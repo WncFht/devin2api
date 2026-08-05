@@ -10,12 +10,14 @@ RUN apk add --no-cache protobuf \
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
-RUN go mod download
-
+# 先 COPY 已提交的描述符并生成绑定（replace 目标 outputs/devin-proto-go 存在后，
+# 后续 go mod download 才能解析 local/devinproto）
 COPY Taskfile.yml ./
 COPY outputs/devin-proto ./outputs/devin-proto
 RUN task generate
+
+COPY go.mod go.sum ./
+RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
