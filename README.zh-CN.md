@@ -9,7 +9,7 @@ devin-2api 是一个轻量的 [OpenAI Responses API](https://platform.openai.com
 - **OpenAI 兼容**的 `/v1/responses` 接口——外部程序可通过标准 OpenAI 协议调用 Devin 模型
 - **支持流式与一次性响应**（typed SSE / JSON）
 - **适配器模式**——极易扩展新的上游
-- **部署简单**——单一静态二进制，附带官方 Docker 镜像
+- **部署简单**——单一静态二进制，[Docker Hub](https://hub.docker.com/r/devinuser123/devin-2api) 公开镜像
 - **可选调试日志**——按请求记录，便于排查问题
 
 ## 快速开始
@@ -41,13 +41,12 @@ cp config.example.yaml config.yaml
 go run ./cmd/devin-2api -config config.yaml
 ```
 
-Docker：
+Docker（镜像已发布至 [Docker Hub](https://hub.docker.com/r/devinuser123/devin-2api)）：
 
 ```bash
-docker build -t devin-2api .
 docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
-  devin-2api --config /app/config.yaml
+  devinuser123/devin-2api --config /app/config.yaml
 ```
 
 ### 4. 验证
