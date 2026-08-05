@@ -46,13 +46,15 @@ jobs:
         id: meta
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          MINOR="${VERSION%.*}"
-          MAJOR="${VERSION%%.*}"
-          TAGS="docker.io/devinuser123/devin-2api:${VERSION},docker.io/devinuser123/devin-2api:${MINOR},docker.io/devinuser123/devin-2api:${MAJOR}"
-          # 预发布版本（如 v0.2.0-rc.1）不打 latest
+          TAGS="docker.io/devinuser123/devin-2api:${VERSION}"
+          # 仅稳定版（无 - 后缀）推 MINOR/MAJOR 浮动 tag：v0.1.0 → 0.1, 0
           if [[ "${VERSION}" != *-* ]]; then
-            TAGS="${TAGS},docker.io/devinuser123/devin-2api:latest"
+            MINOR="${VERSION%.*}"
+            MAJOR="${VERSION%%.*}"
+            TAGS="${TAGS},docker.io/devinuser123/devin-2api:${MINOR},docker.io/devinuser123/devin-2api:${MAJOR}"
           fi
+          # 所有发布（含预发布）都更新 latest
+          TAGS="${TAGS},docker.io/devinuser123/devin-2api:latest"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
