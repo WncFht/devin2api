@@ -59,6 +59,8 @@ curl http://localhost:8080/healthz
 
 ## 用法
 
+> **注意**：本服务目前**暂不校验认证**——`/v1/responses` 接受任意 API key（传入任何密钥均可）且不验证其有效性。在加入鉴权之前，请只在可信网络内暴露本服务。
+
 使用你的 OpenAI Responses API 客户端调用 `http://localhost:8080/v1/responses` 即可。
 
 一次性响应：

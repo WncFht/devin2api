@@ -59,6 +59,8 @@ curl http://localhost:8080/healthz
 
 ## Usage
 
+> **Note**: this service does **not** enforce authentication yet — `/v1/responses` accepts any API key (even an arbitrary one) and does not validate it. Only expose it to trusted networks until auth is added.
+
 Call `http://localhost:8080/v1/responses` with your OpenAI Responses API client.
 
 Non-streaming:
