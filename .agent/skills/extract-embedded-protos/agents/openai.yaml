@@ -1,0 +1,4 @@
+interface:
+  display_name: "Extract Embedded Protos"
+  short_description: "Extract and flatten embedded Go protobuf descriptors"
+  default_prompt: "Use $extract-embedded-protos to recover all embedded protobuf descriptors from this compiled binary."

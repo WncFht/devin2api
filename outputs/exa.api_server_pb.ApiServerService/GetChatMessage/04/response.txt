@@ -1,0 +1,600 @@
+{
+  "latency": 4.6503622339999975,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 137573322,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2",
+    "responseHeader": {
+      "x-request-id": "chatcmpl-19ba8226b3ad4cd9b9558839db550db8"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 4.650520064,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 137731092,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "用户",
+  "latency": 4.6506191040000004,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 137830252,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "问",
+  "latency": 4.650683633999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 137894822,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "\"",
+  "latency": 5.012888735999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 500099784,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "我的",
+  "latency": 5.099423965,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 586635043,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "桌面",
+  "latency": 5.0994878749999994,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 586699043,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "有什么",
+  "latency": 5.0995459049999985,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 586756693,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "？\"",
+  "latency": 5.099644415000001,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 586855473,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "，",
+  "latency": 5.143125124000001,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 630335702,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "这是",
+  "latency": 5.143182594,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 630393352,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "询问",
+  "latency": 5.143238383999998,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 630449302,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "桌面",
+  "latency": 5.143292204,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 630503002,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "上的",
+  "latency": 5.144756514000001,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 631967512,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "文件",
+  "latency": 5.144846284000001,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 632057412,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "。",
+  "latency": 5.177087473,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 664298561,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "让我",
+  "latency": 5.177147203,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 664358281,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "列出",
+  "latency": 5.219000961999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 706211970,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "桌面",
+  "latency": 5.220502871999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 707714020,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "目录",
+  "latency": 5.220750472000001,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 707961650,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "的内容",
+  "latency": 5.260657970999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 747868969,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaThinking": "。",
+  "latency": 5.2607199609999995,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 747931089,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "id": "chatcmpl-tool-a186c26ba5297e13",
+      "name": "exec"
+    }
+  ],
+  "latency": 5.260763271,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 747973509,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "{\"command\": \""
+    }
+  ],
+  "latency": 5.297350389999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 784561458,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "ls"
+    }
+  ],
+  "latency": 5.29741856,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 784629628,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": " -"
+    }
+  ],
+  "latency": 5.297617069999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 784828118,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "la"
+    }
+  ],
+  "latency": 5.29768385,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 784895008,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": " ~/"
+    }
+  ],
+  "latency": 5.34195577,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 829166538,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "Desktop"
+    }
+  ],
+  "latency": 5.3420469100000005,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 829258058,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "\""
+    }
+  ],
+  "latency": 5.342087619999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 829298428,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaToolCalls": [
+    {
+      "argumentsJson": "}"
+    }
+  ],
+  "latency": 5.3421413300000005,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 829352198,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 5.342206479999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "stopReason": "ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL",
+  "timestamp": {
+    "nanos": 829417588,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 5.346633928999999,
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "requestId": "b8832527-9ff2-4634-91f5-b93889ec2928",
+  "timestamp": {
+    "nanos": 833845077,
+    "seconds": 1785338423
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "cacheReadTokens": 11961,
+    "inputTokens": 235,
+    "modelUid": "glm-5-2",
+    "outputTokens": 35,
+    "responseHeader": {
+      "x-request-id": "chatcmpl-19ba8226b3ad4cd9b9558839db550db8"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "messageId": "bot-b8832527-9ff2-4634-91f5-b93889ec2928",
+  "responseDimensionGroups": [
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Agent messages",
+            "pluralTail": " messages",
+            "tail": " message",
+            "value": 1
+          },
+          "uid": "agent_messages"
+        },
+        {
+          "metric": {
+            "label": "Model",
+            "value": "GLM-5.2 High"
+          },
+          "uid": "model"
+        }
+      ],
+      "title": "Response Statistics"
+    },
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 235
+          },
+          "uid": "input_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Output tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 35
+          },
+          "uid": "output_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Cached input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 11961
+          },
+          "uid": "cached_input_tokens"
+        }
+      ],
+      "title": "Token Usage"
+    }
+  ],
+  "timestamp": {
+    "nanos": 833845077,
+    "seconds": 1785338423
+  }
+}

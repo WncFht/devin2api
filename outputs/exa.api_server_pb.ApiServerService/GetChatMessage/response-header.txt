@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+Date: Wed, 29 Jul 2026 14:15:06 GMT
+Content-Type: application/connect+proto
+Transfer-Encoding: chunked
+Connection: keep-alive
+connect-accept-encoding: gzip
+content-security-policy: object-src 'none'; script-src 'none'
+vary: Origin
+x-content-type-options: nosniff
+Strict-Transport-Security: max-age=31536000; includeSubDomains

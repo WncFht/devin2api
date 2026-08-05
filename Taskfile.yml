@@ -1,0 +1,59 @@
+# proto 提取与 Go 绑定生成。
+#
+# 两条链路：
+#   task extract BINARY=<上游二进制>  ① 二进制 → outputs/devin-proto/（不可复现，需上游二进制 + 抓包）
+#   task generate                      ② outputs/devin-proto/ → outputs/devin-proto-go/（可复现）
+#
+# 依赖：
+#   ① 无（protoextract 是仓库内 Go 工具）
+#   ② protoc + protoc-gen-go + protoc-gen-connect-go
+#      brew install protobuf
+#      go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+#      go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
+
+version: "3"
+
+vars:
+  PROTO_DIR: outputs/devin-proto
+  PROTO_SRC: outputs/devin-proto/all-protos.proto
+  PROTO_INC: outputs/devin-proto
+  GEN_DIR: outputs/devin-proto-go
+  GO_PKG: local/devinproto
+  CONNECT_GO_VERSION: v1.19.1
+  PROTOBUF_GO_VERSION: v1.36.11
+
+tasks:
+  extract:
+    desc: Extract embedded protobuf descriptors from a binary into outputs/devin-proto
+    summary: |
+      从编译后的二进制中扫描内嵌的 FileDescriptorProto，重建 outputs/devin-proto/：
+      descriptors.pb（原始描述符集）、all-protos.proto（扁平化单文件）、manifest.json（符号映射）。
+
+      用法：task extract BINARY=/path/to/binary
+      注意：会清空 outputs/devin-proto/ 后重新写入。
+      该步骤依赖上游二进制与抓包，不可复现；产物需提交进 git。
+    requires:
+      vars: [BINARY]
+    cmds:
+      - go run ./cmd/protoextract {{.BINARY}} {{.PROTO_DIR}}
+
+  generate:
+    desc: Generate Go bindings from outputs/devin-proto/all-protos.proto
+    summary: |
+      用 protoc 从 outputs/devin-proto/all-protos.proto 生成 Connect 客户端绑定到
+      outputs/devin-proto-go/（不追踪，clone 后先执行本任务再构建）。
+      生成参数：module=local/devinproto + Mall-protos.proto 映射，go.mod 固定
+      connect v1.20.0 / protobuf v1.36.11。
+    cmds:
+      - rm -rf "{{.GEN_DIR}}"
+      - mkdir -p "{{.GEN_DIR}}"
+      - >-
+        protoc -I {{.PROTO_INC}}
+        --go_out={{.GEN_DIR}} --go_opt=module={{.GO_PKG}} --go_opt=Mall-protos.proto={{.GO_PKG}}
+        --connect-go_out={{.GEN_DIR}} --connect-go_opt=module={{.GO_PKG}} --connect-go_opt=Mall-protos.proto={{.GO_PKG}}
+        {{.PROTO_SRC}}
+      - >-
+        cd {{.GEN_DIR}} && go mod init {{.GO_PKG}}
+        && go mod edit -go=1.26.3
+        -require=connectrpc.com/connect@v1.20.0 -require=google.golang.org/protobuf@{{.PROTOBUF_GO_VERSION}}
+        && go mod tidy

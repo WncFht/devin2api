@@ -1,0 +1,8 @@
+POST https: //server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage HTTP/1.1
+authorization: Basic devin-session-token$mock-token-devin-session-token$mock-token
+sentry-trace: 86deac9911d2bfc2044e67b1e6a8d672-bddd534dad04ff23-1
+content-type: application/connect+proto
+connect-protocol-version: 1
+accept: */*
+host: server.codeium.com
+content-length: 51821

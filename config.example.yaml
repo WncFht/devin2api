@@ -1,0 +1,11 @@
+server:
+  listen: ":8080"
+
+debug:
+  enabled: false
+
+devin:
+  base_url: "https://server.codeium.com"
+  token: "devin-session-token$mock-token"
+  # model: "swe-1-7"
+  model: "glm-5-2"

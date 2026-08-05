@@ -1,0 +1,256 @@
+{
+  "latency": 2.231046417,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 867658967,
+    "seconds": 1785337808
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2",
+    "responseHeader": {
+      "x-request-id": "chatcmpl-e9ca1736479d47ffa42563cd8330d610"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 2.231189557,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 867802267,
+    "seconds": 1785337808
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "好的",
+  "deltaTokens": 2,
+  "latency": 2.2312968270000004,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 867909527,
+    "seconds": 1785337808
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "，",
+  "deltaTokens": 1,
+  "latency": 2.231442987,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 868055697,
+    "seconds": 1785337808
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "有",
+  "deltaTokens": 1,
+  "latency": 2.2314850969999998,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 868097827,
+    "seconds": 1785337808
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "需要",
+  "deltaTokens": 2,
+  "latency": 2.636745863,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 273358273,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "随时",
+  "deltaTokens": 4,
+  "latency": 2.6368480830000003,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 273460793,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "找我",
+  "deltaTokens": 4,
+  "latency": 2.6368878430000002,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 273500573,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "！",
+  "deltaTokens": 1,
+  "latency": 2.6959359630000006,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 332548483,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "😊",
+  "deltaTokens": 4,
+  "latency": 2.696003233,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 332615943,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 2.737422252,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "stopReason": "ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN",
+  "timestamp": {
+    "nanos": 374034762,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 2.740785512,
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "requestId": "66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "timestamp": {
+    "nanos": 377398122,
+    "seconds": 1785337809
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN",
+    "cacheReadTokens": 769,
+    "inputTokens": 11125,
+    "modelUid": "glm-5-2",
+    "outputTokens": 10,
+    "responseHeader": {
+      "x-request-id": "chatcmpl-e9ca1736479d47ffa42563cd8330d610"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "messageId": "bot-66c3a93a-1f4b-42bc-a53f-6f09bb5a67d7",
+  "responseDimensionGroups": [
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Agent messages",
+            "pluralTail": " messages",
+            "tail": " message",
+            "value": 1
+          },
+          "uid": "agent_messages"
+        },
+        {
+          "metric": {
+            "label": "Model",
+            "value": "GLM-5.2 High"
+          },
+          "uid": "model"
+        }
+      ],
+      "title": "Response Statistics"
+    },
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 11125
+          },
+          "uid": "input_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Output tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 10
+          },
+          "uid": "output_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Cached input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 769
+          },
+          "uid": "cached_input_tokens"
+        }
+      ],
+      "title": "Token Usage"
+    }
+  ],
+  "timestamp": {
+    "nanos": 377398122,
+    "seconds": 1785337809
+  }
+}

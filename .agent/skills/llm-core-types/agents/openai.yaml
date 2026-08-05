@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM Core Types"
+  short_description: "Preserve the provider-neutral LLM core model"
+  default_prompt: "Use $llm-core-types when changing the provider-neutral LLM request and response model."

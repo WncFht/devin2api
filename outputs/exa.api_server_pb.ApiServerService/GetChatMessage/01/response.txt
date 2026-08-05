@@ -1,0 +1,1360 @@
+{
+  "latency": 1.9962022869999996,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 944872162,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2",
+    "responseHeader": {
+      "x-request-id": "chatcmpl-cc93c9b0602a4fad9f1fc94983469a94"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 1.9963546169999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945024332,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "你好",
+  "deltaTokens": 2,
+  "latency": 1.9964532369999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945123142,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "！",
+  "deltaTokens": 1,
+  "latency": 1.9965059969999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945175842,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "我是",
+  "deltaTokens": 2,
+  "latency": 1.9965684969999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945238422,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " Devin",
+  "deltaTokens": 2,
+  "latency": 1.9966187369999993,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945288652,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "，",
+  "deltaTokens": 1,
+  "latency": 1.996641977,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 945311892,
+    "seconds": 1785334506
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "由",
+  "deltaTokens": 1,
+  "latency": 2.2049007929999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153570498,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " C",
+  "deltaTokens": 1,
+  "latency": 2.2049685230000002,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153638398,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "ognition",
+  "deltaTokens": 2,
+  "latency": 2.205014993,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153684658,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 开",
+  "deltaTokens": 2,
+  "latency": 2.205049733,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153719618,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "发的",
+  "deltaTokens": 2,
+  "latency": 2.205084493,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153754398,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "交互",
+  "deltaTokens": 4,
+  "latency": 2.2051054130000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 153775328,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "式",
+  "deltaTokens": 1,
+  "latency": 2.3383324500000002,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 287002185,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "命令",
+  "deltaTokens": 2,
+  "latency": 2.33838569,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 287055565,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "行",
+  "deltaTokens": 1,
+  "latency": 2.33844355,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 287113445,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "智能",
+  "deltaTokens": 2,
+  "latency": 2.33849009,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 287159975,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "体",
+  "deltaTokens": 1,
+  "latency": 2.3385242699999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 287194185,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "。",
+  "deltaTokens": 1,
+  "latency": 2.563223985000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 511893670,
+    "seconds": 1785334507
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "我",
+  "deltaTokens": 1,
+  "latency": 3.154556942,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 103226597,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "当前",
+  "deltaTokens": 2,
+  "latency": 3.1546438520000004,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 103313707,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "使用",
+  "deltaTokens": 2,
+  "latency": 3.1546896220000002,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 103359447,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "的是",
+  "deltaTokens": 2,
+  "latency": 3.1547794319999998,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 103448957,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " GL",
+  "deltaTokens": 1,
+  "latency": 3.1548197519999994,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 103489667,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "M",
+  "deltaTokens": 1,
+  "latency": 3.3623233079999997,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 310993183,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "-",
+  "deltaTokens": 1,
+  "latency": 3.3623797380000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 311049663,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": 5,
+  "deltaTokens": 1,
+  "latency": 3.362580858,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 311250713,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": ".",
+  "deltaTokens": 1,
+  "latency": 3.362619428000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 311289353,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": 2,
+  "deltaTokens": 1,
+  "latency": 3.3626380579999995,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 311307983,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " High",
+  "deltaTokens": 1,
+  "latency": 3.362696048,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 311365943,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 模",
+  "deltaTokens": 2,
+  "latency": 3.4735876560000007,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 422257471,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "型",
+  "deltaTokens": 1,
+  "latency": 3.473644056,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 422313931,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "。\n\n",
+  "deltaTokens": 3,
+  "latency": 3.4737283260000007,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 422398181,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "我可以",
+  "deltaTokens": 3,
+  "latency": 3.4737675260000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 422437421,
+    "seconds": 1785334508
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "帮你",
+  "deltaTokens": 4,
+  "latency": 4.288509038000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 237178883,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "处理",
+  "deltaTokens": 2,
+  "latency": 4.288562848,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 237232783,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "各种",
+  "deltaTokens": 4,
+  "latency": 4.831697777,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780367262,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "软件",
+  "deltaTokens": 4,
+  "latency": 4.831757947,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780427862,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "工程",
+  "deltaTokens": 2,
+  "latency": 4.8317812270000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780451162,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "任务",
+  "deltaTokens": 2,
+  "latency": 4.831837847000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780492512,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "，",
+  "deltaTokens": 1,
+  "latency": 4.831907407,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780577302,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "比如",
+  "deltaTokens": 2,
+  "latency": 4.831932627,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 780602532,
+    "seconds": 1785334509
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "：\n",
+  "deltaTokens": 2,
+  "latency": 5.1486207,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 97290455,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "-",
+  "deltaTokens": 1,
+  "latency": 5.150677459999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 99347235,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 探",
+  "deltaTokens": 4,
+  "latency": 5.408254094,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 356923609,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "索",
+  "deltaTokens": 1,
+  "latency": 5.408336503999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 357006349,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "和理解",
+  "deltaTokens": 3,
+  "latency": 5.408393374,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 357063289,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "代码",
+  "deltaTokens": 2,
+  "latency": 5.578298081000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 526967866,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "库",
+  "deltaTokens": 1,
+  "latency": 5.578354891000002,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 527024766,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "\n",
+  "deltaTokens": 1,
+  "latency": 5.578398510999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 527068446,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "-",
+  "deltaTokens": 1,
+  "latency": 5.578421811,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 527091756,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 编",
+  "deltaTokens": 2,
+  "latency": 5.579050591,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 527720376,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "写",
+  "deltaTokens": 1,
+  "latency": 5.648128659,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 596798514,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "、",
+  "deltaTokens": 1,
+  "latency": 5.648168959000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 596838854,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "修改",
+  "deltaTokens": 2,
+  "latency": 5.648211648999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 596881554,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "、",
+  "deltaTokens": 1,
+  "latency": 5.751592717000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 700262402,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "调试",
+  "deltaTokens": 2,
+  "latency": 5.8121634360000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 760833261,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "代码",
+  "deltaTokens": 2,
+  "latency": 5.812215845999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 760885751,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "\n",
+  "deltaTokens": 1,
+  "latency": 5.8122720160000005,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 760941921,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "-",
+  "deltaTokens": 1,
+  "latency": 5.812304476,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 760974291,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 运",
+  "deltaTokens": 2,
+  "latency": 5.8729548839999985,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 821624639,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "行",
+  "deltaTokens": 1,
+  "latency": 5.873012963999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 821682869,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "命令",
+  "deltaTokens": 2,
+  "latency": 5.873046233999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 821716049,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "、",
+  "deltaTokens": 1,
+  "latency": 5.873103604000001,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 821773499,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "管理",
+  "deltaTokens": 2,
+  "latency": 5.873129944,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 821799759,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " Git",
+  "deltaTokens": 1,
+  "latency": 5.8796416339999995,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 828311449,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "\n",
+  "deltaTokens": 1,
+  "latency": 5.884544214,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 833213979,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "-",
+  "deltaTokens": 1,
+  "latency": 5.884572793999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 833242729,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": " 解",
+  "deltaTokens": 2,
+  "latency": 5.884591523999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 833261449,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "答",
+  "deltaTokens": 3,
+  "latency": 5.890349343999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839019179,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "技术",
+  "deltaTokens": 4,
+  "latency": 5.8904027239999985,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839072639,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "问题",
+  "deltaTokens": 2,
+  "latency": 5.890576493999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839246319,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "\n\n",
+  "deltaTokens": 2,
+  "latency": 5.890615653999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839285429,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "有什么",
+  "deltaTokens": 5,
+  "latency": 5.890707844,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839377739,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "我可以",
+  "deltaTokens": 3,
+  "latency": 5.890748523999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 839418369,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "帮",
+  "deltaTokens": 3,
+  "latency": 5.894648264,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 843317879,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "你的",
+  "deltaTokens": 2,
+  "latency": 5.8946874639999995,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 843357299,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "吗",
+  "deltaTokens": 3,
+  "latency": 5.894725624,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 843395499,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "deltaText": "？",
+  "deltaTokens": 1,
+  "latency": 5.894759603999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 843429359,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 5.895889223999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "stopReason": "ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN",
+  "timestamp": {
+    "nanos": 844559119,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "modelUid": "glm-5-2"
+  }
+}
+[----------------------next message----------------------]
+{
+  "latency": 5.898757783999999,
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "requestId": "3e040613-c485-43f5-ab70-605cd493ceb1",
+  "timestamp": {
+    "nanos": 847427619,
+    "seconds": 1785334510
+  },
+  "usage": {
+    "apiProvider": "ExaCodeiumCommonPb_APIProvider_API_PROVIDER_FIREWORKS_DEVIN_SERVERLESS",
+    "cacheReadTokens": 204,
+    "inputTokens": 11604,
+    "modelUid": "glm-5-2",
+    "outputTokens": 82,
+    "responseHeader": {
+      "x-request-id": "chatcmpl-cc93c9b0602a4fad9f1fc94983469a94"
+    }
+  }
+}
+[----------------------next message----------------------]
+{
+  "messageId": "bot-3e040613-c485-43f5-ab70-605cd493ceb1",
+  "responseDimensionGroups": [
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Agent messages",
+            "pluralTail": " messages",
+            "tail": " message",
+            "value": 1
+          },
+          "uid": "agent_messages"
+        },
+        {
+          "metric": {
+            "label": "Model",
+            "value": "GLM-5.2 High"
+          },
+          "uid": "model"
+        }
+      ],
+      "title": "Response Statistics"
+    },
+    {
+      "dimensions": [
+        {
+          "cumulativeMetric": {
+            "label": "Input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 11604
+          },
+          "uid": "input_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Output tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 82
+          },
+          "uid": "output_tokens"
+        },
+        {
+          "cumulativeMetric": {
+            "label": "Cached input tokens",
+            "pluralTail": " tokens",
+            "tail": " token",
+            "value": 204
+          },
+          "uid": "cached_input_tokens"
+        }
+      ],
+      "title": "Token Usage"
+    }
+  ],
+  "timestamp": {
+    "nanos": 847427619,
+    "seconds": 1785334510
+  }
+}

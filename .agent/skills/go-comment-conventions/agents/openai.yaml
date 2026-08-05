@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go Comment Conventions"
+  short_description: "Enforce concise Chinese Go documentation"
+  default_prompt: "Use $go-comment-conventions when adding or reviewing Go comments in this project."
