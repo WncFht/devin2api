@@ -17,7 +17,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/leookun/devin-2api/internal/adapter"
-	"github.com/leookun/devin-2api/internal/api/openai/responses"
 	"github.com/leookun/devin-2api/internal/config"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
@@ -76,6 +75,8 @@ func (application *App) Router() http.Handler {
 		protected.Get("/v1/models", application.listModels)
 		protected.Get("/v1/models/{model}", application.getModel)
 		protected.Post("/v1/responses", application.createResponses)
+		protected.Post("/v1/chat/completions", application.createChatCompletions)
+		protected.Post("/v1/messages", application.createMessages)
 	})
 	if application.dashboard != nil {
 		application.dashboard.Register(router)
@@ -220,6 +221,23 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 }
 
 func (application *App) createResponses(writer http.ResponseWriter, request *http.Request) {
+	application.createCompletion(writer, request, decodeResponsesRequest, responsesProtocol{})
+}
+
+func (application *App) createChatCompletions(writer http.ResponseWriter, request *http.Request) {
+	application.createCompletion(writer, request, decodeChatRequest, chatProtocol{})
+}
+
+func (application *App) createMessages(writer http.ResponseWriter, request *http.Request) {
+	application.createCompletion(writer, request, decodeAnthropicRequest, anthropicProtocol{})
+}
+
+func (application *App) createCompletion(
+	writer http.ResponseWriter,
+	request *http.Request,
+	decoder decodeRequestFunc,
+	protocol protocolEncoder,
+) {
 	recorder := application.debugManager.Start(debuglog.RequestMeta{Method: request.Method, Path: request.URL.Path})
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
 	defer func() { recorder.Complete(completion) }()
@@ -237,25 +255,25 @@ func (application *App) createResponses(writer http.ResponseWriter, request *htt
 		return
 	}
 	recorder.WriteJSON("01-http-request.json", httpRequestProjection(request, body))
-	adapted, err := responses.DecodeRequest(body)
+	messages, options, err := decoder(body)
 	if err != nil {
 		completion.StatusCode = http.StatusBadRequest
 		writeLoggedError(writer, recorder, "http_decode", completion.StatusCode, err)
 		return
 	}
-	completion.Model = adapted.Options.Model
-	completion.Stream = adapted.Options.Stream
-	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(adapted.Context))
+	completion.Model = options.Model
+	completion.Stream = options.Stream
+	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 	ctx := debuglog.WithRecorder(request.Context(), recorder)
-	stream, err := application.adapter.Stream(ctx, adapted.Context)
+	stream, err := application.adapter.Stream(ctx, messages)
 	if err != nil {
 		completion.StatusCode = mapProviderErrorStatus(err)
 		writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, err)
 		return
 	}
-	if adapted.Options.Stream {
+	if options.Stream {
 		completion.StatusCode = http.StatusOK
-		message, streamErr := writeSSE(ctx, writer, stream, recorder, adapted.Options.Model)
+		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, options)
 		updateCompletionIdentity(&completion, message)
 		if streamErr != nil {
 			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
@@ -276,7 +294,7 @@ func (application *App) createResponses(writer http.ResponseWriter, request *htt
 		return
 	}
 	updateCompletionIdentity(&completion, message)
-	body, err = responses.EncodeResponse(message)
+	body, err = protocol.EncodeFinal(message)
 	if err != nil {
 		completion.StatusCode = http.StatusInternalServerError
 		writeLoggedError(writer, recorder, "http_encode", completion.StatusCode, err)
@@ -293,7 +311,14 @@ func (application *App) createResponses(writer http.ResponseWriter, request *htt
 	completion.Result = "completed"
 }
 
-func writeSSE(ctx context.Context, writer http.ResponseWriter, stream llm.ResponseStream, recorder *debuglog.Recorder, model string) (*llm.AssistantMessage, error) {
+func writeProtocolStream(
+	ctx context.Context,
+	writer http.ResponseWriter,
+	stream llm.ResponseStream,
+	recorder *debuglog.Recorder,
+	protocol protocolEncoder,
+	options protocolOptions,
+) (*llm.AssistantMessage, error) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
 		return nil, errors.New("streaming response writer does not support flushing")
@@ -301,7 +326,7 @@ func writeSSE(ctx context.Context, writer http.ResponseWriter, stream llm.Respon
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	encoder := responses.NewStreamEncoder(model)
+	encoder := protocol.NewStreamEncoder(options.Model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
 	for {
 		event, err := receiveEvent(ctx, stream, recorder)
@@ -317,7 +342,7 @@ func writeSSE(ctx context.Context, writer http.ResponseWriter, stream llm.Respon
 			return latest, err
 		}
 		for _, encoded := range encodedEvents {
-			if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", encoded.Name, encoded.Data); err != nil {
+			if _, err := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); err != nil {
 				return latest, err
 			}
 			recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))

@@ -214,6 +214,16 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 			ID: uid, Created: now, OwnedBy: ownedBy, SupportsImages: c.GetSupportsImages(),
 		})
 	}
+	// 用户显式配置的 model（如 gpt5.6）即使不在 Devin 返回的列表中，也应可被发现和调用。
+	if configured := strings.TrimSpace(a.config.Model); configured != "" {
+		if _, ok := seen[configured]; !ok {
+			models = append(models, adapter.ModelInfo{
+				ID: configured, Created: now, OwnedBy: "devin",
+				// 配置模型无法从 Devin 获取图片能力，默认按支持图片处理更友好。
+				SupportsImages: true,
+			})
+		}
+	}
 	return models, nil
 }
 
