@@ -21,3 +21,11 @@ func (unavailable Unavailable) Stream(context.Context, llm.RequestMessages) (llm
 	}
 	return nil, errors.New(unavailable.Reason)
 }
+
+// ListModels 返回未配置供应商适配器的错误。
+func (unavailable Unavailable) ListModels(context.Context) ([]ModelInfo, error) {
+	if unavailable.Reason == "" {
+		return nil, errors.New("provider adapter is not implemented")
+	}
+	return nil, errors.New(unavailable.Reason)
+}

@@ -93,8 +93,11 @@ func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
 	if message.TimestampMS <= 0 {
 		createdAt = time.Now().Unix()
 	}
-	response := baseResponse(responseID, model, createdAt, responseStatus(message.StopReason))
-	response["completed_at"] = time.Now().Unix()
+	status := responseStatus(message.StopReason)
+	response := baseResponse(responseID, model, createdAt, status)
+	if status == "completed" {
+		response["completed_at"] = time.Now().Unix()
+	}
 	response["output"] = output
 	response["usage"] = responseUsage(message.Usage)
 	return json.Marshal(response)
@@ -402,12 +405,15 @@ func (encoder *StreamEncoder) emit(name string, payload map[string]any) SSEEvent
 }
 
 func baseResponse(id string, model string, createdAt int64, status string) map[string]any {
+	// 对齐 OpenAI Response 对象的稳定字段；IDE 多轮常依赖 store=true。
 	return map[string]any{
 		"id": id, "object": "response", "created_at": createdAt, "status": status,
-		"completed_at": nil, "error": nil, "incomplete_details": nil, "model": model,
+		"error": nil, "incomplete_details": nil, "instructions": nil, "model": model,
 		"output": []any{}, "parallel_tool_calls": true, "previous_response_id": nil,
-		"reasoning": map[string]any{"effort": nil, "summary": nil}, "store": false,
+		"reasoning": map[string]any{"effort": nil, "summary": nil}, "store": true,
+		"temperature": nil, "top_p": nil, "truncation": "disabled",
 		"tool_choice": "auto", "tools": []any{}, "usage": nil, "metadata": map[string]any{},
+		"max_output_tokens": nil, "text": map[string]any{"format": map[string]any{"type": "text"}},
 	}
 }
 
@@ -433,25 +439,26 @@ func responseUsage(usage llm.Usage) map[string]any {
 }
 
 func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
-	output := make([]any, 0, len(message.Content))
+	// OpenAI 常见顺序：reasoning → function_call → message；稳定排序避免 IDE 只读 output[0] 当 message。
+	var reasonings, toolCalls, messages []any
 	for _, block := range message.Content {
 		switch content := block.(type) {
 		case llm.TextContent:
-			output = append(output, map[string]any{
+			messages = append(messages, map[string]any{
 				"id": newResponseID("msg"), "type": "message", "status": "completed", "role": "assistant",
-				"content": []any{map[string]any{"type": "output_text", "text": content.Text, "annotations": []any{}, "logprobs": []any{}}},
+				"content": []any{map[string]any{"type": "output_text", "text": content.Text, "annotations": []any{}}},
 			})
 		case llm.ThinkingContent:
 			item := map[string]any{
-				"id": newResponseID("rs"), "type": "reasoning",
+				"id": newResponseID("rs"), "type": "reasoning", "status": "completed",
 				"summary": []any{map[string]any{"type": "summary_text", "text": content.Thinking}},
 			}
 			if content.ThinkingSignature != "" {
 				item["encrypted_content"] = content.ThinkingSignature
 			}
-			output = append(output, item)
+			reasonings = append(reasonings, item)
 		case llm.ToolCall:
-			output = append(output, map[string]any{
+			toolCalls = append(toolCalls, map[string]any{
 				"id": newResponseID("fc"), "type": "function_call", "status": "completed",
 				"call_id": content.ID, "name": content.Name, "arguments": string(content.Arguments),
 			})
@@ -459,6 +466,10 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 			return nil, fmt.Errorf("unsupported response content type %T", block)
 		}
 	}
+	output := make([]any, 0, len(reasonings)+len(toolCalls)+len(messages))
+	output = append(output, reasonings...)
+	output = append(output, toolCalls...)
+	output = append(output, messages...)
 	return output, nil
 }
 

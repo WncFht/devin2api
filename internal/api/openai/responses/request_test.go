@@ -3,6 +3,7 @@ package responses
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/leookun/devin-2api/internal/llm"
@@ -67,6 +68,51 @@ func TestDecodeRequestAcceptsStringInput(t *testing.T) {
 	content := message.Content[0].(llm.TextContent)
 	if content.Text != "hello" {
 		t.Fatalf("text = %q, want hello", content.Text)
+	}
+}
+
+// TestDecodeRequestAcceptsImageURLObject 验证 IDE 常见的 image_url 对象形态可解码。
+func TestDecodeRequestAcceptsImageURLObject(t *testing.T) {
+	data := []byte(`{
+  "model":"gpt-test",
+  "input":[{"role":"user","content":[
+    {"type":"input_text","text":"see"},
+    {"type":"input_image","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}
+  ]}]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := request.Context.Messages[0].(llm.UserMessage)
+	if len(user.Content) != 2 {
+		t.Fatalf("content count = %d, want 2", len(user.Content))
+	}
+	img, ok := user.Content[1].(llm.ImageContent)
+	if !ok {
+		t.Fatalf("content[1] = %T, want ImageContent", user.Content[1])
+	}
+	if img.MIMEType != "image/png" || img.Data == "" || strings.HasPrefix(img.Data, "data:") {
+		t.Fatalf("image = %#v", img)
+	}
+}
+
+// TestDecodeRequestAcceptsChatCompletionsImagePart 验证 type=image_url 的 Chat 风格 part。
+func TestDecodeRequestAcceptsChatCompletionsImagePart(t *testing.T) {
+	data := []byte(`{
+  "model":"gpt-test",
+  "input":[{"role":"user","content":[
+    {"type":"text","text":"see"},
+    {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}
+  ]}]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := request.Context.Messages[0].(llm.UserMessage)
+	if _, ok := user.Content[1].(llm.ImageContent); !ok {
+		t.Fatalf("content[1] = %#v, want ImageContent", user.Content[1])
 	}
 }
 

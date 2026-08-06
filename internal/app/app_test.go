@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/leookun/devin-2api/internal/adapter"
 	"github.com/leookun/devin-2api/internal/config"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
@@ -24,6 +25,10 @@ type fakeAdapter struct {
 func (fake *fakeAdapter) Stream(_ context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
 	fake.lastRequest = request
 	return &fakeStream{events: fake.events}, nil
+}
+
+func (fake *fakeAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return []adapter.ModelInfo{{ID: "gpt-test", Created: 1, OwnedBy: "test"}}, nil
 }
 
 type fakeStream struct {
@@ -182,6 +187,79 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	}
 	if !strings.Contains(string(errorLog), `"stage": "http_stream"`) {
 		t.Fatalf("error = %s", errorLog)
+	}
+}
+
+// TestResponsesHandlerRejectsMissingAPIKey 验证未提供密钥时 /v1/* 返回 401。
+func TestResponsesHandlerRejectsMissingAPIKey(t *testing.T) {
+	fake := &fakeAdapter{}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAPIKey("secret-key")
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), `"type":"unauthenticated"`) {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
+// TestResponsesHandlerRejectsInvalidAPIKey 验证错误密钥无法通过鉴权。
+func TestResponsesHandlerRejectsInvalidAPIKey(t *testing.T) {
+	fake := &fakeAdapter{}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAPIKey("secret-key")
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Authorization", "Bearer wrong-key")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestResponsesHandlerAcceptsBearerAPIKey 验证 Authorization: Bearer <key> 通用格式可用。
+func TestResponsesHandlerAcceptsBearerAPIKey(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAPIKey("secret-key")
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer secret-key")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestResponsesHandlerAcceptsXApiKeyHeader 验证兼容头 X-Api-Key 也可用。
+func TestResponsesHandlerAcceptsXApiKeyHeader(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAPIKey("secret-key")
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Api-Key", "secret-key")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestResponsesHandlerHealthIsUnprotected 验证 /healthz 不受 API Key 保护。
+func TestResponsesHandlerHealthIsUnprotected(t *testing.T) {
+	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAPIKey("secret-key")
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 }
 
