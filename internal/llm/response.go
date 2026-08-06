@@ -86,11 +86,8 @@ type Usage struct {
 
 // Validate 检查用量字段均为非负值。
 func (usage Usage) Validate() error {
-	values := []int64{usage.Input, usage.Output, usage.CacheRead, usage.CacheWrite, usage.TotalTokens}
-	for _, value := range values {
-		if value < 0 {
-			return errors.New("usage values cannot be negative")
-		}
+	if usage.Input < 0 || usage.Output < 0 || usage.CacheRead < 0 || usage.CacheWrite < 0 || usage.TotalTokens < 0 {
+		return errors.New("usage values cannot be negative")
 	}
 	if usage.CacheWrite1h != nil && *usage.CacheWrite1h < 0 {
 		return errors.New("one-hour cache write usage cannot be negative")
@@ -117,11 +114,8 @@ type UsageCost struct {
 
 // Validate 检查费用字段均为非负值。
 func (cost UsageCost) Validate() error {
-	values := []float64{cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite, cost.Total}
-	for _, value := range values {
-		if value < 0 {
-			return errors.New("usage costs cannot be negative")
-		}
+	if cost.Input < 0 || cost.Output < 0 || cost.CacheRead < 0 || cost.CacheWrite < 0 || cost.Total < 0 {
+		return errors.New("usage costs cannot be negative")
 	}
 	return nil
 }

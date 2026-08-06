@@ -4,6 +4,7 @@
 package debuglog
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -66,6 +67,16 @@ type Recorder struct {
 	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
 	attachmentCount int
+	// jsonlFiles 保存已打开的 JSONL 文件，避免每帧重复 open/sync/close。
+	jsonlFiles map[string]*jsonlFile
+	// pendingWrites 跟踪异步 WriteJSON goroutine，Complete 时统一等待。
+	pendingWrites sync.WaitGroup
+}
+
+// jsonlFile 保存单个已打开的 JSONL 文件句柄及其缓冲写。
+type jsonlFile struct {
+	file   *os.File
+	writer *bufio.Writer
 }
 
 // JSONLRecord 是一个 JSONL 文件中的统一行信封。
@@ -132,6 +143,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			requestMeta:      meta,
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
+			jsonlFiles:       make(map[string]*jsonlFile),
 		}
 		recorder.writeMeta(nil)
 		return recorder
@@ -153,19 +165,24 @@ func FromContext(ctx context.Context) *Recorder {
 }
 
 // WriteJSON 将一个阶段快照写为格式化 JSON 文件。
+// 序列化和写盘在后台 goroutine 中执行，不阻塞请求主线程；Complete 时统一等待完成。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
 	}
-	recorder.mutex.Lock()
-	defer recorder.mutex.Unlock()
-	value = recorder.sanitize(value)
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return
-	}
-	data = append(data, '\n')
-	_ = os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600)
+	recorder.pendingWrites.Add(1)
+	go func() {
+		defer recorder.pendingWrites.Done()
+		recorder.mutex.Lock()
+		defer recorder.mutex.Unlock()
+		value = recorder.sanitize(value)
+		data, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			return
+		}
+		data = append(data, '\n')
+		_ = os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600)
+	}()
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -187,13 +204,7 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if err != nil {
 		return
 	}
-	file, err := os.OpenFile(filepath.Join(recorder.directory, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	_, _ = file.Write(append(data, '\n'))
-	_ = file.Sync()
-	_ = file.Close()
+	recorder.appendJSONL(name, data)
 }
 
 // AppendValueJSONL 将一个结构化值直接追加为 JSONL 行，不添加事件信封。
@@ -207,13 +218,7 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 	if err != nil {
 		return
 	}
-	file, err := os.OpenFile(filepath.Join(recorder.directory, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	_, _ = file.Write(append(data, '\n'))
-	_ = file.Sync()
-	_ = file.Close()
+	recorder.appendJSONL(name, data)
 }
 
 // WriteError 写入请求失败的阶段和错误摘要。
@@ -244,9 +249,42 @@ func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
 	}
+	// 等待所有异步 WriteJSON 完成后再刷盘关闭，避免文件内容不完整。
+	recorder.pendingWrites.Wait()
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
+	// 请求结束时统一刷盘并关闭 JSONL，避免每帧 file.Sync() 带来的延迟。
+	for _, f := range recorder.jsonlFiles {
+		_ = f.writer.Flush()
+		_ = f.file.Close()
+	}
+	recorder.jsonlFiles = nil
 	recorder.writeMeta(&completion)
+}
+
+func (recorder *Recorder) appendJSONL(name string, data []byte) {
+	jf, err := recorder.getJSONLFile(name)
+	if err != nil {
+		return
+	}
+	_, _ = jf.writer.Write(data)
+	_ = jf.writer.WriteByte('\n')
+}
+
+func (recorder *Recorder) getJSONLFile(name string) (*jsonlFile, error) {
+	if recorder.jsonlFiles == nil {
+		recorder.jsonlFiles = make(map[string]*jsonlFile)
+	}
+	if f, ok := recorder.jsonlFiles[name]; ok {
+		return f, nil
+	}
+	file, err := os.OpenFile(filepath.Join(recorder.directory, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f := &jsonlFile{file: file, writer: bufio.NewWriter(file)}
+	recorder.jsonlFiles[name] = f
+	return f, nil
 }
 
 func (recorder *Recorder) writeMeta(completion *Completion) {

@@ -4,16 +4,19 @@ package devin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	devinproto "local/devinproto"
+
+	"connectrpc.com/connect"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
 	"google.golang.org/protobuf/proto"
-	devinproto "local/devinproto"
 )
 
 // fakeDevinResponseReceiver 为 responseStream 测试提供确定顺序的 protobuf 帧。
@@ -122,6 +125,77 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	}
 	if converted.GetConfiguration().GetMaxNewlines() != 400 {
 		t.Fatalf("max newlines = %d, want 400", converted.GetConfiguration().GetMaxNewlines())
+	}
+}
+
+// TestValidateImagesForModelRejectsGLM 验证无视觉模型带图时返回可读错误（透传给客户端）。
+func TestValidateImagesForModelRejectsGLM(t *testing.T) {
+	request := llm.RequestMessages{
+		Model: "glm-5-2",
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{
+			llm.TextContent{Text: "see"},
+			llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+		}}},
+	}
+	err := validateImagesForModel(request, "glm-5-2")
+	if err == nil {
+		t.Fatal("expected error for glm-5-2 + image")
+	}
+	if !strings.Contains(err.Error(), "does not support image") {
+		t.Fatalf("error = %v, want does not support image", err)
+	}
+	if err := validateImagesForModel(request, "swe-1-7"); err != nil {
+		t.Fatalf("swe-1-7 should allow images: %v", err)
+	}
+	if err := validateImagesForModel(llm.RequestMessages{Model: "glm-5-2", Messages: []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
+	}}, "glm-5-2"); err != nil {
+		t.Fatalf("text-only glm should pass: %v", err)
+	}
+}
+
+// TestConnectErrorPassthrough 验证 Connect 错误 message 原样保留。
+func TestConnectErrorPassthrough(t *testing.T) {
+	err := connectError(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
+	if err == nil || !strings.Contains(err.Error(), "invalid_argument") || !strings.Contains(err.Error(), "model does not support images") {
+		t.Fatalf("connectError = %v", err)
+	}
+}
+
+// TestBuildRequestOmitsHistoricalImages 验证多轮里只有最新用户消息挂 Images，历史图改占位。
+func TestBuildRequestOmitsHistoricalImages(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "see this"},
+				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+			}},
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}},
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "and this"},
+				llm.ImageContent{Data: "BBBB", MIMEType: "image/jpeg"},
+			}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+	if len(prompts[0].GetImages()) != 0 {
+		t.Fatalf("history images = %#v, want empty", prompts[0].GetImages())
+	}
+	if !strings.Contains(prompts[0].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("history prompt = %q, want image placeholder", prompts[0].GetPrompt())
+	}
+	if len(prompts[2].GetImages()) != 1 || prompts[2].GetImages()[0].GetBase64Data() != "BBBB" {
+		t.Fatalf("latest images = %#v, want BBBB", prompts[2].GetImages())
+	}
+	if strings.Contains(prompts[2].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("latest prompt should keep real image, got %q", prompts[2].GetPrompt())
 	}
 }
 
@@ -358,6 +432,7 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	}
 	recordProtoJSON(recorder, "03-devin-request.json", request)
 	recordProtoJSON(recorder, "04-devin-response.jsonl", &devinproto.GetChatMessageResponse{DeltaText: proto.String("world")})
+	recorder.Complete(debuglog.Completion{})
 
 	entries, err := os.ReadDir(root)
 	if err != nil {

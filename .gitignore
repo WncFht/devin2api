@@ -4,9 +4,20 @@
 /bin/
 /work/
 /logs/
+/build/
 
 # 本地运行配置（含真实 devin token，不要提交）
 config.yaml
+
+# 编译产物
+/devin-2api
+/devin-2api.exe
+/devin-2api-linux-*
+
+# 调试/测试输出
+/outputs/*.json
+/outputs/*.txt
+/outputs/*.py
 
 # 生成代码：由 task generate 从 outputs/devin-proto 生成
 /outputs/devin-proto-go/

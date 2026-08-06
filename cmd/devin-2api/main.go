@@ -19,6 +19,7 @@ import (
 	"github.com/leookun/devin-2api/internal/adapter/devin"
 	"github.com/leookun/devin-2api/internal/app"
 	"github.com/leookun/devin-2api/internal/config"
+	"github.com/leookun/devin-2api/internal/dashboard"
 	"github.com/leookun/devin-2api/internal/debuglog"
 )
 
@@ -41,6 +42,7 @@ func main() {
 			BaseURL: serviceConfig.Devin.BaseURL,
 			Token:   serviceConfig.Devin.Token,
 			Model:   serviceConfig.Devin.Model,
+			Proxy:   serviceConfig.Devin.Proxy,
 		})
 		if createErr != nil {
 			log.Fatal(createErr)
@@ -52,6 +54,10 @@ func main() {
 		debugManager = debuglog.NewManager(filepath.Join(filepath.Dir(absoluteConfigPath), "logs"))
 	}
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
+	application.SetAPIKey(serviceConfig.Auth.APIKey)
+	if serviceConfig.Devin.Token != "" {
+		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy))
+	}
 	server := application.HTTPServer()
 	log.Printf("HTTP server listening on %s", listenURL(server.Addr))
 
@@ -77,6 +83,7 @@ func listenURL(listen string) string {
 func run(ctx context.Context, server interface {
 	ListenAndServe() error
 	Shutdown(context.Context) error
+	Close() error
 }) error {
 	result := make(chan error, 1)
 	go func() {
@@ -95,7 +102,8 @@ func run(ctx context.Context, server interface {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown HTTP server: %w", err)
+		// 优雅关闭超时（可能有活跃 SSE 流），强制关闭不再报错。
+		server.Close()
 	}
 	return nil
 }

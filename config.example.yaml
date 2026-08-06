@@ -9,3 +9,15 @@ devin:
   token: "devin-session-token$mock-token"
   # model: "swe-1-7"
   model: "glm-5-2"
+  # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://
+  # 留空则直连或走系统环境变量 HTTP_PROXY/HTTPS_PROXY。
+  # proxy: "socks5://127.0.0.1:1080"
+
+dashboard:
+  # 管理面板密码；留空则无需登录，直接进入 /panel。
+  password: ""
+
+auth:
+  # OpenAI 兼容接口访问密钥；留空则不校验，任何客户端均可调用 /v1/*。
+  # 客户端可通过 Authorization: Bearer <api_key> 或 X-Api-Key: <api_key> 传递。
+  api_key: ""

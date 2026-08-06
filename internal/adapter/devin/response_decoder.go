@@ -19,12 +19,18 @@ type responseDecoder struct {
 	partial llm.AssistantMessage
 	// text 是当前累计的文字块。
 	text *llm.TextContent
+	// textBuilder 累计文字增量，避免 O(n²) 字符串拼接。
+	textBuilder strings.Builder
 	// textIdx 是文字块在 partial.Content 中的位置。
 	textIdx int
 	// textOpen 表示文字块已经开始但尚未结束。
 	textOpen bool
 	// thinking 是当前累计的思考块。
 	thinking *llm.ThinkingContent
+	// thinkingBuilder 累计思考正文。
+	thinkingBuilder strings.Builder
+	// thinkingSigBuilder 累计思考签名。
+	thinkingSigBuilder strings.Builder
 	// thinkIdx 是思考块在 partial.Content 中的位置。
 	thinkIdx int
 	// thinkingOpen 表示思考块已经开始但尚未结束。
@@ -100,7 +106,8 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		return nil
 	}
 	if upstreamErr != nil {
-		return decoder.fail(upstreamErr)
+		// 流中途/结束时的 Connect 错误同样透传原文。
+		return decoder.fail(connectError(upstreamErr))
 	}
 	if !decoder.hasStopReason && len(decoder.partial.Content) == 0 && len(decoder.tools) == 0 {
 		return decoder.fail(errors.New("Devin stream ended without generated content"))
@@ -149,14 +156,22 @@ func (decoder *responseDecoder) decodeThinking(response *devinproto.GetChatMessa
 	events := make([]llm.ResponseEvent, 0, 2)
 	if !decoder.thinkingOpen {
 		decoder.thinking = &llm.ThinkingContent{Redacted: response.GetThinkingRedacted()}
+		decoder.thinkingBuilder.Reset()
+		decoder.thinkingSigBuilder.Reset()
 		decoder.partial.Content = append(decoder.partial.Content, *decoder.thinking)
 		decoder.thinkIdx = len(decoder.partial.Content) - 1
 		decoder.thinkingOpen = true
 		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: decoder.thinkIdx, Partial: &decoder.partial})
 	}
-	decoder.thinking.Thinking += response.GetDeltaThinking()
+	if delta := response.GetDeltaThinking(); delta != "" {
+		decoder.thinkingBuilder.WriteString(delta)
+	}
+	if sig := response.GetDeltaSignature(); sig != "" {
+		decoder.thinkingSigBuilder.WriteString(sig)
+	}
 	decoder.thinking.Redacted = decoder.thinking.Redacted || response.GetThinkingRedacted()
-	decoder.thinking.ThinkingSignature += response.GetDeltaSignature()
+	// 思考正文在 endThinking 再 materialize；签名通常较短，每帧同步签名避免 startReasoning 拿不到。
+	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	if delta := response.GetDeltaThinking(); delta != "" {
 		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingDelta, ContentIndex: decoder.thinkIdx, Delta: delta, Partial: &decoder.partial})
@@ -168,13 +183,14 @@ func (decoder *responseDecoder) decodeText(delta string) []llm.ResponseEvent {
 	events := make([]llm.ResponseEvent, 0, 2)
 	if !decoder.textOpen {
 		decoder.text = &llm.TextContent{}
+		decoder.textBuilder.Reset()
 		decoder.partial.Content = append(decoder.partial.Content, *decoder.text)
 		decoder.textIdx = len(decoder.partial.Content) - 1
 		decoder.textOpen = true
 		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextStart, ContentIndex: decoder.textIdx, Partial: &decoder.partial})
 	}
-	decoder.text.Text += delta
-	decoder.partial.Content[decoder.textIdx] = *decoder.text
+	// 用 Builder 累加，避免每帧产生越来越大的新字符串。
+	decoder.textBuilder.WriteString(delta)
 	events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial})
 	return events
 }
@@ -217,11 +233,7 @@ func (decoder *responseDecoder) decodeNativeTool(state *toolState, fragment stri
 			ToolCallID: state.call.ID, ToolName: state.call.Name, Partial: &decoder.partial,
 		})
 	}
-	arguments := strings.TrimSpace(state.arguments.String())
-	if isJSONObject([]byte(arguments)) {
-		state.call.Arguments = json.RawMessage(arguments)
-	}
-	decoder.partial.Content[state.contentIdx] = state.call
+	// 工具参数在 complete 中一次性解析并写入，避免每帧 O(n) 拷贝/校验。
 	if hasFragment {
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
@@ -236,6 +248,10 @@ func (decoder *responseDecoder) endThinking() []llm.ResponseEvent {
 		return nil
 	}
 	decoder.thinkingOpen = false
+	// 只在思考块结束时一次性生成完整思考与签名。
+	decoder.thinking.Thinking = decoder.thinkingBuilder.String()
+	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
+	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	return []llm.ResponseEvent{{
 		Type: llm.ResponseEventThinkingEnd, ContentIndex: decoder.thinkIdx,
 		Content: decoder.thinking.Thinking, Partial: &decoder.partial,
@@ -247,6 +263,9 @@ func (decoder *responseDecoder) endText() []llm.ResponseEvent {
 		return nil
 	}
 	decoder.textOpen = false
+	// 只在内容块结束时一次性生成完整文字，避免 O(n²) 拷贝。
+	decoder.text.Text = decoder.textBuilder.String()
+	decoder.partial.Content[decoder.textIdx] = *decoder.text
 	return []llm.ResponseEvent{{
 		Type: llm.ResponseEventTextEnd, ContentIndex: decoder.textIdx,
 		Content: decoder.text.Text, Partial: &decoder.partial,
@@ -277,6 +296,8 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 		if !state.emitted {
 			continue
 		}
+		// 在结束时一次性把 Builder 中的完整参数转成 JSON，避免中间反复解析/拷贝。
+		state.call.Arguments = json.RawMessage(state.arguments.String())
 		if !isJSONObject(state.call.Arguments) {
 			state.call.Arguments = json.RawMessage(`{}`)
 		}

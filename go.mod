@@ -6,6 +6,7 @@ require (
 	connectrpc.com/connect v1.20.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.1
+	golang.org/x/net v0.57.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	local/devinproto v0.0.0

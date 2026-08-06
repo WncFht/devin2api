@@ -19,6 +19,10 @@ type Config struct {
 	Devin DevinConfig `yaml:"devin"`
 	// Debug 保存仅用于本地诊断的日志配置。
 	Debug DebugConfig `yaml:"debug"`
+	// Dashboard 保存管理面板配置。
+	Dashboard DashboardConfig `yaml:"dashboard"`
+	// Auth 保存对外 OpenAI 兼容接口的访问控制配置。
+	Auth AuthConfig `yaml:"auth"`
 }
 
 // ServerConfig 保存 HTTP 服务监听配置。
@@ -35,12 +39,26 @@ type DevinConfig struct {
 	Token string `yaml:"token"`
 	// Model 是 Devin chat model UID。
 	Model string `yaml:"model"`
+	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
+	Proxy string `yaml:"proxy"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
 type DebugConfig struct {
 	// Enabled 表示是否在配置文件同目录的 logs 下写入请求调试日志。
 	Enabled bool `yaml:"enabled"`
+}
+
+// DashboardConfig 保存管理面板配置。
+type DashboardConfig struct {
+	// Password 是面板访问密码；为空则不要求登录，直接进入面板。
+	Password string `yaml:"password"`
+}
+
+// AuthConfig 保存对外 OpenAI 兼容接口的访问控制配置。
+type AuthConfig struct {
+	// APIKey 是客户端访问 /v1/* 接口所需的密钥；为空时不启用鉴权。
+	APIKey string `yaml:"api_key"`
 }
 
 // Load 从 YAML 文件读取并校验配置。
