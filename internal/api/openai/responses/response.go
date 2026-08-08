@@ -350,8 +350,13 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	if event.Error != nil && event.Error.ErrorMessage != "" {
 		message = event.Error.ErrorMessage
 	}
-	return []SSEEvent{encoder.emit("error", map[string]any{
-		"error": map[string]any{"message": message, "type": "server_error"},
+	// OpenAI Responses API 中，流式失败应发送 response.failed 事件，
+	// 包含 status="failed" 的 response 对象与 error 字段。
+	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
+	response["error"] = map[string]any{"message": message, "type": "server_error", "code": nil, "param": nil}
+	return []SSEEvent{encoder.emit("response.failed", map[string]any{
+		"response": response,
+		"error":    map[string]any{"message": message, "type": "server_error"},
 	})}
 }
 

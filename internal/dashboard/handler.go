@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -40,19 +41,30 @@ type Handler struct {
 	apiClient     devinprotoconnect.ApiServerServiceClient
 	httpClient    *http.Client
 	baseTransport http.RoundTripper
+	sessionMu     sync.RWMutex
 	sessionTokens map[string]time.Time
+
+	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存可显著降低上游压力。
+	cacheMu             sync.RWMutex
+	cacheTTL            time.Duration
+	modelsCache         []map[string]any
+	modelsExpiry        time.Time
+	providersCache      []map[string]any
+	providersExpiry     time.Time
+	modelStatusesCache  []map[string]any
+	modelStatusesExpiry time.Time
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
 func New(password, baseURL, token, proxy string) *Handler {
-	base := http.DefaultTransport
-	if proxy != "" {
-		if t, err := httpproxy.NewTransport(proxy); err == nil {
-			base = t
-		}
+	base, err := httpproxy.NewTransport(proxy)
+	if err != nil {
+		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
+		base = http.DefaultTransport.(*http.Transport).Clone()
 	}
 	transport := &authTransport{base: base, token: token}
-	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
+	httpClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
 	return &Handler{
 		password:      password,
 		baseURL:       strings.TrimRight(baseURL, "/"),
@@ -61,6 +73,7 @@ func New(password, baseURL, token, proxy string) *Handler {
 		httpClient:    httpClient,
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
+		cacheTTL:      5 * time.Minute,
 	}
 }
 
@@ -97,7 +110,9 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := generateSessionID()
+	h.sessionMu.Lock()
 	h.sessionTokens[sessionID] = time.Now().Add(24 * time.Hour)
+	h.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "devin_panel_session",
 		Value:    sessionID,
@@ -117,11 +132,16 @@ func (h *Handler) isAuthenticated(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
+	h.sessionMu.RLock()
 	expiry, ok := h.sessionTokens[cookie.Value]
-	if !ok || time.Now().After(expiry) {
-		if ok {
-			delete(h.sessionTokens, cookie.Value)
-		}
+	h.sessionMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		h.sessionMu.Lock()
+		delete(h.sessionTokens, cookie.Value)
+		h.sessionMu.Unlock()
 		return false
 	}
 	return true
@@ -140,15 +160,21 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	// 面板聚合多个上游调用，给足时间避免单个慢接口拖垮整体；
+	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
+	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
 	defer cancel()
 
 	result := map[string]any{}
+	var resultMu sync.Mutex
 
 	// 正确路径：JSON Connect SeatManagement GetUserStatus（Bearer + metadata.api_key）
 	if user, plan, planInfo, err := h.fetchUserStatus(ctx); err != nil {
+		resultMu.Lock()
 		result["user_status_error"] = err.Error()
+		resultMu.Unlock()
 	} else {
+		resultMu.Lock()
 		if user != nil {
 			result["user"] = user
 		}
@@ -158,60 +184,70 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 		if planInfo != nil {
 			result["plan_info"] = planInfo
 		}
+		resultMu.Unlock()
 	}
 
-	capResp, err := h.apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
-		Metadata: buildMetadata(h.token),
-	}))
-	if err != nil {
-		result["capacity_error"] = err.Error()
-	} else {
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		capResp, err := h.apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
+			Metadata: buildMetadata(h.token),
+		}))
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if err != nil {
+			result["capacity_error"] = err.Error()
+			return
+		}
 		result["capacity"] = map[string]any{
 			"has_capacity":    capResp.Msg.GetHasCapacity(),
 			"message":         capResp.Msg.GetMessage(),
 			"active_sessions": capResp.Msg.GetActiveSessions(),
 		}
-	}
+	}()
 
-	statusResp, err := h.apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
-		Metadata: buildMetadata(h.token),
-	}))
-	if err != nil {
-		result["status_error"] = err.Error()
-	} else {
+	go func() {
+		defer wg.Done()
+		statusResp, err := h.apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
+			Metadata: buildMetadata(h.token),
+		}))
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if err != nil {
+			result["status_error"] = err.Error()
+			return
+		}
 		st := statusResp.Msg.GetStatus()
 		result["ide_status"] = map[string]any{
 			"level":   shortEnum(st.GetLevel().String(), "STATUS_LEVEL_"),
 			"message": st.GetMessage(),
 		}
 		result["show_review_prompt"] = statusResp.Msg.GetShowReviewPrompt()
-	}
+	}()
 
-	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
-		Metadata: buildMetadata(h.token),
-	}))
-	if err == nil {
-		var statuses []map[string]any
-		for _, s := range modelStatusResp.Msg.GetModelStatusInfos() {
-			statuses = append(statuses, map[string]any{
-				"model":  shortEnum(s.GetModel().String(), "MODEL_"),
-				"status": shortEnum(s.GetStatus().String(), "MODEL_STATUS_"),
-			})
+	go func() {
+		defer wg.Done()
+		statuses := h.cachedModelStatuses(ctx)
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if statuses != nil {
+			result["model_statuses"] = statuses
 		}
-		result["model_statuses"] = statuses
-	}
+	}()
 
-	providerResp, err := h.apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
-	if err == nil {
-		var providers []map[string]any
-		for _, p := range providerResp.Msg.GetModelProviders() {
-			providers = append(providers, map[string]any{
-				"provider":     shortEnum(p.GetProvider().String(), "MODEL_PROVIDER_"),
-				"display_name": p.GetDisplayName(),
-			})
+	go func() {
+		defer wg.Done()
+		providers := h.cachedProviders(ctx)
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if providers != nil {
+			result["providers"] = providers
 		}
-		result["providers"] = providers
-	}
+	}()
+
+	wg.Wait()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
@@ -244,7 +280,8 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 	req.Header.Set("Authorization", "Bearer "+h.token)
 
 	// 使用不带 Basic 改写的 client，避免 authTransport 覆盖 Bearer；但复用代理 transport。
-	client := &http.Client{Timeout: 20 * time.Second, Transport: h.baseTransport}
+	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
+	client := &http.Client{Timeout: 610 * time.Second, Transport: h.baseTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, nil, err
@@ -352,16 +389,35 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	// 模型目录可能较大，给足时间并复用缓存；与 ResponseHeaderTimeout 对齐。
+	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
 	defer cancel()
+
+	models, err := h.cachedModels(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
+}
+
+func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
+	h.cacheMu.RLock()
+	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
+		cached := h.modelsCache
+		h.cacheMu.RUnlock()
+		return cached, nil
+	}
+	h.cacheMu.RUnlock()
 
 	resp, err := h.apiClient.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
 		Metadata: buildMetadata(h.token),
 	}))
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
-		return
+		return nil, err
 	}
 
 	var models []map[string]any
@@ -469,8 +525,15 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 		models = append(models, m)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	// 请求期间可能有其他 goroutine 已写入缓存，不覆盖更热数据。
+	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
+		return h.modelsCache, nil
+	}
+	h.modelsCache = models
+	h.modelsExpiry = time.Now().Add(h.cacheTTL)
+	return models, nil
 }
 
 func buildMetadata(token string) *devinproto.ExaCodeiumCommonPb_Metadata {
@@ -485,6 +548,70 @@ func buildMetadata(token string) *devinproto.ExaCodeiumCommonPb_Metadata {
 		Os:               proto.String("win"),
 		F:                proto.String(fingerprint),
 	}
+}
+
+func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
+	h.cacheMu.RLock()
+	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
+		cached := h.providersCache
+		h.cacheMu.RUnlock()
+		return cached
+	}
+	h.cacheMu.RUnlock()
+
+	providerResp, err := h.apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
+	if err != nil {
+		return nil
+	}
+	var providers []map[string]any
+	for _, p := range providerResp.Msg.GetModelProviders() {
+		providers = append(providers, map[string]any{
+			"provider":     shortEnum(p.GetProvider().String(), "MODEL_PROVIDER_"),
+			"display_name": p.GetDisplayName(),
+		})
+	}
+
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
+		return h.providersCache
+	}
+	h.providersCache = providers
+	h.providersExpiry = time.Now().Add(h.cacheTTL)
+	return providers
+}
+
+func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
+	h.cacheMu.RLock()
+	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
+		cached := h.modelStatusesCache
+		h.cacheMu.RUnlock()
+		return cached
+	}
+	h.cacheMu.RUnlock()
+
+	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
+		Metadata: buildMetadata(h.token),
+	}))
+	if err != nil {
+		return nil
+	}
+	var statuses []map[string]any
+	for _, s := range modelStatusResp.Msg.GetModelStatusInfos() {
+		statuses = append(statuses, map[string]any{
+			"model":  shortEnum(s.GetModel().String(), "MODEL_"),
+			"status": shortEnum(s.GetStatus().String(), "MODEL_STATUS_"),
+		})
+	}
+
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
+		return h.modelStatusesCache
+	}
+	h.modelStatusesCache = statuses
+	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
+	return statuses
 }
 
 type authTransport struct {

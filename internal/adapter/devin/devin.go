@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	devinproto "local/devinproto"
@@ -46,8 +47,13 @@ type Config struct {
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
-	config Config
-	client devinprotoconnect.ApiServerServiceClient
+	config         Config
+	client         devinprotoconnect.ApiServerServiceClient
+	apiClient      devinprotoconnect.ApiServerServiceClient
+	modelsMu       sync.RWMutex
+	models         []adapter.ModelInfo
+	modelsExpiry   time.Time
+	modelsCacheTTL time.Duration
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
@@ -68,8 +74,22 @@ func New(config Config) (*Adapter, error) {
 		return nil, fmt.Errorf("create proxy transport: %w", err)
 	}
 	transport := &authTransport{base: base, token: config.Token}
-	client := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
-	return &Adapter{config: config, client: client}, nil
+
+	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
+	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
+	streamClient := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
+
+	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
+	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
+	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
+	apiClient := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL)
+
+	return &Adapter{
+		config:         config,
+		client:         streamClient,
+		apiClient:      apiClient,
+		modelsCacheTTL: 5 * time.Minute,
+	}, nil
 }
 
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
@@ -170,9 +190,17 @@ func connectError(err error) error {
 	return err
 }
 
-// ListModels 通过 GetCascadeModelConfigs 拉取可用模型目录。
+// ListModels 通过 GetCascadeModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
 func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
-	resp, err := a.client.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
+	a.modelsMu.RLock()
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		cached := a.models
+		a.modelsMu.RUnlock()
+		return cached, nil
+	}
+	a.modelsMu.RUnlock()
+
+	resp, err := a.apiClient.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{
 			ApiKey:           proto.String(a.config.Token),
 			ExtensionName:    proto.String(clientName),
@@ -224,6 +252,15 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 			})
 		}
 	}
+
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	// 请求期间可能有其他请求已写入缓存，避免覆盖更热的数据。
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		return a.models, nil
+	}
+	a.models = models
+	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
 	return models, nil
 }
 
@@ -279,16 +316,17 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		ExecutionId: proto.String(executionID),
 	}
 	// Devin/Cascade 只可靠接受「当前轮」图片；历史图进 Images 会 invalid_argument。
-	// 对齐 WindsurfAPI：仅最后一条 user/tool 消息可挂 Images，更早的图改成文本占位。
-	lastAttachIndex := -1
+	// 当前轮 = 最后一条 AssistantMessage 之后的所有 user/tool 消息。
+	// Anthropic 客户端常把 image 和 tool_result 放在同一条 user 消息里，
+	// 解码后拆成 UserMessage + ToolResultMessage 两条；仅挂最后一条会丢失图片。
+	lastAssistantIndex := -1
 	for index, message := range request.Messages {
-		switch message.(type) {
-		case llm.UserMessage, llm.ToolResultMessage:
-			lastAttachIndex = index
+		if _, ok := message.(llm.AssistantMessage); ok {
+			lastAssistantIndex = index
 		}
 	}
 	for index, message := range request.Messages {
-		converted, err := convertMessage(message, index == lastAttachIndex)
+		converted, err := convertMessage(message, index > lastAssistantIndex)
 		if err != nil {
 			return nil, fmt.Errorf("message %d: %w", index, err)
 		}

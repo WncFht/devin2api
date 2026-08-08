@@ -199,6 +199,38 @@ func TestBuildRequestOmitsHistoricalImages(t *testing.T) {
 	}
 }
 
+// TestBuildRequestAttachesImagesInSameTurn 验证同一轮中 UserMessage(image) + ToolResultMessage 都挂图片。
+// Anthropic 客户端常把 image 和 tool_result 放在同一条 user 消息里，解码后拆成两条；
+// 旧逻辑仅挂最后一条，导致图片丢失。
+func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}},
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "see this"},
+				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+			}},
+			llm.ToolResultMessage{ToolCallID: "tc1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	// prompts: [assistant, user(image), tool_result]
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+	// user 消息在 assistant 之后，属于当前轮，图片应保留
+	if len(prompts[1].GetImages()) != 1 || prompts[1].GetImages()[0].GetBase64Data() != "AAAA" {
+		t.Fatalf("current-turn user images = %#v, want AAAA", prompts[1].GetImages())
+	}
+	if strings.Contains(prompts[1].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("current-turn prompt should keep real image, got %q", prompts[1].GetPrompt())
+	}
+}
+
 // TestBuildRequestWithoutToolsKeepsPromptUnchanged 的测试动机是确保工具转换不会污染纯文本请求。
 func TestBuildRequestWithoutToolsKeepsPromptUnchanged(t *testing.T) {
 	request := llm.RequestMessages{SystemPrompt: "system", Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}}}

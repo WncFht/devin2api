@@ -1,5 +1,7 @@
 server:
   listen: ":8080"
+  # 同时处理的 /v1/* 请求数上限；0 或不填表示使用默认值 1024。
+  max_concurrency: 1024
 
 debug:
   enabled: false

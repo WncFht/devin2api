@@ -33,8 +33,14 @@ type DashboardRegistrar interface {
 const (
 	// readHeaderTimeout 是防止慢速请求头连接长期占用资源的内部策略。
 	readHeaderTimeout = 60 * time.Second
+	// readTimeout 限制请求体读取总时长，防止慢速客户端长期占用连接。
+	readTimeout = 120 * time.Second
+	// writeTimeout 限制响应写入总时长；SSE 流可能较长，这里给足余量。
+	writeTimeout = 30 * time.Minute
 	// idleTimeout 是 keep-alive 连接两次请求之间的内部空闲策略。
 	idleTimeout = 360 * time.Second
+	// defaultMaxConcurrency 是默认同时处理的 /v1/* 请求数上限。
+	defaultMaxConcurrency = 1024
 )
 
 // App 保存 HTTP 应用依赖和服务配置。
@@ -49,11 +55,22 @@ type App struct {
 	dashboard DashboardRegistrar
 	// apiKey 是可选的 OpenAI 兼容接口访问密钥；为空则不校验。
 	apiKey string
+	// concurrency 限制同时处理的 /v1/* 请求数。
+	concurrency chan struct{}
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
 func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debugManager *debuglog.Manager) *App {
-	return &App{adapter: providerAdapter, serverConfig: serverConfig, debugManager: debugManager}
+	limit := serverConfig.MaxConcurrency
+	if limit <= 0 {
+		limit = defaultMaxConcurrency
+	}
+	return &App{
+		adapter:      providerAdapter,
+		serverConfig: serverConfig,
+		debugManager: debugManager,
+		concurrency:  make(chan struct{}, limit),
+	}
 }
 
 // SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
@@ -71,9 +88,11 @@ func (application *App) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/healthz", application.health)
 	router.Group(func(protected chi.Router) {
+		protected.Use(application.concurrencyMiddleware)
 		protected.Use(application.apiKeyMiddleware)
 		protected.Get("/v1/models", application.listModels)
 		protected.Get("/v1/models/{model}", application.getModel)
+		protected.Get("/v1/responses", application.createResponsesWebSocket)
 		protected.Post("/v1/responses", application.createResponses)
 		protected.Post("/v1/chat/completions", application.createChatCompletions)
 		protected.Post("/v1/messages", application.createMessages)
@@ -90,7 +109,10 @@ func (application *App) HTTPServer() *http.Server {
 		Addr:              application.serverConfig.Listen,
 		Handler:           application.Router(),
 		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    1 << 20,
 	}
 }
 
@@ -181,6 +203,19 @@ func writeAuthError(writer http.ResponseWriter, message string) {
 	writer.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(writer).Encode(map[string]any{
 		"error": map[string]any{"message": message, "type": "unauthenticated", "code": nil, "param": nil},
+	})
+}
+
+// concurrencyMiddleware 限制同时处理的 /v1/* 请求数，避免上游阻塞时资源耗尽。
+func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case application.concurrency <- struct{}{}:
+			defer func() { <-application.concurrency }()
+			next.ServeHTTP(writer, request)
+		default:
+			writeJSONError(writer, http.StatusServiceUnavailable, "server is busy, please try again later")
+		}
 	})
 }
 
@@ -345,10 +380,28 @@ func writeProtocolStream(
 			if _, err := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); err != nil {
 				return latest, err
 			}
-			recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
+			if encoded.Name == "[DONE]" {
+				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
+			} else {
+				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
+			}
 			flusher.Flush()
 		}
 		if event.Type == llm.ResponseEventError {
+			// 先把错误编码为 SSE 发送出去，避免客户端看到流直接关闭。
+			// OpenAI Responses 会生成 error 事件；chat/anthropic 编码器目前仍返回错误，不影响行为。
+			errorEvents, _ := encoder.Encode(event)
+			for _, encoded := range errorEvents {
+				if _, werr := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); werr != nil {
+					return latest, werr
+				}
+				if encoded.Name == "[DONE]" {
+					recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
+				} else {
+					recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
+				}
+				flusher.Flush()
+			}
 			if event.Error != nil && event.Error.ErrorMessage != "" {
 				return latest, errors.New(event.Error.ErrorMessage)
 			}

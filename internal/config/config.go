@@ -29,6 +29,8 @@ type Config struct {
 type ServerConfig struct {
 	// Listen 是 HTTP 服务监听地址。
 	Listen string `yaml:"listen"`
+	// MaxConcurrency 是同时处理的 /v1/* 请求数上限；0 表示使用默认值。
+	MaxConcurrency int `yaml:"max_concurrency"`
 }
 
 // DevinConfig 保存 Devin Connect 上游调用配置。
@@ -81,10 +83,13 @@ func Load(path string) (Config, error) {
 	return config, nil
 }
 
-// Validate 检查配置中的必填项。
-func (config Config) Validate() error {
+// Validate 检查配置中的必填项，并设置默认值。
+func (config *Config) Validate() error {
 	if config.Server.Listen == "" {
 		return errors.New("server.listen is required")
+	}
+	if config.Server.MaxConcurrency <= 0 {
+		config.Server.MaxConcurrency = 1024
 	}
 	return nil
 }
