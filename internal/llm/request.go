@@ -32,6 +32,8 @@ const (
 
 // RequestMessages 是发送给任意供应商适配器的完整请求上下文。
 type RequestMessages struct {
+	// Model 是调用方指定的模型标识；空表示由适配器使用默认配置。
+	Model string
 	// SystemPrompt 是独立于普通消息历史的系统提示词。
 	SystemPrompt string
 	// Messages 是按时间顺序排列、可跨供应商重放的完整对话历史。

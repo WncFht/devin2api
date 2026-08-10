@@ -5,14 +5,12 @@ package responses
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime"
-	"strings"
 	"time"
 
+	"github.com/leookun/devin-2api/internal/api/common"
 	"github.com/leookun/devin-2api/internal/llm"
 )
 
@@ -58,8 +56,6 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	// Model 是上游模型标识。
-	Model string
 	// Stream 表示调用方是否请求流式响应。
 	Stream bool
 	// MaxOutputTokens 是可选的输出 token 上限。
@@ -81,7 +77,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, errors.New("responses request model is required")
 	}
 
-	context := llm.RequestMessages{SystemPrompt: request.Instructions}
+	context := llm.RequestMessages{Model: request.Model, SystemPrompt: request.Instructions}
 	if err := appendInputMessages(&context, request.Input); err != nil {
 		return AdaptedRequest{}, err
 	}
@@ -105,7 +101,6 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Model:              request.Model,
 			Stream:             request.Stream,
 			MaxOutputTokens:    request.MaxOutputTokens,
 			Temperature:        request.Temperature,
@@ -176,7 +171,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage) error {
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
-		output, err := rawOutputText(item.Output)
+		output, err := common.RawOutputText(item.Output)
 		if err != nil {
 			return err
 		}
@@ -224,7 +219,7 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return err
 	}
-	content, err := decodeMessageContent(item.Content)
+	content, err := common.DecodeContent(item.Content)
 	if err != nil {
 		return err
 	}
@@ -237,86 +232,11 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	case "assistant":
 		context.Messages = append(context.Messages, llm.AssistantMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
 	case "system", "developer":
-		text := contentText(content)
+		text := common.ContentText(content)
 		if context.SystemPrompt != "" && text != "" {
 			context.SystemPrompt += "\n"
 		}
 		context.SystemPrompt += text
 	}
 	return nil
-}
-
-func decodeMessageContent(raw json.RawMessage) ([]llm.Content, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return []llm.Content{llm.TextContent{Text: text}}, nil
-	}
-	var parts []json.RawMessage
-	if err := json.Unmarshal(raw, &parts); err != nil {
-		return nil, fmt.Errorf("decode message content: %w", err)
-	}
-	content := make([]llm.Content, 0, len(parts))
-	for index, part := range parts {
-		var item struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			ImageURL string `json:"image_url"`
-		}
-		if err := json.Unmarshal(part, &item); err != nil {
-			return nil, fmt.Errorf("content[%d]: %w", index, err)
-		}
-		switch item.Type {
-		case "input_text", "output_text", "text":
-			content = append(content, llm.TextContent{Text: item.Text})
-		case "input_image":
-			image, err := decodeDataImage(item.ImageURL)
-			if err != nil {
-				return nil, fmt.Errorf("content[%d]: %w", index, err)
-			}
-			content = append(content, image)
-		default:
-			continue
-		}
-	}
-	return content, nil
-}
-
-func decodeDataImage(value string) (llm.ImageContent, error) {
-	if !strings.HasPrefix(value, "data:") {
-		return llm.ImageContent{}, errors.New("only data URL images are supported")
-	}
-	meta, encoded, ok := strings.Cut(value, ",")
-	if !ok || !strings.HasSuffix(meta, ";base64") {
-		return llm.ImageContent{}, errors.New("image must be a base64 data URL")
-	}
-	mimeType := strings.TrimPrefix(strings.TrimSuffix(meta, ";base64"), "data:")
-	if _, _, err := mime.ParseMediaType(mimeType); err != nil {
-		return llm.ImageContent{}, fmt.Errorf("invalid image MIME type: %w", err)
-	}
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return llm.ImageContent{}, fmt.Errorf("decode image data: %w", err)
-	}
-	return llm.ImageContent{Data: base64.StdEncoding.EncodeToString(data), MIMEType: mimeType}, nil
-}
-
-func rawOutputText(raw json.RawMessage) (string, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text, nil
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "", errors.New("function call output is required")
-	}
-	return string(raw), nil
-}
-
-func contentText(content []llm.Content) string {
-	var builder strings.Builder
-	for _, block := range content {
-		if text, ok := block.(llm.TextContent); ok {
-			builder.WriteString(text.Text)
-		}
-	}
-	return builder.String()
 }

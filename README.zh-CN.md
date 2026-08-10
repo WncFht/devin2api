@@ -58,7 +58,7 @@ curl http://localhost:8080/healthz
 
 ## 用法
 
-> **注意**：本服务目前**暂不校验认证**——`/v1/responses` 接受任意 API key（传入任何密钥均可）且不验证其有效性。在加入鉴权之前，请只在可信网络内暴露本服务。
+> **注意**：`/v1/*` 接口支持可选的 API Key 鉴权。在 `config.yaml` 中设置 `auth.api_key` 后，客户端需通过 `Authorization: Bearer <api_key>` 或 `X-Api-Key: <api_key>` 传递密钥；留空则不校验，请只在可信网络内暴露。
 
 使用你的 OpenAI Responses API 客户端调用 `http://localhost:8080/v1/responses` 即可。
 
@@ -98,6 +98,7 @@ curl -N http://localhost:8080/v1/responses \
 | `devin.token` | Devin 会话 token（`devin-session-token$...`） | 否——未配置时接口返回 503 |
 | `devin.model` | Devin chat model UID（如 `glm-5-2`） | 配置了 `devin.token` 后必填（代码无默认值） |
 | `debug.enabled` | 在配置文件同目录的 `logs/` 下写按请求的调试日志 | 否 |
+| `auth.api_key` | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 否 |
 
 ```yaml
 server:
@@ -110,6 +111,10 @@ devin:
 
 debug:
   enabled: false
+
+auth:
+  # 填入强密码以保护 /v1/*；留空则不校验。
+  api_key: ""
 ```
 
 注意：

@@ -20,6 +20,8 @@ func (server *fakeServer) Shutdown(context.Context) error {
 	return nil
 }
 
+func (server *fakeServer) Close() error { return nil }
+
 // TestListenURL verifies listen address descriptions used in the startup log.
 func TestListenURL(t *testing.T) {
 	cases := map[string]string{

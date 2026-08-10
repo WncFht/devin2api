@@ -4,16 +4,19 @@ package devin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	devinproto "local/devinproto"
+
+	"connectrpc.com/connect"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
 	"google.golang.org/protobuf/proto"
-	devinproto "local/devinproto"
 )
 
 // fakeDevinResponseReceiver 为 responseStream 测试提供确定顺序的 protobuf 帧。
@@ -122,6 +125,109 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	}
 	if converted.GetConfiguration().GetMaxNewlines() != 400 {
 		t.Fatalf("max newlines = %d, want 400", converted.GetConfiguration().GetMaxNewlines())
+	}
+}
+
+// TestValidateImagesForModelRejectsGLM 验证无视觉模型带图时返回可读错误（透传给客户端）。
+func TestValidateImagesForModelRejectsGLM(t *testing.T) {
+	request := llm.RequestMessages{
+		Model: "glm-5-2",
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{
+			llm.TextContent{Text: "see"},
+			llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+		}}},
+	}
+	err := validateImagesForModel(request, "glm-5-2")
+	if err == nil {
+		t.Fatal("expected error for glm-5-2 + image")
+	}
+	if !strings.Contains(err.Error(), "does not support image") {
+		t.Fatalf("error = %v, want does not support image", err)
+	}
+	if err := validateImagesForModel(request, "swe-1-7"); err != nil {
+		t.Fatalf("swe-1-7 should allow images: %v", err)
+	}
+	if err := validateImagesForModel(llm.RequestMessages{Model: "glm-5-2", Messages: []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
+	}}, "glm-5-2"); err != nil {
+		t.Fatalf("text-only glm should pass: %v", err)
+	}
+}
+
+// TestConnectErrorPassthrough 验证 Connect 错误 message 原样保留。
+func TestConnectErrorPassthrough(t *testing.T) {
+	err := connectError(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
+	if err == nil || !strings.Contains(err.Error(), "invalid_argument") || !strings.Contains(err.Error(), "model does not support images") {
+		t.Fatalf("connectError = %v", err)
+	}
+}
+
+// TestBuildRequestOmitsHistoricalImages 验证多轮里只有最新用户消息挂 Images，历史图改占位。
+func TestBuildRequestOmitsHistoricalImages(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "see this"},
+				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+			}},
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}},
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "and this"},
+				llm.ImageContent{Data: "BBBB", MIMEType: "image/jpeg"},
+			}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+	if len(prompts[0].GetImages()) != 0 {
+		t.Fatalf("history images = %#v, want empty", prompts[0].GetImages())
+	}
+	if !strings.Contains(prompts[0].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("history prompt = %q, want image placeholder", prompts[0].GetPrompt())
+	}
+	if len(prompts[2].GetImages()) != 1 || prompts[2].GetImages()[0].GetBase64Data() != "BBBB" {
+		t.Fatalf("latest images = %#v, want BBBB", prompts[2].GetImages())
+	}
+	if strings.Contains(prompts[2].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("latest prompt should keep real image, got %q", prompts[2].GetPrompt())
+	}
+}
+
+// TestBuildRequestAttachesImagesInSameTurn 验证同一轮中 UserMessage(image) + ToolResultMessage 都挂图片。
+// Anthropic 客户端常把 image 和 tool_result 放在同一条 user 消息里，解码后拆成两条；
+// 旧逻辑仅挂最后一条，导致图片丢失。
+func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "ok"}}},
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "see this"},
+				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+			}},
+			llm.ToolResultMessage{ToolCallID: "tc1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	// prompts: [assistant, user(image), tool_result]
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %d, want 3", len(prompts))
+	}
+	// user 消息在 assistant 之后，属于当前轮，图片应保留
+	if len(prompts[1].GetImages()) != 1 || prompts[1].GetImages()[0].GetBase64Data() != "AAAA" {
+		t.Fatalf("current-turn user images = %#v, want AAAA", prompts[1].GetImages())
+	}
+	if strings.Contains(prompts[1].GetPrompt(), "[Image omitted from history]") {
+		t.Fatalf("current-turn prompt should keep real image, got %q", prompts[1].GetPrompt())
 	}
 }
 
@@ -331,12 +437,33 @@ func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderCompletesPartialWithThinking 验证 STOP_REASON_PARTIAL 不吞掉已生成的思考/文本。
+func TestResponseDecoderCompletesPartialWithThinking(t *testing.T) {
+	decoder := newResponseDecoder("model")
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello"), StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL.Enum()})
+	events := decoder.finish(nil)
+	done := events[len(events)-1]
+	if done.Type != llm.ResponseEventDone || done.Reason != llm.StopReasonLength || done.Message == nil {
+		t.Fatalf("done event = %#v, want done with length", done)
+	}
+	if done.Message.Content[0].(llm.ThinkingContent).Thinking != "think" {
+		t.Fatalf("thinking missing or wrong: %#v", done.Message.Content)
+	}
+	if done.Message.Content[1].(llm.TextContent).Text != "hello" {
+		t.Fatalf("text missing or wrong: %#v", done.Message.Content)
+	}
+}
+
 func TestMapStopReason(t *testing.T) {
 	cases := []struct {
 		input devinproto.ExaCodeiumCommonPb_StopReason
 		want  llm.StopReason
 	}{
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS, llm.StopReasonLength},
+		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_INCOMPLETE, llm.StopReasonLength},
+		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL, llm.StopReasonLength},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL, llm.StopReasonToolUse},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR, llm.StopReasonError},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN, llm.StopReasonStop},
@@ -358,6 +485,7 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	}
 	recordProtoJSON(recorder, "03-devin-request.json", request)
 	recordProtoJSON(recorder, "04-devin-response.jsonl", &devinproto.GetChatMessageResponse{DeltaText: proto.String("world")})
+	recorder.Complete(debuglog.Completion{})
 
 	entries, err := os.ReadDir(root)
 	if err != nil {

@@ -13,15 +13,19 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	devinproto "local/devinproto"
+	"local/devinproto/devinprotoconnect"
 
 	"connectrpc.com/connect"
 	"github.com/leookun/devin-2api/internal/adapter"
 	"github.com/leookun/devin-2api/internal/debuglog"
+	"github.com/leookun/devin-2api/internal/httpproxy"
 	"github.com/leookun/devin-2api/internal/llm"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
-	devinproto "local/devinproto"
-	"local/devinproto/devinprotoconnect"
 )
 
 const (
@@ -37,12 +41,21 @@ type Config struct {
 	Token string
 	// Model 是 Devin chat model UID。
 	Model string
+	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
+	Proxy string
+	// ForceHTTP1 为 true 时强制 HTTP/1.1，每请求独立连接，避免 HTTP/2 单连接多 stream 并发瓶颈。
+	ForceHTTP1 bool
 }
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
-	config Config
-	client devinprotoconnect.ApiServerServiceClient
+	config         Config
+	client         devinprotoconnect.ApiServerServiceClient
+	apiClient      devinprotoconnect.ApiServerServiceClient
+	modelsMu       sync.RWMutex
+	models         []adapter.ModelInfo
+	modelsExpiry   time.Time
+	modelsCacheTTL time.Duration
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
@@ -58,9 +71,27 @@ func New(config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("devin model is required")
 	}
-	transport := &authTransport{base: http.DefaultTransport, token: config.Token}
-	client := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
-	return &Adapter{config: config, client: client}, nil
+	base, err := httpproxy.NewTransport(config.Proxy, config.ForceHTTP1)
+	if err != nil {
+		return nil, fmt.Errorf("create proxy transport: %w", err)
+	}
+	transport := &authTransport{base: base, token: config.Token}
+
+	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
+	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
+	streamClient := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
+
+	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
+	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
+	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
+	apiClient := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL)
+
+	return &Adapter{
+		config:         config,
+		client:         streamClient,
+		apiClient:      apiClient,
+		modelsCacheTTL: 5 * time.Minute,
+	}, nil
 }
 
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
@@ -68,7 +99,16 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err := request.Validate(); err != nil {
 		return nil, fmt.Errorf("validate Devin request: %w", err)
 	}
-	protoRequest, err := buildRequest(request, adapter.config)
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = adapter.config.Model
+	}
+	if err := validateImagesForModel(request, model); err != nil {
+		return nil, err
+	}
+	cfg := adapter.config
+	cfg.Model = model
+	protoRequest, err := buildRequest(request, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -77,9 +117,153 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	stream, err := adapter.client.GetChatMessage(ctx, connect.NewRequest(protoRequest))
 	if err != nil {
 		recorder.WriteError("devin_connect", err)
-		return nil, fmt.Errorf("Devin GetChatMessage: %w", err)
+		// 透传上游 Connect 错误原文，不包一层模糊前缀。
+		return nil, connectError(err)
 	}
-	return &responseStream{upstream: stream, decoder: newResponseDecoder(adapter.config.Model), recorder: recorder}, nil
+	return &responseStream{upstream: stream, decoder: newResponseDecoder(model), recorder: recorder}, nil
+}
+
+// validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。
+func validateImagesForModel(request llm.RequestMessages, model string) error {
+	if !requestHasImages(request) {
+		return nil
+	}
+	if !modelLikelySupportsImages(model) {
+		return fmt.Errorf("model %q does not support image inputs (supports_images=false); use a vision-capable model or remove images", model)
+	}
+	return nil
+}
+
+func requestHasImages(request llm.RequestMessages) bool {
+	for _, message := range request.Messages {
+		var content []llm.Content
+		switch m := message.(type) {
+		case llm.UserMessage:
+			content = m.Content
+		case llm.ToolResultMessage:
+			content = m.Content
+		default:
+			continue
+		}
+		for _, block := range content {
+			if _, ok := block.(llm.ImageContent); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// modelLikelySupportsImages 用已知无视觉模型名单；不确定时放行让上游裁决。
+func modelLikelySupportsImages(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return true
+	}
+	// 与 GetCascadeModelConfigs.supports_images=false 的常见 uid 对齐。
+	noVisionPrefixes := []string{
+		"glm-5-2", "glm-5", "glm-4.7", "glm-4-7", "glm-4",
+		"deepseek", "kimi-k2", "qwen3-coder",
+	}
+	for _, p := range noVisionPrefixes {
+		if m == p || strings.HasPrefix(m, p+"-") || strings.HasPrefix(m, p+"_") {
+			return false
+		}
+	}
+	if strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3-mini") || strings.HasPrefix(m, "o4-mini") {
+		return false
+	}
+	return true
+}
+
+// connectError 提取 Connect 错误的 code + message，原样返回给 HTTP 客户端。
+func connectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var connectErr *connect.Error
+	if errors.As(err, &connectErr) {
+		msg := strings.TrimSpace(connectErr.Message())
+		if msg == "" {
+			msg = connectErr.Error()
+		}
+		return fmt.Errorf("%s: %s", connectErr.Code(), msg)
+	}
+	return err
+}
+
+// ListModels 通过 GetCascadeModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
+func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
+	a.modelsMu.RLock()
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		cached := a.models
+		a.modelsMu.RUnlock()
+		return cached, nil
+	}
+	a.modelsMu.RUnlock()
+
+	resp, err := a.apiClient.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
+		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{
+			ApiKey:           proto.String(a.config.Token),
+			ExtensionName:    proto.String(clientName),
+			ExtensionVersion: proto.String(clientVersion),
+			IdeName:          proto.String(clientName),
+			IdeVersion:       proto.String(clientVersion),
+			Locale:           proto.String("en"),
+			Os:               proto.String("win"),
+		},
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("Devin GetCascadeModelConfigs: %w", err)
+	}
+	now := time.Now().Unix()
+	models := make([]adapter.ModelInfo, 0, len(resp.Msg.GetClientModelConfigs()))
+	seen := make(map[string]struct{}, len(resp.Msg.GetClientModelConfigs()))
+	for _, c := range resp.Msg.GetClientModelConfigs() {
+		if c.GetDisabled() {
+			continue
+		}
+		uid := c.GetModelUid()
+		if uid == "" && c.GetModelOrAlias() != nil {
+			uid = c.GetModelOrAlias().GetModelUid()
+		}
+		if uid == "" {
+			continue
+		}
+		if _, ok := seen[uid]; ok {
+			continue
+		}
+		seen[uid] = struct{}{}
+		ownedBy := "devin"
+		if p := c.GetProvider().String(); p != "" {
+			if i := strings.LastIndex(p, "_"); i >= 0 && i+1 < len(p) {
+				ownedBy = strings.ToLower(p[i+1:])
+			}
+		}
+		models = append(models, adapter.ModelInfo{
+			ID: uid, Created: now, OwnedBy: ownedBy, SupportsImages: c.GetSupportsImages(),
+		})
+	}
+	// 用户显式配置的 model（如 gpt5.6）即使不在 Devin 返回的列表中，也应可被发现和调用。
+	if configured := strings.TrimSpace(a.config.Model); configured != "" {
+		if _, ok := seen[configured]; !ok {
+			models = append(models, adapter.ModelInfo{
+				ID: configured, Created: now, OwnedBy: "devin",
+				// 配置模型无法从 Devin 获取图片能力，默认按支持图片处理更友好。
+				SupportsImages: true,
+			})
+		}
+	}
+
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	// 请求期间可能有其他请求已写入缓存，避免覆盖更热的数据。
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		return a.models, nil
+	}
+	a.models = models
+	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
+	return models, nil
 }
 
 type authTransport struct {
@@ -133,8 +317,18 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
 		ExecutionId: proto.String(executionID),
 	}
+	// Devin/Cascade 只可靠接受「当前轮」图片；历史图进 Images 会 invalid_argument。
+	// 当前轮 = 最后一条 AssistantMessage 之后的所有 user/tool 消息。
+	// Anthropic 客户端常把 image 和 tool_result 放在同一条 user 消息里，
+	// 解码后拆成 UserMessage + ToolResultMessage 两条；仅挂最后一条会丢失图片。
+	lastAssistantIndex := -1
 	for index, message := range request.Messages {
-		converted, err := convertMessage(message)
+		if _, ok := message.(llm.AssistantMessage); ok {
+			lastAssistantIndex = index
+		}
+	}
+	for index, message := range request.Messages {
+		converted, err := convertMessage(message, index > lastAssistantIndex)
 		if err != nil {
 			return nil, fmt.Errorf("message %d: %w", index, err)
 		}
@@ -150,12 +344,15 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	return result, nil
 }
 
-func convertMessage(message llm.Message) ([]*devinproto.ExaChatPb_ChatMessagePrompt, error) {
+// convertMessage 将中间消息转为 Devin ChatMessagePrompt。
+// attachImages 为 true 时才把 ImageContent 写入 Images（仅最新用户轮）；历史图改成文本占位。
+func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaChatPb_ChatMessagePrompt, error) {
 	switch message := message.(type) {
 	case llm.UserMessage:
-		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content)}, nil
+		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content, attachImages)}, nil
 	case llm.AssistantMessage:
-		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM, message.Content)
+		// 助手历史不回传图片；若有意外 ImageContent 同样占位。
+		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM, message.Content, false)
 		for _, block := range message.Content {
 			if call, ok := block.(llm.ToolCall); ok {
 				prompt.ToolCalls = append(prompt.ToolCalls, &devinproto.ExaCodeiumCommonPb_ChatToolCall{
@@ -167,7 +364,7 @@ func convertMessage(message llm.Message) ([]*devinproto.ExaChatPb_ChatMessagePro
 		}
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
 	case llm.ToolResultMessage:
-		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content)
+		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content, attachImages)
 		prompt.ToolCallId = proto.String(message.ToolCallID)
 		prompt.ToolResultIsError = proto.Bool(message.IsError)
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
@@ -176,7 +373,7 @@ func convertMessage(message llm.Message) ([]*devinproto.ExaChatPb_ChatMessagePro
 	}
 }
 
-func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content) *devinproto.ExaChatPb_ChatMessagePrompt {
+func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool) *devinproto.ExaChatPb_ChatMessagePrompt {
 	prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randomID()),
 		Source:    source.Enum(),
@@ -193,8 +390,28 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 			}
 			prompt.ThinkingRedacted = proto.Bool(block.Redacted)
 		case llm.ImageContent:
+			if !attachImages {
+				// 与 WindsurfAPI 一致：历史图不进 Images，避免上游 invalid_argument。
+				if text.Len() > 0 {
+					text.WriteByte('\n')
+				}
+				text.WriteString("[Image omitted from history]")
+				continue
+			}
+			// Devin/Windsurf ImageData：纯 base64（无 data: 前缀）+ mime_type。
+			data := block.Data
+			if strings.HasPrefix(data, "data:") {
+				if _, encoded, ok := strings.Cut(data, ","); ok {
+					data = encoded
+				}
+			}
+			mimeType := block.MIMEType
+			if mimeType == "" {
+				mimeType = "image/png"
+			}
 			prompt.Images = append(prompt.Images, &devinproto.ExaCodeiumCommonPb_ImageData{
-				Base64Data: proto.String(block.Data), MimeType: proto.String(block.MIMEType),
+				Base64Data: proto.String(data),
+				MimeType:   proto.String(mimeType),
 			})
 		}
 	}

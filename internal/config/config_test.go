@@ -48,6 +48,21 @@ func TestLoadDisablesDebugLoggingByDefault(t *testing.T) {
 	}
 }
 
+// TestLoadParsesAuthAPIKey 验证可选的 API Key 可从配置中读取。
+func TestLoadParsesAuthAPIKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  listen: ':9090'\nauth:\n  api_key: 'my-secret-key'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth.APIKey != "my-secret-key" {
+		t.Fatalf("Auth.APIKey = %q, want my-secret-key", config.Auth.APIKey)
+	}
+}
+
 // TestLoadEnablesDebugLoggingExplicitly 的测试动机是保留排查协议问题时主动开启日志的能力。
 func TestLoadEnablesDebugLoggingExplicitly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")

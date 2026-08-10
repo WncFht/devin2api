@@ -58,7 +58,7 @@ curl http://localhost:8080/healthz
 
 ## Usage
 
-> **Note**: this service does **not** enforce authentication yet — `/v1/responses` accepts any API key (even an arbitrary one) and does not validate it. Only expose it to trusted networks until auth is added.
+> **Note**: `/v1/*` endpoints support optional API key authentication. Set `auth.api_key` in `config.yaml` to require clients to send `Authorization: Bearer <api_key>` or `X-Api-Key: <api_key>`. If left empty, the endpoints remain open (only expose them to trusted networks).
 
 Call `http://localhost:8080/v1/responses` with your OpenAI Responses API client.
 
@@ -98,6 +98,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `devin.token` | Devin session token (`devin-session-token$...`) | No — endpoint returns 503 until set |
 | `devin.model` | Devin chat model UID (e.g. `glm-5-2`) | Yes, once `devin.token` is set (no default in code) |
 | `debug.enabled` | Write per-request debug logs under `logs/` next to the config file | No |
+| `auth.api_key` | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | No |
 
 ```yaml
 server:
@@ -110,6 +111,10 @@ devin:
 
 debug:
   enabled: false
+
+auth:
+  # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.
+  api_key: ""
 ```
 
 Notes:

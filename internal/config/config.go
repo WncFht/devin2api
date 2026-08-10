@@ -19,12 +19,18 @@ type Config struct {
 	Devin DevinConfig `yaml:"devin"`
 	// Debug 保存仅用于本地诊断的日志配置。
 	Debug DebugConfig `yaml:"debug"`
+	// Dashboard 保存管理面板配置。
+	Dashboard DashboardConfig `yaml:"dashboard"`
+	// Auth 保存对外 OpenAI 兼容接口的访问控制配置。
+	Auth AuthConfig `yaml:"auth"`
 }
 
 // ServerConfig 保存 HTTP 服务监听配置。
 type ServerConfig struct {
 	// Listen 是 HTTP 服务监听地址。
 	Listen string `yaml:"listen"`
+	// MaxConcurrency 是同时处理的 /v1/* 请求数上限；0 表示使用默认值。
+	MaxConcurrency int `yaml:"max_concurrency"`
 }
 
 // DevinConfig 保存 Devin Connect 上游调用配置。
@@ -35,12 +41,30 @@ type DevinConfig struct {
 	Token string `yaml:"token"`
 	// Model 是 Devin chat model UID。
 	Model string `yaml:"model"`
+	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
+	Proxy string `yaml:"proxy"`
+	// ForceHTTP1 为 true 时强制使用 HTTP/1.1，每请求独立 TCP 连接，
+	// 避免 HTTP/2 单连接多 stream 复用导致的上游并发瓶颈（首字延迟飙升/卡住）。
+	// 行为对齐 Devin 客户端多窗口各自独立连接的模式。默认 true。
+	ForceHTTP1 *bool `yaml:"force_http1"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
 type DebugConfig struct {
 	// Enabled 表示是否在配置文件同目录的 logs 下写入请求调试日志。
 	Enabled bool `yaml:"enabled"`
+}
+
+// DashboardConfig 保存管理面板配置。
+type DashboardConfig struct {
+	// Password 是面板访问密码；为空则不要求登录，直接进入面板。
+	Password string `yaml:"password"`
+}
+
+// AuthConfig 保存对外 OpenAI 兼容接口的访问控制配置。
+type AuthConfig struct {
+	// APIKey 是客户端访问 /v1/* 接口所需的密钥；为空时不启用鉴权。
+	APIKey string `yaml:"api_key"`
 }
 
 // Load 从 YAML 文件读取并校验配置。
@@ -63,10 +87,18 @@ func Load(path string) (Config, error) {
 	return config, nil
 }
 
-// Validate 检查配置中的必填项。
-func (config Config) Validate() error {
+// Validate 检查配置中的必填项，并设置默认值。
+func (config *Config) Validate() error {
 	if config.Server.Listen == "" {
 		return errors.New("server.listen is required")
+	}
+	if config.Server.MaxConcurrency <= 0 {
+		config.Server.MaxConcurrency = 1024
+	}
+	// ForceHTTP1 默认开启：HTTP/2 单连接多 stream 复用是并发首字延迟飙升的根因。
+	if config.Devin.ForceHTTP1 == nil {
+		force := true
+		config.Devin.ForceHTTP1 = &force
 	}
 	return nil
 }
