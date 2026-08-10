@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/leookun/devin-2api/internal/adapter"
+	"github.com/leookun/devin-2api/internal/api/common"
 	"github.com/leookun/devin-2api/internal/config"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
@@ -307,8 +308,22 @@ func (application *App) createCompletion(
 		return
 	}
 	if options.Stream {
+		firstEvent, err := receiveEvent(ctx, stream, recorder)
+		if err == nil && firstEvent.Type == llm.ResponseEventError {
+			if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
+				err = errors.New(firstEvent.Error.ErrorMessage)
+			} else {
+				err = errors.New("response stream returned an error event immediately")
+			}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			completion.StatusCode = mapProviderErrorStatus(err)
+			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, err)
+			return
+		}
+
 		completion.StatusCode = http.StatusOK
-		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, messages.Model, options)
+		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, messages.Model, options, firstEvent, err)
 		updateCompletionIdentity(&completion, message)
 		if streamErr != nil {
 			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
@@ -354,6 +369,8 @@ func writeProtocolStream(
 	protocol protocolEncoder,
 	model string,
 	options protocolOptions,
+	firstEvent llm.ResponseEvent,
+	firstErr error,
 ) (*llm.AssistantMessage, error) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
@@ -364,8 +381,8 @@ func writeProtocolStream(
 	writer.Header().Set("Connection", "keep-alive")
 	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
+	event, err := firstEvent, firstErr
 	for {
-		event, err := receiveEvent(ctx, stream, recorder)
 		if errors.Is(err, io.EOF) {
 			return latest, nil
 		}
@@ -373,13 +390,13 @@ func writeProtocolStream(
 			return latest, err
 		}
 		latest = eventMessage(event, latest)
-		encodedEvents, err := encoder.Encode(event)
-		if err != nil {
-			return latest, err
+		encodedEvents, encodeErr := encoder.Encode(event)
+		if encodeErr != nil {
+			return latest, encodeErr
 		}
 		for _, encoded := range encodedEvents {
-			if _, err := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); err != nil {
-				return latest, err
+			if _, wErr := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
+				return latest, wErr
 			}
 			if encoded.Name == "[DONE]" {
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
@@ -395,6 +412,7 @@ func writeProtocolStream(
 			}
 			return latest, errors.New("response stream returned an error event")
 		}
+		event, err = receiveEvent(ctx, stream, recorder)
 	}
 }
 
@@ -479,7 +497,7 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, stage string, status int, err error) {
 	recorder.WriteError(stage, err)
 	message := err.Error()
-	errorType := "server_error"
+	errorType := common.OpenAIErrorType(message)
 	// 客户端可修正的错误用 invalid_request_error，便于 IDE 直接展示。
 	if status == http.StatusBadRequest ||
 		strings.Contains(message, "does not support image") ||

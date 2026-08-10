@@ -182,7 +182,10 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 // TestResponsesHandlerMarksStreamError 的测试动机是避免已输出失败 SSE 的请求被误记为成功。
 func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "upstream failed"}
-	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed}}}
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart},
+		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
+	}}
 	root := filepath.Join(t.TempDir(), "logs")
 	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
