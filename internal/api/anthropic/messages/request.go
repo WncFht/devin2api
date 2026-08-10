@@ -62,7 +62,6 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	Model           string
 	Stream          bool
 	MaxOutputTokens int
 	Temperature     *float64
@@ -109,7 +108,6 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Model:           request.Model,
 			Stream:          request.Stream,
 			MaxOutputTokens: request.MaxTokens,
 			Temperature:     request.Temperature,

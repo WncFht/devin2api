@@ -296,7 +296,7 @@ func (application *App) createCompletion(
 		writeLoggedError(writer, recorder, "http_decode", completion.StatusCode, err)
 		return
 	}
-	completion.Model = options.Model
+	completion.Model = messages.Model
 	completion.Stream = options.Stream
 	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 	ctx := debuglog.WithRecorder(request.Context(), recorder)
@@ -308,7 +308,7 @@ func (application *App) createCompletion(
 	}
 	if options.Stream {
 		completion.StatusCode = http.StatusOK
-		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, options)
+		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, messages.Model, options)
 		updateCompletionIdentity(&completion, message)
 		if streamErr != nil {
 			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
@@ -352,6 +352,7 @@ func writeProtocolStream(
 	stream llm.ResponseStream,
 	recorder *debuglog.Recorder,
 	protocol protocolEncoder,
+	model string,
 	options protocolOptions,
 ) (*llm.AssistantMessage, error) {
 	flusher, ok := writer.(http.Flusher)
@@ -361,7 +362,7 @@ func writeProtocolStream(
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	encoder := protocol.NewStreamEncoder(options.Model, options.IncludeUsage)
+	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
 	for {
 		event, err := receiveEvent(ctx, stream, recorder)

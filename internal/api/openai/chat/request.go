@@ -14,18 +14,18 @@ import (
 
 // Request 是 OpenAI Chat Completions 请求中本适配器支持的字段集合。
 type Request struct {
-	Model            string          `json:"model"`
-	Messages         []Message       `json:"messages"`
-	Tools            []Tool          `json:"tools,omitempty"`
-	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
-	Stream           bool            `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions  `json:"stream_options,omitempty"`
-	MaxTokens        *int            `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int         `json:"max_completion_tokens,omitempty"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"top_p,omitempty"`
-	Stop             json.RawMessage `json:"stop,omitempty"`
-	ResponseFormat   json.RawMessage `json:"response_format,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []Message       `json:"messages"`
+	Tools               []Tool          `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Stream              bool            `json:"stream,omitempty"`
+	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
+	MaxTokens           *int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
 }
 
 // Message 是 Chat Completions 消息条目。
@@ -39,9 +39,9 @@ type Message struct {
 
 // ToolCall 是助手消息中的工具调用（也用于流式增量）。
 type ToolCall struct {
-	ID       string          `json:"id"`
-	Type     string          `json:"type"`
-	Function FunctionCall    `json:"function"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function FunctionCall `json:"function"`
 }
 
 // FunctionCall 是工具调用的函数部分。
@@ -52,8 +52,8 @@ type FunctionCall struct {
 
 // Tool 是 OpenAI Chat function 工具定义。
 type Tool struct {
-	Type     string          `json:"type"`
-	Function FunctionTool    `json:"function"`
+	Type     string       `json:"type"`
+	Function FunctionTool `json:"function"`
 }
 
 // FunctionTool 是 function 工具详情。
@@ -76,11 +76,10 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	Model            string
-	Stream           bool
-	IncludeUsage     bool
-	MaxOutputTokens  *int
-	Temperature      *float64
+	Stream          bool
+	IncludeUsage    bool
+	MaxOutputTokens *int
+	Temperature     *float64
 }
 
 // DecodeRequest 将 OpenAI Chat Completions JSON 请求转换为中间请求。
@@ -126,7 +125,6 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Model:           request.Model,
 			Stream:          request.Stream,
 			IncludeUsage:    request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
 			MaxOutputTokens: maxTokens,

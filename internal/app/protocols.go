@@ -33,7 +33,6 @@ type eventWire struct {
 
 // protocolOptions 保存三个协议都需要的生成控制选项。
 type protocolOptions struct {
-	Model        string
 	Stream       bool
 	IncludeUsage bool
 }
@@ -138,7 +137,6 @@ func decodeResponsesRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
 	return adapted.Context, protocolOptions{
-		Model:        adapted.Options.Model,
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: false,
 	}, nil
@@ -150,7 +148,6 @@ func decodeChatRequest(data []byte) (llm.RequestMessages, protocolOptions, error
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
 	return adapted.Context, protocolOptions{
-		Model:        adapted.Options.Model,
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: adapted.Options.IncludeUsage,
 	}, nil
@@ -162,7 +159,6 @@ func decodeAnthropicRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
 	return adapted.Context, protocolOptions{
-		Model:        adapted.Options.Model,
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: false,
 	}, nil

@@ -28,8 +28,8 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Options.Model != "claude-test" {
-		t.Fatalf("Model = %q, want claude-test", request.Options.Model)
+	if request.Context.Model != "claude-test" {
+		t.Fatalf("Model = %q, want claude-test", request.Context.Model)
 	}
 	if request.Options.MaxOutputTokens != 256 {
 		t.Fatalf("MaxOutputTokens = %d, want 256", request.Options.MaxOutputTokens)

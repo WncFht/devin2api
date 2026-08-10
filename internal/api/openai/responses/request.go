@@ -56,8 +56,6 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	// Model 是上游模型标识。
-	Model string
 	// Stream 表示调用方是否请求流式响应。
 	Stream bool
 	// MaxOutputTokens 是可选的输出 token 上限。
@@ -103,7 +101,6 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Model:              request.Model,
 			Stream:             request.Stream,
 			MaxOutputTokens:    request.MaxOutputTokens,
 			Temperature:        request.Temperature,

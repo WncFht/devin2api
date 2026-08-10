@@ -195,8 +195,11 @@ try{return new Date(n*1000).toLocaleString()}catch(e){return String(v)}
 function bar(label,percent){
 const p=Number(percent);
 if(!Number.isFinite(p)) return '';
+if(p<=0){
+return '<div style="margin-top:12px"><div class="label" style="font-size:12px;color:#888;margin-bottom:4px">'+esc(label)+': 已用尽</div><div class="progress-bar"><div class="progress-fill" style="width:100%;background:#f87171"></div></div></div>';
+}
 const color=p>50?'#4ade80':p>20?'#fbbf24':'#f87171';
-return '<div style="margin-top:12px"><div class="label" style="font-size:12px;color:#888;margin-bottom:4px">'+esc(label)+': '+p+'%</div><div class="progress-bar"><div class="progress-fill" style="width:'+Math.max(0,Math.min(100,p))+'%;background:'+color+'"></div></div></div>';
+return '<div style="margin-top:12px"><div class="label" style="font-size:12px;color:#888;margin-bottom:4px">'+esc(label)+': '+p+'%</div><div class="progress-bar"><div class="progress-fill" style="width:'+Math.min(100,p)+'%;background:'+color+'"></div></div></div>';
 }
 
 async function loadStatus(){

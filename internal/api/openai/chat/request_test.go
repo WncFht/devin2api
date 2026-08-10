@@ -29,8 +29,8 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Options.Model != "gpt-test" {
-		t.Fatalf("Model = %q, want gpt-test", request.Options.Model)
+	if request.Context.Model != "gpt-test" {
+		t.Fatalf("Model = %q, want gpt-test", request.Context.Model)
 	}
 	if request.Context.SystemPrompt != "你是一个谨慎的助手。" {
 		t.Fatalf("SystemPrompt = %q", request.Context.SystemPrompt)
