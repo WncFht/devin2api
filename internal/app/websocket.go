@@ -46,7 +46,7 @@ func newWSResponseWriter(conn *websocket.Conn) *wsResponseWriter {
 	}
 }
 
-func (w *wsResponseWriter) Header() http.Header       { return w.header }
+func (w *wsResponseWriter) Header() http.Header        { return w.header }
 func (w *wsResponseWriter) WriteHeader(statusCode int) { w.statusCode = statusCode }
 
 func (w *wsResponseWriter) Write(p []byte) (int, error) {

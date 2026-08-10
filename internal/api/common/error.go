@@ -6,7 +6,7 @@ import "strings"
 // openAIErrorTypes 把 Connect code 映射为 OpenAI 兼容的错误对象 type。
 // 参考：https://platform.openai.com/docs/guides/error-codes
 var openAIErrorTypes = map[string]string{
-	"invalid_argument":  "invalid_request_error",
+	"invalid_argument":    "invalid_request_error",
 	"failed_precondition": "invalid_request_error",
 	"out_of_range":        "invalid_request_error",
 	"unimplemented":       "invalid_request_error",
@@ -23,7 +23,7 @@ var openAIErrorTypes = map[string]string{
 // anthropicErrorTypes 把 Connect code 映射为 Anthropic 兼容的错误对象 type。
 // 参考：https://platform.claude.com/docs/en/api/errors
 var anthropicErrorTypes = map[string]string{
-	"invalid_argument":  "invalid_request_error",
+	"invalid_argument":    "invalid_request_error",
 	"failed_precondition": "invalid_request_error",
 	"out_of_range":        "invalid_request_error",
 	"unimplemented":       "invalid_request_error",
