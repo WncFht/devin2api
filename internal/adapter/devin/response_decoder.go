@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/llm"
 	devinproto "local/devinproto"
+
+	"github.com/leookun/devin-2api/internal/llm"
 )
 
 // responseDecoder 保存一次 Devin 请求内的响应累计状态和内容映射。
@@ -321,12 +322,14 @@ func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 
 func mapStopReason(reason devinproto.ExaCodeiumCommonPb_StopReason) llm.StopReason {
 	switch reason {
-	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS:
+	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_INCOMPLETE,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL:
+		// INCOMPLETE/PARTIAL 都表示模型没有生成完整回复，按长度截断处理。
 		return llm.StopReasonLength
 	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL:
 		return llm.StopReasonToolUse
-	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR,
-		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL:
+	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR:
 		return llm.StopReasonError
 	default:
 		return llm.StopReasonStop

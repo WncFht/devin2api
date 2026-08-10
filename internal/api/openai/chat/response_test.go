@@ -151,3 +151,35 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 		t.Fatal("encoding after error should fail")
 	}
 }
+
+// TestStreamEncoderEmitsThinkingAsContent 验证 OpenAI Chat 流式下思考被当作普通文本输出。
+func TestStreamEncoderEmitsThinkingAsContent(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test", false)
+	thinking := llm.ThinkingContent{Thinking: "think"}
+	text := llm.TextContent{Text: "hello"}
+	partial := &llm.AssistantMessage{Content: []llm.Content{thinking, text}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: []llm.Content{thinking, text}, StopReason: llm.StopReasonStop}
+	events := []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "think", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "think", Partial: partial},
+		{Type: llm.ResponseEventTextStart, ContentIndex: 1, Partial: partial},
+		{Type: llm.ResponseEventTextDelta, ContentIndex: 1, Delta: "hello", Partial: partial},
+		{Type: llm.ResponseEventTextEnd, ContentIndex: 1, Content: "hello", Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	}
+	encoded := encodeStreamEvents(t, encoder, events)
+	// role, "think", "hello", finish, [DONE]
+	if len(encoded) != 5 {
+		t.Fatalf("event count = %d, want 5", len(encoded))
+	}
+	second := decodeEventData(t, encoded[1])
+	if second["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"] != "think" {
+		t.Fatalf("second chunk should be thinking as content: %v", second)
+	}
+	third := decodeEventData(t, encoded[2])
+	if third["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"] != "hello" {
+		t.Fatalf("third chunk should be text content: %v", third)
+	}
+}

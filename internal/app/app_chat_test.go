@@ -98,3 +98,42 @@ func TestChatCompletionsHandlerStreamError(t *testing.T) {
 		t.Fatalf("error stream should not contain [DONE]: %s", body)
 	}
 }
+
+// TestChatCompletionsHandlerStreamsThinking 验证 chat 流式下思考被当作普通文本输出。
+func TestChatCompletionsHandlerStreamsThinking(t *testing.T) {
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "think"}, llm.TextContent{Text: "hello"}},
+		StopReason: llm.StopReasonPending,
+	}
+	final := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "think"}, llm.TextContent{Text: "hello"}},
+		StopReason: llm.StopReasonStop,
+	}
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "think", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "think", Partial: partial},
+		{Type: llm.ResponseEventTextStart, ContentIndex: 1, Partial: partial},
+		{Type: llm.ResponseEventTextDelta, ContentIndex: 1, Delta: "hello", Partial: partial},
+		{Type: llm.ResponseEventTextEnd, ContentIndex: 1, Content: "hello", Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"content":"think"`) {
+		t.Fatalf("body missing thinking content: %s", body)
+	}
+	if !strings.Contains(body, `"content":"hello"`) {
+		t.Fatalf("body missing text content: %s", body)
+	}
+}

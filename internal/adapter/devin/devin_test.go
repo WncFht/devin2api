@@ -437,12 +437,33 @@ func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderCompletesPartialWithThinking 验证 STOP_REASON_PARTIAL 不吞掉已生成的思考/文本。
+func TestResponseDecoderCompletesPartialWithThinking(t *testing.T) {
+	decoder := newResponseDecoder("model")
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello"), StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL.Enum()})
+	events := decoder.finish(nil)
+	done := events[len(events)-1]
+	if done.Type != llm.ResponseEventDone || done.Reason != llm.StopReasonLength || done.Message == nil {
+		t.Fatalf("done event = %#v, want done with length", done)
+	}
+	if done.Message.Content[0].(llm.ThinkingContent).Thinking != "think" {
+		t.Fatalf("thinking missing or wrong: %#v", done.Message.Content)
+	}
+	if done.Message.Content[1].(llm.TextContent).Text != "hello" {
+		t.Fatalf("text missing or wrong: %#v", done.Message.Content)
+	}
+}
+
 func TestMapStopReason(t *testing.T) {
 	cases := []struct {
 		input devinproto.ExaCodeiumCommonPb_StopReason
 		want  llm.StopReason
 	}{
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS, llm.StopReasonLength},
+		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_INCOMPLETE, llm.StopReasonLength},
+		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL, llm.StopReasonLength},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL, llm.StopReasonToolUse},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR, llm.StopReasonError},
 		{devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN, llm.StopReasonStop},
