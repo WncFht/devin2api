@@ -99,7 +99,7 @@ func TestChatCompletionsHandlerStreamError(t *testing.T) {
 	}
 }
 
-// TestChatCompletionsHandlerStreamsThinking 验证 chat 流式下思考被当作普通文本输出。
+// TestChatCompletionsHandlerStreamsThinking 验证 chat 流式下思考走 reasoning_content、正文走 content。
 func TestChatCompletionsHandlerStreamsThinking(t *testing.T) {
 	partial := &llm.AssistantMessage{
 		Content:    []llm.Content{llm.ThinkingContent{Thinking: "think"}, llm.TextContent{Text: "hello"}},
