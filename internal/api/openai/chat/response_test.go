@@ -112,3 +112,42 @@ func decodeEventData(t *testing.T, event SSEEvent) map[string]any {
 	}
 	return data
 }
+
+// TestStreamEncoderEmitsError 验证流式错误生成带 error 字段的 chat.completion.chunk。
+func TestStreamEncoderEmitsError(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test", false)
+	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "resource_exhausted: rate limit exceeded"}
+	event := llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed}
+	encoded, err := encoder.Encode(event)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	if len(encoded) != 1 {
+		t.Fatalf("event count = %d, want 1", len(encoded))
+	}
+	if encoded[0].Name != "" {
+		t.Fatalf("error chunk should be data-only, got event name %q", encoded[0].Name)
+	}
+	data := decodeEventData(t, encoded[0])
+	if data["object"] != "chat.completion.chunk" {
+		t.Fatalf("object = %v", data["object"])
+	}
+	choices, ok := data["choices"].([]any)
+	if !ok || len(choices) != 0 {
+		t.Fatalf("choices should be empty, got %v", data["choices"])
+	}
+	errObj, ok := data["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error object: %v", data)
+	}
+	if errObj["message"] != "resource_exhausted: rate limit exceeded" {
+		t.Fatalf("error.message = %v", errObj["message"])
+	}
+	if errObj["type"] != "rate_limit_error" {
+		t.Fatalf("error.type = %v, want rate_limit_error", errObj["type"])
+	}
+	// 错误后再次编码应因流已结束而失败。
+	if _, err := encoder.Encode(event); err == nil {
+		t.Fatal("encoding after error should fail")
+	}
+}

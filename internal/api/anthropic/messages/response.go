@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/leookun/devin-2api/internal/api/common"
 	"github.com/leookun/devin-2api/internal/llm"
 )
 
@@ -106,7 +107,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventDone:
 		return encoder.finish(event), nil
 	case llm.ResponseEventError:
-		return nil, errors.New("anthropic message stream returned an error event")
+		return encoder.failed(event), nil
 	default:
 		return nil, fmt.Errorf("unsupported response event type %q", event.Type)
 	}
@@ -285,6 +286,24 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 		encoder.event("message_stop", map[string]any{"type": "message_stop"}),
 	}
 	return events
+}
+
+func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
+	encoder.finished = true
+	message := "anthropic message stream failed"
+	if event.Error != nil && event.Error.ErrorMessage != "" {
+		message = event.Error.ErrorMessage
+	}
+	// Anthropic 官方流式错误格式：
+	// event: error
+	// data: {"type":"error","error":{"type":"...","message":"..."}}
+	return []SSEEvent{encoder.event("error", map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    common.AnthropicErrorType(message),
+			"message": message,
+		},
+	})}
 }
 
 func (encoder *StreamEncoder) block(index int, kind string) *contentBlockState {

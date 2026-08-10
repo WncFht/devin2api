@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/leookun/devin-2api/internal/api/common"
 	"github.com/leookun/devin-2api/internal/llm"
 )
 
@@ -118,7 +119,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventDone:
 		return encoder.finish(event), nil
 	case llm.ResponseEventError:
-		return nil, errors.New("chat completion stream returned an error event")
+		return encoder.failed(event), nil
 	default:
 		return nil, fmt.Errorf("unsupported response event type %q", event.Type)
 	}
@@ -266,6 +267,32 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 	}
 	events = append(events, SSEEvent{Name: "[DONE]", Data: []byte("[DONE]")})
 	return events
+}
+
+func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
+	encoder.finished = true
+	message := "chat completion stream failed"
+	if event.Error != nil && event.Error.ErrorMessage != "" {
+		message = event.Error.ErrorMessage
+	}
+	// OpenAI Chat Completions 流式错误没有官方统一格式。
+	// 这里生成一个带 error 字段的 chat.completion.chunk，
+	// 让 openai-python 等客户端看到 data.error 后抛出异常。
+	data, _ := json.Marshal(map[string]any{
+		"id":      encoder.responseID,
+		"object":  "chat.completion.chunk",
+		"created": encoder.createdAt,
+		"model":   encoder.model,
+		"choices": []any{},
+		"usage":   nil,
+		"error": map[string]any{
+			"message": message,
+			"type":    common.OpenAIErrorType(message),
+			"code":    nil,
+			"param":   nil,
+		},
+	})
+	return []SSEEvent{{Name: "", Data: data}}
 }
 
 func (encoder *StreamEncoder) findTool(id string, contentIndex int) *toolCallState {

@@ -109,3 +109,38 @@ func decodeEventData(t *testing.T, event SSEEvent) map[string]any {
 	}
 	return data
 }
+
+// TestStreamEncoderEmitsError 验证流式错误生成 event: error。
+func TestStreamEncoderEmitsError(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "permission_denied: not allowed"}
+	event := llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed}
+	encoded, err := encoder.Encode(event)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	if len(encoded) != 1 {
+		t.Fatalf("event count = %d, want 1", len(encoded))
+	}
+	if encoded[0].Name != "error" {
+		t.Fatalf("event name = %q, want error", encoded[0].Name)
+	}
+	data := decodeEventData(t, encoded[0])
+	if data["type"] != "error" {
+		t.Fatalf("type = %v", data["type"])
+	}
+	errObj, ok := data["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error object: %v", data)
+	}
+	if errObj["message"] != "permission_denied: not allowed" {
+		t.Fatalf("error.message = %v", errObj["message"])
+	}
+	if errObj["type"] != "permission_error" {
+		t.Fatalf("error.type = %v, want permission_error", errObj["type"])
+	}
+	// 错误后再次编码应因流已结束而失败。
+	if _, err := encoder.Encode(event); err == nil {
+		t.Fatal("encoding after error should fail")
+	}
+}

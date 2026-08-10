@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/leookun/devin-2api/internal/api/common"
 	"github.com/leookun/devin-2api/internal/llm"
 )
 
@@ -352,11 +353,12 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	}
 	// OpenAI Responses API 中，流式失败应发送 response.failed 事件，
 	// 包含 status="failed" 的 response 对象与 error 字段。
+	errorType := common.OpenAIErrorType(message)
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
-	response["error"] = map[string]any{"message": message, "type": "server_error", "code": nil, "param": nil}
+	response["error"] = map[string]any{"message": message, "type": errorType, "code": nil, "param": nil}
 	return []SSEEvent{encoder.emit("response.failed", map[string]any{
 		"response": response,
-		"error":    map[string]any{"message": message, "type": "server_error"},
+		"error":    map[string]any{"message": message, "type": errorType},
 	})}
 }
 

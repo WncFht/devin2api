@@ -389,20 +389,7 @@ func writeProtocolStream(
 			flusher.Flush()
 		}
 		if event.Type == llm.ResponseEventError {
-			// 先把错误编码为 SSE 发送出去，避免客户端看到流直接关闭。
-			// OpenAI Responses 会生成 error 事件；chat/anthropic 编码器目前仍返回错误，不影响行为。
-			errorEvents, _ := encoder.Encode(event)
-			for _, encoded := range errorEvents {
-				if _, werr := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); werr != nil {
-					return latest, werr
-				}
-				if encoded.Name == "[DONE]" {
-					recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
-				} else {
-					recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
-				}
-				flusher.Flush()
-			}
+			// 错误 SSE 已在上面循环写出，这里直接返回错误供外层记录失败日志。
 			if event.Error != nil && event.Error.ErrorMessage != "" {
 				return latest, errors.New(event.Error.ErrorMessage)
 			}

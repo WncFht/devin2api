@@ -44,8 +44,8 @@ func TestChatCompletionsHandlerStreamsSSE(t *testing.T) {
 // TestChatCompletionsHandlerReturnsJSON 验证 chat 非流式返回完整 JSON。
 func TestChatCompletionsHandlerReturnsJSON(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{
-		Type:   llm.ResponseEventDone,
-		Reason: llm.StopReasonStop,
+		Type:    llm.ResponseEventDone,
+		Reason:  llm.StopReasonStop,
 		Message: &llm.AssistantMessage{ResponseID: "chat-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop},
 	}}}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
@@ -61,5 +61,40 @@ func TestChatCompletionsHandlerReturnsJSON(t *testing.T) {
 	}
 	if parsed["object"] != "chat.completion" {
 		t.Fatalf("object = %v, want chat.completion", parsed["object"])
+	}
+}
+
+// TestChatCompletionsHandlerStreamError 验证 chat 流式中途错误返回 error chunk 且不发 [DONE]。
+func TestChatCompletionsHandlerStreamError(t *testing.T) {
+	text := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}, StopReason: llm.StopReasonPending}
+	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "resource_exhausted: rate limit exceeded"}
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventTextStart, ContentIndex: 0, Partial: text},
+		{Type: llm.ResponseEventTextDelta, ContentIndex: 0, Delta: "hello", Partial: text},
+		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
+	}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `data: {`) {
+		t.Fatalf("body missing SSE data: %s", body)
+	}
+	if !strings.Contains(body, `"error"`) {
+		t.Fatalf("body missing error field: %s", body)
+	}
+	if !strings.Contains(body, `"type":"rate_limit_error"`) {
+		t.Fatalf("body missing error type: %s", body)
+	}
+	if strings.Contains(body, `data: [DONE]`) {
+		t.Fatalf("error stream should not contain [DONE]: %s", body)
 	}
 }
