@@ -43,6 +43,10 @@ type DevinConfig struct {
 	Model string `yaml:"model"`
 	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
 	Proxy string `yaml:"proxy"`
+	// ForceHTTP1 为 true 时强制使用 HTTP/1.1，每请求独立 TCP 连接，
+	// 避免 HTTP/2 单连接多 stream 复用导致的上游并发瓶颈（首字延迟飙升/卡住）。
+	// 行为对齐 Devin 客户端多窗口各自独立连接的模式。默认 true。
+	ForceHTTP1 *bool `yaml:"force_http1"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
@@ -90,6 +94,11 @@ func (config *Config) Validate() error {
 	}
 	if config.Server.MaxConcurrency <= 0 {
 		config.Server.MaxConcurrency = 1024
+	}
+	// ForceHTTP1 默认开启：HTTP/2 单连接多 stream 复用是并发首字延迟飙升的根因。
+	if config.Devin.ForceHTTP1 == nil {
+		force := true
+		config.Devin.ForceHTTP1 = &force
 	}
 	return nil
 }

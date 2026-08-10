@@ -39,10 +39,11 @@ func main() {
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
 	if serviceConfig.Devin.Token != "" {
 		configured, createErr := devin.New(devin.Config{
-			BaseURL: serviceConfig.Devin.BaseURL,
-			Token:   serviceConfig.Devin.Token,
-			Model:   serviceConfig.Devin.Model,
-			Proxy:   serviceConfig.Devin.Proxy,
+			BaseURL:    serviceConfig.Devin.BaseURL,
+			Token:      serviceConfig.Devin.Token,
+			Model:      serviceConfig.Devin.Model,
+			Proxy:      serviceConfig.Devin.Proxy,
+			ForceHTTP1: serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
 		})
 		if createErr != nil {
 			log.Fatal(createErr)
@@ -56,7 +57,7 @@ func main() {
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	if serviceConfig.Devin.Token != "" {
-		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy))
+		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1))
 	}
 	server := application.HTTPServer()
 	log.Printf("HTTP server listening on %s", listenURL(server.Addr))

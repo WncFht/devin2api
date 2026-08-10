@@ -56,8 +56,9 @@ type Handler struct {
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
-func New(password, baseURL, token, proxy string) *Handler {
-	base, err := httpproxy.NewTransport(proxy)
+// forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
+func New(password, baseURL, token, proxy string, forceHTTP1 bool) *Handler {
+	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
 	if err != nil {
 		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
 		base = http.DefaultTransport.(*http.Transport).Clone()

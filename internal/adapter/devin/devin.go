@@ -43,6 +43,8 @@ type Config struct {
 	Model string
 	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
 	Proxy string
+	// ForceHTTP1 为 true 时强制 HTTP/1.1，每请求独立连接，避免 HTTP/2 单连接多 stream 并发瓶颈。
+	ForceHTTP1 bool
 }
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
@@ -69,7 +71,7 @@ func New(config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("devin model is required")
 	}
-	base, err := httpproxy.NewTransport(config.Proxy)
+	base, err := httpproxy.NewTransport(config.Proxy, config.ForceHTTP1)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy transport: %w", err)
 	}

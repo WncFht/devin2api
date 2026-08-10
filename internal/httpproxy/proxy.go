@@ -3,6 +3,7 @@ package httpproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,10 +17,12 @@ import (
 // NewTransport 根据 proxyURL 构建 RoundTripper。
 // proxyURL 为空时返回针对高并发优化的 http.DefaultTransport Clone；
 // 走系统环境变量代理时由 DefaultTransport 自行解析。
+// forceHTTP1 为 true 时强制 HTTP/1.1，每请求独立 TCP 连接，
+// 避免 HTTP/2 单连接多 stream 复用导致的上游并发瓶颈。
 // 支持 http://、https://、socks5://、socks5h:// 协议。
-func NewTransport(proxyURL string) (*http.Transport, error) {
+func NewTransport(proxyURL string, forceHTTP1 bool) (*http.Transport, error) {
 	proxyURL = strings.TrimSpace(proxyURL)
-	base := defaultTransport()
+	base := defaultTransport(forceHTTP1)
 	if proxyURL == "" {
 		return base, nil
 	}
@@ -77,7 +80,7 @@ func dialContext(ctx context.Context, dialer interface {
 	return conn, err
 }
 
-func defaultTransport() *http.Transport {
+func defaultTransport(forceHTTP1 bool) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// 提高连接池上限，减少“太多人同时使用”时的连接创建/回收压力。
 	transport.MaxIdleConns = 2000
@@ -91,5 +94,16 @@ func defaultTransport() *http.Transport {
 	transport.ExpectContinueTimeout = 1 * time.Second
 	// 启用压缩，减少上行带宽占用。
 	transport.DisableCompression = false
+	if forceHTTP1 {
+		// 强制 HTTP/1.1：每请求独立 TCP 连接（连接池复用空闲连接），
+		// 避免 HTTP/2 单连接多 stream 复用被上游串行处理导致并发卡住。
+		// 对齐 Devin 客户端多窗口各自独立连接的行为。
+		transport.ForceAttemptHTTP2 = false
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		// ALPN 仅协商 http/1.1，确保不走 HTTP/2。
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
 	return transport
 }
