@@ -165,7 +165,8 @@ func (encoder *StreamEncoder) endText(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent {
 	encoder.thinkingIndex = event.ContentIndex
 	encoder.thinkingStarted = true
-	// OpenAI Chat Completions 没有原生 reasoning 字段，把思考当作普通文本输出。
+	// OpenAI Chat Completions 没有官方 reasoning 字段。
+	// 这里参考 DeepSeek 等厂商的约定，用 choices[0].delta.reasoning_content 输出思考。
 	return nil
 }
 
@@ -179,7 +180,7 @@ func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent 
 	return []SSEEvent{encoder.chunk(map[string]any{
 		"choices": []any{map[string]any{
 			"index":         0,
-			"delta":         map[string]any{"content": event.Delta},
+			"delta":         map[string]any{"reasoning_content": event.Delta},
 			"finish_reason": nil,
 		}},
 	})}
@@ -330,14 +331,15 @@ func (encoder *StreamEncoder) chunk(payload map[string]any) SSEEvent {
 
 func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 	var textParts []string
+	var reasoningParts []string
 	var toolCalls []any
 	for _, block := range message.Content {
 		switch content := block.(type) {
 		case llm.TextContent:
 			textParts = append(textParts, content.Text)
 		case llm.ThinkingContent:
-			// 非流式模式下把思考合并到正文，客户端通常没有 reasoning 字段。
-			textParts = append(textParts, content.Thinking)
+			// 非流式模式下把思考单独放到 reasoning_content，正文只放 text。
+			reasoningParts = append(reasoningParts, content.Thinking)
 		case llm.ToolCall:
 			toolCalls = append(toolCalls, map[string]any{
 				"id":       content.ID,
@@ -349,6 +351,9 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 	messageObj := map[string]any{
 		"role":    "assistant",
 		"content": strings.Join(textParts, ""),
+	}
+	if len(reasoningParts) > 0 {
+		messageObj["reasoning_content"] = strings.Join(reasoningParts, "")
 	}
 	if len(toolCalls) > 0 {
 		messageObj["tool_calls"] = toolCalls

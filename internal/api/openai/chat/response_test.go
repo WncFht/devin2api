@@ -91,6 +91,34 @@ func TestEncodeResponseFinal(t *testing.T) {
 	}
 }
 
+// TestEncodeResponseFinalWithReasoning 验证非流式下 thinking 与 text 分离开。
+func TestEncodeResponseFinalWithReasoning(t *testing.T) {
+	final := &llm.AssistantMessage{
+		ResponseID:    "chatcmpl-2",
+		ResponseModel: "gpt-test",
+		Content: []llm.Content{
+			llm.ThinkingContent{Thinking: "think"},
+			llm.TextContent{Text: "hello"},
+		},
+		StopReason: llm.StopReasonStop,
+	}
+	body, err := EncodeResponse(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	message := parsed["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "hello" {
+		t.Fatalf("content = %v, want hello", message["content"])
+	}
+	if message["reasoning_content"] != "think" {
+		t.Fatalf("reasoning_content = %v, want think", message["reasoning_content"])
+	}
+}
+
 func encodeStreamEvents(t *testing.T, encoder *StreamEncoder, events []llm.ResponseEvent) []SSEEvent {
 	t.Helper()
 	var encoded []SSEEvent
@@ -152,8 +180,8 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 	}
 }
 
-// TestStreamEncoderEmitsThinkingAsContent 验证 OpenAI Chat 流式下思考被当作普通文本输出。
-func TestStreamEncoderEmitsThinkingAsContent(t *testing.T) {
+// TestStreamEncoderEmitsThinkingAsReasoningContent 验证 OpenAI Chat 流式下思考走 reasoning_content、正文走 content。
+func TestStreamEncoderEmitsThinkingAsReasoningContent(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test", false)
 	thinking := llm.ThinkingContent{Thinking: "think"}
 	text := llm.TextContent{Text: "hello"}
@@ -170,13 +198,13 @@ func TestStreamEncoderEmitsThinkingAsContent(t *testing.T) {
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
 	}
 	encoded := encodeStreamEvents(t, encoder, events)
-	// role, "think", "hello", finish, [DONE]
+	// role, reasoning "think", text "hello", finish, [DONE]
 	if len(encoded) != 5 {
 		t.Fatalf("event count = %d, want 5", len(encoded))
 	}
 	second := decodeEventData(t, encoded[1])
-	if second["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"] != "think" {
-		t.Fatalf("second chunk should be thinking as content: %v", second)
+	if second["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["reasoning_content"] != "think" {
+		t.Fatalf("second chunk should be thinking as reasoning_content: %v", second)
 	}
 	third := decodeEventData(t, encoded[2])
 	if third["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"] != "hello" {

@@ -130,8 +130,8 @@ func TestChatCompletionsHandlerStreamsThinking(t *testing.T) {
 		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, `"content":"think"`) {
-		t.Fatalf("body missing thinking content: %s", body)
+	if !strings.Contains(body, `"reasoning_content":"think"`) {
+		t.Fatalf("body missing reasoning_content: %s", body)
 	}
 	if !strings.Contains(body, `"content":"hello"`) {
 		t.Fatalf("body missing text content: %s", body)
