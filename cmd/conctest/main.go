@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -110,5 +109,4 @@ func main() {
 			minFB, sumFB/int64(ok), maxFB, maxFB-minFB)
 	}
 	fmt.Printf("Wall time (all done): %d ms\n", wall)
-	_ = atomic.LoadInt64(&sumFB)
 }
