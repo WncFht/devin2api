@@ -96,7 +96,7 @@ model_context_window = 262144
 base_url = "http://127.0.0.1:49173/v1"
 ```
 
-Codex 走 OpenAI Responses 面(`POST /v1/responses`),ccload 原生转发到 devin-2api。
+Codex 走 OpenAI Responses 面(`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行,不走 tool call,无兼容问题。
 
 ## 共用注意事项
 

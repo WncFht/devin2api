@@ -10,8 +10,8 @@
 | 多轮记忆                       | ✅ `--continue` 回忆 codeword | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅                         |
 | 单工具调用(写+读文件)          | ✅ Write/Read                 | ✅ write/read                    | ✅ write/read                      | ✅                         |
 | 并行工具调用                   | ✅                            | ✅ 同轮读两文件                  | ✅ 同轮读两文件                    | ✅ 2 call + 2 result       |
-| 图像输入                       | — 未测                        | ✅ `@blue.png` 识别颜色          | ✅ `image_in` 读 PNG 识别颜色      | — 未测                     |
-| 并发会话                       | —                             | ✅ pi+kimi 并行                  | ✅                                 | —                          |
+| 图像输入                       | ✅ 识别纯蓝 PNG               | ✅ `@blue.png` 识别颜色          | ✅ `image_in` 读 PNG 识别颜色      | ✅ `exec -i` 识别纯蓝 PNG  |
+| 并发会话                       | ✅ CC+Codex 并行              | ✅ pi+kimi 并行                  | ✅                                 | ✅ CC+Codex 并行           |
 | 多步任务(写文件+bash执行+汇报) | ✅                            | ✅                               | ✅                                 | ✅                         |
 | 流式                           | ✅                            | ✅                               | ✅                                 | ✅                         |
 | 前缀缓存                       | ✅ 后续轮 `cache_read` ~25.5k | ✅ `cache_read` 53k–111k         | ✅ `cache_read` ~17.7k             | ✅                         |
@@ -46,7 +46,7 @@
 ### Codex
 
 - 93KB 真实请求(2 call + 2 result)验证通过
-- `apply_patch` FREEFORM 裸词、reasoning item、`custom`/`web_search` 工具类型上游不认会被静默丢弃——行为偏差已知
+- `apply_patch` 实际走 `exec_command` shell 命令而非 FREEFORM tool call——上游静默丢弃 `custom`/`web_search` 等工具定义的问题被绕过,功能完整
 - 工具调用历史曾触发 `invalid_argument` → 代理已做 call→result 配对重排
 
 ## 已知边界

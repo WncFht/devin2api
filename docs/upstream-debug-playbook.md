@@ -126,7 +126,7 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
   - **settings env 覆盖 shell**：`~/.claude/settings.json` 的 `env` 块优先级高于 shell 环境变量，里面若有 `ANTHROPIC_BASE_URL` 会盖掉导出的值（进程在连别的地址、半天无输出即此症状）。用项目级 `.claude/settings.local.json` 注入 env 最干净。
 - **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
 - **pi**(`@mariozechner/pi-coding-agent`,0.73.x 实测全通):接法 = `~/.pi/agent/models.json` 自定义 provider,`baseUrl` 指 ccload、`api` 用 `anthropic-messages`、`apiKey` 填 ccload token,模型声明 `id:"swe-2-max"` + `contextWindow`/`maxTokens`。**关键特征:pi 的 anthropic-messages provider 会在 system 数组开头塞完整的 Claude Code 指纹提示词**(billing header + "You are Claude Code" 全文),自己真正的系统提示词以 `[System Instructions]` 前缀放进 user 消息——所以 CC 的指纹改写规则自动覆盖 pi,白嫖同一条已打通路径。pi 会发 `thinking:{type:"enabled",budget_tokens:8192}`,上游按需返回 thinking+signature。自带压缩(`contextTokens > contextWindow - reserveTokens`,默认留 16k reserve/20k recent,`/compact` 手动),无需代理侧压缩。
-- **kimi-code**:未实测。`config.toml` `[providers.X]` `type="anthropic"` 或 `"openai"` + `base_url`/`api_key` 可指过来;陌生模型名要在 `[models.X]` 手写 `capabilities` 才有 tool_use。自带压缩。预期风险 = 身份句指纹 + 配对约束。
+- **kimi-code**:零修改直接通(0.42.0 实测)。伪装 CC 请求封套(`claude-cli` UA、`X-Claude-Code-Session-Id`、CC beta 头),`metadata.user_id` 带 device_id JSON 被用作 SessionKey。陌生模型名要在 `[models.X]` 手写 `capabilities` 才有 tool_use。自带压缩。
 - **kimi-cli**:官方已弃用(并入 kimi-code),不建议投入。
 - **通用**:预期风险点 = 身份句指纹 + 工具调用配对约束 + 各自专有字段(先抓真实请求体看有没有非标准块)。
 
