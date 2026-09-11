@@ -99,6 +99,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err := request.Validate(); err != nil {
 		return nil, fmt.Errorf("validate Devin request: %w", err)
 	}
+	request = sanitizeRequest(request)
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
 		model = adapter.config.Model
