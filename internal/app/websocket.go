@@ -136,13 +136,26 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	ctx, cancel := context.WithCancel(request.Context())
 	defer cancel()
 
-	// 监听连接关闭，及时取消上游流。
+	// 监听连接关闭，及时取消上游流。response.create 之后的客户端帧
+	// （response.append 等扩展类型）未实现——显式记录而不是静默吞掉。
 	go func() {
+		seen := make(map[string]bool)
 		for {
-			_, _, err := conn.ReadMessage()
+			_, frame, err := conn.ReadMessage()
 			if err != nil {
 				cancel()
 				return
+			}
+			var probe struct {
+				Type string `json:"type"`
+			}
+			frameType := "<unparseable>"
+			if json.Unmarshal(frame, &probe) == nil && probe.Type != "" {
+				frameType = probe.Type
+			}
+			if !seen[frameType] {
+				seen[frameType] = true
+				log.Printf("websocket: ignoring unsupported client message type %q", frameType)
 			}
 		}
 	}()
