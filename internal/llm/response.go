@@ -155,6 +155,9 @@ const (
 	ResponseEventThinkingStart ResponseEventType = "thinking_start"
 	ResponseEventThinkingDelta ResponseEventType = "thinking_delta"
 	ResponseEventThinkingEnd   ResponseEventType = "thinking_end"
+	// ResponseEventThinkingSignature 是思考块结束后才到达的签名增量
+	//（Devin 上游把签名作为尾随帧发送）。ContentIndex 指向已结束块。
+	ResponseEventThinkingSignature ResponseEventType = "thinking_signature"
 	ResponseEventToolCallStart ResponseEventType = "toolcall_start"
 	ResponseEventToolCallDelta ResponseEventType = "toolcall_delta"
 	ResponseEventToolCallEnd   ResponseEventType = "toolcall_end"
@@ -206,7 +209,7 @@ func (event ResponseEvent) Validate() error {
 			return errors.New("tool call start event requires a tool name")
 		}
 		return nil
-	case ResponseEventTextDelta, ResponseEventThinkingDelta:
+	case ResponseEventTextDelta, ResponseEventThinkingDelta, ResponseEventThinkingSignature:
 		if err := requireIndexedPartial(event); err != nil {
 			return err
 		}

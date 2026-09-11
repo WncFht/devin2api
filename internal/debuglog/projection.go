@@ -26,6 +26,7 @@ func ResponseEventProjection(event llm.ResponseEvent) map[string]any {
 	switch event.Type {
 	case llm.ResponseEventTextStart, llm.ResponseEventTextDelta, llm.ResponseEventTextEnd,
 		llm.ResponseEventThinkingStart, llm.ResponseEventThinkingDelta, llm.ResponseEventThinkingEnd,
+		llm.ResponseEventThinkingSignature,
 		llm.ResponseEventToolCallStart, llm.ResponseEventToolCallDelta, llm.ResponseEventToolCallEnd:
 		result["content_index"] = event.ContentIndex
 	}

@@ -82,7 +82,11 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 	}
 	decoder.updateMetadata(response)
 	events := make([]llm.ResponseEvent, 0, 6)
-	if response.GetDeltaThinking() != "" || response.GetDeltaSignature() != "" || response.GetThinkingRedacted() {
+	// 上游把签名作为全部正文之后的尾随帧发送；思考块已关闭时
+	// 不能新开思考块，要把签名合并回上一个思考块。
+	if response.GetDeltaSignature() != "" && response.GetDeltaThinking() == "" && !decoder.thinkingOpen {
+		events = append(events, decoder.decodeLateSignature(response.GetDeltaSignature())...)
+	} else if response.GetDeltaThinking() != "" || response.GetDeltaSignature() != "" || response.GetThinkingRedacted() {
 		events = append(events, decoder.endText()...)
 		events = append(events, decoder.decodeThinking(response)...)
 	}
@@ -242,6 +246,23 @@ func (decoder *responseDecoder) decodeNativeTool(state *toolState, fragment stri
 		})
 	}
 	return events
+}
+
+// decodeLateSignature 把思考块关闭后才到达的签名帧合并回上一个思考块。
+func (decoder *responseDecoder) decodeLateSignature(signature string) []llm.ResponseEvent {
+	for index := len(decoder.partial.Content) - 1; index >= 0; index-- {
+		thinking, ok := decoder.partial.Content[index].(llm.ThinkingContent)
+		if !ok {
+			continue
+		}
+		thinking.ThinkingSignature += signature
+		decoder.partial.Content[index] = thinking
+		return []llm.ResponseEvent{{
+			Type: llm.ResponseEventThinkingSignature, ContentIndex: index,
+			Delta: signature, Partial: &decoder.partial,
+		}}
+	}
+	return nil
 }
 
 func (decoder *responseDecoder) endThinking() []llm.ResponseEvent {

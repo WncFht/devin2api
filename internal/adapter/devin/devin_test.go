@@ -312,6 +312,26 @@ func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderMergesLateSignature 的测试动机是保证正文之后的
+// 尾随签名帧合并回上一个思考块，而不是落成独立的空思考块。
+func TestResponseDecoderMergesLateSignature(t *testing.T) {
+	decoder := newResponseDecoder("model")
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
+	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
+	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("sig")})
+	if len(events) != 1 || events[0].Type != llm.ResponseEventThinkingSignature {
+		t.Fatalf("late signature events = %#v, want single thinking_signature", events)
+	}
+	if events[0].ContentIndex != 0 || events[0].Delta != "sig" {
+		t.Fatalf("signature event = %#v", events[0])
+	}
+	thinking := events[0].Partial.Content[0].(llm.ThinkingContent)
+	if thinking.Thinking != "think" || thinking.ThinkingSignature != "sig" {
+		t.Fatalf("merged thinking = %#v", thinking)
+	}
+}
+
 // TestResponseDecoderAggregatesToolArgumentFragments 的测试动机是保证事件保留原始增量，同时最终工具调用具有完整参数。
 func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
 	decoder := newResponseDecoder("model")
