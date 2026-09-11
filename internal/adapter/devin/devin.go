@@ -327,11 +327,9 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	if err != nil {
 		return nil, fmt.Errorf("generate Devin device fingerprint: %w", err)
 	}
-	// 上游轨迹缓存按 trajectory/cascade ID 关联：同一会话的连续请求复用
-	// 稳定 ID 可显著提高免费档前缀缓存命中（实测全随机 ~1/6，稳定 ~7/8）。
-	// 优先用调用方 SessionKey（user/prompt_cache_key/metadata.user_id），
-	// 否则退化到「系统提示 + 首条用户消息」的内容哈希 —— 同一会话前缀
-	// 在多轮回放中不变，不同会话天然分散。
+	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
+	// ID，使命中更稳（实测稳定 ~7/8 vs 全随机波动）；缓存匹配本身是
+	// 「账号 + 内容前缀」键控，ID 不参与匹配。
 	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randomUUID()
 	metadata := &devinproto.ExaCodeiumCommonPb_Metadata{
@@ -409,6 +407,7 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	// 它的 TOOL 结果，否则 invalid_argument。客户端历史（OpenAI/Anthropic）是
 	// 「全部调用 → 全部结果」的分组结构，这里按 call id 重排成交错配对。
 	result.ChatMessagePrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
+	result.ChatMessagePrompts = demoteOrphanToolResults(result.ChatMessagePrompts)
 	for _, tool := range request.Tools {
 		converted, err := convertToolDefinition(tool)
 		if err != nil {
@@ -432,28 +431,32 @@ func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
 }
 
 // deriveSessionIDs 为一次请求派生上游 trajectory/cascade ID。
-// 种子 = SessionKey（若有）+ 系统提示头 4KB + 首条消息文本头 1KB，
-// 使同一对话的多轮（历史前缀不变）得到稳定 ID，不同对话自然分散。
+// SessionKey（CC metadata.user_id 内含 session_id、Codex prompt_cache_key
+// 为线程级）本身即会话级标识，直接做种——压缩改写消息内容也不影响轨迹
+// 连续性。无 SessionKey 时退回「系统提示头 4KB + 首条消息文本头 1KB」
+// 内容哈希：同一会话多轮回放前缀不变 → 稳定，不同会话 → 自然分散。
 func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
 	var seed strings.Builder
-	seed.WriteString(request.SessionKey)
-	seed.WriteByte(0)
-	head := request.SystemPrompt
-	if len(head) > 4096 {
-		head = head[:4096]
-	}
-	seed.WriteString(head)
-	for _, message := range request.Messages {
-		text := firstMessageText(message)
-		if text == "" {
-			continue
+	if request.SessionKey != "" {
+		seed.WriteString(request.SessionKey)
+	} else {
+		head := request.SystemPrompt
+		if len(head) > 4096 {
+			head = head[:4096]
 		}
-		if len(text) > 1024 {
-			text = text[:1024]
+		seed.WriteString(head)
+		for _, message := range request.Messages {
+			text := firstMessageText(message)
+			if text == "" {
+				continue
+			}
+			if len(text) > 1024 {
+				text = text[:1024]
+			}
+			seed.WriteByte(0)
+			seed.WriteString(text)
+			break
 		}
-		seed.WriteByte(0)
-		seed.WriteString(text)
-		break
 	}
 	sum := sha256.Sum256([]byte(seed.String()))
 	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
@@ -615,6 +618,37 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 		i = j
 	}
 	return out
+}
+
+// demoteOrphanToolResults 把找不到对应 tool call 的孤立 TOOL 结果
+// （客户端压缩丢掉 function_call 时产生）降级为 USER 文本消息。
+// 上游对无配对的 TOOL prompt 返回 invalid_argument；降级保住结果内容。
+func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) []*devinproto.ExaChatPb_ChatMessagePrompt {
+	callIDs := make(map[string]struct{})
+	for _, prompt := range prompts {
+		for _, call := range prompt.GetToolCalls() {
+			callIDs[call.GetId()] = struct{}{}
+		}
+	}
+	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
+	userSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER
+	for index, prompt := range prompts {
+		if prompt.GetSource() != toolSource {
+			continue
+		}
+		if _, ok := callIDs[prompt.GetToolCallId()]; ok {
+			continue
+		}
+		demoted := &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(randomID()),
+			Source:    userSource.Enum(),
+			Prompt:    proto.String("[tool result, original call lost]\n" + prompt.GetPrompt()),
+		}
+		demoted.PromptCacheOptions = prompt.GetPromptCacheOptions()
+		demoted.Images = prompt.GetImages()
+		prompts[index] = demoted
+	}
+	return prompts
 }
 
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool) *devinproto.ExaChatPb_ChatMessagePrompt {

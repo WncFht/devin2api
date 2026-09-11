@@ -610,24 +610,61 @@ func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
 	}
 }
 
-func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
+// TestDeriveSessionIDSSurvivesCompaction 验证带 SessionKey 的会话在压缩改写
+// 首条消息后仍得到同一 trajectory/cascade ID——SessionKey 即会话契约。
+func TestDeriveSessionIDSSurvivesCompaction(t *testing.T) {
 	makeRequest := func(text string) llm.RequestMessages {
 		return llm.RequestMessages{
 			SystemPrompt: "system",
-			SessionKey:   "user-1",
+			SessionKey:   "session-1",
 			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
 		}
 	}
-	first, err := buildRequest(makeRequest("task A"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	first, err := buildRequest(makeRequest("original first message"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := buildRequest(makeRequest("task B"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	second, err := buildRequest(makeRequest("[summary of compacted history]"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetTrajectoryReference().GetTrajectoryId() != second.GetTrajectoryReference().GetTrajectoryId() ||
+		first.GetCascadeId() != second.GetCascadeId() {
+		t.Fatalf("session IDs must survive compaction for keyed sessions")
+	}
+}
+
+func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
+	makeRequest := func(key, text string) llm.RequestMessages {
+		return llm.RequestMessages{
+			SystemPrompt: "system",
+			SessionKey:   key,
+			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
+		}
+	}
+	cfg := Config{BaseURL: "https://example.com", Token: "token", Model: "model"}
+	first, err := buildRequest(makeRequest("session-1", "task A"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildRequest(makeRequest("session-2", "task A"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.GetTrajectoryReference().GetTrajectoryId() == second.GetTrajectoryReference().GetTrajectoryId() {
-		t.Fatalf("distinct conversations must not share a trajectory")
+		t.Fatalf("distinct session keys must not share a trajectory")
+	}
+	// 无 SessionKey 的客户端退回内容哈希：不同首条消息仍自然分散。
+	third, err := buildRequest(makeRequest("", "task B"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := buildRequest(makeRequest("", "task C"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.GetTrajectoryReference().GetTrajectoryId() == fourth.GetTrajectoryReference().GetTrajectoryId() {
+		t.Fatalf("keyless distinct conversations must not share a trajectory")
 	}
 }
 

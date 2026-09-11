@@ -53,10 +53,11 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有
 1. `buildRequest` 无条件发送 `system_prompt_cache_options` + 末条消息
    `prompt_cache_options`（EPHEMERAL）。免费档下无副作用，付费档可获得
    完整 write→read 计量。
-2. `trajectory_id`/`cascade_id` 由 `deriveSessionIDs` 派生：种子 =
-   `SessionKey`（`user`/`prompt_cache_key`/`metadata.user_id`）+ 系统提示头 4KB +
-   首条消息文本头 1KB。同一会话多轮回放 → 稳定 ID；不同会话 → 自然分散。
-   `execution_id` 与消息 `message_id` 保持每次随机。
+2. `trajectory_id`/`cascade_id` 由 `deriveSessionIDs` 派生：有 `SessionKey`
+   （`user`/`prompt_cache_key`/`metadata.user_id`，三者均为会话级）时直接
+   以它为种——压缩改写消息后轨迹仍然连续；无 key 时退回「系统提示头 4KB +
+   首条消息文本头 1KB」内容哈希。`execution_id` 与消息 `message_id` 保持
+   每次随机。
 3. 上游 cache 计量透传到 `usage.input_tokens_details.cached_tokens` /
    `cache_write_tokens`。
 4. sanitize 改写是确定性的（同输入必同输出），不影响缓存键稳定。
