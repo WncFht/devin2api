@@ -400,6 +400,10 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		}
 		result.ChatMessagePrompts = append(result.ChatMessagePrompts, converted...)
 	}
+	// 上游要求 call→result 紧邻配对：assistant 发出的每个 tool call 必须紧跟
+	// 它的 TOOL 结果，否则 invalid_argument。客户端历史（OpenAI/Anthropic）是
+	// 「全部调用 → 全部结果」的分组结构，这里按 call id 重排成交错配对。
+	result.ChatMessagePrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
 	for _, tool := range request.Tools {
 		converted, err := convertToolDefinition(tool)
 		if err != nil {
@@ -485,26 +489,127 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 	case llm.UserMessage:
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content, attachImages)}, nil
 	case llm.AssistantMessage:
-		// 助手历史不回传图片；若有意外 ImageContent 同样占位。
-		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM, message.Content, false)
+		// Wire 实证（WindsurfAPI）：助手轮 = 可选文本消息 + 每个工具调用各一条
+		// 独立消息。工具调用消息不写 prompt 字段（字段 3 缺席而非空串）；
+		// thinking(#11) 出现在每条 assistant 消息上。
+		var thinking, signature string
+		var redacted bool
+		var text strings.Builder
+		var calls []llm.ToolCall
 		for _, block := range message.Content {
-			if call, ok := block.(llm.ToolCall); ok {
-				prompt.ToolCalls = append(prompt.ToolCalls, &devinproto.ExaCodeiumCommonPb_ChatToolCall{
+			switch typed := block.(type) {
+			case llm.TextContent:
+				text.WriteString(typed.Text)
+			case llm.ThinkingContent:
+				thinking, signature, redacted = typed.Thinking, typed.ThinkingSignature, typed.Redacted
+			case llm.ToolCall:
+				calls = append(calls, typed)
+			}
+		}
+		var prompts []*devinproto.ExaChatPb_ChatMessagePrompt
+		if text.Len() > 0 {
+			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randomID()),
+				Source:    assistantSource.Enum(),
+				Prompt:    proto.String(text.String()),
+			}
+			if thinking != "" {
+				prompt.Thinking = proto.String(thinking)
+				if signature != "" {
+					prompt.Signature = proto.String(signature)
+				}
+				prompt.ThinkingRedacted = proto.Bool(redacted)
+			}
+			prompts = append(prompts, prompt)
+		}
+		for index, call := range calls {
+			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randomID()),
+				Source:    assistantSource.Enum(),
+				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 					Id:            proto.String(call.ID),
 					Name:          proto.String(call.Name),
 					ArgumentsJson: proto.String(string(call.Arguments)),
-				})
+				}},
 			}
+			if thinking != "" {
+				prompt.Thinking = proto.String(thinking)
+				// 无文本消息时签名挂到首条工具调用消息，避免丢失。
+				if index == 0 && text.Len() == 0 {
+					if signature != "" {
+						prompt.Signature = proto.String(signature)
+					}
+					prompt.ThinkingRedacted = proto.Bool(redacted)
+				}
+			}
+			prompts = append(prompts, prompt)
 		}
-		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
+		// 完全空的助手消息会诱发上游反复返回空回复，跳过。
+		return prompts, nil
 	case llm.ToolResultMessage:
 		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content, attachImages)
+		if prompt.GetPrompt() == "" {
+			// 上游不接受空的工具结果文本，对齐 WindsurfAPI 的占位。
+			prompt.Prompt = proto.String("[tool result]")
+		}
 		prompt.ToolCallId = proto.String(message.ToolCallID)
 		prompt.ToolResultIsError = proto.Bool(message.IsError)
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
 	default:
 		return nil, fmt.Errorf("unsupported message type %T", message)
 	}
+}
+
+// assistantSource 是助手消息在 Devin wire 上的来源枚举（上游命名为 SYSTEM，值 2）。
+var assistantSource = devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
+
+// pairToolCallsWithResults 把「连续调用消息 + 连续结果消息」的分组序列
+// 重排为 call_i, result_i, call_j, result_j 的交错序列。
+// 已配对的交错序列保持不变；找不到匹配结果的调用原样保留位置。
+func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) []*devinproto.ExaChatPb_ChatMessagePrompt {
+	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
+	isCallPrompt := func(p *devinproto.ExaChatPb_ChatMessagePrompt) bool {
+		return p.GetSource() == assistantSource && len(p.GetToolCalls()) > 0
+	}
+	isResultPrompt := func(p *devinproto.ExaChatPb_ChatMessagePrompt) bool {
+		return p.GetSource() == toolSource
+	}
+	var out []*devinproto.ExaChatPb_ChatMessagePrompt
+	for i := 0; i < len(prompts); {
+		if !isCallPrompt(prompts[i]) {
+			out = append(out, prompts[i])
+			i++
+			continue
+		}
+		var calls []*devinproto.ExaChatPb_ChatMessagePrompt
+		for i < len(prompts) && isCallPrompt(prompts[i]) {
+			calls = append(calls, prompts[i])
+			i++
+		}
+		byID := make(map[string]*devinproto.ExaChatPb_ChatMessagePrompt)
+		j := i
+		for j < len(prompts) && isResultPrompt(prompts[j]) {
+			byID[prompts[j].GetToolCallId()] = prompts[j]
+			j++
+		}
+		consumed := make(map[string]struct{}, len(calls))
+		for _, call := range calls {
+			out = append(out, call)
+			id := call.GetToolCalls()[0].GetId()
+			if result, ok := byID[id]; ok {
+				out = append(out, result)
+				consumed[id] = struct{}{}
+			}
+		}
+		// 未能配对的孤立结果按原序保留，不丢消息。
+		for k := i; k < j; k++ {
+			if _, ok := consumed[prompts[k].GetToolCallId()]; !ok {
+				out = append(out, prompts[k])
+			}
+		}
+		i = j
+	}
+	return out
 }
 
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool) *devinproto.ExaChatPb_ChatMessagePrompt {

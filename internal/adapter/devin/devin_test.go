@@ -71,17 +71,21 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	if converted.GetPrompt() != wantPrompt || converted.GetChatModelUid() != "model" {
 		t.Fatalf("top-level request = %#v", converted)
 	}
+	// 助手轮无文本：只有 thinking + 工具调用 → 单条调用消息，thinking/签名挂在其上。
 	if len(converted.GetChatMessagePrompts()) != 3 {
 		t.Fatalf("message count = %d, want 3", len(converted.GetChatMessagePrompts()))
 	}
-	assistant := converted.GetChatMessagePrompts()[1]
-	if assistant.GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM {
-		t.Fatalf("assistant source = %v", assistant.GetSource())
+	toolCallMsg := converted.GetChatMessagePrompts()[1]
+	if toolCallMsg.GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM {
+		t.Fatalf("assistant tool call source = %v", toolCallMsg.GetSource())
 	}
-	if assistant.GetThinking() != "think" || assistant.GetSignature() != "sig" || len(assistant.GetToolCalls()) != 1 {
-		t.Fatalf("assistant prompt = %#v", assistant)
+	if toolCallMsg.GetThinking() != "think" || toolCallMsg.GetSignature() != "sig" || len(toolCallMsg.GetToolCalls()) != 1 {
+		t.Fatalf("assistant tool call prompt = %#v", toolCallMsg)
 	}
-	historicalCall := assistant.GetToolCalls()[0]
+	if toolCallMsg.Prompt != nil {
+		t.Fatalf("tool call prompt must omit the prompt field, got %q", toolCallMsg.GetPrompt())
+	}
+	historicalCall := toolCallMsg.GetToolCalls()[0]
 	if historicalCall.GetName() != "exec" || historicalCall.GetArgumentsJson() != `{"command":"ls"}` {
 		t.Fatalf("historical tool call = %#v", historicalCall)
 	}
@@ -508,5 +512,116 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	}
 	if strings.Contains(string(responseLog), `"seq":`) || strings.Contains(string(responseLog), `"data":`) {
 		t.Fatalf("raw protobuf response must not use an event envelope: %s", responseLog)
+	}
+}
+
+func TestBuildRequestForwardsSamplingParams(t *testing.T) {
+	maxTokens := 4096
+	temperature := 0.2
+	topP := 0.8
+	topK := 10
+	seed := int64(42)
+	request := llm.RequestMessages{
+		SystemPrompt:  "system",
+		MaxTokens:     &maxTokens,
+		Temperature:   &temperature,
+		TopP:          &topP,
+		TopK:          &topK,
+		Seed:          &seed,
+		StopSequences: []string{"STOP"},
+		Messages:      []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := converted.GetConfiguration()
+	if configuration.GetMaxTokens() != 4096 || configuration.GetTemperature() != 0.2 ||
+		configuration.GetTopP() != 0.8 || configuration.GetTopK() != 10 ||
+		configuration.GetSeed() != 42 {
+		t.Fatalf("configuration = %#v", configuration)
+	}
+	if len(configuration.GetStopPatterns()) != 1 || configuration.GetStopPatterns()[0] != "STOP" {
+		t.Fatalf("stop patterns = %v", configuration.GetStopPatterns())
+	}
+}
+
+func TestBuildRequestDefaultSamplingParams(t *testing.T) {
+	request := llm.RequestMessages{
+		SystemPrompt: "system",
+		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := converted.GetConfiguration()
+	if configuration.GetMaxTokens() != 128000 || configuration.GetTemperature() != 1 ||
+		configuration.GetTopP() != 0.95 || configuration.GetTopK() != 40 {
+		t.Fatalf("default configuration = %#v", configuration)
+	}
+}
+
+func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
+	base := llm.RequestMessages{
+		SystemPrompt: "system",
+		SessionKey:   "user-1",
+		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "task"}}}},
+	}
+	first, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 同一会话追加了新消息：前缀不变，trajectory/cascade 必须稳定。
+	base.Messages = append(base.Messages,
+		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}},
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "follow up"}}},
+	)
+	second, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetTrajectoryReference().GetTrajectoryId() != second.GetTrajectoryReference().GetTrajectoryId() ||
+		first.GetCascadeId() != second.GetCascadeId() {
+		t.Fatalf("session IDs changed across turns of the same conversation")
+	}
+	if first.GetExecutionId() == second.GetExecutionId() {
+		t.Fatalf("execution ID must stay unique per request")
+	}
+}
+
+func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
+	makeRequest := func(text string) llm.RequestMessages {
+		return llm.RequestMessages{
+			SystemPrompt: "system",
+			SessionKey:   "user-1",
+			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
+		}
+	}
+	first, err := buildRequest(makeRequest("task A"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := buildRequest(makeRequest("task B"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetTrajectoryReference().GetTrajectoryId() == second.GetTrajectoryReference().GetTrajectoryId() {
+		t.Fatalf("distinct conversations must not share a trajectory")
+	}
+}
+
+func TestIsTransientConnectError(t *testing.T) {
+	if !isTransientConnectError(io.ErrUnexpectedEOF) {
+		t.Fatal("unexpected EOF must be retryable")
+	}
+	if !isTransientConnectError(connect.NewError(connect.CodeUnavailable, errors.New("try later"))) {
+		t.Fatal("unavailable must be retryable")
+	}
+	if isTransientConnectError(connect.NewError(connect.CodePermissionDenied, errors.New("blocked"))) {
+		t.Fatal("permission_denied must not be retried")
+	}
+	if isTransientConnectError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request"))) {
+		t.Fatal("invalid_argument must not be retried")
 	}
 }
