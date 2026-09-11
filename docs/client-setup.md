@@ -1,0 +1,87 @@
+# 客户端接入指南
+
+拓扑:`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3003(key 240127)→ Devin 上游`。
+
+所有客户端统一走 ccload 入口,模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以,把地址换成 `:3003`、key 换成 `240127` 即可。
+
+## Claude Code
+
+`~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:49173",
+    "ANTHROPIC_AUTH_TOKEN": "<ccload token>",
+    "ANTHROPIC_MODEL": "swe-2-max",
+    "ANTHROPIC_SMALL_FAST_MODEL": "swe-2-max",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+两个 env flag 让 CC 接受非官方模型名;不配则用 ccload `channel_models` 的 redirect(发 `claude-sonnet-4-6` → `swe-2-max`)兜底。
+
+## pi
+
+`~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "devin": {
+      "baseUrl": "http://127.0.0.1:49173",
+      "api": "anthropic-messages",
+      "apiKey": "<ccload token>",
+      "models": [{ "id": "swe-2-max", "contextWindow": 262144, "maxTokens": 32768, "reasoning": true }]
+    }
+  }
+}
+```
+
+使用:`pi --provider devin --model swe-2-max`,交互里 `/model` 也可选。
+
+## kimi-code
+
+`~/.kimi-code/config.toml`:
+
+```toml
+default_model = "swe-2-max"
+
+[providers.devin]
+type = "anthropic"
+base_url = "http://127.0.0.1:49173"
+api_key = "<ccload token>"
+
+[models."swe-2-max"]
+provider = "devin"
+model = "swe-2-max"
+max_context_size = 262144
+capabilities = ["thinking", "tool_use"]
+```
+
+陌生模型名必须手写 `capabilities`,否则没有工具调用。也支持 `type = "openai"`(chat completions)或 `"openai_responses"`。
+
+## Codex
+
+`~/.codex/config.toml`(本机已配好):
+
+```toml
+model_provider = "OpenAI"
+model = "swe-2-max"
+model_context_window = 262144
+
+[model_providers.OpenAI]
+base_url = "http://127.0.0.1:49173/v1"
+```
+
+Codex 走 OpenAI Responses 面(`POST /v1/responses`),ccload 原生转发到 devin-2api。
+
+## 共用注意事项
+
+- **system prompt 指纹**:各客户端的身份提示词可能被上游内容策略拦截(`permission_denied`)。devin-2api 的 `sanitize.go` 已覆盖 Claude Code 指纹;pi / kimi-code 都会伪装 CC 请求头+提示词,自动被同一套规则覆盖。
+- **工具调用配对**:上游强制 call→result 紧邻配对,代理已自动重排,客户端无感。
+- **压缩**:四个客户端都自带上下文压缩,代理无需处理。
+- **排查**:任何问题先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体),再开 devin-2api debug 看 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
