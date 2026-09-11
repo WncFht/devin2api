@@ -189,6 +189,15 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
+	case "system":
+		// Claude Code 在消息流中间插入 role:system 的途中注入（agent 列表、
+		// task reminder、system notification）。内容位置敏感——解码为
+		// UserMessage 保持时序，不能折叠进系统提示词。
+		messages, err := decodeAnthropicUserMessages(context.Messages, message.Content)
+		if err != nil {
+			return err
+		}
+		context.Messages = append(context.Messages, messages...)
 	default:
 		// 忽略未知角色。
 	}

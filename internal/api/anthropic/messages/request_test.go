@@ -62,6 +62,35 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 	}
 }
 
+// TestDecodeRequestPreservesMidConversationSystem 验证 Claude Code 在消息流
+// 中间插入的 role:system 注入（agent 列表、task reminder）按原位置保留为
+// 用户消息，不再被静默丢弃。
+func TestDecodeRequestPreservesMidConversationSystem(t *testing.T) {
+	data := []byte(`{
+  "model": "claude-test",
+  "messages": [
+    {"role": "user", "content": "hello"},
+    {"role": "system", "content": "Available agent types for the Agent tool: explore"},
+    {"role": "assistant", "content": [{"type": "text", "text": "done"}]}
+  ],
+  "max_tokens": 256
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(request.Context.Messages))
+	}
+	mid, ok := request.Context.Messages[1].(llm.UserMessage)
+	if !ok {
+		t.Fatalf("message[1] type = %T, want llm.UserMessage", request.Context.Messages[1])
+	}
+	if mid.Content[0].(llm.TextContent).Text != "Available agent types for the Agent tool: explore" {
+		t.Fatalf("message[1] content = %#v", mid.Content)
+	}
+}
+
 // TestDecodeRequestAcceptsStringContent 验证简短字符串输入会转换为用户文字消息。
 func TestDecodeRequestAcceptsStringContent(t *testing.T) {
 	request, err := DecodeRequest([]byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":256}`))
