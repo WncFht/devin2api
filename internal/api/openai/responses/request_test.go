@@ -166,6 +166,85 @@ func TestDecodeRequestAcceptsMessageWithoutType(t *testing.T) {
 	}
 }
 
+// TestDecodeRequestAttachesReasoningSummary 验证 reasoning item 的 summary
+// 文本挂到紧随其后的 assistant 产出上（ThinkingContent 前置块）。
+func TestDecodeRequestAttachesReasoningSummary(t *testing.T) {
+	data := []byte(`{
+  "model": "gpt-test",
+  "input": [
+    {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"计划：先读文件再改"}]},
+    {"type":"message","role":"assistant","content":[{"type":"output_text","text":"好的"}]},
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"需要调用 read_file"}],"encrypted_content":"sealed.v1.xyz"},
+    {"type":"function_call","call_id":"call-1","name":"read_file","arguments":"{}"},
+    {"type":"function_call_output","call_id":"call-1","output":"内容"}
+  ]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 4 {
+		t.Fatalf("message count = %d, want 4", len(request.Context.Messages))
+	}
+	assistant := request.Context.Messages[1].(llm.AssistantMessage)
+	thinking, ok := assistant.Content[0].(llm.ThinkingContent)
+	if !ok || thinking.Thinking != "计划：先读文件再改" {
+		t.Fatalf("assistant content[0] = %#v, want ThinkingContent", assistant.Content[0])
+	}
+	call := request.Context.Messages[2].(llm.AssistantMessage)
+	thinking, ok = call.Content[0].(llm.ThinkingContent)
+	if !ok || thinking.Thinking != "需要调用 read_file" {
+		t.Fatalf("function_call content[0] = %#v, want ThinkingContent", call.Content[0])
+	}
+	if _, ok := call.Content[1].(llm.ToolCall); !ok {
+		t.Fatalf("function_call content[1] = %#v, want ToolCall", call.Content[1])
+	}
+}
+
+// TestDecodeRequestDropsOrphanReasoning 验证 reasoning 后无 assistant 产出时
+// 缓冲不会挂到后续 user 消息上。
+func TestDecodeRequestDropsOrphanReasoning(t *testing.T) {
+	data := []byte(`{
+  "model": "gpt-test",
+  "input": [
+    {"type":"reasoning","summary":[{"type":"summary_text","text":"orphan"}]},
+    {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+  ]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := request.Context.Messages[0].(llm.UserMessage)
+	if len(user.Content) != 1 {
+		t.Fatalf("user content = %#v, want single text block", user.Content)
+	}
+}
+
+// TestDecodeRequestToleratesOrphanToolOutput 验证压缩丢失 function_call 后
+// 孤立的 function_call_output 用兜底名放行，不整请求失败。
+func TestDecodeRequestToleratesOrphanToolOutput(t *testing.T) {
+	data := []byte(`{
+  "model": "gpt-test",
+  "input": [
+    {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+    {"type":"function_call_output","call_id":"call-gone","output":"残留结果"}
+  ]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := request.Context.Messages[1].(llm.ToolResultMessage)
+	if !ok {
+		t.Fatalf("message[1] type = %T, want ToolResultMessage", request.Context.Messages[1])
+	}
+	if tool.ToolCallID != "call-gone" || tool.ToolName != "tool" {
+		t.Fatalf("tool result = %#v", tool)
+	}
+}
+
 // TestDecodeRequestIgnoresUnsupportedExtensions 的测试动机是确保上游新增字段和类型不会阻断可识别的对话内容。
 func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
 	request, err := DecodeRequest([]byte(`{
