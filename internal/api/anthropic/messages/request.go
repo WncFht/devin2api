@@ -25,6 +25,7 @@ type Request struct {
 	TopP          *float64        `json:"top_p,omitempty"`
 	TopK          *int            `json:"top_k,omitempty"`
 	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
 }
 
 // Message 是 Anthropic 消息条目。
@@ -82,6 +83,24 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model}
+	maxTokens := request.MaxTokens
+	if maxTokens > 0 {
+		context.MaxTokens = &maxTokens
+	}
+	context.Temperature = request.Temperature
+	context.TopP = request.TopP
+	if request.TopK != nil && *request.TopK > 0 {
+		context.TopK = request.TopK
+	}
+	context.StopSequences = request.StopSequences
+	if len(bytes.TrimSpace(request.Metadata)) > 0 {
+		var metadata struct {
+			UserID string `json:"user_id"`
+		}
+		if json.Unmarshal(request.Metadata, &metadata) == nil {
+			context.SessionKey = metadata.UserID
+		}
+	}
 	if len(bytes.TrimSpace(request.System)) > 0 && !bytes.Equal(bytes.TrimSpace(request.System), []byte("null")) {
 		if err := appendSystem(&context, request.System); err != nil {
 			return AdaptedRequest{}, err

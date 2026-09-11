@@ -32,6 +32,12 @@ type Request struct {
 	Temperature *float64 `json:"temperature,omitempty"`
 	// PreviousResponseID 是上游 Responses 会话关联标识。
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
+	// TopP 是可选的 nucleus 采样参数。
+	TopP *float64 `json:"top_p,omitempty"`
+	// User 是可选的调用方用户标识。
+	User string `json:"user,omitempty"`
+	// PromptCacheKey 是可选的调用方缓存键。
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
 }
 
 // Tool 是 OpenAI Responses function 工具定义。
@@ -78,6 +84,15 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model, SystemPrompt: request.Instructions}
+	if request.MaxOutputTokens != nil && *request.MaxOutputTokens > 0 {
+		context.MaxTokens = request.MaxOutputTokens
+	}
+	context.Temperature = request.Temperature
+	context.TopP = request.TopP
+	context.SessionKey = request.PromptCacheKey
+	if context.SessionKey == "" {
+		context.SessionKey = request.User
+	}
 	if err := appendInputMessages(&context, request.Input); err != nil {
 		return AdaptedRequest{}, err
 	}

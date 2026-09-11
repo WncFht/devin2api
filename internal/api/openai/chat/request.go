@@ -26,6 +26,10 @@ type Request struct {
 	TopP                *float64        `json:"top_p,omitempty"`
 	Stop                json.RawMessage `json:"stop,omitempty"`
 	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	TopK                *int            `json:"top_k,omitempty"`
+	Seed                *int64          `json:"seed,omitempty"`
+	User                string          `json:"user,omitempty"`
+	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
 }
 
 // Message 是 Chat Completions 消息条目。
@@ -97,6 +101,33 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model}
+	maxTokensValue := request.MaxCompletionTokens
+	if maxTokensValue == nil {
+		maxTokensValue = request.MaxTokens
+	}
+	if maxTokensValue != nil && *maxTokensValue > 0 {
+		context.MaxTokens = maxTokensValue
+	}
+	context.Temperature = request.Temperature
+	context.TopP = request.TopP
+	if request.TopK != nil && *request.TopK > 0 {
+		context.TopK = request.TopK
+	}
+	context.Seed = request.Seed
+	if len(bytes.TrimSpace(request.Stop)) > 0 && !bytes.Equal(bytes.TrimSpace(request.Stop), []byte("null")) {
+		var stops []string
+		if err := json.Unmarshal(request.Stop, &stops); err != nil {
+			var single string
+			if json.Unmarshal(request.Stop, &single) == nil && single != "" {
+				stops = []string{single}
+			}
+		}
+		context.StopSequences = stops
+	}
+	context.SessionKey = request.PromptCacheKey
+	if context.SessionKey == "" {
+		context.SessionKey = request.User
+	}
 	if err := appendMessages(&context, request.Messages); err != nil {
 		return AdaptedRequest{}, err
 	}
@@ -118,16 +149,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
 	}
 
-	maxTokens := request.MaxCompletionTokens
-	if maxTokens == nil {
-		maxTokens = request.MaxTokens
-	}
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
 			Stream:          request.Stream,
 			IncludeUsage:    request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
-			MaxOutputTokens: maxTokens,
+			MaxOutputTokens: maxTokensValue,
 			Temperature:     request.Temperature,
 		},
 	}, nil
