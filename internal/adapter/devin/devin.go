@@ -6,6 +6,7 @@ package devin
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -321,8 +322,12 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	if err != nil {
 		return nil, fmt.Errorf("generate Devin device fingerprint: %w", err)
 	}
-	trajectoryID := randomUUID()
-	cascadeID := randomUUID()
+	// 上游轨迹缓存按 trajectory/cascade ID 关联：同一会话的连续请求复用
+	// 稳定 ID 可显著提高免费档前缀缓存命中（实测全随机 ~1/6，稳定 ~7/8）。
+	// 优先用调用方 SessionKey（user/prompt_cache_key/metadata.user_id），
+	// 否则退化到「系统提示 + 首条用户消息」的内容哈希 —— 同一会话前缀
+	// 在多轮回放中不变，不同会话天然分散。
+	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randomUUID()
 	metadata := &devinproto.ExaCodeiumCommonPb_Metadata{
 		ApiKey:           proto.String(config.Token),
@@ -334,19 +339,41 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		Os:               proto.String("mac"),
 		F:                proto.String(fingerprint),
 	}
+	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
+		NumCompletions: proto.Uint64(1),
+		MaxTokens:      proto.Uint64(128000),
+		MaxNewlines:    proto.Uint64(400),
+		Temperature:    proto.Float64(1),
+		TopK:           proto.Uint64(40),
+		TopP:           proto.Float64(0.95),
+	}
+	// 客户端显式提供的采样参数透传到上游；缺省保持 CLI 默认值。
+	if request.MaxTokens != nil && *request.MaxTokens > 0 {
+		completion.MaxTokens = proto.Uint64(uint64(*request.MaxTokens))
+	}
+	if request.Temperature != nil {
+		completion.Temperature = request.Temperature
+	}
+	if request.TopP != nil {
+		completion.TopP = request.TopP
+	}
+	if request.TopK != nil {
+		completion.TopK = proto.Uint64(uint64(*request.TopK))
+	}
+	if len(request.StopSequences) > 0 {
+		completion.StopPatterns = request.StopSequences
+	}
+	if request.Seed != nil {
+		completion.Seed = proto.Uint64(uint64(*request.Seed))
+	}
 	result := &devinproto.GetChatMessageRequest{
 		Metadata:     metadata,
 		Prompt:       proto.String(withToolDescriptions(request.SystemPrompt, request.Tools)),
+		// 上游 prompt 前缀缓存：system prompt 是稳定前缀，标记 EPHEMERAL 断点。
+		SystemPromptCacheOptions: ephemeralCacheOptions(),
 		ChatModelUid: proto.String(config.Model),
 		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-			NumCompletions: proto.Uint64(1),
-			MaxTokens:      proto.Uint64(128000),
-			MaxNewlines:    proto.Uint64(400),
-			Temperature:    proto.Float64(1),
-			TopK:           proto.Uint64(40),
-			TopP:           proto.Float64(0.95),
-		},
+		Configuration: completion,
 		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
 			TrajectoryId:   proto.String(trajectoryID),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
@@ -380,7 +407,75 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		}
 		result.Tools = append(result.Tools, converted)
 	}
+	// 最后一条消息标记 EPHEMERAL 断点：缓存到此为止的全部历史前缀，
+	// 下一轮新消息追加在断点后即可命中缓存。
+	if n := len(result.ChatMessagePrompts); n > 0 {
+		result.ChatMessagePrompts[n-1].PromptCacheOptions = ephemeralCacheOptions()
+	}
 	return result, nil
+}
+
+// ephemeralCacheOptions 返回上游 prompt 缓存的 EPHEMERAL 断点标记。
+func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
+	return &devinproto.ExaChatPb_PromptCacheOptions{
+		Type: devinproto.ExaChatPb_CacheControlType_ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL.Enum(),
+	}
+}
+
+// deriveSessionIDs 为一次请求派生上游 trajectory/cascade ID。
+// 种子 = SessionKey（若有）+ 系统提示头 4KB + 首条消息文本头 1KB，
+// 使同一对话的多轮（历史前缀不变）得到稳定 ID，不同对话自然分散。
+func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
+	var seed strings.Builder
+	seed.WriteString(request.SessionKey)
+	seed.WriteByte(0)
+	head := request.SystemPrompt
+	if len(head) > 4096 {
+		head = head[:4096]
+	}
+	seed.WriteString(head)
+	for _, message := range request.Messages {
+		text := firstMessageText(message)
+		if text == "" {
+			continue
+		}
+		if len(text) > 1024 {
+			text = text[:1024]
+		}
+		seed.WriteByte(0)
+		seed.WriteString(text)
+		break
+	}
+	sum := sha256.Sum256([]byte(seed.String()))
+	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
+}
+
+// firstMessageText 提取消息的首个文本块，用于会话种子。
+func firstMessageText(message llm.Message) string {
+	var content []llm.Content
+	switch typed := message.(type) {
+	case llm.UserMessage:
+		content = typed.Content
+	case llm.AssistantMessage:
+		content = typed.Content
+	case llm.ToolResultMessage:
+		content = typed.Content
+	}
+	for _, block := range content {
+		if text, ok := block.(llm.TextContent); ok && text.Text != "" {
+			return text.Text
+		}
+	}
+	return ""
+}
+
+// uuidFromBytes 将 16 字节格式化为 UUID 字符串（version/variant 位固定）。
+func uuidFromBytes(b []byte) string {
+	var out [16]byte
+	copy(out[:], b)
+	out[6] = (out[6] & 0x0f) | 0x40
+	out[8] = (out[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", out[0:4], out[4:6], out[6:8], out[8:10], out[10:16])
 }
 
 // convertMessage 将中间消息转为 Devin ChatMessagePrompt。
