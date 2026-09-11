@@ -115,13 +115,51 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	recorder := debuglog.FromContext(ctx)
 	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
-	stream, err := adapter.client.GetChatMessage(ctx, connect.NewRequest(protoRequest))
+	stream, err := adapter.getChatMessageWithRetry(ctx, protoRequest)
 	if err != nil {
 		recorder.WriteError("devin_connect", err)
 		// 透传上游 Connect 错误原文，不包一层模糊前缀。
 		return nil, connectError(err)
 	}
 	return &responseStream{upstream: stream, decoder: newResponseDecoder(model), recorder: recorder}, nil
+}
+
+// maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
+const maxConnectAttempts = 3
+
+// getChatMessageWithRetry 在流建立前重试瞬时错误（EOF/连接重置/unavailable）。
+// 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
+func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
+	var lastErr error
+	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+			}
+		}
+		stream, err := adapter.client.GetChatMessage(ctx, connect.NewRequest(protoRequest))
+		if err == nil {
+			return stream, nil
+		}
+		lastErr = err
+		if !isTransientConnectError(err) {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+// isTransientConnectError 判断建立阶段错误是否值得重试：
+// 非 Connect 协议的传输错误（EOF、连接重置、超时）和 unavailable 可重试；
+// permission_denied/invalid_argument 等语义错误不重试。
+func isTransientConnectError(err error) bool {
+	var connectErr *connect.Error
+	if errors.As(err, &connectErr) {
+		return connectErr.Code() == connect.CodeUnavailable
+	}
+	return true
 }
 
 // validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。
