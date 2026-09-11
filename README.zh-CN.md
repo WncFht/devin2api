@@ -91,30 +91,30 @@ curl -N http://localhost:8080/v1/responses \
 
 配置文件为 YAML，启动时加载一次；未知字段会被拒绝。
 
-| 字段 | 说明 | 必填 |
-| --- | --- | --- |
-| `server.listen` | HTTP 监听地址 | 是 |
-| `devin.base_url` | Devin Connect 服务地址 | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token` | Devin 会话 token（`devin-session-token$...`） | 否——未配置时接口返回 503 |
-| `devin.model` | Devin chat model UID（如 `glm-5-2`） | 配置了 `devin.token` 后必填（代码无默认值） |
-| `debug.enabled` | 在配置文件同目录的 `logs/` 下写按请求的调试日志 | 否 |
-| `auth.api_key` | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 否 |
+| 字段             | 说明                                                                                                        | 必填                                                                                               |
+| ---------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `server.listen`  | HTTP 监听地址                                                                                               | 是                                                                                                 |
+| `devin.base_url` | Devin Connect 服务地址                                                                                      | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
+| `devin.token`    | Devin 会话 token（`devin-session-token$...`）                                                               | 否——未配置时接口返回 503                                                                           |
+| `devin.model`    | Devin chat model UID（如 `glm-5-2`）                                                                        | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
+| `debug.enabled`  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | 否                                                                                                 |
+| `auth.api_key`   | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 否                                                                                                 |
 
 ```yaml
 server:
-  listen: ":8080"
+    listen: ":8080"
 
 devin:
-  base_url: "https://server.codeium.com"
-  token: "devin-session-token$..."
-  model: "glm-5-2"
+    base_url: "https://server.codeium.com"
+    token: "devin-session-token$..."
+    model: "glm-5-2"
 
 debug:
-  enabled: false
+    enabled: false
 
 auth:
-  # 填入强密码以保护 /v1/*；留空则不校验。
-  api_key: ""
+    # 填入强密码以保护 /v1/*；留空则不校验。
+    api_key: ""
 ```
 
 注意：
