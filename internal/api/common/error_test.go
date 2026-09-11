@@ -10,7 +10,7 @@ func TestOpenAIErrorType(t *testing.T) {
 	}{
 		{"invalid_argument: model does not support image", "invalid_request_error"},
 		{"resource_exhausted: rate limit exceeded", "rate_limit_error"},
-		{"permission_denied: not allowed", "permission_error"},
+		{"permission_denied: not allowed", "invalid_request_error"},
 		{"not_found: model missing", "not_found_error"},
 		{"unavailable: upstream offline", "server_error"},
 		{"some unknown error", "server_error"},
@@ -29,7 +29,7 @@ func TestAnthropicErrorType(t *testing.T) {
 	}{
 		{"invalid_argument: bad request", "invalid_request_error"},
 		{"resource_exhausted: rate limit exceeded", "rate_limit_error"},
-		{"permission_denied: not allowed", "permission_error"},
+		{"permission_denied: not allowed", "invalid_request_error"},
 		{"not_found: model missing", "not_found_error"},
 		{"unavailable: upstream offline", "api_error"},
 		{"some unknown error", "api_error"},

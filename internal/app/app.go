@@ -541,7 +541,11 @@ func mapProviderErrorStatus(err error) int {
 		return http.StatusUnauthorized
 	case strings.Contains(msg, "permission_denied"),
 		strings.HasPrefix(msg, "permission_denied:"):
-		return http.StatusForbidden
+		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
+		// permission_denied。这三类都是调用方可修正的请求错误，
+		// 归一成 400 而不是 403：下游网关（如 ccload）对 4xx 客户端错误
+		// 不会把渠道标记为失效/冷却，只有 5xx/鉴权错误才会。
+		return http.StatusBadRequest
 	case strings.Contains(msg, "not_found"),
 		strings.HasPrefix(msg, "not_found:"):
 		return http.StatusNotFound

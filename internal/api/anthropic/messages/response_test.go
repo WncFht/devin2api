@@ -136,8 +136,8 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 	if errObj["message"] != "permission_denied: not allowed" {
 		t.Fatalf("error.message = %v", errObj["message"])
 	}
-	if errObj["type"] != "permission_error" {
-		t.Fatalf("error.type = %v, want permission_error", errObj["type"])
+	if errObj["type"] != "invalid_request_error" {
+		t.Fatalf("error.type = %v, want invalid_request_error", errObj["type"])
 	}
 	// 错误后再次编码应因流已结束而失败。
 	if _, err := encoder.Encode(event); err == nil {

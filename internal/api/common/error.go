@@ -11,7 +11,10 @@ var openAIErrorTypes = map[string]string{
 	"out_of_range":        "invalid_request_error",
 	"unimplemented":       "invalid_request_error",
 	"unauthenticated":     "authentication_error",
-	"permission_denied":   "permission_error",
+	// Devin 上游把内容策略拦截、无效模型 UID、未授权模型全部归并到
+	// permission_denied；这些都是调用方可修正的请求错误，归为
+	// invalid_request_error 以便下游网关不误判为账号/渠道失效。
+	"permission_denied":   "invalid_request_error",
 	"not_found":           "not_found_error",
 	"resource_exhausted":  "rate_limit_error",
 	"deadline_exceeded":   "timeout_error",
@@ -28,7 +31,8 @@ var anthropicErrorTypes = map[string]string{
 	"out_of_range":        "invalid_request_error",
 	"unimplemented":       "invalid_request_error",
 	"unauthenticated":     "authentication_error",
-	"permission_denied":   "permission_error",
+	// 同上：permission_denied 统一视为可修正的请求错误。
+	"permission_denied":   "invalid_request_error",
 	"not_found":           "not_found_error",
 	"resource_exhausted":  "rate_limit_error",
 	"deadline_exceeded":   "timeout_error",
