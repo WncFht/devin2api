@@ -35,7 +35,7 @@
       "baseUrl": "http://127.0.0.1:49173",
       "api": "anthropic-messages",
       "apiKey": "<ccload token>",
-      "models": [{ "id": "swe-2-max", "contextWindow": 262144, "maxTokens": 32768, "reasoning": true }]
+      "models": [{ "id": "swe-2-max", "contextWindow": 262144, "maxTokens": 32768, "reasoning": true, "input": ["text", "image"] }]
     }
   }
 }
@@ -59,10 +59,10 @@ api_key = "<ccload token>"
 provider = "devin"
 model = "swe-2-max"
 max_context_size = 262144
-capabilities = ["thinking", "tool_use"]
+capabilities = ["thinking", "tool_use", "image_in"]
 ```
 
-陌生模型名必须手写 `capabilities`,否则没有工具调用。也支持 `type = "openai"`(chat completions)或 `"openai_responses"`。
+陌生模型名必须手写 `capabilities`,否则没有工具调用。可选值:`thinking` / `always_thinking` / `tool_use` / `image_in` / `video_in`——`image_in` 已实测(swe-2-max 支持图片输入,历史图片会被代理转成文本占位);`video_in` 不要开,上游 `ChatMessagePrompt` 没有视频字段。也支持 `type = "openai"`(chat completions)或 `"openai_responses"`。
 
 ## Codex
 

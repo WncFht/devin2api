@@ -10,6 +10,9 @@
 | 多轮记忆 | ✅ `--continue` 回忆 codeword | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅ |
 | 单工具调用(写+读文件) | ✅ Write/Read | ✅ write/read | ✅ write/read | ✅ |
 | 并行工具调用 | ✅ | ✅ 同轮读两文件 | ✅ 同轮读两文件 | ✅ 2 call + 2 result |
+| 图像输入 | — 未测 | ✅ `@blue.png` 识别颜色 | ✅ `image_in` 读 PNG 识别颜色 | — 未测 |
+| 并发会话 | — | ✅ pi+kimi 并行 | ✅ | — |
+| 多步任务(写文件+bash执行+汇报) | ✅ | ✅ | ✅ | ✅ |
 | 流式 | ✅ | ✅ | ✅ | ✅ |
 | 前缀缓存 | ✅ 后续轮 `cache_read` ~25.5k | ✅ `cache_read` 53k–111k | ✅ `cache_read` ~17.7k | ✅ |
 | thinking/签名 | ✅ 尾随签名已合并修复 | ✅ `thinking:enabled,8192` 正常 | ✅ thinking 输出正常 | ✅ |
@@ -36,6 +39,8 @@
 - 零修改直接通。同样伪装 CC 请求封套(`claude-cli` UA、`X-Claude-Code-Session-Id`、CC beta 头)
 - `metadata.user_id` 带 device_id JSON,被代理用作 SessionKey → 会话 ID 稳定,利于缓存
 - `max_tokens` 发得很大(≈context size),透传无碍
+- `image_in` 实测可用——上游 `ChatMessagePrompt.images`(纯 base64 + mime_type)与 swe-2-max 视觉能力都支持;**坏图/非法 base64 会被上游判 `invalid_argument` → 400**,属正确行为
+- `video_in` 未验证也不要开:上游 proto 没有视频字段
 - 注意区分:kimi-cli(旧 Python 版)已官方弃用,未测不测
 
 ### Codex
