@@ -61,6 +61,10 @@ type streamItem struct {
 	encryptedContent string
 	// closed 表示 item 已产生 output_item.done。
 	closed bool
+	// pendingDone 延迟 reasoning 的收尾事件，等待正文之后才到达的签名帧。
+	pendingDone bool
+	// pendingText 是 reasoning 收尾时要回放的完整摘要文本。
+	pendingText string
 }
 
 // NewStreamEncoder 为一次 HTTP Responses 请求创建独立的 SSE 编码状态。
@@ -112,34 +116,48 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	if encoder.completed {
 		return nil, fmt.Errorf("response stream is already completed")
 	}
+	// 上游把思考签名作为正文之后的尾随帧发送：处理后续事件之前先补发
+	// 因等待签名而挂起的 reasoning 收尾（签名事件自身负责收尾，跳过）。
+	var prefix []SSEEvent
+	if event.Type != llm.ResponseEventThinkingSignature {
+		prefix = encoder.flushPendingReasoning()
+	}
+	var events []SSEEvent
+	var err error
 	switch event.Type {
 	case llm.ResponseEventStart:
-		return encoder.start(), nil
+		events, err = encoder.start(), nil
 	case llm.ResponseEventThinkingStart:
-		return encoder.startReasoning(event)
+		events, err = encoder.startReasoning(event)
 	case llm.ResponseEventThinkingDelta:
-		return encoder.reasoningDelta(event)
+		events, err = encoder.reasoningDelta(event)
 	case llm.ResponseEventThinkingEnd:
-		return encoder.endReasoning(event)
+		events, err = encoder.endReasoning(event)
+	case llm.ResponseEventThinkingSignature:
+		events, err = encoder.reasoningSignature(event)
 	case llm.ResponseEventTextStart:
-		return encoder.startText(event)
+		events, err = encoder.startText(event)
 	case llm.ResponseEventTextDelta:
-		return encoder.textDelta(event)
+		events, err = encoder.textDelta(event)
 	case llm.ResponseEventTextEnd:
-		return encoder.endText(event)
+		events, err = encoder.endText(event)
 	case llm.ResponseEventToolCallStart:
-		return encoder.startToolCall(event)
+		events, err = encoder.startToolCall(event)
 	case llm.ResponseEventToolCallDelta:
-		return encoder.toolCallDelta(event)
+		events, err = encoder.toolCallDelta(event)
 	case llm.ResponseEventToolCallEnd:
-		return encoder.endToolCall(event)
+		events, err = encoder.endToolCall(event)
 	case llm.ResponseEventDone:
-		return encoder.done(event)
+		events, err = encoder.done(event)
 	case llm.ResponseEventError:
-		return encoder.failed(event), nil
+		events, err = encoder.failed(event), nil
 	default:
 		return nil, fmt.Errorf("unsupported response event type %q", event.Type)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return append(prefix, events...), nil
 }
 
 func (encoder *StreamEncoder) start() []SSEEvent {
@@ -198,9 +216,21 @@ func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent,
 	if thinking, ok := contentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.ThinkingSignature != "" {
 		item.encryptedContent = thinking.ThinkingSignature
 	}
+	// 上游把签名作为正文之后的尾随帧发送：尚无签名时推迟收尾事件。
+	if item.encryptedContent == "" {
+		item.pendingDone = true
+		item.pendingText = text
+		return nil, nil
+	}
+	return encoder.reasoningDone(item), nil
+}
+
+// reasoningDone 发出 reasoning item 的三个收尾事件。
+func (encoder *StreamEncoder) reasoningDone(item *streamItem) []SSEEvent {
+	item.pendingDone = false
 	completedItem := map[string]any{
 		"id": item.id, "type": "reasoning",
-		"summary": []any{map[string]any{"type": "summary_text", "text": text}},
+		"summary": []any{map[string]any{"type": "summary_text", "text": item.pendingText}},
 	}
 	if item.encryptedContent != "" {
 		completedItem["encrypted_content"] = item.encryptedContent
@@ -208,14 +238,39 @@ func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent,
 	encoder.closeItem(item, completedItem)
 	return []SSEEvent{
 		encoder.emit("response.reasoning_summary_text.done", map[string]any{
-			"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0, "text": text,
+			"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0, "text": item.pendingText,
 		}),
 		encoder.emit("response.reasoning_summary_part.done", map[string]any{
 			"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
-			"part": map[string]any{"type": "summary_text", "text": text},
+			"part": map[string]any{"type": "summary_text", "text": item.pendingText},
 		}),
 		encoder.emit("response.output_item.done", map[string]any{"output_index": item.outputIndex, "item": completedItem}),
-	}, nil
+	}
+}
+
+// reasoningSignature 把尾随签名并入挂起的 reasoning item 并补发收尾。
+func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
+	item, err := encoder.item(event.ContentIndex, "reasoning")
+	if err != nil {
+		return nil, err
+	}
+	item.encryptedContent += event.Delta
+	if !item.pendingDone {
+		return nil, nil
+	}
+	return encoder.reasoningDone(item), nil
+}
+
+// flushPendingReasoning 在发出其他事件前补发挂起的 reasoning 收尾，
+// 上游没有尾随签名时保证 item 仍正常关闭。
+func (encoder *StreamEncoder) flushPendingReasoning() []SSEEvent {
+	var events []SSEEvent
+	for _, item := range encoder.items {
+		if item.pendingDone {
+			events = append(events, encoder.reasoningDone(item)...)
+		}
+	}
+	return events
 }
 
 func (encoder *StreamEncoder) startText(event llm.ResponseEvent) ([]SSEEvent, error) {
