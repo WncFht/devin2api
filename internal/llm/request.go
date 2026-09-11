@@ -40,6 +40,22 @@ type RequestMessages struct {
 	Messages []Message
 	// Tools 是本次请求允许模型调用的工具定义。
 	Tools []ToolDefinition
+	// MaxTokens 是可选的输出 token 上限；nil 表示使用供应商默认。
+	MaxTokens *int
+	// Temperature 是可选的采样温度；nil 表示使用供应商默认。
+	Temperature *float64
+	// TopP 是可选的 nucleus 采样参数；nil 表示使用供应商默认。
+	TopP *float64
+	// TopK 是可选的 top-k 采样参数；nil 表示使用供应商默认。
+	TopK *int
+	// StopSequences 是可选的停止序列列表。
+	StopSequences []string
+	// Seed 是可选的采样种子；nil 表示由供应商随机。
+	Seed *int64
+	// SessionKey 是调用方提供的会话标识（如 user / prompt_cache_key /
+	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
+	// 空表示调用方未提供。
+	SessionKey string
 }
 
 // Message 是用户、助手或工具结果消息的统一接口。
