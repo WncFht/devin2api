@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -103,5 +106,37 @@ func (config *Config) Validate() error {
 		force := true
 		config.Devin.ForceHTTP1 = &force
 	}
+	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
+	if strings.TrimSpace(config.Devin.Token) == "" {
+		config.Devin.Token = resolveDevinToken()
+	}
 	return nil
+}
+
+// devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key。
+var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*"([^"]+)"`)
+
+// resolveDevinToken 从本地 Devin 客户端状态中发现 session token。
+// 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与
+// ~/.local/share/devin/credentials.toml（Devin CLI 登录产物）。
+// 找不到返回空串，由调用方决定是否报错。
+func resolveDevinToken() string {
+	for _, name := range []string{"DEVIN_TOKEN", "WINDSURF_API_KEY"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".local", "share", "devin", "credentials.toml"))
+	if err != nil {
+		return ""
+	}
+	match := devinCredentialsTokenPattern.FindSubmatch(data)
+	if len(match) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(string(match[1]))
 }
