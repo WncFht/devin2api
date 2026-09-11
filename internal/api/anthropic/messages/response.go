@@ -131,10 +131,7 @@ func (encoder *StreamEncoder) start(event llm.ResponseEvent) []SSEEvent {
 			"content":     []any{},
 			"model":       encoder.model,
 			"stop_reason": nil,
-			"usage": map[string]any{
-				"input_tokens":  encoder.usage.Input,
-				"output_tokens": 0,
-			},
+			"usage": anthropicUsage(encoder.usage),
 		},
 	})}
 }
@@ -333,10 +330,7 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 		encoder.event("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": delta,
-			"usage": map[string]any{
-				"input_tokens":  encoder.usage.Input,
-				"output_tokens": 0,
-			},
+			"usage": anthropicUsage(encoder.usage),
 		}),
 		encoder.event("message_stop", map[string]any{"type": "message_stop"}),
 	)
