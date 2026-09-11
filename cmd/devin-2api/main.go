@@ -44,6 +44,7 @@ func main() {
 			Model:      serviceConfig.Devin.Model,
 			Proxy:      serviceConfig.Devin.Proxy,
 			ForceHTTP1: serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+			Aliases:    serviceConfig.Devin.Aliases,
 		})
 		if createErr != nil {
 			log.Fatal(createErr)

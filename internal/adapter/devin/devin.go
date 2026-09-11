@@ -46,6 +46,8 @@ type Config struct {
 	Proxy string
 	// ForceHTTP1 为 true 时强制 HTTP/1.1，每请求独立连接，避免 HTTP/2 单连接多 stream 并发瓶颈。
 	ForceHTTP1 bool
+	// Aliases 是客户端模型名到上游真实 UID 的映射；命中时请求模型被重写。
+	Aliases map[string]string
 }
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
@@ -104,6 +106,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
 		model = adapter.config.Model
+	}
+	if alias, ok := adapter.config.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
+		model = strings.TrimSpace(alias)
 	}
 	if err := validateImagesForModel(request, model); err != nil {
 		return nil, err

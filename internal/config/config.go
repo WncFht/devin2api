@@ -47,6 +47,9 @@ type DevinConfig struct {
 	// 避免 HTTP/2 单连接多 stream 复用导致的上游并发瓶颈（首字延迟飙升/卡住）。
 	// 行为对齐 Devin 客户端多窗口各自独立连接的模式。默认 true。
 	ForceHTTP1 *bool `yaml:"force_http1"`
+	// Aliases 是客户端模型名到上游真实 UID 的映射，
+	// 例如 "swe-2": "swe-2-max"、"glm-5.2": "glm-5-2"。
+	Aliases map[string]string `yaml:"aliases"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
