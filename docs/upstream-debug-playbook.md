@@ -99,6 +99,7 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 8. **空 system prompt + 带 tools** 会被拒：注入最小 system prompt。
 9. **前缀缓存**：内容前缀即命中，无需会话状态；`trajectory_id`/`cascade_id` 稳定 + EPHEMERAL 断点可提升命中率（详见 `upstream-cache.md`）。
 10. **stepType 恒为 `USER_INPUT`**，末条消息**不要求**是 USER（实测 TOOL 结尾只要配对正确也能过）。
+11. **签名是尾随帧**：上游在全部正文之后才发 `DeltaSignature`。解码器把它合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能把签名落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。
 
 ## 新客户端验证清单
 
@@ -106,11 +107,11 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 
 1. 单轮（先确认基本通路 + 身份句是否被封）：
 
-   ```bash
-   curl -s http://localhost:3003/v1/messages -H "Authorization: Bearer 240127" \
-     -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
-     -d '{"model":"swe-2-max","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly: pong"}]}'
-   ```
+    ```bash
+    curl -s http://localhost:3003/v1/messages -H "Authorization: Bearer 240127" \
+      -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
+      -d '{"model":"swe-2-max","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly: pong"}]}'
+    ```
 
 2. 把该客户端的真实 system prompt 整个塞进去（指纹句风险最大的一步）。
 3. 多轮记忆（历史回放是否正常）。
@@ -120,7 +121,9 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 
 每个客户端的特异风险：
 
-- **Claude Code**：系统提示词整体在指纹库里（sanitizer 已覆盖已知名句，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。
+- **Claude Code**：系统提示词整体在指纹库里（CC 2.1.236 实测 7 条指纹行已入 `sanitize.go`，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。已实测的两个客户端侧坑：
+  - **本地模型白名单**：CC 2.1.x 在发请求前就拒绝不认识的模型名（`swe-2-max` 直接被拦，ccload 收不到请求）。解法：ccload `channel_models` 加 `claude-sonnet-4-6` 等可识别名 → `redirect_model=swe-2-max`；CC 侧 `ANTHROPIC_MODEL` 填可识别名。`modelOverrides`/`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` 也可，但 redirect 最不侵入。
+  - **settings env 覆盖 shell**：`~/.claude/settings.json` 的 `env` 块优先级高于 shell 环境变量，里面若有 `ANTHROPIC_BASE_URL` 会盖掉导出的值（进程在连别的地址、半天无输出即此症状）。用项目级 `.claude/settings.local.json` 注入 env 最干净。
 - **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
 - **kimi-code / kimi-cli / pi**：未实测。预期风险点 = 身份句指纹 + 工具调用配对约束 + 各自专有字段（先抓真实请求体看有没有非标准块）。
 
@@ -129,6 +132,7 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 ## ccload 侧注意事项
 
 - 渠道 293 = `http://127.0.0.1:3003`，模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
+- **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。改完要重启 ccload 才生效。
 - ccload 会统计 SSE 级失败（HTTP 200 + `response.failed` 也算失败），连续失败会把渠道打冷却。devin-2api 已把 `permission_denied` 归一成 HTTP 400 `invalid_request_error`，非流式路径不会误伤渠道；流式中途失败只能发事件，是真失败，冷却合理。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
 
