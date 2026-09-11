@@ -4,19 +4,19 @@
 
 ## 验证矩阵
 
-| 场景 | Claude Code | pi | kimi-code | Codex |
-|---|---|---|---|---|
-| 单轮问答 | ✅ | ✅ | ✅ | ✅ |
-| 多轮记忆 | ✅ `--continue` 回忆 codeword | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅ |
-| 单工具调用(写+读文件) | ✅ Write/Read | ✅ write/read | ✅ write/read | ✅ |
-| 并行工具调用 | ✅ | ✅ 同轮读两文件 | ✅ 同轮读两文件 | ✅ 2 call + 2 result |
-| 图像输入 | — 未测 | ✅ `@blue.png` 识别颜色 | ✅ `image_in` 读 PNG 识别颜色 | — 未测 |
-| 并发会话 | — | ✅ pi+kimi 并行 | ✅ | — |
-| 多步任务(写文件+bash执行+汇报) | ✅ | ✅ | ✅ | ✅ |
-| 流式 | ✅ | ✅ | ✅ | ✅ |
-| 前缀缓存 | ✅ 后续轮 `cache_read` ~25.5k | ✅ `cache_read` 53k–111k | ✅ `cache_read` ~17.7k | ✅ |
-| thinking/签名 | ✅ 尾随签名已合并修复 | ✅ `thinking:enabled,8192` 正常 | ✅ thinking 输出正常 | ✅ |
-| 客户端压缩 | CC 自带 | pi 自带(16k reserve/20k recent) | kimi-code 自带 | codex 自带(`auto_compact`) |
+| 场景                           | Claude Code                   | pi                               | kimi-code                          | Codex                      |
+| ------------------------------ | ----------------------------- | -------------------------------- | ---------------------------------- | -------------------------- |
+| 单轮问答                       | ✅                            | ✅                               | ✅                                 | ✅                         |
+| 多轮记忆                       | ✅ `--continue` 回忆 codeword | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅                         |
+| 单工具调用(写+读文件)          | ✅ Write/Read                 | ✅ write/read                    | ✅ write/read                      | ✅                         |
+| 并行工具调用                   | ✅                            | ✅ 同轮读两文件                  | ✅ 同轮读两文件                    | ✅ 2 call + 2 result       |
+| 图像输入                       | — 未测                        | ✅ `@blue.png` 识别颜色          | ✅ `image_in` 读 PNG 识别颜色      | — 未测                     |
+| 并发会话                       | —                             | ✅ pi+kimi 并行                  | ✅                                 | —                          |
+| 多步任务(写文件+bash执行+汇报) | ✅                            | ✅                               | ✅                                 | ✅                         |
+| 流式                           | ✅                            | ✅                               | ✅                                 | ✅                         |
+| 前缀缓存                       | ✅ 后续轮 `cache_read` ~25.5k | ✅ `cache_read` 53k–111k         | ✅ `cache_read` ~17.7k             | ✅                         |
+| thinking/签名                  | ✅ 尾随签名已合并修复         | ✅ `thinking:enabled,8192` 正常  | ✅ thinking 输出正常               | ✅                         |
+| 客户端压缩                     | CC 自带                       | pi 自带(16k reserve/20k recent)  | kimi-code 自带                     | codex 自带(`auto_compact`) |
 
 ## 各客户端接入时踩过的坑(已修)
 
@@ -51,6 +51,6 @@
 
 ## 已知边界
 
-- 免费档模型(swe-2-*)缓存是 best-effort 前缀匹配(~75-90% 命中),偶发逐出属正常
+- 免费档模型(swe-2-\*)缓存是 best-effort 前缀匹配(~75-90% 命中),偶发逐出属正常
 - 重启 devin-2api 会掐断在途请求,ccload 会把渠道打冷却——重启后检查 `channels.cooldown_until`,必要时清零
 - 上游流式中途失败(HTTP 200 + `response.failed`)算真失败,会正常计入 ccload 冷却统计

@@ -43,6 +43,8 @@
 
 使用:`pi --provider devin --model swe-2-max`,交互里 `/model` 也可选。
 
+**权限**:pi 没有权限审批体系,工具默认全部直接执行。收窄用 `--tools read,grep,find,ls`(白名单)、`--no-builtin-tools`、`--no-tools`。
+
 ## kimi-code
 
 `~/.kimi-code/config.toml`:
@@ -63,6 +65,23 @@ capabilities = ["thinking", "tool_use", "image_in"]
 ```
 
 陌生模型名必须手写 `capabilities`,否则没有工具调用。可选值:`thinking` / `always_thinking` / `tool_use` / `image_in` / `video_in`——`image_in` 已实测(swe-2-max 支持图片输入,历史图片会被代理转成文本占位);`video_in` 不要开,上游 `ChatMessagePrompt` 没有视频字段。也支持 `type = "openai"`(chat completions)或 `"openai_responses"`。
+
+**权限**:三档模式 + 细粒度规则。
+
+```toml
+default_permission_mode = "auto"   # manual(默认逐条问) / yolo(常规自动,危险问) / auto(全自动)
+default_plan_mode = false           # 只读规划模式
+
+[[permission.rules]]
+decision = "allow"
+pattern = "Read"
+
+[[permission.rules]]
+decision = "deny"
+pattern = "Bash(rm -rf*)"
+```
+
+单次启动用 `-y`/`--yolo` 或 `--auto`;另有 `[[hooks]] event="PreToolUse"` 可挂自定义审批脚本。
 
 ## Codex
 
