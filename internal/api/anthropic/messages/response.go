@@ -40,6 +40,9 @@ type contentBlockState struct {
 	toolID    string
 	toolName  string
 	input     strings.Builder
+	// pendingSig 表示思考块正文已结束但尚未发出 content_block_stop，
+	// 等待可能尾随到达的签名帧，避免签名落成独立的畸形思考块。
+	pendingSig bool
 }
 
 // NewStreamEncoder 为一次 Anthropic Messages 流创建编码状态。
@@ -98,6 +101,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		return encoder.thinkingDelta(event), nil
 	case llm.ResponseEventThinkingEnd:
 		return encoder.endThinking(event), nil
+	case llm.ResponseEventThinkingSignature:
+		return encoder.thinkingSignature(event), nil
 	case llm.ResponseEventToolCallStart:
 		return encoder.startToolUse(event), nil
 	case llm.ResponseEventToolCallDelta:
@@ -138,13 +143,12 @@ func (encoder *StreamEncoder) startText(event llm.ResponseEvent) []SSEEvent {
 	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "text"}
 	encoder.blocks = append(encoder.blocks, state)
-	return []SSEEvent{
-		encoder.event("content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         event.ContentIndex,
-			"content_block": map[string]any{"type": "text", "text": ""},
-		}),
-	}
+	events := encoder.flushPendingThinking()
+	return append(events, encoder.event("content_block_start", map[string]any{
+		"type":          "content_block_start",
+		"index":         event.ContentIndex,
+		"content_block": map[string]any{"type": "text", "text": ""},
+	}))
 }
 
 func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) []SSEEvent {
@@ -180,11 +184,12 @@ func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent 
 	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "thinking"}
 	encoder.blocks = append(encoder.blocks, state)
-	return []SSEEvent{encoder.event("content_block_start", map[string]any{
+	events := encoder.flushPendingThinking()
+	return append(events, encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
 		"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
-	})}
+	}))
 }
 
 func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent {
@@ -209,31 +214,77 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) []SSEEvent {
 	if thinking == "" {
 		thinking = state.thinking.String()
 	}
+	state.thinking.Reset()
+	state.thinking.WriteString(thinking)
 	if event.Partial != nil && event.ContentIndex < len(event.Partial.Content) {
 		if t, ok := event.Partial.Content[event.ContentIndex].(llm.ThinkingContent); ok {
 			state.signature.WriteString(t.ThinkingSignature)
 		}
 	}
-	block := map[string]any{"type": "thinking", "thinking": thinking}
+	// 上游把签名作为正文之后的尾随帧发送：尚无签名时推迟
+	// content_block_stop，待 signature 事件或下一事件再收尾。
+	if state.signature.Len() == 0 {
+		state.pendingSig = true
+		return nil
+	}
+	return []SSEEvent{encoder.stopThinking(state)}
+}
+
+func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) []SSEEvent {
+	state := encoder.block(event.ContentIndex, "thinking")
+	if state == nil {
+		return nil
+	}
+	state.signature.WriteString(event.Delta)
+	if !state.pendingSig {
+		return nil
+	}
+	state.pendingSig = false
+	return []SSEEvent{
+		encoder.event("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": state.index,
+			"delta": map[string]any{"type": "signature_delta", "signature": event.Delta},
+		}),
+		encoder.stopThinking(state),
+	}
+}
+
+// flushPendingThinking 在发出其他事件前补发挂起的思考块收尾，
+// 上游没有尾随签名时保证块仍按序正常关闭。
+func (encoder *StreamEncoder) flushPendingThinking() []SSEEvent {
+	var events []SSEEvent
+	for _, state := range encoder.blocks {
+		if state.pendingSig {
+			state.pendingSig = false
+			events = append(events, encoder.stopThinking(state))
+		}
+	}
+	return events
+}
+
+func (encoder *StreamEncoder) stopThinking(state *contentBlockState) SSEEvent {
+	block := map[string]any{"type": "thinking", "thinking": state.thinking.String()}
 	if sig := state.signature.String(); sig != "" {
 		block["signature"] = sig
 	}
-	return []SSEEvent{encoder.event("content_block_stop", map[string]any{
+	return encoder.event("content_block_stop", map[string]any{
 		"type":          "content_block_stop",
-		"index":         event.ContentIndex,
+		"index":         state.index,
 		"content_block": block,
-	})}
+	})
 }
 
 func (encoder *StreamEncoder) startToolUse(event llm.ResponseEvent) []SSEEvent {
 	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "tool_use", toolID: event.ToolCallID, toolName: event.ToolName}
 	encoder.blocks = append(encoder.blocks, state)
-	return []SSEEvent{encoder.event("content_block_start", map[string]any{
+	events := encoder.flushPendingThinking()
+	return append(events, encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
 		"content_block": map[string]any{"type": "tool_use", "id": event.ToolCallID, "name": event.ToolName, "input": map[string]any{}},
-	})}
+	}))
 }
 
 func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) []SSEEvent {
@@ -277,14 +328,18 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 		encoder.usage = event.Message.Usage
 	}
 	delta := map[string]any{"stop_reason": anthropicStopReason(event.Reason), "stop_sequence": nil}
-	events := []SSEEvent{
+	events := encoder.flushPendingThinking()
+	events = append(events,
 		encoder.event("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": delta,
-			"usage": map[string]any{"output_tokens": encoder.usage.Output},
+			"usage": map[string]any{
+				"input_tokens":  encoder.usage.Input,
+				"output_tokens": 0,
+			},
 		}),
 		encoder.event("message_stop", map[string]any{"type": "message_stop"}),
-	}
+	)
 	return events
 }
 
@@ -297,13 +352,14 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// Anthropic 官方流式错误格式：
 	// event: error
 	// data: {"type":"error","error":{"type":"...","message":"..."}}
-	return []SSEEvent{encoder.event("error", map[string]any{
+	events := encoder.flushPendingThinking()
+	return append(events, encoder.event("error", map[string]any{
 		"type": "error",
 		"error": map[string]any{
 			"type":    common.AnthropicErrorType(message),
 			"message": message,
 		},
-	})}
+	}))
 }
 
 func (encoder *StreamEncoder) block(index int, kind string) *contentBlockState {
