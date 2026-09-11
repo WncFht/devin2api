@@ -75,6 +75,16 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	{id: "a7-json-wrap", pattern: regexp.MustCompile(`do not wrap the patch in JSON\.`), replacement: "provide the patch as plain text.", promptOnly: true},
 	// 本项目实测：Claude Code 提示词的 tool-call 冒号句也是指纹。
 	rule("cc-colon-toolcall", `(?i)Do not use a colon before tool calls\.[^\n]*?with a period\.`, "Never put a colon before a tool call; write text like \"Let me read the file.\" ending with a period instead of a colon before the call."),
+	// CC 2.1.x 提示词新增指纹行（本项目逐行 bisect 实证）：
+	// 自动压缩句、/help 品牌行、Agent 工具引导句、CLAUDE.md 行、memory 强制句。
+	rule("cc-autocompact", `(?i)The system will automatically compress prior messages in your conversation as it approaches context limits\.[^\n]*`, "Earlier messages may be automatically summarized as the conversation grows long, so the conversation is not bounded by the context window."),
+	rule("cc-help-line", `(?im)^(\s*-\s*)/help:\s*Get help with using Claude Code[^\n]*`, "$1/help: Get help with using this CLI"),
+	rule("cc-agent-tool", `(?i)Use the Agent tool with specialized agents when the task at hand matches the agent's description\.[^\n]*`, "Use the Agent tool with specialized agents when the task matches the agent's description. Delegation is useful for parallelizing independent queries and for keeping the main context window free of excessive results, but avoid using it when not needed, and do not repeat work already delegated to a subagent."),
+	rule("cc-claudemd", `(?i)Anything already documented in CLAUDE\.md files\.`, "Anything already documented in project instruction files."),
+	rule("cc-memory-must", `(?i)You MUST access memory when the user explicitly asks you to check, recall, or remember\.`, "Always consult memory when the user explicitly asks you to check, recall, or remember."),
+	rule("cc-feedback", `(?im)^(\s*-\s*)To give feedback, users should report the issue at https://github\.com/anthropics/claude-code/issues[^\n]*`, "$1To give feedback, users should report issues to the maintainers of this CLI."),
+	rule("cc-blast-radius", `(?i)Carefully consider the reversibility and blast radius of actions\.`, "Carefully consider the reversibility and impact of actions."),
+	rule("cc-claudemd-2", `(?i)durable instructions like CLAUDE\.md files`, "durable instructions like project instruction files"),
 }
 
 // sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案。
