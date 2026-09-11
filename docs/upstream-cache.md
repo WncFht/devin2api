@@ -18,13 +18,13 @@
 
 ## 协议字段（`GetChatMessageRequest`）
 
-| 字段 | 说明 |
-|---|---|
-| `system_prompt_cache_options` | system prompt 缓存选项；可设 `CACHE_CONTROL_TYPE_EPHEMERAL` |
-| `ChatMessagePrompt.prompt_cache_options` | 单条消息缓存断点（EPHEMERAL） |
-| `trajectory_reference` / `cascade_id` | 上游轨迹标识，多轮复用同一会话 ID |
-| `message_id` | 每条 ChatMessagePrompt 的标识 |
-| 响应 `cache_read_tokens` / `cache_write_tokens` | 命中/写入计量（`model_usage`） |
+| 字段                                            | 说明                                                        |
+| ----------------------------------------------- | ----------------------------------------------------------- |
+| `system_prompt_cache_options`                   | system prompt 缓存选项；可设 `CACHE_CONTROL_TYPE_EPHEMERAL` |
+| `ChatMessagePrompt.prompt_cache_options`        | 单条消息缓存断点（EPHEMERAL）                               |
+| `trajectory_reference` / `cascade_id`           | 上游轨迹标识，多轮复用同一会话 ID                           |
+| `message_id`                                    | 每条 ChatMessagePrompt 的标识                               |
+| 响应 `cache_read_tokens` / `cache_write_tokens` | 命中/写入计量（`model_usage`）                              |
 
 Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有
 `cache_breakpoint_indices` 等结构化断点字段——`GetChatMessage` 路线用不到。
@@ -39,11 +39,11 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有
 
 ## A/B 实测（swe-2-max，~5.4k token 前缀）
 
-| 模式 | 命中率 | 备注 |
-|---|---|---|
-| 稳定 trajectory+cascade+msgid | 7/8 | 首次冷写后近乎必中 |
-| 全随机 ID、无 trajectory | 6/6（暖后） | 内容前缀即可命中 |
-| 加 EPHEMERAL 标记 | 6/8 | 标记对免费档无害 |
+| 模式                          | 命中率      | 备注               |
+| ----------------------------- | ----------- | ------------------ |
+| 稳定 trajectory+cascade+msgid | 7/8         | 首次冷写后近乎必中 |
+| 全随机 ID、无 trajectory      | 6/6（暖后） | 内容前缀即可命中   |
+| 加 EPHEMERAL 标记             | 6/8         | 标记对免费档无害   |
 
 命中特征：`input_tokens=1, cached_tokens≈5366`（整段前缀+历史全命中，
 仅新 token 计费）。未命中：`input_tokens=5367, cached_tokens=0`。
