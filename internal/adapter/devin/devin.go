@@ -121,13 +121,22 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	recorder := debuglog.FromContext(ctx)
 	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
-	stream, err := adapter.getChatMessageWithRetry(ctx, protoRequest)
+	// streamCtx 由 responseStream 持有：看门狗判死或客户端断开时
+	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest)
 	if err != nil {
+		cancel()
 		recorder.WriteError("devin_connect", err)
 		// 透传上游 Connect 错误原文，不包一层模糊前缀。
 		return nil, connectError(err)
 	}
-	return &responseStream{upstream: stream, decoder: newResponseDecoder(model, request.StopSequences), recorder: recorder}, nil
+	return &responseStream{
+		frames:   pumpUpstream(stream),
+		cancel:   cancel,
+		decoder:  newResponseDecoder(model, request.StopSequences),
+		recorder: recorder,
+	}, nil
 }
 
 // maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
@@ -790,10 +799,49 @@ func randomHex(size int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-// responseStream 从 Connect 上游按需读取帧并依次返回 decoder 生成的事件。
+// upstreamStallTimeout 是相邻两个上游帧之间允许的最长静默；超时即判定
+// 传输层已死（半开连接、上游挂死），按传输错误收尾而不是无限等待。
+// 取值需高于上游首批帧的实测延迟（长思考可达 45s+）。
+// var 而非 const：测试临时缩短它来覆盖超时路径。
+var upstreamStallTimeout = 120 * time.Second
+
+// upstreamFrameBuffer 是泵协程可超前读取的帧数：上游生产与客户端
+// 消费解耦，同时保留对上游的背压上限。
+const upstreamFrameBuffer = 64
+
+// upstreamFrame 是泵协程的一次产出：response 为正常数据帧；
+// response 为 nil 表示流终止，err 为终止错误（正常 EOF 时为 nil）。
+type upstreamFrame struct {
+	response *devinproto.GetChatMessageResponse
+	err      error
+}
+
+// pumpUpstream 把阻塞的 Receive 归一化为 channel 帧序列：Receive 只能被
+// ctx 取消打断，交给协程后 Recv 才能在等待期间响应静默看门狗与客户端断开。
+// 流终止时 Err() 作为最后一帧发出；缓冲满（调用方已放弃消费）则丢弃，
+// 保证泵协程在任何情况下都能退出。
+func pumpUpstream(upstream devinResponseReceiver) <-chan upstreamFrame {
+	frames := make(chan upstreamFrame, upstreamFrameBuffer)
+	go func() {
+		defer close(frames)
+		for upstream.Receive() {
+			frames <- upstreamFrame{response: upstream.Msg()}
+		}
+		select {
+		case frames <- upstreamFrame{err: upstream.Err()}:
+		default:
+		}
+	}()
+	return frames
+}
+
+// responseStream 从泵协程读取上游帧并依次返回 decoder 生成的事件。
 type responseStream struct {
-	// upstream 是 Devin Connect 返回的服务端流。
-	upstream devinResponseReceiver
+	// frames 是泵协程产出的上游帧通道；终止帧 response 为 nil。
+	frames <-chan upstreamFrame
+	// cancel 中止上游流：看门狗判死、客户端 ctx 取消或流正常结束时调用，
+	// 打断泵协程内可能仍阻塞的 Receive。
+	cancel context.CancelFunc
 	// decoder 将一个 Devin protobuf 帧转换为零个或多个中间响应事件。
 	decoder *responseDecoder
 	// recorder 记录 Devin 原始响应帧；nil 表示禁用调试日志。
@@ -833,15 +881,40 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.pendingStart = stream.decoder.start()
 			continue
 		}
-		if !stream.upstream.Receive() {
-			stream.queue = stream.release(stream.decoder.finish(stream.upstream.Err()))
+		timer := time.NewTimer(upstreamStallTimeout)
+		select {
+		case frame, ok := <-stream.frames:
+			timer.Stop()
+			if !ok || frame.response == nil {
+				// ok==false：缓冲满时终止帧被丢弃（见 pumpUpstream），
+				// 按正常 EOF 处理，缺 stop reason 由 decoder 报错。
+				var upstreamErr error
+				if ok {
+					upstreamErr = frame.err
+				}
+				stream.queue = stream.release(stream.decoder.finish(upstreamErr))
+				stream.finished = true
+				continue
+			}
+			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
+			stream.queue = stream.release(stream.decoder.decode(frame.response))
+			stream.finished = stream.decoder.finished
+		case <-timer.C:
+			// 上游静默超时：取消底层流打断泵协程；已缓冲未消费的帧
+			// 补记进原始日志留证，然后按传输错误收尾。
+			stream.cancel()
+			stream.drainFrames()
+			stream.queue = stream.release(stream.decoder.finish(fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)))
 			stream.finished = true
-			break
+		case <-ctx.Done():
+			timer.Stop()
+			stream.cancel()
+			stream.queue = stream.release(stream.decoder.finish(ctx.Err()))
+			stream.finished = true
 		}
-		response := stream.upstream.Msg()
-		recordProtoJSON(stream.recorder, "04-devin-response.jsonl", response)
-		stream.queue = stream.release(stream.decoder.decode(response))
-		stream.finished = stream.decoder.finished
+	}
+	if stream.finished {
+		stream.cancel()
 	}
 	if len(stream.queue) > 0 {
 		event := stream.queue[0]
@@ -849,6 +922,22 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
+}
+
+// drainFrames 把看门狗判死时已缓冲未消费的上游帧补记进原始日志——
+// 「死前最后输出了什么」是判断上游挂死形态的关键证据。
+func (stream *responseStream) drainFrames() {
+	for {
+		select {
+		case frame, ok := <-stream.frames:
+			if !ok || frame.response == nil {
+				return
+			}
+			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
+		default:
+			return
+		}
+	}
 }
 
 // release 把 decoder 产出的第一批事件交给调用方：非错误批次前置扣留的

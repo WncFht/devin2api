@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	devinproto "local/devinproto"
 
@@ -61,6 +62,24 @@ func (receiver *errorDevinResponseReceiver) Msg() *devinproto.GetChatMessageResp
 
 // Err 返回流终止错误。
 func (receiver *errorDevinResponseReceiver) Err() error { return receiver.err }
+
+// stalledDevinResponseReceiver 模拟上游建立后不再产出任何帧的挂死流：
+// Receive 阻塞至 release 关闭，供静默看门狗与取消路径的测试使用。
+type stalledDevinResponseReceiver struct {
+	release chan struct{}
+}
+
+// Receive 阻塞到 release 关闭再报告流结束。
+func (receiver *stalledDevinResponseReceiver) Receive() bool {
+	<-receiver.release
+	return false
+}
+
+// Msg 没有可返回的帧。
+func (receiver *stalledDevinResponseReceiver) Msg() *devinproto.GetChatMessageResponse { return nil }
+
+// Err 模拟正常 EOF。
+func (receiver *stalledDevinResponseReceiver) Err() error { return nil }
 
 func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	request := llm.RequestMessages{
@@ -486,7 +505,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 		}},
 		{},
 	}}
-	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("requested-model", nil)}
+	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil)}
 	var done llm.ResponseEvent
 	for {
 		event, err := stream.Recv(context.Background())
@@ -763,8 +782,9 @@ func TestIsTransientConnectError(t *testing.T) {
 // 渠道故障并冷却整个渠道。
 func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
 	stream := &responseStream{
-		upstream: &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))},
-		decoder:  newResponseDecoder("model", nil),
+		frames:  pumpUpstream(&errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))}),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil),
 	}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
@@ -785,7 +805,7 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
 		{DeltaText: proto.String("hi")},
 	}}
-	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("model", nil)}
+	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
 	first, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -799,6 +819,47 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 	}
 	if second.Type != llm.ResponseEventTextStart {
 		t.Fatalf("second event = %q, want text_start", second.Type)
+	}
+}
+
+// TestResponseStreamFailsOnUpstreamStall 的测试动机是：上游建立后无限静默
+// （半开连接、上游挂死）时看门狗必须把请求按传输错误收尾，而不是干等
+// 客户端超时或主动断开。
+func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
+	defer func(timeout time.Duration) { upstreamStallTimeout = timeout }(upstreamStallTimeout)
+	upstreamStallTimeout = 20 * time.Millisecond
+	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil || !strings.Contains(event.Error.ErrorMessage, "stalled") {
+		t.Fatalf("event = %#v, want upstream stall error", event)
+	}
+	if _, err := stream.Recv(context.Background()); err != io.EOF {
+		t.Fatalf("after stall Recv err = %v, want io.EOF", err)
+	}
+}
+
+// TestResponseStreamStopsOnContextCancel 验证等待上游帧期间客户端 ctx
+// 取消能立即结束流，而不是挂在阻塞的 Receive 上等看门狗超时。
+func TestResponseStreamStopsOnContextCancel(t *testing.T) {
+	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	event, err := stream.Recv(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil || !strings.Contains(event.Error.ErrorMessage, "canceled") {
+		t.Fatalf("event = %#v, want cancellation error", event)
 	}
 }
 
