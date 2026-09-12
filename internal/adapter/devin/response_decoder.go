@@ -113,23 +113,25 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 		// 停止序列已截断对外输出；继续消费上游帧仅为 usage 统计完整。
 		return nil
 	}
-	events := make([]llm.ResponseEvent, 0, 6)
+	// 子解码器共享同一个 events 切片追加事件；多数帧只产 1-2 个事件，
+	// 共享切片把每帧的 2-3 次小分配压到接近一次。
+	events := make([]llm.ResponseEvent, 0, 4)
 	// 上游把签名作为全部正文之后的尾随帧发送；思考块已关闭时
 	// 不能新开思考块，要把签名合并回上一个思考块。
 	if response.GetDeltaSignature() != "" && response.GetDeltaThinking() == "" && !decoder.thinkingOpen {
-		events = append(events, decoder.decodeLateSignature(response)...)
+		events = decoder.decodeLateSignature(events, response)
 	} else if response.GetDeltaThinking() != "" || response.GetDeltaSignature() != "" || response.GetThinkingRedacted() {
-		events = append(events, decoder.endText()...)
-		events = append(events, decoder.decodeThinking(response)...)
+		events = decoder.endText(events)
+		events = decoder.decodeThinking(events, response)
 	}
 	if response.GetDeltaText() != "" {
-		events = append(events, decoder.endThinking()...)
-		events = append(events, decoder.decodeText(response.GetDeltaText())...)
+		events = decoder.endThinking(events)
+		events = decoder.decodeText(events, response.GetDeltaText())
 	}
 	for _, delta := range response.GetDeltaToolCalls() {
-		events = append(events, decoder.endThinking()...)
-		events = append(events, decoder.endText()...)
-		events = append(events, decoder.decodeTool(delta)...)
+		events = decoder.endThinking(events)
+		events = decoder.endText(events)
+		events = decoder.decodeTool(events, delta)
 	}
 	if response.GetStopReason() != devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED {
 		decoder.hasStopReason = true
@@ -229,8 +231,7 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 	}
 }
 
-func (decoder *responseDecoder) decodeThinking(response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
-	events := make([]llm.ResponseEvent, 0, 2)
+func (decoder *responseDecoder) decodeThinking(events []llm.ResponseEvent, response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
 	if !decoder.thinkingOpen {
 		decoder.thinking = &llm.ThinkingContent{Redacted: response.GetThinkingRedacted()}
 		decoder.thinkingBuilder.Reset()
@@ -261,8 +262,7 @@ func (decoder *responseDecoder) decodeThinking(response *devinproto.GetChatMessa
 	return events
 }
 
-func (decoder *responseDecoder) decodeText(delta string) []llm.ResponseEvent {
-	events := make([]llm.ResponseEvent, 0, 2)
+func (decoder *responseDecoder) decodeText(events []llm.ResponseEvent, delta string) []llm.ResponseEvent {
 	if !decoder.textOpen {
 		decoder.text = &llm.TextContent{}
 		decoder.textBuilder.Reset()
@@ -306,7 +306,7 @@ func (decoder *responseDecoder) scanTextForStops(events []llm.ResponseEvent) []l
 		decoder.stoppedByPattern = true
 		decoder.textBuilder.Reset()
 		decoder.textBuilder.WriteString(text[:earliest])
-		return append(events, decoder.endText()...)
+		return decoder.endText(events)
 	}
 	if safe := len(text) - decoder.maxPatternLen + 1; safe > decoder.textEmitted {
 		events = append(events, decoder.emitTextDelta(text[decoder.textEmitted:safe]))
@@ -320,9 +320,9 @@ func (decoder *responseDecoder) emitTextDelta(delta string) llm.ResponseEvent {
 	return llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial}
 }
 
-func (decoder *responseDecoder) decodeTool(delta *devinproto.ExaCodeiumCommonPb_ChatToolCall) []llm.ResponseEvent {
+func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *devinproto.ExaCodeiumCommonPb_ChatToolCall) []llm.ResponseEvent {
 	if delta == nil {
-		return nil
+		return events
 	}
 	state := decoder.findTool(delta.GetId())
 	if state == nil {
@@ -359,12 +359,11 @@ func (decoder *responseDecoder) decodeTool(delta *devinproto.ExaCodeiumCommonPb_
 	if hasFragment {
 		state.arguments.WriteString(fragment)
 	}
-	return decoder.decodeNativeTool(state, fragment, hasFragment)
+	return decoder.decodeNativeTool(events, state, fragment, hasFragment)
 }
 
 // decodeNativeTool 保留 Devin 原生工具名称和参数增量语义。
-func (decoder *responseDecoder) decodeNativeTool(state *toolState, fragment string, hasFragment bool) []llm.ResponseEvent {
-	events := make([]llm.ResponseEvent, 0, 2)
+func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, state *toolState, fragment string, hasFragment bool) []llm.ResponseEvent {
 	if !state.emitted {
 		state.contentIdx = len(decoder.partial.Content)
 		state.emitted = true
@@ -388,7 +387,7 @@ func (decoder *responseDecoder) decodeNativeTool(state *toolState, fragment stri
 // 没有思考块可挂时合成一个空块：openai 体制下签名是唯一思考产物
 // （无 deltaThinking，推理内容密封在签名的 reasoning item 里），
 // 丢弃它会让 /v1/responses 下游永远拿不到 reasoning item。
-func (decoder *responseDecoder) decodeLateSignature(response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
+func (decoder *responseDecoder) decodeLateSignature(events []llm.ResponseEvent, response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
 	signature := response.GetDeltaSignature()
 	for index := len(decoder.partial.Content) - 1; index >= 0; index-- {
 		thinking, ok := decoder.partial.Content[index].(llm.ThinkingContent)
@@ -401,10 +400,10 @@ func (decoder *responseDecoder) decodeLateSignature(response *devinproto.GetChat
 		}
 		thinking.Redacted = thinking.Redacted || response.GetThinkingRedacted()
 		decoder.partial.Content[index] = thinking
-		return []llm.ResponseEvent{{
+		return append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventThinkingSignature, ContentIndex: index,
 			Delta: signature, Partial: &decoder.partial,
-		}}
+		})
 	}
 	thinking := llm.ThinkingContent{
 		ThinkingSignature: signature,
@@ -416,33 +415,32 @@ func (decoder *responseDecoder) decodeLateSignature(response *devinproto.GetChat
 	// 事件共享同一 Partial 指针，编码器在 start/end 边界就会读到块内签名；
 	// 再发 thinking_signature 会与之叠加翻倍，且合成块永远没有 thinking_end，
 	// 只发签名事件会让编码器侧的 item 悬挂到流终止报错。
-	return []llm.ResponseEvent{
-		{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: &decoder.partial},
-		{Type: llm.ResponseEventThinkingEnd, ContentIndex: index, Partial: &decoder.partial},
-	}
+	return append(events,
+		llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: &decoder.partial},
+		llm.ResponseEvent{Type: llm.ResponseEventThinkingEnd, ContentIndex: index, Partial: &decoder.partial},
+	)
 }
 
-func (decoder *responseDecoder) endThinking() []llm.ResponseEvent {
+func (decoder *responseDecoder) endThinking(events []llm.ResponseEvent) []llm.ResponseEvent {
 	if !decoder.thinkingOpen || decoder.thinking == nil {
-		return nil
+		return events
 	}
 	decoder.thinkingOpen = false
 	// 只在思考块结束时一次性生成完整思考与签名。
 	decoder.thinking.Thinking = decoder.thinkingBuilder.String()
 	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
-	return []llm.ResponseEvent{{
+	return append(events, llm.ResponseEvent{
 		Type: llm.ResponseEventThinkingEnd, ContentIndex: decoder.thinkIdx,
 		Content: decoder.thinking.Thinking, Partial: &decoder.partial,
-	}}
+	})
 }
 
-func (decoder *responseDecoder) endText() []llm.ResponseEvent {
+func (decoder *responseDecoder) endText(events []llm.ResponseEvent) []llm.ResponseEvent {
 	if !decoder.textOpen || decoder.text == nil {
-		return nil
+		return events
 	}
 	decoder.textOpen = false
-	var events []llm.ResponseEvent
 	// 有停止序列时尾部窗口可能还有未下发内容；截断时 builder 已被重置
 	// 为截断文本且 textEmitted 不超过其长度，不会多发。
 	if pending := decoder.textBuilder.String(); decoder.textEmitted < len(pending) {
@@ -475,8 +473,8 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 	}
 	events := make([]llm.ResponseEvent, 0, len(decoder.tools)*3+3)
 	decoder.partial.StopReason = reason
-	events = append(events, decoder.endThinking()...)
-	events = append(events, decoder.endText()...)
+	events = decoder.endThinking(events)
+	events = decoder.endText(events)
 	for _, state := range decoder.tools {
 		if !state.emitted {
 			continue
