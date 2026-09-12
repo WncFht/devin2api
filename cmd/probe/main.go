@@ -307,6 +307,10 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	noFingerprint := fs.Bool("no-fingerprint", false, "")
 	noIDs := fs.Bool("no-ids", false, "")
 	maxTokens := fs.Int("max-tokens", 0, "")
+	temperature := fs.Float64("temperature", -1, "configuration.temperature (<0 = keep default 1)")
+	topP := fs.Float64("top-p", -1, "configuration.top_p (<0 = keep default 0.95)")
+	topK := fs.Int("top-k", -1, "configuration.top_k (<0 = keep default 40)")
+	trajectoryID := fs.String("trajectory-id", "", "explicit trajectory_id (share across calls for session continuation)")
 	images := fs.Int("images", 0, "")
 	internalModel := fs.Int("internal-model", 0, "")
 	assignJWT := fs.String("assign-jwt", "", "model_assignment_jwt")
@@ -389,6 +393,15 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if *maxTokens > 0 {
 		req.Configuration.MaxTokens = proto.Uint64(uint64(*maxTokens))
 	}
+	if *temperature >= 0 {
+		req.Configuration.Temperature = proto.Float64(*temperature)
+	}
+	if *topP >= 0 {
+		req.Configuration.TopP = proto.Float64(*topP)
+	}
+	if *topK >= 0 {
+		req.Configuration.TopK = proto.Uint64(uint64(*topK))
+	}
 	if !*noIDs {
 		if *cascadeID != "" {
 			req.CascadeId = proto.String(*cascadeID)
@@ -397,8 +410,12 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		} else {
 			req.CascadeId = proto.String(uuid())
 		}
+		trajID := uuid()
+		if *trajectoryID != "" {
+			trajID = *trajectoryID
+		}
 		req.TrajectoryReference = &devinproto.ExaCortexPb_CortexTrajectoryReference{
-			TrajectoryId:   proto.String(uuid()),
+			TrajectoryId:   proto.String(trajID),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
 		}
@@ -610,6 +627,10 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	if err := stream.Err(); err != nil {
 		fmt.Printf("== stream err after %d frames: %v\n", n, err)
 		dumpConnectErr(err)
+	}
+	fmt.Println("== headers:", j(stream.ResponseHeader()))
+	fmt.Println("== trailers:", j(stream.ResponseTrailer()))
+	if err := stream.Err(); err != nil {
 		return nil
 	}
 	fmt.Printf("== %d frames\n", n)
@@ -1010,6 +1031,15 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			user("hi"),
 			{MessageId: proto.String(uuid()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum()},
+			user("continue"),
+		}
+	case "empty-assistant":
+		// 空 end_turn 回放进历史再追加 continue——CPA#4886 类故障的续传路径。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Say hi"),
+			{MessageId: proto.String(uuid()),
+				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				Prompt: proto.String("")},
 			user("continue"),
 		}
 	case "experiment":
