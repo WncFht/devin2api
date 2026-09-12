@@ -14,10 +14,37 @@ function esc(s) {
 function qa(s) { return esc(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
 function debounce(fn, ms) { let t; return function () { clearTimeout(t); t = setTimeout(fn, ms || 300); }; }
 
+// 顶部 2px 加载条：任何 /panel/api 在途请求期间显示（stale-while-revalidate
+// 的可见信号——刷新时旧数据保留，靠这条线表达"正在更新"）。
+let inflight = 0;
+function loadingBar(delta) {
+  inflight = Math.max(0, inflight + delta);
+  let bar = $('topLoading');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'topLoading';
+    document.body.appendChild(bar);
+  }
+  bar.classList.toggle('on', inflight > 0);
+}
+
+// 侧栏底部网关状态点：跟随最近一次 API 调用结果变色，不额外发心跳。
+function gwState(ok) {
+  const dot = $('gwDot'), txt = $('gwText');
+  if (!dot) return;
+  dot.classList.toggle('err', !ok);
+  txt.textContent = ok ? '运行中' : '连接异常';
+}
+
 async function api(path, opts) {
-  const res = await fetch('/panel/api' + path, opts);
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return res.json();
+  loadingBar(1);
+  try {
+    const res = await fetch('/panel/api' + path, opts);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    gwState(true);
+    return res.json();
+  } catch (e) { gwState(false); throw e; }
+  finally { loadingBar(-1); }
 }
 
 // ---------- 格式化 ----------
@@ -77,9 +104,50 @@ function money(v) {
 }
 function statusClass(code) {
   if (code >= 500) return 'status-err';
+  if (code === 429) return 'status-rl';
   if (code >= 400) return 'status-warn';
   if (code <= 0) return 'muted';
   return 'status-ok';
+}
+// 结果 badge：语义分层——failed 红、aborted/disconnected 琥珀（非错误）、
+// completed 绿、进行中 accent。中断/断连不算失败是重要区分。
+function resultBadge(result) {
+  const map = {
+    completed: ['ok', '成功'], failed: ['err', '失败'],
+    aborted: ['warn', '已中断'], disconnected: ['warn', '断连'],
+  };
+  const m = map[result] || ['muted', result || '-'];
+  return '<span class="rbadge r-' + m[0] + '">' + esc(m[1]) + '</span>';
+}
+// 阈值着色：秒值与百分比分档上色的统一口径（参照 ccLoad timingColor）。
+function secClass(v, okLim, warnLim) {
+  const s = Number(v) / 1000;
+  return s < okLim ? 'status-ok' : s < warnLim ? 'status-warn' : 'status-err';
+}
+function rateClass(pct, okLim, warnLim) {
+  const p = Number(pct);
+  return p >= (okLim ?? 95) ? 'status-ok' : p >= (warnLim ?? 80) ? 'status-warn' : 'status-err';
+}
+// fmtRel 相对时间（"3 分钟前"），title 里放绝对时间由调用方决定。
+function fmtRel(v) {
+  const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
+  if (!Number.isFinite(t) || t <= 0) return '-';
+  const d = (Date.now() - t) / 1000;
+  if (d < 60) return Math.max(0, Math.floor(d)) + ' 秒前';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  return Math.floor(d / 86400) + ' 天前';
+}
+// fmtIn 倒计时（"2h 34m 后"），用于配额重置等未来时刻。
+function fmtIn(v) {
+  const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
+  if (!Number.isFinite(t) || t <= 0) return '-';
+  const d = (t - Date.now()) / 1000;
+  if (d <= 0) return '已重置';
+  if (d < 60) return '<1m 后';
+  if (d < 3600) return Math.floor(d / 60) + 'm 后';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ' + Math.floor(d % 3600 / 60) + 'm 后';
+  return Math.floor(d / 86400) + 'd ' + Math.floor(d % 86400 / 3600) + 'h 后';
 }
 function hitRate(t) {
   const dd = (t.cache_read_tokens || 0) + (t.input_tokens || 0);
@@ -121,6 +189,79 @@ function sumTotals(list) {
   const t = { requests: 0, errors: 0, disconnected: 0, rate_limited: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, total_tokens: 0, gen_ms: 0, gen_tokens: 0 };
   list.forEach(p => { for (const k in t) t[k] += p[k] || 0; });
   return t;
+}
+
+// ---------- 反馈组件 ----------
+// toast：右上角堆叠，success 3s / error 5s 自动消失。
+function toast(msg, type) {
+  let box = $('toastBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toastBox';
+    document.body.appendChild(box);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast t-' + (type || 'info');
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(() => el.classList.add('out'), type === 'err' ? 5000 : 3000);
+  setTimeout(() => el.remove(), type === 'err' ? 5400 : 3400);
+}
+
+// copyText 带 execCommand 降级（非 HTTPS 内网下 clipboard API 不存在）。
+async function copyText(text, hint) {
+  let ok = false;
+  try {
+    if (navigator.clipboard) { await navigator.clipboard.writeText(text); ok = true; }
+  } catch (e) { ok = false; }
+  if (!ok) {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+  }
+  toast(ok ? (hint || '已复制') : '复制失败', ok ? 'ok' : 'err');
+  return ok;
+}
+
+// confirmBox：窄弹窗替代原生 confirm，danger 时确认键红底。
+// 返回 Promise<boolean>；Esc/遮罩点击 = 取消。
+function confirmBox(title, msg, danger) {
+  return new Promise(resolve => {
+    const ov = document.createElement('div');
+    ov.className = 'dlg-mask';
+    ov.innerHTML = '<div class="dlg"><div class="dlg-t">' + esc(title) + '</div>' +
+      '<div class="dlg-m">' + esc(msg) + '</div>' +
+      '<div class="dlg-b"><button class="btn" data-a="no">取消</button>' +
+      '<button class="btn ' + (danger ? 'btn-danger-solid' : 'btn-on-solid') + '" data-a="yes">确认</button></div></div>';
+    const done = v => { ov.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); };
+    ov.addEventListener('click', e => {
+      if (e.target === ov) return done(false);
+      const b = e.target.closest('[data-a]');
+      if (b) done(b.dataset.a === 'yes');
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(ov);
+    ov.querySelector('[data-a=no]').focus();
+  });
+}
+
+// 页面偏好持久化（localStorage，键空间 panel.页面.字段）。
+function loadPref(key, def) {
+  try { const v = localStorage.getItem('panel.' + key); return v === null ? def : JSON.parse(v); }
+  catch (e) { return def; }
+}
+function savePref(key, v) {
+  try { localStorage.setItem('panel.' + key, JSON.stringify(v)); } catch (e) {}
+}
+
+// titleBadge：在途请求数写到标签页标题，后台也能瞥见。
+const baseTitle = 'Devin API - 管理面板';
+function titleBadge(n) {
+  document.title = (n > 0 ? '(' + n + ') ' : '') + baseTitle;
 }
 
 // ---------- 路由与轮询 ----------

@@ -52,7 +52,8 @@ const System = (() => {
       const d = await res.json();
       cur.classList.toggle('on', !!d.enabled);
       cur.textContent = '请求日志: ' + (d.enabled ? '开' : '关');
-    } catch (e) {}
+      toast('请求日志已' + (d.enabled ? '开启' : '关闭'), 'ok');
+    } catch (e) { toast('切换失败：' + e, 'err'); }
   }
 
   async function loadLog(offset) {

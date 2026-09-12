@@ -5,6 +5,7 @@ const Requests = (() => {
   let expandedDir = null;
   let openFile = null;
   let reqLimit = 100;
+  let lastActive = [];
 
   const FILTER_IDS = ['reqSearch', 'fStatusClass', 'fResult', 'fReqModel', 'fErrStage', 'fSince'];
 
@@ -25,23 +26,36 @@ const Requests = (() => {
     return html + '</tbody></table>';
   }
 
+  // 进行中请求渲染成表格顶部的 pending 行（ccLoad 式），状态变化随每轮列表刷新。
+  function pendingRows() {
+    const stateMap = { waiting_upstream: '等上游', receiving_upstream: '收上游', streaming_client: '发客户端' };
+    return lastActive.map(a =>
+      '<tr class="pending-row" data-dir="' + qa(a.dir) + '">' +
+      '<td><span class="pulse-dot"></span><span class="mono">' + esc(a.dir) + '</span></td>' +
+      '<td>' + esc(a.meta && a.meta.api || '-') + '</td>' +
+      '<td><span class="rbadge r-muted">' + esc(stateMap[a.state] || a.state || '进行中') + '</span></td>' +
+      '<td class="mono">' + esc(a.model || '-') + '</td>' +
+      '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
+      '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
+      '<td class="mono muted">已下发 ' + fmtBytes(a.client_bytes) + '</td>' +
+      '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + qa(a.dir) + '">中断</span>' : '') + '</td></tr>'
+    ).join('');
+  }
+
   async function loadActive() {
     try {
       const d = await api('/requests/active');
-      const list = d.active || [];
-      const panel = $('rqActivePanel');
-      if (!list.length) { panel.style.display = 'none'; return; }
-      panel.style.display = '';
-      $('rqActiveBody').innerHTML = activeTable(list);
+      lastActive = d.active || [];
+      titleBadge(lastActive.length);
     } catch (e) { /* 静默 */ }
   }
 
   async function abort(dir) {
-    if (!confirm('中断请求 ' + dir + '？上游与客户端连接都会被取消。')) return;
+    if (!await confirmBox('中断请求', dir + ' — 上游与客户端连接都会被取消。', true)) return;
     try {
       const res = await fetch('/panel/api/requests/' + encodeURIComponent(dir) + '/abort', { method: 'POST' });
-      if (res.ok) { loadActive(); } else { alert('中断失败：' + await res.text()); }
-    } catch (e) { alert('中断失败：' + e); }
+      if (res.ok) { toast('已中断 ' + dir, 'ok'); load(); } else { toast('中断失败：' + await res.text(), 'err'); }
+    } catch (e) { toast('中断失败：' + e, 'err'); }
   }
 
   // ---------- 筛选与列表 ----------
@@ -55,6 +69,9 @@ const Requests = (() => {
   function restoreFilterHash() {
     const h = parseHash();
     FILTER_IDS.forEach(id => { const v = h.params.get(id); if (v) { const el = $(id); if (el) el.value = v; } });
+    // #requests&dir=X 深链：直接展开该请求详情（对应 ccLoad channels.html?id=N）。
+    const dir = h.params.get('dir');
+    if (dir) expandedDir = dir;
   }
 
   function reqQuery() {
@@ -84,11 +101,11 @@ const Requests = (() => {
         tbody.innerHTML = '<tr><td colspan="8" class="loading">调试日志未启用（config: debug.enabled）</td></tr>';
         reqCount.textContent = ''; moreBtn.style.display = 'none'; return;
       }
-      if (!list.length) {
+      if (!list.length && !lastActive.length) {
         tbody.innerHTML = '<tr><td colspan="8" class="loading">暂无请求记录</td></tr>';
         reqCount.textContent = '命中 0 条'; moreBtn.style.display = 'none'; return;
       }
-      let html = '';
+      let html = pendingRows();
       list.forEach(e => {
         const resolved = (e.model && e.model !== e.requested_model) ? ' → ' + esc(e.model) : '';
         const mismatch = e.model_mismatch ? ' <span class="badge badge-high">错配</span>' : '';
@@ -98,13 +115,13 @@ const Requests = (() => {
         const cache = e.cache_read_tokens ? '<div class="muted">缓存读 ' + fmtNum(e.cache_read_tokens) + '</div>' : '';
         const keyh = e.key_hash ? '<div class="muted" title="key hash">' + esc(e.key_hash) + '</div>' : '';
         html += '<tr data-dir="' + qa(e.dir) + '">' +
-          '<td class="mono">' + fmtTime(e.started_at) + '</td>' +
+          '<td class="mono" title="' + esc(e.started_at || '') + '">' + fmtTime(e.started_at) + '</td>' +
           '<td>' + esc(e.api || '-') + '</td>' +
-          '<td class="' + statusClass(e.status_code) + '">' + e.status_code + ' ' + esc(e.result || '') + stream + stage + '</td>' +
+          '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + stage + '</td>' +
           '<td>' + esc(e.requested_model || '-') + resolved + mismatch + premature + '</td>' +
-          '<td class="mono">' + fmtMs(e.duration_ms) + '</td>' +
-          '<td class="mono">' + fmtMs(e.first_upstream_ms) + '</td>' +
-          '<td class="mono">' + fmtNum(e.input_tokens) + '/' + fmtNum(e.output_tokens) + cache + '</td>' +
+          '<td class="mono ' + secClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
+          '<td class="mono ' + secClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
+          '<td class="mono">↓' + fmtNum(e.input_tokens) + ' ↑' + fmtNum(e.output_tokens) + cache + '</td>' +
           '<td class="mono muted">' + esc(e.client_ip || '') + keyh + '</td></tr>';
         if (expandedDir === e.dir) {
           html += '<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>';
@@ -132,7 +149,8 @@ const Requests = (() => {
       h.style.display = ''; h.textContent = '正在查看文件，自动刷新已暂停（再点一次文件名或收起详情后恢复）。';
       return;
     }
-    load(); loadActive();
+    // 先拉在途再渲染列表：pending 行用本轮数据，不滞后一个周期。
+    loadActive().then(load);
   }
 
   function resetAndLoad() { reqLimit = 100; tick(); }
@@ -259,7 +277,7 @@ const Requests = (() => {
       const ab = e.target.closest('[data-abort]');
       if (ab) { e.stopPropagation(); abort(ab.dataset.abort); return; }
       const cp = e.target.closest('[data-copydir]');
-      if (cp) { navigator.clipboard && navigator.clipboard.writeText(cp.dataset.copydir); return; }
+      if (cp) { copyText(cp.dataset.copydir, '已复制 ' + cp.dataset.copydir); return; }
       const mg = e.target.closest('[data-merged]');
       if (mg) { loadMerged(mg.dataset.merged); return; }
       const fl = e.target.closest('.file-link[data-f]');

@@ -6,6 +6,8 @@ const Usage = (() => {
   const RANGES = [['today', '今日'], ['yday', '昨日'], ['3d', '近3天'], ['7d', '近7天'], ['14d', '近14天'], ['all', '全部']];
   let range = 'today';
   let last = null;
+  // 模型表排序状态：key 取 MCOLS 的取值器名，dir 0/-1/1（无/desc/asc）。
+  let mSortKey = null, mSortDir = 0;
 
   function rangeDays(r) {
     const fmt = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -55,7 +57,7 @@ const Usage = (() => {
     const totals = range === 'all' ? (s.window || {}) : sumTotals(pts);
 
     let html = '<div class="kpis">' +
-      kpi(label + '请求', fmtNum(totals.requests || 0), '错误 ' + (totals.errors || 0) + ' · 断连 ' + (totals.disconnected || 0) + ' · 429 ' + (totals.rate_limited || 0)) +
+      kpi(label + '请求', fmtNum(totals.requests || 0), '错 ' + (totals.errors || 0) + ' · 断 ' + (totals.disconnected || 0) + ' · 429 ' + (totals.rate_limited || 0)) +
       kpi('输入', fmtNum(totals.input_tokens), '缓存读 ' + fmtNum(totals.cache_read_tokens), 'info') +
       kpi('输出', fmtNum(totals.output_tokens), '推理 ' + fmtNum(totals.reasoning_tokens), 'ok') +
       kpi('缓存命中率', hitRate(totals), '写 ' + fmtNum(totals.cache_write_tokens), 'cyan') +
@@ -88,8 +90,14 @@ const Usage = (() => {
       ['输入', totals.input_tokens], ['缓存读', totals.cache_read_tokens], ['缓存写', totals.cache_write_tokens],
       ['输出', totals.output_tokens], ['推理', totals.reasoning_tokens],
     ].filter(x => x[1] > 0);
-    const barRows = (range === 'all' ? (d.models || []).map(m => ({ name: m.name, output_tokens: m.output_tokens, requests: m.requests })) : modelRows)
-      .slice().sort((a, b) => b.output_tokens - a.output_tokens).slice(0, 8);
+    // Top8 之外的模型合并为「其他」一行，保证横向条与总量口径一致（sub2api Σ Other）。
+    const allBar = (range === 'all' ? (d.models || []).map(m => ({ name: m.name, output_tokens: m.output_tokens, requests: m.requests })) : modelRows)
+      .slice().sort((a, b) => b.output_tokens - a.output_tokens);
+    let barRows = allBar.slice(0, 8);
+    if (allBar.length > 8) {
+      const rest = allBar.slice(8);
+      barRows.push({ name: '其他 (' + rest.length + ')', output_tokens: rest.reduce((a, m) => a + (m.output_tokens || 0), 0), requests: rest.reduce((a, m) => a + (m.requests || 0), 0), other: true });
+    }
     if (tokenMix.length || barRows.length) {
       html += '<div class="chart-grid"><div class="chart-box"><div class="chart-cap">Token 构成 · ' + esc(label) + '</div><div id="uMix" class="chart chart-h260"></div></div>' +
         '<div class="chart-box"><div class="chart-cap">模型输出 Token Top ' + barRows.length + ' · ' + esc(label) + '</div><div id="uModelBar" class="chart chart-h260"></div></div></div>';
@@ -119,29 +127,66 @@ const Usage = (() => {
       html += '</tbody></table></div><div class="note">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。本地并发拒绝不进索引，此处全是上游限流。</div></div>';
     }
 
-    // 按模型表
+    // 按模型表：表头三态排序 + 加权合计行 + 阈值着色。
     const allRows = range === 'all' ? (d.models || []) : modelRows;
     if (allRows.length) {
       const wide = range === 'all';
-      html += '<div class="panel"><h3>按模型 <span class="sub">' + esc(label) + (wide ? ' · 含成本估算' : '') + ' · 点击模型筛选请求</span></h3>' +
-        '<div class="scroll-x"><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>429</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th>' +
-        (wide ? '<th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th>' : '') + '</tr></thead><tbody>';
-      allRows.forEach(m => {
-        const sr = m.success_rate != null ? m.success_rate : (m.requests ? (m.requests - m.errors - m.disconnected) / m.requests : 0);
+      const hitRateVal = m => {
+        const dd = (m.cache_read_tokens || 0) + (m.input_tokens || 0);
+        return dd > 0 ? m.cache_read_tokens / dd * 100 : -1;
+      };
+      const srOf = m => (m.success_rate != null ? m.success_rate : (m.requests ? (m.requests - m.errors - m.disconnected) / m.requests : 0)) * 100;
+      const tpsOf = m => m.gen_ms > 0 ? m.gen_tokens / (m.gen_ms / 1000) : -1;
+      // 排序取值器：缺省值排到最后。
+      const MCOLS = {
+        requests: m => m.requests || 0, sr: srOf, rate_limited: m => m.rate_limited || 0,
+        input_tokens: m => m.input_tokens || 0, output_tokens: m => m.output_tokens || 0,
+        cache_read_tokens: m => m.cache_read_tokens || 0, hit: hitRateVal, tps: tpsOf,
+        est_cost: m => m.est_cost ?? -1, avg_duration_ms: m => m.avg_duration_ms || 0,
+        avg_ttfb_ms: m => m.avg_ttfb_ms || 0, last_at: m => new Date(m.last_at || 0).getTime() || 0,
+      };
+      const rows = allRows.slice();
+      if (mSortKey && mSortDir && MCOLS[mSortKey]) {
+        rows.sort((a, b) => (MCOLS[mSortKey](a) - MCOLS[mSortKey](b)) * mSortDir);
+      }
+      const sth = (k, label) => '<th class="sortable" data-msort="' + k + '">' + label +
+        '<span class="sort-ind">' + (mSortKey === k ? (mSortDir === -1 ? ' ↓' : ' ↑') : '') + '</span></th>';
+      html += '<div class="panel"><h3>按模型 <span class="sub">' + esc(label) + (wide ? ' · 含成本估算' : '') + ' · 点击模型筛选请求 · 点列头排序</span></h3>' +
+        '<div class="scroll-x"><table><thead><tr><th>模型</th>' +
+        sth('requests', '请求') + sth('sr', '成功率') + sth('rate_limited', '429') +
+        sth('input_tokens', '输入') + sth('output_tokens', '输出') + sth('cache_read_tokens', '缓存读') +
+        sth('hit', '命中率') + sth('tps', '均速') +
+        (wide ? sth('est_cost', '估算成本') + sth('avg_duration_ms', '均耗时') + sth('avg_ttfb_ms', '均TTFB') + sth('last_at', '最近') : '') +
+        '</tr></thead><tbody>';
+      rows.forEach(m => {
+        const sr = srOf(m);
+        const tps = tpsOf(m);
         html += '<tr><td class="mono"><span class="lnk" data-model="' + qa(m.name) + '">' + esc(m.name) + '</span></td>' +
           '<td class="num">' + m.requests + ' <span class="muted">(err ' + m.errors + ')</span></td>' +
-          '<td class="num">' + (sr * 100).toFixed(0) + '%</td>' +
+          '<td class="num ' + rateClass(sr) + '">' + sr.toFixed(0) + '%</td>' +
           '<td class="num">' + (m.rate_limited || 0) + '</td>' +
           '<td class="mono">' + fmtNum(m.input_tokens) + '</td>' +
           '<td class="mono">' + fmtNum(m.output_tokens) + '</td>' +
           '<td class="mono">' + fmtNum(m.cache_read_tokens) + '</td>' +
           '<td class="mono">' + hitRate(m) + '</td>' +
-          '<td class="mono">' + avgTps(m) + '</td>' +
+          '<td class="mono">' + (tps >= 0 ? tps.toFixed(1) + ' tok/s' : '-') + '</td>' +
           (wide ? '<td>' + (m.est_cost != null ? money(m.est_cost) : '<span class="muted">—</span>') + '</td>' +
-            '<td class="mono">' + fmtMs(Math.round(m.avg_duration_ms || 0)) + '</td>' +
-            '<td class="mono">' + fmtMs(Math.round(m.avg_ttfb_ms || 0)) + '</td>' +
-            '<td class="mono muted">' + fmtTime(m.last_at) + '</td>' : '') + '</tr>';
+            '<td class="mono ' + secClass(m.avg_duration_ms, 30000, 60000) + '">' + fmtMs(Math.round(m.avg_duration_ms || 0)) + '</td>' +
+            '<td class="mono ' + secClass(m.avg_ttfb_ms, 5000, 10000) + '">' + fmtMs(Math.round(m.avg_ttfb_ms || 0)) + '</td>' +
+            '<td class="mono muted" title="' + esc(m.last_at || '') + '">' + fmtRel(m.last_at) + '</td>' : '') + '</tr>';
       });
+      // 加权合计行：命中率/decode 均速按总量加权重算，不按行平均。
+      const tt = sumTotals(allRows);
+      const ttSr = tt.requests ? (tt.requests - tt.errors - tt.disconnected) / tt.requests * 100 : 0;
+      const ttCost = allRows.reduce((a, m) => a + (m.est_cost || 0), 0);
+      html += '<tr style="font-weight:600;border-top:1px solid var(--border-strong)"><td class="mono muted">Σ 合计</td>' +
+        '<td class="num">' + tt.requests + ' <span class="muted">(err ' + tt.errors + ')</span></td>' +
+        '<td class="num ' + rateClass(ttSr) + '">' + ttSr.toFixed(0) + '%</td>' +
+        '<td class="num">' + tt.rate_limited + '</td>' +
+        '<td class="mono">' + fmtNum(tt.input_tokens) + '</td><td class="mono">' + fmtNum(tt.output_tokens) + '</td>' +
+        '<td class="mono">' + fmtNum(tt.cache_read_tokens) + '</td>' +
+        '<td class="mono">' + hitRate(tt) + '</td><td class="mono">' + avgTps(tt) + '</td>' +
+        (wide ? '<td>' + money(ttCost) + '</td><td></td><td></td><td></td>' : '') + '</tr>';
       html += '</tbody></table></div></div>';
     }
 
@@ -149,7 +194,7 @@ const Usage = (() => {
     if (s.keys && s.keys.length) {
       html += '<div class="panel"><h3>按 API Key 哈希 <span class="sub">窗口累计 · 点击筛选请求</span></h3><div class="scroll-x"><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
       s.keys.forEach(k => {
-        html += '<tr><td class="mono"><span class="lnk" data-key="' + qa(k.name) + '">' + esc(k.name) + '</span></td><td class="num">' + k.requests + '</td><td class="num">' + k.errors + '</td><td class="mono">' + fmtNum(k.output_tokens) + '</td><td class="mono muted">' + fmtTime(k.last_at) + '</td></tr>';
+        html += '<tr><td class="mono"><span class="lnk" data-key="' + qa(k.name) + '">' + esc(k.name) + '</span></td><td class="num">' + k.requests + '</td><td class="num">' + k.errors + '</td><td class="mono">' + fmtNum(k.output_tokens) + '</td><td class="mono muted" title="' + esc(k.last_at || '') + '">' + fmtRel(k.last_at) + '</td></tr>';
       });
       html += '</tbody></table></div></div>';
     }
@@ -171,15 +216,18 @@ const Usage = (() => {
     if (!pts.length && !tokenMix.length) return;
     const xs = p => (p.at !== undefined ? p.at : new Date(p.date + 'T00:00:00').getTime() / 1000);
     if (pts.length) {
+      const flowSeries = [
+        Charts.bar('请求', '#818cf8', pts.map(p => Charts.ts(xs(p), p.requests))),
+        Charts.bar('错误', '#f87171', pts.map(p => Charts.ts(xs(p), p.errors))),
+        Charts.bar('429', '#f472b6', pts.map(p => Charts.ts(xs(p), p.rate_limited))),
+        Charts.line('输出 token', '#34d399', pts.map(p => Charts.ts(xs(p), p.output_tokens)), { yAxisIndex: 1 }),
+      ];
+      const gm = Charts.gapMark(pts, fine ? 600 : 86400);
+      if (gm) flowSeries[0].markArea = gm;
       Charts.render($('uFlow'), {
         dataZoom: Charts.zoom(pts),
         yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: '#8b93a7', fontSize: 10.5 } }],
-        series: [
-          Charts.bar('请求', '#818cf8', pts.map(p => Charts.ts(xs(p), p.requests))),
-          Charts.bar('错误', '#f87171', pts.map(p => Charts.ts(xs(p), p.errors))),
-          Charts.bar('429', '#f472b6', pts.map(p => Charts.ts(xs(p), p.rate_limited))),
-          Charts.line('输出 token', '#34d399', pts.map(p => Charts.ts(xs(p), p.output_tokens)), { yAxisIndex: 1 }),
-        ],
+        series: flowSeries,
       });
       Charts.render($('uPerf'), {
         yAxis: [{}, { min: 0, max: 100, splitLine: { show: false }, axisLabel: { formatter: '{value}%', color: '#8b93a7', fontSize: 10.5 } }],
@@ -194,7 +242,7 @@ const Usage = (() => {
       if (fine) {
         Charts.render($('uLat'), {
           series: [
-            Charts.line('TTFB 均值', '#818cf8', pts.map(p => Charts.ts(xs(p), p.avg_ttfb_ms || null))),
+            Charts.line('TTFB 均值', '#818cf8', pts.map(p => Charts.ts(xs(p), p.avg_ttfb_ms || null)), Charts.latencyMarks()),
             Charts.line('TTFB p95', '#fbbf24', pts.map(p => Charts.ts(xs(p), p.ttfb_p95_ms || null))),
             Charts.line('耗时 p95', '#f87171', pts.map(p => Charts.ts(xs(p), p.duration_p95_ms || null))),
           ],
@@ -227,8 +275,16 @@ const Usage = (() => {
     }
   }
 
-  // 事件委托：chips / stage / model / key 链接
+  // 事件委托：chips / stage / model / key 链接 / 表头排序
   document.getElementById('page-usage').addEventListener('click', e => {
+    const st2 = e.target.closest('th[data-msort]');
+    if (st2) {
+      const k = st2.dataset.msort;
+      if (mSortKey !== k) { mSortKey = k; mSortDir = -1; }
+      else mSortDir = mSortDir === -1 ? 1 : 0;
+      render();
+      return;
+    }
     const rc = e.target.closest('[data-range]');
     if (rc) { range = rc.dataset.range; renderChips(); render(); return; }
     const st = e.target.closest('[data-stage]');

@@ -3,9 +3,14 @@
 // 页面切换/容器尺寸变化自动 resize、离开页面时实例挂起不销毁（回来接着用）。
 
 const Charts = (() => {
+  // 主题色从 panel.css 的 CSS 变量读，单一事实源；取不到时回落到内置暗色值。
+  function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  }
   const palette = ['#818cf8', '#34d399', '#fbbf24', '#f87171', '#38bdf8', '#f472b6', '#a78bfa', '#22d3ee'];
-  const axisColor = '#3a415a';
-  const textDim = '#8b93a7';
+  const axisColor = cssVar('--border-strong', '#3a415a');
+  const textDim = cssVar('--muted', '#8b93a7');
 
   // base 返回所有图共用的暗色骨架：色板、坐标轴、tooltip、图例。
   function base() {
@@ -15,7 +20,7 @@ const Charts = (() => {
       grid: { left: 8, right: 12, top: 34, bottom: 8, containLabel: true },
       legend: { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 14, textStyle: { color: textDim, fontSize: 11 } },
       tooltip: {
-        trigger: 'axis',
+        trigger: 'axis', confine: true,
         backgroundColor: 'rgba(18,21,31,.96)',
         borderColor: 'rgba(148,163,184,.25)',
         textStyle: { color: '#e5e9f2', fontSize: 12 },
@@ -29,7 +34,7 @@ const Charts = (() => {
         splitLine: { show: false },
       },
       yAxis: {
-        type: 'value',
+        type: 'value', scale: true,
         axisLabel: { color: textDim, fontSize: 10.5 },
         splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } },
         axisLine: { show: false },
@@ -96,6 +101,55 @@ const Charts = (() => {
     return pts.map(p => ts(p[atKey || 'at'], map ? map(p) : p[vKey]));
   }
 
+  // gapMark：时间序列的空窗标记（markArea 灰底）。
+  // 两类都算空窗：连续 ≥3 个零请求桶；相邻桶间隔 > 1.5 倍桶宽（数据缺失段）。
+  // 返回值挂在第一条 series 上即可（silent 不挡交互）。
+  function gapMark(pts, stepSec) {
+    if (!pts || !pts.length || !stepSec) return null;
+    // 整段全空时整块灰底反而像异常，此时不标（图本身就是空的）。
+    if (!pts.some(p => p.requests || p.errors)) return null;
+    const ranges = [];
+    let s = -1;
+    pts.forEach((p, i) => {
+      const empty = !(p.requests || p.errors);
+      if (empty) { if (s < 0) s = i; }
+      else if (s >= 0) { if (i - s >= 3) ranges.push([pts[s].at, pts[i - 1].at]); s = -1; }
+    });
+    if (s >= 0 && pts.length - s >= 3) ranges.push([pts[s].at, pts[pts.length - 1].at]);
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].at - pts[i - 1].at > stepSec * 1.5) ranges.push([pts[i - 1].at, pts[i].at]);
+    }
+    if (!ranges.length) return null;
+    return {
+      silent: true, itemStyle: { color: 'rgba(148,163,184,0.07)' },
+      data: ranges.map(r => [{ xAxis: r[0] * 1000 }, { xAxis: r[1] * 1000 }]),
+    };
+  }
+
+  // latencyMarks：延迟类曲线挂 markLine(均值虚线) + markPoint(峰值 pin)。
+  function latencyMarks() {
+    return {
+      markLine: {
+        silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1, opacity: 0.55 },
+        label: { color: textDim, fontSize: 10, formatter: p => 'avg ' + fmtMs(p.value) },
+        data: [{ type: 'average' }],
+      },
+      markPoint: {
+        symbol: 'pin', symbolSize: 34,
+        label: { fontSize: 9, color: '#0b0e14', formatter: p => fmtMs(p.value) },
+        data: [{ type: 'max', name: 'MAX' }],
+      },
+    };
+  }
+
+  // empty：无数据时给图容器渲染居中文本（替代空白图）。
+  function empty(el, text) {
+    render(el, {
+      xAxis: { show: false }, yAxis: { show: false }, series: [],
+      graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: text || '暂无数据', fill: textDim, fontSize: 12 } }],
+    });
+  }
+
   // dataZoom：长窗口加底部滑块；任何窗口都支持内部滚轮/拖选。
   function zoom(pts) {
     const z = [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }];
@@ -112,5 +166,5 @@ const Charts = (() => {
     });
   }, 200));
 
-  return { render, line, bar, ts, tsList, zoom, palette, area, hexA };
+  return { render, line, bar, ts, tsList, zoom, palette, area, hexA, gapMark, latencyMarks, empty };
 })();

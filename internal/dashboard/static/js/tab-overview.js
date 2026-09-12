@@ -4,12 +4,26 @@
 const Overview = (() => {
   let statsData = null, usageData = null, quotaData = null, statusData = null;
 
+  // delta：今日 vs 昨日同指标的环比箭头，昨日为 0 时不显示。
+  function delta(cur, prev) {
+    if (!prev) return '';
+    const d = (cur - prev) / prev * 100;
+    if (!Number.isFinite(d)) return '';
+    const up = d >= 0;
+    return ' <span style="color:var(--' + (up ? 'ok' : 'err') + ')">' + (up ? '↑' : '↓') + Math.abs(d).toFixed(0) + '%</span>';
+  }
+
   function renderKpis() {
     if (!statsData || !usageData) return;
     const h = statsData.http || {};
     const r = h.rates || {};
     const s = usageData.snapshot || {};
     const today = s.today || {};
+    const yday = ((s.days || []).find(d => {
+      const y = new Date(); y.setDate(y.getDate() - 1);
+      const pad = n => String(n).padStart(2, '0');
+      return d.date === y.getFullYear() + '-' + pad(y.getMonth() + 1) + '-' + pad(y.getDate());
+    })) || {};
     const done = Math.max(1, today.requests || 0);
     const okN = done - (today.errors || 0) - (today.disconnected || 0);
     const lat = (statsData.usage && statsData.usage.ttfb) || {};
@@ -18,9 +32,9 @@ const Overview = (() => {
     const priced = !usageData.price_missing && (usageData.models || []).some(m => m.est_cost > 0);
     const cost = priced ? money(usageData.est_cost) : '<span class="muted">—</span>';
     $('ovKpis').innerHTML =
-      kpi('今日请求', fmtNum(today.requests || 0),
+      kpi('今日请求', fmtNum(today.requests || 0) + delta(today.requests || 0, yday.requests),
         '成功率 ' + (100 * okN / done).toFixed(0) + '% · 错 ' + (today.errors || 0) + ' · 断 ' + (today.disconnected || 0)) +
-      kpi('输出 Tokens', fmtNum(today.output_tokens),
+      kpi('输出 Tokens', fmtNum(today.output_tokens) + delta(today.output_tokens || 0, yday.output_tokens),
         '输入 ' + fmtNum(today.input_tokens), 'ok') +
       kpi('缓存命中率', hitRate(today),
         '读 ' + fmtNum(today.cache_read_tokens), 'cyan') +
@@ -47,26 +61,51 @@ const Overview = (() => {
     if (last.daily_remaining != null) {
       html += qbar('日配额', last.daily_remaining,
         (d.exhausted_at ? '约 ' + Number(d.hours_left || 0).toFixed(1) + 'h 后耗尽 · ' : '') +
-        '燃烧 ' + Number(d.burn_per_hour || 0).toFixed(2) + '%/h · 重置 ' + fmtUnix(last.daily_reset_at));
+        '燃烧 ' + Number(d.burn_per_hour || 0).toFixed(2) + '%/h · 重置 ' + fmtUnixShort(last.daily_reset_at) + '（' + fmtIn(last.daily_reset_at) + '）');
     }
     if (last.weekly_remaining != null) {
       html += qbar('周配额', last.weekly_remaining,
         (w.exhausted_at ? '预计 ' + fmtUnix(w.exhausted_at) + ' 耗尽 · ' : '') +
-        '燃烧 ' + Number(w.burn_per_hour || 0).toFixed(3) + '%/h · 重置 ' + fmtUnix(last.weekly_reset_at));
+        '燃烧 ' + Number(w.burn_per_hour || 0).toFixed(3) + '%/h · 重置 ' + fmtUnixShort(last.weekly_reset_at) + '（' + fmtIn(last.weekly_reset_at) + '）');
     }
     el.innerHTML = html;
   }
 
+  // 健康时间线：120 个 30s 桶的双编码条（高度=相对请求量，颜色=最差结果）。
+  function renderHealth() {
+    const tm = statsData && statsData.http && statsData.http.trend_minutes;
+    const el = $('ovHealth');
+    if (!el || !tm || !tm.length) return;
+    const max = Math.max(1, ...tm.map(p => p.requests + p.errors));
+    let html = '';
+    tm.forEach(p => {
+      const n = (p.requests || 0) + (p.errors || 0);
+      const cls = !n ? 'h-none' : p.errors ? 'h-err' : 'h-ok';
+      const h = n ? Math.max(18, Math.round(n / max * 100)) : 12;
+      html += '<i class="' + cls + '" style="height:' + h + '%" title="' +
+        fmtTime(p.at * 1000) + ' · ' + n + ' 请求' + (p.errors ? ' · ' + p.errors + ' 错误' : '') + '"></i>';
+    });
+    el.innerHTML = html;
+    const cap = $('ovHealthCap');
+    if (cap) {
+      const tot = tm.reduce((a, p) => a + (p.requests || 0), 0);
+      const errs = tm.reduce((a, p) => a + (p.errors || 0), 0);
+      cap.innerHTML = '<span>' + fmtTime(tm[0].at * 1000) + '</span><span>60 分钟 ' + tot + ' 请求 · ' + errs + ' 错误</span><span>' + fmtTime(tm[tm.length - 1].at * 1000) + '</span>';
+    }
+  }
+
   function renderTrend() {
     const tm = statsData && statsData.http && statsData.http.trend_minutes;
-    if (!tm || !tm.length) return;
+    if (!tm || !tm.length) { Charts.empty($('ovTrendChart')); return; }
+    const bars = [
+      Charts.bar('请求/30s', '#818cf8', Charts.tsList(tm, 'at', 'requests'), { barMaxWidth: 8 }),
+      Charts.bar('错误/30s', '#f87171', Charts.tsList(tm, 'at', 'errors'), { barMaxWidth: 8 }),
+    ];
+    const gm = Charts.gapMark(tm, 30);
+    if (gm) bars[0].markArea = gm;
     Charts.render($('ovTrendChart'), {
       dataZoom: Charts.zoom(tm),
-      yAxis: [{}, { show: false }],
-      series: [
-        Charts.bar('请求/30s', '#818cf8', Charts.tsList(tm, 'at', 'requests'), { barMaxWidth: 8 }),
-        Charts.bar('错误/30s', '#f87171', Charts.tsList(tm, 'at', 'errors'), { yAxisIndex: 0, barMaxWidth: 8 }),
-      ],
+      series: bars,
     });
   }
 
@@ -74,6 +113,7 @@ const Overview = (() => {
     try {
       const d = await api('/requests/active');
       const list = d.active || [];
+      titleBadge(list.length);
       const panel = $('ovActivePanel');
       if (!list.length) { panel.style.display = 'none'; return; }
       panel.style.display = '';
@@ -109,7 +149,7 @@ const Overview = (() => {
       statsData = await api('/stats');
       const v = statsData.version || '';
       if (v) $('versionTag').textContent = v;
-      renderKpis(); renderTrend();
+      renderKpis(); renderTrend(); renderHealth();
     } catch (e) { /* 保留旧数据 */ }
   }
   async function loadUsage() {
@@ -124,6 +164,10 @@ const Overview = (() => {
 
   function refresh() { loadStats(); loadActive(); }
   function refreshSlow() { loadUsage(); loadQuota(); loadStatus(); }
+
+  // 侧栏端口标识：取自当前地址栏，面板换端口时自动跟随。
+  const gp = $('gwPort');
+  if (gp) gp.textContent = ':' + (location.port || '80');
 
   Tabs.register('overview', () => { refresh(); refreshSlow(); });
   onVisible('overview', refresh, 10000);

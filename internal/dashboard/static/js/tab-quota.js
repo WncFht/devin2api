@@ -22,7 +22,8 @@ const Quota = (() => {
     const kEl = $('quotaKpis');
     if (!pts.length) {
       kEl.innerHTML = '<div class="note">暂无配额快照——采样器每 debug.quota_interval_minutes 分钟写一条，重启后开始积累。</div>';
-      $('quotaCurve').innerHTML = '<div class="loading">暂无数据</div>';
+      $('quotaCurve').innerHTML = '';
+      Charts.empty($('quotaCurve'), '暂无配额快照');
       return;
     }
     const last = pts[pts.length - 1];
@@ -39,7 +40,8 @@ const Quota = (() => {
         (wk.exhausted_at ? fmtUnix(wk.exhausted_at) + ' 耗尽 · ' : '') + '燃烧 ' + Number(wk.burn_per_hour || 0).toFixed(3) + '%/h',
         last.weekly_remaining > 50 ? 'ok' : last.weekly_remaining > 20 ? 'warn' : 'err');
     }
-    html += kpi('日重置', fmtUnixShort(last.daily_reset_at)) + kpi('周重置', fmtUnixShort(last.weekly_reset_at));
+    html += kpi('日重置', fmtIn(last.daily_reset_at), fmtUnixShort(last.daily_reset_at)) +
+      kpi('周重置', fmtIn(last.weekly_reset_at), fmtUnixShort(last.weekly_reset_at));
     kEl.innerHTML = html;
 
     Charts.render($('quotaCurve'), {
