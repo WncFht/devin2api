@@ -157,6 +157,9 @@ type Recorder struct {
 	// 相对毫秒数；-1 表示尚未发生。区分「上游慢」与「网关编码慢」。
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
+	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
+	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
+	retryAfterSeconds atomic.Int64
 
 	// 以下字段仅由写 worker 访问，无需加锁：
 	// sequences 保存每个 JSONL 文件各自的递增序号。
@@ -356,6 +359,10 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			if os.IsExist(err) {
 				continue
 			}
+			// 建目录失败返回 nil = 本请求静默无日志；ioErrors 计数 +
+			// Warn 让「日志为什么没了」可查（磁盘满/权限等）。
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: create request dir failed", "dir", name, "error", err)
 			return nil
 		}
 		recorder := &Recorder{
@@ -503,6 +510,15 @@ func (recorder *Recorder) AddClientBytes(n int64) {
 		return
 	}
 	recorder.clientBytes.Add(n)
+}
+
+// SetRetryAfter 记录上游限流给出的 reset 秒数 hint（写进 meta/index，
+// 与错误原文分离，grep/聚合不必再解析文案）；<=0 或非限流错误忽略。
+func (recorder *Recorder) SetRetryAfter(seconds int) {
+	if recorder == nil || seconds <= 0 {
+		return
+	}
+	recorder.retryAfterSeconds.Store(int64(seconds))
 }
 
 // Abort 中断请求：标记 aborted 并调用挂接的取消函数。
@@ -712,6 +728,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if dropped := recorder.dropped.Load(); dropped > 0 {
 		meta["dropped_events"] = dropped
+	}
+	if retry := recorder.retryAfterSeconds.Load(); retry > 0 {
+		meta["retry_after_seconds"] = retry
 	}
 	if completion != nil {
 		finishedAt := time.Now()

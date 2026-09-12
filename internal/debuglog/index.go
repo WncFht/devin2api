@@ -56,6 +56,9 @@ type IndexEntry struct {
 	// 让 grep 直接定位失败发生在哪一层。
 	ErrorStage    string `json:"error_stage,omitempty"`
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
+	// RetryAfterSeconds 是上游限流给出的 reset 秒数 hint，
+	// 供聚合区分「有退避提示的限流」与「裸限流」；非限流请求为 0。
+	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
 	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
 	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
@@ -106,6 +109,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		ClientRequestID:   recorder.requestMeta.ClientRequestID,
 		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
+		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
 		PrematureEndTurn:  completion.PrematureEndTurn,
 	}
 	data, err := json.Marshal(entry)
