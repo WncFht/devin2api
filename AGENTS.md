@@ -88,7 +88,7 @@
 
 ## 格式化工具链
 
-`*.md` 提交会走 pre-commit：autocorrect → markdownlint-cli2 --fix → prettier（经 git-format-staged 只写 index，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。autocorrect/markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
 
 # 服务排障（对运行中的实例）
 

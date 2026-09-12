@@ -1,18 +1,9 @@
 repos:
-  # autocorrect 只改文本内容（中英文之间补空格、标点全半角），需 brew install autocorrect
-  - repo: local
-    hooks:
-      - id: autocorrect
-        name: autocorrect --fix
-        entry: autocorrect --fix
-        language: system
-        types: [markdown]
-  # 顺序即语义：先改内容（autocorrect）→ 再修规则（markdownlint --fix）→ prettier 收尾。
-  # prettier / markdownlint-cli2 走 node_modules：package.json 是唯一版本清单，编辑器
-  # （prettierPath 指向同一处）与 hook 同源；缺依赖时响亮报错而非静默换版本。
-  # prettier / gofmt 经 git-format-staged 只改写 index 里的已暂存内容，不碰工作区——
-  # 混合暂存（同一文件一半 stage 一半没 stage）时不会污染未暂存的编辑。
-  # git-format-staged 依赖系统 python3（macOS 自带）。
+  # 顺序即语义：markdownlint --fix 原地修规则（改了就 fail 一次让你 re-add）→
+  # git-format-staged 链式 "autocorrect --stdin | prettier" 只写 index 收尾——
+  # commit 永远成功，混合暂存时未暂存的编辑不受污染。
+  # prettier / markdownlint-cli2 / gfs 版本以 package.json 为唯一事实源，
+  # 编辑器（prettierPath 指向同一处）与 hook 同源；autocorrect 走 brew，gfs 依赖系统 python3。
   - repo: local
     hooks:
       - id: gofmt
@@ -26,7 +17,7 @@ repos:
         language: system
         types: [markdown]
       - id: prettier
-        name: prettier (staged content)
-        entry: ./node_modules/.bin/git-format-staged --formatter "./node_modules/.bin/prettier --stdin-filepath {}"
+        name: autocorrect + prettier (staged content)
+        entry: ./node_modules/.bin/git-format-staged --formatter "autocorrect --stdin | ./node_modules/.bin/prettier --stdin-filepath {}"
         language: system
         types: [markdown]
