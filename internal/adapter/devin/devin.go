@@ -370,13 +370,13 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		completion.Seed = proto.Uint64(uint64(*request.Seed))
 	}
 	result := &devinproto.GetChatMessageRequest{
-		Metadata:     metadata,
-		Prompt:       proto.String(withToolDescriptions(request.SystemPrompt, request.Tools)),
+		Metadata: metadata,
+		Prompt:   proto.String(withToolDescriptions(request.SystemPrompt, request.Tools)),
 		// 上游 prompt 前缀缓存：system prompt 是稳定前缀，标记 EPHEMERAL 断点。
 		SystemPromptCacheOptions: ephemeralCacheOptions(),
-		ChatModelUid: proto.String(config.Model),
-		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: completion,
+		ChatModelUid:             proto.String(config.Model),
+		RequestType:              devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration:            completion,
 		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
 			TrajectoryId:   proto.String(trajectoryID),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),

@@ -131,7 +131,7 @@ func (encoder *StreamEncoder) start(event llm.ResponseEvent) []SSEEvent {
 			"content":     []any{},
 			"model":       encoder.model,
 			"stop_reason": nil,
-			"usage": anthropicUsage(encoder.usage),
+			"usage":       anthropicUsage(encoder.usage),
 		},
 	})}
 }

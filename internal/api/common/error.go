@@ -17,13 +17,13 @@ var openAIErrorTypes = map[string]string{
 	// Devin 上游把内容策略拦截、无效模型 UID、未授权模型全部归并到
 	// permission_denied；这些都是调用方可修正的请求错误，归为
 	// invalid_request_error 以便下游网关不误判为账号/渠道失效。
-	"permission_denied":   "invalid_request_error",
-	"not_found":           "not_found_error",
-	"resource_exhausted":  "rate_limit_error",
-	"deadline_exceeded":   "timeout_error",
-	"unavailable":         "server_error",
-	"internal":            "server_error",
-	"unknown":             "server_error",
+	"permission_denied":  "invalid_request_error",
+	"not_found":          "not_found_error",
+	"resource_exhausted": "rate_limit_error",
+	"deadline_exceeded":  "timeout_error",
+	"unavailable":        "server_error",
+	"internal":           "server_error",
+	"unknown":            "server_error",
 }
 
 // anthropicErrorTypes 把 Connect code 映射为 Anthropic 兼容的错误对象 type。
@@ -35,13 +35,13 @@ var anthropicErrorTypes = map[string]string{
 	"unimplemented":       "invalid_request_error",
 	"unauthenticated":     "authentication_error",
 	// 同上：permission_denied 统一视为可修正的请求错误。
-	"permission_denied":   "invalid_request_error",
-	"not_found":           "not_found_error",
-	"resource_exhausted":  "rate_limit_error",
-	"deadline_exceeded":   "timeout_error",
-	"unavailable":         "api_error",
-	"internal":            "api_error",
-	"unknown":             "api_error",
+	"permission_denied":  "invalid_request_error",
+	"not_found":          "not_found_error",
+	"resource_exhausted": "rate_limit_error",
+	"deadline_exceeded":  "timeout_error",
+	"unavailable":        "api_error",
+	"internal":           "api_error",
+	"unknown":            "api_error",
 }
 
 // extractErrorCode 从 "<code>: <message>" 形式的消息中提取 code。
