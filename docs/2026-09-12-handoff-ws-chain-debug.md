@@ -1,6 +1,6 @@
 # Handoff: Codex → ccLoad → devin2api WebSocket 多轮全链路调试
 
-> 2026-09-12 交接。目标：让 Codex CLI 通过 ccLoad 走 devin2api 的 codex(responses) 链路，并发挥 WS multi-turn(单连接多轮 + previous_response_id 增量)。**链路已打通到「WS 握手 ✓ → 双跳 upstream WS ✓ → 上游返回完整流 ✓」，最后一公里挂在 devin2api 的 SSE 编码器 bug(已定位、已改、未验证上线)。**
+> 2026-09-12 交接。**已完结**：14:54 全链路实测两轮 `responses-ws` 全部 `completed`(logs/20260912-145403、-145409),prev_id 增量展开、sealed 签名回放、session 身份稳定均已在线上 wire 验证。编码器修复 + decoder 合成路径 latent bug 修复已测试并提交。
 
 ## 背景：三跳链路
 
@@ -56,18 +56,26 @@ Codex CLI --WS--> ccLoad(:49173) --WS--> devin2api(:3003) --Connect-RPC--> Devin
 - `messages/response.go`:`startText`/`startThinking`/`startToolUse` 里的 `flushPendingThinking()` 删掉，flush 保留在 `finish`/`failed`;`thinkingSignature` 原逻辑已容忍 pending 路径，无需再改。
 - **注意 syntax 坑**:改 messages/response.go 时留下过 `}))}` 残留，已修，两个包 `go test` 全绿 (1.13s/1.69s)。
 
-## 待做 (按序)
+## 复核出的第二个 bug(已修)
 
-1. **复查 decoder 侧一个疑似 latent bug**(我还没来得及看完):`internal/adapter/devin/response_decoder.go:391` `decodeLateSignature` 的合成路径 (上游从无 thinking 块、签名裸到时) 会 emit `ThinkingStart`(此时 Partial 里的 ThinkingContent 已含 signature)+ `ThinkingSignature`(Delta=同一签名)→ `startReasoning` 已 set `item.encryptedContent`,`reasoningSignature` 又 `+=` → **签名翻倍**;且该合成 item 可能永远收不到 `thinking_end` → `pendingDone`/`done()` "open item" 报错。查 `endThinking` 调用点和真实 openai-style(signature-only) 上游流再定。
-2. **加回归测试**:responses `thinking_end(0)→toolcall→signature(0)→toolcall_end→done` 序列断言 reasoning item done 含 encrypted_content 且 `response.completed` 成功；anthropic 侧同序断言 `signature_delta`+thinking block 带 signature。放 `internal/api/openai/responses/response_test.go` / `messages/response_test.go`。
-3. **跑全量测试** `go test ./...`(工作区有大量未提交改动，见下)。
-4. **重跑 codex e2e**:重新 `go build -o devin-2api`,重启 :3003 进程 (当前进程是 14:10 构建的旧二进制，**不含本次修复**),再跑上面那条 `codex exec`。观察点：`logs/index.jsonl` 里 `api:"responses-ws"` `result:"success"`;第二轮应走 prev_id 增量 (input 只有 tool output,index.jsonl 里 input_tokens 应主要靠 cache_read);ccLoad 侧不应再 cool down。
-5. **多轮验证**:确认同一 WS 连接上第二轮 create 带 `previous_response_id` 正常合并且 `cache_read` 命中 (上轮 143159 已见 `cache_read:7830`,说明 transcript 重放本身就是通的——只是编码器挂了)。
-6. **收尾清理**:测试完可禁用/删除 ccLoad channel 294 `devin-ws`;`~/.codex/models.ccload.json` 可用 `.bak-ws-test` 还原。
+`response_decoder.go` `decodeLateSignature` 合成路径 (上游从无 thinking 块、签名裸到，openai-style signature-only 形态):原实现 emit `ThinkingStart`+`ThinkingSignature`。事件共享同一 `Partial` 指针，`ThinkingStart` 时块内已含全量签名——responses 编码器 `startReasoning` 播种 `encryptedContent` 后 `reasoningSignature` 又 `+=` 同一 `Delta` → **签名翻倍**;且合成块永不置 `thinkingOpen`、`ThinkingEnd` 不到 → item 悬挂，`done()` 报 `open reasoning item`。anthropic 侧同害：块永远不收尾，`message_stop` 前留未关闭 thinking block。
 
-## 工作区状态 (重要)
+修复：合成路径改 emit `ThinkingStart`+`ThinkingEnd`,签名只经 `Partial` 传递 (两编码器的 start/end 边界都读块内签名，幂等);后续裸签名帧仍走 merge 路径 (块已在 partial.Content 里)。当日日志无此形态实流 (所有含 `deltaSignature` 的请求都有 `deltaThinking`),但该路径是注释明示支持的 openai 体制，触发即翻车。
 
-`git status` 显示**一大批未提交改动**,其中 WS multi-turn 主体 + 本次编码器修复都还没 commit。之前 session 的提交边界在 `git log` 里未必清晰——先 `git diff` 梳理再决定怎么切 commit。docs 目录下还有几篇调研文档未提交。
+回归测试：`TestResponseDecoderSynthesizesThinkingForBareSignature`(decoder 合成 + 二次 merge)、`TestStreamEncoderHoldsReasoningForLateSignature` + `TestStreamEncoderEncodesSignatureOnlyReasoning`(responses)、`TestStreamEncoderHoldsThinkingForLateSignature`(anthropic)。
+
+## 实测结果 (14:54)
+
+- `codex exec -m swe-2-max-ws -c 'model_providers.OpenAI.supports_websockets=true' --skip-git-repo-check "run echo ws-chain-test"` 一次跑通，exec_command 执行并收尾。
+- `index.jsonl`:`responses-ws` ×2 均 `completed`,无重试，ccLoad 未再 cool down。
+- turn2 (145409) wire 证据：`chatMessagePrompts` 4 条 = 2 user + assistant 回放 (带 `signature: sealed.v1.…`、`signatureType: sealed`、toolCalls)+ tool result;`trajectoryId`/`cascadeId` 与 turn1 相同。turn2 内部 POST 的 `input` 8 项含回传的 reasoning `encrypted_content`(与上游 signature 逐字一致，无翻倍) 与 `exec_command_0` 配对的 function_call/output。
+- `cache_read=0`:上游 FIREWORKS_DEVIN usage 帧本轮未上报 cache tokens。早上 `cr=7830` 那次是 Codex 对**同一请求的重试**(两轮 chatMessagePrompts 完全相同，各 2 条 user),整段命中;本轮是真续链 (4 条消息),缓存上报是 provider 侧行为，非链路问题。
+- turn2 带 `premature_end_turn` 标记：观测性启发式 (tool result 后纯文本 end_turn),本例模型正确收尾，非故障。
+
+## 收尾状态
+
+- ccLoad channel 294 `devin-ws` 与 `~/.codex/models.ccload.json` 的 `swe-2-max-ws` 条目**保留**——WS 链路是现行可用配置;还原备份在 `models.ccload.json.bak-ws-test`。
+- :3003 已跑含全部修复的新二进制。
 
 ## 关键文件/位置速查
 
