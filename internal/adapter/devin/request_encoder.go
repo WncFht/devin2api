@@ -199,9 +199,7 @@ func firstMessageText(message llm.Message) string {
 func uuidFromBytes(b []byte) string {
 	var out [16]byte
 	copy(out[:], b)
-	out[6] = (out[6] & 0x0f) | 0x40
-	out[8] = (out[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", out[0:4], out[4:6], out[6:8], out[8:10], out[10:16])
+	return randid.FormatUUID(out)
 }
 
 // convertMessage 将中间消息转为 Devin ChatMessagePrompt。
