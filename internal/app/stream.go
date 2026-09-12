@@ -237,14 +237,20 @@ func writeProtocolStream(
 		if encodeErr != nil {
 			return latest, encodeErr
 		}
+		// 一次 Encode 展开的多个 SSE 事件合并为单次写出：高频 delta 流下
+		// 逐事件 Write+Flush 是数倍的 syscall 开销，合并后 wire 字节不变。
+		var batch []byte
 		for _, encoded := range encodedEvents {
-			if wErr := out.writeContent(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
-				return latest, wErr
-			}
+			batch = append(batch, protocol.SSEFormat(encoded.Name, encoded.Data)...)
 			if encoded.Name == "[DONE]" {
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
 			} else {
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
+			}
+		}
+		if len(batch) > 0 {
+			if wErr := out.writeContent(batch); wErr != nil {
+				return latest, wErr
 			}
 		}
 		if event.Type == llm.ResponseEventError {
