@@ -75,6 +75,20 @@ func (w *wsResponseWriter) Flush() {
 	// 但实际消息在 Write 遇到 "\n\n" 时已经发送，这里不需要额外动作。
 }
 
+// flushTail 把缓冲区里不构成完整 SSE 帧的残余内容（如错误 JSON 响应体）
+// 作为一条文本帧发出；没有它，非流式错误在 WS 路径上会被静默吞掉。
+func (w *wsResponseWriter) flushTail() {
+	if w.err != nil || len(w.buf) == 0 {
+		return
+	}
+	payload := bytes.TrimSpace(w.buf)
+	w.buf = nil
+	if len(payload) > 0 {
+		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+		w.err = w.conn.WriteMessage(websocket.TextMessage, payload)
+	}
+}
+
 // wsWriteDeadline 是单次 WebSocket 写操作的预算；每条消息写出前续约，
 // 不会像一次性绝对 deadline 那样在长轮次中途截断流。
 const wsWriteDeadline = 60 * time.Second
@@ -185,6 +199,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 
 	wsWriter := newWSResponseWriter(conn)
 	application.createResponses(wsWriter, innerRequest)
+	wsWriter.flushTail()
 
 	// 如果 createResponses 没有发送 completed/error，尝试补一个干净的关闭。
 	if wsWriter.err == nil {
