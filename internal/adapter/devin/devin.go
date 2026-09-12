@@ -133,7 +133,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 // maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
 const maxConnectAttempts = 3
 
-// getChatMessageWithRetry 在流建立前重试瞬时错误（EOF/连接重置/unavailable）。
+// getChatMessageWithRetry 在流建立前重试瞬时传输错误（EOF/连接重置/超时）。
 // 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
 func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
