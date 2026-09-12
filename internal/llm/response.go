@@ -92,12 +92,18 @@ type Usage struct {
 	// CacheWrite 是写入提示缓存的 token 数。
 	CacheWrite int64
 	// CacheWrite1h 是写入一小时缓存的 token 数；nil 表示供应商未提供。
+	// 当前无生产者：Devin usage 帧只有单档 cache write，为 Anthropic
+	// 1h TTL 缓存形态预留。
 	CacheWrite1h *int64
 	// Reasoning 是输出 token 中属于推理的子集；nil 表示供应商未提供。
+	// 当前无生产者：Devin usage 不拆分推理 token，为报告
+	// reasoning_tokens 的上游预留；下游编码器（OpenAI usage 输出、
+	// index 索引列）已就位，生产者接上即通。
 	Reasoning *int64
 	// TotalTokens 是供应商报告或适配器计算的总 token 数。
 	TotalTokens int64
 	// Cost 是按统一币种归一化后的费用明细。
+	// 当前无生产者：上游不回报费用，面板成本是按目录价估算的另一条路。
 	Cost UsageCost
 }
 
