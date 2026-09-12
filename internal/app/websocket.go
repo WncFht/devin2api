@@ -74,9 +74,17 @@ func (w *wsResponseWriter) Flush() {
 	// 但实际消息在 Write 遇到 "\n\n" 时已经发送，这里不需要额外动作。
 }
 
+// wsWriteDeadline 是单次 WebSocket 写操作的预算；每条消息写出前续约，
+// 不会像一次性绝对 deadline 那样在长轮次中途截断流。
+const wsWriteDeadline = 60 * time.Second
+
 // writeFrame 解析单条 SSE 帧，把 data 行作为 JSON 文本消息发出。
 // 如果遇到 event: error 事件，同样只把 data 发回，让客户端按 OpenAI 协议处理。
+// SSE 注释行（": ..."）转换为 WebSocket Ping，承担同等的保活作用。
 func (w *wsResponseWriter) writeFrame(frame []byte) error {
+	if bytes.HasPrefix(frame, []byte(":")) {
+		return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteDeadline))
+	}
 	var data []byte
 	lines := bytes.Split(frame, []byte("\n"))
 	for _, line := range lines {
@@ -90,6 +98,7 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -103,9 +112,10 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	}
 	defer conn.Close()
 
-	// 设置 WebSocket 读/写超时，避免死连接长期占用。
+	// 读超时只覆盖第一条 response.create：之后的读取由后台协程负责，
+	// 客户端整个轮次可能不再发消息，绝对 deadline 会在 10 分钟处误杀
+	// 活跃流；连接断开本身通过 ReadMessage 错误或写失败被发现。
 	_ = conn.SetReadDeadline(time.Now().Add(600 * time.Second))
-	_ = conn.SetWriteDeadline(time.Now().Add(600 * time.Second))
 
 	// 读取第一条 response.create 消息。
 	messageType, body, err := conn.ReadMessage()
@@ -117,6 +127,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		log.Printf("websocket received non-text message type %d", messageType)
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
 	// OpenAI WebSocket 模式不写 stream 字段，等价于 stream=true。
 	// 把 body 解析后强制加上 stream=true，确保走流式分支。

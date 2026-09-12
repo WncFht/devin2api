@@ -301,40 +301,14 @@ func (application *App) createCompletion(
 	completion.Stream = options.Stream
 	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 	ctx := debuglog.WithRecorder(request.Context(), recorder)
+	if options.Stream {
+		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion)
+		return
+	}
 	stream, err := application.adapter.Stream(ctx, messages)
 	if err != nil {
 		completion.StatusCode = mapProviderErrorStatus(err)
 		writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, err)
-		return
-	}
-	if options.Stream {
-		firstEvent, err := receiveEvent(ctx, stream, recorder)
-		if err == nil && firstEvent.Type == llm.ResponseEventError {
-			if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
-				err = errors.New(firstEvent.Error.ErrorMessage)
-			} else {
-				err = errors.New("response stream returned an error event immediately")
-			}
-		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			completion.StatusCode = mapProviderErrorStatus(err)
-			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, err)
-			return
-		}
-
-		completion.StatusCode = http.StatusOK
-		message, streamErr := writeProtocolStream(ctx, writer, stream, recorder, protocol, messages.Model, options, firstEvent, err)
-		updateCompletionIdentity(&completion, message)
-		if streamErr != nil {
-			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
-				completion.Result = "disconnected"
-				recorder.WriteError("client_disconnected", streamErr)
-			} else {
-				recorder.WriteError("http_stream", streamErr)
-			}
-			return
-		}
-		completion.Result = "completed"
 		return
 	}
 	message, err := collectFinalMessage(ctx, stream, recorder)
@@ -361,10 +335,161 @@ func (application *App) createCompletion(
 	completion.Result = "completed"
 }
 
-func writeProtocolStream(
+// keepaliveInterval 是上游静默窗口内的 SSE 注释保活间隔。
+// 上游长思考时首批帧可延迟数十秒（实测 45s+），而 Codex 客户端约 30s
+// 无数据即弃连，下游网关也有自己的空闲/首字节超时。
+// var 而非 const：测试会临时缩短它来验证保活路径。
+var keepaliveInterval = 10 * time.Second
+
+// sseKeepalive 是 SSE 注释行：协议合法、SSE 客户端解析器忽略，
+// 仅用于刷新链路上各段的空闲计时器。
+var sseKeepalive = []byte(": keepalive\n\n")
+
+// streamWriter 是流式响应的唯一写出方；committed 标记首字节是否已把
+// HTTP 状态提交为 200——提交后错误只能以 SSE error 事件下发。
+type streamWriter struct {
+	writer    http.ResponseWriter
+	flusher   http.Flusher
+	committed bool
+}
+
+// write 写一段响应体并立即 flush。
+func (out *streamWriter) write(p []byte) error {
+	out.committed = true
+	if _, err := out.writer.Write(p); err != nil {
+		return err
+	}
+	out.flusher.Flush()
+	return nil
+}
+
+// awaitEvent 等待上游下一个事件；等待期间按 ticker 节奏写 SSE 注释行保活。
+// items 关闭视为流结束；ctx 取消或写失败时返回对应错误。
+func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, ticker *time.Ticker) (llm.ResponseEvent, error) {
+	for {
+		select {
+		case item, ok := <-items:
+			if !ok {
+				return llm.ResponseEvent{}, io.EOF
+			}
+			return item.event, item.err
+		case <-ticker.C:
+			if err := out.write(sseKeepalive); err != nil {
+				return llm.ResponseEvent{}, err
+			}
+		case <-ctx.Done():
+			return llm.ResponseEvent{}, ctx.Err()
+		}
+	}
+}
+
+// pumpItem 是 Stream()/Recv() 的一次产出。
+type pumpItem struct {
+	event llm.ResponseEvent
+	err   error
+}
+
+// startStreamPump 在后台协程里建立上游流并串行消费事件，把结果按序推入
+// channel。这样唯一的写出方在等待上游的空窗期可以写保活帧，而 Recv
+// 仍发生在同一协程。事件记录随泵进行，保持调试日志与上游顺序一致。
+// ctx 取消时泵退出，channel 随之关闭。
+func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm.RequestMessages, recorder *debuglog.Recorder) <-chan pumpItem {
+	items := make(chan pumpItem, 8)
+	go func() {
+		defer close(items)
+		stream, err := provider.Stream(ctx, messages)
+		if err != nil {
+			items <- pumpItem{err: err}
+			return
+		}
+		for {
+			event, err := stream.Recv(ctx)
+			if err == nil {
+				recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
+			}
+			select {
+			case items <- pumpItem{event: event, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return items
+}
+
+// streamCompletion 处理流式请求：泵协程驱动上游事件流，本函数是唯一写出方。
+// 上游产生任何内容前的错误仍走非 200 状态码；保活一旦提交 200，
+// 后续错误降级为 SSE error 事件（与流中途错误同形）。
+func (application *App) streamCompletion(
 	ctx context.Context,
 	writer http.ResponseWriter,
-	stream llm.ResponseStream,
+	recorder *debuglog.Recorder,
+	protocol protocolEncoder,
+	messages llm.RequestMessages,
+	options protocolOptions,
+	completion *debuglog.Completion,
+) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		completion.StatusCode = http.StatusInternalServerError
+		writeLoggedError(writer, recorder, "http_stream", completion.StatusCode, errors.New("streaming response writer does not support flushing"))
+		return
+	}
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Connection", "keep-alive")
+	out := &streamWriter{writer: writer, flusher: flusher}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	items := startStreamPump(streamCtx, application.adapter, messages, recorder)
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+
+	firstEvent, firstErr := out.awaitEvent(streamCtx, items, ticker)
+	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+		if !out.committed {
+			completion.StatusCode = mapProviderErrorStatus(firstErr)
+			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, firstErr)
+			return
+		}
+		firstEvent = llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
+			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error()}}
+		firstErr = nil
+	}
+	if !out.committed && firstEvent.Type == llm.ResponseEventError {
+		message := "response stream returned an error event immediately"
+		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
+			message = firstEvent.Error.ErrorMessage
+		}
+		completion.StatusCode = mapProviderErrorStatus(errors.New(message))
+		writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, errors.New(message))
+		return
+	}
+
+	completion.StatusCode = http.StatusOK
+	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, messages.Model, options, firstEvent, firstErr)
+	updateCompletionIdentity(completion, message)
+	if streamErr != nil {
+		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+			completion.Result = "disconnected"
+			recorder.WriteError("client_disconnected", streamErr)
+		} else {
+			recorder.WriteError("http_stream", streamErr)
+		}
+		return
+	}
+	completion.Result = "completed"
+}
+
+func writeProtocolStream(
+	ctx context.Context,
+	out *streamWriter,
+	items <-chan pumpItem,
+	ticker *time.Ticker,
 	recorder *debuglog.Recorder,
 	protocol protocolEncoder,
 	model string,
@@ -372,13 +497,6 @@ func writeProtocolStream(
 	firstEvent llm.ResponseEvent,
 	firstErr error,
 ) (*llm.AssistantMessage, error) {
-	flusher, ok := writer.(http.Flusher)
-	if !ok {
-		return nil, errors.New("streaming response writer does not support flushing")
-	}
-	writer.Header().Set("Content-Type", "text/event-stream")
-	writer.Header().Set("Cache-Control", "no-cache")
-	writer.Header().Set("Connection", "keep-alive")
 	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
 	event, err := firstEvent, firstErr
@@ -395,7 +513,7 @@ func writeProtocolStream(
 			return latest, encodeErr
 		}
 		for _, encoded := range encodedEvents {
-			if _, wErr := writer.Write(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
+			if wErr := out.write(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
 				return latest, wErr
 			}
 			if encoded.Name == "[DONE]" {
@@ -403,7 +521,6 @@ func writeProtocolStream(
 			} else {
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
 			}
-			flusher.Flush()
 		}
 		if event.Type == llm.ResponseEventError {
 			// 错误 SSE 已在上面循环写出，这里直接返回错误供外层记录失败日志。
@@ -412,7 +529,7 @@ func writeProtocolStream(
 			}
 			return latest, errors.New("response stream returned an error event")
 		}
-		event, err = receiveEvent(ctx, stream, recorder)
+		event, err = out.awaitEvent(ctx, items, ticker)
 	}
 }
 
@@ -522,6 +639,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 }
 
 // mapProviderErrorStatus 将上游/适配器错误映射为合适的 HTTP 状态，message 仍原样透传。
+// Connect 编码的上游错误交给 common.HTTPStatus；本地适配器产生的错误先按内容匹配。
 func mapProviderErrorStatus(err error) int {
 	if err == nil {
 		return http.StatusBadGateway
@@ -529,30 +647,12 @@ func mapProviderErrorStatus(err error) int {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "does not support image"),
-		strings.Contains(msg, "invalid_argument"),
-		strings.HasPrefix(msg, "invalid_argument:"),
 		strings.Contains(msg, "file_id images"),
 		strings.Contains(msg, "only data URL"),
 		strings.Contains(msg, "validate Devin request"),
 		strings.Contains(msg, "validate adapted request"):
 		return http.StatusBadRequest
-	case strings.Contains(msg, "unauthenticated"),
-		strings.HasPrefix(msg, "unauthenticated:"):
-		return http.StatusUnauthorized
-	case strings.Contains(msg, "permission_denied"),
-		strings.HasPrefix(msg, "permission_denied:"):
-		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
-		// permission_denied。这三类都是调用方可修正的请求错误，
-		// 归一成 400 而不是 403：下游网关（如 ccload）对 4xx 客户端错误
-		// 不会把渠道标记为失效/冷却，只有 5xx/鉴权错误才会。
-		return http.StatusBadRequest
-	case strings.Contains(msg, "not_found"),
-		strings.HasPrefix(msg, "not_found:"):
-		return http.StatusNotFound
-	case strings.Contains(msg, "resource_exhausted"),
-		strings.HasPrefix(msg, "resource_exhausted:"):
-		return http.StatusTooManyRequests
 	default:
-		return http.StatusBadGateway
+		return common.HTTPStatus(msg)
 	}
 }

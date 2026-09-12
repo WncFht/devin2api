@@ -346,11 +346,15 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// Anthropic 官方流式错误格式：
 	// event: error
 	// data: {"type":"error","error":{"type":"...","message":"..."}}
+	// 顶层 status 供下游网关（ccload）按真实 HTTP 语义分类错误，
+	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	events := encoder.flushPendingThinking()
 	return append(events, encoder.event("error", map[string]any{
-		"type": "error",
+		"type":   "error",
+		"status": common.HTTPStatus(message),
 		"error": map[string]any{
 			"type":    common.AnthropicErrorType(message),
+			"code":    common.ErrorCode(message),
 			"message": message,
 		},
 	}))

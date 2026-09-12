@@ -40,3 +40,37 @@ func TestAnthropicErrorType(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPStatus 的测试动机是 HTTP 状态码决定下游网关的冷却分类：
+// 请求级错误必须落到 4xx，上下文超长落到 413（客户端级、不冷却）。
+func TestHTTPStatus(t *testing.T) {
+	cases := []struct {
+		message string
+		want    int
+	}{
+		{"permission_denied: blocked by content policy", 400},
+		{"invalid_argument: The prompt is too long for this model", 413},
+		{"invalid_argument: internal error", 400},
+		{"unauthenticated: bad token", 401},
+		{"not_found: model missing", 404},
+		{"resource_exhausted: quota", 429},
+		{"unavailable: TLS handshake timeout", 502},
+		{"stream disconnected", 502},
+	}
+	for _, c := range cases {
+		if got := HTTPStatus(c.message); got != c.want {
+			t.Fatalf("HTTPStatus(%q) = %d, want %d", c.message, got, c.want)
+		}
+	}
+}
+
+// TestErrorCode 的测试动机是 error.code 让下游网关把上下文超长识别为
+// 请求级问题；其他错误返回 nil。
+func TestErrorCode(t *testing.T) {
+	if got := ErrorCode("invalid_argument: The prompt is too long for this model"); got != "context_length_exceeded" {
+		t.Fatalf("ErrorCode = %v, want context_length_exceeded", got)
+	}
+	if got := ErrorCode("permission_denied: blocked"); got != nil {
+		t.Fatalf("ErrorCode = %v, want nil", got)
+	}
+}

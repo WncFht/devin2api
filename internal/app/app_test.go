@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/leookun/devin-2api/internal/adapter"
 	"github.com/leookun/devin-2api/internal/config"
@@ -354,4 +355,129 @@ func TestConcurrentResponsesDoNotInterleave(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+// gatedStream 在首个 Recv 前阻塞在 gate 上，用来模拟上游长静默。
+type gatedStream struct {
+	gate   chan struct{}
+	events []llm.ResponseEvent
+	index  int
+}
+
+// Recv 首次调用等待 gate 关闭，之后按序返回事件。
+func (stream *gatedStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
+	if stream.index == 0 {
+		select {
+		case <-stream.gate:
+		case <-ctx.Done():
+			return llm.ResponseEvent{}, ctx.Err()
+		}
+	}
+	if stream.index >= len(stream.events) {
+		return llm.ResponseEvent{}, io.EOF
+	}
+	event := stream.events[stream.index]
+	stream.index++
+	return event, nil
+}
+
+// gatedAdapter 返回阻塞在 gate 上的流，用于保活测试。
+type gatedAdapter struct {
+	stream *gatedStream
+}
+
+// Stream 返回预设的阻塞流。
+func (fake *gatedAdapter) Stream(context.Context, llm.RequestMessages) (llm.ResponseStream, error) {
+	return fake.stream, nil
+}
+
+// ListModels 返回空模型目录。
+func (fake *gatedAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return nil, nil
+}
+
+// TestStreamKeepsAliveDuringUpstreamSilence 的测试动机是上游长思考期间
+// 连接不能保持完全静默：Codex 约 30s 无数据弃连，网关也有空闲超时。
+// SSE 注释行是合法的保活手段，客户端解析器会忽略。
+func TestStreamKeepsAliveDuringUpstreamSilence(t *testing.T) {
+	original := keepaliveInterval
+	keepaliveInterval = 20 * time.Millisecond
+	defer func() { keepaliveInterval = original }()
+
+	final := &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}
+	gate := make(chan struct{})
+	stream := &gatedStream{gate: gate, events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{ResponseID: "resp-1", StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	}}
+	application := New(&gatedAdapter{stream: stream}, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		application.Router().ServeHTTP(response, request)
+		close(done)
+	}()
+	// 上游静默 3 个保活周期后才放行首批事件。
+	time.Sleep(3 * keepaliveInterval)
+	close(gate)
+	<-done
+	if !strings.Contains(response.Body.String(), ": keepalive") {
+		t.Fatalf("body missing SSE keepalive comments: %q", response.Body.String())
+	}
+}
+
+// TestStreamImmediateErrorReturnsHTTPStatus 的测试动机是上游在产出任何内容
+// 前失败时，HTTP 状态必须是真实错误码：下游网关据此区分请求级错误与渠道
+// 故障，已提交的 200 + SSE error 会被误判并触发渠道冷却。
+func TestStreamImmediateErrorReturnsHTTPStatus(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventError,
+		Reason: llm.StopReasonError,
+		Error:  &llm.AssistantMessage{ErrorMessage: "permission_denied: blocked by content policy"},
+	}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestStreamPromptTooLongReturns413 的测试动机是上下文超长必须让网关识别为
+// 客户端问题（不冷却）：413 配上 body 里的 context_length_exceeded code。
+func TestStreamPromptTooLongReturns413(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventError,
+		Reason: llm.StopReasonError,
+		Error:  &llm.AssistantMessage{ErrorMessage: "invalid_argument: The prompt is too long for this model"},
+	}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestStreamMidStreamErrorCarriesHTTPStatus 的测试动机是已提交 200 之后到达的
+// 错误事件必须携带顶层 status 字段，让下游网关按真实语义分类。
+func TestStreamMidStreamErrorCarriesHTTPStatus(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{ResponseID: "resp-1", StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
+			Error: &llm.AssistantMessage{ErrorMessage: "unavailable: connection reset"}},
+	}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed 200: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"status":502`) {
+		t.Fatalf("error event missing top-level status: %s", response.Body.String())
+	}
 }

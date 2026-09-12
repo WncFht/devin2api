@@ -1,7 +1,10 @@
 // 本文件提供把上游 Connect/gRPC 错误码映射到 OpenAI / Anthropic 错误类型的工具。
 package common
 
-import "strings"
+import (
+	"net/http"
+	"strings"
+)
 
 // openAIErrorTypes 把 Connect code 映射为 OpenAI 兼容的错误对象 type。
 // 参考：https://platform.openai.com/docs/guides/error-codes
@@ -66,4 +69,67 @@ func AnthropicErrorType(message string) string {
 		return t
 	}
 	return "api_error"
+}
+
+// contextLengthMarkers 是上游表示"输入超出上下文窗口"的错误文案特征。
+var contextLengthMarkers = []string{
+	"prompt is too long", "context length", "context window",
+	"maximum context", "too many tokens",
+}
+
+// IsContextLengthError 判断错误消息是否表示请求超出上下文长度。
+// 这类错误换渠道/换 Key 重试结果相同，属于客户端可修正的请求问题。
+func IsContextLengthError(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range contextLengthMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// HTTPStatus 把上游错误消息映射为建议的 HTTP 状态码。
+// 同一份映射同时用于响应行状态与流式错误事件里的 status 字段：
+// 下游网关（如 ccload）按状态码区分"请求级错误"与"渠道故障"——
+// 4xx 不冷却整个渠道；上下文超长给 413 并配合 error.code 让网关
+// 直接归类为客户端问题，不做任何冷却。
+// 无法识别的错误返回 502，表示上游服务故障。
+func HTTPStatus(message string) int {
+	switch {
+	case strings.Contains(message, "invalid_argument"),
+		strings.HasPrefix(message, "invalid_argument:"):
+		if IsContextLengthError(message) {
+			return http.StatusRequestEntityTooLarge
+		}
+		return http.StatusBadRequest
+	case strings.Contains(message, "unauthenticated"),
+		strings.HasPrefix(message, "unauthenticated:"):
+		return http.StatusUnauthorized
+	case strings.Contains(message, "permission_denied"),
+		strings.HasPrefix(message, "permission_denied:"):
+		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
+		// permission_denied。这三类都是调用方可修正的请求错误，
+		// 归一成 400 而不是 403：下游网关（如 ccload）对 4xx 只按
+		// 模型作用域冷却，不会把整个渠道标记为失效。
+		return http.StatusBadRequest
+	case strings.Contains(message, "not_found"),
+		strings.HasPrefix(message, "not_found:"):
+		return http.StatusNotFound
+	case strings.Contains(message, "resource_exhausted"),
+		strings.HasPrefix(message, "resource_exhausted:"):
+		return http.StatusTooManyRequests
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+// ErrorCode 返回错误对象的 code 字段值；上下文超长统一为
+// "context_length_exceeded"——与 OpenAI/Anthropic 惯例一致，也让下游
+// 网关能把 SSE 错误事件识别为请求级问题而非渠道故障。其他错误返回 nil。
+func ErrorCode(message string) any {
+	if IsContextLengthError(message) {
+		return "context_length_exceeded"
+	}
+	return nil
 }
