@@ -40,13 +40,19 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{}
 	var resultMu sync.Mutex
 
+	var wg sync.WaitGroup
+	wg.Add(5)
+
 	// 正确路径：JSON Connect SeatManagement GetUserStatus（Bearer + metadata.api_key）
-	if user, plan, planInfo, err := h.fetchUserStatus(ctx); err != nil {
+	go func() {
+		defer wg.Done()
+		user, plan, planInfo, err := h.fetchUserStatus(ctx)
 		resultMu.Lock()
-		result["user_status_error"] = err.Error()
-		resultMu.Unlock()
-	} else {
-		resultMu.Lock()
+		defer resultMu.Unlock()
+		if err != nil {
+			result["user_status_error"] = err.Error()
+			return
+		}
 		if user != nil {
 			result["user"] = user
 		}
@@ -56,11 +62,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 		if planInfo != nil {
 			result["plan_info"] = planInfo
 		}
-		resultMu.Unlock()
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(4)
+	}()
 
 	go func() {
 		defer wg.Done()
@@ -277,17 +279,17 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
-	h.cacheMu.RLock()
+	h.modelsMu.RLock()
 	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
 		cached := h.modelsCache
-		h.cacheMu.RUnlock()
+		h.modelsMu.RUnlock()
 		return cached, nil
 	}
-	h.cacheMu.RUnlock()
+	h.modelsMu.RUnlock()
 
 	// 写锁内复查后再拉取：TTL 过期瞬间的并发 miss 收敛为单次上游调用。
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
+	h.modelsMu.Lock()
+	defer h.modelsMu.Unlock()
 	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
 		return h.modelsCache, nil
 	}
@@ -423,16 +425,16 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 }
 
 func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
-	h.cacheMu.RLock()
+	h.providersMu.RLock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
 		cached := h.providersCache
-		h.cacheMu.RUnlock()
+		h.providersMu.RUnlock()
 		return cached
 	}
-	h.cacheMu.RUnlock()
+	h.providersMu.RUnlock()
 
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
+	h.providersMu.Lock()
+	defer h.providersMu.Unlock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
 		return h.providersCache
 	}
@@ -455,16 +457,16 @@ func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
 }
 
 func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
-	h.cacheMu.RLock()
+	h.modelStatusesMu.RLock()
 	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
 		cached := h.modelStatusesCache
-		h.cacheMu.RUnlock()
+		h.modelStatusesMu.RUnlock()
 		return cached
 	}
-	h.cacheMu.RUnlock()
+	h.modelStatusesMu.RUnlock()
 
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
+	h.modelStatusesMu.Lock()
+	defer h.modelStatusesMu.Unlock()
 	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
 		return h.modelStatusesCache
 	}

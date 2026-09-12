@@ -42,12 +42,16 @@ type Handler struct {
 	loginFailures map[string]*loginFail
 
 	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存可显著降低上游压力。
-	cacheMu             sync.RWMutex
+	// 每个缓存各持一把锁——拉取上游发生在写锁内（锁内复查把并发 miss 收敛成
+	// 单次 RPC），共用一把会让一个慢接口（上限 610s）堵住无关缓存的读。
 	cacheTTL            time.Duration
+	modelsMu            sync.RWMutex
 	modelsCache         []map[string]any
 	modelsExpiry        time.Time
+	providersMu         sync.RWMutex
 	providersCache      []map[string]any
 	providersExpiry     time.Time
+	modelStatusesMu     sync.RWMutex
 	modelStatusesCache  []map[string]any
 	modelStatusesExpiry time.Time
 
