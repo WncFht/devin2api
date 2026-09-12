@@ -4,7 +4,7 @@
 #   harbor run --config multi-harness-eval/jobs/tb21-devin.yaml
 jobs_dir: multi-harness-eval/runs
 job_name: tb21-devin
-n_attempts: 3
+n_attempts: 5
 orchestrator:
   type: local
   n_concurrent_trials: 4

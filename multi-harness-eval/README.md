@@ -108,12 +108,42 @@ harbor run --config jobs/tb21.yaml
 
 **其它**：轨迹统一存 ATIF 格式，turns/tokens/耗时跨 harness 可比；`resume_trajectory`/`load_trajectory` 支持多步任务和会话续跑。
 
-## 6. 实验纪律
+## 6. 采样与超参数
+
+**`n_attempts` 是每题独立 trial 数，不是 agent 内部步数。** 每题跑 $N$ 次，题级得分是 $N$ 次 0/1 的均值，总分是题级得分再对题目取均值（即 avg@N / mean pass@1)。
+
+参照系：
+
+- DeepSeek-V4.1 报告：Terminal-Bench 2.1 用 $N=3$,DeepSWE v1.1 用 $N=8$;temperature 1.0、top_p 0.95、max_steps 500、1M 上下文、TB 断网[^v41]
+- Terminal-Bench 2.1 官方榜单提交要求每题至少 **5 次** trial[^tb]
+
+$N=3$ 是论文里的成本选择，不是统计上够用的选择：题级得分只能取 $\{0, 1/3, 2/3, 1\}$ 四个值，粒度粗；而且 V4.1 报告里 harness 之间的差距本来就只有几个百分点（TB 2.1 上 84.1–90.6),$N=3$ 下这个差距在噪声范围内。二项分布下，真值 $p=0.85$ 的题 $N=3$ 的题级标准差约 0.21,90 题均值的 95% 置信区间约 ±4.5pp —— 够用但勉强；$N=5$ 收窄到 ±3.5pp,$N=8$ 到 ±2.8pp。
+
+分档建议（TB 2.1 约 90 题，跑 1 次 = 90 trial):
+
+| 用途          | n_attempts | 说明                            |
+| ------------- | ---------- | ------------------------------- |
+| smoke         | 1          | 只验证链路通                    |
+| 开发/调参迭代 | 3          | 看方向性差异，不报小数点        |
+| 内部正式对比  | **5**      | 对齐 TB 官方下限，题级 6 个取值 |
+| 写报告/对外   | 8–10       | 对齐 DeepSWE 的 $N=8$ 档        |
+
+其它维度：
+
+- **decoding**：五个 harness 在 Harbor 0.22.0 里都**没有** temperature/top_p kwarg —— 但这不是问题：客户端不发这两个字段时，devin-2api 网关用默认值 `temperature=1, top_p=0.95`（见 `internal/adapter/devin/devin.go`)，恰好等于 V4.1 报告值，且对四个第三方 harness 一致生效。devin CLI 直连 Devin 后端，decoding 不可控 —— 记为「原生默认」，这正是把它当参照系的意义
+- **推理强度**:claude-code/codex 有 `reasoning_effort`,kimi-code 有 `KIMI_MODEL_THINKING_EFFORT`,pi 有 `thinking`。跨 harness 统一到同一概念档（都 `high`)；这些旋钮本身属于 harness 差异的一部分，不要为了追求完全对齐而把某家改残
+- **步数预算**:V4.1 的 max_steps=500 是模型生成轮数，不是 tool call 数也不是 wall time。cc 有 `max_turns` kwarg 可显式对齐；其它家没有对应口，靠 `override_timeout_sec` 兜底。比较时从 ATIF 轨迹里读实际 turns，谁提前触顶要标出来
+- **并发不是实验变量**：每个 trial 独立容器，并发只影响墙钟和上游限流；但限流触发重试会污染结果，所以 devin 单独限 `n_concurrent: 2`（真实计费），其余按配额给。跑完把实际并发记进结果元数据
+- **配对比较**：所有 harness 跑同一套题，差异分析按题配对（per-task 差值的 bootstrap 区间）比两个独立 pass rate 的差更省样本 —— 题目难度这项方差被配对消掉了
+
+报告时除 pass rate 外一起给：题级 $N$ 次结果明细、bootstrap 95% CI、prompt/cached/completion tokens、wall time、turns、触顶/超时次数。
+
+## 7. 实验纪律
 
 - 版本钉死：`--ak version=X.Y.Z` 或 job yaml 里写明，结果里记录每个 harness 的精确版本（V4.1 报告里 Claude Code 四个小版本分数都不同[^v41])
-- 采样：`n_attempts: 3` 起步；50 题规模下 ±8pp 内不显著，差异解读看置信区间
+- 采样分档见 §6，正式对比用 `n_attempts: 5`
 - 别只看 pass rate:token/解题、wall time、空转轮次一起报 —— 同模型跨 harness 的 token 消耗实测能差 40 倍[^scaffold-effect]
-- decoding 显式传（`--ak temperature=...`)，不吃 harness 默认值
+- decoding 由 devin-2api 网关默认（temp 1 / top_p 0.95，对齐 V4.1);harness 侧无统一 kwarg，见 §6
 
 ### 参考文献
 
@@ -126,3 +156,5 @@ harbor run --config jobs/tb21.yaml
 [^scaffold-effect]: Vats & Golev. The Scaffold Effect in Coding Agents: Harness Choice as a Hidden Variable in Coding-Agent Evaluation. KDD Agentic AI Eval Workshop 2026. [paper](https://kdd-eval-workshop.github.io/agenticai-evaluation-kdd2026/assets/papers/74_The_Scaffold_Effect_in_Codi.pdf)
 
 [^v41]: DeepSeek-AI. DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression. 2026.
+
+[^tb]: Terminal-Bench. terminal-bench-2.1 submission guide. [github.com/laude-institute/terminal-bench](https://github.com/laude-institute/terminal-bench)

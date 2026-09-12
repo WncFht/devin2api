@@ -1,8 +1,8 @@
-# 主力:Terminal-Bench 2.1 × 4 harness × n_attempts=3
+# 主力:Terminal-Bench 2.1 × 5 harness × n_attempts=5(TB 官方榜单下限,见 README §6)
 # 跑之前先过 smoke.yaml。n_tasks 控制子集规模,去掉即全量。
 jobs_dir: multi-harness-eval/runs
 job_name: tb21
-n_attempts: 3
+n_attempts: 5
 orchestrator:
   type: local
   n_concurrent_trials: 8
