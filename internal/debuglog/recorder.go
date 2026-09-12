@@ -62,6 +62,8 @@ type Manager struct {
 	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
 	indexFile   *os.File
 	indexWriter *bufio.Writer
+	// indexBytes 跟踪 index.jsonl 当前体积，超 indexFileCap 时保尾部一半重写。
+	indexBytes int64
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期；nil 表示未启动。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}

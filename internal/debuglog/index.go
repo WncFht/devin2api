@@ -6,6 +6,7 @@ package debuglog
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/WncFht/devin2api/internal/llm"
 )
+
+// indexFileCap 是 index.jsonl 的体积上限；超限后保留尾部一半重写。
+// 取值与启动回放窗口一致，保证聚合重建永远覆盖全文件。
+// var 而非 const：测试临时缩小它来覆盖截断路径。
+var indexFileCap int64 = usageReplayTailBytes
 
 // IndexEntry 是 index.jsonl 中一行请求的摘要。
 // 字段选择面向「grep 定位 + 面板列表」两个用途。
@@ -68,6 +74,9 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		}
 		manager.indexFile = file
 		manager.indexWriter = bufio.NewWriter(file)
+		if info, statErr := file.Stat(); statErr == nil {
+			manager.indexBytes = info.Size()
+		}
 	}
 	entry := IndexEntry{
 		Dir:               filepath.Base(recorder.directory),
@@ -113,7 +122,34 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		manager.ioErrors.Add(1)
 		return
 	}
+	manager.indexBytes += int64(len(data) + 1)
 	manager.usage.add(entry)
+	if manager.indexBytes > indexFileCap {
+		manager.truncateIndexLocked()
+	}
+}
+
+// truncateIndexLocked 把 index.jsonl 截到尾部一半大小；调用方持有 mutex。
+// 截断失败只记 ioErrors：写入器重置为惰性重开，索引继续追加不受影响。
+func (manager *Manager) truncateIndexLocked() {
+	_ = manager.indexWriter.Flush()
+	_ = manager.indexFile.Close()
+	manager.indexWriter = nil
+	manager.indexFile = nil
+	path := filepath.Join(manager.root, "index.jsonl")
+	data, err := tailRead(path, indexFileCap/2)
+	if err == nil {
+		// 截断点可能落在行中间，丢弃首行残段。
+		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+			data = data[idx+1:]
+		}
+		err = os.WriteFile(path, data, 0o600)
+	}
+	if err != nil {
+		manager.ioErrors.Add(1)
+		return
+	}
+	manager.indexBytes = int64(len(data))
 }
 
 // reasoningTokens 展开 Usage.Reasoning 指针为整数值。
