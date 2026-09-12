@@ -89,3 +89,17 @@
 ## 格式化工具链
 
 `*.md` 提交会走 pre-commit：autocorrect → markdownlint-cli2 --fix → prettier（经 git-format-staged 只写 index，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。autocorrect/markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+
+# 服务排障（对运行中的实例）
+
+本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值）与 `stage`（失败发生在哪一层）。
+
+工作流：
+
+1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
+2. 读 `logs/<dir>/meta.json`（结果、三段模型、TTFB、token、upstream_request_id）与 `error.json`（首个失败点）。
+3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。
+4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希），`grep` 即可；更早历史被 retention 清理后索引仍在。
+5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
+
+注意：请求体可能含用户隐私内容；日志目录与 API 均不落明文凭据（`key_hash` 是 SHA-256 截断），但内容字段未脱敏——对外分享前先读 `meta.json` 再决定是否给全量。
