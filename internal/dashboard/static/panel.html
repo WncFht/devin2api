@@ -10,12 +10,15 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#e0e0e0;padding:16px 20px 40px}
 .container{max-width:1400px;margin:0 auto}
-h1{font-size:22px;margin-bottom:16px;color:#7c8aff}
-.section{background:#1a1d27;border-radius:12px;padding:20px;margin-bottom:16px}
+h1{font-size:22px;margin-bottom:8px;color:#7c8aff}
+.nav{position:sticky;top:0;z-index:10;background:rgba(15,17,23,.92);backdrop-filter:blur(6px);padding:8px 0 10px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:14px;border-bottom:1px solid #222}
+.nav a{color:#9aa3c0;font-size:13px;text-decoration:none}
+.nav a:hover{color:#fff}
+.section{background:#1a1d27;border-radius:12px;padding:20px;margin-bottom:16px;scroll-margin-top:52px}
 .section h2{font-size:15px;margin-bottom:12px;color:#7c8aff}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
 .card{background:#222632;border-radius:8px;padding:12px}
-.card .label{font-size:11px;color:#888;margin-bottom:4px}
+.card .label{font-size:11px;color:#9a9a9a;margin-bottom:4px}
 .card .value{font-size:16px;font-weight:600;word-break:break-all}
 .progress-bar{width:100%;height:8px;background:#333;border-radius:4px;margin-top:8px;overflow:hidden}
 .progress-fill{height:100%;border-radius:4px;transition:width .5s}
@@ -48,12 +51,18 @@ tr:hover{background:#222632}
 .badge-cap{background:#3a1a2a;color:#f472b6}
 .badge-off{background:#333;color:#999}
 .price{font-variant-numeric:tabular-nums;white-space:nowrap}
-.muted{color:#666}
+.muted{color:#7d8494}
 .loading{text-align:center;padding:32px;color:#888}
-.note{font-size:12px;color:#888;line-height:1.55;margin-top:10px}
+.note{font-size:12px;color:#999;line-height:1.55;margin-top:10px}
 .note code{background:#222;padding:1px 5px;border-radius:3px}
 .spark{display:block;width:100%;height:56px;margin-top:8px}
 .chart{width:100%;margin-top:6px}
+.chart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+.chart-cap{font-size:12px;color:#999;margin-bottom:2px}
+.lnk{color:#aab4ff;cursor:pointer}
+.lnk:hover{text-decoration:underline}
+.err-banner{background:#3a1a1a;border:1px solid #6b2b2b;color:#f87171;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:10px}
+.file-link.on{border-color:#7c8aff;color:#fff}
 .u-legend{font-size:11px;color:#999;margin-top:2px}
 .u-legend .u-series .u-marker{border-radius:2px}
 .req-table td{cursor:pointer}
@@ -70,10 +79,57 @@ tr:hover{background:#222632}
 <body>
 <div class="container">
 <h1>Devin API 管理面板</h1>
+<div class="nav">
+<a href="#statsSection">指标</a>
+<a href="#requestsSection">请求</a>
+<a href="#usageSection">用量</a>
+<a href="#quotaSection">配额</a>
+<a href="#statusSection">账户</a>
+<a href="#processLogSection">进程日志</a>
+<a href="#modelsSection">模型</a>
+</div>
 
 <div class="section" id="statsSection">
 <h2>代理运行指标 <button class="chip" id="debugToggle" onclick="toggleDebug()" style="display:none">日志开关</button></h2>
 <div class="loading">加载中...</div>
+</div>
+
+<div class="section" id="activeSection" style="display:none">
+<h2>进行中请求</h2>
+<div id="activeBody"></div>
+</div>
+
+<div class="section" id="requestsSection">
+<h2>最近请求 <span class="muted" style="font-weight:400;font-size:12px">点击行展开调试细节 · 每 10 秒刷新 · 打开文件时暂停</span></h2>
+<div class="filters">
+<input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果..." oninput="reqTyping()">
+<select id="fStatusClass" onchange="reqFilter()">
+<option value="">全部状态</option><option value="2xx">2xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option>
+</select>
+<select id="fResult" onchange="reqFilter()">
+<option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option>
+</select>
+<input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0" oninput="reqTyping()">
+<input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0" oninput="reqTyping()">
+<select id="fSince" onchange="reqFilter()">
+<option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option>
+</select>
+<span class="file-link" onclick="exportRequests('json')">导出 JSON</span>
+<span class="file-link" onclick="exportRequests('csv')">导出 CSV</span>
+</div>
+<div class="stats" id="reqHint" style="display:none"></div>
+<div class="model-scroll" style="max-height:50vh">
+<table class="req-table">
+<thead><tr>
+<th>时间</th><th>API</th><th>状态</th><th>模型</th><th>耗时</th><th>上游TTFB</th><th>Tokens</th><th>客户端</th>
+</tr></thead>
+<tbody id="reqBody"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+</table>
+</div>
+<div class="filters" style="margin-top:8px;margin-bottom:0">
+<span class="file-link" id="reqMore" style="display:none" onclick="loadMoreRequests()">加载更多 ×100</span>
+<span class="stats" id="reqCount" style="margin:0"></span>
+</div>
 </div>
 
 <div class="section" id="usageSection">
@@ -91,47 +147,13 @@ tr:hover{background:#222632}
 <div class="loading">加载中...</div>
 </div>
 
-<div class="section" id="activeSection" style="display:none">
-<h2>进行中请求</h2>
-<div id="activeBody"></div>
-</div>
-
-<div class="section">
-<h2>最近请求 <span class="muted" style="font-weight:400;font-size:12px">点击行展开调试细节 · 每 10 秒刷新</span></h2>
-<div class="filters">
-<input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果..." oninput="loadRequests()">
-<select id="fStatusClass" onchange="loadRequests()">
-<option value="">全部状态</option><option value="2xx">2xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option>
-</select>
-<select id="fResult" onchange="loadRequests()">
-<option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option>
-</select>
-<input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0" oninput="loadRequests()">
-<input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0" oninput="loadRequests()">
-<select id="fSince" onchange="loadRequests()">
-<option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option>
-</select>
-<span class="file-link" onclick="exportRequests('json')">导出 JSON</span>
-<span class="file-link" onclick="exportRequests('csv')">导出 CSV</span>
-</div>
-<div class="stats" id="reqHint" style="display:none"></div>
-<div class="model-scroll" style="max-height:50vh">
-<table class="req-table">
-<thead><tr>
-<th>时间</th><th>API</th><th>状态</th><th>模型</th><th>耗时</th><th>上游TTFB</th><th>Tokens</th><th>客户端</th>
-</tr></thead>
-<tbody id="reqBody"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
-</table>
-</div>
-</div>
-
 <div class="section" id="processLogSection">
 <h2>进程日志 <span class="muted" style="font-weight:400;font-size:12px">logs/stderr.log · 尾部 256KB</span></h2>
-<div class="filters"><span class="file-link" onclick="loadProcessLog(0)">刷新</span><span class="file-link" id="procFollow" onclick="toggleProcFollow()">跟随输出</span></div>
+<div class="filters"><span class="file-link" onclick="loadProcessLog(0)">刷新</span><span class="file-link" id="procFollow" onclick="toggleProcFollow()">跟随输出</span><select id="procLevel" onchange="renderProcLog()"><option value="">全部级别</option><option value="INFO">INFO+</option><option value="WARN">WARN+</option><option value="ERROR">仅 ERROR</option></select></div>
 <div class="file-view" id="processLogView" style="display:block;max-height:40vh">加载中...</div>
 </div>
 
-<div class="section">
+<div class="section" id="modelsSection">
 <h2>模型列表 · 价格 · 筛选</h2>
 <div class="filters">
 <input type="search" id="search" placeholder="搜索 UID / 标签 / 描述 / 系列..." oninput="applyFilters()">
@@ -206,8 +228,14 @@ return String(s==null?'':s)
 .replace(/&/g,'&amp;')
 .replace(/</g,'&lt;')
 .replace(/>/g,'&gt;')
-.replace(/"/g,'&quot;');
+.replace(/"/g,'&quot;')
+.replace(/'/g,'&#39;');
 }
+// qa 用于 onclick="fn('...')" 这类「双引号属性内套单引号 JS 字符串」的场景：
+// 先对 JS 层转义反斜杠与单引号，再过 esc 保证属性安全。值经 HTML 解码后
+// 进入 JS 的仍是合法的 \' 转义。
+function qa(s){return esc(String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"))}
+function debounce(fn,ms){let t;return function(){clearTimeout(t);t=setTimeout(fn,ms||300)}}
 function card(label,value){
 return '<div class="card"><div class="label">'+esc(label)+'</div><div class="value">'+esc(String(value))+'</div></div>';
 }
@@ -355,6 +383,7 @@ if(m.supports_images) b+='<span class="badge badge-img">img</span>';
 if(m.is_premium) b+='<span class="badge badge-premium">Premium</span>';
 if(m.is_recommended) b+='<span class="badge badge-rec">推荐</span>';
 if(m.is_capacity_limited) b+='<span class="badge badge-cap">限容</span>';
+if(m.beta_warning) b+='<span class="badge badge-beta" title="'+esc(m.beta_warning)+'">警告</span>';
 if(m.disabled) b+='<span class="badge badge-off">禁用</span>';
 return b;
 }
@@ -543,7 +572,7 @@ drawChart('stats',tm,xs,[
 }
 }catch(e){
 resetCharts('stats');
-document.getElementById('statsSection').innerHTML='<h2>代理运行指标</h2><div class="note">指标拉取失败: '+esc(String(e))+'</div>';
+document.getElementById('statsSection').innerHTML='<h2>代理运行指标</h2><div class="note" style="color:#f87171">指标拉取失败: '+esc(String(e))+'（10s 后重试）</div>';
 }
 }
 
@@ -581,6 +610,7 @@ function resetCharts(key){
 (chartPool[key]||[]).forEach(u=>{
  const r=currentXRange(u);
  if(u._uid){if(r)zoomMem[u._uid]=r;else delete zoomMem[u._uid]}
+ if(u.ro)u.ro.disconnect();
  u.destroy();
 });
 chartPool[key]=[];
@@ -652,16 +682,28 @@ const d=u.data[0];
 const min=Math.max(zoomMem[u._uid].min,d[0]),max=Math.min(zoomMem[u._uid].max,d[d.length-1]);
 if(max>min)u.setScale('x',{min:min,max:max});
 }
+// 容器宽度变化（窗口缩放、chart-grid 重排）时同步图表宽度。
+if(window.ResizeObserver){
+u.ro=new ResizeObserver(()=>{const w=el.clientWidth|0;if(w>0&&w!==u.width)u.setSize({width:w,height:u.height})});
+u.ro.observe(el);
+}
 (chartPool[key]=chartPool[key]||[]).push(u);
 }
 
 function fmtTime(iso){
-try{const d=new Date(iso);return d.toLocaleTimeString('zh-CN',{hour12:false})}catch(e){return iso||'-'}
+try{
+const d=new Date(iso);
+if(isNaN(d))return iso||'-';
+const t=d.toLocaleTimeString('zh-CN',{hour12:false});
+if(d.toDateString()===new Date().toDateString())return t;
+return String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+t;
+}catch(e){return iso||'-'}
 }
 function fmtMs(v){return v==null?'-':(v>=1000?(v/1000).toFixed(1)+'s':v+'ms')}
 function statusClass(code){
 if(code>=500)return 'status-err';
 if(code>=400)return 'status-warn';
+if(code<=0)return 'muted';
 return 'status-ok';
 }
 
@@ -748,16 +790,20 @@ html+='</div>';
 const stages=s.error_stages||{};
 const stageKeys=Object.keys(stages);
 if(stageKeys.length){
-html+='<h2 style="margin-top:14px">错误阶段分布 <span class="muted" style="font-weight:400;font-size:12px">窗口累计</span></h2><div class="chip-row">'
+html+='<h2 style="margin-top:14px">错误阶段分布 <span class="muted" style="font-weight:400;font-size:12px">窗口累计 · 点击筛选请求</span></h2><div class="chip-row">'
 stageKeys.sort((a,b)=>stages[b]-stages[a]).forEach(k=>{
-html+='<span class="chip" style="cursor:default">'+esc(k)+' <strong>'+stages[k]+'</strong></span>';
+html+='<span class="chip" onclick="filterStage(\''+qa(k)+'\')">'+esc(k)+' <strong>'+stages[k]+'</strong></span>';
 });
 html+='</div>';
 }
 if(pts.length){
 const gran=hourly?'逐小时':'逐日';
-html+='<h2 style="margin-top:14px">'+gran+'流量 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2><div id="hourlyFlowChart"></div>';
-html+='<h2 style="margin-top:14px">速度与缓存</h2><div id="hourlyPerfChart"></div>';
+html+='<h2 style="margin-top:14px">'+gran+'趋势 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2>';
+html+='<div class="chart-grid">';
+html+='<div><div class="chart-cap">请求 / 错误 / 输出 token</div><div id="hourlyFlowChart"></div></div>';
+html+='<div><div class="chart-cap">decode 均速 / 缓存命中率</div><div id="hourlyPerfChart"></div></div>';
+if(hourly)html+='<div><div class="chart-cap">上游 TTFB / 总耗时 p95</div><div id="hourlyLatChart"></div></div>';
+html+='</div>';
 }
 const md=s.model_days||{};
 if(usageRange!=='all'){
@@ -766,10 +812,10 @@ const rows=Object.keys(md).map(model=>{
  return {name:model,...t};
 }).filter(m=>m.requests>0).sort((a,b)=>b.requests-a.requests);
 if(rows.length){
-html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+' · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th></tr></thead><tbody>';
 rows.forEach(m=>{
 const sr=(m.requests-m.errors-m.disconnected)/m.requests;
-html+='<tr><td class="mono">'+esc(m.name)+'</td>'
+html+='<tr><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(m.name)+'\')">'+esc(m.name)+'</span></td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
 +'<td>'+(sr*100).toFixed(0)+'%</td>'
 +'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
@@ -781,9 +827,9 @@ html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 html+='</tbody></table>';
 }
 }else if(d.models&&d.models.length){
-html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">全窗口 · 含成本估算</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">全窗口 · 含成本估算 · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
 d.models.forEach(m=>{
-html+='<tr><td class="mono">'+esc(m.name)+'</td>'
+html+='<tr><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(m.name)+'\')">'+esc(m.name)+'</span></td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
 +'<td>'+(m.success_rate!=null?(m.success_rate*100).toFixed(0)+'%':'-')+'</td>'
 +'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
@@ -799,9 +845,9 @@ html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 html+='</tbody></table>';
 }
 if(s.keys&&s.keys.length){
-html+='<h2 style="margin-top:14px">按 API Key 哈希 <span class="muted" style="font-weight:400;font-size:12px">窗口累计</span></h2><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按 API Key 哈希 <span class="muted" style="font-weight:400;font-size:12px">窗口累计 · 点击筛选请求</span></h2><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
 s.keys.forEach(k=>{
-html+='<tr><td class="mono">'+esc(k.name)+'</td><td>'+k.requests+'</td><td>'+k.errors+'</td><td class="mono">'+fmtNum(k.output_tokens)+'</td><td class="mono muted">'+fmtTime(k.last_at)+'</td></tr>';
+html+='<tr><td class="mono"><span class="lnk" onclick="filterKey(\''+qa(k.name)+'\')">'+esc(k.name)+'</span></td><td>'+k.requests+'</td><td>'+k.errors+'</td><td class="mono">'+fmtNum(k.output_tokens)+'</td><td class="mono muted">'+fmtTime(k.last_at)+'</td></tr>';
 });
 html+='</tbody></table>';
 }
@@ -826,6 +872,12 @@ drawChart('usage',document.getElementById('hourlyPerfChart'),xs,[
  {label:'均速',color:'#22d3ee',values:pts.map(p=>p.gen_ms>0?p.output_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
  {label:'缓存命中率',color:'#fbbf24',scale:'pct',values:pts.map(p=>{const dd=(p.cache_read_tokens||0)+(p.input_tokens||0);return dd>0?p.cache_read_tokens/dd*100:null}),fmt:v=>v.toFixed(0)+'%'},
 ],{right:[{scale:'pct',range:[0,100]}],uid:'usage.perf'});
+const lat=document.getElementById('hourlyLatChart');
+if(lat)drawChart('usage',lat,xs,[
+ {label:'TTFB 均值',color:'#7c8aff',values:pts.map(p=>p.avg_ttfb_ms||null),fmt:v=>fmtMs(v)},
+ {label:'TTFB p95',color:'#fbbf24',values:pts.map(p=>p.ttfb_p95_ms||null),fmt:v=>fmtMs(v)},
+ {label:'耗时 p95',color:'#f87171',values:pts.map(p=>p.duration_p95_ms||null),fmt:v=>fmtMs(v)},
+],{uid:'usage.lat'});
 }
 }
 
@@ -874,16 +926,31 @@ document.getElementById('quotaSection').innerHTML='<h2>配额历史</h2><div cla
 }
 }
 
-let procOffset=0,procFollow=false;
+let procOffset=0,procFollow=false,procBuf='';
+const PROC_CAP=256<<10;
+const PROC_LV={DEBUG:0,INFO:1,WARN:2,ERROR:3};
 async function loadProcessLog(offset){
 try{
 const res=await fetch('/panel/api/logs?offset='+(offset||0));
 const d=await res.json();
-const view=document.getElementById('processLogView');
-if(offset&&procOffset){view.textContent+=d.text||''}else{view.textContent=d.text||'(空)'}
+if(offset&&procOffset)procBuf+=d.text||'';else procBuf=d.text||'';
+// 缓冲封顶：跟随模式长期运行时 DOM 不无限增长。
+if(procBuf.length>PROC_CAP)procBuf=procBuf.slice(-PROC_CAP);
 procOffset=d.next_offset||0;
-if(procFollow)view.scrollTop=view.scrollHeight;
+renderProcLog();
 }catch(e){document.getElementById('processLogView').textContent='读取失败: '+String(e)}
+}
+// 级别过滤保留无 level= 的行（堆栈续行、手写输出等），不静默吞内容。
+function renderProcLog(){
+const view=document.getElementById('processLogView');
+const min=document.getElementById('procLevel').value;
+let t=procBuf;
+if(min){
+const want=PROC_LV[min]||0;
+t=procBuf.split('\n').filter(l=>{const m=/level=(\w+)/.exec(l);return !m||PROC_LV[m[1]]===undefined||PROC_LV[m[1]]>=want}).join('\n');
+}
+view.textContent=t||'(空)';
+if(procFollow)view.scrollTop=view.scrollHeight;
 }
 function toggleProcFollow(){
 procFollow=!procFollow;
@@ -892,7 +959,39 @@ document.getElementById('procFollow').classList.toggle('on',procFollow);
 
 let expandedDir=null;
 let openFile=null;
-function tickRequests(){if(openFile)return;loadRequests()}
+let reqLimit=100;
+// 打开文件时列表自动刷新暂停（避免详情 DOM 被重建）；在 reqHint 给出提示。
+function tickRequests(){
+if(openFile){
+const h=document.getElementById('reqHint');
+h.style.display='';h.textContent='正在查看文件，自动刷新已暂停（再点一次文件名或收起详情后恢复）。';
+return;
+}
+loadRequests();
+}
+function reqFilter(){reqLimit=100;loadRequests()}
+const reqTyping=debounce(reqFilter,300);
+
+// 过滤器状态同步到 location.hash：刷新/分享链接后现场不丢。
+const REQ_FILTER_IDS=['reqSearch','fStatusClass','fResult','fReqModel','fErrStage','fSince'];
+function saveFilterHash(){
+const p=new URLSearchParams();
+REQ_FILTER_IDS.forEach(id=>{const el=document.getElementById(id);if(el&&el.value)p.set(id,el.value)});
+const s=p.toString();
+history.replaceState(null,'',s?location.pathname+'#'+s:location.pathname);
+}
+function restoreFilterHash(){
+try{
+const p=new URLSearchParams(location.hash.slice(1));
+REQ_FILTER_IDS.forEach(id=>{const v=p.get(id);if(v){const el=document.getElementById(id);if(el)el.value=v}});
+}catch(e){}
+}
+// 用量区的联动入口：把条件填进请求过滤器并滚回请求列表。
+function jumpToRequests(){document.getElementById('requestsSection').scrollIntoView()}
+function filterStage(s){document.getElementById('fErrStage').value=s;reqFilter();jumpToRequests()}
+function filterReqModel(s){document.getElementById('fReqModel').value=s;reqFilter();jumpToRequests()}
+function filterKey(s){document.getElementById('reqSearch').value=s;reqFilter();jumpToRequests()}
+function loadMoreRequests(){reqLimit=Math.min(500,reqLimit+100);loadRequests()}
 function reqQuery(){
 const p=new URLSearchParams();
 const q=document.getElementById('reqSearch').value.trim();if(q)p.set('q',q);
@@ -910,36 +1009,51 @@ window.open('/panel/api/requests/export?'+p.toString(),'_blank');
 }
 async function loadRequests(){
 try{
-const p=reqQuery();p.set('limit','100');
+const p=reqQuery();p.set('limit',reqLimit);
+saveFilterHash();
 const res=await fetch('/panel/api/requests?'+p.toString());
 const data=await res.json();
 const tbody=document.getElementById('reqBody');
 const list=data.requests||[];
-if(data.disabled){tbody.innerHTML='<tr><td colspan="8" class="loading">调试日志未启用（config: debug.enabled）</td></tr>';return}
-if(!list.length){tbody.innerHTML='<tr><td colspan="8" class="loading">暂无请求记录</td></tr>';return}
+const reqCount=document.getElementById('reqCount');
+const moreBtn=document.getElementById('reqMore');
+if(data.disabled){tbody.innerHTML='<tr><td colspan="8" class="loading">调试日志未启用（config: debug.enabled）</td></tr>';reqCount.textContent='';moreBtn.style.display='none';return}
+if(!list.length){tbody.innerHTML='<tr><td colspan="8" class="loading">暂无请求记录</td></tr>';reqCount.textContent='命中 0 条';moreBtn.style.display='none';return}
 let html='';
 list.forEach(e=>{
-const models=esc(e.requested_model||'-');
 const resolved=(e.model&&e.model!==e.requested_model)?' → '+esc(e.model):'';
 const mismatch=e.model_mismatch?' <span class="badge badge-high">错配</span>':'';
-html+='<tr onclick="toggleDetail(\''+esc(e.dir)+'\',this)">'
+const premature=e.premature_end_turn?' <span class="badge badge-medium" title="工具结果之后模型直接 end_turn，未继续调用工具">早停</span>':'';
+const stream=e.stream?' <span class="badge badge-low">SSE</span>':'';
+const stage=e.error_stage?'<div><span class="badge badge-high">'+esc(e.error_stage)+'</span></div>':'';
+const cache=e.cache_read_tokens?'<div class="muted">缓存读 '+fmtNum(e.cache_read_tokens)+'</div>':'';
+const keyh=e.key_hash?'<div class="muted" title="key hash">'+esc(e.key_hash)+'</div>':'';
+html+='<tr onclick="toggleDetail(\''+qa(e.dir)+'\',this)">'
 +'<td class="mono">'+fmtTime(e.started_at)+'</td>'
 +'<td>'+esc(e.api||'-')+'</td>'
-+'<td class="'+statusClass(e.status_code)+'">'+e.status_code+' '+esc(e.result||'')+'</td>'
-+'<td>'+models+resolved+mismatch+'</td>'
++'<td class="'+statusClass(e.status_code)+'">'+e.status_code+' '+esc(e.result||'')+stream+stage+'</td>'
++'<td>'+esc(e.requested_model||'-')+resolved+mismatch+premature+'</td>'
 +'<td class="mono">'+fmtMs(e.duration_ms)+'</td>'
 +'<td class="mono">'+fmtMs(e.first_upstream_ms)+'</td>'
-+'<td class="mono">'+(e.input_tokens??0)+'/'+(e.output_tokens??0)+'</td>'
-+'<td class="mono muted">'+esc(e.client_ip||'')+'</td></tr>';
++'<td class="mono">'+fmtNum(e.input_tokens)+'/'+fmtNum(e.output_tokens)+cache+'</td>'
++'<td class="mono muted">'+esc(e.client_ip||'')+keyh+'</td></tr>';
 if(expandedDir===e.dir){
 html+='<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>';
 }
 });
 tbody.innerHTML=html;
-const hint=document.getElementById('reqHint');
-if(data.has_more){hint.style.display='';hint.textContent='还有更多历史记录在窗口之外（index.jsonl 未完整读入），可缩小筛选或 grep 原文件。'}else{hint.style.display='none'}
+reqCount.textContent='显示 '+list.length+' / 命中 '+(data.total??list.length)+' 条';
+moreBtn.style.display=(list.length<data.total&&reqLimit<500)?'':'none';
+let hint='';
+if(data.has_more)hint='更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
+if(reqLimit>=500&&list.length<data.total)hint+=' 已达 500 条单页上限，用导出查看全部。';
+const hintEl=document.getElementById('reqHint');
+if(hint){hintEl.style.display='';hintEl.textContent=hint}else{hintEl.style.display='none'}
 if(expandedDir){fillDetail(expandedDir)}
-}catch(e){/* 刷新失败保留下次重试 */}
+}catch(e){
+const h=document.getElementById('reqHint');
+h.style.display='';h.textContent='请求列表刷新失败：'+String(e)+'（保留旧数据，10s 后重试）';
+}
 }
 
 async function toggleDetail(dir,row){
@@ -955,34 +1069,60 @@ try{
 const res=await fetch('/panel/api/requests/'+encodeURIComponent(dir));
 const d=await res.json();
 const m=d.meta||{};
-let html='<div class="meta-grid">';
+// 失败请求：error.json 记的是首个失败点（stage+message），提到最上方
+// 比埋在 meta 表格里更先被看到。
+let banner='';
+if((d.files||[]).some(f=>f.name==='error.json')){
+try{
+const er=await fetch('/panel/api/requests/'+encodeURIComponent(dir)+'/file/error.json');
+const eo=JSON.parse((await er.json()).text);
+banner='<div class="err-banner">失败阶段 '+esc(eo.stage||'-')+' · '+esc(eo.message||'')+' · +'+fmtMs(eo.elapsed_ms)+'</div>';
+}catch(e){}
+}
+if(!banner&&(m.status_code>=400||m.result==='failed')){
+banner='<div class="err-banner">'+esc((m.status_code||'')+' '+(m.result||''))+'</div>';
+}
+let html=banner+'<div class="meta-grid">';
 [['目录',d.dir],['API',m.api],['路径',(m.method||'')+' '+(m.path||'')],['状态',(m.status_code||'-')+' '+(m.result||'')],
+['流式',m.stream===true?'SSE':m.stream===false?'否':null],['提供方',m.provider],
 ['请求模型',m.requested_model],['实际模型',m.model],['响应模型',m.response_model],
-['开始',m.started_at],['耗时',fmtMs(m.duration_ms)],['上游TTFB',fmtMs(m.first_upstream_ms)],['客户端TTFB',fmtMs(m.first_client_ms)],
+['模型错配',m.model_mismatch?'是':null],['可疑早停',m.premature_end_turn?'工具结果后纯文本 end_turn':null],
+['开始',m.started_at],['完成',m.finished_at],['耗时',fmtMs(m.duration_ms)],['上游TTFB',fmtMs(m.first_upstream_ms)],['客户端TTFB',fmtMs(m.first_client_ms)],
 ['上游请求ID',m.upstream_request_id],['客户端IP',m.client&&m.client.ip],['UA',m.client&&m.client.user_agent],['Key哈希',m.client&&m.client.key_hash],
+['客户端请求ID',m.client&&m.client.request_id],
 ['Tokens',m.usage?(m.usage.input+' in / '+m.usage.output+' out / '+m.usage.cache_read+' cached'):null],
 ['丢弃事件',m.dropped_events]].forEach(kv=>{
 if(kv[1]==null||kv[1]==='')return;
 html+='<div><span class="k">'+esc(kv[0])+'</span> <span class="v">'+esc(String(kv[1]))+'</span></div>';
 });
 html+='</div><div class="file-list">';
+html+='<span class="file-link" onclick="navigator.clipboard&&navigator.clipboard.writeText(\''+qa(d.dir)+'\')" title="dir 即响应头 X-Request-Id">复制 dir</span>';
 (d.files||[]).forEach(f=>{
-html+='<span class="file-link" onclick="loadFile(\''+esc(d.dir)+'\',\''+esc(f.name)+'\')">'+esc(f.name)+' <span class="muted">'+f.size+'B</span></span>';
+html+='<span class="file-link" data-f="'+esc(f.name)+'" onclick="loadFile(\''+qa(d.dir)+'\',\''+qa(f.name)+'\')">'+esc(f.name)+' <span class="muted">'+fmtBytes(f.size)+'</span></span>';
 if(f.name==='06-http-response.jsonl'){
-html+='<span class="file-link" style="border-color:#4a6" onclick="loadMerged(\''+esc(d.dir)+'\')">合并视图</span>';
+html+='<span class="file-link" style="border-color:#4a6" onclick="loadMerged(\''+qa(d.dir)+'\')">合并视图</span>';
 }
 });
 html+='</div><div class="file-view" id="fileView" style="display:none"></div>';
-if(!d.meta){html='<div class="note">meta.json 缺失或已损坏</div>'+html}
+if(!d.meta){html+='<div class="note">meta.json 缺失或已损坏</div>'}
 row.innerHTML=html;
-if(openFile&&openFile.dir===d.dir){loadFile(d.dir,openFile.name)}
+if(openFile&&openFile.dir===d.dir){const o=openFile;openFile=null;o.merged?loadMerged(d.dir):loadFile(d.dir,o.name)}
 }catch(e){row.innerHTML='<div class="note">详情拉取失败: '+esc(String(e))+'</div>'}
 }
 
+// markFile 高亮当前打开的文件链接；name=null 全部取消。
+function markFile(name){
+document.querySelectorAll('.detail-row .file-link[data-f]').forEach(x=>x.classList.toggle('on',x.dataset.f===name));
+}
 async function loadFile(dir,name){
 const view=document.getElementById('fileView');
 if(!view)return;
+// 再点同一个文件名 = 关闭查看区，恢复列表自动刷新。
+if(openFile&&openFile.dir===dir&&openFile.name===name&&!openFile.merged){
+openFile=null;markFile(null);view.style.display='none';view.textContent='';return;
+}
 openFile={dir:dir,name:name};
+markFile(name);
 view.style.display='block';
 view.textContent='加载 '+name+' ...';
 try{
@@ -1006,7 +1146,8 @@ view.textContent=text+(d.truncated?'\n\n... 已截断（原始 '+d.size+' 字节
 async function loadMerged(dir){
 const view=document.getElementById('fileView');
 if(!view)return;
-openFile={dir:dir,name:'06-http-response.jsonl'};
+openFile={dir:dir,name:'06-http-response.jsonl',merged:true};
+markFile('06-http-response.jsonl');
 view.style.display='block';
 view.textContent='合并 06-http-response.jsonl ...';
 try{
@@ -1061,6 +1202,7 @@ if(sec<3600) return Math.floor(sec/60)+'m '+sec%60+'s';
 return Math.floor(sec/3600)+'h '+Math.floor(sec%3600/60)+'m';
 }
 
+restoreFilterHash();
 loadStatus();
 loadModels();
 loadStats();
@@ -1072,6 +1214,7 @@ loadProcessLog(0);
 setInterval(loadStats,10000);
 setInterval(loadActive,10000);
 setInterval(tickRequests,10000);
+setInterval(loadStatus,60000);
 setInterval(loadUsage,60000);
 setInterval(loadQuota,60000);
 setInterval(()=>{if(procFollow)loadProcessLog(procOffset)},5000);
