@@ -478,12 +478,15 @@ func (encoder *StreamEncoder) emit(name string, payload map[string]any) SSEEvent
 }
 
 func baseResponse(id string, model string, createdAt int64, status string) map[string]any {
-	// 对齐 OpenAI Response 对象的稳定字段；IDE 多轮常依赖 store=true。
+	// 对齐 OpenAI Response 对象的稳定字段。store=false 是诚实声明：
+	// 本代理无响应存储，报 true 会诱使 Codex 等客户端走
+	// previous_response_id 续链而静默丢掉全部上下文；false 让客户端
+	// 回退到每次携带完整历史。
 	return map[string]any{
 		"id": id, "object": "response", "created_at": createdAt, "status": status,
 		"error": nil, "incomplete_details": nil, "instructions": nil, "model": model,
 		"output": []any{}, "parallel_tool_calls": true, "previous_response_id": nil,
-		"reasoning": map[string]any{"effort": nil, "summary": nil}, "store": true,
+		"reasoning": map[string]any{"effort": nil, "summary": nil}, "store": false,
 		"temperature": nil, "top_p": nil, "truncation": "disabled",
 		"tool_choice": "auto", "tools": []any{}, "usage": nil, "metadata": map[string]any{},
 		"max_output_tokens": nil, "text": map[string]any{"format": map[string]any{"type": "text"}},

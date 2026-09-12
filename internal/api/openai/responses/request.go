@@ -31,7 +31,9 @@ type Request struct {
 	MaxOutputTokens *int `json:"max_output_tokens,omitempty"`
 	// Temperature 是可选的采样温度。
 	Temperature *float64 `json:"temperature,omitempty"`
-	// PreviousResponseID 是上游 Responses 会话关联标识。
+	// PreviousResponseID 是调用方提供的上游响应关联标识。本代理无服务端
+	// 响应存储（store=false），该字段被解析但忽略——客户端应回退到
+	// 携带完整历史。
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	// TopP 是可选的 nucleus 采样参数。
 	TopP *float64 `json:"top_p,omitempty"`
