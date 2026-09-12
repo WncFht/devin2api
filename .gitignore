@@ -28,3 +28,4 @@ coverage.out
 /outputs/probe/
 
 /node_modules/
+multi-harness-eval/runs/

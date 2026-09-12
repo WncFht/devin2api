@@ -1,5 +1,6 @@
 # 主力:Terminal-Bench 2.1 × 4 harness × n_attempts=3
 # 跑之前先过 smoke.yaml。n_tasks 控制子集规模,去掉即全量。
+jobs_dir: multi-harness-eval/runs
 job_name: tb21
 n_attempts: 3
 orchestrator:
@@ -48,11 +49,11 @@ agents:
       reasoning_effort: high
       web_search: disabled
 
-  # swe-2-max 原生 harness,直连 api.devin.ai;需 PYTHONPATH=multi-harness-eval
-  - import_path: eval_agents.devin_cli:DevinCli
+  # swe-2-max 原生 harness,Harbor 内置 devin agent,直连 api.devin.ai
+  - name: devin
     model_name: devin/swe-2-max
     env:
-      DEVIN_SESSION_TOKEN: ${DEVIN_SESSION_TOKEN}
+      DEVIN_API_KEY: ${DEVIN_API_KEY}
     extra_allowed_hosts:
       - api.devin.ai
       - server.codeium.com
