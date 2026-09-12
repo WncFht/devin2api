@@ -79,24 +79,19 @@ tail -f logs/stderr.log                                                       # 
 ## 升级流程
 
 ```bash
-cd /Users/devinuser/Desktop/src/devin-2api
-go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" \
-  -o devin-2api.new ./cmd/devin-2api && mv devin-2api.new devin-2api
-launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
+scripts/deploy.sh                # 构建 → 替换二进制 → kickstart → 校验 healthz 版本
+scripts/deploy.sh --no-restart   # 只构建替换，不重启
 ```
 
-原地替换二进制再 kickstart：launchd 发 SIGTERM，进程优雅退出后立即拉起，
-停机约一秒。`git describe` 的输出形如 `f43a8f7`（无 tag 时的短 SHA）或
-`v0.1.0-3-gabc1234`（tag 之后第 3 个提交），工作区有未提交改动时带
-`-dirty` 后缀——版本串因此始终诚实反映"二进制里到底有什么"。
+脚本做四件事：以 `git describe --tags --always --dirty` 注入
+`main.version` 构建新二进制、`-version` 自检、原地替换、kickstart 后轮询
+`/healthz` 确认线上版本与刚构建的一致（不一致说明端口被其它实例抢占）。
+launchd 发 SIGTERM 后进程优雅退出立即拉起，停机约一秒。`git describe`
+输出形如 `f43a8f7`（无 tag 时的短 SHA）或 `v0.1.0-3-gabc1234`（tag 之后
+第 3 个提交），工作区有未提交改动带 `-dirty` 后缀。
 
 冒烟验证**不要用 :3003/:3004**——用空闲端口起临时二进制，验证完再决定
-替换（这两个端口曾有旧构建残留导致误判的历史）。重启后一条命令确认版本：
-
-```bash
-curl -s localhost:3003/healthz          # {"version":"f43a8f7",...}
-./devin-2api -version                    # 或直接问二进制本身
-```
+替换（这两个端口曾有旧构建残留导致误判的历史）。
 
 ## 可选增强
 
