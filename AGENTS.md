@@ -103,7 +103,7 @@
 
 1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
 2. 读 `logs/<dir>/meta.json`（结果、三段模型、TTFB、token、upstream_request_id）与 `error.json`（首个失败点）。
-3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。
+3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。上游重试（token 自愈/空响应/transport 重开）时每次续试写 `03-devin-request.attemptN.json`，并在 04 中插入 `retry_attempt` 标记行分隔各次尝试的原始帧。
 4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希、全部 token 分类），`grep` 即可；更早历史被 retention 清理后索引仍在。
 5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
 

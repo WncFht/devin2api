@@ -27,7 +27,7 @@
     - 指标切换器：同一坐标系切换请求数/RPM/TTFB/耗时/token/成本，我们的趋势图可照此加 metric 切换。
 - `filter-state.js`（170 行）+ `filter-query.js`（69 行）— **声明式筛选字段表**：每个字段声明 `restore` 优先级（URL hash > localStorage > 默认值），`persist` 时同步写 hash + localStorage。我们 `tab-requests.js` 手写的 hash 同步可以统一成这个模式，几十行换来所有筛选可分享、可刷新保持。
 - `service-health.js`（109 行）— 96 格 DOM 健康网格，429 染黄与真实错误分开。我们已实现 120 格版本（概览页健康时间线）。
-- `logs.js`（2827 行）— 日志页大全：进行中请求并入表顶 pending-row（已实现）、按 ID diff 更新、列可见性开关、表达式状态过滤（`>=400`、`!200`）、增量 offset 拉取。
+- `logs.js`（2827 行）— 日志页大全：进行中请求并入表顶 pending-row（已实现）、按 ID diff 更新、列可见性开关、表达式状态过滤（`>=400`、`!200`，已实现）、增量 offset 拉取。
 - `date-range-selector.js`（543 行）— 统一时间范围选择器，预设 + 自定义区间。我们目前各页时间窗是写死的，值得引入。
 - `searchable-select.js`（241 行）— 可搜索下拉，原生 select 退化为隐藏值载体。模型多了之后筛选框可用。
 - `tokens.css` — 设计变量独立文件；ECharts 颜色从 `getComputedStyle` 读 CSS 变量（已实现到我们 `charts.js`）。
