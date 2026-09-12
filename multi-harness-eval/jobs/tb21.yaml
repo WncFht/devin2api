@@ -1,0 +1,48 @@
+# 主力:Terminal-Bench 2.1 × 4 harness × n_attempts=3
+# 跑之前先过 smoke.yaml。n_tasks 控制子集规模,去掉即全量。
+job_name: tb21
+n_attempts: 3
+orchestrator:
+  type: local
+  n_concurrent_trials: 8
+environment:
+  type: docker
+  force_build: true
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    # n_tasks: 30   # 先跑子集省钱,确认无误后注释掉跑全量
+agents:
+  - name: claude-code
+    model_name: anthropic/claude-sonnet-4-5
+    env:
+      ANTHROPIC_BASE_URL: http://host.docker.internal:49173
+      ANTHROPIC_AUTH_TOKEN: ${DEVIN_API_KEY}
+    kwargs:
+      version: "2.1.258"
+
+  - name: kimi-code
+    model_name: kimi-k3
+    env:
+      KIMI_MODEL_BASE_URL: http://host.docker.internal:49173
+      KIMI_MODEL_API_KEY: ${DEVIN_API_KEY}
+      KIMI_MODEL_CAPABILITIES: image_in,thinking
+    kwargs:
+      version: "0.42.0"
+
+  - name: pi
+    model_name: anthropic/swe-2-max
+    env:
+      ANTHROPIC_BASE_URL: http://host.docker.internal:49173
+      ANTHROPIC_API_KEY: ${DEVIN_API_KEY}
+    kwargs:
+      model_api: anthropic-messages
+      thinking: high
+
+  - name: codex
+    model_name: openai/swe-2-max
+    env:
+      OPENAI_BASE_URL: http://host.docker.internal:3003/v1
+      OPENAI_API_KEY: ${DEVIN_API_KEY}
+    kwargs:
+      reasoning_effort: high
+      web_search: disabled

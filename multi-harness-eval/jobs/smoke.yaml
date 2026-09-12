@@ -1,0 +1,48 @@
+# 冒烟:每 harness 跑一道 hello-world,验证鉴权/协议/轨迹落盘
+# 用法:先起 ccload(:49173)和 devin-2api(:3003),再 harbor run --config jobs/smoke.yaml
+job_name: smoke
+n_attempts: 1
+orchestrator:
+  type: local
+  n_concurrent_trials: 4
+environment:
+  type: docker
+  force_build: true
+datasets:
+  - name: harbor/hello-world
+agents:
+  # Anthropic Messages 端点(ccload)。模型名须过 CC 家族名检查,网关改写到真实模型。
+  - name: claude-code
+    model_name: anthropic/claude-sonnet-4-5
+    env:
+      ANTHROPIC_BASE_URL: http://host.docker.internal:49173
+      ANTHROPIC_AUTH_TOKEN: ${DEVIN_API_KEY}
+    kwargs:
+      version: "2.1.258"
+
+  - name: kimi-code
+    model_name: kimi-k3
+    env:
+      KIMI_MODEL_BASE_URL: http://host.docker.internal:49173
+      KIMI_MODEL_API_KEY: ${DEVIN_API_KEY}
+      KIMI_MODEL_CAPABILITIES: image_in,thinking
+    kwargs:
+      version: "0.42.0"
+
+  - name: pi
+    model_name: anthropic/swe-2-max
+    env:
+      ANTHROPIC_BASE_URL: http://host.docker.internal:49173
+      ANTHROPIC_API_KEY: ${DEVIN_API_KEY}
+    kwargs:
+      model_api: anthropic-messages
+      thinking: high
+
+  # OpenAI Responses 端点(devin-2api),唯一直连协议对的
+  - name: codex
+    model_name: openai/swe-2-max
+    env:
+      OPENAI_BASE_URL: http://host.docker.internal:3003/v1
+      OPENAI_API_KEY: ${DEVIN_API_KEY}
+    kwargs:
+      reasoning_effort: high
