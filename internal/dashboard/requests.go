@@ -116,15 +116,20 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
 		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s\n",
-			e.Dir, e.StartedAt, e.Method, csvEscape(e.Path), e.API, e.Model, e.RequestedModel, e.ResponseModel,
-			e.StatusCode, e.Result, e.DurationMS, firstUpstream, firstClient,
+			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
+			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
+			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
-			e.Stream, e.KeyHash, e.ClientRequestID, e.ErrorStage)
+			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage))
 	}
 }
 
-// csvEscape 转义含逗号/引号/换行的字段。
+// csvEscape 转义含逗号/引号/换行的字段；以 = + - @ 开头的值前加单引号，
+// 防止客户端可控字段（client_request_id）在 Excel 里被当公式执行。
 func csvEscape(s string) string {
+	if s != "" && strings.ContainsRune("=+-@", rune(s[0])) {
+		s = "'" + s
+	}
 	if !strings.ContainsAny(s, ",\"\n") {
 		return s
 	}
