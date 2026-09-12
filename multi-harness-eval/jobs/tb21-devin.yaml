@@ -8,7 +8,7 @@ job_name: tb21-devin
 n_attempts: 3
 orchestrator:
   type: local
-  n_concurrent_trials: 4
+  n_concurrent_trials: 2
 environment:
   type: docker
   force_build: true
