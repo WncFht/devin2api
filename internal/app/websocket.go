@@ -296,7 +296,8 @@ func (w *wsResponseWriter) turnResult(completedOutput json.RawMessage) wsTurnRes
 func (w *wsResponseWriter) collectedOutput() json.RawMessage {
 	items := make([]json.RawMessage, 0, len(w.outputItems)+len(w.outputUnindexed))
 	appendItem := func(raw json.RawMessage) {
-		fields := wsParseItem(raw)
+		var fields wsItemFields
+		_ = json.Unmarshal(raw, &fields)
 		if wsFieldsAreToolCall(fields) && !wsFieldsAreCompleteToolCall(fields) {
 			return
 		}
@@ -492,7 +493,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			if err != nil {
 				return
 			}
-			session.commit(normalized, result)
+			session.commit(result)
 			continue
 		}
 
@@ -516,7 +517,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		completedOutput := completedOutputFromEvent(turnWriter.lastTerminal)
 		switch {
 		case turnWriter.completed:
-			session.commit(normalized, turnWriter.turnResult(completedOutput))
+			session.commit(turnWriter.turnResult(completedOutput))
 		case turnWriter.failed:
 			// response.failed 已转发客户端；本轮不推进会话——续链 prev_id
 			// 会 404 触发重放，符合预期。

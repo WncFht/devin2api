@@ -30,18 +30,47 @@ var (
 	errWSUnsupportedRequestType   = errors.New("unsupported websocket request type")
 )
 
+// wsItem 是 transcript item 的一次解析结果：raw 是原文（回放时重放进数组），
+// fields 是已知字段的探针解码。数组元素必为合法 JSON；非 object 项的
+// fields 为零值，谓词结果与「无字段」一致。
+type wsItem struct {
+	raw    json.RawMessage
+	fields wsItemFields
+}
+
+// wsItemFields 是 transcript item 的已知字段：合并/去重/配对/回放判定
+// 只读这几个键，struct 探针替代 map 解树，每条省一半分配。
+type wsItemFields struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	CallID    string          `json:"call_id"`
+	Name      string          `json:"name"`
+	Role      string          `json:"role"`
+	Content   json.RawMessage `json:"content"`
+	Arguments json.RawMessage `json:"arguments"`
+	Input     json.RawMessage `json:"input"`
+}
+
 // wsSession 保存一条 WebSocket 连接的对话回放状态。连接级生命周期：
 // 断开后客户端按协议重放完整 transcript，不需要跨连接存储。
+//
+// lastTop/lastItems/lastOutputItems 是 commit 时解析好的上一轮请求顶层
+// 字段、input 项和 output 项——续轮合并直接复用，历史项每轮零解析。
 type wsSession struct {
-	lastRequest             json.RawMessage
-	lastResponseOutput      json.RawMessage
+	lastTop                 map[string]json.RawMessage
+	lastItems               []wsItem
+	lastOutputItems         []wsItem
 	lastResponseID          string
 	pendingToolCallIDs      []string
 	replacementReplayNeeded bool
+	// stagedTop/stagedItems 是本轮 normalize 的产出，commit 时才转正；
+	// 规范化失败或被丢弃的轮次不推进会话状态。
+	stagedTop   map[string]json.RawMessage
+	stagedItems []wsItem
 }
 
 func newWSSession() *wsSession {
-	return &wsSession{lastResponseOutput: json.RawMessage("[]")}
+	return &wsSession{}
 }
 
 // wsTurnResult 是单轮结束后的提交内容；由 wsResponseWriter 在流结束时产出。
@@ -52,13 +81,13 @@ type wsTurnResult struct {
 }
 
 // commit 把上一轮结果记入会话；只有成功终结的轮次才推进状态。
-func (s *wsSession) commit(request json.RawMessage, result wsTurnResult) {
-	s.lastRequest = bytes.Clone(request)
-	if len(result.completedOutput) == 0 {
-		s.lastResponseOutput = json.RawMessage("[]")
-	} else {
-		s.lastResponseOutput = bytes.Clone(result.completedOutput)
-	}
+// 调用前必须先成功执行 normalizeRequest（它产出 staged 字段）。
+func (s *wsSession) commit(result wsTurnResult) {
+	s.lastTop = s.stagedTop
+	s.lastItems = s.stagedItems
+	s.stagedTop = nil
+	s.stagedItems = nil
+	s.lastOutputItems = wsParseItems(result.completedOutput)
 	s.lastResponseID = strings.TrimSpace(result.completedResponseID)
 	s.pendingToolCallIDs = append([]string(nil), result.pendingToolCallIDs...)
 }
@@ -72,136 +101,150 @@ func (s *wsSession) requireReplacementReplay() {
 // normalizeRequest 把一条客户端 WS 帧规范化成可交给 /v1/responses 的完整请求体。
 // 守卫顺序与 ccLoad responses_websocket_session.go 对齐：先结构性校验，再处理
 // 替换/续链/合并三种形态。
+//
+// payload 顶层只解析一次成字段 map：后续的类型判定、续链、规范化改写全部在
+// map 上读写，出口一次 marshal。续轮的增量 input 项也只解析一次，供
+// pending 校验、完整回放判定、合并去重共享。
 func (s *wsSession) normalizeRequest(payload []byte) (json.RawMessage, error) {
-	if !json.Valid(payload) {
-		return nil, errors.New("invalid websocket request JSON")
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &top); err != nil {
+		if !json.Valid(payload) {
+			return nil, errors.New("invalid websocket request JSON")
+		}
+		// 合法但非 object 的 JSON：top 为 nil，type 读为空串，
+		// 落到 unsupported type 分支——与原先逐字段解析的行为一致。
 	}
-	requestType := wsJSONString(payload, "type")
+	requestType := wsMapString(top, "type")
 	if requestType != "response.create" && requestType != "response.append" {
 		return nil, fmt.Errorf("%w: %q", errWSUnsupportedRequestType, requestType)
 	}
-	previousID := strings.TrimSpace(wsJSONString(payload, "previous_response_id"))
+	previousID := strings.TrimSpace(wsMapString(top, "previous_response_id"))
 	// previous_response_id 只认 resp_* 形态——msg_*/item_*/chatcmpl_* 是
 	// 别的协议的标识，续链必然找不到，按坏请求报。
 	if previousID != "" && !strings.HasPrefix(previousID, "resp_") {
 		return nil, fmt.Errorf("previous_response_id %q is not a response id", previousID)
 	}
 
-	if len(s.lastRequest) == 0 {
+	if s.lastTop == nil {
 		if requestType == "response.append" {
 			return nil, errors.New("response.append received before response.create")
 		}
 		if previousID != "" {
 			return nil, errWSPreviousResponseNotFound
 		}
-		return s.normalizeInitialRequest(payload)
+		return s.normalizeInitialRequest(top)
 	}
 
 	// 续轮的 input 必须是数组（增量项列表）；缺省按空增量处理（客户端可能
 	// 只带 previous_response_id 触发续轮），字符串形态只在首轮合法。
-	nextInput, hasInput, inputIsArray := wsJSONField(payload, "input")
-	if hasInput && !inputIsArray {
+	nextInput := top["input"]
+	if len(nextInput) > 0 && !wsIsJSONArray(nextInput) {
 		return nil, errors.New("websocket request requires array field: input")
 	}
-	if !hasInput {
-		nextInput = json.RawMessage("[]")
-	}
+	nextItems := wsParseItems(nextInput)
 	if previousID != "" && previousID != s.lastResponseID {
 		return nil, fmt.Errorf("%w: %q", errWSPreviousResponseNotFound, previousID)
 	}
 	if s.replacementReplayNeeded && requestType == "response.create" && previousID == "" {
 		s.replacementReplayNeeded = false
-		return s.finalizeReplacement(payload)
+		return s.finalizeReplacement(top)
 	}
-	if len(s.pendingToolCallIDs) > 0 && !wsInputSatisfiesToolCalls(nextInput, s.pendingToolCallIDs) {
+	if len(s.pendingToolCallIDs) > 0 && !wsItemsSatisfyToolCalls(nextItems, s.pendingToolCallIDs) {
 		if previousID != "" || requestType == "response.append" {
 			return nil, errors.New("incremental websocket request is missing output for a pending tool call")
 		}
-		return s.finalizeReplacement(payload)
+		return s.finalizeReplacement(top)
 	}
-	if previousID == "" && wsInputContainsCompletedTranscript(nextInput) {
+	if previousID == "" && wsItemsContainCompletedTranscript(nextItems) {
 		// 客户端自带的 input 已是完整回放（含历史 model 产出），与它合并只会
 		// 得到重复/乱序的 transcript——直接当替换处理。
-		return s.finalizeReplacement(payload)
+		return s.finalizeReplacement(top)
 	}
 
-	merged, err := mergeWSInput(s.lastRequest, s.lastResponseOutput, nextInput)
-	if err != nil {
+	merged := dedupeWSItems(mergeWSItems(s.lastItems, s.lastOutputItems, nextItems))
+	if err := inheritWSFields(top, s.lastTop); err != nil {
 		return nil, err
 	}
-	normalized, err := s.normalizeReplacementRequest(payload)
-	if err != nil {
-		return nil, err
-	}
-	normalized, err = wsJSONSetRaw(normalized, "input", merged)
-	if err != nil {
-		return nil, fmt.Errorf("set merged websocket input: %w", err)
-	}
-	return wsFinalizeRequest(normalized)
+	top["input"] = marshalWSItems(merged)
+	return s.finishNormalize(top, merged)
 }
 
-// finalizeReplacement 走替换语义规范化后统一过 finalize（配对校验 + 字节上限）。
-// 增量合并路径不走这里——它先把客户端增量合并进历史再 finalize 一次，
-// 提前对未合并的增量做配对校验会误报孤儿 output。
-func (s *wsSession) finalizeReplacement(payload []byte) (json.RawMessage, error) {
-	normalized, err := s.normalizeReplacementRequest(payload)
+// inheritWSFields 是续轮请求（合并与替换共用）的字段规范化：剥掉 WS 信封
+// 字段，继承上一轮的 model/instructions（增量帧常省略这两个字段），
+// 强制 stream=true。
+func inheritWSFields(top, last map[string]json.RawMessage) error {
+	delete(top, "type")
+	delete(top, "previous_response_id")
+	delete(top, "generate")
+	if strings.TrimSpace(wsMapString(top, "model")) == "" {
+		if model := strings.TrimSpace(wsMapString(last, "model")); model != "" {
+			encoded, err := json.Marshal(model)
+			if err != nil {
+				return err
+			}
+			top["model"] = encoded
+		}
+	}
+	if _, has := top["instructions"]; !has {
+		if instructions, has := last["instructions"]; has {
+			top["instructions"] = instructions
+		}
+	}
+	top["stream"] = json.RawMessage("true")
+	return nil
+}
+
+// finishNormalize 是规范化请求的统一出口：配对校验 → marshal → 字节上限，
+// 通过后才暂存 staged 字段供 commit 转正。
+func (s *wsSession) finishNormalize(top map[string]json.RawMessage, items []wsItem) (json.RawMessage, error) {
+	if err := wsValidateItemPairing(items); err != nil {
+		return nil, err
+	}
+	normalized, err := json.Marshal(top)
 	if err != nil {
 		return nil, err
 	}
-	return wsFinalizeRequest(normalized)
+	if len(normalized) > wsMaxTranscriptBytes {
+		return nil, fmt.Errorf("websocket transcript exceeds %d byte limit; compact and replay the conversation", wsMaxTranscriptBytes)
+	}
+	s.stagedTop = top
+	s.stagedItems = items
+	return normalized, nil
+}
+
+// finalizeReplacement 走替换语义规范化：不合并历史，input 自带完整
+// transcript（或上次中断后客户端的全量重放）。增量合并路径不走这里——
+// 它先把客户端增量合并进历史再统一校验，提前对未合并的增量做配对校验
+// 会误报孤儿 output。
+func (s *wsSession) finalizeReplacement(top map[string]json.RawMessage) (json.RawMessage, error) {
+	if err := inheritWSFields(top, s.lastTop); err != nil {
+		return nil, err
+	}
+	var items []wsItem
+	if input := top["input"]; wsIsJSONArray(input) {
+		items = wsParseItems(input)
+	}
+	return s.finishNormalize(top, items)
 }
 
 // normalizeInitialRequest 处理首轮 response.create：剥离 WS 信封字段，
 // 强制 stream=true，input 缺省补空数组，model 必填。
-func (s *wsSession) normalizeInitialRequest(payload []byte) (json.RawMessage, error) {
-	if strings.TrimSpace(wsJSONString(payload, "model")) == "" {
+// 首轮 input 允许字符串形态——只对数组形态做解析与配对校验。
+func (s *wsSession) normalizeInitialRequest(top map[string]json.RawMessage) (json.RawMessage, error) {
+	if strings.TrimSpace(wsMapString(top, "model")) == "" {
 		return nil, errors.New("missing model in response.create request")
 	}
-	normalized, err := wsJSONDelete(payload, "type", "previous_response_id", "generate")
-	if err != nil {
-		return nil, err
+	delete(top, "type")
+	delete(top, "previous_response_id")
+	delete(top, "generate")
+	var items []wsItem
+	if input, hasInput := top["input"]; !hasInput {
+		top["input"] = json.RawMessage("[]")
+	} else if wsIsJSONArray(input) {
+		items = wsParseItems(input)
 	}
-	if _, hasInput, _ := wsJSONField(normalized, "input"); !hasInput {
-		normalized, err = wsJSONSetRaw(normalized, "input", json.RawMessage("[]"))
-		if err != nil {
-			return nil, err
-		}
-	}
-	normalized, err = wsJSONSetBool(normalized, "stream", true)
-	if err != nil {
-		return nil, err
-	}
-	return wsFinalizeRequest(normalized)
-}
-
-// normalizeReplacementRequest 处理「这轮 input 自带完整 transcript」的形态：
-// 不合并历史，但继承上一轮的 model/instructions（增量帧常省略这两个字段）。
-func (s *wsSession) normalizeReplacementRequest(payload []byte) (json.RawMessage, error) {
-	normalized, err := wsJSONDelete(payload, "type", "previous_response_id", "generate")
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(wsJSONString(normalized, "model")) == "" {
-		if model := strings.TrimSpace(wsJSONString(s.lastRequest, "model")); model != "" {
-			normalized, err = wsJSONSetString(normalized, "model", model)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	if _, hasInstructions, _ := wsJSONField(normalized, "instructions"); !hasInstructions {
-		if instructions, has, _ := wsJSONField(s.lastRequest, "instructions"); has {
-			normalized, err = wsJSONSetRaw(normalized, "instructions", instructions)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	normalized, err = wsJSONSetBool(normalized, "stream", true)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
+	top["stream"] = json.RawMessage("true")
+	return s.finishNormalize(top, items)
 }
 
 // wsGenerateDisabled 判定 Codex 的预热帧：{"type":"response.create","generate":false,...}
@@ -219,63 +262,84 @@ func wsGenerateDisabled(payload []byte) bool {
 	return !enabled
 }
 
-// mergeWSInput 拼接 lastRequest.input + lastResponseOutput + 增量 input。
-// parts 里非数组的部分跳过（lastResponseOutput 可能是 null/对象等非法形态）。
-func mergeWSInput(lastRequest, lastResponseOutput, appendInput json.RawMessage) (json.RawMessage, error) {
-	var items []json.RawMessage
+// wsParseItems 把合法的 input/output 数组逐条解为 wsItem；raw 不是数组
+// 时返回 nil（调用方按无项处理，首轮字符串 input 即这种形态）。
+func wsParseItems(raw json.RawMessage) []wsItem {
+	var raws []json.RawMessage
+	if json.Unmarshal(raw, &raws) != nil {
+		return nil
+	}
+	items := make([]wsItem, 0, len(raws))
+	for _, itemRaw := range raws {
+		itemRaw = bytes.TrimSpace(itemRaw)
+		var fields wsItemFields
+		_ = json.Unmarshal(itemRaw, &fields)
+		items = append(items, wsItem{raw: itemRaw, fields: fields})
+	}
+	return items
+}
+
+// wsIsJSONArray 判定 raw 是否为 JSON 数组形态（忽略前导空白）。
+func wsIsJSONArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+
+// mergeWSItems 拼接 lastItems + lastOutputItems + 增量项。
+// 第一轮 dedupe：tool call 项按 call_id 保首个——重复 call 只留第一次出现。
+func mergeWSItems(lastItems, lastOutputItems, nextItems []wsItem) []wsItem {
+	var items []wsItem
 	seenCallIDs := make(map[string]struct{})
-	appendParts := func(part json.RawMessage) error {
-		var array []json.RawMessage
-		if err := json.Unmarshal(part, &array); err != nil {
-			return fmt.Errorf("websocket transcript input must be an array: %w", err)
-		}
-		for _, raw := range array {
-			raw = bytes.TrimSpace(raw)
-			fields := wsParseItem(raw)
-			if fields == nil && !json.Valid(raw) {
-				return errors.New("websocket transcript contains invalid item JSON")
-			}
-			// 第一轮 dedupe：tool call 项按 call_id 保首个——重复 call 只留第一次出现。
-			if wsFieldsAreToolCall(fields) {
-				if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
+	for _, part := range [][]wsItem{lastItems, lastOutputItems, nextItems} {
+		for _, item := range part {
+			if wsFieldsAreToolCall(item.fields) {
+				if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
 					if _, dup := seenCallIDs[callID]; dup {
 						continue
 					}
 					seenCallIDs[callID] = struct{}{}
 				}
 			}
-			items = append(items, raw)
-		}
-		return nil
-	}
-	if input, has, isArray := wsJSONField(lastRequest, "input"); has && isArray {
-		if err := appendParts(input); err != nil {
-			return nil, fmt.Errorf("invalid previous request input: %w", err)
+			items = append(items, item)
 		}
 	}
-	if trimmed := bytes.TrimSpace(lastResponseOutput); len(trimmed) > 2 {
-		if err := appendParts(trimmed); err != nil {
-			return nil, fmt.Errorf("invalid previous response output: %w", err)
-		}
-	}
-	if err := appendParts(appendInput); err != nil {
-		return nil, fmt.Errorf("invalid request input: %w", err)
-	}
-	items = dedupeWSInputItems(items)
-	return json.Marshal(items)
+	return items
 }
 
-// dedupeWSInputItems 第二轮去重：按 item id 默认保留最后出现（客户端可能
+// marshalWSItems 手工拼接 item raw 为 JSON 数组：raw 已是合法 JSON，直接
+// 拼接免去 json.Marshal 对每条 RawMessage 的 compact 校验。同时把每项的
+// raw 重指到新缓冲——旧 transcript/上一帧缓冲不再被 item 引用滞留。
+func marshalWSItems(items []wsItem) json.RawMessage {
+	size := 2
+	for _, item := range items {
+		size += len(item.raw) + 1
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	starts := make([]int, 0, len(items))
+	for i, item := range items {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		starts = append(starts, len(out))
+		out = append(out, item.raw...)
+	}
+	out = append(out, ']')
+	for i, start := range starts {
+		items[i].raw = out[start : start+len(items[i].raw)]
+	}
+	return out
+}
+
+// dedupeWSItems 第二轮去重：按 item id 默认保留最后出现（客户端可能
 // 在增量里修正已发项），但被某个 output 项 call_id 引用的 call 项不会被
 // 未引用项顶掉（保 function_call ↔ output 的配对相邻性）。
-// 每条 item 只解析一次成字段树，后续三轮扫描全部读树。
-func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
-	fieldsList := make([]map[string]json.RawMessage, len(items))
+// 每条 item 的字段树来自合并前的单次解析，三轮扫描全部读树。
+func dedupeWSItems(items []wsItem) []wsItem {
 	referencedCallIDs := make(map[string]struct{})
-	for i, raw := range items {
-		fieldsList[i] = wsParseItem(raw)
-		if wsFieldsAreToolCallOutput(fieldsList[i]) {
-			if callID := strings.TrimSpace(wsRawString(fieldsList[i]["call_id"])); callID != "" {
+	for _, item := range items {
+		if wsFieldsAreToolCallOutput(item.fields) {
+			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
 				referencedCallIDs[callID] = struct{}{}
 			}
 		}
@@ -284,11 +348,11 @@ func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
 	// 项优先级高于未被引用的重复项。
 	keepAt := make(map[string]int)
 	callIDReferenced := func(i int) bool {
-		_, ok := referencedCallIDs[strings.TrimSpace(wsRawString(fieldsList[i]["call_id"]))]
+		_, ok := referencedCallIDs[strings.TrimSpace(items[i].fields.CallID)]
 		return ok
 	}
 	for i := len(items) - 1; i >= 0; i-- {
-		id := strings.TrimSpace(wsRawString(fieldsList[i]["id"]))
+		id := strings.TrimSpace(items[i].fields.ID)
 		if id == "" {
 			continue
 		}
@@ -303,50 +367,30 @@ func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
 		keepAt[id] = i
 	}
 	out := items[:0]
-	for i, raw := range items {
-		id := strings.TrimSpace(wsRawString(fieldsList[i]["id"]))
+	for i, item := range items {
+		id := strings.TrimSpace(items[i].fields.ID)
 		if id != "" && keepAt[id] != i {
 			continue
 		}
-		out = append(out, raw)
+		out = append(out, item)
 	}
 	return out
 }
 
-// wsFinalizeRequest 是每条规范化请求的统一出口：配对校验 + 字节上限。
-func wsFinalizeRequest(payload json.RawMessage) (json.RawMessage, error) {
-	if err := wsValidateToolCallPairing(payload); err != nil {
-		return nil, err
-	}
-	if len(payload) > wsMaxTranscriptBytes {
-		return nil, fmt.Errorf("websocket transcript exceeds %d byte limit; compact and replay the conversation", wsMaxTranscriptBytes)
-	}
-	return payload, nil
-}
-
-// wsValidateToolCallPairing 拒绝「有 output 无 call」的 transcript——上游对
+// wsValidateItemPairing 拒绝「有 output 无 call」的 transcript——上游对
 // 这种形态硬报 invalid_argument，提前拦截以免把客户端坏请求算成上游故障。
 // call 只需出现在数组任意位置（不要求在 output 之前）。
-func wsValidateToolCallPairing(payload json.RawMessage) error {
-	input, has, isArray := wsJSONField(payload, "input")
-	if !has || !isArray {
-		return nil
-	}
-	var array []json.RawMessage
-	if err := json.Unmarshal(input, &array); err != nil {
-		return nil
-	}
+func wsValidateItemPairing(items []wsItem) error {
 	calls := make(map[string]struct{})
 	var outputs []string
-	for _, raw := range array {
-		fields := wsParseItem(raw)
+	for _, item := range items {
 		switch {
-		case wsFieldsAreToolCall(fields):
-			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
+		case wsFieldsAreToolCall(item.fields):
+			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
 				calls[callID] = struct{}{}
 			}
-		case wsFieldsAreToolCallOutput(fields):
-			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
+		case wsFieldsAreToolCallOutput(item.fields):
+			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
 				outputs = append(outputs, callID)
 			}
 		}
@@ -359,17 +403,12 @@ func wsValidateToolCallPairing(payload json.RawMessage) error {
 	return nil
 }
 
-// wsInputSatisfiesToolCalls 检查增量 input 是否包含所有 pending call 的 output。
-func wsInputSatisfiesToolCalls(input json.RawMessage, pending []string) bool {
+// wsItemsSatisfyToolCalls 检查增量项是否包含所有 pending call 的 output。
+func wsItemsSatisfyToolCalls(items []wsItem, pending []string) bool {
 	outputs := make(map[string]struct{}, len(pending))
-	var array []json.RawMessage
-	if json.Unmarshal(input, &array) != nil {
-		return false
-	}
-	for _, raw := range array {
-		fields := wsParseItem(raw)
-		if wsFieldsAreToolCallOutput(fields) {
-			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
+	for _, item := range items {
+		if wsFieldsAreToolCallOutput(item.fields) {
+			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
 				outputs[callID] = struct{}{}
 			}
 		}
@@ -382,25 +421,20 @@ func wsInputSatisfiesToolCalls(input json.RawMessage, pending []string) bool {
 	return true
 }
 
-// wsInputContainsCompletedTranscript 判定增量 input 实际已含完整回放历史。
+// wsItemsContainCompletedTranscript 判定增量 input 实际已含完整回放历史。
 // 出现以下任一项即为完整形态：compaction 标记、model 产出项（function_call、
 // assistant message）、或 Codex 本地压缩摘要前缀的 user 消息。
-func wsInputContainsCompletedTranscript(input json.RawMessage) bool {
-	var array []json.RawMessage
-	if json.Unmarshal(input, &array) != nil {
-		return false
-	}
-	for _, raw := range array {
-		fields := wsParseItem(raw)
-		switch strings.TrimSpace(wsRawString(fields["type"])) {
+func wsItemsContainCompletedTranscript(items []wsItem) bool {
+	for _, item := range items {
+		switch strings.TrimSpace(item.fields.Type) {
 		case "compaction", "compaction_summary", "function_call", "custom_tool_call":
 			return true
 		}
-		role := strings.TrimSpace(wsRawString(fields["role"]))
+		role := strings.TrimSpace(item.fields.Role)
 		if role == "assistant" {
 			return true
 		}
-		if role == "user" && strings.HasPrefix(wsMessageText(fields), wsCodexCompactionSummaryPrefix+"\n") {
+		if role == "user" && strings.HasPrefix(wsMessageText(item.fields), wsCodexCompactionSummaryPrefix+"\n") {
 			return true
 		}
 	}
@@ -412,18 +446,17 @@ func wsInputContainsCompletedTranscript(input json.RawMessage) bool {
 const wsCodexCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 
 // wsMessageText 提取 message 项的纯文本（content 为字符串或 input_text/text 块数组）。
-// fields 是调用方已解析的 item 字段树。
-func wsMessageText(fields map[string]json.RawMessage) string {
-	content, has := fields["content"]
-	if !has {
+// fields 是调用方已解析的 item 字段探针。
+func wsMessageText(fields wsItemFields) string {
+	if len(fields.Content) == 0 {
 		return ""
 	}
 	var text string
-	if json.Unmarshal(content, &text) == nil {
+	if json.Unmarshal(fields.Content, &text) == nil {
 		return text
 	}
 	var parts []json.RawMessage
-	if json.Unmarshal(content, &parts) != nil {
+	if json.Unmarshal(fields.Content, &parts) != nil {
 		return ""
 	}
 	var builder strings.Builder
@@ -440,18 +473,14 @@ func wsMessageText(fields map[string]json.RawMessage) string {
 // call_id/name 非空且 arguments（function_call）或 input（custom_tool_call）
 // 为字符串。这些 call 等待客户端回送 output，是下一轮 input 的配对义务。
 func wsPendingToolCallIDs(output json.RawMessage) []string {
-	var array []json.RawMessage
-	if json.Unmarshal(output, &array) != nil {
-		return nil
-	}
 	seen := make(map[string]struct{})
 	var callIDs []string
-	for _, raw := range array {
-		fields := wsParseItem(raw)
+	for _, item := range wsParseItems(output) {
+		fields := item.fields
 		if !wsFieldsAreCompleteToolCall(fields) {
 			continue
 		}
-		callID := strings.TrimSpace(wsRawString(fields["call_id"]))
+		callID := strings.TrimSpace(fields.CallID)
 		if callID == "" {
 			continue
 		}
@@ -464,39 +493,29 @@ func wsPendingToolCallIDs(output json.RawMessage) []string {
 	return callIDs
 }
 
-// wsParseItem 把一条 transcript item 解成顶层字段树；非 object JSON
-// （数组/标量/非法）返回 nil，调用方按「无字段」处理。
-func wsParseItem(raw json.RawMessage) map[string]json.RawMessage {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil {
-		return nil
-	}
-	return fields
-}
-
-func wsFieldsAreToolCall(fields map[string]json.RawMessage) bool {
-	t := strings.TrimSpace(wsRawString(fields["type"]))
+func wsFieldsAreToolCall(fields wsItemFields) bool {
+	t := strings.TrimSpace(fields.Type)
 	return t == "function_call" || t == "custom_tool_call"
 }
 
-func wsFieldsAreToolCallOutput(fields map[string]json.RawMessage) bool {
-	t := strings.TrimSpace(wsRawString(fields["type"]))
+func wsFieldsAreToolCallOutput(fields wsItemFields) bool {
+	t := strings.TrimSpace(fields.Type)
 	return t == "function_call_output" || t == "custom_tool_call_output"
 }
 
-func wsFieldsAreCompleteToolCall(fields map[string]json.RawMessage) bool {
+func wsFieldsAreCompleteToolCall(fields wsItemFields) bool {
 	if !wsFieldsAreToolCall(fields) {
 		return false
 	}
-	if strings.TrimSpace(wsRawString(fields["call_id"])) == "" || strings.TrimSpace(wsRawString(fields["name"])) == "" {
+	if strings.TrimSpace(fields.CallID) == "" || strings.TrimSpace(fields.Name) == "" {
 		return false
 	}
-	field := "arguments"
-	if strings.TrimSpace(wsRawString(fields["type"])) == "custom_tool_call" {
-		field = "input"
+	body := fields.Arguments
+	if strings.TrimSpace(fields.Type) == "custom_tool_call" {
+		body = fields.Input
 	}
 	var s string
-	return json.Unmarshal(fields[field], &s) == nil
+	return json.Unmarshal(body, &s) == nil
 }
 
 // --- 以下为最小 JSON 手术工具：项目此前不依赖 gjson/sjson，这几个 helper
@@ -533,39 +552,7 @@ func wsRawString(raw json.RawMessage) string {
 	return s
 }
 
-// wsJSONDelete 删除若干顶层字段；字段不存在时跳过。
-func wsJSONDelete(payload json.RawMessage, keys ...string) (json.RawMessage, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &object); err != nil {
-		return nil, fmt.Errorf("decode websocket request: %w", err)
-	}
-	for _, key := range keys {
-		delete(object, key)
-	}
-	return json.Marshal(object)
-}
-
-func wsJSONSetRaw(payload json.RawMessage, key string, value json.RawMessage) (json.RawMessage, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &object); err != nil {
-		return nil, fmt.Errorf("decode websocket request: %w", err)
-	}
-	object[key] = value
-	return json.Marshal(object)
-}
-
-func wsJSONSetString(payload json.RawMessage, key string, value string) (json.RawMessage, error) {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-	return wsJSONSetRaw(payload, key, raw)
-}
-
-func wsJSONSetBool(payload json.RawMessage, key string, value bool) (json.RawMessage, error) {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-	return wsJSONSetRaw(payload, key, raw)
+// wsMapString 读已解析顶层 map 的字符串字段；字段缺失/非字符串返回 ""。
+func wsMapString(fields map[string]json.RawMessage, key string) string {
+	return wsRawString(fields[key])
 }

@@ -123,9 +123,9 @@ func BenchmarkWSWriteFrame(b *testing.B) {
 	_ = writer
 }
 
-// BenchmarkWSMergeInput 测量每轮的 transcript 合并成本：
-// 每条 item 经历 wsIsToolCallItem + wsJSONString(call_id) + dedupe 的多次全量 parse。
-func BenchmarkWSMergeInput(b *testing.B) {
+// BenchmarkWSNormalizeTurn 测量续轮规范化的端到端成本：
+// 400 条 item 的历史 + 增量 input 的解析、合并、去重、配对校验与 marshal。
+func BenchmarkWSNormalizeTurn(b *testing.B) {
 	// 200 条 item 的历史：交替 message 与 function_call/output 对。
 	items := make([]json.RawMessage, 0, 400)
 	for i := 0; i < 100; i++ {
@@ -137,13 +137,23 @@ func BenchmarkWSMergeInput(b *testing.B) {
 		)
 	}
 	lastInput, _ := json.Marshal(items)
-	lastRequest, _ := json.Marshal(map[string]any{"input": lastInput, "model": "fake"})
-	output := json.RawMessage(`[]`)
-	next := json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`)
+	// 首轮：历史作为完整 input 建立会话状态。
+	first, _ := json.Marshal(map[string]any{"type": "response.create", "input": json.RawMessage(lastInput), "model": "fake"})
+	next, _ := json.Marshal(map[string]any{
+		"type": "response.create", "previous_response_id": "resp_1",
+		"input": json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`),
+	})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := mergeWSInput(lastRequest, output, next); err != nil {
+		session := newWSSession()
+		normalized, err := session.normalizeRequest(first)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = normalized
+		session.commit(wsTurnResult{completedOutput: json.RawMessage(`[]`), completedResponseID: "resp_1"})
+		if _, err := session.normalizeRequest(next); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -159,10 +169,12 @@ func BenchmarkWSValidatePairing(b *testing.B) {
 		)
 	}
 	payload, _ := json.Marshal(map[string]any{"input": items, "model": "fake"})
+	input, _, _ := wsJSONField(payload, "input")
+	parsed := wsParseItems(input)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := wsValidateToolCallPairing(payload); err != nil {
+		if err := wsValidateItemPairing(parsed); err != nil {
 			b.Fatal(err)
 		}
 	}
