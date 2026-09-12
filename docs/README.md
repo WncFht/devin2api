@@ -9,6 +9,7 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 | 文档                              | 用途                                                                                    |
 | --------------------------------- | --------------------------------------------------------------------------------------- |
 | `client-setup.md`                 | 各客户端接入配置（CC / pi / kimi-code / Codex，含 Codex WS 链路），窗口声明与权限模式   |
+| `upstream-protocol.md`            | 上游协议逆向参考：请求/响应字段契约、帧形态与签名体制、工具调用矩阵、错误分类、RPC 面   |
 | `upstream-debug-playbook.md`      | 排障手册：错误速查表、标准排查流程、已验证 wire 契约、新客户端验证清单、运维坑          |
 | `upstream-policy-fingerprints.md` | content-policy 指纹实证：触发器形态、客户端全模板探测结果、`sanitize.go` 新规则维护流程 |
 | `upstream-cache.md`               | 上游前缀缓存机制逆向：命中条件、EPHEMERAL 断点、trajectory 稳定性                       |
@@ -18,10 +19,10 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 调查档案（`archive/`，2026-09-12）
 
-上游逆向分多轮，阅读顺序即编号顺序：
+上游逆向的原始探测记录，按日期快照保留；结论已按主题整理进 `upstream-protocol.md`，以它为准：
 
-1. `archive/2026-09-12-upstream-gaps.md` — 二轮：proto/strings 静态分析，wire 字段清单（实测结论以 live-probes 为准）
-2. `archive/2026-09-12-upstream-live-probes.md` — 三/四轮：`cmd/probe` 直连上游逐字段实测，含 AssignModel 路由链、帧序、错误分类、签名三体制
+1. `archive/2026-09-12-upstream-gaps.md` — proto/strings 静态分析，wire 字段清单
+2. `archive/2026-09-12-upstream-live-probes.md` — `cmd/probe` 直连上游逐字段实测记录，含 AssignModel 路由链、帧序、错误分类、签名三体制
 3. `archive/2026-09-12-premature-endturn.md` — Codex 提前收工事故 postmortem：助手回合拆分形态抬高宣告句 EOS 概率（契约结论已回写 playbook）
 4. `archive/2026-09-12-cliproxyapi-issues-survey.md` — CLIProxyAPI 2,878 issue 谱系对本项目的适用性分析（actionable 缺口已落地）
 5. `archive/2026-09-12-performance-review.md` — 性能审查：8 个 perf commit 的基线数字、机制与复现命令

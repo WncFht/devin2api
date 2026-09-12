@@ -1,5 +1,7 @@
-# 上游活跃探测报告
+# 上游活跃探测报告（原始记录）
 
+> **结论已按主题整理进 `../upstream-protocol.md`，以它为准。** 本文保留当日多轮探测的原始记录（含过程、样本数、轮次修订痕迹），供追溯证据用；查找现行结论请读 protocol 文档。
+>
 > 方法：新增 `cmd/probe`（直连 `server.codeium.com` 的 Connect-RPC 实验工具，复用 `outputs/devin-proto-go` 生成绑定），对真实上游逐字段打靶。token 用 config.yaml 里同一个免费档账号。
 >
 > 前置文档：`2026-09-12-upstream-gaps.md`（二轮：proto/strings 静态清单）、`../upstream-debug-playbook.md`（wire 契约）、`../upstream-cache.md`（缓存）。本文是**实测**结论，凡是与静态推测冲突的以本文为准。

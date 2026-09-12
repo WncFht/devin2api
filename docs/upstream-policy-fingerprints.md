@@ -2,7 +2,7 @@
 
 > 范围：Devin 上游（`server.codeium.com`）对提示词文案的策略拦截。目标是搞清楚「什么样的句子会被 `permission_denied: blocked by our content policy` 拦下」，并把已实证的触发句沉淀为 `internal/adapter/devin/sanitize.go` 的改写规则。
 >
-> 关联文档：`upstream-debug-playbook.md`（分层排查流程）、`archive/2026-09-12-upstream-live-probes.md`（wire 级实测）。本文只记**指纹层**的结论。
+> 关联文档：`upstream-debug-playbook.md`（分层排查流程）、`upstream-protocol.md`（wire 级协议结论）。本文只记**指纹层**的结论。
 
 ## 一、现象与误判链
 
@@ -108,13 +108,13 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 
 ### 实测发现的限制
 
-| 限制                                          | 层           | 表现                                                                                                                  | 处理                                                                                                                                                                                                                          |
-| --------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/v1/responses` 只认 `type:"function"` 工具   | 本地 adapter | `custom`（Codex apply_patch freeform）、`local_shell`、`web_search`、`mcp` 类型**静默丢弃**，wire 上 `tools:[]`       | Codex 的 `apply_patch_tool_type:"freeform"` 因此失效——模型只能用 shell 写文件。且即使补声明，上游会把 freeform 输出包成 JSON（`{"path":"*** Begin Patch…"}`），与 Codex 期望的 raw 文本不回配，需更深的响应侧转换才能完整支持 |
-| `tool_result` 的 `resource`/`document` 内容块 | 本地 adapter | 原本整块丢弃 → 上游只见 `[tool result]` 占位，MCP 服务器返回的 resource 文本全丢                                      | **已修**：`resource.text` 展开为文本、`resource.blob`+image mime 降级为 ImageContent、其余降级为 `[resource: <uri>]`（见下方提交）；`document` 块仍丢弃（无文本可提取）                                                       |
-| assistant/user 消息中的未知内容块             | 本地 adapter | `server_tool_use`、`web_search_tool_result`、`code_execution_tool_result`、`document` 等 `default: continue` 静默跳过 | 已知取舍：上游无对应概念；若 MCP/服务端工具结果对客户端重要需在 adapter 层物化成文本                                                                                                                                          |
-| 退化图片（1×1 PNG，73B）                      | 上游         | `invalid_argument`（stage=response_event）                                                                            | 上游对图片有最小有效性校验；正常截图不受影响                                                                                                                                                                                  |
-| 速率                                          | 上游         | `resource_exhausted: overall message rate limit … reset in 10 seconds`                                                | 短时窗口限速，探测密集时会撞上，按 `reset in N seconds` 退避即可                                                                                                                                                              |
+| 限制                                          | 层           | 表现                                                                                                                  | 处理                                                                                                                                                                            |
+| --------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/v1/responses` 只认 `type:"function"` 工具   | 本地 adapter | `custom`（Codex apply_patch freeform）、`local_shell`、`web_search`、`mcp` 类型**静默丢弃**，wire 上 `tools:[]`       | **已修（custom）**：`type:"custom"` 声明包装成单 `input` 参数 function 上行、响应解包回原文（见 `upstream-protocol.md`）；`local_shell`/`web_search`/`mcp` 仍丢弃并记 `Dropped` |
+| `tool_result` 的 `resource`/`document` 内容块 | 本地 adapter | 原本整块丢弃 → 上游只见 `[tool result]` 占位，MCP 服务器返回的 resource 文本全丢                                      | **已修**：`resource.text` 展开为文本、`resource.blob`+image mime 降级为 ImageContent、其余降级为 `[resource: <uri>]`（见下方提交）；`document` 块仍丢弃（无文本可提取）         |
+| assistant/user 消息中的未知内容块             | 本地 adapter | `server_tool_use`、`web_search_tool_result`、`code_execution_tool_result`、`document` 等 `default: continue` 静默跳过 | 已知取舍：上游无对应概念；若 MCP/服务端工具结果对客户端重要需在 adapter 层物化成文本                                                                                            |
+| 退化图片（1×1 PNG，73B）                      | 上游         | `invalid_argument`（stage=response_event）                                                                            | 上游对图片有最小有效性校验；正常截图不受影响                                                                                                                                    |
+| 速率                                          | 上游         | `resource_exhausted: overall message rate limit … reset in 10 seconds`                                                | 短时窗口限速，探测密集时会撞上，按 `reset in N seconds` 退避即可                                                                                                                |
 
 ### 结论
 
@@ -128,8 +128,8 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 3. 写规则时给 `trigger` 填匹配必然包含的小写子串（写错会让规则静默失效），改写文案必须是实测通过的等义句。
 4. 验证 = 原模板整体回放 200 + 改写句单独回放 200。
 
-## 七、已知局限
+## 八、已知局限
 
-- 策略非确定：本文全部结论基于 2026-09-12 当天探测，重试后仍可能漏掉低频拦截。
+- 策略非确定且**在漂移**：本文全部结论基于 2026-09-12 当天探测，重试后仍可能漏掉低频拦截。当日复测时 4 条已实证指纹中 3 条原文已放行（`cc-subagent-emojis`、`codex-opensource-def`、`codex-ansi-escapes`），仅 `codex-plan-statuses` 句对仍拦——指纹库可能按灰度/时效调整，已写入的 sanitize 规则继续保留（等义改写无害），但 DENIED 清单应视为时效性证据而非永久事实。
 - 覆盖有限：CC 侧只覆盖 2.1.236 的 65 个模板，Codex 侧只覆盖 0.153.3 提取到的 ~37 个模板；**工具描述、用户正文、memory 注入内容**未系统扫——用户自定义内容里若巧合命中同类句式，同样会被拦（这正是「不做猜测性改写」原则的代价）。
 - 版本漂移：客户端升级改文案即可能出现新指纹；旧指纹若上游放宽也可能变成多余改写（无害）。

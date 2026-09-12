@@ -1,5 +1,7 @@
-# 上游协议未覆盖点（二轮逆向）
+# 上游协议未覆盖点（静态清单，原始记录）
 
+> **结论已按主题整理进 `../upstream-protocol.md`，以它为准。** 本文保留当日 proto/strings 静态分析的原始清单（含后来被实测修正的条目），供追溯字段出处用。
+>
 > 来源：`outputs/devin-proto/all-protos.proto`（Windsurf `language_server_macos_arm` 提取的完整 proto bundle）+ `/opt/homebrew/Caskroom/devin-cli/3000.10.21/bin/devin`（v3000.10.21 Rust 二进制）strings 提取 + `internal/adapter/devin/*` 代码对照。
 >
 > 前置文档：`../upstream-cache.md`（缓存）、`../upstream-compaction.md`（压缩）、`../upstream-debug-playbook.md`（wire 契约与排查）。本文只记录这三份**之外**的新发现。

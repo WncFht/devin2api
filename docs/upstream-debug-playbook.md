@@ -87,6 +87,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 
 ### 6. 逆向参考
 
+- **`upstream-protocol.md`**：按主题整理的上游协议逆向结论（字段契约、帧形态、签名体制、错误分类、RPC 面），本文契约表的详细证据都在那里。
 - **WindsurfAPI**（github.com/dwgx/WindsurfAPI）`src/devin-connect.js` 的注释标了哪些字段是 `VERIFIED-FROM-WIRE`——他们的实证结论基本可以直接信。
 - **抓 devin CLI 真实流量**：把 `~/.local/share/devin/credentials.toml` 的 `api_server_url` 指向本地捕获服务器（Connect 流式 body 有信封：`flag(1B) + len(4B BE) + protobuf`），回放缓存的 GetUserStatus / GetCliModelConfigs / GetCliTeamSettings 让 CLI 走完启动流程拿到 GetChatMessage 请求体，用 `outputs/devin-proto-go` 生成的绑定解码，`protoscope` / 未知字段检查可发现我们 proto 缺失的字段。**实验完必须恢复 `api_server_url`**，运行中的 CLI 会话会因此断线重连。
 
@@ -107,6 +108,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 11. **签名是尾随帧，且按 provider 分体制**：上游在全部正文之后才发 `DeltaSignature`+`DeltaSignatureType`。已观测三种体制：`sealed`（swe-2，`sealed.v1.<b64>`）、`anthropic`（claude-thinking，原生签名 base64）、`openai`（gpt-sol，签名是序列化 reasoning item）。回放时 type 必须与 provider 配对存取——张冠李戴触发流内 `invalid_argument`。解码器把签名合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。
 12. **缺 stopReason 的干净 EOF = 截断，不是正常结束**：正常结束必有 stopReason 帧（swe-2/gemini/deepseek = `STOP_PATTERN`，claude = `MIN_LOG_PROB`——字面误导，实为 end_turn 映射，工具调用 = `FUNCTION_CALL`）；文本后直接 EOF、`deltaToolCalls`/`responseDimensionGroups` 全缺是截断。decoder 直接报流错误（"Devin stream ended without stop reason"）而非合成 end_turn——唯一例外是 `stoppedByPattern`（本地停止序列截断）。
 13. **工具名字符集 ≈ `[A-Za-z0-9_-]`**：点/冒号/CJK 工具名（`mcp::x`、`a.b`、`工具`）被上游以模糊的 `invalid_argument` 拒绝；`mcp__a__b` 合法。
+14. **freeform/custom 工具无原生声明通道**：`is_custom_tool`+`custom_tool_grammar` 声明 → 确定性 `unknown`（0 帧）。可用形态是「包装 function」：单 `input` 字符串参数的 schema，模型把原文填进 `{"input":"…"}`，响应侧解包（`unwrapCustomToolArguments`）。历史方向 `invalid_json_str`+`is_custom_tool_call` 则原生有效。
 
 ## 新客户端验证清单
 
@@ -131,7 +133,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 - **Claude Code**：主会话与 subagent 系统提示词都在指纹库里（CC 2.1.236 主提示词 7 条 + subagent 提示词的 emoji 禁令整句已入 `sanitize.go`，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。subagent 被拒时 CC 报 "issue with the selected model"，主 agent 会自述「subagent 不可用」——不是模型问题，查 `error.json` 的 permission_denied。已实测的两个客户端侧坑：
     - **本地模型白名单**：CC 2.1.x 在发请求前就拒绝不认识的模型名（`swe-2-max` 直接被拦，ccload 收不到请求）。解法：ccload `channel_models` 加 `claude-sonnet-4-6` 等可识别名 → `redirect_model=swe-2-max`；CC 侧 `ANTHROPIC_MODEL` 填可识别名。`modelOverrides`/`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` 也可，但 redirect 最不侵入。
     - **settings env 覆盖 shell**：`~/.claude/settings.json` 的 `env` 块优先级高于 shell 环境变量，里面若有 `ANTHROPIC_BASE_URL` 会盖掉导出的值（进程在连别的地址、半天无输出即此症状）。用项目级 `.claude/settings.local.json` 注入 env 最干净。
-- **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；0.153.3 模板另有三条系统提示指纹（open-source 定义句、plan 状态句对、ANSI 转义句，均已入 `sanitize.go`，实证细节见 `upstream-policy-fingerprints.md`）；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
+- **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；0.153.3 模板另有三条系统提示指纹（open-source 定义句、plan 状态句对、ANSI 转义句，均已入 `sanitize.go`，实证细节见 `upstream-policy-fingerprints.md`）；`type:"custom"` 工具（apply_patch）已支持——上行包装成单 `input` 参数 function、下行解包回 `custom_tool_call` 原文（上游 `is_custom_tool` 声明通道坏，绕行见 `upstream-protocol.md`）；`namespace`/`web_search`/`mcp`/`local_shell` 等类型仍记 `Dropped` 丢弃。
 - **pi**(`@mariozechner/pi-coding-agent`,0.73.x 实测全通):接法 = `~/.pi/agent/models.json` 自定义 provider,`baseUrl` 指 ccload、`api` 用 `anthropic-messages`、`apiKey` 填 ccload token，模型声明 `id:"swe-2-max"` + `contextWindow`/`maxTokens`。**关键特征:pi 的 anthropic-messages provider 会在 system 数组开头塞完整的 Claude Code 指纹提示词**(billing header + "You are Claude Code" 全文),自己真正的系统提示词以 `[System Instructions]` 前缀放进 user 消息——所以 CC 的指纹改写规则自动覆盖 pi，白嫖同一条已打通路径。pi 会发 `thinking:{type:"enabled",budget_tokens:8192}`,上游按需返回 thinking+signature。自带压缩 (`contextTokens > contextWindow - reserveTokens`,默认留 16k reserve/20k recent,`/compact` 手动),无需代理侧压缩。
 - **kimi-code**:零修改直接通 (0.42.0 实测)。伪装 CC 请求封套 (`claude-cli` UA、`X-Claude-Code-Session-Id`、CC beta 头),`metadata.user_id` 带 device_id JSON 被用作 SessionKey。陌生模型名要在 `[models.X]` 手写 `capabilities` 才有 tool_use。自带压缩。
 - **kimi-cli**:官方已弃用 (并入 kimi-code),不建议投入。
