@@ -97,6 +97,7 @@ func (h *Handler) Register(mux interface {
 }) {
 	mux.Get("/panel", h.servePanel)
 	mux.Post("/panel/login", h.handleLogin)
+	mux.Get("/panel/api", h.apiIndex)
 	mux.Get("/panel/api/status", h.apiStatus)
 	mux.Get("/panel/api/models", h.apiModels)
 	mux.Get("/panel/api/stats", h.apiStats)
@@ -121,6 +122,33 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// apiIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明。
+// 让初次接触的调用方无需读代码即可发现检索入口与日志布局。
+func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"service": "devin-2api",
+		"auth":    "dashboard.password 非空时可用 cookie 会话或 Authorization: Bearer <密码>",
+		"endpoints": []map[string]string{
+			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警"},
+			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
+			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标 + 60 分钟逐分钟趋势 + 日志管道自观测"},
+			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=", "description": "最近请求（新在前）；q 匹配 dir/api/模型/路径/结果/上游ID/IP/key哈希"},
+			{"method": "GET", "path": "/panel/api/requests/active", "description": "进行中请求活快照：耗时、已写文件、丢弃数"},
+			{"method": "GET", "path": "/panel/api/requests/{dir}", "description": "单请求 meta.json + 文件清单"},
+			{"method": "GET", "path": "/panel/api/requests/{dir}/file/{name}", "description": "读取请求目录内文件（顶层或 attachments/），超 4MB 截断"},
+		},
+		"debug_workflow": []string{
+			"每个 /v1/* 响应带 X-Request-Id 头（=调试目录名）；错误体含 debug_ref 与 stage 字段",
+			"凭 dir 调 /panel/api/requests/{dir} 拿 meta 与文件清单，再逐个 file/ 读取",
+			"也可直接读磁盘 logs/index.jsonl（每完成请求一行摘要）与 logs/{dir}/（meta.json、01-06 阶段文件、error.json、attachments/）",
+		},
+	})
 }
 
 // requestsFetchCap 是请求列表单次扫描的索引行数上限；
