@@ -69,18 +69,23 @@ func (t *usageTotals) add(e IndexEntry) {
 const usageHourCap = 1024
 
 // usageHourBucket 是一小时内的请求/token 聚合，供趋势图。
+// 计数字段与 usageTotals 对齐：面板按时间范围选择器截一段桶求和，
+// 即可得到该窗口的完整卡片数据（含断连/缓存写/推理 token）。
 type usageHourBucket struct {
-	hour      int64 // unix 小时戳
-	requests  int64
-	errors    int64
-	input     int64
-	output    int64
-	cacheRead int64
-	genMS     int64   // completed 请求的首帧后生成毫秒累计（均速分子分母）
-	durs      []int64 // duration_ms 样本（环形，上限 usageHourCap）
-	durHead   int
-	ttfbs     []int64 // first_upstream_ms 样本
-	ttfbHead  int
+	hour         int64 // unix 小时戳
+	requests     int64
+	errors       int64
+	disconnected int64
+	input        int64
+	output       int64
+	cacheRead    int64
+	cacheWrite   int64
+	reasoning    int64
+	genMS        int64   // completed 请求的首帧后生成毫秒累计（均速分子分母）
+	durs         []int64 // duration_ms 样本（环形，上限 usageHourCap）
+	durHead      int
+	ttfbs        []int64 // first_upstream_ms 样本
+	ttfbHead     int
 }
 
 // pushSample 向容量受限的样本切片追加；满后原地覆盖最旧值。
@@ -95,18 +100,22 @@ func pushSample(samples *[]int64, head *int, v int64) {
 
 // usageHourPoint 是输出给面板的小时数据点。
 type usageHourPoint struct {
-	Hour     int64 `json:"hour"` // unix 秒
-	Requests int64 `json:"requests"`
-	Errors   int64 `json:"errors"`
-	Input    int64 `json:"input_tokens"`
-	Output   int64 `json:"output_tokens"`
-	AvgDur   int64 `json:"avg_duration_ms"`
-	DurP95   int64 `json:"duration_p95_ms"`
-	AvgTTFB  int64 `json:"avg_ttfb_ms"`
-	TTFBP95  int64 `json:"ttfb_p95_ms"`
-	// CacheRead/GenMS 供前端计算逐小时缓存命中率与 decode 均速。
-	CacheRead int64 `json:"cache_read_tokens"`
-	GenMS     int64 `json:"gen_ms,omitempty"`
+	Hour         int64 `json:"hour"` // unix 秒
+	Requests     int64 `json:"requests"`
+	Errors       int64 `json:"errors"`
+	Disconnected int64 `json:"disconnected"`
+	Input        int64 `json:"input_tokens"`
+	Output       int64 `json:"output_tokens"`
+	AvgDur       int64 `json:"avg_duration_ms"`
+	DurP95       int64 `json:"duration_p95_ms"`
+	AvgTTFB      int64 `json:"avg_ttfb_ms"`
+	TTFBP95      int64 `json:"ttfb_p95_ms"`
+	// CacheRead/CacheWrite/Reasoning/GenMS 供前端按任意时间范围求和，
+	// 再派生缓存命中率与 decode 均速。
+	CacheRead  int64 `json:"cache_read_tokens"`
+	CacheWrite int64 `json:"cache_write_tokens"`
+	Reasoning  int64 `json:"reasoning_tokens"`
+	GenMS      int64 `json:"gen_ms,omitempty"`
 }
 
 // dimensionAgg 是按模型或 key 哈希聚合的行。
@@ -160,9 +169,12 @@ type UsageSnapshot struct {
 	Hours       []usageHourPoint `json:"hours"` // 旧到新，含零值小时
 	Models      []dimensionAgg   `json:"models"`
 	Keys        []dimensionAgg   `json:"keys"`
-	ErrorStages map[string]int64 `json:"error_stages"`
-	Duration    latencyStats     `json:"duration"`
-	TTFB        latencyStats     `json:"ttfb"`
+	// ModelDays 是 模型×自然日 的 totals 矩阵，面板的时间范围选择器
+	// 用它把模型表过滤到所选窗口（维度行的其它字段只在全窗口下可得）。
+	ModelDays   map[string]map[string]usageTotals `json:"model_days,omitempty"`
+	ErrorStages map[string]int64                  `json:"error_stages"`
+	Duration    latencyStats                      `json:"duration"`
+	TTFB        latencyStats                      `json:"ttfb"`
 }
 
 // sampleRing 是定长延迟蓄水池：写满后循环覆盖最旧样本。
@@ -222,6 +234,7 @@ type usageAggregator struct {
 	ttfbSamples     *sampleRing
 	durationSamples *sampleRing
 	perModel        map[string]*dimensionAgg
+	perModelDay     map[string]map[string]*usageTotals
 	perKey          map[string]*dimensionAgg
 	errStages       map[string]int64
 }
@@ -232,6 +245,7 @@ func newUsageAggregator() *usageAggregator {
 		ttfbSamples:     newSampleRing(usageSampleCapacity),
 		durationSamples: newSampleRing(usageSampleCapacity),
 		perModel:        make(map[string]*dimensionAgg),
+		perModelDay:     make(map[string]map[string]*usageTotals),
 		perKey:          make(map[string]*dimensionAgg),
 		errStages:       make(map[string]int64),
 	}
@@ -269,9 +283,14 @@ func (a *usageAggregator) add(e IndexEntry) {
 	if e.StatusCode >= 400 || e.Result == "failed" {
 		a.hours[idx].errors++
 	}
+	if e.Result == "disconnected" || e.Result == "aborted" {
+		a.hours[idx].disconnected++
+	}
 	a.hours[idx].input += e.InputTokens
 	a.hours[idx].output += e.OutputTokens
 	a.hours[idx].cacheRead += e.CacheReadTokens
+	a.hours[idx].cacheWrite += e.CacheWriteTokens
+	a.hours[idx].reasoning += e.ReasoningTokens
 	if e.Result == "completed" && e.FirstUpstreamMS != nil {
 		a.hours[idx].genMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
 	}
@@ -296,6 +315,17 @@ func (a *usageAggregator) add(e IndexEntry) {
 			a.perModel[model] = agg
 		}
 		agg.addEntry(e)
+		dayMap := a.perModelDay[model]
+		if dayMap == nil {
+			dayMap = make(map[string]*usageTotals)
+			a.perModelDay[model] = dayMap
+		}
+		dayTotals2 := dayMap[day]
+		if dayTotals2 == nil {
+			dayTotals2 = &usageTotals{}
+			dayMap[day] = dayTotals2
+		}
+		dayTotals2.add(e)
 	}
 	if e.KeyHash != "" {
 		agg := a.perKey[e.KeyHash]
@@ -383,6 +413,24 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 	for _, k := range keys {
 		snap.Days = append(snap.Days, usageDayRow{Date: k, usageTotals: *a.days[k]})
 	}
+	if len(a.perModelDay) > 0 {
+		keep := make(map[string]bool, len(keys))
+		for _, k := range keys {
+			keep[k] = true
+		}
+		snap.ModelDays = make(map[string]map[string]usageTotals, len(a.perModelDay))
+		for model, dayMap := range a.perModelDay {
+			out := make(map[string]usageTotals, len(dayMap))
+			for d, t := range dayMap {
+				if keep[d] {
+					out[d] = *t
+				}
+			}
+			if len(out) > 0 {
+				snap.ModelDays[model] = out
+			}
+		}
+	}
 
 	current := time.Now().Unix() / 3600
 	snap.Hours = make([]usageHourPoint, 0, usageHourBuckets)
@@ -392,9 +440,12 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 		if bucket.hour == h {
 			point.Requests = bucket.requests
 			point.Errors = bucket.errors
+			point.Disconnected = bucket.disconnected
 			point.Input = bucket.input
 			point.Output = bucket.output
 			point.CacheRead = bucket.cacheRead
+			point.CacheWrite = bucket.cacheWrite
+			point.Reasoning = bucket.reasoning
 			point.GenMS = bucket.genMS
 			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)

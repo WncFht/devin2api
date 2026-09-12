@@ -539,7 +539,7 @@ const xs=h.trend_minutes.map(p=>p.minute);
 drawChart('stats',tm,xs,[
  {label:'请求/分',color:'#7c8aff',values:h.trend_minutes.map(p=>p.requests)},
  {label:'错误/分',color:'#f87171',values:h.trend_minutes.map(p=>p.errors)},
-]);
+],{uid:'stats.trend'});
 }
 }catch(e){
 resetCharts('stats');
@@ -566,14 +566,54 @@ if(cur){cur.classList.toggle('on',!!d.enabled);cur.textContent='请求日志: '+
 
 // chartPool 按区块登记 uPlot 实例；各区块重渲染前先销毁自己的旧实例，
 // 否则 innerHTML 清掉 DOM 后实例上的 matchMedia 监听会泄漏。
+// zoomMem 按 uid 记住用户拖选/滚轮缩放的 x 范围，区块定时重渲染后恢复——
+// 否则每 10s 的自动刷新会把正在细看的缩放窗口冲掉。
 const chartPool={};
-function resetCharts(key){(chartPool[key]||[]).forEach(u=>u.destroy());chartPool[key]=[]}
+const zoomMem={};
+function currentXRange(u){
+const s=u.scales.x;
+if(!s||s.min==null||s.max==null)return null;
+const d=u.data[0];
+if(s.min<=d[0]&&s.max>=d[d.length-1])return null;
+return{min:s.min,max:s.max};
+}
+function resetCharts(key){
+(chartPool[key]||[]).forEach(u=>{
+ const r=currentXRange(u);
+ if(u._uid){if(r)zoomMem[u._uid]=r;else delete zoomMem[u._uid]}
+ u.destroy();
+});
+chartPool[key]=[];
+}
 function setSection(el,key,html){resetCharts(key);el.innerHTML=html}
+
+// wheelZoom 是 uPlot 插件：仅在按住 Ctrl（含触摸板捏合，浏览器报为
+// ctrl+wheel）时缩放 x 轴，普通滚轮继续滚动页面。缩放锚在光标位置。
+function wheelZoom(){
+return{hooks:{ready:u=>{
+u.over.addEventListener('wheel',e=>{
+ if(!e.ctrlKey&&!e.metaKey)return;
+ e.preventDefault();
+ const s=u.scales.x;
+ if(s.min==null||s.max==null)return;
+ const rect=u.over.getBoundingClientRect();
+ const left=Math.min(Math.max(e.clientX-rect.left,0),rect.width);
+ const anchor=u.posToVal(left,'x');
+ const f=e.deltaY<0?0.5:2;
+ const d=u.data[0],lo=d[0],hi=d[d.length-1];
+ const min=Math.max(lo,anchor-(anchor-s.min)*f);
+ const max=Math.min(hi,anchor+(s.max-anchor)*f);
+ if(max>min)u.setScale('x',{min:min,max:max});
+},{passive:false});
+}}};
+}
 
 // drawChart 在容器里建一张暗色 uPlot 时序图。
 // xs 为 unix 秒（升序）；series 元素 {label,color,values,scale?,fmt?}，
 // scale 指向 opts.right 里声明的右轴量纲（如 token 数、百分比）。
-// fmt 是图例/光标处单值格式化函数。
+// fmt 是图例/光标处单值格式化函数。opts.uid 给图表一个稳定身份，
+// 使重渲染后能恢复用户缩放窗口。交互：拖选放大 x 轴、Ctrl/捏合+滚轮
+// 以光标为锚缩放、双击复位。
 function drawChart(key,mount,xs,series,opts){
 opts=opts||{};
 const el=document.createElement('div');
@@ -603,8 +643,15 @@ const u=new uPlot({
   value:(self,v)=>v==null?'-':(s.fmt?s.fmt(v):v),
  }))),
  legend:{show:true},
- cursor:{drag:{x:false,y:false}},
+ cursor:{drag:{x:true,y:false}},
+ plugins:[wheelZoom()],
 },[xs].concat(series.map(s=>s.values)),el);
+u._uid=opts.uid;
+if(u._uid&&zoomMem[u._uid]){
+const d=u.data[0];
+const min=Math.max(zoomMem[u._uid].min,d[0]),max=Math.min(zoomMem[u._uid].max,d[d.length-1]);
+if(max>min)u.setScale('x',{min:min,max:max});
+}
 (chartPool[key]=chartPool[key]||[]).push(u);
 }
 
@@ -618,47 +665,123 @@ if(code>=400)return 'status-warn';
 return 'status-ok';
 }
 
+// 用量区块的时间范围：全部按自然日对齐，使按天表、模型表与趋势图
+// 口径一致（小时图再按小时精确裁剪）。usageRange 存在模块级变量里，
+// 60s 定时重渲染后选择不丢。
+const usageRanges=[['today','今日'],['yday','昨日'],['3d','近3天'],['7d','近7天'],['14d','近14天'],['all','全部']];
+let usageRange='today';
+let lastUsage=null;
+function setUsageRange(r){usageRange=r;if(lastUsage)renderUsage(lastUsage)}
+
+// rangeDays 返回所选范围覆盖的自然日串 [start,end]（YYYY-MM-DD，本地时区，
+// 可字典序比较）；'all' 返回 null 表示不裁剪。
+function rangeDays(r){
+const fmt=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const now=new Date();now.setHours(0,0,0,0);
+const shift=n=>fmt(new Date(now.getTime()-n*86400000));
+switch(r){
+case 'today':return [shift(0),shift(0)];
+case 'yday':return [shift(1),shift(1)];
+case '3d':return [shift(2),shift(0)];
+case '7d':return [shift(6),shift(0)];
+case '14d':return [shift(13),shift(0)];
+}
+return null;
+}
+// rangeSecs 与 rangeDays 同义但返回 unix 秒界 [start,end)，用于裁剪小时桶。
+function rangeSecs(r){
+const days=rangeDays(r);if(!days)return null;
+return [new Date(days[0]+'T00:00:00').getTime()/1000,new Date(days[1]+'T00:00:00').getTime()/1000+86400];
+}
+// sumTotals 把一组 usageTotals 形状的对象求和成 totals。
+function sumTotals(list){
+const t={requests:0,errors:0,disconnected:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:0,total_tokens:0,gen_ms:0};
+list.forEach(p=>{for(const k in t)t[k]+=p[k]||0});
+return t;
+}
+
 async function loadUsage(){
 try{
 const res=await fetch('/panel/api/usage');
-const d=await res.json();
+lastUsage=await res.json();
+renderUsage(lastUsage);
+}catch(e){
+resetCharts('usage');
+document.getElementById('usageSection').innerHTML='<h2>用量统计</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
+}
+}
+
+function renderUsage(d){
 const el=document.getElementById('usageSection');
 let html='<h2>用量统计 <span class="muted" style="font-weight:400;font-size:12px">index.jsonl 聚合 · 重启自动回放</span></h2>';
 if(d.disabled){setSection(el,'usage',html+'<div class="note">调试日志未启用，无用量统计。</div>');return}
 const s=d.snapshot||{};
-const today=s.today||{},win=s.window||{};
 // hitRate 是发出 prompt 中命中前缀缓存的比例；avgTps 是首帧后的
 // decode 速率（output_tokens ÷ 生成时长），两者都由聚合原始量派生。
-const hitRate=t=>{const d=(t.cache_read_tokens||0)+(t.input_tokens||0);return d>0?(100*t.cache_read_tokens/d).toFixed(1)+'%':'-'};
+const hitRate=t=>{const dd=(t.cache_read_tokens||0)+(t.input_tokens||0);return dd>0?(100*t.cache_read_tokens/dd).toFixed(1)+'%':'-'};
 const avgTps=t=>(t.gen_ms>0)?(t.output_tokens/(t.gen_ms/1000)).toFixed(1)+' tok/s':'-';
+const days=rangeDays(usageRange);
+const secs=rangeSecs(usageRange);
+const inRange=p=>!secs||(p.hour>=secs[0]&&p.hour<secs[1]);
+const inDays=dt=>!days||(dt>=days[0]&&dt<=days[1]);
+// ≤8 天的窗口用小时桶（逐小时粒度）；更长窗口只有天行可用，按日聚合。
+const hourly=secs!=null&&(secs[1]-secs[0])<=8*86400;
+const pts=hourly?(s.hours||[]).filter(inRange):(s.days||[]).filter(p=>inDays(p.date)).slice().reverse();
+const rangeLabel=(usageRanges.find(r=>r[0]===usageRange)||[])[1]||'';
+const totals=usageRange==='all'?(s.window||{}):sumTotals(pts);
+html+='<div class="chip-row" style="margin-bottom:12px">';
+usageRanges.forEach(r=>{
+html+='<span class="chip'+(r[0]===usageRange?' on':'')+'" onclick="setUsageRange(\''+r[0]+'\')">'+r[1]+'</span>';
+});
+html+='<span class="muted" style="font-size:11px;align-self:center">图表：拖选放大 · Ctrl/⌘+滚轮缩放 · 双击复位</span></div>';
 html+='<div class="grid">';
-html+=card('今日请求',today.requests??0);
-html+=card('今日错误/断连',(today.errors??0)+' / '+(today.disconnected??0));
-html+=card('今日输入',fmtNum(today.input_tokens));
-html+=card('今日输出',fmtNum(today.output_tokens));
-html+=card('今日缓存读/写',fmtNum(today.cache_read_tokens)+' / '+fmtNum(today.cache_write_tokens));
-html+=card('今日缓存命中率',hitRate(today));
-html+=card('今日推理',fmtNum(today.reasoning_tokens));
-html+=card('今日平均速度',avgTps(today));
-html+=card('窗口累计请求',win.requests??0);
-html+=card('窗口累计 Token',fmtNum(win.total_tokens));
-if(d.est_cost) html+=card('估算成本',money(d.est_cost));
+html+=card(rangeLabel+'请求',totals.requests??0);
+html+=card(rangeLabel+'错误/断连',(totals.errors??0)+' / '+(totals.disconnected??0));
+html+=card('输入',fmtNum(totals.input_tokens));
+html+=card('输出',fmtNum(totals.output_tokens));
+html+=card('缓存读/写',fmtNum(totals.cache_read_tokens)+' / '+fmtNum(totals.cache_write_tokens));
+html+=card('缓存命中率',hitRate(totals));
+html+=card('推理',fmtNum(totals.reasoning_tokens));
+html+=card('平均速度',avgTps(totals));
+if(usageRange==='all'){html+=card('窗口累计 Token',fmtNum(totals.total_tokens));if(d.est_cost)html+=card('估算成本',money(d.est_cost))}
 html+='</div>';
 const stages=s.error_stages||{};
 const stageKeys=Object.keys(stages);
 if(stageKeys.length){
-html+='<h2 style="margin-top:14px">错误阶段分布</h2><div class="chip-row">'
+html+='<h2 style="margin-top:14px">错误阶段分布 <span class="muted" style="font-weight:400;font-size:12px">窗口累计</span></h2><div class="chip-row">'
 stageKeys.sort((a,b)=>stages[b]-stages[a]).forEach(k=>{
 html+='<span class="chip" style="cursor:default">'+esc(k)+' <strong>'+stages[k]+'</strong></span>';
 });
 html+='</div>';
 }
-if(s.hours&&s.hours.length){
-html+='<h2 style="margin-top:14px">逐小时趋势 <span class="muted" style="font-weight:400;font-size:12px">近 7 天</span></h2><div id="hourlyFlowChart"></div>';
+if(pts.length){
+const gran=hourly?'逐小时':'逐日';
+html+='<h2 style="margin-top:14px">'+gran+'流量 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2><div id="hourlyFlowChart"></div>';
 html+='<h2 style="margin-top:14px">速度与缓存</h2><div id="hourlyPerfChart"></div>';
 }
-if(d.models&&d.models.length){
-html+='<h2 style="margin-top:14px">按模型</h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
+const md=s.model_days||{};
+if(usageRange!=='all'){
+const rows=Object.keys(md).map(model=>{
+ const t=sumTotals(Object.keys(md[model]).filter(inDays).map(k=>md[model][k]));
+ return {name:model,...t};
+}).filter(m=>m.requests>0).sort((a,b)=>b.requests-a.requests);
+if(rows.length){
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th></tr></thead><tbody>';
+rows.forEach(m=>{
+const sr=(m.requests-m.errors-m.disconnected)/m.requests;
+html+='<tr><td class="mono">'+esc(m.name)+'</td>'
++'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
++'<td>'+(sr*100).toFixed(0)+'%</td>'
++'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
++'<td class="mono">'+fmtNum(m.output_tokens)+'</td>'
++'<td class="mono">'+fmtNum(m.cache_read_tokens)+'</td>'
++'<td class="mono">'+hitRate(m)+'</td>'
++'<td class="mono">'+avgTps(m)+'</td></tr>';
+});
+html+='</tbody></table>';
+}
+}else if(d.models&&d.models.length){
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">全窗口 · 含成本估算</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
 d.models.forEach(m=>{
 html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
@@ -676,7 +799,7 @@ html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 html+='</tbody></table>';
 }
 if(s.keys&&s.keys.length){
-html+='<h2 style="margin-top:14px">按 API Key 哈希</h2><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按 API Key 哈希 <span class="muted" style="font-weight:400;font-size:12px">窗口累计</span></h2><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
 s.keys.forEach(k=>{
 html+='<tr><td class="mono">'+esc(k.name)+'</td><td>'+k.requests+'</td><td>'+k.errors+'</td><td class="mono">'+fmtNum(k.output_tokens)+'</td><td class="mono muted">'+fmtTime(k.last_at)+'</td></tr>';
 });
@@ -693,20 +816,16 @@ if(d.cost_basis) html+='<div class="note" style="margin-top:8px">估算成本按
 setSection(el,'usage',html);
 const hf=document.getElementById('hourlyFlowChart');
 if(hf){
-const xs=s.hours.map(p=>p.hour);
+const xs=pts.map(p=>p.hour!==undefined?p.hour:new Date(p.date+'T00:00:00').getTime()/1000);
 drawChart('usage',hf,xs,[
- {label:'请求',color:'#7c8aff',values:s.hours.map(p=>p.requests)},
- {label:'错误',color:'#f87171',values:s.hours.map(p=>p.errors)},
- {label:'输出 token',color:'#4ade80',scale:'tok',values:s.hours.map(p=>p.output_tokens),fmt:v=>fmtNum(v)},
-],{right:[{scale:'tok'}]});
+ {label:'请求',color:'#7c8aff',values:pts.map(p=>p.requests)},
+ {label:'错误',color:'#f87171',values:pts.map(p=>p.errors)},
+ {label:'输出 token',color:'#4ade80',scale:'tok',values:pts.map(p=>p.output_tokens),fmt:v=>fmtNum(v)},
+],{right:[{scale:'tok'}],uid:'usage.flow'});
 drawChart('usage',document.getElementById('hourlyPerfChart'),xs,[
- {label:'均速',color:'#22d3ee',values:s.hours.map(p=>p.gen_ms>0?p.output_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
- {label:'缓存命中率',color:'#fbbf24',scale:'pct',values:s.hours.map(p=>{const d=(p.cache_read_tokens||0)+(p.input_tokens||0);return d>0?p.cache_read_tokens/d*100:null}),fmt:v=>v.toFixed(0)+'%'},
-],{right:[{scale:'pct',range:[0,100]}]});
-}
-}catch(e){
-resetCharts('usage');
-document.getElementById('usageSection').innerHTML='<h2>用量统计</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
+ {label:'均速',color:'#22d3ee',values:pts.map(p=>p.gen_ms>0?p.output_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
+ {label:'缓存命中率',color:'#fbbf24',scale:'pct',values:pts.map(p=>{const dd=(p.cache_read_tokens||0)+(p.input_tokens||0);return dd>0?p.cache_read_tokens/dd*100:null}),fmt:v=>v.toFixed(0)+'%'},
+],{right:[{scale:'pct',range:[0,100]}],uid:'usage.perf'});
 }
 }
 
@@ -748,7 +867,7 @@ setSection(el,'quota',html);
 drawChart('quota',document.getElementById('quotaCurve'),pts.map(p=>p.at),[
  {label:'日剩余',color:'#7c8aff',values:pts.map(p=>p.daily_remaining??null),fmt:v=>v.toFixed(1)+'%'},
  {label:'周剩余',color:'#f87171',values:pts.map(p=>p.weekly_remaining??null),fmt:v=>v.toFixed(1)+'%'},
-],{yRange:[0,100]});
+],{yRange:[0,100],uid:'quota.curve'});
 }catch(e){
 resetCharts('quota');
 document.getElementById('quotaSection').innerHTML='<h2>配额历史</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';

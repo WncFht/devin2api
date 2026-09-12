@@ -39,6 +39,12 @@ func TestUsageAggregatorCounts(t *testing.T) {
 	if len(snap.Models) != 1 || snap.Models[0].Name != "swe-2-max" || snap.Models[0].Requests != 2 || snap.Models[0].Errors != 1 {
 		t.Fatalf("models = %+v", snap.Models)
 	}
+	// model_days 供面板按自然日范围过滤模型表：两次请求都落在今天。
+	todayKey := time.Now().Local().Format("2006-01-02")
+	md := snap.ModelDays["swe-2-max"][todayKey]
+	if md.Requests != 2 || md.InputTokens != 110 {
+		t.Fatalf("model_days = %+v", snap.ModelDays)
+	}
 	if len(snap.Keys) != 1 || snap.Keys[0].Requests != 2 {
 		t.Fatalf("keys = %+v", snap.Keys)
 	}
