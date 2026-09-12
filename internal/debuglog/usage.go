@@ -41,9 +41,29 @@ type usageTotals struct {
 	CacheWrite   int64 `json:"cache_write_tokens"`
 	Reasoning    int64 `json:"reasoning_tokens"`
 	TotalTokens  int64 `json:"total_tokens"`
-	// GenMS 是 completed 请求的首帧后生成毫秒累计（duration−TTFB），
-	// 前端用 output_tokens/gen_ms 求 decode 速率（tok/s）。
-	GenMS int64 `json:"gen_ms,omitempty"`
+	// GenMS/GenOut 是 decode 速率的分母分子：只累计「可信流式」条目
+	// （见 decodeWindow），前端用 gen_tokens/gen_ms 求 tok/s。
+	GenMS  int64 `json:"gen_ms,omitempty"`
+	GenOut int64 `json:"gen_tokens,omitempty"`
+}
+
+// maxPlausibleDecodeTPS 是单条请求表面 decode 速率的上限（tok/s）。
+// 上游（swe-2 走 Devin 协议）常把整段结果集中在末帧突发下发，
+// duration−TTFB≈0 除出的速率是测量伪影而非真实速度；当前模型真实
+// decode 峰值约 300+，取 400 作为可信边界。
+const maxPlausibleDecodeTPS = 400
+
+// decodeWindow 返回该条目的（输出 token 数, 生成毫秒）；无首帧时间戳、
+// 无输出 token 或表面速率超过物理上限（突发下发）时不进速率统计。
+func decodeWindow(e IndexEntry) (int64, int64, bool) {
+	if e.Result != "completed" || e.FirstUpstreamMS == nil || e.OutputTokens <= 0 {
+		return 0, 0, false
+	}
+	gen := max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	if gen <= 0 || e.OutputTokens*1000 > maxPlausibleDecodeTPS*gen {
+		return 0, 0, false
+	}
+	return e.OutputTokens, gen, true
 }
 
 // add 把一条索引行计入累计。
@@ -64,10 +84,11 @@ func (t *usageTotals) add(e IndexEntry) {
 	t.CacheWrite += e.CacheWriteTokens
 	t.Reasoning += e.ReasoningTokens
 	t.TotalTokens += e.TotalTokens
-	// 只计正常完成且有首帧时间戳的请求：失败/断连的耗时段包含
-	// 非生成分量，混入会拉低均速。
-	if e.Result == "completed" && e.FirstUpstreamMS != nil {
-		t.GenMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	// 只计可信流式条目：失败/断连的耗时段含非生成分量，突发下发的
+	// 表面速率是伪影，混入都会污染均速。
+	if out, gen, ok := decodeWindow(e); ok {
+		t.GenMS += gen
+		t.GenOut += out
 	}
 }
 
@@ -88,7 +109,8 @@ type usageMinBucket struct {
 	cacheRead    int64
 	cacheWrite   int64
 	reasoning    int64
-	genMS        int64   // completed 请求的首帧后生成毫秒累计（均速分子分母）
+	genMS        int64   // 可信流式条目的生成毫秒累计（见 decodeWindow）
+	genOut       int64   // 对应条目的输出 token 累计（均速分子）
 	durs         []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
 	durHead      int
 	ttfbs        []int64 // first_upstream_ms 样本
@@ -118,12 +140,13 @@ type usageMinPoint struct {
 	DurP95       int64 `json:"duration_p95_ms"`
 	AvgTTFB      int64 `json:"avg_ttfb_ms"`
 	TTFBP95      int64 `json:"ttfb_p95_ms"`
-	// CacheRead/CacheWrite/Reasoning/GenMS 供前端按任意时间范围求和，
-	// 再派生缓存命中率与 decode 均速。
+	// CacheRead/CacheWrite/Reasoning/GenMS/GenOut 供前端按任意时间范围
+	// 求和，再派生缓存命中率与 decode 均速。
 	CacheRead  int64 `json:"cache_read_tokens"`
 	CacheWrite int64 `json:"cache_write_tokens"`
 	Reasoning  int64 `json:"reasoning_tokens"`
 	GenMS      int64 `json:"gen_ms,omitempty"`
+	GenOut     int64 `json:"gen_tokens,omitempty"`
 }
 
 // dimensionAgg 是按模型或 key 哈希聚合的行。
@@ -139,8 +162,10 @@ type dimensionAgg struct {
 	CacheWrite   int64  `json:"cache_write_tokens"`
 	Reasoning    int64  `json:"reasoning_tokens"`
 	TotalTokens  int64  `json:"total_tokens"`
-	// GenMS 是 completed 请求的首帧后生成毫秒累计，供前端算均速。
+	// GenMS/GenOut 是可信流式条目的生成毫秒/输出 token 累计（见
+	// decodeWindow），供前端算 decode 均速。
 	GenMS       int64   `json:"gen_ms,omitempty"`
+	GenOut      int64   `json:"gen_tokens,omitempty"`
 	SumDuration int64   `json:"-"`
 	TTFBSamples int64   `json:"-"`
 	SumTTFB     int64   `json:"-"`
@@ -325,8 +350,9 @@ func (a *usageAggregator) add(e IndexEntry) {
 	a.mins[idx].cacheRead += e.CacheReadTokens
 	a.mins[idx].cacheWrite += e.CacheWriteTokens
 	a.mins[idx].reasoning += e.ReasoningTokens
-	if e.Result == "completed" && e.FirstUpstreamMS != nil {
-		a.mins[idx].genMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	if out, gen, ok := decodeWindow(e); ok {
+		a.mins[idx].genMS += gen
+		a.mins[idx].genOut += out
 	}
 	pushSample(&a.mins[idx].durs, &a.mins[idx].durHead, e.DurationMS)
 	if e.FirstUpstreamMS != nil {
@@ -428,8 +454,9 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 		d.TTFBSamples++
 		d.SumTTFB += *e.FirstUpstreamMS
 	}
-	if e.Result == "completed" && e.FirstUpstreamMS != nil {
-		d.GenMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	if out, gen, ok := decodeWindow(e); ok {
+		d.GenMS += gen
+		d.GenOut += out
 	}
 	d.LastResult = e.Result
 	d.LastStatus = e.StatusCode
@@ -516,6 +543,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 			point.CacheWrite = bucket.cacheWrite
 			point.Reasoning = bucket.reasoning
 			point.GenMS = bucket.genMS
+			point.GenOut = bucket.genOut
 			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)
 		}

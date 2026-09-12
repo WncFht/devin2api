@@ -787,7 +787,7 @@ return [new Date(days[0]+'T00:00:00').getTime()/1000,new Date(days[1]+'T00:00:00
 }
 // sumTotals 把一组 usageTotals 形状的对象求和成 totals。
 function sumTotals(list){
-const t={requests:0,errors:0,disconnected:0,rate_limited:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:0,total_tokens:0,gen_ms:0};
+const t={requests:0,errors:0,disconnected:0,rate_limited:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:0,total_tokens:0,gen_ms:0,gen_tokens:0};
 list.forEach(p=>{for(const k in t)t[k]+=p[k]||0});
 return t;
 }
@@ -809,9 +809,10 @@ let html='<h2>用量统计 <span class="muted" style="font-weight:400;font-size:
 if(d.disabled){setSection(el,'usage',html+'<div class="note">调试日志未启用，无用量统计。</div>');return}
 const s=d.snapshot||{};
 // hitRate 是发出 prompt 中命中前缀缓存的比例；avgTps 是首帧后的
-// decode 速率（output_tokens ÷ 生成时长），两者都由聚合原始量派生。
+// decode 速率（gen_tokens ÷ 生成时长；gen_tokens 只含可信流式条目，
+// 上游突发下发的条目已被后端剔除，不会出现天文数字）。
 const hitRate=t=>{const dd=(t.cache_read_tokens||0)+(t.input_tokens||0);return dd>0?(100*t.cache_read_tokens/dd).toFixed(1)+'%':'-'};
-const avgTps=t=>(t.gen_ms>0)?(t.output_tokens/(t.gen_ms/1000)).toFixed(1)+' tok/s':'-';
+const avgTps=t=>(t.gen_ms>0)?(t.gen_tokens/(t.gen_ms/1000)).toFixed(1)+' tok/s':'-';
 const days=rangeDays(usageRange);
 const secs=rangeSecs(usageRange);
 const inRange=p=>!secs||(p.at>=secs[0]&&p.at<secs[1]);
@@ -938,7 +939,7 @@ drawChart('usage',hf,xs,[
  {label:'输出 token',color:'#4ade80',scale:'tok',values:pts.map(p=>p.output_tokens),fmt:v=>fmtNum(v)},
 ],{right:[{scale:'tok'}],uid:'usage.flow'});
 drawChart('usage',document.getElementById('hourlyPerfChart'),xs,[
- {label:'均速',color:'#22d3ee',values:pts.map(p=>p.gen_ms>0?p.output_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
+ {label:'均速',color:'#22d3ee',values:pts.map(p=>p.gen_ms>0?p.gen_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
  {label:'缓存命中率',color:'#fbbf24',scale:'pct',values:pts.map(p=>{const dd=(p.cache_read_tokens||0)+(p.input_tokens||0);return dd>0?p.cache_read_tokens/dd*100:null}),fmt:v=>v.toFixed(0)+'%'},
 ],{right:[{scale:'pct',range:[0,100]}],uid:'usage.perf'});
 const lat=document.getElementById('hourlyLatChart');
