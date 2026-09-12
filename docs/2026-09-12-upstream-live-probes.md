@@ -200,7 +200,8 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 - `thinking_id`/`phase`/`credit_cost`/`committed_*`/`provider_refusal`/`redact`/`gemini_thought_signature`/`completion_profile`/`actual_model_uid`——`output_id`/`signature_type` 已移出此清单（见 §十）。
 - `invalid_json_str`/`is_custom_tool_call` 的**响应方向**线上形态（历史方向已验证有效）；`arena_*`。
 - `prompt`(#19 响应回显）、`response_dimension_groups` 的完整语义（UI 用，无关紧要）。
-- `MIN_LOG_PROB` 是否就是 Anthropic end_turn 的唯一映射（单样本）；Gemini 路径 `gemini_thought_signature` bytes 字段始终未出现（Databricks 侧似乎不下发思考签名）。
+- `MIN_LOG_PROB` 已确认为 Anthropic 路径正常收尾（4 样本）；Gemini 路径 `gemini_thought_signature` bytes 字段始终未出现（Vertex/Databricks 侧均不下发思考签名）。
+- `is_custom_tool` **声明**方向当前在 swe-2-max 上确定性 `unknown`（§十五）——上游侧故障还是字段被拒待后续复测；响应方向 `invalid_json_str` 线上形态因此仍不可观测。
 
 ## 十五、五轮补充实测（2026-09-12 午后，复核 + 新靶点）
 
@@ -208,14 +209,25 @@ probe 新增 `-temperature`/`-top-p`/`-top-k`/`-trajectory-id` flag。全部对�
 
 ### 签名校验严格度按 provider 分级（对 §六/§十 的细化）
 
-| 模型                       | 变体                                              | 结果                                                            |
-| -------------------------- | ------------------------------------------------- | --------------------------------------------------------------- |
-| claude-sonnet-4-6-thinking | `bogus-sig`（截断伪造 anthropic 签名）            | **流内 `invalid_argument`**（第 2 帧后，文案仍模糊 + trace ID） |
-| swe-2-max                  | `mutated-thinking`（真签名 + 改写的 thinking 文） | 正常，`input=213`                                               |
-| swe-2-max                  | `sig-only`（签名无 thinking 文本）                | 正常，`input=197`                                               |
-| gpt-5-6-sol-medium         | `bogus-sig`                                       | 未有效测——step1 未产出 reasoning（effort 概率性），无签名可伪造 |
+| 模型                       | 变体                                               | 结果                                                                                        |
+| -------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| claude-sonnet-4-6-thinking | `bogus-sig`（截断伪造 anthropic 签名）             | **流内 `invalid_argument`**（第 2 帧后，文案仍模糊 + trace ID）                             |
+| swe-2-max                  | `mutated-thinking`（真签名 + 改写的 thinking 文）  | 正常，`input=213`                                                                           |
+| swe-2-max                  | `sig-only`（签名无 thinking 文本）                 | 正常，`input=197`                                                                           |
+| gpt-5-6-sol-medium         | `bogus-sig`（伪造签名、不带 type）                 | 正常——无 `signature_type` 时 signature 字段被忽略                                           |
+| gpt-5-6-sol-medium         | `bogus-sig-typed`（伪造签名 + 正确 `openai` type） | **正常**——type 配对即可，内容坏不坏不查                                                     |
+| gpt-5-6-sol-medium         | `with-ids`（真签名 + type + `output_id`）          | 正常——OpenAI reasoning item 经 `thinking`+`signature`+`signature_type`+`output_id` 回放有效 |
 
-结论修订：签名校验严格度 **Anthropic（校验 blob 本体真伪）> Fireworks（完全不校验）**；但 Anthropic 不绑定 thinking 正文（四轮：真签名 + 改写 thinking 仍正常）。OpenAI 路径 signature 本身是序列化 reasoning item，伪造大概率卡在反序列化——未实证。给客户端的推论不变：**签名必须原样往返，不能伪造、不能错配 `signature_type`**。
+结论修订：签名校验严格度 **Anthropic（校验 blob 本体真伪）> OpenAI（只查 `signature_type` 配对，内容不验）> Fireworks（完全不校验）**；三者在「签名与 thinking 正文绑定」上全都不查。gpt-sol 本轮还观测到 `deltaThinking` 摘要文本与 `openai` 签名共存（thinking_len=451 + sig_len=2458）——§十「无 thinking 文本」修正为「reasoning item 在 signature 里，摘要可走 deltaThinking」。给客户端的推论不变：**签名必须原样往返，`signature_type` 必须配对**。
+
+### custom/freeform 工具声明方向（新缺陷面）
+
+`-custom-tool apply_patch`（`is_custom_tool=true` + lark grammar）+ 任意请求 → **3/3 确定性 `unknown: The third-party model provider is experiencing issues and is currently not available`（0 帧，带 error ID + trace ID）**。同请求去掉该工具定义即正常。即：custom tool 的**历史回放**通道有效（`invalid_json_str`/`is_custom_tool_call`，edge `custom-tool-call-flag` 已证），但**声明**通道在 swe-2-max 上当前是坏的——客户端声明 custom tool（OpenAI GPT-5 freeform 形态）会拿到 `unknown` 上游错误。映射注意：`connect.CodeUnknown` 不是传输错误，`tryReopen` 不会重试（分类正确）。
+
+### 其余确认项
+
+- `MIN_LOG_PROB`：claude-sonnet-4-6-thinking 正常收尾 4/4 样本均为它——从「疑似」升为确认。
+- `gemini-3-7-flash-medium`/`gemini-3-8-flash-medium`：仍**无签名帧**；provider 已切到 `GOOGLE_GENAI_VERTEX_GLOBAL`（3-1-pro 是 `GEMINI_DATABRICKS`），`responseHeader` 带 `responseId`+`trafficType: ON_DEMAND`。
 
 ### `stop_patterns` 上游不执行
 
