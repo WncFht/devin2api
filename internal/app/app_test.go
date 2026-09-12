@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/adapter"
-	"github.com/leookun/devin-2api/internal/config"
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/config"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 type fakeAdapter struct {

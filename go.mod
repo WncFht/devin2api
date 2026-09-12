@@ -1,4 +1,4 @@
-module github.com/leookun/devin-2api
+module github.com/WncFht/devin2api
 
 go 1.26.3
 

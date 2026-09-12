@@ -86,24 +86,28 @@ if [[ "${HEAD_SHA}" != "${REMOTE_SHA}" ]]; then
 	CI_STATE="blocked: HEAD (${HEAD_SHA:0:7}) 未推送到 origin/main (${REMOTE_SHA:0:7})"
 else
 	TOKEN="${GH_TOKEN:-}"
+	if [[ -z "${TOKEN}" ]] && command -v gh >/dev/null; then
+		TOKEN="$(gh auth token 2>/dev/null || true)"
+	fi
 	if [[ -z "${TOKEN}" ]]; then
 		TOKEN="$(printf 'protocol=https\nhost=github.com\n' | git credential fill 2>/dev/null | awk -F= '/^password=/{print $2}')"
 	fi
 	CI_JSON="$(curl -sf -m 10 ${TOKEN:+-H "Authorization: Bearer ${TOKEN}"} \
-		"https://api.github.com/repos/${REPO_SLUG}/commits/${HEAD_SHA}/check-runs" 2>/dev/null || true)"
+		"https://api.github.com/repos/${REPO_SLUG}/actions/runs?head_sha=${HEAD_SHA}&per_page=20" 2>/dev/null || true)"
 	if [[ -n "${CI_JSON}" ]]; then
 		CI_STATE="$(CI_JSON="${CI_JSON}" python3 -c '
 import json, os
 d = json.loads(os.environ["CI_JSON"])
-runs = [r for r in d.get("check_runs", []) if r["name"] == "CI" or r.get("app", {}).get("slug") == "github-actions"]
+# 只看名为 CI 的 workflow——Dependabot 等其它 workflow 的失败与发布质量无关
+runs = [r for r in d.get("workflow_runs", []) if r["name"] == "CI"]
 if not runs:
-    print("unknown (no check runs)")
-elif all(r["status"] == "completed" and r["conclusion"] == "success" for r in runs):
-    print("green")
-elif any(r["conclusion"] in ("failure", "cancelled") for r in runs):
-    print("FAILED")
-else:
+    print("unknown (no CI run for HEAD)")
+elif runs[0]["status"] != "completed":
     print("pending")
+elif runs[0]["conclusion"] == "success":
+    print("green")
+else:
+    print("FAILED")
 ' 2>/dev/null || echo unknown)"
 	fi
 fi

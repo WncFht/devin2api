@@ -21,10 +21,10 @@ import (
 	"local/devinproto/devinprotoconnect"
 
 	"connectrpc.com/connect"
-	"github.com/leookun/devin-2api/internal/adapter"
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/httpproxy"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/httpproxy"
+	"github.com/WncFht/devin2api/internal/llm"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -558,16 +558,25 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 		// Wire 实证（WindsurfAPI）：助手轮 = 可选文本消息 + 每个工具调用各一条
 		// 独立消息。工具调用消息不写 prompt 字段（字段 3 缺席而非空串）；
 		// thinking(#11) 出现在每条 assistant 消息上。
-		var thinking, signature string
+		var signature string
 		var redacted bool
-		var text strings.Builder
+		var text, thinking strings.Builder
 		var calls []llm.ToolCall
 		for _, block := range message.Content {
 			switch typed := block.(type) {
 			case llm.TextContent:
 				text.WriteString(typed.Text)
 			case llm.ThinkingContent:
-				thinking, signature, redacted = typed.Thinking, typed.ThinkingSignature, typed.Redacted
+				// 一条 assistant 消息可带多个 thinking 块（interleaved）；
+				// wire 模型每 prompt 只有单份 thinking，顺序拼接、签名取最后非空。
+				if thinking.Len() > 0 && typed.Thinking != "" {
+					thinking.WriteString("\n")
+				}
+				thinking.WriteString(typed.Thinking)
+				if typed.ThinkingSignature != "" {
+					signature = typed.ThinkingSignature
+				}
+				redacted = redacted || typed.Redacted
 			case llm.ToolCall:
 				calls = append(calls, typed)
 			}
@@ -579,8 +588,10 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 				Source:    assistantSource.Enum(),
 				Prompt:    proto.String(text.String()),
 			}
-			if thinking != "" {
-				prompt.Thinking = proto.String(thinking)
+			if thinking.Len() > 0 || redacted {
+				if thinking.Len() > 0 {
+					prompt.Thinking = proto.String(thinking.String())
+				}
 				if signature != "" {
 					prompt.Signature = proto.String(signature)
 				}
@@ -598,8 +609,10 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 					ArgumentsJson: proto.String(string(call.Arguments)),
 				}},
 			}
-			if thinking != "" {
-				prompt.Thinking = proto.String(thinking)
+			if thinking.Len() > 0 || redacted {
+				if thinking.Len() > 0 {
+					prompt.Thinking = proto.String(thinking.String())
+				}
 				// 无文本消息时签名挂到首条工具调用消息，避免丢失。
 				if index == 0 && text.Len() == 0 {
 					if signature != "" {

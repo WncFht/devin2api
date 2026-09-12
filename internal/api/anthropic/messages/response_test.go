@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // TestStreamEncoderEmitsMessageStartAndText 验证流式文本产生 Anthropic 标准事件。

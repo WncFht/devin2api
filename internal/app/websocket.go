@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/gorilla/websocket"
-	"github.com/leookun/devin-2api/internal/llm"
-	"github.com/leookun/devin-2api/internal/obs"
 )
 
 var upgrader = websocket.Upgrader{

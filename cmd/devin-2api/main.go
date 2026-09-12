@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/adapter"
-	"github.com/leookun/devin-2api/internal/adapter/devin"
-	"github.com/leookun/devin-2api/internal/app"
-	"github.com/leookun/devin-2api/internal/config"
-	"github.com/leookun/devin-2api/internal/dashboard"
-	"github.com/leookun/devin-2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/adapter/devin"
+	"github.com/WncFht/devin2api/internal/app"
+	"github.com/WncFht/devin2api/internal/config"
+	"github.com/WncFht/devin2api/internal/dashboard"
+	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
 // version 由构建期 -ldflags "-X main.version=$(git rev-parse --short HEAD)" 注入；

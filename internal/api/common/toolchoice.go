@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // ParseOpenAIToolChoice 解析 OpenAI 风格的 tool_choice 字段：

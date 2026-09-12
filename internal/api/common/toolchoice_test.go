@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 func TestParseOpenAIToolChoice(t *testing.T) {

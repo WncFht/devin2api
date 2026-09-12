@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/httpproxy"
+	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/go-chi/chi/v5"
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/httpproxy"
-	"github.com/leookun/devin-2api/internal/obs"
 
 	devinproto "local/devinproto"
 	"local/devinproto/devinprotoconnect"

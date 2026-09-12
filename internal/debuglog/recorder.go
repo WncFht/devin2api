@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。

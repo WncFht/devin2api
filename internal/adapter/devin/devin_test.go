@@ -14,9 +14,9 @@ import (
 	devinproto "local/devinproto"
 
 	"connectrpc.com/connect"
-	"github.com/leookun/devin-2api/internal/adapter"
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/llm"
 	"google.golang.org/protobuf/proto"
 )
 

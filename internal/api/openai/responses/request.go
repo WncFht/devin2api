@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/api/common"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/api/common"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // Request 是 OpenAI Responses 请求中本适配器支持的字段集合。
@@ -155,27 +155,39 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 	}
 	// reasoning item 在 input 里位于它所属输出项（assistant message /
 	// function_call）之前：summary 文本先缓冲，挂到紧随其后的 assistant
-	// 产出上。encrypted_content 是 OpenAI 封装载荷，对上游不可解，只取明文。
-	var pendingThinking []string
+	// 产出上。encrypted_content 为 sealed.* 时是我们自己发出的上游签名，
+	// 随思考回放在 wire 上交给上游；外来不透明载荷不可解，忽略。
+	var pending pendingReasoning
 	for index, item := range items {
-		if err := appendInputItem(context, item, &pendingThinking); err != nil {
+		if err := appendInputItem(context, item, &pending); err != nil {
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
 	}
 	return nil
 }
 
-// consumePendingThinking 取出累积的 reasoning summary，作为 ThinkingContent 前置块。
-func consumePendingThinking(pending *[]string) []llm.Content {
-	if len(*pending) == 0 {
-		return nil
-	}
-	content := []llm.Content{llm.ThinkingContent{Thinking: strings.Join(*pending, "\n")}}
-	*pending = nil
-	return content
+// pendingReasoning 缓冲 reasoning item 的 summary 文本与可回放签名。
+type pendingReasoning struct {
+	texts     []string
+	signature string
 }
 
-func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pendingThinking *[]string) error {
+// consumePendingThinking 取出累积的 reasoning summary，作为 ThinkingContent 前置块。
+// 只有签名没有可见文本时按 redacted 处理，与上游的 sealed 表示一致。
+func consumePendingThinking(pending *pendingReasoning) []llm.Content {
+	if len(pending.texts) == 0 && pending.signature == "" {
+		return nil
+	}
+	block := llm.ThinkingContent{
+		Thinking:          strings.Join(pending.texts, "\n"),
+		ThinkingSignature: pending.signature,
+		Redacted:          len(pending.texts) == 0,
+	}
+	*pending = pendingReasoning{}
+	return []llm.Content{block}
+}
+
+func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning) error {
 	var header struct {
 		Type string `json:"type"`
 		Role string `json:"role"`
@@ -193,18 +205,22 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pendingT
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"summary"`
+			EncryptedContent string `json:"encrypted_content"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
 		for _, part := range item.Summary {
 			if part.Type == "summary_text" && part.Text != "" {
-				*pendingThinking = append(*pendingThinking, part.Text)
+				pending.texts = append(pending.texts, part.Text)
 			}
+		}
+		if strings.HasPrefix(item.EncryptedContent, "sealed.") {
+			pending.signature = item.EncryptedContent
 		}
 		return nil
 	case "message":
-		return appendMessageItem(context, raw, header.Role, pendingThinking)
+		return appendMessageItem(context, raw, header.Role, pending)
 	case "function_call":
 		var item struct {
 			CallID    string `json:"call_id"`
@@ -215,7 +231,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pendingT
 			return err
 		}
 		arguments := json.RawMessage(item.Arguments)
-		content := append(consumePendingThinking(pendingThinking),
+		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
 			Content:     content,
@@ -225,7 +241,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pendingT
 		return nil
 	case "function_call_output":
 		// reasoning 与产出之间插入结果项 → reasoning 成孤儿，丢弃缓冲。
-		*pendingThinking = nil
+		*pending = pendingReasoning{}
 		var item struct {
 			CallID string          `json:"call_id"`
 			Output json.RawMessage `json:"output"`
@@ -271,7 +287,7 @@ func findToolName(messages []llm.Message, callID string) string {
 	return ""
 }
 
-func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role string, pendingThinking *[]string) error {
+func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role string, pending *pendingReasoning) error {
 	switch role {
 	case "user", "assistant", "system", "developer":
 	default:
@@ -293,13 +309,13 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	switch role {
 	case "user":
 		// 非 assistant 产出介入 → 缓冲的 reasoning 成孤儿，丢弃。
-		*pendingThinking = nil
+		*pending = pendingReasoning{}
 		context.Messages = append(context.Messages, llm.UserMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
 	case "assistant":
-		content = append(consumePendingThinking(pendingThinking), content...)
+		content = append(consumePendingThinking(pending), content...)
 		context.Messages = append(context.Messages, llm.AssistantMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
 	case "system", "developer":
-		*pendingThinking = nil
+		*pending = pendingReasoning{}
 		text := common.ContentText(content)
 		if context.SystemPrompt != "" && text != "" {
 			context.SystemPrompt += "\n"

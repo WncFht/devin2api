@@ -4,11 +4,11 @@ package app
 import (
 	"fmt"
 
-	"github.com/leookun/devin-2api/internal/api/anthropic/messages"
-	"github.com/leookun/devin-2api/internal/api/openai/chat"
-	"github.com/leookun/devin-2api/internal/api/openai/responses"
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/api/anthropic/messages"
+	"github.com/WncFht/devin2api/internal/api/openai/chat"
+	"github.com/WncFht/devin2api/internal/api/openai/responses"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // protocolEncoder 抽象流式与非流式协议编码。

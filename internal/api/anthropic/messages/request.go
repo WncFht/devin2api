@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/leookun/devin-2api/internal/api/common"
-	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/api/common"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // Request 是 Anthropic Messages 请求中本适配器支持的字段集合。
@@ -295,11 +295,14 @@ func decodeAssistantContent(raw json.RawMessage) ([]llm.Content, error) {
 	content := make([]llm.Content, 0, len(parts))
 	for index, part := range parts {
 		var header struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			Data      string          `json:"data"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
@@ -308,8 +311,10 @@ func decodeAssistantContent(raw json.RawMessage) ([]llm.Content, error) {
 		case "text":
 			content = append(content, llm.TextContent{Text: header.Text})
 		case "thinking":
-			// 历史中的 thinking 块不需要签名。
-			content = append(content, llm.ThinkingContent{Thinking: header.Text})
+			content = append(content, llm.ThinkingContent{Thinking: header.Thinking, ThinkingSignature: header.Signature})
+		case "redacted_thinking":
+			// redacted 块的 data 是密封思考体；在 Devin wire 上对应 signature+redacted 标记。
+			content = append(content, llm.ThinkingContent{ThinkingSignature: header.Data, Redacted: true})
 		case "tool_use":
 			args := header.Input
 			if len(args) == 0 {

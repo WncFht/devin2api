@@ -11,8 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/leookun/devin-2api/internal/debuglog"
-	"github.com/leookun/devin-2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/obs"
 )
 
 // newTestPanel 挂载面板路由到 chi，返回可直接 ServeHTTP 的 handler。
