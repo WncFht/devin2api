@@ -766,14 +766,19 @@ func validLogName(name, extension string) bool {
 func (recorder *Recorder) sanitize(value any) any {
 	var generic any
 	switch value := value.(type) {
-	case json.RawMessage:
-		// 快路径：预筛不敏感即原样透传——记录多为自产 SSE 帧与 proto
-		// 投影，完整 unmarshal+树遍历+marshal 在每条 delta 上是纯开销。
-		// json.Marshal 对 RawMessage 只做空白压缩，wire 语义不变。
-		if !rawNeedsSanitize(value) {
-			return value
+	case json.Marshaler:
+		// RawMessage 与惰性序列化包装（protoJSON 等）共用此路：序列化在
+		// worker 内发生，调用方 goroutine 不承担 marshal 成本。快路径
+		// 预筛不敏感即原样透传——记录多为自产 SSE 帧与 proto 投影，完整
+		// unmarshal+树遍历+marshal 在每条 delta 上是纯开销。
+		data, err := value.MarshalJSON()
+		if err != nil {
+			return map[string]any{"serialization_error": err.Error()}
 		}
-		if err := json.Unmarshal(value, &generic); err != nil {
+		if !rawNeedsSanitize(data) {
+			return json.RawMessage(data)
+		}
+		if err := json.Unmarshal(data, &generic); err != nil {
 			return map[string]any{"serialization_error": err.Error()}
 		}
 	case map[string]any, []any, string:
@@ -830,15 +835,6 @@ var secretKeyNames = []string{
 	"clientsecret", "f", "devicefingerprint",
 }
 
-// secretKeyNeedles 是 secretKeyNames 的引号包裹子串形态，供原始字节预筛。
-var secretKeyNeedles = func() [][]byte {
-	needles := make([][]byte, len(secretKeyNames))
-	for i, name := range secretKeyNames {
-		needles[i] = []byte(`"` + name + `"`)
-	}
-	return needles
-}()
-
 func secretKey(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
 	for _, name := range secretKeyNames {
@@ -849,32 +845,75 @@ func secretKey(key string) bool {
 	return false
 }
 
-// rawNeedsSanitize 预筛 RawMessage 记录：含内联图片或疑似敏感键时才需要
-// 完整的 unmarshal+树遍历脱敏。判定口径与 sanitizeValue 对齐："image/"
-// 子串同时覆盖 data:image/ 值与 {"mime_type":"image/*","data":...} 对象
-// 两种图片形态；键名按小写+去下划线归一后以引号包裹匹配（"token" 不误伤
-// prompt_tokens）。字符串值恰好含同款文本会误进慢路径——宁多检，不漏检。
+// rawNeedsSanitize 预筛 JSON 记录：含内联图片或敏感键名才需要完整的
+// unmarshal+树遍历脱敏。判定口径与 sanitizeValue 对齐："image/" 子串同时
+// 覆盖 data:image/ 值与 {"mime_type":"image/*","data":...} 对象两种图片
+// 形态；键名只在 "key": 位置匹配（小写+去下划线归一，与 secretKey 一致），
+// 字符串值里的同名文本不再误进慢路径。扫描零分配。
 func rawNeedsSanitize(data []byte) bool {
 	if bytes.Contains(data, []byte("image/")) {
 		return true
 	}
-	compact := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {
-		c := data[i]
-		if c == '_' {
+		if data[i] != '"' {
 			continue
 		}
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
+		end := i + 1
+		for end < len(data) && data[end] != '"' {
+			if data[end] == '\\' {
+				end++
+			}
+			end++
 		}
-		compact = append(compact, c)
+		if end >= len(data) {
+			break
+		}
+		colon := end + 1
+		for colon < len(data) && (data[colon] == ' ' || data[colon] == '\t' || data[colon] == '\r' || data[colon] == '\n') {
+			colon++
+		}
+		if colon < len(data) && data[colon] == ':' && secretKeySpan(data[i+1:end]) {
+			return true
+		}
+		i = end
 	}
-	for _, needle := range secretKeyNeedles {
-		if bytes.Contains(compact, needle) {
+	return false
+}
+
+// secretKeySpan 判定引号内的键名是否命中脱敏名单，归一方式与 secretKey
+// 一致：忽略 '_'、大小写不敏感。
+func secretKeySpan(span []byte) bool {
+	for _, name := range secretKeyNames {
+		if equalFoldKey(span, name) {
 			return true
 		}
 	}
 	return false
+}
+
+// equalFoldKey 比较引号内键名原文与归一化名单项：跳过 '_'、大小写折叠。
+func equalFoldKey(span []byte, name string) bool {
+	i := 0
+	for j := 0; j < len(name); j++ {
+		for i < len(span) && span[i] == '_' {
+			i++
+		}
+		if i >= len(span) {
+			return false
+		}
+		c := span[i]
+		i++
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != name[j] {
+			return false
+		}
+	}
+	for i < len(span) && span[i] == '_' {
+		i++
+	}
+	return i == len(span)
 }
 
 func (recorder *Recorder) extractImage(value map[string]any) (attachmentReference, bool) {

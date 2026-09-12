@@ -5,7 +5,6 @@ package devin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -787,18 +786,22 @@ func (stream *responseStream) release(events []llm.ResponseEvent) []llm.Response
 	return append(start, events...)
 }
 
+// protoJSON 把 protojson 序列化推迟到日志写协程：recordProtoJSON 的调用方
+// 是上游泵/解码 goroutine，同步 marshal 每帧会挤占流处理；包装成
+// json.Marshaler 后 sanitize 在 worker 内 marshal+预筛+脱敏。marshal 失败
+// 的兜底是记录文件里的 serialization_error 条目（实际不可达：protojson
+// 对构造好的消息不报错）。
+type protoJSON struct{ message proto.Message }
+
+func (p protoJSON) MarshalJSON() ([]byte, error) { return protojson.Marshal(p.message) }
+
 func recordProtoJSON(recorder *debuglog.Recorder, name string, message proto.Message) {
 	if recorder == nil || message == nil {
 		return
 	}
-	data, err := protojson.Marshal(message)
-	if err != nil {
-		recorder.WriteError("devin_proto_encode", err)
-		return
-	}
 	if strings.HasSuffix(name, ".jsonl") {
-		recorder.AppendValueJSONL(name, json.RawMessage(data))
+		recorder.AppendValueJSONL(name, protoJSON{message})
 		return
 	}
-	recorder.WriteJSON(name, json.RawMessage(data))
+	recorder.WriteJSON(name, protoJSON{message})
 }
