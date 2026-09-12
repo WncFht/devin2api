@@ -6,7 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LABEL="com.devinuser.devin-2api"
+# launchd label 跟随当前用户名（本机约定 com.<user>.devin-2api）；
+# 需要固定名时可用 DEVIN2API_LABEL 覆盖。
+LABEL="${DEVIN2API_LABEL:-com.${USER}.devin-2api}"
 HEALTH_URL="http://localhost:3003/healthz"
 REPO_SLUG="$(git remote get-url origin | sed -E 's#.*github.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
 

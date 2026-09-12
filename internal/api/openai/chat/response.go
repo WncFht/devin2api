@@ -362,7 +362,10 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 	}
 	if len(toolCalls) > 0 {
 		messageObj["tool_calls"] = toolCalls
-		messageObj["content"] = nil
+		// content 与 tool_calls 允许共存：有正文就保留，只有纯调用轮才置 nil。
+		if len(textParts) == 0 {
+			messageObj["content"] = nil
+		}
 	}
 	return messageObj, toolCalls
 }

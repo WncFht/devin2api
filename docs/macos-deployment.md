@@ -1,7 +1,7 @@
 # macOS 部署（launchd）
 
-本机主实例由 launchd 用户代理管理，Label `com.devinuser.devin-2api`，
-plist 位于 `~/Library/LaunchAgents/com.devinuser.devin-2api.plist`。
+本机主实例由 launchd 用户代理管理，Label `com.$USER.devin-2api`，
+plist 位于 `~/Library/LaunchAgents/com.$USER.devin-2api.plist`。
 本文说明该配置的含义、日常管理命令、升级流程和可选项。重启、换二进制
 前先确认目标端口上没有遗留测试进程（`lsof -nP -iTCP:<port> -sTCP:LISTEN`）。
 
@@ -28,20 +28,20 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>com.devinuser.devin-2api</string>
+	<key>Label</key><string>com.$USER.devin-2api</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/devinuser/Desktop/src/devin-2api/devin-2api</string>
+		<string>/Users/<user>/src/devin-2api/devin-2api</string>
 		<string>-config</string>
-		<string>/Users/devinuser/Desktop/src/devin-2api/config.yaml</string>
+		<string>/Users/<user>/src/devin-2api/config.yaml</string>
 	</array>
-	<key>WorkingDirectory</key><string>/Users/devinuser/Desktop/src/devin-2api</string>
+	<key>WorkingDirectory</key><string>/Users/<user>/src/devin-2api</string>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>ThrottleInterval</key><integer>5</integer>
 	<key>ExitTimeOut</key><integer>60</integer>
-	<key>StandardOutPath</key><string>/Users/devinuser/Desktop/src/devin-2api/logs/stdout.log</string>
-	<key>StandardErrorPath</key><string>/Users/devinuser/Desktop/src/devin-2api/logs/stderr.log</string>
+	<key>StandardOutPath</key><string>/Users/<user>/src/devin-2api/logs/stdout.log</string>
+	<key>StandardErrorPath</key><string>/Users/<user>/src/devin-2api/logs/stderr.log</string>
 </dict>
 </plist>
 ```
@@ -62,7 +62,7 @@ debug 请求日志有 retention，但 `stderr.log`（slog 进程日志）只会�
 用系统自带 newsyslog 管即可，`/etc/newsyslog.d/devin-2api.conf`（需 sudo）：
 
 ```
-/Users/devinuser/Desktop/src/devin-2api/logs/stderr.log devinuser:staff 644 5 10240 * J
+~/src/devin-2api/logs/stderr.log $USER:staff 644 5 10240 * J
 ```
 
 含义：超 10MB 轮转、保留 5 份、bzip2 压缩（`J`）。`stdout.log` 同理可加。
@@ -70,10 +70,10 @@ debug 请求日志有 retention，但 `stderr.log`（slog 进程日志）只会�
 ## 常用命令
 
 ```bash
-launchctl print gui/$(id -u)/com.devinuser.devin-2api | grep -E 'state|pid'   # 状态
-launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api                 # 重启（发 SIGTERM 再拉起）
-launchctl bootout gui/$(id -u)/com.devinuser.devin-2api                      # 停止
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.devinuser.devin-2api.plist  # 重新加载
+launchctl print gui/$(id -u)/com.$USER.devin-2api | grep -E 'state|pid'   # 状态
+launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api                 # 重启（发 SIGTERM 再拉起）
+launchctl bootout gui/$(id -u)/com.$USER.devin-2api                      # 停止
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.devin-2api.plist  # 重新加载
 tail -f logs/stderr.log                                                       # 进程日志
 ```
 

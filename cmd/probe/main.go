@@ -755,6 +755,15 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 		if aSig != "" {
 			asst.Signature = proto.String("bogus-" + aSig[:min(len(aSig), 16)])
 		}
+	case "bogus-sig-typed":
+		// 伪造签名 + 正确 signature_type：分离「type 错配」与「内容伪造」两个变量。
+		if aThinking != "" {
+			asst.Thinking = proto.String(aThinking)
+		}
+		if aSig != "" {
+			asst.Signature = proto.String("bogus-" + aSig[:min(len(aSig), 16)])
+			asst.SignatureType = proto.String(aSigType)
+		}
 	case "with-ids":
 		if aThinking != "" {
 			asst.Thinking = proto.String(aThinking)
