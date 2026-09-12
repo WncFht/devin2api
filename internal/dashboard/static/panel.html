@@ -1170,7 +1170,7 @@ const list=data.active||[];
 const section=document.getElementById('activeSection');
 if(!list.length){section.style.display='none';return}
 section.style.display='';
-let html='<table><thead><tr><th>目录</th><th>API</th><th>模型</th><th>阶段</th><th>已耗时</th><th>上游TTFB</th><th>已下发</th><th>队列/丢弃</th><th>已写文件</th><th></th></tr></thead><tbody>';
+let html='<table><thead><tr><th>目录</th><th>API</th><th>模型</th><th>阶段</th><th>已耗时</th><th>上游TTFB</th><th>已下发</th><th>队列/丢弃</th><th></th></tr></thead><tbody>';
 list.forEach(a=>{
 const stateMap={waiting_upstream:'等上游',receiving_upstream:'收上游',streaming_client:'发客户端'};
 html+='<tr><td class="mono">'+esc(a.dir)+'</td><td>'+esc(a.meta&&a.meta.api||'-')+'</td>'
@@ -1180,8 +1180,7 @@ html+='<tr><td class="mono">'+esc(a.dir)+'</td><td>'+esc(a.meta&&a.meta.api||'-'
 +'<td class="mono">'+fmtMs(a.first_upstream_ms)+'</td>'
 +'<td class="mono">'+fmtBytes(a.client_bytes)+'</td>'
 +'<td class="mono">'+(a.queued_events||0)+' / '+(a.dropped_events||0)+'</td>'
-+'<td class="mono">'+(a.files||[]).map(f=>esc(f.name)).join(', ')+'</td>'
-+'<td>'+(a.abortable?'<span class="file-link" onclick="abortRequest(\''+esc(a.dir)+'\')">中断</span>':'')+'</td></tr>';
++'<td>'+(a.abortable?'<span class="file-link" onclick="abortRequest(\''+qa(a.dir)+'\')">中断</span>':'')+'</td></tr>';
 });
 html+='</tbody></table>';
 document.getElementById('activeBody').innerHTML=html;
