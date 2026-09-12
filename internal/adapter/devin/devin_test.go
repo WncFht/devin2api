@@ -423,6 +423,40 @@ func TestResponseDecoderMergesLateSignature(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderSynthesizesThinkingForBareSignature 的测试动机是 openai 体制
+// 上游只有签名没有思考正文：合成块必须走 start/end 完整生命周期，编码器从
+// Partial 边界取签名；发 thinking_signature 会与边界读取叠加翻倍并让 item 悬挂。
+func TestResponseDecoderSynthesizesThinkingForBareSignature(t *testing.T) {
+	decoder := newResponseDecoder("model", nil)
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaSignature:     proto.String("sig"),
+		DeltaSignatureType: proto.String("openai"),
+	})
+	want := []llm.ResponseEventType{llm.ResponseEventThinkingStart, llm.ResponseEventThinkingEnd}
+	if len(events) != len(want) {
+		t.Fatalf("bare signature events = %#v, want start+end", events)
+	}
+	for index, eventType := range want {
+		if events[index].Type != eventType || events[index].ContentIndex != 0 {
+			t.Fatalf("event[%d] = %#v, want %q at index 0", index, events[index], eventType)
+		}
+	}
+	thinking := events[1].Partial.Content[0].(llm.ThinkingContent)
+	if thinking.ThinkingSignature != "sig" || thinking.SignatureType != "openai" {
+		t.Fatalf("synthesized thinking = %#v", thinking)
+	}
+	// 后续裸签名帧按 merge 路径并入同一合成块。
+	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("2")})
+	if len(events) != 1 || events[0].Type != llm.ResponseEventThinkingSignature || events[0].Delta != "2" {
+		t.Fatalf("second signature events = %#v, want thinking_signature delta", events)
+	}
+	thinking = events[0].Partial.Content[0].(llm.ThinkingContent)
+	if thinking.ThinkingSignature != "sig2" {
+		t.Fatalf("merged synthesized thinking = %#v", thinking)
+	}
+}
+
 // TestResponseDecoderAggregatesToolArgumentFragments 的测试动机是保证事件保留原始增量，同时最终工具调用具有完整参数。
 func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
 	decoder := newResponseDecoder("model", nil)
@@ -1041,5 +1075,260 @@ func TestRepairLeakedXMLArguments(t *testing.T) {
 	}
 	if _, ok := repairLeakedXMLArguments(`garbage`); ok {
 		t.Fatal("no tags → no repair")
+	}
+}
+
+// TestResponseDecoderStoresSignatureTypeAndOutputID 验证 signature_type 与
+// output_id 随帧落进中间模型：回放时缺 signature_type 实测触发上游
+// invalid_argument，output_id 是 OpenAI 侧 message item 的真实 id。
+func TestResponseDecoderStoresSignatureTypeAndOutputID(t *testing.T) {
+	decoder := newResponseDecoder("model", nil)
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaThinking:      proto.String("think"),
+		DeltaSignature:     proto.String("sig-payload"),
+		DeltaSignatureType: proto.String("anthropic"),
+		OutputId:           proto.String("msg_123"),
+	})
+	if len(events) == 0 {
+		t.Fatal("expected thinking events")
+	}
+	thinking, ok := decoder.partial.Content[0].(llm.ThinkingContent)
+	if !ok {
+		t.Fatalf("content[0] = %T, want ThinkingContent", decoder.partial.Content[0])
+	}
+	if thinking.SignatureType != "anthropic" || thinking.ThinkingSignature != "sig-payload" {
+		t.Fatalf("thinking = %#v", thinking)
+	}
+	if decoder.partial.OutputID != "msg_123" {
+		t.Fatalf("output id = %q, want msg_123", decoder.partial.OutputID)
+	}
+}
+
+// TestResponseDecoderLateSignatureSynthesizesBlock 验证思考块缺席时签名帧
+// 不被丢弃：openai 体制无 deltaThinking，签名是唯一思考产物，必须合成
+// 空块（start+end 一对，签名经共享 Partial 传达）让 /v1/responses 下游
+// 拿得到 reasoning item。
+func TestResponseDecoderLateSignatureSynthesizesBlock(t *testing.T) {
+	decoder := newResponseDecoder("model", nil)
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaSignature:     proto.String(`[{"id":"rs_9","type":"reasoning","encrypted_content":"gAAA"}]`),
+		DeltaSignatureType: proto.String("openai"),
+	})
+	var sawStart, sawEnd bool
+	for _, event := range events {
+		if event.Type == llm.ResponseEventThinkingStart {
+			sawStart = true
+		}
+		if event.Type == llm.ResponseEventThinkingEnd {
+			sawEnd = true
+		}
+	}
+	if !sawStart || !sawEnd {
+		t.Fatalf("events = %#v, want thinking_start + thinking_end", events)
+	}
+	thinking, ok := decoder.partial.Content[0].(llm.ThinkingContent)
+	if !ok || thinking.SignatureType != "openai" || thinking.ThinkingSignature == "" {
+		t.Fatalf("content[0] = %#v", decoder.partial.Content[0])
+	}
+}
+
+// TestResponseDecoderCustomToolCall 验证 is_custom_tool_call + invalid_json_str
+// 把非 JSON 参数原文（如补丁文本）透传为 Custom 调用，而不是吞成 {}。
+func TestResponseDecoderCustomToolCall(t *testing.T) {
+	decoder := newResponseDecoder("model", nil)
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+			Id:               proto.String("call-1"),
+			Name:             proto.String("apply_patch"),
+			IsCustomToolCall: proto.Bool(true),
+			InvalidJsonStr:   proto.String("*** Begin Patch\n+hello"),
+		}},
+	})
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL.Enum(),
+	})
+	events := decoder.finish(nil)
+	var done llm.ResponseEvent
+	for _, event := range events {
+		if event.Type == llm.ResponseEventDone {
+			done = event
+		}
+	}
+	if done.Message == nil {
+		t.Fatal("missing done message")
+	}
+	call, ok := done.Message.Content[0].(llm.ToolCall)
+	if !ok {
+		t.Fatalf("content[0] = %T, want ToolCall", done.Message.Content[0])
+	}
+	if !call.Custom || string(call.Arguments) != "*** Begin Patch\n+hello" {
+		t.Fatalf("tool call = %#v", call)
+	}
+}
+
+// TestBuildRequestReplaysSignatureMetadata 验证签名三件套（signature +
+// signature_type + output_id）整体回填到 assistant prompt。
+func TestBuildRequestReplaysSignatureMetadata(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
+			llm.AssistantMessage{
+				OutputID: "msg_42",
+				Content: []llm.Content{
+					llm.ThinkingContent{Thinking: "t", ThinkingSignature: "sig", SignatureType: "anthropic"},
+					llm.TextContent{Text: "answer"},
+				},
+			},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := converted.GetChatMessagePrompts()[1]
+	if prompt.GetSignature() != "sig" || prompt.GetSignatureType() != "anthropic" || prompt.GetOutputId() != "msg_42" {
+		t.Fatalf("assistant prompt = %#v", prompt)
+	}
+}
+
+// TestBuildRequestCustomToolCallUsesInvalidJSONStr 验证 Custom 调用经
+// invalid_json_str + is_custom_tool_call 回传，非 JSON 原文不进 arguments_json。
+func TestBuildRequestCustomToolCallUsesInvalidJSONStr(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ToolCall{ID: "c1", Name: "apply_patch", Arguments: json.RawMessage("*** Begin Patch"), Custom: true},
+			}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := converted.GetChatMessagePrompts()[0].GetToolCalls()[0]
+	if !call.GetIsCustomToolCall() || call.GetInvalidJsonStr() != "*** Begin Patch" || call.ArgumentsJson != nil {
+		t.Fatalf("custom tool call wire = %#v", call)
+	}
+}
+
+// TestBuildRequestRejectsNamedToolChoiceOutsideTools 验证指名不存在工具的
+// tool_choice 在本地报可读错误——上游对此只回模糊流内 invalid_argument。
+func TestBuildRequestRejectsNamedToolChoiceOutsideTools(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+		Tools: []llm.ToolDefinition{
+			{Name: "read_file", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		},
+		ToolChoice: &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "missing_tool"},
+	}
+	_, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	if err == nil || !strings.Contains(err.Error(), "missing_tool") {
+		t.Fatalf("err = %v, want named tool_choice rejection", err)
+	}
+}
+
+// TestPairToolCallsWithResultsConsumesDuplicateID 验证重复 call-id 按位置
+// 绑定：同 id 的第二个调用不再复用同一份结果（上游实测容忍重复 id）。
+func TestPairToolCallsWithResultsConsumesDuplicateID(t *testing.T) {
+	assistant := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
+	tool := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
+	callPrompt := func() *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			Source:    assistant.Enum(),
+			ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String("dup"), Name: proto.String("x")}},
+		}
+	}
+	resultPrompt := &devinproto.ExaChatPb_ChatMessagePrompt{
+		Source: tool.Enum(), ToolCallId: proto.String("dup"), Prompt: proto.String("r"),
+	}
+	out := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callPrompt(), callPrompt(), resultPrompt})
+	if len(out) != 3 {
+		t.Fatalf("paired prompts = %d, want 3", len(out))
+	}
+	if out[0].GetSource() != assistant || out[1].GetSource() != tool || out[2].GetSource() != assistant {
+		t.Fatalf("expected call,result,call ordering, got %#v", out)
+	}
+}
+
+// TestResponseStreamReopensBeforeContent 验证首内容帧前的瞬时传输错误
+// 触发一次整体重发：客户端不可见任何事件，重发无可见副作用。
+func TestResponseStreamReopensBeforeContent(t *testing.T) {
+	reopened := false
+	second := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: io.ErrUnexpectedEOF}),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil),
+		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
+			reopened = true
+			return pumpUpstream(context.Background(), second), func() {}, nil
+		},
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil) },
+	}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened {
+		t.Fatal("expected reopen before first content")
+	}
+	if event.Type != llm.ResponseEventStart {
+		t.Fatalf("first event = %q, want start", event.Type)
+	}
+}
+
+// TestResponseStreamDoesNotReopenAfterContent 验证内容已开始流动后失败
+// 直接透传为 error 事件——整体重发会把已下发内容重复一遍。
+func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
+	first := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+	}}
+	reopened := false
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), first),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil),
+		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
+			reopened = true
+			return nil, nil, cause
+		},
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil) },
+	}
+	// 先消费 start/text 事件，之后 EOF 无 stopReason → 报截断错误而非重试。
+	for {
+		event, err := stream.Recv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			break
+		}
+	}
+	if reopened {
+		t.Fatal("must not reopen after content flowed")
+	}
+}
+
+// TestReloadToken 验证 unauthenticated 自愈：TokenSource 拿到非空且
+// 不同的新凭据才更新；同 token 或空值视为自愈失败。
+func TestReloadToken(t *testing.T) {
+	adapter := &Adapter{token: "old"}
+	adapter.config.TokenSource = func() string { return "old" }
+	if adapter.reloadToken() {
+		t.Fatal("same token must not count as reload")
+	}
+	adapter.config.TokenSource = func() string { return "" }
+	if adapter.reloadToken() {
+		t.Fatal("empty token must not count as reload")
+	}
+	adapter.config.TokenSource = func() string { return "new" }
+	if !adapter.reloadToken() || adapter.currentToken() != "new" {
+		t.Fatal("expected token reload to swap credentials")
 	}
 }

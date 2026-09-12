@@ -62,6 +62,68 @@ func TestStreamEncoderEmitsToolUse(t *testing.T) {
 	}
 }
 
+// TestStreamEncoderHoldsThinkingForLateSignature 的测试动机是上游实测帧序
+// thinking_end → toolcall_* → thinking_signature：thinking 块必须挂起等待
+// 隔块的尾随签名，签名到达时补发 signature_delta 再收尾。
+func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}, call},
+		StopReason: llm.StopReasonPending,
+	}
+	final := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}, call},
+		StopReason: llm.StopReasonToolUse,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+		{Type: llm.ResponseEventToolCallStart, ContentIndex: 1, ToolCallID: "call-1", ToolName: "lookup", Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 1, ToolCallID: "call-1", Delta: `{"city":"Shanghai"}`, Partial: partial},
+	})
+	// thinking 块挂起期间 tool_use 正常推进，此刻共 5 个事件且没有块收尾。
+	if len(encoded) != 5 {
+		t.Fatalf("events before signature = %d, want 5", len(encoded))
+	}
+	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}
+	encoded = append(encoded, encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
+		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 1, ToolCall: &call, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
+	})...)
+	names := make([]string, 0, len(encoded))
+	for _, event := range encoded {
+		names = append(names, event.Name)
+	}
+	want := []string{
+		"message_start", "content_block_start", "content_block_delta",
+		"content_block_start", "content_block_delta",
+		"content_block_delta", "content_block_stop",
+		"content_block_stop", "message_delta", "message_stop",
+	}
+	if len(names) != len(want) {
+		t.Fatalf("event names = %v, want %v", names, want)
+	}
+	for index, name := range want {
+		if names[index] != name {
+			t.Fatalf("event[%d] = %q, want %q (all: %v)", index, names[index], name, names)
+		}
+	}
+	signatureDelta := decodeEventData(t, encoded[5])
+	delta := signatureDelta["delta"].(map[string]any)
+	if delta["type"] != "signature_delta" || delta["signature"] != "sig" || signatureDelta["index"] != float64(0) {
+		t.Fatalf("signature delta = %#v", signatureDelta)
+	}
+	stopBlock := decodeEventData(t, encoded[6])
+	block := stopBlock["content_block"].(map[string]any)
+	if stopBlock["index"] != float64(0) || block["type"] != "thinking" || block["signature"] != "sig" {
+		t.Fatalf("thinking stop block = %#v", stopBlock)
+	}
+}
+
 // TestEncodeResponseFinal 验证非流式最终 JSON 结构和缓存用量字段。
 func TestEncodeResponseFinal(t *testing.T) {
 	final := &llm.AssistantMessage{

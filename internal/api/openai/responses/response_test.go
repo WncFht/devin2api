@@ -124,6 +124,86 @@ func TestStreamEncoderEncodesFinalTextMessage(t *testing.T) {
 	}
 }
 
+// TestStreamEncoderHoldsReasoningForLateSignature 的测试动机是上游实测帧序
+// thinking_end → toolcall_* → thinking_signature：reasoning item 必须挂起等待
+// 隔块的尾随签名，而不是提前关闭把签名撞成 already-closed 错误。
+func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}, call},
+		StopReason: llm.StopReasonPending,
+	}
+	final := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}, call},
+		StopReason: llm.StopReasonToolUse,
+	}
+	events := []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+		{Type: llm.ResponseEventToolCallStart, ContentIndex: 1, ToolCallID: "call-1", ToolName: "lookup", Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 1, ToolCallID: "call-1", Delta: `{"city":"Shanghai"}`, Partial: partial},
+	}
+	encoded := encodeStreamEvents(t, encoder, events)
+	// 签名帧到达时 Partial 中的思考块已带上签名（与解码器共享指针语义一致）。
+	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}
+	late := []llm.ResponseEvent{
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
+		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 1, ToolCall: &call, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
+	}
+	encoded = append(encoded, encodeStreamEvents(t, encoder, late)...)
+	assertEventNames(t, encoded, []string{
+		"response.created", "response.in_progress",
+		"response.output_item.added", "response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.output_item.added", "response.function_call_arguments.delta",
+		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
+		"response.output_item.done",
+		"response.function_call_arguments.done", "response.output_item.done",
+		"response.completed",
+	})
+	assertSequenceNumbers(t, encoded)
+	reasoningDone := decodeEventData(t, encoded[9])
+	if got := nestedString(t, reasoningDone, "item", "encrypted_content"); got != "sig" {
+		t.Fatalf("reasoning encrypted_content = %q, want sig", got)
+	}
+	completed := decodeEventData(t, encoded[len(encoded)-1])
+	output := completed["response"].(map[string]any)["output"].([]any)
+	if got := output[0].(map[string]any)["encrypted_content"]; got != "sig" {
+		t.Fatalf("completed reasoning output = %#v", output[0])
+	}
+}
+
+// TestStreamEncoderEncodesSignatureOnlyReasoning 的测试动机是 openai 体制上游
+// 可能只发签名没有思考正文：解码器合成 thinking_start/end 后，reasoning item
+// 必须正常关闭且签名不翻倍。
+func TestStreamEncoderEncodesSignatureOnlyReasoning(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	thinking := llm.ThinkingContent{ThinkingSignature: "sig"}
+	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonStop}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	assertEventNames(t, encoded, []string{
+		"response.created", "response.in_progress",
+		"response.output_item.added", "response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
+		"response.output_item.done", "response.completed",
+	})
+	completed := decodeEventData(t, encoded[len(encoded)-1])
+	output := completed["response"].(map[string]any)["output"].([]any)
+	if got := output[0].(map[string]any)["encrypted_content"]; got != "sig" {
+		t.Fatalf("signature-only reasoning encrypted_content = %v, want sig", got)
+	}
+}
+
 // TestStreamEncoderRejectsUnknownEvent 的测试动机是避免未知核心事件被静默丢弃并产生不完整 SSE。
 func TestStreamEncoderRejectsUnknownEvent(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test")
@@ -232,4 +312,77 @@ func nestedString(t *testing.T, value map[string]any, parent string, field strin
 		t.Fatalf("%s.%s = %#v, want string", parent, field, nested[field])
 	}
 	return result
+}
+
+// TestStreamEncoderOpenAISignatureRestoresItemID 验证 openai 型签名
+// （序列化 reasoning item 数组）下行时 item id 还原为内层真实 rs_*，
+// encrypted_content 携带签名原文 blob 供下一轮回放识别。
+func TestStreamEncoderOpenAISignatureRestoresItemID(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	blob := `[{"id":"rs_real1","type":"reasoning","encrypted_content":"gAAA","summary":[],"content":[],"status":""}]`
+	thinking := llm.ThinkingContent{ThinkingSignature: blob, SignatureType: "openai", Redacted: true}
+	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonStop}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	added := decodeEventData(t, encoded[2])
+	if got := nestedString(t, added, "item", "id"); got != "rs_real1" {
+		t.Fatalf("reasoning item id = %q, want rs_real1", got)
+	}
+	if got := nestedString(t, added, "item", "encrypted_content"); got != blob {
+		t.Fatalf("encrypted_content = %q, want raw signature blob", got)
+	}
+}
+
+// TestStreamEncoderMessageItemUsesOutputID 验证上游 output_id（msg_*）
+// 直接作为 message item id 下发，与上游记录对齐。
+func TestStreamEncoderMessageItemUsesOutputID(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	partial := &llm.AssistantMessage{OutputID: "msg_up1", Content: []llm.Content{llm.TextContent{}}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{OutputID: "msg_up1", Content: []llm.Content{llm.TextContent{Text: "hi"}}, StopReason: llm.StopReasonStop}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventTextStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventTextDelta, ContentIndex: 0, Delta: "hi", Partial: partial},
+		{Type: llm.ResponseEventTextEnd, ContentIndex: 0, Content: "hi", Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	added := decodeEventData(t, encoded[2])
+	if got := nestedString(t, added, "item", "id"); got != "msg_up1" {
+		t.Fatalf("message item id = %q, want msg_up1", got)
+	}
+}
+
+// TestStreamEncoderCustomToolCall 验证 Custom 调用按 custom_tool_call item
+// 下发：input 字段携带非 JSON 原文而非 arguments。
+func TestStreamEncoderCustomToolCall(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	call := llm.ToolCall{ID: "c1", Name: "apply_patch", Arguments: json.RawMessage("*** Begin Patch"), Custom: true}
+	partial := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonToolUse}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventToolCallStart, ContentIndex: 0, ToolCallID: "c1", ToolName: "apply_patch", Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 0, ToolCallID: "c1", Delta: "*** Begin Patch", Partial: partial},
+		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 0, ToolCall: &call, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
+	})
+	added := decodeEventData(t, encoded[2])
+	if got := nestedString(t, added, "item", "type"); got != "custom_tool_call" {
+		t.Fatalf("item type = %q, want custom_tool_call", got)
+	}
+	if name := decodeEventData(t, encoded[3])["type"]; name != "response.custom_tool_call_input.delta" {
+		t.Fatalf("delta event = %v, want response.custom_tool_call_input.delta", name)
+	}
+	done := decodeEventData(t, encoded[5])
+	if got := nestedString(t, done, "item", "input"); got != "*** Begin Patch" {
+		t.Fatalf("custom input = %q", got)
+	}
+	if _, hasArguments := done["item"].(map[string]any)["arguments"]; hasArguments {
+		t.Fatal("custom_tool_call must not carry arguments field")
+	}
 }
