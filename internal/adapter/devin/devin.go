@@ -295,6 +295,14 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	}
 	a.modelsMu.RUnlock()
 
+	// 写锁内复查后再拉取：TTL 过期瞬间的并发 miss 收敛为单次上游调用，
+	// 等待者拿到同一个结果而不是各自打一遍 GetCliModelConfigs。
+	a.modelsMu.Lock()
+	defer a.modelsMu.Unlock()
+	if a.models != nil && time.Now().Before(a.modelsExpiry) {
+		return a.models, nil
+	}
+
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{
 			ApiKey:           proto.String(a.config.Token),
@@ -366,12 +374,6 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		}
 	}
 
-	a.modelsMu.Lock()
-	defer a.modelsMu.Unlock()
-	// 请求期间可能有其他请求已写入缓存，避免覆盖更热的数据。
-	if a.models != nil && time.Now().Before(a.modelsExpiry) {
-		return a.models, nil
-	}
 	a.models = models
 	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
 	return models, nil

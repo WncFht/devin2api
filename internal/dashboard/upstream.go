@@ -285,6 +285,13 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 	}
 	h.cacheMu.RUnlock()
 
+	// 写锁内复查后再拉取：TTL 过期瞬间的并发 miss 收敛为单次上游调用。
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
+		return h.modelsCache, nil
+	}
+
 	// CLI 版响应与 Cascade 版模型表一致，并多出 subagent_default_model_uid 等字段。
 	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: buildMetadata(h.token),
@@ -410,12 +417,6 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 		models = append(models, m)
 	}
 
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
-	// 请求期间可能有其他 goroutine 已写入缓存，不覆盖更热数据。
-	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
-		return h.modelsCache, nil
-	}
 	h.modelsCache = models
 	h.modelsExpiry = time.Now().Add(h.cacheTTL)
 	return models, nil
@@ -444,6 +445,12 @@ func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
 	}
 	h.cacheMu.RUnlock()
 
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
+		return h.providersCache
+	}
+
 	providerResp, err := h.apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
 	if err != nil {
 		return nil
@@ -456,11 +463,6 @@ func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
 		})
 	}
 
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
-	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
-		return h.providersCache
-	}
 	h.providersCache = providers
 	h.providersExpiry = time.Now().Add(h.cacheTTL)
 	return providers
@@ -474,6 +476,12 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 		return cached
 	}
 	h.cacheMu.RUnlock()
+
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
+		return h.modelStatusesCache
+	}
 
 	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
 		Metadata: buildMetadata(h.token),
@@ -489,11 +497,6 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 		})
 	}
 
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
-	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
-		return h.modelStatusesCache
-	}
 	h.modelStatusesCache = statuses
 	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
 	return statuses
