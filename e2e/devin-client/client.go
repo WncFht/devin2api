@@ -1,4 +1,8 @@
-package example
+// Package devinclient 是 outputs/devin-proto-go 生成绑定的最小使用样例：
+// 绕开内部 llm 抽象直接构造 Connect 请求、消费服务端流。
+// 无生产调用方——它的价值是让 go build ./... 顺带验证生成产物可用，
+// 以及给手动联调上游时提供一个复制起点。
+package devinclient
 
 import (
 	"context"
@@ -10,6 +14,7 @@ import (
 	"local/devinproto/devinprotoconnect"
 )
 
+// NewChatRequest 构造一个带单个只读工具的 GetChatMessage 请求。
 func NewChatRequest(prompt string) *connect.Request[devinproto.GetChatMessageRequest] {
 	return connect.NewRequest(&devinproto.GetChatMessageRequest{
 		Prompt: proto.String(prompt),
@@ -22,6 +27,7 @@ func NewChatRequest(prompt string) *connect.Request[devinproto.GetChatMessageReq
 	})
 }
 
+// StreamChat 发出请求并收集整条流的响应帧。
 func StreamChat(ctx context.Context, baseURL, prompt string) ([]*devinproto.GetChatMessageResponse, error) {
 	client := devinprotoconnect.NewApiServerServiceClient(http.DefaultClient, baseURL)
 	stream, err := client.GetChatMessage(ctx, NewChatRequest(prompt))
