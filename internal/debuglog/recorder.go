@@ -428,10 +428,16 @@ func (recorder *Recorder) enqueue(task writeTask) {
 }
 
 // runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
-// tasks 关闭后排空残余任务，统一刷盘并关闭所有 JSONL 文件。
+// 队列排空时把缓冲刷盘（进行中的请求目录对面板也应实时可读，不能只等
+// Complete）；tasks 关闭后排空残余任务，统一刷盘并关闭所有 JSONL 文件。
 func (recorder *Recorder) runWriter() {
 	for task := range recorder.tasks {
 		task()
+		// len(channel) 的竞态无碍：多看一个任务只是少刷一次，
+		// 关闭前的统一 flush 仍兜底。
+		if len(recorder.tasks) == 0 {
+			recorder.flushJSONL()
+		}
 	}
 	for _, f := range recorder.jsonlFiles {
 		_ = f.writer.Flush()
@@ -439,6 +445,13 @@ func (recorder *Recorder) runWriter() {
 	}
 	recorder.jsonlFiles = nil
 	close(recorder.writerDone)
+}
+
+// flushJSONL 把已打开 JSONL 文件的缓冲写落盘；仅写协程调用。
+func (recorder *Recorder) flushJSONL() {
+	for _, f := range recorder.jsonlFiles {
+		_ = f.writer.Flush()
+	}
 }
 
 // NoteUpstreamLatency 记录首个上游事件到达的相对毫秒数（幂等，只记第一次）。
