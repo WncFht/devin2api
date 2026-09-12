@@ -139,6 +139,45 @@ func TestDecodeRequestRetainsRawSchema(t *testing.T) {
 	}
 }
 
+// TestDecodeRequestCustomToolDeclaration 验证 type:"custom" 工具被包装成
+// 单 input 参数的 function 声明并带 Custom 标记；format.definition 是模型
+// 可见的唯一语法规范，随 description 注入；未知工具类型记 Dropped。
+func TestDecodeRequestCustomToolDeclaration(t *testing.T) {
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","tools":[
+		{"type":"custom","name":"apply_patch","description":"Patch files","format":{"syntax":"lark","definition":"patch_grammar"}},
+		{"type":"custom","name":"no_grammar"},
+		{"type":"mystery","name":"dropped_tool"}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Tools) != 2 {
+		t.Fatalf("tools = %#v, want 2 decoded", request.Context.Tools)
+	}
+	tool := request.Context.Tools[0]
+	if !tool.Custom || tool.Name != "apply_patch" {
+		t.Fatalf("tool = %#v, want custom apply_patch", tool)
+	}
+	if string(tool.InputSchema) != string(customToolInputSchema) {
+		t.Fatalf("wrapped schema = %s, want %s", tool.InputSchema, customToolInputSchema)
+	}
+	if tool.Description != "Patch files\n\nInput grammar (lark):\npatch_grammar" {
+		t.Fatalf("description = %q, want grammar appended", tool.Description)
+	}
+	if plain := request.Context.Tools[1]; plain.Description != "" {
+		t.Fatalf("no-format custom tool description = %q, want empty", plain.Description)
+	}
+	found := false
+	for _, d := range request.Context.Dropped {
+		if d == "tool:mystery" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dropped = %#v, want tool:mystery", request.Context.Dropped)
+	}
+}
+
 // TestDecodeRequestAcceptsMessageWithoutType 的测试动机是覆盖 OpenAI 官方示例和 SDK 发送的 role 加 content 简写。
 func TestDecodeRequestAcceptsMessageWithoutType(t *testing.T) {
 	data := []byte(`{

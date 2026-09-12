@@ -222,7 +222,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	return &responseStream{
 		frames:   pumpUpstream(streamCtx, stream),
 		cancel:   cancel,
-		decoder:  newResponseDecoder(model, request.StopSequences),
+		decoder:  newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools)),
 		recorder: recorder,
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
@@ -258,7 +258,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
 		},
 		newDecoder: func() *responseDecoder {
-			return newResponseDecoder(model, request.StopSequences)
+			return newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
 		},
 	}, nil
 }

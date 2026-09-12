@@ -57,17 +57,28 @@ var responsesRequestFields = map[string]bool{
 	"tool_choice": true, "parallel_tool_calls": true,
 }
 
-// Tool 是 OpenAI Responses function 工具定义。
+// Tool 是 OpenAI Responses 工具定义；type 支持 function 与 custom（freeform）。
 type Tool struct {
-	// Type 固定为 function。
+	// Type 是工具类型：function 或 custom。
 	Type string `json:"type"`
 	// Name 是工具名称。
 	Name string `json:"name"`
 	// Description 是工具用途说明。
 	Description string `json:"description,omitempty"`
-	// Parameters 是工具输入 JSON Schema。
+	// Parameters 是 function 工具输入 JSON Schema；custom 工具没有该字段。
 	Parameters json.RawMessage `json:"parameters"`
+	// Format 是 custom 工具的输入语法声明（如 apply_patch 的 lark grammar），
+	// 是模型能看到的唯一格式规范，随说明一并注入。
+	Format *struct {
+		Syntax     string `json:"syntax"`
+		Definition string `json:"definition"`
+	} `json:"format,omitempty"`
 }
+
+// customToolInputSchema 把 freeform 工具包装成上游接受的 function 形态：
+// 上游 is_custom_tool 声明通道实测确定性 unknown，改为声明单字符串参数的
+// function，模型将原文填入 input（实测 apply_patch 补丁按此下发）。
+var customToolInputSchema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
 
 // AdaptedRequest 是 OpenAI 请求转换后的中间请求和生成选项。
 type AdaptedRequest struct {
@@ -123,19 +134,31 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
-		if tool.Type != "function" {
+		switch tool.Type {
+		case "function":
+			schema := tool.Parameters
+			if len(schema) == 0 {
+				schema = json.RawMessage(`{"type":"object"}`)
+			}
+			context.Tools = append(context.Tools, llm.ToolDefinition{
+				Name:        tool.Name,
+				Description: tool.Description,
+				InputSchema: schema,
+			})
+		case "custom":
+			description := tool.Description
+			if tool.Format != nil && tool.Format.Definition != "" {
+				description += "\n\nInput grammar (" + tool.Format.Syntax + "):\n" + tool.Format.Definition
+			}
+			context.Tools = append(context.Tools, llm.ToolDefinition{
+				Name:        tool.Name,
+				Description: description,
+				InputSchema: customToolInputSchema,
+				Custom:      true,
+			})
+		default:
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
-			continue
 		}
-		schema := tool.Parameters
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object"}`)
-		}
-		context.Tools = append(context.Tools, llm.ToolDefinition{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: schema,
-		})
 	}
 	if err := context.Validate(); err != nil {
 		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)

@@ -322,6 +322,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	topP := fs.Float64("top-p", -1, "configuration.top_p (<0 = keep default 0.95)")
 	topK := fs.Int("top-k", -1, "configuration.top_k (<0 = keep default 40)")
 	trajectoryID := fs.String("trajectory-id", "", "explicit trajectory_id (share across calls for session continuation)")
+	stepIndex := fs.Int("step-index", -1, "trajectoryReference.step_index (session-monotonic counter, real CLI sends it)")
 	images := fs.Int("images", 0, "")
 	internalModel := fs.Int("internal-model", 0, "")
 	assignJWT := fs.String("assign-jwt", "", "model_assignment_jwt")
@@ -429,6 +430,9 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			TrajectoryId:   proto.String(trajID),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
+		}
+		if *stepIndex >= 0 {
+			req.TrajectoryReference.StepIndex = proto.Int32(int32(*stepIndex))
 		}
 	}
 	msg := &devinproto.ExaChatPb_ChatMessagePrompt{

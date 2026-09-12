@@ -273,6 +273,11 @@ type ToolDefinition struct {
 	Description string
 	// InputSchema 是描述工具输入对象的 JSON Schema。
 	InputSchema json.RawMessage
+	// Custom 表示客户端按 freeform/custom 语义声明的工具（Codex apply_patch）：
+	// 参数体是原文而非 JSON。上游 is_custom_tool 声明通道实测确定性 unknown，
+	// 这类工具在 wire 上包装成单字符串参数的 function 声明（InputSchema 即
+	// 包装 schema），响应侧按此标记把 {"input":"<原文>"} 解包回原文。
+	Custom bool
 }
 
 // toolNameCharset 是上游实测接受的工具名字符集（a.b、mcp::x、中文名

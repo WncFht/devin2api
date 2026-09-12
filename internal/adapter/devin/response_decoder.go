@@ -63,6 +63,9 @@ type responseDecoder struct {
 	providerLogged bool
 	// providerRefusal 表示上游声明 provider 拒绝了本次请求（usage.provider_refusal）。
 	providerRefusal bool
+	// customTools 是本次请求按 freeform/custom 语义声明的工具名集合；
+	// 这些工具在 wire 上是单参数 function 包装形态，响应要解包回原文。
+	customTools map[string]bool
 }
 
 // toolState 保存一次 Devin 工具调用的累计状态。
@@ -75,9 +78,12 @@ type toolState struct {
 	arguments strings.Builder
 	// emitted 表示原始工具调用已经加入 partial 并产生 start 事件。
 	emitted bool
+	// wrapped 表示该调用是 custom 声明工具的 function 包装形态：参数片段
+	// 是 {"input":"<原文>"} 的 JSON 包装，不是给客户端的参数体本身。
+	wrapped bool
 }
 
-func newResponseDecoder(model string, stopPatterns []string) *responseDecoder {
+func newResponseDecoder(model string, stopPatterns []string, customTools map[string]bool) *responseDecoder {
 	patterns := make([]string, 0, len(stopPatterns))
 	maxLen := 0
 	for _, pattern := range stopPatterns {
@@ -89,7 +95,22 @@ func newResponseDecoder(model string, stopPatterns []string) *responseDecoder {
 			maxLen = len(pattern)
 		}
 	}
-	return &responseDecoder{model: model, stopPatterns: patterns, maxPatternLen: maxLen}
+	return &responseDecoder{model: model, stopPatterns: patterns, maxPatternLen: maxLen, customTools: customTools}
+}
+
+// customToolNames 返回请求里按 freeform/custom 语义声明的工具名集合，
+// 供解码器识别包装 function 调用并解包回原文。
+func customToolNames(tools []llm.ToolDefinition) map[string]bool {
+	var names map[string]bool
+	for _, tool := range tools {
+		if tool.Custom {
+			if names == nil {
+				names = make(map[string]bool)
+			}
+			names[tool.Name] = true
+		}
+	}
+	return names
 }
 
 func (decoder *responseDecoder) start() []llm.ResponseEvent {
@@ -343,6 +364,12 @@ func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *de
 	}
 	if delta.GetName() != "" {
 		state.call.Name = delta.GetName()
+		if decoder.customTools[delta.GetName()] {
+			// custom 声明工具的 wire 形态是包装 function：按 custom_tool_call
+			// 语义标记，参数片段在 complete 统一解包。
+			state.call.Custom = true
+			state.wrapped = true
+		}
 	}
 	if delta.GetIsCustomToolCall() {
 		state.call.Custom = true
@@ -374,7 +401,9 @@ func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, sta
 		})
 	}
 	// 工具参数在 complete 中一次性解析并写入，避免每帧 O(n) 拷贝/校验。
-	if hasFragment {
+	// wrapped 调用的片段是 JSON 包装碎片而非参数原文，不下发增量——
+	// 解包后的完整 input 在 complete 以单条 delta 补发。
+	if hasFragment && !state.wrapped {
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
 			ToolCallID: state.call.ID, Delta: fragment, Partial: &decoder.partial,
@@ -481,7 +510,17 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 		}
 		// 在结束时一次性把 Builder 中的完整参数转成 JSON，避免中间反复解析/拷贝。
 		state.call.Arguments = json.RawMessage(state.arguments.String())
-		if state.call.Custom {
+		if state.wrapped {
+			// custom 声明工具的包装参数体：解出 input 原文下发；
+			// 模型偏离包装 schema 时（裸文本/多键）整体按 freeform 原文透传。
+			state.call.Custom = true
+			state.call.Arguments = unwrapCustomToolArguments(state.arguments.String())
+			// 补发单条完整 delta，让按增量累计输入的下游状态收敛到一致。
+			events = append(events, llm.ResponseEvent{
+				Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
+				ToolCallID: state.call.ID, Delta: string(state.call.Arguments), Partial: &decoder.partial,
+			})
+		} else if state.call.Custom {
 			// 原文即参数体（invalid_json_str 通道或客户端回灌的畸形 JSON），
 			// 不走 JSON 校验与 XML 修复。
 		} else if !isJSONObject(state.call.Arguments) {
@@ -537,6 +576,22 @@ func mapStopReason(reason devinproto.ExaCodeiumCommonPb_StopReason) llm.StopReas
 	default:
 		return llm.StopReasonStop
 	}
+}
+
+// unwrapCustomToolArguments 解出包装 schema {"input":"<原文>"} 中的原文；
+// 模型偏离包装（裸文本或 input 非字符串）时按 freeform 语义整体透传。
+func unwrapCustomToolArguments(raw string) json.RawMessage {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &object); err != nil {
+		return json.RawMessage(raw)
+	}
+	if input, ok := object["input"]; ok {
+		var text string
+		if err := json.Unmarshal(input, &text); err == nil {
+			return json.RawMessage(text)
+		}
+	}
+	return json.RawMessage(raw)
 }
 
 // leakedXMLParameterPattern 匹配泄漏进 arguments_json 的 XML 参数片段（CLI 实测格式）。

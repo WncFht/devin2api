@@ -134,7 +134,7 @@ func BenchmarkRecvDeltaStream(b *testing.B) {
 		stream := &responseStream{
 			frames:   pumpUpstream(context.Background(), receiver),
 			cancel:   func() {},
-			decoder:  newResponseDecoder("m", nil),
+			decoder:  newResponseDecoder("m", nil, nil),
 			recorder: nil,
 		}
 		for {
