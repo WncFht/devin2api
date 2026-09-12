@@ -197,6 +197,9 @@ func TestDecodeRequestAttachesReasoningSummary(t *testing.T) {
 	if !ok || thinking.Thinking != "需要调用 read_file" {
 		t.Fatalf("function_call content[0] = %#v, want ThinkingContent", call.Content[0])
 	}
+	if thinking.ThinkingSignature != "sealed.v1.xyz" {
+		t.Fatalf("thinking signature = %q, want sealed.v1.xyz replay", thinking.ThinkingSignature)
+	}
 	if _, ok := call.Content[1].(llm.ToolCall); !ok {
 		t.Fatalf("function_call content[1] = %#v, want ToolCall", call.Content[1])
 	}

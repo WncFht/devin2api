@@ -147,6 +147,40 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	}
 }
 
+// TestBuildRequestAggregatesThinkingBlocks 验证一条 assistant 消息的多个
+// thinking 块按序拼接、签名取最后非空；纯 redacted 块（无可见文本）也生成
+// wire 上的签名回放。
+func TestBuildRequestAggregatesThinkingBlocks(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ThinkingContent{Thinking: "part-1", ThinkingSignature: "sig-1"},
+				llm.ThinkingContent{Thinking: "part-2", ThinkingSignature: "sig-2"},
+				llm.TextContent{Text: "answer"},
+			}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "again"}}},
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ThinkingContent{ThinkingSignature: "sealed-x", Redacted: true},
+				llm.ToolCall{ID: "call-1", Name: "exec", Arguments: json.RawMessage(`{}`)},
+			}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	textMsg := prompts[1]
+	if textMsg.GetThinking() != "part-1\npart-2" || textMsg.GetSignature() != "sig-2" {
+		t.Fatalf("multi-block thinking prompt = %#v", textMsg)
+	}
+	redactedCall := prompts[3]
+	if !redactedCall.GetThinkingRedacted() || redactedCall.GetSignature() != "sealed-x" || redactedCall.GetThinking() != "" {
+		t.Fatalf("redacted-only prompt = %#v", redactedCall)
+	}
+}
+
 // TestValidateImagesForModelRejectsGLM 验证无视觉模型带图时返回可读错误（透传给客户端）。
 func TestValidateImagesForModelRejectsGLM(t *testing.T) {
 	request := llm.RequestMessages{
@@ -540,7 +574,7 @@ func TestMapStopReason(t *testing.T) {
 // TestRecordProtoJSONRedactsMetadata 的测试动机是确保 Devin 原始请求可诊断但不会写出 token 和设备指纹。
 func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	recorder := debuglog.NewManager(root, 0, 0).Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
+	recorder := debuglog.NewManager(root, debuglog.RetentionPolicy{}).Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
 	request := &devinproto.GetChatMessageRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{ApiKey: proto.String("secret-token"), F: proto.String("fingerprint")},
 		Prompt:   proto.String("hello"),

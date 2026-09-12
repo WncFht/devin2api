@@ -91,6 +91,38 @@ func TestDecodeRequestPreservesMidConversationSystem(t *testing.T) {
 	}
 }
 
+// TestDecodeRequestReplaysThinkingSignature 验证 thinking 块正文读自
+// thinking 字段（而非 text）、签名保留，redacted_thinking 的 data 透传为
+// 可回放签名。
+func TestDecodeRequestReplaysThinkingSignature(t *testing.T) {
+	data := []byte(`{
+  "model": "claude-test",
+  "messages": [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "先想清楚再答", "signature": "sig-1"},
+      {"type": "redacted_thinking", "data": "sealed-data-2"},
+      {"type": "text", "text": "好的"}
+    ]},
+    {"role": "user", "content": "next"}
+  ],
+  "max_tokens": 256
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := request.Context.Messages[1].(llm.AssistantMessage)
+	first, ok := assistant.Content[0].(llm.ThinkingContent)
+	if !ok || first.Thinking != "先想清楚再答" || first.ThinkingSignature != "sig-1" {
+		t.Fatalf("content[0] = %#v, want thinking+signature", assistant.Content[0])
+	}
+	second, ok := assistant.Content[1].(llm.ThinkingContent)
+	if !ok || !second.Redacted || second.ThinkingSignature != "sealed-data-2" {
+		t.Fatalf("content[1] = %#v, want redacted thinking with data as signature", assistant.Content[1])
+	}
+}
+
 // TestDecodeRequestAcceptsStringContent 验证简短字符串输入会转换为用户文字消息。
 func TestDecodeRequestAcceptsStringContent(t *testing.T) {
 	request, err := DecodeRequest([]byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":256}`))
