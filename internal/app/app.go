@@ -649,7 +649,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 	response := map[string]any{"error": map[string]any{
 		"message": message,
 		"type":    errorType,
-		"code":    nil,
+		"code":    common.ErrorCode(message),
 		"param":   nil,
 	}}
 	_ = json.NewEncoder(writer).Encode(response)

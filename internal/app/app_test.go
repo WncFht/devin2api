@@ -445,8 +445,11 @@ func TestStreamImmediateErrorReturnsHTTPStatus(t *testing.T) {
 	}
 }
 
-// TestStreamPromptTooLongReturns413 的测试动机是上下文超长必须让网关识别为
-// 客户端问题（不冷却）：413 配上 body 里的 context_length_exceeded code。
+// TestStreamPromptTooLongReturns413 的测试动机是上下文超长必须以真实 HTTP
+// 状态返回：实测经网关（ccload）时 SSE 错误事件只被用于分类、不会转发给
+// 客户端，走事件会让 Codex 误判为断流重试；HTTP 413 + body 里的
+// context_length_exceeded code 让网关归为客户端错误（不冷却渠道），
+// 客户端拿到的是干净的失败而非截断的流。
 func TestStreamPromptTooLongReturns413(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{
 		Type:   llm.ResponseEventError,
@@ -459,6 +462,9 @@ func TestStreamPromptTooLongReturns413(t *testing.T) {
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"context_length_exceeded"`) {
+		t.Fatalf("error body missing context_length_exceeded code: %s", response.Body.String())
 	}
 }
 
