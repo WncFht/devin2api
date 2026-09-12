@@ -14,11 +14,8 @@ import (
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
-// SSEEvent 是单个 Anthropic SSE 事件。
-type SSEEvent struct {
-	Name string
-	Data []byte
-}
+// SSEEvent 别名共用的事件类型，保留包内引用的可读性。
+type SSEEvent = common.SSEEvent
 
 // StreamEncoder 保存一次 Anthropic Messages 流的协议状态。
 type StreamEncoder struct {

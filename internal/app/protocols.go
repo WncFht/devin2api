@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/WncFht/devin2api/internal/api/anthropic/messages"
+	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/api/openai/chat"
 	"github.com/WncFht/devin2api/internal/api/openai/responses"
 	"github.com/WncFht/devin2api/internal/llm"
@@ -22,12 +23,7 @@ type protocolEncoder interface {
 
 // streamEncoder 抽象三种协议共有的中间事件编码。
 type streamEncoder interface {
-	Encode(event llm.ResponseEvent) ([]eventWire, error)
-}
-
-type eventWire struct {
-	Name string
-	Data []byte
+	Encode(event llm.ResponseEvent) ([]common.SSEEvent, error)
 }
 
 // protocolOptions 保存三个协议都需要的生成控制选项。
@@ -40,7 +36,7 @@ type protocolOptions struct {
 type responsesProtocol struct{}
 
 func (p responsesProtocol) NewStreamEncoder(model string, _ bool) streamEncoder {
-	return &responsesStreamAdapter{responses.NewStreamEncoder(model)}
+	return responses.NewStreamEncoder(model)
 }
 
 func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
@@ -55,7 +51,7 @@ func (p responsesProtocol) SSEFormat(name string, data []byte) []byte {
 type chatProtocol struct{}
 
 func (p chatProtocol) NewStreamEncoder(model string, includeUsage bool) streamEncoder {
-	return &chatStreamAdapter{chat.NewStreamEncoder(model, includeUsage)}
+	return chat.NewStreamEncoder(model, includeUsage)
 }
 
 func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
@@ -74,7 +70,7 @@ func (p chatProtocol) SSEFormat(name string, data []byte) []byte {
 type anthropicProtocol struct{}
 
 func (p anthropicProtocol) NewStreamEncoder(model string, _ bool) streamEncoder {
-	return &anthropicStreamAdapter{messages.NewStreamEncoder(model)}
+	return messages.NewStreamEncoder(model)
 }
 
 func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
@@ -83,48 +79,6 @@ func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, e
 
 func (p anthropicProtocol) SSEFormat(name string, data []byte) []byte {
 	return fmt.Appendf(nil, "event: %s\ndata: %s\n\n", name, data)
-}
-
-type responsesStreamAdapter struct{ encoder *responses.StreamEncoder }
-
-func (a *responsesStreamAdapter) Encode(event llm.ResponseEvent) ([]eventWire, error) {
-	raw, err := a.encoder.Encode(event)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]eventWire, 0, len(raw))
-	for _, e := range raw {
-		out = append(out, eventWire{Name: e.Name, Data: e.Data})
-	}
-	return out, nil
-}
-
-type chatStreamAdapter struct{ encoder *chat.StreamEncoder }
-
-func (a *chatStreamAdapter) Encode(event llm.ResponseEvent) ([]eventWire, error) {
-	raw, err := a.encoder.Encode(event)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]eventWire, 0, len(raw))
-	for _, e := range raw {
-		out = append(out, eventWire{Name: e.Name, Data: e.Data})
-	}
-	return out, nil
-}
-
-type anthropicStreamAdapter struct{ encoder *messages.StreamEncoder }
-
-func (a *anthropicStreamAdapter) Encode(event llm.ResponseEvent) ([]eventWire, error) {
-	raw, err := a.encoder.Encode(event)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]eventWire, 0, len(raw))
-	for _, e := range raw {
-		out = append(out, eventWire{Name: e.Name, Data: e.Data})
-	}
-	return out, nil
 }
 
 // decodeRequest 把具体协议的解码结果统一为中间请求和公共选项。

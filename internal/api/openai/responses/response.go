@@ -13,13 +13,8 @@ import (
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
-// SSEEvent 是 OpenAI Responses typed SSE 的单个事件。
-type SSEEvent struct {
-	// Name 是 SSE event 字段值。
-	Name string
-	// Data 是 JSON 编码的 SSE data 内容。
-	Data []byte
-}
+// SSEEvent 别名共用的事件类型，保留包内引用的可读性。
+type SSEEvent = common.SSEEvent
 
 // StreamEncoder 保存一次 HTTP Responses 流的协议状态和完整 output items。
 type StreamEncoder struct {
