@@ -11,10 +11,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/gorilla/websocket"
 )
@@ -217,18 +215,4 @@ func (application *App) createResponsesWebSocket(writer http.ResponseWriter, req
 		return
 	}
 	application.responsesWebSocket(writer, request)
-}
-
-// isWebSocketRequest 判断请求是否为 OpenAI Responses WebSocket upgrade。
-// 同时检查 Upgrade 头和 Sec-WebSocket-Protocol（OpenAI WebSocket 可能带此协议头）。
-func isWebSocketRequest(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
-}
-
-// ensureAssistantMessage 保证最终消息不为空；辅助处理 codex 的 SSE 转换。
-func ensureAssistantMessage(message *llm.AssistantMessage, fallback *llm.AssistantMessage) *llm.AssistantMessage {
-	if message != nil {
-		return message
-	}
-	return fallback
 }

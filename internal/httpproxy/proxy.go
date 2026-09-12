@@ -2,10 +2,8 @@
 package httpproxy
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,42 +40,17 @@ func NewTransport(proxyURL string, forceHTTP1 bool) (*http.Transport, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
 		}
-		// 优先使用 DialContext，保证 HTTP/2、连接复用与 context 取消可传播。
-		if cd, ok := dialer.(proxy.ContextDialer); ok {
-			base.DialContext = cd.DialContext
-		} else {
-			base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialContext(ctx, dialer, network, addr)
-			}
+		// FromURL 产出的 socks.Dialer 必实现 ContextDialer；断言失败说明
+		// 依赖行为变化，显式报错而不是回落到会泄漏协程的包装器。
+		cd, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("SOCKS5 dialer %T does not implement ContextDialer", dialer)
 		}
+		base.DialContext = cd.DialContext
 		return base, nil
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q (use http, https, socks5, or socks5h)", scheme)
 	}
-}
-
-// dialContext 将不支持 ContextDialer 的 Dialer 包装为可取消版本。
-func dialContext(ctx context.Context, dialer interface {
-	Dial(network, addr string) (net.Conn, error)
-}, network, addr string) (net.Conn, error) {
-	var (
-		conn net.Conn
-		err  error
-	)
-	done := make(chan struct{}, 1)
-	go func() {
-		conn, err = dialer.Dial(network, addr)
-		close(done)
-		if conn != nil && ctx.Err() != nil {
-			conn.Close()
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		err = ctx.Err()
-	case <-done:
-	}
-	return conn, err
 }
 
 func defaultTransport(forceHTTP1 bool) *http.Transport {

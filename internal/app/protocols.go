@@ -7,7 +7,6 @@ import (
 	"github.com/WncFht/devin2api/internal/api/anthropic/messages"
 	"github.com/WncFht/devin2api/internal/api/openai/chat"
 	"github.com/WncFht/devin2api/internal/api/openai/responses"
-	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -162,12 +161,4 @@ func decodeAnthropicRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: false,
 	}, nil
-}
-
-// logRequestMessages 把中间请求消息投影为 JSON 调试日志。
-func logRequestMessages(recorder *debuglog.Recorder, messages llm.RequestMessages) {
-	if recorder == nil {
-		return
-	}
-	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 }

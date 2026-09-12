@@ -43,9 +43,10 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-源码运行：
+源码运行（需先从仓库内的描述符生成 proto 绑定——clone 后一次性步骤，依赖 `protoc` + `protoc-gen-go` + `protoc-gen-connect-go` + `task`，版本见 `Taskfile.yml`）：
 
 ```bash
+task generate
 go run ./cmd/devin-2api -config config.yaml
 ```
 

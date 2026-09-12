@@ -41,8 +41,11 @@ const (
 	readHeaderTimeout = 60 * time.Second
 	// readTimeout 限制请求体读取总时长，防止慢速客户端长期占用连接。
 	readTimeout = 120 * time.Second
-	// writeTimeout 限制响应写入总时长；SSE 流可能较长，这里给足余量。
-	writeTimeout = 30 * time.Minute
+	// writeTimeout 是响应级绝对 deadline，会无差别砍断超过时长的正常 SSE
+	// 长流（长 thinking + 长输出可超过 30 分钟）。流的生命周期由应用层
+	// 更精确的机制管理：上游静默看门狗（120s）、SSE 保活、客户端 ctx 取消；
+	// 慢读客户端的背压挂起由并发槽上限兜底。故不设写超时。
+	writeTimeout = 0
 	// idleTimeout 是 keep-alive 连接两次请求之间的内部空闲策略。
 	idleTimeout = 360 * time.Second
 	// defaultMaxConcurrency 是默认同时处理的 /v1/* 请求数上限。
