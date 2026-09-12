@@ -231,12 +231,13 @@ func mergeWSInput(lastRequest, lastResponseOutput, appendInput json.RawMessage) 
 		}
 		for _, raw := range array {
 			raw = bytes.TrimSpace(raw)
-			if len(raw) == 0 || !json.Valid(raw) {
+			fields := wsParseItem(raw)
+			if fields == nil && !json.Valid(raw) {
 				return errors.New("websocket transcript contains invalid item JSON")
 			}
 			// 第一轮 dedupe：tool call 项按 call_id 保首个——重复 call 只留第一次出现。
-			if wsIsToolCallItem(raw) {
-				if callID := strings.TrimSpace(wsJSONString(raw, "call_id")); callID != "" {
+			if wsFieldsAreToolCall(fields) {
+				if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
 					if _, dup := seenCallIDs[callID]; dup {
 						continue
 					}
@@ -267,11 +268,14 @@ func mergeWSInput(lastRequest, lastResponseOutput, appendInput json.RawMessage) 
 // dedupeWSInputItems 第二轮去重：按 item id 默认保留最后出现（客户端可能
 // 在增量里修正已发项），但被某个 output 项 call_id 引用的 call 项不会被
 // 未引用项顶掉（保 function_call ↔ output 的配对相邻性）。
+// 每条 item 只解析一次成字段树，后续三轮扫描全部读树。
 func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
+	fieldsList := make([]map[string]json.RawMessage, len(items))
 	referencedCallIDs := make(map[string]struct{})
-	for _, raw := range items {
-		if wsIsToolCallOutputItem(raw) {
-			if callID := strings.TrimSpace(wsJSONString(raw, "call_id")); callID != "" {
+	for i, raw := range items {
+		fieldsList[i] = wsParseItem(raw)
+		if wsFieldsAreToolCallOutput(fieldsList[i]) {
+			if callID := strings.TrimSpace(wsRawString(fieldsList[i]["call_id"])); callID != "" {
 				referencedCallIDs[callID] = struct{}{}
 			}
 		}
@@ -279,19 +283,19 @@ func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
 	// 反向扫描决定每个 id 保留哪个下标：默认最后一个；更早但 call_id 被引用的
 	// 项优先级高于未被引用的重复项。
 	keepAt := make(map[string]int)
-	callIDReferenced := func(raw json.RawMessage) bool {
-		_, ok := referencedCallIDs[strings.TrimSpace(wsJSONString(raw, "call_id"))]
+	callIDReferenced := func(i int) bool {
+		_, ok := referencedCallIDs[strings.TrimSpace(wsRawString(fieldsList[i]["call_id"]))]
 		return ok
 	}
 	for i := len(items) - 1; i >= 0; i-- {
-		id := strings.TrimSpace(wsJSONString(items[i], "id"))
+		id := strings.TrimSpace(wsRawString(fieldsList[i]["id"]))
 		if id == "" {
 			continue
 		}
 		if existing, seen := keepAt[id]; seen {
 			// existing 是更靠后的重复项。若 existing 未被引用而当前项被引用，
 			// 改保留当前项（更早但配对着）。
-			if !callIDReferenced(items[existing]) && callIDReferenced(items[i]) {
+			if !callIDReferenced(existing) && callIDReferenced(i) {
 				keepAt[id] = i
 			}
 			continue
@@ -300,7 +304,7 @@ func dedupeWSInputItems(items []json.RawMessage) []json.RawMessage {
 	}
 	out := items[:0]
 	for i, raw := range items {
-		id := strings.TrimSpace(wsJSONString(raw, "id"))
+		id := strings.TrimSpace(wsRawString(fieldsList[i]["id"]))
 		if id != "" && keepAt[id] != i {
 			continue
 		}
@@ -322,6 +326,7 @@ func wsFinalizeRequest(payload json.RawMessage) (json.RawMessage, error) {
 
 // wsValidateToolCallPairing 拒绝「有 output 无 call」的 transcript——上游对
 // 这种形态硬报 invalid_argument，提前拦截以免把客户端坏请求算成上游故障。
+// call 只需出现在数组任意位置（不要求在 output 之前）。
 func wsValidateToolCallPairing(payload json.RawMessage) error {
 	input, has, isArray := wsJSONField(payload, "input")
 	if !has || !isArray {
@@ -332,21 +337,21 @@ func wsValidateToolCallPairing(payload json.RawMessage) error {
 		return nil
 	}
 	calls := make(map[string]struct{})
+	var outputs []string
 	for _, raw := range array {
-		if wsIsToolCallItem(raw) {
-			if callID := strings.TrimSpace(wsJSONString(raw, "call_id")); callID != "" {
+		fields := wsParseItem(raw)
+		switch {
+		case wsFieldsAreToolCall(fields):
+			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
 				calls[callID] = struct{}{}
+			}
+		case wsFieldsAreToolCallOutput(fields):
+			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
+				outputs = append(outputs, callID)
 			}
 		}
 	}
-	for _, raw := range array {
-		if !wsIsToolCallOutputItem(raw) {
-			continue
-		}
-		callID := strings.TrimSpace(wsJSONString(raw, "call_id"))
-		if callID == "" {
-			continue
-		}
+	for _, callID := range outputs {
 		if _, ok := calls[callID]; !ok {
 			return fmt.Errorf("websocket transcript has tool call output for unknown call_id %q", callID)
 		}
@@ -362,8 +367,9 @@ func wsInputSatisfiesToolCalls(input json.RawMessage, pending []string) bool {
 		return false
 	}
 	for _, raw := range array {
-		if wsIsToolCallOutputItem(raw) {
-			if callID := strings.TrimSpace(wsJSONString(raw, "call_id")); callID != "" {
+		fields := wsParseItem(raw)
+		if wsFieldsAreToolCallOutput(fields) {
+			if callID := strings.TrimSpace(wsRawString(fields["call_id"])); callID != "" {
 				outputs[callID] = struct{}{}
 			}
 		}
@@ -385,16 +391,16 @@ func wsInputContainsCompletedTranscript(input json.RawMessage) bool {
 		return false
 	}
 	for _, raw := range array {
-		itemType := strings.TrimSpace(wsJSONString(raw, "type"))
-		role := strings.TrimSpace(wsJSONString(raw, "role"))
-		switch itemType {
+		fields := wsParseItem(raw)
+		switch strings.TrimSpace(wsRawString(fields["type"])) {
 		case "compaction", "compaction_summary", "function_call", "custom_tool_call":
 			return true
 		}
+		role := strings.TrimSpace(wsRawString(fields["role"]))
 		if role == "assistant" {
 			return true
 		}
-		if role == "user" && strings.HasPrefix(wsMessageText(raw), wsCodexCompactionSummaryPrefix+"\n") {
+		if role == "user" && strings.HasPrefix(wsMessageText(fields), wsCodexCompactionSummaryPrefix+"\n") {
 			return true
 		}
 	}
@@ -406,8 +412,9 @@ func wsInputContainsCompletedTranscript(input json.RawMessage) bool {
 const wsCodexCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 
 // wsMessageText 提取 message 项的纯文本（content 为字符串或 input_text/text 块数组）。
-func wsMessageText(raw json.RawMessage) string {
-	content, has, _ := wsJSONField(raw, "content")
+// fields 是调用方已解析的 item 字段树。
+func wsMessageText(fields map[string]json.RawMessage) string {
+	content, has := fields["content"]
 	if !has {
 		return ""
 	}
@@ -440,10 +447,11 @@ func wsPendingToolCallIDs(output json.RawMessage) []string {
 	seen := make(map[string]struct{})
 	var callIDs []string
 	for _, raw := range array {
-		if !wsIsCompleteToolCall(raw) {
+		fields := wsParseItem(raw)
+		if !wsFieldsAreCompleteToolCall(fields) {
 			continue
 		}
-		callID := strings.TrimSpace(wsJSONString(raw, "call_id"))
+		callID := strings.TrimSpace(wsRawString(fields["call_id"]))
 		if callID == "" {
 			continue
 		}
@@ -456,33 +464,39 @@ func wsPendingToolCallIDs(output json.RawMessage) []string {
 	return callIDs
 }
 
-func wsIsToolCallItem(raw json.RawMessage) bool {
-	t := strings.TrimSpace(wsJSONString(raw, "type"))
+// wsParseItem 把一条 transcript item 解成顶层字段树；非 object JSON
+// （数组/标量/非法）返回 nil，调用方按「无字段」处理。
+func wsParseItem(raw json.RawMessage) map[string]json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	return fields
+}
+
+func wsFieldsAreToolCall(fields map[string]json.RawMessage) bool {
+	t := strings.TrimSpace(wsRawString(fields["type"]))
 	return t == "function_call" || t == "custom_tool_call"
 }
 
-func wsIsToolCallOutputItem(raw json.RawMessage) bool {
-	t := strings.TrimSpace(wsJSONString(raw, "type"))
+func wsFieldsAreToolCallOutput(fields map[string]json.RawMessage) bool {
+	t := strings.TrimSpace(wsRawString(fields["type"]))
 	return t == "function_call_output" || t == "custom_tool_call_output"
 }
 
-func wsIsCompleteToolCall(raw json.RawMessage) bool {
-	if !wsIsToolCallItem(raw) {
+func wsFieldsAreCompleteToolCall(fields map[string]json.RawMessage) bool {
+	if !wsFieldsAreToolCall(fields) {
 		return false
 	}
-	if strings.TrimSpace(wsJSONString(raw, "call_id")) == "" || strings.TrimSpace(wsJSONString(raw, "name")) == "" {
+	if strings.TrimSpace(wsRawString(fields["call_id"])) == "" || strings.TrimSpace(wsRawString(fields["name"])) == "" {
 		return false
 	}
 	field := "arguments"
-	if strings.TrimSpace(wsJSONString(raw, "type")) == "custom_tool_call" {
+	if strings.TrimSpace(wsRawString(fields["type"])) == "custom_tool_call" {
 		field = "input"
 	}
-	value, has, _ := wsJSONField(raw, field)
-	if !has {
-		return false
-	}
 	var s string
-	return json.Unmarshal(value, &s) == nil
+	return json.Unmarshal(fields[field], &s) == nil
 }
 
 // --- 以下为最小 JSON 手术工具：项目此前不依赖 gjson/sjson，这几个 helper

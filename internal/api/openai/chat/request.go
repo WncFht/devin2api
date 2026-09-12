@@ -146,7 +146,10 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if context.SessionKey == "" {
 		context.SessionKey = request.User
 	}
-	if err := appendMessages(&context, request.Messages); err != nil {
+	// toolNames 随解码增量登记 assistant tool_call 的 id→name，
+	// tool 消息按 id 直查，替代逐条 findToolName 全历史回扫。
+	toolNames := make(map[string]string)
+	if err := appendMessages(&context, request.Messages, toolNames); err != nil {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
@@ -179,16 +182,16 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}, nil
 }
 
-func appendMessages(context *llm.RequestMessages, messages []Message) error {
+func appendMessages(context *llm.RequestMessages, messages []Message, toolNames map[string]string) error {
 	for index, message := range messages {
-		if err := appendMessage(context, message); err != nil {
+		if err := appendMessage(context, message, toolNames); err != nil {
 			return fmt.Errorf("message[%d]: %w", index, err)
 		}
 	}
 	return nil
 }
 
-func appendMessage(context *llm.RequestMessages, message Message) error {
+func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
 	switch message.Role {
 	case "system", "developer":
 		content, err := common.DecodeContent(message.Content)
@@ -210,7 +213,7 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "assistant":
-		content, err := decodeAssistantContent(context, message)
+		content, err := decodeAssistantContent(context, message, toolNames)
 		if err != nil {
 			return err
 		}
@@ -226,7 +229,7 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 		if err != nil {
 			return err
 		}
-		name := findToolName(context.Messages, message.ToolCallID)
+		name := toolNames[message.ToolCallID]
 		if name == "" {
 			// 压缩后的历史可能丢掉对应的 assistant tool_call；兜底名交给
 			// wire 层的 demoteOrphanToolResults 降级，避免整请求 400。
@@ -252,7 +255,7 @@ func decodeUserContent(raw json.RawMessage) ([]llm.Content, error) {
 	return common.DecodeContent(raw)
 }
 
-func decodeAssistantContent(context *llm.RequestMessages, message Message) ([]llm.Content, error) {
+func decodeAssistantContent(context *llm.RequestMessages, message Message, toolNames map[string]string) ([]llm.Content, error) {
 	var content []llm.Content
 	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
 		decoded, err := common.DecodeContent(message.Content)
@@ -278,6 +281,7 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message) ([]ll
 			// 吞成 {} 会让上游看到的调用语义悄悄变空。
 			custom = true
 		}
+		toolNames[call.ID] = call.Function.Name
 		content = append(content, llm.ToolCall{
 			ID:        call.ID,
 			Name:      call.Function.Name,
@@ -286,24 +290,6 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message) ([]ll
 		})
 	}
 	return content, nil
-}
-
-// findToolName 在前面 assistant 消息的工具调用中查找工具名；
-// 找不到返回空串，由调用方降级兜底而不是让整请求失败。
-func findToolName(messages []llm.Message, callID string) string {
-	for index := len(messages) - 1; index >= 0; index-- {
-		assistant, ok := messages[index].(llm.AssistantMessage)
-		if !ok {
-			continue
-		}
-		for _, block := range assistant.Content {
-			call, ok := block.(llm.ToolCall)
-			if ok && call.ID == callID {
-				return call.Name
-			}
-		}
-	}
-	return ""
 }
 
 func llmIsJSONObject(value json.RawMessage) bool {

@@ -161,8 +161,11 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 	// 产出上。encrypted_content 为 sealed.* 时是我们自己发出的上游签名，
 	// 随思考回放在 wire 上交给上游；外来不透明载荷不可解，忽略。
 	var pending pendingReasoning
+	// toolNames 随解码增量登记 function_call/custom_tool_call 的
+	// call_id→name，output item 按 id 直查，替代逐条 findToolName 回扫。
+	toolNames := make(map[string]string)
 	for index, item := range items {
-		if err := appendInputItem(context, item, &pending); err != nil {
+		if err := appendInputItem(context, item, &pending, toolNames); err != nil {
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
 	}
@@ -223,7 +226,7 @@ func isOpenAIReasoningSignature(blob string) bool {
 	return items[0].Type == "reasoning"
 }
 
-func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning) error {
+func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning, toolNames map[string]string) error {
 	var header struct {
 		Type string `json:"type"`
 		Role string `json:"role"`
@@ -271,6 +274,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 			return err
 		}
 		arguments := json.RawMessage(item.Arguments)
+		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
@@ -290,6 +294,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
+		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Input), Custom: true})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
@@ -327,7 +332,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err != nil {
 			return err
 		}
-		toolName := findToolName(context.Messages, callID)
+		toolName := toolNames[callID]
 		if toolName == "" {
 			// 压缩后的历史可能丢掉对应的 function_call；对齐 Anthropic
 			// 解码路径的兜底名，避免整请求失败。
@@ -351,22 +356,6 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		})
 		return nil
 	}
-}
-
-func findToolName(messages []llm.Message, callID string) string {
-	for index := len(messages) - 1; index >= 0; index-- {
-		assistant, ok := messages[index].(llm.AssistantMessage)
-		if !ok {
-			continue
-		}
-		for _, block := range assistant.Content {
-			call, ok := block.(llm.ToolCall)
-			if ok && call.ID == callID {
-				return call.Name
-			}
-		}
-	}
-	return ""
 }
 
 // decodeToolOutput 解码 function_call_output/custom_tool_call_output 的

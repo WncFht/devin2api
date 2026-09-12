@@ -296,7 +296,8 @@ func (w *wsResponseWriter) turnResult(completedOutput json.RawMessage) wsTurnRes
 func (w *wsResponseWriter) collectedOutput() json.RawMessage {
 	items := make([]json.RawMessage, 0, len(w.outputItems)+len(w.outputUnindexed))
 	appendItem := func(raw json.RawMessage) {
-		if wsIsToolCallItem(raw) && !wsIsCompleteToolCall(raw) {
+		fields := wsParseItem(raw)
+		if wsFieldsAreToolCall(fields) && !wsFieldsAreCompleteToolCall(fields) {
 			return
 		}
 		items = append(items, raw)
