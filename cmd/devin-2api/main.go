@@ -141,6 +141,8 @@ func main() {
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
 	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
 	// 异步回放：回放数千条会拖慢 listen 之后的首次应答，SeedTrend 有锁。
+	// 50000 只是「尽可能多」的软上限——实际深度受 ListRequests 的
+	// indexTailBytes（4MB 尾部）约束，正常流量下也远超 60 分钟窗口所需。
 	go func() {
 		for _, e := range debugManager.ListRequests(50000, debuglog.RequestFilter{}).Entries {
 			started, err := time.Parse(time.RFC3339Nano, e.StartedAt)

@@ -75,6 +75,8 @@ type Manager struct {
 	ioErrors atomic.Uint64
 	// usage 是 index.jsonl 的内存聚合器；启动时回放、请求完成时累加。
 	usage *usageAggregator
+	// replayDone 在启动回放结束时关闭；UsageStats 等它而不是返回半成数据。
+	replayDone chan struct{}
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -216,7 +218,8 @@ type attachmentReference struct {
 
 // NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
 // policy 控制后台清理；任一维度启用即启动清理协程。
-// 启动时回放 index.jsonl 尾部重建用量聚合，进程重启不丢统计口径。
+// 启动时异步回放 index.jsonl 尾部重建用量聚合——尾部上限 64MB，同步解析会
+// 拖住 listen 之后的首次应答；UsageStats 在读侧等回放完成，不会返回半成数据。
 func NewManager(root string, policy RetentionPolicy) *Manager {
 	manager := &Manager{
 		root:       root,
@@ -224,18 +227,23 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 		activeDirs: make(map[string]*Recorder),
 		policy:     policy,
 		usage:      newUsageAggregator(),
+		replayDone: make(chan struct{}),
 	}
 	manager.enabled.Store(true)
 	if root == "" {
+		close(manager.replayDone)
 		return manager
 	}
 	// 提前建好根目录：quota.jsonl/stderr.log 等顶层文件不经过 Start() 的惰性建目录。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("debuglog: create log root failed", "root", root, "error", err)
 	}
-	if parsed := manager.usage.replayIndex(filepath.Join(root, "index.jsonl")); parsed > 0 {
-		slog.Info("debuglog: replayed request index", "entries", parsed)
-	}
+	go func() {
+		defer close(manager.replayDone)
+		if parsed := manager.usage.replayIndex(filepath.Join(root, "index.jsonl")); parsed > 0 {
+			slog.Info("debuglog: replayed request index", "entries", parsed)
+		}
+	}()
 	if policy.Days > 0 || policy.MaxTotalMB > 0 || policy.PayloadHours > 0 {
 		manager.cleanerStop = make(chan struct{})
 		manager.cleanerDone = make(chan struct{})
@@ -318,11 +326,13 @@ func (manager *Manager) Stats() map[string]any {
 }
 
 // UsageStats 返回 index.jsonl 的聚合快照（今日/窗口累计、按模型、按 key、
-// 错误阶段、小时趋势、延迟分位数）。
+// 错误阶段、小时趋势、延迟分位数）。启动回放完成前调用会阻塞到回放结束，
+// 保证面板看到的口径是完整的而不是部分数据。
 func (manager *Manager) UsageStats() UsageSnapshot {
 	if manager == nil {
 		return UsageSnapshot{}
 	}
+	<-manager.replayDone
 	return manager.usage.snapshot()
 }
 
