@@ -44,3 +44,7 @@ multi-harness-eval/runs/
 # Claude Code 入口：CLAUDE.md 与 .claude/skills/ 均是指向 AGENTS.md / .agents/ 的软链
 /CLAUDE.md
 /.claude/
+
+# 本地分析副件：ccload.db 快照（含明文凭据）与 scc 报告
+/data/
+/scc-report.html

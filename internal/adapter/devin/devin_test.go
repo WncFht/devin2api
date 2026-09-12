@@ -956,6 +956,28 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	}
 }
 
+// TestResponseStreamReleasesStartOnHoldTimeout 的测试动机是：上游建流后
+// 长时间静默时，扣留的 start 必须先行下发——否则客户端在 ~30s 无数据
+// 处弃连（中间网关只在首个协议事件后才向客户端放通字节），一条本来
+// 能成功的长思考流被掐死。
+func TestResponseStreamReleasesStartOnHoldTimeout(t *testing.T) {
+	defer func(timeout time.Duration) { startHoldTimeout = timeout }(startHoldTimeout)
+	startHoldTimeout = 20 * time.Millisecond
+	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventStart {
+		t.Fatalf("event = %q, want start released on hold timeout", event.Type)
+	}
+	if !stream.startReleased {
+		t.Fatal("startReleased = false after hold-timeout release")
+	}
+}
+
 // TestResponseStreamStopsOnContextCancel 验证等待上游帧期间客户端 ctx
 // 取消能立即结束流，而不是挂在阻塞的 Receive 上等看门狗超时。
 func TestResponseStreamStopsOnContextCancel(t *testing.T) {

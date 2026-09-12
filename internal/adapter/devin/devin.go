@@ -557,6 +557,14 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 // var 而非 const：测试临时缩短它来覆盖超时路径。
 var upstreamStallTimeout = 120 * time.Second
 
+// startHoldTimeout 是 start 事件（message_start/response.created）允许被
+// 扣留的最长时间。扣留的目的是给上游「产出内容前就失败」留一个返回真实
+// HTTP 状态码的窗口——实测这类失败全部在 ~9s 内落定；而下游客户端在
+// ~30s 无数据时弃连，且中间网关只在首个协议事件后才向客户端放通字节
+// （保活注释行不算）。15s 位于两者之间：快速失败仍拿到真实状态码，
+// 长思考则先把 start 发出去让客户端保持存活。
+var startHoldTimeout = 15 * time.Second
+
 // upstreamFrameBuffer 是泵协程可超前读取的帧数：上游生产与客户端
 // 消费解耦，同时保留对上游的背压上限。
 const upstreamFrameBuffer = 64
@@ -609,7 +617,13 @@ type responseStream struct {
 	// start 推迟到第一批真实事件前发出：上游在产出内容前报错时，
 	// 首个对外事件是 error，HTTP 层才能返回真实错误状态码，
 	// 而不是已提交的 200 + SSE error（下游网关会把后者误判为渠道故障）。
+	// 扣留上限由 startHold 控制：超时后 start 单独下发。
 	pendingStart []llm.ResponseEvent
+	// startHold 在 pendingStart 填充时武装，到期释放扣留的 start。
+	startHold *time.Timer
+	// startReleased 标记 start 已下发给客户端：pre-content 重试重建
+	// 解码器后必须丢弃新 start，否则客户端会收到第二个 message_start。
+	startReleased bool
 	// finished 表示 decoder 已经生成最终事件，不再读取上游。
 	finished bool
 	// queue 保存已经转换、等待调用方读取的中间响应事件。
@@ -660,10 +674,32 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 事件本身扣留在 pendingStart，等待第一批真实事件一起下发。
 			stream.started = true
 			stream.pendingStart = stream.decoder.start()
+			if stream.startReleased {
+				// 重试流上客户端已见过一个 start，重复下发会违反协议。
+				stream.pendingStart = nil
+			} else if stream.startHold == nil {
+				stream.startHold = time.NewTimer(startHoldTimeout)
+			} else {
+				stream.startHold.Reset(startHoldTimeout)
+			}
 			continue
 		}
 		stall.Reset(upstreamStallTimeout)
+		var startHold <-chan time.Time
+		if stream.startHold != nil {
+			startHold = stream.startHold.C
+		}
 		select {
+		case <-startHold:
+			// 上游建流后静默超时：先把扣留的 start 发出去——对客户端
+			// 这是首个可见字节，链路各段的空闲计时器随之刷新。
+			if len(stream.pendingStart) == 0 {
+				continue
+			}
+			stream.queue = stream.pendingStart
+			stream.pendingStart = nil
+			stream.startReleased = true
+			continue
 		case frame, ok := <-stream.frames:
 			stall.Stop()
 			if !ok || frame.response == nil {

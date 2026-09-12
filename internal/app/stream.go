@@ -106,7 +106,11 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 		for {
 			event, err := stream.Recv(ctx)
 			if err == nil {
-				recorder.NoteUpstreamLatency()
+				// Start 事件是本地合成的信封且可能被 startHold 提前释放——
+				// 不算上游产出；首帧时延要量的是上游真实事件的到达时刻。
+				if event.Type != llm.ResponseEventStart {
+					recorder.NoteUpstreamLatency()
+				}
 				if recorder != nil {
 					// 事件投影建树有实分配；nil recorder 时 AppendJSONL
 					// 是 no-op，投影参数却会先求值——外层门控。
