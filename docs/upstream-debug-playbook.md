@@ -125,7 +125,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 
 每个客户端的特异风险：
 
-- **Claude Code**：系统提示词整体在指纹库里（CC 2.1.236 实测 7 条指纹行已入 `sanitize.go`，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。已实测的两个客户端侧坑：
+- **Claude Code**：主会话与 subagent 系统提示词都在指纹库里（CC 2.1.236 主提示词 7 条 + subagent 提示词的 emoji 禁令整句已入 `sanitize.go`，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。subagent 被拒时 CC 报 "issue with the selected model"，主 agent 会自述「subagent 不可用」——不是模型问题，查 `error.json` 的 permission_denied。已实测的两个客户端侧坑：
     - **本地模型白名单**：CC 2.1.x 在发请求前就拒绝不认识的模型名（`swe-2-max` 直接被拦，ccload 收不到请求）。解法：ccload `channel_models` 加 `claude-sonnet-4-6` 等可识别名 → `redirect_model=swe-2-max`；CC 侧 `ANTHROPIC_MODEL` 填可识别名。`modelOverrides`/`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` 也可，但 redirect 最不侵入。
     - **settings env 覆盖 shell**：`~/.claude/settings.json` 的 `env` 块优先级高于 shell 环境变量，里面若有 `ANTHROPIC_BASE_URL` 会盖掉导出的值（进程在连别的地址、半天无输出即此症状）。用项目级 `.claude/settings.local.json` 注入 env 最干净。
 - **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
