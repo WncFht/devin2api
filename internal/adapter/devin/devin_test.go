@@ -47,6 +47,20 @@ func (receiver *fakeDevinResponseReceiver) Msg() *devinproto.GetChatMessageRespo
 // Err 模拟正常 EOF。
 func (receiver *fakeDevinResponseReceiver) Err() error { return nil }
 
+// errorDevinResponseReceiver 模拟上游零帧即以错误终止的流。
+type errorDevinResponseReceiver struct {
+	err error
+}
+
+// Receive 直接报告流结束。
+func (receiver *errorDevinResponseReceiver) Receive() bool { return false }
+
+// Msg 没有可返回的帧。
+func (receiver *errorDevinResponseReceiver) Msg() *devinproto.GetChatMessageResponse { return nil }
+
+// Err 返回流终止错误。
+func (receiver *errorDevinResponseReceiver) Err() error { return receiver.err }
+
 func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	request := llm.RequestMessages{
 		SystemPrompt: "system",
@@ -680,5 +694,50 @@ func TestIsTransientConnectError(t *testing.T) {
 	}
 	if isTransientConnectError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request"))) {
 		t.Fatal("invalid_argument must not be retried")
+	}
+}
+
+// TestResponseStreamYieldsErrorBeforeStart 的测试动机是：上游在产出任何内容
+// 前失败时，首个对外事件必须是 error 而不是 start——否则 HTTP 层在 start
+// 时已提交 200，真实错误状态码无法回传，下游网关会把请求级错误误判为
+// 渠道故障并冷却整个渠道。
+func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
+	stream := &responseStream{
+		upstream: &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))},
+		decoder:  newResponseDecoder("model"),
+	}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError {
+		t.Fatalf("first event = %q, want error", event.Type)
+	}
+	if event.Error == nil || !strings.Contains(event.Error.ErrorMessage, "permission_denied") {
+		t.Fatalf("error message = %#v", event.Error)
+	}
+}
+
+// TestResponseStreamStartsBeforeFirstContent 的测试动机是保证正常流中
+// start 仍是第一个事件，仅在上游内容就绪时才随首批事件下发。
+func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
+	receiver := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
+		{DeltaText: proto.String("hi")},
+	}}
+	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("model")}
+	first, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Type != llm.ResponseEventStart {
+		t.Fatalf("first event = %q, want start", first.Type)
+	}
+	second, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Type != llm.ResponseEventTextStart {
+		t.Fatalf("second event = %q, want text_start", second.Type)
 	}
 }

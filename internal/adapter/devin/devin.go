@@ -729,6 +729,11 @@ type responseStream struct {
 	recorder *debuglog.Recorder
 	// started 表示是否已经请求 decoder 产生 start 事件。
 	started bool
+	// pendingStart 保存 decoder.start() 生成但尚未下发的事件。
+	// start 推迟到第一批真实事件前发出：上游在产出内容前报错时，
+	// 首个对外事件是 error，HTTP 层才能返回真实错误状态码，
+	// 而不是已提交的 200 + SSE error（下游网关会把后者误判为渠道故障）。
+	pendingStart []llm.ResponseEvent
 	// finished 表示 decoder 已经生成最终事件，不再读取上游。
 	finished bool
 	// queue 保存已经转换、等待调用方读取的中间响应事件。
@@ -751,18 +756,20 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			return llm.ResponseEvent{}, err
 		}
 		if !stream.started {
+			// start() 初始化 decoder.partial，必须先于 decode 调用；
+			// 事件本身扣留在 pendingStart，等待第一批真实事件一起下发。
 			stream.started = true
-			stream.queue = append(stream.queue, stream.decoder.start()...)
-			break
+			stream.pendingStart = stream.decoder.start()
+			continue
 		}
 		if !stream.upstream.Receive() {
-			stream.queue = append(stream.queue, stream.decoder.finish(stream.upstream.Err())...)
+			stream.queue = stream.release(stream.decoder.finish(stream.upstream.Err()))
 			stream.finished = true
 			break
 		}
 		response := stream.upstream.Msg()
 		recordProtoJSON(stream.recorder, "04-devin-response.jsonl", response)
-		stream.queue = append(stream.queue, stream.decoder.decode(response)...)
+		stream.queue = stream.release(stream.decoder.decode(response))
 		stream.finished = stream.decoder.finished
 	}
 	if len(stream.queue) > 0 {
@@ -771,6 +778,21 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
+}
+
+// release 把 decoder 产出的第一批事件交给调用方：非错误批次前置扣留的
+// start 事件；若首批就是错误事件（上游在产出内容前失败），丢弃 start，
+// 让错误成为流的第一个对外事件。
+func (stream *responseStream) release(events []llm.ResponseEvent) []llm.ResponseEvent {
+	if len(events) == 0 || len(stream.pendingStart) == 0 {
+		return events
+	}
+	start := stream.pendingStart
+	stream.pendingStart = nil
+	if events[0].Type == llm.ResponseEventError {
+		return events
+	}
+	return append(start, events...)
 }
 
 func recordProtoJSON(recorder *debuglog.Recorder, name string, message proto.Message) {
