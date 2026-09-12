@@ -68,3 +68,39 @@ func TestTrendBuckets(t *testing.T) {
 		t.Fatalf("last bucket = %+v, want requests=3 errors=2", last)
 	}
 }
+
+// TestRatesDerived 验证分钟桶派生的 RPM/QPS 指标。
+func TestRatesDerived(t *testing.T) {
+	m := NewMetrics()
+	m.Begin().Finish(200, 0)
+	m.Begin().Finish(200, 0)
+	m.Begin().Finish(500, 0)
+	rates, _ := m.Snapshot()["rates"].(map[string]any)
+	if rates["rpm_current"] != uint64(3) || rates["rpm_peak"] != uint64(3) {
+		t.Fatalf("rates = %+v", rates)
+	}
+	if qps, _ := rates["qps_current"].(float64); qps <= 0 {
+		t.Fatalf("qps_current = %v", rates["qps_current"])
+	}
+	if avg, _ := rates["rpm_avg"].(float64); avg != 3 {
+		t.Fatalf("rpm_avg = %v, want 3 (first minute)", rates["rpm_avg"])
+	}
+}
+
+// TestProcessMetrics 验证进程级指标存在且值域合理。
+func TestProcessMetrics(t *testing.T) {
+	m := NewMetrics()
+	proc, _ := m.Snapshot()["process"].(map[string]any)
+	if proc["goroutines"].(int) <= 0 {
+		t.Fatalf("goroutines = %v", proc["goroutines"])
+	}
+	if proc["heap_alloc_bytes"].(uint64) == 0 {
+		t.Fatalf("heap_alloc_bytes = %v", proc["heap_alloc_bytes"])
+	}
+	// 第二次快照应有非负 CPU 百分比（相邻 rusage 差分）。
+	m.Snapshot()
+	proc, _ = m.Snapshot()["process"].(map[string]any)
+	if cpu, _ := proc["cpu_percent"].(float64); cpu < 0 {
+		t.Fatalf("cpu_percent = %v", cpu)
+	}
+}
