@@ -78,11 +78,13 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	// CC 2.1.x 提示词新增指纹行（本项目逐行 bisect 实证）：
 	// 自动压缩句、/help 品牌行、Agent 工具引导句、CLAUDE.md 行、memory 强制句。
 	rule("cc-autocompact", `(?i)The system will automatically compress prior messages in your conversation as it approaches context limits\.[^\n]*`, "Earlier messages may be automatically summarized as the conversation grows long, so the conversation is not bounded by the context window."),
-	rule("cc-help-line", `(?im)^(\s*-\s*)/help:\s*Get help with using Claude Code[^\n]*`, "$1/help: Get help with using this CLI"),
+	// cc-help-line/cc-feedback 的指纹是裸句本身（上游实测：无行首/列表
+	// 前缀也拦），故不做行首锚定；列表形态的 "- " 前缀得以保留，替换结果不变。
+	rule("cc-help-line", `(?i)/help:\s*Get help with using Claude Code[^\n]*`, "/help: Get help with using this CLI"),
 	rule("cc-agent-tool", `(?i)Use the Agent tool with specialized agents when the task at hand matches the agent's description\.[^\n]*`, "Use the Agent tool with specialized agents when the task matches the agent's description. Delegation is useful for parallelizing independent queries and for keeping the main context window free of excessive results, but avoid using it when not needed, and do not repeat work already delegated to a subagent."),
 	rule("cc-claudemd", `(?i)Anything already documented in CLAUDE\.md files\.`, "Anything already documented in project instruction files."),
 	rule("cc-memory-must", `(?i)You MUST access memory when the user explicitly asks you to check, recall, or remember\.`, "Always consult memory when the user explicitly asks you to check, recall, or remember."),
-	rule("cc-feedback", `(?im)^(\s*-\s*)To give feedback, users should report the issue at https://github\.com/anthropics/claude-code/issues[^\n]*`, "$1To give feedback, users should report issues to the maintainers of this CLI."),
+	rule("cc-feedback", `(?i)To give feedback, users should report the issue at https://github\.com/anthropics/claude-code/issues[^\n]*`, "To give feedback, users should report issues to the maintainers of this CLI."),
 	rule("cc-blast-radius", `(?i)Carefully consider the reversibility and blast radius of actions\.`, "Carefully consider the reversibility and impact of actions."),
 	rule("cc-claudemd-2", `(?i)durable instructions like CLAUDE\.md files`, "durable instructions like project instruction files"),
 	// CC 2.1.x subagent 系统提示的 emoji 禁令行（本项目逐行 bisect 实证：
