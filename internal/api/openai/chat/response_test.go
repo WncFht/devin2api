@@ -211,3 +211,22 @@ func TestStreamEncoderEmitsThinkingAsReasoningContent(t *testing.T) {
 		t.Fatalf("third chunk should be text content: %v", third)
 	}
 }
+
+// TestMessageToChatKeepsTextWithToolCalls 钉住 content 与 tool_calls 共存：
+// 模型同轮给正文+调用时正文必须下发（上游实测会这么回），纯调用轮才置 nil。
+func TestMessageToChatKeepsTextWithToolCalls(t *testing.T) {
+	message := &llm.AssistantMessage{Content: []llm.Content{
+		llm.TextContent{Text: "let me check"},
+		llm.ToolCall{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
+	}}
+	object, calls := messageToChat(message)
+	if object["content"] != "let me check" || len(calls) != 1 {
+		t.Fatalf("message = %#v, calls = %#v", object, calls)
+	}
+	onlyCall, _ := messageToChat(&llm.AssistantMessage{Content: []llm.Content{
+		llm.ToolCall{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
+	}})
+	if content, ok := onlyCall["content"]; !ok || content != nil {
+		t.Fatalf("pure tool call turn should emit content=null, got %#v", onlyCall)
+	}
+}
