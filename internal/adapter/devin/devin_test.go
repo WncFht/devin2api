@@ -1412,3 +1412,84 @@ func TestResponseStreamEmptyEndTurnSurfacesWithoutRetry(t *testing.T) {
 		t.Fatalf("done = %#v", done)
 	}
 }
+
+// TestDecoderToEncoderReplayContract 钉住一轮真实 agent 循环的跨请求契约：
+// 上游产出 thinking+签名+tool_call → llm.AssistantMessage → 下一轮请求
+// 回放时 signature/signature_type/output_id、call↔result 邻接配对全部保真。
+// 这是 CPA 多轮会话事故（签名丢失/乱序配对）在我们链路上的对应防回归点。
+func TestDecoderToEncoderReplayContract(t *testing.T) {
+	// 第一拍：上游帧 → AssistantMessage（decoder 输出，不带 finish 错误）。
+	decoder := newResponseDecoder("swe-2-max", nil)
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaThinking: proto.String("need to read the file"),
+	})
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaSignature:     proto.String("sealed.v1.abc"),
+		DeltaSignatureType: proto.String("sealed"),
+		OutputId:           proto.String("msg_1"),
+	})
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		DeltaText: proto.String("checking"),
+		DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+			Id: proto.String("read_file_0"), Name: proto.String("read_file"),
+			ArgumentsJson: proto.String(`{"path":"a.txt"}`),
+		}},
+	})
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL.Enum(),
+	})
+	var done *llm.AssistantMessage
+	for _, event := range decoder.finish(nil) {
+		if event.Type == llm.ResponseEventDone {
+			done = event.Message
+		}
+	}
+	if done == nil {
+		t.Fatal("decoder produced no done message")
+	}
+
+	// 第二拍：回放消息序列进 wire——user, assistant(text+thinking+call), tool result, user。
+	converted, err := buildRequest(llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "read a.txt"}}},
+			*done,
+			llm.ToolResultMessage{
+				ToolCallID: "read_file_0", ToolName: "read_file",
+				Content: []llm.Content{llm.TextContent{Text: "file body"}},
+			},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "what did you find?"}}},
+		},
+	}, Config{BaseURL: "https://example.com", Token: "token", Model: "swe-2-max"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	if len(prompts) != 5 {
+		t.Fatalf("prompt count = %d, want 5 (user, assistant text, call, result, user)", len(prompts))
+	}
+	assistantText := prompts[1]
+	if assistantText.GetPrompt() != "checking" {
+		t.Fatalf("assistant text prompt = %q", assistantText.GetPrompt())
+	}
+	if assistantText.GetThinking() != "need to read the file" ||
+		assistantText.GetSignature() != "sealed.v1.abc" ||
+		assistantText.GetSignatureType() != "sealed" ||
+		assistantText.GetOutputId() != "msg_1" {
+		t.Fatalf("assistant replay metadata = %#v", assistantText)
+	}
+	call := prompts[2]
+	if len(call.GetToolCalls()) != 1 || call.GetToolCalls()[0].GetId() != "read_file_0" ||
+		call.GetToolCalls()[0].GetArgumentsJson() != `{"path":"a.txt"}` {
+		t.Fatalf("call prompt = %#v", call)
+	}
+	result := prompts[3]
+	if result.GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL ||
+		result.GetToolCallId() != "read_file_0" || result.GetPrompt() != "file body" {
+		t.Fatalf("result prompt = %#v", result)
+	}
+	// 契约核心：call 与 result 必须邻接（grouped 形态上游 invalid_argument）。
+	if prompts[2].GetSource() != assistantSource || prompts[3].GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL {
+		t.Fatalf("call/result not adjacent: %#v", prompts)
+	}
+}
