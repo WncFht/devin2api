@@ -36,6 +36,8 @@ type wsResponseWriter struct {
 	statusCode int
 	buf        []byte
 	err        error
+	// debugRefSent 标记 debug_ref 是否已随 response.created 下发。
+	debugRefSent bool
 }
 
 func newWSResponseWriter(conn *websocket.Conn) *wsResponseWriter {
@@ -111,8 +113,35 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	data = w.withDebugRef(data)
 	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// withDebugRef 把调试目录名编进 response.created 的 response 对象。
+// WS 握手响应在 createCompletion 分配请求 ID 之前就已发出，X-Request-Id
+// 无处可放——客户端只能靠 payload 携带的引用回查日志目录（错误事件
+// 自带 debug_ref，这里只补成功路径的首帧）。
+func (w *wsResponseWriter) withDebugRef(data []byte) []byte {
+	if w.debugRefSent || !bytes.Contains(data, []byte(`"response.created"`)) {
+		return data
+	}
+	ref := w.header.Get("X-Request-Id")
+	var event map[string]any
+	if ref == "" || json.Unmarshal(data, &event) != nil || event["type"] != "response.created" {
+		return data
+	}
+	response, ok := event["response"].(map[string]any)
+	if !ok {
+		return data
+	}
+	response["debug_ref"] = ref
+	patched, err := json.Marshal(event)
+	if err != nil {
+		return data
+	}
+	w.debugRefSent = true
+	return patched
 }
 
 // responsesWebSocket 处理 OpenAI Responses WebSocket 连接。
@@ -190,8 +219,12 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		return
 	}
 	innerRequest.Header.Set("Content-Type", "application/json")
-	if auth := request.Header.Get("Authorization"); auth != "" {
-		innerRequest.Header.Set("Authorization", auth)
+	// innerRequest 不经过 HTTP middleware，鉴权与日志关联所需的头逐一手动透传：
+	// createCompletion 的凭据哈希、clientRequestID、UserAgent 都从这里取。
+	for _, name := range []string{"Authorization", "X-Api-Key", "X-Request-Id", "X-Session-Id", "User-Agent"} {
+		if value := request.Header.Get(name); value != "" {
+			innerRequest.Header.Set(name, value)
+		}
 	}
 	innerRequest.RemoteAddr = request.RemoteAddr
 
