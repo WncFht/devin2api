@@ -383,6 +383,15 @@ func (application *App) createCompletion(
 	// 图片 base64 会显著放大 JSON；与常见 IDE 多图请求对齐到 32MiB。
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			// 字节超限按 PayloadTooLarge 报 413：下游网关按 4xx 归类为
+			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
+			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
+			completion.StatusCode = http.StatusRequestEntityTooLarge
+			writeLoggedError(writer, recorder, "http_read", completion.StatusCode, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
+			return
+		}
 		completion.StatusCode = http.StatusBadRequest
 		writeLoggedError(writer, recorder, "http_read", completion.StatusCode, fmt.Errorf("read request: %w", err))
 		return
@@ -553,6 +562,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 	errorType := common.OpenAIErrorType(message)
 	// 客户端可修正的错误用 invalid_request_error，便于 IDE 直接展示。
 	if status == http.StatusBadRequest ||
+		status == http.StatusRequestEntityTooLarge ||
 		strings.Contains(message, "does not support image") ||
 		strings.Contains(message, "invalid_argument") ||
 		strings.HasPrefix(message, "invalid_argument:") {
