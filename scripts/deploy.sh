@@ -10,6 +10,16 @@ LABEL="com.devinuser.devin-2api"
 HEALTH_URL="http://localhost:3003/healthz"
 REPO_SLUG="$(git remote get-url origin | sed -E 's#.*github.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
 
+# 单实例约定：launchd 托管的 :3003 是唯一合法实例。部署前先列出其它
+# devin-2api 进程（手动 ./devin-2api、遗忘的冒烟实例）——它们会抢端口、
+# 分流请求，且不受 SIGTERM 优雅退出保护。
+LAUNCHD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/pid = /{print $3}' || true)"
+STRAYS="$(pgrep -fl 'devin-2api' | awk -v keep="${LAUNCHD_PID:-0}" '$1 != keep' | grep -v 'devin-2api.new' || true)"
+if [[ -n "${STRAYS}" ]]; then
+	echo "WARN: 非 launchd 托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:" >&2
+	echo "${STRAYS}" >&2
+fi
+
 RELEASE_TAG=""
 NO_RESTART=0
 while [[ $# -gt 0 ]]; do
@@ -93,7 +103,8 @@ OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^\s*pid =
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
 echo "==> waiting for healthz (old pid: ${OLD_PID:-?})"
-for _ in $(seq 1 20); do
+# 新进程要回放 index.jsonl（数千条）并过 Gatekeeper 检查，实测 14s+。
+for _ in $(seq 1 60); do
 	HEALTH="$(curl -sf -m 2 "${HEALTH_URL}" 2>/dev/null || true)"
 	if [[ -n "${HEALTH}" ]]; then
 		break
@@ -101,7 +112,7 @@ for _ in $(seq 1 20); do
 	sleep 0.5
 done
 [[ -n "${HEALTH:-}" ]] || {
-	echo "healthz did not come up in 10s; check logs/stderr.log" >&2
+	echo "healthz did not come up in 30s; check logs/stderr.log" >&2
 	exit 1
 }
 

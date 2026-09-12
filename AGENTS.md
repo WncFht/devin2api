@@ -118,4 +118,12 @@
 
 注意：请求体可能含用户隐私内容；日志目录与 API 均不落明文凭据（`key_hash` 是 SHA-256 截断），但内容字段未脱敏——对外分享前先读 `meta.json` 再决定是否给全量。
 
-部署看 docs/macos-deployment.md
+## 部署（单实例约定）
+
+本机只维护一个实例：launchd 用户代理 `com.devinuser.devin-2api` 监听 :3003，plist 与原理见 docs/macos-deployment.md。
+
+- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 替换二进制 → `kickstart -k` → healthz 校验版本）。
+- **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
+- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=60`，在途流跑完再退），禁用 `kill -9` 抢时间。
+- 冒烟用空闲端口（如 :3005）起临时二进制，验证完立即关闭；不保留常驻侧实例。
+- `devin-2api.new` 构建产物若部署中断残留，直接删除即可。

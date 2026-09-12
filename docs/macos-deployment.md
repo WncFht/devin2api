@@ -100,8 +100,10 @@ launchd 发 SIGTERM 后进程优雅退出立即拉起，停机约一秒。`git d
 
 - **config 改动自动重启**：plist 加 `WatchPaths` 指向 `config.yaml`，保存即
   触发重启。代价是任何 mtime 变化（包括编辑器误触）都会重启。
-- **多实例**：side 测试实例（如 :3004）若要常态化，用不同 Label + 不同
-  config 另起一个 plist；不要放 `/tmp` 裸跑，`/tmp` 重启即丢。
+- **单实例约定**：本机只维护这一个实例。冒烟验证用空闲端口（如 :3005）
+  起临时二进制，验证完立即 `kill <pid>`（SIGTERM 会走优雅退出）；不留
+  常驻 side 实例，也不要手动占 :3003/:3004——与 KeepAlive 互抢端口时
+  全部在途流都会被掐。
 - **版本可见性**：已实现——`main.version` 由构建期 `-X` 注入（见升级命令），
   `stderr.log` 启动行、`/healthz`、`-version` flag 三处可查。
 
