@@ -11,9 +11,10 @@ environment:
 datasets:
   - name: harbor/hello-world
 agents:
-  # Anthropic Messages 端点(ccload)。模型名须过 CC 家族名检查,网关改写到真实模型。
+  # 被测模型恒定 swe-2-max,网关改写;各 harness 的 model_name 只是过客户端校验的前台名
+  # Anthropic Messages 端点(ccload)
   - name: claude-code
-    model_name: anthropic/claude-sonnet-4-5
+    model_name: anthropic/claude-sonnet-4-5   # 须含 claude 家族词
     env:
       ANTHROPIC_BASE_URL: http://host.docker.internal:49173
       ANTHROPIC_AUTH_TOKEN: ${DEVIN_API_KEY}

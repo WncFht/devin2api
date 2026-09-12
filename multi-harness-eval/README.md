@@ -1,29 +1,31 @@
 # multi-harness-eval:同一模型 × 多 harness 评测
 
-目标：把同一个模型端点（devin-2api / ccload 链路，见 `docs/harness-verification.md`）灌进多个 coding-agent harness,在固定 benchmark 上对比。基建用 **Harbor**(Terminal-Bench 团队的通用评测框架，TB 2.x 官方 harness)[^harbor]。
+目标：把 **swe-2-max**（经 devin-2api / ccload 链路暴露，见 `docs/harness-verification.md`）灌进多个 coding-agent harness,在固定 benchmark 上对比。被测模型恒定，只换 harness。基建用 **Harbor**(Terminal-Bench 团队的通用评测框架，TB 2.x 官方 harness)[^harbor]。
 
 ## 1. 端点与协议
 
 链路里有两个入口，不同 harness 各吃一个：
 
-| 入口 | 协议 | 服务对象 |
-|---|---|---|
-| `http://<ccload>:49173` | Anthropic Messages(`/v1/messages`) | claude-code、kimi-code、pi |
-| `http://<devin-2api>:3003` | OpenAI Responses(`/v1/responses`) | codex、pi(备选 `model_api=openai-responses`) |
+| 入口                       | 协议                               | 服务对象                                     |
+| -------------------------- | ---------------------------------- | -------------------------------------------- |
+| `http://<ccload>:49173`    | Anthropic Messages(`/v1/messages`) | claude-code、kimi-code、pi                   |
+| `http://<devin-2api>:3003` | OpenAI Responses(`/v1/responses`)  | codex、pi(备选 `model_api=openai-responses`) |
 
-**注意：agent 跑在 Docker 容器里，`localhost` 指容器自己。** 宿主机上的服务要写 `http://host.docker.internal:<port>`(Docker Desktop)或局域网 IP；如果任务的 `[agent]` 网络策略拦了 egress，还要加 `--allow-agent-host=<host>` 或在 task.toml 里放开。模型名经过网关改写落到 `swe-2-max`，客户端侧用一个能被各家 picker 接受的名字即可。
+**注意：agent 跑在 Docker 容器里，`localhost` 指容器自己。** 宿主机上的服务要写 `http://host.docker.internal:<port>`(Docker Desktop)或局域网 IP；如果任务的 `[agent]` 网络策略拦了 egress，还要加 `--allow-agent-host=<host>` 或在 task.toml 里放开。
+
+**被测模型恒定 swe-2-max。** 网关侧统一改写模型名，所以各 harness 的 `model_name` 只是过客户端 picker 校验的前台名，不参与实际路由 —— claude-code 要求名字含 claude 家族词，kimi-code 沿用 `kimi-k3` 最稳，pi 和 codex 可以直接写 `swe-2-max`。
 
 ## 2. Harness 接入矩阵
 
 四个目标 harness 全部内置（`harbor agent list` / `harbor agent schema <name>` 可查）[^harbor-agents]。通用参数：`--ak version=X.Y.Z` 钉版本、`--agent-env KEY=VAL` 注入容器内 agent 进程环境、`--ak`/`--agent-kwarg` 传 agent 级选项。
 
-| Agent | 模型名（`-m`) | endpoint 接法 | 备注 |
-|---|---|---|---|
-| `claude-code` | `anthropic/claude-sonnet-4-5`（名字须含 claude/opus/sonnet/haiku 家族词，网关侧改写） | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` | 可选 kwargs:`reasoning_effort`、`max_turns`、`append_system_prompt`、`allowed_tools`/`disallowed_tools`、`memory_dir` |
-| `kimi-code` | `kimi-k3` | `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_API_KEY`；可选 `KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_CAPABILITIES=image_in,thinking`、`KIMI_MODEL_THINKING_EFFORT=max` | 自带 CC 请求封套伪装，走 Anthropic 端点 |
-| `pi` | `anthropic/<model>` | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` + `--ak model_api=anthropic-messages` | 自定义端点会自动写 `models.json`;`--ak thinking=<档>` |
-| `codex` | `openai/<model>` | `OPENAI_BASE_URL=<devin-2api>/v1`(Harbor 写入容器 `config.toml` 的 `openai_base_url`)| 原生说 Responses，直连 devin-2api;`--ak reasoning_effort=...`、`web_search=disabled`；复杂配置用 `--ak config=./codex.toml` |
-| `mini-swe-agent`（可选基线） | `openai/<model>` | litellm `api_base` + `OPENAI_API_KEY` | 极简 bash-loop，作「harness 下限」参照，Epoch AI 用它做跨模型标准 scaffold[^epoch]；需要 chat-completions 格式，端点只有 responses 时经 LiteLLM 转一道 |
+| Agent                        | 模型名（`-m`)                                                                         | endpoint 接法                                                                                                                                                   | 备注                                                                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `claude-code`                | `anthropic/claude-sonnet-4-5`（名字须含 claude/opus/sonnet/haiku 家族词，网关侧改写） | `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`                                                                                                                   | 可选 kwargs:`reasoning_effort`、`max_turns`、`append_system_prompt`、`allowed_tools`/`disallowed_tools`、`memory_dir`                                  |
+| `kimi-code`                  | `kimi-k3`                                                                             | `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_API_KEY`；可选 `KIMI_MODEL_MAX_CONTEXT_SIZE`、`KIMI_MODEL_CAPABILITIES=image_in,thinking`、`KIMI_MODEL_THINKING_EFFORT=max` | 自带 CC 请求封套伪装，走 Anthropic 端点                                                                                                                |
+| `pi`                         | `anthropic/swe-2-max`                                                                 | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` + `--ak model_api=anthropic-messages`                                                                                | 自定义端点会自动写 `models.json`;`--ak thinking=<档>`                                                                                                  |
+| `codex`                      | `openai/swe-2-max`                                                                    | `OPENAI_BASE_URL=<devin-2api>/v1`(Harbor 写入容器 `config.toml` 的 `openai_base_url`)                                                                           | 原生说 Responses，直连 devin-2api;`--ak reasoning_effort=...`、`web_search=disabled`；复杂配置用 `--ak config=./codex.toml`                            |
+| `mini-swe-agent`（可选基线） | `openai/swe-2-max`                                                                    | litellm `api_base` + `OPENAI_API_KEY`                                                                                                                           | 极简 bash-loop，作「harness 下限」参照，Epoch AI 用它做跨模型标准 scaffold[^epoch]；需要 chat-completions 格式，端点只有 responses 时经 LiteLLM 转一道 |
 
 ## 3. 测哪些 bench
 
@@ -103,7 +105,11 @@ harbor run --config jobs/tb21.yaml
 ### 参考文献
 
 [^harbor]: harbor-framework. Harbor: framework for evaluating and optimizing agents. [github.com/harbor-framework/harbor](https://github.com/harbor-framework/harbor)
+
 [^harbor-agents]: Harbor Docs. Agents. [harborframework.com/docs/agents](https://www.harborframework.com/docs/agents)
+
 [^epoch]: Epoch AI. SWE-bench Verified methodology. [epoch.ai/benchmarks/swe-bench-verified](https://epoch.ai/benchmarks/swe-bench-verified)
+
 [^scaffold-effect]: Vats & Golev. The Scaffold Effect in Coding Agents: Harness Choice as a Hidden Variable in Coding-Agent Evaluation. KDD Agentic AI Eval Workshop 2026. [paper](https://kdd-eval-workshop.github.io/agenticai-evaluation-kdd2026/assets/papers/74_The_Scaffold_Effect_in_Codi.pdf)
+
 [^v41]: DeepSeek-AI. DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression. 2026.
