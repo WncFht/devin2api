@@ -6,10 +6,11 @@
 
 链路里有两个入口，不同 harness 各吃一个：
 
-| 入口                       | 协议                               | 服务对象                                     |
-| -------------------------- | ---------------------------------- | -------------------------------------------- |
-| `http://<ccload>:49173`    | Anthropic Messages(`/v1/messages`) | claude-code、kimi-code、pi                   |
-| `http://<devin-2api>:3003` | OpenAI Responses(`/v1/responses`)  | codex、pi(备选 `model_api=openai-responses`) |
+| 入口                                  | 协议                               | 服务对象                                     |
+| ------------------------------------- | ---------------------------------- | -------------------------------------------- |
+| `http://<ccload>:49173`               | Anthropic Messages(`/v1/messages`) | claude-code、kimi-code、pi                   |
+| `http://<devin-2api>:3003`            | OpenAI Responses(`/v1/responses`)  | codex、pi(备选 `model_api=openai-responses`) |
+| `api.devin.ai` / `server.codeium.com` | Devin 原生 API                     | devin-cli(不走本地链路，直连官服)            |
 
 **注意：agent 跑在 Docker 容器里，`localhost` 指容器自己。** 宿主机上的服务要写 `http://host.docker.internal:<port>`(Docker Desktop) 或局域网 IP；如果任务的 `[agent]` 网络策略拦了 egress，还要加 `--allow-agent-host=<host>` 或在 task.toml 里放开。
 
@@ -17,7 +18,7 @@
 
 ## 2. Harness 接入矩阵
 
-四个目标 harness 全部内置（`harbor agent list` / `harbor agent schema <name>` 可查）[^harbor-agents]。通用参数：`--ak version=X.Y.Z` 钉版本、`--agent-env KEY=VAL` 注入容器内 agent 进程环境、`--ak`/`--agent-kwarg` 传 agent 级选项。
+四个第三方 harness 全部内置（`harbor agent list` / `harbor agent schema <name>` 可查）[^harbor-agents];`devin-cli` 没有内置，用自定义 agent 接入（见下节）。通用参数：`--ak version=X.Y.Z` 钉版本、`--agent-env KEY=VAL` 注入容器内 agent 进程环境、`--ak`/`--agent-kwarg` 传 agent 级选项。
 
 | Agent                        | 模型名（`-m`)                                                                         | endpoint 接法                                                                                                                                                   | 备注                                                                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -26,6 +27,23 @@
 | `pi`                         | `anthropic/swe-2-max`                                                                 | `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY` + `--ak model_api=anthropic-messages`                                                                                | 自定义端点会自动写 `models.json`;`--ak thinking=<档>`                                                                                                  |
 | `codex`                      | `openai/swe-2-max`                                                                    | `OPENAI_BASE_URL=<devin-2api>/v1`(Harbor 写入容器 `config.toml` 的 `openai_base_url`)                                                                           | 原生说 Responses，直连 devin-2api;`--ak reasoning_effort=...`、`web_search=disabled`；复杂配置用 `--ak config=./codex.toml`                            |
 | `mini-swe-agent`（可选基线） | `openai/swe-2-max`                                                                    | litellm `api_base` + `OPENAI_API_KEY`                                                                                                                           | 极简 bash-loop，作「harness 下限」参照，Epoch AI 用它做跨模型标准 scaffold[^epoch]；需要 chat-completions 格式，端点只有 responses 时经 LiteLLM 转一道 |
+| `devin-cli`（自定义）        | `devin/swe-2-max`                                                                     | `DEVIN_SESSION_TOKEN` env → 容器内写 `~/.local/share/devin/credentials.toml`                                                                                    | **swe-2-max 的原生 harness**，见下一节                                                                                                                 |
+
+### devin-cli 接入
+
+Harbor 没有内置，用 `BaseInstalledAgent` 写了个 ~70 行适配器：`eval_agents/devin_cli.py`。逻辑：
+
+- `install()`：容器里 `curl -fsSL https://cli.devin.ai/install.sh | bash`(install.sh 支持 Linux/macOS)，再把 `DEVIN_SESSION_TOKEN` 写成 `credentials.toml`（字段结构照抄本机 `~/.local/share/devin/credentials.toml`,`windsurf_api_key` 就是 session token)。备选：`devin auth login --force-manual-token-flow` 走手动 token 流
+- `run()`:`devin -p --model swe-2-max --permission-mode dangerous --respect-workspace-trust false --export <atif.json> -- <instruction>`。`-p` 是非交互模式；`--export` 直接吐 **ATIF** 轨迹，和 Harbor 原生格式同源，token/成本解析在 `populate_context_post_run` 里做
+- 网络：容器要能出网到 `api.devin.ai`/`server.codeium.com`/install 用的 `cli.devin.ai`+`static.devin.ai`,job yaml 里用 `extra_allowed_hosts` 声明
+- 语义注意：它是 swe-2-max 的**原厂 harness**，对照组意义大——可以分离「模型能力」和「我们的 devin-2api/ccload 转发链 + 第三方 harness」两层变量。二进制里还有 `DEVIN_HARNESS_LEAD_ONLY`/`DEVIN_HARNESS_SIDEKICK_ONLY` 环境变量（lead/sidekick 多 agent 结构开关），值得在冒烟时探一下是否能关掉 sidekick 做单 agent 纯净对比
+- 版本固定：install.sh 顶层装最新；要钉版本用带版本的 `cli/<ver>/setup.sh`（或至少在每个 trial 里记录 `devin --version`)。计费走真实 Devin 账户
+
+调用方式（import_path 是纯 Python 模块路径，`eval_agents` 包要在 sys.path 上）:
+
+```bash
+PYTHONPATH=multi-harness-eval harbor run --config multi-harness-eval/jobs/smoke.yaml
+```
 
 ## 3. 测哪些 bench
 

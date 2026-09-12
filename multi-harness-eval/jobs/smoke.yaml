@@ -47,3 +47,14 @@ agents:
       OPENAI_API_KEY: ${DEVIN_API_KEY}
     kwargs:
       reasoning_effort: high
+
+  # swe-2-max 原生 harness,直连 api.devin.ai;需 PYTHONPATH=multi-harness-eval
+  - import_path: eval_agents.devin_cli:DevinCli
+    model_name: devin/swe-2-max
+    env:
+      DEVIN_SESSION_TOKEN: ${DEVIN_SESSION_TOKEN}
+    extra_allowed_hosts:
+      - api.devin.ai
+      - server.codeium.com
+      - cli.devin.ai
+      - static.devin.ai
