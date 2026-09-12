@@ -7,18 +7,19 @@ repos:
         entry: autocorrect --fix
         language: system
         types: [markdown]
-  - repo: https://github.com/DavidAnson/markdownlint-cli2
-    rev: v0.23.2
-    hooks:
-      - id: markdownlint-cli2
-        args: [--fix]
-  # prettier 必须最后写盘，保证提交结果是 prettier 规范形；版本与 package.json 一致，
-  # 与 VS Code prettier-vscode 解析到的项目本地版本同源
+  # prettier / markdownlint-cli2 一律走 node_modules 里的版本：package.json 是唯一版本清单，
+  # 编辑器（prettierPath 指向同一处）与 hook 同源；缺依赖时响亮报错而非静默换版本。
+  # 顺序即语义：先改内容（autocorrect）→ 再修规则（markdownlint --fix）→ prettier 最后写盘，
+  # 保证落盘结果是 prettier 规范形，commit 后编辑器再 format 必然无 diff。
   - repo: local
     hooks:
+      - id: markdownlint-cli2
+        name: markdownlint-cli2 --fix
+        entry: ./node_modules/.bin/markdownlint-cli2 --fix
+        language: system
+        types: [markdown]
       - id: prettier
         name: prettier --write
-        entry: prettier --write
-        language: node
-        additional_dependencies: [prettier@3.9.6]
+        entry: ./node_modules/.bin/prettier --write
+        language: system
         types: [markdown]

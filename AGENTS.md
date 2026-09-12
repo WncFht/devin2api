@@ -85,3 +85,7 @@
 正确使用 LaTeX 语法，最好不要把数学公式放到代码块里面
 
 - `docs/` 下顶层带日期的笔记必须使用 `YYYY-MM-DD-<slug>.md` 格式；不要使用 `article.md`、`周报.md` 或 `*.zh.md` 这类别名。
+
+## Markdown 工具链
+
+`*.md` 提交会走 pre-commit：autocorrect → markdownlint-cli2 --fix → prettier，版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。hook 改写文件时会 fail 一次，重新 `git add` 再提交。

@@ -80,6 +80,8 @@ go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
 ```
 
+- Markdown toolchain (only needed when touching `*.md`): `npm install` pins prettier + markdownlint-cli2 from `package.json`, `brew install autocorrect`, then `pre-commit install` — commits run autocorrect → markdownlint --fix → prettier in that order
+
 ## Common commands
 
 ```bash
@@ -129,7 +131,8 @@ Concurrent requests in the same second are distinguished by an incrementing suff
 1. **Tests pass**: `go test ./...`
 2. **Formatted**: `gofmt -l .` produces no output
 3. **Comment conventions**: follow the repo's Go comment conventions (`.agent/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
-4. **No real tokens**: `config.yaml` is tracked by git; make sure no real `devin.token` is committed (add it to `.gitignore` if needed)
+4. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
+5. **No real tokens**: `config.yaml` is tracked by git; make sure no real `devin.token` is committed (add it to `.gitignore` if needed)
 
 ## Submitting changes
 
