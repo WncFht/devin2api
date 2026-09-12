@@ -414,7 +414,8 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 	}
 	h.cacheMu.RUnlock()
 
-	resp, err := h.apiClient.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
+	// CLI 版响应与 Cascade 版模型表一致，并多出 subagent_default_model_uid 等字段。
+	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: buildMetadata(h.token),
 	}))
 	if err != nil {
@@ -464,6 +465,18 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 			"supports_images":     c.GetSupportsImages(),
 			"is_capacity_limited": c.GetIsCapacityLimited(),
 			"supports_legacy":     c.GetSupportsLegacy(),
+		}
+		if modelInfo := c.GetModelInfo(); modelInfo != nil {
+			m["context_tokens"] = modelInfo.GetMaxTokens()
+			m["max_output_tokens"] = modelInfo.GetMaxOutputTokens()
+			m["is_model_router"] = modelInfo.GetIsModelRouter()
+			if features := modelInfo.GetModelFeatures(); features != nil {
+				m["supports_tool_calls"] = features.GetSupportsToolCalls()
+				m["supports_parallel_tool_calls"] = features.GetSupportsParallelToolCalls()
+				m["supports_thinking"] = features.GetSupportsThinking()
+				m["preserve_thinking"] = features.GetPreserveThinking()
+				m["interleave_thinking"] = features.GetInterleaveThinking()
+			}
 		}
 
 		var dims []map[string]any

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/leookun/devin-2api/internal/llm"
 )
 
 // Manager 在固定 logs 根目录下为每次请求创建独立 recorder。
@@ -49,6 +51,10 @@ type Completion struct {
 	Provider string
 	// Stream 表示请求是否使用流式响应。
 	Stream bool
+	// UpstreamRequestID 是上游为本次调用分配的追踪标识，报障时可引用。
+	UpstreamRequestID string
+	// Usage 是上游报告的最终 token 用量；失败或未上报时为零值。
+	Usage llm.Usage
 }
 
 // Recorder 保存单次请求的目录、开始时间和各 JSONL 文件序号。
@@ -302,6 +308,18 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		meta["model"] = completion.Model
 		meta["provider"] = completion.Provider
 		meta["stream"] = completion.Stream
+		if completion.UpstreamRequestID != "" {
+			meta["upstream_request_id"] = completion.UpstreamRequestID
+		}
+		if completion.Usage != (llm.Usage{}) {
+			meta["usage"] = map[string]any{
+				"input":       completion.Usage.Input,
+				"output":      completion.Usage.Output,
+				"cache_read":  completion.Usage.CacheRead,
+				"cache_write": completion.Usage.CacheWrite,
+				"total":       completion.Usage.TotalTokens,
+			}
+		}
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err == nil {

@@ -17,7 +17,29 @@ func RequestMessagesProjection(request llm.RequestMessages) map[string]any {
 			"name": tool.Name, "description": tool.Description, "input_schema": tool.InputSchema,
 		})
 	}
-	return map[string]any{"system_prompt": request.SystemPrompt, "messages": messages, "tools": tools}
+	result := map[string]any{
+		"model":          request.Model,
+		"system_prompt":  request.SystemPrompt,
+		"messages":       messages,
+		"tools":          tools,
+		"stop_sequences": request.StopSequences,
+	}
+	if request.ToolChoice != nil {
+		result["tool_choice"] = map[string]any{"mode": request.ToolChoice.Mode, "tool_name": request.ToolChoice.ToolName}
+	}
+	if request.DisableParallelToolCalls {
+		result["disable_parallel_tool_calls"] = true
+	}
+	if request.MaxTokens != nil {
+		result["max_tokens"] = *request.MaxTokens
+	}
+	if request.Temperature != nil {
+		result["temperature"] = *request.Temperature
+	}
+	if request.SessionKey != "" {
+		result["session_key"] = request.SessionKey
+	}
+	return result
 }
 
 // ResponseEventProjection 将响应事件转成避免重复完整 Partial 的日志结构。
@@ -85,18 +107,20 @@ func messageProjection(message llm.Message) map[string]any {
 
 func assistantProjection(message llm.AssistantMessage) map[string]any {
 	return map[string]any{
-		"role":           llm.MessageRoleAssistant,
-		"content":        contentListProjection(message.Content),
-		"api":            message.API,
-		"provider":       message.Provider,
-		"model":          message.Model,
-		"response_model": message.ResponseModel,
-		"response_id":    message.ResponseID,
-		"diagnostics":    message.Diagnostics,
-		"usage":          message.Usage,
-		"stop_reason":    message.StopReason,
-		"error_message":  message.ErrorMessage,
-		"timestamp_ms":   message.TimestampMS,
+		"role":                llm.MessageRoleAssistant,
+		"content":             contentListProjection(message.Content),
+		"api":                 message.API,
+		"provider":            message.Provider,
+		"model":               message.Model,
+		"response_model":      message.ResponseModel,
+		"response_id":         message.ResponseID,
+		"upstream_request_id": message.UpstreamRequestID,
+		"diagnostics":         message.Diagnostics,
+		"usage":               message.Usage,
+		"stop_reason":         message.StopReason,
+		"stop_sequence":       message.StopSequence,
+		"error_message":       message.ErrorMessage,
+		"timestamp_ms":        message.TimestampMS,
 	}
 }
 

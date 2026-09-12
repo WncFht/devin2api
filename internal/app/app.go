@@ -146,8 +146,18 @@ func (application *App) listModels(writer http.ResponseWriter, request *http.Req
 		entry := map[string]any{
 			"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
 		}
-		// 非 OpenAI 标准字段，供面板/客户端识别是否可传图。
+		// 非 OpenAI 标准字段，供面板/网关按能力做请求前 gate。
 		entry["supports_images"] = m.SupportsImages
+		entry["supports_tool_calls"] = m.SupportsToolCalls
+		entry["supports_parallel_tool_calls"] = m.SupportsParallelToolCalls
+		entry["supports_thinking"] = m.SupportsThinking
+		entry["preserve_thinking"] = m.PreserveThinking
+		if m.ContextTokens > 0 {
+			entry["context_tokens"] = m.ContextTokens
+		}
+		if m.MaxOutputTokens > 0 {
+			entry["max_output_tokens"] = m.MaxOutputTokens
+		}
 		data = append(data, entry)
 	}
 	writer.Header().Set("Content-Type", "application/json")
@@ -183,7 +193,13 @@ func (application *App) getModel(writer http.ResponseWriter, request *http.Reque
 			writer.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(writer).Encode(map[string]any{
 				"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
-				"supports_images": m.SupportsImages,
+				"supports_images":              m.SupportsImages,
+				"supports_tool_calls":          m.SupportsToolCalls,
+				"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
+				"supports_thinking":            m.SupportsThinking,
+				"preserve_thinking":            m.PreserveThinking,
+				"context_tokens":               m.ContextTokens,
+				"max_output_tokens":            m.MaxOutputTokens,
 			})
 			return
 		}
@@ -587,6 +603,8 @@ func updateCompletionIdentity(completion *debuglog.Completion, message *llm.Assi
 		return
 	}
 	completion.Provider = message.Provider
+	completion.UpstreamRequestID = message.UpstreamRequestID
+	completion.Usage = message.Usage
 	if message.ResponseModel != "" {
 		completion.Model = message.ResponseModel
 	} else if message.Model != "" {
