@@ -23,6 +23,10 @@ import (
 	"github.com/leookun/devin-2api/internal/debuglog"
 )
 
+// version 由构建期 -ldflags "-X main.version=$(git rev-parse --short HEAD)" 注入；
+// 缺省 dev 表示本地 go run/未注入构建。
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
 	flag.Parse()
@@ -67,11 +71,12 @@ func main() {
 	}
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
+	application.SetVersion(version)
 	if serviceConfig.Devin.Token != "" {
 		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager))
 	}
 	server := application.HTTPServer()
-	slog.Info("HTTP server listening", "addr", listenURL(server.Addr))
+	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -415,12 +415,16 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// 顶层 status 供下游网关（ccload）按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	errorType := common.OpenAIErrorType(message)
+	errorPayload := map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message)}
+	if event.Error != nil && event.Error.DebugRef != "" {
+		errorPayload["debug_ref"] = event.Error.DebugRef
+	}
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
 	response["error"] = map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message), "param": nil}
 	return []SSEEvent{encoder.emit("response.failed", map[string]any{
 		"response": response,
 		"status":   common.HTTPStatus(message),
-		"error":    map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message)},
+		"error":    errorPayload,
 	})}
 }
 

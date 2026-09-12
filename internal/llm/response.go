@@ -53,6 +53,9 @@ type AssistantMessage struct {
 	StopSequence string
 	// ErrorMessage 是生成失败或中止时的可读错误信息。
 	ErrorMessage string
+	// DebugRef 是本代理侧的请求日志引用（调试目录名），由 app 层在错误
+	// 事件下发前注入——客户端/agent 可凭它直接定位完整证据链。
+	DebugRef string
 	// TimestampMS 是创建消息时的 Unix 毫秒时间戳。
 	TimestampMS int64
 }

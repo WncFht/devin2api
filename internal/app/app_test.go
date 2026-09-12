@@ -497,3 +497,58 @@ func TestStreamMidStreamErrorCarriesHTTPStatus(t *testing.T) {
 		t.Fatalf("error event missing top-level status: %s", response.Body.String())
 	}
 }
+
+// TestRequestIDHeaderAndDebugRef 验证响应头与错误体都携带本地调试目录名，
+// agent 无需猜测即可定位完整日志。
+func TestRequestIDHeaderAndDebugRef(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type: llm.ResponseEventError, Reason: llm.StopReasonError,
+		Error: &llm.AssistantMessage{ErrorMessage: "invalid_argument: broken"},
+	}}}
+	root := filepath.Join(t.TempDir(), "logs")
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+
+	// 成功前即失败：上游首个事件就是错误 → 非 200 HTTP 错误响应。
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("X-Request-Id", "agent-corr-1")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+
+	dir := response.Header().Get("X-Request-Id")
+	if dir == "" {
+		t.Fatal("missing X-Request-Id header")
+	}
+	if _, err := os.Stat(filepath.Join(root, dir)); err != nil {
+		t.Fatalf("X-Request-Id %q does not map to a log dir: %v", dir, err)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"debug_ref":"`+dir+`"`) || !strings.Contains(body, `"stage":"response_event"`) {
+		t.Fatalf("error body missing debug_ref/stage: %s", body)
+	}
+	indexData, readErr := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	index := string(indexData)
+	if !strings.Contains(index, `"client_request_id":"agent-corr-1"`) || !strings.Contains(index, `"error_stage":"response_event"`) {
+		t.Fatalf("index missing correlation fields: %s", index)
+	}
+}
+
+// TestStreamErrorCarriesDebugRef 验证已提交 200 的流式错误事件内嵌 debug_ref。
+func TestStreamErrorCarriesDebugRef(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{ResponseID: "resp-1", StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
+			Error: &llm.AssistantMessage{ErrorMessage: "upstream exploded"}},
+	}}
+	root := filepath.Join(t.TempDir(), "logs")
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	dir := response.Header().Get("X-Request-Id")
+	if dir == "" || !strings.Contains(response.Body.String(), `"debug_ref":"`+dir+`"`) {
+		t.Fatalf("stream error missing debug_ref: header=%q body=%s", dir, response.Body.String())
+	}
+}

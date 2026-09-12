@@ -38,7 +38,13 @@ type IndexEntry struct {
 	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
 	ClientIP          string `json:"client_ip,omitempty"`
 	KeyHash           string `json:"key_hash,omitempty"`
-	DroppedEvents     uint64 `json:"dropped_events,omitempty"`
+	// ClientRequestID 是客户端自带的关联 ID（X-Request-Id 等），
+	// 让调用方能用自己的 ID 反查本次请求。
+	ClientRequestID string `json:"client_request_id,omitempty"`
+	// ErrorStage 是首个失败阶段（http_decode/provider_stream/http_stream 等），
+	// 让 grep 直接定位失败发生在哪一层。
+	ErrorStage    string `json:"error_stage,omitempty"`
+	DroppedEvents uint64 `json:"dropped_events,omitempty"`
 }
 
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
@@ -76,6 +82,8 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		UpstreamRequestID: completion.UpstreamRequestID,
 		ClientIP:          recorder.requestMeta.ClientIP,
 		KeyHash:           recorder.requestMeta.KeyHash,
+		ClientRequestID:   recorder.requestMeta.ClientRequestID,
+		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
 	}
 	data, err := json.Marshal(entry)

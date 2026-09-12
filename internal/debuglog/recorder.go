@@ -69,6 +69,9 @@ type RequestMeta struct {
 	// KeyHash 是客户端凭据的 SHA-256 前 8 字节十六进制——
 	// 用于按 key 关联请求，不明文落盘。
 	KeyHash string
+	// ClientRequestID 是客户端自带的关联 ID（X-Request-Id/X-Session-Id），
+	// 让调用方能用自己的 ID 检索本次请求。
+	ClientRequestID string
 }
 
 // Completion 是请求结束时写入 meta.json 的结果摘要。
@@ -131,6 +134,8 @@ type Recorder struct {
 	jsonlFiles map[string]*jsonlFile
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
+	// errorStage 记录首个错误的阶段名，随索引落盘供按失败点检索。
+	errorStage string
 }
 
 // writeTask 是交给写 worker 的一次作业，worker 内串行执行。
@@ -403,6 +408,7 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 			return
 		}
 		recorder.errorWritten = true
+		recorder.errorStage = stage
 		value := recorder.sanitize(map[string]any{
 			"stage":      stage,
 			"message":    err.Error(),
@@ -475,6 +481,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if recorder.requestMeta.KeyHash != "" {
 		client["key_hash"] = recorder.requestMeta.KeyHash
+	}
+	if recorder.requestMeta.ClientRequestID != "" {
+		client["request_id"] = recorder.requestMeta.ClientRequestID
 	}
 	if len(client) > 0 {
 		meta["client"] = client

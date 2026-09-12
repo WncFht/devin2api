@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,6 +65,10 @@ type App struct {
 	concurrency chan struct{}
 	// metrics 是常驻运行计数器；始终可用，供面板和进程日志消费。
 	metrics *obs.Metrics
+	// version 是构建注入的版本标识，healthz 透出供排障定位运行构建。
+	version string
+	// startedAt 是应用创建时间，供 healthz 报 uptime。
+	startedAt time.Time
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -78,6 +83,7 @@ func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debu
 		debugManager: debugManager,
 		concurrency:  make(chan struct{}, limit),
 		metrics:      obs.NewMetrics(),
+		startedAt:    time.Now(),
 	}
 }
 
@@ -94,6 +100,11 @@ func (application *App) SetAPIKey(apiKey string) {
 // SetDashboard 注入管理面板处理器。
 func (application *App) SetDashboard(d DashboardRegistrar) {
 	application.dashboard = d
+}
+
+// SetVersion 记录构建版本，由 main 通过 -ldflags -X 注入。
+func (application *App) SetVersion(version string) {
+	application.version = version
 }
 
 // Router 返回应用的 chi HTTP 路由。
@@ -131,7 +142,14 @@ func (application *App) HTTPServer() *http.Server {
 
 func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
-	_, _ = writer.Write([]byte(`{"status":"ok"}` + "\n"))
+	// 除存活信号外带版本与运行概况：健康检查同时也是排障入口，
+	// 让调用方不碰面板就能确认「跑的是哪一版、日志是否开着」。
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"status":         "ok",
+		"version":        application.version,
+		"uptime_seconds": int64(time.Since(application.startedAt).Seconds()),
+		"debug_logging":  application.debugManager != nil,
+	})
 }
 
 // listModels 返回 OpenAI 兼容的 GET /v1/models 列表。
@@ -315,13 +333,20 @@ func (application *App) createCompletion(
 ) {
 	reqMetrics := application.metrics.Begin()
 	recorder := application.debugManager.Start(debuglog.RequestMeta{
-		Method:    request.Method,
-		Path:      request.URL.Path,
-		API:       api,
-		ClientIP:  clientIP(request),
-		UserAgent: request.UserAgent(),
-		KeyHash:   requestCredentialHash(request),
+		Method:          request.Method,
+		Path:            request.URL.Path,
+		API:             api,
+		ClientIP:        clientIP(request),
+		UserAgent:       request.UserAgent(),
+		KeyHash:         requestCredentialHash(request),
+		ClientRequestID: clientRequestID(request),
 	})
+	// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
+	// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
+	// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
+	if ref := debugRef(recorder); ref != "" {
+		writer.Header().Set("X-Request-Id", ref)
+	}
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
 	startedAt := time.Now()
 	responseBytes := 0
@@ -611,6 +636,11 @@ func writeProtocolStream(
 			return latest, err
 		}
 		latest = eventMessage(event, latest)
+		if event.Type == llm.ResponseEventError && event.Error != nil {
+			// 流内错误事件已没有 HTTP 头可用——把调试引用编进错误 JSON，
+			// 让客户端（含 WS 帧）自身携带定位键。
+			event.Error.DebugRef = debugRef(recorder)
+		}
 		encodedEvents, encodeErr := encoder.Encode(event)
 		if encodeErr != nil {
 			return latest, encodeErr
@@ -713,6 +743,20 @@ func clientIP(request *http.Request) string {
 	return host
 }
 
+// clientRequestID 提取客户端自带的关联 ID，供其事后按自己的 ID 反查日志。
+// 只认常见关联头；长度截断防止异常大的头放大日志体积。
+func clientRequestID(request *http.Request) string {
+	for _, header := range []string{"X-Request-Id", "X-Session-Id"} {
+		if value := strings.TrimSpace(request.Header.Get(header)); value != "" {
+			if len(value) > 128 {
+				return value[:128]
+			}
+			return value
+		}
+	}
+	return ""
+}
+
 // requestCredentialHash 计算请求携带凭据的短哈希用于按 key 关联日志；
 // 未携带凭据时返回空串。永远不落明文——SHA-256 前 8 字节。
 func requestCredentialHash(request *http.Request) string {
@@ -731,6 +775,16 @@ func hashCredential(credential string) string {
 	}
 	sum := sha256.Sum256([]byte(credential))
 	return hex.EncodeToString(sum[:8])
+}
+
+// debugRef 返回本请求的调试目录名作为跨接口关联引用；
+// 未启用调试日志（nil recorder）或异常路径时为空串。
+func debugRef(recorder *debuglog.Recorder) string {
+	dir := filepath.Base(recorder.DirectoryPath())
+	if dir == "." || dir == "/" {
+		return ""
+	}
+	return dir
 }
 
 func httpRequestProjection(request *http.Request, body []byte) map[string]any {
@@ -768,13 +822,19 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
-	// 透传完整 message，不改写上游文案。
-	response := map[string]any{"error": map[string]any{
+	// 透传完整 message，不改写上游文案；stage 标明失败发生在哪一层，
+	// debug_ref 是本地调试目录名，agent 凭它一次调用即可拿到全部证据。
+	payload := map[string]any{
 		"message": message,
 		"type":    errorType,
 		"code":    common.ErrorCode(message),
 		"param":   nil,
-	}}
+		"stage":   stage,
+	}
+	if ref := debugRef(recorder); ref != "" {
+		payload["debug_ref"] = ref
+	}
+	response := map[string]any{"error": payload}
 	_ = json.NewEncoder(writer).Encode(response)
 	recorder.AppendJSONL("06-http-response.jsonl", "error", response)
 }
