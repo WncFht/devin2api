@@ -70,7 +70,7 @@ func (h *Handler) sampleQuota(path string) {
 	_, plan, _, err := h.fetchUserStatus(ctx)
 	if err != nil || plan == nil {
 		if err != nil {
-			slog.Debug("quota sample failed", "error", err)
+			slog.Warn("quota sample failed", "error", err)
 		}
 		return
 	}

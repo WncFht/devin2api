@@ -142,7 +142,8 @@ func (adapter *Adapter) currentToken() string {
 }
 
 // reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
-// 拿到非空且不同的新 token 才视为自愈成功。
+// 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
+// 凭据静默失效是排障天敌，进程日志里必须留痕。
 func (adapter *Adapter) reloadToken() bool {
 	source := adapter.config.TokenSource
 	if source == nil {
@@ -150,11 +151,13 @@ func (adapter *Adapter) reloadToken() bool {
 	}
 	token := strings.TrimSpace(source())
 	if token == "" {
+		slog.Warn("upstream unauthenticated but TokenSource returned no token")
 		return false
 	}
 	adapter.tokenMu.Lock()
 	defer adapter.tokenMu.Unlock()
 	if token == adapter.token {
+		slog.Warn("upstream unauthenticated and TokenSource returned the same token; credential refresh did not help")
 		return false
 	}
 	adapter.token = token
@@ -628,6 +631,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				if upstreamErr != nil && stream.tryReopen(upstreamErr) {
 					continue
 				}
+				stream.recordUpstreamFailure(upstreamErr)
 				stream.queue = stream.release(stream.decoder.finish(upstreamErr))
 				stream.finished = true
 				continue
@@ -648,6 +652,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			if stream.tryReopen(stallErr) {
 				continue
 			}
+			stream.recordUpstreamFailure(stallErr)
 			stream.queue = stream.release(stream.decoder.finish(stallErr))
 			stream.finished = true
 		case <-ctx.Done():
@@ -690,6 +695,25 @@ func (stream *responseStream) tryReopen(cause error) bool {
 	stream.finished = false
 	stream.queue = nil
 	return true
+}
+
+// recordUpstreamFailure 把不可重试的上游侧失败记为请求目录的首个失败点：
+// 传输层断裂（EOF/重置/超时/静默判死，即非 connect.Error）记
+// devin_transport；Connect 协议语义错误记 devin_connect。ctx 取消不记——
+// 客户端断连由 HTTP 外层记 client_disconnected，不应被上游 stage 抢占。
+// WriteError 是 first-write-wins，此处记录后外层 http_stream 只作补充。
+func (stream *responseStream) recordUpstreamFailure(cause error) {
+	if cause == nil || stream.recorder == nil {
+		return
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return
+	}
+	stage := "devin_connect"
+	if isTransientConnectError(cause) {
+		stage = "devin_transport"
+	}
+	stream.recorder.WriteError(stage, cause)
 }
 
 // drainFrames 把看门狗判死时已缓冲未消费的上游帧补记进原始日志——
