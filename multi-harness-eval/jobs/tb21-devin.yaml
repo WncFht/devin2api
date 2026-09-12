@@ -1,0 +1,27 @@
+# devin 单跑 Terminal-Bench 2.1(其它 harness 需 ccload/devin-2api 在线,先独立跑 devin)
+# 用法(在仓库根目录):
+#   export DEVIN_API_KEY=<devin-session-token$...>
+#   harbor run --config multi-harness-eval/jobs/tb21-devin.yaml
+jobs_dir: multi-harness-eval/runs
+job_name: tb21-devin
+n_attempts: 3
+orchestrator:
+  type: local
+  n_concurrent_trials: 4
+environment:
+  type: docker
+  force_build: true
+datasets:
+  - name: terminal-bench/terminal-bench-2-1
+    # n_tasks: 10   # 先跑子集看稳定性,确认后注释掉跑全量
+agents:
+  - name: devin
+    model_name: devin/swe-2-max
+    n_concurrent: 2           # 走真实 Devin 计费,单 agent 限流
+    env:
+      DEVIN_API_KEY: ${DEVIN_API_KEY}
+    extra_allowed_hosts:
+      - api.devin.ai
+      - server.codeium.com
+      - cli.devin.ai
+      - static.devin.ai

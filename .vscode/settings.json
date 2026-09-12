@@ -1,0 +1,12 @@
+{
+    // prettier 版本以 package.json/node_modules 为唯一事实源；
+    // 缺 node_modules 时直接报错，而不是静默回落到扩展内置版本
+    "prettier.prettierPath": "./node_modules/prettier",
+    "[markdown]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll.markdownlint": "always"
+        }
+    }
+}

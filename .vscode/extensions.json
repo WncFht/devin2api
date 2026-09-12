@@ -1,0 +1,9 @@
+{
+    "recommendations": [
+        "esbenp.prettier-vscode",
+        "davidanson.vscode-markdownlint",
+        "huacnlee.autocorrect",
+        "editorconfig.editorconfig",
+        "golang.go"
+    ]
+}
