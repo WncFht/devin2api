@@ -117,3 +117,5 @@
 - 保留策略分层：`debug.retention_days`（目录整删）与 `debug.max_total_mb`（容量淘汰）之外，`debug.payload_hours` 超时剥离大文件（03/04/06/attachments），`debug.keep_error_dirs` 在容量淘汰时保护最近 N 个含 `error.json` 的失败目录。
 
 注意：请求体可能含用户隐私内容；日志目录与 API 均不落明文凭据（`key_hash` 是 SHA-256 截断），但内容字段未脱敏——对外分享前先读 `meta.json` 再决定是否给全量。
+
+部署看 docs/macos-deployment.md

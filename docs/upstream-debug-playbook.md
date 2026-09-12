@@ -15,18 +15,19 @@ client (cc / codex / kimi-cli / ...)
 
 ## 错误速查表
 
-| 现象                                                  | 层         | 含义                              | 处理                                                     |
-| ----------------------------------------------------- | ---------- | --------------------------------- | -------------------------------------------------------- |
-| HTTP 401                                              | devin-2api | api_key 不对                      | 查 `auth.api_key` / 请求头                               |
-| HTTP 503 `devin token not configured`                 | devin-2api | 没拿到上游 token                  | 查 `devin.token` / 自动发现链                            |
-| `permission_denied`（无 policy 文案）                 | 上游       | 模型 UID 不存在/无权              | 查别名表、模型名拼写                                     |
-| `permission_denied` + "blocked by our content policy" | 上游       | 命中特征句指纹库                  | bisect 请求体，把触发句加进 `sanitize.go`                |
-| `invalid_argument`                                    | 上游       | **wire 形状不符**（不是内容问题） | 对照本文「已验证 wire 契约」逐条查                       |
-| `unexpected EOF` / connection reset                   | 传输       | 上游偶发抖动                      | 建立阶段重试 3 次（仅纯传输错误）；仍失败换模型/稍后再试 |
-| Connect code 错误（含 `unavailable`）                 | 上游       | 确定性语义错误                    | **不重试**——"try later" 文案是固定模板                   |
-| HTTP 200 + SSE `response.failed`/`error`              | 上游       | 流建立后上游才拒绝                | 同上，看事件里的 code/status 分类                        |
-| ccload 渠道被冷却                                     | ccload     | 连续失败计数                      | `SELECT cooldown_until FROM channels WHERE id=293`       |
-| 进程活着但端口拒绝连接                                | launchd    | dyld/Gatekeeper 卡住              | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉        |
+| 现象                                                  | 层         | 含义                              | 处理                                                                                                                    |
+| ----------------------------------------------------- | ---------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| HTTP 401                                              | devin-2api | api_key 不对                      | 查 `auth.api_key` / 请求头                                                                                              |
+| HTTP 503 `devin token not configured`                 | devin-2api | 没拿到上游 token                  | 查 `devin.token` / 自动发现链                                                                                           |
+| `permission_denied`（无 policy 文案）                 | 上游       | 模型 UID 不存在/无权              | **先查 `devin.aliases` 目标是否还活着**（stderr 有 `model absent from upstream catalog` Warn 即此情形），再查模型名拼写 |
+| 某模型突然 `not_found`/`permission_denied`            | 上游       | 上游可能给该模型加了版本门        | bump `devin.client_version` 到最新 CLI 版本再试                                                                         |
+| `permission_denied` + "blocked by our content policy" | 上游       | 命中特征句指纹库                  | bisect 请求体，把触发句加进 `sanitize.go`                                                                               |
+| `invalid_argument`                                    | 上游       | **wire 形状不符**（不是内容问题） | 对照本文「已验证 wire 契约」逐条查                                                                                      |
+| `unexpected EOF` / connection reset                   | 传输       | 上游偶发抖动                      | 建立阶段重试 3 次（仅纯传输错误）；仍失败换模型/稍后再试                                                                |
+| Connect code 错误（含 `unavailable`）                 | 上游       | 确定性语义错误                    | **不重试**——"try later" 文案是固定模板                                                                                  |
+| HTTP 200 + SSE `response.failed`/`error`              | 上游       | 流建立后上游才拒绝                | 同上，看事件里的 code/status 分类                                                                                       |
+| ccload 渠道被冷却                                     | ccload     | 连续失败计数                      | `SELECT cooldown_until FROM channels WHERE id=293`                                                                      |
+| 进程活着但端口拒绝连接                                | launchd    | dyld/Gatekeeper 卡住              | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉                                                                       |
 
 ## 标准排查流程
 

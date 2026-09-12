@@ -22,40 +22,41 @@
 
 ### 消息侧（`ChatMessagePrompt`）
 
-| 字段                             | 现状                               | 判断                                                                                                                                                                   |
-| -------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `output_id` (#15)                | **上游回给我们，我们不存也不回放** | ~~建议回放回填~~ **撤销**——实测免费档响应从不下发这四个字段（live-probes），无回放对象。CLI 序列化 `ChatMessagePrompt` 时带这些 ID 是付费/内部档行为。若未来下发再议。 |
-| `thinking_id` (#16)              | 同上                               | 同上，实测不下发。                                                                                                                                                     |
-| `signature_type` (#18)           | 同上                               | 同上，实测不下发；且签名 `sealed.v1` 上游不校验（伪造签名回放照常工作），回放无必要。                                                                                  |
-| `phase` (#19)                    | 同上                               | 同上，实测不下发。                                                                                                                                                     |
-| `num_tokens` (#4)                | 未设                               | 调用方预算填，上游可能用来做 context 预算。实测静默接受、CLI 不发。**仅记录**。                                                                                        |
-| `safe_for_code_telemetry` (#5)   | 未设                               | 隐私位，默认 false 即可。**仅记录**。                                                                                                                                  |
-| `prompt_annotation_ranges` (#14) | 未设                               | IDE 的 prompt 区域标注。**仅记录**。                                                                                                                                   |
-| `gemini_thought_signature` (#17) | 未用                               | bytes 形式的 Gemini 签名，跟 `signature` 串并存。我们对所有模型统一走 `signature`——若某天接 `gemini-*` 模型且上游只认 bytes 签名，会丢。**仅记录**。                   |
+| 字段                             | 现状                           | 判断                                                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output_id` (#15)                | **部分下发，我们不存也不回放** | ~~撤销~~ **四轮修正**：OpenAI 路径（gpt-5-6-sol 系）响应帧**带 `outputId=msg_*`**（OpenAI 侧 message id，与 reasoning item 的 `rs_*` 同前缀）；swe-2/glm/deepseek/gemini/claude 路径仍不下发。**建议**：有则存进 item 元数据，回放时回填——对 `/v1/responses` 客户端是原生 `id`。                     |
+| `thinking_id` (#16)              | 未观测到                       | 四轮全 provider 未出现。**仅记录**。                                                                                                                                                                                                                                                                 |
+| `signature_type` (#18)           | **三种体制已观测**             | ~~不下发~~ **四轮修正**：实测 `sealed`（swe-2，`sealed.v1.<b64>`）、`anthropic`（claude-thinking，原生签名 base64）、`openai`（gpt-sol，signature=序列化 reasoning item JSON 含 `encrypted_content`）。**注意**：张冠李戴的 `signature_type` 触发流内 `invalid_argument`——必须与 provider 配对存取。 |
+| `phase` (#19)                    | 未观测到                       | 四轮全 provider 未出现。**仅记录**。                                                                                                                                                                                                                                                                 |
+| `num_tokens` (#4)                | 未设                           | 调用方预算填，上游可能用来做 context 预算。实测静默接受、CLI 不发。**仅记录**。                                                                                                                                                                                                                      |
+| `safe_for_code_telemetry` (#5)   | 未设                           | 隐私位，默认 false 即可。**仅记录**。                                                                                                                                                                                                                                                                |
+| `prompt_annotation_ranges` (#14) | 未设                           | IDE 的 prompt 区域标注。**仅记录**。                                                                                                                                                                                                                                                                 |
+| `gemini_thought_signature` (#17) | 未用                           | bytes 形式的 Gemini 签名。四轮实测 gemini-3-1-pro-high（GEMINI_DATABRICKS）**string/bytes 两种签名都不下发**——该 provider 路径上此字段是死的。**仅记录**。                                                                                                                                           |
 
 ### 响应侧（`GetChatMessageResponse`）
 
-| 字段                                                                                                                                                                | 现状           | 判断                                                                                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `output_id` (#15) / `thinking_id` (#16)                                                                                                                             | **解码器没读** | ~~应存进 `partial` 供回放回填~~ **撤销**——免费档响应不下发这些字段（live-probes），没有可存的对象。                                     |
-| `signature_type` (#21→delta_signature_type) / `phase` (#25)                                                                                                         | 没读           | 同上，实测不下发。                                                                                                                      |
-| `gemini_thought_signature` (#20)                                                                                                                                    | 没读           | bytes 签名；如果哪天用到 Gemini 家族要补。                                                                                              |
-| `redact` (#8)                                                                                                                                                       | 没读           | 上游让我们在持久化时抹掉这段输出（遥测/ZDR 场景）。我们做纯转发可以忽略，但若客户端回放给我们时带了 redact 语义我们要留意。**仅记录**。 |
-| `prompt` (#19)                                                                                                                                                      | 没读           | 怀疑是回显（upstream 把 prompt 回填让客户端确认），可忽略。                                                                             |
-| `latency` (#12) / `completion_profile` (#13)                                                                                                                        | 没读           | TTFT/总耗时，可以记录到 usage 扩展字段做观测。**可选**。                                                                                |
-| `credit_cost` (#14) / `committed_credit_cost` (#18) / `committed_acu_cost` (#22) / `committed_quota_cost_basis_points` (#26) / `committed_overage_cost_cents` (#27) | 没读           | 计费明细。如果 `usage` 上想透传成本，可从这组取。**可选**。                                                                             |
-| `request_id` (#17)                                                                                                                                                  | **已读**       | 已实现：进 `meta.json` 的 `upstream_request_id` 与进程日志 slog 行；provider 侧 `api_provider`+`x-request-id` 进 `diagnostics`。        |
-| `arena_invocation_cap_reached` (#24)                                                                                                                                | 没读           | arena 模式配额到达标志。**仅记录**。                                                                                                    |
-| `response_dimension_groups` (#28)                                                                                                                                   | 没读           | UI 展示用的维度组（copyable code / metric / cumulative metric）。客户端用不上。**仅记录**。                                             |
-| `usage.provider_refusal` (#12 inside ModelUsageStats)                                                                                                               | **已读**       | 已实现：decoder 检测到 `provider_refusal=true` 时直接 fail，错误信息写明 "upstream provider refused"。                                  |
-| `usage.billing_model_uid` / `requested_model_uid`                                                                                                                   | 没读           | 可用来观测模型实际路由（比如 swe-2-max 落到哪个内部模型）。**可选**。                                                                   |
+| 字段                                                                                                                                                                | 现状                            | 判断                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output_id` (#15) / `thinking_id` (#16)                                                                                                                             | **解码器没读**                  | **四轮修正**：`output_id` 在 OpenAI 路径**有下发**（`msg_*`），值得存；`thinking_id` 全 provider 未出现。                                                               |
+| `signature_type` (#21→delta_signature_type) / `phase` (#25)                                                                                                         | **signature_type 已下发但没读** | **四轮修正**：`sealed`/`anthropic`/`openai` 三体制实测到；signature 本身我们已存但 type 丢了——回放张冠李戴会触发上游 `invalid_argument`，**应配对存**。`phase` 未出现。 |
+| `gemini_thought_signature` (#20)                                                                                                                                    | 没读                            | bytes 签名；GEMINI_DATABRICKS 路径实测不下发任何签名，死字段（免费档）。                                                                                                |
+| `usage.message_id`（ModelUsageStats #7）                                                                                                                            | 没读                            | **四轮新发现**：Anthropic 路径在此下发原生 `msg_*` message id——provider 侧溯源字段，建议进 diagnostics。                                                                |
+| `redact` (#8)                                                                                                                                                       | 没读                            | 上游让我们在持久化时抹掉这段输出（遥测/ZDR 场景）。我们做纯转发可以忽略，但若客户端回放给我们时带了 redact 语义我们要留意。**仅记录**。                                 |
+| `prompt` (#19)                                                                                                                                                      | 没读                            | 怀疑是回显（upstream 把 prompt 回填让客户端确认），可忽略。                                                                                                             |
+| `latency` (#12) / `completion_profile` (#13)                                                                                                                        | 没读                            | TTFT/总耗时，可以记录到 usage 扩展字段做观测。**可选**。                                                                                                                |
+| `credit_cost` (#14) / `committed_credit_cost` (#18) / `committed_acu_cost` (#22) / `committed_quota_cost_basis_points` (#26) / `committed_overage_cost_cents` (#27) | 没读                            | 计费明细。如果 `usage` 上想透传成本，可从这组取。**可选**。                                                                                                             |
+| `request_id` (#17)                                                                                                                                                  | **已读**                        | 已实现：进 `meta.json` 的 `upstream_request_id` 与进程日志 slog 行；provider 侧 `api_provider`+`x-request-id` 进 `diagnostics`。                                        |
+| `arena_invocation_cap_reached` (#24)                                                                                                                                | 没读                            | arena 模式配额到达标志。**仅记录**。                                                                                                                                    |
+| `response_dimension_groups` (#28)                                                                                                                                   | 没读                            | UI 展示用的维度组（copyable code / metric / cumulative metric）。客户端用不上。**仅记录**。                                                                             |
+| `usage.provider_refusal` (#12 inside ModelUsageStats)                                                                                                               | **已读**                        | 已实现：decoder 检测到 `provider_refusal=true` 时直接 fail，错误信息写明 "upstream provider refused"。                                                                  |
+| `usage.billing_model_uid` / `requested_model_uid`                                                                                                                   | 没读                            | 可用来观测模型实际路由（比如 swe-2-max 落到哪个内部模型）。**可选**。                                                                                                   |
 
 ### `ChatToolCall`（`ExaCodeiumCommonPb_ChatToolCall`）
 
-| 字段                                              | 现状     | 判断                                                                                                                                                                                                  |
-| ------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `invalid_json_str` (#4) / `invalid_json_err` (#5) | **没读** | 模型吐非法 JSON 时参数落在这两个字段。**降级为仅记录**：swe-2-max 上实测不可诱导（provider 侧约束解码兜底，live-probes）；若某天其他模型出现，方向是 `invalid_json_str` 非空时原文透传而非兜底 `{}`。 |
-| `is_custom_tool_call` (#6)                        | 没读     | 上游标记该调用走 custom_tool_grammar（freeform）而非 JSON。**仅记录**——`is_custom_tool` 方向实测上游报错（见下表），返回侧也未见下发。                                                                |
+| 字段                                              | 现状     | 判断                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invalid_json_str` (#4) / `invalid_json_err` (#5) | **没读** | 响应方向 swe-2-max 不可诱导（provider 约束解码兜底）。**四轮新证据（历史方向）**：回放 `is_custom_tool_call=true`+`invalid_json_str=<patch 原文>` 的 call 被上游正常消费、模型读到了 patch 内容——该字段是**有效的历史通道**。若解码端遇到应原文透传而非兜底 `{}`。另注意：历史里 `arguments_json` 非法 JSON 实测结果不稳定（一次 invalid_argument、一次容忍）。 |
+| `is_custom_tool_call` (#6)                        | 没读     | 上游标记该调用走 freeform。**四轮**：作为历史字段回放被正常接受（配合 `invalid_json_str`）；响应方向未见下发。**仅记录**。                                                                                                                                                                                                                                      |
 
 ### `ChatToolDefinition`（`ExaChatPb_ChatToolDefinition`）
 
@@ -157,9 +158,9 @@ CLI 用 GetCliModelConfigs 拿模型表 + `subagent_default_model_uid` 决定 si
 
 ### 该改（有证据表明不改会出错或丢功能）
 
-1. ~~**回放时带上 `output_id`/`thinking_id`/`signature_type`/`phase`**~~：**撤销**——免费档上游从不下发这四个字段（见 live-probes 文档），无回放对象。若未来付费档开始下发再议。
+1. **存 `signature_type`（与 signature 配对）+ `output_id`**：**四轮修正后重新成立**——`signature_type` 三种体制（sealed/anthropic/openai）实测下发，张冠李戴回放会触发流内 `invalid_argument`；`outputId` 在 OpenAI 路径是 `msg_*` 原生 id。`thinking_id`/`phase` 仍全 provider 未观测，不存。另外 `signature_type=openai` 时 signature 是完整 reasoning item（含 `encrypted_content`）——给 `/v1/responses` 客户端时可还原成标准 reasoning item，是多轮 reasoning 的关键通道。
 
-2. **`ChatToolCall.invalid_json_str`/`invalid_json_err` 处理**：**仍未实现**。模型吐非 JSON 时，参数不落在 `arguments_json`，`complete` 兜底成 `{}`——上游把"坏参数"静默吞掉。注意实测中 swe-2-max 无法诱导出该字段（约束解码兜底，见 live-probes），优先级低；若某天真出现，方向是 `invalid_json_str` 非空时原样透传给客户端而不是 `{}`。
+2. **`ChatToolCall.invalid_json_str`/`invalid_json_err` 处理**：**仍未实现**。模型吐非 JSON 时，参数不落在 `arguments_json`，`complete` 兜底成 `{}`——上游把"坏参数"静默吞掉。响应方向 swe-2-max 无法诱导（约束解码兜底），但**历史方向已验证该字段有效**（live-probes §十一 `custom-tool-call-flag`：模型能读到 patch 原文）。方向不变：`invalid_json_str` 非空时原样透传给客户端。
 
 3. ~~**`tool_arg_leak_recovery` 同款防御**~~：**已实现**——`complete` 检测到 `arguments_json` 不是 JSON object 时先走 `repairLeakedXMLArguments` 把 `<parameter name="X">v</parameter>` 解回 JSON，失败才兜底 `{}`（`response_decoder.go`）。
 
@@ -172,6 +173,14 @@ CLI 用 GetCliModelConfigs 拿模型表 + `subagent_default_model_uid` 决定 si
 6.5 **`stop_sequences` 本地截断**（原"gaps"外新增，已实现）：上游 `stopPatterns` 实测不生效，已在 `responseDecoder` 做尾部保留 + 本地截断，命中时上报 `stopSequence`/`stop_sequence`。
 
 6.6 **错误重试修正**（已实现）：`unavailable` 从瞬时重试集移除——上游该码是确定性语义错误的伪装（"try later" 文案是固定模板）。
+
+6.7 **四轮新增：TOOL 结果契约**（live-probes §十一）：上游硬约束=「TOOL 消息必须出现在至少一个 call 之后」「不能 call,call,result,result 分组」。我们的 `pairToolCallsWithResults`/`demoteOrphanToolResults` 方向已被证明必要；剩余缺口在入口侧——OpenAI Chat `findToolName` 对未知 call id 硬 400、Responses `function_call_output` 只认 `call_id` 一种字段名——应统一走孤儿降级而非入口拒绝。
+
+6.8 **四轮新增：`resource_exhausted` 文案解析**：真实限流错误（`"Your limit will reset in N seconds"`）无 Retry-After 头、无 RetryInfo detail，唯一可用 hint 在文案。建议解析 `reset in (\d+) seconds` → 下游 `Retry-After` + `429`；同时注意 `CheckUserMessageRateLimit`/`CheckChatCapacity` 与实际限流**互相独立**，不能当闸门。
+
+6.9 **四轮新增：工具名/工具引用前置校验**：上游合法字符集约 `[A-Za-z0-9_-]`（`a.b`/`mcp::x`/非 ASCII 全 `invalid_argument` 且文案模糊）；`tool_choice` 指名不存在工具也报模糊 `invalid_argument`。入口本地校验能把模糊流内错变成清晰的 400。
+
+6.10 **四轮新增：`MIN_LOG_PROB` 显式映射**：claude 路径正常收尾枚举是 `MIN_LOG_PROB` 而非 `STOP_PATTERN`，default 兜底虽对但应显式列出避免误读。
 
 ### 可选（能改善但非必须）
 
@@ -194,7 +203,8 @@ CLI 用 GetCliModelConfigs 拿模型表 + `subagent_default_model_uid` 决定 si
 > **2026-09-12 已用 `cmd/probe` 对真实上游逐条实测，结论见 `2026-09-12-upstream-live-probes.md`**。要点：
 >
 > - CLI 请求（v3000.2.17 抓包）**不填** `provider_source`/`language`/`prompt_id`/`num_tokens`/`safe_for_code_telemetry`；实测逐项打在 swe-2-max 上均静默接受。
-> - `output_id`/`thinking_id`/`signature_type`/`phase` 在免费档响应中**不下发**，无回放需求；签名 `sealed.v1` 仅 swe-2 系有，且**上游不校验**（伪造签名回放照常工作）。
+> - ~~`output_id`/`thinking_id`/`signature_type`/`phase` 在免费档响应中不下发~~ **四轮修正**：`output_id`/`signature_type` 按 provider 有下发（live-probes §十）；`thinking_id`/`phase` 仍未见。签名 `sealed.v1` 上游不校验内容，但 **`signature_type` 张冠李戴会触发 `invalid_argument`**。
 > - `AssignModel` 链路完整验证：jwt 绑 `cascade_id`、不绑 model_uid；`subagent-default`→`swe-1-7-medium`。
-> - `invalid_json_str` 在 swe-2-max 不可诱导（上游约束解码兜底）。
+> - `invalid_json_str` 在 swe-2-max 响应方向不可诱导（上游约束解码兜底），但历史方向有效（live-probes §十一）。
 > - 新增事实：`tool_choice.option_name` 合法值 {none,auto,required}（`any` 报错）、`stopPatterns`/`maxNewlines`/`disable_parallel_tool_calls` 上游不生效、`numCompletions>1` 崩流、非 CASCADE `request_type` 需真实会话。
+> - **四轮新增**：TOOL 消息契约矩阵（孤儿 result 必炸、分组 call/result 必炸、id 不匹配可容忍）、限流 `resource_exhausted` 无 RetryInfo 只有文案秒数、TOOL 消息挂图有效、PDF mime 走 Images 通道被拒、隐式缓存的 `cacheReadTokens` 偶发出现。
