@@ -45,6 +45,8 @@ type Handler struct {
 	metrics *obs.Metrics
 	// debugManager 暴露日志管道自身指标（丢弃数、活跃目录数）。
 	debugManager *debuglog.Manager
+	// version 是运行中二进制的构建版本，由 main 经 SetVersion 注入。
+	version string
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
@@ -71,6 +73,11 @@ func New(password, baseURL, token, proxy string, forceHTTP1 bool, metrics *obs.M
 		metrics:       metrics,
 		debugManager:  debugManager,
 	}
+}
+
+// SetVersion 记录构建版本，stats/index 端点透出，供排障辨认运行中的二进制。
+func (h *Handler) SetVersion(version string) {
+	h.version = version
 }
 
 // Register 将面板路由注册到 mux。有 token 即可启用；密码仅控制是否登录。
@@ -104,7 +111,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	payload := map[string]any{}
+	payload := map[string]any{"version": h.version}
 	if h.metrics != nil {
 		payload["http"] = h.metrics.Snapshot()
 	}
@@ -125,6 +132,7 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"service": "devin-2api",
+		"version": h.version,
 		"auth":    "dashboard.password 非空时可用 cookie 会话或 Authorization: Bearer <密码>",
 		"endpoints": []map[string]string{
 			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警"},

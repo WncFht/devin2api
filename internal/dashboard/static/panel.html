@@ -78,7 +78,7 @@ tr:hover{background:#222632}
 </head>
 <body>
 <div class="container">
-<h1>Devin API 管理面板</h1>
+<h1>Devin API 管理面板 <span class="muted" id="versionTag" style="font-size:12px;font-weight:400"></span></h1>
 <div class="nav">
 <a href="#statsSection">指标</a>
 <a href="#requestsSection">请求</a>
@@ -501,6 +501,7 @@ try{
 const res=await fetch('/panel/api/stats');
 const data=await res.json();
 const el=document.getElementById('statsSection');
+document.getElementById('versionTag').textContent=data.version?('@ '+data.version):'';
 let html='<h2>代理运行指标 <button class="chip" id="debugToggle" onclick="toggleDebug()" style="display:none">日志开关</button></h2><div class="grid">';
 const h=data.http||{};
 html+=card('活跃请求',h.active_requests??0);

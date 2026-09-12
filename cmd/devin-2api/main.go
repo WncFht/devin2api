@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -23,16 +24,49 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
-// version 由构建期 -ldflags "-X main.version=$(git rev-parse --short HEAD)" 注入；
-// 缺省 dev 表示本地 go run/未注入构建。
+// version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
+// 注入（见 scripts/deploy.sh）；缺省 dev 表示未注入构建，此时 resolvedVersion
+// 回退到 Go 内嵌的 VCS build info，让手动 go build 的二进制也能自报 commit。
 var version = "dev"
+
+// resolvedVersion 返回对外展示的运行版本：注入值优先，其次 build info 的
+// 短 commit（dirty 标记工作区未提交），都没有时才退回 "dev"。
+func resolvedVersion() string {
+	if version != "dev" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	var revision, modified string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value
+		}
+	}
+	if revision == "" {
+		return version
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if modified == "true" {
+		revision += "-dirty"
+	}
+	return "dev-" + revision
+}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
 	flag.Parse()
+	resolved := resolvedVersion()
 	if *showVersion {
-		fmt.Println(version)
+		fmt.Println(resolved)
 		return
 	}
 
@@ -90,14 +124,15 @@ func main() {
 	defer debugManager.Close()
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
-	application.SetVersion(version)
+	application.SetVersion(resolved)
 	if serviceConfig.Devin.Token != "" {
 		panel := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+		panel.SetVersion(resolved)
 		panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 		application.SetDashboard(panel)
 	}
 	server := application.HTTPServer()
-	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", version)
+	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
