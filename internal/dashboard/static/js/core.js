@@ -119,7 +119,7 @@ function resultBadge(result) {
   const m = map[result] || ['muted', result || '-'];
   return '<span class="rbadge r-' + m[0] + '">' + esc(m[1]) + '</span>';
 }
-// 阈值着色：秒值与百分比分档上色的统一口径（参照 ccLoad timingColor）。
+// 阈值着色：秒值与百分比分档上色的统一口径（参照同类面板的 timingColor）。
 function secClass(v, okLim, warnLim) {
   const s = Number(v) / 1000;
   return s < okLim ? 'status-ok' : s < warnLim ? 'status-warn' : 'status-err';
@@ -288,7 +288,7 @@ const Tabs = {
   },
 };
 
-// Polls 是面板的轮询调度器（对齐 ccLoad createAutoRefresh 的行为）：
+// Polls 是面板的轮询调度器（对齐同类面板自动刷新的行为）：
 // - setTimeout 链而非 setInterval——fn 落地才排下一轮，慢请求不会在飞叠加；
 // - 某轮若页面非当前页 / 浏览器后台 / 确认弹窗打开则跳过，下轮照常；
 // - interval 可为固定 ms 或 ()=>ms（按当前状态算节奏，如请求页活跃加速）；

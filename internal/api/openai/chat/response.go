@@ -249,7 +249,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// OpenAI Chat Completions 流式错误没有官方统一格式。
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。
-	// 顶层 status 供下游网关（ccload）按真实 HTTP 语义分类错误。
+	// 顶层 status 供下游网关按真实 HTTP 语义分类错误。
 	errorPayload := map[string]any{
 		"message": message,
 		"type":    common.OpenAIErrorType(message),

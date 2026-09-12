@@ -93,7 +93,7 @@ func IsContextLengthError(message string) bool {
 
 // HTTPStatus 把上游错误消息映射为建议的 HTTP 状态码。
 // 同一份映射同时用于响应行状态与流式错误事件里的 status 字段：
-// 下游网关（如 ccload）按状态码区分"请求级错误"与"渠道故障"——
+// 下游网关按状态码区分"请求级错误"与"渠道故障"——
 // 4xx 不冷却整个渠道；上下文超长给 413 并配合 error.code 让网关
 // 直接归类为客户端问题，不做任何冷却。
 // 无法识别的错误返回 502，表示上游服务故障。
@@ -112,7 +112,7 @@ func HTTPStatus(message string) int {
 	case strings.Contains(message, "permission_denied"):
 		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
 		// permission_denied。这三类都是调用方可修正的请求错误，
-		// 归一成 400 而不是 403：下游网关（如 ccload）对 4xx 只按
+		// 归一成 400 而不是 403：下游网关对 4xx 只按
 		// 模型作用域冷却，不会把整个渠道标记为失效。
 		return http.StatusBadRequest
 	case strings.Contains(message, "not_found"):

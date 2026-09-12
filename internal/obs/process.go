@@ -1,6 +1,6 @@
 // 本文件采集进程级运行指标：goroutine、堆内存、GC、CPU 占用、RSS。
-// 用途是区分「代理本身成为瓶颈」与「上游/客户端慢」——ccLoad 的
-// processRuntimeMetrics 同款思路，数据源为 runtime.ReadMemStats 与
+// 用途是区分「代理本身成为瓶颈」与「上游/客户端慢」——同类代理的
+// 进程级指标采集同款思路，数据源为 runtime.ReadMemStats 与
 // 平台相关的 getrusage（见 process_darwin.go / process_linux.go）。
 package obs
 

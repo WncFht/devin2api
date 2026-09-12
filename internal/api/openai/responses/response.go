@@ -474,7 +474,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	}
 	// OpenAI Responses API 中，流式失败应发送 response.failed 事件，
 	// 包含 status="failed" 的 response 对象与 error 字段。
-	// 顶层 status 供下游网关（ccload）按真实 HTTP 语义分类错误，
+	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	errorType := common.OpenAIErrorType(message)
 	errorPayload := map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message)}

@@ -99,7 +99,7 @@ func (s *wsSession) requireReplacementReplay() {
 }
 
 // normalizeRequest 把一条客户端 WS 帧规范化成可交给 /v1/responses 的完整请求体。
-// 守卫顺序与 ccLoad responses_websocket_session.go 对齐：先结构性校验，再处理
+// 守卫顺序参照同类 Responses WS 会话实现：先结构性校验，再处理
 // 替换/续链/合并三种形态。
 //
 // payload 顶层只解析一次成字段 map：后续的类型判定、续链、规范化改写全部在

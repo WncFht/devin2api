@@ -30,7 +30,7 @@ const Requests = (() => {
     return html + '</tbody></table>';
   }
 
-  // 进行中请求渲染成表格顶部的 pending 行（ccLoad 式），状态变化随每轮列表刷新。
+  // 进行中请求渲染成表格顶部的 pending 行（同类面板式），状态变化随每轮列表刷新。
   // 展开中的 pending 行同样给详情占位——进行中请求的调试目录已存在，可直接读。
   function pendingRows() {
     const stateMap = { waiting_upstream: '等上游', receiving_upstream: '收上游', streaming_client: '发客户端' };
@@ -75,7 +75,7 @@ const Requests = (() => {
   function restoreFilterHash() {
     const h = parseHash();
     FILTER_IDS.forEach(id => { const v = h.params.get(id); if (v) { const el = $(id); if (el) el.value = v; } });
-    // #requests&dir=X 深链：直接展开该请求详情（对应 ccLoad channels.html?id=N）。
+    // #requests&dir=X 深链：直接展开该请求详情（对应同类面板的渠道深链）。
     const dir = h.params.get('dir');
     if (dir) expandedDir = dir;
   }
@@ -136,7 +136,7 @@ const Requests = (() => {
         }
       });
       // 渲染签名不变就跳过 tbody 重建：空闲时零 DOM churn，
-      // hover/文本选中/已展开详情的 DOM 都不被打断（ccLoad 按 ID diff 的轻量版）。
+      // hover/文本选中/已展开详情的 DOM 都不被打断（按 ID diff 的轻量版）。
       if (html !== lastSig) {
         // 展开中的详情节点先摘出来再塞回去，整体重建不清空它的内容/文件查看区。
         const savedDetail = expandedDir ? tbody.querySelector('.detail-row') : null;

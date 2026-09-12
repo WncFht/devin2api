@@ -139,7 +139,7 @@ func csvEscape(s string) string {
 }
 
 // apiMergedResponse 把请求目录内 06-http-response.jsonl 的 SSE 帧合并成
-// 可读的最终响应文本（ccLoad merge-debug-response 同款），原始帧仍可读。
+// 可读的最终响应文本（同类调试面板的响应合并同款），原始帧仍可读。
 func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
@@ -160,7 +160,7 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、
-// 已落盘文件清单——请求未结束就能检查它收到过什么（ccLoad 同款）。
+// 已落盘文件清单——请求未结束就能检查它收到过什么（同类实现同款）。
 func (h *Handler) apiActiveRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return

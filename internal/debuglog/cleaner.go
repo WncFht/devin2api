@@ -1,6 +1,6 @@
 // 本文件实现调试日志的生命周期管理：分层保留请求目录。
 //
-// 设计要点（参照 CLIProxyAPI log_dir_cleaner 与 ccLoad 的调试日志短 TTL）：
+// 设计要点（参照 CLIProxyAPI log_dir_cleaner 与同类网关的调试日志短 TTL）：
 //   - 后台 ticker 周期执行，失败只告警不中断；
 //   - activeDirs 中仍在写入的目录永不删除；
 //   - 大体积负载（上游响应/客户端 SSE/附件）先剥离，证据文件

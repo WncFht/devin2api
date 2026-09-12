@@ -2,7 +2,7 @@
 //
 // Package obs 提供常驻零成本的运行观测：请求计数、错误分类、
 // 流式占比和收发字节量。全部用 atomic 实现，热路径无锁。
-// 参考 ccLoad 的 httpProxyRuntimeMetrics 形态——同量级代理不需要
+// 参考同类代理的运行指标形态——同量级代理不需要
 // Prometheus 整套 exposition，JSON 快照直接喂给面板。
 package obs
 
@@ -166,7 +166,7 @@ func (m *Metrics) Snapshot() map[string]any {
 	}
 }
 
-// rates 从 30 秒桶派生 RPM/QPS（ccLoad RPMStats 同款：current/peak/avg + QPS）。
+// rates 从 30 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。
 // current/peak 先按自然分钟合并相邻桶再取值，语义与分钟粒度时代一致；
 // avg 覆盖趋势环内窗口。
 func (m *Metrics) rates() map[string]any {

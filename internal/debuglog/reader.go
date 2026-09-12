@@ -159,7 +159,7 @@ type ActiveRequest struct {
 	Files []RequestFileInfo `json:"files"`
 }
 
-// ActiveRequests 返回仍在写入的请求目录快照（ccLoad 的
+// ActiveRequests 返回仍在写入的请求目录快照（同类代理的
 // active-requests/debug-log 同款能力：请求未结束就能看已收到的帧）。
 // JSONL 内容经 bufio 缓冲，文件清单可能略滞后于实际收到的事件。
 func (manager *Manager) ActiveRequests() []ActiveRequest {
@@ -195,7 +195,7 @@ type ListResult struct {
 type RequestFilter struct {
 	// StatusClass 按状态码段过滤："2xx"/"4xx"/"5xx"。
 	StatusClass string
-	// Status 按状态表达式过滤（ccLoad 式），逗号分隔为 OR；
+	// Status 按状态表达式过滤（同类网关式），逗号分隔为 OR；
 	// 单项支持精确码(499)、段位(4xx)、比较(>=400/<300)、取反(!200/!2xx)。
 	Status string
 	// Result 按结果过滤：completed/failed/disconnected/aborted。

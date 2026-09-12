@@ -180,10 +180,10 @@ func (application *App) streamCompletion(
 		if common.IsContextLengthError(message) {
 			// Codex 只在 SSE response.failed 里按 error.code==
 			// "context_length_exceeded" 识别窗口溢出并自动压缩——但网关
-			// （ccload）会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
+			// 会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
 			// 客户端永远收不到 response.failed。先补一个合成 start 让网关
 			// 提交 200，error 事件随后以 SSE 送达；事件顶层 status 仍让
-			// ccload 按 413 归为客户端错误、不冷却渠道。
+			// 网关按 413 归为客户端错误、不冷却渠道。
 			prelude = []llm.ResponseEvent{
 				{Type: llm.ResponseEventStart, Reason: llm.StopReasonPending, Partial: firstEvent.Error},
 				firstEvent,

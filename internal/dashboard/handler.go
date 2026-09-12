@@ -184,7 +184,7 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(loginPage))
 		return
 	}
-	// 静态资源带 24h 缓存头，URL 里的版本戳让每次发版必然拿到新 JS/CSS（ccLoad 同款 ?v=）。
+	// 静态资源带 24h 缓存头，URL 里的版本戳让每次发版必然拿到新 JS/CSS（同类实现同款 ?v=）。
 	v := h.version
 	if v == "" {
 		v = "dev"

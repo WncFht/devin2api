@@ -18,10 +18,10 @@ import (
 const (
 	// gateMaxHold 是闸门内允许的最长排队等待。上游恢复时刻或令牌排队
 	// 超过它时请求在本地快速失败并带 Retry-After：客户端/下游网关
-	//（如 ccload）按声明时刻退避，比占着并发槽空等更符合冷却语义。
+	//按声明时刻退避，比占着并发槽空等更符合冷却语义。
 	gateMaxHold = 15 * time.Second
 	// gateDefaultLatch 是上游 resource_exhausted 未携带 reset hint 时的
-	// 兜底闩时长（对齐 ccLoad cooldown_rate_limit_seconds 默认值 60s）。
+	// 兜底闩时长（对齐同类网关 60s 冷却默认值）。
 	gateDefaultLatch = 60 * time.Second
 )
 

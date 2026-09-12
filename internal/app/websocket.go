@@ -42,7 +42,7 @@ const (
 	// 防慢握手占连接。
 	wsFirstMessageTimeout = 30 * time.Second
 	// wsIdleTimeout 是轮次之间/消息之间允许的空闲上限；PongHandler 与每条
-	// 客户端消息都会续约。对应 ccLoad 的 5min 空闲回收。
+	// 客户端消息都会续约。对齐同类网关的 5min 空闲回收。
 	wsIdleTimeout = 5 * time.Minute
 	// wsPingInterval 是服务端主动 ping 的周期；客户端 pong 在 PongHandler 里
 	// 续约 read deadline，双向确认存活。WriteControl 不经写锁，不会被大

@@ -293,7 +293,7 @@ func (manager *Manager) Root() string {
 }
 
 // Stats 返回日志管道自身的运行指标：丢弃数、活跃请求目录数、写队列积压、
-// IO 失败数——观测系统自己的健康状况也应可观测（参考 ccLoad 的 drop/backlog 计数）。
+// IO 失败数——观测系统自己的健康状况也应可观测（参考同类代理的 drop/backlog 计数）。
 func (manager *Manager) Stats() map[string]any {
 	if manager == nil {
 		return nil
