@@ -27,6 +27,9 @@ type ModelInfo struct {
 	SupportsThinking bool
 	// PreserveThinking 表示该模型的 thinking 是否需要在后续轮次中原样回放。
 	PreserveThinking bool
+	// IsModelRouter 表示该 uid 是上游路由器而非具体模型：
+	// 直连 GetChatMessage 会被上游以 unavailable 拒绝，需先 AssignModel 解析。
+	IsModelRouter bool
 	// ContextTokens 是上游声明的上下文窗口 token 数；未知为 0。
 	ContextTokens int
 	// MaxOutputTokens 是上游声明的单次输出 token 上限；未知为 0。

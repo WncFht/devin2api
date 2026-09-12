@@ -156,12 +156,33 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// modelEntry 把目录条目投影为 OpenAI /v1/models 形状；列表与详情端点
+// 共用同一份字段集，避免两处漂移。非 OpenAI 标准字段供面板/网关按能力
+// 做请求前 gate（含 is_model_router：router uid 直连上游会被拒）。
+func modelEntry(m adapter.ModelInfo) map[string]any {
+	created := m.Created
+	if created == 0 {
+		created = time.Now().Unix()
+	}
+	ownedBy := m.OwnedBy
+	if ownedBy == "" {
+		ownedBy = "devin"
+	}
+	return map[string]any{
+		"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
+		"supports_images":              m.SupportsImages,
+		"supports_tool_calls":          m.SupportsToolCalls,
+		"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
+		"supports_thinking":            m.SupportsThinking,
+		"preserve_thinking":            m.PreserveThinking,
+		"is_model_router":              m.IsModelRouter,
+		"context_tokens":               m.ContextTokens,
+		"max_output_tokens":            m.MaxOutputTokens,
+	}
+}
+
 // listModels 返回 OpenAI 兼容的 GET /v1/models 列表。
 func (application *App) listModels(writer http.ResponseWriter, request *http.Request) {
-	if application.adapter == nil {
-		writeJSONError(writer, http.StatusServiceUnavailable, "provider adapter is not configured")
-		return
-	}
 	models, err := application.adapter.ListModels(request.Context())
 	if err != nil {
 		writeJSONError(writer, http.StatusBadGateway, err.Error())
@@ -169,30 +190,7 @@ func (application *App) listModels(writer http.ResponseWriter, request *http.Req
 	}
 	data := make([]map[string]any, 0, len(models))
 	for _, m := range models {
-		created := m.Created
-		if created == 0 {
-			created = time.Now().Unix()
-		}
-		ownedBy := m.OwnedBy
-		if ownedBy == "" {
-			ownedBy = "devin"
-		}
-		entry := map[string]any{
-			"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
-		}
-		// 非 OpenAI 标准字段，供面板/网关按能力做请求前 gate。
-		entry["supports_images"] = m.SupportsImages
-		entry["supports_tool_calls"] = m.SupportsToolCalls
-		entry["supports_parallel_tool_calls"] = m.SupportsParallelToolCalls
-		entry["supports_thinking"] = m.SupportsThinking
-		entry["preserve_thinking"] = m.PreserveThinking
-		if m.ContextTokens > 0 {
-			entry["context_tokens"] = m.ContextTokens
-		}
-		if m.MaxOutputTokens > 0 {
-			entry["max_output_tokens"] = m.MaxOutputTokens
-		}
-		data = append(data, entry)
+		data = append(data, modelEntry(m))
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{"object": "list", "data": data})
@@ -200,10 +198,6 @@ func (application *App) listModels(writer http.ResponseWriter, request *http.Req
 
 // getModel 返回 OpenAI 兼容的 GET /v1/models/{model}。
 func (application *App) getModel(writer http.ResponseWriter, request *http.Request) {
-	if application.adapter == nil {
-		writeJSONError(writer, http.StatusServiceUnavailable, "provider adapter is not configured")
-		return
-	}
 	id := chi.URLParam(request, "model")
 	if id == "" {
 		writeJSONError(writer, http.StatusBadRequest, "model id is required")
@@ -216,25 +210,8 @@ func (application *App) getModel(writer http.ResponseWriter, request *http.Reque
 	}
 	for _, m := range models {
 		if m.ID == id {
-			created := m.Created
-			if created == 0 {
-				created = time.Now().Unix()
-			}
-			ownedBy := m.OwnedBy
-			if ownedBy == "" {
-				ownedBy = "devin"
-			}
 			writer.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(map[string]any{
-				"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
-				"supports_images":              m.SupportsImages,
-				"supports_tool_calls":          m.SupportsToolCalls,
-				"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
-				"supports_thinking":            m.SupportsThinking,
-				"preserve_thinking":            m.PreserveThinking,
-				"context_tokens":               m.ContextTokens,
-				"max_output_tokens":            m.MaxOutputTokens,
-			})
+			_ = json.NewEncoder(writer).Encode(modelEntry(m))
 			return
 		}
 	}

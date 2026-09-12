@@ -110,6 +110,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
+	if err := adapter.validateNotRouterModel(model); err != nil {
+		return nil, err
+	}
 	cfg := adapter.config
 	cfg.Model = model
 	protoRequest, err := buildRequest(request, cfg)
@@ -204,6 +207,22 @@ func (adapter *Adapter) catalogSupportsImages(model string) (supported bool, kno
 		}
 	}
 	return false, false
+}
+
+// validateNotRouterModel 拒绝上游 router uid 的直连请求：目录里标了
+// is_model_router 的 uid 必须先经 AssignModel 解出真实模型（未实现），
+// 实测直连只换回 unavailable: third-party model provider——伪装成
+// 瞬时错误的永久失败。提前报成 invalid_argument，让网关按 4xx 归类。
+// 目录未覆盖该模型时放行，交给上游裁决。
+func (adapter *Adapter) validateNotRouterModel(model string) error {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	for _, m := range adapter.models {
+		if m.ID == model && m.IsModelRouter {
+			return fmt.Errorf("invalid_argument: model %q is an upstream router uid and requires AssignModel resolution, which this proxy does not implement; pick a concrete model uid", model)
+		}
+	}
+	return nil
 }
 
 func requestHasImages(request llm.RequestMessages) bool {
@@ -320,6 +339,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		}
 		if modelInfo := c.GetModelInfo(); modelInfo != nil {
 			info.MaxOutputTokens = int(modelInfo.GetMaxOutputTokens())
+			info.IsModelRouter = modelInfo.GetIsModelRouter()
 			if info.ContextTokens == 0 {
 				info.ContextTokens = int(modelInfo.GetMaxTokens())
 			}
