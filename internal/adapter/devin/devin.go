@@ -870,6 +870,10 @@ type devinResponseReceiver interface {
 }
 
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
+	// 静默计时器逐帧复用：一条流可产出数千帧，每帧 NewTimer 是无谓分配。
+	// Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发。
+	stall := time.NewTimer(upstreamStallTimeout)
+	defer stall.Stop()
 	for len(stream.queue) == 0 && !stream.finished {
 		if err := ctx.Err(); err != nil {
 			return llm.ResponseEvent{}, err
@@ -881,10 +885,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.pendingStart = stream.decoder.start()
 			continue
 		}
-		timer := time.NewTimer(upstreamStallTimeout)
+		stall.Reset(upstreamStallTimeout)
 		select {
 		case frame, ok := <-stream.frames:
-			timer.Stop()
+			stall.Stop()
 			if !ok || frame.response == nil {
 				// ok==false：缓冲满时终止帧被丢弃（见 pumpUpstream），
 				// 按正常 EOF 处理，缺 stop reason 由 decoder 报错。
@@ -899,7 +903,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
 			stream.queue = stream.release(stream.decoder.decode(frame.response))
 			stream.finished = stream.decoder.finished
-		case <-timer.C:
+		case <-stall.C:
 			// 上游静默超时：取消底层流打断泵协程；已缓冲未消费的帧
 			// 补记进原始日志留证，然后按传输错误收尾。
 			stream.cancel()
@@ -907,7 +911,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.queue = stream.release(stream.decoder.finish(fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)))
 			stream.finished = true
 		case <-ctx.Done():
-			timer.Stop()
+			stall.Stop()
 			stream.cancel()
 			stream.queue = stream.release(stream.decoder.finish(ctx.Err()))
 			stream.finished = true
