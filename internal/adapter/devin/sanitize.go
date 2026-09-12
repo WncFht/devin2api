@@ -85,6 +85,9 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	rule("cc-feedback", `(?im)^(\s*-\s*)To give feedback, users should report the issue at https://github\.com/anthropics/claude-code/issues[^\n]*`, "$1To give feedback, users should report issues to the maintainers of this CLI."),
 	rule("cc-blast-radius", `(?i)Carefully consider the reversibility and blast radius of actions\.`, "Carefully consider the reversibility and impact of actions."),
 	rule("cc-claudemd-2", `(?i)durable instructions like CLAUDE\.md files`, "durable instructions like project instruction files"),
+	// CC 2.1.x subagent 系统提示的 emoji 禁令行（本项目逐行 bisect 实证：
+	// 指纹是整句，"For clear communication…" 前缀与 "MUST avoid" 缺一不可）。
+	rule("cc-subagent-emojis", `(?i)For clear communication with the user the assistant MUST avoid using emojis\.`, "Keep communication with the user clear and free of emojis."),
 }
 
 // sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案。
