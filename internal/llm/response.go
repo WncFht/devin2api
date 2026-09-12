@@ -15,10 +15,15 @@ type StopReason string
 const (
 	StopReasonPending StopReason = "pending"
 	StopReasonStop    StopReason = "stop"
-	StopReasonLength  StopReason = "length"
-	StopReasonToolUse StopReason = "toolUse"
-	StopReasonError   StopReason = "error"
-	StopReasonAborted StopReason = "aborted"
+	// StopReasonStopSequence 表示生成被客户端提供的停止序列截断。
+	// Devin 上游不执行 stop_patterns，由适配器在解码层本地截断。
+	StopReasonStopSequence StopReason = "stopSequence"
+	StopReasonLength       StopReason = "length"
+	StopReasonToolUse      StopReason = "toolUse"
+	// StopReasonContentFilter 表示上游内容过滤器结束了生成。
+	StopReasonContentFilter StopReason = "contentFilter"
+	StopReasonError         StopReason = "error"
+	StopReasonAborted       StopReason = "aborted"
 )
 
 // AssistantMessage 表示供应商无关的助手消息，也是最终响应消息。
@@ -35,12 +40,17 @@ type AssistantMessage struct {
 	ResponseModel string
 	// ResponseID 是供应商分配的响应标识，可用于延续会话或诊断。
 	ResponseID string
+	// UpstreamRequestID 是上游服务为本次调用分配的追踪标识
+	//（Devin Connect 的 request_id），报障时可直接提供给上游。
+	UpstreamRequestID string
 	// Diagnostics 是转换或流式处理过程中收集的非主响应诊断信息。
 	Diagnostics []AssistantMessageDiagnostic
 	// Usage 是本条响应累计的 token 与费用用量。
 	Usage Usage
 	// StopReason 是当前或最终生成状态。
 	StopReason StopReason
+	// StopSequence 是 StopReasonStopSequence 时实际命中的停止序列。
+	StopSequence string
 	// ErrorMessage 是生成失败或中止时的可读错误信息。
 	ErrorMessage string
 	// TimestampMS 是创建消息时的 Unix 毫秒时间戳。
@@ -158,11 +168,11 @@ const (
 	// ResponseEventThinkingSignature 是思考块结束后才到达的签名增量
 	//（Devin 上游把签名作为尾随帧发送）。ContentIndex 指向已结束块。
 	ResponseEventThinkingSignature ResponseEventType = "thinking_signature"
-	ResponseEventToolCallStart ResponseEventType = "toolcall_start"
-	ResponseEventToolCallDelta ResponseEventType = "toolcall_delta"
-	ResponseEventToolCallEnd   ResponseEventType = "toolcall_end"
-	ResponseEventDone          ResponseEventType = "done"
-	ResponseEventError         ResponseEventType = "error"
+	ResponseEventToolCallStart     ResponseEventType = "toolcall_start"
+	ResponseEventToolCallDelta     ResponseEventType = "toolcall_delta"
+	ResponseEventToolCallEnd       ResponseEventType = "toolcall_end"
+	ResponseEventDone              ResponseEventType = "done"
+	ResponseEventError             ResponseEventType = "error"
 )
 
 // ResponseEvent 是供应商无关的助手响应增量事件。
@@ -236,7 +246,9 @@ func (event ResponseEvent) Validate() error {
 		}
 		return event.ToolCall.Validate()
 	case ResponseEventDone:
-		if event.Reason != StopReasonStop && event.Reason != StopReasonLength && event.Reason != StopReasonToolUse {
+		switch event.Reason {
+		case StopReasonStop, StopReasonStopSequence, StopReasonLength, StopReasonToolUse, StopReasonContentFilter:
+		default:
 			return fmt.Errorf("invalid done reason %q", event.Reason)
 		}
 		if event.Message == nil {
@@ -272,7 +284,8 @@ func requireIndexedPartial(event ResponseEvent) error {
 
 func (reason StopReason) valid() bool {
 	switch reason {
-	case StopReasonPending, StopReasonStop, StopReasonLength, StopReasonToolUse, StopReasonError, StopReasonAborted:
+	case StopReasonPending, StopReasonStop, StopReasonStopSequence, StopReasonLength,
+		StopReasonToolUse, StopReasonContentFilter, StopReasonError, StopReasonAborted:
 		return true
 	default:
 		return false

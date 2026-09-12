@@ -50,12 +50,41 @@ type RequestMessages struct {
 	TopK *int
 	// StopSequences 是可选的停止序列列表。
 	StopSequences []string
+	// ToolChoice 是调用方对工具调用行为的偏好；nil 表示交给模型自选。
+	ToolChoice *ToolChoice
+	// DisableParallelToolCalls 为 true 时要求模型不要在一轮内发起多个并行工具调用。
+	// Devin 上游接受但会忽略该标记（实测并行调用照常发出），适配器仅做形状透传。
+	DisableParallelToolCalls bool
 	// Seed 是可选的采样种子；nil 表示由供应商随机。
 	Seed *int64
 	// SessionKey 是调用方提供的会话标识（如 user / prompt_cache_key /
 	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
 	// 空表示调用方未提供。
 	SessionKey string
+}
+
+// ToolChoiceMode 标识客户端要求的工具调用模式。
+type ToolChoiceMode string
+
+const (
+	// ToolChoiceAuto 由模型自行决定是否调用工具（默认行为）。
+	ToolChoiceAuto ToolChoiceMode = "auto"
+	// ToolChoiceNone 禁止模型调用工具。
+	ToolChoiceNone ToolChoiceMode = "none"
+	// ToolChoiceRequired 强制模型本轮必须调用工具（任一工具）。
+	ToolChoiceRequired ToolChoiceMode = "required"
+	// ToolChoiceNamed 强制模型调用 ToolName 指定的工具。
+	ToolChoiceNamed ToolChoiceMode = "named"
+)
+
+// ToolChoice 是供应商无关的工具调用偏好。
+// Anthropic 的 {"type":"any"} 在本层归一为 ToolChoiceRequired——
+// Devin 上游的 option_name 合法值是 none/auto/required，"any" 会被拒绝。
+type ToolChoice struct {
+	// Mode 是归一化后的调用模式。
+	Mode ToolChoiceMode
+	// ToolName 是 ToolChoiceNamed 模式下要求调用的工具名。
+	ToolName string
 }
 
 // Message 是用户、助手或工具结果消息的统一接口。
@@ -253,6 +282,17 @@ func (request RequestMessages) Validate() error {
 	for index, tool := range request.Tools {
 		if err := tool.Validate(); err != nil {
 			return fmt.Errorf("tool %d: %w", index, err)
+		}
+	}
+	if request.ToolChoice != nil {
+		switch request.ToolChoice.Mode {
+		case ToolChoiceAuto, ToolChoiceNone, ToolChoiceRequired:
+		case ToolChoiceNamed:
+			if request.ToolChoice.ToolName == "" {
+				return errors.New("tool_choice named mode requires a tool name")
+			}
+		default:
+			return fmt.Errorf("invalid tool_choice mode %q", request.ToolChoice.Mode)
 		}
 	}
 	return nil
