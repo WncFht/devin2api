@@ -95,7 +95,8 @@ const Overview = (() => {
     (d.model_statuses || []).forEach(s => {
       const st = String(s.status || '-');
       if (/WARN|ERROR|FATAL|DOWN/i.test(st)) {
-        rows += '<div class="err-banner">模型 ' + esc(s.model || '-') + ': ' + esc(st) + '</div>';
+        rows += '<div class="err-banner">模型 ' + esc(s.model_uid || s.model || '-') + ': ' + esc(st) +
+          (s.message ? ' — ' + esc(s.message) : '') + '</div>';
       }
     });
     const panel = $('ovAlertPanel');

@@ -478,8 +478,10 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 	var statuses []map[string]any
 	for _, s := range modelStatusResp.Msg.GetModelStatusInfos() {
 		statuses = append(statuses, map[string]any{
-			"model":  shortEnum(s.GetModel().String(), "MODEL_"),
-			"status": shortEnum(s.GetStatus().String(), "MODEL_STATUS_"),
+			"model":     shortEnum(s.GetModel().String(), "MODEL_"),
+			"model_uid": s.GetModelUid(),
+			"status":    shortEnum(s.GetStatus().String(), "MODEL_STATUS_"),
+			"message":   s.GetMessage(),
 		})
 	}
 

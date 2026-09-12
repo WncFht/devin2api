@@ -105,7 +105,8 @@ const Quota = (() => {
     if (bad.length) {
       ms.style.display = '';
       $('modelStatusBody').innerHTML = '<div class="grid">' + bad.map(s =>
-        '<div class="mini"><span class="k">' + esc(s.model || '-') + '</span><span class="v" style="color:var(--err)">' + esc(String(s.status || '-')) + '</span></div>').join('') + '</div>';
+        '<div class="mini"><span class="k">' + esc(s.model_uid || s.model || '-') + '</span><span class="v" style="color:var(--err)">' +
+        esc(String(s.status || '-')) + (s.message ? ' · ' + esc(s.message) : '') + '</span></div>').join('') + '</div>';
     } else {
       ms.style.display = 'none';
     }
