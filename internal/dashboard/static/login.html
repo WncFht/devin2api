@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Devin API - 管理面板</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f1117;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.login-box{background:#1a1d27;border-radius:12px;padding:40px;width:360px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.login-box h1{font-size:20px;margin-bottom:24px;text-align:center;color:#7c8aff}
+.login-box input{width:100%;padding:12px 16px;border:1px solid #333;border-radius:8px;background:#0f1117;color:#e0e0e0;font-size:14px;margin-bottom:16px}
+.login-box button{width:100%;padding:12px;border:none;border-radius:8px;background:#7c8aff;color:#fff;font-size:14px;cursor:pointer}
+.error{color:#ff6b6b;font-size:13px;text-align:center;margin-top:8px;display:none}
+</style>
+</head>
+<body>
+<div class="login-box">
+<h1>Devin API 管理面板</h1>
+<form id="loginForm">
+<input type="password" id="password" placeholder="请输入密码" autofocus>
+<button type="submit">登录</button>
+</form>
+<div class="error" id="err">密码错误</div>
+</div>
+<script>
+document.getElementById('loginForm').addEventListener('submit',async e=>{
+e.preventDefault();
+const pwd=document.getElementById('password').value;
+const res=await fetch('/panel/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'password='+encodeURIComponent(pwd)});
+if(res.ok){location.reload()}else{const el=document.getElementById('err');el.style.display='block';setTimeout(()=>el.style.display='none',2000)}
+});
+</script>
+</body>
+</html>
