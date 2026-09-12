@@ -90,14 +90,21 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.$USER.devin-2api.pli
 tail -f logs/stderr.log                                                       # 进程日志
 ```
 
-## 升级流程
+## 首装与升级流程
 
 ```bash
 scripts/deploy.sh                    # 构建 → 替换二进制 → kickstart → 校验 healthz 版本
 scripts/deploy.sh --no-restart       # 只构建替换，不重启
 scripts/deploy.sh --release v0.2.0   # 下载 GitHub Release 预编译二进制（sha256 校验）后替换
 scripts/deploy.sh --release latest   # 同上，装最新 release
+scripts/deploy.sh --check            # 对比 已安装/运行中/最新 release 版本，落后时 exit 1
 ```
+
+首装不需要手工处理 launchd：服务未加载时 `deploy.sh` 会按本文「当前 plist」
+一节的内容生成 `~/Library/LaunchAgents/com.$USER.devin-2api.plist` 并
+`launchctl bootstrap`（刚 bootstrap 的进程直接跑新二进制，跳过 redundant
+kickstart）。因此新机器的最小安装路径是：同步仓库（含 `config.yaml`）→
+`scripts/deploy.sh --release latest`。
 
 脚本做四件事：以 `git describe --tags --always --dirty` 注入
 `main.version` 构建新二进制、`-version` 自检、安装到运行目录并同步
