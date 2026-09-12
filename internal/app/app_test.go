@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -628,4 +629,91 @@ func TestStreamErrorCarriesDebugRef(t *testing.T) {
 	if dir == "" || !strings.Contains(response.Body.String(), `"debug_ref":"`+dir+`"`) {
 		t.Fatalf("stream error missing debug_ref: header=%q body=%s", dir, response.Body.String())
 	}
+}
+
+// failingAdapter 在 Stream 阶段直接返回错误，用于验证适配器建连失败
+// 时的 HTTP 归一（状态码 / Retry-After / 上游排障字段）。
+type failingAdapter struct {
+	err error
+}
+
+func (fake *failingAdapter) Stream(context.Context, llm.RequestMessages) (llm.ResponseStream, error) {
+	return nil, fake.err
+}
+
+func (fake *failingAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return []adapter.ModelInfo{{ID: "gpt-test", Created: 1, OwnedBy: "test"}}, nil
+}
+
+// TestResponsesHandlerMapsRateLimitError 验证上游 resource_exhausted 归一为
+// 429，且限流文案里的 reset 秒数翻成 Retry-After 头、trace ID 进错误体。
+func TestResponsesHandlerMapsRateLimitError(t *testing.T) {
+	fake := &failingAdapter{err: errors.New(
+		"resource_exhausted: rate limited. Your limit will reset in 30 seconds. (trace ID: abc123)")}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want 30", got)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"type":"rate_limit_error"`, `"upstream_trace_id":"abc123"`, `"retry_after":30`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("body = %s, want %s", body, expected)
+		}
+	}
+}
+
+// blockingAdapter 的 Stream 在 release 关闭前不返回，用于占住并发槽。
+type blockingAdapter struct {
+	release chan struct{}
+}
+
+func (blocking *blockingAdapter) Stream(ctx context.Context, _ llm.RequestMessages) (llm.ResponseStream, error) {
+	select {
+	case <-blocking.release:
+		return nil, errors.New("released")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (blocking *blockingAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return []adapter.ModelInfo{{ID: "gpt-test", Created: 1, OwnedBy: "test"}}, nil
+}
+
+// TestConcurrencyOverflowReturns429 验证并发槽打满时溢出请求收到
+// 429 + Retry-After，而不是 503——503 会让下游网关误判渠道故障。
+func TestConcurrencyOverflowReturns429(t *testing.T) {
+	blocking := &blockingAdapter{release: make(chan struct{})}
+	application := New(blocking, config.ServerConfig{Listen: ":0", MaxConcurrency: 1}, nil)
+
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+		application.Router().ServeHTTP(httptest.NewRecorder(), request)
+	}()
+	// 等第一个请求占住槽：阻塞式 Stream 没有占槽信号，用轮询 metrics 太绕，
+	// 直接短暂等待后探测——溢出分支是 select-default，不占槽立即返回。
+	time.Sleep(50 * time.Millisecond)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header")
+	}
+	if !strings.Contains(response.Body.String(), `"type":"rate_limit_error"`) {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+	close(blocking.release)
+	<-held
 }
