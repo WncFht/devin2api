@@ -39,6 +39,9 @@ func RequestMessagesProjection(request llm.RequestMessages) map[string]any {
 	if request.SessionKey != "" {
 		result["session_key"] = request.SessionKey
 	}
+	if len(request.Dropped) > 0 {
+		result["dropped_items"] = request.Dropped
+	}
 	return result
 }
 
@@ -114,6 +117,7 @@ func assistantProjection(message llm.AssistantMessage) map[string]any {
 		"model":               message.Model,
 		"response_model":      message.ResponseModel,
 		"response_id":         message.ResponseID,
+		"output_id":           message.OutputID,
 		"upstream_request_id": message.UpstreamRequestID,
 		"diagnostics":         message.Diagnostics,
 		"usage":               message.Usage,
@@ -137,10 +141,15 @@ func contentProjection(content llm.Content) map[string]any {
 	case llm.TextContent:
 		return map[string]any{"type": content.ContentType(), "text": content.Text, "text_signature": content.TextSignature}
 	case llm.ThinkingContent:
-		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "thinking_signature": content.ThinkingSignature, "redacted": content.Redacted}
+		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "thinking_signature": content.ThinkingSignature, "signature_type": content.SignatureType, "redacted": content.Redacted}
 	case llm.ImageContent:
 		return map[string]any{"type": content.ContentType(), "data": content.Data, "mime_type": content.MIMEType}
 	case llm.ToolCall:
+		// Custom 调用的 Arguments 是供应商原文而非 JSON，直接 marshal
+		// RawMessage 会产生坏 JSON——按字符串落盘并标 custom。
+		if content.Custom {
+			return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": string(content.Arguments), "custom": true, "thought_signature": content.ThoughtSignature}
+		}
 		return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": content.Arguments, "thought_signature": content.ThoughtSignature}
 	default:
 		return map[string]any{"type": "unknown"}

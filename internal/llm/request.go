@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 // MessageRole 标识一条中间消息在对话中的角色。
@@ -61,6 +62,9 @@ type RequestMessages struct {
 	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
 	// 空表示调用方未提供。
 	SessionKey string
+	// Dropped 记录请求解码时被丢弃/降级的下游字段（"kind:detail"），
+	// 供调试日志透出——「解码即过滤」的静默面需要可观测。
+	Dropped []string
 }
 
 // ToolChoiceMode 标识客户端要求的工具调用模式。
@@ -123,6 +127,11 @@ type ThinkingContent struct {
 	Thinking string
 	// ThinkingSignature 是供应商签名或加密后的不透明载荷，重放时应原样保留。
 	ThinkingSignature string
+	// SignatureType 是签名载荷的格式标识（Devin 上游 signature_type：
+	// sealed/anthropic/openai）。签名的解析规则由它决定——openai 型签名
+	// 是序列化的 Responses reasoning item，其余是不透明 blob。重放时必须
+	// 随签名原样回传，实测错配触发上游 invalid_argument。
+	SignatureType string
 	// Redacted 表示思考正文已被供应商隐藏，签名中可能保存可重放载荷。
 	Redacted bool
 }
@@ -168,6 +177,11 @@ type ToolCall struct {
 	Name string
 	// Arguments 是模型增量拼接完成后的 JSON 参数对象。
 	Arguments json.RawMessage
+	// Custom 为 true 时 Arguments 不是 JSON 对象而是供应商原文
+	//（Devin invalid_json_str/is_custom_tool_call：custom/freeform 工具
+	// 的参数体本来就不是 JSON，如 apply_patch 的补丁文本）。请求方向
+	// 客户端回灌的畸形 JSON 参数也按此保留原文，不吞成 {}。
+	Custom bool
 	// ThoughtSignature 是部分供应商附加到工具调用上的思考签名，重放时应原样保留。
 	ThoughtSignature string
 }
@@ -182,6 +196,9 @@ func (call ToolCall) Validate() error {
 	}
 	if call.Name == "" {
 		return errors.New("tool call name is required")
+	}
+	if call.Custom {
+		return nil
 	}
 	if !validJSONObject(call.Arguments) {
 		return errors.New("tool call arguments must be a JSON object")
@@ -258,10 +275,17 @@ type ToolDefinition struct {
 	InputSchema json.RawMessage
 }
 
+// toolNameCharset 是上游实测接受的工具名字符集（a.b、mcp::x、中文名
+// 均被拒且只回模糊 internal error）。本地校验把这类失败变成可读的 400。
+var toolNameCharset = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // Validate 检查工具定义。
 func (tool ToolDefinition) Validate() error {
 	if tool.Name == "" {
 		return errors.New("tool name is required")
+	}
+	if !toolNameCharset.MatchString(tool.Name) {
+		return fmt.Errorf("tool name %q contains characters outside [A-Za-z0-9_-] which upstream rejects", tool.Name)
 	}
 	if !validJSONObject(tool.InputSchema) {
 		return errors.New("tool input schema must be a JSON object")

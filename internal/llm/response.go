@@ -40,6 +40,10 @@ type AssistantMessage struct {
 	ResponseModel string
 	// ResponseID 是供应商分配的响应标识，可用于延续会话或诊断。
 	ResponseID string
+	// OutputID 是供应商分配的 output item 标识（Devin 上游 outputId，
+	// OpenAI 形态是 msg_*）。重放历史时随该消息原样回传 wire
+	// output_id——跨 provider 的 output item 身份锚点。
+	OutputID string
 	// UpstreamRequestID 是上游服务为本次调用分配的追踪标识
 	//（Devin Connect 的 request_id），报障时可直接提供给上游。
 	UpstreamRequestID string
