@@ -136,10 +136,12 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 
 - 渠道 293 = `http://127.0.0.1:3003`，模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
 - **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。改完要重启 ccload 才生效。
-- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed` 也算失败），连续失败会把渠道打冷却。devin-2api 已把 `permission_denied` 归一成 HTTP 400 `invalid_request_error`，非流式路径不会误伤渠道；流式中途失败只能发事件，是真失败，冷却合理。
+- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed` 也算失败），连续失败会把渠道打冷却。devin-2api 在首个上游事件前不下发 `start`：上游零帧报错（`permission_denied`、`prompt too long` 等请求级问题）走真实 HTTP 4xx，`prompt too long` 归一成 413 + `context_length_exceeded`，ccload 按客户端错误透传不冷却；流式中途的错误事件在 data 里带顶层 `status` 字段，让 ccload 按真实语义分类而不是按通用 SSE 故障加倍冷却。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
 
 ## 运维坑
 
+- **重启腰斩在途流**：`launchctl kickstart -k` 和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在 ccload 侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外 `ExitTimeOut` 已设为 60s，优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
+- **不要手动跑 `./devin-2api` 抢 :3003**：手动实例和 launchd 的 KeepAlive 会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经 launchd 启停。
 - **launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。
