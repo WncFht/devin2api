@@ -215,6 +215,17 @@ func writeProtocolStream(
 ) (*llm.AssistantMessage, error) {
 	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
+	// batch 累计本批次的编码字节：泵 channel 持续供给时多个事件并入同一批，
+	// 一次 Write+Flush；channel 空了立即落盘，空闲路径与逐事件写出等价。
+	var batch []byte
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		data := batch
+		batch = nil
+		return out.writeContent(data)
+	}
 	for {
 		var event llm.ResponseEvent
 		var err error
@@ -224,13 +235,35 @@ func writeProtocolStream(
 			if len(prelude) == 0 {
 				err = preludeErr
 			}
+		} else if len(batch) > 0 {
+			// 上批未落盘说明上游供给不断：非阻塞再取一帧并入同批；
+			// channel 暂时空了才 flush，突发流量摊薄 syscall。
+			select {
+			case item, ok := <-items:
+				if !ok {
+					err = io.EOF
+				} else {
+					event, err = item.event, item.err
+				}
+			default:
+				if wErr := flush(); wErr != nil {
+					return latest, wErr
+				}
+				continue
+			}
 		} else {
 			event, err = out.awaitEvent(ctx, items, ticker)
 		}
 		if errors.Is(err, io.EOF) {
+			if wErr := flush(); wErr != nil {
+				return latest, wErr
+			}
 			return latest, nil
 		}
 		if err != nil {
+			if wErr := flush(); wErr != nil {
+				return latest, wErr
+			}
 			return latest, err
 		}
 		latest = eventMessage(event, latest)
@@ -241,11 +274,11 @@ func writeProtocolStream(
 		}
 		encodedEvents, encodeErr := encoder.Encode(event)
 		if encodeErr != nil {
+			if wErr := flush(); wErr != nil {
+				return latest, wErr
+			}
 			return latest, encodeErr
 		}
-		// 一次 Encode 展开的多个 SSE 事件合并为单次写出：高频 delta 流下
-		// 逐事件 Write+Flush 是数倍的 syscall 开销，合并后 wire 字节不变。
-		var batch []byte
 		for _, encoded := range encodedEvents {
 			batch = append(batch, protocol.SSEFormat(encoded.Name, encoded.Data)...)
 			if encoded.Name == "[DONE]" {
@@ -254,13 +287,11 @@ func writeProtocolStream(
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
 			}
 		}
-		if len(batch) > 0 {
-			if wErr := out.writeContent(batch); wErr != nil {
+		if event.Type == llm.ResponseEventError {
+			// 错误 SSE 已进批次，先落盘再返回错误供外层记录失败日志。
+			if wErr := flush(); wErr != nil {
 				return latest, wErr
 			}
-		}
-		if event.Type == llm.ResponseEventError {
-			// 错误 SSE 已在上面循环写出，这里直接返回错误供外层记录失败日志。
 			if event.Error != nil && event.Error.ErrorMessage != "" {
 				return latest, errors.New(event.Error.ErrorMessage)
 			}
