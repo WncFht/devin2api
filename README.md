@@ -91,30 +91,30 @@ The request body follows the OpenAI Responses API (`input`, `instructions`, `too
 
 Configuration is a YAML file loaded once at startup. Unknown fields are rejected.
 
-| Field | Description | Required |
-| --- | --- | --- |
-| `server.listen` | HTTP listen address | Yes |
-| `devin.base_url` | Devin Connect service base URL | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token` | Devin session token (`devin-session-token$...`) | No — endpoint returns 503 until set |
-| `devin.model` | Devin chat model UID (e.g. `glm-5-2`) | Yes, once `devin.token` is set (no default in code) |
-| `debug.enabled` | Write per-request debug logs under `logs/` next to the config file | No |
-| `auth.api_key` | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | No |
+| Field            | Description                                                                                                              | Required                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `server.listen`  | HTTP listen address                                                                                                      | Yes                                                                                                          |
+| `devin.base_url` | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
+| `devin.token`    | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
+| `devin.model`    | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
+| `debug.enabled`  | Write per-request debug logs under `logs/` next to the config file                                                       | No                                                                                                           |
+| `auth.api_key`   | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | No                                                                                                           |
 
 ```yaml
 server:
-  listen: ":8080"
+    listen: ":8080"
 
 devin:
-  base_url: "https://server.codeium.com"
-  token: "devin-session-token$..."
-  model: "glm-5-2"
+    base_url: "https://server.codeium.com"
+    token: "devin-session-token$..."
+    model: "glm-5-2"
 
 debug:
-  enabled: false
+    enabled: false
 
 auth:
-  # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.
-  api_key: ""
+    # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.
+    api_key: ""
 ```
 
 Notes:

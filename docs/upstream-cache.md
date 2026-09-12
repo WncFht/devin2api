@@ -45,7 +45,7 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有
 | 全随机 ID、无 trajectory      | 6/6（暖后） | 内容前缀即可命中   |
 | 加 EPHEMERAL 标记             | 6/8         | 标记对免费档无害   |
 
-命中特征：`input_tokens=1, cached_tokens≈5366`（整段前缀+历史全命中，
+命中特征：`input_tokens=1, cached_tokens≈5366`（整段前缀 + 历史全命中，
 仅新 token 计费）。未命中：`input_tokens=5367, cached_tokens=0`。
 
 ## devin-2api 的对接

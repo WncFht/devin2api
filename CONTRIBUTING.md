@@ -50,21 +50,21 @@ Full request lifecycle:
 3. `adapter.Stream` hands the vendor-neutral context to the configured adapter and returns an `llm.ResponseStream`;
 4. the Devin adapter translates the intermediate model into a `GetChatMessageRequest` (protobuf), reads upstream frames over a Connect stream, and a `responseDecoder` interprets each frame into zero or more `llm.ResponseEvent`s;
 5. output is split by the request's `stream` option:
-   - **streaming**: `StreamEncoder` expands events into typed SSE (`response.output_text.delta`, …);
-   - **non-streaming**: `done`/`error` events are aggregated into a final `AssistantMessage` encoded as Responses JSON.
+    - **streaming**: `StreamEncoder` expands events into typed SSE (`response.output_text.delta`, …);
+    - **non-streaming**: `done`/`error` events are aggregated into a final `AssistantMessage` encoded as Responses JSON.
 
 ### Intermediate model (internal/llm)
 
 The semantic model shared by all adapters, defined in `internal/llm`:
 
-| Concept | Description |
-| --- | --- |
-| `RequestMessages` | Full request context: `SystemPrompt` + chronologically ordered `Messages` + `Tools` |
-| `Message` | `UserMessage` / `AssistantMessage` / `ToolResultMessage` (role decided by `Role()`) |
-| `Content` | Content blocks: `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall` |
-| `ToolDefinition` | Tool name + description + JSON Schema input |
-| `ResponseEvent` | Incremental events (12 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …) |
-| `AssistantMessage` | Final aggregated message incl. `Usage`, `StopReason`, provider metadata |
+| Concept            | Description                                                                            |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `RequestMessages`  | Full request context: `SystemPrompt` + chronologically ordered `Messages` + `Tools`    |
+| `Message`          | `UserMessage` / `AssistantMessage` / `ToolResultMessage` (role decided by `Role()`)    |
+| `Content`          | Content blocks: `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall`        |
+| `ToolDefinition`   | Tool name + description + JSON Schema input                                            |
+| `ResponseEvent`    | Incremental events (12 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …) |
+| `AssistantMessage` | Final aggregated message incl. `Usage`, `StopReason`, provider metadata                |
 
 Message history is a **complete, replayable conversation across providers**: thinking signatures, tool-call IDs, and usage fields are designed to be passed verbatim into the next request round (see the comments on `TextSignature`, `ThinkingSignature`, etc. in `request.go`).
 
@@ -137,9 +137,9 @@ Concurrent requests in the same second are distinguished by an incrementing suff
 2. One logical change per commit; write commit messages in the imperative, saying what and why;
 3. If the change alters protocol semantics or adapter behavior, update the README and tests accordingly;
 4. Open a Pull Request and describe:
-   - the purpose and how you verified it;
-   - which layer it touches ("HTTP ⇄ intermediate ⇄ upstream");
-   - whether an upstream protocol upgrade is involved (descriptor changes, see below).
+    - the purpose and how you verified it;
+    - which layer it touches ("HTTP ⇄ intermediate ⇄ upstream");
+    - whether an upstream protocol upgrade is involved (descriptor changes, see below).
 
 ## Releasing
 
@@ -195,11 +195,13 @@ Outputs:
 **Standard procedure after an upstream upgrade** (the new binary may embed new descriptors):
 
 1. Extract to a temp dir and diff against the committed version:
-   ```bash
-   go run ./cmd/protoextract <new-binary> /tmp/extract-test
-   diff <(grep '"name"' outputs/devin-proto/manifest.json | sort) \
-        <(grep '"name"' /tmp/extract-test/manifest.json | sort)
-   ```
+
+    ```bash
+    go run ./cmd/protoextract <new-binary> /tmp/extract-test
+    diff <(grep '"name"' outputs/devin-proto/manifest.json | sort) \
+         <(grep '"name"' /tmp/extract-test/manifest.json | sort)
+    ```
+
 2. Confirm the added/changed descriptors are expected, then overwrite `outputs/devin-proto/` (Option 1) or copy the temp outputs;
 3. Run `task generate` to regenerate the Go bindings;
 4. Verify extraction quality: check `descriptor_count` and `missing_dependencies` in `manifest.json`, and compile-check `all-protos.proto` with `protoc --descriptor_set_out=/dev/null all-protos.proto`.

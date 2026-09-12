@@ -1,6 +1,6 @@
 # multi-harness-eval:同一模型 × 多 harness 评测
 
-目标：把 **swe-2-max**（经 devin-2api / ccload 链路暴露，见 `docs/harness-verification.md`）灌进多个 coding-agent harness,在固定 benchmark 上对比。被测模型恒定，只换 harness。基建用 **Harbor**(Terminal-Bench 团队的通用评测框架，TB 2.x 官方 harness)[^harbor]。
+目标：把 **swe-2-max**（经 devin-2api / ccload 链路暴露，见 `docs/harness-verification.md`）灌进多个 coding-agent harness，在固定 benchmark 上对比。被测模型恒定，只换 harness。基建用 **Harbor**(Terminal-Bench 团队的通用评测框架，TB 2.x 官方 harness)[^harbor]。
 
 ## 1. 端点与协议
 
@@ -11,7 +11,7 @@
 | `http://<ccload>:49173`    | Anthropic Messages(`/v1/messages`) | claude-code、kimi-code、pi                   |
 | `http://<devin-2api>:3003` | OpenAI Responses(`/v1/responses`)  | codex、pi(备选 `model_api=openai-responses`) |
 
-**注意：agent 跑在 Docker 容器里，`localhost` 指容器自己。** 宿主机上的服务要写 `http://host.docker.internal:<port>`(Docker Desktop)或局域网 IP；如果任务的 `[agent]` 网络策略拦了 egress，还要加 `--allow-agent-host=<host>` 或在 task.toml 里放开。
+**注意：agent 跑在 Docker 容器里，`localhost` 指容器自己。** 宿主机上的服务要写 `http://host.docker.internal:<port>`(Docker Desktop) 或局域网 IP；如果任务的 `[agent]` 网络策略拦了 egress，还要加 `--allow-agent-host=<host>` 或在 task.toml 里放开。
 
 **被测模型恒定 swe-2-max。** 网关侧统一改写模型名，所以各 harness 的 `model_name` 只是过客户端 picker 校验的前台名，不参与实际路由 —— claude-code 要求名字含 claude 家族词，kimi-code 沿用 `kimi-k3` 最稳，pi 和 codex 可以直接写 `swe-2-max`。
 
