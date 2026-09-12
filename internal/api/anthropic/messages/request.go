@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/api/common"
@@ -365,8 +366,14 @@ func decodeAnthropicContent(raw json.RawMessage) ([]llm.Content, error) {
 	content := make([]llm.Content, 0, len(parts))
 	for index, part := range parts {
 		var header struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Resource *struct {
+				URI      string `json:"uri"`
+				MIMEType string `json:"mimeType"`
+				Text     string `json:"text"`
+				Blob     string `json:"blob"`
+			} `json:"resource"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
@@ -380,6 +387,19 @@ func decodeAnthropicContent(raw json.RawMessage) ([]llm.Content, error) {
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			content = append(content, image)
+		case "resource":
+			// MCP tool_result 的 resource 块：text 直接展开；blob 按图片或占位降级。
+			if header.Resource == nil {
+				continue
+			}
+			switch {
+			case header.Resource.Text != "":
+				content = append(content, llm.TextContent{Text: header.Resource.Text})
+			case header.Resource.Blob != "" && strings.HasPrefix(header.Resource.MIMEType, "image/"):
+				content = append(content, llm.ImageContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType})
+			default:
+				content = append(content, llm.TextContent{Text: "[resource: " + header.Resource.URI + "]"})
+			}
 		default:
 			continue
 		}
