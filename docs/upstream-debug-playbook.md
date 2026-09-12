@@ -145,3 +145,13 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 - **不要手动跑 `./devin-2api` 抢 :3003**：手动实例和 launchd 的 KeepAlive 会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经 launchd 启停。
 - **launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。
+
+## 客户端上下文窗口配置（自动压缩前提）
+
+上游 `GetCliModelConfigs` 报告 `swe-2-max` 真实窗口 **262000**。客户端若以为窗口更大，auto-compact 阈值会设在上限之外，永远撞 prompt-too-long 而不压缩。已验证的可用配置：
+
+- **Codex** `~/.codex/config.toml`：`model_context_window = 262000`，`model_auto_compact_token_limit = 230000`。resume 实验确认 240k 历史触发 `context compacted` 后正常续答。
+- **Claude Code** `~/.claude/settings.json` env：`CLAUDE_CODE_MAX_CONTEXT_TOKENS=262000`（非 `claude-` 前缀模型的窗口声明）、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=230000`。实测 ~202k 用量后自动压缩（阈值≈window-28k buffer），压缩后上下文降到 ~17k。
+- CC 另有单条 prompt ≤80% 窗口的客户端保护（~209k tokens），超限直接 "Prompt is too long" 不发请求；`-c -p` resume 时若投影总量超窗也同样拒绝，不会自动压缩——这是边界保护不是 bug。
+- Codex 只对 SSE `response.failed` 事件里 `error.code=="context_length_exceeded"` 触发错误恢复式压缩；HTTP 413/400 错误体不触发。且 ccload 会吞掉上游 SSE error 事件做冷却分类、不透传给客户端——所以**不要**把 context 溢出改成流内 SSE 事件下发，保持 HTTP 状态码路径（413 对 ccload 是客户端级、零冷却）。
+- ccload 的 `/v1/models` 不透传 `context_tokens` 等元数据，客户端无法经 discovery 学到窗口，只能靠上述本地配置。
