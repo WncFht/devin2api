@@ -1,6 +1,9 @@
 // 本文件实现单次 HTTP 请求的分阶段调试日志目录和 JSON/JSONL 写盘。
 //
 // Package debuglog 负责记录兼容 API 请求在 HTTP、中间模型和供应商协议之间的转换过程。
+// 所有写盘作业经每请求一个有界任务队列交给单 worker 串行执行——
+// 事件顺序即入队顺序，热路径只承担一次 channel send；队列满时丢弃并计数，
+// 观测系统自身降级不拖垮请求。生命周期管理（保留期/总量清理）见 cleaner.go。
 package debuglog
 
 import (
@@ -16,19 +19,38 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/leookun/devin-2api/internal/llm"
 )
 
-// Manager 在固定 logs 根目录下为每次请求创建独立 recorder。
+// writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
+const writeQueueSize = 4096
+
+// Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
+// 全局索引（index.jsonl）与后台清理器。
 type Manager struct {
 	// root 是所有请求日志目录的根路径；空值表示禁用调试日志。
 	root string
 	// now 返回当前时间；测试会固定它以验证同秒目录分配。
 	now func() time.Time
-	// mutex 保证同一秒并发请求的目录后缀分配不会冲突。
+	// mutex 串行化目录分配、index.jsonl 追加和 activeDirs 维护。
 	mutex sync.Mutex
+	// activeDirs 记录仍有进行中请求的目录名，清理器必须跳过。
+	activeDirs map[string]struct{}
+	// retentionDays 是请求目录保留天数；<=0 不按时间清理。
+	retentionDays int
+	// maxBytes 是 logs 根目录总量上限；<=0 不按大小清理。
+	maxBytes int64
+	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
+	indexFile   *os.File
+	indexWriter *bufio.Writer
+	// cleanerStop/cleanerDone 控制后台清理协程生命周期；nil 表示未启动。
+	cleanerStop chan struct{}
+	cleanerDone chan struct{}
+	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
+	droppedTotal atomic.Uint64
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -37,6 +59,15 @@ type RequestMeta struct {
 	Method string
 	// Path 是 HTTP 请求路径。
 	Path string
+	// API 是入口协议标识（openai-chat、openai-responses、responses-ws、anthropic）。
+	API string
+	// ClientIP 是下游客户端地址（不含端口）。
+	ClientIP string
+	// UserAgent 是下游客户端声明的 UA。
+	UserAgent string
+	// KeyHash 是客户端凭据的 SHA-256 前 8 字节十六进制——
+	// 用于按 key 关联请求，不明文落盘。
+	KeyHash string
 }
 
 // Completion 是请求结束时写入 meta.json 的结果摘要。
@@ -45,8 +76,14 @@ type Completion struct {
 	StatusCode int
 	// Result 是 completed、failed 或 disconnected。
 	Result string
-	// Model 是请求使用的模型标识。
+	// Model 是实际发给上游的模型标识（别名解析后）。
 	Model string
+	// RequestedModel 是客户端原始请求的模型名（可能命中别名）。
+	RequestedModel string
+	// ResponseModel 是上游响应声明的模型；为空表示上游未声明。
+	ResponseModel string
+	// ModelMismatch 表示上游声明模型与实际请求模型不一致。
+	ModelMismatch bool
 	// Provider 是实际生成响应的供应商标识。
 	Provider string
 	// Stream 表示请求是否使用流式响应。
@@ -57,27 +94,46 @@ type Completion struct {
 	Usage llm.Usage
 }
 
-// Recorder 保存单次请求的目录、开始时间和各 JSONL 文件序号。
+// Recorder 保存单次请求的目录、开始时间和异步写队列。
 type Recorder struct {
+	// manager 回指所属 Manager，Complete 时写索引并释放目录保护。
+	manager *Manager
 	// directory 是本次请求的日志目录。
 	directory string
 	// startedAt 是 HTTP 请求进入应用的时间。
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
-	// mutex 串行化同一请求内的文件写入和附件编号。
+	// mutex 保护 closed 标志与入队决策；worker 自身状态无锁。
 	mutex sync.Mutex
+	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
+	closed bool
+	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
+	tasks chan writeTask
+	// writerDone 在 worker 排空队列并关闭文件后关闭。
+	writerDone chan struct{}
+	// dropped 是本次请求被丢弃的写任务数。
+	dropped atomic.Uint64
+	// firstUpstreamMS/firstClientMS 是首上游事件/首客户端内容字节的
+	// 相对毫秒数；-1 表示尚未发生。区分「上游慢」与「网关编码慢」。
+	firstUpstreamMS atomic.Int64
+	firstClientMS   atomic.Int64
+
+	// 以下字段仅由写 worker 访问，无需加锁：
 	// sequences 保存每个 JSONL 文件各自的递增序号。
 	sequences map[string]int
 	// attachmentByHash 用于复用在多个转换阶段重复出现的同一附件。
 	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
 	attachmentCount int
-	// jsonlFiles 保存已打开的 JSONL 文件，避免每帧重复 open/sync/close。
+	// jsonlFiles 保存已打开的 JSONL 文件，避免每帧重复 open/close。
 	jsonlFiles map[string]*jsonlFile
-	// pendingWrites 跟踪异步 WriteJSON goroutine，Complete 时统一等待。
-	pendingWrites sync.WaitGroup
+	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
+	errorWritten bool
 }
+
+// writeTask 是交给写 worker 的一次作业，worker 内串行执行。
+type writeTask func()
 
 // jsonlFile 保存单个已打开的 JSONL 文件句柄及其缓冲写。
 type jsonlFile struct {
@@ -114,9 +170,59 @@ type attachmentReference struct {
 	SHA256 string `json:"sha256"`
 }
 
-// NewManager 创建写入指定 logs 根目录的管理器；空路径会返回禁用状态的管理器。
-func NewManager(root string) *Manager {
-	return &Manager{root: root, now: time.Now}
+// NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
+// retentionDays 和 maxTotalMB 控制后台清理：<=0 表示对应维度不限制。
+func NewManager(root string, retentionDays int, maxTotalMB int64) *Manager {
+	manager := &Manager{
+		root:          root,
+		now:           time.Now,
+		activeDirs:    make(map[string]struct{}),
+		retentionDays: retentionDays,
+		maxBytes:      maxTotalMB << 20,
+	}
+	if root != "" && (retentionDays > 0 || maxTotalMB > 0) {
+		manager.cleanerStop = make(chan struct{})
+		manager.cleanerDone = make(chan struct{})
+		go manager.runCleaner()
+	}
+	return manager
+}
+
+// Close 停止后台清理并关闭索引文件句柄；进程退出前调用一次。
+func (manager *Manager) Close() {
+	if manager == nil {
+		return
+	}
+	if manager.cleanerStop != nil {
+		close(manager.cleanerStop)
+		<-manager.cleanerDone
+	}
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	if manager.indexWriter != nil {
+		_ = manager.indexWriter.Flush()
+		_ = manager.indexFile.Close()
+		manager.indexWriter = nil
+		manager.indexFile = nil
+	}
+}
+
+// Stats 返回日志管道自身的运行指标：丢弃数、活跃请求目录数。
+// 观测系统自己的健康状况也应可观测（参考 ccLoad 的 drop/backlog 计数）。
+func (manager *Manager) Stats() map[string]any {
+	if manager == nil {
+		return nil
+	}
+	manager.mutex.Lock()
+	active := len(manager.activeDirs)
+	manager.mutex.Unlock()
+	return map[string]any{
+		"log_root":            manager.root,
+		"active_request_dirs": active,
+		"dropped_log_events":  manager.droppedTotal.Load(),
+		"retention_days":      manager.retentionDays,
+		"max_total_mb":        manager.maxBytes >> 20,
+	}
 }
 
 // Start 为一个 HTTP 请求创建按进入秒命名的独立日志目录。
@@ -144,13 +250,20 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			return nil
 		}
 		recorder := &Recorder{
+			manager:          manager,
 			directory:        directory,
 			startedAt:        now,
 			requestMeta:      meta,
+			tasks:            make(chan writeTask, writeQueueSize),
+			writerDone:       make(chan struct{}),
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
 			jsonlFiles:       make(map[string]*jsonlFile),
 		}
+		recorder.firstUpstreamMS.Store(-1)
+		recorder.firstClientMS.Store(-1)
+		manager.activeDirs[name] = struct{}{}
+		go recorder.runWriter()
 		recorder.writeMeta(nil)
 		return recorder
 	}
@@ -170,17 +283,61 @@ func FromContext(ctx context.Context) *Recorder {
 	return recorder
 }
 
-// WriteJSON 将一个阶段快照写为格式化 JSON 文件。
-// 序列化和写盘在后台 goroutine 中执行，不阻塞请求主线程；Complete 时统一等待完成。
+// enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
+func (recorder *Recorder) enqueue(task writeTask) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	if recorder.closed {
+		recorder.dropped.Add(1)
+		return
+	}
+	select {
+	case recorder.tasks <- task:
+	default:
+		recorder.dropped.Add(1)
+	}
+}
+
+// runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
+// tasks 关闭后排空残余任务，统一刷盘并关闭所有 JSONL 文件。
+func (recorder *Recorder) runWriter() {
+	for task := range recorder.tasks {
+		task()
+	}
+	for _, f := range recorder.jsonlFiles {
+		_ = f.writer.Flush()
+		_ = f.file.Close()
+	}
+	recorder.jsonlFiles = nil
+	close(recorder.writerDone)
+}
+
+// NoteUpstreamLatency 记录首个上游事件到达的相对毫秒数（幂等，只记第一次）。
+func (recorder *Recorder) NoteUpstreamLatency() {
+	if recorder == nil {
+		return
+	}
+	recorder.firstUpstreamMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// NoteClientLatency 记录首个下发给客户端的内容字节的相对毫秒数。
+// SSE 保活注释不计——它是链路保活不是内容。
+func (recorder *Recorder) NoteClientLatency() {
+	if recorder == nil {
+		return
+	}
+	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON 文件。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
 	}
-	recorder.pendingWrites.Add(1)
-	go func() {
-		defer recorder.pendingWrites.Done()
-		recorder.mutex.Lock()
-		defer recorder.mutex.Unlock()
+	recorder.enqueue(func() {
 		value = recorder.sanitize(value)
 		data, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
@@ -188,7 +345,7 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 		}
 		data = append(data, '\n')
 		_ = os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600)
-	}()
+	})
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -196,21 +353,21 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
 	}
-	recorder.mutex.Lock()
-	defer recorder.mutex.Unlock()
-	recorder.sequences[name]++
-	record := JSONLRecord{
-		Seq:       recorder.sequences[name],
-		Time:      time.Now().Format(time.RFC3339Nano),
-		ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
-		Event:     event,
-		Data:      recorder.sanitize(value),
-	}
-	data, err := json.Marshal(record)
-	if err != nil {
-		return
-	}
-	recorder.appendJSONL(name, data)
+	recorder.enqueue(func() {
+		recorder.sequences[name]++
+		record := JSONLRecord{
+			Seq:       recorder.sequences[name],
+			Time:      time.Now().Format(time.RFC3339Nano),
+			ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
+			Event:     event,
+			Data:      recorder.sanitize(value),
+		}
+		data, err := json.Marshal(record)
+		if err != nil {
+			return
+		}
+		recorder.appendJSONL(name, data)
+	})
 }
 
 // AppendValueJSONL 将一个结构化值直接追加为 JSONL 行，不添加事件信封。
@@ -218,54 +375,55 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
 	}
-	recorder.mutex.Lock()
-	defer recorder.mutex.Unlock()
-	data, err := json.Marshal(recorder.sanitize(value))
-	if err != nil {
-		return
-	}
-	recorder.appendJSONL(name, data)
+	recorder.enqueue(func() {
+		data, err := json.Marshal(recorder.sanitize(value))
+		if err != nil {
+			return
+		}
+		recorder.appendJSONL(name, data)
+	})
 }
 
-// WriteError 写入请求失败的阶段和错误摘要。
+// WriteError 写入请求失败的阶段和错误摘要；只保留首个错误。
 func (recorder *Recorder) WriteError(stage string, err error) {
 	if recorder == nil || err == nil {
 		return
 	}
-	recorder.mutex.Lock()
-	defer recorder.mutex.Unlock()
-	path := filepath.Join(recorder.directory, "error.json")
-	if _, statErr := os.Stat(path); statErr == nil {
-		return
-	}
-	value := recorder.sanitize(map[string]any{
-		"stage":      stage,
-		"message":    err.Error(),
-		"elapsed_ms": time.Since(recorder.startedAt).Milliseconds(),
+	recorder.enqueue(func() {
+		if recorder.errorWritten {
+			return
+		}
+		recorder.errorWritten = true
+		value := recorder.sanitize(map[string]any{
+			"stage":      stage,
+			"message":    err.Error(),
+			"elapsed_ms": time.Since(recorder.startedAt).Milliseconds(),
+		})
+		data, marshalErr := json.MarshalIndent(value, "", "  ")
+		if marshalErr != nil {
+			return
+		}
+		_ = os.WriteFile(filepath.Join(recorder.directory, "error.json"), append(data, '\n'), 0o600)
 	})
-	data, marshalErr := json.MarshalIndent(value, "", "  ")
-	if marshalErr != nil {
-		return
-	}
-	_ = os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
-// Complete 使用最终状态重写 meta.json。
+// Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
+// 追加全局索引行并释放目录的清理保护。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
 	}
-	// 等待所有异步 WriteJSON 完成后再刷盘关闭，避免文件内容不完整。
-	recorder.pendingWrites.Wait()
 	recorder.mutex.Lock()
-	defer recorder.mutex.Unlock()
-	// 请求结束时统一刷盘并关闭 JSONL，避免每帧 file.Sync() 带来的延迟。
-	for _, f := range recorder.jsonlFiles {
-		_ = f.writer.Flush()
-		_ = f.file.Close()
+	if !recorder.closed {
+		recorder.closed = true
+		close(recorder.tasks)
 	}
-	recorder.jsonlFiles = nil
+	recorder.mutex.Unlock()
+	<-recorder.writerDone
 	recorder.writeMeta(&completion)
+	recorder.manager.appendIndex(recorder, &completion)
+	recorder.manager.releaseDir(recorder.directory)
+	recorder.manager.droppedTotal.Add(recorder.dropped.Load())
 }
 
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
@@ -278,9 +436,6 @@ func (recorder *Recorder) appendJSONL(name string, data []byte) {
 }
 
 func (recorder *Recorder) getJSONLFile(name string) (*jsonlFile, error) {
-	if recorder.jsonlFiles == nil {
-		recorder.jsonlFiles = make(map[string]*jsonlFile)
-	}
 	if f, ok := recorder.jsonlFiles[name]; ok {
 		return f, nil
 	}
@@ -299,6 +454,31 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		"method":     recorder.requestMeta.Method,
 		"path":       recorder.requestMeta.Path,
 	}
+	if recorder.requestMeta.API != "" {
+		meta["api"] = recorder.requestMeta.API
+	}
+	client := map[string]any{}
+	if recorder.requestMeta.ClientIP != "" {
+		client["ip"] = recorder.requestMeta.ClientIP
+	}
+	if recorder.requestMeta.UserAgent != "" {
+		client["user_agent"] = recorder.requestMeta.UserAgent
+	}
+	if recorder.requestMeta.KeyHash != "" {
+		client["key_hash"] = recorder.requestMeta.KeyHash
+	}
+	if len(client) > 0 {
+		meta["client"] = client
+	}
+	if first := recorder.firstUpstreamMS.Load(); first >= 0 {
+		meta["first_upstream_ms"] = first
+	}
+	if first := recorder.firstClientMS.Load(); first >= 0 {
+		meta["first_client_ms"] = first
+	}
+	if dropped := recorder.dropped.Load(); dropped > 0 {
+		meta["dropped_events"] = dropped
+	}
 	if completion != nil {
 		finishedAt := time.Now()
 		meta["finished_at"] = finishedAt.Format(time.RFC3339Nano)
@@ -308,6 +488,15 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		meta["model"] = completion.Model
 		meta["provider"] = completion.Provider
 		meta["stream"] = completion.Stream
+		if completion.RequestedModel != "" {
+			meta["requested_model"] = completion.RequestedModel
+		}
+		if completion.ResponseModel != "" {
+			meta["response_model"] = completion.ResponseModel
+		}
+		if completion.ModelMismatch {
+			meta["model_mismatch"] = true
+		}
 		if completion.UpstreamRequestID != "" {
 			meta["upstream_request_id"] = completion.UpstreamRequestID
 		}

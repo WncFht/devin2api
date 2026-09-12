@@ -59,6 +59,11 @@ type DevinConfig struct {
 type DebugConfig struct {
 	// Enabled 表示是否在配置文件同目录的 logs 下写入请求调试日志。
 	Enabled bool `yaml:"enabled"`
+	// RetentionDays 是请求日志目录的保留天数；<=0 不按时间清理。默认 14。
+	RetentionDays *int `yaml:"retention_days"`
+	// MaxTotalMB 是 logs 目录总量上限（MB），超限从最旧目录开始删；
+	// <=0 不按大小清理。默认 1024。
+	MaxTotalMB *int64 `yaml:"max_total_mb"`
 }
 
 // DashboardConfig 保存管理面板配置。
@@ -105,6 +110,15 @@ func (config *Config) Validate() error {
 	if config.Devin.ForceHTTP1 == nil {
 		force := true
 		config.Devin.ForceHTTP1 = &force
+	}
+	// 调试日志默认保留 14 天、总量 1GB，防止磁盘被静默打满。
+	if config.Debug.RetentionDays == nil {
+		days := 14
+		config.Debug.RetentionDays = &days
+	}
+	if config.Debug.MaxTotalMB == nil {
+		mb := int64(1024)
+		config.Debug.MaxTotalMB = &mb
 	}
 	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
 	if strings.TrimSpace(config.Devin.Token) == "" {

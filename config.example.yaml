@@ -5,6 +5,10 @@ server:
 
 debug:
   enabled: false
+  # 请求日志目录保留天数；<=0 不按时间清理。默认 14。
+  # retention_days: 14
+  # logs 目录总量上限（MB），超限从最旧目录开始删；<=0 不限制。默认 1024。
+  # max_total_mb: 1024
 
 devin:
   base_url: "https://server.codeium.com"

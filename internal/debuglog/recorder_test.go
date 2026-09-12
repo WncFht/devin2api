@@ -13,7 +13,7 @@ import (
 // TestRecorderWritesRedactedStagesAndAttachments 的测试动机是防止诊断日志泄露凭据或重复嵌入大图片。
 func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	recorder := NewManager(root).Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
+	recorder := NewManager(root, 0, 0).Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
 	if recorder == nil {
 		t.Fatal("Start() = nil")
 	}
@@ -55,7 +55,7 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 
 // TestManagerAllocatesCollisionSuffix 的测试动机是保证同秒并发请求不会共写同一个目录。
 func TestManagerAllocatesCollisionSuffix(t *testing.T) {
-	manager := NewManager(filepath.Join(t.TempDir(), "logs"))
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), 0, 0)
 	manager.now = func() time.Time { return time.Date(2027, time.January, 1, 23, 54, 54, 0, time.Local) }
 	first := manager.Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
 	second := manager.Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
@@ -72,9 +72,11 @@ func TestManagerAllocatesCollisionSuffix(t *testing.T) {
 
 // TestWriteErrorKeepsFirstCause 的测试动机是让最接近故障源的阶段不被外层通用错误覆盖。
 func TestWriteErrorKeepsFirstCause(t *testing.T) {
-	recorder := NewManager(filepath.Join(t.TempDir(), "logs")).Start(RequestMeta{})
+	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), 0, 0).Start(RequestMeta{})
 	recorder.WriteError("devin_connect", os.ErrPermission)
 	recorder.WriteError("provider_stream", os.ErrNotExist)
+	// 写任务经队列异步执行，Complete 排空后才能读到文件。
+	recorder.Complete(Completion{StatusCode: 500, Result: "failed"})
 	log := readTestFile(t, filepath.Join(recorder.directory, "error.json"))
 	if !strings.Contains(log, "devin_connect") || strings.Contains(log, "provider_stream") {
 		t.Fatalf("error log = %s", log)
@@ -93,4 +95,62 @@ func readTestBytes(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// TestIndexWrittenOnComplete 验证全局索引每完成一个请求追加一行可定位摘要。
+func TestIndexWrittenOnComplete(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 0, 0)
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", ClientIP: "127.0.0.1", KeyHash: "abcd1234"})
+	recorder.NoteUpstreamLatency()
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "swe-2-max", RequestedModel: "swe-2", ResponseModel: "swe-2-max", Stream: true, UpstreamRequestID: "req-1"})
+	index := readTestFile(t, filepath.Join(root, "index.jsonl"))
+	for _, want := range []string{`"dir":`, `"api":"anthropic"`, `"requested_model":"swe-2"`, `"response_model":"swe-2-max"`, `"upstream_request_id":"req-1"`, `"key_hash":"abcd1234"`, `"first_upstream_ms"`} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("index.jsonl missing %s: %s", want, index)
+		}
+	}
+}
+
+// TestCleanerRemovesExpiredDirs 验证清理器删除超龄目录、跳过活跃目录、不碰索引文件。
+func TestCleanerRemovesExpiredDirs(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 7, 0)
+	defer manager.Close()
+
+	old := filepath.Join(root, "20200101-000000")
+	if err := os.MkdirAll(old, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "meta.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	active := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+
+	if removed := manager.cleanOnce(); removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("expired dir should be deleted")
+	}
+	if _, err := os.Stat(active.directory); err != nil {
+		t.Fatal("active dir must be protected")
+	}
+	active.Complete(Completion{StatusCode: 200, Result: "completed"})
+}
+
+// TestDroppedCounterOnClosedQueue 验证 Complete 之后的写入被丢弃并计数。
+func TestDroppedCounterOnClosedQueue(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 0, 0)
+	recorder := manager.Start(RequestMeta{})
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	recorder.WriteJSON("late.json", map[string]any{"x": 1})
+	if recorder.dropped.Load() != 1 {
+		t.Fatalf("dropped = %d, want 1", recorder.dropped.Load())
+	}
 }
