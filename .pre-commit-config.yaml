@@ -21,3 +21,9 @@ repos:
         entry: ./node_modules/.bin/git-format-staged --formatter "autocorrect --stdin | ./node_modules/.bin/prettier --stdin-filepath {}"
         language: system
         types: [markdown]
+  # secret 门控：GitHub push protection 只认标准 pattern，devin-session-token$
+  # 是本仓库最可能泄的自有格式，靠这里的自定义规则拦（见 .gitleaks.toml）。
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
