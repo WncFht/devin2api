@@ -9,7 +9,7 @@ devin-2api is a lightweight forwarding tool for the [OpenAI Responses API](https
 - **OpenAI-compatible** `/v1/responses` endpoint — call Devin's models through the standard OpenAI Responses protocol
 - **Streaming and non-streaming** responses (typed SSE / JSON)
 - **Adapter-based design** — easily extended to new upstreams
-- **Easy to deploy** — single static binary, public Docker image on [Docker Hub](https://hub.docker.com/r/devinuser123/devin-2api)
+- **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 - **Optional debug logs** per request for troubleshooting
 
 ## Quick start
@@ -41,12 +41,12 @@ Local:
 go run ./cmd/devin-2api -config config.yaml
 ```
 
-Docker (image published on [Docker Hub](https://hub.docker.com/r/devinuser123/devin-2api)):
+Docker (image published on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)):
 
 ```bash
 docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
-  devinuser123/devin-2api --config /app/config.yaml
+  ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
 
 ### 4. Verify

@@ -149,17 +149,20 @@ Concurrent requests in the same second are distinguished by an incrementing suff
 
 Releases follow [SemVer](https://semver.org/). While the project is in the 0.x phase, breaking changes bump the minor version (`v0.1.0` → `v0.2.0`), not the major one.
 
-A release is a `v`-prefixed tag. `gh release create` tags the current `HEAD`, pushes the tag, and creates the GitHub Release page with auto-generated notes — which triggers the `release.yml` workflow (full test suite, then a Docker image build + push to Docker Hub `devinuser123/devin-2api` for amd64 and arm64):
+A release is a `v`-prefixed tag published via `scripts/release.sh`. The script derives the next version from Conventional Commits since the last tag, then gates on `HEAD == origin/main` and a green `CI` workflow run for that commit — tags are only ever placed on pushed, tested commits:
 
 ```bash
-gh release create v0.1.0 --generate-notes
+scripts/release.sh            # dry-run: next version, changelog, gate status
+scripts/release.sh --publish  # create + push the annotated tag
 ```
+
+Pushing the tag triggers the `release.yml` workflow (full test suite, then a multi-arch Docker build with `-X main.version=<tag>` injected, pushed to GHCR `ghcr.io/wncfht/devin2api`, plus the GitHub Release page with auto-generated notes).
 
 Notes:
 
-- the workflow tags the image as `0.1.0`, `0.1`, `0`, and `latest` (pre-releases like `v0.2.0-rc.1` skip `latest`);
-- the workflow reads the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets — the maintainer must set them once (token created at [hub.docker.com/settings/security](https://hub.docker.com/settings/security), not the login password);
-- tags are immutable once pushed; fix a bad release by releasing a new version, never by rewriting the tag.
+- a stable tag `v0.1.0` publishes image tags `0.1.0`, `0.1`, `0`, and `latest`; pre-releases like `v0.2.0-rc.1` only get the exact `0.2.0-rc.1` tag (no floating aliases);
+- GHCR is always published via `GITHUB_TOKEN` — no secrets to configure. Setting `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` additionally mirrors the image to Docker Hub;
+- tags are immutable once pushed (enforced by a repo ruleset); fix a bad release by releasing a new version, never by rewriting the tag.
 
 ## Updating the upstream protocol (proto extraction)
 
