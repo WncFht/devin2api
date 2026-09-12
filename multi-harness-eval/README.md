@@ -132,12 +132,44 @@ $N=3$ 是论文里的成本选择，不是统计上够用的选择：题级得�
 其它维度：
 
 - **decoding**：五个 harness 在 Harbor 0.22.0 里都**没有** temperature/top_p kwarg —— 但这不是问题：客户端不发这两个字段时，devin-2api 网关用默认值 `temperature=1, top_p=0.95`（见 `internal/adapter/devin/devin.go`)，恰好等于 V4.1 报告值，且对四个第三方 harness 一致生效。devin CLI 直连 Devin 后端，decoding 不可控 —— 记为「原生默认」，这正是把它当参照系的意义
-- **推理强度**:SWE-2 的 effort 编码在 model UID 里 —— `devin models list` 实测有 `swe-2-medium` / `swe-2-high` / `swe-2-max` 三档，**`swe-2-max` 本身已是最高档**,devin 侧无需再调。客户端侧的 effort 旋钮（cc `reasoning_effort`、codex `reasoning_effort`、kimi `KIMI_MODEL_THINKING_EFFORT`、pi `thinking`）只影响 harness 本地行为，不透传到上游 —— job 里统一顶格（`max`/`xhigh`)，但注意这只是客户端设置，真正决定推理量的是模型 UID。**effort 扫档 = 换 model_name 到 `swe-2-high`/`swe-2-medium`**（第三方 harness 需网关支持对应 UID 改写），这是后续一组独立实验维度
+- **推理强度**:SWE-2 的 effort 编码在 model UID 里 —— `devin models list` 实测有 `swe-2-medium` / `swe-2-high` / `swe-2-max` 三档，**`swe-2-max` 本身已是最高档**,devin 侧无需再调。V4.1 的 effort 是 25–100 连续标量，API 三档预设 low=50/high=75/max=100，表格主结果均报 max(100)[^v41];swe-2 三档与其对应关系未官方说明，按序对应即可。客户端侧旋钮（cc `reasoning_effort`、codex `reasoning_effort`、kimi `KIMI_MODEL_THINKING_EFFORT`、pi `thinking`）不透传上游，只影响 harness 本地预算行为 —— job 里统一顶格（`max`/`xhigh`)
+
+**swe-2 三档 × 各 harness 切换方式**（后续 effort 扫档实验用）:
+
+| harness     | 换档方式                                                                                                                            | 三档均可行？       |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| devin       | `model_name: devin/swe-2-{medium,high,max}`                                                                                         | ✅ 原生支持        |
+| codex       | `model_name: openai/swe-2-{tier}`,devin-2api 透传                                                                                   | ✅                 |
+| pi          | `model_name: anthropic/swe-2-{tier}`，经 ccload 透传                                                                                | ✅                 |
+| claude-code | 客户端名被白名单钉死在 `claude-*`，换档改 ccload `modelOverrides` 或 devin-2api `aliases` 映射（如 `claude-sonnet-4-5: swe-2-high`) | ✅ 但一次 run 一档 |
+| kimi-code   | 同上，客户端名固定 `kimi-k3`，在网关侧改映射                                                                                        | ✅ 但一次 run 一档 |
+
+注：devin-2api 对客户端 `model` 字段是「别名命中则改写、未命中则透传、为空则回落 `devin.model` 默认」(`devin.go:106-112`)，所以真实 UID 直通无需配置；别名表是全局生效的，扫档时按 tier 分批跑、批间改配置。
+
 - **步数预算**:V4.1 的 max_steps=500 是模型生成轮数，不是 tool call 数也不是 wall time。cc 有 `max_turns` kwarg 可显式对齐；其它家没有对应口，靠 `override_timeout_sec` 兜底。比较时从 ATIF 轨迹里读实际 turns，谁提前触顶要标出来
 - **并发不是实验变量**：每个 trial 独立容器，并发只影响墙钟和上游限流；但限流触发重试会污染结果，所以 devin 单独限 `n_concurrent: 2`（真实计费），其余按配额给。跑完把实际并发记进结果元数据
 - **配对比较**：所有 harness 跑同一套题，差异分析按题配对（per-task 差值的 bootstrap 区间）比两个独立 pass rate 的差更省样本 —— 题目难度这项方差被配对消掉了
 
 报告时除 pass rate 外一起给：题级 $N$ 次结果明细、bootstrap 95% CI、prompt/cached/completion tokens、wall time、turns、触顶/超时次数。
+
+**各 bench 定档**（按 V4.1 协议[^v41] 对齐，V4 为参照[^v4]):
+
+| bench                  | n_attempts | decoding                           | effort | 步数   | 上下文     | 网络                       | 出处                                          |
+| ---------------------- | ---------- | ---------------------------------- | ------ | ------ | ---------- | -------------------------- | --------------------------------------------- |
+| Terminal-Bench 2.1     | 3          | temp 1.0, top_p 0.95               | max    | 500 轮 | 1M         | **断网**（仅放通 API host) | V4.1 Table 4 注                               |
+| DeepSWE v1.1（如跑）   | 8          | 同上                               | max    | 500 轮 | 1M         | 同上                       | V4.1 Table 4 注                               |
+| ProgramBench / NL2Repo | 3          | 同上                               | max    | 500 轮 | 1M         | 同上                       | V4.1 code-agent 共享设置                      |
+| CyberGym               | 3          | 同上                               | max    | 500 轮 | 1M         | 同上                       | 同上；注意论文实测出现过 exploit-seeking 行为 |
+| SWE-bench Verified     | 8（建议）  | temp 1.0(V4 未写 top_p，沿用 0.95) | max    | 500 步 | V4 用 512K | 断网                       | V4 §5.3.1 code-agent 协议                     |
+| aider_polyglot         | 3          | 同上                               | max    | 500 轮 | 262K       | 同上                       | DS 未跑，我方补充                             |
+
+落实到我们的环境时要注意的差异：
+
+- swe-2 全系实际上下文 **262144 / 输出 128000**(`devin models list` 实测）,V4.1 的 1M 窗口在 swe-2 上不存在 —— 记为 262K，不设 KIMI_MODEL_MAX_CONTEXT_SIZE 也行，它默认已是模型上限
+- 「断网」在 V4.1 指 agent 任务环境无外网；我们的 harness 在容器内调模型 API,Harbor 里对应做法是 agent `extra_allowed_hosts` 只放 API host(codex 走 `host.docker.internal:3003`，其余走 49173 或 `api.devin.ai`/`server.codeium.com`)，其余 egress 关掉 —— TB 2.1 数据集自身 task.toml 可能已声明网络策略，以数据集为准
+- V4.1 的防作弊三件套照搬：断网、剥 git history、清 transient 缓存（go/mod、node_modules、.jar、pycache)—— 前两条 Harbor/TB 任务环境天然满足（容器隔离、任务镜像不带 .git)，第三条是 V4.1 评测侧的额外处理，我们的轨迹分析阶段如遇异常分数按此排查
+- V4.1 scaffold 版本表（Appendix B.1):CC v2.1.251（另测 105/238/259 四版本求均值）、Codex v0.147.0、Pi v0.84.2(RPC 模式 + file/shell + search 扩展）、mini-SWE v2、DSH Minimal/Standard/PTC —— 我们 job 里已钉 cc `2.1.258`、kimi-code `0.42.0`，和论文版本不同属正常（论文版本仅作参照），但每 run 必须记录实际版本号
+- 我们多一个 `kimi-code`（论文没有）、少 OpenCode/mini-SWE/DSH；如要和论文 mini-SWE/DSH-Minimal 直接对表，可后续加 `mini-swe-agent` 作标准 scaffold 参照
 
 ## 7. 实验纪律
 
@@ -157,5 +189,7 @@ $N=3$ 是论文里的成本选择，不是统计上够用的选择：题级得�
 [^scaffold-effect]: Vats & Golev. The Scaffold Effect in Coding Agents: Harness Choice as a Hidden Variable in Coding-Agent Evaluation. KDD Agentic AI Eval Workshop 2026. [paper](https://kdd-eval-workshop.github.io/agenticai-evaluation-kdd2026/assets/papers/74_The_Scaffold_Effect_in_Codi.pdf)
 
 [^v41]: DeepSeek-AI. DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression. 2026.
+
+[^v4]: DeepSeek-AI. DeepSeek-V4 Technical Report. 2026.
 
 [^tb]: Terminal-Bench. terminal-bench-2.1 submission guide. [github.com/laude-institute/terminal-bench](https://github.com/laude-institute/terminal-bench)
