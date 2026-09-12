@@ -33,6 +33,9 @@ type streamWriter struct {
 	flusher   http.Flusher
 	recorder  *debuglog.Recorder
 	committed bool
+	// heartbeat 是等待上游期间周期性写出的保活载荷：SSE 用注释行，
+	// 非流式 JSON 用 "\n"（合法前导空白）；空表示不心跳。
+	heartbeat []byte
 	// bytes 累计写出字节数，供 metrics 统计响应流量。
 	bytes int
 }
@@ -67,7 +70,10 @@ func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, 
 			}
 			return item.event, item.err
 		case <-ticker.C:
-			if err := out.write(sseKeepalive); err != nil {
+			if len(out.heartbeat) == 0 {
+				continue
+			}
+			if err := out.write(out.heartbeat); err != nil {
 				return llm.ResponseEvent{}, err
 			}
 		case <-ctx.Done():
@@ -136,7 +142,7 @@ func (application *App) streamCompletion(
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder}
+	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder, heartbeat: sseKeepalive}
 
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -263,10 +269,14 @@ func writeProtocolStream(
 	}
 }
 
-func collectFinalMessage(ctx context.Context, stream llm.ResponseStream, recorder *debuglog.Recorder) (*llm.AssistantMessage, error) {
+// collectPumpedMessage 从泵 channel 收集非流式最终消息。等待期间按
+// ticker 节奏写 heartbeat 载荷：非流式请求在上游长思考窗口内完全无字节，
+// Codex 约 30s 弃连、网关有自己的首字节超时——"\n" 是 JSON 响应体的
+// 合法前导空白，心跳不污染最终文档。
+func collectPumpedMessage(ctx context.Context, out *streamWriter, items <-chan pumpItem, ticker *time.Ticker) (*llm.AssistantMessage, error) {
 	var final *llm.AssistantMessage
 	for {
-		event, err := receiveEvent(ctx, stream, recorder)
+		event, err := out.awaitEvent(ctx, items, ticker)
 		if errors.Is(err, io.EOF) {
 			if final == nil {
 				return nil, errors.New("response stream ended without a final message")
@@ -289,15 +299,6 @@ func collectFinalMessage(ctx context.Context, stream llm.ResponseStream, recorde
 			return nil, errors.New(event.Error.ErrorMessage)
 		}
 	}
-}
-
-func receiveEvent(ctx context.Context, stream llm.ResponseStream, recorder *debuglog.Recorder) (llm.ResponseEvent, error) {
-	event, err := stream.Recv(ctx)
-	if err == nil {
-		recorder.NoteUpstreamLatency()
-		recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
-	}
-	return event, err
 }
 
 func eventMessage(event llm.ResponseEvent, fallback *llm.AssistantMessage) *llm.AssistantMessage {

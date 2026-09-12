@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,9 @@ type App struct {
 	apiKey string
 	// concurrency 限制同时处理的 /v1/* 请求数。
 	concurrency chan struct{}
+	// wsConns 限制下游 WebSocket 连接数。连接占用 fd+goroutine，与上游并发
+	// 槽分开计量——空闲长连接不该烧并发额度；槽按轮次在 WS 循环里获取。
+	wsConns chan struct{}
 	// metrics 是常驻运行计数器；始终可用，供面板和进程日志消费。
 	metrics *obs.Metrics
 	// version 是构建注入的版本标识，healthz 透出供排障定位运行构建。
@@ -85,6 +89,7 @@ func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debu
 		serverConfig: serverConfig,
 		debugManager: debugManager,
 		concurrency:  make(chan struct{}, limit),
+		wsConns:      make(chan struct{}, wsMaxConnections),
 		metrics:      obs.NewMetrics(),
 		startedAt:    time.Now(),
 	}
@@ -117,10 +122,14 @@ func (application *App) Router() http.Handler {
 	router.Group(func(protected chi.Router) {
 		// 先鉴权再占并发槽：未携带 key 的洪水请求不应消耗稀缺并发额度。
 		protected.Use(application.apiKeyMiddleware)
+		// WebSocket 升级单独一组：连接是长生命周期的，不能在 middleware 里
+		// 整连接持并发槽——槽由 WS 循环按轮次获取/释放，连接数另有 wsConns 上限。
+		protected.Group(func(ws chi.Router) {
+			ws.Get("/v1/responses", application.createResponsesWebSocket)
+		})
 		protected.Use(application.concurrencyMiddleware)
 		protected.Get("/v1/models", application.listModels)
 		protected.Get("/v1/models/{model}", application.getModel)
-		protected.Get("/v1/responses", application.createResponsesWebSocket)
 		protected.Post("/v1/responses", application.createResponses)
 		protected.Post("/v1/chat/completions", application.createChatCompletions)
 		protected.Post("/v1/messages", application.createMessages)
@@ -234,6 +243,17 @@ func writeAuthError(writer http.ResponseWriter, message string) {
 	})
 }
 
+// writeRateLimitError 返回 429 + Retry-After：并发溢出是「本地过载」不是
+// 服务端故障，503 会让下游网关误判渠道故障并冷却。
+func writeRateLimitError(writer http.ResponseWriter, message string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Retry-After", "1")
+	writer.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"error": map[string]any{"message": message, "type": "rate_limit_error", "code": "rate_limit_exceeded", "param": nil},
+	})
+}
+
 // concurrencyMiddleware 限制同时处理的 /v1/* 请求数，避免上游阻塞时资源耗尽。
 func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -244,7 +264,7 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 		default:
 			application.metrics.Reject()
 			slog.Warn("request rejected", "reason", "concurrency_limit", "path", request.URL.Path, "client_ip", clientIP(request))
-			writeJSONError(writer, http.StatusServiceUnavailable, "server is busy, please try again later")
+			writeRateLimitError(writer, "server is busy, please try again later")
 		}
 	})
 }
@@ -387,14 +407,38 @@ func (application *App) createCompletion(
 		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion, &responseBytes)
 		return
 	}
-	stream, err := application.adapter.Stream(ctx, messages)
-	if err != nil {
-		completion.StatusCode = mapProviderErrorStatus(err)
-		writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, err)
-		return
+	writer.Header().Set("Content-Type", "application/json")
+	out := &streamWriter{writer: writer, recorder: recorder}
+	if flusher, ok := writer.(http.Flusher); ok {
+		// 非流式响应在上游长思考窗口内完全无字节——"\n" 心跳刷新
+		// 下游空闲计时器且是合法 JSON 前导空白。无 Flusher 则不心跳。
+		out.flusher = flusher
+		out.heartbeat = []byte("\n")
 	}
-	message, err := collectFinalMessage(ctx, stream, recorder)
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	items := startStreamPump(streamCtx, application.adapter, messages, recorder)
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			completion.Result = "disconnected"
+			recorder.WriteError("client_disconnected", err)
+			return
+		}
+		if out.committed {
+			// 心跳已把状态提交为 200，错误只能以协议错误体下发——
+			// 前导 \n 是合法 JSON 空白，客户端解析出 error 字段。
+			completion.StatusCode = http.StatusOK
+			if writeErr := out.writeContent(protocol.EncodeError(err, debugRef(recorder))); writeErr != nil {
+				completion.Result = "disconnected"
+				recorder.WriteError("client_disconnected", writeErr)
+				return
+			}
+			recorder.WriteError("response_event", err)
+			return
+		}
 		completion.StatusCode = mapProviderErrorStatus(err)
 		writeLoggedError(writer, recorder, "response_event", completion.StatusCode, err)
 		return
@@ -406,15 +450,12 @@ func (application *App) createCompletion(
 		writeLoggedError(writer, recorder, "http_encode", completion.StatusCode, err)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	if _, err := writer.Write(body); err != nil {
+	if err := out.writeContent(body); err != nil {
 		completion.Result = "disconnected"
 		recorder.WriteError("client_disconnected", err)
 		return
 	}
-	recorder.NoteClientLatency()
-	recorder.AddClientBytes(int64(len(body)))
-	responseBytes += len(body)
+	responseBytes += out.bytes
 	recorder.AppendJSONL("06-http-response.jsonl", "response", json.RawMessage(body))
 	completion.StatusCode = http.StatusOK
 	completion.Result = "completed"
@@ -545,6 +586,13 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 		}
 	}
 	writer.Header().Set("Content-Type", "application/json")
+	// 上游限流文案里的 reset 秒数是唯一可行动的 hint——翻成标准
+	// Retry-After 头，客户端/网关才能按语义退避而不是猜。
+	if status == http.StatusTooManyRequests {
+		if seconds, ok := common.RetryAfterSeconds(message); ok {
+			writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+		}
+	}
 	writer.WriteHeader(status)
 	// 透传完整 message，不改写上游文案；stage 标明失败发生在哪一层，
 	// debug_ref 是本地调试目录名，agent 凭它一次调用即可拿到全部证据。
@@ -554,6 +602,9 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 		"code":    common.ErrorCode(message),
 		"param":   nil,
 		"stage":   stage,
+	}
+	for key, value := range common.UpstreamErrorDetails(message) {
+		payload[key] = value
 	}
 	if ref := debugRef(recorder); ref != "" {
 		payload["debug_ref"] = ref
@@ -565,7 +616,15 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 
 // mapProviderErrorStatus 将上游/适配器错误映射为合适的 HTTP 状态，message 仍原样透传。
 // Connect 编码的上游错误交给 common.HTTPStatus；本地适配器产生的错误先按内容匹配。
+// 客户端取消映射 499（nginx 约定）、上游超时 504：客户端主动断开计成
+// 502 会污染指标并让网关误判渠道故障。
 func mapProviderErrorStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return 499
+	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "does not support image"),
@@ -574,6 +633,11 @@ func mapProviderErrorStatus(err error) int {
 		strings.Contains(msg, "validate Devin request"),
 		strings.Contains(msg, "validate adapted request"):
 		return http.StatusBadRequest
+	case strings.Contains(msg, "context deadline exceeded"):
+		// 上游 ctx 错误可能在事件层被展平成字符串，errors.Is 已接不到。
+		return http.StatusGatewayTimeout
+	case strings.Contains(msg, "context canceled"):
+		return 499
 	default:
 		return common.HTTPStatus(msg)
 	}

@@ -2,6 +2,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/WncFht/devin2api/internal/api/anthropic/messages"
@@ -17,8 +18,27 @@ type protocolEncoder interface {
 	NewStreamEncoder(model string, includeUsage bool) streamEncoder
 	// EncodeFinal 把最终助手消息编码为完整的非流式 JSON 响应体。
 	EncodeFinal(message *llm.AssistantMessage) ([]byte, error)
+	// EncodeError 把错误编码为该协议形状的错误 JSON 体——非流式心跳
+	// 已提交 200 后，错误只能以错误体下发，形状按客户端协议决定。
+	EncodeError(err error, debugRef string) []byte
 	// SSEFormat 把单个 SSE 事件格式化为可写入客户端的字节。
 	SSEFormat(name string, data []byte) []byte
+}
+
+// openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
+func openAIErrorBody(err error, debugRef string) []byte {
+	payload := map[string]any{
+		"message": err.Error(), "type": common.OpenAIErrorType(err.Error()),
+		"code": common.ErrorCode(err.Error()), "param": nil,
+	}
+	for key, value := range common.UpstreamErrorDetails(err.Error()) {
+		payload[key] = value
+	}
+	if debugRef != "" {
+		payload["debug_ref"] = debugRef
+	}
+	body, _ := json.Marshal(map[string]any{"error": payload})
+	return body
 }
 
 // streamEncoder 抽象三种协议共有的中间事件编码。
@@ -43,6 +63,10 @@ func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, e
 	return responses.EncodeResponse(message)
 }
 
+func (p responsesProtocol) EncodeError(err error, debugRef string) []byte {
+	return openAIErrorBody(err, debugRef)
+}
+
 func (p responsesProtocol) SSEFormat(name string, data []byte) []byte {
 	return fmt.Appendf(nil, "event: %s\ndata: %s\n\n", name, data)
 }
@@ -56,6 +80,10 @@ func (p chatProtocol) NewStreamEncoder(model string, includeUsage bool) streamEn
 
 func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
 	return chat.EncodeResponse(message)
+}
+
+func (p chatProtocol) EncodeError(err error, debugRef string) []byte {
+	return openAIErrorBody(err, debugRef)
 }
 
 func (p chatProtocol) SSEFormat(name string, data []byte) []byte {
@@ -75,6 +103,21 @@ func (p anthropicProtocol) NewStreamEncoder(model string, _ bool) streamEncoder 
 
 func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
 	return messages.EncodeResponse(message)
+}
+
+func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
+	payload := map[string]any{
+		"type": common.AnthropicErrorType(err.Error()), "message": err.Error(),
+		"code": common.ErrorCode(err.Error()),
+	}
+	for key, value := range common.UpstreamErrorDetails(err.Error()) {
+		payload[key] = value
+	}
+	if debugRef != "" {
+		payload["debug_ref"] = debugRef
+	}
+	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
+	return body
 }
 
 func (p anthropicProtocol) SSEFormat(name string, data []byte) []byte {
