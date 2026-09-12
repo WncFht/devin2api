@@ -624,16 +624,22 @@ const res=await fetch('/panel/api/usage');
 const d=await res.json();
 const el=document.getElementById('usageSection');
 let html='<h2>用量统计 <span class="muted" style="font-weight:400;font-size:12px">index.jsonl 聚合 · 重启自动回放</span></h2>';
-if(d.disabled){el.innerHTML=html+'<div class="note">调试日志未启用，无用量统计。</div>';return}
+if(d.disabled){setSection(el,'usage',html+'<div class="note">调试日志未启用，无用量统计。</div>');return}
 const s=d.snapshot||{};
 const today=s.today||{},win=s.window||{};
+// hitRate 是发出 prompt 中命中前缀缓存的比例；avgTps 是首帧后的
+// decode 速率（output_tokens ÷ 生成时长），两者都由聚合原始量派生。
+const hitRate=t=>{const d=(t.cache_read_tokens||0)+(t.input_tokens||0);return d>0?(100*t.cache_read_tokens/d).toFixed(1)+'%':'-'};
+const avgTps=t=>(t.gen_ms>0)?(t.output_tokens/(t.gen_ms/1000)).toFixed(1)+' tok/s':'-';
 html+='<div class="grid">';
 html+=card('今日请求',today.requests??0);
 html+=card('今日错误/断连',(today.errors??0)+' / '+(today.disconnected??0));
 html+=card('今日输入',fmtNum(today.input_tokens));
 html+=card('今日输出',fmtNum(today.output_tokens));
 html+=card('今日缓存读/写',fmtNum(today.cache_read_tokens)+' / '+fmtNum(today.cache_write_tokens));
+html+=card('今日缓存命中率',hitRate(today));
 html+=card('今日推理',fmtNum(today.reasoning_tokens));
+html+=card('今日平均速度',avgTps(today));
 html+=card('窗口累计请求',win.requests??0);
 html+=card('窗口累计 Token',fmtNum(win.total_tokens));
 if(d.est_cost) html+=card('估算成本',money(d.est_cost));
@@ -648,10 +654,11 @@ html+='<span class="chip" style="cursor:default">'+esc(k)+' <strong>'+stages[k]+
 html+='</div>';
 }
 if(s.hours&&s.hours.length){
-html+='<h2 style="margin-top:14px">逐小时趋势 <span class="muted" style="font-weight:400;font-size:12px">近 7 天 · 蓝=请求 红=错误 绿=输出token/10K</span></h2>'+hourlyChart(s.hours);
+html+='<h2 style="margin-top:14px">逐小时趋势 <span class="muted" style="font-weight:400;font-size:12px">近 7 天</span></h2><div id="hourlyFlowChart"></div>';
+html+='<h2 style="margin-top:14px">速度与缓存</h2><div id="hourlyPerfChart"></div>';
 }
 if(d.models&&d.models.length){
-html+='<h2 style="margin-top:14px">按模型</h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按模型</h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
 d.models.forEach(m=>{
 html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
@@ -659,6 +666,8 @@ html+='<tr><td class="mono">'+esc(m.name)+'</td>'
 +'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.output_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.cache_read_tokens)+'</td>'
++'<td class="mono">'+hitRate(m)+'</td>'
++'<td class="mono">'+avgTps(m)+'</td>'
 +'<td>'+(m.est_cost!=null?money(m.est_cost):'<span class="muted">—</span>')+'</td>'
 +'<td class="mono">'+fmtMs(Math.round(m.avg_duration_ms||0))+'</td>'
 +'<td class="mono">'+fmtMs(Math.round(m.avg_ttfb_ms||0))+'</td>'
@@ -674,15 +683,29 @@ html+='<tr><td class="mono">'+esc(k.name)+'</td><td>'+k.requests+'</td><td>'+k.e
 html+='</tbody></table>';
 }
 if(s.days&&s.days.length>1){
-html+='<h2 style="margin-top:14px">按天</h2><table><thead><tr><th>日期</th><th>请求</th><th>错误</th><th>断连</th><th>输入</th><th>输出</th><th>Token合计</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按天</h2><table><thead><tr><th>日期</th><th>请求</th><th>错误</th><th>断连</th><th>输入</th><th>输出</th><th>命中率</th><th>Token合计</th></tr></thead><tbody>';
 s.days.slice(0,14).forEach(day=>{
-html+='<tr><td class="mono">'+esc(day.date)+'</td><td>'+day.requests+'</td><td>'+day.errors+'</td><td>'+day.disconnected+'</td><td class="mono">'+fmtNum(day.input_tokens)+'</td><td class="mono">'+fmtNum(day.output_tokens)+'</td><td class="mono">'+fmtNum(day.total_tokens)+'</td></tr>';
+html+='<tr><td class="mono">'+esc(day.date)+'</td><td>'+day.requests+'</td><td>'+day.errors+'</td><td>'+day.disconnected+'</td><td class="mono">'+fmtNum(day.input_tokens)+'</td><td class="mono">'+fmtNum(day.output_tokens)+'</td><td class="mono">'+hitRate(day)+'</td><td class="mono">'+fmtNum(day.total_tokens)+'</td></tr>';
 });
 html+='</tbody></table>';
 }
 if(d.cost_basis) html+='<div class="note" style="margin-top:8px">估算成本按模型目录价（'+esc(d.cost_basis)+'）；非上游账单。'+(d.price_missing?'模型价目暂不可用，未计入成本。':'')+'窗口起点: '+esc(s.window_start||'-')+' · 聚合 '+s.entries+' 条</div>';
-el.innerHTML=html;
+setSection(el,'usage',html);
+const hf=document.getElementById('hourlyFlowChart');
+if(hf){
+const xs=s.hours.map(p=>p.hour);
+drawChart('usage',hf,xs,[
+ {label:'请求',color:'#7c8aff',values:s.hours.map(p=>p.requests)},
+ {label:'错误',color:'#f87171',values:s.hours.map(p=>p.errors)},
+ {label:'输出 token',color:'#4ade80',scale:'tok',values:s.hours.map(p=>p.output_tokens),fmt:v=>fmtNum(v)},
+],{right:[{scale:'tok'}]});
+drawChart('usage',document.getElementById('hourlyPerfChart'),xs,[
+ {label:'均速',color:'#22d3ee',values:s.hours.map(p=>p.gen_ms>0?p.output_tokens/(p.gen_ms/1000):null),fmt:v=>v.toFixed(1)+' tok/s'},
+ {label:'缓存命中率',color:'#fbbf24',scale:'pct',values:s.hours.map(p=>{const d=(p.cache_read_tokens||0)+(p.input_tokens||0);return d>0?p.cache_read_tokens/d*100:null}),fmt:v=>v.toFixed(0)+'%'},
+],{right:[{scale:'pct',range:[0,100]}]});
+}
 }catch(e){
+resetCharts('usage');
 document.getElementById('usageSection').innerHTML='<h2>用量统计</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
 }
 }
@@ -694,24 +717,6 @@ if(n>=1e3) return (n/1e3).toFixed(1)+'K';
 return String(n);
 }
 
-function hourlyChart(hours){
-const w=900,h=64;
-const maxReq=Math.max(1,...hours.map(p=>p.requests||0));
-const maxOut=Math.max(1,...hours.map(p=>p.output_tokens||0));
-const step=w/Math.max(1,hours.length-1);
-const xy=(v,mx,i)=>((i*step).toFixed(1))+','+(h-4-(v/mx)*(h-10)).toFixed(1);
-const line=hours.map((p,i)=>xy(p.requests||0,maxReq,i)).join(' ');
-const errs=hours.map((p,i)=>xy(p.errors||0,maxReq,i)).join(' ');
-const outs=hours.map((p,i)=>xy((p.output_tokens||0)/10000,maxOut/10000,i)).join(' ');
-const total=hours.reduce((s2,p)=>s2+(p.requests||0),0);
-const errTotal=hours.reduce((s2,p)=>s2+(p.errors||0),0);
-return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
-+'<polyline points="'+outs+'" fill="none" stroke="#4ade80" stroke-width="1" opacity="0.6"/>'
-+'<polyline points="'+line+'" fill="none" stroke="#7c8aff" stroke-width="1.5"/>'
-+(errTotal?'<polyline points="'+errs+'" fill="none" stroke="#f87171" stroke-width="1.5"/>':'')
-+'</svg><div class="note" style="margin-top:4px">窗口共 '+total+' 请求 / '+errTotal+' 错误 · 悬停行查看精确值</div>';
-}
-
 async function loadQuota(){
 try{
 const res=await fetch('/panel/api/quota');
@@ -720,7 +725,7 @@ const el=document.getElementById('quotaSection');
 let html='<h2>配额历史 <span class="muted" style="font-weight:400;font-size:12px">周期采样写入 logs/quota.jsonl</span></h2>';
 const pts=d.points||[];
 if(!pts.length){
-el.innerHTML=html+'<div class="note">暂无配额快照——采样器每 debug.quota_interval_minutes 分钟写一条，重启后开始积累。</div>';return;
+setSection(el,'quota',html+'<div class="note">暂无配额快照——采样器每 debug.quota_interval_minutes 分钟写一条，重启后开始积累。</div>');return;
 }
 const last=pts[pts.length-1];
 html+='<div class="grid">';
@@ -737,24 +742,17 @@ if(d.weekly.exhausted_at) html+=card('周配额预计耗尽',fmtUnix(d.weekly.ex
 html+=card('日重置',fmtUnix(last.daily_reset_at));
 html+=card('周重置',fmtUnix(last.weekly_reset_at));
 html+='</div>';
-html+='<h2 style="margin-top:14px">配额曲线</h2>'+quotaChart(pts);
+html+='<h2 style="margin-top:14px">配额曲线</h2><div id="quotaCurve"></div>';
 html+='<div class="note" style="margin-top:4px">蓝=日配额剩余% · 红=周配额剩余% · 共 '+pts.length+' 个采样点 · 最早 '+fmtUnix(pts[0].at)+'</div>';
-el.innerHTML=html;
+setSection(el,'quota',html);
+drawChart('quota',document.getElementById('quotaCurve'),pts.map(p=>p.at),[
+ {label:'日剩余',color:'#7c8aff',values:pts.map(p=>p.daily_remaining??null),fmt:v=>v.toFixed(1)+'%'},
+ {label:'周剩余',color:'#f87171',values:pts.map(p=>p.weekly_remaining??null),fmt:v=>v.toFixed(1)+'%'},
+],{yRange:[0,100]});
 }catch(e){
+resetCharts('quota');
 document.getElementById('quotaSection').innerHTML='<h2>配额历史</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
 }
-}
-
-function quotaChart(pts){
-const w=900,h=64;
-const step=w/Math.max(1,pts.length-1);
-const xy=(v,i)=>((i*step).toFixed(1))+','+(h-4-(Math.max(0,Math.min(100,v))/100)*(h-10)).toFixed(1);
-const daily=pts.map((p,i)=>xy(p.daily_remaining||0,i)).join(' ');
-const weekly=pts.map((p,i)=>xy(p.weekly_remaining||0,i)).join(' ');
-return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
-+'<polyline points="'+daily+'" fill="none" stroke="#7c8aff" stroke-width="1.5"/>'
-+'<polyline points="'+weekly+'" fill="none" stroke="#f87171" stroke-width="1.5"/>'
-+'</svg>';
 }
 
 let procOffset=0,procFollow=false;

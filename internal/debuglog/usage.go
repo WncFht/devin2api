@@ -38,6 +38,9 @@ type usageTotals struct {
 	CacheWrite   int64 `json:"cache_write_tokens"`
 	Reasoning    int64 `json:"reasoning_tokens"`
 	TotalTokens  int64 `json:"total_tokens"`
+	// GenMS 是 completed 请求的首帧后生成毫秒累计（duration−TTFB），
+	// 前端用 output_tokens/gen_ms 求 decode 速率（tok/s）。
+	GenMS int64 `json:"gen_ms,omitempty"`
 }
 
 // add 把一条索引行计入累计。
@@ -55,6 +58,11 @@ func (t *usageTotals) add(e IndexEntry) {
 	t.CacheWrite += e.CacheWriteTokens
 	t.Reasoning += e.ReasoningTokens
 	t.TotalTokens += e.TotalTokens
+	// 只计正常完成且有首帧时间戳的请求：失败/断连的耗时段包含
+	// 非生成分量，混入会拉低均速。
+	if e.Result == "completed" && e.FirstUpstreamMS != nil {
+		t.GenMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	}
 }
 
 // usageHourCap 是单小时桶内保留的延迟样本上限；超出后循环覆盖最旧样本。
@@ -62,15 +70,17 @@ const usageHourCap = 1024
 
 // usageHourBucket 是一小时内的请求/token 聚合，供趋势图。
 type usageHourBucket struct {
-	hour     int64 // unix 小时戳
-	requests int64
-	errors   int64
-	input    int64
-	output   int64
-	durs     []int64 // duration_ms 样本（环形，上限 usageHourCap）
-	durHead  int
-	ttfbs    []int64 // first_upstream_ms 样本
-	ttfbHead int
+	hour      int64 // unix 小时戳
+	requests  int64
+	errors    int64
+	input     int64
+	output    int64
+	cacheRead int64
+	genMS     int64   // completed 请求的首帧后生成毫秒累计（均速分子分母）
+	durs      []int64 // duration_ms 样本（环形，上限 usageHourCap）
+	durHead   int
+	ttfbs     []int64 // first_upstream_ms 样本
+	ttfbHead  int
 }
 
 // pushSample 向容量受限的样本切片追加；满后原地覆盖最旧值。
@@ -94,29 +104,34 @@ type usageHourPoint struct {
 	DurP95   int64 `json:"duration_p95_ms"`
 	AvgTTFB  int64 `json:"avg_ttfb_ms"`
 	TTFBP95  int64 `json:"ttfb_p95_ms"`
+	// CacheRead/GenMS 供前端计算逐小时缓存命中率与 decode 均速。
+	CacheRead int64 `json:"cache_read_tokens"`
+	GenMS     int64 `json:"gen_ms,omitempty"`
 }
 
 // dimensionAgg 是按模型或 key 哈希聚合的行。
 type dimensionAgg struct {
-	Name         string  `json:"name"`
-	Requests     int64   `json:"requests"`
-	Errors       int64   `json:"errors"`
-	Disconnected int64   `json:"disconnected"`
-	Input        int64   `json:"input_tokens"`
-	Output       int64   `json:"output_tokens"`
-	CacheRead    int64   `json:"cache_read_tokens"`
-	CacheWrite   int64   `json:"cache_write_tokens"`
-	Reasoning    int64   `json:"reasoning_tokens"`
-	TotalTokens  int64   `json:"total_tokens"`
-	SumDuration  int64   `json:"-"`
-	TTFBSamples  int64   `json:"-"`
-	SumTTFB      int64   `json:"-"`
-	LastResult   string  `json:"last_result,omitempty"`
-	LastStatus   int     `json:"last_status,omitempty"`
-	LastAt       string  `json:"last_at,omitempty"`
-	AvgDuration  float64 `json:"avg_duration_ms"`
-	AvgTTFB      float64 `json:"avg_ttfb_ms"`
-	SuccessRate  float64 `json:"success_rate"`
+	Name         string `json:"name"`
+	Requests     int64  `json:"requests"`
+	Errors       int64  `json:"errors"`
+	Disconnected int64  `json:"disconnected"`
+	Input        int64  `json:"input_tokens"`
+	Output       int64  `json:"output_tokens"`
+	CacheRead    int64  `json:"cache_read_tokens"`
+	CacheWrite   int64  `json:"cache_write_tokens"`
+	Reasoning    int64  `json:"reasoning_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	// GenMS 是 completed 请求的首帧后生成毫秒累计，供前端算均速。
+	GenMS       int64   `json:"gen_ms,omitempty"`
+	SumDuration int64   `json:"-"`
+	TTFBSamples int64   `json:"-"`
+	SumTTFB     int64   `json:"-"`
+	LastResult  string  `json:"last_result,omitempty"`
+	LastStatus  int     `json:"last_status,omitempty"`
+	LastAt      string  `json:"last_at,omitempty"`
+	AvgDuration float64 `json:"avg_duration_ms"`
+	AvgTTFB     float64 `json:"avg_ttfb_ms"`
+	SuccessRate float64 `json:"success_rate"`
 }
 
 // latencyStats 是蓄水池算出的延迟分布。
@@ -256,6 +271,10 @@ func (a *usageAggregator) add(e IndexEntry) {
 	}
 	a.hours[idx].input += e.InputTokens
 	a.hours[idx].output += e.OutputTokens
+	a.hours[idx].cacheRead += e.CacheReadTokens
+	if e.Result == "completed" && e.FirstUpstreamMS != nil {
+		a.hours[idx].genMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+	}
 	pushSample(&a.hours[idx].durs, &a.hours[idx].durHead, e.DurationMS)
 	if e.FirstUpstreamMS != nil {
 		pushSample(&a.hours[idx].ttfbs, &a.hours[idx].ttfbHead, *e.FirstUpstreamMS)
@@ -310,6 +329,9 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	if e.FirstUpstreamMS != nil {
 		d.TTFBSamples++
 		d.SumTTFB += *e.FirstUpstreamMS
+	}
+	if e.Result == "completed" && e.FirstUpstreamMS != nil {
+		d.GenMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
 	}
 	d.LastResult = e.Result
 	d.LastStatus = e.StatusCode
@@ -372,6 +394,8 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 			point.Errors = bucket.errors
 			point.Input = bucket.input
 			point.Output = bucket.output
+			point.CacheRead = bucket.cacheRead
+			point.GenMS = bucket.genMS
 			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)
 		}
