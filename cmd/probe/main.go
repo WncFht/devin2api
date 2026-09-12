@@ -98,6 +98,10 @@ func usage() {
     -no-fingerprint           omit metadata.f
     -no-ids                   omit trajectory/cascade ids
     -max-tokens n             configuration.max_tokens
+    -temperature f            configuration.temperature (default 1)
+    -top-p f                  configuration.top_p (default 0.95)
+    -top-k n                  configuration.top_k (default 40)
+    -trajectory-id s          explicit trajectory_id (share across calls)
     -images n                 attach n copies of a tiny png to the user msg
     -internal-model N         use_internal_chat_model + internal_chat_model=N
     -frames                   print every frame protojson (default: field inventory + text)
