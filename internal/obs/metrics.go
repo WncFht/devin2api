@@ -117,7 +117,12 @@ func (m *Metrics) Reject() {
 
 // recordBucket 把一次请求归入当前 30 秒桶；桶满时循环覆盖最旧数据。
 func (m *Metrics) recordBucket(isError bool) {
-	at := time.Now().Unix() / trendBucketSecs * trendBucketSecs
+	m.recordBucketAt(time.Now().Unix(), isError)
+}
+
+// recordBucketAt 把一次请求归入 at（unix 秒）对齐的 30 秒桶。
+func (m *Metrics) recordBucketAt(at int64, isError bool) {
+	at = at / trendBucketSecs * trendBucketSecs
 	m.bucketsMu.Lock()
 	defer m.bucketsMu.Unlock()
 	index := int(at / trendBucketSecs % trendBuckets)
@@ -128,6 +133,17 @@ func (m *Metrics) recordBucket(isError bool) {
 	if isError {
 		m.buckets[index].errors++
 	}
+}
+
+// SeedTrend 用一条历史请求预热趋势桶（数据来自 index.jsonl 启动回放）。
+// finishedAt 是请求完成时刻（与 Finish 实时归桶同口径：按完成而非开始时刻）；
+// 落在 60 分钟窗口外的条目丢弃。
+func (m *Metrics) SeedTrend(finishedAt time.Time, isError bool) {
+	at := finishedAt.Unix()
+	if at < time.Now().Unix()-trendWindowMinutes*60 {
+		return
+	}
+	m.recordBucketAt(at, isError)
 }
 
 // Snapshot 返回全部计数的即时快照，供 JSON 序列化给面板或 /statsz。
@@ -159,6 +175,7 @@ func (m *Metrics) rates() map[string]any {
 	snapshot := m.buckets
 	m.bucketsMu.Unlock()
 	var window uint64
+	var minAt int64
 	perMinute := map[int64]uint64{}
 	for _, bucket := range snapshot {
 		if bucket.at == 0 {
@@ -166,6 +183,9 @@ func (m *Metrics) rates() map[string]any {
 		}
 		window += bucket.requests
 		perMinute[bucket.at/60] += bucket.requests
+		if minAt == 0 || bucket.at < minAt {
+			minAt = bucket.at
+		}
 	}
 	var peak uint64
 	for _, v := range perMinute {
@@ -174,8 +194,13 @@ func (m *Metrics) rates() map[string]any {
 		}
 	}
 	current := perMinute[now/60]
-	// avg 除以实际覆盖的分钟数（未满窗口按已运行时长计，避免启动初期被稀释）。
+	// avg 分母取「进程运行分钟数」与「最早非空桶覆盖分钟数」的较大者：
+	// 前者保证无预热时口径不变（空转时段照样稀释），后者覆盖 index.jsonl
+	// 回放预热场景——窗口数据比进程老，否则 avg 会被放大几十倍。
 	elapsed := int64(time.Since(m.startedAt)/time.Minute) + 1
+	if minAt != 0 && (now-minAt)/60+1 > elapsed {
+		elapsed = (now-minAt)/60 + 1
+	}
 	if elapsed > trendWindowMinutes {
 		elapsed = trendWindowMinutes
 	}

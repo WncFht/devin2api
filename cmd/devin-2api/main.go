@@ -123,6 +123,17 @@ func main() {
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
+	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
+	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
+	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
+	for _, e := range debugManager.ListRequests(50000, debuglog.RequestFilter{}).Entries {
+		started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
+		if err != nil {
+			continue
+		}
+		application.Metrics().SeedTrend(started.Add(time.Duration(e.DurationMS)*time.Millisecond),
+			e.StatusCode >= 400 || (e.Result != "" && e.Result != "completed"))
+	}
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	if serviceConfig.Devin.Token != "" {
