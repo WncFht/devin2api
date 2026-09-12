@@ -42,6 +42,11 @@ devin:
   # client_name: "chisel"
   # client_version: "3000.2.17"
   # client_os: "mac"
+  # 发往上游 GetChatMessage 的消息速率上限（条/分钟），令牌桶实现、
+  # 桶容量为一分钟额度可容纳突发；<=0 或不填不限速。上游报
+  # resource_exhausted 时本地冷却闩按其 reset 时刻拦停后续请求
+  #（预计等待 >15s 的直接 429 + Retry-After 快速失败），不受此项影响。
+  # max_rpm: 50
 
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /panel。

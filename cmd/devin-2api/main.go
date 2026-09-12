@@ -106,6 +106,7 @@ func main() {
 			ClientName:    serviceConfig.Devin.ClientName,
 			ClientVersion: serviceConfig.Devin.ClientVersion,
 			ClientOS:      serviceConfig.Devin.ClientOS,
+			MaxRPM:        serviceConfig.Devin.MaxRPM,
 			// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 			// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 			TokenSource: func() string {

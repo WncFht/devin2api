@@ -56,6 +56,9 @@ type Config struct {
 	ClientName    string
 	ClientVersion string
 	ClientOS      string
+	// MaxRPM 是发往上游 GetChatMessage 的消息速率上限（条/分钟）；
+	// <=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
+	MaxRPM int
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
@@ -95,6 +98,9 @@ type Adapter struct {
 	models         []adapter.ModelInfo
 	modelsExpiry   time.Time
 	modelsCacheTTL time.Duration
+	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
+	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
+	gate *rateGate
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
@@ -118,6 +124,7 @@ func New(config Config) (*Adapter, error) {
 		config:         config,
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
+		gate:           newRateGate(config.MaxRPM),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
@@ -231,7 +238,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	if err != nil {
 		cancel()
-		recorder.WriteError("devin_connect", err)
+		// 本地限流闸的拒绝记 rate_gate 与上游真拒（devin_connect）区分：
+		// 聚合排障时前者说明根本没碰到上游，后者才是上游配额动作。
+		stage := "devin_connect"
+		var gateErr *rateGateError
+		if errors.As(err, &gateErr) {
+			stage = "rate_gate"
+		}
+		recorder.WriteError(stage, err)
 		// 透传上游 Connect 错误原文，不包一层模糊前缀。
 		return nil, connectError(err)
 	}
@@ -240,6 +254,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		cancel:   cancel,
 		decoder:  newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools)),
 		recorder: recorder,
+		gate:     adapter.gate,
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 语义错误（invalid_argument 等）重试只会复现同样失败，直接放行。
@@ -297,6 +312,11 @@ const maxConnectAttempts = 3
 func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
 	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
+		// 每次真实发送（含瞬时错误重试）都要过速率闸：被拒尝试
+		// 会推后上游恢复时刻，本地整形是唯一止损点。
+		if err := adapter.gate.wait(ctx); err != nil {
+			return nil, err
+		}
 		if attempt > 0 {
 			// ±25% 抖动：上游瞬时拥塞时固定节拍的重试会相互叠加。
 			base := time.Duration(attempt) * 400 * time.Millisecond
@@ -316,6 +336,7 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			break
 		}
 	}
+	adapter.gate.noteUpstreamError(lastErr)
 	return nil, lastErr
 }
 
@@ -631,6 +652,8 @@ type responseStream struct {
 	// producedEvents 表示上游帧已产出过任何事件：一旦为真说明内容已
 	// 开始对外流动，此后失败只能透传，不能整体重发。
 	producedEvents bool
+	// gate 是上游消息速率闸门：流内 resource_exhausted 也要喂冷却闩。
+	gate *rateGate
 	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
 	retried bool
 	// reopen 在可重试的 pre-content 失败（传输断裂、凭据自愈后的
@@ -811,7 +834,12 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 // 客户端断连由 HTTP 外层记 client_disconnected，不应被上游 stage 抢占。
 // WriteError 是 first-write-wins，此处记录后外层 http_stream 只作补充。
 func (stream *responseStream) recordUpstreamFailure(cause error) {
-	if cause == nil || stream.recorder == nil {
+	if cause == nil {
+		return
+	}
+	// 限流结论与日志开关无关：上游报了 resource_exhausted 就上闩。
+	stream.gate.noteUpstreamError(cause)
+	if stream.recorder == nil {
 		return
 	}
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {

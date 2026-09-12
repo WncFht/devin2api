@@ -134,20 +134,24 @@ func ErrorCode(message string) any {
 	return nil
 }
 
-// rateLimitResetPattern 匹配上游限流文案里的重试窗口
-// （"Your limit will reset in N seconds."）。上游不给 Retry-After 头
-// 或 RetryInfo detail，这句文案是唯一可行动的 hint。
-var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+) seconds`)
+// rateLimitResetPattern 匹配上游限流文案里的重试窗口。实测两种单位：
+// 剩余不足一分钟时报 "reset in N seconds"，更长时报 "reset in N
+// minute(s)"（floor 取整）。上游不给 Retry-After 头或 RetryInfo
+// detail，这句文案是唯一可行动的 hint。
+var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+)\s*(seconds?|minutes?)`)
 
 // RetryAfterSeconds 从上游错误文案解析限流重置秒数；无 hint 返回 false。
 func RetryAfterSeconds(message string) (int, bool) {
 	match := rateLimitResetPattern.FindStringSubmatch(message)
-	if len(match) != 2 {
+	if len(match) != 3 {
 		return 0, false
 	}
 	seconds, err := strconv.Atoi(match[1])
 	if err != nil || seconds <= 0 {
 		return 0, false
+	}
+	if strings.HasPrefix(match[2], "minute") {
+		seconds *= 60
 	}
 	return seconds, true
 }

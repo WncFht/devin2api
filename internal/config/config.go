@@ -62,6 +62,11 @@ type DevinConfig struct {
 	ClientVersion string `yaml:"client_version"`
 	// ClientOS 是 metadata.os；默认 "mac"。
 	ClientOS string `yaml:"client_os"`
+	// MaxRPM 是发往上游 GetChatMessage 的消息速率上限（条/分钟），
+	// 令牌桶实现、桶容量为一分钟额度可容纳突发；<=0 不限速。
+	// 上游限流冷却闩（resource_exhausted 后按声明 reset 时刻本地拦停）
+	// 不受此项影响，始终生效。
+	MaxRPM int `yaml:"max_rpm"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
