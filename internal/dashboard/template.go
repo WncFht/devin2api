@@ -95,6 +95,11 @@ tr:hover{background:#222632}
 <div class="container">
 <h1>Devin API 管理面板</h1>
 
+<div class="section" id="statsSection">
+<h2>代理运行指标</h2>
+<div class="loading">加载中...</div>
+</div>
+
 <div class="section" id="statusSection">
 <h2>账户 / 容量状态</h2>
 <div class="loading">加载中...</div>
@@ -260,7 +265,11 @@ html+='</div>';
 }
 if(data.model_statuses&&data.model_statuses.length){
 html+='<h2 style="margin-top:16px">模型状态告警</h2><div class="grid">';
-data.model_statuses.forEach(s=>{html+=card(s.model||'-',s.status||'-')});
+data.model_statuses.forEach(s=>{
+const st=String(s.status||'-');
+const bad=/WARN|ERROR|FATAL|DOWN/i.test(st);
+html+='<div class="card"><div class="label">'+esc(s.model||'-')+'</div><div class="value" style="color:'+(bad?'#f87171':'#4ade80')+'">'+esc(st)+'</div></div>';
+});
 html+='</div>';
 }
 if(!data.user && data.user_status_error){
@@ -432,8 +441,48 @@ fillSelect('fPricing',pricings);
 applyFilters();
 }
 
+async function loadStats(){
+try{
+const res=await fetch('/panel/api/stats');
+const data=await res.json();
+const el=document.getElementById('statsSection');
+let html='<h2>代理运行指标</h2><div class="grid">';
+const h=data.http||{};
+html+=card('活跃请求',h.active_requests??0);
+html+=card('完成请求',h.completed_requests??0);
+html+=card('被拒请求',h.rejected_requests??0);
+html+=card('2xx',h.ok_responses??0);
+html+=card('4xx',h.client_error_responses??0);
+html+=card('5xx',h.server_error_responses??0);
+html+=card('流式/非流式',(h.streaming_requests??0)+' / '+(h.non_streaming_requests??0));
+html+=card('运行时长',fmtDuration(h.uptime_seconds));
+html+='</div>';
+if(data.debuglog){
+const d=data.debuglog;
+html+='<h2 style="margin-top:16px">日志管道</h2><div class="grid">';
+html+=card('活跃日志目录',d.active_request_dirs??0);
+html+=card('丢弃日志事件',d.dropped_log_events??0);
+html+=card('保留天数',d.retention_days??'-');
+html+=card('容量上限',(d.max_total_mb??'-')+' MB');
+html+='</div>';
+}
+html+='<div class="note" style="margin-top:8px">指标为进程内存计数，重启清零；每 10 秒自动刷新。</div>';
+el.innerHTML=html;
+}catch(e){
+document.getElementById('statsSection').innerHTML='<h2>代理运行指标</h2><div class="note">指标拉取失败: '+esc(String(e))+'</div>';
+}
+}
+function fmtDuration(sec){
+sec=Number(sec)||0;
+if(sec<60) return sec+'s';
+if(sec<3600) return Math.floor(sec/60)+'m '+sec%60+'s';
+return Math.floor(sec/3600)+'h '+Math.floor(sec%3600/60)+'m';
+}
+
 loadStatus();
 loadModels();
+loadStats();
+setInterval(loadStats,10000);
 </script>
 </body>
 </html>`

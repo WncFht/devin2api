@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/httpproxy"
+	"github.com/leookun/devin-2api/internal/obs"
 
 	devinproto "local/devinproto"
 	"local/devinproto/devinprotoconnect"
@@ -53,11 +55,17 @@ type Handler struct {
 	providersExpiry     time.Time
 	modelStatusesCache  []map[string]any
 	modelStatusesExpiry time.Time
+
+	// metrics 是 HTTP 代理运行计数器快照源；nil 时 stats 端点只返回日志侧数据。
+	metrics *obs.Metrics
+	// debugManager 暴露日志管道自身指标（丢弃数、活跃目录数）。
+	debugManager *debuglog.Manager
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
 // forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
-func New(password, baseURL, token, proxy string, forceHTTP1 bool) *Handler {
+// metrics/debugManager 允许为 nil（对应功能未启用）。
+func New(password, baseURL, token, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debugManager *debuglog.Manager) *Handler {
 	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
 	if err != nil {
 		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
@@ -75,6 +83,8 @@ func New(password, baseURL, token, proxy string, forceHTTP1 bool) *Handler {
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
 		cacheTTL:      5 * time.Minute,
+		metrics:       metrics,
+		debugManager:  debugManager,
 	}
 }
 
@@ -87,6 +97,24 @@ func (h *Handler) Register(mux interface {
 	mux.Post("/panel/login", h.handleLogin)
 	mux.Get("/panel/api/status", h.apiStatus)
 	mux.Get("/panel/api/models", h.apiModels)
+	mux.Get("/panel/api/stats", h.apiStats)
+}
+
+// apiStats 返回代理自身运行指标：请求计数、错误分类、流式占比、字节量，
+// 以及调试日志管道自观测数据（丢弃数、活跃目录数）。
+func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	payload := map[string]any{}
+	if h.metrics != nil {
+		payload["http"] = h.metrics.Snapshot()
+	}
+	if h.debugManager != nil {
+		payload["debuglog"] = h.debugManager.Stats()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
