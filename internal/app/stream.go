@@ -105,7 +105,11 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 			event, err := stream.Recv(ctx)
 			if err == nil {
 				recorder.NoteUpstreamLatency()
-				recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
+				if recorder != nil {
+					// 事件投影建树有实分配；nil recorder 时 AppendJSONL
+					// 是 no-op，投影参数却会先求值——外层门控。
+					recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
+				}
 			}
 			select {
 			case items <- pumpItem{event: event, err: err}:

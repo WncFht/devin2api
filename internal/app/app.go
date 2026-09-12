@@ -389,7 +389,11 @@ func (application *App) createCompletion(
 		writeLoggedError(writer, recorder, "http_read", completion.StatusCode, fmt.Errorf("read request: %w", err))
 		return
 	}
-	recorder.WriteJSON("01-http-request.json", httpRequestProjection(request, body))
+	if recorder != nil {
+		// 投影会对 body 再做一次 generic unmarshal；recorder 为 nil 时
+		// WriteJSON 是 no-op，参数表达式却仍会求值——必须在外层门控。
+		recorder.WriteJSON("01-http-request.json", httpRequestProjection(request, body))
+	}
 	messages, options, err := decoder(body)
 	if err != nil {
 		completion.StatusCode = http.StatusBadRequest
@@ -401,7 +405,9 @@ func (application *App) createCompletion(
 	completion.Stream = options.Stream
 	reqMetrics.Observe(options.Stream, len(body))
 	recorder.SetModel(messages.Model)
-	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
+	if recorder != nil {
+		recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
+	}
 	ctx := debuglog.WithRecorder(reqCtx, recorder)
 	if options.Stream {
 		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion, &responseBytes)
