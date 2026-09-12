@@ -14,9 +14,9 @@ func TestMetricsLifecycle(t *testing.T) {
 	m := NewMetrics()
 	r := m.Begin()
 	r.Observe(true, 100)
-	r.Finish(http.StatusOK, 500)
+	r.Finish(http.StatusOK, 500, "completed")
 	r2 := m.Begin()
-	r2.Finish(http.StatusBadRequest, 0)
+	r2.Finish(http.StatusBadRequest, 0, "failed")
 	m.Reject()
 
 	snap := m.Snapshot()
@@ -56,25 +56,27 @@ func TestDiagnosticBoundsAndRedacts(t *testing.T) {
 // TestTrendBuckets 验证分钟桶把请求与错误归入当前分钟并出现在快照里。
 func TestTrendBuckets(t *testing.T) {
 	m := NewMetrics()
-	m.Begin().Finish(200, 0)
-	m.Begin().Finish(500, 0)
+	m.Begin().Finish(200, 0, "completed")
+	m.Begin().Finish(500, 0, "failed")
+	// SSE 已提交 200 后客户端断连：HTTP 状态是 2xx，但趋势应计为错误。
+	m.Begin().Finish(200, 0, "disconnected")
 	m.Reject()
 	trend, _ := m.Snapshot()["trend_minutes"].([]map[string]any)
 	if len(trend) != 60 {
 		t.Fatalf("trend len = %d, want 60", len(trend))
 	}
 	last := trend[len(trend)-1]
-	if last["requests"] != uint64(3) || last["errors"] != uint64(2) {
-		t.Fatalf("last bucket = %+v, want requests=3 errors=2", last)
+	if last["requests"] != uint64(4) || last["errors"] != uint64(3) {
+		t.Fatalf("last bucket = %+v, want requests=4 errors=3", last)
 	}
 }
 
 // TestRatesDerived 验证分钟桶派生的 RPM/QPS 指标。
 func TestRatesDerived(t *testing.T) {
 	m := NewMetrics()
-	m.Begin().Finish(200, 0)
-	m.Begin().Finish(200, 0)
-	m.Begin().Finish(500, 0)
+	m.Begin().Finish(200, 0, "completed")
+	m.Begin().Finish(200, 0, "completed")
+	m.Begin().Finish(500, 0, "failed")
 	rates, _ := m.Snapshot()["rates"].(map[string]any)
 	if rates["rpm_current"] != uint64(3) || rates["rpm_peak"] != uint64(3) {
 		t.Fatalf("rates = %+v", rates)

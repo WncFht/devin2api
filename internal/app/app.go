@@ -360,7 +360,7 @@ func (application *App) createCompletion(
 	responseBytes := 0
 	defer func() {
 		recorder.Complete(completion)
-		reqMetrics.Finish(completion.StatusCode, responseBytes)
+		reqMetrics.Finish(completion.StatusCode, responseBytes, completion.Result)
 		if completion.PrematureEndTurn {
 			slog.Warn("premature end_turn", "dir", debugRef(recorder), "model", completion.Model)
 		}

@@ -19,7 +19,7 @@ const trendBuckets = 60
 type minuteBucket struct {
 	minute   int64 // unix 分钟戳
 	requests uint64
-	errors   uint64 // 4xx/5xx 与管线前拒绝
+	errors   uint64 // 4xx/5xx、管线前拒绝与未正常完成的已提交流（disconnected/aborted/流内失败）
 }
 
 // Metrics 是 /v1/* 请求的运行计数器集合。
@@ -72,8 +72,11 @@ func (r *Request) Observe(streaming bool, requestBodyBytes int) {
 	}
 }
 
-// Finish 在请求结束时按最终状态归类计数；responseBodyBytes 为下发字节数。
-func (r *Request) Finish(status, responseBodyBytes int) {
+// Finish 在请求结束时归类计数；responseBodyBytes 为下发字节数。
+// 状态计数按 HTTP status 归类（回答「返回了什么状态」）；分钟趋势桶另把
+// result 非 completed 的请求计入 errors——SSE 提交 200 后断连/中止/流内失败
+// 虽然对客户端是 200，对运营信号是失败（回答「请求有没有正常跑完」）。
+func (r *Request) Finish(status, responseBodyBytes int, result string) {
 	if r == nil || r.metrics == nil {
 		return
 	}
@@ -99,7 +102,7 @@ func (r *Request) Finish(status, responseBodyBytes int) {
 	default:
 		m.okResponses.Add(1)
 	}
-	m.recordBucket(status >= 400)
+	m.recordBucket(status >= 400 || (result != "" && result != "completed"))
 }
 
 // Reject 计入一个在进入处理管线前被拒的请求（鉴权失败/并发上限）。
