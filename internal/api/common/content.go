@@ -291,6 +291,10 @@ var codexPermissionsBlock = regexp.MustCompile(`(?s)<permissions instructions>.*
 
 // SanitizeText 移除 codex system prompt 中可能触发上游内容策略的敏感块。
 func SanitizeText(text string) string {
+	// 正则匹配必含字面开标签；不含即不可能命中，干净文本省下整段扫描。
+	if !strings.Contains(text, "<permissions instructions>") {
+		return text
+	}
 	return codexPermissionsBlock.ReplaceAllString(text, "")
 }
 

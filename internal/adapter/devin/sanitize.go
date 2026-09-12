@@ -146,13 +146,50 @@ func sanitizeContents(content []llm.Content) []llm.Content {
 	return content
 }
 
+// sanitizeBucketsAll / sanitizeBucketsMessages 把全部（或仅非 promptOnly）
+// trigger 按首字节折小写（b | 0x20）分桶：预筛逐字节查桶，桶命中再做
+// EqualFold 前缀比对。干净文本（绝大多数块）单趟扫描、零分配返回，
+// 免去逐规则 strings.Contains 全扫和 ToLower 整文拷贝。
+var (
+	sanitizeBucketsAll      = triggerBuckets(true)
+	sanitizeBucketsMessages = triggerBuckets(false)
+)
+
+func triggerBuckets(includePromptOnly bool) [256][]string {
+	var buckets [256][]string
+	for _, rule := range upstreamSanitizeRules {
+		if rule.promptOnly && !includePromptOnly {
+			continue
+		}
+		buckets[rule.trigger[0]|0x20] = append(buckets[rule.trigger[0]|0x20], rule.trigger)
+	}
+	return buckets
+}
+
+func hasSanitizeTrigger(text string, buckets *[256][]string) bool {
+	for i := 0; i < len(text); i++ {
+		for _, trigger := range buckets[text[i]|0x20] {
+			if len(text)-i >= len(trigger) && strings.EqualFold(text[i:i+len(trigger)], trigger) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func sanitizeUpstreamText(text string, includePromptOnly bool) string {
 	if text == "" {
 		return text
 	}
+	buckets := &sanitizeBucketsMessages
+	if includePromptOnly {
+		buckets = &sanitizeBucketsAll
+	}
+	if !hasSanitizeTrigger(text, buckets) {
+		return text
+	}
 	// 每条规则的 trigger 是该 pattern 任何匹配必然包含的字面词；
-	// 不含即不可能命中，跳过正则扫描。长会话历史里绝大多数文本块
-	// 零命中，小写化一次摊薄全部预筛成本。
+	// 预筛命中后仍按 trigger 逐规则跳过，再做正则改写。
 	lower := strings.ToLower(text)
 	for _, rule := range upstreamSanitizeRules {
 		if rule.promptOnly && !includePromptOnly {
