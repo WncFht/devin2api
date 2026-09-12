@@ -89,6 +89,16 @@ tr:hover{background:#222632}
 .loading{text-align:center;padding:32px;color:#888}
 .note{font-size:12px;color:#888;line-height:1.55;margin-top:10px}
 .note code{background:#222;padding:1px 5px;border-radius:3px}
+.spark{display:block;width:100%;height:56px;margin-top:8px}
+.req-table td{cursor:pointer}
+.status-ok{color:#4ade80}.status-err{color:#f87171}.status-warn{color:#fbbf24}
+.detail-row td{cursor:default;background:#151823;padding:12px}
+.file-list{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.file-link{padding:3px 10px;border:1px solid #333;border-radius:6px;background:#222632;color:#aab4ff;font-size:11px;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
+.file-link:hover{border-color:#7c8aff}
+.file-view{margin-top:8px;max-height:50vh;overflow:auto;background:#0d0f16;border:1px solid #222;border-radius:8px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all}
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px 14px;font-size:12px;margin-bottom:8px}
+.meta-grid .k{color:#888}.meta-grid .v{color:#e0e0e0;font-family:ui-monospace,Menlo,monospace;word-break:break-all}
 </style>
 </head>
 <body>
@@ -103,6 +113,26 @@ tr:hover{background:#222632}
 <div class="section" id="statusSection">
 <h2>账户 / 容量状态</h2>
 <div class="loading">加载中...</div>
+</div>
+
+<div class="section" id="activeSection" style="display:none">
+<h2>进行中请求</h2>
+<div id="activeBody"></div>
+</div>
+
+<div class="section">
+<h2>最近请求 <span class="muted" style="font-weight:400;font-size:12px">点击行展开调试细节 · 每 10 秒刷新</span></h2>
+<div class="filters">
+<input type="search" id="reqSearch" placeholder="过滤：模型 / 路径 / 上游ID / IP / key哈希 / 结果..." oninput="loadRequests()">
+</div>
+<div class="model-scroll" style="max-height:50vh">
+<table class="req-table">
+<thead><tr>
+<th>时间</th><th>API</th><th>状态</th><th>模型</th><th>耗时</th><th>上游TTFB</th><th>Tokens</th><th>客户端</th>
+</tr></thead>
+<tbody id="reqBody"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
+</table>
+</div>
 </div>
 
 <div class="section">
@@ -466,11 +496,153 @@ html+=card('保留天数',d.retention_days??'-');
 html+=card('容量上限',(d.max_total_mb??'-')+' MB');
 html+='</div>';
 }
+if(h.trend_minutes&&h.trend_minutes.length){
+html+='<h2 style="margin-top:16px">最近 60 分钟</h2>'+sparkline(h.trend_minutes);
+}
 html+='<div class="note" style="margin-top:8px">指标为进程内存计数，重启清零；每 10 秒自动刷新。</div>';
 el.innerHTML=html;
 }catch(e){
 document.getElementById('statsSection').innerHTML='<h2>代理运行指标</h2><div class="note">指标拉取失败: '+esc(String(e))+'</div>';
 }
+}
+
+function sparkline(points){
+const w=600,h=56,max=Math.max(1,...points.map(p=>p.requests||0));
+const step=w/Math.max(1,points.length-1);
+const xy=(p,i)=>((i*step).toFixed(1))+','+(h-4-((p.requests||0)/max)*(h-10)).toFixed(1);
+const errxy=(p,i)=>((i*step).toFixed(1))+','+(h-4-((p.errors||0)/max)*(h-10)).toFixed(1);
+const line=points.map(xy).join(' ');
+const errs=points.map(errxy).join(' ');
+const total=points.reduce((s,p)=>s+(p.requests||0),0);
+const errTotal=points.reduce((s,p)=>s+(p.errors||0),0);
+return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
++'<polyline points="'+line+'" fill="none" stroke="#7c8aff" stroke-width="1.5"/>'
++(errTotal?'<polyline points="'+errs+'" fill="none" stroke="#f87171" stroke-width="1.5"/>':'')
++'</svg><div class="note" style="margin-top:4px">蓝=请求/分钟 · 红=错误/分钟 · 本小时共 '+total+' 请求 / '+errTotal+' 错误</div>';
+}
+
+function fmtTime(iso){
+try{const d=new Date(iso);return d.toLocaleTimeString('zh-CN',{hour12:false})}catch(e){return iso||'-'}
+}
+function fmtMs(v){return v==null?'-':(v>=1000?(v/1000).toFixed(1)+'s':v+'ms')}
+function statusClass(code){
+if(code>=500)return 'status-err';
+if(code>=400)return 'status-warn';
+return 'status-ok';
+}
+
+let expandedDir=null;
+let openFile=null;
+function tickRequests(){if(openFile)return;loadRequests()}
+async function loadRequests(){
+try{
+const q=encodeURIComponent(document.getElementById('reqSearch').value.trim());
+const res=await fetch('/panel/api/requests?limit=100'+(q?'&q='+q:''));
+const data=await res.json();
+const tbody=document.getElementById('reqBody');
+const list=data.requests||[];
+if(data.disabled){tbody.innerHTML='<tr><td colspan="8" class="loading">调试日志未启用（config: debug.enabled）</td></tr>';return}
+if(!list.length){tbody.innerHTML='<tr><td colspan="8" class="loading">暂无请求记录</td></tr>';return}
+let html='';
+list.forEach(e=>{
+const models=esc(e.requested_model||'-');
+const resolved=(e.model&&e.model!==e.requested_model)?' → '+esc(e.model):'';
+const mismatch=e.model_mismatch?' <span class="badge badge-high">错配</span>':'';
+html+='<tr onclick="toggleDetail(\''+esc(e.dir)+'\',this)">'
++'<td class="mono">'+fmtTime(e.started_at)+'</td>'
++'<td>'+esc(e.api||'-')+'</td>'
++'<td class="'+statusClass(e.status_code)+'">'+e.status_code+' '+esc(e.result||'')+'</td>'
++'<td>'+models+resolved+mismatch+'</td>'
++'<td class="mono">'+fmtMs(e.duration_ms)+'</td>'
++'<td class="mono">'+fmtMs(e.first_upstream_ms)+'</td>'
++'<td class="mono">'+(e.input_tokens??0)+'/'+(e.output_tokens??0)+'</td>'
++'<td class="mono muted">'+esc(e.client_ip||'')+'</td></tr>';
+if(expandedDir===e.dir){
+html+='<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>';
+}
+});
+tbody.innerHTML=html;
+if(expandedDir){fillDetail(expandedDir)}
+}catch(e){/* 刷新失败保留下次重试 */}
+}
+
+async function toggleDetail(dir,row){
+if(expandedDir===dir){expandedDir=null;openFile=null;loadRequests();return}
+expandedDir=dir;
+loadRequests();
+}
+
+async function fillDetail(dir){
+const row=document.querySelector('.detail-row td');
+if(!row)return;
+try{
+const res=await fetch('/panel/api/requests/'+encodeURIComponent(dir));
+const d=await res.json();
+const m=d.meta||{};
+let html='<div class="meta-grid">';
+[['目录',d.dir],['API',m.api],['路径',(m.method||'')+' '+(m.path||'')],['状态',(m.status_code||'-')+' '+(m.result||'')],
+['请求模型',m.requested_model],['实际模型',m.model],['响应模型',m.response_model],
+['开始',m.started_at],['耗时',fmtMs(m.duration_ms)],['上游TTFB',fmtMs(m.first_upstream_ms)],['客户端TTFB',fmtMs(m.first_client_ms)],
+['上游请求ID',m.upstream_request_id],['客户端IP',m.client&&m.client.ip],['UA',m.client&&m.client.user_agent],['Key哈希',m.client&&m.client.key_hash],
+['Tokens',m.usage?(m.usage.input+' in / '+m.usage.output+' out / '+m.usage.cache_read+' cached'):null],
+['丢弃事件',m.dropped_events]].forEach(kv=>{
+if(kv[1]==null||kv[1]==='')return;
+html+='<div><span class="k">'+esc(kv[0])+'</span> <span class="v">'+esc(String(kv[1]))+'</span></div>';
+});
+html+='</div><div class="file-list">';
+(d.files||[]).forEach(f=>{
+html+='<span class="file-link" onclick="loadFile(\''+esc(d.dir)+'\',\''+esc(f.name)+'\')">'+esc(f.name)+' <span class="muted">'+f.size+'B</span></span>';
+});
+html+='</div><div class="file-view" id="fileView" style="display:none"></div>';
+if(!d.meta){html='<div class="note">meta.json 缺失或已损坏</div>'+html}
+row.innerHTML=html;
+if(openFile&&openFile.dir===d.dir){loadFile(d.dir,openFile.name)}
+}catch(e){row.innerHTML='<div class="note">详情拉取失败: '+esc(String(e))+'</div>'}
+}
+
+async function loadFile(dir,name){
+const view=document.getElementById('fileView');
+if(!view)return;
+openFile={dir:dir,name:name};
+view.style.display='block';
+view.textContent='加载 '+name+' ...';
+try{
+const res=await fetch('/panel/api/requests/'+encodeURIComponent(dir)+'/file/'+name.split('/').map(encodeURIComponent).join('/'));
+const d=await res.json();
+let text=d.text||'';
+if(name.endsWith('.json')){
+try{text=JSON.stringify(JSON.parse(text),null,2)}catch(e){}
+}else if(name.endsWith('.jsonl')){
+text=text.split('\n').filter(Boolean).map(line=>{
+try{const o=JSON.parse(line);
+const head=(o.seq?'#'+o.seq+' ':'')+(o.elapsed_ms!=null?'+'+o.elapsed_ms+'ms ':'')+(o.event||'');
+return head+'  '+JSON.stringify(o.data!==undefined?o.data:o,null,0).slice(0,2000);
+}catch(e){return line}
+}).join('\n\n');
+}
+view.textContent=text+(d.truncated?'\n\n... 已截断（原始 '+d.size+' 字节）':'');
+}catch(e){view.textContent='读取失败: '+String(e)}
+}
+
+async function loadActive(){
+try{
+const res=await fetch('/panel/api/requests/active');
+const data=await res.json();
+const list=data.active||[];
+const section=document.getElementById('activeSection');
+if(!list.length){section.style.display='none';return}
+section.style.display='';
+let html='<table><thead><tr><th>目录</th><th>API</th><th>路径</th><th>已耗时</th><th>已写文件</th><th>丢弃事件</th></tr></thead><tbody>';
+list.forEach(a=>{
+html+='<tr><td class="mono">'+esc(a.dir)+'</td><td>'+esc(a.meta&&a.meta.api||'-')+'</td>'
++'<td class="mono">'+esc((a.meta&&a.meta.method||'')+' '+(a.meta&&a.meta.path||''))+'</td>'
++'<td class="mono">'+fmtMs(a.elapsed_ms)+'</td>'
++'<td class="mono">'+(a.files||[]).map(f=>esc(f.name)).join(', ')+'</td>'
++'<td>'+(a.dropped_events||0)+'</td></tr>';
+});
+html+='</tbody></table>';
+document.getElementById('activeBody').innerHTML=html;
+}catch(e){/* 静默 */}
 }
 function fmtDuration(sec){
 sec=Number(sec)||0;
@@ -482,7 +654,11 @@ return Math.floor(sec/3600)+'h '+Math.floor(sec%3600/60)+'m';
 loadStatus();
 loadModels();
 loadStats();
+loadRequests();
+loadActive();
 setInterval(loadStats,10000);
+setInterval(loadActive,10000);
+setInterval(tickRequests,10000);
 </script>
 </body>
 </html>`

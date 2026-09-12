@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/go-chi/chi/v5"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/httpproxy"
 	"github.com/leookun/devin-2api/internal/obs"
@@ -98,6 +100,10 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/panel/api/status", h.apiStatus)
 	mux.Get("/panel/api/models", h.apiModels)
 	mux.Get("/panel/api/stats", h.apiStats)
+	mux.Get("/panel/api/requests", h.apiRequests)
+	mux.Get("/panel/api/requests/active", h.apiActiveRequests)
+	mux.Get("/panel/api/requests/{dir}", h.apiRequestDetail)
+	mux.Get("/panel/api/requests/{dir}/file/*", h.apiRequestFile)
 }
 
 // apiStats 返回代理自身运行指标：请求计数、错误分类、流式占比、字节量，
@@ -115,6 +121,122 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// requestsFetchCap 是请求列表单次扫描的索引行数上限；
+// 过滤与分页在这批记录内进行，更早历史用 grep 查 index.jsonl 原文件。
+const requestsFetchCap = 2000
+
+// apiRequests 返回 index.jsonl 中的最近请求（新的在前），供面板列表和
+// agent 检索。支持 ?limit=&offset= 分页与 ?q= 子串过滤
+// （匹配目录名/模型/路径/upstream_request_id/client_ip/key_hash）。
+func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		_, _ = w.Write([]byte(`{"requests":[],"disabled":true}`))
+		return
+	}
+	entries := h.debugManager.ListRequests(requestsFetchCap)
+	query := strings.ToLower(r.URL.Query().Get("q"))
+	if query != "" {
+		filtered := entries[:0]
+		for _, entry := range entries {
+			haystack := strings.ToLower(strings.Join([]string{
+				entry.Dir, entry.API, entry.Path, entry.Result,
+				entry.RequestedModel, entry.Model, entry.ResponseModel,
+				entry.UpstreamRequestID, entry.ClientIP, entry.KeyHash,
+			}, " "))
+			if strings.Contains(haystack, query) {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
+	}
+	total := len(entries)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	if offset > 0 {
+		if offset >= total {
+			entries = nil
+		} else {
+			entries = entries[offset:]
+		}
+	}
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"requests": entries,
+		"total":    total,
+		"offset":   offset,
+		"limit":    limit,
+	})
+}
+
+// apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、
+// 已落盘文件清单——请求未结束就能检查它收到过什么（ccLoad 同款）。
+func (h *Handler) apiActiveRequests(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	active := []debuglog.ActiveRequest{}
+	if h.debugManager != nil {
+		active = h.debugManager.ActiveRequests()
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"active": active})
+}
+
+// apiRequestDetail 返回单个请求目录的 meta.json 与文件清单。
+func (h *Handler) apiRequestDetail(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		return
+	}
+	detail, err := h.debugManager.Detail(chi.URLParam(r, "dir"))
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"request log not found or already cleaned"}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(detail)
+}
+
+// apiRequestFile 返回请求目录内单个文件的内容；JSON/JSONL 原文回传，
+// 由前端按需美化。大小超上限时截断并标记 truncated。
+func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		return
+	}
+	data, total, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), chi.URLParam(r, "*"))
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"file not found"}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":      chi.URLParam(r, "*"),
+		"size":      total,
+		"truncated": truncated,
+		"text":      string(data),
+	})
 }
 
 func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +278,13 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) isAuthenticated(r *http.Request) bool {
 	if h.password == "" {
 		return true
+	}
+	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
+	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(h.password)) == 1 {
+			return true
+		}
 	}
 	cookie, err := r.Cookie("devin_panel_session")
 	if err != nil {
