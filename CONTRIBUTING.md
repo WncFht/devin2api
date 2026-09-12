@@ -136,7 +136,7 @@ The admin panel at `/panel` (login: `dashboard.password`) renders these logs as 
 
 1. **Tests pass**: `go test ./...`
 2. **Formatted**: `gofmt -l .` produces no output
-3. **Comment conventions**: follow the repo's Go comment conventions (`.agent/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
+3. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
 4. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
 5. **No real tokens**: `config.yaml` is tracked by git; make sure no real `devin.token` is committed (add it to `.gitignore` if needed)
 
