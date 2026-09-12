@@ -1,0 +1,24 @@
+repos:
+  # autocorrect 只改文本内容（中英文之间补空格、标点全半角），需 brew install autocorrect
+  - repo: local
+    hooks:
+      - id: autocorrect
+        name: autocorrect --fix
+        entry: autocorrect --fix
+        language: system
+        types: [markdown]
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+        args: [--fix]
+  # prettier 必须最后写盘，保证提交结果是 prettier 规范形；版本与 package.json 一致，
+  # 与 VS Code prettier-vscode 解析到的项目本地版本同源
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier --write
+        entry: prettier --write
+        language: node
+        additional_dependencies: [prettier@3.9.6]
+        types: [markdown]
