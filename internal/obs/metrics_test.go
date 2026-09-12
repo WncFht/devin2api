@@ -52,3 +52,19 @@ func TestDiagnosticBoundsAndRedacts(t *testing.T) {
 		t.Fatalf("diagnostic not bounded: %d", len(Diagnostic(long)))
 	}
 }
+
+// TestTrendBuckets 验证分钟桶把请求与错误归入当前分钟并出现在快照里。
+func TestTrendBuckets(t *testing.T) {
+	m := NewMetrics()
+	m.Begin().Finish(200, 0)
+	m.Begin().Finish(500, 0)
+	m.Reject()
+	trend, _ := m.Snapshot()["trend_minutes"].([]map[string]any)
+	if len(trend) != 60 {
+		t.Fatalf("trend len = %d, want 60", len(trend))
+	}
+	last := trend[len(trend)-1]
+	if last["requests"] != uint64(3) || last["errors"] != uint64(2) {
+		t.Fatalf("last bucket = %+v, want requests=3 errors=2", last)
+	}
+}

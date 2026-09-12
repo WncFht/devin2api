@@ -7,9 +7,20 @@
 package obs
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// trendBuckets 是趋势环形缓冲的分钟桶数：保留最近 60 分钟。
+const trendBuckets = 60
+
+// minuteBucket 是一分钟内的请求聚合，供趋势图使用。
+type minuteBucket struct {
+	minute   int64 // unix 分钟戳
+	requests uint64
+	errors   uint64 // 4xx/5xx 与管线前拒绝
+}
 
 // Metrics 是 /v1/* 请求的运行计数器集合。
 type Metrics struct {
@@ -24,6 +35,9 @@ type Metrics struct {
 	reqBytes    atomic.Uint64
 	respBytes   atomic.Uint64
 	startedAt   time.Time
+	// bucketsMu 保护 buckets；分钟桶写入低频，普通 mutex 足够。
+	bucketsMu sync.Mutex
+	buckets   [trendBuckets]minuteBucket
 }
 
 // NewMetrics 创建以启动时刻为起点的指标集合。
@@ -81,11 +95,28 @@ func (r *Request) Finish(status, responseBodyBytes int) {
 	default:
 		m.okResponses.Add(1)
 	}
+	m.recordBucket(status >= 400)
 }
 
 // Reject 计入一个在进入处理管线前被拒的请求（鉴权失败/并发上限）。
 func (m *Metrics) Reject() {
 	m.rejected.Add(1)
+	m.recordBucket(true)
+}
+
+// recordBucket 把一次请求归入当前分钟桶；桶满时循环覆盖最旧数据。
+func (m *Metrics) recordBucket(isError bool) {
+	minute := time.Now().Unix() / 60
+	m.bucketsMu.Lock()
+	defer m.bucketsMu.Unlock()
+	index := int(minute % trendBuckets)
+	if m.buckets[index].minute != minute {
+		m.buckets[index] = minuteBucket{minute: minute}
+	}
+	m.buckets[index].requests++
+	if isError {
+		m.buckets[index].errors++
+	}
 }
 
 // Snapshot 返回全部计数的即时快照，供 JSON 序列化给面板或 /statsz。
@@ -102,5 +133,26 @@ func (m *Metrics) Snapshot() map[string]any {
 		"non_streaming_requests": m.buffered.Load(),
 		"request_body_bytes":     m.reqBytes.Load(),
 		"response_body_bytes":    m.respBytes.Load(),
+		"trend_minutes":          m.trend(),
 	}
+}
+
+// trend 返回最近 60 分钟的逐分钟请求/错误数（旧→新，含零值分钟），
+// 供面板直接画 sparkline，无需客户端再聚合。
+func (m *Metrics) trend() []map[string]any {
+	current := time.Now().Unix() / 60
+	m.bucketsMu.Lock()
+	snapshot := m.buckets
+	m.bucketsMu.Unlock()
+	out := make([]map[string]any, 0, trendBuckets)
+	for minute := current - trendBuckets + 1; minute <= current; minute++ {
+		bucket := snapshot[int(minute%trendBuckets)]
+		point := map[string]any{"minute": minute * 60, "requests": uint64(0), "errors": uint64(0)}
+		if bucket.minute == minute {
+			point["requests"] = bucket.requests
+			point["errors"] = bucket.errors
+		}
+		out = append(out, point)
+	}
+	return out
 }
