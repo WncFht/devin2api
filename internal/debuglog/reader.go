@@ -26,30 +26,6 @@ const fileReadCap = 4 << 20
 // requestDirPattern 约束请求目录名，防止路径穿越读取任意目录。
 var requestDirPattern = regexp.MustCompile(`^\d{8}-\d{6}(-\d{2})?$`)
 
-// ListRequests 返回 index.jsonl 中最新 limit 条请求摘要（新的在前）。
-// 索引在目录被清理后仍保留记录，因此列表是完整历史，Detail 才可能 404。
-func (manager *Manager) ListRequests(limit int) []IndexEntry {
-	if manager == nil || manager.root == "" || limit <= 0 {
-		return nil
-	}
-	data, err := tailRead(filepath.Join(manager.root, "index.jsonl"), indexTailBytes)
-	if err != nil {
-		return nil
-	}
-	lines := bytes.Split(data, []byte{'\n'})
-	entries := make([]IndexEntry, 0, limit)
-	for i := len(lines) - 1; i >= 0 && len(entries) < limit; i-- {
-		if len(lines[i]) == 0 {
-			continue
-		}
-		var entry IndexEntry
-		if json.Unmarshal(lines[i], &entry) == nil {
-			entries = append(entries, entry)
-		}
-	}
-	return entries
-}
-
 // RequestFileInfo 是请求目录内一个文件的清单项。
 type RequestFileInfo struct {
 	// Name 是相对请求目录的路径（顶层文件名或 attachments/xxx）。
@@ -160,12 +136,24 @@ type ActiveRequest struct {
 	Dir string `json:"dir"`
 	// Meta 是创建时记录的 HTTP 元信息。
 	Meta RequestMeta `json:"meta"`
+	// Model 是解码后的客户端请求模型名；未记录时为空。
+	Model string `json:"model,omitempty"`
 	// StartedAt 是请求进入时间。
 	StartedAt time.Time `json:"started_at"`
 	// ElapsedMS 是快照时刻相对进入时间的毫秒数。
 	ElapsedMS int64 `json:"elapsed_ms"`
+	// State 是请求所处阶段：waiting_upstream / receiving_upstream / streaming_client。
+	State string `json:"state"`
+	// FirstUpstreamMS 是首上游事件相对毫秒数；未发生为 null。
+	FirstUpstreamMS *int64 `json:"first_upstream_ms"`
+	// ClientBytes 是已下发给客户端的累计字节数。
+	ClientBytes int64 `json:"client_bytes"`
+	// QueuedEvents 是写队列中积压的任务数。
+	QueuedEvents int `json:"queued_events"`
 	// DroppedEvents 是目前已被丢弃的写任务数。
 	DroppedEvents uint64 `json:"dropped_events"`
+	// Abortable 表示请求 ctx 已挂接取消函数、可被面板中断。
+	Abortable bool `json:"abortable"`
 	// Files 是目录内目前已落盘的文件清单。
 	Files []RequestFileInfo `json:"files"`
 }
@@ -183,20 +171,151 @@ func (manager *Manager) ActiveRequests() []ActiveRequest {
 		recorders = append(recorders, recorder)
 	}
 	manager.mutex.Unlock()
-	now := time.Now()
 	out := make([]ActiveRequest, 0, len(recorders))
 	for _, recorder := range recorders {
-		out = append(out, ActiveRequest{
-			Dir:           filepath.Base(recorder.directory),
-			Meta:          recorder.requestMeta,
-			StartedAt:     recorder.startedAt,
-			ElapsedMS:     now.Sub(recorder.startedAt).Milliseconds(),
-			DroppedEvents: recorder.dropped.Load(),
-			Files:         listRequestFiles(recorder.directory),
-		})
+		snap := recorder.snapshot()
+		snap.Files = listRequestFiles(recorder.directory)
+		out = append(out, snap)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out
+}
+
+// ListResult 是 ListRequests 的返回体：命中条目加历史截断信号。
+type ListResult struct {
+	// Entries 是命中的请求摘要，新的在前。
+	Entries []IndexEntry `json:"entries"`
+	// HasMore 表示 index.jsonl 在读取窗口之外还有更早历史
+	// （文件超过尾部读取上限，或未读窗口内仍有剩余行）。
+	HasMore bool `json:"has_more"`
+}
+
+// RequestFilter 是请求列表的结构化筛选条件；零值匹配全部。
+type RequestFilter struct {
+	// StatusClass 按状态码段过滤："2xx"/"4xx"/"5xx"。
+	StatusClass string
+	// Result 按结果过滤：completed/failed/disconnected/aborted。
+	Result string
+	// Model 按请求或响应模型精确过滤。
+	Model string
+	// ErrorStage 按失败阶段精确过滤。
+	ErrorStage string
+	// Since 只保留开始时间晚于该时刻的请求；零值不限。
+	Since time.Time
+	// Query 保留原有子串匹配：命中 dir/model/key_hash/client_request_id/path。
+	Query string
+}
+
+// match 判断一条索引行是否满足筛选条件。
+func (f RequestFilter) match(e IndexEntry) bool {
+	if f.StatusClass != "" {
+		class := e.StatusCode / 100
+		want := int(f.StatusClass[0] - '0')
+		if len(f.StatusClass) != 3 || f.StatusClass[1:] != "xx" || class != want {
+			return false
+		}
+	}
+	if f.Result != "" && e.Result != f.Result {
+		return false
+	}
+	if f.Model != "" && e.Model != f.Model && e.RequestedModel != f.Model && e.ResponseModel != f.Model {
+		return false
+	}
+	if f.ErrorStage != "" && e.ErrorStage != f.ErrorStage {
+		return false
+	}
+	if !f.Since.IsZero() {
+		started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
+		if err != nil || !started.After(f.Since) {
+			return false
+		}
+	}
+	if f.Query != "" {
+		haystack := e.Dir + " " + e.Method + " " + e.Path + " " + e.Model + " " +
+			e.RequestedModel + " " + e.ResponseModel + " " + e.KeyHash + " " +
+			e.ClientRequestID + " " + e.ErrorStage + " " + e.Result
+		if !strings.Contains(strings.ToLower(haystack), strings.ToLower(f.Query)) {
+			return false
+		}
+	}
+	return true
+}
+
+// ListRequests 返回 index.jsonl 中最新 limit 条请求摘要（新的在前）。
+// 索引在目录被清理后仍保留记录，因此列表是完整历史，Detail 才可能 404。
+// 结构化筛选走 filter；HasMore 提示更早历史只存在于原文件中。
+func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult {
+	if manager == nil || manager.root == "" || limit <= 0 {
+		return ListResult{}
+	}
+	data, err := tailRead(filepath.Join(manager.root, "index.jsonl"), indexTailBytes)
+	if err != nil {
+		return ListResult{}
+	}
+	lines := bytes.Split(data, []byte{'\n'})
+	entries := make([]IndexEntry, 0, limit)
+	// scannedAll 为 false 表示窗口内还有没扫到的行（limit 用尽），更早历史必然存在。
+	scannedAll := true
+	for i := len(lines) - 1; i >= 0; i-- {
+		if len(lines[i]) == 0 {
+			continue
+		}
+		if len(entries) >= limit {
+			scannedAll = false
+			break
+		}
+		var entry IndexEntry
+		if json.Unmarshal(lines[i], &entry) == nil && filter.match(entry) {
+			entries = append(entries, entry)
+		}
+	}
+	// 文件比读取窗口大 → 窗口外还有历史；窗口内未扫完 → 同理。
+	hasMore := false
+	if info, statErr := os.Stat(filepath.Join(manager.root, "index.jsonl")); statErr == nil && info.Size() > int64(len(data)) {
+		hasMore = true
+	}
+	return ListResult{Entries: entries, HasMore: hasMore || !scannedAll}
+}
+
+// processLogTailBytes 是进程日志单次返回的尾部上限。
+const processLogTailBytes = 256 << 10
+
+// ReadProcessLog 返回进程日志（stderr.log）尾部内容与下一次增量拉取的偏移。
+// offset>0 时从该偏移继续读（CLIProxyAPI GetLogs 的 cursor 模式简化版——
+// 本服务日志不 rotate，偏移量天然单调有效）。
+func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, err error) {
+	if manager == nil || manager.root == "" {
+		return nil, 0, os.ErrNotExist
+	}
+	path := filepath.Join(manager.root, "stderr.log")
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	size := info.Size()
+	if offset > 0 && offset <= size {
+		// 增量模式：从上次偏移读到现在。
+		start := offset
+		if size-offset > processLogTailBytes {
+			start = size - processLogTailBytes
+		}
+		data = make([]byte, size-start)
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return nil, 0, openErr
+		}
+		defer func() { _ = file.Close() }()
+		if _, err = file.ReadAt(data, start); err != nil {
+			return nil, 0, err
+		}
+		return data, size, nil
+	}
+	// 全量尾部模式：读最后 processLogTailBytes。
+	data, err = tailRead(path, processLogTailBytes)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, size, nil
 }
 
 // tailRead 读取文件末尾至多 max 字节；文件小于 max 时读全文。

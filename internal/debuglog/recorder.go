@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"mime"
 	"os"
 	"path/filepath"
@@ -28,8 +29,22 @@ import (
 // writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
 const writeQueueSize = 4096
 
+// RetentionPolicy 是请求日志的生命周期策略。
+type RetentionPolicy struct {
+	// Days 是请求目录整体保留天数；<=0 不按时间清理。
+	Days int
+	// MaxTotalMB 是 logs 根目录总量上限（MB），超限从最旧目录开始删；<=0 不按大小清理。
+	MaxTotalMB int64
+	// PayloadHours 是大体积阶段文件（03/04/05/06 与 attachments/）的保留小时数；
+	// 超时只剥负载、保留 meta.json/error.json/01/02 等证据文件。<=0 不剥离。
+	PayloadHours int
+	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数（含 error.json 的目录）；
+	// 超过该数量的旧失败目录仍可被淘汰，时间清理不受影响。<=0 不保护。
+	KeepErrorDirs int
+}
+
 // Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
-// 全局索引（index.jsonl）与后台清理器。
+// 全局索引（index.jsonl）、用量聚合器与后台清理器。
 type Manager struct {
 	// root 是所有请求日志目录的根路径；空值表示禁用调试日志。
 	root string
@@ -40,10 +55,10 @@ type Manager struct {
 	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
 	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
 	activeDirs map[string]*Recorder
-	// retentionDays 是请求目录保留天数；<=0 不按时间清理。
-	retentionDays int
-	// maxBytes 是 logs 根目录总量上限；<=0 不按大小清理。
-	maxBytes int64
+	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
+	enabled atomic.Bool
+	// policy 是日志生命周期策略。
+	policy RetentionPolicy
 	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
 	indexFile   *os.File
 	indexWriter *bufio.Writer
@@ -52,6 +67,10 @@ type Manager struct {
 	cleanerDone chan struct{}
 	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
 	droppedTotal atomic.Uint64
+	// ioErrors 汇总索引与阶段文件的写失败数——日志管道自身故障不静默。
+	ioErrors atomic.Uint64
+	// usage 是 index.jsonl 的内存聚合器；启动时回放、请求完成时累加。
+	usage *usageAggregator
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -108,16 +127,24 @@ type Recorder struct {
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
-	// mutex 保护 closed 标志与入队决策；worker 自身状态无锁。
+	// mutex 保护 closed、abortCancel、requestedModel；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
+	// abortCancel 是请求 ctx 的取消函数，面板 Abort 时调用；nil 表示不可中断。
+	abortCancel context.CancelFunc
+	// requestedModel 是解码后的客户端请求模型名（面板进行中列表展示用）。
+	requestedModel string
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
 	writerDone chan struct{}
 	// dropped 是本次请求被丢弃的写任务数。
 	dropped atomic.Uint64
+	// aborted 标记请求被面板主动中断（区别于客户端自行断连）。
+	aborted atomic.Bool
+	// clientBytes 是已下发给客户端的累计字节数。
+	clientBytes atomic.Int64
 	// firstUpstreamMS/firstClientMS 是首上游事件/首客户端内容字节的
 	// 相对毫秒数；-1 表示尚未发生。区分「上游慢」与「网关编码慢」。
 	firstUpstreamMS atomic.Int64
@@ -177,16 +204,24 @@ type attachmentReference struct {
 }
 
 // NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
-// retentionDays 和 maxTotalMB 控制后台清理：<=0 表示对应维度不限制。
-func NewManager(root string, retentionDays int, maxTotalMB int64) *Manager {
+// policy 控制后台清理；任一维度启用即启动清理协程。
+// 启动时回放 index.jsonl 尾部重建用量聚合，进程重启不丢统计口径。
+func NewManager(root string, policy RetentionPolicy) *Manager {
 	manager := &Manager{
-		root:          root,
-		now:           time.Now,
-		activeDirs:    make(map[string]*Recorder),
-		retentionDays: retentionDays,
-		maxBytes:      maxTotalMB << 20,
+		root:       root,
+		now:        time.Now,
+		activeDirs: make(map[string]*Recorder),
+		policy:     policy,
+		usage:      newUsageAggregator(),
 	}
-	if root != "" && (retentionDays > 0 || maxTotalMB > 0) {
+	manager.enabled.Store(true)
+	if root == "" {
+		return manager
+	}
+	if parsed := manager.usage.replayIndex(filepath.Join(root, "index.jsonl")); parsed > 0 {
+		slog.Info("debuglog: replayed request index", "entries", parsed)
+	}
+	if policy.Days > 0 || policy.MaxTotalMB > 0 || policy.PayloadHours > 0 {
 		manager.cleanerStop = make(chan struct{})
 		manager.cleanerDone = make(chan struct{})
 		go manager.runCleaner()
@@ -213,27 +248,86 @@ func (manager *Manager) Close() {
 	}
 }
 
-// Stats 返回日志管道自身的运行指标：丢弃数、活跃请求目录数。
-// 观测系统自己的健康状况也应可观测（参考 ccLoad 的 drop/backlog 计数）。
+// SetEnabled 运行时切换请求日志；关闭后新请求不再创建目录，历史仍可查询。
+func (manager *Manager) SetEnabled(enabled bool) {
+	if manager == nil {
+		return
+	}
+	manager.enabled.Store(enabled)
+}
+
+// Enabled 返回请求日志当前是否开启。
+func (manager *Manager) Enabled() bool {
+	return manager != nil && manager.enabled.Load()
+}
+
+// Root 返回日志根目录；禁用态返回空串。配额历史等顶层文件与其同目录。
+func (manager *Manager) Root() string {
+	if manager == nil {
+		return ""
+	}
+	return manager.root
+}
+
+// Stats 返回日志管道自身的运行指标：丢弃数、活跃请求目录数、写队列积压、
+// IO 失败数——观测系统自己的健康状况也应可观测（参考 ccLoad 的 drop/backlog 计数）。
 func (manager *Manager) Stats() map[string]any {
 	if manager == nil {
 		return nil
 	}
 	manager.mutex.Lock()
 	active := len(manager.activeDirs)
+	queued := 0
+	for _, recorder := range manager.activeDirs {
+		queued += len(recorder.tasks)
+	}
 	manager.mutex.Unlock()
+	var indexBytes int64
+	if info, err := os.Stat(filepath.Join(manager.root, "index.jsonl")); err == nil {
+		indexBytes = info.Size()
+	}
 	return map[string]any{
 		"log_root":            manager.root,
+		"enabled":             manager.enabled.Load(),
 		"active_request_dirs": active,
+		"queued_log_events":   queued,
+		"queue_capacity":      active * writeQueueSize,
 		"dropped_log_events":  manager.droppedTotal.Load(),
-		"retention_days":      manager.retentionDays,
-		"max_total_mb":        manager.maxBytes >> 20,
+		"io_errors":           manager.ioErrors.Load(),
+		"index_bytes":         indexBytes,
+		"retention_days":      manager.policy.Days,
+		"max_total_mb":        manager.policy.MaxTotalMB,
+		"payload_hours":       manager.policy.PayloadHours,
+		"keep_error_dirs":     manager.policy.KeepErrorDirs,
 	}
+}
+
+// UsageStats 返回 index.jsonl 的聚合快照（今日/窗口累计、按模型、按 key、
+// 错误阶段、小时趋势、延迟分位数）。
+func (manager *Manager) UsageStats() UsageSnapshot {
+	if manager == nil {
+		return UsageSnapshot{}
+	}
+	return manager.usage.snapshot()
+}
+
+// Abort 中断指定进行中请求的 ctx；目录不存在或不可中断时返回 false。
+func (manager *Manager) Abort(dir string) bool {
+	if manager == nil || !requestDirPattern.MatchString(dir) {
+		return false
+	}
+	manager.mutex.Lock()
+	recorder := manager.activeDirs[dir]
+	manager.mutex.Unlock()
+	if recorder == nil {
+		return false
+	}
+	return recorder.Abort()
 }
 
 // Start 为一个 HTTP 请求创建按进入秒命名的独立日志目录。
 func (manager *Manager) Start(meta RequestMeta) *Recorder {
-	if manager == nil || manager.root == "" {
+	if manager == nil || manager.root == "" || !manager.enabled.Load() {
 		return nil
 	}
 	now := manager.now()
@@ -346,6 +440,90 @@ func (recorder *Recorder) NoteClientLatency() {
 	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
 }
 
+// SetAbort 挂接请求 ctx 的取消函数，使面板 Abort 能真正中断请求。
+// Complete 后自动失效；ctx 为 nil 时忽略。
+func (recorder *Recorder) SetAbort(cancel context.CancelFunc) {
+	if recorder == nil || cancel == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	if !recorder.closed {
+		recorder.abortCancel = cancel
+	}
+	recorder.mutex.Unlock()
+}
+
+// SetModel 记录解码后的客户端请求模型名，用于进行中列表与诊断。
+func (recorder *Recorder) SetModel(model string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.requestedModel = model
+	recorder.mutex.Unlock()
+}
+
+// AddClientBytes 累加已下发给客户端的字节数，用于进行中列表观察流出速率。
+func (recorder *Recorder) AddClientBytes(n int64) {
+	if recorder == nil || n <= 0 {
+		return
+	}
+	recorder.clientBytes.Add(n)
+}
+
+// Abort 中断请求：标记 aborted 并调用挂接的取消函数。
+// 无可中断的请求（未挂接或已完结）返回 false。
+func (recorder *Recorder) Abort() bool {
+	if recorder == nil {
+		return false
+	}
+	recorder.mutex.Lock()
+	cancel := recorder.abortCancel
+	recorder.mutex.Unlock()
+	if cancel == nil {
+		return false
+	}
+	recorder.aborted.Store(true)
+	cancel()
+	return true
+}
+
+// WasAborted 返回请求是否被面板主动中断。
+func (recorder *Recorder) WasAborted() bool {
+	return recorder != nil && recorder.aborted.Load()
+}
+
+// snapshot 返回进行中请求的活快照：队列积压、首字节计时、阶段状态、模型。
+// State 分三档：waiting_upstream（上游未回首事件）→ receiving_upstream
+// （上游在回但未下发客户端内容）→ streaming_client（正在向客户端流出）。
+func (recorder *Recorder) snapshot() ActiveRequest {
+	recorder.mutex.Lock()
+	model := recorder.requestedModel
+	abortable := recorder.abortCancel != nil
+	recorder.mutex.Unlock()
+	firstUpstream := optionalLatency(recorder.firstUpstreamMS.Load())
+	state := "waiting_upstream"
+	switch {
+	case recorder.firstClientMS.Load() >= 0:
+		state = "streaming_client"
+	case firstUpstream != nil:
+		state = "receiving_upstream"
+	}
+	return ActiveRequest{
+		Dir:             filepath.Base(recorder.directory),
+		Meta:            recorder.requestMeta,
+		Model:           model,
+		StartedAt:       recorder.startedAt,
+		ElapsedMS:       time.Since(recorder.startedAt).Milliseconds(),
+		State:           state,
+		FirstUpstreamMS: firstUpstream,
+		ClientBytes:     recorder.clientBytes.Load(),
+		QueuedEvents:    len(recorder.tasks),
+		DroppedEvents:   recorder.dropped.Load(),
+		Abortable:       abortable,
+	}
+}
+
 // WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON 文件。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
@@ -431,9 +609,13 @@ func (recorder *Recorder) Complete(completion Completion) {
 	recorder.mutex.Lock()
 	if !recorder.closed {
 		recorder.closed = true
+		recorder.abortCancel = nil
 		close(recorder.tasks)
 	}
 	recorder.mutex.Unlock()
+	if recorder.aborted.Load() && completion.Result == "disconnected" {
+		completion.Result = "aborted"
+	}
 	<-recorder.writerDone
 	recorder.writeMeta(&completion)
 	recorder.manager.appendIndex(recorder, &completion)
@@ -524,6 +706,7 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 				"output":      completion.Usage.Output,
 				"cache_read":  completion.Usage.CacheRead,
 				"cache_write": completion.Usage.CacheWrite,
+				"reasoning":   reasoningTokens(completion.Usage),
 				"total":       completion.Usage.TotalTokens,
 			}
 		}

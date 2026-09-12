@@ -64,6 +64,14 @@ type DebugConfig struct {
 	// MaxTotalMB 是 logs 目录总量上限（MB），超限从最旧目录开始删；
 	// <=0 不按大小清理。默认 1024。
 	MaxTotalMB *int64 `yaml:"max_total_mb"`
+	// PayloadHours 是大体积阶段文件（03/04/06 与 attachments/）的保留小时数，
+	// 超时后剥离负载、保留证据文件；<=0 不剥离。默认 24。
+	PayloadHours *int `yaml:"payload_hours"`
+	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数；<=0 不保护。默认 32。
+	KeepErrorDirs *int `yaml:"keep_error_dirs"`
+	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 logs/quota.jsonl；
+	// <=0 不采样。默认 10。
+	QuotaIntervalMinutes *int `yaml:"quota_interval_minutes"`
 }
 
 // DashboardConfig 保存管理面板配置。
@@ -119,6 +127,18 @@ func (config *Config) Validate() error {
 	if config.Debug.MaxTotalMB == nil {
 		mb := int64(1024)
 		config.Debug.MaxTotalMB = &mb
+	}
+	if config.Debug.PayloadHours == nil {
+		hours := 24
+		config.Debug.PayloadHours = &hours
+	}
+	if config.Debug.KeepErrorDirs == nil {
+		keep := 32
+		config.Debug.KeepErrorDirs = &keep
+	}
+	if config.Debug.QuotaIntervalMinutes == nil {
+		minutes := 10
+		config.Debug.QuotaIntervalMinutes = &minutes
 	}
 	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
 	if strings.TrimSpace(config.Devin.Token) == "" {

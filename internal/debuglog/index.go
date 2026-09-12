@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // IndexEntry 是 index.jsonl 中一行请求的摘要。
@@ -35,6 +37,9 @@ type IndexEntry struct {
 	InputTokens       int64  `json:"input_tokens,omitempty"`
 	OutputTokens      int64  `json:"output_tokens,omitempty"`
 	CacheReadTokens   int64  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens  int64  `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens   int64  `json:"reasoning_tokens,omitempty"`
+	TotalTokens       int64  `json:"total_tokens,omitempty"`
 	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
 	ClientIP          string `json:"client_ip,omitempty"`
 	KeyHash           string `json:"key_hash,omitempty"`
@@ -55,6 +60,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 	if manager.indexWriter == nil {
 		file, err := os.OpenFile(filepath.Join(manager.root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
+			manager.ioErrors.Add(1)
 			return
 		}
 		manager.indexFile = file
@@ -79,6 +85,9 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		InputTokens:       completion.Usage.Input,
 		OutputTokens:      completion.Usage.Output,
 		CacheReadTokens:   completion.Usage.CacheRead,
+		CacheWriteTokens:  completion.Usage.CacheWrite,
+		ReasoningTokens:   reasoningTokens(completion.Usage),
+		TotalTokens:       completion.Usage.TotalTokens,
 		UpstreamRequestID: completion.UpstreamRequestID,
 		ClientIP:          recorder.requestMeta.ClientIP,
 		KeyHash:           recorder.requestMeta.KeyHash,
@@ -88,11 +97,27 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
+		manager.ioErrors.Add(1)
 		return
 	}
-	_, _ = manager.indexWriter.Write(data)
+	if _, err := manager.indexWriter.Write(data); err != nil {
+		manager.ioErrors.Add(1)
+		return
+	}
 	_ = manager.indexWriter.WriteByte('\n')
-	_ = manager.indexWriter.Flush()
+	if err := manager.indexWriter.Flush(); err != nil {
+		manager.ioErrors.Add(1)
+		return
+	}
+	manager.usage.add(entry)
+}
+
+// reasoningTokens 展开 Usage.Reasoning 指针为整数值。
+func reasoningTokens(usage llm.Usage) int64 {
+	if usage.Reasoning == nil {
+		return 0
+	}
+	return *usage.Reasoning
 }
 
 // optionalLatency 把 -1 哨兵转成 nil，其余原样透传（含合法的 0ms）。

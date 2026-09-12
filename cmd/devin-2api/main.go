@@ -66,19 +66,23 @@ func main() {
 		providerAdapter = configured
 	}
 	var debugManager *debuglog.Manager
+	logRoot := filepath.Join(filepath.Dir(absoluteConfigPath), "logs")
 	if serviceConfig.Debug.Enabled {
-		debugManager = debuglog.NewManager(
-			filepath.Join(filepath.Dir(absoluteConfigPath), "logs"),
-			*serviceConfig.Debug.RetentionDays,
-			*serviceConfig.Debug.MaxTotalMB,
-		)
+		debugManager = debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
+			Days:          *serviceConfig.Debug.RetentionDays,
+			MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
+			PayloadHours:  *serviceConfig.Debug.PayloadHours,
+			KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
+		})
 		defer debugManager.Close()
 	}
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(version)
 	if serviceConfig.Devin.Token != "" {
-		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager))
+		panel := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+		panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+		application.SetDashboard(panel)
 	}
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", version)

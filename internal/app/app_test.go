@@ -151,7 +151,7 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -195,7 +195,7 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -301,7 +301,7 @@ func TestResponsesHandlerIgnoresLogInitializationFailure(t *testing.T) {
 	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, 0, 0))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, debuglog.RetentionPolicy{}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -506,7 +506,7 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 		Error: &llm.AssistantMessage{ErrorMessage: "invalid_argument: broken"},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
 
 	// 成功前即失败：上游首个事件就是错误 → 非 200 HTTP 错误响应。
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
@@ -543,7 +543,7 @@ func TestStreamErrorCarriesDebugRef(t *testing.T) {
 			Error: &llm.AssistantMessage{ErrorMessage: "upstream exploded"}},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
