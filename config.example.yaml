@@ -9,6 +9,15 @@ debug:
   # retention_days: 14
   # logs 目录总量上限（MB），超限从最旧目录开始删；<=0 不限制。默认 1024。
   # max_total_mb: 1024
+  # 大体积阶段文件（03-devin-request/04-devin-response/06-http-response 与
+  # attachments/）的保留小时数；超时剥离负载、保留 meta/error/01/02/05 证据。
+  # <=0 不剥离。默认 24。
+  # payload_hours: 24
+  # 容量淘汰时保护的最新失败目录数（含 error.json）；<=0 不保护。默认 32。
+  # keep_error_dirs: 32
+  # 配额快照采样间隔（分钟），写入 logs/quota.jsonl 供燃烧速率预测；<=0 不采样。
+  # 默认 10。
+  # quota_interval_minutes: 10
 
 devin:
   base_url: "https://server.codeium.com"

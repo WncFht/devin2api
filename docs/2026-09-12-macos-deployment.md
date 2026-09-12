@@ -18,7 +18,8 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 - 进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）：停服会先 flush
   日志索引、排空异步写队列，再退出。`ExitTimeOut=60` 给了充足余量。
 - 请求级 debug 日志的生命周期由 `debug.retention_days` /
-  `debug.max_total_mb` 自管；launchd 侧无需额外配置。
+  `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs`
+  自管；launchd 侧无需额外配置。
 
 ## 当前 plist
 

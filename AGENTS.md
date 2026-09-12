@@ -104,7 +104,16 @@
 1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
 2. 读 `logs/<dir>/meta.json`（结果、三段模型、TTFB、token、upstream_request_id）与 `error.json`（首个失败点）。
 3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。
-4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希），`grep` 即可；更早历史被 retention 清理后索引仍在。
+4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希、全部 token 分类），`grep` 即可；更早历史被 retention 清理后索引仍在。
 5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
+
+聚合与生命周期：
+
+- `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、7 天逐小时趋势、最近 4096 条延迟 p50/p95/p99、按模型目录价的估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
+- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）。
+- `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
+- `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
+- `GET /panel/api/requests` 支持结构化筛选（`status_class`/`result`/`model`/`error_stage`/`since`）与 `has_more` 截断信号；`/panel/api/requests/export?format=csv|json` 导出；`/panel/api/requests/{dir}/merged` 把 `06` 的 SSE 帧合并成可读正文。
+- 保留策略分层：`debug.retention_days`（目录整删）与 `debug.max_total_mb`（容量淘汰）之外，`debug.payload_hours` 超时剥离大文件（03/04/06/attachments），`debug.keep_error_dirs` 在容量淘汰时保护最近 N 个含 `error.json` 的失败目录。
 
 注意：请求体可能含用户隐私内容；日志目录与 API 均不落明文凭据（`key_hash` 是 SHA-256 截断），但内容字段未脱敏——对外分享前先读 `meta.json` 再决定是否给全量。
