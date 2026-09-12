@@ -8,6 +8,7 @@ package debuglog
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -766,6 +767,12 @@ func (recorder *Recorder) sanitize(value any) any {
 	var generic any
 	switch value := value.(type) {
 	case json.RawMessage:
+		// 快路径：预筛不敏感即原样透传——记录多为自产 SSE 帧与 proto
+		// 投影，完整 unmarshal+树遍历+marshal 在每条 delta 上是纯开销。
+		// json.Marshal 对 RawMessage 只做空白压缩，wire 语义不变。
+		if !rawNeedsSanitize(value) {
+			return value
+		}
 		if err := json.Unmarshal(value, &generic); err != nil {
 			return map[string]any{"serialization_error": err.Error()}
 		}
@@ -815,14 +822,59 @@ func (recorder *Recorder) sanitizeValue(value any) any {
 	}
 }
 
+// secretKeyNames 是会被脱敏的 JSON 键名（去下划线、小写归一化后的形态）。
+// secretKey 与 rawNeedsSanitize 共用同一份名单，避免两处漂移。
+var secretKeyNames = []string{
+	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
+	"sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password",
+	"clientsecret", "f", "devicefingerprint",
+}
+
+// secretKeyNeedles 是 secretKeyNames 的引号包裹子串形态，供原始字节预筛。
+var secretKeyNeedles = func() [][]byte {
+	needles := make([][]byte, len(secretKeyNames))
+	for i, name := range secretKeyNames {
+		needles[i] = []byte(`"` + name + `"`)
+	}
+	return needles
+}()
+
 func secretKey(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
-	switch normalized {
-	case "authorization", "cookie", "setcookie", "apikey", "accesskey", "token", "sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password", "clientsecret", "f", "devicefingerprint":
-		return true
-	default:
-		return false
+	for _, name := range secretKeyNames {
+		if normalized == name {
+			return true
+		}
 	}
+	return false
+}
+
+// rawNeedsSanitize 预筛 RawMessage 记录：含内联图片或疑似敏感键时才需要
+// 完整的 unmarshal+树遍历脱敏。判定口径与 sanitizeValue 对齐："image/"
+// 子串同时覆盖 data:image/ 值与 {"mime_type":"image/*","data":...} 对象
+// 两种图片形态；键名按小写+去下划线归一后以引号包裹匹配（"token" 不误伤
+// prompt_tokens）。字符串值恰好含同款文本会误进慢路径——宁多检，不漏检。
+func rawNeedsSanitize(data []byte) bool {
+	if bytes.Contains(data, []byte("image/")) {
+		return true
+	}
+	compact := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		if c == '_' {
+			continue
+		}
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		compact = append(compact, c)
+	}
+	for _, needle := range secretKeyNeedles {
+		if bytes.Contains(compact, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (recorder *Recorder) extractImage(value map[string]any) (attachmentReference, bool) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -174,6 +175,15 @@ func escapeXMLText(value string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
+// toolDefinitionCache 以 (name, schema) 缓存 convertToolDefinition 的产物：
+// 同一客户端的工具集逐请求原样重发，strip+normalize 双程是纯重复劳动。
+// 命中返回同一 proto 指针——调用方只 marshal 不修改，共享安全。
+// 条目数超上限时整体清空重建，避免无界增长。
+var toolDefinitionCache = struct {
+	sync.Mutex
+	items map[string]*devinproto.ExaChatPb_ChatToolDefinition
+}{items: make(map[string]*devinproto.ExaChatPb_ChatToolDefinition)}
+
 // convertToolDefinition 保留工具身份和 JSON Schema 约束，仅移除自然语言注释。
 // 工具名先做本地校验：上游实测只接受 [A-Za-z0-9_-]（mcp__a__b 合法，
 // a.b / mcp::x / CJK 全部 invalid_argument: an internal error occurred），
@@ -183,6 +193,13 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 	if !validToolName(tool.Name) {
 		return nil, fmt.Errorf("invalid_argument: tool name %q contains characters outside [A-Za-z0-9_-], which the upstream rejects", tool.Name)
 	}
+	cacheKey := tool.Name + "\x00" + string(tool.InputSchema)
+	toolDefinitionCache.Lock()
+	cached := toolDefinitionCache.items[cacheKey]
+	toolDefinitionCache.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
 	schema, err := stripSchemaAnnotations(tool.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("sanitize Devin tool %q schema: %w", tool.Name, err)
@@ -191,11 +208,18 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 	if err != nil {
 		return nil, fmt.Errorf("normalize Devin tool %q schema: %w", tool.Name, err)
 	}
-	return &devinproto.ExaChatPb_ChatToolDefinition{
+	converted := &devinproto.ExaChatPb_ChatToolDefinition{
 		Name:             proto.String(tool.Name),
 		Description:      proto.String(tool.Name),
 		JsonSchemaString: proto.String(string(schema)),
-	}, nil
+	}
+	toolDefinitionCache.Lock()
+	if len(toolDefinitionCache.items) >= 512 {
+		clear(toolDefinitionCache.items)
+	}
+	toolDefinitionCache.items[cacheKey] = converted
+	toolDefinitionCache.Unlock()
+	return converted, nil
 }
 
 // validToolName 匹配上游实测的工具名字符集。

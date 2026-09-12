@@ -150,10 +150,8 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) []SSEEvent {
 		return nil
 	}
 	state.text.WriteString(event.Delta)
-	return []SSEEvent{encoder.event("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": event.ContentIndex,
-		"delta": map[string]any{"type": "text_delta", "text": event.Delta},
+	return []SSEEvent{encoder.emitBlockDelta(event.ContentIndex, blockDelta{
+		Type: "text_delta", Text: event.Delta,
 	})}
 }
 
@@ -196,10 +194,8 @@ func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent 
 		// 隐藏思考不应把增量正文发出去（上游也不会给正文，但 belt-and-suspenders）。
 		return nil
 	}
-	return []SSEEvent{encoder.event("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": event.ContentIndex,
-		"delta": map[string]any{"type": "thinking_delta", "thinking": event.Delta},
+	return []SSEEvent{encoder.emitBlockDelta(event.ContentIndex, blockDelta{
+		Type: "thinking_delta", Thinking: event.Delta,
 	})}
 }
 
@@ -243,10 +239,8 @@ func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) []SSEEv
 		return []SSEEvent{encoder.stopThinking(state)}
 	}
 	return []SSEEvent{
-		encoder.event("content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": state.index,
-			"delta": map[string]any{"type": "signature_delta", "signature": event.Delta},
+		encoder.emitBlockDelta(state.index, blockDelta{
+			Type: "signature_delta", Signature: event.Delta,
 		}),
 		encoder.stopThinking(state),
 	}
@@ -304,10 +298,8 @@ func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) []SSEEvent {
 		return nil
 	}
 	state.input.WriteString(event.Delta)
-	return []SSEEvent{encoder.event("content_block_delta", map[string]any{
-		"type":  "content_block_delta",
-		"index": event.ContentIndex,
-		"delta": map[string]any{"type": "input_json_delta", "partial_json": event.Delta},
+	return []SSEEvent{encoder.emitBlockDelta(event.ContentIndex, blockDelta{
+		Type: "input_json_delta", PartialJSON: event.Delta,
 	})}
 }
 
@@ -397,6 +389,30 @@ func (encoder *StreamEncoder) block(index int, kind string) *contentBlockState {
 func (encoder *StreamEncoder) event(name string, payload map[string]any) SSEEvent {
 	data, _ := json.Marshal(payload)
 	return SSEEvent{Name: name, Data: data}
+}
+
+// blockDelta 覆盖 content_block_delta 的四种增量形态；各形态键位互斥，
+// omitempty 保证 wire 键集与原 map 逐字节一致。
+type blockDelta struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+}
+
+// blockDeltaEvent 是 content_block_delta 的固定外壳。
+type blockDeltaEvent struct {
+	Type  string     `json:"type"`
+	Index int        `json:"index"`
+	Delta blockDelta `json:"delta"`
+}
+
+// emitBlockDelta 用 struct 编码最高频的 content_block_delta 帧，
+// 省掉每帧 map 反射 marshal。
+func (encoder *StreamEncoder) emitBlockDelta(index int, delta blockDelta) SSEEvent {
+	data, _ := json.Marshal(blockDeltaEvent{Type: "content_block_delta", Index: index, Delta: delta})
+	return SSEEvent{Name: "content_block_delta", Data: data}
 }
 
 // thinkingAt 取 partial 消息中指定下标的思考块。

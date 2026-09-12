@@ -219,8 +219,9 @@ func (encoder *StreamEncoder) reasoningDelta(event llm.ResponseEvent) ([]SSEEven
 		return nil, err
 	}
 	item.value.WriteString(event.Delta)
-	return []SSEEvent{encoder.emit("response.reasoning_summary_text.delta", map[string]any{
-		"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0, "delta": event.Delta,
+	return []SSEEvent{encoder.emitDelta(deltaEvent{
+		Type: "response.reasoning_summary_text.delta", ItemID: item.id, OutputIndex: item.outputIndex,
+		SummaryIndex: new(int), Delta: event.Delta,
 	})}, nil
 }
 
@@ -335,9 +336,9 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, er
 		return nil, err
 	}
 	item.value.WriteString(event.Delta)
-	return []SSEEvent{encoder.emit("response.output_text.delta", map[string]any{
-		"item_id": item.id, "output_index": item.outputIndex, "content_index": item.contentIndex,
-		"delta": event.Delta, "logprobs": []any{},
+	return []SSEEvent{encoder.emitDelta(deltaEvent{
+		Type: "response.output_text.delta", ItemID: item.id, OutputIndex: item.outputIndex,
+		ContentIndex: &item.contentIndex, Delta: event.Delta, Logprobs: []any{},
 	})}, nil
 }
 
@@ -405,8 +406,8 @@ func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent
 	if item.kind == "custom_tool_call" {
 		eventName = "response.custom_tool_call_input.delta"
 	}
-	return []SSEEvent{encoder.emit(eventName, map[string]any{
-		"item_id": item.id, "output_index": item.outputIndex, "delta": event.Delta,
+	return []SSEEvent{encoder.emitDelta(deltaEvent{
+		Type: eventName, ItemID: item.id, OutputIndex: item.outputIndex, Delta: event.Delta,
 	})}, nil
 }
 
@@ -547,6 +548,27 @@ func (encoder *StreamEncoder) emit(name string, payload map[string]any) SSEEvent
 	encoder.sequenceNumber++
 	data, _ := json.Marshal(payload)
 	return SSEEvent{Name: name, Data: data}
+}
+
+// deltaEvent 是高频增量事件的固定编码形态：键集与 emit(map) 产出逐一
+// 对应，但走 struct 编码——省掉每帧一次 map 反射 marshal。omitempty
+// 指针字段保证缺省键不出现，与各事件原 map 键集一致。
+type deltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int64  `json:"sequence_number"`
+	ItemID         string `json:"item_id"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   *int   `json:"content_index,omitempty"`
+	SummaryIndex   *int   `json:"summary_index,omitempty"`
+	Delta          string `json:"delta"`
+	Logprobs       []any  `json:"logprobs,omitempty"`
+}
+
+func (encoder *StreamEncoder) emitDelta(event deltaEvent) SSEEvent {
+	event.SequenceNumber = encoder.sequenceNumber
+	encoder.sequenceNumber++
+	data, _ := json.Marshal(event)
+	return SSEEvent{Name: event.Type, Data: data}
 }
 
 func baseResponse(id string, model string, createdAt int64, status string) map[string]any {

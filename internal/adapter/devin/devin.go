@@ -593,6 +593,8 @@ type responseStream struct {
 	reopen func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error)
 	// newDecoder 重建响应解码器供重试使用；nil 时不可重试。
 	newDecoder func() *responseDecoder
+	// stall 是跨 Recv 复用的静默看门狗计时器；首次等待时创建。
+	stall *time.Timer
 }
 
 // devinResponseReceiver 描述 responseStream 消费 Devin 服务端流所需的最小能力。
@@ -606,10 +608,16 @@ type devinResponseReceiver interface {
 }
 
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
-	// 静默计时器在单次 Recv 的等待循环内复用（Reset 覆盖每帧间隔）；
-	// 跨 Recv 调用不复用。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后
-	// 不会投递陈旧触发。
-	stall := time.NewTimer(upstreamStallTimeout)
+	// 静默计时器挂在流上跨 Recv 复用：每次入等待循环前 Reset 覆盖
+	// 帧间隔。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发，
+	// 已触发（stall.C 分支）的计时器 Reset 重新武装即可。
+	stall := stream.stall
+	if stall == nil {
+		stall = time.NewTimer(upstreamStallTimeout)
+		stream.stall = stall
+	} else {
+		stall.Reset(upstreamStallTimeout)
+	}
 	defer stall.Stop()
 	for len(stream.queue) == 0 && !stream.finished {
 		if err := ctx.Err(); err != nil {
