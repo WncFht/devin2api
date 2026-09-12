@@ -358,6 +358,9 @@ func (application *App) createCompletion(
 	defer func() {
 		recorder.Complete(completion)
 		reqMetrics.Finish(completion.StatusCode, responseBytes)
+		if completion.PrematureEndTurn {
+			slog.Warn("premature end_turn", "dir", debugRef(recorder), "model", completion.Model)
+		}
 		slog.Info("request",
 			"api", api, "method", request.Method, "path", request.URL.Path,
 			"status", completion.StatusCode, "result", completion.Result,
@@ -411,7 +414,7 @@ func (application *App) createCompletion(
 		writeLoggedError(writer, recorder, "response_event", completion.StatusCode, err)
 		return
 	}
-	updateCompletionIdentity(&completion, message)
+	updateCompletionIdentity(&completion, messages, message)
 	body, err = protocol.EncodeFinal(message)
 	if err != nil {
 		completion.StatusCode = http.StatusInternalServerError
@@ -597,7 +600,7 @@ func (application *App) streamCompletion(
 
 	completion.StatusCode = http.StatusOK
 	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, messages.Model, options, prelude, firstErr)
-	updateCompletionIdentity(completion, message)
+	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {
 		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
@@ -723,7 +726,7 @@ func eventMessage(event llm.ResponseEvent, fallback *llm.AssistantMessage) *llm.
 	return fallback
 }
 
-func updateCompletionIdentity(completion *debuglog.Completion, message *llm.AssistantMessage) {
+func updateCompletionIdentity(completion *debuglog.Completion, messages llm.RequestMessages, message *llm.AssistantMessage) {
 	if message == nil {
 		return
 	}
@@ -731,6 +734,7 @@ func updateCompletionIdentity(completion *debuglog.Completion, message *llm.Assi
 	completion.UpstreamRequestID = message.UpstreamRequestID
 	completion.Usage = message.Usage
 	completion.ResponseModel = message.ResponseModel
+	completion.PrematureEndTurn = prematureEndTurn(messages, message)
 	// 上游声明的模型与实际下发的 uid 不一致时记错配——路由/重定向排障信号。
 	if message.ResponseModel != "" && message.Model != "" && message.ResponseModel != message.Model {
 		completion.ModelMismatch = true
@@ -740,6 +744,23 @@ func updateCompletionIdentity(completion *debuglog.Completion, message *llm.Assi
 	} else if message.Model != "" {
 		completion.Model = message.Model
 	}
+}
+
+// prematureEndTurn 识别可疑的正常收尾：请求最后一条输入是工具结果，
+// 模型却以无工具调用的 end_turn 结束。该形态结构上合法（可能真是
+// 最终答复），但实测存在模型声称继续动作后直接 EOS 的故障模式
+// （docs/2026-09-12-premature-endturn.md），记入日志供统计真实频率。
+func prematureEndTurn(messages llm.RequestMessages, message *llm.AssistantMessage) bool {
+	if message.StopReason != llm.StopReasonStop || len(messages.Messages) == 0 {
+		return false
+	}
+	for _, block := range message.Content {
+		if block.ContentType() == llm.ContentTypeToolCall {
+			return false
+		}
+	}
+	_, ok := messages.Messages[len(messages.Messages)-1].(llm.ToolResultMessage)
+	return ok
 }
 
 // clientIP 提取下游客户端地址；WebSocket 内部请求已透传 RemoteAddr。

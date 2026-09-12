@@ -50,6 +50,9 @@ type IndexEntry struct {
 	// 让 grep 直接定位失败发生在哪一层。
 	ErrorStage    string `json:"error_stage,omitempty"`
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
+	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
+	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
+	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
 }
 
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
@@ -94,6 +97,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		ClientRequestID:   recorder.requestMeta.ClientRequestID,
 		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
+		PrematureEndTurn:  completion.PrematureEndTurn,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {

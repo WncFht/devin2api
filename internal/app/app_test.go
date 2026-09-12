@@ -187,6 +187,83 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 }
 
+// TestPrematureEndTurnFlagged 的测试动机是观测「工具结果之后模型纯文本
+// end_turn」的可疑收尾：结构合法但实测存在模型声称继续动作后直接 EOS
+// 的故障形态，meta/index 需要可检索的标记来统计真实频率。
+func TestPrematureEndTurnFlagged(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventDone,
+		Reason: llm.StopReasonStop,
+		Message: &llm.AssistantMessage{
+			ResponseModel: "gpt-test", StopReason: llm.StopReasonStop,
+			Content: []llm.Content{llm.TextContent{Text: "done"}},
+		},
+	}}}
+	root := filepath.Join(t.TempDir(), "logs")
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},
+		{"type":"function_call","call_id":"call-1","name":"exec","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call-1","output":"file.txt"}
+	]}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, entries[0].Name())
+	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(meta), `"premature_end_turn": true`) {
+		t.Fatalf("meta = %s, want premature_end_turn", meta)
+	}
+	index, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `"premature_end_turn":true`) {
+		t.Fatalf("index = %s, want premature_end_turn", index)
+	}
+}
+
+// TestPrematureEndTurnNotFlaggedForUserInput 验证普通用户输入后的正常
+// 收尾不触发标记——标记只统计工具结果结尾的可疑形态。
+func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventDone,
+		Reason: llm.StopReasonStop,
+		Message: &llm.AssistantMessage{
+			ResponseModel: "gpt-test", StopReason: llm.StopReasonStop,
+			Content: []llm.Content{llm.TextContent{Text: "done"}},
+		},
+	}}}
+	root := filepath.Join(t.TempDir(), "logs")
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := os.ReadFile(filepath.Join(root, entries[0].Name(), "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(meta), "premature_end_turn") {
+		t.Fatalf("meta = %s, want no premature_end_turn", meta)
+	}
+}
+
 // TestResponsesHandlerMarksStreamError 的测试动机是避免已输出失败 SSE 的请求被误记为成功。
 func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "upstream failed"}

@@ -115,6 +115,10 @@ type Completion struct {
 	UpstreamRequestID string
 	// Usage 是上游报告的最终 token 用量；失败或未上报时为零值。
 	Usage llm.Usage
+	// PrematureEndTurn 标记可疑的正常收尾：请求以工具结果结尾、
+	// 模型却返回无工具调用的 end_turn。实测存在模型声称要继续动作
+	// 后直接 EOS 的故障形态；该标记仅用于观测统计，不改变响应。
+	PrematureEndTurn bool
 }
 
 // Recorder 保存单次请求的目录、开始时间和异步写队列。
@@ -700,6 +704,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		}
 		if completion.ModelMismatch {
 			meta["model_mismatch"] = true
+		}
+		if completion.PrematureEndTurn {
+			meta["premature_end_turn"] = true
 		}
 		if completion.UpstreamRequestID != "" {
 			meta["upstream_request_id"] = completion.UpstreamRequestID
