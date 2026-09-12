@@ -47,6 +47,16 @@ type Request struct {
 	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
+// responsesRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
+// （reasoning/store/service_tier/include/previous_response_id 等）上游
+// 没有对应物，记入 Dropped 透出而不是静默吞掉。
+var responsesRequestFields = map[string]bool{
+	"model": true, "instructions": true, "input": true, "tools": true,
+	"stream": true, "max_output_tokens": true, "temperature": true,
+	"top_p": true, "user": true, "prompt_cache_key": true,
+	"tool_choice": true, "parallel_tool_calls": true,
+}
+
 // Tool 是 OpenAI Responses function 工具定义。
 type Tool struct {
 	// Type 固定为 function。
@@ -91,6 +101,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model, SystemPrompt: request.Instructions}
+	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, responsesRequestFields)...)
 	if request.MaxOutputTokens != nil && *request.MaxOutputTokens > 0 {
 		context.MaxTokens = request.MaxOutputTokens
 	}

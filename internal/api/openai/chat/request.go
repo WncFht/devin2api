@@ -77,6 +77,17 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
+// chatRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
+// （reasoning_effort/store/service_tier/metadata/response_format 等）
+// 上游没有对应物，记入 Dropped 透出而不是静默吞掉。
+var chatRequestFields = map[string]bool{
+	"model": true, "messages": true, "tools": true, "tool_choice": true,
+	"stream": true, "stream_options": true, "max_tokens": true,
+	"max_completion_tokens": true, "temperature": true, "top_p": true,
+	"stop": true, "top_k": true, "seed": true, "user": true,
+	"prompt_cache_key": true, "parallel_tool_calls": true, "n": true,
+}
+
 // AdaptedRequest 是 Chat 请求转换后的中间请求和生成选项。
 type AdaptedRequest struct {
 	Context llm.RequestMessages
@@ -106,6 +117,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model}
+	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
 	maxTokensValue := request.MaxCompletionTokens
 	if maxTokensValue == nil {
 		maxTokensValue = request.MaxTokens
