@@ -21,8 +21,9 @@ type protocolEncoder interface {
 	// EncodeError 把错误编码为该协议形状的错误 JSON 体——非流式心跳
 	// 已提交 200 后，错误只能以错误体下发，形状按客户端协议决定。
 	EncodeError(err error, debugRef string) []byte
-	// SSEFormat 把单个 SSE 事件格式化为可写入客户端的字节。
-	SSEFormat(name string, data []byte) []byte
+	// AppendSSE 把单个 SSE 事件追加编码到 dst；写方持有 dst 的所有权，
+	// 避免每帧先分配临时切片再整体拷贝进批次缓冲。
+	AppendSSE(dst []byte, name string, data []byte) []byte
 }
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
@@ -67,8 +68,8 @@ func (p responsesProtocol) EncodeError(err error, debugRef string) []byte {
 	return openAIErrorBody(err, debugRef)
 }
 
-func (p responsesProtocol) SSEFormat(name string, data []byte) []byte {
-	return fmt.Appendf(nil, "event: %s\ndata: %s\n\n", name, data)
+func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
+	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
 }
 
 // chatProtocol 实现 OpenAI Chat Completions 协议。
@@ -86,12 +87,12 @@ func (p chatProtocol) EncodeError(err error, debugRef string) []byte {
 	return openAIErrorBody(err, debugRef)
 }
 
-func (p chatProtocol) SSEFormat(name string, data []byte) []byte {
+func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	// OpenAI Chat Completions 使用 data-only SSE；[DONE] 作为流终止标记。
 	if name == "[DONE]" {
-		return []byte("data: [DONE]\n\n")
+		return append(dst, "data: [DONE]\n\n"...)
 	}
-	return fmt.Appendf(nil, "data: %s\n\n", data)
+	return fmt.Appendf(dst, "data: %s\n\n", data)
 }
 
 // anthropicProtocol 实现 Anthropic Messages 协议。
@@ -120,8 +121,8 @@ func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
 	return body
 }
 
-func (p anthropicProtocol) SSEFormat(name string, data []byte) []byte {
-	return fmt.Appendf(nil, "event: %s\ndata: %s\n\n", name, data)
+func (p anthropicProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
+	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
 }
 
 // decodeRequest 把具体协议的解码结果统一为中间请求和公共选项。

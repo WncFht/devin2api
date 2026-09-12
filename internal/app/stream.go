@@ -227,7 +227,9 @@ func writeProtocolStream(
 			return nil
 		}
 		data := batch
-		batch = nil
+		// ResponseWriter.Write 不保留切片——写完后底层数组可复用，
+		// 批次缓冲在整条流上只分配一次并随压力增长。
+		batch = batch[:0]
 		return out.writeContent(data)
 	}
 	for {
@@ -284,7 +286,7 @@ func writeProtocolStream(
 			return latest, encodeErr
 		}
 		for _, encoded := range encodedEvents {
-			batch = append(batch, protocol.SSEFormat(encoded.Name, encoded.Data)...)
+			batch = protocol.AppendSSE(batch, encoded.Name, encoded.Data)
 			if encoded.Name == "[DONE]" {
 				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
 			} else {
