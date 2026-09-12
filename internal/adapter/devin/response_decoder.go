@@ -413,9 +413,12 @@ func (decoder *responseDecoder) decodeLateSignature(response *devinproto.GetChat
 	}
 	decoder.partial.Content = append(decoder.partial.Content, thinking)
 	index := len(decoder.partial.Content) - 1
+	// 事件共享同一 Partial 指针，编码器在 start/end 边界就会读到块内签名；
+	// 再发 thinking_signature 会与之叠加翻倍，且合成块永远没有 thinking_end，
+	// 只发签名事件会让编码器侧的 item 悬挂到流终止报错。
 	return []llm.ResponseEvent{
 		{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: &decoder.partial},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: index, Delta: signature, Partial: &decoder.partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: index, Partial: &decoder.partial},
 	}
 }
 
