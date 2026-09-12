@@ -35,7 +35,15 @@ cp config.example.yaml config.yaml
 
 ### 3. 启动
 
-本地运行：
+预编译二进制（见 [Releases](https://github.com/WncFht/devin2api/releases)，附 `checksums.txt` 可校验）：
+
+```bash
+curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/devin-2api-darwin-arm64
+chmod +x devin-2api-darwin-arm64
+./devin-2api-darwin-arm64 -config config.yaml
+```
+
+源码运行：
 
 ```bash
 go run ./cmd/devin-2api -config config.yaml

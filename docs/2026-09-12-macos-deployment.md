@@ -79,8 +79,10 @@ tail -f logs/stderr.log                                                       # 
 ## 升级流程
 
 ```bash
-scripts/deploy.sh                # 构建 → 替换二进制 → kickstart → 校验 healthz 版本
-scripts/deploy.sh --no-restart   # 只构建替换，不重启
+scripts/deploy.sh                    # 构建 → 替换二进制 → kickstart → 校验 healthz 版本
+scripts/deploy.sh --no-restart       # 只构建替换，不重启
+scripts/deploy.sh --release v0.2.0   # 下载 GitHub Release 预编译二进制（sha256 校验）后替换
+scripts/deploy.sh --release latest   # 同上，装最新 release
 ```
 
 脚本做四件事：以 `git describe --tags --always --dirty` 注入

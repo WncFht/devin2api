@@ -32,9 +32,69 @@ jobs:
       - name: Test
         run: go test ./...
 
-  publish:
-    name: Publish Docker image
+  binaries:
+    name: Build ${{ matrix.asset }}
     needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            asset: devin-2api-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            asset: devin-2api-darwin-arm64
+          - goos: linux
+            goarch: amd64
+            asset: devin-2api-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset: devin-2api-linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install protoc toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
+          go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Generate proto bindings
+        run: task generate
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "dist/${{ matrix.asset }}" ./cmd/devin-2api
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish Docker image + release
+    needs: [test, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,7 +160,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum devin-2api-* | sort -k2 > checksums.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/devin-2api-*
+            dist/checksums.txt

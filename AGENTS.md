@@ -92,7 +92,7 @@
 
 ## 版本与发布
 
-- 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入，`scripts/deploy.sh` 本机升级、`scripts/release.sh` 发版（先 dry-run 再 `--publish`）。
+- 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入，`scripts/deploy.sh` 本机升级（`--release <tag>` 可装预编译二进制）、`scripts/release.sh` 发版（先 dry-run 再 `--publish`）。
 - tag 只打在已推送 `origin/main` 且 CI 绿的提交上；0.x 阶段 feat/破坏性变更升 minor、其余升 patch。`latest` 镜像 tag 只跟随稳定版。
 
 # 服务排障（对运行中的实例）

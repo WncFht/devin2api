@@ -35,7 +35,15 @@ Edit `config.yaml` and fill in your token (starting from `config.example.yaml`, 
 
 ### 3. Run
 
-Local:
+Prebuilt binary (from [Releases](https://github.com/WncFht/devin2api/releases), `checksums.txt` attached for verification):
+
+```bash
+curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/devin-2api-darwin-arm64
+chmod +x devin-2api-darwin-arm64
+./devin-2api-darwin-arm64 -config config.yaml
+```
+
+From source:
 
 ```bash
 go run ./cmd/devin-2api -config config.yaml
