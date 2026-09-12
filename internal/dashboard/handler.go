@@ -102,9 +102,16 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/panel/api/models", h.apiModels)
 	mux.Get("/panel/api/stats", h.apiStats)
 	mux.Get("/panel/api/requests", h.apiRequests)
+	mux.Get("/panel/api/requests/export", h.apiExportRequests)
 	mux.Get("/panel/api/requests/active", h.apiActiveRequests)
 	mux.Get("/panel/api/requests/{dir}", h.apiRequestDetail)
+	mux.Get("/panel/api/requests/{dir}/merged", h.apiMergedResponse)
 	mux.Get("/panel/api/requests/{dir}/file/*", h.apiRequestFile)
+	mux.Post("/panel/api/requests/{dir}/abort", h.apiAbortRequest)
+	mux.Get("/panel/api/logs", h.apiProcessLog)
+	mux.Get("/panel/api/quota", h.apiQuota)
+	mux.Get("/panel/api/usage", h.apiUsage)
+	mux.Post("/panel/api/debug/toggle", h.apiDebugToggle)
 }
 
 // apiStats 返回代理自身运行指标：请求计数、错误分类、流式占比、字节量，
@@ -119,6 +126,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.debugManager != nil {
 		payload["debuglog"] = h.debugManager.Stats()
+		payload["usage"] = h.debugManager.UsageStats()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
@@ -137,11 +145,18 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 		"endpoints": []map[string]string{
 			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警"},
 			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
-			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标 + 60 分钟逐分钟趋势 + 日志管道自观测"},
-			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=", "description": "最近请求（新在前）；q 匹配 dir/api/模型/路径/结果/上游ID/IP/key哈希"},
-			{"method": "GET", "path": "/panel/api/requests/active", "description": "进行中请求活快照：耗时、已写文件、丢弃数"},
+			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐分钟趋势 + 日志管道自观测 + index 聚合用量"},
+			{"method": "GET", "path": "/panel/api/usage", "description": "index.jsonl 聚合：今日/窗口累计、按模型/按 key、错误阶段、7 天逐小时趋势、p50/p95/p99、目录价估算成本"},
+			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=&status_class=&result=&model=&error_stage=&since=", "description": "最近请求（新在前）；q 子串或结构化过滤，has_more 提示窗口外仍有历史"},
+			{"method": "GET", "path": "/panel/api/requests/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSONL）"},
+			{"method": "GET", "path": "/panel/api/requests/active", "description": "进行中请求活快照：阶段状态、模型、已下发字节、已写文件、丢弃数"},
 			{"method": "GET", "path": "/panel/api/requests/{dir}", "description": "单请求 meta.json + 文件清单"},
+			{"method": "GET", "path": "/panel/api/requests/{dir}/merged", "description": "把 06-http-response.jsonl 的 SSE 帧合并成可读的最终响应"},
 			{"method": "GET", "path": "/panel/api/requests/{dir}/file/{name}", "description": "读取请求目录内文件（顶层或 attachments/），超 4MB 截断"},
+			{"method": "POST", "path": "/panel/api/requests/{dir}/abort", "description": "中断进行中请求（取消 ctx）；无活跃请求时 404"},
+			{"method": "GET", "path": "/panel/api/logs?offset=", "description": "进程 stderr 日志尾部；offset>0 增量拉取，响应带 next_offset"},
+			{"method": "GET", "path": "/panel/api/quota", "description": "配额历史快照（logs/quota.jsonl）+ 按燃烧速率外推的耗尽时间"},
+			{"method": "POST", "path": "/panel/api/debug/toggle", "description": "请求日志运行时开关；body {\"enabled\":true|false}"},
 		},
 		"debug_workflow": []string{
 			"每个 /v1/* 响应带 X-Request-Id 头（=调试目录名）；错误体含 debug_ref 与 stage 字段",
@@ -156,8 +171,8 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 const requestsFetchCap = 2000
 
 // apiRequests 返回 index.jsonl 中的最近请求（新的在前），供面板列表和
-// agent 检索。支持 ?limit=&offset= 分页与 ?q= 子串过滤
-// （匹配目录名/模型/路径/upstream_request_id/client_ip/key_hash）。
+// agent 检索。?limit=&offset= 分页；过滤走结构化参数
+// ?q= 子串、?status_class=2xx|4xx|5xx、?result=、?model=、?error_stage=、?since=RFC3339。
 func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
@@ -167,25 +182,11 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"requests":[],"disabled":true}`))
 		return
 	}
-	entries := h.debugManager.ListRequests(requestsFetchCap)
-	query := strings.ToLower(r.URL.Query().Get("q"))
-	if query != "" {
-		filtered := entries[:0]
-		for _, entry := range entries {
-			haystack := strings.ToLower(strings.Join([]string{
-				entry.Dir, entry.API, entry.Path, entry.Result,
-				entry.RequestedModel, entry.Model, entry.ResponseModel,
-				entry.UpstreamRequestID, entry.ClientIP, entry.KeyHash,
-			}, " "))
-			if strings.Contains(haystack, query) {
-				filtered = append(filtered, entry)
-			}
-		}
-		entries = filtered
-	}
+	result := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query()))
+	entries := result.Entries
 	total := len(entries)
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(params.Get("offset"))
+	limit, _ := strconv.Atoi(params.Get("limit"))
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
@@ -204,7 +205,189 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 		"total":    total,
 		"offset":   offset,
 		"limit":    limit,
+		"has_more": result.HasMore,
 	})
+}
+
+// parseRequestFilter 从查询串构建结构化筛选；q 为子串，其余为精确条件。
+func parseRequestFilter(params map[string][]string) debuglog.RequestFilter {
+	get := func(key string) string {
+		if values := params[key]; len(values) > 0 {
+			return values[0]
+		}
+		return ""
+	}
+	filter := debuglog.RequestFilter{
+		Query:       get("q"),
+		StatusClass: get("status_class"),
+		Result:      get("result"),
+		Model:       get("model"),
+		ErrorStage:  get("error_stage"),
+	}
+	if since := get("since"); since != "" {
+		if parsed, err := time.Parse(time.RFC3339, since); err == nil {
+			filter.Since = parsed
+		}
+	}
+	return filter
+}
+
+// apiExportRequests 把筛选后的请求摘要导出为 JSON 数组或 CSV。
+func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		return
+	}
+	entries := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query())).Entries
+	if r.URL.Query().Get("format") == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="requests.csv"`)
+		writeRequestsCSV(w, entries)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
+func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
+	out := bufio.NewWriter(w)
+	defer out.Flush()
+	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage\n")
+	for _, e := range entries {
+		firstUpstream, firstClient := "", ""
+		if e.FirstUpstreamMS != nil {
+			firstUpstream = strconv.FormatInt(*e.FirstUpstreamMS, 10)
+		}
+		if e.FirstClientMS != nil {
+			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
+		}
+		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s\n",
+			e.Dir, e.StartedAt, e.Method, csvEscape(e.Path), e.API, e.Model, e.RequestedModel, e.ResponseModel,
+			e.StatusCode, e.Result, e.DurationMS, firstUpstream, firstClient,
+			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
+			e.Stream, e.KeyHash, e.ClientRequestID, e.ErrorStage)
+	}
+}
+
+// csvEscape 转义含逗号/引号/换行的字段。
+func csvEscape(s string) string {
+	if !strings.ContainsAny(s, ",\"\n") {
+		return s
+	}
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// apiUsage 返回 index.jsonl 聚合快照，并按模型目录价附估算成本。
+// 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
+func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		_, _ = w.Write([]byte(`{"disabled":true}`))
+		return
+	}
+	snap := h.debugManager.UsageStats()
+	prices := h.modelPriceMap(r.Context())
+	var totalCost float64
+	models := make([]map[string]any, 0, len(snap.Models))
+	for _, m := range snap.Models {
+		row := map[string]any{
+			"name": m.Name, "requests": m.Requests, "errors": m.Errors, "disconnected": m.Disconnected,
+			"input_tokens": m.Input, "output_tokens": m.Output,
+			"cache_read_tokens": m.CacheRead, "cache_write_tokens": m.CacheWrite,
+			"reasoning_tokens": m.Reasoning, "total_tokens": m.TotalTokens,
+			"avg_duration_ms": m.AvgDuration, "avg_ttfb_ms": m.AvgTTFB,
+			"success_rate": m.SuccessRate, "last_result": m.LastResult, "last_at": m.LastAt,
+		}
+		if p, ok := prices[m.Name]; ok {
+			cost := (float64(m.Input)*p.input + float64(m.CacheRead)*p.cached + float64(m.Output)*p.output) / 1e6
+			row["est_cost"] = cost
+			totalCost += cost
+		}
+		models = append(models, row)
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"snapshot":      snap,
+		"models":        models,
+		"est_cost":      totalCost,
+		"cost_basis":    "catalog price per 1M tokens (estimate, not invoice)",
+		"price_missing": len(prices) == 0,
+	})
+}
+
+// modelPriceMap 从模型目录缓存取 uid → 三类 token 单价（$/1M）。
+func (h *Handler) modelPriceMap(ctx context.Context) map[string]struct {
+	input, cached, output float64
+} {
+	type price struct{ input, cached, output float64 }
+	out := map[string]price{}
+	models, err := h.cachedModels(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, m := range models {
+		uid, _ := m["uid"].(string)
+		if uid == "" {
+			continue
+		}
+		out[uid] = price{
+			input:  floatAny(m["price_input"]),
+			cached: floatAny(m["price_cached"]),
+			output: floatAny(m["price_output"]),
+		}
+	}
+	return out
+}
+
+// apiDebugToggle 运行时切换请求日志开关；body {"enabled":bool}。
+func (h *Handler) apiDebugToggle(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled at startup"}`))
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"body must be {\"enabled\":bool}"}`))
+		return
+	}
+	h.debugManager.SetEnabled(*body.Enabled)
+	_ = json.NewEncoder(w).Encode(map[string]any{"enabled": h.debugManager.Enabled()})
+}
+
+// apiMergedResponse 把请求目录内 06-http-response.jsonl 的 SSE 帧合并成
+// 可读的最终响应文本（ccLoad merge-debug-response 同款），原始帧仍可读。
+func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		return
+	}
+	data, _, _, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), "06-http-response.jsonl")
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"response stream file not found"}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(mergeStreamEvents(data))
 }
 
 // apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、
@@ -264,6 +447,45 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 		"size":      total,
 		"truncated": truncated,
 		"text":      string(data),
+	})
+}
+
+// apiAbortRequest 中断一个仍在进行中的请求（取消其 ctx，客户端看到连接断开）。
+// 给 agent 提供中止卡死请求的手段；已完结或不存在的目录返回 404。
+func (h *Handler) apiAbortRequest(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil || !h.debugManager.Abort(chi.URLParam(r, "dir")) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"no active request for dir"}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"aborted": true})
+}
+
+// apiProcessLog 返回进程 stderr 日志尾部（slog 行），支持 ?offset= 增量拉取。
+func (h *Handler) apiProcessLog(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		return
+	}
+	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
+	data, next, err := h.debugManager.ReadProcessLog(offset)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"process log unavailable"}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"text":        string(data),
+		"next_offset": next,
 	})
 }
 

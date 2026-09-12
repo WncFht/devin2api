@@ -28,7 +28,7 @@ func newTestPanel(t *testing.T, password string, manager *debuglog.Manager) http
 // TestPanelRequestsEndpoints 验证请求列表、详情与文件端点的完整链路。
 func TestPanelRequestsEndpoints(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := debuglog.NewManager(root, 0, 0)
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{})
 	defer manager.Close()
 	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 	recorder.WriteJSON("03-devin-request.json", map[string]any{"model": "swe-2-max"})
