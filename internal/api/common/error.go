@@ -98,30 +98,24 @@ func IsContextLengthError(message string) bool {
 func HTTPStatus(message string) int {
 	switch {
 	case strings.Contains(message, "invalid_argument"),
-		strings.HasPrefix(message, "invalid_argument:"),
-		strings.Contains(message, "failed_precondition"),
-		strings.HasPrefix(message, "failed_precondition:"):
+		strings.Contains(message, "failed_precondition"):
 		// failed_precondition 实测是请求形状/前置状态问题（如非 CASCADE
 		// request_type 缺真实会话），与 invalid_argument 同属调用方可修正。
 		if IsContextLengthError(message) {
 			return http.StatusRequestEntityTooLarge
 		}
 		return http.StatusBadRequest
-	case strings.Contains(message, "unauthenticated"),
-		strings.HasPrefix(message, "unauthenticated:"):
+	case strings.Contains(message, "unauthenticated"):
 		return http.StatusUnauthorized
-	case strings.Contains(message, "permission_denied"),
-		strings.HasPrefix(message, "permission_denied:"):
+	case strings.Contains(message, "permission_denied"):
 		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
 		// permission_denied。这三类都是调用方可修正的请求错误，
 		// 归一成 400 而不是 403：下游网关（如 ccload）对 4xx 只按
 		// 模型作用域冷却，不会把整个渠道标记为失效。
 		return http.StatusBadRequest
-	case strings.Contains(message, "not_found"),
-		strings.HasPrefix(message, "not_found:"):
+	case strings.Contains(message, "not_found"):
 		return http.StatusNotFound
-	case strings.Contains(message, "resource_exhausted"),
-		strings.HasPrefix(message, "resource_exhausted:"):
+	case strings.Contains(message, "resource_exhausted"):
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusBadGateway

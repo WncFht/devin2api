@@ -65,7 +65,7 @@ func defaultTransport(forceHTTP1 bool) *http.Transport {
 	// 支持上游长时思考/排队，设置为 600 秒。
 	transport.ResponseHeaderTimeout = 600 * time.Second
 	transport.ExpectContinueTimeout = 1 * time.Second
-	// 启用压缩，减少上行带宽占用。
+	// 允许响应 gzip 解压（DisableCompression 只管下行，不影响上行 body）。
 	transport.DisableCompression = false
 	if forceHTTP1 {
 		// 强制 HTTP/1.1：每请求独立 TCP 连接（连接池复用空闲连接），

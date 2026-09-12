@@ -17,13 +17,11 @@ type SSEEvent = common.SSEEvent
 
 // StreamEncoder 保存一次 Anthropic Messages 流的协议状态。
 type StreamEncoder struct {
-	model      string
-	messageID  string
-	finished   bool
-	index      int
-	blocks     []*contentBlockState
-	usage      llm.Usage
-	blockIndex int
+	model     string
+	messageID string
+	finished  bool
+	blocks    []*contentBlockState
+	usage     llm.Usage
 }
 
 type contentBlockState struct {
@@ -43,9 +41,8 @@ type contentBlockState struct {
 // NewStreamEncoder 为一次 Anthropic Messages 流创建编码状态。
 func NewStreamEncoder(model string) *StreamEncoder {
 	return &StreamEncoder{
-		model:      model,
-		messageID:  randid.Prefixed("msg_"),
-		blockIndex: -1,
+		model:     model,
+		messageID: randid.Prefixed("msg_"),
 	}
 }
 
@@ -135,7 +132,6 @@ func (encoder *StreamEncoder) start(event llm.ResponseEvent) []SSEEvent {
 }
 
 func (encoder *StreamEncoder) startText(event llm.ResponseEvent) []SSEEvent {
-	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "text"}
 	encoder.blocks = append(encoder.blocks, state)
 	events := encoder.flushPendingThinking()
@@ -176,7 +172,6 @@ func (encoder *StreamEncoder) endText(event llm.ResponseEvent) []SSEEvent {
 }
 
 func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent {
-	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "thinking"}
 	encoder.blocks = append(encoder.blocks, state)
 	events := encoder.flushPendingThinking()
@@ -271,7 +266,6 @@ func (encoder *StreamEncoder) stopThinking(state *contentBlockState) SSEEvent {
 }
 
 func (encoder *StreamEncoder) startToolUse(event llm.ResponseEvent) []SSEEvent {
-	encoder.blockIndex = event.ContentIndex
 	state := &contentBlockState{index: event.ContentIndex, kind: "tool_use", toolID: event.ToolCallID, toolName: event.ToolName}
 	encoder.blocks = append(encoder.blocks, state)
 	events := encoder.flushPendingThinking()

@@ -445,8 +445,9 @@ type devinResponseReceiver interface {
 }
 
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
-	// 静默计时器逐帧复用：一条流可产出数千帧，每帧 NewTimer 是无谓分配。
-	// Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发。
+	// 静默计时器在单次 Recv 的等待循环内复用（Reset 覆盖每帧间隔）；
+	// 跨 Recv 调用不复用。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后
+	// 不会投递陈旧触发。
 	stall := time.NewTimer(upstreamStallTimeout)
 	defer stall.Stop()
 	for len(stream.queue) == 0 && !stream.finished {

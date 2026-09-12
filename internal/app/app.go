@@ -353,11 +353,6 @@ func (application *App) createCompletion(
 			"cache_read_tokens", completion.Usage.CacheRead)
 	}()
 
-	if application.adapter == nil {
-		completion.StatusCode = http.StatusServiceUnavailable
-		writeLoggedError(writer, recorder, "provider_configuration", completion.StatusCode, errors.New("provider adapter is not configured"))
-		return
-	}
 	// 图片 base64 会显著放大 JSON；与常见 IDE 多图请求对齐到 32MiB。
 	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
 	if err != nil {
@@ -571,9 +566,6 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 // mapProviderErrorStatus 将上游/适配器错误映射为合适的 HTTP 状态，message 仍原样透传。
 // Connect 编码的上游错误交给 common.HTTPStatus；本地适配器产生的错误先按内容匹配。
 func mapProviderErrorStatus(err error) int {
-	if err == nil {
-		return http.StatusBadGateway
-	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "does not support image"),

@@ -26,7 +26,6 @@ type StreamEncoder struct {
 	textStarted     bool
 	thinkingIndex   int
 	thinkingStarted bool
-	toolIndex       int
 	toolCalls       []*toolCallState
 	finished        bool
 	finalUsage      llm.Usage
@@ -38,7 +37,6 @@ type toolCallState struct {
 	id        string
 	name      string
 	arguments strings.Builder
-	done      bool
 }
 
 // NewStreamEncoder 为一次 Chat Completions 流创建编码状态。
@@ -234,7 +232,6 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) []SSEEvent {
 	if state == nil {
 		return nil
 	}
-	state.done = true
 	if event.ToolCall != nil {
 		state.id = event.ToolCall.ID
 		state.name = event.ToolCall.Name
