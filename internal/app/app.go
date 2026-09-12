@@ -148,7 +148,7 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 		"status":         "ok",
 		"version":        application.version,
 		"uptime_seconds": int64(time.Since(application.startedAt).Seconds()),
-		"debug_logging":  application.debugManager != nil,
+		"debug_logging":  application.debugManager.Enabled(),
 	})
 }
 

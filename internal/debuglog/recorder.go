@@ -218,6 +218,10 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 	if root == "" {
 		return manager
 	}
+	// 提前建好根目录：quota.jsonl/stderr.log 等顶层文件不经过 Start() 的惰性建目录。
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		slog.Warn("debuglog: create log root failed", "root", root, "error", err)
+	}
 	if parsed := manager.usage.replayIndex(filepath.Join(root, "index.jsonl")); parsed > 0 {
 		slog.Info("debuglog: replayed request index", "entries", parsed)
 	}

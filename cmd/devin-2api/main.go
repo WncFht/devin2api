@@ -65,17 +65,17 @@ func main() {
 		}
 		providerAdapter = configured
 	}
-	var debugManager *debuglog.Manager
+	// 管理器总是创建：enabled 只控制新请求是否写目录，历史查询、
+	// 用量回放、清理与配额采样不随开关停掉，面板也可运行时热切换。
 	logRoot := filepath.Join(filepath.Dir(absoluteConfigPath), "logs")
-	if serviceConfig.Debug.Enabled {
-		debugManager = debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
-			Days:          *serviceConfig.Debug.RetentionDays,
-			MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
-			PayloadHours:  *serviceConfig.Debug.PayloadHours,
-			KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
-		})
-		defer debugManager.Close()
-	}
+	debugManager := debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
+		Days:          *serviceConfig.Debug.RetentionDays,
+		MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
+		PayloadHours:  *serviceConfig.Debug.PayloadHours,
+		KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
+	})
+	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
+	defer debugManager.Close()
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(version)
