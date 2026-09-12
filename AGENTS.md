@@ -86,6 +86,6 @@
 
 - `docs/` 下顶层带日期的笔记必须使用 `YYYY-MM-DD-<slug>.md` 格式；不要使用 `article.md`、`周报.md` 或 `*.zh.md` 这类别名。
 
-## Markdown 工具链
+## 格式化工具链
 
-`*.md` 提交会走 pre-commit：autocorrect → markdownlint-cli2 --fix → prettier，版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。hook 改写文件时会 fail 一次，重新 `git add` 再提交。
+`*.md` 提交会走 pre-commit：autocorrect → markdownlint-cli2 --fix → prettier（经 git-format-staged 只写 index，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。autocorrect/markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。

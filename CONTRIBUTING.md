@@ -80,7 +80,8 @@ go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
 ```
 
-- Markdown toolchain (only needed when touching `*.md`): `npm install` pins prettier + markdownlint-cli2 from `package.json`, `brew install autocorrect`, then `pre-commit install` — commits run autocorrect → markdownlint --fix → prettier in that order
+- Formatting toolchain: `npm install` pins prettier/markdownlint-cli2/git-format-staged from `package.json`, `brew install autocorrect`, then `pre-commit install` — commits run autocorrect → markdownlint --fix → prettier on `*.md`, and gofmt on `*.go`; prettier/gofmt rewrite only the staged content in the index, never the working tree. Manual checks: `npm run format:check` / `npm run lint:md`
+- Run once so `git blame` skips the mass-format commit: `git config blame.ignoreRevsFile .git-blame-ignore-revs`
 
 ## Common commands
 

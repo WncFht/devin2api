@@ -1,0 +1,4 @@
+{
+    // 生成物不进 lint 扫描；规则本身在 .markdownlint.jsonc
+    "ignores": ["node_modules/**", "logs/**", "outputs/**", "multi-harness-eval/runs/**"]
+}

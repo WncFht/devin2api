@@ -7,19 +7,26 @@ repos:
         entry: autocorrect --fix
         language: system
         types: [markdown]
-  # prettier / markdownlint-cli2 一律走 node_modules 里的版本：package.json 是唯一版本清单，
-  # 编辑器（prettierPath 指向同一处）与 hook 同源；缺依赖时响亮报错而非静默换版本。
-  # 顺序即语义：先改内容（autocorrect）→ 再修规则（markdownlint --fix）→ prettier 最后写盘，
-  # 保证落盘结果是 prettier 规范形，commit 后编辑器再 format 必然无 diff。
+  # 顺序即语义：先改内容（autocorrect）→ 再修规则（markdownlint --fix）→ prettier 收尾。
+  # prettier / markdownlint-cli2 走 node_modules：package.json 是唯一版本清单，编辑器
+  # （prettierPath 指向同一处）与 hook 同源；缺依赖时响亮报错而非静默换版本。
+  # prettier / gofmt 经 git-format-staged 只改写 index 里的已暂存内容，不碰工作区——
+  # 混合暂存（同一文件一半 stage 一半没 stage）时不会污染未暂存的编辑。
+  # git-format-staged 依赖系统 python3（macOS 自带）。
   - repo: local
     hooks:
+      - id: gofmt
+        name: gofmt (staged content)
+        entry: ./node_modules/.bin/git-format-staged --formatter "gofmt"
+        language: system
+        types: [go]
       - id: markdownlint-cli2
         name: markdownlint-cli2 --fix
         entry: ./node_modules/.bin/markdownlint-cli2 --fix
         language: system
         types: [markdown]
       - id: prettier
-        name: prettier --write
-        entry: ./node_modules/.bin/prettier --write
+        name: prettier (staged content)
+        entry: ./node_modules/.bin/git-format-staged --formatter "./node_modules/.bin/prettier --stdin-filepath {}"
         language: system
         types: [markdown]

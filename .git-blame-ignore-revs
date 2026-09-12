@@ -1,0 +1,4 @@
+# 一次性全仓格式化提交，从 blame 里剔除。
+# 本地生效需执行一次：git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub 网页端自动识别本文件。
+39bbb51ac4a62ae4c44b027ae1cfd3a77893d197
