@@ -18,17 +18,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install protoc toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
-          go install github.com/go-task/task/v3/cmd/task@latest
-
-      - name: Generate proto bindings
-        run: task generate
-
       - name: Test
         run: go test ./...
 
@@ -62,17 +51,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install protoc toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
-          go install github.com/go-task/task/v3/cmd/task@latest
-
-      - name: Generate proto bindings
-        run: task generate
 
       - name: Build binary
         env:

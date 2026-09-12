@@ -20,8 +20,8 @@ config.yaml
 /outputs/*.txt
 /outputs/*.py
 
-# 生成代码：由 task generate 从 outputs/devin-proto 生成
-/outputs/devin-proto-go/
+# 生成代码已提交（outputs/devin-proto-go），clone 后可直接 go build；
+# 上游 proto 变化时用 task generate 重新生成并提交
 
 coverage.out
 *.test

@@ -7,7 +7,3 @@ work
 config.yaml
 coverage.out
 *.test
-
-# 生成绑定由 builder 阶段 task generate 生成，不需要进构建上下文
-outputs/devin-proto-go
-outputs/devin-proto-go/**

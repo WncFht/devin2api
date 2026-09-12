@@ -45,10 +45,9 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-From source (requires the proto bindings generated from the committed descriptors — one-time step after clone, needs `protoc` + `protoc-gen-go` + `protoc-gen-connect-go` + `task`; see `Taskfile.yml` for exact versions):
+From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
 
 ```bash
-task generate
 go run ./cmd/devin-2api -config config.yaml
 ```
 

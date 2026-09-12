@@ -4,21 +4,12 @@ ARG TARGETARCH
 # VERSION 由 release 流水线注入（git tag），本地构建缺省 dev
 ARG VERSION=dev
 
-# proto → Go 绑定生成工具链（见 Taskfile.yml）
-RUN apk add --no-cache protobuf \
-    && go install github.com/go-task/task/v3/cmd/task@latest \
-    && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 \
-    && go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
-
 WORKDIR /src
 
-# 先 COPY 已提交的描述符并生成绑定（replace 目标 outputs/devin-proto-go 存在后，
-# 后续 go mod download 才能解析 local/devinproto）
-COPY Taskfile.yml ./
-COPY outputs/devin-proto ./outputs/devin-proto
-RUN task generate
-
+# 生成绑定已随仓库提交（outputs/devin-proto-go 是 go.mod replace 目标），
+# 先拷它与 go.mod/go.sum 以利用 go mod download 的层缓存。
 COPY go.mod go.sum ./
+COPY outputs/devin-proto-go ./outputs/devin-proto-go
 RUN go mod download
 
 COPY cmd ./cmd

@@ -2,7 +2,7 @@
 #
 # 两条链路：
 #   task extract BINARY=<上游二进制>  ① 二进制 → outputs/devin-proto/（不可复现，需上游二进制 + 抓包）
-#   task generate                      ② outputs/devin-proto/ → outputs/devin-proto-go/（可复现）
+#   task generate                      ② outputs/devin-proto/ → outputs/devin-proto-go/（可复现，产物已提交进 git；仅 proto 变化后需重跑）
 #
 # 依赖：
 #   ① 无（protoextract 是仓库内 Go 工具）
@@ -41,7 +41,8 @@ tasks:
     desc: Generate Go bindings from outputs/devin-proto/all-protos.proto
     summary: |
       用 protoc 从 outputs/devin-proto/all-protos.proto 生成 Connect 客户端绑定到
-      outputs/devin-proto-go/（不追踪，clone 后先执行本任务再构建）。
+      outputs/devin-proto-go/。产物已提交进 git，clone 后无需执行本任务；
+      仅上游 proto 变化（task extract 之后）需要重新生成并提交。
       生成参数：module=local/devinproto + Mall-protos.proto 映射，go.mod 固定
       connect v1.20.0 / protobuf v1.36.11。
     cmds:
