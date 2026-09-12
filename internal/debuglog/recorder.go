@@ -37,8 +37,9 @@ type Manager struct {
 	now func() time.Time
 	// mutex 串行化目录分配、index.jsonl 追加和 activeDirs 维护。
 	mutex sync.Mutex
-	// activeDirs 记录仍有进行中请求的目录名，清理器必须跳过。
-	activeDirs map[string]struct{}
+	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
+	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
+	activeDirs map[string]*Recorder
 	// retentionDays 是请求目录保留天数；<=0 不按时间清理。
 	retentionDays int
 	// maxBytes 是 logs 根目录总量上限；<=0 不按大小清理。
@@ -176,7 +177,7 @@ func NewManager(root string, retentionDays int, maxTotalMB int64) *Manager {
 	manager := &Manager{
 		root:          root,
 		now:           time.Now,
-		activeDirs:    make(map[string]struct{}),
+		activeDirs:    make(map[string]*Recorder),
 		retentionDays: retentionDays,
 		maxBytes:      maxTotalMB << 20,
 	}
@@ -262,11 +263,19 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		}
 		recorder.firstUpstreamMS.Store(-1)
 		recorder.firstClientMS.Store(-1)
-		manager.activeDirs[name] = struct{}{}
+		manager.activeDirs[name] = recorder
 		go recorder.runWriter()
 		recorder.writeMeta(nil)
 		return recorder
 	}
+}
+
+// DirectoryPath 返回本请求的日志目录绝对路径；禁用态 recorder 为空串。
+func (recorder *Recorder) DirectoryPath() string {
+	if recorder == nil {
+		return ""
+	}
+	return recorder.directory
 }
 
 // WithRecorder 将本次请求 recorder 放入 context 供供应商 adapter 使用。

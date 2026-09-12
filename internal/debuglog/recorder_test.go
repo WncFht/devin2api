@@ -154,3 +154,74 @@ func TestDroppedCounterOnClosedQueue(t *testing.T) {
 		t.Fatalf("dropped = %d, want 1", recorder.dropped.Load())
 	}
 }
+
+// TestReaderListDetailAndFiles 验证索引倒读、单请求详情与文件读取接口。
+func TestReaderListDetailAndFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 0, 0)
+	defer manager.Close()
+	for _, model := range []string{"m-a", "m-b"} {
+		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
+		recorder.WriteJSON("03-devin-request.json", map[string]any{"model": model})
+		recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: model})
+	}
+	entries := manager.ListRequests(10)
+	if len(entries) != 2 || entries[0].Model != "m-b" || entries[1].Model != "m-a" {
+		t.Fatalf("ListRequests order = %+v", entries)
+	}
+	detail, err := manager.Detail(entries[0].Dir)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+	if len(detail.Meta) == 0 || !strings.Contains(string(detail.Meta), `"m-b"`) {
+		t.Fatalf("detail meta = %s", detail.Meta)
+	}
+	var names []string
+	for _, f := range detail.Files {
+		names = append(names, f.Name)
+	}
+	if !strings.Contains(strings.Join(names, ","), "meta.json") || !strings.Contains(strings.Join(names, ","), "03-devin-request.json") {
+		t.Fatalf("files = %v", names)
+	}
+	data, total, truncated, err := manager.ReadFile(entries[0].Dir, "03-devin-request.json")
+	if err != nil || truncated || total == 0 || !strings.Contains(string(data), "m-b") {
+		t.Fatalf("ReadFile = %q total=%d truncated=%v err=%v", data, total, truncated, err)
+	}
+}
+
+// TestReaderRejectsTraversal 验证目录名与文件名的路径穿越防护。
+func TestReaderRejectsTraversal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 0, 0)
+	defer manager.Close()
+	recorder := manager.Start(RequestMeta{})
+	dir := filepath.Base(recorder.directory)
+	recorder.Complete(Completion{StatusCode: 200})
+	if _, err := manager.Detail("../etc"); err == nil {
+		t.Fatal("Detail should reject traversal")
+	}
+	for _, bad := range []string{"../meta.json", "meta.json/../x", "/abs", "sub/dir/x.json"} {
+		if _, _, _, err := manager.ReadFile(dir, bad); err == nil {
+			t.Fatalf("ReadFile should reject %q", bad)
+		}
+	}
+	if _, _, _, err := manager.ReadFile(dir, "meta.json"); err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+}
+
+// TestActiveRequestsSnapshot 验证进行中请求的活快照在 Complete 后消失。
+func TestActiveRequestsSnapshot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, 0, 0)
+	defer manager.Close()
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
+	active := manager.ActiveRequests()
+	if len(active) != 1 || active[0].Meta.API != "anthropic" {
+		t.Fatalf("ActiveRequests = %+v", active)
+	}
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	if got := manager.ActiveRequests(); len(got) != 0 {
+		t.Fatalf("ActiveRequests after Complete = %+v", got)
+	}
+}

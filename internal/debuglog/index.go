@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// indexEntry 是 index.jsonl 中一行请求的摘要。
+// IndexEntry 是 index.jsonl 中一行请求的摘要。
 // 字段选择面向「grep 定位 + 面板列表」两个用途。
-type indexEntry struct {
+type IndexEntry struct {
 	Dir        string `json:"dir"`
 	StartedAt  string `json:"started_at"`
 	DurationMS int64  `json:"duration_ms"`
@@ -54,7 +54,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		manager.indexFile = file
 		manager.indexWriter = bufio.NewWriter(file)
 	}
-	entry := indexEntry{
+	entry := IndexEntry{
 		Dir:               filepath.Base(recorder.directory),
 		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
 		DurationMS:        time.Since(recorder.startedAt).Milliseconds(),
