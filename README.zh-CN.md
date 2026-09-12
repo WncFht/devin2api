@@ -2,35 +2,39 @@
 
 > [English](README.md) | **中文**
 
-devin-2api 是一个轻量转发工具，把 Devin（[app.devin.ai](https://app.devin.ai/)）包装在 OpenAI / Anthropic 兼容接口后面——让外部程序可以通过标准协议调用 Devin 内部的模型。
+devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.ai](https://app.devin.ai/)）可用的模型包装在 OpenAI / Anthropic 兼容接口后面——让标准客户端（Codex、Claude Code、任意 SDK）通过熟悉的 API 调用它们。
+
+> **声明**：本项目与 Cognition 无任何关联、未获其背书。它使用你自己的 Devin 会话 token 调用内部 RPC 接口，仅供个人账号自用；请自行遵守 Devin 的服务条款。
 
 ## 特性
 
 - **一个上游，三个 API 面**——`POST /v1/responses`（OpenAI Responses，含 Codex 式客户端的 WebSocket transport 与多轮会话）、`POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）
 - **支持流式与一次性响应**（typed SSE / JSON）
-- **思考签名跨轮回放**——按各 provider 原生形态（`sealed`/`anthropic`/`openai`）保存并回传；在 Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
-- **忠实的工具调用**——custom/freeform 工具调用原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对；孤儿工具结果降级为文本而非整请求失败
-- **上游流韧性**——首个内容字节前的失败（传输断裂、从凭据文件重读的过期 token、静默卡死、空 end_turn）透明重试一次；start 事件延后下发，早期上游失败返回真实 HTTP 错误而非已提交 200 后的 SSE error
-- **归一化错误契约**——上游 Connect 错误码映射为正确的 HTTP 状态与协议错误类型；限流归一为 `429` + 从文案解析出的 `Retry-After`；每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
-- **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型配置
+- **思考签名跨轮回放**——按各 provider 原生形态保存并回传：Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
+- **忠实的工具调用**——custom/freeform 工具调用（如 `apply_patch`）原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对
+- **上游流韧性**——token 过期自动从凭据来源重读；产出内容前的上游失败（传输断裂、静默卡死、空回复）透明重试；早期失败返回真实 HTTP 错误，而不是已提交 200 后的 SSE error
+- **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
+- **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型目录
 - **`/panel` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录
-- **对齐真实 Devin CLI 指纹**——请求 metadata 复刻 CLI 的客户端身份（`devin.client_*` 可配置，上游加版本门时 bump `client_version` 即可）
-- **适配器模式**——极易扩展新的上游
 - **部署简单**——单一静态二进制，[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
-- **可选调试日志**——按请求记录，便于排查问题
 
 ## 快速开始
 
-### 1. 获取 Devin token
+### 1. 提供 Devin token
 
-devin-2api 使用你的 Devin 会话 token 向 Devin 鉴权。macOS 下可从 Devin 应用本地状态提取：
+devin-2api 使用你的 Devin 会话 token（`devin-session-token$...`）向上游鉴权。`config.yaml` 里 `devin.token` 留空时按顺序自动发现：
+
+1. `DEVIN_TOKEN` 或 `WINDSURF_API_KEY` 环境变量；
+2. `~/.local/share/devin/credentials.toml`（Devin CLI 登录产物）。
+
+macOS 下也可从 Devin 应用本地状态提取：
 
 ```bash
 sqlite3 ~/Library/"Application Support"/Devin/User/globalStorage/state.vscdb \
   "SELECT json_extract(value, '$.apiKey') FROM ItemTable WHERE key='windsurfAuthStatus';"
 ```
 
-输出为 `devin-session-token$...` 格式的完整 token。
+token 会过期。上游回 `unauthenticated` 时适配器会重读同一条来源链——Devin CLI 续期改写 `credentials.toml` 后，代理无需重启即自愈。
 
 ### 2. 配置
 
@@ -50,10 +54,9 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-源码运行（需先从仓库内的描述符生成 proto 绑定——clone 后一次性步骤，依赖 `protoc` + `protoc-gen-go` + `protoc-gen-connect-go` + `task`，版本见 `Taskfile.yml`）：
+源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 
 ```bash
-task generate
 go run ./cmd/devin-2api -config config.yaml
 ```
 
@@ -69,20 +72,22 @@ docker run --rm -p 8080:8080 \
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"v0.3.0","uptime_seconds":12,"debug_logging":false}
+# {"status":"ok","version":"...","uptime_seconds":12,"debug_logging":false}
 ```
 
 ## 用法
 
-> **注意**：`/v1/*` 接口支持可选的 API Key 鉴权。在 `config.yaml` 中设置 `auth.api_key` 后，客户端需通过 `Authorization: Bearer <api_key>` 或 `X-Api-Key: <api_key>` 传递密钥；留空则不校验，请只在可信网络内暴露。
+> **注意**：`/v1/*` 接口支持可选的 API Key 鉴权。在 `config.yaml` 中设置 `auth.api_key` 后，客户端需通过 `Authorization: Bearer <api_key>` 或 `X-Api-Key: <api_key>` 传递密钥；留空则不校验——监听到非 loopback 地址前务必先设密钥，否则等于把你的 Devin 配额开放给整个网络。
 
 接口列表：
 
 - `POST /v1/responses`——OpenAI Responses（同路径 `GET` 可协商 WebSocket transport）
 - `POST /v1/chat/completions`——OpenAI Chat Completions
 - `POST /v1/messages`——Anthropic Messages
-- `GET /v1/models`、`GET /v1/models/{model}`——上游模型列表与能力位
+- `GET /v1/models`、`GET /v1/models/{model}`——上游模型目录与能力位
 - `GET /panel`——管理面板（请求浏览、用量、配额、进程指标）；`dashboard.password` 保护
+
+本代理是**无状态**的：每个 HTTP 请求都要携带完整对话历史（`previous_response_id` 会被解析但忽略——没有服务端响应存储）。WebSocket transport 下由会话状态机按连接维护多轮上下文，增量 input 会被透明展开为完整 transcript。
 
 使用你的 OpenAI Responses API 客户端调用 `http://localhost:8080/v1/responses` 即可。
 
@@ -133,10 +138,10 @@ curl http://localhost:8080/v1/messages \
 | `server.listen`                                  | HTTP 监听地址                                                                                               | 是                                                                                                 |
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                        | `1024`                                                                                             |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                      | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）                                                               | 否——未配置时接口返回 503                                                                           |
+| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                          | 否——未配置时接口返回 503                                                                           |
 | `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                        | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）                                                   | 无                                                                                                 |
-| `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份（上游给新模型加版本门时 bump `client_version` 即可）                         | `chisel` / `3000.2.17` / `mac`                                                                     |
+| `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                              | `chisel` / `3000.2.17` / `mac`                                                                     |
 | `devin.proxy`                                    | 上游代理地址（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                          | 无                                                                                                 |
 | `devin.force_http1`                              | 每请求独立 TCP 连上游（避免 HTTP/2 单连接多 stream 串行化）                                                 | `true`                                                                                             |
 | `debug.enabled`                                  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | `false`                                                                                            |

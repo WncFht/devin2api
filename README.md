@@ -2,35 +2,39 @@
 
 > **English** | [中文](README.zh-CN.md)
 
-devin-2api is a lightweight forwarding tool that exposes Devin ([app.devin.ai](https://app.devin.ai/)) behind OpenAI- and Anthropic-compatible endpoints — letting external programs call Devin's models through standard protocols.
+devin-2api is an unofficial protocol adapter that exposes the models available to your Devin account ([app.devin.ai](https://app.devin.ai/)) behind OpenAI- and Anthropic-compatible endpoints — so standard clients (Codex, Claude Code, any SDK) can call them through familiar APIs.
+
+> **Disclaimer**: this project is not affiliated with or endorsed by Cognition. It authenticates with your own Devin session token against an internal RPC surface. It is intended for personal use with your own account; you are responsible for complying with Devin's terms of service.
 
 ## Features
 
 - **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. a WebSocket transport with multi-turn sessions for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
 - **Streaming and non-streaming** responses (typed SSE / JSON)
-- **Reasoning that round-trips** — thinking signatures are preserved and replayed across turns in each provider's native shape (`sealed`/`anthropic`/`openai`); surfaced as `encrypted_content` reasoning items on Responses, `redacted_thinking` on Anthropic, and `reasoning_content` on Chat
-- **Faithful tool calling** — custom/freeform tool calls round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces; orphan tool results demote to text instead of failing the request
-- **Resilient upstream streams** — failures before the first content byte (transport breaks, expired token reloaded from the credentials file, silent stalls, empty end_turn replies) are retried transparently; stream start is deferred so early upstream failures surface as real HTTP errors instead of SSE errors after a committed `200`
-- **Normalized error contract** — upstream Connect codes map to proper HTTP status and protocol error types; rate limits become `429` + `Retry-After` parsed from the reset hint; every request carries `X-Request-Id`/`debug_ref` pointing at its debug directory
-- **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from upstream model config
+- **Reasoning that round-trips** — thinking signatures are preserved and replayed across turns: `encrypted_content` reasoning items on Responses, `redacted_thinking` on Anthropic, `reasoning_content` on Chat
+- **Faithful tool calling** — custom/freeform tool calls (e.g. `apply_patch`) round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces
+- **Resilient upstream streams** — expired tokens are reloaded from the credentials source, pre-content upstream failures (transport breaks, silent stalls, empty replies) are retried transparently, and early failures surface as real HTTP errors instead of SSE errors after a committed `200`
+- **Normalized error contract** — upstream error codes map to proper HTTP status and per-protocol error types; rate limits become `429` + `Retry-After`; every request carries `X-Request-Id`/`debug_ref` pointing at its debug directory
+- **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from the upstream model catalog
 - **Admin panel at `/panel`** — request browser, usage/cost aggregation, quota tracking, process metrics, and per-request debug directories
-- **Matches the real Devin CLI fingerprint** — request metadata replicates the CLI's client identity (`devin.client_*` makes it configurable when upstream bumps version gates)
-- **Adapter-based design** — easily extended to new upstreams
 - **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
-- **Optional debug logs** per request for troubleshooting
 
 ## Quick start
 
-### 1. Get a Devin token
+### 1. Provide a Devin token
 
-devin-2api authenticates to Devin with your Devin session token. On macOS, extract it from the Devin app's local state:
+devin-2api authenticates to Devin with your Devin session token (`devin-session-token$...`). If `devin.token` is left empty in `config.yaml`, the adapter discovers one automatically, in order:
+
+1. `DEVIN_TOKEN` or `WINDSURF_API_KEY` environment variable;
+2. `~/.local/share/devin/credentials.toml` (written by the Devin CLI login).
+
+On macOS you can also extract the token from the Devin app's local state:
 
 ```bash
 sqlite3 ~/Library/"Application Support"/Devin/User/globalStorage/state.vscdb \
   "SELECT json_extract(value, '$.apiKey') FROM ItemTable WHERE key='windsurfAuthStatus';"
 ```
 
-The output is a token in the `devin-session-token$...` format.
+Tokens expire. When upstream answers `unauthenticated`, the adapter re-reads the same source chain — so if the Devin CLI refreshes `credentials.toml`, the proxy heals itself without a restart.
 
 ### 2. Configure
 
@@ -68,20 +72,22 @@ docker run --rm -p 8080:8080 \
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"v0.3.0","uptime_seconds":12,"debug_logging":false}
+# {"status":"ok","version":"...","uptime_seconds":12,"debug_logging":false}
 ```
 
 ## Usage
 
-> **Note**: `/v1/*` endpoints support optional API key authentication. Set `auth.api_key` in `config.yaml` to require clients to send `Authorization: Bearer <api_key>` or `X-Api-Key: <api_key>`. If left empty, the endpoints remain open (only expose them to trusted networks).
+> **Note**: `/v1/*` endpoints support optional API key authentication. Set `auth.api_key` in `config.yaml` to require clients to send `Authorization: Bearer <api_key>` or `X-Api-Key: <api_key>`. If left empty, the endpoints remain open — only bind beyond loopback if you also set a key, or you are handing out your Devin quota to the network.
 
 Endpoints:
 
 - `POST /v1/responses` — OpenAI Responses (`GET` on the same path negotiates WebSocket transport)
 - `POST /v1/chat/completions` — OpenAI Chat Completions
 - `POST /v1/messages` — Anthropic Messages
-- `GET /v1/models`, `GET /v1/models/{model}` — upstream model list with capability flags
+- `GET /v1/models`, `GET /v1/models/{model}` — upstream model catalog with capability flags
 - `GET /panel` — admin panel (request browser, usage, quota, process stats); `dashboard.password` protects it
+
+The proxy is **stateless**: every HTTP request must carry the full conversation (`previous_response_id` is accepted but ignored — there is no server-side response store). Over the WebSocket transport, multi-turn sessions are maintained per connection and incremental inputs are expanded into full transcripts transparently.
 
 Call `http://localhost:8080/v1/responses` with your OpenAI Responses API client.
 
@@ -132,10 +138,10 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `server.listen`                                  | HTTP listen address                                                                                                      | Yes                                                                                                          |
 | `server.max_concurrency`                         | Max concurrent `/v1/*` requests                                                                                          | `1024`                                                                                                       |
 | `devin.base_url`                                 | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token`                                    | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
+| `devin.token`                                    | Devin session token (`devin-session-token$...`); empty = discover from env / credentials file                            | No — endpoint returns 503 until set                                                                          |
 | `devin.model`                                    | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
 | `devin.aliases`                                  | Client model name to upstream UID map (e.g. `swe-2: swe-2-max`)                                                          | none                                                                                                         |
-| `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata (bump `client_version` when upstream gates a model on a newer CLI)             | `chisel` / `3000.2.17` / `mac`                                                                               |
+| `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata                                                                                | `chisel` / `3000.2.17` / `mac`                                                                               |
 | `devin.proxy`                                    | Upstream proxy URL (`http(s)://`, `socks5(h)://`); empty = direct / env vars                                             | none                                                                                                         |
 | `devin.force_http1`                              | Per-request TCP connections to upstream (avoids HTTP/2 stream serialization)                                             | `true`                                                                                                       |
 | `debug.enabled`                                  | Write per-request debug logs under `logs/` next to the config file                                                       | `false`                                                                                                      |
