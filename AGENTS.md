@@ -90,6 +90,11 @@
 
 `*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
 
+## 版本与发布
+
+- 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入，`scripts/deploy.sh` 本机升级、`scripts/release.sh` 发版（先 dry-run 再 `--publish`）。
+- tag 只打在已推送 `origin/main` 且 CI 绿的提交上；0.x 阶段 feat/破坏性变更升 minor、其余升 patch。`latest` 镜像 tag 只跟随稳定版。
+
 # 服务排障（对运行中的实例）
 
 本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值）与 `stage`（失败发生在哪一层）。
