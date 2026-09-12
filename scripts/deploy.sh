@@ -101,7 +101,7 @@ if [[ "${NO_RESTART}" == "1" ]]; then
 	exit 0
 fi
 
-OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^\s*pid = /{print $3}' || true)"
+OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
 echo "==> waiting for healthz (old pid: ${OLD_PID:-?})"
@@ -119,7 +119,7 @@ done
 }
 
 RUNNING="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","<none>"))' <<<"${HEALTH}")"
-NEW_PID="$(launchctl print "gui/$(id -u)/${LABEL}" | awk '/^\s*pid = /{print $3}')"
+NEW_PID="$(launchctl print "gui/$(id -u)/${LABEL}" | awk '/^[ \t]*pid = /{print $3}')"
 echo "==> running: pid=${NEW_PID} version=${RUNNING}"
 if [[ "${RUNNING}" != "${VERSION}" ]]; then
 	echo "WARN: healthz version ${RUNNING} != built ${VERSION} (端口可能被其它实例抢占)" >&2
