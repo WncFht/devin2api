@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,9 +29,13 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// 默认客户端身份常量与真实 Devin CLI 抓包逐字段对齐；上游若开始按
+// extension_version 做版本门（新模型 gate），可在 config 的 devin.client_*
+// 覆盖而不必发版。
 const (
-	clientName    = "chisel"
-	clientVersion = "3000.2.17"
+	defaultClientName    = "chisel"
+	defaultClientVersion = "3000.2.17"
+	defaultClientOS      = "mac"
 )
 
 // Config 保存 Devin adapter 的固定上游配置。
@@ -46,11 +52,42 @@ type Config struct {
 	ForceHTTP1 bool
 	// Aliases 是客户端模型名到上游真实 UID 的映射；命中时请求模型被重写。
 	Aliases map[string]string
+	// ClientName/ClientVersion/ClientOS 是发给上游的 metadata 身份字段；
+	// 为空时回落到默认常量（与真实 CLI 抓包一致）。
+	ClientName    string
+	ClientVersion string
+	ClientOS      string
+	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
+	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
+	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
+	TokenSource func() string
+}
+
+// clientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
+// Devin CLI 抓包一致的默认值。
+func (config Config) clientIdentity() (name, version, os string) {
+	name = strings.TrimSpace(config.ClientName)
+	if name == "" {
+		name = defaultClientName
+	}
+	version = strings.TrimSpace(config.ClientVersion)
+	if version == "" {
+		version = defaultClientVersion
+	}
+	os = strings.TrimSpace(config.ClientOS)
+	if os == "" {
+		os = defaultClientOS
+	}
+	return name, version, os
 }
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
 	config Config
+	// token 是当前生效的上游凭据：unauthenticated 自愈会原地更新，
+	// transport 经 tokenFunc 每次请求读取，无需重建 HTTP 客户端。
+	tokenMu sync.RWMutex
+	token   string
 	// streamClient 无 Client.Timeout（SSE 长连接靠 Transport 层超时兜底）；
 	// apiClient 有 610s 整体超时，用于模型目录等普通调用。
 	streamClient   devinprotoconnect.ApiServerServiceClient
@@ -78,23 +115,57 @@ func New(config Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create proxy transport: %w", err)
 	}
-	transport := upstream.NewBasicAuthTransport(base, config.Token)
+	adapter := &Adapter{
+		config:         config,
+		token:          config.Token,
+		modelsCacheTTL: 5 * time.Minute,
+	}
+	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
-	streamClient := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
+	adapter.streamClient = devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
 	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	apiClient := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL)
+	adapter.apiClient = devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL)
 
-	return &Adapter{
-		config:         config,
-		streamClient:   streamClient,
-		apiClient:      apiClient,
-		modelsCacheTTL: 5 * time.Minute,
-	}, nil
+	return adapter, nil
+}
+
+// currentToken 返回当前生效的上游凭据。
+func (adapter *Adapter) currentToken() string {
+	adapter.tokenMu.RLock()
+	defer adapter.tokenMu.RUnlock()
+	return adapter.token
+}
+
+// reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
+// 拿到非空且不同的新 token 才视为自愈成功。
+func (adapter *Adapter) reloadToken() bool {
+	source := adapter.config.TokenSource
+	if source == nil {
+		return false
+	}
+	token := strings.TrimSpace(source())
+	if token == "" {
+		return false
+	}
+	adapter.tokenMu.Lock()
+	defer adapter.tokenMu.Unlock()
+	if token == adapter.token {
+		return false
+	}
+	adapter.token = token
+	slog.Info("reloaded upstream token after unauthenticated error")
+	return true
+}
+
+// isUnauthenticated 判断错误是否为上游 unauthenticated（凭据失效）。
+func isUnauthenticated(err error) bool {
+	var connectErr *connect.Error
+	return errors.As(err, &connectErr) && connectErr.Code() == connect.CodeUnauthenticated
 }
 
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
@@ -110,6 +181,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if alias, ok := adapter.config.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
 		model = strings.TrimSpace(alias)
 	}
+	adapter.warnIfModelAbsentFromCatalog(model)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
@@ -118,6 +190,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	cfg := adapter.config
 	cfg.Model = model
+	cfg.Token = adapter.currentToken()
 	protoRequest, err := buildRequest(request, cfg)
 	if err != nil {
 		return nil, err
@@ -128,6 +201,16 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
 	streamCtx, cancel := context.WithCancel(ctx)
 	stream, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest)
+	if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
+		// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
+		// 用新凭据重建请求重试一次。token 未变化时不重试。
+		cfg.Token = adapter.currentToken()
+		if rebuilt, buildErr := buildRequest(request, cfg); buildErr == nil {
+			protoRequest = rebuilt
+			recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
+			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest)
+		}
+	}
 	if err != nil {
 		cancel()
 		recorder.WriteError("devin_connect", err)
@@ -135,10 +218,39 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		return nil, connectError(err)
 	}
 	return &responseStream{
-		frames:   pumpUpstream(stream),
+		frames:   pumpUpstream(streamCtx, stream),
 		cancel:   cancel,
 		decoder:  newResponseDecoder(model, request.StopSequences),
 		recorder: recorder,
+		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
+		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
+		// 语义错误（invalid_argument 等）重试只会复现同样失败，直接放行。
+		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
+			if isTransientConnectError(cause) {
+				slog.Warn("reopening stream: transport error before first content", "error", cause)
+			} else if isUnauthenticated(cause) && adapter.reloadToken() {
+				slog.Info("reopening stream: token reloaded after unauthenticated")
+			} else {
+				return nil, nil, cause
+			}
+			retryCtx, retryCancel := context.WithCancel(ctx)
+			retryCfg := cfg
+			retryCfg.Token = adapter.currentToken()
+			rebuilt, err := buildRequest(request, retryCfg)
+			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
+			if err == nil {
+				recordProtoJSON(recorder, "03-devin-request.json", rebuilt)
+				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt)
+			}
+			if err != nil {
+				retryCancel()
+				return nil, nil, err
+			}
+			return pumpUpstream(retryCtx, reopened), retryCancel, nil
+		},
+		newDecoder: func() *responseDecoder {
+			return newResponseDecoder(model, request.StopSequences)
+		},
 	}, nil
 }
 
@@ -151,10 +263,13 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 	var lastErr error
 	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
 		if attempt > 0 {
+			// ±25% 抖动：上游瞬时拥塞时固定节拍的重试会相互叠加。
+			base := time.Duration(attempt) * 400 * time.Millisecond
+			backoff := time.Duration(float64(base) * (0.75 + 0.5*rand.Float64()))
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+			case <-time.After(backoff):
 			}
 		}
 		stream, err := adapter.streamClient.GetChatMessage(ctx, connect.NewRequest(protoRequest))
@@ -210,6 +325,25 @@ func (adapter *Adapter) catalogSupportsImages(model string) (supported bool, kno
 		}
 	}
 	return false, false
+}
+
+// warnIfModelAbsentFromCatalog 在目录已加载且目标 uid 缺席时记 Warn。
+// 实测 alias 指向死模型时上游只回模糊的 permission_denied: an internal
+// error occurred——排障只能靠日志里的这条提示定位到 alias 目标。
+// 目录未加载或缺席都放行：用户配置的 model 本就可以不在目录里。
+func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	if len(adapter.models) == 0 {
+		return
+	}
+	for _, m := range adapter.models {
+		if m.ID == model {
+			return
+		}
+	}
+	slog.Warn("model absent from upstream catalog; upstream will likely return a vague permission_denied",
+		"model", model, "hint", "check devin.aliases target or bump devin.client_version")
 }
 
 // validateNotRouterModel 拒绝上游 router uid 的直连请求：目录里标了
@@ -306,8 +440,9 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		return a.models, nil
 	}
 
+	name, version, os := a.config.clientIdentity()
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
-		Metadata: upstream.BuildMetadata(a.config.Token, clientName, clientVersion, "win", 0),
+		Metadata: upstream.BuildMetadata(a.config.Token, name, version, os, 0),
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("Devin GetCliModelConfigs: %w", err)
@@ -393,18 +528,23 @@ type upstreamFrame struct {
 
 // pumpUpstream 把阻塞的 Receive 归一化为 channel 帧序列：Receive 只能被
 // ctx 取消打断，交给协程后 Recv 才能在等待期间响应静默看门狗与客户端断开。
-// 流终止时 Err() 作为最后一帧发出；缓冲满（调用方已放弃消费）则丢弃，
-// 保证泵协程在任何情况下都能退出。
-func pumpUpstream(upstream devinResponseReceiver) <-chan upstreamFrame {
+// 流终止时 Err() 作为最后一帧无条件投递：终帧只有一帧，阻塞等消费方
+// 排空缓冲，丢弃它会以「正常 EOF」的形态吃掉真实流错误（含静默截断）。
+// 所有发送带 ctx.Done 分支：消费方放弃后协程必须能退出。
+func pumpUpstream(ctx context.Context, upstream devinResponseReceiver) <-chan upstreamFrame {
 	frames := make(chan upstreamFrame, upstreamFrameBuffer)
 	go func() {
 		defer close(frames)
 		for upstream.Receive() {
-			frames <- upstreamFrame{response: upstream.Msg()}
+			select {
+			case frames <- upstreamFrame{response: upstream.Msg()}:
+			case <-ctx.Done():
+				return
+			}
 		}
 		select {
 		case frames <- upstreamFrame{err: upstream.Err()}:
-		default:
+		case <-ctx.Done():
 		}
 	}()
 	return frames
@@ -432,6 +572,16 @@ type responseStream struct {
 	finished bool
 	// queue 保存已经转换、等待调用方读取的中间响应事件。
 	queue []llm.ResponseEvent
+	// producedEvents 表示上游帧已产出过任何事件：一旦为真说明内容已
+	// 开始对外流动，此后失败只能透传，不能整体重发。
+	producedEvents bool
+	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
+	retried bool
+	// reopen 在可重试的 pre-content 失败（传输断裂、凭据自愈后的
+	// unauthenticated、静默看门狗判死）时重发同一请求并返回新泵。
+	reopen func(cause error) (<-chan upstreamFrame, context.CancelFunc, error)
+	// newDecoder 重建响应解码器供重试使用；nil 时不可重试。
+	newDecoder func() *responseDecoder
 }
 
 // devinResponseReceiver 描述 responseStream 消费 Devin 服务端流所需的最小能力。
@@ -466,25 +616,39 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		case frame, ok := <-stream.frames:
 			stall.Stop()
 			if !ok || frame.response == nil {
-				// ok==false：缓冲满时终止帧被丢弃（见 pumpUpstream），
-				// 按正常 EOF 处理，缺 stop reason 由 decoder 报错。
 				var upstreamErr error
 				if ok {
 					upstreamErr = frame.err
+				} else if ctxErr := ctx.Err(); ctxErr != nil {
+					// ok==false 只剩「泵协程随 ctx 取消退出」一种来源
+					//（终帧无条件投递）。把取消透传给 finish，避免以
+					// 正常 EOF 的形态吞掉被截断的流。
+					upstreamErr = ctxErr
+				}
+				if upstreamErr != nil && stream.tryReopen(upstreamErr) {
+					continue
 				}
 				stream.queue = stream.release(stream.decoder.finish(upstreamErr))
 				stream.finished = true
 				continue
 			}
 			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
-			stream.queue = stream.release(stream.decoder.decode(frame.response))
+			events := stream.decoder.decode(frame.response)
+			if len(events) > 0 {
+				stream.producedEvents = true
+			}
+			stream.queue = stream.release(events)
 			stream.finished = stream.decoder.finished
 		case <-stall.C:
 			// 上游静默超时：取消底层流打断泵协程；已缓冲未消费的帧
 			// 补记进原始日志留证，然后按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			stream.queue = stream.release(stream.decoder.finish(fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)))
+			stallErr := fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)
+			if stream.tryReopen(stallErr) {
+				continue
+			}
+			stream.queue = stream.release(stream.decoder.finish(stallErr))
 			stream.finished = true
 		case <-ctx.Done():
 			stall.Stop()
@@ -502,6 +666,30 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
+}
+
+// tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：
+// 此时客户端只见过扣留的 start 事件，重发没有可见副作用。返回 true
+// 表示新流已接管，调用方重置解码器后继续消费。
+func (stream *responseStream) tryReopen(cause error) bool {
+	if stream.retried || stream.producedEvents || stream.reopen == nil || cause == nil {
+		return false
+	}
+	frames, cancel, err := stream.reopen(cause)
+	if err != nil {
+		return false
+	}
+	stream.retried = true
+	stream.frames = frames
+	stream.cancel = cancel
+	if stream.newDecoder != nil {
+		stream.decoder = stream.newDecoder()
+	}
+	stream.started = false
+	stream.pendingStart = nil
+	stream.finished = false
+	stream.queue = nil
+	return true
 }
 
 // drainFrames 把看门狗判死时已缓冲未消费的上游帧补记进原始日志——

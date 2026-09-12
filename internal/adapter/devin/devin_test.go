@@ -505,7 +505,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 		}},
 		{},
 	}}
-	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil)}
 	var done llm.ResponseEvent
 	for {
 		event, err := stream.Recv(context.Background())
@@ -782,7 +782,7 @@ func TestIsTransientConnectError(t *testing.T) {
 // 渠道故障并冷却整个渠道。
 func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
 	stream := &responseStream{
-		frames:  pumpUpstream(&errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))}),
+		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))}),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil),
 	}
@@ -805,7 +805,7 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
 		{DeltaText: proto.String("hi")},
 	}}
-	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
 	first, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -830,7 +830,7 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	upstreamStallTimeout = 20 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -848,7 +848,7 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 func TestResponseStreamStopsOnContextCancel(t *testing.T) {
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil)}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -889,6 +889,8 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 		t.Fatalf("tool_choice = %#v, want option_name=none", converted.GetToolChoice())
 	}
 
+	// 指名调用要求工具在 tools 表内：先声明 read_file 再指名。
+	request.Tools = []llm.ToolDefinition{{Name: "read_file", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "read_file"}
 	converted, err = buildRequest(request, cfg)
 	if err != nil {

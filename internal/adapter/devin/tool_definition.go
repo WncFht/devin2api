@@ -175,16 +175,40 @@ func escapeXMLText(value string) string {
 }
 
 // convertToolDefinition 保留工具身份和 JSON Schema 约束，仅移除自然语言注释。
+// 工具名先做本地校验：上游实测只接受 [A-Za-z0-9_-]（mcp__a__b 合法，
+// a.b / mcp::x / CJK 全部 invalid_argument: an internal error occurred），
+// 提前报成可读的 invalid_argument，比上游的模糊文案可排障。
+// 不做静默改名——改写会让客户端历史回灌的 tool_call 名对不上。
 func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
+	if !validToolName(tool.Name) {
+		return nil, fmt.Errorf("invalid_argument: tool name %q contains characters outside [A-Za-z0-9_-], which the upstream rejects", tool.Name)
+	}
 	schema, err := stripSchemaAnnotations(tool.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("sanitize Devin tool %q schema: %w", tool.Name, err)
+	}
+	schema, err = normalizeSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("normalize Devin tool %q schema: %w", tool.Name, err)
 	}
 	return &devinproto.ExaChatPb_ChatToolDefinition{
 		Name:             proto.String(tool.Name),
 		Description:      proto.String(tool.Name),
 		JsonSchemaString: proto.String(string(schema)),
 	}, nil
+}
+
+// validToolName 匹配上游实测的工具名字符集。
+func validToolName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r != '_' && r != '-' && !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func stripSchemaAnnotations(schema json.RawMessage) (json.RawMessage, error) {
@@ -251,4 +275,130 @@ func isJSONObject(value []byte) bool {
 	}
 	var object map[string]json.RawMessage
 	return json.Unmarshal(value, &object) == nil && object != nil
+}
+
+// normalizeSchema 消除上游确定性拒绝的两种 schema 形态（实测）：
+//  1. 本地 $ref（"#/$defs/x" 等 JSON-pointer）inline 展开，顶层
+//     $defs/definitions/$schema 一并剥掉；
+//  2. 顶层没有任何 schema 关键字、值全为对象的「裸属性 map」包一层
+//     {"type":"object","properties":…}。
+//
+// 循环或解不开的引用丢掉 $ref 键、保留同层其余约束（等价 any），比整请求
+// 打回上游拿模糊 invalid_argument 更可排障。其余形态上游全容忍，不做改写。
+func normalizeSchema(schema json.RawMessage) (json.RawMessage, error) {
+	var value any
+	if err := json.Unmarshal(schema, &value); err != nil {
+		return nil, err
+	}
+	normalized := normalizeSchemaValue(value, value, map[string]bool{}, 0)
+	if object, ok := normalized.(map[string]any); ok {
+		delete(object, "$defs")
+		delete(object, "definitions")
+		delete(object, "$schema")
+		if isBarePropertyMap(object) {
+			normalized = map[string]any{"type": "object", "properties": object}
+		}
+	}
+	return json.Marshal(normalized)
+}
+
+// maxSchemaRefDepth 限制 $ref 展开深度，病态嵌套 schema 不至于无限膨胀。
+const maxSchemaRefDepth = 32
+
+func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth int) any {
+	if depth > maxSchemaRefDepth {
+		return value
+	}
+	switch typed := value.(type) {
+	case []any:
+		for index, item := range typed {
+			typed[index] = normalizeSchemaValue(item, root, resolving, depth+1)
+		}
+		return typed
+	case map[string]any:
+		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(ref, "#") {
+			if target, found := resolveLocalRef(root, ref); found && !resolving[ref] {
+				resolving[ref] = true
+				resolved := normalizeSchemaValue(target, root, resolving, depth+1)
+				delete(resolving, ref)
+				delete(typed, "$ref")
+				// $ref 与兄弟键并存时合并：兄弟键覆盖被引用方的同名字段。
+				if resolvedObject, ok := resolved.(map[string]any); ok {
+					for key, child := range resolvedObject {
+						if _, exists := typed[key]; !exists {
+							typed[key] = child
+						}
+					}
+				}
+			} else {
+				// 外部 URL、解不开的路径或循环引用：丢 $ref 保其余键。
+				delete(typed, "$ref")
+			}
+		}
+		for key, child := range typed {
+			// 业务值字面量里的 map 不是 schema，跳过防止误展开其中的 $ref 键。
+			if isSchemaLiteral(key) {
+				continue
+			}
+			typed[key] = normalizeSchemaValue(child, root, resolving, depth+1)
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+// resolveLocalRef 解析 "#/a/b" 形态的本地 JSON-pointer，处理 ~0/~1 转义。
+func resolveLocalRef(root any, ref string) (any, bool) {
+	if ref == "#" {
+		return root, true
+	}
+	if !strings.HasPrefix(ref, "#/") {
+		return nil, false
+	}
+	current := root
+	for _, segment := range strings.Split(ref[2:], "/") {
+		segment = strings.ReplaceAll(strings.ReplaceAll(segment, "~1", "/"), "~0", "~")
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if current, ok = object[segment]; !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+// schemaKeywords 是判断「该 map 是不是 schema」的关键字集合；
+// 判定只需要存在性，不要求穷尽 JSON Schema 全部关键字。
+var schemaKeywords = map[string]bool{
+	"type": true, "properties": true, "items": true, "required": true,
+	"additionalProperties": true, "allOf": true, "anyOf": true, "oneOf": true,
+	"not": true, "enum": true, "const": true, "format": true, "pattern": true,
+	"minLength": true, "maxLength": true, "minimum": true, "maximum": true,
+	"exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true,
+	"minItems": true, "maxItems": true, "uniqueItems": true, "contains": true,
+	"minProperties": true, "maxProperties": true, "patternProperties": true,
+	"propertyNames": true, "dependentRequired": true, "dependentSchemas": true,
+	"prefixItems": true, "if": true, "then": true, "else": true,
+	"readOnly": true, "writeOnly": true, "deprecated": true,
+	"description": true, "title": true, "default": true, "examples": true,
+}
+
+// isBarePropertyMap 判定对象是否是上游会拒绝的「裸属性 map」：
+// 没有 schema 关键字、没有 $/x- 前缀键，且每个值都是对象（即属性子 schema）。
+func isBarePropertyMap(object map[string]any) bool {
+	if len(object) == 0 {
+		return false
+	}
+	for key, child := range object {
+		if schemaKeywords[key] || strings.HasPrefix(key, "$") || strings.HasPrefix(strings.ToLower(key), "x-") {
+			return false
+		}
+		if _, ok := child.(map[string]any); !ok {
+			return false
+		}
+	}
+	return true
 }

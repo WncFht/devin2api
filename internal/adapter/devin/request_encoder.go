@@ -7,6 +7,7 @@ package devin
 import (
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -23,7 +24,8 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	// 「账号 + 内容前缀」键控，ID 不参与匹配。
 	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randid.UUID()
-	metadata := upstream.BuildMetadata(config.Token, clientName, clientVersion, "mac", 366)
+	name, version, os := config.clientIdentity()
+	metadata := upstream.BuildMetadata(config.Token, name, version, os, 366)
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),
 		MaxTokens:      proto.Uint64(128000),
@@ -77,6 +79,18 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 				Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: string(choice.Mode)},
 			}
 		case llm.ToolChoiceNamed:
+			// 指名调用必须命中 tools 表：上游对不存在的目标只回模糊的
+			// invalid_argument，本地提前报成可读错误。
+			found := false
+			for _, tool := range request.Tools {
+				if tool.Name == choice.ToolName {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("invalid_argument: tool_choice names tool %q which is not in the tools list", choice.ToolName)
+			}
 			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
 				Choice: &devinproto.ExaChatPb_ChatToolChoice_ToolName{ToolName: choice.ToolName},
 			}
@@ -200,7 +214,7 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 		// Wire 实证（WindsurfAPI）：助手轮 = 可选文本消息 + 每个工具调用各一条
 		// 独立消息。工具调用消息不写 prompt 字段（字段 3 缺席而非空串）；
 		// thinking(#11) 出现在每条 assistant 消息上。
-		var signature string
+		var signature, signatureType string
 		var redacted bool
 		var text, thinking strings.Builder
 		var calls []llm.ToolCall
@@ -217,11 +231,30 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 				thinking.WriteString(typed.Thinking)
 				if typed.ThinkingSignature != "" {
 					signature = typed.ThinkingSignature
+					signatureType = typed.SignatureType
 				}
 				redacted = redacted || typed.Redacted
 			case llm.ToolCall:
 				calls = append(calls, typed)
 			}
+		}
+		// attachThinking 把本轮的思考/签名三件套挂到一条 prompt 上。
+		// signature_type 与 output_id 必须随签名原样回传：实测错配
+		// signature_type 会触发上游 invalid_argument。
+		attachThinking := func(prompt *devinproto.ExaChatPb_ChatMessagePrompt) {
+			if thinking.Len() > 0 {
+				prompt.Thinking = proto.String(thinking.String())
+			}
+			if signature != "" {
+				prompt.Signature = proto.String(signature)
+			}
+			if signatureType != "" {
+				prompt.SignatureType = proto.String(signatureType)
+			}
+			if message.OutputID != "" {
+				prompt.OutputId = proto.String(message.OutputID)
+			}
+			prompt.ThinkingRedacted = proto.Bool(redacted)
 		}
 		var prompts []*devinproto.ExaChatPb_ChatMessagePrompt
 		if text.Len() > 0 {
@@ -230,37 +263,35 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 				Source:    assistantSource.Enum(),
 				Prompt:    proto.String(text.String()),
 			}
-			if thinking.Len() > 0 || redacted {
-				if thinking.Len() > 0 {
-					prompt.Thinking = proto.String(thinking.String())
-				}
-				if signature != "" {
-					prompt.Signature = proto.String(signature)
-				}
-				prompt.ThinkingRedacted = proto.Bool(redacted)
+			if thinking.Len() > 0 || redacted || signature != "" || message.OutputID != "" {
+				attachThinking(prompt)
 			}
 			prompts = append(prompts, prompt)
 		}
 		for index, call := range calls {
+			toolCall := &devinproto.ExaCodeiumCommonPb_ChatToolCall{
+				Id:   proto.String(call.ID),
+				Name: proto.String(call.Name),
+			}
+			if call.Custom {
+				// custom/freeform 调用的参数体不是 JSON，走 invalid_json_str
+				// 通道原样回传（上游对该字段实测容忍非 JSON 原文）。
+				toolCall.IsCustomToolCall = proto.Bool(true)
+				toolCall.InvalidJsonStr = proto.String(string(call.Arguments))
+			} else {
+				toolCall.ArgumentsJson = proto.String(string(call.Arguments))
+			}
 			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 				MessageId: proto.String(randid.UUID()),
 				Source:    assistantSource.Enum(),
-				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
-					Id:            proto.String(call.ID),
-					Name:          proto.String(call.Name),
-					ArgumentsJson: proto.String(string(call.Arguments)),
-				}},
+				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{toolCall},
 			}
-			if thinking.Len() > 0 || redacted {
-				if thinking.Len() > 0 {
-					prompt.Thinking = proto.String(thinking.String())
-				}
+			if thinking.Len() > 0 || redacted || (index == 0 && text.Len() == 0 && (signature != "" || message.OutputID != "")) {
 				// 无文本消息时签名挂到首条工具调用消息，避免丢失。
 				if index == 0 && text.Len() == 0 {
-					if signature != "" {
-						prompt.Signature = proto.String(signature)
-					}
-					prompt.ThinkingRedacted = proto.Bool(redacted)
+					attachThinking(prompt)
+				} else if thinking.Len() > 0 {
+					prompt.Thinking = proto.String(thinking.String())
 				}
 			}
 			prompts = append(prompts, prompt)
@@ -320,6 +351,9 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 			if result, ok := byID[id]; ok {
 				out = append(out, result)
 				consumed[id] = struct{}{}
+				// 重复 call-id 实测被上游容忍但按位置绑定：同 id 的第二个
+				// 调用不应再挂到同一份结果上，消费后即删除。
+				delete(byID, id)
 			}
 		}
 		// 未能配对的孤立结果按原序保留，不丢消息。
@@ -352,6 +386,7 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 		if _, ok := callIDs[prompt.GetToolCallId()]; ok {
 			continue
 		}
+		slog.Warn("demoted orphan tool result to user text", "tool_call_id", prompt.GetToolCallId())
 		demoted := &devinproto.ExaChatPb_ChatMessagePrompt{
 			MessageId: proto.String(randid.UUID()),
 			Source:    userSource.Enum(),
@@ -378,6 +413,9 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 			prompt.Thinking = proto.String(block.Thinking)
 			if block.ThinkingSignature != "" {
 				prompt.Signature = proto.String(block.ThinkingSignature)
+			}
+			if block.SignatureType != "" {
+				prompt.SignatureType = proto.String(block.SignatureType)
 			}
 			prompt.ThinkingRedacted = proto.Bool(block.Redacted)
 		case llm.ImageContent:

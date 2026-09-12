@@ -4,6 +4,7 @@ package devin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -116,7 +117,7 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 	// 上游把签名作为全部正文之后的尾随帧发送；思考块已关闭时
 	// 不能新开思考块，要把签名合并回上一个思考块。
 	if response.GetDeltaSignature() != "" && response.GetDeltaThinking() == "" && !decoder.thinkingOpen {
-		events = append(events, decoder.decodeLateSignature(response.GetDeltaSignature())...)
+		events = append(events, decoder.decodeLateSignature(response)...)
 	} else if response.GetDeltaThinking() != "" || response.GetDeltaSignature() != "" || response.GetThinkingRedacted() {
 		events = append(events, decoder.endText()...)
 		events = append(events, decoder.decodeThinking(response)...)
@@ -173,6 +174,9 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 	if response.MessageId != nil {
 		decoder.partial.ResponseID = response.GetMessageId()
 	}
+	if id := response.GetOutputId(); id != "" {
+		decoder.partial.OutputID = id
+	}
 	if id := response.GetRequestId(); id != "" && decoder.partial.UpstreamRequestID == "" {
 		decoder.partial.UpstreamRequestID = id
 	}
@@ -211,6 +215,7 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 				details, _ := json.Marshal(map[string]string{
 					"api_provider":        apiProvider,
 					"provider_request_id": providerRequestID,
+					"provider_message_id": usage.GetMessageId(),
 					"billing_model_uid":   usage.GetBillingModelUid(),
 				})
 				decoder.partial.Diagnostics = append(decoder.partial.Diagnostics, llm.AssistantMessageDiagnostic{
@@ -240,6 +245,11 @@ func (decoder *responseDecoder) decodeThinking(response *devinproto.GetChatMessa
 	}
 	if sig := response.GetDeltaSignature(); sig != "" {
 		decoder.thinkingSigBuilder.WriteString(sig)
+	}
+	if sigType := response.GetDeltaSignatureType(); sigType != "" {
+		// signature_type 决定签名载荷的格式（sealed/anthropic/openai），
+		// 重放时必须原样回传——实测错配触发上游 invalid_argument。
+		decoder.thinking.SignatureType = sigType
 	}
 	decoder.thinking.Redacted = decoder.thinking.Redacted || response.GetThinkingRedacted()
 	// 思考正文在 endThinking 再 materialize；签名通常较短，每帧同步签名避免 startReasoning 拿不到。
@@ -316,8 +326,14 @@ func (decoder *responseDecoder) decodeTool(delta *devinproto.ExaCodeiumCommonPb_
 	}
 	state := decoder.findTool(delta.GetId())
 	if state == nil {
+		id := delta.GetId()
+		if id == "" {
+			// 上游偶发首帧不带 id：合成稳定占位，保证 ToolCallStart
+			// 事件过得了 Validate，后续按位置续接参数增量。
+			id = fmt.Sprintf("call_%d", len(decoder.tools))
+		}
 		state = &toolState{
-			call:       llm.ToolCall{ID: delta.GetId(), Name: delta.GetName(), Arguments: json.RawMessage(`{}`)},
+			call:       llm.ToolCall{ID: id, Name: delta.GetName(), Arguments: json.RawMessage(`{}`)},
 			contentIdx: -1,
 		}
 		decoder.tools = append(decoder.tools, state)
@@ -328,8 +344,18 @@ func (decoder *responseDecoder) decodeTool(delta *devinproto.ExaCodeiumCommonPb_
 	if delta.GetName() != "" {
 		state.call.Name = delta.GetName()
 	}
+	if delta.GetIsCustomToolCall() {
+		state.call.Custom = true
+	}
 	fragment := delta.GetArgumentsJson()
 	hasFragment := delta.ArgumentsJson != nil
+	if invalid := delta.GetInvalidJsonStr(); invalid != "" {
+		// custom/freeform 工具的参数体本来就不是 JSON（如补丁文本），
+		// 原样透传给客户端而不是吞成 {}。
+		state.call.Custom = true
+		fragment = invalid
+		hasFragment = true
+	}
 	if hasFragment {
 		state.arguments.WriteString(fragment)
 	}
@@ -359,20 +385,38 @@ func (decoder *responseDecoder) decodeNativeTool(state *toolState, fragment stri
 }
 
 // decodeLateSignature 把思考块关闭后才到达的签名帧合并回上一个思考块。
-func (decoder *responseDecoder) decodeLateSignature(signature string) []llm.ResponseEvent {
+// 没有思考块可挂时合成一个空块：openai 体制下签名是唯一思考产物
+// （无 deltaThinking，推理内容密封在签名的 reasoning item 里），
+// 丢弃它会让 /v1/responses 下游永远拿不到 reasoning item。
+func (decoder *responseDecoder) decodeLateSignature(response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
+	signature := response.GetDeltaSignature()
 	for index := len(decoder.partial.Content) - 1; index >= 0; index-- {
 		thinking, ok := decoder.partial.Content[index].(llm.ThinkingContent)
 		if !ok {
 			continue
 		}
 		thinking.ThinkingSignature += signature
+		if sigType := response.GetDeltaSignatureType(); sigType != "" {
+			thinking.SignatureType = sigType
+		}
+		thinking.Redacted = thinking.Redacted || response.GetThinkingRedacted()
 		decoder.partial.Content[index] = thinking
 		return []llm.ResponseEvent{{
 			Type: llm.ResponseEventThinkingSignature, ContentIndex: index,
 			Delta: signature, Partial: &decoder.partial,
 		}}
 	}
-	return nil
+	thinking := llm.ThinkingContent{
+		ThinkingSignature: signature,
+		SignatureType:     response.GetDeltaSignatureType(),
+		Redacted:          response.GetThinkingRedacted(),
+	}
+	decoder.partial.Content = append(decoder.partial.Content, thinking)
+	index := len(decoder.partial.Content) - 1
+	return []llm.ResponseEvent{
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: &decoder.partial},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: index, Delta: signature, Partial: &decoder.partial},
+	}
 }
 
 func (decoder *responseDecoder) endThinking() []llm.ResponseEvent {
@@ -436,7 +480,10 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 		}
 		// 在结束时一次性把 Builder 中的完整参数转成 JSON，避免中间反复解析/拷贝。
 		state.call.Arguments = json.RawMessage(state.arguments.String())
-		if !isJSONObject(state.call.Arguments) {
+		if state.call.Custom {
+			// 原文即参数体（invalid_json_str 通道或客户端回灌的畸形 JSON），
+			// 不走 JSON 校验与 XML 修复。
+		} else if !isJSONObject(state.call.Arguments) {
 			// swe 系模型偶尔把 XML 参数语法泄漏进 arguments_json（CLI 实测），
 			// 先尝试把 <parameter name="X">v</parameter> 解回 JSON 再兜底 {}。
 			if repaired, ok := repairLeakedXMLArguments(state.arguments.String()); ok {
