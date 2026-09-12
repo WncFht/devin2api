@@ -38,6 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,15 +49,22 @@ jobs:
         id: meta
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          TAGS="docker.io/devinuser123/devin-2api:${VERSION}"
+          GHCR="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="${GHCR}:${VERSION}"
           # 仅稳定版（无 - 后缀）推 MINOR/MAJOR 浮动 tag：v0.1.0 → 0.1, 0
           if [[ "${VERSION}" != *-* ]]; then
             MINOR="${VERSION%.*}"
             MAJOR="${VERSION%%.*}"
-            TAGS="${TAGS},docker.io/devinuser123/devin-2api:${MINOR},docker.io/devinuser123/devin-2api:${MAJOR}"
+            TAGS="${TAGS},${GHCR}:${MINOR},${GHCR}:${MAJOR}"
           fi
-          # 所有发布（含预发布）都更新 latest
-          TAGS="${TAGS},docker.io/devinuser123/devin-2api:latest"
+          # latest 只跟随稳定版，预发布不动它
+          if [[ "${VERSION}" != *-* ]]; then
+            TAGS="${TAGS},${GHCR}:latest"
+          fi
+          # Docker Hub 在 secrets 配置后才会推送（条件登录见下）
+          if [[ -n "${DOCKERHUB_USERNAME}" ]]; then
+            TAGS="${TAGS},docker.io/${DOCKERHUB_USERNAME}/devin-2api:${VERSION},docker.io/${DOCKERHUB_USERNAME}/devin-2api:latest"
+          fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -64,7 +74,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
