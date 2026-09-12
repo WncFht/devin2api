@@ -170,8 +170,8 @@ const Overview = (() => {
   if (gp) gp.textContent = ':' + (location.port || '80');
 
   Tabs.register('overview', () => { refresh(); refreshSlow(); });
-  onVisible('overview', refresh, 10000);
-  onVisible('overview', refreshSlow, 60000);
+  Polls.add('overview', refresh, 10000);
+  Polls.add('overview', refreshSlow, 60000);
 
   return { refresh };
 })();

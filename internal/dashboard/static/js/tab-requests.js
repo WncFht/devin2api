@@ -1,11 +1,15 @@
 // 请求页：进行中请求表 + 筛选列表 + 行内详情 + 文件查看 + 导出 + 中断。
 // activeTable 同时被概览页复用渲染在途快照。
+// 轮询节奏跟随活跃度：有进行中请求 4s/轮（完成 ≤4s 落表），空闲 15s。
 
 const Requests = (() => {
   let expandedDir = null;
   let openFile = null;
   let reqLimit = 100;
   let lastActive = [];
+  let lastSig = '';        // 上轮渲染的行签名，一致则跳过 tbody 重建
+  let prevDirs = null;     // 上轮渲染出的 dir 集（null=首轮/刚重置，不做新行闪显）
+  let detailJson = '';     // 展开详情的上次响应 JSON，未变则不动 DOM
 
   const FILTER_IDS = ['reqSearch', 'fStatusClass', 'fResult', 'fReqModel', 'fErrStage', 'fSince'];
 
@@ -27,6 +31,7 @@ const Requests = (() => {
   }
 
   // 进行中请求渲染成表格顶部的 pending 行（ccLoad 式），状态变化随每轮列表刷新。
+  // 展开中的 pending 行同样给详情占位——进行中请求的调试目录已存在，可直接读。
   function pendingRows() {
     const stateMap = { waiting_upstream: '等上游', receiving_upstream: '收上游', streaming_client: '发客户端' };
     return lastActive.map(a =>
@@ -38,7 +43,8 @@ const Requests = (() => {
       '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
       '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
       '<td class="mono muted">已下发 ' + fmtBytes(a.client_bytes) + '</td>' +
-      '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + qa(a.dir) + '">中断</span>' : '') + '</td></tr>'
+      '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + qa(a.dir) + '">中断</span>' : '') + '</td></tr>' +
+      (expandedDir === a.dir ? '<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>' : '')
     ).join('');
   }
 
@@ -106,7 +112,9 @@ const Requests = (() => {
         reqCount.textContent = '命中 0 条'; moreBtn.style.display = 'none'; return;
       }
       let html = pendingRows();
+      const dirs = lastActive.map(a => a.dir);
       list.forEach(e => {
+        dirs.push(e.dir);
         const resolved = (e.model && e.model !== e.requested_model) ? ' → ' + esc(e.model) : '';
         const mismatch = e.model_mismatch ? ' <span class="badge badge-high">错配</span>' : '';
         const premature = e.premature_end_turn ? ' <span class="badge badge-medium" title="工具结果之后模型直接 end_turn，未继续调用工具">早停</span>' : '';
@@ -127,8 +135,28 @@ const Requests = (() => {
           html += '<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>';
         }
       });
-      tbody.innerHTML = html;
-      reqCount.textContent = '显示 ' + list.length + ' / 命中 ' + (data.total ?? list.length) + ' 条';
+      // 渲染签名不变就跳过 tbody 重建：空闲时零 DOM churn，
+      // hover/文本选中/已展开详情的 DOM 都不被打断（ccLoad 按 ID diff 的轻量版）。
+      if (html !== lastSig) {
+        // 展开中的详情节点先摘出来再塞回去，整体重建不清空它的内容/文件查看区。
+        const savedDetail = expandedDir ? tbody.querySelector('.detail-row') : null;
+        tbody.innerHTML = html;
+        if (savedDetail) {
+          const ph = tbody.querySelector('.detail-row');
+          if (ph) ph.replaceWith(savedDetail);
+          else { expandedDir = null; openFile = null; detailJson = ''; }
+        }
+        // 本轮新出现的 dir 闪显提示；首轮或刚换过滤条件(prevDirs=null)不闪。
+        if (prevDirs) {
+          tbody.querySelectorAll('tr[data-dir]').forEach(tr => {
+            if (!prevDirs.has(tr.dataset.dir)) tr.classList.add('row-new');
+          });
+        }
+        prevDirs = new Set(dirs);
+        lastSig = html;
+      }
+      reqCount.textContent = '显示 ' + list.length + ' / 命中 ' + (data.total ?? list.length) + ' 条' +
+        ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       moreBtn.style.display = (list.length < data.total && reqLimit < 500) ? '' : 'none';
       let hint = '';
       if (data.has_more) hint = '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
@@ -138,7 +166,7 @@ const Requests = (() => {
       if (expandedDir) fillDetail(expandedDir);
     } catch (e) {
       const h = $('reqHint');
-      h.style.display = ''; h.textContent = '请求列表刷新失败：' + String(e) + '（保留旧数据，10s 后重试）';
+      h.style.display = ''; h.textContent = '请求列表刷新失败：' + String(e) + '（保留旧数据，下轮自动重试）';
     }
   }
 
@@ -153,12 +181,13 @@ const Requests = (() => {
     loadActive().then(load);
   }
 
-  function resetAndLoad() { reqLimit = 100; tick(); }
+  function resetAndLoad() { reqLimit = 100; prevDirs = null; tick(); }
 
   // ---------- 行内详情 ----------
   function toggleDetail(dir) {
     if (expandedDir === dir) { expandedDir = null; openFile = null; load(); return; }
     expandedDir = dir;
+    detailJson = '';
     load();
   }
 
@@ -167,6 +196,9 @@ const Requests = (() => {
     if (!row) return;
     try {
       const d = await api('/requests/' + encodeURIComponent(dir));
+      const sig = JSON.stringify(d);
+      if (sig === detailJson) return;
+      detailJson = sig;
       const m = d.meta || {};
       // 失败请求：error.json 记的是首个失败点，提到最上方比埋在 meta 表格里更先被看到。
       let banner = '';
@@ -293,7 +325,7 @@ const Requests = (() => {
 
   bind();
   Tabs.register('requests', () => { restoreFilterHash(); tick(); });
-  onVisible('requests', tick, 10000);
+  Polls.add('requests', tick, () => lastActive.length ? 4000 : 15000);
 
   return { activeTable, resetAndLoad };
 })();

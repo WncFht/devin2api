@@ -89,7 +89,7 @@ const System = (() => {
   });
 
   Tabs.register('system', () => { loadStats(); loadLog(0); });
-  onVisible('system', loadStats, 10000);
-  onVisible('system', () => { if (procFollow) loadLog(procOffset); }, 5000);
+  Polls.add('system', loadStats, 10000);
+  Polls.add('system', () => { if (procFollow) loadLog(procOffset); }, 5000);
   return {};
 })();

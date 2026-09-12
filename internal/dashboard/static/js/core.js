@@ -277,6 +277,7 @@ const Tabs = {
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'page-' + name));
     document.querySelectorAll('#topNav a').forEach(a => a.classList.toggle('on', a.dataset.tab === name));
     this.handlers[name] && this.handlers[name]();
+    Polls.reset(name);
     // 页切换后已挂起的图表恢复显示，需要按新尺寸重排。
     setTimeout(() => {
       document.querySelectorAll('#page-' + name + ' .chart').forEach(el => {
@@ -287,11 +288,35 @@ const Tabs = {
   },
 };
 
-// onVisible 以固定间隔调用 fn，但仅在对应页面可见且文档前台时真正执行。
-// 每个 tab 模块在初始化时调用一次；定时器常驻、由 Tabs.current 门控。
-function onVisible(name, fn, ms) {
-  setInterval(() => { if (Tabs.current === name && !document.hidden) fn(); }, ms);
-}
+// Polls 是面板的轮询调度器（对齐 ccLoad createAutoRefresh 的行为）：
+// - setTimeout 链而非 setInterval——fn 落地才排下一轮，慢请求不会在飞叠加；
+// - 某轮若页面非当前页 / 浏览器后台 / 确认弹窗打开则跳过，下轮照常；
+// - interval 可为固定 ms 或 ()=>ms（按当前状态算节奏，如请求页活跃加速）；
+// - 浏览器标签回前台时对当前页 kick 一轮，不空等下个周期；
+// - Tabs.apply 切页时 reset 该页定时器，让下一次轮询从手动加载之后起算。
+const Polls = {
+  items: [],
+  add(name, fn, interval) {
+    const it = { name, fn, interval, timer: null };
+    const wait = () => typeof it.interval === 'function' ? it.interval() : it.interval;
+    const loop = async () => {
+      if (Tabs.current === it.name && !document.hidden && !document.querySelector('.dlg-mask')) {
+        try { await it.fn(); } catch (e) { /* 单次失败不挡后续轮询 */ }
+      }
+      it.timer = setTimeout(loop, wait());
+    };
+    it.kick = () => { clearTimeout(it.timer); loop(); };
+    it.reset = () => { clearTimeout(it.timer); it.timer = setTimeout(loop, wait()); };
+    it.timer = setTimeout(loop, wait());
+    this.items.push(it);
+    return it;
+  },
+  kick(name) { this.items.forEach(it => { if (it.name === name) it.kick(); }); },
+  reset(name) { this.items.forEach(it => { if (it.name === name) it.reset(); }); },
+};
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Tabs.current) Polls.kick(Tabs.current);
+});
 
 function parseHash() {
   const raw = location.hash.slice(1);

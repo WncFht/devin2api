@@ -297,7 +297,7 @@ const Usage = (() => {
 
   renderChips();
   Tabs.register('usage', load);
-  onVisible('usage', load, 60000);
+  Polls.add('usage', load, 60000);
 
   return {};
 })();

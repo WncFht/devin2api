@@ -115,6 +115,6 @@ const Quota = (() => {
   }
 
   Tabs.register('quota', load);
-  onVisible('quota', load, 60000);
+  Polls.add('quota', load, 60000);
   return {};
 })();
