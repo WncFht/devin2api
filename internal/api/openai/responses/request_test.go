@@ -296,3 +296,125 @@ func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
 		t.Fatalf("tools = %#v", request.Context.Tools)
 	}
 }
+
+// TestDecodeRequestAcceptsCallIDVariants 验证 function_call_output 的调用
+// ID 四种字段名都被接受：call_id 是规范，其余来自 Chat 习惯/驼峰/id 直用。
+func TestDecodeRequestAcceptsCallIDVariants(t *testing.T) {
+	for _, field := range []string{"call_id", "tool_call_id", "callId", "id"} {
+		data := []byte(`{"model":"m","input":[
+			{"type":"function_call","call_id":"c1","name":"t","arguments":"{}"},
+			{"type":"function_call_output","` + field + `":"c1","output":"ok"}
+		]}`)
+		request, err := DecodeRequest(data)
+		if err != nil {
+			t.Fatalf("%s: %v", field, err)
+		}
+		result, ok := request.Context.Messages[1].(llm.ToolResultMessage)
+		if !ok || result.ToolCallID != "c1" {
+			t.Fatalf("%s: message[1] = %#v", field, request.Context.Messages[1])
+		}
+	}
+}
+
+// TestDecodeRequestReplaysOpenAIReasoningSignature 验证 openai 型签名
+// （序列化 reasoning item 数组）从 encrypted_content 原样回放为
+// signature+signature_type——这是 Responses 多轮 reasoning 的回放通道。
+func TestDecodeRequestReplaysOpenAIReasoningSignature(t *testing.T) {
+	blob := `[{"id":"rs_9","type":"reasoning","encrypted_content":"gAAA","summary":[],"content":[],"status":""}]`
+	data := []byte(`{"model":"m","input":[
+		{"type":"reasoning","id":"rs_9","summary":[],"encrypted_content":` + "`" + blob + "`" + `},
+		{"type":"message","role":"assistant","id":"msg_7","content":[{"type":"output_text","text":"done"}]}
+	]}`)
+	data = []byte(strings.ReplaceAll(string(data), "`"+blob+"`", `"`+strings.ReplaceAll(blob, `"`, `\"`)+`"`))
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, ok := request.Context.Messages[0].(llm.AssistantMessage)
+	if !ok {
+		t.Fatalf("message[0] = %T", request.Context.Messages[0])
+	}
+	thinking, ok := assistant.Content[0].(llm.ThinkingContent)
+	if !ok || thinking.SignatureType != "openai" || thinking.ThinkingSignature != blob {
+		t.Fatalf("thinking block = %#v", assistant.Content[0])
+	}
+	if !thinking.Redacted {
+		t.Fatal("signature-only reasoning must be marked redacted")
+	}
+	if assistant.OutputID != "msg_7" {
+		t.Fatalf("OutputID = %q, want msg_7", assistant.OutputID)
+	}
+}
+
+// TestDecodeRequestDropsForeignReasoningPayload 验证外来不透明
+// encrypted_content（既非 sealed.* 也非 reasoning item JSON）不透传。
+func TestDecodeRequestDropsForeignReasoningPayload(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"reasoning","summary":[],"encrypted_content":"gAAAAB-foreign"},
+		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+	]}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := request.Context.Messages[0].(llm.AssistantMessage)
+	for _, block := range assistant.Content {
+		if thinking, ok := block.(llm.ThinkingContent); ok && thinking.ThinkingSignature != "" {
+			t.Fatalf("foreign signature must be dropped, got %#v", thinking)
+		}
+	}
+	found := false
+	for _, d := range request.Context.Dropped {
+		if d == "reasoning:encrypted_content" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dropped = %#v, want reasoning:encrypted_content", request.Context.Dropped)
+	}
+}
+
+// TestDecodeRequestCustomToolCall 验证 custom_tool_call item 的 input 原文
+// 走 Custom 通道——freeform 参数体不是 JSON。
+func TestDecodeRequestCustomToolCall(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n+x"},
+		{"type":"custom_tool_call_output","call_id":"c1","output":"patched"}
+	]}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := request.Context.Messages[0].(llm.AssistantMessage)
+	call, ok := assistant.Content[0].(llm.ToolCall)
+	if !ok || !call.Custom || string(call.Arguments) != "*** Begin Patch\n+x" {
+		t.Fatalf("custom tool call = %#v", assistant.Content[0])
+	}
+	result := request.Context.Messages[1].(llm.ToolResultMessage)
+	if result.ToolCallID != "c1" {
+		t.Fatalf("custom_tool_call_output = %#v", result)
+	}
+}
+
+// TestDecodeRequestToolOutputPartArray 验证 function_call_output 的 output
+// part 数组（含 input_image）解码为内容块而不是字面 JSON 文本。
+func TestDecodeRequestToolOutputPartArray(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"function_call","call_id":"c1","name":"shot","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[
+			{"type":"input_text","text":"see"},
+			{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}
+		]}
+	]}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := request.Context.Messages[1].(llm.ToolResultMessage)
+	if len(result.Content) != 2 {
+		t.Fatalf("tool result content = %#v", result.Content)
+	}
+	if _, ok := result.Content[1].(llm.ImageContent); !ok {
+		t.Fatalf("content[1] = %T, want ImageContent", result.Content[1])
+	}
+}
