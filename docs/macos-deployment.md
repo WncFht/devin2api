@@ -25,8 +25,11 @@ cdhash 记，每次重建二进制即失效）。因此二进制、`config.yaml`
 `deploy.sh` 每次部署同步到运行目录；单改配置可
 `cp config.yaml "$RT/" && launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
 
-- 进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）：停服会先 flush
-  日志索引、排空异步写队列，再退出。`ExitTimeOut=60` 给了充足余量。
+- 进程实现 `SIGTERM` 优雅重启（`signal.NotifyContext`）：收到信号后进入
+  draining——监听器保持打开，`/healthz` 继续应答但带 `draining: true`，
+  新的 `/v1/*` 请求立即得到 `503 + Retry-After: 1`（客户端可重试），
+  已在途的请求继续跑完；排空上限 50s，超时强关剩余连接再退出。
+  `ExitTimeOut=60` 覆盖排空上限加余量。
 - 请求级 debug 日志的生命周期由 `debug.retention_days` /
   `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs`
   自管；launchd 侧无需额外配置。
@@ -98,11 +101,14 @@ scripts/deploy.sh --release latest   # 同上，装最新 release
 
 脚本做四件事：以 `git describe --tags --always --dirty` 注入
 `main.version` 构建新二进制、`-version` 自检、安装到运行目录并同步
-`config.yaml`、kickstart 后轮询
-`/healthz` 确认线上版本与刚构建的一致（不一致说明端口被其它实例抢占）。
-launchd 发 SIGTERM 后进程优雅退出立即拉起，停机约一秒。`git describe`
-输出形如 `f43a8f7`（无 tag 时的短 SHA）或 `v0.1.0-3-gabc1234`（tag 之后
-第 3 个提交），工作区有未提交改动带 `-dirty` 后缀。
+`config.yaml`、kickstart 后轮询 `/healthz` 直到 **version 字段等于刚构建
+的版本**——排空期旧进程仍在应答旧版本，首次 200 不代表切换完成（版本一直
+不变说明端口被其它实例抢占）。排空在途请求期间 `healthz`/`/v1/*` 全程可达，
+新连接只会短暂收到 `503 + Retry-After`，无 connection refused 窗口；
+真正无进程应答的空窗是「旧进程排空退出 → launchd 拉起新进程」之间。
+`git describe` 输出形如 `f43a8f7`（无 tag 时的短 SHA）或
+`v0.1.0-3-gabc1234`（tag 之后第 3 个提交），工作区有未提交改动带
+`-dirty` 后缀。
 
 冒烟验证**不要用 :3003/:3004**——用空闲端口起临时二进制，验证完再决定
 替换（这两个端口曾有旧构建残留导致误判的历史）。

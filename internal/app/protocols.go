@@ -21,9 +21,49 @@ type protocolEncoder interface {
 	// EncodeError 把错误编码为该协议形状的错误 JSON 体——非流式心跳
 	// 已提交 200 后，错误只能以错误体下发，形状按客户端协议决定。
 	EncodeError(err error, debugRef string) []byte
+	// EncodeHTTPError 把错误编码为该协议形状的完整错误响应体，供
+	// 未提交响应头的 HTTP 错误路径使用：/v1/messages 的失败必须是
+	// Anthropic 的 {"type":"error","error":{...}} 信封，回 OpenAI 形状
+	// 时 Claude Code 等客户端解析不出 error 字段。
+	EncodeHTTPError(e httpError) []byte
 	// AppendSSE 把单个 SSE 事件追加编码到 dst；写方持有 dst 的所有权，
 	// 避免每帧先分配临时切片再整体拷贝进批次缓冲。
 	AppendSSE(dst []byte, name string, data []byte) []byte
+}
+
+// httpError 是 app 层归一化后的错误视图：协议层只负责把同一组字段
+// 装进各自的信封。ClientFixable 为真时错误类型统一为
+// invalid_request_error（两侧协议对该语义同名）。
+type httpError struct {
+	// Message 是透传给客户端的错误原文（不改写上游文案）。
+	Message string
+	// ClientFixable 标记客户端可修正的请求错误（图片不支持/
+	// invalid_argument/超长），覆盖协议默认类型推导。
+	ClientFixable bool
+	// Stage 是失败发生的处理层（http_decode/provider_stream 等）。
+	Stage string
+	// DebugRef 是本地调试目录名；空串省略。
+	DebugRef string
+}
+
+// openAIHTTPError 编码 OpenAI 系（chat/responses 共享）的 HTTP 错误体。
+func openAIHTTPError(e httpError) []byte {
+	errorType := common.OpenAIErrorType(e.Message)
+	if e.ClientFixable {
+		errorType = "invalid_request_error"
+	}
+	payload := map[string]any{
+		"message": e.Message, "type": errorType,
+		"code": common.ErrorCode(e.Message), "param": nil, "stage": e.Stage,
+	}
+	for key, value := range common.UpstreamErrorDetails(e.Message) {
+		payload[key] = value
+	}
+	if e.DebugRef != "" {
+		payload["debug_ref"] = e.DebugRef
+	}
+	body, _ := json.Marshal(map[string]any{"error": payload})
+	return append(body, '\n')
 }
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
@@ -68,6 +108,10 @@ func (p responsesProtocol) EncodeError(err error, debugRef string) []byte {
 	return openAIErrorBody(err, debugRef)
 }
 
+func (p responsesProtocol) EncodeHTTPError(e httpError) []byte {
+	return openAIHTTPError(e)
+}
+
 func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
 }
@@ -85,6 +129,10 @@ func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error)
 
 func (p chatProtocol) EncodeError(err error, debugRef string) []byte {
 	return openAIErrorBody(err, debugRef)
+}
+
+func (p chatProtocol) EncodeHTTPError(e httpError) []byte {
+	return openAIHTTPError(e)
 }
 
 func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
@@ -119,6 +167,25 @@ func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
 	}
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return body
+}
+
+func (p anthropicProtocol) EncodeHTTPError(e httpError) []byte {
+	errorType := common.AnthropicErrorType(e.Message)
+	if e.ClientFixable {
+		errorType = "invalid_request_error"
+	}
+	payload := map[string]any{
+		"type": errorType, "message": e.Message,
+		"code": common.ErrorCode(e.Message), "stage": e.Stage,
+	}
+	for key, value := range common.UpstreamErrorDetails(e.Message) {
+		payload[key] = value
+	}
+	if e.DebugRef != "" {
+		payload["debug_ref"] = e.DebugRef
+	}
+	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
+	return append(body, '\n')
 }
 
 func (p anthropicProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {

@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter"
@@ -76,6 +78,11 @@ type App struct {
 	version string
 	// startedAt 是应用创建时间，供 healthz 报 uptime。
 	startedAt time.Time
+	// draining 置位后并发槽获取点转为快速 503：进程即将退出，
+	// 下游网关应立即换路重试，而不是把请求塞进一个要退出的实例。
+	draining atomic.Bool
+	// inflight 跟踪占用并发槽的请求与 WS 轮次，供优雅退出等待排空。
+	inflight sync.WaitGroup
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -162,6 +169,9 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 		"version":        application.version,
 		"uptime_seconds": int64(time.Since(application.startedAt).Seconds()),
 		"debug_logging":  application.debugManager.Enabled(),
+		// 排空期 healthz 仍应答——部署脚本靠 version+draining 区分
+		// 「旧实例还在排」与「新实例已接管」。
+		"draining": application.draining.Load(),
 	})
 }
 
@@ -254,9 +264,52 @@ func writeRateLimitError(writer http.ResponseWriter, message string) {
 	})
 }
 
+// writeDrainingError 在优雅退出排空期返回 503 + Retry-After：实例即将退出，
+// 下游应立即换路重试；Refused 连接与挂在半路的流都换成一个可行动的错误。
+func writeDrainingError(writer http.ResponseWriter) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Retry-After", "1")
+	writer.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(writer).Encode(map[string]any{
+		"error": map[string]any{"message": "server is draining for restart; retry the request", "type": "server_error", "code": "server_draining", "param": nil},
+	})
+}
+
+// BeginDrain 进入排空态：新请求快速 503，在途请求继续跑完。
+// listener 保持开启由调用方控制——http.Server.Shutdown 会先关 listener 再
+// 等在途连接，排空期整段变成 connection refused；这里改为排空结束才 Close。
+func (application *App) BeginDrain() { application.draining.Store(true) }
+
+// Draining 报告是否处于排空态，供 healthz 透出。
+func (application *App) Draining() bool { return application.draining.Load() }
+
+// WaitDrain 阻塞到在途并发槽清空或 ctx 超时；超时返回错误，调用方负责强制 Close。
+func (application *App) WaitDrain(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		application.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // concurrencyMiddleware 限制同时处理的 /v1/* 请求数，避免上游阻塞时资源耗尽。
 func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		// Add 先于 draining 检查：排空等待才能覆盖所有已经进入的请求，
+		// 被拒绝的请求瞬时 Done，不占排空时间。
+		application.inflight.Add(1)
+		defer application.inflight.Done()
+		if application.draining.Load() {
+			application.metrics.Reject()
+			writeDrainingError(writer)
+			return
+		}
 		select {
 		case application.concurrency <- struct{}{}:
 			defer func() { <-application.concurrency }()
@@ -344,9 +397,13 @@ func (application *App) createCompletion(
 	})
 	// reqCtx 供面板 Abort 主动中断：cancel 挂到 recorder 上，
 	// Complete 时 recorder 自动解除挂接，defer cancel 兜底释放。
-	reqCtx, cancel := context.WithCancel(request.Context())
-	defer cancel()
-	recorder.SetAbort(cancel)
+	// WithCancelCause 让中断原因沿 ctx 链传到事件泵/上游 Recv——
+	// 客户端看到的错误是「aborted via panel」而非裸 context.Canceled。
+	reqCtx, cancel := context.WithCancelCause(request.Context())
+	defer cancel(nil)
+	recorder.SetAbort(func() {
+		cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
+	})
 	// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
 	// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
 	// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
@@ -382,11 +439,11 @@ func (application *App) createCompletion(
 			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
 			completion.StatusCode = http.StatusRequestEntityTooLarge
-			writeLoggedError(writer, recorder, "http_read", completion.StatusCode, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
+			writeLoggedError(writer, recorder, protocol, "http_read", completion.StatusCode, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
 		completion.StatusCode = http.StatusBadRequest
-		writeLoggedError(writer, recorder, "http_read", completion.StatusCode, fmt.Errorf("read request: %w", err))
+		writeLoggedError(writer, recorder, protocol, "http_read", completion.StatusCode, fmt.Errorf("read request: %w", err))
 		return
 	}
 	if recorder != nil {
@@ -397,7 +454,7 @@ func (application *App) createCompletion(
 	messages, options, err := decoder(body)
 	if err != nil {
 		completion.StatusCode = http.StatusBadRequest
-		writeLoggedError(writer, recorder, "http_decode", completion.StatusCode, err)
+		writeLoggedError(writer, recorder, protocol, "http_decode", completion.StatusCode, err)
 		return
 	}
 	completion.Model = messages.Model
@@ -421,13 +478,14 @@ func (application *App) createCompletion(
 		out.flusher = flusher
 		out.heartbeat = []byte("\n")
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	streamCtx, stopStream := context.WithCancel(ctx)
+	defer stopStream()
 	items := startStreamPump(streamCtx, application.adapter, messages, recorder)
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
+		noteRetryAfter(recorder, err.Error())
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", err)
@@ -446,14 +504,14 @@ func (application *App) createCompletion(
 			return
 		}
 		completion.StatusCode = mapProviderErrorStatus(err)
-		writeLoggedError(writer, recorder, "response_event", completion.StatusCode, err)
+		writeLoggedError(writer, recorder, protocol, "response_event", completion.StatusCode, err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
 	body, err = protocol.EncodeFinal(message)
 	if err != nil {
 		completion.StatusCode = http.StatusInternalServerError
-		writeLoggedError(writer, recorder, "http_encode", completion.StatusCode, err)
+		writeLoggedError(writer, recorder, protocol, "http_encode", completion.StatusCode, err)
 		return
 	}
 	if err := out.writeContent(body); err != nil {
@@ -574,22 +632,19 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 	}
 }
 
-func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, stage string, status int, err error) {
+func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) {
 	recorder.WriteError(stage, err)
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
 	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
 	message := err.Error()
-	errorType := common.OpenAIErrorType(message)
-	// 客户端可修正的错误用 invalid_request_error，便于 IDE 直接展示。
-	if status == http.StatusBadRequest ||
+	// 客户端可修正的错误统一报 invalid_request_error（两个协议对该语义
+	// 同名），便于 IDE 直接展示；状态码同样压回 4xx。
+	clientFixable := status == http.StatusBadRequest ||
 		status == http.StatusRequestEntityTooLarge ||
 		strings.Contains(message, "does not support image") ||
-		strings.Contains(message, "invalid_argument") ||
-		strings.HasPrefix(message, "invalid_argument:") {
-		errorType = "invalid_request_error"
-		if status >= 500 {
-			status = http.StatusBadRequest
-		}
+		strings.Contains(message, "invalid_argument")
+	if clientFixable && status >= 500 {
+		status = http.StatusBadRequest
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	// 上游限流文案里的 reset 秒数是唯一可行动的 hint——翻成标准
@@ -599,25 +654,26 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, s
 			writer.Header().Set("Retry-After", strconv.Itoa(seconds))
 		}
 	}
+	noteRetryAfter(recorder, message)
 	writer.WriteHeader(status)
-	// 透传完整 message，不改写上游文案；stage 标明失败发生在哪一层，
+	// 错误体按客户端协议成形：/v1/messages 必须回 Anthropic 信封，
+	// 否则 Claude Code 解析不出 error 字段。stage 标明失败发生在哪一层，
 	// debug_ref 是本地调试目录名，agent 凭它一次调用即可拿到全部证据。
-	payload := map[string]any{
-		"message": message,
-		"type":    errorType,
-		"code":    common.ErrorCode(message),
-		"param":   nil,
-		"stage":   stage,
+	body := protocol.EncodeHTTPError(httpError{
+		Message: message, ClientFixable: clientFixable,
+		Stage: stage, DebugRef: debugRef(recorder),
+	})
+	_, _ = writer.Write(body)
+	recorder.AppendJSONL("06-http-response.jsonl", "error", json.RawMessage(body))
+}
+
+// noteRetryAfter 把上游限流文案里的 reset 秒数记进请求日志——无论它最终
+// 走 Retry-After 头（未提交 429）还是已提交后的错误体下发，索引里都有可查的
+// 结构化 hint，grep/聚合不必再解析文案。
+func noteRetryAfter(recorder *debuglog.Recorder, message string) {
+	if seconds, ok := common.RetryAfterSeconds(message); ok {
+		recorder.SetRetryAfter(seconds)
 	}
-	for key, value := range common.UpstreamErrorDetails(message) {
-		payload[key] = value
-	}
-	if ref := debugRef(recorder); ref != "" {
-		payload["debug_ref"] = ref
-	}
-	response := map[string]any{"error": payload}
-	_ = json.NewEncoder(writer).Encode(response)
-	recorder.AppendJSONL("06-http-response.jsonl", "error", response)
 }
 
 // mapProviderErrorStatus 将上游/适配器错误映射为合适的 HTTP 状态，message 仍原样透传。

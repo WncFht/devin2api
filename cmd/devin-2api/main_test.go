@@ -3,24 +3,15 @@ package main
 
 import (
 	"context"
-	"errors"
+	"net"
+	"net/http"
 	"testing"
+
+	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/app"
+	"github.com/WncFht/devin2api/internal/config"
+	"github.com/WncFht/devin2api/internal/debuglog"
 )
-
-type fakeServer struct {
-	shutdown bool
-}
-
-func (server *fakeServer) ListenAndServe() error {
-	return errors.New("listen stopped")
-}
-
-func (server *fakeServer) Shutdown(context.Context) error {
-	server.shutdown = true
-	return nil
-}
-
-func (server *fakeServer) Close() error { return nil }
 
 // TestListenURL verifies listen address descriptions used in the startup log.
 func TestListenURL(t *testing.T) {
@@ -40,11 +31,17 @@ func TestListenURL(t *testing.T) {
 
 // TestRunReturnsServeError verifies unexpected server failures are returned to main.
 func TestRunReturnsServeError(t *testing.T) {
-	server := &fakeServer{}
-	if err := run(context.Background(), server); err == nil {
-		t.Fatal("run() error = nil, want serve error")
+	// 已关闭的 listener 让 Serve 立即返回错误——无需伪造 server。
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if server.shutdown {
-		t.Fatal("server was shut down after an unexpected serve failure")
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	application := app.New(adapter.Unavailable{Reason: "test"}, config.ServerConfig{},
+		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}))
+	if err := run(context.Background(), application, &http.Server{}, listener); err == nil {
+		t.Fatal("run() error = nil, want serve error")
 	}
 }

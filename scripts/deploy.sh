@@ -111,25 +111,24 @@ fi
 OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
-echo "==> waiting for healthz (old pid: ${OLD_PID:-?})"
-# 新进程要回放 index.jsonl（数千条）并过 Gatekeeper 检查，实测 14s+。
-for _ in $(seq 1 60); do
+echo "==> waiting for healthz version=${VERSION} (old pid: ${OLD_PID:-?})"
+# 优雅重启期间旧进程继续应答 healthz（旧版本 + draining 标记），
+# 首次 200 不代表新实例已接管——必须轮询到版本匹配才确认。
+# 排空上限 50s + 新进程 Gatekeeper/启动，预留 ~90s。
+RUNNING=""
+for _ in $(seq 1 180); do
 	HEALTH="$(curl -sf -m 2 "${HEALTH_URL}" 2>/dev/null || true)"
 	if [[ -n "${HEALTH}" ]]; then
-		break
+		RUNNING="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","<none>"))' <<<"${HEALTH}")"
+		[[ "${RUNNING}" == "${VERSION}" ]] && break
 	fi
 	sleep 0.5
 done
-[[ -n "${HEALTH:-}" ]] || {
-	echo "healthz did not come up in 30s; check logs/stderr.log" >&2
+[[ "${RUNNING}" == "${VERSION}" ]] || {
+	echo "healthz 未出现新版本 (last=${RUNNING:-<none>}); check logs/stderr.log" >&2
 	exit 1
 }
 
-RUNNING="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("version","<none>"))' <<<"${HEALTH}")"
 NEW_PID="$(launchctl print "gui/$(id -u)/${LABEL}" | awk '/^[ \t]*pid = /{print $3}')"
 echo "==> running: pid=${NEW_PID} version=${RUNNING}"
-if [[ "${RUNNING}" != "${VERSION}" ]]; then
-	echo "WARN: healthz version ${RUNNING} != built ${VERSION} (端口可能被其它实例抢占)" >&2
-	exit 1
-fi
 echo "done"

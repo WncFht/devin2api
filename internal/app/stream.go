@@ -77,7 +77,9 @@ func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, 
 				return llm.ResponseEvent{}, err
 			}
 		case <-ctx.Done():
-			return llm.ResponseEvent{}, ctx.Err()
+			// Cause 携带取消原因：面板 abort 给的是「aborted via panel」
+			// 而不是裸 context.Canceled，客户端/日志能区分主动中断。
+			return llm.ResponseEvent{}, context.Cause(ctx)
 		}
 	}
 }
@@ -140,7 +142,7 @@ func (application *App) streamCompletion(
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
 		completion.StatusCode = http.StatusInternalServerError
-		writeLoggedError(writer, recorder, "http_stream", completion.StatusCode, errors.New("streaming response writer does not support flushing"))
+		writeLoggedError(writer, recorder, protocol, "http_stream", completion.StatusCode, errors.New("streaming response writer does not support flushing"))
 		return
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
@@ -158,7 +160,7 @@ func (application *App) streamCompletion(
 	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
 		if !out.committed {
 			completion.StatusCode = mapProviderErrorStatus(firstErr)
-			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, firstErr)
+			writeLoggedError(writer, recorder, protocol, "provider_stream", completion.StatusCode, firstErr)
 			return
 		}
 		firstEvent = llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
@@ -184,7 +186,7 @@ func (application *App) streamCompletion(
 			}
 		} else {
 			completion.StatusCode = mapProviderErrorStatus(errors.New(message))
-			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, errors.New(message))
+			writeLoggedError(writer, recorder, protocol, "provider_stream", completion.StatusCode, errors.New(message))
 			return
 		}
 	}
@@ -194,6 +196,7 @@ func (application *App) streamCompletion(
 	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {
+		noteRetryAfter(recorder, streamErr.Error())
 		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", streamErr)

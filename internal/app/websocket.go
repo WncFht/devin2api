@@ -368,6 +368,13 @@ func (w *wsResponseWriter) withDebugRef(data []byte) []byte {
 // 读循环与 turn 处理分离——turn 进行中 reader goroutine 继续消费控制帧
 // （ping/pong/close）与排队下一帧，客户端断连能及时取消上游。
 func (application *App) responsesWebSocket(writer http.ResponseWriter, request *http.Request) {
+	// 排空期拒绝新连接：进程即将退出，升级成功的连接也活不过排空上限，
+	// 不如让客户端立刻换路。
+	if application.draining.Load() {
+		application.metrics.Reject()
+		writeDrainingError(writer)
+		return
+	}
 	// 连接级准入：与上游并发槽分开计量，空闲长连接不占并发额度。
 	select {
 	case application.wsConns <- struct{}{}:
@@ -497,10 +504,22 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			continue
 		}
 
+		// inflight.Add 先于 draining 检查：排空等待覆盖所有已开始的轮次。
+		application.inflight.Add(1)
+		// 排空期拒新轮次并断开：连接在排空结束时注定被 Close，
+		// 提前断开让客户端尽早重连到即将接管的新实例。
+		if application.draining.Load() {
+			application.inflight.Done()
+			if err := writeWSErrorEvent(conn, http.StatusServiceUnavailable, "server_error", "server_draining", "", "server is draining for restart; resend the request"); err != nil {
+				slog.Debug("websocket drain notice failed", "error", obs.Diagnostic(err))
+			}
+			return
+		}
 		// 并发槽按轮次获取：连接的空闲期不烧额度，溢出回 429 事件不断连。
 		select {
 		case application.concurrency <- struct{}{}:
 		default:
+			application.inflight.Done()
 			application.metrics.Reject()
 			if err := writeWSErrorEvent(conn, http.StatusTooManyRequests, "rate_limit_error", "rate_limit", "", "server is busy, please try again later"); err != nil {
 				return
@@ -509,6 +528,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		}
 		turnWriter, turnErr := application.runWSTurn(connCtx, conn, request, normalized)
 		<-application.concurrency
+		application.inflight.Done()
 
 		if turnErr != nil {
 			// 写出层失败（断连/close sent）——连接已不可用，直接退出。
