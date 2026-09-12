@@ -140,6 +140,13 @@ func (adapter *Adapter) currentToken() string {
 	return adapter.token
 }
 
+// TokenFunc 返回读取当前凭据的函数，供面板等共享同一上游账号的组件
+// 跟随 adapter 的 unauthenticated 自愈结果——凭据续期后各方拿到的是
+// 同一份新 token，而不是启动时的静态快照。
+func (adapter *Adapter) TokenFunc() func() string {
+	return adapter.currentToken
+}
+
 // reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
 // 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
 // 凭据静默失效是排障天敌，进程日志里必须留痕。
@@ -199,6 +206,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	recorder := debuglog.FromContext(ctx)
 	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
+	// attempt 计数区分多次发送：自愈重发与 pre-content reopen 都会重建
+	// 请求体，attempt2+ 写独立文件并在 04 里留 retry_attempt 分界行，
+	// 否则 04 的帧无法归因到具体哪次发送。
+	attempt := 1
 	// streamCtx 由 responseStream 持有：看门狗判死或客户端断开时
 	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -209,7 +220,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		cfg.Token = adapter.currentToken()
 		if rebuilt, buildErr := buildRequest(request, cfg); buildErr == nil {
 			protoRequest = rebuilt
-			recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
+			attempt++
+			recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
+				"attempt": attempt,
+				"cause":   "unauthenticated: token reloaded",
+			})
+			recordProtoJSON(recorder, fmt.Sprintf("03-devin-request.attempt%d.json", attempt), protoRequest)
 			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest)
 		}
 	}
@@ -229,15 +245,19 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 语义错误（invalid_argument 等）重试只会复现同样失败，直接放行。
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			retryRequest := request
+			var causeText string
 			if continueEmpty {
 				// 空 end_turn（有 stopReason 零内容，上游实测存在的退化形态）：
 				// 追加 "continue" 用户消息重发一次，让模型在同一上下文续说。
 				retryRequest.Messages = append(append([]llm.Message{}, request.Messages...),
 					llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}})
+				causeText = "empty end_turn: continue"
 				slog.Warn("reopening stream: upstream ended with empty content")
 			} else if isTransientConnectError(cause) {
+				causeText = "transport: " + cause.Error()
 				slog.Warn("reopening stream: transport error before first content", "error", cause)
 			} else if isUnauthenticated(cause) && adapter.reloadToken() {
+				causeText = "unauthenticated: token reloaded"
 				slog.Info("reopening stream: token reloaded after unauthenticated")
 			} else {
 				return nil, nil, cause
@@ -248,7 +268,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			rebuilt, err := buildRequest(retryRequest, retryCfg)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
-				recordProtoJSON(recorder, "03-devin-request.json", rebuilt)
+				attempt++
+				recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
+					"attempt":        attempt,
+					"cause":          causeText,
+					"continue_empty": continueEmpty,
+				})
+				recordProtoJSON(recorder, fmt.Sprintf("03-devin-request.attempt%d.json", attempt), rebuilt)
 				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt)
 			}
 			if err != nil {
@@ -277,7 +303,7 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			backoff := time.Duration(float64(base) * (0.75 + 0.5*rand.Float64()))
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, context.Cause(ctx)
 			case <-time.After(backoff):
 			}
 		}
@@ -451,9 +477,16 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 
 	name, version, os := a.config.clientIdentity()
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
-		Metadata: upstream.BuildMetadata(a.config.Token, name, version, os, 0),
+		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
 	if err != nil {
+		// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
+		// 能力位校验同时失去依据，比数据稍旧危害更大。不续期 TTL——
+		// 下次调用仍重试拉取，恢复后自然回到新数据。
+		if a.models != nil {
+			slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
+			return a.models, nil
+		}
 		return nil, fmt.Errorf("Devin GetCliModelConfigs: %w", err)
 	}
 	now := time.Now().Unix()
@@ -637,7 +670,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				var upstreamErr error
 				if ok {
 					upstreamErr = frame.err
-				} else if ctxErr := ctx.Err(); ctxErr != nil {
+				} else if ctxErr := context.Cause(ctx); ctxErr != nil {
 					// ok==false 只剩「泵协程随 ctx 取消退出」一种来源
 					//（终帧无条件投递）。把取消透传给 finish，避免以
 					// 正常 EOF 的形态吞掉被截断的流。
@@ -677,7 +710,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		case <-ctx.Done():
 			stall.Stop()
 			stream.cancel()
-			stream.queue = stream.release(stream.decoder.finish(ctx.Err()))
+			stream.queue = stream.release(stream.decoder.finish(context.Cause(ctx)))
 			stream.finished = true
 		}
 	}
