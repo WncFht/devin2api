@@ -97,7 +97,7 @@ scripts/deploy.sh                    # 构建 → 替换二进制 → kickstart 
 scripts/deploy.sh --no-restart       # 只构建替换，不重启
 scripts/deploy.sh --release v0.2.0   # 下载 GitHub Release 预编译二进制（sha256 校验）后替换
 scripts/deploy.sh --release latest   # 同上，装最新 release
-scripts/deploy.sh --check            # 对比 已安装/运行中/最新 release 版本，落后时 exit 1
+scripts/deploy.sh --check            # 对比 已安装/运行中/最新 release 版本，与 latest 不一致时 exit 1
 ```
 
 首装不需要手工处理 launchd：服务未加载时 `deploy.sh` 会按本文「当前 plist」

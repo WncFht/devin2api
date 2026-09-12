@@ -3,7 +3,8 @@
 # 用法: scripts/deploy.sh [--release <tag|latest>] [--no-restart] [--check]
 #   --release     安装 GitHub Release 预编译二进制（校验 sha256）；缺省为源码构建
 #   --no-restart  只替换二进制，不 kickstart（下次自然重启时生效）
-#   --check       只对比 已安装/运行中/最新 release 版本，不做变更；落后时 exit 1
+#   --check       只对比 已安装/运行中/最新 release 版本，不做变更；
+#                 与 latest 不一致时 exit 1（源码构建的超前版本也会触发）
 #
 # launchd 服务未加载时自动生成 plist 并 bootstrap，因此首装与升级同一条命令：
 # 新机器只要同步本仓库再跑 deploy.sh。
