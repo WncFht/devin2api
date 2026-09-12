@@ -1465,31 +1465,30 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	prompts := converted.GetChatMessagePrompts()
-	if len(prompts) != 5 {
-		t.Fatalf("prompt count = %d, want 5 (user, assistant text, call, result, user)", len(prompts))
+	if len(prompts) != 4 {
+		t.Fatalf("prompt count = %d, want 4 (user, assistant, result, user)", len(prompts))
 	}
-	assistantText := prompts[1]
-	if assistantText.GetPrompt() != "checking" {
-		t.Fatalf("assistant text prompt = %q", assistantText.GetPrompt())
+	assistant := prompts[1]
+	if assistant.GetPrompt() != "checking" {
+		t.Fatalf("assistant text prompt = %q", assistant.GetPrompt())
 	}
-	if assistantText.GetThinking() != "need to read the file" ||
-		assistantText.GetSignature() != "sealed.v1.abc" ||
-		assistantText.GetSignatureType() != "sealed" ||
-		assistantText.GetOutputId() != "msg_1" {
-		t.Fatalf("assistant replay metadata = %#v", assistantText)
+	if assistant.GetThinking() != "need to read the file" ||
+		assistant.GetSignature() != "sealed.v1.abc" ||
+		assistant.GetSignatureType() != "sealed" ||
+		assistant.GetOutputId() != "msg_1" {
+		t.Fatalf("assistant replay metadata = %#v", assistant)
 	}
-	call := prompts[2]
-	if len(call.GetToolCalls()) != 1 || call.GetToolCalls()[0].GetId() != "read_file_0" ||
-		call.GetToolCalls()[0].GetArgumentsJson() != `{"path":"a.txt"}` {
-		t.Fatalf("call prompt = %#v", call)
+	if len(assistant.GetToolCalls()) != 1 || assistant.GetToolCalls()[0].GetId() != "read_file_0" ||
+		assistant.GetToolCalls()[0].GetArgumentsJson() != `{"path":"a.txt"}` {
+		t.Fatalf("assistant merged tool calls = %#v", assistant)
 	}
-	result := prompts[3]
+	result := prompts[2]
 	if result.GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL ||
 		result.GetToolCallId() != "read_file_0" || result.GetPrompt() != "file body" {
 		t.Fatalf("result prompt = %#v", result)
 	}
-	// 契约核心：call 与 result 必须邻接（grouped 形态上游 invalid_argument）。
-	if prompts[2].GetSource() != assistantSource || prompts[3].GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL {
+	// 契约核心：携带 call 的 prompt 与 result 必须邻接（grouped 形态上游 invalid_argument）。
+	if prompts[1].GetSource() != assistantSource || prompts[2].GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL {
 		t.Fatalf("call/result not adjacent: %#v", prompts)
 	}
 }

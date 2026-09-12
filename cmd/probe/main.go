@@ -63,6 +63,8 @@ func main() {
 		err = cmdBigctx(ctx, client, os.Args[2:])
 	case "misc":
 		err = cmdMisc(ctx, client, token)
+	case "hist":
+		err = cmdHist(ctx, client, os.Args[2:])
 	case "edge":
 		err = cmdEdge(ctx, client, os.Args[2:])
 	default:
@@ -108,6 +110,7 @@ func usage() {
     -dump dir                 write each frame protojson to dir/NN.json
   replay [flags]              two-step: call once, then replay assistant msg with variants
     -variant with-ids|no-sig|bogus-sig|with-sig|no-thinking
+  hist -shape merged|split    synthetic text+2-call+2-result history in either wire shape
   bigctx -kb N                send ~N KB single user message, observe error code`)
 }
 
@@ -812,6 +815,124 @@ func q1cpy(m *devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.ExaChatPb_Chat
 		Source:    m.Source,
 		Prompt:    m.Prompt,
 	}
+}
+
+// ---- hist: synthetic assistant-turn wire shapes ----
+
+func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+	fs := flag.NewFlagSet("hist", flag.ContinueOnError)
+	shape := fs.String("shape", "merged", "")
+	model := fs.String("model", "swe-2-max", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	token := os.Getenv("DEVIN_TOKEN")
+	if token == "" {
+		token = tokenFromConfig()
+	}
+	user := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(uuid()),
+			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
+			Prompt:    proto.String(text),
+		}
+	}
+	toolResult := func(id, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId:  proto.String(uuid()),
+			Source:     devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
+			Prompt:     proto.String(text),
+			ToolCallId: proto.String(id),
+		}
+	}
+	call := func(id, name, args string) *devinproto.ExaCodeiumCommonPb_ChatToolCall {
+		return &devinproto.ExaCodeiumCommonPb_ChatToolCall{
+			Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(args),
+		}
+	}
+	sys := func() *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(uuid()),
+			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+		}
+	}
+	call1 := call("chatcmpl-tool-aaa1", "exec", `{"command":"ls"}`)
+	call2 := call("chatcmpl-tool-bbb2", "read_file", `{"path":"README.md"}`)
+	thinking := "I should list the directory and read the readme in parallel."
+	var asst []*devinproto.ExaChatPb_ChatMessagePrompt
+	switch *shape {
+	case "merged":
+		m := sys()
+		m.Prompt = proto.String("I'll list files and read the readme at once:")
+		m.Thinking = proto.String(thinking)
+		m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1, call2}
+		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
+	case "merged-single":
+		m := sys()
+		m.Prompt = proto.String("I'll list files first:")
+		m.Thinking = proto.String(thinking)
+		m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
+		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
+	case "split":
+		t := sys()
+		t.Prompt = proto.String("I'll list files and read the readme at once:")
+		t.Thinking = proto.String(thinking)
+		c1 := sys()
+		c1.Thinking = proto.String(thinking)
+		c1.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
+		c2 := sys()
+		c2.Thinking = proto.String(thinking)
+		c2.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call2}
+		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{t, c1, c2}
+	case "split-single":
+		t := sys()
+		t.Prompt = proto.String("I'll list files first:")
+		t.Thinking = proto.String(thinking)
+		c1 := sys()
+		c1.Thinking = proto.String(thinking)
+		c1.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
+		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{t, c1}
+	default:
+		return fmt.Errorf("unknown shape %q", *shape)
+	}
+	var msgs []*devinproto.ExaChatPb_ChatMessagePrompt
+	msgs = append(msgs, user("list the files and read README.md"))
+	if *shape == "split" {
+		// 生产形态：文本 prompt 后按 call→result 交错（上游拒绝分组排列）。
+		msgs = append(msgs, asst[0], asst[1], toolResult("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"), asst[2], toolResult("chatcmpl-tool-bbb2", "# hello\n"))
+	} else {
+		msgs = append(msgs, asst...)
+		msgs = append(msgs, toolResult("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"))
+		if *shape == "merged" {
+			msgs = append(msgs, toolResult("chatcmpl-tool-bbb2", "# hello\n"))
+		}
+	}
+	msgs = append(msgs, user("What files did you see? One line."))
+	req := &devinproto.GetChatMessageRequest{
+		Metadata:     metadata(token, true),
+		Prompt:       proto.String("You are a helpful assistant."),
+		ChatModelUid: proto.String(*model),
+		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
+			NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
+			MaxNewlines: proto.Uint64(400), Temperature: proto.Float64(1),
+			TopK: proto.Uint64(40), TopP: proto.Float64(0.95),
+		},
+		CascadeId:   proto.String(uuid()),
+		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
+		ExecutionId: proto.String(uuid()),
+		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
+			TrajectoryId:   proto.String(uuid()),
+			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
+			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
+		},
+		ChatMessagePrompts: msgs,
+		Tools: []*devinproto.ExaChatPb_ChatToolDefinition{
+			{Name: proto.String("exec"), Description: proto.String("run a command"), JsonSchemaString: proto.String(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
+			{Name: proto.String("read_file"), Description: proto.String("read a file"), JsonSchemaString: proto.String(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		},
+	}
+	return runStream(ctx, client, req, false, "")
 }
 
 // ---- bigctx ----

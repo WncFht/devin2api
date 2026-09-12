@@ -211,9 +211,10 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 	case llm.UserMessage:
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content, attachImages)}, nil
 	case llm.AssistantMessage:
-		// Wire 实证（WindsurfAPI）：助手轮 = 可选文本消息 + 每个工具调用各一条
-		// 独立消息。工具调用消息不写 prompt 字段（字段 3 缺席而非空串）；
-		// thinking(#11) 出现在每条 assistant 消息上。
+		// Wire 实证（chisel 3000.2.17 抓包）：一个助手回合合并为单条
+		// prompt——prompt/thinking/signature/toolCalls 同体携带，无文本时
+		// prompt 字段缺席；真实客户端从不产生相邻 SYSTEM 消息。拆成多条会
+		// 在渲染上下文里引入回合边界，模型在「宣告文本」后采到 EOS 提前收轮。
 		var signature, signatureType string
 		var redacted bool
 		var text, thinking strings.Builder
@@ -238,10 +239,20 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 				calls = append(calls, typed)
 			}
 		}
-		// attachThinking 把本轮的思考/签名三件套挂到一条 prompt 上。
+		// 完全空的助手消息会诱发上游反复返回空回复，跳过。
+		if text.Len() == 0 && len(calls) == 0 {
+			return nil, nil
+		}
+		prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(randid.UUID()),
+			Source:    assistantSource.Enum(),
+		}
+		if text.Len() > 0 {
+			prompt.Prompt = proto.String(text.String())
+		}
 		// signature_type 与 output_id 必须随签名原样回传：实测错配
 		// signature_type 会触发上游 invalid_argument。
-		attachThinking := func(prompt *devinproto.ExaChatPb_ChatMessagePrompt) {
+		if thinking.Len() > 0 || redacted || signature != "" || message.OutputID != "" {
 			if thinking.Len() > 0 {
 				prompt.Thinking = proto.String(thinking.String())
 			}
@@ -256,19 +267,7 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 			}
 			prompt.ThinkingRedacted = proto.Bool(redacted)
 		}
-		var prompts []*devinproto.ExaChatPb_ChatMessagePrompt
-		if text.Len() > 0 {
-			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
-				MessageId: proto.String(randid.UUID()),
-				Source:    assistantSource.Enum(),
-				Prompt:    proto.String(text.String()),
-			}
-			if thinking.Len() > 0 || redacted || signature != "" || message.OutputID != "" {
-				attachThinking(prompt)
-			}
-			prompts = append(prompts, prompt)
-		}
-		for index, call := range calls {
+		for _, call := range calls {
 			toolCall := &devinproto.ExaCodeiumCommonPb_ChatToolCall{
 				Id:   proto.String(call.ID),
 				Name: proto.String(call.Name),
@@ -281,23 +280,9 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 			} else {
 				toolCall.ArgumentsJson = proto.String(string(call.Arguments))
 			}
-			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
-				MessageId: proto.String(randid.UUID()),
-				Source:    assistantSource.Enum(),
-				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{toolCall},
-			}
-			if thinking.Len() > 0 || redacted || (index == 0 && text.Len() == 0 && (signature != "" || message.OutputID != "")) {
-				// 无文本消息时签名挂到首条工具调用消息，避免丢失。
-				if index == 0 && text.Len() == 0 {
-					attachThinking(prompt)
-				} else if thinking.Len() > 0 {
-					prompt.Thinking = proto.String(thinking.String())
-				}
-			}
-			prompts = append(prompts, prompt)
+			prompt.ToolCalls = append(prompt.ToolCalls, toolCall)
 		}
-		// 完全空的助手消息会诱发上游反复返回空回复，跳过。
-		return prompts, nil
+		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
 	case llm.ToolResultMessage:
 		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content, attachImages)
 		if prompt.GetPrompt() == "" {
@@ -345,15 +330,17 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 			j++
 		}
 		consumed := make(map[string]struct{}, len(calls))
-		for _, call := range calls {
-			out = append(out, call)
-			id := call.GetToolCalls()[0].GetId()
-			if result, ok := byID[id]; ok {
-				out = append(out, result)
-				consumed[id] = struct{}{}
-				// 重复 call-id 实测被上游容忍但按位置绑定：同 id 的第二个
-				// 调用不应再挂到同一份结果上，消费后即删除。
-				delete(byID, id)
+		for _, callPrompt := range calls {
+			out = append(out, callPrompt)
+			for _, call := range callPrompt.GetToolCalls() {
+				id := call.GetId()
+				if result, ok := byID[id]; ok {
+					out = append(out, result)
+					consumed[id] = struct{}{}
+					// 重复 call-id 实测被上游容忍但按位置绑定：同 id 的第二个
+					// 调用不应再挂到同一份结果上，消费后即删除。
+					delete(byID, id)
+				}
 			}
 		}
 		// 未能配对的孤立结果按原序保留，不丢消息。

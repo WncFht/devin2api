@@ -67,6 +67,15 @@
 3. **代理层 continuation hook**（agy 先例）：条件 = `end_turn` 且无 toolCall 且最后一条输入为 `tool_result`；追加一条合成 user 消息（如 "Please continue"）重发一次，把两次上游响应聚合成一个下游回合；**必须 `max_continuations ≤ 2`**（agy 的 deadlock 教训）。真·终答的代价是多跑一句废话；
 4. 更保守的中间态：只在 `meta.json`/`index.jsonl` 打 `premature_endturn` 标记先观测频率，不干预。
 
+## 五点五、16:50 复查：发现 wire 形态分叉，已修复
+
+用户反馈"说完话没去调工具"仍在高频复发（当日 48 次 STOP_PATTERN，约一半停在"让我看 X："/"先编译："这类宣告句末尾）。重新取证发现根因大概率在请求侧编码：
+
+- **真实客户端（chisel 3000.2.17 抓包 `outputs/exa.api_server_pb.ApiServerService/GetChatMessage/06/request.txt`）把一个助手回合合并为单条 ChatMessagePrompt**：`prompt`+`thinking`+`toolCalls` 同体携带，无文本时 `prompt` 字段缺席；抓包中从不出现相邻 SYSTEM-SYSTEM。
+- 我们的编码（a0d4a80 引入）把同一回合拆成「文本 prompt + 每调用各一条 prompt」，相邻 SYSTEM 边界在渲染后的上下文里反复出现「宣告文本 → 消息边界 → toolCall」的模式，模型在生成到宣告文本末尾时采到 EOS 的概率被抬高——与观察到的停止位置完全一致。
+- a0d4a80 当时修复的真实约束只是 **call→result 必须交错相邻**（分组排列实测 `invalid_argument`）；"必须拆分调用"是误归因：probe `hist -shape merged` 实测单 prompt 携带 2 个调用 + 两份结果，上游正常接受。
+- 修复：`convertMessage` 恢复合并编码（一条 prompt 携带全部 toolCalls），`pairToolCallsWithResults` 适配单 prompt 多调用。`probe hist` 子命令留存做形状回归。
+
 ## 六、其他可能踩到的问题（CPA issue/PR 普查 → 本链路映射）
 
 ### 事件序列编排（翻译层高发区）
