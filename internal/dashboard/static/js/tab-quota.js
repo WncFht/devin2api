@@ -55,6 +55,17 @@ const Quota = (() => {
     });
   }
 
+  // creditUsage 把月度额度与可用余额合成「已用 used / total（剩 avail）」。
+  // monthly≤0（上游 -1 表示不按固定额度计费）时退化为只显示可用量；
+  // 已用由 monthly-available 反推，额外购credit导致 available>monthly 时按 0 计。
+  function creditUsage(monthly, available) {
+    // Number(null)===0，须先判空：字段缺失与"可用为 0"语义不同。
+    const m = Number(monthly), a = available == null ? NaN : Number(available);
+    if (!Number.isFinite(m) || m <= 0) return '可用 ' + fmtQuota(available);
+    if (!Number.isFinite(a)) return '月 ' + fmtQuota(m);
+    return '已用 ' + Math.max(0, Math.round(m - a)) + ' / ' + fmtQuota(m) + '（剩 ' + fmtQuota(a) + '）';
+  }
+
   function renderStatus(d) {
     let html = '<h3>账户与套餐</h3><div class="grid">';
     if (d.user) {
@@ -66,10 +77,9 @@ const Quota = (() => {
     if (d.plan_status || d.plan_info) {
       html += meta('套餐', ps.plan_name || pi.plan_name || '-') +
         meta('计费', ps.billing_strategy || pi.billing_strategy || '-') +
-        meta('月 Prompt', fmtQuota(ps.monthly_prompt_credits ?? pi.monthly_prompt_credits)) +
-        meta('可用 Prompt', fmtQuota(ps.available_prompt_credits)) +
-        meta('可用 Flow', fmtQuota(ps.available_flow_credits)) +
-        meta('可用 Flex', fmtQuota(ps.available_flex_credits)) +
+        meta('Prompt', creditUsage(ps.monthly_prompt_credits ?? pi.monthly_prompt_credits, ps.available_prompt_credits)) +
+        meta('Flow', creditUsage(ps.monthly_flow_credits ?? pi.monthly_flow_credits, ps.available_flow_credits)) +
+        meta('Flex', '可用 ' + fmtQuota(ps.available_flex_credits)) +
         meta('周期', (ps.plan_start || '?') + ' ~ ' + (ps.plan_end || '?')) +
         meta('ACU', (ps.acu_consumed ?? '-') + ' / ' + (ps.acu_limit ?? '-')) +
         meta('超额 micros', ps.overage_balance_micros ?? '-');
