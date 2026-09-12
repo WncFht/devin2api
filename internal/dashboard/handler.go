@@ -140,7 +140,7 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
 			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + 日志管道自观测 + index 聚合用量"},
 			{"method": "GET", "path": "/panel/api/usage", "description": "index.jsonl 聚合：今日/窗口累计、model_days 模型×日矩阵（供面板时间范围选择器）、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势（含缓存命中率与均速原料）、p50/p95/p99、目录价估算成本"},
-			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=&status_class=&result=&model=&error_stage=&since=", "description": "最近请求（新在前）；q 子串或结构化过滤，has_more 提示窗口外仍有历史"},
+			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=", "description": "最近请求（新在前）；q 子串或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；has_more 提示窗口外仍有历史"},
 			{"method": "GET", "path": "/panel/api/requests/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSONL）"},
 			{"method": "GET", "path": "/panel/api/requests/active", "description": "进行中请求活快照：阶段状态、模型、已下发字节、已写文件、丢弃数"},
 			{"method": "GET", "path": "/panel/api/requests/{dir}", "description": "单请求 meta.json + 文件清单"},

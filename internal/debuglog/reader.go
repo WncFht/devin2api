@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -194,6 +195,9 @@ type ListResult struct {
 type RequestFilter struct {
 	// StatusClass 按状态码段过滤："2xx"/"4xx"/"5xx"。
 	StatusClass string
+	// Status 按状态表达式过滤（ccLoad 式），逗号分隔为 OR；
+	// 单项支持精确码(499)、段位(4xx)、比较(>=400/<300)、取反(!200/!2xx)。
+	Status string
 	// Result 按结果过滤：completed/failed/disconnected/aborted。
 	Result string
 	// Model 按请求或响应模型精确过滤。
@@ -206,8 +210,98 @@ type RequestFilter struct {
 	Query string
 }
 
-// match 判断一条索引行是否满足筛选条件。
-func (f RequestFilter) match(e IndexEntry) bool {
+// statusCond 是编译后的单项状态码条件；多个条件之间是 OR。
+type statusCond struct {
+	neg bool // "!" 前缀对整个单项取反
+	op  byte // '=' 精确码, 'x' 段位(百位), 'g' '>=', 'l' '<=', '>' '>', '<' '<'
+	val int
+}
+
+func (c statusCond) ok(code int) bool {
+	var m bool
+	switch c.op {
+	case 'x':
+		m = code/100 == c.val
+	case 'g':
+		m = code >= c.val
+	case 'l':
+		m = code <= c.val
+	case '>':
+		m = code > c.val
+	case '<':
+		m = code < c.val
+	default:
+		m = code == c.val
+	}
+	return m != c.neg
+}
+
+// parseStatusExpr 把状态表达式编译成条件列表；空串返回 nil（不过滤）。
+// 任一单项非法时返回恒不匹配的哨兵——表达式是用户输入，
+// 宁可显式空结果也不静默退化成无过滤。
+func parseStatusExpr(s string) []statusCond {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []statusCond
+	for _, part := range strings.Split(s, ",") {
+		c, ok := parseStatusTerm(strings.TrimSpace(part))
+		if !ok {
+			return []statusCond{{op: '=', val: -1}}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// parseStatusTerm 解析单项：可选 "!" 前缀 + Nxx 段位 / 比较符三位码 / 裸三位码。
+func parseStatusTerm(t string) (statusCond, bool) {
+	c := statusCond{op: '='}
+	if strings.HasPrefix(t, "!") {
+		c.neg = true
+		t = t[1:]
+	}
+	for _, p := range []struct {
+		pre string
+		op  byte
+	}{{">=", 'g'}, {"<=", 'l'}, {">", '>'}, {"<", '<'}} {
+		if strings.HasPrefix(t, p.pre) {
+			c.op = p.op
+			t = t[len(p.pre):]
+			break
+		}
+	}
+	// 段位写法 "4xx" 只在精确语义下成立（">=4xx" 无意义）。
+	if len(t) == 3 && t[1:] == "xx" && t[0] >= '0' && t[0] <= '9' {
+		if c.op != '=' {
+			return c, false
+		}
+		c.op, c.val = 'x', int(t[0]-'0')
+		return c, true
+	}
+	n, err := strconv.Atoi(t)
+	if err != nil || n < 100 || n > 999 {
+		return c, false
+	}
+	c.val = n
+	return c, true
+}
+
+// match 判断一条索引行是否满足筛选条件；conds 由 ListRequests 统一编译传入。
+func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
+	if conds != nil {
+		ok := false
+		for _, c := range conds {
+			if c.ok(e.StatusCode) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
 	if f.StatusClass != "" {
 		class := e.StatusCode / 100
 		want := int(f.StatusClass[0] - '0')
@@ -254,6 +348,7 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	}
 	lines := bytes.Split(data, []byte{'\n'})
 	entries := make([]IndexEntry, 0, limit)
+	conds := parseStatusExpr(filter.Status)
 	// scannedAll 为 false 表示窗口内还有没扫到的行（limit 用尽），更早历史必然存在。
 	scannedAll := true
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -265,7 +360,7 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 			break
 		}
 		var entry IndexEntry
-		if json.Unmarshal(lines[i], &entry) == nil && filter.match(entry) {
+		if json.Unmarshal(lines[i], &entry) == nil && filter.match(entry, conds) {
 			entries = append(entries, entry)
 		}
 	}

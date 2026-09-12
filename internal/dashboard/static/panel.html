@@ -47,7 +47,7 @@
     <div class="panel">
       <div class="filters">
         <input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果...">
-        <select id="fStatusClass"><option value="">全部状态</option><option value="2xx">2xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option></select>
+        <input type="search" id="fStatus" placeholder="状态码: 499 / !200 / >=400 / 2xx" style="max-width:210px;flex:0" title="状态码表达式：精确码 499、段位 4xx、比较 >=400、取反 !200；逗号分隔为或">
         <select id="fResult"><option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option></select>
         <input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0">
         <input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0">

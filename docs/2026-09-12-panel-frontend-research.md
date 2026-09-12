@@ -37,7 +37,7 @@
 
 1. **统一时间范围选择器**——预设 1h/6h/24h/7d + 自定义，用量/趋势/日志页共用。
 2. **趋势图指标切换**——一个图切多个指标，比并排多图省空间。
-3. **表达式状态过滤**——`>=400`、`!200`、`499`，解析器就几十行。
+3. ~~**表达式状态过滤**~~——已实现（`status=499,!200,>=400,4xx`，后端 `RequestFilter.Status` + `parseStatusExpr`）。
 4. **列可见性开关**——请求表列越来越多，让用户自选。
 5. **声明式 filter-state**——替换现在手写的 hash 同步，之后加筛选字段不用写样板。
 
@@ -52,7 +52,7 @@
     - donut 图旁配滚动明细表 + `Σ Other` 补差行，top-N 与总量口径对齐（已实现）。
 - `components/common/BaseDialog.vue`、`ConfirmDialog.vue` — 弹窗基座：Esc/遮罩取消、danger 主键（已实现到我们 `confirmBox`）。
 - `api/admin/*.ts` — 每个资源一个 API 模块，错误统一归一化。我们 `core.js` 的 `api()` 是简化版。
-- 布局：固定侧栏 256px ↔ 72px 折叠、sticky 页头、路由 meta 带页标题 + 一行描述。我们侧栏不能折叠，窄屏直接收顶部——够用，不抄。
+- 布局：固定侧栏 256px ↔ 72px 折叠、sticky 页头、路由 meta 带页标题 + 一行描述。我们已改为 ccLoad 式顶栏，侧栏折叠不再适用。
 - KPI 卡：icon 块 + 大数字 + muted 标签 + 环比/提示副行。环比已实现（今日 vs 昨日）。
 
 ### sub2api 未吸收但值得做的
@@ -97,9 +97,11 @@
 3. **卡片流日志视图**——替代表格或作为可选视图。
 4. **`QueryStateView` 三态封装**——loading/error/empty 统一处理入口。
 
-## 已吸收清单（2026-09-12 前完成）
+## 已吸收清单
 
-见 commit `e5fee9a`：toast、复制降级 + 反馈、confirmBox、顶部加载条、侧栏状态点 + 端口、title 角标、badge 语义分层（中断琥珀）、状态码色阶、耗时/TTFB 阈值色、↓↑ token、pending-row 并入表顶、`#requests&dir=` 深链、markArea 空窗、markLine/markPoint、y 轴留白、confine tooltip、图表空态、配色读 CSS 变量、120 格健康时间线、KPI 今日 vs 昨日、模型表三态排序 + 加权合计行+Σ Other、配额重置倒计时。
+2026-09-12 上午（commit `e5fee9a`）：toast、复制降级 + 反馈、confirmBox、顶部加载条、状态点 + 端口、title 角标、badge 语义分层（中断琥珀）、状态码色阶、耗时/TTFB 阈值色、↓↑ token、pending-row 并入表顶、`#requests&dir=` 深链、markArea 空窗、markLine/markPoint、y 轴留白、confine tooltip、图表空态、配色读 CSS 变量、120 格健康时间线、KPI 今日 vs 昨日、模型表三态排序 + 加权合计行+Σ Other、配额重置倒计时。
+
+2026-09-12 下午（`70a7420`/`7228543` 起）：侧栏改 ccLoad 式固定顶栏（brand/导航/网关状态三段）、`?v=<version>` 静态资源版本戳（`servePanel` 注入，解决 24h 缓存配旧 JS）、`Polls` 调度器（setTimeout 链无在飞叠加、确认弹窗打开跳过、回前台立即 kick、切页 reset）、请求页活跃加速（4s/15s）、渲染签名不变跳过 tbody 重建、展开详情节点跨重建保留 + JSON 未变不重绘、新行闪显、pending 行可展开看进行中请求的调试目录、状态码表达式过滤。
 
 ## 明确不做的
 

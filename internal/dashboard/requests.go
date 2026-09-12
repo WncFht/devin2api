@@ -21,7 +21,8 @@ const requestsFetchCap = 2000
 
 // apiRequests 返回 index.jsonl 中的最近请求（新的在前），供面板列表和
 // agent 检索。?limit=&offset= 分页；过滤走结构化参数
-// ?q= 子串、?status_class=2xx|4xx|5xx、?result=、?model=、?error_stage=、?since=RFC3339。
+// ?q= 子串、?status=499|!200|>=400|4xx（逗号 OR）、?status_class=2xx|4xx|5xx、
+// ?result=、?model=、?error_stage=、?since=RFC3339。
 func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
@@ -69,6 +70,7 @@ func parseRequestFilter(params map[string][]string) debuglog.RequestFilter {
 	filter := debuglog.RequestFilter{
 		Query:       get("q"),
 		StatusClass: get("status_class"),
+		Status:      get("status"),
 		Result:      get("result"),
 		Model:       get("model"),
 		ErrorStage:  get("error_stage"),

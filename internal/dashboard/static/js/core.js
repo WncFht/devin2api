@@ -339,7 +339,7 @@ document.getElementById('topNav').addEventListener('click', e => {
 
 // 跨页联动：把条件填进请求页过滤器并切过去（由各 tab 的表格/chips 调用）。
 function jumpRequests(kv) {
-  const map = { q: 'reqSearch', status_class: 'fStatusClass', result: 'fResult', model: 'fReqModel', error_stage: 'fErrStage' };
+  const map = { q: 'reqSearch', status: 'fStatus', result: 'fResult', model: 'fReqModel', error_stage: 'fErrStage' };
   for (const k in kv) { const el = $(map[k]); if (el) el.value = kv[k]; }
   Tabs.go('requests');
   Requests.resetAndLoad();

@@ -192,6 +192,18 @@ func TestRequestFilters(t *testing.T) {
 	if got := manager.ListRequests(10, RequestFilter{StatusClass: "4xx"}); len(got.Entries) != 1 || got.Entries[0].Model != "m-b" {
 		t.Fatalf("status_class=4xx = %+v", got.Entries)
 	}
+	// status 表达式：精确/取反/比较/段位/逗号 OR；非法表达式不匹配任何条目。
+	for _, tc := range []struct {
+		expr string
+		want int
+	}{
+		{"400", 1}, {"!200", 2}, {">=400", 2}, {"<300", 1}, {"4xx", 1},
+		{"400,500", 2}, {"!2xx", 2}, {"garbage", 0}, {">=4xx", 0},
+	} {
+		if got := manager.ListRequests(10, RequestFilter{Status: tc.expr}); len(got.Entries) != tc.want {
+			t.Fatalf("status=%q = %d 条, want %d", tc.expr, len(got.Entries), tc.want)
+		}
+	}
 	if got := manager.ListRequests(10, RequestFilter{Model: "m-a"}); len(got.Entries) != 2 {
 		t.Fatalf("model=m-a = %+v", got.Entries)
 	}

@@ -11,7 +11,7 @@ const Requests = (() => {
   let prevDirs = null;     // 上轮渲染出的 dir 集（null=首轮/刚重置，不做新行闪显）
   let detailJson = '';     // 展开详情的上次响应 JSON，未变则不动 DOM
 
-  const FILTER_IDS = ['reqSearch', 'fStatusClass', 'fResult', 'fReqModel', 'fErrStage', 'fSince'];
+  const FILTER_IDS = ['reqSearch', 'fStatus', 'fResult', 'fReqModel', 'fErrStage', 'fSince'];
 
   // ---------- 进行中请求 ----------
   function activeTable(list) {
@@ -83,7 +83,7 @@ const Requests = (() => {
   function reqQuery() {
     const p = new URLSearchParams();
     const q = $('reqSearch').value.trim(); if (q) p.set('q', q);
-    const sc = $('fStatusClass').value; if (sc) p.set('status_class', sc);
+    const sc = $('fStatus').value.trim(); if (sc) p.set('status', sc);
     const rs = $('fResult').value; if (rs) p.set('result', rs);
     const md = $('fReqModel').value.trim(); if (md) p.set('model', md);
     const es = $('fErrStage').value.trim(); if (es) p.set('error_stage', es);
@@ -297,9 +297,9 @@ const Requests = (() => {
   // ---------- 事件委托与注册 ----------
   function bind() {
     $('reqSearch').addEventListener('input', debounce(resetAndLoad, 300));
+    $('fStatus').addEventListener('input', debounce(resetAndLoad, 300));
     $('fReqModel').addEventListener('input', debounce(resetAndLoad, 300));
     $('fErrStage').addEventListener('input', debounce(resetAndLoad, 300));
-    $('fStatusClass').addEventListener('change', resetAndLoad);
     $('fResult').addEventListener('change', resetAndLoad);
     $('fSince').addEventListener('change', resetAndLoad);
     $('reqMore').addEventListener('click', () => { reqLimit = Math.min(500, reqLimit + 100); load(); });
