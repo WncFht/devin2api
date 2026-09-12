@@ -166,6 +166,47 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	}
 }
 
+// TestBuildRequestMergesParallelToolCalls 验证一个助手回合的文本与多个
+// 并行 tool call 合并为单条 prompt（真实 chisel 客户端的 wire 形态），
+// 对应结果按 call 序紧随其后，不产生相邻 SYSTEM 消息。
+func TestBuildRequestMergesParallelToolCalls(t *testing.T) {
+	request := llm.RequestMessages{
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "check both"}}},
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.TextContent{Text: "Reading both files."},
+				llm.ToolCall{ID: "call-a", Name: "read", Arguments: json.RawMessage(`{"path":"a"}`)},
+				llm.ToolCall{ID: "call-b", Name: "read", Arguments: json.RawMessage(`{"path":"b"}`)},
+			}},
+			llm.ToolResultMessage{ToolCallID: "call-a", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-b", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
+		},
+	}
+	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompts := converted.GetChatMessagePrompts()
+	if len(prompts) != 4 {
+		t.Fatalf("message count = %d, want 4 (user, merged assistant, result, result)", len(prompts))
+	}
+	assistant := prompts[1]
+	if assistant.GetSource() != assistantSource {
+		t.Fatalf("assistant source = %v", assistant.GetSource())
+	}
+	if assistant.GetPrompt() != "Reading both files." || len(assistant.GetToolCalls()) != 2 {
+		t.Fatalf("merged assistant prompt = %#v", assistant)
+	}
+	if assistant.GetToolCalls()[0].GetId() != "call-a" || assistant.GetToolCalls()[1].GetId() != "call-b" {
+		t.Fatalf("tool call order = %q, %q", assistant.GetToolCalls()[0].GetId(), assistant.GetToolCalls()[1].GetId())
+	}
+	for index, want := range []string{"call-a", "call-b"} {
+		if prompts[2+index].GetToolCallId() != want {
+			t.Fatalf("result %d tool_call_id = %q, want %q", index, prompts[2+index].GetToolCallId(), want)
+		}
+	}
+}
+
 // TestBuildRequestAggregatesThinkingBlocks 验证一条 assistant 消息的多个
 // thinking 块按序拼接、签名取最后非空；纯 redacted 块（无可见文本）也生成
 // wire 上的签名回放。
