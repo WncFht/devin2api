@@ -21,6 +21,7 @@ agents:
       ANTHROPIC_AUTH_TOKEN: ${DEVIN_API_KEY}
     kwargs:
       version: "2.1.258"
+      reasoning_effort: max        # swe-2-max 即 SWE-2 最高档,客户端侧同步顶格
 
   - name: kimi-code
     model_name: kimi-k3
@@ -28,6 +29,7 @@ agents:
       KIMI_MODEL_BASE_URL: http://host.docker.internal:49173
       KIMI_MODEL_API_KEY: ${DEVIN_API_KEY}
       KIMI_MODEL_CAPABILITIES: image_in,thinking
+      KIMI_MODEL_THINKING_EFFORT: max
     kwargs:
       version: "0.42.0"
 
@@ -38,7 +40,7 @@ agents:
       ANTHROPIC_API_KEY: ${DEVIN_API_KEY}
     kwargs:
       model_api: anthropic-messages
-      thinking: high
+      thinking: xhigh              # pi 可选档上限
 
   # OpenAI Responses 端点(devin-2api),唯一直连协议对的
   - name: codex
@@ -47,7 +49,7 @@ agents:
       OPENAI_BASE_URL: http://host.docker.internal:3003/v1
       OPENAI_API_KEY: ${DEVIN_API_KEY}
     kwargs:
-      reasoning_effort: high
+      reasoning_effort: xhigh      # 若报非法值回退 high(老 codex 上限)
 
   # swe-2-max 原生 harness,Harbor 内置 devin agent,直连 api.devin.ai
   - name: devin

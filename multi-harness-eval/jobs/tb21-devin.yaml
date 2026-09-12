@@ -1,10 +1,11 @@
 # devin 单跑 Terminal-Bench 2.1(其它 harness 需 ccload/devin-2api 在线,先独立跑 devin)
+# n_attempts=3 对齐 DeepSeek-V4.1 TB2.1 协议;swe-2-max 本身已是 SWE-2 最高 effort 档
 # 用法(在仓库根目录):
 #   export DEVIN_API_KEY=<devin-session-token$...>
 #   harbor run --config multi-harness-eval/jobs/tb21-devin.yaml
 jobs_dir: multi-harness-eval/runs
 job_name: tb21-devin
-n_attempts: 5
+n_attempts: 3
 orchestrator:
   type: local
   n_concurrent_trials: 4

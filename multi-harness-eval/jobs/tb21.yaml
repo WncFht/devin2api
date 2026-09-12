@@ -1,8 +1,8 @@
-# 主力:Terminal-Bench 2.1 × 5 harness × n_attempts=5(TB 官方榜单下限,见 README §6)
+# 主力:Terminal-Bench 2.1 × 5 harness × n_attempts=3(对齐 DeepSeek-V4.1 TB2.1 协议,见 README §6)
 # 跑之前先过 smoke.yaml。n_tasks 控制子集规模,去掉即全量。
 jobs_dir: multi-harness-eval/runs
 job_name: tb21
-n_attempts: 5
+n_attempts: 3
 orchestrator:
   type: local
   n_concurrent_trials: 8
@@ -21,6 +21,7 @@ agents:
       ANTHROPIC_AUTH_TOKEN: ${DEVIN_API_KEY}
     kwargs:
       version: "2.1.258"
+      reasoning_effort: max
 
   - name: kimi-code
     model_name: kimi-k3
@@ -28,6 +29,7 @@ agents:
       KIMI_MODEL_BASE_URL: http://host.docker.internal:49173
       KIMI_MODEL_API_KEY: ${DEVIN_API_KEY}
       KIMI_MODEL_CAPABILITIES: image_in,thinking
+      KIMI_MODEL_THINKING_EFFORT: max
     kwargs:
       version: "0.42.0"
 
@@ -38,7 +40,7 @@ agents:
       ANTHROPIC_API_KEY: ${DEVIN_API_KEY}
     kwargs:
       model_api: anthropic-messages
-      thinking: high
+      thinking: xhigh
 
   - name: codex
     model_name: openai/swe-2-max
@@ -46,7 +48,7 @@ agents:
       OPENAI_BASE_URL: http://host.docker.internal:3003/v1
       OPENAI_API_KEY: ${DEVIN_API_KEY}
     kwargs:
-      reasoning_effort: high
+      reasoning_effort: xhigh
       web_search: disabled
 
   # swe-2-max 原生 harness,Harbor 内置 devin agent,直连 api.devin.ai
