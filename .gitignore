@@ -24,3 +24,5 @@ config.yaml
 
 coverage.out
 *.test
+# probe 实验输出（可用 go run ./cmd/probe 重新生成）
+/outputs/probe/
