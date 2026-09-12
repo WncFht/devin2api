@@ -19,6 +19,7 @@
 
 - **签名格式 `sealed.v1.<base64url>`，`delta_signature_type="sealed"`**。glm-5-2 与 swe-1-7-medium（Decart）**完全无签名帧**——签名是 swe-2/Fireworks 特有。
 - **`stop_reason` 正常结束 = `STOP_REASON_STOP_PATTERN`**（不是 STOP），工具调用 = `FUNCTION_CALL`，`maxTokens=8` 实测烧完 thinking 后 `STOP_REASON_MAX_TOKENS`。`mapStopReason` 靠 default 兜到 Stop，建议显式列上 STOP_PATTERN/CONTENT_FILTER。
+- **缺 `stopReason` 的干净 EOF = 截断，不是正常结束**。2026-09-12 实测事故：Codex 一轮输出在序言文本后流即 EOF，`deltaToolCalls`/`stopReason`/`responseDimensionGroups` 全部缺失；同请求重放产出完整 3 个 tool_use。decoder 曾把这种情况合成 `end_turn`，导致 Codex `task_complete` 静默收工——已改为显式流错误 "Devin stream ended without stop reason"。`stoppedByPattern`（本地停止序列截断）是唯一例外的合法无停因结束。
 - 每帧带 `latency`（累计秒）、`requestId`、`timestamp`、`usage`；`usage.responseHeader.x-request-id` 是 provider 侧请求号（Fireworks=`chatcmpl-*`，Decart=`req_*`）——**排障金矿，建议进 debuglog**。
 - `usage.apiProvider`：swe-2-max/glm-5-2 → `FIREWORKS_DEVIN`；swe-1-7-medium → `DECART`。
 - 免费档**不下发** `creditCost`/`committed_*`/`actualModelUid`/`completionProfile`/`prompt`/`redact`/`geminiThoughtSignature`/`outputId`/`thinkingId`/`phase`/`arenaInvocationCapReached`。

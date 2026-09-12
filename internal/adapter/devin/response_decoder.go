@@ -153,7 +153,12 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		reason = llm.StopReasonStopSequence
 		decoder.partial.StopSequence = decoder.stopSequence
 	} else if !decoder.hasStopReason {
-		reason = llm.StopReasonStop
+		// Devin 正常收尾必带 stopReason 帧（实测帧序 delta → stopReason →
+		// usage → responseDimensionGroups）。干净 EOF 却没有停止原因说明
+		// 流在应用层被截断；此处合成 Stop 会把截断伪装成 end_turn，
+		// 下游 agent 会把半完成的任务当作完成（实测复现：Codex 在宣告
+		// 继续调用工具后直接 task_complete）。
+		return decoder.fail(errors.New("Devin stream ended without stop reason"))
 	}
 	if reason == llm.StopReasonError {
 		if decoder.providerRefusal {

@@ -477,15 +477,15 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 	}
 }
 
-// TestResponseDecoderAcceptsContentBeforeNormalEOF 的测试动机是匹配 Devin 以统计帧和正常 Connect EOF 结束、但不发送 stop_reason 的真实行为。
-func TestResponseDecoderAcceptsContentBeforeNormalEOF(t *testing.T) {
+// TestResponseDecoderRejectsEOFWithoutStopReason 的测试动机是防止把上游截断伪装成
+// 正常结束：Devin 的正常收尾必带 stopReason 帧，干净 EOF 却缺它说明流被截断。
+func TestResponseDecoderRejectsEOFWithoutStopReason(t *testing.T) {
 	decoder := newResponseDecoder("model", nil)
 	decoder.start()
-	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("complete")})
-	events := decoder.finish(nil)
-	done := events[len(events)-1]
-	if done.Type != llm.ResponseEventDone || done.Reason != llm.StopReasonStop || done.Message == nil {
-		t.Fatalf("done event = %#v", done)
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("partial")})
+	event := decoder.finish(nil)[0]
+	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "Devin stream ended without stop reason" {
+		t.Fatalf("event = %#v, want truncation error", event)
 	}
 }
 
