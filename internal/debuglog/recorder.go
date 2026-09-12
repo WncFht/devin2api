@@ -811,19 +811,22 @@ func (recorder *Recorder) sanitize(value any) any {
 			return map[string]any{"serialization_error": err.Error()}
 		}
 	}
-	return recorder.sanitizeValue(generic)
+	return recorder.sanitizeValue(generic, false)
 }
 
-func (recorder *Recorder) sanitizeValue(value any) any {
+// sanitizeValue 递归脱敏 any 树。metadataScope 标记当前子树是否位于某个
+// "metadata" 键之下——上游 Metadata.f（设备指纹）只在这一作用域内敏感，
+// 全局脱敏会把客户端请求体里同名的 "f" 键一并遮盖。
+func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 	switch value := value.(type) {
 	case []any:
 		for index := range value {
-			value[index] = recorder.sanitizeValue(value[index])
+			value[index] = recorder.sanitizeValue(value[index], metadataScope)
 		}
 		return value
 	case map[string]any:
 		for key := range value {
-			if secretKey(key) {
+			if secretKey(key) || (metadataScope && metadataSecretKey(key)) {
 				value[key] = "<redacted>"
 			}
 		}
@@ -831,7 +834,7 @@ func (recorder *Recorder) sanitizeValue(value any) any {
 			return reference
 		}
 		for key, item := range value {
-			value[key] = recorder.sanitizeValue(item)
+			value[key] = recorder.sanitizeValue(item, metadataScope || isMetadataKey(key))
 		}
 		return value
 	case string:
@@ -851,8 +854,13 @@ func (recorder *Recorder) sanitizeValue(value any) any {
 var secretKeyNames = []string{
 	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
 	"sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password",
-	"clientsecret", "f", "devicefingerprint",
+	"clientsecret", "devicefingerprint",
 }
+
+// metadataSecretKeyNames 是只在 metadata 对象内才算敏感的键名：上游
+// Metadata.f 是设备指纹必须脱敏，但 "f" 作为通用短键名在客户端负载里
+// 合法存在，放到全局名单会误伤排障现场。
+var metadataSecretKeyNames = []string{"f"}
 
 func secretKey(key string) bool {
 	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
@@ -862,6 +870,22 @@ func secretKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// metadataSecretKey 判定仅 metadata 作用域内敏感的键名，归一方式同 secretKey。
+func metadataSecretKey(key string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+	for _, name := range metadataSecretKeyNames {
+		if normalized == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isMetadataKey 判定键是否进入 metadata 作用域（归一方式同 secretKey）。
+func isMetadataKey(key string) bool {
+	return strings.ToLower(strings.ReplaceAll(key, "_", "")) == "metadata"
 }
 
 // rawNeedsSanitize 预筛 JSON 记录：含内联图片或敏感键名才需要完整的
@@ -900,9 +924,15 @@ func rawNeedsSanitize(data []byte) bool {
 }
 
 // secretKeySpan 判定引号内的键名是否命中脱敏名单，归一方式与 secretKey
-// 一致：忽略 '_'、大小写不敏感。
+// 一致：忽略 '_'、大小写不敏感。预筛分不清嵌套层级，metadata 专属键名
+// 也算命中——宁多进一次慢路径，由 sanitizeValue 按作用域定夺。
 func secretKeySpan(span []byte) bool {
 	for _, name := range secretKeyNames {
+		if equalFoldKey(span, name) {
+			return true
+		}
+	}
+	for _, name := range metadataSecretKeyNames {
 		if equalFoldKey(span, name) {
 			return true
 		}

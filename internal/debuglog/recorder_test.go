@@ -20,6 +20,8 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	image := base64.StdEncoding.EncodeToString([]byte("png-data"))
 	recorder.WriteJSON("01-http-request.json", map[string]any{
 		"authorization": "secret",
+		// "f" 是客户端负载里的普通短键名——只有上游 metadata.f 指纹该脱敏。
+		"f": "client-field",
 		"body": map[string]any{
 			"image": map[string]any{"mime_type": "image/png", "data": image},
 		},
@@ -32,6 +34,9 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	httpLog := readTestFile(t, filepath.Join(recorder.directory, "01-http-request.json"))
 	if strings.Contains(httpLog, "secret") || strings.Contains(httpLog, image) {
 		t.Fatalf("request log contains a secret or inline image: %s", httpLog)
+	}
+	if !strings.Contains(httpLog, `"f": "client-field"`) {
+		t.Fatalf("non-metadata \"f\" key was over-redacted: %s", httpLog)
 	}
 	if !strings.Contains(httpLog, `"file": "attachments/image-001.png"`) {
 		t.Fatalf("request log has no attachment reference: %s", httpLog)
