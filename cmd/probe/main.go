@@ -67,6 +67,8 @@ func main() {
 		err = cmdHist(ctx, client, os.Args[2:])
 	case "edge":
 		err = cmdEdge(ctx, client, os.Args[2:])
+	case "rerun":
+		err = cmdRerun(ctx, client, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -111,6 +113,8 @@ func usage() {
   replay [flags]              two-step: call once, then replay assistant msg with variants
     -variant with-ids|no-sig|bogus-sig|with-sig|no-thinking
   hist -shape merged|split    synthetic text+2-call+2-result history in either wire shape
+  rerun -file 03.json [-n N]  replay a captured GetChatMessageRequest N times,
+                              print stop_reason + calls + text tail per run
   bigctx -kb N                send ~N KB single user message, observe error code`)
 }
 
@@ -933,6 +937,66 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		},
 	}
 	return runStream(ctx, client, req, false, "")
+}
+
+// ---- rerun: replay a captured request N times ----
+
+// cmdRerun 回放 03-devin-request.json 抓到的完整上游请求：每次换新的
+// executionId，统计 stopReason / toolCalls / 文本尾部，用于同一段历史在
+// 不同 wire 形态下的 A/B 对照（拆分 vs 合并）。
+func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+	fs := flag.NewFlagSet("rerun", flag.ContinueOnError)
+	file := fs.String("file", "", "protojson GetChatMessageRequest (logs/*/03-devin-request.json)")
+	n := fs.Int("n", 8, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(*file)
+	if err != nil {
+		return err
+	}
+	base := &devinproto.GetChatMessageRequest{}
+	if err := protojson.Unmarshal(raw, base); err != nil {
+		return fmt.Errorf("unmarshal %s: %w", *file, err)
+	}
+	token := os.Getenv("DEVIN_TOKEN")
+	if token == "" {
+		token = tokenFromConfig()
+	}
+	// 抓包里的 apiKey 可能已轮换，用当前 token 覆盖。
+	if base.GetMetadata() != nil {
+		base.Metadata.ApiKey = proto.String(token)
+	}
+	for run := 0; run < *n; run++ {
+		req := proto.Clone(base).(*devinproto.GetChatMessageRequest)
+		req.ExecutionId = proto.String(uuid())
+		stream, err := client.GetChatMessage(ctx, connect.NewRequest(req))
+		if err != nil {
+			fmt.Printf("run %d: connect: %v\n", run, err)
+			continue
+		}
+		stop := "UNSPECIFIED"
+		var text strings.Builder
+		var calls int
+		for stream.Receive() {
+			m := stream.Msg()
+			if s := m.GetStopReason().String(); !strings.HasSuffix(s, "UNSPECIFIED") {
+				stop = s[strings.LastIndex(s, "STOP_REASON_")+len("STOP_REASON_"):]
+			}
+			text.WriteString(m.GetDeltaText())
+			calls += len(m.GetDeltaToolCalls())
+		}
+		if err := stream.Err(); err != nil {
+			fmt.Printf("run %d: stream: %v\n", run, err)
+			continue
+		}
+		tail := text.String()
+		if len(tail) > 90 {
+			tail = tail[len(tail)-90:]
+		}
+		fmt.Printf("run %d: stop=%s calls=%d tail=%q\n", run, stop, calls, tail)
+	}
+	return nil
 }
 
 // ---- bigctx ----
