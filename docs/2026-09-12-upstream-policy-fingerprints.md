@@ -88,7 +88,40 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 - 日志里 34 条 `codex-tui` UA 的 `/v1/responses` 失败请求，`instructions` 实为 Claude Code subagent 提示词（ccload 把 CC 流量转换成了 responses 形态），归因是已修的 emoji 指纹——**不是 Codex 原生提示词**。
 - 真实 Codex 原生流量在当前日志窗口内未出现；`swe-2-max` 的模型目录项走 `You are Codex, a coding agent based on GPT-5` 系模板（实测 PASS）。cli-52/cli-agent/keepgoing 三套是 Codex 对其它模型家族的备选模板——用户换模型条目或 Codex 改家族映射时会踩到，所以仍补了规则。
 
-## 六、维护流程（新症状 → 新规则）
+## 六、Feature 级限制实测（skill / subagent / MCP / 杂项）
+
+提示词指纹之外，对 feature 面的逐项实验结论（全部走真实链路，swe-2-max）：
+
+### 实测通过
+
+| 面           | 实验                                                                                                               | 结果                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| MCP 工具名   | 声明 `mcp__ide__getDiagnostics` 并强制调用                                                                         | 模型正确发 `tool_use`，id 形如 `mcp__ide__getDiagnostics_0`，名与参数（`{"file":"main.go"}`）完整回传 |
+| MCP 工具数量 | 声明 50 个 `mcp__srvN__tool` / 150 个普通工具                                                                      | 200，无数量上限迹象                                                                                   |
+| MCP 结果带图 | `tool_result` 内嵌 image 块（截图模式）                                                                            | 200，图片正常进 wire `images` 字段                                                                    |
+| 图片输入     | 64×64 PNG 作为 user 内容                                                                                           | 200，模型可描述内容（`supports_images:true` 属实）                                                    |
+| thinking     | `thinking:{type:enabled}` + 回放伪造 `sealed.v1.` 签名                                                             | 200，上游不校验历史签名的真实性                                                                       |
+| max_tokens   | 200000                                                                                                             | 200（上限内静默接受）                                                                                 |
+| 注入文本     | `<system-reminder>` skill 列表、agent 类型列表、`# MCP Server Instructions` 块、SKILL.md/agent.md frontmatter 正文 | 全部 200                                                                                              |
+| CC 工具描述  | 真实请求的 29 个工具描述（Agent/Skill/Workflow/TaskCreate/CronCreate/SendMessage/ReportFindings/mcp__ide__\* 等）  | 全部 200（描述经 `# tools descriptions` 段并入 system prompt）                                        |
+| Codex 模板   | skills-usage 段（`## Skills` / `### Available skills`）、autonomous loop ×2                                        | 200                                                                                                   |
+
+### 实测发现的限制
+
+| 限制                                          | 层           | 表现                                                                                                                  | 处理                                                                                                                                                                                                                          |
+| --------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/v1/responses` 只认 `type:"function"` 工具   | 本地 adapter | `custom`（Codex apply_patch freeform）、`local_shell`、`web_search`、`mcp` 类型**静默丢弃**，wire 上 `tools:[]`       | Codex 的 `apply_patch_tool_type:"freeform"` 因此失效——模型只能用 shell 写文件。且即使补声明，上游会把 freeform 输出包成 JSON（`{"path":"*** Begin Patch…"}`），与 Codex 期望的 raw 文本不回配，需更深的响应侧转换才能完整支持 |
+| `tool_result` 的 `resource`/`document` 内容块 | 本地 adapter | 原本整块丢弃 → 上游只见 `[tool result]` 占位，MCP 服务器返回的 resource 文本全丢                                      | **已修**：`resource.text` 展开为文本、`resource.blob`+image mime 降级为 ImageContent、其余降级为 `[resource: <uri>]`（见下方提交）；`document` 块仍丢弃（无文本可提取）                                                       |
+| assistant/user 消息中的未知内容块             | 本地 adapter | `server_tool_use`、`web_search_tool_result`、`code_execution_tool_result`、`document` 等 `default: continue` 静默跳过 | 已知取舍：上游无对应概念；若 MCP/服务端工具结果对客户端重要需在 adapter 层物化成文本                                                                                                                                          |
+| 退化图片（1×1 PNG，73B）                      | 上游         | `invalid_argument`（stage=response_event）                                                                            | 上游对图片有最小有效性校验；正常截图不受影响                                                                                                                                                                                  |
+| 速率                                          | 上游         | `resource_exhausted: overall message rate limit … reset in 10 seconds`                                                | 短时窗口限速，探测密集时会撞上，按 `reset in N seconds` 退避即可                                                                                                                                                              |
+
+### 结论
+
+- **skill/subagent/MCP 三个 feature 面在上游没有独立限制**——子代理请求与主会话同构（system + messages + tools），MCP 工具名是普通函数名，skill 注入是普通文本。唯一的 feature 级拦截面仍是提示词指纹（第三、四节）。
+- 限制集中在**本地 adapter 的协议覆盖度**：非 function 工具类型、非 text/image 内容块被静默丢弃，用户无感知。排查「某 feature 没生效」时先查 `02-request-messages.json` 与 `03-devin-request.json` 对比输入是否完整到达 wire。
+
+## 七、维护流程（新症状 → 新规则）
 
 1. 客户端报「模型不可用/无权限」类文案时，先查 `logs/<dir>/error.json`：`provider_stream` + `content policy` 即指纹问题。
 2. 从 `01-http-request.json` 取 `system`/`instructions` 原文，按第二节方法 bisect 到句级；注意先区分「单句触发」「句对触发」「同句共现」三种形态（两两组合测试不可省）。
