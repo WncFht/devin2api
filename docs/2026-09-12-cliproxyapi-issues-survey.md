@@ -162,13 +162,19 @@ CPA 最大的反复事故簇是「冷却/负状态与上游现实脱节」（156
 
 ## 三、行动清单（按性价比排序）
 
-> **执行状态（2026-09-12 收尾校订）**：#1–#6、#8–#16、#18–#20 已全部落地。
+> **执行状态（2026-09-12 收尾校订 v2）**：#1–#20 已全部落地。
 > #2 超出原案：`TokenSource`+`reloadToken` 自愈在「建连失败」与「流内 pre-content」两处都会重读凭据重试。
-> #7 做了一半：`devin_connect` stage 已有；`devin_transport` 细分与 quota 采样失败/unauthenticated 提到 Warn 未做。
+> #7 已齐：`devin_transport`/`devin_connect` stage 细分（非 connect.Error → transport）、quota 采样失败与 unauthenticated 均 Warn。
 > #17 已落地但形态不同：非流式心跳恒发 `\n`（合法 JSON 前导空白），没有做成可配开关。
 > #21 被 `tryReopen` 覆盖大半：pre-content 的 transient/unauth/静默判死三类失败整体重发一次；剩余开放项是 capacity/overload 类错误是否归入可重试（需错误分类表实验）。
 > #23 已接线：`signature_type`/`output_id` 双向回放，`thinking_id`/`phase`/`gemini_thought_signature` 四轮实测全 provider 未下发，不接。
-> #22、#24–#28 与契约级回归测试包未做；#29/#30 决议不做。
+> #24 已决：三条协议的错误路径都发协议原生终止事件（responses=`response.failed`、anthropic=`error`、chat=error chunk 后关流不发 `[DONE]`，有测试钉住）；error 事件本身即终止，不补 `[DONE]`。
+> #25 已查清：`cacheReadTokens` 与 `inputTokens` 互斥（实测 68k/47k/177k cacheRead 对应 input 2.7k/889/1.9k），OpenAI 侧 `input_tokens=Input+CacheRead+CacheWrite`、Anthropic 侧拆开报，无重复计数；`outputTokens` 无 thinking 细分可观测。
+> #26 已落地：空 end_turn（有 stopReason 零内容）触发 `tryReopen(continueEmpty)` 追加 `continue` 用户消息重发一次；probe `edge empty-assistant` 证实该形态上游正常续说。
+> #27 已测为阴性：`"Claude Agent SDK"`/`"OpenAI Codex CLI"`/`"Hermes Agent"` 裸串做 system/user prompt 均正常完成，无伪 429/permission_denied。
+> #28 已测为阴性：Connect 响应 header/trailer 无任何配额/限流信号（只有标准 connect+cache 头）；配额 hint 只在 `usage.responseHeader.x-request-id`（供应商侧请求号，已进 diagnostics）。
+> #22 决议不做：quota 软 gate 需要 remaining=0 的真实耗尽态验证（当前 daily 89% 无法低成本触达），且上游 `resource_exhausted` 已正确归一为 429+Retry-After——本地 gate 只会因快照陈旧引入误拒，价值为负。
+> #29/#30 决议不做。契约级回归测试包已部分落地（signatures/replay/reopen/usage/错误形态），终态零事件与「看门狗挂死收尾」两条可用 pump 夹具补。
 > 另注意 dashboard 仍自称 `windsurf/1.48.2`+`win`——Seat/status 端点对照的是 Windsurf wire，与请求面的 chisel 身份是两条线，暂保留。
 
 ### 立即可做（小改动、证据充分）

@@ -188,7 +188,14 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 - 该错误**不带 Retry-After 头、不带 connect.Error.Details**（RetryInfo 为空），唯一机器可用信息是消息文本里的 `reset in N seconds`——要 Retry-After 只能解析文案。
 - 含义：配额信号（capacity/limit RPC）与生成可用性是两套系统，「容量检查说有」≠「生成不报 429」。我们的代理不能把 Check* RPC 当成准确闸门；遇到 `resource_exhausted` 应优先提取文案里的 reset 秒数透传给客户端。
 
-## 十三、仍未解（本账号观测不到）
+## 十三、五轮实测：行动清单剩余项验证（2026-09-12 收尾）
+
+- **空 end_turn 续传**（`edge empty-assistant`）：历史里塞 `SYSTEM`-source 空 assistant 消息 + 追加 user "continue" → 上游正常续说（153 帧、正常 stopReason）。**续传重发路径可行**——`tryReopen(continueEmpty)` 已落地。
+- **裸竞品指纹串**：`"Claude Agent SDK"`（system）、`"OpenAI Codex CLI"`（system）、`"Hermes Agent"`（user prompt）三组裸串全部正常完成，无伪 429/permission_denied——**身份检测不在 prompt 裸串这一层**。
+- **Connect 响应 header/trailer**：`chat` 正常流与流内错误路径的 headers 均只有标准字段（`Content-Type: application/connect+proto`、`Connect-*-Encoding`、cache 安全头），trailers 为空——**上游不在 HTTP 层给配额/限流信号**，唯一的供应商侧锚点是 `usage.responseHeader.x-request-id`（已进 diagnostics）。
+- **quota 软 gate 不可验证**：`CheckUserMessageRateLimit` 恒报 `messagesRemaining:-1`；`GetUserStatus` 的 `daily_remaining=89%` 无法低成本耗尽到 0。且 `resource_exhausted` 已归一 429+Retry-After，本地 gate 只会引入陈旧快照误拒——决议不做。
+
+## 十四、仍未解（本账号观测不到）
 
 - `thinking_id`/`phase`/`credit_cost`/`committed_*`/`provider_refusal`/`redact`/`gemini_thought_signature`/`completion_profile`/`actual_model_uid`——`output_id`/`signature_type` 已移出此清单（见 §十）。
 - `invalid_json_str`/`is_custom_tool_call` 的**响应方向**线上形态（历史方向已验证有效）；`arena_*`。
