@@ -5,7 +5,7 @@
 //   - 请求完成时 appendIndex 顺带累加，热路径只有一次 mutex 下的计数更新；
 //   - 延迟用定长蓄水池（最近 usageSampleCapacity 条）算 p50/p95/p99，
 //     比均值更能暴露上游长尾；
-//   - 天聚合按本地时区；小时环保留最近 usageHourBuckets 小时。
+//   - 天聚合按本地时区；10 分钟环保留最近 usageMinBuckets 个桶（8 天）。
 package debuglog
 
 import (
@@ -21,8 +21,8 @@ const (
 	usageReplayTailBytes = 64 << 20
 	// usageSampleCapacity 是延迟蓄水池容量（最近 N 条完成请求）。
 	usageSampleCapacity = 4096
-	// usageHourBuckets 是逐小时趋势保留的桶数（7 天）。
-	usageHourBuckets = 24 * 7
+	// usageMinBuckets 是细粒度趋势保留的 10 分钟桶数（8 天）。
+	usageMinBuckets = 6 * 24 * 8
 	// usageMaxDays 是天聚合输出的天数上限。
 	usageMaxDays = 31
 )
@@ -71,14 +71,14 @@ func (t *usageTotals) add(e IndexEntry) {
 	}
 }
 
-// usageHourCap 是单小时桶内保留的延迟样本上限；超出后循环覆盖最旧样本。
-const usageHourCap = 1024
+// usageMinSampleCap 是单桶内保留的延迟样本上限；超出后循环覆盖最旧样本。
+const usageMinSampleCap = 256
 
-// usageHourBucket 是一小时内的请求/token 聚合，供趋势图。
+// usageMinBucket 是一个 10 分钟窗口内的请求/token 聚合，供趋势图。
 // 计数字段与 usageTotals 对齐：面板按时间范围选择器截一段桶求和，
 // 即可得到该窗口的完整卡片数据（含断连/缓存写/推理 token）。
-type usageHourBucket struct {
-	hour         int64 // unix 小时戳
+type usageMinBucket struct {
+	at           int64 // 桶起点 unix 秒（600s 对齐）
 	requests     int64
 	errors       int64
 	disconnected int64
@@ -89,7 +89,7 @@ type usageHourBucket struct {
 	cacheWrite   int64
 	reasoning    int64
 	genMS        int64   // completed 请求的首帧后生成毫秒累计（均速分子分母）
-	durs         []int64 // duration_ms 样本（环形，上限 usageHourCap）
+	durs         []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
 	durHead      int
 	ttfbs        []int64 // first_upstream_ms 样本
 	ttfbHead     int
@@ -97,17 +97,17 @@ type usageHourBucket struct {
 
 // pushSample 向容量受限的样本切片追加；满后原地覆盖最旧值。
 func pushSample(samples *[]int64, head *int, v int64) {
-	if len(*samples) < usageHourCap {
+	if len(*samples) < usageMinSampleCap {
 		*samples = append(*samples, v)
 		return
 	}
 	(*samples)[*head] = v
-	*head = (*head + 1) % usageHourCap
+	*head = (*head + 1) % usageMinSampleCap
 }
 
-// usageHourPoint 是输出给面板的小时数据点。
-type usageHourPoint struct {
-	Hour         int64 `json:"hour"` // unix 秒
+// usageMinPoint 是输出给面板的 10 分钟粒度数据点。
+type usageMinPoint struct {
+	At           int64 `json:"at"` // 桶起点 unix 秒
 	Requests     int64 `json:"requests"`
 	Errors       int64 `json:"errors"`
 	Disconnected int64 `json:"disconnected"`
@@ -185,14 +185,14 @@ const startsCap = 4096
 
 // UsageSnapshot 是聚合结果的完整快照。
 type UsageSnapshot struct {
-	WindowStart string           `json:"window_start"` // 回放窗口最早一条的时间
-	Entries     int64            `json:"entries"`      // 参与聚合的索引行数
-	Today       usageTotals      `json:"today"`
-	Window      usageTotals      `json:"window"`
-	Days        []usageDayRow    `json:"days"`  // 新在前
-	Hours       []usageHourPoint `json:"hours"` // 旧到新，含零值小时
-	Models      []dimensionAgg   `json:"models"`
-	Keys        []dimensionAgg   `json:"keys"`
+	WindowStart string          `json:"window_start"` // 回放窗口最早一条的时间
+	Entries     int64           `json:"entries"`      // 参与聚合的索引行数
+	Today       usageTotals     `json:"today"`
+	Window      usageTotals     `json:"window"`
+	Days        []usageDayRow   `json:"days"`   // 新在前
+	Points      []usageMinPoint `json:"points"` // 旧到新，10 分钟粒度，含零值桶
+	Models      []dimensionAgg  `json:"models"`
+	Keys        []dimensionAgg  `json:"keys"`
 	// ModelDays 是 模型×自然日 的 totals 矩阵，面板的时间范围选择器
 	// 用它把模型表过滤到所选窗口（维度行的其它字段只在全窗口下可得）。
 	ModelDays   map[string]map[string]usageTotals `json:"model_days,omitempty"`
@@ -255,7 +255,7 @@ type usageAggregator struct {
 	entries     int64
 	total       usageTotals
 	days        map[string]*usageTotals
-	hours       [usageHourBuckets]usageHourBucket
+	mins        [usageMinBuckets]usageMinBucket
 	// ttfbSamples/durationSamples 蓄水池分别覆盖 first_upstream_ms 与 duration_ms。
 	ttfbSamples     *sampleRing
 	durationSamples *sampleRing
@@ -289,7 +289,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 		started = time.Now()
 	}
 	day := started.Local().Format("2006-01-02")
-	hour := started.Unix() / 3600
+	slot := started.Unix() / 600
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -306,31 +306,31 @@ func (a *usageAggregator) add(e IndexEntry) {
 	}
 	dayTotals.add(e)
 
-	idx := int(hour % usageHourBuckets)
-	if a.hours[idx].hour != hour {
-		a.hours[idx] = usageHourBucket{hour: hour}
+	idx := int(slot % usageMinBuckets)
+	if a.mins[idx].at != slot*600 {
+		a.mins[idx] = usageMinBucket{at: slot * 600}
 	}
-	a.hours[idx].requests++
+	a.mins[idx].requests++
 	if e.StatusCode >= 400 || e.Result == "failed" {
-		a.hours[idx].errors++
+		a.mins[idx].errors++
 	}
 	if e.Result == "disconnected" || e.Result == "aborted" {
-		a.hours[idx].disconnected++
+		a.mins[idx].disconnected++
 	}
 	if e.StatusCode == 429 {
-		a.hours[idx].rateLimited++
+		a.mins[idx].rateLimited++
 	}
-	a.hours[idx].input += e.InputTokens
-	a.hours[idx].output += e.OutputTokens
-	a.hours[idx].cacheRead += e.CacheReadTokens
-	a.hours[idx].cacheWrite += e.CacheWriteTokens
-	a.hours[idx].reasoning += e.ReasoningTokens
+	a.mins[idx].input += e.InputTokens
+	a.mins[idx].output += e.OutputTokens
+	a.mins[idx].cacheRead += e.CacheReadTokens
+	a.mins[idx].cacheWrite += e.CacheWriteTokens
+	a.mins[idx].reasoning += e.ReasoningTokens
 	if e.Result == "completed" && e.FirstUpstreamMS != nil {
-		a.hours[idx].genMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
+		a.mins[idx].genMS += max(e.DurationMS-*e.FirstUpstreamMS, 0)
 	}
-	pushSample(&a.hours[idx].durs, &a.hours[idx].durHead, e.DurationMS)
+	pushSample(&a.mins[idx].durs, &a.mins[idx].durHead, e.DurationMS)
 	if e.FirstUpstreamMS != nil {
-		pushSample(&a.hours[idx].ttfbs, &a.hours[idx].ttfbHead, *e.FirstUpstreamMS)
+		pushSample(&a.mins[idx].ttfbs, &a.mins[idx].ttfbHead, *e.FirstUpstreamMS)
 	}
 
 	a.durationSamples.push(e.DurationMS)
@@ -500,12 +500,12 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 		}
 	}
 
-	current := time.Now().Unix() / 3600
-	snap.Hours = make([]usageHourPoint, 0, usageHourBuckets)
-	for h := current - usageHourBuckets + 1; h <= current; h++ {
-		bucket := a.hours[int(h%usageHourBuckets)]
-		point := usageHourPoint{Hour: h * 3600}
-		if bucket.hour == h {
+	current := time.Now().Unix() / 600
+	snap.Points = make([]usageMinPoint, 0, usageMinBuckets)
+	for s := current - usageMinBuckets + 1; s <= current; s++ {
+		bucket := a.mins[int(s%usageMinBuckets)]
+		point := usageMinPoint{At: s * 600}
+		if bucket.at == s*600 {
 			point.Requests = bucket.requests
 			point.Errors = bucket.errors
 			point.Disconnected = bucket.disconnected
@@ -519,7 +519,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)
 		}
-		snap.Hours = append(snap.Hours, point)
+		snap.Points = append(snap.Points, point)
 	}
 
 	snap.Models = sortedAggs(a.perModel)

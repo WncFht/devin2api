@@ -53,8 +53,8 @@ func TestUsageAggregatorCounts(t *testing.T) {
 	if snap.ErrorStages["provider_stream"] != 1 {
 		t.Fatalf("error_stages = %+v", snap.ErrorStages)
 	}
-	if len(snap.Hours) != usageHourBuckets {
-		t.Fatalf("hours len = %d", len(snap.Hours))
+	if len(snap.Points) != usageMinBuckets {
+		t.Fatalf("points len = %d", len(snap.Points))
 	}
 	if snap.Duration.Samples != 2 {
 		t.Fatalf("duration stats = %+v", snap.Duration)

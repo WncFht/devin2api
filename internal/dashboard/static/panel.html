@@ -565,10 +565,10 @@ html+='<div class="note" style="margin-top:8px">计数器为进程内存值，�
 setSection(el,'stats',html);
 const tm=document.getElementById('trendMinutesChart');
 if(tm){
-const xs=h.trend_minutes.map(p=>p.minute);
+const xs=h.trend_minutes.map(p=>p.at);
 drawChart('stats',tm,xs,[
- {label:'请求/分',color:'#7c8aff',values:h.trend_minutes.map(p=>p.requests)},
- {label:'错误/分',color:'#f87171',values:h.trend_minutes.map(p=>p.errors)},
+ {label:'请求/30s',color:'#7c8aff',values:h.trend_minutes.map(p=>p.requests)},
+ {label:'错误/30s',color:'#f87171',values:h.trend_minutes.map(p=>p.errors)},
 ],{uid:'stats.trend'});
 }
 }catch(e){
@@ -639,6 +639,54 @@ u.over.addEventListener('wheel',e=>{
 }}};
 }
 
+// smoothPath 用 Fritsch–Carlson 单调三次 Hermite 插值生成平滑曲线。
+// 普通样条（Catmull-Rom）在尖峰两侧会过冲——计数沉到 0 轴以下、
+// 百分比冲出量程；单调插值让曲线严格落在相邻数据点夹出的区间内，
+// 不产生假峰。切线在数据空间（真实时间戳）计算，采样间隔不匀时
+// 形状仍正确；每个区间按像素跨度插值回投，视觉上点更密。
+function smoothPath(){
+return (u,idx,idx0,idx1)=>{
+const xs=u.data[0],ys=u.data[idx],key=u.series[idx].scale||'y';
+const path=new Path2D();
+const toX=v=>u.valToPos(v,'x',true),toY=v=>u.valToPos(v,key,true);
+let seg=[];
+const flush=()=>{
+const n=seg.length;
+if(!n)return;
+const x=seg.map(i=>xs[i]),y=seg.map(i=>ys[i]);
+seg=[];
+if(n===1){
+ // 孤点没有区间可插值，补一个小圆点避免不可见。
+ const cx=toX(x[0]),cy=toY(y[0]);
+ path.moveTo(cx+1.5,cy);path.arc(cx,cy,1.5,0,6.2832);
+ return;
+}
+const n1=n-1,d=new Array(n1),m=new Array(n);
+for(let i=0;i<n1;i++)d[i]=(y[i+1]-y[i])/(x[i+1]-x[i]);
+m[0]=d[0];m[n1]=d[n1-1];
+for(let i=1;i<n1;i++)m[i]=d[i-1]*d[i]<=0?0:(d[i-1]+d[i])/2;
+for(let i=0;i<n1;i++){
+ if(!d[i]){m[i]=0;m[i+1]=0;continue}
+ const a=m[i]/d[i],b=m[i+1]/d[i],q=a*a+b*b;
+ if(q>9){const t=3/Math.sqrt(q);m[i]=t*a*d[i];m[i+1]=t*b*d[i]}
+}
+path.moveTo(toX(x[0]),toY(y[0]));
+for(let i=0;i<n1;i++){
+ const p0=toX(x[i]),p1=toX(x[i+1]),h=x[i+1]-x[i];
+ const k=Math.max(2,Math.min(24,Math.round(Math.abs(p1-p0)/3)));
+ for(let j=1;j<=k;j++){
+  const t=j/k,t2=t*t,t3=t2*t;
+  const v=(2*t3-3*t2+1)*y[i]+(t3-2*t2+t)*h*m[i]+(3*t2-2*t3)*y[i+1]+(t3-t2)*h*m[i+1];
+  path.lineTo(p0+(p1-p0)*t,toY(v));
+ }
+}
+};
+for(let i=idx0;i<=idx1;i++){if(ys[i]==null)flush();else seg.push(i)}
+flush();
+return{stroke:path};
+};
+}
+
 // drawChart 在容器里建一张暗色 uPlot 时序图。
 // xs 为 unix 秒（升序）；series 元素 {label,color,values,scale?,fmt?}，
 // scale 指向 opts.right 里声明的右轴量纲（如 token 数、百分比）。
@@ -670,6 +718,7 @@ const u=new uPlot({
   stroke:s.color,
   width:1.6,
   scale:s.scale||'y',
+  paths:smoothPath(),
   points:{show:false},
   value:(self,v)=>v==null?'-':(s.fmt?s.fmt(v):v),
  }))),
@@ -765,11 +814,11 @@ const hitRate=t=>{const dd=(t.cache_read_tokens||0)+(t.input_tokens||0);return d
 const avgTps=t=>(t.gen_ms>0)?(t.output_tokens/(t.gen_ms/1000)).toFixed(1)+' tok/s':'-';
 const days=rangeDays(usageRange);
 const secs=rangeSecs(usageRange);
-const inRange=p=>!secs||(p.hour>=secs[0]&&p.hour<secs[1]);
+const inRange=p=>!secs||(p.at>=secs[0]&&p.at<secs[1]);
 const inDays=dt=>!days||(dt>=days[0]&&dt<=days[1]);
-// ≤8 天的窗口用小时桶（逐小时粒度）；更长窗口只有天行可用，按日聚合。
-const hourly=secs!=null&&(secs[1]-secs[0])<=8*86400;
-const pts=hourly?(s.hours||[]).filter(inRange):(s.days||[]).filter(p=>inDays(p.date)).slice().reverse();
+// ≤8 天的窗口用 10 分钟桶；更长窗口只有天行可用，按日聚合。
+const fine=secs!=null&&(secs[1]-secs[0])<=8*86400;
+const pts=fine?(s.points||[]).filter(inRange):(s.days||[]).filter(p=>inDays(p.date)).slice().reverse();
 const rangeLabel=(usageRanges.find(r=>r[0]===usageRange)||[])[1]||'';
 const totals=usageRange==='all'?(s.window||{}):sumTotals(pts);
 html+='<div class="chip-row" style="margin-bottom:12px">';
@@ -814,12 +863,12 @@ html+='</tbody></table></div>';
 html+='<div class="note" style="margin-top:6px">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。本地并发拒绝（503/WS 429 事件）不进索引，此处全是上游限流。</div>';
 }
 if(pts.length){
-const gran=hourly?'逐小时':'逐日';
+const gran=fine?'10 分钟':'逐日';
 html+='<h2 style="margin-top:14px">'+gran+'趋势 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2>';
 html+='<div class="chart-grid">';
 html+='<div><div class="chart-cap">请求 / 错误 / 输出 token</div><div id="hourlyFlowChart"></div></div>';
 html+='<div><div class="chart-cap">decode 均速 / 缓存命中率</div><div id="hourlyPerfChart"></div></div>';
-if(hourly)html+='<div><div class="chart-cap">上游 TTFB / 总耗时 p95</div><div id="hourlyLatChart"></div></div>';
+if(fine)html+='<div><div class="chart-cap">上游 TTFB / 总耗时 p95</div><div id="hourlyLatChart"></div></div>';
 html+='</div>';
 }
 const md=s.model_days||{};
@@ -881,7 +930,7 @@ if(d.cost_basis) html+='<div class="note" style="margin-top:8px">估算成本按
 setSection(el,'usage',html);
 const hf=document.getElementById('hourlyFlowChart');
 if(hf){
-const xs=pts.map(p=>p.hour!==undefined?p.hour:new Date(p.date+'T00:00:00').getTime()/1000);
+const xs=pts.map(p=>p.at!==undefined?p.at:new Date(p.date+'T00:00:00').getTime()/1000);
 drawChart('usage',hf,xs,[
  {label:'请求',color:'#7c8aff',values:pts.map(p=>p.requests)},
  {label:'错误',color:'#f87171',values:pts.map(p=>p.errors)},

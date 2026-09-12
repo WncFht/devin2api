@@ -22,7 +22,7 @@ import (
 const quotaFileName = "quota.jsonl"
 
 // quotaFileCap 是配额文件体积上限；超限后保留尾部一半重写。
-// 10 分钟一条、每条约 200B，4MB 约覆盖 2 万条 ≈ 半年。
+// 每条约 200B，4MB 约覆盖 2 万条（默认 5 分钟一条 ≈ 69 天）。
 const quotaFileCap = 4 << 20
 
 // quotaPoint 是一次配额快照。
@@ -129,7 +129,7 @@ func truncateQuotaFile(path string) {
 	_ = os.WriteFile(path, data, 0o600)
 }
 
-// quotaHistoryCap 是单次读取的历史行数上限；10 分钟间隔下约覆盖 69 天。
+// quotaHistoryCap 是单次读取的历史行数上限；默认 5 分钟间隔下约覆盖 34 天。
 const quotaHistoryCap = 10000
 
 // readQuotaHistory 读取 quota.jsonl 全部有效行（尾部 quotaHistoryCap 条）。

@@ -53,7 +53,7 @@ func TestDiagnosticBoundsAndRedacts(t *testing.T) {
 	}
 }
 
-// TestTrendBuckets 验证分钟桶把请求与错误归入当前分钟并出现在快照里。
+// TestTrendBuckets 验证趋势桶把请求与错误归入当前 30 秒窗口并出现在快照里。
 func TestTrendBuckets(t *testing.T) {
 	m := NewMetrics()
 	m.Begin().Finish(200, 0, "completed")
@@ -62,8 +62,8 @@ func TestTrendBuckets(t *testing.T) {
 	m.Begin().Finish(200, 0, "disconnected")
 	m.Reject()
 	trend, _ := m.Snapshot()["trend_minutes"].([]map[string]any)
-	if len(trend) != 60 {
-		t.Fatalf("trend len = %d, want 60", len(trend))
+	if len(trend) != trendBuckets {
+		t.Fatalf("trend len = %d, want %d", len(trend), trendBuckets)
 	}
 	last := trend[len(trend)-1]
 	if last["requests"] != uint64(4) || last["errors"] != uint64(3) {
@@ -71,7 +71,7 @@ func TestTrendBuckets(t *testing.T) {
 	}
 }
 
-// TestRatesDerived 验证分钟桶派生的 RPM/QPS 指标。
+// TestRatesDerived 验证趋势桶按自然分钟合并后派生的 RPM/QPS 指标。
 func TestRatesDerived(t *testing.T) {
 	m := NewMetrics()
 	m.Begin().Finish(200, 0, "completed")

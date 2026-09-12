@@ -79,7 +79,7 @@ type DebugConfig struct {
 	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数；<=0 不保护。默认 32。
 	KeepErrorDirs *int `yaml:"keep_error_dirs"`
 	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 logs/quota.jsonl；
-	// <=0 不采样。默认 10。
+	// <=0 不采样。默认 5。
 	QuotaIntervalMinutes *int `yaml:"quota_interval_minutes"`
 }
 
@@ -146,7 +146,7 @@ func (config *Config) Validate() error {
 		config.Debug.KeepErrorDirs = &keep
 	}
 	if config.Debug.QuotaIntervalMinutes == nil {
-		minutes := 10
+		minutes := 5
 		config.Debug.QuotaIntervalMinutes = &minutes
 	}
 	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。

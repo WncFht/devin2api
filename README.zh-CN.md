@@ -144,7 +144,7 @@ curl http://localhost:8080/v1/messages \
 | `debug.max_total_mb`                             | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                | `1024`                                                                                             |
 | `debug.payload_hours`                            | 大体积阶段文件（03/04/06 与 attachments/）保留小时数，超时剥离负载保留 meta/error 证据                      | `24`                                                                                               |
 | `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                           | `32`                                                                                               |
-| `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                         | `10`                                                                                               |
+| `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                         | `5`                                                                                                |
 | `dashboard.password`                             | `/panel` 管理面板密码；留空免登录                                                                           | 无                                                                                                 |
 | `auth.api_key`                                   | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 无（开放）                                                                                         |
 

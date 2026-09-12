@@ -12,12 +12,16 @@ import (
 	"time"
 )
 
-// trendBuckets 是趋势环形缓冲的分钟桶数：保留最近 60 分钟。
-const trendBuckets = 60
+// trendBucketSecs 是趋势桶粒度（秒）；trendBuckets 覆盖最近 trendWindowMinutes 分钟。
+const (
+	trendBucketSecs    = 30
+	trendWindowMinutes = 60
+	trendBuckets       = 60 * trendWindowMinutes / trendBucketSecs
+)
 
-// minuteBucket 是一分钟内的请求聚合，供趋势图使用。
-type minuteBucket struct {
-	minute   int64 // unix 分钟戳
+// spanBucket 是一个 30 秒窗口内的请求聚合，供趋势图使用。
+type spanBucket struct {
+	at       int64 // 桶起点 unix 秒（30s 对齐）
 	requests uint64
 	errors   uint64 // 4xx/5xx、管线前拒绝与未正常完成的已提交流（disconnected/aborted/流内失败）
 }
@@ -35,9 +39,9 @@ type Metrics struct {
 	reqBytes    atomic.Uint64
 	respBytes   atomic.Uint64
 	startedAt   time.Time
-	// bucketsMu 保护 buckets；分钟桶写入低频，普通 mutex 足够。
+	// bucketsMu 保护 buckets；趋势桶写入低频，普通 mutex 足够。
 	bucketsMu sync.Mutex
-	buckets   [trendBuckets]minuteBucket
+	buckets   [trendBuckets]spanBucket
 	// procMu 保护 CPU 采样状态：cpu_percent 由相邻两次快照的 rusage 差得出。
 	procMu         sync.Mutex
 	lastCPUSeconds float64
@@ -111,14 +115,14 @@ func (m *Metrics) Reject() {
 	m.recordBucket(true)
 }
 
-// recordBucket 把一次请求归入当前分钟桶；桶满时循环覆盖最旧数据。
+// recordBucket 把一次请求归入当前 30 秒桶；桶满时循环覆盖最旧数据。
 func (m *Metrics) recordBucket(isError bool) {
-	minute := time.Now().Unix() / 60
+	at := time.Now().Unix() / trendBucketSecs * trendBucketSecs
 	m.bucketsMu.Lock()
 	defer m.bucketsMu.Unlock()
-	index := int(minute % trendBuckets)
-	if m.buckets[index].minute != minute {
-		m.buckets[index] = minuteBucket{minute: minute}
+	index := int(at / trendBucketSecs % trendBuckets)
+	if m.buckets[index].at != at {
+		m.buckets[index] = spanBucket{at: at}
 	}
 	m.buckets[index].requests++
 	if isError {
@@ -146,31 +150,34 @@ func (m *Metrics) Snapshot() map[string]any {
 	}
 }
 
-// rates 从分钟桶派生 RPM/QPS（ccLoad RPMStats 同款：current/peak/avg + QPS）。
-// current 是进行中的当前分钟计数；avg 覆盖分钟环内窗口；peak 是历史单分钟峰值。
+// rates 从 30 秒桶派生 RPM/QPS（ccLoad RPMStats 同款：current/peak/avg + QPS）。
+// current/peak 先按自然分钟合并相邻桶再取值，语义与分钟粒度时代一致；
+// avg 覆盖趋势环内窗口。
 func (m *Metrics) rates() map[string]any {
 	now := time.Now().Unix()
-	minute := now / 60
 	m.bucketsMu.Lock()
 	snapshot := m.buckets
 	m.bucketsMu.Unlock()
-	var window, peak, current uint64
+	var window uint64
+	perMinute := map[int64]uint64{}
 	for _, bucket := range snapshot {
-		if bucket.minute == 0 {
+		if bucket.at == 0 {
 			continue
 		}
 		window += bucket.requests
-		if bucket.requests > peak {
-			peak = bucket.requests
-		}
-		if bucket.minute == minute {
-			current = bucket.requests
+		perMinute[bucket.at/60] += bucket.requests
+	}
+	var peak uint64
+	for _, v := range perMinute {
+		if v > peak {
+			peak = v
 		}
 	}
-	// avg 除以实际覆盖的分钟数（未满 60 分钟按已运行时长计，避免启动初期被稀释）。
+	current := perMinute[now/60]
+	// avg 除以实际覆盖的分钟数（未满窗口按已运行时长计，避免启动初期被稀释）。
 	elapsed := int64(time.Since(m.startedAt)/time.Minute) + 1
-	if elapsed > trendBuckets {
-		elapsed = trendBuckets
+	if elapsed > trendWindowMinutes {
+		elapsed = trendWindowMinutes
 	}
 	// QPS 用当前分钟已计请求 ÷ 本分钟已过秒数；首秒内按 1 秒防除零。
 	secondsIntoMinute := now%60 + 1
@@ -182,18 +189,18 @@ func (m *Metrics) rates() map[string]any {
 	}
 }
 
-// trend 返回最近 60 分钟的逐分钟请求/错误数（旧→新，含零值分钟），
+// trend 返回最近 60 分钟的逐 30 秒请求/错误数（旧→新，含零值桶），
 // 供面板直接画 sparkline，无需客户端再聚合。
 func (m *Metrics) trend() []map[string]any {
-	current := time.Now().Unix() / 60
+	current := time.Now().Unix() / trendBucketSecs
 	m.bucketsMu.Lock()
 	snapshot := m.buckets
 	m.bucketsMu.Unlock()
 	out := make([]map[string]any, 0, trendBuckets)
-	for minute := current - trendBuckets + 1; minute <= current; minute++ {
-		bucket := snapshot[int(minute%trendBuckets)]
-		point := map[string]any{"minute": minute * 60, "requests": uint64(0), "errors": uint64(0)}
-		if bucket.minute == minute {
+	for slot := current - trendBuckets + 1; slot <= current; slot++ {
+		bucket := snapshot[int(slot%trendBuckets)]
+		point := map[string]any{"at": slot * trendBucketSecs, "requests": uint64(0), "errors": uint64(0)}
+		if bucket.at == slot*trendBucketSecs {
 			point["requests"] = bucket.requests
 			point["errors"] = bucket.errors
 		}

@@ -16,8 +16,8 @@ debug:
   # 容量淘汰时保护的最新失败目录数（含 error.json）；<=0 不保护。默认 32。
   # keep_error_dirs: 32
   # 配额快照采样间隔（分钟），写入 logs/quota.jsonl 供燃烧速率预测；<=0 不采样。
-  # 默认 10。
-  # quota_interval_minutes: 10
+  # 默认 5。
+  # quota_interval_minutes: 5
 
 devin:
   base_url: "https://server.codeium.com"

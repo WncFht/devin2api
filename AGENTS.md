@@ -109,7 +109,7 @@
 
 聚合与生命周期：
 
-- `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、7 天逐小时趋势、最近 4096 条延迟 p50/p95/p99、按模型目录价的估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
+- `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势、最近 4096 条延迟 p50/p95/p99、按模型目录价的估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
 - `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）。
 - `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
 - `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
