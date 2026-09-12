@@ -40,3 +40,7 @@ multi-harness-eval/runs/
 
 # 本地 agent 技能/配置（不入库）
 /.devin/
+
+# Claude Code 入口：CLAUDE.md 与 .claude/skills/ 均是指向 AGENTS.md / .agents/ 的软链
+/CLAUDE.md
+/.claude/
