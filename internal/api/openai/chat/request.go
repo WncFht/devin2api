@@ -288,7 +288,7 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 		custom := false
 		if len(bytes.TrimSpace(args)) == 0 {
 			args = json.RawMessage(`{}`)
-		} else if !llmIsJSONObject(args) {
+		} else if !llm.IsJSONObject(args) {
 			// 客户端回灌的畸形/非 JSON 参数原文按 custom 通道保留，
 			// 吞成 {} 会让上游看到的调用语义悄悄变空。
 			custom = true
@@ -302,12 +302,4 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 		})
 	}
 	return content, nil
-}
-
-func llmIsJSONObject(value json.RawMessage) bool {
-	if !json.Valid(value) {
-		return false
-	}
-	var object map[string]json.RawMessage
-	return json.Unmarshal(value, &object) == nil && object != nil
 }

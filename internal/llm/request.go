@@ -200,7 +200,7 @@ func (call ToolCall) Validate() error {
 	if call.Custom {
 		return nil
 	}
-	if !validJSONObject(call.Arguments) {
+	if !IsJSONObject(call.Arguments) {
 		return errors.New("tool call arguments must be a JSON object")
 	}
 	return nil
@@ -292,7 +292,7 @@ func (tool ToolDefinition) Validate() error {
 	if !toolNameCharset.MatchString(tool.Name) {
 		return fmt.Errorf("tool name %q contains characters outside [A-Za-z0-9_-] which upstream rejects", tool.Name)
 	}
-	if !validJSONObject(tool.InputSchema) {
+	if !IsJSONObject(tool.InputSchema) {
 		return errors.New("tool input schema must be a JSON object")
 	}
 	return nil
@@ -346,10 +346,10 @@ func validateContent(content []Content, allowed ...ContentType) error {
 	return nil
 }
 
-func validJSONObject(value json.RawMessage) bool {
-	if !json.Valid(value) {
-		return false
-	}
+// IsJSONObject 判定 value 是否为 JSON 对象（{} 含）。Unmarshal 自带完整
+// 语法校验，无需前置 json.Valid；非对象/非法文本/null 均返回 false。
+// 各协议前端与适配器共用的参数体检定。
+func IsJSONObject(value json.RawMessage) bool {
 	var object map[string]json.RawMessage
 	return json.Unmarshal(value, &object) == nil && object != nil
 }

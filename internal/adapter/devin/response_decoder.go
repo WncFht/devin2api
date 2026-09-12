@@ -523,7 +523,7 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 		} else if state.call.Custom {
 			// 原文即参数体（invalid_json_str 通道或客户端回灌的畸形 JSON），
 			// 不走 JSON 校验与 XML 修复。
-		} else if !isJSONObject(state.call.Arguments) {
+		} else if !llm.IsJSONObject(state.call.Arguments) {
 			// swe 系模型偶尔把 XML 参数语法泄漏进 arguments_json（CLI 实测），
 			// 先尝试把 <parameter name="X">v</parameter> 解回 JSON 再兜底 {}。
 			if repaired, ok := repairLeakedXMLArguments(state.arguments.String()); ok {

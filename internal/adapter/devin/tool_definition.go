@@ -293,14 +293,6 @@ func isNaturalLanguageAnnotation(key string) bool {
 	}
 }
 
-func isJSONObject(value []byte) bool {
-	if !json.Valid(value) {
-		return false
-	}
-	var object map[string]json.RawMessage
-	return json.Unmarshal(value, &object) == nil && object != nil
-}
-
 // normalizeSchema 消除上游确定性拒绝的两种 schema 形态（实测）：
 //  1. 本地 $ref（"#/$defs/x" 等 JSON-pointer）inline 展开，顶层
 //     $defs/definitions/$schema 一并剥掉；
