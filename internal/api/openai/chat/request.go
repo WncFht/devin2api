@@ -41,6 +41,9 @@ type Message struct {
 	Name       string          `json:"name,omitempty"`
 	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
+	// ReasoningContent 是 DeepSeek 系/部分代理回传思考文本的约定字段；
+	// 解码进 ThinkingContent，客户端回灌历史时思考不会静默丢失。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ToolCall 是助手消息中的工具调用（也用于流式增量）。
@@ -148,6 +151,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 	for _, tool := range request.Tools {
 		if tool.Type != "function" {
+			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
 			continue
 		}
 		schema := tool.Function.Parameters
@@ -206,7 +210,7 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "assistant":
-		content, err := decodeAssistantContent(message)
+		content, err := decodeAssistantContent(context, message)
 		if err != nil {
 			return err
 		}
@@ -222,9 +226,12 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 		if err != nil {
 			return err
 		}
-		name, err := findToolName(context.Messages, message.ToolCallID)
-		if err != nil {
-			return err
+		name := findToolName(context.Messages, message.ToolCallID)
+		if name == "" {
+			// 压缩后的历史可能丢掉对应的 assistant tool_call；兜底名交给
+			// wire 层的 demoteOrphanToolResults 降级，避免整请求 400。
+			context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+message.ToolCallID)
+			name = "tool"
 		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  message.ToolCallID,
@@ -233,7 +240,7 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	default:
-		// 忽略未知角色。
+		context.Dropped = append(context.Dropped, "role:"+message.Role)
 	}
 	return nil
 }
@@ -245,7 +252,7 @@ func decodeUserContent(raw json.RawMessage) ([]llm.Content, error) {
 	return common.DecodeContent(raw)
 }
 
-func decodeAssistantContent(message Message) ([]llm.Content, error) {
+func decodeAssistantContent(context *llm.RequestMessages, message Message) ([]llm.Content, error) {
 	var content []llm.Content
 	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
 		decoded, err := common.DecodeContent(message.Content)
@@ -254,24 +261,36 @@ func decodeAssistantContent(message Message) ([]llm.Content, error) {
 		}
 		content = append(content, decoded...)
 	}
+	if message.ReasoningContent != "" {
+		content = append(content, llm.ThinkingContent{Thinking: message.ReasoningContent})
+	}
 	for _, call := range message.ToolCalls {
 		if call.Type != "" && call.Type != "function" {
+			context.Dropped = append(context.Dropped, "tool_call:"+call.Type)
 			continue
 		}
 		args := json.RawMessage(call.Function.Arguments)
-		if !llmIsJSONObject(args) {
+		custom := false
+		if len(bytes.TrimSpace(args)) == 0 {
 			args = json.RawMessage(`{}`)
+		} else if !llmIsJSONObject(args) {
+			// 客户端回灌的畸形/非 JSON 参数原文按 custom 通道保留，
+			// 吞成 {} 会让上游看到的调用语义悄悄变空。
+			custom = true
 		}
 		content = append(content, llm.ToolCall{
 			ID:        call.ID,
 			Name:      call.Function.Name,
 			Arguments: args,
+			Custom:    custom,
 		})
 	}
 	return content, nil
 }
 
-func findToolName(messages []llm.Message, callID string) (string, error) {
+// findToolName 在前面 assistant 消息的工具调用中查找工具名；
+// 找不到返回空串，由调用方降级兜底而不是让整请求失败。
+func findToolName(messages []llm.Message, callID string) string {
 	for index := len(messages) - 1; index >= 0; index-- {
 		assistant, ok := messages[index].(llm.AssistantMessage)
 		if !ok {
@@ -280,11 +299,11 @@ func findToolName(messages []llm.Message, callID string) (string, error) {
 		for _, block := range assistant.Content {
 			call, ok := block.(llm.ToolCall)
 			if ok && call.ID == callID {
-				return call.Name, nil
+				return call.Name
 			}
 		}
 	}
-	return "", fmt.Errorf("tool message references unknown tool_call_id %q", callID)
+	return ""
 }
 
 func llmIsJSONObject(value json.RawMessage) bool {

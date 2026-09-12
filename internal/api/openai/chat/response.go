@@ -282,6 +282,9 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 		"code":    common.ErrorCode(message),
 		"param":   nil,
 	}
+	for key, value := range common.UpstreamErrorDetails(message) {
+		errorPayload[key] = value
+	}
 	if event.Error != nil && event.Error.DebugRef != "" {
 		errorPayload["debug_ref"] = event.Error.DebugRef
 	}
@@ -365,26 +368,28 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 }
 
 func chatUsage(usage llm.Usage) map[string]any {
-	reasoningTokens := int64(0)
-	if usage.Reasoning != nil {
-		reasoningTokens = *usage.Reasoning
-	}
 	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
 	total := usage.TotalTokens
 	if total == 0 {
 		total = inputTokens + usage.Output
 	}
-	return map[string]any{
+	result := map[string]any{
 		"prompt_tokens":     inputTokens,
 		"completion_tokens": usage.Output,
 		"total_tokens":      total,
 		"prompt_tokens_details": map[string]any{
-			"cached_tokens": usage.CacheRead,
-		},
-		"completion_tokens_details": map[string]any{
-			"reasoning_tokens": reasoningTokens,
+			"cached_tokens":      usage.CacheRead,
+			"cache_write_tokens": usage.CacheWrite,
 		},
 	}
+	// Reasoning 为 nil 表示上游未报告推理子集；恒输出 0 会把「未知」
+	// 伪造成「无推理」，下游网关据此统计推理占比时会算错。
+	if usage.Reasoning != nil {
+		result["completion_tokens_details"] = map[string]any{
+			"reasoning_tokens": *usage.Reasoning,
+		}
+	}
+	return result
 }
 
 func finishReason(reason llm.StopReason) any {

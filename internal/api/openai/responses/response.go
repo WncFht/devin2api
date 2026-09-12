@@ -110,10 +110,12 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	if encoder.completed {
 		return nil, fmt.Errorf("response stream is already completed")
 	}
-	// 上游把思考签名作为正文之后的尾随帧发送：处理后续事件之前先补发
-	// 因等待签名而挂起的 reasoning 收尾（签名事件自身负责收尾，跳过）。
+	// 上游把思考签名作为正文之后的尾随帧发送，且可能隔着整个 toolcall
+	// 块才到（实测 thinking_end → toolcall_* → thinking_signature）。中途
+	// 不提前补发 reasoning 收尾，把等待窗口保留到流终止；签名事件到达时
+	// 由 reasoningSignature 自行收尾。Done 之前兜底关闭，防挂起 item 拦下完成。
 	var prefix []SSEEvent
-	if event.Type != llm.ResponseEventThinkingSignature {
+	if event.Type == llm.ResponseEventDone {
 		prefix = encoder.flushPendingReasoning()
 	}
 	var events []SSEEvent
@@ -166,6 +168,23 @@ func (encoder *StreamEncoder) start() []SSEEvent {
 	}
 }
 
+// openAIReasoningItemID 从 openai 型签名（序列化 reasoning item 数组）
+// 取出上游分配的真实 rs_* item id；解析失败返回空串，调用方保留生成的 id。
+func openAIReasoningItemID(signature string) string {
+	trimmed := strings.TrimSpace(signature)
+	if !strings.HasPrefix(trimmed, "[") {
+		return ""
+	}
+	var items []struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 || items[0].Type != "reasoning" {
+		return ""
+	}
+	return items[0].ID
+}
+
 func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.newItem(event.ContentIndex, "reasoning", "rs")
 	if err != nil {
@@ -173,6 +192,13 @@ func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEven
 	}
 	if thinking, ok := contentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok {
 		item.encryptedContent = thinking.ThinkingSignature
+		if thinking.SignatureType == "openai" {
+			// 签名原文 blob 整体进 encrypted_content（回放时按同一形态
+			// 识别），但 item id 用内层真实 rs_*——与上游下发一致。
+			if id := openAIReasoningItemID(item.encryptedContent); id != "" {
+				item.id = id
+			}
+		}
 	}
 	addedItem := map[string]any{"id": item.id, "type": "reasoning", "summary": []any{}}
 	if item.encryptedContent != "" {
@@ -210,10 +236,13 @@ func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent,
 	if thinking, ok := contentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.ThinkingSignature != "" {
 		item.encryptedContent = thinking.ThinkingSignature
 	}
+	// 思考文本无论是否推迟收尾都要先落进 pendingText：签名与正文同帧
+	// 到达时不走 pending 分支，若只在该分支赋值，reasoningDone 发出的
+	// summary/done 会带空文本。
+	item.pendingText = text
 	// 上游把签名作为正文之后的尾随帧发送：尚无签名时推迟收尾事件。
 	if item.encryptedContent == "" {
 		item.pendingDone = true
-		item.pendingText = text
 		return nil, nil
 	}
 	return encoder.reasoningDone(item), nil
@@ -242,21 +271,31 @@ func (encoder *StreamEncoder) reasoningDone(item *streamItem) []SSEEvent {
 	}
 }
 
-// reasoningSignature 把尾随签名并入挂起的 reasoning item 并补发收尾。
+// reasoningSignature 把尾随签名并入 reasoning item：挂起时补发收尾；
+// item 已关闭时（签名随 thinking_end 同帧到达、或兜底 flush 后仍有迟到帧）
+// 只补写 completed output 里的 encrypted_content，不再重发事件；
+// 下标没有 reasoning item 属上游异常形态，静默丢弃而非整流报错。
 func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
-	item, err := encoder.item(event.ContentIndex, "reasoning")
-	if err != nil {
-		return nil, err
+	item := encoder.items[event.ContentIndex]
+	if item == nil || item.kind != "reasoning" {
+		return nil, nil
 	}
 	item.encryptedContent += event.Delta
+	if item.closed {
+		if completed, ok := encoder.output[item.outputIndex].(map[string]any); ok {
+			completed["encrypted_content"] = item.encryptedContent
+		}
+		return nil, nil
+	}
 	if !item.pendingDone {
 		return nil, nil
 	}
 	return encoder.reasoningDone(item), nil
 }
 
-// flushPendingReasoning 在发出其他事件前补发挂起的 reasoning 收尾，
-// 上游没有尾随签名时保证 item 仍正常关闭。
+// flushPendingReasoning 在流终止（Done）前补发挂起的 reasoning 收尾，
+// 上游始终没有尾随签名时保证 item 仍正常关闭。签名帧可能隔着后续
+// 内容块才到，中途不调用以免提前关项导致迟到签名无处可落。
 func (encoder *StreamEncoder) flushPendingReasoning() []SSEEvent {
 	var events []SSEEvent
 	for _, item := range encoder.items {
@@ -271,6 +310,11 @@ func (encoder *StreamEncoder) startText(event llm.ResponseEvent) ([]SSEEvent, er
 	item, err := encoder.newItem(event.ContentIndex, "message", "msg")
 	if err != nil {
 		return nil, err
+	}
+	// 上游 output_id 是 OpenAI 侧 message item 的真实标识（msg_*），
+	// 下发同一个 id 让客户端回放的 item 与上游记录对齐。
+	if event.Partial != nil && event.Partial.OutputID != "" {
+		item.id = event.Partial.OutputID
 	}
 	item.contentIndex = 0
 	return []SSEEvent{
@@ -324,34 +368,50 @@ func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, erro
 }
 
 func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
-	item, err := encoder.newItem(event.ContentIndex, "function_call", "fc")
+	// custom/freeform 调用的参数体不是 JSON（上游 is_custom_tool_call），
+	// 按 Responses custom_tool_call item 下发——input 字段而非 arguments。
+	kind := "function_call"
+	if call, ok := contentAt[llm.ToolCall](event.Partial, event.ContentIndex); ok && call.Custom {
+		kind = "custom_tool_call"
+	}
+	item, err := encoder.newItem(event.ContentIndex, kind, "fc")
 	if err != nil {
 		return nil, err
 	}
 	item.callID = event.ToolCallID
 	item.name = event.ToolName
+	addedItem := map[string]any{
+		"id": item.id, "type": kind, "status": "in_progress",
+		"call_id": item.callID, "name": item.name,
+	}
+	if kind == "custom_tool_call" {
+		addedItem["input"] = ""
+	} else {
+		addedItem["arguments"] = ""
+	}
 	return []SSEEvent{encoder.emit("response.output_item.added", map[string]any{
 		"output_index": item.outputIndex,
-		"item": map[string]any{
-			"id": item.id, "type": "function_call", "status": "in_progress", "arguments": "",
-			"call_id": item.callID, "name": item.name,
-		},
+		"item":         addedItem,
 	})}, nil
 }
 
 func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
-	item, err := encoder.item(event.ContentIndex, "function_call")
+	item, err := encoder.itemAnyKind(event.ContentIndex, "function_call", "custom_tool_call")
 	if err != nil {
 		return nil, err
 	}
 	item.value.WriteString(event.Delta)
-	return []SSEEvent{encoder.emit("response.function_call_arguments.delta", map[string]any{
+	eventName := "response.function_call_arguments.delta"
+	if item.kind == "custom_tool_call" {
+		eventName = "response.custom_tool_call_input.delta"
+	}
+	return []SSEEvent{encoder.emit(eventName, map[string]any{
 		"item_id": item.id, "output_index": item.outputIndex, "delta": event.Delta,
 	})}, nil
 }
 
 func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
-	item, err := encoder.item(event.ContentIndex, "function_call")
+	item, err := encoder.itemAnyKind(event.ContentIndex, "function_call", "custom_tool_call")
 	if err != nil {
 		return nil, err
 	}
@@ -362,13 +422,20 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 		item.name = event.ToolCall.Name
 	}
 	completedItem := map[string]any{
-		"id": item.id, "type": "function_call", "status": "completed", "arguments": arguments,
+		"id": item.id, "type": item.kind, "status": "completed",
 		"call_id": item.callID, "name": item.name,
 	}
+	eventName := "response.function_call_arguments.done"
+	field := "arguments"
+	if item.kind == "custom_tool_call" {
+		eventName = "response.custom_tool_call_input.done"
+		field = "input"
+	}
+	completedItem[field] = arguments
 	encoder.closeItem(item, completedItem)
 	return []SSEEvent{
-		encoder.emit("response.function_call_arguments.done", map[string]any{
-			"item_id": item.id, "output_index": item.outputIndex, "arguments": arguments,
+		encoder.emit(eventName, map[string]any{
+			"item_id": item.id, "output_index": item.outputIndex, field: arguments,
 		}),
 		encoder.emit("response.output_item.done", map[string]any{"output_index": item.outputIndex, "item": completedItem}),
 	}, nil
@@ -410,6 +477,9 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	errorType := common.OpenAIErrorType(message)
 	errorPayload := map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message)}
+	for key, value := range common.UpstreamErrorDetails(message) {
+		errorPayload[key] = value
+	}
 	if event.Error != nil && event.Error.DebugRef != "" {
 		errorPayload["debug_ref"] = event.Error.DebugRef
 	}
@@ -435,17 +505,25 @@ func (encoder *StreamEncoder) newItem(contentIndex int, kind string, prefix stri
 }
 
 func (encoder *StreamEncoder) item(contentIndex int, kind string) (*streamItem, error) {
+	return encoder.itemAnyKind(contentIndex, kind)
+}
+
+// itemAnyKind 取指定下标的进行中 item，kind 必须属于给定集合——
+// 工具调用在事件途中才能区分 function_call / custom_tool_call。
+func (encoder *StreamEncoder) itemAnyKind(contentIndex int, kinds ...string) (*streamItem, error) {
 	item := encoder.items[contentIndex]
 	if item == nil {
 		return nil, fmt.Errorf("content index %d has no active output item", contentIndex)
 	}
-	if item.kind != kind {
-		return nil, fmt.Errorf("content index %d is %q, want %q", contentIndex, item.kind, kind)
+	for _, kind := range kinds {
+		if item.kind == kind {
+			if item.closed {
+				return nil, fmt.Errorf("content index %d output item is already closed", contentIndex)
+			}
+			return item, nil
+		}
 	}
-	if item.closed {
-		return nil, fmt.Errorf("content index %d output item is already closed", contentIndex)
-	}
-	return item, nil
+	return nil, fmt.Errorf("content index %d is %q, want one of %v", contentIndex, item.kind, kinds)
 }
 
 func (encoder *StreamEncoder) closeItem(item *streamItem, output any) {
@@ -514,13 +592,23 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 	for _, block := range message.Content {
 		switch content := block.(type) {
 		case llm.TextContent:
+			messageID := message.OutputID
+			if messageID == "" {
+				messageID = randid.Prefixed("msg_")
+			}
 			messages = append(messages, map[string]any{
-				"id": randid.Prefixed("msg_"), "type": "message", "status": "completed", "role": "assistant",
+				"id": messageID, "type": "message", "status": "completed", "role": "assistant",
 				"content": []any{map[string]any{"type": "output_text", "text": content.Text, "annotations": []any{}}},
 			})
 		case llm.ThinkingContent:
+			itemID := randid.Prefixed("rs_")
+			if content.SignatureType == "openai" {
+				if id := openAIReasoningItemID(content.ThinkingSignature); id != "" {
+					itemID = id
+				}
+			}
 			item := map[string]any{
-				"id": randid.Prefixed("rs_"), "type": "reasoning", "status": "completed",
+				"id": itemID, "type": "reasoning", "status": "completed",
 				"summary": []any{map[string]any{"type": "summary_text", "text": content.Thinking}},
 			}
 			if content.ThinkingSignature != "" {
@@ -528,10 +616,17 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 			}
 			reasonings = append(reasonings, item)
 		case llm.ToolCall:
-			toolCalls = append(toolCalls, map[string]any{
-				"id": randid.Prefixed("fc_"), "type": "function_call", "status": "completed",
-				"call_id": content.ID, "name": content.Name, "arguments": string(content.Arguments),
-			})
+			if content.Custom {
+				toolCalls = append(toolCalls, map[string]any{
+					"id": randid.Prefixed("fc_"), "type": "custom_tool_call", "status": "completed",
+					"call_id": content.ID, "name": content.Name, "input": string(content.Arguments),
+				})
+			} else {
+				toolCalls = append(toolCalls, map[string]any{
+					"id": randid.Prefixed("fc_"), "type": "function_call", "status": "completed",
+					"call_id": content.ID, "name": content.Name, "arguments": string(content.Arguments),
+				})
+			}
 		default:
 			return nil, fmt.Errorf("unsupported response content type %T", block)
 		}

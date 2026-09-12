@@ -270,12 +270,24 @@ func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.Context.Messages) != 1 {
-		t.Fatalf("message count = %d, want 1", len(request.Context.Messages))
+	// 未知 item 降级为 USER 文本保住内容：additional_tools 与无 type 项
+	// 各产生一条降级消息，future_role 消息被丢弃，可识别内容不受影响。
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(request.Context.Messages))
 	}
-	message, ok := request.Context.Messages[0].(llm.UserMessage)
+	for index := 0; index < 2; index++ {
+		message, ok := request.Context.Messages[index].(llm.UserMessage)
+		if !ok {
+			t.Fatalf("message %d type = %T, want llm.UserMessage", index, request.Context.Messages[index])
+		}
+		text := message.Content[0].(llm.TextContent).Text
+		if !strings.HasPrefix(text, "[input item type=") {
+			t.Fatalf("demoted message %d = %q", index, text)
+		}
+	}
+	message, ok := request.Context.Messages[2].(llm.UserMessage)
 	if !ok {
-		t.Fatalf("message type = %T, want llm.UserMessage", request.Context.Messages[0])
+		t.Fatalf("message type = %T, want llm.UserMessage", request.Context.Messages[2])
 	}
 	if len(message.Content) != 1 || message.Content[0].(llm.TextContent).Text != "hello" {
 		t.Fatalf("message content = %#v", message.Content)

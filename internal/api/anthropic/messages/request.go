@@ -37,6 +37,9 @@ type Message struct {
 
 // Tool 是 Anthropic 工具定义。
 type Tool struct {
+	// Type 缺省/为 "custom" 时是客户端 function 工具；web_search_* 等
+	// server tool 没有 input_schema 语义，本代理不转发。
+	Type        string          `json:"type,omitempty"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
@@ -117,6 +120,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
+		// 只转客户端自定义工具：server tool（web_search_*/advisor_* 等）
+		// 由供应商托管执行，上游 Devin 无对应物，转发只会制造废工具。
+		if tool.Type != "" && tool.Type != "custom" {
+			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
+			continue
+		}
 		schema := tool.InputSchema
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object"}`)
@@ -160,6 +169,7 @@ func appendSystem(context *llm.RequestMessages, raw json.RawMessage) error {
 			return err
 		}
 		if block.Type != "text" {
+			context.Dropped = append(context.Dropped, "system_block:"+block.Type)
 			continue
 		}
 		if context.SystemPrompt != "" && block.Text != "" {
@@ -182,13 +192,13 @@ func appendMessages(context *llm.RequestMessages, messages []Message) error {
 func appendMessage(context *llm.RequestMessages, message Message) error {
 	switch message.Role {
 	case "user":
-		messages, err := decodeAnthropicUserMessages(context.Messages, message.Content)
+		messages, err := decodeAnthropicUserMessages(context, context.Messages, message.Content)
 		if err != nil {
 			return err
 		}
 		context.Messages = append(context.Messages, messages...)
 	case "assistant":
-		content, err := decodeAssistantContent(message.Content)
+		content, err := decodeAssistantContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -200,20 +210,20 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 		// Claude Code 在消息流中间插入 role:system 的途中注入（agent 列表、
 		// task reminder、system notification）。内容位置敏感——解码为
 		// UserMessage 保持时序，不能折叠进系统提示词。
-		messages, err := decodeAnthropicUserMessages(context.Messages, message.Content)
+		messages, err := decodeAnthropicUserMessages(context, context.Messages, message.Content)
 		if err != nil {
 			return err
 		}
 		context.Messages = append(context.Messages, messages...)
 	default:
-		// 忽略未知角色。
+		context.Dropped = append(context.Dropped, "role:"+message.Role)
 	}
 	return nil
 }
 
 // decodeAnthropicUserMessages 把 Anthropic user 消息 content 拆分为一个或多个中间消息。
 // tool_result 内容块会生成独立的 llm.ToolResultMessage。
-func decodeAnthropicUserMessages(messages []llm.Message, raw json.RawMessage) ([]llm.Message, error) {
+func decodeAnthropicUserMessages(context *llm.RequestMessages, messages []llm.Message, raw json.RawMessage) ([]llm.Message, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Message{llm.UserMessage{
 			Content:     []llm.Content{llm.TextContent{Text: ""}},
@@ -267,21 +277,21 @@ func decodeAnthropicUserMessages(messages []llm.Message, raw json.RawMessage) ([
 			currentUserContent = append(currentUserContent, image)
 		case "tool_result":
 			flushUser()
-			tool, err := decodeToolResult(messages, header.ToolUseID, header.Content, header.IsError)
+			tool, err := decodeToolResult(context, messages, header.ToolUseID, header.Content, header.IsError)
 			if err != nil {
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			result = append(result, tool)
 			messages = append(messages, tool)
 		default:
-			continue
+			context.Dropped = append(context.Dropped, "user_block:"+header.Type)
 		}
 	}
 	flushUser()
 	return result, nil
 }
 
-func decodeAssistantContent(raw json.RawMessage) ([]llm.Content, error) {
+func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
@@ -312,10 +322,18 @@ func decodeAssistantContent(raw json.RawMessage) ([]llm.Content, error) {
 		case "text":
 			content = append(content, llm.TextContent{Text: header.Text})
 		case "thinking":
-			content = append(content, llm.ThinkingContent{Thinking: header.Thinking, ThinkingSignature: header.Signature})
+			content = append(content, llm.ThinkingContent{
+				Thinking:          header.Thinking,
+				ThinkingSignature: header.Signature,
+				SignatureType:     guessSignatureType(header.Signature),
+			})
 		case "redacted_thinking":
 			// redacted 块的 data 是密封思考体；在 Devin wire 上对应 signature+redacted 标记。
-			content = append(content, llm.ThinkingContent{ThinkingSignature: header.Data, Redacted: true})
+			content = append(content, llm.ThinkingContent{
+				ThinkingSignature: header.Data,
+				SignatureType:     guessSignatureType(header.Data),
+				Redacted:          true,
+			})
 		case "tool_use":
 			args := header.Input
 			if len(args) == 0 {
@@ -323,18 +341,22 @@ func decodeAssistantContent(raw json.RawMessage) ([]llm.Content, error) {
 			}
 			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args})
 		default:
-			continue
+			context.Dropped = append(context.Dropped, "assistant_block:"+header.Type)
 		}
 	}
 	return content, nil
 }
 
-func decodeToolResult(messages []llm.Message, toolUseID string, raw json.RawMessage, isError bool) (llm.ToolResultMessage, error) {
+func decodeToolResult(context *llm.RequestMessages, messages []llm.Message, toolUseID string, raw json.RawMessage, isError bool) (llm.ToolResultMessage, error) {
 	if toolUseID == "" {
 		return llm.ToolResultMessage{}, errors.New("tool_result requires tool_use_id")
 	}
 	name := findToolNameByToolUseID(messages, toolUseID)
-	content, err := decodeAnthropicContent(raw)
+	if name == "" {
+		context.Dropped = append(context.Dropped, "unmatched_tool_use_id:"+toolUseID)
+		name = "tool"
+	}
+	content, err := decodeAnthropicContent(context, raw)
 	if err != nil {
 		return llm.ToolResultMessage{}, err
 	}
@@ -351,7 +373,7 @@ func decodeToolResult(messages []llm.Message, toolUseID string, raw json.RawMess
 }
 
 // decodeAnthropicContent 把原始 JSON 解码为 text / image 内容块。
-func decodeAnthropicContent(raw json.RawMessage) ([]llm.Content, error) {
+func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
@@ -401,13 +423,14 @@ func decodeAnthropicContent(raw json.RawMessage) ([]llm.Content, error) {
 				content = append(content, llm.TextContent{Text: "[resource: " + header.Resource.URI + "]"})
 			}
 		default:
-			continue
+			context.Dropped = append(context.Dropped, "content_block:"+header.Type)
 		}
 	}
 	return content, nil
 }
 
-// findToolNameByToolUseID 在前面 assistant 消息的工具调用中查找工具名。
+// findToolNameByToolUseID 在前面 assistant 消息的工具调用中查找工具名；
+// 找不到返回空串，由调用方降级兜底。
 func findToolNameByToolUseID(messages []llm.Message, toolUseID string) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		assistant, ok := messages[i].(llm.AssistantMessage)
@@ -421,5 +444,20 @@ func findToolNameByToolUseID(messages []llm.Message, toolUseID string) string {
 			}
 		}
 	}
-	return "tool"
+	return ""
+}
+
+// guessSignatureType 给回放的思考签名标注上游 signature_type：
+// sealed.* 是本代理下发过的密封格式；其余不透明 blob 按 anthropic
+// 体制标注（走 Anthropic 协议的签名要么来自本代理的 claude 模型，
+// 要么来自真实 Anthropic API，两边都是 anthropic 体制）。
+// 缺类型实测被上游容忍，标错类型才会 invalid_argument。
+func guessSignatureType(signature string) string {
+	if strings.HasPrefix(signature, "sealed.") {
+		return "sealed"
+	}
+	if signature == "" {
+		return ""
+	}
+	return "anthropic"
 }

@@ -3,6 +3,8 @@ package common
 
 import (
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -130,4 +132,48 @@ func ErrorCode(message string) any {
 		return "context_length_exceeded"
 	}
 	return nil
+}
+
+// rateLimitResetPattern 匹配上游限流文案里的重试窗口
+// （"Your limit will reset in N seconds."）。上游不给 Retry-After 头
+// 或 RetryInfo detail，这句文案是唯一可行动的 hint。
+var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+) seconds`)
+
+// RetryAfterSeconds 从上游错误文案解析限流重置秒数；无 hint 返回 false。
+func RetryAfterSeconds(message string) (int, bool) {
+	match := rateLimitResetPattern.FindStringSubmatch(message)
+	if len(match) != 2 {
+		return 0, false
+	}
+	seconds, err := strconv.Atoi(match[1])
+	if err != nil || seconds <= 0 {
+		return 0, false
+	}
+	return seconds, true
+}
+
+// traceIDPattern 匹配上游流内错误尾的 trace 标记 "(trace ID: …)"。
+// 上游错误文案普遍是模糊 "internal error"，trace ID 是唯一排障锚点。
+var traceIDPattern = regexp.MustCompile(`\(trace ID: ([^)\s]+)\)`)
+
+// UpstreamTraceID 从错误文案提取上游 trace ID；没有返回空串。
+func UpstreamTraceID(message string) string {
+	match := traceIDPattern.FindStringSubmatch(message)
+	if len(match) != 2 {
+		return ""
+	}
+	return match[1]
+}
+
+// UpstreamErrorDetails 返回应附进错误对象的上游排障字段：
+// upstream_trace_id（报障锚点）与 retry_after（限流重置秒数 hint）。
+func UpstreamErrorDetails(message string) map[string]any {
+	details := map[string]any{}
+	if traceID := UpstreamTraceID(message); traceID != "" {
+		details["upstream_trace_id"] = traceID
+	}
+	if seconds, ok := RetryAfterSeconds(message); ok {
+		details["retry_after"] = seconds
+	}
+	return details
 }

@@ -113,6 +113,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 	for _, tool := range request.Tools {
 		if tool.Type != "function" {
+			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
 			continue
 		}
 		schema := tool.Parameters
@@ -170,8 +171,9 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 
 // pendingReasoning 缓冲 reasoning item 的 summary 文本与可回放签名。
 type pendingReasoning struct {
-	texts     []string
-	signature string
+	texts         []string
+	signature     string
+	signatureType string
 }
 
 // consumePendingThinking 取出累积的 reasoning summary，作为 ThinkingContent 前置块。
@@ -183,10 +185,42 @@ func consumePendingThinking(pending *pendingReasoning) []llm.Content {
 	block := llm.ThinkingContent{
 		Thinking:          strings.Join(pending.texts, "\n"),
 		ThinkingSignature: pending.signature,
+		SignatureType:     pending.signatureType,
 		Redacted:          len(pending.texts) == 0,
 	}
 	*pending = pendingReasoning{}
 	return []llm.Content{block}
+}
+
+// classifyReasoningSignature 识别回放进 input 的 encrypted_content 属于哪种
+// 上游签名体制：sealed.* 与序列化 reasoning item 数组（openai 型）都是我们
+// 自己下发过的形态，原样回放；其余外来不透明载荷不可解，丢弃。
+func classifyReasoningSignature(encrypted string) (signature, signatureType string, keep bool) {
+	switch {
+	case strings.HasPrefix(encrypted, "sealed."):
+		return encrypted, "sealed", true
+	case isOpenAIReasoningSignature(encrypted):
+		return encrypted, "openai", true
+	default:
+		return "", "", false
+	}
+}
+
+// isOpenAIReasoningSignature 判断载荷是否为 openai 型签名——上游 signature
+// 字段的实测形态是序列化 Responses reasoning item 数组。下行时我们把整个
+// blob 原样放进 encrypted_content，回放时按同一形态识别。
+func isOpenAIReasoningSignature(blob string) bool {
+	trimmed := strings.TrimSpace(blob)
+	if !strings.HasPrefix(trimmed, "[") {
+		return false
+	}
+	var items []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 {
+		return false
+	}
+	return items[0].Type == "reasoning"
 }
 
 func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning) error {
@@ -217,8 +251,12 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 				pending.texts = append(pending.texts, part.Text)
 			}
 		}
-		if strings.HasPrefix(item.EncryptedContent, "sealed.") {
-			pending.signature = item.EncryptedContent
+		if signature, signatureType, keep := classifyReasoningSignature(item.EncryptedContent); keep {
+			pending.signature = signature
+			pending.signatureType = signatureType
+		} else if item.EncryptedContent != "" {
+			// 外来不透明载荷不可解，记录而不透传。
+			context.Dropped = append(context.Dropped, "reasoning:encrypted_content")
 		}
 		return nil
 	case "message":
@@ -241,34 +279,76 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 			TimestampMS: time.Now().UnixMilli(),
 		})
 		return nil
-	case "function_call_output":
-		// reasoning 与产出之间插入结果项 → reasoning 成孤儿，丢弃缓冲。
-		*pending = pendingReasoning{}
+	case "custom_tool_call":
+		// freeform 工具调用的 input 是原文不是 JSON（如 apply_patch 补丁），
+		// 走 Custom 通道原样上行到 invalid_json_str。
 		var item struct {
-			CallID string          `json:"call_id"`
-			Output json.RawMessage `json:"output"`
+			CallID string `json:"call_id"`
+			Name   string `json:"name"`
+			Input  string `json:"input"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
-		output, err := common.RawOutputText(item.Output)
+		content := append(consumePendingThinking(pending),
+			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Input), Custom: true})
+		context.Messages = append(context.Messages, llm.AssistantMessage{
+			Content:     content,
+			StopReason:  llm.StopReasonToolUse,
+			TimestampMS: time.Now().UnixMilli(),
+		})
+		return nil
+	case "function_call_output", "custom_tool_call_output":
+		// reasoning 与产出之间插入结果项 → reasoning 成孤儿，丢弃缓冲。
+		*pending = pendingReasoning{}
+		// 客户端对调用 ID 字段名有四种植法（call_id 是规范，其余来自
+		// Chat 习惯/驼峰序列化/id 即调用 id 的实现），按序兼容取第一个非空。
+		var item struct {
+			CallID      string          `json:"call_id"`
+			ToolCallID  string          `json:"tool_call_id"`
+			CallIDCamel string          `json:"callId"`
+			ID          string          `json:"id"`
+			Output      json.RawMessage `json:"output"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return err
+		}
+		callID := item.CallID
+		if callID == "" {
+			callID = item.ToolCallID
+		}
+		if callID == "" {
+			callID = item.CallIDCamel
+		}
+		if callID == "" {
+			callID = item.ID
+		}
+		content, err := decodeToolOutput(item.Output)
 		if err != nil {
 			return err
 		}
-		toolName := findToolName(context.Messages, item.CallID)
+		toolName := findToolName(context.Messages, callID)
 		if toolName == "" {
 			// 压缩后的历史可能丢掉对应的 function_call；对齐 Anthropic
 			// 解码路径的兜底名，避免整请求失败。
+			context.Dropped = append(context.Dropped, "unmatched_call_id:"+callID)
 			toolName = "tool"
 		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
-			ToolCallID:  item.CallID,
+			ToolCallID:  callID,
 			ToolName:    toolName,
-			Content:     []llm.Content{llm.TextContent{Text: output}},
+			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
 		return nil
 	default:
+		// tool_search_output / mcp_* 等服务端工具产物没有对应中间类型；
+		// 静默丢弃会丢上下文，降级为 USER 文本保住内容。
+		context.Dropped = append(context.Dropped, "item:"+header.Type)
+		context.Messages = append(context.Messages, llm.UserMessage{
+			Content:     []llm.Content{llm.TextContent{Text: "[input item type=" + header.Type + "]\n" + string(raw)}},
+			TimestampMS: time.Now().UnixMilli(),
+		})
 		return nil
 	}
 }
@@ -289,13 +369,36 @@ func findToolName(messages []llm.Message, callID string) string {
 	return ""
 }
 
+// decodeToolOutput 解码 function_call_output/custom_tool_call_output 的
+// output：字符串直接成文本；part 数组（可含 input_image——实测上游
+// tool_result 图像子通道有效）按消息内容解码；其余 JSON 原样转文本。
+func decodeToolOutput(raw json.RawMessage) ([]llm.Content, error) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return []llm.Content{llm.TextContent{Text: text}}, nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, errors.New("function call output is required")
+	}
+	if trimmed[0] == '[' {
+		content, err := common.DecodeContent(raw)
+		if err == nil && len(content) > 0 {
+			return content, nil
+		}
+	}
+	return []llm.Content{llm.TextContent{Text: string(raw)}}, nil
+}
+
 func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role string, pending *pendingReasoning) error {
 	switch role {
 	case "user", "assistant", "system", "developer":
 	default:
+		context.Dropped = append(context.Dropped, "message_role:"+role)
 		return nil
 	}
 	var item struct {
+		ID      string          `json:"id"`
 		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &item); err != nil {
@@ -315,7 +418,13 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 		context.Messages = append(context.Messages, llm.UserMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
 	case "assistant":
 		content = append(consumePendingThinking(pending), content...)
-		context.Messages = append(context.Messages, llm.AssistantMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
+		assistant := llm.AssistantMessage{Content: content, TimestampMS: time.Now().UnixMilli()}
+		if strings.HasPrefix(item.ID, "msg_") {
+			// msg_* 是 OpenAI 侧 message item 的真实标识，上游 output_id
+			// 回放用同一个值。
+			assistant.OutputID = item.ID
+		}
+		context.Messages = append(context.Messages, assistant)
 	case "system", "developer":
 		*pending = pendingReasoning{}
 		text := common.ContentText(content)

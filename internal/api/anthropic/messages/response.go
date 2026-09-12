@@ -36,6 +36,9 @@ type contentBlockState struct {
 	// pendingSig 表示思考块正文已结束但尚未发出 content_block_stop，
 	// 等待可能尾随到达的签名帧，避免签名落成独立的畸形思考块。
 	pendingSig bool
+	// redacted 表示该思考块正文被上游隐藏（ThinkingRedacted），
+	// 收尾时应发 redacted_thinking 块而非 thinking 块。
+	redacted bool
 }
 
 // NewStreamEncoder 为一次 Anthropic Messages 流创建编码状态。
@@ -134,12 +137,11 @@ func (encoder *StreamEncoder) start(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) startText(event llm.ResponseEvent) []SSEEvent {
 	state := &contentBlockState{index: event.ContentIndex, kind: "text"}
 	encoder.blocks = append(encoder.blocks, state)
-	events := encoder.flushPendingThinking()
-	return append(events, encoder.event("content_block_start", map[string]any{
+	return []SSEEvent{encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
 		"content_block": map[string]any{"type": "text", "text": ""},
-	}))
+	})}
 }
 
 func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) []SSEEvent {
@@ -173,13 +175,15 @@ func (encoder *StreamEncoder) endText(event llm.ResponseEvent) []SSEEvent {
 
 func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent {
 	state := &contentBlockState{index: event.ContentIndex, kind: "thinking"}
+	if thinking, ok := thinkingAt(event.Partial, event.ContentIndex); ok && thinking.Redacted {
+		state.redacted = true
+	}
 	encoder.blocks = append(encoder.blocks, state)
-	events := encoder.flushPendingThinking()
-	return append(events, encoder.event("content_block_start", map[string]any{
+	return []SSEEvent{encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
 		"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
-	}))
+	})}
 }
 
 func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent {
@@ -188,6 +192,10 @@ func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent 
 		return nil
 	}
 	state.thinking.WriteString(event.Delta)
+	if state.redacted {
+		// 隐藏思考不应把增量正文发出去（上游也不会给正文，但 belt-and-suspenders）。
+		return nil
+	}
 	return []SSEEvent{encoder.event("content_block_delta", map[string]any{
 		"type":  "content_block_delta",
 		"index": event.ContentIndex,
@@ -206,10 +214,9 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) []SSEEvent {
 	}
 	state.thinking.Reset()
 	state.thinking.WriteString(thinking)
-	if event.Partial != nil && event.ContentIndex < len(event.Partial.Content) {
-		if t, ok := event.Partial.Content[event.ContentIndex].(llm.ThinkingContent); ok {
-			state.signature.WriteString(t.ThinkingSignature)
-		}
+	if t, ok := thinkingAt(event.Partial, event.ContentIndex); ok {
+		state.signature.WriteString(t.ThinkingSignature)
+		state.redacted = state.redacted || t.Redacted
 	}
 	// 上游把签名作为正文之后的尾随帧发送：尚无签名时推迟
 	// content_block_stop，待 signature 事件或下一事件再收尾。
@@ -230,6 +237,11 @@ func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) []SSEEv
 		return nil
 	}
 	state.pendingSig = false
+	if state.redacted {
+		// redacted 块的 data 只在收尾的 content_block_stop 里整体下发，
+		// 没有 signature_delta 这种增量形态。
+		return []SSEEvent{encoder.stopThinking(state)}
+	}
 	return []SSEEvent{
 		encoder.event("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
@@ -240,8 +252,10 @@ func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) []SSEEv
 	}
 }
 
-// flushPendingThinking 在发出其他事件前补发挂起的思考块收尾，
-// 上游没有尾随签名时保证块仍按序正常关闭。
+// flushPendingThinking 在流终止（finish/failed）前补发挂起的思考块收尾，
+// 上游没有尾随签名时保证块仍按序正常关闭。签名帧可能隔着后续内容块
+// 才到（实测 thinking_end → toolcall_* → signature），中途不调用以免
+// 提前关块导致迟到签名被静默丢弃。
 func (encoder *StreamEncoder) flushPendingThinking() []SSEEvent {
 	var events []SSEEvent
 	for _, state := range encoder.blocks {
@@ -254,26 +268,34 @@ func (encoder *StreamEncoder) flushPendingThinking() []SSEEvent {
 }
 
 func (encoder *StreamEncoder) stopThinking(state *contentBlockState) SSEEvent {
+	return encoder.event("content_block_stop", map[string]any{
+		"type":          "content_block_stop",
+		"index":         state.index,
+		"content_block": thinkingBlock(state),
+	})
+}
+
+// thinkingBlock 生成思考块的最终形态：上游标记隐藏的思考按 Anthropic
+// redacted_thinking 块发出（data 即上游密封签名），正文不落盘不外发。
+func thinkingBlock(state *contentBlockState) map[string]any {
+	if state.redacted {
+		return map[string]any{"type": "redacted_thinking", "data": state.signature.String()}
+	}
 	block := map[string]any{"type": "thinking", "thinking": state.thinking.String()}
 	if sig := state.signature.String(); sig != "" {
 		block["signature"] = sig
 	}
-	return encoder.event("content_block_stop", map[string]any{
-		"type":          "content_block_stop",
-		"index":         state.index,
-		"content_block": block,
-	})
+	return block
 }
 
 func (encoder *StreamEncoder) startToolUse(event llm.ResponseEvent) []SSEEvent {
 	state := &contentBlockState{index: event.ContentIndex, kind: "tool_use", toolID: event.ToolCallID, toolName: event.ToolName}
 	encoder.blocks = append(encoder.blocks, state)
-	events := encoder.flushPendingThinking()
-	return append(events, encoder.event("content_block_start", map[string]any{
+	return []SSEEvent{encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
 		"content_block": map[string]any{"type": "tool_use", "id": event.ToolCallID, "name": event.ToolName, "input": map[string]any{}},
-	}))
+	})}
 }
 
 func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) []SSEEvent {
@@ -349,6 +371,9 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 		"code":    common.ErrorCode(message),
 		"message": message,
 	}
+	for key, value := range common.UpstreamErrorDetails(message) {
+		errorPayload[key] = value
+	}
 	if event.Error != nil && event.Error.DebugRef != "" {
 		errorPayload["debug_ref"] = event.Error.DebugRef
 	}
@@ -374,6 +399,15 @@ func (encoder *StreamEncoder) event(name string, payload map[string]any) SSEEven
 	return SSEEvent{Name: name, Data: data}
 }
 
+// thinkingAt 取 partial 消息中指定下标的思考块。
+func thinkingAt(message *llm.AssistantMessage, index int) (llm.ThinkingContent, bool) {
+	if message == nil || index < 0 || index >= len(message.Content) {
+		return llm.ThinkingContent{}, false
+	}
+	content, ok := message.Content[index].(llm.ThinkingContent)
+	return content, ok
+}
+
 func messageToAnthropic(message *llm.AssistantMessage) []any {
 	var blocks []any
 	for _, block := range message.Content {
@@ -381,6 +415,10 @@ func messageToAnthropic(message *llm.AssistantMessage) []any {
 		case llm.TextContent:
 			blocks = append(blocks, map[string]any{"type": "text", "text": content.Text})
 		case llm.ThinkingContent:
+			if content.Redacted {
+				blocks = append(blocks, map[string]any{"type": "redacted_thinking", "data": content.ThinkingSignature})
+				continue
+			}
 			b := map[string]any{"type": "thinking", "thinking": content.Thinking}
 			if content.ThinkingSignature != "" {
 				b["signature"] = content.ThinkingSignature
