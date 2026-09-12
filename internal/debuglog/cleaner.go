@@ -18,8 +18,10 @@ import (
 	"time"
 )
 
-// cleanerInterval 是清理周期；一分钟足够及时，也不会带来可感知的 IO 压力。
-const cleanerInterval = time.Minute
+// cleanerInterval 是清理周期。三个维度全是粗粒度策略（小时级负载剥离、
+// 天级目录淘汰、GB 级总量软上限），不需要分钟级精度；周期放大到 5 分钟
+// 可把每轮的全树 dirSize 遍历（每目录一次 Walk）摊薄到可忽略。
+const cleanerInterval = 5 * time.Minute
 
 // payloadNames 是「负载层」文件：体积大、只在近距排障时需要。
 // 超时后被剥离，meta.json/error.json/01/02/05 等证据继续保留。

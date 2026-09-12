@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -343,9 +344,6 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 	now := manager.now()
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-	if err := os.MkdirAll(manager.root, 0o700); err != nil {
-		return nil
-	}
 	base := now.Format("20060102-150405")
 	for suffix := 1; ; suffix++ {
 		name := base
@@ -353,7 +351,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			name = fmt.Sprintf("%s-%02d", base, suffix)
 		}
 		directory := filepath.Join(manager.root, name)
-		if err := os.Mkdir(directory, 0o700); err != nil {
+		if err := mkdirRequestDir(directory); err != nil {
 			if os.IsExist(err) {
 				continue
 			}
@@ -399,6 +397,16 @@ func WithRecorder(ctx context.Context, recorder *Recorder) context.Context {
 func FromContext(ctx context.Context) *Recorder {
 	recorder, _ := ctx.Value(contextKey{}).(*Recorder)
 	return recorder
+}
+
+// mkdirRequestDir 创建请求日志目录；根目录在运行期被删时重建父目录后重试一次。
+// 不预先 MkdirAll——根目录由 NewManager 建好，每请求一次 stat 是无谓开销。
+func mkdirRequestDir(path string) error {
+	err := os.Mkdir(path, 0o700)
+	if errors.Is(err, os.ErrNotExist) && os.MkdirAll(filepath.Dir(path), 0o700) == nil {
+		err = os.Mkdir(path, 0o700)
+	}
+	return err
 }
 
 // enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
