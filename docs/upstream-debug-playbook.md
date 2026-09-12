@@ -15,17 +15,18 @@ client (cc / codex / kimi-cli / ...)
 
 ## 错误速查表
 
-| 现象                                                  | 层         | 含义                              | 处理                                               |
-| ----------------------------------------------------- | ---------- | --------------------------------- | -------------------------------------------------- |
-| HTTP 401                                              | devin-2api | api_key 不对                      | 查 `auth.api_key` / 请求头                         |
-| HTTP 503 `devin token not configured`                 | devin-2api | 没拿到上游 token                  | 查 `devin.token` / 自动发现链                      |
-| `permission_denied`（无 policy 文案）                 | 上游       | 模型 UID 不存在/无权              | 查别名表、模型名拼写                               |
-| `permission_denied` + "blocked by our content policy" | 上游       | 命中特征句指纹库                  | bisect 请求体，把触发句加进 `sanitize.go`          |
-| `invalid_argument`                                    | 上游       | **wire 形状不符**（不是内容问题） | 对照本文「已验证 wire 契约」逐条查                 |
-| `unexpected EOF` / connection reset                   | 传输       | 上游偶发抖动                      | 已内置重试（3 次），仍失败则换模型/稍后再试        |
-| HTTP 200 + SSE `response.failed`                      | 上游       | 流建立后上游才拒绝                | 同上，看事件里的 code 分类                         |
-| ccload 渠道被冷却                                     | ccload     | 连续失败计数                      | `SELECT cooldown_until FROM channels WHERE id=293` |
-| 进程活着但端口拒绝连接                                | launchd    | dyld/Gatekeeper 卡住              | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉  |
+| 现象                                                  | 层         | 含义                              | 处理                                                     |
+| ----------------------------------------------------- | ---------- | --------------------------------- | -------------------------------------------------------- |
+| HTTP 401                                              | devin-2api | api_key 不对                      | 查 `auth.api_key` / 请求头                               |
+| HTTP 503 `devin token not configured`                 | devin-2api | 没拿到上游 token                  | 查 `devin.token` / 自动发现链                            |
+| `permission_denied`（无 policy 文案）                 | 上游       | 模型 UID 不存在/无权              | 查别名表、模型名拼写                                     |
+| `permission_denied` + "blocked by our content policy" | 上游       | 命中特征句指纹库                  | bisect 请求体，把触发句加进 `sanitize.go`                |
+| `invalid_argument`                                    | 上游       | **wire 形状不符**（不是内容问题） | 对照本文「已验证 wire 契约」逐条查                       |
+| `unexpected EOF` / connection reset                   | 传输       | 上游偶发抖动                      | 建立阶段重试 3 次（仅纯传输错误）；仍失败换模型/稍后再试 |
+| Connect code 错误（含 `unavailable`）                 | 上游       | 确定性语义错误                    | **不重试**——"try later" 文案是固定模板                   |
+| HTTP 200 + SSE `response.failed`/`error`              | 上游       | 流建立后上游才拒绝                | 同上，看事件里的 code/status 分类                        |
+| ccload 渠道被冷却                                     | ccload     | 连续失败计数                      | `SELECT cooldown_until FROM channels WHERE id=293`       |
+| 进程活着但端口拒绝连接                                | launchd    | dyld/Gatekeeper 卡住              | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉        |
 
 ## 标准排查流程
 
@@ -76,6 +77,8 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 
 `chatMessagePrompts` 里每条消息的 `source`/`prompt`/`toolCalls`/`toolCallId` 是否出现，直接对照下面的契约表。protojson 输出里**字段缺席**和**字段为空串**是两回事——上游对两者行为不同。
 
+另外每个请求在进程日志里有一行 `slog` 汇总（`api`/`status`/`duration_ms`/`model`/`stream`/`client_ip`/`upstream_request_id`/token 用量），debug 录制目录的 `meta.json` 带同样的字段外加 `user_agent`/`key_hash`/TTFB 标记——排障时先扫这一行往往就能定位是哪类失败，不用拆 proto。
+
 ### 5. 对照实验
 
 怀疑某个结构约束时，构造最小差异的两份请求同时打。本次实战：同一历史 `call0, call1, result0, result1` 被拒，改成 `call0, result0, call1, result1` 即通过——证实 call→result 必须紧邻。
@@ -96,7 +99,7 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 5. **完全空的 assistant 轮跳过**（实测诱发上游反复返回空回复）。
 6. **工具 schema 剥离**：`Description` 换工具名、剥 annotations（`convertToolDefinition`，防 Cursor 类 MCP-gate 指纹）。
 7. **特征句指纹库**（`permission_denied`）：对 system prompt / 消息 / 工具描述做等义改写，规则在 `sanitize.go`，对齐 WindsurfAPI 全量实证规则 + 本项目新增的 tool-call 冒号句。
-8. **空 system prompt + 带 tools** 会被拒：注入最小 system prompt。
+8. ~~空 system prompt + 带 tools 会被拒~~：**2026-09-12 实测已不成立**——上游不再因此拒绝，代码也已不再注入兜底 system prompt（仅 `withToolDescriptions` 把工具说明并入 system 字段）。保留此条仅为解释旧记录。
 9. **前缀缓存**：内容前缀即命中，无需会话状态；`trajectory_id`/`cascade_id` 稳定 + EPHEMERAL 断点可提升命中率（详见 `upstream-cache.md`）。
 10. **stepType 恒为 `USER_INPUT`**，末条消息**不要求**是 USER（实测 TOOL 结尾只要配对正确也能过）。
 11. **签名是尾随帧**：上游在全部正文之后才发 `DeltaSignature`。解码器把它合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能把签名落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。
@@ -136,7 +139,7 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 
 - 渠道 293 = `http://127.0.0.1:3003`，模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
 - **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。改完要重启 ccload 才生效。
-- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed` 也算失败），连续失败会把渠道打冷却。devin-2api 在首个上游事件前不下发 `start`：上游零帧报错（`permission_denied`、`prompt too long` 等请求级问题）走真实 HTTP 4xx，`prompt too long` 归一成 413 + `context_length_exceeded`，ccload 按客户端错误透传不冷却；流式中途的错误事件在 data 里带顶层 `status` 字段，让 ccload 按真实语义分类而不是按通用 SSE 故障加倍冷却。
+- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed`/`error` 事件也算失败），连续失败会把渠道打冷却。devin-2api 的应对分三层：① 首个上游事件前不下发 `start`，上游零帧报错（`permission_denied` 等）走真实 HTTP 4xx，ccload 按客户端错误透传不冷却渠道；② 唯一的例外是上下文超长——为了让 Codex 收到 `response.failed`（它只在 SSE 事件里认 `error.code=="context_length_exceeded"`），会先补发一个合成 `start` 再发 error 事件，事件顶层 `status:413` 让 ccload 仍按客户端级分类、不冷却；③ 流式中途（已有语义输出、连接已提交后）的错误事件同样在 data 里带顶层 `status`，ccload 按真实语义分类且事件原文会继续透传给客户端。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
 
 ## 运维坑
@@ -153,5 +156,5 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 - **Codex** `~/.codex/config.toml`：`model_context_window = 262000`，`model_auto_compact_token_limit = 230000`。resume 实验确认 240k 历史触发 `context compacted` 后正常续答。
 - **Claude Code** `~/.claude/settings.json` env：`CLAUDE_CODE_MAX_CONTEXT_TOKENS=262000`（非 `claude-` 前缀模型的窗口声明）、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=230000`。实测 ~202k 用量后自动压缩（阈值≈window-28k buffer），压缩后上下文降到 ~17k。
 - CC 另有单条 prompt ≤80% 窗口的客户端保护（~209k tokens），超限直接 "Prompt is too long" 不发请求；`-c -p` resume 时若投影总量超窗也同样拒绝，不会自动压缩——这是边界保护不是 bug。
-- Codex 只对 SSE `response.failed` 事件里 `error.code=="context_length_exceeded"` 触发错误恢复式压缩；HTTP 413/400 错误体不触发。且 ccload 会吞掉上游 SSE error 事件做冷却分类、不透传给客户端——所以**不要**把 context 溢出改成流内 SSE 事件下发，保持 HTTP 状态码路径（413 对 ccload 是客户端级、零冷却）。
+- Codex 只在 SSE `response.failed` 事件里按 `error.code=="context_length_exceeded"` 触发错误恢复式压缩；裸 HTTP 413 错误体不会触发（走 generic request error）。因此 devin-2api 对流式请求刻意先补合成 `start` 再发 error 事件（顶层 `status:413` + `code=context_length_exceeded`）。注意路径差异：**直连 :3003 时** Codex 能收到 `response.failed`；**经 ccload 时** `response.created`/`in_progress` 不算语义输出、不会促使 ccload 提交响应，ccload 仍在写出前截住 error 事件并物化成 HTTP 413 给客户端——与裸 413 效果等价（客户端级、零冷却），只是拿不到 SSE 形态。Anthropic 面不同：`message_start` 算语义输出会提交，error 事件随后原文透传。非流式请求统一是干净的 HTTP 413。
 - ccload 的 `/v1/models` 不透传 `context_tokens` 等元数据，客户端无法经 discovery 学到窗口，只能靠上述本地配置。

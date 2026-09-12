@@ -113,19 +113,19 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 | `unknown`                          | provider 层崩坏：坏 schema、is_custom_tool、SYSTEM_PROMPT/UNKNOWN source、缺 model uid                                                                                                  | provider 内部错，同样永久                                                                  |
 | `internal` (HTTP/2 INTERNAL_ERROR) | numCompletions>1                                                                                                                                                                        | 流中断                                                                                     |
 
-排障含义：`unavailable`/`unknown` 里的 "experiencing issues / try later" 文案是误导性的固定模板，**真实原因是确定性的请求/权限问题**，不应按瞬时错误重试。`isTransientConnectError` 现在只对 connect.CodeUnavailable 重试——按本文结论，upstream 的 `unavailable` 多半是永久语义，**建议把它从可重试集合里去掉**（或限定只对无 error ID 的纯传输 unavailable 重试）。
+排障含义：`unavailable`/`unknown` 里的 "experiencing issues / try later" 文案是误导性的固定模板，**真实原因是确定性的请求/权限问题**，不应按瞬时错误重试。已落实：`isTransientConnectError` 现在**只**对非 Connect 的纯传输错误（EOF/连接重置/超时）重试，所有 Connect code（含 unavailable）一律视为语义错误直接透传。
 
-## 九、对代理的改动建议（按优先级）
+## 九、对代理的改动建议（按优先级；2026-09-12 状态已对齐实现）
 
-1. **stopPatterns 不是真透传**：要么在 adapter 层本地截断 deltaText（遇到 pattern 就停流并按 length 收尾），要么在文档注明上游不支持。当前是静默丢语义。
-2. **`unavailable` 从重试集移除**（见上）。
-3. **`tool_choice`/`disable_parallel_tool_calls` 映射**：`any`→`required`，`none`/`auto`/`required`/tool_name 直传；`parallel_tool_calls=false`→`disable_parallel_tool_calls=true`（尽管实测无效，至少形状对齐 CLI）。
-4. **response `request_id`+`usage.responseHeader.x-request-id` 进 debuglog**——排障时可直接给上游报 trace id。
-5. `mapStopReason` 显式列 `STOP_PATTERN→Stop`、`CONTENT_FILTER`→（需要新增 content_filter 或归入 error?）。
-6. `numCompletions>1` 前置拒绝（本地 invalid_request），别打到上游。
-7. `maxTokens` 语义提示：thinking 烧预算，客户端给很小的 max_tokens 会得到零文本。
-8. 模型目录建议从 `GetCliModelConfigs` 取（多 `subagent_default_model_uid`/`default_override_model_config`），`ListModels` 可透出 `supports_tool_calls`/`supports_parallel_tool_calls`/`supports_thinking`/`preserve_thinking`/`interleave_thinking`。
-9. `subagent-default`/`session-titler`/`command-reviser`/`swe-1-7-medium` 是隐藏可用 uid——若未来做代理侧标题生成/子代理回落可直接用（router 需 AssignModel+cascade 一致；`swe-1-7-medium` 直连即可，mult=3 最便宜档）。
+1. ~~**stopPatterns 不是真透传**~~：**已实现**——`newResponseDecoder` 接收 `request.StopSequences`，本地做尾部保留窗口 + 命中截断，结束时上报 `StopReasonStopSequence` + 命中 pattern（Anthropic `stop_sequence`、OpenAI `stop`、Responses 正常 completed）。
+2. ~~**`unavailable` 从重试集移除**~~：**已实现**——`isTransientConnectError` 现在只对非 Connect 的纯传输错误（EOF/重置/超时）重试，所有 Connect code（含 unavailable）一律不重试。
+3. ~~**`tool_choice`/`disable_parallel_tool_calls` 映射**~~：**已实现**——`any`→`required`，`none`/`auto`/`required`/`tool_name` 直传；`parallel_tool_calls=false`→`disable_parallel_tool_calls=true`（上游实测不执行，仅形状对齐）。
+4. ~~**response `request_id`+`usage.responseHeader.x-request-id` 进 debuglog**~~：**已实现**——`upstream_request_id` 进 `meta.json`，`api_provider`+provider 侧 request id 进 `diagnostics`，进程日志 slog 行也带 `upstream_request_id`。
+5. ~~**`mapStopReason` 显式列**~~：**已实现**——`STOP_PATTERN→Stop`（上游正常收尾）、`CONTENT_FILTER→StopReasonContentFilter`（Anthropic `refusal`、chat `content_filter`、Responses `incomplete`+`content_filter`）。
+6. ~~**`numCompletions>1` 前置拒绝**~~：**已实现**——chat 解码层本地报错 `n > 1 is not supported`，不打到上游。
+7. `maxTokens` 语义提示：thinking 烧预算，客户端给很小的 max_tokens 会得到零文本——观测事实，无需代码改动。
+8. ~~**模型目录从 `GetCliModelConfigs` 取**~~：**已实现**——`ListModels` 已切到 `GetCliModelConfigs`，`ModelInfo` 透出 `supports_tool_calls`/`supports_parallel_tool_calls`/`supports_thinking`/`preserve_thinking`/`context_tokens`/`max_output_tokens`。
+9. `subagent-default`/`session-titler`/`command-reviser`/`swe-1-7-medium` 是隐藏可用 uid——备查（router 需 AssignModel+cascade 一致；`swe-1-7-medium` 直连即可，mult=3 最便宜档）。
 
 ## 十、仍未解（本账号观测不到）
 

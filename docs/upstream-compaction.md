@@ -4,7 +4,7 @@
 
 ## 结论先行
 
-`GetChatMessageRequest` 是无状态补全调用 (全量历史重放),上游**不做**自动压缩。压缩义务在调用方:devin CLI 在 `agent-ext/src/compactor/` 实现了完整的压缩器;Claude Code 也有自己的压缩器。对 devin-2api 来说，接没有自带压缩的客户端 (kimi-cli、pi 等) 时，长会话会直接顶爆窗口，届时才需要代理侧压缩。
+`GetChatMessageRequest` 是无状态补全调用 (全量历史重放),上游**不做**自动压缩。压缩义务在调用方:devin CLI 在 `agent-ext/src/compactor/` 实现了完整的压缩器;Claude Code/Codex/pi/kimi-code 也各有自己的压缩器。对 devin-2api 来说，只有接没有自带压缩的客户端时才需要考虑代理侧压缩；已接入的客户端只需保证它们声明的窗口与上游真实窗口一致（见末节）。
 
 ## 触发：三阈值异步管线
 
@@ -91,10 +91,11 @@ take any actions. Just provide the summary in <summary> tags.
 
 ## 对 devin-2api 的含义
 
-1. **当前链路不需要我们压缩**:Claude Code 自带压缩器;它提示词里 "The system will automatically compress prior messages" 一句已在上游指纹库中，由 `sanitize.go` 改写。
-2. **无压缩客户端**(kimi-cli、pi 等若不带) 长会话会顶爆 swe-2 窗口，表现为上游 `prompt_too_long` 类失败。需要时可照本文实现代理侧压缩:token 估算到 spawn 阈值 → 用同模型跑上面的 summarizer 提示词 → 历史替换为 `<summary>` + 逐字保留段 + 尾部 N 条。
-3. **工具调用配对不变**:压缩替换的是消息列表，`devin.go` 的 call→result 配对约束照样适用——保留尾部必须从**完整的 user 轮边界**切开，不能切在 call/result 对中间，否则复现 `invalid_argument`。
-4. **缓存**:压缩后历史前缀改变，前缀缓存整体失效;逐字保留段 (文件清单/todo) 若放在 system 前缀内可保住 system 部分的缓存。
+1. **当前链路不需要我们压缩**:在用的四个客户端 (Claude Code、Codex、pi、kimi-code) 都自带压缩器;CC 提示词里 "The system will automatically compress prior messages" 一句已在上游指纹库中，由 `sanitize.go` 改写。
+2. **客户端压缩生效有前提**:自动压缩按「客户端声明的窗口」触发——声明值若大于上游真实窗口 (swe-2-max = 262000)，阈值落在上限之外，超限请求直接 `prompt too long` 而不是先压缩。Codex/CC 的正确窗口配置与实测记录见 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」节。
+3. **无压缩客户端**若将来接入 (如裸 API 调用方)，长会话会顶爆窗口。需要时可照本文实现代理侧压缩:token 估算到 spawn 阈值 → 用同模型跑上面的 summarizer 提示词 → 历史替换为 `<summary>` + 逐字保留段 + 尾部 N 条。
+4. **工具调用配对不变**:压缩替换的是消息列表，`devin.go` 的 call→result 配对约束照样适用——保留尾部必须从**完整的 user 轮边界**切开，不能切在 call/result 对中间，否则复现 `invalid_argument`。
+5. **缓存**:压缩后历史前缀改变，前缀缓存整体失效;逐字保留段 (文件清单/todo) 若放在 system 前缀内可保住 system 部分的缓存。
 
 ## 附：服务端压缩 (未走 GetChatMessage 的)
 

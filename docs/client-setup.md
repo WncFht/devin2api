@@ -16,13 +16,14 @@
         "ANTHROPIC_MODEL": "swe-2-max",
         "ANTHROPIC_SMALL_FAST_MODEL": "swe-2-max",
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-        "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262000",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "230000"
     }
 }
 ```
 
-两个 env flag 让 CC 接受非官方模型名;不配则用 ccload `channel_models` 的 redirect(发 `claude-sonnet-4-6` → `swe-2-max`) 兜底。
+两个窗口 env 是关键：`swe-2-max` 非 `claude-` 前缀，CC 走 unknown-model 默认窗口（远小于实际上游上限 262000），不声明则自动压缩阈值错位——要么压得太早浪费窗口，要么阈值超出真实上限永远撞 prompt-too-long。`AUTO_COMPACT_WINDOW` 留 ~30k 给压缩请求自身的指令与摘要开销。不配窗口声明则用 ccload `channel_models` 的 redirect(发 `claude-sonnet-4-6` → `swe-2-max`) 兜底。
 
 ## pi
 
@@ -38,7 +39,7 @@
             "models": [
                 {
                     "id": "swe-2-max",
-                    "contextWindow": 262144,
+                    "contextWindow": 262000,
                     "maxTokens": 32768,
                     "reasoning": true,
                     "input": ["text", "image"]
@@ -68,7 +69,7 @@ api_key = "<ccload token>"
 [models."swe-2-max"]
 provider = "devin"
 model = "swe-2-max"
-max_context_size = 262144
+max_context_size = 262000
 capabilities = ["thinking", "tool_use", "image_in"]
 ```
 
@@ -98,17 +99,18 @@ pattern = "Bash(rm -rf*)"
 ```toml
 model_provider = "OpenAI"
 model = "swe-2-max"
-model_context_window = 262144
+model_context_window = 262000
+model_auto_compact_token_limit = 230000
 
 [model_providers.OpenAI]
 base_url = "http://127.0.0.1:49173/v1"
 ```
 
-Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行，不走 tool call，无兼容问题。
+Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行，不走 tool call，无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
 
 ## 共用注意事项
 
 - **system prompt 指纹**:各客户端的身份提示词可能被上游内容策略拦截 (`permission_denied`)。devin-2api 的 `sanitize.go` 已覆盖 Claude Code 指纹;pi / kimi-code 都会伪装 CC 请求头 + 提示词，自动被同一套规则覆盖。
 - **工具调用配对**:上游强制 call→result 紧邻配对，代理已自动重排，客户端无感。
-- **压缩**:四个客户端都自带上下文压缩，代理无需处理。
+- **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
 - **排查**:任何问题先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体),再开 devin-2api debug 看 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
