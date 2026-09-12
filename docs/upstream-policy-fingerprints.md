@@ -2,7 +2,7 @@
 
 > 范围：Devin 上游（`server.codeium.com`）对提示词文案的策略拦截。目标是搞清楚「什么样的句子会被 `permission_denied: blocked by our content policy` 拦下」，并把已实证的触发句沉淀为 `internal/adapter/devin/sanitize.go` 的改写规则。
 >
-> 关联文档：`upstream-debug-playbook.md`（分层排查流程）、`2026-09-12-upstream-live-probes.md`（wire 级实测）。本文只记**指纹层**的结论。
+> 关联文档：`upstream-debug-playbook.md`（分层排查流程）、`archive/2026-09-12-upstream-live-probes.md`（wire 级实测）。本文只记**指纹层**的结论。
 
 ## 一、现象与误判链
 

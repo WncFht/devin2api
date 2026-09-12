@@ -25,7 +25,7 @@
 
 - 本地模型白名单拦截 `swe-2-max` → env flag / ccload redirect / `modelOverrides` 三解法
 - `settings.json` env 覆盖 shell 变量
-- 主提示词 7 条指纹 + subagent 提示词 emoji 禁令句触发 `permission_denied` → `sanitize.go` 改写（详见 `2026-09-12-upstream-policy-fingerprints.md`）；subagent 被拒时 CC 报 "issue with the selected model" 属误诊，实非模型问题
+- 主提示词 7 条指纹 + subagent 提示词 emoji 禁令句触发 `permission_denied` → `sanitize.go` 改写（详见 `upstream-policy-fingerprints.md`）；subagent 被拒时 CC 报 "issue with the selected model" 属误诊，实非模型问题
 - 尾随 `DeltaSignature` 落成独立空 thinking 块 → decoder/encoder 修复，`content_block_stop` 延迟等签名
 - ccload `protocol_transform_mode` 必须 `local`,`auto` 的 codex→anthropic 转换会产生同款畸形签名块
 

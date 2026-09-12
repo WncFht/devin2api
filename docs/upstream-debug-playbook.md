@@ -95,7 +95,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 这些是用真实请求逐条试出来的硬约束（详见 `internal/adapter/devin/devin.go` 注释）：
 
 1. **call→result 紧邻配对**：assistant 发出的每个 tool call 必须紧跟它的 TOOL 结果消息，「全部调用→全部结果」的分组序列直接 `invalid_argument`。（`pairToolCallsWithResults` 负责重排）
-2. **助手轮拆分**：一条 assistant 消息 = 可选文本消息 + **每个 tool call 各一条独立消息**；tool call 消息上 `prompt` 字段（#3）完全省略——空串与缺席不同。
+2. **助手回合合并为单条消息**：一个 assistant 回合 = 一条 `ChatMessagePrompt`，`prompt`+`thinking`+`signature`+`toolCalls` 数组同体携带（真实客户端抓包形态，从不出现相邻 SYSTEM 对）；无文本时 `prompt` 字段完全省略——空串与缺席不同。拆成多条会在渲染上下文插入假回合边界，显著抬高模型在宣告句末尾采 EOS 的概率（premature end_turn 事故，见 `archive/2026-09-12-premature-endturn.md`）。
 3. **thinking 挂每条 assistant 消息**（#11），签名 #12 跟 thinking 走。
 4. **tool result 文本不能为空**，空则占位 `[tool result]`。
 5. **完全空的 assistant 轮跳过**（实测诱发上游反复返回空回复）。
@@ -104,7 +104,9 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 8. ~~空 system prompt + 带 tools 会被拒~~：**2026-09-12 实测已不成立**——上游不再因此拒绝，代码也已不再注入兜底 system prompt（仅 `withToolDescriptions` 把工具说明并入 system 字段）。保留此条仅为解释旧记录。
 9. **前缀缓存**：内容前缀即命中，无需会话状态；`trajectory_id`/`cascade_id` 稳定 + EPHEMERAL 断点可提升命中率（详见 `upstream-cache.md`）。
 10. **stepType 恒为 `USER_INPUT`**，末条消息**不要求**是 USER（实测 TOOL 结尾只要配对正确也能过）。
-11. **签名是尾随帧**：上游在全部正文之后才发 `DeltaSignature`。解码器把它合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能把签名落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。
+11. **签名是尾随帧，且按 provider 分体制**：上游在全部正文之后才发 `DeltaSignature`+`DeltaSignatureType`。已观测三种体制：`sealed`（swe-2，`sealed.v1.<b64>`）、`anthropic`（claude-thinking，原生签名 base64）、`openai`（gpt-sol，签名是序列化 reasoning item）。回放时 type 必须与 provider 配对存取——张冠李戴触发流内 `invalid_argument`。解码器把签名合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。
+12. **缺 stopReason 的干净 EOF = 截断，不是正常结束**：正常结束必有 stopReason 帧（swe-2/gemini/deepseek = `STOP_PATTERN`，claude = `MIN_LOG_PROB`——字面误导，实为 end_turn 映射，工具调用 = `FUNCTION_CALL`）；文本后直接 EOF、`deltaToolCalls`/`responseDimensionGroups` 全缺是截断。decoder 直接报流错误（"Devin stream ended without stop reason"）而非合成 end_turn——唯一例外是 `stoppedByPattern`（本地停止序列截断）。
+13. **工具名字符集 ≈ `[A-Za-z0-9_-]`**：点/冒号/CJK 工具名（`mcp::x`、`a.b`、`工具`）被上游以模糊的 `invalid_argument` 拒绝；`mcp__a__b` 合法。
 
 ## 新客户端验证清单
 
@@ -129,7 +131,7 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 - **Claude Code**：主会话与 subagent 系统提示词都在指纹库里（CC 2.1.236 主提示词 7 条 + subagent 提示词的 emoji 禁令整句已入 `sanitize.go`，新版 CC 换文案会再封）；`metadata.user_id` 会被当 SessionKey 用。subagent 被拒时 CC 报 "issue with the selected model"，主 agent 会自述「subagent 不可用」——不是模型问题，查 `error.json` 的 permission_denied。已实测的两个客户端侧坑：
     - **本地模型白名单**：CC 2.1.x 在发请求前就拒绝不认识的模型名（`swe-2-max` 直接被拦，ccload 收不到请求）。解法：ccload `channel_models` 加 `claude-sonnet-4-6` 等可识别名 → `redirect_model=swe-2-max`；CC 侧 `ANTHROPIC_MODEL` 填可识别名。`modelOverrides`/`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` 也可，但 redirect 最不侵入。
     - **settings env 覆盖 shell**：`~/.claude/settings.json` 的 `env` 块优先级高于 shell 环境变量，里面若有 `ANTHROPIC_BASE_URL` 会盖掉导出的值（进程在连别的地址、半天无输出即此症状）。用项目级 `.claude/settings.local.json` 注入 env 最干净。
-- **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；0.153.3 模板另有三条系统提示指纹（open-source 定义句、plan 状态句对、ANSI 转义句，均已入 `sanitize.go`，实证细节见 `2026-09-12-upstream-policy-fingerprints.md`）；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
+- **Codex**：`apply_patch` 的 FREEFORM 裸词、"do not wrap the patch in JSON"；0.153.3 模板另有三条系统提示指纹（open-source 定义句、plan 状态句对、ANSI 转义句，均已入 `sanitize.go`，实证细节见 `upstream-policy-fingerprints.md`）；reasoning item、`custom`/`namespace`/`web_search` 工具类型会被静默丢弃（上游不认），Codex 可能依赖 apply_patch 工具——注意行为偏差。
 - **pi**(`@mariozechner/pi-coding-agent`,0.73.x 实测全通):接法 = `~/.pi/agent/models.json` 自定义 provider,`baseUrl` 指 ccload、`api` 用 `anthropic-messages`、`apiKey` 填 ccload token，模型声明 `id:"swe-2-max"` + `contextWindow`/`maxTokens`。**关键特征:pi 的 anthropic-messages provider 会在 system 数组开头塞完整的 Claude Code 指纹提示词**(billing header + "You are Claude Code" 全文),自己真正的系统提示词以 `[System Instructions]` 前缀放进 user 消息——所以 CC 的指纹改写规则自动覆盖 pi，白嫖同一条已打通路径。pi 会发 `thinking:{type:"enabled",budget_tokens:8192}`,上游按需返回 thinking+signature。自带压缩 (`contextTokens > contextWindow - reserveTokens`,默认留 16k reserve/20k recent,`/compact` 手动),无需代理侧压缩。
 - **kimi-code**:零修改直接通 (0.42.0 实测)。伪装 CC 请求封套 (`claude-cli` UA、`X-Claude-Code-Session-Id`、CC beta 头),`metadata.user_id` 带 device_id JSON 被用作 SessionKey。陌生模型名要在 `[models.X]` 手写 `capabilities` 才有 tool_use。自带压缩。
 - **kimi-cli**:官方已弃用 (并入 kimi-code),不建议投入。

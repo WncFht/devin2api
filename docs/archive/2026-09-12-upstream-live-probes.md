@@ -2,7 +2,7 @@
 
 > 方法：新增 `cmd/probe`（直连 `server.codeium.com` 的 Connect-RPC 实验工具，复用 `outputs/devin-proto-go` 生成绑定），对真实上游逐字段打靶。token 用 config.yaml 里同一个免费档账号。
 >
-> 前置文档：`2026-09-12-upstream-gaps.md`（二轮：proto/strings 静态清单）、`upstream-debug-playbook.md`（wire 契约）、`upstream-cache.md`（缓存）。本文是**实测**结论，凡是与静态推测冲突的以本文为准。
+> 前置文档：`2026-09-12-upstream-gaps.md`（二轮：proto/strings 静态清单）、`../upstream-debug-playbook.md`（wire 契约）、`../upstream-cache.md`（缓存）。本文是**实测**结论，凡是与静态推测冲突的以本文为准。
 
 ## 一、gaps 文档验证清单的实测结论
 

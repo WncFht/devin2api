@@ -2,7 +2,7 @@
 
 > 来源：`outputs/devin-proto/all-protos.proto`（Windsurf `language_server_macos_arm` 提取的完整 proto bundle）+ `/opt/homebrew/Caskroom/devin-cli/3000.10.21/bin/devin`（v3000.10.21 Rust 二进制）strings 提取 + `internal/adapter/devin/*` 代码对照。
 >
-> 前置文档：`upstream-cache.md`（缓存）、`upstream-compaction.md`（压缩）、`upstream-debug-playbook.md`（wire 契约与排查）。本文只记录这三份**之外**的新发现。
+> 前置文档：`../upstream-cache.md`（缓存）、`../upstream-compaction.md`（压缩）、`../upstream-debug-playbook.md`（wire 契约与排查）。本文只记录这三份**之外**的新发现。
 
 ## 一、wire 协议上我们没用/没消费的字段
 

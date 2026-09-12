@@ -108,6 +108,22 @@ base_url = "http://127.0.0.1:49173/v1"
 
 Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行，不走 tool call，无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
 
+### Codex WebSocket 链路（可选）
+
+Codex 支持 Responses-over-WS：一条连接上反复 `response.create`/`response.append`，`previous_response_id` + 增量 input。ccload→devin-2api 的 WS 多轮已实现并实测通过（2026-09-12，`responses-ws` 全链路 `completed`）。现行配置：
+
+- ccload channel **294 `devin-ws`**（独立于 293 `devin` 的 anthropic 渠道）：url `http://127.0.0.1:3003/v1`、protocols `["codex"]`、`websockets=1`，模型 `swe-2-max-ws` → redirect `swe-2-max`。
+- `~/.codex/models.ccload.json` 的 `swe-2-max-ws` 条目带 `prefer_websockets: true`；还原备份在同目录 `models.ccload.json.bak-ws-test`。
+- Codex 侧需 `supports_websockets=true`：写进 `[model_providers.OpenAI]`，或启动时 `-c` override。
+
+验证命令：
+
+```bash
+codex exec -m swe-2-max-ws \
+  -c 'model_providers.OpenAI.supports_websockets=true' \
+  --skip-git-repo-check "run echo ws-chain-test"
+```
+
 ## 共用注意事项
 
 - **system prompt 指纹**:各客户端的身份提示词可能被上游内容策略拦截 (`permission_denied`)。devin-2api 的 `sanitize.go` 已覆盖 Claude Code 指纹;pi / kimi-code 都会伪装 CC 请求头 + 提示词，自动被同一套规则覆盖。
