@@ -278,11 +278,17 @@ func requirePartial(event ResponseEvent) error {
 	return event.Partial.Validate()
 }
 
+// requireIndexedPartial 只检查 ContentIndex 合法与 Partial 在场，不深校验消息体：
+// Partial 是同一累计对象逐帧复用，逐帧走完整 Validate 是 O(帧数×内容块) 的浪费；
+// 深度契约由 start/done/error 边界事件覆盖，那里才是编码器读取完整语义的位置。
 func requireIndexedPartial(event ResponseEvent) error {
 	if event.ContentIndex < 0 {
 		return fmt.Errorf("%s event requires a non-negative content index", event.Type)
 	}
-	return requirePartial(event)
+	if event.Partial == nil {
+		return fmt.Errorf("%s event requires a partial message", event.Type)
+	}
+	return nil
 }
 
 func (reason StopReason) valid() bool {
