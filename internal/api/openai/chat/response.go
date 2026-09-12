@@ -123,10 +123,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 }
 
 func (encoder *StreamEncoder) start() []SSEEvent {
-	return []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index":         0,
-		"delta":         map[string]any{"role": "assistant"},
-		"finish_reason": nil,
+	return []SSEEvent{encoder.chunk([]chatChoice{{
+		Delta: chatDelta{Role: "assistant"},
 	}}, nil)}
 }
 
@@ -143,10 +141,8 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) []SSEEvent {
 	if event.Delta == "" {
 		return nil
 	}
-	return []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index":         0,
-		"delta":         map[string]any{"content": event.Delta},
-		"finish_reason": nil,
+	return []SSEEvent{encoder.chunk([]chatChoice{{
+		Delta: chatDelta{Content: event.Delta},
 	}}, nil)}
 }
 
@@ -170,10 +166,8 @@ func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent 
 	if event.Delta == "" {
 		return nil
 	}
-	return []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index":         0,
-		"delta":         map[string]any{"reasoning_content": event.Delta},
-		"finish_reason": nil,
+	return []SSEEvent{encoder.chunk([]chatChoice{{
+		Delta: chatDelta{ReasoningContent: event.Delta},
 	}}, nil)}
 }
 
@@ -185,17 +179,13 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) []SSEEvent {
 	state := &toolCallState{index: len(encoder.toolCalls), id: event.ToolCallID, name: event.ToolName}
 	encoder.toolCalls = append(encoder.toolCalls, state)
-	return []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index": 0,
-		"delta": map[string]any{
-			"tool_calls": []any{map[string]any{
-				"index":    state.index,
-				"id":       state.id,
-				"type":     "function",
-				"function": map[string]any{"name": state.name, "arguments": ""},
-			}},
-		},
-		"finish_reason": nil,
+	return []SSEEvent{encoder.chunk([]chatChoice{{
+		Delta: chatDelta{ToolCalls: []chatToolCall{{
+			Index:    state.index,
+			ID:       state.id,
+			Type:     "function",
+			Function: chatToolCallFunction{Name: state.name},
+		}}},
 	}}, nil)}
 }
 
@@ -205,15 +195,11 @@ func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) []SSEEvent 
 		return nil
 	}
 	state.arguments.WriteString(event.Delta)
-	return []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index": 0,
-		"delta": map[string]any{
-			"tool_calls": []any{map[string]any{
-				"index":    state.index,
-				"function": map[string]any{"arguments": event.Delta},
-			}},
-		},
-		"finish_reason": nil,
+	return []SSEEvent{encoder.chunk([]chatChoice{{
+		Delta: chatDelta{ToolCalls: []chatToolCall{{
+			Index:    state.index,
+			Function: chatToolCallFunction{Arguments: event.Delta},
+		}}},
 	}}, nil)}
 }
 
@@ -239,13 +225,9 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 		encoder.finalReason = event.Message.StopReason
 	}
 	reason := finishReason(event.Reason)
-	events := []SSEEvent{encoder.chunk([]any{map[string]any{
-		"index":         0,
-		"delta":         map[string]any{},
-		"finish_reason": reason,
-	}}, nil)}
+	events := []SSEEvent{encoder.chunk([]chatChoice{{FinishReason: reason}}, nil)}
 	if encoder.includeUsage {
-		events = append(events, encoder.chunk([]any{}, chatUsage(encoder.finalUsage)))
+		events = append(events, encoder.chunk([]chatChoice{}, chatUsage(encoder.finalUsage)))
 	}
 	events = append(events, SSEEvent{Name: "[DONE]", Data: []byte("[DONE]")})
 	return events
@@ -310,15 +292,48 @@ func (encoder *StreamEncoder) findToolByIndex(contentIndex int) *toolCallState {
 // chatChunk 是流式 chunk 的固定 envelope：五键整流不变，只有 choices/usage
 // 随事件变。struct 编码替代每帧 map marshal（实测 ~2.7x 快、~5.7x 少分配）。
 type chatChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []any  `json:"choices"`
-	Usage   any    `json:"usage"`
+	ID      string       `json:"id"`
+	Object  string       `json:"object"`
+	Created int64        `json:"created"`
+	Model   string       `json:"model"`
+	Choices []chatChoice `json:"choices"`
+	Usage   any          `json:"usage"`
 }
 
-func (encoder *StreamEncoder) chunk(choices []any, usage any) SSEEvent {
+// 以下类型按 map marshal 的键名字母序声明字段，与旧的 map[string]any
+// 编码保持逐字节一致的输出。
+
+// chatChoice 是 choices 数组的单元素形态：finish_reason 恒输出（可为 null），
+// index 恒为 0。
+type chatChoice struct {
+	Delta        chatDelta `json:"delta"`
+	FinishReason any       `json:"finish_reason"`
+	Index        int       `json:"index"`
+}
+
+// chatDelta 是全部 delta 键的并集：每种事件只填其中一键。
+type chatDelta struct {
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Role             string         `json:"role,omitempty"`
+	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
+}
+
+// chatToolCall 是 delta.tool_calls 的元素：start 事件带 id/type/name，
+// 参数增量帧只有 function.arguments 与 index。
+type chatToolCall struct {
+	Function chatToolCallFunction `json:"function"`
+	ID       string               `json:"id,omitempty"`
+	Index    int                  `json:"index"`
+	Type     string               `json:"type,omitempty"`
+}
+
+type chatToolCallFunction struct {
+	Arguments string `json:"arguments"`
+	Name      string `json:"name,omitempty"`
+}
+
+func (encoder *StreamEncoder) chunk(choices []chatChoice, usage any) SSEEvent {
 	data, _ := json.Marshal(chatChunk{
 		ID:      encoder.responseID,
 		Object:  "chat.completion.chunk",
