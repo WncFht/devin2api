@@ -6,10 +6,15 @@ devin-2api is a lightweight forwarding tool that exposes Devin ([app.devin.ai](h
 
 ## Features
 
-- **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. WebSocket transport for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
+- **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. a WebSocket transport with multi-turn sessions for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
 - **Streaming and non-streaming** responses (typed SSE / JSON)
+- **Reasoning that round-trips** — thinking signatures are preserved and replayed across turns in each provider's native shape (`sealed`/`anthropic`/`openai`); surfaced as `encrypted_content` reasoning items on Responses, `redacted_thinking` on Anthropic, and `reasoning_content` on Chat
+- **Faithful tool calling** — custom/freeform tool calls round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces; orphan tool results demote to text instead of failing the request
+- **Resilient upstream streams** — failures before the first content byte (transport breaks, expired token reloaded from the credentials file, silent stalls, empty end_turn replies) are retried transparently; stream start is deferred so early upstream failures surface as real HTTP errors instead of SSE errors after a committed `200`
+- **Normalized error contract** — upstream Connect codes map to proper HTTP status and protocol error types; rate limits become `429` + `Retry-After` parsed from the reset hint; every request carries `X-Request-Id`/`debug_ref` pointing at its debug directory
 - **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from upstream model config
 - **Admin panel at `/panel`** — request browser, usage/cost aggregation, quota tracking, process metrics, and per-request debug directories
+- **Matches the real Devin CLI fingerprint** — request metadata replicates the CLI's client identity (`devin.client_*` makes it configurable when upstream bumps version gates)
 - **Adapter-based design** — easily extended to new upstreams
 - **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 - **Optional debug logs** per request for troubleshooting
@@ -63,7 +68,7 @@ docker run --rm -p 8080:8080 \
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"v0.2.0","uptime_seconds":12,"debug_logging":false}
+# {"status":"ok","version":"v0.3.0","uptime_seconds":12,"debug_logging":false}
 ```
 
 ## Usage
@@ -122,24 +127,25 @@ See the [Contributing guide](CONTRIBUTING.md) for the exact subset of fields sup
 
 Configuration is a YAML file loaded once at startup. Unknown fields are rejected.
 
-| Field                          | Description                                                                                                              | Required / Default                                                                                           |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `server.listen`                | HTTP listen address                                                                                                      | Yes                                                                                                          |
-| `server.max_concurrency`       | Max concurrent `/v1/*` requests                                                                                          | `1024`                                                                                                       |
-| `devin.base_url`               | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token`                  | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
-| `devin.model`                  | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
-| `devin.aliases`                | Client model name to upstream UID map (e.g. `swe-2: swe-2-max`)                                                          | none                                                                                                         |
-| `devin.proxy`                  | Upstream proxy URL (`http(s)://`, `socks5(h)://`); empty = direct / env vars                                             | none                                                                                                         |
-| `devin.force_http1`            | Per-request TCP connections to upstream (avoids HTTP/2 stream serialization)                                             | `true`                                                                                                       |
-| `debug.enabled`                | Write per-request debug logs under `logs/` next to the config file                                                       | `false`                                                                                                      |
-| `debug.retention_days`         | Days to keep request log dirs; `<=0` disables time-based cleanup                                                         | `14`                                                                                                         |
-| `debug.max_total_mb`           | Total `logs/` size cap; evicts oldest dirs first                                                                         | `1024`                                                                                                       |
-| `debug.payload_hours`          | Hours before large stage files (03/04/06/attachments) are stripped, keeping meta/error evidence                          | `24`                                                                                                         |
-| `debug.keep_error_dirs`        | Newest N failed dirs (with `error.json`) protected from size eviction                                                    | `32`                                                                                                         |
-| `debug.quota_interval_minutes` | Quota snapshot interval into `logs/quota.jsonl`; `<=0` disables                                                          | `10`                                                                                                         |
-| `dashboard.password`           | `/panel` admin password; empty = no login required                                                                       | none                                                                                                         |
-| `auth.api_key`                 | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | none (open)                                                                                                  |
+| Field                                            | Description                                                                                                              | Required / Default                                                                                           |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `server.listen`                                  | HTTP listen address                                                                                                      | Yes                                                                                                          |
+| `server.max_concurrency`                         | Max concurrent `/v1/*` requests                                                                                          | `1024`                                                                                                       |
+| `devin.base_url`                                 | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
+| `devin.token`                                    | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
+| `devin.model`                                    | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
+| `devin.aliases`                                  | Client model name to upstream UID map (e.g. `swe-2: swe-2-max`)                                                          | none                                                                                                         |
+| `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata (bump `client_version` when upstream gates a model on a newer CLI)             | `chisel` / `3000.2.17` / `mac`                                                                               |
+| `devin.proxy`                                    | Upstream proxy URL (`http(s)://`, `socks5(h)://`); empty = direct / env vars                                             | none                                                                                                         |
+| `devin.force_http1`                              | Per-request TCP connections to upstream (avoids HTTP/2 stream serialization)                                             | `true`                                                                                                       |
+| `debug.enabled`                                  | Write per-request debug logs under `logs/` next to the config file                                                       | `false`                                                                                                      |
+| `debug.retention_days`                           | Days to keep request log dirs; `<=0` disables time-based cleanup                                                         | `14`                                                                                                         |
+| `debug.max_total_mb`                             | Total `logs/` size cap; evicts oldest dirs first                                                                         | `1024`                                                                                                       |
+| `debug.payload_hours`                            | Hours before large stage files (03/04/06/attachments) are stripped, keeping meta/error evidence                          | `24`                                                                                                         |
+| `debug.keep_error_dirs`                          | Newest N failed dirs (with `error.json`) protected from size eviction                                                    | `32`                                                                                                         |
+| `debug.quota_interval_minutes`                   | Quota snapshot interval into `logs/quota.jsonl`; `<=0` disables                                                          | `10`                                                                                                         |
+| `dashboard.password`                             | `/panel` admin password; empty = no login required                                                                       | none                                                                                                         |
+| `auth.api_key`                                   | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | none (open)                                                                                                  |
 
 ```yaml
 server:

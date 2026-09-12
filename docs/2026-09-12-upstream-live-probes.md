@@ -1,4 +1,4 @@
-# 上游活跃探测报告（三轮逆向）
+# 上游活跃探测报告
 
 > 方法：新增 `cmd/probe`（直连 `server.codeium.com` 的 Connect-RPC 实验工具，复用 `outputs/devin-proto-go` 生成绑定），对真实上游逐字段打靶。token 用 config.yaml 里同一个免费档账号。
 >
@@ -201,3 +201,48 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 - `invalid_json_str`/`is_custom_tool_call` 的**响应方向**线上形态（历史方向已验证有效）；`arena_*`。
 - `prompt`(#19 响应回显）、`response_dimension_groups` 的完整语义（UI 用，无关紧要）。
 - `MIN_LOG_PROB` 是否就是 Anthropic end_turn 的唯一映射（单样本）；Gemini 路径 `gemini_thought_signature` bytes 字段始终未出现（Databricks 侧似乎不下发思考签名）。
+
+## 十五、五轮补充实测（2026-09-12 午后，复核 + 新靶点）
+
+probe 新增 `-temperature`/`-top-p`/`-top-k`/`-trajectory-id` flag。全部对照 swe-2-max 默认请求。
+
+### 签名校验严格度按 provider 分级（对 §六/§十 的细化）
+
+| 模型                       | 变体                                              | 结果                                                            |
+| -------------------------- | ------------------------------------------------- | --------------------------------------------------------------- |
+| claude-sonnet-4-6-thinking | `bogus-sig`（截断伪造 anthropic 签名）            | **流内 `invalid_argument`**（第 2 帧后，文案仍模糊 + trace ID） |
+| swe-2-max                  | `mutated-thinking`（真签名 + 改写的 thinking 文） | 正常，`input=213`                                               |
+| swe-2-max                  | `sig-only`（签名无 thinking 文本）                | 正常，`input=197`                                               |
+| gpt-5-6-sol-medium         | `bogus-sig`                                       | 未有效测——step1 未产出 reasoning（effort 概率性），无签名可伪造 |
+
+结论修订：签名校验严格度 **Anthropic（校验 blob 本体真伪）> Fireworks（完全不校验）**；但 Anthropic 不绑定 thinking 正文（四轮：真签名 + 改写 thinking 仍正常）。OpenAI 路径 signature 本身是序列化 reasoning item，伪造大概率卡在反序列化——未实证。给客户端的推论不变：**签名必须原样往返，不能伪造、不能错配 `signature_type`**。
+
+### `stop_patterns` 上游不执行
+
+`-stop-pattern p`/`ell` 两次：文本 "pong"/"hello" 全量下发，零截断；字段被静默接受并忽略（无 `invalid_argument`）。`STOP_PATTERN` 这个枚举名只是 swe-2 的通用正常收尾，与 `stop_patterns` 命中无关。**decoder 的本地尾部截断是 stop 序列的唯一实现**——若哪天想去掉本地逻辑换成上游透传，这里是反例。
+
+### `max_tokens` 计费口径（对 #25 的细化）
+
+- `outputTokens` 正常路径 = thinking+text 合计（thinking≈50 + "391"≈3 → 报 55）。
+- cap 合并计费：`-max-tokens 4` → thinking 5 token+text 0，`outputTokens=4`；`-max-tokens 1` → thinking ~40 token 送达但 `outputTokens=1`（**送达按 chunk 粒度可超 cap，计费按 cap**）。
+- `deltaTokens` 只数 text 帧。
+- 空文本轮可稳定复现：`max_tokens≤8` 十次全部 `MAX_TOKENS` + thinking-only + 零 text——「有 stopReason 但零可见内容」的真实形态（`emptyEndTurn` 重试针对的是正常 stop 零内容，与此不同源）。
+
+### `cascade_id` 不携带会话状态（#26 直接验证）
+
+同 `cascade_id` 先后两请求：step2 的 thinking 明说 "this is the very first message in our conversation"——上游不按 cascade 关联 prompt 历史，续传只能靠回放 `chat_message_prompts`（`edge empty-assistant` 已证该形态可用）。
+
+### 采样参数无服务端约束
+
+`temperature=0.5 + top_p=0.5` 在 `glm-5-3-max`（preserveThinking）、`swe-2-max`、`claude-sonnet-4-6-thinking` 全部正常应答。CPA#2509 的「thinking 激活强制 temp=1/top_p≥0.95/top_k 缺席」在本上游不存在——要么不校验，要么 Devin 侧已改写。
+
+### 响应 wire 元数据（#28 复核 + provider 头全集）
+
+- Connect 成功响应：headers 仅标准 connect+ 安全头，**trailers 恒空**；错误 meta 同样无配额字段。配额信号只有 Check* RPC + 错误文案（§十二结论维持）。
+- `usage.responseHeader` 按 provider 透传原生响应头：Fireworks `x-request-id: chatcmpl-*`；Anthropic `Request-Id: req_*`+`Date`；OpenAI `x-request-id: req_*`+`openai-version`+`openai-processing-ms`；**glm 路径不下发**（且 `apiProvider` 是未命名枚举值 `"58"`——本地 proto 的 APIProvider 枚举落后于服务端）。
+- `usage.messageId` 在 Anthropic 路径是 `msg_*` 原生 message id。
+
+### 运行期观测（两条）
+
+- **Fireworks 帧形态**：一轮正常响应 = ~40+ 个仅含 `latency`/`timestamp`/`usage` 的心跳帧 → 单帧整段 `deltaThinking` → `deltaText` → `deltaSignature` → `stopReason` → 收尾 usage。thinking 是批式单帧不是逐 token 流；看门狗按「任意帧到达」重置（`upstreamStallTimeout=120s`），长思考窗口天然安全。
+- **瞬时全断事件**：约 3 分钟窗口内所有 RPC（含 Check* 一元调用）全部 `unavailable: unexpected EOF`，随后自愈；10 连发中也偶发 0 帧 EOF。**0 帧 `unavailable` 是本上游真实存在的瞬时态**，`tryReopen` 对纯传输错误的 pre-content 重试覆盖的是正确分类。

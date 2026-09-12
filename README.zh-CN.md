@@ -6,10 +6,15 @@ devin-2api 是一个轻量转发工具，把 Devin（[app.devin.ai](https://app.
 
 ## 特性
 
-- **一个上游，三个 API 面**——`POST /v1/responses`（OpenAI Responses，含 Codex 式客户端用的 WebSocket transport）、`POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）
+- **一个上游，三个 API 面**——`POST /v1/responses`（OpenAI Responses，含 Codex 式客户端的 WebSocket transport 与多轮会话）、`POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）
 - **支持流式与一次性响应**（typed SSE / JSON）
+- **思考签名跨轮回放**——按各 provider 原生形态（`sealed`/`anthropic`/`openai`）保存并回传；在 Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
+- **忠实的工具调用**——custom/freeform 工具调用原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对；孤儿工具结果降级为文本而非整请求失败
+- **上游流韧性**——首个内容字节前的失败（传输断裂、从凭据文件重读的过期 token、静默卡死、空 end_turn）透明重试一次；start 事件延后下发，早期上游失败返回真实 HTTP 错误而非已提交 200 后的 SSE error
+- **归一化错误契约**——上游 Connect 错误码映射为正确的 HTTP 状态与协议错误类型；限流归一为 `429` + 从文案解析出的 `Retry-After`；每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
 - **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型配置
 - **`/panel` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录
+- **对齐真实 Devin CLI 指纹**——请求 metadata 复刻 CLI 的客户端身份（`devin.client_*` 可配置，上游加版本门时 bump `client_version` 即可）
 - **适配器模式**——极易扩展新的上游
 - **部署简单**——单一静态二进制，[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
 - **可选调试日志**——按请求记录，便于排查问题
@@ -64,7 +69,7 @@ docker run --rm -p 8080:8080 \
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"v0.2.0","uptime_seconds":12,"debug_logging":false}
+# {"status":"ok","version":"v0.3.0","uptime_seconds":12,"debug_logging":false}
 ```
 
 ## 用法
@@ -123,24 +128,25 @@ curl http://localhost:8080/v1/messages \
 
 配置文件为 YAML，启动时加载一次；未知字段会被拒绝。
 
-| 字段                           | 说明                                                                                                        | 必填 / 默认值                                                                                      |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `server.listen`                | HTTP 监听地址                                                                                               | 是                                                                                                 |
-| `server.max_concurrency`       | `/v1/*` 并发请求上限                                                                                        | `1024`                                                                                             |
-| `devin.base_url`               | Devin Connect 服务地址                                                                                      | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token`                  | Devin 会话 token（`devin-session-token$...`）                                                               | 否——未配置时接口返回 503                                                                           |
-| `devin.model`                  | Devin chat model UID（如 `glm-5-2`）                                                                        | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
-| `devin.aliases`                | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）                                                   | 无                                                                                                 |
-| `devin.proxy`                  | 上游代理地址（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                          | 无                                                                                                 |
-| `devin.force_http1`            | 每请求独立 TCP 连上游（避免 HTTP/2 单连接多 stream 串行化）                                                 | `true`                                                                                             |
-| `debug.enabled`                | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | `false`                                                                                            |
-| `debug.retention_days`         | 请求日志目录保留天数；`<=0` 不按时间清理                                                                    | `14`                                                                                               |
-| `debug.max_total_mb`           | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                | `1024`                                                                                             |
-| `debug.payload_hours`          | 大体积阶段文件（03/04/06 与 attachments/）保留小时数，超时剥离负载保留 meta/error 证据                      | `24`                                                                                               |
-| `debug.keep_error_dirs`        | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                           | `32`                                                                                               |
-| `debug.quota_interval_minutes` | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                         | `10`                                                                                               |
-| `dashboard.password`           | `/panel` 管理面板密码；留空免登录                                                                           | 无                                                                                                 |
-| `auth.api_key`                 | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 无（开放）                                                                                         |
+| 字段                                             | 说明                                                                                                        | 必填 / 默认值                                                                                      |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `server.listen`                                  | HTTP 监听地址                                                                                               | 是                                                                                                 |
+| `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                        | `1024`                                                                                             |
+| `devin.base_url`                                 | Devin Connect 服务地址                                                                                      | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
+| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）                                                               | 否——未配置时接口返回 503                                                                           |
+| `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                        | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
+| `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）                                                   | 无                                                                                                 |
+| `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份（上游给新模型加版本门时 bump `client_version` 即可）                         | `chisel` / `3000.2.17` / `mac`                                                                     |
+| `devin.proxy`                                    | 上游代理地址（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                          | 无                                                                                                 |
+| `devin.force_http1`                              | 每请求独立 TCP 连上游（避免 HTTP/2 单连接多 stream 串行化）                                                 | `true`                                                                                             |
+| `debug.enabled`                                  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | `false`                                                                                            |
+| `debug.retention_days`                           | 请求日志目录保留天数；`<=0` 不按时间清理                                                                    | `14`                                                                                               |
+| `debug.max_total_mb`                             | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                | `1024`                                                                                             |
+| `debug.payload_hours`                            | 大体积阶段文件（03/04/06 与 attachments/）保留小时数，超时剥离负载保留 meta/error 证据                      | `24`                                                                                               |
+| `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                           | `32`                                                                                               |
+| `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                         | `10`                                                                                               |
+| `dashboard.password`                             | `/panel` 管理面板密码；留空免登录                                                                           | 无                                                                                                 |
+| `auth.api_key`                                   | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 无（开放）                                                                                         |
 
 ```yaml
 server:
