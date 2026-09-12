@@ -27,9 +27,14 @@ type StreamEncoder struct {
 	thinkingIndex   int
 	thinkingStarted bool
 	toolCalls       []*toolCallState
-	finished        bool
-	finalUsage      llm.Usage
-	finalReason     llm.StopReason
+	// toolByContent 按 llm ContentIndex 索引工具状态。ContentIndex 是
+	// partial.Content 的全局块下标（text/thinking/toolCall 混排），
+	// 与 tool_calls 输出序号 state.index 不是一套编号——查找必须走这张表，
+	// 不能拿序号比下标。
+	toolByContent map[int]*toolCallState
+	finished      bool
+	finalUsage    llm.Usage
+	finalReason   llm.StopReason
 }
 
 type toolCallState struct {
@@ -47,6 +52,7 @@ func NewStreamEncoder(model string, includeUsage bool) *StreamEncoder {
 		createdAt:     time.Now().Unix(),
 		includeUsage:  includeUsage,
 		thinkingIndex: -1,
+		toolByContent: map[int]*toolCallState{},
 	}
 }
 
@@ -179,6 +185,7 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) []SSEEvent {
 	state := &toolCallState{index: len(encoder.toolCalls), id: event.ToolCallID, name: event.ToolName}
 	encoder.toolCalls = append(encoder.toolCalls, state)
+	encoder.toolByContent[event.ContentIndex] = state
 	return []SSEEvent{encoder.chunk([]chatChoice{{
 		Delta: chatDelta{ToolCalls: []chatToolCall{{
 			Index:    state.index,
@@ -268,25 +275,19 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	return []SSEEvent{{Name: "", Data: data}}
 }
 
+// findTool 先按供应商调用 id 匹配；id 缺失（上游可不产 id，decoder 另有
+// 空 id 兜底路径）时退回 ContentIndex 映射。
 func (encoder *StreamEncoder) findTool(id string, contentIndex int) *toolCallState {
 	for _, state := range encoder.toolCalls {
 		if state.id != "" && state.id == id {
 			return state
 		}
-		if state.index == contentIndex {
-			return state
-		}
 	}
-	return nil
+	return encoder.findToolByIndex(contentIndex)
 }
 
 func (encoder *StreamEncoder) findToolByIndex(contentIndex int) *toolCallState {
-	for _, state := range encoder.toolCalls {
-		if state.index == contentIndex {
-			return state
-		}
-	}
-	return nil
+	return encoder.toolByContent[contentIndex]
 }
 
 // chatChunk 是流式 chunk 的固定 envelope：五键整流不变，只有 choices/usage

@@ -64,6 +64,40 @@ func TestStreamEncoderEmitsToolCalls(t *testing.T) {
 	}
 }
 
+// TestStreamEncoderToolCallAfterOtherBlocks 钉住工具查找语义：ContentIndex 是
+// partial.Content 的全局块下标（thinking/text 占 0/1，工具在 2），不能与
+// tool_calls 输出序号混比。delta 的 id 与 start 不一致时（上游再键控），
+// 参数增量必须仍归属正确的工具而不是被丢弃或错挂到 index=0 的块上。
+func TestStreamEncoderToolCallAfterOtherBlocks(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test", false)
+	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
+	partial := &llm.AssistantMessage{Content: []llm.Content{
+		llm.ThinkingContent{Thinking: "t"}, llm.TextContent{Text: "x"}, call,
+	}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: partial.Content, StopReason: llm.StopReasonToolUse}
+	events := []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventToolCallStart, ContentIndex: 2, ToolCallID: "call-1", ToolName: "lookup", Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 2, ToolCallID: "call-rekeyed", Delta: `{"city":"`, Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 2, ToolCallID: "call-rekeyed", Delta: `Shanghai"}`, Partial: partial},
+		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 2, ToolCall: &call, Partial: partial},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
+	}
+	encoded := encodeStreamEvents(t, encoder, events)
+	// role, tool start, arg delta x2, finish, [DONE]——两个 delta 都必须下发。
+	if len(encoded) != 6 {
+		t.Fatalf("event count = %d, want 6 (arg deltas must not be dropped)", len(encoded))
+	}
+	delta := decodeEventData(t, encoded[2])
+	toolCall := delta["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)
+	if toolCall["index"] != float64(0) {
+		t.Fatalf("tool_calls index = %v, want 0 (output ordinal, not content index)", toolCall["index"])
+	}
+	if toolCall["function"].(map[string]any)["arguments"] != `{"city":"` {
+		t.Fatalf("arguments delta = %v", toolCall["function"])
+	}
+}
+
 // TestEncodeResponseFinal 验证非流式最终 JSON 结构和用量缓存字段。
 func TestEncodeResponseFinal(t *testing.T) {
 	final := &llm.AssistantMessage{
