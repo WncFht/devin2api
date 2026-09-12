@@ -14,7 +14,6 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-COPY e2e ./e2e
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/devin-2api ./cmd/devin-2api
 
