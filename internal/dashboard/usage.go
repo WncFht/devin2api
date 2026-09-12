@@ -25,6 +25,7 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 	for _, m := range snap.Models {
 		row := map[string]any{
 			"name": m.Name, "requests": m.Requests, "errors": m.Errors, "disconnected": m.Disconnected,
+			"rate_limited": m.RateLimited,
 			"input_tokens": m.Input, "output_tokens": m.Output,
 			"cache_read_tokens": m.CacheRead, "cache_write_tokens": m.CacheWrite,
 			"reasoning_tokens": m.Reasoning, "total_tokens": m.TotalTokens,

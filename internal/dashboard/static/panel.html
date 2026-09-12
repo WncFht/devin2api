@@ -737,7 +737,7 @@ return [new Date(days[0]+'T00:00:00').getTime()/1000,new Date(days[1]+'T00:00:00
 }
 // sumTotals 把一组 usageTotals 形状的对象求和成 totals。
 function sumTotals(list){
-const t={requests:0,errors:0,disconnected:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:0,total_tokens:0,gen_ms:0};
+const t={requests:0,errors:0,disconnected:0,rate_limited:0,input_tokens:0,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,reasoning_tokens:0,total_tokens:0,gen_ms:0};
 list.forEach(p=>{for(const k in t)t[k]+=p[k]||0});
 return t;
 }
@@ -779,6 +779,7 @@ html+='<span class="muted" style="font-size:11px;align-self:center">图表：拖
 html+='<div class="grid">';
 html+=card(rangeLabel+'请求',totals.requests??0);
 html+=card(rangeLabel+'错误/断连',(totals.errors??0)+' / '+(totals.disconnected??0));
+html+=card('429 限流',totals.rate_limited??0);
 html+=card('输入',fmtNum(totals.input_tokens));
 html+=card('输出',fmtNum(totals.output_tokens));
 html+=card('缓存读/写',fmtNum(totals.cache_read_tokens)+' / '+fmtNum(totals.cache_write_tokens));
@@ -796,6 +797,21 @@ html+='<span class="chip" onclick="filterStage(\''+qa(k)+'\')">'+esc(k)+' <stron
 });
 html+='</div>';
 }
+// 429 采样：rpm 是 429 到达时刻前 60s 发出的请求数，峰值即上游
+// 每分钟限额的观测下界。事件环形保留 256 条，重启经 index 回放恢复。
+const rl=s.rate_limit_events||[];
+if(rl.length){
+const maxRPM=rl.reduce((m,e)=>Math.max(m,e.rpm||0),0);
+html+='<h2 style="margin-top:14px">上游限流 429 <span class="muted" style="font-weight:400;font-size:12px">当时速率 = 该时刻前 60s 发出的请求数</span></h2><div class="grid">';
+html+=card('采样事件',rl.length+(rl.length>=256?'（保留最近 256）':''));
+html+=card('观测上限 ≈',maxRPM+' req/min');
+html+='</div><table><thead><tr><th>时间</th><th>模型</th><th>当时速率</th></tr></thead><tbody>';
+rl.slice(-50).reverse().forEach(e=>{
+html+='<tr><td class="mono">'+fmtTime(e.at*1000)+'</td><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(e.model)+'\')">'+esc(e.model||'-')+'</span></td><td class="mono">'+e.rpm+' req/min</td></tr>';
+});
+html+='</tbody></table>';
+html+='<div class="note" style="margin-top:6px">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。本地并发拒绝（503/WS 429 事件）不进索引，此处全是上游限流。</div>';
+}
 if(pts.length){
 const gran=hourly?'逐小时':'逐日';
 html+='<h2 style="margin-top:14px">'+gran+'趋势 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+'</span></h2>';
@@ -812,12 +828,13 @@ const rows=Object.keys(md).map(model=>{
  return {name:model,...t};
 }).filter(m=>m.requests>0).sort((a,b)=>b.requests-a.requests);
 if(rows.length){
-html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+' · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">'+esc(rangeLabel)+' · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>429</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th></tr></thead><tbody>';
 rows.forEach(m=>{
 const sr=(m.requests-m.errors-m.disconnected)/m.requests;
 html+='<tr><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(m.name)+'\')">'+esc(m.name)+'</span></td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
 +'<td>'+(sr*100).toFixed(0)+'%</td>'
++'<td>'+(m.rate_limited||0)+'</td>'
 +'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.output_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.cache_read_tokens)+'</td>'
@@ -827,11 +844,12 @@ html+='<tr><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(m.n
 html+='</tbody></table>';
 }
 }else if(d.models&&d.models.length){
-html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">全窗口 · 含成本估算 · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按模型 <span class="muted" style="font-weight:400;font-size:12px">全窗口 · 含成本估算 · 点击模型筛选请求</span></h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>429</th><th>输入</th><th>输出</th><th>缓存读</th><th>命中率</th><th>均速</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
 d.models.forEach(m=>{
 html+='<tr><td class="mono"><span class="lnk" onclick="filterReqModel(\''+qa(m.name)+'\')">'+esc(m.name)+'</span></td>'
 +'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
 +'<td>'+(m.success_rate!=null?(m.success_rate*100).toFixed(0)+'%':'-')+'</td>'
++'<td>'+(m.rate_limited||0)+'</td>'
 +'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.output_tokens)+'</td>'
 +'<td class="mono">'+fmtNum(m.cache_read_tokens)+'</td>'
@@ -852,9 +870,9 @@ html+='<tr><td class="mono"><span class="lnk" onclick="filterKey(\''+qa(k.name)+
 html+='</tbody></table>';
 }
 if(s.days&&s.days.length>1){
-html+='<h2 style="margin-top:14px">按天</h2><table><thead><tr><th>日期</th><th>请求</th><th>错误</th><th>断连</th><th>输入</th><th>输出</th><th>命中率</th><th>Token合计</th></tr></thead><tbody>';
+html+='<h2 style="margin-top:14px">按天</h2><table><thead><tr><th>日期</th><th>请求</th><th>错误</th><th>断连</th><th>429</th><th>输入</th><th>输出</th><th>命中率</th><th>Token合计</th></tr></thead><tbody>';
 s.days.slice(0,14).forEach(day=>{
-html+='<tr><td class="mono">'+esc(day.date)+'</td><td>'+day.requests+'</td><td>'+day.errors+'</td><td>'+day.disconnected+'</td><td class="mono">'+fmtNum(day.input_tokens)+'</td><td class="mono">'+fmtNum(day.output_tokens)+'</td><td class="mono">'+hitRate(day)+'</td><td class="mono">'+fmtNum(day.total_tokens)+'</td></tr>';
+html+='<tr><td class="mono">'+esc(day.date)+'</td><td>'+day.requests+'</td><td>'+day.errors+'</td><td>'+day.disconnected+'</td><td>'+(day.rate_limited||0)+'</td><td class="mono">'+fmtNum(day.input_tokens)+'</td><td class="mono">'+fmtNum(day.output_tokens)+'</td><td class="mono">'+hitRate(day)+'</td><td class="mono">'+fmtNum(day.total_tokens)+'</td></tr>';
 });
 html+='</tbody></table>';
 }
@@ -866,6 +884,7 @@ const xs=pts.map(p=>p.hour!==undefined?p.hour:new Date(p.date+'T00:00:00').getTi
 drawChart('usage',hf,xs,[
  {label:'请求',color:'#7c8aff',values:pts.map(p=>p.requests)},
  {label:'错误',color:'#f87171',values:pts.map(p=>p.errors)},
+ {label:'429',color:'#f472b6',values:pts.map(p=>p.rate_limited)},
  {label:'输出 token',color:'#4ade80',scale:'tok',values:pts.map(p=>p.output_tokens),fmt:v=>fmtNum(v)},
 ],{right:[{scale:'tok'}],uid:'usage.flow'});
 drawChart('usage',document.getElementById('hourlyPerfChart'),xs,[

@@ -32,6 +32,9 @@ type usageTotals struct {
 	Requests     int64 `json:"requests"`
 	Errors       int64 `json:"errors"`       // status>=400 或 result=failed
 	Disconnected int64 `json:"disconnected"` // 含 aborted
+	// RateLimited 是上游返回 429 的次数。本地并发拒绝在 recorder 创建前
+	// 返回、不进 index，故此处纯为上游限流语义。
+	RateLimited  int64 `json:"rate_limited"`
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`
 	CacheRead    int64 `json:"cache_read_tokens"`
@@ -51,6 +54,9 @@ func (t *usageTotals) add(e IndexEntry) {
 		t.Errors++
 	case e.Result == "disconnected" || e.Result == "aborted":
 		t.Disconnected++
+	}
+	if e.StatusCode == 429 {
+		t.RateLimited++
 	}
 	t.InputTokens += e.InputTokens
 	t.OutputTokens += e.OutputTokens
@@ -76,6 +82,7 @@ type usageHourBucket struct {
 	requests     int64
 	errors       int64
 	disconnected int64
+	rateLimited  int64 // status_code==429
 	input        int64
 	output       int64
 	cacheRead    int64
@@ -104,6 +111,7 @@ type usageHourPoint struct {
 	Requests     int64 `json:"requests"`
 	Errors       int64 `json:"errors"`
 	Disconnected int64 `json:"disconnected"`
+	RateLimited  int64 `json:"rate_limited"`
 	Input        int64 `json:"input_tokens"`
 	Output       int64 `json:"output_tokens"`
 	AvgDur       int64 `json:"avg_duration_ms"`
@@ -124,6 +132,7 @@ type dimensionAgg struct {
 	Requests     int64  `json:"requests"`
 	Errors       int64  `json:"errors"`
 	Disconnected int64  `json:"disconnected"`
+	RateLimited  int64  `json:"rate_limited"`
 	Input        int64  `json:"input_tokens"`
 	Output       int64  `json:"output_tokens"`
 	CacheRead    int64  `json:"cache_read_tokens"`
@@ -159,6 +168,21 @@ type usageDayRow struct {
 	usageTotals
 }
 
+// rateLimitEvent 是一次上游 429 的采样：发生时刻（≈请求完成时刻）、模型、
+// 以及该时刻前 60s 内启动的请求数。多次采样的 RPM 峰值即上游
+// 限流阈值（每分钟请求数）的观测下界——被限说明已触线。
+type rateLimitEvent struct {
+	At    int64  `json:"at"` // unix 秒
+	Model string `json:"model,omitempty"`
+	RPM   int64  `json:"rpm"` // At 前 60s 内启动的请求数（含本请求）
+}
+
+// rateLimitEventCap 是限流事件环形保留条数。
+const rateLimitEventCap = 256
+
+// startsCap 触发 starts 窗口压缩的条数上限。
+const startsCap = 4096
+
 // UsageSnapshot 是聚合结果的完整快照。
 type UsageSnapshot struct {
 	WindowStart string           `json:"window_start"` // 回放窗口最早一条的时间
@@ -175,6 +199,8 @@ type UsageSnapshot struct {
 	ErrorStages map[string]int64                  `json:"error_stages"`
 	Duration    latencyStats                      `json:"duration"`
 	TTFB        latencyStats                      `json:"ttfb"`
+	// RateLimitEvents 是最近的上游 429 采样（旧到新），供面板推算限流阈值。
+	RateLimitEvents []rateLimitEvent `json:"rate_limit_events,omitempty"`
 }
 
 // sampleRing 是定长延迟蓄水池：写满后循环覆盖最旧样本。
@@ -237,6 +263,11 @@ type usageAggregator struct {
 	perModelDay     map[string]map[string]*usageTotals
 	perKey          map[string]*dimensionAgg
 	errStages       map[string]int64
+	// starts 是最近请求的启动时间戳（秒，按完成序追加、近似时序），
+	// 用于在 429 到达时刻回看前 60s 的发送速率。
+	// 在途请求完成前不入索引，速率读数略偏低。
+	starts   []int64
+	rlEvents []rateLimitEvent
 }
 
 func newUsageAggregator() *usageAggregator {
@@ -285,6 +316,9 @@ func (a *usageAggregator) add(e IndexEntry) {
 	}
 	if e.Result == "disconnected" || e.Result == "aborted" {
 		a.hours[idx].disconnected++
+	}
+	if e.StatusCode == 429 {
+		a.hours[idx].rateLimited++
 	}
 	a.hours[idx].input += e.InputTokens
 	a.hours[idx].output += e.OutputTokens
@@ -338,6 +372,37 @@ func (a *usageAggregator) add(e IndexEntry) {
 	if e.ErrorStage != "" {
 		a.errStages[e.ErrorStage]++
 	}
+
+	a.starts = append(a.starts, started.Unix())
+	// starts 超容时裁到 61s 窗口内——更早的样本不可能再参与任何
+	// 未来 429 的速率计算。回放大索引时同理安全：条目按完成序到达。
+	if len(a.starts) > startsCap {
+		cut := started.Unix() - 61
+		keep := a.starts[:0]
+		for _, s := range a.starts {
+			if s >= cut {
+				keep = append(keep, s)
+			}
+		}
+		a.starts = keep
+	}
+	if e.StatusCode == 429 {
+		end := started.Unix() + e.DurationMS/1000
+		var rpm int64
+		for _, s := range a.starts {
+			if s > end-60 && s <= end {
+				rpm++
+			}
+		}
+		model := e.Model
+		if model == "" {
+			model = e.RequestedModel
+		}
+		a.rlEvents = append(a.rlEvents, rateLimitEvent{At: end, Model: model, RPM: rpm})
+		if len(a.rlEvents) > rateLimitEventCap {
+			a.rlEvents = a.rlEvents[len(a.rlEvents)-rateLimitEventCap:]
+		}
+	}
 }
 
 // addEntry 把请求计入一个维度行。
@@ -348,6 +413,9 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 		d.Errors++
 	case e.Result == "disconnected" || e.Result == "aborted":
 		d.Disconnected++
+	}
+	if e.StatusCode == 429 {
+		d.RateLimited++
 	}
 	d.Input += e.InputTokens
 	d.Output += e.OutputTokens
@@ -441,6 +509,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 			point.Requests = bucket.requests
 			point.Errors = bucket.errors
 			point.Disconnected = bucket.disconnected
+			point.RateLimited = bucket.rateLimited
 			point.Input = bucket.input
 			point.Output = bucket.output
 			point.CacheRead = bucket.cacheRead
@@ -455,6 +524,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 
 	snap.Models = sortedAggs(a.perModel)
 	snap.Keys = sortedAggs(a.perKey)
+	snap.RateLimitEvents = append([]rateLimitEvent(nil), a.rlEvents...)
 	return snap
 }
 

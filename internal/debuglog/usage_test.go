@@ -3,8 +3,10 @@ package debuglog
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,6 +104,64 @@ func TestUsagePercentiles(t *testing.T) {
 	stats = agg.durationSamples.stats()
 	if stats.Samples != usageSampleCapacity {
 		t.Fatalf("samples = %d, want %d", stats.Samples, usageSampleCapacity)
+	}
+}
+
+// TestUsageRateLimitSampling 验证上游 429 单独计数，并按前 60s 窗口采样发出速率；
+// 同时验证事件经 index.jsonl 回放在重启后重建。
+func TestUsageRateLimitSampling(t *testing.T) {
+	base := time.Now()
+	// entry 以完成序构造：off 为相对 base 的启动时刻。
+	entry := func(off time.Duration, status int, durMS int64) IndexEntry {
+		return IndexEntry{
+			StartedAt:  base.Add(off).Format(time.RFC3339Nano),
+			DurationMS: durMS, StatusCode: status, Result: "completed", Model: "m-a",
+		}
+	}
+	entries := []IndexEntry{
+		entry(-120*time.Second, 200, 100), // 在 429 的 60s 窗口之外
+		entry(-30*time.Second, 200, 100),
+		entry(-20*time.Second, 200, 100),
+		entry(-10*time.Second, 200, 100),
+		// end = -5s+2s = -3s；窗口 (-63s,-3s] 内含 -30/-20/-10/-5 共 4 个 start。
+		entry(-5*time.Second, 429, 2000),
+	}
+
+	agg := newUsageAggregator()
+	for _, e := range entries {
+		agg.add(e)
+	}
+	snap := agg.snapshot()
+	if snap.Window.RateLimited != 1 {
+		t.Fatalf("window rate_limited = %d", snap.Window.RateLimited)
+	}
+	if len(snap.RateLimitEvents) != 1 {
+		t.Fatalf("rate_limit_events = %+v", snap.RateLimitEvents)
+	}
+	ev := snap.RateLimitEvents[0]
+	if ev.Model != "m-a" || ev.RPM != 4 || ev.At != base.Unix()-3 {
+		t.Fatalf("event = %+v", ev)
+	}
+	if snap.Models[0].RateLimited != 1 {
+		t.Fatalf("model agg = %+v", snap.Models[0])
+	}
+
+	// 同一份 index 内容写文件回放，重启后聚合与采样应一致重建。
+	path := filepath.Join(t.TempDir(), "index.jsonl")
+	var buf strings.Builder
+	for _, e := range entries {
+		data, _ := json.Marshal(e)
+		buf.Write(data)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replayed := newUsageAggregator()
+	replayed.replayIndex(path)
+	rsnap := replayed.snapshot()
+	if rsnap.Window.RateLimited != 1 || len(rsnap.RateLimitEvents) != 1 || rsnap.RateLimitEvents[0].RPM != 4 {
+		t.Fatalf("replayed = rate_limited %d events %+v", rsnap.Window.RateLimited, rsnap.RateLimitEvents)
 	}
 }
 
