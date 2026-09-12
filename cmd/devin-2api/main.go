@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -27,13 +27,17 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
 	flag.Parse()
 
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
 	absoluteConfigPath, err := filepath.Abs(*configPath)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("resolve config path failed", "error", err)
+		os.Exit(1)
 	}
 	serviceConfig, err := config.Load(absoluteConfigPath)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("load config failed", "error", err)
+		os.Exit(1)
 	}
 
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
@@ -47,26 +51,33 @@ func main() {
 			Aliases:    serviceConfig.Devin.Aliases,
 		})
 		if createErr != nil {
-			log.Fatal(createErr)
+			slog.Error("create devin adapter failed", "error", createErr)
+			os.Exit(1)
 		}
 		providerAdapter = configured
 	}
 	var debugManager *debuglog.Manager
 	if serviceConfig.Debug.Enabled {
-		debugManager = debuglog.NewManager(filepath.Join(filepath.Dir(absoluteConfigPath), "logs"))
+		debugManager = debuglog.NewManager(
+			filepath.Join(filepath.Dir(absoluteConfigPath), "logs"),
+			*serviceConfig.Debug.RetentionDays,
+			*serviceConfig.Debug.MaxTotalMB,
+		)
+		defer debugManager.Close()
 	}
 	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	if serviceConfig.Devin.Token != "" {
-		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1))
+		application.SetDashboard(dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, serviceConfig.Devin.Token, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager))
 	}
 	server := application.HTTPServer()
-	log.Printf("HTTP server listening on %s", listenURL(server.Addr))
+	slog.Info("HTTP server listening", "addr", listenURL(server.Addr))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, server); err != nil {
-		log.Fatal(err)
+		slog.Error("serve HTTP failed", "error", err)
+		os.Exit(1)
 	}
 }
 

@@ -151,7 +151,7 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -162,9 +162,16 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("request directory count = %d, want 1", len(entries))
+	var requestDirs []os.DirEntry
+	for _, entry := range entries {
+		if entry.IsDir() {
+			requestDirs = append(requestDirs, entry)
+		}
 	}
+	if len(requestDirs) != 1 {
+		t.Fatalf("request directory count = %d, want 1", len(requestDirs))
+	}
+	entries = requestDirs
 	directory := filepath.Join(root, entries[0].Name())
 	for _, name := range []string{"meta.json", "01-http-request.json", "02-request-messages.json", "05-response-events.jsonl", "06-http-response.jsonl"} {
 		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
@@ -188,7 +195,7 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, 0, 0))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -294,7 +301,7 @@ func TestResponsesHandlerIgnoresLogInitializationFailure(t *testing.T) {
 	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, 0, 0))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -445,12 +452,11 @@ func TestStreamImmediateErrorReturnsHTTPStatus(t *testing.T) {
 	}
 }
 
-// TestStreamPromptTooLongReturns413 的测试动机是上下文超长必须以真实 HTTP
-// 状态返回：实测经网关（ccload）时 SSE 错误事件只被用于分类、不会转发给
-// 客户端，走事件会让 Codex 误判为断流重试；HTTP 413 + body 里的
-// context_length_exceeded code 让网关归为客户端错误（不冷却渠道），
-// 客户端拿到的是干净的失败而非截断的流。
-func TestStreamPromptTooLongReturns413(t *testing.T) {
+// TestStreamPromptTooLongDeliversSSE413 验证上下文超长错误的 Codex 契约：
+// 裸 HTTP 413 会让下游网关物化成错误响应，Codex 永远收不到
+// response.failed。正确形态是提交 200 + SSE error 事件（顶层 status=413、
+// error.code=context_length_exceeded），客户端据此自动压缩重试。
+func TestStreamPromptTooLongDeliversSSE413(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{
 		Type:   llm.ResponseEventError,
 		Reason: llm.StopReasonError,
@@ -460,11 +466,15 @@ func TestStreamPromptTooLongReturns413(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
-	if response.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed 200: %s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `"context_length_exceeded"`) {
-		t.Fatalf("error body missing context_length_exceeded code: %s", response.Body.String())
+	body := response.Body.String()
+	if !strings.Contains(body, "response.failed") {
+		t.Fatalf("missing response.failed event: %s", body)
+	}
+	if !strings.Contains(body, `"status":413`) || !strings.Contains(body, `"context_length_exceeded"`) {
+		t.Fatalf("error event missing 413/context_length_exceeded: %s", body)
 	}
 }
 

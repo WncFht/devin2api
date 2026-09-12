@@ -7,10 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +24,7 @@ import (
 	"github.com/leookun/devin-2api/internal/config"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/leookun/devin-2api/internal/obs"
 )
 
 // DashboardRegistrar 描述面板路由注册所需的最小能力。
@@ -58,6 +62,8 @@ type App struct {
 	apiKey string
 	// concurrency 限制同时处理的 /v1/* 请求数。
 	concurrency chan struct{}
+	// metrics 是常驻运行计数器；始终可用，供面板和进程日志消费。
+	metrics *obs.Metrics
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -71,7 +77,13 @@ func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debu
 		serverConfig: serverConfig,
 		debugManager: debugManager,
 		concurrency:  make(chan struct{}, limit),
+		metrics:      obs.NewMetrics(),
 	}
+}
+
+// Metrics 返回常驻运行计数器，供面板 stats 端点读取。
+func (application *App) Metrics() *obs.Metrics {
+	return application.metrics
 }
 
 // SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
@@ -231,6 +243,8 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 			defer func() { <-application.concurrency }()
 			next.ServeHTTP(writer, request)
 		default:
+			application.metrics.Reject()
+			slog.Warn("request rejected", "reason", "concurrency_limit", "path", request.URL.Path, "client_ip", clientIP(request))
 			writeJSONError(writer, http.StatusServiceUnavailable, "server is busy, please try again later")
 		}
 	})
@@ -258,6 +272,8 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if provided == "" {
+			application.metrics.Reject()
+			slog.Warn("request rejected", "reason", "missing_api_key", "path", request.URL.Path, "client_ip", clientIP(request))
 			writeAuthError(writer, "Missing API key")
 			return
 		}
@@ -265,6 +281,8 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 		expectedHash := sha256.Sum256([]byte(application.apiKey))
 		providedHash := sha256.Sum256([]byte(provided))
 		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
+			application.metrics.Reject()
+			slog.Warn("request rejected", "reason", "invalid_api_key", "path", request.URL.Path, "client_ip", clientIP(request), "key_hash", hashCredential(provided))
 			writeAuthError(writer, "Invalid API key")
 			return
 		}
@@ -273,26 +291,53 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 }
 
 func (application *App) createResponses(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, decodeResponsesRequest, responsesProtocol{})
+	api := "openai-responses"
+	if _, isWS := writer.(*wsResponseWriter); isWS {
+		api = "responses-ws"
+	}
+	application.createCompletion(writer, request, api, decodeResponsesRequest, responsesProtocol{})
 }
 
 func (application *App) createChatCompletions(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, decodeChatRequest, chatProtocol{})
+	application.createCompletion(writer, request, "openai-chat", decodeChatRequest, chatProtocol{})
 }
 
 func (application *App) createMessages(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, decodeAnthropicRequest, anthropicProtocol{})
+	application.createCompletion(writer, request, "anthropic", decodeAnthropicRequest, anthropicProtocol{})
 }
 
 func (application *App) createCompletion(
 	writer http.ResponseWriter,
 	request *http.Request,
+	api string,
 	decoder decodeRequestFunc,
 	protocol protocolEncoder,
 ) {
-	recorder := application.debugManager.Start(debuglog.RequestMeta{Method: request.Method, Path: request.URL.Path})
+	reqMetrics := application.metrics.Begin()
+	recorder := application.debugManager.Start(debuglog.RequestMeta{
+		Method:    request.Method,
+		Path:      request.URL.Path,
+		API:       api,
+		ClientIP:  clientIP(request),
+		UserAgent: request.UserAgent(),
+		KeyHash:   requestCredentialHash(request),
+	})
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
-	defer func() { recorder.Complete(completion) }()
+	startedAt := time.Now()
+	responseBytes := 0
+	defer func() {
+		recorder.Complete(completion)
+		reqMetrics.Finish(completion.StatusCode, responseBytes)
+		slog.Info("request",
+			"api", api, "method", request.Method, "path", request.URL.Path,
+			"status", completion.StatusCode, "result", completion.Result,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"model", completion.Model, "requested_model", completion.RequestedModel,
+			"stream", completion.Stream, "client_ip", clientIP(request),
+			"upstream_request_id", completion.UpstreamRequestID,
+			"input_tokens", completion.Usage.Input, "output_tokens", completion.Usage.Output,
+			"cache_read_tokens", completion.Usage.CacheRead)
+	}()
 
 	if application.adapter == nil {
 		completion.StatusCode = http.StatusServiceUnavailable
@@ -314,11 +359,13 @@ func (application *App) createCompletion(
 		return
 	}
 	completion.Model = messages.Model
+	completion.RequestedModel = messages.Model
 	completion.Stream = options.Stream
+	reqMetrics.Observe(options.Stream, len(body))
 	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 	ctx := debuglog.WithRecorder(request.Context(), recorder)
 	if options.Stream {
-		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion)
+		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion, &responseBytes)
 		return
 	}
 	stream, err := application.adapter.Stream(ctx, messages)
@@ -346,6 +393,8 @@ func (application *App) createCompletion(
 		recorder.WriteError("client_disconnected", err)
 		return
 	}
+	recorder.NoteClientLatency()
+	responseBytes += len(body)
 	recorder.AppendJSONL("06-http-response.jsonl", "response", json.RawMessage(body))
 	completion.StatusCode = http.StatusOK
 	completion.Result = "completed"
@@ -366,7 +415,10 @@ var sseKeepalive = []byte(": keepalive\n\n")
 type streamWriter struct {
 	writer    http.ResponseWriter
 	flusher   http.Flusher
+	recorder  *debuglog.Recorder
 	committed bool
+	// bytes 累计写出字节数，供 metrics 统计响应流量。
+	bytes int
 }
 
 // write 写一段响应体并立即 flush。
@@ -375,8 +427,16 @@ func (out *streamWriter) write(p []byte) error {
 	if _, err := out.writer.Write(p); err != nil {
 		return err
 	}
+	out.bytes += len(p)
 	out.flusher.Flush()
 	return nil
+}
+
+// writeContent 写一段协议内容帧（区别于 SSE 保活注释），
+// 并标记「首个客户端可见字节」时间点。
+func (out *streamWriter) writeContent(p []byte) error {
+	out.recorder.NoteClientLatency()
+	return out.write(p)
 }
 
 // awaitEvent 等待上游下一个事件；等待期间按 ticker 节奏写 SSE 注释行保活。
@@ -421,6 +481,7 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 		for {
 			event, err := stream.Recv(ctx)
 			if err == nil {
+				recorder.NoteUpstreamLatency()
 				recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
 			}
 			select {
@@ -447,6 +508,7 @@ func (application *App) streamCompletion(
 	messages llm.RequestMessages,
 	options protocolOptions,
 	completion *debuglog.Completion,
+	responseBytes *int,
 ) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
@@ -457,7 +519,7 @@ func (application *App) streamCompletion(
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	out := &streamWriter{writer: writer, flusher: flusher}
+	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder}
 
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -476,19 +538,34 @@ func (application *App) streamCompletion(
 			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error()}}
 		firstErr = nil
 	}
+	prelude := []llm.ResponseEvent{firstEvent}
 	if !out.committed && firstEvent.Type == llm.ResponseEventError {
 		message := "response stream returned an error event immediately"
 		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
 			message = firstEvent.Error.ErrorMessage
 		}
-		completion.StatusCode = mapProviderErrorStatus(errors.New(message))
-		writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, errors.New(message))
-		return
+		if common.IsContextLengthError(message) {
+			// Codex 只在 SSE response.failed 里按 error.code==
+			// "context_length_exceeded" 识别窗口溢出并自动压缩——但网关
+			// （ccload）会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
+			// 客户端永远收不到 response.failed。先补一个合成 start 让网关
+			// 提交 200，error 事件随后以 SSE 送达；事件顶层 status 仍让
+			// ccload 按 413 归为客户端错误、不冷却渠道。
+			prelude = []llm.ResponseEvent{
+				{Type: llm.ResponseEventStart, Reason: llm.StopReasonPending, Partial: firstEvent.Error},
+				firstEvent,
+			}
+		} else {
+			completion.StatusCode = mapProviderErrorStatus(errors.New(message))
+			writeLoggedError(writer, recorder, "provider_stream", completion.StatusCode, errors.New(message))
+			return
+		}
 	}
 
 	completion.StatusCode = http.StatusOK
-	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, messages.Model, options, firstEvent, firstErr)
+	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, messages.Model, options, prelude, firstErr)
 	updateCompletionIdentity(completion, message)
+	*responseBytes += out.bytes
 	if streamErr != nil {
 		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
 			completion.Result = "disconnected"
@@ -510,13 +587,23 @@ func writeProtocolStream(
 	protocol protocolEncoder,
 	model string,
 	options protocolOptions,
-	firstEvent llm.ResponseEvent,
-	firstErr error,
+	prelude []llm.ResponseEvent,
+	preludeErr error,
 ) (*llm.AssistantMessage, error) {
 	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
 	var latest *llm.AssistantMessage
-	event, err := firstEvent, firstErr
 	for {
+		var event llm.ResponseEvent
+		var err error
+		if len(prelude) > 0 {
+			event = prelude[0]
+			prelude = prelude[1:]
+			if len(prelude) == 0 {
+				err = preludeErr
+			}
+		} else {
+			event, err = out.awaitEvent(ctx, items, ticker)
+		}
 		if errors.Is(err, io.EOF) {
 			return latest, nil
 		}
@@ -529,7 +616,7 @@ func writeProtocolStream(
 			return latest, encodeErr
 		}
 		for _, encoded := range encodedEvents {
-			if wErr := out.write(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
+			if wErr := out.writeContent(protocol.SSEFormat(encoded.Name, encoded.Data)); wErr != nil {
 				return latest, wErr
 			}
 			if encoded.Name == "[DONE]" {
@@ -545,7 +632,6 @@ func writeProtocolStream(
 			}
 			return latest, errors.New("response stream returned an error event")
 		}
-		event, err = out.awaitEvent(ctx, items, ticker)
 	}
 }
 
@@ -580,6 +666,7 @@ func collectFinalMessage(ctx context.Context, stream llm.ResponseStream, recorde
 func receiveEvent(ctx context.Context, stream llm.ResponseStream, recorder *debuglog.Recorder) (llm.ResponseEvent, error) {
 	event, err := stream.Recv(ctx)
 	if err == nil {
+		recorder.NoteUpstreamLatency()
 		recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), debuglog.ResponseEventProjection(event))
 	}
 	return event, err
@@ -605,11 +692,45 @@ func updateCompletionIdentity(completion *debuglog.Completion, message *llm.Assi
 	completion.Provider = message.Provider
 	completion.UpstreamRequestID = message.UpstreamRequestID
 	completion.Usage = message.Usage
+	completion.ResponseModel = message.ResponseModel
+	// 上游声明的模型与实际下发的 uid 不一致时记错配——路由/重定向排障信号。
+	if message.ResponseModel != "" && message.Model != "" && message.ResponseModel != message.Model {
+		completion.ModelMismatch = true
+	}
 	if message.ResponseModel != "" {
 		completion.Model = message.ResponseModel
 	} else if message.Model != "" {
 		completion.Model = message.Model
 	}
+}
+
+// clientIP 提取下游客户端地址；WebSocket 内部请求已透传 RemoteAddr。
+func clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		return request.RemoteAddr
+	}
+	return host
+}
+
+// requestCredentialHash 计算请求携带凭据的短哈希用于按 key 关联日志；
+// 未携带凭据时返回空串。永远不落明文——SHA-256 前 8 字节。
+func requestCredentialHash(request *http.Request) string {
+	credential := ""
+	if auth := request.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		credential = strings.TrimSpace(auth[len("Bearer "):])
+	} else if key := request.Header.Get("X-Api-Key"); key != "" {
+		credential = strings.TrimSpace(key)
+	}
+	return hashCredential(credential)
+}
+
+func hashCredential(credential string) string {
+	if credential == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:8])
 }
 
 func httpRequestProjection(request *http.Request, body []byte) map[string]any {
@@ -631,6 +752,8 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 
 func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, stage string, status int, err error) {
 	recorder.WriteError(stage, err)
+	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
+	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
 	message := err.Error()
 	errorType := common.OpenAIErrorType(message)
 	// 客户端可修正的错误用 invalid_request_error，便于 IDE 直接展示。

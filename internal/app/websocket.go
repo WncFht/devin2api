@@ -9,13 +9,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/leookun/devin-2api/internal/llm"
+	"github.com/leookun/devin-2api/internal/obs"
 )
 
 var upgrader = websocket.Upgrader{
@@ -107,7 +108,7 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 func (application *App) responsesWebSocket(writer http.ResponseWriter, request *http.Request) {
 	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
-		log.Printf("websocket upgrade failed: %v", err)
+		slog.Warn("websocket upgrade failed", "error", obs.Diagnostic(err))
 		return
 	}
 	defer conn.Close()
@@ -120,11 +121,11 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 读取第一条 response.create 消息。
 	messageType, body, err := conn.ReadMessage()
 	if err != nil {
-		log.Printf("websocket read failed: %v", err)
+		slog.Warn("websocket read failed", "error", obs.Diagnostic(err))
 		return
 	}
 	if messageType != websocket.TextMessage {
-		log.Printf("websocket received non-text message type %d", messageType)
+		slog.Warn("websocket received non-text message", "type", messageType)
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -133,13 +134,13 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 把 body 解析后强制加上 stream=true，确保走流式分支。
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Printf("websocket parse request failed: %v", err)
+		slog.Warn("websocket parse request failed", "error", obs.Diagnostic(err))
 		return
 	}
 	payload["stream"] = true
 	body, err = json.Marshal(payload)
 	if err != nil {
-		log.Printf("websocket encode request failed: %v", err)
+		slog.Warn("websocket encode request failed", "error", obs.Diagnostic(err))
 		return
 	}
 
@@ -166,17 +167,20 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			}
 			if !seen[frameType] {
 				seen[frameType] = true
-				log.Printf("websocket: ignoring unsupported client message type %q", frameType)
+				slog.Warn("websocket: ignoring unsupported client message type", "type", frameType)
 			}
 		}
 	}()
 
 	innerRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("websocket create inner request failed: %v", err)
+		slog.Warn("websocket create inner request failed", "error", obs.Diagnostic(err))
 		return
 	}
 	innerRequest.Header.Set("Content-Type", "application/json")
+	if auth := request.Header.Get("Authorization"); auth != "" {
+		innerRequest.Header.Set("Authorization", auth)
+	}
 	innerRequest.RemoteAddr = request.RemoteAddr
 
 	wsWriter := newWSResponseWriter(conn)
