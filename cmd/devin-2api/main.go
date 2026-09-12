@@ -29,7 +29,12 @@ var version = "dev"
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
+	showVersion := flag.Bool("version", false, "打印构建版本后退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 

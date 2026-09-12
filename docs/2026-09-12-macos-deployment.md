@@ -80,13 +80,23 @@ tail -f logs/stderr.log                                                       # 
 
 ```bash
 cd /Users/devinuser/Desktop/src/devin-2api
-go build -o devin-2api.new ./cmd/devin-2api && mv devin-2api.new devin-2api
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" \
+  -o devin-2api.new ./cmd/devin-2api && mv devin-2api.new devin-2api
 launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
 ```
 
 原地替换二进制再 kickstart：launchd 发 SIGTERM，进程优雅退出后立即拉起，
-停机约一秒。冒烟验证**不要用 :3003/:3004**——用空闲端口起临时二进制，
-验证完再决定替换（这两个端口曾有旧构建残留导致误判的历史）。
+停机约一秒。`git describe` 的输出形如 `f43a8f7`（无 tag 时的短 SHA）或
+`v0.1.0-3-gabc1234`（tag 之后第 3 个提交），工作区有未提交改动时带
+`-dirty` 后缀——版本串因此始终诚实反映"二进制里到底有什么"。
+
+冒烟验证**不要用 :3003/:3004**——用空闲端口起临时二进制，验证完再决定
+替换（这两个端口曾有旧构建残留导致误判的历史）。重启后一条命令确认版本：
+
+```bash
+curl -s localhost:3003/healthz          # {"version":"f43a8f7",...}
+./devin-2api -version                    # 或直接问二进制本身
+```
 
 ## 可选增强
 
@@ -94,9 +104,8 @@ launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
   触发重启。代价是任何 mtime 变化（包括编辑器误触）都会重启。
 - **多实例**：side 测试实例（如 :3004）若要常态化，用不同 Label + 不同
   config 另起一个 plist；不要放 `/tmp` 裸跑，`/tmp` 重启即丢。
-- **版本可见性**：构建时注入
-  `-ldflags "-X main.version=$(git rev-parse --short HEAD)"`，
-  让 `stderr.log` 首行和面板能显示版本，排障时不用靠二进制 mtime 猜。
+- **版本可见性**：已实现——`main.version` 由构建期 `-X` 注入（见升级命令），
+  `stderr.log` 启动行、`/healthz`、`-version` flag 三处可查。
 
 ## 面板与 agent 访问
 

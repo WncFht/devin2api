@@ -1,6 +1,8 @@
 FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS builder
 
 ARG TARGETARCH
+# VERSION 由 release 流水线注入（git tag），本地构建缺省 dev
+ARG VERSION=dev
 
 # proto → Go 绑定生成工具链（见 Taskfile.yml）
 RUN apk add --no-cache protobuf \
@@ -23,7 +25,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY e2e ./e2e
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/devin-2api ./cmd/devin-2api
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w -X main.version=$VERSION" -o /out/devin-2api ./cmd/devin-2api
 
 FROM alpine:3.22
 
