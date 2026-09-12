@@ -10,6 +10,11 @@ cd "$(dirname "$0")/.."
 # 需要固定名时可用 DEVIN2API_LABEL 覆盖。
 LABEL="${DEVIN2API_LABEL:-com.${USER}.devin-2api}"
 HEALTH_URL="http://localhost:3003/healthz"
+# 运行目录独立于仓库：launchd 子进程对 ~/Desktop 的每次 open 都会被
+# TCC 桌面文件夹授权挂起（仓库在 Desktop 下时 exec/config/logs 全部卡死），
+# 因此二进制、config.yaml、logs/ 一律放 Application Support，仓库只保留
+# logs -> RUNTIME/logs 的符号链接供排障读取。
+RUNTIME="${DEVIN2API_RUNTIME:-${HOME}/Library/Application Support/devin-2api}"
 REPO_SLUG="$(git remote get-url origin | sed -E 's#.*github.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
 
 # 单实例约定：launchd 托管的 :3003 是唯一合法实例。部署前先列出其它
@@ -93,8 +98,10 @@ echo "==> smoke: 新二进制 -version"
 	exit 1
 }
 
-mv devin-2api.new devin-2api
-echo "==> binary replaced"
+mkdir -p "${RUNTIME}/logs"
+mv devin-2api.new "${RUNTIME}/devin-2api"
+cp config.yaml "${RUNTIME}/config.yaml"
+echo "==> installed ${RUNTIME}/devin-2api (config.yaml synced from repo)"
 
 if [[ "${NO_RESTART}" == "1" ]]; then
 	echo "done (binary swapped, restart skipped)"

@@ -9,11 +9,21 @@ plist 位于 `~/Library/LaunchAgents/com.$USER.devin-2api.plist`。
 
 ```
 launchd (gui/<uid> 用户域, 无需 sudo)
-  └─ devin-2api -config .../config.yaml   监听 :3003
+  └─ devin-2api -config $RT/config.yaml   监听 :3003   ($RT = ~/Library/Application Support/devin-2api)
        ├─ config.yaml 同目录 logs/         请求级 debug 目录 + index.jsonl
        ├─ logs/stdout.log                 面板渲染等 fmt 输出
        └─ logs/stderr.log                 slog 结构化进程日志
 ```
+
+**运行目录与仓库分离**：仓库在 `~/Desktop` 下，而 launchd 拉起的进程对
+Desktop 的每次 `open()` 都会进入 TCC「桌面文件夹」授权判定——未授权时
+内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按
+cdhash 记，每次重建二进制即失效）。因此二进制、`config.yaml`、`logs/`
+都放在 `~/Library/Application Support/devin-2api/`（不受 TCC 保护）；
+仓库里的 `logs/` 是指向该目录的符号链接，`logs/<dir>/`、`index.jsonl`
+等排障路径照旧可用。`config.yaml` 的权威副本仍是仓库里那份，
+`deploy.sh` 每次部署同步到运行目录；单改配置可
+`cp config.yaml "$RT/" && launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
 
 - 进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）：停服会先 flush
   日志索引、排空异步写队列，再退出。`ExitTimeOut=60` 给了充足余量。
@@ -31,17 +41,17 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 	<key>Label</key><string>com.$USER.devin-2api</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/<user>/src/devin-2api/devin-2api</string>
+		<string>/Users/<user>/Library/Application Support/devin-2api/devin-2api</string>
 		<string>-config</string>
-		<string>/Users/<user>/src/devin-2api/config.yaml</string>
+		<string>/Users/<user>/Library/Application Support/devin-2api/config.yaml</string>
 	</array>
-	<key>WorkingDirectory</key><string>/Users/<user>/src/devin-2api</string>
+	<key>WorkingDirectory</key><string>/Users/<user>/Library/Application Support/devin-2api</string>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>ThrottleInterval</key><integer>5</integer>
 	<key>ExitTimeOut</key><integer>60</integer>
-	<key>StandardOutPath</key><string>/Users/<user>/src/devin-2api/logs/stdout.log</string>
-	<key>StandardErrorPath</key><string>/Users/<user>/src/devin-2api/logs/stderr.log</string>
+	<key>StandardOutPath</key><string>/Users/<user>/Library/Application Support/devin-2api/logs/stdout.log</string>
+	<key>StandardErrorPath</key><string>/Users/<user>/Library/Application Support/devin-2api/logs/stderr.log</string>
 </dict>
 </plist>
 ```
@@ -62,7 +72,7 @@ debug 请求日志有 retention，但 `stderr.log`（slog 进程日志）只会�
 用系统自带 newsyslog 管即可，`/etc/newsyslog.d/devin-2api.conf`（需 sudo）：
 
 ```
-~/src/devin-2api/logs/stderr.log $USER:staff 644 5 10240 * J
+~/Library/Application\ Support/devin-2api/logs/stderr.log $USER:staff 644 5 10240 * J
 ```
 
 含义：超 10MB 轮转、保留 5 份、bzip2 压缩（`J`）。`stdout.log` 同理可加。
@@ -87,7 +97,8 @@ scripts/deploy.sh --release latest   # 同上，装最新 release
 ```
 
 脚本做四件事：以 `git describe --tags --always --dirty` 注入
-`main.version` 构建新二进制、`-version` 自检、原地替换、kickstart 后轮询
+`main.version` 构建新二进制、`-version` 自检、安装到运行目录并同步
+`config.yaml`、kickstart 后轮询
 `/healthz` 确认线上版本与刚构建的一致（不一致说明端口被其它实例抢占）。
 launchd 发 SIGTERM 后进程优雅退出立即拉起，停机约一秒。`git describe`
 输出形如 `f43a8f7`（无 tag 时的短 SHA）或 `v0.1.0-3-gabc1234`（tag 之后
@@ -98,8 +109,9 @@ launchd 发 SIGTERM 后进程优雅退出立即拉起，停机约一秒。`git d
 
 ## 可选增强
 
-- **config 改动自动重启**：plist 加 `WatchPaths` 指向 `config.yaml`，保存即
-  触发重启。代价是任何 mtime 变化（包括编辑器误触）都会重启。
+- **config 改动自动重启**：plist 加 `WatchPaths` 指向运行目录的
+  `config.yaml`，保存即触发重启。代价是任何 mtime 变化（包括编辑器误触、
+  `deploy.sh` 的同步）都会重启。
 - **单实例约定**：本机只维护这一个实例。冒烟验证用空闲端口（如 :3005）
   起临时二进制，验证完立即 `kill <pid>`（SIGTERM 会走优雅退出）；不留
   常驻 side 实例，也不要手动占 :3003/:3004——与 KeepAlive 互抢端口时

@@ -4,7 +4,8 @@
 /probe
 /bin/
 /work/
-/logs/
+# 现在是符号链接（指向 ~/Library/Application Support/devin-2api/logs）
+/logs
 /build/
 
 # 本地运行配置（含真实 devin token，不要提交）
