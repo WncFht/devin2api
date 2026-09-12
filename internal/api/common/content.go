@@ -188,29 +188,42 @@ func DecodeDataImage(value string) (llm.ImageContent, error) {
 	return DecodeRawBase64(encoded, mimeType)
 }
 
-// DecodeRawBase64 把 base64 字符串解码并返回中间图片内容块。
-func DecodeRawBase64(encoded, mimeType string) (llm.ImageContent, error) {
-	encoded = strings.TrimSpace(encoded)
-	// 去掉空白/换行（部分客户端会折行）。
-	encoded = strings.Map(func(r rune) rune {
+// stripBase64Whitespace 去掉空白/换行（部分客户端会折行）。
+func stripBase64Whitespace(encoded string) string {
+	return strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
 			return -1
 		}
 		return r
 	}, encoded)
+}
+
+// DecodeRawBase64 把 base64 字符串解码并返回中间图片内容块。
+func DecodeRawBase64(encoded, mimeType string) (llm.ImageContent, error) {
+	encoded = strings.TrimSpace(encoded)
+	// 快路径：干净的标准 base64 直接解码，并以原串作为上行载荷——
+	// StdEncoding 解码成功即说明字母表与 padding 合法，re-encode 只是
+	// 规范化字符串形态（字节不变），跳过省一次全量编码。
 	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err == nil && len(data) > 0 {
+		return llm.ImageContent{Data: encoded, MIMEType: mimeType}, nil
+	}
+	cleaned := stripBase64Whitespace(encoded)
+	if data, err = base64.StdEncoding.DecodeString(cleaned); err == nil && len(data) > 0 {
+		return llm.ImageContent{Data: cleaned, MIMEType: mimeType}, nil
+	}
+	// URL-safe 与无 padding 变体：解码成功但字符串形态需归一为标准 base64。
 	if err != nil {
-		// URL-safe base64
-		data, err = base64.URLEncoding.DecodeString(encoded)
+		data, err = base64.URLEncoding.DecodeString(cleaned)
 		if err != nil {
-			data, err = base64.RawStdEncoding.DecodeString(encoded)
+			data, err = base64.RawStdEncoding.DecodeString(cleaned)
 			if err != nil {
-				data, err = base64.RawURLEncoding.DecodeString(encoded)
+				data, err = base64.RawURLEncoding.DecodeString(cleaned)
 			}
 		}
-		if err != nil {
-			return llm.ImageContent{}, fmt.Errorf("decode image data: %w", err)
-		}
+	}
+	if err != nil {
+		return llm.ImageContent{}, fmt.Errorf("decode image data: %w", err)
 	}
 	if len(data) == 0 {
 		return llm.ImageContent{}, errors.New("image data is empty")
@@ -224,15 +237,22 @@ func DecodeRawBase64(encoded, mimeType string) (llm.ImageContent, error) {
 
 // SniffImageMIME 通过 base64 解码后的文件魔数猜测图片 MIME 类型。
 func SniffImageMIME(encoded string) string {
-	encoded = strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
-			return -1
+	// 魔数判别只需前 12 个解码字节（16 个 base64 字符）；只取头部
+	// 非空白字符解码，避免对大图做全量 Map+DecodeString。
+	var head [24]byte
+	n := 0
+	for i := 0; i < len(encoded) && n < len(head); i++ {
+		c := encoded[i]
+		if c != '\n' && c != '\r' && c != ' ' && c != '\t' {
+			head[n] = c
+			n++
 		}
-		return r
-	}, encoded)
-	raw, err := base64.StdEncoding.DecodeString(encoded)
+	}
+	// 头部不含 padding（只在整串末尾出现），Raw 变体容忍非 4 对齐长度；
+	// 短串可能带上 '='，退回 Std 再试。
+	raw, err := base64.RawStdEncoding.DecodeString(string(head[:n]))
 	if err != nil {
-		raw, err = base64.RawStdEncoding.DecodeString(encoded)
+		raw, err = base64.StdEncoding.DecodeString(string(head[:n]))
 	}
 	if err != nil || len(raw) < 4 {
 		return ""
