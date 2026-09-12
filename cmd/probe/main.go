@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -315,6 +316,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	metaExtras := fs.Bool("meta-extras", false, "send session_id/request_id/device_fingerprint/disable_telemetry")
 	numCompletions := fs.Int("num-completions", 0, "configuration.num_completions")
 	stopPattern := fs.String("stop-pattern", "", "configuration.stop_patterns[0]")
+	cascadeID := fs.String("cascade-id", "", "explicit cascade_id (share across calls to test concurrency)")
 	frames := fs.Bool("frames", false, "")
 	dumpDir := fs.String("dump", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -388,7 +390,9 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		req.Configuration.MaxTokens = proto.Uint64(uint64(*maxTokens))
 	}
 	if !*noIDs {
-		if sharedCascade != "" {
+		if *cascadeID != "" {
+			req.CascadeId = proto.String(*cascadeID)
+		} else if sharedCascade != "" {
 			req.CascadeId = proto.String(sharedCascade)
 		} else {
 			req.CascadeId = proto.String(uuid())
@@ -566,13 +570,12 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	var thinking strings.Builder
 	var calls []map[string]any
 	n := 0
-	var last *devinproto.GetChatMessageResponse
+	stopReason := devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED
 	if dumpDir != "" {
 		_ = os.MkdirAll(dumpDir, 0o755)
 	}
 	for stream.Receive() {
 		msg := stream.Msg()
-		last = msg
 		n++
 		b, _ := marshal.Marshal(msg)
 		if dumpDir != "" {
@@ -587,6 +590,9 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 			for k, v := range u {
 				usageSeen[k] = j(v)
 			}
+		}
+		if msg.GetStopReason() != devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED {
+			stopReason = msg.GetStopReason()
 		}
 		if showFrames {
 			fmt.Printf("-- frame %d: %s\n", n, string(b))
@@ -603,14 +609,13 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	}
 	if err := stream.Err(); err != nil {
 		fmt.Printf("== stream err after %d frames: %v\n", n, err)
+		dumpConnectErr(err)
 		return nil
 	}
 	fmt.Printf("== %d frames\n", n)
 	fmt.Println("== fields:", j(fieldSeen))
 	fmt.Println("== usage:", j(usageSeen))
-	if last != nil {
-		fmt.Println("== stopReason:", last.GetStopReason())
-	}
+	fmt.Println("== stopReason:", stopReason)
 	if thinking.Len() > 0 {
 		fmt.Println("== thinking:", thinking.String()[:min(thinking.Len(), 300)])
 	}
@@ -627,6 +632,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	variant := fs.String("variant", "with-sig", "")
+	q1Text := fs.String("prompt", "Think briefly, then reply with the single word: zebra", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -664,7 +670,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	q1 := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(uuid()),
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
-		Prompt:    proto.String("Think briefly, then reply with the single word: zebra"),
+		Prompt:    proto.String(*q1Text),
 	}
 	stream, err := client.GetChatMessage(ctx, connect.NewRequest(mk([]*devinproto.ExaChatPb_ChatMessagePrompt{q1})))
 	if err != nil {
@@ -709,6 +715,8 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	case "with-sig":
 		if aThinking != "" {
 			asst.Thinking = proto.String(aThinking)
+		}
+		if aSig != "" {
 			asst.Signature = proto.String(aSig)
 		}
 	case "no-sig":
@@ -718,11 +726,15 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	case "bogus-sig":
 		if aThinking != "" {
 			asst.Thinking = proto.String(aThinking)
+		}
+		if aSig != "" {
 			asst.Signature = proto.String("bogus-" + aSig[:min(len(aSig), 16)])
 		}
 	case "with-ids":
 		if aThinking != "" {
 			asst.Thinking = proto.String(aThinking)
+		}
+		if aSig != "" {
 			asst.Signature = proto.String(aSig)
 		}
 		asst.OutputId = proto.String(aOutputID)
@@ -732,6 +744,22 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 		}
 		if aPhase != "" {
 			asst.Phase = proto.String(aPhase)
+		}
+	case "sig-only":
+		// signature without thinking text (openai reasoning-blob form)
+		if aSig != "" {
+			asst.Signature = proto.String(aSig)
+		}
+		if aSigType != "" {
+			asst.SignatureType = proto.String(aSigType)
+		}
+	case "mutated-thinking":
+		// thinking text altered but real signature kept (sanitizer-analog)
+		if aThinking != "" {
+			asst.Thinking = proto.String("COMPLETELY DIFFERENT reasoning about bananas.")
+		}
+		if aSig != "" {
+			asst.Signature = proto.String(aSig)
 		}
 	case "no-thinking":
 		// bare text only
@@ -800,6 +828,7 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	}))
 	if err != nil {
 		fmt.Println("GetEmbeddings ERR:", err)
+		dumpConnectErr(err)
 	} else {
 		b, _ := marshal.Marshal(emb.Msg)
 		fmt.Println("GetEmbeddings:", string(b)[:400])
@@ -858,13 +887,47 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	return nil
 }
 
+// dumpConnectErr 打印 connect.Error 的 code/details/meta，用于确认上游错误是否
+// 携带结构化 detail（RetryInfo 等）——决定 connectError 是否值得保留这些信息。
+func dumpConnectErr(err error) {
+	var connectErr *connect.Error
+	if !errors.As(err, &connectErr) {
+		fmt.Println("  not a *connect.Error")
+		return
+	}
+	fmt.Println("  code:", connectErr.Code())
+	fmt.Println("  raw message:", connectErr.Error())
+	for i, d := range connectErr.Details() {
+		v, verr := d.Value()
+		fmt.Printf("  detail[%d]: type=%s bytes=%d", i, d.Type(), len(d.Bytes()))
+		if verr != nil {
+			fmt.Printf(" value_err=%v", verr)
+		} else {
+			fmt.Printf(" value=%v", v)
+		}
+		fmt.Println()
+	}
+	for k, vals := range connectErr.Meta() {
+		fmt.Printf("  meta[%s]=%v\n", k, vals)
+	}
+}
+
 // ---- edge cases ----
 
 func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, argv []string) error {
 	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
+	imageFile := fs.String("image-file", "", "png file to attach instead of tinyPNG")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+	imageB64 := tinyPNG()
+	if *imageFile != "" {
+		raw, rerr := os.ReadFile(*imageFile)
+		if rerr != nil {
+			return rerr
+		}
+		imageB64 = base64.StdEncoding.EncodeToString(raw)
 	}
 	args := fs.Args()
 	if len(args) == 0 {
@@ -1030,6 +1093,13 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			toolResult("zzz", "orphan"),
 			user("ok?"),
 		}
+	case "orphan-result-with-id":
+		// 结果带 tool_call_id 但全程没有任何 call：区分「无 id」与「无匹配 call」。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("hi"),
+			toolResult("zzz", "orphan"),
+			user("what did the tool return?"),
+		}
 	case "tool-call-invalid-json-arg":
 		// 回放历史里的非法 JSON 参数。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
@@ -1050,6 +1120,65 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		}}
 		req.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
 			Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: "required"},
+		}
+	case "gap-tool-result":
+		// call 与 result 之间夹一条 USER（mid-conversation system 降级形态）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			user("[system] reminder: be concise"),
+			toolResult("c1", "file contents here"),
+			user("what did you find?"),
+		}
+	case "dup-call-id":
+		// 两条 call prompt 用同一个 call id（客户端重复记录调用）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			toolResult("c1", "file contents"),
+			user("ok?"),
+		}
+	case "tool-result-image":
+		// TOOL prompt 挂图片：上游是否消费 tool 结果里的图。
+		tr := toolResult("c1", "screenshot attached")
+		tr.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
+			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
+		}}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Take a screenshot then tell me the dominant color."),
+			assistantCall("c1", "take_screenshot", `{}`),
+			tr,
+			user("What color is it? Answer in one word."),
+		}
+	case "user-image-file":
+		// USER prompt 挂图片对照组：验证上游确实消费用户消息里的图。
+		m := user("What is the dominant color of the attached image? Answer in one word.")
+		m.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
+			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
+		}}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
+	case "pdf-as-image":
+		// 文档通道探测：mime_type=application/pdf 是否被 Images 通道接受。
+		m := user("What is in this document? One sentence.")
+		m.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
+			Base64Data: proto.String(tinyPNG()), MimeType: proto.String("application/pdf"),
+		}}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
+	case "custom-tool-call-flag":
+		// 历史回放带 is_custom_tool_call=true + invalid_json_str 的 call。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Apply this patch: *** Begin Patch\n*** Update File: x.go\n@@\n+x\n*** End Patch"),
+			{MessageId: proto.String(uuid()),
+				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+					Id:               proto.String("c1"),
+					Name:             proto.String("apply_patch"),
+					IsCustomToolCall: proto.Bool(true),
+					InvalidJsonStr:   proto.String("*** Begin Patch\n*** Update File: x.go\n@@\n+x\n*** End Patch"),
+				}}},
+			toolResult("c1", "applied"),
+			user("did it apply?"),
 		}
 	default:
 		return fmt.Errorf("unknown edge case %q", args[0])
