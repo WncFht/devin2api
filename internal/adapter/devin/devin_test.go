@@ -14,6 +14,7 @@ import (
 	devinproto "local/devinproto"
 
 	"connectrpc.com/connect"
+	"github.com/leookun/devin-2api/internal/adapter"
 	"github.com/leookun/devin-2api/internal/debuglog"
 	"github.com/leookun/devin-2api/internal/llm"
 	"google.golang.org/protobuf/proto"
@@ -155,20 +156,43 @@ func TestValidateImagesForModelRejectsGLM(t *testing.T) {
 			llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
 		}}},
 	}
-	err := validateImagesForModel(request, "glm-5-2")
+	a := &Adapter{}
+	err := a.validateImagesForModel(request, "glm-5-2")
 	if err == nil {
 		t.Fatal("expected error for glm-5-2 + image")
 	}
 	if !strings.Contains(err.Error(), "does not support image") {
 		t.Fatalf("error = %v, want does not support image", err)
 	}
-	if err := validateImagesForModel(request, "swe-1-7"); err != nil {
+	if err := a.validateImagesForModel(request, "swe-1-7"); err != nil {
 		t.Fatalf("swe-1-7 should allow images: %v", err)
 	}
-	if err := validateImagesForModel(llm.RequestMessages{Model: "glm-5-2", Messages: []llm.Message{
+	if err := a.validateImagesForModel(llm.RequestMessages{Model: "glm-5-2", Messages: []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
 	}}, "glm-5-2"); err != nil {
 		t.Fatalf("text-only glm should pass: %v", err)
+	}
+}
+
+// TestValidateImagesUsesCatalog 验证目录缓存的 supports_images 优先于前缀启发式。
+func TestValidateImagesUsesCatalog(t *testing.T) {
+	request := llm.RequestMessages{
+		Model: "future-vision",
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{
+			llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+		}}},
+	}
+	a := &Adapter{models: []adapter.ModelInfo{
+		{ID: "glm-9-vision", SupportsImages: true},
+		{ID: "swe-3-text", SupportsImages: false},
+	}}
+	// 目录声明支持图片时，即使名字像无视觉模型也放行。
+	if err := a.validateImagesForModel(request, "glm-9-vision"); err != nil {
+		t.Fatalf("catalog vision model should pass: %v", err)
+	}
+	// 目录声明不支持时直接拒绝。
+	if err := a.validateImagesForModel(request, "swe-3-text"); err == nil {
+		t.Fatal("catalog non-vision model should be rejected")
 	}
 }
 
@@ -285,7 +309,7 @@ func TestBuildRequestIgnoresEmptyToolDescriptions(t *testing.T) {
 
 // TestResponseDecoderMapsOneFrameToOrderedEvents 的测试动机是明确一个 Devin protobuf 帧可以包含多个 loop 语义。
 func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	events := decoder.start()
 	if len(events) != 1 || events[0].Type != llm.ResponseEventStart {
 		t.Fatalf("start events = %#v", events)
@@ -329,7 +353,7 @@ func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
 // TestResponseDecoderMergesLateSignature 的测试动机是保证正文之后的
 // 尾随签名帧合并回上一个思考块，而不是落成独立的空思考块。
 func TestResponseDecoderMergesLateSignature(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
@@ -348,7 +372,7 @@ func TestResponseDecoderMergesLateSignature(t *testing.T) {
 
 // TestResponseDecoderAggregatesToolArgumentFragments 的测试动机是保证事件保留原始增量，同时最终工具调用具有完整参数。
 func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	first := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String("call"), Name: proto.String("exec")}}})
 	if len(first) != 1 || first[0].Type != llm.ResponseEventToolCallStart {
@@ -392,7 +416,7 @@ func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
 
 // TestResponseDecoderConsumesUsageAfterStopReason 的测试动机是匹配 Devin 在停止原因后发送最终 token 统计帧的真实顺序。
 func TestResponseDecoderConsumesUsageAfterStopReason(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("complete")})
 	stopEvents := decoder.decode(&devinproto.GetChatMessageResponse{
@@ -428,7 +452,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 		}},
 		{},
 	}}
-	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("requested-model")}
+	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("requested-model", nil)}
 	var done llm.ResponseEvent
 	for {
 		event, err := stream.Recv(context.Background())
@@ -455,7 +479,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 
 // TestResponseDecoderAcceptsContentBeforeNormalEOF 的测试动机是匹配 Devin 以统计帧和正常 Connect EOF 结束、但不发送 stop_reason 的真实行为。
 func TestResponseDecoderAcceptsContentBeforeNormalEOF(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("complete")})
 	events := decoder.finish(nil)
@@ -467,7 +491,7 @@ func TestResponseDecoderAcceptsContentBeforeNormalEOF(t *testing.T) {
 
 // TestResponseDecoderRejectsEmptyNormalEOF 的测试动机是避免把未产生任何内容的异常空流误报为成功。
 func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	event := decoder.finish(nil)[0]
 	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "Devin stream ended without generated content" {
@@ -477,7 +501,7 @@ func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
 
 // TestResponseDecoderCompletesPartialWithThinking 验证 STOP_REASON_PARTIAL 不吞掉已生成的思考/文本。
 func TestResponseDecoderCompletesPartialWithThinking(t *testing.T) {
-	decoder := newResponseDecoder("model")
+	decoder := newResponseDecoder("model", nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello"), StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL.Enum()})
@@ -682,12 +706,14 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 	}
 }
 
+// TestIsTransientConnectError 验证只对纯传输错误重试：上游 unavailable
+// 实测是确定性语义错误（router 直连、未开放端点），重试永远得到同样失败。
 func TestIsTransientConnectError(t *testing.T) {
 	if !isTransientConnectError(io.ErrUnexpectedEOF) {
 		t.Fatal("unexpected EOF must be retryable")
 	}
-	if !isTransientConnectError(connect.NewError(connect.CodeUnavailable, errors.New("try later"))) {
-		t.Fatal("unavailable must be retryable")
+	if isTransientConnectError(connect.NewError(connect.CodeUnavailable, errors.New("try later"))) {
+		t.Fatal("unavailable must not be retried")
 	}
 	if isTransientConnectError(connect.NewError(connect.CodePermissionDenied, errors.New("blocked"))) {
 		t.Fatal("permission_denied must not be retried")
@@ -704,7 +730,7 @@ func TestIsTransientConnectError(t *testing.T) {
 func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
 	stream := &responseStream{
 		upstream: &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))},
-		decoder:  newResponseDecoder("model"),
+		decoder:  newResponseDecoder("model", nil),
 	}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
@@ -725,7 +751,7 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
 		{DeltaText: proto.String("hi")},
 	}}
-	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("model")}
+	stream := &responseStream{upstream: receiver, decoder: newResponseDecoder("model", nil)}
 	first, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -739,5 +765,184 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 	}
 	if second.Type != llm.ResponseEventTextStart {
 		t.Fatalf("second event = %q, want text_start", second.Type)
+	}
+}
+
+// TestBuildRequestToolChoiceMapping 验证 tool_choice 映射到上游 oneof：
+// required/none 走 option_name，named 走 tool_name，auto 缺省不发。
+func TestBuildRequestToolChoiceMapping(t *testing.T) {
+	cfg := Config{BaseURL: "https://example.com", Token: "token", Model: "model"}
+	request := llm.RequestMessages{Messages: []llm.Message{
+		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
+	}}
+
+	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceRequired}
+	converted, err := buildRequest(request, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.GetToolChoice().GetOptionName() != "required" {
+		t.Fatalf("tool_choice = %#v, want option_name=required", converted.GetToolChoice())
+	}
+
+	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNone}
+	converted, err = buildRequest(request, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.GetToolChoice().GetOptionName() != "none" {
+		t.Fatalf("tool_choice = %#v, want option_name=none", converted.GetToolChoice())
+	}
+
+	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "read_file"}
+	converted, err = buildRequest(request, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.GetToolChoice().GetToolName() != "read_file" {
+		t.Fatalf("tool_choice = %#v, want tool_name=read_file", converted.GetToolChoice())
+	}
+
+	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
+	converted, err = buildRequest(request, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.GetToolChoice() != nil {
+		t.Fatalf("auto tool_choice should be omitted, got %#v", converted.GetToolChoice())
+	}
+
+	request.ToolChoice = nil
+	request.DisableParallelToolCalls = true
+	converted, err = buildRequest(request, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !converted.GetDisableParallelToolCalls() {
+		t.Fatal("disable_parallel_tool_calls not set")
+	}
+}
+
+// TestResponseDecoderLocalStopSequence 验证上游不执行 stop_patterns 时
+// 解码层本地截断：命中处关闭文字块，剩余上游帧只更新用量。
+func TestResponseDecoderLocalStopSequence(t *testing.T) {
+	decoder := newResponseDecoder("model", []string{"STOP"})
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello STOP world")})
+	var types []llm.ResponseEventType
+	var text string
+	for _, event := range events {
+		types = append(types, event.Type)
+		if event.Type == llm.ResponseEventTextDelta {
+			text += event.Delta
+		}
+	}
+	if text != "hello " {
+		t.Fatalf("emitted text = %q, want %q", text, "hello ")
+	}
+	last := events[len(events)-1]
+	if last.Type != llm.ResponseEventTextEnd || last.Content != "hello " {
+		t.Fatalf("last event = %#v, want text_end with truncated content", last)
+	}
+	// 截断后上游继续吐的帧不再产生对外事件。
+	if later := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String(" more")}); len(later) != 0 {
+		t.Fatalf("post-truncation events = %#v, want none", later)
+	}
+	done := decoder.finish(nil)
+	if len(done) != 1 || done[0].Type != llm.ResponseEventDone {
+		t.Fatalf("finish events = %#v, want done", done)
+	}
+	if done[0].Reason != llm.StopReasonStopSequence || done[0].Message.StopSequence != "STOP" {
+		t.Fatalf("done = %#v, want stopSequence reason with matched pattern", done[0])
+	}
+}
+
+// TestResponseDecoderStopSequenceAcrossDeltas 验证跨帧停止序列：
+// 第一帧尾部的疑似前缀不下发，第二帧补全后立即截断。
+func TestResponseDecoderStopSequenceAcrossDeltas(t *testing.T) {
+	decoder := newResponseDecoder("model", []string{"XYZ"})
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("abc XY")})
+	var emitted string
+	for _, event := range events {
+		if event.Type == llm.ResponseEventTextDelta {
+			emitted += event.Delta
+		}
+	}
+	// "XY" 可能是 "XYZ" 的不完整前缀，只能下safe发窗口内部分。
+	if emitted != "abc " {
+		t.Fatalf("first delta emitted = %q, want %q", emitted, "abc ")
+	}
+	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("Z tail")})
+	emitted = ""
+	var endContent string
+	for _, event := range events {
+		if event.Type == llm.ResponseEventTextDelta {
+			emitted += event.Delta
+		}
+		if event.Type == llm.ResponseEventTextEnd {
+			endContent = event.Content
+		}
+	}
+	if emitted != "" || endContent != "abc " {
+		t.Fatalf("after match: emitted=%q end=%q, want no extra delta, content 'abc '", emitted, endContent)
+	}
+	done := decoder.finish(nil)
+	if done[0].Reason != llm.StopReasonStopSequence {
+		t.Fatalf("reason = %q, want stopSequence", done[0].Reason)
+	}
+}
+
+// TestResponseDecoderNoStopMatchFlushesTail 验证未命中时保留的尾部
+// 在文字块关闭时随最后一个 delta 全部下发。
+func TestResponseDecoderNoStopMatchFlushesTail(t *testing.T) {
+	decoder := newResponseDecoder("model", []string{"STOP"})
+	decoder.start()
+	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hi")})
+	if len(events) != 1 || events[0].Type != llm.ResponseEventTextStart {
+		t.Fatalf("events = %#v, want only text_start (tail withheld)", events)
+	}
+	// 工具调用帧触发文字块收尾，尾部 "hi" 随 delta 下发。
+	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Id: proto.String("c"), Name: proto.String("exec"), ArgumentsJson: proto.String(`{}`),
+	}}})
+	var emitted, endContent string
+	for _, event := range events {
+		if event.Type == llm.ResponseEventTextDelta {
+			emitted += event.Delta
+		}
+		if event.Type == llm.ResponseEventTextEnd {
+			endContent = event.Content
+		}
+	}
+	if emitted != "hi" || endContent != "hi" {
+		t.Fatalf("tail flush: delta=%q content=%q, want 'hi'", emitted, endContent)
+	}
+	decoder.decode(&devinproto.GetChatMessageResponse{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL.Enum()})
+	done := decoder.finish(nil)
+	last := done[len(done)-1]
+	if last.Type != llm.ResponseEventDone || last.Reason != llm.StopReasonToolUse {
+		t.Fatalf("done = %#v, want toolUse", last)
+	}
+}
+
+func TestRepairLeakedXMLArguments(t *testing.T) {
+	raw := `<parameter name="command">ls -la</parameter><antml:parameter name="path">/tmp</antml:parameter>`
+	repaired, ok := repairLeakedXMLArguments(raw)
+	if !ok {
+		t.Fatal("expected repair to succeed")
+	}
+	var args map[string]string
+	if err := json.Unmarshal(repaired, &args); err != nil {
+		t.Fatalf("repaired args not JSON: %v", err)
+	}
+	if args["command"] != "ls -la" || args["path"] != "/tmp" {
+		t.Fatalf("args = %v", args)
+	}
+	if _, ok := repairLeakedXMLArguments(`{"command":"ls"}`); ok {
+		t.Fatal("plain JSON must not be treated as leaked XML")
+	}
+	if _, ok := repairLeakedXMLArguments(`garbage`); ok {
+		t.Fatal("no tags → no repair")
 	}
 }

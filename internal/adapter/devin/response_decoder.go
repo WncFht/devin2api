@@ -4,6 +4,7 @@ package devin
 import (
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,6 +47,21 @@ type responseDecoder struct {
 	hasStopReason bool
 	// stopReason 保存 Devin 声明的最终停止原因，等待上游 EOF 后用于完成响应。
 	stopReason llm.StopReason
+	// stopPatterns 是客户端请求的停止序列。上游 stopPatterns 实测不生效
+	//（模型越过 pattern 继续输出），由解码层对累计文本做本地截断。
+	stopPatterns []string
+	// maxPatternLen 是最长停止序列的字节长度，决定流式下发时保留的尾部窗口。
+	maxPatternLen int
+	// textEmitted 是 textBuilder 中已作为 delta 下发的字节数。
+	textEmitted int
+	// stoppedByPattern 表示生成已被停止序列截断；后续帧只更新用量元数据。
+	stoppedByPattern bool
+	// stopSequence 是命中的停止序列文本。
+	stopSequence string
+	// providerLogged 表示已把 provider 侧追踪信息写入 diagnostics。
+	providerLogged bool
+	// providerRefusal 表示上游声明 provider 拒绝了本次请求（usage.provider_refusal）。
+	providerRefusal bool
 }
 
 // toolState 保存一次 Devin 工具调用的累计状态。
@@ -60,8 +76,19 @@ type toolState struct {
 	emitted bool
 }
 
-func newResponseDecoder(model string) *responseDecoder {
-	return &responseDecoder{model: model}
+func newResponseDecoder(model string, stopPatterns []string) *responseDecoder {
+	patterns := make([]string, 0, len(stopPatterns))
+	maxLen := 0
+	for _, pattern := range stopPatterns {
+		if pattern == "" {
+			continue
+		}
+		patterns = append(patterns, pattern)
+		if len(pattern) > maxLen {
+			maxLen = len(pattern)
+		}
+	}
+	return &responseDecoder{model: model, stopPatterns: patterns, maxPatternLen: maxLen}
 }
 
 func (decoder *responseDecoder) start() []llm.ResponseEvent {
@@ -81,6 +108,10 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 		return nil
 	}
 	decoder.updateMetadata(response)
+	if decoder.stoppedByPattern {
+		// 停止序列已截断对外输出；继续消费上游帧仅为 usage 统计完整。
+		return nil
+	}
 	events := make([]llm.ResponseEvent, 0, 6)
 	// 上游把签名作为全部正文之后的尾随帧发送；思考块已关闭时
 	// 不能新开思考块，要把签名合并回上一个思考块。
@@ -118,10 +149,16 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		return decoder.fail(errors.New("Devin stream ended without generated content"))
 	}
 	reason := decoder.stopReason
-	if !decoder.hasStopReason {
+	if decoder.stoppedByPattern {
+		reason = llm.StopReasonStopSequence
+		decoder.partial.StopSequence = decoder.stopSequence
+	} else if !decoder.hasStopReason {
 		reason = llm.StopReasonStop
 	}
 	if reason == llm.StopReasonError {
+		if decoder.providerRefusal {
+			return decoder.fail(errors.New("upstream provider refused the request (provider_refusal)"))
+		}
 		return decoder.fail(errors.New("Devin stopped with an error"))
 	}
 	return decoder.complete(reason)
@@ -130,6 +167,9 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessageResponse) {
 	if response.MessageId != nil {
 		decoder.partial.ResponseID = response.GetMessageId()
+	}
+	if id := response.GetRequestId(); id != "" && decoder.partial.UpstreamRequestID == "" {
+		decoder.partial.UpstreamRequestID = id
 	}
 	if response.ActualModelUid != nil {
 		decoder.partial.ResponseModel = response.GetActualModelUid()
@@ -154,6 +194,28 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 			decoder.partial.Usage.CacheWrite = int64(usage.GetCacheWriteTokens())
 		}
 		decoder.partial.Usage.TotalTokens = decoder.partial.Usage.Input + decoder.partial.Usage.Output + decoder.partial.Usage.CacheRead + decoder.partial.Usage.CacheWrite
+		if usage.GetProviderRefusal() {
+			decoder.providerRefusal = true
+		}
+		// provider 侧追踪信息（api_provider + 供应商 HTTP 请求号）只记一次，
+		// 排障时可直接把 x-request-id 报给上游/供应商。
+		if !decoder.providerLogged {
+			apiProvider := strings.TrimPrefix(usage.GetApiProvider().String(), "API_PROVIDER_")
+			providerRequestID := usage.GetResponseHeader()["x-request-id"]
+			if providerRequestID != "" || (apiProvider != "" && apiProvider != "UNSPECIFIED") {
+				details, _ := json.Marshal(map[string]string{
+					"api_provider":        apiProvider,
+					"provider_request_id": providerRequestID,
+					"billing_model_uid":   usage.GetBillingModelUid(),
+				})
+				decoder.partial.Diagnostics = append(decoder.partial.Diagnostics, llm.AssistantMessageDiagnostic{
+					Type:        "upstream_provider",
+					TimestampMS: time.Now().UnixMilli(),
+					Details:     details,
+				})
+				decoder.providerLogged = true
+			}
+		}
 	}
 }
 
@@ -189,6 +251,7 @@ func (decoder *responseDecoder) decodeText(delta string) []llm.ResponseEvent {
 	if !decoder.textOpen {
 		decoder.text = &llm.TextContent{}
 		decoder.textBuilder.Reset()
+		decoder.textEmitted = 0
 		decoder.partial.Content = append(decoder.partial.Content, *decoder.text)
 		decoder.textIdx = len(decoder.partial.Content) - 1
 		decoder.textOpen = true
@@ -196,8 +259,50 @@ func (decoder *responseDecoder) decodeText(delta string) []llm.ResponseEvent {
 	}
 	// 用 Builder 累加，避免每帧产生越来越大的新字符串。
 	decoder.textBuilder.WriteString(delta)
-	events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial})
+	if len(decoder.stopPatterns) == 0 {
+		decoder.textEmitted += len(delta)
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial})
+		return events
+	}
+	return decoder.scanTextForStops(events)
+}
+
+// scanTextForStops 在累计文本中查找停止序列并决定本次可下发的 delta。
+// 已下发前缀保证不含任何匹配起点（见 emitTextUpTo 的安全窗口推导），
+// 因此只需从 textEmitted 起搜索。命中时截断文本、关闭文字块并标记
+// stoppedByPattern；未命中时保留尾部 maxPatternLen-1 字节不下发——
+// 它们可能是某个序列跨帧的不完整前缀。
+func (decoder *responseDecoder) scanTextForStops(events []llm.ResponseEvent) []llm.ResponseEvent {
+	text := decoder.textBuilder.String()
+	earliest := -1
+	for _, pattern := range decoder.stopPatterns {
+		if idx := strings.Index(text[decoder.textEmitted:], pattern); idx >= 0 {
+			pos := decoder.textEmitted + idx
+			if earliest < 0 || pos < earliest {
+				earliest = pos
+				decoder.stopSequence = pattern
+			}
+		}
+	}
+	if earliest >= 0 {
+		if earliest > decoder.textEmitted {
+			events = append(events, decoder.emitTextDelta(text[decoder.textEmitted:earliest]))
+		}
+		decoder.stoppedByPattern = true
+		decoder.textBuilder.Reset()
+		decoder.textBuilder.WriteString(text[:earliest])
+		return append(events, decoder.endText()...)
+	}
+	if safe := len(text) - decoder.maxPatternLen + 1; safe > decoder.textEmitted {
+		events = append(events, decoder.emitTextDelta(text[decoder.textEmitted:safe]))
+	}
 	return events
+}
+
+// emitTextDelta 下发一段文本增量并推进 textEmitted 计数。
+func (decoder *responseDecoder) emitTextDelta(delta string) llm.ResponseEvent {
+	decoder.textEmitted += len(delta)
+	return llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial}
 }
 
 func (decoder *responseDecoder) decodeTool(delta *devinproto.ExaCodeiumCommonPb_ChatToolCall) []llm.ResponseEvent {
@@ -285,13 +390,19 @@ func (decoder *responseDecoder) endText() []llm.ResponseEvent {
 		return nil
 	}
 	decoder.textOpen = false
+	var events []llm.ResponseEvent
+	// 有停止序列时尾部窗口可能还有未下发内容；截断时 builder 已被重置
+	// 为截断文本且 textEmitted 不超过其长度，不会多发。
+	if pending := decoder.textBuilder.String(); decoder.textEmitted < len(pending) {
+		events = append(events, decoder.emitTextDelta(pending[decoder.textEmitted:]))
+	}
 	// 只在内容块结束时一次性生成完整文字，避免 O(n²) 拷贝。
 	decoder.text.Text = decoder.textBuilder.String()
 	decoder.partial.Content[decoder.textIdx] = *decoder.text
-	return []llm.ResponseEvent{{
+	return append(events, llm.ResponseEvent{
 		Type: llm.ResponseEventTextEnd, ContentIndex: decoder.textIdx,
 		Content: decoder.text.Text, Partial: &decoder.partial,
-	}}
+	})
 }
 
 func (decoder *responseDecoder) findTool(id string) *toolState {
@@ -321,7 +432,13 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 		// 在结束时一次性把 Builder 中的完整参数转成 JSON，避免中间反复解析/拷贝。
 		state.call.Arguments = json.RawMessage(state.arguments.String())
 		if !isJSONObject(state.call.Arguments) {
-			state.call.Arguments = json.RawMessage(`{}`)
+			// swe 系模型偶尔把 XML 参数语法泄漏进 arguments_json（CLI 实测），
+			// 先尝试把 <parameter name="X">v</parameter> 解回 JSON 再兜底 {}。
+			if repaired, ok := repairLeakedXMLArguments(state.arguments.String()); ok {
+				state.call.Arguments = repaired
+			} else {
+				state.call.Arguments = json.RawMessage(`{}`)
+			}
 		}
 		decoder.partial.Content[state.contentIdx] = state.call
 		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventToolCallEnd, ContentIndex: state.contentIdx, ToolCall: &state.call, Partial: &decoder.partial})
@@ -344,15 +461,48 @@ func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 func mapStopReason(reason devinproto.ExaCodeiumCommonPb_StopReason) llm.StopReason {
 	switch reason {
 	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_NEWLINES,
 		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_INCOMPLETE,
 		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL:
 		// INCOMPLETE/PARTIAL 都表示模型没有生成完整回复，按长度截断处理。
 		return llm.StopReasonLength
 	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL:
 		return llm.StopReasonToolUse
-	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR:
+	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_CONTENT_FILTER:
+		return llm.StopReasonContentFilter
+	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_ERROR,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_NONFINITE_LOGIT_OR_PROB:
 		return llm.StopReasonError
+	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MIN_LOG_PROB,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_EXIT_SCOPE,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FIRST_NON_WHITESPACE_LINE,
+		devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_NON_INSERTION:
+		// STOP_PATTERN 是上游自身 stop-pattern 机制的正常结束（实测正常回复以此收尾），
+		// 其余为补全时代的正常终止形态。
+		return llm.StopReasonStop
 	default:
 		return llm.StopReasonStop
 	}
+}
+
+// leakedXMLParameterPattern 匹配泄漏进 arguments_json 的 XML 参数片段（CLI 实测格式）。
+var leakedXMLParameterPattern = regexp.MustCompile(`<(?:antml:)?parameter\s+name="([A-Za-z_][\w-]*)"[^>]*>([\s\S]*?)</(?:antml:)?parameter>`)
+
+// repairLeakedXMLArguments 把混进 arguments 的 XML 参数标签提取成 JSON 对象；
+// 不含参数标签时返回 false，调用方走原有兜底路径。
+func repairLeakedXMLArguments(raw string) (json.RawMessage, bool) {
+	matches := leakedXMLParameterPattern.FindAllStringSubmatch(raw, -1)
+	if len(matches) == 0 {
+		return nil, false
+	}
+	object := make(map[string]string, len(matches))
+	for _, match := range matches {
+		object[match[1]] = strings.TrimSpace(match[2])
+	}
+	data, err := json.Marshal(object)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }

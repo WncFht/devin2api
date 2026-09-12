@@ -19,6 +19,18 @@ type ModelInfo struct {
 	OwnedBy string
 	// SupportsImages 表示该模型是否支持多模态图片输入；目录未知时为 false。
 	SupportsImages bool
+	// SupportsToolCalls 表示该模型是否支持工具调用；目录未声明时为 false。
+	SupportsToolCalls bool
+	// SupportsParallelToolCalls 表示该模型是否支持同轮并行工具调用；目录未声明时为 false。
+	SupportsParallelToolCalls bool
+	// SupportsThinking 表示该模型是否产出 thinking 内容。
+	SupportsThinking bool
+	// PreserveThinking 表示该模型的 thinking 是否需要在后续轮次中原样回放。
+	PreserveThinking bool
+	// ContextTokens 是上游声明的上下文窗口 token 数；未知为 0。
+	ContextTokens int
+	// MaxOutputTokens 是上游声明的单次输出 token 上限；未知为 0。
+	MaxOutputTokens int
 }
 
 // Adapter 将供应商无关的请求上下文转换为具体供应商调用，并返回有序响应流。

@@ -110,7 +110,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if alias, ok := adapter.config.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
 		model = strings.TrimSpace(alias)
 	}
-	if err := validateImagesForModel(request, model); err != nil {
+	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
 	cfg := adapter.config
@@ -127,7 +127,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 透传上游 Connect 错误原文，不包一层模糊前缀。
 		return nil, connectError(err)
 	}
-	return &responseStream{upstream: stream, decoder: newResponseDecoder(model), recorder: recorder}, nil
+	return &responseStream{upstream: stream, decoder: newResponseDecoder(model, request.StopSequences), recorder: recorder}, nil
 }
 
 // maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
@@ -158,25 +158,46 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 }
 
 // isTransientConnectError 判断建立阶段错误是否值得重试：
-// 非 Connect 协议的传输错误（EOF、连接重置、超时）和 unavailable 可重试；
-// permission_denied/invalid_argument 等语义错误不重试。
+// 只对非 Connect 协议的传输错误（EOF、连接重置、超时）重试。
+// 上游 unavailable 实测是确定性语义错误（router 直连、未开放端点），
+// 文案里的 "try again later" 是固定模板，重试永远得到同样的失败；
+// 其余 Connect code 均为语义错误，同样不重试。
 func isTransientConnectError(err error) bool {
 	var connectErr *connect.Error
 	if errors.As(err, &connectErr) {
-		return connectErr.Code() == connect.CodeUnavailable
+		return false
 	}
 	return true
 }
 
 // validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。
-func validateImagesForModel(request llm.RequestMessages, model string) error {
+// 模型目录缓存中有该模型时以目录的 supports_images 为准（上游实测确实回
+// invalid_argument），目录未覆盖时退回前缀启发式。
+func (adapter *Adapter) validateImagesForModel(request llm.RequestMessages, model string) error {
 	if !requestHasImages(request) {
 		return nil
 	}
-	if !modelLikelySupportsImages(model) {
+	supported, known := adapter.catalogSupportsImages(model)
+	if !known {
+		supported = modelLikelySupportsImages(model)
+	}
+	if !supported {
 		return fmt.Errorf("model %q does not support image inputs (supports_images=false); use a vision-capable model or remove images", model)
 	}
 	return nil
+}
+
+// catalogSupportsImages 查询模型目录缓存中该 uid 的图片能力。
+// 第二个返回值表示目录是否包含该模型。
+func (adapter *Adapter) catalogSupportsImages(model string) (supported bool, known bool) {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	for _, m := range adapter.models {
+		if m.ID == model {
+			return m.SupportsImages, true
+		}
+	}
+	return false, false
 }
 
 func requestHasImages(request llm.RequestMessages) bool {
@@ -237,7 +258,9 @@ func connectError(err error) error {
 	return err
 }
 
-// ListModels 通过 GetCascadeModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
+// ListModels 通过 GetCliModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
+// CLI 版响应比 Cascade 版多 subagent_default_model_uid/default_override_model_config，
+// 且 modelInfo.modelFeatures 提供 tool_calls/thinking/parallel 能力位。
 func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	a.modelsMu.RLock()
 	if a.models != nil && time.Now().Before(a.modelsExpiry) {
@@ -247,7 +270,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	}
 	a.modelsMu.RUnlock()
 
-	resp, err := a.apiClient.GetCascadeModelConfigs(ctx, connect.NewRequest(&devinproto.GetCascadeModelConfigsRequest{
+	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{
 			ApiKey:           proto.String(a.config.Token),
 			ExtensionName:    proto.String(clientName),
@@ -259,7 +282,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		},
 	}))
 	if err != nil {
-		return nil, fmt.Errorf("Devin GetCascadeModelConfigs: %w", err)
+		return nil, fmt.Errorf("Devin GetCliModelConfigs: %w", err)
 	}
 	now := time.Now().Unix()
 	models := make([]adapter.ModelInfo, 0, len(resp.Msg.GetClientModelConfigs()))
@@ -285,9 +308,26 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 				ownedBy = strings.ToLower(p[i+1:])
 			}
 		}
-		models = append(models, adapter.ModelInfo{
+		info := adapter.ModelInfo{
 			ID: uid, Created: now, OwnedBy: ownedBy, SupportsImages: c.GetSupportsImages(),
-		})
+			ContextTokens: int(c.GetMaxTokens()),
+		}
+		if modelInfo := c.GetModelInfo(); modelInfo != nil {
+			info.MaxOutputTokens = int(modelInfo.GetMaxOutputTokens())
+			if info.ContextTokens == 0 {
+				info.ContextTokens = int(modelInfo.GetMaxTokens())
+			}
+			if features := modelInfo.GetModelFeatures(); features != nil {
+				info.SupportsToolCalls = features.GetSupportsToolCalls()
+				info.SupportsParallelToolCalls = features.GetSupportsParallelToolCalls()
+				info.SupportsThinking = features.GetSupportsThinking()
+				info.PreserveThinking = features.GetPreserveThinking()
+				if !info.SupportsImages {
+					info.SupportsImages = features.GetSupportsImages()
+				}
+			}
+		}
+		models = append(models, info)
 	}
 	// 用户显式配置的 model（如 gpt5.6）即使不在 Devin 返回的列表中，也应可被发现和调用。
 	if configured := strings.TrimSpace(a.config.Model); configured != "" {
@@ -385,6 +425,24 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		CascadeId:   proto.String(cascadeID),
 		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
 		ExecutionId: proto.String(executionID),
+	}
+	// 上游实测：option_name 合法值为 none/auto/required；Anthropic 的 "any"
+	// 在本层已归一为 required。auto 不发送，与上游缺省行为一致。
+	if choice := request.ToolChoice; choice != nil {
+		switch choice.Mode {
+		case llm.ToolChoiceNone, llm.ToolChoiceRequired:
+			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
+				Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: string(choice.Mode)},
+			}
+		case llm.ToolChoiceNamed:
+			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
+				Choice: &devinproto.ExaChatPb_ChatToolChoice_ToolName{ToolName: choice.ToolName},
+			}
+		}
+	}
+	// 上游接受但实测不执行该约束（并行调用照常发出），仅形状对齐。
+	if request.DisableParallelToolCalls {
+		result.DisableParallelToolCalls = proto.Bool(true)
 	}
 	// Devin/Cascade 只可靠接受「当前轮」图片；历史图进 Images 会 invalid_argument。
 	// 当前轮 = 最后一条 AssistantMessage 之后的所有 user/tool 消息。
