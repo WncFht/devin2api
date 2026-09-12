@@ -30,3 +30,9 @@ coverage.out
 
 /node_modules/
 multi-harness-eval/runs/
+
+# 任务运行中下载的媒体文件
+/downloads/
+
+# cliproxyapi 调研语料（~118MB，可由调研脚本重建；结论已沉淀进 docs/）
+/outputs/cliproxy-research/
