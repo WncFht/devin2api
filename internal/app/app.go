@@ -115,8 +115,9 @@ func (application *App) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/healthz", application.health)
 	router.Group(func(protected chi.Router) {
-		protected.Use(application.concurrencyMiddleware)
+		// 先鉴权再占并发槽：未携带 key 的洪水请求不应消耗稀缺并发额度。
 		protected.Use(application.apiKeyMiddleware)
+		protected.Use(application.concurrencyMiddleware)
 		protected.Get("/v1/models", application.listModels)
 		protected.Get("/v1/models/{model}", application.getModel)
 		protected.Get("/v1/responses", application.createResponsesWebSocket)
