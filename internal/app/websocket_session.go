@@ -507,6 +507,11 @@ func wsJSONString(payload json.RawMessage, key string) string {
 	if !has {
 		return ""
 	}
+	return wsRawString(raw)
+}
+
+// wsRawString 把单个 RawMessage 解为字符串；非字符串或空值返回 ""。
+func wsRawString(raw json.RawMessage) string {
 	var s string
 	if json.Unmarshal(raw, &s) != nil {
 		return ""

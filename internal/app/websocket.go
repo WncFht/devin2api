@@ -196,13 +196,16 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if !json.Valid(data) {
-		// 非 JSON 的 data 帧原样透传（协议外内容不应静默丢弃）；不算终结信号。
+	// 单帧一次解析：type/error.code/response.id/item 从同一棵字段树直取，
+	// 替代原先每个关注点各做一次全量 Unmarshal 的读法。非 object JSON
+	// （数组/标量/非法文本）与原 json.Valid 分支等价——原样透传文本帧。
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
 		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 		return w.conn.WriteMessage(websocket.TextMessage, data)
 	}
-	eventType := wsJSONString(data, "type")
-	if err := w.collectOutputItem(eventType, data); err != nil {
+	eventType := wsRawString(fields["type"])
+	if err := w.collectOutputItem(eventType, fields); err != nil {
 		return err
 	}
 	switch eventType {
@@ -210,14 +213,14 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 		w.completed = true
 		w.surfaced = true
 		w.lastTerminal = bytes.Clone(data)
-		w.completedResponseID = wsNestedJSONString(data, "response", "id")
+		w.completedResponseID = wsJSONString(fields["response"], "id")
 	case "response.failed":
 		w.failed = true
 		w.surfaced = true
 		w.lastTerminal = bytes.Clone(data)
-		w.completedResponseID = wsNestedJSONString(data, "response", "id")
+		w.completedResponseID = wsJSONString(fields["response"], "id")
 	}
-	if wsIsMessageTooBigPayload(data) {
+	if wsJSONString(fields["error"], "code") == "message_too_big" {
 		_ = w.conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "upstream websocket message too big"),
@@ -236,34 +239,19 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	return w.conn.WriteMessage(websocket.TextMessage, data)
 }
 
-// wsNestedJSONString 读取嵌套两层的字符串字段（如 response.id）。
-func wsNestedJSONString(payload []byte, outer, inner string) string {
-	object, has, _ := wsJSONField(payload, outer)
-	if !has {
-		return ""
-	}
-	return wsJSONString(object, inner)
-}
-
-// wsIsMessageTooBigPayload 识别上游/适配层的 message_too_big 错误事件——
-// Codex 客户端靠 close code 1009 决策降级到 SSE，事件本身不转发。
-func wsIsMessageTooBigPayload(payload []byte) bool {
-	return wsNestedJSONString(payload, "error", "code") == "message_too_big"
-}
-
 // collectOutputItem 累积 response.output_item.done 的 item 快照。
 // completed 事件的 response.output 才是回放基准；collected 只在它缺失/为空
-// 时兜底（见 turnResult）。
-func (w *wsResponseWriter) collectOutputItem(eventType string, payload []byte) error {
+// 时兜底（见 turnResult）。fields 是 writeFrame 已解析的顶层字段树。
+func (w *wsResponseWriter) collectOutputItem(eventType string, fields map[string]json.RawMessage) error {
 	if eventType != "response.output_item.done" {
 		return nil
 	}
-	item, has, _ := wsJSONField(payload, "item")
+	item, has := fields["item"]
 	if !has {
 		return nil
 	}
 	item = bytes.Clone(bytes.TrimSpace(item))
-	indexRaw, hasIndex, _ := wsJSONField(payload, "output_index")
+	indexRaw, hasIndex := fields["output_index"]
 	var index int64 = -1
 	if hasIndex {
 		_ = json.Unmarshal(indexRaw, &index)
