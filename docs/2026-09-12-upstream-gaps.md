@@ -157,7 +157,7 @@ CLI 用 GetCliModelConfigs 拿模型表 + `subagent_default_model_uid` 决定 si
 
 ### 该改（有证据表明不改会出错或丢功能）
 
-1. **回放时带上 `output_id`/`thinking_id`/`signature_type`/`phase`**：decoder 在响应帧里读到这几个字段就存进 `partial`/`thinking` 块；`convertMessage` 把 assistant 历史中的这些 ID 回填到对应 `ChatMessagePrompt`。CLI 就是这么干的（strings 序列化字段表里四个都在），上游多半用它们做溯源/dedup/计费。工作量小（llm 中间表示加字段 + 两侧透传）。
+1. ~~**回放时带上 `output_id`/`thinking_id`/`signature_type`/`phase`**~~：**撤销**——免费档上游从不下发这四个字段（见 live-probes 文档），无回放对象。若未来付费档开始下发再议。
 
 2. **`ChatToolCall.invalid_json_str`/`invalid_json_err` 处理**：模型吐非 JSON 时，参数不落在 `arguments_json`。当前 `decodeNativeTool` 会把空参数补成 `{}`——上游把"坏参数"静默吞掉。建议：`invalid_json_str` 非空时把它原样透传给客户端（OpenAI `function_call.arguments` 允许非 JSON 字符串），complete 时保留原文不强制 JSON。
 
@@ -165,21 +165,25 @@ CLI 用 GetCliModelConfigs 拿模型表 + `subagent_default_model_uid` 决定 si
 
 4. **`usage.provider_refusal` 检查**：流结束时如果 `usage.provider_refusal=true`，把错误信息写成 "upstream provider refused"（而非泛化的 "Devin stopped with an error"）。否则客户端看到的只是 opaque error。
 
-5. **`tool_choice` / `disable_parallel_tool_calls` 透传**：客户端的 `tool_choice`/`parallel_tool_calls` 现在被静默丢弃，行为偏差。映射规则：OpenAI `required`→`option_name="required"`、`none`→`option_name="none"`、`{"type":"function","function":{"name":"X"}}`→`tool_name="X"`；Anthropic `auto`→缺省、`any`→`option_name="any"`、`tool:name`→`tool_name`。`parallel_tool_calls=false`→`disable_parallel_tool_calls=true`。
+5. **`tool_choice` / `disable_parallel_tool_calls` 透传**：~~现在被静默丢弃~~ **已实现**（2026-09-12）。映射规则按实测修正：OpenAI `required`→`option_name="required"`、`none`→`"none"`、function 对象→`tool_name`；Anthropic `auto`→缺省、**`any`→`required`**（上游不接受 `"any"`，实测 invalid_argument）、`tool`→`tool_name`。`parallel_tool_calls=false`→`disable_parallel_tool_calls=true`（上游实测不执行，仅形状对齐）。
 
-6. **`max_trailing_images` 上限**：CLI 对同一轮挂图有尾部 cap（`max_trailing_images`），超了写 "Images omitted (exceeded trailing-image cap)"。我们无上限——单轮几十张图会把请求打爆（`PayloadTooLarge`）。建议给一个保守上限（比如 8 张），超出写占位文本。
+6. **`max_trailing_images` 上限**：CLI 对同一轮挂图有尾部 cap（`max_trailing_images`），超了写 "Images omitted (exceeded trailing-image cap)"。我们无上限——但实测单轮 20 张上游正常接受，CLI 的 cap 是客户端策略不是 wire 约束。暂不实现；若未来出现大图压爆再议。
+
+6.5 **`stop_sequences` 本地截断**（原"gaps"外新增，已实现）：上游 `stopPatterns` 实测不生效，已在 `responseDecoder` 做尾部保留 + 本地截断，命中时上报 `stopSequence`/`stop_sequence`。
+
+6.6 **错误重试修正**（已实现）：`unavailable` 从瞬时重试集移除——上游该码是确定性语义错误的伪装（"try later" 文案是固定模板）。
 
 ### 可选（能改善但非必须）
 
-6. **`request_id`/`latency`/`completion_profile`/`credit_cost` 记录到 debuglog**：排障时有用，不传给客户端。
+6. **`request_id`/`latency`/`completion_profile`/`credit_cost` 记录到 debuglog**：**已实现**——`request_id` 进 `meta.json` 的 `upstream_request_id`，provider 侧 `api_provider`+`x-request-id` 进 `diagnostics`（`upstream_provider`），usage 汇总进 meta.json。`latency`/`credit_cost` 免费档不下发，暂无内容可记。
 
 7. **`AssignModel` 路由解析**：如果 `GetCliModelConfigs` 回来的 `is_model_router=true`，增加一次 `AssignModel` RPC 拿 `assignment_jwt`+真实 `model_uid` 再发 `GetChatMessage`。目前没踩到（因为 `swe-2-max` 直连能用），但如果上游哪天把 swe-2-max 改成 router，我们会静默落到不同路径。
 
-8. **`provider_source=CASCADE`**：让请求更像真 CLI。缺省 UNSPECIFIED 也能用，先实测差异再决定。
+8. **`provider_source=CASCADE`**：~~先实测差异~~ **实测无可观测差异**，CLI 自己也不发。不实现。
 
-9. **`prompt_id`**：如果客户端有 `previous_response_id`，可把它哈希进 `prompt_id`，上游 dedup 可能更稳。
+9. **`prompt_id`**：~~上游 dedup 可能更稳~~ **实测无 dedup 效果**（同 id 连发各跑各的）。纯关联字段，不实现。
 
-10. **`ModelFeatures` 透出**:`ListModels` 把 `supports_tool_calls`/`supports_parallel_tool_calls`/`supports_thinking`/`preserve_thinking` 加进 `ModelInfo`，ccload/客户端可用作 gate。
+10. **`ModelFeatures` 透出**：**已实现**——`ListModels` 切到 `GetCliModelConfigs`，`ModelInfo` 新增 `supports_tool_calls`/`supports_parallel_tool_calls`/`supports_thinking`/`preserve_thinking`/`context_tokens`/`max_output_tokens`，`/v1/models` 与面板同步透出。
 
 ### 仅记录（上游内部用，我们不用动）
 
