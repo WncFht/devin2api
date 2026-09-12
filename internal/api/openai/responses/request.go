@@ -39,6 +39,10 @@ type Request struct {
 	User string `json:"user,omitempty"`
 	// PromptCacheKey 是可选的调用方缓存键。
 	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+	// ToolChoice 控制工具调用行为："auto"/"none"/"required" 或 function 对象。
+	ToolChoice json.RawMessage `json:"tool_choice,omitempty"`
+	// ParallelToolCalls 为 false 时禁止并行工具调用。
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 }
 
 // Tool 是 OpenAI Responses function 工具定义。
@@ -93,6 +97,14 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	context.SessionKey = request.PromptCacheKey
 	if context.SessionKey == "" {
 		context.SessionKey = request.User
+	}
+	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice)
+	if err != nil {
+		return AdaptedRequest{}, err
+	}
+	context.ToolChoice = toolChoice
+	if request.ParallelToolCalls != nil && !*request.ParallelToolCalls {
+		context.DisableParallelToolCalls = true
 	}
 	if err := appendInputMessages(&context, request.Input); err != nil {
 		return AdaptedRequest{}, err

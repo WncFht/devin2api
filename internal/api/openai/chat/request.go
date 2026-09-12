@@ -30,6 +30,8 @@ type Request struct {
 	Seed                *int64          `json:"seed,omitempty"`
 	User                string          `json:"user,omitempty"`
 	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	N                   *int            `json:"n,omitempty"`
 }
 
 // Message 是 Chat Completions 消息条目。
@@ -114,6 +116,19 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		context.TopK = request.TopK
 	}
 	context.Seed = request.Seed
+	// 上游 CASCADE 通道只支持单次补全：num_completions>1 会中途崩流，
+	// 本地尽早拒绝比打到上游更可读。
+	if request.N != nil && *request.N > 1 {
+		return AdaptedRequest{}, errors.New("chat request n > 1 is not supported by this provider")
+	}
+	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice)
+	if err != nil {
+		return AdaptedRequest{}, err
+	}
+	context.ToolChoice = toolChoice
+	if request.ParallelToolCalls != nil && !*request.ParallelToolCalls {
+		context.DisableParallelToolCalls = true
+	}
 	if len(bytes.TrimSpace(request.Stop)) > 0 && !bytes.Equal(bytes.TrimSpace(request.Stop), []byte("null")) {
 		var stops []string
 		if err := json.Unmarshal(request.Stop, &stops); err != nil {

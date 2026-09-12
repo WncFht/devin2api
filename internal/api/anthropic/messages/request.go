@@ -93,6 +93,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		context.TopK = request.TopK
 	}
 	context.StopSequences = request.StopSequences
+	toolChoice, disableParallel, err := common.ParseAnthropicToolChoice(request.ToolChoice)
+	if err != nil {
+		return AdaptedRequest{}, err
+	}
+	context.ToolChoice = toolChoice
+	context.DisableParallelToolCalls = disableParallel
 	if len(bytes.TrimSpace(request.Metadata)) > 0 {
 		var metadata struct {
 			UserID string `json:"user_id"`
