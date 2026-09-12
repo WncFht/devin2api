@@ -165,7 +165,12 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(loginPage))
 		return
 	}
-	_, _ = w.Write([]byte(dashboardPage))
+	// 静态资源带 24h 缓存头，URL 里的版本戳让每次发版必然拿到新 JS/CSS（ccLoad 同款 ?v=）。
+	v := h.version
+	if v == "" {
+		v = "dev"
+	}
+	_, _ = w.Write([]byte(strings.ReplaceAll(dashboardPage, "__VERSION__", v)))
 }
 
 // serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定，按天缓存。

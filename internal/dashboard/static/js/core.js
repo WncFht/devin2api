@@ -275,7 +275,7 @@ const Tabs = {
     if (!this.handlers[name]) name = 'overview';
     this.current = name;
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'page-' + name));
-    document.querySelectorAll('#sideNav a').forEach(a => a.classList.toggle('on', a.dataset.tab === name));
+    document.querySelectorAll('#topNav a').forEach(a => a.classList.toggle('on', a.dataset.tab === name));
     this.handlers[name] && this.handlers[name]();
     // 页切换后已挂起的图表恢复显示，需要按新尺寸重排。
     setTimeout(() => {
@@ -307,7 +307,7 @@ window.addEventListener('hashchange', () => {
   const h = parseHash();
   if (h.tab !== Tabs.current) Tabs.apply(h.tab);
 });
-document.getElementById('sideNav').addEventListener('click', e => {
+document.getElementById('topNav').addEventListener('click', e => {
   const a = e.target.closest('a[data-tab]');
   if (a) Tabs.go(a.dataset.tab);
 });
