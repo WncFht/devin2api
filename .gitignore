@@ -35,7 +35,7 @@ multi-harness-eval/runs/
 # 任务运行中下载的媒体文件
 /downloads/
 
-# cliproxyapi 调研语料（~118MB，可由调研脚本重建；结论已沉淀进 docs/）
+# cliproxyapi 调研语料（~118MB，可由调研脚本重建；结论已沉淀进 notes/）
 /outputs/cliproxy-research/
 
 # 本地 agent 技能/配置（不入库）
@@ -45,6 +45,9 @@ multi-harness-eval/runs/
 /CLAUDE.md
 /.claude/
 
-# 本地分析副件：ccload.db 快照（含明文凭据）与 scc 报告
+# 内部研究档案：上游逆向笔记、调研快照、本机部署/接入笔记（不随公开发布）
+/notes/
+
+# 本地分析副件：网关数据库快照（含明文凭据）与 scc 报告
 /data/
 /scc-report.html

@@ -548,7 +548,7 @@ func updateCompletionIdentity(completion *debuglog.Completion, messages llm.Requ
 // prematureEndTurn 识别可疑的正常收尾：请求最后一条输入是工具结果，
 // 模型却以无工具调用的 end_turn 结束。该形态结构上合法（可能真是
 // 最终答复），但实测存在模型声称继续动作后直接 EOS 的故障模式
-// （docs/archive/2026-09-12-premature-endturn.md），记入日志供统计真实频率。
+// （notes/archive/2026-09-12-premature-endturn.md），记入日志供统计真实频率。
 func prematureEndTurn(messages llm.RequestMessages, message *llm.AssistantMessage) bool {
 	if message.StopReason != llm.StopReasonStop || len(messages.Messages) == 0 {
 		return false
