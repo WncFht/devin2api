@@ -2,8 +2,6 @@
 package chat
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +10,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
 // SSEEvent 别名共用的事件类型，保留包内引用的可读性。
@@ -46,7 +45,7 @@ type toolCallState struct {
 func NewStreamEncoder(model string, includeUsage bool) *StreamEncoder {
 	return &StreamEncoder{
 		model:         model,
-		responseID:    newChatResponseID(),
+		responseID:    randid.Prefixed("chatcmpl-"),
 		createdAt:     time.Now().Unix(),
 		includeUsage:  includeUsage,
 		thinkingIndex: -1,
@@ -67,7 +66,7 @@ func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
 	}
 	messageObj, toolCalls := messageToChat(message)
 	response := map[string]any{
-		"id":      newChatResponseID(),
+		"id":      randid.Prefixed("chatcmpl-"),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
@@ -404,12 +403,4 @@ func finishReason(reason llm.StopReason) any {
 	default:
 		return nil
 	}
-}
-
-func newChatResponseID() string {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return fmt.Sprintf("chatcmpl-%x", time.Now().UnixNano())
-	}
-	return "chatcmpl-" + hex.EncodeToString(value)
 }

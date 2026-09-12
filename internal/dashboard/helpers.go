@@ -1,26 +1,18 @@
-// 本文件是面板内部的通用小工具：随机 ID、枚举名缩短、any 类型提取、截断。
+// 本文件是面板内部的通用小工具：会话 ID、枚举名缩短、any 类型提取、截断。
 package dashboard
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
-func randomHex(size int) (string, error) {
-	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
+// generateSessionID 返回面板登录会话 token（32 字节随机数的 hex）。
 func generateSessionID() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	id, _ := randid.Hex(32)
+	return id
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。

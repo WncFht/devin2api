@@ -5,9 +5,7 @@
 package devin
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -15,28 +13,17 @@ import (
 	devinproto "local/devinproto"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/randid"
+	"github.com/WncFht/devin2api/internal/upstream"
 )
 
 func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetChatMessageRequest, error) {
-	fingerprint, err := randomHex(366)
-	if err != nil {
-		return nil, fmt.Errorf("generate Devin device fingerprint: %w", err)
-	}
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
 	// ID，使命中更稳（实测稳定 ~7/8 vs 全随机波动）；缓存匹配本身是
 	// 「账号 + 内容前缀」键控，ID 不参与匹配。
 	trajectoryID, cascadeID := deriveSessionIDs(request)
-	executionID := randomUUID()
-	metadata := &devinproto.ExaCodeiumCommonPb_Metadata{
-		ApiKey:           proto.String(config.Token),
-		ExtensionName:    proto.String(clientName),
-		ExtensionVersion: proto.String(clientVersion),
-		IdeName:          proto.String(clientName),
-		IdeVersion:       proto.String(clientVersion),
-		Locale:           proto.String("en"),
-		Os:               proto.String("mac"),
-		F:                proto.String(fingerprint),
-	}
+	executionID := randid.UUID()
+	metadata := upstream.BuildMetadata(config.Token, clientName, clientVersion, "mac", 366)
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),
 		MaxTokens:      proto.Uint64(128000),
@@ -239,7 +226,7 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 		var prompts []*devinproto.ExaChatPb_ChatMessagePrompt
 		if text.Len() > 0 {
 			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
-				MessageId: proto.String(randomID()),
+				MessageId: proto.String(randid.UUID()),
 				Source:    assistantSource.Enum(),
 				Prompt:    proto.String(text.String()),
 			}
@@ -256,7 +243,7 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 		}
 		for index, call := range calls {
 			prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
-				MessageId: proto.String(randomID()),
+				MessageId: proto.String(randid.UUID()),
 				Source:    assistantSource.Enum(),
 				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 					Id:            proto.String(call.ID),
@@ -366,7 +353,7 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 			continue
 		}
 		demoted := &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(randomID()),
+			MessageId: proto.String(randid.UUID()),
 			Source:    userSource.Enum(),
 			Prompt:    proto.String("[tool result, original call lost]\n" + prompt.GetPrompt()),
 		}
@@ -379,7 +366,7 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool) *devinproto.ExaChatPb_ChatMessagePrompt {
 	prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(randomID()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    source.Enum(),
 	}
 	var text strings.Builder
@@ -421,26 +408,4 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 	}
 	prompt.Prompt = proto.String(text.String())
 	return prompt
-}
-
-func randomID() string {
-	return randomUUID()
-}
-
-func randomUUID() string {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "00000000-0000-4000-8000-000000000000"
-	}
-	bytes[6] = (bytes[6] & 0x0f) | 0x40
-	bytes[8] = (bytes[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
-}
-
-func randomHex(size int) (string, error) {
-	bytes := make([]byte, size)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(bytes), nil
 }

@@ -17,7 +17,7 @@ import (
 
 	devinproto "local/devinproto"
 
-	"google.golang.org/protobuf/proto"
+	"github.com/WncFht/devin2api/internal/upstream"
 )
 
 const (
@@ -65,7 +65,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		capResp, err := h.apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
-			Metadata: buildMetadata(h.token),
+			Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
 		defer resultMu.Unlock()
@@ -83,7 +83,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		statusResp, err := h.apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
-			Metadata: buildMetadata(h.token),
+			Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
 		defer resultMu.Unlock()
@@ -294,7 +294,7 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 
 	// CLI 版响应与 Cascade 版模型表一致，并多出 subagent_default_model_uid 等字段。
 	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
-		Metadata: buildMetadata(h.token),
+		Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
 		return nil, err
@@ -422,20 +422,6 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 	return models, nil
 }
 
-func buildMetadata(token string) *devinproto.ExaCodeiumCommonPb_Metadata {
-	fingerprint, _ := randomHex(32)
-	return &devinproto.ExaCodeiumCommonPb_Metadata{
-		ApiKey:           proto.String(token),
-		ExtensionName:    proto.String(clientName),
-		ExtensionVersion: proto.String(clientVersion),
-		IdeName:          proto.String(clientName),
-		IdeVersion:       proto.String(clientVersion),
-		Locale:           proto.String("en"),
-		Os:               proto.String("win"),
-		F:                proto.String(fingerprint),
-	}
-}
-
 func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
 	h.cacheMu.RLock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
@@ -484,7 +470,7 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 	}
 
 	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
-		Metadata: buildMetadata(h.token),
+		Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
 		return nil
@@ -500,20 +486,4 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 	h.modelStatusesCache = statuses
 	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
 	return statuses
-}
-
-// authTransport 给面板的上游调用补 Basic 认证头（token-token 形式）；
-// 已带 Authorization 的请求（如 Seat 的 Bearer）原样放行。
-type authTransport struct {
-	base  http.RoundTripper
-	token string
-}
-
-func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	// ApiServer Connect 客户端沿用 Basic token-token；Seat 单独走 Bearer。
-	if clone.Header.Get("Authorization") == "" {
-		clone.Header.Set("Authorization", "Basic "+t.token+"-"+t.token)
-	}
-	return t.base.RoundTrip(clone)
 }

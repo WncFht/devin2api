@@ -2,8 +2,6 @@
 package responses
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -11,6 +9,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
 // SSEEvent 别名共用的事件类型，保留包内引用的可读性。
@@ -66,7 +65,7 @@ type streamItem struct {
 func NewStreamEncoder(model string) *StreamEncoder {
 	return &StreamEncoder{
 		model:      model,
-		responseID: newResponseID("resp"),
+		responseID: randid.Prefixed("resp_"),
 		createdAt:  time.Now().Unix(),
 		items:      make(map[int]*streamItem),
 	}
@@ -87,7 +86,7 @@ func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
 	}
 	responseID := message.ResponseID
 	if !strings.HasPrefix(responseID, "resp_") {
-		responseID = newResponseID("resp")
+		responseID = randid.Prefixed("resp_")
 	}
 	createdAt := time.UnixMilli(message.TimestampMS).Unix()
 	if message.TimestampMS <= 0 {
@@ -428,7 +427,7 @@ func (encoder *StreamEncoder) newItem(contentIndex int, kind string, prefix stri
 		return nil, fmt.Errorf("content index %d already has an output item", contentIndex)
 	}
 	item := &streamItem{
-		kind: kind, id: newResponseID(prefix), outputIndex: len(encoder.output), contentIndex: 0,
+		kind: kind, id: randid.Prefixed(prefix + "_"), outputIndex: len(encoder.output), contentIndex: 0,
 	}
 	encoder.items[contentIndex] = item
 	encoder.output = append(encoder.output, nil)
@@ -516,12 +515,12 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 		switch content := block.(type) {
 		case llm.TextContent:
 			messages = append(messages, map[string]any{
-				"id": newResponseID("msg"), "type": "message", "status": "completed", "role": "assistant",
+				"id": randid.Prefixed("msg_"), "type": "message", "status": "completed", "role": "assistant",
 				"content": []any{map[string]any{"type": "output_text", "text": content.Text, "annotations": []any{}}},
 			})
 		case llm.ThinkingContent:
 			item := map[string]any{
-				"id": newResponseID("rs"), "type": "reasoning", "status": "completed",
+				"id": randid.Prefixed("rs_"), "type": "reasoning", "status": "completed",
 				"summary": []any{map[string]any{"type": "summary_text", "text": content.Thinking}},
 			}
 			if content.ThinkingSignature != "" {
@@ -530,7 +529,7 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 			reasonings = append(reasonings, item)
 		case llm.ToolCall:
 			toolCalls = append(toolCalls, map[string]any{
-				"id": newResponseID("fc"), "type": "function_call", "status": "completed",
+				"id": randid.Prefixed("fc_"), "type": "function_call", "status": "completed",
 				"call_id": content.ID, "name": content.Name, "arguments": string(content.Arguments),
 			})
 		default:
@@ -551,14 +550,6 @@ func contentAt[T llm.Content](message *llm.AssistantMessage, index int) (T, bool
 	}
 	content, ok := message.Content[index].(T)
 	return content, ok
-}
-
-func newResponseID(prefix string) string {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return fmt.Sprintf("%s_%x", prefix, time.Now().UnixNano())
-	}
-	return prefix + "_" + hex.EncodeToString(value)
 }
 
 func responseStatus(reason llm.StopReason) string {

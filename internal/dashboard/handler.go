@@ -15,6 +15,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/upstream"
 
 	"local/devinproto/devinprotoconnect"
 )
@@ -55,7 +56,7 @@ func New(password, baseURL, token, proxy string, forceHTTP1 bool, metrics *obs.M
 		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
 		base = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	transport := &authTransport{base: base, token: token}
+	transport := upstream.NewBasicAuthTransport(base, token)
 	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
 	httpClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
 	return &Handler{

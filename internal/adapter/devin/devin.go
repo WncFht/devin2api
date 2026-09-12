@@ -22,6 +22,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/upstream"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -49,8 +50,10 @@ type Config struct {
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
-	config         Config
-	client         devinprotoconnect.ApiServerServiceClient
+	config Config
+	// streamClient 无 Client.Timeout（SSE 长连接靠 Transport 层超时兜底）；
+	// apiClient 有 610s 整体超时，用于模型目录等普通调用。
+	streamClient   devinprotoconnect.ApiServerServiceClient
 	apiClient      devinprotoconnect.ApiServerServiceClient
 	modelsMu       sync.RWMutex
 	models         []adapter.ModelInfo
@@ -75,7 +78,7 @@ func New(config Config) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create proxy transport: %w", err)
 	}
-	transport := &authTransport{base: base, token: config.Token}
+	transport := upstream.NewBasicAuthTransport(base, config.Token)
 
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
@@ -88,7 +91,7 @@ func New(config Config) (*Adapter, error) {
 
 	return &Adapter{
 		config:         config,
-		client:         streamClient,
+		streamClient:   streamClient,
 		apiClient:      apiClient,
 		modelsCacheTTL: 5 * time.Minute,
 	}, nil
@@ -154,7 +157,7 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
 			}
 		}
-		stream, err := adapter.client.GetChatMessage(ctx, connect.NewRequest(protoRequest))
+		stream, err := adapter.streamClient.GetChatMessage(ctx, connect.NewRequest(protoRequest))
 		if err == nil {
 			return stream, nil
 		}
@@ -304,15 +307,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	}
 
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
-		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{
-			ApiKey:           proto.String(a.config.Token),
-			ExtensionName:    proto.String(clientName),
-			ExtensionVersion: proto.String(clientVersion),
-			IdeName:          proto.String(clientName),
-			IdeVersion:       proto.String(clientVersion),
-			Locale:           proto.String("en"),
-			Os:               proto.String("win"),
-		},
+		Metadata: upstream.BuildMetadata(a.config.Token, clientName, clientVersion, "win", 0),
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("Devin GetCliModelConfigs: %w", err)
@@ -377,17 +372,6 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	a.models = models
 	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
 	return models, nil
-}
-
-type authTransport struct {
-	base  http.RoundTripper
-	token string
-}
-
-func (transport *authTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	clone := request.Clone(request.Context())
-	clone.Header.Set("Authorization", "Basic "+transport.token+"-"+transport.token)
-	return transport.base.RoundTrip(clone)
 }
 
 // upstreamStallTimeout 是相邻两个上游帧之间允许的最长静默；超时即判定

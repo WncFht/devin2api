@@ -2,16 +2,14 @@
 package messages
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
 // SSEEvent 别名共用的事件类型，保留包内引用的可读性。
@@ -46,7 +44,7 @@ type contentBlockState struct {
 func NewStreamEncoder(model string) *StreamEncoder {
 	return &StreamEncoder{
 		model:      model,
-		messageID:  newAnthropicMessageID(),
+		messageID:  randid.Prefixed("msg_"),
 		blockIndex: -1,
 	}
 }
@@ -64,7 +62,7 @@ func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
 		model = "claude"
 	}
 	response := map[string]any{
-		"id":          newAnthropicMessageID(),
+		"id":          randid.Prefixed("msg_"),
 		"type":        "message",
 		"role":        "assistant",
 		"content":     messageToAnthropic(message),
@@ -431,12 +429,4 @@ func anthropicStopReason(reason llm.StopReason) any {
 	default:
 		return nil
 	}
-}
-
-func newAnthropicMessageID() string {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return fmt.Sprintf("msg_%x", time.Now().UnixNano())
-	}
-	return "msg_" + hex.EncodeToString(value)
 }
