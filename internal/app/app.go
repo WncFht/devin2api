@@ -341,6 +341,11 @@ func (application *App) createCompletion(
 		KeyHash:         requestCredentialHash(request),
 		ClientRequestID: clientRequestID(request),
 	})
+	// reqCtx 供面板 Abort 主动中断：cancel 挂到 recorder 上，
+	// Complete 时 recorder 自动解除挂接，defer cancel 兜底释放。
+	reqCtx, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	recorder.SetAbort(cancel)
 	// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
 	// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
 	// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
@@ -387,8 +392,9 @@ func (application *App) createCompletion(
 	completion.RequestedModel = messages.Model
 	completion.Stream = options.Stream
 	reqMetrics.Observe(options.Stream, len(body))
+	recorder.SetModel(messages.Model)
 	recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
-	ctx := debuglog.WithRecorder(request.Context(), recorder)
+	ctx := debuglog.WithRecorder(reqCtx, recorder)
 	if options.Stream {
 		application.streamCompletion(ctx, writer, recorder, protocol, messages, options, &completion, &responseBytes)
 		return
@@ -419,6 +425,7 @@ func (application *App) createCompletion(
 		return
 	}
 	recorder.NoteClientLatency()
+	recorder.AddClientBytes(int64(len(body)))
 	responseBytes += len(body)
 	recorder.AppendJSONL("06-http-response.jsonl", "response", json.RawMessage(body))
 	completion.StatusCode = http.StatusOK
@@ -453,6 +460,7 @@ func (out *streamWriter) write(p []byte) error {
 		return err
 	}
 	out.bytes += len(p)
+	out.recorder.AddClientBytes(int64(len(p)))
 	out.flusher.Flush()
 	return nil
 }

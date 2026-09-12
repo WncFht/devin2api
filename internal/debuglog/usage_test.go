@@ -1,0 +1,247 @@
+// 本文件验证 index.jsonl 的用量聚合：多维累计、延迟分位数、启动回放。
+package debuglog
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/WncFht/devin2api/internal/llm"
+)
+
+// TestUsageAggregatorCounts 验证一次请求完成后各维度都被计入。
+func TestUsageAggregatorCounts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+
+	reasoning := int64(7)
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", KeyHash: "k1"})
+	recorder.Complete(Completion{
+		StatusCode: 200, Result: "completed", Model: "swe-2-max", RequestedModel: "swe-2",
+		Usage: usageFixture(100, 50, 40, 30, &reasoning, 187),
+	})
+	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", KeyHash: "k1"})
+	failed.WriteError("provider_stream", os.ErrNotExist)
+	failed.Complete(Completion{StatusCode: 500, Result: "failed", Model: "swe-2-max", Usage: usageFixture(10, 0, 0, 0, nil, 10)})
+
+	snap := manager.UsageStats()
+	if snap.Today.Requests != 2 || snap.Today.Errors != 1 {
+		t.Fatalf("today = %+v", snap.Today)
+	}
+	if snap.Today.InputTokens != 110 || snap.Today.OutputTokens != 50 ||
+		snap.Today.CacheRead != 40 || snap.Today.CacheWrite != 30 ||
+		snap.Today.Reasoning != 7 || snap.Today.TotalTokens != 197 {
+		t.Fatalf("today tokens = %+v", snap.Today)
+	}
+	if len(snap.Models) != 1 || snap.Models[0].Name != "swe-2-max" || snap.Models[0].Requests != 2 || snap.Models[0].Errors != 1 {
+		t.Fatalf("models = %+v", snap.Models)
+	}
+	if len(snap.Keys) != 1 || snap.Keys[0].Requests != 2 {
+		t.Fatalf("keys = %+v", snap.Keys)
+	}
+	if snap.ErrorStages["provider_stream"] != 1 {
+		t.Fatalf("error_stages = %+v", snap.ErrorStages)
+	}
+	if len(snap.Hours) != usageHourBuckets {
+		t.Fatalf("hours len = %d", len(snap.Hours))
+	}
+	if snap.Duration.Samples != 2 {
+		t.Fatalf("duration stats = %+v", snap.Duration)
+	}
+}
+
+// TestUsageReplayOnRestart 验证进程重启（重建 Manager）后历史统计不丢。
+func TestUsageReplayOnRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	first := NewManager(root, RetentionPolicy{})
+	recorder := first.Start(RequestMeta{Method: "POST", Path: "/v1/chat/completions", API: "openai-chat"})
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(1000, 200, 0, 0, nil, 1200)})
+	first.Close()
+
+	second := NewManager(root, RetentionPolicy{})
+	defer second.Close()
+	snap := second.UsageStats()
+	if snap.Window.Requests != 1 || snap.Window.InputTokens != 1000 || snap.Window.TotalTokens != 1200 {
+		t.Fatalf("replayed window = %+v", snap.Window)
+	}
+	if len(snap.Models) != 1 || snap.Models[0].Name != "glm-5-2" {
+		t.Fatalf("replayed models = %+v", snap.Models)
+	}
+	// 回放后新请求继续累加，不重复计数。
+	recorder2 := second.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
+	recorder2.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(5, 5, 0, 0, nil, 10)})
+	snap = second.UsageStats()
+	if snap.Window.Requests != 2 || snap.Window.TotalTokens != 1210 {
+		t.Fatalf("post-replay window = %+v", snap.Window)
+	}
+}
+
+// TestUsagePercentiles 验证蓄水池 p50/p95/p99 与环覆盖。
+func TestUsagePercentiles(t *testing.T) {
+	agg := newUsageAggregator()
+	for i := 1; i <= 100; i++ {
+		agg.add(IndexEntry{StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: int64(i), Result: "completed"})
+	}
+	stats := agg.durationSamples.stats()
+	if stats.P50 != 50 || stats.P95 != 95 || stats.P99 != 99 || stats.Max != 100 {
+		t.Fatalf("percentiles = %+v", stats)
+	}
+	// 蓄水池超容量后只保留最近样本。
+	for i := 0; i < usageSampleCapacity; i++ {
+		agg.add(IndexEntry{StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: 1, Result: "completed"})
+	}
+	stats = agg.durationSamples.stats()
+	if stats.Samples != usageSampleCapacity {
+		t.Fatalf("samples = %d, want %d", stats.Samples, usageSampleCapacity)
+	}
+}
+
+// TestRequestFilters 验证结构化筛选与 has_more 信号。
+func TestRequestFilters(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+
+	cases := []struct {
+		model  string
+		status int
+		result string
+		stage  string
+	}{
+		{"m-a", 200, "completed", ""},
+		{"m-b", 400, "failed", "http_decode"},
+		{"m-a", 500, "failed", "provider_stream"},
+	}
+	for _, c := range cases {
+		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+		if c.stage != "" {
+			recorder.WriteError(c.stage, os.ErrNotExist)
+		}
+		recorder.Complete(Completion{StatusCode: c.status, Result: c.result, Model: c.model})
+	}
+
+	if got := manager.ListRequests(10, RequestFilter{StatusClass: "4xx"}); len(got.Entries) != 1 || got.Entries[0].Model != "m-b" {
+		t.Fatalf("status_class=4xx = %+v", got.Entries)
+	}
+	if got := manager.ListRequests(10, RequestFilter{Model: "m-a"}); len(got.Entries) != 2 {
+		t.Fatalf("model=m-a = %+v", got.Entries)
+	}
+	if got := manager.ListRequests(10, RequestFilter{ErrorStage: "provider_stream"}); len(got.Entries) != 1 {
+		t.Fatalf("error_stage = %+v", got.Entries)
+	}
+	if got := manager.ListRequests(10, RequestFilter{Result: "completed"}); len(got.Entries) != 1 {
+		t.Fatalf("result=completed = %+v", got.Entries)
+	}
+	if got := manager.ListRequests(10, RequestFilter{Since: time.Now().Add(time.Hour)}); len(got.Entries) != 0 {
+		t.Fatalf("since future = %+v", got.Entries)
+	}
+	// limit 用尽时应提示窗口内仍有历史。
+	if got := manager.ListRequests(1, RequestFilter{}); len(got.Entries) != 1 || !got.HasMore {
+		t.Fatalf("limit=1 = %+v has_more=%v", got.Entries, got.HasMore)
+	}
+	if got := manager.ListRequests(10, RequestFilter{}); got.HasMore {
+		t.Fatal("full scan should not report has_more")
+	}
+}
+
+// TestSetEnabledHotToggle 验证日志开关运行时切换后 Start 立即生效。
+func TestSetEnabledHotToggle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+
+	manager.SetEnabled(false)
+	if r := manager.Start(RequestMeta{}); r != nil {
+		t.Fatal("Start should return nil while disabled")
+	}
+	manager.SetEnabled(true)
+	if r := manager.Start(RequestMeta{}); r == nil {
+		t.Fatal("Start should work after re-enable")
+	} else {
+		r.Complete(Completion{StatusCode: 200, Result: "completed"})
+	}
+}
+
+// TestAbortActiveRequest 验证 Abort 取消挂接的 ctx 并把结果记为 aborted。
+func TestAbortActiveRequest(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	dir := filepath.Base(recorder.DirectoryPath())
+	if manager.Abort(dir) {
+		t.Fatal("Abort should fail before ctx is attached")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorder.SetAbort(cancel)
+
+	active := manager.ActiveRequests()
+	if len(active) != 1 || !active[0].Abortable || active[0].State != "waiting_upstream" {
+		t.Fatalf("active = %+v", active)
+	}
+	if !manager.Abort(dir) {
+		t.Fatal("Abort returned false")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("ctx not cancelled by Abort")
+	}
+	recorder.Complete(Completion{StatusCode: 200, Result: "disconnected"})
+	result := manager.ListRequests(10, RequestFilter{Result: "aborted"})
+	if len(result.Entries) != 1 {
+		t.Fatalf("aborted entries = %+v", result.Entries)
+	}
+	// 完结后再 abort 应失败。
+	if manager.Abort(dir) {
+		t.Fatal("Abort after Complete should fail")
+	}
+}
+
+// TestLayeredRetention 验证负载剥离与失败目录豁免。
+func TestLayeredRetention(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1})
+	defer manager.Close()
+
+	// 一个 2 小时前的目录：负载应被剥离，证据保留。
+	old := filepath.Join(root, "20200101-000000")
+	for _, name := range []string{"03-devin-request.json", "04-devin-response.jsonl", "06-http-response.jsonl", "meta.json", "error.json"} {
+		if err := os.MkdirAll(old, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(old, "attachments"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "attachments", "a.bin"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.cleanOnce()
+	for _, gone := range payloadNames {
+		if _, err := os.Stat(filepath.Join(old, gone)); !os.IsNotExist(err) {
+			t.Fatalf("payload %s should be stripped", gone)
+		}
+	}
+	for _, keep := range []string{"meta.json", "error.json"} {
+		if _, err := os.Stat(filepath.Join(old, keep)); err != nil {
+			t.Fatalf("evidence %s should remain: %v", keep, err)
+		}
+	}
+}
+
+// usageFixture 构造带全部 token 字段的 Usage。
+func usageFixture(input, output, cacheRead, cacheWrite int64, reasoning *int64, total int64) llm.Usage {
+	return llm.Usage{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite, Reasoning: reasoning, TotalTokens: total}
+}

@@ -106,7 +106,17 @@ tr:hover{background:#222632}
 <h1>Devin API 管理面板</h1>
 
 <div class="section" id="statsSection">
-<h2>代理运行指标</h2>
+<h2>代理运行指标 <button class="chip" id="debugToggle" onclick="toggleDebug()" style="display:none">日志开关</button></h2>
+<div class="loading">加载中...</div>
+</div>
+
+<div class="section" id="usageSection">
+<h2>用量统计 <span class="muted" style="font-weight:400;font-size:12px">index.jsonl 聚合 · 重启自动回放</span></h2>
+<div class="loading">加载中...</div>
+</div>
+
+<div class="section" id="quotaSection">
+<h2>配额历史 <span class="muted" style="font-weight:400;font-size:12px">周期采样写入 logs/quota.jsonl</span></h2>
 <div class="loading">加载中...</div>
 </div>
 
@@ -123,8 +133,22 @@ tr:hover{background:#222632}
 <div class="section">
 <h2>最近请求 <span class="muted" style="font-weight:400;font-size:12px">点击行展开调试细节 · 每 10 秒刷新</span></h2>
 <div class="filters">
-<input type="search" id="reqSearch" placeholder="过滤：模型 / 路径 / 上游ID / IP / key哈希 / 结果..." oninput="loadRequests()">
+<input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果..." oninput="loadRequests()">
+<select id="fStatusClass" onchange="loadRequests()">
+<option value="">全部状态</option><option value="2xx">2xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option>
+</select>
+<select id="fResult" onchange="loadRequests()">
+<option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option>
+</select>
+<input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0" oninput="loadRequests()">
+<input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0" oninput="loadRequests()">
+<select id="fSince" onchange="loadRequests()">
+<option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option>
+</select>
+<span class="file-link" onclick="exportRequests('json')">导出 JSON</span>
+<span class="file-link" onclick="exportRequests('csv')">导出 CSV</span>
 </div>
+<div class="stats" id="reqHint" style="display:none"></div>
 <div class="model-scroll" style="max-height:50vh">
 <table class="req-table">
 <thead><tr>
@@ -133,6 +157,12 @@ tr:hover{background:#222632}
 <tbody id="reqBody"><tr><td colspan="8" class="loading">加载中...</td></tr></tbody>
 </table>
 </div>
+</div>
+
+<div class="section" id="processLogSection">
+<h2>进程日志 <span class="muted" style="font-weight:400;font-size:12px">logs/stderr.log · 尾部 256KB</span></h2>
+<div class="filters"><span class="file-link" onclick="loadProcessLog(0)">刷新</span><span class="file-link" id="procFollow" onclick="toggleProcFollow()">跟随输出</span></div>
+<div class="file-view" id="processLogView" style="display:block;max-height:40vh">加载中...</div>
 </div>
 
 <div class="section">
@@ -476,7 +506,7 @@ try{
 const res=await fetch('/panel/api/stats');
 const data=await res.json();
 const el=document.getElementById('statsSection');
-let html='<h2>代理运行指标</h2><div class="grid">';
+let html='<h2>代理运行指标 <button class="chip" id="debugToggle" onclick="toggleDebug()" style="display:none">日志开关</button></h2><div class="grid">';
 const h=data.http||{};
 html+=card('活跃请求',h.active_requests??0);
 html+=card('完成请求',h.completed_requests??0);
@@ -486,24 +516,77 @@ html+=card('4xx',h.client_error_responses??0);
 html+=card('5xx',h.server_error_responses??0);
 html+=card('流式/非流式',(h.streaming_requests??0)+' / '+(h.non_streaming_requests??0));
 html+=card('运行时长',fmtDuration(h.uptime_seconds));
+const r=h.rates||{};
+if(r.rpm_current!=null){
+html+=card('当前 RPM',r.rpm_current);
+html+=card('峰值 RPM',r.rpm_peak??0);
+html+=card('平均 RPM',Number(r.rpm_avg||0).toFixed(1));
+html+=card('当前 QPS',Number(r.qps_current||0).toFixed(2));
+}
 html+='</div>';
+const p=h.process||{};
+if(p.goroutines!=null){
+html+='<h2 style="margin-top:16px">进程</h2><div class="grid">';
+html+=card('goroutine',p.goroutines);
+html+=card('堆内存',fmtBytes(p.heap_alloc_bytes)+' / '+fmtBytes(p.heap_sys_bytes));
+html+=card('峰值 RSS',fmtBytes(p.max_rss_bytes));
+html+=card('GC 次数',p.num_gc??0);
+html+=card('GC 暂停累计',Number(p.gc_pause_total_ms||0).toFixed(0)+'ms');
+html+=card('GC CPU 占比',(Number(p.gc_cpu_fraction||0)*100).toFixed(2)+'%');
+html+=card('CPU',Number(p.cpu_percent||0).toFixed(1)+'% · '+Number(p.cpu_seconds||0).toFixed(1)+'s');
+html+='</div>';
+}
+if(data.usage&&(data.usage.duration||{}).samples){
+const u=data.usage,dur=u.duration||{},tf=u.ttfb||{};
+html+='<h2 style="margin-top:16px">延迟分布 <span class="muted" style="font-weight:400;font-size:12px">最近 '+dur.samples+' 个完成请求</span></h2><div class="grid">';
+html+=card('总耗时 p50/p95',fmtMs(dur.p50)+' / '+fmtMs(dur.p95));
+html+=card('总耗时 p99/max',fmtMs(dur.p99)+' / '+fmtMs(dur.max));
+html+=card('上游 TTFB p50/p95',fmtMs(tf.p50)+' / '+fmtMs(tf.p95));
+html+=card('上游 TTFB p99/max',fmtMs(tf.p99)+' / '+fmtMs(tf.max));
+html+='</div>';
+}
 if(data.debuglog){
 const d=data.debuglog;
 html+='<h2 style="margin-top:16px">日志管道</h2><div class="grid">';
+html+=card('日志开关',d.enabled?'开启':'关闭');
 html+=card('活跃日志目录',d.active_request_dirs??0);
+html+=card('写队列积压',(d.queued_log_events??0)+' / '+(d.queue_capacity??0));
 html+=card('丢弃日志事件',d.dropped_log_events??0);
+html+=card('IO 写失败',d.io_errors??0);
+html+=card('索引大小',fmtBytes(d.index_bytes));
 html+=card('保留天数',d.retention_days??'-');
 html+=card('容量上限',(d.max_total_mb??'-')+' MB');
+html+=card('负载剥离',(d.payload_hours??'-')+'h');
+html+=card('保护失败目录',d.keep_error_dirs??'-');
 html+='</div>';
+const tg=document.getElementById('debugToggle');
+if(tg){tg.style.display='';tg.textContent='请求日志: '+(d.enabled?'开':'关');tg.classList.toggle('on',!!d.enabled)}
 }
 if(h.trend_minutes&&h.trend_minutes.length){
 html+='<h2 style="margin-top:16px">最近 60 分钟</h2>'+sparkline(h.trend_minutes);
 }
-html+='<div class="note" style="margin-top:8px">指标为进程内存计数，重启清零；每 10 秒自动刷新。</div>';
+html+='<div class="note" style="margin-top:8px">计数器为进程内存值，重启清零；用量统计经 index.jsonl 回放不丢。每 10 秒自动刷新。</div>';
 el.innerHTML=html;
 }catch(e){
 document.getElementById('statsSection').innerHTML='<h2>代理运行指标</h2><div class="note">指标拉取失败: '+esc(String(e))+'</div>';
 }
+}
+
+function fmtBytes(v){
+const n=Number(v)||0;
+if(n>=1073741824) return (n/1073741824).toFixed(1)+'GB';
+if(n>=1048576) return (n/1048576).toFixed(1)+'MB';
+if(n>=1024) return (n/1024).toFixed(1)+'KB';
+return n+'B';
+}
+async function toggleDebug(){
+try{
+const cur=document.getElementById('debugToggle');
+const on=cur&&cur.classList.contains('on');
+const res=await fetch('/panel/api/debug/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!on})});
+const d=await res.json();
+if(cur){cur.classList.toggle('on',!!d.enabled);cur.textContent='请求日志: '+(d.enabled?'开':'关')}
+}catch(e){}
 }
 
 function sparkline(points){
@@ -531,13 +614,183 @@ if(code>=400)return 'status-warn';
 return 'status-ok';
 }
 
+async function loadUsage(){
+try{
+const res=await fetch('/panel/api/usage');
+const d=await res.json();
+const el=document.getElementById('usageSection');
+let html='<h2>用量统计 <span class="muted" style="font-weight:400;font-size:12px">index.jsonl 聚合 · 重启自动回放</span></h2>';
+if(d.disabled){el.innerHTML=html+'<div class="note">调试日志未启用，无用量统计。</div>';return}
+const s=d.snapshot||{};
+const today=s.today||{},win=s.window||{};
+html+='<div class="grid">';
+html+=card('今日请求',today.requests??0);
+html+=card('今日错误/断连',(today.errors??0)+' / '+(today.disconnected??0));
+html+=card('今日输入',fmtNum(today.input_tokens));
+html+=card('今日输出',fmtNum(today.output_tokens));
+html+=card('今日缓存读/写',fmtNum(today.cache_read_tokens)+' / '+fmtNum(today.cache_write_tokens));
+html+=card('今日推理',fmtNum(today.reasoning_tokens));
+html+=card('窗口累计请求',win.requests??0);
+html+=card('窗口累计 Token',fmtNum(win.total_tokens));
+if(d.est_cost) html+=card('估算成本',money(d.est_cost));
+html+='</div>';
+const stages=s.error_stages||{};
+const stageKeys=Object.keys(stages);
+if(stageKeys.length){
+html+='<h2 style="margin-top:14px">错误阶段分布</h2><div class="chip-row">'
+stageKeys.sort((a,b)=>stages[b]-stages[a]).forEach(k=>{
+html+='<span class="chip" style="cursor:default">'+esc(k)+' <strong>'+stages[k]+'</strong></span>';
+});
+html+='</div>';
+}
+if(s.hours&&s.hours.length){
+html+='<h2 style="margin-top:14px">逐小时趋势 <span class="muted" style="font-weight:400;font-size:12px">近 7 天 · 蓝=请求 红=错误 绿=输出token/10K</span></h2>'+hourlyChart(s.hours);
+}
+if(d.models&&d.models.length){
+html+='<h2 style="margin-top:14px">按模型</h2><table><thead><tr><th>模型</th><th>请求</th><th>成功率</th><th>输入</th><th>输出</th><th>缓存读</th><th>估算成本</th><th>均耗时</th><th>均TTFB</th><th>最近</th></tr></thead><tbody>';
+d.models.forEach(m=>{
+html+='<tr><td class="mono">'+esc(m.name)+'</td>'
++'<td>'+m.requests+' <span class="muted">(err '+m.errors+')</span></td>'
++'<td>'+(m.success_rate!=null?(m.success_rate*100).toFixed(0)+'%':'-')+'</td>'
++'<td class="mono">'+fmtNum(m.input_tokens)+'</td>'
++'<td class="mono">'+fmtNum(m.output_tokens)+'</td>'
++'<td class="mono">'+fmtNum(m.cache_read_tokens)+'</td>'
++'<td>'+(m.est_cost!=null?money(m.est_cost):'<span class="muted">—</span>')+'</td>'
++'<td class="mono">'+fmtMs(Math.round(m.avg_duration_ms||0))+'</td>'
++'<td class="mono">'+fmtMs(Math.round(m.avg_ttfb_ms||0))+'</td>'
++'<td class="mono muted">'+fmtTime(m.last_at)+'</td></tr>';
+});
+html+='</tbody></table>';
+}
+if(s.keys&&s.keys.length){
+html+='<h2 style="margin-top:14px">按 API Key 哈希</h2><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
+s.keys.forEach(k=>{
+html+='<tr><td class="mono">'+esc(k.name)+'</td><td>'+k.requests+'</td><td>'+k.errors+'</td><td class="mono">'+fmtNum(k.output_tokens)+'</td><td class="mono muted">'+fmtTime(k.last_at)+'</td></tr>';
+});
+html+='</tbody></table>';
+}
+if(s.days&&s.days.length>1){
+html+='<h2 style="margin-top:14px">按天</h2><table><thead><tr><th>日期</th><th>请求</th><th>错误</th><th>断连</th><th>输入</th><th>输出</th><th>Token合计</th></tr></thead><tbody>';
+s.days.slice(0,14).forEach(day=>{
+html+='<tr><td class="mono">'+esc(day.date)+'</td><td>'+day.requests+'</td><td>'+day.errors+'</td><td>'+day.disconnected+'</td><td class="mono">'+fmtNum(day.input_tokens)+'</td><td class="mono">'+fmtNum(day.output_tokens)+'</td><td class="mono">'+fmtNum(day.total_tokens)+'</td></tr>';
+});
+html+='</tbody></table>';
+}
+if(d.cost_basis) html+='<div class="note" style="margin-top:8px">估算成本按模型目录价（'+esc(d.cost_basis)+'）；非上游账单。'+(d.price_missing?'模型价目暂不可用，未计入成本。':'')+'窗口起点: '+esc(s.window_start||'-')+' · 聚合 '+s.entries+' 条</div>';
+el.innerHTML=html;
+}catch(e){
+document.getElementById('usageSection').innerHTML='<h2>用量统计</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
+}
+}
+
+function fmtNum(v){
+const n=Number(v)||0;
+if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+return String(n);
+}
+
+function hourlyChart(hours){
+const w=900,h=64;
+const maxReq=Math.max(1,...hours.map(p=>p.requests||0));
+const maxOut=Math.max(1,...hours.map(p=>p.output_tokens||0));
+const step=w/Math.max(1,hours.length-1);
+const xy=(v,mx,i)=>((i*step).toFixed(1))+','+(h-4-(v/mx)*(h-10)).toFixed(1);
+const line=hours.map((p,i)=>xy(p.requests||0,maxReq,i)).join(' ');
+const errs=hours.map((p,i)=>xy(p.errors||0,maxReq,i)).join(' ');
+const outs=hours.map((p,i)=>xy((p.output_tokens||0)/10000,maxOut/10000,i)).join(' ');
+const total=hours.reduce((s2,p)=>s2+(p.requests||0),0);
+const errTotal=hours.reduce((s2,p)=>s2+(p.errors||0),0);
+return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
++'<polyline points="'+outs+'" fill="none" stroke="#4ade80" stroke-width="1" opacity="0.6"/>'
++'<polyline points="'+line+'" fill="none" stroke="#7c8aff" stroke-width="1.5"/>'
++(errTotal?'<polyline points="'+errs+'" fill="none" stroke="#f87171" stroke-width="1.5"/>':'')
++'</svg><div class="note" style="margin-top:4px">窗口共 '+total+' 请求 / '+errTotal+' 错误 · 悬停行查看精确值</div>';
+}
+
+async function loadQuota(){
+try{
+const res=await fetch('/panel/api/quota');
+const d=await res.json();
+const el=document.getElementById('quotaSection');
+let html='<h2>配额历史 <span class="muted" style="font-weight:400;font-size:12px">周期采样写入 logs/quota.jsonl</span></h2>';
+const pts=d.points||[];
+if(!pts.length){
+el.innerHTML=html+'<div class="note">暂无配额快照——采样器每 debug.quota_interval_minutes 分钟写一条，重启后开始积累。</div>';return;
+}
+const last=pts[pts.length-1];
+html+='<div class="grid">';
+html+=card('日配额剩余',last.daily_remaining!=null?last.daily_remaining+'%':'-');
+html+=card('周配额剩余',last.weekly_remaining!=null?last.weekly_remaining+'%':'-');
+if(d.daily){
+html+=card('日燃烧速率',Number(d.daily.burn_per_hour||0).toFixed(2)+'%/h · '+Number(d.daily.burn_per_day||0).toFixed(1)+'%/d');
+if(d.daily.exhausted_at) html+=card('日配额预计耗尽',fmtUnix(d.daily.exhausted_at)+'（'+Number(d.daily.hours_left||0).toFixed(1)+'h 后）');
+}
+if(d.weekly){
+html+=card('周燃烧速率',Number(d.weekly.burn_per_hour||0).toFixed(3)+'%/h');
+if(d.weekly.exhausted_at) html+=card('周配额预计耗尽',fmtUnix(d.weekly.exhausted_at));
+}
+html+=card('日重置',fmtUnix(last.daily_reset_at));
+html+=card('周重置',fmtUnix(last.weekly_reset_at));
+html+='</div>';
+html+='<h2 style="margin-top:14px">配额曲线</h2>'+quotaChart(pts);
+html+='<div class="note" style="margin-top:4px">蓝=日配额剩余% · 红=周配额剩余% · 共 '+pts.length+' 个采样点 · 最早 '+fmtUnix(pts[0].at)+'</div>';
+el.innerHTML=html;
+}catch(e){
+document.getElementById('quotaSection').innerHTML='<h2>配额历史</h2><div class="note">拉取失败: '+esc(String(e))+'</div>';
+}
+}
+
+function quotaChart(pts){
+const w=900,h=64;
+const step=w/Math.max(1,pts.length-1);
+const xy=(v,i)=>((i*step).toFixed(1))+','+(h-4-(Math.max(0,Math.min(100,v))/100)*(h-10)).toFixed(1);
+const daily=pts.map((p,i)=>xy(p.daily_remaining||0,i)).join(' ');
+const weekly=pts.map((p,i)=>xy(p.weekly_remaining||0,i)).join(' ');
+return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
++'<polyline points="'+daily+'" fill="none" stroke="#7c8aff" stroke-width="1.5"/>'
++'<polyline points="'+weekly+'" fill="none" stroke="#f87171" stroke-width="1.5"/>'
++'</svg>';
+}
+
+let procOffset=0,procFollow=false;
+async function loadProcessLog(offset){
+try{
+const res=await fetch('/panel/api/logs?offset='+(offset||0));
+const d=await res.json();
+const view=document.getElementById('processLogView');
+if(offset&&procOffset){view.textContent+=d.text||''}else{view.textContent=d.text||'(空)'}
+procOffset=d.next_offset||0;
+if(procFollow)view.scrollTop=view.scrollHeight;
+}catch(e){document.getElementById('processLogView').textContent='读取失败: '+String(e)}
+}
+function toggleProcFollow(){
+procFollow=!procFollow;
+document.getElementById('procFollow').classList.toggle('on',procFollow);
+}
+
 let expandedDir=null;
 let openFile=null;
 function tickRequests(){if(openFile)return;loadRequests()}
+function reqQuery(){
+const p=new URLSearchParams();
+const q=document.getElementById('reqSearch').value.trim();if(q)p.set('q',q);
+const sc=document.getElementById('fStatusClass').value;if(sc)p.set('status_class',sc);
+const rs=document.getElementById('fResult').value;if(rs)p.set('result',rs);
+const md=document.getElementById('fReqModel').value.trim();if(md)p.set('model',md);
+const es=document.getElementById('fErrStage').value.trim();if(es)p.set('error_stage',es);
+const since=document.getElementById('fSince').value;
+if(since){const ms={'1h':36e5,'24h':864e5,'7d':6048e5}[since]||0;if(ms)p.set('since',new Date(Date.now()-ms).toISOString())}
+return p;
+}
+function exportRequests(fmt){
+const p=reqQuery();p.set('format',fmt);
+window.open('/panel/api/requests/export?'+p.toString(),'_blank');
+}
 async function loadRequests(){
 try{
-const q=encodeURIComponent(document.getElementById('reqSearch').value.trim());
-const res=await fetch('/panel/api/requests?limit=100'+(q?'&q='+q:''));
+const p=reqQuery();p.set('limit','100');
+const res=await fetch('/panel/api/requests?'+p.toString());
 const data=await res.json();
 const tbody=document.getElementById('reqBody');
 const list=data.requests||[];
@@ -562,6 +815,8 @@ html+='<tr class="detail-row"><td colspan="8"><div class="loading" style="paddin
 }
 });
 tbody.innerHTML=html;
+const hint=document.getElementById('reqHint');
+if(data.has_more){hint.style.display='';hint.textContent='还有更多历史记录在窗口之外（index.jsonl 未完整读入），可缩小筛选或 grep 原文件。'}else{hint.style.display='none'}
 if(expandedDir){fillDetail(expandedDir)}
 }catch(e){/* 刷新失败保留下次重试 */}
 }
@@ -592,6 +847,9 @@ html+='<div><span class="k">'+esc(kv[0])+'</span> <span class="v">'+esc(String(k
 html+='</div><div class="file-list">';
 (d.files||[]).forEach(f=>{
 html+='<span class="file-link" onclick="loadFile(\''+esc(d.dir)+'\',\''+esc(f.name)+'\')">'+esc(f.name)+' <span class="muted">'+f.size+'B</span></span>';
+if(f.name==='06-http-response.jsonl'){
+html+='<span class="file-link" style="border-color:#4a6" onclick="loadMerged(\''+esc(d.dir)+'\')">合并视图</span>';
+}
 });
 html+='</div><div class="file-view" id="fileView" style="display:none"></div>';
 if(!d.meta){html='<div class="note">meta.json 缺失或已损坏</div>'+html}
@@ -624,6 +882,24 @@ view.textContent=text+(d.truncated?'\n\n... 已截断（原始 '+d.size+' 字节
 }catch(e){view.textContent='读取失败: '+String(e)}
 }
 
+async function loadMerged(dir){
+const view=document.getElementById('fileView');
+if(!view)return;
+openFile={dir:dir,name:'06-http-response.jsonl'};
+view.style.display='block';
+view.textContent='合并 06-http-response.jsonl ...';
+try{
+const res=await fetch('/panel/api/requests/'+encodeURIComponent(dir)+'/merged');
+const d=await res.json();
+let out='== 正文 ==\n'+(d.text||'(空)');
+if(d.reasoning) out+='\n\n== 推理 ==\n'+d.reasoning;
+if(d.tool_input) out+='\n\n== 工具调用参数 ==\n'+d.tool_input;
+if(d.usage) out+='\n\n== usage ==\n'+JSON.stringify(JSON.parse(d.usage),null,2);
+out+='\n\n— 合并自 '+d.events+' 帧'+(d.finish_reason?(' · finish='+d.finish_reason):'');
+view.textContent=out;
+}catch(e){view.textContent='合并失败: '+String(e)}
+}
+
 async function loadActive(){
 try{
 const res=await fetch('/panel/api/requests/active');
@@ -632,17 +908,30 @@ const list=data.active||[];
 const section=document.getElementById('activeSection');
 if(!list.length){section.style.display='none';return}
 section.style.display='';
-let html='<table><thead><tr><th>目录</th><th>API</th><th>路径</th><th>已耗时</th><th>已写文件</th><th>丢弃事件</th></tr></thead><tbody>';
+let html='<table><thead><tr><th>目录</th><th>API</th><th>模型</th><th>阶段</th><th>已耗时</th><th>上游TTFB</th><th>已下发</th><th>队列/丢弃</th><th>已写文件</th><th></th></tr></thead><tbody>';
 list.forEach(a=>{
+const stateMap={waiting_upstream:'等上游',receiving_upstream:'收上游',streaming_client:'发客户端'};
 html+='<tr><td class="mono">'+esc(a.dir)+'</td><td>'+esc(a.meta&&a.meta.api||'-')+'</td>'
-+'<td class="mono">'+esc((a.meta&&a.meta.method||'')+' '+(a.meta&&a.meta.path||''))+'</td>'
++'<td class="mono">'+esc(a.model||'-')+'</td>'
++'<td>'+esc(stateMap[a.state]||a.state||'-')+'</td>'
 +'<td class="mono">'+fmtMs(a.elapsed_ms)+'</td>'
++'<td class="mono">'+fmtMs(a.first_upstream_ms)+'</td>'
++'<td class="mono">'+fmtBytes(a.client_bytes)+'</td>'
++'<td class="mono">'+(a.queued_events||0)+' / '+(a.dropped_events||0)+'</td>'
 +'<td class="mono">'+(a.files||[]).map(f=>esc(f.name)).join(', ')+'</td>'
-+'<td>'+(a.dropped_events||0)+'</td></tr>';
++'<td>'+(a.abortable?'<span class="file-link" onclick="abortRequest(\''+esc(a.dir)+'\')">中断</span>':'')+'</td></tr>';
 });
 html+='</tbody></table>';
 document.getElementById('activeBody').innerHTML=html;
 }catch(e){/* 静默 */}
+}
+
+async function abortRequest(dir){
+if(!confirm('中断请求 '+dir+'？上游与客户端连接都会被取消。'))return;
+try{
+const res=await fetch('/panel/api/requests/'+encodeURIComponent(dir)+'/abort',{method:'POST'});
+if(res.ok){loadActive()}else{alert('中断失败：'+await res.text())}
+}catch(e){alert('中断失败：'+e)}
 }
 function fmtDuration(sec){
 sec=Number(sec)||0;
@@ -654,11 +943,17 @@ return Math.floor(sec/3600)+'h '+Math.floor(sec%3600/60)+'m';
 loadStatus();
 loadModels();
 loadStats();
+loadUsage();
+loadQuota();
 loadRequests();
 loadActive();
+loadProcessLog(0);
 setInterval(loadStats,10000);
 setInterval(loadActive,10000);
 setInterval(tickRequests,10000);
+setInterval(loadUsage,60000);
+setInterval(loadQuota,60000);
+setInterval(()=>{if(procFollow)loadProcessLog(procOffset)},5000);
 </script>
 </body>
 </html>`

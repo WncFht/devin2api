@@ -3,6 +3,7 @@
 package dashboard
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -185,8 +186,8 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	result := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query()))
 	entries := result.Entries
 	total := len(entries)
-	offset, _ := strconv.Atoi(params.Get("offset"))
-	limit, _ := strconv.Atoi(params.Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
@@ -322,12 +323,16 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// modelPrice 是目录价：三类 token 的单价（$/1M tokens）。
+type modelPrice struct {
+	input  float64
+	cached float64
+	output float64
+}
+
 // modelPriceMap 从模型目录缓存取 uid → 三类 token 单价（$/1M）。
-func (h *Handler) modelPriceMap(ctx context.Context) map[string]struct {
-	input, cached, output float64
-} {
-	type price struct{ input, cached, output float64 }
-	out := map[string]price{}
+func (h *Handler) modelPriceMap(ctx context.Context) map[string]modelPrice {
+	out := map[string]modelPrice{}
 	models, err := h.cachedModels(ctx)
 	if err != nil {
 		return nil
@@ -337,7 +342,7 @@ func (h *Handler) modelPriceMap(ctx context.Context) map[string]struct {
 		if uid == "" {
 			continue
 		}
-		out[uid] = price{
+		out[uid] = modelPrice{
 			input:  floatAny(m["price_input"]),
 			cached: floatAny(m["price_cached"]),
 			output: floatAny(m["price_output"]),

@@ -38,6 +38,10 @@ type Metrics struct {
 	// bucketsMu 保护 buckets；分钟桶写入低频，普通 mutex 足够。
 	bucketsMu sync.Mutex
 	buckets   [trendBuckets]minuteBucket
+	// procMu 保护 CPU 采样状态：cpu_percent 由相邻两次快照的 rusage 差得出。
+	procMu         sync.Mutex
+	lastCPUSeconds float64
+	lastCPUAt      time.Time
 }
 
 // NewMetrics 创建以启动时刻为起点的指标集合。
@@ -134,6 +138,44 @@ func (m *Metrics) Snapshot() map[string]any {
 		"request_body_bytes":     m.reqBytes.Load(),
 		"response_body_bytes":    m.respBytes.Load(),
 		"trend_minutes":          m.trend(),
+		"rates":                  m.rates(),
+		"process":                m.process(),
+	}
+}
+
+// rates 从分钟桶派生 RPM/QPS（ccLoad RPMStats 同款：current/peak/avg + QPS）。
+// current 是进行中的当前分钟计数；avg 覆盖分钟环内窗口；peak 是历史单分钟峰值。
+func (m *Metrics) rates() map[string]any {
+	now := time.Now().Unix()
+	minute := now / 60
+	m.bucketsMu.Lock()
+	snapshot := m.buckets
+	m.bucketsMu.Unlock()
+	var window, peak, current uint64
+	for _, bucket := range snapshot {
+		if bucket.minute == 0 {
+			continue
+		}
+		window += bucket.requests
+		if bucket.requests > peak {
+			peak = bucket.requests
+		}
+		if bucket.minute == minute {
+			current = bucket.requests
+		}
+	}
+	// avg 除以实际覆盖的分钟数（未满 60 分钟按已运行时长计，避免启动初期被稀释）。
+	elapsed := int64(time.Since(m.startedAt)/time.Minute) + 1
+	if elapsed > trendBuckets {
+		elapsed = trendBuckets
+	}
+	// QPS 用当前分钟已计请求 ÷ 本分钟已过秒数；首秒内按 1 秒防除零。
+	secondsIntoMinute := now%60 + 1
+	return map[string]any{
+		"rpm_current": current,
+		"rpm_peak":    peak,
+		"rpm_avg":     float64(window) / float64(elapsed),
+		"qps_current": float64(current) / float64(secondsIntoMinute),
 	}
 }
 
