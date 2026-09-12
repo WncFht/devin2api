@@ -5,7 +5,10 @@
 // 编辑器也有正常语法高亮。
 package dashboard
 
-import _ "embed"
+import (
+	"embed"
+	_ "embed"
+)
 
 //go:embed static/login.html
 var loginPage string
@@ -13,8 +16,7 @@ var loginPage string
 //go:embed static/panel.html
 var dashboardPage string
 
-//go:embed static/uplot.iife.min.js
-var uplotJS []byte
-
-//go:embed static/uplot.min.css
-var uplotCSS []byte
+// staticFS 打包面板的全部静态资源（css/js/第三方库），由 /panel/static/* 下发。
+//
+//go:embed static
+var staticFS embed.FS

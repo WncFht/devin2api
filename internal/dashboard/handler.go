@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -87,7 +88,7 @@ func (h *Handler) Register(mux interface {
 }) {
 	mux.Get("/panel", h.servePanel)
 	mux.Post("/panel/login", h.handleLogin)
-	mux.Get("/panel/static/{name}", h.serveStatic)
+	mux.Get("/panel/static/*", h.serveStatic)
 	mux.Get("/panel/api", h.apiIndex)
 	mux.Get("/panel/api/status", h.apiStatus)
 	mux.Get("/panel/api/models", h.apiModels)
@@ -167,29 +168,40 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(dashboardPage))
 }
 
-// staticAssets 是 vendored 前端库（uPlot 等），随二进制 go:embed 打包，
-// 面板离线可用，不依赖 CDN。
-var staticAssets = map[string]struct {
-	contentType string
-	body        []byte
-}{
-	"uplot.iife.min.js": {"text/javascript; charset=utf-8", uplotJS},
-	"uplot.min.css":     {"text/css; charset=utf-8", uplotCSS},
-}
-
-// serveStatic 下发 vendored 前端资源；内容随二进制固定，按天缓存。
+// serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定，按天缓存。
 func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	asset, ok := staticAssets[chi.URLParam(r, "name")]
-	if !ok {
+	name := path.Clean(strings.TrimPrefix(chi.URLParam(r, "*"), "/"))
+	if name == "." || strings.HasPrefix(name, "..") || strings.HasPrefix(name, "/") {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", asset.contentType)
+	body, err := staticFS.ReadFile("static/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", staticContentType(name))
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = w.Write(asset.body)
+	_, _ = w.Write(body)
+}
+
+// staticContentType 按扩展名给面板资源定 MIME；未识别类型按二进制流下发。
+func staticContentType(name string) string {
+	switch path.Ext(name) {
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "text/javascript; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
