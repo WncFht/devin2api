@@ -69,9 +69,10 @@ curl -sN http://localhost:3003/v1/responses \
 ### 4. 看生成的 wire（debug 日志）
 
 ```bash
-# config.yaml 打开 debug.enabled，重启服务
-sed -i '' 's/^  enabled: false/  enabled: true/' config.yaml
-launchctl kickstart -k gui/$(id -u)/com.devinuser.devin-2api
+# 优先热切换：POST /panel/api/debug/toggle，不用重启
+curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
+  -H "Authorization: Bearer <dashboard.password>"
+# 或改 config.yaml 的 debug.enabled 后 kickstart（冷路径，配 launchd 用）
 # 复现一次请求，然后看 logs/<时间戳>/03-devin-request.json
 ```
 

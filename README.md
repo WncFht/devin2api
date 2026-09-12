@@ -2,12 +2,14 @@
 
 > **English** | [中文](README.zh-CN.md)
 
-devin-2api is a lightweight forwarding tool for the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses). It exposes a standard `/v1/responses` endpoint and transparently forwards your LLM requests to Devin ([app.devin.ai](https://app.devin.ai/)) through an adapter — letting external programs call Devin's models through the standard OpenAI protocol.
+devin-2api is a lightweight forwarding tool that exposes Devin ([app.devin.ai](https://app.devin.ai/)) behind OpenAI- and Anthropic-compatible endpoints — letting external programs call Devin's models through standard protocols.
 
 ## Features
 
-- **OpenAI-compatible** `/v1/responses` endpoint — call Devin's models through the standard OpenAI Responses protocol
+- **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. WebSocket transport for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
 - **Streaming and non-streaming** responses (typed SSE / JSON)
+- **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from upstream model config
+- **Admin panel at `/panel`** — request browser, usage/cost aggregation, quota tracking, process metrics, and per-request debug directories
 - **Adapter-based design** — easily extended to new upstreams
 - **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 - **Optional debug logs** per request for troubleshooting
@@ -62,12 +64,20 @@ docker run --rm -p 8080:8080 \
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok"}
+# {"status":"ok","version":"v0.2.0","uptime_seconds":12,"debug_logging":false}
 ```
 
 ## Usage
 
 > **Note**: `/v1/*` endpoints support optional API key authentication. Set `auth.api_key` in `config.yaml` to require clients to send `Authorization: Bearer <api_key>` or `X-Api-Key: <api_key>`. If left empty, the endpoints remain open (only expose them to trusted networks).
+
+Endpoints:
+
+- `POST /v1/responses` — OpenAI Responses (`GET` on the same path negotiates WebSocket transport)
+- `POST /v1/chat/completions` — OpenAI Chat Completions
+- `POST /v1/messages` — Anthropic Messages
+- `GET /v1/models`, `GET /v1/models/{model}` — upstream model list with capability flags
+- `GET /panel` — admin panel (request browser, usage, quota, process stats); `dashboard.password` protects it
 
 Call `http://localhost:8080/v1/responses` with your OpenAI Responses API client.
 
@@ -94,20 +104,43 @@ curl -N http://localhost:8080/v1/responses \
   }'
 ```
 
-The request body follows the OpenAI Responses API (`input`, `instructions`, `tools`, `stream`, …). See the [Contributing guide](CONTRIBUTING.md) for the exact subset of fields supported.
+The request body follows the OpenAI Responses API (`input`, `instructions`, `tools`, `stream`, …). Anthropic Messages clients call `/v1/messages` instead:
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "glm-5-2",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+See the [Contributing guide](CONTRIBUTING.md) for the exact subset of fields supported per surface.
 
 ## Configuration
 
 Configuration is a YAML file loaded once at startup. Unknown fields are rejected.
 
-| Field            | Description                                                                                                              | Required                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `server.listen`  | HTTP listen address                                                                                                      | Yes                                                                                                          |
-| `devin.base_url` | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token`    | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
-| `devin.model`    | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
-| `debug.enabled`  | Write per-request debug logs under `logs/` next to the config file                                                       | No                                                                                                           |
-| `auth.api_key`   | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | No                                                                                                           |
+| Field                          | Description                                                                                                              | Required / Default                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `server.listen`                | HTTP listen address                                                                                                      | Yes                                                                                                          |
+| `server.max_concurrency`       | Max concurrent `/v1/*` requests                                                                                          | `1024`                                                                                                       |
+| `devin.base_url`               | Devin Connect service base URL                                                                                           | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
+| `devin.token`                  | Devin session token (`devin-session-token$...`)                                                                          | No — endpoint returns 503 until set                                                                          |
+| `devin.model`                  | Devin chat model UID (e.g. `glm-5-2`)                                                                                    | Yes, once `devin.token` is set (no default in code)                                                          |
+| `devin.aliases`                | Client model name to upstream UID map (e.g. `swe-2: swe-2-max`)                                                          | none                                                                                                         |
+| `devin.proxy`                  | Upstream proxy URL (`http(s)://`, `socks5(h)://`); empty = direct / env vars                                             | none                                                                                                         |
+| `devin.force_http1`            | Per-request TCP connections to upstream (avoids HTTP/2 stream serialization)                                             | `true`                                                                                                       |
+| `debug.enabled`                | Write per-request debug logs under `logs/` next to the config file                                                       | `false`                                                                                                      |
+| `debug.retention_days`         | Days to keep request log dirs; `<=0` disables time-based cleanup                                                         | `14`                                                                                                         |
+| `debug.max_total_mb`           | Total `logs/` size cap; evicts oldest dirs first                                                                         | `1024`                                                                                                       |
+| `debug.payload_hours`          | Hours before large stage files (03/04/06/attachments) are stripped, keeping meta/error evidence                          | `24`                                                                                                         |
+| `debug.keep_error_dirs`        | Newest N failed dirs (with `error.json`) protected from size eviction                                                    | `32`                                                                                                         |
+| `debug.quota_interval_minutes` | Quota snapshot interval into `logs/quota.jsonl`; `<=0` disables                                                          | `10`                                                                                                         |
+| `dashboard.password`           | `/panel` admin password; empty = no login required                                                                       | none                                                                                                         |
+| `auth.api_key`                 | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>` | none (open)                                                                                                  |
 
 ```yaml
 server:
@@ -121,6 +154,9 @@ devin:
 debug:
     enabled: false
 
+dashboard:
+    password: "" # /panel login; empty = open
+
 auth:
     # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.
     api_key: ""
@@ -129,8 +165,8 @@ auth:
 Notes:
 
 - tokens are never written to logs (redacted as `<redacted>`);
-- if `devin.token` is empty, `/v1/responses` returns `503 provider_configuration`;
-- `config.yaml` is tracked by git — don't commit a real token (add it to `.gitignore` if needed).
+- if `devin.token` is empty, `/v1/*` endpoints return `503 provider_configuration`;
+- `config.yaml` is gitignored — keep real tokens out of git anyway; pre-commit runs gitleaks to catch committed secrets.
 
 ## Documentation
 

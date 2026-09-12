@@ -24,34 +24,35 @@ OpenAI Responses HTTP ──► llm intermediate layer ──► Devin Connect R
 ## Architecture and data flow
 
 ```text
-                 ┌────────────────────────────────────────────────────┐
-                 │                  devin-2api                        │
-  HTTP client    │                                                    │    upstream
- ─────────────►  │  /v1/responses                                    │  ┌──────────────────┐
-   Responses     │   │                                                │  │ Devin Connect     │
-   JSON / SSE    │   ▼                                                │  │ (server.codeium   │
-                 │  responses.DecodeRequest ──► llm.RequestMessages  │  │  .com)            │
-                 │        │                                            │  │                   │
-                 │        ▼                                            │  │ GetChatMessage    │
-                 │  adapter.Stream(ctx, RequestMessages) ────────────►│  │ (Connect, proto)  │
-                 │        │                                            │  └──────────────────┘
-                 │        ▼                                            │
-                 │  llm.ResponseStream (event stream)                  │
-                 │        │                                            │
-                 │        ├─ streaming:  writeSSE + StreamEncoder ──► │
-                 │        └─ non-stream: collectFinalMessage ──► JSON │
-                 └────────────────────────────────────────────────────┘
+                 ┌────────────────────────────────────────────────────────┐
+                 │                     devin-2api                         │
+  HTTP client    │                                                        │    upstream
+ ─────────────►  │  /v1/responses   /v1/chat/completions   /v1/messages   │  ┌──────────────────┐
+   OpenAI /      │  (GET /v1/responses upgrades to WebSocket transport)   │  │ Devin Connect     │
+   Anthropic     │        │                                               │  │ (server.codeium   │
+   JSON / SSE    │        ▼                                               │  │  .com)            │
+                 │  <surface>.DecodeRequest ──► llm.RequestMessages      │  │                   │
+                 │        │                                               │  │ GetChatMessage    │
+                 │        ▼                                               │  │ (Connect, proto)  │
+                 │  adapter.Stream(ctx, RequestMessages) ───────────────►│  └──────────────────┘
+                 │        │                                               │
+                 │        ▼                                               │
+                 │  llm.ResponseStream (event stream)                     │
+                 │        │                                               │
+                 │        ├─ streaming:  writeSSE + <surface>Encoder ──► │
+                 │        └─ non-stream: collectFinalMessage ──► JSON    │
+                 └────────────────────────────────────────────────────────┘
 ```
 
 Full request lifecycle:
 
-1. `POST /v1/responses` receives OpenAI Responses JSON (body capped at 8 MiB);
-2. `responses.DecodeRequest` converts the request into `llm.RequestMessages` (system prompt, message history, tool definitions) plus generation options;
+1. an API surface (`/v1/responses`, `/v1/chat/completions`, or `/v1/messages`) receives the request JSON (body capped at 8 MiB); `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport instead;
+2. that surface's `DecodeRequest` converts the request into `llm.RequestMessages` (system prompt, message history, tool definitions) plus generation options;
 3. `adapter.Stream` hands the vendor-neutral context to the configured adapter and returns an `llm.ResponseStream`;
 4. the Devin adapter translates the intermediate model into a `GetChatMessageRequest` (protobuf), reads upstream frames over a Connect stream, and a `responseDecoder` interprets each frame into zero or more `llm.ResponseEvent`s;
 5. output is split by the request's `stream` option:
-    - **streaming**: `StreamEncoder` expands events into typed SSE (`response.output_text.delta`, …);
-    - **non-streaming**: `done`/`error` events are aggregated into a final `AssistantMessage` encoded as Responses JSON.
+    - **streaming**: the surface's `StreamEncoder` expands events into its own typed SSE (`response.output_text.delta` / `chat.completion.chunk` / `content_block_delta`, …);
+    - **non-streaming**: `done`/`error` events are aggregated into a final `AssistantMessage` encoded as the surface's JSON shape.
 
 ### Intermediate model (internal/llm)
 
@@ -98,12 +99,12 @@ go run ./cmd/devin-2api -config config.yaml
 
 ## Supported API surface
 
-`/v1/responses` supports a subset of the OpenAI Responses API:
+All three surfaces decode into the same `llm.RequestMessages` and re-encode the same `llm.ResponseEvent` stream — so upstream quirks (tool-call pairing, fingerprint sanitizing, thinking signatures) are handled once, centrally.
 
-- `input` may be a plain string or an array of input items (`message`, `function_call`, `function_call_output`);
-- `content` supports a string or an array of parts (`input_text`, `output_text`, `text`, `input_image` as base64 data URL);
-- generation options: `instructions`, `tools` (function type with JSON Schema `parameters`), `stream`;
-- `stream: false` returns a full JSON Response; `stream: true` returns typed SSE (`response.created`, `response.output_item.added`, `response.output_text.delta`, `response.completed`, …).
+- `POST /v1/responses` — subset of the OpenAI Responses API: `input` (string or items: `message`, `function_call`, `function_call_output`, `reasoning`), `instructions`, `tools`, `stream`, `max_output_tokens`, `temperature`, `top_p`, `tool_choice`, `parallel_tool_calls`, `previous_response_id`, `prompt_cache_key`, `user`. `content` parts: `input_text`, `output_text`, `text`, `input_image` (base64 data URL). `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport (`responses_websockets=2026-02-06`), mapping each SSE event to one text frame.
+- `POST /v1/chat/completions` — OpenAI Chat: `messages`, `tools`, `tool_choice`, `stream`/`stream_options.include_usage`, `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `stop`, `response_format`, `parallel_tool_calls`, `prompt_cache_key`, `user`.
+- `POST /v1/messages` — Anthropic Messages: `system`, `messages` (text / `image` / `tool_use` / `tool_result` / `thinking`+`signature` blocks), `tools`, `tool_choice`, `max_tokens`, `stop_sequences`, `thinking`, `metadata.user_id` (used as the session key for cache affinity).
+- `GET /v1/models` + `GET /v1/models/{model}` — upstream model list with capability flags (`context_tokens`, `max_output_tokens`, `supports_tool_calls`, `supports_parallel_tool_calls`, `supports_thinking`, `preserve_thinking`, `supports_images`).
 
 ### Tool description passing
 
@@ -126,6 +127,10 @@ attachments/               # externalized image attachments (deduped by SHA-256)
 ```
 
 Concurrent requests in the same second are distinguished by an incrementing suffix in the directory name.
+
+`logs/index.jsonl` appends one summary line per completed request (result, model, `error_stage`, token classes, key hash) — it survives retention cleanup and backs the panel's usage aggregation. `logs/quota.jsonl` holds quota snapshots sampled every `debug.quota_interval_minutes`. Retention is tiered: `debug.retention_days` deletes whole dirs by age, `debug.max_total_mb` evicts oldest first, `debug.payload_hours` strips the large stage files (03/04/06/attachments) while keeping meta/error/01/02/05 evidence, and `debug.keep_error_dirs` protects the newest N failed dirs during size eviction.
+
+The admin panel at `/panel` (login: `dashboard.password`) renders these logs as a request browser and exposes `/panel/api/*` for programmatic access — `/panel/api` returns the endpoint catalog; `/panel/api/debug/toggle` hot-switches request logging without a restart.
 
 ## Before submitting
 
