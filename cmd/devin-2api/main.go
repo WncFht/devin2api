@@ -52,12 +52,24 @@ func main() {
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
 	if serviceConfig.Devin.Token != "" {
 		configured, createErr := devin.New(devin.Config{
-			BaseURL:    serviceConfig.Devin.BaseURL,
-			Token:      serviceConfig.Devin.Token,
-			Model:      serviceConfig.Devin.Model,
-			Proxy:      serviceConfig.Devin.Proxy,
-			ForceHTTP1: serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
-			Aliases:    serviceConfig.Devin.Aliases,
+			BaseURL:       serviceConfig.Devin.BaseURL,
+			Token:         serviceConfig.Devin.Token,
+			Model:         serviceConfig.Devin.Model,
+			Proxy:         serviceConfig.Devin.Proxy,
+			ForceHTTP1:    serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+			Aliases:       serviceConfig.Devin.Aliases,
+			ClientName:    serviceConfig.Devin.ClientName,
+			ClientVersion: serviceConfig.Devin.ClientVersion,
+			ClientOS:      serviceConfig.Devin.ClientOS,
+			// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
+			// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
+			TokenSource: func() string {
+				reloaded, err := config.Load(absoluteConfigPath)
+				if err != nil {
+					return ""
+				}
+				return reloaded.Devin.Token
+			},
 		})
 		if createErr != nil {
 			slog.Error("create devin adapter failed", "error", createErr)

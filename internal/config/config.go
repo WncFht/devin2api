@@ -53,6 +53,15 @@ type DevinConfig struct {
 	// Aliases 是客户端模型名到上游真实 UID 的映射，
 	// 例如 "swe-2": "swe-2-max"、"glm-5.2": "glm-5-2"。
 	Aliases map[string]string `yaml:"aliases"`
+	// ClientName 是发给上游 metadata.extension_name/ide_name 的客户端名；
+	// 默认 "chisel"（与真实 Devin CLI 抓包一致）。
+	ClientName string `yaml:"client_name"`
+	// ClientVersion 是 metadata.extension_version/ide_version 的版本号；
+	// 默认与当前抓包版本一致。上游若给新模型加版本门，改这里即可，
+	// 不必发版。
+	ClientVersion string `yaml:"client_version"`
+	// ClientOS 是 metadata.os；默认 "mac"。
+	ClientOS string `yaml:"client_os"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
