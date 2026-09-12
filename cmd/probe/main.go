@@ -286,6 +286,8 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	system := fs.String("system", "You are a helpful assistant.", "")
 	var tools toolList
 	fs.Var(&tools, "tool", "")
+	var toolSchemas toolList
+	fs.Var(&toolSchemas, "tool-schema", "json schema for the corresponding -tool (positional)")
 	customTool := fs.String("custom-tool", "", "add is_custom_tool with lark grammar (name)")
 	rawSchema := fs.Bool("raw-schema", false, "send invalid json_schema_string on tools")
 	toolExtras := fs.Bool("tool-extras", false, "strict+read_only_hint+server_name+attribution on tools")
@@ -420,11 +422,16 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	}
 	req.ChatMessagePrompts = append(req.ChatMessagePrompts, msg)
 
+	schemaIdx := 0
 	for _, name := range tools {
 		schema := `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
 		if *rawSchema {
 			schema = `this is not json`
 		}
+		if schemaIdx < len(toolSchemas) && toolSchemas[schemaIdx] != "" {
+			schema = toolSchemas[schemaIdx]
+		}
+		schemaIdx++
 		td := &devinproto.ExaChatPb_ChatToolDefinition{
 			Name:             proto.String(name),
 			Description:      proto.String(name + " tool"),
@@ -853,9 +860,15 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 
 // ---- edge cases ----
 
-func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, argv []string) error {
+	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
+	model := fs.String("model", "swe-2-max", "")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	args := fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("edge needs a case name: orphan-tool-result|unknown-source|dup-message-id|empty-user-prompt|experiment")
+		return fmt.Errorf("edge needs a case name")
 	}
 	token := os.Getenv("DEVIN_TOKEN")
 	if token == "" {
@@ -868,10 +881,34 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			Prompt:    proto.String(text),
 		}
 	}
+	assistant := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(uuid()),
+			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+			Prompt:    proto.String(text),
+		}
+	}
+	assistantCall := func(id, name, argsJSON string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId: proto.String(uuid()),
+			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+			ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+				Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(argsJSON),
+			}},
+		}
+	}
+	toolResult := func(callID, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			MessageId:  proto.String(uuid()),
+			Source:     devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
+			Prompt:     proto.String(text),
+			ToolCallId: proto.String(callID),
+		}
+	}
 	req := &devinproto.GetChatMessageRequest{
 		Metadata:     metadata(token, true),
 		Prompt:       proto.String("You are a helpful assistant."),
-		ChatModelUid: proto.String("swe-2-max"),
+		ChatModelUid: proto.String(*model),
 		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
 		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 			NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
@@ -918,6 +955,102 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			ForceDisableExperimentStrings: []string{"another_bogus"},
 		}
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{user("Reply exactly: pong")}
+	case "trailing-assistant":
+		// 历史以 assistant 文本结尾（Anthropic prefill 形态）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("List two colors."), assistant("1. Blue"),
+		}
+	case "trailing-tool-result":
+		// 历史以 tool 结果结尾且无后续 user（IDE 恢复会话的形态）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read file a.txt"),
+			assistantCall("call_1", "read_file", `{"path":"a.txt"}`),
+			toolResult("call_1", "file contents here"),
+		}
+	case "thinking-only-assistant":
+		// assistant 只有 thinking 没有 text/call：我们回放时被 convertMessage 整个丢弃的形态。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("hi"),
+			{MessageId: proto.String(uuid()),
+				Source:   devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				Thinking: proto.String("I should greet politely.")},
+			user("continue"),
+		}
+	case "thinking-empty-sig":
+		// redacted thinking：无正文有签名（我们回放 Anthropic redacted_thinking 的形态）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("hi"),
+			{MessageId: proto.String(uuid()),
+				Source:           devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				Prompt:           proto.String("sure"),
+				Signature:        proto.String("sealed.v1.ZmFrZSBmb3IgdGVzdA"),
+				ThinkingRedacted: proto.Bool(true)},
+			user("continue"),
+		}
+	case "interleaved-calls":
+		// 已按 call,result 配对的正确交错顺序（正向对照）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt then b.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			toolResult("c1", "aaa"),
+			assistantCall("c2", "read_file", `{"path":"b.txt"}`),
+			toolResult("c2", "bbb"),
+			user("what did you find?"),
+		}
+	case "grouped-calls-results":
+		// 未配对的分组形态：call,call,result,result（客户端原样历史）。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt then b.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			assistantCall("c2", "read_file", `{"path":"b.txt"}`),
+			toolResult("c1", "aaa"),
+			toolResult("c2", "bbb"),
+			user("what did you find?"),
+		}
+	case "trailing-call-no-result":
+		// 历史以「未得到结果的 tool call」结尾。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+		}
+	case "dup-tool-result":
+		// 同一 call_id 两条结果。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			toolResult("c1", "first"),
+			toolResult("c1", "second"),
+			user("ok?"),
+		}
+	case "tool-result-mismatch-call":
+		// 结果的 call_id 指向不存在的调用。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			toolResult("zzz", "orphan"),
+			user("ok?"),
+		}
+	case "tool-call-invalid-json-arg":
+		// 回放历史里的非法 JSON 参数。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			user("Read a.txt"),
+			assistantCall("c1", "read_file", `{bad json`),
+			user("ok?"),
+		}
+	case "tool-name":
+		// 可疑工具名逐个打：tool-name "mcp::x" / "a b" / "工具" / "a.b" / ""
+		if len(args) < 2 {
+			return fmt.Errorf("tool-name needs a name argument (use empty string for empty)")
+		}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{user("call the tool now")}
+		req.Tools = []*devinproto.ExaChatPb_ChatToolDefinition{{
+			Name:             proto.String(args[1]),
+			Description:      proto.String("test tool"),
+			JsonSchemaString: proto.String(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+		}}
+		req.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
+			Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: "required"},
+		}
 	default:
 		return fmt.Errorf("unknown edge case %q", args[0])
 	}
