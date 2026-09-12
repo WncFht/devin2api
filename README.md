@@ -177,3 +177,7 @@ Notes:
 
 - **Architecture, supported API fields, proto extraction, and other technical details**: [Contributing guide](CONTRIBUTING.md)
 - **License**: [MIT](LICENSE)
+
+## Acknowledgments
+
+This project builds on [leookun/devin-2api](https://github.com/leookun/devin-2api) — thanks to the original authors for their work.

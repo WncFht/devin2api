@@ -178,3 +178,7 @@ auth:
 
 - **架构、API 字段子集、proto 提取等技术细节**：[贡献指南](CONTRIBUTING.md)
 - **开源协议**：[MIT](LICENSE)
+
+## 致谢
+
+本项目在 [leookun/devin-2api](https://github.com/leookun/devin-2api) 的基础上继续开发，感谢原作者的工作。
