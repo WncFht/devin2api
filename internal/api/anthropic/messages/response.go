@@ -75,6 +75,9 @@ func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
 		"stop_reason": anthropicStopReason(message.StopReason),
 		"usage":       anthropicUsage(message.Usage),
 	}
+	if message.StopSequence != "" {
+		response["stop_sequence"] = message.StopSequence
+	}
 	return json.Marshal(response)
 }
 
@@ -324,7 +327,11 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 	if event.Message != nil {
 		encoder.usage = event.Message.Usage
 	}
-	delta := map[string]any{"stop_reason": anthropicStopReason(event.Reason), "stop_sequence": nil}
+	var stopSequence any
+	if event.Message != nil && event.Message.StopSequence != "" {
+		stopSequence = event.Message.StopSequence
+	}
+	delta := map[string]any{"stop_reason": anthropicStopReason(event.Reason), "stop_sequence": stopSequence}
 	events := encoder.flushPendingThinking()
 	events = append(events,
 		encoder.event("message_delta", map[string]any{
@@ -414,6 +421,10 @@ func anthropicStopReason(reason llm.StopReason) any {
 		return "max_tokens"
 	case llm.StopReasonStop:
 		return "end_turn"
+	case llm.StopReasonStopSequence:
+		return "stop_sequence"
+	case llm.StopReasonContentFilter:
+		return "refusal"
 	case llm.StopReasonError, llm.StopReasonAborted:
 		return "error"
 	default:

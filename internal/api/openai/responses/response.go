@@ -391,9 +391,13 @@ func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) 
 	response["output"] = encoder.completedOutput()
 	response["usage"] = responseUsage(event.Message.Usage)
 	eventName := "response.completed"
-	if event.Reason == llm.StopReasonLength {
+	if event.Reason == llm.StopReasonLength || event.Reason == llm.StopReasonContentFilter {
 		eventName = "response.incomplete"
-		response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+		reason := "max_output_tokens"
+		if event.Reason == llm.StopReasonContentFilter {
+			reason = "content_filter"
+		}
+		response["incomplete_details"] = map[string]any{"reason": reason}
 	} else {
 		response["completed_at"] = time.Now().Unix()
 	}
@@ -556,7 +560,7 @@ func newResponseID(prefix string) string {
 }
 
 func responseStatus(reason llm.StopReason) string {
-	if reason == llm.StopReasonLength {
+	if reason == llm.StopReasonLength || reason == llm.StopReasonContentFilter {
 		return "incomplete"
 	}
 	if reason == llm.StopReasonError || reason == llm.StopReasonAborted {

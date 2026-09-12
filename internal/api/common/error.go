@@ -98,7 +98,11 @@ func IsContextLengthError(message string) bool {
 func HTTPStatus(message string) int {
 	switch {
 	case strings.Contains(message, "invalid_argument"),
-		strings.HasPrefix(message, "invalid_argument:"):
+		strings.HasPrefix(message, "invalid_argument:"),
+		strings.Contains(message, "failed_precondition"),
+		strings.HasPrefix(message, "failed_precondition:"):
+		// failed_precondition 实测是请求形状/前置状态问题（如非 CASCADE
+		// request_type 缺真实会话），与 invalid_argument 同属调用方可修正。
 		if IsContextLengthError(message) {
 			return http.StatusRequestEntityTooLarge
 		}

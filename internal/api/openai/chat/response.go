@@ -396,9 +396,9 @@ func finishReason(reason llm.StopReason) any {
 		return "tool_calls"
 	case llm.StopReasonLength:
 		return "length"
-	case llm.StopReasonStop:
+	case llm.StopReasonStop, llm.StopReasonStopSequence:
 		return "stop"
-	case llm.StopReasonError, llm.StopReasonAborted:
+	case llm.StopReasonContentFilter, llm.StopReasonError, llm.StopReasonAborted:
 		return "content_filter"
 	default:
 		return nil
