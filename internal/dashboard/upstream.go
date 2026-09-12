@@ -65,7 +65,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		capResp, err := h.apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
-			Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
+			Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
 		defer resultMu.Unlock()
@@ -83,7 +83,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		statusResp, err := h.apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
-			Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
+			Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
 		defer resultMu.Unlock()
@@ -129,7 +129,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map[string]any, err error) {
 	bodyObj := map[string]any{
 		"metadata": map[string]any{
-			"api_key":           h.token,
+			"api_key":           h.tokenFunc(),
 			"extension_name":    clientName,
 			"extension_version": clientVersion,
 			"ide_name":          clientName,
@@ -149,7 +149,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("Authorization", "Bearer "+h.token)
+	req.Header.Set("Authorization", "Bearer "+h.tokenFunc())
 
 	// 使用不带 Basic 改写的 client，避免 authTransport 覆盖 Bearer；但复用代理 transport。
 	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
@@ -294,7 +294,7 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 
 	// CLI 版响应与 Cascade 版模型表一致，并多出 subagent_default_model_uid 等字段。
 	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
-		Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
+		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
 		return nil, err
@@ -470,7 +470,7 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 	}
 
 	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
-		Metadata: upstream.BuildMetadata(h.token, clientName, clientVersion, "win", 32),
+		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
 		return nil

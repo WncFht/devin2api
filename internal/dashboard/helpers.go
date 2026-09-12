@@ -2,8 +2,11 @@
 package dashboard
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 
 	"github.com/WncFht/devin2api/internal/randid"
@@ -13,6 +16,26 @@ import (
 func generateSessionID() string {
 	id, _ := randid.Hex(32)
 	return id
+}
+
+// remoteIP 返回请求来源 IP（去端口）；登录限速按它归并。
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// maskToken 对回显给面板的日志字节做字面值兜底脱敏：写路径的 secretKey
+// 名单只能覆盖结构化键名，token 若出现在自由文本（请求 body 原文、上游
+// 错误文案）里会漏出，读路径再按当前 token 字面值过一遍。
+func (h *Handler) maskToken(data []byte) []byte {
+	token := h.tokenFunc()
+	if token == "" || len(data) == 0 {
+		return data
+	}
+	return bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。

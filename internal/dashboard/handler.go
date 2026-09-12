@@ -3,6 +3,7 @@
 package dashboard
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -23,14 +24,22 @@ import (
 
 // Handler 是面板 HTTP 处理器。
 type Handler struct {
-	password      string
-	baseURL       string
-	token         string
+	password string
+	// passwordHash 是面板密码的 SHA-256：比较走定长哈希，既不向
+	// ConstantTimeCompare 泄漏长度，也与 apiKeyMiddleware 的口径一致。
+	passwordHash [32]byte
+	baseURL      string
+	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
+	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
+	tokenFunc     func() string
 	apiClient     devinprotoconnect.ApiServerServiceClient
 	httpClient    *http.Client
 	baseTransport http.RoundTripper
 	sessionMu     sync.RWMutex
 	sessionTokens map[string]time.Time
+	// loginFailures 按客户端 IP 记录连续登录失败与锁定期——面板是
+	// 唯一持密码的端点，爆破代价要抬高。
+	loginFailures map[string]*loginFail
 
 	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存可显著降低上游压力。
 	cacheMu             sync.RWMutex
@@ -52,24 +61,30 @@ type Handler struct {
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
 // forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
-// metrics/debugManager 允许为 nil（对应功能未启用）。
-func New(password, baseURL, token, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debugManager *debuglog.Manager) *Handler {
+// tokenFunc 每次求值返回当前上游凭据（与 adapter 的自愈共用同一来源）；
+// nil 视为恒空凭据。metrics/debugManager 允许为 nil（对应功能未启用）。
+func New(password, baseURL string, tokenFunc func() string, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debugManager *debuglog.Manager) *Handler {
+	if tokenFunc == nil {
+		tokenFunc = func() string { return "" }
+	}
 	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
 	if err != nil {
 		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
 		base = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	transport := upstream.NewBasicAuthTransport(base, token)
+	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
 	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
 	httpClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
 	return &Handler{
 		password:      password,
+		passwordHash:  sha256.Sum256([]byte(password)),
 		baseURL:       strings.TrimRight(baseURL, "/"),
-		token:         token,
+		tokenFunc:     tokenFunc,
 		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, baseURL),
 		httpClient:    httpClient,
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
+		loginFailures: make(map[string]*loginFail),
 		cacheTTL:      5 * time.Minute,
 		metrics:       metrics,
 		debugManager:  debugManager,
@@ -209,21 +224,76 @@ func staticContentType(name string) string {
 	}
 }
 
+// loginFail 记录单个来源 IP 的连续登录失败状态。
+type loginFail struct {
+	// fails 是上次锁定以来的连续失败次数。
+	fails int
+	// lockedUntil 是锁定截止时间；到期前失败的请求直接 429。
+	lockedUntil time.Time
+}
+
+const (
+	// loginMaxFails 是触发锁定的连续失败次数。
+	loginMaxFails = 5
+	// loginLockout 是达到失败上限后的锁定时长。
+	loginLockout = 10 * time.Minute
+	// sessionSweepThreshold 是触发机会清扫的 session 数量水位。
+	sessionSweepThreshold = 64
+)
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if h.password == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true,"open":true}`))
 		return
 	}
-	password := r.FormValue("password")
-	if subtle.ConstantTimeCompare([]byte(password), []byte(h.password)) != 1 {
+	ip := remoteIP(r)
+	provided := sha256.Sum256([]byte(r.FormValue("password")))
+	if subtle.ConstantTimeCompare(provided[:], h.passwordHash[:]) != 1 {
+		h.sessionMu.Lock()
+		state := h.loginFailures[ip]
+		if state == nil {
+			state = &loginFail{}
+			h.loginFailures[ip] = state
+		}
+		now := time.Now()
+		if now.Before(state.lockedUntil) {
+			h.sessionMu.Unlock()
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
+			return
+		}
+		state.fails++
+		if state.fails >= loginMaxFails {
+			state.fails = 0
+			state.lockedUntil = now.Add(loginLockout)
+		}
+		h.sessionMu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"密码错误"}`))
 		return
 	}
-	sessionID := generateSessionID()
+	// 密码正确时即使 IP 在锁定期内也放行并清零——锁定只为抬高爆破
+	// 代价，真用户记对密码不应被挡在门外。
 	h.sessionMu.Lock()
-	h.sessionTokens[sessionID] = time.Now().Add(24 * time.Hour)
+	delete(h.loginFailures, ip)
+	now := time.Now()
+	if len(h.sessionTokens) > sessionSweepThreshold {
+		// 机会清扫：session 只增不扫会缓慢累积，登录是低频事件，
+		// 顺手把过期条目与失效失败记录清掉。
+		for id, expiry := range h.sessionTokens {
+			if now.After(expiry) {
+				delete(h.sessionTokens, id)
+			}
+		}
+		for key, state := range h.loginFailures {
+			if state.fails == 0 && now.After(state.lockedUntil) {
+				delete(h.loginFailures, key)
+			}
+		}
+	}
+	sessionID := generateSessionID()
+	h.sessionTokens[sessionID] = now.Add(24 * time.Hour)
 	h.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     "devin_panel_session",
@@ -231,6 +301,9 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   86400,
+		// Lax 挡住跨站 POST 登录/请求携带 cookie 的 CSRF 面，
+		// 同站导航不受影响。
+		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"ok":true}`))
@@ -243,7 +316,8 @@ func (h *Handler) isAuthenticated(r *http.Request) bool {
 	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
 	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		if subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(h.password)) == 1 {
+		provided := sha256.Sum256([]byte(strings.TrimPrefix(auth, "Bearer ")))
+		if subtle.ConstantTimeCompare(provided[:], h.passwordHash[:]) == 1 {
 			return true
 		}
 	}

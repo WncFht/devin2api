@@ -156,7 +156,7 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"response stream file not found"}`))
 		return
 	}
-	_ = json.NewEncoder(w).Encode(mergeStreamEvents(data))
+	_ = json.NewEncoder(w).Encode(mergeStreamEvents(h.maskToken(data)))
 }
 
 // apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、
@@ -190,6 +190,9 @@ func (h *Handler) apiRequestDetail(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"request log not found or already cleaned"}`))
 		return
 	}
+	// meta.json 含 client.user_agent 等自由文本，写路径键名脱敏
+	// 覆盖不到值内 token，读路径按字面值再兜底一遍。
+	detail.Meta = json.RawMessage(h.maskToken(detail.Meta))
 	_ = json.NewEncoder(w).Encode(detail)
 }
 
@@ -215,7 +218,7 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 		"name":      chi.URLParam(r, "*"),
 		"size":      total,
 		"truncated": truncated,
-		"text":      string(data),
+		"text":      string(h.maskToken(data)),
 	})
 }
 
@@ -253,7 +256,7 @@ func (h *Handler) apiProcessLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"text":        string(data),
+		"text":        string(h.maskToken(data)),
 		"next_offset": next,
 	})
 }

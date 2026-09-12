@@ -19,7 +19,7 @@ import (
 // token 留空时上游字段不会被这些端点触达。
 func newTestPanel(t *testing.T, password string, manager *debuglog.Manager) http.Handler {
 	t.Helper()
-	handler := New(password, "https://example.com", "", "", false, obs.NewMetrics(), manager)
+	handler := New(password, "https://example.com", func() string { return "" }, "", false, obs.NewMetrics(), manager)
 	router := chi.NewRouter()
 	handler.Register(router)
 	return router
