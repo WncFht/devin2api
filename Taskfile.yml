@@ -58,3 +58,17 @@ tasks:
         && go mod edit -go=1.26.3
         -require=connectrpc.com/connect@v1.20.0 -require=google.golang.org/protobuf@{{.PROTOBUF_GO_VERSION}}
         && go mod tidy
+
+  census:
+    desc: Scan logs/ wire traffic against the extracted schema (field coverage, drift signals)
+    summary: |
+      统计 logs/ 请求目录里 03-devin-request.json / 04-devin-response.jsonl 的
+      字段覆盖率、未知键和枚举异常。上游新增枚举成员会以数字形式出现在异常里；
+      新增字段在日志中不可见（protojson 会丢未知字段），需走 task extract + diff。
+
+      用法：task census [MAX_DIRS=500]
+      描述符 diff：go run ./cmd/protocensus diff <old-descriptors.pb> <new-descriptors.pb>
+    vars:
+      MAX_DIRS: "0"
+    cmds:
+      - go run ./cmd/protocensus census -max-dirs {{.MAX_DIRS}}

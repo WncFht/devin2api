@@ -1,0 +1,4 @@
+interface:
+  display_name: "Protocol Drift"
+  short_description: "Detect upstream protocol drift and field-coverage gaps"
+  default_prompt: "Use $protocol-drift when checking whether the upstream Devin protocol changed or whether the adapter under-populates requests."
