@@ -1265,7 +1265,7 @@ func TestResponseStreamReopensBeforeContent(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: io.ErrUnexpectedEOF}),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil),
-		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
+		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return pumpUpstream(context.Background(), second), func() {}, nil
 		},
@@ -1294,7 +1294,7 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil),
-		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
+		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return nil, nil, cause
 		},
@@ -1330,5 +1330,85 @@ func TestReloadToken(t *testing.T) {
 	adapter.config.TokenSource = func() string { return "new" }
 	if !adapter.reloadToken() || adapter.currentToken() != "new" {
 		t.Fatal("expected token reload to swap credentials")
+	}
+}
+
+// TestResponseStreamContinuesEmptyEndTurn 验证上游正常 stop 但零内容时
+// 以追加 "continue" 的形态整体重发一次（空 end_turn 是实测退化形态）。
+func TestResponseStreamContinuesEmptyEndTurn(t *testing.T) {
+	first := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	second := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	continued := false
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), first),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil),
+		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
+			if !continueEmpty {
+				return nil, nil, cause
+			}
+			continued = true
+			return pumpUpstream(context.Background(), second), func() {}, nil
+		},
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil) },
+	}
+	var text strings.Builder
+	for {
+		event, err := stream.Recv(context.Background())
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			t.Fatalf("unexpected error event: %#v", event.Error)
+		}
+		if event.Type == llm.ResponseEventDone {
+			if event.Message == nil || event.Message.StopReason != llm.StopReasonStop {
+				t.Fatalf("done = %#v", event.Message)
+			}
+		}
+		text.WriteString(event.Delta)
+	}
+	if !continued {
+		t.Fatal("expected empty-end-turn continuation retry")
+	}
+	if text.String() != "hi" {
+		t.Fatalf("text = %q, want hi", text.String())
+	}
+}
+
+// TestResponseStreamEmptyEndTurnSurfacesWithoutRetry 验证无 reopen 能力时
+// 空轮按原样放行——续传是 best-effort 优化，不能变成必依赖路径。
+func TestResponseStreamEmptyEndTurnSurfacesWithoutRetry(t *testing.T) {
+	first := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), first),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil),
+	}
+	var done *llm.ResponseEvent
+	for {
+		event, err := stream.Recv(context.Background())
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventDone {
+			done = &event
+		}
+	}
+	if done == nil || done.Message == nil || done.Message.StopReason != llm.StopReasonStop {
+		t.Fatalf("done = %#v", done)
 	}
 }

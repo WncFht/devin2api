@@ -228,8 +228,15 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 语义错误（invalid_argument 等）重试只会复现同样失败，直接放行。
-		reopen: func(cause error) (<-chan upstreamFrame, context.CancelFunc, error) {
-			if isTransientConnectError(cause) {
+		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
+			retryRequest := request
+			if continueEmpty {
+				// 空 end_turn（有 stopReason 零内容，上游实测存在的退化形态）：
+				// 追加 "continue" 用户消息重发一次，让模型在同一上下文续说。
+				retryRequest.Messages = append(append([]llm.Message{}, request.Messages...),
+					llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}})
+				slog.Warn("reopening stream: upstream ended with empty content")
+			} else if isTransientConnectError(cause) {
 				slog.Warn("reopening stream: transport error before first content", "error", cause)
 			} else if isUnauthenticated(cause) && adapter.reloadToken() {
 				slog.Info("reopening stream: token reloaded after unauthenticated")
@@ -239,7 +246,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			retryCtx, retryCancel := context.WithCancel(ctx)
 			retryCfg := cfg
 			retryCfg.Token = adapter.currentToken()
-			rebuilt, err := buildRequest(request, retryCfg)
+			rebuilt, err := buildRequest(retryRequest, retryCfg)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
 				recordProtoJSON(recorder, "03-devin-request.json", rebuilt)
@@ -581,8 +588,9 @@ type responseStream struct {
 	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
 	retried bool
 	// reopen 在可重试的 pre-content 失败（传输断裂、凭据自愈后的
-	// unauthenticated、静默看门狗判死）时重发同一请求并返回新泵。
-	reopen func(cause error) (<-chan upstreamFrame, context.CancelFunc, error)
+	// unauthenticated、静默看门狗判死）时重发请求并返回新泵；
+	// continueEmpty 表示空 end_turn 续传：追加 "continue" 用户消息。
+	reopen func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error)
 	// newDecoder 重建响应解码器供重试使用；nil 时不可重试。
 	newDecoder func() *responseDecoder
 }
@@ -628,11 +636,15 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 					// 正常 EOF 的形态吞掉被截断的流。
 					upstreamErr = ctxErr
 				}
-				if upstreamErr != nil && stream.tryReopen(upstreamErr) {
+				if upstreamErr != nil && stream.tryReopen(upstreamErr, false) {
+					continue
+				}
+				events := stream.release(stream.decoder.finish(upstreamErr))
+				if upstreamErr == nil && emptyEndTurn(events) && stream.tryReopen(nil, true) {
 					continue
 				}
 				stream.recordUpstreamFailure(upstreamErr)
-				stream.queue = stream.release(stream.decoder.finish(upstreamErr))
+				stream.queue = events
 				stream.finished = true
 				continue
 			}
@@ -649,7 +661,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.cancel()
 			stream.drainFrames()
 			stallErr := fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)
-			if stream.tryReopen(stallErr) {
+			if stream.tryReopen(stallErr, false) {
 				continue
 			}
 			stream.recordUpstreamFailure(stallErr)
@@ -676,11 +688,16 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 // tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：
 // 此时客户端只见过扣留的 start 事件，重发没有可见副作用。返回 true
 // 表示新流已接管，调用方重置解码器后继续消费。
-func (stream *responseStream) tryReopen(cause error) bool {
-	if stream.retried || stream.producedEvents || stream.reopen == nil || cause == nil {
+// continueEmpty 为空 end_turn 续传：流正常结束但零内容时重发并
+// 追加 "continue" 用户消息（空轮是上游实测退化形态，CPA#4886 同构）。
+func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
+	if stream.retried || stream.producedEvents || stream.reopen == nil {
 		return false
 	}
-	frames, cancel, err := stream.reopen(cause)
+	if cause == nil && !continueEmpty {
+		return false
+	}
+	frames, cancel, err := stream.reopen(cause, continueEmpty)
 	if err != nil {
 		return false
 	}
@@ -695,6 +712,21 @@ func (stream *responseStream) tryReopen(cause error) bool {
 	stream.finished = false
 	stream.queue = nil
 	return true
+}
+
+// emptyEndTurn 判断 finish 产出的事件是否构成「正常 stop 但零内容」：
+// 上游偶发直接以 stopReason 收尾且不带任何 delta。StopSequence 不算——
+// 零内容命中停止序列更可能是预期的截断而非退化轮。
+func emptyEndTurn(events []llm.ResponseEvent) bool {
+	for _, event := range events {
+		if event.Type != llm.ResponseEventDone {
+			continue
+		}
+		return event.Message != nil &&
+			event.Message.StopReason == llm.StopReasonStop &&
+			len(event.Message.Content) == 0
+	}
+	return false
 }
 
 // recordUpstreamFailure 把不可重试的上游侧失败记为请求目录的首个失败点：
