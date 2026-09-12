@@ -372,7 +372,9 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.firstClientMS.Store(-1)
 		manager.activeDirs[name] = recorder
 		go recorder.runWriter()
-		recorder.writeMeta(nil)
+		// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
+		// 同时把同步写盘移出 manager.mutex——目录分配锁不该挡文件 IO。
+		recorder.enqueue(func() { recorder.writeMeta(nil) })
 		return recorder
 	}
 }
@@ -755,14 +757,28 @@ func validLogName(name, extension string) bool {
 	return filepath.Base(name) == name && strings.HasSuffix(name, extension)
 }
 
+// sanitize 把待写值归一成 any 树后递归脱敏。map/slice/string 本身已是
+// any 树节点（投影函数的产物），直接递归；json.RawMessage（03/04 的
+// protojson 帧、06 的 SSE data）只需一次 unmarshal——此前先 marshal 回
+// 字节再 unmarshal 是纯浪费。注意 map/slice 输入会被原地改写（secret 键
+// 遮盖、图片提取），调用方传入的都是当次投影专用结构，原地改写是安全的。
 func (recorder *Recorder) sanitize(value any) any {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return map[string]any{"serialization_error": err.Error()}
-	}
 	var generic any
-	if err := json.Unmarshal(data, &generic); err != nil {
-		return map[string]any{"serialization_error": err.Error()}
+	switch value := value.(type) {
+	case json.RawMessage:
+		if err := json.Unmarshal(value, &generic); err != nil {
+			return map[string]any{"serialization_error": err.Error()}
+		}
+	case map[string]any, []any, string:
+		generic = value
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return map[string]any{"serialization_error": err.Error()}
+		}
+		if err := json.Unmarshal(data, &generic); err != nil {
+			return map[string]any{"serialization_error": err.Error()}
+		}
 	}
 	return recorder.sanitizeValue(generic)
 }
