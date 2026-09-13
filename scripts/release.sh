@@ -95,7 +95,7 @@ for s in ${SUBJECTS[@]+"${SUBJECTS[@]}"}; do
 		OTHERS+=("${s}")
 	fi
 done
-NOTES_FILE="$(mktemp -t devin2api-release-notes)"
+NOTES_FILE="$(mktemp -t devin2api-release-notes.XXXXXX)"
 trap 'rm -f "${NOTES_FILE}"' EXIT
 {
 	echo "devin-2api ${NEXT}"

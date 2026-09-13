@@ -12,7 +12,8 @@ FAILED=0
 pass() { echo "ok    $1"; }
 fail() { echo "FAIL  $1"; FAILED=1; }
 
-WORK="$(mktemp -d -t devin2api-release-selftest)"
+# 模板必须自带 XXXXXX：BSD mktemp 会自动补，GNU 没有就报错。
+WORK="$(mktemp -d -t devin2api-release-selftest.XXXXXX)"
 trap 'rm -rf "${WORK}"' EXIT
 
 # check <描述> <命令串>：bash -c 执行须成功，失败时回显输出。
@@ -241,7 +242,7 @@ cat > "${WORK}/sabotage-p5.sh" <<EOF
 #!/usr/bin/env bash
 [[ -f "${WORK}/sabotage-p5.done" ]] && exit 0
 touch "${WORK}/sabotage-p5.done"
-t="\$(mktemp -d -t sabotage)"
+t="\$(mktemp -d -t sabotage.XXXXXX)"
 git clone -q "file://${WORK}/p5-origin.git" "\${t}/r"
 git -C "\${t}/r" config user.email s@d
 git -C "\${t}/r" config user.name s
