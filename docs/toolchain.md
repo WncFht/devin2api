@@ -81,7 +81,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 - **Issue 模板** `.github/ISSUE_TEMPLATE/bug_report.yml`：要 `X-Request-Id`/`debug_ref`（logs 调试目录名）、`meta.json`/`error.json`、版本、平台——与服务排障工作流（AGENTS.md「服务排障」节）对应。
 - **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有：`extract-embedded-protos`、`go-comment-conventions`、`llm-core-types`、`protocol-drift`、`release-runbook`。
-- **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、本文档。
+- **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、`docs/`（活文档目录，索引 `docs/README.md`：上游协议逆向、排障手册、客户端接入、配额计费、部署、本文档）。`notes/` 是本机私有工作区（gitignore），只放 `archive/` 日期快照。
 
 ## 8. 速查
 

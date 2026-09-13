@@ -203,6 +203,7 @@ auth:
 ## 文档
 
 - **架构、API 字段子集、proto 提取等技术细节**：[贡献指南](CONTRIBUTING.md)
+- **上游协议逆向、客户端接入、排障手册、部署与工具链**：[docs/](docs/README.md)
 - **开源协议**：[MIT](LICENSE)
 
 ## 致谢

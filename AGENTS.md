@@ -84,7 +84,7 @@
 行内公式用 $，行间公式用 $$，表格中的 LaTeX 使用 \mid、\Vert 等命令，避免裸 |
 正确使用 LaTeX 语法，最好不要把数学公式放到代码块里面
 
-- `notes/` 下顶层带日期的笔记必须使用 `YYYY-MM-DD-<slug>.md` 格式；不要使用 `article.md`、`周报.md` 或 `*.zh.md` 这类别名。`notes/` 整体 gitignore，不随公开发布。
+- 文档分两处：`docs/` 是随仓库发布的**活文档**（上游协议逆向、排障、客户端接入、部署、工具链，索引 `docs/README.md`），agent 需要的长期参考都写这里；`notes/` 整体 gitignore，只放 `archive/` 下的日期快照调查档案（`YYYY-MM-DD-<slug>.md`，不要用 `article.md`、`周报.md` 或 `*.zh.md` 这类别名）。
 
 ## 格式化工具链
 
@@ -125,7 +125,7 @@
 
 ## 部署（单实例约定）
 
-本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003，plist 与原理见 notes/macos-deployment.md。
+本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003，plist 与原理见 docs/macos-deployment.md。
 
 - 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入运行目录并同步 config → `kickstart -k` → healthz 校验版本）。
 - 运行目录是 `~/Library/Application Support/devin-2api/`（二进制+config.yaml+logs），不是仓库：launchd 子进程对 ~/Desktop 的 open 会被 TCC 授权判定永久挂起。仓库 `logs/` 是指向运行目录的符号链接，排障路径照旧。

@@ -1,0 +1,91 @@
+# Devin 配额计费模型
+
+通过配额快照的整数翻转点与代理侧逐请求账单对齐，反推出的上游 Teams 座位计费公式与日/周额度大小。结论先行：
+
+$$
+\text{burn} = \big((t_{in}+t_{cw})\cdot p_{in} + t_{cr}\cdot p_{cached} + t_{out}\cdot p_{out}\big)/10^6 \quad \text{（目录价美元）}
+$$
+
+- **日额度 ≈ $14.1，周额度 ≈ $26.3**（目录价口径，周 ≈ 1.86×日）；
+- **cache_write 按 ~1.0× input 价计费**（拟合隐含价 $9.5–10.7/Mtok，fable input 价 $10），不是 Anthropic 惯例的 1.25×[^anthropic-cache]；
+- `credit_multiplier` 与实际扣费无关（同为 mult=175 的调用燃烧量差 200 倍）；
+- catalog 无价格维的 free 档模型（swe-2-max 等）烧 $0；
+- 日额度归零后字段返回 null，付费模型被上游 `failed_precondition` 拒，free 档不受影响。
+
+## 数据来源
+
+三路数据：
+
+| 数据       | 位置                                                                                                                                                         | 说明                                                                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| 配额快照   | `scripts/quota/poll.sh` 每 30s 打一次 `GetUserStatus`[^connect]，记 `daily/weeklyQuotaRemainingPercent`；另有 daemon 每 5 分钟一条写 `logs/quota.jsonl` 保底 | 本机采集示例：`outputs/quota-probe-2026-09-13.jsonl`                                                                                       |
+| 逐请求摘要 | `logs/index.jsonl`                                                                                                                                           | 每个代理请求一行：模型、`input/output/cache_read/cache_write_tokens`、result、秒级时间戳                                                   |
+| 模型目录   | `GetCliModelConfigs` 缓存的 `/panel/api/models` 快照                                                                                                         | 191 个模型的 `credit_multiplier`、cost_tier、展示价（in/cached/out，无 cache_write 维）；本机示例：`outputs/model-catalog-2026-09-13.json` |
+
+配额字段是 **int32 整数百分比**且向下取整——1% 的粒度决定了只能用"翻转点"做方程：两次相邻采样间掉了 k 个点，即该窗口真实燃烧量落在 $((k-1)D, (k+1)D)$，D 为每点对应的美元数。上游入账还有 ~1–3 分钟延迟，所以拟合时把请求时间戳整体前移一个 lag 再扫参。
+
+## 拟合方法
+
+逐请求的"真实账单"不可见，可见的只有配额百分比的阶梯下降。做法是把每次翻转当成一个区间约束：窗口 $(t_i, t_{i+1}]$ 内掉 $k$ 点，则 $\sum$ 该窗内请求的 burn $+ \varepsilon_{\text{入账延迟}} \in ((k-1)D,(k+1)D)$。
+
+实际操作中等价更稳的形式：对候选计费函数 $b(\text{request})$，构造累计燃烧曲线 $B(t)=\sum_{t_c\le t-\delta} b(c)$，在每个重置窗口内对「已消耗百分点 vs $B(t)$」做带截距的最小二乘。斜率的倒数 $1/\hat\beta$ 就是 1% 对应的账单额，乘以 100 得窗口额度。**两个独立窗口（16:00 重置两侧）用同一公式各自拟合，斜率一致才算数**——这是排除"巧合拟合"的关键检验。
+
+## 被否掉的假设
+
+探索过程中三个假设依次被数据杀死，每个的死法都值得记录：
+
+1. **固定倍率计费**（每请求烧 `credit_multiplier` 单位，与 token 无关）。上午的 fable-5-1-medium 连打 13 发（mult 全=175，est$ 却从 $0.004 到 $0.80 差 200 倍），掉点幅度跟 $ 走不跟次数走；且全日累计 14K mult-units 对应 97 个日点 → D≈145 u/点，但前一天 79 个 mult=75 的 opus 探测调用按此应掉 29 点，实测几乎没动。SSE 比 $ 模型差 46 倍。
+2. **不含 cache_write 的目录价计费**。单窗口内 R²≈0.99 看似很好，但跨窗口斜率差 3.3 倍（窗口 B 每 $ 燃烧是 A 的 3.3 倍）。一度怀疑有外部用量或额度缩水——实际原因是 B 的 19 个 agentic 调用写了 118 万 cache_write token（每轮重写全上下文），而 est$ 公式没算它。
+3. **swe-2-max 隐性计费**。窗口 B 内有 1,050 个 swe 调用，若每个扣哪怕 0.05 点就能解释缺口——但把 swe 计数/输出/cache 加进回归，系数全部 ~0 或为负（噪声），且前一天 1.3 万个 swe 调用对应几乎零漂移。
+
+补上 cache_write 后全部收敛：
+
+| 窗口                  | 通道   | 斜率 (pts/$) | 推出额度 | R²    |
+| --------------------- | ------ | ------------ | -------- | ----- |
+| A（16:00–次日 16:00） | daily  | 7.081        | $14.12   | 0.994 |
+| A                     | weekly | 3.668        | $27.26   | 0.999 |
+| B（次日 16:00–）      | daily  | 7.168        | $13.95   | 0.955 |
+| B                     | weekly | 3.949        | $25.32   | 0.994 |
+
+日额度两窗口差 1.2%，周差 7%。`in+out+cr+cw` 全自由权重回归也收敛到 cw 主导（cw≈$10.7/M 隐含价），但因为当天燃烧几乎全是 fable-5-1-medium 单一模型，各 token 类型间有共线性，权重拆分不如"目录价 + cw@input 价"先验稳健——后者同时是最经济的解释。
+
+![拟合图](../outputs/quota-fit-2026-09-13.png)
+
+## 行为层面的附带发现
+
+- **重置**：`daily_quota_reset_at` 与 `weekly_quota_reset_at` 是同一 unix 时刻（观测到 16:00 +08 双重置），"周额度"实为 ~1.86×日额度的并行预算，不是滚动 7 天。
+- **归零**：daily 烧穿后 `dailyQuotaRemainingPercent` 直接变 null；付费调用在 connect 阶段收到 400 `failed_precondition: Your daily usage quota has been exhausted`（可引导至 app.devin.ai 购买 on-demand）[^devin-quota]；free 档（swe-2-max）照常服务，归零后 242 个调用全部 completed。
+- **失败计费**：3 个配额拒绝的调用不产生燃烧（请求没真正执行）；其它类型失败的计费情况样本不足。
+- **入账延迟**：~1–3 分钟，且偶发 10 分钟级延迟。
+- `overageBalanceMicros` 恒为 -500354（未开 auto-reload），`acuConsumed/acuLimit` 恒 null——Teams 座位的配额不走 ACU 通道。
+- `GetQuotaUsageInternal`（能直接返回日/周 usage_micros/limit_micros）需要 admin secret，普通会话 token 拿不到，所以只能反推。
+
+## 复现
+
+```bash
+# 1. 加密采集（独立于代理进程，token 从运行目录 config.yaml 读）
+nohup scripts/quota/poll.sh 30 /tmp/quota.jsonl &
+
+# 2. 正常用付费模型产生燃烧（index.jsonl 自动记录）
+
+# 3. 拟合（uv 起隔离环境；catalog 也可给 http://localhost:3003/panel/api/models --key <api_key>）
+uv run --with numpy --with matplotlib scripts/quota/fit.py \
+  --status outputs/quota-probe-2026-09-13.jsonl \
+  --index "$HOME/Library/Application Support/devin-2api/logs/index.jsonl" \
+  --catalog outputs/model-catalog-2026-09-13.json \
+  --out outputs/quota-fit.png
+```
+
+注意点：`fit.py` 按 daily 字段回升切窗口；daily 归零后样本截断（`censor`），否则 0 值平台会拉歪斜率。想进一步分离各 token 类型的独立权重，需要用价格构成差异大的模型（如 kimi-k3-max $3/$15、mult=9）跑大 output 调用。
+
+## 对 est_cost 的修正
+
+`internal/dashboard/usage.go` 的 est_cost 原本漏算 cache_write（字段采集了但没进公式），已按本结论修复为 `(input + cache_write)·p_in`（commit 78b6ede）。修复后面板 est_cost 与配额实际燃烧同口径。
+
+### 参考文献
+
+[^anthropic-cache]: Anthropic. Prompt caching pricing（cache write 按 1.25× input、cache read 按 0.1× input 计价）. [Claude API docs](https://docs.claude.com/en/docs/build-with-claude/prompt-caching).
+
+[^connect]: Connect RPC. Connect protocol over HTTP/JSON. [connectrpc.com/docs/protocol](https://connectrpc.com/docs/protocol/).
+
+[^devin-quota]: Devin app.devin.ai. Usage & billing（on-demand usage / auto-reload）. <https://app.devin.ai/settings/usage>.

@@ -203,6 +203,7 @@ Notes:
 ## Documentation
 
 - **Architecture, supported API fields, proto extraction, and other technical details**: [Contributing guide](CONTRIBUTING.md)
+- **Upstream protocol reverse-engineering notes, client setup, debugging playbook, deployment & toolchain**: [docs/](docs/README.md)（中文）
 - **License**: [MIT](LICENSE)
 
 ## Acknowledgments
