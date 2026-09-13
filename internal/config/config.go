@@ -188,11 +188,11 @@ func resolveDevinToken() string {
 }
 
 // devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
-// Linux/macOS 上 CLI 遵循 XDG 写 ~/.local/share。Devin CLI 目前没有
-// Windows 发行版（homebrew cask 只出 apple-darwin/unknown-linux），
-// %APPDATA%/%LOCALAPPDATA% 两个候选是前瞻探测：若日后 Windows CLI
-// 落地并按惯例写 roaming/local AppData，发现链直接可用；今天 Windows
-// 上实际生效的来源只有环境变量与显式 devin.token。
+// Linux/macOS 上 CLI 遵循 XDG 写 ~/.local/share。Windows 上 CLI 不单发，
+// 由 Windsurf 桌面端（即 Devin app）内置携带：
+// resources/app/extensions/windsurf/devin/bin/devin.exe，
+// `devin.exe auth login` 写 %APPDATA%\devin\credentials.toml（已实测）；
+// %LOCALAPPDATA% 一并探测作兜底。
 func devinCredentialsPaths() []string {
 	var dirs []string
 	if runtime.GOOS == "windows" {

@@ -25,7 +25,7 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 devin-2api 使用你的 Devin 会话 token（`devin-session-token$...`）向上游鉴权。`config.yaml` 里 `devin.token` 留空时按顺序自动发现：
 
 1. `DEVIN_TOKEN` 或 `WINDSURF_API_KEY` 环境变量；
-2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`。（Devin CLI 目前没有 Windows 发行版，Windows 下请用环境变量或 `devin.token`；`%APPDATA%\devin\credentials.toml` 与 `%LOCALAPPDATA%\devin\credentials.toml` 仍会探测，供日后 Windows 版 CLI 落地时使用。）
+2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`（其次 `%LOCALAPPDATA%\devin\credentials.toml`）。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
 
 macOS 下也可从 Devin 应用本地状态提取：
 

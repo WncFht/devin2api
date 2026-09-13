@@ -25,7 +25,7 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 devin-2api authenticates to Devin with your Devin session token (`devin-session-token$...`). If `devin.token` is left empty in `config.yaml`, the adapter discovers one automatically, in order:
 
 1. `DEVIN_TOKEN` or `WINDSURF_API_KEY` environment variable;
-2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux. (The Devin CLI has no Windows build today; on Windows use the env var or `devin.token`. `%APPDATA%\devin\credentials.toml` and `%LOCALAPPDATA%\devin\credentials.toml` are also probed in case a future Windows CLI writes there.)
+2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux; `%APPDATA%\devin\credentials.toml` (then `%LOCALAPPDATA%\devin\credentials.toml`) on Windows. The Windows CLI is not distributed standalone but ships inside the [Windsurf desktop app](https://devin.ai/download) — after installing it, `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` produces the file above.
 
 On macOS you can also extract the token from the Devin app's local state:
 
