@@ -54,7 +54,7 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-Assets are named `devin-2api-<os>-<arch>` (Windows builds end in `.exe`); pick the one matching your platform. On Windows, run `devin-2api-windows-amd64.exe -config config.yaml` in a console — Ctrl+C triggers the same graceful drain.
+Assets are named `devin-2api-<os>-<arch>`; pick the one matching your platform. Windows assets ship as `.zip` bundles (exe + `config.example.yaml` + LICENSE) — unzip, edit `config.yaml`, run `devin-2api.exe -config config.yaml` in a console; Ctrl+C triggers the same graceful drain.
 
 From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
 
@@ -70,7 +70,15 @@ docker run --rm -p 8080:8080 \
   ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
 
-Run as a service (optional): `scripts/deploy.sh` manages a launchd agent on macOS, `scripts/deploy-linux.sh` a `systemd --user` unit on Linux — both install or upgrade in one shot (`--release latest` downloads a prebuilt binary). Windows has no service integration: run the `.exe` in a console, or register it with NSSM / Task Scheduler if you want it daemonized.
+Run as a service (optional):
+
+| Platform | Supervisor                               | Runtime dir (binary + config + logs)       | Install / upgrade         |
+| -------- | ---------------------------------------- | ------------------------------------------ | ------------------------- |
+| macOS    | launchd agent                            | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`       |
+| Linux    | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
+| Windows  | none — console, or NSSM / Task Scheduler | alongside the exe                          | download zip, run exe     |
+
+Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, and keep a `logs` symlink inside the repo pointing at the runtime logs. On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
 
 ### 4. Verify
 

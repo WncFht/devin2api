@@ -54,7 +54,7 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-资产命名规则是 `devin-2api-<os>-<arch>`（Windows 资产带 `.exe` 后缀），按平台选择。Windows 下在控制台运行 `devin-2api-windows-amd64.exe -config config.yaml`，Ctrl+C 同样触发优雅排空。
+资产命名规则是 `devin-2api-<os>-<arch>`，按平台选择。Windows 资产是 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）——解压后编辑 `config.yaml`，在控制台运行 `devin-2api.exe -config config.yaml`；Ctrl+C 同样触发优雅排空。
 
 源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 
@@ -70,7 +70,15 @@ docker run --rm -p 8080:8080 \
   ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
 
-以服务方式运行（可选）：macOS 用 `scripts/deploy.sh` 托管 launchd 代理，Linux 用 `scripts/deploy-linux.sh` 托管 `systemd --user` unit——首装与升级同一条命令（`--release latest` 可装预编译二进制）。Windows 不做服务集成：控制台里跑 `.exe` 即可，要常驻可自行用 NSSM / 任务计划程序注册。
+以服务方式运行（可选）：
+
+| 平台    | 托管方式                                 | 运行目录（二进制 + 配置 + 日志）           | 安装 / 升级               |
+| ------- | ---------------------------------------- | ------------------------------------------ | ------------------------- |
+| macOS   | launchd 代理                             | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`       |
+| Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
+| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe 同目录                                 | 下载 zip，运行 exe        |
+
+两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，并在仓库内维护指向运行目录日志的 `logs` 符号链接。Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 
 ### 4. 验证
 
