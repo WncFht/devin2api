@@ -139,6 +139,11 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	if n := len(result.ChatMessagePrompts); n > 0 {
 		result.ChatMessagePrompts[n-1].PromptCacheOptions = ephemeralCacheOptions()
 	}
+	// router uid 经 AssignModel 解析出的 jwt 绑本次 cascade_id，
+	// 与真实 CLI 的 GetChatMessage 形态一致（见 resolveModelRouting）。
+	if config.ModelAssignmentJWT != "" {
+		result.ModelAssignmentJwt = proto.String(config.ModelAssignmentJWT)
+	}
 	return result, repairs, nil
 }
 

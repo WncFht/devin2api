@@ -63,6 +63,9 @@ type Config struct {
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
 	TokenSource func() string
+	// ModelAssignmentJWT 是 router uid 经 AssignModel 解析出的绑定 jwt，
+	// 由 Stream 按请求设置（与 Token/Model 一样是每次调用覆盖的字段）。
+	ModelAssignmentJWT string
 }
 
 // clientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -101,6 +104,17 @@ type Adapter struct {
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
+	// assignments 缓存 (router uid, cascade id) 的 AssignModel 解析结果：
+	// assignment jwt 绑 cascade_id（上游实测），同会话内复用省去
+	// 每请求一次的解析往返。
+	assignmentsMu sync.Mutex
+	assignments   map[string]resolvedAssignment
+}
+
+// resolvedAssignment 是 AssignModel 对单个 router uid 的解析结果。
+type resolvedAssignment struct {
+	modelUID string
+	jwt      string
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
@@ -125,6 +139,7 @@ func New(config Config) (*Adapter, error) {
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
 		gate:           newRateGate(config.MaxRPM),
+		assignments:    make(map[string]resolvedAssignment),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
@@ -197,21 +212,26 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if alias, ok := adapter.config.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
 		model = strings.TrimSpace(alias)
 	}
+	recorder := debuglog.FromContext(ctx)
+	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
+	adapter.ensureCatalog(ctx)
 	adapter.warnIfModelAbsentFromCatalog(model)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
-	if err := adapter.validateNotRouterModel(model); err != nil {
+	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
+	if err != nil {
+		recorder.WriteError("devin_connect", err)
 		return nil, err
 	}
 	cfg := adapter.config
 	cfg.Model = model
 	cfg.Token = adapter.currentToken()
+	cfg.ModelAssignmentJWT = assignmentJWT
 	protoRequest, repairs, err := buildRequest(request, cfg)
 	if err != nil {
 		return nil, err
 	}
-	recorder := debuglog.FromContext(ctx)
 	repairs.SanitizeHits = sanitizeHits
 	recorder.SetRepairs(repairs)
 	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
@@ -404,20 +424,77 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 		"model", model, "hint", "check devin.aliases target or bump devin.client_version")
 }
 
-// validateNotRouterModel 拒绝上游 router uid 的直连请求：目录里标了
-// is_model_router 的 uid 必须先经 AssignModel 解出真实模型（未实现），
-// 实测直连只换回 unavailable: third-party model provider——伪装成
-// 瞬时错误的永久失败。提前报成 invalid_argument，让网关按 4xx 归类。
-// 目录未覆盖该模型时放行，交给上游裁决。
-func (adapter *Adapter) validateNotRouterModel(model string) error {
+// ensureCatalog 尽力保证模型目录已加载：router 判定、图片能力位校验与
+// 缺席告警都以目录为依据，目录从未加载过时这些检查静默失效。
+// TTL 缓存使命中期的调用只是读锁；拉取失败放行，维持「交给上游裁决」的旧行为。
+func (adapter *Adapter) ensureCatalog(ctx context.Context) {
+	if _, err := adapter.ListModels(ctx); err != nil {
+		slog.Warn("model catalog unavailable; router detection skipped", "error", err)
+	}
+}
+
+// resolveModelRouting 对目录里标了 is_model_router 的 uid 调 AssignModel
+// 解出真实 model_uid 与绑定 cascade_id 的 assignment jwt——router uid
+// 直连上游只回 unavailable: third-party model provider，伪装成瞬时错误
+// 的永久失败。目录未覆盖该模型时按原样放行，交给上游裁决。
+func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.RequestMessages, model string) (resolved string, assignmentJWT string, err error) {
 	adapter.modelsMu.RLock()
-	defer adapter.modelsMu.RUnlock()
+	isRouter := false
 	for _, m := range adapter.models {
-		if m.ID == model && m.IsModelRouter {
-			return fmt.Errorf("invalid_argument: model %q is an upstream router uid and requires AssignModel resolution, which this proxy does not implement; pick a concrete model uid", model)
+		if m.ID == model {
+			isRouter = m.IsModelRouter
+			break
 		}
 	}
-	return nil
+	adapter.modelsMu.RUnlock()
+	if !isRouter {
+		return model, "", nil
+	}
+	// jwt 绑 cascade_id：必须用与本请求 wire 一致的派生值。
+	_, cascadeID := deriveSessionIDs(request)
+	assignment, err := adapter.assignModel(ctx, model, cascadeID)
+	if err != nil {
+		return "", "", err
+	}
+	slog.Info("resolved model router via AssignModel", "router", model, "model", assignment.modelUID)
+	return assignment.modelUID, assignment.jwt, nil
+}
+
+// assignModel 调上游 AssignModel 把 router uid 解析为真实模型 + assignment
+// jwt，结果按 (router uid, cascade id) 缓存。错误分类见
+// notes/upstream-protocol.md 路由节：非 router uid → invalid_argument，
+// 不存在的 router → not_found。
+func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
+	key := routerUID + "|" + cascadeID
+	adapter.assignmentsMu.Lock()
+	cached, ok := adapter.assignments[key]
+	adapter.assignmentsMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	name, version, os := adapter.config.clientIdentity()
+	resp, err := adapter.apiClient.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
+		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
+		ModelRouterUid: proto.String(routerUID),
+		CascadeId:      proto.String(cascadeID),
+	}))
+	if err != nil {
+		return resolvedAssignment{}, fmt.Errorf("AssignModel(%s): %w", routerUID, connectError(err))
+	}
+	assignment := resp.Msg.GetAssignment()
+	resolved := strings.TrimSpace(assignment.GetModelUid())
+	if resolved == "" || assignment.GetAssignmentJwt() == "" {
+		return resolvedAssignment{}, fmt.Errorf("invalid_argument: AssignModel(%s) returned empty assignment", routerUID)
+	}
+	result := resolvedAssignment{modelUID: resolved, jwt: assignment.GetAssignmentJwt()}
+	adapter.assignmentsMu.Lock()
+	// 有界缓存：会话级键随运行时长累积，触顶整体清空让会话重新解析。
+	if len(adapter.assignments) >= 4096 {
+		adapter.assignments = make(map[string]resolvedAssignment)
+	}
+	adapter.assignments[key] = result
+	adapter.assignmentsMu.Unlock()
+	return result, nil
 }
 
 func requestHasImages(request llm.RequestMessages) bool {
