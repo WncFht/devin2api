@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
 // DashboardRegistrar 描述面板路由注册所需的最小能力。
@@ -128,6 +130,9 @@ func (application *App) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/healthz", application.health)
 	router.Group(func(protected chi.Router) {
+		// request-id 最先挂上：连同鉴权/并发拒绝在内的所有 /v1/* 响应
+		// 都需要 Anthropic 形态的请求 ID。
+		protected.Use(requestIDMiddleware)
 		// 先鉴权再占并发槽：未携带 key 的洪水请求不应消耗稀缺并发额度。
 		protected.Use(application.apiKeyMiddleware)
 		// WebSocket 升级单独一组：连接是长生命周期的，不能在 middleware 里
@@ -323,6 +328,17 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// requestIDMiddleware 给每个 /v1/* 响应发 req_ 前缀的请求 ID。
+// Claude Code 只把 req_ 前缀的 request-id 认作 Anthropic 第一方响应：
+// 缺失或非 req_ 形态时它把响应当作中间人代理产物——流式失败后会再做
+// 一次非流式探测请求，且重试预算与超时参数都按更保守的档取。
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("request-id", randid.Prefixed("req_"))
+		next.ServeHTTP(writer, request)
+	})
+}
+
 // apiKeyMiddleware 校验 OpenAI 兼容接口的 API Key。
 // 支持标准 Authorization: Bearer <key> 与兼容头 X-Api-Key: <key>。
 func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
@@ -474,10 +490,15 @@ func (application *App) createCompletion(
 	writer.Header().Set("Content-Type", "application/json")
 	out := &streamWriter{writer: writer, recorder: recorder}
 	if flusher, ok := writer.(http.Flusher); ok {
-		// 非流式响应在上游长思考窗口内完全无字节——"\n" 心跳刷新
-		// 下游空闲计时器且是合法 JSON 前导空白。无 Flusher 则不心跳。
 		out.flusher = flusher
-		out.heartbeat = []byte("\n")
+		// "\n" 心跳只发给 OpenAI 系（Codex 约 30s 无字节弃连）。
+		// Anthropic 非流式在上游思考窗口保持静默：Anthropic SDK 系客户端
+		// 容忍分钟级首字等待，而任何提前写出的字节都把状态提交为 200，
+		// 之后的失败只能以「200 + 错误体」下发——Claude Code 把它判为
+		// malformed response 并终止整轮，不可重试。
+		if api != "anthropic" {
+			out.heartbeat = []byte("\n")
+		}
 	}
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
@@ -575,7 +596,7 @@ func clientIP(request *http.Request) string {
 // clientRequestID 提取客户端自带的关联 ID，供其事后按自己的 ID 反查日志。
 // 只认常见关联头；长度截断防止异常大的头放大日志体积。
 func clientRequestID(request *http.Request) string {
-	for _, header := range []string{"X-Request-Id", "X-Session-Id"} {
+	for _, header := range []string{"X-Request-Id", "X-Session-Id", "X-Client-Request-Id"} {
 		if value := strings.TrimSpace(request.Header.Get(header)); value != "" {
 			if len(value) > 128 {
 				return value[:128]
@@ -648,11 +669,17 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 		status = http.StatusBadRequest
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	// 上游限流文案里的 reset 秒数是唯一可行动的 hint——翻成标准
-	// Retry-After 头，客户端/网关才能按语义退避而不是猜。
+	// 上游限流文案里的 reset hint 是唯一可行动信号——翻成标准
+	// Retry-After 头 + Anthropic 统一限流重置时刻，客户端/网关才能
+	// 按语义退避而不是猜。unified-reset 给的是绝对时刻：Claude Code
+	// 对 429 优先按它睡到重置点（上限 6h），分钟级限流也能扛过
+	// 整个重试预算。注意：非 429 状态的 Retry-After 不可超过 60s——
+	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
-		if seconds, ok := common.RetryAfterSeconds(message); ok {
-			writer.Header().Set("Retry-After", strconv.Itoa(seconds))
+		if resetAt, ok := common.RateLimitReset(message, time.Now()); ok {
+			wait := int(math.Ceil(time.Until(resetAt).Seconds()))
+			writer.Header().Set("Retry-After", strconv.Itoa(wait))
+			writer.Header().Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(resetAt.Unix(), 10))
 		}
 	}
 	noteRetryAfter(recorder, message)

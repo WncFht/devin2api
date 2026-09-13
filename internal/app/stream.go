@@ -33,6 +33,10 @@ type streamWriter struct {
 	flusher   http.Flusher
 	recorder  *debuglog.Recorder
 	committed bool
+	// upstreamOpen 标记上游流已建立：保活只在此后武装——建连前的静默期
+	// 写任何字节都会提前提交 200，限流闩/上游 connect 失败便无法再以
+	// 真实状态码（429 等）下发。
+	upstreamOpen bool
 	// heartbeat 是等待上游期间周期性写出的保活载荷：SSE 用注释行，
 	// 非流式 JSON 用 "\n"（合法前导空白）；空表示不心跳。
 	heartbeat []byte
@@ -59,8 +63,10 @@ func (out *streamWriter) writeContent(p []byte) error {
 	return out.write(p)
 }
 
-// awaitEvent 等待上游下一个事件；等待期间按 ticker 节奏写 SSE 注释行保活。
-// items 关闭视为流结束；ctx 取消或写失败时返回对应错误。
+// awaitEvent 等待上游下一个事件；等待期间按 ticker 节奏写保活帧。
+// 保活仅在上游流建立后武装：connected 标记由泵协程在 Stream() 返回后
+// 推入，先于任何事件到达。items 关闭视为流结束；ctx 取消或写失败时
+// 返回对应错误。
 func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, ticker *time.Ticker) (llm.ResponseEvent, error) {
 	for {
 		select {
@@ -68,9 +74,13 @@ func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, 
 			if !ok {
 				return llm.ResponseEvent{}, io.EOF
 			}
+			if item.connected {
+				out.upstreamOpen = true
+				continue
+			}
 			return item.event, item.err
 		case <-ticker.C:
-			if len(out.heartbeat) == 0 {
+			if len(out.heartbeat) == 0 || !out.upstreamOpen {
 				continue
 			}
 			if err := out.write(out.heartbeat); err != nil {
@@ -84,10 +94,14 @@ func (out *streamWriter) awaitEvent(ctx context.Context, items <-chan pumpItem, 
 	}
 }
 
-// pumpItem 是 Stream()/Recv() 的一次产出。
+// pumpItem 是 Stream()/Recv() 的一次产出。connected 为 true 时不是事件
+// 而是「上游流已建立」信号——泵协程在 Stream() 成功后、首个 Recv 结果前
+// 推入，写出方据此武装保活。它必然先于所有事件被消费（首个 awaitEvent
+// 循环会把它吃掉），writeProtocolStream 的批量预取分支见不到它。
 type pumpItem struct {
-	event llm.ResponseEvent
-	err   error
+	event     llm.ResponseEvent
+	err       error
+	connected bool
 }
 
 // startStreamPump 在后台协程里建立上游流并串行消费事件，把结果按序推入
@@ -103,6 +117,7 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 			items <- pumpItem{err: err}
 			return
 		}
+		items <- pumpItem{connected: true}
 		for {
 			event, err := stream.Recv(ctx)
 			if err == nil {
