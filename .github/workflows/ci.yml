@@ -70,6 +70,11 @@ jobs:
       - name: Assert deploy assets
         run: bash scripts/deploy-assets.test.sh
 
+      # release.sh 离线演练：bare origin + stub curl/gh，覆盖 dry-run
+      # 版本计算与 publish 的全部拒绝分支，不触网。
+      - name: release.sh self-test
+        run: bash scripts/release-selftest.sh
+
   lint-markdown:
     name: Markdown
     runs-on: ubuntu-latest

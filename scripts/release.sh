@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 PUBLISH=0
 OVERRIDE=""
 CI_WAIT_SECONDS="${CI_WAIT_SECONDS:-1200}"
+CI_POLL_INTERVAL="${CI_POLL_INTERVAL:-20}"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--publish) PUBLISH=1 ;;
@@ -197,7 +198,7 @@ while true; do
 		echo "拒绝发布：等待 CI 超时（state=${STATE}）" >&2
 		exit 1
 	fi
-	sleep 20
+	sleep "${CI_POLL_INTERVAL}"
 done
 
 # 打 tag 前复查：期间若有人推进 origin/main，本次 HEAD 已不是它，拒绝。
