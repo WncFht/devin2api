@@ -67,6 +67,16 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "${out}" ./cmd/devin-2api
 
+      # CGO_ENABLED=0 的产物不应声明解释器；出现 program interpreter 说明
+      # 意外引入了 cgo 依赖——alpine/scratch 镜像里会跑不起来。
+      - name: Assert static binary
+        if: matrix.goos == 'linux'
+        run: |
+          if readelf -l "dist/${{ matrix.asset }}" | grep -q "Requesting program interpreter"; then
+            echo "::error::${{ matrix.asset }} 不是静态二进制（有 program interpreter）"
+            exit 1
+          fi
+
       - name: Package windows zip
         if: matrix.goos == 'windows'
         run: |
