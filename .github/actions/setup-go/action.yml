@@ -1,0 +1,34 @@
+name: Setup Go
+description: 按 go.mod 装 Go，模块缓存按 go.sum 键、构建缓存按 job+sha 逐级回退。
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      id: go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        # 内建 cache 关，下面两类缓存键分得更细
+        cache: false
+
+    - name: Cache module downloads
+      uses: actions/cache@v4
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-gomod-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-gomod-${{ steps.go.outputs.go-version }}-
+          ${{ runner.os }}-gomod-
+
+    - name: Cache build output
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-gobuild-${{ github.job }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-gobuild-${{ github.job }}-
+          ${{ runner.os }}-gobuild-
+
+    - name: Verify toolchain
+      shell: bash
+      run: go version
