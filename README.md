@@ -25,7 +25,7 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 devin-2api authenticates to Devin with your Devin session token (`devin-session-token$...`). If `devin.token` is left empty in `config.yaml`, the adapter discovers one automatically, in order:
 
 1. `DEVIN_TOKEN` or `WINDSURF_API_KEY` environment variable;
-2. `~/.local/share/devin/credentials.toml` (written by the Devin CLI login).
+2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux, `%APPDATA%\devin\credentials.toml` or `%LOCALAPPDATA%\devin\credentials.toml` on Windows.
 
 On macOS you can also extract the token from the Devin app's local state:
 
@@ -54,6 +54,8 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
+Assets are named `devin-2api-<os>-<arch>` (Windows builds end in `.exe`); pick the one matching your platform. On Windows, run `devin-2api-windows-amd64.exe -config config.yaml` in a console — Ctrl+C triggers the same graceful drain.
+
 From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
 
 ```bash
@@ -67,6 +69,8 @@ docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
   ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
+
+Run as a service (optional): `scripts/deploy.sh` manages a launchd agent on macOS, `scripts/deploy-linux.sh` a `systemd --user` unit on Linux — both install or upgrade in one shot (`--release latest` downloads a prebuilt binary). Windows has no service integration: run the `.exe` in a console, or register it with NSSM / Task Scheduler if you want it daemonized.
 
 ### 4. Verify
 

@@ -128,3 +128,5 @@
 - 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=60`，在途流跑完再退），禁用 `kill -9` 抢时间。
 - 冒烟用空闲端口（如 :3005）起临时二进制，验证完立即关闭；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
+
+其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，运行目录 `${XDG_DATA_HOME:-~/.local/share}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。

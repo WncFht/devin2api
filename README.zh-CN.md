@@ -25,7 +25,7 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 devin-2api 使用你的 Devin 会话 token（`devin-session-token$...`）向上游鉴权。`config.yaml` 里 `devin.token` 留空时按顺序自动发现：
 
 1. `DEVIN_TOKEN` 或 `WINDSURF_API_KEY` 环境变量；
-2. `~/.local/share/devin/credentials.toml`（Devin CLI 登录产物）。
+2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`，Windows 为 `%APPDATA%\devin\credentials.toml` 或 `%LOCALAPPDATA%\devin\credentials.toml`。
 
 macOS 下也可从 Devin 应用本地状态提取：
 
@@ -54,6 +54,8 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
+资产命名规则是 `devin-2api-<os>-<arch>`（Windows 资产带 `.exe` 后缀），按平台选择。Windows 下在控制台运行 `devin-2api-windows-amd64.exe -config config.yaml`，Ctrl+C 同样触发优雅排空。
+
 源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 
 ```bash
@@ -67,6 +69,8 @@ docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
   ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
+
+以服务方式运行（可选）：macOS 用 `scripts/deploy.sh` 托管 launchd 代理，Linux 用 `scripts/deploy-linux.sh` 托管 `systemd --user` unit——首装与升级同一条命令（`--release latest` 可装预编译二进制）。Windows 不做服务集成：控制台里跑 `.exe` 即可，要常驻可自行用 NSSM / 任务计划程序注册。
 
 ### 4. 验证
 
