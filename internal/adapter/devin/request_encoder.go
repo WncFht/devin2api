@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"google.golang.org/protobuf/proto"
 	devinproto "local/devinproto"
@@ -63,7 +64,10 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		RequestType:              devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
 		Configuration:            completion,
 		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
-			TrajectoryId:   proto.String(trajectoryID),
+			TrajectoryId: proto.String(trajectoryID),
+			// step_index 是真实 CLI 发送的会话内单调步数（抓包实测），
+			// 缺省是残留的 wire 形态差异；按 trajectory_id 记账。
+			StepIndex:      proto.Int32(nextStepIndex(trajectoryID)),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
 		},
@@ -210,6 +214,25 @@ func uuidFromBytes(b []byte) string {
 	var out [16]byte
 	copy(out[:], b)
 	return randid.FormatUUID(out)
+}
+
+// stepIndexRegistry 按 trajectory_id 记录已发送的上游步数：真实 CLI 每请求
+// 发送会话内单调递增的 step_index（抓包实测），不发是残留的 wire 形态
+// 差异。计数随进程重启归零，与 CLI 重启行为一致；容量封顶防止会话数
+// 长期累积成无界 map，触顶整体清空——轨迹记账字段重置无害。
+var stepIndexRegistry = struct {
+	sync.Mutex
+	counts map[string]int32
+}{counts: make(map[string]int32)}
+
+func nextStepIndex(trajectoryID string) int32 {
+	stepIndexRegistry.Lock()
+	defer stepIndexRegistry.Unlock()
+	if len(stepIndexRegistry.counts) >= 65536 {
+		stepIndexRegistry.counts = make(map[string]int32)
+	}
+	stepIndexRegistry.counts[trajectoryID]++
+	return stepIndexRegistry.counts[trajectoryID]
 }
 
 // convertMessage 将中间消息转为 Devin ChatMessagePrompt。
