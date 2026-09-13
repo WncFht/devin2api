@@ -33,7 +33,9 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 			"success_rate": m.SuccessRate, "last_result": m.LastResult, "last_at": m.LastAt,
 		}
 		if p, ok := prices[m.Name]; ok {
-			cost := (float64(m.Input)*p.input + float64(m.CacheRead)*p.cached + float64(m.Output)*p.output) / 1e6
+			// cache_write 实测按 input 价计费：配额翻转拟合的隐含单价 ≈ input 价，
+			// 并非 Anthropic 惯例的 1.25×；catalog 无独立 cache_write 价格维。
+			cost := (float64(m.Input+m.CacheWrite)*p.input + float64(m.CacheRead)*p.cached + float64(m.Output)*p.output) / 1e6
 			row["est_cost"] = cost
 			totalCost += cost
 		}
