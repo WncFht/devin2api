@@ -1,0 +1,15 @@
+# release 流水线专用：镜像不再编译 Go——release.yml 的 matrix job 已产出
+# 各平台二进制（含 ldflags 注入的版本号），这里只做打包。多架构靠 buildx
+# 的 TARGETARCH 选对产物，全程无 QEMU。
+# 根 Dockerfile 仍是源码构建入口（本地/应急构建用它）。
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates
+
+ARG TARGETARCH
+WORKDIR /app
+COPY dist/devin-2api-linux-${TARGETARCH} /app/devin-2api
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/devin-2api"]

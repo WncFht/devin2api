@@ -13,10 +13,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+        uses: ./.github/actions/setup-go
 
       - name: Test
         run: go test ./...
@@ -56,10 +53,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+        uses: ./.github/actions/setup-go
 
       - name: Build binary
         env:
@@ -125,8 +119,13 @@ jobs:
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # 先下载 matrix 产物：Dockerfile.release 直接 COPY 它们（镜像二进制
+      # 与 release 资产同源同 checksum），不再在镜像内重编，QEMU 可省。
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -149,28 +148,26 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Download binaries
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
 
       - name: Create checksums
         working-directory: dist
         run: sha256sum devin-2api-* | sort -k2 > checksums.txt
 
+      # release notes 取 annotated tag 正文（release.sh 生成的分类 changelog），
+      # 不再用 generate_release_notes——tag 即 notes 唯一事实源。
+      - name: Extract release notes from tag
+        run: git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' > release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           fail_on_unmatched_files: true
           files: |
             dist/devin-2api-*
