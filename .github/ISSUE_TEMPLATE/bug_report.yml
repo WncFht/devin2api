@@ -1,0 +1,51 @@
+name: Bug report
+description: 报告 devin-2api 的问题
+title: "[bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 现象、期望行为、复现步骤
+    validations:
+      required: true
+
+  - type: input
+    id: debug_ref
+    attributes:
+      label: X-Request-Id / debug_ref
+      description: >-
+        失败请求响应头 X-Request-Id 的值（或错误体里的 error.debug_ref），
+        即 logs/ 下本次请求的调试目录名。没有它我们基本无法定位问题。
+      placeholder: 2026-09-14T07-12-33.456_ab12cd34
+    validations:
+      required: false
+
+  - type: textarea
+    id: meta
+    attributes:
+      label: meta.json / error.json
+      description: >-
+        logs/<dir>/ 下这两个文件的原文。注意请求体可能含隐私内容，
+        meta.json/error.json 本身不含请求正文，但分享前请自行确认。
+      render: json
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: devin-2api -version 的输出
+      placeholder: v0.6.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: 平台
+      placeholder: macOS arm64 / Linux amd64 / Windows amd64
+    validations:
+      required: true
