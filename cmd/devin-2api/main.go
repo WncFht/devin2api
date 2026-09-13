@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,18 +29,30 @@ import (
 
 // version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
 // 注入（见 scripts/deploy.sh）；缺省 dev 表示未注入构建，此时 resolvedVersion
-// 回退到 Go 内嵌的 VCS build info，让手动 go build 的二进制也能自报 commit。
+// 逐级回退（见下），让任何渠道构建的二进制都能自报版本。
 var version = "dev"
 
-// resolvedVersion 返回对外展示的运行版本：注入值优先，其次 build info 的
-// 短 commit（dirty 标记工作区未提交），都没有时才退回 "dev"。
+// embeddedVersion 是最近一次 release 的 tag，由 release.sh 在打 tag 前写入
+// VERSION 文件并提交；覆盖无 .git 的源码 tarball 构建场景。
+//
+//go:embed VERSION
+var embeddedVersion string
+
+// resolvedVersion 返回对外展示的运行版本，优先级：ldflags 注入 >
+// `go install @vX.Y.Z` 的 module version > VCS 短 commit（dirty 标记工作区
+// 未提交）> 内嵌 VERSION 文件 > "dev"。
 func resolvedVersion() string {
 	if version != "dev" {
 		return version
 	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return version
+		return strings.TrimSpace(embeddedVersion)
+	}
+	// go install module@version 构建：Main.Version 是模块版本（如 v0.6.0），
+	// 源码树内构建则是 "(devel)"。
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
 	}
 	var revision, modified string
 	for _, setting := range info.Settings {
@@ -49,16 +63,19 @@ func resolvedVersion() string {
 			modified = setting.Value
 		}
 	}
-	if revision == "" {
-		return version
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		if modified == "true" {
+			revision += "-dirty"
+		}
+		return "dev-" + revision
 	}
-	if len(revision) > 12 {
-		revision = revision[:12]
+	if v := strings.TrimSpace(embeddedVersion); v != "" {
+		return v
 	}
-	if modified == "true" {
-		revision += "-dirty"
-	}
-	return "dev-" + revision
+	return version
 }
 
 func main() {
@@ -91,7 +108,7 @@ func main() {
 	if err != nil {
 		reportListenFailure(serviceConfig.Server.Listen, err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
 	var tokenFunc func() string
@@ -246,7 +263,7 @@ func probeExistingInstance(listen string) string {
 	if err != nil {
 		return "unresponsive"
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var health struct {
 		Version string `json:"version"`
 		Uptime  int64  `json:"uptime_seconds"`
