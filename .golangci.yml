@@ -1,0 +1,28 @@
+# golangci-lint v2 配置：default:none + 显式点名启用——升级 golangci
+# 不会被新增默认 linter 偷袭。代理项目对口的是 bodyclose（上游响应体
+# 泄漏即连接泄漏）与 errcheck。
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    revive:
+      rules:
+        # 导出符号注释不是本仓库约定（docstring 风格见 CLAUDE.md）
+        - name: exported
+          disabled: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes: github.com/WncFht/devin2api

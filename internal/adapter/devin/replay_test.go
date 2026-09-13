@@ -14,8 +14,9 @@ import (
 
 	devinproto "local/devinproto"
 
-	"github.com/WncFht/devin2api/internal/llm"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // replayFixture 把一个金帧文件逐行回放给解码器，返回含 start 与 finish
@@ -26,7 +27,7 @@ func replayFixture(t *testing.T, name string, stopPatterns []string, customTools
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	decoder := newResponseDecoder("swe-2-max", stopPatterns, customTools)
 	events := decoder.start()
 	scanner := bufio.NewScanner(file)

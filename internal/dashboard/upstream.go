@@ -160,7 +160,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return nil, nil, nil, err
@@ -270,7 +270,7 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 	models, err := h.cachedModels(ctx)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
-		fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
+		_, _ = fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
 		return
 	}
 

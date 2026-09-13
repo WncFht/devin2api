@@ -11,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/go-chi/chi/v5"
+
+	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
 // requestsFetchCap 是请求列表单次扫描的索引行数上限；
@@ -107,7 +108,7 @@ func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
 func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 	out := bufio.NewWriter(w)
-	defer out.Flush()
+	defer func() { _ = out.Flush() }()
 	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage\n")
 	for _, e := range entries {
 		firstUpstream, firstClient := "", ""

@@ -11,9 +11,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/WncFht/devin2api/internal/llm"
-	"google.golang.org/protobuf/proto"
 	devinproto "local/devinproto"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 var descriptionListItemPattern = regexp.MustCompile(`^(?:[-*+]\s+|\d+[.):]\s+|\[\d+\]\s+)(.+)$`)
@@ -228,7 +230,7 @@ func validToolName(name string) bool {
 		return false
 	}
 	for _, r := range name {
-		if r != '_' && r != '-' && !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') {
+		if r != '_' && r != '-' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
 			return false
 		}
 	}

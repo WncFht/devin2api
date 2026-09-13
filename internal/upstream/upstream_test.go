@@ -33,9 +33,11 @@ func newRequest(t *testing.T) *http.Request {
 func TestBasicAuthTransportSuppressesUserAgent(t *testing.T) {
 	stub := &stubRoundTripper{}
 	transport := NewBasicAuthTransport(stub, "tok")
-	if _, err := transport.RoundTrip(newRequest(t)); err != nil {
+	resp, err := transport.RoundTrip(newRequest(t))
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 	values, present := stub.header["User-Agent"]
 	if !present || len(values) != 1 || values[0] != "" {
 		t.Fatalf("User-Agent = %#v (present=%v), want single empty value", values, present)
@@ -51,13 +53,17 @@ func TestBasicAuthTransportFuncRefreshesPerRequest(t *testing.T) {
 	stub := &stubRoundTripper{}
 	token := "old"
 	transport := NewBasicAuthTransportFunc(stub, func() string { return token })
-	if _, err := transport.RoundTrip(newRequest(t)); err != nil {
+	resp, err := transport.RoundTrip(newRequest(t))
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 	token = "new"
-	if _, err := transport.RoundTrip(newRequest(t)); err != nil {
+	resp, err = transport.RoundTrip(newRequest(t))
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 	if got := stub.header.Get("Authorization"); got != "Basic new-new" {
 		t.Fatalf("Authorization = %q, want refreshed token", got)
 	}
@@ -70,9 +76,11 @@ func TestBasicAuthTransportPreservesExistingAuthorization(t *testing.T) {
 	transport := NewBasicAuthTransport(stub, "tok")
 	req := newRequest(t)
 	req.Header.Set("Authorization", "Bearer seat-token")
-	if _, err := transport.RoundTrip(req); err != nil {
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_ = resp.Body.Close()
 	if got := stub.header.Get("Authorization"); got != "Bearer seat-token" {
 		t.Fatalf("Authorization = %q, want Bearer preserved", got)
 	}

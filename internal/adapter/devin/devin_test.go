@@ -15,10 +15,11 @@ import (
 	devinproto "local/devinproto"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
-	"google.golang.org/protobuf/proto"
 )
 
 // fakeDevinResponseReceiver 为 responseStream 测试提供确定顺序的 protobuf 帧。
@@ -510,8 +511,8 @@ func TestResponseDecoderMergesLateSignature(t *testing.T) {
 	decoder := newResponseDecoder("model", nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
-	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
-	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("sig")})
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
+	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("sig")})
 	if len(events) != 1 || events[0].Type != llm.ResponseEventThinkingSignature {
 		t.Fatalf("late signature events = %#v, want single thinking_signature", events)
 	}
@@ -710,7 +711,7 @@ func TestResponseDecoderRejectsEOFWithoutStopReason(t *testing.T) {
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("partial")})
 	event := decoder.finish(nil)[0]
-	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "Devin stream ended without stop reason" {
+	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "devin stream ended without stop reason" {
 		t.Fatalf("event = %#v, want truncation error", event)
 	}
 }
@@ -720,7 +721,7 @@ func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
 	decoder := newResponseDecoder("model", nil, nil)
 	decoder.start()
 	event := decoder.finish(nil)[0]
-	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "Devin stream ended without generated content" {
+	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "devin stream ended without generated content" {
 		t.Fatalf("event = %#v, want empty-stream error", event)
 	}
 }
@@ -1121,10 +1122,8 @@ func TestResponseDecoderLocalStopSequence(t *testing.T) {
 	decoder := newResponseDecoder("model", []string{"STOP"}, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello STOP world")})
-	var types []llm.ResponseEventType
 	var text string
 	for _, event := range events {
-		types = append(types, event.Type)
 		if event.Type == llm.ResponseEventTextDelta {
 			text += event.Delta
 		}

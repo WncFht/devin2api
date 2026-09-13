@@ -155,7 +155,7 @@ func main() {
 		"rows":             rows,
 	}
 	f, _ := os.Create("outputs/model-dump.json")
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)

@@ -11,8 +11,9 @@ import (
 	"strings"
 	"sync"
 
-	"google.golang.org/protobuf/proto"
 	devinproto "local/devinproto"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/randid"

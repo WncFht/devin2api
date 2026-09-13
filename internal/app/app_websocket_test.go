@@ -13,10 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/llm"
-	"github.com/gorilla/websocket"
 )
 
 // wsScriptAdapter 按调用顺序回放每轮的预定事件流，并记录每次收到的
@@ -95,11 +96,14 @@ func wsToolCallTurnScript(callID, name, arguments string) []llm.ResponseEvent {
 func dialWS(t *testing.T, server *httptest.Server) *websocket.Conn {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
-	conn, _, err := websocket.DefaultDialer.Dial(url, http.Header{})
+	conn, resp, err := websocket.DefaultDialer.Dial(url, http.Header{})
 	if err != nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		t.Fatalf("dial websocket: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return conn
 }
 
@@ -655,6 +659,9 @@ func TestWebSocketConnectionLimit(t *testing.T) {
 	}
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
 	_, response, err := websocket.DefaultDialer.Dial(url, http.Header{})
+	if response != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err == nil {
 		t.Fatal("dial should fail when connection limit is reached")
 	}

@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"connectrpc.com/connect"
-	"github.com/WncFht/devin2api/internal/config"
 	devinproto "local/devinproto"
 	"local/devinproto/devinprotoconnect"
+
+	"connectrpc.com/connect"
+
+	"github.com/WncFht/devin2api/internal/config"
 
 	"google.golang.org/protobuf/proto"
 )

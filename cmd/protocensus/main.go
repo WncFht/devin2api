@@ -143,7 +143,7 @@ func cmdCensus(args []string) error {
 					resp.walk(respMD, obj)
 				}
 			}
-			f.Close()
+			_ = f.Close()
 		}
 	}
 	return printReport(len(dirs), frames, req, resp)

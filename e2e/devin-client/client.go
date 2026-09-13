@@ -8,10 +8,11 @@ import (
 	"context"
 	"net/http"
 
-	"connectrpc.com/connect"
-	"google.golang.org/protobuf/proto"
 	devinproto "local/devinproto"
 	"local/devinproto/devinprotoconnect"
+
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 )
 
 // NewChatRequest 构造一个带单个只读工具的 GetChatMessage 请求。

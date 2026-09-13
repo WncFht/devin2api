@@ -19,9 +19,10 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/WncFht/devin2api/internal/randid"
-	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
@@ -397,7 +398,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		slog.Warn("websocket upgrade failed", "error", obs.Diagnostic(err))
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	conn.SetReadLimit(wsMaxTranscriptBytes)
 
 	connCtx, cancelConn := context.WithCancel(context.Background())

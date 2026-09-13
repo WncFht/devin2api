@@ -49,7 +49,7 @@ func main() {
 				results[idx] = result{Idx: idx, Total: time.Since(sw).Milliseconds(), Err: err.Error()}
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			// 读第一个字节
 			buf := make([]byte, 4096)

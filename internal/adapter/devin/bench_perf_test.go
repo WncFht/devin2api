@@ -11,8 +11,9 @@ import (
 
 	devinproto "local/devinproto"
 
-	"github.com/WncFht/devin2api/internal/llm"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // BenchmarkSanitizeText 测量规则预筛在「干净长文本」上的成本：

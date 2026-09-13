@@ -152,7 +152,7 @@ func DecodeDataImage(value string) (llm.ImageContent, error) {
 		return llm.ImageContent{}, errors.New("image url/data is empty")
 	}
 	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
-		return llm.ImageContent{}, errors.New("http(s) image URLs are not fetched yet; embed as data:image/...;base64,...")
+		return llm.ImageContent{}, errors.New("http(s) image URLs are not fetched yet; embed as data:image/<mime>;base64,<data>")
 	}
 	if !strings.HasPrefix(value, "data:") {
 		// 纯 base64：尝试按魔数嗅探。

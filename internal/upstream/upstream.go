@@ -7,8 +7,9 @@ import (
 
 	devinproto "local/devinproto"
 
-	"github.com/WncFht/devin2api/internal/randid"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/WncFht/devin2api/internal/randid"
 )
 
 // BuildMetadata 构造上游请求的 Metadata 公共头。os 与 fingerprintBytes

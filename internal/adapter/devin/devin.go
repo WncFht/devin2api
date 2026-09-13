@@ -19,14 +19,15 @@ import (
 	"local/devinproto/devinprotoconnect"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/upstream"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
 )
 
 // 默认客户端身份常量与真实 Devin CLI 抓包逐字段对齐；上游若开始按
@@ -379,10 +380,7 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 // 其余 Connect code 均为语义错误，同样不重试。
 func isTransientConnectError(err error) bool {
 	var connectErr *connect.Error
-	if errors.As(err, &connectErr) {
-		return false
-	}
-	return true
+	return !errors.As(err, &connectErr)
 }
 
 // validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。
@@ -597,7 +595,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
 	if err != nil {
-		wrapped := fmt.Errorf("Devin GetCliModelConfigs: %w", err)
+		wrapped := fmt.Errorf("devin GetCliModelConfigs: %w", err)
 		// 客户端断连的 ctx 取消不是上游失败，不上冷却。
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			backoff := catalogRetryBackoff
@@ -866,7 +864,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 补记进原始日志留证，然后按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			stallErr := fmt.Errorf("Devin stream stalled: no frames for %s", upstreamStallTimeout)
+			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", upstreamStallTimeout)
 			if stream.tryReopen(stallErr, false) {
 				continue
 			}

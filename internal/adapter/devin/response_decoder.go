@@ -170,7 +170,7 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		return decoder.fail(connectError(upstreamErr))
 	}
 	if !decoder.hasStopReason && len(decoder.partial.Content) == 0 && len(decoder.tools) == 0 {
-		return decoder.fail(errors.New("Devin stream ended without generated content"))
+		return decoder.fail(errors.New("devin stream ended without generated content"))
 	}
 	reason := decoder.stopReason
 	if decoder.stoppedByPattern {
@@ -182,13 +182,13 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		// 流在应用层被截断；此处合成 Stop 会把截断伪装成 end_turn，
 		// 下游 agent 会把半完成的任务当作完成（实测复现：Codex 在宣告
 		// 继续调用工具后直接 task_complete）。
-		return decoder.fail(errors.New("Devin stream ended without stop reason"))
+		return decoder.fail(errors.New("devin stream ended without stop reason"))
 	}
 	if reason == llm.StopReasonError {
 		if decoder.providerRefusal {
 			return decoder.fail(errors.New("upstream provider refused the request (provider_refusal)"))
 		}
-		return decoder.fail(errors.New("Devin stopped with an error"))
+		return decoder.fail(errors.New("devin stopped with an error"))
 	}
 	return decoder.complete(reason)
 }
