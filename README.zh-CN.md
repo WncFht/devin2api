@@ -25,7 +25,7 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 devin-2api 使用你的 Devin 会话 token（`devin-session-token$...`）向上游鉴权。`config.yaml` 里 `devin.token` 留空时按顺序自动发现：
 
 1. `DEVIN_TOKEN` 或 `WINDSURF_API_KEY` 环境变量；
-2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`，Windows 为 `%APPDATA%\devin\credentials.toml` 或 `%LOCALAPPDATA%\devin\credentials.toml`。
+2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`。（Devin CLI 目前没有 Windows 发行版，Windows 下请用环境变量或 `devin.token`；`%APPDATA%\devin\credentials.toml` 与 `%LOCALAPPDATA%\devin\credentials.toml` 仍会探测，供日后 Windows 版 CLI 落地时使用。）
 
 macOS 下也可从 Devin 应用本地状态提取：
 
@@ -54,7 +54,7 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-资产命名规则是 `devin-2api-<os>-<arch>`，按平台选择。Windows 资产是 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）——解压后编辑 `config.yaml`，在控制台运行 `devin-2api.exe -config config.yaml`；Ctrl+C 同样触发优雅排空。
+资产命名规则是 `devin-2api-<os>-<arch>`，按平台选择。Windows 资产是 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）——解压后编辑 `config.yaml`，在控制台运行 `devin-2api.exe -config config.yaml`；Ctrl+C 同样触发优雅排空（关窗、`taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径）。
 
 源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 

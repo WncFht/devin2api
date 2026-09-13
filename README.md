@@ -25,7 +25,7 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 devin-2api authenticates to Devin with your Devin session token (`devin-session-token$...`). If `devin.token` is left empty in `config.yaml`, the adapter discovers one automatically, in order:
 
 1. `DEVIN_TOKEN` or `WINDSURF_API_KEY` environment variable;
-2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux, `%APPDATA%\devin\credentials.toml` or `%LOCALAPPDATA%\devin\credentials.toml` on Windows.
+2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux. (The Devin CLI has no Windows build today; on Windows use the env var or `devin.token`. `%APPDATA%\devin\credentials.toml` and `%LOCALAPPDATA%\devin\credentials.toml` are also probed in case a future Windows CLI writes there.)
 
 On macOS you can also extract the token from the Devin app's local state:
 
@@ -54,7 +54,7 @@ chmod +x devin-2api-darwin-arm64
 ./devin-2api-darwin-arm64 -config config.yaml
 ```
 
-Assets are named `devin-2api-<os>-<arch>`; pick the one matching your platform. Windows assets ship as `.zip` bundles (exe + `config.example.yaml` + LICENSE) — unzip, edit `config.yaml`, run `devin-2api.exe -config config.yaml` in a console; Ctrl+C triggers the same graceful drain.
+Assets are named `devin-2api-<os>-<arch>`; pick the one matching your platform. Windows assets ship as `.zip` bundles (exe + `config.example.yaml` + LICENSE) — unzip, edit `config.yaml`, run `devin-2api.exe -config config.yaml` in a console; Ctrl+C triggers the same graceful drain (console close and `taskkill /F` do not — Windows offers no graceful kill for console processes).
 
 From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
 
