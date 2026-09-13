@@ -1,5 +1,8 @@
 .git
 .agent
+.agents
+.claude
+.devin
 .DS_Store
 bin
 logs
@@ -7,3 +10,15 @@ work
 config.yaml
 coverage.out
 *.test
+node_modules
+notes
+data
+downloads
+multi-harness-eval
+scc-report.html
+# outputs/devin-proto-go 是镜像构建必需的生成绑定，其余调研/探测产物不进上下文
+outputs/cliproxy-research
+outputs/probe
+outputs/*.json
+outputs/*.txt
+outputs/*.py
