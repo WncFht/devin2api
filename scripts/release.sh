@@ -207,7 +207,8 @@ if [[ "${HEAD_SHA}" != "$(git rev-parse origin/main)" ]]; then
 	exit 1
 fi
 
-git tag -a "${NEXT}" -F "${NOTES_FILE}"
+# --cleanup=verbatim：默认 strip 会把 "## Features" 这类行当注释吃掉。
+git tag -a "${NEXT}" -F "${NOTES_FILE}" --cleanup=verbatim
 git push origin "${NEXT}"
 echo
 echo "已推送 ${NEXT} → release.yml 开始发布："
