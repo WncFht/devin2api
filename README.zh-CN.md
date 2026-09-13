@@ -46,15 +46,16 @@ cp config.example.yaml config.yaml
 
 ### 3. 启动
 
-预编译二进制（见 [Releases](https://github.com/WncFht/devin2api/releases)，附 `checksums.txt` 可校验）：
+预编译二进制（见 [Releases](https://github.com/WncFht/devin2api/releases)，附 `checksums.txt` 可校验）。资产命名 `devin-2api-{darwin,linux}-{amd64,arm64}`；Windows 为同名 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）：
 
 ```bash
-curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/devin-2api-darwin-arm64
-chmod +x devin-2api-darwin-arm64
-./devin-2api-darwin-arm64 -config config.yaml
+# Linux 示例；macOS 换成 devin-2api-darwin-arm64 或 -darwin-amd64
+curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/devin-2api-linux-amd64
+chmod +x devin-2api-linux-amd64
+./devin-2api-linux-amd64 -config config.yaml
 ```
 
-资产命名规则是 `devin-2api-<os>-<arch>`，按平台选择。Windows 资产是 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）——解压后编辑 `config.yaml`，在控制台运行 `devin-2api.exe -config config.yaml`；Ctrl+C 同样触发优雅排空（关窗、`taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径）。
+Windows：解压 `devin-2api-windows-amd64.zip`，编辑 `config.yaml`（token 可留空——第 1 节第 2 条让 Windsurf 内嵌的 `devin.exe` 产出凭证文件），在控制台运行 `devin-2api.exe -config config.yaml`。Ctrl+C 触发优雅排空；关窗和 `taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径。
 
 源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 
@@ -78,7 +79,15 @@ docker run --rm -p 8080:8080 \
 | Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
 | Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe 同目录                                 | 下载 zip，运行 exe        |
 
-两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，并在仓库内维护指向运行目录日志的 `logs` 符号链接。Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
+两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管。脚本以仓库为家——同步 `config.yaml` 进运行目录、在仓库内维护指向运行目录日志的 `logs` 符号链接，所以先 clone 再跑：
+
+```bash
+git clone https://github.com/WncFht/devin2api && cd devin2api
+cp config.example.yaml config.yaml   # 按需编辑；token 留空走第 1 节的自动发现
+bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
+```
+
+Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 
 ### 4. 验证
 
