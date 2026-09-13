@@ -25,4 +25,5 @@ formatters:
     - goimports
   settings:
     goimports:
-      local-prefixes: github.com/WncFht/devin2api
+      local-prefixes:
+        - github.com/WncFht/devin2api
