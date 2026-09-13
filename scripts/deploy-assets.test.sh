@@ -28,7 +28,7 @@ echo "== syntax =="
 for script in scripts/*.sh scripts/quota/poll.sh; do
 	check "bash -n ${script}" bash -n "${script}"
 done
-check "py_compile scripts/quota/fit.py" python3 -m py_compile scripts/quota/fit.py
+check "python 语法 scripts/quota/fit.py" python3 -c "compile(open('scripts/quota/fit.py').read(), 'fit.py', 'exec')"
 
 echo "== lib-deploy.sh（共享逻辑）=="
 check "下载校验 checksums.txt" has scripts/lib-deploy.sh "checksums.txt"

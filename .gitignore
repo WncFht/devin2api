@@ -51,3 +51,6 @@ multi-harness-eval/runs/
 # 本地分析副件：网关数据库快照（含明文凭据）与 scc 报告
 /data/
 /scc-report.html
+
+# Python 字节码缓存（scripts/quota/fit.py 等）
+__pycache__/
