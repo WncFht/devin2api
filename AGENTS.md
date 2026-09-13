@@ -88,12 +88,17 @@
 
 ## 格式化工具链
 
-`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect`、`pre-commit install`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+
+改 Go 代码提交前跑 `golangci-lint run`（规则见 `.golangci.yml`：default:none + 显式启用 bodyclose/errcheck/govet/revive/staticcheck/unused），`golangci-lint fmt` 修 gofmt/goimports；CI golangci job 同配置，本地不过 CI 必挂。全量工具链说明见 `docs/toolchain.md`。
 
 ## 版本与发布
 
-- 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入，`scripts/deploy.sh` 本机升级（`--release <tag>` 可装预编译二进制）、`scripts/release.sh` 发版（先 dry-run 再 `--publish`）。
-- tag 只打在已推送 `origin/main` 且 CI 绿的提交上；0.x 阶段 feat/破坏性变更升 minor、其余升 patch。`latest` 镜像 tag 只跟随稳定版。
+- 版本号不写进源码：构建期 `-X main.version=$(git describe --tags --always --dirty)` 注入；运行时解析链见 `resolvedVersion`（ldflags → buildinfo → `vcs.revision` → embed `cmd/devin-2api/VERSION` → `"dev"`）。
+- `scripts/release.sh` 发版：dry-run 打印分类 changelog；`--publish` 自动回写 VERSION 并推送 → 轮询该提交的 CI 到绿 → 复查 `origin/main` 未被推进 → `git tag -a --cleanup=verbatim` 推送。tag 注解是 release body 的唯一事实源（release.yml 取 `%(contents)`）。
+- tag 只打在已推送 `origin/main` 且 CI 绿的提交上；0.x 阶段 feat/破坏性变更升 minor、其余升 patch。`latest` 镜像 tag 只跟随稳定版。**已推送的 tag 永不重打**——release body 出错用 `gh release edit --notes-file` 原地修（详见 release-runbook skill）。
+- 改 `scripts/release.sh` 后必跑 `scripts/release-selftest.sh`：bare origin + stub GitHub API 的离线演练，覆盖 dry-run 版本计算与 publish 全部拒绝分支；CI 的 deploy-assets job 同步跑它。
+- `scripts/deploy.sh` 本机升级（`--release <tag>` 可装预编译二进制）。
 
 # 服务排障（对运行中的实例）
 
