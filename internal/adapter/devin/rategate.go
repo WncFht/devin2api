@@ -32,7 +32,12 @@ const (
 //  2. 冷却闩：上游 resource_exhausted 声明「reset in N」时上闩到
 //     该时刻。上游限流器实测把被拒尝试也计入、每次再推后恢复
 //     ~2.4s（封顶 10min）——闩内本地拦停是防止「客户端重试把 1
-//     分钟小限流续成十几分钟自封」的关键。
+//     分钟小限流续成十几分钟自封」的关键。上闩同时冻结令牌桶：
+//     闩内不累计、存量额度清零——否则闩末桶已攒满，整队等待者
+//     对齐释放形成齐射，在边际态上游必然重触（实测每次到期齐射
+//     ~20 条、5/5 次重触）；冻结后队列按 refill 节奏逐条放行，
+//     第一条即探针，被拒在 ~RTT 内重闩，损失 1~2 条而非整队。
+//     上游规则推导见 notes/upstream-rate-limit.md。
 type rateGate struct {
 	mu           sync.Mutex
 	tokens       float64 // 当前令牌数；可为负，负值是已预售给排队者的额度
@@ -63,9 +68,13 @@ func (gate *rateGate) wait(ctx context.Context) error {
 	now := time.Now()
 	gate.mu.Lock()
 	// 令牌按经过时间补充；预订式扣减（允许为负）让等待者的发车间隔
-	// 自动错开，闩解除或突发结束时不会向上游齐射。
-	gate.tokens = math.Min(gate.tokens+now.Sub(gate.lastAccrual).Seconds()*gate.refillPerSec, gate.capacity)
-	gate.lastAccrual = now
+	// 自动错开，闩解除或突发结束时不会向上游齐射。lastAccrual 可被
+	// 闩推到将来（冻结期），只在正向流逝时结算，否则闩内每次调用
+	// 都会把桶扣得更深。
+	if elapsed := now.Sub(gate.lastAccrual); elapsed > 0 {
+		gate.tokens = math.Min(gate.tokens+elapsed.Seconds()*gate.refillPerSec, gate.capacity)
+		gate.lastAccrual = now
+	}
 	wait := gate.limitedUntil.Sub(now)
 	if gate.refillPerSec > 0 && gate.tokens < 1 {
 		if deficit := time.Duration((1 - gate.tokens) / gate.refillPerSec * float64(time.Second)); deficit > wait {
@@ -115,6 +124,10 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	extended := until.After(gate.limitedUntil)
 	if extended {
 		gate.limitedUntil = until
+		// 冻结令牌桶到闩末：清空存量额度且闩内不累计，解除后队列
+		// 按 refill 节奏逐条放行而非满桶齐射。
+		gate.tokens = math.Min(gate.tokens, 0)
+		gate.lastAccrual = until
 	}
 	gate.mu.Unlock()
 	if extended {

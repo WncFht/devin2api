@@ -83,6 +83,24 @@ func TestRateGateBucketReject(t *testing.T) {
 	}
 }
 
+// 闩期间冻结令牌桶：存量清零、闩内不累计。解除后队列按 refill
+// 节奏逐条放行（首条即探针），而不是满桶齐射——实测上游在闩末
+// 仍在边际态，齐射必然重触并各加 ~2.4s 刑期。
+func TestRateGateLatchFreezesBucket(t *testing.T) {
+	gate := newRateGate(60) // 每秒 1 令牌，闩前满桶 60
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
+	time.Sleep(1100 * time.Millisecond) // 闩过期；若未冻结，桶已重新攒满、三条都瞬时放行
+	for i := 0; i < 3; i++ {
+		start := time.Now()
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("post-latch wait %d error = %v", i, err)
+		}
+		if d := time.Since(start); d < 600*time.Millisecond {
+			t.Fatalf("post-latch wait %d released after %v, want ~1s serialized drip", i, d)
+		}
+	}
+}
+
 // 等待中 ctx 取消：返回取消原因且退还令牌。
 func TestRateGateWaitCancelRefunds(t *testing.T) {
 	gate := newRateGate(0)
