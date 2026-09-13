@@ -200,6 +200,15 @@ func decodeResponsesRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 	if err != nil {
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
+	// HTTP 路径无响应存储（store=false 已如实声明），previous_response_id
+	// 意味着客户端只发了增量 input——静默当全量会把上下文丢光，
+	// 显式拒绝比带病执行便宜。WS 会话在规范化时已剥掉该字段做
+	// 本地合并，不会走到这里。
+	if adapted.Options.PreviousResponseID != "" {
+		return llm.RequestMessages{}, protocolOptions{}, fmt.Errorf(
+			"invalid_argument: previous_response_id %q requires a server-side response store; this proxy always reports store=false — resend the full conversation input without previous_response_id",
+			adapted.Options.PreviousResponseID)
+	}
 	return adapted.Context, protocolOptions{
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: false,

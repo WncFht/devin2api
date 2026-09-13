@@ -32,8 +32,9 @@ type Request struct {
 	// Temperature 是可选的采样温度。
 	Temperature *float64 `json:"temperature,omitempty"`
 	// PreviousResponseID 是调用方提供的上游响应关联标识。本代理无服务端
-	// 响应存储（store=false），该字段被解析但忽略——客户端应回退到
-	// 携带完整历史。
+	// 响应存储（store=false），HTTP 路径上非空即在 app 层 400 拒绝——
+	// 否则增量 input 会被当全量，上下文静默丢失；WS 会话路径在规范化
+	// 阶段已剥离该字段做本地合并，不受影响。
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 	// TopP 是可选的 nucleus 采样参数。
 	TopP *float64 `json:"top_p,omitempty"`
@@ -48,13 +49,15 @@ type Request struct {
 }
 
 // responsesRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
-// （reasoning/store/service_tier/include/previous_response_id 等）上游
-// 没有对应物，记入 Dropped 透出而不是静默吞掉。
+// （reasoning/store/service_tier/include 等）上游没有对应物，
+// 记入 Dropped 透出而不是静默吞掉。previous_response_id 虽被消费
+// 用于显式拒绝，标记为已读避免空值也落进 dropped。
 var responsesRequestFields = map[string]bool{
 	"model": true, "instructions": true, "input": true, "tools": true,
 	"stream": true, "max_output_tokens": true, "temperature": true,
 	"top_p": true, "user": true, "prompt_cache_key": true,
 	"tool_choice": true, "parallel_tool_calls": true,
+	"previous_response_id": true,
 }
 
 // Tool 是 OpenAI Responses 工具定义；type 支持 function 与 custom（freeform）。
