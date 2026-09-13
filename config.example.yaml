@@ -44,9 +44,19 @@ devin:
   # client_os: "mac"
   # 发往上游 GetChatMessage 的消息速率上限（条/分钟），令牌桶实现、
   # 桶容量为一分钟额度可容纳突发；<=0 或不填不限速。上游报
-  # resource_exhausted 时本地冷却闩按其 reset 时刻拦停后续请求
-  #（预计等待 >15s 的直接 429 + Retry-After 快速失败），不受此项影响。
+  # resource_exhausted 时本地冷却闩按其 reset 时刻拦停后续请求，
+  # 不受此项影响。
   # max_rpm: 50
+  # 上游限流冷却闩参数（通常无需调整）：
+  # gate_max_hold_seconds: 闩外令牌排队允许的最长等待秒数，超出快速
+  #   失败 429 + Retry-After。默认 15。
+  # gate_drip_interval_seconds: 闩内放行探针的间隔秒数——滴灌节奏
+  #   决定限流期间打到上游的速率与解闩探测频率。默认 8。
+  # gate_default_latch_seconds: 上游未声明 reset 时刻时的兜底闩时长
+  #   秒数。默认 60。
+  # gate_max_hold_seconds: 15
+  # gate_drip_interval_seconds: 8
+  # gate_default_latch_seconds: 60
 
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /panel。

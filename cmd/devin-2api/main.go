@@ -114,16 +114,19 @@ func main() {
 	var tokenFunc func() string
 	if serviceConfig.Devin.Token != "" {
 		configured, createErr := devin.New(devin.Config{
-			BaseURL:       serviceConfig.Devin.BaseURL,
-			Token:         serviceConfig.Devin.Token,
-			Model:         serviceConfig.Devin.Model,
-			Proxy:         serviceConfig.Devin.Proxy,
-			ForceHTTP1:    serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
-			Aliases:       serviceConfig.Devin.Aliases,
-			ClientName:    serviceConfig.Devin.ClientName,
-			ClientVersion: serviceConfig.Devin.ClientVersion,
-			ClientOS:      serviceConfig.Devin.ClientOS,
-			MaxRPM:        serviceConfig.Devin.MaxRPM,
+			BaseURL:          serviceConfig.Devin.BaseURL,
+			Token:            serviceConfig.Devin.Token,
+			Model:            serviceConfig.Devin.Model,
+			Proxy:            serviceConfig.Devin.Proxy,
+			ForceHTTP1:       serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+			Aliases:          serviceConfig.Devin.Aliases,
+			ClientName:       serviceConfig.Devin.ClientName,
+			ClientVersion:    serviceConfig.Devin.ClientVersion,
+			ClientOS:         serviceConfig.Devin.ClientOS,
+			MaxRPM:           serviceConfig.Devin.MaxRPM,
+			GateMaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
+			GateDripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
+			GateDefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
 			// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 			// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 			TokenSource: func() string {

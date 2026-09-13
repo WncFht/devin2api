@@ -68,6 +68,15 @@ type DevinConfig struct {
 	// 上游限流冷却闩（resource_exhausted 后按声明 reset 时刻本地拦停）
 	// 不受此项影响，始终生效。
 	MaxRPM int `yaml:"max_rpm"`
+	// GateMaxHoldSeconds 是闸门内允许的最长排队等待秒数：闩外令牌
+	// 排队预计超过它时请求本地快速失败 429 + Retry-After；<=0 默认 15。
+	GateMaxHoldSeconds int `yaml:"gate_max_hold_seconds"`
+	// GateDripIntervalSeconds 是冷却闩内放行探针的间隔秒数：闩期间
+	// 按此节奏逐条放到上游探测解闩，其余请求快速失败；<=0 默认 8。
+	GateDripIntervalSeconds int `yaml:"gate_drip_interval_seconds"`
+	// GateDefaultLatchSeconds 是上游 resource_exhausted 未携带 reset
+	// hint 时的兜底闩时长秒数；<=0 默认 60。
+	GateDefaultLatchSeconds int `yaml:"gate_default_latch_seconds"`
 }
 
 // DebugConfig 保存请求级调试日志配置。

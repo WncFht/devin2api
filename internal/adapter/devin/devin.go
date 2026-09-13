@@ -64,6 +64,12 @@ type Config struct {
 	// MaxRPM 是发往上游 GetChatMessage 的消息速率上限（条/分钟）；
 	// <=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
 	MaxRPM int
+	// GateMaxHold/GateDripInterval/GateDefaultLatch 是冷却闩参数：
+	// 闩外排队允许的最长等待、闩内滴灌探针的放行间隔、上游未带
+	// reset hint 时的兜底闩时长；<=0 时闸门用默认值。
+	GateMaxHold      time.Duration
+	GateDripInterval time.Duration
+	GateDefaultLatch time.Duration
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
@@ -149,8 +155,9 @@ func New(config Config) (*Adapter, error) {
 		config:         config,
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
-		gate:           newRateGate(config.MaxRPM),
-		assignments:    make(map[string]resolvedAssignment),
+		gate: newRateGate(config.MaxRPM,
+			config.GateMaxHold, config.GateDripInterval, config.GateDefaultLatch),
+		assignments: make(map[string]resolvedAssignment),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
@@ -470,7 +477,7 @@ func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.Req
 
 // assignModel 调上游 AssignModel 把 router uid 解析为真实模型 + assignment
 // jwt，结果按 (router uid, cascade id) 缓存。错误分类见
-// notes/upstream-protocol.md 路由节：非 router uid → invalid_argument，
+// docs/upstream-protocol.md 路由节：非 router uid → invalid_argument，
 // 不存在的 router → not_found。
 func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
 	key := routerUID + "|" + cascadeID
@@ -757,6 +764,9 @@ type responseStream struct {
 	// producedEvents 表示上游帧已产出过任何事件：一旦为真说明内容已
 	// 开始对外流动，此后失败只能透传，不能整体重发。
 	producedEvents bool
+	// upstreamConfirmed 标记上游已产出首个非错误帧：限流闩以此为据
+	// 提前解闩（边际态下拒绝是概率执行，成功帧即窗口已过的证据）。
+	upstreamConfirmed bool
 	// gate 是上游消息速率闸门：流内 resource_exhausted 也要喂冷却闩。
 	gate *rateGate
 	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
@@ -852,6 +862,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.finished = true
 				continue
 			}
+			if !stream.upstreamConfirmed {
+				stream.upstreamConfirmed = true
+				stream.gate.noteUpstreamSuccess()
+			}
 			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
 			events := stream.decoder.decode(frame.response)
 			if len(events) > 0 {
@@ -915,6 +929,9 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	stream.pendingStart = nil
 	stream.finished = false
 	stream.queue = nil
+	// 新流的首个非错误帧重新获得解闩资格——上一流的确认不能
+	// 替代这次重试是否真的打穿了限流。
+	stream.upstreamConfirmed = false
 	return true
 }
 

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // openAIErrorTypes 把 Connect code 映射为 OpenAI 兼容的错误对象 type。
@@ -141,6 +142,8 @@ func ErrorCode(message string) any {
 var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+)\s*(seconds?|minutes?)`)
 
 // RetryAfterSeconds 从上游错误文案解析限流重置秒数；无 hint 返回 false。
+// 返回的是上游声明的字面秒数（分钟按 60 折算）；要拿可行动的等待时长/
+// 绝对时刻用 RateLimitReset——分钟 hint 是桶界的 floor 取整，需向上对齐。
 func RetryAfterSeconds(message string) (int, bool) {
 	match := rateLimitResetPattern.FindStringSubmatch(message)
 	if len(match) != 3 {
@@ -154,6 +157,33 @@ func RetryAfterSeconds(message string) (int, bool) {
 		seconds *= 60
 	}
 	return seconds, true
+}
+
+// RateLimitReset 把限流文案的 reset hint 解析为绝对时刻。
+// 秒级 hint 直接取 now+N；分钟级 hint 是上游对当前分钟桶剩余时长的
+// floor 取整（"reset in 1 minute" 实际指本桶结束，最晚 ~119s 后），
+// 按上游分钟桶模型向上对齐到下一个 :59 秒桶界——上游时钟约快 1s，
+// 实测桶界落在本地 :58.5~:59.5。"reset in 0" 等 <=0 hint 返回 false。
+func RateLimitReset(message string, now time.Time) (time.Time, bool) {
+	match := rateLimitResetPattern.FindStringSubmatch(message)
+	if len(match) != 3 {
+		return time.Time{}, false
+	}
+	amount, err := strconv.Atoi(match[1])
+	if err != nil || amount <= 0 {
+		return time.Time{}, false
+	}
+	if !strings.HasPrefix(match[2], "minute") {
+		return now.Add(time.Duration(amount) * time.Second), true
+	}
+	// now+Nmin 落入的分钟桶的 :59 边界；若该时刻本身已过 :59，
+	// 取下一个分钟的 :59。
+	target := now.Add(time.Duration(amount) * time.Minute)
+	reset := target.Truncate(time.Minute).Add(59 * time.Second)
+	if !reset.After(target) {
+		reset = reset.Add(time.Minute)
+	}
+	return reset, true
 }
 
 // traceIDPattern 匹配上游流内错误尾的 trace 标记 "(trace ID: …)"。
