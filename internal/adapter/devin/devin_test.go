@@ -97,7 +97,7 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 			{Name: "read", Description: "read file", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestBuildRequestMergesParallelToolCalls(t *testing.T) {
 			llm.ToolResultMessage{ToolCallID: "call-b", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +207,66 @@ func TestBuildRequestMergesParallelToolCalls(t *testing.T) {
 	}
 }
 
+// TestBuildRequestReportsRepairs 验证请求投影的静默修复逐类计数：分组式
+// call/result 历史被重排、孤立结果降级、空 assistant 丢弃、历史图剥离，
+// 加上 sanitize 命中——合计即落进 meta.json 的 repairs 总量。
+func TestBuildRequestReportsRepairs(t *testing.T) {
+	request := llm.RequestMessages{
+		SystemPrompt: "You are Claude Code, Anthropic's official CLI for Claude.",
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{
+				llm.TextContent{Text: "earlier turn with a screenshot"},
+				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
+			}},
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a"}`)},
+			}},
+			llm.AssistantMessage{Content: []llm.Content{
+				llm.ToolCall{ID: "call-2", Name: "read", Arguments: json.RawMessage(`{"path":"b"}`)},
+			}},
+			llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-2", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-lost", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "orphan"}}},
+			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: ""}}},
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "next step"}}},
+		},
+	}
+	var sanitizeHits map[string]int
+	request, sanitizeHits = sanitizeRequest(request)
+	converted, repairs, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairs.SanitizeHits = sanitizeHits
+	if repairs.ReorderedPrompts != 2 {
+		t.Fatalf("reordered = %d, want 2", repairs.ReorderedPrompts)
+	}
+	if repairs.DemotedOrphanResults != 1 {
+		t.Fatalf("demoted = %d, want 1", repairs.DemotedOrphanResults)
+	}
+	if repairs.DroppedEmptyAssistant != 1 {
+		t.Fatalf("dropped empty assistant = %d, want 1", repairs.DroppedEmptyAssistant)
+	}
+	if repairs.OmittedHistoryImages != 1 {
+		t.Fatalf("omitted images = %d, want 1", repairs.OmittedHistoryImages)
+	}
+	if repairs.SanitizeHits["a1-cc-full"] != 1 {
+		t.Fatalf("sanitize hits = %#v, want a1-cc-full:1", repairs.SanitizeHits)
+	}
+	if repairs.Total() != 6 {
+		t.Fatalf("total = %d, want 6", repairs.Total())
+	}
+	// 孤立结果被降级为 USER 文本保住内容，其余 prompt 数量不变。
+	prompts := converted.GetChatMessagePrompts()
+	if len(prompts) != 7 {
+		t.Fatalf("prompts = %d, want 7", len(prompts))
+	}
+	if prompts[5].GetSource() != devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER ||
+		!strings.Contains(prompts[5].GetPrompt(), "original call lost") {
+		t.Fatalf("demoted prompt = %v %q", prompts[5].GetSource(), prompts[5].GetPrompt())
+	}
+}
+
 // TestBuildRequestAggregatesThinkingBlocks 验证一条 assistant 消息的多个
 // thinking 块按序拼接、签名取最后非空；纯 redacted 块（无可见文本）也生成
 // wire 上的签名回放。
@@ -226,7 +286,7 @@ func TestBuildRequestAggregatesThinkingBlocks(t *testing.T) {
 			}},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +373,7 @@ func TestBuildRequestOmitsHistoricalImages(t *testing.T) {
 			}},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +409,7 @@ func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
 			llm.ToolResultMessage{ToolCallID: "tc1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +430,7 @@ func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
 // TestBuildRequestWithoutToolsKeepsPromptUnchanged 的测试动机是确保工具转换不会污染纯文本请求。
 func TestBuildRequestWithoutToolsKeepsPromptUnchanged(t *testing.T) {
 	request := llm.RequestMessages{SystemPrompt: "system", Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}}}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +451,7 @@ func TestBuildRequestIgnoresEmptyToolDescriptions(t *testing.T) {
 			{Name: "read", Description: "  read a file  ", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +815,7 @@ func TestBuildRequestForwardsSamplingParams(t *testing.T) {
 		StopSequences: []string{"STOP"},
 		Messages:      []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +835,7 @@ func TestBuildRequestDefaultSamplingParams(t *testing.T) {
 		SystemPrompt: "system",
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +852,7 @@ func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
 		SessionKey:   "user-1",
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "task"}}}},
 	}
-	first, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	first, _, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +861,7 @@ func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}},
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "follow up"}}},
 	)
-	second, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	second, _, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -824,11 +884,11 @@ func TestDeriveSessionIDSSurvivesCompaction(t *testing.T) {
 			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
 		}
 	}
-	first, err := buildRequest(makeRequest("original first message"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	first, _, err := buildRequest(makeRequest("original first message"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := buildRequest(makeRequest("[summary of compacted history]"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	second, _, err := buildRequest(makeRequest("[summary of compacted history]"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -847,11 +907,11 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 		}
 	}
 	cfg := Config{BaseURL: "https://example.com", Token: "token", Model: "model"}
-	first, err := buildRequest(makeRequest("session-1", "task A"), cfg)
+	first, _, err := buildRequest(makeRequest("session-1", "task A"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := buildRequest(makeRequest("session-2", "task A"), cfg)
+	second, _, err := buildRequest(makeRequest("session-2", "task A"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,11 +919,11 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 		t.Fatalf("distinct session keys must not share a trajectory")
 	}
 	// 无 SessionKey 的客户端退回内容哈希：不同首条消息仍自然分散。
-	third, err := buildRequest(makeRequest("", "task B"), cfg)
+	third, _, err := buildRequest(makeRequest("", "task B"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fourth, err := buildRequest(makeRequest("", "task C"), cfg)
+	fourth, _, err := buildRequest(makeRequest("", "task C"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1007,7 +1067,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	}}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceRequired}
-	converted, err := buildRequest(request, cfg)
+	converted, _, err := buildRequest(request, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1076,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNone}
-	converted, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1087,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	// 指名调用要求工具在 tools 表内：先声明 read_file 再指名。
 	request.Tools = []llm.ToolDefinition{{Name: "read_file", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "read_file"}
-	converted, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,7 +1096,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
-	converted, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,7 +1106,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 
 	request.ToolChoice = nil
 	request.DisableParallelToolCalls = true
-	converted, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1285,7 +1345,7 @@ func TestBuildRequestReplaysSignatureMetadata(t *testing.T) {
 			},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1305,7 +1365,7 @@ func TestBuildRequestCustomToolCallUsesInvalidJSONStr(t *testing.T) {
 			}},
 		},
 	}
-	converted, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1325,7 +1385,7 @@ func TestBuildRequestRejectsNamedToolChoiceOutsideTools(t *testing.T) {
 		},
 		ToolChoice: &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "missing_tool"},
 	}
-	_, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	_, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
 	if err == nil || !strings.Contains(err.Error(), "missing_tool") {
 		t.Fatalf("err = %v, want named tool_choice rejection", err)
 	}
@@ -1345,7 +1405,7 @@ func TestPairToolCallsWithResultsConsumesDuplicateID(t *testing.T) {
 	resultPrompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 		Source: tool.Enum(), ToolCallId: proto.String("dup"), Prompt: proto.String("r"),
 	}
-	out := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callPrompt(), callPrompt(), resultPrompt})
+	out, _ := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callPrompt(), callPrompt(), resultPrompt})
 	if len(out) != 3 {
 		t.Fatalf("paired prompts = %d, want 3", len(out))
 	}
@@ -1551,7 +1611,7 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 	}
 
 	// 第二拍：回放消息序列进 wire——user, assistant(text+thinking+call), tool result, user。
-	converted, err := buildRequest(llm.RequestMessages{
+	converted, _, err := buildRequest(llm.RequestMessages{
 		Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "read a.txt"}}},
 			*done,

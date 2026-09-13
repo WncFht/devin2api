@@ -105,41 +105,45 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	rule("codex-ansi-escapes", `Don['’]t output ANSI escape codes directly — the CLI renderer applies them\.`, "Never output ANSI escape codes directly — the CLI renderer applies them.", "ansi escape codes directly"),
 }
 
-// sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案。
-func sanitizeRequest(request llm.RequestMessages) llm.RequestMessages {
-	request.SystemPrompt = sanitizeUpstreamText(request.SystemPrompt, true)
+// sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案，
+// 返回按规则 id 统计的命中数——改写本身是静默的，命中计数
+// 随请求日志落盘让「代理动过什么」可查。
+func sanitizeRequest(request llm.RequestMessages) (llm.RequestMessages, map[string]int) {
+	hits := make(map[string]int)
+	request.SystemPrompt = sanitizeUpstreamText(request.SystemPrompt, true, hits)
 	for index, message := range request.Messages {
 		switch typed := message.(type) {
 		case llm.UserMessage:
-			typed.Content = sanitizeContents(typed.Content)
+			typed.Content = sanitizeContents(typed.Content, hits)
 			request.Messages[index] = typed
 		case llm.AssistantMessage:
-			typed.Content = sanitizeContents(typed.Content)
+			typed.Content = sanitizeContents(typed.Content, hits)
 			request.Messages[index] = typed
 		case llm.ToolResultMessage:
-			typed.Content = sanitizeContents(typed.Content)
+			typed.Content = sanitizeContents(typed.Content, hits)
 			request.Messages[index] = typed
 		}
 	}
 	for index, tool := range request.Tools {
-		request.Tools[index].Description = sanitizeUpstreamText(tool.Description, true)
+		request.Tools[index].Description = sanitizeUpstreamText(tool.Description, true, hits)
 	}
 	// 上游会拒绝「声明了 tools 但 system prompt 为空」的请求（实测触发
 	// permission_denied）；注入最小中性身份句兜底。
 	if strings.TrimSpace(request.SystemPrompt) == "" && len(request.Tools) > 0 {
 		request.SystemPrompt = "You are an AI coding assistant."
+		hits["inject-empty-system"]++
 	}
-	return request
+	return request, hits
 }
 
-func sanitizeContents(content []llm.Content) []llm.Content {
+func sanitizeContents(content []llm.Content, hits map[string]int) []llm.Content {
 	for index, block := range content {
 		switch typed := block.(type) {
 		case llm.TextContent:
-			typed.Text = sanitizeUpstreamText(typed.Text, false)
+			typed.Text = sanitizeUpstreamText(typed.Text, false, hits)
 			content[index] = typed
 		case llm.ThinkingContent:
-			typed.Thinking = sanitizeUpstreamText(typed.Thinking, false)
+			typed.Thinking = sanitizeUpstreamText(typed.Thinking, false, hits)
 			content[index] = typed
 		}
 	}
@@ -177,7 +181,10 @@ func hasSanitizeTrigger(text string, buckets *[256][]string) bool {
 	return false
 }
 
-func sanitizeUpstreamText(text string, includePromptOnly bool) string {
+// sanitizeUpstreamText 按规则集改写文本并把命中数累加进 hits（由
+// sanitizeRequest 统一分配）；替换串允许含 $ 捕获组引用，故命中数
+// 用 FindAll 先数一遍而非 ReplaceAllStringFunc 统计。
+func sanitizeUpstreamText(text string, includePromptOnly bool, hits map[string]int) string {
 	if text == "" {
 		return text
 	}
@@ -198,7 +205,10 @@ func sanitizeUpstreamText(text string, includePromptOnly bool) string {
 		if !strings.Contains(lower, rule.trigger) {
 			continue
 		}
-		text = rule.pattern.ReplaceAllString(text, rule.replacement)
+		if matches := rule.pattern.FindAllStringIndex(text, -1); len(matches) > 0 {
+			hits[rule.id] += len(matches)
+			text = rule.pattern.ReplaceAllString(text, rule.replacement)
+		}
 	}
 	return text
 }

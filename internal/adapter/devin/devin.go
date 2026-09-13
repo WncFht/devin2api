@@ -189,7 +189,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err := request.Validate(); err != nil {
 		return nil, fmt.Errorf("validate Devin request: %w", err)
 	}
-	request = sanitizeRequest(request)
+	request, sanitizeHits := sanitizeRequest(request)
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
 		model = adapter.config.Model
@@ -207,11 +207,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	cfg := adapter.config
 	cfg.Model = model
 	cfg.Token = adapter.currentToken()
-	protoRequest, err := buildRequest(request, cfg)
+	protoRequest, repairs, err := buildRequest(request, cfg)
 	if err != nil {
 		return nil, err
 	}
 	recorder := debuglog.FromContext(ctx)
+	repairs.SanitizeHits = sanitizeHits
+	recorder.SetRepairs(repairs)
 	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
 	// attempt 计数区分多次发送：自愈重发与 pre-content reopen 都会重建
 	// 请求体，attempt2+ 写独立文件并在 04 里留 retry_attempt 分界行，
@@ -225,7 +227,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
 		// 用新凭据重建请求重试一次。token 未变化时不重试。
 		cfg.Token = adapter.currentToken()
-		if rebuilt, buildErr := buildRequest(request, cfg); buildErr == nil {
+		if rebuilt, _, buildErr := buildRequest(request, cfg); buildErr == nil {
 			protoRequest = rebuilt
 			attempt++
 			recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
@@ -280,7 +282,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			retryCtx, retryCancel := context.WithCancel(ctx)
 			retryCfg := cfg
 			retryCfg.Token = adapter.currentToken()
-			rebuilt, err := buildRequest(retryRequest, retryCfg)
+			rebuilt, _, err := buildRequest(retryRequest, retryCfg)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
 				attempt++

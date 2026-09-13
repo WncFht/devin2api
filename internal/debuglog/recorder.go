@@ -162,6 +162,9 @@ type Recorder struct {
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
 	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
+	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
+	// 构建请求后写入；Complete 时随 meta.json 与 index 落盘。
+	repairs atomic.Pointer[llm.RequestRepairs]
 
 	// 以下字段仅由写 worker 访问，无需加锁：
 	// sequences 保存每个 JSONL 文件各自的递增序号。
@@ -531,6 +534,15 @@ func (recorder *Recorder) SetRetryAfter(seconds int) {
 	recorder.retryAfterSeconds.Store(int64(seconds))
 }
 
+// SetRepairs 记录请求投影到上游协议时发生的修复计数；全零不存，
+// meta.json 就不出现 repairs 字段——「代理没动过」本身就是排障答案。
+func (recorder *Recorder) SetRepairs(repairs llm.RequestRepairs) {
+	if recorder == nil || repairs.Total() == 0 {
+		return
+	}
+	recorder.repairs.Store(&repairs)
+}
+
 // Abort 中断请求：标记 aborted 并调用挂接的取消函数。
 // 无可中断的请求（未挂接或已完结）返回 false。
 func (recorder *Recorder) Abort() bool {
@@ -741,6 +753,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if retry := recorder.retryAfterSeconds.Load(); retry > 0 {
 		meta["retry_after_seconds"] = retry
+	}
+	if repairs := recorder.repairs.Load(); repairs != nil {
+		meta["repairs"] = repairs
 	}
 	if completion != nil {
 		finishedAt := time.Now()

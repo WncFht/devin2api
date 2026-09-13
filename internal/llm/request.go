@@ -67,6 +67,34 @@ type RequestMessages struct {
 	Dropped []string
 }
 
+// RequestRepairs 是一次请求投影为上游 wire 格式时发生的静默修复计数，
+// 与响应方向的 AssistantMessageDiagnostic 同族（诊断，不改变主结果）。
+// 协议翻译层的修复（调用-结果配对重排、孤儿结果降级、空助手消息丢弃、
+// 历史图片剥离、策略指纹改写）本身合法，但上游协议漂移排障必须能回答
+// 「代理对这次请求动过什么」。全零时整个字段不落盘。
+type RequestRepairs struct {
+	// ReorderedPrompts 是 call→result 配对重排中改变位置的 prompt 数。
+	ReorderedPrompts int `json:"reordered_prompts,omitempty"`
+	// DemotedOrphanResults 是被降级为 USER 文本的孤儿 TOOL 结果数。
+	DemotedOrphanResults int `json:"demoted_orphan_results,omitempty"`
+	// DroppedEmptyAssistant 是被跳过的空助手消息数（上游见空回复会退化）。
+	DroppedEmptyAssistant int `json:"dropped_empty_assistant,omitempty"`
+	// OmittedHistoryImages 是被改写为文本占位的历史图片数（上游只收当前轮图片）。
+	OmittedHistoryImages int `json:"omitted_history_images,omitempty"`
+	// SanitizeHits 是上游内容策略指纹改写按规则 id 的命中计数。
+	SanitizeHits map[string]int `json:"sanitize_hits,omitempty"`
+}
+
+// Total 返回全部修复动作的合计次数，供日志索引汇总成单字段。
+func (repairs RequestRepairs) Total() int {
+	total := repairs.ReorderedPrompts + repairs.DemotedOrphanResults +
+		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages
+	for _, hits := range repairs.SanitizeHits {
+		total += hits
+	}
+	return total
+}
+
 // ToolChoiceMode 标识客户端要求的工具调用模式。
 type ToolChoiceMode string
 

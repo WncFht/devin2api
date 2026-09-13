@@ -18,7 +18,8 @@ import (
 	"github.com/WncFht/devin2api/internal/upstream"
 )
 
-func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetChatMessageRequest, error) {
+func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
+	var repairs llm.RequestRepairs
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
 	// ID，使命中更稳（实测稳定 ~7/8 vs 全随机波动）；缓存匹配本身是
 	// 「账号 + 内容前缀」键控，ID 不参与匹配。
@@ -89,7 +90,7 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 				}
 			}
 			if !found {
-				return nil, fmt.Errorf("invalid_argument: tool_choice names tool %q which is not in the tools list", choice.ToolName)
+				return nil, repairs, fmt.Errorf("invalid_argument: tool_choice names tool %q which is not in the tools list", choice.ToolName)
 			}
 			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
 				Choice: &devinproto.ExaChatPb_ChatToolChoice_ToolName{ToolName: choice.ToolName},
@@ -111,21 +112,25 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		}
 	}
 	for index, message := range request.Messages {
-		converted, err := convertMessage(message, index > lastAssistantIndex)
+		converted, err := convertMessage(message, index > lastAssistantIndex, &repairs)
 		if err != nil {
-			return nil, fmt.Errorf("message %d: %w", index, err)
+			return nil, repairs, fmt.Errorf("message %d: %w", index, err)
+		}
+		// 完全空的助手消息会被跳过（上游见空回复退化），计入修复量。
+		if _, isAssistant := message.(llm.AssistantMessage); isAssistant && len(converted) == 0 {
+			repairs.DroppedEmptyAssistant++
 		}
 		result.ChatMessagePrompts = append(result.ChatMessagePrompts, converted...)
 	}
 	// 上游要求 call→result 紧邻配对：assistant 发出的每个 tool call 必须紧跟
 	// 它的 TOOL 结果，否则 invalid_argument。客户端历史（OpenAI/Anthropic）是
 	// 「全部调用 → 全部结果」的分组结构，这里按 call id 重排成交错配对。
-	result.ChatMessagePrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
-	result.ChatMessagePrompts = demoteOrphanToolResults(result.ChatMessagePrompts)
+	result.ChatMessagePrompts, repairs.ReorderedPrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
+	result.ChatMessagePrompts, repairs.DemotedOrphanResults = demoteOrphanToolResults(result.ChatMessagePrompts)
 	for _, tool := range request.Tools {
 		converted, err := convertToolDefinition(tool)
 		if err != nil {
-			return nil, err
+			return nil, repairs, err
 		}
 		result.Tools = append(result.Tools, converted)
 	}
@@ -134,7 +139,7 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	if n := len(result.ChatMessagePrompts); n > 0 {
 		result.ChatMessagePrompts[n-1].PromptCacheOptions = ephemeralCacheOptions()
 	}
-	return result, nil
+	return result, repairs, nil
 }
 
 // ephemeralCacheOptions 返回上游 prompt 缓存的 EPHEMERAL 断点标记。
@@ -204,10 +209,11 @@ func uuidFromBytes(b []byte) string {
 
 // convertMessage 将中间消息转为 Devin ChatMessagePrompt。
 // attachImages 为 true 时才把 ImageContent 写入 Images（仅最新用户轮）；历史图改成文本占位。
-func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaChatPb_ChatMessagePrompt, error) {
+// repairs 累计转换中发生的静默修复（历史图剥离等）。
+func convertMessage(message llm.Message, attachImages bool, repairs *llm.RequestRepairs) ([]*devinproto.ExaChatPb_ChatMessagePrompt, error) {
 	switch message := message.(type) {
 	case llm.UserMessage:
-		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content, attachImages)}, nil
+		return []*devinproto.ExaChatPb_ChatMessagePrompt{promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER, message.Content, attachImages, repairs)}, nil
 	case llm.AssistantMessage:
 		// Wire 实证（chisel 3000.2.17 抓包）：一个助手回合合并为单条
 		// prompt——prompt/thinking/signature/toolCalls 同体携带，无文本时
@@ -282,7 +288,7 @@ func convertMessage(message llm.Message, attachImages bool) ([]*devinproto.ExaCh
 		}
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
 	case llm.ToolResultMessage:
-		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content, attachImages)
+		prompt := promptForContent(devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL, message.Content, attachImages, repairs)
 		if prompt.GetPrompt() == "" {
 			// 上游不接受空的工具结果文本，对齐 WindsurfAPI 的占位。
 			prompt.Prompt = proto.String("[tool result]")
@@ -301,7 +307,8 @@ var assistantSource = devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeium
 // pairToolCallsWithResults 把「连续调用消息 + 连续结果消息」的分组序列
 // 重排为 call_i, result_i, call_j, result_j 的交错序列。
 // 已配对的交错序列保持不变；找不到匹配结果的调用原样保留位置。
-func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) []*devinproto.ExaChatPb_ChatMessagePrompt {
+// 第二个返回值是位置发生变化的 prompt 数（已交错的历史为 0）。
+func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) ([]*devinproto.ExaChatPb_ChatMessagePrompt, int) {
 	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
 	isCallPrompt := func(p *devinproto.ExaChatPb_ChatMessagePrompt) bool {
 		return p.GetSource() == assistantSource && len(p.GetToolCalls()) > 0
@@ -349,13 +356,30 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 		}
 		i = j
 	}
-	return out
+	return out, countMovedPrompts(prompts, out)
+}
+
+// countMovedPrompts 统计重排后位置发生变化的 prompt 数，作为配对修复量。
+// prompt 指针在流程中唯一（每条消息独立构造），可安全作 map 键。
+func countMovedPrompts(in, out []*devinproto.ExaChatPb_ChatMessagePrompt) int {
+	original := make(map[*devinproto.ExaChatPb_ChatMessagePrompt]int, len(in))
+	for index, prompt := range in {
+		original[prompt] = index
+	}
+	moved := 0
+	for position, prompt := range out {
+		if original[prompt] != position {
+			moved++
+		}
+	}
+	return moved
 }
 
 // demoteOrphanToolResults 把找不到对应 tool call 的孤立 TOOL 结果
 // （客户端压缩丢掉 function_call 时产生）降级为 USER 文本消息。
 // 上游对无配对的 TOOL prompt 返回 invalid_argument；降级保住结果内容。
-func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) []*devinproto.ExaChatPb_ChatMessagePrompt {
+// 第二个返回值是被降级的结果数。
+func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) ([]*devinproto.ExaChatPb_ChatMessagePrompt, int) {
 	callIDs := make(map[string]struct{})
 	for _, prompt := range prompts {
 		for _, call := range prompt.GetToolCalls() {
@@ -364,6 +388,7 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 	}
 	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
 	userSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER
+	demotedCount := 0
 	for index, prompt := range prompts {
 		if prompt.GetSource() != toolSource {
 			continue
@@ -372,6 +397,7 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 			continue
 		}
 		slog.Warn("demoted orphan tool result to user text", "tool_call_id", prompt.GetToolCallId())
+		demotedCount++
 		demoted := &devinproto.ExaChatPb_ChatMessagePrompt{
 			MessageId: proto.String(randid.UUID()),
 			Source:    userSource.Enum(),
@@ -381,10 +407,10 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 		demoted.Images = prompt.GetImages()
 		prompts[index] = demoted
 	}
-	return prompts
+	return prompts, demotedCount
 }
 
-func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool) *devinproto.ExaChatPb_ChatMessagePrompt {
+func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool, repairs *llm.RequestRepairs) *devinproto.ExaChatPb_ChatMessagePrompt {
 	prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randid.UUID()),
 		Source:    source.Enum(),
@@ -410,6 +436,7 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 					text.WriteByte('\n')
 				}
 				text.WriteString("[Image omitted from history]")
+				repairs.OmittedHistoryImages++
 				continue
 			}
 			// Devin/Windsurf ImageData：纯 base64（无 data: 前缀）+ mime_type。

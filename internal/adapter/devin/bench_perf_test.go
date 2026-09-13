@@ -24,7 +24,7 @@ func BenchmarkSanitizeText(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = sanitizeUpstreamText(text, true)
+		_ = sanitizeUpstreamText(text, true, make(map[string]int))
 	}
 }
 
@@ -44,7 +44,7 @@ func BenchmarkSanitizeRequest(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = sanitizeRequest(request)
+		_, _ = sanitizeRequest(request)
 	}
 }
 
@@ -101,7 +101,7 @@ func BenchmarkBuildRequestLongHistory(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := buildRequest(request, cfg); err != nil {
+		if _, _, err := buildRequest(request, cfg); err != nil {
 			b.Fatal(err)
 		}
 	}

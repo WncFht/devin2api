@@ -62,6 +62,9 @@ type IndexEntry struct {
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
 	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
 	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
+	// Repairs 是请求投影为上游 wire 格式时的静默修复动作总数
+	//（重排/降级/剥离/指纹改写），明细在同名 meta.json 字段。
+	Repairs int `json:"repairs,omitempty"`
 }
 
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
@@ -111,6 +114,9 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
 		PrematureEndTurn:  completion.PrematureEndTurn,
+	}
+	if repairs := recorder.repairs.Load(); repairs != nil {
+		entry.Repairs = repairs.Total()
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
