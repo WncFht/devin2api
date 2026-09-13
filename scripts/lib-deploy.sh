@@ -56,7 +56,9 @@ download_release_binary() {
 	asset="$(release_asset_name)" || return 1
 	base="https://github.com/${REPO_SLUG}/releases/download/${tag}"
 	token="$(gh_token)"
-	echo "==> download ${asset} @ ${tag}"
+	# 进度走 stderr：本函数会被 build_or_download 在 $() 里调用，
+	# stdout 留给版本号返回值，混入进度会污染捕获结果。
+	echo "==> download ${asset} @ ${tag}" >&2
 	# 公开 repo 下 token 为空也无妨；留着 auth 头以兼容 repo 转 private 的场景，
 	# github.com 重定向到 S3 预签名 URL 时 curl 不会跨主机转发 Authorization。
 	# -C - 断点续传：失败留下半成品，重跑接着下；若残留的是别的版本残片，
@@ -129,13 +131,15 @@ config_listen_port() {
 
 # warn_strays <keep_pid>：列出非服务托管的 devin-2api 进程（单实例约定——
 # 它们会抢端口、分流请求，且不受优雅退出保护）。
+# 按可执行名精确匹配（comm）：pgrep -f 会把 cmdline 里含 "devin-2api"
+# 的 bash/grep（含本函数自己的管道与外层 `cd devin-2api` 的 shell）
+# 误报为 stray。
 warn_strays() {
-	local strays
-	strays="$(pgrep -fl 'devin-2api' | awk -v keep="${1:-0}" '$1 != keep' | grep -v 'devin-2api.new' || true)"
-	if [[ -n "${strays}" ]]; then
-		echo "WARN: 非服务托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:" >&2
-		echo "${strays}" >&2
-	fi
+	local pids
+	pids="$(pgrep -x devin-2api | grep -vx "${1:-0}" || true)"
+	[[ -z "${pids}" ]] && return 0
+	echo "WARN: 非服务托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:" >&2
+	ps -o pid=,args= -p "$(printf '%s\n' "${pids}" | paste -sd, -)" >&2
 }
 
 # healthz_version 返回 /healthz 的 version 字段；未运行/解析失败返回空。
