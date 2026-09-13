@@ -20,6 +20,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/llm"
@@ -35,6 +36,9 @@ const (
 	defaultClientName    = "chisel"
 	defaultClientVersion = "3000.2.17"
 	defaultClientOS      = "mac"
+	// catalogRetryBackoff 是模型目录拉取失败且错误未带 reset hint 时的
+	// 冷却时长；带 hint 时按 hint 冷却（上游何时解除它自己最清楚）。
+	catalogRetryBackoff = 30 * time.Second
 )
 
 // Config 保存 Devin adapter 的固定上游配置。
@@ -101,6 +105,12 @@ type Adapter struct {
 	models         []adapter.ModelInfo
 	modelsExpiry   time.Time
 	modelsCacheTTL time.Duration
+	// modelsRetryUntil/modelsErr 是目录拉取失败的冷却窗口：失败期间
+	// 目录始终为空，不冷却会让每个请求（ensureCatalog）都重试一次
+	// GetCliModelConfigs，客户端重试风暴原样穿透到上游（stub 实测
+	// 20s 内 1.1 万次）。窗口内有旧缓存回旧值，否则回 modelsErr。
+	modelsRetryUntil time.Time
+	modelsErr        error
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
@@ -574,20 +584,36 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	if a.models != nil && time.Now().Before(a.modelsExpiry) {
 		return a.models, nil
 	}
+	// 失败冷却期不再打上游：有旧值回旧值，空缓存回上次错误。
+	if time.Now().Before(a.modelsRetryUntil) {
+		if a.models != nil {
+			return a.models, nil
+		}
+		return nil, a.modelsErr
+	}
 
 	name, version, os := a.config.clientIdentity()
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
 	if err != nil {
+		wrapped := fmt.Errorf("Devin GetCliModelConfigs: %w", err)
+		// 客户端断连的 ctx 取消不是上游失败，不上冷却。
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			backoff := catalogRetryBackoff
+			if seconds, ok := common.RetryAfterSeconds(err.Error()); ok {
+				backoff = time.Duration(seconds) * time.Second
+			}
+			a.modelsRetryUntil = time.Now().Add(backoff)
+			a.modelsErr = wrapped
+		}
 		// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
-		// 能力位校验同时失去依据，比数据稍旧危害更大。不续期 TTL——
-		// 下次调用仍重试拉取，恢复后自然回到新数据。
+		// 能力位校验同时失去依据，比数据稍旧危害更大。
 		if a.models != nil {
 			slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
 			return a.models, nil
 		}
-		return nil, fmt.Errorf("Devin GetCliModelConfigs: %w", err)
+		return nil, wrapped
 	}
 	now := time.Now().Unix()
 	models := make([]adapter.ModelInfo, 0, len(resp.Msg.GetClientModelConfigs()))
@@ -648,6 +674,8 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 
 	a.models = models
 	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
+	a.modelsRetryUntil = time.Time{}
+	a.modelsErr = nil
 	return models, nil
 }
 
