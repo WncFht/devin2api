@@ -37,6 +37,15 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # 交叉编译门禁：build 覆盖平台 tag 文件，vet 额外覆盖测试文件——
+      # 防止以后引入 unix-only 调用把 windows/darwin 编译打断。
+      - name: Cross-compile check
+        run: |
+          for goos in windows darwin; do
+            GOOS=$goos go build ./...
+            GOOS=$goos go vet ./...
+          done
+
   lint-markdown:
     name: Markdown
     runs-on: ubuntu-latest
