@@ -42,12 +42,15 @@ jobs:
           - goos: linux
             goarch: arm64
             asset: devin-2api-linux-arm64
+          # Windows 资产是 zip 包（exe + config.example.yaml + LICENSE）：
+          # 该平台没有 deploy 脚本消费裸 exe，归档让用户一次下载即可运行；
+          # unix 资产保持裸二进制，deploy 脚本直接下载热替换。
           - goos: windows
             goarch: amd64
-            asset: devin-2api-windows-amd64.exe
+            asset: devin-2api-windows-amd64.zip
           - goos: windows
             goarch: arm64
-            asset: devin-2api-windows-arm64.exe
+            asset: devin-2api-windows-arm64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,8 +68,18 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
+          out="dist/${{ matrix.asset }}"
+          [[ "${{ matrix.goos }}" == "windows" ]] && out="dist/devin-2api.exe"
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-            -o "dist/${{ matrix.asset }}" ./cmd/devin-2api
+            -o "${out}" ./cmd/devin-2api
+
+      - name: Package windows zip
+        if: matrix.goos == 'windows'
+        run: |
+          cp config.example.yaml LICENSE dist/
+          cd dist
+          zip -q "${{ matrix.asset }}" devin-2api.exe config.example.yaml LICENSE
+          rm devin-2api.exe config.example.yaml LICENSE
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

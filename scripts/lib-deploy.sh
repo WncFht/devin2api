@@ -106,13 +106,18 @@ smoke_version() {
 	}
 }
 
-# install_binary <new_binary>：装入 RUNTIME 并同步仓库 config.yaml。
+# install_binary <new_binary>：装入 RUNTIME 并同步仓库 config.yaml；
+# 仓库内 logs 符号链接指向运行目录，排障路径与 AGENTS.md 约定一致。
 install_binary() {
 	mkdir -p "${RUNTIME}/logs"
 	mv "$1" "${RUNTIME}/devin-2api"
 	cmp -s config.yaml "${RUNTIME}/config.yaml" 2>/dev/null ||
 		echo "==> config.yaml 与运行目录不一致，以仓库版本覆盖"
 	cp config.yaml "${RUNTIME}/config.yaml"
+	# logs 已是真实目录（本地 -config config.yaml 跑过）则不动，避免吞掉现场。
+	if [[ -L logs || ! -e logs ]]; then
+		ln -sfn "${RUNTIME}/logs" logs
+	fi
 	echo "==> installed ${RUNTIME}/devin-2api (config.yaml synced from repo)"
 }
 
