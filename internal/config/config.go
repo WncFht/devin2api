@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -165,8 +166,8 @@ func (config *Config) Validate() error {
 var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*"([^"]+)"`)
 
 // resolveDevinToken 从本地 Devin 客户端状态中发现 session token。
-// 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与
-// ~/.local/share/devin/credentials.toml（Devin CLI 登录产物）。
+// 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与 Devin CLI 登录产物
+// credentials.toml（路径见 devinCredentialsPaths，随平台变化）。
 // 找不到返回空串，由调用方决定是否报错。
 func resolveDevinToken() string {
 	for _, name := range []string{"DEVIN_TOKEN", "WINDSURF_API_KEY"} {
@@ -174,17 +175,35 @@ func resolveDevinToken() string {
 			return value
 		}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	for _, path := range devinCredentialsPaths() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
+			return strings.TrimSpace(string(match[1]))
+		}
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".local", "share", "devin", "credentials.toml"))
-	if err != nil {
-		return ""
+	return ""
+}
+
+// devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
+// Linux/macOS 上 CLI 遵循 XDG 写 ~/.local/share；Windows 上写 roaming
+// %APPDATA%（部分版本在 %LOCALAPPDATA%），两个都探测以免漏掉。
+func devinCredentialsPaths() []string {
+	var dirs []string
+	if runtime.GOOS == "windows" {
+		for _, env := range []string{"APPDATA", "LOCALAPPDATA"} {
+			if dir := os.Getenv(env); dir != "" {
+				dirs = append(dirs, dir)
+			}
+		}
+	} else if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "share"))
 	}
-	match := devinCredentialsTokenPattern.FindSubmatch(data)
-	if len(match) != 2 {
-		return ""
+	paths := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, filepath.Join(dir, "devin", "credentials.toml"))
 	}
-	return strings.TrimSpace(string(match[1]))
+	return paths
 }
