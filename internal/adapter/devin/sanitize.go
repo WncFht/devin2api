@@ -38,6 +38,8 @@ type upstreamSanitizeRule struct {
 	trigger string
 }
 
+// rule 构造一条非 promptOnly 的改写规则；pattern 非法会在初始化期 panic
+// （MustCompile）——规则表是编译期常量，尽早暴露拼写错误。
 func rule(id, pattern, replacement, trigger string) upstreamSanitizeRule {
 	return upstreamSanitizeRule{id: id, pattern: regexp.MustCompile(pattern), replacement: replacement, trigger: trigger}
 }
@@ -103,11 +105,18 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	// ANSI 转义句：「Don't output ANSI escape codes directly」与
 	// 「the CLI renderer applies them」须同句共现，缺一或换主语即放行。
 	rule("codex-ansi-escapes", `Don['’]t output ANSI escape codes directly — the CLI renderer applies them\.`, "Never output ANSI escape codes directly — the CLI renderer applies them.", "ansi escape codes directly"),
+	// codex 注入的 <permissions instructions> 授权块：上游内容策略实测
+	// 拦截。原先在 common.DecodeContent 解码期剥离——迁到本表后
+	// 01/02 日志保留客户端原文、命中进 repairs 计数可查，且 anthropic
+	// 入口（不走 DecodeContent）同样覆盖。
+	rule("codex-permissions", `(?s)<permissions instructions>.*?</permissions instructions>`, "", "permissions instructions"),
 }
 
 // sanitizeRequest 改写请求中所有会被上游策略拦截的已知文案，
 // 返回按规则 id 统计的命中数——改写本身是静默的，命中计数
 // 随请求日志落盘让「代理动过什么」可查。
+// 注意：原地改写 Messages/Tools 切片的元素（02 日志必须在调用前
+// 先投影落盘，否则记到的是改写后内容），返回值与入参共享底层数组。
 func sanitizeRequest(request llm.RequestMessages) (llm.RequestMessages, map[string]int) {
 	hits := make(map[string]int)
 	request.SystemPrompt = sanitizeUpstreamText(request.SystemPrompt, true, hits)
@@ -136,6 +145,8 @@ func sanitizeRequest(request llm.RequestMessages) (llm.RequestMessages, map[stri
 	return request, hits
 }
 
+// sanitizeContents 就地改写内容块里的文本/思考正文（值语义块先改后
+// 写回原槽位）；图片等其他块不含可拦截文案，跳过。
 func sanitizeContents(content []llm.Content, hits map[string]int) []llm.Content {
 	for index, block := range content {
 		switch typed := block.(type) {
@@ -159,6 +170,9 @@ var (
 	sanitizeBucketsMessages = triggerBuckets(false)
 )
 
+// triggerBuckets 建预筛桶：按 trigger 首字节折小写（b|0x20）把规则
+// 分进 256 桶。includePromptOnly 为 false 时剔除只作用于 prompt/工具
+// 描述的规则——消息正文不走那批。
 func triggerBuckets(includePromptOnly bool) [256][]string {
 	var buckets [256][]string
 	for _, rule := range upstreamSanitizeRules {
@@ -170,6 +184,9 @@ func triggerBuckets(includePromptOnly bool) [256][]string {
 	return buckets
 }
 
+// hasSanitizeTrigger 逐字节扫描文本：命中字节桶再做 EqualFold 短前缀
+// 比对。任一 trigger 出现即返回 true（可能存在规则命中），全否则文本
+// 一定干净——桶按 trigger 首字节索引，规则不可能绕过对应桶。
 func hasSanitizeTrigger(text string, buckets *[256][]string) bool {
 	for i := 0; i < len(text); i++ {
 		for _, trigger := range buckets[text[i]|0x20] {

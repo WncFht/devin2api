@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"mime"
-	"regexp"
 	"strings"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -23,7 +22,7 @@ var ErrImageShape = errors.New("unrecognized image value shape")
 func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error) {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
-		return []llm.Content{llm.TextContent{Text: SanitizeText(text)}}, nil
+		return []llm.Content{llm.TextContent{Text: text}}, nil
 	}
 	var parts []json.RawMessage
 	if err := json.Unmarshal(raw, &parts); err != nil {
@@ -40,7 +39,7 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 		}
 		switch header.Type {
 		case "input_text", "output_text", "text":
-			content = append(content, llm.TextContent{Text: SanitizeText(header.Text)})
+			content = append(content, llm.TextContent{Text: header.Text})
 		case "input_image", "image_url", "image":
 			image, err := DecodeImagePart(part)
 			if err != nil {
@@ -276,20 +275,6 @@ func SniffImageMIME(encoded string) string {
 	default:
 		return ""
 	}
-}
-
-// ContentText 从内容块中提取纯文本。
-// codexPermissionsBlock 匹配 codex 发送的 <permissions instructions>...</permissions instructions> 块，
-// 上游 Devin 的内容策略会因此拒绝请求。
-var codexPermissionsBlock = regexp.MustCompile(`(?s)<permissions instructions>.*?</permissions instructions>`)
-
-// SanitizeText 移除 codex system prompt 中可能触发上游内容策略的敏感块。
-func SanitizeText(text string) string {
-	// 正则匹配必含字面开标签；不含即不可能命中，干净文本省下整段扫描。
-	if !strings.Contains(text, "<permissions instructions>") {
-		return text
-	}
-	return codexPermissionsBlock.ReplaceAllString(text, "")
 }
 
 // ContentText 拼接内容块中的全部 TextContent 正文。
