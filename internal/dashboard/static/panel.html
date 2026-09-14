@@ -54,10 +54,10 @@
       <div class="filters">
         <input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果...">
         <input type="search" id="fStatus" placeholder="状态码: 499 / !200 / >=400 / 2xx" style="max-width:210px;flex:0" title="状态码表达式：精确码 499、段位 4xx、比较 >=400、取反 !200；逗号分隔为或">
-        <select id="fResult"><option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option></select>
+        <select id="fResult" aria-label="按结果筛选"><option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option></select>
         <input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0">
         <input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0">
-        <select id="fSince"><option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select>
+        <select id="fSince" aria-label="按时间范围筛选"><option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select>
         <input type="hidden" id="fSinceTS"><input type="hidden" id="fUntilTS">
         <button class="btn" id="reqExportJson">导出 JSON</button>
         <button class="btn" id="reqExportCsv">导出 CSV</button>
@@ -98,11 +98,11 @@
     <div class="panel">
       <div class="filters">
         <input type="search" id="search" placeholder="搜索 UID / 标签 / 描述 / 系列...">
-        <select id="fProvider"><option value="">全部渠道</option></select>
-        <select id="fApi"><option value="">全部 API Provider</option></select>
-        <select id="fTier"><option value="">全部定价等级</option><option value="free">FREE</option><option value="low">LOW</option><option value="medium">MEDIUM</option><option value="high">HIGH</option></select>
-        <select id="fPricing"><option value="">全部计费类型</option></select>
-        <select id="fSort"><option value="default">默认排序</option><option value="mult_asc">倍率 升序</option><option value="mult_desc">倍率 降序</option><option value="in_asc">Input $/1M 升序</option><option value="in_desc">Input $/1M 降序</option><option value="out_asc">Output $/1M 升序</option><option value="out_desc">Output $/1M 降序</option><option value="name">名称 A-Z</option></select>
+        <select id="fProvider" aria-label="按渠道筛选"><option value="">全部渠道</option></select>
+        <select id="fApi" aria-label="按 API Provider 筛选"><option value="">全部 API Provider</option></select>
+        <select id="fTier" aria-label="按定价等级筛选"><option value="">全部定价等级</option><option value="free">FREE</option><option value="low">LOW</option><option value="medium">MEDIUM</option><option value="high">HIGH</option></select>
+        <select id="fPricing" aria-label="按计费类型筛选"><option value="">全部计费类型</option></select>
+        <select id="fSort" aria-label="排序方式"><option value="default">默认排序</option><option value="mult_asc">倍率 升序</option><option value="mult_desc">倍率 降序</option><option value="in_asc">Input $/1M 升序</option><option value="in_desc">Input $/1M 降序</option><option value="out_asc">Output $/1M 升序</option><option value="out_desc">Output $/1M 降序</option><option value="name">名称 A-Z</option></select>
       </div>
       <div class="chip-row" id="chips">
         <button type="button" class="chip" data-tag="free">FREE</button><button type="button" class="chip" data-tag="promo">PROMO</button><button type="button" class="chip" data-tag="img">支持图片</button><button type="button" class="chip" data-tag="beta">BETA</button><button type="button" class="chip" data-tag="new">NEW</button><button type="button" class="chip" data-tag="fast">FAST</button><button type="button" class="chip" data-tag="premium">Premium</button><button type="button" class="chip" data-tag="rec">推荐</button><button type="button" class="chip" data-tag="empty_mult">无倍率</button><button type="button" class="chip" data-tag="disabled">已禁用</button>
@@ -135,7 +135,7 @@
       <h3>进程日志 <span class="sub">logs/stderr.log · 尾部 256KB</span><span class="spacer"></span>
         <button class="btn" id="procReload">刷新</button>
         <button class="btn" id="procFollow">跟随输出</button>
-        <select id="procLevel" class="btn" style="padding-right:6px"><option value="">全部级别</option><option value="INFO">INFO+</option><option value="WARN">WARN+</option><option value="ERROR">仅 ERROR</option></select>
+        <select id="procLevel" class="btn" style="padding-right:6px" aria-label="日志级别过滤"><option value="">全部级别</option><option value="INFO">INFO+</option><option value="WARN">WARN+</option><option value="ERROR">仅 ERROR</option></select>
       </h3>
       <div class="file-view" id="processLogView" style="max-height:44vh">加载中...</div>
     </div>

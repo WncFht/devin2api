@@ -105,10 +105,14 @@ export function fmtDuration(sec) {
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor(sec % 3600 / 60) + 'm';
   return Math.floor(sec / 86400) + 'd ' + Math.floor(sec % 86400 / 3600) + 'h';
 }
+// toLocaleString 系列每次调用都新建 Intl.DateTimeFormat（内部查 locale
+// 数据表）——请求表/矩阵每秒上百次调用时构造开销不可忽略，缓存两个实例。
+const TIME_FMT = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const DATETIME_FMT = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 export function fmtTime(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso || '-';
-  const t = d.toLocaleTimeString('zh-CN', { hour12: false });
+  const t = TIME_FMT.format(d);
   if (d.toDateString() === new Date().toDateString()) return t;
   return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + t;
 }
@@ -117,7 +121,7 @@ export function fmtUnix(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return String(v);
   const d = new Date(n * 1000);
-  return isNaN(d) ? String(v) : d.toLocaleString('zh-CN', { hour12: false });
+  return isNaN(d) ? String(v) : DATETIME_FMT.format(d);
 }
 // fmtUnixShort 输出 M/D HH:mm 短形式，用于 KPI 卡等窄位。
 export function fmtUnixShort(v) {
@@ -233,11 +237,14 @@ export const REJECT_LABELS = {
 // ---------- 组件 ----------
 // kpi 卡片：label + 大数字 + 副行。tone 控制左侧色点；value/sub 允许内嵌 HTML
 // （money()/fmtNum()+delta 等已自带转义或纯数字），label 纯文本。
+// 两者都是 nowrap+ellipsis 截断——title 兜底完整文本，被截的关键信息
+// （往往在副行后半段）悬停仍可读。
+const plainText = s => String(s).replace(/<[^>]+>/g, '');
 export function kpi(label, value, sub, tone) {
   return '<div class="kpi' + (tone ? ' tone-' + tone : '') + '">' +
     '<div class="k-label">' + (tone ? '<i></i>' : '') + esc(label) + '</div>' +
-    '<div class="k-value">' + value + '</div>' +
-    (sub ? '<div class="k-sub">' + sub + '</div>' : '') + '</div>';
+    '<div class="k-value" title="' + esc(plainText(value)) + '">' + value + '</div>' +
+    (sub ? '<div class="k-sub" title="' + esc(plainText(sub)) + '">' + sub + '</div>' : '') + '</div>';
 }
 export function meta(k, v) {
   return '<div class="mini"><span class="k">' + esc(k) + '</span><span class="v">' + esc(String(v)) + '</span></div>';

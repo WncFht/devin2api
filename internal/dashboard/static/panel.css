@@ -6,6 +6,8 @@
   --surface: #12151f;
   --surface-2: #181c29;
   --surface-3: #1f2434;
+  /* 凹进面板的内嵌阅读区（日志/文件查看器）：比底色再暗一档的井。 */
+  --inset: #0d1017;
   --border: rgba(148, 163, 184, 0.10);
   --border-strong: rgba(148, 163, 184, 0.20);
   --text: #e5e9f2;
@@ -13,6 +15,7 @@
   --muted: #78819a;
   --chart-dim: #8b93a7;
   --accent: #818cf8;
+  --accent-hover: #93a0fb;
   --accent-soft: rgba(129, 140, 248, 0.14);
   --ok: #34d399;
   --ok-soft: rgba(52, 211, 153, 0.14);
@@ -60,7 +63,10 @@ a { color: var(--accent); text-decoration: none; }
 .brand-name { font-size: 15px; font-weight: 700; letter-spacing: 0.2px; }
 .brand-name b { color: var(--accent); }
 .brand-ver { font-size: var(--fs-sm); color: var(--muted); font-family: var(--mono); }
-.topnav { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; justify-content: center; }
+/* overflow-x 常驻：901–1200px 中宽区间顶栏不折行，导航靠横滑兜住
+   不被右侧状态区挤裁；scrollbar 隐藏保持顶栏干净。 */
+.topnav { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; justify-content: center; overflow-x: auto; }
+.topnav::-webkit-scrollbar { display: none; }
 .topnav a {
   display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px;
   border-radius: var(--radius-sm); color: var(--text-dim); font-size: 13px;
@@ -242,7 +248,7 @@ tr.total td { font-weight: 600; border-top: 1px solid var(--border-strong); }
 .file-link:hover, .file-link.on { border-color: var(--accent); }
 .file-link.ok { border-color: var(--ok); }
 .file-view {
-  margin-top: 8px; max-height: 54vh; overflow: auto; background: #0d1017;
+  margin-top: 8px; max-height: 54vh; overflow: auto; background: var(--inset);
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px;
   font-family: var(--mono); font-size: var(--fs-sm); white-space: pre-wrap; word-break: break-all;
   line-height: 1.6;
@@ -294,7 +300,7 @@ tr.total td { font-weight: 600; border-top: 1px solid var(--border-strong); }
 .btn-danger-solid { background: var(--err); border-color: var(--err); color: #fff; }
 .btn-danger-solid:hover { background: #ef4444; border-color: #ef4444; color: #fff; }
 .btn-on-solid { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn-on-solid:hover { background: #93a0fb; color: #fff; }
+.btn-on-solid:hover { background: var(--accent-hover); color: #fff; }
 
 /* ---------- 结果 badge（请求表语义色） ---------- */
 .rbadge {
@@ -425,8 +431,7 @@ tr.row-new td { animation: rowNew 1.6s ease-out; }
 /* ---------- 窄屏：顶栏折行，导航掉到第二行 ---------- */
 @media (max-width: 900px) {
   .topbar { height: auto; min-height: var(--topbar-h); flex-wrap: wrap; padding: 8px 14px; gap: 8px; }
-  .topnav { order: 3; flex: 0 0 100%; justify-content: flex-start; overflow-x: auto; }
-  .topnav::-webkit-scrollbar { display: none; }
+  .topnav { order: 3; flex: 0 0 100%; justify-content: flex-start; }
   .topnav a { padding: 5px 9px; font-size: var(--fs-md); }
   .main { padding: 104px 14px 40px; }
 }
