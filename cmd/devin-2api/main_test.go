@@ -98,7 +98,10 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := app.New(devinAdapter, config.ServerConfig{}, manager)
-	panel := dashboard.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+	panel, err := dashboard.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)

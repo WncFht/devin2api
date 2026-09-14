@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path"
 	"strings"
@@ -96,14 +97,13 @@ type ConfigReloadReport struct {
 // forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
 // tokenFunc 每次求值返回当前上游凭据（与 adapter 的自愈共用同一来源）；
 // nil 视为恒空凭据。metrics/debugManager 允许为 nil（对应功能未启用）。
-func New(password, baseURL string, tokenFunc func() string, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debugManager *debuglog.Manager) *Handler {
+func New(password, baseURL string, tokenFunc func() string, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debugManager *debuglog.Manager) (*Handler, error) {
 	if tokenFunc == nil {
 		tokenFunc = func() string { return "" }
 	}
 	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
 	if err != nil {
-		// 代理配置错误时回退到默认 transport，保证面板仍可尝试工作。
-		base = http.DefaultTransport.(*http.Transport).Clone()
+		return nil, fmt.Errorf("proxy transport: %w", err)
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
 	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
@@ -121,7 +121,7 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 		cacheTTL:      5 * time.Minute,
 		metrics:       metrics,
 		debugManager:  debugManager,
-	}
+	}, nil
 }
 
 // SetVersion 记录构建版本，stats/index 端点透出，供排障辨认运行中的二进制。
@@ -402,9 +402,10 @@ const (
 )
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// 所有分支都回 JSON——错误路径此前漏设 Content-Type。
+	w.Header().Set("Content-Type", "application/json")
 	password, passwordHash := h.passwordSnapshot()
 	if password == "" {
-		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true,"open":true}`))
 		return
 	}

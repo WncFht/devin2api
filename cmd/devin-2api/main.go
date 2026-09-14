@@ -190,7 +190,11 @@ func main() {
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	if serviceConfig.Devin.Token != "" {
-		panel := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+		panel, err := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+		if err != nil {
+			slog.Error("create dashboard failed", "error", err)
+			os.Exit(1)
+		}
 		panel.SetVersion(resolved)
 		panel.SetGateStats(devinAdapter.GateStats)
 		panel.SetAliasesFunc(devinAdapter.Aliases)

@@ -22,7 +22,10 @@ import (
 // token 留空时上游字段不会被这些端点触达。
 func newTestPanel(t *testing.T, password string, manager *debuglog.Manager) http.Handler {
 	t.Helper()
-	handler := New(password, "https://example.com", func() string { return "" }, "", false, obs.NewMetrics(), manager)
+	handler, err := New(password, "https://example.com", func() string { return "" }, "", false, obs.NewMetrics(), manager)
+	if err != nil {
+		t.Fatal(err)
+	}
 	router := chi.NewRouter()
 	handler.Register(router)
 	return router
@@ -140,7 +143,10 @@ func TestPanelExportTruncatedHeader(t *testing.T) {
 // TestLoginFailureSweep 验证失败路径会清扫已失效的爆破条目——纯爆破
 // 流量永远不走成功路径，loginFailures 不能无界增长。
 func TestLoginFailureSweep(t *testing.T) {
-	handler := New("pw", "https://example.com", nil, "", false, nil, nil)
+	handler, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stale := time.Now().Add(-time.Hour)
 	for i := 0; i < sessionSweepThreshold+10; i++ {
 		handler.loginFailures[fmt.Sprintf("10.0.0.%d", i)] = &loginFail{fails: 1, lastSeen: stale}
