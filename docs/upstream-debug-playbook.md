@@ -148,7 +148,7 @@ curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
 ## ccload 侧注意事项
 
 - 本机示例渠道 id=293（`http://127.0.0.1:3003`），模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
-- **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。改完要重启 ccload 才生效。
+- **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。它是 `channels` 表列，写库即热生效（走缓存失效）——需要重启的只有 `system_settings`。
 - ccload 会统计 SSE 级失败（HTTP 200 + `response.failed`/`error` 事件也算失败），连续失败会把渠道打冷却。devin-2api 的应对分三层：① 首个上游事件前不下发 `start`，上游零帧报错（`permission_denied` 等）走真实 HTTP 4xx，ccload 按客户端错误透传不冷却渠道；② 唯一的例外是上下文超长——为了让 Codex 收到 `response.failed`（它只在 SSE 事件里认 `error.code=="context_length_exceeded"`），会先补发一个合成 `start` 再发 error 事件，事件顶层 `status:413` 让 ccload 仍按客户端级分类、不冷却；③ 流式中途（已有语义输出、连接已提交后）的错误事件同样在 data 里带顶层 `status`，ccload 按真实语义分类且事件原文会继续透传给客户端。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
 
