@@ -32,6 +32,12 @@ const Charts = (() => {
   const palette = [C.accent, C.ok, C.warn, C.err, C.info, C.pink, C.violet, C.cyan];
   const axisColor = C.line;
   const textDim = C.axis;
+  // 字号三档与 panel.css 的 --fs-* 令牌同步（变量值是 '12.5px'，parse 成数字）。
+  const F = {
+    xs: parseFloat(cssVar('--fs-xs')) || 10.5,
+    sm: parseFloat(cssVar('--fs-sm')) || 11.5,
+    md: parseFloat(cssVar('--fs-md')) || 12.5,
+  };
   // slate-400 任意 alpha 变体：分格线/遮罩/十字线共用底色的自由透明度。
   function slate(a) { return 'rgba(148,163,184,' + a + ')'; }
 
@@ -41,7 +47,7 @@ const Charts = (() => {
       color: palette,
       textStyle: { fontFamily: 'system-ui, -apple-system, sans-serif' },
       grid: { left: 8, right: 12, top: 34, bottom: 8, containLabel: true },
-      legend: { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 14, textStyle: { color: textDim, fontSize: 11 } },
+      legend: { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 14, textStyle: { color: textDim, fontSize: F.sm } },
       // tooltip 容器对齐矩阵悬停卡 .mx-tip 的令牌（surface-3 底、
       // border-strong 边、8px 圆角、同款阴影与内边距）——全站悬浮层
       // 只有一套外观；内容排版由调用方复用 mt-* 结构类保持一致。
@@ -51,7 +57,7 @@ const Charts = (() => {
         borderColor: C.borderStrong,
         borderWidth: 1,
         padding: [9, 12, 10],
-        textStyle: { color: C.text, fontSize: 11.5 },
+        textStyle: { color: C.text, fontSize: F.sm },
         extraCssText: 'border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.5);line-height:1.65;',
         axisPointer: { type: 'line', lineStyle: { color: slate(0.4) } },
       },
@@ -59,12 +65,12 @@ const Charts = (() => {
         type: 'time',
         axisLine: { lineStyle: { color: axisColor } },
         axisTick: { show: false },
-        axisLabel: { color: textDim, fontSize: 10.5, hideOverlap: true },
+        axisLabel: { color: textDim, fontSize: F.xs, hideOverlap: true },
         splitLine: { show: false },
       },
       yAxis: {
         type: 'value', scale: true,
-        axisLabel: { color: textDim, fontSize: 10.5 },
+        axisLabel: { color: textDim, fontSize: F.xs },
         splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } },
         axisLine: { show: false },
       },
@@ -182,7 +188,7 @@ const Charts = (() => {
     return {
       markLine: {
         silent: true, symbol: 'none', lineStyle: { type: 'dashed', width: 1, opacity: 0.55 },
-        label: { color: textDim, fontSize: 10, formatter: p => 'avg ' + fmtMs(p.value) },
+        label: { color: textDim, fontSize: F.xs, formatter: p => 'avg ' + fmtMs(p.value) },
         data: [{ type: 'average' }],
       },
       markPoint: {
@@ -197,7 +203,7 @@ const Charts = (() => {
   function empty(el, text) {
     render(el, {
       xAxis: { show: false }, yAxis: { show: false }, series: [],
-      graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: text || '暂无数据', fill: textDim, fontSize: 12 } }],
+      graphic: [{ type: 'text', left: 'center', top: 'middle', style: { text: text || '暂无数据', fill: textDim, fontSize: F.md } }],
     });
   }
 
@@ -205,7 +211,7 @@ const Charts = (() => {
   function zoom(pts) {
     const z = [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }];
     if (pts && pts.length > 150) {
-      z.push({ type: 'slider', height: 18, bottom: 2, borderColor: 'transparent', backgroundColor: slate(0.06), fillerColor: hexA(C.accent, 0.15), handleStyle: { color: C.accent }, textStyle: { color: textDim, fontSize: 10 }, dataBackground: { lineStyle: { color: axisColor }, areaStyle: { color: slate(0.08) } } });
+      z.push({ type: 'slider', height: 18, bottom: 2, borderColor: 'transparent', backgroundColor: slate(0.06), fillerColor: hexA(C.accent, 0.15), handleStyle: { color: C.accent }, textStyle: { color: textDim, fontSize: F.xs }, dataBackground: { lineStyle: { color: axisColor }, areaStyle: { color: slate(0.08) } } });
     }
     return z;
   }
@@ -217,5 +223,5 @@ const Charts = (() => {
     });
   }, 200));
 
-  return { render, line, bar, ts, tsList, zoom, palette, area, hexA, gapMark, latencyMarks, empty, C, slate };
+  return { render, line, bar, ts, tsList, zoom, palette, area, hexA, gapMark, latencyMarks, empty, C, slate, F };
 })();

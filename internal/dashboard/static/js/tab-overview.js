@@ -2,7 +2,7 @@
 // 数据分两层轮询：stats/active/matrix 1s（快变），usage/quota/status 60s（慢变）。
 
 const Overview = (() => {
-  const C = Charts.C;
+  const C = Charts.C, F = Charts.F;
   let statsData = null, usageData = null, quotaData = null, statusData = null, matrixData = null;
   // 健康矩阵窗口：最近 30 分钟按 10 秒分桶（行=模型，格=桶）。
   // 10s 粒度是「看清错误爆发的精确时刻」与格子可点可悬停（~4px）的折中；
@@ -343,11 +343,11 @@ const Overview = (() => {
     Charts.render(el, {
       dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
       yAxis: [
-        { min: 0, max: yMax, interval: yMax / 4, name: 'req/s', nameTextStyle: { color: C.axis, fontSize: 10 },
-          axisLabel: { color: C.axis, fontSize: 10.5, formatter: v => +v.toFixed(2) } },
-        { min: 0, max: yMax * 60, interval: yMax * 15, position: 'right', name: 'req/min', nameTextStyle: { color: C.axis, fontSize: 10 },
+        { min: 0, max: yMax, interval: yMax / 4, name: 'req/s', nameTextStyle: { color: C.axis, fontSize: F.xs },
+          axisLabel: { color: C.axis, fontSize: F.xs, formatter: v => +v.toFixed(2) } },
+        { min: 0, max: yMax * 60, interval: yMax * 15, position: 'right', name: 'req/min', nameTextStyle: { color: C.axis, fontSize: F.xs },
           splitLine: { show: false },
-          axisLabel: { color: C.axis, fontSize: 10.5, formatter: v => String(Math.round(v)) } },
+          axisLabel: { color: C.axis, fontSize: F.xs, formatter: v => String(Math.round(v)) } },
       ],
       // tooltip 容器令牌由 base 统一供给（trigger/confine/axisPointer 同缺省），
       // 这里只给内容 formatter——排版与矩阵悬停卡同构：mt-head 色点+时间窗

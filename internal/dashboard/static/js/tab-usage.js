@@ -3,7 +3,7 @@
 // ≤8 天窗口用 10 分钟桶，更长窗口按日聚合（与旧版口径相同）。
 
 const Usage = (() => {
-  const C = Charts.C;
+  const C = Charts.C, F = Charts.F;
   const RANGES = [['today', '今日'], ['yday', '昨日'], ['3d', '近3天'], ['7d', '近7天'], ['14d', '近14天'], ['all', '全部']];
   let range = 'today';
   let last = null;
@@ -250,11 +250,11 @@ const Usage = (() => {
       if (gm) flowSeries[0].markArea = gm;
       Charts.render($('uFlow'), {
         dataZoom: Charts.zoom(pts),
-        yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: 10.5 } }],
+        yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: F.xs } }],
         series: flowSeries,
       });
       Charts.render($('uPerf'), {
-        yAxis: [{}, { min: 0, max: 100, splitLine: { show: false }, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: 10.5 } }],
+        yAxis: [{}, { min: 0, max: 100, splitLine: { show: false }, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: F.xs } }],
         series: [
           Charts.line('decode 均速', C.cyan, pts.map(p => Charts.ts(xs(p), p.gen_ms > 0 ? +(p.gen_tokens / (p.gen_ms / 1000)).toFixed(1) : null))),
           Charts.line('缓存命中率', C.warn, pts.map(p => {
@@ -271,18 +271,18 @@ const Usage = (() => {
             Charts.line('耗时 p95', C.err, pts.map(p => Charts.ts(xs(p), p.duration_p95_ms || null))),
           ],
           tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : fmtMs(v) },
-          yAxis: { axisLabel: { formatter: v => v >= 1000 ? (v / 1000) + 's' : v, color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
+          yAxis: { axisLabel: { formatter: v => v >= 1000 ? (v / 1000) + 's' : v, color: C.axis, fontSize: F.xs }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
         });
       }
     }
     if (tokenMix.length && $('uMix')) {
       Charts.render($('uMix'), {
         tooltip: { trigger: 'item', valueFormatter: v => fmtNum(v) },
-        legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: C.axis, fontSize: 11 } },
+        legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: C.axis, fontSize: F.sm } },
         series: [{
           type: 'pie', radius: ['52%', '74%'], center: ['50%', '44%'],
           itemStyle: { borderColor: C.surface, borderWidth: 2, borderRadius: 4 },
-          label: { show: false }, emphasis: { label: { show: true, color: C.text, fontSize: 12, formatter: '{b}\n{d}%' } },
+          label: { show: false }, emphasis: { label: { show: true, color: C.text, fontSize: F.md, formatter: '{b}\n{d}%' } },
           data: tokenMix.map((x, i) => ({ name: x[0], value: x[1], itemStyle: { color: Charts.palette[i] } })),
         }],
       });
@@ -291,8 +291,8 @@ const Usage = (() => {
       const rows = barRows.slice().reverse();
       Charts.render($('uModelBar'), {
         grid: { left: 8, right: 40, top: 8, bottom: 8, containLabel: true },
-        xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
-        yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: C.dim, fontSize: 10.5, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: C.line } }, axisTick: { show: false } },
+        xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: F.xs }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
+        yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: C.dim, fontSize: F.xs, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: C.line } }, axisTick: { show: false } },
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => p.name + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
         series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: Charts.hexA(C.accent, 0.55) }, { offset: 1, color: C.accent }]) }, label: { show: true, position: 'right', color: C.axis, fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
       });

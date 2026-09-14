@@ -2,7 +2,7 @@
 // status 端点聚合多个上游调用（最长 610s 超时），失败字段以 *_error 透出。
 
 const Quota = (() => {
-  const C = Charts.C;
+  const C = Charts.C, F = Charts.F;
   async function load() {
     try {
       const d = await api('/quota');
@@ -47,7 +47,7 @@ const Quota = (() => {
 
     Charts.render($('quotaCurve'), {
       dataZoom: Charts.zoom(pts),
-      yAxis: { min: 0, max: 100, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
+      yAxis: { min: 0, max: 100, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: F.xs }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
       tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : Number(v).toFixed(1) + '%' },
       series: [
         Charts.line('日剩余', C.accent, Charts.tsList(pts, 'at', 'daily_remaining')),
