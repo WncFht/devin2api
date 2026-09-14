@@ -1,10 +1,16 @@
 // 概览页：KPI + 配额余量 + 60 分钟实时流量 + 进行中请求 + 告警。
-// 数据分三层轮询：stats/active 10s（快变），usage/quota/status 60s（慢变）。
+// 数据分两层轮询：stats/active/matrix 1s（快变），usage/quota/status 60s（慢变）。
 
 const Overview = (() => {
   let statsData = null, usageData = null, quotaData = null, statusData = null, matrixData = null;
-  // 健康矩阵窗口：最近 60 分钟按 1 分钟分桶（行=模型，格=桶）。
-  const MX_BUCKETS = 60, MX_BUCKET_MS = 60000;
+  // 健康矩阵窗口：最近 30 分钟按 10 秒分桶（行=模型，格=桶）。
+  // 10s 粒度是「看清错误爆发的精确时刻」与格子可点可悬停（~4px）的折中；
+  // 若拉满 60 分钟需 360 格，格子会挤到 2px 以下失去可操作性。
+  const MX_BUCKETS = 180, MX_BUCKET_MS = 10000;
+  // 矩阵渲染状态：mxRowsData 是悬停提示的数据源（格子上只放索引），
+  // mxSig 是外观签名——1s 轮询下数据没变就跳过整树 innerHTML 重建，
+  // 既省 DOM churn，也避免悬停中的格子被反复换掉。
+  let mxRowsData = [], mxStart = 0, mxSig = '', mxHover = null, mxTip = null;
 
   // delta：今日 vs 昨日同指标的环比箭头，昨日为 0 时不显示。
   function delta(cur, prev) {
@@ -74,10 +80,11 @@ const Overview = (() => {
     el.innerHTML = html;
   }
 
-  // 健康矩阵：行=模型（首行总计）× 列=1 分钟桶，双编码——颜色=桶内
+  // 健康矩阵：行=模型（首行总计）× 列=10 秒桶，双编码——颜色=桶内
   // 最重归因（服务端失分>客户端/限流>全绿），深浅=请求量；空桶灰显，
-  // 「没流量」与「坏」不再同色。点格带 模型+时间窗 下钻请求页。
-  // 数据来自 /requests 原始行而非预聚合：窗口小（~8rpm × 60min），
+  // 「没流量」与「坏」不再同色。悬停出单格指标卡，点格带 模型+时间窗
+  // 下钻请求页。
+  // 数据来自 /requests 原始行而非预聚合：窗口小（~8rpm × 30min），
   // 客户端分桶比后端另开一套 ring buffer 便宜且口径可现场核对。
   function renderHealth() {
     const el = $('ovHealth');
@@ -98,45 +105,67 @@ const Overview = (() => {
     if (top.length > 6) {
       rows.push({ label: '其他 (' + (top.length - 6) + ')', pick: e => !topSet.has(e.model || e.requested_model || '-'), model: null });
     }
-    let html = '';
     rows.forEach(row => {
-      // cells[i] = {n, sev, cli, up, lim}；sev 0绿 1琥珀（客户端/限流） 2红（服务端）。
+      // cells[i] = {n, sev, cli, up, lim, dur, tt, ttN, st}；sev 0绿 1琥珀
+      // （客户端/限流） 2红（服务端）。dur/tt/st 只服务悬停卡，不进外观签名。
       const cells = new Array(MX_BUCKETS);
       list.forEach(e => {
         if (!row.pick(e)) return;
         const slot = Math.floor(Date.parse(e.started_at) / MX_BUCKET_MS) - startSlot;
         if (slot < 0 || slot >= MX_BUCKETS) return;
-        const c = cells[slot] || (cells[slot] = { n: 0, sev: 0, cli: 0, up: 0, lim: 0 });
+        const c = cells[slot] || (cells[slot] = { n: 0, sev: 0, cli: 0, up: 0, lim: 0, dur: 0, tt: 0, ttN: 0, st: {} });
         c.n++;
+        c.dur += e.duration_ms || 0;
+        if (e.first_upstream_ms != null) { c.tt += e.first_upstream_ms; c.ttN++; }
+        const sc = e.status_code || '?';
+        c.st[sc] = (c.st[sc] || 0) + 1;
         const owner = errorOwner(e);
         if (owner === 'upstream') { c.up++; c.sev = 2; }
         else if (owner === 'client') { c.cli++; c.sev = Math.max(c.sev, 1); }
         else if (owner === 'business_limited') { c.lim++; c.sev = Math.max(c.sev, 1); }
       });
-      // cells 是稀疏数组（空桶无条目），Array.from 遍历含空位，
-      // 直接 cells.map+展开会把空位展开成 undefined 污染 Math.max。
-      const rowMax = Math.max(1, ...Array.from(cells, c => (c && c.n) || 0));
-      let cellsHtml = '';
-      for (let i = 0; i < MX_BUCKETS; i++) {
-        const c = cells[i];
-        const at = new Date((startSlot + i) * MX_BUCKET_MS);
-        if (!c) {
-          cellsHtml += '<i class="h-none" title="' + fmtTime(at) + ' · 无请求"></i>';
-          continue;
-        }
-        const cls = c.sev === 2 ? 'h-err' : c.sev === 1 ? 'h-warn' : 'h-ok';
-        // 深浅按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压暗。
-        const alpha = (0.3 + 0.7 * (c.n / rowMax)).toFixed(2);
-        const until = new Date((startSlot + i + 1) * MX_BUCKET_MS);
-        cellsHtml += '<i class="' + cls + '" data-n="' + c.n + '" data-m="' + esc(row.model || '') +
-          '" data-s="' + at.toISOString() + '" data-u="' + until.toISOString() +
-          '" style="opacity:' + alpha + '" title="' + fmtTime(at) + ' · ' + c.n + ' 请求' +
-          (c.up ? ' · 服务端 ' + c.up : '') + (c.cli ? ' · 客户端 ' + c.cli : '') + (c.lim ? ' · 429 ' + c.lim : '') + '"></i>';
-      }
-      html += '<div class="mx-row"><span class="mx-label"' + (row.model ? ' data-mx="' + esc(row.model) + '"' : '') +
-        ' title="' + esc(row.label) + '">' + esc(row.label) + '</span><div class="mx-cells">' + cellsHtml + '</div></div>';
+      row.cells = cells;
     });
-    el.innerHTML = html;
+    mxRowsData = rows;
+    mxStart = startSlot;
+    // 外观签名：行标签（模型进出 Top6 会换行）+ 每格 n（决定深浅，经行
+    // 峰值归一）与 sev（决定色相），加 startSlot——桶边界滚动后同一批
+    // 数据也要整体平移重画。
+    const sig = startSlot + '|' + JSON.stringify(rows.map(r => [r.label, Array.from(r.cells, c => c ? [c.n, c.sev] : 0)]));
+    if (sig !== mxSig) {
+      mxSig = sig;
+      let html = '';
+      rows.forEach((row, ri) => {
+        // cells 是稀疏数组（空桶无条目），Array.from 遍历含空位，
+        // 直接 cells.map+展开会把空位展开成 undefined 污染 Math.max。
+        const rowMax = Math.max(1, ...Array.from(row.cells, c => (c && c.n) || 0));
+        let cellsHtml = '';
+        for (let i = 0; i < MX_BUCKETS; i++) {
+          const c = row.cells[i];
+          // data-r/data-i 是 mxRowsData 的索引；data-s/data-u 供下钻钉时间窗。
+          const base = ' data-r="' + ri + '" data-i="' + i + '" data-s="' + new Date((startSlot + i) * MX_BUCKET_MS).toISOString() + '"';
+          if (!c) {
+            cellsHtml += '<i class="h-none"' + base + '></i>';
+            continue;
+          }
+          const cls = c.sev === 2 ? 'h-err' : c.sev === 1 ? 'h-warn' : 'h-ok';
+          // 深浅按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压暗。
+          const alpha = (0.3 + 0.7 * (c.n / rowMax)).toFixed(2);
+          cellsHtml += '<i class="' + cls + '"' + base + ' data-n="' + c.n + '" data-m="' + esc(row.model || '') +
+            '" data-u="' + new Date((startSlot + i + 1) * MX_BUCKET_MS).toISOString() + '" style="opacity:' + alpha + '"></i>';
+        }
+        html += '<div class="mx-row"><span class="mx-label"' + (row.model ? ' data-mx="' + esc(row.model) + '"' : '') +
+          ' title="' + esc(row.label) + '">' + esc(row.label) + '</span><div class="mx-cells">' + cellsHtml + '</div></div>';
+      });
+      el.innerHTML = html;
+      // 重建会换掉悬停中的格子元素：同行同槽的新格还在就把提示挂回去，
+      // 行序变了（模型跌出 Top6）则收起。
+      if (mxHover) {
+        const again = el.querySelector('i[data-r="' + mxHover.r + '"][data-i="' + mxHover.i + '"]');
+        if (again && mxRowsData[mxHover.r] && mxRowsData[mxHover.r].label === mxHover.label) mxShowTip(again);
+        else mxHideTip();
+      }
+    }
     const cap = $('ovHealthCap');
     if (cap) {
       const tot = { up: 0, cli: 0, lim: 0 };
@@ -144,10 +173,63 @@ const Overview = (() => {
         const o = errorOwner(e);
         if (o === 'upstream') tot.up++; else if (o === 'client') tot.cli++; else if (o === 'business_limited') tot.lim++;
       });
+      const mins = Math.round(MX_BUCKETS * MX_BUCKET_MS / 60000);
       const more = (matrixData && matrixData.total > list.length) ? '（窗口早于列表扫描上限 ' + list.length + ' 条，矩阵可能截断）' : '';
-      cap.innerHTML = '<span>' + fmtTime(startSlot * MX_BUCKET_MS) + '</span><span>60 分钟 ' + list.length + ' 请求 · 服务端 ' + tot.up + ' · 客户端 ' + tot.cli + ' · 429 ' + tot.lim + more + '</span><span>' + fmtTime(endSlot * MX_BUCKET_MS) + '</span>';
+      cap.innerHTML = '<span>' + fmtTime(startSlot * MX_BUCKET_MS) + '</span><span>' + mins + ' 分钟 ' + list.length + ' 请求 · 服务端 ' + tot.up + ' · 客户端 ' + tot.cli + ' · 429 ' + tot.lim + more + '</span><span>' + fmtTime(endSlot * MX_BUCKET_MS) + '</span>';
     }
   }
+
+  // ---------- 矩阵悬停提示 ----------
+  // 单例 tooltip 锚定在格子上方（GitHub 贡献图 tool-tip 同款：定位跟随
+  // 锚元素而非光标——格子只有几像素，跟光标会一路闪动）。事件委托挂
+  // 矩阵容器：mouseover/mouseout 冒泡可委托，mouseenter/leave 不冒泡；
+  // 数据读 mxRowsData，格子上只有 data-r/data-i 索引，上千个格子不各塞副本。
+  function mxTipEl() {
+    if (!mxTip) {
+      mxTip = document.createElement('div');
+      mxTip.className = 'mx-tip';
+      document.body.appendChild(mxTip);
+    }
+    return mxTip;
+  }
+
+  // mxCellTip 生成单格内容：时间段 + 请求数与状态码分布 + 归因拆分 + 均值。
+  function mxCellTip(r, i) {
+    const row = mxRowsData[r];
+    if (!row) return '';
+    const c = row.cells[i];
+    const at = new Date((mxStart + i) * MX_BUCKET_MS);
+    const until = new Date((mxStart + i + 1) * MX_BUCKET_MS);
+    let html = '<div class="mt-t">' + esc(row.label) + ' · ' + fmtTime(at) + ' – ' + fmtTime(until) + '</div>';
+    if (!c || !c.n) return html + '<div class="mt-r muted">无请求</div>';
+    const sts = Object.keys(c.st).sort((a, b) => c.st[b] - c.st[a]).slice(0, 4)
+      .map(k => '<span class="' + statusClass(+k) + '">' + esc(k) + '</span>×' + c.st[k]);
+    html += '<div class="mt-r"><strong>' + c.n + '</strong> 请求 · ' + sts.join(' · ') + '</div>';
+    const owners = [];
+    if (c.up) owners.push('<span class="status-err">服务端 ' + c.up + '</span>');
+    if (c.cli) owners.push('<span class="status-warn">客户端 ' + c.cli + '</span>');
+    if (c.lim) owners.push('<span class="status-rl">429 ' + c.lim + '</span>');
+    if (owners.length) html += '<div class="mt-r">' + owners.join(' · ') + '</div>';
+    let tm = '均耗时 ' + fmtMs(c.dur / c.n);
+    if (c.ttN) tm += ' · 均 TTFB ' + fmtMs(c.tt / c.ttN);
+    return html + '<div class="mt-r muted">' + tm + '</div>';
+  }
+
+  function mxShowTip(cell) {
+    const r = +cell.dataset.r, i = +cell.dataset.i;
+    const row = mxRowsData[r];
+    if (!row) return;
+    mxHover = { r, i, label: row.label };
+    const tip = mxTipEl();
+    tip.innerHTML = mxCellTip(r, i);
+    tip.style.display = 'block';
+    // 锚定格子正上方居中，顶部空间不足翻到底部，横向钳进视口。
+    const cr = cell.getBoundingClientRect(), tr = tip.getBoundingClientRect();
+    tip.style.left = Math.max(8, Math.min(cr.left + cr.width / 2 - tr.width / 2, window.innerWidth - tr.width - 8)) + 'px';
+    tip.style.top = (cr.top - tr.height - 7 < 4 ? cr.bottom + 7 : cr.top - tr.height - 7) + 'px';
+  }
+
+  function mxHideTip() { mxHover = null; if (mxTip) mxTip.style.display = 'none'; }
 
   // 判词：把闸门闩态、SLA 与告警压成一行结论（对齐 CPAMC hero verdict）——
   // 好的面板先回答「要不要担心」，细节留给下面的卡片。
@@ -200,10 +282,10 @@ const Overview = (() => {
     const tm = statsData && statsData.http && statsData.http.trend_minutes;
     if (!tm || !tm.length) { Charts.empty($('ovTrendChart')); return; }
     const bars = [
-      Charts.bar('请求/30s', '#818cf8', Charts.tsList(tm, 'at', 'requests'), { barMaxWidth: 8 }),
-      Charts.bar('错误/30s', '#f87171', Charts.tsList(tm, 'at', 'errors'), { barMaxWidth: 8 }),
+      Charts.bar('请求/10s', '#818cf8', Charts.tsList(tm, 'at', 'requests'), { barMaxWidth: 8 }),
+      Charts.bar('错误/10s', '#f87171', Charts.tsList(tm, 'at', 'errors'), { barMaxWidth: 8 }),
     ];
-    const gm = Charts.gapMark(tm, 30);
+    const gm = Charts.gapMark(tm, 10, 9);
     if (gm) bars[0].markArea = gm;
     Charts.render($('ovTrendChart'), {
       dataZoom: Charts.zoom(tm),
@@ -292,8 +374,9 @@ const Overview = (() => {
   const gp = $('gwPort');
   if (gp) gp.textContent = ':' + (location.port || '80');
 
-  // 矩阵下钻：点格 → 请求页钉住 模型+该分钟时间窗；点行首模型名 → 只筛模型。
+  // 矩阵下钻：点格 → 请求页钉住 模型+该 10 秒时间窗；点行首模型名 → 只筛模型。
   document.getElementById('page-overview').addEventListener('click', e => {
+    mxHideTip();
     const cell = e.target.closest('.mx-cells i[data-n]');
     if (cell) {
       const kv = { since: cell.dataset.s, until: cell.dataset.u };
@@ -305,8 +388,23 @@ const Overview = (() => {
     if (lbl) jumpRequests({ model: lbl.dataset.mx });
   });
 
+  // 矩阵悬停提示：委托 mouseover/mouseout 到容器。移出格子到非格子目标
+  // （邻格由它的 mouseover 接力）、滚屏、切页时收起；tooltip 自身
+  // pointer-events:none 不会成为 relatedTarget 造成闪烁。
+  const mxEl = $('ovHealth');
+  mxEl.addEventListener('mouseover', e => {
+    const cell = e.target.closest('.mx-cells i');
+    if (cell) mxShowTip(cell);
+  });
+  mxEl.addEventListener('mouseout', e => {
+    const to = e.relatedTarget;
+    if (!(to instanceof Element) || !to.closest('.mx-cells i')) mxHideTip();
+  });
+  window.addEventListener('scroll', mxHideTip, true);
+  window.addEventListener('hashchange', mxHideTip);
+
   Tabs.register('overview', () => { refresh(); refreshSlow(); });
-  Polls.add('overview', refresh, 10000);
+  Polls.add('overview', refresh, 1000);
   Polls.add('overview', refreshSlow, 60000);
 
   return { refresh };

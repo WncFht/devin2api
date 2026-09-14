@@ -102,10 +102,12 @@ const Charts = (() => {
   }
 
   // gapMark：时间序列的空窗标记（markArea 灰底）。
-  // 两类都算空窗：连续 ≥3 个零请求桶；相邻桶间隔 > 1.5 倍桶宽（数据缺失段）。
+  // 两类都算空窗：连续 ≥minEmpty 个零请求桶（默认 3，调用方按桶宽换算
+  // 时长——10s 桶传 9 ≈ 90s 无流量）；相邻桶间隔 > 1.5 倍桶宽（数据缺失段）。
   // 返回值挂在第一条 series 上即可（silent 不挡交互）。
-  function gapMark(pts, stepSec) {
+  function gapMark(pts, stepSec, minEmpty) {
     if (!pts || !pts.length || !stepSec) return null;
+    const minRun = minEmpty || 3;
     // 整段全空时整块灰底反而像异常，此时不标（图本身就是空的）。
     if (!pts.some(p => p.requests || p.errors)) return null;
     const ranges = [];
@@ -113,9 +115,9 @@ const Charts = (() => {
     pts.forEach((p, i) => {
       const empty = !(p.requests || p.errors);
       if (empty) { if (s < 0) s = i; }
-      else if (s >= 0) { if (i - s >= 3) ranges.push([pts[s].at, pts[i - 1].at]); s = -1; }
+      else if (s >= 0) { if (i - s >= minRun) ranges.push([pts[s].at, pts[i - 1].at]); s = -1; }
     });
-    if (s >= 0 && pts.length - s >= 3) ranges.push([pts[s].at, pts[pts.length - 1].at]);
+    if (s >= 0 && pts.length - s >= minRun) ranges.push([pts[s].at, pts[pts.length - 1].at]);
     for (let i = 1; i < pts.length; i++) {
       if (pts[i].at - pts[i - 1].at > stepSec * 1.5) ranges.push([pts[i - 1].at, pts[i].at]);
     }

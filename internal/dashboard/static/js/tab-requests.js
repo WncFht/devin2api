@@ -1,6 +1,6 @@
 // 请求页：进行中请求表 + 筛选列表 + 行内详情 + 文件查看 + 导出 + 中断。
 // activeTable 同时被概览页复用渲染在途快照。
-// 轮询节奏跟随活跃度：有进行中请求 4s/轮（完成 ≤4s 落表），空闲 15s。
+// 轮询节奏跟随活跃度：有进行中请求 1s/轮，空闲 5s。
 
 const Requests = (() => {
   let expandedDir = null;
@@ -370,7 +370,7 @@ const Requests = (() => {
 
   bind();
   Tabs.register('requests', () => { restoreFilterHash(); tick(); });
-  Polls.add('requests', tick, () => lastActive.length ? 4000 : 15000);
+  Polls.add('requests', tick, () => lastActive.length ? 1000 : 5000);
 
   return { activeTable, resetAndLoad };
 })();
