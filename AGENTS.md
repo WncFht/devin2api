@@ -114,9 +114,10 @@
 聚合与生命周期：
 
 - `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势、最近 4096 条延迟 p50/p95/p99、按模型目录价的估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
-- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）。
+- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）。
 - `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
 - `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
+- `GET /panel/api/config` 返回脱敏后的生效配置视图（`devin.token`/`auth.api_key`/`dashboard.password` 以 `sha256:` 前缀代替明文，可与日志 `key_hash` 对照；`stale=true` 表示文件在最后一次加载后被改过）。`POST /panel/api/config/reload` 重读 config.yaml 并热应用，返回 `applied`（已生效字段）与 `requires_restart`（要重启才生效：`server.listen`/`max_concurrency`/`devin.base_url`/`proxy`/`force_http1`/`debug.quota_interval_minutes`）；校验失败 422、旧配置继续服役。注意 `devin.client_*` 只影响 chat 路径——面板自身的 seat 类上游调用固定用 windsurf 身份。
 - `GET /panel/api/requests` 支持结构化筛选（`status_class`/`result`/`model`/`error_stage`/`since`）与 `has_more` 截断信号；`/panel/api/requests/export?format=csv|json` 导出；`/panel/api/requests/{dir}/merged` 把 `06` 的 SSE 帧合并成可读正文。
 - 保留策略分层：`debug.retention_days`（目录整删）与 `debug.max_total_mb`（容量淘汰）之外，`debug.payload_hours` 超时剥离大文件（03/04/06/attachments），`debug.keep_error_dirs` 在容量淘汰时保护最近 N 个含 `error.json` 的失败目录。
 
@@ -130,7 +131,7 @@
 - 运行目录是 `~/Library/Application Support/devin-2api/`（二进制+config.yaml+logs），不是仓库：launchd 子进程对 ~/Desktop 的 open 会被 TCC 授权判定永久挂起。仓库 `logs/` 是指向运行目录的符号链接，排障路径照旧。
 - **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
 - 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=60`，在途流跑完再退），禁用 `kill -9` 抢时间。
-- 冒烟用空闲端口（如 :3005）起临时二进制，验证完立即关闭；不保留常驻侧实例。
+- 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 
 其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，运行目录 `${XDG_DATA_HOME:-~/.local/share}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。
