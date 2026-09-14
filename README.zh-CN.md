@@ -13,9 +13,10 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 - **思考签名跨轮回放**——按各 provider 原生形态保存并回传：Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
 - **忠实的工具调用**——custom/freeform 工具调用（如 `apply_patch`）原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对
 - **上游流韧性**——token 过期自动从凭据来源重读；产出内容前的上游失败（传输断裂、静默卡死、空回复）透明重试；早期失败返回真实 HTTP 错误，而不是已提交 200 后的 SSE error
+- **限流闸门**——上游 `resource_exhausted` 触发本地冷却闩：排队请求短暂等待后快速失败 `429` + `Retry-After`，不再捶打已被限流的上游；闩内按滴灌节奏放探针探测恢复；闩状态落盘 `logs/gate-state.json`，重启后未过期自动恢复。可选 `max_rpm` 令牌桶在触闩前先行整形出站压力
 - **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
 - **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型目录
-- **`/panel` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录
+- **`/panel` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录，以及多数字段可热加载的脱敏配置视图
 - **部署简单**——单一静态二进制，[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
 
 ## 快速开始
@@ -166,6 +167,10 @@ curl http://localhost:8080/v1/messages \
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                              | `chisel` / `3000.2.17` / `mac`                                                                     |
 | `devin.proxy`                                    | 上游代理地址（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                          | 无                                                                                                 |
 | `devin.force_http1`                              | 每请求独立 TCP 连上游（避免 HTTP/2 单连接多 stream 串行化）                                                 | `true`                                                                                             |
+| `devin.max_rpm`                                  | 发往上游的消息速率上限（条/分钟，令牌桶）；`<=0` 不限速——429 冷却闩始终生效                                 | `0`（不限速；`config.example.yaml` 发货 `80`）                                                     |
+| `devin.gate_max_hold_seconds`                    | 闩内排队允许的最长等待秒数，超出快速失败 `429` + `Retry-After`                                              | `15`                                                                                               |
+| `devin.gate_drip_interval_seconds`               | 闩内放行探针的间隔秒数——决定限流期间打到上游的速率与解闩探测频率                                            | `8`                                                                                                |
+| `devin.gate_default_latch_seconds`               | 上游 `resource_exhausted` 未声明 reset 时刻时的兜底闩时长秒数                                               | `60`                                                                                               |
 | `debug.enabled`                                  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | `false`                                                                                            |
 | `debug.retention_days`                           | 请求日志目录保留天数；`<=0` 不按时间清理                                                                    | `14`                                                                                               |
 | `debug.max_total_mb`                             | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                | `1024`                                                                                             |
