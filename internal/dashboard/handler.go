@@ -280,14 +280,15 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	password, _ := h.passwordSnapshot()
-	if password != "" && !h.isAuthenticated(r) {
-		_, _ = w.Write([]byte(loginPage))
-		return
-	}
-	// 静态资源带 24h 缓存头，URL 里的版本戳让每次发版必然拿到新 JS/CSS（同类实现同款 ?v=）。
+	// ?v= 版本戳让 HTML 引用的资源随发版必然换新 URL；模块 import 走
+	// serveStatic 的 ETag 条件请求，覆盖 import 链注不进版本戳的部分。
 	v := h.version
 	if v == "" {
 		v = "dev"
+	}
+	if password != "" && !h.isAuthenticated(r) {
+		_, _ = w.Write([]byte(strings.ReplaceAll(loginPage, "__VERSION__", v)))
+		return
 	}
 	_, _ = w.Write([]byte(strings.ReplaceAll(dashboardPage, "__VERSION__", v)))
 }

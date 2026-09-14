@@ -3,7 +3,7 @@
 
 import {
   $, api, apiRaw, esc, fmtBytes, fmtDuration, fmtMs, fmtTime, fmtInPrecise,
-  kpi, meta, toast, Tabs, Polls, morph, REJECT_LABELS,
+  kpi, meta, toast, Tabs, Polls, morph, REJECT_LABELS, loadPref, savePref,
 } from './core.js';
 
 let procOffset = 0, procFollow = false, procBuf = '';
@@ -237,7 +237,10 @@ $('debugToggle').addEventListener('click', toggleDebug);
 $('cfgReload').addEventListener('click', reloadConfig);
 $('cfgViewBtn').addEventListener('click', toggleCfgView);
 $('procReload').addEventListener('click', () => loadLog(0));
-$('procLevel').addEventListener('change', renderLog);
+// 日志级别过滤偏好：只认现有选项值，重开面板沿用上次选择。
+const savedLevel = loadPref('system.proclevel', '');
+if ([...$('procLevel').options].some(o => o.value === savedLevel)) $('procLevel').value = savedLevel;
+$('procLevel').addEventListener('change', () => { savePref('system.proclevel', $('procLevel').value); renderLog(); });
 $('procFollow').addEventListener('click', e => {
   procFollow = !procFollow;
   e.target.classList.toggle('on', procFollow);

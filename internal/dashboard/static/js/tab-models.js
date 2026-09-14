@@ -1,11 +1,14 @@
 // 模型页：上游模型目录 + 价格/倍率/能力筛选。目录数据 5 分钟缓存（后端），
-// 页面只在首次打开时拉取一次。
+// 前端按同一 TTL 重拉——目录新鲜度跟随后端缓存节拍，不叠加二次缓存。
+// 排序选择记忆在 localStorage（models.sort）。
 
 import {
-  $, api, esc, debounce, money, fillSelect, Tabs, morph,
+  $, api, esc, debounce, money, fillSelect, Tabs, morph, loadPref, savePref,
 } from './core.js';
 
+const TTL_MS = 5 * 60000;
 let allModels = [];
+let loadedAt = 0;
 let aliasMap = {}; // 上游 uid -> [客户端别名]，取自 /panel/api/config 的 devin.aliases
 const activeTags = new Set();
 
@@ -131,10 +134,13 @@ async function loadAliases() {
 }
 
 async function load() {
-  if (allModels.length) return;
+  // TTL 内不重拉：目录变化频率是小时级，5 分钟与后端缓存同节拍；
+  // 失败时 loadedAt 不归零，下次进页会重试。
+  if (allModels.length && Date.now() - loadedAt < TTL_MS) return;
   try {
     const d = await api('/models');
     allModels = d.models || [];
+    loadedAt = Date.now();
     const providers = new Set(), apis = new Set(), pricings = new Set();
     allModels.forEach(m => {
       if (m.provider) providers.add(m.provider);
@@ -151,6 +157,10 @@ async function load() {
 }
 
 $('search').addEventListener('input', debounce(apply, 200));
+// 排序偏好只认当前选项里的值——历史/手改 localStorage 不把 select 置空。
+const savedSort = loadPref('models.sort', 'default');
+if ([...$('fSort').options].some(o => o.value === savedSort)) $('fSort').value = savedSort;
+$('fSort').addEventListener('change', () => savePref('models.sort', $('fSort').value));
 ['fProvider', 'fApi', 'fTier', 'fPricing', 'fSort'].forEach(id => $(id).addEventListener('change', apply));
 $('chips').addEventListener('click', e => {
   const c = e.target.closest('.chip');

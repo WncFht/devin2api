@@ -8,17 +8,19 @@
 import {
   $, api, esc, fmtNum, fmtMs, fmtTime, fmtRel, money,
   secClass, rateClass, slaRate, hitRate, avgTps, kpi, meta,
-  sumTotals, Tabs, Polls, morph,
+  sumTotals, Tabs, Polls, morph, loadPref, savePref,
 } from './core.js';
 import { Charts } from './charts.js';
 import { jumpRequests } from './tab-requests.js';
 
 const C = Charts.C, F = Charts.F;
 const RANGES = [['today', '今日'], ['yday', '昨日'], ['3d', '近3天'], ['7d', '近7天'], ['14d', '近14天'], ['all', '全部']];
-let range = 'today';
+// 时间范围与模型表排序记忆在 localStorage：重开面板回到上次视角。
+let range = loadPref('usage.range', 'today');
 let last = null;
 // 模型表排序状态：key 取 MCOLS 的取值器名，dir 0/-1/1（无/desc/asc）。
-let mSortKey = null, mSortDir = 0;
+const mSortSaved = loadPref('usage.msort', { key: null, dir: 0 });
+let mSortKey = mSortSaved.key, mSortDir = mSortSaved.dir;
 
 function rangeDays(r) {
   const fmt = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -40,7 +42,7 @@ function rangeSecs(r) {
 
 function renderChips() {
   morph($('usageRangeChips'), RANGES.map(r =>
-    '<span class="chip' + (r[0] === range ? ' on' : '') + '" data-range="' + r[0] + '">' + r[1] + '</span>').join(''));
+    '<button type="button" class="chip' + (r[0] === range ? ' on' : '') + '" data-range="' + r[0] + '">' + r[1] + '</button>').join(''));
 }
 
 async function load() {
@@ -77,7 +79,7 @@ function render() {
     kpi('缓存命中率', hitRate(totals), '写 ' + fmtNum(totals.cache_write_tokens), 'cyan') +
     kpi('decode 均速', avgTps(totals), '可信流式条目加权', 'violet');
   if (range === 'all') {
-    html += kpi('窗口累计 Token', fmtNum(totals.total_tokens), d.est_cost > 0 ? '估算 ' + '$' + Number(d.est_cost).toFixed(2) + '（目录价）' : '', 'warn');
+    html += kpi('窗口累计 Token', fmtNum(totals.total_tokens), d.est_cost > 0 ? '估算 ' + money(d.est_cost) + '（目录价）' : '', 'warn');
   }
   html += '</div>';
 
@@ -123,7 +125,7 @@ function render() {
   if (stageKeys.length) {
     html += '<div class="panel"><h3>错误阶段分布 <span class="sub">窗口累计 · 点击筛选请求</span></h3><div class="chip-row flat">';
     stageKeys.sort((a, b) => stages[b] - stages[a]).forEach(k => {
-      html += '<span class="chip" data-stage="' + esc(k) + '">' + esc(k) + ' <strong>' + stages[k] + '</strong></span>';
+      html += '<button type="button" class="chip" data-stage="' + esc(k) + '">' + esc(k) + ' <strong>' + stages[k] + '</strong></button>';
     });
     html += '</div></div>';
   }
@@ -142,7 +144,7 @@ function render() {
       const src = e.stage === 'rate_gate'
         ? '<span class="badge badge-off" title="本地闸门快败：未触达上游，stage=rate_gate">本地闸门</span>'
         : '<span class="badge badge-medium" title="上游真实限流' + (e.stage ? '，stage=' + esc(e.stage) : '') + '">上游</span>';
-      html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td><td>' + src + '</td><td class="mono"><span class="lnk" data-model="' + esc(e.model) + '">' + esc(e.model || '-') + '</span></td><td class="mono">' + e.rpm + ' req/min</td></tr>';
+      html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td><td>' + src + '</td><td class="mono"><button type="button" class="lnk" data-model="' + esc(e.model) + '">' + esc(e.model || '-') + '</button></td><td class="mono">' + e.rpm + ' req/min</td></tr>';
     });
     html += '</tbody></table></div><div class="note">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。鉴权/并发/排空等管线前拒绝不进索引（见系统页「本地拒绝」）；本地闸门行统计的是到达洪峰，不代表上游阈值。</div></div>';
   }
@@ -201,7 +203,7 @@ function render() {
       const costCell = (m.est_cost != null)
         ? money(m.est_cost) + (ttCost > 0 ? '<div class="share-bar" title="成本占比 ' + (m.est_cost / ttCost * 100).toFixed(1) + '%"><i style="width:' + Math.min(100, m.est_cost / ttCost * 100).toFixed(1) + '%"></i></div>' : '')
         : '<span class="muted">—</span>';
-      html += '<tr><td class="mono"><span class="lnk" data-model="' + esc(m.name) + '">' + esc(m.name) + '</span></td>' +
+      html += '<tr><td class="mono"><button type="button" class="lnk" data-model="' + esc(m.name) + '">' + esc(m.name) + '</button></td>' +
         '<td class="num">' + m.requests + ' <span class="muted">(服 ' + (m.upstream_faults || 0) + ' 客 ' + (m.client_faults || 0) + ')</span></td>' +
         '<td class="num ' + (sr == null ? 'muted' : rateClass(sr)) + '">' + (sr == null ? '—' : sr.toFixed(0) + '%') + '</td>' +
         '<td class="num">' + (m.rate_limited || 0) + '</td>' +
@@ -234,7 +236,7 @@ function render() {
   if (s.keys && s.keys.length) {
     html += '<div class="panel"><h3>按 API Key 哈希 <span class="sub">窗口累计 · 点击筛选请求</span></h3><div class="scroll-x"><table><thead><tr><th>Key 哈希</th><th>请求</th><th>错误</th><th>输出Token</th><th>最近</th></tr></thead><tbody>';
     s.keys.forEach(k => {
-      html += '<tr><td class="mono"><span class="lnk" data-key="' + esc(k.name) + '">' + esc(k.name) + '</span></td><td class="num">' + k.requests + '</td><td class="num">' + k.errors + '</td><td class="mono">' + fmtNum(k.output_tokens) + '</td><td class="mono muted" title="' + esc(k.last_at || '') + '">' + fmtRel(k.last_at) + '</td></tr>';
+      html += '<tr><td class="mono"><button type="button" class="lnk" data-key="' + esc(k.name) + '">' + esc(k.name) + '</button></td><td class="num">' + k.requests + '</td><td class="num">' + k.errors + '</td><td class="mono">' + fmtNum(k.output_tokens) + '</td><td class="mono muted" title="' + esc(k.last_at || '') + '">' + fmtRel(k.last_at) + '</td></tr>';
     });
     html += '</tbody></table></div></div>';
   }
@@ -322,11 +324,12 @@ document.getElementById('page-usage').addEventListener('click', e => {
     const k = st2.dataset.msort;
     if (mSortKey !== k) { mSortKey = k; mSortDir = -1; }
     else mSortDir = mSortDir === -1 ? 1 : 0;
+    savePref('usage.msort', { key: mSortKey, dir: mSortDir });
     render();
     return;
   }
   const rc = e.target.closest('[data-range]');
-  if (rc) { range = rc.dataset.range; renderChips(); render(); return; }
+  if (rc) { range = rc.dataset.range; savePref('usage.range', range); renderChips(); render(); return; }
   const st = e.target.closest('[data-stage]');
   if (st) { jumpRequests({ error_stage: st.dataset.stage }); return; }
   const mo = e.target.closest('[data-model]');

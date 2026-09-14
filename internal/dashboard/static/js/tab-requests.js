@@ -56,7 +56,7 @@ function pendingRowHtml(a) {
     '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
     '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
     '<td class="mono muted">已下发 ' + fmtBytes(a.client_bytes) + '</td>' +
-    '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + esc(a.dir) + '">中断</span>' : '') + '</td></tr>';
+    '<td>' + (a.abortable ? '<button type="button" class="file-link" data-abort="' + esc(a.dir) + '">中断</button>' : '') + '</td></tr>';
 }
 
 function rowHtml(e) {
@@ -117,12 +117,12 @@ function detailInnerHtml(d) {
     html += '<div><span class="k">' + esc(kv[0]) + '</span> <span class="v">' + esc(String(kv[1])) + '</span></div>';
   });
   html += '</div><div class="file-list">';
-  html += '<span class="file-link" data-copydir="' + esc(d.dir) + '" title="dir 即响应头 X-Request-Id">复制 dir</span>';
+  html += '<button type="button" class="file-link" data-copydir="' + esc(d.dir) + '" title="dir 即响应头 X-Request-Id">复制 dir</button>';
   (d.files || []).forEach(f => {
     const on = openFile && openFile.dir === d.dir && openFile.name === f.name && !openFile.merged;
-    html += '<span class="file-link' + (on ? ' on' : '') + '" data-f="' + esc(f.name) + '" data-dir="' + esc(d.dir) + '">' + esc(f.name) + ' <span class="muted">' + fmtBytes(f.size) + '</span></span>';
+    html += '<button type="button" class="file-link' + (on ? ' on' : '') + '" data-f="' + esc(f.name) + '" data-dir="' + esc(d.dir) + '">' + esc(f.name) + ' <span class="muted">' + fmtBytes(f.size) + '</span></button>';
     if (f.name === '06-http-response.jsonl') {
-      html += '<span class="file-link ok' + (openFile && openFile.merged ? ' on' : '') + '" data-merged="' + esc(d.dir) + '">合并视图</span>';
+      html += '<button type="button" class="file-link ok' + (openFile && openFile.merged ? ' on' : '') + '" data-merged="' + esc(d.dir) + '">合并视图</button>';
     }
   });
   html += '</div>';
@@ -175,7 +175,7 @@ export function activeTable(list) {
       '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
       '<td class="mono">' + fmtBytes(a.client_bytes) + '</td>' +
       '<td class="mono">' + (a.queued_events || 0) + ' / ' + (a.dropped_events || 0) + '</td>' +
-      '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + esc(a.dir) + '">中断</span>' : '') + '</td></tr>';
+      '<td>' + (a.abortable ? '<button type="button" class="file-link" data-abort="' + esc(a.dir) + '">中断</button>' : '') + '</td></tr>';
   });
   return html + '</tbody></table>';
 }
@@ -256,12 +256,12 @@ async function load() {
       const byReason = {};
       recentRejects.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
       const parts = Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]);
-      hint += '近 15 分钟本地拒绝 ' + recentRejects.length + ' 条（' + esc(parts.join(' · ')) + '）——管线前拒绝不进索引，<span class="lnk" data-gotosys="1">去系统页</span>。 ';
+      hint += '近 15 分钟本地拒绝 ' + recentRejects.length + ' 条（' + esc(parts.join(' · ')) + '）——管线前拒绝不进索引，<button type="button" class="lnk" data-gotosys="1">去系统页</button>。 ';
     }
     const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
     if (sts || uts) {
       hint = '时间窗锁定 ' + (sts ? fmtTime(sts) : '最早') + ' ~ ' + (uts ? fmtTime(uts) : '现在') +
-        '（矩阵下钻）· <span class="lnk" data-clrwin="1">清除窗口</span> ';
+        '（矩阵下钻）· <button type="button" class="lnk" data-clrwin="1">清除窗口</button> ';
     }
     if (data.has_more) hint += '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
     if (reqLimit >= 500 && lastList.length < data.total) hint += ' 已达 500 条单页上限，用导出查看全部。';
@@ -383,6 +383,9 @@ function bind() {
   $('reqExportJson').addEventListener('click', () => exportReq('json'));
   $('reqExportCsv').addEventListener('click', () => exportReq('csv'));
   document.getElementById('page-requests').addEventListener('click', e => {
+    // 中断按钮在 document 级处理（概览页也用）——此处提前放行，
+    // 否则中断按钮落在 tr[data-dir] 内会先触发展开详情。
+    if (e.target.closest('[data-abort]')) return;
     const cp = e.target.closest('[data-copydir]');
     if (cp) { copyText(cp.dataset.copydir, '已复制 ' + cp.dataset.copydir); return; }
     const mg = e.target.closest('[data-merged]');

@@ -166,8 +166,13 @@ function renderHealth() {
         cellsHtml += '<i class="' + cls + '"' + base + ' data-n="' + c.n + '" data-m="' + esc(row.model || '') +
           '" data-u="' + new Date((startSlot + i + 1) * MX_BUCKET_MS).toISOString() + '" style="height:' + h + '%"></i>';
       }
-      html += '<div class="mx-row"><span class="mx-label"' + (row.model ? ' data-mx="' + esc(row.model) + '"' : '') +
-        ' title="' + esc(row.label) + '">' + esc(row.label) + '</span><div class="mx-cells">' + cellsHtml + '</div></div>';
+      // 可下钻的行标签用 button 渲染（键盘可达）；「全部/其他」行无
+      // 单一模型可筛，保持 span 不暗示可点。
+      html += '<div class="mx-row">' +
+        (row.model
+          ? '<button type="button" class="mx-label" data-mx="' + esc(row.model) + '" title="' + esc(row.label) + '">' + esc(row.label) + '</button>'
+          : '<span class="mx-label" title="' + esc(row.label) + '">' + esc(row.label) + '</span>') +
+        '<div class="mx-cells">' + cellsHtml + '</div></div>';
     });
     morph(el, html);
     // morph 保节点身份，悬停格在属性级更新下存活；但行序变化（模型跌出

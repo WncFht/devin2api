@@ -405,7 +405,3 @@ window.addEventListener('hashchange', () => {
   const h = parseHash();
   if (h.tab !== Tabs.current) Tabs.apply(h.tab);
 });
-document.getElementById('topNav').addEventListener('click', e => {
-  const a = e.target.closest('a[data-tab]');
-  if (a) Tabs.go(a.dataset.tab);
-});

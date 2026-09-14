@@ -104,7 +104,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .kpi .k-label { font-size: var(--fs-sm); color: var(--muted); margin-bottom: 5px; display: flex; align-items: center; gap: 6px; }
 .kpi .k-label i { width: 7px; height: 7px; border-radius: 2px; background: var(--accent); flex: none; }
-.kpi .k-value { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .k-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi .k-sub { font-size: var(--fs-sm); color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi.tone-ok .k-label i { background: var(--ok); }
 .kpi.tone-warn .k-label i { background: var(--warn); }
@@ -155,7 +155,7 @@ a { color: var(--accent); text-decoration: none; }
 .chip {
   padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border-strong);
   background: var(--surface-2); color: var(--text-dim); font-size: var(--fs-md);
-  cursor: pointer; user-select: none;
+  cursor: pointer; user-select: none; font-family: inherit;
 }
 .chip:hover { border-color: var(--accent); color: var(--text); }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
@@ -171,8 +171,12 @@ a { color: var(--accent); text-decoration: none; }
 .btn:hover { border-color: var(--accent); color: var(--text); }
 .btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .btn.danger:hover { border-color: var(--err); color: var(--err); }
-.lnk { color: var(--accent); cursor: pointer; }
+/* .lnk 是内嵌表格/提示文案里的动作词（跳请求页筛选等），用 button 渲染
+   才有键盘可达性——扒掉按钮默认外观，只留 accent 色与下划线悬停。 */
+.lnk { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font: inherit; text-align: left; }
 .lnk:hover { text-decoration: underline; }
+/* 键盘焦点的统一可见样式：focus-visible 只在键盘导航时出现，鼠标点击不画圈。 */
+:is(a, button, select, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: var(--radius-xs); }
 
 /* ---------- 表格 ---------- */
 .scroll-x { overflow-x: auto; }
@@ -308,7 +312,7 @@ th .sort-ind { font-size: 10px; color: var(--accent); }
 .mx-label {
   flex: none; width: 158px; font-family: var(--mono); font-size: var(--fs-sm);
   color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  cursor: pointer;
+  cursor: pointer; background: none; border: none; padding: 0; text-align: left;
 }
 .mx-label:hover { color: var(--accent); }
 /* 波形条：容器底部对齐 + 下沿基线，每格是从基线长起的竖条；
@@ -408,4 +412,12 @@ tr.row-new td { animation: rowNew 1.6s ease-out; }
   .topnav::-webkit-scrollbar { display: none; }
   .topnav a { padding: 5px 9px; font-size: var(--fs-md); }
   .main { padding: 104px 14px 40px; }
+}
+
+/* 系统级减动效偏好：动画/过渡压到近零时长（脉冲点、行闪显、淡入全停）。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }

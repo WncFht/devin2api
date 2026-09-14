@@ -5,16 +5,17 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:,">
 <title>Devin API - 管理面板</title>
+<!-- 与面板共享 panel.css：登录页颜色/字体全部走同一套令牌，不另养色板。 -->
+<link rel="stylesheet" href="/panel/static/panel.css?v=__VERSION__">
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,-apple-system,sans-serif;background:#0b0e14;color:#e5e9f2;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.login-box{background:#12151f;border:1px solid rgba(148,163,184,.1);border-radius:12px;padding:40px;width:360px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
-.login-box h1{font-size:20px;margin-bottom:24px;text-align:center;color:#818cf8}
-.login-box input{width:100%;padding:12px 16px;border:1px solid rgba(148,163,184,.2);border-radius:8px;background:#0b0e14;color:#e5e9f2;font-size:14px;margin-bottom:16px;outline:none}
-.login-box input:focus{border-color:#818cf8}
-.login-box button{width:100%;padding:12px;border:none;border-radius:8px;background:#818cf8;color:#fff;font-size:14px;cursor:pointer}
+body{display:flex;justify-content:center;align-items:center;min-height:100vh}
+.login-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:40px;width:360px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+.login-box h1{font-size:20px;margin-bottom:24px;text-align:center;color:var(--accent)}
+.login-box input{width:100%;padding:12px 16px;border:1px solid var(--border-strong);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:14px;margin-bottom:16px;outline:none;font-family:inherit}
+.login-box input:focus{border-color:var(--accent)}
+.login-box button{width:100%;padding:12px;border:none;border-radius:var(--radius-sm);background:var(--accent);color:#fff;font-size:14px;cursor:pointer;font-family:inherit}
 .login-box button:hover{background:#93a0fa}
-.error{color:#f87171;font-size:13px;text-align:center;margin-top:8px;display:none}
+.error{color:var(--err);font-size:var(--fs-md);text-align:center;margin-top:8px;display:none}
 </style>
 </head>
 <body>
@@ -24,14 +25,19 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0b0e14;color:#e5
 <input type="password" id="password" name="password" autocomplete="current-password" placeholder="请输入密码" autofocus>
 <button type="submit">登录</button>
 </form>
-<div class="error" id="err">密码错误</div>
+<div class="error" id="err" role="alert"></div>
 </div>
 <script>
+// 服务端按场景返回 {error: "..."}（401 密码错误 / 429 锁定冷却）——
+// 直接透出错误体，比固定文案多给了「为什么不行」的信息。
 document.getElementById('loginForm').addEventListener('submit',async e=>{
 e.preventDefault();
 const pwd=document.getElementById('password').value;
 const res=await fetch('/panel/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'password='+encodeURIComponent(pwd)});
-if(res.ok){location.reload()}else{const el=document.getElementById('err');el.style.display='block';setTimeout(()=>el.style.display='none',2000)}
+if(res.ok){location.reload();return}
+let msg='登录失败（HTTP '+res.status+'）';
+try{const d=await res.json();if(d&&d.error)msg=d.error}catch(_){/* 非 JSON 体用状态码兜底 */}
+const el=document.getElementById('err');el.textContent=msg;el.style.display='block';
 });
 </script>
 </body>
