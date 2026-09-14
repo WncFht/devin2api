@@ -143,7 +143,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if request.N != nil && *request.N > 1 {
 		return AdaptedRequest{}, errors.New("chat request n > 1 is not supported by this provider")
 	}
-	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice)
+	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice, &context.Dropped)
 	if err != nil {
 		return AdaptedRequest{}, err
 	}

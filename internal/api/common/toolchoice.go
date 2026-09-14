@@ -14,7 +14,10 @@ import (
 // 字符串 "auto"/"none"/"required"，或对象 {"type":"function","function":{"name":X}}
 // （Responses API 的扁平形态 {"type":"function","name":X} 同样接受）。
 // 空输入与 "auto" 返回 nil（模型自选，与缺省一致）。
-func ParseOpenAIToolChoice(raw json.RawMessage) (*llm.ToolChoice, error) {
+// 非 function 的对象形态（file_search/mcp/allowed_tools 等托管工具约束）
+// 上游没有对应物：记 dropped 透出并按 auto 放行——这类约束指向的工具本来
+// 就在 tools 里被丢弃，为不可满足的强制条件 400 掉整个请求没有意义。
+func ParseOpenAIToolChoice(raw json.RawMessage, dropped *[]string) (*llm.ToolChoice, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
@@ -41,6 +44,10 @@ func ParseOpenAIToolChoice(raw json.RawMessage) (*llm.ToolChoice, error) {
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return nil, fmt.Errorf("decode tool_choice: %w", err)
 	}
+	if object.Type != "" && object.Type != "function" {
+		*dropped = append(*dropped, "tool_choice:"+object.Type)
+		return nil, nil
+	}
 	toolName := object.Name
 	if toolName == "" {
 		toolName = object.Function.Name
@@ -52,10 +59,11 @@ func ParseOpenAIToolChoice(raw json.RawMessage) (*llm.ToolChoice, error) {
 }
 
 // ParseAnthropicToolChoice 解析 Anthropic 风格的 tool_choice 对象：
-// {"type":"auto"|"any"|"tool"|"none", "name":X, "disable_parallel_tool_calls":bool}。
+// {"type":"auto"|"any"|"tool"|"none", "name":X, "disable_parallel_tool_use":bool}。
 // Anthropic 的 "any"（任一工具必须调用）归一为 ToolChoiceRequired——
 // Devin 上游 option_name 不接受 "any"（实测 invalid_argument）。
-// 第二个返回值是 disable_parallel_tool_calls。
+// 第二个返回值是 disable_parallel_tool_use；历史上本代理解析过
+// 非规范的 "disable_parallel_tool_calls" 拼写，两个键都接受（任一 true 即禁用）。
 func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, false, nil
@@ -63,6 +71,7 @@ func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error
 	var object struct {
 		Type                     string `json:"type"`
 		Name                     string `json:"name"`
+		DisableParallelToolUse   bool   `json:"disable_parallel_tool_use"`
 		DisableParallelToolCalls bool   `json:"disable_parallel_tool_calls"`
 	}
 	if err := json.Unmarshal(raw, &object); err != nil {
@@ -83,7 +92,7 @@ func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error
 	default:
 		return nil, false, fmt.Errorf("unsupported tool_choice type %q", object.Type)
 	}
-	return choice, object.DisableParallelToolCalls, nil
+	return choice, object.DisableParallelToolUse || object.DisableParallelToolCalls, nil
 }
 
 // NormalizeToolArguments 归一回放历史里的工具调用参数体：空串/null 吞成

@@ -121,7 +121,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if context.SessionKey == "" {
 		context.SessionKey = request.User
 	}
-	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice)
+	toolChoice, err := common.ParseOpenAIToolChoice(request.ToolChoice, &context.Dropped)
 	if err != nil {
 		return AdaptedRequest{}, err
 	}
