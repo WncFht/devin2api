@@ -70,7 +70,7 @@ func openAIHTTPError(e httpError) []byte {
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
 func openAIErrorBody(err error, debugRef string) []byte {
-	failure := common.Classify(err)
+	failure := llm.Classify(err)
 	payload := common.BuildErrorPayload(failure.Error(), failure, common.OpenAIErrorType(failure), debugRef, true)
 	body, _ := json.Marshal(map[string]any{"error": payload})
 	return body
@@ -153,7 +153,7 @@ func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, e
 }
 
 func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
-	failure := common.Classify(err)
+	failure := llm.Classify(err)
 	payload := common.BuildErrorPayload(failure.Error(), failure, common.AnthropicErrorType(failure), debugRef, false)
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return body
@@ -189,9 +189,12 @@ func decodeResponsesRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 	// 显式拒绝比带病执行便宜。WS 会话在规范化时已剥掉该字段做
 	// 本地合并，不会走到这里。
 	if adapted.Options.PreviousResponseID != "" {
-		return llm.RequestMessages{}, protocolOptions{}, fmt.Errorf(
-			"invalid_argument: previous_response_id %q requires a server-side response store; this proxy always reports store=false — resend the full conversation input without previous_response_id",
-			adapted.Options.PreviousResponseID)
+		return llm.RequestMessages{}, protocolOptions{}, &llm.Failure{
+			Code: "invalid_argument",
+			Message: fmt.Sprintf(
+				"previous_response_id %q requires a server-side response store; this proxy always reports store=false — resend the full conversation input without previous_response_id",
+				adapted.Options.PreviousResponseID),
+		}
 	}
 	return adapted.Context, protocolOptions{
 		Stream:       adapted.Options.Stream,

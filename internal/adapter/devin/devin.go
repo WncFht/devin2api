@@ -25,7 +25,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/WncFht/devin2api/internal/adapter"
-	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/llm"
@@ -304,7 +303,7 @@ func isUnauthenticated(err error) bool {
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
 func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
 	if err := request.Validate(); err != nil {
-		return nil, fmt.Errorf("validate Devin request: %w", err)
+		return nil, &llm.Failure{Code: "invalid_argument", Message: "validate Devin request: " + err.Error(), Cause: err}
 	}
 	request, sanitizeHits := sanitizeRequest(request)
 	cfg := adapter.currentConfig()
@@ -381,7 +380,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError(stage, err)
 		// 错误分类记录随车携带——下游经 common.Classify 取回结构事实，
 		// 不再按文本反推。
-		return nil, asFailure(err)
+		return nil, llm.Classify(err)
 	}
 	return &responseStream{
 		frames:   pumpUpstream(streamCtx, stream),
@@ -503,6 +502,13 @@ func isTransientConnectError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// 已分类的语义记录（如闸门拒绝、本地校验）不是传输断裂——外层
+	// fmt.Errorf 包装会让 unwrap 链上看不到 connect.Error，没有这条
+	// 短路会把语义拒绝误判成可重试的断线。
+	var failure *llm.Failure
+	if errors.As(err, &failure) {
+		return false
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
@@ -531,7 +537,7 @@ func (adapter *Adapter) validateImagesForModel(request llm.RequestMessages, mode
 		supported = modelLikelySupportsImages(model)
 	}
 	if !supported {
-		return fmt.Errorf("model %q does not support image inputs (supports_images=false); use a vision-capable model or remove images", model)
+		return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("model %q does not support image inputs (supports_images=false); use a vision-capable model or remove images", model)}
 	}
 	return nil
 }
@@ -623,12 +629,16 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 		CascadeId:      proto.String(cascadeID),
 	}))
 	if err != nil {
-		return resolvedAssignment{}, fmt.Errorf("AssignModel(%s): %w", routerUID, asFailure(err))
+		// 归因写进 Message——Classify 经 errors.As 直取内层记录，
+		// fmt.Errorf 包装文本不会进客户端可见文案。
+		failure := llm.Classify(err)
+		failure.Message = fmt.Sprintf("AssignModel(%s): %s", routerUID, failure.Message)
+		return resolvedAssignment{}, failure
 	}
 	assignment := resp.Msg.GetAssignment()
 	resolved := strings.TrimSpace(assignment.GetModelUid())
 	if resolved == "" || assignment.GetAssignmentJwt() == "" {
-		return resolvedAssignment{}, fmt.Errorf("invalid_argument: AssignModel(%s) returned empty assignment", routerUID)
+		return resolvedAssignment{}, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("AssignModel(%s) returned empty assignment", routerUID)}
 	}
 	result := resolvedAssignment{modelUID: resolved, jwt: assignment.GetAssignmentJwt()}
 	adapter.assignmentsMu.Lock()
@@ -685,16 +695,6 @@ func modelLikelySupportsImages(model string) bool {
 	return true
 }
 
-// asFailure 把错误归一为分类记录 *llm.Failure（派生字段见
-// common.Classify）——适配器边界之后错误语义随 error 链携带，
-// 下游不再各自按 "<code>: <msg>" 文本方言反推。
-func asFailure(err error) error {
-	if err == nil {
-		return nil
-	}
-	return common.Classify(err)
-}
-
 // ListModels 通过 GetCliModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
 // CLI 版响应比 Cascade 版多 subagent_default_model_uid/default_override_model_config，
 // 且 modelInfo.modelFeatures 提供 tool_calls/thinking/parallel 能力位。
@@ -734,7 +734,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		// 客户端断连的 ctx 取消不是上游失败，不上冷却。
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			backoff := catalogRetryBackoff
-			if failure := common.Classify(err); failure.RetryAfterSeconds > 0 {
+			if failure := llm.Classify(err); failure.RetryAfterSeconds > 0 {
 				backoff = time.Duration(failure.RetryAfterSeconds) * time.Second
 			}
 			a.modelsRetryUntil = time.Now().Add(backoff)

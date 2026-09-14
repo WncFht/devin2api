@@ -200,7 +200,7 @@ func (application *App) streamCompletion(
 			recorder.WriteError("client_disconnected", firstErr)
 			return
 		}
-		firstFailure := common.Classify(firstErr)
+		firstFailure := llm.Classify(firstErr)
 		status := common.HTTPStatus(firstFailure)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
@@ -218,18 +218,17 @@ func (application *App) streamCompletion(
 	}
 	prelude := []llm.ResponseEvent{firstEvent}
 	if !out.committed && firstEvent.Type == llm.ResponseEventError {
-		// 上游把断连物化成首事件错误时同样按取消归因——事件文本经
-		// errors.New 重建后错误链已丢，errors.Is 接不到，直接看 ctx。
+		// 上游把断连物化成首事件错误时同样按取消归因——泵投递与 ctx
+		// 完成存在竞态（取消可能先落成错误事件再被看见），ctx 是兜底。
 		if streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", context.Cause(streamCtx))
 			return
 		}
-		message := "response stream returned an error event immediately"
-		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
-			message = firstEvent.Error.ErrorMessage
+		failure := llm.FailureOf(firstEvent.Error)
+		if failure.Error() == "" {
+			failure.Message = "response stream returned an error event immediately"
 		}
-		failure := common.FailureOf(firstEvent.Error)
 		status := common.HTTPStatus(failure)
 		if protocol.StreamErrorEvents() && (failure.ContextLength || status == http.StatusTooManyRequests) {
 			// Codex 只在 SSE response.failed 里按 error.code==
@@ -248,7 +247,7 @@ func (application *App) streamCompletion(
 				firstEvent,
 			}
 		} else {
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, errors.New(message))
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, failure)
 			return
 		}
 	}
@@ -258,7 +257,7 @@ func (application *App) streamCompletion(
 	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {
-		streamFailure := common.Classify(streamErr)
+		streamFailure := llm.Classify(streamErr)
 		noteRetryAfter(recorder, streamFailure)
 		// 流内错误事件下发的限流 HTTP 状态仍是 200——按记录语义补标，
 		// 责任归因与 429 采样才不会把这批限流漏成普通失败。
@@ -383,8 +382,10 @@ func writeProtocolStream(
 			if wErr := flush(); wErr != nil {
 				return latest, wErr
 			}
-			if event.Error != nil && event.Error.ErrorMessage != "" {
-				return latest, errors.New(event.Error.ErrorMessage)
+			// 分类记录随车返回——Cause 链（context.Canceled 等）与
+			// 生产侧结构字段不再经文本重推。
+			if failure := llm.FailureOf(event.Error); failure.Error() != "" {
+				return latest, failure
 			}
 			return latest, errors.New("response stream returned an error event")
 		}
@@ -423,7 +424,7 @@ func collectPumpedMessage(ctx context.Context, out *streamWriter, items <-chan p
 			if event.Error == nil {
 				return nil, errors.New("error event has no error message")
 			}
-			return nil, errors.New(event.Error.ErrorMessage)
+			return nil, llm.FailureOf(event.Error)
 		}
 	}
 }

@@ -200,7 +200,7 @@ var toolDefinitionCache = struct {
 // 不做静默改名——改写会让客户端历史回灌的 tool_call 名对不上。
 func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
 	if !validToolName(tool.Name) {
-		return nil, fmt.Errorf("invalid_argument: tool name %q contains characters outside [A-Za-z0-9_-], which the upstream rejects", tool.Name)
+		return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("tool name %q contains characters outside [A-Za-z0-9_-], which the upstream rejects", tool.Name)}
 	}
 	cacheKey := tool.Name + "\x00" + string(tool.InputSchema)
 	toolDefinitionCache.Lock()

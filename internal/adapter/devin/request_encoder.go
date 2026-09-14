@@ -110,7 +110,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 				}
 			}
 			if !found {
-				return nil, repairs, fmt.Errorf("invalid_argument: tool_choice names tool %q which is not in the tools list", choice.ToolName)
+				return nil, repairs, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("tool_choice names tool %q which is not in the tools list", choice.ToolName)}
 			}
 			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
 				Choice: &devinproto.ExaChatPb_ChatToolChoice_ToolName{ToolName: choice.ToolName},

@@ -1,12 +1,31 @@
-package llm
-
-// Failure 是请求失败的分类记录，实现 error 接口随错误链随车携带——
-// 压平成字符串之前的类型信息不再丢失，消费侧经 common.Classify 一次取回，
+// 本文件是错误语义的唯一事实源：分类记录 Failure 随错误链随车携带，
+// 压平成字符串之前的类型信息不再丢失；消费侧经 Classify 一次取回，
 // 不再各自从文案反推。
 //
-// 字段分两层：Code/Message/Cause/LocalGate/RetryAfterSeconds/RetryAfterMinute
-// 由生产侧（adapter、rate gate）填结构已知的事实；其余派生字段由
-// common.Classify 统一补齐——直接读未经 Classify 的记录时派生字段为零值。
+// 字段分两层：Code/Message/Cause/LocalGate/UpstreamFault/
+// RetryAfterSeconds/RetryAfterMinute 由生产侧（adapter、rate gate）填
+// 结构已知的事实；其余派生字段由 Classify 统一补齐——直接读未经
+// Classify 的记录时派生字段为零值。derive 不覆盖生产侧已置位的字段。
+//
+// 字符串解析（前缀 code、文案标记、hint 正则）只存在于 Classify 的
+// 兜底分支——此前全库按 "<code>: <msg>" 方言各自重解析，每来一种
+// 新的上游错误形状就要同步多处。
+package llm
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"connectrpc.com/connect"
+)
+
+// Failure 是请求失败的分类记录，实现 error 接口。
 type Failure struct {
 	// Code 是 Connect 协议错误码（resource_exhausted 等）；非 Connect
 	// 错误为空。文案前缀 "<code>: <msg>" 的方言由本字段替代。
@@ -18,6 +37,11 @@ type Failure struct {
 	// LocalGate 为真表示本地速率闸门拒绝——请求未触达上游，
 	// 排障归因与上游真拒（devin_connect）区分。
 	LocalGate bool
+	// UpstreamFault 为真表示责任在上游侧，与 Code 声称的语义无关：
+	// 传输断裂会被 connect-go 包成 invalid_argument/internal 文案，
+	// 上游也把真实内部故障塞进可修正 code（"an internal error
+	// occurred" 模板）——两者都不该让客户端按请求错误处理。
+	UpstreamFault bool
 	// RetryAfterSeconds 是生产侧结构已知的限流等待秒数（本地闸门）；
 	// 上游只在文案里给 hint，由 Classify 解析补齐。
 	RetryAfterSeconds int
@@ -25,7 +49,7 @@ type Failure struct {
 	// 分钟桶界向上对齐（floor 取整的剩余时长），不能当精确秒数用。
 	RetryAfterMinute bool
 
-	// 以下由 common.Classify 派生填充。
+	// 以下由 Classify 派生填充。
 
 	// ContextLength 表示请求超出上游上下文窗口——客户端可修正。
 	ContextLength bool
@@ -36,7 +60,8 @@ type Failure struct {
 	// Timeout 表示等待超时（context.DeadlineExceeded 或上游等价物）。
 	Timeout bool
 	// ClientFixable 表示客户端可修正的请求错误（4xx 家族 code、上下文
-	// 超长、本地校验标记）——错误类型与状态码据此压回 invalid_request/4xx。
+	// 超长）——错误类型与状态码据此压回 invalid_request/4xx。
+	// UpstreamFault 置位时恒假。
 	ClientFixable bool
 	// TraceID 是上游错误尾缀 "(trace ID: …)" 提取出的排障锚点。
 	TraceID string
@@ -53,3 +78,204 @@ func (e *Failure) Error() string {
 
 // Unwrap 暴露原始错误链，context.Canceled/DeadlineExceeded 等哨兵仍可判定。
 func (e *Failure) Unwrap() error { return e.Cause }
+
+// Classify 把任意错误归一为分类记录：*Failure 直取并补齐派生字段，
+// *connect.Error 取结构字段，其余按文本兜底（前缀 code + 标记匹配）。
+// 派生是幂等的纯计算，重复调用结果一致。
+func Classify(err error) *Failure {
+	if err == nil {
+		return nil
+	}
+	failure := &Failure{Message: err.Error(), Cause: err}
+	var typed *Failure
+	var connectErr *connect.Error
+	switch {
+	case errors.As(err, &typed):
+		failure = typed
+	case errors.As(err, &connectErr):
+		// Message 不含 code 前缀，Failure.Error() 重组即原线文本；
+		// 空 message 时不再回填 connectErr.Error()——那会引入前缀重复。
+		failure.Message = strings.TrimSpace(connectErr.Message())
+		failure.Code = connectErr.Code().String()
+	default:
+		if code, rest, ok := splitCodePrefix(failure.Message); ok {
+			failure.Code, failure.Message = code, rest
+		}
+	}
+	return derive(failure)
+}
+
+// FailureOf 返回错误助手消息的分类记录：优先用生产侧携带的 typed
+// Failure，缺失时按 ErrorMessage 文本兜底分类。
+func FailureOf(message *AssistantMessage) *Failure {
+	if message != nil && message.Failure != nil {
+		return derive(message.Failure)
+	}
+	text := ""
+	if message != nil {
+		text = message.ErrorMessage
+	}
+	return ClassifyText(text)
+}
+
+// ClassifyText 对无 error 载体的纯文案分类（事件层压平后的 ErrorMessage、
+// 测试构造等）。
+func ClassifyText(message string) *Failure {
+	failure := &Failure{Message: message, Cause: errors.New(message)}
+	if code, rest, ok := splitCodePrefix(message); ok {
+		failure.Code, failure.Message = code, rest
+	}
+	return derive(failure)
+}
+
+// derive 按原始字段补齐派生字段；生产侧已置位的字段保持不变——生产侧
+// 能以文本标记以外的方式结构知道这些事实（本地闸门、上游细节字段）。
+func derive(failure *Failure) *Failure {
+	message := strings.ToLower(failure.Message)
+	for _, marker := range contextLengthMarkers {
+		if strings.Contains(message, marker) {
+			failure.ContextLength = true
+			break
+		}
+	}
+	failure.RateLimited = failure.RateLimited ||
+		failure.Code == "resource_exhausted" || failure.LocalGate
+	failure.Canceled = failure.Canceled ||
+		failure.Code == "canceled" ||
+		errors.Is(failure.Cause, context.Canceled) ||
+		strings.Contains(message, "context canceled")
+	failure.Timeout = failure.Timeout ||
+		failure.Code == "deadline_exceeded" ||
+		errors.Is(failure.Cause, context.DeadlineExceeded) ||
+		strings.Contains(message, "context deadline exceeded")
+	failure.UpstreamFault = failure.UpstreamFault ||
+		strings.Contains(message, internalErrorMarker) ||
+		transportBreak(failure)
+	failure.ClientFixable = failure.ClientFixable ||
+		(!failure.UpstreamFault &&
+			(failure.ContextLength || requestCodeSet[failure.Code]))
+	if match := traceIDPattern.FindStringSubmatch(failure.Message); len(match) == 2 {
+		failure.TraceID = match[1]
+	}
+	if failure.RetryAfterSeconds == 0 {
+		failure.RetryAfterSeconds, failure.RetryAfterMinute = parseResetHint(failure.Message)
+	}
+	return failure
+}
+
+// internalErrorMarker 是上游内部故障的固定模板文案——Devin 把真实内部
+// 错误塞进 invalid_argument/permission_denied 等可修正 code 下发，
+// 文案是它唯一可靠的自报。
+const internalErrorMarker = "an internal error occurred"
+
+// transportBreak 判定传输层断裂：connect-go 把 RoundTrip/读写断包成
+// CodeUnavailable、envelope 帧截断包成 CodeInvalidArgument "protocol
+// error: ..."、流中段裸 EOF 包成 CodeUnknown——判据看 unwrap 链里的
+// io/net 错误与 connect 的固定措辞，而不是 code 本身。已归取消/超时的
+// 不算传输故障。
+func transportBreak(failure *Failure) bool {
+	if failure.Canceled || failure.Timeout {
+		return false
+	}
+	if errors.Is(failure.Cause, io.EOF) || errors.Is(failure.Cause, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(failure.Cause, &netErr) {
+		return true
+	}
+	return (failure.Code == "invalid_argument" || failure.Code == "internal") &&
+		strings.HasPrefix(failure.Message, "protocol error:")
+}
+
+// connectCodes 是 Connect 协议全部错误码——文本兜底时只有前缀命中该集合
+// 才认作 code，避免把 "read request: …" 之类本地文案误当体制标记。
+var connectCodes = map[string]bool{
+	"canceled": true, "unknown": true, "invalid_argument": true,
+	"deadline_exceeded": true, "not_found": true, "already_exists": true,
+	"permission_denied": true, "resource_exhausted": true,
+	"failed_precondition": true, "aborted": true, "out_of_range": true,
+	"unimplemented": true, "internal": true, "unavailable": true,
+	"data_loss": true, "unauthenticated": true,
+}
+
+// requestCodeSet 是调用方可修正的请求错误 code 家族——与 HTTPStatus 的
+// 4xx 分支同源。failed_precondition 实测是请求形状/前置状态问题（如非
+// CASCADE request_type 缺真实会话），与 invalid_argument 同属可修正；
+// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
+// permission_denied，同样可归一。
+var requestCodeSet = map[string]bool{
+	"invalid_argument": true, "failed_precondition": true,
+	"permission_denied": true,
+}
+
+// splitCodePrefix 把 "<code>: <msg>" 方言拆成结构字段：前缀命中已知
+// Connect code 才成立，返回 code 与去掉前缀的正文——Message 存剥前缀的
+// 正文，Failure.Error() 重组后与原线文本逐字节一致。
+func splitCodePrefix(message string) (code, rest string, ok bool) {
+	i := strings.Index(message, ":")
+	if i < 0 {
+		return "", "", false
+	}
+	code = strings.TrimSpace(message[:i])
+	if !connectCodes[code] {
+		return "", "", false
+	}
+	return code, strings.TrimSpace(message[i+1:]), true
+}
+
+// contextLengthMarkers 是上游表示"输入超出上下文窗口"的错误文案特征。
+var contextLengthMarkers = []string{
+	"prompt is too long", "context length", "context window",
+	"maximum context", "too many tokens",
+}
+
+// traceIDPattern 匹配上游流内错误尾的 trace 标记 "(trace ID: …)"。
+// 上游错误文案普遍是模糊 "internal error"，trace ID 是唯一排障锚点。
+var traceIDPattern = regexp.MustCompile(`\(trace ID: ([^)\s]+)\)`)
+
+// rateLimitResetPattern 匹配上游限流文案里的重试窗口。实测两种单位：
+// 剩余不足一分钟时报 "reset in N seconds"，更长时报 "reset in N
+// minute(s)"（floor 取整）。上游不给 Retry-After 头或 RetryInfo
+// detail，这句文案是唯一可行动的 hint。
+var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+)\s*(seconds?|minutes?)`)
+
+// parseResetHint 从文案解析限流重置秒数与粒度；无 hint 返回 0。
+// 返回的字面秒数（分钟按 60 折算）；要拿可行动的等待时长/绝对时刻用
+// RateLimitReset——分钟 hint 是桶界的 floor 取整，需向上对齐。
+func parseResetHint(message string) (seconds int, minute bool) {
+	match := rateLimitResetPattern.FindStringSubmatch(message)
+	if len(match) != 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(match[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	if strings.HasPrefix(match[2], "minute") {
+		return n * 60, true
+	}
+	return n, false
+}
+
+// RateLimitReset 把限流重置时刻解析为绝对时刻：生产侧已知的精确秒数
+// 直接 now+N；分钟级 hint 是上游对当前分钟桶剩余时长的 floor 取整
+// （"reset in 1 minute" 实际指本桶结束，最晚 ~119s 后），按上游分钟桶
+// 模型向上对齐到下一个 :59 秒桶界——上游时钟约快 1s，实测桶界落在本地
+// :58.5~:59.5。
+func (failure *Failure) RateLimitReset(now time.Time) (time.Time, bool) {
+	if failure == nil || failure.RetryAfterSeconds <= 0 {
+		return time.Time{}, false
+	}
+	if !failure.RetryAfterMinute {
+		return now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second), true
+	}
+	// now+Nmin 落入的分钟桶的 :59 边界；若该时刻本身已过 :59，
+	// 取下一个分钟的 :59。
+	target := now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second)
+	reset := target.Truncate(time.Minute).Add(59 * time.Second)
+	if !reset.After(target) {
+		reset = reset.Add(time.Minute)
+	}
+	return reset, true
+}

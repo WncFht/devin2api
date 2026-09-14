@@ -12,7 +12,6 @@ import (
 
 	devinproto "local/devinproto"
 
-	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -632,7 +631,7 @@ func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 	}
 	decoder.partial.StopReason = llm.StopReasonError
 	decoder.partial.ErrorMessage = err.Error()
-	decoder.partial.Failure = common.Classify(err)
+	decoder.partial.Failure = llm.Classify(err)
 	decoder.finished = true
 	return []llm.ResponseEvent{{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: &decoder.partial}}
 }

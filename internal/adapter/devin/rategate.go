@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -503,7 +502,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	if gate == nil {
 		return
 	}
-	failure := common.Classify(err)
+	failure := llm.Classify(err)
 	// 本地闸门自己的拒绝（LocalGate）不带上游证据，不能拿来上闩。
 	if failure == nil || failure.LocalGate || !failure.RateLimited {
 		return
@@ -511,7 +510,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	now := gate.now()
 	// defaultLatch 由 setParams 热更新，须在锁内读。
 	var until time.Time
-	if resetAt, ok := common.RateLimitReset(failure, now); ok {
+	if resetAt, ok := failure.RateLimitReset(now); ok {
 		until = resetAt
 	}
 	gate.mu.Lock()

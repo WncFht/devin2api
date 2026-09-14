@@ -578,7 +578,7 @@ func (application *App) createCompletion(
 	defer ticker.Stop()
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
-		noteRetryAfter(recorder, common.Classify(err))
+		noteRetryAfter(recorder, llm.Classify(err))
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", err)
@@ -596,7 +596,7 @@ func (application *App) createCompletion(
 			recorder.WriteError("response_event", err)
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(common.Classify(err)), err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(llm.Classify(err)), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
@@ -735,7 +735,7 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 // 的 ≥500 会压成 400，调用方应记返回值而非入参，否则索引口径「服务端
 // 错误」与客户端口径「请求错误」错配，按状态码归因会误伤。
 func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) int {
-	failure := common.Classify(err)
+	failure := llm.Classify(err)
 	recorder.WriteError(stage, err)
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
 	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
@@ -756,7 +756,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
-		if resetAt, ok := common.RateLimitReset(failure, time.Now()); ok {
+		if resetAt, ok := failure.RateLimitReset(time.Now()); ok {
 			wait := int(math.Ceil(time.Until(resetAt).Seconds()))
 			writer.Header().Set("Retry-After", strconv.Itoa(wait))
 			writer.Header().Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(resetAt.Unix(), 10))

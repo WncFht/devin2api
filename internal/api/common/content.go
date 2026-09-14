@@ -13,8 +13,15 @@ import (
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
-// ErrImageShape 表示无法识别的图片值形态。
-var ErrImageShape = errors.New("unrecognized image value shape")
+// errImageShape 表示无法识别的图片值形态——内部控制流哨兵，
+// 不直接面向客户端。
+var errImageShape = errors.New("unrecognized image value shape")
+
+// invalidRequest 构造调用方可修正的请求形状错误的分类记录——解码层
+// 拒绝（缺字段、file_id 不支持、非 base64）全是请求错误而非上游故障。
+func invalidRequest(format string, args ...any) *llm.Failure {
+	return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf(format, args...)}
+}
 
 // DecodeContent 把 JSON 字符串或 part 数组解码为中间内容块。
 // 解码时被丢弃/降级的 part 记入 dropped（"content_part:<type>"），
@@ -26,7 +33,7 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 	}
 	var parts []json.RawMessage
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return nil, fmt.Errorf("decode message content: %w", err)
+		return nil, &llm.Failure{Code: "invalid_argument", Message: "decode message content: " + err.Error(), Cause: err}
 	}
 	content := make([]llm.Content, 0, len(parts))
 	for index, part := range parts {
@@ -35,7 +42,7 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
-			return nil, fmt.Errorf("content[%d]: %w", index, err)
+			return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("content[%d]: %s", index, err), Cause: err}
 		}
 		switch header.Type {
 		case "input_text", "output_text", "text":
@@ -43,7 +50,12 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 		case "input_image", "image_url", "image":
 			image, err := DecodeImagePart(part)
 			if err != nil {
-				return nil, fmt.Errorf("content[%d]: %w", index, err)
+				var failure *llm.Failure
+				if errors.As(err, &failure) {
+					failure.Message = fmt.Sprintf("content[%d]: %s", index, failure.Message)
+					return nil, failure
+				}
+				return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("content[%d]: %s", index, err), Cause: err}
 			}
 			content = append(content, image)
 		case "input_file", "file", "document", "input_audio":
@@ -79,7 +91,7 @@ func DecodeImagePart(raw json.RawMessage) (llm.ImageContent, error) {
 		return llm.ImageContent{}, err
 	}
 	if envelope.FileID != "" {
-		return llm.ImageContent{}, errors.New("file_id images are not supported; use base64 data URL in image_url")
+		return llm.ImageContent{}, invalidRequest("file_id images are not supported; use base64 data URL in image_url")
 	}
 
 	candidates := []json.RawMessage{envelope.ImageURL, envelope.Image, envelope.Source}
@@ -89,7 +101,7 @@ func DecodeImagePart(raw json.RawMessage) (llm.ImageContent, error) {
 		}
 		if image, err := DecodeImageValue(candidate); err == nil {
 			return image, nil
-		} else if !errors.Is(err, ErrImageShape) {
+		} else if !errors.Is(err, errImageShape) {
 			return llm.ImageContent{}, err
 		}
 	}
@@ -99,7 +111,7 @@ func DecodeImagePart(raw json.RawMessage) (llm.ImageContent, error) {
 	if envelope.Data != "" {
 		return DecodeDataImage(envelope.Data)
 	}
-	return llm.ImageContent{}, errors.New("image part missing image_url/url/data (base64 data URL required)")
+	return llm.ImageContent{}, invalidRequest("image part missing image_url/url/data (base64 data URL required)")
 }
 
 // DecodeImageValue 解析 JSON 字符串或图片对象。
@@ -119,10 +131,10 @@ func DecodeImageValue(raw json.RawMessage) (llm.ImageContent, error) {
 		FileID    string `json:"file_id"`
 	}
 	if err := json.Unmarshal(raw, &asObject); err != nil {
-		return llm.ImageContent{}, ErrImageShape
+		return llm.ImageContent{}, errImageShape
 	}
 	if asObject.FileID != "" {
-		return llm.ImageContent{}, errors.New("file_id images are not supported; use base64 data URL")
+		return llm.ImageContent{}, invalidRequest("file_id images are not supported; use base64 data URL")
 	}
 	if asObject.URL != "" {
 		return DecodeDataImage(asObject.URL)
@@ -135,7 +147,7 @@ func DecodeImageValue(raw json.RawMessage) (llm.ImageContent, error) {
 		encoded = asObject.B64JSON
 	}
 	if encoded == "" {
-		return llm.ImageContent{}, ErrImageShape
+		return llm.ImageContent{}, errImageShape
 	}
 	mimeType := asObject.MIMEType
 	if mimeType == "" {
@@ -148,7 +160,7 @@ func DecodeImageValue(raw json.RawMessage) (llm.ImageContent, error) {
 		mimeType = SniffImageMIME(encoded)
 	}
 	if mimeType == "" {
-		return llm.ImageContent{}, errors.New("image base64 requires mime_type/media_type or data URL prefix")
+		return llm.ImageContent{}, invalidRequest("image base64 requires mime_type/media_type or data URL prefix")
 	}
 	return DecodeRawBase64(encoded, mimeType)
 }
@@ -157,21 +169,21 @@ func DecodeImageValue(raw json.RawMessage) (llm.ImageContent, error) {
 func DecodeDataImage(value string) (llm.ImageContent, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return llm.ImageContent{}, errors.New("image url/data is empty")
+		return llm.ImageContent{}, invalidRequest("image url/data is empty")
 	}
 	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
-		return llm.ImageContent{}, errors.New("http(s) image URLs are not fetched yet; embed as data:image/<mime>;base64,<data>")
+		return llm.ImageContent{}, invalidRequest("http(s) image URLs are not fetched yet; embed as data:image/<mime>;base64,<data>")
 	}
 	if !strings.HasPrefix(value, "data:") {
 		// 纯 base64：尝试按魔数嗅探。
 		if mimeType := SniffImageMIME(value); mimeType != "" {
 			return DecodeRawBase64(value, mimeType)
 		}
-		return llm.ImageContent{}, errors.New("only data URL or raw base64 images are supported")
+		return llm.ImageContent{}, invalidRequest("only data URL or raw base64 images are supported")
 	}
 	meta, encoded, ok := strings.Cut(value, ",")
 	if !ok {
-		return llm.ImageContent{}, errors.New("image must be a base64 data URL")
+		return llm.ImageContent{}, invalidRequest("image must be a base64 data URL")
 	}
 	meta = strings.TrimPrefix(meta, "data:")
 	// 允许 data:image/png;base64,xxx 与 data:image/png;charset=utf-8;base64,xxx
@@ -185,10 +197,10 @@ func DecodeDataImage(value string) (llm.ImageContent, error) {
 		mimeType = "image/png"
 	}
 	if _, _, err := mime.ParseMediaType(mimeType); err != nil {
-		return llm.ImageContent{}, fmt.Errorf("invalid image MIME type: %w", err)
+		return llm.ImageContent{}, &llm.Failure{Code: "invalid_argument", Message: "invalid image MIME type: " + err.Error(), Cause: err}
 	}
 	if !isBase64 {
-		return llm.ImageContent{}, errors.New("image data URL must be base64 encoded")
+		return llm.ImageContent{}, invalidRequest("image data URL must be base64 encoded")
 	}
 	return DecodeRawBase64(encoded, mimeType)
 }
@@ -228,10 +240,10 @@ func DecodeRawBase64(encoded, mimeType string) (llm.ImageContent, error) {
 		}
 	}
 	if err != nil {
-		return llm.ImageContent{}, fmt.Errorf("decode image data: %w", err)
+		return llm.ImageContent{}, &llm.Failure{Code: "invalid_argument", Message: "decode image data: " + err.Error(), Cause: err}
 	}
 	if len(data) == 0 {
-		return llm.ImageContent{}, errors.New("image data is empty")
+		return llm.ImageContent{}, invalidRequest("image data is empty")
 	}
 	// 上游按纯 base64 字符串接收，不带 data: 前缀。
 	return llm.ImageContent{

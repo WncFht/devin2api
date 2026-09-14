@@ -251,11 +251,11 @@ func TestRetryAfterParsesMinutes(t *testing.T) {
 		"Your limit will reset in 1 minute.":   60,
 		"Your limit will reset in 8 minutes.":  480,
 	} {
-		if got := common.ClassifyText(text).RetryAfterSeconds; got != want {
+		if got := llm.ClassifyText(text).RetryAfterSeconds; got != want {
 			t.Errorf("ClassifyText(%q).RetryAfterSeconds = %d, want %d", text, got, want)
 		}
 	}
-	if common.ClassifyText("no hint here").RetryAfterSeconds != 0 {
+	if llm.ClassifyText("no hint here").RetryAfterSeconds != 0 {
 		t.Error("expected no hint to parse")
 	}
 	if !strings.Contains(rateLimitErr("reset in 5 seconds.").Error(), "resource_exhausted") {
@@ -267,7 +267,7 @@ func TestRetryAfterParsesMinutes(t *testing.T) {
 // 真实截止 = now+Nmin 所在桶的 :59；秒级 hint 精确落地不改。
 func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	now := time.Date(2026, 9, 14, 4, 36, 12, 0, time.Local)
-	reset, ok := common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."), now)
+	reset, ok := llm.ClassifyText("Your limit will reset in 1 minute.").RateLimitReset(now)
 	if !ok {
 		t.Fatal("minute hint should parse")
 	}
@@ -277,7 +277,7 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	}
 	// 目标时刻已过 :59 时进下一分钟桶界：04:36:59.5 + 1min = 04:37:59.5，
 	// 本分钟 :59 已过 → 04:38:59。
-	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."),
+	reset, ok = llm.ClassifyText("Your limit will reset in 1 minute.").RateLimitReset(
 		time.Date(2026, 9, 14, 4, 36, 59, int(500*time.Millisecond), time.Local))
 	if !ok {
 		t.Fatal("minute hint should parse")
@@ -285,10 +285,10 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	if want := time.Date(2026, 9, 14, 4, 38, 59, 0, time.Local); !reset.Equal(want) {
 		t.Fatalf("RateLimitReset = %v, want %v", reset, want)
 	}
-	if _, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 0 minutes."), now); ok {
+	if _, ok = llm.ClassifyText("Your limit will reset in 0 minutes.").RateLimitReset(now); ok {
 		t.Fatal("zero-minute hint should not parse")
 	}
-	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."), time.Date(2026, 9, 14, 4, 36, 1, 0, time.Local))
+	reset, ok = llm.ClassifyText("Your limit will reset in 1 minute.").RateLimitReset(time.Date(2026, 9, 14, 4, 36, 1, 0, time.Local))
 	if !ok {
 		t.Fatal("minute hint should parse")
 	}
@@ -296,7 +296,7 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 		t.Fatalf("RateLimitReset = %v, want %v", reset, want)
 	}
 	// 秒级 hint 原样生效。
-	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 30 seconds."), now)
+	reset, ok = llm.ClassifyText("Your limit will reset in 30 seconds.").RateLimitReset(now)
 	if !ok || !reset.Equal(now.Add(30*time.Second)) {
 		t.Fatalf("seconds RateLimitReset = %v,%v", reset, ok)
 	}
