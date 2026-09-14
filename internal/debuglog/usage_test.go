@@ -397,9 +397,14 @@ func TestLayeredRetention(t *testing.T) {
 	manager := NewManager(root, RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1})
 	defer manager.Close()
 
-	// 一个 2 小时前的目录：负载应被剥离，证据保留。
+	// 一个 2 小时前的目录：负载应被剥离，证据保留。重试分片
+	// 03-devin-request.attempt2.json 同属负载层，必须一并剥掉。
 	old := filepath.Join(root, "20200101-000000")
-	for _, name := range []string{"03-devin-request.json", "04-devin-response.jsonl", "06-http-response.jsonl", "meta.json", "error.json"} {
+	payloads := []string{
+		"03-devin-request.json", "03-devin-request.attempt2.json",
+		"04-devin-response.jsonl", "06-http-response.jsonl",
+	}
+	for _, name := range append(payloads, "meta.json", "error.json") {
 		if err := os.MkdirAll(old, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -419,7 +424,7 @@ func TestLayeredRetention(t *testing.T) {
 	}
 
 	manager.cleanOnce()
-	for _, gone := range payloadNames {
+	for _, gone := range append(payloads, "attachments") {
 		if _, err := os.Stat(filepath.Join(old, gone)); !os.IsNotExist(err) {
 			t.Fatalf("payload %s should be stripped", gone)
 		}

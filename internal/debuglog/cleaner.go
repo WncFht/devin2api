@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -23,13 +24,20 @@ import (
 // 可把每轮的全树 dirSize 遍历（每目录一次 Walk）摊薄到可忽略。
 const cleanerInterval = 5 * time.Minute
 
-// payloadNames 是「负载层」文件：体积大、只在近距排障时需要。
-// 超时后被剥离，meta.json/error.json/01/02/05 等证据继续保留。
-var payloadNames = []string{
-	"03-devin-request.json",
-	"04-devin-response.jsonl",
-	"06-http-response.jsonl",
-	"attachments",
+// isPayloadName 判定请求目录内的「负载层」成员：体积大、只在近距排障
+// 时需要。超时后被剥离，meta.json/error.json/01/02/05 等证据继续保留。
+// devinRequestStageStem+"." 前缀同时圈出 03 主文件与全部重试分片
+// （03-devin-request.attemptN.json）——精确名匹配会漏掉分片，重试
+// 请求的大体积请求体将永不剥离。
+func isPayloadName(name string) bool {
+	if strings.HasPrefix(name, devinRequestStageStem+".") {
+		return true
+	}
+	switch name {
+	case StageDevinResponse, StageHTTPResponse, AttachmentsDir:
+		return true
+	}
+	return false
 }
 
 // runCleaner 是后台清理协程：按 ticker 周期执行 retention 检查，
@@ -116,7 +124,7 @@ func (manager *Manager) cleanOnce() int {
 			dir.size = dirSize(full)
 			totalBytes += dir.size
 			if policy.KeepErrorDirs > 0 {
-				if _, statErr := os.Stat(filepath.Join(full, "error.json")); statErr == nil {
+				if _, statErr := os.Stat(filepath.Join(full, ErrorFile)); statErr == nil {
 					dir.hasError = true
 				}
 			}
@@ -165,16 +173,22 @@ func (manager *Manager) cleanOnce() int {
 // stripPayload 删除目录内的大体积负载文件，保留证据层文件。
 // 返回释放的字节数；文件本就不存在不是错误。
 func stripPayload(dir string) int64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
 	var freed int64
-	for _, name := range payloadNames {
-		path := filepath.Join(dir, name)
-		info, err := os.Stat(path)
-		if err != nil {
+	for _, entry := range entries {
+		if !isPayloadName(entry.Name()) {
 			continue
 		}
-		size := info.Size()
-		if info.IsDir() {
-			size = dirSize(path)
+		path := filepath.Join(dir, entry.Name())
+		var size int64
+		if info, statErr := entry.Info(); statErr == nil {
+			size = info.Size()
+			if info.IsDir() {
+				size = dirSize(path)
+			}
 		}
 		if os.RemoveAll(path) == nil {
 			freed += size
