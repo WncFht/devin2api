@@ -1,8 +1,10 @@
-// 系统页：进程运行指标 + 日志管道自观测 + stderr 日志查看 + 请求日志开关。
+// 系统页：进程运行指标 + 日志管道自观测 + 速率闸门 + 生效配置 + stderr 日志。
 // 计数器为进程内存值，重启清零；用量口径见用量页（index.jsonl 回放不丢）。
 
 const System = (() => {
   let procOffset = 0, procFollow = false, procBuf = '';
+  let cfgData = null;    // /panel/api/config 视图（文件值，用于开关口径漂移提示）
+  let lastDebug = null;  // 最近一次 debuglog stats，供 config 到达后补渲染口径行
   const PROC_CAP = 256 << 10;
   const PROC_LV = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
@@ -20,15 +22,48 @@ const System = (() => {
         kpi('当前 QPS', Number(r.qps_current || 0).toFixed(2), 'RPM ' + (r.rpm_current ?? 0) + ' / 峰值 ' + (r.rpm_peak ?? 0), 'cyan') +
         kpi('累计请求', h.completed_requests ?? 0, '2xx ' + (h.ok_responses ?? 0) + ' · 4xx ' + (h.client_error_responses ?? 0) + ' · 5xx ' + (h.server_error_responses ?? 0) + ' · 拒 ' + (h.rejected_requests ?? 0)) +
         kpi('流式/非流式', (h.streaming_requests ?? 0) + ' / ' + (h.non_streaming_requests ?? 0), '上行 ' + fmtBytes(h.request_body_bytes) + ' · 下行 ' + fmtBytes(h.response_body_bytes));
+      renderGate(d.gate);
       if (d.debuglog) renderPipe(d.debuglog);
     } catch (e) {
       $('sysKpis').innerHTML = '<div class="note" style="color:var(--err)">指标拉取失败: ' + esc(String(e)) + '</div>';
     }
   }
 
+  // 速率闸门：闩中状态用 banner 强调（正在对客户端快败 429），
+  // 计数器是进程内存值，重启清零。
+  function renderGate(g) {
+    const body = $('gateBody');
+    if (!g) { body.innerHTML = '<div class="mini"><span class="v">无闸门数据（provider adapter 未配置）</span></div>'; return; }
+    let html = '';
+    if (g.latched) {
+      const until = g.limited_until ? fmtTime(g.limited_until) + '（' + fmtIn(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
+      html += '<div class="err-banner" style="grid-column:1/-1;margin-bottom:4px">闩中：上游限流冷却至 ' + esc(until) + '，闩内新请求快败 429 + Retry-After，滴灌探针放行探测解闩</div>';
+    }
+    html += meta('闩态', g.latched ? '闩中' : '未闩') +
+      meta('闩截止', g.limited_until ? fmtTime(g.limited_until) : '-') +
+      meta('累计上闩', g.latch_count ?? 0) +
+      meta('滴灌放行', g.drip_count ?? 0) +
+      meta('闩内快败', g.reject_latched_count ?? 0) +
+      meta('排队快败', g.reject_hold_count ?? 0) +
+      meta('令牌补充', Number(g.refill_per_sec || 0).toFixed(2) + ' req/s');
+    body.innerHTML = html;
+  }
+
+  // 开关口径：toggle 只改内存，重启后回退到文件值；内存与文件不一致
+  // 时显式标出（config 视图拿的是最后一次加载的文件值）。
+  function pipeScopeHint(d) {
+    const fileEnabled = cfgData && cfgData.config && cfgData.config.debug ? cfgData.config.debug.enabled : null;
+    if (fileEnabled != null && !!fileEnabled !== !!d.enabled) {
+      return meta('开关口径', '仅运行时生效 · 文件值为' + (fileEnabled ? '开' : '关') + '，重启后回退');
+    }
+    return meta('开关口径', '仅运行时生效 · 重启后回退到文件值');
+  }
+
   function renderPipe(d) {
+    lastDebug = d;
     $('debugPipeBody').innerHTML =
       meta('日志开关', d.enabled ? '开启' : '关闭') +
+      pipeScopeHint(d) +
       meta('活跃日志目录', d.active_request_dirs ?? 0) +
       meta('写队列积压', (d.queued_log_events ?? 0) + ' / ' + (d.queue_capacity ?? 0)) +
       meta('丢弃日志事件', d.dropped_log_events ?? 0) +
@@ -52,8 +87,66 @@ const System = (() => {
       const d = await res.json();
       cur.classList.toggle('on', !!d.enabled);
       cur.textContent = '请求日志: ' + (d.enabled ? '开' : '关');
+      if (lastDebug) { lastDebug.enabled = !!d.enabled; renderPipe(lastDebug); }
       toast('请求日志已' + (d.enabled ? '开启' : '关闭'), 'ok');
     } catch (e) { toast('切换失败：' + e, 'err'); }
+  }
+
+  // ---------- 生效配置 ----------
+  // 文件为事实源：这里展示最后一次加载的脱敏视图；改 config.yaml 后
+  // 点「重新加载」热应用，requires_restart 列出的字段需托管重启。
+  async function loadConfig() {
+    try {
+      cfgData = await api('/config');
+      renderConfig();
+      if (lastDebug) renderPipe(lastDebug);
+    } catch (e) {
+      $('cfgBody').innerHTML = '<div class="mini"><span class="v">配置端点不可用: ' + esc(String(e)) + '</span></div>';
+    }
+  }
+
+  function renderConfig() {
+    const d = cfgData || {};
+    $('cfgBanner').innerHTML = d.stale
+      ? '<div class="err-banner" style="margin-bottom:8px">config.yaml 在最后一次加载后被修改——点「重新加载」热应用；requires_restart 字段需托管重启生效</div>'
+      : '';
+    let html =
+      meta('文件', d.path || '-') +
+      meta('加载于', fmtTime(d.loaded_at)) +
+      meta('文件修改', fmtTime(d.file_mtime)) +
+      meta('文件状态', d.stale ? '已修改（待应用）' : '与文件一致');
+    const r = d.last_reload;
+    if (r) {
+      html += meta('上次重载', fmtTime(r.at)) +
+        meta('已应用', (r.applied || []).join(', ') || '无') +
+        meta('待重启', (r.requires_restart || []).join(', ') || '无');
+    }
+    $('cfgBody').innerHTML = html;
+  }
+
+  async function reloadConfig() {
+    const btn = $('cfgReload');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/panel/api/config/reload', { method: 'POST' });
+      if (res.status === 401) { location.href = '/panel'; return; }
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast('重载失败：' + (d.error || ('HTTP ' + res.status)), 'err'); return; }
+      const cold = d.requires_restart || [];
+      toast('已应用: ' + ((d.applied || []).join(', ') || '无变更') +
+        (cold.length ? ' · 待重启: ' + cold.join(', ') : ''), cold.length ? 'warn' : 'ok');
+      // 热字段（debug.enabled 等）可能刚变，连带刷新 stats 与配置视图。
+      loadStats();
+      loadConfig();
+    } catch (e) { toast('重载失败：' + e, 'err'); }
+    finally { btn.disabled = false; }
+  }
+
+  function toggleCfgView() {
+    const v = $('cfgView');
+    const show = v.style.display !== 'block';
+    v.style.display = show ? 'block' : 'none';
+    if (show) v.textContent = cfgData && cfgData.config ? JSON.stringify(cfgData.config, null, 2) : '(无配置数据)';
   }
 
   async function loadLog(offset) {
@@ -81,6 +174,8 @@ const System = (() => {
   }
 
   $('debugToggle').addEventListener('click', toggleDebug);
+  $('cfgReload').addEventListener('click', reloadConfig);
+  $('cfgViewBtn').addEventListener('click', toggleCfgView);
   $('procReload').addEventListener('click', () => loadLog(0));
   $('procLevel').addEventListener('change', renderLog);
   $('procFollow').addEventListener('click', e => {
@@ -88,8 +183,9 @@ const System = (() => {
     e.target.classList.toggle('on', procFollow);
   });
 
-  Tabs.register('system', () => { loadStats(); loadLog(0); });
+  Tabs.register('system', () => { loadStats(); loadConfig(); loadLog(0); });
   Polls.add('system', loadStats, 10000);
+  Polls.add('system', loadConfig, 60000);
   Polls.add('system', () => { if (procFollow) loadLog(procOffset); }, 5000);
   return {};
 })();

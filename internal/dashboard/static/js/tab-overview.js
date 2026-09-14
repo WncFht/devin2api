@@ -122,9 +122,21 @@ const Overview = (() => {
   }
 
   function renderAlerts() {
-    if (!statusData) return;
-    const d = statusData;
     let rows = '';
+    // 闸门闩态来自 stats（10s 轮询）——闩中意味着正在对客户端快败
+    // 429，是面板上最需要置顶的信号。
+    const g = statsData && statsData.gate;
+    if (g && g.latched) {
+      const until = g.limited_until ? fmtTime(g.limited_until) + '（' + fmtIn(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
+      rows += '<div class="err-banner">速率闸门闩中：上游限流冷却至 ' + esc(until) +
+        '，闩内请求本地快败 429（本次已累计 ' + (g.reject_latched_count || 0) + ' 条）</div>';
+    }
+    const d = statusData;
+    if (!d) { $('ovAlertPanel').style.display = rows ? '' : 'none'; $('ovAlertBody').innerHTML = rows; return; }
+    (d.alias_targets_absent || []).forEach(a => {
+      rows += '<div class="err-banner">别名目标缺席：' + esc(a) + ' — 上游目录无此 uid，经别名的请求会被 permission_denied（改 devin.aliases）</div>';
+    });
+    if (d.alias_check_error) rows += '<div class="err-banner">别名校验失败: ' + esc(d.alias_check_error) + '</div>';
     if (d.user_status_error) rows += '<div class="err-banner">账户用量拉取失败: ' + esc(d.user_status_error) + '</div>';
     if (d.capacity && d.capacity.has_capacity === false) {
       rows += '<div class="err-banner">无可用容量: ' + esc(d.capacity.message || '上游容量满') + '（活跃会话 ' + (d.capacity.active_sessions ?? '-') + '）</div>';
@@ -149,7 +161,7 @@ const Overview = (() => {
       statsData = await api('/stats');
       const v = statsData.version || '';
       if (v) $('versionTag').textContent = v;
-      renderKpis(); renderTrend(); renderHealth();
+      renderKpis(); renderTrend(); renderHealth(); renderAlerts();
     } catch (e) { /* 保留旧数据 */ }
   }
   async function loadUsage() {

@@ -40,6 +40,9 @@ async function api(path, opts) {
   loadingBar(1);
   try {
     const res = await fetch('/panel/api' + path, opts);
+    // 会话过期或服务重启（session 是内存表）时回登录页，
+    // 比每页各自弹「连接异常」更直接。
+    if (res.status === 401) { location.href = '/panel'; throw new Error('unauthorized'); }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     gwState(true);
     return res.json();

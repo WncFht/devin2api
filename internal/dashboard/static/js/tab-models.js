@@ -3,6 +3,7 @@
 
 const Models = (() => {
   let allModels = [];
+  let aliasMap = {}; // 上游 uid -> [客户端别名]，取自 /panel/api/config 的 devin.aliases
   const activeTags = new Set();
 
   function multDisplay(m) {
@@ -36,6 +37,7 @@ const Models = (() => {
     if (m.is_capacity_limited) b += '<span class="badge badge-cap">限容</span>';
     if (m.beta_warning) b += '<span class="badge badge-beta" title="' + esc(m.beta_warning) + '">警告</span>';
     if (m.disabled) b += '<span class="badge badge-off">禁用</span>';
+    if (aliasMap[m.uid]) b += '<span class="badge badge-sse" title="devin.aliases 中客户端别名 → 此 uid">别名 ' + esc(aliasMap[m.uid].join(', ')) + '</span>';
     return b;
   }
   function matchTags(m) {
@@ -114,6 +116,17 @@ const Models = (() => {
     tbody.innerHTML = html;
   }
 
+  async function loadAliases() {
+    try {
+      const d = await api('/config');
+      const al = (d && d.config && d.config.devin && d.config.devin.aliases) || {};
+      for (const name in al) {
+        const t = al[name];
+        (aliasMap[t] = aliasMap[t] || []).push(name);
+      }
+    } catch (e) { /* 配置端点不可用时别名徽标留空 */ }
+  }
+
   async function load() {
     if (allModels.length) return;
     try {
@@ -145,6 +158,6 @@ const Models = (() => {
     apply();
   });
 
-  Tabs.register('models', load);
+  Tabs.register('models', () => { loadAliases().then(load); });
   return {};
 })();

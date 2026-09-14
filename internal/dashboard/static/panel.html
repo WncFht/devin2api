@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Devin API - 管理面板</title>
 <link rel="stylesheet" href="/panel/static/panel.css?v=__VERSION__">
 <script src="/panel/static/echarts.min.js?v=__VERSION__"></script>
@@ -25,6 +26,7 @@
   <div class="tb-right">
     <span class="gw" title="面板 API 连通状态 · 每页仅在可见时轮询"><i class="gw-dot" id="gwDot"></i><span id="gwText">连接中</span></span>
     <span class="gw-port" id="gwPort"></span>
+    <a class="gw" href="/panel/api" target="_blank" title="面板 API 端点目录（JSON，面向程序化访问）" style="text-decoration:none"><span class="sub">API</span></a>
   </div>
 </header>
 
@@ -115,6 +117,14 @@
     <div class="page-head"><h2>系统</h2><span class="sub">进程指标 · 日志管道 · stderr</span></div>
     <div class="kpis" id="sysKpis"><div class="loading">加载中...</div></div>
     <div class="panel"><h3>日志管道 <span class="sub">请求调试日志自观测</span><span class="spacer"></span><button class="btn" id="debugToggle" style="display:none">日志开关</button></h3><div class="grid" id="debugPipeBody"><div class="loading">加载中...</div></div></div>
+    <div class="panel"><h3>速率闸门 <span class="sub">令牌桶限速 + 上游限流冷却闩 · 闩截止时刻落盘 gate-state.json</span></h3><div class="grid" id="gateBody"><div class="loading">加载中...</div></div></div>
+    <div class="panel"><h3>配置 <span class="sub">config.yaml 生效视图 · 凭据脱敏 · 改文件后热应用</span><span class="spacer"></span>
+      <button class="btn" id="cfgViewBtn">查看配置</button>
+      <button class="btn" id="cfgReload">重新加载</button></h3>
+      <div id="cfgBanner"></div>
+      <div class="grid" id="cfgBody"><div class="loading">加载中...</div></div>
+      <div class="file-view" id="cfgView" style="display:none;margin-top:8px"></div>
+    </div>
     <div class="panel">
       <h3>进程日志 <span class="sub">logs/stderr.log · 尾部 256KB</span><span class="spacer"></span>
         <button class="btn" id="procReload">刷新</button>
