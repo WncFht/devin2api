@@ -88,7 +88,11 @@ type App struct {
 	// 下游网关应立即换路重试，而不是把请求塞进一个要退出的实例。
 	draining atomic.Bool
 	// inflight 跟踪占用并发槽的请求与 WS 轮次，供优雅退出等待排空。
-	inflight sync.WaitGroup
+	// 不用 sync.WaitGroup：排空期 listener 保持开启，新请求仍会 Add——
+	// counter 归零与 waiter 唤醒之间存在调度窗口，窗口内 Add(1) 触发
+	// "sync: WaitGroup is reused before previous Wait has returned" panic，
+	// 会把正在排空的进程整段炸掉、掐死在途流。
+	inflight drainTracker
 }
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
@@ -295,27 +299,63 @@ func writeDrainingError(writer http.ResponseWriter) {
 	})
 }
 
-// BeginDrain 进入排空态：新请求快速 503，在途请求继续跑完。
-// listener 保持开启由调用方控制——http.Server.Shutdown 会先关 listener 再
-// 等在途连接，排空期整段变成 connection refused；这里改为排空结束才 Close。
-func (application *App) BeginDrain() { application.draining.Store(true) }
+// drainTracker 计数在途并发槽并给排空等待方一个完成信号。
+// 全部状态迁移在 mu 下进行：WaitGroup 版本里「counter 归零」与
+// 「waiter 真正返回」是两步，其间新来的 Add 即 panic；这里归零与
+// 唤醒是同一临界区内的原子动作，任何时序的 Add 都安全。
+type drainTracker struct {
+	mu      sync.Mutex
+	count   int
+	drained chan struct{} // 非 nil 表示有排空等待方；计数归零时关闭并置 nil
+}
 
-// Draining 报告是否处于排空态，供 healthz 透出。
-func (application *App) Draining() bool { return application.draining.Load() }
+// Add 占用一个并发槽。允许在排空等待进行中调用——等待方会在
+// 计数再次归零时才被唤醒，语义与「Add 先于 draining 检查」一致。
+func (tracker *drainTracker) Add() {
+	tracker.mu.Lock()
+	tracker.count++
+	tracker.mu.Unlock()
+}
 
-// WaitDrain 阻塞到在途并发槽清空或 ctx 超时；超时返回错误，调用方负责强制 Close。
-func (application *App) WaitDrain(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		application.inflight.Wait()
-		close(done)
-	}()
+// Done 释放一个并发槽；计数归零且有等待方时唤醒。
+func (tracker *drainTracker) Done() {
+	tracker.mu.Lock()
+	tracker.count--
+	if tracker.count == 0 && tracker.drained != nil {
+		close(tracker.drained)
+		tracker.drained = nil
+	}
+	tracker.mu.Unlock()
+}
+
+// Wait 阻塞到计数归零或 ctx 截止。
+func (tracker *drainTracker) Wait(ctx context.Context) error {
+	tracker.mu.Lock()
+	if tracker.count == 0 {
+		tracker.mu.Unlock()
+		return nil
+	}
+	if tracker.drained == nil {
+		tracker.drained = make(chan struct{})
+	}
+	done := tracker.drained
+	tracker.mu.Unlock()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// BeginDrain 进入排空态：新请求快速 503，在途请求继续跑完。
+// listener 保持开启由调用方控制——http.Server.Shutdown 会先关 listener 再
+// 等在途连接，排空期整段变成 connection refused；这里改为排空结束才 Close。
+func (application *App) BeginDrain() { application.draining.Store(true) }
+
+// WaitDrain 阻塞到在途并发槽清空或 ctx 超时；超时返回错误，调用方负责强制 Close。
+func (application *App) WaitDrain(ctx context.Context) error {
+	return application.inflight.Wait(ctx)
 }
 
 // noteReject 统一记录一次管线前拒绝：分原因计数、事件环与进程日志同源。
@@ -340,7 +380,7 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		// Add 先于 draining 检查：排空等待才能覆盖所有已经进入的请求，
 		// 被拒绝的请求瞬时 Done，不占排空时间。
-		application.inflight.Add(1)
+		application.inflight.Add()
 		defer application.inflight.Done()
 		if application.draining.Load() {
 			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
@@ -486,12 +526,10 @@ func (application *App) createCompletion(
 			// 字节超限按 PayloadTooLarge 报 413：下游网关按 4xx 归类为
 			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
-			completion.StatusCode = http.StatusRequestEntityTooLarge
-			writeLoggedError(writer, recorder, protocol, "http_read", completion.StatusCode, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_read", http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
-		completion.StatusCode = http.StatusBadRequest
-		writeLoggedError(writer, recorder, protocol, "http_read", completion.StatusCode, fmt.Errorf("read request: %w", err))
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_read", http.StatusBadRequest, fmt.Errorf("read request: %w", err))
 		return
 	}
 	if recorder != nil {
@@ -501,8 +539,7 @@ func (application *App) createCompletion(
 	}
 	messages, options, err := decoder(body)
 	if err != nil {
-		completion.StatusCode = http.StatusBadRequest
-		writeLoggedError(writer, recorder, protocol, "http_decode", completion.StatusCode, err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_decode", http.StatusBadRequest, err)
 		return
 	}
 	completion.Model = messages.Model
@@ -559,15 +596,13 @@ func (application *App) createCompletion(
 			recorder.WriteError("response_event", err)
 			return
 		}
-		completion.StatusCode = mapProviderErrorStatus(err)
-		writeLoggedError(writer, recorder, protocol, "response_event", completion.StatusCode, err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", mapProviderErrorStatus(err), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
 	body, err = protocol.EncodeFinal(message)
 	if err != nil {
-		completion.StatusCode = http.StatusInternalServerError
-		writeLoggedError(writer, recorder, protocol, "http_encode", completion.StatusCode, err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_encode", http.StatusInternalServerError, err)
 		return
 	}
 	if err := out.writeContent(body); err != nil {
@@ -670,7 +705,7 @@ func hashCredential(credential string) string {
 // 未启用调试日志（nil recorder）或异常路径时为空串。
 func debugRef(recorder *debuglog.Recorder) string {
 	dir := filepath.Base(recorder.DirectoryPath())
-	if dir == "." || dir == "/" {
+	if dir == "." {
 		return ""
 	}
 	return dir
@@ -698,7 +733,10 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 	}
 }
 
-func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) {
+// writeLoggedError 写出错误响应并返回实际下发的状态码——clientFixable
+// 的 ≥500 会压成 400，调用方应记返回值而非入参，否则索引口径「服务端
+// 错误」与客户端口径「请求错误」错配，按状态码归因会误伤。
+func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) int {
 	recorder.WriteError(stage, err)
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
 	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
@@ -738,6 +776,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	})
 	_, _ = writer.Write(body)
 	recorder.AppendJSONL("06-http-response.jsonl", "error", json.RawMessage(body))
+	return status
 }
 
 // noteRetryAfter 把上游限流文案里的 reset 秒数记进请求日志——无论它最终

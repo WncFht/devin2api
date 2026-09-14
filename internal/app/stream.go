@@ -176,8 +176,7 @@ func (application *App) streamCompletion(
 ) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
-		completion.StatusCode = http.StatusInternalServerError
-		writeLoggedError(writer, recorder, protocol, "http_stream", completion.StatusCode, errors.New("streaming response writer does not support flushing"))
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
 		return
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
@@ -203,8 +202,7 @@ func (application *App) streamCompletion(
 		}
 		status := mapProviderErrorStatus(firstErr)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
-			completion.StatusCode = status
-			writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
 			return
 		}
 		// OpenAI 流式面上的限流是唯一转流内事件的 pre-stream 失败：
@@ -248,8 +246,7 @@ func (application *App) streamCompletion(
 				firstEvent,
 			}
 		} else {
-			completion.StatusCode = status
-			writeLoggedError(writer, recorder, protocol, "provider_stream", status, errors.New(message))
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, errors.New(message))
 			return
 		}
 	}
@@ -273,8 +270,7 @@ func (application *App) streamCompletion(
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
-			completion.StatusCode = mapProviderErrorStatus(streamErr)
-			writeLoggedError(writer, recorder, protocol, "http_stream", completion.StatusCode, streamErr)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", mapProviderErrorStatus(streamErr), streamErr)
 		default:
 			recorder.WriteError("http_stream", streamErr)
 		}

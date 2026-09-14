@@ -446,7 +446,14 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 	if err := application.WaitDrain(drainCtx); err != nil {
 		slog.Warn("shutdown: drain timed out, closing remaining connections", "error", err)
 	}
-	return server.Close()
+	// reuseport 路径上面已直接关过底层 listener：Serve 的 defer 解除
+	// listener 追踪与这里的 Close 存在竞态，落后时对同一 fd 做真实
+	// 二次 close → ErrClosed 冒泡成 serve HTTP failed + exit(1)，
+	// 干净的重启概率性留假错误日志。吞掉这一种，其余照常上报。
+	if err := server.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // listenConfigured 绑定配置的监听地址。KeepAlive 3 分钟与

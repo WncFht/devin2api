@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -764,4 +765,58 @@ func TestConcurrencyOverflowReturns429(t *testing.T) {
 	}
 	close(blocking.release)
 	<-held
+}
+
+// TestDrainTrackerLateAddDuringWait 复现原 WaitGroup 实现的 panic 窗口：
+// 排空等待方已武装、计数归零唤醒之间，排空期仍开着的 listener 放进来的
+// 新请求会迟到 Add——tracker 必须容忍这个时序而不是 panic。
+func TestDrainTrackerLateAddDuringWait(t *testing.T) {
+	var tracker drainTracker
+	tracker.Add()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() { waited <- tracker.Wait(ctx) }()
+
+	// 等等待方武装 drained（确定时序，不依赖调度延迟）。
+	for i := 0; i < 1000; i++ {
+		tracker.mu.Lock()
+		armed := tracker.drained != nil
+		tracker.mu.Unlock()
+		if armed {
+			break
+		}
+		runtime.Gosched()
+	}
+	tracker.mu.Lock()
+	armed := tracker.drained != nil
+	tracker.mu.Unlock()
+	if !armed {
+		t.Fatal("waiter did not arm drained channel")
+	}
+
+	tracker.Done() // 计数归零 → 等待方被唤醒
+	tracker.Add()  // 唤醒后、Wait 返回前的迟到 Add：WaitGroup 在此窗口 panic
+	tracker.Done()
+
+	if err := <-waited; err != nil {
+		t.Fatalf("Wait = %v, want nil", err)
+	}
+	// 计数再次归零后 Wait 应立即返回。
+	if err := tracker.Wait(ctx); err != nil {
+		t.Fatalf("Wait after drain = %v, want nil", err)
+	}
+}
+
+// TestDrainTrackerWaitTimeout 验证 ctx 截止路径返回错误而不是泄漏等待。
+func TestDrainTrackerWaitTimeout(t *testing.T) {
+	var tracker drainTracker
+	tracker.Add()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := tracker.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait = %v, want DeadlineExceeded", err)
+	}
+	tracker.Done()
 }

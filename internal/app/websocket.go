@@ -525,24 +525,28 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		}
 
 		// inflight.Add 先于 draining 检查：排空等待覆盖所有已开始的轮次。
-		application.inflight.Add(1)
+		application.inflight.Add()
 		// 排空期拒新轮次并断开：连接在排空结束时注定被 Close，
 		// 提前断开让客户端尽早重连到即将接管的新实例。
 		if application.draining.Load() {
-			application.inflight.Done()
 			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
+			// 事件先于 Done 发出：Done 放行 WaitDrain → 进程退出，
+			// 颠倒顺序客户端多半只看到连接断掉而收不到通知。
 			if err := writeWSErrorEvent(conn, http.StatusServiceUnavailable, "server_error", "server_draining", "", "server is draining for restart; resend the request"); err != nil {
 				slog.Debug("websocket drain notice failed", "error", obs.Diagnostic(err))
 			}
+			application.inflight.Done()
 			return
 		}
 		// 并发槽按轮次获取：连接的空闲期不烧额度，溢出回 429 事件不断连。
 		select {
 		case application.concurrency <- struct{}{}:
 		default:
-			application.inflight.Done()
 			application.noteReject(obs.RejectConcurrencyLimit, request, http.StatusTooManyRequests)
-			if err := writeWSErrorEvent(conn, http.StatusTooManyRequests, "rate_limit_error", "rate_limit", "", "server is busy, please try again later"); err != nil {
+			// 同上：事件先落地再释放并发槽，排空不会抢在通知前关进程。
+			err := writeWSErrorEvent(conn, http.StatusTooManyRequests, "rate_limit_error", "rate_limit", "", "server is busy, please try again later")
+			application.inflight.Done()
+			if err != nil {
 				return
 			}
 			continue
@@ -613,6 +617,9 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	for _, name := range []string{
 		"Authorization", "X-Api-Key", "X-Session-Id", "User-Agent",
 		"Session-Id", "Session_id", "Thread-Id", "X-Codex-Turn-Metadata",
+		// clientRequestID（app.go:638）与请求投影都读它，不透传则
+		// WS 轮次的调试目录无法按客户端 ID 反查。
+		"X-Client-Request-Id",
 	} {
 		if value := upgradeRequest.Header.Get(name); value != "" {
 			innerRequest.Header.Set(name, value)
