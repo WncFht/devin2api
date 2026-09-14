@@ -2,6 +2,8 @@
 // GetChatMessage，按场景在 envelope 写到一半时收尾，让客户端读帧器得到
 // 「incomplete envelope: unexpected EOF」——与线上 TCP 断流在读帧视角同构。
 // 也可模拟静默收尾、上游错误尾帧、挂死、坏帧，用于验证重试链路与错误分层。
+// stream 场景提供正常全流（可配 delta 数/大小/间隔/TTFT），
+// 作为 perf-snapshot 的确定性压测后端。
 package main
 
 import (
@@ -10,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -24,8 +27,12 @@ var requestCount atomic.Int64
 func main() {
 	listen := flag.String("listen", "127.0.0.1:48090", "监听地址")
 	scenario := flag.String("scenario", "precontent",
-		"precontent|midcontent|recover|cleaneof|cleaneof-content|bare-end|endstream-error|badframe|badflags|end-hang|heartbeat|stall")
+		"precontent|midcontent|recover|cleaneof|cleaneof-content|bare-end|endstream-error|badframe|badflags|end-hang|heartbeat|stall|stream")
 	recoverAfter := flag.Int64("recover-after", 1, "recover 场景下前 N 次请求截断，之后返回完整流")
+	deltas := flag.Int("deltas", 200, "stream 场景的 delta 帧数")
+	deltaBytes := flag.Int("delta-bytes", 32, "stream 场景每帧 delta 字节数")
+	interval := flag.Duration("interval", 0, "stream 场景帧间隔（0 = 连续吐帧）")
+	ttfb := flag.Duration("ttfb", 0, "stream 场景首帧前延迟（模拟上游思考 TTFT）")
 	flag.Parse()
 
 	http.HandleFunc("/exa.api_server_pb.ApiServerService/GetChatMessage", func(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +111,36 @@ func main() {
 					f.Flush()
 				}
 				time.Sleep(3 * time.Second)
+			}
+			return
+		case "stream":
+			// 正常全流：meta → 可选 TTFT 静默 → N 个 delta（逐帧 flush，
+			// 真实驱动代理的逐帧投影/编码/下发路径）→ stop → endStream。
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = w.Write(frame(metaFrame(), jsonWire))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if *ttfb > 0 {
+				time.Sleep(*ttfb)
+			}
+			// 帧内容固定：只 marshal 一次，桩侧不引入逐帧序列化成本，
+			// 压测瓶颈如实落在被测代理的投影/编码路径上。
+			deltaFrame := frame(deltaText(strings.Repeat("x", *deltaBytes)), jsonWire)
+			for i := 0; i < *deltas; i++ {
+				_, _ = w.Write(deltaFrame)
+				if flusher != nil {
+					flusher.Flush()
+				}
+				if *interval > 0 {
+					time.Sleep(*interval)
+				}
+			}
+			_, _ = w.Write(join(frame(stopFrame(), jsonWire), endStream("{}")))
+			if flusher != nil {
+				flusher.Flush()
 			}
 			return
 		case "recover":
