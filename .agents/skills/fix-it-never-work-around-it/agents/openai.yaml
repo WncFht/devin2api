@@ -1,0 +1,3 @@
+interface:
+  display_name: "Fix It, Never Work Around It"
+  short_description: "Root-cause discipline for unexpected failures"

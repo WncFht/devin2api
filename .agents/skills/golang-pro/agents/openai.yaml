@@ -1,0 +1,3 @@
+interface:
+  display_name: "Golang Pro"
+  short_description: "Idiomatic Go, concurrency and pprof expertise"
