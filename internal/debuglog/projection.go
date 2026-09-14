@@ -85,6 +85,8 @@ func ResponseEventProjection(event llm.ResponseEvent) map[string]any {
 	return result
 }
 
+// messageProjection 把单条中间模型消息投影为日志 JSON；助手消息复用
+// assistantProjection 的全字段，其余类型取各自的可排障字段。
 func messageProjection(message llm.Message) map[string]any {
 	result := map[string]any{"role": message.Role()}
 	switch message := message.(type) {
@@ -99,15 +101,14 @@ func messageProjection(message llm.Message) map[string]any {
 		result["tool_call_id"] = message.ToolCallID
 		result["tool_name"] = message.ToolName
 		result["content"] = contentListProjection(message.Content)
-		result["details"] = message.Details
-		result["usage"] = message.Usage
-		result["added_tool_names"] = message.AddedToolNames
 		result["is_error"] = message.IsError
 		result["timestamp_ms"] = message.TimestampMS
 	}
 	return result
 }
 
+// assistantProjection 把助手消息投影为日志 JSON；同一投影同时服务
+// 02 的消息列表与 05 的事件内 message 字段，保证两处口径一致。
 func assistantProjection(message llm.AssistantMessage) map[string]any {
 	return map[string]any{
 		"role":                llm.MessageRoleAssistant,
@@ -128,6 +129,7 @@ func assistantProjection(message llm.AssistantMessage) map[string]any {
 	}
 }
 
+// contentListProjection 把内容块列表逐块投影为日志 JSON。
 func contentListProjection(content []llm.Content) []any {
 	result := make([]any, 0, len(content))
 	for _, block := range content {
@@ -136,10 +138,12 @@ func contentListProjection(content []llm.Content) []any {
 	return result
 }
 
+// contentProjection 把单个内容块投影为日志 JSON，type 字段取块自报
+// 的类型标识；未知块记 {"type":"unknown"} 而不是丢弃，日志如实反映形状。
 func contentProjection(content llm.Content) map[string]any {
 	switch content := content.(type) {
 	case llm.TextContent:
-		return map[string]any{"type": content.ContentType(), "text": content.Text, "text_signature": content.TextSignature}
+		return map[string]any{"type": content.ContentType(), "text": content.Text}
 	case llm.ThinkingContent:
 		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "thinking_signature": content.ThinkingSignature, "signature_type": content.SignatureType, "redacted": content.Redacted}
 	case llm.ImageContent:
@@ -148,9 +152,9 @@ func contentProjection(content llm.Content) map[string]any {
 		// Custom 调用的 Arguments 是供应商原文而非 JSON，直接 marshal
 		// RawMessage 会产生坏 JSON——按字符串落盘并标 custom。
 		if content.Custom {
-			return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": string(content.Arguments), "custom": true, "thought_signature": content.ThoughtSignature}
+			return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": string(content.Arguments), "custom": true}
 		}
-		return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": content.Arguments, "thought_signature": content.ThoughtSignature}
+		return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": content.Arguments}
 	default:
 		return map[string]any{"type": "unknown"}
 	}
