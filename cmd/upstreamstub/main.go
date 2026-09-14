@@ -114,16 +114,17 @@ func main() {
 		case "heartbeat":
 			// 周期无事件帧续命：元数据帧每 3s 一帧永不终止——看门狗若
 			// 按「任意帧」判活将永不判死（ccLoad #119 纯 keepalive 挂死类）。
+			// 断连后写失败被忽略、循环空转到进程退出：stub 的生命周期
+			// 就是拉起它的测试进程，不值得为常驻泄漏加复杂度。
 			w.Header().Set("Content-Type", contentType)
 			w.WriteHeader(http.StatusOK)
-			for i := 0; i < 100; i++ {
+			for {
 				_, _ = w.Write(frame(metaFrame(), jsonWire))
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
 				time.Sleep(3 * time.Second)
 			}
-			return
 		case "stream":
 			// 正常全流：meta → 可选 TTFT 静默 → N 个 delta（逐帧 flush，
 			// 真实驱动代理的逐帧投影/编码/下发路径）→ stop → endStream。
