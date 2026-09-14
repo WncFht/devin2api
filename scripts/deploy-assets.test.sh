@@ -59,6 +59,17 @@ check "优雅停止窗口" has scripts/deploy-linux.sh 'TimeoutStopSec='
 check "systemctl --user" has scripts/deploy-linux.sh 'systemctl --user'
 check "日志落运行目录" has scripts/deploy-linux.sh 'StandardOutput=append:'
 
+echo "== deploy-windows.ps1（Windows 裸进程）=="
+check "ps1 存在" test -f scripts/deploy-windows.ps1
+check "release zip 资产名" has scripts/deploy-windows.ps1 "devin-2api-windows-amd64.zip"
+check "sha256 校验" has scripts/deploy-windows.ps1 "Get-FileHash"
+check "healthz 轮询" has scripts/deploy-windows.ps1 "healthz"
+check "上游冒烟 /v1/models" has scripts/deploy-windows.ps1 "/v1/models"
+check "新控制台窗口启动" has scripts/deploy-windows.ps1 "Start-Process"
+check "token 自动发现" has scripts/deploy-windows.ps1 "credentials.toml"
+# UTF-8 BOM 是 PS5.1 正确解析中文的前提（无 BOM 按 ANSI 解码会乱码甚至截断字符串）。
+check "UTF-8 BOM" bash -c "head -c3 scripts/deploy-windows.ps1 | od -An -tx1 | tr -d ' ' | grep -qx efbbbf"
+
 echo "== release.sh（发版门禁）=="
 check "HEAD 必须已推送" has scripts/release.sh 'origin/main'
 check "查 CI workflow run" has scripts/release.sh 'workflow_runs'

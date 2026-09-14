@@ -74,11 +74,11 @@ docker run --rm -p 8080:8080 \
 
 以服务方式运行（可选）：
 
-| 平台    | 托管方式                                 | 运行目录（二进制 + 配置 + 日志）           | 安装 / 升级               |
-| ------- | ---------------------------------------- | ------------------------------------------ | ------------------------- |
-| macOS   | launchd 代理                             | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`       |
-| Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
-| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe 同目录                                 | 下载 zip，运行 exe        |
+| 平台    | 托管方式                                 | 运行目录（二进制 + 配置 + 日志）           | 安装 / 升级                  |
+| ------- | ---------------------------------------- | ------------------------------------------ | ---------------------------- |
+| macOS   | launchd 代理                             | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`          |
+| Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh`    |
+| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | `%LOCALAPPDATA%\Programs\devin-2api`       | `scripts/deploy-windows.ps1` |
 
 两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进运行目录、在仓库内维护指向运行目录日志的 `logs` 符号链接，所以先 clone 再跑：
 

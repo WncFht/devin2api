@@ -2,11 +2,11 @@
 
 三平台拓扑：
 
-| 平台    | 托管方式                                   | 运行目录（二进制 + config.yaml + logs/）      | 服务定义位置                                        | 部署命令                  |
-| ------- | ------------------------------------------ | --------------------------------------------- | --------------------------------------------------- | ------------------------- |
-| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/Library/Application Support/devin-2api`    | `~/Library/LaunchAgents/com.$USER.devin-2api.plist` | `scripts/deploy.sh`       |
-| Linux   | systemd `--user` unit `devin-2api.service` | `${XDG_DATA_HOME:-~/.local/share}/devin-2api` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`       | `scripts/deploy-linux.sh` |
-| Windows | 无服务化，裸 exe 前台跑                    | 任意目录（exe 与 config.yaml 同目录）         | —                                                   | 手动复制 release exe      |
+| 平台    | 托管方式                                   | 运行目录（二进制 + config.yaml + logs/）      | 服务定义位置                                        | 部署命令                     |
+| ------- | ------------------------------------------ | --------------------------------------------- | --------------------------------------------------- | ---------------------------- |
+| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/Library/Application Support/devin-2api`    | `~/Library/LaunchAgents/com.$USER.devin-2api.plist` | `scripts/deploy.sh`          |
+| Linux   | systemd `--user` unit `devin-2api.service` | `${XDG_DATA_HOME:-~/.local/share}/devin-2api` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`       | `scripts/deploy-linux.sh`    |
+| Windows | 无服务化，裸 exe 前台跑                    | `%LOCALAPPDATA%\Programs\devin-2api`          | —                                                   | `scripts/deploy-windows.ps1` |
 
 三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
@@ -137,7 +137,9 @@ tail -f logs/stderr.log                     # 进程日志
 
 ## Windows（裸进程）
 
-不做服务化：`devin-2api.exe` 与 `config.yaml` 放同一目录，前台启动。Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）。`logs/` 落在 config.yaml 同目录。release zip 内含 exe + `config.example.yaml` + LICENSE。
+不做服务化：`devin-2api.exe` 与 `config.yaml` 放同一目录，前台启动。Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）；关窗、`taskkill /F`、`Stop-Process` 都是强杀。`logs/` 落在 config.yaml 同目录。release zip 内含 exe + `config.example.yaml` + LICENSE。
+
+`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `auth.api_key`/`dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
 
 ## 面板与 agent 访问
 

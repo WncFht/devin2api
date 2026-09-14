@@ -74,11 +74,11 @@ docker run --rm -p 8080:8080 \
 
 Run as a service (optional):
 
-| Platform | Supervisor                               | Runtime dir (binary + config + logs)       | Install / upgrade         |
-| -------- | ---------------------------------------- | ------------------------------------------ | ------------------------- |
-| macOS    | launchd agent                            | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`       |
-| Linux    | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
-| Windows  | none — console, or NSSM / Task Scheduler | alongside the exe                          | download zip, run exe     |
+| Platform | Supervisor                               | Runtime dir (binary + config + logs)       | Install / upgrade            |
+| -------- | ---------------------------------------- | ------------------------------------------ | ---------------------------- |
+| macOS    | launchd agent                            | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`          |
+| Linux    | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh`    |
+| Windows  | none — console, or NSSM / Task Scheduler | `%LOCALAPPDATA%\Programs\devin-2api`       | `scripts/deploy-windows.ps1` |
 
 Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works. They treat the repo as home — syncing `config.yaml` into the runtime dir and keeping a `logs` symlink inside the repo — so clone first, then run:
 
