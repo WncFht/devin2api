@@ -34,13 +34,18 @@ type usageTotals struct {
 	Disconnected int64 `json:"disconnected"` // 含 aborted
 	// RateLimited 是上游返回 429 的次数。本地并发拒绝在 recorder 创建前
 	// 返回、不进 index，故此处纯为上游限流语义。
-	RateLimited  int64 `json:"rate_limited"`
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	CacheRead    int64 `json:"cache_read_tokens"`
-	CacheWrite   int64 `json:"cache_write_tokens"`
-	Reasoning    int64 `json:"reasoning_tokens"`
-	TotalTokens  int64 `json:"total_tokens"`
+	RateLimited int64 `json:"rate_limited"`
+	// ClientFaults/UpstreamFaults 是 errorOwner 归因计数：调用方责任
+	//（断连/中断/请求体阶段失败）与服务端责任（上游错误与代理自身
+	// 失败）分列——SLA 口径只把后者算作失分。
+	ClientFaults   int64 `json:"client_faults"`
+	UpstreamFaults int64 `json:"upstream_faults"`
+	InputTokens    int64 `json:"input_tokens"`
+	OutputTokens   int64 `json:"output_tokens"`
+	CacheRead      int64 `json:"cache_read_tokens"`
+	CacheWrite     int64 `json:"cache_write_tokens"`
+	Reasoning      int64 `json:"reasoning_tokens"`
+	TotalTokens    int64 `json:"total_tokens"`
 	// GenMS/GenOut 是 decode 速率的分母分子：只累计「可信流式」条目
 	// （见 decodeWindow），前端用 gen_tokens/gen_ms 求 tok/s。
 	GenMS  int64 `json:"gen_ms,omitempty"`
@@ -66,6 +71,35 @@ func decodeWindow(e IndexEntry) (int64, int64, bool) {
 	return e.OutputTokens, gen, true
 }
 
+// errorOwner 把一条索引记录按失败责任归因（对齐 sub2api 的 error_owner +
+// is_business_limited 双标记，压缩成单维三值）：
+//   - "client"：客户端断连/面板中断，或请求体读取与解码阶段的失败——
+//     还没碰到上游，责任在调用方；
+//   - "business_limited"：429（本地闩快败或上游限流）——配额动作不是
+//     服务质量故障，SLA 分母剔除；
+//   - "upstream"：其余失败（上游 5xx/语义错误/transport 断裂/代理自身
+//     编码失败）——SLA 口径里唯一算失分的类别；
+//   - ""：非失败请求。
+//
+// 判定只用索引字段（result/status/error_stage），回放旧索引行同样可归类。
+// 已知盲区：走 200+流内错误事件下发的上游限流（OpenAI 系 stream）状态码
+// 记 200 而非 429，会归入 upstream——这批限流没有结构化标记可认。
+func errorOwner(e IndexEntry) string {
+	if e.StatusCode == 429 {
+		return "business_limited"
+	}
+	if e.Result == "disconnected" || e.Result == "aborted" {
+		return "client"
+	}
+	if e.StatusCode < 400 && e.Result != "failed" {
+		return ""
+	}
+	if e.ErrorStage == "http_read" || e.ErrorStage == "http_decode" {
+		return "client"
+	}
+	return "upstream"
+}
+
 // add 把一条索引行计入累计。
 func (t *usageTotals) add(e IndexEntry) {
 	t.Requests++
@@ -74,6 +108,12 @@ func (t *usageTotals) add(e IndexEntry) {
 		t.Errors++
 	case e.Result == "disconnected" || e.Result == "aborted":
 		t.Disconnected++
+	}
+	switch errorOwner(e) {
+	case "client":
+		t.ClientFaults++
+	case "upstream":
+		t.UpstreamFaults++
 	}
 	if e.StatusCode == 429 {
 		t.RateLimited++
@@ -99,22 +139,24 @@ const usageMinSampleCap = 256
 // 计数字段与 usageTotals 对齐：面板按时间范围选择器截一段桶求和，
 // 即可得到该窗口的完整卡片数据（含断连/缓存写/推理 token）。
 type usageMinBucket struct {
-	at           int64 // 桶起点 unix 秒（600s 对齐）
-	requests     int64
-	errors       int64
-	disconnected int64
-	rateLimited  int64 // status_code==429
-	input        int64
-	output       int64
-	cacheRead    int64
-	cacheWrite   int64
-	reasoning    int64
-	genMS        int64   // 可信流式条目的生成毫秒累计（见 decodeWindow）
-	genOut       int64   // 对应条目的输出 token 累计（均速分子）
-	durs         []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
-	durHead      int
-	ttfbs        []int64 // first_upstream_ms 样本
-	ttfbHead     int
+	at             int64 // 桶起点 unix 秒（600s 对齐）
+	requests       int64
+	errors         int64
+	disconnected   int64
+	rateLimited    int64 // status_code==429
+	clientFaults   int64 // errorOwner==client
+	upstreamFaults int64 // errorOwner==upstream
+	input          int64
+	output         int64
+	cacheRead      int64
+	cacheWrite     int64
+	reasoning      int64
+	genMS          int64   // 可信流式条目的生成毫秒累计（见 decodeWindow）
+	genOut         int64   // 对应条目的输出 token 累计（均速分子）
+	durs           []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
+	durHead        int
+	ttfbs          []int64 // first_upstream_ms 样本
+	ttfbHead       int
 }
 
 // pushSample 向容量受限的样本切片追加；满后原地覆盖最旧值。
@@ -129,17 +171,19 @@ func pushSample(samples *[]int64, head *int, v int64) {
 
 // usageMinPoint 是输出给面板的 10 分钟粒度数据点。
 type usageMinPoint struct {
-	At           int64 `json:"at"` // 桶起点 unix 秒
-	Requests     int64 `json:"requests"`
-	Errors       int64 `json:"errors"`
-	Disconnected int64 `json:"disconnected"`
-	RateLimited  int64 `json:"rate_limited"`
-	Input        int64 `json:"input_tokens"`
-	Output       int64 `json:"output_tokens"`
-	AvgDur       int64 `json:"avg_duration_ms"`
-	DurP95       int64 `json:"duration_p95_ms"`
-	AvgTTFB      int64 `json:"avg_ttfb_ms"`
-	TTFBP95      int64 `json:"ttfb_p95_ms"`
+	At             int64 `json:"at"` // 桶起点 unix 秒
+	Requests       int64 `json:"requests"`
+	Errors         int64 `json:"errors"`
+	Disconnected   int64 `json:"disconnected"`
+	RateLimited    int64 `json:"rate_limited"`
+	ClientFaults   int64 `json:"client_faults"`
+	UpstreamFaults int64 `json:"upstream_faults"`
+	Input          int64 `json:"input_tokens"`
+	Output         int64 `json:"output_tokens"`
+	AvgDur         int64 `json:"avg_duration_ms"`
+	DurP95         int64 `json:"duration_p95_ms"`
+	AvgTTFB        int64 `json:"avg_ttfb_ms"`
+	TTFBP95        int64 `json:"ttfb_p95_ms"`
 	// CacheRead/CacheWrite/Reasoning/GenMS/GenOut 供前端按任意时间范围
 	// 求和，再派生缓存命中率与 decode 均速。
 	CacheRead  int64 `json:"cache_read_tokens"`
@@ -151,17 +195,19 @@ type usageMinPoint struct {
 
 // dimensionAgg 是按模型或 key 哈希聚合的行。
 type dimensionAgg struct {
-	Name         string `json:"name"`
-	Requests     int64  `json:"requests"`
-	Errors       int64  `json:"errors"`
-	Disconnected int64  `json:"disconnected"`
-	RateLimited  int64  `json:"rate_limited"`
-	Input        int64  `json:"input_tokens"`
-	Output       int64  `json:"output_tokens"`
-	CacheRead    int64  `json:"cache_read_tokens"`
-	CacheWrite   int64  `json:"cache_write_tokens"`
-	Reasoning    int64  `json:"reasoning_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
+	Name           string `json:"name"`
+	Requests       int64  `json:"requests"`
+	Errors         int64  `json:"errors"`
+	Disconnected   int64  `json:"disconnected"`
+	RateLimited    int64  `json:"rate_limited"`
+	ClientFaults   int64  `json:"client_faults"`   // errorOwner==client
+	UpstreamFaults int64  `json:"upstream_faults"` // errorOwner==upstream
+	Input          int64  `json:"input_tokens"`
+	Output         int64  `json:"output_tokens"`
+	CacheRead      int64  `json:"cache_read_tokens"`
+	CacheWrite     int64  `json:"cache_write_tokens"`
+	Reasoning      int64  `json:"reasoning_tokens"`
+	TotalTokens    int64  `json:"total_tokens"`
 	// GenMS/GenOut 是可信流式条目的生成毫秒/输出 token 累计（见
 	// decodeWindow），供前端算 decode 均速。
 	GenMS       int64   `json:"gen_ms,omitempty"`
@@ -175,12 +221,30 @@ type dimensionAgg struct {
 	AvgDuration float64 `json:"avg_duration_ms"`
 	AvgTTFB     float64 `json:"avg_ttfb_ms"`
 	SuccessRate float64 `json:"success_rate"`
+	// SLASuccessRate 是服务端口径成功率：分母剔除客户端责任与 429
+	// 限流条目，剩余请求中 upstream 失分占比取反——回答「服务本身
+	// 可靠吗」而不是「客户端有没有正确使用」。
+	SLASuccessRate float64 `json:"sla_success_rate"`
+	// InTok/OutTok 分位数描述该模型的请求体量分布：计费与上下文窗口
+	// 占用都跟长度强相关，均值会掩盖长尾（见 dimensionSampleCapacity）。
+	InTokP50  int64 `json:"input_p50,omitempty"`
+	InTokP95  int64 `json:"input_p95,omitempty"`
+	OutTokP50 int64 `json:"output_p50,omitempty"`
+	OutTokP95 int64 `json:"output_p95,omitempty"`
+	// inTokSamples/outTokSamples 是 token 数蓄水池（最近 N 条），
+	// 序列化维度行时经 stats() 折叠成上面的分位数字段。
+	inTokSamples  *sampleRing `json:"-"`
+	outTokSamples *sampleRing `json:"-"`
 }
+
+// dimensionSampleCapacity 是单维度行 token 样本蓄水池容量。
+const dimensionSampleCapacity = 2048
 
 // latencyStats 是蓄水池算出的延迟分布。
 type latencyStats struct {
 	Samples int64 `json:"samples"`
 	P50     int64 `json:"p50"`
+	P90     int64 `json:"p90"`
 	P95     int64 `json:"p95"`
 	P99     int64 `json:"p99"`
 	Avg     int64 `json:"avg"`
@@ -266,6 +330,7 @@ func (r *sampleRing) stats() latencyStats {
 	return latencyStats{
 		Samples: int64(r.size),
 		P50:     pick(0.50),
+		P90:     pick(0.90),
 		P95:     pick(0.95),
 		P99:     pick(0.99),
 		Avg:     sum / int64(len(sorted)),
@@ -345,6 +410,12 @@ func (a *usageAggregator) add(e IndexEntry) {
 	if e.StatusCode == 429 {
 		a.mins[idx].rateLimited++
 	}
+	switch errorOwner(e) {
+	case "client":
+		a.mins[idx].clientFaults++
+	case "upstream":
+		a.mins[idx].upstreamFaults++
+	}
 	a.mins[idx].input += e.InputTokens
 	a.mins[idx].output += e.OutputTokens
 	a.mins[idx].cacheRead += e.CacheReadTokens
@@ -371,7 +442,11 @@ func (a *usageAggregator) add(e IndexEntry) {
 	if model != "" {
 		agg := a.perModel[model]
 		if agg == nil {
-			agg = &dimensionAgg{Name: model}
+			agg = &dimensionAgg{
+				Name:          model,
+				inTokSamples:  newSampleRing(dimensionSampleCapacity),
+				outTokSamples: newSampleRing(dimensionSampleCapacity),
+			}
 			a.perModel[model] = agg
 		}
 		agg.addEntry(e)
@@ -443,6 +518,12 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	if e.StatusCode == 429 {
 		d.RateLimited++
 	}
+	switch errorOwner(e) {
+	case "client":
+		d.ClientFaults++
+	case "upstream":
+		d.UpstreamFaults++
+	}
 	d.Input += e.InputTokens
 	d.Output += e.OutputTokens
 	d.CacheRead += e.CacheReadTokens
@@ -453,6 +534,12 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	if e.FirstUpstreamMS != nil {
 		d.TTFBSamples++
 		d.SumTTFB += *e.FirstUpstreamMS
+	}
+	if d.inTokSamples != nil {
+		d.inTokSamples.push(e.InputTokens)
+	}
+	if d.outTokSamples != nil && e.OutputTokens > 0 {
+		d.outTokSamples.push(e.OutputTokens)
 	}
 	if out, gen, ok := decodeWindow(e); ok {
 		d.GenMS += gen
@@ -473,6 +560,17 @@ func (d *dimensionAgg) finish() {
 	}
 	if total := d.Requests; total > 0 {
 		d.SuccessRate = float64(total-d.Errors-d.Disconnected) / float64(total)
+	}
+	// SLA 口径：分母只留「服务端承诺内」的请求——客户端责任与限流
+	// 条目整体剔除，upstream 失分占比取反。
+	if slable := d.Requests - d.ClientFaults - d.RateLimited; slable > 0 {
+		d.SLASuccessRate = float64(slable-d.UpstreamFaults) / float64(slable)
+	}
+	if st := d.inTokSamples.stats(); st.Samples > 0 {
+		d.InTokP50, d.InTokP95 = st.P50, st.P95
+	}
+	if st := d.outTokSamples.stats(); st.Samples > 0 {
+		d.OutTokP50, d.OutTokP95 = st.P50, st.P95
 	}
 }
 
@@ -537,6 +635,8 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 			point.Errors = bucket.errors
 			point.Disconnected = bucket.disconnected
 			point.RateLimited = bucket.rateLimited
+			point.ClientFaults = bucket.clientFaults
+			point.UpstreamFaults = bucket.upstreamFaults
 			point.Input = bucket.input
 			point.Output = bucket.output
 			point.CacheRead = bucket.cacheRead

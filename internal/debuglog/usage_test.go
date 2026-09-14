@@ -216,12 +216,119 @@ func TestRequestFilters(t *testing.T) {
 	if got := manager.ListRequests(10, RequestFilter{Since: time.Now().Add(time.Hour)}); len(got.Entries) != 0 {
 		t.Fatalf("since future = %+v", got.Entries)
 	}
+	// until 把列表钉在历史窗口内：过去的上界一条不留，未来的上界全保留。
+	if got := manager.ListRequests(10, RequestFilter{Until: time.Now().Add(-time.Hour)}); len(got.Entries) != 0 {
+		t.Fatalf("until past = %+v", got.Entries)
+	}
+	if got := manager.ListRequests(10, RequestFilter{Until: time.Now().Add(time.Hour)}); len(got.Entries) != 3 {
+		t.Fatalf("until future = %+v", got.Entries)
+	}
 	// limit 用尽时应提示窗口内仍有历史。
 	if got := manager.ListRequests(1, RequestFilter{}); len(got.Entries) != 1 || !got.HasMore {
 		t.Fatalf("limit=1 = %+v has_more=%v", got.Entries, got.HasMore)
 	}
 	if got := manager.ListRequests(10, RequestFilter{}); got.HasMore {
 		t.Fatal("full scan should not report has_more")
+	}
+}
+
+// TestErrorOwnerAndSLA 验证失败责任归类与 SLA 口径：客户端责任（断连、
+// 请求体阶段失败）与 429 限流不进 SLA 分母，只有服务端失分扣分。
+func TestErrorOwnerAndSLA(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		result string
+		stage  string
+		want   string
+	}{
+		{200, "completed", "", ""},
+		{429, "failed", "devin_connect", "business_limited"},
+		{429, "failed", "rate_gate", "business_limited"},
+		{200, "disconnected", "client_disconnected", "client"},
+		{500, "aborted", "", "client"},
+		{400, "failed", "http_decode", "client"},
+		{413, "failed", "http_read", "client"},
+		{500, "failed", "provider_stream", "upstream"},
+		{502, "failed", "devin_transport", "upstream"},
+		// 200+流内错误事件下发的失败：状态 200 但 result=failed，归服务端。
+		{200, "failed", "response_event", "upstream"},
+		// 上游返回的 4xx（非请求体阶段）同样记服务端失分。
+		{404, "failed", "devin_connect", "upstream"},
+	} {
+		if got := errorOwner(IndexEntry{StatusCode: tc.status, Result: tc.result, ErrorStage: tc.stage}); got != tc.want {
+			t.Fatalf("errorOwner(%d/%s/%s) = %q, want %q", tc.status, tc.result, tc.stage, got, tc.want)
+		}
+	}
+
+	agg := newUsageAggregator()
+	add := func(status int, result, stage string) {
+		agg.add(IndexEntry{
+			StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: 10,
+			StatusCode: status, Result: result, ErrorStage: stage, Model: "m-x",
+		})
+	}
+	add(200, "completed", "")
+	add(200, "completed", "")
+	add(429, "failed", "devin_connect")   // 限流：剔除分母
+	add(200, "disconnected", "")          // 客户端：剔除分母
+	add(400, "failed", "http_decode")     // 客户端 4xx：剔除分母
+	add(500, "failed", "provider_stream") // 服务端失分：SLA 唯一扣分项
+	snap := agg.snapshot()
+	m := snap.Models[0]
+	if m.ClientFaults != 2 || m.UpstreamFaults != 1 || m.RateLimited != 1 {
+		t.Fatalf("faults = %+v", m)
+	}
+	// slable = 6 - 2 - 1 = 3；SLA = (3-1)/3 ≈ 0.667。
+	if want := 2.0 / 3.0; m.SLASuccessRate < want-1e-9 || m.SLASuccessRate > want+1e-9 {
+		t.Fatalf("sla_success_rate = %v, want %v", m.SLASuccessRate, want)
+	}
+	// 聚合层级同步：窗口 totals 与 10 分钟桶也要带归因计数。
+	if snap.Window.ClientFaults != 2 || snap.Window.UpstreamFaults != 1 {
+		t.Fatalf("window = %+v", snap.Window)
+	}
+	var sumClient, sumUpstream int64
+	for _, p := range snap.Points {
+		sumClient += p.ClientFaults
+		sumUpstream += p.UpstreamFaults
+	}
+	if sumClient != 2 || sumUpstream != 1 {
+		t.Fatalf("points faults = %d/%d", sumClient, sumUpstream)
+	}
+}
+
+// TestRetryAttemptsInIndex 验证重发计数随索引与 meta 落盘：
+// NoteRetryAttempt 与 04 的 retry_attempt 分界行同源。
+func TestRetryAttemptsInIndex(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	dir := filepath.Base(recorder.DirectoryPath())
+	recorder.NoteRetryAttempt(2, "unauthenticated: token reloaded")
+	recorder.NoteRetryAttempt(3, "transport: EOF")
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m-x"})
+
+	entries := manager.ListRequests(10, RequestFilter{}).Entries
+	if len(entries) != 1 || entries[0].Retries != 2 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	// meta.json 应带明细（attempt 号/原因/相对时刻），面板据此渲染链路。
+	data, err := os.ReadFile(filepath.Join(root, dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	attempts, _ := meta["retry_attempts"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("retry_attempts = %v", meta["retry_attempts"])
+	}
+	second, _ := attempts[1].(map[string]any)
+	if second["attempt"] != float64(3) || second["cause"] != "transport: EOF" {
+		t.Fatalf("attempts[1] = %v", second)
 	}
 }
 

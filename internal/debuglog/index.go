@@ -59,6 +59,10 @@ type IndexEntry struct {
 	// RetryAfterSeconds 是上游限流给出的 reset 秒数 hint，
 	// 供聚合区分「有退避提示的限流」与「裸限流」；非限流请求为 0。
 	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
+	// Retries 是上游重发次数（attempt2+，token 自愈/空响应/transport
+	// 重开）；明细在同目录 meta.json 的 retry_attempts 与 04 的
+	// retry_attempt 分界行。0 表示一次发送完成。
+	Retries int `json:"retries,omitempty"`
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
 	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
 	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
@@ -113,6 +117,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
+		Retries:           len(recorder.retryAttempts()),
 		PrematureEndTurn:  completion.PrematureEndTurn,
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {

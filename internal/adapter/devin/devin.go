@@ -355,9 +355,11 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		if rebuilt, _, buildErr := buildRequest(request, cfg); buildErr == nil {
 			protoRequest = rebuilt
 			attempt++
+			cause := "unauthenticated: token reloaded"
+			recorder.NoteRetryAttempt(attempt, cause)
 			recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
 				"attempt": attempt,
-				"cause":   "unauthenticated: token reloaded",
+				"cause":   cause,
 			})
 			recordProtoJSON(recorder, fmt.Sprintf("03-devin-request.attempt%d.json", attempt), protoRequest)
 			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest)
@@ -411,6 +413,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
 				attempt++
+				recorder.NoteRetryAttempt(attempt, causeText)
 				recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
 					"attempt":        attempt,
 					"cause":          causeText,

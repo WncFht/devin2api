@@ -164,6 +164,10 @@ type Recorder struct {
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
 	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
+	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
+	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
+	// 追加，writeMeta/appendIndex 读，走 mutex 同步。
+	retries []retryAttempt
 	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
 	// 构建请求后写入；Complete 时随 meta.json 与 index 落盘。
 	repairs atomic.Pointer[llm.RequestRepairs]
@@ -181,6 +185,14 @@ type Recorder struct {
 	errorWritten bool
 	// errorStage 记录首个错误的阶段名，随索引落盘供按失败点检索。
 	errorStage string
+}
+
+// retryAttempt 是一次上游重发的记录：attempt 是请求体序号（2 起），
+// cause 是触发原因（token 自愈/空响应续说/transport 断裂重开）。
+type retryAttempt struct {
+	Attempt   int    `json:"attempt"`
+	Cause     string `json:"cause"`
+	ElapsedMS int64  `json:"elapsed_ms"`
 }
 
 // writeTask 是交给写 worker 的一次作业，worker 内串行执行。
@@ -567,6 +579,28 @@ func (recorder *Recorder) SetRepairs(repairs llm.RequestRepairs) {
 	recorder.repairs.Store(&repairs)
 }
 
+// NoteRetryAttempt 记录一次上游重发及其触发原因；调用方在同处写
+// 04 的 retry_attempt 分界行，两处记录保持同源——每次重发各记一笔。
+func (recorder *Recorder) NoteRetryAttempt(attempt int, cause string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.retries = append(recorder.retries, retryAttempt{
+		Attempt:   attempt,
+		Cause:     cause,
+		ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
+	})
+	recorder.mutex.Unlock()
+}
+
+// retryAttempts 返回重发记录的拷贝；无重发返回 nil。
+func (recorder *Recorder) retryAttempts() []retryAttempt {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return append([]retryAttempt(nil), recorder.retries...)
+}
+
 // Abort 中断请求：标记 aborted 并调用挂接的取消函数。
 // 无可中断的请求（未挂接或已完结）返回 false。
 func (recorder *Recorder) Abort() bool {
@@ -780,6 +814,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		meta["repairs"] = repairs
+	}
+	if retries := recorder.retryAttempts(); len(retries) > 0 {
+		meta["retry_attempts"] = retries
 	}
 	if completion != nil {
 		finishedAt := time.Now()

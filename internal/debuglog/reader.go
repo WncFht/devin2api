@@ -206,6 +206,9 @@ type RequestFilter struct {
 	ErrorStage string
 	// Since 只保留开始时间晚于该时刻的请求；零值不限。
 	Since time.Time
+	// Until 只保留开始时间早于该时刻的请求；零值不限。
+	// 矩阵格子下钻用它把列表钉在一个历史窗口内，而不是从现在往回滚。
+	Until time.Time
 	// Query 保留原有子串匹配：命中 dir/model/key_hash/client_request_id/path。
 	Query string
 }
@@ -318,9 +321,15 @@ func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
 	if f.ErrorStage != "" && e.ErrorStage != f.ErrorStage {
 		return false
 	}
-	if !f.Since.IsZero() {
+	if !f.Since.IsZero() || !f.Until.IsZero() {
 		started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
-		if err != nil || !started.After(f.Since) {
+		if err != nil {
+			return false
+		}
+		if !f.Since.IsZero() && !started.After(f.Since) {
+			return false
+		}
+		if !f.Until.IsZero() && !started.Before(f.Until) {
 			return false
 		}
 	}

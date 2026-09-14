@@ -23,7 +23,7 @@ const requestsFetchCap = 2000
 // apiRequests 返回 index.jsonl 中的最近请求（新的在前），供面板列表和
 // agent 检索。?limit=&offset= 分页；过滤走结构化参数
 // ?q= 子串、?status=499|!200|>=400|4xx（逗号 OR）、?status_class=2xx|4xx|5xx、
-// ?result=、?model=、?error_stage=、?since=RFC3339。
+// ?result=、?model=、?error_stage=、?since=/?until=RFC3339 时间窗。
 func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
@@ -81,6 +81,11 @@ func parseRequestFilter(params map[string][]string) debuglog.RequestFilter {
 			filter.Since = parsed
 		}
 	}
+	if until := get("until"); until != "" {
+		if parsed, err := time.Parse(time.RFC3339, until); err == nil {
+			filter.Until = parsed
+		}
+	}
 	return filter
 }
 
@@ -109,7 +114,7 @@ func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
 func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
-	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage\n")
+	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries\n")
 	for _, e := range entries {
 		firstUpstream, firstClient := "", ""
 		if e.FirstUpstreamMS != nil {
@@ -118,12 +123,12 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 		if e.FirstClientMS != nil {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
-		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s\n",
+		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d\n",
 			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
-			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage))
+			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage), e.Retries)
 	}
 }
 
