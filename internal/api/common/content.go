@@ -45,6 +45,13 @@ func DecodeContent(raw json.RawMessage) ([]llm.Content, error) {
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			content = append(content, image)
+		case "input_file", "file", "document", "input_audio":
+			// 文档/音频 part 上游没有对应通道，内容必然丢；
+			// 静默丢弃会让模型在缺上下文下回答而无人察觉，
+			// 落占位文本至少让缺失可见。
+			content = append(content, llm.TextContent{
+				Text: "[content omitted: " + header.Type + " part not supported]",
+			})
 		default:
 			// 忽略未知 part，避免 IDE 额外字段整请求失败。
 			continue
