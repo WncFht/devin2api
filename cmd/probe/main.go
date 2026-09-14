@@ -35,14 +35,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
-	}
-	if token == "" {
-		fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
-		os.Exit(1)
-	}
+	token := resolveToken()
 	client := devinprotoconnect.NewApiServerServiceClient(newHTTPClient(token), baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
@@ -50,25 +43,25 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "configs":
-		err = cmdConfigs(ctx, client)
+		err = cmdConfigs(ctx, client, token)
 	case "status":
 		err = cmdStatus(ctx, client, token)
 	case "assign":
-		err = cmdAssign(ctx, client, os.Args[2:])
+		err = cmdAssign(ctx, client, token, os.Args[2:])
 	case "chat":
-		err = cmdChat(ctx, client, os.Args[2:])
+		err = cmdChat(ctx, client, token, os.Args[2:])
 	case "replay":
-		err = cmdReplay(ctx, client, os.Args[2:])
+		err = cmdReplay(ctx, client, token, os.Args[2:])
 	case "bigctx":
-		err = cmdBigctx(ctx, client, os.Args[2:])
+		err = cmdBigctx(ctx, client, token, os.Args[2:])
 	case "misc":
 		err = cmdMisc(ctx, client, token)
 	case "hist":
-		err = cmdHist(ctx, client, os.Args[2:])
+		err = cmdHist(ctx, client, token, os.Args[2:])
 	case "edge":
-		err = cmdEdge(ctx, client, os.Args[2:])
+		err = cmdEdge(ctx, client, token, os.Args[2:])
 	case "rerun":
-		err = cmdRerun(ctx, client, os.Args[2:])
+		err = cmdRerun(ctx, client, token, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -116,6 +109,20 @@ func usage() {
   rerun -file 03.json [-n N]  replay a captured GetChatMessageRequest N times,
                               print stop_reason + calls + text tail per run
   bigctx -kb N                send ~N KB single user message, observe error code`)
+}
+
+// resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先，回落 config.yaml
+// 的 devin.token；两者皆空时直接退出——子命令不再各自重复解析。
+func resolveToken() string {
+	if token := os.Getenv("DEVIN_TOKEN"); token != "" {
+		return token
+	}
+	if token := tokenFromConfig(); token != "" {
+		return token
+	}
+	fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
+	os.Exit(1)
+	return ""
 }
 
 func tokenFromConfig() string {
@@ -182,11 +189,7 @@ func j(v any) string {
 
 // ---- configs ----
 
-func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient) error {
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
-	}
+func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string) error {
 	resp, err := client.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: metadata(token, true),
 	}))
@@ -257,11 +260,7 @@ func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- assign ----
 
-func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
-	}
+func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("assign needs at least one uid")
 	}
@@ -291,7 +290,7 @@ func (t *toolList) Set(v string) error {
 	return nil
 }
 
-func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	userPrompt := fs.String("prompt", "Reply exactly: pong", "")
@@ -337,10 +336,6 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	dumpDir := fs.String("dump", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
 	}
 	var sharedCascade string
 	if *resolveModel {
@@ -664,7 +659,7 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- replay: capture assistant output then replay with variants ----
 
-func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	variant := fs.String("variant", "with-sig", "")
@@ -672,12 +667,6 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
-	}
-	meta := func() *devinproto.ExaCodeiumCommonPb_Metadata { return metadata(token, true) }
-	_ = meta
 
 	mk := func(msgs []*devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.GetChatMessageRequest {
 		return &devinproto.GetChatMessageRequest{
@@ -827,16 +816,12 @@ func q1cpy(m *devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.ExaChatPb_Chat
 
 // ---- hist: synthetic assistant-turn wire shapes ----
 
-func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("hist", flag.ContinueOnError)
 	shape := fs.String("shape", "merged", "")
 	model := fs.String("model", "swe-2-max", "")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
 	}
 	user := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
 		return &devinproto.ExaChatPb_ChatMessagePrompt{
@@ -948,7 +933,7 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 // cmdRerun 回放 03-devin-request.json 抓到的完整上游请求：每次换新的
 // executionId，统计 stopReason / toolCalls / 文本尾部，用于同一段历史在
 // 不同 wire 形态下的 A/B 对照（拆分 vs 合并）。
-func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("rerun", flag.ContinueOnError)
 	file := fs.String("file", "", "protojson GetChatMessageRequest (logs/*/03-devin-request.json)")
 	n := fs.Int("n", 8, "")
@@ -962,10 +947,6 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 	base := &devinproto.GetChatMessageRequest{}
 	if err := protojson.Unmarshal(raw, base); err != nil {
 		return fmt.Errorf("unmarshal %s: %w", *file, err)
-	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
 	}
 	// 抓包里的 apiKey 可能已轮换，用当前 token 覆盖。
 	if base.GetMetadata() != nil {
@@ -1011,16 +992,12 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 
 // ---- bigctx ----
 
-func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, args []string) error {
+func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("bigctx", flag.ContinueOnError)
 	kb := fs.Int("kb", 1024, "")
 	model := fs.String("model", "swe-2-max", "")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
 	}
 	filler := strings.Repeat("lorem ipsum dolor sit amet ", *kb*1024/27)
 	req := &devinproto.GetChatMessageRequest{
@@ -1143,7 +1120,7 @@ func dumpConnectErr(err error) {
 
 // ---- edge cases ----
 
-func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, argv []string) error {
+func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, argv []string) error {
 	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	imageFile := fs.String("image-file", "", "png file to attach instead of tinyPNG")
@@ -1161,10 +1138,6 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	args := fs.Args()
 	if len(args) == 0 {
 		return fmt.Errorf("edge needs a case name")
-	}
-	token := os.Getenv("DEVIN_TOKEN")
-	if token == "" {
-		token = tokenFromConfig()
 	}
 	user := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
 		return &devinproto.ExaChatPb_ChatMessagePrompt{
@@ -1429,13 +1402,6 @@ func nonEmpty(s string) *string {
 		return nil
 	}
 	return proto.String(s)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func trunc(s string, n int) string {
