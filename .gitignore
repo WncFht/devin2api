@@ -54,3 +54,5 @@ multi-harness-eval/runs/
 
 # Python 字节码缓存（scripts/quota/fit.py 等）
 __pycache__/
+
+/outputs/quota-probe-*.jsonl
