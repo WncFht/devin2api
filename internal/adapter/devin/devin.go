@@ -63,19 +63,8 @@ type Config struct {
 	ClientName    string
 	ClientVersion string
 	ClientOS      string
-	// MaxRPM 是每个对齐分钟窗口内发往上游 GetChatMessage 的配额
-	// （条/分钟）；<=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
-	MaxRPM int
-	// GateMaxHold/GateDripInterval/GateDefaultLatch 是冷却闩参数：
-	// 闩外排队允许的最长等待、闩内滴灌探针的放行间隔、上游未带
-	// reset hint 时的兜底闩时长；<=0 时闸门用默认值。
-	GateMaxHold      time.Duration
-	GateDripInterval time.Duration
-	GateDefaultLatch time.Duration
-	// GateWindowOffset/GateWindowGuard 是分钟窗口参数：上游桶界在
-	// 本地分钟内的估计位置、桶界两侧的停发死区；<=0 时闸门用默认值。
-	GateWindowOffset time.Duration
-	GateWindowGuard  time.Duration
+	// Gate 是速率闸门参数组；字段语义与默认值回落见 GateConfig。
+	Gate GateConfig
 	// GateStatePath 非空时冷却闩截止时刻落盘到该文件，进程重启后
 	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
 	// 裸发会把限流续长。
@@ -169,15 +158,8 @@ func New(config Config) (*Adapter, error) {
 		config:         config,
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
-		gate: newRateGate(gateParams{
-			quota:        config.MaxRPM,
-			maxHold:      config.GateMaxHold,
-			dripInterval: config.GateDripInterval,
-			defaultLatch: config.GateDefaultLatch,
-			windowOffset: config.GateWindowOffset,
-			windowGuard:  config.GateWindowGuard,
-		}, config.GateStatePath),
-		assignments: make(map[string]resolvedAssignment),
+		gate:           newRateGate(config.Gate, config.GateStatePath),
+		assignments:    make(map[string]resolvedAssignment),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
@@ -258,30 +240,23 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []str
 		adapter.tokenMu.Unlock()
 		applied = append(applied, "devin.token")
 	}
-	adapter.gate.setParams(gateParams{
-		quota:        next.MaxRPM,
-		maxHold:      next.GateMaxHold,
-		dripInterval: next.GateDripInterval,
-		defaultLatch: next.GateDefaultLatch,
-		windowOffset: next.GateWindowOffset,
-		windowGuard:  next.GateWindowGuard,
-	})
-	if prev.MaxRPM != next.MaxRPM {
+	adapter.gate.setParams(next.Gate)
+	if prev.Gate.MaxRPM != next.Gate.MaxRPM {
 		applied = append(applied, "devin.max_rpm")
 	}
-	if prev.GateMaxHold != next.GateMaxHold {
+	if prev.Gate.MaxHold != next.Gate.MaxHold {
 		applied = append(applied, "devin.gate_max_hold_seconds")
 	}
-	if prev.GateDripInterval != next.GateDripInterval {
+	if prev.Gate.DripInterval != next.Gate.DripInterval {
 		applied = append(applied, "devin.gate_drip_interval_seconds")
 	}
-	if prev.GateDefaultLatch != next.GateDefaultLatch {
+	if prev.Gate.DefaultLatch != next.Gate.DefaultLatch {
 		applied = append(applied, "devin.gate_default_latch_seconds")
 	}
-	if prev.GateWindowOffset != next.GateWindowOffset {
+	if prev.Gate.WindowOffset != next.Gate.WindowOffset {
 		applied = append(applied, "devin.gate_window_offset_seconds")
 	}
-	if prev.GateWindowGuard != next.GateWindowGuard {
+	if prev.Gate.WindowGuard != next.Gate.WindowGuard {
 		applied = append(applied, "devin.gate_window_guard_seconds")
 	}
 	if prev.BaseURL != next.BaseURL {

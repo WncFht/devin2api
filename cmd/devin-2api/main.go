@@ -228,22 +228,24 @@ func main() {
 // 热重载共用同一映射，保证 ApplyConfig 看到的字段口径与 New 一致。
 func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Config {
 	return devin.Config{
-		BaseURL:          serviceConfig.Devin.BaseURL,
-		Token:            serviceConfig.Devin.Token,
-		Model:            serviceConfig.Devin.Model,
-		Proxy:            serviceConfig.Devin.Proxy,
-		ForceHTTP1:       serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
-		Aliases:          serviceConfig.Devin.Aliases,
-		ClientName:       serviceConfig.Devin.ClientName,
-		ClientVersion:    serviceConfig.Devin.ClientVersion,
-		ClientOS:         serviceConfig.Devin.ClientOS,
-		MaxRPM:           serviceConfig.Devin.MaxRPM,
-		GateMaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
-		GateDripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
-		GateDefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
-		GateWindowOffset: time.Duration(serviceConfig.Devin.GateWindowOffsetSeconds) * time.Second,
-		GateWindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
-		GateStatePath:    filepath.Join(filepath.Dir(configPath), "logs", "gate-state.json"),
+		BaseURL:       serviceConfig.Devin.BaseURL,
+		Token:         serviceConfig.Devin.Token,
+		Model:         serviceConfig.Devin.Model,
+		Proxy:         serviceConfig.Devin.Proxy,
+		ForceHTTP1:    serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+		Aliases:       serviceConfig.Devin.Aliases,
+		ClientName:    serviceConfig.Devin.ClientName,
+		ClientVersion: serviceConfig.Devin.ClientVersion,
+		ClientOS:      serviceConfig.Devin.ClientOS,
+		Gate: devin.GateConfig{
+			MaxRPM:       serviceConfig.Devin.MaxRPM,
+			MaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
+			DripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
+			DefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
+			WindowOffset: time.Duration(serviceConfig.Devin.GateWindowOffsetSeconds) * time.Second,
+			WindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
+		},
+		GateStatePath: filepath.Join(filepath.Dir(configPath), "logs", "gate-state.json"),
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 		TokenSource: func() string {

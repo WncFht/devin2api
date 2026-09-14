@@ -79,18 +79,18 @@ type rateGate struct {
 	waiters       int // 当前睡到下一窗口的请求数（闩内快败不进此列）
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
-	events    [gateEventCap]gateEvent
+	events    [GateEventCap]GateEvent
 	eventHead int
 	eventSize int
 }
 
-// gateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
-const gateEventCap = 64
+// GateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
+const GateEventCap = 64
 
-// gateEvent 是一次闩状态迁移的采样。kind：latched（上游限流上闩/延闩）、
+// GateEvent 是一次闩状态迁移的采样。kind：latched（上游限流上闩/延闩）、
 // released（成功帧提前解闩）、expired（闩到期自然失效）、restored（重启
 // 从 statePath 恢复未过期闩）。until 是该事件涉及的闩截止时刻。
-type gateEvent struct {
+type GateEvent struct {
 	At     time.Time  `json:"at"`
 	Kind   string     `json:"kind"`
 	Until  *time.Time `json:"until,omitempty"`
@@ -100,14 +100,14 @@ type gateEvent struct {
 // pushEvent 追加一条闩迁移事件；调用方须持 mu（启动恢复路径在并发前
 // 调用，视同持锁）。
 func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
-	ev := gateEvent{At: gate.now(), Kind: kind, Detail: detail}
+	ev := GateEvent{At: gate.now(), Kind: kind, Detail: detail}
 	if !until.IsZero() {
 		u := until
 		ev.Until = &u
 	}
 	gate.events[gate.eventHead] = ev
-	gate.eventHead = (gate.eventHead + 1) % gateEventCap
-	if gate.eventSize < gateEventCap {
+	gate.eventHead = (gate.eventHead + 1) % GateEventCap
+	if gate.eventSize < GateEventCap {
 		gate.eventSize++
 	}
 }
@@ -147,28 +147,35 @@ type GateStats struct {
 	WindowNext    *time.Time  `json:"window_next,omitempty"` // 下一桶可发窗口开放时刻
 	Sendable      bool        `json:"sendable"`              // 当前是否处于可发区间（非死区）
 	Waiters       int         `json:"waiters"`
-	Events        []gateEvent `json:"events,omitempty"` // 新在前
+	Events        []GateEvent `json:"events,omitempty"` // 新在前
 }
 
-// gateParams 是闸门的可调参数集；时长参数 <=0 时取默认值。
-// windowOffset 是上游分钟桶界在本地分钟内的估计位置——拒绝 hint
-// 隐含 deadline 实测落在 :58.6~:01（上游时钟快 ~1s），默认 0 即以
-// 本地 :00 为估计中心，负值按 mod 60 折算（-1 = :59）；windowGuard
-// 是桶界两侧的停发死区——可发区间 = [offset+guard, offset+60-guard)，
-// 只要真实桶界落在估计值 ±guard 内，每个可发区间都是某个真实上游
-// 桶的严格子集，单桶可见发送计数永不超 quota。
-type gateParams struct {
-	quota        int
-	maxHold      time.Duration
-	dripInterval time.Duration
-	defaultLatch time.Duration
-	windowOffset time.Duration
-	windowGuard  time.Duration
+// GateConfig 是速率闸门的可调参数集；时长参数 <=0 时取默认值。
+// Config.Gate 与闸门入参同型：启动构建与 ApplyConfig 热更新整块下发，
+// 不再逐字段翻译。
+type GateConfig struct {
+	// MaxRPM 是每个对齐分钟窗口内发往上游 GetChatMessage 的配额
+	// （条/分钟）；<=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
+	MaxRPM int
+	// MaxHold/DripInterval/DefaultLatch 是冷却闩参数：
+	// 闩外排队允许的最长等待、闩内滴灌探针的放行间隔、上游未带
+	// reset hint 时的兜底闩时长。
+	MaxHold      time.Duration
+	DripInterval time.Duration
+	DefaultLatch time.Duration
+	// WindowOffset 是上游分钟桶界在本地分钟内的估计位置——拒绝 hint
+	// 隐含 deadline 实测落在 :58.6~:01（上游时钟快 ~1s），默认 0 即以
+	// 本地 :00 为估计中心，负值按 mod 60 折算（-1 = :59）；WindowGuard
+	// 是桶界两侧的停发死区——可发区间 = [offset+guard, offset+60-guard)，
+	// 只要真实桶界落在估计值 ±guard 内，每个可发区间都是某个真实上游
+	// 桶的严格子集，单桶可见发送计数永不超 MaxRPM。
+	WindowOffset time.Duration
+	WindowGuard  time.Duration
 }
 
-// newRateGate 创建速率闸门；quota<=0 时只有冷却闩生效，不做窗口限速。
+// newRateGate 创建速率闸门；MaxRPM<=0 时只有冷却闩生效，不做窗口限速。
 // statePath 非空时恢复未过期的冷却闩。
-func newRateGate(params gateParams, statePath string) *rateGate {
+func newRateGate(params GateConfig, statePath string) *rateGate {
 	gate := &rateGate{
 		statePath: statePath,
 		now:       time.Now,
@@ -180,21 +187,21 @@ func newRateGate(params gateParams, statePath string) *rateGate {
 
 // setParams 原位更新闸门参数（reload 热路径）：闩态保留，窗口参数变化
 // 后下一次 wait/stats 按新边界重算当前桶，桶起点不同即开新桶重新计数。
-func (gate *rateGate) setParams(params gateParams) {
+func (gate *rateGate) setParams(params GateConfig) {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	gate.maxHold = gateDurationOrDefault(params.maxHold, gateDefaultMaxHold)
-	gate.dripInterval = gateDurationOrDefault(params.dripInterval, gateDefaultDripInterval)
-	gate.defaultLatch = gateDurationOrDefault(params.defaultLatch, gateDefaultLatch)
-	offset := params.windowOffset % windowPeriod
+	gate.maxHold = gateDurationOrDefault(params.MaxHold, gateDefaultMaxHold)
+	gate.dripInterval = gateDurationOrDefault(params.DripInterval, gateDefaultDripInterval)
+	gate.defaultLatch = gateDurationOrDefault(params.DefaultLatch, gateDefaultLatch)
+	offset := params.WindowOffset % windowPeriod
 	if offset < 0 {
 		offset += windowPeriod
 	}
-	guard := params.windowGuard
+	guard := params.WindowGuard
 	if guard <= 0 || 2*guard >= windowPeriod {
 		guard = gateDefaultWindowGuard
 	}
-	gate.quota = params.quota
+	gate.quota = params.MaxRPM
 	gate.windowOpen = (offset + guard) % windowPeriod
 	gate.usable = windowPeriod - 2*guard
 }
@@ -299,7 +306,7 @@ func (gate *rateGate) stats() GateStats {
 		stats.WindowNext = &next
 	}
 	for i := 1; i <= gate.eventSize; i++ {
-		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap])
+		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+GateEventCap)%GateEventCap])
 	}
 	if !gate.limitedUntil.IsZero() {
 		until := gate.limitedUntil
