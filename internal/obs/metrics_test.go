@@ -53,7 +53,7 @@ func TestDiagnosticBoundsAndRedacts(t *testing.T) {
 	}
 }
 
-// TestTrendBuckets 验证趋势桶把请求与错误归入当前 30 秒窗口并出现在快照里。
+// TestTrendBuckets 验证趋势桶把请求与错误归入当前 10 秒窗口并出现在快照里。
 func TestTrendBuckets(t *testing.T) {
 	m := NewMetrics()
 	m.Begin().Finish(200, 0, "completed")

@@ -14,14 +14,14 @@ import (
 
 // trendBucketSecs 是趋势桶粒度（秒）；trendBuckets 覆盖最近 trendWindowMinutes 分钟。
 const (
-	trendBucketSecs    = 30
+	trendBucketSecs    = 10
 	trendWindowMinutes = 60
 	trendBuckets       = 60 * trendWindowMinutes / trendBucketSecs
 )
 
-// spanBucket 是一个 30 秒窗口内的请求聚合，供趋势图使用。
+// spanBucket 是一个 10 秒窗口内的请求聚合，供趋势图使用。
 type spanBucket struct {
-	at       int64 // 桶起点 unix 秒（30s 对齐）
+	at       int64 // 桶起点 unix 秒（10s 对齐）
 	requests uint64
 	errors   uint64 // 4xx/5xx、管线前拒绝与未正常完成的已提交流（disconnected/aborted/流内失败）
 }
@@ -115,12 +115,12 @@ func (m *Metrics) Reject() {
 	m.recordBucket(true)
 }
 
-// recordBucket 把一次请求归入当前 30 秒桶；桶满时循环覆盖最旧数据。
+// recordBucket 把一次请求归入当前 10 秒桶；桶满时循环覆盖最旧数据。
 func (m *Metrics) recordBucket(isError bool) {
 	m.recordBucketAt(time.Now().Unix(), isError)
 }
 
-// recordBucketAt 把一次请求归入 at（unix 秒）对齐的 30 秒桶。
+// recordBucketAt 把一次请求归入 at（unix 秒）对齐的 10 秒桶。
 func (m *Metrics) recordBucketAt(at int64, isError bool) {
 	at = at / trendBucketSecs * trendBucketSecs
 	m.bucketsMu.Lock()
@@ -166,7 +166,7 @@ func (m *Metrics) Snapshot() map[string]any {
 	}
 }
 
-// rates 从 30 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。
+// rates 从 10 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。
 // current/peak 先按自然分钟合并相邻桶再取值，语义与分钟粒度时代一致；
 // avg 覆盖趋势环内窗口。
 func (m *Metrics) rates() map[string]any {
@@ -214,7 +214,7 @@ func (m *Metrics) rates() map[string]any {
 	}
 }
 
-// trend 返回最近 60 分钟的逐 30 秒请求/错误数（旧→新，含零值桶），
+// trend 返回最近 60 分钟的逐 10 秒请求/错误数（旧→新，含零值桶），
 // 供面板直接画 sparkline，无需客户端再聚合。
 func (m *Metrics) trend() []map[string]any {
 	current := time.Now().Unix() / trendBucketSecs
