@@ -114,9 +114,13 @@ function render() {
     const rest = allBar.slice(8);
     barRows.push({ name: '其他 (' + rest.length + ')', output_tokens: rest.reduce((a, m) => a + (m.output_tokens || 0), 0), requests: rest.reduce((a, m) => a + (m.requests || 0), 0), other: true });
   }
-  if (tokenMix.length || barRows.length) {
-    html += '<div class="chart-grid"><div class="chart-box"><div class="chart-cap">Token 构成 · ' + esc(label) + '</div><div id="uMix" class="chart chart-h260"></div></div>' +
-      '<div class="chart-box"><div class="chart-cap">模型输出 Token Top ' + barRows.length + ' · ' + esc(label) + '</div><div id="uModelBar" class="chart chart-h260"></div></div></div>';
+  // 单模型窗口下 Top 条图退化成一根独柱——没有对比就没有信息量，藏掉。
+  const showMix = tokenMix.length > 0, showBar = barRows.length > 1;
+  if (showMix || showBar) {
+    html += '<div class="chart-grid">' +
+      (showMix ? '<div class="chart-box"><div class="chart-cap">Token 构成 · ' + esc(label) + '</div><div id="uMix" class="chart chart-h260"></div></div>' : '') +
+      (showBar ? '<div class="chart-box"><div class="chart-cap">模型输出 Token Top ' + barRows.length + ' · ' + esc(label) + '</div><div id="uModelBar" class="chart chart-h260"></div></div>' : '') +
+      '</div>';
   }
 
   // 错误阶段 chips（点击跳请求页筛选）

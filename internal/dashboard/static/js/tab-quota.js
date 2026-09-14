@@ -63,6 +63,13 @@ function renderQuota(d) {
   });
 }
 
+// fmtDay 把 ISO 时间串渲染成本地日期（2026/9/7），用于套餐周期这类
+// 只关心日不关心时刻的字段；无法解析时透传原串。
+function fmtDay(v) {
+  const d = new Date(v);
+  return isNaN(d) ? (v || '?') : d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate();
+}
+
 // creditUsage 把月度额度与可用余额合成「已用 used / total（剩 avail）」。
 // monthly≤0（上游 -1 表示不按固定额度计费）时退化为只显示可用量；
 // 已用由 monthly-available 反推，额外购credit导致 available>monthly 时按 0 计。
@@ -88,7 +95,7 @@ function renderStatus(d) {
       meta('Prompt', creditUsage(ps.monthly_prompt_credits ?? pi.monthly_prompt_credits, ps.available_prompt_credits)) +
       meta('Flow', creditUsage(ps.monthly_flow_credits ?? pi.monthly_flow_credits, ps.available_flow_credits)) +
       meta('Flex', '可用 ' + fmtQuota(ps.available_flex_credits)) +
-      meta('周期', (ps.plan_start || '?') + ' ~ ' + (ps.plan_end || '?')) +
+      meta('周期', fmtDay(ps.plan_start) + ' ~ ' + fmtDay(ps.plan_end)) +
       meta('ACU', (ps.acu_consumed ?? '-') + ' / ' + (ps.acu_limit ?? '-')) +
       meta('超额 micros', ps.overage_balance_micros ?? '-');
   }
@@ -109,12 +116,19 @@ function renderStatus(d) {
       meta('有容量', d.capacity.has_capacity ? '是' : '否') +
       meta('活跃会话', d.capacity.active_sessions ?? '-') +
       meta('容量消息', d.capacity.message || '-') +
-      (d.ide_status ? meta('IDE 状态', d.ide_status.level || '-') + meta('IDE 消息', d.ide_status.message || '-') : '') +
+      (d.ide_status ? meta('IDE 状态', d.ide_status.level === 'UNSPECIFIED' ? '—' : (d.ide_status.level || '-')) + meta('IDE 消息', d.ide_status.message || '-') : '') +
       '</div>';
   }
   if (d.providers && d.providers.length) {
     phtml += '<div class="chip-row flat">' +
-      d.providers.map(p => '<span class="chip static">' + esc(p.display_name || p.provider) + ' <span class="muted">' + esc(p.provider || '') + '</span></span>').join('') + '</div>';
+      d.providers.map(p => {
+        const name = p.display_name || p.provider || '-';
+        // provider 枚举与 display_name 同源时（OPENAI/OpenAI）只留前者，
+        // 否则括号附原始枚举值区分显示名与渠道标识。
+        const dup = p.provider && p.display_name && String(p.provider).toUpperCase() === String(p.display_name).toUpperCase();
+        return '<span class="chip static">' + esc(name) +
+          (p.provider && !dup ? ' <span class="muted">' + esc(p.provider) + '</span>' : '') + '</span>';
+      }).join('') + '</div>';
   }
   pv.style.display = phtml ? '' : 'none';
   morph($('providerBody'), phtml);
