@@ -4,7 +4,7 @@
 数据链路：poll.sh 采的 GetUserStatus 快照（整数百分比，含入账延迟）为因变量，
 index.jsonl 里每个付费请求按目录价折算 est$（含 cache_write，按 input 价），
 在每个重置窗口内对「累计 est$ vs 已消耗百分点」做最小二乘——斜率的倒数即
-该窗口 1% 对应的美元额。2026-09-13 两窗口拟合见 notes/2026-09-13-quota-billing-fit.md。
+该窗口 1% 对应的美元额。2026-09-13 两窗口拟合见 docs/quota-billing.md（原始记录 notes/archive/2026-09-13-quota-billing-fit.md）。
 
 依赖: uv run --with numpy --with matplotlib scripts/quota/fit.py \
         --status quota-probe.jsonl --index index.jsonl --catalog models.json [--out fit.png]
