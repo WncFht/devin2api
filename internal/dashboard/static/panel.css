@@ -327,28 +327,32 @@ th .sort-ind { font-size: 10px; color: var(--accent); }
 }
 .mx-tip.above .mt-arr { bottom: -5px; border-top: 0; border-left: 0; }
 .mx-tip.below .mt-arr { top: -5px; border-bottom: 0; border-right: 0; }
-.mx-tip .mt-head { display: flex; align-items: center; gap: 7px; }
-.mx-tip .mt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.mx-tip .mt-dot.d-ok { background: var(--ok); }
-.mx-tip .mt-dot.d-warn { background: var(--warn); }
-.mx-tip .mt-dot.d-err { background: var(--err); }
-.mx-tip .mt-dot.d-none { background: var(--muted); }
-.mx-tip .mt-sev { font-size: 12px; font-weight: 650; }
-.mx-tip .mt-sev.s-ok { color: var(--ok); }
-.mx-tip .mt-sev.s-warn { color: var(--warn); }
-.mx-tip .mt-sev.s-err { color: var(--err); }
-.mx-tip .mt-sev.s-none { color: var(--muted); }
-.mx-tip .mt-model {
+
+/* mt-* 悬浮卡内容结构类——全局生效：矩阵自绘卡（.mx-tip）与 echarts
+   tooltip（formatter 包一层 .mx-tip-inner）共用同一套排版。 */
+.mx-tip-inner { font-size: 11.5px; line-height: 1.65; }
+.mt-head { display: flex; align-items: center; gap: 7px; }
+.mt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.mt-dot.d-ok { background: var(--ok); }
+.mt-dot.d-warn { background: var(--warn); }
+.mt-dot.d-err { background: var(--err); }
+.mt-dot.d-none { background: var(--muted); }
+.mt-sev { font-size: 12px; font-weight: 650; }
+.mt-sev.s-ok { color: var(--ok); }
+.mt-sev.s-warn { color: var(--warn); }
+.mt-sev.s-err { color: var(--err); }
+.mt-sev.s-none { color: var(--muted); }
+.mt-model {
   margin-left: auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted);
 }
-.mx-tip .mt-time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 1px; }
-.mx-tip .mt-sep { height: 1px; background: var(--border); margin: 7px -12px 6px; }
-.mx-tip .mt-line { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
-.mx-tip .mt-line .k { color: var(--muted); }
-.mx-tip .mt-line .mt-sp { flex: 1; }
-.mx-tip .mt-line.muted { color: var(--muted); }
-.mx-tip .mt-empty { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 4px; }
+.mt-time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+.mt-sep { height: 1px; background: var(--border); margin: 7px -12px 6px; }
+.mt-line { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+.mt-line .k { color: var(--muted); }
+.mt-line .mt-sp { flex: 1; }
+.mt-line.muted { color: var(--muted); }
+.mt-empty { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 4px; }
 
 /* ---------- 判词行（概览顶部一句话结论） ---------- */
 .verdict {

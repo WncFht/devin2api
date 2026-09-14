@@ -47,7 +47,7 @@ const Quota = (() => {
     Charts.render($('quotaCurve'), {
       dataZoom: Charts.zoom(pts),
       yAxis: { min: 0, max: 100, axisLabel: { formatter: '{value}%', color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
-      tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : Number(v).toFixed(1) + '%', backgroundColor: 'rgba(18,21,31,.96)', borderColor: 'rgba(148,163,184,.25)', textStyle: { color: '#e5e9f2', fontSize: 12 } },
+      tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : Number(v).toFixed(1) + '%' },
       series: [
         Charts.line('日剩余', '#818cf8', Charts.tsList(pts, 'at', 'daily_remaining')),
         Charts.line('周剩余', '#f472b6', Charts.tsList(pts, 'at', 'weekly_remaining')),

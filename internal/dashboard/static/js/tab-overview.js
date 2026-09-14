@@ -351,17 +351,18 @@ const Overview = (() => {
       tooltip: {
         trigger: 'axis', confine: true,
         axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
+        // 内容与矩阵悬停卡共用 mt-* 结构类：.mx-tip-inner 提供排版上下文，
+        // marker 是 echarts 的彩色圆点，视觉语言跟 mt-dot 一致。
         formatter: ps => {
           if (!ps || !ps.length) return '';
           const byName = {};
           ps.forEach(p => byName[p.seriesName] = p);
           const reqP = byName['请求速率'], errP = byName['错误速率'], rpsP = byName['RPS 30s均值'];
-          let h = '<div style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#78819a;margin-bottom:3px">' +
-            fmtTime(new Date(ps[0].axisValue)) + '</div>';
-          if (reqP) h += '<div>' + reqP.marker + '请求 <b>' + Math.round(reqP.value[1] * sec) + '</b> 条/10s</div>';
-          if (rpsP) h += '<div>' + rpsP.marker + '速率 <b>' + rpsP.value[1].toFixed(2) + '</b> rps · <b>' + (rpsP.value[1] * 60).toFixed(1) + '</b> rpm（30s均值）</div>';
-          if (errP && errP.value[1] > 0) h += '<div>' + errP.marker + '错误 <b style="color:#f87171">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
-          return h;
+          let h = '<div class="mx-tip-inner"><div class="mt-time">' + fmtTime(new Date(ps[0].axisValue)) + '</div><div class="mt-sep"></div>';
+          if (reqP) h += '<div class="mt-line">' + reqP.marker + '<span class="k">请求</span><b>' + Math.round(reqP.value[1] * sec) + '</b> 条/10s</div>';
+          if (rpsP) h += '<div class="mt-line">' + rpsP.marker + '<span class="k">速率</span><b>' + rpsP.value[1].toFixed(2) + '</b> rps · ' + (rpsP.value[1] * 60).toFixed(1) + ' rpm</div>';
+          if (errP && errP.value[1] > 0) h += '<div class="mt-line">' + errP.marker + '<span class="k">错误</span><b class="status-err">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
+          return h + '</div>';
         },
       },
       series,

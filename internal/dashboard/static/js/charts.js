@@ -19,11 +19,17 @@ const Charts = (() => {
       textStyle: { fontFamily: 'system-ui, -apple-system, sans-serif' },
       grid: { left: 8, right: 12, top: 34, bottom: 8, containLabel: true },
       legend: { top: 0, left: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, itemGap: 14, textStyle: { color: textDim, fontSize: 11 } },
+      // tooltip 容器对齐矩阵悬停卡 .mx-tip 的令牌（surface-3 底、
+      // border-strong 边、8px 圆角、同款阴影与内边距）——全站悬浮层
+      // 只有一套外观；内容排版由调用方复用 mt-* 结构类保持一致。
       tooltip: {
         trigger: 'axis', confine: true,
-        backgroundColor: 'rgba(18,21,31,.96)',
-        borderColor: 'rgba(148,163,184,.25)',
-        textStyle: { color: '#e5e9f2', fontSize: 12 },
+        backgroundColor: '#1f2434',
+        borderColor: 'rgba(148,163,184,.20)',
+        borderWidth: 1,
+        padding: [9, 12, 10],
+        textStyle: { color: '#e5e9f2', fontSize: 11.5 },
+        extraCssText: 'border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.5);line-height:1.65;',
         axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
       },
       xAxis: {

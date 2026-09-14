@@ -269,14 +269,14 @@ const Usage = (() => {
             Charts.line('TTFB p95', '#fbbf24', pts.map(p => Charts.ts(xs(p), p.ttfb_p95_ms || null))),
             Charts.line('耗时 p95', '#f87171', pts.map(p => Charts.ts(xs(p), p.duration_p95_ms || null))),
           ],
-          tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : fmtMs(v), backgroundColor: 'rgba(18,21,31,.96)', borderColor: 'rgba(148,163,184,.25)', textStyle: { color: '#e5e9f2', fontSize: 12 } },
+          tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : fmtMs(v) },
           yAxis: { axisLabel: { formatter: v => v >= 1000 ? (v / 1000) + 's' : v, color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
         });
       }
     }
     if (tokenMix.length && $('uMix')) {
       Charts.render($('uMix'), {
-        tooltip: { trigger: 'item', backgroundColor: 'rgba(18,21,31,.96)', borderColor: 'rgba(148,163,184,.25)', textStyle: { color: '#e5e9f2', fontSize: 12 }, valueFormatter: v => fmtNum(v) },
+        tooltip: { trigger: 'item', valueFormatter: v => fmtNum(v) },
         legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: '#8b93a7', fontSize: 11 } },
         series: [{
           type: 'pie', radius: ['52%', '74%'], center: ['50%', '44%'],
@@ -292,7 +292,7 @@ const Usage = (() => {
         grid: { left: 8, right: 40, top: 8, bottom: 8, containLabel: true },
         xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
         yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: '#aab1c5', fontSize: 10.5, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: '#3a415a' } }, axisTick: { show: false } },
-        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, backgroundColor: 'rgba(18,21,31,.96)', borderColor: 'rgba(148,163,184,.25)', textStyle: { color: '#e5e9f2', fontSize: 12 }, formatter: ps => ps.map(p => p.name + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => p.name + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
         series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: 'rgba(129,140,248,.55)' }, { offset: 1, color: '#818cf8' }]) }, label: { show: true, position: 'right', color: '#8b93a7', fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
       });
     }
