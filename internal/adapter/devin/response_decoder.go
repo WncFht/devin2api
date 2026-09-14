@@ -74,10 +74,18 @@ type toolState struct {
 	call llm.ToolCall
 	// contentIdx 是调用在 partial.Content 中的位置。
 	contentIdx int
+	// eventID 是下发事件的固定调用标识：ToolCallStart 用什么，后续
+	// delta 就用什么——首帧缺 id 时它是合成占位，真实 id 晚到只回填
+	// call/内容块，不改事件 id（客户端已按 start 的值对账）。
+	eventID string
 	// arguments 累计 Devin 返回的工具参数 JSON 片段。
 	arguments strings.Builder
 	// emitted 表示原始工具调用已经加入 partial 并产生 start 事件。
 	emitted bool
+	// placeholderID 表示 call.ID 仍是合成占位（首帧无 id）：真实 id
+	// 到达后该位置 false。占位期间无 id 续帧与迟到的真 id 帧都按
+	// 位置归并给它。
+	placeholderID bool
 	// wrapped 表示该调用是 custom 声明工具的 function 包装形态：参数片段
 	// 是 {"input":"<原文>"} 的 JSON 包装，不是给客户端的参数体本身。
 	wrapped bool
@@ -348,22 +356,22 @@ func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *de
 	if delta == nil {
 		return events
 	}
-	state := decoder.findTool(delta.GetId())
+	state := decoder.findTool(delta)
 	if state == nil {
 		id := delta.GetId()
-		if id == "" {
+		placeholder := id == ""
+		if placeholder {
 			// 上游偶发首帧不带 id：合成稳定占位，保证 ToolCallStart
 			// 事件过得了 Validate，后续按位置续接参数增量。
 			id = fmt.Sprintf("call_%d", len(decoder.tools))
 		}
 		state = &toolState{
-			call:       llm.ToolCall{ID: id, Name: delta.GetName(), Arguments: json.RawMessage(`{}`)},
-			contentIdx: -1,
+			call:          llm.ToolCall{ID: id, Name: delta.GetName(), Arguments: json.RawMessage(`{}`)},
+			contentIdx:    -1,
+			eventID:       id,
+			placeholderID: placeholder,
 		}
 		decoder.tools = append(decoder.tools, state)
-	}
-	if delta.GetId() != "" {
-		state.call.ID = delta.GetId()
 	}
 	if delta.GetName() != "" {
 		state.call.Name = delta.GetName()
@@ -376,6 +384,14 @@ func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *de
 	}
 	if delta.GetIsCustomToolCall() {
 		state.call.Custom = true
+	}
+	if state.placeholderID && delta.GetId() != "" {
+		// 占位调用的真实 id 晚到：回填已发出的内容块，让最终消息携带
+		// 真 id 供下轮回放；事件 ToolCallID 保持首次值（占位）不换——
+		// 客户端已按 start 的 id 对账，中途换 id 会让 delta 悬空。
+		state.placeholderID = false
+		state.call.ID = delta.GetId()
+		decoder.partial.Content[state.contentIdx] = state.call
 	}
 	fragment := delta.GetArgumentsJson()
 	hasFragment := delta.ArgumentsJson != nil
@@ -400,7 +416,7 @@ func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, sta
 		decoder.partial.Content = append(decoder.partial.Content, state.call)
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallStart, ContentIndex: state.contentIdx,
-			ToolCallID: state.call.ID, ToolName: state.call.Name, Partial: &decoder.partial,
+			ToolCallID: state.eventID, ToolName: state.call.Name, Partial: &decoder.partial,
 		})
 	}
 	// 工具参数在 complete 中一次性解析并写入，避免每帧 O(n) 拷贝/校验。
@@ -409,7 +425,7 @@ func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, sta
 	if hasFragment && !state.wrapped {
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
-			ToolCallID: state.call.ID, Delta: fragment, Partial: &decoder.partial,
+			ToolCallID: state.eventID, Delta: fragment, Partial: &decoder.partial,
 		})
 	}
 	return events
@@ -487,16 +503,32 @@ func (decoder *responseDecoder) endText(events []llm.ResponseEvent) []llm.Respon
 	})
 }
 
-func (decoder *responseDecoder) findTool(id string) *toolState {
+// findTool 定位工具调用增量所属的 toolState：带 id 的帧按 id 精确匹配；
+// 匹配不到且末位调用仍持占位 id 时，视为该占位调用迟到的真实 id（上游
+// 同一调用的帧连续发送）。无 id 帧按位置并入末位调用——但帧上带了一个
+// 与末位不同的名字时，它是首帧缺 id 的下一次调用而非续帧，归还会把两次
+// 独立调用的参数粘在一起。
+func (decoder *responseDecoder) findTool(delta *devinproto.ExaCodeiumCommonPb_ChatToolCall) *toolState {
+	id := delta.GetId()
 	for _, state := range decoder.tools {
 		if id != "" && state.call.ID == id {
 			return state
 		}
 	}
-	if id == "" && len(decoder.tools) > 0 {
-		return decoder.tools[len(decoder.tools)-1]
+	if len(decoder.tools) == 0 {
+		return nil
 	}
-	return nil
+	last := decoder.tools[len(decoder.tools)-1]
+	if id != "" {
+		if last.placeholderID {
+			return last
+		}
+		return nil
+	}
+	if name := delta.GetName(); name != "" && last.call.Name != "" && name != last.call.Name {
+		return nil
+	}
+	return last
 }
 
 func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEvent {
@@ -521,7 +553,7 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 			// 补发单条完整 delta，让按增量累计输入的下游状态收敛到一致。
 			events = append(events, llm.ResponseEvent{
 				Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
-				ToolCallID: state.call.ID, Delta: string(state.call.Arguments), Partial: &decoder.partial,
+				ToolCallID: state.eventID, Delta: string(state.call.Arguments), Partial: &decoder.partial,
 			})
 		} else if state.call.Custom {
 			// 原文即参数体（invalid_json_str 通道或客户端回灌的畸形 JSON），

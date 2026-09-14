@@ -447,6 +447,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			}
 			if err != nil {
 				retryCancel()
+				// 重发自身撞到的错误也要留痕：error.json 是
+				// first-write-wins 只记原始失败点，「重发又撞上
+				// 什么」只在这一行找得到。
+				recorder.AppendJSONL("04-devin-response.jsonl", "retry_failed", map[string]any{
+					"attempt": attempt,
+					"error":   err.Error(),
+				})
 				return nil, nil, err
 			}
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
@@ -515,6 +522,12 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 // 垃圾前缀会误判进此分支，但重试一次确定性失败代价小，换覆盖全部帧级
 // 解析失败形态。
 func isTransientConnectError(err error) bool {
+	// 调用方取消不是传输故障：context.DeadlineExceeded 自身实现
+	// net.Error，不先短路会把客户端断连/超时误判成可重试的断线，
+	// 既无谓重发又把 stage 错记成 devin_transport。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
@@ -680,17 +693,17 @@ func modelLikelySupportsImages(model string) bool {
 		return true
 	}
 	// 与 GetCascadeModelConfigs.supports_images=false 的常见 uid 对齐。
+	// 前缀必须带边界（相等或 -/_ 续形）：裸 HasPrefix 会把 "o10" 一类
+	// 同头异名 uid 误判成无视觉模型。
 	noVisionPrefixes := []string{
 		"glm-5-2", "glm-5", "glm-4.7", "glm-4-7", "glm-4",
 		"deepseek", "kimi-k2", "qwen3-coder",
+		"o1", "o3-mini", "o4-mini",
 	}
 	for _, p := range noVisionPrefixes {
 		if m == p || strings.HasPrefix(m, p+"-") || strings.HasPrefix(m, p+"_") {
 			return false
 		}
-	}
-	if strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3-mini") || strings.HasPrefix(m, "o4-mini") {
-		return false
 	}
 	return true
 }
@@ -738,7 +751,10 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		return nil, a.modelsErr
 	}
 
-	name, version, os := a.config.clientIdentity()
+	// config 经 currentConfig 取快照：写路径是 ApplyConfig 持 configMu
+	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
+	cfg := a.currentConfig()
+	name, version, os := cfg.clientIdentity()
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
@@ -808,7 +824,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		models = append(models, info)
 	}
 	// 用户显式配置的 model（如 gpt5.6）即使不在 Devin 返回的列表中，也应可被发现和调用。
-	if configured := strings.TrimSpace(a.config.Model); configured != "" {
+	if configured := strings.TrimSpace(cfg.Model); configured != "" {
 		if _, ok := seen[configured]; !ok {
 			models = append(models, adapter.ModelInfo{
 				ID: configured, Created: now, OwnedBy: "devin",
@@ -932,8 +948,12 @@ type responseStream struct {
 	newDecoder func() *responseDecoder
 	// stall 是跨 Recv 复用的静默看门狗计时器；首次等待时创建。
 	stall *time.Timer
-	// progress 是「无内容进度」期限计时器：只有产出事件的帧重置它，
+	// progress 是「无内容进度」期限计时器：只有产出事件的帧喂它，
 	// latency 活性帧/元数据帧不喂——退化上游的零事件帧续命会被它兜底。
+	// 与 stall 同为跨 Recv 复用计时器：Recv 入等待前 Reset 续期，
+	// tryReopen 换流后重置窗口；不随 Recv 返回 Stop——窗口语义是
+	// 「消费方活跃等待期间零事件」，Stop 会让首个内容事件后的
+	// 零事件帧续命逃过看门狗，流无限挂起。
 	progress *time.Timer
 }
 
@@ -959,12 +979,16 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		stall.Reset(upstreamStallTimeout)
 	}
 	defer stall.Stop()
+	// progress 与 stall 同构：计时器跨 Recv 复用，消费方每次进入等待
+	// 前 Reset 续期——窗口只覆盖「活跃等待期间」的零事件时长，消费方
+	// 去忙别的事不计入，也不能随 Recv 返回停表。
 	progress := stream.progress
 	if progress == nil {
 		progress = time.NewTimer(upstreamNoProgressTimeout)
 		stream.progress = progress
+	} else {
+		progress.Reset(upstreamNoProgressTimeout)
 	}
-	defer progress.Stop()
 	for len(stream.queue) == 0 && !stream.finished {
 		if err := ctx.Err(); err != nil {
 			return llm.ResponseEvent{}, err
@@ -1127,6 +1151,9 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	// 新流的首个非错误帧重新获得解闩资格——上一流的确认不能
 	// 替代这次重试是否真的打穿了限流。
 	stream.upstreamConfirmed = false
+	// 新流的无进度窗口从头计起：旧流的计时器（可能刚触发排空）
+	// 不沿用，消费方对新流重新获得完整的零事件容忍期。
+	stream.progress.Reset(upstreamNoProgressTimeout)
 	return true
 }
 

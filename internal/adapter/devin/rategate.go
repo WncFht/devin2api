@@ -386,8 +386,9 @@ func (gate *rateGate) wait(ctx context.Context) error {
 }
 
 // noteUpstreamError 用上游失败刷新冷却闩；只有 resource_exhausted 与
-// 限流有关，其余错误原样忽略。闩只延长不提前；新拒绝同时重置滴灌
-// 时钟——上一枚探针刚被打回来，下一槽从头计起。
+// 限流有关，其余错误原样忽略。闩只延长不提前；只有闩被延长时才重置
+// 滴灌时钟——截止未变的重复拒绝说明窗口未过，原探测节奏仍然成立，
+// 重排滴灌只会无谓推迟下一枚探针。
 func (gate *rateGate) noteUpstreamError(err error) {
 	if gate == nil {
 		return

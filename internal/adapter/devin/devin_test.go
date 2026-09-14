@@ -112,6 +112,35 @@ func (receiver *hangAfterReceiver) Msg() *devinproto.GetChatMessageResponse {
 // Err 模拟正常 EOF。
 func (receiver *hangAfterReceiver) Err() error { return nil }
 
+// heartbeatAfterReceiver 发完脚本帧后无限续发同一心跳帧（零事件活性帧），
+// 模拟「上游有帧流动但永不产出内容」的退化流——静默看门狗被帧到达喂活，
+// 只能由无进度期限兜底。
+type heartbeatAfterReceiver struct {
+	responses []*devinproto.GetChatMessageResponse
+	index     int
+	current   *devinproto.GetChatMessageResponse
+	heartbeat *devinproto.GetChatMessageResponse
+}
+
+// Receive 先发脚本帧，之后无限报告心跳帧。
+func (receiver *heartbeatAfterReceiver) Receive() bool {
+	if receiver.index < len(receiver.responses) {
+		receiver.current = receiver.responses[receiver.index]
+		receiver.index++
+		return true
+	}
+	receiver.current = receiver.heartbeat
+	return true
+}
+
+// Msg 返回最近一次成功读取的帧。
+func (receiver *heartbeatAfterReceiver) Msg() *devinproto.GetChatMessageResponse {
+	return receiver.current
+}
+
+// Err 模拟正常 EOF。
+func (receiver *heartbeatAfterReceiver) Err() error { return nil }
+
 func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	request := llm.RequestMessages{
 		SystemPrompt: "system",
@@ -633,6 +662,57 @@ func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderBindsLateToolCallID 的测试动机是首帧缺 id 的退化形态：
+// 合成占位发出 ToolCallStart 后真实 id 晚到，事件侧必须继续用占位 id
+// （客户端已按它对账），而最终消息的内容块要回填真 id 供下轮回放。
+func TestResponseDecoderBindsLateToolCallID(t *testing.T) {
+	decoder := newResponseDecoder("model", nil, nil)
+	decoder.start()
+	first := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Name: proto.String("exec"), ArgumentsJson: proto.String(`{"command":"`),
+	}}})
+	if len(first) == 0 || first[0].Type != llm.ResponseEventToolCallStart || first[0].ToolCallID != "call_0" {
+		t.Fatalf("first events = %#v, want tool start with placeholder call_0", first)
+	}
+	second := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Id: proto.String("real-id"), ArgumentsJson: proto.String(`ls"}`),
+	}}})
+	for _, event := range second {
+		if event.ToolCallID != "call_0" {
+			t.Fatalf("delta ToolCallID = %q, want pinned placeholder call_0", event.ToolCallID)
+		}
+	}
+	call := decoder.partial.Content[0].(llm.ToolCall)
+	if call.ID != "real-id" {
+		t.Fatalf("partial call id = %q, want backfilled real-id", call.ID)
+	}
+	decoder.decode(&devinproto.GetChatMessageResponse{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL.Enum()})
+	done := decoder.finish(nil)
+	final := done[len(done)-1].Message.Content[0].(llm.ToolCall)
+	if final.ID != "real-id" || string(final.Arguments) != `{"command":"ls"}` {
+		t.Fatalf("final call = %#v", final)
+	}
+}
+
+// TestResponseDecoderSplitsSecondIdlessCall 验证带新名字的后续无 id 帧开启
+// 新调用而不是并入上一个——无 id 续帧按位置归并，但名字不同就是另一次调用。
+func TestResponseDecoderSplitsSecondIdlessCall(t *testing.T) {
+	decoder := newResponseDecoder("model", nil, nil)
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Id: proto.String("a"), Name: proto.String("exec"),
+	}}})
+	second := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Name: proto.String("read"),
+	}}})
+	if len(second) != 1 || second[0].Type != llm.ResponseEventToolCallStart || second[0].ToolCallID != "call_1" {
+		t.Fatalf("second events = %#v, want new tool start call_1", second)
+	}
+	if len(decoder.tools) != 2 {
+		t.Fatalf("tools = %d, want 2 separate calls", len(decoder.tools))
+	}
+}
+
 // TestResponseDecoderUnwrapsCustomToolArguments 验证 custom 声明工具的
 // wire 包装形态：start 即标记 Custom（下游 item kind 是 custom_tool_call），
 // {"input":"<原文>"} 片段流中不产生 delta，结束帧解包成 freeform 原文。
@@ -1131,6 +1211,40 @@ func TestResponseStreamNoProgressWatchdog(t *testing.T) {
 	}
 }
 
+// TestResponseStreamNoProgressWatchdogAfterContent 的测试动机是钉住无进度
+// 看门狗的跨 Recv 生命周期：首个内容事件下发后看门狗必须仍在岗——消费方
+// 活跃等待期间零事件帧续命照样触发收尾（旧实现 Recv 返回即停表，首事件
+// 后看门狗实质失效，退化的活性帧流会让请求无限挂起）。
+func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
+	defer func(d time.Duration) { upstreamNoProgressTimeout = d }(upstreamNoProgressTimeout)
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamNoProgressTimeout = 30 * time.Millisecond
+	upstreamStallTimeout = 10 * time.Second
+	receiver := &heartbeatAfterReceiver{
+		responses: []*devinproto.GetChatMessageResponse{{DeltaText: proto.String("hi")}},
+		heartbeat: &devinproto.GetChatMessageResponse{
+			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
+		},
+	}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	// 先排空首批内容事件（start/text_start/text_delta），此后只剩心跳帧。
+	for drained := false; !drained; {
+		event, err := stream.Recv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		drained = event.Type == llm.ResponseEventTextDelta
+	}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil ||
+		!strings.Contains(event.Error.ErrorMessage, "no progress") {
+		t.Fatalf("event = %#v, want no-progress error after first content", event)
+	}
+}
+
 // TestResponseStreamReleasesStartOnHoldTimeout 的测试动机是：上游建流后
 // 长时间静默时，扣留的 start 必须先行下发——否则客户端在 ~30s 无数据
 // 处弃连（中间网关只在首个协议事件后才向客户端放通字节），一条本来
@@ -1524,6 +1638,27 @@ func TestPairToolCallsWithResultsConsumesDuplicateID(t *testing.T) {
 	}
 	if out[0].GetSource() != assistant || out[1].GetSource() != tool || out[2].GetSource() != assistant {
 		t.Fatalf("expected call,result,call ordering, got %#v", out)
+	}
+}
+
+// TestPairToolCallsWithResultsKeepsDuplicateResults 验证同 id 的多份结果
+// 按到达顺序配对且都不丢：旧实现 byID 单值存取，R1 被 R2 覆盖后按 id 判
+// 已消费，先到的结果被静默丢弃。
+func TestPairToolCallsWithResultsKeepsDuplicateResults(t *testing.T) {
+	assistant := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
+	tool := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
+	callPrompt := &devinproto.ExaChatPb_ChatMessagePrompt{
+		Source:    assistant.Enum(),
+		ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String("dup"), Name: proto.String("x")}},
+	}
+	result1 := &devinproto.ExaChatPb_ChatMessagePrompt{Source: tool.Enum(), ToolCallId: proto.String("dup"), Prompt: proto.String("r1")}
+	result2 := &devinproto.ExaChatPb_ChatMessagePrompt{Source: tool.Enum(), ToolCallId: proto.String("dup"), Prompt: proto.String("r2")}
+	out, _ := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callPrompt, result1, result2})
+	if len(out) != 3 {
+		t.Fatalf("paired prompts = %d, want 3 (no result may be dropped)", len(out))
+	}
+	if out[0] != callPrompt || out[1] != result1 || out[2] != result2 {
+		t.Fatalf("expected call,result1,result2 order, got %#v", out)
 	}
 }
 

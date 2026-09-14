@@ -272,8 +272,12 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 				calls = append(calls, typed)
 			}
 		}
-		// 完全空的助手消息会诱发上游反复返回空回复，跳过。
-		if text.Len() == 0 && len(calls) == 0 {
+		// 完全空的助手消息会诱发上游反复返回空回复，跳过。判空要覆盖
+		// 全部可回放产物：thinking/签名/redacted/output_id/调用任一
+		// 存在都不算空——openai 体制下「只有签名的 thinking 块」是
+		// 合法载荷，decodeLateSignature 合成的正是这一形态。
+		if text.Len() == 0 && thinking.Len() == 0 && len(calls) == 0 &&
+			signature == "" && !redacted && message.OutputID == "" {
 			return nil, nil
 		}
 		prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
@@ -357,29 +361,33 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 			calls = append(calls, prompts[i])
 			i++
 		}
-		byID := make(map[string]*devinproto.ExaChatPb_ChatMessagePrompt)
+		byID := make(map[string][]*devinproto.ExaChatPb_ChatMessagePrompt)
 		j := i
 		for j < len(prompts) && isResultPrompt(prompts[j]) {
-			byID[prompts[j].GetToolCallId()] = prompts[j]
+			id := prompts[j].GetToolCallId()
+			byID[id] = append(byID[id], prompts[j])
 			j++
 		}
-		consumed := make(map[string]struct{}, len(calls))
+		// consumed 记已配对的 result 指针而非 id：同 id 多份结果按到达
+		// 顺序消费（重复 call-id 实测被上游容忍但按位置绑定），单值
+		// byID 会让先到的结果被后到的覆盖丢失。
+		consumed := make(map[*devinproto.ExaChatPb_ChatMessagePrompt]struct{}, len(calls))
 		for _, callPrompt := range calls {
 			out = append(out, callPrompt)
 			for _, call := range callPrompt.GetToolCalls() {
 				id := call.GetId()
-				if result, ok := byID[id]; ok {
-					out = append(out, result)
-					consumed[id] = struct{}{}
-					// 重复 call-id 实测被上游容忍但按位置绑定：同 id 的第二个
-					// 调用不应再挂到同一份结果上，消费后即删除。
-					delete(byID, id)
+				queue := byID[id]
+				if len(queue) == 0 {
+					continue
 				}
+				out = append(out, queue[0])
+				consumed[queue[0]] = struct{}{}
+				byID[id] = queue[1:]
 			}
 		}
 		// 未能配对的孤立结果按原序保留，不丢消息。
 		for k := i; k < j; k++ {
-			if _, ok := consumed[prompts[k].GetToolCallId()]; !ok {
+			if _, ok := consumed[prompts[k]]; !ok {
 				out = append(out, prompts[k])
 			}
 		}
@@ -406,23 +414,23 @@ func countMovedPrompts(in, out []*devinproto.ExaChatPb_ChatMessagePrompt) int {
 
 // demoteOrphanToolResults 把找不到对应 tool call 的孤立 TOOL 结果
 // （客户端压缩丢掉 function_call 时产生）降级为 USER 文本消息。
-// 上游对无配对的 TOOL prompt 返回 invalid_argument；降级保住结果内容。
+// 判据是位置性的——同 id call 必须出现在该 result 之前：上游要求
+// call→result 紧邻配对，result 先于 call（或根本没有 call）都回
+// invalid_argument；降级保住结果内容。
 // 第二个返回值是被降级的结果数。
 func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) ([]*devinproto.ExaChatPb_ChatMessagePrompt, int) {
-	callIDs := make(map[string]struct{})
-	for _, prompt := range prompts {
-		for _, call := range prompt.GetToolCalls() {
-			callIDs[call.GetId()] = struct{}{}
-		}
-	}
 	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
 	userSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER
 	demotedCount := 0
+	seenCallIDs := make(map[string]struct{})
 	for index, prompt := range prompts {
+		for _, call := range prompt.GetToolCalls() {
+			seenCallIDs[call.GetId()] = struct{}{}
+		}
 		if prompt.GetSource() != toolSource {
 			continue
 		}
-		if _, ok := callIDs[prompt.GetToolCallId()]; ok {
+		if _, ok := seenCallIDs[prompt.GetToolCallId()]; ok {
 			continue
 		}
 		slog.Warn("demoted orphan tool result to user text", "tool_call_id", prompt.GetToolCallId())
@@ -439,6 +447,10 @@ func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) 
 	return prompts, demotedCount
 }
 
+// promptForContent 把 UserMessage/ToolResultMessage 的内容块投影为单条
+// prompt。两类消息的 Validate 已限定 content 只含 text/image，
+// thinking/工具调用不会到达这里——助手侧产物走 convertMessage 的
+// AssistantMessage 分支单独组装。
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool, repairs *llm.RequestRepairs) *devinproto.ExaChatPb_ChatMessagePrompt {
 	prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randid.UUID()),
@@ -449,15 +461,6 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 		switch block := block.(type) {
 		case llm.TextContent:
 			text.WriteString(block.Text)
-		case llm.ThinkingContent:
-			prompt.Thinking = proto.String(block.Thinking)
-			if block.ThinkingSignature != "" {
-				prompt.Signature = proto.String(block.ThinkingSignature)
-			}
-			if block.SignatureType != "" {
-				prompt.SignatureType = proto.String(block.SignatureType)
-			}
-			prompt.ThinkingRedacted = proto.Bool(block.Redacted)
 		case llm.ImageContent:
 			if !attachImages {
 				// 与 WindsurfAPI 一致：历史图不进 Images，避免上游 invalid_argument。
