@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // openAIErrorTypes 把 Connect code 映射为 OpenAI 兼容的错误对象 type。
@@ -245,9 +243,9 @@ func UpstreamErrorDetails(message string) map[string]any {
 
 // BuildErrorPayload 组装协议流内错误的 error 字段：message/type/code 三键、
 // openAIParam 为 true 时附带 OpenAI 风格的 "param":null，再并入上游排障
-// 字段（upstream_trace_id/retry_after）与错误消息携带的 debug_ref。
+// 字段（upstream_trace_id/retry_after）与请求调试目录名 debug_ref。
 // 三协议的流内错误共用同一份字段清单，避免各处抄写随演进漂移。
-func BuildErrorPayload(message string, errorType string, failed *llm.AssistantMessage, openAIParam bool) map[string]any {
+func BuildErrorPayload(message string, errorType string, debugRef string, openAIParam bool) map[string]any {
 	payload := map[string]any{
 		"message": message,
 		"type":    errorType,
@@ -259,8 +257,8 @@ func BuildErrorPayload(message string, errorType string, failed *llm.AssistantMe
 	for key, value := range UpstreamErrorDetails(message) {
 		payload[key] = value
 	}
-	if failed != nil && failed.DebugRef != "" {
-		payload["debug_ref"] = failed.DebugRef
+	if debugRef != "" {
+		payload["debug_ref"] = debugRef
 	}
 	return payload
 }

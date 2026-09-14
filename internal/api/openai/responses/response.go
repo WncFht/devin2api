@@ -486,7 +486,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	// 事件顶层 error 与 response.error 共用同一份 payload（spec 位置与
 	// 排障位置同事实源），debug_ref 等排障字段两处一致。
-	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error, true)
+	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error.DebugRef, true)
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
 	response["error"] = errorPayload
 	// 挂起的 reasoning item 先补发收尾再下发失败事件，与 Done 路径一致——

@@ -384,7 +384,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// data: {"type":"error","error":{"type":"...","message":"..."}}
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
-	errorPayload := common.BuildErrorPayload(message, common.AnthropicErrorType(message), event.Error, false)
+	errorPayload := common.BuildErrorPayload(message, common.AnthropicErrorType(message), event.Error.DebugRef, false)
 	events := encoder.flushPendingThinking()
 	return append(events, encoder.event("error", map[string]any{
 		"type":   "error",

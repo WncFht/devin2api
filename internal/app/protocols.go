@@ -61,32 +61,15 @@ func openAIHTTPError(e httpError) []byte {
 	if e.ClientFixable {
 		errorType = "invalid_request_error"
 	}
-	payload := map[string]any{
-		"message": e.Message, "type": errorType,
-		"code": common.ErrorCode(e.Message), "param": nil, "stage": e.Stage,
-	}
-	for key, value := range common.UpstreamErrorDetails(e.Message) {
-		payload[key] = value
-	}
-	if e.DebugRef != "" {
-		payload["debug_ref"] = e.DebugRef
-	}
+	payload := common.BuildErrorPayload(e.Message, errorType, e.DebugRef, true)
+	payload["stage"] = e.Stage
 	body, _ := json.Marshal(map[string]any{"error": payload})
 	return append(body, '\n')
 }
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
 func openAIErrorBody(err error, debugRef string) []byte {
-	payload := map[string]any{
-		"message": err.Error(), "type": common.OpenAIErrorType(err.Error()),
-		"code": common.ErrorCode(err.Error()), "param": nil,
-	}
-	for key, value := range common.UpstreamErrorDetails(err.Error()) {
-		payload[key] = value
-	}
-	if debugRef != "" {
-		payload["debug_ref"] = debugRef
-	}
+	payload := common.BuildErrorPayload(err.Error(), common.OpenAIErrorType(err.Error()), debugRef, true)
 	body, _ := json.Marshal(map[string]any{"error": payload})
 	return body
 }
@@ -168,16 +151,7 @@ func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, e
 }
 
 func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
-	payload := map[string]any{
-		"type": common.AnthropicErrorType(err.Error()), "message": err.Error(),
-		"code": common.ErrorCode(err.Error()),
-	}
-	for key, value := range common.UpstreamErrorDetails(err.Error()) {
-		payload[key] = value
-	}
-	if debugRef != "" {
-		payload["debug_ref"] = debugRef
-	}
+	payload := common.BuildErrorPayload(err.Error(), common.AnthropicErrorType(err.Error()), debugRef, false)
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return body
 }
@@ -189,16 +163,8 @@ func (p anthropicProtocol) EncodeHTTPError(e httpError) []byte {
 	if e.ClientFixable {
 		errorType = "invalid_request_error"
 	}
-	payload := map[string]any{
-		"type": errorType, "message": e.Message,
-		"code": common.ErrorCode(e.Message), "stage": e.Stage,
-	}
-	for key, value := range common.UpstreamErrorDetails(e.Message) {
-		payload[key] = value
-	}
-	if e.DebugRef != "" {
-		payload["debug_ref"] = e.DebugRef
-	}
+	payload := common.BuildErrorPayload(e.Message, errorType, e.DebugRef, false)
+	payload["stage"] = e.Stage
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return append(body, '\n')
 }

@@ -254,7 +254,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误。
-	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error, true)
+	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error.DebugRef, true)
 	data, _ := json.Marshal(map[string]any{
 		"id":      encoder.responseID,
 		"object":  "chat.completion.chunk",
