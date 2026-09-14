@@ -18,12 +18,15 @@ type SSEEvent = common.SSEEvent
 
 // StreamEncoder 保存一次 Chat Completions 流的协议状态。
 type StreamEncoder struct {
-	model           string
-	responseID      string
-	createdAt       int64
-	includeUsage    bool
-	textStarted     bool
-	thinkingStarted bool
+	model        string
+	responseID   string
+	createdAt    int64
+	includeUsage bool
+	// textStarted/thinkingStarted 按 llm ContentIndex 记录块开闭：不同下标
+	// 的同类块可以交错（thinking 块之间夹 text），单 bool 会把第二个块的
+	// delta 误判成「未 start」。
+	textStarted     map[int]bool
+	thinkingStarted map[int]bool
 	toolCalls       []*toolCallState
 	// toolByContent 按 llm ContentIndex 索引工具状态。ContentIndex 是
 	// partial.Content 的全局块下标（text/thinking/toolCall 混排），
@@ -43,11 +46,13 @@ type toolCallState struct {
 // NewStreamEncoder 为一次 Chat Completions 流创建编码状态。
 func NewStreamEncoder(model string, includeUsage bool) *StreamEncoder {
 	return &StreamEncoder{
-		model:         model,
-		responseID:    randid.Prefixed("chatcmpl-"),
-		createdAt:     time.Now().Unix(),
-		includeUsage:  includeUsage,
-		toolByContent: map[int]*toolCallState{},
+		model:           model,
+		responseID:      randid.Prefixed("chatcmpl-"),
+		createdAt:       time.Now().Unix(),
+		includeUsage:    includeUsage,
+		textStarted:     map[int]bool{},
+		thinkingStarted: map[int]bool{},
+		toolByContent:   map[int]*toolCallState{},
 	}
 }
 
@@ -94,13 +99,13 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventStart:
 		return encoder.start(), nil
 	case llm.ResponseEventTextStart:
-		return encoder.startText(), nil
+		return encoder.startText(event), nil
 	case llm.ResponseEventTextDelta:
 		return encoder.textDelta(event)
 	case llm.ResponseEventTextEnd:
 		return encoder.endText(event)
 	case llm.ResponseEventThinkingStart:
-		return encoder.startThinking(), nil
+		return encoder.startThinking(event), nil
 	case llm.ResponseEventThinkingDelta:
 		return encoder.thinkingDelta(event)
 	case llm.ResponseEventThinkingEnd:
@@ -134,14 +139,14 @@ func (encoder *StreamEncoder) start() []SSEEvent {
 // 后续所有块级事件（delta/end/signature）都依赖对应 *_start 前置——
 // 解码器契约保证该顺序，缺失即解码器 bug，各 handler 显式报错而非
 // 自动补或静默丢弃，与另两个协议编码器一致。
-func (encoder *StreamEncoder) startText() []SSEEvent {
-	encoder.textStarted = true
+func (encoder *StreamEncoder) startText(event llm.ResponseEvent) []SSEEvent {
+	encoder.textStarted[event.ContentIndex] = true
 	return nil
 }
 
 // textDelta 下发一段正文增量。
 func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if !encoder.textStarted {
+	if !encoder.textStarted[event.ContentIndex] {
 		return nil, fmt.Errorf("text delta at content index %d without text_start", event.ContentIndex)
 	}
 	return []SSEEvent{encoder.chunk([]chatChoice{{
@@ -151,24 +156,24 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, er
 
 // endText 关闭文字块；Chat 流没有块结束帧，仅复位状态。
 func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if !encoder.textStarted {
+	if !encoder.textStarted[event.ContentIndex] {
 		return nil, fmt.Errorf("text end at content index %d without text_start", event.ContentIndex)
 	}
-	encoder.textStarted = false
+	delete(encoder.textStarted, event.ContentIndex)
 	return nil, nil
 }
 
 // startThinking 标记思考块已开。
 // OpenAI Chat Completions 没有官方 reasoning 字段。
 // 这里参考 DeepSeek 等厂商的约定，用 choices[0].delta.reasoning_content 输出思考。
-func (encoder *StreamEncoder) startThinking() []SSEEvent {
-	encoder.thinkingStarted = true
+func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent {
+	encoder.thinkingStarted[event.ContentIndex] = true
 	return nil
 }
 
 // thinkingDelta 下发一段思考增量为 reasoning_content。
 func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if !encoder.thinkingStarted {
+	if !encoder.thinkingStarted[event.ContentIndex] {
 		return nil, fmt.Errorf("thinking delta at content index %d without thinking_start", event.ContentIndex)
 	}
 	return []SSEEvent{encoder.chunk([]chatChoice{{
@@ -178,10 +183,10 @@ func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) ([]SSEEvent
 
 // endThinking 关闭思考块，仅复位状态。
 func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if !encoder.thinkingStarted {
+	if !encoder.thinkingStarted[event.ContentIndex] {
 		return nil, fmt.Errorf("thinking end at content index %d without thinking_start", event.ContentIndex)
 	}
-	encoder.thinkingStarted = false
+	delete(encoder.thinkingStarted, event.ContentIndex)
 	return nil, nil
 }
 

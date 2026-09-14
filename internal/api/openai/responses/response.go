@@ -4,6 +4,8 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,6 +35,9 @@ type StreamEncoder struct {
 	started bool
 	// completed 表示终止事件已经发出。
 	completed bool
+	// outputIDClaimed 标记上游 outputId 已被首个 message item 领走：
+	// item id 在一次响应内必须唯一，后续 message 块用合成的 msg_。
+	outputIDClaimed bool
 }
 
 // streamItem 保存一个 reasoning、function_call 或 message output item 的编码状态。
@@ -289,8 +294,8 @@ func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSE
 // 内容块才到，中途不调用以免提前关项导致迟到签名无处可落。
 func (encoder *StreamEncoder) flushPendingReasoning() []SSEEvent {
 	var events []SSEEvent
-	for _, item := range encoder.items {
-		if item.pendingDone {
+	for _, index := range slices.Sorted(maps.Keys(encoder.items)) {
+		if item := encoder.items[index]; item.pendingDone {
 			events = append(events, encoder.reasoningDone(item)...)
 		}
 	}
@@ -304,11 +309,13 @@ func (encoder *StreamEncoder) startText(event llm.ResponseEvent) ([]SSEEvent, er
 		return nil, err
 	}
 	// 上游 output_id 是 OpenAI 侧 message item 的真实标识（msg_*），
-	// 下发同一个 id 让客户端回放的 item 与上游记录对齐。
-	if event.Partial != nil && event.Partial.OutputID != "" {
+	// 下发同一个 id 让客户端回放的 item 与上游记录对齐。一个上游
+	// outputId 只认领一次：同响应内多个 message 块共用会让 output item
+	// id 冲突，后续块落回合成的 msg_。
+	if event.Partial.OutputID != "" && !encoder.outputIDClaimed {
 		item.id = event.Partial.OutputID
+		encoder.outputIDClaimed = true
 	}
-	item.contentIndex = 0
 	return []SSEEvent{
 		encoder.emit("response.output_item.added", map[string]any{
 			"output_index": item.outputIndex,
@@ -440,8 +447,8 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 
 // done 校验无悬空 item 后发 response.completed/incomplete 终帧。
 func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) {
-	for _, item := range encoder.items {
-		if !item.closed {
+	for _, index := range slices.Sorted(maps.Keys(encoder.items)) {
+		if item := encoder.items[index]; !item.closed {
 			return nil, fmt.Errorf("cannot finish response with open %s item at output index %d", item.kind, item.outputIndex)
 		}
 	}
@@ -618,13 +625,17 @@ func responseUsage(usage llm.Usage) map[string]any {
 func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 	// OpenAI 常见顺序：reasoning → function_call → message；稳定排序避免 IDE 只读 output[0] 当 message。
 	var reasonings, toolCalls, messages []any
+	messageIDClaimed := false
 	for _, block := range message.Content {
 		switch content := block.(type) {
 		case llm.TextContent:
+			// 上游 outputId 只归首个 message item——多个文字块共用同一 id
+			// 会让 output item 标识冲突，其余用合成 msg_。
 			messageID := message.OutputID
-			if messageID == "" {
+			if messageID == "" || messageIDClaimed {
 				messageID = randid.Prefixed("msg_")
 			}
+			messageIDClaimed = true
 			messages = append(messages, map[string]any{
 				"id": messageID, "type": "message", "status": "completed", "role": "assistant",
 				"content": []any{map[string]any{"type": "output_text", "text": content.Text, "annotations": []any{}}},
