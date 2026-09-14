@@ -189,6 +189,10 @@ type ListResult struct {
 	// HasMore 表示 index.jsonl 在读取窗口之外还有更早历史
 	// （文件超过尾部读取上限，或未读窗口内仍有剩余行）。
 	HasMore bool `json:"has_more"`
+	// IndexTailStart 是本轮索引尾部读取窗覆盖到的最早一行 started_at；
+	// 配合 filter.Since 可判断时间窗覆盖是否完整——它比 since 还晚，
+	// 说明尾部窗口边界落在请求窗口内部，窗内条目可能被截断。
+	IndexTailStart string `json:"index_tail_start,omitempty"`
 }
 
 // RequestFilter 是请求列表的结构化筛选条件；零值匹配全部。
@@ -404,7 +408,11 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	}
 	// 文件比读取窗口大 → 窗口外还有历史；窗口内未扫完 → 同理。
 	hasMore := info.Size() > cached.windowBytes
-	return ListResult{Entries: entries, HasMore: hasMore || !scannedAll}
+	result := ListResult{Entries: entries, HasMore: hasMore || !scannedAll}
+	if len(cached.entries) > 0 {
+		result.IndexTailStart = cached.entries[0].StartedAt
+	}
+	return result
 }
 
 // processLogTailBytes 是进程日志单次返回的尾部上限。

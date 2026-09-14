@@ -66,6 +66,65 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+// matrixEntry 是健康矩阵用的条目投影：只带分桶（started_at）与归因/悬停
+// （归因口径、状态码计数、均耗时/均 TTFB）所需字段。完整 IndexEntry 约
+// 30 个字段，投影把单条载荷压小一个量级。
+type matrixEntry struct {
+	StartedAt       string `json:"started_at"`
+	Model           string `json:"model,omitempty"`
+	RequestedModel  string `json:"requested_model,omitempty"`
+	StatusCode      int    `json:"status_code"`
+	Result          string `json:"result"`
+	ErrorStage      string `json:"error_stage,omitempty"`
+	DurationMS      int64  `json:"duration_ms"`
+	FirstUpstreamMS *int64 `json:"first_upstream_ms,omitempty"`
+	RateLimited     bool   `json:"rate_limited,omitempty"`
+}
+
+// apiRequestMatrix 给概览健康矩阵提供紧凑条目：窗口内条目不分页，
+// 扫描上限直接用满 requestsFetchCap——走 /requests?limit=500 的列表
+// 口径在高流量下盖不满 30 分钟分桶窗口。
+func (h *Handler) apiRequestMatrix(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if h.debugManager == nil {
+		_, _ = w.Write([]byte(`{"entries":[],"disabled":true}`))
+		return
+	}
+	filter := parseRequestFilter(r.URL.Query())
+	result := h.debugManager.ListRequests(requestsFetchCap, filter)
+	entries := make([]matrixEntry, 0, len(result.Entries))
+	for _, e := range result.Entries {
+		entries = append(entries, matrixEntry{
+			StartedAt:       e.StartedAt,
+			Model:           e.Model,
+			RequestedModel:  e.RequestedModel,
+			StatusCode:      e.StatusCode,
+			Result:          e.Result,
+			ErrorStage:      e.ErrorStage,
+			DurationMS:      e.DurationMS,
+			FirstUpstreamMS: e.FirstUpstreamMS,
+			RateLimited:     e.RateLimited,
+		})
+	}
+	// 截断判定不同于列表的 has_more（后者只说文件比尾部窗大）：窗口内
+	// 条目打满扫描上限，或尾部窗最早一行仍晚于 since（尾部边界落在
+	// 请求窗口内部，窗内可能有条目根本没被读到），才算覆盖不完整。
+	truncated := len(result.Entries) >= requestsFetchCap
+	if !truncated && result.HasMore && !filter.Since.IsZero() {
+		if tailStart, err := time.Parse(time.RFC3339Nano, result.IndexTailStart); err == nil {
+			truncated = tailStart.After(filter.Since)
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"entries":   entries,
+		"total":     len(entries),
+		"truncated": truncated,
+	})
+}
+
 // parseRequestFilter 从查询串构建结构化筛选；q 为子串，其余为精确条件。
 func parseRequestFilter(params map[string][]string) debuglog.RequestFilter {
 	get := func(key string) string {

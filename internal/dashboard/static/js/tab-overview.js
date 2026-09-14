@@ -18,18 +18,18 @@ const MX_BUCKETS = 180, MX_BUCKET_MS = 10000;
 // 矩阵渲染状态：mxRowsData 是悬停提示的数据源（格子上只放索引），
 // mxSig 是外观签名——1s 轮询下数据没变就跳过整棵字符串重建 + morph diff，
 // 上千格子的解析成本不是免费的。
-let mxRowsData = [], mxStart = 0, mxSig = '', mxHover = null, mxTip = null;
+let mxRowsData = [], mxStart = 0, mxSig = '', mxHover = null, mxTip = null, mxFocus = null;
 // alertCount 由 renderAlerts 写入，verdict 引用——替代 innerHTML 里
 // 数 'err-banner' 字符串的脆写法（class 改名或文案撞词就静默算错）。
 let alertCount = 0;
 
 // delta：今日 vs 昨日同指标的环比箭头，昨日为 0 时不显示。
+// 中性色：请求量/token 的增减是方向不是好坏，红绿暗示价值判断会误读。
 function delta(cur, prev) {
   if (!prev) return '';
   const d = (cur - prev) / prev * 100;
   if (!Number.isFinite(d)) return '';
-  const up = d >= 0;
-  return ' <span class="' + (up ? 'status-ok' : 'status-err') + '">' + (up ? '↑' : '↓') + Math.abs(d).toFixed(0) + '%</span>';
+  return ' <span class="muted">' + (d >= 0 ? '↑' : '↓') + Math.abs(d).toFixed(0) + '%</span>';
 }
 
 function renderKpis() {
@@ -100,7 +100,7 @@ function renderQuota() {
 function renderHealth() {
   const el = $('ovHealth');
   if (!el) return;
-  const list = (matrixData && matrixData.requests) || [];
+  const list = (matrixData && matrixData.entries) || [];
   const endSlot = Math.floor(Date.now() / MX_BUCKET_MS);
   const startSlot = endSlot - MX_BUCKETS;
   // 行：总计 + 窗口内请求量 Top6 模型；更多模型并进「其他」一行。
@@ -140,12 +140,18 @@ function renderHealth() {
   mxRowsData = rows;
   mxStart = startSlot;
   // 外观签名：行标签（模型进出 Top6 会换行）+ 每格 n（决定深浅，经行
-  // 峰值归一）与 sev（决定色相），加 startSlot——桶边界滚动后同一批
-  // 数据也要整体平移重画。签名不变就跳过字符串重建 + morph diff。
-  const sig = startSlot + '|' + JSON.stringify(rows.map(r => [r.label, Array.from(r.cells, c => c ? [c.n, c.sev] : 0)]));
+  // 峰值归一）与 sev（决定色相），加 startSlot 与截断标记——桶边界滚动
+  // 或截断状态翻转后同一批数据也要整体重画。签名不变就跳过字符串重建 + morph diff。
+  const truncated = !!(matrixData && matrixData.truncated);
+  const sig = startSlot + '|' + (truncated ? 'T' : 'F') + '|' + JSON.stringify(rows.map(r => [r.label, Array.from(r.cells, c => c ? [c.n, c.sev] : 0)]));
   if (sig !== mxSig) {
     mxSig = sig;
     let html = '';
+    // 截断升级成琥珀 banner：埋在 caption 小字里排障时看不见。
+    if (truncated) {
+      html += '<div class="warn-banner">矩阵覆盖被截断：仅加载最近 ' + list.length +
+        ' 条，更早时段可能缺失——完整历史用 grep 查 index.jsonl。</div>';
+    }
     rows.forEach((row, ri) => {
       // cells 是稀疏数组（空桶无条目），Array.from 遍历含空位，
       // 直接 cells.map+展开会把空位展开成 undefined 污染 Math.max。
@@ -154,16 +160,22 @@ function renderHealth() {
       for (let i = 0; i < MX_BUCKETS; i++) {
         const c = row.cells[i];
         // data-r/data-i 是 mxRowsData 的索引；data-s/data-u 供下钻钉时间窗。
-        const base = ' data-r="' + ri + '" data-i="' + i + '" data-s="' + new Date((startSlot + i) * MX_BUCKET_MS).toISOString() + '"';
+        // 全部格子可聚焦（roving tabindex，键盘方向键导航 + 焦点悬停卡）；
+        // 无数据格同样可读「无请求」，只是 Enter 不下钻。
+        const base = ' tabindex="-1" role="gridcell" data-r="' + ri + '" data-i="' + i +
+          '" data-s="' + new Date((startSlot + i) * MX_BUCKET_MS).toISOString() + '"';
+        const sevWord = !c || !c.n ? '无请求' : c.sev === 2 ? '服务端失分' : c.sev === 1 ? '客户端或限流' : '正常';
+        const alabel = ' aria-label="' + esc(row.label + ' ' + fmtTime((startSlot + i) * MX_BUCKET_MS) + ' ' +
+          (c && c.n ? c.n + ' 条请求，' : '') + sevWord) + '"';
         if (!c) {
-          cellsHtml += '<i class="h-none"' + base + '></i>';
+          cellsHtml += '<i class="h-none"' + base + alabel + '></i>';
           continue;
         }
         const cls = c.sev === 2 ? 'h-err' : c.sev === 1 ? 'h-warn' : 'h-ok';
         // 高度按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压矮；
         // 20% 下限保证单请求桶仍是可见的条而非刻度线。
         const h = Math.round(20 + 80 * (c.n / rowMax));
-        cellsHtml += '<i class="' + cls + '"' + base + ' data-n="' + c.n + '" data-m="' + esc(row.model || '') +
+        cellsHtml += '<i class="' + cls + '"' + base + alabel + ' data-n="' + c.n + '" data-m="' + esc(row.model || '') +
           '" data-u="' + new Date((startSlot + i + 1) * MX_BUCKET_MS).toISOString() + '" style="height:' + h + '%"></i>';
       }
       // 可下钻的行标签用 button 渲染（键盘可达）；「全部/其他」行无
@@ -174,7 +186,26 @@ function renderHealth() {
           : '<span class="mx-label" title="' + esc(row.label) + '">' + esc(row.label) + '</span>') +
         '<div class="mx-cells">' + cellsHtml + '</div></div>';
     });
+    html += '<div class="mx-legend"><span><i class="h-ok"></i>正常</span><span><i class="h-warn"></i>客户端 / 429</span>' +
+      '<span><i class="h-err"></i>服务端失分</span><span><i class="h-none"></i>无请求</span>' +
+      '<span>高度 = 行内相对请求量 · 方向键移格，Enter 下钻</span></div>';
     morph(el, html);
+    // roving tabindex：整个矩阵只占一个 Tab 位。重建后把焦点还给等价格
+    // （行序可能变，按 label 复核）；未持焦时把 Tab 入口钉在左上角第一格。
+    if (mxFocus) {
+      const again = el.querySelector('i[data-r="' + mxFocus.r + '"][data-i="' + mxFocus.i + '"]');
+      if (again && mxRowsData[mxFocus.r] && mxRowsData[mxFocus.r].label === mxFocus.label) {
+        again.tabIndex = 0;
+        if (!mxEl.contains(document.activeElement)) again.focus();
+      } else {
+        mxFocus = null;
+        const first = el.querySelector('.mx-cells i');
+        if (first) first.tabIndex = 0;
+      }
+    } else {
+      const first = el.querySelector('.mx-cells i');
+      if (first) first.tabIndex = 0;
+    }
     // morph 保节点身份，悬停格在属性级更新下存活；但行序变化（模型跌出
     // Top6）后旧格可能已代表另一行——按 label 复核，对不上就收提示。
     if (mxHover) {
@@ -191,8 +222,7 @@ function renderHealth() {
       if (o === 'upstream') tot.up++; else if (o === 'client') tot.cli++; else if (o === 'business_limited') tot.lim++;
     });
     const mins = Math.round(MX_BUCKETS * MX_BUCKET_MS / 60000);
-    const more = (matrixData && matrixData.total > list.length) ? '（窗口早于列表扫描上限 ' + list.length + ' 条，矩阵可能截断）' : '';
-    cap.innerHTML = '<span>' + fmtTime(startSlot * MX_BUCKET_MS) + '</span><span>' + mins + ' 分钟 ' + list.length + ' 请求 · 服务端 ' + tot.up + ' · 客户端 ' + tot.cli + ' · 429 ' + tot.lim + more + '</span><span>' + fmtTime(endSlot * MX_BUCKET_MS) + '</span>';
+    cap.innerHTML = '<span>' + fmtTime(startSlot * MX_BUCKET_MS) + '</span><span>' + mins + ' 分钟 ' + list.length + ' 请求 · 服务端 ' + tot.up + ' · 客户端 ' + tot.cli + ' · 429 ' + tot.lim + '</span><span>' + fmtTime(endSlot * MX_BUCKET_MS) + '</span>';
   }
 }
 
@@ -268,6 +298,7 @@ function mxShowTip(cell) {
 }
 
 function mxHideTip() {
+  if (!mxHover) return;
   mxHover = null;
   if (mxTip) mxTip.style.display = 'none';
   mxEl.querySelectorAll('i.col-hl').forEach(x => x.classList.remove('col-hl'));
@@ -510,17 +541,18 @@ async function loadQuota() {
 async function loadStatus() {
   try { statusData = await api('/status'); renderAlerts(); renderVerdict(); } catch (e) {}
 }
-// 矩阵数据走 /requests 原始行（since 钉住窗口起点，list 超过单页
-// 上限时 caption 会标注截断）。
+// 矩阵数据走 /requests/matrix 紧凑投影（只带分桶与归因字段，不分页、
+// 扫描上限用满 2000）——替代原先借用列表端点 limit=500 盖不满窗口的口径。
+// truncated 为真（上限打满或尾部窗没回溯到 since）时渲染层提示截断。
 async function loadMatrix() {
   try {
     const since = new Date(Math.floor(Date.now() / MX_BUCKET_MS) * MX_BUCKET_MS - MX_BUCKETS * MX_BUCKET_MS).toISOString();
-    matrixData = await api('/requests?since=' + encodeURIComponent(since) + '&limit=500');
+    matrixData = await api('/requests/matrix?since=' + encodeURIComponent(since));
     renderHealth();
   } catch (e) { /* 保留旧矩阵 */ }
 }
 
-function refresh() { loadStats(); loadActive(); loadMatrix(); }
+function refresh() { loadStats(); loadActive(); }
 function refreshSlow() { loadUsage(); loadQuota(); loadStatus(); }
 
 // 侧栏端口标识：取自当前地址栏，面板换端口时自动跟随。
@@ -553,9 +585,47 @@ mxEl.addEventListener('mouseout', e => {
   const to = e.relatedTarget;
   if (!(to instanceof Element) || !to.closest('.mx-cells i')) mxHideTip();
 });
+// 键盘导航：roving tabindex——矩阵只占一个 Tab 位，方向键在格间移动
+// （上下键按同一 10s 槽换行），焦点落格即出悬停卡，Enter 对有数据的
+// 格子执行下钻（与鼠标点击同一路径）。
+mxEl.addEventListener('focusin', e => {
+  const cell = e.target.closest('.mx-cells i');
+  if (!cell) return;
+  mxEl.querySelectorAll('i[tabindex="0"]').forEach(x => { if (x !== cell) x.tabIndex = -1; });
+  cell.tabIndex = 0;
+  const row = mxRowsData[+cell.dataset.r];
+  mxFocus = { r: +cell.dataset.r, i: +cell.dataset.i, label: row && row.label };
+  mxShowTip(cell);
+});
+mxEl.addEventListener('focusout', e => {
+  const to = e.relatedTarget;
+  if (!(to instanceof Element) || !to.closest('.mx-cells i')) {
+    mxFocus = null;
+    mxHideTip();
+  }
+});
+mxEl.addEventListener('keydown', e => {
+  const cell = e.target.closest('.mx-cells i');
+  if (!cell) return;
+  if (e.key === 'Enter' || e.key === ' ') {
+    if (!cell.dataset.n) return;
+    e.preventDefault();
+    const kv = { since: cell.dataset.s, until: cell.dataset.u };
+    if (cell.dataset.m) kv.model = cell.dataset.m;
+    jumpRequests(kv);
+    return;
+  }
+  const dr = { ArrowRight: [0, 1], ArrowLeft: [0, -1], ArrowDown: [1, 0], ArrowUp: [-1, 0] }[e.key];
+  if (!dr) return;
+  e.preventDefault();
+  const target = mxEl.querySelector('i[data-r="' + (+cell.dataset.r + dr[0]) + '"][data-i="' + (+cell.dataset.i + dr[1]) + '"]');
+  if (target) target.focus();
+});
 window.addEventListener('scroll', mxHideTip, true);
 window.addEventListener('hashchange', mxHideTip);
 
-Tabs.register('overview', () => { refresh(); refreshSlow(); });
+Tabs.register('overview', () => { refresh(); refreshSlow(); loadMatrix(); });
 Polls.add('overview', refresh, 1000);
+// 矩阵桶粒度 10s：独立慢轮询即可，不跟 stats/active 的 1s 节奏空拉。
+Polls.add('overview', loadMatrix, 5000);
 Polls.add('overview', refreshSlow, 60000);

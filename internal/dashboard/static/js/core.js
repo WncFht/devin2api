@@ -197,9 +197,10 @@ export function fmtInPrecise(v) {
 
 // ---------- 错误归因（与后端 debuglog.errorOwner 同口径） ----------
 // client=调用方责任（断连/中断/请求体阶段失败）；business_limited=429
-// 配额动作；upstream=服务端失分（上游错误与代理自身失败），SLA 只算它。
+// 配额动作（HTTP 429 或流内限流——后者 HTTP 仍是 200，靠 rate_limited
+// 标记认出）；upstream=服务端失分（上游错误与代理自身失败），SLA 只算它。
 export function errorOwner(e) {
-  if (e.status_code === 429) return 'business_limited';
+  if (e.status_code === 429 || e.rate_limited) return 'business_limited';
   if (e.result === 'disconnected' || e.result === 'aborted') return 'client';
   if (e.status_code < 400 && e.result !== 'failed') return '';
   if (e.error_stage === 'http_read' || e.error_stage === 'http_decode') return 'client';
