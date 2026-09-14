@@ -591,24 +591,27 @@ func baseResponse(id string, model string, createdAt int64, status string) map[s
 }
 
 func responseUsage(usage llm.Usage) map[string]any {
-	reasoningTokens := int64(0)
-	if usage.Reasoning != nil {
-		reasoningTokens = *usage.Reasoning
-	}
 	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
 	total := usage.TotalTokens
 	if total == 0 {
 		total = inputTokens + usage.Output
 	}
-	return map[string]any{
+	result := map[string]any{
 		"input_tokens": inputTokens,
 		"input_tokens_details": map[string]any{
 			"cached_tokens": usage.CacheRead, "cache_write_tokens": usage.CacheWrite,
 		},
-		"output_tokens":         usage.Output,
-		"output_tokens_details": map[string]any{"reasoning_tokens": reasoningTokens},
-		"total_tokens":          total,
+		"output_tokens": usage.Output,
+		"total_tokens":  total,
 	}
+	// Reasoning 为 nil 表示上游未报告推理子集；恒输出 0 会把「未知」
+	// 伪造成「无推理」，与 chat 面 completion_tokens_details 处理一致。
+	if usage.Reasoning != nil {
+		result["output_tokens_details"] = map[string]any{
+			"reasoning_tokens": *usage.Reasoning,
+		}
+	}
+	return result
 }
 
 func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
