@@ -41,7 +41,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	var resultMu sync.Mutex
 
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 
 	// 正确路径：JSON Connect SeatManagement GetUserStatus（Bearer + metadata.api_key）
 	go func() {
@@ -118,6 +118,42 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 		defer resultMu.Unlock()
 		if providers != nil {
 			result["providers"] = providers
+		}
+	}()
+
+	// 别名目标缺席校验：devin.aliases 指向的 uid 不在上游目录时，请求
+	// 会以模糊的 permission_denied 失败——这个告警此前只在 stderr 里
+	// 按请求打一行，抬到 status 让 agent 程序化可得。
+	go func() {
+		defer wg.Done()
+		resultMu.Lock()
+		defer resultMu.Unlock()
+		if h.aliasesFunc == nil {
+			return
+		}
+		models, err := h.cachedModels(ctx)
+		if err != nil {
+			result["alias_check_error"] = err.Error()
+			return
+		}
+		uids := make(map[string]struct{}, len(models))
+		for _, m := range models {
+			if uid, ok := m["uid"].(string); ok && uid != "" {
+				uids[uid] = struct{}{}
+			}
+		}
+		var absent []string
+		for name, target := range h.aliasesFunc() {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+			if _, ok := uids[target]; !ok {
+				absent = append(absent, name+"→"+target)
+			}
+		}
+		if len(absent) > 0 {
+			result["alias_targets_absent"] = absent
 		}
 	}()
 
