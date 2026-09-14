@@ -405,37 +405,43 @@ func (a *usageAggregator) add(e IndexEntry) {
 	dayTotals.add(e)
 
 	idx := int(slot % usageMinBuckets)
-	if a.mins[idx].at != slot*600 {
+	// 环形槽按 usageMinBuckets（8 天）回绕：回放窗口内的旧条目会撞上
+	// 当前桶的槽位，直接重置会把已计数据连同桶一起抹掉。槽位冲突只
+	// 保留较新 slot 的桶——更旧条目的桶更新丢弃（total/天/维度仍照常
+	// 累计），新 slot 则重置过期桶。
+	if a.mins[idx].at < slot*600 {
 		a.mins[idx] = usageMinBucket{at: slot * 600}
 	}
-	a.mins[idx].requests++
-	if e.StatusCode >= 400 || e.Result == "failed" {
-		a.mins[idx].errors++
-	}
-	if e.Result == "disconnected" || e.Result == "aborted" {
-		a.mins[idx].disconnected++
-	}
-	if isRateLimited(e) {
-		a.mins[idx].rateLimited++
-	}
-	switch errorOwner(e) {
-	case "client":
-		a.mins[idx].clientFaults++
-	case "upstream":
-		a.mins[idx].upstreamFaults++
-	}
-	a.mins[idx].input += e.InputTokens
-	a.mins[idx].output += e.OutputTokens
-	a.mins[idx].cacheRead += e.CacheReadTokens
-	a.mins[idx].cacheWrite += e.CacheWriteTokens
-	a.mins[idx].reasoning += e.ReasoningTokens
-	if out, gen, ok := decodeWindow(e); ok {
-		a.mins[idx].genMS += gen
-		a.mins[idx].genOut += out
-	}
-	pushSample(&a.mins[idx].durs, &a.mins[idx].durHead, e.DurationMS)
-	if e.FirstUpstreamMS != nil {
-		pushSample(&a.mins[idx].ttfbs, &a.mins[idx].ttfbHead, *e.FirstUpstreamMS)
+	if a.mins[idx].at == slot*600 {
+		a.mins[idx].requests++
+		if e.StatusCode >= 400 || e.Result == "failed" {
+			a.mins[idx].errors++
+		}
+		if e.Result == "disconnected" || e.Result == "aborted" {
+			a.mins[idx].disconnected++
+		}
+		if isRateLimited(e) {
+			a.mins[idx].rateLimited++
+		}
+		switch errorOwner(e) {
+		case "client":
+			a.mins[idx].clientFaults++
+		case "upstream":
+			a.mins[idx].upstreamFaults++
+		}
+		a.mins[idx].input += e.InputTokens
+		a.mins[idx].output += e.OutputTokens
+		a.mins[idx].cacheRead += e.CacheReadTokens
+		a.mins[idx].cacheWrite += e.CacheWriteTokens
+		a.mins[idx].reasoning += e.ReasoningTokens
+		if out, gen, ok := decodeWindow(e); ok {
+			a.mins[idx].genMS += gen
+			a.mins[idx].genOut += out
+		}
+		pushSample(&a.mins[idx].durs, &a.mins[idx].durHead, e.DurationMS)
+		if e.FirstUpstreamMS != nil {
+			pushSample(&a.mins[idx].ttfbs, &a.mins[idx].ttfbHead, *e.FirstUpstreamMS)
+		}
 	}
 
 	a.durationSamples.push(e.DurationMS)
@@ -679,13 +685,11 @@ func sampleSummary(samples []int64) (avg, p95 int64) {
 	return sum / int64(len(sorted)), sorted[int(0.95*float64(len(sorted)-1))]
 }
 
-// replayIndex 启动时回放 index.jsonl 尾部重建聚合，返回成功解析的行数。
-// 文件缺失（首次运行）不是错误。
-func (a *usageAggregator) replayIndex(path string) int64 {
-	data, err := tailRead(path, usageReplayTailBytes)
-	if err != nil {
-		return 0
-	}
+// replayLines 把 index.jsonl 的快照字节逐行解析并计入聚合，返回成功行数。
+// 快照边界由调用方划定：NewManager 的回放协程在 manager.mutex 下
+// tailRead——appendIndex 的「写文件+入账」与快照天然互斥，快照内行
+// 由本函数统一入账，快照外行由实时路径自计，任一行恰入账一次。
+func (a *usageAggregator) replayLines(data []byte) int64 {
 	var parsed int64
 	for line := range strings.Lines(string(data)) {
 		line = strings.TrimSpace(line)

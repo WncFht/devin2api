@@ -25,7 +25,9 @@ const indexTailBytes = 4 << 20
 const fileReadCap = 4 << 20
 
 // requestDirPattern 约束请求目录名，防止路径穿越读取任意目录。
-var requestDirPattern = regexp.MustCompile(`^\d{8}-\d{6}(-\d{2})?$`)
+// 同秒后缀按 %02d 生成、位数不设上限：同秒第 100+ 个请求会得到三位
+// 后缀（-100），必须同样被接受。
+var requestDirPattern = regexp.MustCompile(`^\d{8}-\d{6}(-\d{2,})?$`)
 
 // RequestFileInfo 是请求目录内一个文件的清单项。
 type RequestFileInfo struct {

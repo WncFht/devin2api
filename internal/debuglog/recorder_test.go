@@ -3,6 +3,7 @@ package debuglog
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,6 +86,73 @@ func TestWriteErrorKeepsFirstCause(t *testing.T) {
 	log := readTestFile(t, filepath.Join(recorder.directory, "error.json"))
 	if !strings.Contains(log, "devin_connect") || strings.Contains(log, "provider_stream") {
 		t.Fatalf("error log = %s", log)
+	}
+}
+
+// TestSameSecondSuffixBeyondPattern 验证同秒第 100+ 个请求的目录名仍被
+// 读取面接受：%02d 后缀位数不设上限，三位数后缀不得被 requestDirPattern 拒绝。
+func TestSameSecondSuffixBeyondPattern(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{})
+	manager.now = func() time.Time { return time.Date(2027, time.January, 1, 23, 54, 54, 0, time.Local) }
+	var recorders []*Recorder
+	for i := 0; i < 105; i++ {
+		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+		if recorder == nil {
+			t.Fatalf("request %d: Start returned nil", i)
+		}
+		recorders = append(recorders, recorder)
+	}
+	dir := filepath.Base(recorders[104].directory)
+	if !strings.HasSuffix(dir, "-105") {
+		t.Fatalf("dir = %q, want -105 suffix", dir)
+	}
+	for _, recorder := range recorders {
+		recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	}
+	if _, err := manager.Detail(dir); err != nil {
+		t.Fatalf("Detail(%q): %v", dir, err)
+	}
+	if _, _, _, err := manager.ReadFile(dir, "meta.json"); err != nil {
+		t.Fatalf("ReadFile(%q): %v", dir, err)
+	}
+}
+
+// TestSanitizeEscapedAndHyphenatedKeys 验证预筛无法按字节判别的敏感键名
+// ——JSON 转义拼写的键名与连字符变体——仍被完整脱敏，不以原文落盘。
+func TestSanitizeEscapedAndHyphenatedKeys(t *testing.T) {
+	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}).Start(RequestMeta{})
+	// 键名用 JSON \u 转义拼写：字节预筛看到的不是解码后的 "apikey"，
+	// 必须靠「键名含转义→慢路径」兜底，否则原文落盘。
+	escapedKey := `{"api` + "\\u006b" + `ey":"secret","plain":1}`
+	recorder.WriteJSON("01-http-request.json", json.RawMessage(escapedKey))
+	recorder.WriteJSON("03-devin-request.json", json.RawMessage(`{"api-key":"secret","set-cookie":"secret","keep":"ok"}`))
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	for _, name := range []string{"01-http-request.json", "03-devin-request.json"} {
+		log := readTestFile(t, filepath.Join(recorder.directory, name))
+		if strings.Contains(log, "secret") {
+			t.Fatalf("%s contains unredacted credentials: %s", name, log)
+		}
+	}
+}
+
+// TestIOErrorsCountedOncePerKind 验证 worker 内写盘失败计入 ioErrors，
+// 且同目录同类别失败只记一笔。
+func TestIOErrorsCountedOncePerKind(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+	// 目录消失后所有文件写与 JSONL 打开都会失败：
+	// file 类（writeMeta/01/03/meta）一笔、jsonl 类（04 open）一笔。
+	if err := os.RemoveAll(recorder.DirectoryPath()); err != nil {
+		t.Fatal(err)
+	}
+	recorder.WriteJSON("01-http-request.json", map[string]any{"x": 1})
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": 2})
+	recorder.AppendJSONL("04-devin-response.jsonl", "e", map[string]any{"x": 1})
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	if got := manager.Stats()["io_errors"]; got != uint64(2) {
+		t.Fatalf("io_errors = %v, want 2（file/jsonl 各一笔）", got)
 	}
 }
 

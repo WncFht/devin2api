@@ -159,7 +159,11 @@ func TestUsageRateLimitSampling(t *testing.T) {
 		t.Fatal(err)
 	}
 	replayed := newUsageAggregator()
-	replayed.replayIndex(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed.replayLines(data)
 	rsnap := replayed.snapshot()
 	if rsnap.Window.RateLimited != 1 || len(rsnap.RateLimitEvents) != 1 || rsnap.RateLimitEvents[0].RPM != 4 {
 		t.Fatalf("replayed = rate_limited %d events %+v", rsnap.Window.RateLimited, rsnap.RateLimitEvents)
@@ -424,6 +428,93 @@ func TestLayeredRetention(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(old, keep)); err != nil {
 			t.Fatalf("evidence %s should remain: %v", keep, err)
 		}
+	}
+}
+
+// TestUsageMinBucketWraparound 验证环形槽回绕：8 天前的旧条目撞上当前桶
+// 的槽位时不得重置已计数据——旧条目的桶更新被丢弃，total 仍照常累计。
+func TestUsageMinBucketWraparound(t *testing.T) {
+	agg := newUsageAggregator()
+	now := time.Now().Truncate(10 * time.Minute)
+	agg.add(IndexEntry{StartedAt: now.Format(time.RFC3339Nano), DurationMS: 5, Result: "completed", InputTokens: 7})
+	// 恰好 usageMinBuckets 个桶（8 天）之前的条目与当前桶映射到同一槽位。
+	old := now.Add(-usageMinBuckets * 10 * time.Minute)
+	agg.add(IndexEntry{StartedAt: old.Format(time.RFC3339Nano), DurationMS: 9, Result: "completed", InputTokens: 3})
+	snap := agg.snapshot()
+	if snap.Window.Requests != 2 || snap.Window.InputTokens != 10 {
+		t.Fatalf("window = %+v", snap.Window)
+	}
+	current := snap.Points[len(snap.Points)-1]
+	if current.Requests != 1 || current.Input != 7 {
+		t.Fatalf("current bucket = %+v, want requests=1 input=7", current)
+	}
+}
+
+// TestUsageReplayCountsOnce 验证回放与实时入账不重叠：无论请求完成落在
+// 回放取快照之前还是之后，其索引行都只入账一次。
+func TestUsageReplayCountsOnce(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		root := filepath.Join(t.TempDir(), "logs")
+		manager := NewManager(root, RetentionPolicy{})
+		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+		recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m"})
+		snap := manager.UsageStats()
+		manager.Close()
+		if snap.Entries != 1 || snap.Window.Requests != 1 {
+			t.Fatalf("iter %d: entries=%d requests=%d, want 1", i, snap.Entries, snap.Window.Requests)
+		}
+	}
+}
+
+// TestIndexSnapshottedGate 验证快照闸门的边界语义：落定前 appendIndex
+// 只落盘不入账（行已在回放快照内，由回放补记）；落定后才由实时路径自计。
+func TestIndexSnapshottedGate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{})
+	defer manager.Close()
+	<-manager.replayDone
+
+	// 人为回到落定前状态：完成的请求只写索引行，不进聚合——
+	// 该行本应由回放快照补记（测试里快照已取过，故总量保持 0）。
+	manager.mutex.Lock()
+	manager.indexSnapshotted = false
+	manager.mutex.Unlock()
+	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
+	if got := manager.usage.snapshot().Entries; got != 0 {
+		t.Fatalf("pre-snapshot entry counted: entries=%d, want 0", got)
+	}
+
+	manager.mutex.Lock()
+	manager.indexSnapshotted = true
+	manager.mutex.Unlock()
+	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
+	if got := manager.usage.snapshot().Entries; got != 1 {
+		t.Fatalf("post-snapshot entry lost: entries=%d, want 1", got)
+	}
+}
+
+// TestRetentionAgesByDirName 验证计龄以目录名内嵌时间戳为准：
+// dir mtime 被刷成现在（如负载剥离后）不影响超龄目录的淘汰判定。
+func TestRetentionAgesByDirName(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	manager := NewManager(root, RetentionPolicy{Days: 7, PayloadHours: 1})
+	defer manager.Close()
+
+	old := filepath.Join(root, "20200101-000000")
+	for _, name := range []string{"03-devin-request.json", "meta.json"} {
+		if err := os.MkdirAll(old, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	if err := os.Chtimes(old, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if removed := manager.cleanOnce(); removed != 1 {
+		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，mtime 不算数）", removed)
 	}
 }
 

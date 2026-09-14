@@ -54,8 +54,8 @@ func (manager *Manager) runCleaner() {
 type requestDir struct {
 	name     string
 	size     int64
-	modTime  time.Time
-	hasError bool // 含 error.json，失败现场
+	at       time.Time // 计龄时刻：目录名内嵌时间戳优先，mtime 兜底
+	hasError bool      // 含 error.json，失败现场
 }
 
 // cleanOnce 执行一轮清理，返回删除的目录数。
@@ -89,21 +89,29 @@ func (manager *Manager) cleanOnce() int {
 		if _, ok := active[entry.Name()]; ok {
 			continue // 请求仍在写入，保护其证据完整性
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
 		full := filepath.Join(manager.root, entry.Name())
-		if policy.PayloadHours > 0 && info.ModTime().Before(payloadCutoff) {
+		// 计龄以目录名内嵌的请求进入时刻为准：stripPayload 删文件会把
+		// dir mtime 刷成剥离时刻，按 mtime 计龄会让天数淘汰被推迟、
+		// 失败目录新旧排序失真；名内时间戳不受维护操作影响。
+		// 非请求目录名（无内嵌时间戳）回退 mtime。
+		at := requestDirTime(entry.Name())
+		if at.IsZero() {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			at = info.ModTime()
+		}
+		if policy.PayloadHours > 0 && at.Before(payloadCutoff) {
 			stripPayload(full)
 		}
-		if policy.Days > 0 && info.ModTime().Before(ageCutoff) {
+		if policy.Days > 0 && at.Before(ageCutoff) {
 			if os.RemoveAll(full) == nil {
 				removed++
 				continue
 			}
 		}
-		dir := requestDir{name: entry.Name(), modTime: info.ModTime()}
+		dir := requestDir{name: entry.Name(), at: at}
 		if maxBytes > 0 {
 			dir.size = dirSize(full)
 			totalBytes += dir.size
@@ -119,7 +127,12 @@ func (manager *Manager) cleanOnce() int {
 	// 总量超限后从最旧的目录开始回收，直到回到上限内。
 	// 最近 policy.KeepErrorDirs 个失败目录受保护：失败现场恰恰是日后最想回看的。
 	if maxBytes > 0 && totalBytes > maxBytes {
-		sort.Slice(dirs, func(i, j int) bool { return dirs[i].modTime.Before(dirs[j].modTime) })
+		sort.Slice(dirs, func(i, j int) bool {
+			if dirs[i].at.Equal(dirs[j].at) {
+				return dirs[i].name < dirs[j].name
+			}
+			return dirs[i].at.Before(dirs[j].at)
+		})
 		errorCount := 0
 		for _, dir := range dirs {
 			if dir.hasError {
@@ -180,4 +193,18 @@ func dirSize(root string) int64 {
 		return nil
 	})
 	return size
+}
+
+// requestDirTime 解析请求目录名内嵌的进入时刻：Start 以本地时区
+// "20060102-150405" 命名（可带 -NN 同秒后缀），目录名本身即时间戳。
+// 非请求目录名或无法解析时返回零值，调用方以 dir mtime 兜底。
+func requestDirTime(name string) time.Time {
+	if !requestDirPattern.MatchString(name) {
+		return time.Time{}
+	}
+	t, err := time.ParseInLocation("20060102-150405", name[:15], time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

@@ -151,7 +151,12 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		return
 	}
 	manager.indexBytes += int64(len(data) + 1)
-	manager.usage.add(entry)
+	// 回放快照落定前完成的请求不单独入账：其索引行已在回放快照内，
+	// 由回放统一计入；落定后的行快照不可见，必须由实时路径累加——
+	// 闸门保证任一行恰入账一次（见 NewManager 的回放协程）。
+	if manager.indexSnapshotted {
+		manager.usage.add(entry)
+	}
 	if manager.indexBytes > indexFileCap {
 		manager.truncateIndexLocked()
 	}
@@ -160,7 +165,9 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 // truncateIndexLocked 把 index.jsonl 截到尾部一半大小；调用方持有 mutex。
 // 截断失败只记 ioErrors：写入器重置为惰性重开，索引继续追加不受影响。
 func (manager *Manager) truncateIndexLocked() {
-	_ = manager.indexWriter.Flush()
+	if err := manager.indexWriter.Flush(); err != nil {
+		manager.ioErrors.Add(1)
+	}
 	_ = manager.indexFile.Close()
 	manager.indexWriter = nil
 	manager.indexFile = nil

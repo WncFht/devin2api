@@ -37,7 +37,7 @@ type RetentionPolicy struct {
 	Days int
 	// MaxTotalMB 是 logs 根目录总量上限（MB），超限从最旧目录开始删；<=0 不按大小清理。
 	MaxTotalMB int64
-	// PayloadHours 是大体积阶段文件（03/04/05/06 与 attachments/）的保留小时数；
+	// PayloadHours 是大体积阶段文件（03/04/06 与 attachments/）的保留小时数；
 	// 超时只剥负载、保留 meta.json/error.json/01/02 等证据文件。<=0 不剥离。
 	PayloadHours int
 	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数（含 error.json 的目录）；
@@ -68,6 +68,10 @@ type Manager struct {
 	indexWriter *bufio.Writer
 	// indexBytes 跟踪 index.jsonl 当前体积，超 indexFileCap 时保尾部一半重写。
 	indexBytes int64
+	// indexSnapshotted 标记启动回放已在 mutex 内截取索引快照：此前完成的
+	// 请求其索引行已在快照内、由回放统一入账，appendIndex 不再单独累加；
+	// 此后写入的行在快照之外，必须由实时路径自计——任一行恰入账一次。
+	indexSnapshotted bool
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期；nil 表示未启动。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
@@ -204,6 +208,8 @@ type Recorder struct {
 	errorWritten bool
 	// errorStage 记录首个错误的阶段名，随索引落盘供按失败点检索。
 	errorStage string
+	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
+	ioErrSeen map[string]struct{}
 }
 
 // retryAttempt 是一次上游重发的记录：attempt 是请求体序号（2 起），
@@ -276,7 +282,19 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 	}
 	go func() {
 		defer close(manager.replayDone)
-		if parsed := manager.usage.replayIndex(filepath.Join(root, "index.jsonl")); parsed > 0 {
+		// 快照边界必须持锁划定：appendIndex 在同一 mutex 内完成「写文件
+		// +条件入账」——边界前写入的行全部落在快照内，其自身入账被
+		// indexSnapshotted 闸门跳过、由回放统一补记；边界后写入的行在
+		// 快照之外，由实时路径自计。任一行恰入账一次，无锁读则边界前后
+		// 都可能与 appendIndex 交错，把同一行计两遍。
+		manager.mutex.Lock()
+		data, err := tailRead(filepath.Join(root, "index.jsonl"), usageReplayTailBytes)
+		manager.indexSnapshotted = true
+		manager.mutex.Unlock()
+		if err != nil {
+			return
+		}
+		if parsed := manager.usage.replayLines(data); parsed > 0 {
 			slog.Info("debuglog: replayed request index", "entries", parsed)
 		}
 	}()
@@ -300,7 +318,9 @@ func (manager *Manager) Close() {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 	if manager.indexWriter != nil {
-		_ = manager.indexWriter.Flush()
+		if err := manager.indexWriter.Flush(); err != nil {
+			manager.ioErrors.Add(1)
+		}
 		_ = manager.indexFile.Close()
 		manager.indexWriter = nil
 		manager.indexFile = nil
@@ -443,6 +463,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
 			jsonlFiles:       make(map[string]*jsonlFile),
+			ioErrSeen:        make(map[string]struct{}),
 		}
 		recorder.requestReadyMS.Store(-1)
 		recorder.upstreamSentMS.Store(-1)
@@ -521,7 +542,9 @@ func (recorder *Recorder) runWriter() {
 		}
 	}
 	for _, f := range recorder.jsonlFiles {
-		_ = f.writer.Flush()
+		if err := f.writer.Flush(); err != nil {
+			recorder.noteIOErr("jsonl", err)
+		}
 		_ = f.file.Close()
 	}
 	recorder.jsonlFiles = nil
@@ -531,8 +554,23 @@ func (recorder *Recorder) runWriter() {
 // flushJSONL 把已打开 JSONL 文件的缓冲写落盘；仅写协程调用。
 func (recorder *Recorder) flushJSONL() {
 	for _, f := range recorder.jsonlFiles {
-		_ = f.writer.Flush()
+		if err := f.writer.Flush(); err != nil {
+			recorder.noteIOErr("jsonl", err)
+		}
 	}
+}
+
+// noteIOErr 把本目录一次写失败计入 manager.ioErrors 并告警；同一类别
+// （kind）只记一笔——磁盘满等持续故障若逐帧计数，总量会失真到无法反映
+// 影响面。仅在写 worker 与 Complete 收尾（writerDone 关闭后，与其构成
+// happens-after）调用，去重集合无需加锁。
+func (recorder *Recorder) noteIOErr(kind string, err error) {
+	if _, ok := recorder.ioErrSeen[kind]; ok {
+		return
+	}
+	recorder.ioErrSeen[kind] = struct{}{}
+	recorder.manager.ioErrors.Add(1)
+	slog.Warn("debuglog: write failed", "dir", filepath.Base(recorder.directory), "kind", kind, "error", err)
 }
 
 // NoteRequestReady 记录请求体解码+投影完成、泵协程即将调 adapter.Stream
@@ -737,7 +775,9 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 			return
 		}
 		data = append(data, '\n')
-		_ = os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600)
+		if err := os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600); err != nil {
+			recorder.noteIOErr("file", err)
+		}
 	})
 }
 
@@ -799,7 +839,9 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		if marshalErr != nil {
 			return
 		}
-		_ = os.WriteFile(filepath.Join(recorder.directory, "error.json"), append(data, '\n'), 0o600)
+		if err := os.WriteFile(filepath.Join(recorder.directory, "error.json"), append(data, '\n'), 0o600); err != nil {
+			recorder.noteIOErr("file", err)
+		}
 	})
 }
 
@@ -829,10 +871,15 @@ func (recorder *Recorder) Complete(completion Completion) {
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
 	jf, err := recorder.getJSONLFile(name)
 	if err != nil {
+		recorder.noteIOErr("jsonl", err)
 		return
 	}
-	_, _ = jf.writer.Write(data)
-	_ = jf.writer.WriteByte('\n')
+	if _, err := jf.writer.Write(data); err != nil {
+		recorder.noteIOErr("jsonl", err)
+	}
+	if err := jf.writer.WriteByte('\n'); err != nil {
+		recorder.noteIOErr("jsonl", err)
+	}
 }
 
 func (recorder *Recorder) getJSONLFile(name string) (*jsonlFile, error) {
@@ -940,7 +987,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err == nil {
-		_ = os.WriteFile(filepath.Join(recorder.directory, "meta.json"), append(data, '\n'), 0o600)
+		if err := os.WriteFile(filepath.Join(recorder.directory, "meta.json"), append(data, '\n'), 0o600); err != nil {
+			recorder.noteIOErr("file", err)
+		}
 	}
 }
 
@@ -1031,7 +1080,7 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 	}
 }
 
-// secretKeyNames 是会被脱敏的 JSON 键名（去下划线、小写归一化后的形态）。
+// secretKeyNames 是会被脱敏的 JSON 键名（剔除 '_'/'-'、小写归一化后的形态）。
 // secretKey 与 rawNeedsSanitize 共用同一份名单，避免两处漂移。
 var secretKeyNames = []string{
 	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
@@ -1039,13 +1088,17 @@ var secretKeyNames = []string{
 	"clientsecret", "devicefingerprint",
 }
 
+// keyNormalizer 归一化 JSON 键名：剔除 '_' 与 '-'，配合小写折叠让
+// api_key / api-key / APIKEY 等变体命中同一份名单。
+var keyNormalizer = strings.NewReplacer("_", "", "-", "")
+
 // metadataSecretKeyNames 是只在 metadata 对象内才算敏感的键名：上游
 // Metadata.f 是设备指纹必须脱敏，但 "f" 作为通用短键名在客户端负载里
 // 合法存在，放到全局名单会误伤排障现场。
 var metadataSecretKeyNames = []string{"f"}
 
 func secretKey(key string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+	normalized := strings.ToLower(keyNormalizer.Replace(key))
 	for _, name := range secretKeyNames {
 		if normalized == name {
 			return true
@@ -1056,7 +1109,7 @@ func secretKey(key string) bool {
 
 // metadataSecretKey 判定仅 metadata 作用域内敏感的键名，归一方式同 secretKey。
 func metadataSecretKey(key string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+	normalized := strings.ToLower(keyNormalizer.Replace(key))
 	for _, name := range metadataSecretKeyNames {
 		if normalized == name {
 			return true
@@ -1067,14 +1120,16 @@ func metadataSecretKey(key string) bool {
 
 // isMetadataKey 判定键是否进入 metadata 作用域（归一方式同 secretKey）。
 func isMetadataKey(key string) bool {
-	return strings.ToLower(strings.ReplaceAll(key, "_", "")) == "metadata"
+	return strings.ToLower(keyNormalizer.Replace(key)) == "metadata"
 }
 
 // rawNeedsSanitize 预筛 JSON 记录：含内联图片或敏感键名才需要完整的
 // unmarshal+树遍历脱敏。判定口径与 sanitizeValue 对齐："image/" 子串同时
 // 覆盖 data:image/ 值与 {"mime_type":"image/*","data":...} 对象两种图片
-// 形态；键名只在 "key": 位置匹配（小写+去下划线归一，与 secretKey 一致），
-// 字符串值里的同名文本不再误进慢路径。扫描零分配。
+// 形态；键名只在 "key": 位置匹配（小写+剔除 '_'/'-' 归一，与 secretKey 一致），
+// 字符串值里的同名文本不再误进慢路径。键名含转义序列时预筛看到的不是
+// 解码后的真实键名（如 JSON 转义拼出的 apikey），无法按字节归一，
+// 同样送慢路径定夺。扫描零分配。
 func rawNeedsSanitize(data []byte) bool {
 	if bytes.Contains(data, []byte("image/")) {
 		return true
@@ -1084,8 +1139,10 @@ func rawNeedsSanitize(data []byte) bool {
 			continue
 		}
 		end := i + 1
+		escaped := false
 		for end < len(data) && data[end] != '"' {
 			if data[end] == '\\' {
+				escaped = true
 				end++
 			}
 			end++
@@ -1097,7 +1154,7 @@ func rawNeedsSanitize(data []byte) bool {
 		for colon < len(data) && (data[colon] == ' ' || data[colon] == '\t' || data[colon] == '\r' || data[colon] == '\n') {
 			colon++
 		}
-		if colon < len(data) && data[colon] == ':' && secretKeySpan(data[i+1:end]) {
+		if colon < len(data) && data[colon] == ':' && (escaped || secretKeySpan(data[i+1:end])) {
 			return true
 		}
 		i = end
@@ -1106,8 +1163,8 @@ func rawNeedsSanitize(data []byte) bool {
 }
 
 // secretKeySpan 判定引号内的键名是否命中脱敏名单，归一方式与 secretKey
-// 一致：忽略 '_'、大小写不敏感。预筛分不清嵌套层级，metadata 专属键名
-// 也算命中——宁多进一次慢路径，由 sanitizeValue 按作用域定夺。
+// 一致：忽略 '_' 与 '-'、大小写不敏感。预筛分不清嵌套层级，metadata 专属
+// 键名也算命中——宁多进一次慢路径，由 sanitizeValue 按作用域定夺。
 func secretKeySpan(span []byte) bool {
 	for _, name := range secretKeyNames {
 		if equalFoldKey(span, name) {
@@ -1122,11 +1179,11 @@ func secretKeySpan(span []byte) bool {
 	return false
 }
 
-// equalFoldKey 比较引号内键名原文与归一化名单项：跳过 '_'、大小写折叠。
+// equalFoldKey 比较引号内键名原文与归一化名单项：跳过 '_' 与 '-'、大小写折叠。
 func equalFoldKey(span []byte, name string) bool {
 	i := 0
 	for j := 0; j < len(name); j++ {
-		for i < len(span) && span[i] == '_' {
+		for i < len(span) && (span[i] == '_' || span[i] == '-') {
 			i++
 		}
 		if i >= len(span) {
@@ -1141,7 +1198,7 @@ func equalFoldKey(span []byte, name string) bool {
 			return false
 		}
 	}
-	for i < len(span) && span[i] == '_' {
+	for i < len(span) && (span[i] == '_' || span[i] == '-') {
 		i++
 	}
 	return i == len(span)
@@ -1184,8 +1241,12 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 	fileName := fmt.Sprintf("image-%03d%s", recorder.attachmentCount, extension)
 	relativePath := filepath.Join("attachments", fileName)
 	directory := filepath.Join(recorder.directory, "attachments")
-	_ = os.MkdirAll(directory, 0o700)
-	_ = os.WriteFile(filepath.Join(directory, fileName), data, 0o600)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		recorder.noteIOErr("file", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, fileName), data, 0o600); err != nil {
+		recorder.noteIOErr("file", err)
+	}
 	reference := attachmentReference{File: filepath.ToSlash(relativePath), MIMEType: mimeType, Size: len(data), SHA256: hash}
 	recorder.attachmentByHash[hash] = reference
 	return reference
