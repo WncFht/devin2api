@@ -706,13 +706,25 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 	}
 }
 
+// evalDeferred 展开调用方传入的延迟求值 thunk：传 func() any 时投影/建树
+// 在写 worker 内执行，请求/泵 goroutine 只承担一次 channel send——热路径
+// 不为日志付同步的 marshal/投影成本。注意调用方须保证 thunk 捕获的数据
+// 在 worker 执行期间不被并发改写（不可变值或已冻结的快照）。
+func evalDeferred(value any) any {
+	if thunk, ok := value.(func() any); ok {
+		return thunk()
+	}
+	return value
+}
+
 // WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON 文件。
+// value 可为 func() any 延迟求值（语义见 evalDeferred）。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
 	}
 	recorder.enqueue(func() {
-		value = recorder.sanitize(value)
+		value = recorder.sanitize(evalDeferred(value))
 		data, err := json.MarshalIndent(value, "", "  ")
 		if err != nil {
 			return
@@ -723,6 +735,7 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
+// value 可为 func() any 延迟求值（语义见 evalDeferred）。
 func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
@@ -734,7 +747,7 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 			Time:      time.Now().Format(time.RFC3339Nano),
 			ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
 			Event:     event,
-			Data:      recorder.sanitize(value),
+			Data:      recorder.sanitize(evalDeferred(value)),
 		}
 		data, err := json.Marshal(record)
 		if err != nil {
@@ -745,12 +758,13 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 }
 
 // AppendValueJSONL 将一个结构化值直接追加为 JSONL 行，不添加事件信封。
+// value 可为 func() any 延迟求值（语义见 evalDeferred）。
 func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
 	}
 	recorder.enqueue(func() {
-		data, err := json.Marshal(recorder.sanitize(value))
+		data, err := json.Marshal(recorder.sanitize(evalDeferred(value)))
 		if err != nil {
 			return
 		}
@@ -994,6 +1008,17 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 			}
 		}
 		return value
+	case json.RawMessage:
+		// 嵌套的原始 JSON（如 01 的请求体）：沿用顶层的预筛口径，
+		// 干净即原样透传免建树，命中敏感键/图片才 unmarshal 走完整脱敏。
+		if !rawNeedsSanitize(value) {
+			return value
+		}
+		var generic any
+		if err := json.Unmarshal(value, &generic); err != nil {
+			return value
+		}
+		return recorder.sanitizeValue(generic, false)
 	default:
 		return value
 	}

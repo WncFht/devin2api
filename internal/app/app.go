@@ -503,6 +503,9 @@ func (application *App) createCompletion(
 	reqMetrics.Observe(options.Stream, len(body))
 	recorder.SetModel(messages.Model)
 	if recorder != nil {
+		// 02 投影必须就地求值、不能推迟到日志 worker：adapter 的
+		// sanitizeRequest 会原地改写 messages 的共享 slice——推迟读
+		// 既会数据竞争，也会把「客户端原文」记成改写后内容。
 		recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
 	}
 	ctx := debuglog.WithRecorder(reqCtx, recorder)
@@ -666,8 +669,12 @@ func debugRef(recorder *debuglog.Recorder) string {
 }
 
 func httpRequestProjection(request *http.Request, body []byte) map[string]any {
-	var parsedBody any
-	if err := json.Unmarshal(body, &parsedBody); err != nil {
+	// body 以 RawMessage 原样交给日志 worker：请求 goroutine 不做全量
+	// unmarshal 建树——worker 侧 rawNeedsSanitize 预筛后，干净 body 直接
+	// 落盘，含敏感键/图片才走完整脱敏（语义与旧的全量投影一致）。
+	// 非 JSON body 退化为字符串（此时 decode 必然 400，只为留证）。
+	var parsedBody any = json.RawMessage(body)
+	if !json.Valid(body) {
 		parsedBody = string(body)
 	}
 	return map[string]any{
