@@ -84,6 +84,34 @@ func (receiver *stalledDevinResponseReceiver) Msg() *devinproto.GetChatMessageRe
 // Err 模拟正常 EOF。
 func (receiver *stalledDevinResponseReceiver) Err() error { return nil }
 
+// hangAfterReceiver 先按脚本发帧、发完后阻塞在 release 上：
+// 模拟「内容到齐但传输不收尾」或「只发零事件帧续命」的退化流。
+type hangAfterReceiver struct {
+	responses []*devinproto.GetChatMessageResponse
+	index     int
+	current   *devinproto.GetChatMessageResponse
+	release   chan struct{}
+}
+
+// Receive 发完脚本帧后阻塞到 release 关闭。
+func (receiver *hangAfterReceiver) Receive() bool {
+	if receiver.index >= len(receiver.responses) {
+		<-receiver.release
+		return false
+	}
+	receiver.current = receiver.responses[receiver.index]
+	receiver.index++
+	return true
+}
+
+// Msg 返回最近一次成功读取的帧。
+func (receiver *hangAfterReceiver) Msg() *devinproto.GetChatMessageResponse {
+	return receiver.current
+}
+
+// Err 模拟正常 EOF。
+func (receiver *hangAfterReceiver) Err() error { return nil }
+
 func TestBuildRequestMapsLoopMessages(t *testing.T) {
 	request := llm.RequestMessages{
 		SystemPrompt: "system",
@@ -1041,6 +1069,65 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	}
 	if _, err := stream.Recv(context.Background()); err != io.EOF {
 		t.Fatalf("after stall Recv err = %v, want io.EOF", err)
+	}
+}
+
+// TestResponseStreamTailGraceFinishesAfterStopReason 的测试动机是：上游
+// 发完 stopReason 后语义内容已齐，若传输层不收尾（connect-go 排空 body
+// 等 EOF 时上游挂住连接），短宽限后必须按正常 EOF 完成而不是干等
+// 120s 静默看门狗再把完整响应拖成 stall 错误。
+func TestResponseStreamTailGraceFinishesAfterStopReason(t *testing.T) {
+	defer func(d time.Duration) { upstreamTailGrace = d }(upstreamTailGrace)
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamTailGrace = 20 * time.Millisecond
+	upstreamStallTimeout = 10 * time.Second
+	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("done")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	for i := 0; i < 16; i++ {
+		event, err := stream.Recv(context.Background())
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			t.Fatalf("tail grace emitted error event %#v, want clean finish", event.Error)
+		}
+	}
+	t.Fatal("stream did not finish cleanly within tail grace")
+}
+
+// TestResponseStreamNoProgressWatchdog 的测试动机是：上游只发零事件帧
+// （latency 活性帧/元数据帧）续命时，静默看门狗被帧到达重置、永不判死，
+// 「无内容进度」期限必须兜底收尾——pre-content 尚可整体重发，
+// post-content 按传输错误收场。
+func TestResponseStreamNoProgressWatchdog(t *testing.T) {
+	defer func(d time.Duration) { upstreamNoProgressTimeout = d }(upstreamNoProgressTimeout)
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamNoProgressTimeout = 30 * time.Millisecond
+	upstreamStallTimeout = 10 * time.Second
+	meta := func() *devinproto.GetChatMessageResponse {
+		return &devinproto.GetChatMessageResponse{
+			MessageId: proto.String("m"), RequestId: proto.String("r"),
+			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
+		}
+	}
+	receiver := &hangAfterReceiver{release: make(chan struct{}),
+		responses: []*devinproto.GetChatMessageResponse{meta(), meta(), meta()}}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil ||
+		!strings.Contains(event.Error.ErrorMessage, "no progress") {
+		t.Fatalf("event = %#v, want no-progress error", event)
 	}
 }
 

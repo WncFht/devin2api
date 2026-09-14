@@ -804,6 +804,18 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 // var 而非 const：测试临时缩短它来覆盖超时路径。
 var upstreamStallTimeout = 120 * time.Second
 
+// upstreamNoProgressTimeout 是「无内容进度」期限：任意帧（含上游
+// latency 活性帧）喂 stall 看门狗，但只有产出事件的帧喂它。上游实测
+// 合法内容帧间隔上限 ~60s，而退化上游可能周期性发零事件帧无限续命
+// （latency 心跳/元数据帧）——10min 是观察值 10 倍余量的兜底。
+var upstreamNoProgressTimeout = 10 * time.Minute
+
+// upstreamTailGrace 是消费到 stopReason 之后等待流终止帧的宽限。
+// 实测健康流的尾帧（usage/dim/endstream）在 stopReason 后 <1ms 到达；
+// connect-go 读到 endstream envelope 还会排空 body 等传输 EOF，上游
+// 不关 body 时会卡到看门狗——语义内容已齐时按正常收尾，不再等。
+var upstreamTailGrace = 15 * time.Second
+
 // startHoldTimeout 是 start 事件（message_start/response.created）允许被
 // 扣留的最长时间。扣留的目的是给上游「产出内容前就失败」留一个返回真实
 // HTTP 状态码的窗口——实测这类失败全部在 ~9s 内落定；而下游客户端在
@@ -893,6 +905,9 @@ type responseStream struct {
 	newDecoder func() *responseDecoder
 	// stall 是跨 Recv 复用的静默看门狗计时器；首次等待时创建。
 	stall *time.Timer
+	// progress 是「无内容进度」期限计时器：只有产出事件的帧重置它，
+	// latency 活性帧/元数据帧不喂——退化上游的零事件帧续命会被它兜底。
+	progress *time.Timer
 }
 
 // devinResponseReceiver 描述 responseStream 消费 Devin 服务端流所需的最小能力。
@@ -917,6 +932,12 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		stall.Reset(upstreamStallTimeout)
 	}
 	defer stall.Stop()
+	progress := stream.progress
+	if progress == nil {
+		progress = time.NewTimer(upstreamNoProgressTimeout)
+		stream.progress = progress
+	}
+	defer progress.Stop()
 	for len(stream.queue) == 0 && !stream.finished {
 		if err := ctx.Err(); err != nil {
 			return llm.ResponseEvent{}, err
@@ -936,7 +957,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			continue
 		}
-		stall.Reset(upstreamStallTimeout)
+		// stopReason 之后只剩尾帧（实测 <1ms 到达），等待窗口从静默
+		// 看门狗缩到尾部宽限：connect-go 排空 body 等传输 EOF 时上游
+		// 不关连接会把正常收尾拖成 stall。
+		stallDeadline := upstreamStallTimeout
+		if stream.decoder.hasStopReason {
+			stallDeadline = upstreamTailGrace
+		}
+		stall.Reset(stallDeadline)
 		var startHold <-chan time.Time
 		if stream.startHold != nil {
 			startHold = stream.startHold.C
@@ -984,6 +1012,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			events := stream.decoder.decode(frame.response)
 			if len(events) > 0 {
 				stream.producedEvents = true
+				progress.Reset(upstreamNoProgressTimeout)
 			}
 			stream.queue = stream.release(events)
 			stream.finished = stream.decoder.finished
@@ -992,12 +1021,37 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 补记进原始日志留证，然后按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
+			if stream.decoder.hasStopReason {
+				// 语义内容已齐、只是传输尾帧没到（上游不关 body 时
+				// connect-go 的排空会一直等）——按正常 EOF 收尾。
+				slog.Warn("upstream held connection after stop reason; finishing after tail grace")
+				events := stream.release(stream.decoder.finish(nil))
+				if emptyEndTurn(events) && stream.tryReopen(nil, true) {
+					continue
+				}
+				stream.queue = events
+				stream.finished = true
+				continue
+			}
 			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", upstreamStallTimeout)
 			if stream.tryReopen(stallErr, false) {
 				continue
 			}
 			stream.recordUpstreamFailure(stallErr)
 			stream.queue = stream.release(stream.decoder.finish(stallErr))
+			stream.finished = true
+		case <-progress.C:
+			// 有帧流动但长期零内容进度（上游 latency 活性帧不算
+			// 进度）：退化形态兜底——pre-content 可整体重发，
+			// post-content 按传输错误收尾。
+			stream.cancel()
+			stream.drainFrames()
+			progressErr := fmt.Errorf("devin stream made no progress for %s", upstreamNoProgressTimeout)
+			if stream.tryReopen(progressErr, false) {
+				continue
+			}
+			stream.recordUpstreamFailure(progressErr)
+			stream.queue = stream.release(stream.decoder.finish(progressErr))
 			stream.finished = true
 		case <-ctx.Done():
 			stall.Stop()
