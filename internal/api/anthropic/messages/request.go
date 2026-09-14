@@ -15,10 +15,12 @@ import (
 
 // Request 是 Anthropic Messages 请求中本适配器支持的字段集合。
 type Request struct {
-	Model         string          `json:"model"`
-	Messages      []Message       `json:"messages"`
-	System        json.RawMessage `json:"system,omitempty"`
-	MaxTokens     int             `json:"max_tokens"`
+	Model    string          `json:"model"`
+	Messages []Message       `json:"messages"`
+	System   json.RawMessage `json:"system,omitempty"`
+	// MaxTokens 用指针区分「未提供」与「显式 <=0」：后者是被丢弃的
+	// 客户端输入，需要进 Dropped 可观测。
+	MaxTokens     *int            `json:"max_tokens"`
 	Tools         []Tool          `json:"tools,omitempty"`
 	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
 	Stream        bool            `json:"stream,omitempty"`
@@ -37,8 +39,9 @@ type Message struct {
 
 // Tool 是 Anthropic 工具定义。
 type Tool struct {
-	// Type 缺省/为 "custom" 时是客户端 function 工具；web_search_* 等
-	// server tool 没有 input_schema 语义，本代理不转发。
+	// Type 缺省/为 "custom" 时是客户端 function 工具；bash_*/text_editor_*
+	// 等客户端执行类型同样转发（无 input_schema 时按 {"type":"object"} 占位）；
+	// web_search_*/web_fetch_*/code_execution_* 等服务端托管类型不转发。
 	Type        string          `json:"type,omitempty"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
@@ -72,6 +75,11 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if err := decoder.Decode(&request); err != nil {
 		return AdaptedRequest{}, fmt.Errorf("decode anthropic request: %w", err)
 	}
+	if decoder.More() {
+		// 顶层 JSON 后还有内容说明 body 不是单个请求对象——多半
+		// 是客户端 bug 或代理误拼接，静默忽略会掩盖截断/串包。
+		return AdaptedRequest{}, errors.New("anthropic request has trailing data after JSON body")
+	}
 	if request.Model == "" {
 		return AdaptedRequest{}, errors.New("anthropic request model is required")
 	}
@@ -81,14 +89,21 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 
 	context := llm.RequestMessages{Model: request.Model}
 	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, anthropicRequestFields)...)
-	maxTokens := request.MaxTokens
-	if maxTokens > 0 {
-		context.MaxTokens = &maxTokens
+	if request.MaxTokens != nil {
+		if *request.MaxTokens > 0 {
+			context.MaxTokens = request.MaxTokens
+		} else {
+			context.Dropped = append(context.Dropped, "field:max_tokens")
+		}
 	}
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
-	if request.TopK != nil && *request.TopK > 0 {
-		context.TopK = request.TopK
+	if request.TopK != nil {
+		if *request.TopK > 0 {
+			context.TopK = request.TopK
+		} else {
+			context.Dropped = append(context.Dropped, "field:top_k")
+		}
 	}
 	context.StopSequences = request.StopSequences
 	toolChoice, disableParallel, err := common.ParseAnthropicToolChoice(request.ToolChoice)
@@ -114,9 +129,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
-		// 只转客户端自定义工具：server tool（web_search_*/advisor_* 等）
-		// 由供应商托管执行，上游 Devin 无对应物，转发只会制造废工具。
-		if tool.Type != "" && tool.Type != "custom" {
+		if !clientExecutedToolType(tool.Type) {
+			// server tool（web_search_*/web_fetch_*/code_execution_* 等）
+			// 由供应商托管执行，上游 Devin 无对应物，转发只会制造废工具。
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
 			continue
 		}
@@ -140,6 +155,28 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 			Stream: request.Stream,
 		},
 	}, nil
+}
+
+// clientToolTypePrefixes 是 Anthropic 客户端执行工具的 type 形态：
+// bash/text_editor/computer/memory 由调用方环境执行（Claude Code 的本地
+// 工具就是这种），客户端不带 input_schema——按 {"type":"object"} 透传让
+// 模型照常发起调用，参数由客户端按类型版本的既定 schema 解释。
+var clientToolTypePrefixes = []string{
+	"bash_", "text_editor_", "computer_", "memory_", "str_replace_based_edit_tool",
+}
+
+// clientExecutedToolType 判断 tool.type 是否客户端可执行：空/custom 是
+// 普通 function 工具；已知客户端类型前缀放行；其余视为服务端托管工具。
+func clientExecutedToolType(toolType string) bool {
+	if toolType == "" || toolType == "custom" {
+		return true
+	}
+	for _, prefix := range clientToolTypePrefixes {
+		if strings.HasPrefix(toolType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // appendSystem 把 system 字段（字符串或块数组）并入 SystemPrompt。
@@ -188,22 +225,7 @@ func appendMessages(context *llm.RequestMessages, messages []Message) error {
 // appendMessage 按 role 把单条消息解码进会话。
 func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
 	switch message.Role {
-	case "user":
-		messages, err := decodeAnthropicUserMessages(context, message.Content, toolNames)
-		if err != nil {
-			return err
-		}
-		context.Messages = append(context.Messages, messages...)
-	case "assistant":
-		content, err := decodeAssistantContent(context, message.Content, toolNames)
-		if err != nil {
-			return err
-		}
-		context.Messages = append(context.Messages, llm.AssistantMessage{
-			Content:     content,
-			TimestampMS: time.Now().UnixMilli(),
-		})
-	case "system":
+	case "user", "system":
 		// Claude Code 在消息流中间插入 role:system 的途中注入（agent 列表、
 		// task reminder、system notification）。内容位置敏感——解码为
 		// UserMessage 保持时序，不能折叠进系统提示词。
@@ -211,7 +233,28 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 		if err != nil {
 			return err
 		}
+		if len(messages) == 0 && len(bytes.TrimSpace(message.Content)) > 0 {
+			// content:[] 的消息不该凭空消失：与 content:null 同策落成
+			// 空文本占位，保住轮次结构，同时记账可见。
+			context.Dropped = append(context.Dropped, "empty_message:"+message.Role)
+			messages = []llm.Message{llm.UserMessage{
+				Content:     []llm.Content{llm.TextContent{Text: ""}},
+				TimestampMS: time.Now().UnixMilli(),
+			}}
+		}
 		context.Messages = append(context.Messages, messages...)
+	case "assistant":
+		content, err := decodeAssistantContent(context, message.Content, toolNames)
+		if err != nil {
+			return err
+		}
+		if len(content) == 0 && len(bytes.TrimSpace(message.Content)) > 0 {
+			context.Dropped = append(context.Dropped, "empty_message:assistant")
+		}
+		context.Messages = append(context.Messages, llm.AssistantMessage{
+			Content:     content,
+			TimestampMS: time.Now().UnixMilli(),
+		})
 	default:
 		context.Dropped = append(context.Dropped, "role:"+message.Role)
 	}
@@ -283,7 +326,7 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 			if header.ToolUseID == "" {
 				// 无 tool_use_id 的结果块无法配对、过不了 IR 校验；
 				// 与孤儿结果同策降级为同一条 user 消息的文本。
-				context.Dropped = append(context.Dropped, "missing_tool_use_id")
+				context.Dropped = append(context.Dropped, "missing_tool_call_id")
 				demoted, err := decodeAnthropicContent(context, header.Content)
 				if err != nil {
 					return nil, fmt.Errorf("content[%d]: %w", index, err)
@@ -352,15 +395,7 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 				Redacted:          true,
 			})
 		case "tool_use":
-			args := header.Input
-			custom := false
-			if trimmed := bytes.TrimSpace(args); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-				args = json.RawMessage(`{}`)
-			} else if !llm.IsJSONObject(args) {
-				// 客户端回灌的非对象 input（标量等非 JSON 对象）原文按
-				// Custom 通道保真上行，吞成 {} 会让调用语义悄悄变空。
-				custom = true
-			}
+			args, custom := common.NormalizeToolArguments(header.Input)
 			toolNames[header.ID] = header.Name
 			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args, Custom: custom})
 		default:
@@ -375,7 +410,7 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.RawMessage, isError bool, toolNames map[string]string) (llm.ToolResultMessage, error) {
 	name := toolNames[toolUseID]
 	if name == "" {
-		context.Dropped = append(context.Dropped, "unmatched_tool_use_id:"+toolUseID)
+		context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+toolUseID)
 		name = "tool"
 	}
 	content, err := decodeAnthropicContent(context, raw)

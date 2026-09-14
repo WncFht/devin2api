@@ -2,6 +2,8 @@
 package messages
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -135,5 +137,66 @@ func TestDecodeRequestAcceptsStringContent(t *testing.T) {
 	message := request.Context.Messages[0].(llm.UserMessage)
 	if message.Content[0].(llm.TextContent).Text != "hello" {
 		t.Fatalf("message content = %#v", message.Content)
+	}
+}
+
+// TestDecodeRequestClientTypedTools 验证客户端执行工具（bash_*/text_editor_*）
+// 带 {"type":"object"} 占位 schema 透传，服务端托管类型（web_search_*）丢弃记账。
+func TestDecodeRequestClientTypedTools(t *testing.T) {
+	data := []byte(`{
+  "model": "claude-test",
+  "messages": [{"role": "user", "content": "hi"}],
+  "tools": [
+    {"type": "bash_20250124", "name": "bash"},
+    {"type": "text_editor_20250429", "name": "str_replace_editor"},
+    {"type": "web_search_20250305", "name": "web_search"},
+    {"name": "plain_custom", "input_schema": {"type": "object", "properties": {"x": {"type": "string"}}}}
+  ]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Tools) != 3 {
+		t.Fatalf("tools = %#v", request.Context.Tools)
+	}
+	if request.Context.Tools[0].Name != "bash" || string(request.Context.Tools[0].InputSchema) != `{"type":"object"}` {
+		t.Fatalf("bash tool = %#v", request.Context.Tools[0])
+	}
+	dropped := fmt.Sprint(request.Context.Dropped)
+	if !strings.Contains(dropped, "tool:web_search_20250305") {
+		t.Fatalf("dropped = %v, want tool:web_search_20250305", request.Context.Dropped)
+	}
+}
+
+// TestDecodeRequestDroppedFields 验证无效字段值与空消息体进入 Dropped 记账。
+func TestDecodeRequestDroppedFields(t *testing.T) {
+	data := []byte(`{
+  "model": "claude-test",
+  "max_tokens": 0,
+  "top_k": -1,
+  "messages": [{"role": "user", "content": []}, {"role": "user", "content": "hi"}]
+}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped := fmt.Sprint(request.Context.Dropped)
+	for _, want := range []string{"field:max_tokens", "field:top_k", "empty_message:user"} {
+		if !strings.Contains(dropped, want) {
+			t.Fatalf("dropped = %v, want %s", request.Context.Dropped, want)
+		}
+	}
+	// content:[] 的用户消息落成空文本占位，轮次结构不丢。
+	if len(request.Context.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(request.Context.Messages))
+	}
+}
+
+// TestDecodeRequestTrailingData 验证顶层 JSON 后的尾随内容报错而非静默忽略。
+func TestDecodeRequestTrailingData(t *testing.T) {
+	data := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hi"}]} extra`)
+	if _, err := DecodeRequest(data); err == nil {
+		t.Fatal("trailing data should error")
 	}
 }
