@@ -253,7 +253,7 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 		"endpoints": []map[string]string{
 			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警 + devin.aliases 目标缺席校验（alias_targets_absent）"},
 			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
-			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + 日志管道自观测 + index 聚合用量 + gate 速率闸门状态"},
+			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + index 聚合用量 + gate 速率闸门状态"},
 			{"method": "GET", "path": "/panel/api/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
 			{"method": "POST", "path": "/panel/api/config/reload", "description": "重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
 			{"method": "GET", "path": "/panel/api/usage", "description": "index.jsonl 聚合：今日/窗口累计、model_days 模型×日矩阵（供面板时间范围选择器）、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势（含缓存命中率与均速原料）、p50/p95/p99、目录价估算成本"},

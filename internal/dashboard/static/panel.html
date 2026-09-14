@@ -121,6 +121,7 @@
     <div class="kpis" id="sysKpis"><div class="loading">加载中...</div></div>
     <div class="panel"><h3>日志管道 <span class="sub">请求调试日志自观测</span><span class="spacer"></span><button class="btn" id="debugToggle" style="display:none">日志开关</button></h3><div class="grid" id="debugPipeBody"><div class="loading">加载中...</div></div></div>
     <div class="panel"><h3>速率闸门 <span class="sub">令牌桶限速 + 上游限流冷却闩 · 闩截止时刻落盘 gate-state.json</span></h3><div class="grid" id="gateBody"><div class="loading">加载中...</div></div></div>
+    <div class="panel"><h3>本地拒绝 <span class="sub">管线前拒绝（鉴权/并发/排空/WS 准入）· 不进请求索引 · 跨重启痕迹在 stderr.log</span></h3><div id="rejectBody"><div class="loading">加载中...</div></div></div>
     <div class="panel"><h3>配置 <span class="sub">config.yaml 生效视图 · 凭据脱敏 · 改文件后热应用</span><span class="spacer"></span>
       <button class="btn" id="cfgViewBtn">查看配置</button>
       <button class="btn" id="cfgReload">重新加载</button></h3>

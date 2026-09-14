@@ -26,11 +26,42 @@ type spanBucket struct {
 	errors   uint64 // 4xx/5xx、管线前拒绝与未正常完成的已提交流（disconnected/aborted/流内失败）
 }
 
+// RejectReason 是管线前拒绝的分类；值即透出到面板与日志的标识串。
+type RejectReason string
+
+const (
+	// RejectDraining 是排空期拒绝：进程即将退出，新请求 503 + Retry-After。
+	RejectDraining RejectReason = "draining"
+	// RejectConcurrencyLimit 是并发槽溢出：/v1/* 请求槽与 WS 轮次槽共用此分类。
+	RejectConcurrencyLimit RejectReason = "concurrency_limit"
+	// RejectWSConnectionLimit 是 WS 连接级准入溢出（连接槽与请求槽分开计量）。
+	RejectWSConnectionLimit RejectReason = "ws_connection_limit"
+	// RejectMissingAPIKey 是未携带凭据的 401。
+	RejectMissingAPIKey RejectReason = "missing_api_key"
+	// RejectInvalidAPIKey 是凭据不匹配的 401。
+	RejectInvalidAPIKey RejectReason = "invalid_api_key"
+)
+
+// RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试目录
+// 也没有 index.jsonl 行，这条记录是它的全部结构化痕迹。
+type RejectEvent struct {
+	At        int64  `json:"at"`
+	Reason    string `json:"reason"`
+	Status    int    `json:"status"`
+	Path      string `json:"path,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	KeyHash   string `json:"key_hash,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
+}
+
+// rejectEventCap 是拒绝事件环形保留条数；拒绝是边缘路径，256 条足够回溯一次洪峰。
+const rejectEventCap = 256
+
 // Metrics 是 /v1/* 请求的运行计数器集合。
 type Metrics struct {
 	active      atomic.Int64
 	completed   atomic.Uint64
-	rejected    atomic.Uint64 // 鉴权/并发拒绝，未进入处理管线
+	rejected    atomic.Uint64 // 鉴权/并发/排空拒绝，未进入处理管线
 	okResponses atomic.Uint64
 	clientErrs  atomic.Uint64
 	serverErrs  atomic.Uint64
@@ -39,6 +70,12 @@ type Metrics struct {
 	reqBytes    atomic.Uint64
 	respBytes   atomic.Uint64
 	startedAt   time.Time
+	// rejectsMu 保护 rejectCounts 与 rejectRing；拒绝低频，单锁足够。
+	rejectsMu    sync.Mutex
+	rejectCounts map[RejectReason]uint64
+	rejectRing   [rejectEventCap]RejectEvent
+	rejectHead   int
+	rejectSize   int
 	// bucketsMu 保护 buckets；趋势桶写入低频，普通 mutex 足够。
 	bucketsMu sync.Mutex
 	buckets   [trendBuckets]spanBucket
@@ -50,7 +87,7 @@ type Metrics struct {
 
 // NewMetrics 创建以启动时刻为起点的指标集合。
 func NewMetrics() *Metrics {
-	return &Metrics{startedAt: time.Now()}
+	return &Metrics{startedAt: time.Now(), rejectCounts: make(map[RejectReason]uint64)}
 }
 
 // Request 是一次请求生命周期的观测句柄，begin/finish 成对使用。
@@ -109,10 +146,22 @@ func (r *Request) Finish(status, responseBodyBytes int, result string) {
 	m.recordBucket(status >= 400 || (result != "" && result != "completed"))
 }
 
-// Reject 计入一个在进入处理管线前被拒的请求（鉴权失败/并发上限）。
-func (m *Metrics) Reject() {
+// Reject 计入一个在进入处理管线前被拒的请求。reason 分类落到计数与
+// 事件环上——这类请求刻意不产生调试目录与 index 行（未鉴权/过载路径
+// 不做磁盘写），计数与事件环是它们唯一的结构化足迹。
+func (m *Metrics) Reject(reason RejectReason, ev RejectEvent) {
 	m.rejected.Add(1)
 	m.recordBucket(true)
+	ev.At = time.Now().Unix()
+	ev.Reason = string(reason)
+	m.rejectsMu.Lock()
+	m.rejectCounts[reason]++
+	m.rejectRing[m.rejectHead] = ev
+	m.rejectHead = (m.rejectHead + 1) % rejectEventCap
+	if m.rejectSize < rejectEventCap {
+		m.rejectSize++
+	}
+	m.rejectsMu.Unlock()
 }
 
 // recordBucket 把一次请求归入当前 10 秒桶；桶满时循环覆盖最旧数据。
@@ -163,7 +212,25 @@ func (m *Metrics) Snapshot() map[string]any {
 		"trend_minutes":          m.trend(),
 		"rates":                  m.rates(),
 		"process":                m.process(),
+		"rejects":                m.rejects(),
 	}
+}
+
+// rejects 返回管线前拒绝的分原因计数与最近事件（新在前）。
+// 计数是进程内存值，重启清零；跨重启的拒绝痕迹在 stderr.log 的
+// "request rejected" 行里（reason 字段与这里同源）。
+func (m *Metrics) rejects() map[string]any {
+	m.rejectsMu.Lock()
+	byReason := make(map[string]uint64, len(m.rejectCounts))
+	for reason, n := range m.rejectCounts {
+		byReason[string(reason)] = n
+	}
+	recent := make([]RejectEvent, 0, m.rejectSize)
+	for i := 1; i <= m.rejectSize; i++ {
+		recent = append(recent, m.rejectRing[(m.rejectHead-i+rejectEventCap)%rejectEventCap])
+	}
+	m.rejectsMu.Unlock()
+	return map[string]any{"by_reason": byReason, "recent": recent}
 }
 
 // rates 从 10 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。

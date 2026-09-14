@@ -23,6 +23,7 @@ const System = (() => {
         kpi('累计请求', h.completed_requests ?? 0, '2xx ' + (h.ok_responses ?? 0) + ' · 4xx ' + (h.client_error_responses ?? 0) + ' · 5xx ' + (h.server_error_responses ?? 0) + ' · 拒 ' + (h.rejected_requests ?? 0)) +
         kpi('流式/非流式', (h.streaming_requests ?? 0) + ' / ' + (h.non_streaming_requests ?? 0), '上行 ' + fmtBytes(h.request_body_bytes) + ' · 下行 ' + fmtBytes(h.response_body_bytes));
       renderGate(d.gate);
+      renderRejects(h.rejects);
       if (d.debuglog) renderPipe(d.debuglog);
     } catch (e) {
       $('sysKpis').innerHTML = '<div class="note status-err">指标拉取失败: ' + esc(String(e)) + '</div>';
@@ -46,6 +47,47 @@ const System = (() => {
       meta('闩内快败', g.reject_latched_count ?? 0) +
       meta('排队快败', g.reject_hold_count ?? 0) +
       meta('令牌补充', Number(g.refill_per_sec || 0).toFixed(2) + ' req/s');
+    body.innerHTML = html;
+  }
+
+  // 本地拒绝：管线前被拒的请求没有调试目录与 index 行——分原因计数 +
+  // 最近事件表是它们唯一的面板足迹；reason 与 stderr.log 的
+  // "request rejected" 行同源，重启后可去进程日志按时间对。
+  const REJECT_LABELS = {
+    draining: '排空',
+    concurrency_limit: '并发上限',
+    ws_connection_limit: 'WS 连接上限',
+    missing_api_key: '缺 API Key',
+    invalid_api_key: '错 API Key',
+  };
+  function renderRejects(rj) {
+    const body = $('rejectBody');
+    if (!rj) { body.innerHTML = '<div class="mini"><span class="v">无拒绝数据</span></div>'; return; }
+    const by = rj.by_reason || {};
+    let html = '<div class="grid">';
+    const keys = Object.keys(REJECT_LABELS).concat(Object.keys(by).filter(k => !REJECT_LABELS[k]));
+    let any = false;
+    keys.forEach(k => {
+      if (!by[k]) return;
+      any = true;
+      html += meta(REJECT_LABELS[k] || k, by[k]);
+    });
+    if (!any) html += meta('分原因计数', '本进程无拒绝');
+    html += '</div>';
+    const recent = (rj.recent || []).slice(0, 30);
+    if (recent.length) {
+      html += '<div class="tbl-wrap" style="max-height:220px"><table><thead><tr><th>时间</th><th>原因</th><th>状态</th><th>路径</th><th>客户端</th></tr></thead><tbody>';
+      recent.forEach(e => {
+        const who = esc(e.ip || '-') + (e.key_hash ? ' <span class="muted" title="key hash">' + esc(e.key_hash) + '</span>' : '');
+        const ua = e.user_agent ? '<div class="muted" title="' + qa(e.user_agent) + '">' + esc(e.user_agent.length > 48 ? e.user_agent.slice(0, 48) + '…' : e.user_agent) + '</div>' : '';
+        html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td>' +
+          '<td><span class="badge badge-medium" title="' + qa(e.reason) + '">' + esc(REJECT_LABELS[e.reason] || e.reason) + '</span></td>' +
+          '<td class="mono">' + e.status + '</td><td class="mono">' + esc(e.path || '-') + '</td>' +
+          '<td class="mono">' + who + ua + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+      if ((rj.recent || []).length > recent.length) html += '<div class="note">仅显示最近 ' + recent.length + ' 条；更早的查 stderr.log「request rejected」。</div>';
+    }
     body.innerHTML = html;
   }
 

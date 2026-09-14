@@ -308,6 +308,23 @@ func (application *App) WaitDrain(ctx context.Context) error {
 	}
 }
 
+// noteReject 统一记录一次管线前拒绝：分原因计数、事件环与进程日志同源。
+// 这类请求没有调试目录与 index 行——计数/事件环供面板查，slog 行是唯一
+// 跨重启留存的足迹（部署后查排空期拒绝就靠它）。
+func (application *App) noteReject(reason obs.RejectReason, request *http.Request, status int) {
+	event := obs.RejectEvent{
+		Status:    status,
+		Path:      request.URL.Path,
+		IP:        clientIP(request),
+		KeyHash:   requestCredentialHash(request),
+		UserAgent: request.UserAgent(),
+	}
+	application.metrics.Reject(reason, event)
+	slog.Warn("request rejected",
+		"reason", string(reason), "status", status, "path", request.URL.Path,
+		"client_ip", event.IP, "key_hash", event.KeyHash, "ua", event.UserAgent)
+}
+
 // concurrencyMiddleware 限制同时处理的 /v1/* 请求数，避免上游阻塞时资源耗尽。
 func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -316,7 +333,7 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 		application.inflight.Add(1)
 		defer application.inflight.Done()
 		if application.draining.Load() {
-			application.metrics.Reject()
+			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
 			writeDrainingError(writer)
 			return
 		}
@@ -325,8 +342,7 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 			defer func() { <-application.concurrency }()
 			next.ServeHTTP(writer, request)
 		default:
-			application.metrics.Reject()
-			slog.Warn("request rejected", "reason", "concurrency_limit", "path", request.URL.Path, "client_ip", clientIP(request))
+			application.noteReject(obs.RejectConcurrencyLimit, request, http.StatusTooManyRequests)
 			writeRateLimitError(writer, "server is busy, please try again later")
 		}
 	})
@@ -368,8 +384,7 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if provided == "" {
-			application.metrics.Reject()
-			slog.Warn("request rejected", "reason", "missing_api_key", "path", request.URL.Path, "client_ip", clientIP(request))
+			application.noteReject(obs.RejectMissingAPIKey, request, http.StatusUnauthorized)
 			writeAuthError(writer, "Missing API key")
 			return
 		}
@@ -377,8 +392,7 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 		expectedHash := sha256.Sum256([]byte(expected))
 		providedHash := sha256.Sum256([]byte(provided))
 		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
-			application.metrics.Reject()
-			slog.Warn("request rejected", "reason", "invalid_api_key", "path", request.URL.Path, "client_ip", clientIP(request), "key_hash", hashCredential(provided))
+			application.noteReject(obs.RejectInvalidAPIKey, request, http.StatusUnauthorized)
 			writeAuthError(writer, "Invalid API key")
 			return
 		}

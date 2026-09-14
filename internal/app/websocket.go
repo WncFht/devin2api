@@ -372,7 +372,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 排空期拒绝新连接：进程即将退出，升级成功的连接也活不过排空上限，
 	// 不如让客户端立刻换路。
 	if application.draining.Load() {
-		application.metrics.Reject()
+		application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
 		writeDrainingError(writer)
 		return
 	}
@@ -381,6 +381,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	case application.wsConns <- struct{}{}:
 		defer func() { <-application.wsConns }()
 	default:
+		application.noteReject(obs.RejectWSConnectionLimit, request, http.StatusTooManyRequests)
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(writer).Encode(map[string]any{
@@ -511,6 +512,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		// 提前断开让客户端尽早重连到即将接管的新实例。
 		if application.draining.Load() {
 			application.inflight.Done()
+			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
 			if err := writeWSErrorEvent(conn, http.StatusServiceUnavailable, "server_error", "server_draining", "", "server is draining for restart; resend the request"); err != nil {
 				slog.Debug("websocket drain notice failed", "error", obs.Diagnostic(err))
 			}
@@ -521,7 +523,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		case application.concurrency <- struct{}{}:
 		default:
 			application.inflight.Done()
-			application.metrics.Reject()
+			application.noteReject(obs.RejectConcurrencyLimit, request, http.StatusTooManyRequests)
 			if err := writeWSErrorEvent(conn, http.StatusTooManyRequests, "rate_limit_error", "rate_limit", "", "server is busy, please try again later"); err != nil {
 				return
 			}

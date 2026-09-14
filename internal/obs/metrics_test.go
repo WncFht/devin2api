@@ -17,7 +17,7 @@ func TestMetricsLifecycle(t *testing.T) {
 	r.Finish(http.StatusOK, 500, "completed")
 	r2 := m.Begin()
 	r2.Finish(http.StatusBadRequest, 0, "failed")
-	m.Reject()
+	m.Reject(RejectDraining, RejectEvent{Status: http.StatusServiceUnavailable, Path: "/v1/messages"})
 
 	snap := m.Snapshot()
 	if snap["completed_requests"].(uint64) != 2 || snap["ok_responses"].(uint64) != 1 || snap["client_error_responses"].(uint64) != 1 {
@@ -25,6 +25,14 @@ func TestMetricsLifecycle(t *testing.T) {
 	}
 	if snap["active_requests"].(int64) != 0 || snap["rejected_requests"].(uint64) != 1 {
 		t.Fatalf("snapshot = %v", snap)
+	}
+	rejects, _ := snap["rejects"].(map[string]any)
+	if rejects["by_reason"].(map[string]uint64)[string(RejectDraining)] != 1 {
+		t.Fatalf("rejects = %v", rejects)
+	}
+	recent, _ := rejects["recent"].([]RejectEvent)
+	if len(recent) != 1 || recent[0].Path != "/v1/messages" || recent[0].Reason != string(RejectDraining) {
+		t.Fatalf("recent = %+v", recent)
 	}
 	if snap["streaming_requests"].(uint64) != 1 || snap["response_body_bytes"].(uint64) != 500 {
 		t.Fatalf("snapshot = %v", snap)
@@ -60,7 +68,7 @@ func TestTrendBuckets(t *testing.T) {
 	m.Begin().Finish(500, 0, "failed")
 	// SSE 已提交 200 后客户端断连：HTTP 状态是 2xx，但趋势应计为错误。
 	m.Begin().Finish(200, 0, "disconnected")
-	m.Reject()
+	m.Reject(RejectConcurrencyLimit, RejectEvent{Status: http.StatusTooManyRequests})
 	trend, _ := m.Snapshot()["trend_minutes"].([]map[string]any)
 	if len(trend) != trendBuckets {
 		t.Fatalf("trend len = %d, want %d", len(trend), trendBuckets)
