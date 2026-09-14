@@ -8,6 +8,8 @@ package dashboard
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
 // mergedStream 是合并视图的返回结构。
@@ -38,17 +40,14 @@ func mergeStreamEvents(data []byte) mergedStream {
 		if line == "" {
 			continue
 		}
-		var record struct {
-			Event string          `json:"event"`
-			Data  json.RawMessage `json:"data"`
-		}
+		var record debuglog.JSONLRecord
 		if json.Unmarshal([]byte(line), &record) != nil {
 			continue
 		}
 		out.Events++
 		out.EventNames[record.Event]++
-		var payload map[string]any
-		if json.Unmarshal(record.Data, &payload) != nil {
+		payload, ok := record.Data.(map[string]any)
+		if !ok {
 			continue // [DONE] 等纯文本帧
 		}
 		mergePayload(payload, &text, &reasoning, &toolInput, &out)
@@ -113,10 +112,12 @@ func mergePayload(payload map[string]any, text, reasoning, toolInput *strings.Bu
 				if s, _ := delta["text"].(string); s != "" {
 					text.WriteString(s)
 				}
-			case "thinking_delta", "signature_delta":
+			case "thinking_delta":
 				if s, _ := delta["thinking"].(string); s != "" {
 					reasoning.WriteString(s)
 				}
+				// signature_delta 的 delta.signature 是密封签名而非可读思考，
+				// 不进合并视图。
 			case "input_json_delta":
 				if s, _ := delta["partial_json"].(string); s != "" {
 					toolInput.WriteString(s)

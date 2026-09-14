@@ -23,20 +23,11 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 	var totalCost float64
 	models := make([]map[string]any, 0, len(snap.Models))
 	for _, m := range snap.Models {
-		row := map[string]any{
-			"name": m.Name, "requests": m.Requests, "errors": m.Errors, "disconnected": m.Disconnected,
-			"rate_limited":  m.RateLimited,
-			"client_faults": m.ClientFaults, "upstream_faults": m.UpstreamFaults,
-			"sla_success_rate": m.SLASuccessRate,
-			"input_tokens":     m.Input, "output_tokens": m.Output,
-			"input_p50": m.InTokP50, "input_p95": m.InTokP95,
-			"output_p50": m.OutTokP50, "output_p95": m.OutTokP95,
-			"cache_read_tokens": m.CacheRead, "cache_write_tokens": m.CacheWrite,
-			"reasoning_tokens": m.Reasoning, "total_tokens": m.TotalTokens,
-			"gen_ms": m.GenMS, "gen_tokens": m.GenOut,
-			"avg_duration_ms": m.AvgDuration, "avg_ttfb_ms": m.AvgTTFB,
-			"success_rate": m.SuccessRate, "last_result": m.LastResult, "last_at": m.LastAt,
-		}
+		// 行字段与 dimensionAgg 的 json tag 一一对应：marshal 往返代替
+		// 手抄清单，聚合侧新增维度（如 last_status）自动透出。
+		raw, _ := json.Marshal(m)
+		var row map[string]any
+		_ = json.Unmarshal(raw, &row)
 		if c, ok := catalog[m.Name]; ok {
 			// cache_write 实测按 input 价计费：配额翻转拟合的隐含单价 ≈ input 价，
 			// 并非 Anthropic 惯例的 1.25×；catalog 无独立 cache_write 价格维。

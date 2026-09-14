@@ -227,7 +227,7 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
 		return
 	}
-	data, _, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), "06-http-response.jsonl")
+	data, _, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), debuglog.StageHTTPResponse)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"response stream file not found"}`))

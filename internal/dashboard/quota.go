@@ -6,7 +6,6 @@
 package dashboard
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -16,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
 // quotaFileName 是配额历史文件名，位于日志根目录下。
@@ -98,61 +99,40 @@ func (h *Handler) sampleQuota(path string) {
 		return
 	}
 	if info, statErr := os.Stat(path); statErr == nil && info.Size() > quotaFileCap {
-		truncateQuotaFile(path)
+		if _, err := debuglog.TruncateToTail(path, quotaFileCap/2); err != nil {
+			slog.Warn("quota history truncate failed", "error", err)
+		}
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		slog.Warn("quota sample open failed", "error", err)
 		return
 	}
 	defer func() { _ = file.Close() }()
-	_, _ = file.Write(append(data, '\n'))
-}
-
-// truncateQuotaFile 保留文件尾部一半重写，防止多年运行无限增长。
-func truncateQuotaFile(path string) {
-	file, err := os.Open(path)
-	if err != nil {
-		return
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		slog.Warn("quota sample write failed", "error", err)
 	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return
-	}
-	start := info.Size() / 2
-	data := make([]byte, info.Size()-start)
-	if _, err = file.ReadAt(data, start); err != nil {
-		_ = file.Close()
-		return
-	}
-	_ = file.Close()
-	// 丢弃首行残段（截断点可能落在行中间）。
-	if idx := strings.IndexByte(string(data), '\n'); idx >= 0 {
-		data = data[idx+1:]
-	}
-	_ = os.WriteFile(path, data, 0o600)
 }
 
 // quotaHistoryCap 是单次读取的历史行数上限；默认 5 分钟间隔下约覆盖 34 天。
 const quotaHistoryCap = 10000
 
-// readQuotaHistory 读取 quota.jsonl 全部有效行（尾部 quotaHistoryCap 条）。
+// readQuotaHistory 读取 quota.jsonl 尾部 quotaHistoryCap 条有效行。
+// 按行数上限折算字节上限（~256B/行）只读文件尾部，多年运行的文件不再整读；
+// 截断点的首行残段解析失败自然跳过。
 func (h *Handler) readQuotaHistory() []quotaPoint {
 	if h.debugManager == nil || h.debugManager.Root() == "" {
 		return nil
 	}
 	path := filepath.Join(h.debugManager.Root(), quotaFileName)
-	file, err := os.Open(path)
+	data, err := debuglog.TailRead(path, quotaHistoryCap*256)
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = file.Close() }()
 	var points []quotaPoint
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
-	for scanner.Scan() {
+	for line := range strings.Lines(string(data)) {
 		var point quotaPoint
-		if json.Unmarshal(scanner.Bytes(), &point) == nil {
+		if json.Unmarshal([]byte(strings.TrimSpace(line)), &point) == nil {
 			points = append(points, point)
 		}
 	}
