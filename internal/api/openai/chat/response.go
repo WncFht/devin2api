@@ -244,17 +244,18 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 // failed 发一个带 error 字段的终止 chunk 并关闭流。
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
+	// 分类记录随车携带（decoder 产出时已挂）：type/status/retry 全读字段。
+	failure := common.FailureOf(event.Error)
 	message := "chat completion stream failed"
-	if event.Error.ErrorMessage != "" {
-		message = event.Error.ErrorMessage
+	if failure.Error() != "" {
+		// 同 responses 面：给限流消息补 Codex 可解析的 "try again in Ns"。
+		message = common.RetryAfterHint(failure, time.Now())
 	}
-	// 同 responses 面：给限流消息补 Codex 可解析的 "try again in Ns"。
-	message = common.RetryAfterHint(message, time.Now())
 	// OpenAI Chat Completions 流式错误没有官方统一格式。
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误。
-	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error.DebugRef, true)
+	errorPayload := common.BuildErrorPayload(message, failure, common.OpenAIErrorType(failure), event.Error.DebugRef, true)
 	data, _ := json.Marshal(map[string]any{
 		"id":      encoder.responseID,
 		"object":  "chat.completion.chunk",
@@ -262,7 +263,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 		"model":   encoder.model,
 		"choices": []any{},
 		"usage":   nil,
-		"status":  common.HTTPStatus(message),
+		"status":  common.HTTPStatus(failure),
 		"error":   errorPayload,
 	})
 	return []SSEEvent{{Name: "", Data: data}}

@@ -374,13 +374,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 本地限流闸的拒绝记 rate_gate 与上游真拒（devin_connect）区分：
 		// 聚合排障时前者说明根本没碰到上游，后者才是上游配额动作。
 		stage := "devin_connect"
-		var gateErr *rateGateError
-		if errors.As(err, &gateErr) {
+		var failure *llm.Failure
+		if errors.As(err, &failure) && failure.LocalGate {
 			stage = "rate_gate"
 		}
 		recorder.WriteError(stage, err)
-		// 透传上游 Connect 错误原文，不包一层模糊前缀。
-		return nil, connectError(err)
+		// 错误分类记录随车携带——下游经 common.Classify 取回结构事实，
+		// 不再按文本反推。
+		return nil, asFailure(err)
 	}
 	return &responseStream{
 		frames:   pumpUpstream(streamCtx, stream),
@@ -622,7 +623,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 		CascadeId:      proto.String(cascadeID),
 	}))
 	if err != nil {
-		return resolvedAssignment{}, fmt.Errorf("AssignModel(%s): %w", routerUID, connectError(err))
+		return resolvedAssignment{}, fmt.Errorf("AssignModel(%s): %w", routerUID, asFailure(err))
 	}
 	assignment := resp.Msg.GetAssignment()
 	resolved := strings.TrimSpace(assignment.GetModelUid())
@@ -684,20 +685,14 @@ func modelLikelySupportsImages(model string) bool {
 	return true
 }
 
-// connectError 提取 Connect 错误的 code + message，原样返回给 HTTP 客户端。
-func connectError(err error) error {
+// asFailure 把错误归一为分类记录 *llm.Failure（派生字段见
+// common.Classify）——适配器边界之后错误语义随 error 链携带，
+// 下游不再各自按 "<code>: <msg>" 文本方言反推。
+func asFailure(err error) error {
 	if err == nil {
 		return nil
 	}
-	var connectErr *connect.Error
-	if errors.As(err, &connectErr) {
-		msg := strings.TrimSpace(connectErr.Message())
-		if msg == "" {
-			msg = connectErr.Error()
-		}
-		return fmt.Errorf("%s: %s", connectErr.Code(), msg)
-	}
-	return err
+	return common.Classify(err)
 }
 
 // ListModels 通过 GetCliModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
@@ -739,8 +734,8 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		// 客户端断连的 ctx 取消不是上游失败，不上冷却。
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			backoff := catalogRetryBackoff
-			if seconds, ok := common.RetryAfterSeconds(err.Error()); ok {
-				backoff = time.Duration(seconds) * time.Second
+			if failure := common.Classify(err); failure.RetryAfterSeconds > 0 {
+				backoff = time.Duration(failure.RetryAfterSeconds) * time.Second
 			}
 			a.modelsRetryUntil = time.Now().Add(backoff)
 			a.modelsErr = wrapped

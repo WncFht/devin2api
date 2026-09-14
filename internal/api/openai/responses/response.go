@@ -473,20 +473,21 @@ func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) 
 // failed 先补发挂起 reasoning 的收尾，再发 response.failed 并关闭流。
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.completed = true
+	// 分类记录随车携带（decoder 产出时已挂）：type/status/retry 全读字段。
+	failure := common.FailureOf(event.Error)
 	message := "response stream failed"
-	if event.Error.ErrorMessage != "" {
-		message = event.Error.ErrorMessage
+	if failure.Error() != "" {
+		// Codex 只在 message 含 "try again in Ns" 时按服务端时刻睡眠重试；
+		// 追加该短语不影响其它客户端阅读，内部日志保留未改写原文。
+		message = common.RetryAfterHint(failure, time.Now())
 	}
-	// Codex 只在 message 含 "try again in Ns" 时按服务端时刻睡眠重试；
-	// 追加该短语不影响其它客户端阅读，内部日志保留未改写原文。
-	message = common.RetryAfterHint(message, time.Now())
 	// OpenAI Responses API 中，流式失败应发送 response.failed 事件，
 	// 包含 status="failed" 的 response 对象与 error 字段。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	// 事件顶层 error 与 response.error 共用同一份 payload（spec 位置与
 	// 排障位置同事实源），debug_ref 等排障字段两处一致。
-	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error.DebugRef, true)
+	errorPayload := common.BuildErrorPayload(message, failure, common.OpenAIErrorType(failure), event.Error.DebugRef, true)
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
 	response["error"] = errorPayload
 	// 挂起的 reasoning item 先补发收尾再下发失败事件，与 Done 路径一致——
@@ -494,7 +495,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	events := encoder.flushPendingReasoning()
 	return append(events, encoder.emit("response.failed", map[string]any{
 		"response": response,
-		"status":   common.HTTPStatus(message),
+		"status":   common.HTTPStatus(failure),
 		"error":    errorPayload,
 	}))
 }

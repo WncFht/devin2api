@@ -13,6 +13,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/WncFht/devin2api/internal/api/common"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 func rateLimitErr(text string) error {
@@ -51,19 +52,16 @@ func TestRateGateLatchRejectsUntilReset(t *testing.T) {
 	gate := newRateGate(GateConfig{}, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Please try again later. Your limit will reset in 8 minutes. (trace ID: x)"))
 	err := gate.wait(context.Background())
-	var gateErr *rateGateError
-	if !errors.As(err, &gateErr) {
-		t.Fatalf("wait error = %v, want *rateGateError", err)
+	var failure *llm.Failure
+	if !errors.As(err, &failure) || !failure.LocalGate {
+		t.Fatalf("wait error = %v, want local-gate *llm.Failure", err)
 	}
-	if gateErr.retryAfter < 480*time.Second || gateErr.retryAfter > 545*time.Second {
-		t.Fatalf("retryAfter = %v, want 480~545s (bucket-aligned)", gateErr.retryAfter)
+	if failure.RetryAfterSeconds < 480 || failure.RetryAfterSeconds > 545 {
+		t.Fatalf("RetryAfterSeconds = %d, want 480~545 (bucket-aligned)", failure.RetryAfterSeconds)
 	}
-	// 错误文案必须能被公共错误管道译出 429 + Retry-After。
-	if status := common.HTTPStatus(err.Error()); status != 429 {
+	// 分类记录必须能被公共错误管道译出 429。
+	if status := common.HTTPStatus(failure); status != 429 {
 		t.Fatalf("HTTPStatus = %d, want 429", status)
-	}
-	if seconds, ok := common.RetryAfterSeconds(err.Error()); !ok || seconds < 480 || seconds > 545 {
-		t.Fatalf("RetryAfterSeconds = %d,%v, want 480~545", seconds, ok)
 	}
 }
 
@@ -77,9 +75,9 @@ func TestRateGateLatchFastFails(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("wait held %v during latch, want instant fast-fail", elapsed)
 	}
-	var gateErr *rateGateError
-	if !errors.As(err, &gateErr) || gateErr.retryAfter <= 0 || gateErr.retryAfter > time.Second {
-		t.Fatalf("wait error = %v, want rateGateError with retryAfter ~1s", err)
+	var gateErr *llm.Failure
+	if !errors.As(err, &gateErr) || gateErr.RetryAfterSeconds <= 0 || gateErr.RetryAfterSeconds > 1 {
+		t.Fatalf("wait error = %v, want local-gate *llm.Failure with RetryAfterSeconds ~1s", err)
 	}
 }
 
@@ -90,9 +88,9 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 	clock := pinGateClock(gate, 10) // 可发区间内
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
-	var gateErr *rateGateError
+	var gateErr *llm.Failure
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
-		t.Fatalf("first wait error = %v, want *rateGateError (slot not open yet)", err)
+		t.Fatalf("first wait error = %v, want local-gate *llm.Failure (slot not open yet)", err)
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
 	if err := gate.wait(context.Background()); err != nil {
@@ -100,7 +98,7 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 	}
 	// 槽已被取走，紧随其后的请求回到快败。
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
-		t.Fatalf("post-probe wait error = %v, want *rateGateError", err)
+		t.Fatalf("post-probe wait error = %v, want *llm.Failure", err)
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
 	if err := gate.wait(context.Background()); err != nil {
@@ -115,9 +113,9 @@ func TestRateGateDripRespectsDeadZone(t *testing.T) {
 	clock := pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 60 seconds."))
 	clock.t = clock.t.Add(48 * time.Second) // :58，闩内且进死区，槽已开
-	var gateErr *rateGateError
+	var gateErr *llm.Failure
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
-		t.Fatalf("dead-zone wait error = %v, want *rateGateError (no drip in dead zone)", err)
+		t.Fatalf("dead-zone wait error = %v, want *llm.Failure (no drip in dead zone)", err)
 	}
 	clock.t = clock.t.Add(5 * time.Second) // :03 下一分钟，回可发区间
 	if err := gate.wait(context.Background()); err != nil {
@@ -131,9 +129,9 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 	gate := newRateGate(GateConfig{}, "")
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
-	var gateErr *rateGateError
+	var gateErr *llm.Failure
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
-		t.Fatalf("latched wait error = %v, want *rateGateError", err)
+		t.Fatalf("latched wait error = %v, want *llm.Failure", err)
 	}
 	gate.noteUpstreamSuccess()
 	if err := gate.wait(context.Background()); err != nil {
@@ -151,8 +149,8 @@ func TestRateGateLatchSelective(t *testing.T) {
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 10 minutes."))
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	err := gate.wait(context.Background())
-	var gateErr *rateGateError
-	if !errors.As(err, &gateErr) || gateErr.retryAfter < 590*time.Second {
+	var gateErr *llm.Failure
+	if !errors.As(err, &gateErr) || gateErr.RetryAfterSeconds < 590 {
 		t.Fatalf("wait error = %v, want latch ~600s (max wins)", err)
 	}
 }
@@ -168,13 +166,13 @@ func TestRateGateWindowQuotaReject(t *testing.T) {
 		}
 	}
 	err := gate.wait(context.Background())
-	var gateErr *rateGateError
+	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) {
-		t.Fatalf("excess wait error = %v, want *rateGateError", err)
+		t.Fatalf("excess wait error = %v, want *llm.Failure", err)
 	}
 	// :10 配额度尽 → 下一窗口 :02+60 开放，retryAfter ≈ 52s。
-	if gateErr.retryAfter < 50*time.Second || gateErr.retryAfter > 53*time.Second {
-		t.Fatalf("retryAfter = %v, want ~52s (next window)", gateErr.retryAfter)
+	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 53 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
 	}
 }
 
@@ -213,12 +211,12 @@ func TestRateGateDeadZoneFastFails(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, "")
 	pinGateClock(gate, 58.5) // 死区头，下一窗口 ~3.5s > maxHold
 	err := gate.wait(context.Background())
-	var gateErr *rateGateError
+	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) {
-		t.Fatalf("wait error = %v, want *rateGateError", err)
+		t.Fatalf("wait error = %v, want *llm.Failure", err)
 	}
-	if gateErr.retryAfter < 3*time.Second || gateErr.retryAfter > 4*time.Second {
-		t.Fatalf("retryAfter = %v, want ~3.5s (next window)", gateErr.retryAfter)
+	if gateErr.RetryAfterSeconds < 3 || gateErr.RetryAfterSeconds > 4 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~3.5s (next window)", gateErr.RetryAfterSeconds)
 	}
 }
 
@@ -253,11 +251,11 @@ func TestRetryAfterParsesMinutes(t *testing.T) {
 		"Your limit will reset in 1 minute.":   60,
 		"Your limit will reset in 8 minutes.":  480,
 	} {
-		if got, ok := common.RetryAfterSeconds(text); !ok || got != want {
-			t.Errorf("RetryAfterSeconds(%q) = %d,%v, want %d", text, got, ok, want)
+		if got := common.ClassifyText(text).RetryAfterSeconds; got != want {
+			t.Errorf("ClassifyText(%q).RetryAfterSeconds = %d, want %d", text, got, want)
 		}
 	}
-	if _, ok := common.RetryAfterSeconds("no hint here"); ok {
+	if common.ClassifyText("no hint here").RetryAfterSeconds != 0 {
 		t.Error("expected no hint to parse")
 	}
 	if !strings.Contains(rateLimitErr("reset in 5 seconds.").Error(), "resource_exhausted") {
@@ -269,7 +267,7 @@ func TestRetryAfterParsesMinutes(t *testing.T) {
 // 真实截止 = now+Nmin 所在桶的 :59；秒级 hint 精确落地不改。
 func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	now := time.Date(2026, 9, 14, 4, 36, 12, 0, time.Local)
-	reset, ok := common.RateLimitReset("Your limit will reset in 1 minute.", now)
+	reset, ok := common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."), now)
 	if !ok {
 		t.Fatal("minute hint should parse")
 	}
@@ -279,7 +277,7 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	}
 	// 目标时刻已过 :59 时进下一分钟桶界：04:36:59.5 + 1min = 04:37:59.5，
 	// 本分钟 :59 已过 → 04:38:59。
-	reset, ok = common.RateLimitReset("Your limit will reset in 1 minute.",
+	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."),
 		time.Date(2026, 9, 14, 4, 36, 59, int(500*time.Millisecond), time.Local))
 	if !ok {
 		t.Fatal("minute hint should parse")
@@ -287,10 +285,10 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	if want := time.Date(2026, 9, 14, 4, 38, 59, 0, time.Local); !reset.Equal(want) {
 		t.Fatalf("RateLimitReset = %v, want %v", reset, want)
 	}
-	if _, ok = common.RateLimitReset("Your limit will reset in 0 minutes.", now); ok {
+	if _, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 0 minutes."), now); ok {
 		t.Fatal("zero-minute hint should not parse")
 	}
-	reset, ok = common.RateLimitReset("Your limit will reset in 1 minute.", time.Date(2026, 9, 14, 4, 36, 1, 0, time.Local))
+	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 1 minute."), time.Date(2026, 9, 14, 4, 36, 1, 0, time.Local))
 	if !ok {
 		t.Fatal("minute hint should parse")
 	}
@@ -298,7 +296,7 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 		t.Fatalf("RateLimitReset = %v, want %v", reset, want)
 	}
 	// 秒级 hint 原样生效。
-	reset, ok = common.RateLimitReset("Your limit will reset in 30 seconds.", now)
+	reset, ok = common.RateLimitReset(common.ClassifyText("Your limit will reset in 30 seconds."), now)
 	if !ok || !reset.Equal(now.Add(30*time.Second)) {
 		t.Fatalf("seconds RateLimitReset = %v,%v", reset, ok)
 	}

@@ -4,7 +4,6 @@ package devin
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -12,9 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"connectrpc.com/connect"
-
 	"github.com/WncFht/devin2api/internal/api/common"
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 const (
@@ -365,7 +363,7 @@ func (gate *rateGate) wait(ctx context.Context) error {
 			retryAfter := gate.limitedUntil.Sub(now)
 			gate.rejectLatched++
 			gate.mu.Unlock()
-			return &rateGateError{retryAfter: retryAfter}
+			return gateRejection(retryAfter)
 		}
 		if gate.quota <= 0 {
 			gate.mu.Unlock()
@@ -380,7 +378,7 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		if wait > gate.maxHold {
 			gate.rejectHold++
 			gate.mu.Unlock()
-			return &rateGateError{retryAfter: wait}
+			return gateRejection(wait)
 		}
 		gate.waiters++
 		sleeping = true
@@ -406,13 +404,14 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	if gate == nil {
 		return
 	}
-	var connectErr *connect.Error
-	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeResourceExhausted {
+	failure := common.Classify(err)
+	// 本地闸门自己的拒绝（LocalGate）不带上游证据，不能拿来上闩。
+	if failure == nil || failure.LocalGate || !failure.RateLimited {
 		return
 	}
 	now := gate.now()
 	until := now.Add(gate.defaultLatch)
-	if resetAt, ok := common.RateLimitReset(err.Error(), now); ok {
+	if resetAt, ok := common.RateLimitReset(failure, now); ok {
 		until = resetAt
 	}
 	gate.mu.Lock()
@@ -459,16 +458,17 @@ func (gate *rateGate) noteUpstreamSuccess() {
 	}
 }
 
-// rateGateError 是本地闸门的拒绝。文案沿用上游限流格式
-// （resource_exhausted + "reset in N seconds"），现有错误管道自然译出
-// 429 + Retry-After + retry_after 细节字段，下游无需特判本地/上游。
-type rateGateError struct {
-	retryAfter time.Duration
-}
-
-// Error 返回闸门快败的错误文案：沿用上游 resource_exhausted 的
-// "reset in N seconds" 句式，客户端/下游解析 reset hint 的逻辑无需
-// 区分本地闸门与上游真拒。
-func (e *rateGateError) Error() string {
-	return fmt.Sprintf("resource_exhausted: upstream message rate limited by local gate; your limit will reset in %d seconds.", int(math.Ceil(e.retryAfter.Seconds())))
+// gateRejection 是本地闸门拒绝的分类记录：Code 沿用上游限流方言
+// resource_exhausted 让下游自然译出 429，LocalGate 标记未触达上游
+// （排障归因 rate_gate），RetryAfterSeconds 直接带精确等待秒数——
+// 不再靠伪造 "reset in N seconds" 文案让下游重解析。Message 保留
+// 同一句式，客户端与日志看到的文案不变。
+func gateRejection(retryAfter time.Duration) *llm.Failure {
+	seconds := int(math.Ceil(retryAfter.Seconds()))
+	return &llm.Failure{
+		Code:              "resource_exhausted",
+		Message:           fmt.Sprintf("upstream message rate limited by local gate; your limit will reset in %d seconds.", seconds),
+		LocalGate:         true,
+		RetryAfterSeconds: seconds,
+	}
 }

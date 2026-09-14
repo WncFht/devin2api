@@ -387,22 +387,23 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 // failed 收尾挂起思考块后发 Anthropic 形态的 error 事件并关闭流。
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
+	// 分类记录随车携带（decoder 产出时已挂）：type/status/retry 全读字段。
+	failure := common.FailureOf(event.Error)
 	message := "anthropic message stream failed"
-	if event.Error.ErrorMessage != "" {
-		message = event.Error.ErrorMessage
+	if failure.Error() != "" {
+		// 与 chat/responses 面一致：给限流消息补 "try again in Ns" 等待提示。
+		message = common.RetryAfterHint(failure, time.Now())
 	}
-	// 与 chat/responses 面一致：给限流消息补 "try again in Ns" 等待提示。
-	message = common.RetryAfterHint(message, time.Now())
 	// Anthropic 官方流式错误格式：
 	// event: error
 	// data: {"type":"error","error":{"type":"...","message":"..."}}
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
-	errorPayload := common.BuildErrorPayload(message, common.AnthropicErrorType(message), event.Error.DebugRef, false)
+	errorPayload := common.BuildErrorPayload(message, failure, common.AnthropicErrorType(failure), event.Error.DebugRef, false)
 	events := encoder.flushPendingThinking()
 	return append(events, encoder.event("error", map[string]any{
 		"type":   "error",
-		"status": common.HTTPStatus(message),
+		"status": common.HTTPStatus(failure),
 		"error":  errorPayload,
 	}))
 }

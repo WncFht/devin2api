@@ -410,11 +410,11 @@ func TestValidateImagesUsesCatalog(t *testing.T) {
 	}
 }
 
-// TestConnectErrorPassthrough 验证 Connect 错误 message 原样保留。
+// TestConnectErrorPassthrough 验证 Connect 错误分类后 code + message 原样保留。
 func TestConnectErrorPassthrough(t *testing.T) {
-	err := connectError(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
+	err := asFailure(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
 	if err == nil || !strings.Contains(err.Error(), "invalid_argument") || !strings.Contains(err.Error(), "model does not support images") {
-		t.Fatalf("connectError = %v", err)
+		t.Fatalf("asFailure = %v", err)
 	}
 }
 

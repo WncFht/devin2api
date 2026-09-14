@@ -578,7 +578,7 @@ func (application *App) createCompletion(
 	defer ticker.Stop()
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
-		noteRetryAfter(recorder, err.Error())
+		noteRetryAfter(recorder, common.Classify(err))
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", err)
@@ -596,7 +596,7 @@ func (application *App) createCompletion(
 			recorder.WriteError("response_event", err)
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", mapProviderErrorStatus(err), err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(common.Classify(err)), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
@@ -735,16 +735,15 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 // 的 ≥500 会压成 400，调用方应记返回值而非入参，否则索引口径「服务端
 // 错误」与客户端口径「请求错误」错配，按状态码归因会误伤。
 func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) int {
+	failure := common.Classify(err)
 	recorder.WriteError(stage, err)
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
 	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
-	message := err.Error()
 	// 客户端可修正的错误统一报 invalid_request_error（两个协议对该语义
 	// 同名），便于 IDE 直接展示；状态码同样压回 4xx。
 	clientFixable := status == http.StatusBadRequest ||
 		status == http.StatusRequestEntityTooLarge ||
-		strings.Contains(message, "does not support image") ||
-		strings.Contains(message, "invalid_argument")
+		failure.ClientFixable
 	if clientFixable && status >= 500 {
 		status = http.StatusBadRequest
 	}
@@ -757,19 +756,19 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
-		if resetAt, ok := common.RateLimitReset(message, time.Now()); ok {
+		if resetAt, ok := common.RateLimitReset(failure, time.Now()); ok {
 			wait := int(math.Ceil(time.Until(resetAt).Seconds()))
 			writer.Header().Set("Retry-After", strconv.Itoa(wait))
 			writer.Header().Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(resetAt.Unix(), 10))
 		}
 	}
-	noteRetryAfter(recorder, message)
+	noteRetryAfter(recorder, failure)
 	writer.WriteHeader(status)
 	// 错误体按客户端协议成形：/v1/messages 必须回 Anthropic 信封，
 	// 否则 Claude Code 解析不出 error 字段。stage 标明失败发生在哪一层，
 	// debug_ref 是本地调试目录名，agent 凭它一次调用即可拿到全部证据。
 	body := protocol.EncodeHTTPError(httpError{
-		Message: message, ClientFixable: clientFixable,
+		Failure: failure, ClientFixable: clientFixable,
 		Stage: stage, DebugRef: debugRef(recorder),
 	})
 	_, _ = writer.Write(body)
@@ -777,40 +776,11 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	return status
 }
 
-// noteRetryAfter 把上游限流文案里的 reset 秒数记进请求日志——无论它最终
+// noteRetryAfter 把限流记录的 reset 秒数记进请求日志——无论它最终
 // 走 Retry-After 头（未提交 429）还是已提交后的错误体下发，索引里都有可查的
 // 结构化 hint，grep/聚合不必再解析文案。
-func noteRetryAfter(recorder *debuglog.Recorder, message string) {
-	if seconds, ok := common.RetryAfterSeconds(message); ok {
-		recorder.SetRetryAfter(seconds)
-	}
-}
-
-// mapProviderErrorStatus 将上游/适配器错误映射为合适的 HTTP 状态，message 仍原样透传。
-// Connect 编码的上游错误交给 common.HTTPStatus；本地适配器产生的错误先按内容匹配。
-// 客户端取消映射 499（nginx 约定）、上游超时 504：客户端主动断开计成
-// 502 会污染指标并让网关误判渠道故障。
-func mapProviderErrorStatus(err error) int {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout
-	}
-	if errors.Is(err, context.Canceled) {
-		return 499
-	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "does not support image"),
-		strings.Contains(msg, "file_id images"),
-		strings.Contains(msg, "only data URL"),
-		strings.Contains(msg, "validate Devin request"),
-		strings.Contains(msg, "validate adapted request"):
-		return http.StatusBadRequest
-	case strings.Contains(msg, "context deadline exceeded"):
-		// 上游 ctx 错误可能在事件层被展平成字符串，errors.Is 已接不到。
-		return http.StatusGatewayTimeout
-	case strings.Contains(msg, "context canceled"):
-		return 499
-	default:
-		return common.HTTPStatus(msg)
+func noteRetryAfter(recorder *debuglog.Recorder, failure *llm.Failure) {
+	if failure != nil && failure.RetryAfterSeconds > 0 {
+		recorder.SetRetryAfter(failure.RetryAfterSeconds)
 	}
 }

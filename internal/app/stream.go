@@ -193,14 +193,15 @@ func (application *App) streamCompletion(
 	firstEvent, firstErr := out.awaitEvent(streamCtx, items, ticker)
 	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
 		// 建流后首事件前的断连/中止先按取消归因——context.Canceled 会被
-		// mapProviderErrorStatus 映成 499，走 writeLoggedError 就把断连
+		// 分类记录映成 499，走 writeLoggedError 就把断连
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
 		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", firstErr)
 			return
 		}
-		status := mapProviderErrorStatus(firstErr)
+		firstFailure := common.Classify(firstErr)
+		status := common.HTTPStatus(firstFailure)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
 			return
@@ -212,7 +213,7 @@ func (application *App) streamCompletion(
 		// 网关分类。Anthropic 面不在此列——其客户端按 HTTP 状态码
 		// 重试，提交 200 反而把失败降级为不可重试的畸形响应。
 		firstEvent = llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
-			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error()}}
+			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error(), Failure: firstFailure}}
 		firstErr = nil
 	}
 	prelude := []llm.ResponseEvent{firstEvent}
@@ -228,8 +229,9 @@ func (application *App) streamCompletion(
 		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
 			message = firstEvent.Error.ErrorMessage
 		}
-		status := mapProviderErrorStatus(errors.New(message))
-		if protocol.StreamErrorEvents() && (common.IsContextLengthError(message) || status == http.StatusTooManyRequests) {
+		failure := common.FailureOf(firstEvent.Error)
+		status := common.HTTPStatus(failure)
+		if protocol.StreamErrorEvents() && (failure.ContextLength || status == http.StatusTooManyRequests) {
 			// Codex 只在 SSE response.failed 里按 error.code==
 			// "context_length_exceeded" 识别窗口溢出并自动压缩——但网关
 			// 会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
@@ -256,10 +258,11 @@ func (application *App) streamCompletion(
 	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {
-		noteRetryAfter(recorder, streamErr.Error())
-		// 流内错误事件下发的限流 HTTP 状态仍是 200——按文案语义补标，
+		streamFailure := common.Classify(streamErr)
+		noteRetryAfter(recorder, streamFailure)
+		// 流内错误事件下发的限流 HTTP 状态仍是 200——按记录语义补标，
 		// 责任归因与 429 采样才不会把这批限流漏成普通失败。
-		if common.HTTPStatus(streamErr.Error()) == http.StatusTooManyRequests {
+		if streamFailure.RateLimited {
 			recorder.SetRateLimited()
 		}
 		switch {
@@ -270,7 +273,7 @@ func (application *App) streamCompletion(
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", mapProviderErrorStatus(streamErr), streamErr)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", common.HTTPStatus(streamFailure), streamErr)
 		default:
 			recorder.WriteError("http_stream", streamErr)
 		}

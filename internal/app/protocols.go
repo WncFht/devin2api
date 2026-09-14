@@ -44,8 +44,9 @@ type protocolEncoder interface {
 // 装进各自的信封。ClientFixable 为真时错误类型统一为
 // invalid_request_error（两侧协议对该语义同名）。
 type httpError struct {
-	// Message 是透传给客户端的错误原文（不改写上游文案）。
-	Message string
+	// Failure 是本次失败的分类记录：type/code/排障字段全部从记录派生，
+	// 协议层不再按文本反推。
+	Failure *llm.Failure
 	// ClientFixable 标记客户端可修正的请求错误（图片不支持/
 	// invalid_argument/超长），覆盖协议默认类型推导。
 	ClientFixable bool
@@ -57,11 +58,11 @@ type httpError struct {
 
 // openAIHTTPError 编码 OpenAI 系（chat/responses 共享）的 HTTP 错误体。
 func openAIHTTPError(e httpError) []byte {
-	errorType := common.OpenAIErrorType(e.Message)
+	errorType := common.OpenAIErrorType(e.Failure)
 	if e.ClientFixable {
 		errorType = "invalid_request_error"
 	}
-	payload := common.BuildErrorPayload(e.Message, errorType, e.DebugRef, true)
+	payload := common.BuildErrorPayload(e.Failure.Error(), e.Failure, errorType, e.DebugRef, true)
 	payload["stage"] = e.Stage
 	body, _ := json.Marshal(map[string]any{"error": payload})
 	return append(body, '\n')
@@ -69,7 +70,8 @@ func openAIHTTPError(e httpError) []byte {
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
 func openAIErrorBody(err error, debugRef string) []byte {
-	payload := common.BuildErrorPayload(err.Error(), common.OpenAIErrorType(err.Error()), debugRef, true)
+	failure := common.Classify(err)
+	payload := common.BuildErrorPayload(failure.Error(), failure, common.OpenAIErrorType(failure), debugRef, true)
 	body, _ := json.Marshal(map[string]any{"error": payload})
 	return body
 }
@@ -151,7 +153,8 @@ func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, e
 }
 
 func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
-	payload := common.BuildErrorPayload(err.Error(), common.AnthropicErrorType(err.Error()), debugRef, false)
+	failure := common.Classify(err)
+	payload := common.BuildErrorPayload(failure.Error(), failure, common.AnthropicErrorType(failure), debugRef, false)
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return body
 }
@@ -159,11 +162,11 @@ func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
 func (p anthropicProtocol) StreamErrorEvents() bool { return false }
 
 func (p anthropicProtocol) EncodeHTTPError(e httpError) []byte {
-	errorType := common.AnthropicErrorType(e.Message)
+	errorType := common.AnthropicErrorType(e.Failure)
 	if e.ClientFixable {
 		errorType = "invalid_request_error"
 	}
-	payload := common.BuildErrorPayload(e.Message, errorType, e.DebugRef, false)
+	payload := common.BuildErrorPayload(e.Failure.Error(), e.Failure, errorType, e.DebugRef, false)
 	payload["stage"] = e.Stage
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return append(body, '\n')

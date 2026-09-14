@@ -16,7 +16,7 @@ func TestOpenAIErrorType(t *testing.T) {
 		{"some unknown error", "server_error"},
 	}
 	for _, c := range cases {
-		if got := OpenAIErrorType(c.message); got != c.want {
+		if got := OpenAIErrorType(ClassifyText(c.message)); got != c.want {
 			t.Fatalf("OpenAIErrorType(%q) = %q, want %q", c.message, got, c.want)
 		}
 	}
@@ -35,7 +35,7 @@ func TestAnthropicErrorType(t *testing.T) {
 		{"some unknown error", "api_error"},
 	}
 	for _, c := range cases {
-		if got := AnthropicErrorType(c.message); got != c.want {
+		if got := AnthropicErrorType(ClassifyText(c.message)); got != c.want {
 			t.Fatalf("AnthropicErrorType(%q) = %q, want %q", c.message, got, c.want)
 		}
 	}
@@ -58,7 +58,7 @@ func TestHTTPStatus(t *testing.T) {
 		{"stream disconnected", 502},
 	}
 	for _, c := range cases {
-		if got := HTTPStatus(c.message); got != c.want {
+		if got := HTTPStatus(ClassifyText(c.message)); got != c.want {
 			t.Fatalf("HTTPStatus(%q) = %d, want %d", c.message, got, c.want)
 		}
 	}
@@ -67,10 +67,10 @@ func TestHTTPStatus(t *testing.T) {
 // TestErrorCode 的测试动机是 error.code 让下游网关把上下文超长识别为
 // 请求级问题；其他错误返回 nil。
 func TestErrorCode(t *testing.T) {
-	if got := ErrorCode("invalid_argument: The prompt is too long for this model"); got != "context_length_exceeded" {
+	if got := ErrorCode(ClassifyText("invalid_argument: The prompt is too long for this model")); got != "context_length_exceeded" {
 		t.Fatalf("ErrorCode = %v, want context_length_exceeded", got)
 	}
-	if got := ErrorCode("permission_denied: blocked"); got != nil {
+	if got := ErrorCode(ClassifyText("permission_denied: blocked")); got != nil {
 		t.Fatalf("ErrorCode = %v, want nil", got)
 	}
 }
@@ -78,24 +78,24 @@ func TestErrorCode(t *testing.T) {
 // TestRetryAfterSeconds 验证从上游限流文案解析重置窗口——上游没有
 // Retry-After/RetryInfo，"reset in N seconds" 是唯一可行动 hint。
 func TestRetryAfterSeconds(t *testing.T) {
-	if seconds, ok := RetryAfterSeconds("resource_exhausted: rate limited. Your limit will reset in 42 seconds."); !ok || seconds != 42 {
-		t.Fatalf("RetryAfterSeconds = %d,%v, want 42,true", seconds, ok)
+	if seconds := ClassifyText("resource_exhausted: rate limited. Your limit will reset in 42 seconds.").RetryAfterSeconds; seconds != 42 {
+		t.Fatalf("RetryAfterSeconds = %d, want 42", seconds)
 	}
-	if _, ok := RetryAfterSeconds("resource_exhausted: quota exceeded"); ok {
-		t.Fatal("no reset hint must report false")
+	if seconds := ClassifyText("resource_exhausted: quota exceeded").RetryAfterSeconds; seconds != 0 {
+		t.Fatal("no reset hint must report 0")
 	}
-	if _, ok := RetryAfterSeconds("reset in 0 seconds"); ok {
-		t.Fatal("zero reset must report false")
+	if seconds := ClassifyText("reset in 0 seconds").RetryAfterSeconds; seconds != 0 {
+		t.Fatal("zero reset must report 0")
 	}
 }
 
 // TestUpstreamTraceID 验证从错误文案尾部提取 "(trace ID: …)"——上游错误
 // 全是模糊 internal error，trace ID 是唯一的报障锚点。
 func TestUpstreamTraceID(t *testing.T) {
-	if got := UpstreamTraceID("internal: an internal error occurred (trace ID: abc-def)"); got != "abc-def" {
-		t.Fatalf("UpstreamTraceID = %q, want abc-def", got)
+	if got := ClassifyText("internal: an internal error occurred (trace ID: abc-def)").TraceID; got != "abc-def" {
+		t.Fatalf("TraceID = %q, want abc-def", got)
 	}
-	if got := UpstreamTraceID("internal: boom"); got != "" {
-		t.Fatalf("UpstreamTraceID = %q, want empty", got)
+	if got := ClassifyText("internal: boom").TraceID; got != "" {
+		t.Fatalf("TraceID = %q, want empty", got)
 	}
 }

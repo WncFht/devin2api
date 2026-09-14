@@ -12,6 +12,7 @@ import (
 
 	devinproto "local/devinproto"
 
+	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -201,8 +202,8 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		return nil
 	}
 	if upstreamErr != nil {
-		// 流中途/结束时的 Connect 错误同样透传原文。
-		return decoder.fail(connectError(upstreamErr))
+		// 流中途/结束时的错误透传原文；fail 内部统一分类成记录。
+		return decoder.fail(upstreamErr)
 	}
 	if !decoder.hasStopReason && len(decoder.partial.Content) == 0 && len(decoder.tools) == 0 {
 		return decoder.fail(errors.New("devin stream ended without generated content"))
@@ -622,14 +623,16 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 	return events
 }
 
-// fail 产出错误终止事件：partial 标记 error 并携带原文，Done
-// 语义由消费方按 Reason=error 映射为协议错误帧。重复调用返回空。
+// fail 产出错误终止事件：partial 标记 error、携带原文与分类记录
+// （消费方经 Failure 取 type/status/retry 结构事实，不再按文本反推），
+// Done 语义由消费方按 Reason=error 映射为协议错误帧。重复调用返回空。
 func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 	if decoder.finished {
 		return nil
 	}
 	decoder.partial.StopReason = llm.StopReasonError
 	decoder.partial.ErrorMessage = err.Error()
+	decoder.partial.Failure = common.Classify(err)
 	decoder.finished = true
 	return []llm.ResponseEvent{{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: &decoder.partial}}
 }
