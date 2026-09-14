@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -933,20 +935,39 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 	}
 }
 
-// TestIsTransientConnectError 验证只对纯传输错误重试：上游 unavailable
-// 实测是确定性语义错误（router 直连、未开放端点），重试永远得到同样失败。
+// TestIsTransientConnectError 验证传输断裂（含 connect.Error 包装形态）
+// 可重试、上游语义拒绝不重试：上游 unavailable 实测是确定性语义错误
+// （router 直连、未开放端点），文案 "try again later" 是固定模板，
+// 重试永远得到同样失败。
 func TestIsTransientConnectError(t *testing.T) {
-	if !isTransientConnectError(io.ErrUnexpectedEOF) {
-		t.Fatal("unexpected EOF must be retryable")
+	retryable := map[string]error{
+		"bare unexpected EOF": io.ErrUnexpectedEOF,
+		// 线上实测形态：connect-go 把传输断裂包成 connect.Error——
+		// RoundTrip 断 → unavailable 包 EOF；envelope 截断 →
+		// invalid_argument 包 "protocol error: ..."；tcp 重置 →
+		// unavailable 包 *net.OpError。
+		"unavailable wrapping EOF": connect.NewError(connect.CodeUnavailable, io.ErrUnexpectedEOF),
+		"incomplete envelope": connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("protocol error: incomplete envelope: %w", io.ErrUnexpectedEOF)),
+		"tcp reset": connect.NewError(connect.CodeUnavailable,
+			&net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}),
+		"mid-stream clean EOF": connect.NewError(connect.CodeUnknown, io.EOF),
 	}
-	if isTransientConnectError(connect.NewError(connect.CodeUnavailable, errors.New("try later"))) {
-		t.Fatal("unavailable must not be retried")
+	for name, err := range retryable {
+		if !isTransientConnectError(err) {
+			t.Fatalf("%s must be retryable: %v", name, err)
+		}
 	}
-	if isTransientConnectError(connect.NewError(connect.CodePermissionDenied, errors.New("blocked"))) {
-		t.Fatal("permission_denied must not be retried")
+	semantic := map[string]error{
+		"unavailable template": connect.NewError(connect.CodeUnavailable, errors.New("try later")),
+		"permission denied":    connect.NewError(connect.CodePermissionDenied, errors.New("blocked")),
+		"invalid argument":     connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")),
+		"rate limited":         connect.NewError(connect.CodeResourceExhausted, errors.New("rate limit")),
 	}
-	if isTransientConnectError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request"))) {
-		t.Fatal("invalid_argument must not be retried")
+	for name, err := range semantic {
+		if isTransientConnectError(err) {
+			t.Fatalf("%s must not be retried: %v", name, err)
+		}
 	}
 }
 

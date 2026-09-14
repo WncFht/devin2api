@@ -101,7 +101,7 @@
 
 # 服务排障（对运行中的实例）
 
-本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值）与 `stage`（失败发生在哪一层）。
+本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值），非流式错误体还带 `stage`（写出错误的 HTTP 处理层）。失败的首因分层 stage 以 `error.json`/`index.jsonl` 为准：`devin_transport` 是连接被截断类传输故障（含 connect.Error 包装的 EOF/帧截断），`devin_connect` 是上游语义拒绝（参数/权限/限流）。
 
 工作流：
 

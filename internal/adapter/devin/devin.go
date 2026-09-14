@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -386,7 +387,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		gate:     adapter.gate,
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
-		// 语义错误（invalid_argument 等）重试只会复现同样失败，直接放行。
+		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			retryRequest := request
 			var causeText string
@@ -470,12 +471,22 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 	return nil, lastErr
 }
 
-// isTransientConnectError 判断建立阶段错误是否值得重试：
-// 只对非 Connect 协议的传输错误（EOF、连接重置、超时）重试。
-// 上游 unavailable 实测是确定性语义错误（router 直连、未开放端点），
-// 文案里的 "try again later" 是固定模板，重试永远得到同样的失败；
-// 其余 Connect code 均为语义错误，同样不重试。
+// isTransientConnectError 判断错误是否为传输层断裂（可重试、记
+// devin_transport）。connect-go 会把底层传输失败统一包成 connect.Error——
+// RoundTrip/读写断 → CodeUnavailable（duplex_http_call.go），envelope 帧
+// 被截断 → CodeInvalidArgument "protocol error: ..."，流中段裸 EOF →
+// CodeUnknown——判据要看 unwrap 链里有没有 io/net 错误，而不是
+// 「是不是 connect.Error」。链上不带底层错误的 connect.Error 才是上游
+// 语义拒绝（unavailable 固定模板、invalid_argument 参数、
+// resource_exhausted、permission_denied），重试只会复现同样失败。
 func isTransientConnectError(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
 	var connectErr *connect.Error
 	return !errors.As(err, &connectErr)
 }
@@ -1041,9 +1052,10 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 }
 
 // recordUpstreamFailure 把不可重试的上游侧失败记为请求目录的首个失败点：
-// 传输层断裂（EOF/重置/超时/静默判死，即非 connect.Error）记
-// devin_transport；Connect 协议语义错误记 devin_connect。ctx 取消不记——
-// 客户端断连由 HTTP 外层记 client_disconnected，不应被上游 stage 抢占。
+// 传输层断裂记 devin_transport——含 connect.Error 包装的 EOF/帧截断/
+// 连接重置，判定见 isTransientConnectError；上游语义错误记 devin_connect。
+// ctx 取消不记——客户端断连由 HTTP 外层记 client_disconnected，不应被
+// 上游 stage 抢占。
 // WriteError 是 first-write-wins，此处记录后外层 http_stream 只作补充。
 func (stream *responseStream) recordUpstreamFailure(cause error) {
 	if cause == nil {
