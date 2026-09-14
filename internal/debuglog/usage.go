@@ -110,11 +110,14 @@ func ErrorOwner(e IndexEntry) string {
 // add 把一条索引行计入累计。
 func (t *usageTotals) add(e IndexEntry) {
 	t.Requests++
+	// 断连/中止先按结果归类：预提交断连的错误状态码（500/499）是
+	// 「没写出去」的占位而非服务端失分，按状态码先判会把断连误计为
+	// Errors 且永远到不了 Disconnected 分支。
 	switch {
-	case e.StatusCode >= 400 || e.Result == "failed":
-		t.Errors++
 	case e.Result == "disconnected" || e.Result == "aborted":
 		t.Disconnected++
+	case e.StatusCode >= 400 || e.Result == "failed":
+		t.Errors++
 	}
 	switch ErrorOwner(e) {
 	case "client":
@@ -415,11 +418,11 @@ func (a *usageAggregator) add(e IndexEntry) {
 	}
 	if a.mins[idx].at == slot*600 {
 		a.mins[idx].requests++
-		if e.StatusCode >= 400 || e.Result == "failed" {
-			a.mins[idx].errors++
-		}
+		// 与 usageTotals.add 同口径：断连/中止按结果归类，不占 errors。
 		if e.Result == "disconnected" || e.Result == "aborted" {
 			a.mins[idx].disconnected++
+		} else if e.StatusCode >= 400 || e.Result == "failed" {
+			a.mins[idx].errors++
 		}
 		if isRateLimited(e) {
 			a.mins[idx].rateLimited++
@@ -525,10 +528,10 @@ func (a *usageAggregator) add(e IndexEntry) {
 func (d *dimensionAgg) addEntry(e IndexEntry) {
 	d.Requests++
 	switch {
-	case e.StatusCode >= 400 || e.Result == "failed":
-		d.Errors++
 	case e.Result == "disconnected" || e.Result == "aborted":
 		d.Disconnected++
+	case e.StatusCode >= 400 || e.Result == "failed":
+		d.Errors++
 	}
 	if isRateLimited(e) {
 		d.RateLimited++
