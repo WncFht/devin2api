@@ -10,6 +10,8 @@
 > 关联：`internal/adapter/devin/rategate.go`（本地闸门 + 冷却闩）、`upstream-debug-playbook.md`。
 >
 > **2026-09-14 修订**：旧版核心结论「封禁 deadline = 分钟末 + 被拒次数 × ~2.4s 线性累积」与「深封期零放行」被新窗口数据**证伪**，第三、四节按新证据重写为**分钟桶量化 + 概率执行**模型。第一节（指纹）、第二节（触发）结论仍然成立。
+>
+> **2026-09-14 晚新增**：第八节记录本地整形语义选型决策——令牌桶 `capacity=rpm` 实测允许单分钟发 ~160，改为按上游分钟桶界对齐的固定窗口（已决策、未实现）。
 
 ## 一、错误指纹：两种 429 必须分开
 
@@ -126,3 +128,49 @@
 - 被拒尝试是否计入下一新桶的计数未确定；B33 零发送 B34 仍爆说明封禁延续至少部分与我方尝试无关（不可见流量或上游状态机自身滚动）。
 - 深度发作（hint 数百秒）的阶梯结构只有旧窗口 EP3 一例，上限 10min 的说法未再验证。
 - 账号「不可见份额」未量化；若同账号还有其他客户端在线，本文全部「我方速率」口径都只是下界。
+
+## 八、整形语义选型：按上游桶界对齐（2026-09-14 决策）
+
+### 8.1 触发与口径辨析
+
+2026-09-14 晚发现面板 `rpm_peak` 超 80（=102），怀疑闸门未生效。核查结论：配置与版本都正常，超 80 是「统计口径 + 令牌桶突发语义」的叠加，不是失效。两个口径必须分开，这是本次排查的关键辨析：
+
+- **面板 `rpm_*` 是客户端请求的完成速率**：计数点在 `Request.Finish`/`Reject`（`internal/obs/metrics.go`），含本地快败与管线前拒绝。claude-cli 并行子代理的到达突发天然超 80，当日 19:14 一分钟到达 128 个请求——到达超 80 不代表上游发送超 80。
+- **上游发送速率要用 `index.jsonl` 还原**：按 `started_at + upstream_sent_ms` 归每分钟（`upstream_sent_ms` 是首次真实发送时刻，重试另计）。实测当日多个分钟超 80：**19:14 发 127、19:17 发 101、17:26 发 94**。
+- **根因是取值不是 bug**：令牌桶 `capacity = max_rpm = 80`（一整分钟额度，为吸收并行子代理突发而设），任意 60s 窗口上界 = `capacity + refill×60 ≈ 160`。持续速率 80/min 成立，单分钟无硬顶；当日 127/min 未触发上游拒绝是概率运气，不是安全证据（边际态执行是 Loaded dice，见 3.3）。
+
+### 8.2 候选方案与保证语义
+
+| 方案                        | 任意滚动 60s 上界 | 单个上游分钟桶上界 | 突发形态               | 备注                                                                                                    |
+| --------------------------- | ----------------- | ------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| 现状：令牌桶 B=80、r=80/min | ~160              | ~160               | 满桶齐放后滴灌         | 令牌桶是 AWS/Envoy/Stripe 同族算法[^aws-throttle][^stripe]，但业界 burst 多取秒级额度，B=整窗口配额罕见 |
+| A. 对齐桶界的固定窗口       | 跨桶界瞬间 ~160   | **≤80**            | 桶内随意、桶末硬停     | 与上游计数语义同构：跨界 160 恰是上游自己也允许的形态                                                   |
+| B. 滑动窗口 log             | **≤80**           | ≤80                | 突发后按最旧戳逐条解冻 | 「任意窗口 ≤N」的严格保证[^cloudflare][^kong]；O(N) 内存的缺点按高基数场景说的，单 key 闸门下可忽略     |
+| C. burst 解耦（B=10~20）    | ~100              | ~100               | 小突发 + 滴灌          | 最小改动，不给硬保证                                                                                    |
+
+GCRA/漏桶族与令牌桶等价（TAT 形式），任意窗口上界同为 `B + r·T`，不单列[^smudge]。AWS 把 rate（补充速率）与 burst（容量）作为两个独立旋钮暴露，且声明 throttle 是 best-effort 目标值而非硬顶[^aws-throttle]——「burst 应该多大」本来就是独立决策，我们把它绑死在 rpm 上才是问题。
+
+### 8.3 决策：选 A（对齐上游桶界的固定窗口）
+
+- **保证语义上 A≈B**：上游按固定分钟桶计数，「每桶 ≤80」就是它的违规判据；A 直接给这个保证，B 用更强的「任意 60s ≤80」隐含给出（固定桶是滚动窗口的特例）。差别在 A 依赖桶界对齐精度，B 无条件严格。
+- **吞吐上 A>B**：上游允许「:59 发满 80 + :00 再发 80」（滚动 60s 看是 160，但两个桶各 80、均不违规）；A 放行、B 禁止。B 多出来的保守是纯自我设限。
+- **与滴灌闩正交**：对齐窗口管常态期「每桶别超」，闩管上游翻脸后的冷却探测，两层机制互不干扰；presold、睡醒复检、maxHold 快败等不变量沿用。
+- **风险与余量**：上游时钟快 ~1s、多分片桶界漂移（3.2），本地桶界取 :59 加 ~2s 偏移，必要时每桶配额再留少量 margin；对不齐的损失是桶界附近几条越过，不是系统性失效。若实测漂移大、对齐不可维持，退回 B。
+- **非目标重申**：整形买不到免疫——56/min 也触发过闩、零发送桶也照样被拒（不可见流量 + 概率执行 + 分片漂移，见二、三节）。A 的收益是「常态期每桶不超上游计数 + 发作期每桶违规数更少」，不是「不再被限」。
+- **桶内不再叠加秒级整形**：上游只按分钟桶计数，桶内瞬发 80 与均摊 80 在它的计数器里等价；加平滑层只增加本地延迟，不减少上游视角的违规。
+
+### 8.4 实现状态
+
+已决策、未实现（2026-09-14）。实现要点：`wait` 的令牌判定换成「当前桶计数 < 配额」，睡眠目标换成下一桶界；桶界常数 = 本地 :59 边界 + 时钟偏移余量；令牌桶结构可由小容量突发参数保留或整体替换，实现时定。
+
+### 参考文献
+
+[^aws-throttle]: AWS. Throttle requests to your REST APIs for better throughput in API Gateway. AWS API Gateway Developer Guide. [docs.aws.amazon.com](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html)
+
+[^stripe]: Stripe. Scaling your API with rate limiters. Stripe Blog 2019. [stripe.com](https://stripe.com/blog/rate-limiters)
+
+[^cloudflare]: Cloudflare. Counting things: a lot of different things. Cloudflare Blog 2019. [blog.cloudflare.com](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/)
+
+[^kong]: Kong. How to Design a Scalable Rate Limiting Algorithm. Kong Blog 2017. [konghq.com](https://konghq.com/blog/engineering/how-to-design-a-scalable-rate-limiting-algorithm)
+
+[^smudge]: smudge.ai. Rate limiting algorithms. [smudge.ai](https://smudge.ai/blog/ratelimit-algorithms)
