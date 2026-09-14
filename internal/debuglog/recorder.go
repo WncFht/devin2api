@@ -833,24 +833,27 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		if marshalErr != nil {
 			return
 		}
-		if err := os.WriteFile(filepath.Join(recorder.directory, "error.json"), append(data, '\n'), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(recorder.directory, ErrorFile), append(data, '\n'), 0o600); err != nil {
 			recorder.noteIOErr("file", err)
 		}
 	})
 }
 
 // Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
-// 追加全局索引行并释放目录的清理保护。
+// 追加全局索引行并释放目录的清理保护。幂等：二次调用直接返回——
+// 否则 writeMeta 与 index 行会重复落一份。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
 	}
 	recorder.mutex.Lock()
-	if !recorder.closed {
-		recorder.closed = true
-		recorder.abortCancel = nil
-		close(recorder.tasks)
+	if recorder.closed {
+		recorder.mutex.Unlock()
+		return
 	}
+	recorder.closed = true
+	recorder.abortCancel = nil
+	close(recorder.tasks)
 	recorder.mutex.Unlock()
 	if recorder.aborted.Load() && completion.Result == "disconnected" {
 		completion.Result = "aborted"
