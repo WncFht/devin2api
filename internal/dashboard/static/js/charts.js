@@ -2,7 +2,9 @@
 // 所有图表经 Charts.render(el, option) 产出：同容器重复渲染复用实例、
 // 页面切换/容器尺寸变化自动 resize、离开页面时实例挂起不销毁（回来接着用）。
 
-const Charts = (() => {
+import { debounce, fmtMs } from './core.js';
+
+export const Charts = (() => {
   // 主题色从 panel.css 的 CSS 变量读，单一事实源；取不到时回落到内置暗色值。
   function cssVar(name, fallback) {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -81,22 +83,26 @@ const Charts = (() => {
   // 的 dataZoom 窗口记下来，渲染后恢复，避免 10s 轮询冲掉正在细看的缩放。
   // 悬停冻结：setOption 会拆掉正在显示的 tooltip。指针在图上时只记最新
   // option 不渲染，mouseleave 补一笔——轮询照跑，画面不打扰悬浮窗。
+  // 饥饿兜底：指针长期停在图上时冻结会无限顺延，挂起超过 30s 的旧 option
+  // 直接渲染——画面新鲜度比 tooltip 稳定更需要。
   const deferred = new Map(), leaveBound = new WeakSet();
   function render(el, option) {
     if (!el || !window.echarts) return null;
     let inst = echarts.getInstanceByDom(el);
-    if (inst && el.matches(':hover')) {
-      deferred.set(el, option);
+    const pend = deferred.get(el);
+    if (inst && el.matches(':hover') && (!pend || Date.now() - pend.at < 30000)) {
+      deferred.set(el, { option, at: pend ? pend.at : Date.now() });
       if (!leaveBound.has(el)) {
         leaveBound.add(el);
         el.addEventListener('mouseleave', () => {
           const o = deferred.get(el);
           deferred.delete(el);
-          if (o) render(el, o);
+          if (o) render(el, o.option);
         });
       }
       return inst;
     }
+    deferred.delete(el);
     let savedZoom = null;
     if (inst) {
       const cur = (inst.getOption().dataZoom || [])[0];

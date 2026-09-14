@@ -1,18 +1,44 @@
-// 面板核心：DOM/格式化 helpers、hash 路由、按页轮询调度。
-// 约定：每个 tab 模块调用 Tabs.register(name, {refresh}) 注册自己；
-// core 负责切页、只在可见页上跑定时器、以及「点模型跳到请求页」这类跨页联动。
+// 面板核心：DOM/格式化 helpers、hash 路由、按页轮询调度、morph 渲染器、
+// 统一 API 出口（api/apiRaw）。约定：每个 tab 模块调用 Tabs.register(name, fn)
+// 注册自己；core 负责切页、只在可见页上跑定时器。
+// 全部经 ES module 显式导入，不再依赖 script 标签顺序与全局符号。
 
-const $ = id => document.getElementById(id);
+import morphdom from './vendor/morphdom.js';
 
-function esc(s) {
+export const $ = id => document.getElementById(id);
+
+export function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-// qa 用于 onclick="fn('...')" 这类「双引号属性内套单引号 JS 字符串」的场景：
-// 先对 JS 层转义反斜杠与单引号，再过 esc 保证属性安全。
-function qa(s) { return esc(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")); }
-function debounce(fn, ms) { let t; return function () { clearTimeout(t); t = setTimeout(fn, ms || 300); }; }
+export function debounce(fn, ms) { let t; return function () { clearTimeout(t); t = setTimeout(fn, ms || 300); }; }
+
+// morph 用「目标 HTML」外科手术式更新 el 的子树：morphdom 只改动真正变化
+// 的节点，未变节点保持身份——展开行、悬停态、选区、滚动位置自然保留，
+// 替代原先 innerHTML + 签名比对 + 节点移植的组合。
+// _echarts_instance_ 是 echarts.init 打在容器上的标记：这类容器内部由
+// echarts 自管（canvas/option），整棵跳过 morph；被移除时（条件性出现的
+// 图表消失）顺带 dispose 实例，避免 canvas/监听器泄漏。
+export function morph(el, html) {
+  const t = document.createElement(el.tagName);
+  t.innerHTML = html;
+  morphdom(el, t, {
+    childrenOnly: true,
+    onBeforeElUpdated: fromEl => !fromEl.hasAttribute('_echarts_instance_'),
+    onNodeDiscarded(node) {
+      if (node.nodeType !== 1 || !window.echarts) return;
+      if (node.hasAttribute('_echarts_instance_')) {
+        const inst = echarts.getInstanceByDom(node);
+        if (inst) inst.dispose();
+      }
+      node.querySelectorAll('[_echarts_instance_]').forEach(d => {
+        const inst = echarts.getInstanceByDom(d);
+        if (inst) inst.dispose();
+      });
+    },
+  });
+}
 
 // 顶部 2px 加载条：任何 /panel/api 在途请求期间显示（stale-while-revalidate
 // 的可见信号——刷新时旧数据保留，靠这条线表达"正在更新"）。
@@ -28,7 +54,7 @@ function loadingBar(delta) {
   bar.classList.toggle('on', inflight > 0);
 }
 
-// 侧栏底部网关状态点：跟随最近一次 API 调用结果变色，不额外发心跳。
+// 顶栏网关状态点：跟随最近一次 API 调用结果变色，不额外发心跳。
 function gwState(ok) {
   const dot = $('gwDot'), txt = $('gwText');
   if (!dot) return;
@@ -36,76 +62,82 @@ function gwState(ok) {
   txt.textContent = ok ? '运行中' : '连接异常';
 }
 
-async function api(path, opts) {
+// apiRaw 是所有 /panel/api 出口的统一底层：loadingBar/gwState/401 跳登录。
+// 需要按 status 分支或读错误体的调用方用它（abort/config reload）。
+export async function apiRaw(path, opts) {
   loadingBar(1);
   try {
     const res = await fetch('/panel/api' + path, opts);
     // 会话过期或服务重启（session 是内存表）时回登录页，
     // 比每页各自弹「连接异常」更直接。
     if (res.status === 401) { location.href = '/panel'; throw new Error('unauthorized'); }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
     gwState(true);
-    return res.json();
+    return res;
   } catch (e) { gwState(false); throw e; }
   finally { loadingBar(-1); }
 }
+// api 是 JSON 消费位的常规出口；非 2xx 抛错（要错误体请用 apiRaw）。
+export async function api(path, opts) {
+  const res = await apiRaw(path, opts);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
 
 // ---------- 格式化 ----------
-function fmtNum(v) {
+export function fmtNum(v) {
   const n = Number(v) || 0;
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(n);
 }
-function fmtBytes(v) {
+export function fmtBytes(v) {
   const n = Number(v) || 0;
   if (n >= 1073741824) return (n / 1073741824).toFixed(1) + 'GB';
   if (n >= 1048576) return (n / 1048576).toFixed(1) + 'MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + 'KB';
   return n + 'B';
 }
-function fmtMs(v) { return v == null ? '-' : (v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms'); }
-function fmtDuration(sec) {
+export function fmtMs(v) { return v == null ? '-' : (v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms'); }
+export function fmtDuration(sec) {
   sec = Number(sec) || 0;
   if (sec < 60) return sec + 's';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + sec % 60 + 's';
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor(sec % 3600 / 60) + 'm';
   return Math.floor(sec / 86400) + 'd ' + Math.floor(sec % 86400 / 3600) + 'h';
 }
-function fmtTime(iso) {
-  try {
-    const d = new Date(iso);
-    if (isNaN(d)) return iso || '-';
-    const t = d.toLocaleTimeString('zh-CN', { hour12: false });
-    if (d.toDateString() === new Date().toDateString()) return t;
-    return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + t;
-  } catch (e) { return iso || '-'; }
+export function fmtTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso || '-';
+  const t = d.toLocaleTimeString('zh-CN', { hour12: false });
+  if (d.toDateString() === new Date().toDateString()) return t;
+  return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + t;
 }
-function fmtUnix(v) {
+export function fmtUnix(v) {
   if (v == null || v === '' || Number(v) === 0) return '-';
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return String(v);
-  try { return new Date(n * 1000).toLocaleString('zh-CN', { hour12: false }); } catch (e) { return String(v); }
+  const d = new Date(n * 1000);
+  return isNaN(d) ? String(v) : d.toLocaleString('zh-CN', { hour12: false });
 }
 // fmtUnixShort 输出 M/D HH:mm 短形式，用于 KPI 卡等窄位。
-function fmtUnixShort(v) {
+export function fmtUnixShort(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return '-';
   const d = new Date(n * 1000);
   return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
-function fmtQuota(v) {
+export function fmtQuota(v) {
   if (v == null || v === '' || v === undefined) return '-';
   if (Number(v) === -1) return '不限';
   return String(v);
 }
-function money(v) {
+export function money(v) {
   if (v == null || v === undefined || v === '') return '<span class="muted">—</span>';
   const n = Number(v);
   if (Number.isNaN(n)) return '<span class="muted">—</span>';
   return '<span class="num">$' + n.toFixed(n >= 10 ? 1 : n >= 1 ? 2 : 3) + '</span>';
 }
-function statusClass(code) {
+export function statusClass(code) {
   if (code >= 500) return 'status-err';
   if (code === 429) return 'status-rl';
   if (code >= 400) return 'status-warn';
@@ -114,7 +146,7 @@ function statusClass(code) {
 }
 // 结果 badge：语义分层——failed 红、aborted/disconnected 琥珀（非错误）、
 // completed 绿、进行中 accent。中断/断连不算失败是重要区分。
-function resultBadge(result) {
+export function resultBadge(result) {
   const map = {
     completed: ['ok', '成功'], failed: ['err', '失败'],
     aborted: ['warn', '已中断'], disconnected: ['warn', '断连'],
@@ -122,17 +154,17 @@ function resultBadge(result) {
   const m = map[result] || ['muted', result || '-'];
   return '<span class="rbadge r-' + m[0] + '">' + esc(m[1]) + '</span>';
 }
-// 阈值着色：秒值与百分比分档上色的统一口径（参照同类面板的 timingColor）。
-function secClass(v, okLim, warnLim) {
+// 阈值着色：秒值与百分比分档上色的统一口径。
+export function secClass(v, okLim, warnLim) {
   const s = Number(v) / 1000;
   return s < okLim ? 'status-ok' : s < warnLim ? 'status-warn' : 'status-err';
 }
-function rateClass(pct, okLim, warnLim) {
+export function rateClass(pct, okLim, warnLim) {
   const p = Number(pct);
   return p >= (okLim ?? 95) ? 'status-ok' : p >= (warnLim ?? 80) ? 'status-warn' : 'status-err';
 }
 // fmtRel 相对时间（"3 分钟前"），title 里放绝对时间由调用方决定。
-function fmtRel(v) {
+export function fmtRel(v) {
   const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
   if (!Number.isFinite(t) || t <= 0) return '-';
   const d = (Date.now() - t) / 1000;
@@ -142,7 +174,7 @@ function fmtRel(v) {
   return Math.floor(d / 86400) + ' 天前';
 }
 // fmtIn 倒计时（"2h 34m 后"），用于配额重置等未来时刻。
-function fmtIn(v) {
+export function fmtIn(v) {
   const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
   if (!Number.isFinite(t) || t <= 0) return '-';
   const d = (t - Date.now()) / 1000;
@@ -154,7 +186,7 @@ function fmtIn(v) {
 }
 // fmtInPrecise 是闩倒计时的精细版：剩余 <1h 时显示到秒（"12m 34s"），
 // 跨小时回退 fmtIn——解闩前的最后几十分钟里秒级读数才有意义。
-function fmtInPrecise(v) {
+export function fmtInPrecise(v) {
   const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
   if (!Number.isFinite(t) || t <= 0) return '-';
   const d = (t - Date.now()) / 1000;
@@ -166,7 +198,7 @@ function fmtInPrecise(v) {
 // ---------- 错误归因（与后端 debuglog.errorOwner 同口径） ----------
 // client=调用方责任（断连/中断/请求体阶段失败）；business_limited=429
 // 配额动作；upstream=服务端失分（上游错误与代理自身失败），SLA 只算它。
-function errorOwner(e) {
+export function errorOwner(e) {
   if (e.status_code === 429) return 'business_limited';
   if (e.result === 'disconnected' || e.result === 'aborted') return 'client';
   if (e.status_code < 400 && e.result !== 'failed') return '';
@@ -175,32 +207,42 @@ function errorOwner(e) {
 }
 // slaRate 服务端口径成功率：分母剔除客户端责任与 429 条目后，
 // upstream 失分占比取反；分母为 0（只有客户端/限流流量）返回 null。
-function slaRate(t) {
+export function slaRate(t) {
   const base = (t.requests || 0) - (t.client_faults || 0) - (t.rate_limited || 0);
   if (base <= 0) return null;
   return (base - (t.upstream_faults || 0)) / base * 100;
 }
-function hitRate(t) {
+export function hitRate(t) {
   const dd = (t.cache_read_tokens || 0) + (t.input_tokens || 0);
   return dd > 0 ? (100 * t.cache_read_tokens / dd).toFixed(1) + '%' : '-';
 }
-function avgTps(t) {
+export function avgTps(t) {
   return (t.gen_ms > 0) ? (t.gen_tokens / (t.gen_ms / 1000)).toFixed(1) + ' tok/s' : '-';
 }
 
+// REJECT_LABELS 是管线前拒绝原因的中文标签：请求页提示与系统页拒绝表共用一份。
+export const REJECT_LABELS = {
+  draining: '排空',
+  concurrency_limit: '并发上限',
+  ws_connection_limit: 'WS连接上限',
+  missing_api_key: '缺API Key',
+  invalid_api_key: '错API Key',
+};
+
 // ---------- 组件 ----------
-// kpi 卡片：label + 大数字 + 副行。tone 控制左侧色点。
-function kpi(label, value, sub, tone) {
+// kpi 卡片：label + 大数字 + 副行。tone 控制左侧色点；value/sub 允许内嵌 HTML
+// （money()/fmtNum()+delta 等已自带转义或纯数字），label 纯文本。
+export function kpi(label, value, sub, tone) {
   return '<div class="kpi' + (tone ? ' tone-' + tone : '') + '">' +
     '<div class="k-label">' + (tone ? '<i></i>' : '') + esc(label) + '</div>' +
     '<div class="k-value">' + value + '</div>' +
     (sub ? '<div class="k-sub">' + sub + '</div>' : '') + '</div>';
 }
-function meta(k, v) {
+export function meta(k, v) {
   return '<div class="mini"><span class="k">' + esc(k) + '</span><span class="v">' + esc(String(v)) + '</span></div>';
 }
 // 配额条：label + 剩余% + 副信息（耗尽预测/重置）。
-function qbar(label, pct, sub) {
+export function qbar(label, pct, sub) {
   const p = Number(pct);
   if (!Number.isFinite(p)) return '';
   const tone = p > 50 ? 'ok' : p > 20 ? 'warn' : 'err';
@@ -209,14 +251,14 @@ function qbar(label, pct, sub) {
     '<div class="qb-track"><div class="qb-fill ' + tone + '" style="width:' + Math.max(0, Math.min(100, p)) + '%"></div></div>' +
     (sub ? '<div class="qb-sub">' + esc(sub) + '</div>' : '') + '</div>';
 }
-function fillSelect(id, values) {
+export function fillSelect(id, values) {
   const el = $(id);
   const cur = el.value;
   const keep = el.options[0].outerHTML;
   el.innerHTML = keep + [...values].filter(Boolean).sort().map(v => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join('');
   if ([...el.options].some(o => o.value === cur)) el.value = cur;
 }
-function sumTotals(list) {
+export function sumTotals(list) {
   const t = { requests: 0, errors: 0, disconnected: 0, rate_limited: 0, client_faults: 0, upstream_faults: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, total_tokens: 0, gen_ms: 0, gen_tokens: 0 };
   list.forEach(p => { for (const k in t) t[k] += p[k] || 0; });
   return t;
@@ -224,7 +266,7 @@ function sumTotals(list) {
 
 // ---------- 反馈组件 ----------
 // toast：右上角堆叠，success 3s / error 5s 自动消失。
-function toast(msg, type) {
+export function toast(msg, type) {
   let box = $('toastBox');
   if (!box) {
     box = document.createElement('div');
@@ -240,7 +282,7 @@ function toast(msg, type) {
 }
 
 // copyText 带 execCommand 降级（非 HTTPS 内网下 clipboard API 不存在）。
-async function copyText(text, hint) {
+export async function copyText(text, hint) {
   let ok = false;
   try {
     if (navigator.clipboard) { await navigator.clipboard.writeText(text); ok = true; }
@@ -259,7 +301,7 @@ async function copyText(text, hint) {
 
 // confirmBox：窄弹窗替代原生 confirm，danger 时确认键红底。
 // 返回 Promise<boolean>；Esc/遮罩点击 = 取消。
-function confirmBox(title, msg, danger) {
+export function confirmBox(title, msg, danger) {
   return new Promise(resolve => {
     const ov = document.createElement('div');
     ov.className = 'dlg-mask';
@@ -281,23 +323,23 @@ function confirmBox(title, msg, danger) {
 }
 
 // 页面偏好持久化（localStorage，键空间 panel.页面.字段）。
-function loadPref(key, def) {
+export function loadPref(key, def) {
   try { const v = localStorage.getItem('panel.' + key); return v === null ? def : JSON.parse(v); }
   catch (e) { return def; }
 }
-function savePref(key, v) {
+export function savePref(key, v) {
   try { localStorage.setItem('panel.' + key, JSON.stringify(v)); } catch (e) {}
 }
 
 // titleBadge：在途请求数写到标签页标题，后台也能瞥见。
 const baseTitle = 'Devin API - 管理面板';
-function titleBadge(n) {
+export function titleBadge(n) {
   document.title = (n > 0 ? '(' + n + ') ' : '') + baseTitle;
 }
 
 // ---------- 路由与轮询 ----------
 // hash 形如 #requests&model=x&result=failed：首段是 tab 名，其余是页面内过滤参数。
-const Tabs = {
+export const Tabs = {
   handlers: {},
   current: null,
   register(name, fn) { this.handlers[name] = fn; },
@@ -325,7 +367,7 @@ const Tabs = {
 // - interval 可为固定 ms 或 ()=>ms（按当前状态算节奏，如请求页活跃加速）；
 // - 浏览器标签回前台时对当前页 kick 一轮，不空等下个周期；
 // - Tabs.apply 切页时 reset 该页定时器，让下一次轮询从手动加载之后起算。
-const Polls = {
+export const Polls = {
   items: [],
   add(name, fn, interval) {
     const it = { name, fn, interval, timer: null };
@@ -349,13 +391,13 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && Tabs.current) Polls.kick(Tabs.current);
 });
 
-function parseHash() {
+export function parseHash() {
   const raw = location.hash.slice(1);
   const [tab, ...rest] = raw.split('&');
   return { tab: tab || 'overview', params: new URLSearchParams(rest.join('&')) };
 }
 // writeHash 保留 tab 段，重写过滤参数段。
-function writeHash(tab, params) {
+export function writeHash(tab, params) {
   const s = params.toString();
   history.replaceState(null, '', location.pathname + '#' + tab + (s ? '&' + s : ''));
 }
@@ -367,15 +409,3 @@ document.getElementById('topNav').addEventListener('click', e => {
   const a = e.target.closest('a[data-tab]');
   if (a) Tabs.go(a.dataset.tab);
 });
-
-// 跨页联动：把条件填进请求页过滤器并切过去（由各 tab 的表格/chips 调用）。
-// since/until 是隐藏时间窗字段（矩阵格子下钻用 ISO 时刻钉窗口）：
-// 不带窗参数的跳转总是清掉旧锁，否则一次下钻后所有跳转都被钉住。
-function jumpRequests(kv) {
-  const map = { q: 'reqSearch', status: 'fStatus', result: 'fResult', model: 'fReqModel', error_stage: 'fErrStage', since: 'fSinceTS', until: 'fUntilTS' };
-  for (const k in kv) { const el = $(map[k]); if (el) el.value = kv[k]; }
-  if (!('since' in kv)) { const el = $('fSinceTS'); if (el) el.value = ''; }
-  if (!('until' in kv)) { const el = $('fUntilTS'); if (el) el.value = ''; }
-  Tabs.go('requests');
-  Requests.resetAndLoad();
-}

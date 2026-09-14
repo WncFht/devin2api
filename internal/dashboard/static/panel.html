@@ -141,14 +141,9 @@
 
 </main>
 
-<script src="/panel/static/js/core.js?v=__VERSION__"></script>
-<script src="/panel/static/js/charts.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-overview.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-requests.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-usage.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-quota.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-models.js?v=__VERSION__"></script>
-<script src="/panel/static/js/tab-system.js?v=__VERSION__"></script>
-<script src="/panel/static/js/boot.js?v=__VERSION__"></script>
+<!-- 单一 module 入口：boot.js 经 import 拉起 core/charts/各 tab；
+     模块内部的静态 import 无法用 ?v= 缓存击破，改走 ETag + no-cache
+     条件请求（serveStatic 对全部静态资源生效），更新照旧即时生效。 -->
+<script type="module" src="/panel/static/js/boot.js?v=__VERSION__"></script>
 </body>
 </html>
