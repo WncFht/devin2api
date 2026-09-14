@@ -22,3 +22,6 @@ outputs/probe
 outputs/*.json
 outputs/*.txt
 outputs/*.py
+/probe
+/devin-2api
+/devin-2api.new
