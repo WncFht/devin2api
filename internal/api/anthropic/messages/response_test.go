@@ -118,8 +118,7 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 		t.Fatalf("signature delta = %#v", signatureDelta)
 	}
 	stopBlock := decodeEventData(t, encoded[6])
-	block := stopBlock["content_block"].(map[string]any)
-	if stopBlock["index"] != float64(0) || block["type"] != "thinking" || block["signature"] != "sig" {
+	if stopBlock["index"] != float64(0) || stopBlock["content_block"] != nil {
 		t.Fatalf("thinking stop block = %#v", stopBlock)
 	}
 }
@@ -204,5 +203,64 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 	// 错误后再次编码应因流已结束而失败。
 	if _, err := encoder.Encode(event); err == nil {
 		t.Fatal("encoding after error should fail")
+	}
+}
+
+// TestStreamEncoderSignatureReadyAtThinkingEnd 覆盖签名随 thinking_end
+// 一次到齐的路径（decodeLateSignature 合成块的 Start+End 序列即是此形态）：
+// 规范客户端只从 signature_delta 累积签名，必须先补 delta 再收尾。
+func TestStreamEncoderSignatureReadyAtThinkingEnd(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}},
+		StopReason: llm.StopReasonPending,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+	})
+	// message_start + block_start + thinking_delta + signature_delta + block_stop。
+	if len(encoded) != 5 {
+		t.Fatalf("events = %d, want 5", len(encoded))
+	}
+	if encoded[3].Name != "content_block_delta" || encoded[4].Name != "content_block_stop" {
+		t.Fatalf("tail events = %q, %q", encoded[3].Name, encoded[4].Name)
+	}
+	delta := decodeEventData(t, encoded[3])["delta"].(map[string]any)
+	if delta["type"] != "signature_delta" || delta["signature"] != "sig" {
+		t.Fatalf("signature delta = %#v", delta)
+	}
+}
+
+// TestStreamEncoderRedactedThinkingDeferredStart 覆盖开块即知 redacted 的
+// 路径：spec 的 redacted_thinking 是 start 一次性带 data 的完整块，start
+// 应推迟到签名就绪随 data 一起下发。
+func TestStreamEncoderRedactedThinkingDeferredStart(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	partial := &llm.AssistantMessage{
+		Content: []llm.Content{llm.ThinkingContent{
+			Thinking: "hidden", ThinkingSignature: "sealed-payload", Redacted: true,
+		}},
+		StopReason: llm.StopReasonPending,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Partial: partial},
+	})
+	// message_start + deferred block_start{redacted_thinking,data} + block_stop。
+	if len(encoded) != 3 {
+		t.Fatalf("events = %d, want 3", len(encoded))
+	}
+	start := decodeEventData(t, encoded[1])
+	block := start["content_block"].(map[string]any)
+	if start["type"] != "content_block_start" || block["type"] != "redacted_thinking" || block["data"] != "sealed-payload" {
+		t.Fatalf("deferred start = %#v", start)
+	}
+	stop := decodeEventData(t, encoded[2])
+	if stop["type"] != "content_block_stop" || stop["content_block"] != nil {
+		t.Fatalf("stop = %#v", stop)
 	}
 }
