@@ -21,7 +21,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/adapter"
@@ -371,10 +370,10 @@ const drainTimeout = 300 * time.Second
 // 绑定同一监听地址，deploy 先起桥接进程入队再排空旧实例，做到零停机重启。
 // 经环境变量（非 config）控制：只有托管实例（plist/unit 注入）与 deploy
 // 拉起的交接进程拿到它——裸跑 ./devin-2api 不带 env 仍会 EADDRINUSE，
-// 单实例约定的端口冲突保护不变。
+// 单实例约定的端口冲突保护不变。平台不支持（Windows）时恒 false。
 func reusePortEnabled() bool {
 	v := os.Getenv("DEVIN2API_REUSEPORT")
-	return v == "1" || strings.EqualFold(v, "true")
+	return reusePortSupported && (v == "1" || strings.EqualFold(v, "true"))
 }
 
 func run(ctx context.Context, application *app.App, server *http.Server, listener net.Listener) error {
@@ -418,13 +417,7 @@ func listenConfigured(listen string) (net.Listener, error) {
 	lc := &net.ListenConfig{KeepAlive: 3 * time.Minute}
 	if reusePortEnabled() {
 		lc.Control = func(_, _ string, c syscall.RawConn) error {
-			var setErr error
-			if err := c.Control(func(fd uintptr) {
-				setErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-			}); err != nil {
-				return err
-			}
-			return setErr
+			return setReusePort(c)
 		}
 	}
 	return lc.Listen(context.Background(), "tcp", listen)
