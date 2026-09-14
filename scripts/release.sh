@@ -28,7 +28,9 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
-REPO_SLUG="$(git remote get-url origin | sed -E 's#.*github.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
+# origin 可能是 SSH host 别名形式（git@github.com-work:owner/repo）——
+# github.com 与分隔符之间允许夹别名后缀，解析不出则 slug 为空。
+REPO_SLUG="$(git remote get-url origin | sed -nE 's#.*github\.com[-[:alnum:]_.]*[:/]([^/]+/[^/.]+)(\.git)?$#\1#p')"
 LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 VERSION_FILE="cmd/devin-2api/VERSION"
 
@@ -118,14 +120,17 @@ trap 'rm -f "${NOTES_FILE}"' EXIT
 } > "${NOTES_FILE}"
 
 # --- CI 门禁：查名为 CI 的 workflow 在指定 sha 上的结论；轮询到 completed ---
+# 凭据链与 lib-deploy.sh 的 gh_token 一致：GH_TOKEN → gh keyring →
+# git credential（gh 已装未登录时不能只停在第二步）。
 gh_token() {
-	if [[ -n "${GH_TOKEN:-}" ]]; then
-		echo "${GH_TOKEN}"
-	elif command -v gh >/dev/null; then
-		gh auth token 2>/dev/null || true
-	else
-		printf 'protocol=https\nhost=github.com\n' | git credential fill 2>/dev/null | awk -F= '/^password=/{print $2}'
+	local token="${GH_TOKEN:-}"
+	if [[ -z "${token}" ]] && command -v gh >/dev/null; then
+		token="$(gh auth token 2>/dev/null || true)"
 	fi
+	if [[ -z "${token}" ]]; then
+		token="$(printf 'protocol=https\nhost=github.com\n' | git credential fill 2>/dev/null | awk -F= '/^password=/{print $2}')"
+	fi
+	printf '%s' "${token}"
 }
 
 # ci_state <sha>：输出 green / FAILED / pending / unknown

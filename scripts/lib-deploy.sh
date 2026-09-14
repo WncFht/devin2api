@@ -52,7 +52,7 @@ gh_token() {
 release_slugs() {
 	local origin slug
 	origin="$(git remote get-url origin 2>/dev/null || true)"
-	slug="$(printf '%s' "${origin}" | sed -nE 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#p')"
+	slug="$(printf '%s' "${origin}" | sed -nE 's#.*github\.com[-[:alnum:]_.]*[:/]([^/]+/[^/.]+)(\.git)?$#\1#p')"
 	{
 		[[ -n "${slug}" ]] && printf '%s\n' "${slug}"
 		printf '%s\n' "WncFht/devin2api"
@@ -420,13 +420,17 @@ handoff_pidfile() { printf '%s' "${RUNTIME}/.handoff.pid"; }
 # retire_stale_transient：回收上次部署中断留下的交接进程。它排在托管
 # 实例之后绑定，且 drain 起点已关 listener——不抢流量，SIGTERM 让它在
 # 自己的排空期内自然退场（不等，上限与主进程一致）。
+# pidfile 跨重启持久，记录的是数字 pid——进程死后 pid 会被系统复用，
+# kill -0 通过不代表还是交接进程；发信号前用 pgrep -x（与 warn_strays
+# 同款的可执行名精确匹配）确认它仍是 devin-2api，避免误杀无关进程。
 retire_stale_transient() {
 	local pf pid
 	pf="$(handoff_pidfile)"
 	[[ -f "${pf}" ]] || return 0
 	pid="$(cat "${pf}" 2>/dev/null || true)"
 	rm -f "${pf}"
-	if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+	if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null &&
+		pgrep -x devin-2api | grep -qx "${pid}"; then
 		echo "==> 回收上次残留的交接进程 pid=${pid}（SIGTERM，自行排空退出）" >&2
 		kill "${pid}" 2>/dev/null || true
 	fi
