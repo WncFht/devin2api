@@ -180,8 +180,10 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 		"uptime_seconds": int64(time.Since(application.startedAt).Seconds()),
 		"debug_logging":  application.debugManager.Enabled(),
 		// 排空期 healthz 仍应答——部署脚本靠 version+draining 区分
-		// 「旧实例还在排」与「新实例已接管」。
-		"draining": application.draining.Load(),
+		// 「旧实例还在排」与「新实例已接管」；active_requests 让部署
+		// 能挑空闲窗口 kickstart，排空期 503 少砸到真实请求。
+		"draining":        application.draining.Load(),
+		"active_requests": application.metrics.Active(),
 	})
 }
 

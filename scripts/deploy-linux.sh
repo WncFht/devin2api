@@ -110,6 +110,8 @@ if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service enabled and started"
 else
 	OLD_PID="$(systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null || true)"
+	# 与 macOS 版同口径：等在途清零的空闲窗口再重启，压缩排空 503 窗口。
+	wait_inflight_idle "${HEALTH_URL}" 30
 	systemctl --user restart "${UNIT}"
 fi
 

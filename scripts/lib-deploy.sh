@@ -359,6 +359,32 @@ healthz_version() {
 	curl -sf -m 2 "$1" 2>/dev/null | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p'
 }
 
+# healthz_active 返回 /healthz 的 active_requests 字段；未运行/老版本无此
+# 字段时返回空（缺字段视为不可知，不当作 0 等）。
+healthz_active() {
+	curl -sf -m 2 "$1" 2>/dev/null | sed -n 's/.*"active_requests" *: *\([0-9]*\).*/\1/p'
+}
+
+# wait_inflight_idle <health_url> [seconds]：kickstart 前等在途请求清空。
+# 排空期新请求全部吃 503——挑一个空闲窗口重启，把 503 窗口压到进程切换
+# 间隙本身。字段缺失（旧二进制）直接跳过；超时仍有在途请求时警告并放行，
+# 排空机制会护住它们（在途请求照常跑完，只是新到请求被拒）。
+wait_inflight_idle() {
+	local url="$1" secs="${2:-30}" active _ warned=0
+	for _ in $(seq $((secs * 2))); do
+		active="$(healthz_active "${url}")"
+		[[ -z "${active}" ]] && return 0
+		[[ "${active}" == "0" ]] && return 0
+		if [[ "${warned}" == "0" ]]; then
+			warned=1
+			echo "==> ${active} 个在途请求，等空闲窗口再重启（最多 ${secs}s）..."
+		fi
+		sleep 0.5
+	done
+	warn "等待 ${secs}s 后仍有 ${active} 个在途请求——照常重启，排空会保护在途请求但新请求在窗口内会拿到 503"
+	return 0
+}
+
 # wait_healthz_version <health_url> <want_version> [seconds]
 # 优雅重启期间旧进程继续应答 healthz（旧版本 + draining 标记），
 # 首次 200 不代表新实例已接管——必须轮询到版本匹配才确认。

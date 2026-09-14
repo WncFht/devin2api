@@ -115,6 +115,9 @@ if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service bootstrapped (RunAtLoad 已启动新进程)"
 else
 	OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
+	# 排空期新请求一律 503——先在在途清零的空闲窗口里 kickstart，把
+	# 拒绝窗口压到进程切换间隙本身（在途有长流时最多等 30s 再照排）。
+	wait_inflight_idle "${HEALTH_URL}" 30
 	launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 fi
 

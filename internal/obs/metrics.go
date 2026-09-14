@@ -104,6 +104,11 @@ func (m *Metrics) Begin() *Request {
 	return &Request{metrics: m}
 }
 
+// Active 返回当前在途请求数；healthz 透出供部署脚本挑空闲窗口重启。
+func (m *Metrics) Active() int64 {
+	return m.active.Load()
+}
+
 // Observe 在请求体读取完成后记录方向与请求大小。
 func (r *Request) Observe(streaming bool, requestBodyBytes int) {
 	r.observed = true
