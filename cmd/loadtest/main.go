@@ -118,7 +118,13 @@ func doRequest(client *http.Client, url, key string, body []byte) result {
 	if readErr != nil && readErr != io.EOF {
 		return result{ttfb: ttfb, total: ttfb, errMsg: fmt.Sprintf("read first byte: %v", readErr)}
 	}
-	written, _ := io.CopyBuffer(io.Discard, resp.Body, buf)
+	written, copyErr := io.CopyBuffer(io.Discard, resp.Body, buf)
+	// 读流中途断掉不是成功完成：压测关心「上游/代理会不会半路掐流」，
+	// 截断必须显式计为错误，否则结果里的成功率和字节数都虚高。
+	if copyErr != nil {
+		return result{ttfb: ttfb, total: time.Since(started), bytes: int64(n) + written,
+			errMsg: fmt.Sprintf("stream truncated: %v", copyErr)}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return result{ttfb: ttfb, total: time.Since(started), bytes: int64(n) + written,
 			errMsg: fmt.Sprintf("status %d", resp.StatusCode)}
