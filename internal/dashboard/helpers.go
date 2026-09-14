@@ -1,4 +1,4 @@
-// 本文件是面板内部的通用小工具：会话 ID、枚举名缩短、any 类型提取、截断。
+// 本文件是面板内部的通用小工具：枚举名缩短、any 类型提取、截断。
 package dashboard
 
 import (
@@ -8,15 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
-
-	"github.com/WncFht/devin2api/internal/randid"
 )
-
-// generateSessionID 返回面板登录会话 token（32 字节随机数的 hex）。
-func generateSessionID() string {
-	id, _ := randid.Hex(32)
-	return id
-}
 
 // remoteIP 返回请求来源 IP（去端口）；登录限速按它归并。
 func remoteIP(r *http.Request) string {

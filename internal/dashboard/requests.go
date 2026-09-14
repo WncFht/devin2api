@@ -43,7 +43,8 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	if offset > 0 {
 		if offset >= total {
-			entries = nil
+			// 空页也要回 [] 而非 null——前端按数组消费。
+			entries = []debuglog.IndexEntry{}
 		} else {
 			entries = entries[offset:]
 		}
@@ -164,15 +165,20 @@ func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
 		return
 	}
-	entries := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query())).Entries
+	result := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query()))
+	if result.HasMore {
+		// 导出打满扫描上限时给截断信号：JSON/CSV 响应体本身无
+		// 元数据位，用响应头标记窗口外仍有更早历史。
+		w.Header().Set("X-Truncated", "true")
+	}
 	if r.URL.Query().Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="requests.csv"`)
-		writeRequestsCSV(w, entries)
+		writeRequestsCSV(w, result.Entries)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(entries)
+	_ = json.NewEncoder(w).Encode(result.Entries)
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
@@ -221,13 +227,18 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
 		return
 	}
-	data, _, _, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), "06-http-response.jsonl")
+	data, _, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), "06-http-response.jsonl")
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"response stream file not found"}`))
 		return
 	}
-	_ = json.NewEncoder(w).Encode(mergeStreamEvents(h.maskToken(data)))
+	// truncated 透传读取截断位：>4MB 的 06 只合并前 4MB，没有它
+	// 调用方会把残缺流当成完整响应。
+	_ = json.NewEncoder(w).Encode(struct {
+		mergedStream
+		Truncated bool `json:"truncated"`
+	}{mergeStreamEvents(h.maskToken(data)), truncated})
 }
 
 // apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、

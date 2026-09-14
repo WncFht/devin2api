@@ -16,9 +16,9 @@ import (
 func TestForecastBurnRate(t *testing.T) {
 	now := time.Now().Unix()
 	points := []quotaPoint{
-		{At: now - 7200, DailyRemaining: 80, DailyResetAt: now + 10000},
+		{At: now - 7200, DailyRemaining: 80, DailyResetAt: now + 100000},
 		{At: now - 3600, DailyRemaining: 70},
-		{At: now, DailyRemaining: 60, DailyResetAt: now + 10000},
+		{At: now, DailyRemaining: 60, DailyResetAt: now + 100000},
 	}
 	got := forecast(points, 24*time.Hour,
 		func(p quotaPoint) float64 { return p.DailyRemaining },
@@ -36,8 +36,34 @@ func TestForecastBurnRate(t *testing.T) {
 	if got["exhausted_at"].(int64) != now+21600 {
 		t.Fatalf("exhausted_at = %v", got["exhausted_at"])
 	}
-	if got["reset_at"].(int64) != now+10000 {
+	if got["reset_at"].(int64) != now+100000 {
 		t.Fatalf("reset_at = %v", got["reset_at"])
+	}
+}
+
+// TestForecastSurvivesUntilReset 验证外推耗尽越过重置点时报 survives_until_reset。
+func TestForecastSurvivesUntilReset(t *testing.T) {
+	now := time.Now().Unix()
+	points := []quotaPoint{
+		{At: now - 3600, DailyRemaining: 91, DailyResetAt: now + 36000},
+		{At: now, DailyRemaining: 90, DailyResetAt: now + 36000},
+	}
+	got := forecast(points, 24*time.Hour,
+		func(p quotaPoint) float64 { return p.DailyRemaining },
+		func(p quotaPoint) int64 { return p.DailyResetAt })
+	if got == nil {
+		t.Fatal("forecast = nil")
+	}
+	// 90% 按 1%/h 要 90h 才烧完，但 10h 后就重置——不可能发生的耗尽时刻
+	// 不应出现在响应里。
+	if _, ok := got["exhausted_at"]; ok {
+		t.Fatalf("exhausted_at = %v, want absent (quota resets first)", got["exhausted_at"])
+	}
+	if got["survives_until_reset"] != true {
+		t.Fatalf("survives_until_reset = %v, want true", got["survives_until_reset"])
+	}
+	if left := got["hours_left"].(float64); left != 90 {
+		t.Fatalf("hours_left = %v, want 90", left)
 	}
 }
 

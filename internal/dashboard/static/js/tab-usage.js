@@ -315,8 +315,8 @@ function drawCharts(pts, fine, tokenMix, barRows) {
       grid: { left: 8, right: 40, top: 8, bottom: 8, containLabel: true },
       xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: F.xs }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
       yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: C.dim, fontSize: F.xs, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: C.line } }, axisTick: { show: false } },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => p.name + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
-      series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: Charts.hexA(C.accent, 0.55) }, { offset: 1, color: C.accent }]) }, label: { show: true, position: 'right', color: C.axis, fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => esc(p.name) + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
+      series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new window.echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: Charts.hexA(C.accent, 0.55) }, { offset: 1, color: C.accent }]) }, label: { show: true, position: 'right', color: C.axis, fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
     });
   }
 }

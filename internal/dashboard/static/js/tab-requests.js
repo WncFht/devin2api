@@ -9,7 +9,7 @@
 import {
   $, api, apiRaw, esc, debounce, fmtMs, fmtBytes, fmtNum, fmtTime,
   secClass, statusClass, resultBadge, copyText, confirmBox, toast,
-  titleBadge, Tabs, Polls, morph, parseHash, writeHash, REJECT_LABELS,
+  titleBadge, Tabs, Polls, morph, parseHash, writeHash, summarizeRejects,
 } from './core.js';
 
 let expandedDir = null;  // 展开详情的 dir；详情行随 tbody 一起由 render 产出
@@ -214,10 +214,15 @@ function saveFilterHash() {
 }
 function restoreFilterHash() {
   const h = parseHash();
-  FILTER_IDS.forEach(id => { const v = h.params.get(id); if (v) { const el = $(id); if (el) el.value = v; } });
+  // hash 是过滤器/展开态的事实源：缺席参数=清空——只写不清会让
+  // 无参 #requests 链接带着上次筛选残留复活。
+  FILTER_IDS.forEach(id => { const el = $(id); if (el) el.value = h.params.get(id) || ''; });
   // #requests&dir=X 深链：直接展开该请求详情（对应同类面板的渠道深链）。
-  const dir = h.params.get('dir');
-  if (dir) expandedDir = dir;
+  // dir 变化时旧详情态一并重置：detail 按 dir 同源校验自然失效，
+  // 但 openFile 不清会把列表自动刷新卡在暂停态。
+  const dir = h.params.get('dir') || null;
+  if (dir !== expandedDir) { detail = null; detailErr = null; openFile = null; fileText = ''; }
+  expandedDir = dir;
 }
 
 function reqQuery() {
@@ -258,12 +263,9 @@ async function load() {
     let hint = '';
     // 管线前拒绝（排空/并发/鉴权）不进 index——用户在请求页找这类 503/429
     // 天然扑空，看到提示才知道去系统页查拒绝事件环。
-    const recentRejects = (data.rejects && data.rejects.recent || []).filter(e => e.at * 1000 > Date.now() - 15 * 60000);
-    if (recentRejects.length) {
-      const byReason = {};
-      recentRejects.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
-      const parts = Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]);
-      hint += '近 15 分钟本地拒绝 ' + recentRejects.length + ' 条（' + esc(parts.join(' · ')) + '）——管线前拒绝不进索引，<button type="button" class="lnk" data-gotosys="1">去系统页</button>。 ';
+    const rej = summarizeRejects(data.rejects && data.rejects.recent, 15 * 60000);
+    if (rej.n) {
+      hint += '近 15 分钟本地拒绝 ' + rej.n + ' 条（' + esc(rej.parts.join(' · ')) + '）——管线前拒绝不进索引，<button type="button" class="lnk" data-gotosys="1">去系统页</button>。 ';
     }
     hint += windowLockHint();
     if (data.has_more) hint += '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
@@ -343,8 +345,11 @@ async function openFileView(dir, name, merged) {
       text = '== 正文 ==\n' + (d.text || '(空)');
       if (d.reasoning) text += '\n\n== 推理 ==\n' + d.reasoning;
       if (d.tool_input) text += '\n\n== 工具调用参数 ==\n' + d.tool_input;
-      if (d.usage) text += '\n\n== usage ==\n' + JSON.stringify(JSON.parse(d.usage), null, 2);
+      // usage 是 json.RawMessage：res.json() 后已是对象，不能再 JSON.parse。
+      if (d.usage) text += '\n\n== usage ==\n' + JSON.stringify(d.usage, null, 2);
       text += '\n\n— 合并自 ' + d.events + ' 帧' + (d.finish_reason ? (' · finish=' + d.finish_reason) : '');
+      // truncated=源文件超 4MB 读取上限被截断，只合并了前段帧，响应后半可能缺失。
+      if (d.truncated) text = '[已截断] 06-http-response.jsonl 超 4MB 读取上限，仅前段帧参与合并——响应后半可能缺失。\n\n' + text;
     } else {
       const d = await api('/requests/' + encodeURIComponent(dir) + '/file/' + name.split('/').map(encodeURIComponent).join('/'));
       text = d.text || '';
@@ -380,8 +385,15 @@ export function jumpRequests(kv) {
   for (const k in kv) { const el = $(map[k]); if (el) el.value = kv[k]; }
   if (!('since' in kv)) { const el = $('fSinceTS'); if (el) el.value = ''; }
   if (!('until' in kv)) { const el = $('fUntilTS'); if (el) el.value = ''; }
-  Tabs.go('requests');
-  resetAndLoad();
+  // 过滤器状态先落进目标 hash 再切页：hashchange→apply→restoreFilterHash
+  // 从 hash 重建同一批输入值（缺席=清空），切页与首次加载单链完成；
+  // 若先 Tabs.go 再手动加载，apply 链路与手动链路会各跑一整遍请求。
+  reqLimit = 100; prevDirs = null;
+  const p = new URLSearchParams();
+  FILTER_IDS.forEach(id => { const el = $(id); if (el && el.value) p.set(id, el.value); });
+  const target = '#requests' + (p.toString() ? '&' + p.toString() : '');
+  if (Tabs.current === 'requests') tick(); // 同页 hashchange 不触发 apply，手动重载
+  else location.hash = target;
 }
 
 // ---------- 事件委托与注册 ----------

@@ -21,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/randid"
 	"github.com/WncFht/devin2api/internal/upstream"
 
 	"local/devinproto/devinprotoconnect"
@@ -386,6 +387,9 @@ type loginFail struct {
 	fails int
 	// lockedUntil 是锁定截止时间；到期前失败的请求直接 429。
 	lockedUntil time.Time
+	// lastSeen 是最近一次失败时刻：闲置超过一个锁定周期的条目计数
+	// 清零并可被机会清扫——爆破流量不走成功路径也能被回收。
+	lastSeen time.Time
 }
 
 const (
@@ -408,22 +412,34 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	provided := sha256.Sum256([]byte(r.FormValue("password")))
 	if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) != 1 {
 		h.sessionMu.Lock()
+		now := time.Now()
 		state := h.loginFailures[ip]
 		if state == nil {
 			state = &loginFail{}
 			h.loginFailures[ip] = state
 		}
-		now := time.Now()
 		if now.Before(state.lockedUntil) {
+			state.lastSeen = now
 			h.sessionMu.Unlock()
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
 			return
 		}
+		// 距上次失败超过一个锁定周期视为新一波尝试：陈旧计数跨时间
+		// 累积会把低频手滑误算成爆破。
+		if now.Sub(state.lastSeen) > loginLockout {
+			state.fails = 0
+		}
+		state.lastSeen = now
 		state.fails++
 		if state.fails >= loginMaxFails {
 			state.fails = 0
 			state.lockedUntil = now.Add(loginLockout)
+		}
+		// 机会清扫：纯爆破流量永远不走成功路径，失败条目只增不扫会
+		// 无界增长——按与 session 相同的水位顺手清掉已失效条目。
+		if len(h.loginFailures) > sessionSweepThreshold {
+			h.sweepLoginFailures(now)
 		}
 		h.sessionMu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
@@ -443,13 +459,15 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 				delete(h.sessionTokens, id)
 			}
 		}
-		for key, state := range h.loginFailures {
-			if state.fails == 0 && now.After(state.lockedUntil) {
-				delete(h.loginFailures, key)
-			}
-		}
+		h.sweepLoginFailures(now)
 	}
-	sessionID := generateSessionID()
+	sessionID, err := randid.Hex(32)
+	if err != nil {
+		h.sessionMu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"会话创建失败"}`))
+		return
+	}
 	h.sessionTokens[sessionID] = now.Add(24 * time.Hour)
 	h.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -464,6 +482,16 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"ok":true}`))
+}
+
+// sweepLoginFailures 清掉锁定已过期且闲置超过一个锁定周期的失败条目。
+// 仍在锁定中或近期仍有失败活动的条目保留。调用方须持有 sessionMu。
+func (h *Handler) sweepLoginFailures(now time.Time) {
+	for key, state := range h.loginFailures {
+		if !now.Before(state.lockedUntil) && now.Sub(state.lastSeen) > loginLockout {
+			delete(h.loginFailures, key)
+		}
+	}
 }
 
 func (h *Handler) isAuthenticated(r *http.Request) bool {

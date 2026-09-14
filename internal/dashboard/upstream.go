@@ -103,20 +103,24 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer wg.Done()
-		statuses := h.cachedModelStatuses(ctx)
+		statuses, err := h.cachedModelStatuses(ctx)
 		resultMu.Lock()
 		defer resultMu.Unlock()
-		if statuses != nil {
+		if err != nil {
+			result["model_status_error"] = err.Error()
+		} else if statuses != nil {
 			result["model_statuses"] = statuses
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
-		providers := h.cachedProviders(ctx)
+		providers, err := h.cachedProviders(ctx)
 		resultMu.Lock()
 		defer resultMu.Unlock()
-		if providers != nil {
+		if err != nil {
+			result["providers_error"] = err.Error()
+		} else if providers != nil {
 			result["providers"] = providers
 		}
 	}()
@@ -305,8 +309,9 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 
 	models, err := h.cachedModels(ctx)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		_, _ = fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -460,24 +465,24 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 	return models, nil
 }
 
-func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
+func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error) {
 	h.providersMu.RLock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
 		cached := h.providersCache
 		h.providersMu.RUnlock()
-		return cached
+		return cached, nil
 	}
 	h.providersMu.RUnlock()
 
 	h.providersMu.Lock()
 	defer h.providersMu.Unlock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
-		return h.providersCache
+		return h.providersCache, nil
 	}
 
 	providerResp, err := h.apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var providers []map[string]any
 	for _, p := range providerResp.Msg.GetModelProviders() {
@@ -489,29 +494,29 @@ func (h *Handler) cachedProviders(ctx context.Context) []map[string]any {
 
 	h.providersCache = providers
 	h.providersExpiry = time.Now().Add(h.cacheTTL)
-	return providers
+	return providers, nil
 }
 
-func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
+func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, error) {
 	h.modelStatusesMu.RLock()
 	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
 		cached := h.modelStatusesCache
 		h.modelStatusesMu.RUnlock()
-		return cached
+		return cached, nil
 	}
 	h.modelStatusesMu.RUnlock()
 
 	h.modelStatusesMu.Lock()
 	defer h.modelStatusesMu.Unlock()
 	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
-		return h.modelStatusesCache
+		return h.modelStatusesCache, nil
 	}
 
 	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var statuses []map[string]any
 	for _, s := range modelStatusResp.Msg.GetModelStatusInfos() {
@@ -525,5 +530,5 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) []map[string]any {
 
 	h.modelStatusesCache = statuses
 	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
-	return statuses
+	return statuses, nil
 }

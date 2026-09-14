@@ -3,7 +3,7 @@
 
 import {
   $, api, apiRaw, esc, fmtBytes, fmtDuration, fmtMs, fmtTime, fmtInPrecise,
-  kpi, meta, toast, Tabs, Polls, morph, REJECT_LABELS, loadPref, savePref,
+  kpi, meta, toast, Tabs, Polls, morph, REJECT_LABELS, gateLatchUntil, loadPref, savePref,
 } from './core.js';
 
 let procOffset = 0, procFollow = false, procBuf = '';
@@ -41,8 +41,7 @@ function renderGate(g) {
   if (!g) { morph(body, '<div class="mini"><span class="v">无闸门数据（provider adapter 未配置）</span></div>'); return; }
   let html = '';
   if (g.latched) {
-    const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
-    html += '<div class="err-banner full">闩中：上游限流冷却至 ' + esc(until) + '，闩内新请求快败 429 + Retry-After，滴灌探针放行探测解闩</div>';
+    html += '<div class="err-banner full">闩中：上游限流冷却至 ' + esc(gateLatchUntil(g)) + '，闩内新请求快败 429 + Retry-After，滴灌探针放行探测解闩</div>';
   }
   html += meta('闩态', g.latched ? '闩中' : '未闩') +
     meta('闩截止', g.limited_until ? fmtTime(g.limited_until) : '-') +

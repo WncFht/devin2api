@@ -85,10 +85,11 @@ export const Charts = (() => {
   // option 不渲染，mouseleave 补一笔——轮询照跑，画面不打扰悬浮窗。
   // 饥饿兜底：指针长期停在图上时冻结会无限顺延，挂起超过 30s 的旧 option
   // 直接渲染——画面新鲜度比 tooltip 稳定更需要。
-  const deferred = new Map(), leaveBound = new WeakSet();
+  // deferred 用 WeakMap：容器被 morph 丢弃后条目随元素 GC，不留死引用。
+  const deferred = new WeakMap(), leaveBound = new WeakSet();
   function render(el, option) {
     if (!el || !window.echarts) return null;
-    let inst = echarts.getInstanceByDom(el);
+    let inst = window.echarts.getInstanceByDom(el);
     const pend = deferred.get(el);
     if (inst && el.matches(':hover') && (!pend || Date.now() - pend.at < 30000)) {
       deferred.set(el, { option, at: pend ? pend.at : Date.now() });
@@ -108,14 +109,14 @@ export const Charts = (() => {
       const cur = (inst.getOption().dataZoom || [])[0];
       if (cur && cur.startValue != null) savedZoom = { startValue: cur.startValue, endValue: cur.endValue };
     } else {
-      inst = echarts.init(el, null, { renderer: 'canvas' });
+      inst = window.echarts.init(el, null, { renderer: 'canvas' });
     }
     const opt = Object.assign(base(), option);
     // 轴允许传数组（双 y 轴）：缺省项补暗色轴样式。
     ['xAxis', 'yAxis'].forEach(k => {
       if (Array.isArray(opt[k])) {
         opt[k] = opt[k].map(a => Object.assign({}, base()[k], a));
-      } else if (opt[k] && opt[k] !== base()[k]) {
+      } else if (opt[k]) {
         opt[k] = Object.assign({}, base()[k], opt[k]);
       }
     });
@@ -132,7 +133,7 @@ export const Charts = (() => {
   }
 
   function area(color, top, bottom) {
-    return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    return new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
       { offset: 0, color: hexA(color, top == null ? 0.22 : top) },
       { offset: 1, color: hexA(color, bottom == null ? 0 : bottom) },
     ]);
@@ -223,8 +224,9 @@ export const Charts = (() => {
   }
 
   window.addEventListener('resize', debounce(() => {
+    if (!window.echarts) return;
     document.querySelectorAll('.chart').forEach(el => {
-      const inst = echarts.getInstanceByDom(el);
+      const inst = window.echarts.getInstanceByDom(el);
       if (inst) inst.resize();
     });
   }, 200));

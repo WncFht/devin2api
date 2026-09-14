@@ -29,11 +29,11 @@ export function morph(el, html) {
     onNodeDiscarded(node) {
       if (node.nodeType !== 1 || !window.echarts) return;
       if (node.hasAttribute('_echarts_instance_')) {
-        const inst = echarts.getInstanceByDom(node);
+        const inst = window.echarts.getInstanceByDom(node);
         if (inst) inst.dispose();
       }
       node.querySelectorAll('[_echarts_instance_]').forEach(d => {
-        const inst = echarts.getInstanceByDom(d);
+        const inst = window.echarts.getInstanceByDom(d);
         if (inst) inst.dispose();
       });
     },
@@ -233,6 +233,20 @@ export const REJECT_LABELS = {
   missing_api_key: '缺API Key',
   invalid_api_key: '错API Key',
 };
+// summarizeRejects 把 rejects.recent 事件环聚合成「窗口内条数 + 分原因明细」：
+// 概览判词（10 分钟窗、≥3 条才告警）与请求页提示（15 分钟窗、≥1 条即提示）
+// 共用同一聚合口径，只是阈值与包裹文案不同。
+export function summarizeRejects(recent, windowMs) {
+  const list = (recent || []).filter(e => e.at * 1000 > Date.now() - windowMs);
+  const byReason = {};
+  list.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
+  return { n: list.length, parts: Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]) };
+}
+// gateLatchUntil 是闩截止时刻的统一文案（"14:03:22（剩 9m 41s）"）：
+// 概览判词、告警横幅与系统页闸门卡三处共用。
+export function gateLatchUntil(g) {
+  return g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(g.limited_until) + '）' : '时刻未知';
+}
 
 // ---------- 组件 ----------
 // kpi 卡片：label + 大数字 + 副行。tone 控制左侧色点；value/sub 允许内嵌 HTML
@@ -361,8 +375,9 @@ export const Tabs = {
     Polls.reset(name);
     // 页切换后已挂起的图表恢复显示，需要按新尺寸重排。
     setTimeout(() => {
+      if (!window.echarts) return;
       document.querySelectorAll('#page-' + name + ' .chart').forEach(el => {
-        const inst = echarts.getInstanceByDom(el);
+        const inst = window.echarts.getInstanceByDom(el);
         if (inst) inst.resize();
       });
     }, 30);
@@ -378,16 +393,20 @@ export const Tabs = {
 export const Polls = {
   items: [],
   add(name, fn, interval) {
-    const it = { name, fn, interval, timer: null };
+    const it = { name, fn, interval, timer: null, running: false };
     const wait = () => typeof it.interval === 'function' ? it.interval() : it.interval;
     const loop = async () => {
+      it.running = true;
       if (Tabs.current === it.name && !document.hidden && !document.querySelector('.dlg-mask')) {
         try { await it.fn(); } catch (e) { /* 单次失败不挡后续轮询 */ }
       }
+      it.running = false;
       it.timer = setTimeout(loop, wait());
     };
-    it.kick = () => { clearTimeout(it.timer); loop(); };
-    it.reset = () => { clearTimeout(it.timer); it.timer = setTimeout(loop, wait()); };
+    // kick/reset 只改「等待中」的排程：fn 在途时它落地后自会重排，
+    // 此时再启新 loop 会分裂出第二条定时链——两链各自续命，请求量翻倍。
+    it.kick = () => { if (!it.running) { clearTimeout(it.timer); loop(); } };
+    it.reset = () => { if (!it.running) { clearTimeout(it.timer); it.timer = setTimeout(loop, wait()); } };
     it.timer = setTimeout(loop, wait());
     this.items.push(it);
     return it;

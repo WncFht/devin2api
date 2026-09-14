@@ -111,13 +111,20 @@ function renderStatus(d) {
   // 渠道 + 容量 + IDE
   const pv = $('providerPanel');
   let phtml = '';
-  if (d.capacity) {
+  if (d.capacity || d.ide_status || d.status_error) {
     phtml += '<div class="grid" style="margin-bottom:8px">' +
-      meta('有容量', d.capacity.has_capacity ? '是' : '否') +
-      meta('活跃会话', d.capacity.active_sessions ?? '-') +
-      meta('容量消息', d.capacity.message || '-') +
-      (d.ide_status ? meta('IDE 状态', d.ide_status.level === 'UNSPECIFIED' ? '—' : (d.ide_status.level || '-')) + meta('IDE 消息', d.ide_status.message || '-') : '') +
+      (d.capacity ? meta('有容量', d.capacity.has_capacity ? '是' : '否') +
+        meta('活跃会话', d.capacity.active_sessions ?? '-') +
+        meta('容量消息', d.capacity.message || '-') : '') +
+      // ide_status 缺省分两态：status_error 是拉取失败（GetStatus RPC 报错），
+      // 否则是真没数据——两者在排障时含义完全不同。
+      (d.ide_status
+        ? meta('IDE 状态', d.ide_status.level === 'UNSPECIFIED' ? '—' : (d.ide_status.level || '-')) + meta('IDE 消息', d.ide_status.message || '-')
+        : meta('IDE 状态', d.status_error ? '拉取失败: ' + d.status_error : '无数据')) +
       '</div>';
+  }
+  if (d.providers_error) {
+    phtml += '<div class="err-banner" style="margin-bottom:8px">渠道目录拉取失败: ' + esc(d.providers_error) + '</div>';
   }
   if (d.providers && d.providers.length) {
     phtml += '<div class="chip-row flat">' +
@@ -136,7 +143,10 @@ function renderStatus(d) {
   // 模型状态告警
   const ms = $('modelStatusPanel');
   const bad = (d.model_statuses || []).filter(s => /WARN|ERROR|FATAL|DOWN/i.test(String(s.status || '')));
-  if (bad.length) {
+  if (d.model_status_error) {
+    ms.style.display = '';
+    morph($('modelStatusBody'), '<div class="err-banner">模型状态拉取失败: ' + esc(d.model_status_error) + '</div>');
+  } else if (bad.length) {
     ms.style.display = '';
     morph($('modelStatusBody'), '<div class="grid">' + bad.map(s =>
       '<div class="mini"><span class="k">' + esc(s.model_uid || s.model || '-') + '</span><span class="v status-err">' +

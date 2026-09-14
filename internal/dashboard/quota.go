@@ -68,10 +68,14 @@ func (h *Handler) sampleQuota(path string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	_, plan, _, err := h.fetchUserStatus(ctx)
-	if err != nil || plan == nil {
-		if err != nil {
-			slog.Warn("quota sample failed", "error", err)
-		}
+	if err != nil {
+		slog.Warn("quota sample failed", "error", err)
+		return
+	}
+	if plan == nil {
+		// 上游 200 但缺 planStatus：不写点也不报错会把 quota.jsonl
+		// 变成静默空文件，留一行痕迹说明「拉到了但无配额数据」。
+		slog.Warn("quota sample skipped: userStatus carried no planStatus")
 		return
 	}
 	point := quotaPoint{
@@ -188,7 +192,16 @@ func forecast(points []quotaPoint, lookback time.Duration, pick func(quotaPoint)
 	}
 	if rate > 0 {
 		hoursLeft := pick(last) / rate
-		out["exhausted_at"] = last.At + int64(hoursLeft*3600)
+		exhaustedAt := last.At + int64(hoursLeft*3600)
+		// 外推的耗尽时刻越过重置点就没有物理意义：配额在 reset_at
+		// 先回满，本周期烧不完——报 survives_until_reset 而非一个
+		// 不可能发生的 exhausted_at。reset_at 未知或已过期时无法
+		// 判定边界，按原样报 exhausted_at。
+		if reset := resetAt(last); reset > last.At && exhaustedAt > reset {
+			out["survives_until_reset"] = true
+		} else {
+			out["exhausted_at"] = exhaustedAt
+		}
 		out["hours_left"] = hoursLeft
 	}
 	return out

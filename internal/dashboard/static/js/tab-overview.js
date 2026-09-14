@@ -2,9 +2,9 @@
 // 数据分两层轮询：stats/active/matrix 1s（快变），usage/quota/status 60s（慢变）。
 
 import {
-  $, api, esc, fmtNum, fmtMs, fmtTime, fmtUnix, fmtUnixShort, fmtIn, fmtInPrecise,
+  $, api, esc, fmtNum, fmtMs, fmtTime, fmtUnix, fmtUnixShort, fmtIn,
   money, statusClass, errorOwner, slaRate, hitRate, kpi, qbar,
-  titleBadge, Tabs, Polls, morph, REJECT_LABELS,
+  titleBadge, Tabs, Polls, morph, summarizeRejects, gateLatchUntil,
 } from './core.js';
 import { Charts } from './charts.js';
 import { jumpRequests, activeTable } from './tab-requests.js';
@@ -313,19 +313,14 @@ function renderVerdict() {
   const probs = [];
   const g = statsData && statsData.gate;
   if (g && g.latched) {
-    const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
-    probs.push(['err', '速率闸门闩中，冷却至 ' + until]);
+    probs.push(['err', '速率闸门闩中，冷却至 ' + gateLatchUntil(g)]);
   }
   // 本地拒绝突刺：管线前拒绝（排空/并发/鉴权）不进 index，SLA 与
   // 矩阵都看不见——部署窗口的 503 风暴只在事件环里。≥3 条/10 分钟
   // 才算突刺，个别乱入的 401 不告警。
-  const recentRejects = ((statsData && statsData.http && statsData.http.rejects || {}).recent || [])
-    .filter(e => e.at * 1000 > Date.now() - 10 * 60000);
-  if (recentRejects.length >= 3) {
-    const byReason = {};
-    recentRejects.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
-    const parts = Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]);
-    probs.push(['warn', '近 10 分钟本地拒绝 ' + recentRejects.length + ' 条（' + parts.join(' · ') + '）——不进请求索引，详见系统页']);
+  const rej = summarizeRejects(statsData && statsData.http && statsData.http.rejects && statsData.http.rejects.recent, 10 * 60000);
+  if (rej.n >= 3) {
+    probs.push(['warn', '近 10 分钟本地拒绝 ' + rej.n + ' 条（' + rej.parts.join(' · ') + '）——不进请求索引，详见系统页']);
   }
   const today = (usageData && usageData.snapshot && usageData.snapshot.today) || {};
   const sla = slaRate(today);
@@ -493,8 +488,7 @@ function renderAlerts() {
   // 429，是面板上最需要置顶的信号。
   const g = statsData && statsData.gate;
   if (g && g.latched) {
-    const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
-    banners.push('<div class="err-banner">速率闸门闩中：上游限流冷却至 ' + esc(until) +
+    banners.push('<div class="err-banner">速率闸门闩中：上游限流冷却至 ' + esc(gateLatchUntil(g)) +
       '，闩内请求本地快败 429（本次已快败 ' + (g.reject_latched_count || 0) + ' 条 · 滴灌放行 ' + (g.drip_count || 0) + ' 条）</div>');
   }
   const d = statusData;
@@ -504,6 +498,9 @@ function renderAlerts() {
     });
     if (d.alias_check_error) banners.push('<div class="err-banner">别名校验失败: ' + esc(d.alias_check_error) + '</div>');
     if (d.user_status_error) banners.push('<div class="err-banner">账户用量拉取失败: ' + esc(d.user_status_error) + '</div>');
+    if (d.status_error) banners.push('<div class="err-banner">IDE 状态拉取失败: ' + esc(d.status_error) + '</div>');
+    if (d.providers_error) banners.push('<div class="err-banner">渠道目录拉取失败: ' + esc(d.providers_error) + '</div>');
+    if (d.model_status_error) banners.push('<div class="err-banner">模型状态拉取失败: ' + esc(d.model_status_error) + '</div>');
     if (d.capacity && d.capacity.has_capacity === false) {
       banners.push('<div class="err-banner">无可用容量: ' + esc(d.capacity.message || '上游容量满') + '（活跃会话 ' + (d.capacity.active_sessions ?? '-') + '）</div>');
     }

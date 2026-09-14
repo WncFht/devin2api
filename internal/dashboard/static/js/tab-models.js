@@ -9,6 +9,7 @@ import {
 const TTL_MS = 5 * 60000;
 let allModels = [];
 let loadedAt = 0;
+let loadErr = null; // 上次目录拉取的错误：render 把它拼进计数位，成功后清空
 let aliasMap = {}; // 上游 uid -> [客户端别名]，取自 /panel/api/config 的 devin.aliases
 const activeTags = new Set();
 
@@ -98,7 +99,8 @@ function apply() {
 
 function render(models) {
   const tbody = document.querySelector('#modelTable tbody');
-  $('modelCount').textContent = '显示 ' + models.length + ' / 共 ' + allModels.length + ' 个';
+  $('modelCount').textContent = '显示 ' + models.length + ' / 共 ' + allModels.length + ' 个' +
+    (loadErr ? ' · 拉取失败（展示上次成功数据）: ' + loadErr : '');
   if (!models.length) {
     morph(tbody, '<tr><td colspan="9" class="loading">无匹配模型</td></tr>');
     return;
@@ -140,6 +142,7 @@ async function load() {
     const d = await api('/models');
     allModels = d.models || [];
     loadedAt = Date.now();
+    loadErr = null;
     const providers = new Set(), apis = new Set(), pricings = new Set();
     allModels.forEach(m => {
       if (m.provider) providers.add(m.provider);
@@ -151,7 +154,10 @@ async function load() {
     fillSelect('fPricing', pricings);
     apply();
   } catch (e) {
-    morph(document.querySelector('#modelTable tbody'), '<tr><td colspan="9" class="loading">模型目录拉取失败: ' + esc(String(e)) + '</td></tr>');
+    // 有旧数据时保留表格、把错误拼进计数位（与其他 tab「保留旧数据」口径
+    // 一致，提示随下次成功自动消除）；首载失败才占表位报错。
+    if (allModels.length) { loadErr = String(e); apply(); }
+    else morph(document.querySelector('#modelTable tbody'), '<tr><td colspan="9" class="loading">模型目录拉取失败: ' + esc(String(e)) + '</td></tr>');
   }
 }
 
