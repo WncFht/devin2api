@@ -34,6 +34,17 @@ func main() {
 	interval := flag.Duration("interval", 0, "stream 场景帧间隔（0 = 连续吐帧）")
 	ttfb := flag.Duration("ttfb", 0, "stream 场景首帧前延迟（模拟上游思考 TTFT）")
 	flag.Parse()
+	// 未知 scenario 拼错不能静默落到某个场景——那会让测试对着错误
+	// 行为判结果。启动期直接拒绝。
+	validScenarios := map[string]bool{
+		"precontent": true, "midcontent": true, "recover": true, "cleaneof": true,
+		"cleaneof-content": true, "bare-end": true, "endstream-error": true,
+		"badframe": true, "badflags": true, "end-hang": true, "heartbeat": true,
+		"stall": true, "stream": true,
+	}
+	if !validScenarios[*scenario] {
+		log.Fatalf("unknown scenario %q", *scenario)
+	}
 
 	http.HandleFunc("/exa.api_server_pb.ApiServerService/GetChatMessage", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -153,7 +164,7 @@ func main() {
 					frame(stopFrame(), jsonWire),
 					endStream("{}"))
 			}
-		default: // precontent
+		default: // precontent：启动期已校验，余下只有它
 			body = append(frame(metaFrame(), jsonWire), 0x00, 0x00)
 		}
 		w.Header().Set("Content-Type", contentType)
