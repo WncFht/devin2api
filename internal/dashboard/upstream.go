@@ -95,7 +95,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		st := statusResp.Msg.GetStatus()
 		result["ide_status"] = map[string]any{
-			"level":   shortEnum(st.GetLevel().String(), "STATUS_LEVEL_"),
+			"level":   shortEnum(st.GetLevel().String()),
 			"message": st.GetMessage(),
 		}
 		result["show_review_prompt"] = statusResp.Msg.GetShowReviewPrompt()
@@ -227,7 +227,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 		"pro":                 boolAny(us["pro"]),
 		"user_id":             strAny(us["userId"], us["user_id"]),
 		"team_id":             strAny(us["teamId"], us["team_id"]),
-		"teams_tier":          shortEnum(strAny(us["teamsTier"], us["teams_tier"]), "TEAMS_TIER_"),
+		"teams_tier":          shortEnum(strAny(us["teamsTier"], us["teams_tier"])),
 		"used_prompt_credits": numAny(us["userUsedPromptCredits"], us["user_used_prompt_credits"]),
 		"used_flow_credits":   numAny(us["userUsedFlowCredits"], us["user_used_flow_credits"]),
 		"max_premium_chat":    numAny(us["maxNumPremiumChatMessages"], us["max_num_premium_chat_messages"]),
@@ -263,7 +263,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 			plan["plan_name"] = strAny(pi["planName"], pi["plan_name"])
 			plan["monthly_prompt_credits"] = numAny(pi["monthlyPromptCredits"], pi["monthly_prompt_credits"])
 			plan["monthly_flow_credits"] = numAny(pi["monthlyFlowCredits"], pi["monthly_flow_credits"])
-			plan["billing_strategy"] = shortEnum(strAny(pi["billingStrategy"], pi["billing_strategy"]), "BILLING_STRATEGY_")
+			plan["billing_strategy"] = shortEnum(strAny(pi["billingStrategy"], pi["billing_strategy"]))
 			plan["is_teams"] = boolAny(pi["isTeams"], pi["is_teams"])
 			plan["is_enterprise"] = boolAny(pi["isEnterprise"], pi["is_enterprise"])
 			plan["can_buy_more"] = boolAny(pi["canBuyMoreCredits"], pi["can_buy_more_credits"])
@@ -277,7 +277,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 			"plan_name":                 strAny(top["planName"], top["plan_name"]),
 			"monthly_prompt_credits":    numAny(top["monthlyPromptCredits"], top["monthly_prompt_credits"]),
 			"monthly_flow_credits":      numAny(top["monthlyFlowCredits"], top["monthly_flow_credits"]),
-			"billing_strategy":          shortEnum(strAny(top["billingStrategy"], top["billing_strategy"]), "BILLING_STRATEGY_"),
+			"billing_strategy":          shortEnum(strAny(top["billingStrategy"], top["billing_strategy"])),
 			"is_teams":                  boolAny(top["isTeams"], top["is_teams"]),
 			"is_enterprise":             boolAny(top["isEnterprise"], top["is_enterprise"]),
 			"has_paid_features":         boolAny(top["hasPaidFeatures"], top["has_paid_features"]),
@@ -363,9 +363,9 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 
 		mult := c.GetCreditMultiplier()
 		multKnown := mult != 0 || costTier == "free"
-		pricingType := shortEnum(c.GetPricingType().String(), "MODEL_PRICING_TYPE_")
-		provider := shortEnum(c.GetProvider().String(), "MODEL_PROVIDER_")
-		apiProvider := shortEnum(c.GetApiProvider().String(), "API_PROVIDER_")
+		pricingType := shortEnum(c.GetPricingType().String())
+		provider := shortEnum(c.GetProvider().String())
+		apiProvider := shortEnum(c.GetApiProvider().String())
 
 		m := map[string]any{
 			"uid":                 uid,
@@ -410,7 +410,7 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 				"min":         d.GetMinRange(),
 				"max":         d.GetMaxRange(),
 				"denominator": d.GetDenominator(),
-				"kind":        shortEnum(d.GetKind().String(), "MODEL_DIMENSION_KIND_"),
+				"kind":        shortEnum(d.GetKind().String()),
 				"info":        d.GetInfo(),
 			}
 			dims = append(dims, dim)
@@ -487,7 +487,7 @@ func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error)
 	var providers []map[string]any
 	for _, p := range providerResp.Msg.GetModelProviders() {
 		providers = append(providers, map[string]any{
-			"provider":     shortEnum(p.GetProvider().String(), "MODEL_PROVIDER_"),
+			"provider":     shortEnum(p.GetProvider().String()),
 			"display_name": p.GetDisplayName(),
 		})
 	}
@@ -521,9 +521,9 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, er
 	var statuses []map[string]any
 	for _, s := range modelStatusResp.Msg.GetModelStatusInfos() {
 		statuses = append(statuses, map[string]any{
-			"model":     shortEnum(s.GetModel().String(), "MODEL_"),
+			"model":     shortEnum(s.GetModel().String()),
 			"model_uid": s.GetModelUid(),
-			"status":    shortEnum(s.GetStatus().String(), "MODEL_STATUS_"),
+			"status":    shortEnum(s.GetStatus().String()),
 			"message":   s.GetMessage(),
 		})
 	}

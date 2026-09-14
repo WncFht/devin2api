@@ -31,8 +31,8 @@ func (h *Handler) maskToken(data []byte) []byte {
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。
-// prefix 参数是调用方知道的确切前缀；前面的表是兜底匹配。
-func shortEnum(full, prefix string) string {
+// 表按精确到宽泛排序；全部落空时取最后一个 "_" 之后的段。
+func shortEnum(full string) string {
 	if full == "" {
 		return ""
 	}
@@ -50,11 +50,7 @@ func shortEnum(full, prefix string) string {
 		"MODEL_PROVIDER_", "API_PROVIDER_", "MODEL_PRICING_TYPE_", "MODEL_COST_TIER_",
 		"MODEL_DIMENSION_KIND_", "STATUS_LEVEL_", "MODEL_STATUS_", "TEAMS_TIER_", "BILLING_STRATEGY_",
 		"MODEL_",
-		prefix,
 	} {
-		if p == "" {
-			continue
-		}
 		if idx := strings.Index(full, p); idx >= 0 {
 			return full[idx+len(p):]
 		}
@@ -65,6 +61,8 @@ func shortEnum(full, prefix string) string {
 	return full
 }
 
+// strAny 返回首个非空字符串形态值：上游 protobuf JSON 里同一字段
+// 在不同版本出现为 string/number，逐个候选取第一个可用的。
 func strAny(vals ...any) string {
 	for _, v := range vals {
 		if v == nil {
@@ -89,6 +87,7 @@ func strAny(vals ...any) string {
 	return ""
 }
 
+// boolAny 返回首个可判真的值：bool 原样、字符串按 "true"/"1" 判真。
 func boolAny(vals ...any) bool {
 	for _, v := range vals {
 		if v == nil {
@@ -104,6 +103,8 @@ func boolAny(vals ...any) bool {
 	return false
 }
 
+// numAny 返回首个数值形态值（数值类型原样透传，非空字符串也接受——
+// 上游偶发把数字序列化成字符串）。用于 JSON 里键名漂移的数值字段。
 func numAny(vals ...any) any {
 	for _, v := range vals {
 		if v == nil {
@@ -121,6 +122,7 @@ func numAny(vals ...any) any {
 	return nil
 }
 
+// truncate 把 s 截到 n 字节并以 "..." 结尾；不超原样返回。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
