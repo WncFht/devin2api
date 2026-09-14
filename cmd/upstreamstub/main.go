@@ -1,7 +1,7 @@
 // upstreamstub 是上游断流故障注入桩：以真实 Connect 流式帧格式响应
 // GetChatMessage，按场景在 envelope 写到一半时收尾，让客户端读帧器得到
 // 「incomplete envelope: unexpected EOF」——与线上 TCP 断流在读帧视角同构。
-// 用于验证传输断裂的重试链路与错误分层归类。
+// 也可模拟静默收尾、上游错误尾帧、挂死、坏帧，用于验证重试链路与错误分层。
 package main
 
 import (
@@ -23,44 +23,70 @@ var requestCount atomic.Int64
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:48090", "监听地址")
-	scenario := flag.String("scenario", "precontent", "precontent|midcontent|recover")
+	scenario := flag.String("scenario", "precontent",
+		"precontent|midcontent|recover|cleaneof|cleaneof-content|bare-end|endstream-error|badframe|stall")
 	recoverAfter := flag.Int64("recover-after", 1, "recover 场景下前 N 次请求截断，之后返回完整流")
 	flag.Parse()
 
 	http.HandleFunc("/exa.api_server_pb.ApiServerService/GetChatMessage", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		json := r.Header.Get("Content-Type") == "application/connect+json"
+		jsonWire := r.Header.Get("Content-Type") == "application/connect+json"
 		n := requestCount.Add(1)
-		truncate := *scenario != "recover" || n <= *recoverAfter
+		contentType := "application/connect+proto"
+		if jsonWire {
+			contentType = "application/connect+json"
+		}
 		var body []byte
-		if truncate {
-			switch *scenario {
-			case "midcontent":
-				// 先吐内容再断：客户端已产出 delta，属于不可重发场景。
-				body = join(
-					frame(deltaText("stub: hello "), json),
-					frame(deltaText("world"), json))
-			default:
-				// precontent/recover 的截断分支：只发不产生内容的元数据帧。
-				body = frame(metaFrame(), json)
+		switch *scenario {
+		case "stall":
+			// 流建立后无限静默：验证静默看门狗与判死重发。睡超时两倍兜底。
+			w.Header().Set("Content-Type", contentType)
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
 			}
-			// 追加半个 envelope 前缀（5 字节头只写 2 字节）：读帧器
-			// ReadFull 得到 ErrUnexpectedEOF，与 TCP 半路断开等效。
-			body = append(body, 0x00, 0x00)
-		} else {
+			log.Printf("request #%d scenario=stall: headers sent, hanging", n)
+			time.Sleep(5 * time.Minute)
+			return
+		case "midcontent":
+			// 先吐内容再断：客户端已产出 delta，属于不可重发场景。
 			body = join(
-				frame(metaFrame(), json),
-				frame(deltaText("stub: recovered reply"), json),
-				frame(stopFrame(), json),
-				endStream(),
-			)
+				frame(deltaText("stub: hello "), jsonWire),
+				frame(deltaText("world"), jsonWire))
+			body = append(body, 0x00, 0x00) // 半帧前缀 → ErrUnexpectedEOF
+		case "cleaneof":
+			// 元数据帧后协议中途干净收尾（无尾帧）：静默截断，pre-content 应重发。
+			body = frame(metaFrame(), jsonWire)
+		case "cleaneof-content":
+			// 内容帧后干净收尾：已产出内容的静默截断，不可重发。
+			body = join(frame(metaFrame(), jsonWire), frame(deltaText("stub: partial"), jsonWire))
+		case "bare-end":
+			// 有 EndStream 尾帧但无 stopReason：上游「正常结束但没给理由」，
+			// 复现线上 "Devin stream ended without stop reason"。
+			body = join(frame(metaFrame(), jsonWire), endStream("{}"))
+		case "endstream-error":
+			// 尾帧携带错误：上游经 EndStream 主动报语义错误（限流形态）。
+			body = join(frame(metaFrame(), jsonWire),
+				endStream(`{"error":{"code":"resource_exhausted","message":"stub: rate limited"}}`))
+		case "badframe":
+			// 垃圾字节充当 envelope：unmarshal/帧级解析失败路径。
+			body = []byte{0xff, 0xff, 0xff, 0xff, 0xff}
+		case "recover":
+			if n <= *recoverAfter {
+				body = append(frame(metaFrame(), jsonWire), 0x00, 0x00)
+			} else {
+				body = join(
+					frame(metaFrame(), jsonWire),
+					frame(deltaText("stub: recovered reply"), jsonWire),
+					frame(stopFrame(), jsonWire),
+					endStream("{}"))
+			}
+		default: // precontent
+			body = append(frame(metaFrame(), jsonWire), 0x00, 0x00)
 		}
-		w.Header().Set("Content-Type", "application/connect+proto")
-		if json {
-			w.Header().Set("Content-Type", "application/connect+json")
-		}
+		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write(body)
-		log.Printf("request #%d scenario=%s truncate=%v bytes=%d", n, *scenario, truncate, len(body))
+		log.Printf("request #%d scenario=%s bytes=%d", n, *scenario, len(body))
 	})
 	// 其余 RPC（GetCliModelConfigs 等）不实现：直接断开让调用方走目录缺失路径。
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -87,9 +113,9 @@ func frame(msg *devinproto.GetChatMessageResponse, json bool) []byte {
 	return append(out, payload...)
 }
 
-// endStream 编码流终止 envelope：0x02 标志 + JSON 尾帧体。
-func endStream() []byte {
-	payload := []byte("{}")
+// endStream 编码流终止 envelope：0x02 标志 + JSON 尾帧体
+// （EndStreamResponse：{"error":..,"metadata":..} 或 {}）。
+func endStream(payload string) []byte {
 	out := make([]byte, 5, 5+len(payload))
 	out[0] = 0x02
 	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
