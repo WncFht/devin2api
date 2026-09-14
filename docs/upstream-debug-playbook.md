@@ -76,7 +76,8 @@ curl -sN http://localhost:3003/v1/responses \
 # 优先热切换：POST /panel/api/debug/toggle，不用重启
 curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
   -H "Authorization: Bearer <dashboard.password>"
-# 或改 config.yaml 的 debug.enabled 后托管重启（冷路径）
+# 改 config.yaml 后也可 POST /panel/api/config/reload 热应用，
+# 返回里 requires_restart 列出的字段才需要托管重启（冷路径）
 # 复现一次请求，然后看 logs/<时间戳>/03-devin-request.json
 ```
 
@@ -99,7 +100,7 @@ curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
 这些是用真实请求逐条试出来的硬约束（详见 `internal/adapter/devin/devin.go` 注释）：
 
 1. **call→result 紧邻配对**：assistant 发出的每个 tool call 必须紧跟它的 TOOL 结果消息，「全部调用→全部结果」的分组序列直接 `invalid_argument`。（`pairToolCallsWithResults` 负责重排）
-2. **助手回合合并为单条消息**：一个 assistant 回合 = 一条 `ChatMessagePrompt`，`prompt`+`thinking`+`signature`+`toolCalls` 数组同体携带（真实客户端抓包形态，从不出现相邻 SYSTEM 对）；无文本时 `prompt` 字段完全省略——空串与缺席不同。拆成多条会在渲染上下文插入假回合边界，显著抬高模型在宣告句末尾采 EOS 的概率（premature end_turn 事故，调查档案见 `notes/archive/2026-09-12-premature-endturn.md`）。
+2. **助手回合合并为单条消息**：一个 assistant 回合 = 一条 `ChatMessagePrompt`，`prompt`+`thinking`+`signature`+`toolCalls` 数组同体携带（真实客户端抓包形态，从不出现相邻 SYSTEM 对）；无文本时 `prompt` 字段完全省略——空串与缺席不同。拆成多条会在渲染上下文插入假回合边界，显著抬高模型在宣告句末尾采 EOS 的概率（premature end_turn 事故，调查档案见 `notes/archive/2026-09-12-premature-endturn.md`）。同一拆线形态有第二条成因：`/v1/responses` 解码器曾把一回合铺平的多个 input item 逐条成消息（issue #2，`d53dfde` 起解码层合并相邻 AssistantMessage，档案 `notes/archive/2026-09-14-issue2-responses-turn-fragmentation.md`）——查相邻 SYSTEM 对要同时怀疑编码层与解码层。
 3. **thinking 挂每条 assistant 消息**（#11），签名 #12 跟 thinking 走。
 4. **tool result 文本不能为空**，空则占位 `[tool result]`。
 5. **完全空的 assistant 轮跳过**（实测诱发上游反复返回空回复）。

@@ -85,7 +85,7 @@ swe-2-max（Fireworks）正常响应帧序：~40 个仅含 `latency`/`timestamp`
 - 免费档不下发 `creditCost`/`committed_*`/`actualModelUid`/`completionProfile`/`prompt`(回显)/`redact`/`provider_refusal`（文本拒绝是普通 deltaText）。
 - 工具调用 id 格式按模型分：swe-2-max → `read_file_0`，glm-5-2 → `chatcmpl-tool-<hex>`——**不要假设 id 形态**。
 - `cacheReadTokens` 偶发出现（inputTokens=1 + cacheRead=128，疑似系统前缀隐式命中）——存在但不可控、不可依赖。
-- `premature_end_turn` 标记真实存在（样本占比 ~0.13%），面板已透出。
+- `premature_end_turn` 标记真实存在（样本占比 ~0.13%），面板已透出。它是 shape 候选信号而非判定：任务正常收官轮（`tool_result` 输入 → 纯文本 → `STOP`）与真 premature 同形不可分，命中需逐条复核（口径见 `prematureEndTurn` 注释）；已实锤的病因是 responses 解码碎片化（issue #2，`d53dfde`）。
 
 ### stopReason 词表
 
