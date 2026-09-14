@@ -209,7 +209,9 @@ if [[ "${HEAD_SHA}" != "$(git rev-parse origin/main)" ]]; then
 fi
 
 # --cleanup=verbatim：默认 strip 会把 "## Features" 这类行当注释吃掉。
-git tag -a "${NEXT}" -F "${NOTES_FILE}" --cleanup=verbatim
+# tag 必须落在 HEAD_SHA（等过 CI 的那个提交）而非当前 HEAD——等 CI 期间
+# 本地可能落了未推送的新提交，复查只挡 origin/main 被推进，挡不住这个。
+git tag -a "${NEXT}" -F "${NOTES_FILE}" --cleanup=verbatim "${HEAD_SHA}"
 git push origin "${NEXT}"
 echo
 echo "已推送 ${NEXT} → release.yml 开始发布："
