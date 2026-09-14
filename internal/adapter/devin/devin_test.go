@@ -157,7 +157,7 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 			{Name: "read", Description: "read file", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestBuildRequestMergesParallelToolCalls(t *testing.T) {
 			llm.ToolResultMessage{ToolCallID: "call-b", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestBuildRequestReportsRepairs(t *testing.T) {
 	}
 	var sanitizeHits map[string]int
 	request, sanitizeHits = sanitizeRequest(request)
-	converted, repairs, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, repairs, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestBuildRequestAggregatesThinkingBlocks(t *testing.T) {
 			}},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestBuildRequestOmitsHistoricalImages(t *testing.T) {
 			}},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
 			llm.ToolResultMessage{ToolCallID: "tc1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
 // TestBuildRequestWithoutToolsKeepsPromptUnchanged 的测试动机是确保工具转换不会污染纯文本请求。
 func TestBuildRequestWithoutToolsKeepsPromptUnchanged(t *testing.T) {
 	request := llm.RequestMessages{SystemPrompt: "system", Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}}}}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +511,7 @@ func TestBuildRequestIgnoresEmptyToolDescriptions(t *testing.T) {
 			{Name: "read", Description: "  read a file  ", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +926,7 @@ func TestBuildRequestForwardsSamplingParams(t *testing.T) {
 		StopSequences: []string{"STOP"},
 		Messages:      []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -946,7 +946,7 @@ func TestBuildRequestDefaultSamplingParams(t *testing.T) {
 		SystemPrompt: "system",
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -963,7 +963,7 @@ func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
 		SessionKey:   "user-1",
 		Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "task"}}}},
 	}
-	first, _, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	first, _, err := buildRequest(base, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +972,7 @@ func TestDeriveSessionIDsStableForSamePrefix(t *testing.T) {
 		llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "answer"}}},
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "follow up"}}},
 	)
-	second, _, err := buildRequest(base, Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	second, _, err := buildRequest(base, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,11 +995,11 @@ func TestDeriveSessionIDSSurvivesCompaction(t *testing.T) {
 			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
 		}
 	}
-	first, _, err := buildRequest(makeRequest("original first message"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	first, _, err := buildRequest(makeRequest("original first message"), Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := buildRequest(makeRequest("[summary of compacted history]"), Config{BaseURL: "https://example.com", Token: "token", Model: "model"})
+	second, _, err := buildRequest(makeRequest("[summary of compacted history]"), Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1017,12 +1017,12 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: text}}}},
 		}
 	}
-	cfg := Config{BaseURL: "https://example.com", Token: "token", Model: "model"}
-	first, _, err := buildRequest(makeRequest("session-1", "task A"), cfg)
+	binding := callBinding{Token: "token", Model: "model"}
+	first, _, err := buildRequest(makeRequest("session-1", "task A"), Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := buildRequest(makeRequest("session-2", "task A"), cfg)
+	second, _, err := buildRequest(makeRequest("session-2", "task A"), Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1030,11 +1030,11 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 		t.Fatalf("distinct session keys must not share a trajectory")
 	}
 	// 无 SessionKey 的客户端退回内容哈希：不同首条消息仍自然分散。
-	third, _, err := buildRequest(makeRequest("", "task B"), cfg)
+	third, _, err := buildRequest(makeRequest("", "task B"), Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fourth, _, err := buildRequest(makeRequest("", "task C"), cfg)
+	fourth, _, err := buildRequest(makeRequest("", "task C"), Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1290,13 +1290,13 @@ func TestResponseStreamStopsOnContextCancel(t *testing.T) {
 // TestBuildRequestToolChoiceMapping 验证 tool_choice 映射到上游 oneof：
 // required/none 走 option_name，named 走 tool_name，auto 缺省不发。
 func TestBuildRequestToolChoiceMapping(t *testing.T) {
-	cfg := Config{BaseURL: "https://example.com", Token: "token", Model: "model"}
+	binding := callBinding{Token: "token", Model: "model"}
 	request := llm.RequestMessages{Messages: []llm.Message{
 		llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}},
 	}}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceRequired}
-	converted, _, err := buildRequest(request, cfg)
+	converted, _, err := buildRequest(request, Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1305,7 +1305,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNone}
-	converted, _, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1316,7 +1316,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	// 指名调用要求工具在 tools 表内：先声明 read_file 再指名。
 	request.Tools = []llm.ToolDefinition{{Name: "read_file", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "read_file"}
-	converted, _, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1325,7 +1325,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 	}
 
 	request.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
-	converted, _, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1335,7 +1335,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 
 	request.ToolChoice = nil
 	request.DisableParallelToolCalls = true
-	converted, _, err = buildRequest(request, cfg)
+	converted, _, err = buildRequest(request, Config{}, binding)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1572,7 +1572,7 @@ func TestBuildRequestReplaysSignatureMetadata(t *testing.T) {
 			},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "t", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1592,7 +1592,7 @@ func TestBuildRequestCustomToolCallUsesInvalidJSONStr(t *testing.T) {
 			}},
 		},
 	}
-	converted, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "t", Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1612,7 +1612,7 @@ func TestBuildRequestRejectsNamedToolChoiceOutsideTools(t *testing.T) {
 		},
 		ToolChoice: &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "missing_tool"},
 	}
-	_, _, err := buildRequest(request, Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	_, _, err := buildRequest(request, Config{}, callBinding{Token: "t", Model: "m"})
 	if err == nil || !strings.Contains(err.Error(), "missing_tool") {
 		t.Fatalf("err = %v, want named tool_choice rejection", err)
 	}
@@ -1869,7 +1869,7 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 			},
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "what did you find?"}}},
 		},
-	}, Config{BaseURL: "https://example.com", Token: "token", Model: "swe-2-max"})
+	}, Config{}, callBinding{Token: "token", Model: "swe-2-max"})
 	if err != nil {
 		t.Fatal(err)
 	}

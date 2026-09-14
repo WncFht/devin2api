@@ -98,11 +98,11 @@ func BenchmarkBuildRequestLongHistory(b *testing.B) {
 			{Name: "read_file", Description: "read a file", InputSchema: benchToolSchema},
 		},
 	}
-	cfg := Config{BaseURL: "https://example.com", Token: "t", Model: "m"}
+	binding := callBinding{Token: "t", Model: "m"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, err := buildRequest(request, cfg); err != nil {
+		if _, _, err := buildRequest(request, Config{}, binding); err != nil {
 			b.Fatal(err)
 		}
 	}

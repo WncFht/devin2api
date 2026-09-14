@@ -328,20 +328,33 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		return nil, err
 	}
 	cfg = adapter.currentConfig()
-	cfg.Model = model
-	cfg.Token = adapter.currentToken()
-	cfg.ModelAssignmentJWT = assignmentJWT
-	protoRequest, repairs, err := buildRequest(request, cfg)
+	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
+	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
+	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
+	protoRequest, repairs, err := buildRequest(request, cfg, binding)
 	if err != nil {
 		return nil, err
 	}
 	repairs.SanitizeHits = sanitizeHits
 	recorder.SetRepairs(repairs)
-	recordProtoJSON(recorder, "03-devin-request.json", protoRequest)
+	recordProtoJSON(recorder, debuglog.StageDevinRequest, protoRequest)
 	// attempt 计数区分多次发送：自愈重发与 pre-content reopen 都会重建
 	// 请求体，attempt2+ 写独立文件并在 04 里留 retry_attempt 分界行，
 	// 否则 04 的帧无法归因到具体哪次发送。
 	attempt := 1
+	// noteRetry 统一重发记账：attempt 递增、index retries、04 分界行与
+	// 03.attemptN 分片在同一点落盘——两处调用方曾各写一套，漂移出
+	// 分界行字段不一致（continue_empty 只有一边写）。
+	noteRetry := func(cause string, message *devinproto.GetChatMessageRequest, continueEmpty bool) {
+		attempt++
+		recorder.NoteRetryAttempt(attempt, cause)
+		recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_attempt", map[string]any{
+			"attempt":        attempt,
+			"cause":          cause,
+			"continue_empty": continueEmpty,
+		})
+		recordProtoJSON(recorder, debuglog.StageDevinRequestAttempt(attempt), message)
+	}
 	// streamCtx 由 responseStream 持有：看门狗判死或客户端断开时
 	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
 	streamCtx, cancel := context.WithCancel(ctx)
@@ -349,17 +362,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
 		// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
 		// 用新凭据重建请求重试一次。token 未变化时不重试。
-		cfg.Token = adapter.currentToken()
-		if rebuilt, _, buildErr := buildRequest(request, cfg); buildErr == nil {
+		binding.Token = adapter.currentToken()
+		if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
 			protoRequest = rebuilt
-			attempt++
-			cause := "unauthenticated: token reloaded"
-			recorder.NoteRetryAttempt(attempt, cause)
-			recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
-				"attempt": attempt,
-				"cause":   cause,
-			})
-			recordProtoJSON(recorder, fmt.Sprintf("03-devin-request.attempt%d.json", attempt), protoRequest)
+			noteRetry("unauthenticated: token reloaded", protoRequest, false)
 			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest)
 		}
 	}
@@ -405,19 +411,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 				return nil, nil, cause
 			}
 			retryCtx, retryCancel := context.WithCancel(ctx)
-			retryCfg := cfg
-			retryCfg.Token = adapter.currentToken()
-			rebuilt, _, err := buildRequest(retryRequest, retryCfg)
+			retryBinding := binding
+			retryBinding.Token = adapter.currentToken()
+			rebuilt, _, err := buildRequest(retryRequest, cfg, retryBinding)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
-				attempt++
-				recorder.NoteRetryAttempt(attempt, causeText)
-				recorder.AppendJSONL("04-devin-response.jsonl", "retry_attempt", map[string]any{
-					"attempt":        attempt,
-					"cause":          causeText,
-					"continue_empty": continueEmpty,
-				})
-				recordProtoJSON(recorder, fmt.Sprintf("03-devin-request.attempt%d.json", attempt), rebuilt)
+				noteRetry(causeText, rebuilt, continueEmpty)
 				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt)
 			}
 			if err != nil {
@@ -425,7 +424,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 				// 重发自身撞到的错误也要留痕：error.json 是
 				// first-write-wins 只记原始失败点，「重发又撞上
 				// 什么」只在这一行找得到。
-				recorder.AppendJSONL("04-devin-response.jsonl", "retry_failed", map[string]any{
+				recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
 					"attempt": attempt,
 					"error":   err.Error(),
 				})

@@ -5,6 +5,7 @@
 package devin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
@@ -20,7 +21,21 @@ import (
 	"github.com/WncFht/devin2api/internal/upstream"
 )
 
-func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
+// callBinding 是单次 GetChatMessage 调用的绑定信息：Model 是经别名/
+// router 改写后的上游 model uid，Token 是调用时现取的凭据
+// （unauthenticated 自愈会换新），ModelAssignmentJWT 是 AssignModel
+// 按请求绑定的 router jwt。三者随调用变化，与静态 Config 分开传——
+// 重试只需换 binding.Token。
+type callBinding struct {
+	Token              string
+	Model              string
+	ModelAssignmentJWT string
+}
+
+// buildRequest 把中间请求投影为上游 wire 格式：静态身份取 config
+// （Client* 与 clientIdentity 默认值），每次调用可变的凭据/路由取
+// binding。返回 repairs 记录转换中的静默修复计数，随请求日志落盘。
+func buildRequest(request llm.RequestMessages, config Config, binding callBinding) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
 	var repairs llm.RequestRepairs
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
 	// ID，使命中更稳（实测稳定 ~7/8 vs 全随机波动）；缓存匹配本身是
@@ -28,7 +43,7 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randid.UUID()
 	name, version, os := config.clientIdentity()
-	metadata := upstream.BuildMetadata(config.Token, name, version, os, 366)
+	metadata := upstream.BuildMetadata(binding.Token, name, version, os, 366)
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),
 		MaxTokens:      proto.Uint64(128000),
@@ -61,7 +76,7 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 		Prompt:   proto.String(withToolDescriptions(request.SystemPrompt, request.Tools)),
 		// 上游 prompt 前缀缓存：system prompt 是稳定前缀，标记 EPHEMERAL 断点。
 		SystemPromptCacheOptions: ephemeralCacheOptions(),
-		ChatModelUid:             proto.String(config.Model),
+		ChatModelUid:             proto.String(binding.Model),
 		RequestType:              devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
 		Configuration:            completion,
 		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
@@ -146,8 +161,8 @@ func buildRequest(request llm.RequestMessages, config Config) (*devinproto.GetCh
 	}
 	// router uid 经 AssignModel 解析出的 jwt 绑本次 cascade_id，
 	// 与真实 CLI 的 GetChatMessage 形态一致（见 resolveModelRouting）。
-	if config.ModelAssignmentJWT != "" {
-		result.ModelAssignmentJwt = proto.String(config.ModelAssignmentJWT)
+	if binding.ModelAssignmentJWT != "" {
+		result.ModelAssignmentJwt = proto.String(binding.ModelAssignmentJWT)
 	}
 	return result, repairs, nil
 }
@@ -165,7 +180,9 @@ func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
 // 连续性。无 SessionKey 时退回「系统提示头 4KB + 首条消息文本头 1KB」
 // 内容哈希：同一会话多轮回放前缀不变 → 稳定，不同会话 → 自然分散。
 func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
-	var seed strings.Builder
+	// bytes.Buffer 的 Bytes() 零拷贝交给 Sum256；strings.Builder 则需
+	// 先 String() 再 []byte() 多一份全量拷贝。
+	var seed bytes.Buffer
 	if request.SessionKey != "" {
 		seed.WriteString(request.SessionKey)
 	} else {
@@ -187,7 +204,7 @@ func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascade
 			break
 		}
 	}
-	sum := sha256.Sum256([]byte(seed.String()))
+	sum := sha256.Sum256(seed.Bytes())
 	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
 }
 
@@ -226,6 +243,9 @@ var stepIndexRegistry = struct {
 	counts map[string]int32
 }{counts: make(map[string]int32)}
 
+// nextStepIndex 返回该 trajectory 的下一个会话内单调步数；表项无界
+// 增长时整体清空重计（65536 条约对应数万并发会话，清空只是步数
+// 从 1 重排，上游不校验跨请求连续性）。
 func nextStepIndex(trajectoryID string) int32 {
 	stepIndexRegistry.Lock()
 	defer stepIndexRegistry.Unlock()
