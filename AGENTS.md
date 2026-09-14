@@ -106,7 +106,7 @@
 工作流：
 
 1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
-2. 读 `logs/<dir>/meta.json`（结果、三段模型、TTFB、token、upstream_request_id）与 `error.json`（首个失败点）。
+2. 读 `logs/<dir>/meta.json`（结果、三段模型、五段延迟分解 `request_ready/upstream_sent/upstream_open/first_upstream/first_client_ms`、token、upstream_request_id）与 `error.json`（首个失败点）。延迟分解字段的段语义见 `docs/perf.md`。
 3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。上游重试（token 自愈/空响应/transport 重开）时每次续试写 `03-devin-request.attemptN.json`，并在 04 中插入 `retry_attempt` 标记行分隔各次尝试的原始帧；次数与原因另落 `index.jsonl` 的 `retries` 与 meta.json 的 `retry_attempts`。
 4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希、全部 token 分类、重发次数 `retries`），`grep` 即可；更早历史被 retention 清理后索引仍在。
 5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
@@ -117,7 +117,7 @@
 - `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`http.rejects` 段暴露管线前拒绝（`by_reason` 分原因计数 + `recent` 最近 256 条事件环）；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数/令牌余量/排队数 + `events` 闩迁移事件环——上闩/延闩/解闩/到期/恢复——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）。
 - `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
 - `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
-- `GET /panel/api/config` 返回脱敏后的生效配置视图（`devin.token`/`auth.api_key`/`dashboard.password` 以 `sha256:` 前缀代替明文，可与日志 `key_hash` 对照；`stale=true` 表示文件在最后一次加载后被改过）。`POST /panel/api/config/reload` 重读 config.yaml 并热应用，返回 `applied`（已生效字段）与 `requires_restart`（要重启才生效：`server.listen`/`max_concurrency`/`devin.base_url`/`proxy`/`force_http1`/`debug.quota_interval_minutes`）；校验失败 422、旧配置继续服役。注意 `devin.client_*` 只影响 chat 路径——面板自身的 seat 类上游调用固定用 windsurf 身份。
+- `GET /panel/api/config` 返回脱敏后的生效配置视图（`devin.token`/`auth.api_key`/`dashboard.password` 以 `sha256:` 前缀代替明文，可与日志 `key_hash` 对照；`stale=true` 表示文件在最后一次加载后被改过）。`POST /panel/api/config/reload` 重读 config.yaml 并热应用，返回 `applied`（已生效字段）与 `requires_restart`（要重启才生效：`server.listen`/`max_concurrency`/`devin.base_url`/`proxy`/`force_http1`/`debug.quota_interval_minutes`/`debug.pprof_listen`）；校验失败 422、旧配置继续服役。注意 `devin.client_*` 只影响 chat 路径——面板自身的 seat 类上游调用固定用 windsurf 身份。
 - `GET /panel/api/requests` 支持结构化筛选（`status_class`/`result`/`model`/`error_stage`/`since`/`until`）与 `has_more` 截断信号，响应另捎带 `rejects` 管线前拒绝事件环（与 stats `http.rejects` 同源，供请求页提示「拒绝不进索引」）；`/panel/api/requests/export?format=csv|json` 导出；`/panel/api/requests/{dir}/merged` 把 `06` 的 SSE 帧合并成可读正文。
 - 保留策略分层：`debug.retention_days`（目录整删）与 `debug.max_total_mb`（容量淘汰）之外，`debug.payload_hours` 超时剥离大文件（03/04/06/attachments），`debug.keep_error_dirs` 在容量淘汰时保护最近 N 个含 `error.json` 的失败目录。
 

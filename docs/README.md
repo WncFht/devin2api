@@ -25,10 +25,11 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 部署与工程
 
-| 文档            | 用途                                                                                        |
-| --------------- | ------------------------------------------------------------------------------------------- |
-| `deployment.md` | 部署：macOS launchd / Linux systemd --user / Windows 裸进程，运行目录、优雅排空、单实例约定 |
-| `toolchain.md`  | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族            |
+| 文档            | 用途                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `deployment.md` | 部署：macOS launchd / Linux systemd --user / Windows 裸进程，运行目录、优雅排空、单实例约定  |
+| `toolchain.md`  | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族             |
+| `perf.md`       | 性能工作流：pprof/fgprof 端点、loadtest+upstreamstub 压测、延迟分解字段、benchstat 验收、PGO |
 
 ## 速查入口
 
@@ -38,3 +39,4 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 - feature 没生效（工具不调用/内容丢失）→ 指纹文档 + playbook「已验证 wire 契约」
 - 上游 429 频发 → `upstream-rate-limit.md`（模型）+ `rategate.go`（实现）
 - 发版/格式化/CI → `toolchain.md`
+- 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ `logs/<debug_ref>/meta.json` 延迟分解字段
