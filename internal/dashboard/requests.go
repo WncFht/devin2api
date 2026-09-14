@@ -51,13 +51,19 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	payload := map[string]any{
 		"requests": entries,
 		"total":    total,
 		"offset":   offset,
 		"limit":    limit,
 		"has_more": result.HasMore,
-	})
+	}
+	// 管线前拒绝不进 index——用户在请求页找 503/429 时天然扑空，
+	// 把拒绝事件环捎在列表响应里，前端据此提示「去系统页看」。
+	if h.metrics != nil {
+		payload["rejects"] = h.metrics.Rejects()
+	}
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 // parseRequestFilter 从查询串构建结构化筛选；q 为子串，其余为精确条件。

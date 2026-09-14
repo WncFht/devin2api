@@ -270,6 +270,18 @@ const Overview = (() => {
       const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
       probs.push(['err', '速率闸门闩中，冷却至 ' + until]);
     }
+    // 本地拒绝突刺：管线前拒绝（排空/并发/鉴权）不进 index，SLA 与
+    // 矩阵都看不见——部署窗口的 503 风暴只在事件环里。≥3 条/10 分钟
+    // 才算突刺，个别乱入的 401 不告警。
+    const REJECT_SHORT = { draining: '排空', concurrency_limit: '并发', ws_connection_limit: 'WS连接', missing_api_key: '缺Key', invalid_api_key: '错Key' };
+    const recentRejects = ((statsData && statsData.http && statsData.http.rejects || {}).recent || [])
+      .filter(e => e.at * 1000 > Date.now() - 10 * 60000);
+    if (recentRejects.length >= 3) {
+      const byReason = {};
+      recentRejects.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
+      const parts = Object.keys(byReason).map(k => (REJECT_SHORT[k] || k) + ' ' + byReason[k]);
+      probs.push(['warn', '近 10 分钟本地拒绝 ' + recentRejects.length + ' 条（' + parts.join(' · ') + '）——不进请求索引，详见系统页']);
+    }
     const today = (usageData && usageData.snapshot && usageData.snapshot.today) || {};
     const sla = slaRate(today);
     if (sla != null && sla < 95) {

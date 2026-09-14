@@ -13,6 +13,15 @@ const Requests = (() => {
 
   const FILTER_IDS = ['reqSearch', 'fStatus', 'fResult', 'fReqModel', 'fErrStage', 'fSince', 'fSinceTS', 'fUntilTS'];
 
+  // 与 tab-system.js 同款分原因标签——模块互相隔离，各持一份。
+  const REJECT_LABELS = {
+    draining: '排空',
+    concurrency_limit: '并发上限',
+    ws_connection_limit: 'WS连接上限',
+    missing_api_key: '缺API Key',
+    invalid_api_key: '错API Key',
+  };
+
   // ---------- 静默检测 ----------
   // ActiveRequest 没有 last_activity 字段：跨轮询比较 client_bytes 增量，
   // 10 分钟无新字节流出即标「静默」——等上游超时/上游挂死都会呈现这个形态。
@@ -189,6 +198,15 @@ const Requests = (() => {
         ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       moreBtn.style.display = (list.length < data.total && reqLimit < 500) ? '' : 'none';
       let hint = '';
+      // 管线前拒绝（排空/并发/鉴权）不进 index——用户在请求页找这类 503/429
+      // 天然扑空，看到提示才知道去系统页查拒绝事件环。
+      const recentRejects = (data.rejects && data.rejects.recent || []).filter(e => e.at * 1000 > Date.now() - 15 * 60000);
+      if (recentRejects.length) {
+        const byReason = {};
+        recentRejects.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
+        const parts = Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]);
+        hint += '近 15 分钟本地拒绝 ' + recentRejects.length + ' 条（' + esc(parts.join(' · ')) + '）——管线前拒绝不进索引，<span class="lnk" data-gotosys="1">去系统页</span>。 ';
+      }
       const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
       if (sts || uts) {
         hint = '时间窗锁定 ' + (sts ? fmtTime(sts) : '最早') + ' ~ ' + (uts ? fmtTime(uts) : '现在') +
@@ -361,6 +379,8 @@ const Requests = (() => {
       if (fl) { loadFile(fl.dataset.dir, fl.dataset.f); return; }
       const cw = e.target.closest('[data-clrwin]');
       if (cw) { $('fSinceTS').value = ''; $('fUntilTS').value = ''; resetAndLoad(); return; }
+      const gs = e.target.closest('[data-gotosys]');
+      if (gs) { Tabs.go('system'); return; }
       const tr = e.target.closest('.req-table tbody tr[data-dir]');
       if (tr) toggleDetail(tr.dataset.dir);
     });
