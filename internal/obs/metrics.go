@@ -42,6 +42,23 @@ const (
 	RejectInvalidAPIKey RejectReason = "invalid_api_key"
 )
 
+// RejectLabel 是拒绝分类与面板显示名的有序对——数组下发而非 map，
+// 保住表格行的稳定排序（Go map 序随机，逐次刷新会闪动）。
+type RejectLabel struct {
+	Reason string `json:"reason"`
+	Label  string `json:"label"`
+}
+
+// rejectLabels 是拒绝分类的面板显示名：词汇与标签同文件定义，新增分类
+// 漏补标签立刻可见；JS 侧不再维护镜像表，未知 reason 回退显示原值。
+var rejectLabels = []RejectLabel{
+	{string(RejectDraining), "排空"},
+	{string(RejectConcurrencyLimit), "并发上限"},
+	{string(RejectWSConnectionLimit), "WS连接上限"},
+	{string(RejectMissingAPIKey), "缺API Key"},
+	{string(RejectInvalidAPIKey), "错API Key"},
+}
+
 // RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试目录
 // 也没有 index.jsonl 行，这条记录是它的全部结构化痕迹。
 type RejectEvent struct {
@@ -233,7 +250,7 @@ func (m *Metrics) Rejects() map[string]any {
 		recent = append(recent, m.rejectRing[(m.rejectHead-i+rejectEventCap)%rejectEventCap])
 	}
 	m.rejectsMu.Unlock()
-	return map[string]any{"by_reason": byReason, "recent": recent}
+	return map[string]any{"by_reason": byReason, "recent": recent, "labels": rejectLabels}
 }
 
 // rates 从 10 秒桶派生 RPM/QPS（同类代理 RPM 统计同款：current/peak/avg + QPS）。

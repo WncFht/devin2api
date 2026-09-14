@@ -71,12 +71,16 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 // （归因口径、状态码计数、均耗时/均 TTFB）所需字段。完整 IndexEntry 约
 // 30 个字段，投影把单条载荷压小一个量级。
 type matrixEntry struct {
-	StartedAt       string `json:"started_at"`
-	Model           string `json:"model,omitempty"`
-	RequestedModel  string `json:"requested_model,omitempty"`
-	StatusCode      int    `json:"status_code"`
-	Result          string `json:"result"`
-	ErrorStage      string `json:"error_stage,omitempty"`
+	StartedAt      string `json:"started_at"`
+	Model          string `json:"model,omitempty"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	StatusCode     int    `json:"status_code"`
+	Result         string `json:"result"`
+	ErrorStage     string `json:"error_stage,omitempty"`
+	// Owner 是失败责任归因（client/business_limited/upstream），由
+	// debuglog.ErrorOwner 统一计算——前端不再按 status/result/stage
+	// 复刻判定，与 usage 聚合的 client_faults/upstream_faults 同口径。
+	Owner           string `json:"owner,omitempty"`
 	DurationMS      int64  `json:"duration_ms"`
 	FirstUpstreamMS *int64 `json:"first_upstream_ms,omitempty"`
 	RateLimited     bool   `json:"rate_limited,omitempty"`
@@ -105,6 +109,7 @@ func (h *Handler) apiRequestMatrix(w http.ResponseWriter, r *http.Request) {
 			StatusCode:      e.StatusCode,
 			Result:          e.Result,
 			ErrorStage:      e.ErrorStage,
+			Owner:           debuglog.ErrorOwner(e),
 			DurationMS:      e.DurationMS,
 			FirstUpstreamMS: e.FirstUpstreamMS,
 			RateLimited:     e.RateLimited,

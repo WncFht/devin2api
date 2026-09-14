@@ -85,20 +85,50 @@ type rateGate struct {
 // GateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
 const GateEventCap = 64
 
-// GateEvent 是一次闩状态迁移的采样。kind：latched（上游限流上闩/延闩）、
-// released（成功帧提前解闩）、expired（闩到期自然失效）、restored（重启
-// 从 statePath 恢复未过期闩）。until 是该事件涉及的闩截止时刻。
+// 闩迁移事件种类：latched（上游限流上闩/延闩）、released（成功帧提前
+// 解闩）、expired（闩到期自然失效）、restored（重启从 statePath 恢复
+// 未过期闩）。
+const (
+	gateEventLatched  = "latched"
+	gateEventReleased = "released"
+	gateEventExpired  = "expired"
+	gateEventRestored = "restored"
+)
+
+// gateEventLabel 是闩事件的面板显示名——词汇（kind）与展示文案同文件
+// 产出，前端事件表不再持有镜像标签表；延闩（latched+extended）在产出
+// 处就合并成单独显示名。
+func gateEventLabel(kind, detail string) string {
+	switch kind {
+	case gateEventLatched:
+		if detail == "extended" {
+			return "延闩"
+		}
+		return "上闩"
+	case gateEventReleased:
+		return "解闩"
+	case gateEventExpired:
+		return "到期失效"
+	case gateEventRestored:
+		return "重启恢复"
+	}
+	return kind
+}
+
+// GateEvent 是一次闩状态迁移的采样。until 是该事件涉及的闩截止时刻；
+// label 是产出时算好的面板显示名（kind+detail 的合并文案）。
 type GateEvent struct {
 	At     time.Time  `json:"at"`
 	Kind   string     `json:"kind"`
 	Until  *time.Time `json:"until,omitempty"`
 	Detail string     `json:"detail,omitempty"` // latched 时 "extended" 表示闩中延闩
+	Label  string     `json:"label"`
 }
 
 // pushEvent 追加一条闩迁移事件；调用方须持 mu（启动恢复路径在并发前
 // 调用，视同持锁）。
 func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
-	ev := GateEvent{At: gate.now(), Kind: kind, Detail: detail}
+	ev := GateEvent{At: gate.now(), Kind: kind, Detail: detail, Label: gateEventLabel(kind, detail)}
 	if !until.IsZero() {
 		u := until
 		ev.Until = &u
@@ -118,7 +148,7 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 	if gate.limitedUntil.IsZero() || now.Before(gate.limitedUntil) {
 		return
 	}
-	gate.pushEvent("expired", gate.limitedUntil, "")
+	gate.pushEvent(gateEventExpired, gate.limitedUntil, "")
 	gate.limitedUntil = time.Time{}
 	gate.nextDrip = time.Time{}
 	gate.clearState()
@@ -146,6 +176,17 @@ type GateStats struct {
 	Sendable      bool        `json:"sendable"`              // 当前是否处于可发区间（非死区）
 	Waiters       int         `json:"waiters"`
 	Events        []GateEvent `json:"events,omitempty"` // 新在前
+	// LatchRanges 是从闩事件环还原的闩时段（[start,end] 对），由
+	// stats() 与事件环同锁算出——前端趋势图直接铺 markArea，不再在
+	// JS 里重放状态机。
+	LatchRanges []GateLatchRange `json:"latch_ranges,omitempty"`
+}
+
+// GateLatchRange 是一段闩时段；Start 为 nil 表示开窗事件已滚出事件环
+// （时段左端不可考，展示层按视窗左缘裁剪）。
+type GateLatchRange struct {
+	Start *time.Time `json:"start,omitempty"`
+	End   time.Time  `json:"end"`
 }
 
 // GateConfig 是速率闸门的可调参数集；时长参数 <=0 时取默认值。
@@ -239,7 +280,7 @@ func (gate *rateGate) restoreState() {
 	}
 	gate.limitedUntil = state.LimitedUntil
 	gate.nextDrip = gate.now().Add(gate.dripInterval)
-	gate.pushEvent("restored", state.LimitedUntil, "")
+	gate.pushEvent(gateEventRestored, state.LimitedUntil, "")
 	slog.Warn("rate gate latch restored from state file", "until", state.LimitedUntil.Format(time.RFC3339))
 }
 
@@ -310,7 +351,64 @@ func (gate *rateGate) stats() GateStats {
 		until := gate.limitedUntil
 		stats.LimitedUntil = &until
 	}
+	stats.LatchRanges = gate.latchRanges(now)
 	return stats
+}
+
+// latchRanges 按事件时间序还原闩时段：latched/restored 开窗，released
+// 提前关窗，expired 按截止关窗；延闩（latched 落在开窗内）只推进右端。
+// 仍在闩中的时段收到 now；当前闩的开窗事件滚出环外时给 nil Start。
+// 调用方须持 mu。
+func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
+	if gate.eventSize == 0 {
+		return nil
+	}
+	var ranges []GateLatchRange
+	var open *GateLatchRange
+	closeOpen := func(end time.Time) {
+		if open != nil {
+			open.End = end
+			ranges = append(ranges, *open)
+			open = nil
+		}
+	}
+	// 事件环按写入序（旧到新）重放——stats.Events 的新在前序是展示序。
+	for i := gate.eventSize; i >= 1; i-- {
+		ev := gate.events[(gate.eventHead-i+GateEventCap)%GateEventCap]
+		until := ev.At
+		if ev.Until != nil {
+			until = *ev.Until
+		}
+		switch ev.Kind {
+		case gateEventLatched, gateEventRestored:
+			// 开窗事件晚于当前窗右端：上一闩其实已自然失效（expired
+			// 可能滚出环外），先闭旧窗再开新窗。
+			if open != nil && ev.At.After(open.End) {
+				closeOpen(open.End)
+			}
+			if open == nil {
+				start := ev.At
+				open = &GateLatchRange{Start: &start, End: until}
+			} else if until.After(open.End) {
+				open.End = until
+			}
+		case gateEventReleased:
+			closeOpen(ev.At)
+		case gateEventExpired:
+			closeOpen(until)
+		}
+	}
+	if open != nil {
+		end := open.End
+		if now.Before(end) {
+			end = now
+		}
+		closeOpen(end)
+	} else if stats_latched := !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil); stats_latched {
+		// 当前闩的开窗事件已滚出环外：左端不可考，给 nil Start。
+		ranges = append(ranges, GateLatchRange{End: now})
+	}
+	return ranges
 }
 
 // wait 阻塞到本次上游发送拿到许可，或判定不值得等：
@@ -426,7 +524,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 		if remaining > 0 {
 			detail = "extended"
 		}
-		gate.pushEvent("latched", until, detail)
+		gate.pushEvent(gateEventLatched, until, detail)
 	}
 	gate.mu.Unlock()
 	if extended {
@@ -447,7 +545,7 @@ func (gate *rateGate) noteUpstreamSuccess() {
 	gate.mu.Lock()
 	latched := !gate.limitedUntil.IsZero()
 	if latched {
-		gate.pushEvent("released", gate.limitedUntil, "")
+		gate.pushEvent(gateEventReleased, gate.limitedUntil, "")
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
 	}

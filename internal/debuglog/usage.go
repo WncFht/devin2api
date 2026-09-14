@@ -71,8 +71,9 @@ func decodeWindow(e IndexEntry) (int64, int64, bool) {
 	return e.OutputTokens, gen, true
 }
 
-// errorOwner 把一条索引记录按失败责任归因（对齐 sub2api 的 error_owner +
-// is_business_limited 双标记，压缩成单维三值）：
+// ErrorOwner 把一条索引记录按失败责任归因（对齐 sub2api 的 error_owner +
+// is_business_limited 双标记，压缩成单维三值）。面板经 matrix 条目的
+// owner 字段直接消费，JS 不再复刻这份判定。
 //   - "client"：客户端断连/面板中断，或请求体读取与解码阶段的失败——
 //     还没碰到上游，责任在调用方；
 //   - "business_limited"：429（本地闩快败或上游限流）——配额动作不是
@@ -90,7 +91,7 @@ func isRateLimited(e IndexEntry) bool {
 
 // 判定只用索引字段（result/status/error_stage/rate_limited），回放旧索引
 // 行同样可归类——旧行无 rate_limited 字段，流内限流仍按 upstream 归。
-func errorOwner(e IndexEntry) string {
+func ErrorOwner(e IndexEntry) string {
 	if isRateLimited(e) {
 		return "business_limited"
 	}
@@ -115,7 +116,7 @@ func (t *usageTotals) add(e IndexEntry) {
 	case e.Result == "disconnected" || e.Result == "aborted":
 		t.Disconnected++
 	}
-	switch errorOwner(e) {
+	switch ErrorOwner(e) {
 	case "client":
 		t.ClientFaults++
 	case "upstream":
@@ -423,7 +424,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 		if isRateLimited(e) {
 			a.mins[idx].rateLimited++
 		}
-		switch errorOwner(e) {
+		switch ErrorOwner(e) {
 		case "client":
 			a.mins[idx].clientFaults++
 		case "upstream":
@@ -532,7 +533,7 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	if isRateLimited(e) {
 		d.RateLimited++
 	}
-	switch errorOwner(e) {
+	switch ErrorOwner(e) {
 	case "client":
 		d.ClientFaults++
 	case "upstream":

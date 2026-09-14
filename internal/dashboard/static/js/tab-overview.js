@@ -3,7 +3,7 @@
 
 import {
   $, api, esc, fmtNum, fmtMs, fmtTime, fmtUnix, fmtUnixShort, fmtIn,
-  money, statusClass, errorOwner, slaRate, hitRate, kpi, qbar,
+  money, statusClass, slaRate, hitRate, kpi, qbar,
   titleBadge, Tabs, Polls, morph, summarizeRejects, gateLatchUntil,
 } from './core.js';
 import { Charts } from './charts.js';
@@ -130,7 +130,7 @@ function renderHealth() {
       if (e.first_upstream_ms != null) { c.tt += e.first_upstream_ms; c.ttN++; }
       const sc = e.status_code || '?';
       c.st[sc] = (c.st[sc] || 0) + 1;
-      const owner = errorOwner(e);
+      const owner = e.owner;
       if (owner === 'upstream') { c.up++; c.sev = 2; }
       else if (owner === 'client') { c.cli++; c.sev = Math.max(c.sev, 1); }
       else if (owner === 'business_limited') { c.lim++; c.sev = Math.max(c.sev, 1); }
@@ -218,7 +218,7 @@ function renderHealth() {
   if (cap) {
     const tot = { up: 0, cli: 0, lim: 0 };
     list.forEach(e => {
-      const o = errorOwner(e);
+      const o = e.owner;
       if (o === 'upstream') tot.up++; else if (o === 'client') tot.cli++; else if (o === 'business_limited') tot.lim++;
     });
     const mins = Math.round(MX_BUCKETS * MX_BUCKET_MS / 60000);
@@ -318,7 +318,7 @@ function renderVerdict() {
   // 本地拒绝突刺：管线前拒绝（排空/并发/鉴权）不进 index，SLA 与
   // 矩阵都看不见——部署窗口的 503 风暴只在事件环里。≥3 条/10 分钟
   // 才算突刺，个别乱入的 401 不告警。
-  const rej = summarizeRejects(statsData && statsData.http && statsData.http.rejects && statsData.http.rejects.recent, 10 * 60000);
+  const rej = summarizeRejects(statsData && statsData.http && statsData.http.rejects, 10 * 60000);
   if (rej.n >= 3) {
     probs.push(['warn', '近 10 分钟本地拒绝 ' + rej.n + ' 条（' + rej.parts.join(' · ') + '）——不进请求索引，详见系统页']);
   }
@@ -356,33 +356,14 @@ function renderLatency() {
   morph($('ovLatBody'), html);
 }
 
-// 闩事件环还原闩时段：latched/restored 开窗，released 提前关窗，
-// expired 按截止关窗；延闩（latched 落在开窗内）只推进右端。
-// 返回 markArea data 形态，裁剪到 [t0, now]——起止在图外的窗口
-// 由 ECharts 截到可视边，趋势图 60 分钟窗口外的闩段不画。
+// 闩时段在服务端随事件环同锁还原（gate.latch_ranges），这里只做展示
+// 裁剪：裁到 [t0, now]、滤空段、映射成 markArea data 形态——起点在
+// 事件环外不可考的时段（start 缺省）按视窗左缘补齐。
 function gateLatchRanges(g, t0) {
   if (!g) return [];
-  const evs = (g.events || []).slice().sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   const now = Date.now();
-  const ranges = [];
-  let open = null;
-  evs.forEach(e => {
-    const at = Date.parse(e.at), until = e.until ? Date.parse(e.until) : 0;
-    if (e.kind === 'latched' || e.kind === 'restored') {
-      // 开窗事件晚于当前窗右端：上一个闩其实已自然失效（expired
-      // 事件可能已滚出环外），先闭旧窗再开新窗。
-      if (open && at > open.end) { ranges.push([open.start, open.end]); open = null; }
-      if (!open) open = { start: at, end: until || at };
-      else open.end = Math.max(open.end, until);
-    } else if (e.kind === 'released' && open) {
-      ranges.push([open.start, at]); open = null;
-    } else if (e.kind === 'expired' && open) {
-      ranges.push([open.start, until || at]); open = null;
-    }
-  });
-  if (open) ranges.push([open.start, Math.min(now, open.end || now)]);
-  else if (g.latched) ranges.push([t0, now]); // 当前闩的起点事件已滚出环外
-  return ranges
+  return (g.latch_ranges || [])
+    .map(r => [r.start ? Date.parse(r.start) : t0, Date.parse(r.end)])
     .map(r => [Math.max(r[0], t0), Math.min(r[1], now)])
     .filter(r => r[1] > r[0])
     .map(r => [{ xAxis: r[0] }, { xAxis: r[1] }]);

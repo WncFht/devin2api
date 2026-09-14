@@ -302,6 +302,51 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	}
 }
 
+// 闩时段还原：事件环按写入序重放，上闩开窗、延闩推右端、解闩/到期关窗；
+// 闩中时段收到 now，开窗滚出环外的在闩时段给 nil Start。
+func TestRateGateLatchRanges(t *testing.T) {
+	gate := newRateGate(GateConfig{}, "")
+	clock := pinGateClock(gate, 10)
+	// 闩 1：上闩 → 延闩 → 提前解闩，产出一段 [latchAt, releaseAt]，
+	// 右端是延闩后的截止对不上的解闩时刻。
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 1 minutes."))
+	latchAt := clock.t
+	clock.t = clock.t.Add(5 * time.Second)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 3 minutes."))
+	clock.t = clock.t.Add(5 * time.Second)
+	releaseAt := clock.t
+	gate.noteUpstreamSuccess()
+	ranges := gate.stats().LatchRanges
+	if len(ranges) != 1 || ranges[0].Start == nil || !ranges[0].Start.Equal(latchAt) || !ranges[0].End.Equal(releaseAt) {
+		t.Fatalf("latch→release ranges = %+v, want [%v, %v]", ranges, latchAt, releaseAt)
+	}
+	// 闩 2：上闩后到期自然失效——expireIfDue 在 stats 轮询里补 expired
+	// 事件，关窗端点是闩截止时刻而非 now。
+	clock.t = clock.t.Add(time.Minute)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 2 minutes."))
+	latch2At := clock.t
+	clock.t = clock.t.Add(3 * time.Minute) // 过闩截止
+	stats := gate.stats()
+	if len(stats.LatchRanges) != 2 {
+		t.Fatalf("ranges = %+v, want 2", stats.LatchRanges)
+	}
+	// 分钟 hint 向上对齐 :59 桶界：截止 = now+2min 所在分钟桶的 :59。
+	wantEnd := latch2At.Truncate(time.Minute).Add(2*time.Minute + 59*time.Second)
+	if got := stats.LatchRanges[1]; got.Start == nil || !got.Start.Equal(latch2At) || !got.End.Equal(wantEnd) {
+		t.Fatalf("expired range = %+v, want [%v, %v]", got, latch2At, wantEnd)
+	}
+	// 闩 3：当前仍在闩中，开窗可见 → 末段 End=now、Start 是开窗时刻。
+	clock.t = clock.t.Add(time.Minute)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 5 minutes."))
+	latch3At := clock.t
+	clock.t = clock.t.Add(30 * time.Second)
+	stats = gate.stats()
+	last := stats.LatchRanges[len(stats.LatchRanges)-1]
+	if last.Start == nil || !last.Start.Equal(latch3At) || !last.End.Equal(clock.t) {
+		t.Fatalf("open range = %+v, want [%v, now]", last, latch3At)
+	}
+}
+
 // 冷却闩落盘与恢复：上闩写状态文件，新实例（模拟重启）恢复未过期的闩，
 // 防止重启后裸发把上游限流续长；解闩清文件，过期文件被忽略并清除。
 func TestRateGateLatchPersistRestore(t *testing.T) {

@@ -3,7 +3,7 @@
 
 import {
   $, api, apiRaw, esc, fmtBytes, fmtDuration, fmtMs, fmtTime, fmtInPrecise,
-  kpi, meta, toast, Tabs, Polls, morph, REJECT_LABELS, gateLatchUntil, loadPref, savePref,
+  kpi, meta, toast, Tabs, Polls, morph, rejectLabels, gateLatchUntil, loadPref, savePref,
 } from './core.js';
 
 let procOffset = 0, procFollow = false, procBuf = '';
@@ -55,19 +55,17 @@ function renderGate(g) {
     meta('下一窗口', g.window_next ? fmtInPrecise(Date.parse(g.window_next) / 1000) : '-');
   // 闩迁移事件环：计数器只说发生过几次，事件表回答「何时闩的、
   // 闩了多久、怎么解的」；概览趋势图的闩时段底色与这份数据同源。
-  const GATE_KIND = { latched: '上闩', released: '解闩', expired: '到期失效', restored: '重启恢复' };
+  // 事件显示名由服务端随事件下发（e.label，含延闩合并），这里只管排版。
   const evs = (g.events || []).slice(0, 20);
   if (evs.length) {
     html += '<div class="tbl-wrap" style="max-height:180px;margin-top:6px"><table><thead><tr><th>时间</th><th>事件</th><th>闩截止</th><th>详情</th></tr></thead><tbody>';
     evs.forEach(e => {
       const at = Date.parse(e.at), until = e.until ? Date.parse(e.until) : 0;
-      let label = GATE_KIND[e.kind] || e.kind;
-      if (e.kind === 'latched' && e.detail === 'extended') label = '延闩';
       let detail = '';
       if (e.kind === 'latched' && until) detail = '闩长 ' + fmtMs(until - at);
       else if (e.kind === 'released' && until) detail = '提前 ' + fmtMs(Math.max(0, until - at)) + ' 解闩';
       else if (e.kind === 'restored') detail = '自 gate-state.json';
-      html += '<tr><td class="mono">' + fmtTime(at) + '</td><td>' + esc(label) + '</td>' +
+      html += '<tr><td class="mono">' + fmtTime(at) + '</td><td>' + esc(e.label || e.kind) + '</td>' +
         '<td class="mono">' + (until ? fmtTime(until) : '-') + '</td><td class="muted">' + esc(detail) + '</td></tr>';
     });
     html += '</tbody></table></div>';
@@ -78,18 +76,20 @@ function renderGate(g) {
 // 本地拒绝：管线前被拒的请求没有调试目录与 index 行——分原因计数 +
 // 最近事件表是它们唯一的面板足迹；reason 与 stderr.log 的
 // "request rejected" 行同源，重启后可去进程日志按时间对。
-// 标签表在 core.js 的 REJECT_LABELS（请求页拒绝提示同源共用）。
+// 显示名取服务端下发的 rj.labels（reason→label 有序对），未知原因
+// 回退显示原值——JS 不维护词汇镜像表。
 function renderRejects(rj) {
   const body = $('rejectBody');
   if (!rj) { morph(body, '<div class="mini"><span class="v">无拒绝数据</span></div>'); return; }
   const by = rj.by_reason || {};
+  const labels = rejectLabels(rj);
   let html = '<div class="grid">';
-  const keys = Object.keys(REJECT_LABELS).concat(Object.keys(by).filter(k => !REJECT_LABELS[k]));
+  const keys = (rj.labels || []).map(l => l.reason).concat(Object.keys(by).filter(k => !labels[k]));
   let any = false;
   keys.forEach(k => {
     if (!by[k]) return;
     any = true;
-    html += meta(REJECT_LABELS[k] || k, by[k]);
+    html += meta(labels[k] || k, by[k]);
   });
   if (!any) html += meta('分原因计数', '本进程无拒绝');
   html += '</div>';
@@ -100,7 +100,7 @@ function renderRejects(rj) {
       const who = esc(e.ip || '-') + (e.key_hash ? ' <span class="muted" title="key hash">' + esc(e.key_hash) + '</span>' : '');
       const ua = e.user_agent ? '<div class="muted" title="' + esc(e.user_agent) + '">' + esc(e.user_agent.length > 48 ? e.user_agent.slice(0, 48) + '…' : e.user_agent) + '</div>' : '';
       html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td>' +
-        '<td><span class="badge badge-medium" title="' + esc(e.reason) + '">' + esc(REJECT_LABELS[e.reason] || e.reason) + '</span></td>' +
+        '<td><span class="badge badge-medium" title="' + esc(e.reason) + '">' + esc(labels[e.reason] || e.reason) + '</span></td>' +
         '<td class="mono">' + e.status + '</td><td class="mono">' + esc(e.path || '-') + '</td>' +
         '<td class="mono">' + who + ua + '</td></tr>';
     });

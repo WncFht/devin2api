@@ -263,7 +263,7 @@ async function load() {
     let hint = '';
     // 管线前拒绝（排空/并发/鉴权）不进 index——用户在请求页找这类 503/429
     // 天然扑空，看到提示才知道去系统页查拒绝事件环。
-    const rej = summarizeRejects(data.rejects && data.rejects.recent, 15 * 60000);
+    const rej = summarizeRejects(data.rejects, 15 * 60000);
     if (rej.n) {
       hint += '近 15 分钟本地拒绝 ' + rej.n + ' 条（' + esc(rej.parts.join(' · ')) + '）——管线前拒绝不进索引，<button type="button" class="lnk" data-gotosys="1">去系统页</button>。 ';
     }

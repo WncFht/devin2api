@@ -199,17 +199,9 @@ export function fmtInPrecise(v) {
   return fmtIn(t / 1000);
 }
 
-// ---------- 错误归因（与后端 debuglog.errorOwner 同口径） ----------
-// client=调用方责任（断连/中断/请求体阶段失败）；business_limited=429
-// 配额动作（HTTP 429 或流内限流——后者 HTTP 仍是 200，靠 rate_limited
-// 标记认出）；upstream=服务端失分（上游错误与代理自身失败），SLA 只算它。
-export function errorOwner(e) {
-  if (e.status_code === 429 || e.rate_limited) return 'business_limited';
-  if (e.result === 'disconnected' || e.result === 'aborted') return 'client';
-  if (e.status_code < 400 && e.result !== 'failed') return '';
-  if (e.error_stage === 'http_read' || e.error_stage === 'http_decode') return 'client';
-  return 'upstream';
-}
+// ---------- 错误归因 ----------
+// 归因判定在服务端 debuglog.ErrorOwner 统一计算，matrix 条目带 owner
+// 字段直读；这里只留展示层派生（SLA 成功率/命中率/速率格式化）。
 // slaRate 服务端口径成功率：分母剔除客户端责任与 429 条目后，
 // upstream 失分占比取反；分母为 0（只有客户端/限流流量）返回 null。
 export function slaRate(t) {
@@ -225,22 +217,22 @@ export function avgTps(t) {
   return (t.gen_ms > 0) ? (t.gen_tokens / (t.gen_ms / 1000)).toFixed(1) + ' tok/s' : '-';
 }
 
-// REJECT_LABELS 是管线前拒绝原因的中文标签：请求页提示与系统页拒绝表共用一份。
-export const REJECT_LABELS = {
-  draining: '排空',
-  concurrency_limit: '并发上限',
-  ws_connection_limit: 'WS连接上限',
-  missing_api_key: '缺API Key',
-  invalid_api_key: '错API Key',
-};
+// rejectLabels 把服务端下发的 [{reason,label}] 展成查表用对象；
+// 未知 reason 回退原值显示。
+export function rejectLabels(rj) {
+  const m = {};
+  (rj && rj.labels || []).forEach(l => { m[l.reason] = l.label; });
+  return m;
+}
 // summarizeRejects 把 rejects.recent 事件环聚合成「窗口内条数 + 分原因明细」：
 // 概览判词（10 分钟窗、≥3 条才告警）与请求页提示（15 分钟窗、≥1 条即提示）
-// 共用同一聚合口径，只是阈值与包裹文案不同。
-export function summarizeRejects(recent, windowMs) {
-  const list = (recent || []).filter(e => e.at * 1000 > Date.now() - windowMs);
+// 共用同一聚合口径，只是阈值与包裹文案不同。标签取服务端 rj.labels。
+export function summarizeRejects(rj, windowMs) {
+  const labels = rejectLabels(rj);
+  const list = ((rj && rj.recent) || []).filter(e => e.at * 1000 > Date.now() - windowMs);
   const byReason = {};
   list.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + 1; });
-  return { n: list.length, parts: Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]) };
+  return { n: list.length, parts: Object.keys(byReason).map(k => (labels[k] || k) + ' ' + byReason[k]) };
 }
 // gateLatchUntil 是闩截止时刻的统一文案（"14:03:22（剩 9m 41s）"）：
 // 概览判词、告警横幅与系统页闸门卡三处共用。
