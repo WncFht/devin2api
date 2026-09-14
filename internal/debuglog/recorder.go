@@ -87,23 +87,25 @@ type Manager struct {
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
+// json tag 与 meta.json 的 client 块字段同名，ActiveRequest.Meta 经
+// /requests/active 下发时与完成请求保持同一 wire 口径。
 type RequestMeta struct {
 	// Method 是 HTTP 请求方法。
-	Method string
+	Method string `json:"method"`
 	// Path 是 HTTP 请求路径。
-	Path string
+	Path string `json:"path"`
 	// API 是入口协议标识（openai-chat、openai-responses、responses-ws、anthropic）。
-	API string
+	API string `json:"api,omitempty"`
 	// ClientIP 是下游客户端地址（不含端口）。
-	ClientIP string
+	ClientIP string `json:"client_ip,omitempty"`
 	// UserAgent 是下游客户端声明的 UA。
-	UserAgent string
+	UserAgent string `json:"user_agent,omitempty"`
 	// KeyHash 是客户端凭据的 SHA-256 前 8 字节十六进制——
 	// 用于按 key 关联请求，不明文落盘。
-	KeyHash string
+	KeyHash string `json:"key_hash,omitempty"`
 	// ClientRequestID 是客户端自带的关联 ID（X-Request-Id/X-Session-Id），
 	// 让调用方能用自己的 ID 检索本次请求。
-	ClientRequestID string
+	ClientRequestID string `json:"client_request_id,omitempty"`
 }
 
 // Completion 是请求结束时写入 meta.json 的结果摘要。
