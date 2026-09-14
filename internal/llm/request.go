@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 )
 
@@ -63,21 +64,22 @@ type RequestMessages struct {
 	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
 	// 空表示调用方未提供。
 	SessionKey string
-	// Dropped 记录请求解码时被丢弃/降级的下游字段（"kind:detail"），
-	// 供调试日志透出——「解码即过滤」的静默面需要可观测。
+	// Dropped 记录请求解码与规范化时被丢弃/降级的下游字段
+	//（"kind:detail"），供调试日志透出——「解码即过滤」的静默面
+	// 需要可观测。
 	Dropped []string
 }
 
 // RequestRepairs 是一次请求投影为上游 wire 格式时发生的静默修复计数，
 // 与响应方向的 AssistantMessageDiagnostic 同族（诊断，不改变主结果）。
-// 协议翻译层的修复（调用-结果配对重排、孤儿结果降级、空助手消息丢弃、
-// 历史图片剥离、策略指纹改写）本身合法，但上游协议漂移排障必须能回答
+// 协议翻译层的修复（调用-结果配对重排、空助手消息丢弃、历史图片剥离、
+// 策略指纹改写）本身合法，但上游协议漂移排障必须能回答
 // 「代理对这次请求动过什么」。全零时整个字段不落盘。
+// 孤儿 tool result 的降级发生在 IR 层（DemoteOrphanToolResults），不进
+// wire——它的审计走 RequestMessages.Dropped 逐条标记而非这里的计数。
 type RequestRepairs struct {
 	// ReorderedPrompts 是 call→result 配对重排中改变位置的 prompt 数。
 	ReorderedPrompts int `json:"reordered_prompts,omitempty"`
-	// DemotedOrphanResults 是被降级为 USER 文本的孤儿 TOOL 结果数。
-	DemotedOrphanResults int `json:"demoted_orphan_results,omitempty"`
 	// DroppedEmptyAssistant 是被跳过的空助手消息数（上游见空回复会退化）。
 	DroppedEmptyAssistant int `json:"dropped_empty_assistant,omitempty"`
 	// OmittedHistoryImages 是被改写为文本占位的历史图片数（上游只收当前轮图片）。
@@ -88,7 +90,7 @@ type RequestRepairs struct {
 
 // Total 返回全部修复动作的合计次数，供日志索引汇总成单字段。
 func (repairs RequestRepairs) Total() int {
-	total := repairs.ReorderedPrompts + repairs.DemotedOrphanResults +
+	total := repairs.ReorderedPrompts +
 		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages
 	for _, hits := range repairs.SanitizeHits {
 		total += hits
@@ -338,6 +340,45 @@ func (request RequestMessages) Validate() error {
 		}
 	}
 	return nil
+}
+
+// DemoteOrphanToolResults 把找不到前置 tool call 的孤儿 ToolResultMessage
+// 原位降级为 UserMessage：上游要求 call→result 紧邻配对，结果先于调用
+// （或调用根本不存在，如客户端压缩历史丢掉 function_call）只回
+// invalid_argument，降级保住结果内容让整单可继续。
+// 判据是位置性的——同 id call 必须出现在该 result 之前的助手消息里；
+// 缺失调用 id（ToolCallID 为空）的结果同样无法配对，一并降级。
+// 必须在 Validate 之前调用：孤儿结果的 ToolCallID/ToolName 允许为空，
+// 降级后这些必填约束才成立。每处降级在 Dropped 留
+// missing_tool_call_id / unmatched_tool_call_id:<id> 标记。
+func (request *RequestMessages) DemoteOrphanToolResults() {
+	seenCallIDs := make(map[string]struct{})
+	for index, message := range request.Messages {
+		switch message := message.(type) {
+		case AssistantMessage:
+			for _, block := range message.Content {
+				if call, ok := block.(ToolCall); ok && call.ID != "" {
+					seenCallIDs[call.ID] = struct{}{}
+				}
+			}
+		case ToolResultMessage:
+			if _, ok := seenCallIDs[message.ToolCallID]; ok {
+				continue
+			}
+			if message.ToolCallID == "" {
+				request.Dropped = append(request.Dropped, "missing_tool_call_id")
+			} else {
+				request.Dropped = append(request.Dropped, "unmatched_tool_call_id:"+message.ToolCallID)
+			}
+			slog.Warn("demoted orphan tool result to user text", "tool_call_id", message.ToolCallID)
+			// 前缀块带 \n：wire 投影把多条 text 内容块直接拼接，
+			// 拆成两块才有「标记行 + 原文」的分行效果。
+			request.Messages[index] = UserMessage{
+				Content:     append([]Content{TextContent{Text: "[tool result, original call lost]\n"}}, message.Content...),
+				TimestampMS: message.TimestampMS,
+			}
+		}
+	}
 }
 
 func validateContent(content []Content, allowed ...ContentType) error {

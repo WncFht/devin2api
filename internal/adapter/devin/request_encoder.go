@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 
@@ -110,7 +109,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 				}
 			}
 			if !found {
-				return nil, repairs, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("tool_choice names tool %q which is not in the tools list", choice.ToolName)}
+				return nil, repairs, fmt.Errorf("invalid_argument: tool_choice names tool %q which is not in the tools list", choice.ToolName)
 			}
 			result.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
 				Choice: &devinproto.ExaChatPb_ChatToolChoice_ToolName{ToolName: choice.ToolName},
@@ -146,7 +145,6 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// 它的 TOOL 结果，否则 invalid_argument。客户端历史（OpenAI/Anthropic）是
 	// 「全部调用 → 全部结果」的分组结构，这里按 call id 重排成交错配对。
 	result.ChatMessagePrompts, repairs.ReorderedPrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
-	result.ChatMessagePrompts, repairs.DemotedOrphanResults = demoteOrphanToolResults(result.ChatMessagePrompts)
 	for _, tool := range request.Tools {
 		converted, err := convertToolDefinition(tool)
 		if err != nil {
@@ -430,41 +428,6 @@ func countMovedPrompts(in, out []*devinproto.ExaChatPb_ChatMessagePrompt) int {
 		}
 	}
 	return moved
-}
-
-// demoteOrphanToolResults 把找不到对应 tool call 的孤立 TOOL 结果
-// （客户端压缩丢掉 function_call 时产生）降级为 USER 文本消息。
-// 判据是位置性的——同 id call 必须出现在该 result 之前：上游要求
-// call→result 紧邻配对，result 先于 call（或根本没有 call）都回
-// invalid_argument；降级保住结果内容。
-// 第二个返回值是被降级的结果数。
-func demoteOrphanToolResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) ([]*devinproto.ExaChatPb_ChatMessagePrompt, int) {
-	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
-	userSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER
-	demotedCount := 0
-	seenCallIDs := make(map[string]struct{})
-	for index, prompt := range prompts {
-		for _, call := range prompt.GetToolCalls() {
-			seenCallIDs[call.GetId()] = struct{}{}
-		}
-		if prompt.GetSource() != toolSource {
-			continue
-		}
-		if _, ok := seenCallIDs[prompt.GetToolCallId()]; ok {
-			continue
-		}
-		slog.Warn("demoted orphan tool result to user text", "tool_call_id", prompt.GetToolCallId())
-		demotedCount++
-		demoted := &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(randid.UUID()),
-			Source:    userSource.Enum(),
-			Prompt:    proto.String("[tool result, original call lost]\n" + prompt.GetPrompt()),
-		}
-		demoted.PromptCacheOptions = prompt.GetPromptCacheOptions()
-		demoted.Images = prompt.GetImages()
-		prompts[index] = demoted
-	}
-	return prompts, demotedCount
 }
 
 // promptForContent 把 UserMessage/ToolResultMessage 的内容块投影为单条

@@ -219,7 +219,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
-		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
+		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
 	}
 
 	return AdaptedRequest{
@@ -273,30 +273,22 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames, fun
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "tool":
-		if message.ToolCallID == "" {
-			return errors.New("tool message requires tool_call_id")
-		}
+		// tool_call_id 缺失或对不上前置调用的结果先按原样进 IR；
+		// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
 		content, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return err
 		}
-		name := toolNames[message.ToolCallID]
-		if name == "" {
-			// 压缩后的历史可能丢掉对应的 assistant tool_call；兜底名交给
-			// wire 层的 demoteOrphanToolResults 降级，避免整请求 400。
-			context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+message.ToolCallID)
-			name = "tool"
-		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  message.ToolCallID,
-			ToolName:    name,
+			ToolName:    toolNames[message.ToolCallID],
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "function":
 		// 旧版工具结果：没有 call id，凭 name 对回对应 function_call
 		// 的合成 id；对不上说明历史里没有该调用，造孤儿 id 交给
-		// demoteOrphanToolResults 降级成文本而不是 400 整单。
+		// DemoteOrphanToolResults 降级成文本而不是 400 整单。
 		content, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return err

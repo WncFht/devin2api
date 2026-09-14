@@ -195,12 +195,11 @@ func inheritWSFields(top, last map[string]json.RawMessage) error {
 	return nil
 }
 
-// finishNormalize 是规范化请求的统一出口：配对校验 → marshal → 字节上限，
-// 通过后才暂存 staged 字段供 commit 转正。
+// finishNormalize 是规范化请求的统一出口：marshal → 字节上限，
+// 通过后才暂存 staged 字段供 commit 转正。孤儿 tool output 不在此拦截——
+// 解码进 IR 时由 DemoteOrphanToolResults 统一降级为 user 文本，
+// 与三个 HTTP 协议入口同策。
 func (s *wsSession) finishNormalize(top map[string]json.RawMessage, items []wsItem) (json.RawMessage, error) {
-	if err := wsValidateItemPairing(items); err != nil {
-		return nil, err
-	}
 	normalized, err := json.Marshal(top)
 	if err != nil {
 		return nil, err
@@ -376,32 +375,6 @@ func dedupeWSItems(items []wsItem) []wsItem {
 		out = append(out, item)
 	}
 	return out
-}
-
-// wsValidateItemPairing 拒绝「有 output 无 call」的 transcript——上游对
-// 这种形态硬报 invalid_argument，提前拦截以免把客户端坏请求算成上游故障。
-// call 只需出现在数组任意位置（不要求在 output 之前）。
-func wsValidateItemPairing(items []wsItem) error {
-	calls := make(map[string]struct{})
-	var outputs []string
-	for _, item := range items {
-		switch {
-		case wsFieldsAreToolCall(item.fields):
-			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
-				calls[callID] = struct{}{}
-			}
-		case wsFieldsAreToolCallOutput(item.fields):
-			if callID := strings.TrimSpace(item.fields.CallID); callID != "" {
-				outputs = append(outputs, callID)
-			}
-		}
-	}
-	for _, callID := range outputs {
-		if _, ok := calls[callID]; !ok {
-			return fmt.Errorf("websocket transcript has tool call output for unknown call_id %q", callID)
-		}
-	}
-	return nil
 }
 
 // wsItemsSatisfyToolCalls 检查增量项是否包含所有 pending call 的 output。

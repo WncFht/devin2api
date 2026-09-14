@@ -293,6 +293,9 @@ func TestBuildRequestReportsRepairs(t *testing.T) {
 	}
 	var sanitizeHits map[string]int
 	request, sanitizeHits = sanitizeRequest(request)
+	// 孤儿结果降级发生在 IR 层（解码尾），这里手动补一遍以模拟
+	// 真实管线到达 buildRequest 前的形态。
+	request.DemoteOrphanToolResults()
 	converted, repairs, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
 	if err != nil {
 		t.Fatal(err)
@@ -300,9 +303,6 @@ func TestBuildRequestReportsRepairs(t *testing.T) {
 	repairs.SanitizeHits = sanitizeHits
 	if repairs.ReorderedPrompts != 2 {
 		t.Fatalf("reordered = %d, want 2", repairs.ReorderedPrompts)
-	}
-	if repairs.DemotedOrphanResults != 1 {
-		t.Fatalf("demoted = %d, want 1", repairs.DemotedOrphanResults)
 	}
 	if repairs.DroppedEmptyAssistant != 1 {
 		t.Fatalf("dropped empty assistant = %d, want 1", repairs.DroppedEmptyAssistant)
@@ -313,8 +313,8 @@ func TestBuildRequestReportsRepairs(t *testing.T) {
 	if repairs.SanitizeHits["a1-cc-full"] != 1 {
 		t.Fatalf("sanitize hits = %#v, want a1-cc-full:1", repairs.SanitizeHits)
 	}
-	if repairs.Total() != 6 {
-		t.Fatalf("total = %d, want 6", repairs.Total())
+	if repairs.Total() != 5 {
+		t.Fatalf("total = %d, want 5", repairs.Total())
 	}
 	// 孤立结果被降级为 USER 文本保住内容，其余 prompt 数量不变。
 	prompts := converted.GetChatMessagePrompts()
@@ -412,9 +412,9 @@ func TestValidateImagesUsesCatalog(t *testing.T) {
 
 // TestConnectErrorPassthrough 验证 Connect 错误分类后 code + message 原样保留。
 func TestConnectErrorPassthrough(t *testing.T) {
-	err := llm.Classify(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
+	err := asFailure(connect.NewError(connect.CodeInvalidArgument, errors.New("model does not support images")))
 	if err == nil || !strings.Contains(err.Error(), "invalid_argument") || !strings.Contains(err.Error(), "model does not support images") {
-		t.Fatalf("Classify = %v", err)
+		t.Fatalf("asFailure = %v", err)
 	}
 }
 

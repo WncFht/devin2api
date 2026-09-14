@@ -148,7 +148,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 | redacted thinking + 伪造 `sealed.v1.` 签名                              | 正常                                                        |
 | 空 assistant(SYSTEM source) + user "continue"                           | 正常续说——`continueEmpty` 重发路径的形态依据                |
 
-含义：`pairToolCallsWithResults`/`demoteOrphanToolResults` 是承重墙；孤儿 result 的 demote 是安全降级（有挂起 call 时上游按位置容忍 id 不匹配）。
+含义：`RequestMessages.DemoteOrphanToolResults`（IR 层）+ `pairToolCallsWithResults`（wire 层）是承重墙；孤儿 result 的 demote 是安全降级（有挂起 call 时上游按位置容忍 id 不匹配）。
 
 ### 工具名与 tool_choice
 
@@ -252,7 +252,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 
 | 契约                                                 | 落点                                                                                                                     |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| call→result 重排 / 孤儿 result 降级                  | `pairToolCallsWithResults` / `demoteOrphanToolResults`                                                                   |
+| call→result 重排 / 孤儿 result 降级                  | `pairToolCallsWithResults`（wire）/ `RequestMessages.DemoteOrphanToolResults`（IR，解码尾）                              |
 | 助手回合合并单条 ChatMessagePrompt                   | `buildRequest`（devin.go）                                                                                               |
 | stop 序列本地截断                                    | `responseDecoder` 尾部窗口 + `stoppedByPattern`                                                                          |
 | 缺 stopReason 判截断                                 | `responseDecoder.finish`                                                                                                 |

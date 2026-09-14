@@ -163,27 +163,6 @@ func BenchmarkWSNormalizeTurn(b *testing.B) {
 	}
 }
 
-// BenchmarkWSValidatePairing 测量配对校验在合并后 transcript 上的二次扫描。
-func BenchmarkWSValidatePairing(b *testing.B) {
-	items := make([]json.RawMessage, 0, 400)
-	for i := 0; i < 100; i++ {
-		items = append(items,
-			json.RawMessage(fmt.Sprintf(`{"type":"function_call","id":"fc_%d","call_id":"call_%d","name":"tool_%d","arguments":"{}"}`, i, i, i)),
-			json.RawMessage(fmt.Sprintf(`{"type":"function_call_output","call_id":"call_%d","output":"out"}`, i)),
-		)
-	}
-	payload, _ := json.Marshal(map[string]any{"input": items, "model": "fake"})
-	input, _, _ := wsJSONField(payload, "input")
-	parsed := wsParseItems(input)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := wsValidateItemPairing(parsed); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 func (a *benchAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
 	return []adapter.ModelInfo{{ID: "fake"}}, nil
 }

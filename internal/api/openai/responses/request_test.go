@@ -137,7 +137,7 @@ func TestDecodeRequestPreservesMalformedToolArguments(t *testing.T) {
 
 // TestDecodeRequestRetainsRawSchema 验证工具 schema 会以原始 JSON 保留。
 func TestDecodeRequestRetainsRawSchema(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","tools":[{"type":"function","name":"tool","parameters":{"type":"object","additionalProperties":false}}]}`))
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hi","tools":[{"type":"function","name":"tool","parameters":{"type":"object","additionalProperties":false}}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestDecodeRequestRetainsRawSchema(t *testing.T) {
 // 单 input 参数的 function 声明并带 Custom 标记；format.definition 是模型
 // 可见的唯一语法规范，随 description 注入；未知工具类型记 Dropped。
 func TestDecodeRequestCustomToolDeclaration(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","tools":[
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hi","tools":[
 		{"type":"custom","name":"apply_patch","description":"Patch files","format":{"syntax":"lark","definition":"patch_grammar"}},
 		{"type":"custom","name":"no_grammar"},
 		{"type":"mystery","name":"dropped_tool"}
@@ -371,7 +371,8 @@ func TestDecodeRequestDropsOrphanReasoning(t *testing.T) {
 }
 
 // TestDecodeRequestToleratesOrphanToolOutput 验证压缩丢失 function_call 后
-// 孤立的 function_call_output 用兜底名放行，不整请求失败。
+// 孤立的 function_call_output 在解码尾降级为 USER 文本并留 Dropped 标记，
+// 不整请求失败。
 func TestDecodeRequestToleratesOrphanToolOutput(t *testing.T) {
 	data := []byte(`{
   "model": "gpt-test",
@@ -384,12 +385,21 @@ func TestDecodeRequestToleratesOrphanToolOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, ok := request.Context.Messages[1].(llm.ToolResultMessage)
+	user, ok := request.Context.Messages[1].(llm.UserMessage)
 	if !ok {
-		t.Fatalf("message[1] type = %T, want ToolResultMessage", request.Context.Messages[1])
+		t.Fatalf("message[1] type = %T, want demoted UserMessage", request.Context.Messages[1])
 	}
-	if tool.ToolCallID != "call-gone" || tool.ToolName != "tool" {
-		t.Fatalf("tool result = %#v", tool)
+	if len(user.Content) != 2 {
+		t.Fatalf("demoted content = %#v, want prefix + body", user.Content)
+	}
+	found := false
+	for _, marker := range request.Context.Dropped {
+		if marker == "unmatched_tool_call_id:call-gone" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dropped markers = %v, want unmatched_tool_call_id:call-gone", request.Context.Dropped)
 	}
 }
 

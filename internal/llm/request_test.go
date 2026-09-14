@@ -89,3 +89,56 @@ func TestRequestMessagesRejectsInvalidToolArguments(t *testing.T) {
 		t.Fatal("Validate() error = nil, want invalid tool arguments error")
 	}
 }
+
+// DemoteOrphanToolResults 的位置语义：result 先于同 id call（或未出现
+// 的 call、缺失 id）都降级为 UserMessage 文本并留 Dropped 标记；
+// 正常配对的结果不动。降级后消息整体过 Validate。
+func TestDemoteOrphanToolResults(t *testing.T) {
+	request := RequestMessages{
+		Messages: []Message{
+			// 孤儿：调用来得更晚（压缩/乱序）——按位置判孤儿。
+			ToolResultMessage{ToolCallID: "call-late", ToolName: "read", Content: []Content{TextContent{Text: "early"}}},
+			AssistantMessage{Content: []Content{
+				ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{}`)},
+				ToolCall{ID: "call-late", Name: "read", Arguments: json.RawMessage(`{}`)},
+			}},
+			// 正常配对：call-1 已在前置助手消息出现。
+			ToolResultMessage{ToolCallID: "call-1", ToolName: "read", Content: []Content{TextContent{Text: "ok"}}},
+			// 孤儿：调用不存在。
+			ToolResultMessage{ToolCallID: "call-gone", ToolName: "", Content: []Content{TextContent{Text: "lost"}}},
+			// 孤儿：id 缺失。
+			ToolResultMessage{Content: []Content{TextContent{Text: "noid"}}},
+		},
+	}
+	request.DemoteOrphanToolResults()
+
+	if _, ok := request.Messages[0].(UserMessage); !ok {
+		t.Fatalf("result-before-call not demoted: %T", request.Messages[0])
+	}
+	if _, ok := request.Messages[2].(ToolResultMessage); !ok {
+		t.Fatalf("matched result was demoted: %T", request.Messages[2])
+	}
+	for _, index := range []int{3, 4} {
+		demoted, ok := request.Messages[index].(UserMessage)
+		if !ok {
+			t.Fatalf("message %d not demoted: %T", index, request.Messages[index])
+		}
+		text, ok := demoted.Content[0].(TextContent)
+		if !ok || text.Text != "[tool result, original call lost]\n" {
+			t.Fatalf("message %d prefix = %#v", index, demoted.Content[0])
+		}
+	}
+	want := []string{"unmatched_tool_call_id:call-late", "unmatched_tool_call_id:call-gone", "missing_tool_call_id"}
+	got := request.Dropped
+	if len(got) != len(want) {
+		t.Fatalf("dropped = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dropped[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("post-demote Validate() error = %v", err)
+	}
+}

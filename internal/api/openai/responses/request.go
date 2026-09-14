@@ -163,7 +163,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
-		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
+		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
 	}
 	return AdaptedRequest{
 		Context: context,
@@ -406,28 +406,11 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err != nil {
 			return err
 		}
-		if callID == "" {
-			// 完全没有调用 id 的结果无法配对、过不了 IR 校验；
-			// 与孤儿结果同策降级为 USER 文本保住内容（不伪造 id）。
-			context.Dropped = append(context.Dropped, "missing_tool_call_id")
-			context.Messages = append(context.Messages, llm.UserMessage{
-				Content: append([]llm.Content{
-					llm.TextContent{Text: "[tool result, call id missing]"},
-				}, content...),
-				TimestampMS: time.Now().UnixMilli(),
-			})
-			return nil
-		}
-		toolName := toolNames[callID]
-		if toolName == "" {
-			// 压缩后的历史可能丢掉对应的 function_call；对齐 Anthropic
-			// 解码路径的兜底名，避免整请求失败。
-			context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+callID)
-			toolName = "tool"
-		}
+		// 调用 id 缺失或对不上前置 function_call 的结果先按原样进 IR；
+		// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  callID,
-			ToolName:    toolName,
+			ToolName:    toolNames[callID],
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})

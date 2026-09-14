@@ -149,7 +149,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
-		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
+		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
 	}
 
 	return AdaptedRequest{
@@ -326,19 +326,8 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 				Text: "[content omitted: " + header.Type + " block not supported]",
 			})
 		case "tool_result":
-			if header.ToolUseID == "" {
-				// 无 tool_use_id 的结果块无法配对、过不了 IR 校验；
-				// 与孤儿结果同策降级为同一条 user 消息的文本。
-				context.Dropped = append(context.Dropped, "missing_tool_call_id")
-				demoted, err := decodeAnthropicContent(context, header.Content)
-				if err != nil {
-					return nil, fmt.Errorf("content[%d]: %w", index, err)
-				}
-				currentUserContent = append(currentUserContent,
-					llm.TextContent{Text: "[tool result, tool_use_id missing]"})
-				currentUserContent = append(currentUserContent, demoted...)
-				continue
-			}
+			// tool_use_id 缺失或对不上前置调用的结果先按原样进 IR；
+			// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
 			flushUser()
 			tool, err := decodeToolResult(context, header.ToolUseID, header.Content, header.IsError, toolNames)
 			if err != nil {
@@ -409,13 +398,10 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 }
 
 // decodeToolResult 把 tool_result 块解码为 ToolResultMessage；tool_use_id
-// 对不上已知调用时记 Dropped 并用占位名。
+// 缺失或对不上已知调用时 ToolCallID/ToolName 留空，由解码尾的
+// DemoteOrphanToolResults 降级。
 func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.RawMessage, isError bool, toolNames map[string]string) (llm.ToolResultMessage, error) {
 	name := toolNames[toolUseID]
-	if name == "" {
-		context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+toolUseID)
-		name = "tool"
-	}
 	content, err := decodeAnthropicContent(context, raw)
 	if err != nil {
 		return llm.ToolResultMessage{}, err
