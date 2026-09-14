@@ -22,9 +22,7 @@ type StreamEncoder struct {
 	responseID      string
 	createdAt       int64
 	includeUsage    bool
-	textIndex       int
 	textStarted     bool
-	thinkingIndex   int
 	thinkingStarted bool
 	toolCalls       []*toolCallState
 	// toolByContent 按 llm ContentIndex 索引工具状态。ContentIndex 是
@@ -34,14 +32,12 @@ type StreamEncoder struct {
 	toolByContent map[int]*toolCallState
 	finished      bool
 	finalUsage    llm.Usage
-	finalReason   llm.StopReason
 }
 
 type toolCallState struct {
-	index     int
-	id        string
-	name      string
-	arguments strings.Builder
+	index int
+	id    string
+	name  string
 }
 
 // NewStreamEncoder 为一次 Chat Completions 流创建编码状态。
@@ -51,7 +47,6 @@ func NewStreamEncoder(model string, includeUsage bool) *StreamEncoder {
 		responseID:    randid.Prefixed("chatcmpl-"),
 		createdAt:     time.Now().Unix(),
 		includeUsage:  includeUsage,
-		thinkingIndex: -1,
 		toolByContent: map[int]*toolCallState{},
 	}
 }
@@ -99,26 +94,26 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventStart:
 		return encoder.start(), nil
 	case llm.ResponseEventTextStart:
-		return encoder.startText(event), nil
+		return encoder.startText(), nil
 	case llm.ResponseEventTextDelta:
-		return encoder.textDelta(event), nil
+		return encoder.textDelta(event)
 	case llm.ResponseEventTextEnd:
-		return encoder.endText(event), nil
+		return encoder.endText(event)
 	case llm.ResponseEventThinkingStart:
-		return encoder.startThinking(event), nil
+		return encoder.startThinking(), nil
 	case llm.ResponseEventThinkingDelta:
-		return encoder.thinkingDelta(event), nil
+		return encoder.thinkingDelta(event)
 	case llm.ResponseEventThinkingEnd:
-		return encoder.endThinking(event), nil
+		return encoder.endThinking(event)
 	case llm.ResponseEventThinkingSignature:
 		// Chat Completions 没有签名概念，思考签名只影响 Anthropic/Responses 形态。
 		return nil, nil
 	case llm.ResponseEventToolCallStart:
 		return encoder.startToolCall(event), nil
 	case llm.ResponseEventToolCallDelta:
-		return encoder.toolCallDelta(event), nil
+		return encoder.toolCallDelta(event)
 	case llm.ResponseEventToolCallEnd:
-		return encoder.endToolCall(event), nil
+		return encoder.endToolCall(event)
 	case llm.ResponseEventDone:
 		return encoder.finish(event), nil
 	case llm.ResponseEventError:
@@ -128,60 +123,69 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	}
 }
 
+// start 发流的首个 chunk：只带 role=assistant 的 delta。
 func (encoder *StreamEncoder) start() []SSEEvent {
 	return []SSEEvent{encoder.chunk([]chatChoice{{
 		Delta: chatDelta{Role: "assistant"},
 	}}, nil)}
 }
 
-func (encoder *StreamEncoder) startText(event llm.ResponseEvent) []SSEEvent {
-	encoder.textIndex = event.ContentIndex
+// startText 标记文字块已开；Chat 流没有独立的块开始帧。
+// 后续所有块级事件（delta/end/signature）都依赖对应 *_start 前置——
+// 解码器契约保证该顺序，缺失即解码器 bug，各 handler 显式报错而非
+// 自动补或静默丢弃，与另两个协议编码器一致。
+func (encoder *StreamEncoder) startText() []SSEEvent {
 	encoder.textStarted = true
 	return nil
 }
 
-func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) []SSEEvent {
+// textDelta 下发一段正文增量。
+func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
 	if !encoder.textStarted {
-		encoder.startText(event)
-	}
-	if event.Delta == "" {
-		return nil
+		return nil, fmt.Errorf("text delta at content index %d without text_start", event.ContentIndex)
 	}
 	return []SSEEvent{encoder.chunk([]chatChoice{{
 		Delta: chatDelta{Content: event.Delta},
-	}}, nil)}
+	}}, nil)}, nil
 }
 
-func (encoder *StreamEncoder) endText(event llm.ResponseEvent) []SSEEvent {
-	encoder.textStarted = false
-	return nil
-}
-
-func (encoder *StreamEncoder) startThinking(event llm.ResponseEvent) []SSEEvent {
-	encoder.thinkingIndex = event.ContentIndex
-	encoder.thinkingStarted = true
-	// OpenAI Chat Completions 没有官方 reasoning 字段。
-	// 这里参考 DeepSeek 等厂商的约定，用 choices[0].delta.reasoning_content 输出思考。
-	return nil
-}
-
-func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) []SSEEvent {
-	if !encoder.thinkingStarted {
-		encoder.startThinking(event)
+// endText 关闭文字块；Chat 流没有块结束帧，仅复位状态。
+func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, error) {
+	if !encoder.textStarted {
+		return nil, fmt.Errorf("text end at content index %d without text_start", event.ContentIndex)
 	}
-	if event.Delta == "" {
-		return nil
+	encoder.textStarted = false
+	return nil, nil
+}
+
+// startThinking 标记思考块已开。
+// OpenAI Chat Completions 没有官方 reasoning 字段。
+// 这里参考 DeepSeek 等厂商的约定，用 choices[0].delta.reasoning_content 输出思考。
+func (encoder *StreamEncoder) startThinking() []SSEEvent {
+	encoder.thinkingStarted = true
+	return nil
+}
+
+// thinkingDelta 下发一段思考增量为 reasoning_content。
+func (encoder *StreamEncoder) thinkingDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
+	if !encoder.thinkingStarted {
+		return nil, fmt.Errorf("thinking delta at content index %d without thinking_start", event.ContentIndex)
 	}
 	return []SSEEvent{encoder.chunk([]chatChoice{{
 		Delta: chatDelta{ReasoningContent: event.Delta},
-	}}, nil)}
+	}}, nil)}, nil
 }
 
-func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) []SSEEvent {
+// endThinking 关闭思考块，仅复位状态。
+func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, error) {
+	if !encoder.thinkingStarted {
+		return nil, fmt.Errorf("thinking end at content index %d without thinking_start", event.ContentIndex)
+	}
 	encoder.thinkingStarted = false
-	return nil
+	return nil, nil
 }
 
+// startToolCall 登记工具调用状态并发带 id/name 的 tool_calls 首帧。
 func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) []SSEEvent {
 	state := &toolCallState{index: len(encoder.toolCalls), id: event.ToolCallID, name: event.ToolName}
 	encoder.toolCalls = append(encoder.toolCalls, state)
@@ -196,40 +200,34 @@ func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) []SSEEvent 
 	}}, nil)}
 }
 
-func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) []SSEEvent {
+// toolCallDelta 下发一段工具参数增量。
+func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
 	state := encoder.findTool(event.ToolCallID, event.ContentIndex)
 	if state == nil {
-		return nil
+		return nil, fmt.Errorf("tool call delta at content index %d (call %q) without toolcall_start", event.ContentIndex, event.ToolCallID)
 	}
-	state.arguments.WriteString(event.Delta)
 	return []SSEEvent{encoder.chunk([]chatChoice{{
 		Delta: chatDelta{ToolCalls: []chatToolCall{{
 			Index:    state.index,
 			Function: chatToolCallFunction{Arguments: event.Delta},
 		}}},
-	}}, nil)}
+	}}, nil)}, nil
 }
 
-func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) []SSEEvent {
-	state := encoder.findToolByIndex(event.ContentIndex)
-	if state == nil {
-		return nil
+// endToolCall 校验块已开；OpenAI Chat Completions 流式工具调用不输出
+// 单独的结束 chunk，finish_reason 会标记结束。
+func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
+	if encoder.findToolByIndex(event.ContentIndex) == nil {
+		return nil, fmt.Errorf("tool call end at content index %d without toolcall_start", event.ContentIndex)
 	}
-	if event.ToolCall != nil {
-		state.id = event.ToolCall.ID
-		state.name = event.ToolCall.Name
-		state.arguments.Reset()
-		state.arguments.WriteString(string(event.ToolCall.Arguments))
-	}
-	// OpenAI Chat Completions 流式工具调用不输出单独的结束 chunk；finish_reason 会标记结束。
-	return nil
+	return nil, nil
 }
 
+// finish 发 finish_reason chunk、可选 usage chunk 和 [DONE] 终止帧。
 func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
 	if event.Message != nil {
 		encoder.finalUsage = event.Message.Usage
-		encoder.finalReason = event.Message.StopReason
 	}
 	reason := finishReason(event.Reason)
 	events := []SSEEvent{encoder.chunk([]chatChoice{{FinishReason: reason}}, nil)}
@@ -240,6 +238,7 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 	return events
 }
 
+// failed 发一个带 error 字段的终止 chunk 并关闭流。
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
 	message := "chat completion stream failed"
@@ -252,18 +251,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误。
-	errorPayload := map[string]any{
-		"message": message,
-		"type":    common.OpenAIErrorType(message),
-		"code":    common.ErrorCode(message),
-		"param":   nil,
-	}
-	for key, value := range common.UpstreamErrorDetails(message) {
-		errorPayload[key] = value
-	}
-	if event.Error != nil && event.Error.DebugRef != "" {
-		errorPayload["debug_ref"] = event.Error.DebugRef
-	}
+	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error, true)
 	data, _ := json.Marshal(map[string]any{
 		"id":      encoder.responseID,
 		"object":  "chat.completion.chunk",
@@ -288,6 +276,7 @@ func (encoder *StreamEncoder) findTool(id string, contentIndex int) *toolCallSta
 	return encoder.findToolByIndex(contentIndex)
 }
 
+// findToolByIndex 按 llm ContentIndex 查工具状态。
 func (encoder *StreamEncoder) findToolByIndex(contentIndex int) *toolCallState {
 	return encoder.toolByContent[contentIndex]
 }
@@ -336,6 +325,7 @@ type chatToolCallFunction struct {
 	Name      string `json:"name,omitempty"`
 }
 
+// chunk 把 choices/usage 装进固定 envelope marshal 成一帧 SSE。
 func (encoder *StreamEncoder) chunk(choices []chatChoice, usage any) SSEEvent {
 	data, _ := json.Marshal(chatChunk{
 		ID:      encoder.responseID,
@@ -348,6 +338,7 @@ func (encoder *StreamEncoder) chunk(choices []chatChoice, usage any) SSEEvent {
 	return SSEEvent{Name: "", Data: data}
 }
 
+// messageToChat 把最终消息投影成 chat message 对象与 tool_calls 数组。
 func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 	var textParts []string
 	var reasoningParts []string
@@ -384,6 +375,7 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 	return messageObj, toolCalls
 }
 
+// chatUsage 投影 Chat Completions usage 形态，含 cache 与 reasoning 明细。
 func chatUsage(usage llm.Usage) map[string]any {
 	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
 	total := usage.TotalTokens
@@ -409,6 +401,7 @@ func chatUsage(usage llm.Usage) map[string]any {
 	return result
 }
 
+// finishReason 映射 Chat Completions finish_reason 枚举。
 func finishReason(reason llm.StopReason) any {
 	switch reason {
 	case llm.StopReasonToolUse:

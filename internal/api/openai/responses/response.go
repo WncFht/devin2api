@@ -156,6 +156,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	return append(prefix, events...), nil
 }
 
+// start 发 response.created 与 response.in_progress 两帧开场事件。
 func (encoder *StreamEncoder) start() []SSEEvent {
 	if encoder.started {
 		return nil
@@ -185,6 +186,8 @@ func openAIReasoningItemID(signature string) string {
 	return items[0].ID
 }
 
+// startReasoning 开 reasoning item 并发 output_item.added 与
+// reasoning_summary_part.added；openai 型签名用内层真实 rs_* id。
 func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.newItem(event.ContentIndex, "reasoning", "rs")
 	if err != nil {
@@ -213,6 +216,7 @@ func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEven
 	}, nil
 }
 
+// reasoningDelta 把思考增量发为 reasoning_summary_text.delta。
 func (encoder *StreamEncoder) reasoningDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.item(event.ContentIndex, "reasoning")
 	if err != nil {
@@ -225,6 +229,8 @@ func (encoder *StreamEncoder) reasoningDelta(event llm.ResponseEvent) ([]SSEEven
 	})}, nil
 }
 
+// endReasoning 收尾 reasoning item：有签名即关项发 done 三帧，
+// 否则挂起等待尾随签名帧。
 func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.item(event.ContentIndex, "reasoning")
 	if err != nil {
@@ -275,11 +281,12 @@ func (encoder *StreamEncoder) reasoningDone(item *streamItem) []SSEEvent {
 // reasoningSignature 把尾随签名并入 reasoning item：挂起时补发收尾；
 // item 已关闭时（签名随 thinking_end 同帧到达、或兜底 flush 后仍有迟到帧）
 // 只补写 completed output 里的 encrypted_content，不再重发事件；
-// 下标没有 reasoning item 属上游异常形态，静默丢弃而非整流报错。
+// 下标没有 reasoning item 属解码器 bug（start 先于块事件的契约被破坏），
+// 显式报错而非静默丢弃。
 func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item := encoder.items[event.ContentIndex]
 	if item == nil || item.kind != "reasoning" {
-		return nil, nil
+		return nil, fmt.Errorf("thinking signature at content index %d without thinking_start", event.ContentIndex)
 	}
 	item.encryptedContent += event.Delta
 	if item.closed {
@@ -307,6 +314,7 @@ func (encoder *StreamEncoder) flushPendingReasoning() []SSEEvent {
 	return events
 }
 
+// startText 开 message item 并发 output_item.added 与 content_part.added。
 func (encoder *StreamEncoder) startText(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.newItem(event.ContentIndex, "message", "msg")
 	if err != nil {
@@ -330,6 +338,7 @@ func (encoder *StreamEncoder) startText(event llm.ResponseEvent) ([]SSEEvent, er
 	}, nil
 }
 
+// textDelta 把正文增量发为 output_text.delta。
 func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.item(event.ContentIndex, "message")
 	if err != nil {
@@ -342,6 +351,8 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, er
 	})}, nil
 }
 
+// endText 关 message item 并发 output_text.done、content_part.done、
+// output_item.done 三帧收尾。
 func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.item(event.ContentIndex, "message")
 	if err != nil {
@@ -368,6 +379,7 @@ func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, erro
 	}, nil
 }
 
+// startToolCall 开 function_call/custom_tool_call item 并发 output_item.added。
 func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
 	// custom/freeform 调用的参数体不是 JSON（上游 is_custom_tool_call），
 	// 按 Responses custom_tool_call item 下发——input 字段而非 arguments。
@@ -396,6 +408,7 @@ func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent
 	})}, nil
 }
 
+// toolCallDelta 按 item 类型发 arguments.delta 或 custom_tool_call_input.delta。
 func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.itemAnyKind(event.ContentIndex, "function_call", "custom_tool_call")
 	if err != nil {
@@ -411,6 +424,8 @@ func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent
 	})}, nil
 }
 
+// endToolCall 关工具 item 并发 *.done 与 output_item.done；完整参数
+// 优先取 end 事件携带的 ToolCall。
 func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item, err := encoder.itemAnyKind(event.ContentIndex, "function_call", "custom_tool_call")
 	if err != nil {
@@ -442,6 +457,7 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 	}, nil
 }
 
+// done 校验无悬空 item 后发 response.completed/incomplete 终帧。
 func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) {
 	for _, item := range encoder.items {
 		if !item.closed {
@@ -466,6 +482,7 @@ func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) 
 	return []SSEEvent{encoder.emit(eventName, map[string]any{"response": response})}, nil
 }
 
+// failed 先补发挂起 reasoning 的收尾，再发 response.failed 并关闭流。
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.completed = true
 	message := "response stream failed"
@@ -479,23 +496,22 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// 包含 status="failed" 的 response 对象与 error 字段。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
-	errorType := common.OpenAIErrorType(message)
-	errorPayload := map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message)}
-	for key, value := range common.UpstreamErrorDetails(message) {
-		errorPayload[key] = value
-	}
-	if event.Error != nil && event.Error.DebugRef != "" {
-		errorPayload["debug_ref"] = event.Error.DebugRef
-	}
+	// 事件顶层 error 与 response.error 共用同一份 payload（spec 位置与
+	// 排障位置同事实源），debug_ref 等排障字段两处一致。
+	errorPayload := common.BuildErrorPayload(message, common.OpenAIErrorType(message), event.Error, true)
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
-	response["error"] = map[string]any{"message": message, "type": errorType, "code": common.ErrorCode(message), "param": nil}
-	return []SSEEvent{encoder.emit("response.failed", map[string]any{
+	response["error"] = errorPayload
+	// 挂起的 reasoning item 先补发收尾再下发失败事件，与 Done 路径一致——
+	// 否则等待尾随签名的 item 会悬空在 output 之外。
+	events := encoder.flushPendingReasoning()
+	return append(events, encoder.emit("response.failed", map[string]any{
 		"response": response,
 		"status":   common.HTTPStatus(message),
 		"error":    errorPayload,
-	})}
+	}))
 }
 
+// newItem 按 llm ContentIndex 登记新 output item；下标重复即报解码器 bug。
 func (encoder *StreamEncoder) newItem(contentIndex int, kind string, prefix string) (*streamItem, error) {
 	if _, exists := encoder.items[contentIndex]; exists {
 		return nil, fmt.Errorf("content index %d already has an output item", contentIndex)
@@ -508,6 +524,7 @@ func (encoder *StreamEncoder) newItem(contentIndex int, kind string, prefix stri
 	return item, nil
 }
 
+// item 取指定下标、指定类型的进行中 item。
 func (encoder *StreamEncoder) item(contentIndex int, kind string) (*streamItem, error) {
 	return encoder.itemAnyKind(contentIndex, kind)
 }
@@ -530,11 +547,13 @@ func (encoder *StreamEncoder) itemAnyKind(contentIndex int, kinds ...string) (*s
 	return nil, fmt.Errorf("content index %d is %q, want one of %v", contentIndex, item.kind, kinds)
 }
 
+// closeItem 关闭 item 并把最终形态写进 output 槽位。
 func (encoder *StreamEncoder) closeItem(item *streamItem, output any) {
 	item.closed = true
 	encoder.output[item.outputIndex] = output
 }
 
+// completedOutput 返回已关闭 item 的最终形态数组（跳过未关闭槽位）。
 func (encoder *StreamEncoder) completedOutput() []any {
 	output := make([]any, 0, len(encoder.output))
 	for _, item := range encoder.output {
@@ -545,6 +564,7 @@ func (encoder *StreamEncoder) completedOutput() []any {
 	return output
 }
 
+// emit 补 type/sequence_number 后 marshal 成一帧 SSE。
 func (encoder *StreamEncoder) emit(name string, payload map[string]any) SSEEvent {
 	payload["type"] = name
 	payload["sequence_number"] = encoder.sequenceNumber
@@ -567,6 +587,7 @@ type deltaEvent struct {
 	Logprobs       []any  `json:"logprobs,omitempty"`
 }
 
+// emitDelta 补 sequence_number 后用 struct 编码一帧增量 SSE。
 func (encoder *StreamEncoder) emitDelta(event deltaEvent) SSEEvent {
 	event.SequenceNumber = encoder.sequenceNumber
 	encoder.sequenceNumber++
@@ -574,6 +595,7 @@ func (encoder *StreamEncoder) emitDelta(event deltaEvent) SSEEvent {
 	return SSEEvent{Name: event.Type, Data: data}
 }
 
+// baseResponse 生成 Response 对象的稳定字段骨架（store=false 等见函数体注释）。
 func baseResponse(id string, model string, createdAt int64, status string) map[string]any {
 	// 对齐 OpenAI Response 对象的稳定字段。store=false 是诚实声明：
 	// 本代理无响应存储，报 true 会诱使 Codex 等客户端走
@@ -590,6 +612,7 @@ func baseResponse(id string, model string, createdAt int64, status string) map[s
 	}
 }
 
+// responseUsage 投影 Responses usage 形态，含 cache 与 reasoning 明细。
 func responseUsage(usage llm.Usage) map[string]any {
 	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
 	total := usage.TotalTokens
@@ -614,6 +637,7 @@ func responseUsage(usage llm.Usage) map[string]any {
 	return result
 }
 
+// outputFromMessage 把最终消息内容块投影成 Responses output 数组。
 func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 	// OpenAI 常见顺序：reasoning → function_call → message；稳定排序避免 IDE 只读 output[0] 当 message。
 	var reasonings, toolCalls, messages []any
@@ -666,6 +690,7 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 	return output, nil
 }
 
+// contentAt 取 partial 消息中指定下标的内容块并按目标类型断言。
 func contentAt[T llm.Content](message *llm.AssistantMessage, index int) (T, bool) {
 	var zero T
 	if message == nil || index < 0 || index >= len(message.Content) {
@@ -675,6 +700,7 @@ func contentAt[T llm.Content](message *llm.AssistantMessage, index int) (T, bool
 	return content, ok
 }
 
+// responseStatus 映射 Response 对象的 status 枚举。
 func responseStatus(reason llm.StopReason) string {
 	if reason == llm.StopReasonLength || reason == llm.StopReasonContentFilter {
 		return "incomplete"

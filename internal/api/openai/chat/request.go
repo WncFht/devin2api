@@ -38,7 +38,6 @@ type Request struct {
 type Message struct {
 	Role       string          `json:"role"`
 	Content    json.RawMessage `json:"content"`
-	Name       string          `json:"name,omitempty"`
 	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
 	// ReasoningContent 是 DeepSeek 系/部分代理回传思考文本的约定字段；
@@ -96,10 +95,8 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	Stream          bool
-	IncludeUsage    bool
-	MaxOutputTokens *int
-	Temperature     *float64
+	Stream       bool
+	IncludeUsage bool
 }
 
 // DecodeRequest 将 OpenAI Chat Completions JSON 请求转换为中间请求。
@@ -152,7 +149,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 				stops = []string{single}
 			}
 		}
-		context.StopSequences = stops
+		if stops == nil {
+			// stop 为数字/对象等不识形态，不生效不能静默吞。
+			context.Dropped = append(context.Dropped, "field:stop")
+		} else {
+			context.StopSequences = stops
+		}
 	}
 	context.SessionKey = request.PromptCacheKey
 	if context.SessionKey == "" {
@@ -186,14 +188,13 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Stream:          request.Stream,
-			IncludeUsage:    request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
-			MaxOutputTokens: maxTokensValue,
-			Temperature:     request.Temperature,
+			Stream:       request.Stream,
+			IncludeUsage: request.StreamOptions != nil && request.StreamOptions.IncludeUsage,
 		},
 	}, nil
 }
 
+// appendMessages 逐条解码 messages 数组并保序追加进会话。
 func appendMessages(context *llm.RequestMessages, messages []Message, toolNames map[string]string) error {
 	for index, message := range messages {
 		if err := appendMessage(context, message, toolNames); err != nil {
@@ -203,10 +204,11 @@ func appendMessages(context *llm.RequestMessages, messages []Message, toolNames 
 	return nil
 }
 
+// appendMessage 按 role 把单条消息解码进会话。
 func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
 	switch message.Role {
 	case "system", "developer":
-		content, err := common.DecodeContent(message.Content)
+		content, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return err
 		}
@@ -216,7 +218,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 		}
 		context.SystemPrompt += text
 	case "user":
-		content, err := decodeUserContent(message.Content)
+		content, err := decodeUserContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -237,7 +239,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 		if message.ToolCallID == "" {
 			return errors.New("tool message requires tool_call_id")
 		}
-		content, err := common.DecodeContent(message.Content)
+		content, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return err
 		}
@@ -260,17 +262,19 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 	return nil
 }
 
-func decodeUserContent(raw json.RawMessage) ([]llm.Content, error) {
+// decodeUserContent 解码 user 消息内容；空/null 归一为空文本块。
+func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
-	return common.DecodeContent(raw)
+	return common.DecodeContent(raw, &context.Dropped)
 }
 
+// decodeAssistantContent 解码 assistant 消息的正文与 tool_calls。
 func decodeAssistantContent(context *llm.RequestMessages, message Message, toolNames map[string]string) ([]llm.Content, error) {
 	var content []llm.Content
 	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
-		decoded, err := common.DecodeContent(message.Content)
+		decoded, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return nil, err
 		}

@@ -116,11 +116,22 @@ func TestDecodeRequestAcceptsChatCompletionsImagePart(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestRejectsInvalidToolArguments 验证适配器调用前会拒绝非对象工具参数。
-func TestDecodeRequestRejectsInvalidToolArguments(t *testing.T) {
+// TestDecodeRequestPreservesMalformedToolArguments 验证非对象工具参数原文
+// 走 Custom 通道保真上行——与 chat/anthropic 面一致，吞成 {} 或 400 都会
+// 让调用语义悄悄变空或丢失上下文。
+func TestDecodeRequestPreservesMalformedToolArguments(t *testing.T) {
 	data := []byte(`{"model":"gpt-test","input":[{"type":"function_call","call_id":"call-1","name":"tool","arguments":"[]"}]}`)
-	if _, err := DecodeRequest(data); err == nil {
-		t.Fatal("DecodeRequest() error = nil, want invalid arguments error")
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, ok := request.Context.Messages[0].(llm.AssistantMessage)
+	if !ok {
+		t.Fatalf("message[0] = %T", request.Context.Messages[0])
+	}
+	call, ok := assistant.Content[0].(llm.ToolCall)
+	if !ok || !call.Custom || string(call.Arguments) != "[]" {
+		t.Fatalf("malformed arguments must be preserved as Custom, got %#v", assistant.Content[0])
 	}
 }
 

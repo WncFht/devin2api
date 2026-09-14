@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/llm"
 )
 
 // openAIErrorTypes 把 Connect code 映射为 OpenAI 兼容的错误对象 type。
@@ -99,28 +101,30 @@ func IsContextLengthError(message string) bool {
 // 下游网关按状态码区分"请求级错误"与"渠道故障"——
 // 4xx 不冷却整个渠道；上下文超长给 413 并配合 error.code 让网关
 // 直接归类为客户端问题，不做任何冷却。
+// 判据与 OpenAIErrorType/AnthropicErrorType 同源（extractErrorCode 的
+// 冒号前缀 code），避免「type=server_error 但 status=4xx」式矛盾：
+// code 词出现在消息正文但不在前缀位置时不算体制标记。
 // 无法识别的错误返回 502，表示上游服务故障。
 func HTTPStatus(message string) int {
-	switch {
-	case strings.Contains(message, "invalid_argument"),
-		strings.Contains(message, "failed_precondition"):
+	switch extractErrorCode(message) {
+	case "invalid_argument", "failed_precondition":
 		// failed_precondition 实测是请求形状/前置状态问题（如非 CASCADE
 		// request_type 缺真实会话），与 invalid_argument 同属调用方可修正。
 		if IsContextLengthError(message) {
 			return http.StatusRequestEntityTooLarge
 		}
 		return http.StatusBadRequest
-	case strings.Contains(message, "unauthenticated"):
+	case "unauthenticated":
 		return http.StatusUnauthorized
-	case strings.Contains(message, "permission_denied"):
+	case "permission_denied":
 		// Devin 上游把内容策略拦截、模型 UID 无效、模型未授权都归并到
 		// permission_denied。这三类都是调用方可修正的请求错误，
 		// 归一成 400 而不是 403：下游网关对 4xx 只按
 		// 模型作用域冷却，不会把整个渠道标记为失效。
 		return http.StatusBadRequest
-	case strings.Contains(message, "not_found"):
+	case "not_found":
 		return http.StatusNotFound
-	case strings.Contains(message, "resource_exhausted"):
+	case "resource_exhausted":
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusBadGateway
@@ -132,12 +136,12 @@ func HTTPStatus(message string) int {
 // 网关能把 SSE 错误事件识别为请求级问题而非渠道故障。限流给
 // "rate_limit_exceeded"：Codex 只在 error.code 为该值时把流内错误
 // 归入 RateLimitExceeded 重试档（codex-rs sse/responses.rs）。
-// 其他错误返回 nil。
+// 判据与 HTTPStatus 同源（冒号前缀 code），其他错误返回 nil。
 func ErrorCode(message string) any {
 	if IsContextLengthError(message) {
 		return "context_length_exceeded"
 	}
-	if strings.Contains(message, "resource_exhausted") {
+	if extractErrorCode(message) == "resource_exhausted" {
 		return "rate_limit_exceeded"
 	}
 	return nil
@@ -237,4 +241,26 @@ func UpstreamErrorDetails(message string) map[string]any {
 		details["retry_after"] = seconds
 	}
 	return details
+}
+
+// BuildErrorPayload 组装协议流内错误的 error 字段：message/type/code 三键、
+// openAIParam 为 true 时附带 OpenAI 风格的 "param":null，再并入上游排障
+// 字段（upstream_trace_id/retry_after）与错误消息携带的 debug_ref。
+// 三协议的流内错误共用同一份字段清单，避免各处抄写随演进漂移。
+func BuildErrorPayload(message string, errorType string, failed *llm.AssistantMessage, openAIParam bool) map[string]any {
+	payload := map[string]any{
+		"message": message,
+		"type":    errorType,
+		"code":    ErrorCode(message),
+	}
+	if openAIParam {
+		payload["param"] = nil
+	}
+	for key, value := range UpstreamErrorDetails(message) {
+		payload[key] = value
+	}
+	if failed != nil && failed.DebugRef != "" {
+		payload["debug_ref"] = failed.DebugRef
+	}
+	return payload
 }

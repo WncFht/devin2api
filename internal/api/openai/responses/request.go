@@ -95,10 +95,6 @@ type AdaptedRequest struct {
 type RequestOptions struct {
 	// Stream 表示调用方是否请求流式响应。
 	Stream bool
-	// MaxOutputTokens 是可选的输出 token 上限。
-	MaxOutputTokens *int
-	// Temperature 是可选的采样温度。
-	Temperature *float64
 	// PreviousResponseID 是调用方提供的上游响应关联标识。
 	PreviousResponseID string
 }
@@ -170,13 +166,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		Context: context,
 		Options: RequestOptions{
 			Stream:             request.Stream,
-			MaxOutputTokens:    request.MaxOutputTokens,
-			Temperature:        request.Temperature,
 			PreviousResponseID: request.PreviousResponseID,
 		},
 	}, nil
 }
 
+// appendInputMessages 处理 input 为字符串/消息数组的两种形态。
 func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) error {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil
@@ -205,6 +200,10 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 		if err := appendInputItem(context, item, &pending, toolNames); err != nil {
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
+	}
+	if len(pending.texts) > 0 || pending.signature != "" {
+		// 输入尾部孤儿 reasoning：其后没有可挂的 assistant 产出。
+		context.Dropped = append(context.Dropped, "reasoning:orphan")
 	}
 	context.Messages = mergeAdjacentAssistantTurns(context.Messages)
 	return nil
@@ -279,33 +278,14 @@ func consumePendingThinking(pending *pendingReasoning) []llm.Content {
 // 上游签名体制：sealed.* 与序列化 reasoning item 数组（openai 型）都是我们
 // 自己下发过的形态，原样回放；其余外来不透明载荷不可解，丢弃。
 func classifyReasoningSignature(encrypted string) (signature, signatureType string, keep bool) {
-	switch {
-	case strings.HasPrefix(encrypted, "sealed."):
-		return encrypted, "sealed", true
-	case isOpenAIReasoningSignature(encrypted):
-		return encrypted, "openai", true
-	default:
-		return "", "", false
+	if signatureType = common.ClassifySignatureType(encrypted); signatureType != "" {
+		return encrypted, signatureType, true
 	}
+	return "", "", false
 }
 
-// isOpenAIReasoningSignature 判断载荷是否为 openai 型签名——上游 signature
-// 字段的实测形态是序列化 Responses reasoning item 数组。下行时我们把整个
-// blob 原样放进 encrypted_content，回放时按同一形态识别。
-func isOpenAIReasoningSignature(blob string) bool {
-	trimmed := strings.TrimSpace(blob)
-	if !strings.HasPrefix(trimmed, "[") {
-		return false
-	}
-	var items []struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 {
-		return false
-	}
-	return items[0].Type == "reasoning"
-}
-
+// appendInputItem 按 item type 分派单条 input 元素（message/reasoning/
+// function_call 等），未知类型记入 Dropped 后跳过。
 func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning, toolNames map[string]string) error {
 	var header struct {
 		Type string `json:"type"`
@@ -365,9 +345,17 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 			return err
 		}
 		arguments := json.RawMessage(item.Arguments)
+		custom := false
+		if len(bytes.TrimSpace(arguments)) == 0 {
+			arguments = json.RawMessage(`{}`)
+		} else if !llm.IsJSONObject(arguments) {
+			// 客户端回灌的畸形/非 JSON 参数原文按 Custom 通道保真上行，
+			// 吞成 {} 会让上游看到的调用语义悄悄变空。
+			custom = true
+		}
 		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
-			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments})
+			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments, Custom: custom})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
 			Content:     content,
 			StopReason:  llm.StopReasonToolUse,
@@ -419,7 +407,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if callID == "" {
 			callID = item.ID
 		}
-		content, err := decodeToolOutput(item.Output)
+		content, err := decodeToolOutput(context, item.Output)
 		if err != nil {
 			return err
 		}
@@ -464,7 +452,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 // decodeToolOutput 解码 function_call_output/custom_tool_call_output 的
 // output：字符串直接成文本；part 数组（可含 input_image——实测上游
 // tool_result 图像子通道有效）按消息内容解码；其余 JSON 原样转文本。
-func decodeToolOutput(raw json.RawMessage) ([]llm.Content, error) {
+func decodeToolOutput(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		return []llm.Content{llm.TextContent{Text: text}}, nil
@@ -474,7 +462,7 @@ func decodeToolOutput(raw json.RawMessage) ([]llm.Content, error) {
 		return nil, errors.New("function call output is required")
 	}
 	if trimmed[0] == '[' {
-		content, err := common.DecodeContent(raw)
+		content, err := common.DecodeContent(raw, &context.Dropped)
 		if err == nil && len(content) > 0 {
 			return content, nil
 		}
@@ -482,6 +470,7 @@ func decodeToolOutput(raw json.RawMessage) ([]llm.Content, error) {
 	return []llm.Content{llm.TextContent{Text: string(raw)}}, nil
 }
 
+// appendMessageItem 把一条 message item 按 role 解码进会话；未知 role 记 Dropped。
 func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role string, pending *pendingReasoning) error {
 	switch role {
 	case "user", "assistant", "system", "developer":
@@ -496,11 +485,13 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return err
 	}
-	content, err := common.DecodeContent(item.Content)
+	content, err := common.DecodeContent(item.Content, &context.Dropped)
 	if err != nil {
 		return err
 	}
 	if len(content) == 0 {
+		// content 为空数组或全部 part 被丢弃：整条消息不上行不能静默。
+		context.Dropped = append(context.Dropped, "empty_message:"+role)
 		return nil
 	}
 	switch role {

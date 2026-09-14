@@ -45,20 +45,6 @@ type Tool struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// ToolResult 是 Anthropic 工具结果内容块。
-type ToolResult struct {
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`
-	IsError   bool            `json:"is_error,omitempty"`
-}
-
-// ToolUse 是 Anthropic 助手历史中的工具调用。
-type ToolUse struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
-}
-
 // anthropicRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
 // （thinking/service_tier/context_management/mcp_servers 等）上游没有
 // 对应物，记入 Dropped 透出而不是静默吞掉。
@@ -76,9 +62,7 @@ type AdaptedRequest struct {
 
 // RequestOptions 保存不属于对话历史的生成控制参数。
 type RequestOptions struct {
-	Stream          bool
-	MaxOutputTokens int
-	Temperature     *float64
+	Stream bool
 }
 
 // DecodeRequest 将 Anthropic Messages JSON 请求转换为中间请求。
@@ -153,13 +137,12 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	return AdaptedRequest{
 		Context: context,
 		Options: RequestOptions{
-			Stream:          request.Stream,
-			MaxOutputTokens: request.MaxTokens,
-			Temperature:     request.Temperature,
+			Stream: request.Stream,
 		},
 	}, nil
 }
 
+// appendSystem 把 system 字段（字符串或块数组）并入 SystemPrompt。
 func appendSystem(context *llm.RequestMessages, raw json.RawMessage) error {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
@@ -202,6 +185,7 @@ func appendMessages(context *llm.RequestMessages, messages []Message) error {
 	return nil
 }
 
+// appendMessage 按 role 把单条消息解码进会话。
 func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
 	switch message.Role {
 	case "user":
@@ -323,6 +307,7 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 	return result, nil
 }
 
+// decodeAssistantContent 解码 assistant 消息的 text/thinking/tool_use 块。
 func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, toolNames map[string]string) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
@@ -368,11 +353,16 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 			})
 		case "tool_use":
 			args := header.Input
-			if len(args) == 0 {
+			custom := false
+			if trimmed := bytes.TrimSpace(args); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 				args = json.RawMessage(`{}`)
+			} else if !llm.IsJSONObject(args) {
+				// 客户端回灌的非对象 input（标量等非 JSON 对象）原文按
+				// Custom 通道保真上行，吞成 {} 会让调用语义悄悄变空。
+				custom = true
 			}
 			toolNames[header.ID] = header.Name
-			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args})
+			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args, Custom: custom})
 		default:
 			context.Dropped = append(context.Dropped, "assistant_block:"+header.Type)
 		}
@@ -380,10 +370,9 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 	return content, nil
 }
 
+// decodeToolResult 把 tool_result 块解码为 ToolResultMessage；tool_use_id
+// 对不上已知调用时记 Dropped 并用占位名。
 func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.RawMessage, isError bool, toolNames map[string]string) (llm.ToolResultMessage, error) {
-	if toolUseID == "" {
-		return llm.ToolResultMessage{}, errors.New("tool_result requires tool_use_id")
-	}
 	name := toolNames[toolUseID]
 	if name == "" {
 		context.Dropped = append(context.Dropped, "unmatched_tool_use_id:"+toolUseID)
@@ -462,14 +451,16 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 	return content, nil
 }
 
-// guessSignatureType 给回放的思考签名标注上游 signature_type：
-// sealed.* 是本代理下发过的密封格式；其余不透明 blob 按 anthropic
-// 体制标注（走 Anthropic 协议的签名要么来自本代理的 claude 模型，
-// 要么来自真实 Anthropic API，两边都是 anthropic 体制）。
-// 缺类型实测被上游容忍，标错类型才会 invalid_argument。
+// guessSignatureType 给回放的思考签名标注上游 signature_type。形态分类
+// 与 responses 前端共用 common.ClassifySignatureType——signature_type 是
+// 上游体制属性而非入口协议属性，跨前端回放的 openai 体制签名（序列化
+// reasoning item blob）若标成 anthropic 会触发上游 invalid_argument。
+// 其余不透明 blob 按 anthropic 体制标注（走 Anthropic 协议的签名要么来自
+// 本代理的 claude 模型，要么来自真实 Anthropic API，两边都是 anthropic
+// 体制）。缺类型实测被上游容忍，标错类型才会 invalid_argument。
 func guessSignatureType(signature string) string {
-	if strings.HasPrefix(signature, "sealed.") {
-		return "sealed"
+	if signatureType := common.ClassifySignatureType(signature); signatureType != "" {
+		return signatureType
 	}
 	if signature == "" {
 		return ""

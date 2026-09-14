@@ -31,8 +31,8 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 	if request.Context.Model != "claude-test" {
 		t.Fatalf("Model = %q, want claude-test", request.Context.Model)
 	}
-	if request.Options.MaxOutputTokens != 256 {
-		t.Fatalf("MaxOutputTokens = %d, want 256", request.Options.MaxOutputTokens)
+	if request.Context.MaxTokens == nil || *request.Context.MaxTokens != 256 {
+		t.Fatalf("MaxTokens = %v, want 256", request.Context.MaxTokens)
 	}
 	if request.Context.SystemPrompt != "你是一个谨慎的助手。" {
 		t.Fatalf("SystemPrompt = %q", request.Context.SystemPrompt)

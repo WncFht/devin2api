@@ -18,7 +18,9 @@ import (
 var ErrImageShape = errors.New("unrecognized image value shape")
 
 // DecodeContent 把 JSON 字符串或 part 数组解码为中间内容块。
-func DecodeContent(raw json.RawMessage) ([]llm.Content, error) {
+// 解码时被丢弃/降级的 part 记入 dropped（"content_part:<type>"），
+// 调用方接 RequestMessages.Dropped——「解码即过滤」的静默面需要可观测。
+func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error) {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		return []llm.Content{llm.TextContent{Text: SanitizeText(text)}}, nil
@@ -49,11 +51,13 @@ func DecodeContent(raw json.RawMessage) ([]llm.Content, error) {
 			// 文档/音频 part 上游没有对应通道，内容必然丢；
 			// 静默丢弃会让模型在缺上下文下回答而无人察觉，
 			// 落占位文本至少让缺失可见。
+			*dropped = append(*dropped, "content_part:"+header.Type)
 			content = append(content, llm.TextContent{
 				Text: "[content omitted: " + header.Type + " part not supported]",
 			})
 		default:
 			// 忽略未知 part，避免 IDE 额外字段整请求失败。
+			*dropped = append(*dropped, "content_part:"+header.Type)
 			continue
 		}
 	}
@@ -68,7 +72,6 @@ func DecodeImagePart(raw json.RawMessage) (llm.ImageContent, error) {
 		Image    json.RawMessage `json:"image"`
 		Source   json.RawMessage `json:"source"`
 		FileID   string          `json:"file_id"`
-		Detail   string          `json:"detail"`
 		// 少数客户端把 data URL 直接放在 url / data 字段。
 		URL  string `json:"url"`
 		Data string `json:"data"`
@@ -114,7 +117,6 @@ func DecodeImageValue(raw json.RawMessage) (llm.ImageContent, error) {
 		MIMEType  string `json:"mime_type"`
 		MediaType string `json:"media_type"`
 		Type      string `json:"type"` // anthropic source.type = base64
-		Detail    string `json:"detail"`
 		FileID    string `json:"file_id"`
 	}
 	if err := json.Unmarshal(raw, &asObject); err != nil {
@@ -175,9 +177,6 @@ func DecodeDataImage(value string) (llm.ImageContent, error) {
 	meta = strings.TrimPrefix(meta, "data:")
 	// 允许 data:image/png;base64,xxx 与 data:image/png;charset=utf-8;base64,xxx
 	isBase64 := strings.Contains(meta, ";base64") || !strings.Contains(meta, ";")
-	if strings.Contains(meta, ";base64") {
-		isBase64 = true
-	}
 	mimeType := meta
 	if i := strings.Index(mimeType, ";"); i >= 0 {
 		mimeType = mimeType[:i]
@@ -279,18 +278,6 @@ func SniffImageMIME(encoded string) string {
 	}
 }
 
-// RawOutputText 把工具输出 JSON 优先当字符串处理，非字符串时回退到原始 JSON 文本。
-func RawOutputText(raw json.RawMessage) (string, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text, nil
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "", errors.New("function call output is required")
-	}
-	return string(raw), nil
-}
-
 // ContentText 从内容块中提取纯文本。
 // codexPermissionsBlock 匹配 codex 发送的 <permissions instructions>...</permissions instructions> 块，
 // 上游 Devin 的内容策略会因此拒绝请求。
@@ -305,6 +292,7 @@ func SanitizeText(text string) string {
 	return codexPermissionsBlock.ReplaceAllString(text, "")
 }
 
+// ContentText 拼接内容块中的全部 TextContent 正文。
 func ContentText(content []llm.Content) string {
 	var builder strings.Builder
 	for _, block := range content {
@@ -313,4 +301,38 @@ func ContentText(content []llm.Content) string {
 		}
 	}
 	return builder.String()
+}
+
+// ClassifySignatureType 按内容形态识别可回放思考签名的上游体制：
+// sealed.* 是本代理下发过的密封格式；序列化 Responses reasoning item
+// 数组是 openai 体制（上游 signature 字段的实测形态）。signature_type
+// 是上游体制属性而非入口协议属性——跨前端回放时各端必须用同一判据，
+// 否则 openai 体制签名被标成 anthropic 触发上游 invalid_argument。
+// 其余外来不透明载荷不可解，返回空串由调用方决定丢弃还是按本端体制标注。
+func ClassifySignatureType(blob string) string {
+	switch {
+	case strings.HasPrefix(blob, "sealed."):
+		return "sealed"
+	case IsOpenAIReasoningSignature(blob):
+		return "openai"
+	default:
+		return ""
+	}
+}
+
+// IsOpenAIReasoningSignature 判断载荷是否为 openai 型签名——上游 signature
+// 字段的实测形态是序列化 Responses reasoning item 数组。下行时我们把整个
+// blob 原样放进 encrypted_content，回放时按同一形态识别。
+func IsOpenAIReasoningSignature(blob string) bool {
+	trimmed := strings.TrimSpace(blob)
+	if !strings.HasPrefix(trimmed, "[") {
+		return false
+	}
+	var items []struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 {
+		return false
+	}
+	return items[0].Type == "reasoning"
 }
