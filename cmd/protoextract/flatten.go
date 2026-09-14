@@ -99,7 +99,7 @@ func flattenDescriptors(files []*descriptorpb.FileDescriptorProto, preferredPack
 		for _, extension := range file.GetExtension() {
 			original := qualify(file.GetPackage(), extension.GetName())
 			cloned := proto.Clone(extension).(*descriptorpb.FieldDescriptorProto)
-			state.rewriteField(file, original, cloned)
+			state.rewriteField(file, cloned)
 			cloned.Name = proto.String(shortName(state.extensionNames[original]))
 			flat.Extension = append(flat.Extension, cloned)
 		}
@@ -264,10 +264,10 @@ func (state *flattenState) rewriteMessage(file *descriptorpb.FileDescriptorProto
 		return fmt.Errorf("%s: %w", original, err)
 	}
 	for _, field := range message.GetField() {
-		state.rewriteField(file, qualify(original, field.GetName()), field)
+		state.rewriteField(file, field)
 	}
 	for _, extension := range message.GetExtension() {
-		state.rewriteField(file, qualify(original, extension.GetName()), extension)
+		state.rewriteField(file, extension)
 	}
 	for _, nested := range message.GetNestedType() {
 		if err := state.rewriteMessage(file, qualify(original, nested.GetName()), nested); err != nil {
@@ -302,7 +302,7 @@ func (state *flattenState) rewriteService(service *descriptorpb.ServiceDescripto
 	}
 }
 
-func (state *flattenState) rewriteField(file *descriptorpb.FileDescriptorProto, original string, field *descriptorpb.FieldDescriptorProto) {
+func (state *flattenState) rewriteField(file *descriptorpb.FileDescriptorProto, field *descriptorpb.FieldDescriptorProto) {
 	isExtension := field.GetExtendee() != ""
 	originalType := strings.TrimPrefix(field.GetTypeName(), ".")
 	field.TypeName = optionalString(state.rewriteTypeName(field.GetTypeName()))
@@ -322,7 +322,6 @@ func (state *flattenState) rewriteField(file *descriptorpb.FileDescriptorProto, 
 		field.Options = nil
 	}
 	field.Proto3Optional = nil
-	_ = original // retained for diagnostics and future source-level validation
 }
 
 func (state *flattenState) rewriteTypeName(name string) string {

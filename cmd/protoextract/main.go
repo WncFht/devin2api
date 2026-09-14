@@ -15,7 +15,6 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
@@ -78,8 +77,7 @@ func main() {
 	descriptorSet := &descriptorpb.FileDescriptorSet{File: all}
 	writeProtoBinary(filepath.Join(outputDir, "descriptors.pb"), descriptorSet)
 
-	_, resolutionErr := resolveDescriptors(descriptorSet)
-	if resolutionErr != nil {
+	if resolutionErr := resolveDescriptors(descriptorSet); resolutionErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: descriptor set is not fully resolvable: %v\n", resolutionErr)
 	}
 
@@ -179,31 +177,23 @@ func writeProtoBinary(path string, message proto.Message) {
 	check(os.WriteFile(path, data, 0o644))
 }
 
-func resolveDescriptors(set *descriptorpb.FileDescriptorSet) (map[string]protoreflect.FileDescriptor, error) {
-	resolved := make(map[string]protoreflect.FileDescriptor, len(set.GetFile()))
-	registry, registryErr := protodesc.NewFiles(set)
-	if registryErr == nil {
+// resolveDescriptors 只做整体可解性校验：返回值即唯一消费物（调用方只看
+// error 决定是否告警），不再构造无人使用的 resolved 映射。
+func resolveDescriptors(set *descriptorpb.FileDescriptorSet) error {
+	if _, err := protodesc.NewFiles(set); err == nil {
+		return nil
+	} else {
+		registryErr := err
+		// A binary may reference a descriptor that is not linked into that binary.
+		// Still render every descriptor we did recover, with unresolved references
+		// kept as fully-qualified placeholders, and report missing imports separately.
 		for _, file := range set.GetFile() {
-			fd, err := registry.FindFileByPath(file.GetName())
-			if err != nil {
-				return nil, err
+			if _, err := (protodesc.FileOptions{AllowUnresolvable: true}).New(file, nil); err != nil {
+				return fmt.Errorf("%s: %w", file.GetName(), err)
 			}
-			resolved[file.GetName()] = fd
 		}
-		return resolved, nil
+		return registryErr
 	}
-
-	// A binary may reference a descriptor that is not linked into that binary.
-	// Still render every descriptor we did recover, with unresolved references
-	// kept as fully-qualified placeholders, and report missing imports separately.
-	for _, file := range set.GetFile() {
-		fd, err := (protodesc.FileOptions{AllowUnresolvable: true}).New(file, nil)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", file.GetName(), err)
-		}
-		resolved[file.GetName()] = fd
-	}
-	return resolved, registryErr
 }
 
 func renderFlattened(file *descriptorpb.FileDescriptorProto, originalFileCount int, printer protoprint.Printer) ([]byte, error) {
