@@ -206,7 +206,50 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
 	}
+	context.Messages = mergeAdjacentAssistantTurns(context.Messages)
 	return nil
+}
+
+// mergeAdjacentAssistantTurns 合并连续的 AssistantMessage：Responses 输入项
+// 把一个模型回合铺平成 message/function_call 多个 item，逐 item 成消息会让
+// wire 上产生假的回合边界、抬高宣告处 EOS 概率（issue #2；机制见
+// notes/archive/2026-09-12-premature-endturn.md）。连续 assistant 消息必属
+// 同一回合——回合边界永远由 user/tool_result item 分隔。
+func mergeAdjacentAssistantTurns(messages []llm.Message) []llm.Message {
+	merged := make([]llm.Message, 0, len(messages))
+	for _, message := range messages {
+		assistant, ok := message.(llm.AssistantMessage)
+		if !ok || len(merged) == 0 {
+			merged = append(merged, message)
+			continue
+		}
+		last, ok := merged[len(merged)-1].(llm.AssistantMessage)
+		if !ok {
+			merged = append(merged, message)
+			continue
+		}
+		// 两段相邻文本之间补换行：convertMessage 对多块 TextContent 无分隔
+		// 直连，不补会把回合内两条 message 的正文粘连。
+		if len(last.Content) > 0 && len(assistant.Content) > 0 {
+			_, prevText := last.Content[len(last.Content)-1].(llm.TextContent)
+			_, nextText := assistant.Content[0].(llm.TextContent)
+			if prevText && nextText {
+				last.Content = append(last.Content, llm.TextContent{Text: "\n"})
+			}
+		}
+		last.Content = append(last.Content, assistant.Content...)
+		if assistant.OutputID != "" {
+			last.OutputID = assistant.OutputID
+		}
+		for _, block := range assistant.Content {
+			if _, isCall := block.(llm.ToolCall); isCall {
+				last.StopReason = llm.StopReasonToolUse
+				break
+			}
+		}
+		merged[len(merged)-1] = last
+	}
+	return merged
 }
 
 // pendingReasoning 缓冲 reasoning item 的 summary 文本与可回放签名。

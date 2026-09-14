@@ -223,24 +223,119 @@ func TestDecodeRequestAttachesReasoningSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.Context.Messages) != 4 {
-		t.Fatalf("message count = %d, want 4", len(request.Context.Messages))
+	// 同一回合的 assistant message 与 function_call 合并为一条消息：
+	// thinking/text 按输入序保留在合并后的内容块里。
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(request.Context.Messages))
 	}
 	assistant := request.Context.Messages[1].(llm.AssistantMessage)
 	thinking, ok := assistant.Content[0].(llm.ThinkingContent)
 	if !ok || thinking.Thinking != "计划：先读文件再改" {
 		t.Fatalf("assistant content[0] = %#v, want ThinkingContent", assistant.Content[0])
 	}
-	call := request.Context.Messages[2].(llm.AssistantMessage)
-	thinking, ok = call.Content[0].(llm.ThinkingContent)
+	thinking, ok = assistant.Content[2].(llm.ThinkingContent)
 	if !ok || thinking.Thinking != "需要调用 read_file" {
-		t.Fatalf("function_call content[0] = %#v, want ThinkingContent", call.Content[0])
+		t.Fatalf("assistant content[2] = %#v, want ThinkingContent", assistant.Content[2])
 	}
 	if thinking.ThinkingSignature != "sealed.v1.xyz" {
 		t.Fatalf("thinking signature = %q, want sealed.v1.xyz replay", thinking.ThinkingSignature)
 	}
-	if _, ok := call.Content[1].(llm.ToolCall); !ok {
-		t.Fatalf("function_call content[1] = %#v, want ToolCall", call.Content[1])
+	if _, ok := assistant.Content[3].(llm.ToolCall); !ok {
+		t.Fatalf("assistant content[3] = %#v, want ToolCall", assistant.Content[3])
+	}
+}
+
+// TestDecodeRequestMergesAssistantTurnItems 验证同一回合铺平的多个 input
+// item（assistant message / reasoning / function_call）合并为一条
+// AssistantMessage——逐 item 成消息会让 wire 上出现假回合边界，抬高
+// premature end_turn 概率（issue #2）。负例：被 function_call_output
+// 分隔的 assistant 产出属不同回合，不得合并。
+func TestDecodeRequestMergesAssistantTurnItems(t *testing.T) {
+	data := []byte(`{
+	  "model": "gpt-test",
+	  "input": [
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"看看项目结构"}]},
+	    {"type":"reasoning","summary":[{"type":"summary_text","text":"先看 README"}]},
+	    {"type":"message","role":"assistant","id":"msg_1","content":[{"type":"output_text","text":"我先读 README"}]},
+	    {"type":"reasoning","summary":[{"type":"summary_text","text":"需要 read_file"}],"encrypted_content":"sealed.v1.sig"},
+	    {"type":"function_call","call_id":"c1","name":"read_file","arguments":"{\"path\":\"README.md\"}"},
+	    {"type":"function_call_output","call_id":"c1","output":"readme 内容"},
+	    {"type":"function_call","call_id":"c2","name":"list_dir","arguments":"{}"},
+	    {"type":"function_call_output","call_id":"c2","output":"file list"},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"继续"}]}
+	  ]
+	}`)
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 6 {
+		t.Fatalf("message count = %d, want 6", len(request.Context.Messages))
+	}
+	assistant, ok := request.Context.Messages[1].(llm.AssistantMessage)
+	if !ok {
+		t.Fatalf("message[1] type = %T, want AssistantMessage", request.Context.Messages[1])
+	}
+	if len(assistant.Content) != 4 {
+		t.Fatalf("merged content = %#v, want 4 blocks", assistant.Content)
+	}
+	if thinking, ok := assistant.Content[0].(llm.ThinkingContent); !ok || thinking.Thinking != "先看 README" {
+		t.Fatalf("content[0] = %#v, want turn reasoning", assistant.Content[0])
+	}
+	if text, ok := assistant.Content[1].(llm.TextContent); !ok || text.Text != "我先读 README" {
+		t.Fatalf("content[1] = %#v, want announcement text", assistant.Content[1])
+	}
+	if thinking, ok := assistant.Content[2].(llm.ThinkingContent); !ok || thinking.ThinkingSignature != "sealed.v1.sig" {
+		t.Fatalf("content[2] = %#v, want signed reasoning", assistant.Content[2])
+	}
+	call, ok := assistant.Content[3].(llm.ToolCall)
+	if !ok || call.ID != "c1" || call.Name != "read_file" {
+		t.Fatalf("content[3] = %#v, want read_file ToolCall", assistant.Content[3])
+	}
+	if assistant.StopReason != llm.StopReasonToolUse {
+		t.Fatalf("StopReason = %q, want toolUse for merged turn with call", assistant.StopReason)
+	}
+	if assistant.OutputID != "msg_1" {
+		t.Fatalf("OutputID = %q, want last non-empty msg_1", assistant.OutputID)
+	}
+	if _, ok := request.Context.Messages[2].(llm.ToolResultMessage); !ok {
+		t.Fatalf("message[2] type = %T, want ToolResultMessage", request.Context.Messages[2])
+	}
+	// 负例：output 分隔后的 function_call 属下一回合，必须独立成条。
+	next, ok := request.Context.Messages[3].(llm.AssistantMessage)
+	if !ok || len(next.Content) != 1 {
+		t.Fatalf("message[3] = %#v, want separate AssistantMessage", request.Context.Messages[3])
+	}
+	if call, ok := next.Content[0].(llm.ToolCall); !ok || call.ID != "c2" {
+		t.Fatalf("message[3] content = %#v, want list_dir ToolCall", next.Content)
+	}
+
+	// 同回合内两条 assistant message 的文本用 "\n" 分隔拼接，
+	// OutputID 取 run 内最后一个非空。
+	request, err = DecodeRequest([]byte(`{"model":"m","input":[
+		{"type":"message","role":"assistant","id":"msg_a","content":[{"type":"output_text","text":"第一段"}]},
+		{"type":"message","role":"assistant","id":"msg_b","content":[{"type":"output_text","text":"第二段"}]}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 1 {
+		t.Fatalf("message count = %d, want 1 merged", len(request.Context.Messages))
+	}
+	joined := request.Context.Messages[0].(llm.AssistantMessage)
+	texts := make([]string, 0, len(joined.Content))
+	for _, block := range joined.Content {
+		text, ok := block.(llm.TextContent)
+		if !ok {
+			t.Fatalf("content = %#v, want text blocks only", joined.Content)
+		}
+		texts = append(texts, text.Text)
+	}
+	if strings.Join(texts, "") != "第一段\n第二段" {
+		t.Fatalf("joined text = %q, want newline-separated", strings.Join(texts, ""))
+	}
+	if joined.OutputID != "msg_b" {
+		t.Fatalf("OutputID = %q, want last non-empty msg_b", joined.OutputID)
 	}
 }
 
