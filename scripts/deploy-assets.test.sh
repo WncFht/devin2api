@@ -75,6 +75,17 @@ check "HEAD 必须已推送" has scripts/release.sh 'origin/main'
 check "查 CI workflow run" has scripts/release.sh 'workflow_runs'
 check "VERSION 回写" has scripts/release.sh 'cmd/devin-2api/VERSION'
 
+echo "== Dockerfile =="
+# FROM 的 Go 版本必须 ≥ go.mod 的 go 指令：官方镜像 GOTOOLCHAIN=local，
+# FROM 更低时 go mod download 直接失败（1.26.3 镜像撞 go 1.27.1 断过一次）。
+check "Dockerfile FROM go 版本 ≥ go.mod go 指令" bash -c '
+	from=$(sed -nE "s/^FROM .*golang:([0-9]+(\.[0-9]+){1,2}).*/\1/p" Dockerfile | head -1)
+	want=$(sed -nE "s/^go ([0-9]+(\.[0-9]+){1,2}).*/\1/p" go.mod | head -1)
+	[[ -n "${from}" && -n "${want}" ]] || exit 1
+	oldest=$(printf "%s\n%s\n" "${want}" "${from}" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)
+	[[ "${oldest}" == "${want}" ]]
+'
+
 echo
 if [[ "${FAILED}" == "1" ]]; then
 	echo "deploy assets 断言失败" >&2
