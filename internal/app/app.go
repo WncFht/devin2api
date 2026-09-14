@@ -646,9 +646,10 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 		"method": request.Method,
 		"path":   request.URL.Path,
 		"headers": map[string]string{
-			"accept":       request.Header.Get("Accept"),
-			"content_type": request.Header.Get("Content-Type"),
-			"user_agent":   request.Header.Get("User-Agent"),
+			"accept":              request.Header.Get("Accept"),
+			"content_type":        request.Header.Get("Content-Type"),
+			"user_agent":          request.Header.Get("User-Agent"),
+			"x_client_request_id": request.Header.Get("X-Client-Request-Id"),
 		},
 		"body": parsedBody,
 	}
