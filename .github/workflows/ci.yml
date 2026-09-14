@@ -16,6 +16,11 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
+      # go.mod/go.sum 与实际 import 失配（如直接依赖误标 // indirect）在这里
+      # 拦下；-diff 只打印差异不改文件，非零退出即漂移。
+      - name: Mod tidy check
+        run: go mod tidy -diff
+
       - name: Format check
         run: |
           unformatted=$(gofmt -l . || true)

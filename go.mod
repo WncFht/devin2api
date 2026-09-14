@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	connectrpc.com/connect v1.20.0
+	github.com/felixge/fgprof v0.9.5
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.1
@@ -15,7 +16,6 @@ require (
 )
 
 require (
-	github.com/felixge/fgprof v0.9.5 // indirect
 	github.com/google/pprof v0.0.0-20240227163752-401108e1b7e7 // indirect
 	github.com/kr/text v0.2.0 // indirect
 )

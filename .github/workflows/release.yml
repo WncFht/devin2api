@@ -122,9 +122,13 @@ jobs:
           if [[ "${VERSION}" != *-* ]]; then
             TAGS="${TAGS},${GHCR}:latest"
           fi
-          # Docker Hub 在 secrets 配置后才会推送（条件登录见下）
+          # Docker Hub 在 secrets 配置后才会推送（条件登录见下）；
+          # latest 与 GHCR 同规则——只跟随稳定版，预发布不抢它。
           if [[ -n "${DOCKERHUB_USERNAME}" ]]; then
-            TAGS="${TAGS},docker.io/${DOCKERHUB_USERNAME}/devin-2api:${VERSION},docker.io/${DOCKERHUB_USERNAME}/devin-2api:latest"
+            TAGS="${TAGS},docker.io/${DOCKERHUB_USERNAME}/devin-2api:${VERSION}"
+            if [[ "${VERSION}" != *-* ]]; then
+              TAGS="${TAGS},docker.io/${DOCKERHUB_USERNAME}/devin-2api:latest"
+            fi
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"

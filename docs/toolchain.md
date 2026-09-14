@@ -39,7 +39,7 @@
 
 push 到 main 与 PR 触发，4 个并行 job：
 
-- **test**：gofmt 检查 → `go vet` → `go test -race` → `go build` → windows/darwin 交叉编译 + vet。
+- **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race` → `go build` → windows/darwin 交叉编译 + vet。
 - **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地 brew 版对齐。
 - **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练。
 - **lint-markdown**：`npm ci` → `format:check` + `lint:md`。
