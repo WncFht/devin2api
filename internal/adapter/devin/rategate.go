@@ -413,10 +413,11 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 
 // wait 阻塞到本次上游发送拿到许可，或判定不值得等：
 //   - 闩内：滴灌槽空闲且在可发区间内立即放行（该请求即探针，计入
-//     本桶配额）；否则直接返回 *rateGateError，retryAfter 报闩剩余——
-//     客户端睡到恢复时刻重试比按槽位节奏轮询更省重试预算；
+//     本桶配额）；否则直接返回闸门拒绝（*llm.Failure，LocalGate），
+//     retryAfter 报闩剩余——客户端睡到恢复时刻重试比按槽位节奏轮询
+//     更省重试预算；
 //   - 闩外：可发区间内配额未满立即放行；配额耗尽或在死区内睡到
-//     下一窗口开放，预计等待超 maxHold 返回 *rateGateError；
+//     下一窗口开放，预计等待超 maxHold 同样返回闸门拒绝；
 //   - 睡眠不做配额预约：窗口开放时睡醒者与新到者一起竞争，抢不到
 //     的看到满桶按新一轮等待决定再睡或快败——分钟粒度下排序公平性
 //     不值得换复杂度。睡醒后不直接放行，回到循环首重新评估——
@@ -508,11 +509,15 @@ func (gate *rateGate) noteUpstreamError(err error) {
 		return
 	}
 	now := gate.now()
-	until := now.Add(gate.defaultLatch)
+	// defaultLatch 由 setParams 热更新，须在锁内读。
+	var until time.Time
 	if resetAt, ok := common.RateLimitReset(failure, now); ok {
 		until = resetAt
 	}
 	gate.mu.Lock()
+	if until.IsZero() {
+		until = now.Add(gate.defaultLatch)
+	}
 	extended := until.After(gate.limitedUntil)
 	remaining := gate.limitedUntil.Sub(now)
 	if extended {

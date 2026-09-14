@@ -557,15 +557,23 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		turnMu.Lock()
 		turnCancel = stopTurn
 		turnMu.Unlock()
-		turnWriter, turnErr := application.runWSTurn(turnCtx, conn, request, normalized)
-		// 取消状态必须在 stopTurn 前采样——之后的 Err() 永远非 nil。
-		turnCancelled := turnCtx.Err() != nil
+		var turnCancelled bool
+		turnWriter, turnErr := func() (*wsResponseWriter, error) {
+			// 名额归还得走 defer：runWSTurn panic 时直线释放被跳过，
+			// 会永久占住一个并发槽并让 WaitDrain 卡满 drainTimeout。
+			defer func() {
+				stopTurn()
+				<-application.concurrency
+				application.inflight.Done()
+			}()
+			writer, err := application.runWSTurn(turnCtx, conn, request, normalized)
+			// 取消状态必须在 stopTurn 前采样——之后的 Err() 永远非 nil。
+			turnCancelled = turnCtx.Err() != nil
+			return writer, err
+		}()
 		turnMu.Lock()
 		turnCancel = nil
 		turnMu.Unlock()
-		stopTurn()
-		<-application.concurrency
-		application.inflight.Done()
 
 		if turnErr != nil {
 			// 写出层失败（断连/close sent）——连接已不可用，直接退出。
