@@ -6,6 +6,7 @@
 package llm
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,9 +140,6 @@ type Content interface {
 type TextContent struct {
 	// Text 是向用户展示或作为上下文重放的文字。
 	Text string
-	// TextSignature 是供应商返回的文字签名或序列化签名，重放时应原样保留。
-	// 当前无生产者：Devin 上游不签发文字签名，为 Anthropic 系签名形态预留。
-	TextSignature string
 }
 
 // ContentType 返回文字内容类型。
@@ -211,10 +209,6 @@ type ToolCall struct {
 	// 的参数体本来就不是 JSON，如 apply_patch 的补丁文本）。请求方向
 	// 客户端回灌的畸形 JSON 参数也按此保留原文，不吞成 {}。
 	Custom bool
-	// ThoughtSignature 是部分供应商附加到工具调用上的思考签名，重放时应原样保留。
-	// 当前无生产者：Devin 上游不在工具调用上带签名，为 Gemini/Anthropic
-	// 的 tool_use 签名形态预留。
-	ThoughtSignature string
 }
 
 // ContentType 返回工具调用内容类型。
@@ -261,15 +255,6 @@ type ToolResultMessage struct {
 	ToolName string
 	// Content 是返回给模型的文字和图片内容块。
 	Content []Content
-	// Details 是仅供应用层保存和展示、不一定发送给模型的结构化详情。
-	// 当前无生产者：三个协议解码器都不填，为携带结构化结果的工具协议预留。
-	Details json.RawMessage
-	// Usage 是执行工具本身产生的可选用量，不计入助手响应主用量。
-	// 当前无生产者：解码器不填。
-	Usage *Usage
-	// AddedToolNames 是本次结果触发延迟加载后新增的工具名称。
-	// 当前无生产者：解码器不填。
-	AddedToolNames []string
 	// IsError 表示工具执行是否失败。
 	IsError bool
 	// TimestampMS 是创建消息时的 Unix 毫秒时间戳。
@@ -289,12 +274,6 @@ func (message ToolResultMessage) Validate() error {
 	}
 	if err := validateContent(message.Content, ContentTypeText, ContentTypeImage); err != nil {
 		return err
-	}
-	if len(message.Details) > 0 && !json.Valid(message.Details) {
-		return errors.New("tool result details must be valid JSON")
-	}
-	if message.Usage != nil {
-		return message.Usage.Validate()
 	}
 	return nil
 }
@@ -380,10 +359,10 @@ func validateContent(content []Content, allowed ...ContentType) error {
 	return nil
 }
 
-// IsJSONObject 判定 value 是否为 JSON 对象（{} 含）。Unmarshal 自带完整
-// 语法校验，无需前置 json.Valid；非对象/非法文本/null 均返回 false。
+// IsJSONObject 判定 value 是否为 JSON 对象（{} 含）。首字节预筛 + json.Valid
+// 扫描，不为建树分配——非对象/非法文本/null 均返回 false。
 // 各协议前端与适配器共用的参数体检定。
 func IsJSONObject(value json.RawMessage) bool {
-	var object map[string]json.RawMessage
-	return json.Unmarshal(value, &object) == nil && object != nil
+	trimmed := bytes.TrimSpace(value)
+	return len(trimmed) > 0 && trimmed[0] == '{' && json.Valid(trimmed)
 }
