@@ -288,7 +288,27 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			currentUserContent = append(currentUserContent, image)
+		case "document", "file":
+			// 文档块上游没有对应通道，内容必然丢；静默丢弃会让模型在
+			// 缺上下文下回答而无人察觉，落占位文本至少让缺失可见。
+			context.Dropped = append(context.Dropped, "user_block:"+header.Type)
+			currentUserContent = append(currentUserContent, llm.TextContent{
+				Text: "[content omitted: " + header.Type + " block not supported]",
+			})
 		case "tool_result":
+			if header.ToolUseID == "" {
+				// 无 tool_use_id 的结果块无法配对、过不了 IR 校验；
+				// 与孤儿结果同策降级为同一条 user 消息的文本。
+				context.Dropped = append(context.Dropped, "missing_tool_use_id")
+				demoted, err := decodeAnthropicContent(context, header.Content)
+				if err != nil {
+					return nil, fmt.Errorf("content[%d]: %w", index, err)
+				}
+				currentUserContent = append(currentUserContent,
+					llm.TextContent{Text: "[tool result, tool_use_id missing]"})
+				currentUserContent = append(currentUserContent, demoted...)
+				continue
+			}
 			flushUser()
 			tool, err := decodeToolResult(context, header.ToolUseID, header.Content, header.IsError, toolNames)
 			if err != nil {

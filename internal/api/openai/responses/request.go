@@ -412,6 +412,18 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err != nil {
 			return err
 		}
+		if callID == "" {
+			// 完全没有调用 id 的结果无法配对、过不了 IR 校验；
+			// 与孤儿结果同策降级为 USER 文本保住内容（不伪造 id）。
+			context.Dropped = append(context.Dropped, "missing_call_id")
+			context.Messages = append(context.Messages, llm.UserMessage{
+				Content: append([]llm.Content{
+					llm.TextContent{Text: "[tool result, call id missing]"},
+				}, content...),
+				TimestampMS: time.Now().UnixMilli(),
+			})
+			return nil
+		}
 		toolName := toolNames[callID]
 		if toolName == "" {
 			// 压缩后的历史可能丢掉对应的 function_call；对齐 Anthropic
