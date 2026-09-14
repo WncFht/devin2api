@@ -129,10 +129,16 @@ func cmdCensus(args []string) error {
 	var frames int
 	for _, dir := range dirs {
 		req.currentDir, resp.currentDir = dir, dir
-		if raw, err := os.ReadFile(filepath.Join(*logsDir, dir, debuglog.StageDevinRequest)); err == nil {
-			var obj map[string]any
-			if json.Unmarshal(raw, &obj) == nil {
-				req.walk(reqMD, obj)
+		// 首个请求与 attemptN 重试分片都进普查——重试写给上游的 wire
+		// 形态不同（如换 model/追加 continue），漏掉会低估字段覆盖。
+		if requestStages, err := debuglog.DevinRequestStages(filepath.Join(*logsDir, dir)); err == nil {
+			for _, stage := range requestStages {
+				if raw, err := os.ReadFile(filepath.Join(*logsDir, dir, stage)); err == nil {
+					var obj map[string]any
+					if json.Unmarshal(raw, &obj) == nil {
+						req.walk(reqMD, obj)
+					}
+				}
 			}
 		}
 		if f, err := os.Open(filepath.Join(*logsDir, dir, debuglog.StageDevinResponse)); err == nil {
@@ -144,6 +150,11 @@ func cmdCensus(args []string) error {
 					frames++
 					resp.walk(respMD, obj)
 				}
+			}
+			// 单行超过 4MB 缓冲时 Scan 提前终止——不查 Err 会把截断
+			// 当成正常读完，普查少计而不自知。
+			if err := sc.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: scan %s/%s: %v\n", dir, debuglog.StageDevinResponse, err)
 			}
 			_ = f.Close()
 		}

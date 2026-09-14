@@ -4,7 +4,12 @@
 // 是读取侧，两处各自拼写字面量会随演进静默对不上（清理漏剥、面板读空）。
 package debuglog
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
 
 const (
 	// StageHTTPRequest 是客户端原始请求投影。
@@ -41,4 +46,23 @@ const devinRequestStageStem = "03-devin-request"
 // 请求文件名；与首个请求的 StageDevinRequest 共享 devinRequestStageStem。
 func StageDevinRequestAttempt(attempt int) string {
 	return fmt.Sprintf("%s.attempt%d.json", devinRequestStageStem, attempt)
+}
+
+// DevinRequestStages 列出请求目录内全部上游 wire 请求文件——首个请求加
+// attemptN 重试分片，按文件名字典序返回（主文件在前）。census 类消费者
+// 经它枚举，重试写进上游的 wire 形态才不会逃出覆盖统计。
+func DevinRequestStages(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() && strings.HasPrefix(name, devinRequestStageStem) && strings.HasSuffix(name, ".json") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
