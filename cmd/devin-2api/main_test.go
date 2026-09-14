@@ -7,9 +7,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
@@ -115,5 +119,157 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 	if _, err := reloadRuntimeConfig(configPath, devinAdapter, application, panel, manager); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
+	}
+}
+
+// TestReloadClassifiesEveryConfigField 钉住「reload 分类无兜底」的契约：
+// 反射枚举 config.Config 的全部 yaml 叶子字段，逐字段变异后走真实
+// reloadRuntimeConfig——任一字段既不在 applied 也不在 requires_restart，
+// 测试即失败。新增配置项漏接热更链时第一时间暴露，而不是静默躺在
+// /panel/api/config 里显示已生效。
+func TestReloadClassifiesEveryConfigField(t *testing.T) {
+	baseYAML := `server:
+  listen: '127.0.0.1:1'
+  max_concurrency: 64
+devin:
+  base_url: 'https://example.com'
+  token: 'tok'
+  model: 'm'
+  proxy: 'http://127.0.0.1:7890'
+  force_http1: false
+  aliases: {a: b}
+  client_name: 'chisel'
+  client_version: '1.0'
+  client_os: 'mac'
+  max_rpm: 12
+  gate_max_hold_seconds: 9
+  gate_drip_interval_seconds: 4
+  gate_default_latch_seconds: 30
+  gate_window_offset_seconds: 1
+  gate_window_guard_seconds: 3
+debug:
+  enabled: true
+  retention_days: 7
+  max_total_mb: 256
+  payload_hours: 12
+  keep_error_dirs: 5
+  quota_interval_minutes: 6
+  pprof_listen: '127.0.0.1:0'
+dashboard:
+  password: 'pw'
+auth:
+  api_key: 'k'
+`
+	// 聚合上报名：retention 四个字段在报告里合并为一条 debug.retention。
+	reported := map[string]string{
+		"debug.retention_days":  "debug.retention",
+		"debug.max_total_mb":    "debug.retention",
+		"debug.payload_hours":   "debug.retention",
+		"debug.keep_error_dirs": "debug.retention",
+	}
+	type leaf struct {
+		path  string
+		index []int
+	}
+	var leaves []leaf
+	var walk func(typ reflect.Type, prefix string, index []int)
+	walk = func(typ reflect.Type, prefix string, index []int) {
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			tag := strings.Split(field.Tag.Get("yaml"), ",")[0]
+			if tag == "" || tag == "-" {
+				continue
+			}
+			path := prefix + tag
+			fieldType := field.Type
+			if fieldType.Kind() == reflect.Pointer {
+				fieldType = fieldType.Elem()
+			}
+			if fieldType.Kind() == reflect.Struct {
+				walk(fieldType, path+".", append(index, i))
+				continue
+			}
+			leaves = append(leaves, leaf{path: path, index: append(index, i)})
+		}
+	}
+	walk(reflect.TypeOf(config.Config{}), "", nil)
+
+	for _, lf := range leaves {
+		t.Run(lf.path, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(baseYAML), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			prev, err := config.Load(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeConfigPtr.Store(&runtimeConfigState{cfg: prev, loadedAt: time.Now()})
+
+			// 变异 yaml 树上该叶子：值取与 prev 不同的形态。
+			var tree map[string]any
+			if err := yaml.Unmarshal([]byte(baseYAML), &tree); err != nil {
+				t.Fatal(err)
+			}
+			segments := strings.Split(lf.path, ".")
+			node := tree
+			for _, seg := range segments[:len(segments)-1] {
+				next, _ := node[seg].(map[string]any)
+				if next == nil {
+					next = map[string]any{}
+					node[seg] = next
+				}
+				node = next
+			}
+			current := reflect.ValueOf(prev)
+			for _, i := range lf.index {
+				current = current.Field(i)
+				if current.Kind() == reflect.Pointer {
+					current = current.Elem()
+				}
+			}
+			switch current.Kind() {
+			case reflect.Bool:
+				node[segments[len(segments)-1]] = !current.Bool()
+			case reflect.Int, reflect.Int64:
+				node[segments[len(segments)-1]] = current.Int() + 7
+			case reflect.Map:
+				node[segments[len(segments)-1]] = map[string]any{"mutated": "yes"}
+			default:
+				node[segments[len(segments)-1]] = current.String() + "-mutated"
+			}
+			mutated, err := yaml.Marshal(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, mutated, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
+			defer manager.Close()
+			devinAdapter, err := devin.New(devinConfigFrom(prev, configPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			application := app.New(devinAdapter, config.ServerConfig{}, manager)
+			panel, err := dashboard.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := reloadRuntimeConfig(configPath, devinAdapter, application, panel, manager)
+			if err != nil {
+				t.Fatalf("reloadRuntimeConfig() error = %v", err)
+			}
+			name := lf.path
+			if alias, ok := reported[lf.path]; ok {
+				name = alias
+			}
+			if !slices.Contains(report.Applied, name) && !slices.Contains(report.RequiresRestart, name) {
+				t.Fatalf("%s changed but reported nowhere: applied=%v requires_restart=%v",
+					lf.path, report.Applied, report.RequiresRestart)
+			}
+		})
 	}
 }
