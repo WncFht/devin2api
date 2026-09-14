@@ -3,6 +3,7 @@
 // ≤8 天窗口用 10 分钟桶，更长窗口按日聚合（与旧版口径相同）。
 
 const Usage = (() => {
+  const C = Charts.C;
   const RANGES = [['today', '今日'], ['yday', '昨日'], ['3d', '近3天'], ['7d', '近7天'], ['14d', '近14天'], ['all', '全部']];
   let range = 'today';
   let last = null;
@@ -110,7 +111,7 @@ const Usage = (() => {
     const stages = s.error_stages || {};
     const stageKeys = Object.keys(stages);
     if (stageKeys.length) {
-      html += '<div class="panel"><h3>错误阶段分布 <span class="sub">窗口累计 · 点击筛选请求</span></h3><div class="chip-row" style="margin:0">';
+      html += '<div class="panel"><h3>错误阶段分布 <span class="sub">窗口累计 · 点击筛选请求</span></h3><div class="chip-row flat">';
       stageKeys.sort((a, b) => stages[b] - stages[a]).forEach(k => {
         html += '<span class="chip" data-stage="' + qa(k) + '">' + esc(k) + ' <strong>' + stages[k] + '</strong></span>';
       });
@@ -202,7 +203,7 @@ const Usage = (() => {
       // 加权合计行：命中率/decode 均速按总量加权重算，不按行平均；
       // SLA 用合计后的归因计数重算，同样不取行平均。
       const ttSla = slaRate(tt);
-      html += '<tr style="font-weight:600;border-top:1px solid var(--border-strong)"><td class="mono muted">Σ 合计</td>' +
+      html += '<tr class="total"><td class="mono muted">Σ 合计</td>' +
         '<td class="num">' + tt.requests + ' <span class="muted">(服 ' + tt.upstream_faults + ' 客 ' + tt.client_faults + ')</span></td>' +
         '<td class="num ' + (ttSla == null ? 'muted' : rateClass(ttSla)) + '">' + (ttSla == null ? '—' : ttSla.toFixed(0) + '%') + '</td>' +
         '<td class="num">' + tt.rate_limited + '</td>' +
@@ -240,23 +241,23 @@ const Usage = (() => {
     const xs = p => (p.at !== undefined ? p.at : new Date(p.date + 'T00:00:00').getTime() / 1000);
     if (pts.length) {
       const flowSeries = [
-        Charts.bar('请求', '#818cf8', pts.map(p => Charts.ts(xs(p), p.requests))),
-        Charts.bar('错误', '#f87171', pts.map(p => Charts.ts(xs(p), p.errors))),
-        Charts.bar('429', '#f472b6', pts.map(p => Charts.ts(xs(p), p.rate_limited))),
-        Charts.line('输出 token', '#34d399', pts.map(p => Charts.ts(xs(p), p.output_tokens)), { yAxisIndex: 1 }),
+        Charts.bar('请求', C.accent, pts.map(p => Charts.ts(xs(p), p.requests))),
+        Charts.bar('错误', C.err, pts.map(p => Charts.ts(xs(p), p.errors))),
+        Charts.bar('429', C.pink, pts.map(p => Charts.ts(xs(p), p.rate_limited))),
+        Charts.line('输出 token', C.ok, pts.map(p => Charts.ts(xs(p), p.output_tokens)), { yAxisIndex: 1 }),
       ];
       const gm = Charts.gapMark(pts, fine ? 600 : 86400);
       if (gm) flowSeries[0].markArea = gm;
       Charts.render($('uFlow'), {
         dataZoom: Charts.zoom(pts),
-        yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: '#8b93a7', fontSize: 10.5 } }],
+        yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: 10.5 } }],
         series: flowSeries,
       });
       Charts.render($('uPerf'), {
-        yAxis: [{}, { min: 0, max: 100, splitLine: { show: false }, axisLabel: { formatter: '{value}%', color: '#8b93a7', fontSize: 10.5 } }],
+        yAxis: [{}, { min: 0, max: 100, splitLine: { show: false }, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: 10.5 } }],
         series: [
-          Charts.line('decode 均速', '#22d3ee', pts.map(p => Charts.ts(xs(p), p.gen_ms > 0 ? +(p.gen_tokens / (p.gen_ms / 1000)).toFixed(1) : null))),
-          Charts.line('缓存命中率', '#fbbf24', pts.map(p => {
+          Charts.line('decode 均速', C.cyan, pts.map(p => Charts.ts(xs(p), p.gen_ms > 0 ? +(p.gen_tokens / (p.gen_ms / 1000)).toFixed(1) : null))),
+          Charts.line('缓存命中率', C.warn, pts.map(p => {
             const dd = (p.cache_read_tokens || 0) + (p.input_tokens || 0);
             return Charts.ts(xs(p), dd > 0 ? +(p.cache_read_tokens / dd * 100).toFixed(1) : null);
           }), { yAxisIndex: 1, areaStyle: undefined }),
@@ -265,23 +266,23 @@ const Usage = (() => {
       if (fine) {
         Charts.render($('uLat'), {
           series: [
-            Charts.line('TTFB 均值', '#818cf8', pts.map(p => Charts.ts(xs(p), p.avg_ttfb_ms || null)), Charts.latencyMarks()),
-            Charts.line('TTFB p95', '#fbbf24', pts.map(p => Charts.ts(xs(p), p.ttfb_p95_ms || null))),
-            Charts.line('耗时 p95', '#f87171', pts.map(p => Charts.ts(xs(p), p.duration_p95_ms || null))),
+            Charts.line('TTFB 均值', C.accent, pts.map(p => Charts.ts(xs(p), p.avg_ttfb_ms || null)), Charts.latencyMarks()),
+            Charts.line('TTFB p95', C.warn, pts.map(p => Charts.ts(xs(p), p.ttfb_p95_ms || null))),
+            Charts.line('耗时 p95', C.err, pts.map(p => Charts.ts(xs(p), p.duration_p95_ms || null))),
           ],
           tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : fmtMs(v) },
-          yAxis: { axisLabel: { formatter: v => v >= 1000 ? (v / 1000) + 's' : v, color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
+          yAxis: { axisLabel: { formatter: v => v >= 1000 ? (v / 1000) + 's' : v, color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
         });
       }
     }
     if (tokenMix.length && $('uMix')) {
       Charts.render($('uMix'), {
         tooltip: { trigger: 'item', valueFormatter: v => fmtNum(v) },
-        legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: '#8b93a7', fontSize: 11 } },
+        legend: { bottom: 0, icon: 'roundRect', itemWidth: 10, itemHeight: 10, textStyle: { color: C.axis, fontSize: 11 } },
         series: [{
           type: 'pie', radius: ['52%', '74%'], center: ['50%', '44%'],
-          itemStyle: { borderColor: '#12151f', borderWidth: 2, borderRadius: 4 },
-          label: { show: false }, emphasis: { label: { show: true, color: '#e5e9f2', fontSize: 12, formatter: '{b}\n{d}%' } },
+          itemStyle: { borderColor: C.surface, borderWidth: 2, borderRadius: 4 },
+          label: { show: false }, emphasis: { label: { show: true, color: C.text, fontSize: 12, formatter: '{b}\n{d}%' } },
           data: tokenMix.map((x, i) => ({ name: x[0], value: x[1], itemStyle: { color: Charts.palette[i] } })),
         }],
       });
@@ -290,10 +291,10 @@ const Usage = (() => {
       const rows = barRows.slice().reverse();
       Charts.render($('uModelBar'), {
         grid: { left: 8, right: 40, top: 8, bottom: 8, containLabel: true },
-        xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
-        yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: '#aab1c5', fontSize: 10.5, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: '#3a415a' } }, axisTick: { show: false } },
+        xAxis: { type: 'value', axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
+        yAxis: { type: 'category', data: rows.map(r => r.name), axisLabel: { color: C.dim, fontSize: 10.5, width: 130, overflow: 'truncate' }, axisLine: { lineStyle: { color: C.line } }, axisTick: { show: false } },
         tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => p.name + '<br/>输出 ' + fmtNum(p.value) + ' tok').join('') },
-        series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: 'rgba(129,140,248,.55)' }, { offset: 1, color: '#818cf8' }]) }, label: { show: true, position: 'right', color: '#8b93a7', fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
+        series: [{ type: 'bar', barMaxWidth: 14, itemStyle: { borderRadius: [0, 4, 4, 0], color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: Charts.hexA(C.accent, 0.55) }, { offset: 1, color: C.accent }]) }, label: { show: true, position: 'right', color: C.axis, fontSize: 10, formatter: p => fmtNum(p.value) }, data: rows.map(r => r.output_tokens) }],
       });
     }
   }

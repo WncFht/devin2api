@@ -25,7 +25,7 @@ const System = (() => {
       renderGate(d.gate);
       if (d.debuglog) renderPipe(d.debuglog);
     } catch (e) {
-      $('sysKpis').innerHTML = '<div class="note" style="color:var(--err)">指标拉取失败: ' + esc(String(e)) + '</div>';
+      $('sysKpis').innerHTML = '<div class="note status-err">指标拉取失败: ' + esc(String(e)) + '</div>';
     }
   }
 
@@ -37,7 +37,7 @@ const System = (() => {
     let html = '';
     if (g.latched) {
       const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
-      html += '<div class="err-banner" style="grid-column:1/-1;margin-bottom:4px">闩中：上游限流冷却至 ' + esc(until) + '，闩内新请求快败 429 + Retry-After，滴灌探针放行探测解闩</div>';
+      html += '<div class="err-banner full">闩中：上游限流冷却至 ' + esc(until) + '，闩内新请求快败 429 + Retry-After，滴灌探针放行探测解闩</div>';
     }
     html += meta('闩态', g.latched ? '闩中' : '未闩') +
       meta('闩截止', g.limited_until ? fmtTime(g.limited_until) : '-') +

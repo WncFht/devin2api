@@ -26,7 +26,7 @@
   <div class="tb-right">
     <span class="gw" title="面板 API 连通状态 · 每页仅在可见时轮询"><i class="gw-dot" id="gwDot"></i><span id="gwText">连接中</span></span>
     <span class="gw-port" id="gwPort"></span>
-    <a class="gw" href="/panel/api" target="_blank" title="面板 API 端点目录（JSON，面向程序化访问）" style="text-decoration:none"><span class="sub">API</span></a>
+    <a class="gw" href="/panel/api" target="_blank" title="面板 API 端点目录（JSON，面向程序化访问）"><span class="sub">API</span></a>
   </div>
 </header>
 
@@ -40,7 +40,7 @@
     <div class="panel" id="ovLatPanel" style="display:none"><h3>延迟分布 <span class="sub">最近 4096 条完成请求蓄水池</span></h3><div id="ovLatBody"></div></div>
     <div class="panel" id="ovQuotaPanel"><h3>配额余量</h3><div class="loading">加载中...</div></div>
     <div class="panel"><h3>健康矩阵 <span class="sub">最近 30 分钟 · 行=模型 格=10秒 · 颜色=最重归因 高度=请求量 · 悬停看单格指标 点格下钻</span></h3><div class="mx" id="ovHealth"></div><div class="health-cap" id="ovHealthCap"></div></div>
-    <div class="panel"><h3>实时流量 <span class="sub">最近 60 分钟 · req/s · 滚轮/拖选缩放</span><span class="sub" id="ovTrendSub" style="margin-left:auto"></span></h3><div id="ovTrendChart" class="chart chart-h220"></div></div>
+    <div class="panel"><h3>实时流量 <span class="sub">最近 60 分钟 · req/s · 滚轮/拖选缩放</span><span class="spacer"></span><span class="sub" id="ovTrendSub"></span></h3><div id="ovTrendChart" class="chart chart-h220"></div></div>
     <div class="panel" id="ovActivePanel" style="display:none"><h3>进行中请求</h3><div id="ovActiveBody"></div></div>
     <div class="panel" id="ovAlertPanel" style="display:none"><h3>告警</h3><div id="ovAlertBody"></div></div>
   </section>
@@ -76,7 +76,7 @@
 
   <!-- ============ 用量 ============ -->
   <section class="page" id="page-usage">
-    <div class="page-head"><h2>用量统计</h2><span class="sub">index.jsonl 聚合 · 重启自动回放</span><span class="spacer"></span><span class="chip-row" id="usageRangeChips" style="margin:0"></span></div>
+    <div class="page-head"><h2>用量统计</h2><span class="sub">index.jsonl 聚合 · 重启自动回放</span><span class="spacer"></span><span class="chip-row flat" id="usageRangeChips"></span></div>
     <div id="usageBody"><div class="loading">加载中...</div></div>
   </section>
 

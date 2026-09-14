@@ -2,6 +2,7 @@
 // status 端点聚合多个上游调用（最长 610s 超时），失败字段以 *_error 透出。
 
 const Quota = (() => {
+  const C = Charts.C;
   async function load() {
     try {
       const d = await api('/quota');
@@ -46,11 +47,11 @@ const Quota = (() => {
 
     Charts.render($('quotaCurve'), {
       dataZoom: Charts.zoom(pts),
-      yAxis: { min: 0, max: 100, axisLabel: { formatter: '{value}%', color: '#8b93a7', fontSize: 10.5 }, splitLine: { lineStyle: { color: 'rgba(148,163,184,0.08)' } } },
+      yAxis: { min: 0, max: 100, axisLabel: { formatter: '{value}%', color: C.axis, fontSize: 10.5 }, splitLine: { lineStyle: { color: Charts.slate(0.08) } } },
       tooltip: { trigger: 'axis', valueFormatter: v => v == null ? '-' : Number(v).toFixed(1) + '%' },
       series: [
-        Charts.line('日剩余', '#818cf8', Charts.tsList(pts, 'at', 'daily_remaining')),
-        Charts.line('周剩余', '#f472b6', Charts.tsList(pts, 'at', 'weekly_remaining')),
+        Charts.line('日剩余', C.accent, Charts.tsList(pts, 'at', 'daily_remaining')),
+        Charts.line('周剩余', C.pink, Charts.tsList(pts, 'at', 'weekly_remaining')),
       ],
     });
   }
@@ -105,8 +106,8 @@ const Quota = (() => {
         '</div>';
     }
     if (d.providers && d.providers.length) {
-      phtml += '<div class="chip-row" style="margin:0">' +
-        d.providers.map(p => '<span class="chip" style="cursor:default">' + esc(p.display_name || p.provider) + ' <span class="muted">' + esc(p.provider || '') + '</span></span>').join('') + '</div>';
+      phtml += '<div class="chip-row flat">' +
+        d.providers.map(p => '<span class="chip static">' + esc(p.display_name || p.provider) + ' <span class="muted">' + esc(p.provider || '') + '</span></span>').join('') + '</div>';
     }
     pv.style.display = phtml ? '' : 'none';
     $('providerBody').innerHTML = phtml;
@@ -117,7 +118,7 @@ const Quota = (() => {
     if (bad.length) {
       ms.style.display = '';
       $('modelStatusBody').innerHTML = '<div class="grid">' + bad.map(s =>
-        '<div class="mini"><span class="k">' + esc(s.model_uid || s.model || '-') + '</span><span class="v" style="color:var(--err)">' +
+        '<div class="mini"><span class="k">' + esc(s.model_uid || s.model || '-') + '</span><span class="v status-err">' +
         esc(String(s.status || '-')) + (s.message ? ' · ' + esc(s.message) : '') + '</span></div>').join('') + '</div>';
     } else {
       ms.style.display = 'none';

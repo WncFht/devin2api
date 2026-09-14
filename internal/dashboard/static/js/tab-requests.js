@@ -66,7 +66,7 @@ const Requests = (() => {
       '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
       '<td class="mono muted">已下发 ' + fmtBytes(a.client_bytes) + '</td>' +
       '<td>' + (a.abortable ? '<span class="file-link" data-abort="' + qa(a.dir) + '">中断</span>' : '') + '</td></tr>' +
-      (expandedDir === a.dir ? '<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>' : '')
+      (expandedDir === a.dir ? '<tr class="detail-row"><td colspan="8"><div class="loading sm">加载中...</div></td></tr>' : '')
     ).join('');
   }
 
@@ -160,7 +160,7 @@ const Requests = (() => {
           '<td class="mono">↓' + fmtNum(e.input_tokens) + ' ↑' + fmtNum(e.output_tokens) + cache + '</td>' +
           '<td class="mono muted">' + esc(e.client_ip || '') + keyh + '</td></tr>';
         if (expandedDir === e.dir) {
-          html += '<tr class="detail-row"><td colspan="8"><div class="loading" style="padding:8px">加载中...</div></td></tr>';
+          html += '<tr class="detail-row"><td colspan="8"><div class="loading sm">加载中...</div></td></tr>';
         }
       });
       // 渲染签名不变就跳过 tbody 重建：空闲时零 DOM churn，
@@ -273,7 +273,7 @@ const Requests = (() => {
       (d.files || []).forEach(f => {
         html += '<span class="file-link" data-f="' + esc(f.name) + '" data-dir="' + qa(d.dir) + '">' + esc(f.name) + ' <span class="muted">' + fmtBytes(f.size) + '</span></span>';
         if (f.name === '06-http-response.jsonl') {
-          html += '<span class="file-link" style="border-color:#34d399" data-merged="' + qa(d.dir) + '">合并视图</span>';
+          html += '<span class="file-link ok" data-merged="' + qa(d.dir) + '">合并视图</span>';
         }
       });
       html += '</div><div class="file-view" id="fileView" style="display:none"></div>';
