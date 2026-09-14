@@ -124,6 +124,8 @@ base_url = "http://127.0.0.1:49173/v1"
 
 Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行，不走 tool call，无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
 
+上游限流（429）对 Codex 只经流内错误事件重试——codex-rs 对 HTTP 429 一律终止（`retry_429` 硬编码 false），代理已把 pre-stream 429 转成 `response.failed` 事件下发，Codex 按事件里的 `try again in Ns` 睡到解闩再续。默认 `stream_max_retries = 5` 大约只覆盖不到一分钟的限流窗口；常见的一分钟桶限流建议在 `[model_providers.OpenAI]` 块内加一行 `stream_max_retries = 100`（上限 100）。
+
 ### Codex WebSocket 链路（可选）
 
 Codex 支持 Responses-over-WS：一条连接上反复 `response.create`/`response.append`，`previous_response_id` + 增量 input。ccload→devin-2api 的 WS 多轮已实现并实测通过（2026-09-12，`responses-ws` 全链路 `completed`）。现行配置：
