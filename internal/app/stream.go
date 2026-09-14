@@ -148,6 +148,9 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 			select {
 			case items <- pumpItem{event: event, err: err}:
 			case <-ctx.Done():
+				// 两路就绪时随机选：取消瞬间产出的尾帧会被丢掉。
+				// 不在这里补投递——取消归因统一由消费端按 ctx 状态
+				// 收口（writeProtocolStream/collectPumpedMessage）。
 				return
 			}
 			if err != nil {
@@ -190,6 +193,14 @@ func (application *App) streamCompletion(
 
 	firstEvent, firstErr := out.awaitEvent(streamCtx, items, ticker)
 	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+		// 建流后首事件前的断连/中止先按取消归因——context.Canceled 会被
+		// mapProviderErrorStatus 映成 499，走 writeLoggedError 就把断连
+		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
+		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
+			completion.Result = "disconnected"
+			recorder.WriteError("client_disconnected", firstErr)
+			return
+		}
 		status := mapProviderErrorStatus(firstErr)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
 			completion.StatusCode = status
@@ -208,12 +219,19 @@ func (application *App) streamCompletion(
 	}
 	prelude := []llm.ResponseEvent{firstEvent}
 	if !out.committed && firstEvent.Type == llm.ResponseEventError {
+		// 上游把断连物化成首事件错误时同样按取消归因——事件文本经
+		// errors.New 重建后错误链已丢，errors.Is 接不到，直接看 ctx。
+		if streamCtx.Err() != nil {
+			completion.Result = "disconnected"
+			recorder.WriteError("client_disconnected", context.Cause(streamCtx))
+			return
+		}
 		message := "response stream returned an error event immediately"
 		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
 			message = firstEvent.Error.ErrorMessage
 		}
 		status := mapProviderErrorStatus(errors.New(message))
-		if common.IsContextLengthError(message) || (protocol.StreamErrorEvents() && status == http.StatusTooManyRequests) {
+		if protocol.StreamErrorEvents() && (common.IsContextLengthError(message) || status == http.StatusTooManyRequests) {
 			// Codex 只在 SSE response.failed 里按 error.code==
 			// "context_length_exceeded" 识别窗口溢出并自动压缩——但网关
 			// 会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
@@ -222,6 +240,9 @@ func (application *App) streamCompletion(
 			// 网关按 413 归为客户端错误、不冷却渠道。
 			// 限流错误同理走 200 + error 事件：OpenAI 流式客户端的
 			// 可重试通道只有流内事件（见上方注释与 StreamErrorEvents）。
+			// 两个子句都以 StreamErrorEvents 为前提——Anthropic 客户端
+			// 按 HTTP 状态码重试（见上方 firstErr 分支），提前提交 200
+			// 会把失败降级为不可重试的畸形响应。
 			prelude = []llm.ResponseEvent{
 				{Type: llm.ResponseEventStart, Reason: llm.StopReasonPending, Partial: firstEvent.Error},
 				firstEvent,
@@ -244,10 +265,17 @@ func (application *App) streamCompletion(
 		if common.HTTPStatus(streamErr.Error()) == http.StatusTooManyRequests {
 			recorder.SetRateLimited()
 		}
-		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+		switch {
+		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
+			// ctx 取消收口：写出/编码错误与取消同时发生时同样归因断连。
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", streamErr)
-		} else {
+		case !out.committed:
+			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
+			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
+			completion.StatusCode = mapProviderErrorStatus(streamErr)
+			writeLoggedError(writer, recorder, protocol, "http_stream", completion.StatusCode, streamErr)
+		default:
 			recorder.WriteError("http_stream", streamErr)
 		}
 		return
@@ -310,6 +338,14 @@ func writeProtocolStream(
 		} else {
 			event, err = out.awaitEvent(ctx, items, ticker)
 		}
+		// 取消收口：ctx 取消后无论本轮拿到的是正常事件、物化的取消错误
+		// 事件（errors.New 重建后错误链已丢）还是 channel 关闭的 EOF，
+		// 统一按 context.Cause 归因——泵的投递 select 与 awaitEvent 的
+		// 接收 select 在两路就绪时随机选，不查 ctx 会把断连随机记成
+		// completed/failed/disconnected。
+		if ctx.Err() != nil {
+			return latest, context.Cause(ctx)
+		}
 		if errors.Is(err, io.EOF) {
 			if wErr := flush(); wErr != nil {
 				return latest, wErr
@@ -364,6 +400,11 @@ func collectPumpedMessage(ctx context.Context, out *streamWriter, items <-chan p
 	var final *llm.AssistantMessage
 	for {
 		event, err := out.awaitEvent(ctx, items, ticker)
+		// 取消收口同 writeProtocolStream：物化取消事件与 channel 关闭
+		// 的 EOF 一律归因 context.Cause，断连不会被记成普通失败。
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
 		if errors.Is(err, io.EOF) {
 			if final == nil {
 				return nil, errors.New("response stream ended without a final message")

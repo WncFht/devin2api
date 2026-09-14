@@ -142,6 +142,12 @@ func (s *wsSession) normalizeRequest(payload []byte) (json.RawMessage, error) {
 		return nil, errors.New("websocket request requires array field: input")
 	}
 	nextItems := wsParseItems(nextInput)
+	if wsItemsContainCompletedTranscript(nextItems) {
+		// 客户端自带的 input 已是完整回放（含历史 model 产出）——无论
+		// 是否携带 previous_response_id，与它合并只会得到重复/乱序的
+		// transcript，直接当替换处理；prev_id 失配也因此被宽宥。
+		return s.finalizeReplacement(top)
+	}
 	if previousID != "" && previousID != s.lastResponseID {
 		return nil, fmt.Errorf("%w: %q", errWSPreviousResponseNotFound, previousID)
 	}
@@ -153,11 +159,6 @@ func (s *wsSession) normalizeRequest(payload []byte) (json.RawMessage, error) {
 		if previousID != "" || requestType == "response.append" {
 			return nil, errors.New("incremental websocket request is missing output for a pending tool call")
 		}
-		return s.finalizeReplacement(top)
-	}
-	if previousID == "" && wsItemsContainCompletedTranscript(nextItems) {
-		// 客户端自带的 input 已是完整回放（含历史 model 产出），与它合并只会
-		// 得到重复/乱序的 transcript——直接当替换处理。
 		return s.finalizeReplacement(top)
 	}
 

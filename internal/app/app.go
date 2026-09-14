@@ -194,10 +194,14 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 // modelEntry 把目录条目投影为 OpenAI /v1/models 形状；列表与详情端点
 // 共用同一份字段集，避免两处漂移。非 OpenAI 标准字段供面板/网关按能力
 // 做请求前 gate（含 is_model_router：router uid 直连上游会被拒）。
+// modelCreatedFallback 是目录缺 created 字段时全部模型共用的兜底时间戳
+// （进程启动时刻）：逐请求取 time.Now() 会让同一模型的 created 逐次漂移。
+var modelCreatedFallback = time.Now().Unix()
+
 func modelEntry(m adapter.ModelInfo) map[string]any {
 	created := m.Created
 	if created == 0 {
-		created = time.Now().Unix()
+		created = modelCreatedFallback
 	}
 	ownedBy := m.OwnedBy
 	if ownedBy == "" {
@@ -538,7 +542,7 @@ func (application *App) createCompletion(
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
 		noteRetryAfter(recorder, err.Error())
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", err)
 			return

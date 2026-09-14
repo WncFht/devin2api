@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -409,7 +410,15 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 处理 ping/pong/close 控制帧，且这是发现客户端断连的唯一手段。
 	// channel 带缓冲：turn 进行中读到的数据帧排队等主循环，控制帧照常应答；
 	// 读端一旦出错立即 cancelConn，让在途上游随 ctx 取消而不是空跑到结束。
+	// 缓冲量级：单帧上限 wsMaxTranscriptBytes(32MiB)×16 ≈ 512MiB/连接，
+	// 极端占用靠前置鉴权与 wsMaxConnections 连接上限兜底。
 	messages := make(chan wsInboundMessage, 16)
+	// 当前轮次的取消句柄：turn 期间主循环阻塞在 runWSTurn 不读
+	// messages，response.cancel 由 reader 识别后直接取消本轮
+	// ctx——排队到轮末才处理的「取消」形同虚设。轮间到达的 cancel
+	// 没有可取消对象，照常排队由主循环回 unsupported_event。
+	var turnMu sync.Mutex
+	var turnCancel context.CancelFunc
 	go func() {
 		defer close(messages)
 		first := true
@@ -430,6 +439,15 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 				return
 			}
 			first = false
+			if messageType == websocket.TextMessage && bytes.Contains(payload, []byte(`"response.cancel"`)) && wsJSONString(payload, "type") == "response.cancel" {
+				turnMu.Lock()
+				cancel := turnCancel
+				turnMu.Unlock()
+				if cancel != nil {
+					cancel()
+					continue
+				}
+			}
 			select {
 			case messages <- wsInboundMessage{messageType: messageType, payload: payload}:
 			case <-connCtx.Done():
@@ -529,7 +547,19 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			}
 			continue
 		}
-		turnWriter, turnErr := application.runWSTurn(connCtx, conn, request, normalized)
+		// 每轮一个可取消 ctx：reader 识别到 response.cancel 时取消本轮，
+		// 在途上游随 ctx 停掉而不是空跑到自然结束。
+		turnCtx, stopTurn := context.WithCancel(connCtx)
+		turnMu.Lock()
+		turnCancel = stopTurn
+		turnMu.Unlock()
+		turnWriter, turnErr := application.runWSTurn(turnCtx, conn, request, normalized)
+		// 取消状态必须在 stopTurn 前采样——之后的 Err() 永远非 nil。
+		turnCancelled := turnCtx.Err() != nil
+		turnMu.Lock()
+		turnCancel = nil
+		turnMu.Unlock()
+		stopTurn()
 		<-application.concurrency
 		application.inflight.Done()
 
@@ -546,11 +576,19 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			// 会 404 触发重放，符合预期。
 			session.requireReplacementReplay()
 		case !turnWriter.surfaced:
-			// 流结束但客户端没收到任何可终结本轮的信号：补一个中断事件，
+			// 流结束但客户端没收到任何可终结本轮的信号：补一个终结事件，
 			// 并标记下次 create 为全量替换（客户端会重放完整 transcript）。
 			session.requireReplacementReplay()
-			if err := writeWSErrorEvent(conn, http.StatusBadGateway, "server_error", "upstream_stream_interrupted",
-				"", "upstream response was interrupted; resend the full conversation input"); err != nil {
+			var terminalErr error
+			if turnCancelled {
+				// 客户端 response.cancel 终止了本轮（连接仍活着）：回
+				// 明确的取消事件，不伪装成上游故障。
+				terminalErr = writeWSErrorEvent(conn, http.StatusBadRequest, "invalid_request_error", "turn_cancelled", "", "turn cancelled by client")
+			} else {
+				terminalErr = writeWSErrorEvent(conn, http.StatusBadGateway, "server_error", "upstream_stream_interrupted",
+					"", "upstream response was interrupted; resend the full conversation input")
+			}
+			if terminalErr != nil {
 				return
 			}
 		default:
@@ -563,8 +601,8 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 
 // runWSTurn 把一条规范化请求交给常规 /v1/responses 流水线执行。
 // 返回的 writer 供调用方读取轮级状态（completed/failed/output 收集）。
-func (application *App) runWSTurn(connCtx context.Context, conn *websocket.Conn, upgradeRequest *http.Request, body json.RawMessage) (*wsResponseWriter, error) {
-	innerRequest, err := http.NewRequestWithContext(connCtx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
+func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upgradeRequest *http.Request, body json.RawMessage) (*wsResponseWriter, error) {
+	innerRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -651,9 +689,6 @@ func writeWSErrorEvent(conn *websocket.Conn, status int, errorType, code, param,
 }
 
 func writeWSPayload(conn *websocket.Conn, payload []byte) error {
-	if conn == nil {
-		return errors.New("websocket connection is nil")
-	}
 	if err := conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline)); err != nil {
 		return err
 	}
@@ -664,9 +699,6 @@ func writeWSPayload(conn *websocket.Conn, payload []byte) error {
 // 在重连后保持 turn 状态粘性（参照 CLIProxyAPI websocketUpgradeHeaders）。
 func wsUpgradeHeaders(request *http.Request) http.Header {
 	headers := http.Header{}
-	if request == nil {
-		return headers
-	}
 	if turnState := request.Header.Get("x-codex-turn-state"); turnState != "" {
 		headers.Set("x-codex-turn-state", turnState)
 	}
