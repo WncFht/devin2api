@@ -14,10 +14,15 @@ import (
 
 // Request 是 OpenAI Chat Completions 请求中本适配器支持的字段集合。
 type Request struct {
-	Model               string          `json:"model"`
-	Messages            []Message       `json:"messages"`
-	Tools               []Tool          `json:"tools,omitempty"`
-	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	Model      string          `json:"model"`
+	Messages   []Message       `json:"messages"`
+	Tools      []Tool          `json:"tools,omitempty"`
+	ToolChoice json.RawMessage `json:"tool_choice,omitempty"`
+	// Functions 与 FunctionCall 是 2023-06 前的旧版 function-calling
+	// 形态：functions 与 tools 并存时两边都收，function_call 只在
+	// tool_choice 缺席时兜底为工具选择。
+	Functions           []FunctionTool  `json:"functions,omitempty"`
+	FunctionCall        json.RawMessage `json:"function_call,omitempty"`
 	Stream              bool            `json:"stream,omitempty"`
 	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
 	MaxTokens           *int            `json:"max_tokens,omitempty"`
@@ -25,7 +30,6 @@ type Request struct {
 	Temperature         *float64        `json:"temperature,omitempty"`
 	TopP                *float64        `json:"top_p,omitempty"`
 	Stop                json.RawMessage `json:"stop,omitempty"`
-	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
 	TopK                *int            `json:"top_k,omitempty"`
 	Seed                *int64          `json:"seed,omitempty"`
 	User                string          `json:"user,omitempty"`
@@ -40,6 +44,11 @@ type Message struct {
 	Content    json.RawMessage `json:"content"`
 	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
+	// FunctionCall 是旧版（2023-06 前）function-calling 形态的助手调用；
+	// 与 tool_calls 互斥，解码时合成 call id 转成 ToolCall。
+	FunctionCall *FunctionCall `json:"function_call,omitempty"`
+	// Name 是旧版 role:"function" 结果消息携带的函数名。
+	Name string `json:"name,omitempty"`
 	// ReasoningContent 是 DeepSeek 系/部分代理回传思考文本的约定字段；
 	// 解码进 ThinkingContent，客户端回灌历史时思考不会静默丢失。
 	ReasoningContent string `json:"reasoning_content,omitempty"`
@@ -81,6 +90,7 @@ type StreamOptions struct {
 // 上游没有对应物，记入 Dropped 透出而不是静默吞掉。
 var chatRequestFields = map[string]bool{
 	"model": true, "messages": true, "tools": true, "tool_choice": true,
+	"functions": true, "function_call": true,
 	"stream": true, "stream_options": true, "max_tokens": true,
 	"max_completion_tokens": true, "temperature": true, "top_p": true,
 	"stop": true, "top_k": true, "seed": true, "user": true,
@@ -138,6 +148,15 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		return AdaptedRequest{}, err
 	}
 	context.ToolChoice = toolChoice
+	// 请求级 function_call 是 tool_choice 的旧版前身（"auto"/"none"
+	// 字符串或 {"name":X} 对象）；tool_choice 在场时以它为准。
+	if context.ToolChoice == nil {
+		if choice, ok := parseLegacyFunctionCall(request.FunctionCall); ok {
+			context.ToolChoice = choice
+		} else {
+			context.Dropped = append(context.Dropped, "field:function_call")
+		}
+	}
 	if request.ParallelToolCalls != nil && !*request.ParallelToolCalls {
 		context.DisableParallelToolCalls = true
 	}
@@ -162,8 +181,11 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 	// toolNames 随解码增量登记 assistant tool_call 的 id→name，
 	// tool 消息按 id 直查，替代逐条 findToolName 全历史回扫。
+	// functionIDs 是旧版形态的 name→合成 id 映射：role:"function"
+	// 结果消息按函数名而非 call id 对账。
 	toolNames := make(map[string]string)
-	if err := appendMessages(&context, request.Messages, toolNames); err != nil {
+	functionIDs := make(map[string]string)
+	if err := appendMessages(&context, request.Messages, toolNames, functionIDs); err != nil {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
@@ -181,6 +203,18 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 			InputSchema: schema,
 		})
 	}
+	// functions 是旧版工具声明形态：与 tools 同构，直接并入。
+	for _, fn := range request.Functions {
+		schema := fn.Parameters
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object"}`)
+		}
+		context.Tools = append(context.Tools, llm.ToolDefinition{
+			Name:        fn.Name,
+			Description: fn.Description,
+			InputSchema: schema,
+		})
+	}
 	if err := context.Validate(); err != nil {
 		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
 	}
@@ -195,9 +229,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 }
 
 // appendMessages 逐条解码 messages 数组并保序追加进会话。
-func appendMessages(context *llm.RequestMessages, messages []Message, toolNames map[string]string) error {
+func appendMessages(context *llm.RequestMessages, messages []Message, toolNames, functionIDs map[string]string) error {
 	for index, message := range messages {
-		if err := appendMessage(context, message, toolNames); err != nil {
+		if err := appendMessage(context, message, toolNames, functionIDs); err != nil {
 			return fmt.Errorf("message[%d]: %w", index, err)
 		}
 	}
@@ -205,7 +239,7 @@ func appendMessages(context *llm.RequestMessages, messages []Message, toolNames 
 }
 
 // appendMessage 按 role 把单条消息解码进会话。
-func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
+func appendMessage(context *llm.RequestMessages, message Message, toolNames, functionIDs map[string]string) error {
 	switch message.Role {
 	case "system", "developer":
 		content, err := common.DecodeContent(message.Content, &context.Dropped)
@@ -227,7 +261,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "assistant":
-		content, err := decodeAssistantContent(context, message, toolNames)
+		content, err := decodeAssistantContent(context, message, toolNames, functionIDs)
 		if err != nil {
 			return err
 		}
@@ -256,6 +290,29 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
+	case "function":
+		// 旧版工具结果：没有 call id，凭 name 对回对应 function_call
+		// 的合成 id；对不上说明历史里没有该调用，造孤儿 id 交给
+		// demoteOrphanToolResults 降级成文本而不是 400 整单。
+		content, err := common.DecodeContent(message.Content, &context.Dropped)
+		if err != nil {
+			return err
+		}
+		id := functionIDs[message.Name]
+		if id == "" {
+			context.Dropped = append(context.Dropped, "unmatched_function_name:"+message.Name)
+			id = "call_function_unmatched_" + message.Name
+		}
+		name := message.Name
+		if name == "" {
+			name = "tool"
+		}
+		context.Messages = append(context.Messages, llm.ToolResultMessage{
+			ToolCallID:  id,
+			ToolName:    name,
+			Content:     content,
+			TimestampMS: time.Now().UnixMilli(),
+		})
 	default:
 		context.Dropped = append(context.Dropped, "role:"+message.Role)
 	}
@@ -270,8 +327,9 @@ func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm
 	return common.DecodeContent(raw, &context.Dropped)
 }
 
-// decodeAssistantContent 解码 assistant 消息的正文与 tool_calls。
-func decodeAssistantContent(context *llm.RequestMessages, message Message, toolNames map[string]string) ([]llm.Content, error) {
+// decodeAssistantContent 解码 assistant 消息的正文与 tool_calls
+// （含旧版 function_call 单字段形态）。
+func decodeAssistantContent(context *llm.RequestMessages, message Message, toolNames, functionIDs map[string]string) ([]llm.Content, error) {
 	var content []llm.Content
 	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
 		decoded, err := common.DecodeContent(message.Content, &context.Dropped)
@@ -297,5 +355,52 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 			Custom:    custom,
 		})
 	}
+	if call := message.FunctionCall; call != nil {
+		// 旧版 function_call 没有 call id：按「已登记调用数」合成
+		// call_function_N 序数 id，name→id 登记进 functionIDs 供
+		// function 角色结果消息对账。
+		var callID string
+		for i := len(toolNames); ; i++ {
+			callID = fmt.Sprintf("call_function_%d", i)
+			if _, taken := toolNames[callID]; !taken {
+				break
+			}
+		}
+		toolNames[callID] = call.Name
+		functionIDs[call.Name] = callID
+		args, custom := common.NormalizeToolArguments(json.RawMessage(call.Arguments))
+		content = append(content, llm.ToolCall{
+			ID:        callID,
+			Name:      call.Name,
+			Arguments: args,
+			Custom:    custom,
+		})
+	}
 	return content, nil
+}
+
+// parseLegacyFunctionCall 解析请求级 function_call 旧字段：
+// "auto"/"none" 字符串或 {"name":X} 对象；空/null 输入返回 (nil, true)
+// 表示字段缺席，其余不识形态返回 ok=false 由调用方记 dropped。
+func parseLegacyFunctionCall(raw json.RawMessage) (*llm.ToolChoice, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, true
+	}
+	var mode string
+	if json.Unmarshal(raw, &mode) == nil {
+		switch mode {
+		case "", "auto":
+			return nil, true
+		case "none":
+			return &llm.ToolChoice{Mode: llm.ToolChoiceNone}, true
+		}
+		return nil, false
+	}
+	var named struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &named) == nil && named.Name != "" {
+		return &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: named.Name}, true
+	}
+	return nil, false
 }

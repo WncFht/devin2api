@@ -89,3 +89,44 @@ func TestDecodeRequestAcceptsFunctionCallArguments(t *testing.T) {
 		t.Fatalf("tool call arguments = %q", call.Arguments)
 	}
 }
+
+// TestDecodeRequestAcceptsLegacyFunctionDialect 验证 2023-06 前的
+// function-calling 形态：functions 声明、assistant function_call
+// 合成 id、role:"function" 结果按 name 对账、请求级 function_call 选择。
+func TestDecodeRequestAcceptsLegacyFunctionDialect(t *testing.T) {
+	data := []byte(`{
+	  "model": "gpt-test",
+	  "messages": [
+	    {"role": "user", "content": "读文件"},
+	    {"role": "assistant", "content": null, "function_call": {"name": "read_file", "arguments": "{\"path\":\"a.txt\"}"}},
+	    {"role": "function", "name": "read_file", "content": "内容"}
+	  ],
+	  "functions": [{"name": "read_file", "description": "读取文件", "parameters": {"type": "object"}}],
+	  "function_call": {"name": "read_file"}
+	}`)
+
+	request, err := DecodeRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := request.Context.Messages[1].(llm.AssistantMessage)
+	call, ok := assistant.Content[0].(llm.ToolCall)
+	if !ok || call.Name != "read_file" {
+		t.Fatalf("assistant content[0] = %#v", assistant.Content[0])
+	}
+	result := request.Context.Messages[2].(llm.ToolResultMessage)
+	if result.ToolCallID != call.ID || result.ToolName != "read_file" {
+		t.Fatalf("tool result = %#v, want id %q name read_file", result, call.ID)
+	}
+	if len(request.Context.Tools) != 1 || request.Context.Tools[0].Name != "read_file" {
+		t.Fatalf("tools = %#v", request.Context.Tools)
+	}
+	if request.Context.ToolChoice == nil ||
+		request.Context.ToolChoice.Mode != llm.ToolChoiceNamed ||
+		request.Context.ToolChoice.ToolName != "read_file" {
+		t.Fatalf("ToolChoice = %#v", request.Context.ToolChoice)
+	}
+	if err := request.Context.Validate(); err != nil {
+		t.Fatalf("context validation error = %v", err)
+	}
+}
