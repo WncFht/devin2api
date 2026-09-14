@@ -123,9 +123,6 @@ func (r *Request) Observe(streaming bool, requestBodyBytes int) {
 // result 非 completed 的请求计入 errors——SSE 提交 200 后断连/中止/流内失败
 // 虽然对客户端是 200，对运营信号是失败（回答「请求有没有正常跑完」）。
 func (r *Request) Finish(status, responseBodyBytes int, result string) {
-	if r == nil || r.metrics == nil {
-		return
-	}
 	m := r.metrics
 	m.active.Add(-1)
 	m.completed.Add(1)
