@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -130,9 +131,26 @@ func (decoder *responseDecoder) start() []llm.ResponseEvent {
 		API: "connect", Provider: "devin", Model: decoder.model,
 		StopReason: llm.StopReasonPending, TimestampMS: time.Now().UnixMilli(),
 	}
-	return []llm.ResponseEvent{{Type: llm.ResponseEventStart, Partial: &decoder.partial}}
+	return []llm.ResponseEvent{{Type: llm.ResponseEventStart, Partial: decoder.snapshot()}}
 }
 
+// snapshot 返回 partial 的隔离副本。产出的事件经 channel 跨 goroutine
+// 交给编码器（泵协程写 partial、消费协程读 event.Partial），共享活对象
+// 会让消费侧并发读到后续帧的写入。Content/Diagnostics 只做整块替换与
+// append（内容块是值类型、在 decoder.text/thinking/state.call 缓冲里
+// 写好后整体拷入），浅拷贝消息体 + 克隆这两个切片即与后续写入隔离。
+// Done 的 Message 与 ToolCallEnd 的 ToolCall 是终态指针（此后不再有
+// 写点），不走这里。
+func (decoder *responseDecoder) snapshot() *llm.AssistantMessage {
+	partial := decoder.partial
+	partial.Content = slices.Clone(partial.Content)
+	partial.Diagnostics = slices.Clone(partial.Diagnostics)
+	return &partial
+}
+
+// decode 把一帧上游响应解释为若干中间事件：先刷元数据/usage，再按
+// 思考、文本、工具增量、停止原因依次走子解码器，共享同一 events
+// 切片追加。已 finished 或停止序列截断后的帧只更新元数据。
 func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
 	if response == nil || decoder.finished {
 		return nil
@@ -271,7 +289,7 @@ func (decoder *responseDecoder) decodeThinking(events []llm.ResponseEvent, respo
 		decoder.partial.Content = append(decoder.partial.Content, *decoder.thinking)
 		decoder.thinkIdx = len(decoder.partial.Content) - 1
 		decoder.thinkingOpen = true
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: decoder.thinkIdx, Partial: &decoder.partial})
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: decoder.thinkIdx, Partial: decoder.snapshot()})
 	}
 	if delta := response.GetDeltaThinking(); delta != "" {
 		decoder.thinkingBuilder.WriteString(delta)
@@ -289,11 +307,14 @@ func (decoder *responseDecoder) decodeThinking(events []llm.ResponseEvent, respo
 	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	if delta := response.GetDeltaThinking(); delta != "" {
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingDelta, ContentIndex: decoder.thinkIdx, Delta: delta, Partial: &decoder.partial})
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingDelta, ContentIndex: decoder.thinkIdx, Delta: delta, Partial: decoder.snapshot()})
 	}
 	return events
 }
 
+// decodeText 处理文本增量：未开块时先建块发 TextStart；命中停止
+// 序列时截断下发并把命中位置记为 stoppedByPattern，后续帧只刷
+// 元数据不再产正文。
 func (decoder *responseDecoder) decodeText(events []llm.ResponseEvent, delta string) []llm.ResponseEvent {
 	if !decoder.textOpen {
 		decoder.text = &llm.TextContent{}
@@ -302,13 +323,13 @@ func (decoder *responseDecoder) decodeText(events []llm.ResponseEvent, delta str
 		decoder.partial.Content = append(decoder.partial.Content, *decoder.text)
 		decoder.textIdx = len(decoder.partial.Content) - 1
 		decoder.textOpen = true
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextStart, ContentIndex: decoder.textIdx, Partial: &decoder.partial})
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextStart, ContentIndex: decoder.textIdx, Partial: decoder.snapshot()})
 	}
 	// 用 Builder 累加，避免每帧产生越来越大的新字符串。
 	decoder.textBuilder.WriteString(delta)
 	if len(decoder.stopPatterns) == 0 {
 		decoder.textEmitted += len(delta)
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial})
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: decoder.snapshot()})
 		return events
 	}
 	return decoder.scanTextForStops(events)
@@ -349,13 +370,13 @@ func (decoder *responseDecoder) scanTextForStops(events []llm.ResponseEvent) []l
 // emitTextDelta 下发一段文本增量并推进 textEmitted 计数。
 func (decoder *responseDecoder) emitTextDelta(delta string) llm.ResponseEvent {
 	decoder.textEmitted += len(delta)
-	return llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: &decoder.partial}
+	return llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: decoder.snapshot()}
 }
 
+// decodeTool 处理工具调用增量：按 id 定位或新建 toolState（无 id
+// 首帧合成占位 id 续接）；custom 声明工具的包装参数与原生调用
+// 分路，参数体在 complete 时一次性成形。
 func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *devinproto.ExaCodeiumCommonPb_ChatToolCall) []llm.ResponseEvent {
-	if delta == nil {
-		return events
-	}
 	state := decoder.findTool(delta)
 	if state == nil {
 		id := delta.GetId()
@@ -416,7 +437,7 @@ func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, sta
 		decoder.partial.Content = append(decoder.partial.Content, state.call)
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallStart, ContentIndex: state.contentIdx,
-			ToolCallID: state.eventID, ToolName: state.call.Name, Partial: &decoder.partial,
+			ToolCallID: state.eventID, ToolName: state.call.Name, Partial: decoder.snapshot(),
 		})
 	}
 	// 工具参数在 complete 中一次性解析并写入，避免每帧 O(n) 拷贝/校验。
@@ -425,7 +446,7 @@ func (decoder *responseDecoder) decodeNativeTool(events []llm.ResponseEvent, sta
 	if hasFragment && !state.wrapped {
 		events = append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
-			ToolCallID: state.eventID, Delta: fragment, Partial: &decoder.partial,
+			ToolCallID: state.eventID, Delta: fragment, Partial: decoder.snapshot(),
 		})
 	}
 	return events
@@ -450,7 +471,7 @@ func (decoder *responseDecoder) decodeLateSignature(events []llm.ResponseEvent, 
 		decoder.partial.Content[index] = thinking
 		return append(events, llm.ResponseEvent{
 			Type: llm.ResponseEventThinkingSignature, ContentIndex: index,
-			Delta: signature, Partial: &decoder.partial,
+			Delta: signature, Partial: decoder.snapshot(),
 		})
 	}
 	thinking := llm.ThinkingContent{
@@ -464,13 +485,17 @@ func (decoder *responseDecoder) decodeLateSignature(events []llm.ResponseEvent, 
 	// 再发 thinking_signature 会与之叠加翻倍，且合成块永远没有 thinking_end，
 	// 只发签名事件会让编码器侧的 item 悬挂到流终止报错。
 	return append(events,
-		llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: &decoder.partial},
-		llm.ResponseEvent{Type: llm.ResponseEventThinkingEnd, ContentIndex: index, Partial: &decoder.partial},
+		llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: decoder.snapshot()},
+		llm.ResponseEvent{Type: llm.ResponseEventThinkingEnd, ContentIndex: index, Partial: decoder.snapshot()},
 	)
 }
 
+// endThinking 收尾当前思考块：builder 里的完整正文与签名一次性
+// 物化回 partial，发 ThinkingEnd。思考块可被跨块尾随签名复开——
+// 见 decodeLateSignature。
 func (decoder *responseDecoder) endThinking(events []llm.ResponseEvent) []llm.ResponseEvent {
-	if !decoder.thinkingOpen || decoder.thinking == nil {
+	// thinkingOpen 只在 thinking 缓冲建块后置位，开块即非空。
+	if !decoder.thinkingOpen {
 		return events
 	}
 	decoder.thinkingOpen = false
@@ -480,12 +505,16 @@ func (decoder *responseDecoder) endThinking(events []llm.ResponseEvent) []llm.Re
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	return append(events, llm.ResponseEvent{
 		Type: llm.ResponseEventThinkingEnd, ContentIndex: decoder.thinkIdx,
-		Content: decoder.thinking.Thinking, Partial: &decoder.partial,
+		Content: decoder.thinking.Thinking, Partial: decoder.snapshot(),
 	})
 }
 
+// endText 收尾当前文本块：builder 中未下发的尾部（停止序列截断
+// 后剩余窗口内容已重置为截断文本，不会多发）补发为最后一条 delta，
+// 再发 TextEnd。
 func (decoder *responseDecoder) endText(events []llm.ResponseEvent) []llm.ResponseEvent {
-	if !decoder.textOpen || decoder.text == nil {
+	// textOpen 只在 text 缓冲建块后置位，开块即非空。
+	if !decoder.textOpen {
 		return events
 	}
 	decoder.textOpen = false
@@ -499,7 +528,7 @@ func (decoder *responseDecoder) endText(events []llm.ResponseEvent) []llm.Respon
 	decoder.partial.Content[decoder.textIdx] = *decoder.text
 	return append(events, llm.ResponseEvent{
 		Type: llm.ResponseEventTextEnd, ContentIndex: decoder.textIdx,
-		Content: decoder.text.Text, Partial: &decoder.partial,
+		Content: decoder.text.Text, Partial: decoder.snapshot(),
 	})
 }
 
@@ -553,7 +582,7 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 			// 补发单条完整 delta，让按增量累计输入的下游状态收敛到一致。
 			events = append(events, llm.ResponseEvent{
 				Type: llm.ResponseEventToolCallDelta, ContentIndex: state.contentIdx,
-				ToolCallID: state.eventID, Delta: string(state.call.Arguments), Partial: &decoder.partial,
+				ToolCallID: state.eventID, Delta: string(state.call.Arguments), Partial: decoder.snapshot(),
 			})
 		} else if state.call.Custom {
 			// 原文即参数体（invalid_json_str 通道或客户端回灌的畸形 JSON），
@@ -568,13 +597,15 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 			}
 		}
 		decoder.partial.Content[state.contentIdx] = state.call
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventToolCallEnd, ContentIndex: state.contentIdx, ToolCall: &state.call, Partial: &decoder.partial})
+		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventToolCallEnd, ContentIndex: state.contentIdx, ToolCall: &state.call, Partial: decoder.snapshot()})
 	}
 	events = append(events, llm.ResponseEvent{Type: llm.ResponseEventDone, Reason: reason, Message: &decoder.partial})
 	decoder.finished = true
 	return events
 }
 
+// fail 产出错误终止事件：partial 标记 error 并携带原文，Done
+// 语义由消费方按 Reason=error 映射为协议错误帧。重复调用返回空。
 func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 	if decoder.finished {
 		return nil
