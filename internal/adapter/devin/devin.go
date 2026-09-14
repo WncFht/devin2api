@@ -479,6 +479,11 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 // 「是不是 connect.Error」。链上不带底层错误的 connect.Error 才是上游
 // 语义拒绝（unavailable 固定模板、invalid_argument 参数、
 // resource_exhausted、permission_denied），重试只会复现同样失败。
+// 例外：帧体被截断（CopyN 收到 io.EOF）被 connect-go 译成不带 %w 的
+// CodeInvalidArgument "protocol error: promised/got"（envelope.go:361），
+// unwrap 链干净，只能靠措辞认出——"protocol error:" 是它对「线上字节不
+// 构成合法帧」的固定措辞，与上游业务文案不撞车；垃圾前缀会误判进此分支，
+// 但重试一次确定性失败代价小，换覆盖最常见的帧体截断。
 func isTransientConnectError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
@@ -488,7 +493,11 @@ func isTransientConnectError(err error) bool {
 		return true
 	}
 	var connectErr *connect.Error
-	return !errors.As(err, &connectErr)
+	if !errors.As(err, &connectErr) {
+		return true
+	}
+	return connectErr.Code() == connect.CodeInvalidArgument &&
+		strings.HasPrefix(connectErr.Message(), "protocol error:")
 }
 
 // validateImagesForModel 在本地尽早拒绝「无视觉能力模型 + 图片」组合，错误信息对客户端可读。

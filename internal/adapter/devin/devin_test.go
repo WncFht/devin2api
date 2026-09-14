@@ -949,6 +949,9 @@ func TestIsTransientConnectError(t *testing.T) {
 		"unavailable wrapping EOF": connect.NewError(connect.CodeUnavailable, io.ErrUnexpectedEOF),
 		"incomplete envelope": connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("protocol error: incomplete envelope: %w", io.ErrUnexpectedEOF)),
+		// 帧体截断：connect-go 不 %w 包 io.EOF，只能靠 protocol error: 措辞。
+		"payload truncated": connect.NewError(connect.CodeInvalidArgument,
+			errors.New("protocol error: promised 1024 bytes in enveloped message, got 100 bytes")),
 		"tcp reset": connect.NewError(connect.CodeUnavailable,
 			&net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}),
 		"mid-stream clean EOF": connect.NewError(connect.CodeUnknown, io.EOF),
