@@ -32,7 +32,7 @@ func newRequest(t *testing.T) *http.Request {
 // net/http 对空值 User-Agent 键的处理是整条头省略，消掉 connect-go 指纹。
 func TestBasicAuthTransportSuppressesUserAgent(t *testing.T) {
 	stub := &stubRoundTripper{}
-	transport := NewBasicAuthTransport(stub, "tok")
+	transport := NewBasicAuthTransportFunc(stub, func() string { return "tok" })
 	resp, err := transport.RoundTrip(newRequest(t))
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +73,7 @@ func TestBasicAuthTransportFuncRefreshesPerRequest(t *testing.T) {
 // 的请求（Seat Bearer 形态）不被 Basic 覆盖。
 func TestBasicAuthTransportPreservesExistingAuthorization(t *testing.T) {
 	stub := &stubRoundTripper{}
-	transport := NewBasicAuthTransport(stub, "tok")
+	transport := NewBasicAuthTransportFunc(stub, func() string { return "tok" })
 	req := newRequest(t)
 	req.Header.Set("Authorization", "Bearer seat-token")
 	resp, err := transport.RoundTrip(req)

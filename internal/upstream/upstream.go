@@ -41,13 +41,9 @@ type BasicAuthTransport struct {
 	tokenFunc func() string
 }
 
-// NewBasicAuthTransport 包装 base，使出站请求默认携带 Basic token-token 认证。
-func NewBasicAuthTransport(base http.RoundTripper, token string) *BasicAuthTransport {
-	return NewBasicAuthTransportFunc(base, func() string { return token })
-}
-
-// NewBasicAuthTransportFunc 同 NewBasicAuthTransport，但 token 每次请求
-// 重新求值——unauthenticated 触发的凭据自愈不需要重建 transport。
+// NewBasicAuthTransportFunc 包装 base，使出站请求默认携带 Basic
+// token-token 认证；token 每次请求重新求值——unauthenticated 触发的
+// 凭据自愈不需要重建 transport。
 func NewBasicAuthTransportFunc(base http.RoundTripper, tokenFunc func() string) *BasicAuthTransport {
 	return &BasicAuthTransport{base: base, tokenFunc: tokenFunc}
 }
