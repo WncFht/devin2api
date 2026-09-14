@@ -118,17 +118,23 @@ const Usage = (() => {
       html += '</div></div>';
     }
 
-    // 429 采样
+    // 429 采样：stage 区分来源——rate_gate 是本地闸门快败（其"当时速率"
+    // 是到达速率，含被拒请求），其余为上游真 429（近似上游收到的发送
+    // 速率）。观测上限只取上游行：本地快败没碰到上游，不代表上游阈值。
     const rl = s.rate_limit_events || [];
     if (rl.length) {
-      const maxRPM = rl.reduce((m, e) => Math.max(m, e.rpm || 0), 0);
-      html += '<div class="panel"><h3>上游限流 429 <span class="sub">当时速率 = 该时刻前 60s 发出的请求数</span></h3>' +
-        '<div class="grid" style="margin-bottom:10px">' + meta('采样事件', rl.length + (rl.length >= 256 ? '（保留最近 256）' : '')) + meta('观测上限 ≈', maxRPM + ' req/min') + '</div>' +
-        '<div class="tbl-wrap" style="max-height:280px"><table><thead><tr><th>时间</th><th>模型</th><th>当时速率</th></tr></thead><tbody>';
+      const up = rl.filter(e => e.stage !== 'rate_gate');
+      const maxRPM = up.reduce((m, e) => Math.max(m, e.rpm || 0), 0);
+      html += '<div class="panel"><h3>限流 429 <span class="sub">当时速率 = 该时刻前 60s 内启动的请求数 · 本地闸门行是到达速率</span></h3>' +
+        '<div class="grid" style="margin-bottom:10px">' + meta('采样事件', rl.length + (rl.length >= 256 ? '（保留最近 256）' : '')) + meta('上游 / 本地闸门', up.length + ' / ' + (rl.length - up.length)) + meta('上游观测上限 ≈', maxRPM + ' req/min') + '</div>' +
+        '<div class="tbl-wrap" style="max-height:280px"><table><thead><tr><th>时间</th><th>来源</th><th>模型</th><th>当时速率</th></tr></thead><tbody>';
       rl.slice().reverse().forEach(e => {
-        html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td><td class="mono"><span class="lnk" data-model="' + qa(e.model) + '">' + esc(e.model || '-') + '</span></td><td class="mono">' + e.rpm + ' req/min</td></tr>';
+        const src = e.stage === 'rate_gate'
+          ? '<span class="badge badge-off" title="本地闸门快败：未触达上游，stage=rate_gate">本地闸门</span>'
+          : '<span class="badge badge-medium" title="上游真实限流' + (e.stage ? '，stage=' + esc(e.stage) : '') + '">上游</span>';
+        html += '<tr><td class="mono">' + fmtTime(e.at * 1000) + '</td><td>' + src + '</td><td class="mono"><span class="lnk" data-model="' + qa(e.model) + '">' + esc(e.model || '-') + '</span></td><td class="mono">' + e.rpm + ' req/min</td></tr>';
       });
-      html += '</tbody></table></div><div class="note">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。本地并发拒绝不进索引，此处全是上游限流。</div></div>';
+      html += '</tbody></table></div><div class="note">速率按已落盘请求的启动时间统计，在途未完成的请求不计，读数略偏低。鉴权/并发/排空等管线前拒绝不进索引（见系统页「本地拒绝」）；本地闸门行统计的是到达洪峰，不代表上游阈值。</div></div>';
     }
 
     // 按模型表：表头三态排序 + 加权合计行 + 阈值着色。

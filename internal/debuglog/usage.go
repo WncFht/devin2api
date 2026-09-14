@@ -257,13 +257,15 @@ type usageDayRow struct {
 	usageTotals
 }
 
-// rateLimitEvent 是一次上游 429 的采样：发生时刻（≈请求完成时刻）、模型、
-// 以及该时刻前 60s 内启动的请求数。多次采样的 RPM 峰值即上游
-// 限流阈值（每分钟请求数）的观测下界——被限说明已触线。
+// rateLimitEvent 是一次 429 的采样：发生时刻（≈请求完成时刻）、模型、
+// 以及该时刻前 60s 内启动的请求数。stage 区分来源——rate_gate 是本地
+// 闸门快败（RPM 读数为到达速率，含被拒），其余是上游真 429（RPM 近似
+// 上游实际收到的发送速率）；上游行的 RPM 峰值即限流阈值观测下界。
 type rateLimitEvent struct {
 	At    int64  `json:"at"` // unix 秒
 	Model string `json:"model,omitempty"`
 	RPM   int64  `json:"rpm"` // At 前 60s 内启动的请求数（含本请求）
+	Stage string `json:"stage,omitempty"`
 }
 
 // rateLimitEventCap 是限流事件环形保留条数。
@@ -499,7 +501,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 		if model == "" {
 			model = e.RequestedModel
 		}
-		a.rlEvents = append(a.rlEvents, rateLimitEvent{At: end, Model: model, RPM: rpm})
+		a.rlEvents = append(a.rlEvents, rateLimitEvent{At: end, Model: model, RPM: rpm, Stage: e.ErrorStage})
 		if len(a.rlEvents) > rateLimitEventCap {
 			a.rlEvents = a.rlEvents[len(a.rlEvents)-rateLimitEventCap:]
 		}

@@ -126,6 +126,7 @@ func TestUsageRateLimitSampling(t *testing.T) {
 		// end = -5s+2s = -3s；窗口 (-63s,-3s] 内含 -30/-20/-10/-5 共 4 个 start。
 		entry(-5*time.Second, 429, 2000),
 	}
+	entries[len(entries)-1].ErrorStage = "rate_gate"
 
 	agg := newUsageAggregator()
 	for _, e := range entries {
@@ -139,7 +140,7 @@ func TestUsageRateLimitSampling(t *testing.T) {
 		t.Fatalf("rate_limit_events = %+v", snap.RateLimitEvents)
 	}
 	ev := snap.RateLimitEvents[0]
-	if ev.Model != "m-a" || ev.RPM != 4 || ev.At != base.Unix()-3 {
+	if ev.Model != "m-a" || ev.RPM != 4 || ev.At != base.Unix()-3 || ev.Stage != "rate_gate" {
 		t.Fatalf("event = %+v", ev)
 	}
 	if snap.Models[0].RateLimited != 1 {
