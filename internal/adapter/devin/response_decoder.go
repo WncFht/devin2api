@@ -92,6 +92,9 @@ type toolState struct {
 	wrapped bool
 }
 
+// newResponseDecoder 建解码器：stopPatterns 滤掉空串并记最大长度
+// （供截断尾部窗口的扫描界）；customTools 是按 freeform 语义声明的
+// 工具名集合，对应调用按包装格式解包。
 func newResponseDecoder(model string, stopPatterns []string, customTools map[string]bool) *responseDecoder {
 	patterns := make([]string, 0, len(stopPatterns))
 	maxLen := 0
@@ -122,6 +125,9 @@ func customToolNames(tools []llm.ToolDefinition) map[string]bool {
 	return names
 }
 
+// start 初始化 partial 并产出 ResponseEventStart：事件由 Recv 扣留
+// （pendingStart）与首批真实事件一起下发，已发过一次 start 的重试流
+// 不重复产出。重复调用（reopen 后新 decoder 之外的路径）返回空。
 func (decoder *responseDecoder) start() []llm.ResponseEvent {
 	if decoder.started || decoder.finished {
 		return nil
@@ -187,6 +193,9 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 	return events
 }
 
+// finish 在流终止（正常 EOF 或错误）时产出收尾事件：错误走 fail
+// 透传 connect 原文；正常收尾先补齐 thinking/text/tool 的 end 事件
+// 再产 Done。重复调用返回空。
 func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 	if decoder.finished {
 		return nil
@@ -219,6 +228,9 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 	return decoder.complete(reason)
 }
 
+// updateMetadata 把帧上的响应元数据（id/模型/时间戳/usage/诊断）
+// 刷进 partial；字段只在「有值且更完整」时覆盖——上游常把 usage
+// 分多次增量上报，首值不丢。
 func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessageResponse) {
 	if response.MessageId != nil {
 		decoder.partial.ResponseID = response.GetMessageId()
@@ -281,6 +293,9 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 	}
 }
 
+// decodeThinking 处理思考增量：未开块时先建块并发 ThinkingStart，
+// 正文/签名分别进独立 builder（上游分通道上报），签名每帧同步回写
+// partial——隔块到达的尾随签名由 finish 阶段的延迟逻辑兜底。
 func (decoder *responseDecoder) decodeThinking(events []llm.ResponseEvent, response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
 	if !decoder.thinkingOpen {
 		decoder.thinking = &llm.ThinkingContent{Redacted: response.GetThinkingRedacted()}
@@ -560,6 +575,9 @@ func (decoder *responseDecoder) findTool(delta *devinproto.ExaCodeiumCommonPb_Ch
 	return last
 }
 
+// complete 产出正常收尾事件序列：先置 StopReason，再逐个收尾
+// 打开的 thinking/text/tool 块（工具参数此时一次性成形并修偏），
+// 最后发 Done——partial 即最终消息。
 func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEvent {
 	if decoder.finished {
 		return nil
@@ -616,6 +634,8 @@ func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
 	return []llm.ResponseEvent{{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: &decoder.partial}}
 }
 
+// mapStopReason 把上游 stop_reason 枚举归一到中间模型；上游把
+// 补全时代的多种终止形态都塞在枚举里，同语义值合并映射。
 func mapStopReason(reason devinproto.ExaCodeiumCommonPb_StopReason) llm.StopReason {
 	switch reason {
 	case devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_MAX_TOKENS,

@@ -466,6 +466,9 @@ type rateGateError struct {
 	retryAfter time.Duration
 }
 
+// Error 返回闸门快败的错误文案：沿用上游 resource_exhausted 的
+// "reset in N seconds" 句式，客户端/下游解析 reset hint 的逻辑无需
+// 区分本地闸门与上游真拒。
 func (e *rateGateError) Error() string {
 	return fmt.Sprintf("resource_exhausted: upstream message rate limited by local gate; your limit will reset in %d seconds.", int(math.Ceil(e.retryAfter.Seconds())))
 }

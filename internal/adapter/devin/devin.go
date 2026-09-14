@@ -640,6 +640,8 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	return result, nil
 }
 
+// requestHasImages 判断请求是否含图片块（用户消息与工具结果两类），
+// 供 validateImagesForModel 在无图时跳过目录能力检查。
 func requestHasImages(request llm.RequestMessages) bool {
 	for _, message := range request.Messages {
 		var content []llm.Content
@@ -941,6 +943,9 @@ type devinResponseReceiver interface {
 	Err() error
 }
 
+// Recv 前进到下一个中间响应事件。单消费者契约：decoder/queue/看门狗
+// 全部是无锁内部状态，只能由消费方 goroutine 独占调用；ctx 取消让等待
+// 中的 Recv 返回取消错误，泵协程同时被 stream.cancel 打断。
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 	// 静默计时器挂在流上跨 Recv 复用：每次入等待循环前 Reset 覆盖
 	// 帧间隔。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发，
@@ -1033,7 +1038,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.upstreamConfirmed = true
 				stream.gate.noteUpstreamSuccess()
 			}
-			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
+			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
 			events := stream.decoder.decode(frame.response)
 			if len(events) > 0 {
 				stream.producedEvents = true
@@ -1158,9 +1163,6 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	}
 	// 限流结论与日志开关无关：上游报了 resource_exhausted 就上闩。
 	stream.gate.noteUpstreamError(cause)
-	if stream.recorder == nil {
-		return
-	}
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}
@@ -1180,7 +1182,7 @@ func (stream *responseStream) drainFrames() {
 			if !ok || frame.response == nil {
 				return
 			}
-			recordProtoJSON(stream.recorder, "04-devin-response.jsonl", frame.response)
+			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
 		default:
 			return
 		}
@@ -1209,12 +1211,14 @@ func (stream *responseStream) release(events []llm.ResponseEvent) []llm.Response
 // 对构造好的消息不报错）。
 type protoJSON struct{ message proto.Message }
 
+// MarshalJSON 实现 json.Marshaler：把 protojson 序列化推迟到日志
+// worker 执行，调用方 goroutine 不承担 marshal 成本。
 func (p protoJSON) MarshalJSON() ([]byte, error) { return protojson.Marshal(p.message) }
 
+// recordProtoJSON 把 proto 消息记入调试日志；.jsonl 文件名走追加，
+// 其余整写。recorder 可为 nil（未开调试日志）——Recorder 方法对
+// nil 接收者安全。message 在全部调用点都已保证非空。
 func recordProtoJSON(recorder *debuglog.Recorder, name string, message proto.Message) {
-	if recorder == nil || message == nil {
-		return
-	}
 	if strings.HasSuffix(name, ".jsonl") {
 		recorder.AppendValueJSONL(name, protoJSON{message})
 		return

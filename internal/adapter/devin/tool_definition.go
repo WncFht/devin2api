@@ -112,6 +112,9 @@ func formatToolDescription(description string) string {
 	return strings.TrimSpace(strings.Join(output, "\n"))
 }
 
+// splitDescriptionSentences 按句子边界切分段落：句读终止符后须跟
+// 空白才算边界（e.g./i.e. 等缩写误切由 endsWithAbbreviation 兜住），
+// 中文全角标点无空格尾随即视作边界。
 func splitDescriptionSentences(paragraph string) []string {
 	sentences := make([]string, 0, 1)
 	start := 0
@@ -143,6 +146,7 @@ func splitDescriptionSentences(paragraph string) []string {
 	return sentences
 }
 
+// isSentenceTerminator 判定句读终止符（中英两套）。
 func isSentenceTerminator(character rune) bool {
 	switch character {
 	case '.', '!', '?', '。', '！', '？':
@@ -152,6 +156,8 @@ func isSentenceTerminator(character rune) bool {
 	}
 }
 
+// endsWithAbbreviation 判定片段尾词是否为不结束句子的常见缩写
+// （e.g./i.e./etc./vs./称谓），防止终止符规则把缩写句点当句界。
 func endsWithAbbreviation(fragment string) bool {
 	fields := strings.Fields(strings.ToLower(fragment))
 	if len(fields) == 0 {
@@ -166,6 +172,7 @@ func endsWithAbbreviation(fragment string) bool {
 	}
 }
 
+// escapeXMLAttribute 转义工具名/参数名进 XML 属性值的特殊字符。
 func escapeXMLAttribute(value string) string {
 	var escaped strings.Builder
 	_ = xml.EscapeText(&escaped, []byte(value))
@@ -237,6 +244,8 @@ func validToolName(name string) bool {
 	return true
 }
 
+// stripSchemaAnnotations 剥掉 input schema 里上游不接受的注解键
+// （见 stripSchemaValueAnnotations）；非法 JSON 原样报错。
 func stripSchemaAnnotations(schema json.RawMessage) (json.RawMessage, error) {
 	var value any
 	if err := json.Unmarshal(schema, &value); err != nil {
@@ -250,6 +259,8 @@ func stripSchemaAnnotations(schema json.RawMessage) (json.RawMessage, error) {
 	return encoded, nil
 }
 
+// stripSchemaValueAnnotations 递归剥注解：propertyNames 标记当前
+// 处于 properties 键名层级——属性名本身是要保留的键而非注解。
 func stripSchemaValueAnnotations(value any, propertyNames bool) any {
 	switch typed := value.(type) {
 	case []any:
@@ -323,6 +334,9 @@ func normalizeSchema(schema json.RawMessage) (json.RawMessage, error) {
 // maxSchemaRefDepth 限制 $ref 展开深度，病态嵌套 schema 不至于无限膨胀。
 const maxSchemaRefDepth = 32
 
+// normalizeSchemaValue 递归展开 $ref 并归一 schema 结构：root 是
+// 解析引用用的根文档，resolving 检测循环引用，depth 封顶防止病态
+// 嵌套无限膨胀。
 func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth int) any {
 	if depth > maxSchemaRefDepth {
 		return value
