@@ -60,8 +60,15 @@ release_slugs() {
 }
 
 # latest_tag_of <slug>：解析该 repo 最新 release tag；失败/无限额返回空。
+# 先走 /releases/latest 的 302 重定向——不吃 api.github.com 匿名限流
+# （60/h/IP，共享出口易打满）；失败再退到 REST API。
 latest_tag_of() {
-	local token
+	local loc token
+	loc="$(curl -sfI -m 10 -o /dev/null -w '%{redirect_url}' "https://github.com/$1/releases/latest" 2>/dev/null || true)"
+	if [[ "${loc}" =~ /releases/tag/([^/[:space:]]+) ]]; then
+		printf '%s' "${BASH_REMATCH[1]}"
+		return 0
+	fi
 	token="$(gh_token)"
 	curl -sf -m 10 ${token:+-H "Authorization: Bearer ${token}"} \
 		"https://api.github.com/repos/$1/releases/latest" |
@@ -190,11 +197,11 @@ install_binary() {
 	echo "==> installed ${RUNTIME}/devin-2api (config.yaml synced from repo)"
 }
 
-# yaml_scalar <key>：取 config.yaml 里首个 "key: value" 的值（去引号、
-# 截断行内空格/注释）。只够读本项目扁平的 key: value 行，不是通用解析。
+# yaml_scalar <key>：取 config.yaml 里首个 "key: value" 的值（去单/双
+# 引号、截断行内空格/注释）。只够读本项目扁平的 key: value 行，不是通用解析。
 yaml_scalar() {
 	[[ -f config.yaml ]] || return 0
-	sed -nE "s/^ *$1: *\"?([^\"# ]*).*/\1/p" config.yaml | head -1
+	sed -nE "s/^ *$1: *['\"]?([^'\"# ]*)['\"]?.*/\1/p" config.yaml | head -1
 }
 
 # config_listen_port 从 config.yaml 的 server.listen 提取端口（取最后一个
