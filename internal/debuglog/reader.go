@@ -344,6 +344,15 @@ func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
 	return true
 }
 
+// listIndexCache 缓存 index.jsonl 尾部窗口的全量解析结果，键是文件的
+// (size,mtime)——索引只在请求完成追加或超容量重写时变化，命中期间 ListRequests
+// 只剩内存筛选。entries 按文件序（旧→新）存储，调用方倒序取新。
+type listIndexCache struct {
+	key         string
+	entries     []IndexEntry
+	windowBytes int64 // 缓存窗口覆盖的字节数（=当时 tailRead 长度），供 hasMore 判断
+}
+
 // ListRequests 返回 index.jsonl 中最新 limit 条请求摘要（新的在前）。
 // 索引在目录被清理后仍保留记录，因此列表是完整历史，Detail 才可能 404。
 // 结构化筛选走 filter；HasMore 提示更早历史只存在于原文件中。
@@ -351,33 +360,50 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	if manager == nil || manager.root == "" || limit <= 0 {
 		return ListResult{}
 	}
-	data, err := tailRead(filepath.Join(manager.root, "index.jsonl"), indexTailBytes)
+	path := filepath.Join(manager.root, "index.jsonl")
+	info, err := os.Stat(path)
 	if err != nil {
 		return ListResult{}
 	}
-	lines := bytes.Split(data, []byte{'\n'})
+	key := strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
+	manager.listCacheMu.Lock()
+	if manager.listCache.key != key {
+		data, err := tailRead(path, indexTailBytes)
+		if err != nil {
+			manager.listCacheMu.Unlock()
+			return ListResult{}
+		}
+		lines := bytes.Split(data, []byte{'\n'})
+		all := make([]IndexEntry, 0, len(lines))
+		for _, ln := range lines {
+			if len(ln) == 0 {
+				continue
+			}
+			var e IndexEntry
+			if json.Unmarshal(ln, &e) == nil {
+				all = append(all, e)
+			}
+		}
+		manager.listCache = listIndexCache{key: key, entries: all, windowBytes: int64(len(data))}
+	}
+	cached := manager.listCache
+	manager.listCacheMu.Unlock()
+
 	entries := make([]IndexEntry, 0, limit)
 	conds := parseStatusExpr(filter.Status)
 	// scannedAll 为 false 表示窗口内还有没扫到的行（limit 用尽），更早历史必然存在。
 	scannedAll := true
-	for i := len(lines) - 1; i >= 0; i-- {
-		if len(lines[i]) == 0 {
-			continue
-		}
+	for i := len(cached.entries) - 1; i >= 0; i-- {
 		if len(entries) >= limit {
 			scannedAll = false
 			break
 		}
-		var entry IndexEntry
-		if json.Unmarshal(lines[i], &entry) == nil && filter.match(entry, conds) {
-			entries = append(entries, entry)
+		if filter.match(cached.entries[i], conds) {
+			entries = append(entries, cached.entries[i])
 		}
 	}
 	// 文件比读取窗口大 → 窗口外还有历史；窗口内未扫完 → 同理。
-	hasMore := false
-	if info, statErr := os.Stat(filepath.Join(manager.root, "index.jsonl")); statErr == nil && info.Size() > int64(len(data)) {
-		hasMore = true
-	}
+	hasMore := info.Size() > cached.windowBytes
 	return ListResult{Entries: entries, HasMore: hasMore || !scannedAll}
 }
 

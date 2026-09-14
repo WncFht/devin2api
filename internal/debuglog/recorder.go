@@ -79,6 +79,11 @@ type Manager struct {
 	usage *usageAggregator
 	// replayDone 在启动回放结束时关闭；UsageStats 等它而不是返回半成数据。
 	replayDone chan struct{}
+	// listCache 是 ListRequests 的尾部窗口解析缓存，listCacheMu 保护；
+	// 面板轮询（概览矩阵 1s、请求页 1-5s）反复扫同一 index.jsonl，
+	// 文件 (size,mtime) 没变就免掉 4MB 尾读 + 全量 JSON 解析。
+	listCacheMu sync.Mutex
+	listCache   listIndexCache
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
