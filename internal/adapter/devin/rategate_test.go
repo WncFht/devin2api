@@ -2,7 +2,10 @@ package devin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +22,7 @@ func rateLimitErr(text string) error {
 // 限流闩未到声明时刻：wait 本地拒绝且 retryAfter 等于闩剩余时长
 // （分钟 hint 已向上对齐到 :59 桶界，实际可达 N*60+59s）。
 func TestRateGateLatchRejectsUntilReset(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0)
+	gate := newRateGate(0, 0, 0, 0, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Please try again later. Your limit will reset in 8 minutes. (trace ID: x)"))
 	err := gate.wait(context.Background())
 	var gateErr *rateGateError
@@ -41,7 +44,7 @@ func TestRateGateLatchRejectsUntilReset(t *testing.T) {
 // 闩内不排队：无论闩剩余长短都立即快败，Retry-After 报闩剩余，
 // 由客户端睡到恢复时刻再来，而不是占着并发槽空等。
 func TestRateGateLatchFastFails(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0)
+	gate := newRateGate(0, 0, 0, 0, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	start := time.Now()
 	err := gate.wait(context.Background())
@@ -57,7 +60,7 @@ func TestRateGateLatchFastFails(t *testing.T) {
 // 闩内按滴灌间隔放行探针：槽空闲 → 放行；槽被占 → 快败。
 // 探针是限流期间唯一到达上游的请求，负责探出解闩又不给上游续债。
 func TestRateGateDripReleasesProbes(t *testing.T) {
-	gate := newRateGate(0, 0, 50*time.Millisecond, 0)
+	gate := newRateGate(0, 0, 50*time.Millisecond, 0, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
 	var gateErr *rateGateError
@@ -81,7 +84,7 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 // 任一上游成功帧立即解闩：边际态下拒绝是概率执行，
 // 成功帧是窗口已过的证据，不该再闩到声明时刻。
 func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0)
+	gate := newRateGate(0, 0, 0, 0, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	var gateErr *rateGateError
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
@@ -95,7 +98,7 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 
 // 非限流错误不上闩；新闩只延长不提前。
 func TestRateGateLatchSelective(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0)
+	gate := newRateGate(0, 0, 0, 0, "")
 	gate.noteUpstreamError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")))
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait error = %v, want nil (no latch)", err)
@@ -112,7 +115,7 @@ func TestRateGateLatchSelective(t *testing.T) {
 // 令牌桶：容量打空后排队预估超过 maxHold 时本地拒绝，
 // 而不是放行去上游续债。
 func TestRateGateBucketReject(t *testing.T) {
-	gate := newRateGate(1, 0, 0, 0) // 1 rpm：容量 1、补充 1/60s
+	gate := newRateGate(1, 0, 0, 0, "") // 1 rpm：容量 1、补充 1/60s
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("first wait error = %v, want immediate pass", err)
 	}
@@ -130,7 +133,7 @@ func TestRateGateBucketReject(t *testing.T) {
 // 节奏逐条放行（首条即探针），而不是满桶齐射——实测上游在闩末
 // 仍在边际态，齐射必然重触并各加 ~2.4s 刑期。
 func TestRateGateLatchFreezesBucket(t *testing.T) {
-	gate := newRateGate(60, 0, 0, 0) // 每秒 1 令牌，闩前满桶 60
+	gate := newRateGate(60, 0, 0, 0, "") // 每秒 1 令牌，闩前满桶 60
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	time.Sleep(1100 * time.Millisecond) // 闩过期；若未冻结，桶已重新攒满、三条都瞬时放行
 	for i := 0; i < 3; i++ {
@@ -146,7 +149,7 @@ func TestRateGateLatchFreezesBucket(t *testing.T) {
 
 // 等待中 ctx 取消：返回取消原因且退还令牌。
 func TestRateGateWaitCancelRefunds(t *testing.T) {
-	gate := newRateGate(6, 0, 0, 0) // 0.1/s 补充：排空满桶后缺口 ~10s < maxHold，原地等待
+	gate := newRateGate(6, 0, 0, 0, "") // 0.1/s 补充：排空满桶后缺口 ~10s < maxHold，原地等待
 	for i := 0; i < 6; i++ {
 		if err := gate.wait(context.Background()); err != nil {
 			t.Fatalf("drain wait %d error = %v, want immediate pass", i, err)
@@ -213,5 +216,69 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	reset, ok = common.RateLimitReset("Your limit will reset in 30 seconds.", now)
 	if !ok || !reset.Equal(now.Add(30*time.Second)) {
 		t.Fatalf("seconds RateLimitReset = %v,%v", reset, ok)
+	}
+}
+
+// 冷却闩落盘与恢复：上闩写状态文件，新实例（模拟重启）恢复未过期的闩，
+// 防止重启后裸发把上游限流续长；解闩清文件，过期文件被忽略并清除。
+func TestRateGateLatchPersistRestore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gate-state.json")
+	gate := newRateGate(60, 0, 0, 0, path)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("state file not written: %v", err)
+	}
+
+	restarted := newRateGate(60, 0, 0, 0, path)
+	stats := restarted.stats()
+	if !stats.Latched || stats.LimitedUntil == nil {
+		t.Fatalf("restarted gate should restore latch, stats = %+v", stats)
+	}
+	if err := restarted.wait(context.Background()); err == nil {
+		t.Fatal("restored latch should keep rejecting")
+	}
+
+	restarted.noteUpstreamSuccess()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("release should remove state file, err = %v", err)
+	}
+	if restarted.stats().Latched {
+		t.Fatal("release should unlatch")
+	}
+}
+
+func TestRateGateStateExpiredIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gate-state.json")
+	past := gateStateFile{LimitedUntil: time.Now().Add(-time.Minute)}
+	data, err := json.Marshal(past)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gate := newRateGate(0, 0, 0, 0, path)
+	if gate.stats().Latched {
+		t.Fatal("expired state must not latch")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("expired state file should be removed")
+	}
+}
+
+func TestRateGateSetParamsPreservesLatch(t *testing.T) {
+	gate := newRateGate(60, 0, 0, 0, "")
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
+	gate.setParams(30, 0, 0, 0)
+	stats := gate.stats()
+	if !stats.Latched {
+		t.Fatal("setParams must preserve latch")
+	}
+	if stats.RefillPerSec != 0.5 {
+		t.Fatalf("refillPerSec = %v, want 0.5", stats.RefillPerSec)
+	}
+	gate.setParams(0, 0, 0, 0)
+	if gate.stats().RefillPerSec != 0 {
+		t.Fatal("rpm=0 should disable refill")
 	}
 }

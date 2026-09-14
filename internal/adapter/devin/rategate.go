@@ -3,10 +3,12 @@ package devin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"sync"
 	"time"
 
@@ -53,32 +55,147 @@ type rateGate struct {
 	maxHold      time.Duration
 	dripInterval time.Duration
 	defaultLatch time.Duration
+	// statePath 非空时冷却闩截止时刻落盘（tmp+rename）：重启后仍在闩内
+	// 的实例不会裸发上游把限流续长——上游限流器把被拒尝试也计入窗口。
+	statePath string
+	// 计数器供面板 stats 透出闸门状态；全部在 mu 下读写。
+	latchCount    int
+	dripCount     int
+	rejectLatched int // 闩内被快败的请求数
+	rejectHold    int // 闩外排队预计超 maxHold 被快败的请求数
+}
+
+// gateStateFile 是冷却闩的落盘形态；只持久化截止时刻——滴灌时钟与
+// 令牌桶刻意不存（重启满桶是想要的，闩内节奏按 dripInterval 重排即可）。
+type gateStateFile struct {
+	LimitedUntil time.Time `json:"limited_until"`
+}
+
+// GateStats 是闸门状态快照，面板 /panel/api/stats 的 gate 段透出。
+type GateStats struct {
+	Latched       bool       `json:"latched"`
+	LimitedUntil  *time.Time `json:"limited_until,omitempty"`
+	LatchCount    int        `json:"latch_count"`
+	DripCount     int        `json:"drip_count"`
+	RejectLatched int        `json:"reject_latched_count"`
+	RejectHold    int        `json:"reject_hold_count"`
+	RefillPerSec  float64    `json:"refill_per_sec"`
 }
 
 // newRateGate 创建速率闸门；rpm<=0 时只有冷却闩生效，不做主动限速。
-// 时长参数 <=0 时用默认值。
-func newRateGate(rpm int, maxHold, dripInterval, defaultLatch time.Duration) *rateGate {
+// 时长参数 <=0 时用默认值。statePath 非空时恢复未过期的冷却闩。
+func newRateGate(rpm int, maxHold, dripInterval, defaultLatch time.Duration, statePath string) *rateGate {
 	gate := &rateGate{
 		lastAccrual:  time.Now(),
 		maxHold:      maxHold,
 		dripInterval: dripInterval,
 		defaultLatch: defaultLatch,
+		statePath:    statePath,
 	}
-	if gate.maxHold <= 0 {
-		gate.maxHold = gateDefaultMaxHold
+	gate.setParams(rpm, maxHold, dripInterval, defaultLatch)
+	if rpm > 0 {
+		gate.tokens = gate.capacity
 	}
-	if gate.dripInterval <= 0 {
-		gate.dripInterval = gateDefaultDripInterval
-	}
-	if gate.defaultLatch <= 0 {
-		gate.defaultLatch = gateDefaultLatch
-	}
+	gate.restoreState()
+	return gate
+}
+
+// setParams 原位更新闸门参数（reload 热路径）：闩态与令牌桶保留，
+// rpm 变化只改补充速率与容量，存量令牌按新容量截断。
+func (gate *rateGate) setParams(rpm int, maxHold, dripInterval, defaultLatch time.Duration) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	gate.maxHold = gateDurationOrDefault(maxHold, gateDefaultMaxHold)
+	gate.dripInterval = gateDurationOrDefault(dripInterval, gateDefaultDripInterval)
+	gate.defaultLatch = gateDurationOrDefault(defaultLatch, gateDefaultLatch)
 	if rpm > 0 {
 		gate.refillPerSec = float64(rpm) / 60
 		gate.capacity = float64(rpm)
-		gate.tokens = gate.capacity
+	} else {
+		gate.refillPerSec = 0
+		gate.capacity = 0
 	}
-	return gate
+	gate.tokens = math.Min(gate.tokens, gate.capacity)
+}
+
+// gateDurationOrDefault 把 <=0 的时长参数回落到默认值。
+func gateDurationOrDefault(value, fallback time.Duration) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+// restoreState 在启动时恢复未过期的冷却闩：冻结令牌桶到闩末、滴灌
+// 时钟按间隔重排——与 noteUpstreamError 的延闩路径保持同一组不变量。
+// 文件缺失/损坏/已过期都按无闩处理并顺手清掉过期文件。
+func (gate *rateGate) restoreState() {
+	if gate.statePath == "" {
+		return
+	}
+	data, err := os.ReadFile(gate.statePath)
+	if err != nil {
+		return
+	}
+	var state gateStateFile
+	if err := json.Unmarshal(data, &state); err != nil || !state.LimitedUntil.After(time.Now()) {
+		_ = os.Remove(gate.statePath)
+		return
+	}
+	gate.limitedUntil = state.LimitedUntil
+	gate.nextDrip = time.Now().Add(gate.dripInterval)
+	gate.tokens = math.Min(gate.tokens, 0)
+	gate.lastAccrual = state.LimitedUntil
+	slog.Warn("rate gate latch restored from state file", "until", state.LimitedUntil.Format(time.RFC3339))
+}
+
+// persistState 把冷却闩截止时刻原子落盘（tmp+rename）；写失败只记
+// 日志——落盘是防重启续限的保险，不挡请求路径。
+func (gate *rateGate) persistState(until time.Time) {
+	if gate.statePath == "" {
+		return
+	}
+	data, err := json.Marshal(gateStateFile{LimitedUntil: until})
+	if err != nil {
+		return
+	}
+	tmp := gate.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		slog.Warn("rate gate state write failed", "error", err)
+		return
+	}
+	if err := os.Rename(tmp, gate.statePath); err != nil {
+		slog.Warn("rate gate state rename failed", "error", err)
+	}
+}
+
+// clearState 在解闩后移除状态文件；文件不存在不算错误。
+func (gate *rateGate) clearState() {
+	if gate.statePath == "" {
+		return
+	}
+	if err := os.Remove(gate.statePath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("rate gate state remove failed", "error", err)
+	}
+}
+
+// stats 返回闸门状态快照。
+func (gate *rateGate) stats() GateStats {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	stats := GateStats{
+		Latched:       !gate.limitedUntil.IsZero() && time.Now().Before(gate.limitedUntil),
+		LatchCount:    gate.latchCount,
+		DripCount:     gate.dripCount,
+		RejectLatched: gate.rejectLatched,
+		RejectHold:    gate.rejectHold,
+		RefillPerSec:  gate.refillPerSec,
+	}
+	if !gate.limitedUntil.IsZero() {
+		until := gate.limitedUntil
+		stats.LimitedUntil = &until
+	}
+	return stats
 }
 
 // wait 阻塞到本次上游发送拿到许可，或判定不值得等：
@@ -115,10 +232,12 @@ func (gate *rateGate) wait(ctx context.Context) error {
 				// 探针槽空闲：放行并推进下一个槽。滴灌放行不耗令牌——
 				// 闩内节奏由槽位控制，桶仍冻结到闩末。
 				gate.nextDrip = now.Add(gate.dripInterval)
+				gate.dripCount++
 				gate.mu.Unlock()
 				return nil
 			}
 			retryAfter := gate.limitedUntil.Sub(now)
+			gate.rejectLatched++
 			gate.mu.Unlock()
 			return &rateGateError{retryAfter: retryAfter}
 		}
@@ -132,6 +251,7 @@ func (gate *rateGate) wait(ctx context.Context) error {
 			wait = time.Duration((1 - gate.tokens) / gate.refillPerSec * float64(time.Second))
 		}
 		if wait > gate.maxHold {
+			gate.rejectHold++
 			gate.mu.Unlock()
 			return &rateGateError{retryAfter: wait}
 		}
@@ -179,6 +299,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	if extended {
 		gate.limitedUntil = until
 		gate.nextDrip = now.Add(gate.dripInterval)
+		gate.latchCount++
 		// 冻结令牌桶到闩末：清空存量额度且闩内不累计，解除后队列
 		// 按 refill 节奏逐条放行而非满桶齐射。
 		gate.tokens = math.Min(gate.tokens, 0)
@@ -186,6 +307,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	}
 	gate.mu.Unlock()
 	if extended {
+		gate.persistState(until)
 		slog.Warn("upstream message rate limited; drip-latching new requests", "until", until.Format(time.RFC3339), "latch", until.Sub(now))
 	} else {
 		slog.Info("upstream message rate limited while latched", "remaining", remaining)
@@ -208,6 +330,7 @@ func (gate *rateGate) noteUpstreamSuccess() {
 	}
 	gate.mu.Unlock()
 	if latched {
+		gate.clearState()
 		slog.Info("rate gate released: upstream accepted a message")
 	}
 }

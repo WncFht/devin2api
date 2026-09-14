@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -70,6 +71,10 @@ type Config struct {
 	GateMaxHold      time.Duration
 	GateDripInterval time.Duration
 	GateDefaultLatch time.Duration
+	// GateStatePath 非空时冷却闩截止时刻落盘到该文件，进程重启后
+	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
+	// 裸发会把限流续长。
+	GateStatePath string
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
@@ -99,7 +104,11 @@ func (config Config) clientIdentity() (name, version, os string) {
 
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
-	config Config
+	// configMu 保护 config：ApplyConfig 热路径整体换值，读侧经
+	// currentConfig 取快照。proxy/base_url/force_http1 等烤进
+	// transport 的字段虽在结构里但换值不生效（见 ApplyConfig）。
+	configMu sync.RWMutex
+	config   Config
 	// token 是当前生效的上游凭据：unauthenticated 自愈会原地更新，
 	// transport 经 tokenFunc 每次请求读取，无需重建 HTTP 客户端。
 	tokenMu sync.RWMutex
@@ -156,7 +165,8 @@ func New(config Config) (*Adapter, error) {
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
 		gate: newRateGate(config.MaxRPM,
-			config.GateMaxHold, config.GateDripInterval, config.GateDefaultLatch),
+			config.GateMaxHold, config.GateDripInterval, config.GateDefaultLatch,
+			config.GateStatePath),
 		assignments: make(map[string]resolvedAssignment),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
@@ -187,11 +197,87 @@ func (adapter *Adapter) TokenFunc() func() string {
 	return adapter.currentToken
 }
 
+// currentConfig 返回当前生效配置的读快照。
+func (adapter *Adapter) currentConfig() Config {
+	adapter.configMu.RLock()
+	defer adapter.configMu.RUnlock()
+	return adapter.config
+}
+
+// Aliases 返回当前生效的模型别名映射，供面板做目录缺席校验。
+func (adapter *Adapter) Aliases() map[string]string {
+	return adapter.currentConfig().Aliases
+}
+
+// GateStats 返回速率闸门状态快照，供面板 stats 端点透出。
+func (adapter *Adapter) GateStats() GateStats {
+	return adapter.gate.stats()
+}
+
+// ApplyConfig 热应用新配置：读侧每次请求取快照的字段（model、aliases、
+// client_*）与闸门参数/token 直接换值即生效；烤进 transport 的
+// base_url/proxy/force_http1 换值不生效，列入 requiresRestart 由调用方
+// 回报。返回的两个列表只含值发生变化的字段。
+func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []string) {
+	adapter.configMu.Lock()
+	prev := adapter.config
+	// 运行时字段不归配置管：状态文件路径与 JWT 缓存沿用旧值。
+	next.GateStatePath = prev.GateStatePath
+	next.ModelAssignmentJWT = prev.ModelAssignmentJWT
+	adapter.config = next
+	adapter.configMu.Unlock()
+
+	if prev.Model != next.Model {
+		applied = append(applied, "devin.model")
+	}
+	if !maps.Equal(prev.Aliases, next.Aliases) {
+		applied = append(applied, "devin.aliases")
+	}
+	if prev.ClientName != next.ClientName {
+		applied = append(applied, "devin.client_name")
+	}
+	if prev.ClientVersion != next.ClientVersion {
+		applied = append(applied, "devin.client_version")
+	}
+	if prev.ClientOS != next.ClientOS {
+		applied = append(applied, "devin.client_os")
+	}
+	if prev.Token != next.Token {
+		adapter.tokenMu.Lock()
+		adapter.token = next.Token
+		adapter.tokenMu.Unlock()
+		applied = append(applied, "devin.token")
+	}
+	adapter.gate.setParams(next.MaxRPM, next.GateMaxHold, next.GateDripInterval, next.GateDefaultLatch)
+	if prev.MaxRPM != next.MaxRPM {
+		applied = append(applied, "devin.max_rpm")
+	}
+	if prev.GateMaxHold != next.GateMaxHold {
+		applied = append(applied, "devin.gate_max_hold_seconds")
+	}
+	if prev.GateDripInterval != next.GateDripInterval {
+		applied = append(applied, "devin.gate_drip_interval_seconds")
+	}
+	if prev.GateDefaultLatch != next.GateDefaultLatch {
+		applied = append(applied, "devin.gate_default_latch_seconds")
+	}
+	if prev.BaseURL != next.BaseURL {
+		requiresRestart = append(requiresRestart, "devin.base_url")
+	}
+	if prev.Proxy != next.Proxy {
+		requiresRestart = append(requiresRestart, "devin.proxy")
+	}
+	if prev.ForceHTTP1 != next.ForceHTTP1 {
+		requiresRestart = append(requiresRestart, "devin.force_http1")
+	}
+	return applied, requiresRestart
+}
+
 // reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
 // 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
 // 凭据静默失效是排障天敌，进程日志里必须留痕。
 func (adapter *Adapter) reloadToken() bool {
-	source := adapter.config.TokenSource
+	source := adapter.currentConfig().TokenSource
 	if source == nil {
 		return false
 	}
@@ -223,11 +309,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		return nil, fmt.Errorf("validate Devin request: %w", err)
 	}
 	request, sanitizeHits := sanitizeRequest(request)
+	cfg := adapter.currentConfig()
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
-		model = adapter.config.Model
+		model = cfg.Model
 	}
-	if alias, ok := adapter.config.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
+	if alias, ok := cfg.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
 		model = strings.TrimSpace(alias)
 	}
 	recorder := debuglog.FromContext(ctx)
@@ -242,7 +329,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError("devin_connect", err)
 		return nil, err
 	}
-	cfg := adapter.config
+	cfg = adapter.currentConfig()
 	cfg.Model = model
 	cfg.Token = adapter.currentToken()
 	cfg.ModelAssignmentJWT = assignmentJWT
@@ -487,7 +574,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	if ok {
 		return cached, nil
 	}
-	name, version, os := adapter.config.clientIdentity()
+	name, version, os := adapter.currentConfig().clientIdentity()
 	resp, err := adapter.apiClient.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
 		ModelRouterUid: proto.String(routerUID),
