@@ -164,6 +164,10 @@ type Recorder struct {
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
 	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
+	// rateLimited 标记本请求被限流语义终结（上游 429 或本地闸门快败）。
+	// 流内错误事件下发的限流 HTTP 状态仍是 200，单靠 status_code 认不出——
+	// 责任归因与 429 采样都靠这个显式标记而不是状态码。
+	rateLimited atomic.Bool
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，writeMeta/appendIndex 读，走 mutex 同步。
@@ -570,6 +574,16 @@ func (recorder *Recorder) SetRetryAfter(seconds int) {
 	recorder.retryAfterSeconds.Store(int64(seconds))
 }
 
+// SetRateLimited 标记本请求被限流语义终结：状态码映射为 429 的错误
+// （上游 resource_exhausted / 本地闸门）都该置位——流内错误事件下发的
+// 限流 HTTP 状态仍是 200，没这个标记聚合层认不出它是限流。
+func (recorder *Recorder) SetRateLimited() {
+	if recorder == nil {
+		return
+	}
+	recorder.rateLimited.Store(true)
+}
+
 // SetRepairs 记录请求投影到上游协议时发生的修复计数；全零不存，
 // meta.json 就不出现 repairs 字段——「代理没动过」本身就是排障答案。
 func (recorder *Recorder) SetRepairs(repairs llm.RequestRepairs) {
@@ -811,6 +825,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if retry := recorder.retryAfterSeconds.Load(); retry > 0 {
 		meta["retry_after_seconds"] = retry
+	}
+	if recorder.rateLimited.Load() {
+		meta["rate_limited"] = true
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		meta["repairs"] = repairs

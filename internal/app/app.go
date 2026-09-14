@@ -705,6 +705,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// 整个重试预算。注意：非 429 状态的 Retry-After 不可超过 60s——
 	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
+		recorder.SetRateLimited()
 		if resetAt, ok := common.RateLimitReset(message, time.Now()); ok {
 			wait := int(math.Ceil(time.Until(resetAt).Seconds()))
 			writer.Header().Set("Retry-After", strconv.Itoa(wait))

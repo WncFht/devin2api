@@ -59,6 +59,10 @@ type IndexEntry struct {
 	// RetryAfterSeconds 是上游限流给出的 reset 秒数 hint，
 	// 供聚合区分「有退避提示的限流」与「裸限流」；非限流请求为 0。
 	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
+	// RateLimited 标记本请求被限流语义终结（上游 429 / 本地闸门 / 流内
+	// 限流错误事件）。HTTP 状态码认不全限流——流内下发的限流仍是 200，
+	// 责任归因与限流采样用本字段而不是 status_code。
+	RateLimited bool `json:"rate_limited,omitempty"`
 	// Retries 是上游重发次数（attempt2+，token 自愈/空响应/transport
 	// 重开）；明细在同目录 meta.json 的 retry_attempts 与 04 的
 	// retry_attempt 分界行。0 表示一次发送完成。
@@ -117,6 +121,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
+		RateLimited:       recorder.rateLimited.Load(),
 		Retries:           len(recorder.retryAttempts()),
 		PrematureEndTurn:  completion.PrematureEndTurn,
 	}

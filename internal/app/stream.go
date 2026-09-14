@@ -226,6 +226,11 @@ func (application *App) streamCompletion(
 	*responseBytes += out.bytes
 	if streamErr != nil {
 		noteRetryAfter(recorder, streamErr.Error())
+		// 流内错误事件下发的限流 HTTP 状态仍是 200——按文案语义补标，
+		// 责任归因与 429 采样才不会把这批限流漏成普通失败。
+		if common.HTTPStatus(streamErr.Error()) == http.StatusTooManyRequests {
+			recorder.SetRateLimited()
+		}
 		if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", streamErr)

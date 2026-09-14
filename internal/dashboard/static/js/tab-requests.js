@@ -147,13 +147,15 @@ const Requests = (() => {
         const premature = e.premature_end_turn ? ' <span class="badge badge-medium" title="工具结果之后模型直接 end_turn，未继续调用工具">早停</span>' : '';
         const stream = e.stream ? ' <span class="badge badge-sse">SSE</span>' : '';
         const stage = e.error_stage ? '<div><span class="badge badge-high">' + esc(e.error_stage) + '</span></div>' : '';
+        // 流内下发的限流 HTTP 状态仍是 200——rate_limited 标记是唯一能认出它的字段。
+        const rl = e.rate_limited && e.status_code !== 429 ? ' <span class="badge badge-medium" title="限流语义经流内错误事件下发（HTTP 200 + error event）">流内429</span>' : '';
         const retry = e.retries ? ' <span class="badge badge-sse" title="上游重发 ' + e.retries + ' 次（attempt 文件与 retry_attempt 分界行见详情）">重试' + e.retries + '</span>' : '';
         const cache = e.cache_read_tokens ? '<div class="muted">缓存读 ' + fmtNum(e.cache_read_tokens) + '</div>' : '';
         const keyh = e.key_hash ? '<div class="muted" title="key hash">' + esc(e.key_hash) + '</div>' : '';
         html += '<tr data-dir="' + qa(e.dir) + '">' +
           '<td class="mono" title="' + esc(e.started_at || '') + '">' + fmtTime(e.started_at) + '</td>' +
           '<td>' + esc(e.api || '-') + '</td>' +
-          '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + retry + stage + '</td>' +
+          '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + retry + rl + stage + '</td>' +
           '<td>' + esc(e.requested_model || '-') + resolved + mismatch + premature + '</td>' +
           '<td class="mono ' + secClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
           '<td class="mono ' + secClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
@@ -261,7 +263,7 @@ const Requests = (() => {
       ['请求模型', m.requested_model], ['实际模型', m.model], ['响应模型', m.response_model],
       ['模型错配', m.model_mismatch ? '是' : null], ['可疑早停', m.premature_end_turn ? '工具结果后纯文本 end_turn' : null],
       ['开始', m.started_at], ['完成', m.finished_at], ['耗时', fmtMs(m.duration_ms)], ['上游TTFB', fmtMs(m.first_upstream_ms)], ['客户端TTFB', fmtMs(m.first_client_ms)],
-      ['上游请求ID', m.upstream_request_id], ['客户端IP', m.client && m.client.ip], ['UA', m.client && m.client.user_agent], ['Key哈希', m.client && m.client.key_hash],
+      ['上游请求ID', m.upstream_request_id], ['限流标记', m.rate_limited ? '是（含流内下发）' : null], ['重试等待', m.retry_after_seconds != null ? m.retry_after_seconds + 's' : null], ['客户端IP', m.client && m.client.ip], ['UA', m.client && m.client.user_agent], ['Key哈希', m.client && m.client.key_hash],
       ['客户端请求ID', m.client && m.client.request_id],
       ['Tokens', m.usage ? (m.usage.input + ' in / ' + m.usage.output + ' out / ' + m.usage.cache_read + ' cached') : null],
       ['丢弃事件', m.dropped_events]].forEach(kv => {

@@ -81,11 +81,17 @@ func decodeWindow(e IndexEntry) (int64, int64, bool) {
 //     编码失败）——SLA 口径里唯一算失分的类别；
 //   - ""：非失败请求。
 //
-// 判定只用索引字段（result/status/error_stage），回放旧索引行同样可归类。
-// 已知盲区：走 200+流内错误事件下发的上游限流（OpenAI 系 stream）状态码
-// 记 200 而非 429，会归入 upstream——这批限流没有结构化标记可认。
+// isRateLimited 判定索引行是否被限流语义终结：HTTP 429（上游真拒或本地
+// 闸门快败），或 200+流内错误事件下发的限流——后者靠 index 的
+// rate_limited 标记认出（recorder 在记录错误时按文案语义置位）。
+func isRateLimited(e IndexEntry) bool {
+	return e.StatusCode == 429 || e.RateLimited
+}
+
+// 判定只用索引字段（result/status/error_stage/rate_limited），回放旧索引
+// 行同样可归类——旧行无 rate_limited 字段，流内限流仍按 upstream 归。
 func errorOwner(e IndexEntry) string {
-	if e.StatusCode == 429 {
+	if isRateLimited(e) {
 		return "business_limited"
 	}
 	if e.Result == "disconnected" || e.Result == "aborted" {
@@ -115,7 +121,7 @@ func (t *usageTotals) add(e IndexEntry) {
 	case "upstream":
 		t.UpstreamFaults++
 	}
-	if e.StatusCode == 429 {
+	if isRateLimited(e) {
 		t.RateLimited++
 	}
 	t.InputTokens += e.InputTokens
@@ -409,7 +415,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 	if e.Result == "disconnected" || e.Result == "aborted" {
 		a.mins[idx].disconnected++
 	}
-	if e.StatusCode == 429 {
+	if isRateLimited(e) {
 		a.mins[idx].rateLimited++
 	}
 	switch errorOwner(e) {
@@ -489,7 +495,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 		}
 		a.starts = keep
 	}
-	if e.StatusCode == 429 {
+	if isRateLimited(e) {
 		end := started.Unix() + e.DurationMS/1000
 		var rpm int64
 		for _, s := range a.starts {
@@ -517,7 +523,7 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	case e.Result == "disconnected" || e.Result == "aborted":
 		d.Disconnected++
 	}
-	if e.StatusCode == 429 {
+	if isRateLimited(e) {
 		d.RateLimited++
 	}
 	switch errorOwner(e) {
