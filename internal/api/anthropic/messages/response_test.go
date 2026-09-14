@@ -117,9 +117,49 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	if delta["type"] != "signature_delta" || delta["signature"] != "sig" || signatureDelta["index"] != float64(0) {
 		t.Fatalf("signature delta = %#v", signatureDelta)
 	}
-	stopBlock := decodeEventData(t, encoded[6])
-	if stopBlock["index"] != float64(0) || stopBlock["content_block"] != nil {
-		t.Fatalf("thinking stop block = %#v", stopBlock)
+	// 签名不再就地关块：挂起的思考块由流终止时的 flush 统一收尾，
+	// 因此 index=1 的工具块先于 index=0 的思考块 stop。
+	toolStop := decodeEventData(t, encoded[6])
+	if toolStop["index"] != float64(1) {
+		t.Fatalf("tool stop block = %#v", toolStop)
+	}
+	thinkingStop := decodeEventData(t, encoded[7])
+	if thinkingStop["index"] != float64(0) || thinkingStop["content_block"] != nil {
+		t.Fatalf("thinking stop block = %#v", thinkingStop)
+	}
+}
+
+// TestStreamEncoderEmitsEverySignatureFragment 钉住上游把签名拆成多帧的
+// 形态：每个 thinking_signature 事件都必须发 signature_delta——首个分片
+// 就关块会让客户端只累积到前缀，下轮回放截断签名被上游拒。
+func TestStreamEncoderEmitsEverySignatureFragment(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}},
+		StopReason: llm.StopReasonPending,
+	}
+	withSig := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "AAABBB"}},
+		StopReason: llm.StopReasonStop,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "AAA", Partial: withSig},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "BBB", Partial: withSig},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: withSig},
+	})
+	var signatures []string
+	for _, event := range encoded {
+		delta, ok := decodeEventData(t, event)["delta"].(map[string]any)
+		if ok && delta["type"] == "signature_delta" {
+			signatures = append(signatures, delta["signature"].(string))
+		}
+	}
+	if len(signatures) != 2 || signatures[0] != "AAA" || signatures[1] != "BBB" {
+		t.Fatalf("signature deltas = %v, want [AAA BBB]", signatures)
 	}
 }
 

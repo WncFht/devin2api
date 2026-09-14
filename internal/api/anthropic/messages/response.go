@@ -235,29 +235,27 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 	}, encoder.stopThinking(state)...), nil
 }
 
-// thinkingSignature 处理尾随签名帧：挂起中的块补 signature_delta 并收尾。
+// thinkingSignature 处理尾随签名帧：增量按 signature_delta 下发，
+// 块保持挂起、由 flushPendingThinking 统一收尾。上游可把签名拆成
+// 多帧（decoder 每帧发一个事件），首个分片就关块会把后续分片丢在
+// content_block_stop 之后——客户端只累积到前缀，下轮回放截断签名
+// 被上游拒。
 func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
 	state := encoder.block(event.ContentIndex, "thinking")
 	if state == nil {
 		return nil, fmt.Errorf("thinking signature at content index %d without thinking_start", event.ContentIndex)
 	}
 	state.signature.WriteString(event.Delta)
-	if !state.pendingSig {
-		// 签名帧晚于 content_block_stop 到达属可容忍失序（块已收尾，
-		// 增量无处可发）——与块不存在（解码器 bug）区分开。
+	if state.redacted {
+		// redacted 块的 data 没有 signature_delta 增量形态，只能在收尾的
+		// content_block_stop 整体下发——分片继续累积，flush 时随 data 走。
 		return nil, nil
 	}
-	state.pendingSig = false
-	if state.redacted {
-		// redacted 块的 data 只在收尾的 content_block_stop 里整体下发，
-		// 没有 signature_delta 这种增量形态。
-		return encoder.stopThinking(state), nil
-	}
-	return append([]SSEEvent{
+	return []SSEEvent{
 		encoder.emitBlockDelta(state.index, blockDelta{
 			Type: "signature_delta", Signature: event.Delta,
 		}),
-	}, encoder.stopThinking(state)...), nil
+	}, nil
 }
 
 // flushPendingThinking 在流终止（finish/failed）前补发挂起的思考块收尾，
