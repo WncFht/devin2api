@@ -4,7 +4,10 @@ server:
   max_concurrency: 1024
 
 debug:
-  enabled: false
+  # 请求级调试日志是本服务的排障基础：logs/ 阶段文件、index.jsonl、
+  # 面板 usage/requests 全部依赖它，关闭则整套排障工作流不可用。
+  # 记录含请求正文，注意隐私与磁盘（上限由 max_total_mb 兜底）。
+  enabled: true
   # 请求日志目录保留天数；<=0 不按时间清理。默认 14。
   # retention_days: 14
   # logs 目录总量上限（MB），超限从最旧目录开始删；<=0 不限制。默认 1024。
@@ -21,8 +24,12 @@ debug:
 
 devin:
   base_url: "https://server.codeium.com"
-  token: "devin-session-token$mock-token"
-  # model: "swe-1-7"
+  # session token；留空则按 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量
+  # → Devin CLI credentials.toml 自动发现（CLI 续期自动跟随，推荐）。
+  # 写死字面量会旁路该链路，token 过期后只能手改本文件；
+  # 本机没有 Devin CLI 时才需要填字面量。
+  token: ""
+  # model: "swe-2-max"
   model: "glm-5-2"
   # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://
   # 留空则直连或走系统环境变量 HTTP_PROXY/HTTPS_PROXY。
@@ -36,6 +43,7 @@ devin:
   # aliases:
   #   swe-2: "swe-2-max"
   #   glm-5.2: "glm-5-2"
+  #   glm-5.3-max: "glm-5-3-max"
   # 发给上游 metadata 的客户端身份；默认与真实 Devin CLI 抓包一致
   #（chisel / 3000.2.17 / mac）。上游若给新模型加版本门（某模型突然
   # not_found 或 permission_denied），bump client_version 即可，不必发版。
@@ -43,10 +51,12 @@ devin:
   # client_version: "3000.2.17"
   # client_os: "mac"
   # 发往上游 GetChatMessage 的消息速率上限（条/分钟），令牌桶实现、
-  # 桶容量为一分钟额度可容纳突发；<=0 或不填不限速。上游报
-  # resource_exhausted 时本地冷却闩按其 reset 时刻拦停后续请求，
-  # 不受此项影响。
-  # max_rpm: 50
+  # 桶容量为一分钟额度可容纳突发；<=0 或不填不限速——不建议：上游
+  # 限流器按分钟桶计数且把被拒尝试计入，不限速时突发容易触顶。
+  # 冷却闩本身始终生效（resource_exhausted 后按其 reset 时刻拦停，
+  # 闩截止时刻落盘 logs/gate-state.json、重启恢复），max_rpm 决定
+  # 的是触闩频率而不是兜底。
+  max_rpm: 80
   # 上游限流冷却闩参数（通常无需调整）：
   # gate_max_hold_seconds: 闩外令牌排队允许的最长等待秒数，超出快速
   #   失败 429 + Retry-After。默认 15。
