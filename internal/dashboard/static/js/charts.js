@@ -8,9 +8,32 @@ const Charts = (() => {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
   }
-  const palette = ['#818cf8', '#34d399', '#fbbf24', '#f87171', '#38bdf8', '#f472b6', '#a78bfa', '#22d3ee'];
-  const axisColor = cssVar('--border-strong', '#3a415a');
-  const textDim = cssVar('--muted', '#8b93a7');
+  // 语义色表：JS 侧不再散落令牌抄本，主题改色只动 panel.css。
+  // C.axis 是图表次级文字专用灰（--chart-dim），C.line 是 border-strong
+  // 在暗底上的实体近似色——画布上画半透明细线会发虚，轴线用实体色。
+  const C = {
+    accent: cssVar('--accent', '#818cf8'),
+    ok: cssVar('--ok', '#34d399'),
+    warn: cssVar('--warn', '#fbbf24'),
+    err: cssVar('--err', '#f87171'),
+    info: cssVar('--info', '#38bdf8'),
+    pink: cssVar('--pink', '#f472b6'),
+    violet: cssVar('--violet', '#a78bfa'),
+    cyan: cssVar('--cyan', '#22d3ee'),
+    text: cssVar('--text', '#e5e9f2'),
+    dim: cssVar('--text-dim', '#aab1c5'),
+    surface: cssVar('--surface', '#12151f'),
+    surface3: cssVar('--surface-3', '#1f2434'),
+    bg: cssVar('--bg', '#0b0e14'),
+    borderStrong: cssVar('--border-strong', 'rgba(148,163,184,.2)'),
+    axis: cssVar('--chart-dim', '#8b93a7'),
+    line: '#3a415a',
+  };
+  const palette = [C.accent, C.ok, C.warn, C.err, C.info, C.pink, C.violet, C.cyan];
+  const axisColor = C.line;
+  const textDim = C.axis;
+  // slate-400 任意 alpha 变体：分格线/遮罩/十字线共用底色的自由透明度。
+  function slate(a) { return 'rgba(148,163,184,' + a + ')'; }
 
   // base 返回所有图共用的暗色骨架：色板、坐标轴、tooltip、图例。
   function base() {
@@ -24,13 +47,13 @@ const Charts = (() => {
       // 只有一套外观；内容排版由调用方复用 mt-* 结构类保持一致。
       tooltip: {
         trigger: 'axis', confine: true,
-        backgroundColor: '#1f2434',
-        borderColor: 'rgba(148,163,184,.20)',
+        backgroundColor: C.surface3,
+        borderColor: C.borderStrong,
         borderWidth: 1,
         padding: [9, 12, 10],
-        textStyle: { color: '#e5e9f2', fontSize: 11.5 },
+        textStyle: { color: C.text, fontSize: 11.5 },
         extraCssText: 'border-radius:8px;box-shadow:0 10px 28px rgba(0,0,0,.5);line-height:1.65;',
-        axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
+        axisPointer: { type: 'line', lineStyle: { color: slate(0.4) } },
       },
       xAxis: {
         type: 'time',
@@ -50,9 +73,24 @@ const Charts = (() => {
 
   // render 同容器重复渲染时复用实例。定时刷新会重建 option：先把用户当前
   // 的 dataZoom 窗口记下来，渲染后恢复，避免 10s 轮询冲掉正在细看的缩放。
+  // 悬停冻结：setOption 会拆掉正在显示的 tooltip。指针在图上时只记最新
+  // option 不渲染，mouseleave 补一笔——轮询照跑，画面不打扰悬浮窗。
+  const deferred = new Map(), leaveBound = new WeakSet();
   function render(el, option) {
     if (!el || !window.echarts) return null;
     let inst = echarts.getInstanceByDom(el);
+    if (inst && el.matches(':hover')) {
+      deferred.set(el, option);
+      if (!leaveBound.has(el)) {
+        leaveBound.add(el);
+        el.addEventListener('mouseleave', () => {
+          const o = deferred.get(el);
+          deferred.delete(el);
+          if (o) render(el, o);
+        });
+      }
+      return inst;
+    }
     let savedZoom = null;
     if (inst) {
       const cur = (inst.getOption().dataZoom || [])[0];
@@ -68,6 +106,11 @@ const Charts = (() => {
       } else if (opt[k] && opt[k] !== base()[k]) {
         opt[k] = Object.assign({}, base()[k], opt[k]);
       }
+    });
+    // tooltip/legend 同轴处理：顶层浅合并会把调用方传入的整个键顶掉，
+    // 容器令牌全丢、回落 echarts 默认灰卡——只传差异字段，缺省由 base 补。
+    ['tooltip', 'legend'].forEach(k => {
+      if (opt[k] && !Array.isArray(opt[k])) opt[k] = Object.assign({}, base()[k], opt[k]);
     });
     if (savedZoom && opt.dataZoom) {
       opt.dataZoom = opt.dataZoom.map(z => Object.assign({}, z, savedZoom));
@@ -129,7 +172,7 @@ const Charts = (() => {
     }
     if (!ranges.length) return null;
     return {
-      silent: true, itemStyle: { color: 'rgba(148,163,184,0.07)' },
+      silent: true, itemStyle: { color: slate(0.07) },
       data: ranges.map(r => [{ xAxis: r[0] * 1000 }, { xAxis: r[1] * 1000 }]),
     };
   }
@@ -144,7 +187,7 @@ const Charts = (() => {
       },
       markPoint: {
         symbol: 'pin', symbolSize: 34,
-        label: { fontSize: 9, color: '#0b0e14', formatter: p => fmtMs(p.value) },
+        label: { fontSize: 9, color: C.bg, formatter: p => fmtMs(p.value) },
         data: [{ type: 'max', name: 'MAX' }],
       },
     };
@@ -162,7 +205,7 @@ const Charts = (() => {
   function zoom(pts) {
     const z = [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }];
     if (pts && pts.length > 150) {
-      z.push({ type: 'slider', height: 18, bottom: 2, borderColor: 'transparent', backgroundColor: 'rgba(148,163,184,0.06)', fillerColor: 'rgba(129,140,248,0.15)', handleStyle: { color: '#818cf8' }, textStyle: { color: textDim, fontSize: 10 }, dataBackground: { lineStyle: { color: axisColor }, areaStyle: { color: 'rgba(148,163,184,0.08)' } } });
+      z.push({ type: 'slider', height: 18, bottom: 2, borderColor: 'transparent', backgroundColor: slate(0.06), fillerColor: hexA(C.accent, 0.15), handleStyle: { color: C.accent }, textStyle: { color: textDim, fontSize: 10 }, dataBackground: { lineStyle: { color: axisColor }, areaStyle: { color: slate(0.08) } } });
     }
     return z;
   }
@@ -174,5 +217,5 @@ const Charts = (() => {
     });
   }, 200));
 
-  return { render, line, bar, ts, tsList, zoom, palette, area, hexA, gapMark, latencyMarks, empty };
+  return { render, line, bar, ts, tsList, zoom, palette, area, hexA, gapMark, latencyMarks, empty, C, slate };
 })();

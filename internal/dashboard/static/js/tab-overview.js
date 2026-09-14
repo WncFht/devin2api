@@ -2,6 +2,7 @@
 // 数据分两层轮询：stats/active/matrix 1s（快变），usage/quota/status 60s（慢变）。
 
 const Overview = (() => {
+  const C = Charts.C;
   let statsData = null, usageData = null, quotaData = null, statusData = null, matrixData = null;
   // 健康矩阵窗口：最近 30 分钟按 10 秒分桶（行=模型，格=桶）。
   // 10s 粒度是「看清错误爆发的精确时刻」与格子可点可悬停（~4px）的折中；
@@ -18,7 +19,7 @@ const Overview = (() => {
     const d = (cur - prev) / prev * 100;
     if (!Number.isFinite(d)) return '';
     const up = d >= 0;
-    return ' <span style="color:var(--' + (up ? 'ok' : 'err') + ')">' + (up ? '↑' : '↓') + Math.abs(d).toFixed(0) + '%</span>';
+    return ' <span class="' + (up ? 'status-ok' : 'status-err') + '">' + (up ? '↑' : '↓') + Math.abs(d).toFixed(0) + '%</span>';
   }
 
   function renderKpis() {
@@ -329,12 +330,12 @@ const Overview = (() => {
     const NICE = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 50, 100];
     const yMax = NICE.find(v => v >= peak * 1.15) || peak * 1.15;
     const series = [
-      Charts.bar('请求速率', 'rgba(129,140,248,0.30)', req, { barMaxWidth: 8, z: 1 }),
-      Charts.bar('错误速率', '#f87171', err, { barMaxWidth: 8, barGap: '-100%', z: 2 }),
-      Charts.line('RPS 30s均值', '#818cf8', roll, {
+      Charts.bar('请求速率', Charts.hexA(C.accent, 0.30), req, { barMaxWidth: 8, z: 1 }),
+      Charts.bar('错误速率', C.err, err, { barMaxWidth: 8, barGap: '-100%', z: 2 }),
+      Charts.line('RPS 30s均值', C.accent, roll, {
         z: 3,
-        lineStyle: { width: 2, color: '#818cf8' },
-        areaStyle: { color: Charts.area('#818cf8', 0.26, 0.02) },
+        lineStyle: { width: 2, color: C.accent },
+        areaStyle: { color: Charts.area(C.accent, 0.26, 0.02) },
       }),
     ];
     const gm = Charts.gapMark(tm, sec, 9);
@@ -342,26 +343,32 @@ const Overview = (() => {
     Charts.render(el, {
       dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
       yAxis: [
-        { min: 0, max: yMax, interval: yMax / 4, name: 'req/s', nameTextStyle: { color: '#8b93a7', fontSize: 10 },
-          axisLabel: { color: '#8b93a7', fontSize: 10.5, formatter: v => +v.toFixed(2) } },
-        { min: 0, max: yMax * 60, interval: yMax * 15, position: 'right', name: 'req/min', nameTextStyle: { color: '#8b93a7', fontSize: 10 },
+        { min: 0, max: yMax, interval: yMax / 4, name: 'req/s', nameTextStyle: { color: C.axis, fontSize: 10 },
+          axisLabel: { color: C.axis, fontSize: 10.5, formatter: v => +v.toFixed(2) } },
+        { min: 0, max: yMax * 60, interval: yMax * 15, position: 'right', name: 'req/min', nameTextStyle: { color: C.axis, fontSize: 10 },
           splitLine: { show: false },
-          axisLabel: { color: '#8b93a7', fontSize: 10.5, formatter: v => String(Math.round(v)) } },
+          axisLabel: { color: C.axis, fontSize: 10.5, formatter: v => String(Math.round(v)) } },
       ],
+      // tooltip 容器令牌由 base 统一供给（trigger/confine/axisPointer 同缺省），
+      // 这里只给内容 formatter——排版与矩阵悬停卡同构：mt-head 色点+时间窗
+      // 卡头、mt-sep 分隔、mt-line 指标行；marker 圆点视觉同 mt-dot。
       tooltip: {
-        trigger: 'axis', confine: true,
-        axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
-        // 内容与矩阵悬停卡共用 mt-* 结构类：.mx-tip-inner 提供排版上下文，
-        // marker 是 echarts 的彩色圆点，视觉语言跟 mt-dot 一致。
         formatter: ps => {
           if (!ps || !ps.length) return '';
           const byName = {};
           ps.forEach(p => byName[p.seriesName] = p);
           const reqP = byName['请求速率'], errP = byName['错误速率'], rpsP = byName['RPS 30s均值'];
-          let h = '<div class="mx-tip-inner"><div class="mt-time">' + fmtTime(new Date(ps[0].axisValue)) + '</div><div class="mt-sep"></div>';
-          if (reqP) h += '<div class="mt-line">' + reqP.marker + '<span class="k">请求</span><b>' + Math.round(reqP.value[1] * sec) + '</b> 条/10s</div>';
+          const t0 = new Date(ps[0].axisValue);
+          const n = reqP ? Math.round(reqP.value[1] * sec) : 0;
+          const hasErr = errP && errP.value[1] > 0;
+          // 卡头色点沿用矩阵语义：含错误红、有流量绿、空桶灰。
+          const dot = hasErr ? 'd-err' : n ? 'd-ok' : 'd-none';
+          let h = '<div class="mx-tip-inner"><div class="mt-head"><i class="mt-dot ' + dot + '"></i>' +
+            '<span class="mt-sev mono">' + fmtTime(t0) + ' – ' + fmtTime(new Date(t0.getTime() + sec * 1000)) + '</span>' +
+            '<span class="mt-model">' + sec + 's 桶</span></div><div class="mt-sep"></div>';
+          if (reqP) h += '<div class="mt-line">' + reqP.marker + '<span class="k">请求</span><b>' + n + '</b> 条</div>';
           if (rpsP) h += '<div class="mt-line">' + rpsP.marker + '<span class="k">速率</span><b>' + rpsP.value[1].toFixed(2) + '</b> rps · ' + (rpsP.value[1] * 60).toFixed(1) + ' rpm</div>';
-          if (errP && errP.value[1] > 0) h += '<div class="mt-line">' + errP.marker + '<span class="k">错误</span><b class="status-err">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
+          if (hasErr) h += '<div class="mt-line">' + errP.marker + '<span class="k">错误</span><b class="status-err">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
           return h + '</div>';
         },
       },
