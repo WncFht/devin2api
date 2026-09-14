@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,6 +66,9 @@ func BenchmarkStreamEndToEndDebugLog(b *testing.B) {
 }
 
 func benchEndToEnd(b *testing.B, debugEnabled bool, deltaCount, deltaSize int) {
+	// 基准输出要能被 benchstat 解析：请求级的 slog 行会插进基准行里，
+	// 抬高级别静默（只影响本测试进程的日志阈值）。
+	slog.SetLogLoggerLevel(slog.LevelError)
 	var manager *debuglog.Manager
 	if debugEnabled {
 		manager = debuglog.NewManager(b.TempDir(), debuglog.RetentionPolicy{})

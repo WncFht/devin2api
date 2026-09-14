@@ -20,6 +20,9 @@ config.yaml
 /outputs/*.json
 /outputs/*.txt
 /outputs/*.py
+# 性能快照与基准基线（可由 scripts/perf-snapshot.sh、scripts/bench.sh 重新生成）
+/outputs/perf/
+/outputs/bench/
 
 # 生成代码已提交（outputs/devin-proto-go），clone 后可直接 go build；
 # 上游 proto 变化时用 task generate 重新生成并提交
