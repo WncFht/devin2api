@@ -288,15 +288,7 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 			context.Dropped = append(context.Dropped, "tool_call:"+call.Type)
 			continue
 		}
-		args := json.RawMessage(call.Function.Arguments)
-		custom := false
-		if len(bytes.TrimSpace(args)) == 0 {
-			args = json.RawMessage(`{}`)
-		} else if !llm.IsJSONObject(args) {
-			// 客户端回灌的畸形/非 JSON 参数原文按 custom 通道保留，
-			// 吞成 {} 会让上游看到的调用语义悄悄变空。
-			custom = true
-		}
+		args, custom := common.NormalizeToolArguments(json.RawMessage(call.Function.Arguments))
 		toolNames[call.ID] = call.Function.Name
 		content = append(content, llm.ToolCall{
 			ID:        call.ID,

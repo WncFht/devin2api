@@ -344,15 +344,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
-		arguments := json.RawMessage(item.Arguments)
-		custom := false
-		if len(bytes.TrimSpace(arguments)) == 0 {
-			arguments = json.RawMessage(`{}`)
-		} else if !llm.IsJSONObject(arguments) {
-			// 客户端回灌的畸形/非 JSON 参数原文按 Custom 通道保真上行，
-			// 吞成 {} 会让上游看到的调用语义悄悄变空。
-			custom = true
-		}
+		arguments, custom := common.NormalizeToolArguments(json.RawMessage(item.Arguments))
 		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments, Custom: custom})
@@ -414,7 +406,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if callID == "" {
 			// 完全没有调用 id 的结果无法配对、过不了 IR 校验；
 			// 与孤儿结果同策降级为 USER 文本保住内容（不伪造 id）。
-			context.Dropped = append(context.Dropped, "missing_call_id")
+			context.Dropped = append(context.Dropped, "missing_tool_call_id")
 			context.Messages = append(context.Messages, llm.UserMessage{
 				Content: append([]llm.Content{
 					llm.TextContent{Text: "[tool result, call id missing]"},
@@ -427,7 +419,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if toolName == "" {
 			// 压缩后的历史可能丢掉对应的 function_call；对齐 Anthropic
 			// 解码路径的兜底名，避免整请求失败。
-			context.Dropped = append(context.Dropped, "unmatched_call_id:"+callID)
+			context.Dropped = append(context.Dropped, "unmatched_tool_call_id:"+callID)
 			toolName = "tool"
 		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{

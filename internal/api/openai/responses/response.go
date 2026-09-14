@@ -169,23 +169,6 @@ func (encoder *StreamEncoder) start() []SSEEvent {
 	}
 }
 
-// openAIReasoningItemID 从 openai 型签名（序列化 reasoning item 数组）
-// 取出上游分配的真实 rs_* item id；解析失败返回空串，调用方保留生成的 id。
-func openAIReasoningItemID(signature string) string {
-	trimmed := strings.TrimSpace(signature)
-	if !strings.HasPrefix(trimmed, "[") {
-		return ""
-	}
-	var items []struct {
-		ID   string `json:"id"`
-		Type string `json:"type"`
-	}
-	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 || items[0].Type != "reasoning" {
-		return ""
-	}
-	return items[0].ID
-}
-
 // startReasoning 开 reasoning item 并发 output_item.added 与
 // reasoning_summary_part.added；openai 型签名用内层真实 rs_* id。
 func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEvent, error) {
@@ -193,13 +176,13 @@ func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEven
 	if err != nil {
 		return nil, err
 	}
-	if thinking, ok := contentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok {
+	if thinking, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok {
 		item.encryptedContent = thinking.ThinkingSignature
 		if thinking.SignatureType == "openai" {
 			// 签名原文 blob 整体进 encrypted_content（回放时按同一形态
 			// 识别），但 item id 用内层真实 rs_*——与上游下发一致。
-			if id := openAIReasoningItemID(item.encryptedContent); id != "" {
-				item.id = id
+			if items := common.OpenAIReasoningItems(item.encryptedContent); items != nil && items[0].ID != "" {
+				item.id = items[0].ID
 			}
 		}
 	}
@@ -240,7 +223,7 @@ func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent,
 	if text == "" {
 		text = item.value.String()
 	}
-	if thinking, ok := contentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.ThinkingSignature != "" {
+	if thinking, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.ThinkingSignature != "" {
 		item.encryptedContent = thinking.ThinkingSignature
 	}
 	// 思考文本无论是否推迟收尾都要先落进 pendingText：签名与正文同帧
@@ -384,7 +367,7 @@ func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent
 	// custom/freeform 调用的参数体不是 JSON（上游 is_custom_tool_call），
 	// 按 Responses custom_tool_call item 下发——input 字段而非 arguments。
 	kind := "function_call"
-	if call, ok := contentAt[llm.ToolCall](event.Partial, event.ContentIndex); ok && call.Custom {
+	if call, ok := common.ContentAt[llm.ToolCall](event.Partial, event.ContentIndex); ok && call.Custom {
 		kind = "custom_tool_call"
 	}
 	item, err := encoder.newItem(event.ContentIndex, kind, "fc")
@@ -414,7 +397,6 @@ func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent
 	if err != nil {
 		return nil, err
 	}
-	item.value.WriteString(event.Delta)
 	eventName := "response.function_call_arguments.delta"
 	if item.kind == "custom_tool_call" {
 		eventName = "response.custom_tool_call_input.delta"
@@ -431,12 +413,11 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 	if err != nil {
 		return nil, err
 	}
-	arguments := item.value.String()
-	if event.ToolCall != nil {
-		arguments = string(event.ToolCall.Arguments)
-		item.callID = event.ToolCall.ID
-		item.name = event.ToolCall.Name
-	}
+	// event.Validate 保证 ToolCallEnd 的 ToolCall 非空，完整参数直接取它，
+	// 不再依赖 delta 累计值。
+	arguments := string(event.ToolCall.Arguments)
+	item.callID = event.ToolCall.ID
+	item.name = event.ToolCall.Name
 	completedItem := map[string]any{
 		"id": item.id, "type": item.kind, "status": "completed",
 		"call_id": item.callID, "name": item.name,
@@ -486,7 +467,7 @@ func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) 
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.completed = true
 	message := "response stream failed"
-	if event.Error != nil && event.Error.ErrorMessage != "" {
+	if event.Error.ErrorMessage != "" {
 		message = event.Error.ErrorMessage
 	}
 	// Codex 只在 message 含 "try again in Ns" 时按服务端时刻睡眠重试；
@@ -614,11 +595,7 @@ func baseResponse(id string, model string, createdAt int64, status string) map[s
 
 // responseUsage 投影 Responses usage 形态，含 cache 与 reasoning 明细。
 func responseUsage(usage llm.Usage) map[string]any {
-	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
-	total := usage.TotalTokens
-	if total == 0 {
-		total = inputTokens + usage.Output
-	}
+	inputTokens, total := common.UsageTotals(usage)
 	result := map[string]any{
 		"input_tokens": inputTokens,
 		"input_tokens_details": map[string]any{
@@ -655,8 +632,8 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 		case llm.ThinkingContent:
 			itemID := randid.Prefixed("rs_")
 			if content.SignatureType == "openai" {
-				if id := openAIReasoningItemID(content.ThinkingSignature); id != "" {
-					itemID = id
+				if items := common.OpenAIReasoningItems(content.ThinkingSignature); items != nil && items[0].ID != "" {
+					itemID = items[0].ID
 				}
 			}
 			item := map[string]any{
@@ -688,16 +665,6 @@ func outputFromMessage(message *llm.AssistantMessage) ([]any, error) {
 	output = append(output, toolCalls...)
 	output = append(output, messages...)
 	return output, nil
-}
-
-// contentAt 取 partial 消息中指定下标的内容块并按目标类型断言。
-func contentAt[T llm.Content](message *llm.AssistantMessage, index int) (T, bool) {
-	var zero T
-	if message == nil || index < 0 || index >= len(message.Content) {
-		return zero, false
-	}
-	content, ok := message.Content[index].(T)
-	return content, ok
 }
 
 // responseStatus 映射 Response 对象的 status 枚举。

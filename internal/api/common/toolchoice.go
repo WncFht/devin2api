@@ -85,3 +85,17 @@ func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error
 	}
 	return choice, object.DisableParallelToolCalls, nil
 }
+
+// NormalizeToolArguments 归一回放历史里的工具调用参数体：空串/null 吞成
+// {}（上游只认 JSON 对象）；非 JSON 对象原文（畸形 JSON、标量）标记 custom
+// 走 Custom 通道保真上行——吞成 {} 会让上游看到的调用语义悄悄变空。
+func NormalizeToolArguments(raw json.RawMessage) (json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage(`{}`), false
+	}
+	if !llm.IsJSONObject(raw) {
+		return raw, true
+	}
+	return raw, false
+}

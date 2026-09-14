@@ -309,15 +309,37 @@ func ClassifySignatureType(blob string) string {
 // 字段的实测形态是序列化 Responses reasoning item 数组。下行时我们把整个
 // blob 原样放进 encrypted_content，回放时按同一形态识别。
 func IsOpenAIReasoningSignature(blob string) bool {
+	return OpenAIReasoningItems(blob) != nil
+}
+
+// OpenAIReasoningItem 是 openai 型签名里序列化 reasoning item 的投影；
+// id 是上游分配的真实 rs_* item 标识。
+type OpenAIReasoningItem struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// OpenAIReasoningItems 解析 openai 型签名载荷；不是该形态（非 JSON 数组、
+// 空数组或首项非 reasoning）时返回 nil。responses 前端取首项 id 复用为
+// 下行 item 标识——与上游下发保持一致。
+func OpenAIReasoningItems(blob string) []OpenAIReasoningItem {
 	trimmed := strings.TrimSpace(blob)
 	if !strings.HasPrefix(trimmed, "[") {
-		return false
+		return nil
 	}
-	var items []struct {
-		Type string `json:"type"`
+	var items []OpenAIReasoningItem
+	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 || items[0].Type != "reasoning" {
+		return nil
 	}
-	if json.Unmarshal([]byte(trimmed), &items) != nil || len(items) == 0 {
-		return false
+	return items
+}
+
+// ContentAt 取 partial 消息中指定下标的内容块并按目标类型断言。
+func ContentAt[T llm.Content](message *llm.AssistantMessage, index int) (T, bool) {
+	var zero T
+	if message == nil || index < 0 || index >= len(message.Content) {
+		return zero, false
 	}
-	return items[0].Type == "reasoning"
+	content, ok := message.Content[index].(T)
+	return content, ok
 }

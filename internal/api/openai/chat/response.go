@@ -217,7 +217,7 @@ func (encoder *StreamEncoder) toolCallDelta(event llm.ResponseEvent) ([]SSEEvent
 // endToolCall 校验块已开；OpenAI Chat Completions 流式工具调用不输出
 // 单独的结束 chunk，finish_reason 会标记结束。
 func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if encoder.findToolByIndex(event.ContentIndex) == nil {
+	if encoder.toolByContent[event.ContentIndex] == nil {
 		return nil, fmt.Errorf("tool call end at content index %d without toolcall_start", event.ContentIndex)
 	}
 	return nil, nil
@@ -226,15 +226,13 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 // finish 发 finish_reason chunk、可选 usage chunk 和 [DONE] 终止帧。
 func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
-	if event.Message != nil {
-		encoder.finalUsage = event.Message.Usage
-	}
+	encoder.finalUsage = event.Message.Usage
 	reason := finishReason(event.Reason)
 	events := []SSEEvent{encoder.chunk([]chatChoice{{FinishReason: reason}}, nil)}
 	if encoder.includeUsage {
 		events = append(events, encoder.chunk([]chatChoice{}, chatUsage(encoder.finalUsage)))
 	}
-	events = append(events, SSEEvent{Name: "[DONE]", Data: []byte("[DONE]")})
+	events = append(events, SSEEvent{Name: common.SSEDone, Data: []byte(common.SSEDone)})
 	return events
 }
 
@@ -242,7 +240,7 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
 	message := "chat completion stream failed"
-	if event.Error != nil && event.Error.ErrorMessage != "" {
+	if event.Error.ErrorMessage != "" {
 		message = event.Error.ErrorMessage
 	}
 	// 同 responses 面：给限流消息补 Codex 可解析的 "try again in Ns"。
@@ -273,11 +271,6 @@ func (encoder *StreamEncoder) findTool(id string, contentIndex int) *toolCallSta
 			return state
 		}
 	}
-	return encoder.findToolByIndex(contentIndex)
-}
-
-// findToolByIndex 按 llm ContentIndex 查工具状态。
-func (encoder *StreamEncoder) findToolByIndex(contentIndex int) *toolCallState {
 	return encoder.toolByContent[contentIndex]
 }
 
@@ -377,11 +370,7 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 
 // chatUsage 投影 Chat Completions usage 形态，含 cache 与 reasoning 明细。
 func chatUsage(usage llm.Usage) map[string]any {
-	inputTokens := usage.Input + usage.CacheRead + usage.CacheWrite
-	total := usage.TotalTokens
-	if total == 0 {
-		total = inputTokens + usage.Output
-	}
+	inputTokens, total := common.UsageTotals(usage)
 	result := map[string]any{
 		"prompt_tokens":     inputTokens,
 		"completion_tokens": usage.Output,
