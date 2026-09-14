@@ -152,7 +152,6 @@ func (s *wsSession) normalizeRequest(payload []byte) (json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: %q", errWSPreviousResponseNotFound, previousID)
 	}
 	if s.replacementReplayNeeded && requestType == "response.create" && previousID == "" {
-		s.replacementReplayNeeded = false
 		return s.finalizeReplacement(top)
 	}
 	if len(s.pendingToolCallIDs) > 0 && !wsItemsSatisfyToolCalls(nextItems, s.pendingToolCallIDs) {
@@ -216,7 +215,12 @@ func (s *wsSession) finishNormalize(top map[string]json.RawMessage, items []wsIt
 // transcript（或上次中断后客户端的全量重放）。增量合并路径不走这里——
 // 它先把客户端增量合并进历史再统一校验，提前对未合并的增量做配对校验
 // 会误报孤儿 output。
+// replacementReplayNeeded 在此统一解除：标记的职责是「把下一条无
+// previous_response_id 的 create 路由成全量替换」，任何一条请求实际
+// 走了替换语义，歧义就已消费——挂着不管会让再下一条普通增量 create
+// 也被误判成替换，lastItems 之前的会话历史被静默丢弃。
 func (s *wsSession) finalizeReplacement(top map[string]json.RawMessage) (json.RawMessage, error) {
+	s.replacementReplayNeeded = false
 	if err := inheritWSFields(top, s.lastTop); err != nil {
 		return nil, err
 	}
