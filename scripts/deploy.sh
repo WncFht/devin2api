@@ -23,8 +23,44 @@ PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 # logs -> RUNTIME/logs 的符号链接供排障读取。
 RUNTIME="${DEVIN2API_RUNTIME:-${HOME}/Library/Application Support/devin-2api}"
 
+# 服务管理动词：lib-deploy.sh 的 handoff_* 族经它们抹平 launchd/systemd 差异。
+svc_pid()     { launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}'; }
+svc_restart() { launchctl kickstart -k "gui/$(id -u)/${LABEL}"; }
+
+# plist_content：目标服务定义。EnvironmentVariables 注入 reuseport 是
+# 重叠交接的前提；ExitTimeOut 须覆盖二进制 drainTimeout（300s）+退出余量。
+plist_content() {
+	cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>${LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${RUNTIME}/devin-2api</string>
+		<string>-config</string>
+		<string>${RUNTIME}/config.yaml</string>
+	</array>
+	<key>WorkingDirectory</key><string>${RUNTIME}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DEVIN2API_REUSEPORT</key><string>1</string>
+	</dict>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>ThrottleInterval</key><integer>5</integer>
+	<key>ExitTimeOut</key><integer>330</integer>
+	<key>StandardOutPath</key><string>${RUNTIME}/logs/stdout.log</string>
+	<key>StandardErrorPath</key><string>${RUNTIME}/logs/stderr.log</string>
+</dict>
+</plist>
+EOF
+}
+
 do_uninstall() {
 	local did=0
+	retire_stale_transient
 	if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
 		launchctl bootout "gui/$(id -u)/${LABEL}"
 		echo "==> service booted out (${LABEL})"
@@ -45,9 +81,12 @@ parse_deploy_args "$@"
 
 # 单实例约定：launchd 托管的实例是唯一合法实例。部署前先列出其它
 # devin-2api 进程（手动 ./devin-2api、遗忘的冒烟实例）——它们会抢端口、
-# 分流请求，且不受 SIGTERM 优雅退出保护。
-LAUNCHD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/pid = /{print $3}' || true)"
-warn_strays "${LAUNCHD_PID:-0}"
+# 分流请求，且不受 SIGTERM 优雅退出保护。交接进程有 pidfile 登记，属
+# 豁免项；有残留则就地回收。
+LAUNCHD_PID="$(svc_pid)"
+STALE_TPID="$(cat "$(handoff_pidfile)" 2>/dev/null || true)"
+warn_strays "${LAUNCHD_PID:-0}" ${STALE_TPID:+"${STALE_TPID}"}
+retire_stale_transient
 
 if [[ "${UNINSTALL}" == "1" ]]; then
 	do_uninstall
@@ -70,36 +109,21 @@ VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
 
-# 服务未加载时生成 plist 并 bootstrap——首装场景（新机器同步仓库后直接
-# 跑本脚本即可）。plist 内容与 docs/deployment.md 保持一致。
+# plist 与模板对齐：缺失生成、漂移重写。job 定义只在 bootstrap 时载入，
+# kickstart 不重读文件——已加载服务的 plist 变更只能 bootout+bootstrap
+# 生效，该路径本身即一次经典重启（首装与升级同一条命令）。
 FRESH_BOOT=0
+PLIST_RELOAD=0
+if [[ ! -f "${PLIST}" ]]; then
+	echo "==> first install: 生成 ${PLIST}"
+	mkdir -p "$(dirname "${PLIST}")"
+	plist_content >"${PLIST}"
+elif ! plist_content | cmp -s - "${PLIST}"; then
+	echo "==> plist 模板有更新，重写 ${PLIST}"
+	plist_content >"${PLIST}"
+	PLIST_RELOAD=1
+fi
 if ! launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
-	if [[ ! -f "${PLIST}" ]]; then
-		echo "==> first install: 生成 ${PLIST}"
-		mkdir -p "$(dirname "${PLIST}")"
-		cat >"${PLIST}" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key><string>${LABEL}</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>${RUNTIME}/devin-2api</string>
-		<string>-config</string>
-		<string>${RUNTIME}/config.yaml</string>
-	</array>
-	<key>WorkingDirectory</key><string>${RUNTIME}</string>
-	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><true/>
-	<key>ThrottleInterval</key><integer>5</integer>
-	<key>ExitTimeOut</key><integer>60</integer>
-	<key>StandardOutPath</key><string>${RUNTIME}/logs/stdout.log</string>
-	<key>StandardErrorPath</key><string>${RUNTIME}/logs/stderr.log</string>
-</dict>
-</plist>
-EOF
-	fi
 	launchctl bootstrap "gui/$(id -u)" "${PLIST}"
 	FRESH_BOOT=1
 fi
@@ -110,20 +134,32 @@ if [[ "${NO_RESTART}" == "1" ]]; then
 fi
 
 # 刚 bootstrap 的服务已在跑新二进制，kickstart 只会平白弹它一次。
+# plist 变更则必须 bootout+bootstrap 才能生效——本次仍是经典重启
+# （在跑实例多半还没拿到 reuseport env），下次部署起走重叠交接。
 OLD_PID=""
 if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service bootstrapped (RunAtLoad 已启动新进程)"
-else
-	OLD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
-	# 排空期新请求一律 503——先在在途清零的空闲窗口里 kickstart，把
-	# 拒绝窗口压到进程切换间隙本身（在途有长流时最多等 30s 再照排）。
+elif [[ "${PLIST_RELOAD}" == "1" ]]; then
+	OLD_PID="$(svc_pid)"
 	wait_inflight_idle "${HEALTH_URL}" 30
-	launchctl kickstart -k "gui/$(id -u)/${LABEL}"
+	echo "==> bootout+bootstrap 使新 plist 生效"
+	launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+	# bootout 返回不等进程退完——新实例 bind 会撞还在排空的旧 socket，
+	# 先等旧 pid 消失再 bootstrap，省得 KeepAlive 在 EADDRINUSE 上空转。
+	for _ in $(seq 140); do
+		[[ -z "${OLD_PID}" ]] && break
+		kill -0 "${OLD_PID}" 2>/dev/null || break
+		sleep 0.5
+	done
+	launchctl bootstrap "gui/$(id -u)" "${PLIST}"
+else
+	OLD_PID="$(svc_pid)"
+	handoff_restart "${OLD_PID:-0}"
 fi
 
 echo "==> waiting for healthz version=${VERSION} (old pid: ${OLD_PID:-?})"
-# 排空上限 50s + 新进程启动，预留 ~90s。
-RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 90)" || {
+# 交接路径几秒内即达；回退路径最坏要等 300s 排空 + KeepAlive 重拉。
+RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 330)" || {
 	echo "healthz 未出现新版本 (last=${RUNNING})" >&2
 	dump_recent_log
 	exit 1

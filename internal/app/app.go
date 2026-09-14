@@ -16,6 +16,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -184,6 +185,9 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 		// 能挑空闲窗口 kickstart，排空期 503 少砸到真实请求。
 		"draining":        application.draining.Load(),
 		"active_requests": application.metrics.Active(),
+		// pid 让部署脚本区分「应答的是交接进程还是托管新实例」——
+		// 交接期间 version 两边相同，只有 pid 能确认切换终态。
+		"pid": os.Getpid(),
 	})
 }
 

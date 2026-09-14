@@ -13,7 +13,8 @@
 ## 跨平台共同约定
 
 - **logs/ 永远在 config.yaml 同目录**：请求级 debug 目录、`index.jsonl`、`quota.jsonl` 都在运行目录的 `logs/` 下；`stdout.log`/`stderr.log` 是进程输出。仓库里的 `logs/` 只是指向本机运行目录的符号链接（开发便利，非必需）。
-- **优雅排空是硬要求**：进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）——收到信号进入 draining：监听器保持打开，`/healthz` 继续应答但带 `draining: true`，新的 `/v1/*` 立即 `503 + Retry-After: 1`，在途请求跑完；排空上限 50s，超时强关剩余连接。两个服务定义都给 60s 停止超时覆盖该上限加余量。重启只发 SIGTERM，禁用 `kill -9` 抢时间（Ctrl+C 在 Windows 前台触发同一套排空）。
+- **优雅排空是硬要求**：进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）——收到信号进入 draining：`/healthz` 继续应答但带 `draining: true`，新的 `/v1/*` 立即 `503 + Retry-After: 1`，在途请求跑完；排空上限 300s，超时强关剩余连接。两个服务定义都给 330s 停止超时覆盖该上限加余量。重启只发 SIGTERM，禁用 `kill -9` 抢时间（Ctrl+C 在 Windows 前台触发同一套排空）。listener 在排空期的行为取决于 `DEVIN2API_REUSEPORT`：未开启时保持打开（新请求拿应用层 503 而非内核拒绝）；开启时立即关闭——reuseport 组内新连接按绑定序（macOS）或哈希（Linux）落到组内其它 socket，旧实例只有让出监听，deploy 预置的交接进程才能接管。
+- **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 300s 排空上限约束，也不再需要等空闲窗口。交接进程 pid 记录在 `<运行目录>/.handoff.pid`；部署中断残留时下次部署自动回收。回退路径：在跑的旧实例没有 reuseport env 时交接进程 bind 失败，自动退化经典「等空闲 + 重启」——每个失败分支都不劣于旧部署语义。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
 - **单实例**：托管器（KeepAlive/Restart=always）会与手动起的实例互抢监听端口，交替时全部在途流被掐。所有实例必须经托管器启停；冒烟验证用空闲端口起临时二进制，验证完立即关闭，不留常驻侧实例。
 - **版本可见性**：`main.version` 由构建期 `-X` 注入（`git describe --tags --always --dirty` 或 tag 名），`stderr.log` 启动行、`/healthz`、`-version` flag 三处可查。部署后脚本轮询 `/healthz` 直到 version 等于刚部署的版本——排空期旧进程仍在应答旧版本，首次 200 不代表切换完成。
 - 重启、换二进制前先确认目标端口上没有遗留测试进程（`lsof -nP -iTCP:<port> -sTCP:LISTEN`，Windows 用 `netstat -ano | findstr <port>`）。
@@ -47,10 +48,14 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 		<string>/Users/<user>/Library/Application Support/devin-2api/config.yaml</string>
 	</array>
 	<key>WorkingDirectory</key><string>/Users/<user>/Library/Application Support/devin-2api</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DEVIN2API_REUSEPORT</key><string>1</string>
+	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>ThrottleInterval</key><integer>5</integer>
-	<key>ExitTimeOut</key><integer>60</integer>
+	<key>ExitTimeOut</key><integer>330</integer>
 	<key>StandardOutPath</key><string>/Users/<user>/Library/Application Support/devin-2api/logs/stdout.log</string>
 	<key>StandardErrorPath</key><string>/Users/<user>/Library/Application Support/devin-2api/logs/stderr.log</string>
 </dict>
@@ -59,13 +64,14 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 
 各键的含义与取舍：
 
-| 键                  | 当前值          | 说明                                                                                                                        |
-| ------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `RunAtLoad`         | true            | 登录即启动                                                                                                                  |
-| `KeepAlive`         | true            | 任何退出都重拉——含 `bootout` 外的主动 `kill`。若想「干净退出不复活」，改为 `<dict><key>SuccessfulExit</key><false/></dict>` |
-| `ThrottleInterval`  | 5               | 崩溃循环时每 5 秒才重试，防止拉满 CPU                                                                                       |
-| `ExitTimeOut`       | 60              | SIGTERM 后最多等 60s 再 SIGKILL；默认 20s 也够                                                                              |
-| `StandardErrorPath` | logs/stderr.log | slog 输出落盘；**没有轮转**，见下节                                                                                         |
+| 键                     | 当前值                  | 说明                                                                                                                        |
+| ---------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `RunAtLoad`            | true                    | 登录即启动                                                                                                                  |
+| `KeepAlive`            | true                    | 任何退出都重拉——含 `bootout` 外的主动 `kill`。若想「干净退出不复活」，改为 `<dict><key>SuccessfulExit</key><false/></dict>` |
+| `ThrottleInterval`     | 5                       | 崩溃循环时每 5 秒才重试，防止拉满 CPU                                                                                       |
+| `ExitTimeOut`          | 330                     | SIGTERM 后最多等 330s 再 SIGKILL；覆盖二进制 300s 排空上限 + 退出余量                                                       |
+| `EnvironmentVariables` | `DEVIN2API_REUSEPORT=1` | 注入 SO_REUSEPORT——重叠交接部署的前提；裸跑二进制没有它，仍会撞单实例端口冲突保护                                           |
+| `StandardErrorPath`    | logs/stderr.log         | slog 输出落盘；**没有轮转**，见下节                                                                                         |
 
 ### stderr 日志轮转（可选）
 
@@ -104,9 +110,10 @@ After=network-online.target
 [Service]
 ExecStart=<运行目录>/devin-2api -config <运行目录>/config.yaml
 WorkingDirectory=<运行目录>
+Environment=DEVIN2API_REUSEPORT=1
 Restart=always
 RestartSec=5
-TimeoutStopSec=60
+TimeoutStopSec=330
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -118,7 +125,7 @@ StandardError=append:<运行目录>/logs/stderr.log
 WantedBy=default.target
 ```
 
-与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=60` ≈ `ExitTimeOut`，stdout/stderr 同样落运行目录文件（不走 journal，排障路径与 macOS 一致）。
+与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=330` ≈ `ExitTimeOut`，`Environment=DEVIN2API_REUSEPORT=1` ≈ `EnvironmentVariables`，stdout/stderr 同样落运行目录文件（不走 journal，排障路径与 macOS 一致）。
 
 常用命令：
 

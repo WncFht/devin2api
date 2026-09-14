@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/adapter"
@@ -200,7 +201,7 @@ func main() {
 		application.SetDashboard(panel)
 	}
 	server := application.HTTPServer()
-	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved)
+	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -359,11 +360,22 @@ func listenURL(listen string) string {
 	return "http://" + host + ":" + port
 }
 
-// drainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=60，
-// 留 ~10s 给 Close 与进程退出。注意这里不用 http.Server.Shutdown——
-// 它先关 listener 再排空，排空期所有新连接都被内核 refused；改为
-// listener 保持开启、/v1/* 由应用层快速 503，排空结束才关 listener。
-const drainTimeout = 50 * time.Second
+// drainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=330、
+// systemd TimeoutStopSec=330，留 ~30s 给 Close 与进程退出。重叠交接部署下
+// 排空不再阻塞新请求，上限按在途时长分布取（实测 p99≈163s）。注意这里不用
+// http.Server.Shutdown——它先关 listener 再排空，排空期所有新连接都被内核
+// refused；非交接场景改为 listener 保持开启、/v1/* 由应用层快速 503。
+const drainTimeout = 300 * time.Second
+
+// reusePortEnabled 报告是否启用 SO_REUSEPORT 重叠交接：开启后多个进程可
+// 绑定同一监听地址，deploy 先起桥接进程入队再排空旧实例，做到零停机重启。
+// 经环境变量（非 config）控制：只有托管实例（plist/unit 注入）与 deploy
+// 拉起的交接进程拿到它——裸跑 ./devin-2api 不带 env 仍会 EADDRINUSE，
+// 单实例约定的端口冲突保护不变。
+func reusePortEnabled() bool {
+	v := os.Getenv("DEVIN2API_REUSEPORT")
+	return v == "1" || strings.EqualFold(v, "true")
+}
 
 func run(ctx context.Context, application *app.App, server *http.Server, listener net.Listener) error {
 	result := make(chan error, 1)
@@ -382,6 +394,15 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 
 	slog.Info("shutdown: draining in-flight requests", "timeout", drainTimeout)
 	application.BeginDrain()
+	// 交接语义的关键：reuseport 组内 macOS 按绑定先后派发新连接、Linux 按
+	// 哈希分流——无论哪种，旧实例都必须立刻关闭 listener，新连接才会全部
+	// 落到接替者（deploy 预置的交接进程）身上；开着只会白收连接再发 503。
+	// 关闭只切断新 accept，已 accept 的在途连接继续排空。未开 reuseport
+	// 时维持旧行为：listener 保持开启，新请求拿 503+Retry-After 而非拒绝。
+	if reusePortEnabled() {
+		_ = listener.Close()
+		slog.Info("shutdown: listener released for handoff")
+	}
 	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
 	if err := application.WaitDrain(drainCtx); err != nil {
@@ -392,8 +413,21 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 
 // listenConfigured 绑定配置的监听地址。KeepAlive 3 分钟与
 // http.Server.ListenAndServe 内部 tcpKeepAliveListener 的行为一致。
+// reuseport 开启时经 Control 在 bind 前置 SO_REUSEPORT。
 func listenConfigured(listen string) (net.Listener, error) {
-	return (&net.ListenConfig{KeepAlive: 3 * time.Minute}).Listen(context.Background(), "tcp", listen)
+	lc := &net.ListenConfig{KeepAlive: 3 * time.Minute}
+	if reusePortEnabled() {
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var setErr error
+			if err := c.Control(func(fd uintptr) {
+				setErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			}); err != nil {
+				return err
+			}
+			return setErr
+		}
+	}
+	return lc.Listen(context.Background(), "tcp", listen)
 }
 
 // reportListenFailure 处理绑定失败并退出：EADDRINUSE 时探活占用者的
@@ -425,9 +459,10 @@ func probeExistingInstance(listen string) string {
 		Version string `json:"version"`
 		Uptime  int64  `json:"uptime_seconds"`
 		Drain   bool   `json:"draining"`
+		PID     int    `json:"pid"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil || health.Version == "" {
 		return "not devin-2api"
 	}
-	return fmt.Sprintf("devin-2api version=%s uptime=%ds draining=%v", health.Version, health.Uptime, health.Drain)
+	return fmt.Sprintf("devin-2api pid=%d version=%s uptime=%ds draining=%v", health.PID, health.Version, health.Uptime, health.Drain)
 }

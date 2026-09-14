@@ -341,14 +341,15 @@ check_port_available() {
 	die "端口 ${PORT} 被非 devin-2api 进程占用——改 server.listen 或先释放端口"
 }
 
-# warn_strays <keep_pid>：列出非服务托管的 devin-2api 进程（单实例约定——
-# 它们会抢端口、分流请求，且不受优雅退出保护）。
+# warn_strays <keep_pid...>：列出非服务托管的 devin-2api 进程（单实例约定——
+# 它们会抢端口、分流请求，且不受优雅退出保护）。参数均为豁免 pid（托管
+# 实例、已知交接进程）。
 # 按可执行名精确匹配（comm）：pgrep 匹配 cmdline 会把含 "devin-2api"
 # 的 bash/grep（含本函数自己的管道与外层 `cd devin-2api` 的 shell）
 # 误报为 stray。
 warn_strays() {
 	local pids
-	pids="$(pgrep -x devin-2api | grep -vx "${1:-0}" || true)"
+	pids="$(pgrep -x devin-2api | grep -vxF -f <(printf '%s\n' "$@") || true)"
 	[[ -z "${pids}" ]] && return 0
 	warn "非服务托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:"
 	ps -o pid=,args= -p "$(printf '%s\n' "${pids}" | paste -sd, -)" >&2
@@ -401,6 +402,145 @@ wait_healthz_version() {
 	done
 	printf '%s' "${running:-<none>}"
 	return 1
+}
+
+# ===================== SO_REUSEPORT 重叠交接 =====================
+# 语义（本机实测，Darwin）：reuseport 组内新连接派给最先绑定且仍存活的
+# socket，它退出或关闭 listener 后按绑定序轮到下一个；Linux 则按四元组
+# 哈希分流。两种语义下，「交接进程先入队 → 旧实例 drain 起点即关闭
+# listener → 托管新实例拉起入队 → 交接进程退场」这条链里任意时刻都有
+# 健康 socket 接新连接——零 503、零拒绝、在途不受打断。
+# 前提：组内所有 socket 都开了 SO_REUSEPORT（env 注入给托管实例与交接
+# 进程；裸跑二进制拿不到 env，单实例端口冲突保护不变）。在跑的旧实例
+# 没有 env 时交接进程 bind 必失败——spawn 探测失败后自动退化为经典重启。
+
+# handoff_pidfile：交接进程 pid 记录——部署中断残留供下次部署回收。
+handoff_pidfile() { printf '%s' "${RUNTIME}/.handoff.pid"; }
+
+# retire_stale_transient：回收上次部署中断留下的交接进程。它排在托管
+# 实例之后绑定，且 drain 起点已关 listener——不抢流量，SIGTERM 让它在
+# 自己的排空期内自然退场（不等，上限与主进程一致）。
+retire_stale_transient() {
+	local pf pid
+	pf="$(handoff_pidfile)"
+	[[ -f "${pf}" ]] || return 0
+	pid="$(cat "${pf}" 2>/dev/null || true)"
+	rm -f "${pf}"
+	if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+		echo "==> 回收上次残留的交接进程 pid=${pid}（SIGTERM，自行排空退出）" >&2
+		kill "${pid}" 2>/dev/null || true
+	fi
+}
+
+# spawn_handoff：起交接进程（同 config、同日志文件、reuseport env）并入队。
+# 就绪判据：进程活着 + stderr.log 出现新的「HTTP server listening」行——
+# bind 成功只是第一关，adapter 装配/索引回放卡住时踢掉旧实例会整段拒绝。
+# stdout 只输出 pid；失败（早夭/超时未就绪）返回 1 并已自行清理。
+spawn_handoff() {
+	local logf startline pid
+	logf="${RUNTIME}/logs/stderr.log"
+	startline=0
+	[[ -f "${logf}" ]] && startline="$(wc -l <"${logf}" | tr -d ' ')"
+	(
+		cd "${RUNTIME}" && exec env DEVIN2API_REUSEPORT=1 ./devin-2api -config "${RUNTIME}/config.yaml"
+	) >>"${RUNTIME}/logs/stdout.log" 2>>"${logf}" &
+	pid=$!
+	printf '%s' "${pid}" >"$(handoff_pidfile)"
+	for _ in $(seq 40); do
+		if ! kill -0 "${pid}" 2>/dev/null; then
+			rm -f "$(handoff_pidfile)"
+			return 1
+		fi
+		if tail -n "+$((startline + 1))" "${logf}" 2>/dev/null | grep -q 'msg="HTTP server listening"'; then
+			printf '%s' "${pid}"
+			return 0
+		fi
+		sleep 0.25
+	done
+	kill "${pid}" 2>/dev/null
+	rm -f "$(handoff_pidfile)"
+	return 1
+}
+
+# healthz_pid：/healthz 的 pid 字段；旧版本无此字段返回空。
+healthz_pid() {
+	curl -sf -m 2 "$1" 2>/dev/null | sed -n 's/.*"pid" *: *\([0-9]*\).*/\1/p'
+}
+
+# wait_healthz_pid <health_url> <want_pid> <secs>：轮询到应答进程的 pid
+# 匹配——交接期间两侧 version 相同，pid 是确认「谁在接流量」的唯一信号。
+wait_healthz_pid() {
+	local url="$1" want="$2" secs="$3" got _
+	for _ in $(seq $((secs * 2))); do
+		got="$(healthz_pid "${url}")"
+		[[ -n "${got}" && "${got}" == "${want}" ]] && return 0
+		sleep 0.5
+	done
+	return 1
+}
+
+# wait_managed_pid <secs> <exclude_pid...>：等托管器拉起的新进程 pid。
+# 旧实例退出前 svc_pid 仍报旧值，退出到重拉之间为空；一个不在排除列表
+# 且连续两次读到的 pid 才算稳定接管。svc_pid 由各 deploy 脚本定义。
+wait_managed_pid() {
+	local secs="$1" pid="" stable="" _
+	shift
+	for _ in $(seq $((secs * 2))); do
+		pid="$(svc_pid)"
+		if [[ -n "${pid}" && "${pid}" != "0" ]] && ! printf '%s\n' "$@" | grep -qx "${pid}"; then
+			[[ "${pid}" == "${stable}" ]] && {
+				printf '%s' "${pid}"
+				return 0
+			}
+			stable="${pid}"
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
+# handoff_restart <old_pid>：reuseport 重叠交接重启。
+# 每个失败分支都退化为「重启 + 外层等 healthz 版本」的经典路径——
+# 失败语义不劣于旧部署。svc_restart/svc_pid 由各 deploy 脚本提供。
+handoff_restart() {
+	local old_pid="$1" tpid mpid _
+	if ! tpid="$(spawn_handoff)"; then
+		echo "==> 交接进程不可用（在跑实例未开 reuseport）——回退经典重启" >&2
+		wait_inflight_idle "${HEALTH_URL}" 30
+		svc_restart
+		return 0
+	fi
+	echo "==> 交接进程就绪 pid=${tpid}；重启托管实例（其 drain 起点即让出监听，在途继续排空）" >&2
+	# svc_restart 失败不能放任 set -e 把脚本掐死在交接半途——交接进程已
+	# 接管服役，旧实例未被信号触及仍在跑，提示后交给外层 healthz 检查。
+	if ! svc_restart; then
+		warn "重启命令失败——交接进程 pid=${tpid} 与旧实例并存服役，请检查托管状态"
+		return 0
+	fi
+	if ! wait_healthz_pid "${HEALTH_URL}" "${tpid}" 90; then
+		warn "交接进程未接管（可能已崩）——退化为等托管新实例直接上线"
+		return 0
+	fi
+	echo "==> 交接进程已接管全部新连接；等托管新实例拉起（旧实例排空，上限 ~310s）" >&2
+	if ! mpid="$(wait_managed_pid 310 "${old_pid}" "${tpid}")"; then
+		warn "托管实例未在预期内复活——交接进程 pid=${tpid} 继续服役，pidfile 保留供下次部署回收"
+		return 0
+	fi
+	echo "==> 托管新实例 pid=${mpid} 已绑定；交接进程开始退场" >&2
+	kill "${tpid}" 2>/dev/null || true
+	if ! wait_healthz_pid "${HEALTH_URL}" "${mpid}" 60; then
+		warn "托管实例未及时接管应答——终态以外层 healthz 版本检查为准"
+	fi
+	# 交接进程自行排空退出（上限同主进程）；等 10s 仍活着则留 pidfile。
+	for _ in $(seq 20); do
+		kill -0 "${tpid}" 2>/dev/null || {
+			rm -f "$(handoff_pidfile)"
+			return 0
+		}
+		sleep 0.5
+	done
+	warn "交接进程 ${tpid} 仍在排放在途请求——pidfile 保留，退出后由下次部署清理"
+	return 0
 }
 
 # smoke_upstream：部署后打一发 /v1/models——healthz 绿只证明进程活着，

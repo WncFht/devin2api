@@ -127,10 +127,10 @@
 
 本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003（config 的 `server.listen`，作者本机取值），plist 与原理见 docs/deployment.md。
 
-- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入运行目录并同步 config → `kickstart -k` → healthz 校验版本）。
+- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入运行目录并同步 config → reuseport 交接进程预接管 → `kickstart -k` → 托管新实例拉起后退交接 → healthz 校验版本）。
 - 运行目录是 `~/Library/Application Support/devin-2api/`（二进制+config.yaml+logs），不是仓库：launchd 子进程对 ~/Desktop 的 open 会被 TCC 授权判定永久挂起。仓库 `logs/` 是指向运行目录的符号链接，排障路径照旧。
 - **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
-- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=60`，在途流跑完再退），禁用 `kill -9` 抢时间。
+- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=330` 覆盖 300s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。
 - 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 
