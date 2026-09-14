@@ -21,6 +21,10 @@ debug:
   # 配额快照采样间隔（分钟），写入 logs/quota.jsonl 供燃烧速率预测；<=0 不采样。
   # 默认 5。
   # quota_interval_minutes: 5
+  # pprof/fgprof 剖析端点的独立监听地址；空值不启用（默认）。
+  # 端点无鉴权——只绑回环地址，跨机访问走 ssh 端口转发。
+  # 开启时同时启用 block/mutex 剖析采样（带少量持续开销）。
+  # pprof_listen: "127.0.0.1:6060"
 
 devin:
   base_url: "https://server.codeium.com"

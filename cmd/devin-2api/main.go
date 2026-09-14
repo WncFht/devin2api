@@ -128,6 +128,14 @@ func main() {
 	}
 	defer func() { _ = listener.Close() }()
 
+	// pprof 侦听是可选的第二端口：空值不启用（默认）。监听失败不致命——
+	// 剖析是诊断辅助，不该让主服务起不来；错误日志已说明原因。
+	if addr := serviceConfig.Debug.PprofListen; addr != "" {
+		if pprofServer := startPprofServer(addr); pprofServer != nil {
+			defer func() { _ = pprofServer.Close() }()
+		}
+	}
+
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
 	// devinAdapter 保留具体类型引用：配置热重载（ApplyConfig）、闸门状态
 	// （GateStats）与别名校验（Aliases）都挂在它上面。
@@ -273,6 +281,9 @@ func reloadRuntimeConfig(configPath string, devinAdapter *devin.Adapter, applica
 	}
 	if *pcfg.Debug.QuotaIntervalMinutes != *cfg.Debug.QuotaIntervalMinutes {
 		report.RequiresRestart = append(report.RequiresRestart, "debug.quota_interval_minutes")
+	}
+	if pcfg.Debug.PprofListen != cfg.Debug.PprofListen {
+		report.RequiresRestart = append(report.RequiresRestart, "debug.pprof_listen")
 	}
 	if pcfg.Server.Listen != cfg.Server.Listen {
 		report.RequiresRestart = append(report.RequiresRestart, "server.listen")

@@ -96,6 +96,10 @@ type DebugConfig struct {
 	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 logs/quota.jsonl；
 	// <=0 不采样。默认 5。
 	QuotaIntervalMinutes *int `yaml:"quota_interval_minutes"`
+	// PprofListen 是 pprof/fgprof 剖析端点的独立监听地址（如
+	// "127.0.0.1:6060"）；空值不启用。端点无鉴权——应只绑回环地址，
+	// 跨机访问经 ssh 端口转发；开启时同时启用 block/mutex 剖析采样。
+	PprofListen string `yaml:"pprof_listen"`
 }
 
 // DashboardConfig 保存管理面板配置。
