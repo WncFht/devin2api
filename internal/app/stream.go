@@ -142,7 +142,7 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 						ev := event
 						projected = func() any { return debuglog.ResponseEventProjection(ev) }
 					}
-					recorder.AppendJSONL("05-response-events.jsonl", string(event.Type), projected)
+					recorder.AppendJSONL(debuglog.StageResponseEvents, string(event.Type), projected)
 				}
 			}
 			select {
@@ -369,10 +369,10 @@ func writeProtocolStream(
 		}
 		for _, encoded := range encodedEvents {
 			batch = protocol.AppendSSE(batch, encoded.Name, encoded.Data)
-			if encoded.Name == "[DONE]" {
-				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, string(encoded.Data))
+			if encoded.Name == common.SSEDone {
+				recorder.AppendJSONL(debuglog.StageHTTPResponse, encoded.Name, string(encoded.Data))
 			} else {
-				recorder.AppendJSONL("06-http-response.jsonl", encoded.Name, json.RawMessage(encoded.Data))
+				recorder.AppendJSONL(debuglog.StageHTTPResponse, encoded.Name, json.RawMessage(encoded.Data))
 			}
 		}
 		if event.Type == llm.ResponseEventError {

@@ -535,7 +535,7 @@ func (application *App) createCompletion(
 	if recorder != nil {
 		// 投影会对 body 再做一次 generic unmarshal；recorder 为 nil 时
 		// WriteJSON 是 no-op，参数表达式却仍会求值——必须在外层门控。
-		recorder.WriteJSON("01-http-request.json", httpRequestProjection(request, body))
+		recorder.WriteJSON(debuglog.StageHTTPRequest, httpRequestProjection(request, body))
 	}
 	messages, options, err := decoder(body)
 	if err != nil {
@@ -551,7 +551,7 @@ func (application *App) createCompletion(
 		// 02 投影必须就地求值、不能推迟到日志 worker：adapter 的
 		// sanitizeRequest 会原地改写 messages 的共享 slice——推迟读
 		// 既会数据竞争，也会把「客户端原文」记成改写后内容。
-		recorder.WriteJSON("02-request-messages.json", debuglog.RequestMessagesProjection(messages))
+		recorder.WriteJSON(debuglog.StageRequestMessages, debuglog.RequestMessagesProjection(messages))
 	}
 	ctx := debuglog.WithRecorder(reqCtx, recorder)
 	if options.Stream {
@@ -611,7 +611,7 @@ func (application *App) createCompletion(
 		return
 	}
 	responseBytes += out.bytes
-	recorder.AppendJSONL("06-http-response.jsonl", "response", json.RawMessage(body))
+	recorder.AppendJSONL(debuglog.StageHTTPResponse, "response", json.RawMessage(body))
 	completion.StatusCode = http.StatusOK
 	completion.Result = "completed"
 }
@@ -636,15 +636,13 @@ func updateCompletionIdentity(completion *debuglog.Completion, messages llm.Requ
 	}
 }
 
-// prematureEndTurn 识别可疑的正常收尾：请求最后一条输入是工具结果，
-// 模型却以无工具调用的 end_turn 结束。该形态结构上合法（可能真是
-// 最终答复），但实测存在模型声称继续动作后直接 EOS 的故障模式
-// （notes/archive/2026-09-12-premature-endturn.md），记入日志供统计真实频率。
 // prematureEndTurn 标记疑似提前收轮：末条输入是 tool_result、响应无
-// toolCall 却声明 STOP——形似「宣告要做事却直接结束」。这是候选信号
-// 而非判定：任务正常收官（末轮 tool_result → 总结文本 → STOP）形状完全
-// 相同，只能靠语义（宣告式 vs 总结式）或会话是否终结来区分，读
-// index.jsonl 计数时每个命中都要这样复核。
+// toolCall 却声明 STOP——形似「宣告要做事却直接结束」。该形态结构上
+// 合法（可能真是最终答复），但实测存在模型声称继续动作后直接 EOS 的
+// 故障模式（notes/archive/2026-09-12-premature-endturn.md）。这是候选
+// 信号而非判定：任务正常收官（末轮 tool_result → 总结文本 → STOP）
+// 形状完全相同，只能靠语义（宣告式 vs 总结式）或会话是否终结来区分，
+// 读 index.jsonl 计数时每个命中都要这样复核。
 func prematureEndTurn(messages llm.RequestMessages, message *llm.AssistantMessage) bool {
 	if message.StopReason != llm.StopReasonStop || len(messages.Messages) == 0 {
 		return false
@@ -775,7 +773,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 		Stage: stage, DebugRef: debugRef(recorder),
 	})
 	_, _ = writer.Write(body)
-	recorder.AppendJSONL("06-http-response.jsonl", "error", json.RawMessage(body))
+	recorder.AppendJSONL(debuglog.StageHTTPResponse, "error", json.RawMessage(body))
 	return status
 }
 

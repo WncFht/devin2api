@@ -150,8 +150,8 @@ func (p chatProtocol) StreamErrorEvents() bool { return true }
 
 func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	// OpenAI Chat Completions 使用 data-only SSE；[DONE] 作为流终止标记。
-	if name == "[DONE]" {
-		return append(dst, "data: [DONE]\n\n"...)
+	if name == common.SSEDone {
+		return append(dst, ("data: " + common.SSEDone + "\n\n")...)
 	}
 	return fmt.Appendf(dst, "data: %s\n\n", data)
 }

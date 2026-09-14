@@ -15,6 +15,8 @@ import (
 
 	_ "local/devinproto" // 注册上游描述符到全局 registry，供 census 按线网名解析
 
+	"github.com/WncFht/devin2api/internal/debuglog"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -127,13 +129,13 @@ func cmdCensus(args []string) error {
 	var frames int
 	for _, dir := range dirs {
 		req.currentDir, resp.currentDir = dir, dir
-		if raw, err := os.ReadFile(filepath.Join(*logsDir, dir, "03-devin-request.json")); err == nil {
+		if raw, err := os.ReadFile(filepath.Join(*logsDir, dir, debuglog.StageDevinRequest)); err == nil {
 			var obj map[string]any
 			if json.Unmarshal(raw, &obj) == nil {
 				req.walk(reqMD, obj)
 			}
 		}
-		if f, err := os.Open(filepath.Join(*logsDir, dir, "04-devin-response.jsonl")); err == nil {
+		if f, err := os.Open(filepath.Join(*logsDir, dir, debuglog.StageDevinResponse)); err == nil {
 			sc := bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 4<<20), 4<<20)
 			for sc.Scan() {
