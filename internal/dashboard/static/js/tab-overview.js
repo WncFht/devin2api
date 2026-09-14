@@ -304,19 +304,68 @@ const Overview = (() => {
     $('ovLatBody').innerHTML = html;
   }
 
+  // 实时流量：三层叠放——每 10s 瞬时速率柱（低饱和背景，表达离散到达
+  // 节奏）+ 30s 滑动均值 RPS 曲线（渐变面积前景，表达速率趋势）+
+  // 错误速率红条（barGap -100% 叠在同槽位上）。统一 req/s 单 y 轴；
+  // 十字线 tooltip 同时给原始条数与速率两种读数；底部不放缩放滑块，
+  // 滚轮/拖选缩放保留（inside zoom）。
   function renderTrend() {
     const tm = statsData && statsData.http && statsData.http.trend_minutes;
-    if (!tm || !tm.length) { Charts.empty($('ovTrendChart')); return; }
-    const bars = [
-      Charts.bar('请求/10s', '#818cf8', Charts.tsList(tm, 'at', 'requests'), { barMaxWidth: 8 }),
-      Charts.bar('错误/10s', '#f87171', Charts.tsList(tm, 'at', 'errors'), { barMaxWidth: 8 }),
-    ];
-    const gm = Charts.gapMark(tm, 10, 9);
-    if (gm) bars[0].markArea = gm;
-    Charts.render($('ovTrendChart'), {
-      dataZoom: Charts.zoom(tm),
-      series: bars,
+    const el = $('ovTrendChart');
+    if (!tm || !tm.length) { Charts.empty(el); return; }
+    // 桶宽从数据推（相邻点间隔），后端粒度再调前端不用跟着改。
+    const sec = tm.length > 1 ? tm[1].at - tm[0].at : 10;
+    const req = tm.map(p => [p.at * 1000, p.requests / sec]);
+    const err = tm.map(p => [p.at * 1000, p.errors / sec]);
+    // RPS 曲线 = 当前点往前共 3 桶（30s）的均值速率：瞬时速率在低流量下
+    // 只能取 0/0.1/0.2 几个台阶值，滑动窗口把台阶抹成趋势。
+    const roll = tm.map((p, i) => {
+      const w = tm.slice(Math.max(0, i - 2), i + 1);
+      return [p.at * 1000, w.reduce((a, b) => a + b.requests, 0) / w.length / sec];
     });
+    const series = [
+      Charts.bar('请求速率', 'rgba(129,140,248,0.30)', req, { barMaxWidth: 8, z: 1 }),
+      Charts.bar('错误速率', '#f87171', err, { barMaxWidth: 8, barGap: '-100%', z: 2 }),
+      Charts.line('RPS 30s均值', '#818cf8', roll, {
+        z: 3,
+        lineStyle: { width: 2, color: '#818cf8' },
+        areaStyle: { color: Charts.area('#818cf8', 0.26, 0.02) },
+        markLine: {
+          silent: true, symbol: 'none',
+          lineStyle: { type: 'dashed', width: 1, color: 'rgba(148,163,184,0.45)' },
+          label: { color: '#8b93a7', fontSize: 10, formatter: p => 'avg ' + p.value.toFixed(2) + ' rps' },
+          data: [{ type: 'average' }],
+        },
+      }),
+    ];
+    const gm = Charts.gapMark(tm, sec, 9);
+    if (gm) series[0].markArea = gm;
+    Charts.render(el, {
+      dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
+      tooltip: {
+        trigger: 'axis', confine: true,
+        axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
+        formatter: ps => {
+          if (!ps || !ps.length) return '';
+          const byName = {};
+          ps.forEach(p => byName[p.seriesName] = p);
+          const reqP = byName['请求速率'], errP = byName['错误速率'], rpsP = byName['RPS 30s均值'];
+          let h = '<div style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#78819a;margin-bottom:3px">' +
+            fmtTime(new Date(ps[0].axisValue)) + '</div>';
+          if (reqP) h += '<div>' + reqP.marker + '请求 <b>' + Math.round(reqP.value[1] * sec) + '</b> 条/10s</div>';
+          if (rpsP) h += '<div>' + rpsP.marker + '速率 <b>' + rpsP.value[1].toFixed(2) + '</b> rps（30s均值）</div>';
+          if (errP && errP.value[1] > 0) h += '<div>' + errP.marker + '错误 <b style="color:#f87171">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
+          return h;
+        },
+      },
+      series,
+    });
+    // 面板副标题右侧放实时读数：当前 30s 均值速率与窗口内均值。
+    const sub = $('ovTrendSub');
+    if (sub) {
+      const avg = roll.reduce((a, p) => a + p[1], 0) / roll.length;
+      sub.textContent = '当前 ' + roll[roll.length - 1][1].toFixed(2) + ' rps · 均值 ' + avg.toFixed(2);
+    }
   }
 
   async function loadActive() {
