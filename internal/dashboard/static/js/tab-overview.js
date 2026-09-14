@@ -149,10 +149,11 @@ const Overview = (() => {
             continue;
           }
           const cls = c.sev === 2 ? 'h-err' : c.sev === 1 ? 'h-warn' : 'h-ok';
-          // 深浅按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压暗。
-          const alpha = (0.3 + 0.7 * (c.n / rowMax)).toFixed(2);
+          // 高度按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压矮；
+          // 20% 下限保证单请求桶仍是可见的条而非刻度线。
+          const h = Math.round(20 + 80 * (c.n / rowMax));
           cellsHtml += '<i class="' + cls + '"' + base + ' data-n="' + c.n + '" data-m="' + esc(row.model || '') +
-            '" data-u="' + new Date((startSlot + i + 1) * MX_BUCKET_MS).toISOString() + '" style="opacity:' + alpha + '"></i>';
+            '" data-u="' + new Date((startSlot + i + 1) * MX_BUCKET_MS).toISOString() + '" style="height:' + h + '%"></i>';
         }
         html += '<div class="mx-row"><span class="mx-label"' + (row.model ? ' data-mx="' + esc(row.model) + '"' : '') +
           ' title="' + esc(row.label) + '">' + esc(row.label) + '</span><div class="mx-cells">' + cellsHtml + '</div></div>';
@@ -193,26 +194,37 @@ const Overview = (() => {
     return mxTip;
   }
 
-  // mxCellTip 生成单格内容：时间段 + 请求数与状态码分布 + 归因拆分 + 均值。
+  // mxCellTip 生成单格浮卡：头行=severity 色点+判词+模型（跟格子同色，
+  // 一眼对上号），次行=时间窗，分隔线后是 请求/状态码、归因、耗时三行。
   function mxCellTip(r, i) {
     const row = mxRowsData[r];
     if (!row) return '';
     const c = row.cells[i];
     const at = new Date((mxStart + i) * MX_BUCKET_MS);
     const until = new Date((mxStart + i + 1) * MX_BUCKET_MS);
-    let html = '<div class="mt-t">' + esc(row.label) + ' · ' + fmtTime(at) + ' – ' + fmtTime(until) + '</div>';
-    if (!c || !c.n) return html + '<div class="mt-r muted">无请求</div>';
-    const sts = Object.keys(c.st).sort((a, b) => c.st[b] - c.st[a]).slice(0, 4)
-      .map(k => '<span class="' + statusClass(+k) + '">' + esc(k) + '</span>×' + c.st[k]);
-    html += '<div class="mt-r"><strong>' + c.n + '</strong> 请求 · ' + sts.join(' · ') + '</div>';
-    const owners = [];
-    if (c.up) owners.push('<span class="status-err">服务端 ' + c.up + '</span>');
-    if (c.cli) owners.push('<span class="status-warn">客户端 ' + c.cli + '</span>');
-    if (c.lim) owners.push('<span class="status-rl">429 ' + c.lim + '</span>');
-    if (owners.length) html += '<div class="mt-r">' + owners.join(' · ') + '</div>';
+    // sev 文案按桶内实际构成细分：sev=1 可能是客户端责任、429 或两者混合。
+    const sev = !c || !c.n ? ['none', '无请求']
+      : c.sev === 2 ? ['err', '服务端失分']
+      : c.sev === 1 ? ['warn', c.cli && c.lim ? '客户端+限流' : c.cli ? '客户端责任' : '429 限流']
+      : ['ok', '正常'];
+    let html = '<div class="mt-head"><i class="mt-dot d-' + sev[0] + '"></i><span class="mt-sev s-' + sev[0] + '">' + sev[1] +
+      '</span><span class="mt-model">' + esc(row.label) + '</span></div>' +
+      '<div class="mt-time">' + fmtTime(at) + ' – ' + fmtTime(until) + '</div>';
+    if (!c || !c.n) return html + '<div class="mt-empty">该 10 秒内无请求</div>';
+    const codes = Object.keys(c.st).sort((a, b) => c.st[b] - c.st[a]);
+    const sts = codes.slice(0, 4).map(k => '<span class="' + statusClass(+k) + '">' + esc(k) + '</span>×' + c.st[k]);
+    const more = codes.length > 4 ? ' · +' + (codes.length - 4) + '种' : '';
+    const own = (label, n, cls) => '<span class="' + (n ? cls : 'muted') + '">' + label + ' ' + n + '</span>';
     let tm = '均耗时 ' + fmtMs(c.dur / c.n);
     if (c.ttN) tm += ' · 均 TTFB ' + fmtMs(c.tt / c.ttN);
-    return html + '<div class="mt-r muted">' + tm + '</div>';
+    return html + '<div class="mt-sep"></div>' +
+      '<div class="mt-line"><span class="k">请求</span><b>' + c.n + '</b><span class="mt-sp"></span>' +
+      '<span class="k">状态</span><span>' + sts.join(' · ') + more + '</span></div>' +
+      ((c.up || c.cli || c.lim)
+        ? '<div class="mt-line">' + own('服务端', c.up, 'status-err') + '<span class="muted">·</span>' +
+          own('客户端', c.cli, 'status-warn') + '<span class="muted">·</span>' + own('429', c.lim, 'status-rl') + '</div>'
+        : '') +
+      '<div class="mt-line muted">' + tm + '</div>';
   }
 
   function mxShowTip(cell) {
@@ -221,15 +233,29 @@ const Overview = (() => {
     if (!row) return;
     mxHover = { r, i, label: row.label };
     const tip = mxTipEl();
-    tip.innerHTML = mxCellTip(r, i);
+    tip.innerHTML = mxCellTip(r, i) + '<i class="mt-arr"></i>';
     tip.style.display = 'block';
-    // 锚定格子正上方居中，顶部空间不足翻到底部，横向钳进视口。
+    // 锚定格子正上方居中，顶部空间不足翻到底部（.below 换箭头方位），
+    // 横向钳进视口；箭头始终对准格子中心（随卡片钳位平移）。
     const cr = cell.getBoundingClientRect(), tr = tip.getBoundingClientRect();
-    tip.style.left = Math.max(8, Math.min(cr.left + cr.width / 2 - tr.width / 2, window.innerWidth - tr.width - 8)) + 'px';
-    tip.style.top = (cr.top - tr.height - 7 < 4 ? cr.bottom + 7 : cr.top - tr.height - 7) + 'px';
+    const left = Math.max(8, Math.min(cr.left + cr.width / 2 - tr.width / 2, window.innerWidth - tr.width - 8));
+    const below = cr.top - tr.height - 8 < 4;
+    tip.style.left = left + 'px';
+    tip.style.top = (below ? cr.bottom + 8 : cr.top - tr.height - 8) + 'px';
+    tip.classList.toggle('below', below);
+    tip.classList.toggle('above', !below);
+    tip.querySelector('.mt-arr').style.left =
+      Math.max(10, Math.min(cr.left + cr.width / 2 - left - 4, tr.width - 18)) + 'px';
+    // 同槽列高亮：跨行对齐同一 10 秒窗，方便对照各模型同一时刻的状态。
+    mxEl.querySelectorAll('i.col-hl').forEach(x => x.classList.remove('col-hl'));
+    mxEl.querySelectorAll('i[data-i="' + i + '"]').forEach(x => x.classList.add('col-hl'));
   }
 
-  function mxHideTip() { mxHover = null; if (mxTip) mxTip.style.display = 'none'; }
+  function mxHideTip() {
+    mxHover = null;
+    if (mxTip) mxTip.style.display = 'none';
+    mxEl.querySelectorAll('i.col-hl').forEach(x => x.classList.remove('col-hl'));
+  }
 
   // 判词：把闸门闩态、SLA 与告警压成一行结论（对齐 CPAMC hero verdict）——
   // 好的面板先回答「要不要担心」，细节留给下面的卡片。

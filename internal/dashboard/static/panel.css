@@ -285,36 +285,70 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--text); }
 th .sort-ind { font-size: 10px; color: var(--accent); }
 
-/* ---------- 健康矩阵（行=模型 × 列=1分钟桶：颜色=最重归因 深浅=请求量） ---------- */
-.mx { display: flex; flex-direction: column; gap: 3px; }
-.mx-row { display: flex; align-items: center; gap: 10px; }
+/* ---------- 健康矩阵（行=模型 × 列=10秒桶：颜色=最重归因 高度=请求量） ---------- */
+.mx { display: flex; flex-direction: column; gap: 5px; }
+.mx-row { display: flex; align-items: center; gap: 10px; border-radius: 6px; padding: 0 4px; margin: 0 -4px; }
+.mx-row:hover { background: var(--surface-2); }
 .mx-label {
   flex: none; width: 158px; font-family: var(--mono); font-size: 11px;
   color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   cursor: pointer;
 }
 .mx-label:hover { color: var(--accent); }
-.mx-cells { display: flex; gap: 2px; flex: 1; height: 14px; }
-.mx-cells i { flex: 1; min-width: 2px; border-radius: 2px; background: var(--surface-3); }
-.mx-cells i[data-n] { cursor: pointer; }
-.mx-cells i[data-n]:hover { outline: 1px solid var(--border-strong); }
+/* 波形条：容器底部对齐 + 下沿基线，每格是从基线长起的竖条；
+   空桶缩成 2px 基线刻度，跟有流量的条不再同形。 */
+.mx-cells { display: flex; align-items: flex-end; gap: 2px; flex: 1; height: 26px; border-bottom: 1px solid var(--border); }
+.mx-cells i { flex: 1; min-width: 2px; border-radius: 1.5px 1.5px 0 0; }
 .mx-cells i.h-ok { background: var(--ok); }
 .mx-cells i.h-warn { background: var(--warn); }
 .mx-cells i.h-err { background: var(--err); }
-.mx-cells i.h-none { background: var(--surface-3); }
+.mx-cells i.h-none { height: 2px; border-radius: 1px; background: var(--surface-3); }
+.mx-cells i[data-n] { cursor: pointer; }
+/* 悬停时整列（同一 10s 槽，跨模型行）提亮描边，悬停格再亮一档。 */
+.mx-cells i.col-hl { outline: 1px solid rgba(148, 163, 184, 0.55); filter: brightness(1.3); }
+.mx-cells i:hover { filter: brightness(1.55); }
 .health-cap { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); margin-top: 5px; }
 
-/* 矩阵悬停卡：单例 fixed 元素锚定格子上方；pointer-events:none
-   让它永不拦截指针（否则盖在格子上会反复触发 mouseout 闪动）。 */
+/* 矩阵悬停卡：单例 fixed 元素锚定格子上方，带指向箭头；pointer-events:none
+   永不拦截指针（否则盖在格子上会反复触发 mouseout 闪动）。 */
 .mx-tip {
   position: fixed; z-index: 95; display: none; pointer-events: none;
-  max-width: 340px; padding: 8px 11px; border-radius: var(--radius-sm);
-  background: var(--surface-3); border: 1px solid var(--border-strong);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); font-size: 11.5px; line-height: 1.6;
+  min-width: 216px; max-width: 340px; padding: 9px 12px 10px;
+  border-radius: var(--radius-sm); background: var(--surface-3);
+  border: 1px solid var(--border-strong); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  font-size: 11.5px; line-height: 1.65; animation: mxTipIn .1s ease;
 }
-.mx-tip .mt-t { font-family: var(--mono); font-size: 11px; font-weight: 650; color: var(--text); margin-bottom: 3px; }
-.mx-tip .mt-r { font-family: var(--mono); color: var(--text-dim); }
-.mx-tip .mt-r.muted { color: var(--muted); }
+@keyframes mxTipIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+/* 指向箭头：45° 旋转的正方形，只留朝向格子的两条边（above=朝下、below=朝上）。 */
+.mx-tip .mt-arr {
+  position: absolute; width: 8px; height: 8px; border-radius: 1px;
+  background: var(--surface-3); border: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+}
+.mx-tip.above .mt-arr { bottom: -5px; border-top: 0; border-left: 0; }
+.mx-tip.below .mt-arr { top: -5px; border-bottom: 0; border-right: 0; }
+.mx-tip .mt-head { display: flex; align-items: center; gap: 7px; }
+.mx-tip .mt-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.mx-tip .mt-dot.d-ok { background: var(--ok); }
+.mx-tip .mt-dot.d-warn { background: var(--warn); }
+.mx-tip .mt-dot.d-err { background: var(--err); }
+.mx-tip .mt-dot.d-none { background: var(--muted); }
+.mx-tip .mt-sev { font-size: 12px; font-weight: 650; }
+.mx-tip .mt-sev.s-ok { color: var(--ok); }
+.mx-tip .mt-sev.s-warn { color: var(--warn); }
+.mx-tip .mt-sev.s-err { color: var(--err); }
+.mx-tip .mt-sev.s-none { color: var(--muted); }
+.mx-tip .mt-model {
+  margin-left: auto; max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.mx-tip .mt-time { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 1px; }
+.mx-tip .mt-sep { height: 1px; background: var(--border); margin: 7px -12px 6px; }
+.mx-tip .mt-line { display: flex; align-items: baseline; gap: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+.mx-tip .mt-line .k { color: var(--muted); }
+.mx-tip .mt-line .mt-sp { flex: 1; }
+.mx-tip .mt-line.muted { color: var(--muted); }
+.mx-tip .mt-empty { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 4px; }
 
 /* ---------- 判词行（概览顶部一句话结论） ---------- */
 .verdict {
