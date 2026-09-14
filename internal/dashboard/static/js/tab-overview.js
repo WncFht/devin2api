@@ -323,6 +323,11 @@ const Overview = (() => {
       const w = tm.slice(Math.max(0, i - 2), i + 1);
       return [p.at * 1000, w.reduce((a, b) => a + b.requests, 0) / w.length / sec];
     });
+    // 右轴 req/min 刻度镜像左轴 ×60：同一条 RPS 曲线按两个单位读数。
+    // 两侧显式钉死 min/max/interval 保证刻度严格对齐；左轴上限取整齐值。
+    const peak = Math.max(0.01, ...roll.map(p => p[1]), ...req.map(p => p[1]), ...err.map(p => p[1]));
+    const NICE = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 50, 100];
+    const yMax = NICE.find(v => v >= peak * 1.15) || peak * 1.15;
     const series = [
       Charts.bar('请求速率', 'rgba(129,140,248,0.30)', req, { barMaxWidth: 8, z: 1 }),
       Charts.bar('错误速率', '#f87171', err, { barMaxWidth: 8, barGap: '-100%', z: 2 }),
@@ -330,18 +335,19 @@ const Overview = (() => {
         z: 3,
         lineStyle: { width: 2, color: '#818cf8' },
         areaStyle: { color: Charts.area('#818cf8', 0.26, 0.02) },
-        markLine: {
-          silent: true, symbol: 'none',
-          lineStyle: { type: 'dashed', width: 1, color: 'rgba(148,163,184,0.45)' },
-          label: { color: '#8b93a7', fontSize: 10, formatter: p => 'avg ' + p.value.toFixed(2) + ' rps' },
-          data: [{ type: 'average' }],
-        },
       }),
     ];
     const gm = Charts.gapMark(tm, sec, 9);
     if (gm) series[0].markArea = gm;
     Charts.render(el, {
       dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
+      yAxis: [
+        { min: 0, max: yMax, interval: yMax / 4, name: 'req/s', nameTextStyle: { color: '#8b93a7', fontSize: 10 },
+          axisLabel: { color: '#8b93a7', fontSize: 10.5, formatter: v => +v.toFixed(2) } },
+        { min: 0, max: yMax * 60, interval: yMax * 15, position: 'right', name: 'req/min', nameTextStyle: { color: '#8b93a7', fontSize: 10 },
+          splitLine: { show: false },
+          axisLabel: { color: '#8b93a7', fontSize: 10.5, formatter: v => String(Math.round(v)) } },
+      ],
       tooltip: {
         trigger: 'axis', confine: true,
         axisPointer: { type: 'line', lineStyle: { color: 'rgba(148,163,184,.4)' } },
@@ -353,18 +359,18 @@ const Overview = (() => {
           let h = '<div style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#78819a;margin-bottom:3px">' +
             fmtTime(new Date(ps[0].axisValue)) + '</div>';
           if (reqP) h += '<div>' + reqP.marker + '请求 <b>' + Math.round(reqP.value[1] * sec) + '</b> 条/10s</div>';
-          if (rpsP) h += '<div>' + rpsP.marker + '速率 <b>' + rpsP.value[1].toFixed(2) + '</b> rps（30s均值）</div>';
+          if (rpsP) h += '<div>' + rpsP.marker + '速率 <b>' + rpsP.value[1].toFixed(2) + '</b> rps · <b>' + (rpsP.value[1] * 60).toFixed(1) + '</b> rpm（30s均值）</div>';
           if (errP && errP.value[1] > 0) h += '<div>' + errP.marker + '错误 <b style="color:#f87171">' + Math.round(errP.value[1] * sec) + '</b> 条</div>';
           return h;
         },
       },
       series,
     });
-    // 面板副标题右侧放实时读数：当前 30s 均值速率与窗口内均值。
+    // 面板副标题右侧放实时读数：当前 30s 均值速率的两种单位。
     const sub = $('ovTrendSub');
     if (sub) {
-      const avg = roll.reduce((a, p) => a + p[1], 0) / roll.length;
-      sub.textContent = '当前 ' + roll[roll.length - 1][1].toFixed(2) + ' rps · 均值 ' + avg.toFixed(2);
+      const cur = roll[roll.length - 1][1];
+      sub.textContent = '当前 ' + cur.toFixed(2) + ' rps · ' + (cur * 60).toFixed(1) + ' req/min';
     }
   }
 
