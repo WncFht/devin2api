@@ -26,6 +26,15 @@ type protocolEncoder interface {
 	// Anthropic 的 {"type":"error","error":{...}} 信封，回 OpenAI 形状
 	// 时 Claude Code 等客户端解析不出 error 字段。
 	EncodeHTTPError(e httpError) []byte
+	// StreamErrorEvents 为 true 表示该协议的流式客户端把流内错误
+	// 事件当可重试信号：限流（429）是 pre-stream 失败中唯一转
+	// 「200 + 错误事件」下发的类别——Codex 对 HTTP 429 一律终止
+	//（codex-rs retry_429 硬编码 false，5xx/transport 却照常重试），
+	// 只有流内错误事件进它的重试循环；确定性 4xx 重试无意义，
+	// 保留真实状态码让下游网关按请求级错误分类。false（Anthropic）
+	// 表示客户端按 HTTP 状态码重试，提前提交 200 会把失败降级为
+	// 不可重试的畸形响应。
+	StreamErrorEvents() bool
 	// AppendSSE 把单个 SSE 事件追加编码到 dst；写方持有 dst 的所有权，
 	// 避免每帧先分配临时切片再整体拷贝进批次缓冲。
 	AppendSSE(dst []byte, name string, data []byte) []byte
@@ -112,6 +121,8 @@ func (p responsesProtocol) EncodeHTTPError(e httpError) []byte {
 	return openAIHTTPError(e)
 }
 
+func (p responsesProtocol) StreamErrorEvents() bool { return true }
+
 func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
 }
@@ -134,6 +145,8 @@ func (p chatProtocol) EncodeError(err error, debugRef string) []byte {
 func (p chatProtocol) EncodeHTTPError(e httpError) []byte {
 	return openAIHTTPError(e)
 }
+
+func (p chatProtocol) StreamErrorEvents() bool { return true }
 
 func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	// OpenAI Chat Completions 使用 data-only SSE；[DONE] 作为流终止标记。
@@ -168,6 +181,8 @@ func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {
 	body, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
 	return body
 }
+
+func (p anthropicProtocol) StreamErrorEvents() bool { return false }
 
 func (p anthropicProtocol) EncodeHTTPError(e httpError) []byte {
 	errorType := common.AnthropicErrorType(e.Message)

@@ -246,6 +246,8 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	if event.Error != nil && event.Error.ErrorMessage != "" {
 		message = event.Error.ErrorMessage
 	}
+	// 同 responses 面：给限流消息补 Codex 可解析的 "try again in Ns"。
+	message = common.RetryAfterHint(message, time.Now())
 	// OpenAI Chat Completions 流式错误没有官方统一格式。
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。

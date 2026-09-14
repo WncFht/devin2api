@@ -177,11 +177,18 @@ func (application *App) streamCompletion(
 
 	firstEvent, firstErr := out.awaitEvent(streamCtx, items, ticker)
 	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
-		if !out.committed {
-			completion.StatusCode = mapProviderErrorStatus(firstErr)
-			writeLoggedError(writer, recorder, protocol, "provider_stream", completion.StatusCode, firstErr)
+		status := mapProviderErrorStatus(firstErr)
+		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
+			completion.StatusCode = status
+			writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
 			return
 		}
+		// OpenAI 流式面上的限流是唯一转流内事件的 pre-stream 失败：
+		// Codex 对 HTTP 429 一律终止（codex-rs retry_429 硬编码 false，
+		// 5xx/transport 反而照常重试），只有流内错误事件进它的重试
+		// 循环；确定性错误（4xx）重试无意义，保留真实状态码供下游
+		// 网关分类。Anthropic 面不在此列——其客户端按 HTTP 状态码
+		// 重试，提交 200 反而把失败降级为不可重试的畸形响应。
 		firstEvent = llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
 			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error()}}
 		firstErr = nil
@@ -192,20 +199,23 @@ func (application *App) streamCompletion(
 		if firstEvent.Error != nil && firstEvent.Error.ErrorMessage != "" {
 			message = firstEvent.Error.ErrorMessage
 		}
-		if common.IsContextLengthError(message) {
+		status := mapProviderErrorStatus(errors.New(message))
+		if common.IsContextLengthError(message) || (protocol.StreamErrorEvents() && status == http.StatusTooManyRequests) {
 			// Codex 只在 SSE response.failed 里按 error.code==
 			// "context_length_exceeded" 识别窗口溢出并自动压缩——但网关
 			// 会把无正常事件前置的 SSE 错误物化成 HTTP 错误响应，
 			// 客户端永远收不到 response.failed。先补一个合成 start 让网关
 			// 提交 200，error 事件随后以 SSE 送达；事件顶层 status 仍让
 			// 网关按 413 归为客户端错误、不冷却渠道。
+			// 限流错误同理走 200 + error 事件：OpenAI 流式客户端的
+			// 可重试通道只有流内事件（见上方注释与 StreamErrorEvents）。
 			prelude = []llm.ResponseEvent{
 				{Type: llm.ResponseEventStart, Reason: llm.StopReasonPending, Partial: firstEvent.Error},
 				firstEvent,
 			}
 		} else {
-			completion.StatusCode = mapProviderErrorStatus(errors.New(message))
-			writeLoggedError(writer, recorder, protocol, "provider_stream", completion.StatusCode, errors.New(message))
+			completion.StatusCode = status
+			writeLoggedError(writer, recorder, protocol, "provider_stream", status, errors.New(message))
 			return
 		}
 	}

@@ -556,6 +556,54 @@ func TestStreamPromptTooLongDeliversSSE413(t *testing.T) {
 	}
 }
 
+// TestStreamRateLimitDeliversSSE429 验证 OpenAI 流式面的限流契约：
+// pre-stream 429 以「200 + 错误事件」下发——Codex 对 HTTP 429 一律终止
+// （codex-rs retry_429 硬编码 false），只把流内错误事件当可重试信号；
+// error.code=rate_limit_exceeded + "try again in Ns" 让它睡到 reset
+// 时刻再重试。确定性错误仍走真实 HTTP 状态（见上个用例）。
+func TestStreamRateLimitDeliversSSE429(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventError,
+		Reason: llm.StopReasonError,
+		Error:  &llm.AssistantMessage{ErrorMessage: "resource_exhausted: Reached overall message rate limit. Please try again later. Your limit will reset in 30 seconds."},
+	}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed 200: %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, want := range []string{"response.failed", `"status":429`, `"rate_limit_exceeded"`, "try again in"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("error event missing %s: %s", want, body)
+		}
+	}
+}
+
+// TestStreamRateLimitAnthropicKeepsHTTPStatus 是对照组：同样的限流在
+// Anthropic 面必须保留 429 状态——Claude Code 按 HTTP 状态码与
+// unified-reset 头睡眠重试，提交 200 会让失败被判为不可重试的
+// malformed response。
+func TestStreamRateLimitAnthropicKeepsHTTPStatus(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{
+		Type:   llm.ResponseEventError,
+		Reason: llm.StopReasonError,
+		Error:  &llm.AssistantMessage{ErrorMessage: "resource_exhausted: Reached overall message rate limit. Please try again later. Your limit will reset in 30 seconds."},
+	}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header on 429")
+	}
+}
+
 // TestStreamMidStreamErrorCarriesHTTPStatus 的测试动机是已提交 200 之后到达的
 // 错误事件必须携带顶层 status 字段，让下游网关按真实语义分类。
 func TestStreamMidStreamErrorCarriesHTTPStatus(t *testing.T) {

@@ -2,6 +2,8 @@
 package common
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -127,10 +129,16 @@ func HTTPStatus(message string) int {
 
 // ErrorCode 返回错误对象的 code 字段值；上下文超长统一为
 // "context_length_exceeded"——与 OpenAI/Anthropic 惯例一致，也让下游
-// 网关能把 SSE 错误事件识别为请求级问题而非渠道故障。其他错误返回 nil。
+// 网关能把 SSE 错误事件识别为请求级问题而非渠道故障。限流给
+// "rate_limit_exceeded"：Codex 只在 error.code 为该值时把流内错误
+// 归入 RateLimitExceeded 重试档（codex-rs sse/responses.rs）。
+// 其他错误返回 nil。
 func ErrorCode(message string) any {
 	if IsContextLengthError(message) {
 		return "context_length_exceeded"
+	}
+	if strings.Contains(message, "resource_exhausted") {
+		return "rate_limit_exceeded"
 	}
 	return nil
 }
@@ -157,6 +165,25 @@ func RetryAfterSeconds(message string) (int, bool) {
 		seconds *= 60
 	}
 	return seconds, true
+}
+
+// RetryAfterHint 给限流消息追加 Codex 可解析的等待提示 " (try again
+// in Ns)"：codex-rs 只在 error.code=="rate_limit_exceeded" 且 message
+// 匹配 /try again in N(s|ms|seconds)/ 时才按服务端建议时刻睡眠重试
+// （sse/responses.rs try_parse_retry_after），否则退回 ~200ms 起跳的
+// 本地指数退避——分钟级限流 episode 会在闩期内烧光重试预算。等待
+// 时长与 unified-reset 头同源（分钟 hint 向上对齐桶界）。非限流
+// 消息、无 hint 或 reset 已过期的消息原样返回。
+func RetryAfterHint(message string, now time.Time) string {
+	resetAt, ok := RateLimitReset(message, now)
+	if !ok {
+		return message
+	}
+	wait := int(math.Ceil(time.Until(resetAt).Seconds()))
+	if wait <= 0 {
+		return message
+	}
+	return fmt.Sprintf("%s (try again in %ds)", message, wait)
 }
 
 // RateLimitReset 把限流文案的 reset hint 解析为绝对时刻。
