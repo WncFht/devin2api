@@ -58,20 +58,20 @@ curl -sN http://localhost:3003/v1/responses \
 
 传输断裂类故障（envelope 截断/连接重置）可用 `cmd/upstreamstub` 本地复现：起桩监听后把测试实例 `devin.base_url` 指过去，用 `-scenario` 选故障形态，验证重试链路与 stage 归类：
 
-| 场景                            | 桩行为                                      | 预期归类                                                      |
-| ------------------------------- | ------------------------------------------- | ------------------------------------------------------------- |
-| `precontent`                    | 元数据帧后半帧前缀截断                      | transport，pre-content 重发一次                               |
-| `midcontent`                    | 内容帧后截断                                | transport，不重发（已产出内容）                               |
-| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`） | 透明自愈，`retries:1`                                         |
-| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）              | transport；pre-content 重发                                   |
-| `bare-end`                      | 有 EndStream 无 stopReason                  | `provider_stream`，"ended without generated content"          |
-| `endstream-error`               | EndStream 携带限流错误                      | `devin_connect` 语义错误 + 速率闩                             |
-| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                   | transport，pre-content 重发一次                               |
-| `stall`                         | 建流后零帧挂死                              | 120s 看门狗判死 → 重发 → transport                            |
-| `end-hang`                      | 完整终止序列后 body 不收尾                  | connect-go 排空 body 等传输 EOF，看门狗 120s 兜底（已知取舍） |
-| `heartbeat`                     | 周期无事件帧续命                            | 每帧都喂看门狗 → 流无限挂起（已知缺口，见下）                 |
+| 场景                            | 桩行为                                      | 预期归类                                             |
+| ------------------------------- | ------------------------------------------- | ---------------------------------------------------- |
+| `precontent`                    | 元数据帧后半帧前缀截断                      | transport，pre-content 重发一次                      |
+| `midcontent`                    | 内容帧后截断                                | transport，不重发（已产出内容）                      |
+| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`） | 透明自愈，`retries:1`                                |
+| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）              | transport；pre-content 重发                          |
+| `bare-end`                      | 有 EndStream 无 stopReason                  | `provider_stream`，"ended without generated content" |
+| `endstream-error`               | EndStream 携带限流错误                      | `devin_connect` 语义错误 + 速率闩                    |
+| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                   | transport，pre-content 重发一次                      |
+| `stall`                         | 建流后零帧挂死                              | 120s 看门狗判死 → 重发 → transport                   |
+| `end-hang`                      | 完整终止序列后 body 不收尾                  | stopReason 后 15s 尾部宽限到点按正常 EOF 干净收尾    |
+| `heartbeat`                     | 周期无事件帧续命                            | 零事件帧不喂「无进度」期限 → 10min 兜底收尾          |
 
-`heartbeat`/`end-hang` 暴露的是看门狗语义边界：它按「任意帧到达」判活而非「内容进度」，且语义终帧后 connect-go 仍会排空 body 等传输 EOF——两者都靠 120s 看门狗兜底。Devin 实测不产生这两类形态，暂记已知边界不修。
+看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ `upstreamNoProgressTimeout`（10min，只认产出事件帧的内容进度探测）。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。
 
 直连同样失败 → 问题在 devin-2api/上游，与 ccload 无关。
 
