@@ -79,13 +79,14 @@ Run as a service (optional):
 | Linux    | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
 | Windows  | none — console, or NSSM / Task Scheduler | alongside the exe                          | download zip, run exe     |
 
-Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary) and verify `/healthz` reports the new version. They treat the repo as home — syncing `config.yaml` into the runtime dir and keeping a `logs` symlink inside the repo — so clone first, then run:
+Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works. They treat the repo as home — syncing `config.yaml` into the runtime dir and keeping a `logs` symlink inside the repo — so clone first, then run:
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api
-cp config.example.yaml config.yaml   # edit as needed; token may stay empty for auto-discovery
 bash scripts/deploy-linux.sh --release latest    # macOS: scripts/deploy.sh
 ```
+
+On first run `config.yaml` is generated from `config.example.yaml` with a random `auth.api_key`/`dashboard.password`, and you're prompted for the Devin token (left empty it falls back to auto-discovery); to preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
 
 On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
 

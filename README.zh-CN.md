@@ -79,13 +79,14 @@ docker run --rm -p 8080:8080 \
 | Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh` |
 | Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe 同目录                                 | 下载 zip，运行 exe        |
 
-两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管。脚本以仓库为家——同步 `config.yaml` 进运行目录、在仓库内维护指向运行目录日志的 `logs` 符号链接，所以先 clone 再跑：
+两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进运行目录、在仓库内维护指向运行目录日志的 `logs` 符号链接，所以先 clone 再跑：
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api
-cp config.example.yaml config.yaml   # 按需编辑；token 留空走第 1 节的自动发现
 bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
 ```
+
+首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `auth.api_key`/`dashboard.password`，并提示粘贴 Devin token——留空走自动发现）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
 
 Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 

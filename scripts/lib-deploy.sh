@@ -1,8 +1,37 @@
 # lib-deploy.sh — deploy.sh（macOS/launchd）与 deploy-linux.sh（systemd --user）
-# 共用的发布下载、版本校验、健康检查函数。
-# 前提：调用方已 cd 到仓库根，且定义了 RUNTIME 与 HEALTH_URL。
+# 共用的发布下载、版本校验、健康检查与首装预检函数。
+# 前提：调用方已 cd 到仓库根，且定义了 RUNTIME。PORT/HEALTH_URL 由
+# detect_port 生成（config.yaml 就绪后再调用，首次调用只为 --check）。
 
-REPO_SLUG="$(git remote get-url origin | sed -E 's#.*github.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
+# 告警/错误一律走 stderr——多处函数经 $() 捕获 stdout，混入噪音会污染
+# 返回值。tty 上加颜色便于人类扫读。
+if [[ -t 2 ]]; then
+	_C_RED=$'\033[31m' _C_YEL=$'\033[33m' _C_RST=$'\033[0m'
+else
+	_C_RED='' _C_YEL='' _C_RST=''
+fi
+warn() { echo "${_C_YEL}WARN${_C_RST} $*" >&2; }
+err() { echo "${_C_RED}ERROR${_C_RST} $*" >&2; }
+die() {
+	err "$*"
+	exit 1
+}
+
+deploy_usage() {
+	cat <<EOF
+用法: $(basename "$0") [--release <tag|latest>] [--no-restart] [--check] [--uninstall] [--help]
+  --release     安装 GitHub Release 预编译二进制（sha256 校验）；缺省为源码构建
+  --no-restart  只替换二进制，不重启服务（下次自然重启时生效）
+  --check       只对比 已安装/运行中/最新 release 版本，不做变更
+  --uninstall   停用并移除服务与二进制（保留 config.yaml 与 logs/）
+  --help        显示本说明
+
+首装与升级同一条命令：服务未安装时自动生成服务定义并拉起；config.yaml
+缺失时从 config.example.yaml 生成——写入随机 auth.api_key 与
+dashboard.password，devin.token 在终端下提示粘贴，否则置空走自动发现。
+覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_RUNTIME / DEVIN2API_PORT。
+EOF
+}
 
 # api.github.com 匿名额度很低且私有 repo 需要凭据，依次尝试 gh keyring /
 # git credential；公开 repo 拿不到也无妨（仅受匿名速率限制）。
@@ -17,12 +46,39 @@ gh_token() {
 	printf '%s' "${token}"
 }
 
-latest_release_tag() {
+# release_slugs 输出 release 候选 repo（每行一个）：origin（若是 GitHub
+# 地址）在前，上游 WncFht/devin2api 兜底——fork 克隆的 origin 一般没有
+# release 资产，会自动落到上游；无 .git（tarball 解压）也能解析出兜底项。
+release_slugs() {
+	local origin slug
+	origin="$(git remote get-url origin 2>/dev/null || true)"
+	slug="$(printf '%s' "${origin}" | sed -nE 's#.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$#\1#p')"
+	{
+		[[ -n "${slug}" ]] && printf '%s\n' "${slug}"
+		printf '%s\n' "WncFht/devin2api"
+	} | awk '!seen[$0]++'
+}
+
+# latest_tag_of <slug>：解析该 repo 最新 release tag；失败/无限额返回空。
+latest_tag_of() {
 	local token
 	token="$(gh_token)"
 	curl -sf -m 10 ${token:+-H "Authorization: Bearer ${token}"} \
-		"https://api.github.com/repos/${REPO_SLUG}/releases/latest" |
+		"https://api.github.com/repos/$1/releases/latest" |
 		sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p'
+}
+
+# latest_release_tag 按候选序取首个能解析出 tag 的 repo。
+latest_release_tag() {
+	local slug tag
+	for slug in $(release_slugs); do
+		tag="$(latest_tag_of "${slug}")"
+		[[ -n "${tag}" ]] && {
+			printf '%s' "${tag}"
+			return 0
+		}
+	done
+	return 1
 }
 
 # release_asset_name 按当前平台输出 release 资产名（Windows 资产带 .exe，
@@ -49,22 +105,22 @@ sha256_file() {
 	fi
 }
 
-# download_release_binary <tag> <output>：下载当前平台资产并按 checksums.txt
-# 校验；输出文件权限置为可执行。
+# download_release_binary <slug> <tag> <output>：下载指定 repo 的当前平台
+# 资产并按 checksums.txt 校验；输出文件权限置为可执行。
 download_release_binary() {
-	local tag="$1" out="$2" asset base token expected actual
+	local slug="$1" tag="$2" out="$3" asset base token expected actual
 	asset="$(release_asset_name)" || return 1
-	base="https://github.com/${REPO_SLUG}/releases/download/${tag}"
+	base="https://github.com/${slug}/releases/download/${tag}"
 	token="$(gh_token)"
 	# 进度走 stderr：本函数会被 build_or_download 在 $() 里调用，
 	# stdout 留给版本号返回值，混入进度会污染捕获结果。
-	echo "==> download ${asset} @ ${tag}" >&2
+	echo "==> download ${asset} @ ${tag} (${slug})" >&2
 	# 公开 repo 下 token 为空也无妨；留着 auth 头以兼容 repo 转 private 的场景，
 	# github.com 重定向到 S3 预签名 URL 时 curl 不会跨主机转发 Authorization。
 	# -C - 断点续传：失败留下半成品，重跑接着下；若残留的是别的版本残片，
 	# 下面的 sha256 校验会拦下并删除。
 	curl -fL -C - ${token:+-H "Authorization: Bearer ${token}"} -o "${out}" "${base}/${asset}" || {
-		echo "download failed — ${tag} 无二进制资产（老发版只有镜像）或网络中断" >&2
+		echo "download failed — ${slug} @ ${tag} 无二进制资产或网络中断" >&2
 		return 1
 	}
 	expected="$(curl -sfL ${token:+-H "Authorization: Bearer ${token}"} "${base}/checksums.txt" | awk -v a="${asset}" '$2==a {print $1}')"
@@ -79,19 +135,30 @@ download_release_binary() {
 
 # build_or_download <release_tag_or_empty>：--release 走下载，否则源码构建；
 # 产物一律写 devin-2api.new，版本号经 stdout 返回（进度输出走 stderr）。
+# 下载按 release_slugs 候选序尝试：显式 tag 在 origin 无资产时落到上游。
 build_or_download() {
-	local tag="$1" version
-	if [[ -n "${tag}" ]]; then
-		if [[ "${tag}" == "latest" ]]; then
-			tag="$(latest_release_tag)" || {
-				echo "failed to resolve latest release tag (auth or rate limit)" >&2
-				return 1
-			}
-		fi
-		download_release_binary "${tag}" devin-2api.new || return 1
-		version="${tag}"
+	local want="$1" slug tag version=""
+	if [[ -n "${want}" ]]; then
+		for slug in $(release_slugs); do
+			tag="${want}"
+			if [[ "${want}" == "latest" ]]; then
+				tag="$(latest_tag_of "${slug}")"
+				[[ -n "${tag}" ]] || continue
+			fi
+			if download_release_binary "${slug}" "${tag}" devin-2api.new; then
+				version="${tag}"
+				break
+			fi
+		done
+		[[ -n "${version}" ]] || {
+			echo "release ${want} 解析或下载失败（tag 不存在、无该平台资产或网络中断）" >&2
+			return 1
+		}
 	else
-		version="$(git describe --tags --always --dirty)"
+		version="$(git describe --tags --always --dirty)" || {
+			echo "git describe 失败——非 git 环境请用 --release latest" >&2
+			return 1
+		}
 		echo "==> build devin-2api ${version}" >&2
 		go build -ldflags "-X main.version=${version}" -o devin-2api.new ./cmd/devin-2api || return 1
 	fi
@@ -114,7 +181,7 @@ install_binary() {
 	mkdir -p "${RUNTIME}/logs"
 	mv "$1" "${RUNTIME}/devin-2api"
 	cmp -s config.yaml "${RUNTIME}/config.yaml" 2>/dev/null ||
-		echo "==> config.yaml 与运行目录不一致，以仓库版本覆盖"
+		warn "config.yaml 与运行目录不一致，以仓库版本覆盖（权威副本在仓库）"
 	cp config.yaml "${RUNTIME}/config.yaml"
 	# logs 已是真实目录（本地 -config config.yaml 跑过）则不动，避免吞掉现场。
 	if [[ -L logs || ! -e logs ]]; then
@@ -123,22 +190,160 @@ install_binary() {
 	echo "==> installed ${RUNTIME}/devin-2api (config.yaml synced from repo)"
 }
 
+# yaml_scalar <key>：取 config.yaml 里首个 "key: value" 的值（去引号、
+# 截断行内空格/注释）。只够读本项目扁平的 key: value 行，不是通用解析。
+yaml_scalar() {
+	[[ -f config.yaml ]] || return 0
+	sed -nE "s/^ *$1: *\"?([^\"# ]*).*/\1/p" config.yaml | head -1
+}
+
 # config_listen_port 从 config.yaml 的 server.listen 提取端口（取最后一个
 # 冒号后的数字，兼容 ":3003" 与 "127.0.0.1:8080" 写法）；解析不到返回空。
 config_listen_port() {
+	[[ -f config.yaml ]] || return 0
 	sed -n 's/^ *listen:.*:\([0-9]\{1,5\}\).*/\1/p' config.yaml | head -1
+}
+
+# sed_inplace 兼容 GNU（sed -i）与 BSD（sed -i ''）的就地改写。
+sed_inplace() {
+	if sed --version >/dev/null 2>&1; then
+		sed -i "$@"
+	else
+		sed -i '' "$@"
+	fi
+}
+
+# set_yaml_scalar <key> <value> <file>：就地替换首个 key 行为 key: "<value>"
+# ——YAML 映射要求冒号后有空格，重写整行顺带把 key:"v" 这类写法归一。
+set_yaml_scalar() {
+	local esc
+	esc="$(printf '%s' "$2" | sed 's/[&\\]/\\&/g')"
+	sed_inplace "s|^\\( *\\)$1:.*|\\1$1: \"${esc}\"|" "$3"
+}
+
+gen_secret() {
+	openssl rand -hex 16 2>/dev/null || od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+# ensure_config：config.yaml 缺失时从 config.example.yaml 生成——写入随机
+# auth.api_key 与 dashboard.password（示例默认 ":8080" 全网卡监听，裸 key
+# 等于把配额和面板开放给 LAN）；devin.token 在终端下提示粘贴，否则置空
+# 走自动发现。已有 config.yaml 时不动——用户手写优先。
+ensure_config() {
+	[[ -f config.yaml ]] && return 0
+	[[ -f config.example.yaml ]] ||
+		die "config.yaml 缺失且找不到 config.example.yaml——请在仓库根目录运行"
+	echo "==> first install: 从 config.example.yaml 生成 config.yaml" >&2
+	cp config.example.yaml config.yaml
+	chmod 600 config.yaml
+	set_yaml_scalar api_key "$(gen_secret)" config.yaml
+	set_yaml_scalar password "$(gen_secret)" config.yaml
+	local token=""
+	# -r/-w 测的是权限不是控制终端——无 tty 环境下 open /dev/tty 才失败。
+	if (exec 3<>/dev/tty) 2>/dev/null; then
+		printf 'Devin session token（devin-session-token$...，留空走自动发现）: ' >/dev/tty
+		IFS= read -r -s token </dev/tty || true
+		printf '\n' >/dev/tty
+	fi
+	set_yaml_scalar token "${token}" config.yaml
+}
+
+# token_source_desc 描述启动时 token 将来自何处；无处可寻返回空。
+# 与 config.Load 的发现链一致：配置值 → env → credentials.toml。
+token_source_desc() {
+	[[ -n "$(yaml_scalar token)" ]] && {
+		printf 'config.yaml devin.token'
+		return 0
+	}
+	[[ -n "${DEVIN_TOKEN:-}" ]] && {
+		printf 'env DEVIN_TOKEN'
+		return 0
+	}
+	[[ -n "${WINDSURF_API_KEY:-}" ]] && {
+		printf 'env WINDSURF_API_KEY'
+		return 0
+	}
+	[[ -f "${HOME}/.local/share/devin/credentials.toml" ]] && {
+		printf '~/.local/share/devin/credentials.toml'
+		return 0
+	}
+	printf ''
+}
+
+# listen_is_loopback：server.listen 绑在回环上返回 0。
+listen_is_loopback() {
+	case "$(yaml_scalar listen)" in
+	127.* | localhost:* | \[::1\]*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# preflight_deploy：开工前把"必炸"与"装了也白装"的场景拦下或喊出来——
+# 每个失败点原地给出修复路径，而不是让错误漂到 90s 后的 healthz 超时。
+# 依赖 RELEASE_TAG 已解析（决定要不要 git/go）。
+preflight_deploy() {
+	# 两平台都是用户级服务；sudo 会把 unit/二进制写到 root 名下。
+	[[ "$(id -u)" == "0" ]] &&
+		die "不需要 sudo——launchd gui 域与 systemd --user 都属当前用户，请以普通用户运行"
+	command -v curl >/dev/null || die "缺少 curl"
+	if [[ -z "${RELEASE_TAG}" ]]; then
+		command -v git >/dev/null || die "源码构建需要 git；也可用 --release latest 免构建"
+		command -v go >/dev/null || die "源码构建需要 go 工具链；也可用 --release latest 免构建"
+	fi
+
+	ensure_config
+
+	# 模板占位 token 会屏蔽自动发现并让上游全部 401/403——拒绝部署。
+	grep -q 'devin-session-token\$mock-token' config.yaml &&
+		die "devin.token 仍是模板占位值（mock-token）：请编辑 config.yaml 填真实 token，或置空走自动发现"
+
+	local src
+	src="$(token_source_desc)"
+	if [[ -z "${src}" ]]; then
+		warn "未发现 token 来源（config/env/credentials.toml 均无）"
+		warn "空 token 启动的实例 /v1/* 不可用且不自愈——配置 token 后须重启服务"
+	else
+		echo "==> token 来源: ${src}" >&2
+	fi
+
+	# 非回环监听 + 空 api_key = 把配额开放给整个网络（README 明确警告）。
+	if ! listen_is_loopback && [[ -z "$(yaml_scalar api_key)" ]]; then
+		warn "server.listen 非回环且 auth.api_key 为空——等于把配额开放给网络，请先配置 auth.api_key"
+	fi
+}
+
+# detect_port <default>：生成 PORT 与 HEALTH_URL。须在 config.yaml 就绪后
+# 调用（ensure_config 之后），否则只能拿到缺省值。
+detect_port() {
+	PORT="${DEVIN2API_PORT:-$(config_listen_port)}"
+	PORT="${PORT:-$1}"
+	HEALTH_URL="http://localhost:${PORT}/healthz"
+}
+
+# check_port_available <managed_pid>：端口被占用时判别占用者——
+# 能回 healthz 版本的是 devin-2api：托管实例（升级场景）放行，
+# 非托管（stray）与外来进程都拦下，省得服务等 90s 才超时。
+check_port_available() {
+	(exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null || return 0
+	local v
+	v="$(healthz_version "${HEALTH_URL}")"
+	if [[ -n "${v}" ]]; then
+		[[ -n "${1:-}" && "${1}" != "0" ]] && return 0
+		die "端口 ${PORT} 已被一个非服务托管的 devin-2api 实例占用（${v}）——先 kill 掉它（见上方 stray 列表）"
+	fi
+	die "端口 ${PORT} 被非 devin-2api 进程占用——改 server.listen 或先释放端口"
 }
 
 # warn_strays <keep_pid>：列出非服务托管的 devin-2api 进程（单实例约定——
 # 它们会抢端口、分流请求，且不受优雅退出保护）。
-# 按可执行名精确匹配（comm）：pgrep -f 会把 cmdline 里含 "devin-2api"
+# 按可执行名精确匹配（comm）：pgrep 匹配 cmdline 会把含 "devin-2api"
 # 的 bash/grep（含本函数自己的管道与外层 `cd devin-2api` 的 shell）
 # 误报为 stray。
 warn_strays() {
 	local pids
 	pids="$(pgrep -x devin-2api | grep -vx "${1:-0}" || true)"
 	[[ -z "${pids}" ]] && return 0
-	echo "WARN: 非服务托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:" >&2
+	warn "非服务托管的 devin-2api 进程（单实例约定，建议 kill <pid> 优雅关闭）:"
 	ps -o pid=,args= -p "$(printf '%s\n' "${pids}" | paste -sd, -)" >&2
 }
 
@@ -165,6 +370,42 @@ wait_healthz_version() {
 	return 1
 }
 
+# smoke_upstream：部署后打一发 /v1/models——healthz 绿只证明进程活着，
+# token 无效/缺失在这一层才暴露。返回非零表示上游鉴权未通过。
+smoke_upstream() {
+	local key code src
+	key="$(yaml_scalar api_key)"
+	code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' \
+		${key:+-H "X-Api-Key: ${key}"} "http://localhost:${PORT}/v1/models" 2>/dev/null || true)"
+	if [[ "${code}" == "200" ]]; then
+		echo "==> upstream auth verified (GET /v1/models 200)"
+		return 0
+	fi
+	case "${code}" in
+	401 | 403)
+		warn "服务已运行但 /v1/models 返回 HTTP ${code}——客户端 api_key 不匹配或上游 token 无效"
+		;;
+	*)
+		warn "服务已运行但 /v1/models 返回 HTTP ${code:-<timeout>}——上游链路未通过"
+		;;
+	esac
+	src="$(token_source_desc)"
+	if [[ -z "${src}" ]]; then
+		warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启"
+	else
+		warn "token 来源 ${src}——可能已过期；排障看 logs/index.jsonl 与 /panel"
+	fi
+	return 1
+}
+
+# dump_recent_log：失败时把服务 stderr 尾部打到调用方终端，省一次翻文件。
+dump_recent_log() {
+	local f="${RUNTIME}/logs/stderr.log"
+	[[ -f "${f}" ]] || return 0
+	echo "--- tail ${f} ---" >&2
+	tail -n 15 "${f}" >&2
+}
+
 # check_versions 对比 已安装/运行中/最新 release 版本；不一致返回 1。
 check_versions() {
 	local installed running latest
@@ -175,10 +416,32 @@ check_versions() {
 	[[ "${installed}" == "${latest}" ]]
 }
 
-# parse_deploy_args 解析三个脚本共用的 --release/--no-restart/--check。
+# remove_installed_binary：删运行目录二进制；config.yaml 与 logs/ 保留。
+# 删了返回 0，本就不存在返回 1。
+remove_installed_binary() {
+	[[ -f "${RUNTIME}/devin-2api" ]] || return 1
+	rm -f "${RUNTIME}/devin-2api"
+	echo "==> removed ${RUNTIME}/devin-2api"
+}
+
+# print_summary <version> <服务管理命令>：收尾报告——装在哪、怎么停、
+# 日志与面板在哪，把"接下来怎么办"直接写出来。
+print_summary() {
+	cat <<EOF
+==> deployed $1
+    运行目录 : ${RUNTIME}（binary + config.yaml + logs/）
+    监听     : http://localhost:${PORT}（面板 /panel，凭据见 config.yaml）
+    服务管理 : $2
+    日志     : tail -f ${RUNTIME}/logs/stderr.log
+EOF
+}
+
+# parse_deploy_args 解析三个脚本共用的 --release/--no-restart/--check/
+# --uninstall/--help。
 RELEASE_TAG=""
 NO_RESTART=0
 CHECK=0
+UNINSTALL=0
 parse_deploy_args() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -194,8 +457,16 @@ parse_deploy_args() {
 			CHECK=1
 			shift
 			;;
+		--uninstall)
+			UNINSTALL=1
+			shift
+			;;
+		--help | -h)
+			deploy_usage
+			exit 0
+			;;
 		*)
-			echo "unknown arg: $1" >&2
+			echo "unknown arg: $1（--help 查看用法）" >&2
 			exit 2
 			;;
 		esac

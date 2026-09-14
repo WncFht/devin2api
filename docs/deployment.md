@@ -8,7 +8,7 @@
 | Linux   | systemd `--user` unit `devin-2api.service` | `${XDG_DATA_HOME:-~/.local/share}/devin-2api` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`       | `scripts/deploy-linux.sh` |
 | Windows | 无服务化，裸 exe 前台跑                    | 任意目录（exe 与 config.yaml 同目录）         | —                                                   | 手动复制 release exe      |
 
-三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本。服务未安装时首装自动生成服务定义并拉起——最小安装路径是：同步仓库（含 `config.yaml`）→ `deploy*.sh --release latest`。
+三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
 ## 跨平台共同约定
 
@@ -107,6 +107,10 @@ WorkingDirectory=<运行目录>
 Restart=always
 RestartSec=5
 TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=<运行目录>
 StandardOutput=append:<运行目录>/logs/stdout.log
 StandardError=append:<运行目录>/logs/stderr.log
 

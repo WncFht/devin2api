@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 # deploy.sh — 构建或下载并热替换本机 launchd 托管的 devin-2api（仅 macOS）。
-# 用法: scripts/deploy.sh [--release <tag|latest>] [--no-restart] [--check]
-#   --release     安装 GitHub Release 预编译二进制（校验 sha256）；缺省为源码构建
-#   --no-restart  只替换二进制，不 kickstart（下次自然重启时生效）
-#   --check       只对比 已安装/运行中/最新 release 版本，不做变更；
-#                 与 latest 不一致时 exit 1（源码构建的超前版本也会触发）
-#
-# launchd 服务未加载时自动生成 plist 并 bootstrap，因此首装与升级同一条命令：
+# 用法见 --help。launchd 服务未加载时自动生成 plist 并 bootstrap，
+# config.yaml 缺失时自动从 example 生成——首装与升级同一条命令：
 # 新机器只要同步本仓库再跑 deploy.sh。Linux 用 scripts/deploy-linux.sh
 # （systemd --user），两者共享 scripts/lib-deploy.sh。
 set -euo pipefail
@@ -27,9 +22,26 @@ PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 # 因此二进制、config.yaml、logs/ 一律放 Application Support，仓库只保留
 # logs -> RUNTIME/logs 的符号链接供排障读取。
 RUNTIME="${DEVIN2API_RUNTIME:-${HOME}/Library/Application Support/devin-2api}"
-PORT="${DEVIN2API_PORT:-$(config_listen_port)}"
-PORT="${PORT:-3003}"
-HEALTH_URL="http://localhost:${PORT}/healthz"
+
+do_uninstall() {
+	local did=0
+	if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
+		launchctl bootout "gui/$(id -u)/${LABEL}"
+		echo "==> service booted out (${LABEL})"
+		did=1
+	fi
+	if [[ -f "${PLIST}" ]]; then
+		rm -f "${PLIST}"
+		echo "==> removed ${PLIST}"
+		did=1
+	fi
+	remove_installed_binary && did=1
+	[[ -f "${RUNTIME}/config.yaml" || -d "${RUNTIME}/logs" ]] &&
+		echo "    保留 ${RUNTIME} 下 config.yaml 与 logs/；彻底清理: rm -rf '${RUNTIME}'"
+	[[ "${did}" == "0" ]] && echo "nothing to remove"
+}
+
+parse_deploy_args "$@"
 
 # 单实例约定：launchd 托管的实例是唯一合法实例。部署前先列出其它
 # devin-2api 进程（手动 ./devin-2api、遗忘的冒烟实例）——它们会抢端口、
@@ -37,12 +49,22 @@ HEALTH_URL="http://localhost:${PORT}/healthz"
 LAUNCHD_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/pid = /{print $3}' || true)"
 warn_strays "${LAUNCHD_PID:-0}"
 
-parse_deploy_args "$@"
+if [[ "${UNINSTALL}" == "1" ]]; then
+	do_uninstall
+	exit 0
+fi
 
 if [[ "${CHECK}" == "1" ]]; then
+	detect_port 3003
 	check_versions
 	exit $?
 fi
+
+# 预检：依赖、config 引导（缺失自动生成）、token/端口冲突——全部在下载
+# 之前拦截，错误原地带修复路径，不让它漂到 healthz 超时。
+preflight_deploy
+detect_port 3003
+check_port_available "${LAUNCHD_PID:-0}"
 
 VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
@@ -99,10 +121,16 @@ fi
 echo "==> waiting for healthz version=${VERSION} (old pid: ${OLD_PID:-?})"
 # 排空上限 50s + 新进程启动，预留 ~90s。
 RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 90)" || {
-	echo "healthz 未出现新版本 (last=${RUNNING}); check logs/stderr.log" >&2
+	echo "healthz 未出现新版本 (last=${RUNNING})" >&2
+	dump_recent_log
 	exit 1
 }
 
 NEW_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
 echo "==> running: pid=${NEW_PID:-?} version=${RUNNING}"
-echo "done"
+
+# healthz 只证明进程活着；真链路冒烟打 /v1/models 验证上游鉴权。
+smoke_rc=0
+smoke_upstream || smoke_rc=$?
+print_summary "${RUNNING}" "launchctl kickstart -k gui/$(id -u)/${LABEL}（重启）；--uninstall 卸载"
+exit "${smoke_rc}"
