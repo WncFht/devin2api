@@ -1,0 +1,44 @@
+// 本文件集中定义请求调试目录内的阶段文件名与 logs 根目录下的共享文件名。
+//
+// 这是一份跨包契约：app/adapter 是写入侧，cleaner/dashboard/protocensus
+// 是读取侧，两处各自拼写字面量会随演进静默对不上（清理漏剥、面板读空）。
+package debuglog
+
+import "fmt"
+
+const (
+	// StageHTTPRequest 是客户端原始请求投影。
+	StageHTTPRequest = "01-http-request.json"
+	// StageRequestMessages 是中间模型投影。
+	StageRequestMessages = "02-request-messages.json"
+	// StageDevinRequest 是首个上游 wire 请求；重试分片见 StageDevinRequestAttempt。
+	StageDevinRequest = "03-devin-request.json"
+	// StageDevinResponse 是上游原始响应帧。
+	StageDevinResponse = "04-devin-response.jsonl"
+	// StageResponseEvents 是内部响应事件流。
+	StageResponseEvents = "05-response-events.jsonl"
+	// StageHTTPResponse 是下发客户端的 SSE 帧。
+	StageHTTPResponse = "06-http-response.jsonl"
+
+	// AttachmentsDir 是请求目录内的附件子目录名。
+	AttachmentsDir = "attachments"
+	// MetaFile 是请求元信息文件（创建时与完结时各写一次）。
+	MetaFile = "meta.json"
+	// ErrorFile 记录首个失败点；容量淘汰按它识别失败目录。
+	ErrorFile = "error.json"
+	// IndexFile 是跨请求索引（每完成请求追加一行摘要）。
+	IndexFile = "index.jsonl"
+	// StderrFile 是进程 stderr 日志（slog 行），部署脚本负责重定向写入。
+	StderrFile = "stderr.log"
+)
+
+// devinRequestStageStem 是上游请求文件名的公共词干：首个请求是
+// 03-devin-request.json，第 N 次重发是 03-devin-request.attemptN.json——
+// 词干加 "." 前缀匹配可同时圈出主文件与全部重试分片。
+const devinRequestStageStem = "03-devin-request"
+
+// StageDevinRequestAttempt 返回第 attempt 次（attempt>=2）上游重发的
+// 请求文件名；与首个请求的 StageDevinRequest 共享 devinRequestStageStem。
+func StageDevinRequestAttempt(attempt int) string {
+	return fmt.Sprintf("%s.attempt%d.json", devinRequestStageStem, attempt)
+}

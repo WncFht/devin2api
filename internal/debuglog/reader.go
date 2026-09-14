@@ -59,7 +59,7 @@ func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
 		return nil, os.ErrNotExist
 	}
 	detail := &RequestDetail{Dir: dir}
-	if data, err := os.ReadFile(filepath.Join(root, "meta.json")); err == nil && json.Valid(data) {
+	if data, err := os.ReadFile(filepath.Join(root, MetaFile)); err == nil && json.Valid(data) {
 		detail.Meta = json.RawMessage(data)
 	}
 	detail.Files = listRequestFiles(root)
@@ -130,7 +130,7 @@ func validFileRelPath(name string) bool {
 		return false
 	}
 	parts := strings.Split(clean, "/")
-	return len(parts) == 1 || (len(parts) == 2 && parts[0] == "attachments")
+	return len(parts) == 1 || (len(parts) == 2 && parts[0] == AttachmentsDir)
 }
 
 // ActiveRequest 是一个仍在进行中的请求的可观测快照。
@@ -366,7 +366,7 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	if manager == nil || manager.root == "" || limit <= 0 {
 		return ListResult{}
 	}
-	path := filepath.Join(manager.root, "index.jsonl")
+	path := filepath.Join(manager.root, IndexFile)
 	info, err := os.Stat(path)
 	if err != nil {
 		return ListResult{}
@@ -374,7 +374,7 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	key := strconv.FormatInt(info.Size(), 10) + ":" + strconv.FormatInt(info.ModTime().UnixNano(), 10)
 	manager.listCacheMu.Lock()
 	if manager.listCache.key != key {
-		data, err := tailRead(path, indexTailBytes)
+		data, err := TailRead(path, indexTailBytes)
 		if err != nil {
 			manager.listCacheMu.Unlock()
 			return ListResult{}
@@ -427,7 +427,7 @@ func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, e
 	if manager == nil || manager.root == "" {
 		return nil, 0, os.ErrNotExist
 	}
-	path := filepath.Join(manager.root, "stderr.log")
+	path := filepath.Join(manager.root, StderrFile)
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, 0, err
@@ -451,16 +451,16 @@ func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, e
 		return data, size, nil
 	}
 	// 全量尾部模式：读最后 processLogTailBytes。
-	data, err = tailRead(path, processLogTailBytes)
+	data, err = TailRead(path, processLogTailBytes)
 	if err != nil {
 		return nil, 0, err
 	}
 	return data, size, nil
 }
 
-// tailRead 读取文件末尾至多 max 字节；文件小于 max 时读全文。
+// TailRead 读取文件末尾至多 max 字节；文件小于 max 时读全文。
 // 返回内容从第一个完整行开始（丢弃被截断的首行由调用方按行解析时自然跳过）。
-func tailRead(path string, max int64) ([]byte, error) {
+func TailRead(path string, max int64) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -479,4 +479,32 @@ func tailRead(path string, max int64) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// TruncateToTail 把 path 文件截到末尾至多 keep 字节：读取尾部、丢弃被截断
+// 的首行残段后原地重写，返回实际保留的字节数。文件本就不超过 keep 时
+// 不改写，直接返回其大小。供 JSONL 类追加日志（index/quota）的容量收口
+// 共用——截断点落在行中间时残留半行对按行消费者是毒数据，必须丢弃。
+func TruncateToTail(path string, keep int64) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() <= keep {
+		return info.Size(), nil
+	}
+	data, err := TailRead(path, keep)
+	if err != nil {
+		return 0, err
+	}
+	if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
+		data = data[idx+1:]
+	} else {
+		// 整个尾部是一行残段，全丢弃留空文件。
+		data = nil
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return 0, err
+	}
+	return int64(len(data)), nil
 }

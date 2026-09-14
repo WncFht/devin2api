@@ -6,7 +6,6 @@ package debuglog
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -86,7 +85,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 	if manager.indexWriter == nil {
-		file, err := os.OpenFile(filepath.Join(manager.root, "index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		file, err := os.OpenFile(filepath.Join(manager.root, IndexFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			manager.ioErrors.Add(1)
 			return
@@ -171,20 +170,13 @@ func (manager *Manager) truncateIndexLocked() {
 	_ = manager.indexFile.Close()
 	manager.indexWriter = nil
 	manager.indexFile = nil
-	path := filepath.Join(manager.root, "index.jsonl")
-	data, err := tailRead(path, indexFileCap/2)
-	if err == nil {
-		// 截断点可能落在行中间，丢弃首行残段。
-		if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
-			data = data[idx+1:]
-		}
-		err = os.WriteFile(path, data, 0o600)
-	}
+	path := filepath.Join(manager.root, IndexFile)
+	kept, err := TruncateToTail(path, indexFileCap/2)
 	if err != nil {
 		manager.ioErrors.Add(1)
 		return
 	}
-	manager.indexBytes = int64(len(data))
+	manager.indexBytes = kept
 }
 
 // reasoningTokens 展开 Usage.Reasoning 指针为整数值。
