@@ -16,7 +16,7 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 
 ## 二、探测方法
 
-复用链路 `probe → devin-2api :3003 → 上游`，最小负载：
+复用链路 `probe → devin-2api :<listen 端口> → 上游`（本机示例 :3003），最小负载：
 
 ```json
 {

@@ -11,24 +11,26 @@ client (cc / codex / kimi-cli / ...)
       → server.codeium.com   (Devin 上游, Connect-RPC)
 ```
 
+> 链路为作者本机示例：ccload 是作者自用的前置网关（非必需——客户端可直连 devin-2api），`:49173`/`:3003` 端口与渠道 id 是本地部署取值，按自己的拓扑替换。ccload 相关小节只在走同款链路时适用。
+
 任何一环出错都会以「重试/失败」的形式表现在客户端。定位的第一步永远是**确定错误在哪一层产生**。
 
 ## 错误速查表
 
-| 现象                                                                                         | 层         | 含义                                                                       | 处理                                                                                                                    |
-| -------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| HTTP 401                                                                                     | devin-2api | api_key 不对                                                               | 查 `auth.api_key` / 请求头                                                                                              |
-| HTTP 503 `devin token not configured`                                                        | devin-2api | 没拿到上游 token                                                           | 查 `devin.token` / 自动发现链                                                                                           |
-| `permission_denied`（无 policy 文案）                                                        | 上游       | 模型 UID 不存在/无权                                                       | **先查 `devin.aliases` 目标是否还活着**（stderr 有 `model absent from upstream catalog` Warn 即此情形），再查模型名拼写 |
-| 某模型突然 `not_found`/`permission_denied`                                                   | 上游       | 上游可能给该模型加了版本门                                                 | bump `devin.client_version` 到最新 CLI 版本再试                                                                         |
-| `permission_denied` + "blocked by our content policy"                                        | 上游       | 命中特征句指纹库                                                           | bisect 请求体，把触发句加进 `sanitize.go`                                                                               |
-| `invalid_argument`                                                                           | 上游       | **wire 形状不符**（不是内容问题）                                          | 对照本文「已验证 wire 契约」逐条查                                                                                      |
-| `unexpected EOF` / connection reset                                                          | 传输       | 上游偶发抖动                                                               | 建立阶段重试 3 次（仅纯传输错误）；仍失败换模型/稍后再试                                                                |
-| Connect code 错误（含 `unavailable`）                                                        | 上游       | 确定性语义错误                                                             | **不重试**——"try later" 文案是固定模板                                                                                  |
-| HTTP 200 + SSE `response.failed`/`error`                                                     | 上游       | 流建立后上游才拒绝                                                         | 同上，看事件里的 code/status 分类                                                                                       |
-| ccload 渠道被冷却                                                                            | ccload     | 连续失败计数                                                               | `SELECT cooldown_until FROM channels WHERE id=<渠道id>`                                                                 |
-| 进程活着但端口拒绝连接                                                                       | launchd    | dyld/Gatekeeper 卡住                                                       | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉                                                                       |
-| 日志全 `completed` 无 error_stage，但会话"想了很久只回一句"或工具全 `[Tool use interrupted]` | 客户端     | 打断 - 续跑循环（见下文 Claude Code 条目）——代理交付完整，断在客户端权限层 | `grep -l '"(no content)"' logs/*/01-http-request.json` 命中即此故障；别往上游查                                         |
+| 现象                                                                                         | 层               | 含义                                                                       | 处理                                                                                                                    |
+| -------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| HTTP 401                                                                                     | devin-2api       | api_key 不对                                                               | 查 `auth.api_key` / 请求头                                                                                              |
+| HTTP 503 `devin token not configured`                                                        | devin-2api       | 没拿到上游 token                                                           | 查 `devin.token` / 自动发现链                                                                                           |
+| `permission_denied`（无 policy 文案）                                                        | 上游             | 模型 UID 不存在/无权                                                       | **先查 `devin.aliases` 目标是否还活着**（stderr 有 `model absent from upstream catalog` Warn 即此情形），再查模型名拼写 |
+| 某模型突然 `not_found`/`permission_denied`                                                   | 上游             | 上游可能给该模型加了版本门                                                 | bump `devin.client_version` 到最新 CLI 版本再试                                                                         |
+| `permission_denied` + "blocked by our content policy"                                        | 上游             | 命中特征句指纹库                                                           | bisect 请求体，把触发句加进 `sanitize.go`                                                                               |
+| `invalid_argument`                                                                           | 上游             | **wire 形状不符**（不是内容问题）                                          | 对照本文「已验证 wire 契约」逐条查                                                                                      |
+| `unexpected EOF` / connection reset                                                          | 传输             | 上游偶发抖动                                                               | 建立阶段重试 3 次（仅纯传输错误）；仍失败换模型/稍后再试                                                                |
+| Connect code 错误（含 `unavailable`）                                                        | 上游             | 确定性语义错误                                                             | **不重试**——"try later" 文案是固定模板                                                                                  |
+| HTTP 200 + SSE `response.failed`/`error`                                                     | 上游             | 流建立后上游才拒绝                                                         | 同上，看事件里的 code/status 分类                                                                                       |
+| ccload 渠道被冷却                                                                            | ccload           | 连续失败计数                                                               | `SELECT cooldown_until FROM channels WHERE id=<渠道id>`                                                                 |
+| 进程活着但端口拒绝连接                                                                       | launchd（macOS） | dyld/Gatekeeper 卡住                                                       | `sample <pid>` 确认后 `kill -9`，KeepAlive 会重拉                                                                       |
+| 日志全 `completed` 无 error_stage，但会话"想了很久只回一句"或工具全 `[Tool use interrupted]` | 客户端           | 打断 - 续跑循环（见下文 Claude Code 条目）——代理交付完整，断在客户端权限层 | `grep -l '"(no content)"' logs/*/01-http-request.json` 命中即此故障；别往上游查                                         |
 
 ## 标准排查流程
 
@@ -72,9 +74,9 @@ curl -sN http://localhost:3003/v1/responses \
 
 ```bash
 # 优先热切换：POST /panel/api/debug/toggle，不用重启
-curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
+curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
   -H "Authorization: Bearer <dashboard.password>"
-# 或改 config.yaml 的 debug.enabled 后 kickstart（冷路径，配 launchd 用）
+# 或改 config.yaml 的 debug.enabled 后托管重启（冷路径）
 # 复现一次请求，然后看 logs/<时间戳>/03-devin-request.json
 ```
 
@@ -152,9 +154,9 @@ curl -s -X POST http://localhost:3003/panel/api/debug/toggle \
 
 ## 运维坑
 
-- **重启腰斩在途流**：`launchctl kickstart -k` 和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在 ccload 侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外 `ExitTimeOut` 已设为 60s，优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
-- **不要手动跑 `./devin-2api` 抢 :3003**：手动实例和 launchd 的 KeepAlive 会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经 launchd 启停。
-- **launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。
+- **重启腰斩在途流**：托管重启（`kickstart -k`、`systemctl --user restart`）和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在前置网关侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外停止超时已设为 60s（launchd `ExitTimeOut` / systemd `TimeoutStopSec`），优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
+- **不要手动跑 `./devin-2api` 抢监听端口**：手动实例和托管器的自动重拉（launchd KeepAlive / systemd Restart=always）会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经托管器启停。
+- **macOS 特有——launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。详见 `deployment.md`。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。
 
 ## 客户端上下文窗口配置（自动压缩前提）

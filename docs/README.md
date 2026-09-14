@@ -25,10 +25,10 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 部署与工程
 
-| 文档                  | 用途                                                                                  |
-| --------------------- | ------------------------------------------------------------------------------------- |
-| `macos-deployment.md` | launchd 部署：plist、升级流程、进程模型（Linux/Windows 对应物见 AGENTS.md「部署」节） |
-| `toolchain.md`        | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族      |
+| 文档            | 用途                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------- |
+| `deployment.md` | 部署：macOS launchd / Linux systemd --user / Windows 裸进程，运行目录、优雅排空、单实例约定 |
+| `toolchain.md`  | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族            |
 
 ## 速查入口
 

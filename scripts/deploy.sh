@@ -49,7 +49,7 @@ smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
 
 # 服务未加载时生成 plist 并 bootstrap——首装场景（新机器同步仓库后直接
-# 跑本脚本即可）。plist 内容与 docs/macos-deployment.md 保持一致。
+# 跑本脚本即可）。plist 内容与 docs/deployment.md 保持一致。
 FRESH_BOOT=0
 if ! launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
 	if [[ ! -f "${PLIST}" ]]; then

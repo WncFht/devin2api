@@ -72,7 +72,7 @@ take any actions. Just provide the summary in <summary> tags.
 
 全文历史先落盘 (`file_compactor.rs` / `async_file_compactor.rs`),再拼装新上下文：
 
-- **历史文件**:`~/.local/share/devin/cli/summaries/history_<id>.md`,内含 `#Full conversation history saved at <path>` 和 `Summary:` 段——与 CLI 会话恢复摘要文件格式完全一致
+- **历史文件**:`~/.local/share/devin/cli/summaries/history_<id>.md`（Devin CLI 的 XDG 数据目录），内含 `#Full conversation history saved at <path>` 和 `Summary:` 段——与 CLI 会话恢复摘要文件格式完全一致
 - **恢复包装**:`You are continuing work from a previous conversation thread. Below is a summary of the previous conversation thread:` + `<summary>` 内容 + `Here are some files that you edited` + `<last_todo_list>` 等段
 - **逐字保留**(`apply_summary`):
     - 编辑过的文件路径清单 (`compact/edited_files`,`apply_summary: preserving N edited file path(s)`)
