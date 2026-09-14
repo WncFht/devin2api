@@ -213,16 +213,19 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 		if decoder.partial.ResponseModel == "" && usage.ModelUid != nil {
 			decoder.partial.ResponseModel = usage.GetModelUid()
 		}
-		if usage.InputTokens != nil {
+		// 显式零字段不得覆盖已入账的非零值——占位零字段的上游/
+		// 中继存在（ccLoad#133 同型）；usage 是累计快照，零只接受
+		// 「尚无入账」时的占位。
+		if usage.GetInputTokens() != 0 || decoder.partial.Usage.Input == 0 {
 			decoder.partial.Usage.Input = int64(usage.GetInputTokens())
 		}
-		if usage.OutputTokens != nil {
+		if usage.GetOutputTokens() != 0 || decoder.partial.Usage.Output == 0 {
 			decoder.partial.Usage.Output = int64(usage.GetOutputTokens())
 		}
-		if usage.CacheReadTokens != nil {
+		if usage.GetCacheReadTokens() != 0 || decoder.partial.Usage.CacheRead == 0 {
 			decoder.partial.Usage.CacheRead = int64(usage.GetCacheReadTokens())
 		}
-		if usage.CacheWriteTokens != nil {
+		if usage.GetCacheWriteTokens() != 0 || decoder.partial.Usage.CacheWrite == 0 {
 			decoder.partial.Usage.CacheWrite = int64(usage.GetCacheWriteTokens())
 		}
 		decoder.partial.Usage.TotalTokens = decoder.partial.Usage.Input + decoder.partial.Usage.Output + decoder.partial.Usage.CacheRead + decoder.partial.Usage.CacheWrite

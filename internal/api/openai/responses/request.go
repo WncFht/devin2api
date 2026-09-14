@@ -324,6 +324,12 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"summary"`
+			// 新版 Responses 把推理正文放在 content[].reasoning_text，
+			// 只读 summary 会静默丢掉整段思考（CPA#5378 同型）。
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
 			EncryptedContent string `json:"encrypted_content"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -331,6 +337,11 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		}
 		for _, part := range item.Summary {
 			if part.Type == "summary_text" && part.Text != "" {
+				pending.texts = append(pending.texts, part.Text)
+			}
+		}
+		for _, part := range item.Content {
+			if part.Type == "reasoning_text" && part.Text != "" {
 				pending.texts = append(pending.texts, part.Text)
 			}
 		}
