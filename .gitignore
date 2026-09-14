@@ -48,6 +48,9 @@ multi-harness-eval/runs/
 /CLAUDE.md
 /.claude/
 
+# MPE 预览环境（parser.js/style.less/pseudocode 运行时）：本机目录，不入库
+/.crossnote/
+
 # 内部研究档案：上游逆向笔记、调研快照、本机部署/接入笔记（不随公开发布）
 /notes/
 

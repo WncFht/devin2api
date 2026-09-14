@@ -2,6 +2,24 @@
     // prettier 版本以 package.json/node_modules 为唯一事实源；
     // 缺 node_modules 时直接报错，而不是静默回落到扩展内置版本
     "prettier.prettierPath": "./node_modules/prettier",
+    // Markdown Preview Enhanced：预览环境本体在 /.crossnote/（gitignore 的本机
+    // 目录，由 setup-toolchain 部署）。enablePreviewScripts 是 pseudocode-runtime.js
+    // 注入的前提（另要求工作区受信任）；mathRenderingOption KaTeX 是 pseudocode
+    // 数学 CSS 的依赖；previewTheme none.css 把主题交给 .crossnote/style.less；
+    // wikiLinkResolution 是"编辑器设置 ?? config.js"取值键，只能写在这里。
+    "markdown-preview-enhanced.enablePreviewScripts": true,
+    "markdown-preview-enhanced.enableScriptExecution": true,
+    "markdown-preview-enhanced.enableWikiLinkSyntax": true,
+    "markdown-preview-enhanced.wikiLinkResolution": "shortest",
+    "markdown-preview-enhanced.enableCriticMarkupSyntax": true,
+    "markdown-preview-enhanced.enableExtendedTableSyntax": true,
+    "markdown-preview-enhanced.enableHTML5Embed": true,
+    "markdown-preview-enhanced.breakOnSingleNewLine": true,
+    "markdown-preview-enhanced.mathRenderingOption": "KaTeX",
+    "markdown-preview-enhanced.previewTheme": "none.css",
+    "markdown-preview-enhanced.previewColorScheme": "selectedPreviewTheme",
+    "markdown-preview-enhanced.mermaidTheme": "dark",
+    "markdown-preview-enhanced.frontMatterRenderingOption": "code block",
     "[markdown]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode",
         "editor.formatOnSave": true,
