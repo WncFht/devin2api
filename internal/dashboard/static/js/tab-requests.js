@@ -47,16 +47,23 @@ function silentTag(a) {
 }
 
 // ---------- 行模板 ----------
+// pendingRowHtml 与完成行共用同一组表头（时间/API/状态/模型/耗时/上游
+// TTFB/Tokens/客户端）：各列对齐同语义——dir 作副行挂在时间列下，
+// 「已下发字节」是唯一在途进度信号（token 尚未结算），客户端列放
+// IP/key 哈希与中断按钮。
 function pendingRowHtml(a) {
+  const m = a.meta || {};
   return '<tr class="pending-row" id="p-' + esc(a.dir) + '" data-dir="' + esc(a.dir) + '">' +
-    '<td><span class="pulse-dot"></span><span class="mono">' + esc(a.dir) + '</span></td>' +
-    '<td>' + esc(a.meta && a.meta.api || '-') + '</td>' +
+    '<td class="mono"><span class="pulse-dot"></span>' + fmtTime(a.started_at) + '<div class="muted" title="dir 即响应头 X-Request-Id">' + esc(a.dir) + '</div></td>' +
+    '<td>' + esc(m.api || '-') + '</td>' +
     '<td><span class="rbadge r-muted">' + esc(STATE_LABEL[a.state] || a.state || '进行中') + '</span>' + silentTag(a) + '</td>' +
     '<td class="mono">' + esc(a.model || '-') + '</td>' +
     '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
     '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
-    '<td class="mono muted">已下发 ' + fmtBytes(a.client_bytes) + '</td>' +
-    '<td>' + (a.abortable ? '<button type="button" class="file-link" data-abort="' + esc(a.dir) + '">中断</button>' : '') + '</td></tr>';
+    '<td class="mono muted" title="已下发字节（token 未结算）">↓' + fmtBytes(a.client_bytes) + '</td>' +
+    '<td class="mono muted">' + esc(m.client_ip || '') +
+      (m.key_hash ? '<div class="muted" title="key hash">' + esc(m.key_hash) + '</div>' : '') +
+      (a.abortable ? '<button type="button" class="file-link" data-abort="' + esc(a.dir) + '">中断</button>' : '') + '</td></tr>';
 }
 
 function rowHtml(e) {
@@ -73,7 +80,7 @@ function rowHtml(e) {
   return '<tr id="r-' + esc(e.dir) + '" data-dir="' + esc(e.dir) + '">' +
     '<td class="mono" title="' + esc(e.started_at || '') + '">' + fmtTime(e.started_at) + '</td>' +
     '<td>' + esc(e.api || '-') + '</td>' +
-    '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + retry + rl + stage + '</td>' +
+    '<td><span class="' + statusClass(e.status_code) + ' mono">' + esc(e.status_code) + '</span>' + resultBadge(e.result) + stream + retry + rl + stage + '</td>' +
     '<td>' + esc(e.requested_model || '-') + resolved + mismatch + premature + '</td>' +
     '<td class="mono ' + secClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
     '<td class="mono ' + secClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
@@ -258,11 +265,7 @@ async function load() {
       const parts = Object.keys(byReason).map(k => (REJECT_LABELS[k] || k) + ' ' + byReason[k]);
       hint += '近 15 分钟本地拒绝 ' + recentRejects.length + ' 条（' + esc(parts.join(' · ')) + '）——管线前拒绝不进索引，<button type="button" class="lnk" data-gotosys="1">去系统页</button>。 ';
     }
-    const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
-    if (sts || uts) {
-      hint = '时间窗锁定 ' + (sts ? fmtTime(sts) : '最早') + ' ~ ' + (uts ? fmtTime(uts) : '现在') +
-        '（矩阵下钻）· <button type="button" class="lnk" data-clrwin="1">清除窗口</button> ';
-    }
+    hint += windowLockHint();
     if (data.has_more) hint += '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
     if (reqLimit >= 500 && lastList.length < data.total) hint += ' 已达 500 条单页上限，用导出查看全部。';
     const hintEl = $('reqHint');
@@ -274,11 +277,21 @@ async function load() {
   }
 }
 
+// windowLockHint 是矩阵下钻隐藏 ISO 窗字段生效时的常驻提示；
+// load() 组装 hint 与 tick() 的暂停态提示共用，避免覆盖丢失。
+function windowLockHint() {
+  const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
+  if (!sts && !uts) return '';
+  return '时间窗锁定 ' + (sts ? fmtTime(sts) : '最早') + ' ~ ' + (uts ? fmtTime(uts) : '现在') +
+    '（矩阵下钻）· <button type="button" class="lnk" data-clrwin="1">清除窗口</button> ';
+}
+
 // 打开文件时列表自动刷新暂停（避免详情 DOM 被重建）。
 function tick() {
   if (openFile) {
     const h = $('reqHint');
-    h.style.display = ''; h.textContent = '正在查看文件，自动刷新已暂停（再点一次文件名或收起详情后恢复）。';
+    h.style.display = '';
+    h.innerHTML = '正在查看文件，自动刷新已暂停（再点一次文件名或收起详情后恢复）。 ' + windowLockHint();
     return;
   }
   // 先拉在途再渲染列表：pending 行用本轮数据，不滞后一个周期。
