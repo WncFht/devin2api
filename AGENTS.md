@@ -114,7 +114,7 @@
 聚合与生命周期：
 
 - `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势、最近 4096 条延迟 p50/p90/p95/p99、错误责任归因 `client_faults`/`upstream_faults` 与 SLA 口径成功率、按模型 token 分位数与目录价估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
-- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`http.rejects` 段暴露管线前拒绝（`by_reason` 分原因计数 + `recent` 最近 256 条事件环）；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）。
+- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`http.rejects` 段暴露管线前拒绝（`by_reason` 分原因计数 + `recent` 最近 256 条事件环）；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数/令牌余量/排队数 + `events` 闩迁移事件环——上闩/延闩/解闩/到期/恢复——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）。
 - `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
 - `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
 - `GET /panel/api/config` 返回脱敏后的生效配置视图（`devin.token`/`auth.api_key`/`dashboard.password` 以 `sha256:` 前缀代替明文，可与日志 `key_hash` 对照；`stale=true` 表示文件在最后一次加载后被改过）。`POST /panel/api/config/reload` 重读 config.yaml 并热应用，返回 `applied`（已生效字段）与 `requires_restart`（要重启才生效：`server.listen`/`max_concurrency`/`devin.base_url`/`proxy`/`force_http1`/`debug.quota_interval_minutes`）；校验失败 422、旧配置继续服役。注意 `devin.client_*` 只影响 chat 路径——面板自身的 seat 类上游调用固定用 windsurf 身份。

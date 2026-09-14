@@ -46,7 +46,28 @@ const System = (() => {
       meta('滴灌放行', g.drip_count ?? 0) +
       meta('闩内快败', g.reject_latched_count ?? 0) +
       meta('排队快败', g.reject_hold_count ?? 0) +
+      meta('令牌余量', g.capacity ? Number(g.tokens ?? 0).toFixed(1) + ' / ' + g.capacity : '-') +
+      meta('排队等待', g.waiters ?? 0) +
       meta('令牌补充', Number(g.refill_per_sec || 0).toFixed(2) + ' req/s');
+    // 闩迁移事件环：计数器只说发生过几次，事件表回答「何时闩的、
+    // 闩了多久、怎么解的」；概览趋势图的闩时段底色与这份数据同源。
+    const GATE_KIND = { latched: '上闩', released: '解闩', expired: '到期失效', restored: '重启恢复' };
+    const evs = (g.events || []).slice(0, 20);
+    if (evs.length) {
+      html += '<div class="tbl-wrap" style="max-height:180px;margin-top:6px"><table><thead><tr><th>时间</th><th>事件</th><th>闩截止</th><th>详情</th></tr></thead><tbody>';
+      evs.forEach(e => {
+        const at = Date.parse(e.at), until = e.until ? Date.parse(e.until) : 0;
+        let label = GATE_KIND[e.kind] || e.kind;
+        if (e.kind === 'latched' && e.detail === 'extended') label = '延闩';
+        let detail = '';
+        if (e.kind === 'latched' && until) detail = '闩长 ' + fmtMs(until - at);
+        else if (e.kind === 'released' && until) detail = '提前 ' + fmtMs(Math.max(0, until - at)) + ' 解闩';
+        else if (e.kind === 'restored') detail = '自 gate-state.json';
+        html += '<tr><td class="mono">' + fmtTime(at) + '</td><td>' + esc(label) + '</td>' +
+          '<td class="mono">' + (until ? fmtTime(until) : '-') + '</td><td class="muted">' + esc(detail) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
     body.innerHTML = html;
   }
 

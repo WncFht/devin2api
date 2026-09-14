@@ -305,6 +305,38 @@ const Overview = (() => {
     $('ovLatBody').innerHTML = html;
   }
 
+  // 闩事件环还原闩时段：latched/restored 开窗，released 提前关窗，
+  // expired 按截止关窗；延闩（latched 落在开窗内）只推进右端。
+  // 返回 markArea data 形态，裁剪到 [t0, now]——起止在图外的窗口
+  // 由 ECharts 截到可视边，趋势图 60 分钟窗口外的闩段不画。
+  function gateLatchRanges(g, t0) {
+    if (!g) return [];
+    const evs = (g.events || []).slice().sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    const now = Date.now();
+    const ranges = [];
+    let open = null;
+    evs.forEach(e => {
+      const at = Date.parse(e.at), until = e.until ? Date.parse(e.until) : 0;
+      if (e.kind === 'latched' || e.kind === 'restored') {
+        // 开窗事件晚于当前窗右端：上一个闩其实已自然失效（expired
+        // 事件可能已滚出环外），先闭旧窗再开新窗。
+        if (open && at > open.end) { ranges.push([open.start, open.end]); open = null; }
+        if (!open) open = { start: at, end: until || at };
+        else open.end = Math.max(open.end, until);
+      } else if (e.kind === 'released' && open) {
+        ranges.push([open.start, at]); open = null;
+      } else if (e.kind === 'expired' && open) {
+        ranges.push([open.start, until || at]); open = null;
+      }
+    });
+    if (open) ranges.push([open.start, Math.min(now, open.end || now)]);
+    else if (g.latched) ranges.push([t0, now]); // 当前闩的起点事件已滚出环外
+    return ranges
+      .map(r => [Math.max(r[0], t0), Math.min(r[1], now)])
+      .filter(r => r[1] > r[0])
+      .map(r => [{ xAxis: r[0] }, { xAxis: r[1] }]);
+  }
+
   // 实时流量：三层叠放——每 10s 瞬时速率柱（低饱和背景，表达离散到达
   // 节奏）+ 30s 滑动均值 RPS 曲线（渐变面积前景，表达速率趋势）+
   // 错误速率红条（barGap -100% 叠在同槽位上）。统一 req/s 单 y 轴；
@@ -340,6 +372,11 @@ const Overview = (() => {
     ];
     const gm = Charts.gapMark(tm, sec, 9);
     if (gm) series[0].markArea = gm;
+    // 闩时段叠琥珀底色：拒绝风暴/流量塌陷与「当时在闩内」在图上直接对得上。
+    const latchRanges = gateLatchRanges(statsData.gate, tm[0].at * 1000);
+    if (latchRanges.length) {
+      series[1].markArea = { silent: true, itemStyle: { color: Charts.hexA(C.warn, 0.12) }, data: latchRanges };
+    }
     Charts.render(el, {
       dataZoom: [{ type: 'inside', xAxisIndex: 0, filterMode: 'none' }],
       yAxis: [
