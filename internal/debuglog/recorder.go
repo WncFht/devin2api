@@ -157,8 +157,16 @@ type Recorder struct {
 	aborted atomic.Bool
 	// clientBytes 是已下发给客户端的累计字节数。
 	clientBytes atomic.Int64
-	// firstUpstreamMS/firstClientMS 是首上游事件/首客户端内容字节的
-	// 相对毫秒数；-1 表示尚未发生。区分「上游慢」与「网关编码慢」。
+	// requestReadyMS/upstreamSentMS/upstreamOpenMS/firstUpstreamMS/
+	// firstClientMS 是首字延迟分解的五个阶段标记，-1 表示尚未发生：
+	//   ready→sent  = 本地投影转换（validate/sanitize/routing/buildRequest/闸门排队）
+	//   sent→open   = 上游建流往返（POST + 响应头）
+	//   open→first_upstream = 上游思考 TTFT
+	//   first_upstream→first_client = 代理编码+flush 下发
+	// 区分「上游慢」与「网关编码慢」之外，sent 之前的部分即本进程自加延迟。
+	requestReadyMS  atomic.Int64
+	upstreamSentMS  atomic.Int64
+	upstreamOpenMS  atomic.Int64
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
@@ -429,6 +437,9 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			attachmentByHash: make(map[string]attachmentReference),
 			jsonlFiles:       make(map[string]*jsonlFile),
 		}
+		recorder.requestReadyMS.Store(-1)
+		recorder.upstreamSentMS.Store(-1)
+		recorder.upstreamOpenMS.Store(-1)
 		recorder.firstUpstreamMS.Store(-1)
 		recorder.firstClientMS.Store(-1)
 		manager.activeDirs[name] = recorder
@@ -517,6 +528,33 @@ func (recorder *Recorder) flushJSONL() {
 	}
 }
 
+// NoteRequestReady 记录请求体解码+投影完成、泵协程即将调 adapter.Stream
+// 的时刻——此前全部耗时是入口段（读体+JSON 解码+消息投影）。
+func (recorder *Recorder) NoteRequestReady() {
+	if recorder == nil {
+		return
+	}
+	recorder.requestReadyMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// NoteUpstreamSend 记录首个上游 RPC 真实发往连线的时刻（幂等，只记第一次）。
+// 与 requestReady 之差即适配器转换耗时（含本地速率闸门排队）。
+func (recorder *Recorder) NoteUpstreamSend() {
+	if recorder == nil {
+		return
+	}
+	recorder.upstreamSentMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// NoteUpstreamOpen 记录上游流建立成功（响应头到达）的时刻（幂等，只记第一次）。
+// 与 upstreamSent 之差是建流往返；与 firstUpstream 之差才是上游思考 TTFT。
+func (recorder *Recorder) NoteUpstreamOpen() {
+	if recorder == nil {
+		return
+	}
+	recorder.upstreamOpenMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
 // NoteUpstreamLatency 记录首个上游事件到达的相对毫秒数（幂等，只记第一次）。
 func (recorder *Recorder) NoteUpstreamLatency() {
 	if recorder == nil {
@@ -565,7 +603,7 @@ func (recorder *Recorder) AddClientBytes(n int64) {
 	recorder.clientBytes.Add(n)
 }
 
-// SetRetryAfter 记录上游限流给出的 reset 秒数 hint（写进 meta/index，
+// SetRetryAfter 记录上游限流文案里的 reset 秒数 hint（写进 meta/index，
 // 与错误原文分离，grep/聚合不必再解析文案）；<=0 或非限流错误忽略。
 func (recorder *Recorder) SetRetryAfter(seconds int) {
 	if recorder == nil || seconds <= 0 {
@@ -813,6 +851,15 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if len(client) > 0 {
 		meta["client"] = client
+	}
+	if ready := recorder.requestReadyMS.Load(); ready >= 0 {
+		meta["request_ready_ms"] = ready
+	}
+	if sent := recorder.upstreamSentMS.Load(); sent >= 0 {
+		meta["upstream_sent_ms"] = sent
+	}
+	if open := recorder.upstreamOpenMS.Load(); open >= 0 {
+		meta["upstream_open_ms"] = open
 	}
 	if first := recorder.firstUpstreamMS.Load(); first >= 0 {
 		meta["first_upstream_ms"] = first

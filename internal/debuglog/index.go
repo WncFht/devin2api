@@ -26,8 +26,13 @@ type IndexEntry struct {
 	Dir        string `json:"dir"`
 	StartedAt  string `json:"started_at"`
 	DurationMS int64  `json:"duration_ms"`
-	// FirstUpstreamMS/FirstClientMS 用指针区分「未发生」（nil，省略）
-	// 与「即时发生」（0ms）；int 零值会掩盖这两种语义。
+	// 延迟分解字段用指针区分「未发生」（nil，省略）与「即时发生」（0ms）；
+	// int 零值会掩盖这两种语义。五段口径见 recorder.go 同名字段注释：
+	// ready→sent 本地投影、sent→open 建流往返、open→first_upstream 上游
+	// 思考 TTFT、first_upstream→first_client 代理编码下发。
+	RequestReadyMS    *int64 `json:"request_ready_ms,omitempty"`
+	UpstreamSentMS    *int64 `json:"upstream_sent_ms,omitempty"`
+	UpstreamOpenMS    *int64 `json:"upstream_open_ms,omitempty"`
 	FirstUpstreamMS   *int64 `json:"first_upstream_ms,omitempty"`
 	FirstClientMS     *int64 `json:"first_client_ms,omitempty"`
 	API               string `json:"api,omitempty"`
@@ -96,6 +101,9 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		Dir:               filepath.Base(recorder.directory),
 		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
 		DurationMS:        time.Since(recorder.startedAt).Milliseconds(),
+		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
+		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
+		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
 		FirstUpstreamMS:   optionalLatency(recorder.firstUpstreamMS.Load()),
 		FirstClientMS:     optionalLatency(recorder.firstClientMS.Load()),
 		API:               recorder.requestMeta.API,

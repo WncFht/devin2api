@@ -442,6 +442,9 @@ const maxConnectAttempts = 3
 // 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
 func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
+	// sent/open 埋点幂等（CAS -1）：重试时 sent 留在首次发送、open 记首个
+	// 成功的建流，sent→open 的差值如实包含退避重试耗时。
+	recorder := debuglog.FromContext(ctx)
 	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
 		// 每次真实发送（含瞬时错误重试）都要过速率闸：被拒尝试
 		// 会推后上游恢复时刻，本地整形是唯一止损点。
@@ -458,8 +461,10 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			case <-time.After(backoff):
 			}
 		}
+		recorder.NoteUpstreamSend()
 		stream, err := adapter.streamClient.GetChatMessage(ctx, connect.NewRequest(protoRequest))
 		if err == nil {
+			recorder.NoteUpstreamOpen()
 			return stream, nil
 		}
 		lastErr = err

@@ -112,6 +112,7 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 	items := make(chan pumpItem, 8)
 	go func() {
 		defer close(items)
+		recorder.NoteRequestReady()
 		stream, err := provider.Stream(ctx, messages)
 		if err != nil {
 			items <- pumpItem{err: err}
