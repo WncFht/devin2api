@@ -19,10 +19,36 @@ func rateLimitErr(text string) error {
 	return connect.NewError(connect.CodeResourceExhausted, errors.New(text))
 }
 
+// fakeClock 是测试用静态假钟：wait/stats/闩事件全走 gate.now，
+// 用例把钟钉在指定分钟秒位，再按需要手动推进。
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+// pinGateClock 把 gate 的时钟源换成静态假钟，初始钉在当前分钟第 sec 秒。
+// 默认参数下可发区间是 :02~:58，:58~:02 是死区。
+func pinGateClock(gate *rateGate, sec float64) *fakeClock {
+	c := &fakeClock{t: time.Now().Truncate(time.Minute).Add(time.Duration(sec * float64(time.Second)))}
+	gate.now = c.now
+	return c
+}
+
+// offsetGateClock 把 gate.now 平移到当前分钟第 sec 秒并随真实时间前进：
+// 用于让 wait 真实地睡一小段（睡醒复检依赖时钟随睡眠流逝）。
+func offsetGateClock(gate *rateGate, sec float64) {
+	real := time.Now()
+	target := real.Truncate(time.Minute).Add(time.Duration(sec * float64(time.Second)))
+	if !target.After(real) {
+		target = target.Add(time.Minute)
+	}
+	delta := target.Sub(real)
+	gate.now = func() time.Time { return time.Now().Add(delta) }
+}
+
 // 限流闩未到声明时刻：wait 本地拒绝且 retryAfter 等于闩剩余时长
 // （分钟 hint 已向上对齐到 :59 桶界，实际可达 N*60+59s）。
 func TestRateGateLatchRejectsUntilReset(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0, "")
+	gate := newRateGate(gateParams{}, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Please try again later. Your limit will reset in 8 minutes. (trace ID: x)"))
 	err := gate.wait(context.Background())
 	var gateErr *rateGateError
@@ -44,7 +70,7 @@ func TestRateGateLatchRejectsUntilReset(t *testing.T) {
 // 闩内不排队：无论闩剩余长短都立即快败，Retry-After 报闩剩余，
 // 由客户端睡到恢复时刻再来，而不是占着并发槽空等。
 func TestRateGateLatchFastFails(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0, "")
+	gate := newRateGate(gateParams{}, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	start := time.Now()
 	err := gate.wait(context.Background())
@@ -60,14 +86,15 @@ func TestRateGateLatchFastFails(t *testing.T) {
 // 闩内按滴灌间隔放行探针：槽空闲 → 放行；槽被占 → 快败。
 // 探针是限流期间唯一到达上游的请求，负责探出解闩又不给上游续债。
 func TestRateGateDripReleasesProbes(t *testing.T) {
-	gate := newRateGate(0, 0, 50*time.Millisecond, 0, "")
+	gate := newRateGate(gateParams{dripInterval: 50 * time.Millisecond}, "")
+	clock := pinGateClock(gate, 10) // 可发区间内
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
 	var gateErr *rateGateError
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
 		t.Fatalf("first wait error = %v, want *rateGateError (slot not open yet)", err)
 	}
-	time.Sleep(60 * time.Millisecond)
+	clock.t = clock.t.Add(60 * time.Millisecond)
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("drip-slot wait error = %v, want probe release", err)
 	}
@@ -75,16 +102,34 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
 		t.Fatalf("post-probe wait error = %v, want *rateGateError", err)
 	}
-	time.Sleep(60 * time.Millisecond)
+	clock.t = clock.t.Add(60 * time.Millisecond)
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("next drip-slot wait error = %v, want probe release", err)
+	}
+}
+
+// 死区内不放探针：滴灌槽空着但落在桶界死区时照样快败——桶界附近的
+// 发送可能落进相邻真实上游桶白送计数。
+func TestRateGateDripRespectsDeadZone(t *testing.T) {
+	gate := newRateGate(gateParams{dripInterval: time.Millisecond}, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 60 seconds."))
+	clock.t = clock.t.Add(48 * time.Second) // :58，闩内且进死区，槽已开
+	var gateErr *rateGateError
+	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+		t.Fatalf("dead-zone wait error = %v, want *rateGateError (no drip in dead zone)", err)
+	}
+	clock.t = clock.t.Add(5 * time.Second) // :03 下一分钟，回可发区间
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("sendable wait error = %v, want probe release", err)
 	}
 }
 
 // 任一上游成功帧立即解闩：边际态下拒绝是概率执行，
 // 成功帧是窗口已过的证据，不该再闩到声明时刻。
 func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0, "")
+	gate := newRateGate(gateParams{}, "")
+	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	var gateErr *rateGateError
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
@@ -98,7 +143,7 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 
 // 非限流错误不上闩；新闩只延长不提前。
 func TestRateGateLatchSelective(t *testing.T) {
-	gate := newRateGate(0, 0, 0, 0, "")
+	gate := newRateGate(gateParams{}, "")
 	gate.noteUpstreamError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")))
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait error = %v, want nil (no latch)", err)
@@ -112,53 +157,93 @@ func TestRateGateLatchSelective(t *testing.T) {
 	}
 }
 
-// 令牌桶：容量打空后排队预估超过 maxHold 时本地拒绝，
-// 而不是放行去上游续债。
-func TestRateGateBucketReject(t *testing.T) {
-	gate := newRateGate(1, 0, 0, 0, "") // 1 rpm：容量 1、补充 1/60s
-	if err := gate.wait(context.Background()); err != nil {
-		t.Fatalf("first wait error = %v, want immediate pass", err)
+// 分钟窗口配额：本桶放行数打满后，请求睡到下一窗口；预计等待超过
+// maxHold 时本地拒绝，而不是放行去上游续债。
+func TestRateGateWindowQuotaReject(t *testing.T) {
+	gate := newRateGate(gateParams{quota: 2}, "")
+	pinGateClock(gate, 10)
+	for i := 0; i < 2; i++ {
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("wait %d error = %v, want immediate pass", i, err)
+		}
 	}
 	err := gate.wait(context.Background())
 	var gateErr *rateGateError
 	if !errors.As(err, &gateErr) {
-		t.Fatalf("second wait error = %v, want *rateGateError", err)
+		t.Fatalf("excess wait error = %v, want *rateGateError", err)
 	}
-	if gateErr.retryAfter < 59*time.Second {
-		t.Fatalf("retryAfter = %v, want ~60s", gateErr.retryAfter)
+	// :10 配额度尽 → 下一窗口 :02+60 开放，retryAfter ≈ 52s。
+	if gateErr.retryAfter < 50*time.Second || gateErr.retryAfter > 53*time.Second {
+		t.Fatalf("retryAfter = %v, want ~52s (next window)", gateErr.retryAfter)
 	}
 }
 
-// 闩期间冻结令牌桶：存量清零、闩内不累计。解除后队列按 refill
-// 节奏逐条放行（首条即探针），而不是满桶齐射——实测上游在闩末
-// 仍在边际态，齐射必然重触并各加 ~2.4s 刑期。
-func TestRateGateLatchFreezesBucket(t *testing.T) {
-	gate := newRateGate(60, 0, 0, 0, "") // 每秒 1 令牌，闩前满桶 60
-	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
-	time.Sleep(1100 * time.Millisecond) // 闩过期；若未冻结，桶已重新攒满、三条都瞬时放行
+// 窗口翻转重新计数：上一桶的用量不结转。
+func TestRateGateWindowRollover(t *testing.T) {
+	gate := newRateGate(gateParams{quota: 1}, "")
+	clock := pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("first wait error = %v, want pass", err)
+	}
+	if err := gate.wait(context.Background()); err == nil {
+		t.Fatal("second wait should be rejected (quota exhausted)")
+	}
+	clock.t = clock.t.Add(time.Minute) // 下一桶同秒位
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("new-bucket wait error = %v, want pass after rollover", err)
+	}
+}
+
+// 死区内请求睡到下一窗口开放再放行，而不是立即快败——
+// 等待在 maxHold 内就值得睡。
+func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
+	gate := newRateGate(gateParams{quota: 1}, "")
+	offsetGateClock(gate, 1.9) // 死区尾，距 :02 开放 ~100ms
+	start := time.Now()
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait error = %v, want pass after short sleep", err)
+	}
+	if d := time.Since(start); d < 50*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("wait took %v, want ~100ms sleep until window opens", d)
+	}
+}
+
+// 死区等待超 maxHold 直接快败，Retry-After 报到下一窗口的剩余。
+func TestRateGateDeadZoneFastFails(t *testing.T) {
+	gate := newRateGate(gateParams{quota: 1, maxHold: time.Second}, "")
+	pinGateClock(gate, 58.5) // 死区头，下一窗口 ~3.5s > maxHold
+	err := gate.wait(context.Background())
+	var gateErr *rateGateError
+	if !errors.As(err, &gateErr) {
+		t.Fatalf("wait error = %v, want *rateGateError", err)
+	}
+	if gateErr.retryAfter < 3*time.Second || gateErr.retryAfter > 4*time.Second {
+		t.Fatalf("retryAfter = %v, want ~3.5s (next window)", gateErr.retryAfter)
+	}
+}
+
+// quota<=0 不做窗口限速：死区内也直接放行。
+func TestRateGateZeroQuotaUnlimited(t *testing.T) {
+	gate := newRateGate(gateParams{}, "")
+	pinGateClock(gate, 59) // 死区
 	for i := 0; i < 3; i++ {
-		start := time.Now()
 		if err := gate.wait(context.Background()); err != nil {
-			t.Fatalf("post-latch wait %d error = %v", i, err)
-		}
-		if d := time.Since(start); d < 600*time.Millisecond {
-			t.Fatalf("post-latch wait %d released after %v, want ~1s serialized drip", i, d)
+			t.Fatalf("wait %d error = %v, want pass (no window limit)", i, err)
 		}
 	}
 }
 
-// 等待中 ctx 取消：返回取消原因且退还令牌。
+// 等待中 ctx 取消：返回取消原因，waiters 名额归还。
 func TestRateGateWaitCancelRefunds(t *testing.T) {
-	gate := newRateGate(6, 0, 0, 0, "") // 0.1/s 补充：排空满桶后缺口 ~10s < maxHold，原地等待
-	for i := 0; i < 6; i++ {
-		if err := gate.wait(context.Background()); err != nil {
-			t.Fatalf("drain wait %d error = %v, want immediate pass", i, err)
-		}
-	}
+	gate := newRateGate(gateParams{quota: 1}, "")
+	offsetGateClock(gate, 58.2) // 死区，睡到 :02 约 3.8s < maxHold
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 	if err := gate.wait(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait error = %v, want context.Canceled", err)
+	}
+	if waiters := gate.stats().Waiters; waiters != 0 {
+		t.Fatalf("waiters = %d, want 0 after cancel", waiters)
 	}
 }
 
@@ -223,13 +308,13 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 // 防止重启后裸发把上游限流续长；解闩清文件，过期文件被忽略并清除。
 func TestRateGateLatchPersistRestore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gate-state.json")
-	gate := newRateGate(60, 0, 0, 0, path)
+	gate := newRateGate(gateParams{quota: 60}, path)
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("state file not written: %v", err)
 	}
 
-	restarted := newRateGate(60, 0, 0, 0, path)
+	restarted := newRateGate(gateParams{quota: 60}, path)
 	stats := restarted.stats()
 	if !stats.Latched || stats.LimitedUntil == nil {
 		t.Fatalf("restarted gate should restore latch, stats = %+v", stats)
@@ -257,7 +342,7 @@ func TestRateGateStateExpiredIgnored(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gate := newRateGate(0, 0, 0, 0, path)
+	gate := newRateGate(gateParams{}, path)
 	if gate.stats().Latched {
 		t.Fatal("expired state must not latch")
 	}
@@ -267,18 +352,18 @@ func TestRateGateStateExpiredIgnored(t *testing.T) {
 }
 
 func TestRateGateSetParamsPreservesLatch(t *testing.T) {
-	gate := newRateGate(60, 0, 0, 0, "")
+	gate := newRateGate(gateParams{quota: 60}, "")
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
-	gate.setParams(30, 0, 0, 0)
+	gate.setParams(gateParams{quota: 30})
 	stats := gate.stats()
 	if !stats.Latched {
 		t.Fatal("setParams must preserve latch")
 	}
-	if stats.RefillPerSec != 0.5 {
-		t.Fatalf("refillPerSec = %v, want 0.5", stats.RefillPerSec)
+	if stats.WindowQuota != 30 {
+		t.Fatalf("WindowQuota = %v, want 30", stats.WindowQuota)
 	}
-	gate.setParams(0, 0, 0, 0)
-	if gate.stats().RefillPerSec != 0 {
-		t.Fatal("rpm=0 should disable refill")
+	gate.setParams(gateParams{quota: 0})
+	if gate.stats().WindowQuota != 0 {
+		t.Fatal("quota=0 should disable window limit")
 	}
 }

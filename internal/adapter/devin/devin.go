@@ -63,8 +63,8 @@ type Config struct {
 	ClientName    string
 	ClientVersion string
 	ClientOS      string
-	// MaxRPM 是发往上游 GetChatMessage 的消息速率上限（条/分钟）；
-	// <=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
+	// MaxRPM 是每个对齐分钟窗口内发往上游 GetChatMessage 的配额
+	// （条/分钟）；<=0 不做主动限速。上游限流冷却闩不受此项影响，始终生效。
 	MaxRPM int
 	// GateMaxHold/GateDripInterval/GateDefaultLatch 是冷却闩参数：
 	// 闩外排队允许的最长等待、闩内滴灌探针的放行间隔、上游未带
@@ -72,6 +72,10 @@ type Config struct {
 	GateMaxHold      time.Duration
 	GateDripInterval time.Duration
 	GateDefaultLatch time.Duration
+	// GateWindowOffset/GateWindowGuard 是分钟窗口参数：上游桶界在
+	// 本地分钟内的估计位置、桶界两侧的停发死区；<=0 时闸门用默认值。
+	GateWindowOffset time.Duration
+	GateWindowGuard  time.Duration
 	// GateStatePath 非空时冷却闩截止时刻落盘到该文件，进程重启后
 	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
 	// 裸发会把限流续长。
@@ -165,9 +169,14 @@ func New(config Config) (*Adapter, error) {
 		config:         config,
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
-		gate: newRateGate(config.MaxRPM,
-			config.GateMaxHold, config.GateDripInterval, config.GateDefaultLatch,
-			config.GateStatePath),
+		gate: newRateGate(gateParams{
+			quota:        config.MaxRPM,
+			maxHold:      config.GateMaxHold,
+			dripInterval: config.GateDripInterval,
+			defaultLatch: config.GateDefaultLatch,
+			windowOffset: config.GateWindowOffset,
+			windowGuard:  config.GateWindowGuard,
+		}, config.GateStatePath),
 		assignments: make(map[string]resolvedAssignment),
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
@@ -249,7 +258,14 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []str
 		adapter.tokenMu.Unlock()
 		applied = append(applied, "devin.token")
 	}
-	adapter.gate.setParams(next.MaxRPM, next.GateMaxHold, next.GateDripInterval, next.GateDefaultLatch)
+	adapter.gate.setParams(gateParams{
+		quota:        next.MaxRPM,
+		maxHold:      next.GateMaxHold,
+		dripInterval: next.GateDripInterval,
+		defaultLatch: next.GateDefaultLatch,
+		windowOffset: next.GateWindowOffset,
+		windowGuard:  next.GateWindowGuard,
+	})
 	if prev.MaxRPM != next.MaxRPM {
 		applied = append(applied, "devin.max_rpm")
 	}
@@ -261,6 +277,12 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []str
 	}
 	if prev.GateDefaultLatch != next.GateDefaultLatch {
 		applied = append(applied, "devin.gate_default_latch_seconds")
+	}
+	if prev.GateWindowOffset != next.GateWindowOffset {
+		applied = append(applied, "devin.gate_window_offset_seconds")
+	}
+	if prev.GateWindowGuard != next.GateWindowGuard {
+		applied = append(applied, "devin.gate_window_guard_seconds")
 	}
 	if prev.BaseURL != next.BaseURL {
 		requiresRestart = append(requiresRestart, "devin.base_url")

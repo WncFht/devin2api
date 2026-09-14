@@ -12,11 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -92,6 +94,10 @@ type runtimeConfigState struct {
 
 var runtimeConfigPtr atomic.Pointer[runtimeConfigState]
 var lastReloadPtr atomic.Pointer[dashboard.ConfigReloadReport]
+
+// reloadMu 串行化热重载：ApplyConfig→SetAPIKey→…→runtimeConfigPtr.Store
+// 是一串多步提交，并发 reload 交错会让配置快照与生效值分叉。
+var reloadMu sync.Mutex
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
@@ -203,7 +209,15 @@ func main() {
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// ctx 取消后立刻恢复信号默认动作：否则排空期第二发 SIGINT/SIGTERM
+	// 被 NotifyContext 静默吸收，运维失去「再发一次强杀」的逃生口。
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	defer stop()
+	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
+	signal.Ignore(syscall.SIGHUP)
 	if err := run(ctx, application, server, listener); err != nil {
 		slog.Error("serve HTTP failed", "error", err)
 		os.Exit(1)
@@ -227,6 +241,8 @@ func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Confi
 		GateMaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
 		GateDripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
 		GateDefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
+		GateWindowOffset: time.Duration(serviceConfig.Devin.GateWindowOffsetSeconds) * time.Second,
+		GateWindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
 		GateStatePath:    filepath.Join(filepath.Dir(configPath), "logs", "gate-state.json"),
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
@@ -246,9 +262,22 @@ func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Confi
 // transport 固化字段（base_url/proxy/force_http1）与监听参数进
 // requires_restart，调用方据此知道哪些改动仍在 pending。
 func reloadRuntimeConfig(configPath string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager) (*dashboard.ConfigReloadReport, error) {
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, err
+	}
+	// 本入口只在 devinAdapter 存活时可达（token 为空启动时不挂面板，
+	// reload 端点不存在）。存活即要求上游必填项非空：启动期空值是
+	// 干净的 Unavailable 降级，但 reload 提交空 model/token 会让全部
+	// 请求失败，且 token 自愈链读同一文件也永远拿不到凭据——整单
+	// 拒绝（422），旧配置继续服役。
+	if devinAdapter != nil &&
+		(strings.TrimSpace(cfg.Devin.Token) == "" ||
+			strings.TrimSpace(cfg.Devin.Model) == "" ||
+			strings.TrimSpace(cfg.Devin.BaseURL) == "") {
+		return nil, errors.New("devin.token, devin.model and devin.base_url must be non-empty while the adapter is live")
 	}
 	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
 	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath))
@@ -324,6 +353,8 @@ func runtimeConfigView(configPath string) map[string]any {
 
 // redactConfigSecrets 把配置视图里的凭据值替换为 sha256 前缀——
 // 既能和日志里的 key_hash 对照确认「是不是我以为的那把 key」，又不回明文。
+// devin.proxy 允许 http://user:pass@host 形式，userinfo 同样是凭据：
+// 清掉整段 User 保留 host，排障仍能辨认代理指向。
 func redactConfigSecrets(fields map[string]any) {
 	for _, path := range [][2]string{{"devin", "token"}, {"auth", "api_key"}, {"dashboard", "password"}} {
 		section, ok := fields[path[0]].(map[string]any)
@@ -336,6 +367,14 @@ func redactConfigSecrets(fields map[string]any) {
 		}
 		sum := sha256.Sum256([]byte(raw))
 		section[path[1]] = fmt.Sprintf("sha256:%x", sum[:6])
+	}
+	if devin, ok := fields["devin"].(map[string]any); ok {
+		if raw, ok := devin["proxy"].(string); ok && raw != "" {
+			if parsed, err := url.Parse(raw); err == nil && parsed.User != nil {
+				parsed.User = nil
+				devin["proxy"] = parsed.String()
+			}
+		}
 	}
 }
 

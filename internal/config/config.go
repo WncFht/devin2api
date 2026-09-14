@@ -15,7 +15,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 保存服务启动所需的全部配置；服务运行期间不会热更新。
+// Config 是一次配置加载的快照。运行期变更不走本结构换值——各热应用
+// 路径（adapter.ApplyConfig、app.SetAPIKey、panel.SetPassword 等）直接
+// 改各自持有的字段，快照保留给配置自省与 reload 的变更比对。
 type Config struct {
 	// Server 保存 HTTP 服务配置。
 	Server ServerConfig `yaml:"server"`
@@ -63,13 +65,14 @@ type DevinConfig struct {
 	ClientVersion string `yaml:"client_version"`
 	// ClientOS 是 metadata.os；默认 "mac"。
 	ClientOS string `yaml:"client_os"`
-	// MaxRPM 是发往上游 GetChatMessage 的消息速率上限（条/分钟），
-	// 令牌桶实现、桶容量为一分钟额度可容纳突发；<=0 不限速。
+	// MaxRPM 是每个对齐分钟窗口内发往上游 GetChatMessage 的配额
+	// （条/分钟）：上游限流器按自然分钟桶计数，本地窗口与估计桶界
+	// 对齐、两侧留死区，使单桶可见计数不超此值；<=0 不限速。
 	// 上游限流冷却闩（resource_exhausted 后按声明 reset 时刻本地拦停）
 	// 不受此项影响，始终生效。
 	MaxRPM int `yaml:"max_rpm"`
-	// GateMaxHoldSeconds 是闸门内允许的最长排队等待秒数：闩外令牌
-	// 排队预计超过它时请求本地快速失败 429 + Retry-After；<=0 默认 15。
+	// GateMaxHoldSeconds 是闸门内允许的最长排队等待秒数：闩外睡到
+	// 下一窗口预计超过它时请求本地快速失败 429 + Retry-After；<=0 默认 15。
 	GateMaxHoldSeconds int `yaml:"gate_max_hold_seconds"`
 	// GateDripIntervalSeconds 是冷却闩内放行探针的间隔秒数：闩期间
 	// 按此节奏逐条放到上游探测解闩，其余请求快速失败；<=0 默认 8。
@@ -77,6 +80,12 @@ type DevinConfig struct {
 	// GateDefaultLatchSeconds 是上游 resource_exhausted 未携带 reset
 	// hint 时的兜底闩时长秒数；<=0 默认 60。
 	GateDefaultLatchSeconds int `yaml:"gate_default_latch_seconds"`
+	// GateWindowOffsetSeconds 是上游分钟桶界在本地分钟内的估计位置
+	// （第几秒）：实测桶界在本地 :59~:00（上游时钟快 ~1s），默认 0。
+	GateWindowOffsetSeconds int `yaml:"gate_window_offset_seconds"`
+	// GateWindowGuardSeconds 是桶界两侧的停发死区秒数：覆盖桶界估计
+	// 误差与多分片漂移，死区内请求睡到下一窗口；<=0 默认 2。
+	GateWindowGuardSeconds int `yaml:"gate_window_guard_seconds"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
@@ -201,9 +210,9 @@ func resolveDevinToken() string {
 }
 
 // devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
-// Linux/macOS 上 CLI 遵循 XDG 写 ~/.local/share。Windows 上 CLI 不单发，
-// 由 Windsurf 桌面端（即 Devin app）内置携带：
-// resources/app/extensions/windsurf/devin/bin/devin.exe，
+// Linux/macOS 上 CLI 遵循 XDG：数据目录为 $XDG_DATA_HOME，缺省
+// ~/.local/share。Windows 上 CLI 不单发，由 Windsurf 桌面端（即
+// Devin app）内置携带：resources/app/extensions/windsurf/devin/bin/devin.exe，
 // `devin.exe auth login` 写 %APPDATA%\devin\credentials.toml（已实测）；
 // %LOCALAPPDATA% 一并探测作兜底。
 func devinCredentialsPaths() []string {
@@ -214,8 +223,16 @@ func devinCredentialsPaths() []string {
 				dirs = append(dirs, dir)
 			}
 		}
-	} else if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".local", "share"))
+	} else {
+		dir := os.Getenv("XDG_DATA_HOME")
+		if dir == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				dir = filepath.Join(home, ".local", "share")
+			}
+		}
+		if dir != "" {
+			dirs = append(dirs, dir)
+		}
 	}
 	paths := make([]string, 0, len(dirs))
 	for _, dir := range dirs {

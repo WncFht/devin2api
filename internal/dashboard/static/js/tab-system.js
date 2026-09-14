@@ -50,9 +50,10 @@ function renderGate(g) {
     meta('滴灌放行', g.drip_count ?? 0) +
     meta('闩内快败', g.reject_latched_count ?? 0) +
     meta('排队快败', g.reject_hold_count ?? 0) +
-    meta('令牌余量', g.capacity ? Number(g.tokens ?? 0).toFixed(1) + ' / ' + g.capacity : '-') +
+    meta('本桶用量', (g.window_used ?? 0) + ' / ' + (g.window_quota ?? 0)) +
+    meta('可发区间', g.sendable ? '开放' : '死区') +
     meta('排队等待', g.waiters ?? 0) +
-    meta('令牌补充', Number(g.refill_per_sec || 0).toFixed(2) + ' req/s');
+    meta('下一窗口', g.window_next ? fmtInPrecise(Date.parse(g.window_next) / 1000) : '-');
   // 闩迁移事件环：计数器只说发生过几次，事件表回答「何时闩的、
   // 闩了多久、怎么解的」；概览趋势图的闩时段底色与这份数据同源。
   const GATE_KIND = { latched: '上闩', released: '解闩', expired: '到期失效', restored: '重启恢复' };

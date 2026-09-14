@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	// gateDefaultMaxHold 是闸门内允许的最长排队等待：令牌排队预计
+	// gateDefaultMaxHold 是闸门内允许的最长排队等待：预计睡到下一窗口
 	// 超过它时请求在本地快速失败并带 Retry-After——客户端/下游网关
 	// 按声明时刻退避，比占着并发槽空等更符合冷却语义。
 	gateDefaultMaxHold = 15 * time.Second
@@ -28,12 +28,21 @@ const (
 	// gateDefaultLatch 是上游 resource_exhausted 未携带 reset hint 时的
 	// 兜底闩时长（对齐同类网关 60s 冷却默认值）。
 	gateDefaultLatch = 60 * time.Second
+	// windowPeriod 是上游限流器的计数周期：实测按自然分钟桶计数。
+	windowPeriod = time.Minute
+	// gateDefaultWindowGuard 是桶界两侧的停发余量：覆盖桶界估计误差与
+	// 多分片漂移，死区内不发送，使每个发送区间严格落在单一上游桶内。
+	gateDefaultWindowGuard = 2 * time.Second
 )
 
 // rateGate 整形发往上游的消息流，两层机制各自独立：
-//  1. 令牌桶把持续速率压到配置 rpm，桶容量取一整分钟额度以吸收
-//     claude-cli 并行子代理的瞬时突发；预计排队超过 maxHold 的
-//     请求直接本地拒绝，不打到上游。
+//  1. 对齐分钟窗口：上游限流器按自然分钟桶计数（桶界实测在本地
+//     :59~:00，多分片有漂移），本地把发送对齐到同一套桶——每个窗口
+//     配额 max_rpm，窗口两端各留 guard 秒死区，使发送区间严格落在
+//     单一上游桶内，单桶可见计数永不超配额。桶内不做秒级整形：上游
+//     只按分钟计数，桶内瞬发与均摊在它的计数器里等价，叠加平滑层
+//     只增加本地延迟。窗口配额耗尽或落在死区内的请求睡到下一窗口
+//     开放；预计等待超 maxHold 的直接本地 429 + Retry-After 快败。
 //  2. 冷却闩：上游 resource_exhausted 声明「reset in N」时上闩到
 //     该时刻（分钟 hint 向上对齐到 :59 桶界）。上游限流器实测按
 //     分钟桶计数且把被拒尝试也计入，闩内若整队睡到恢复时刻再齐射，
@@ -41,29 +50,33 @@ const (
 //     到期齐射 ~20 条、5/5 次重触）。因此闩内不排队：按滴灌间隔
 //     放探针，其余请求立即 429 + Retry-After=闩剩余快败，客户端
 //     睡到恢复时刻再来；任一上游成功帧即提前解闩（边际态下拒绝
-//     是概率执行，成功帧是窗口已过的证据）。上闩同时冻结令牌桶：
-//     闩内不累计、存量额度清零，解闩后队列按 refill 节奏逐条放行。
+//     是概率执行，成功帧是窗口已过的证据）。探针同样只在可发区间
+//     内放行并计入本桶配额——探针也是真实上游发送。
 //     上游规则推导见 docs/upstream-rate-limit.md。
 type rateGate struct {
 	mu           sync.Mutex
-	tokens       float64 // 当前令牌数；可为负，负值是已预售给排队者的额度
-	capacity     float64 // 桶容量：攒满即一分钟的请求额度
-	refillPerSec float64 // 令牌补充速率；0 表示不限速（闩仍然生效）
-	lastAccrual  time.Time
-	limitedUntil time.Time // 冷却闩截止时刻；零值表示未上闩
-	nextDrip     time.Time // 闩内下一个探针放行时刻
+	quota        int           // 每桶配额（= max_rpm）；<=0 不做窗口限速
+	windowOpen   time.Duration // 可发窗口在分钟内的起点（= offset+guard，mod 60s）
+	usable       time.Duration // 可发区间长度（= 60s - 2*guard）
+	bucketStart  time.Time     // 当前计数桶的窗口起点
+	bucketUsed   int           // 本桶已放行数（含滴灌探针，与上游「被拒也计数」口径一致）
+	limitedUntil time.Time     // 冷却闩截止时刻；零值表示未上闩
+	nextDrip     time.Time     // 闩内下一个探针放行时刻
 	maxHold      time.Duration
 	dripInterval time.Duration
 	defaultLatch time.Duration
 	// statePath 非空时冷却闩截止时刻落盘（tmp+rename）：重启后仍在闩内
 	// 的实例不会裸发上游把限流续长——上游限流器把被拒尝试也计入窗口。
 	statePath string
+	// now 是时钟源，测试可替换为可控假钟；窗口位置依赖墙钟，注入后
+	// 配额/死区/闩的用例才能确定落在指定分钟秒位。
+	now func() time.Time
 	// 计数器供面板 stats 透出闸门状态；全部在 mu 下读写。
 	latchCount    int
 	dripCount     int
 	rejectLatched int // 闩内被快败的请求数
 	rejectHold    int // 闩外排队预计超 maxHold 被快败的请求数
-	waiters       int // 当前睡在令牌桶上的请求数（闩内快败不进此列）
+	waiters       int // 当前睡到下一窗口的请求数（闩内快败不进此列）
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
 	events    [gateEventCap]gateEvent
@@ -87,7 +100,7 @@ type gateEvent struct {
 // pushEvent 追加一条闩迁移事件；调用方须持 mu（启动恢复路径在并发前
 // 调用，视同持锁）。
 func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
-	ev := gateEvent{At: time.Now(), Kind: kind, Detail: detail}
+	ev := gateEvent{At: gate.now(), Kind: kind, Detail: detail}
 	if !until.IsZero() {
 		u := until
 		ev.Until = &u
@@ -114,7 +127,8 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 }
 
 // gateStateFile 是冷却闩的落盘形态；只持久化截止时刻——滴灌时钟与
-// 令牌桶刻意不存（重启满桶是想要的，闩内节奏按 dripInterval 重排即可）。
+// 窗口计数刻意不存（重启新窗口重新计数是想要的，闩内节奏按
+// dripInterval 重排即可）。
 type gateStateFile struct {
 	LimitedUntil time.Time `json:"limited_until"`
 }
@@ -127,47 +141,62 @@ type GateStats struct {
 	DripCount     int         `json:"drip_count"`
 	RejectLatched int         `json:"reject_latched_count"`
 	RejectHold    int         `json:"reject_hold_count"`
-	RefillPerSec  float64     `json:"refill_per_sec"`
-	Tokens        float64     `json:"tokens"`
-	Capacity      float64     `json:"capacity"`
+	WindowQuota   int         `json:"window_quota"`          // 每桶配额（= max_rpm）；0 表示不限速
+	WindowUsed    int         `json:"window_used"`           // 当前桶已放行数
+	WindowOpen    *time.Time  `json:"window_open,omitempty"` // 当前桶的可发窗口起点
+	WindowNext    *time.Time  `json:"window_next,omitempty"` // 下一桶可发窗口开放时刻
+	Sendable      bool        `json:"sendable"`              // 当前是否处于可发区间（非死区）
 	Waiters       int         `json:"waiters"`
 	Events        []gateEvent `json:"events,omitempty"` // 新在前
 }
 
-// newRateGate 创建速率闸门；rpm<=0 时只有冷却闩生效，不做主动限速。
-// 时长参数 <=0 时用默认值。statePath 非空时恢复未过期的冷却闩。
-func newRateGate(rpm int, maxHold, dripInterval, defaultLatch time.Duration, statePath string) *rateGate {
+// gateParams 是闸门的可调参数集；时长参数 <=0 时取默认值。
+// windowOffset 是上游分钟桶界在本地分钟内的估计位置——拒绝 hint
+// 隐含 deadline 实测落在 :58.6~:01（上游时钟快 ~1s），默认 0 即以
+// 本地 :00 为估计中心，负值按 mod 60 折算（-1 = :59）；windowGuard
+// 是桶界两侧的停发死区——可发区间 = [offset+guard, offset+60-guard)，
+// 只要真实桶界落在估计值 ±guard 内，每个可发区间都是某个真实上游
+// 桶的严格子集，单桶可见发送计数永不超 quota。
+type gateParams struct {
+	quota        int
+	maxHold      time.Duration
+	dripInterval time.Duration
+	defaultLatch time.Duration
+	windowOffset time.Duration
+	windowGuard  time.Duration
+}
+
+// newRateGate 创建速率闸门；quota<=0 时只有冷却闩生效，不做窗口限速。
+// statePath 非空时恢复未过期的冷却闩。
+func newRateGate(params gateParams, statePath string) *rateGate {
 	gate := &rateGate{
-		lastAccrual:  time.Now(),
-		maxHold:      maxHold,
-		dripInterval: dripInterval,
-		defaultLatch: defaultLatch,
-		statePath:    statePath,
+		statePath: statePath,
+		now:       time.Now,
 	}
-	gate.setParams(rpm, maxHold, dripInterval, defaultLatch)
-	if rpm > 0 {
-		gate.tokens = gate.capacity
-	}
+	gate.setParams(params)
 	gate.restoreState()
 	return gate
 }
 
-// setParams 原位更新闸门参数（reload 热路径）：闩态与令牌桶保留，
-// rpm 变化只改补充速率与容量，存量令牌按新容量截断。
-func (gate *rateGate) setParams(rpm int, maxHold, dripInterval, defaultLatch time.Duration) {
+// setParams 原位更新闸门参数（reload 热路径）：闩态保留，窗口参数变化
+// 后下一次 wait/stats 按新边界重算当前桶，桶起点不同即开新桶重新计数。
+func (gate *rateGate) setParams(params gateParams) {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	gate.maxHold = gateDurationOrDefault(maxHold, gateDefaultMaxHold)
-	gate.dripInterval = gateDurationOrDefault(dripInterval, gateDefaultDripInterval)
-	gate.defaultLatch = gateDurationOrDefault(defaultLatch, gateDefaultLatch)
-	if rpm > 0 {
-		gate.refillPerSec = float64(rpm) / 60
-		gate.capacity = float64(rpm)
-	} else {
-		gate.refillPerSec = 0
-		gate.capacity = 0
+	gate.maxHold = gateDurationOrDefault(params.maxHold, gateDefaultMaxHold)
+	gate.dripInterval = gateDurationOrDefault(params.dripInterval, gateDefaultDripInterval)
+	gate.defaultLatch = gateDurationOrDefault(params.defaultLatch, gateDefaultLatch)
+	offset := params.windowOffset % windowPeriod
+	if offset < 0 {
+		offset += windowPeriod
 	}
-	gate.tokens = math.Min(gate.tokens, gate.capacity)
+	guard := params.windowGuard
+	if guard <= 0 || 2*guard >= windowPeriod {
+		guard = gateDefaultWindowGuard
+	}
+	gate.quota = params.quota
+	gate.windowOpen = (offset + guard) % windowPeriod
+	gate.usable = windowPeriod - 2*guard
 }
 
 // gateDurationOrDefault 把 <=0 的时长参数回落到默认值。
@@ -178,8 +207,17 @@ func gateDurationOrDefault(value, fallback time.Duration) time.Duration {
 	return value
 }
 
-// restoreState 在启动时恢复未过期的冷却闩：冻结令牌桶到闩末、滴灌
-// 时钟按间隔重排——与 noteUpstreamError 的延闩路径保持同一组不变量。
+// windowStart 返回 t 所属计数桶的窗口起点：t 所在分钟内最近的
+// windowOpen 边界；t 落在边界前则归上一分钟的边界。
+func (gate *rateGate) windowStart(t time.Time) time.Time {
+	start := t.Truncate(windowPeriod).Add(gate.windowOpen)
+	if t.Before(start) {
+		start = start.Add(-windowPeriod)
+	}
+	return start
+}
+
+// restoreState 在启动时恢复未过期的冷却闩：滴灌时钟按间隔重排。
 // 文件缺失/损坏/已过期都按无闩处理并顺手清掉过期文件。
 func (gate *rateGate) restoreState() {
 	if gate.statePath == "" {
@@ -196,8 +234,6 @@ func (gate *rateGate) restoreState() {
 	}
 	gate.limitedUntil = state.LimitedUntil
 	gate.nextDrip = time.Now().Add(gate.dripInterval)
-	gate.tokens = math.Min(gate.tokens, 0)
-	gate.lastAccrual = state.LimitedUntil
 	gate.pushEvent("restored", state.LimitedUntil, "")
 	slog.Warn("rate gate latch restored from state file", "until", state.LimitedUntil.Format(time.RFC3339))
 }
@@ -232,22 +268,35 @@ func (gate *rateGate) clearState() {
 	}
 }
 
-// stats 返回闸门状态快照。顺带惰性结算到期闩：wait 只在有流量时
-// 触发，无流量时段的闩到期由这里的轮询补记，面板时间线才闭环。
+// stats 返回闸门状态快照。顺带惰性结算到期闩与滚动桶：wait 只在有
+// 流量时触发，无流量时段的闩到期与窗口翻转由这里的轮询补记，面板
+// 时间线才闭环。
 func (gate *rateGate) stats() GateStats {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	gate.expireIfDue(time.Now())
+	now := gate.now()
+	gate.expireIfDue(now)
+	ws := gate.windowStart(now)
+	if !ws.Equal(gate.bucketStart) {
+		gate.bucketStart = ws
+		gate.bucketUsed = 0
+	}
 	stats := GateStats{
-		Latched:       !gate.limitedUntil.IsZero() && time.Now().Before(gate.limitedUntil),
+		Latched:       !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
 		LatchCount:    gate.latchCount,
 		DripCount:     gate.dripCount,
 		RejectLatched: gate.rejectLatched,
 		RejectHold:    gate.rejectHold,
-		RefillPerSec:  gate.refillPerSec,
-		Tokens:        gate.tokens,
-		Capacity:      gate.capacity,
+		WindowQuota:   gate.quota,
+		WindowUsed:    gate.bucketUsed,
+		Sendable:      now.Sub(ws) < gate.usable,
 		Waiters:       gate.waiters,
+	}
+	if gate.quota > 0 {
+		open := ws
+		next := ws.Add(windowPeriod)
+		stats.WindowOpen = &open
+		stats.WindowNext = &next
 	}
 	for i := 1; i <= gate.eventSize; i++ {
 		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap])
@@ -260,49 +309,43 @@ func (gate *rateGate) stats() GateStats {
 }
 
 // wait 阻塞到本次上游发送拿到许可，或判定不值得等：
-//   - 闩内：滴灌槽空闲立即放行（该请求即探针），槽被占直接返回
-//     *rateGateError，retryAfter 报闩剩余——客户端睡到恢复时刻
-//     重试比按槽位节奏轮询更省重试预算，长闩也能完整存活；
-//   - 闩外：令牌排队预计超过 maxHold 返回 *rateGateError；
-//   - 等待中 ctx 取消退还令牌并返回原因；睡醒后不直接放行，
-//     回到循环首重新评估——睡眠期间闩态可能已变。
+//   - 闩内：滴灌槽空闲且在可发区间内立即放行（该请求即探针，计入
+//     本桶配额）；否则直接返回 *rateGateError，retryAfter 报闩剩余——
+//     客户端睡到恢复时刻重试比按槽位节奏轮询更省重试预算；
+//   - 闩外：可发区间内配额未满立即放行；配额耗尽或在死区内睡到
+//     下一窗口开放，预计等待超 maxHold 返回 *rateGateError；
+//   - 睡眠不做配额预约：窗口开放时睡醒者与新到者一起竞争，抢不到
+//     的看到满桶按新一轮等待决定再睡或快败——分钟粒度下排序公平性
+//     不值得换复杂度。睡醒后不直接放行，回到循环首重新评估——
+//     睡眠期间闩态可能已变。
 func (gate *rateGate) wait(ctx context.Context) error {
 	if gate == nil {
 		return nil
 	}
-	// presold 是本请求已预售的令牌：睡醒复检发现已上闩时先退还，
-	// 再按闩内规则决定去留——预售额在冻结期不能带走。
-	presold := false
-	// sleeping 标记本请求占着一个 waiters 名额：睡醒回到循环首的
-	// 同一把锁里归还，与状态重估保持同一临界区。
-	sleeping := false
+	sleeping := false // 标记本请求占着一个 waiters 名额
 	for {
-		now := time.Now()
+		now := gate.now()
 		gate.mu.Lock()
 		if sleeping {
 			gate.waiters--
 			sleeping = false
 		}
-		// 令牌按经过时间补充；预订式扣减（允许为负）让等待者的发车间隔
-		// 自动错开，闩解除或突发结束时不会向上游齐射。lastAccrual 可被
-		// 闩推到将来（冻结期），只在正向流逝时结算，否则闩内每次调用
-		// 都会把桶扣得更深。
-		if elapsed := now.Sub(gate.lastAccrual); elapsed > 0 {
-			gate.tokens = math.Min(gate.tokens+elapsed.Seconds()*gate.refillPerSec, gate.capacity)
-			gate.lastAccrual = now
-		}
 		// 闩到期是自然失效而非解闩（没有成功帧证据）。
 		gate.expireIfDue(now)
+		// 计数桶随窗口边界滚动：过期桶的用量不结转。
+		ws := gate.windowStart(now)
+		if !ws.Equal(gate.bucketStart) {
+			gate.bucketStart = ws
+			gate.bucketUsed = 0
+		}
+		sendable := now.Sub(ws) < gate.usable
 		if now.Before(gate.limitedUntil) {
-			if presold {
-				gate.tokens = math.Min(gate.tokens+1, gate.capacity)
-				presold = false
-			}
-			if !now.Before(gate.nextDrip) {
-				// 探针槽空闲：放行并推进下一个槽。滴灌放行不耗令牌——
-				// 闩内节奏由槽位控制，桶仍冻结到闩末。
+			if sendable && !now.Before(gate.nextDrip) {
+				// 探针槽空闲且在可发区间：放行并推进下一个槽。死区内
+				// 不放探针——桶界附近的探针可能落进相邻真实桶白送计数。
 				gate.nextDrip = now.Add(gate.dripInterval)
 				gate.dripCount++
+				gate.bucketUsed++
 				gate.mu.Unlock()
 				return nil
 			}
@@ -311,40 +354,30 @@ func (gate *rateGate) wait(ctx context.Context) error {
 			gate.mu.Unlock()
 			return &rateGateError{retryAfter: retryAfter}
 		}
-		if presold {
-			// 睡醒且未上闩：预售令牌生效，放行。
+		if gate.quota <= 0 {
 			gate.mu.Unlock()
 			return nil
 		}
-		var wait time.Duration
-		if gate.refillPerSec > 0 && gate.tokens < 1 {
-			wait = time.Duration((1 - gate.tokens) / gate.refillPerSec * float64(time.Second))
+		if sendable && gate.bucketUsed < gate.quota {
+			gate.bucketUsed++
+			gate.mu.Unlock()
+			return nil
 		}
+		wait := ws.Add(windowPeriod).Sub(now)
 		if wait > gate.maxHold {
 			gate.rejectHold++
 			gate.mu.Unlock()
 			return &rateGateError{retryAfter: wait}
 		}
-		if gate.refillPerSec > 0 {
-			gate.tokens--
-			presold = true
-		}
-		if wait > 0 {
-			gate.waiters++
-			sleeping = true
-		}
+		gate.waiters++
+		sleeping = true
 		gate.mu.Unlock()
-		if wait <= 0 {
-			return nil
-		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			gate.mu.Lock()
 			gate.waiters--
-			gate.tokens = math.Min(gate.tokens+1, gate.capacity)
-			presold = false
 			gate.mu.Unlock()
 			return context.Cause(ctx)
 		case <-timer.C:
@@ -363,7 +396,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	if !errors.As(err, &connectErr) || connectErr.Code() != connect.CodeResourceExhausted {
 		return
 	}
-	now := time.Now()
+	now := gate.now()
 	until := now.Add(gate.defaultLatch)
 	if resetAt, ok := common.RateLimitReset(err.Error(), now); ok {
 		until = resetAt
@@ -381,10 +414,6 @@ func (gate *rateGate) noteUpstreamError(err error) {
 			detail = "extended"
 		}
 		gate.pushEvent("latched", until, detail)
-		// 冻结令牌桶到闩末：清空存量额度且闩内不累计，解除后队列
-		// 按 refill 节奏逐条放行而非满桶齐射。
-		gate.tokens = math.Min(gate.tokens, 0)
-		gate.lastAccrual = until
 	}
 	gate.mu.Unlock()
 	if extended {
@@ -397,8 +426,7 @@ func (gate *rateGate) noteUpstreamError(err error) {
 
 // noteUpstreamSuccess 用任一上游正常帧解除冷却闩：边际态下拒绝是
 // 概率执行，成功帧说明窗口已过，继续闩到声明时刻只会浪费滴灌窗口。
-// 冻结期 lastAccrual 保持原值——解闩后队列仍按 refill 节奏放行，
-// 提早解闩不等于立刻满速。
+// 解闩后放行仍受窗口配额约束——剩余配额是窗口内齐射的天然上限。
 func (gate *rateGate) noteUpstreamSuccess() {
 	if gate == nil {
 		return
