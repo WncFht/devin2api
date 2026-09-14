@@ -235,12 +235,12 @@ func (gate *rateGate) restoreState() {
 		return
 	}
 	var state gateStateFile
-	if err := json.Unmarshal(data, &state); err != nil || !state.LimitedUntil.After(time.Now()) {
+	if err := json.Unmarshal(data, &state); err != nil || !state.LimitedUntil.After(gate.now()) {
 		_ = os.Remove(gate.statePath)
 		return
 	}
 	gate.limitedUntil = state.LimitedUntil
-	gate.nextDrip = time.Now().Add(gate.dripInterval)
+	gate.nextDrip = gate.now().Add(gate.dripInterval)
 	gate.pushEvent("restored", state.LimitedUntil, "")
 	slog.Warn("rate gate latch restored from state file", "until", state.LimitedUntil.Format(time.RFC3339))
 }
@@ -331,12 +331,18 @@ func (gate *rateGate) wait(ctx context.Context) error {
 	}
 	sleeping := false // 标记本请求占着一个 waiters 名额
 	for {
-		now := gate.now()
 		gate.mu.Lock()
 		if sleeping {
 			gate.waiters--
 			sleeping = false
 		}
+		// 睡醒与 ctx 取消可能同时就绪（select 二选一随机）：回环首
+		// 复查一次，避免取消请求在计时器侥幸先触发时仍被放行计数。
+		if err := ctx.Err(); err != nil {
+			gate.mu.Unlock()
+			return context.Cause(ctx)
+		}
+		now := gate.now()
 		// 闩到期是自然失效而非解闩（没有成功帧证据）。
 		gate.expireIfDue(now)
 		// 计数桶随窗口边界滚动：过期桶的用量不结转。
