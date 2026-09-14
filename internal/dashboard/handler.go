@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/obs"
@@ -24,6 +25,8 @@ import (
 
 // Handler 是面板 HTTP 处理器。
 type Handler struct {
+	// authMu 保护 password/passwordHash：配置 reload 会运行时换值。
+	authMu   sync.RWMutex
 	password string
 	// passwordHash 是面板密码的 SHA-256：比较走定长哈希，既不向
 	// ConstantTimeCompare 泄漏长度，也与 apiKeyMiddleware 的口径一致。
@@ -61,6 +64,28 @@ type Handler struct {
 	debugManager *debuglog.Manager
 	// version 是运行中二进制的构建版本，由 main 经 SetVersion 注入。
 	version string
+	// gateStats 返回速率闸门快照；nil 时 stats 不输出 gate 段。
+	gateStats func() devin.GateStats
+	// aliasesFunc 返回当前生效的模型别名映射；nil 时 status 不做缺席校验。
+	aliasesFunc func() map[string]string
+	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
+	configOps *ConfigOps
+}
+
+// ConfigOps 是面板配置端点的操作面：Reload 重读并热应用配置文件，
+// Current 返回脱敏后的生效配置视图。实现由装配层（main）提供——
+// 热应用要跨 adapter/应用/日志管理器多方协调，不属于面板自身职责。
+type ConfigOps struct {
+	Reload  func() (*ConfigReloadReport, error)
+	Current func() map[string]any
+}
+
+// ConfigReloadReport 是一次热重载的结果：applied 是已生效的变更字段，
+// requiresRestart 是改了但要重启才生效的字段（listen/transport 固化项）。
+type ConfigReloadReport struct {
+	At              string   `json:"at"`
+	Applied         []string `json:"applied"`
+	RequiresRestart []string `json:"requires_restart,omitempty"`
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
@@ -100,6 +125,36 @@ func (h *Handler) SetVersion(version string) {
 	h.version = version
 }
 
+// SetPassword 运行时更换面板密码（配置 reload 热路径）。
+func (h *Handler) SetPassword(password string) {
+	h.authMu.Lock()
+	h.password = password
+	h.passwordHash = sha256.Sum256([]byte(password))
+	h.authMu.Unlock()
+}
+
+// SetGateStats 注入速率闸门快照源。
+func (h *Handler) SetGateStats(fn func() devin.GateStats) {
+	h.gateStats = fn
+}
+
+// SetAliasesFunc 注入当前别名映射源，供 status 端点做目录缺席校验。
+func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
+	h.aliasesFunc = fn
+}
+
+// SetConfigOps 注入配置自省与热重载操作面。
+func (h *Handler) SetConfigOps(ops ConfigOps) {
+	h.configOps = &ops
+}
+
+// passwordSnapshot 返回密码与哈希的一致性快照。
+func (h *Handler) passwordSnapshot() (string, [32]byte) {
+	h.authMu.RLock()
+	defer h.authMu.RUnlock()
+	return h.password, h.passwordHash
+}
+
 // Register 将面板路由注册到 mux。有 token 即可启用；密码仅控制是否登录。
 func (h *Handler) Register(mux interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
@@ -123,6 +178,8 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/panel/api/quota", h.apiQuota)
 	mux.Get("/panel/api/usage", h.apiUsage)
 	mux.Post("/panel/api/debug/toggle", h.apiDebugToggle)
+	mux.Get("/panel/api/config", h.apiConfigCurrent)
+	mux.Post("/panel/api/config/reload", h.apiConfigReload)
 }
 
 // apiStats 返回代理自身运行指标：请求计数、错误分类、流式占比、字节量，
@@ -139,8 +196,47 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 		payload["debuglog"] = h.debugManager.Stats()
 		payload["usage"] = h.debugManager.UsageStats()
 	}
+	if h.gateStats != nil {
+		payload["gate"] = h.gateStats()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// apiConfigCurrent 返回脱敏后的生效配置视图（文件键名与 config.yaml 一致，
+// token/api_key/password 以 sha256 前缀代替明文）。实现见 main 的装配。
+func (h *Handler) apiConfigCurrent(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	if h.configOps == nil || h.configOps.Current == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(h.configOps.Current())
+}
+
+// apiConfigReload 重读配置文件并热应用；校验失败 422 且旧配置继续服役。
+// 返回 applied（已生效）与 requires_restart（要重启才生效）两组字段名，
+// 让调用方明确知道哪些改动仍在 pending。
+func (h *Handler) apiConfigReload(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuth(w, r) {
+		return
+	}
+	if h.configOps == nil || h.configOps.Reload == nil {
+		http.NotFound(w, r)
+		return
+	}
+	report, err := h.configOps.Reload()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 // apiIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明。
@@ -155,9 +251,11 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 		"version": h.version,
 		"auth":    "dashboard.password 非空时可用 cookie 会话或 Authorization: Bearer <密码>",
 		"endpoints": []map[string]string{
-			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警"},
+			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警 + devin.aliases 目标缺席校验（alias_targets_absent）"},
 			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
-			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + 日志管道自观测 + index 聚合用量"},
+			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + 日志管道自观测 + index 聚合用量 + gate 速率闸门状态"},
+			{"method": "GET", "path": "/panel/api/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
+			{"method": "POST", "path": "/panel/api/config/reload", "description": "重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
 			{"method": "GET", "path": "/panel/api/usage", "description": "index.jsonl 聚合：今日/窗口累计、model_days 模型×日矩阵（供面板时间范围选择器）、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势（含缓存命中率与均速原料）、p50/p95/p99、目录价估算成本"},
 			{"method": "GET", "path": "/panel/api/requests?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=", "description": "最近请求（新在前）；q 子串或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；has_more 提示窗口外仍有历史"},
 			{"method": "GET", "path": "/panel/api/requests/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSONL）"},
@@ -180,7 +278,8 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if h.password != "" && !h.isAuthenticated(r) {
+	password, _ := h.passwordSnapshot()
+	if password != "" && !h.isAuthenticated(r) {
 		_, _ = w.Write([]byte(loginPage))
 		return
 	}
@@ -246,14 +345,15 @@ const (
 )
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if h.password == "" {
+	password, passwordHash := h.passwordSnapshot()
+	if password == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true,"open":true}`))
 		return
 	}
 	ip := remoteIP(r)
 	provided := sha256.Sum256([]byte(r.FormValue("password")))
-	if subtle.ConstantTimeCompare(provided[:], h.passwordHash[:]) != 1 {
+	if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) != 1 {
 		h.sessionMu.Lock()
 		state := h.loginFailures[ip]
 		if state == nil {
@@ -314,14 +414,15 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) isAuthenticated(r *http.Request) bool {
-	if h.password == "" {
+	password, passwordHash := h.passwordSnapshot()
+	if password == "" {
 		return true
 	}
 	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
 	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		provided := sha256.Sum256([]byte(strings.TrimPrefix(auth, "Bearer ")))
-		if subtle.ConstantTimeCompare(provided[:], h.passwordHash[:]) == 1 {
+		if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) == 1 {
 			return true
 		}
 	}

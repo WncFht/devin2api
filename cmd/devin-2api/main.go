@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -16,8 +17,11 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
@@ -78,6 +82,17 @@ func resolvedVersion() string {
 	return version
 }
 
+// runtimeConfigState 是最近一次成功加载的配置快照：配置自省端点拿它
+// 回答「文件在最后一次加载后是否被改过」（file_mtime vs 当前 mtime）。
+type runtimeConfigState struct {
+	cfg       config.Config
+	loadedAt  time.Time
+	fileMtime time.Time
+}
+
+var runtimeConfigPtr atomic.Pointer[runtimeConfigState]
+var lastReloadPtr atomic.Pointer[dashboard.ConfigReloadReport]
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
@@ -100,6 +115,9 @@ func main() {
 		slog.Error("load config failed", "error", err)
 		os.Exit(1)
 	}
+	runtimeConfigPtr.Store(&runtimeConfigState{
+		cfg: serviceConfig, loadedAt: time.Now(), fileMtime: configFileMtime(absoluteConfigPath),
+	})
 
 	// 尽早绑定监听端口：其后的适配器/日志管理器/指标回放都有 IO 耗时，
 	// 先 listen 让内核把启动期连接排入 backlog（调用方 connect 成功但等待），
@@ -111,36 +129,17 @@ func main() {
 	defer func() { _ = listener.Close() }()
 
 	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
+	// devinAdapter 保留具体类型引用：配置热重载（ApplyConfig）、闸门状态
+	// （GateStats）与别名校验（Aliases）都挂在它上面。
+	var devinAdapter *devin.Adapter
 	var tokenFunc func() string
 	if serviceConfig.Devin.Token != "" {
-		configured, createErr := devin.New(devin.Config{
-			BaseURL:          serviceConfig.Devin.BaseURL,
-			Token:            serviceConfig.Devin.Token,
-			Model:            serviceConfig.Devin.Model,
-			Proxy:            serviceConfig.Devin.Proxy,
-			ForceHTTP1:       serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
-			Aliases:          serviceConfig.Devin.Aliases,
-			ClientName:       serviceConfig.Devin.ClientName,
-			ClientVersion:    serviceConfig.Devin.ClientVersion,
-			ClientOS:         serviceConfig.Devin.ClientOS,
-			MaxRPM:           serviceConfig.Devin.MaxRPM,
-			GateMaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
-			GateDripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
-			GateDefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
-			// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
-			// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
-			TokenSource: func() string {
-				reloaded, err := config.Load(absoluteConfigPath)
-				if err != nil {
-					return ""
-				}
-				return reloaded.Devin.Token
-			},
-		})
+		configured, createErr := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath))
 		if createErr != nil {
 			slog.Error("create devin adapter failed", "error", createErr)
 			os.Exit(1)
 		}
+		devinAdapter = configured
 		providerAdapter = configured
 		// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
 		// 自愈更新 token 后，面板的上游调用自动跟随新值。
@@ -179,6 +178,16 @@ func main() {
 	if serviceConfig.Devin.Token != "" {
 		panel := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
 		panel.SetVersion(resolved)
+		panel.SetGateStats(devinAdapter.GateStats)
+		panel.SetAliasesFunc(devinAdapter.Aliases)
+		panel.SetConfigOps(dashboard.ConfigOps{
+			Reload: func() (*dashboard.ConfigReloadReport, error) {
+				return reloadRuntimeConfig(absoluteConfigPath, devinAdapter, application, panel, debugManager)
+			},
+			Current: func() map[string]any {
+				return runtimeConfigView(absoluteConfigPath)
+			},
+		})
 		panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 		application.SetDashboard(panel)
 	}
@@ -191,6 +200,140 @@ func main() {
 		slog.Error("serve HTTP failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// devinConfigFrom 把启动配置映射为 Devin adapter 配置；启动与配置
+// 热重载共用同一映射，保证 ApplyConfig 看到的字段口径与 New 一致。
+func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Config {
+	return devin.Config{
+		BaseURL:          serviceConfig.Devin.BaseURL,
+		Token:            serviceConfig.Devin.Token,
+		Model:            serviceConfig.Devin.Model,
+		Proxy:            serviceConfig.Devin.Proxy,
+		ForceHTTP1:       serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+		Aliases:          serviceConfig.Devin.Aliases,
+		ClientName:       serviceConfig.Devin.ClientName,
+		ClientVersion:    serviceConfig.Devin.ClientVersion,
+		ClientOS:         serviceConfig.Devin.ClientOS,
+		MaxRPM:           serviceConfig.Devin.MaxRPM,
+		GateMaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
+		GateDripInterval: time.Duration(serviceConfig.Devin.GateDripIntervalSeconds) * time.Second,
+		GateDefaultLatch: time.Duration(serviceConfig.Devin.GateDefaultLatchSeconds) * time.Second,
+		GateStatePath:    filepath.Join(filepath.Dir(configPath), "logs", "gate-state.json"),
+		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
+		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
+		TokenSource: func() string {
+			reloaded, err := config.Load(configPath)
+			if err != nil {
+				return ""
+			}
+			return reloaded.Devin.Token
+		},
+	}
+}
+
+// reloadRuntimeConfig 重读配置文件并把可安全换值的字段热应用；校验失败
+// 直接返回错误、旧配置继续服役（validate-then-commit）。只报告值发生
+// 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
+// transport 固化字段（base_url/proxy/force_http1）与监听参数进
+// requires_restart，调用方据此知道哪些改动仍在 pending。
+func reloadRuntimeConfig(configPath string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager) (*dashboard.ConfigReloadReport, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
+	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath))
+	report.Applied = append(report.Applied, applied...)
+	report.RequiresRestart = append(report.RequiresRestart, cold...)
+	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
+	// 而本函数只能经 panel 端点触达。
+	pcfg := runtimeConfigPtr.Load().cfg
+	if pcfg.Auth.APIKey != cfg.Auth.APIKey {
+		application.SetAPIKey(cfg.Auth.APIKey)
+		report.Applied = append(report.Applied, "auth.api_key")
+	}
+	if pcfg.Dashboard.Password != cfg.Dashboard.Password {
+		panel.SetPassword(cfg.Dashboard.Password)
+		report.Applied = append(report.Applied, "dashboard.password")
+	}
+	if pcfg.Debug.Enabled != cfg.Debug.Enabled {
+		debugManager.SetEnabled(cfg.Debug.Enabled)
+		report.Applied = append(report.Applied, "debug.enabled")
+	}
+	newPolicy := debuglog.RetentionPolicy{
+		Days:          *cfg.Debug.RetentionDays,
+		MaxTotalMB:    *cfg.Debug.MaxTotalMB,
+		PayloadHours:  *cfg.Debug.PayloadHours,
+		KeepErrorDirs: *cfg.Debug.KeepErrorDirs,
+	}
+	if debugManager.Policy() != newPolicy {
+		debugManager.SetPolicy(newPolicy)
+		report.Applied = append(report.Applied, "debug.retention")
+	}
+	if *pcfg.Debug.QuotaIntervalMinutes != *cfg.Debug.QuotaIntervalMinutes {
+		report.RequiresRestart = append(report.RequiresRestart, "debug.quota_interval_minutes")
+	}
+	if pcfg.Server.Listen != cfg.Server.Listen {
+		report.RequiresRestart = append(report.RequiresRestart, "server.listen")
+	}
+	if pcfg.Server.MaxConcurrency != cfg.Server.MaxConcurrency {
+		report.RequiresRestart = append(report.RequiresRestart, "server.max_concurrency")
+	}
+	runtimeConfigPtr.Store(&runtimeConfigState{cfg: cfg, loadedAt: time.Now(), fileMtime: configFileMtime(configPath)})
+	lastReloadPtr.Store(report)
+	slog.Info("config reloaded", "applied", report.Applied, "requires_restart", report.RequiresRestart)
+	return report, nil
+}
+
+// runtimeConfigView 返回配置自省视图：最近成功加载的配置（脱敏）、
+// 文件 mtime、以及文件在加载后是否被改动（stale）。配置经 yaml 往返
+// 成 map，键名与 config.yaml 一致。
+func runtimeConfigView(configPath string) map[string]any {
+	view := map[string]any{"path": configPath}
+	cur := runtimeConfigPtr.Load()
+	if cur == nil {
+		view["error"] = "config not loaded"
+		return view
+	}
+	fields := map[string]any{}
+	if raw, err := yaml.Marshal(cur.cfg); err == nil {
+		_ = yaml.Unmarshal(raw, &fields)
+	}
+	redactConfigSecrets(fields)
+	view["config"] = fields
+	view["loaded_at"] = cur.loadedAt.Format(time.RFC3339)
+	view["file_mtime"] = cur.fileMtime.Format(time.RFC3339)
+	view["stale"] = configFileMtime(configPath).After(cur.fileMtime)
+	if report := lastReloadPtr.Load(); report != nil {
+		view["last_reload"] = report
+	}
+	return view
+}
+
+// redactConfigSecrets 把配置视图里的凭据值替换为 sha256 前缀——
+// 既能和日志里的 key_hash 对照确认「是不是我以为的那把 key」，又不回明文。
+func redactConfigSecrets(fields map[string]any) {
+	for _, path := range [][2]string{{"devin", "token"}, {"auth", "api_key"}, {"dashboard", "password"}} {
+		section, ok := fields[path[0]].(map[string]any)
+		if !ok {
+			continue
+		}
+		raw, ok := section[path[1]].(string)
+		if !ok || raw == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(raw))
+		section[path[1]] = fmt.Sprintf("sha256:%x", sum[:6])
+	}
+}
+
+// configFileMtime 返回配置文件的最后修改时刻；stat 失败回零值。
+func configFileMtime(path string) time.Time {
+	if info, err := os.Stat(path); err == nil {
+		return info.ModTime()
+	}
+	return time.Time{}
 }
 
 // listenURL 生成启动日志中的监听描述：配置为通配地址时同时给出 localhost 可访问地址。

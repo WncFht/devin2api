@@ -73,7 +73,7 @@ func (manager *Manager) cleanOnce() int {
 	}
 	manager.mutex.Unlock()
 
-	policy := manager.policy
+	policy := manager.Policy()
 	maxBytes := policy.MaxTotalMB << 20
 	now := time.Now()
 	ageCutoff := now.Add(-time.Duration(policy.Days) * 24 * time.Hour)

@@ -59,8 +59,10 @@ type Manager struct {
 	activeDirs map[string]*Recorder
 	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
 	enabled atomic.Bool
-	// policy 是日志生命周期策略。
-	policy RetentionPolicy
+	// policy 是日志生命周期策略；policyMu 保护它：配置 reload 会运行时换值，
+	// cleaner 协程与 Stats 每轮经 Policy() 取快照。
+	policyMu sync.RWMutex
+	policy   RetentionPolicy
 	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
 	indexFile   *os.File
 	indexWriter *bufio.Writer
@@ -287,6 +289,27 @@ func (manager *Manager) Enabled() bool {
 	return manager != nil && manager.enabled.Load()
 }
 
+// SetPolicy 运行时更换日志生命周期策略（配置 reload 热路径）；cleaner
+// 协程下一轮 tick 即按新策略执行。
+func (manager *Manager) SetPolicy(policy RetentionPolicy) {
+	if manager == nil {
+		return
+	}
+	manager.policyMu.Lock()
+	manager.policy = policy
+	manager.policyMu.Unlock()
+}
+
+// Policy 返回当前生效的生命周期策略快照。
+func (manager *Manager) Policy() RetentionPolicy {
+	if manager == nil {
+		return RetentionPolicy{}
+	}
+	manager.policyMu.RLock()
+	defer manager.policyMu.RUnlock()
+	return manager.policy
+}
+
 // Root 返回日志根目录；禁用态返回空串。配额历史等顶层文件与其同目录。
 func (manager *Manager) Root() string {
 	if manager == nil {
@@ -312,6 +335,7 @@ func (manager *Manager) Stats() map[string]any {
 	if info, err := os.Stat(filepath.Join(manager.root, "index.jsonl")); err == nil {
 		indexBytes = info.Size()
 	}
+	policy := manager.Policy()
 	return map[string]any{
 		"log_root":            manager.root,
 		"enabled":             manager.enabled.Load(),
@@ -321,10 +345,10 @@ func (manager *Manager) Stats() map[string]any {
 		"dropped_log_events":  manager.droppedTotal.Load(),
 		"io_errors":           manager.ioErrors.Load(),
 		"index_bytes":         indexBytes,
-		"retention_days":      manager.policy.Days,
-		"max_total_mb":        manager.policy.MaxTotalMB,
-		"payload_hours":       manager.policy.PayloadHours,
-		"keep_error_dirs":     manager.policy.KeepErrorDirs,
+		"retention_days":      policy.Days,
+		"max_total_mb":        policy.MaxTotalMB,
+		"payload_hours":       policy.PayloadHours,
+		"keep_error_dirs":     policy.KeepErrorDirs,
 	}
 }
 
