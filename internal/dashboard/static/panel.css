@@ -285,19 +285,45 @@ th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--text); }
 th .sort-ind { font-size: 10px; color: var(--accent); }
 
-/* ---------- 健康时间线（纯 DOM 双编码：颜色=错误率 高度=请求量） ---------- */
-.health-strip { display: flex; align-items: flex-end; gap: 2px; height: 34px; }
-.health-strip i {
-  flex: 1; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--surface-3);
-  height: 22%; transition: transform .1s;
+/* ---------- 健康矩阵（行=模型 × 列=1分钟桶：颜色=最重归因 深浅=请求量） ---------- */
+.mx { display: flex; flex-direction: column; gap: 3px; }
+.mx-row { display: flex; align-items: center; gap: 10px; }
+.mx-label {
+  flex: none; width: 158px; font-family: var(--mono); font-size: 11px;
+  color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer;
 }
-.health-strip i:hover { transform: scaleY(1.15); outline: 1px solid var(--border-strong); }
-.health-strip i.h-ok { background: var(--ok); }
-.health-strip i.h-warn { background: var(--warn); }
-.health-strip i.h-err { background: var(--err); }
-.health-strip i.h-rl { background: #facc15; }
-.health-strip i.h-none { background: var(--surface-3); height: 12%; }
+.mx-label:hover { color: var(--accent); }
+.mx-cells { display: flex; gap: 2px; flex: 1; height: 14px; }
+.mx-cells i { flex: 1; min-width: 2px; border-radius: 2px; background: var(--surface-3); }
+.mx-cells i[data-n] { cursor: pointer; }
+.mx-cells i[data-n]:hover { outline: 1px solid var(--border-strong); }
+.mx-cells i.h-ok { background: var(--ok); }
+.mx-cells i.h-warn { background: var(--warn); }
+.mx-cells i.h-err { background: var(--err); }
+.mx-cells i.h-none { background: var(--surface-3); }
 .health-cap { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); margin-top: 5px; }
+
+/* ---------- 判词行（概览顶部一句话结论） ---------- */
+.verdict {
+  border-radius: var(--radius-sm); padding: 9px 14px; margin-bottom: 12px;
+  font-size: 12.5px; border: 1px solid var(--border); border-left: 3px solid var(--ok);
+  background: var(--ok-soft); color: var(--text);
+}
+.verdict.v-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+.verdict.v-err { border-left-color: var(--err); background: var(--err-soft); }
+
+/* ---------- 重试链路（详情内 attempt 序列） ---------- */
+.retry-chain {
+  border-radius: var(--radius-sm); padding: 7px 12px; margin-bottom: 10px;
+  font-size: 12px; border: 1px solid rgba(56, 189, 248, 0.3);
+  background: var(--info-soft); color: var(--info);
+}
+.retry-chain .muted { color: var(--muted); }
+
+/* ---------- 成本占比条（模型表成本列内嵌） ---------- */
+.share-bar { height: 3px; background: var(--surface-3); border-radius: 2px; margin-top: 3px; overflow: hidden; }
+.share-bar i { display: block; height: 100%; background: var(--warn); border-radius: 2px; }
 
 /* ---------- 进行中请求行（并入请求表顶部） ---------- */
 tr.pending-row td { background: var(--accent-soft); }

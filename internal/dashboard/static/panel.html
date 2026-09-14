@@ -35,9 +35,11 @@
   <!-- ============ 概览 ============ -->
   <section class="page" id="page-overview">
     <div class="page-head"><h2>概览</h2><span class="sub">一眼看清：流量、配额、在途、告警</span><span class="spacer"></span><span class="sub" id="ovUpdated"></span></div>
+    <div id="ovVerdict"></div>
     <div class="kpis" id="ovKpis"><div class="loading">加载中...</div></div>
+    <div class="panel" id="ovLatPanel" style="display:none"><h3>延迟分布 <span class="sub">最近 4096 条完成请求蓄水池</span></h3><div id="ovLatBody"></div></div>
     <div class="panel" id="ovQuotaPanel"><h3>配额余量</h3><div class="loading">加载中...</div></div>
-    <div class="panel"><h3>健康时间线 <span class="sub">最近 60 分钟 · 每格 30s · 高度=请求量 颜色=结果</span></h3><div class="health-strip" id="ovHealth"></div><div class="health-cap" id="ovHealthCap"></div></div>
+    <div class="panel"><h3>健康矩阵 <span class="sub">最近 60 分钟 · 行=模型 格=1分钟 · 颜色=最重归因 深浅=请求量 · 点格下钻请求列表</span></h3><div class="mx" id="ovHealth"></div><div class="health-cap" id="ovHealthCap"></div></div>
     <div class="panel"><h3>实时流量 <span class="sub">最近 60 分钟 · 30s 粒度</span></h3><div id="ovTrendChart" class="chart chart-h220"></div></div>
     <div class="panel" id="ovActivePanel" style="display:none"><h3>进行中请求</h3><div id="ovActiveBody"></div></div>
     <div class="panel" id="ovAlertPanel" style="display:none"><h3>告警</h3><div id="ovAlertBody"></div></div>
@@ -54,6 +56,7 @@
         <input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0">
         <input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0">
         <select id="fSince"><option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select>
+        <input type="hidden" id="fSinceTS"><input type="hidden" id="fUntilTS">
         <button class="btn" id="reqExportJson">导出 JSON</button>
         <button class="btn" id="reqExportCsv">导出 CSV</button>
       </div>

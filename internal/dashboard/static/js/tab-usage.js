@@ -56,8 +56,11 @@ const Usage = (() => {
     const label = (RANGES.find(r => r[0] === range) || [])[1] || '';
     const totals = range === 'all' ? (s.window || {}) : sumTotals(pts);
 
+    // 成功率统一走 SLA 口径：服务端失分/承诺内请求（剔除客户端责任与 429）。
+    const sla = slaRate(totals);
     let html = '<div class="kpis">' +
-      kpi(label + '请求', fmtNum(totals.requests || 0), '错 ' + (totals.errors || 0) + ' · 断 ' + (totals.disconnected || 0) + ' · 429 ' + (totals.rate_limited || 0)) +
+      kpi(label + '请求', fmtNum(totals.requests || 0), (sla == null ? '成功率 —' : 'SLA ' + sla.toFixed(1) + '%') +
+        ' · 服务端 ' + (totals.upstream_faults || 0) + ' · 客户端 ' + (totals.client_faults || 0) + ' · 429 ' + (totals.rate_limited || 0)) +
       kpi('输入', fmtNum(totals.input_tokens), '缓存读 ' + fmtNum(totals.cache_read_tokens), 'info') +
       kpi('输出', fmtNum(totals.output_tokens), '推理 ' + fmtNum(totals.reasoning_tokens), 'ok') +
       kpi('缓存命中率', hitRate(totals), '写 ' + fmtNum(totals.cache_write_tokens), 'cyan') +
@@ -128,6 +131,9 @@ const Usage = (() => {
     }
 
     // 按模型表：表头三态排序 + 加权合计行 + 阈值着色。
+    // 成功率列是 SLA 口径（剔除客户端责任与 429 的服务端成功率）；
+    // 长度分布/上下文填充/成本占比只在全窗口下可得（model_days 不带
+    // 样本与目录字段，与 est_cost 同一约束）。
     const allRows = range === 'all' ? (d.models || []) : modelRows;
     if (allRows.length) {
       const wide = range === 'all';
@@ -135,13 +141,14 @@ const Usage = (() => {
         const dd = (m.cache_read_tokens || 0) + (m.input_tokens || 0);
         return dd > 0 ? m.cache_read_tokens / dd * 100 : -1;
       };
-      const srOf = m => (m.success_rate != null ? m.success_rate : (m.requests ? (m.requests - m.errors - m.disconnected) / m.requests : 0)) * 100;
+      const srOf = m => slaRate(m) ?? -1;
       const tpsOf = m => m.gen_ms > 0 ? m.gen_tokens / (m.gen_ms / 1000) : -1;
       // 排序取值器：缺省值排到最后。
       const MCOLS = {
         requests: m => m.requests || 0, sr: srOf, rate_limited: m => m.rate_limited || 0,
         input_tokens: m => m.input_tokens || 0, output_tokens: m => m.output_tokens || 0,
         cache_read_tokens: m => m.cache_read_tokens || 0, hit: hitRateVal, tps: tpsOf,
+        in_p50: m => m.input_p50 || 0, fill: m => m.context_fill_pct || 0,
         est_cost: m => m.est_cost ?? -1, avg_duration_ms: m => m.avg_duration_ms || 0,
         avg_ttfb_ms: m => m.avg_ttfb_ms || 0, last_at: m => new Date(m.last_at || 0).getTime() || 0,
       };
@@ -151,42 +158,58 @@ const Usage = (() => {
       }
       const sth = (k, label) => '<th class="sortable" data-msort="' + k + '">' + label +
         '<span class="sort-ind">' + (mSortKey === k ? (mSortDir === -1 ? ' ↓' : ' ↑') : '') + '</span></th>';
-      html += '<div class="panel"><h3>按模型 <span class="sub">' + esc(label) + (wide ? ' · 含成本估算' : '') + ' · 点击模型筛选请求 · 点列头排序</span></h3>' +
+      const tt = sumTotals(allRows);
+      const ttCost = allRows.reduce((a, m) => a + (m.est_cost || 0), 0);
+      html += '<div class="panel"><h3>按模型 <span class="sub">' + esc(label) +
+        (wide ? ' · 含长度分布/上下文填充/成本估算' : '') +
+        ' · SLA=剔除客户端与429后的服务端成功率 · 点击模型筛选请求 · 点列头排序</span></h3>' +
         '<div class="scroll-x"><table><thead><tr><th>模型</th>' +
-        sth('requests', '请求') + sth('sr', '成功率') + sth('rate_limited', '429') +
+        sth('requests', '请求') + sth('sr', 'SLA') + sth('rate_limited', '429') +
         sth('input_tokens', '输入') + sth('output_tokens', '输出') + sth('cache_read_tokens', '缓存读') +
         sth('hit', '命中率') + sth('tps', '均速') +
-        (wide ? sth('est_cost', '估算成本') + sth('avg_duration_ms', '均耗时') + sth('avg_ttfb_ms', '均TTFB') + sth('last_at', '最近') : '') +
+        (wide ? sth('in_p50', '长度 p50/p95') + sth('fill', '上下文填充') +
+          sth('est_cost', '估算成本') + sth('avg_duration_ms', '均耗时') + sth('avg_ttfb_ms', '均TTFB') + sth('last_at', '最近') : '') +
         '</tr></thead><tbody>';
       rows.forEach(m => {
-        const sr = srOf(m);
+        const sr = slaRate(m);
         const tps = tpsOf(m);
+        // 长度分布单元格两行：↓输入 / ↑输出 各自的 p50/p95（蓄水池分位）。
+        const lenCell = (m.input_p50 || m.output_p50)
+          ? '↓' + fmtNum(m.input_p50) + ' / ' + fmtNum(m.input_p95) +
+            '<div class="muted">↑' + fmtNum(m.output_p50) + ' / ' + fmtNum(m.output_p95) + '</div>'
+          : '<span class="muted">—</span>';
+        const fillCell = (m.context_fill_pct != null)
+          ? m.context_fill_pct.toFixed(0) + '%<div class="muted" title="平均单请求占用 ÷ 上下文窗口">均 ' + fmtNum(Math.round(m.avg_context_tokens || 0)) + '/' + fmtNum(m.context_tokens) + '</div>'
+          : '<span class="muted">—</span>';
+        const costCell = (m.est_cost != null)
+          ? money(m.est_cost) + (ttCost > 0 ? '<div class="share-bar" title="成本占比 ' + (m.est_cost / ttCost * 100).toFixed(1) + '%"><i style="width:' + Math.min(100, m.est_cost / ttCost * 100).toFixed(1) + '%"></i></div>' : '')
+          : '<span class="muted">—</span>';
         html += '<tr><td class="mono"><span class="lnk" data-model="' + qa(m.name) + '">' + esc(m.name) + '</span></td>' +
-          '<td class="num">' + m.requests + ' <span class="muted">(err ' + m.errors + ')</span></td>' +
-          '<td class="num ' + rateClass(sr) + '">' + sr.toFixed(0) + '%</td>' +
+          '<td class="num">' + m.requests + ' <span class="muted">(服 ' + (m.upstream_faults || 0) + ' 客 ' + (m.client_faults || 0) + ')</span></td>' +
+          '<td class="num ' + (sr == null ? 'muted' : rateClass(sr)) + '">' + (sr == null ? '—' : sr.toFixed(0) + '%') + '</td>' +
           '<td class="num">' + (m.rate_limited || 0) + '</td>' +
           '<td class="mono">' + fmtNum(m.input_tokens) + '</td>' +
           '<td class="mono">' + fmtNum(m.output_tokens) + '</td>' +
           '<td class="mono">' + fmtNum(m.cache_read_tokens) + '</td>' +
           '<td class="mono">' + hitRate(m) + '</td>' +
           '<td class="mono">' + (tps >= 0 ? tps.toFixed(1) + ' tok/s' : '-') + '</td>' +
-          (wide ? '<td>' + (m.est_cost != null ? money(m.est_cost) : '<span class="muted">—</span>') + '</td>' +
+          (wide ? '<td class="mono">' + lenCell + '</td><td class="mono">' + fillCell + '</td>' +
+            '<td>' + costCell + '</td>' +
             '<td class="mono ' + secClass(m.avg_duration_ms, 30000, 60000) + '">' + fmtMs(Math.round(m.avg_duration_ms || 0)) + '</td>' +
             '<td class="mono ' + secClass(m.avg_ttfb_ms, 5000, 10000) + '">' + fmtMs(Math.round(m.avg_ttfb_ms || 0)) + '</td>' +
             '<td class="mono muted" title="' + esc(m.last_at || '') + '">' + fmtRel(m.last_at) + '</td>' : '') + '</tr>';
       });
-      // 加权合计行：命中率/decode 均速按总量加权重算，不按行平均。
-      const tt = sumTotals(allRows);
-      const ttSr = tt.requests ? (tt.requests - tt.errors - tt.disconnected) / tt.requests * 100 : 0;
-      const ttCost = allRows.reduce((a, m) => a + (m.est_cost || 0), 0);
+      // 加权合计行：命中率/decode 均速按总量加权重算，不按行平均；
+      // SLA 用合计后的归因计数重算，同样不取行平均。
+      const ttSla = slaRate(tt);
       html += '<tr style="font-weight:600;border-top:1px solid var(--border-strong)"><td class="mono muted">Σ 合计</td>' +
-        '<td class="num">' + tt.requests + ' <span class="muted">(err ' + tt.errors + ')</span></td>' +
-        '<td class="num ' + rateClass(ttSr) + '">' + ttSr.toFixed(0) + '%</td>' +
+        '<td class="num">' + tt.requests + ' <span class="muted">(服 ' + tt.upstream_faults + ' 客 ' + tt.client_faults + ')</span></td>' +
+        '<td class="num ' + (ttSla == null ? 'muted' : rateClass(ttSla)) + '">' + (ttSla == null ? '—' : ttSla.toFixed(0) + '%') + '</td>' +
         '<td class="num">' + tt.rate_limited + '</td>' +
         '<td class="mono">' + fmtNum(tt.input_tokens) + '</td><td class="mono">' + fmtNum(tt.output_tokens) + '</td>' +
         '<td class="mono">' + fmtNum(tt.cache_read_tokens) + '</td>' +
         '<td class="mono">' + hitRate(tt) + '</td><td class="mono">' + avgTps(tt) + '</td>' +
-        (wide ? '<td>' + money(ttCost) + '</td><td></td><td></td><td></td>' : '') + '</tr>';
+        (wide ? '<td></td><td></td><td>' + money(ttCost) + '</td><td></td><td></td><td></td>' : '') + '</tr>';
       html += '</tbody></table></div></div>';
     }
 

@@ -152,6 +152,34 @@ function fmtIn(v) {
   if (d < 86400) return Math.floor(d / 3600) + 'h ' + Math.floor(d % 3600 / 60) + 'm 后';
   return Math.floor(d / 86400) + 'd ' + Math.floor(d % 86400 / 3600) + 'h 后';
 }
+// fmtInPrecise 是闩倒计时的精细版：剩余 <1h 时显示到秒（"12m 34s"），
+// 跨小时回退 fmtIn——解闩前的最后几十分钟里秒级读数才有意义。
+function fmtInPrecise(v) {
+  const t = typeof v === 'number' ? v * 1000 : new Date(v).getTime();
+  if (!Number.isFinite(t) || t <= 0) return '-';
+  const d = (t - Date.now()) / 1000;
+  if (d <= 0) return '已到期';
+  if (d < 3600) return Math.floor(d / 60) + 'm ' + Math.floor(d % 60) + 's';
+  return fmtIn(t / 1000);
+}
+
+// ---------- 错误归因（与后端 debuglog.errorOwner 同口径） ----------
+// client=调用方责任（断连/中断/请求体阶段失败）；business_limited=429
+// 配额动作；upstream=服务端失分（上游错误与代理自身失败），SLA 只算它。
+function errorOwner(e) {
+  if (e.status_code === 429) return 'business_limited';
+  if (e.result === 'disconnected' || e.result === 'aborted') return 'client';
+  if (e.status_code < 400 && e.result !== 'failed') return '';
+  if (e.error_stage === 'http_read' || e.error_stage === 'http_decode') return 'client';
+  return 'upstream';
+}
+// slaRate 服务端口径成功率：分母剔除客户端责任与 429 条目后，
+// upstream 失分占比取反；分母为 0（只有客户端/限流流量）返回 null。
+function slaRate(t) {
+  const base = (t.requests || 0) - (t.client_faults || 0) - (t.rate_limited || 0);
+  if (base <= 0) return null;
+  return (base - (t.upstream_faults || 0)) / base * 100;
+}
 function hitRate(t) {
   const dd = (t.cache_read_tokens || 0) + (t.input_tokens || 0);
   return dd > 0 ? (100 * t.cache_read_tokens / dd).toFixed(1) + '%' : '-';
@@ -189,7 +217,7 @@ function fillSelect(id, values) {
   if ([...el.options].some(o => o.value === cur)) el.value = cur;
 }
 function sumTotals(list) {
-  const t = { requests: 0, errors: 0, disconnected: 0, rate_limited: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, total_tokens: 0, gen_ms: 0, gen_tokens: 0 };
+  const t = { requests: 0, errors: 0, disconnected: 0, rate_limited: 0, client_faults: 0, upstream_faults: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, total_tokens: 0, gen_ms: 0, gen_tokens: 0 };
   list.forEach(p => { for (const k in t) t[k] += p[k] || 0; });
   return t;
 }
@@ -341,9 +369,13 @@ document.getElementById('topNav').addEventListener('click', e => {
 });
 
 // 跨页联动：把条件填进请求页过滤器并切过去（由各 tab 的表格/chips 调用）。
+// since/until 是隐藏时间窗字段（矩阵格子下钻用 ISO 时刻钉窗口）：
+// 不带窗参数的跳转总是清掉旧锁，否则一次下钻后所有跳转都被钉住。
 function jumpRequests(kv) {
-  const map = { q: 'reqSearch', status: 'fStatus', result: 'fResult', model: 'fReqModel', error_stage: 'fErrStage' };
+  const map = { q: 'reqSearch', status: 'fStatus', result: 'fResult', model: 'fReqModel', error_stage: 'fErrStage', since: 'fSinceTS', until: 'fUntilTS' };
   for (const k in kv) { const el = $(map[k]); if (el) el.value = kv[k]; }
+  if (!('since' in kv)) { const el = $('fSinceTS'); if (el) el.value = ''; }
+  if (!('until' in kv)) { const el = $('fUntilTS'); if (el) el.value = ''; }
   Tabs.go('requests');
   Requests.resetAndLoad();
 }

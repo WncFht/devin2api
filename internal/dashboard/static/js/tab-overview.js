@@ -2,7 +2,9 @@
 // 数据分三层轮询：stats/active 10s（快变），usage/quota/status 60s（慢变）。
 
 const Overview = (() => {
-  let statsData = null, usageData = null, quotaData = null, statusData = null;
+  let statsData = null, usageData = null, quotaData = null, statusData = null, matrixData = null;
+  // 健康矩阵窗口：最近 60 分钟按 1 分钟分桶（行=模型，格=桶）。
+  const MX_BUCKETS = 60, MX_BUCKET_MS = 60000;
 
   // delta：今日 vs 昨日同指标的环比箭头，昨日为 0 时不显示。
   function delta(cur, prev) {
@@ -24,16 +26,17 @@ const Overview = (() => {
       const pad = n => String(n).padStart(2, '0');
       return d.date === y.getFullYear() + '-' + pad(y.getMonth() + 1) + '-' + pad(y.getDate());
     })) || {};
-    const done = Math.max(1, today.requests || 0);
-    const okN = done - (today.errors || 0) - (today.disconnected || 0);
     const lat = (statsData.usage && statsData.usage.ttfb) || {};
     const dur = (statsData.usage && statsData.usage.duration) || {};
     // 价目整体缺失或在用模型均无目录价时，成本无意义，显示占位符而非 $0.000。
     const priced = !usageData.price_missing && (usageData.models || []).some(m => m.est_cost > 0);
     const cost = priced ? money(usageData.est_cost) : '<span class="muted">—</span>';
+    // 成功率走 SLA 口径（剔除客户端责任与 429）：服务端失分才是服务质量信号。
+    const sla = slaRate(today);
     $('ovKpis').innerHTML =
       kpi('今日请求', fmtNum(today.requests || 0) + delta(today.requests || 0, yday.requests),
-        '成功率 ' + (100 * okN / done).toFixed(0) + '% · 错 ' + (today.errors || 0) + ' · 断 ' + (today.disconnected || 0)) +
+        (sla == null ? '成功率 —' : 'SLA ' + sla.toFixed(1) + '%') +
+        ' · 服务端 ' + (today.upstream_faults || 0) + ' · 客户端 ' + (today.client_faults || 0) + ' · 429 ' + (today.rate_limited || 0)) +
       kpi('输出 Tokens', fmtNum(today.output_tokens) + delta(today.output_tokens || 0, yday.output_tokens),
         '输入 ' + fmtNum(today.input_tokens), 'ok') +
       kpi('缓存命中率', hitRate(today),
@@ -71,27 +74,126 @@ const Overview = (() => {
     el.innerHTML = html;
   }
 
-  // 健康时间线：120 个 30s 桶的双编码条（高度=相对请求量，颜色=最差结果）。
+  // 健康矩阵：行=模型（首行总计）× 列=1 分钟桶，双编码——颜色=桶内
+  // 最重归因（服务端失分>客户端/限流>全绿），深浅=请求量；空桶灰显，
+  // 「没流量」与「坏」不再同色。点格带 模型+时间窗 下钻请求页。
+  // 数据来自 /requests 原始行而非预聚合：窗口小（~8rpm × 60min），
+  // 客户端分桶比后端另开一套 ring buffer 便宜且口径可现场核对。
   function renderHealth() {
-    const tm = statsData && statsData.http && statsData.http.trend_minutes;
     const el = $('ovHealth');
-    if (!el || !tm || !tm.length) return;
-    const max = Math.max(1, ...tm.map(p => p.requests + p.errors));
+    if (!el) return;
+    const list = (matrixData && matrixData.requests) || [];
+    const endSlot = Math.floor(Date.now() / MX_BUCKET_MS);
+    const startSlot = endSlot - MX_BUCKETS;
+    // 行：总计 + 窗口内请求量 Top6 模型；更多模型并进「其他」一行。
+    const byModel = {};
+    list.forEach(e => {
+      const m = e.model || e.requested_model || '-';
+      (byModel[m] = byModel[m] || []).push(e);
+    });
+    const top = Object.keys(byModel).sort((a, b) => byModel[b].length - byModel[a].length);
+    const topSet = new Set(top.slice(0, 6));
+    const rows = [{ label: '全部', pick: () => true, model: '' }];
+    top.slice(0, 6).forEach(m => rows.push({ label: m, pick: e => (e.model || e.requested_model || '-') === m, model: m }));
+    if (top.length > 6) {
+      rows.push({ label: '其他 (' + (top.length - 6) + ')', pick: e => !topSet.has(e.model || e.requested_model || '-'), model: null });
+    }
     let html = '';
-    tm.forEach(p => {
-      const n = (p.requests || 0) + (p.errors || 0);
-      const cls = !n ? 'h-none' : p.errors ? 'h-err' : 'h-ok';
-      const h = n ? Math.max(18, Math.round(n / max * 100)) : 12;
-      html += '<i class="' + cls + '" style="height:' + h + '%" title="' +
-        fmtTime(p.at * 1000) + ' · ' + n + ' 请求' + (p.errors ? ' · ' + p.errors + ' 错误' : '') + '"></i>';
+    rows.forEach(row => {
+      // cells[i] = {n, sev, cli, up, lim}；sev 0绿 1琥珀（客户端/限流） 2红（服务端）。
+      const cells = new Array(MX_BUCKETS);
+      list.forEach(e => {
+        if (!row.pick(e)) return;
+        const slot = Math.floor(Date.parse(e.started_at) / MX_BUCKET_MS) - startSlot;
+        if (slot < 0 || slot >= MX_BUCKETS) return;
+        const c = cells[slot] || (cells[slot] = { n: 0, sev: 0, cli: 0, up: 0, lim: 0 });
+        c.n++;
+        const owner = errorOwner(e);
+        if (owner === 'upstream') { c.up++; c.sev = 2; }
+        else if (owner === 'client') { c.cli++; c.sev = Math.max(c.sev, 1); }
+        else if (owner === 'business_limited') { c.lim++; c.sev = Math.max(c.sev, 1); }
+      });
+      // cells 是稀疏数组（空桶无条目），Array.from 遍历含空位，
+      // 直接 cells.map+展开会把空位展开成 undefined 污染 Math.max。
+      const rowMax = Math.max(1, ...Array.from(cells, c => (c && c.n) || 0));
+      let cellsHtml = '';
+      for (let i = 0; i < MX_BUCKETS; i++) {
+        const c = cells[i];
+        const at = new Date((startSlot + i) * MX_BUCKET_MS);
+        if (!c) {
+          cellsHtml += '<i class="h-none" title="' + fmtTime(at) + ' · 无请求"></i>';
+          continue;
+        }
+        const cls = c.sev === 2 ? 'h-err' : c.sev === 1 ? 'h-warn' : 'h-ok';
+        // 深浅按行内峰值归一：每行各自呈现节奏，稀少量模型不被总计行压暗。
+        const alpha = (0.3 + 0.7 * (c.n / rowMax)).toFixed(2);
+        const until = new Date((startSlot + i + 1) * MX_BUCKET_MS);
+        cellsHtml += '<i class="' + cls + '" data-n="' + c.n + '" data-m="' + esc(row.model || '') +
+          '" data-s="' + at.toISOString() + '" data-u="' + until.toISOString() +
+          '" style="opacity:' + alpha + '" title="' + fmtTime(at) + ' · ' + c.n + ' 请求' +
+          (c.up ? ' · 服务端 ' + c.up : '') + (c.cli ? ' · 客户端 ' + c.cli : '') + (c.lim ? ' · 429 ' + c.lim : '') + '"></i>';
+      }
+      html += '<div class="mx-row"><span class="mx-label"' + (row.model ? ' data-mx="' + esc(row.model) + '"' : '') +
+        ' title="' + esc(row.label) + '">' + esc(row.label) + '</span><div class="mx-cells">' + cellsHtml + '</div></div>';
     });
     el.innerHTML = html;
     const cap = $('ovHealthCap');
     if (cap) {
-      const tot = tm.reduce((a, p) => a + (p.requests || 0), 0);
-      const errs = tm.reduce((a, p) => a + (p.errors || 0), 0);
-      cap.innerHTML = '<span>' + fmtTime(tm[0].at * 1000) + '</span><span>60 分钟 ' + tot + ' 请求 · ' + errs + ' 错误</span><span>' + fmtTime(tm[tm.length - 1].at * 1000) + '</span>';
+      const tot = { up: 0, cli: 0, lim: 0 };
+      list.forEach(e => {
+        const o = errorOwner(e);
+        if (o === 'upstream') tot.up++; else if (o === 'client') tot.cli++; else if (o === 'business_limited') tot.lim++;
+      });
+      const more = (matrixData && matrixData.total > list.length) ? '（窗口早于列表扫描上限 ' + list.length + ' 条，矩阵可能截断）' : '';
+      cap.innerHTML = '<span>' + fmtTime(startSlot * MX_BUCKET_MS) + '</span><span>60 分钟 ' + list.length + ' 请求 · 服务端 ' + tot.up + ' · 客户端 ' + tot.cli + ' · 429 ' + tot.lim + more + '</span><span>' + fmtTime(endSlot * MX_BUCKET_MS) + '</span>';
     }
+  }
+
+  // 判词：把闸门闩态、SLA 与告警压成一行结论（对齐 CPAMC hero verdict）——
+  // 好的面板先回答「要不要担心」，细节留给下面的卡片。
+  function renderVerdict() {
+    const el = $('ovVerdict');
+    if (!el) return;
+    if (!statsData && !usageData) { el.innerHTML = ''; return; }
+    const probs = [];
+    const g = statsData && statsData.gate;
+    if (g && g.latched) {
+      const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
+      probs.push(['err', '速率闸门闩中，冷却至 ' + until]);
+    }
+    const today = (usageData && usageData.snapshot && usageData.snapshot.today) || {};
+    const sla = slaRate(today);
+    if (sla != null && sla < 95) {
+      probs.push(['err', '今日服务端成功率 ' + sla.toFixed(1) + '%，失分 ' + (today.upstream_faults || 0) + ' 条']);
+    } else if (sla != null && sla < 99.5) {
+      probs.push(['warn', '今日服务端成功率 ' + sla.toFixed(1) + '%，有失分 ' + (today.upstream_faults || 0) + ' 条']);
+    }
+    const alertN = (($('ovAlertBody') || {}).innerHTML || '').split('err-banner').length - 1;
+    if (alertN > 0) probs.push(['warn', alertN + ' 条告警待处理']);
+    const active = (statsData && statsData.http && statsData.http.active_requests) || 0;
+    if (!probs.length) {
+      el.innerHTML = '<div class="verdict">运行平稳 · 今日 ' + fmtNum(today.requests || 0) +
+        ' 请求 · SLA ' + (sla == null ? '—' : sla.toFixed(1) + '%') + ' · 在途 ' + active + ' 条 · 无告警</div>';
+      return;
+    }
+    const level = probs.some(p => p[0] === 'err') ? 'v-err' : 'v-warn';
+    el.innerHTML = '<div class="verdict ' + level + '">' + probs.map(p => esc(p[1])).join('；') + '</div>';
+  }
+
+  // 双百分位行：耗时与上游 TTFB 的 p50→max 并排（对齐 sub2api ops 大屏）。
+  function renderLatency() {
+    const el = $('ovLatPanel');
+    if (!el) return;
+    const u = statsData && statsData.usage;
+    const dur = u && u.duration, tt = u && u.ttfb;
+    const row = (label, s) => (s && s.samples)
+      ? '<div class="mini"><span class="k">' + label + '</span><span class="v">p50 ' + fmtMs(s.p50) +
+        ' · p90 ' + fmtMs(s.p90) + ' · p95 ' + fmtMs(s.p95) + ' · p99 ' + fmtMs(s.p99) +
+        ' · max ' + fmtMs(s.max) + '（n=' + s.samples + '）</span></div>'
+      : '';
+    const html = row('总耗时', dur) + row('上游 TTFB', tt);
+    el.style.display = html ? '' : 'none';
+    $('ovLatBody').innerHTML = html;
   }
 
   function renderTrend() {
@@ -127,9 +229,9 @@ const Overview = (() => {
     // 429，是面板上最需要置顶的信号。
     const g = statsData && statsData.gate;
     if (g && g.latched) {
-      const until = g.limited_until ? fmtTime(g.limited_until) + '（' + fmtIn(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
+      const until = g.limited_until ? fmtTime(g.limited_until) + '（剩 ' + fmtInPrecise(Date.parse(g.limited_until) / 1000) + '）' : '时刻未知';
       rows += '<div class="err-banner">速率闸门闩中：上游限流冷却至 ' + esc(until) +
-        '，闩内请求本地快败 429（本次已累计 ' + (g.reject_latched_count || 0) + ' 条）</div>';
+        '，闩内请求本地快败 429（本次已快败 ' + (g.reject_latched_count || 0) + ' 条 · 滴灌放行 ' + (g.drip_count || 0) + ' 条）</div>';
     }
     const d = statusData;
     if (!d) { $('ovAlertPanel').style.display = rows ? '' : 'none'; $('ovAlertBody').innerHTML = rows; return; }
@@ -161,25 +263,47 @@ const Overview = (() => {
       statsData = await api('/stats');
       const v = statsData.version || '';
       if (v) $('versionTag').textContent = v;
-      renderKpis(); renderTrend(); renderHealth(); renderAlerts();
+      renderKpis(); renderTrend(); renderLatency(); renderAlerts(); renderVerdict();
     } catch (e) { /* 保留旧数据 */ }
   }
   async function loadUsage() {
-    try { usageData = await api('/usage'); renderKpis(); } catch (e) {}
+    try { usageData = await api('/usage'); renderKpis(); renderVerdict(); } catch (e) {}
   }
   async function loadQuota() {
     try { quotaData = await api('/quota'); renderQuota(); } catch (e) {}
   }
   async function loadStatus() {
-    try { statusData = await api('/status'); renderAlerts(); } catch (e) {}
+    try { statusData = await api('/status'); renderAlerts(); renderVerdict(); } catch (e) {}
+  }
+  // 矩阵数据走 /requests 原始行（since 钉住窗口起点，list 超过单页
+  // 上限时 caption 会标注截断）。
+  async function loadMatrix() {
+    try {
+      const since = new Date(Math.floor(Date.now() / MX_BUCKET_MS) * MX_BUCKET_MS - MX_BUCKETS * MX_BUCKET_MS).toISOString();
+      matrixData = await api('/requests?since=' + encodeURIComponent(since) + '&limit=500');
+      renderHealth();
+    } catch (e) { /* 保留旧矩阵 */ }
   }
 
-  function refresh() { loadStats(); loadActive(); }
+  function refresh() { loadStats(); loadActive(); loadMatrix(); }
   function refreshSlow() { loadUsage(); loadQuota(); loadStatus(); }
 
   // 侧栏端口标识：取自当前地址栏，面板换端口时自动跟随。
   const gp = $('gwPort');
   if (gp) gp.textContent = ':' + (location.port || '80');
+
+  // 矩阵下钻：点格 → 请求页钉住 模型+该分钟时间窗；点行首模型名 → 只筛模型。
+  document.getElementById('page-overview').addEventListener('click', e => {
+    const cell = e.target.closest('.mx-cells i[data-n]');
+    if (cell) {
+      const kv = { since: cell.dataset.s, until: cell.dataset.u };
+      if (cell.dataset.m) kv.model = cell.dataset.m;
+      jumpRequests(kv);
+      return;
+    }
+    const lbl = e.target.closest('.mx-label[data-mx]');
+    if (lbl) jumpRequests({ model: lbl.dataset.mx });
+  });
 
   Tabs.register('overview', () => { refresh(); refreshSlow(); });
   Polls.add('overview', refresh, 10000);

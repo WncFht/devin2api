@@ -11,16 +11,38 @@ const Requests = (() => {
   let prevDirs = null;     // 上轮渲染出的 dir 集（null=首轮/刚重置，不做新行闪显）
   let detailJson = '';     // 展开详情的上次响应 JSON，未变则不动 DOM
 
-  const FILTER_IDS = ['reqSearch', 'fStatus', 'fResult', 'fReqModel', 'fErrStage', 'fSince'];
+  const FILTER_IDS = ['reqSearch', 'fStatus', 'fResult', 'fReqModel', 'fErrStage', 'fSince', 'fSinceTS', 'fUntilTS'];
+
+  // ---------- 静默检测 ----------
+  // ActiveRequest 没有 last_activity 字段：跨轮询比较 client_bytes 增量，
+  // 10 分钟无新字节流出即标「静默」——等上游超时/上游挂死都会呈现这个形态。
+  const SILENCE_MS = 10 * 60000;
+  const silence = {}; // dir -> {bytes, t: 最后一次字节变化时刻}
+  function annotateSilence(list) {
+    const seen = {};
+    list.forEach(a => {
+      const s = silence[a.dir] || (silence[a.dir] = { bytes: 0, t: Date.now() });
+      if ((a.client_bytes || 0) > s.bytes) { s.bytes = a.client_bytes; s.t = Date.now(); }
+      a.silent_ms = Date.now() - s.t;
+      seen[a.dir] = 1;
+    });
+    for (const k in silence) if (!seen[k]) delete silence[k];
+  }
+  function silentTag(a) {
+    return (a.silent_ms || 0) >= SILENCE_MS
+      ? ' <span class="badge badge-high" title="≥10 分钟无字节流出，可能上游挂死或对端僵住">静默 ' + Math.floor(a.silent_ms / 60000) + 'm</span>'
+      : '';
+  }
 
   // ---------- 进行中请求 ----------
   function activeTable(list) {
+    annotateSilence(list);
     const stateMap = { waiting_upstream: '等上游', receiving_upstream: '收上游', streaming_client: '发客户端' };
     let html = '<table><thead><tr><th>目录</th><th>API</th><th>模型</th><th>阶段</th><th>已耗时</th><th>上游TTFB</th><th>已下发</th><th>队列/丢弃</th><th></th></tr></thead><tbody>';
     list.forEach(a => {
       html += '<tr><td class="mono">' + esc(a.dir) + '</td><td>' + esc(a.meta && a.meta.api || '-') + '</td>' +
         '<td class="mono">' + esc(a.model || '-') + '</td>' +
-        '<td>' + esc(stateMap[a.state] || a.state || '-') + '</td>' +
+        '<td>' + esc(stateMap[a.state] || a.state || '-') + silentTag(a) + '</td>' +
         '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
         '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
         '<td class="mono">' + fmtBytes(a.client_bytes) + '</td>' +
@@ -38,7 +60,7 @@ const Requests = (() => {
       '<tr class="pending-row" data-dir="' + qa(a.dir) + '">' +
       '<td><span class="pulse-dot"></span><span class="mono">' + esc(a.dir) + '</span></td>' +
       '<td>' + esc(a.meta && a.meta.api || '-') + '</td>' +
-      '<td><span class="rbadge r-muted">' + esc(stateMap[a.state] || a.state || '进行中') + '</span></td>' +
+      '<td><span class="rbadge r-muted">' + esc(stateMap[a.state] || a.state || '进行中') + '</span>' + silentTag(a) + '</td>' +
       '<td class="mono">' + esc(a.model || '-') + '</td>' +
       '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
       '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
@@ -52,6 +74,7 @@ const Requests = (() => {
     try {
       const d = await api('/requests/active');
       lastActive = d.active || [];
+      annotateSilence(lastActive);
       titleBadge(lastActive.length);
     } catch (e) { /* 静默 */ }
   }
@@ -92,6 +115,10 @@ const Requests = (() => {
       const ms = { '1h': 36e5, '24h': 864e5, '7d': 6048e5 }[since] || 0;
       if (ms) p.set('since', new Date(Date.now() - ms).toISOString());
     }
+    // 隐藏 ISO 窗字段由矩阵下钻写入，存在即优先于下拉相对窗。
+    const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
+    if (sts) p.set('since', sts);
+    if (uts) p.set('until', uts);
     return p;
   }
 
@@ -120,12 +147,13 @@ const Requests = (() => {
         const premature = e.premature_end_turn ? ' <span class="badge badge-medium" title="工具结果之后模型直接 end_turn，未继续调用工具">早停</span>' : '';
         const stream = e.stream ? ' <span class="badge badge-sse">SSE</span>' : '';
         const stage = e.error_stage ? '<div><span class="badge badge-high">' + esc(e.error_stage) + '</span></div>' : '';
+        const retry = e.retries ? ' <span class="badge badge-sse" title="上游重发 ' + e.retries + ' 次（attempt 文件与 retry_attempt 分界行见详情）">重试' + e.retries + '</span>' : '';
         const cache = e.cache_read_tokens ? '<div class="muted">缓存读 ' + fmtNum(e.cache_read_tokens) + '</div>' : '';
         const keyh = e.key_hash ? '<div class="muted" title="key hash">' + esc(e.key_hash) + '</div>' : '';
         html += '<tr data-dir="' + qa(e.dir) + '">' +
           '<td class="mono" title="' + esc(e.started_at || '') + '">' + fmtTime(e.started_at) + '</td>' +
           '<td>' + esc(e.api || '-') + '</td>' +
-          '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + stage + '</td>' +
+          '<td><span class="' + statusClass(e.status_code) + ' mono">' + e.status_code + '</span>' + resultBadge(e.result) + stream + retry + stage + '</td>' +
           '<td>' + esc(e.requested_model || '-') + resolved + mismatch + premature + '</td>' +
           '<td class="mono ' + secClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
           '<td class="mono ' + secClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
@@ -159,10 +187,15 @@ const Requests = (() => {
         ' · 更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       moreBtn.style.display = (list.length < data.total && reqLimit < 500) ? '' : 'none';
       let hint = '';
-      if (data.has_more) hint = '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
+      const sts = $('fSinceTS').value.trim(), uts = $('fUntilTS').value.trim();
+      if (sts || uts) {
+        hint = '时间窗锁定 ' + (sts ? fmtTime(sts) : '最早') + ' ~ ' + (uts ? fmtTime(uts) : '现在') +
+          '（矩阵下钻）· <span class="lnk" data-clrwin="1">清除窗口</span> ';
+      }
+      if (data.has_more) hint += '更早历史在扫描窗口之外，可缩小筛选或 grep index.jsonl。';
       if (reqLimit >= 500 && list.length < data.total) hint += ' 已达 500 条单页上限，用导出查看全部。';
       const hintEl = $('reqHint');
-      if (hint) { hintEl.style.display = ''; hintEl.textContent = hint; } else { hintEl.style.display = 'none'; }
+      if (hint) { hintEl.style.display = ''; hintEl.innerHTML = hint; } else { hintEl.style.display = 'none'; }
       if (expandedDir) fillDetail(expandedDir);
     } catch (e) {
       const h = $('reqHint');
@@ -212,7 +245,17 @@ const Requests = (() => {
       if (!banner && (m.status_code >= 400 || m.result === 'failed')) {
         banner = '<div class="err-banner">' + esc((m.status_code || '') + ' ' + (m.result || '')) + '</div>';
       }
-      let html = banner + '<div class="meta-grid">';
+      // 上游重发链路：meta.retry_attempts 与 04 的 retry_attempt 分界行
+      // 同源；每次重发的请求体在 03-devin-request.attemptN.json。
+      let chain = '';
+      if (m.retry_attempts && m.retry_attempts.length) {
+        const hops = ['<strong>attempt 1</strong>'];
+        m.retry_attempts.forEach(a => {
+          hops.push('attempt ' + a.attempt + '<span class="muted">（' + esc(a.cause || '-') + ' · +' + fmtMs(a.elapsed_ms) + '）</span>');
+        });
+        chain = '<div class="retry-chain">上游重发链路：' + hops.join(' → ') + '</div>';
+      }
+      let html = banner + chain + '<div class="meta-grid">';
       [['目录', d.dir], ['API', m.api], ['路径', (m.method || '') + ' ' + (m.path || '')], ['状态', (m.status_code || '-') + ' ' + (m.result || '')],
       ['流式', m.stream === true ? 'SSE' : m.stream === false ? '否' : null], ['提供方', m.provider],
       ['请求模型', m.requested_model], ['实际模型', m.model], ['响应模型', m.response_model],
@@ -314,6 +357,8 @@ const Requests = (() => {
       if (mg) { loadMerged(mg.dataset.merged); return; }
       const fl = e.target.closest('.file-link[data-f]');
       if (fl) { loadFile(fl.dataset.dir, fl.dataset.f); return; }
+      const cw = e.target.closest('[data-clrwin]');
+      if (cw) { $('fSinceTS').value = ''; $('fUntilTS').value = ''; resetAndLoad(); return; }
       const tr = e.target.closest('.req-table tbody tr[data-dir]');
       if (tr) toggleDetail(tr.dataset.dir);
     });
