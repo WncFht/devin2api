@@ -985,7 +985,13 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 		for stream.Receive() {
 			m := stream.Msg()
 			if s := m.GetStopReason().String(); !strings.HasSuffix(s, "UNSPECIFIED") {
-				stop = s[strings.LastIndex(s, "STOP_REASON_")+len("STOP_REASON_"):]
+				// 枚举 String() 对未知值可能返回纯数字——无 STOP_REASON_
+				// 前缀时切片会越界，退化用原始串。
+				if i := strings.LastIndex(s, "STOP_REASON_"); i >= 0 {
+					stop = s[i+len("STOP_REASON_"):]
+				} else {
+					stop = s
+				}
 			}
 			text.WriteString(m.GetDeltaText())
 			calls += len(m.GetDeltaToolCalls())
