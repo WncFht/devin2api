@@ -3,6 +3,8 @@
 package dashboard
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -293,10 +295,29 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.ReplaceAll(dashboardPage, "__VERSION__", v)))
 }
 
-// staticETags 缓存资源名 → ETag：内容随二进制固定，按名惰性算一次。
-// ETag+no-cache 代替 ?v= 版本戳之外给模块导入（静态路径注不进 ?v=）提供
-// 一致性保证——条件请求 304 使再验证零成本。
-var staticETags sync.Map
+// staticEntry 缓存资源名 → {etag, gzip 预压缩体}：内容随二进制固定，
+// 按名惰性算一次。ETag+no-cache 代替 ?v= 版本戳之外给模块导入（静态路径
+// 注不进 ?v=）提供一致性保证——条件请求 304 使再验证零成本。
+// gzip 只服务 ≥1KB 的文本资源：echarts 630KB 经 tailnet 远程访问面板时
+// 体积差距明显；小于阈值时压缩头开销比省的字节还多。
+type staticEntry struct {
+	etag string
+	gz   []byte // nil 表示不值得压缩
+}
+
+var staticEntries sync.Map
+
+func gzipBody(body []byte) []byte {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(body); err != nil {
+		return nil
+	}
+	if err := gw.Close(); err != nil {
+		return nil
+	}
+	return buf.Bytes()
+}
 
 // serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定。
 // private：响应需鉴权，不允许共享缓存存储；no-cache+ETag：每次加载再验证。
@@ -314,18 +335,28 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	etagV, ok := staticETags.Load(name)
-	etag, _ := etagV.(string)
+	entryV, ok := staticEntries.Load(name)
+	entry, _ := entryV.(*staticEntry)
 	if !ok {
 		sum := sha256.Sum256(body)
-		etag = `"` + hex.EncodeToString(sum[:16]) + `"`
-		staticETags.Store(name, etag)
+		entry = &staticEntry{etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+		if len(body) >= 1024 {
+			entry.gz = gzipBody(body)
+		}
+		staticEntries.Store(name, entry)
 	}
 	w.Header().Set("Content-Type", staticContentType(name))
 	w.Header().Set("Cache-Control", "private, no-cache")
-	w.Header().Set("ETag", etag)
-	if r.Header.Get("If-None-Match") == etag {
+	w.Header().Set("ETag", entry.etag)
+	// 响应体随客户端 Accept-Encoding 变体——无论 200 还是 304 都要声明。
+	w.Header().Set("Vary", "Accept-Encoding")
+	if r.Header.Get("If-None-Match") == entry.etag {
 		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if entry.gz != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(entry.gz)
 		return
 	}
 	_, _ = w.Write(body)

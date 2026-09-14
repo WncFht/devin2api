@@ -6,7 +6,9 @@
 <link rel="icon" href="data:,">
 <title>Devin API - 管理面板</title>
 <link rel="stylesheet" href="/panel/static/panel.css?v=__VERSION__">
-<script src="/panel/static/echarts.min.js?v=__VERSION__"></script>
+<!-- defer：echarts 只在模块渲染图表时才用，同步加载会阻塞 630KB 解析期的首屏；
+     defer 与 module 脚本同按文档顺序执行，先于文末 boot.js 落地。 -->
+<script defer src="/panel/static/echarts.min.js?v=__VERSION__"></script>
 </head>
 <body>
 
