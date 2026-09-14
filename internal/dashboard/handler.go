@@ -5,6 +5,7 @@ package dashboard
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"path"
@@ -291,7 +292,13 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(strings.ReplaceAll(dashboardPage, "__VERSION__", v)))
 }
 
-// serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定，按天缓存。
+// staticETags 缓存资源名 → ETag：内容随二进制固定，按名惰性算一次。
+// ETag+no-cache 代替 ?v= 版本戳之外给模块导入（静态路径注不进 ?v=）提供
+// 一致性保证——条件请求 304 使再验证零成本。
+var staticETags sync.Map
+
+// serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定。
+// private：响应需鉴权，不允许共享缓存存储；no-cache+ETag：每次加载再验证。
 func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
@@ -306,8 +313,20 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	etagV, ok := staticETags.Load(name)
+	etag, _ := etagV.(string)
+	if !ok {
+		sum := sha256.Sum256(body)
+		etag = `"` + hex.EncodeToString(sum[:16]) + `"`
+		staticETags.Store(name, etag)
+	}
 	w.Header().Set("Content-Type", staticContentType(name))
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	_, _ = w.Write(body)
 }
 
