@@ -69,7 +69,9 @@ type App struct {
 	// dashboard 是可选的管理面板处理器；nil 表示不启用面板。
 	dashboard DashboardRegistrar
 	// apiKey 是可选的 OpenAI 兼容接口访问密钥；为空则不校验。
-	apiKey string
+	// apiKeyMu 保护它：配置 reload 会运行时换值。
+	apiKeyMu sync.RWMutex
+	apiKey   string
 	// concurrency 限制同时处理的 /v1/* 请求数。
 	concurrency chan struct{}
 	// wsConns 限制下游 WebSocket 连接数。连接占用 fd+goroutine，与上游并发
@@ -112,7 +114,9 @@ func (application *App) Metrics() *obs.Metrics {
 
 // SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
 func (application *App) SetAPIKey(apiKey string) {
+	application.apiKeyMu.Lock()
 	application.apiKey = apiKey
+	application.apiKeyMu.Unlock()
 }
 
 // SetDashboard 注入管理面板处理器。
@@ -343,7 +347,10 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 // 支持标准 Authorization: Bearer <key> 与兼容头 X-Api-Key: <key>。
 func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if strings.TrimSpace(application.apiKey) == "" {
+		application.apiKeyMu.RLock()
+		expected := application.apiKey
+		application.apiKeyMu.RUnlock()
+		if strings.TrimSpace(expected) == "" {
 			next.ServeHTTP(writer, request)
 			return
 		}
@@ -367,7 +374,7 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		expectedHash := sha256.Sum256([]byte(application.apiKey))
+		expectedHash := sha256.Sum256([]byte(expected))
 		providedHash := sha256.Sum256([]byte(provided))
 		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
 			application.metrics.Reject()
@@ -571,6 +578,11 @@ func updateCompletionIdentity(completion *debuglog.Completion, messages llm.Requ
 // 模型却以无工具调用的 end_turn 结束。该形态结构上合法（可能真是
 // 最终答复），但实测存在模型声称继续动作后直接 EOS 的故障模式
 // （notes/archive/2026-09-12-premature-endturn.md），记入日志供统计真实频率。
+// prematureEndTurn 标记疑似提前收轮：末条输入是 tool_result、响应无
+// toolCall 却声明 STOP——形似「宣告要做事却直接结束」。这是候选信号
+// 而非判定：任务正常收官（末轮 tool_result → 总结文本 → STOP）形状完全
+// 相同，只能靠语义（宣告式 vs 总结式）或会话是否终结来区分，读
+// index.jsonl 计数时每个命中都要这样复核。
 func prematureEndTurn(messages llm.RequestMessages, message *llm.AssistantMessage) bool {
 	if message.StopReason != llm.StopReasonStop || len(messages.Messages) == 0 {
 		return false
