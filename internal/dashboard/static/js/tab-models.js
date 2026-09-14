@@ -100,7 +100,7 @@ function render(models) {
   const tbody = document.querySelector('#modelTable tbody');
   $('modelCount').textContent = '显示 ' + models.length + ' / 共 ' + allModels.length + ' 个';
   if (!models.length) {
-    morph(tbody, '<tr><td colspan="10" class="loading">无匹配模型</td></tr>');
+    morph(tbody, '<tr><td colspan="9" class="loading">无匹配模型</td></tr>');
     return;
   }
   let html = '';
@@ -111,7 +111,6 @@ function render(models) {
       '<td>' + (i + 1) + '</td>' +
       '<td><div><strong>' + esc(m.label || '-') + '</strong></div><div class="mono muted">' + esc(m.uid) + '</div></td>' +
       '<td>' + esc(m.provider || '-') + (m.api_provider && m.api_provider !== m.provider && m.api_provider !== 'UNSPECIFIED' ? '<div class="muted mono">' + esc(m.api_provider) + '</div>' : '') + '</td>' +
-      '<td>' + esc(m.cost_tier || '-') + '</td>' +
       '<td>' + multDisplay(m) + '</td>' +
       '<td>' + money(m.price_input) + '</td>' +
       '<td>' + money(m.price_cached) + '</td>' +
@@ -152,7 +151,7 @@ async function load() {
     fillSelect('fPricing', pricings);
     apply();
   } catch (e) {
-    morph(document.querySelector('#modelTable tbody'), '<tr><td colspan="10" class="loading">模型目录拉取失败: ' + esc(String(e)) + '</td></tr>');
+    morph(document.querySelector('#modelTable tbody'), '<tr><td colspan="9" class="loading">模型目录拉取失败: ' + esc(String(e)) + '</td></tr>');
   }
 }
 
