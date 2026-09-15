@@ -33,8 +33,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # -pgo=off：测试二进制不需要剖面引导优化——default.pgo 会让
+      # all-protos.connect.go（1.8MB 生成代码）按 PGO 变体再编一遍，
+      # 在低核 runner 上数倍放大编译时长。-timeout 兜底防挂死。
       - name: Test
-        run: go test -race ./...
+        run: go test -race -pgo=off -timeout 300s ./...
 
       - name: Build
         run: go build ./...
@@ -86,6 +89,9 @@ jobs:
   darwin-smoke:
     name: macOS smoke
     runs-on: macos-latest
+    # 冷构建缓存下 smoke 的 go build 要过一次 PGO 编译（生成代码大头），
+    # 给整 job 留 25 分钟护栏；正常应 <10 分钟。
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,7 +100,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Test
-        run: go test ./...
+        run: go test -pgo=off -timeout 300s ./...
 
       - name: Smoke without upstream
         run: bash scripts/smoke.sh --no-upstream --config config.example.yaml --port 18099
