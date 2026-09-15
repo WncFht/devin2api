@@ -32,6 +32,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/modelreg"
 )
 
 // version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
@@ -255,6 +256,15 @@ func main() {
 		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
 	})
 	ccPanel.SetTokenStore(tokenStore)
+	// 模型注册表：models.json 落状态目录根；/v1 准入（停用/重定向）与
+	// 移植面板的注册表页共用同一仓。
+	modelStore, err := modelreg.New(absoluteStateDir)
+	if err != nil {
+		slog.Error("load model registry failed", "error", err)
+		os.Exit(1)
+	}
+	application.SetModelRegistry(modelStore)
+	ccPanel.SetModelRegistry(modelStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())

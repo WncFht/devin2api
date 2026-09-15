@@ -350,17 +350,11 @@ func (h *Handler) channelFilterOptions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// channelModelNames 返回合成渠道对外的模型名表：别名 ∪ 上游目录 uid。
+// channelModelNames 返回合成渠道对外的模型名表：目录 ∪ 别名 ∪ 注册表 ∪
+// 流量中见过的模型名（与注册表页同一并集——注册表项可能创造目录外的
+// 对外名字，流量名则覆盖未登记的直通名）。
 func (h *Handler) channelModelNames(r *http.Request) []string {
-	set := map[string]struct{}{}
-	if h.aliasesFunc != nil {
-		for name := range h.aliasesFunc() {
-			set[name] = struct{}{}
-		}
-	}
-	for _, uid := range h.panel.ModelUIDs(r.Context()) {
-		set[uid] = struct{}{}
-	}
+	set := h.modelNamesUnion(r)
 	out := make([]string, 0, len(set))
 	for m := range set {
 		out = append(out, m)

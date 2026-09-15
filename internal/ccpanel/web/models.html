@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/web/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.json">
+  <meta name="theme-color" content="#3b82f6">
+  <title data-i18n="models.title">模型注册表 - Claude Code & Codex Proxy</title>
+  <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/channels.css?v=__VERSION__">
+  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/models.js?v=__VERSION__"></script>
+</head>
+<body>
+  <div class="app-container">
+    <main class="main-content">
+      <div class="content-area">
+        <section class="glass-card mb-6">
+          <div class="settings-save-actions" style="justify-content: flex-start; gap: var(--space-2); flex-wrap: wrap;">
+            <input id="models-filter" type="search" class="form-input" style="max-width: 220px;"
+              data-i18n-placeholder="models.filterPlaceholder" placeholder="筛选模型名" spellcheck="false">
+            <input id="new-model-name" class="form-input" style="max-width: 260px;"
+              data-i18n-placeholder="models.add.namePlaceholder" placeholder="对外模型名" spellcheck="false">
+            <input id="new-model-target" class="form-input" style="max-width: 260px;" list="models-target-list"
+              data-i18n-placeholder="models.add.targetPlaceholder" placeholder="重定向目标（可选）" spellcheck="false">
+            <button id="add-model-btn" type="button" class="btn btn-primary" data-i18n="models.add.button">+ 添加模型</button>
+          </div>
+          <div class="table-container settings-table-container mobile-card-table-container">
+            <table class="modern-table settings-table mobile-card-table">
+              <thead>
+                <tr>
+                  <th data-i18n="models.col.model">模型</th>
+                  <th data-i18n="models.col.source">来源</th>
+                  <th data-i18n="models.col.enabled">启用</th>
+                  <th data-i18n="models.col.redirect">重定向到</th>
+                  <th data-i18n="models.col.resolved">实际解析</th>
+                  <th data-i18n="common.actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="models-tbody"></tbody>
+            </table>
+            <p id="models-empty" class="settings-multimodal-fallback-summary" data-i18n="models.empty" hidden>暂无模型</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <datalist id="models-target-list"></datalist>
+</body>
+</html>

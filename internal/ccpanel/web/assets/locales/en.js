@@ -68,6 +68,7 @@ window.I18N_LOCALES['en'] = {
   'nav.overview': 'Overview',
   'nav.channels': 'Channels',
   'nav.tokens': 'API Tokens',
+  'nav.models': 'Model Registry',
   'nav.stats': 'Statistics',
   'nav.trend': 'Trends',
   'nav.logs': 'Logs',
@@ -2372,5 +2373,27 @@ window.I18N_LOCALES['en'] = {
   'channels.management.status.credential_invalid': 'Management credential is invalid',
   'channels.management.status.credential_forbidden': 'The current Sub2API Pro role cannot check in',
   'channels.management.status.uncertain': 'Result not confirmed',
-  'channels.management.status.skipped_disabled': 'Check-in is off'
+  'channels.management.status.skipped_disabled': 'Check-in is off',
+
+  // ============================================================
+  // Model Registry
+  // ============================================================
+  'models.title': 'Model Registry - Claude Code & Codex Proxy',
+  'models.filterPlaceholder': 'Filter model names',
+  'models.add.namePlaceholder': 'Public model name',
+  'models.add.targetPlaceholder': 'Redirect target (optional)',
+  'models.add.button': '+ Add Model',
+  'models.col.model': 'Model',
+  'models.col.source': 'Source',
+  'models.col.enabled': 'Enabled',
+  'models.col.redirect': 'Redirect To',
+  'models.col.resolved': 'Resolved',
+  'models.empty': 'No models',
+  'models.action.enable': 'Enable model',
+  'models.action.disable': 'Disable model',
+  'models.action.reset': 'Reset',
+  'models.msg.saved': 'Saved',
+  'models.msg.saveFailed': 'Save failed',
+  'models.msg.loadFailed': 'Failed to load models',
+  'models.msg.enterName': 'Please enter a model name'
 };

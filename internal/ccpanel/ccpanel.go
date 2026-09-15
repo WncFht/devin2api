@@ -15,6 +15,7 @@ import (
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
 )
 
@@ -41,6 +42,8 @@ type Handler struct {
 	aliasesFunc func() map[string]string
 	// tokens 是下游令牌仓；nil 时 api_token 登录与令牌端点不可用。
 	tokens *authtoken.Store
+	// models 是模型注册表仓；nil 时 /admin/model-registry 返回 503。
+	models *modelreg.Store
 
 	versionMu sync.RWMutex
 	version   string
@@ -90,6 +93,12 @@ func (h *Handler) SetTokenStore(s *authtoken.Store) {
 	h.tokens = s
 }
 
+// SetModelRegistry 注入模型注册表仓（/admin/model-registry 与渠道模型
+// 清单投影用）。
+func (h *Handler) SetModelRegistry(s *modelreg.Store) {
+	h.models = s
+}
+
 // Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为
 // 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
 func (h *Handler) Register(mux interface {
@@ -137,6 +146,9 @@ func (h *Handler) Register(mux interface {
 	mux.Put("/admin/auth-tokens/{id}", h.withAuth(h.adminUpdateAuthToken))
 	mux.Delete("/admin/auth-tokens/{id}", h.withAuth(h.adminDeleteAuthToken))
 	mux.Get("/admin/models", h.withAuth(h.dashboardModels))
+	mux.Get("/admin/model-registry", h.withAuth(h.adminModelRegistry))
+	mux.Put("/admin/model-registry", h.withAuth(h.adminPutModel))
+	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
 	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))
 }

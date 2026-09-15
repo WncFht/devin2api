@@ -33,6 +33,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/WncFht/devin2api/internal/randid"
 )
@@ -84,6 +85,9 @@ type App struct {
 	// tokens 是下游 auth token 仓（移植面板的多 key 体系）；nil 表示未启用。
 	// master key 与有效 token 都能过 /v1 鉴权；token 另有并发/模型/费用准入。
 	tokens *authtoken.Store
+	// models 是模型注册表覆盖层（停用开关与重定向）；nil 表示无注册表，
+	// 模型名直通 adapter 别名解析。
+	models *modelreg.Store
 	// tokenCostFn 把一次请求的 token 用量折成美元（目录价口径），
 	// 供 token 费用窗口记账；nil 时成本记 0。
 	tokenCostFn func(model string, input, output, cacheRead, cacheWrite int64) float64
@@ -135,6 +139,11 @@ func (application *App) Metrics() *obs.Metrics {
 func (application *App) SetAuthTokens(tokens *authtoken.Store, costFn func(model string, input, output, cacheRead, cacheWrite int64) float64) {
 	application.tokens = tokens
 	application.tokenCostFn = costFn
+}
+
+// SetModelRegistry 注入模型注册表；应在 Router 之前调用。
+func (application *App) SetModelRegistry(models *modelreg.Store) {
+	application.models = models
 }
 
 // SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
@@ -795,6 +804,23 @@ func (application *App) createCompletion(
 			windowName := map[string]string{"daily": "Daily", "monthly": "Monthly", "total": "Total"}[window]
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
 			return
+		}
+	}
+	// 模型注册表准入（ccLoad 渠道 ModelEntry 同义，本服务为全局覆盖层）：
+	// 停用按 404 收尾——对客户端的语义是本网关不提供该模型；redirect_model
+	// 改写请求模型名，下游走 adapter 别名解析落到最终上游 uid。
+	// RequestedModel 保持客户端原名，index.jsonl 同时留两段身份。
+	// 不设 tokenBlocked：请求本身合法，按失败回写令牌统计（ccLoad 同口径）。
+	if application.models != nil {
+		if entry, ok := application.models.Lookup(messages.Model); ok {
+			if entry.Disabled {
+				completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageModelDisabled, http.StatusNotFound, fmt.Errorf("model '%s' is disabled", messages.Model))
+				return
+			}
+			if entry.RedirectModel != "" {
+				messages.Model = entry.RedirectModel
+				completion.Model = entry.RedirectModel
+			}
 		}
 	}
 	ctx := debuglog.WithRecorder(reqCtx, recorder)

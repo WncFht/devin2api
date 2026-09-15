@@ -71,6 +71,9 @@ const (
 	// ErrStageTokenLimit 是下游令牌准入拒绝（并发/模型白名单/费用限额），
 	// 请求未触达上游；与管线前拒绝不同——它发生在读体解码后，留有调试目录。
 	ErrStageTokenLimit = "token_limit"
+	// ErrStageModelDisabled 是模型注册表准入拒绝（模型被停用），
+	// 请求未触达上游；同样发生在解码后，留有调试目录。
+	ErrStageModelDisabled = "model_disabled"
 )
 
 // devinRequestStageStem 是上游请求文件名的公共词干：首个请求是

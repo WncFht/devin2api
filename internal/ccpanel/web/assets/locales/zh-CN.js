@@ -68,6 +68,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'nav.overview': '概览',
   'nav.channels': '渠道管理',
   'nav.tokens': 'API令牌',
+  'nav.models': '模型注册表',
   'nav.stats': '调用统计',
   'nav.trend': '请求趋势',
   'nav.logs': '日志',
@@ -2372,5 +2373,27 @@ window.I18N_LOCALES['zh-CN'] = {
   'channels.management.status.credential_invalid': '管理凭据已失效',
   'channels.management.status.credential_forbidden': '当前 Sub2API Pro 角色无签到权限',
   'channels.management.status.uncertain': '结果未确认',
-  'channels.management.status.skipped_disabled': '签到已关闭'
+  'channels.management.status.skipped_disabled': '签到已关闭',
+
+  // ============================================================
+  // 模型注册表
+  // ============================================================
+  'models.title': '模型注册表 - Claude Code & Codex Proxy',
+  'models.filterPlaceholder': '筛选模型名',
+  'models.add.namePlaceholder': '对外模型名',
+  'models.add.targetPlaceholder': '重定向目标（可选）',
+  'models.add.button': '+ 添加模型',
+  'models.col.model': '模型',
+  'models.col.source': '来源',
+  'models.col.enabled': '启用',
+  'models.col.redirect': '重定向到',
+  'models.col.resolved': '实际解析',
+  'models.empty': '暂无模型',
+  'models.action.enable': '启用模型',
+  'models.action.disable': '停用模型',
+  'models.action.reset': '重置',
+  'models.msg.saved': '已保存',
+  'models.msg.saveFailed': '保存失败',
+  'models.msg.loadFailed': '加载模型失败',
+  'models.msg.enterName': '请输入模型名'
 };
