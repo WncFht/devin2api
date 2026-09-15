@@ -107,6 +107,9 @@ var secretKeyNames = []string{
 	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
 	"sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password",
 	"clientsecret", "devicefingerprint",
+	// modelAssignmentJwt 是 AssignModel 按请求签发的 router jwt，03 请求
+	// 体里的凭证级字段；归一化形态（去 _/-、小写）列入名单。
+	"modelassignmentjwt",
 }
 
 // keyNormalizer 归一化 JSON 键名：剔除 '_' 与 '-'，配合小写折叠让
