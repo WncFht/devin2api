@@ -8,7 +8,10 @@
 set -u
 
 INTERVAL="${1:-30}"
-OUT="${2:-quota-probe.jsonl}"
+# 默认落 outputs/ 下带时间戳——与 .gitignore 的 /outputs/quota-probe-*.jsonl
+# 对齐，仓根跑默认参数不会留下未忽略的探测文件。
+OUT="${2:-outputs/quota-probe-$(date +%Y%m%d-%H%M%S).jsonl}"
+mkdir -p "$(dirname "$OUT")"
 CONF="${3:-$HOME/Library/Application Support/devin-2api/config.yaml}"
 TOKEN=$(grep -E '^[[:space:]]+token:' "$CONF" | head -1 | sed 's/.*token:[[:space:]]*//')
 URL='https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus'
