@@ -683,6 +683,15 @@ func (recorder *Recorder) NoteUpstreamLatency() {
 	recorder.firstUpstreamMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
 }
 
+// FirstUpstreamMS 返回首个上游事件距请求开始的毫秒数；未发生返回负值。
+// 供令牌统计回写 TTFB（authtoken.AddResult 的 FirstByteSec）。
+func (recorder *Recorder) FirstUpstreamMS() int64 {
+	if recorder == nil {
+		return -1
+	}
+	return recorder.firstUpstreamMS.Load()
+}
+
 // NoteClientLatency 记录首个下发给客户端的内容字节的相对毫秒数。
 // SSE 保活注释不计——它是链路保活不是内容。
 func (recorder *Recorder) NoteClientLatency() {

@@ -368,10 +368,12 @@ type listIndexCache struct {
 }
 
 // ListRequests 返回 index.jsonl 中最新 limit 条请求摘要（新的在前）。
+// limit<0 表示不限条数，返回尾部窗口内全部命中——调用方自行分页切片
+// （ccpanel 的二级筛选需要在全量命中上做才数得出总数）。
 // 索引在目录被清理后仍保留记录，因此列表是完整历史，Detail 才可能 404。
 // 结构化筛选走 filter；HasMore 提示更早历史只存在于原文件中。
 func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult {
-	if manager == nil || manager.root == "" || limit <= 0 {
+	if manager == nil || manager.root == "" || limit == 0 {
 		return ListResult{}
 	}
 	path := filepath.Join(manager.root, IndexFile)
@@ -403,7 +405,12 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	cached := manager.listCache
 	manager.listCacheMu.Unlock()
 
-	entries := make([]IndexEntry, 0, limit)
+	// 预分配上限取缓存行数：limit<0（全量）或大 limit 都不会超配。
+	capHint := limit
+	if capHint < 0 || capHint > len(cached.entries) {
+		capHint = len(cached.entries)
+	}
+	entries := make([]IndexEntry, 0, capHint)
 	conds := parseStatusExpr(filter.Status)
 	// q 筛选的 needle 与大小写形态对全循环不变——先归一再扫，
 	// 免得每条候选行各做一次 ToLower(f.Query)。
@@ -411,7 +418,7 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 	// scannedAll 为 false 表示窗口内还有没扫到的行（limit 用尽），更早历史必然存在。
 	scannedAll := true
 	for i := len(cached.entries) - 1; i >= 0; i-- {
-		if len(entries) >= limit {
+		if limit > 0 && len(entries) >= limit {
 			scannedAll = false
 			break
 		}
@@ -426,6 +433,42 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 		result.IndexTailStart = cached.entries[0].StartedAt
 	}
 	return result
+}
+
+// FindDirByStartedAt 按请求开始时刻（epoch 毫秒）反查请求目录名。
+// 目录名只有秒级精度（本地时区 20060102-150405 前缀 + 同秒 -NN 后缀），
+// 同秒多个候选经各自 meta.json 的 started_at 精确比对消歧。
+// 供 ccpanel 把日志行 id（started_at 毫秒戳）映射回调试目录。
+func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
+	if manager == nil || manager.root == "" {
+		return "", false
+	}
+	base := time.UnixMilli(ms).Format("20060102-150405")
+	entries, err := os.ReadDir(manager.root)
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, base) || !requestDirPattern.MatchString(name) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(manager.root, name, MetaFile))
+		if err != nil {
+			continue
+		}
+		var meta struct {
+			StartedAt string `json:"started_at"`
+		}
+		if json.Unmarshal(data, &meta) != nil {
+			continue
+		}
+		started, err := time.Parse(time.RFC3339Nano, meta.StartedAt)
+		if err == nil && started.UnixMilli() == ms {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // processLogTailBytes 是进程日志单次返回的尾部上限。

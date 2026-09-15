@@ -68,6 +68,9 @@ const (
 	ErrStageDevinTransport = "devin_transport"
 	// ErrStageRateGate 是本地速率闸门快败，请求未触达上游。
 	ErrStageRateGate = "rate_gate"
+	// ErrStageTokenLimit 是下游令牌准入拒绝（并发/模型白名单/费用限额），
+	// 请求未触达上游；与管线前拒绝不同——它发生在读体解码后，留有调试目录。
+	ErrStageTokenLimit = "token_limit"
 )
 
 // devinRequestStageStem 是上游请求文件名的公共词干：首个请求是
