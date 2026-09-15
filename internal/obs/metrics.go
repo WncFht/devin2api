@@ -264,8 +264,12 @@ func (m *Metrics) rates() map[string]any {
 	var window uint64
 	var minAt int64
 	perMinute := map[int64]uint64{}
+	// 槽位复用不即时逐出：桶只在新请求落到同槽位时被覆盖，>60min 空闲后
+	// 环里全是旧数据——与 trend() 同口径加窗口谓词，过窗桶不计入
+	// current/peak/avg，否则空闲代理会一直报幻影 RPM。
+	windowStart := (now/trendBucketSecs - trendBuckets + 1) * trendBucketSecs
 	for _, bucket := range snapshot {
-		if bucket.at == 0 {
+		if bucket.at == 0 || bucket.at < windowStart || bucket.at > now {
 			continue
 		}
 		window += bucket.requests
