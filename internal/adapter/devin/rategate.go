@@ -76,13 +76,13 @@ type rateGate struct {
 	waiters       int // 当前睡到下一窗口的请求数（闩内快败不进此列）
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
-	events    [GateEventCap]GateEvent
+	events    [gateEventCap]GateEvent
 	eventHead int
 	eventSize int
 }
 
-// GateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
-const GateEventCap = 64
+// gateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
+const gateEventCap = 64
 
 // 闩迁移事件种类：latched（上游限流上闩/延闩）、released（成功帧提前
 // 解闩）、expired（闩到期自然失效）、restored（重启从 statePath 恢复
@@ -133,8 +133,8 @@ func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
 		ev.Until = &u
 	}
 	gate.events[gate.eventHead] = ev
-	gate.eventHead = (gate.eventHead + 1) % GateEventCap
-	if gate.eventSize < GateEventCap {
+	gate.eventHead = (gate.eventHead + 1) % gateEventCap
+	if gate.eventSize < gateEventCap {
 		gate.eventSize++
 	}
 }
@@ -344,7 +344,7 @@ func (gate *rateGate) stats() GateStats {
 		stats.WindowNext = &next
 	}
 	for i := 1; i <= gate.eventSize; i++ {
-		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+GateEventCap)%GateEventCap])
+		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap])
 	}
 	if !gate.limitedUntil.IsZero() {
 		until := gate.limitedUntil
@@ -373,7 +373,7 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 	}
 	// 事件环按写入序（旧到新）重放——stats.Events 的新在前序是展示序。
 	for i := gate.eventSize; i >= 1; i-- {
-		ev := gate.events[(gate.eventHead-i+GateEventCap)%GateEventCap]
+		ev := gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap]
 		until := ev.At
 		if ev.Until != nil {
 			until = *ev.Until
