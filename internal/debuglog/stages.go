@@ -35,6 +35,9 @@ const (
 	IndexFile = "index.jsonl"
 	// StderrFile 是进程 stderr 日志（slog 行），部署脚本负责重定向写入。
 	StderrFile = "stderr.log"
+	// BindFailureFile 记录最近一次 listen 绑定失败（reuseport 交接争抢等），
+	// main 侧写、Stats 侧读，面板能直接看到「上次为什么没绑上」。
+	BindFailureFile = "bind-failure.json"
 )
 
 // 错误阶段名是另一条轴的跨包契约：WriteError/writeLoggedError 的 stage

@@ -418,8 +418,14 @@ func (manager *Manager) Stats() map[string]any {
 	if info, err := os.Stat(filepath.Join(manager.root, IndexFile)); err == nil {
 		indexBytes = info.Size()
 	}
+	// bind-failure.json 由 main 侧在 listen 绑定失败时写入；缺失/损坏
+	// 都不透出——面板只需知道「最近一次为什么没绑上」，没有就是没发生过。
+	var bindFailure json.RawMessage
+	if data, err := os.ReadFile(filepath.Join(manager.root, BindFailureFile)); err == nil && json.Valid(data) {
+		bindFailure = data
+	}
 	policy := manager.Policy()
-	return map[string]any{
+	stats := map[string]any{
 		"log_root":            manager.root,
 		"enabled":             manager.enabled.Load(),
 		"active_request_dirs": active,
@@ -433,6 +439,10 @@ func (manager *Manager) Stats() map[string]any {
 		"payload_hours":       policy.PayloadHours,
 		"keep_error_dirs":     policy.KeepErrorDirs,
 	}
+	if bindFailure != nil {
+		stats["last_bind_failure"] = bindFailure
+	}
+	return stats
 }
 
 // UsageStats 返回 index.jsonl 的聚合快照（今日/窗口累计、按模型、按 key、

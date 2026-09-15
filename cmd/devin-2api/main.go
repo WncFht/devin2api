@@ -423,12 +423,13 @@ func listenURL(listen string) string {
 	return "http://" + host + ":" + port
 }
 
-// drainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=330、
-// systemd TimeoutStopSec=330，留 ~30s 给 Close 与进程退出。重叠交接部署下
-// 排空不再阻塞新请求，上限按在途时长分布取（实测 p99≈163s）。注意这里不用
+// drainTimeout 是优雅退出排空在途请求的最长等待：plist ExitTimeOut=660、
+// systemd TimeoutStopSec=660，留 ~60s 给 Close 与进程退出。重叠交接部署下
+// 排空不再阻塞新请求，上限按在途时长分布取（实测 p99≈163s，但 CC 长会话
+// 尾部分布远超该值——300s 窗口内仍有真实请求被硬切）。注意这里不用
 // http.Server.Shutdown——它先关 listener 再排空，排空期所有新连接都被内核
 // refused；非交接场景改为 listener 保持开启、/v1/* 由应用层快速 503。
-const drainTimeout = 300 * time.Second
+const drainTimeout = 600 * time.Second
 
 // reusePortEnabled 报告是否启用 SO_REUSEPORT 重叠交接：开启后多个进程可
 // 绑定同一监听地址，deploy 先起桥接进程入队再排空旧实例，做到零停机重启。
@@ -457,6 +458,11 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 
 	slog.Info("shutdown: draining in-flight requests", "timeout", drainTimeout)
 	application.BeginDrain()
+	// 关闭 keep-alive：此后的响应都带 Connection: close，客户端收完
+	// 当前响应后新开连接。reuseport 交接时新连接落到接替实例——不开
+	// 的话，已 accept 的 keep-alive 连接会继续打回正在排空的旧实例，
+	// 每个复用请求都吃一次 draining 503。在途连接不受影响照常跑完。
+	server.SetKeepAlivesEnabled(false)
 	// 交接语义的关键：reuseport 组内 macOS 按绑定先后派发新连接、Linux 按
 	// 哈希分流——无论哪种，旧实例都必须立刻关闭 listener，新连接才会全部
 	// 落到接替者（deploy 预置的交接进程）身上；开着只会白收连接再发 503。
@@ -495,16 +501,82 @@ func listenConfigured(listen string) (net.Listener, error) {
 }
 
 // reportListenFailure 处理绑定失败并退出：EADDRINUSE 时探活占用者的
-// /healthz，把「谁在占端口、跑哪版、是否正在排空」写进日志——
-// launchd KeepAlive 每 5s 拉起一次的 bind 冲突循环里，这行日志是
-// 唯一能区分「旧实例在排空」「孤儿/手动实例占坑」「非本服务占用」的信号。
-func reportListenFailure(listen string, err error) {
+// /healthz，把「谁在占端口、跑哪版、是否正在排空」写进日志并落
+// bind-failure.json 标记——launchd KeepAlive 每 5s 拉起一次的 bind
+// 冲突循环里，这行日志是唯一能区分「旧实例在排空」「孤儿/手动实例
+// 占坑」「非本服务占用」的信号，标记文件把同一件事留成机器可查的
+// 持久痕迹（面板 stats 透出）。
+func reportListenFailure(listen, logRoot string, err error) {
 	if errors.Is(err, syscall.EADDRINUSE) {
-		slog.Error("port already in use", "addr", listen, "holder", probeExistingInstance(listen))
+		holder := probeExistingInstance(listen)
+		slog.Error("port already in use", "addr", listen, "holder", holder)
+		recordBindFailure(logRoot, listen, holder)
 	} else {
 		slog.Error("listen failed", "addr", listen, "error", err)
 	}
 	os.Exit(1)
+}
+
+// bindFailureFile 是 EADDRINUSE 退出前落在 logs/ 的冲突标记名。
+const bindFailureFile = "bind-failure.json"
+
+// bindFailureMarker 记录一轮端口冲突的累计形态：count 跨失败累加，
+// holder 取最新一次探活结果，recovered_at 标记「恢复告警已发到哪」。
+type bindFailureMarker struct {
+	FirstAt     string `json:"first_at"`
+	LastAt      string `json:"last_at"`
+	Count       int    `json:"count"`
+	Addr        string `json:"addr"`
+	Holder      string `json:"holder"`
+	RecoveredAt string `json:"recovered_at,omitempty"`
+}
+
+// recordBindFailure 读改写 bind-failure.json：每失败一次 count 加一。
+// 文件只增不删——恢复后的汇报与清理由成功启动侧负责。
+func recordBindFailure(logRoot, listen, holder string) {
+	path := filepath.Join(logRoot, bindFailureFile)
+	var marker bindFailureMarker
+	if raw, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(raw, &marker)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if marker.Count == 0 {
+		marker.FirstAt = now
+	}
+	marker.LastAt = now
+	marker.Count++
+	marker.Addr = listen
+	marker.Holder = holder
+	if raw, err := json.Marshal(marker); err == nil {
+		_ = os.WriteFile(path, raw, 0o644)
+	}
+}
+
+// warnIfBindContentionRecovered 在成功绑定后读冲突标记：上一轮
+// EADDRINUSE 循环（KeepAlive 拉起 vs 旧实例排空）若发生过，补一条
+// 恢复告警把「冲突已解除、共失败几次、谁占的坑」并进 stderr.log。
+// recovered_at 记忆已汇报到的 last_at：只在新冲突晚于上次汇报时
+// 再警，避免每次重启都复读旧冲突。
+func warnIfBindContentionRecovered(logRoot string) {
+	path := filepath.Join(logRoot, bindFailureFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var marker bindFailureMarker
+	if err := json.Unmarshal(raw, &marker); err != nil || marker.Count == 0 {
+		return
+	}
+	if marker.RecoveredAt != "" && marker.LastAt <= marker.RecoveredAt {
+		return
+	}
+	slog.Warn("port contention recovered",
+		"addr", marker.Addr, "holder", marker.Holder,
+		"count", marker.Count, "first_at", marker.FirstAt, "last_at", marker.LastAt)
+	marker.RecoveredAt = time.Now().UTC().Format(time.RFC3339)
+	if raw, err := json.Marshal(marker); err == nil {
+		_ = os.WriteFile(path, raw, 0o644)
+	}
 }
 
 // probeExistingInstance 查询占用监听端口的进程是否为本服务实例。
