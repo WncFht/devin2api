@@ -35,17 +35,21 @@ const defaultBaseURL = "https://server.codeium.com"
 var marshal = protojson.MarshalOptions{EmitUnpopulated: false, UseEnumNumbers: false}
 
 // commands 是子命令分派表；usage() 的子命令列表须与它保持一致。
-var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServiceClient, string, []string) error{
-	"configs": cmdConfigs,
-	"status":  cmdStatus,
-	"assign":  cmdAssign,
-	"chat":    cmdChat,
-	"replay":  cmdReplay,
-	"hist":    cmdHist,
-	"rerun":   cmdRerun,
-	"bigctx":  cmdBigctx,
-	"misc":    cmdMisc,
-	"edge":    cmdEdge,
+// 第二个客户端参数是 LanguageServerService（GetSystemPromptAndTools /
+// GetMcpServerStates / GetAllSkills 所在服务），只有 registry 使用。
+var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServiceClient, devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, string, []string) error{
+	"configs":   cmdConfigs,
+	"status":    cmdStatus,
+	"assign":    cmdAssign,
+	"chat":      cmdChat,
+	"replay":    cmdReplay,
+	"hist":      cmdHist,
+	"rerun":     cmdRerun,
+	"bigctx":    cmdBigctx,
+	"misc":      cmdMisc,
+	"edge":      cmdEdge,
+	"websearch": cmdWebsearch,
+	"registry":  cmdRegistry,
 }
 
 // 客户端身份三元组在 main 里从 config 的 devin.client_* 解析一次
@@ -98,13 +102,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
 	}
-	client := devinprotoconnect.NewApiServerServiceClient(
-		&http.Client{Transport: upstream.NewBasicAuthTransportFunc(transport, func() string { return token })},
-		baseURL)
+	httpClient := &http.Client{Transport: upstream.NewBasicAuthTransportFunc(transport, func() string { return token })}
+	client := devinprotoconnect.NewApiServerServiceClient(httpClient, baseURL)
+	lsClient := devinprotoconnect.NewExaLanguageServerPb_LanguageServerServiceClient(httpClient, baseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	if err := run(ctx, client, token, os.Args[2:]); err != nil {
+	if err := run(ctx, client, lsClient, token, os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
 	}
@@ -172,7 +176,10 @@ func usage() {
   edge <case> [flags]         targeted edge-case histories (case names in source switch)
     -model uid                chat_model_uid (default swe-2-max)
     -image-file path          attach a real png instead of the tiny 1x1 blue png
-    -prompt text              user prompt text for prompt-driven cases (e.g. user-image-prompt)`)
+    -prompt text              user prompt text for prompt-driven cases (e.g. user-image-prompt)
+  registry [flags]            GetSystemPromptAndTools + GetMcpServerStates + GetAllSkills
+    -planner-type name        conversational|conversational_v2 (default: both unset and conversational)
+    -skip-mcp-skills          skip GetMcpServerStates/GetAllSkills calls`)
 }
 
 // resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
@@ -278,7 +285,7 @@ func toolCall(id, name, argsJSON string) *devinproto.ExaCodeiumCommonPb_ChatTool
 
 // ---- configs ----
 
-func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
+func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	resp, err := client.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: metadata(token, true),
 	}))
@@ -318,7 +325,7 @@ func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceCl
 
 // ---- status ----
 
-func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
+func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	if r, err := client.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("CheckChatCapacity ERR:", err)
 	} else {
@@ -348,7 +355,7 @@ func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- assign ----
 
-func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("assign needs at least one uid")
 	}
@@ -378,7 +385,7 @@ func (t *toolList) Set(v string) error {
 	return nil
 }
 
-func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	userPrompt := fs.String("prompt", "Reply exactly: pong", "")
@@ -387,9 +394,17 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	fs.Var(&tools, "tool", "")
 	var toolSchemas toolList
 	fs.Var(&toolSchemas, "tool-schema", "json schema for the corresponding -tool (positional)")
+	var toolDescs toolList
+	fs.Var(&toolDescs, "tool-desc", "description for the corresponding -tool (positional)")
 	customTool := fs.String("custom-tool", "", "add is_custom_tool with lark grammar (name)")
+	customToolRaw := fs.String("custom-tool-raw", "", "add is_custom_tool WITHOUT grammar (name)")
 	rawSchema := fs.Bool("raw-schema", false, "send invalid json_schema_string on tools")
 	toolExtras := fs.Bool("tool-extras", false, "strict+read_only_hint+server_name+attribution on tools")
+	xStrict := fs.Bool("x-strict", false, "strict=true on tools")
+	xReadonly := fs.Bool("x-readonly", false, "read_only_hint=true on tools")
+	xServer := fs.Bool("x-servername", false, "server_name=mcp-server on tools")
+	xAttr := fs.Bool("x-attribution", false, "attribution_field_names=[path] on tools")
+	xCU := fs.Bool("x-computeruse", false, "computer_use_config on tools")
 	sysAsMsg := fs.Bool("system-as-message", false, "send system prompt as SYSTEM_PROMPT-source message, drop top-level prompt")
 	emptySys := fs.Bool("system-empty", false, "send prompt field as explicit empty string")
 	toolChoice := fs.String("tool-choice", "", "")
@@ -546,10 +561,14 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		if schemaIdx < len(toolSchemas) && toolSchemas[schemaIdx] != "" {
 			schema = toolSchemas[schemaIdx]
 		}
+		desc := name + " tool"
+		if schemaIdx < len(toolDescs) && toolDescs[schemaIdx] != "" {
+			desc = toolDescs[schemaIdx]
+		}
 		schemaIdx++
 		td := &devinproto.ExaChatPb_ChatToolDefinition{
 			Name:             proto.String(name),
-			Description:      proto.String(name + " tool"),
+			Description:      proto.String(desc),
 			JsonSchemaString: proto.String(schema),
 		}
 		if *toolExtras {
@@ -557,6 +576,25 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			td.ReadOnlyHint = proto.Bool(true)
 			td.ServerName = proto.String("mcp-server")
 			td.AttributionFieldNames = []string{"path"}
+		}
+		if *xStrict {
+			td.Strict = proto.Bool(true)
+		}
+		if *xReadonly {
+			td.ReadOnlyHint = proto.Bool(true)
+		}
+		if *xServer {
+			td.ServerName = proto.String("mcp-server")
+		}
+		if *xAttr {
+			td.AttributionFieldNames = []string{"path"}
+		}
+		if *xCU {
+			td.ComputerUseConfig = &devinproto.ExaChatPb_ComputerUseToolConfig{
+				DisplayWidthPx:  proto.Int32(1920),
+				DisplayHeightPx: proto.Int32(1080),
+				DisplayNumber:   proto.Int32(1),
+			}
 		}
 		req.Tools = append(req.Tools, td)
 	}
@@ -567,6 +605,13 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			IsCustomTool:            proto.Bool(true),
 			CustomToolGrammar:       proto.String(`start: "PATCH" /[a-zA-Z0-9_.\/-]+/ "END"`),
 			CustomToolGrammarSyntax: proto.String("lark"),
+		})
+	}
+	if *customToolRaw != "" {
+		req.Tools = append(req.Tools, &devinproto.ExaChatPb_ChatToolDefinition{
+			Name:         proto.String(*customToolRaw),
+			Description:  proto.String("raw custom tool"),
+			IsCustomTool: proto.Bool(true),
 		})
 	}
 	if *toolChoice != "" {
@@ -752,7 +797,7 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- replay: capture assistant output then replay with variants ----
 
-func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	variant := fs.String("variant", "with-sig", "")
@@ -906,7 +951,7 @@ func q1cpy(m *devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.ExaChatPb_Chat
 
 // ---- hist: synthetic assistant-turn wire shapes ----
 
-func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("hist", flag.ContinueOnError)
 	shape := fs.String("shape", "merged", "")
 	model := fs.String("model", "swe-2-max", "")
@@ -994,7 +1039,7 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 // cmdRerun 回放 03-devin-request.json 抓到的完整上游请求：每次换新的
 // executionId，统计 stopReason / toolCalls / 文本尾部，用于同一段历史在
 // 不同 wire 形态下的 A/B 对照（拆分 vs 合并）。
-func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("rerun", flag.ContinueOnError)
 	file := fs.String("file", "", "protojson GetChatMessageRequest (logs/*/03-devin-request.json)")
 	n := fs.Int("n", 8, "")
@@ -1053,7 +1098,7 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 
 // ---- bigctx ----
 
-func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, args []string) error {
+func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("bigctx", flag.ContinueOnError)
 	kb := fs.Int("kb", 1024, "")
 	model := fs.String("model", "swe-2-max", "")
@@ -1080,7 +1125,7 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- misc: adjacent endpoints ----
 
-func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
+func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	emb, err := client.GetEmbeddings(ctx, connect.NewRequest(&devinproto.GetEmbeddingsRequest{
 		Request: &devinproto.ExaCodeiumCommonPb_EmbeddingsRequest{
 			Prompts: []string{"hello world"},
@@ -1176,7 +1221,7 @@ func dumpConnectErr(err error) {
 
 // ---- edge cases ----
 
-func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, argv []string) error {
+func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, argv []string) error {
 	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	imageFile := fs.String("image-file", "", "png file to attach instead of tinyPNG")
@@ -1497,4 +1542,163 @@ func trunc(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// ---- websearch ----
+
+func cmdWebsearch(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
+	fs := flag.NewFlagSet("websearch", flag.ExitOnError)
+	query := fs.String("query", "", "search query (required)")
+	limit := fs.Uint("limit", 5, "max results")
+	domain := fs.String("domain", "", "restrict to domain")
+	mode := fs.String("mode", "", "mode field")
+	provider := fs.String("provider", "", "third-party provider enum (OPENAI)")
+	wmodel := fs.String("wmodel", "", "third-party model enum (O3|GPT_4_1|O4_MINI)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *query == "" {
+		return fmt.Errorf("websearch needs -query")
+	}
+	req := &devinproto.GetWebSearchResultsRequest{
+		Metadata: metadata(token, true),
+		Query:    proto.String(*query),
+		Limit:    proto.Uint32(uint32(*limit)),
+		Domain:   nonEmpty(*domain),
+		Mode:     nonEmpty(*mode),
+	}
+	if *provider != "" || *wmodel != "" {
+		tpc := &devinproto.ExaCodeiumCommonPb_ThirdPartyWebSearchConfig{}
+		if *provider != "" {
+			v, err := enumByName[devinproto.ExaCodeiumCommonPb_ThirdPartyWebSearchProvider](*provider, devinproto.ExaCodeiumCommonPb_ThirdPartyWebSearchProvider_value)
+			if err != nil {
+				return err
+			}
+			tpc.Provider = v.Enum()
+		}
+		if *wmodel != "" {
+			v, err := enumByName[devinproto.ExaCodeiumCommonPb_ThirdPartyWebSearchModel](*wmodel, devinproto.ExaCodeiumCommonPb_ThirdPartyWebSearchModel_value)
+			if err != nil {
+				return err
+			}
+			tpc.Model = v.Enum()
+		}
+		req.ThirdPartyConfig = tpc
+	}
+	resp, err := client.GetWebSearchResults(ctx, connect.NewRequest(req))
+	if err != nil {
+		return err
+	}
+	b, _ := marshal.Marshal(resp.Msg)
+	fmt.Println(string(b))
+	return nil
+}
+
+// ---- registry: upstream canonical system prompt + tool registry ----
+
+// cmdRegistry 调 LanguageServerService.GetSystemPromptAndTools（上游下发系统
+// 提示与工具注册表的 RPC），按 planner_mode 全枚举扫描，对比各模式下工具集
+// 与 system prompt 差异；另附 GetMcpServerStates/GetAllSkills 一次性 dump，
+// 原始响应全部落 outputs/probe/。
+func cmdRegistry(ctx context.Context, _ devinprotoconnect.ApiServerServiceClient, ls devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
+	fs := flag.NewFlagSet("registry", flag.ContinueOnError)
+	plannerType := fs.String("planner-type", "conversational", "conversational|conversational_v2")
+	skipExtra := fs.Bool("skip-mcp-skills", false, "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_ = os.MkdirAll("outputs/probe", 0o755)
+	type modeCase struct {
+		label string
+		mode  *devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode
+	}
+	cases := []modeCase{{label: "unset"}}
+	for _, m := range []string{"DEFAULT", "READ_ONLY", "NO_TOOL", "EXPLORE", "PLANNING", "AUTO"} {
+		v, err := enumByName[devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode](m, devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_value)
+		if err != nil {
+			return err
+		}
+		cases = append(cases, modeCase{label: m, mode: &v})
+	}
+	var baseline []string
+	for _, c := range cases {
+		req := &devinproto.ExaLanguageServerPb_GetSystemPromptAndToolsRequest{Metadata: metadata(token, true)}
+		if c.mode != nil {
+			pc := &devinproto.ExaCortexPb_CascadePlannerConfig{}
+			switch *plannerType {
+			case "conversational":
+				pc.PlannerTypeConfig = &devinproto.ExaCortexPb_CascadePlannerConfig_Conversational{
+					Conversational: &devinproto.ExaCortexPb_CascadeConversationalPlannerConfig{PlannerMode: c.mode},
+				}
+			case "conversational_v2":
+				pc.PlannerTypeConfig = &devinproto.ExaCortexPb_CascadePlannerConfig_ConversationalV2{
+					ConversationalV2: &devinproto.ExaCortexPb_CascadeConversationalV2PlannerConfig{PlannerMode: c.mode},
+				}
+			default:
+				return fmt.Errorf("unknown planner-type %q", *plannerType)
+			}
+			req.CascadeConfig = &devinproto.ExaCortexPb_CascadeConfig{PlannerConfig: pc}
+		}
+		resp, err := ls.GetSystemPromptAndTools(ctx, connect.NewRequest(req))
+		if err != nil {
+			fmt.Printf("%-10s ERR %v\n", c.label, err)
+			continue
+		}
+		b, _ := marshal.Marshal(resp.Msg)
+		_ = os.WriteFile(fmt.Sprintf("outputs/probe/registry-%s.json", strings.ToLower(c.label)), b, 0o644)
+		var names []string
+		fieldUse := map[string]int{}
+		for _, td := range resp.Msg.GetToolDefinitions() {
+			names = append(names, td.GetName())
+			if td.GetDescription() != "" {
+				fieldUse["description"]++
+			}
+			if td.GetJsonSchemaString() != "" {
+				fieldUse["schema"]++
+			}
+			if td.GetServerName() != "" {
+				fieldUse["server_name"]++
+			}
+			if td.GetReadOnlyHint() {
+				fieldUse["read_only_hint"]++
+			}
+			if td.GetIsCustomTool() {
+				fieldUse["is_custom_tool"]++
+			}
+			if td.GetStrict() {
+				fieldUse["strict"]++
+			}
+			if td.GetComputerUseConfig() != nil {
+				fieldUse["computer_use"]++
+			}
+			if len(td.GetAttributionFieldNames()) > 0 {
+				fieldUse["attribution"]++
+			}
+		}
+		fmt.Printf("%-10s tools=%d fields=%v syslen=%d\n", c.label, len(names), j(fieldUse), len(resp.Msg.GetSystemPrompt()))
+		if baseline == nil {
+			baseline = names
+			fmt.Println("  tools:", strings.Join(names, ", "))
+		} else if j(names) != j(baseline) {
+			fmt.Printf("  DIFF tools: %s\n", strings.Join(names, ", "))
+		}
+	}
+	if *skipExtra {
+		return nil
+	}
+	if r, err := ls.GetMcpServerStates(ctx, connect.NewRequest(&devinproto.ExaLanguageServerPb_GetMcpServerStatesRequest{})); err != nil {
+		fmt.Println("GetMcpServerStates ERR:", err)
+	} else {
+		b, _ := marshal.Marshal(r.Msg)
+		_ = os.WriteFile("outputs/probe/mcp-server-states.json", b, 0o644)
+		fmt.Println("GetMcpServerStates states:", len(r.Msg.GetStates()), "-> outputs/probe/mcp-server-states.json")
+	}
+	if r, err := ls.GetAllSkills(ctx, connect.NewRequest(&devinproto.ExaLanguageServerPb_GetAllSkillsRequest{})); err != nil {
+		fmt.Println("GetAllSkills ERR:", err)
+	} else {
+		b, _ := marshal.Marshal(r.Msg)
+		_ = os.WriteFile("outputs/probe/all-skills.json", b, 0o644)
+		fmt.Println("GetAllSkills skills:", len(r.Msg.GetSkills()), "-> outputs/probe/all-skills.json")
+	}
+	return nil
 }
