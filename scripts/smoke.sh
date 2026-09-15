@@ -49,7 +49,9 @@ cleanup() {
 trap cleanup EXIT
 
 # 独立运行目录：listen 改到冒烟端口；logs/gate-state 都落临时目录。
-sed -E "s/^([[:space:]]*listen:[[:space:]]*)\"?[^\"[:space:]]+\"?/\1\":$PORT\"/" "$SRC_CONFIG" >"$WORK/config.yaml"
+# 只换行尾 :port 段、保留既有 host——源配置若绑 127.0.0.1，整值替换成
+# ":PORT" 会让冒烟实例短暂暴露到全部接口。
+sed -E "/^[[:space:]]*listen:/s/:[0-9]+([\"']?[[:space:]]*)$/:$PORT\1/" "$SRC_CONFIG" >"$WORK/config.yaml"
 grep -q "listen[[:space:]]*:[[:space:]]*\"*:$PORT" "$WORK/config.yaml" || {
 	echo "未能把 server.listen 改写到 :$PORT，检查配置文件格式" >&2
 	exit 1
