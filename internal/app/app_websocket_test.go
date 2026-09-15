@@ -685,3 +685,35 @@ func TestWebSocketNoUpgradeRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 405", response.Code)
 	}
 }
+
+// TestWebSocketInboundQueueByteLimit 验证入队字节闸：turn 进行中积压的
+// 客户端帧总量超过 wsMaxQueuedBytes（64MiB）时服务端回 close 1009 断连。
+// 按帧数限额会让 16×32MiB≈512MiB/连接成为最坏值，字节预算才是内存闸。
+func TestWebSocketInboundQueueByteLimit(t *testing.T) {
+	fake := &blockedStreamAdapter{entered: make(chan struct{})}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	server := httptest.NewServer(application.Router())
+	t.Cleanup(server.Close)
+	conn := dialWS(t, server)
+
+	wsWriteJSON(t, conn, map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"input": []any{wsUserItem("hold the turn")},
+	})
+	<-fake.entered
+
+	// 单帧受 32MiB read limit 约束，分帧累积越过 64MiB 入队字节预算；
+	// 服务端触发关闭后后续写可能失败，容忍之。
+	payload := make([]byte, 16<<20)
+	for i := 0; i < 5; i++ {
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			break
+		}
+	}
+	_, _, err := conn.ReadMessage()
+	closeErr, ok := err.(*websocket.CloseError)
+	if !ok || closeErr.Code != websocket.CloseMessageTooBig {
+		t.Fatalf("read err = %v, want close 1009", err)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -53,6 +54,9 @@ const (
 	// wsMaxConnections 是进程级下游 WS 连接上限。连接占用的是 fd+goroutine，
 	// 与上游并发槽分开计量——空闲连接不该烧并发额度。
 	wsMaxConnections = 256
+	// wsMaxQueuedBytes 是单连接入队数据帧的总字节上限——按帧数限额会让
+	// 16×32MiB≈512MiB/连接成为最坏值；字节预算才是真正的内存闸。
+	wsMaxQueuedBytes = 64 << 20
 )
 
 // wsInboundMessage 是 reader goroutine 交给主循环的一帧。
@@ -441,9 +445,11 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 处理 ping/pong/close 控制帧，且这是发现客户端断连的唯一手段。
 	// channel 带缓冲：turn 进行中读到的数据帧排队等主循环，控制帧照常应答；
 	// 读端一旦出错立即 cancelConn，让在途上游随 ctx 取消而不是空跑到结束。
-	// 缓冲量级：单帧上限 wsMaxTranscriptBytes(32MiB)×16 ≈ 512MiB/连接，
-	// 极端占用靠前置鉴权与 wsMaxConnections 连接上限兜底。
-	messages := make(chan wsInboundMessage, 16)
+	// 积压闸门按总字节（wsMaxQueuedBytes）而非帧数：小帧流水线不受帧数
+	// 限制影响，超出预算时满帧已在内存——断连比阻塞读循环诚实（阻塞会
+	// 让 ping/pong/close 与断连检测一并停摆）。
+	messages := make(chan wsInboundMessage, 64)
+	var queuedBytes atomic.Int64
 	// 当前轮次的取消句柄：turn 期间主循环阻塞在 runWSTurn 不读
 	// messages，response.cancel 由 reader 识别后直接取消本轮
 	// ctx——排队到轮末才处理的「取消」形同虚设。轮间到达的 cancel
@@ -479,9 +485,18 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 					continue
 				}
 			}
+			frameBytes := int64(len(payload))
+			if queuedBytes.Add(frameBytes) > wsMaxQueuedBytes {
+				_ = conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "inbound queue byte limit exceeded"),
+					time.Now().Add(wsWriteDeadline))
+				cancelConn()
+				return
+			}
 			select {
 			case messages <- wsInboundMessage{messageType: messageType, payload: payload}:
 			case <-connCtx.Done():
+				queuedBytes.Add(-frameBytes)
 				return
 			}
 		}
@@ -517,6 +532,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			if !ok {
 				return
 			}
+			queuedBytes.Add(-int64(len(inbound.payload)))
 			message = inbound
 		}
 
