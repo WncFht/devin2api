@@ -629,7 +629,9 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	innerRequest.RemoteAddr = upgradeRequest.RemoteAddr
 
 	turnWriter := newWSResponseWriter(conn)
-	application.createResponses(turnWriter, innerRequest)
+	// api 标签由调用方固定为 responses-ws：innerRequest 不再经 HTTP 路由，
+	// writer 类型断言无法区分（旧的 isWS 分支已移除）。
+	application.createCompletion(turnWriter, innerRequest, "responses-ws", decodeResponsesRequest, responsesProtocol{})
 	turnWriter.flushTail()
 	if turnWriter.err != nil {
 		return turnWriter, turnWriter.err

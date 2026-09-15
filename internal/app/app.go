@@ -486,11 +486,7 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 }
 
 func (application *App) createResponses(writer http.ResponseWriter, request *http.Request) {
-	api := "openai-responses"
-	if _, isWS := writer.(*wsResponseWriter); isWS {
-		api = "responses-ws"
-	}
-	application.createCompletion(writer, request, api, decodeResponsesRequest, responsesProtocol{})
+	application.createCompletion(writer, request, "openai-responses", decodeResponsesRequest, responsesProtocol{})
 }
 
 func (application *App) createChatCompletions(writer http.ResponseWriter, request *http.Request) {
