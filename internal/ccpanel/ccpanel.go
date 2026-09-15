@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/obs"
@@ -38,6 +39,8 @@ type Handler struct {
 	maxConcurrency int
 	// aliasesFunc 返回模型别名表（注册表落地前的静态种子）。
 	aliasesFunc func() map[string]string
+	// tokens 是下游令牌仓；nil 时 api_token 登录与令牌端点不可用。
+	tokens *authtoken.Store
 
 	versionMu sync.RWMutex
 	version   string
@@ -82,6 +85,11 @@ func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
 	h.aliasesFunc = fn
 }
 
+// SetTokenStore 注入下游令牌仓（api_token 登录与 /admin/auth-tokens 用）。
+func (h *Handler) SetTokenStore(s *authtoken.Store) {
+	h.tokens = s
+}
+
 // Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为
 // 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
 func (h *Handler) Register(mux interface {
@@ -98,20 +106,36 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/public/version", h.publicVersion)
 	mux.Get("/public/protocols", h.publicProtocols)
 
-	mux.Get("/dashboard/session", h.withAuth(h.dashboardSession))
-	mux.Get("/dashboard/summary", h.withAuth(h.dashboardSummary))
-	mux.Get("/dashboard/metrics", h.withAuth(h.dashboardMetrics))
-	mux.Get("/dashboard/models", h.withAuth(h.dashboardModels))
-	mux.Get("/dashboard/channels/filter-options", h.withAuth(h.channelFilterOptions))
+	mux.Get("/dashboard/session", h.withWebAuth(h.dashboardSession))
+	mux.Get("/dashboard/summary", h.withWebAuth(h.dashboardSummary))
+	mux.Get("/dashboard/metrics", h.withWebAuth(h.dashboardMetrics))
+	mux.Get("/dashboard/logs", h.withWebAuth(h.dashboardLogs))
+	mux.Get("/dashboard/logs/bootstrap", h.withWebAuth(h.dashboardLogsBootstrap))
+	mux.Get("/dashboard/stats", h.withWebAuth(h.dashboardStats))
+	mux.Get("/dashboard/stats/filter-options", h.withWebAuth(h.dashboardStatsFilterOptions))
+	mux.Get("/dashboard/models", h.withWebAuth(h.dashboardModels))
+	mux.Get("/dashboard/channels", h.withWebAuth(h.dashboardChannels))
+	mux.Get("/dashboard/channels/filter-options", h.withWebAuth(h.channelFilterOptions))
 
 	mux.Get("/admin/active-requests", h.withAuth(h.adminActiveRequests))
+	mux.Get("/admin/active-requests/{id}/debug-log", h.withAuth(h.adminActiveRequestDebugLog))
 	mux.Post("/admin/active-requests/{id}/abort", h.withAuth(h.adminAbortActiveRequest))
+	mux.Get("/admin/logs", h.withAuth(h.dashboardLogs))
+	mux.Get("/admin/logs/bootstrap", h.withAuth(h.dashboardLogsBootstrap))
+	mux.Post("/admin/debug-logs/merged-response", h.withAuth(h.adminMergedResponse))
+	mux.Get("/admin/debug-logs/{id}", h.withAuth(h.adminDebugLog))
+	mux.Get("/admin/metrics", h.withAuth(h.dashboardMetrics))
+	mux.Get("/admin/stats", h.withAuth(h.dashboardStats))
+	mux.Get("/admin/stats/filter-options", h.withAuth(h.dashboardStatsFilterOptions))
 	mux.Get("/admin/channels", h.withAuth(h.adminListChannels))
 	mux.Get("/admin/channels/filter-options", h.withAuth(h.channelFilterOptions))
 	mux.Get("/admin/channels/{id}", h.withAuth(h.adminGetChannel))
 	mux.Get("/admin/channels/{id}/keys", h.withAuth(h.adminChannelKeys))
 	mux.Get("/admin/settings", h.withAuth(h.adminListSettings))
 	mux.Get("/admin/auth-tokens", h.withAuth(h.adminListAuthTokens))
+	mux.Post("/admin/auth-tokens", h.withAuth(h.adminCreateAuthToken))
+	mux.Put("/admin/auth-tokens/{id}", h.withAuth(h.adminUpdateAuthToken))
+	mux.Delete("/admin/auth-tokens/{id}", h.withAuth(h.adminDeleteAuthToken))
 	mux.Get("/admin/models", h.withAuth(h.dashboardModels))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
 	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))

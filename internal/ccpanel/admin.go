@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/WncFht/devin2api/internal/authtoken"
 )
 
 // activeRequest 是 ccLoad ActiveRequest 的 wire 形状；本服务无多上游，
@@ -183,22 +185,98 @@ func (h *Handler) adminListSettings(w http.ResponseWriter, _ *http.Request) {
 	respondOK(w, []any{})
 }
 
-// adminListAuthTokens 实现 GET /admin/auth-tokens：S4 之前恒空表，
-// 带 range 时同样回 rpm/duration 统计字段，前端不区分。
+// adminListAuthTokens 实现 GET /admin/auth-tokens：令牌表 + range 时叠加
+// duration/rpm/is_today 全局统计，并用时间窗聚合同名覆盖各令牌的累计
+// 字段（ccLoad HandleListAuthTokens + GetAuthTokenStatsInRange 语义：
+// 覆盖值来自 logs 范围聚合而非令牌持久计数，范围外无数据的令牌清零）。
 func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
+	var list []*authtoken.Token
+	if h.tokens != nil {
+		list = h.tokens.List()
+	}
+	tokens := make([]authtoken.View, 0, len(list))
+	for _, t := range list {
+		tokens = append(tokens, t.API())
+	}
 	data := map[string]any{
-		"tokens":   []any{},
+		"tokens":   tokens,
 		"is_today": false,
 	}
-	if rangeParam := strings.TrimSpace(r.URL.Query().Get("range")); rangeParam != "" && rangeParam != "all" {
-		since, until, name := resolveRange(r, time.Now())
-		duration := until.Sub(since).Seconds()
-		if duration < 1 {
-			duration = 1
+	rangeParam := strings.TrimSpace(r.URL.Query().Get("range"))
+	if rangeParam == "" || rangeParam == "all" {
+		respondOK(w, data)
+		return
+	}
+	since, until, name := resolveRange(r, time.Now())
+	isToday := name == "today"
+	duration := until.Sub(since).Seconds()
+	if duration < 1 {
+		duration = 1
+	}
+	data["duration_seconds"] = duration
+	data["is_today"] = isToday
+	data["rpm_stats"] = h.rpmStatsFiltered(since, until, nil, isToday, "", "")
+
+	// 时间窗覆盖：按 key_hash 聚合格子，逐令牌覆盖累计字段。
+	// 口径对齐 GetAuthTokenStatsInRange：success/failure 计数非 499，
+	// token/成本求和含 499 行，TTFB/RT 均值含全部状态（stream 取 fbt
+	// 样本、non-stream 取 duration 样本），stream/non_stream 计数非 499。
+	// master key/开放模式的行无对应令牌，自然不落入任何令牌。
+	prices := h.panel.CatalogPrices(r.Context())
+	type tokenAgg struct {
+		t    cellTotals
+		cost float64
+		peak int64 // 单槽非 499 峰值（peak_rpm 的分子，折算分钟速率）
+	}
+	byKH := map[string]*tokenAgg{}
+	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
+		if key.kh == "" {
+			return
 		}
-		data["duration_seconds"] = duration
-		data["is_today"] = name == "" || name == "today"
-		data["rpm_stats"] = h.rpmStats(since, until)
+		a := byKH[key.kh]
+		if a == nil {
+			a = &tokenAgg{}
+			byKH[key.kh] = a
+		}
+		a.t = addCells(a.t, c)
+		a.cost += cellCost(key, c, prices)
+		if n := c.requests - c.gone; n > a.peak {
+			a.peak = n
+		}
+	})
+	for i, t := range list {
+		ov := &tokens[i]
+		a := byKH[t.KeyHash()]
+		if a == nil {
+			a = &tokenAgg{} // 范围内无数据：清零覆盖（ccLoad 同款语义）
+		}
+		ov.SuccessCount = a.t.ok
+		ov.FailureCount = a.t.requests - a.t.ok - a.t.gone
+		ov.PromptTokensTotal = a.t.inTok
+		ov.CompletionTokensTotal = a.t.outTok
+		ov.CacheReadTokensTotal = a.t.cacheRead
+		ov.CacheCreationTokensTotal = a.t.cacheWrite
+		ov.TotalCostUSD = a.cost
+		ov.EffectiveCostUSD = a.cost
+		ov.StreamAvgTTFB = 0
+		if a.t.nFirstStream > 0 {
+			ov.StreamAvgTTFB = float64(a.t.sumFirstStreamMS) / float64(a.t.nFirstStream) / 1000
+		}
+		ov.NonStreamAvgRT = 0
+		if a.t.nNonStream > 0 {
+			ov.NonStreamAvgRT = float64(a.t.sumDurNonStreamMS) / float64(a.t.nNonStream) / 1000
+		}
+		ov.StreamCount = a.t.nStreamNG
+		ov.NonStreamCount = a.t.nNonStreamNG
+		ov.PeakRPM = float64(a.peak) / (rollupSlotSeconds / 60)
+		ov.AvgRPM = float64(ov.SuccessCount+ov.FailureCount) * 60 / duration
+		ov.RecentRPM = 0
+		if isToday {
+			ov.RecentRPM = h.ru.recentRPM(h.debug, "", t.KeyHash())
+			if ov.PeakRPM < ov.RecentRPM {
+				ov.PeakRPM = ov.RecentRPM
+			}
+		}
 	}
 	respondOK(w, data)
 }

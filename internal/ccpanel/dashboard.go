@@ -79,41 +79,50 @@ type protocolStat struct {
 	EffectiveCost            float64 `json:"effective_cost"`
 }
 
-// dashboardSummary 实现 ccLoad 的 /dashboard/summary：按入口协议与认证
-// 类型（恒 api_key）分组的用量卡片数据。
+// dashboardSummary 实现 ccLoad 的 /dashboard/summary：按入口协议与渠道认证
+// 类型（本服务恒 api_key）分组的用量卡片。口径对齐 GetClientProtocolStats/
+// GetAuthTypeStats：success=2xx、error=非2xx非499、total=success+error，
+// token/成本求和含 499 行；api_token 身份收敛到自己的 key_hash 行。
 func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, rangeName := resolveRange(r, now)
+	isToday := rangeName == "today"
+	match, kh, excluded := h.queryScope(r)
 	prices := h.panel.CatalogPrices(r.Context())
 
 	byProtocol := map[string]*protocolStat{}
 	var grand protocolStat
-	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-		proto := clientProtocol(key.api)
-		stat := byProtocol[proto]
-		if stat == nil {
-			stat = &protocolStat{ClientProtocol: proto}
-			byProtocol[proto] = stat
-		}
-		cost := cellCost(key, c, prices)
-		for _, dst := range []*protocolStat{stat, &grand} {
-			dst.TotalRequests += c.requests
-			dst.ErrorRequests += c.failures
-			dst.SuccessRequests += c.requests - c.failures
-			dst.TotalInputTokens += c.inTok
-			dst.TotalOutputTokens += c.outTok
-			dst.TotalCacheReadTokens += c.cacheRead
-			dst.TotalCacheCreationTokens += c.cacheWrite
-			dst.TotalCost += cost
-			dst.EffectiveCost += cost
-		}
-	})
+	if !excluded {
+		h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
+			if match != nil && !match(key) {
+				return
+			}
+			proto := clientProtocol(key.api)
+			stat := byProtocol[proto]
+			if stat == nil {
+				stat = &protocolStat{ClientProtocol: proto}
+				byProtocol[proto] = stat
+			}
+			cost := cellCost(key, c, prices)
+			for _, dst := range []*protocolStat{stat, &grand} {
+				dst.TotalRequests += c.requests - c.gone
+				dst.SuccessRequests += c.ok
+				dst.ErrorRequests += c.requests - c.ok - c.gone
+				dst.TotalInputTokens += c.inTok
+				dst.TotalOutputTokens += c.outTok
+				dst.TotalCacheReadTokens += c.cacheRead
+				dst.TotalCacheCreationTokens += c.cacheWrite
+				dst.TotalCost += cost
+				dst.EffectiveCost += cost
+			}
+		})
+	}
 
 	protocols := make(map[string]protocolStat, len(byProtocol))
 	for k, v := range byProtocol {
 		protocols[k] = *v
 	}
-	// 认证类型卡：本服务只有一种下游凭据形态，全部流量归 api_key。
+	// 认证类型卡按上游渠道 auth_type 分组：唯一合成渠道恒 api_key。
 	grand.AuthType = "api_key"
 	byAuth := map[string]protocolStat{}
 	if grand.TotalRequests > 0 {
@@ -124,44 +133,21 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	if duration < 1 {
 		duration = 1
 	}
+	rpm := zeroRPMStats()
+	if !excluded {
+		rpm = h.rpmStatsFiltered(since, until, match, isToday, "", kh)
+	}
 	respondOK(w, map[string]any{
 		"total_requests":     grand.TotalRequests,
 		"success_requests":   grand.SuccessRequests,
 		"error_requests":     grand.ErrorRequests,
 		"range":              rangeName,
 		"duration_seconds":   duration,
-		"rpm_stats":          h.rpmStats(since, until),
-		"is_today":           rangeName == "" || rangeName == "today",
+		"rpm_stats":          rpm,
+		"is_today":           isToday,
 		"by_client_protocol": protocols,
 		"by_auth_type":       byAuth,
 	})
-}
-
-// rpmStats 由 10 分钟格子推导 RPM/QPS 估计：peak 取单槽请求数/10 分钟，
-// recent 取 recent 环的真实 60s 计数。
-func (h *Handler) rpmStats(since, until time.Time) map[string]any {
-	var total, peakSlot int64
-	h.ru.eachCell(h.debug, since, until, func(_ cellKey, c cellTotals) {
-		total += c.requests
-		if c.requests > peakSlot {
-			peakSlot = c.requests
-		}
-	})
-	minutes := until.Sub(since).Minutes()
-	if minutes < 1 {
-		minutes = 1
-	}
-	peakRPM := float64(peakSlot) / (rollupSlotSeconds / 60)
-	avgRPM := float64(total) / minutes
-	recent := h.ru.recentRPM(h.debug)
-	return map[string]any{
-		"peak_rpm":   peakRPM,
-		"peak_qps":   peakRPM / 60,
-		"avg_rpm":    avgRPM,
-		"avg_qps":    avgRPM / 60,
-		"recent_rpm": recent,
-		"recent_qps": recent / 60,
-	}
 }
 
 // metricPoint/metricChannel 对应 ccLoad 的 MetricPoint/ChannelMetric：
@@ -197,7 +183,11 @@ type metricPoint struct {
 }
 
 // dashboardMetrics 实现 /dashboard/metrics：按 bucket_min 聚合的时间桶点列，
-// channels 键为模型名。model 参数按生效模型精确过滤。
+// channels 键为模型名（本服务无多上游渠道，模型即最细维度）。口径对齐
+// ccLoad AggregateRangeWithFilter：success=2xx、error=非2xx非499，
+// token/成本只计非 499 行（NG 字段），均值样本为 2xx 且时值>0 的行。
+// 无论有无数据都补出 [since,until] 对齐 bucket 边界的满序列（metrics_finalize
+// 同款），前端按点位对齐多序列；格子粒度 10 分钟，更小的 bucket 抬到 10。
 func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, _ := resolveRange(r, now)
@@ -205,13 +195,11 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	if bucketMin <= 0 {
 		bucketMin = 5
 	}
-	// 格子粒度 10 分钟：小于它的 bucket 直接抬到 10，避免输出
-	// 大量空桶（10 分钟桶已是存储分辨率下限）。
 	if bucketMin < 10 {
 		bucketMin = 10
 	}
 	bucketSec := int64(bucketMin) * 60
-	modelFilter := r.URL.Query().Get("model")
+	match, _, excluded := h.queryScope(r)
 	prices := h.panel.CatalogPrices(r.Context())
 
 	type bucketAgg struct {
@@ -221,76 +209,79 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 		modelCost map[string]float64
 	}
 	buckets := map[int64]*bucketAgg{}
-	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-		if modelFilter != "" && key.model != modelFilter {
-			return
-		}
-		b := key.slot / bucketSec * bucketSec
-		a := buckets[b]
-		if a == nil {
-			a = &bucketAgg{byModel: map[string]*cellTotals{}, modelCost: map[string]float64{}}
-			buckets[b] = a
-		}
-		cost := cellCost(key, c, prices)
-		a.cost += cost
-		mt := a.byModel[key.model]
-		if mt == nil {
-			mt = &cellTotals{}
-			a.byModel[key.model] = mt
-		}
-		*mt = addCells(*mt, c)
-		a.modelCost[key.model] += cost
-		a.total = addCells(a.total, c)
-	})
-
-	ts := make([]int64, 0, len(buckets))
-	for b := range buckets {
-		ts = append(ts, b)
+	if !excluded {
+		h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
+			if match != nil && !match(key) {
+				return
+			}
+			// 整格归入槽起点所在桶：bucket 不是 10 分钟倍数时边界有
+			// ±10 分钟错位（格子分辨率下限），前端常用档位均为整倍数。
+			b := key.slot / bucketSec * bucketSec
+			a := buckets[b]
+			if a == nil {
+				a = &bucketAgg{byModel: map[string]*cellTotals{}, modelCost: map[string]float64{}}
+				buckets[b] = a
+			}
+			cost := cellCostNG(key, c, prices)
+			a.cost += cost
+			mt := a.byModel[key.model]
+			if mt == nil {
+				mt = &cellTotals{}
+				a.byModel[key.model] = mt
+			}
+			*mt = addCells(*mt, c)
+			a.modelCost[key.model] += cost
+			a.total = addCells(a.total, c)
+		})
 	}
-	sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
-	points := make([]metricPoint, 0, len(ts))
-	for _, b := range ts {
-		a := buckets[b]
-		p := metricPoint{
-			Ts:                   time.Unix(b, 0),
-			Success:              a.total.requests - a.total.failures,
-			Error:                a.total.failures,
-			FirstByteSampleCount: a.total.nFirst,
-			DurationSampleCount:  a.total.requests,
-			InputTokens:          a.total.inTok,
-			OutputTokens:         a.total.outTok,
-			CacheReadTokens:      a.total.cacheRead,
-			CacheCreationTokens:  a.total.cacheWrite,
-		}
-		if a.total.nFirst > 0 {
-			v := float64(a.total.sumFirstMS) / float64(a.total.nFirst) / 1000
+
+	fill := func(p *metricPoint, t cellTotals, cost float64) {
+		p.Success = t.ok
+		p.Error = t.requests - t.ok - t.gone
+		p.FirstByteSampleCount = t.nFirstOK
+		p.DurationSampleCount = t.nDurOK
+		p.InputTokens = t.inTokNG
+		p.OutputTokens = t.outTokNG
+		p.CacheReadTokens = t.cacheReadNG
+		p.CacheCreationTokens = t.cacheWriteNG
+		if t.nFirstOK > 0 {
+			v := float64(t.sumFirstOKMS) / float64(t.nFirstOK) / 1000
 			p.AvgFirstByteTimeSeconds = &v
 		}
-		if a.total.requests > 0 {
-			v := float64(a.total.sumDurMS) / float64(a.total.requests) / 1000
+		if t.nDurOK > 0 {
+			v := float64(t.sumDurOKMS) / float64(t.nDurOK) / 1000
 			p.AvgDurationSeconds = &v
 		}
-		if a.cost > 0 {
-			p.TotalCost = &a.cost
-			p.EffectiveCost = &a.cost
+		if cost > 0 {
+			p.TotalCost = &cost
+			p.EffectiveCost = &cost
 		}
-		if len(a.byModel) > 0 {
+	}
+
+	// 满序列：范围端点各自截到 bucket 边界，逐桶吐点，空桶给零值点。
+	start := since.Unix() / bucketSec * bucketSec
+	end := until.Unix() / bucketSec * bucketSec
+	points := make([]metricPoint, 0, (end-start)/bucketSec+1)
+	for b := start; b <= end; b += bucketSec {
+		p := metricPoint{Ts: time.Unix(b, 0)}
+		if a := buckets[b]; a != nil {
+			fill(&p, a.total, a.cost)
 			p.Channels = make(map[string]metricChannel, len(a.byModel))
 			for model, t := range a.byModel {
 				mc := metricChannel{
-					Success:             t.requests - t.failures,
-					Error:               t.failures,
-					InputTokens:         t.inTok,
-					OutputTokens:        t.outTok,
-					CacheReadTokens:     t.cacheRead,
-					CacheCreationTokens: t.cacheWrite,
+					Success:             t.ok,
+					Error:               t.requests - t.ok - t.gone,
+					InputTokens:         t.inTokNG,
+					OutputTokens:        t.outTokNG,
+					CacheReadTokens:     t.cacheReadNG,
+					CacheCreationTokens: t.cacheWriteNG,
 				}
-				if t.nFirst > 0 {
-					v := float64(t.sumFirstMS) / float64(t.nFirst) / 1000
+				if t.nFirstOK > 0 {
+					v := float64(t.sumFirstOKMS) / float64(t.nFirstOK) / 1000
 					mc.AvgFirstByteTimeSeconds = &v
 				}
-				if t.requests > 0 {
-					v := float64(t.sumDurMS) / float64(t.requests) / 1000
+				if t.nDurOK > 0 {
+					v := float64(t.sumDurOKMS) / float64(t.nDurOK) / 1000
 					mc.AvgDurationSeconds = &v
 				}
 				if c := a.modelCost[model]; c > 0 {
@@ -305,35 +296,34 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, points)
 }
 
-// addCells 返回 a+b 的逐字段和。
-func addCells(a, b cellTotals) cellTotals {
-	a.requests += b.requests
-	a.failures += b.failures
-	a.inTok += b.inTok
-	a.outTok += b.outTok
-	a.cacheRead += b.cacheRead
-	a.cacheWrite += b.cacheWrite
-	a.sumDurMS += b.sumDurMS
-	a.sumFirstMS += b.sumFirstMS
-	a.nFirst += b.nFirst
-	return a
-}
-
-// cellCost 按目录价折算单格成本；无目录价的模型贡献 0。
+// cellCost 按目录价折算单格成本（含 499 行的 token 口径，summary/stats/
+// token 覆盖用）；无目录价的模型贡献 0。
 // 与旧面板 usage 页同口径：cache_write 按 input 价计费（目录无独立价格维）。
 func cellCost(key cellKey, c cellTotals, prices map[string]dashboard.CatalogPrice) float64 {
-	p, ok := prices[key.model]
+	return tokenCost(key.model, c.inTok, c.outTok, c.cacheRead, c.cacheWrite, prices)
+}
+
+// cellCostNG 与 cellCost 同式，但取非 499 行的 token 口径（metrics/health 用）。
+func cellCostNG(key cellKey, c cellTotals, prices map[string]dashboard.CatalogPrice) float64 {
+	return tokenCost(key.model, c.inTokNG, c.outTokNG, c.cacheReadNG, c.cacheWriteNG, prices)
+}
+
+// tokenCost 是目录价折算公式：prompt 侧 input+cache_write 按 input 价、
+// cache_read 按 cached 价、output 按 output 价，目录单位是 USD/百万 token。
+func tokenCost(model string, in, out, cacheRead, cacheWrite int64, prices map[string]dashboard.CatalogPrice) float64 {
+	p, ok := prices[model]
 	if !ok {
 		return 0
 	}
-	return (float64(c.inTok+c.cacheWrite)*p.Input + float64(c.cacheRead)*p.Cached + float64(c.outTok)*p.Output) / 1e6
+	return (float64(in+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(out)*p.Output) / 1e6
 }
 
 // dashboardModels 实现 /dashboard/models 与 /admin/models：
 // 日志里出现过的模型 + 合成渠道 + 出现过的状态码。
-func (h *Handler) dashboardModels(w http.ResponseWriter, _ *http.Request) {
+// api_token 身份收敛到自己产生过流量的模型。
+func (h *Handler) dashboardModels(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, map[string]any{
-		"models":       h.ru.modelSet(h.debug),
+		"models":       h.ru.modelSet(h.debug, identityFrom(r).KeyHash),
 		"channels":     []map[string]any{{"id": synthChannelID, "name": synthChannelName}},
 		"status_codes": h.ru.statusCodeSet(h.debug),
 	})
@@ -346,7 +336,7 @@ func (h *Handler) channelFilterOptions(w http.ResponseWriter, r *http.Request) {
 	for _, m := range h.channelModelNames(r) {
 		models[m] = struct{}{}
 	}
-	for _, m := range h.ru.modelSet(h.debug) {
+	for _, m := range h.ru.modelSet(h.debug, identityFrom(r).KeyHash) {
 		models[m] = struct{}{}
 	}
 	list := make([]string, 0, len(models))
