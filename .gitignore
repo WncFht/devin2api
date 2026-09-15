@@ -59,6 +59,10 @@ multi-harness-eval/runs/
 /data/
 /scc-report.html
 
+# 本地 scratch（实验/对照代码等杂项，不入库；.prettierignore 与
+# .markdownlint-cli2.jsonc 同步排除）
+/tmp/
+
 # Python 字节码缓存（scripts/quota/fit.py 等）
 __pycache__/
 

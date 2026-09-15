@@ -1,3 +1,4 @@
 logs/
 outputs/
 multi-harness-eval/runs/
+tmp/
