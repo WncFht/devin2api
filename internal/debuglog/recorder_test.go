@@ -228,6 +228,23 @@ func TestDroppedCounterOnClosedQueue(t *testing.T) {
 	}
 }
 
+// TestDroppedCounterOnFullQueue 验证队列打满时 enqueue 走 default 丢弃：
+// 不起写 worker，让 tasks 永远排满——第 writeQueueSize+1 个任务必掉。
+func TestDroppedCounterOnFullQueue(t *testing.T) {
+	recorder := &Recorder{tasks: make(chan writeTask, writeQueueSize)}
+	task := writeTask(func() {})
+	for i := 0; i < writeQueueSize; i++ {
+		recorder.enqueue(task)
+	}
+	if got := recorder.dropped.Load(); got != 0 {
+		t.Fatalf("dropped = %d after filling queue, want 0", got)
+	}
+	recorder.enqueue(task)
+	if got := recorder.dropped.Load(); got != 1 {
+		t.Fatalf("dropped = %d after overflow, want 1", got)
+	}
+}
+
 // TestReaderListDetailAndFiles 验证索引倒读、单请求详情与文件读取接口。
 func TestReaderListDetailAndFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")

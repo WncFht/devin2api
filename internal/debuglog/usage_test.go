@@ -450,7 +450,7 @@ func TestUsageMinBucketWraparound(t *testing.T) {
 		t.Fatalf("window = %+v", snap.Window)
 	}
 	current := snap.Points[len(snap.Points)-1]
-	if current.Requests != 1 || current.Input != 7 {
+	if current.Requests != 1 || current.InputTokens != 7 {
 		t.Fatalf("current bucket = %+v, want requests=1 input=7", current)
 	}
 }

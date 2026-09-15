@@ -146,27 +146,15 @@ func (t *usageTotals) add(e IndexEntry) {
 const usageMinSampleCap = 256
 
 // usageMinBucket 是一个 10 分钟窗口内的请求/token 聚合，供趋势图。
-// 计数字段与 usageTotals 对齐：面板按时间范围选择器截一段桶求和，
+// 计数面直接内嵌 usageTotals：面板按时间范围选择器截一段桶求和，
 // 即可得到该窗口的完整卡片数据（含断连/缓存写/推理 token）。
 type usageMinBucket struct {
-	at             int64 // 桶起点 unix 秒（600s 对齐）
-	requests       int64
-	errors         int64
-	disconnected   int64
-	rateLimited    int64 // isRateLimited 判定（status 429 或 rate_limited 标记）
-	clientFaults   int64 // errorOwner==client
-	upstreamFaults int64 // errorOwner==upstream
-	input          int64
-	output         int64
-	cacheRead      int64
-	cacheWrite     int64
-	reasoning      int64
-	genMS          int64   // 可信流式条目的生成毫秒累计（见 decodeWindow）
-	genOut         int64   // 对应条目的输出 token 累计（均速分子）
-	durs           []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
-	durHead        int
-	ttfbs          []int64 // first_upstream_ms 样本
-	ttfbHead       int
+	at int64 // 桶起点 unix 秒（600s 对齐）
+	usageTotals
+	durs     []int64 // duration_ms 样本（环形，上限 usageMinSampleCap）
+	durHead  int
+	ttfbs    []int64 // first_upstream_ms 样本
+	ttfbHead int
 }
 
 // pushSample 向容量受限的样本切片追加；满后原地覆盖最旧值。
@@ -180,48 +168,22 @@ func pushSample(samples *[]int64, head *int, v int64) {
 }
 
 // usageMinPoint 是输出给面板的 10 分钟粒度数据点。
+// 计数面内嵌 usageTotals（与 usageMinBucket 同型，整块拷贝成点），
+// 附带每桶样本算出的延迟摘要。
 type usageMinPoint struct {
-	At             int64 `json:"at"` // 桶起点 unix 秒
-	Requests       int64 `json:"requests"`
-	Errors         int64 `json:"errors"`
-	Disconnected   int64 `json:"disconnected"`
-	RateLimited    int64 `json:"rate_limited"`
-	ClientFaults   int64 `json:"client_faults"`
-	UpstreamFaults int64 `json:"upstream_faults"`
-	Input          int64 `json:"input_tokens"`
-	Output         int64 `json:"output_tokens"`
-	AvgDur         int64 `json:"avg_duration_ms"`
-	DurP95         int64 `json:"duration_p95_ms"`
-	AvgTTFB        int64 `json:"avg_ttfb_ms"`
-	TTFBP95        int64 `json:"ttfb_p95_ms"`
-	// CacheRead/CacheWrite/Reasoning/GenMS/GenOut 供前端按任意时间范围
-	// 求和，再派生缓存命中率与 decode 均速。
-	CacheRead  int64 `json:"cache_read_tokens"`
-	CacheWrite int64 `json:"cache_write_tokens"`
-	Reasoning  int64 `json:"reasoning_tokens"`
-	GenMS      int64 `json:"gen_ms,omitempty"`
-	GenOut     int64 `json:"gen_tokens,omitempty"`
+	At int64 `json:"at"` // 桶起点 unix 秒
+	usageTotals
+	AvgDur  int64 `json:"avg_duration_ms"`
+	DurP95  int64 `json:"duration_p95_ms"`
+	AvgTTFB int64 `json:"avg_ttfb_ms"`
+	TTFBP95 int64 `json:"ttfb_p95_ms"`
 }
 
 // dimensionAgg 是按模型或 key 哈希聚合的行。
+// 计数面内嵌 usageTotals，本 struct 只保留维度特有的延迟/分位数/末态字段。
 type dimensionAgg struct {
-	Name           string `json:"name"`
-	Requests       int64  `json:"requests"`
-	Errors         int64  `json:"errors"`
-	Disconnected   int64  `json:"disconnected"`
-	RateLimited    int64  `json:"rate_limited"`
-	ClientFaults   int64  `json:"client_faults"`   // errorOwner==client
-	UpstreamFaults int64  `json:"upstream_faults"` // errorOwner==upstream
-	Input          int64  `json:"input_tokens"`
-	Output         int64  `json:"output_tokens"`
-	CacheRead      int64  `json:"cache_read_tokens"`
-	CacheWrite     int64  `json:"cache_write_tokens"`
-	Reasoning      int64  `json:"reasoning_tokens"`
-	TotalTokens    int64  `json:"total_tokens"`
-	// GenMS/GenOut 是可信流式条目的生成毫秒/输出 token 累计（见
-	// decodeWindow），供前端算 decode 均速。
-	GenMS       int64   `json:"gen_ms,omitempty"`
-	GenOut      int64   `json:"gen_tokens,omitempty"`
+	Name string `json:"name"`
+	usageTotals
 	SumDuration int64   `json:"-"`
 	TTFBSamples int64   `json:"-"`
 	SumTTFB     int64   `json:"-"`
@@ -417,31 +379,7 @@ func (a *usageAggregator) add(e IndexEntry) {
 		a.mins[idx] = usageMinBucket{at: slot * 600}
 	}
 	if a.mins[idx].at == slot*600 {
-		a.mins[idx].requests++
-		// 与 usageTotals.add 同口径：断连/中止按结果归类，不占 errors。
-		if e.Result == "disconnected" || e.Result == "aborted" {
-			a.mins[idx].disconnected++
-		} else if e.StatusCode >= 400 || e.Result == "failed" {
-			a.mins[idx].errors++
-		}
-		if isRateLimited(e) {
-			a.mins[idx].rateLimited++
-		}
-		switch ErrorOwner(e) {
-		case "client":
-			a.mins[idx].clientFaults++
-		case "upstream":
-			a.mins[idx].upstreamFaults++
-		}
-		a.mins[idx].input += e.InputTokens
-		a.mins[idx].output += e.OutputTokens
-		a.mins[idx].cacheRead += e.CacheReadTokens
-		a.mins[idx].cacheWrite += e.CacheWriteTokens
-		a.mins[idx].reasoning += e.ReasoningTokens
-		if out, gen, ok := decodeWindow(e); ok {
-			a.mins[idx].genMS += gen
-			a.mins[idx].genOut += out
-		}
+		a.mins[idx].add(e)
 		pushSample(&a.mins[idx].durs, &a.mins[idx].durHead, e.DurationMS)
 		if e.FirstUpstreamMS != nil {
 			pushSample(&a.mins[idx].ttfbs, &a.mins[idx].ttfbHead, *e.FirstUpstreamMS)
@@ -524,30 +462,10 @@ func (a *usageAggregator) add(e IndexEntry) {
 	}
 }
 
-// addEntry 把请求计入一个维度行。
+// addEntry 把请求计入一个维度行：基础计数走内嵌的 usageTotals，
+// 本方法只补维度特有的延迟和、token 蓄水池与末态快照。
 func (d *dimensionAgg) addEntry(e IndexEntry) {
-	d.Requests++
-	switch {
-	case e.Result == "disconnected" || e.Result == "aborted":
-		d.Disconnected++
-	case e.StatusCode >= 400 || e.Result == "failed":
-		d.Errors++
-	}
-	if isRateLimited(e) {
-		d.RateLimited++
-	}
-	switch ErrorOwner(e) {
-	case "client":
-		d.ClientFaults++
-	case "upstream":
-		d.UpstreamFaults++
-	}
-	d.Input += e.InputTokens
-	d.Output += e.OutputTokens
-	d.CacheRead += e.CacheReadTokens
-	d.CacheWrite += e.CacheWriteTokens
-	d.Reasoning += e.ReasoningTokens
-	d.TotalTokens += e.TotalTokens
+	d.add(e)
 	d.SumDuration += e.DurationMS
 	if e.FirstUpstreamMS != nil {
 		d.TTFBSamples++
@@ -558,10 +476,6 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	}
 	if d.outTokSamples != nil && e.OutputTokens > 0 {
 		d.outTokSamples.push(e.OutputTokens)
-	}
-	if out, gen, ok := decodeWindow(e); ok {
-		d.GenMS += gen
-		d.GenOut += out
 	}
 	d.LastResult = e.Result
 	d.LastStatus = e.StatusCode
@@ -649,19 +563,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 		bucket := a.mins[int(s%usageMinBuckets)]
 		point := usageMinPoint{At: s * 600}
 		if bucket.at == s*600 {
-			point.Requests = bucket.requests
-			point.Errors = bucket.errors
-			point.Disconnected = bucket.disconnected
-			point.RateLimited = bucket.rateLimited
-			point.ClientFaults = bucket.clientFaults
-			point.UpstreamFaults = bucket.upstreamFaults
-			point.Input = bucket.input
-			point.Output = bucket.output
-			point.CacheRead = bucket.cacheRead
-			point.CacheWrite = bucket.cacheWrite
-			point.Reasoning = bucket.reasoning
-			point.GenMS = bucket.genMS
-			point.GenOut = bucket.genOut
+			point.usageTotals = bucket.usageTotals
 			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)
 		}
