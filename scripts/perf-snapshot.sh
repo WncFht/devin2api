@@ -58,7 +58,7 @@ mkdir -p "$OUT"
 WORK="$(mktemp -d)"
 PIDS=()
 cleanup() {
-	for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+	for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done
 	rm -rf "$WORK"
 }
 trap cleanup EXIT

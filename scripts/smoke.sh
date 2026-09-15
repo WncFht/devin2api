@@ -91,14 +91,14 @@ AUTH=()
 if [[ "${NO_UPSTREAM}" == "1" ]]; then
 	# 无 token 时端点应明确拒绝而非挂死：断言确切的 502——语义若变
 	# （比如改成 401/503），让跑的人知道行为漂移了。
-	code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "${AUTH[@]}" "http://localhost:$PORT/v1/models" || true)"
+	code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' ${AUTH[@]+"${AUTH[@]}"} "http://localhost:$PORT/v1/models" || true)"
 	[[ "${code}" == "502" ]] || {
 		echo "/v1/models 空 token 期望 502，实得 ${code:-<timeout>}" >&2
 		exit 1
 	}
 	UPSTREAM_DESC="/v1/models 空 token 明确 502"
 else
-	MODELS_BODY="$(curl -sf "${AUTH[@]}" "http://localhost:$PORT/v1/models")" || {
+	MODELS_BODY="$(curl -sf ${AUTH[@]+"${AUTH[@]}"} "http://localhost:$PORT/v1/models")" || {
 		echo "/v1/models 探针失败（鉴权或上游问题）" >&2
 		exit 1
 	}

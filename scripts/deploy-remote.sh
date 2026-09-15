@@ -121,7 +121,7 @@ check)
 	;;
 uninstall | release)
 	cmd="bash \"${REMOTE_REPO}/scripts/deploy.sh\""
-	for a in "${FWD[@]}"; do cmd+=" $(shq "$a")"; done
+	for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
 	exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
 	;;
 ref)
@@ -136,7 +136,7 @@ ref)
 	cmd="git -C \"${REMOTE_REPO}\" fetch origin --tags --quiet"
 	cmd+=" && git -C \"${REMOTE_REPO}\" checkout --detach $(shq "${REF}")"
 	cmd+=" && bash \"${REMOTE_REPO}/scripts/deploy.sh\""
-	for a in "${FWD[@]}"; do cmd+=" $(shq "$a")"; done
+	for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
 	exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
 	;;
 worktree)
@@ -150,7 +150,7 @@ worktree)
 	cmd+=" && cp \"${REMOTE_REPO}/config.yaml\" \"${STAGING}.new/config.yaml\""
 	cmd+=" && rm -rf \"${STAGING}\" && mv \"${STAGING}.new\" \"${STAGING}\""
 	cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
-	for a in "${FWD[@]}"; do cmd+=" $(shq "$a")"; done
+	for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
 	{ git ls-files -z --cached --others --exclude-standard && printf '.git\0'; } |
 		tar --null --files-from=- -cf - |
 		ssh -o BatchMode=yes "${HOST}" "${cmd}"
