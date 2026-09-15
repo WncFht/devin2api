@@ -78,6 +78,16 @@ func TestUpstreamFault(t *testing.T) {
 	if got := Classify(context.Canceled); got.UpstreamFault || !got.Canceled {
 		t.Fatalf("canceled must not be UpstreamFault: %+v", got)
 	}
+	// 对端 RST_STREAM CANCEL 被 connect-go 映成 canceled code（本地 ctx
+	// 未取消时）——上游传输断裂，不是客户端取消：envoy drain/流级超时
+	// 不该被记成 499 断连，交回 transportBreak 判 UpstreamFault。
+	if got := ClassifyText("canceled: stream error: stream ID 3; CANCEL; received from peer"); got.Canceled || !got.UpstreamFault {
+		t.Fatalf("peer RST_STREAM CANCEL must be UpstreamFault, not Canceled: %+v", got)
+	}
+	// 本地取消语义不受影响：无传输措辞的 canceled 仍按客户端断连归类。
+	if got := ClassifyText("canceled: context canceled"); !got.Canceled || got.UpstreamFault {
+		t.Fatalf("local cancel must stay Canceled, not UpstreamFault: %+v", got)
+	}
 	if got := ClassifyText("invalid_argument: bad request"); got.UpstreamFault || !got.ClientFixable {
 		t.Fatalf("plain invalid_argument must stay ClientFixable: %+v", got)
 	}

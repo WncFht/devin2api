@@ -146,8 +146,12 @@ func derive(failure *Failure) *Failure {
 			break
 		}
 	}
+	// connect-go 把对端 RST_STREAM CANCEL 也映成 canceled code（本地 ctx
+	// 未取消时）——那是上游传输断裂而非客户端取消：命中 http2 传输措辞
+	// 时 code 派生不成立，交回下方 transportBreak 判 UpstreamFault。
+	codeCanceled := failure.Code == "canceled" && !IsHTTP2TransportError(failure.Message)
 	failure.Canceled = failure.Canceled ||
-		failure.Code == "canceled" ||
+		codeCanceled ||
 		errors.Is(failure.Cause, context.Canceled) ||
 		strings.Contains(message, "context canceled")
 	failure.Timeout = failure.Timeout ||
