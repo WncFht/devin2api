@@ -372,12 +372,19 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		cancel()
 		// 本地限流闸的拒绝记 rate_gate 与上游真拒（devin_connect）区分：
 		// 聚合排障时前者说明根本没碰到上游，后者才是上游配额动作。
-		stage := "devin_connect"
-		var failure *llm.Failure
-		if errors.As(err, &failure) && failure.LocalGate {
-			stage = "rate_gate"
+		// ctx 已取消（客户端断连/排空）时不记——外层记
+		// client_disconnected，这里抢占首个失败点会把它顶掉。
+		if streamCtx.Err() == nil {
+			stage := "devin_connect"
+			var failure *llm.Failure
+			if errors.As(err, &failure) && failure.LocalGate {
+				stage = "rate_gate"
+			} else if isTransientConnectError(err) {
+				// 建连期的传输断裂与中流断裂同层，不混进上游语义拒绝桶。
+				stage = "devin_transport"
+			}
+			recorder.WriteError(stage, err)
 		}
-		recorder.WriteError(stage, err)
 		// 错误分类记录随车携带——下游经 common.Classify 取回结构事实，
 		// 不再按文本反推。
 		return nil, llm.Classify(err)
@@ -1113,6 +1120,9 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 		return false
 	}
 	stream.retried = true
+	// 换流前先杀旧泵：stall 重开时旧泵可能还堵在 Receive 上，
+	// 不 cancel 它就带着旧 gRPC 流陪跑到请求结束。
+	stream.cancel()
 	stream.frames = frames
 	stream.cancel = cancel
 	if stream.newDecoder != nil {
