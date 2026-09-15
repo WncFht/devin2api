@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	devinproto "local/devinproto"
 
@@ -439,8 +440,17 @@ func (decoder *responseDecoder) scanTextForStops(events []llm.ResponseEvent) []l
 		decoder.textBuilder.WriteString(text[:earliest])
 		return decoder.endText(events)
 	}
+	// safe 是字节下界，可能落在多字节 rune 中间：回退到最近的 rune
+	// 起点，残续字节留在 holdback 窗口等下一帧补齐——否则下发半个
+	// UTF-8 序列会被编码端替成 U+FFFD，残字节再产一个，客户端永久
+	// 丢字符。
 	if safe := len(text) - decoder.maxPatternLen + 1; safe > decoder.textEmitted {
-		events = append(events, decoder.emitTextDelta(text[decoder.textEmitted:safe]))
+		for safe < len(text) && !utf8.RuneStart(text[safe]) {
+			safe--
+		}
+		if safe > decoder.textEmitted {
+			events = append(events, decoder.emitTextDelta(text[decoder.textEmitted:safe]))
+		}
 	}
 	return events
 }

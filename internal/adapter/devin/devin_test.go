@@ -1424,6 +1424,35 @@ func TestResponseDecoderStopSequenceAcrossDeltas(t *testing.T) {
 	}
 }
 
+// TestResponseDecoderStopSequenceRuneBoundary 验证 holdback 安全窗不劈开
+// 多字节 rune：safe 是字节下界，落在 UTF-8 序列中间时下发半个 rune 会被
+// 编码端替成 U+FFFD，残续字节再产一个——客户端永久丢字符。
+func TestResponseDecoderStopSequenceRuneBoundary(t *testing.T) {
+	decoder := newResponseDecoder("model", []string{"STOP"}, nil)
+	decoder.start()
+	var emitted string
+	for _, event := range decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("ab中文cd")}) {
+		if event.Type == llm.ResponseEventTextDelta {
+			emitted += event.Delta
+		}
+	}
+	// "文" 的末字节在旧字节下界内：只能下发到最近的 rune 起点。
+	if emitted != "ab中" || strings.ContainsRune(emitted, '\uFFFD') {
+		t.Fatalf("emitted = %q, want %q without replacement char", emitted, "ab中")
+	}
+	// 文字块收尾时残续字节随尾部完整冲刷，不丢字符。
+	for _, event := range decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+		Id: proto.String("c"), Name: proto.String("exec"), ArgumentsJson: proto.String(`{}`),
+	}}}) {
+		if event.Type == llm.ResponseEventTextDelta {
+			emitted += event.Delta
+		}
+	}
+	if emitted != "ab中文cd" {
+		t.Fatalf("total emitted = %q, want %q", emitted, "ab中文cd")
+	}
+}
+
 // TestResponseDecoderNoStopMatchFlushesTail 验证未命中时保留的尾部
 // 在文字块关闭时随最后一个 delta 全部下发。
 func TestResponseDecoderNoStopMatchFlushesTail(t *testing.T) {
