@@ -10,7 +10,7 @@ $$
 - **cache_write 按 ~1.0× input 价计费**（拟合隐含价 $9.5–10.7/Mtok，fable input 价 $10），不是 Anthropic 惯例的 1.25×[^anthropic-cache]；
 - `credit_multiplier` 与实际扣费无关（同为 mult=175 的调用燃烧量差 200 倍）；
 - catalog 无价格维的 free 档模型（swe-2-max 等）燃烧低于检出限——日级 ~1-2pts 的未归因残差大部分可由 int-floor 与入账延迟解释，但不能排除存在微量燃烧；
-- 日额度归零后字段返回 null，付费模型被上游 `failed_precondition` 拒，free 档不受影响。
+- 日/周额度任一归零后对应字段返回 null，付费模型被上游 `failed_precondition` 拒，free 档不受影响。
 
 ## 数据来源
 
@@ -54,10 +54,10 @@ $$
 ## 行为层面的附带发现
 
 - **重置**：`daily_quota_reset_at` 与 `weekly_quota_reset_at` **各自**指向下一次重置——daily 每日 16:00 +08，weekly 每周日 16:00 +08，仅周日重合产生双重置（写作时实测 daily=09-15 16:00 ≠ weekly=09-20 16:00，即"同一时刻"是误读）。"周额度"实为 ~1.8×日额度的并行预算，不是滚动 7 天。
-- **归零**：daily 烧穿后 `dailyQuotaRemainingPercent` 直接变 null；付费调用在 connect 阶段收到 400 `failed_precondition: Your daily usage quota has been exhausted`（可引导至 app.devin.ai 购买 on-demand）[^devin-quota]；free 档（swe-2-max）照常服务，归零后 242 个调用全部 completed。
+- **归零**：daily 烧穿后 `dailyQuotaRemainingPercent` 直接变 null；付费调用在 connect 阶段收到 400 `failed_precondition: Your daily usage quota has been exhausted`（可引导至 app.devin.ai 购买 on-demand）[^devin-quota]；free 档（swe-2-max）照常服务，归零后 242 个调用全部 completed。weekly 归零同语义：`weeklyQuotaRemainingPercent` 变 null，付费档同样被 `failed_precondition` 拦（文案换成 weekly），free 档继续服务——两额度是并行预算，任一归零都拦付费档。
 - **失败计费**：配额拒绝（`failed_precondition`）不产生燃烧已证实（请求没真正执行）；但**已产出 token 的断连/流失败照常计费**——7 例实测，含一例 fable 断连携 `cache_write=89937`（≈$0.9 目录价）在入账中可见。
 - **入账延迟**：~1–3 分钟，且偶发 10 分钟级延迟。
-- `overageBalanceMicros` 恒为 -500354（未开 auto-reload），`acuConsumed/acuLimit` 恒 null——Teams 座位的配额不走 ACU 通道。
+- `overageBalanceMicros` 恒为 -500354（未开 auto-reload）——是静态占位值而非欠费/负债读数，不随燃烧变动；`acuConsumed/acuLimit` 恒 null——Teams 座位的配额不走 ACU 通道。
 - `GetQuotaUsageInternal`（能直接返回日/周 usage_micros/limit_micros）需要 admin secret，普通会话 token 拿不到，所以只能反推。
 
 ## 复现

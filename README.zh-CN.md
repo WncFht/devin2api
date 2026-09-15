@@ -161,7 +161,7 @@ curl http://localhost:8080/v1/messages \
 | `server.listen`                                  | HTTP 监听地址                                                                                                                                | 是                                                                                                 |
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                                                         | `1024`                                                                                             |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                                                       | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                                                           | 否——未配置时接口返回 502                                                                           |
+| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                                                           | 否——未配置时接口返回 401                                                                           |
 | `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                                                         | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）；匹配顺序：精确 → 大小写不敏感 → `"*"` 兜底；别名列进 `/v1/models` 并带 `alias_of` | 无                                                                                                 |
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                                                               | `chisel` / `3000.2.17` / `mac`                                                                     |
@@ -206,7 +206,7 @@ auth:
 注意：
 
 - token 等敏感字段在日志中会被脱敏为 `<redacted>`，不会泄露；
-- `devin.token` 为空时，`/v1/*` 接口返回 `502`，错误类型 `server_error`（message 为 `provider adapter is not configured`）；
+- `devin.token` 为空时，请求照常发到上游并返回 `401`，错误类型 `authentication_error`——token 出现在自动发现链任一来源后下一个请求即恢复，无需重启；
 - `config.yaml` 已在 `.gitignore` 中——真实 token 不要入库；pre-commit 挂了 gitleaks 会拦误提交的 secret。
 
 ## 文档

@@ -101,20 +101,20 @@
 
 # 服务排障（对运行中的实例）
 
-本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值），非流式错误体还带 `stage`（写出错误的 HTTP 处理层）。失败的首因分层 stage 以 `error.json`/`index.jsonl` 为准：`devin_transport` 是连接被截断类传输故障（含 connect.Error 包装的 EOF/帧截断），`devin_connect` 是上游语义拒绝（参数/权限/限流），`rate_gate` 是本地速率闸门快败（未触达上游）。管线前拒绝（鉴权 401 / 并发 429 / 排空 503 / WS 准入）不产生调试目录、不进 index.jsonl：查 `/panel/api/stats` 的 `http.rejects`（分原因计数 + 最近事件环），跨重启痕迹在 `stderr.log` 的 `request rejected` 行（reason 同源）。
+本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值），非流式错误体还带 `stage`（写出错误的 HTTP 处理层）。失败的首因分层 stage 以 `error.json`/`index.jsonl` 为准：`devin_transport` 是连接被截断类传输故障（含 connect.Error 包装的 EOF/帧截断），`devin_connect` 是上游语义拒绝（参数/权限/限流），`rate_gate` 是本地速率闸门快败（未触达上游，含续试重打被闩拦），`request_build` 是本地请求投影失败（tool_choice 指空等参数校验，未触达上游）；客户端断连记 `client_disconnected`，响应未提交时 status 记 499。管线前拒绝（鉴权 401 / 并发 429 / 排空 503 / WS 准入 / 读体失败 `http_read`）不产生调试目录、不进 index.jsonl：查 `/panel/api/stats` 的 `http.rejects`（分原因计数 + 最近事件环），跨重启痕迹在 `stderr.log` 的 `request rejected` 行（reason 同源）。
 
 工作流：
 
 1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
-2. 读 `logs/<dir>/meta.json`（结果、三段模型、五段延迟分解 `request_ready/upstream_sent/upstream_open/first_upstream/first_client_ms`、token、upstream_request_id）与 `error.json`（首个失败点）。延迟分解字段的段语义见 `docs/perf.md`。
+2. 读 `logs/<dir>/meta.json`（结果、三段模型、五段延迟分解 `request_ready/upstream_sent/upstream_open/first_upstream/first_client_ms`、token、upstream_request_id）与 `error.json`（首个失败点）。延迟分解字段的段语义见 `docs/perf.md`；`repairs` 是投影/sanitize 修复计数——CC 流量有 ~15 hits/req 的基线，异常信号是命中规则 id 集合的漂移而非总数涨落。
 3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。上游重试（token 自愈/空响应/transport 重开）时每次续试写 `03-devin-request.attemptN.json`，并在 04 中插入 `retry_attempt` 标记行分隔各次尝试的原始帧；次数与原因另落 `index.jsonl` 的 `retries` 与 meta.json 的 `retry_attempts`。
 4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希、全部 token 分类、重发次数 `retries`），`grep` 即可；更早历史被 retention 清理后索引仍在。
 5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
 
 聚合与生命周期：
 
-- `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势、最近 4096 条延迟 p50/p90/p95/p99、错误责任归因 `client_faults`/`upstream_faults` 与 SLA 口径成功率、按模型 token 分位数与目录价估算成本）；启动时回放索引尾部（≤64MB）重建，进程重启不丢口径。
-- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`http.rejects` 段暴露管线前拒绝（`by_reason` 分原因计数 + `recent` 最近 256 条事件环）；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数/分钟窗口配额与已放行数/可发区间/排队数 + `events` 闩迁移事件环——上闩/延闩/解闩/到期/恢复——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）。
+- `GET /panel/api/usage` 是 index.jsonl 的内存聚合（今日/窗口累计、按模型/按 key、错误阶段、8 天 10 分钟粒度趋势、最近 4096 条延迟 p50/p90/p95/p99、错误责任归因 `client_faults`/`upstream_faults` 与 SLA 口径成功率、按模型 token 分位数与目录价估算成本）；启动时回放索引尾部（≤256MB）重建，进程重启不丢口径。
+- `GET /panel/api/stats` 的 `http.process`（goroutine/堆/GC/CPU/RSS）与 `http.rates`（RPM/QPS）区分「代理自身瓶颈」与「上游/客户端慢」；`http.rejects` 段暴露管线前拒绝（`by_reason` 分原因计数 + `recent` 最近 256 条事件环）；`debuglog` 段暴露日志管道自观测（开关、写队列积压、丢弃数、IO 失败数）；`gate` 段暴露速率闸门状态（闩态/闩截止/滴灌与快败计数/分钟窗口配额与已放行数/可发区间/排队数 + `events` 闩迁移事件环——上闩/延闩/解闩/到期/恢复——冷却闩截止时刻另落盘 `logs/gate-state.json`，重启后未过期的闩自动恢复）；`last_bind_failure` 与落盘的 `logs/bind-failure.json` 记录最近一次监听端口争夺（`first_at`/`last_at`/`count`/`holder`），是重启风暴的取证入口。
 - `GET /panel/api/quota` 读 `logs/quota.jsonl`（每 `debug.quota_interval_minutes` 一条快照），返回日/周配额曲线与按燃烧速率外推的耗尽时刻。
 - `GET /panel/api/logs?offset=` 增量拉取 `stderr.log`；`POST /panel/api/requests/{dir}/abort` 中断进行中请求（取消上游 ctx，结果记为 `aborted`，区别于客户端断连的 `disconnected`）；`POST /panel/api/debug/toggle` 热切换请求日志。
 - `GET /panel/api/config` 返回脱敏后的生效配置视图（`devin.token`/`auth.api_key`/`dashboard.password` 以 `sha256:` 前缀代替明文，`devin.proxy` 的 userinfo 整段剔除，可与日志 `key_hash` 对照；`stale=true` 表示文件在最后一次加载后被改过）。`POST /panel/api/config/reload` 重读 config.yaml 并热应用，返回 `applied`（已生效字段）与 `requires_restart`（要重启才生效：`server.listen`/`max_concurrency`/`devin.base_url`/`proxy`/`force_http1`/`debug.quota_interval_minutes`/`debug.pprof_listen`）；校验失败 422、旧配置继续服役。注意 `devin.client_*` 只影响 chat 路径——面板自身的 seat 类上游调用固定用 windsurf 身份。
@@ -139,9 +139,9 @@ Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST
 本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003（config 的 `server.listen`，作者本机取值），plist 与原理见 docs/deployment.md。
 
 - 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/Library/Application Support/devin-2api/` → reuseport 交接进程预接管 → `kickstart -k` → 托管新实例拉起后退交接 → healthz 校验版本）。
-- macOS 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 与 logs/ 在 `~/Library/Application Support/devin-2api/`（TCC 保护目录之外——launchd 子进程对 ~/Desktop 的 open 会被授权判定永久挂起）。仓库 `logs/` 是指向该目录的符号链接，排障路径照旧。
+- macOS 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 与 logs/ 在 `~/Library/Application Support/devin-2api/`（TCC 保护目录之外——launchd 子进程对 ~/Desktop 的 open 会被授权判定永久挂起）。仓库 `logs/` 是指向该目录的符号链接，排障路径照旧。stderr/stdout.log 由部署装上的每日轮转管（copytruncate ≥50MB、留 `.1`–`.3.gz`；launchd `com.$USER.devin-2api.logrotate` agent，Linux 对应 `devin-2api-logrotate.timer`）。
 - **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
-- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=330` 覆盖 300s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。
+- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
 - 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 

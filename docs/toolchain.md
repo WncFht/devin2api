@@ -74,7 +74,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 ## 6. 部署脚本族 + 资产断言
 
-- `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。三平台部署细节见 `deployment.md`。
+- `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
 - `scripts/deploy-remote.sh` 是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 仍取远端仓库的权威副本），`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。
 - `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。

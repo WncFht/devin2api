@@ -161,7 +161,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `server.listen`                                  | HTTP listen address                                                                                                                                               | Yes                                                                                                          |
 | `server.max_concurrency`                         | Max concurrent `/v1/*` requests                                                                                                                                   | `1024`                                                                                                       |
 | `devin.base_url`                                 | Devin Connect service base URL                                                                                                                                    | Yes, once `devin.token` is set (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token`                                    | Devin session token (`devin-session-token$...`); empty = discover from env / credentials file                                                                     | No — endpoints return 502 until set                                                                          |
+| `devin.token`                                    | Devin session token (`devin-session-token$...`); empty = discover from env / credentials file                                                                     | No — endpoints return 401 until a token is discoverable                                                      |
 | `devin.model`                                    | Devin chat model UID (e.g. `glm-5-2`)                                                                                                                             | Yes, once `devin.token` is set (no default in code)                                                          |
 | `devin.aliases`                                  | Client model name → upstream UID map (`swe-2: swe-2-max`); match order exact → case-insensitive → `"*"` catch-all; aliases appear in `/v1/models` with `alias_of` | none                                                                                                         |
 | `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata                                                                                                                         | `chisel` / `3000.2.17` / `mac`                                                                               |
@@ -206,7 +206,7 @@ auth:
 Notes:
 
 - tokens are never written to logs (redacted as `<redacted>`);
-- if `devin.token` is empty, `/v1/*` endpoints return `502` with type `server_error` (message `provider adapter is not configured`);
+- if `devin.token` is empty, requests still go upstream and return `401` with type `authentication_error` — once a token shows up in any discovery source the next request succeeds, no restart needed;
 - `config.yaml` is gitignored — keep real tokens out of git anyway; pre-commit runs gitleaks to catch committed secrets.
 
 ## Documentation
