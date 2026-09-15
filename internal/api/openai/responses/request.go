@@ -100,18 +100,29 @@ type RequestOptions struct {
 }
 
 // DecodeRequest 将 OpenAI Responses JSON 请求转换为中间请求。
-func DecodeRequest(data []byte) (AdaptedRequest, error) {
+// collectDropped 为 true 时对请求体做二次全量扫描收集顶层未消费字段
+// （field:* 标记）；为 false 跳过——Dropped 的唯一读者是 debuglog 请求
+// 投影，debug 关时整棵字段树白建。其余 Dropped 写入点都在低频分支，
+// 不随该开关门控。
+func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	var request Request
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&request); err != nil {
 		return AdaptedRequest{}, fmt.Errorf("decode responses request: %w", err)
+	}
+	if decoder.More() {
+		// 顶层 JSON 后还有内容说明 body 不是单个请求对象——多半
+		// 是客户端 bug 或代理误拼接，静默忽略会掩盖截断/串包。
+		return AdaptedRequest{}, errors.New("responses request has trailing data after JSON body")
 	}
 	if request.Model == "" {
 		return AdaptedRequest{}, errors.New("responses request model is required")
 	}
 
 	context := llm.RequestMessages{Model: request.Model, SystemPrompt: request.Instructions}
-	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, responsesRequestFields)...)
+	if collectDropped {
+		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, responsesRequestFields)...)
+	}
 	if request.MaxOutputTokens != nil && *request.MaxOutputTokens > 0 {
 		context.MaxTokens = request.MaxOutputTokens
 	}
@@ -164,6 +175,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
 		}
 	}
+	// 相邻 assistant 回合先合并（与 chat/anthropic 两面同走 IR 层共享
+	// 实现）：假回合边界会让 wire 抬高提前 EOS 概率。
+	context.MergeAdjacentAssistantTurns()
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
 	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
@@ -208,50 +222,7 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 	}
 	// 输入尾部孤儿 reasoning：其后没有可挂的 assistant 产出。
 	dropPendingReasoning(context, &pending)
-	context.Messages = mergeAdjacentAssistantTurns(context.Messages)
 	return nil
-}
-
-// mergeAdjacentAssistantTurns 合并连续的 AssistantMessage：Responses 输入项
-// 把一个模型回合铺平成 message/function_call 多个 item，逐 item 成消息会让
-// wire 上产生假的回合边界、抬高宣告处 EOS 概率（issue #2；机制见
-// notes/archive/2026-09-12-premature-endturn.md）。连续 assistant 消息必属
-// 同一回合——回合边界永远由 user/tool_result item 分隔。
-func mergeAdjacentAssistantTurns(messages []llm.Message) []llm.Message {
-	merged := make([]llm.Message, 0, len(messages))
-	for _, message := range messages {
-		assistant, ok := message.(llm.AssistantMessage)
-		if !ok || len(merged) == 0 {
-			merged = append(merged, message)
-			continue
-		}
-		last, ok := merged[len(merged)-1].(llm.AssistantMessage)
-		if !ok {
-			merged = append(merged, message)
-			continue
-		}
-		// 两段相邻文本之间补换行：convertMessage 对多块 TextContent 无分隔
-		// 直连，不补会把回合内两条 message 的正文粘连。
-		if len(last.Content) > 0 && len(assistant.Content) > 0 {
-			_, prevText := last.Content[len(last.Content)-1].(llm.TextContent)
-			_, nextText := assistant.Content[0].(llm.TextContent)
-			if prevText && nextText {
-				last.Content = append(last.Content, llm.TextContent{Text: "\n"})
-			}
-		}
-		last.Content = append(last.Content, assistant.Content...)
-		if assistant.OutputID != "" {
-			last.OutputID = assistant.OutputID
-		}
-		for _, block := range assistant.Content {
-			if _, isCall := block.(llm.ToolCall); isCall {
-				last.StopReason = llm.StopReasonToolUse
-				break
-			}
-		}
-		merged[len(merged)-1] = last
-	}
-	return merged
 }
 
 // pendingReasoning 缓冲 reasoning item 的 summary 文本与可回放签名。
@@ -437,6 +408,9 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 // decodeToolOutput 解码 function_call_output/custom_tool_call_output 的
 // output：字符串直接成文本；part 数组（可含 input_image——实测上游
 // tool_result 图像子通道有效）按消息内容解码；其余 JSON 原样转文本。
+// part 解码失败的容忍是刻意的——output 字段本来就允许任意 JSON，降格为
+// 字面文本保住内容（消息路径同形态是 400，因为那里 content 语义是确定的），
+// 但形似 part 序列却解不动的要留 Dropped 对账。
 func decodeToolOutput(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
@@ -451,8 +425,26 @@ func decodeToolOutput(context *llm.RequestMessages, raw json.RawMessage) ([]llm.
 		if err == nil && len(content) > 0 {
 			return content, nil
 		}
+		if err != nil && toolOutputLooksLikeParts(raw) {
+			context.Dropped = append(context.Dropped, "tool_output:malformed_parts")
+		}
 	}
 	return []llm.Content{llm.TextContent{Text: string(raw)}}, nil
+}
+
+// toolOutputLooksLikeParts 判定数组元素带 type 键——即调用方按 content
+// part 意图编码（区别于本就任意的 JSON 数组），解码失败值得记 Dropped。
+func toolOutputLooksLikeParts(raw json.RawMessage) bool {
+	var elements []map[string]json.RawMessage
+	if json.Unmarshal(raw, &elements) != nil {
+		return false
+	}
+	for _, element := range elements {
+		if _, has := element["type"]; has {
+			return true
+		}
+	}
+	return false
 }
 
 // appendMessageItem 把一条 message item 按 role 解码进会话；未知 role 记 Dropped。
@@ -475,9 +467,14 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 		return err
 	}
 	if len(content) == 0 {
-		// content 为空数组或全部 part 被丢弃：整条消息不上行不能静默。
+		// content 为空数组或全部 part 被丢弃：消息不静默消失——记
+		// Dropped 并继续走各 role 分支。user 落空文本占位保住轮次结构，
+		// assistant 保留空消息（wire 端按 DroppedEmptyAssistant 计），
+		// system/developer 对 SystemPrompt 无贡献。与 anthropic 面同口径。
 		context.Dropped = append(context.Dropped, "empty_message:"+role)
-		return nil
+		if role == "user" {
+			content = []llm.Content{llm.TextContent{Text: ""}}
+		}
 	}
 	switch role {
 	case "user":

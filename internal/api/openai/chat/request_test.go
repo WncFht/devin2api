@@ -3,6 +3,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
   "tools": [{"type": "function", "function": {"name": "read_file", "description": "读取文件", "parameters": {"type": "object"}}}]
 }`)
 
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 
 // TestDecodeRequestAcceptsPlainString 验证简短字符串输入会转换为用户文字消息。
 func TestDecodeRequestAcceptsPlainString(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`))
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hello"}]}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestDecodeRequestAcceptsPlainString(t *testing.T) {
 
 // TestDecodeRequestAcceptsFunctionCallArguments 验证工具调用参数按 JSON 对象保留。
 func TestDecodeRequestAcceptsFunctionCallArguments(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","messages":[{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]}]}`))
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","messages":[{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]}]}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestDecodeRequestAcceptsLegacyFunctionDialect(t *testing.T) {
 	  "function_call": {"name": "read_file"}
 	}`)
 
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +129,105 @@ func TestDecodeRequestAcceptsLegacyFunctionDialect(t *testing.T) {
 	}
 	if err := request.Context.Validate(); err != nil {
 		t.Fatalf("context validation error = %v", err)
+	}
+}
+
+// TestDecodeRequestTrailingData 验证顶层 JSON 后的尾随内容报错而非静默忽略——
+// 与 anthropic 面的 decoder.More() 检查对齐。
+func TestDecodeRequestTrailingData(t *testing.T) {
+	data := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]} extra`)
+	if _, err := DecodeRequest(data, true); err == nil {
+		t.Fatal("trailing data should error")
+	}
+}
+
+// TestDecodeRequestMergesAdjacentAssistants 验证客户端发来的连续 assistant
+// 消息合并为一个回合——与 responses 面同一实现（IR 层共享），防止 wire 上
+// 出现假回合边界。
+func TestDecodeRequestMergesAdjacentAssistants(t *testing.T) {
+	data := []byte(`{"model":"gpt-test","messages":[
+		{"role":"assistant","content":"第一段"},
+		{"role":"assistant","content":"第二段","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call-1","content":"结果"},
+		{"role":"assistant","content":"下一回合"}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3 (merged)", len(request.Context.Messages))
+	}
+	merged, ok := request.Context.Messages[0].(llm.AssistantMessage)
+	if !ok || merged.StopReason != llm.StopReasonToolUse {
+		t.Fatalf("message[0] = %#v, want merged assistant with toolUse", request.Context.Messages[0])
+	}
+	if _, ok := request.Context.Messages[1].(llm.ToolResultMessage); !ok {
+		t.Fatalf("message[1] = %T, want ToolResultMessage", request.Context.Messages[1])
+	}
+	if _, ok := request.Context.Messages[2].(llm.AssistantMessage); !ok {
+		t.Fatalf("message[2] = %T, want separate assistant turn", request.Context.Messages[2])
+	}
+}
+
+// TestDecodeRequestEmptyContent 验证空 content 口径与 anthropic 面对齐：
+// user 的 content:[] 落成空文本占位并记 empty_message:user；assistant
+// 完全无产出（无 content 无 tool_calls）记 empty_message:assistant。
+func TestDecodeRequestEmptyContent(t *testing.T) {
+	data := []byte(`{"model":"gpt-test","messages":[
+		{"role":"user","content":[]},
+		{"role":"assistant"},
+		{"role":"user","content":"hi"}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(request.Context.Messages))
+	}
+	user := request.Context.Messages[0].(llm.UserMessage)
+	if text, ok := user.Content[0].(llm.TextContent); !ok || text.Text != "" {
+		t.Fatalf("empty user placeholder = %#v", user.Content)
+	}
+	dropped := fmt.Sprint(request.Context.Dropped)
+	for _, want := range []string{"empty_message:user", "empty_message:assistant"} {
+		if !strings.Contains(dropped, want) {
+			t.Fatalf("dropped = %v, want %s", request.Context.Dropped, want)
+		}
+	}
+}
+
+// TestDecodeRequestSkipsFieldScan 验证 collectDropped=false 时跳过顶层
+// 未消费字段扫描（debuglog 关闭的生产路径），其余 Dropped 记账不受影响。
+func TestDecodeRequestSkipsFieldScan(t *testing.T) {
+	data := []byte(`{"model":"gpt-test","messages":[{"role":"user","content":[]}],"store":true,"reasoning_effort":"high"}`)
+	withScan, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutScan, err := DecodeRequest(data, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	droppedOn := fmt.Sprint(withScan.Context.Dropped)
+	for _, want := range []string{"field:store", "field:reasoning_effort"} {
+		if !strings.Contains(droppedOn, want) {
+			t.Fatalf("collectDropped=true dropped = %v, want %s", withScan.Context.Dropped, want)
+		}
+	}
+	for _, marker := range withoutScan.Context.Dropped {
+		if strings.HasPrefix(marker, "field:") {
+			t.Fatalf("collectDropped=false still collected field marker %q", marker)
+		}
+	}
+	found := false
+	for _, marker := range withoutScan.Context.Dropped {
+		if marker == "empty_message:user" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("collectDropped=false dropped = %v, want empty_message:user", withoutScan.Context.Dropped)
 	}
 }

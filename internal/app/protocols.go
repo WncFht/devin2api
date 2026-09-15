@@ -56,24 +56,34 @@ type httpError struct {
 	DebugRef string
 }
 
+// marshalOpenAIError 编码 OpenAI 系（chat/responses 共享）的
+// {"error":{...}} 信封；stage 非空即 HTTP 错误响应形态——附带 stage
+// 字段与尾随换行，流内错误体不带。
+func marshalOpenAIError(failure *llm.Failure, errorType, debugRef, stage string) []byte {
+	payload := common.BuildErrorPayload(failure.Error(), failure, errorType, debugRef, true)
+	if stage != "" {
+		payload["stage"] = stage
+	}
+	body, _ := json.Marshal(map[string]any{"error": payload})
+	if stage != "" {
+		return append(body, '\n')
+	}
+	return body
+}
+
 // openAIHTTPError 编码 OpenAI 系（chat/responses 共享）的 HTTP 错误体。
 func openAIHTTPError(e httpError) []byte {
 	errorType := common.OpenAIErrorType(e.Failure)
 	if e.ClientFixable {
 		errorType = "invalid_request_error"
 	}
-	payload := common.BuildErrorPayload(e.Failure.Error(), e.Failure, errorType, e.DebugRef, true)
-	payload["stage"] = e.Stage
-	body, _ := json.Marshal(map[string]any{"error": payload})
-	return append(body, '\n')
+	return marshalOpenAIError(e.Failure, errorType, e.DebugRef, e.Stage)
 }
 
 // openAIErrorBody 编码 OpenAI 系（chat/responses 共享）的错误 JSON 体。
 func openAIErrorBody(err error, debugRef string) []byte {
 	failure := llm.Classify(err)
-	payload := common.BuildErrorPayload(failure.Error(), failure, common.OpenAIErrorType(failure), debugRef, true)
-	body, _ := json.Marshal(map[string]any{"error": payload})
-	return body
+	return marshalOpenAIError(failure, common.OpenAIErrorType(failure), debugRef, "")
 }
 
 // streamEncoder 抽象三种协议共有的中间事件编码。
@@ -109,7 +119,7 @@ func (p responsesProtocol) EncodeHTTPError(e httpError) []byte {
 func (p responsesProtocol) StreamErrorEvents() bool { return true }
 
 func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
-	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
+	return appendNamedSSE(dst, name, data)
 }
 
 // chatProtocol 实现 OpenAI Chat Completions 协议。
@@ -138,7 +148,9 @@ func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	if name == common.SSEDone {
 		return append(dst, ("data: " + common.SSEDone + "\n\n")...)
 	}
-	return fmt.Appendf(dst, "data: %s\n\n", data)
+	dst = append(dst, "data: "...)
+	dst = append(dst, data...)
+	return append(dst, '\n', '\n')
 }
 
 // anthropicProtocol 实现 Anthropic Messages 协议。
@@ -173,14 +185,26 @@ func (p anthropicProtocol) EncodeHTTPError(e httpError) []byte {
 }
 
 func (p anthropicProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
-	return fmt.Appendf(dst, "event: %s\ndata: %s\n\n", name, data)
+	return appendNamedSSE(dst, name, data)
+}
+
+// appendNamedSSE 把单条带 event 字段的 SSE 帧追加编码到 dst——
+// fmt.Appendf 每帧要过格式串解析与 reflect 装箱，直拼省掉这层开销。
+func appendNamedSSE(dst []byte, name string, data []byte) []byte {
+	dst = append(dst, "event: "...)
+	dst = append(dst, name...)
+	dst = append(dst, "\ndata: "...)
+	dst = append(dst, data...)
+	return append(dst, '\n', '\n')
 }
 
 // decodeRequest 把具体协议的解码结果统一为中间请求和公共选项。
-type decodeRequestFunc func([]byte) (llm.RequestMessages, protocolOptions, error)
+// collectDropped 决定是否收集顶层未消费字段（Dropped 的唯一读者是
+// debuglog 请求投影）——debug 关时不值得为记账再做一遍全量扫描。
+type decodeRequestFunc func(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error)
 
-func decodeResponsesRequest(data []byte) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := responses.DecodeRequest(data)
+func decodeResponsesRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := responses.DecodeRequest(data, collectDropped)
 	if err != nil {
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
@@ -202,8 +226,8 @@ func decodeResponsesRequest(data []byte) (llm.RequestMessages, protocolOptions, 
 	}, nil
 }
 
-func decodeChatRequest(data []byte) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := chat.DecodeRequest(data)
+func decodeChatRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := chat.DecodeRequest(data, collectDropped)
 	if err != nil {
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}
@@ -213,8 +237,8 @@ func decodeChatRequest(data []byte) (llm.RequestMessages, protocolOptions, error
 	}, nil
 }
 
-func decodeAnthropicRequest(data []byte) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := messages.DecodeRequest(data)
+func decodeAnthropicRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := messages.DecodeRequest(data, collectDropped)
 	if err != nil {
 		return llm.RequestMessages{}, protocolOptions{}, err
 	}

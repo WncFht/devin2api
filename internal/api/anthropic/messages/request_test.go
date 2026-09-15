@@ -26,7 +26,7 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
   "tools": [{"name": "read_file", "description": "读取文件", "input_schema": {"type": "object"}}]
 }`)
 
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestDecodeRequestPreservesMidConversationSystem(t *testing.T) {
   ],
   "max_tokens": 256
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestDecodeRequestReplaysThinkingSignature(t *testing.T) {
   ],
   "max_tokens": 256
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestDecodeRequestReplaysThinkingSignature(t *testing.T) {
 
 // TestDecodeRequestAcceptsStringContent 验证简短字符串输入会转换为用户文字消息。
 func TestDecodeRequestAcceptsStringContent(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":256}`))
+	request, err := DecodeRequest([]byte(`{"model":"claude-test","messages":[{"role":"user","content":"hello"}],"max_tokens":256}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestDecodeRequestClientTypedTools(t *testing.T) {
     {"name": "plain_custom", "input_schema": {"type": "object", "properties": {"x": {"type": "string"}}}}
   ]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestDecodeRequestDroppedFields(t *testing.T) {
   "top_k": -1,
   "messages": [{"role": "user", "content": []}, {"role": "user", "content": "hi"}]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,60 @@ func TestDecodeRequestDroppedFields(t *testing.T) {
 // TestDecodeRequestTrailingData 验证顶层 JSON 后的尾随内容报错而非静默忽略。
 func TestDecodeRequestTrailingData(t *testing.T) {
 	data := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hi"}]} extra`)
-	if _, err := DecodeRequest(data); err == nil {
+	if _, err := DecodeRequest(data, true); err == nil {
 		t.Fatal("trailing data should error")
+	}
+}
+
+// TestDecodeRequestMergesAdjacentAssistants 验证连续 assistant 消息合并为
+// 一个回合——与 responses/chat 面同一实现（IR 层共享），防止 wire 上的
+// 假回合边界抬高提前 EOS 概率。
+func TestDecodeRequestMergesAdjacentAssistants(t *testing.T) {
+	data := []byte(`{"model":"claude-test","max_tokens":256,"messages":[
+		{"role":"assistant","content":[{"type":"text","text":"第一段"}]},
+		{"role":"assistant","content":[{"type":"text","text":"第二段"},{"type":"tool_use","id":"call-1","name":"read","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"结果"}]},
+		{"role":"assistant","content":[{"type":"text","text":"下一回合"}]}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// user 消息里的 tool_result 拆成独立 ToolResultMessage——分隔了两侧
+	// assistant，所以最终是 merged / result / assistant / 三段。
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(request.Context.Messages))
+	}
+	merged, ok := request.Context.Messages[0].(llm.AssistantMessage)
+	if !ok || merged.StopReason != llm.StopReasonToolUse {
+		t.Fatalf("message[0] = %#v, want merged assistant with toolUse", request.Context.Messages[0])
+	}
+	if _, ok := request.Context.Messages[1].(llm.ToolResultMessage); !ok {
+		t.Fatalf("message[1] = %T, want ToolResultMessage", request.Context.Messages[1])
+	}
+	if _, ok := request.Context.Messages[2].(llm.AssistantMessage); !ok {
+		t.Fatalf("message[2] = %T, want separate assistant turn", request.Context.Messages[2])
+	}
+}
+
+// TestDecodeRequestPositionalToolResults 验证 tool_result 按位置消化：
+// tool_use_id 指向不存在 call 但前面还有未消化 call 时保留为 TOOL
+// （上游按序消化不校验 id）；先于一切 call 的孤儿 result 才降级。
+func TestDecodeRequestPositionalToolResults(t *testing.T) {
+	data := []byte(`{"model":"claude-test","max_tokens":256,"messages":[
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-early","content":"孤儿"}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"read","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-mismatch","content":"按位置消化"}]}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := request.Context.Messages[0].(llm.UserMessage); !ok {
+		t.Fatalf("orphan result not demoted: %T", request.Context.Messages[0])
+	}
+	result, ok := request.Context.Messages[2].(llm.ToolResultMessage)
+	if !ok || result.ToolCallID != "call-mismatch" {
+		t.Fatalf("positionally-consumable result was demoted: %#v", request.Context.Messages[2])
 	}
 }

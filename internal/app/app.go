@@ -568,7 +568,9 @@ func (application *App) createCompletion(
 		// WriteJSON 是 no-op，参数表达式却仍会求值——必须在外层门控。
 		recorder.WriteJSON(debuglog.StageHTTPRequest, httpRequestProjection(request, body))
 	}
-	messages, options, err := decoder(body)
+	// collectDropped 门控解码期对请求体的二次全量扫描（顶层未消费字段
+	// 收集）——Dropped 的唯一读者是 02 投影，recorder 为 nil 时纯烧 CPU。
+	messages, options, err := decoder(body, recorder != nil)
 	if err != nil {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
@@ -789,9 +791,12 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
 		if resetAt, ok := failure.RateLimitReset(time.Now()); ok {
-			wait := int(math.Ceil(time.Until(resetAt).Seconds()))
-			writer.Header().Set("Retry-After", strconv.Itoa(wait))
-			writer.Header().Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(resetAt.Unix(), 10))
+			// 显式 0 秒 hint（刚过桶界、新桶已爆、无追加罚）解出
+			// resetAt=now——等价于「无退避指导」，不写头保持原状。
+			if wait := int(math.Ceil(time.Until(resetAt).Seconds())); wait > 0 {
+				writer.Header().Set("Retry-After", strconv.Itoa(wait))
+				writer.Header().Set("anthropic-ratelimit-unified-reset", strconv.FormatInt(resetAt.Unix(), 10))
+			}
 		}
 	}
 	noteRetryAfter(recorder, failure)

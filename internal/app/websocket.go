@@ -178,35 +178,46 @@ func (w *wsResponseWriter) wrapErrorPayload(payload []byte) []byte {
 // writeFrame 解析单条 SSE 帧，把 data 行作为 JSON 文本消息发出。
 // 帧级职责：收集 output item、识别终结事件、镜像 message_too_big 为 close 1009。
 // SSE 注释行（": ..."）转换为 WebSocket Ping，承担同等的保活作用。
+// 事件名取 event: 行（AppendSSE 恒写）——只有需要字段树的事件才整帧
+// Unmarshal，delta 类帧原样透传。
 func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if bytes.HasPrefix(frame, []byte(":")) {
 		return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteDeadline))
 	}
 	var data []byte
-	lines := bytes.Split(frame, []byte("\n"))
-	for _, line := range lines {
+	var eventName string
+	for _, line := range bytes.Split(frame, []byte("\n")) {
 		line = bytes.TrimSuffix(line, []byte("\r"))
-		if len(line) == 0 {
-			continue
-		}
-		if bytes.HasPrefix(line, []byte("data: ")) {
+		switch {
+		case bytes.HasPrefix(line, []byte("data: ")):
 			data = append(data, line[len("data: "):]...)
-		} else if bytes.HasPrefix(line, []byte("data:")) {
+		case bytes.HasPrefix(line, []byte("data:")):
 			data = append(data, line[len("data:"):]...)
+		case bytes.HasPrefix(line, []byte("event: ")):
+			eventName = string(line[len("event: "):])
+		case bytes.HasPrefix(line, []byte("event:")):
+			eventName = string(line[len("event:"):])
 		}
 	}
 	if len(data) == 0 {
 		return nil
 	}
-	// 单帧一次解析：type/error.code/response.id/item 从同一棵字段树直取，
-	// 替代原先每个关注点各做一次全量 Unmarshal 的读法。非 object JSON
-	// （数组/标量/非法文本）与原 json.Valid 分支等价——原样透传文本帧。
+	if !wsFrameNeedsFields(eventName) {
+		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+		return w.conn.WriteMessage(websocket.TextMessage, data)
+	}
+	// 单帧一次解析：type/error.code/response.id/item 从同一棵字段树直取。
+	// 非 object JSON（数组/标量/非法文本）与原 json.Valid 分支等价——
+	// 原样透传文本帧。
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 		return w.conn.WriteMessage(websocket.TextMessage, data)
 	}
-	eventType := wsRawString(fields["type"])
+	eventType := eventName
+	if eventType == "" {
+		eventType = wsRawString(fields["type"])
+	}
 	if err := w.collectOutputItem(eventType, fields); err != nil {
 		return err
 	}
@@ -236,9 +247,25 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if eventType == "error" {
 		w.surfaced = true
 	}
-	data = w.withDebugRef(data)
+	if eventType == "response.created" && !w.debugRefSent {
+		data = w.withDebugRef(data, fields)
+	}
 	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
 	return w.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// wsFrameNeedsFields 判定事件是否需要在帧级解出字段树：output_item.done
+// 收 item、终结事件取 response.id、created 注入 debug_ref、error 查
+// code——其余事件（delta 等）data 原样透传。event 行缺席的帧返回 true：
+// 退回按 data.type 分发的解析路径，与逐帧全解析的旧行为等价。
+func wsFrameNeedsFields(eventName string) bool {
+	switch eventName {
+	case "response.output_item.done",
+		"response.completed", "response.failed", "response.incomplete", "response.done",
+		"response.created", "error":
+		return true
+	}
+	return eventName == ""
 }
 
 // collectOutputItem 累积 response.output_item.done 的 item 快照。
@@ -343,21 +370,25 @@ func completedOutputFromEvent(payload json.RawMessage) json.RawMessage {
 // WS 握手响应在 createCompletion 分配请求 ID 之前就已发出，X-Request-Id
 // 无处可放——客户端只能靠 payload 携带的引用回查日志目录（错误事件
 // 自带 debug_ref，这里只补成功路径的首帧）。
-func (w *wsResponseWriter) withDebugRef(data []byte) []byte {
-	if w.debugRefSent || !bytes.Contains(data, []byte(`"response.created"`)) {
-		return data
-	}
+// fields 是 writeFrame 已解析的顶层字段树：就地改写 response 字段后
+// 重 marshal，未触碰的字段保持原始字节。
+func (w *wsResponseWriter) withDebugRef(data []byte, fields map[string]json.RawMessage) []byte {
 	ref := w.header.Get("X-Request-Id")
-	var event map[string]any
-	if ref == "" || json.Unmarshal(data, &event) != nil || event["type"] != "response.created" {
+	raw, has := fields["response"]
+	if ref == "" || !has {
 		return data
 	}
-	response, ok := event["response"].(map[string]any)
-	if !ok {
+	var response map[string]any
+	if json.Unmarshal(raw, &response) != nil || response == nil {
 		return data
 	}
 	response["debug_ref"] = ref
-	patched, err := json.Marshal(event)
+	patchedResponse, err := json.Marshal(response)
+	if err != nil {
+		return data
+	}
+	fields["response"] = patchedResponse
+	patched, err := json.Marshal(fields)
 	if err != nil {
 		return data
 	}

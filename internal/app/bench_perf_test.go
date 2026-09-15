@@ -95,10 +95,9 @@ func benchEndToEnd(b *testing.B, debugEnabled bool, deltaCount, deltaSize int) {
 	}
 }
 
-// BenchmarkWSWriteFrame 测量 WS 路径每帧的 SSE→JSON 解析开销：
-// 一次 Unmarshal 成字段树后 type/error.code/item 直取。
+// BenchmarkWSWriteFrame 测量 WS 路径每帧的 SSE 拆帧+事件分发开销：
+// delta 帧按 event 名直通透传，不再做整帧 Unmarshal。
 func BenchmarkWSWriteFrame(b *testing.B) {
-	writer := &wsResponseWriter{outputItems: make(map[int64]json.RawMessage)}
 	// 典型 delta 帧：event: 行 + data: 行 + \n\n 已由 Write 拆分，writeFrame 只吃帧体。
 	frame, _ := json.Marshal(map[string]any{
 		"type": "response.output_text.delta", "sequence_number": 7,
@@ -110,21 +109,40 @@ func BenchmarkWSWriteFrame(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// 用 nil conn 不可行——writeFrame 最终会 WriteMessage。
-		// 所以直接测解析段：复制 writeFrame 的前半逻辑。
+		// 所以直接测拆帧与分发段：复制 writeFrame 的前半逻辑。
 		var data []byte
+		var eventName string
 		for _, line := range bytes.Split(frame, []byte("\n")) {
-			if bytes.HasPrefix(line, []byte("data: ")) {
+			switch {
+			case bytes.HasPrefix(line, []byte("data: ")):
 				data = append(data, line[len("data: "):]...)
+			case bytes.HasPrefix(line, []byte("event: ")):
+				eventName = string(line[len("event: "):])
 			}
 		}
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(data, &fields); err != nil {
-			b.Fatal("bad frame")
+		if wsFrameNeedsFields(eventName) {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				b.Fatal("bad frame")
+			}
+			_ = wsRawString(fields["type"])
 		}
-		_ = wsRawString(fields["type"])
-		_ = wsJSONString(fields["error"], "code")
 	}
-	_ = writer
+}
+
+// BenchmarkAppendSSE 测量每帧 SSE 编码开销：手写 append 替代
+// fmt.Appendf 的格式串解析与装箱。
+func BenchmarkAppendSSE(b *testing.B) {
+	data, _ := json.Marshal(map[string]any{
+		"type": "response.output_text.delta", "delta": strings.Repeat("x", 64),
+	})
+	protocol := responsesProtocol{}
+	dst := make([]byte, 0, 256)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dst = protocol.AppendSSE(dst[:0], "response.output_text.delta", data)
+	}
 }
 
 // BenchmarkWSNormalizeTurn 测量续轮规范化的端到端成本：

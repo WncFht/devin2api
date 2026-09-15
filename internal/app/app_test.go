@@ -717,6 +717,27 @@ func TestResponsesHandlerMapsRateLimitError(t *testing.T) {
 	}
 }
 
+// TestResponsesHandlerZeroResetHintWritesNoRetryAfter 验证显式 0 秒 reset
+// hint（"reset in 0 seconds"——刚过桶界、新桶已爆、无追加罚）的 429 不写
+// Retry-After/unified-reset 头：写 0 等于叫客户端立刻重试撞新桶。
+func TestResponsesHandlerZeroResetHintWritesNoRetryAfter(t *testing.T) {
+	fake := &failingAdapter{err: errors.New(
+		"resource_exhausted: rate limited. Your limit will reset in 0 seconds. (trace ID: abc123)")}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After = %q, want absent", got)
+	}
+	if got := response.Header().Get("anthropic-ratelimit-unified-reset"); got != "" {
+		t.Fatalf("unified-reset = %q, want absent", got)
+	}
+}
+
 // blockingAdapter 的 Stream 在 release 关闭前不返回，用于占住并发槽。
 type blockingAdapter struct {
 	release chan struct{}

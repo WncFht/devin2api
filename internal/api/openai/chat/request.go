@@ -110,11 +110,20 @@ type RequestOptions struct {
 }
 
 // DecodeRequest 将 OpenAI Chat Completions JSON 请求转换为中间请求。
-func DecodeRequest(data []byte) (AdaptedRequest, error) {
+// collectDropped 为 true 时对请求体做二次全量扫描收集顶层未消费字段
+// （field:* 标记）；为 false 跳过——Dropped 的唯一读者是 debuglog 请求
+// 投影，debug 关时整棵字段树白建。其余 Dropped 写入点都在低频分支，
+// 不随该开关门控。
+func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	var request Request
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&request); err != nil {
 		return AdaptedRequest{}, fmt.Errorf("decode chat request: %w", err)
+	}
+	if decoder.More() {
+		// 顶层 JSON 后还有内容说明 body 不是单个请求对象——多半
+		// 是客户端 bug 或代理误拼接，静默忽略会掩盖截断/串包。
+		return AdaptedRequest{}, errors.New("chat request has trailing data after JSON body")
 	}
 	if request.Model == "" {
 		return AdaptedRequest{}, errors.New("chat request model is required")
@@ -124,7 +133,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model}
-	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
+	if collectDropped {
+		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
+	}
 	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；选中的指针
 	// 非正时静默丢弃会让调用方以为上限已生效——记 Dropped 透出。
 	maxTokensValue := request.MaxCompletionTokens
@@ -228,6 +239,10 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 			InputSchema: schema,
 		})
 	}
+	// 相邻 assistant 回合先合并（与 responses/anthropic 两面同走 IR 层
+	// 共享实现）：客户端发连续 assistant 消息时 wire 上的假回合边界会
+	// 抬高提前 EOS 概率。
+	context.MergeAdjacentAssistantTurns()
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
 	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
@@ -262,6 +277,12 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 		if err != nil {
 			return err
 		}
+		if len(content) == 0 {
+			// content 在场但解不出内容块（空数组/全部 part 不识）：
+			// 对 SystemPrompt 无贡献，记 Dropped 让缺失可对账——
+			// 与 anthropic/responses 面同口径。
+			context.Dropped = append(context.Dropped, "empty_message:"+message.Role)
+		}
 		text := common.ContentText(content)
 		if context.SystemPrompt != "" && text != "" {
 			context.SystemPrompt += "\n"
@@ -280,6 +301,12 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 		content, err := decodeAssistantContent(context, message, callIDs, functionIDs)
 		if err != nil {
 			return err
+		}
+		if len(content) == 0 {
+			// content 缺席/null/空数组且无 tool_calls/function_call/
+			// reasoning：助手消息什么都没贡献，wire 端会按
+			// DroppedEmptyAssistant 丢弃——记 Dropped 对齐 anthropic 面口径。
+			context.Dropped = append(context.Dropped, "empty_message:assistant")
 		}
 		context.Messages = append(context.Messages, llm.AssistantMessage{
 			Content:     content,
@@ -322,11 +349,21 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 }
 
 // decodeUserContent 解码 user 消息内容；空/null 归一为空文本块。
+// content 在场但解不出内容块（空数组/全部 part 不识）时同样落成
+// 空文本占位保住轮次，并记 empty_message:user——与 anthropic 面同口径。
 func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
-	return common.DecodeContent(raw, &context.Dropped)
+	content, err := common.DecodeContent(raw, &context.Dropped)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) == 0 {
+		context.Dropped = append(context.Dropped, "empty_message:user")
+		return []llm.Content{llm.TextContent{Text: ""}}, nil
+	}
+	return content, nil
 }
 
 // decodeAssistantContent 解码 assistant 消息的正文与 tool_calls

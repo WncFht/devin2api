@@ -338,27 +338,29 @@ func (request RequestMessages) Validate() error {
 	return nil
 }
 
-// DemoteOrphanToolResults 把找不到前置 tool call 的孤儿 ToolResultMessage
-// 原位降级为 UserMessage：上游要求 call→result 紧邻配对，结果先于调用
-// （或调用根本不存在，如客户端压缩历史丢掉 function_call）只回
-// invalid_argument，降级保住结果内容让整单可继续。
-// 判据是位置性的——同 id call 必须出现在该 result 之前的助手消息里；
-// 缺失调用 id（ToolCallID 为空）的结果同样无法配对，一并降级。
-// 必须在 Validate 之前调用：孤儿结果的 ToolCallID 允许为空，
-// 降级后必填约束才成立。每处降级在 Dropped 留
-// missing_tool_call_id / unmatched_tool_call_id:<id> 标记。
+// DemoteOrphanToolResults 把前面没有可消化 call 的孤儿 ToolResultMessage
+// 原位降级为 UserMessage。上游配对是位置性的：call→result 按序消化、
+// 不校验 tool_call_id——「id 指向不存在 call 但前面还有未消化 call」的
+// 结果上游照常接受；只有先于一切 call 出现（或 call 已被更早的结果消化完）
+// 的结果才被拒，降级保住结果内容让整单可继续。
+// 缺失调用 id（ToolCallID 为空）的结果 wire 上无法携带配对键，一并降级——
+// 留着也过不了 Validate 的必填约束。必须在 Validate 之前调用。
+// 每处降级在 Dropped 留 missing_tool_call_id / unmatched_tool_call_id:<id> 标记。
 func (request *RequestMessages) DemoteOrphanToolResults() {
-	seenCallIDs := make(map[string]struct{})
+	// pending 计「尚未被 result 消化」的前置 call 数：每个保留的 result
+	// 按到达顺序消化一个，消化完再来的 result 才是孤儿。
+	pending := 0
 	for index, message := range request.Messages {
 		switch message := message.(type) {
 		case AssistantMessage:
 			for _, block := range message.Content {
-				if call, ok := block.(ToolCall); ok && call.ID != "" {
-					seenCallIDs[call.ID] = struct{}{}
+				if _, ok := block.(ToolCall); ok {
+					pending++
 				}
 			}
 		case ToolResultMessage:
-			if _, ok := seenCallIDs[message.ToolCallID]; ok {
+			if message.ToolCallID != "" && pending > 0 {
+				pending--
 				continue
 			}
 			if message.ToolCallID == "" {
@@ -375,6 +377,49 @@ func (request *RequestMessages) DemoteOrphanToolResults() {
 			}
 		}
 	}
+}
+
+// MergeAdjacentAssistantTurns 合并连续的 AssistantMessage：部分客户端历史
+// 把一个模型回合铺平成多条相邻 assistant 消息，逐条放行会让 wire 上产生
+// 假的回合边界、抬高宣告处 EOS 概率（issue #2；机制见
+// notes/archive/2026-09-12-premature-endturn.md）。连续 assistant 消息必属
+// 同一回合——回合边界永远由 user/tool_result 消息分隔。
+func (request *RequestMessages) MergeAdjacentAssistantTurns() {
+	messages := request.Messages
+	merged := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		assistant, ok := message.(AssistantMessage)
+		if !ok || len(merged) == 0 {
+			merged = append(merged, message)
+			continue
+		}
+		last, ok := merged[len(merged)-1].(AssistantMessage)
+		if !ok {
+			merged = append(merged, message)
+			continue
+		}
+		// 两段相邻文本之间补换行：convertMessage 对多块 TextContent 无分隔
+		// 直连，不补会把回合内两条 message 的正文粘连。
+		if len(last.Content) > 0 && len(assistant.Content) > 0 {
+			_, prevText := last.Content[len(last.Content)-1].(TextContent)
+			_, nextText := assistant.Content[0].(TextContent)
+			if prevText && nextText {
+				last.Content = append(last.Content, TextContent{Text: "\n"})
+			}
+		}
+		last.Content = append(last.Content, assistant.Content...)
+		if assistant.OutputID != "" {
+			last.OutputID = assistant.OutputID
+		}
+		for _, block := range assistant.Content {
+			if _, isCall := block.(ToolCall); isCall {
+				last.StopReason = StopReasonToolUse
+				break
+			}
+		}
+		merged[len(merged)-1] = last
+	}
+	request.Messages = merged
 }
 
 func validateContent(content []Content, allowed ...ContentType) error {

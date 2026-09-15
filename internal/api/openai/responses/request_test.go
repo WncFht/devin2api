@@ -3,6 +3,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
   "tools": [{"type":"function","name":"read_file","description":"读取文件","parameters":{"type":"object"}}]
 }`)
 
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +58,7 @@ func TestDecodeRequestBuildsConversationContext(t *testing.T) {
 
 // TestDecodeRequestAcceptsStringInput 验证紧凑字符串输入会转换为用户文字消息。
 func TestDecodeRequestAcceptsStringInput(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hello"}`))
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hello"}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestDecodeRequestAcceptsImageURLObject(t *testing.T) {
     {"type":"input_image","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}
   ]}]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestDecodeRequestAcceptsChatCompletionsImagePart(t *testing.T) {
     {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}
   ]}]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestDecodeRequestAcceptsChatCompletionsImagePart(t *testing.T) {
 // 让调用语义悄悄变空或丢失上下文。
 func TestDecodeRequestPreservesMalformedToolArguments(t *testing.T) {
 	data := []byte(`{"model":"gpt-test","input":[{"type":"function_call","call_id":"call-1","name":"tool","arguments":"[]"}]}`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestDecodeRequestPreservesMalformedToolArguments(t *testing.T) {
 
 // TestDecodeRequestRetainsRawSchema 验证工具 schema 会以原始 JSON 保留。
 func TestDecodeRequestRetainsRawSchema(t *testing.T) {
-	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hi","tools":[{"type":"function","name":"tool","parameters":{"type":"object","additionalProperties":false}}]}`))
+	request, err := DecodeRequest([]byte(`{"model":"gpt-test","input":"hi","tools":[{"type":"function","name":"tool","parameters":{"type":"object","additionalProperties":false}}]}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestDecodeRequestCustomToolDeclaration(t *testing.T) {
 		{"type":"custom","name":"apply_patch","description":"Patch files","format":{"syntax":"lark","definition":"patch_grammar"}},
 		{"type":"custom","name":"no_grammar"},
 		{"type":"mystery","name":"dropped_tool"}
-	]}`))
+	]}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +200,7 @@ func TestDecodeRequestAcceptsMessageWithoutType(t *testing.T) {
   }],
   "stream": true
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +231,7 @@ func TestDecodeRequestAttachesReasoningSummary(t *testing.T) {
     {"type":"function_call_output","call_id":"call-1","output":"内容"}
   ]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestDecodeRequestMergesAssistantTurnItems(t *testing.T) {
 	    {"type":"message","role":"user","content":[{"type":"input_text","text":"继续"}]}
 	  ]
 	}`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestDecodeRequestMergesAssistantTurnItems(t *testing.T) {
 	request, err = DecodeRequest([]byte(`{"model":"m","input":[
 		{"type":"message","role":"assistant","id":"msg_a","content":[{"type":"output_text","text":"第一段"}]},
 		{"type":"message","role":"assistant","id":"msg_b","content":[{"type":"output_text","text":"第二段"}]}
-	]}`))
+	]}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +361,7 @@ func TestDecodeRequestDropsOrphanReasoning(t *testing.T) {
     {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
   ]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +382,7 @@ func TestDecodeRequestToleratesOrphanToolOutput(t *testing.T) {
     {"type":"function_call_output","call_id":"call-gone","output":"残留结果"}
   ]
 }`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +422,7 @@ func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
     {"type":"web_search_preview"},
     {"type":"function","name":"known","parameters":{"type":"object"}}
   ]
-}`))
+}`), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +461,7 @@ func TestDecodeRequestAcceptsCallIDVariants(t *testing.T) {
 			{"type":"function_call","call_id":"c1","name":"t","arguments":"{}"},
 			{"type":"function_call_output","` + field + `":"c1","output":"ok"}
 		]}`)
-		request, err := DecodeRequest(data)
+		request, err := DecodeRequest(data, true)
 		if err != nil {
 			t.Fatalf("%s: %v", field, err)
 		}
@@ -481,7 +482,7 @@ func TestDecodeRequestReplaysOpenAIReasoningSignature(t *testing.T) {
 		{"type":"message","role":"assistant","id":"msg_7","content":[{"type":"output_text","text":"done"}]}
 	]}`)
 	data = []byte(strings.ReplaceAll(string(data), "`"+blob+"`", `"`+strings.ReplaceAll(blob, `"`, `\"`)+`"`))
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +509,7 @@ func TestDecodeRequestDropsForeignReasoningPayload(t *testing.T) {
 		{"type":"reasoning","summary":[],"encrypted_content":"gAAAAB-foreign"},
 		{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
 	]}`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +537,7 @@ func TestDecodeRequestCustomToolCall(t *testing.T) {
 		{"type":"custom_tool_call","call_id":"c1","name":"apply_patch","input":"*** Begin Patch\n+x"},
 		{"type":"custom_tool_call_output","call_id":"c1","output":"patched"}
 	]}`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +562,7 @@ func TestDecodeRequestToolOutputPartArray(t *testing.T) {
 			{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}
 		]}
 	]}`)
-	request, err := DecodeRequest(data)
+	request, err := DecodeRequest(data, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,5 +572,97 @@ func TestDecodeRequestToolOutputPartArray(t *testing.T) {
 	}
 	if _, ok := result.Content[1].(llm.ImageContent); !ok {
 		t.Fatalf("content[1] = %T, want ImageContent", result.Content[1])
+	}
+}
+
+// TestDecodeRequestTrailingData 验证顶层 JSON 后的尾随内容报错而非静默忽略——
+// 与 anthropic 面的 decoder.More() 检查对齐。
+func TestDecodeRequestTrailingData(t *testing.T) {
+	data := []byte(`{"model":"gpt-test","input":"hi"} trailing`)
+	if _, err := DecodeRequest(data, true); err == nil {
+		t.Fatal("trailing data should error")
+	}
+}
+
+// TestDecodeRequestKeepsEmptyMessage 验证空 content 的消息不静默消失：
+// 记 empty_message:<role>，user 落空文本占位、assistant 保留空消息——
+// 与 anthropic 面同口径。
+func TestDecodeRequestKeepsEmptyMessage(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"message","role":"user","content":[]},
+		{"type":"message","role":"assistant","content":[]},
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Context.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(request.Context.Messages))
+	}
+	user := request.Context.Messages[0].(llm.UserMessage)
+	if text, ok := user.Content[0].(llm.TextContent); !ok || text.Text != "" {
+		t.Fatalf("empty user placeholder = %#v", user.Content)
+	}
+	if _, ok := request.Context.Messages[1].(llm.AssistantMessage); !ok {
+		t.Fatalf("empty assistant message dropped: %T", request.Context.Messages[1])
+	}
+	dropped := fmt.Sprint(request.Context.Dropped)
+	for _, want := range []string{"empty_message:user", "empty_message:assistant"} {
+		if !strings.Contains(dropped, want) {
+			t.Fatalf("dropped = %v, want %s", request.Context.Dropped, want)
+		}
+	}
+}
+
+// TestDecodeRequestMalformedToolOutputParts 验证形似 part 数组却解码失败的
+// function_call_output（如坏图片 part）降格为字面 JSON 文本并记
+// Dropped——容忍是刻意的，但要对账。
+func TestDecodeRequestMalformedToolOutputParts(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"function_call","call_id":"c1","name":"shot","arguments":"{}"},
+		{"type":"function_call_output","call_id":"c1","output":[
+			{"type":"input_image","image_url":"http://example.com/x.png"}
+		]}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := request.Context.Messages[1].(llm.ToolResultMessage)
+	text, ok := result.Content[0].(llm.TextContent)
+	if !ok || !strings.Contains(text.Text, "input_image") {
+		t.Fatalf("malformed output should fall back to literal text, got %#v", result.Content)
+	}
+	found := false
+	for _, marker := range request.Context.Dropped {
+		if marker == "tool_output:malformed_parts" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dropped = %v, want tool_output:malformed_parts", request.Context.Dropped)
+	}
+}
+
+// TestDecodeRequestPositionalToolResults 验证孤儿判定按位置语义：
+// id 对不上但前面还有未消化 call 的 output 保留为 TOOL（上游按序消化
+// 不校验 id）；先于一切 call 的孤儿才降级为 USER 文本。
+func TestDecodeRequestPositionalToolResults(t *testing.T) {
+	data := []byte(`{"model":"m","input":[
+		{"type":"function_call_output","call_id":"call-early","output":"孤儿"},
+		{"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call-mismatch","output":"按位置消化"}
+	]}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := request.Context.Messages[0].(llm.UserMessage); !ok {
+		t.Fatalf("orphan output not demoted: %T", request.Context.Messages[0])
+	}
+	result, ok := request.Context.Messages[2].(llm.ToolResultMessage)
+	if !ok || result.ToolCallID != "call-mismatch" {
+		t.Fatalf("positionally-consumable output was demoted: %#v", request.Context.Messages[2])
 	}
 }

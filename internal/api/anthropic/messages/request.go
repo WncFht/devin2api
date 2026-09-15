@@ -69,7 +69,11 @@ type RequestOptions struct {
 }
 
 // DecodeRequest 将 Anthropic Messages JSON 请求转换为中间请求。
-func DecodeRequest(data []byte) (AdaptedRequest, error) {
+// collectDropped 为 true 时对请求体做二次全量扫描收集顶层未消费字段
+// （field:* 标记）；为 false 跳过——Dropped 的唯一读者是 debuglog 请求
+// 投影，debug 关时整棵字段树白建。其余 Dropped 写入点都在低频分支，
+// 不随该开关门控。
+func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	var request Request
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&request); err != nil {
@@ -88,7 +92,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	}
 
 	context := llm.RequestMessages{Model: request.Model}
-	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, anthropicRequestFields)...)
+	if collectDropped {
+		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, anthropicRequestFields)...)
+	}
 	if request.MaxTokens != nil {
 		if *request.MaxTokens > 0 {
 			context.MaxTokens = request.MaxTokens
@@ -145,6 +151,10 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 			InputSchema: schema,
 		})
 	}
+	// 相邻 assistant 回合先合并（与 chat/responses 两面同走 IR 层共享
+	// 实现）：客户端发连续 assistant 消息时 wire 上的假回合边界会
+	// 抬高提前 EOS 概率。
+	context.MergeAdjacentAssistantTurns()
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
 	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
