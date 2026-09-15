@@ -31,6 +31,11 @@ const (
 	ContentTypeThinking ContentType = "thinking"
 	ContentTypeImage    ContentType = "image"
 	ContentTypeToolCall ContentType = "toolCall"
+	// ContentTypeServerToolResult 是服务端托管工具的执行结果块（响应方向
+	// 专属）：与对应的 Server ToolCall 一起出现在 AssistantMessage.Content
+	// 里，按 ToolCallID 配对。请求方向不会由任何解码器产出——托管工具的
+	// 回放走普通 call+ToolResultMessage 对，结果正文已被渲染成文本。
+	ContentTypeServerToolResult ContentType = "serverToolResult"
 )
 
 // RequestMessages 是发送给任意供应商适配器的完整请求上下文。
@@ -64,10 +69,24 @@ type RequestMessages struct {
 	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
 	// 空表示调用方未提供。
 	SessionKey string
+	// ServerSearch 非空表示本请求已被前端判定为「服务端托管搜索侧请求」
+	//（如 Claude Code 的 WebSearch 专用请求：tools 只含 web_search_* 变体）。
+	// 适配器不走 GetChatMessage 主路径，改为代调上游搜索 RPC 并合成
+	// 一次完整的工具调用响应流。
+	ServerSearch *ServerSearchRequest
 	// Dropped 记录请求解码与规范化时被丢弃/降级的下游字段
 	//（"kind:detail"），供调试日志透出——「解码即过滤」的静默面
 	// 需要可观测。
 	Dropped []string
+}
+
+// ServerSearchRequest 是一次服务端托管搜索的完整参数。Query 已从客户端
+// 消息里抽取；Allowed/BlockedDomains 来自工具声明（上游只支持单域字面量
+// 与结果侧过滤，多域语义由适配器展开）。
+type ServerSearchRequest struct {
+	Query          string
+	AllowedDomains []string
+	BlockedDomains []string
 }
 
 // RequestRepairs 是一次请求投影为上游 wire 格式时发生的静默修复计数，
@@ -211,6 +230,11 @@ type ToolCall struct {
 	// 的参数体本来就不是 JSON，如 apply_patch 的补丁文本）。请求方向
 	// 客户端回灌的畸形 JSON 参数也按此保留原文，不吞成 {}。
 	Custom bool
+	// Server 为 true 时这是服务端托管工具的调用（如 OpenAI web_search）：
+	// 客户端不执行任何东西，由代理代调上游专用 RPC 并把结果作为
+	// ServerToolResult 块随同一响应下发。编码器据此把调用渲染成各协议的
+	// 托管形态（anthropic server_tool_use / responses web_search_call）。
+	Server bool
 }
 
 // ContentType 返回工具调用内容类型。
@@ -276,6 +300,48 @@ func (message ToolResultMessage) Validate() error {
 	return nil
 }
 
+// WebSearchResult 是一条服务端搜索命中的标准化结果。
+type WebSearchResult struct {
+	// Title 是命中页面的标题。
+	Title string
+	// URL 是命中页面的地址。
+	URL string
+	// Summary 是上游返回的结果摘要正文。
+	Summary string
+}
+
+// ServerToolResult 是服务端托管工具的执行结果内容块（响应方向专属），
+// 与同一消息内的 Server ToolCall 按 ToolCallID 配对。
+type ServerToolResult struct {
+	// ToolCallID 是本结果所对应的托管工具调用标识。
+	ToolCallID string
+	// ToolName 是托管工具名（如 web_search），供编码器选择结果块形态。
+	ToolName string
+	// Results 是结构化的搜索命中列表；当前仅搜索类托管工具填充。
+	Results []WebSearchResult
+	// Text 是结果的可读正文（上游合成的摘要），回放与兜底渲染共用。
+	Text string
+	// IsError 表示托管执行失败（搜索 RPC 失败、参数缺失等）。
+	IsError bool
+	// ErrorCode 是失败时的稳定错误码（供 anthropic
+	// web_search_tool_result_error 形态使用）。
+	ErrorCode string
+}
+
+// ContentType 返回服务端工具结果内容类型。
+func (ServerToolResult) ContentType() ContentType { return ContentTypeServerToolResult }
+
+// Validate 检查服务端工具结果块。
+func (result ServerToolResult) Validate() error {
+	if result.ToolCallID == "" {
+		return errors.New("server tool result call ID is required")
+	}
+	if result.ToolName == "" {
+		return errors.New("server tool result tool name is required")
+	}
+	return nil
+}
+
 // ToolDefinition 定义模型可以调用的一个工具。
 type ToolDefinition struct {
 	// Name 是工具的稳定名称。
@@ -289,6 +355,21 @@ type ToolDefinition struct {
 	// 这类工具在 wire 上包装成单字符串参数的 function 声明（InputSchema 即
 	// 包装 schema），响应侧按此标记把 {"input":"<原文>"} 解包回原文。
 	Custom bool
+	// Server 表示这是服务端托管语义的声明（OpenAI {"type":"web_search"}）：
+	// 客户端期待代理/上游执行而非本地执行。wire 上按普通 function 声明
+	// 下发（诱饵 schema 驱动模型表达调用意图），响应侧由适配器代执行。
+	Server bool
+	// 以下为上游 ChatToolDefinition 实测接受的可选透传位（2026-09-15
+	// 字段二分确认；is_custom_tool/computer_use_config 同批实测被拒，
+	// 永远不透传）。
+	// Strict 对应上游 strict。
+	Strict bool
+	// ReadOnlyHint 对应上游 read_only_hint（Anthropic annotations 直传）。
+	ReadOnlyHint bool
+	// ServerName 对应上游 server_name（MCP 归属标记）。
+	ServerName string
+	// AttributionFieldNames 对应上游 attribution_field_names。
+	AttributionFieldNames []string
 }
 
 // toolNameCharset 是上游实测接受的工具名字符集（a.b、mcp::x、中文名

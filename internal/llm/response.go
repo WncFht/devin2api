@@ -72,7 +72,7 @@ func (AssistantMessage) Role() MessageRole { return MessageRoleAssistant }
 
 // Validate 检查助手消息。
 func (message AssistantMessage) Validate() error {
-	if err := validateContent(message.Content, ContentTypeText, ContentTypeThinking, ContentTypeToolCall); err != nil {
+	if err := validateContent(message.Content, ContentTypeText, ContentTypeThinking, ContentTypeToolCall, ContentTypeServerToolResult); err != nil {
 		return err
 	}
 	if message.StopReason != "" && !message.StopReason.valid() {
@@ -98,6 +98,20 @@ type Usage struct {
 	Reasoning *int64
 	// TotalTokens 是供应商报告或适配器计算的总 token 数。
 	TotalTokens int64
+	// Costs 是上游帧报告的权威计费读数；nil 表示上游未上报。
+	Costs *UpstreamCosts
+}
+
+// UpstreamCosts 是上游计费读数（Devin GetChatMessageResponse 帧上的
+// credit_cost 系字段）。CreditCost 是单请求口径的可加总成本，聚合层
+// 对它求和；Committed* 系是账户侧快照/累计读数，逐请求保留原值，
+// 跨请求求和没有语义。
+type UpstreamCosts struct {
+	CreditCost                    int64
+	CommittedCreditCost           int64
+	CommittedAcuCost              float64
+	CommittedQuotaCostBasisPoints int64
+	CommittedOverageCostCents     int64
 }
 
 // Validate 检查用量字段均为非负值。
@@ -138,8 +152,12 @@ const (
 	ResponseEventToolCallStart     ResponseEventType = "toolcall_start"
 	ResponseEventToolCallDelta     ResponseEventType = "toolcall_delta"
 	ResponseEventToolCallEnd       ResponseEventType = "toolcall_end"
-	ResponseEventDone              ResponseEventType = "done"
-	ResponseEventError             ResponseEventType = "error"
+	// ResponseEventServerToolResult 是服务端托管工具结果到达事件：
+	// 结果块已按 ContentIndex 追加进 Partial，编码器据此把对应的
+	// 托管调用项（server_tool_use / web_search_call）渲染完结。
+	ResponseEventServerToolResult ResponseEventType = "server_tool_result"
+	ResponseEventDone             ResponseEventType = "done"
+	ResponseEventError            ResponseEventType = "error"
 )
 
 // ResponseEvent 是供应商无关的助手响应增量事件。
@@ -160,6 +178,8 @@ type ResponseEvent struct {
 	ToolName string
 	// ToolCall 是工具调用结束时已经解析完成的调用对象。
 	ToolCall *ToolCall
+	// ServerResult 是服务端托管工具的执行结果（ResponseEventServerToolResult）。
+	ServerResult *ServerToolResult
 	// Reason 是完成或失败事件的停止原因。
 	Reason StopReason
 	// Message 是正常完成时的最终助手消息。
@@ -212,6 +232,14 @@ func (event ResponseEvent) Validate() error {
 			return errors.New("tool call end event requires a tool call")
 		}
 		return event.ToolCall.Validate()
+	case ResponseEventServerToolResult:
+		if err := requireIndexedPartial(event); err != nil {
+			return err
+		}
+		if event.ServerResult == nil {
+			return errors.New("server tool result event requires a result")
+		}
+		return event.ServerResult.Validate()
 	case ResponseEventDone:
 		switch event.Reason {
 		case StopReasonStop, StopReasonStopSequence, StopReasonLength, StopReasonToolUse, StopReasonContentFilter:
