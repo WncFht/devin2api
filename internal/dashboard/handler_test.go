@@ -178,7 +178,7 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 		return request
 	}
 	for i := 0; i < loginMaxFails; i++ {
-		if handler.isAuthenticated(bearer("wrong")) {
+		if authed, _ := handler.isAuthenticated(bearer("wrong")); authed {
 			t.Fatalf("attempt %d: wrong Bearer must not authenticate", i)
 		}
 	}
@@ -186,8 +186,20 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 	if state == nil || !time.Now().Before(state.lockedUntil) {
 		t.Fatalf("after %d Bearer failures IP must be locked: %+v", loginMaxFails, state)
 	}
-	// 锁定只抬高爆破代价：正确密码在锁定期内仍放行（与表单登录一致）。
-	if !handler.isAuthenticated(bearer("pw")) {
+	// 锁定期内继续失败的 Bearer 拿 429 而非 401——账本不只记录，
+	// 要真的把穷举通道节死掉。
+	recorder := httptest.NewRecorder()
+	if handler.requireAuth(recorder, bearer("wrong")) {
+		t.Fatal("locked IP must not authenticate")
+	}
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked Bearer status = %d, want 429", recorder.Code)
+	}
+	// 锁定只抬高爆破代价：正确密码在锁定期内仍放行并清账本（与表单登录一致）。
+	if authed, _ := handler.isAuthenticated(bearer("pw")); !authed {
 		t.Fatal("correct Bearer must authenticate even under lockout")
+	}
+	if _, ok := handler.loginFailures["1.2.3.4"]; ok {
+		t.Fatal("correct Bearer must clear the failure ledger")
 	}
 }

@@ -29,6 +29,19 @@ func (h *Handler) maskToken(data []byte) []byte {
 		return data
 	}
 	for _, token := range h.noteToken(h.tokenFunc()) {
+		if token == "" {
+			continue
+		}
+		// token 含 " 或 \ 时在 JSON 文本（meta.json 的字符串值）里以
+		// 转义形态出现，只换原始字节会静默漏遮——先替换 json.Marshal
+		// 产出的转义形态再替换原始形态：顺序不能反，以 \ 结尾的 token
+		// 原始形态是转义形态的前缀，先吃原始形态会留下孤立反斜杠，
+		// 既漏遮又破坏 JSON 转义。
+		if escaped, err := json.Marshal(token); err == nil {
+			if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) {
+				data = bytes.ReplaceAll(data, esc, []byte("<redacted>"))
+			}
+		}
 		data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
 	}
 	return data

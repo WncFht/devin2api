@@ -307,7 +307,7 @@ func (h *Handler) servePanel(w http.ResponseWriter, r *http.Request) {
 	if v == "" {
 		v = "dev"
 	}
-	if password != "" && !h.isAuthenticated(r) {
+	if authed, _ := h.isAuthenticated(r); password != "" && !authed {
 		_, _ = w.Write([]byte(strings.ReplaceAll(loginPage, "__VERSION__", v)))
 		return
 	}
@@ -520,44 +520,63 @@ func (h *Handler) noteLoginFailure(ip string) bool {
 	return false
 }
 
-func (h *Handler) isAuthenticated(r *http.Request) bool {
+// isAuthenticated 判定请求是否已认证；locked 报告来源 IP 是否处于登录
+// 锁定期——Bearer 失败与表单登录共用同一 IP 账本，只守 login 端点等于
+// 把全速穷举通道留给 Bearer；authed 为真时 locked 无意义（锁定只抬高
+// 爆破代价，持有有效会话/正确凭据的真用户不被挡）。
+func (h *Handler) isAuthenticated(r *http.Request) (authed, locked bool) {
 	password, passwordHash := h.passwordSnapshot()
 	if password == "" {
-		return true
+		return true, false
 	}
 	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
 	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
 	if auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 		provided := sha256.Sum256([]byte(auth))
+		ip := remoteIP(r)
 		if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) == 1 {
-			return true
+			// 与表单登录同口径：正确凭据清掉该 IP 的失败账本。
+			h.sessionMu.RLock()
+			_, hasEntry := h.loginFailures[ip]
+			h.sessionMu.RUnlock()
+			if hasEntry {
+				h.sessionMu.Lock()
+				delete(h.loginFailures, ip)
+				h.sessionMu.Unlock()
+			}
+			return true, false
 		}
-		// Bearer 失败与表单登录共用同一 IP 账本——只守 login 端点等于
-		// 把全速穷举通道留给 Bearer。
-		h.noteLoginFailure(remoteIP(r))
+		locked = h.noteLoginFailure(ip)
 	}
 	cookie, err := r.Cookie("devin_panel_session")
 	if err != nil {
-		return false
+		return false, locked
 	}
 	h.sessionMu.RLock()
 	expiry, ok := h.sessionTokens[cookie.Value]
 	h.sessionMu.RUnlock()
 	if !ok {
-		return false
+		return false, locked
 	}
 	if time.Now().After(expiry) {
 		h.sessionMu.Lock()
 		delete(h.sessionTokens, cookie.Value)
 		h.sessionMu.Unlock()
-		return false
+		return false, locked
 	}
-	return true
+	return true, false
 }
 
 func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request) bool {
-	if h.isAuthenticated(r) {
+	authed, locked := h.isAuthenticated(r)
+	if authed {
 		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if locked {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
+		return false
 	}
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = w.Write([]byte(`{"error":"未授权"}`))
