@@ -524,28 +524,22 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			continue
 		}
 
-		// inflight.Add 先于 draining 检查：排空等待覆盖所有已开始的轮次。
-		application.inflight.Add()
-		// 排空期拒新轮次并断开：连接在排空结束时注定被 Close，
-		// 提前断开让客户端尽早重连到即将接管的新实例。
-		if application.draining.Load() {
-			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
-			// 事件先于 Done 发出：Done 放行 WaitDrain → 进程退出，
-			// 颠倒顺序客户端多半只看到连接断掉而收不到通知。
-			if err := writeWSErrorEvent(conn, http.StatusServiceUnavailable, "server_error", "server_draining", "", "server is draining for restart; resend the request"); err != nil {
+		// 并发槽按轮次获取：连接的空闲期不烧额度，溢出回 429 事件不断连。
+		reason, status, release := application.admitTurn()
+		if reason == obs.RejectDraining {
+			// 排空期拒新轮次并断开：连接在排空结束时注定被 Close，
+			// 提前断开让客户端尽早重连到即将接管的新实例。
+			application.noteReject(reason, request, status)
+			if err := writeWSErrorEvent(conn, status, "server_error", "server_draining", "", "server is draining for restart; resend the request"); err != nil {
 				slog.Debug("websocket drain notice failed", "error", obs.Diagnostic(err))
 			}
-			application.inflight.Done()
+			release()
 			return
 		}
-		// 并发槽按轮次获取：连接的空闲期不烧额度，溢出回 429 事件不断连。
-		select {
-		case application.concurrency <- struct{}{}:
-		default:
-			application.noteReject(obs.RejectConcurrencyLimit, request, http.StatusTooManyRequests)
-			// 同上：事件先落地再释放并发槽，排空不会抢在通知前关进程。
-			err := writeWSErrorEvent(conn, http.StatusTooManyRequests, "rate_limit_error", "rate_limit", "", "server is busy, please try again later")
-			application.inflight.Done()
+		if reason != "" {
+			application.noteReject(reason, request, status)
+			err := writeWSErrorEvent(conn, status, "rate_limit_error", "rate_limit", "", "server is busy, please try again later")
+			release()
 			if err != nil {
 				return
 			}
@@ -563,8 +557,7 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			// 会永久占住一个并发槽并让 WaitDrain 卡满 drainTimeout。
 			defer func() {
 				stopTurn()
-				<-application.concurrency
-				application.inflight.Done()
+				release()
 			}()
 			writer, err := application.runWSTurn(turnCtx, conn, request, normalized)
 			// 取消状态必须在 stopTurn 前采样——之后的 Err() 永远非 nil。

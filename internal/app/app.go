@@ -390,26 +390,46 @@ func (application *App) noteReject(reason obs.RejectReason, request *http.Reques
 		"client_ip", event.IP, "key_hash", event.KeyHash, "ua", event.UserAgent)
 }
 
+// admitTurn 做一次 /v1 轮次准入：inflight.Add 先行（排空等待才能覆盖所有
+// 已进入的请求），再查排空标记与并发槽。reason 非空即被拒。
+// 返回的 release 无论成败都必须调用；拒绝路径要在写完拒绝帧之后才调——
+// release 里的 inflight.Done 放行 WaitDrain，排空中的进程随时退出，
+// 写晚了的拒绝通知客户端根本收不到。HTTP 与 WS 两条入口共用这段计数
+// 纪律，各自只负责按自己的 wire 渲染拒绝。
+func (application *App) admitTurn() (reason obs.RejectReason, status int, release func()) {
+	application.inflight.Add()
+	release = application.inflight.Done
+	if application.draining.Load() {
+		return obs.RejectDraining, http.StatusServiceUnavailable, release
+	}
+	select {
+	case application.concurrency <- struct{}{}:
+		release = func() {
+			<-application.concurrency
+			application.inflight.Done()
+		}
+		return "", 0, release
+	default:
+		return obs.RejectConcurrencyLimit, http.StatusTooManyRequests, release
+	}
+}
+
 // concurrencyMiddleware 限制同时处理的 /v1/* 请求数，避免上游阻塞时资源耗尽。
 func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		// Add 先于 draining 检查：排空等待才能覆盖所有已经进入的请求，
-		// 被拒绝的请求瞬时 Done，不占排空时间。
-		application.inflight.Add()
-		defer application.inflight.Done()
-		if application.draining.Load() {
-			application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
-			writeDrainingError(writer)
+		reason, status, release := application.admitTurn()
+		if reason != "" {
+			application.noteReject(reason, request, status)
+			if reason == obs.RejectDraining {
+				writeDrainingError(writer)
+			} else {
+				writeRateLimitError(writer, "server is busy, please try again later")
+			}
+			release()
 			return
 		}
-		select {
-		case application.concurrency <- struct{}{}:
-			defer func() { <-application.concurrency }()
-			next.ServeHTTP(writer, request)
-		default:
-			application.noteReject(obs.RejectConcurrencyLimit, request, http.StatusTooManyRequests)
-			writeRateLimitError(writer, "server is busy, please try again later")
-		}
+		defer release()
+		next.ServeHTTP(writer, request)
 	})
 }
 
