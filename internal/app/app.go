@@ -541,10 +541,10 @@ func (application *App) createCompletion(
 			// 字节超限按 PayloadTooLarge 报 413：下游网关按 4xx 归类为
 			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_read", http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_read", http.StatusBadRequest, fmt.Errorf("read request: %w", err))
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusBadRequest, fmt.Errorf("read request: %w", err))
 		return
 	}
 	if recorder != nil {
@@ -554,7 +554,7 @@ func (application *App) createCompletion(
 	}
 	messages, options, err := decoder(body)
 	if err != nil {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_decode", http.StatusBadRequest, err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
 	}
 	completion.Model = messages.Model
@@ -597,7 +597,7 @@ func (application *App) createCompletion(
 		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
-			recorder.WriteError("client_disconnected", err)
+			recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
 			return
 		}
 		if out.committed {
@@ -606,24 +606,24 @@ func (application *App) createCompletion(
 			completion.StatusCode = http.StatusOK
 			if writeErr := out.writeContent(protocol.EncodeError(err, debugRef(recorder))); writeErr != nil {
 				completion.Result = "disconnected"
-				recorder.WriteError("client_disconnected", writeErr)
+				recorder.WriteError(debuglog.ErrStageClientDisconnected, writeErr)
 				return
 			}
-			recorder.WriteError("response_event", err)
+			recorder.WriteError(debuglog.ErrStageResponseEvent, err)
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(failure), err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageResponseEvent, common.HTTPStatus(failure), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
 	body, err = protocol.EncodeFinal(message)
 	if err != nil {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_encode", http.StatusInternalServerError, err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return
 	}
 	if err := out.writeContent(body); err != nil {
 		completion.Result = "disconnected"
-		recorder.WriteError("client_disconnected", err)
+		recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
 		return
 	}
 	responseBytes += out.bytes

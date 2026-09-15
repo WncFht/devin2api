@@ -163,7 +163,7 @@ func (application *App) streamCompletion(
 ) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPStream, http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
 		return
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
@@ -184,13 +184,13 @@ func (application *App) streamCompletion(
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
 		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
-			recorder.WriteError("client_disconnected", firstErr)
+			recorder.WriteError(debuglog.ErrStageClientDisconnected, firstErr)
 			return
 		}
 		firstFailure := llm.Classify(firstErr)
 		status := common.HTTPStatus(firstFailure)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, firstErr)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageProviderStream, status, firstErr)
 			return
 		}
 		// OpenAI 流式面上的限流是唯一转流内事件的 pre-stream 失败：
@@ -209,7 +209,7 @@ func (application *App) streamCompletion(
 		// 完成存在竞态（取消可能先落成错误事件再被看见），ctx 是兜底。
 		if streamCtx.Err() != nil {
 			completion.Result = "disconnected"
-			recorder.WriteError("client_disconnected", context.Cause(streamCtx))
+			recorder.WriteError(debuglog.ErrStageClientDisconnected, context.Cause(streamCtx))
 			return
 		}
 		failure := llm.FailureOf(firstEvent.Error)
@@ -234,7 +234,7 @@ func (application *App) streamCompletion(
 				firstEvent,
 			}
 		} else {
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "provider_stream", status, failure)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageProviderStream, status, failure)
 			return
 		}
 	}
@@ -255,13 +255,13 @@ func (application *App) streamCompletion(
 		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
 			// ctx 取消收口：写出/编码错误与取消同时发生时同样归因断连。
 			completion.Result = "disconnected"
-			recorder.WriteError("client_disconnected", streamErr)
+			recorder.WriteError(debuglog.ErrStageClientDisconnected, streamErr)
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, "http_stream", common.HTTPStatus(streamFailure), streamErr)
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPStream, common.HTTPStatus(streamFailure), streamErr)
 		default:
-			recorder.WriteError("http_stream", streamErr)
+			recorder.WriteError(debuglog.ErrStageHTTPStream, streamErr)
 		}
 		return
 	}

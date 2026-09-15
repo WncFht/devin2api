@@ -319,7 +319,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
 	if err != nil {
-		recorder.WriteError("devin_connect", err)
+		recorder.WriteError(debuglog.ErrStageDevinConnect, err)
 		return nil, err
 	}
 	cfg = adapter.currentConfig()
@@ -371,13 +371,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// ctx 已取消（客户端断连/排空）时不记——外层记
 		// client_disconnected，这里抢占首个失败点会把它顶掉。
 		if streamCtx.Err() == nil {
-			stage := "devin_connect"
+			stage := debuglog.ErrStageDevinConnect
 			var failure *llm.Failure
 			if errors.As(err, &failure) && failure.LocalGate {
-				stage = "rate_gate"
+				stage = debuglog.ErrStageRateGate
 			} else if isTransientConnectError(err) {
 				// 建连期的传输断裂与中流断裂同层，不混进上游语义拒绝桶。
-				stage = "devin_transport"
+				stage = debuglog.ErrStageDevinTransport
 			}
 			recorder.WriteError(stage, err)
 		}
@@ -1167,9 +1167,9 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return
 	}
-	stage := "devin_connect"
+	stage := debuglog.ErrStageDevinConnect
 	if isTransientConnectError(cause) {
-		stage = "devin_transport"
+		stage = debuglog.ErrStageDevinTransport
 	}
 	stream.recorder.WriteError(stage, cause)
 }

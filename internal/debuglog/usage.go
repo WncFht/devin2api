@@ -101,7 +101,7 @@ func ErrorOwner(e IndexEntry) string {
 	if e.StatusCode < 400 && e.Result != "failed" {
 		return ""
 	}
-	if e.ErrorStage == "http_read" || e.ErrorStage == "http_decode" {
+	if e.ErrorStage == ErrStageHTTPRead || e.ErrorStage == ErrStageHTTPDecode {
 		return "client"
 	}
 	return "upstream"

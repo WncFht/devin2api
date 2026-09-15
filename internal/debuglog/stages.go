@@ -37,6 +37,33 @@ const (
 	StderrFile = "stderr.log"
 )
 
+// 错误阶段名是另一条轴的跨包契约：WriteError/writeLoggedError 的 stage
+// 实参、IndexEntry.ErrorStage、error.json 的 stage 字段共用这组取值——
+// 写侧在 app/adapter，读侧在 usage 聚合与面板 error_stage 筛选，
+// 字面量漂移会让「按失败点检索」静默失配。
+const (
+	// ErrStageHTTPRead 是请求体读取失败（超限/连接中断）。
+	ErrStageHTTPRead = "http_read"
+	// ErrStageHTTPDecode 是请求体解码或中间层校验失败。
+	ErrStageHTTPDecode = "http_decode"
+	// ErrStageProviderStream 是上游流式响应中途失败（上游责任或语义拒绝）。
+	ErrStageProviderStream = "provider_stream"
+	// ErrStageHTTPStream 是下发客户端的 SSE 写出失败（非断连类）。
+	ErrStageHTTPStream = "http_stream"
+	// ErrStageResponseEvent 是内部事件投影为协议帧时的失败。
+	ErrStageResponseEvent = "response_event"
+	// ErrStageHTTPEncode 是响应体序列化失败。
+	ErrStageHTTPEncode = "http_encode"
+	// ErrStageClientDisconnected 是客户端断连/取消终止了请求。
+	ErrStageClientDisconnected = "client_disconnected"
+	// ErrStageDevinConnect 是上游语义拒绝（参数/权限/限流的 Connect 层错误）。
+	ErrStageDevinConnect = "devin_connect"
+	// ErrStageDevinTransport 是上游传输断裂（EOF/帧截断，非语义响应）。
+	ErrStageDevinTransport = "devin_transport"
+	// ErrStageRateGate 是本地速率闸门快败，请求未触达上游。
+	ErrStageRateGate = "rate_gate"
+)
+
 // devinRequestStageStem 是上游请求文件名的公共词干：首个请求是
 // 03-devin-request.json，第 N 次重发是 03-devin-request.attemptN.json——
 // 词干加 "." 前缀匹配可同时圈出主文件与全部重试分片。
