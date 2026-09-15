@@ -269,7 +269,7 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 		"version": h.version,
 		"auth":    "dashboard.password 非空时可用 cookie 会话或 Authorization: Bearer <密码>",
 		"endpoints": []map[string]string{
-			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警 + devin.aliases 目标缺席校验（alias_targets_absent）"},
+			{"method": "GET", "path": "/panel/api/status", "description": "账户/套餐/容量/渠道/模型状态告警 + devin.aliases 校验（alias_targets_absent 目标缺席 / alias_shadows_catalog 遮蔽真 uid）"},
 			{"method": "GET", "path": "/panel/api/models", "description": "模型目录含能力位与价格"},
 			{"method": "GET", "path": "/panel/api/stats", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ 60 分钟逐 30 秒趋势 + http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + index 聚合用量 + gate 速率闸门状态（闩态/计数/令牌/排队 + events 闩迁移事件环）"},
 			{"method": "GET", "path": "/panel/api/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},

@@ -476,6 +476,9 @@ function renderAlerts() {
     (d.alias_targets_absent || []).forEach(a => {
       banners.push('<div class="err-banner">别名目标缺席：' + esc(a) + ' — 上游目录无此 uid，经别名的请求会被 permission_denied（改 devin.aliases）</div>');
     });
+    (d.alias_shadows_catalog || []).forEach(a => {
+      banners.push('<div class="err-banner">别名遮蔽目录模型：' + esc(a) + ' — 发往该 uid 的请求被改写到目标，客户端无感知（改 devin.aliases）</div>');
+    });
     if (d.alias_check_error) banners.push('<div class="err-banner">别名校验失败: ' + esc(d.alias_check_error) + '</div>');
     if (d.user_status_error) banners.push('<div class="err-banner">账户用量拉取失败: ' + esc(d.user_status_error) + '</div>');
     if (d.status_error) banners.push('<div class="err-banner">IDE 状态拉取失败: ' + esc(d.status_error) + '</div>');
