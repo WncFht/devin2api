@@ -297,7 +297,8 @@ func parseStatusTerm(t string) (statusCond, bool) {
 	return c, true
 }
 
-// match 判断一条索引行是否满足筛选条件；conds 由 ListRequests 统一编译传入。
+// match 判断一条索引行是否满足筛选条件；conds 由 ListRequests 统一编译传入，
+// f.Query 同处已归一为小写（子串比较不再逐条 ToLower）。
 func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
 	if conds != nil {
 		ok := false
@@ -343,7 +344,7 @@ func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
 		haystack := e.Dir + " " + e.Method + " " + e.Path + " " + e.Model + " " +
 			e.RequestedModel + " " + e.ResponseModel + " " + e.KeyHash + " " +
 			e.ClientRequestID + " " + e.ErrorStage + " " + e.Result
-		if !strings.Contains(strings.ToLower(haystack), strings.ToLower(f.Query)) {
+		if !strings.Contains(strings.ToLower(haystack), f.Query) {
 			return false
 		}
 	}
@@ -397,6 +398,9 @@ func (manager *Manager) ListRequests(limit int, filter RequestFilter) ListResult
 
 	entries := make([]IndexEntry, 0, limit)
 	conds := parseStatusExpr(filter.Status)
+	// q 筛选的 needle 与大小写形态对全循环不变——先归一再扫，
+	// 免得每条候选行各做一次 ToLower(f.Query)。
+	filter.Query = strings.ToLower(filter.Query)
 	// scannedAll 为 false 表示窗口内还有没扫到的行（limit 用尽），更早历史必然存在。
 	scannedAll := true
 	for i := len(cached.entries) - 1; i >= 0; i-- {
