@@ -563,21 +563,25 @@ wait_managed_pid() {
 	return 1
 }
 
-# handoff_restart <old_pid>：reuseport 重叠交接重启。
-# 每个失败分支都退化为「重启 + 外层等 healthz 版本」的经典路径——
-# 失败语义不劣于旧部署。svc_restart/svc_pid 由各 deploy 脚本提供。
+# handoff_restart <old_pid> [restart_fn]：reuseport 重叠交接重启。
+# restart_fn 是「让新托管实例跑起来」的动作：常规是 svc_restart（systemd
+# restart 顺带载入已 daemon-reload 的新 unit 定义），plist 变更时 macOS 侧
+# 传 bootout+bootstrap 的封装。每个失败分支都退化为「同一 restart_fn +
+# 外层等 healthz 版本」的经典路径——失败语义不劣于旧部署。spawn_handoff
+# 失败本身就证明在跑实例没开 reuseport（bind 撞旧 socket），此时交接桥无
+# 从谈起，直接走 restart_fn。
 handoff_restart() {
-	local old_pid="$1" tpid mpid _
+	local old_pid="$1" restart_fn="${2:-svc_restart}" tpid mpid _
 	if ! tpid="$(spawn_handoff)"; then
 		echo "==> 交接进程不可用（在跑实例未开 reuseport）——回退经典重启" >&2
 		wait_inflight_idle "${HEALTH_URL}" 30
-		svc_restart
+		"${restart_fn}"
 		return 0
 	fi
 	echo "==> 交接进程就绪 pid=${tpid}；重启托管实例（其 drain 起点即让出监听，在途继续排空）" >&2
-	# svc_restart 失败不能放任 set -e 把脚本掐死在交接半途——交接进程已
+	# restart 失败不能放任 set -e 把脚本掐死在交接半途——交接进程已
 	# 接管服役，旧实例未被信号触及仍在跑，提示后交给外层 healthz 检查。
-	if ! svc_restart; then
+	if ! "${restart_fn}"; then
 		warn "重启命令失败——交接进程 pid=${tpid} 与旧实例并存服役，请检查托管状态"
 		return 0
 	fi

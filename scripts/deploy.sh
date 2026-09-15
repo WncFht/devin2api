@@ -32,6 +32,21 @@ LEGACY_RUNTIME="${HOME}/Library/Application Support/devin-2api"
 svc_pid()     { launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}'; }
 svc_restart() { launchctl kickstart -k "gui/$(id -u)/${LABEL}"; }
 
+# svc_reload_restart：plist 变更时「让新实例跑起来」的动作——kickstart 不载入
+# 新 plist，必须 bootout+bootstrap。bootout 返回不等进程退完：有交接桥时旧实例
+# 的监听已让出（reuseport 组共享），无桥回退时旧 socket 还占着端口，先等旧 pid
+# 消失再 bootstrap，省得 KeepAlive 在 EADDRINUSE 上空转。
+svc_reload_restart() {
+	launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
+	local _ old_pid="${OLD_PID:-}"
+	for _ in $(seq 140); do
+		[[ -z "${old_pid}" ]] && break
+		kill -0 "${old_pid}" 2>/dev/null || break
+		sleep 0.5
+	done
+	launchctl bootstrap "gui/$(id -u)" "${PLIST}"
+}
+
 # plist_content：目标服务定义。EnvironmentVariables 注入 reuseport 是
 # 重叠交接的前提；ExitTimeOut 须覆盖二进制 drainTimeout（600s）+退出余量。
 plist_content() {
@@ -202,24 +217,15 @@ if [[ "${NO_RESTART}" == "1" ]]; then
 fi
 
 # 刚 bootstrap 的服务已在跑新二进制，kickstart 只会平白弹它一次。
-# plist 变更则必须 bootout+bootstrap 才能生效——本次仍是经典重启
-# （在跑实例多半还没拿到 reuseport env），下次部署起走重叠交接。
+# plist 变更必须 bootout+bootstrap（svc_reload_restart）——同样走交接桥：
+# 在跑实例已开 reuseport 时桥先接管新连接，盖住 bootout→排尽→bootstrap
+# 整段空窗；没开时 spawn 失败，handoff_restart 内部退化为等空闲+同一动作。
 OLD_PID=""
 if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service bootstrapped (RunAtLoad 已启动新进程)"
 elif [[ "${PLIST_RELOAD}" == "1" ]]; then
 	OLD_PID="$(svc_pid)"
-	wait_inflight_idle "${HEALTH_URL}" 30
-	echo "==> bootout+bootstrap 使新 plist 生效"
-	launchctl bootout "gui/$(id -u)/${LABEL}" 2>/dev/null || true
-	# bootout 返回不等进程退完——新实例 bind 会撞还在排空的旧 socket，
-	# 先等旧 pid 消失再 bootstrap，省得 KeepAlive 在 EADDRINUSE 上空转。
-	for _ in $(seq 140); do
-		[[ -z "${OLD_PID}" ]] && break
-		kill -0 "${OLD_PID}" 2>/dev/null || break
-		sleep 0.5
-	done
-	launchctl bootstrap "gui/$(id -u)" "${PLIST}"
+	handoff_restart "${OLD_PID}" svc_reload_restart
 else
 	OLD_PID="$(svc_pid)"
 	handoff_restart "${OLD_PID:-0}"

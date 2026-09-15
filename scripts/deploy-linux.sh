@@ -200,15 +200,12 @@ if [[ "${NO_RESTART}" == "1" ]]; then
 fi
 
 # 刚 enable --now 的服务已在跑新二进制，restart 只会平白弹它一次。
-# unit 变更时本次 restart 即载入新定义——在跑实例多半还没拿到 reuseport
-# env，走经典重启，下次部署起走重叠交接。
+# unit 变更时 restart 顺带载入新定义（daemon-reload 已在前面做过）——
+# 不用退回经典重启：在跑实例已开 reuseport 时交接桥能盖住整个排空窗口，
+# 没开时 spawn 失败在 handoff_restart 内部自动退化，语义与原来相同。
 OLD_PID=""
 if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service enabled and started"
-elif [[ "${UNIT_RELOAD}" == "1" ]]; then
-	OLD_PID="$(svc_pid || true)"
-	wait_inflight_idle "${HEALTH_URL}" 30
-	svc_restart
 else
 	OLD_PID="$(svc_pid || true)"
 	handoff_restart "${OLD_PID:-0}"
