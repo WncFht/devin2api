@@ -168,7 +168,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
-		return AdaptedRequest{}, fmt.Errorf("validate adapted request: %w", err)
+		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
 	}
 	return AdaptedRequest{
 		Context: context,

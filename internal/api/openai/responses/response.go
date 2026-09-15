@@ -474,7 +474,7 @@ func (encoder *StreamEncoder) done(event llm.ResponseEvent) ([]SSEEvent, error) 
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.completed = true
 	// 分类记录随车携带（decoder 产出时已挂）：type/status/retry 全读字段。
-	failure := common.FailureOf(event.Error)
+	failure := llm.FailureOf(event.Error)
 	message := "response stream failed"
 	if failure.Error() != "" {
 		// Codex 只在 message 含 "try again in Ns" 时按服务端时刻睡眠重试；

@@ -245,7 +245,7 @@ func (encoder *StreamEncoder) finish(event llm.ResponseEvent) []SSEEvent {
 func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	encoder.finished = true
 	// 分类记录随车携带（decoder 产出时已挂）：type/status/retry 全读字段。
-	failure := common.FailureOf(event.Error)
+	failure := llm.FailureOf(event.Error)
 	message := "chat completion stream failed"
 	if failure.Error() != "" {
 		// 同 responses 面：给限流消息补 Codex 可解析的 "try again in Ns"。
