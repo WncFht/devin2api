@@ -304,8 +304,12 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 	}
 	name := chi.URLParam(r, "*")
 	// ?raw=1 原样回字节：图片等附件要保真，JSON 视图装不下它们。
+	// 载荷是客户端请求日志——可能含 HTML/SVG；sandbox 让渲染出的文档
+	// 处于 opaque origin（脚本拿不到 panel 会话），nosniff 禁掉嗅探覆盖。
 	if r.URL.Query().Get("raw") == "1" {
 		w.Header().Set("Content-Type", http.DetectContentType(data))
+		w.Header().Set("Content-Security-Policy", "sandbox")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, _ = w.Write(h.maskToken(data))
 		return
 	}
