@@ -45,6 +45,10 @@ type Handler struct {
 	baseTransport http.RoundTripper
 	sessionMu     sync.RWMutex
 	sessionTokens map[string]time.Time
+	// recentTokens 是最近见过的上游凭据（token 自愈轮换会换新）：
+	// maskToken 按这个集合脱敏，旧请求目录里的历史 token 字面值也罩住。
+	tokenMu      sync.Mutex
+	recentTokens []string
 	// loginFailures 按客户端 IP 记录连续登录失败与锁定期——面板是
 	// 唯一持密码的端点，爆破代价要抬高。
 	loginFailures map[string]*loginFail
@@ -108,12 +112,15 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
 	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
 	httpClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
+	// baseURL 归一化一次，Connect 客户端与 fetchUserStatus 用同一形态——
+	// 尾随斜杠的 devin.base_url 会让 Connect 调用路径出 "//"。
+	trimmedURL := strings.TrimRight(baseURL, "/")
 	return &Handler{
 		password:      password,
 		passwordHash:  sha256.Sum256([]byte(password)),
-		baseURL:       strings.TrimRight(baseURL, "/"),
+		baseURL:       trimmedURL,
 		tokenFunc:     tokenFunc,
-		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, baseURL),
+		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, trimmedURL),
 		httpClient:    httpClient,
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
@@ -129,12 +136,16 @@ func (h *Handler) SetVersion(version string) {
 	h.version = version
 }
 
-// SetPassword 运行时更换面板密码（配置 reload 热路径）。
+// SetPassword 运行时更换面板密码（配置 reload 热路径）。换密码的运维
+// 语义是踢人——旧密码签出的会话一并吊销，否则最长还能挂 24h。
 func (h *Handler) SetPassword(password string) {
 	h.authMu.Lock()
 	h.password = password
 	h.passwordHash = sha256.Sum256([]byte(password))
 	h.authMu.Unlock()
+	h.sessionMu.Lock()
+	h.sessionTokens = make(map[string]time.Time)
+	h.sessionMu.Unlock()
 }
 
 // SetGateStats 注入速率闸门快照源。
@@ -326,13 +337,15 @@ func gzipBody(body []byte) []byte {
 
 // serveStatic 下发 static/ 内嵌的前端资源；内容随二进制固定。
 // private：响应需鉴权，不允许共享缓存存储；no-cache+ETag：每次加载再验证。
+// 例外是 panel.css：登录页与它共享同一套设计令牌，设了密码（登录页
+// 唯一会出现的场景）时若拦它，登录页会裸成浏览器默认样式。
 func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	name := path.Clean(strings.TrimPrefix(chi.URLParam(r, "*"), "/"))
 	if name == "." || strings.HasPrefix(name, "..") || strings.HasPrefix(name, "/") {
 		http.NotFound(w, r)
+		return
+	}
+	if name != "panel.css" && !h.requireAuth(w, r) {
 		return
 	}
 	body, err := staticFS.ReadFile("static/" + name)

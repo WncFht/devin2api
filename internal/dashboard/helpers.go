@@ -21,13 +21,30 @@ func remoteIP(r *http.Request) string {
 
 // maskToken 对回显给面板的日志字节做字面值兜底脱敏：写路径的 secretKey
 // 名单只能覆盖结构化键名，token 若出现在自由文本（请求 body 原文、上游
-// 错误文案）里会漏出，读路径再按当前 token 字面值过一遍。
+// 错误文案）里会漏出，读路径再按最近见过的 token 字面值过一遍——
+// 自愈轮换后旧 token 仍可能躺在旧请求目录里。
 func (h *Handler) maskToken(data []byte) []byte {
-	token := h.tokenFunc()
-	if token == "" || len(data) == 0 {
+	if len(data) == 0 {
 		return data
 	}
-	return bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
+	for _, token := range h.noteToken(h.tokenFunc()) {
+		data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
+	}
+	return data
+}
+
+// noteToken 记录最近见过的上游 token（去重、保留最近 8 个），返回脱敏
+// 要覆盖的字面值集合。
+func (h *Handler) noteToken(token string) []string {
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	if token != "" && (len(h.recentTokens) == 0 || h.recentTokens[0] != token) {
+		h.recentTokens = append([]string{token}, h.recentTokens...)
+		if len(h.recentTokens) > 8 {
+			h.recentTokens = h.recentTokens[:8]
+		}
+	}
+	return h.recentTokens
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。
