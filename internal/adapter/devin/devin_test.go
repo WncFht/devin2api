@@ -1078,6 +1078,10 @@ func TestIsTransientConnectError(t *testing.T) {
 		// GOAWAY 不走 wrapIfRSTError，建连期以 unavailable 外皮透出。
 		"goaway": connect.NewError(connect.CodeUnavailable,
 			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=9, ErrCode=NO_ERROR, debug=""`)),
+		// h1 连接池（force_http1）：复用到对端已关闭的空闲连接时报
+		// errServerClosedIdle——失败发生在字节写出之前，重试安全。
+		"h1 idle conn closed": connect.NewError(connect.CodeUnavailable,
+			errors.New("http: server closed idle connection")),
 	}
 	for name, err := range retryable {
 		if !isTransientConnectError(err) {

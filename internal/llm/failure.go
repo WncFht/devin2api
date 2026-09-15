@@ -203,6 +203,7 @@ func transportBreak(failure *Failure) bool {
 		return true
 	}
 	return IsHTTP2TransportError(failure.Message) ||
+		IsIdleConnClosedError(failure.Message) ||
 		((failure.Code == "invalid_argument" || failure.Code == "internal") &&
 			strings.HasPrefix(failure.Message, "protocol error:"))
 }
@@ -236,6 +237,15 @@ func IsHTTP2TransportError(message string) bool {
 		}
 	}
 	return false
+}
+
+// IsIdleConnClosedError 判定错误文案是否为 net/http 连接池的
+// errServerClosedIdle 固定措辞（"http: server closed idle connection"）：
+// 池复用到对端已关闭的空闲连接时报出，h1 池（force_http1）特有——
+// 失败发生在任何字节写出之前，与 RST/GOAWAY 同属传输断裂，重试安全。
+// h2 无此形态：GOAWAY 先于复用竞争到达。
+func IsIdleConnClosedError(message string) bool {
+	return strings.Contains(message, "server closed idle connection")
 }
 
 // connectCodes 是 Connect 协议全部错误码——文本兜底时只有前缀命中该集合

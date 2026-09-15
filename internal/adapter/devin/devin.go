@@ -904,11 +904,6 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 			models = append(models, entry)
 		}
 	}
-
-	a.models = models
-	a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
-	a.modelsRetryUntil = time.Time{}
-	a.modelsErr = nil
 	return models, nil
 }
 
