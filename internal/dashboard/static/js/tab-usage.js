@@ -349,6 +349,14 @@ document.getElementById('page-usage').addEventListener('click', e => {
   if (ky) { jumpRequests({ q: ky.dataset.key }); return; }
 });
 
+// role=button 的 th 不自带键盘激活：Enter/Space 映射到同一排序动作，
+// Space 要 preventDefault 否则页面滚动。
+document.getElementById('page-usage').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const st = e.target.closest('th[data-msort]');
+  if (st) { e.preventDefault(); applySort(st.dataset.msort); }
+});
+
 renderChips();
 Tabs.register('usage', load);
 Polls.add('usage', load, 60000);
