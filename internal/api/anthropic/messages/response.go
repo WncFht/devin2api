@@ -215,8 +215,9 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 		state.signature.WriteString(t.ThinkingSignature)
 		state.redacted = state.redacted || t.Redacted
 	}
-	// 上游把签名作为正文之后的尾随帧发送：尚无签名时推迟
-	// content_block_stop，待 signature 事件或下一事件再收尾。
+	// 上游把签名作为正文之后的尾随帧发送（swe-2 实测在所有 text 之后
+	// 的流末尾）：尚无签名时推迟 content_block_stop，由流收尾时的
+	// flushPendingThinking 统一关块。
 	if state.signature.Len() == 0 {
 		state.pendingSig = true
 		return nil, nil
@@ -234,40 +235,39 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 	}, encoder.stopThinking(state)...), nil
 }
 
-// thinkingSignature 处理尾随签名帧：增量按 signature_delta 下发，
-// 块保持挂起、由 flushPendingThinking 统一收尾。上游可把签名拆成
-// 多帧（decoder 每帧发一个事件），首个分片就关块会把后续分片丢在
-// content_block_stop 之后——客户端只累积到前缀，下轮回放截断签名
-// 被上游拒。
+// thinkingSignature 只累积尾随签名增量，不逐帧下发：两个官方 SDK 对
+// signature 是赋值语义（content.signature = delta.signature，非追加），
+// 逐增量发 signature_delta 会让客户端只留最后一片。完整签名统一在
+// flushPendingThinking 里随收尾一次性下发；块已收尾（pendingSig 已清）
+// 的迟到签名帧落进死缓冲自然丢弃——与块不存在（解码器 bug）区分开。
 func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
 	state := encoder.block(event.ContentIndex, "thinking")
 	if state == nil {
 		return nil, fmt.Errorf("thinking signature at content index %d without thinking_start", event.ContentIndex)
 	}
 	state.signature.WriteString(event.Delta)
-	if state.redacted {
-		// redacted 块的 data 没有 signature_delta 增量形态，只能在收尾的
-		// content_block_stop 整体下发——分片继续累积，flush 时随 data 走。
-		return nil, nil
-	}
-	return []SSEEvent{
-		encoder.emitBlockDelta(state.index, blockDelta{
-			Type: "signature_delta", Signature: event.Delta,
-		}),
-	}, nil
+	return nil, nil
 }
 
 // flushPendingThinking 在流终止（finish/failed）前补发挂起的思考块收尾，
 // 上游没有尾随签名时保证块仍按序正常关闭。签名帧可能隔着后续内容块
 // 才到（实测 thinking_end → toolcall_* → signature），中途不调用以免
-// 提前关块导致迟到签名被静默丢弃。
+// 提前关块导致迟到签名被静默丢弃。挂起期间累积的签名以单条
+// signature_delta（完整串）在 content_block_stop 前下发——规范客户端
+// 对 signature 是赋值语义，多片增量等于只留末片。
 func (encoder *StreamEncoder) flushPendingThinking() []SSEEvent {
 	var events []SSEEvent
 	for _, state := range encoder.blocks {
-		if state.pendingSig {
-			state.pendingSig = false
-			events = append(events, encoder.stopThinking(state)...)
+		if !state.pendingSig {
+			continue
 		}
+		state.pendingSig = false
+		if !state.redacted && state.signature.Len() > 0 {
+			events = append(events, encoder.emitBlockDelta(state.index, blockDelta{
+				Type: "signature_delta", Signature: state.signature.String(),
+			}))
+		}
+		events = append(events, encoder.stopThinking(state)...)
 	}
 	return events
 }

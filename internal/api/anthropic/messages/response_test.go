@@ -64,7 +64,7 @@ func TestStreamEncoderEmitsToolUse(t *testing.T) {
 
 // TestStreamEncoderHoldsThinkingForLateSignature 的测试动机是上游实测帧序
 // thinking_end → toolcall_* → thinking_signature：thinking 块必须挂起等待
-// 隔块的尾随签名，签名到达时补发 signature_delta 再收尾。
+// 隔块的尾随签名，完整签名由流收尾时的 flush 以单条 signature_delta 下发。
 func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	encoder := NewStreamEncoder("claude-test")
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
@@ -101,8 +101,9 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	want := []string{
 		"message_start", "content_block_start", "content_block_delta",
 		"content_block_start", "content_block_delta",
+		"content_block_stop",
 		"content_block_delta", "content_block_stop",
-		"content_block_stop", "message_delta", "message_stop",
+		"message_delta", "message_stop",
 	}
 	if len(names) != len(want) {
 		t.Fatalf("event names = %v, want %v", names, want)
@@ -112,16 +113,16 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 			t.Fatalf("event[%d] = %q, want %q (all: %v)", index, names[index], name, names)
 		}
 	}
-	signatureDelta := decodeEventData(t, encoded[5])
+	// index=1 的工具块先收尾；挂起思考块的签名随 flush 以单条
+	// signature_delta 下发，紧跟其 content_block_stop。
+	toolStop := decodeEventData(t, encoded[5])
+	if toolStop["index"] != float64(1) {
+		t.Fatalf("tool stop block = %#v", toolStop)
+	}
+	signatureDelta := decodeEventData(t, encoded[6])
 	delta := signatureDelta["delta"].(map[string]any)
 	if delta["type"] != "signature_delta" || delta["signature"] != "sig" || signatureDelta["index"] != float64(0) {
 		t.Fatalf("signature delta = %#v", signatureDelta)
-	}
-	// 签名不再就地关块：挂起的思考块由流终止时的 flush 统一收尾，
-	// 因此 index=1 的工具块先于 index=0 的思考块 stop。
-	toolStop := decodeEventData(t, encoded[6])
-	if toolStop["index"] != float64(1) {
-		t.Fatalf("tool stop block = %#v", toolStop)
 	}
 	thinkingStop := decodeEventData(t, encoded[7])
 	if thinkingStop["index"] != float64(0) || thinkingStop["content_block"] != nil {
@@ -129,10 +130,11 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	}
 }
 
-// TestStreamEncoderEmitsEverySignatureFragment 钉住上游把签名拆成多帧的
-// 形态：每个 thinking_signature 事件都必须发 signature_delta——首个分片
-// 就关块会让客户端只累积到前缀，下轮回放截断签名被上游拒。
-func TestStreamEncoderEmitsEverySignatureFragment(t *testing.T) {
+// TestStreamEncoderBuffersSignatureFragments 钉住签名分片的下发形态：
+// 无论上游把签名拆成几帧，客户端只应看到一条携带完整签名的
+// signature_delta——官方 SDK 对 signature 是赋值语义，逐分片下发等于
+// 只留末片，下轮回放截断签名被上游拒。
+func TestStreamEncoderBuffersSignatureFragments(t *testing.T) {
 	encoder := NewStreamEncoder("claude-test")
 	partial := &llm.AssistantMessage{
 		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}},
@@ -158,8 +160,8 @@ func TestStreamEncoderEmitsEverySignatureFragment(t *testing.T) {
 			signatures = append(signatures, delta["signature"].(string))
 		}
 	}
-	if len(signatures) != 2 || signatures[0] != "AAA" || signatures[1] != "BBB" {
-		t.Fatalf("signature deltas = %v, want [AAA BBB]", signatures)
+	if len(signatures) != 1 || signatures[0] != "AAABBB" {
+		t.Fatalf("signature deltas = %v, want [AAABBB]", signatures)
 	}
 }
 
