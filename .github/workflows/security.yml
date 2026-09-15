@@ -24,4 +24,6 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        # 钉版本：@latest 让 CI 结果随上游发版漂移（同一提交隔天可红可绿）；
+        # 漏洞库时效性由 DB 侧保证，工具版本只求可复现。
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
