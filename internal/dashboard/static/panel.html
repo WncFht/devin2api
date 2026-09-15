@@ -55,7 +55,8 @@
         <input type="search" id="reqSearch" placeholder="子串：模型 / 路径 / 上游ID / key哈希 / 结果...">
         <input type="search" id="fStatus" placeholder="状态码: 499 / !200 / >=400 / 2xx" style="max-width:210px;flex:0" title="状态码表达式：精确码 499、段位 4xx、比较 >=400、取反 !200；逗号分隔为或">
         <select id="fResult" aria-label="按结果筛选"><option value="">全部结果</option><option value="completed">completed</option><option value="failed">failed</option><option value="disconnected">disconnected</option><option value="aborted">aborted</option></select>
-        <input type="search" id="fReqModel" placeholder="模型精确匹配" style="max-width:160px;flex:0">
+        <input type="search" id="fReqModel" list="fModelList" placeholder="模型精确匹配" style="max-width:160px;flex:0" title="匹配请求模型/实际模型/响应模型任一字段">
+        <datalist id="fModelList"></datalist>
         <input type="search" id="fErrStage" placeholder="错误阶段" style="max-width:140px;flex:0">
         <select id="fSince" aria-label="按时间范围筛选"><option value="">全部时间</option><option value="1h">近 1 小时</option><option value="24h">近 24 小时</option><option value="7d">近 7 天</option></select>
         <input type="hidden" id="fSinceTS"><input type="hidden" id="fUntilTS">

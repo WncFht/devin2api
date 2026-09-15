@@ -53,11 +53,15 @@ function silentTag(a) {
 // IP/key 哈希与中断按钮。
 function pendingRowHtml(a) {
   const m = a.meta || {};
+  // resolved_model 是别名/路由判定后的上线 uid——请求名与实际承担者不同
+  // 时（别名、路由改写）就地显示映射，与完成行的 requested→resolved 同口径。
+  const resolved = (a.resolved_model && a.resolved_model !== a.model) ? ' → ' + esc(a.resolved_model) : '';
+  const retry = a.retries ? ' <span class="badge badge-sse" title="上游重发中：最近一次 ' + esc(a.last_retry_cause || '-') + '">重试' + a.retries + '</span>' : '';
   return '<tr class="pending-row" id="p-' + esc(a.dir) + '" data-dir="' + esc(a.dir) + '">' +
     '<td class="mono"><span class="pulse-dot"></span>' + fmtTime(a.started_at) + '<div class="muted" title="dir 即响应头 X-Request-Id">' + esc(a.dir) + '</div></td>' +
     '<td>' + esc(m.api || '-') + '</td>' +
-    '<td><span class="rbadge r-muted">' + esc(STATE_LABEL[a.state] || a.state || '进行中') + '</span>' + silentTag(a) + '</td>' +
-    '<td class="mono">' + esc(a.model || '-') + '</td>' +
+    '<td><span class="rbadge r-muted">' + esc(STATE_LABEL[a.state] || a.state || '进行中') + '</span>' + retry + silentTag(a) + '</td>' +
+    '<td class="mono">' + esc(a.model || '-') + resolved + '</td>' +
     '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
     '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
     '<td class="mono muted" title="已下发字节（token 未结算）">↓' + fmtBytes(a.client_bytes) + '</td>' +
@@ -97,7 +101,23 @@ function detailRowHtml() {
 // 文件清单、文件视图依次排开。openFile/fileText 决定文件视图的显隐与内容。
 function detailInnerHtml(d) {
   const m = d.meta || {};
+  // 在途请求的 meta.json 只有创建时刻的壳（无结果/模型身份）——命中
+  // lastActive 时在 meta-grid 前补一条活快照行，fillDetail 每轮重拉
+  // 让这组字段实时更新；resolved_model 与完成行「→ 实际」同口径。
+  const live = lastActive.find(a => a.dir === d.dir);
   let html = '';
+  if (live) {
+    html += '<div class="meta-grid">' + [
+      ['状态', (STATE_LABEL[live.state] || live.state || '进行中') + (live.retries ? ' · 重试' + live.retries + '（' + (live.last_retry_cause || '-') + '）' : '')],
+      ['请求模型', live.model],
+      ['实际模型', live.resolved_model && live.resolved_model !== live.model ? live.resolved_model : null],
+      ['已耗时', fmtMs(live.elapsed_ms)],
+      ['上游TTFB', fmtMs(live.first_upstream_ms)],
+      ['已下发', fmtBytes(live.client_bytes)],
+      ['队列/丢弃', live.queued_events + ' / ' + live.dropped_events],
+    ].filter(kv => kv[1] != null && kv[1] !== '').map(kv =>
+      '<div><span class="k">' + esc(kv[0]) + '</span> <span class="v">' + esc(String(kv[1])) + '</span></div>').join('') + '</div>';
+  }
   if (detailErr) {
     html += '<div class="err-banner">失败阶段 ' + esc(detailErr.stage || '-') + ' · ' + esc(detailErr.message || '') + ' · +' + fmtMs(detailErr.elapsed_ms) + '</div>';
   } else if (m.status_code >= 400 || m.result === 'failed') {
@@ -187,9 +207,11 @@ export function activeTable(list) {
   annotateSilence(list);
   let html = '<table><thead><tr><th>目录</th><th>API</th><th>模型</th><th>阶段</th><th>已耗时</th><th>上游TTFB</th><th>已下发</th><th>队列/丢弃</th><th></th></tr></thead><tbody>';
   list.forEach(a => {
+    const resolved = (a.resolved_model && a.resolved_model !== a.model) ? ' → ' + esc(a.resolved_model) : '';
+    const retry = a.retries ? ' <span class="badge badge-sse" title="上游重发中：最近一次 ' + esc(a.last_retry_cause || '-') + '">重试' + a.retries + '</span>' : '';
     html += '<tr><td class="mono">' + esc(a.dir) + '</td><td>' + esc(a.meta && a.meta.api || '-') + '</td>' +
-      '<td class="mono">' + esc(a.model || '-') + '</td>' +
-      '<td>' + esc(STATE_LABEL[a.state] || a.state || '-') + silentTag(a) + '</td>' +
+      '<td class="mono">' + esc(a.model || '-') + resolved + '</td>' +
+      '<td>' + esc(STATE_LABEL[a.state] || a.state || '-') + retry + silentTag(a) + '</td>' +
       '<td class="mono">' + fmtMs(a.elapsed_ms) + '</td>' +
       '<td class="mono">' + fmtMs(a.first_upstream_ms) + '</td>' +
       '<td class="mono">' + fmtBytes(a.client_bytes) + '</td>' +
@@ -290,6 +312,7 @@ async function load() {
     const hintEl = $('reqHint');
     if (hint) { hintEl.style.display = ''; hintEl.innerHTML = hint; } else { hintEl.style.display = 'none'; }
     if (expandedDir) fillDetail(expandedDir);
+    refreshModelOptions();
   } catch (e) {
     const h = $('reqHint');
     h.style.display = ''; h.textContent = '请求列表刷新失败：' + String(e) + '（保留旧数据，下轮自动重试）';
@@ -318,6 +341,33 @@ function tick() {
 }
 
 function resetAndLoad() { reqLimit = 100; prevDirs = null; tick(); }
+
+// ---------- 模型筛选 datalist ----------
+// ?model= 匹配 requested/model/response 任一字段（reader.go），候选因此要
+// 装全三类名：目录 uid + aliases 键值 + 近期列表里出现过的实际模型名。
+// models/config 端点都有缓存，首轮拉一次后每轮 load 只补列表增量。
+let modelChoiceBase = null; // Promise<Set>，目录 uid 与别名键值的静态候选
+function modelChoices() {
+  if (!modelChoiceBase) {
+    modelChoiceBase = Promise.all([api('/models').catch(() => null), api('/config').catch(() => null)])
+      .then(([mods, cfg]) => {
+        const set = new Set();
+        (mods && mods.models || []).forEach(m => { if (m.uid) set.add(m.uid); });
+        const al = cfg && cfg.config && cfg.config.devin && cfg.config.devin.aliases || {};
+        Object.keys(al).forEach(k => { set.add(k); if (al[k]) set.add(al[k]); });
+        return set;
+      });
+  }
+  return modelChoiceBase;
+}
+function refreshModelOptions() {
+  modelChoices().then(base => {
+    const set = new Set(base);
+    lastList.forEach(e => { [e.requested_model, e.model, e.response_model].forEach(v => v && set.add(v)); });
+    lastActive.forEach(a => { [a.model, a.resolved_model].forEach(v => v && set.add(v)); });
+    $('fModelList').innerHTML = [...set].sort().map(v => '<option value="' + esc(v) + '">').join('');
+  });
+}
 
 // ---------- 行内详情 ----------
 function toggleDetail(dir) {

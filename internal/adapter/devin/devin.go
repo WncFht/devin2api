@@ -337,6 +337,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError(debuglog.ErrStageDevinConnect, err)
 		return nil, err
 	}
+	// 别名与路由判定到此完结：记下发上线 uid，进行中列表即刻
+	// 呈现「请求名 → 实际 uid」，不必等响应身份回填。
+	recorder.SetResolvedModel(model)
 	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
 	// 目录能力位与最终承担请求的模型无关。
 	adapter.warnIfModelAbsentFromCatalog(model)

@@ -141,6 +141,13 @@ type ActiveRequest struct {
 	Meta RequestMeta `json:"meta"`
 	// Model 是解码后的客户端请求模型名；未记录时为空。
 	Model string `json:"model,omitempty"`
+	// ResolvedModel 是别名/路由判定后实际发给上游的 uid；上游请求
+	// 尚未发出时为空。
+	ResolvedModel string `json:"resolved_model,omitempty"`
+	// Retries 是已发生的上游重发次数；>0 表示请求正在或曾经重试。
+	Retries int `json:"retries,omitempty"`
+	// LastRetryCause 是最近一次重发的触发原因。
+	LastRetryCause string `json:"last_retry_cause,omitempty"`
 	// StartedAt 是请求进入时间。
 	StartedAt time.Time `json:"started_at"`
 	// ElapsedMS 是快照时刻相对进入时间的毫秒数。

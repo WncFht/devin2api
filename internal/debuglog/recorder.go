@@ -145,7 +145,8 @@ type Recorder struct {
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
-	// mutex 保护 closed、abortCancel、requestedModel；worker 自身状态无锁。
+	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、retries；
+	// worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -153,6 +154,9 @@ type Recorder struct {
 	abortCancel context.CancelFunc
 	// requestedModel 是解码后的客户端请求模型名（面板进行中列表展示用）。
 	requestedModel string
+	// resolvedModel 是别名解析与路由判定后实际发给上游的 uid；
+	// 进行中行据此把模型列渲染成「请求名 → 实际 uid」，不必等完成。
+	resolvedModel string
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
@@ -670,6 +674,17 @@ func (recorder *Recorder) SetModel(model string) {
 	recorder.mutex.Unlock()
 }
 
+// SetResolvedModel 记录别名/路由判定后实际发给上游的模型 uid；
+// 进行中行用它即时呈现映射终点，完成行的 requested→resolved 口径同源。
+func (recorder *Recorder) SetResolvedModel(model string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.resolvedModel = model
+	recorder.mutex.Unlock()
+}
+
 // AddClientBytes 累加已下发给客户端的字节数，用于进行中列表观察流出速率。
 func (recorder *Recorder) AddClientBytes(n int64) {
 	if recorder == nil || n <= 0 {
@@ -751,6 +766,12 @@ func (recorder *Recorder) Abort() bool {
 func (recorder *Recorder) snapshot() ActiveRequest {
 	recorder.mutex.Lock()
 	model := recorder.requestedModel
+	resolved := recorder.resolvedModel
+	retries := len(recorder.retries)
+	var lastRetryCause string
+	if retries > 0 {
+		lastRetryCause = recorder.retries[retries-1].Cause
+	}
 	abortable := recorder.abortCancel != nil
 	recorder.mutex.Unlock()
 	firstUpstream := optionalLatency(recorder.firstUpstreamMS.Load())
@@ -765,6 +786,9 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		Dir:             filepath.Base(recorder.directory),
 		Meta:            recorder.requestMeta,
 		Model:           model,
+		ResolvedModel:   resolved,
+		Retries:         retries,
+		LastRetryCause:  lastRetryCause,
 		StartedAt:       recorder.startedAt,
 		ElapsedMS:       time.Since(recorder.startedAt).Milliseconds(),
 		State:           state,
