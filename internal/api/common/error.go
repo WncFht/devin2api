@@ -80,7 +80,9 @@ func AnthropicErrorType(failure *llm.Failure) string {
 // 下游网关按状态码区分"请求级错误"与"渠道故障"——4xx 不冷却整个渠道；
 // 上下文超长给 413 并配合 error.code 让网关直接归类为客户端问题，不做任何
 // 冷却。客户端取消映射 499（nginx 约定）、超时 504：客户端主动断开计成
-// 502 会污染指标并让网关误判渠道故障。上游责任故障（传输断裂、伪装进
+// 502 会污染指标并让网关误判渠道故障。failure.Canceled 除客户端断连外
+// 还覆盖本端主动取消上游 ctx（面板 abort）——同样归 499：渠道无责，
+// 不该计成渠道故障触发冷却。上游责任故障（传输断裂、伪装进
 // 可修正 code 的内部错误）返回 502——它确实就是上游故障。
 // 无法识别的错误返回 502，表示上游服务故障。
 func HTTPStatus(failure *llm.Failure) int {
@@ -138,7 +140,8 @@ func ErrorCode(failure *llm.Failure) any {
 // （sse/responses.rs try_parse_retry_after），否则退回 ~200ms 起跳的
 // 本地指数退避——分钟级限流 episode 会在闩期内烧光重试预算。等待
 // 时长与 unified-reset 头同源（分钟 hint 向上对齐桶界）。无 hint
-// 或 reset 已过期的错误原样返回。
+// 或 reset 已过期的错误原样返回。failure 须非 nil——调用方先经
+// failure.Error() 判空后才走到这里。
 func RetryAfterHint(failure *llm.Failure, now time.Time) string {
 	message := failure.Error()
 	resetAt, ok := failure.RateLimitReset(now)
