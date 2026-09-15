@@ -64,7 +64,9 @@ func TestChatCompletionsHandlerReturnsJSON(t *testing.T) {
 	}
 }
 
-// TestChatCompletionsHandlerStreamError 验证 chat 流式中途错误返回 error chunk 且不发 [DONE]。
+// TestChatCompletionsHandlerStreamError 验证 chat 流式中途错误返回 error chunk，
+// 尾随 [DONE] 终止帧——缺它时部分客户端把流尾判成传输截断（编码层契约见
+// response_test.go）。
 func TestChatCompletionsHandlerStreamError(t *testing.T) {
 	text := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}, StopReason: llm.StopReasonPending}
 	failed := &llm.AssistantMessage{Provider: "devin", StopReason: llm.StopReasonError, ErrorMessage: "resource_exhausted: rate limit exceeded"}
@@ -94,8 +96,8 @@ func TestChatCompletionsHandlerStreamError(t *testing.T) {
 	if !strings.Contains(body, `"type":"rate_limit_error"`) {
 		t.Fatalf("body missing error type: %s", body)
 	}
-	if strings.Contains(body, `data: [DONE]`) {
-		t.Fatalf("error stream should not contain [DONE]: %s", body)
+	if !strings.Contains(body, `data: [DONE]`) {
+		t.Fatalf("error stream should end with [DONE]: %s", body)
 	}
 }
 
