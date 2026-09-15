@@ -37,11 +37,12 @@
 
 ## 4. CI（`.github/workflows/ci.yml`）
 
-push 到 main 与 PR 触发，4 个并行 job：
+push 到 main 与 PR 触发，5 个并行 job：
 
 - **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race` → `go build` → windows/darwin 交叉编译 + vet。
 - **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地 brew 版对齐。
 - **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练。
+- **darwin-smoke**（macos-latest）：生产宿主平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
 - **lint-markdown**：`npm ci` → `format:check` + `lint:md`。
 
 Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 读 `go.mod` 定版本，mod 缓存按 `go.sum` 哈希、build 缓存按 job+sha（restore-keys 兜底）。
@@ -74,6 +75,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 ## 6. 部署脚本族 + 资产断言
 
 - `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。三平台部署细节见 `deployment.md`。
+- `scripts/deploy-remote.sh` 是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 仍取远端仓库的权威副本），`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。
 - `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。
 
@@ -98,5 +100,6 @@ bash scripts/release-selftest.sh         # 改 release.sh 后必跑
 
 # 部署与排障
 scripts/deploy.sh [--release vX.Y.Z]     # macOS 本机升级
+scripts/deploy-remote.sh [--check|--release vX.Y.Z]  # 从开发机驱动生产机部署
 bash scripts/deploy-assets.test.sh       # 部署资产断言
 ```

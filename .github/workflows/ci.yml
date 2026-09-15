@@ -80,6 +80,25 @@ jobs:
       - name: release.sh self-test
         run: bash scripts/release-selftest.sh
 
+  # 生产宿主是 macOS 而 CI 全在 ubuntu：darwin 构建此前只有交叉编译门禁，
+  # 从没在真系统上跑过。这里补上真平台的测试与无 token 冒烟——exec、
+  # 监听、SIGTERM 排空这层平台差异在这拦下（--no-upstream 不打真上游）。
+  darwin-smoke:
+    name: macOS smoke
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Test
+        run: go test ./...
+
+      - name: Smoke without upstream
+        run: bash scripts/smoke.sh --no-upstream --config config.example.yaml --port 18099
+
   lint-markdown:
     name: Markdown
     runs-on: ubuntu-latest

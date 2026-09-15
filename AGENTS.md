@@ -127,11 +127,11 @@
 
 开发以 archbox 为准：`ssh archbox` → `~/src/devin-2api`（clone 自 GitHub，origin 走 SSH 直连可用）。gitignore 的开发依赖（`config.yaml`、`notes/`、`data/`、`node_modules`）已 rsync 对齐；本机新增私有文件时同步过去，反向同理。
 
-本机到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST（对端伪地址 `2001:2::4`）；本机 `~/.ssh/config` 的 github.com 块已配 `ProxyCommand nc -X connect -x 127.0.0.1:7893 %h %p` 走 mihomo 混合端口——依赖 mihomo 在跑且选中节点可用，代理挂时退回 HTTPS origin + gh 凭据（`credential.https://github.com.helper`）。
+Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST（对端伪地址 `2001:2::4`）；Mac `~/.ssh/config` 的 github.com 块已配 `ProxyCommand nc -X connect -x 127.0.0.1:7893 %h %p` 走 mihomo 混合端口——依赖 mihomo 在跑且选中节点可用，代理挂时退回 HTTPS origin + gh 凭据（`credential.https://github.com.helper`）。
 
 部署两跳，两机各一个实例：
 
-- 生产实例在本机：本机 pull 最新代码后 `scripts/deploy.sh`（或 `--release <tag>` 装预编译），launchd `com.fanghaotian.devin-2api` :3003。
+- 生产实例在 Mac（fht-mba，archbox 经 tailscale 免密 ssh 可达）：从 archbox 用 `scripts/deploy-remote.sh` 一键驱动——默认 worktree 模式把本地工作树（含未提交改动）推到 Mac staging 构建部署；`--ref <ref>`（默认 origin/main）部署已推送状态、`--release <tag|latest>` 装预编译资产、`--check` 并排对比两实例版本。Mac 上手动路径仍是 pull 后 `scripts/deploy.sh`；launchd `com.fanghaotian.devin-2api` :3003。
 - 验证实例在 archbox：`scripts/deploy-linux.sh` 维护的 systemd --user 服务（运行目录 `~/.local/share/devin-2api`），在 linux/amd64 上验行为与排障——两侧 deploy 脚本共享 `scripts/lib-deploy.sh`，语义一致。
 
 ## 部署（单实例约定）
