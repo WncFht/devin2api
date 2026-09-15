@@ -3,7 +3,7 @@
 
 import {
   $, api, esc, fmtUnix, fmtUnixShort, fmtIn, fmtQuota, kpi, meta,
-  Tabs, Polls, morph,
+  Tabs, Polls, morph, burnText,
 } from './core.js';
 import { Charts } from './charts.js';
 
@@ -39,13 +39,13 @@ function renderQuota(d) {
   if (last.daily_remaining != null) {
     const dd = d.daily || {};
     html += kpi('日配额剩余', Number(last.daily_remaining).toFixed(1) + '%',
-      (dd.exhausted_at ? '约 ' + Number(dd.hours_left || 0).toFixed(1) + 'h 后耗尽 · ' : '') + '燃烧 ' + Number(dd.burn_per_hour || 0).toFixed(2) + '%/h',
+      burnText(dd),
       last.daily_remaining > 50 ? 'ok' : last.daily_remaining > 20 ? 'warn' : 'err');
   }
   if (last.weekly_remaining != null) {
     const wk = d.weekly || {};
     html += kpi('周配额剩余', Number(last.weekly_remaining).toFixed(1) + '%',
-      (wk.exhausted_at ? fmtUnix(wk.exhausted_at) + ' 耗尽 · ' : '') + '燃烧 ' + Number(wk.burn_per_hour || 0).toFixed(3) + '%/h',
+      burnText(wk),
       last.weekly_remaining > 50 ? 'ok' : last.weekly_remaining > 20 ? 'warn' : 'err');
   }
   html += kpi('日重置', fmtIn(last.daily_reset_at), fmtUnixShort(last.daily_reset_at)) +

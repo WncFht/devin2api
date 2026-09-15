@@ -176,7 +176,6 @@ a { color: var(--accent); text-decoration: none; }
 }
 .btn:hover { border-color: var(--accent); color: var(--text); }
 .btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-.btn.danger:hover { border-color: var(--err); color: var(--err); }
 /* .lnk 是内嵌表格/提示文案里的动作词（跳请求页筛选等），用 button 渲染
    才有键盘可达性——扒掉按钮默认外观，只留 accent 色与下划线悬停。 */
 .lnk { color: var(--accent); cursor: pointer; background: none; border: none; padding: 0; font: inherit; text-align: left; }
@@ -253,6 +252,8 @@ tr.total td { font-weight: 600; border-top: 1px solid var(--border-strong); }
   font-family: var(--mono); font-size: var(--fs-sm); white-space: pre-wrap; word-break: break-all;
   line-height: 1.6;
 }
+/* 附件图片预览：限在 .file-view 盒内，白底让透明 PNG/SVG 可读。 */
+.file-img { max-width: 100%; max-height: 46vh; display: block; border-radius: var(--radius-xs); background: #fff; }
 .note { font-size: var(--fs-md); color: var(--muted); line-height: 1.6; margin-top: 10px; }
 .note code { background: var(--surface-3); padding: 1px 5px; border-radius: var(--radius-xs); }
 .loading { text-align: center; padding: 28px; color: var(--muted); font-size: var(--fs-md); }

@@ -127,6 +127,8 @@ async function loadAliases() {
   try {
     const d = await api('/config');
     const al = (d && d.config && d.config.devin && d.config.devin.aliases) || {};
+    // 重新拉取即重建——不先清会让徽标随进页次数翻倍，删除的别名也不退场。
+    aliasMap = {};
     for (const name in al) {
       const t = al[name];
       (aliasMap[t] = aliasMap[t] || []).push(name);

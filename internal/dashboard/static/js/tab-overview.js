@@ -3,7 +3,7 @@
 
 import {
   $, api, esc, fmtNum, fmtMs, fmtTime, fmtUnix, fmtUnixShort, fmtIn,
-  money, statusClass, slaRate, hitRate, kpi, qbar,
+  money, statusClass, slaRate, hitRate, kpi, qbar, burnText,
   titleBadge, Tabs, Polls, morph, summarizeRejects, gateLatchUntil,
 } from './core.js';
 import { Charts } from './charts.js';
@@ -78,15 +78,14 @@ function renderQuota() {
   const last = pts[pts.length - 1];
   const d = quotaData.daily || {}, w = quotaData.weekly || {};
   let html = '<h3>配额余量</h3>';
+  const dBurn = burnText(d), wBurn = burnText(w);
   if (last.daily_remaining != null) {
     html += qbar('日配额', last.daily_remaining,
-      (d.exhausted_at ? '约 ' + Number(d.hours_left || 0).toFixed(1) + 'h 后耗尽 · ' : '') +
-      '燃烧 ' + Number(d.burn_per_hour || 0).toFixed(2) + '%/h · 重置 ' + fmtUnixShort(last.daily_reset_at) + '（' + fmtIn(last.daily_reset_at) + '）');
+      (dBurn ? dBurn + ' · ' : '') + '重置 ' + fmtUnixShort(last.daily_reset_at) + '（' + fmtIn(last.daily_reset_at) + '）');
   }
   if (last.weekly_remaining != null) {
     html += qbar('周配额', last.weekly_remaining,
-      (w.exhausted_at ? '预计 ' + fmtUnix(w.exhausted_at) + ' 耗尽 · ' : '') +
-      '燃烧 ' + Number(w.burn_per_hour || 0).toFixed(3) + '%/h · 重置 ' + fmtUnixShort(last.weekly_reset_at) + '（' + fmtIn(last.weekly_reset_at) + '）');
+      (wBurn ? wBurn + ' · ' : '') + '重置 ' + fmtUnixShort(last.weekly_reset_at) + '（' + fmtIn(last.weekly_reset_at) + '）');
   }
   morph(el, html);
 }
@@ -162,7 +161,7 @@ function renderHealth() {
         // data-r/data-i 是 mxRowsData 的索引；data-s/data-u 供下钻钉时间窗。
         // 全部格子可聚焦（roving tabindex，键盘方向键导航 + 焦点悬停卡）；
         // 无数据格同样可读「无请求」，只是 Enter 不下钻。
-        const base = ' tabindex="-1" role="gridcell" data-r="' + ri + '" data-i="' + i +
+        const base = ' tabindex="-1" data-r="' + ri + '" data-i="' + i +
           '" data-s="' + new Date((startSlot + i) * MX_BUCKET_MS).toISOString() + '"';
         const sevWord = !c || !c.n ? '无请求' : c.sev === 2 ? '服务端失分' : c.sev === 1 ? '客户端或限流' : '正常';
         const alabel = ' aria-label="' + esc(row.label + ' ' + fmtTime((startSlot + i) * MX_BUCKET_MS) + ' ' +

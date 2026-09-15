@@ -212,7 +212,10 @@ function toggleCfgView() {
 async function loadLog(offset) {
   try {
     const d = await api('/logs?offset=' + (offset || 0));
-    procBuf = (offset && procOffset) ? procBuf + (d.text || '') : (d.text || '');
+    // next_offset 回缩说明 stderr.log 已被新进程重写——拿到的是新文件
+    // tail 而非增量，往旧缓冲上追加会重复一整段尾巴，整换。
+    const isDelta = offset > 0 && d.next_offset >= procOffset;
+    procBuf = isDelta ? procBuf + (d.text || '') : (d.text || '');
     // 缓冲封顶：跟随模式长期运行时 DOM 不无限增长。
     if (procBuf.length > PROC_CAP) procBuf = procBuf.slice(-PROC_CAP);
     procOffset = d.next_offset || 0;
