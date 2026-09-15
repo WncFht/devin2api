@@ -46,6 +46,9 @@ const (
 	ErrStageHTTPRead = "http_read"
 	// ErrStageHTTPDecode 是请求体解码或中间层校验失败。
 	ErrStageHTTPDecode = "http_decode"
+	// ErrStageRequestBuild 是本地请求投影失败（tool_choice 指空等参数校验），
+	// 请求未触达上游——既不是上游语义拒绝也不是传输断裂。
+	ErrStageRequestBuild = "request_build"
 	// ErrStageProviderStream 是上游流式响应中途失败（上游责任或语义拒绝）。
 	ErrStageProviderStream = "provider_stream"
 	// ErrStageHTTPStream 是下发客户端的 SSE 写出失败（非断连类）。

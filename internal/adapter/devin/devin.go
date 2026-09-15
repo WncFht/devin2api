@@ -334,7 +334,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	adapter.ensureCatalog(ctx)
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
 	if err != nil {
-		recorder.WriteError(debuglog.ErrStageDevinConnect, err)
+		// AssignModel 同属上游建连期 RPC：传输断裂与语义拒绝分层。
+		stage := debuglog.ErrStageDevinConnect
+		if isTransientConnectError(err) {
+			stage = debuglog.ErrStageDevinTransport
+		}
+		recorder.WriteError(stage, err)
 		return nil, err
 	}
 	// 别名与路由判定到此完结：记下发上线 uid，进行中列表即刻
@@ -344,6 +349,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 目录能力位与最终承担请求的模型无关。
 	adapter.warnIfModelAbsentFromCatalog(model)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
+		// 本地校验拒绝在起源点记 request_build：错误继续冒泡会经
+		// 流层错误出口被盖成 provider_stream。
+		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
@@ -351,6 +359,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
 	protoRequest, repairs, err := buildRequest(request, cfg, binding)
 	if err != nil {
+		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
 	repairs.SanitizeHits = sanitizeHits
@@ -394,14 +403,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// client_disconnected，这里抢占首个失败点会把它顶掉。
 		parentDone := ctx.Err() != nil
 		cancel()
-		// 本地限流闸的拒绝记 rate_gate 与上游真拒（devin_connect）区分：
-		// 聚合排障时前者说明根本没碰到上游，后者才是上游配额动作。
+		// 闸门拒绝已在 gate.wait 失败处记 rate_gate；这里只剩上游建连
+		// 失败——传输断裂与上游语义拒绝（devin_connect）分层，前者是
+		// 连接/帧级事故，后者才是上游配额或参数动作。
 		if !parentDone {
 			stage := debuglog.ErrStageDevinConnect
-			var failure *llm.Failure
-			if errors.As(err, &failure) && failure.LocalGate {
-				stage = debuglog.ErrStageRateGate
-			} else if isTransientConnectError(err) {
+			if isTransientConnectError(err) {
 				// 建连期的传输断裂与中流断裂同层，不混进上游语义拒绝桶。
 				stage = debuglog.ErrStageDevinTransport
 			}
@@ -481,6 +488,14 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 		// 每次真实发送（含瞬时错误重试）都要过速率闸：被拒尝试
 		// 会推后上游恢复时刻，本地整形是唯一止损点。
 		if err := adapter.gate.wait(ctx); err != nil {
+			// 闸门快败在起源点记 rate_gate（WriteError first-write-wins）：
+			// 本函数被首发与 reopen 重试共用，reopen 路径的错误会继续
+			// 冒泡经流层出口——不在此处落 stage 会被盖成 provider_stream，
+			// 本地限流被误归上游责任。
+			var failure *llm.Failure
+			if errors.As(err, &failure) && failure.LocalGate {
+				recorder.WriteError(debuglog.ErrStageRateGate, err)
+			}
 			return nil, err
 		}
 		if attempt > 0 {
