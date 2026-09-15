@@ -105,10 +105,12 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	// ANSI 转义句：「Don't output ANSI escape codes directly」与
 	// 「the CLI renderer applies them」须同句共现，缺一或换主语即放行。
 	rule("codex-ansi-escapes", `Don['’]t output ANSI escape codes directly — the CLI renderer applies them\.`, "Never output ANSI escape codes directly — the CLI renderer applies them.", "ansi escape codes directly"),
-	// codex 注入的 <permissions instructions> 授权块：上游内容策略实测
-	// 拦截。原先在 common.DecodeContent 解码期剥离——迁到本表后
-	// 01/02 日志保留客户端原文、命中进 repairs 计数可查，且 anthropic
-	// 入口（不走 DecodeContent）同样覆盖。
+	// codex 注入的 <permissions instructions> 授权块：2026-08 实测触发
+	// content-policy 拦截；2026-09-15 以合成块复测上游正常放行（真实
+	// codex 块原文未入档，断言按历史实测保留）。原先在
+	// common.DecodeContent 解码期剥离——迁到本表后 01/02 日志保留客户
+	// 端原文、命中进 repairs 计数可查，且 anthropic 入口（不走
+	// DecodeContent）同样覆盖。
 	rule("codex-permissions", `(?s)<permissions instructions>.*?</permissions instructions>`, "", "permissions instructions"),
 }
 
@@ -136,8 +138,9 @@ func sanitizeRequest(request llm.RequestMessages) (llm.RequestMessages, map[stri
 	for index, tool := range request.Tools {
 		request.Tools[index].Description = sanitizeUpstreamText(tool.Description, true, hits)
 	}
-	// 上游会拒绝「声明了 tools 但 system prompt 为空」的请求（实测触发
-	// permission_denied）；注入最小中性身份句兜底。
+	// 「声明了 tools 但 system prompt 为空」早期实测触发 permission_denied；
+	// 2026-09-15 复测（显式空串与字段缺席两种形态、带 tools）均被上游
+	// 正常接受——断言已不可复现，注入兜底保留为无害的中性默认。
 	if strings.TrimSpace(request.SystemPrompt) == "" && len(request.Tools) > 0 {
 		request.SystemPrompt = "You are an AI coding assistant."
 		hits["inject-empty-system"]++
