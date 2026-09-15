@@ -469,7 +469,13 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 				content = append(content, llm.TextContent{Text: "[resource: " + header.Resource.URI + "]"})
 			}
 		default:
+			// tool_result 内无法投到 IR 的块（document 等）只记 Dropped、
+			// 不进内容——模型会在不知道有内容被省略的情况下作答；与
+			// user 层 document/file 的占位约定一致，让缺失可见。
 			context.Dropped = append(context.Dropped, "content_block:"+header.Type)
+			content = append(content, llm.TextContent{
+				Text: "[content omitted: " + header.Type + " block not supported]",
+			})
 		}
 	}
 	return content, nil
