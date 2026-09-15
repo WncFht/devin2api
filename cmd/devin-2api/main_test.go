@@ -15,7 +15,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
 	"github.com/WncFht/devin2api/internal/config"
@@ -49,7 +48,11 @@ func TestRunReturnsServeError(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	application := app.New(adapter.Unavailable{Reason: "test"}, config.ServerConfig{},
+	devinAdapter, err := devin.New(devin.Config{BaseURL: "https://example.com", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := app.New(devinAdapter, config.ServerConfig{},
 		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}))
 	if err := run(context.Background(), application, &http.Server{}, listener); err == nil {
 		t.Fatal("run() error = nil, want serve error")
@@ -80,8 +83,9 @@ func TestRedactConfigSecretsProxyUserinfo(t *testing.T) {
 }
 
 // TestReloadRuntimeConfigRejectsEmptyUpstream verifies a live adapter refuses a
-// reload that drops devin.token/model/base_url — committing empty values would
-// fail every request and starve the token self-heal chain.
+// reload that drops devin.model/base_url — committing empty values would fail
+// every request. token 刻意不在必填集：补凭据的通道正是 reload 端点与
+// unauthenticated 自愈链，空 token 必须能经 reload 提交（待配状态）。
 func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
@@ -107,11 +111,24 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 丢 model 整单拒绝。
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
+	}
+
+	// 丢 token 允许热应用并计入 applied。
+	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager)
+	if err != nil {
+		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
+	}
+	if !slices.Contains(report.Applied, "devin.token") {
+		t.Fatalf("devin.token missing from applied: %v", report.Applied)
 	}
 
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {

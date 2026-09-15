@@ -148,9 +148,9 @@ func New(config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.BaseURL) == "" {
 		return nil, errors.New("devin base URL is required")
 	}
-	if strings.TrimSpace(config.Token) == "" {
-		return nil, errors.New("devin token is required")
-	}
+	// token 允许为空：它是运行时字段——unauthenticated 自愈经
+	// TokenSource 重读、config reload 热应用都能补进。启动期强校验
+	// 会让「先起服务后配凭据」变成没有 reload 端点的死路。
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("devin model is required")
 	}

@@ -25,7 +25,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
 	"github.com/WncFht/devin2api/internal/config"
@@ -155,9 +154,12 @@ func main() {
 	// 否则 deploy 换进程期间整段是 connection refused。
 	listener, err := listenConfigured(serviceConfig.Server.Listen)
 	if err != nil {
-		reportListenFailure(serviceConfig.Server.Listen, err)
+		reportListenFailure(serviceConfig.Server.Listen, logRoot, err)
 	}
 	defer func() { _ = listener.Close() }()
+	// 绑定成功才到这里：上一轮 EADDRINUSE 冲突循环（KeepAlive 反复拉起
+	// vs 旧实例排空）若留过标记，补一条恢复告警把次数与占用者并进日志。
+	warnIfBindContentionRecovered(logRoot)
 
 	// pprof 侦听是可选的第二端口：空值不启用（默认）。监听失败不致命——
 	// 剖析是诊断辅助，不该让主服务起不来；错误日志已说明原因。
@@ -167,23 +169,19 @@ func main() {
 		}
 	}
 
-	providerAdapter := adapter.Adapter(adapter.Unavailable{Reason: "provider adapter is not configured"})
+	// token 允许为空启动：凭据是运行时字段——/panel/api/config/reload
+	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
+	// 空 token 起不来的话「先起服务后配凭据」没有任何热补入口。
 	// devinAdapter 保留具体类型引用：配置热重载（ApplyConfig）、闸门状态
 	// （GateStats）与别名校验（Aliases）都挂在它上面。
-	var devinAdapter *devin.Adapter
-	var tokenFunc func() string
-	if serviceConfig.Devin.Token != "" {
-		configured, createErr := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath, logRoot))
-		if createErr != nil {
-			slog.Error("create devin adapter failed", "error", createErr)
-			os.Exit(1)
-		}
-		devinAdapter = configured
-		providerAdapter = configured
-		// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
-		// 自愈更新 token 后，面板的上游调用自动跟随新值。
-		tokenFunc = configured.TokenFunc()
+	devinAdapter, err := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath, logRoot))
+	if err != nil {
+		slog.Error("create devin adapter failed", "error", err)
+		os.Exit(1)
 	}
+	// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
+	// 自愈更新 token 后，面板的上游调用自动跟随新值。
+	tokenFunc := devinAdapter.TokenFunc()
 	// 管理器总是创建：enabled 只控制新请求是否写目录，历史查询、
 	// 用量回放、清理与配额采样不随开关停掉，面板也可运行时热切换。
 	debugManager := debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
@@ -194,7 +192,7 @@ func main() {
 	})
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
-	application := app.New(providerAdapter, serviceConfig.Server, debugManager)
+	application := app.New(devinAdapter, serviceConfig.Server, debugManager)
 	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
 	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
@@ -213,26 +211,26 @@ func main() {
 	}()
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
-	if serviceConfig.Devin.Token != "" {
-		panel, err := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
-		if err != nil {
-			slog.Error("create dashboard failed", "error", err)
-			os.Exit(1)
-		}
-		panel.SetVersion(resolved)
-		panel.SetGateStats(devinAdapter.GateStats)
-		panel.SetAliasesFunc(devinAdapter.Aliases)
-		panel.SetConfigOps(dashboard.ConfigOps{
-			Reload: func() (*dashboard.ConfigReloadReport, error) {
-				return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager)
-			},
-			Current: func() map[string]any {
-				return runtimeConfigView(absoluteConfigPath)
-			},
-		})
-		panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
-		application.SetDashboard(panel)
+	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
+	// 上游相关调用靠 tokenFunc 现取，凭据补进后自动恢复。
+	panel, err := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+	if err != nil {
+		slog.Error("create dashboard failed", "error", err)
+		os.Exit(1)
 	}
+	panel.SetVersion(resolved)
+	panel.SetGateStats(devinAdapter.GateStats)
+	panel.SetAliasesFunc(devinAdapter.Aliases)
+	panel.SetConfigOps(dashboard.ConfigOps{
+		Reload: func() (*dashboard.ConfigReloadReport, error) {
+			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager)
+		},
+		Current: func() map[string]any {
+			return runtimeConfigView(absoluteConfigPath)
+		},
+	})
+	panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+	application.SetDashboard(panel)
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 
@@ -299,16 +297,12 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	if err != nil {
 		return nil, err
 	}
-	// 本入口只在 devinAdapter 存活时可达（token 为空启动时不挂面板，
-	// reload 端点不存在）。存活即要求上游必填项非空：启动期空值是
-	// 干净的 Unavailable 降级，但 reload 提交空 model/token 会让全部
-	// 请求失败，且 token 自愈链读同一文件也永远拿不到凭据——整单
-	// 拒绝（422），旧配置继续服役。
-	if devinAdapter != nil &&
-		(strings.TrimSpace(cfg.Devin.Token) == "" ||
-			strings.TrimSpace(cfg.Devin.Model) == "" ||
-			strings.TrimSpace(cfg.Devin.BaseURL) == "") {
-		return nil, errors.New("devin.token, devin.model and devin.base_url must be non-empty while the adapter is live")
+	// 上游必填项收敛到 model/base_url：reload 提交空值会让全部请求
+	// 失败——整单拒绝（422），旧配置继续服役。token 刻意不在必填集：
+	// 补凭据的通道正是本端点与 unauthenticated 自愈链（读同一文件），
+	// 空 token 是合法的待配状态而非配置事故。
+	if strings.TrimSpace(cfg.Devin.Model) == "" || strings.TrimSpace(cfg.Devin.BaseURL) == "" {
+		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
 	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
