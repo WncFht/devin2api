@@ -297,10 +297,10 @@ func isUnauthenticated(err error) bool {
 }
 
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
+// request 已在三个 DecodeRequest 末尾过一遍 context.Validate()——
+// 唯一调用路径是解码后的 startStreamPump，这里不再重扫（单个
+// arguments 的 json.Valid 曾被扫三次）。
 func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
-	if err := request.Validate(); err != nil {
-		return nil, &llm.Failure{Code: "invalid_argument", Message: "validate Devin request: " + err.Error(), Cause: err}
-	}
 	request, sanitizeHits := sanitizeRequest(request)
 	cfg := adapter.currentConfig()
 	model := strings.TrimSpace(request.Model)
@@ -365,12 +365,15 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		}
 	}
 	if err != nil {
+		// 判父 ctx 而非 streamCtx：cancel() 后 streamCtx 必为 canceled，
+		// 查它会让整个 WriteError 块成为死代码（rate_gate 阶段名全丢）。
+		// 父 ctx 已取消（客户端断连/排空）时不记——外层记
+		// client_disconnected，这里抢占首个失败点会把它顶掉。
+		parentDone := ctx.Err() != nil
 		cancel()
 		// 本地限流闸的拒绝记 rate_gate 与上游真拒（devin_connect）区分：
 		// 聚合排障时前者说明根本没碰到上游，后者才是上游配额动作。
-		// ctx 已取消（客户端断连/排空）时不记——外层记
-		// client_disconnected，这里抢占首个失败点会把它顶掉。
-		if streamCtx.Err() == nil {
+		if !parentDone {
 			stage := debuglog.ErrStageDevinConnect
 			var failure *llm.Failure
 			if errors.As(err, &failure) && failure.LocalGate {
@@ -498,6 +501,17 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 // 帧解析失败的固定措辞，上游语义错误经 EndStream 尾帧传达、不撞前缀。
 // 垃圾前缀会误判进此分支，但重试一次确定性失败代价小，换覆盖全部帧级
 // 解析失败形态。
+// 另一族措辞：对端 http2 RST_STREAM/GOAWAY。connect-go 把 RST 尾缀
+// code 映成语义 code（wrapIfRSTError：REFUSED_STREAM→unavailable、
+// ENHANCE_YOUR_CALM→resource_exhausted、PROTOCOL_ERROR/INTERNAL_ERROR
+// →internal、INADEQUATE_SECURITY→permission_denied），GOAWAY 建连期
+// 以 unavailable 透出——映射 code 只是传输事件的近似，认文案里的本地
+// http2 措辞（llm.IsHTTP2TransportError）。顺带说明盲区：上游对
+// num_completions>1 回的是 EndStream 携带的 invalid_argument
+// "protocol error: incomplete envelope: unexpected EOF"——与本分支本地
+// 措辞同形，但该请求形状在本管线不可达（chat 解码面拒绝 n>1，
+// responses/anthropic 协议无 n，wire 恒为 NumCompletions=1），即使
+// 上游措辞再与本地产文撞车，代价仍是一次确定性重试。
 func isTransientConnectError(err error) bool {
 	// 调用方取消不是传输故障：context.DeadlineExceeded 自身实现
 	// net.Error，不先短路会把客户端断连/超时误判成可重试的断线，
@@ -521,6 +535,11 @@ func isTransientConnectError(err error) bool {
 	}
 	var connectErr *connect.Error
 	if !errors.As(err, &connectErr) {
+		return true
+	}
+	// http2 RST/GOAWAY 措辞先于 code 判定：映射 code（unavailable/
+	// resource_exhausted/internal/permission_denied）与真实语义无关。
+	if llm.IsHTTP2TransportError(connectErr.Message()) {
 		return true
 	}
 	code := connectErr.Code()

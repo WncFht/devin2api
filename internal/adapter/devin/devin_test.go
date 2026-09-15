@@ -1066,6 +1066,18 @@ func TestIsTransientConnectError(t *testing.T) {
 		"tcp reset": connect.NewError(connect.CodeUnavailable,
 			&net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}),
 		"mid-stream clean EOF": connect.NewError(connect.CodeUnknown, io.EOF),
+		// http2 RST_STREAM：connect-go 把尾缀 code 映成语义 code
+		// （wrapIfRSTError），映射出的 unavailable/internal/
+		// resource_exhausted 与真实语义无关——全是传输断裂。
+		"rst refused stream": connect.NewError(connect.CodeUnavailable,
+			errors.New("stream error: stream ID 1; REFUSED_STREAM; received from peer")),
+		"rst internal error": connect.NewError(connect.CodeInternal,
+			errors.New("stream error: stream ID 3; INTERNAL_ERROR; received from peer")),
+		"rst enhance your calm": connect.NewError(connect.CodeResourceExhausted,
+			errors.New("bandwidth exhausted: stream error: stream ID 5; ENHANCE_YOUR_CALM; received from peer")),
+		// GOAWAY 不走 wrapIfRSTError，建连期以 unavailable 外皮透出。
+		"goaway": connect.NewError(connect.CodeUnavailable,
+			errors.New(`http2: server sent GOAWAY and closed the connection; LastStreamID=9, ErrCode=NO_ERROR, debug=""`)),
 	}
 	for name, err := range retryable {
 		if !isTransientConnectError(err) {

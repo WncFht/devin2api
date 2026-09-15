@@ -542,9 +542,12 @@ func (gate *rateGate) noteUpstreamError(err error) {
 	}
 }
 
-// noteUpstreamSuccess 用任一上游正常帧解除冷却闩：边际态下拒绝是
-// 概率执行，成功帧说明窗口已过，继续闩到声明时刻只会浪费滴灌窗口。
-// 解闩后放行仍受窗口配额约束——剩余配额是窗口内齐射的天然上限。
+// noteUpstreamSuccess 用任一上游数据帧解除冷却闩：收到数据帧说明该次
+// 发送已越过上游准入（边际态下拒绝是概率执行），继续闩到声明时刻只会
+// 浪费滴灌窗口。若该次发送随后以限流错误收尾，noteUpstreamError 会重新
+// 上闩——两段判定间存在亚毫秒解闩窗，至多漏放一枚等待中的请求，代价
+// 与一枚滴灌探针同价，可接受。解闩后放行仍受窗口配额约束——剩余配额
+// 是窗口内齐射的天然上限。
 func (gate *rateGate) noteUpstreamSuccess() {
 	if gate == nil {
 		return

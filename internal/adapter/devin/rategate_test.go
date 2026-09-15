@@ -155,6 +155,48 @@ func TestRateGateLatchSelective(t *testing.T) {
 	}
 }
 
+// "reset in 0 seconds" 是桶界到达的声明（新桶已爆、无追加封禁）：
+// 闩态下不延长截止也不重排滴灌钟；无闩时闩到 now 即刻过期——
+// 两种形态都不再落 60s 兜底闩（旧实现把它当无 hint，实测桶界上
+// 每次 0-hint 都把闩续 60s 并重置滴灌，限流被自我续长）。
+func TestRateGateZeroSecondHint(t *testing.T) {
+	gate := newRateGate(GateConfig{}, "")
+	clock := pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
+	latchedUntil := gate.limitedUntil
+	nextDrip := gate.nextDrip
+	clock.t = clock.t.Add(5 * time.Second)
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
+	if !gate.limitedUntil.Equal(latchedUntil) || !gate.nextDrip.Equal(nextDrip) {
+		t.Fatalf("0-hint while latched must not extend latch or re-arm drip: until=%v drip=%v", gate.limitedUntil, gate.nextDrip)
+	}
+	// 无闩：0-hint 闩到 now 即刻过期，后续请求正常放行。
+	fresh := newRateGate(GateConfig{}, "")
+	pinGateClock(fresh, 10)
+	fresh.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
+	if err := fresh.wait(context.Background()); err != nil {
+		t.Fatalf("wait after unlatched 0-hint = %v, want pass (latch expired at arrival)", err)
+	}
+	if fresh.stats().Latched {
+		t.Fatal("0-hint latch must expire cleanly")
+	}
+}
+
+// http2 ENHANCE_YOUR_CALM 被 connect-go 映成 resource_exhausted——
+// 那是传输层事件不是上游限流，不能拿来上闩。
+func TestRateGateIgnoresTransportMasquerade(t *testing.T) {
+	gate := newRateGate(GateConfig{}, "")
+	pinGateClock(gate, 10)
+	gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted,
+		errors.New("bandwidth exhausted: stream error: stream ID 5; ENHANCE_YOUR_CALM; received from peer")))
+	if gate.stats().Latched || gate.stats().LatchCount != 0 {
+		t.Fatal("transport-masqueraded resource_exhausted must not latch")
+	}
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait after masqueraded error = %v, want pass", err)
+	}
+}
+
 // 分钟窗口配额：本桶放行数打满后，请求睡到下一窗口；预计等待超过
 // maxHold 时本地拒绝，而不是放行去上游续债。
 func TestRateGateWindowQuotaReject(t *testing.T) {
@@ -285,8 +327,11 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 	if want := time.Date(2026, 9, 14, 4, 38, 59, 0, time.Local); !reset.Equal(want) {
 		t.Fatalf("RateLimitReset = %v, want %v", reset, want)
 	}
-	if _, ok = llm.ClassifyText("Your limit will reset in 0 minutes.").RateLimitReset(now); ok {
-		t.Fatal("zero-minute hint should not parse")
+	// "0 minutes" 是显式声明而非无 hint：分钟粒度 0 是剩余时长的 floor
+	// 取整，按桶界模型对齐到本桶 :59。
+	reset, ok = llm.ClassifyText("Your limit will reset in 0 minutes.").RateLimitReset(now)
+	if !ok || !reset.Equal(time.Date(2026, 9, 14, 4, 36, 59, 0, time.Local)) {
+		t.Fatalf("zero-minute RateLimitReset = %v,%v, want 04:36:59,true", reset, ok)
 	}
 	reset, ok = llm.ClassifyText("Your limit will reset in 1 minute.").RateLimitReset(time.Date(2026, 9, 14, 4, 36, 1, 0, time.Local))
 	if !ok {
