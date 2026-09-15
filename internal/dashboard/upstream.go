@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var absent []string
+		var shadowed []string
 		for name, target := range h.aliasesFunc() {
 			target = strings.TrimSpace(target)
 			if target == "" {
@@ -155,9 +157,19 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 			if _, ok := uids[target]; !ok {
 				absent = append(absent, name+"→"+target)
 			}
+			// 别名名本身是目录里的真模型：请求全部被改写，原模型变得
+			// 不可达——多半是借用官方名过客户端校验（如 claude-* 名单），
+			// 但值得显式留痕，免得日后查"为什么模型行为对不上目录"。
+			if _, ok := uids[name]; ok {
+				shadowed = append(shadowed, name+"→"+target)
+			}
 		}
 		if len(absent) > 0 {
 			result["alias_targets_absent"] = absent
+		}
+		if len(shadowed) > 0 {
+			slices.Sort(shadowed)
+			result["alias_shadows_catalog"] = shadowed
 		}
 	}()
 

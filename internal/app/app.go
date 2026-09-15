@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,6 +236,7 @@ func (application *App) listModels(writer http.ResponseWriter, request *http.Req
 	for _, m := range models {
 		data = append(data, modelEntry(m))
 	}
+	data = application.mergeAliases(data)
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]any{"object": "list", "data": data})
 }
@@ -251,14 +253,87 @@ func (application *App) getModel(writer http.ResponseWriter, request *http.Reque
 		writeUpstreamCatalogError(writer, err)
 		return
 	}
+	data := make([]map[string]any, 0, len(models))
 	for _, m := range models {
-		if m.ID == id {
+		data = append(data, modelEntry(m))
+	}
+	for _, entry := range application.mergeAliases(data) {
+		if entry["id"] == id {
 			writer.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(modelEntry(m))
+			_ = json.NewEncoder(writer).Encode(entry)
 			return
 		}
 	}
 	writeJSONError(writer, http.StatusNotFound, fmt.Sprintf("model %q not found", id), "invalid_request_error")
+}
+
+// aliasProvider 解出可选的别名映射来源；目前只有 devin adapter 实现，
+// 与 dashboard.SetAliasesFunc 的注入方式保持一致，接口不强求。
+type aliasProvider interface {
+	Aliases() map[string]string
+}
+
+// mergeAliases 把 devin.aliases 并入模型列表投影：别名撞名真实目录条目时
+// 给该条目标注 alias_of（名字仍可达，但请求会被改写为 alias_of 的 uid——
+// 不标注的话目录在说谎）；目录缺席的纯别名补一条合成条目，能力位抄目标
+// 模型，发现端（/model 选择器、模型列表）才能看到并正确认知别名。
+func (application *App) mergeAliases(data []map[string]any) []map[string]any {
+	provider, ok := application.adapter.(aliasProvider)
+	if !ok {
+		return data
+	}
+	aliases := provider.Aliases()
+	if len(aliases) == 0 {
+		return data
+	}
+	byID := make(map[string]map[string]any, len(data))
+	for _, entry := range data {
+		if id, ok := entry["id"].(string); ok {
+			byID[id] = entry
+		}
+	}
+	names := make([]string, 0, len(aliases))
+	for name := range aliases {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	capabilityKeys := []string{
+		"supports_images", "supports_tool_calls",
+		"supports_parallel_tool_calls", "supports_thinking", "preserve_thinking",
+	}
+	for _, name := range names {
+		target := strings.TrimSpace(aliases[name])
+		if target == "" {
+			continue
+		}
+		base, hasTarget := byID[target]
+		if entry, ok := byID[name]; ok {
+			// 影子名：条目仍挂目录原位，但能力位以实际跑的目标为准——
+			// 请求这个名字得到的是 target 的行为，原模型的能力位是说谎。
+			entry["alias_of"] = target
+			if hasTarget {
+				for _, key := range capabilityKeys {
+					if value, ok := base[key]; ok {
+						entry[key] = value
+					}
+				}
+			}
+			continue
+		}
+		entry := map[string]any{
+			"id": name, "object": "model", "created": modelCreatedFallback,
+			"owned_by": "alias", "alias_of": target,
+		}
+		if hasTarget {
+			for _, key := range capabilityKeys {
+				if value, ok := base[key]; ok {
+					entry[key] = value
+				}
+			}
+		}
+		data = append(data, entry)
+	}
+	return data
 }
 
 // writeUpstreamCatalogError 上报模型目录拉取失败：除 429（透传限流语义
