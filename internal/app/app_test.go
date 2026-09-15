@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/obs"
 )
 
 type fakeAdapter struct {
@@ -840,4 +842,128 @@ func TestDrainTrackerWaitTimeout(t *testing.T) {
 		t.Fatalf("Wait = %v, want DeadlineExceeded", err)
 	}
 	tracker.Done()
+}
+
+// errBody 是读取即失败的请求体——模拟客户端断连/超时导致的读失败。
+type errBody struct{ err error }
+
+func (b errBody) Read([]byte) (int, error) { return 0, b.err }
+func (b errBody) Close() error             { return nil }
+
+// zeroBody 是无限零字节源——413 路径只需要真实字节数越过 32MiB 上限，
+// 内容本身永远不会被解析。
+type zeroBody struct{}
+
+func (zeroBody) Read(p []byte) (int, error) { return len(p), nil }
+func (zeroBody) Close() error               { return nil }
+
+// blockedStreamAdapter 的 Stream 挂起直到 ctx 取消——模拟客户端在上游
+// 建流期间断连，或 WS 轮次期间入队帧持续积压。
+type blockedStreamAdapter struct{ entered chan struct{} }
+
+func (b *blockedStreamAdapter) Stream(ctx context.Context, _ llm.RequestMessages) (llm.ResponseStream, error) {
+	close(b.entered)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockedStreamAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return nil, nil
+}
+
+func rejectCount(application *App, reason obs.RejectReason) uint64 {
+	byReason, _ := application.metrics.Rejects()["by_reason"].(map[string]uint64)
+	return byReason[string(reason)]
+}
+
+// TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前
+// 拒绝入账：400 + rejects 计数，不产生调试目录与 index 行——完整请求
+// 从未到达，与鉴权/并发拒绝同口径。
+func TestReadFailureRejectedWithoutDir(t *testing.T) {
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	t.Cleanup(func() { manager.Close() })
+	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", errBody{err: errors.New("read: connection reset by peer")})
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+	if got := rejectCount(application, obs.RejectHTTPRead); got != 1 {
+		t.Fatalf("http_read rejects = %d, want 1", got)
+	}
+	entries, err := os.ReadDir(manager.Root())
+	if err != nil {
+		t.Fatalf("read log root: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			t.Fatalf("read failure produced request dir %s", entry.Name())
+		}
+	}
+}
+
+// TestRequestTooLargeKeepsDebugDir 验证 ≥32MiB 的真实载荷保留调试目录：
+// 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与目录都在，
+// rejects 计数不应增长。
+func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	t.Cleanup(func() { manager.Close() })
+	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", io.LimitReader(zeroBody{}, (32<<20)+1))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", response.Code)
+	}
+	ref := response.Header().Get("X-Request-Id")
+	if ref == "" {
+		t.Fatal("413 response missing X-Request-Id debug ref")
+	}
+	if info, err := os.Stat(filepath.Join(manager.Root(), ref)); err != nil || !info.IsDir() {
+		t.Fatalf("debug dir %s missing: %v", ref, err)
+	}
+	if got := rejectCount(application, obs.RejectHTTPRead); got != 0 {
+		t.Fatalf("413 counted as pipeline reject (%d); it must keep debug evidence", got)
+	}
+}
+
+// TestClientDisconnectRecords499 验证未提交响应前的断连按 499+disconnected
+// 入账而不是 500+failed——断连是客户端责任，不能污染 server_error 聚合。
+func TestClientDisconnectRecords499(t *testing.T) {
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	t.Cleanup(func() { manager.Close() })
+	fake := &blockedStreamAdapter{entered: make(chan struct{})}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"model":"gpt-test","input":"hi"}`)).WithContext(ctx)
+	done := make(chan struct{})
+	go func() {
+		application.Router().ServeHTTP(httptest.NewRecorder(), request)
+		close(done)
+	}()
+	<-fake.entered
+	cancel()
+	<-done
+
+	data, err := os.ReadFile(filepath.Join(manager.Root(), debuglog.IndexFile))
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	var entry debuglog.IndexEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
+		t.Fatalf("parse index line: %v (%s)", err, data)
+	}
+	if entry.StatusCode != 499 || entry.Result != "disconnected" {
+		t.Fatalf("index entry = status %d result %q, want 499/disconnected", entry.StatusCode, entry.Result)
+	}
+	if entry.ErrorStage != debuglog.ErrStageClientDisconnected {
+		t.Fatalf("error_stage = %q, want client_disconnected", entry.ErrorStage)
+	}
 }

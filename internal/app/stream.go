@@ -190,6 +190,13 @@ func (application *App) streamCompletion(
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
 		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
+			// 未提交记 499（客户端关闭）；上游已开口后心跳可能已提交
+			// 200——按线上实况记，断连不伪装成 5xx。
+			if !out.committed {
+				completion.StatusCode = 499
+			} else {
+				completion.StatusCode = http.StatusOK
+			}
 			recorder.WriteError(debuglog.ErrStageClientDisconnected, firstErr)
 			return
 		}
@@ -215,6 +222,11 @@ func (application *App) streamCompletion(
 		// 完成存在竞态（取消可能先落成错误事件再被看见），ctx 是兜底。
 		if streamCtx.Err() != nil {
 			completion.Result = "disconnected"
+			if !out.committed {
+				completion.StatusCode = 499
+			} else {
+				completion.StatusCode = http.StatusOK
+			}
 			recorder.WriteError(debuglog.ErrStageClientDisconnected, context.Cause(streamCtx))
 			return
 		}

@@ -40,6 +40,9 @@ const (
 	RejectMissingAPIKey RejectReason = "missing_api_key"
 	// RejectInvalidAPIKey 是凭据不匹配的 401。
 	RejectInvalidAPIKey RejectReason = "invalid_api_key"
+	// RejectHTTPRead 是请求体读取失败（超时/断连）：完整请求从未到达，
+	// 与鉴权/并发拒绝同口径——不产生调试目录。
+	RejectHTTPRead RejectReason = "http_read"
 )
 
 // RejectLabel 是拒绝分类与面板显示名的有序对——数组下发而非 map，
@@ -57,6 +60,7 @@ var rejectLabels = []RejectLabel{
 	{string(RejectWSConnectionLimit), "WS连接上限"},
 	{string(RejectMissingAPIKey), "缺API Key"},
 	{string(RejectInvalidAPIKey), "错API Key"},
+	{string(RejectHTTPRead), "读体失败"},
 }
 
 // RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试目录

@@ -592,33 +592,39 @@ func (application *App) createCompletion(
 	protocol protocolEncoder,
 ) {
 	reqMetrics := application.metrics.Begin()
-	recorder := application.debugManager.Start(debuglog.RequestMeta{
-		Method:          request.Method,
-		Path:            request.URL.Path,
-		API:             api,
-		ClientIP:        clientIP(request),
-		UserAgent:       request.UserAgent(),
-		KeyHash:         requestCredentialHash(request),
-		ClientRequestID: clientRequestID(request),
-	})
 	// reqCtx 供面板 Abort 主动中断：cancel 挂到 recorder 上，
 	// Complete 时 recorder 自动解除挂接，defer cancel 兜底释放。
 	// WithCancelCause 让中断原因沿 ctx 链传到事件泵/上游 Recv——
 	// 客户端看到的错误是「aborted via panel」而非裸 context.Canceled。
 	reqCtx, cancel := context.WithCancelCause(request.Context())
 	defer cancel(nil)
-	recorder.SetAbort(func() {
-		cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
-	})
-	// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
-	// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
-	// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
-	if ref := debugRef(recorder); ref != "" {
-		writer.Header().Set("X-Request-Id", ref)
-	}
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
 	startedAt := time.Now()
 	responseBytes := 0
+	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
+	//（超时/断连/对端 RST）不产生调试目录与 index 行——它们与鉴权、
+	// 并发、排空拒绝同口径，是唯一痕迹在 http.rejects 里的管线前拒绝。
+	var recorder *debuglog.Recorder
+	startRecorder := func() {
+		recorder = application.debugManager.Start(debuglog.RequestMeta{
+			Method:          request.Method,
+			Path:            request.URL.Path,
+			API:             api,
+			ClientIP:        clientIP(request),
+			UserAgent:       request.UserAgent(),
+			KeyHash:         requestCredentialHash(request),
+			ClientRequestID: clientRequestID(request),
+		})
+		recorder.SetAbort(func() {
+			cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
+		})
+		// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
+		// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
+		// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
+		if ref := debugRef(recorder); ref != "" {
+			writer.Header().Set("X-Request-Id", ref)
+		}
+	}
 	defer func() {
 		recorder.Complete(completion)
 		reqMetrics.Finish(completion.StatusCode, responseBytes, completion.Result)
@@ -644,12 +650,19 @@ func (application *App) createCompletion(
 			// 字节超限按 PayloadTooLarge 报 413：下游网关按 4xx 归类为
 			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
+			// ≥32MiB 的载荷是真实到达的请求，留调试目录供容量排障。
+			startRecorder()
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusBadRequest, fmt.Errorf("read request: %w", err))
+		application.noteReject(obs.RejectHTTPRead, request, http.StatusBadRequest)
+		completion.StatusCode = http.StatusBadRequest
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write(protocol.EncodeError(fmt.Errorf("read request: %w", err), ""))
 		return
 	}
+	startRecorder()
 	if recorder != nil {
 		// 投影会对 body 再做一次 generic unmarshal；recorder 为 nil 时
 		// WriteJSON 是 no-op，参数表达式却仍会求值——必须在外层门控。
@@ -702,6 +715,13 @@ func (application *App) createCompletion(
 		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
+			// 未提交时按 499（nginx 约定的客户端关闭）入账——断连不该
+			// 记成 500 污染 server_error 聚合；心跳已提交 200 的按线上实况记。
+			if !out.committed {
+				completion.StatusCode = 499
+			} else {
+				completion.StatusCode = http.StatusOK
+			}
 			recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
 			return
 		}
@@ -726,8 +746,16 @@ func (application *App) createCompletion(
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return
 	}
+	// committed 必须在写出前采样：write 内部先置位再写，写失败后
+	// 再读已区分不出「此前心跳已提交 200」与「首个字节就没发出去」。
+	wasCommitted := out.committed
 	if err := out.writeContent(body); err != nil {
 		completion.Result = "disconnected"
+		if !wasCommitted {
+			completion.StatusCode = 499
+		} else {
+			completion.StatusCode = http.StatusOK
+		}
 		recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
 		return
 	}
