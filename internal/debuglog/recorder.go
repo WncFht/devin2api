@@ -1076,7 +1076,7 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 			meta["upstream_request_id"] = completion.UpstreamRequestID
 		}
 		if completion.Usage != (llm.Usage{}) {
-			meta["usage"] = map[string]any{
+			usageMeta := map[string]any{
 				"input":       completion.Usage.Input,
 				"output":      completion.Usage.Output,
 				"cache_read":  completion.Usage.CacheRead,
@@ -1084,6 +1084,18 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 				"reasoning":   reasoningTokens(completion.Usage),
 				"total":       completion.Usage.TotalTokens,
 			}
+			// 上游计费读数原样保留：credit_cost 是单请求可加总口径，
+			// committed_* 系是该时刻的账户侧快照，进索引求和没有语义。
+			if costs := completion.Usage.Costs; costs != nil {
+				usageMeta["costs"] = map[string]any{
+					"credit_cost":                       costs.CreditCost,
+					"committed_credit_cost":             costs.CommittedCreditCost,
+					"committed_acu_cost":                costs.CommittedAcuCost,
+					"committed_quota_cost_basis_points": costs.CommittedQuotaCostBasisPoints,
+					"committed_overage_cost_cents":      costs.CommittedOverageCostCents,
+				}
+			}
+			meta["usage"] = usageMeta
 		}
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")

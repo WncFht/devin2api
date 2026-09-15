@@ -32,27 +32,30 @@ type IndexEntry struct {
 	// int 零值会掩盖这两种语义。五段口径见 recorder.go 同名字段注释：
 	// ready→sent 本地投影、sent→open 建流往返、open→first_upstream 上游
 	// 思考 TTFT、first_upstream→first_client 代理编码下发。
-	RequestReadyMS    *int64 `json:"request_ready_ms,omitempty"`
-	UpstreamSentMS    *int64 `json:"upstream_sent_ms,omitempty"`
-	UpstreamOpenMS    *int64 `json:"upstream_open_ms,omitempty"`
-	FirstUpstreamMS   *int64 `json:"first_upstream_ms,omitempty"`
-	FirstClientMS     *int64 `json:"first_client_ms,omitempty"`
-	API               string `json:"api,omitempty"`
-	Method            string `json:"method"`
-	Path              string `json:"path"`
-	StatusCode        int    `json:"status_code"`
-	Result            string `json:"result"`
-	RequestedModel    string `json:"requested_model,omitempty"`
-	Model             string `json:"model,omitempty"`
-	ResponseModel     string `json:"response_model,omitempty"`
-	ModelMismatch     bool   `json:"model_mismatch,omitempty"`
-	Stream            bool   `json:"stream"`
-	InputTokens       int64  `json:"input_tokens,omitempty"`
-	OutputTokens      int64  `json:"output_tokens,omitempty"`
-	CacheReadTokens   int64  `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens  int64  `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens   int64  `json:"reasoning_tokens,omitempty"`
-	TotalTokens       int64  `json:"total_tokens,omitempty"`
+	RequestReadyMS   *int64 `json:"request_ready_ms,omitempty"`
+	UpstreamSentMS   *int64 `json:"upstream_sent_ms,omitempty"`
+	UpstreamOpenMS   *int64 `json:"upstream_open_ms,omitempty"`
+	FirstUpstreamMS  *int64 `json:"first_upstream_ms,omitempty"`
+	FirstClientMS    *int64 `json:"first_client_ms,omitempty"`
+	API              string `json:"api,omitempty"`
+	Method           string `json:"method"`
+	Path             string `json:"path"`
+	StatusCode       int    `json:"status_code"`
+	Result           string `json:"result"`
+	RequestedModel   string `json:"requested_model,omitempty"`
+	Model            string `json:"model,omitempty"`
+	ResponseModel    string `json:"response_model,omitempty"`
+	ModelMismatch    bool   `json:"model_mismatch,omitempty"`
+	Stream           bool   `json:"stream"`
+	InputTokens      int64  `json:"input_tokens,omitempty"`
+	OutputTokens     int64  `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64  `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64  `json:"reasoning_tokens,omitempty"`
+	TotalTokens      int64  `json:"total_tokens,omitempty"`
+	// CreditCost 是上游帧上报的权威计费读数（单请求口径，可加总）；
+	// Committed* 系账户快照读数不进索引——逐请求保留见 meta.json。
+	CreditCost        int64  `json:"credit_cost,omitempty"`
 	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
 	ClientIP          string `json:"client_ip,omitempty"`
 	KeyHash           string `json:"key_hash,omitempty"`
@@ -113,6 +116,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		CacheWriteTokens:  completion.Usage.CacheWrite,
 		ReasoningTokens:   reasoningTokens(completion.Usage),
 		TotalTokens:       completion.Usage.TotalTokens,
+		CreditCost:        creditCost(completion.Usage),
 		UpstreamRequestID: completion.UpstreamRequestID,
 		ClientIP:          recorder.requestMeta.ClientIP,
 		KeyHash:           recorder.requestMeta.KeyHash,
@@ -191,6 +195,14 @@ func reasoningTokens(usage llm.Usage) int64 {
 		return 0
 	}
 	return *usage.Reasoning
+}
+
+// creditCost 展开 Usage.Costs 的单请求计费读数；上游未上报时为 0。
+func creditCost(usage llm.Usage) int64 {
+	if usage.Costs == nil {
+		return 0
+	}
+	return usage.Costs.CreditCost
 }
 
 // optionalLatency 把 -1 哨兵转成 nil，其余原样透传（含合法的 0ms）。

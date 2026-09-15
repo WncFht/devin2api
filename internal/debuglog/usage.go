@@ -48,6 +48,8 @@ type usageTotals struct {
 	CacheWrite     int64 `json:"cache_write_tokens"`
 	Reasoning      int64 `json:"reasoning_tokens"`
 	TotalTokens    int64 `json:"total_tokens"`
+	// CreditCost 是上游权威计费读数的累计（替代纯 token 估算的 quota 口径）。
+	CreditCost int64 `json:"credit_cost,omitempty"`
 	// GenMS/GenOut 是 decode 速率的分母分子：只累计「可信流式」条目
 	// （见 decodeWindow），前端用 gen_tokens/gen_ms 求 tok/s。
 	GenMS  int64 `json:"gen_ms,omitempty"`
@@ -136,6 +138,7 @@ func (t *usageTotals) add(e IndexEntry) {
 	t.CacheWrite += e.CacheWriteTokens
 	t.Reasoning += e.ReasoningTokens
 	t.TotalTokens += e.TotalTokens
+	t.CreditCost += e.CreditCost
 	// 只计可信流式条目：失败/断连的耗时段含非生成分量，突发下发的
 	// 表面速率是伪影，混入都会污染均速。
 	if out, gen, ok := decodeWindow(e); ok {
