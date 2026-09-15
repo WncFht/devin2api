@@ -127,6 +127,12 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 				if event.Type != llm.ResponseEventStart {
 					recorder.NoteUpstreamLatency()
 				}
+				if event.Type == llm.ResponseEventError && event.Error != nil {
+					// 流内错误事件已没有 HTTP 头可用——把调试引用编进错误
+					// JSON 让客户端自身携带定位键。必须在入队前打标：
+					// 入队后终止指针无后续写入，worker 投影读到最终值。
+					event.Error.DebugRef = debugRef(recorder)
+				}
 				// 事件投影推迟到日志 worker 求值——RecordResponseEvent 打
 				// thunk；Partial 是逐帧快照、终止指针无后续写入，无竞态。
 				recorder.RecordResponseEvent(event)
@@ -199,7 +205,7 @@ func (application *App) streamCompletion(
 		// 网关分类。Anthropic 面不在此列——其客户端按 HTTP 状态码
 		// 重试，提交 200 反而把失败降级为不可重试的畸形响应。
 		firstEvent = llm.ResponseEvent{Type: llm.ResponseEventError, Reason: llm.StopReasonError,
-			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error(), Failure: firstFailure}}
+			Error: &llm.AssistantMessage{ErrorMessage: firstErr.Error(), Failure: firstFailure, DebugRef: debugRef(recorder)}}
 		firstErr = nil
 	}
 	prelude := []llm.ResponseEvent{firstEvent}
@@ -343,11 +349,6 @@ func writeProtocolStream(
 			return latest, err
 		}
 		latest = eventMessage(event, latest)
-		if event.Type == llm.ResponseEventError && event.Error != nil {
-			// 流内错误事件已没有 HTTP 头可用——把调试引用编进错误 JSON，
-			// 让客户端（含 WS 帧）自身携带定位键。
-			event.Error.DebugRef = debugRef(recorder)
-		}
 		encodedEvents, encodeErr := encoder.Encode(event)
 		if encodeErr != nil {
 			if wErr := flush(); wErr != nil {
