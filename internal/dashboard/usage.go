@@ -31,14 +31,14 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 		if c, ok := catalog[m.Name]; ok {
 			// cache_write 实测按 input 价计费：配额翻转拟合的隐含单价 ≈ input 价，
 			// 并非 Anthropic 惯例的 1.25×；catalog 无独立 cache_write 价格维。
-			cost := (float64(m.Input+m.CacheWrite)*c.input + float64(m.CacheRead)*c.cached + float64(m.Output)*c.output) / 1e6
+			cost := (float64(m.InputTokens+m.CacheWrite)*c.input + float64(m.CacheRead)*c.cached + float64(m.OutputTokens)*c.output) / 1e6
 			row["est_cost"] = cost
 			totalCost += cost
 			if c.contextTokens > 0 && m.Requests > 0 {
 				row["context_tokens"] = c.contextTokens
 				// 上下文填充率：平均单请求占用 token（输入+两向缓存）占
 				// 窗口上限的比例——衡量「窗口挤不挤」，不是累计量。
-				row["avg_context_tokens"] = float64(m.Input+m.CacheRead+m.CacheWrite) / float64(m.Requests)
+				row["avg_context_tokens"] = float64(m.InputTokens+m.CacheRead+m.CacheWrite) / float64(m.Requests)
 				row["context_fill_pct"] = row["avg_context_tokens"].(float64) / float64(c.contextTokens) * 100
 			}
 		}

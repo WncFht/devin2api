@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +121,46 @@ func TestQuotaFileRoundTrip(t *testing.T) {
 	// 90→80 跨 1200s（1/3 小时）= 30 %/h。
 	if rate := got["burn_per_hour"].(float64); fmt.Sprintf("%.2f", rate) != "30.00" {
 		t.Fatalf("burn_per_hour = %v", rate)
+	}
+}
+
+// TestQuotaPointGraceAndTopUpFields 验证宽限/加额字段的快照形态：
+// grace_period_end 以 unix 秒落盘，缺省字段经 omitempty 不进 JSON。
+func TestQuotaPointGraceAndTopUpFields(t *testing.T) {
+	end := time.Date(2026, 9, 20, 16, 0, 0, 0, time.UTC)
+	point := quotaPoint{
+		At:                end.Unix() - 3600,
+		GracePeriodStatus: "ACTIVE",
+		GracePeriodEnd:    rfc3339Unix(end.Format(time.RFC3339)),
+		OrphanedUsageCut:  true,
+		TopUpEnabled:      true,
+		TopUpStatus:       "SUCCEEDED",
+	}
+	data, err := json.Marshal(point)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back quotaPoint
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.GracePeriodStatus != "ACTIVE" || back.GracePeriodEnd != end.Unix() ||
+		!back.OrphanedUsageCut || !back.TopUpEnabled || back.TopUpStatus != "SUCCEEDED" {
+		t.Fatalf("round trip = %+v", back)
+	}
+	// 空值不序列化：宽限字段在大多数快照里缺席，不能让 0/false 刷存在感。
+	var bare quotaPoint
+	if err := json.Unmarshal([]byte(`{"at":1}`), &bare); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := json.Marshal(bare)
+	for _, key := range []string{"grace_period_status", "grace_period_end", "was_reduced_by_orphaned_usage", "top_up_enabled", "top_up_transaction_status"} {
+		if strings.Contains(string(out), key) {
+			t.Fatalf("empty %s leaked into %s", key, out)
+		}
+	}
+	// 畸形 RFC3339 与缺席都记 0。
+	if rfc3339Unix("not-a-time") != 0 || rfc3339Unix(nil) != 0 {
+		t.Fatal("rfc3339Unix should map bad input to 0")
 	}
 }

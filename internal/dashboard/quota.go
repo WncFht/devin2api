@@ -47,6 +47,14 @@ type quotaPoint struct {
 	UsedPrompt    float64 `json:"used_prompt_credits,omitempty"`
 	UsedFlow      float64 `json:"used_flow_credits,omitempty"`
 	UsedFlex      float64 `json:"used_flex_credits,omitempty"`
+	// 宽限与自动加额状态：配额烧穿后不是立即断供，grace_period_status
+	// 为 ACTIVE 时宽限期计数中，grace_period_end 是宽限截止（unix 秒）；
+	// top_up_* 记录自动加额开关与最近一次加额交易状态。
+	GracePeriodStatus string `json:"grace_period_status,omitempty"`
+	GracePeriodEnd    int64  `json:"grace_period_end,omitempty"`
+	OrphanedUsageCut  bool   `json:"was_reduced_by_orphaned_usage,omitempty"`
+	TopUpEnabled      bool   `json:"top_up_enabled,omitempty"`
+	TopUpStatus       string `json:"top_up_transaction_status,omitempty"`
 }
 
 // StartQuotaSampler 启动后台配额采样协程；interval<=0 或日志未启用时不启动。
@@ -95,6 +103,15 @@ func (h *Handler) sampleQuota(path string) {
 		UsedPrompt:      floatAny(plan["used_prompt_credits"]),
 		UsedFlow:        floatAny(plan["used_flow_credits"]),
 		UsedFlex:        floatAny(plan["used_flex_credits"]),
+		// plan["grace_period_status"] 已经 fetchUserStatus 的 shortEnum
+		// 缩成尾段；grace_period_end 是归一后的 RFC3339，转回 unix 秒。
+		GracePeriodStatus: strAny(plan["grace_period_status"]),
+		GracePeriodEnd:    rfc3339Unix(plan["grace_period_end"]),
+		OrphanedUsageCut:  boolAny(plan["was_reduced_by_orphaned_usage"]),
+	}
+	if tu, ok := plan["top_up_status"].(map[string]any); ok {
+		point.TopUpEnabled = boolAny(tu["enabled"])
+		point.TopUpStatus = strAny(tu["transaction_status"])
 	}
 	data, err := json.Marshal(point)
 	if err != nil {
@@ -244,4 +261,14 @@ func floatOr0(v *float64) float64 {
 		return 0
 	}
 	return *v
+}
+
+// rfc3339Unix 把 planStatus 里归一化后的 RFC3339 时刻转回 unix 秒；
+// 缺席或畸形记 0——omitempty 让快照里该键消失，与「未上报」口径一致。
+func rfc3339Unix(v any) int64 {
+	t, err := time.Parse(time.RFC3339, strAny(v))
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
 }

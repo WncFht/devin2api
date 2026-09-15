@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // remoteIP 返回请求来源 IP（去端口）；登录限速按它归并。
@@ -63,9 +64,12 @@ func shortEnum(full string) string {
 		"ExaCodeiumCommonPb_ModelStatus_MODEL_STATUS_",
 		"ExaCodeiumCommonPb_TeamsTier_TEAMS_TIER_",
 		"ExaCodeiumCommonPb_BillingStrategy_BILLING_STRATEGY_",
+		"ExaCodeiumCommonPb_GracePeriodStatus_GRACE_PERIOD_STATUS_",
+		"ExaCodeiumCommonPb_TransactionStatus_TRANSACTION_STATUS_",
 		"ExaCodeiumCommonPb_Model_",
 		"MODEL_PROVIDER_", "API_PROVIDER_", "MODEL_PRICING_TYPE_", "MODEL_COST_TIER_",
 		"MODEL_DIMENSION_KIND_", "STATUS_LEVEL_", "MODEL_STATUS_", "TEAMS_TIER_", "BILLING_STRATEGY_",
+		"GRACE_PERIOD_STATUS_", "TRANSACTION_STATUS_",
 		"MODEL_",
 	} {
 		if idx := strings.Index(full, p); idx >= 0 {
@@ -137,6 +141,19 @@ func numAny(vals ...any) any {
 		}
 	}
 	return nil
+}
+
+// rfc3339Any 把 Connect-JSON 的 Timestamp 字段（RFC3339 字符串）归一成
+// UTC RFC3339；解析失败保留原文——外部输入边界上原样暴露比吞掉更可排障。
+func rfc3339Any(vals ...any) string {
+	s := strAny(vals...)
+	if s == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return s
 }
 
 // truncate 把 s 截到 n 字节并以 "..." 结尾；不超原样返回。

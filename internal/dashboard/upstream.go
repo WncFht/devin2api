@@ -254,6 +254,26 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 			"overage_balance_micros":   numAny(ps["overageBalanceMicros"], ps["overage_balance_micros"]),
 			"plan_start":               strAny(ps["planStart"], ps["plan_start"]),
 			"plan_end":                 strAny(ps["planEnd"], ps["plan_end"]),
+			// 超额使用后的宽限与充值状态：配额烧穿不是立即断供，先进
+			// grace period（grace_period_end 是 Connect-JSON Timestamp =
+			// RFC3339 字符串）；top_up_status 记录自动加额是否生效。
+			"was_reduced_by_orphaned_usage": boolAny(ps["wasReducedByOrphanedUsage"], ps["was_reduced_by_orphaned_usage"]),
+			"grace_period_status":           shortEnum(strAny(ps["gracePeriodStatus"], ps["grace_period_status"])),
+			"grace_period_end":              rfc3339Any(ps["gracePeriodEnd"], ps["grace_period_end"]),
+		}
+		tu, _ := ps["topUpStatus"].(map[string]any)
+		if tu == nil {
+			tu, _ = ps["top_up_status"].(map[string]any)
+		}
+		if tu != nil {
+			plan["top_up_status"] = map[string]any{
+				"enabled":            boolAny(tu["topUpEnabled"], tu["top_up_enabled"]),
+				"transaction_status": shortEnum(strAny(tu["topUpTransactionStatus"], tu["top_up_transaction_status"])),
+				"monthly_amount":     numAny(tu["monthlyTopUpAmount"], tu["monthly_top_up_amount"]),
+				"spent":              numAny(tu["topUpSpent"], tu["top_up_spent"]),
+				"increment":          numAny(tu["topUpIncrement"], tu["top_up_increment"]),
+				"criteria_met":       boolAny(tu["topUpCriteriaMet"], tu["top_up_criteria_met"]),
+			}
 		}
 		pi, _ := ps["planInfo"].(map[string]any)
 		if pi == nil {
