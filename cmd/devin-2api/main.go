@@ -489,13 +489,19 @@ func reportListenFailure(listen string, err error) {
 }
 
 // probeExistingInstance 查询占用监听端口的进程是否为本服务实例。
+// 探测地址按 listen 派生：绑了具体地址（tailscale IP 等）就探它，
+// 通配（":3003"/"0.0.0.0"/"[::]"）无法拨号，回落 loopback——
+// 一律 127.0.0.1 会在非环回监听时把本服务实例误报成 unresponsive。
 func probeExistingInstance(listen string) string {
-	_, port, err := net.SplitHostPort(listen)
+	host, port, err := net.SplitHostPort(listen)
 	if err != nil || port == "" {
 		return "unknown"
 	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
 	if err != nil {
 		return "unresponsive"
 	}
