@@ -115,8 +115,8 @@ func TestDecodeRequestAcceptsLegacyFunctionDialect(t *testing.T) {
 		t.Fatalf("assistant content[0] = %#v", assistant.Content[0])
 	}
 	result := request.Context.Messages[2].(llm.ToolResultMessage)
-	if result.ToolCallID != call.ID || result.ToolName != "read_file" {
-		t.Fatalf("tool result = %#v, want id %q name read_file", result, call.ID)
+	if result.ToolCallID != call.ID {
+		t.Fatalf("tool result = %#v, want call id %q", result, call.ID)
 	}
 	if len(request.Context.Tools) != 1 || request.Context.Tools[0].Name != "read_file" {
 		t.Fatalf("tools = %#v", request.Context.Tools)

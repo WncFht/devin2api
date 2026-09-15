@@ -191,13 +191,14 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if context.SessionKey == "" {
 		context.SessionKey = request.User
 	}
-	// toolNames 随解码增量登记 assistant tool_call 的 id→name，
-	// tool 消息按 id 直查，替代逐条 findToolName 全历史回扫。
+	// callIDs 登记已发出的全部调用 id（含 tool_call 真 id 与旧版
+	// function_call 的合成 id）：function_call 没有 id 字段，要造
+	// call_function_N 序数 id，造之前必须确认不与既有 id 撞车。
 	// functionIDs 是旧版形态的 name→合成 id 映射：role:"function"
 	// 结果消息按函数名而非 call id 对账。
-	toolNames := make(map[string]string)
+	callIDs := make(map[string]struct{})
 	functionIDs := make(map[string]string)
-	if err := appendMessages(&context, request.Messages, toolNames, functionIDs); err != nil {
+	if err := appendMessages(&context, request.Messages, callIDs, functionIDs); err != nil {
 		return AdaptedRequest{}, err
 	}
 	for _, tool := range request.Tools {
@@ -228,7 +229,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		})
 	}
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
-	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
+	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
 		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
@@ -244,9 +245,9 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 }
 
 // appendMessages 逐条解码 messages 数组并保序追加进会话。
-func appendMessages(context *llm.RequestMessages, messages []Message, toolNames, functionIDs map[string]string) error {
+func appendMessages(context *llm.RequestMessages, messages []Message, callIDs map[string]struct{}, functionIDs map[string]string) error {
 	for index, message := range messages {
-		if err := appendMessage(context, message, toolNames, functionIDs); err != nil {
+		if err := appendMessage(context, message, callIDs, functionIDs); err != nil {
 			return fmt.Errorf("message[%d]: %w", index, err)
 		}
 	}
@@ -254,7 +255,7 @@ func appendMessages(context *llm.RequestMessages, messages []Message, toolNames,
 }
 
 // appendMessage 按 role 把单条消息解码进会话。
-func appendMessage(context *llm.RequestMessages, message Message, toolNames, functionIDs map[string]string) error {
+func appendMessage(context *llm.RequestMessages, message Message, callIDs map[string]struct{}, functionIDs map[string]string) error {
 	switch message.Role {
 	case "system", "developer":
 		content, err := common.DecodeContent(message.Content, &context.Dropped)
@@ -276,7 +277,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames, fun
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	case "assistant":
-		content, err := decodeAssistantContent(context, message, toolNames, functionIDs)
+		content, err := decodeAssistantContent(context, message, callIDs, functionIDs)
 		if err != nil {
 			return err
 		}
@@ -293,7 +294,6 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames, fun
 		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  message.ToolCallID,
-			ToolName:    toolNames[message.ToolCallID],
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
@@ -310,13 +310,8 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames, fun
 			context.Dropped = append(context.Dropped, "unmatched_function_name:"+message.Name)
 			id = "call_function_unmatched_" + message.Name
 		}
-		name := message.Name
-		if name == "" {
-			name = "tool"
-		}
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  id,
-			ToolName:    name,
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})
@@ -336,7 +331,7 @@ func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm
 
 // decodeAssistantContent 解码 assistant 消息的正文与 tool_calls
 // （含旧版 function_call 单字段形态）。
-func decodeAssistantContent(context *llm.RequestMessages, message Message, toolNames, functionIDs map[string]string) ([]llm.Content, error) {
+func decodeAssistantContent(context *llm.RequestMessages, message Message, callIDs map[string]struct{}, functionIDs map[string]string) ([]llm.Content, error) {
 	var content []llm.Content
 	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
 		decoded, err := common.DecodeContent(message.Content, &context.Dropped)
@@ -354,7 +349,7 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 			continue
 		}
 		args, custom := common.NormalizeToolArguments(json.RawMessage(call.Function.Arguments))
-		toolNames[call.ID] = call.Function.Name
+		callIDs[call.ID] = struct{}{}
 		content = append(content, llm.ToolCall{
 			ID:        call.ID,
 			Name:      call.Function.Name,
@@ -367,13 +362,13 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, toolN
 		// call_function_N 序数 id，name→id 登记进 functionIDs 供
 		// function 角色结果消息对账。
 		var callID string
-		for i := len(toolNames); ; i++ {
+		for i := len(callIDs); ; i++ {
 			callID = fmt.Sprintf("call_function_%d", i)
-			if _, taken := toolNames[callID]; !taken {
+			if _, taken := callIDs[callID]; !taken {
 				break
 			}
 		}
-		toolNames[callID] = call.Name
+		callIDs[callID] = struct{}{}
 		functionIDs[call.Name] = callID
 		args, custom := common.NormalizeToolArguments(json.RawMessage(call.Arguments))
 		content = append(content, llm.ToolCall{

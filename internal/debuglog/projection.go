@@ -125,7 +125,6 @@ func messageProjection(message llm.Message) map[string]any {
 		}
 	case llm.ToolResultMessage:
 		result["tool_call_id"] = message.ToolCallID
-		result["tool_name"] = message.ToolName
 		result["content"] = contentListProjection(message.Content)
 		result["is_error"] = message.IsError
 		result["timestamp_ms"] = message.TimestampMS

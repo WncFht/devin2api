@@ -150,7 +150,7 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 				llm.ThinkingContent{Thinking: "think", ThinkingSignature: "sig"},
 				llm.ToolCall{ID: "call-1", Name: "exec", Arguments: json.RawMessage(`{"command":"ls"}`)},
 			}},
-			llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "exec", IsError: true, Content: []llm.Content{llm.TextContent{Text: "failed"}}},
+			llm.ToolResultMessage{ToolCallID: "call-1", IsError: true, Content: []llm.Content{llm.TextContent{Text: "failed"}}},
 		},
 		Tools: []llm.ToolDefinition{
 			{Name: "exec", Description: "run", InputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -238,8 +238,8 @@ func TestBuildRequestMergesParallelToolCalls(t *testing.T) {
 				llm.ToolCall{ID: "call-a", Name: "read", Arguments: json.RawMessage(`{"path":"a"}`)},
 				llm.ToolCall{ID: "call-b", Name: "read", Arguments: json.RawMessage(`{"path":"b"}`)},
 			}},
-			llm.ToolResultMessage{ToolCallID: "call-a", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
-			llm.ToolResultMessage{ToolCallID: "call-b", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-a", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-b", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
 		},
 	}
 	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
@@ -284,9 +284,9 @@ func TestBuildRequestReportsRepairs(t *testing.T) {
 			llm.AssistantMessage{Content: []llm.Content{
 				llm.ToolCall{ID: "call-2", Name: "read", Arguments: json.RawMessage(`{"path":"b"}`)},
 			}},
-			llm.ToolResultMessage{ToolCallID: "call-1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
-			llm.ToolResultMessage{ToolCallID: "call-2", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
-			llm.ToolResultMessage{ToolCallID: "call-lost", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "orphan"}}},
+			llm.ToolResultMessage{ToolCallID: "call-1", Content: []llm.Content{llm.TextContent{Text: "a-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-2", Content: []llm.Content{llm.TextContent{Text: "b-body"}}},
+			llm.ToolResultMessage{ToolCallID: "call-lost", Content: []llm.Content{llm.TextContent{Text: "orphan"}}},
 			llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: ""}}},
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "next step"}}},
 		},
@@ -466,7 +466,7 @@ func TestBuildRequestAttachesImagesInSameTurn(t *testing.T) {
 				llm.TextContent{Text: "see this"},
 				llm.ImageContent{Data: "AAAA", MIMEType: "image/png"},
 			}},
-			llm.ToolResultMessage{ToolCallID: "tc1", ToolName: "read", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
+			llm.ToolResultMessage{ToolCallID: "tc1", Content: []llm.Content{llm.TextContent{Text: "file content"}}},
 		},
 	}
 	converted, _, err := buildRequest(request, Config{}, callBinding{Token: "token", Model: "model"})
@@ -1864,8 +1864,8 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "read a.txt"}}},
 			*done,
 			llm.ToolResultMessage{
-				ToolCallID: "read_file_0", ToolName: "read_file",
-				Content: []llm.Content{llm.TextContent{Text: "file body"}},
+				ToolCallID: "read_file_0",
+				Content:    []llm.Content{llm.TextContent{Text: "file body"}},
 			},
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "what did you find?"}}},
 		},

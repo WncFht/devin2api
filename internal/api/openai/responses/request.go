@@ -165,7 +165,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		}
 	}
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
-	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
+	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
 		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
@@ -201,11 +201,8 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 	// 产出上。encrypted_content 为 sealed.* 时是我们自己发出的上游签名，
 	// 随思考回放在 wire 上交给上游；外来不透明载荷不可解，忽略。
 	var pending pendingReasoning
-	// toolNames 随解码增量登记 function_call/custom_tool_call 的
-	// call_id→name，output item 按 id 直查，替代逐条 findToolName 回扫。
-	toolNames := make(map[string]string)
 	for index, item := range items {
-		if err := appendInputItem(context, item, &pending, toolNames); err != nil {
+		if err := appendInputItem(context, item, &pending); err != nil {
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
 	}
@@ -302,7 +299,7 @@ func classifyReasoningSignature(encrypted string) (signature, signatureType stri
 
 // appendInputItem 按 item type 分派单条 input 元素（message/reasoning/
 // function_call 等），未知类型记入 Dropped 后跳过。
-func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning, toolNames map[string]string) error {
+func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending *pendingReasoning) error {
 	var header struct {
 		Type string `json:"type"`
 		Role string `json:"role"`
@@ -361,7 +358,6 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 			return err
 		}
 		arguments, custom := common.NormalizeToolArguments(json.RawMessage(item.Arguments))
-		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments, Custom: custom})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
@@ -381,7 +377,6 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
-		toolNames[item.CallID] = item.Name
 		content := append(consumePendingThinking(pending),
 			llm.ToolCall{ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(item.Input), Custom: true})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
@@ -423,7 +418,6 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
 		context.Messages = append(context.Messages, llm.ToolResultMessage{
 			ToolCallID:  callID,
-			ToolName:    toolNames[callID],
 			Content:     content,
 			TimestampMS: time.Now().UnixMilli(),
 		})

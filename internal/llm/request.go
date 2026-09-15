@@ -251,10 +251,9 @@ func (message UserMessage) Validate() error {
 
 // ToolResultMessage 表示一次工具调用的执行结果。
 type ToolResultMessage struct {
-	// ToolCallID 是本结果所对应的工具调用标识。
+	// ToolCallID 是本结果所对应的工具调用标识——wire 上凭它配对，
+	// 工具名不上行（上游 prompt 只带 call id + 正文），故不存。
 	ToolCallID string
-	// ToolName 是被执行的工具名称。
-	ToolName string
 	// Content 是返回给模型的文字和图片内容块。
 	Content []Content
 	// IsError 表示工具执行是否失败。
@@ -270,9 +269,6 @@ func (ToolResultMessage) Role() MessageRole { return MessageRoleToolResult }
 func (message ToolResultMessage) Validate() error {
 	if message.ToolCallID == "" {
 		return errors.New("tool result call ID is required")
-	}
-	if message.ToolName == "" {
-		return errors.New("tool result name is required")
 	}
 	if err := validateContent(message.Content, ContentTypeText, ContentTypeImage); err != nil {
 		return err
@@ -348,8 +344,8 @@ func (request RequestMessages) Validate() error {
 // invalid_argument，降级保住结果内容让整单可继续。
 // 判据是位置性的——同 id call 必须出现在该 result 之前的助手消息里；
 // 缺失调用 id（ToolCallID 为空）的结果同样无法配对，一并降级。
-// 必须在 Validate 之前调用：孤儿结果的 ToolCallID/ToolName 允许为空，
-// 降级后这些必填约束才成立。每处降级在 Dropped 留
+// 必须在 Validate 之前调用：孤儿结果的 ToolCallID 允许为空，
+// 降级后必填约束才成立。每处降级在 Dropped 留
 // missing_tool_call_id / unmatched_tool_call_id:<id> 标记。
 func (request *RequestMessages) DemoteOrphanToolResults() {
 	seenCallIDs := make(map[string]struct{})

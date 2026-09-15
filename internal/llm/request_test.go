@@ -47,7 +47,6 @@ func TestRequestMessagesSupportsProviderIndependentHistory(t *testing.T) {
 			},
 			ToolResultMessage{
 				ToolCallID: "call-1",
-				ToolName:   "read_file",
 				Content: []Content{
 					TextContent{Text: `{"debug":true}`},
 					ImageContent{Data: "iVBORw0KGgo=", MIMEType: "image/png"},
@@ -97,15 +96,15 @@ func TestDemoteOrphanToolResults(t *testing.T) {
 	request := RequestMessages{
 		Messages: []Message{
 			// 孤儿：调用来得更晚（压缩/乱序）——按位置判孤儿。
-			ToolResultMessage{ToolCallID: "call-late", ToolName: "read", Content: []Content{TextContent{Text: "early"}}},
+			ToolResultMessage{ToolCallID: "call-late", Content: []Content{TextContent{Text: "early"}}},
 			AssistantMessage{Content: []Content{
 				ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{}`)},
 				ToolCall{ID: "call-late", Name: "read", Arguments: json.RawMessage(`{}`)},
 			}},
 			// 正常配对：call-1 已在前置助手消息出现。
-			ToolResultMessage{ToolCallID: "call-1", ToolName: "read", Content: []Content{TextContent{Text: "ok"}}},
+			ToolResultMessage{ToolCallID: "call-1", Content: []Content{TextContent{Text: "ok"}}},
 			// 孤儿：调用不存在。
-			ToolResultMessage{ToolCallID: "call-gone", ToolName: "", Content: []Content{TextContent{Text: "lost"}}},
+			ToolResultMessage{ToolCallID: "call-gone", Content: []Content{TextContent{Text: "lost"}}},
 			// 孤儿：id 缺失。
 			ToolResultMessage{Content: []Content{TextContent{Text: "noid"}}},
 		},

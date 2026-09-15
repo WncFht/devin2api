@@ -146,7 +146,7 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 		})
 	}
 	// 孤儿 tool result 在 IR 校验前统一降级为 USER 文本——校验要求
-	// ToolCallID/ToolName 非空，而孤儿字段本来就是缺的。
+	// ToolCallID 非空，而孤儿的调用 id 本来就是缺的。
 	context.DemoteOrphanToolResults()
 	if err := context.Validate(); err != nil {
 		return AdaptedRequest{}, &llm.Failure{Code: "invalid_argument", Message: "validate adapted request: " + err.Error(), Cause: err}
@@ -213,12 +213,10 @@ func appendSystem(context *llm.RequestMessages, raw json.RawMessage) error {
 	return nil
 }
 
-// appendMessages 顺序解码消息流；toolNames 随 assistant tool_use 增量登记
-// id→name，后续 tool_result 直查，替代逐条 findToolNameByToolUseID 回扫。
+// appendMessages 顺序解码消息流。
 func appendMessages(context *llm.RequestMessages, messages []Message) error {
-	toolNames := make(map[string]string)
 	for index, message := range messages {
-		if err := appendMessage(context, message, toolNames); err != nil {
+		if err := appendMessage(context, message); err != nil {
 			return fmt.Errorf("message[%d]: %w", index, err)
 		}
 	}
@@ -226,13 +224,13 @@ func appendMessages(context *llm.RequestMessages, messages []Message) error {
 }
 
 // appendMessage 按 role 把单条消息解码进会话。
-func appendMessage(context *llm.RequestMessages, message Message, toolNames map[string]string) error {
+func appendMessage(context *llm.RequestMessages, message Message) error {
 	switch message.Role {
 	case "user", "system":
 		// Claude Code 在消息流中间插入 role:system 的途中注入（agent 列表、
 		// task reminder、system notification）。内容位置敏感——解码为
 		// UserMessage 保持时序，不能折叠进系统提示词。
-		messages, err := decodeAnthropicUserMessages(context, message.Content, toolNames)
+		messages, err := decodeAnthropicUserMessages(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -247,7 +245,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 		}
 		context.Messages = append(context.Messages, messages...)
 	case "assistant":
-		content, err := decodeAssistantContent(context, message.Content, toolNames)
+		content, err := decodeAssistantContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -266,7 +264,7 @@ func appendMessage(context *llm.RequestMessages, message Message, toolNames map[
 
 // decodeAnthropicUserMessages 把 Anthropic user 消息 content 拆分为一个或多个中间消息。
 // tool_result 内容块会生成独立的 llm.ToolResultMessage。
-func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessage, toolNames map[string]string) ([]llm.Message, error) {
+func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Message, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Message{llm.UserMessage{
 			Content:     []llm.Content{llm.TextContent{Text: ""}},
@@ -329,7 +327,7 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 			// tool_use_id 缺失或对不上前置调用的结果先按原样进 IR；
 			// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
 			flushUser()
-			tool, err := decodeToolResult(context, header.ToolUseID, header.Content, header.IsError, toolNames)
+			tool, err := decodeToolResult(context, header.ToolUseID, header.Content, header.IsError)
 			if err != nil {
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
@@ -343,7 +341,7 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 }
 
 // decodeAssistantContent 解码 assistant 消息的 text/thinking/tool_use 块。
-func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, toolNames map[string]string) ([]llm.Content, error) {
+func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
@@ -388,7 +386,6 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 			})
 		case "tool_use":
 			args, custom := common.NormalizeToolArguments(header.Input)
-			toolNames[header.ID] = header.Name
 			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args, Custom: custom})
 		default:
 			context.Dropped = append(context.Dropped, "assistant_block:"+header.Type)
@@ -398,10 +395,9 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage, t
 }
 
 // decodeToolResult 把 tool_result 块解码为 ToolResultMessage；tool_use_id
-// 缺失或对不上已知调用时 ToolCallID/ToolName 留空，由解码尾的
+// 缺失或对不上已知调用时按原样进 IR，由解码尾的
 // DemoteOrphanToolResults 降级。
-func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.RawMessage, isError bool, toolNames map[string]string) (llm.ToolResultMessage, error) {
-	name := toolNames[toolUseID]
+func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.RawMessage, isError bool) (llm.ToolResultMessage, error) {
 	content, err := decodeAnthropicContent(context, raw)
 	if err != nil {
 		return llm.ToolResultMessage{}, err
@@ -411,7 +407,6 @@ func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.R
 	}
 	return llm.ToolResultMessage{
 		ToolCallID:  toolUseID,
-		ToolName:    name,
 		Content:     content,
 		IsError:     isError,
 		TimestampMS: time.Now().UnixMilli(),
