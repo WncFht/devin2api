@@ -127,9 +127,8 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 				if event.Type != llm.ResponseEventStart {
 					recorder.NoteUpstreamLatency()
 				}
-				// 投影就地/推迟求值的判定归 debuglog 所有：哪些字段指向
-				// decoder 跨帧续改的活对象由 ResponseEventProjection 的
-				// 解引用点决定，见 RecordResponseEvent。
+				// 事件投影推迟到日志 worker 求值——RecordResponseEvent 打
+				// thunk；Partial 是逐帧快照、终止指针无后续写入，无竞态。
 				recorder.RecordResponseEvent(event)
 			}
 			select {
