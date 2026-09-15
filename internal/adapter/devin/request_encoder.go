@@ -48,7 +48,11 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	noTools := request.ToolChoice != nil && request.ToolChoice.Mode == llm.ToolChoiceNone
 	systemPrompt := request.SystemPrompt
 	if !noTools {
-		systemPrompt = withToolDescriptions(systemPrompt, request.Tools)
+		injected, err := withToolDescriptions(systemPrompt, request.Tools)
+		if err != nil {
+			return nil, repairs, err
+		}
+		systemPrompt = injected
 	}
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),

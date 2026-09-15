@@ -10,12 +10,15 @@ import (
 
 // TestWithToolDescriptionsNumbersProseAndPreservesCode 的测试动机是避免连续能力声明触发上游策略误判，同时保持代码示例完整。
 func TestWithToolDescriptionsNumbersProseAndPreservesCode(t *testing.T) {
-	prompt := withToolDescriptions("", []llm.ToolDefinition{{
+	prompt, err := withToolDescriptions("", []llm.ToolDefinition{{
 		Name: "read&inspect",
 		Description: `Read the contents of a file. Supports text files and images (jpg, png).
 
 ` + "```json\n" + `{"path":"a&b.txt"}` + "\n```",
 	}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := `# tools descriptions
 <tool name="read&amp;inspect">
 1. Read the contents of a file.

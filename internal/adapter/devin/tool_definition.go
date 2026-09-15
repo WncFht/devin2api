@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -20,31 +21,97 @@ import (
 
 var descriptionListItemPattern = regexp.MustCompile(`^(?:[-*+]\s+|\d+[.):]\s+|\[\d+\]\s+)(.+)$`)
 
-// withToolDescriptions 把非空工具说明追加到 Devin system prompt，供模型理解原生工具用途。
-func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) string {
-	var section strings.Builder
+// 注入段预算分级（参照 WindsurfAPI 的 full→compact→skinny 阶梯）：
+// 软顶以内放行首个够小的形态；最省的 skinny 也过硬顶时报 400——
+// 病态工具量下的无界注入会把 prompt 顶到上游体量上限，错误尽早显式。
+const (
+	toolPreambleSoftBytes = 24000
+	toolPreambleHardBytes = 48000
+	// toolDescriptionCompactRunes 是 compact 档每条说明的字符预算：
+	// 截尾保留开头——「是什么/何时用」的导引信号都在前段。
+	toolDescriptionCompactRunes = 400
+)
+
+// toolSectionEntry 是注入段的一条工具说明：name 是工具名，description
+// 是 formatToolDescription 归一后的全文。
+type toolSectionEntry struct{ name, description string }
+
+// withToolDescriptions 把非空工具说明追加到 Devin system prompt，供模型理解
+// 原生工具用途。full 档超软顶先降 compact（逐条截断）、再降 skinny（纯名
+// 清单——工具名是最后保住的语义信号）；skinny 仍过硬顶返回错误。
+func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (string, error) {
+	var entries []toolSectionEntry
 	for _, tool := range tools {
 		description := strings.TrimSpace(tool.Description)
 		if description == "" {
 			continue
 		}
-		if section.Len() == 0 {
-			section.WriteString("# tools descriptions")
-		}
-		section.WriteString("\n<tool name=\"")
-		section.WriteString(escapeXMLAttribute(tool.Name))
-		section.WriteString("\">\n")
-		section.WriteString(escapeXMLText(formatToolDescription(description)))
-		section.WriteString("\n</tool>")
+		entries = append(entries, toolSectionEntry{tool.Name, formatToolDescription(description)})
 	}
-	if section.Len() == 0 {
-		return systemPrompt
+	if len(entries) == 0 {
+		return systemPrompt, nil
+	}
+	section := renderToolSection(entries, 0)
+	if len(section) > toolPreambleSoftBytes {
+		if compact := renderToolSection(entries, toolDescriptionCompactRunes); len(compact) <= toolPreambleSoftBytes {
+			section = compact
+		} else {
+			section = renderToolSection(entries, -1)
+		}
+	}
+	if len(section) > toolPreambleHardBytes {
+		return "", &llm.Failure{
+			Code: "invalid_argument",
+			Message: fmt.Sprintf("tool_preamble_too_large: tool list needs %d bytes even as a bare name list (limit %d); reduce the number of tools",
+				len(section), toolPreambleHardBytes),
+		}
 	}
 	trimmedPrompt := strings.TrimRight(systemPrompt, "\r\n")
 	if strings.TrimSpace(trimmedPrompt) == "" {
+		return section, nil
+	}
+	return trimmedPrompt + "\n\n" + section, nil
+}
+
+// renderToolSection 按档渲染注入段：truncate 为 0 是 full（说明全文）、
+// 正值是 compact（每条说明截到该字符数）、-1 是 skinny（纯名清单）。
+func renderToolSection(entries []toolSectionEntry, truncate int) string {
+	var section strings.Builder
+	if truncate < 0 {
+		section.WriteString("# available tools:")
+		for _, item := range entries {
+			section.WriteString(" ")
+			section.WriteString(item.name)
+		}
 		return section.String()
 	}
-	return trimmedPrompt + "\n\n" + section.String()
+	section.WriteString("# tools descriptions")
+	for _, item := range entries {
+		description := item.description
+		if truncate > 0 {
+			description = truncateRunes(description, truncate)
+		}
+		section.WriteString("\n<tool name=\"")
+		section.WriteString(escapeXMLAttribute(item.name))
+		section.WriteString("\">\n")
+		section.WriteString(escapeXMLText(description))
+		section.WriteString("\n</tool>")
+	}
+	return section.String()
+}
+
+// truncateRunes 按字符数截断并加省略号；优先落在词边界（不回头超过
+// 四分之一预算，防止长空白前缀把内容截没）。
+func truncateRunes(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > limit*3/4 && !unicode.IsSpace(runes[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(string(runes[:cut])) + "…"
 }
 
 // formatToolDescription 把自然语言句子改为有序条目，并保留代码块和 JSON 示例的原有结构。
@@ -212,7 +279,11 @@ var toolDefinitionCache = struct {
 // 保留语义信息的同时避开该通道的指纹/分类面。属指纹对抗遗留决策：上游
 // 从未被实证拒绝真描述，若要恢复真描述应先跑探针验证再改这里。
 func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
-	cacheKey := tool.Name + "\x00" + string(tool.InputSchema)
+	// 缓存键覆盖全部影响 wire 形态的字段：透传位不同的同名同 schema
+	// 工具不能共享条目。
+	cacheKey := tool.Name + "\x00" + string(tool.InputSchema) + "\x00" +
+		strconv.FormatBool(tool.Strict) + "\x00" + strconv.FormatBool(tool.ReadOnlyHint) + "\x00" +
+		tool.ServerName + "\x00" + strings.Join(tool.AttributionFieldNames, "\x01")
 	toolDefinitionCache.Lock()
 	cached := toolDefinitionCache.items[cacheKey]
 	toolDefinitionCache.Unlock()
@@ -231,6 +302,21 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 		Name:             proto.String(tool.Name),
 		Description:      proto.String(tool.Name),
 		JsonSchemaString: proto.String(string(schema)),
+	}
+	// 可选透传位（2026-09-15 字段二分实测上游全收）；false/空即缺省不
+	// 发，wire 保持最小。is_custom_tool/computer_use_config 同批实测被
+	// 拒，永远不透传。
+	if tool.Strict {
+		converted.Strict = proto.Bool(true)
+	}
+	if tool.ReadOnlyHint {
+		converted.ReadOnlyHint = proto.Bool(true)
+	}
+	if tool.ServerName != "" {
+		converted.ServerName = proto.String(tool.ServerName)
+	}
+	if len(tool.AttributionFieldNames) > 0 {
+		converted.AttributionFieldNames = tool.AttributionFieldNames
 	}
 	toolDefinitionCache.Lock()
 	if len(toolDefinitionCache.items) >= 512 {
