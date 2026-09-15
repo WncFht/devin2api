@@ -529,10 +529,13 @@ func (gate *rateGate) noteUpstreamError(err error) {
 			detail = "extended"
 		}
 		gate.pushEvent(gateEventLatched, until, detail)
+		// 落盘须在锁内：解锁后 persist 可能与并发 release 的 clearState
+		// 交错——clear 先跑、persist 后写，已解闩的截止时刻会作为
+		// 死文件残留，重启后复活成幽灵闩。
+		gate.persistState(until)
 	}
 	gate.mu.Unlock()
 	if extended {
-		gate.persistState(until)
 		slog.Warn("upstream message rate limited; drip-latching new requests", "until", until.Format(time.RFC3339), "latch", until.Sub(now))
 	} else {
 		slog.Info("upstream message rate limited while latched", "remaining", remaining)
@@ -552,10 +555,12 @@ func (gate *rateGate) noteUpstreamSuccess() {
 		gate.pushEvent(gateEventReleased, gate.limitedUntil, "")
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
+		// clear 与上闩方的 persist 同锁序化：锁外执行会让「persist 晚于
+		// clear」交错把已解闩的时刻写回状态文件。
+		gate.clearState()
 	}
 	gate.mu.Unlock()
 	if latched {
-		gate.clearState()
 		slog.Info("rate gate released: upstream accepted a message")
 	}
 }
