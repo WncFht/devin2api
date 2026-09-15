@@ -284,6 +284,14 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 		// 都可能与 appendIndex 交错，把同一行计两遍。
 		manager.mutex.Lock()
 		data, err := TailRead(filepath.Join(root, IndexFile), usageReplayTailBytes)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
+			// 完成的行会被回放假设覆盖、又被实时路径跳过，永久漏记。
+			manager.mutex.Unlock()
+			time.Sleep(200 * time.Millisecond)
+			manager.mutex.Lock()
+			data, err = TailRead(filepath.Join(root, IndexFile), usageReplayTailBytes)
+		}
 		manager.indexSnapshotted = true
 		manager.mutex.Unlock()
 		if err != nil {
@@ -334,9 +342,10 @@ func (manager *Manager) SetEnabled(enabled bool) {
 	manager.enabled.Store(enabled)
 }
 
-// Enabled 返回请求日志当前是否开启。
+// Enabled 返回请求日志当前是否开启。无 root 的 manager 永远写不了盘，
+// 不报 enabled——healthz 之类读它判服务状态。
 func (manager *Manager) Enabled() bool {
-	return manager != nil && manager.enabled.Load()
+	return manager != nil && manager.enabled.Load() && manager.root != ""
 }
 
 // SetPolicy 运行时更换日志生命周期策略（配置 reload 热路径）；cleaner
