@@ -5,16 +5,14 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,49 +22,84 @@ import (
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/WncFht/devin2api/internal/adapter/devin"
+	"github.com/WncFht/devin2api/internal/config"
+	"github.com/WncFht/devin2api/internal/httpproxy"
+	"github.com/WncFht/devin2api/internal/randid"
+	"github.com/WncFht/devin2api/internal/upstream"
 )
 
-const baseURL = "https://server.codeium.com"
+const defaultBaseURL = "https://server.codeium.com"
 
 var marshal = protojson.MarshalOptions{EmitUnpopulated: false, UseEnumNumbers: false}
+
+// commands 是子命令分派表；usage() 的子命令列表须与它保持一致。
+var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServiceClient, string, []string) error{
+	"configs": cmdConfigs,
+	"status":  cmdStatus,
+	"assign":  cmdAssign,
+	"chat":    cmdChat,
+	"replay":  cmdReplay,
+	"hist":    cmdHist,
+	"rerun":   cmdRerun,
+	"bigctx":  cmdBigctx,
+	"misc":    cmdMisc,
+	"edge":    cmdEdge,
+}
+
+// 客户端身份三元组在 main 里从 config 的 devin.client_* 解析一次
+// （缺省回落到与真实 Devin CLI 抓包一致的默认值），probe 流量与
+// 代理走同一套指纹，实验结果才可迁移。
+var clientName, clientVersion, clientOS string
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	token := resolveToken()
-	client := devinprotoconnect.NewApiServerServiceClient(newHTTPClient(token), baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-
-	var err error
-	switch os.Args[1] {
-	case "configs":
-		err = cmdConfigs(ctx, client, token)
-	case "status":
-		err = cmdStatus(ctx, client, token)
-	case "assign":
-		err = cmdAssign(ctx, client, token, os.Args[2:])
-	case "chat":
-		err = cmdChat(ctx, client, token, os.Args[2:])
-	case "replay":
-		err = cmdReplay(ctx, client, token, os.Args[2:])
-	case "bigctx":
-		err = cmdBigctx(ctx, client, token, os.Args[2:])
-	case "misc":
-		err = cmdMisc(ctx, client, token)
-	case "hist":
-		err = cmdHist(ctx, client, token, os.Args[2:])
-	case "edge":
-		err = cmdEdge(ctx, client, token, os.Args[2:])
-	case "rerun":
-		err = cmdRerun(ctx, client, token, os.Args[2:])
-	default:
+	// 先校验子命令再解析 token：未知子命令应直接打 usage，
+	// 不能被「无 token」错误抢在前面。
+	run, ok := commands[os.Args[1]]
+	if !ok {
 		usage()
 		os.Exit(2)
 	}
+	// config.yaml 读取失败按零值继续：token 与身份仍有环境变量、
+	// CLI 凭证文件与默认常量的完整回落链。
+	cfg, _ := config.Load("config.yaml")
+	token := resolveToken(cfg)
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
+		os.Exit(1)
+	}
+	clientName, clientVersion, clientOS = (devin.Config{
+		ClientName:    cfg.Devin.ClientName,
+		ClientVersion: cfg.Devin.ClientVersion,
+		ClientOS:      cfg.Devin.ClientOS,
+	}).ClientIdentity()
+	baseURL := cfg.Devin.BaseURL
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+	// 代理与 HTTP/1.1 强制和生产链路同源：probe 走 h2 而服务走 h1 时，
+	// 帧行为/并发结论不可直接迁移。
+	forceHTTP1 := true
+	if cfg.Devin.ForceHTTP1 != nil {
+		forceHTTP1 = *cfg.Devin.ForceHTTP1
+	}
+	transport, err := httpproxy.NewTransport(cfg.Devin.Proxy, forceHTTP1)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERR:", err)
+		os.Exit(1)
+	}
+	client := devinprotoconnect.NewApiServerServiceClient(
+		&http.Client{Transport: upstream.NewBasicAuthTransportFunc(transport, func() string { return token })},
+		baseURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	if err := run(ctx, client, token, os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
 	}
@@ -80,106 +113,83 @@ func usage() {
   chat [flags]                one GetChatMessage stream, dump all frames
     -model uid                chat_model_uid (default swe-2-max)
     -prompt text              user prompt (default "Reply exactly: pong")
-    -system text              system prompt
+    -system text              system prompt (default "You are a helpful assistant.")
+    -system-as-message        send system prompt as SYSTEM_PROMPT-source message, drop top-level prompt
+    -system-empty             send prompt field as explicit empty string
     -tool name                add a JSON-schema tool (repeatable: -tool a -tool b)
-    -tool-choice opt|tool:v   tool_choice oneof
+    -tool-schema json         schema for the corresponding -tool (positional)
+    -custom-tool name         add is_custom_tool with lark grammar (name)
+    -raw-schema               send invalid json_schema_string on tools
+    -tool-extras              strict+read_only_hint+server_name+attribution on tools
+    -tool-choice opt:v|tool:v tool_choice oneof
     -disable-parallel         disable_parallel_tool_calls=true
     -provider-source N|name   provider_source enum
     -prompt-id s              prompt_id field
     -num-tokens n             per-message num_tokens on last user msg
     -planner-mode N|name      planner_mode enum
     -step-type N|name         trajectory step_type enum
+    -step-index n             trajectoryReference.step_index (session-monotonic counter)
     -request-type N|name      request_type enum
     -language N|name          language enum
     -chat-model-name s        chat_model_name field
     -no-fingerprint           omit metadata.f
     -no-ids                   omit trajectory/cascade ids
+    -trajectory-id s          explicit trajectory_id (share across calls)
+    -cascade-id s             explicit cascade_id (share across calls to test concurrency)
     -max-tokens n             configuration.max_tokens
+    -num-completions n        configuration.num_completions
+    -stop-pattern s           configuration.stop_patterns[0]
     -temperature f            configuration.temperature (default 1)
     -top-p f                  configuration.top_p (default 0.95)
     -top-k n                  configuration.top_k (default 40)
-    -trajectory-id s          explicit trajectory_id (share across calls)
     -images n                 attach n copies of a tiny png to the user msg
     -internal-model N         use_internal_chat_model + internal_chat_model=N
+    -assign-jwt s             model_assignment_jwt
+    -resolve                  run AssignModel first, use returned uid+jwt
+    -resolve-only             run AssignModel but keep chat_model_uid (jwt/model mismatch test)
+    -router uid               router uid for -resolve (defaults to -model)
+    -meta-extras              send session_id/request_id/device_fingerprint/disable_telemetry
     -frames                   print every frame protojson (default: field inventory + text)
     -dump dir                 write each frame protojson to dir/NN.json
   replay [flags]              two-step: call once, then replay assistant msg with variants
-    -variant with-ids|no-sig|bogus-sig|with-sig|no-thinking
-  hist -shape merged|split    synthetic text+2-call+2-result history in either wire shape
+    -model uid                chat_model_uid (default swe-2-max)
+    -prompt text              step-1 user prompt
+    -variant name             with-sig|with-ids|no-sig|bogus-sig|bogus-sig-typed|sig-only|mutated-thinking|no-thinking
+  hist [flags]                synthetic text+call+result history in a chosen wire shape
+    -shape name               merged|merged-single|split|split-single (default merged)
+    -model uid                chat_model_uid (default swe-2-max)
   rerun -file 03.json [-n N]  replay a captured GetChatMessageRequest N times,
                               print stop_reason + calls + text tail per run
-  bigctx -kb N                send ~N KB single user message, observe error code`)
+  bigctx [flags]              send ~N KB single user message, observe error code
+    -kb n                     payload size (default 1024)
+    -model uid                chat_model_uid (default swe-2-max)
+  misc                        adjacent endpoints: embeddings/extchat/status/config/command configs
+  edge <case> [flags]         targeted edge-case histories (case names in source switch)
+    -model uid                chat_model_uid (default swe-2-max)
+    -image-file path          attach a real png instead of the tiny 1x1 blue png`)
 }
 
-// resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先，回落 config.yaml
-// 的 devin.token；两者皆空时直接退出——子命令不再各自重复解析。
-func resolveToken() string {
+// resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
+// 不改配置），随后是 config.yaml 的 devin.token（Load 内部已含
+// env/CLI 凭证兜底）；config.yaml 缺失时直接走 Devin CLI 凭证发现链。
+func resolveToken(cfg config.Config) string {
 	if token := os.Getenv("DEVIN_TOKEN"); token != "" {
 		return token
 	}
-	if token := tokenFromConfig(); token != "" {
-		return token
+	if cfg.Devin.Token != "" {
+		return cfg.Devin.Token
 	}
-	fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
-	os.Exit(1)
-	return ""
+	return config.ResolveDevinToken()
 }
 
-func tokenFromConfig() string {
-	b, err := os.ReadFile("config.yaml")
-	if err != nil {
-		return ""
-	}
-	m := regexp.MustCompile(`(?m)^\s*token:\s*(\S+)`).FindSubmatch(b)
-	if m == nil {
-		return ""
-	}
-	return string(m[1])
-}
-
-func newHTTPClient(token string) *http.Client {
-	return &http.Client{Transport: &authTransport{base: http.DefaultTransport, token: token}}
-}
-
-type authTransport struct {
-	base  http.RoundTripper
-	token string
-}
-
-func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	c := req.Clone(req.Context())
-	c.Header.Set("Authorization", "Basic "+t.token+"-"+t.token)
-	return t.base.RoundTrip(c)
-}
-
+// metadata 组装上游 Metadata；fingerprint=false 时不带设备指纹字段。
+// 身份字段取 main 解析出的 clientName/Version/OS，与代理发出的请求同源。
 func metadata(token string, fingerprint bool) *devinproto.ExaCodeiumCommonPb_Metadata {
-	m := &devinproto.ExaCodeiumCommonPb_Metadata{
-		ApiKey:           proto.String(token),
-		ExtensionName:    proto.String("chisel"),
-		ExtensionVersion: proto.String("3000.2.17"),
-		IdeName:          proto.String("chisel"),
-		IdeVersion:       proto.String("3000.2.17"),
-		Locale:           proto.String("en"),
-		Os:               proto.String("mac"),
-	}
+	fingerprintBytes := 0
 	if fingerprint {
-		m.F = proto.String(randomHex(366))
+		fingerprintBytes = 366
 	}
-	return m
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func uuid() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return upstream.BuildMetadata(token, clientName, clientVersion, clientOS, fingerprintBytes)
 }
 
 func j(v any) string {
@@ -187,9 +197,68 @@ func j(v any) string {
 	return string(b)
 }
 
+// defaultCompletionConfig 返回与真实 CLI 抓包一致的默认补全配置；
+// 各子命令在其上按实验变量覆写个别字段。
+func defaultCompletionConfig() *devinproto.ExaCodeiumCommonPb_CompletionConfiguration {
+	return &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
+		NumCompletions: proto.Uint64(1),
+		MaxTokens:      proto.Uint64(128000),
+		MaxNewlines:    proto.Uint64(400),
+		Temperature:    proto.Float64(1),
+		TopK:           proto.Uint64(40),
+		TopP:           proto.Float64(0.95),
+	}
+}
+
+// ---- 消息构造器：hist/edge 的各 case 共用同一套 wire 形态 ----
+
+func userMsg(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+	return &devinproto.ExaChatPb_ChatMessagePrompt{
+		MessageId: proto.String(randid.UUID()),
+		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
+		Prompt:    proto.String(text),
+	}
+}
+
+// assistantMsg 返回空的 SYSTEM 源消息——上游 wire 里 assistant 回合的
+// 承载形态；Prompt/Thinking/ToolCalls 由调用方按实验变量填。
+func assistantMsg() *devinproto.ExaChatPb_ChatMessagePrompt {
+	return &devinproto.ExaChatPb_ChatMessagePrompt{
+		MessageId: proto.String(randid.UUID()),
+		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+	}
+}
+
+func assistantTextMsg(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+	m := assistantMsg()
+	m.Prompt = proto.String(text)
+	return m
+}
+
+func assistantCallMsg(id, name, argsJSON string) *devinproto.ExaChatPb_ChatMessagePrompt {
+	m := assistantMsg()
+	m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{toolCall(id, name, argsJSON)}
+	return m
+}
+
+func toolResultMsg(callID, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+	return &devinproto.ExaChatPb_ChatMessagePrompt{
+		MessageId:  proto.String(randid.UUID()),
+		Source:     devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
+		Prompt:     proto.String(text),
+		ToolCallId: proto.String(callID),
+	}
+}
+
+func toolCall(id, name, argsJSON string) *devinproto.ExaCodeiumCommonPb_ChatToolCall {
+	return &devinproto.ExaCodeiumCommonPb_ChatToolCall{
+		Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(argsJSON),
+	}
+}
+
 // ---- configs ----
 
-func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string) error {
+func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
 	resp, err := client.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: metadata(token, true),
 	}))
@@ -229,21 +298,20 @@ func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceCl
 
 // ---- status ----
 
-func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string) error {
-	meta := func() *devinproto.ExaCodeiumCommonPb_Metadata { return metadata(token, true) }
-	if r, err := client.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{Metadata: meta()})); err != nil {
+func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
+	if r, err := client.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("CheckChatCapacity ERR:", err)
 	} else {
 		b, _ := marshal.Marshal(r.Msg)
 		fmt.Println("CheckChatCapacity:", string(b))
 	}
-	if r, err := client.CheckUserMessageRateLimit(ctx, connect.NewRequest(&devinproto.CheckUserMessageRateLimitRequest{Metadata: meta(), ModelUid: proto.String("swe-2-max")})); err != nil {
+	if r, err := client.CheckUserMessageRateLimit(ctx, connect.NewRequest(&devinproto.CheckUserMessageRateLimitRequest{Metadata: metadata(token, true), ModelUid: proto.String("swe-2-max")})); err != nil {
 		fmt.Println("CheckUserMessageRateLimit ERR:", err)
 	} else {
 		b, _ := marshal.Marshal(r.Msg)
 		fmt.Println("CheckUserMessageRateLimit:", string(b))
 	}
-	if r, err := client.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{Metadata: meta()})); err != nil {
+	if r, err := client.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("GetModelStatuses ERR:", err)
 	} else {
 		b, _ := marshal.Marshal(r.Msg)
@@ -268,7 +336,7 @@ func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 		resp, err := client.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 			Metadata:       metadata(token, true),
 			ModelRouterUid: proto.String(uid),
-			CascadeId:      proto.String(uuid()),
+			CascadeId:      proto.String(randid.UUID()),
 		}))
 		if err != nil {
 			fmt.Printf("%-28s ERR %v\n", uid, err)
@@ -339,7 +407,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	}
 	var sharedCascade string
 	if *resolveModel {
-		sharedCascade = uuid()
+		sharedCascade = randid.UUID()
 		router := *routerUID
 		if router == "" {
 			router = *model
@@ -366,11 +434,13 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	}
 	m := metadata(token, !*noFingerprint)
 	if *metaExtras {
-		m.SessionId = proto.String(uuid())
+		m.SessionId = proto.String(randid.UUID())
 		m.RequestId = proto.Uint64(42)
-		m.DeviceFingerprint = proto.String(randomHex(32))
+		if fp, ferr := randid.Hex(32); ferr == nil {
+			m.DeviceFingerprint = proto.String(fp)
+		}
 		m.DisableTelemetry = proto.Bool(true)
-		m.UserAgent = proto.String("devin/3000.2.17")
+		m.UserAgent = proto.String("devin/" + clientVersion)
 	}
 	req := &devinproto.GetChatMessageRequest{
 		Metadata:     m,
@@ -381,16 +451,9 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		req.Prompt = proto.String("")
 	}
 	req.RequestType = devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum()
-	req.Configuration = &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-		NumCompletions: proto.Uint64(1),
-		MaxTokens:      proto.Uint64(128000),
-		MaxNewlines:    proto.Uint64(400),
-		Temperature:    proto.Float64(1),
-		TopK:           proto.Uint64(40),
-		TopP:           proto.Float64(0.95),
-	}
+	req.Configuration = defaultCompletionConfig()
 	req.PlannerMode = devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum()
-	req.ExecutionId = proto.String(uuid())
+	req.ExecutionId = proto.String(randid.UUID())
 	if *numCompletions > 0 {
 		req.Configuration.NumCompletions = proto.Uint64(uint64(*numCompletions))
 	}
@@ -415,9 +478,9 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		} else if sharedCascade != "" {
 			req.CascadeId = proto.String(sharedCascade)
 		} else {
-			req.CascadeId = proto.String(uuid())
+			req.CascadeId = proto.String(randid.UUID())
 		}
-		trajID := uuid()
+		trajID := randid.UUID()
 		if *trajectoryID != "" {
 			trajID = *trajectoryID
 		}
@@ -431,7 +494,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		}
 	}
 	msg := &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(uuid()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 		Prompt:    proto.String(*userPrompt),
 	}
@@ -446,7 +509,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	}
 	if *sysAsMsg {
 		req.ChatMessagePrompts = append(req.ChatMessagePrompts, &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
+			MessageId: proto.String(randid.UUID()),
 			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM_PROMPT.Enum(),
 			Prompt:    proto.String(*system),
 		})
@@ -522,7 +585,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		}
 		if req.TrajectoryReference == nil {
 			req.TrajectoryReference = &devinproto.ExaCortexPb_CortexTrajectoryReference{
-				TrajectoryId:   proto.String(uuid()),
+				TrajectoryId:   proto.String(randid.UUID()),
 				TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 			}
 		}
@@ -555,27 +618,36 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	return runStream(ctx, client, req, *frames, *dumpDir)
 }
 
+// enumByName 支持数字、全名与唯一后缀（"CASCADE" → "…_TYPE_CASCADE"）。
+// 后缀命中多个值时 map 遍历顺序不定会随机挑一个——歧义必须显式报错。
 func enumByName[T interface {
 	~int32
 	Enum() *T
 }](s string, values map[string]int32) (T, error) {
 	var zero T
-	if n, err := parseInt(s); err == nil {
+	if n, err := strconv.ParseInt(s, 10, 32); err == nil {
 		return T(n), nil
 	}
 	up := strings.ToUpper(s)
+	if v, ok := values[up]; ok {
+		return T(v), nil
+	}
+	var found T
+	matches := 0
 	for name, v := range values {
-		if strings.HasSuffix(name, "_"+up) || name == up {
-			return T(v), nil
+		if strings.HasSuffix(name, "_"+up) {
+			found = T(v)
+			matches++
 		}
 	}
-	return zero, fmt.Errorf("unknown enum %q", s)
-}
-
-func parseInt(s string) (int64, error) {
-	var n int64
-	_, err := fmt.Sscanf(s, "%d", &n)
-	return n, err
+	switch matches {
+	case 1:
+		return found, nil
+	case 0:
+		return zero, fmt.Errorf("unknown enum %q", s)
+	default:
+		return zero, fmt.Errorf("ambiguous enum %q matches %d values", s, matches)
+	}
 }
 
 func tinyPNG() string {
@@ -670,20 +742,16 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 	mk := func(msgs []*devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.GetChatMessageRequest {
 		return &devinproto.GetChatMessageRequest{
-			Metadata:     metadata(token, true),
-			Prompt:       proto.String("You are a helpful assistant."),
-			ChatModelUid: proto.String(*model),
-			RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-			Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-				NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
-				MaxNewlines: proto.Uint64(400), Temperature: proto.Float64(1),
-				TopK: proto.Uint64(40), TopP: proto.Float64(0.95),
-			},
-			CascadeId:   proto.String(uuid()),
-			PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-			ExecutionId: proto.String(uuid()),
+			Metadata:      metadata(token, true),
+			Prompt:        proto.String("You are a helpful assistant."),
+			ChatModelUid:  proto.String(*model),
+			RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+			Configuration: defaultCompletionConfig(),
+			CascadeId:     proto.String(randid.UUID()),
+			PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
+			ExecutionId:   proto.String(randid.UUID()),
 			TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
-				TrajectoryId:   proto.String(uuid()),
+				TrajectoryId:   proto.String(randid.UUID()),
 				TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 				StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
 			},
@@ -693,7 +761,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 	// step 1: ask a question that triggers thinking
 	q1 := &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(uuid()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 		Prompt:    proto.String(*q1Text),
 	}
@@ -732,7 +800,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 	// step 2: replay the assistant message with the requested variant
 	asst := &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(uuid()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
 		Prompt:    proto.String(aText),
 	}
@@ -799,7 +867,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 		// bare text only
 	}
 	q2 := &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(uuid()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 		Prompt:    proto.String("What word did you just say? One word only."),
 	}
@@ -808,7 +876,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 func q1cpy(m *devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.ExaChatPb_ChatMessagePrompt {
 	return &devinproto.ExaChatPb_ChatMessagePrompt{
-		MessageId: proto.String(uuid()),
+		MessageId: proto.String(randid.UUID()),
 		Source:    m.Source,
 		Prompt:    m.Prompt,
 	}
@@ -823,65 +891,39 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	user := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
-			Prompt:    proto.String(text),
-		}
-	}
-	toolResult := func(id, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId:  proto.String(uuid()),
-			Source:     devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
-			Prompt:     proto.String(text),
-			ToolCallId: proto.String(id),
-		}
-	}
-	call := func(id, name, args string) *devinproto.ExaCodeiumCommonPb_ChatToolCall {
-		return &devinproto.ExaCodeiumCommonPb_ChatToolCall{
-			Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(args),
-		}
-	}
-	sys := func() *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
-		}
-	}
-	call1 := call("chatcmpl-tool-aaa1", "exec", `{"command":"ls"}`)
-	call2 := call("chatcmpl-tool-bbb2", "read_file", `{"path":"README.md"}`)
+	call1 := toolCall("chatcmpl-tool-aaa1", "exec", `{"command":"ls"}`)
+	call2 := toolCall("chatcmpl-tool-bbb2", "read_file", `{"path":"README.md"}`)
 	thinking := "I should list the directory and read the readme in parallel."
 	var asst []*devinproto.ExaChatPb_ChatMessagePrompt
 	switch *shape {
 	case "merged":
-		m := sys()
+		m := assistantMsg()
 		m.Prompt = proto.String("I'll list files and read the readme at once:")
 		m.Thinking = proto.String(thinking)
 		m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1, call2}
 		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
 	case "merged-single":
-		m := sys()
+		m := assistantMsg()
 		m.Prompt = proto.String("I'll list files first:")
 		m.Thinking = proto.String(thinking)
 		m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
 		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
 	case "split":
-		t := sys()
+		t := assistantMsg()
 		t.Prompt = proto.String("I'll list files and read the readme at once:")
 		t.Thinking = proto.String(thinking)
-		c1 := sys()
+		c1 := assistantMsg()
 		c1.Thinking = proto.String(thinking)
 		c1.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
-		c2 := sys()
+		c2 := assistantMsg()
 		c2.Thinking = proto.String(thinking)
 		c2.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call2}
 		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{t, c1, c2}
 	case "split-single":
-		t := sys()
+		t := assistantMsg()
 		t.Prompt = proto.String("I'll list files first:")
 		t.Thinking = proto.String(thinking)
-		c1 := sys()
+		c1 := assistantMsg()
 		c1.Thinking = proto.String(thinking)
 		c1.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{call1}
 		asst = []*devinproto.ExaChatPb_ChatMessagePrompt{t, c1}
@@ -889,33 +931,29 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		return fmt.Errorf("unknown shape %q", *shape)
 	}
 	var msgs []*devinproto.ExaChatPb_ChatMessagePrompt
-	msgs = append(msgs, user("list the files and read README.md"))
+	msgs = append(msgs, userMsg("list the files and read README.md"))
 	if *shape == "split" {
 		// 生产形态：文本 prompt 后按 call→result 交错（上游拒绝分组排列）。
-		msgs = append(msgs, asst[0], asst[1], toolResult("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"), asst[2], toolResult("chatcmpl-tool-bbb2", "# hello\n"))
+		msgs = append(msgs, asst[0], asst[1], toolResultMsg("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"), asst[2], toolResultMsg("chatcmpl-tool-bbb2", "# hello\n"))
 	} else {
 		msgs = append(msgs, asst...)
-		msgs = append(msgs, toolResult("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"))
+		msgs = append(msgs, toolResultMsg("chatcmpl-tool-aaa1", "a.txt\nb.txt\nREADME.md"))
 		if *shape == "merged" {
-			msgs = append(msgs, toolResult("chatcmpl-tool-bbb2", "# hello\n"))
+			msgs = append(msgs, toolResultMsg("chatcmpl-tool-bbb2", "# hello\n"))
 		}
 	}
-	msgs = append(msgs, user("What files did you see? One line."))
+	msgs = append(msgs, userMsg("What files did you see? One line."))
 	req := &devinproto.GetChatMessageRequest{
-		Metadata:     metadata(token, true),
-		Prompt:       proto.String("You are a helpful assistant."),
-		ChatModelUid: proto.String(*model),
-		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-			NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
-			MaxNewlines: proto.Uint64(400), Temperature: proto.Float64(1),
-			TopK: proto.Uint64(40), TopP: proto.Float64(0.95),
-		},
-		CascadeId:   proto.String(uuid()),
-		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-		ExecutionId: proto.String(uuid()),
+		Metadata:      metadata(token, true),
+		Prompt:        proto.String("You are a helpful assistant."),
+		ChatModelUid:  proto.String(*model),
+		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration: defaultCompletionConfig(),
+		CascadeId:     proto.String(randid.UUID()),
+		PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
+		ExecutionId:   proto.String(randid.UUID()),
 		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
-			TrajectoryId:   proto.String(uuid()),
+			TrajectoryId:   proto.String(randid.UUID()),
 			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
 			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
 		},
@@ -954,7 +992,7 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 	}
 	for run := 0; run < *n; run++ {
 		req := proto.Clone(base).(*devinproto.GetChatMessageRequest)
-		req.ExecutionId = proto.String(uuid())
+		req.ExecutionId = proto.String(randid.UUID())
 		stream, err := client.GetChatMessage(ctx, connect.NewRequest(req))
 		if err != nil {
 			fmt.Printf("run %d: connect: %v\n", run, err)
@@ -1001,18 +1039,14 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	}
 	filler := strings.Repeat("lorem ipsum dolor sit amet ", *kb*1024/27)
 	req := &devinproto.GetChatMessageRequest{
-		Metadata:     metadata(token, true),
-		Prompt:       proto.String("You are a helpful assistant."),
-		ChatModelUid: proto.String(*model),
-		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-			NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
-			MaxNewlines: proto.Uint64(400), Temperature: proto.Float64(1),
-			TopK: proto.Uint64(40), TopP: proto.Float64(0.95),
-		},
-		ExecutionId: proto.String(uuid()),
+		Metadata:      metadata(token, true),
+		Prompt:        proto.String("You are a helpful assistant."),
+		ChatModelUid:  proto.String(*model),
+		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration: defaultCompletionConfig(),
+		ExecutionId:   proto.String(randid.UUID()),
 		ChatMessagePrompts: []*devinproto.ExaChatPb_ChatMessagePrompt{{
-			MessageId: proto.String(uuid()),
+			MessageId: proto.String(randid.UUID()),
 			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 			Prompt:    proto.String(filler + "\nReply: ok"),
 		}},
@@ -1022,9 +1056,7 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- misc: adjacent endpoints ----
 
-func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string) error {
-	meta := func() *devinproto.ExaCodeiumCommonPb_Metadata { return metadata(token, true) }
-
+func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, token string, _ []string) error {
 	emb, err := client.GetEmbeddings(ctx, connect.NewRequest(&devinproto.GetEmbeddingsRequest{
 		Request: &devinproto.ExaCodeiumCommonPb_EmbeddingsRequest{
 			Prompts: []string{"hello world"},
@@ -1037,13 +1069,13 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		dumpConnectErr(err)
 	} else {
 		b, _ := marshal.Marshal(emb.Msg)
-		fmt.Println("GetEmbeddings:", string(b)[:400])
+		fmt.Println("GetEmbeddings:", trunc(string(b), 400))
 	}
 
 	st, err := client.GetStreamingExternalChatCompletions(ctx, connect.NewRequest(&devinproto.GetChatCompletionsRequest{
-		Metadata: meta(),
+		Metadata: metadata(token, true),
 		ChatMessagePrompts: []*devinproto.ExaChatPb_ChatMessagePrompt{{
-			MessageId: proto.String(uuid()),
+			MessageId: proto.String(randid.UUID()),
 			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 			Prompt:    proto.String("say hi"),
 		}},
@@ -1061,7 +1093,7 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		for st.Receive() {
 			n++
 			b, _ := marshal.Marshal(st.Msg())
-			fmt.Printf("extchat frame %d: %s\n", n, string(b)[:300])
+			fmt.Printf("extchat frame %d: %s\n", n, trunc(string(b), 300))
 			if n > 8 {
 				break
 			}
@@ -1069,7 +1101,7 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		fmt.Println("extchat stream err:", st.Err())
 	}
 
-	if r, err := client.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{Metadata: meta()})); err != nil {
+	if r, err := client.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("GetStatus ERR:", err)
 	} else {
 		b, _ := marshal.Marshal(r.Msg)
@@ -1081,7 +1113,7 @@ func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		b, _ := marshal.Marshal(r.Msg)
 		fmt.Println("GetConfig:", trunc(string(b), 600))
 	}
-	if r, err := client.GetCommandModelConfigs(ctx, connect.NewRequest(&devinproto.GetCommandModelConfigsRequest{Metadata: meta()})); err != nil {
+	if r, err := client.GetCommandModelConfigs(ctx, connect.NewRequest(&devinproto.GetCommandModelConfigsRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("GetCommandModelConfigs ERR:", err)
 	} else {
 		uids := []string{}
@@ -1139,191 +1171,156 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if len(args) == 0 {
 		return fmt.Errorf("edge needs a case name")
 	}
-	user := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
-			Prompt:    proto.String(text),
-		}
-	}
-	assistant := func(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
-			Prompt:    proto.String(text),
-		}
-	}
-	assistantCall := func(id, name, argsJSON string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId: proto.String(uuid()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
-			ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
-				Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(argsJSON),
-			}},
-		}
-	}
-	toolResult := func(callID, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
-		return &devinproto.ExaChatPb_ChatMessagePrompt{
-			MessageId:  proto.String(uuid()),
-			Source:     devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
-			Prompt:     proto.String(text),
-			ToolCallId: proto.String(callID),
-		}
-	}
 	req := &devinproto.GetChatMessageRequest{
-		Metadata:     metadata(token, true),
-		Prompt:       proto.String("You are a helpful assistant."),
-		ChatModelUid: proto.String(*model),
-		RequestType:  devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
-			NumCompletions: proto.Uint64(1), MaxTokens: proto.Uint64(128000),
-			MaxNewlines: proto.Uint64(400), Temperature: proto.Float64(1),
-			TopK: proto.Uint64(40), TopP: proto.Float64(0.95),
-		},
-		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-		ExecutionId: proto.String(uuid()),
+		Metadata:      metadata(token, true),
+		Prompt:        proto.String("You are a helpful assistant."),
+		ChatModelUid:  proto.String(*model),
+		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration: defaultCompletionConfig(),
+		PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
+		ExecutionId:   proto.String(randid.UUID()),
 	}
 	switch args[0] {
 	case "orphan-tool-result":
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL.Enum(),
 				Prompt: proto.String("orphan result text")},
-			user("what did the tool return?"),
+			userMsg("what did the tool return?"),
 		}
 	case "unknown-source":
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_UNKNOWN.Enum(),
 				Prompt: proto.String("mystery")},
-			user("continue"),
+			userMsg("continue"),
 		}
 	case "dup-message-id":
-		dup := uuid()
+		dup := randid.UUID()
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"), user("second message"),
+			userMsg("hi"), userMsg("second message"),
 		}
 		req.ChatMessagePrompts[1].MessageId = proto.String(dup)
 		req.ChatMessagePrompts[0].MessageId = proto.String(dup)
 	case "empty-user-prompt":
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum()},
-			user("continue"),
+			userMsg("continue"),
 		}
 	case "empty-assistant":
 		// 空 end_turn 回放进历史再追加 continue——CPA#4886 类故障的续传路径。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Say hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("Say hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
 				Prompt: proto.String("")},
-			user("continue"),
+			userMsg("continue"),
 		}
 	case "experiment":
 		req.ExperimentConfig = &devinproto.ExaCodeiumCommonPb_ExperimentConfig{
 			ForceEnableExperimentStrings:  []string{"bogus_exp_xyz"},
 			ForceDisableExperimentStrings: []string{"another_bogus"},
 		}
-		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{user("Reply exactly: pong")}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{userMsg("Reply exactly: pong")}
 	case "trailing-assistant":
 		// 历史以 assistant 文本结尾（Anthropic prefill 形态）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("List two colors."), assistant("1. Blue"),
+			userMsg("List two colors."), assistantTextMsg("1. Blue"),
 		}
 	case "trailing-tool-result":
 		// 历史以 tool 结果结尾且无后续 user（IDE 恢复会话的形态）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read file a.txt"),
-			assistantCall("call_1", "read_file", `{"path":"a.txt"}`),
-			toolResult("call_1", "file contents here"),
+			userMsg("Read file a.txt"),
+			assistantCallMsg("call_1", "read_file", `{"path":"a.txt"}`),
+			toolResultMsg("call_1", "file contents here"),
 		}
 	case "thinking-only-assistant":
 		// assistant 只有 thinking 没有 text/call：我们回放时被 convertMessage 整个丢弃的形态。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source:   devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
 				Thinking: proto.String("I should greet politely.")},
-			user("continue"),
+			userMsg("continue"),
 		}
 	case "thinking-empty-sig":
 		// redacted thinking：无正文有签名（我们回放 Anthropic redacted_thinking 的形态）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			{MessageId: proto.String(uuid()),
+			userMsg("hi"),
+			{MessageId: proto.String(randid.UUID()),
 				Source:           devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
 				Prompt:           proto.String("sure"),
 				Signature:        proto.String("sealed.v1.ZmFrZSBmb3IgdGVzdA"),
 				ThinkingRedacted: proto.Bool(true)},
-			user("continue"),
+			userMsg("continue"),
 		}
 	case "interleaved-calls":
 		// 已按 call,result 配对的正确交错顺序（正向对照）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt then b.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			toolResult("c1", "aaa"),
-			assistantCall("c2", "read_file", `{"path":"b.txt"}`),
-			toolResult("c2", "bbb"),
-			user("what did you find?"),
+			userMsg("Read a.txt then b.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			toolResultMsg("c1", "aaa"),
+			assistantCallMsg("c2", "read_file", `{"path":"b.txt"}`),
+			toolResultMsg("c2", "bbb"),
+			userMsg("what did you find?"),
 		}
 	case "grouped-calls-results":
 		// 未配对的分组形态：call,call,result,result（客户端原样历史）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt then b.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			assistantCall("c2", "read_file", `{"path":"b.txt"}`),
-			toolResult("c1", "aaa"),
-			toolResult("c2", "bbb"),
-			user("what did you find?"),
+			userMsg("Read a.txt then b.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			assistantCallMsg("c2", "read_file", `{"path":"b.txt"}`),
+			toolResultMsg("c1", "aaa"),
+			toolResultMsg("c2", "bbb"),
+			userMsg("what did you find?"),
 		}
 	case "trailing-call-no-result":
 		// 历史以「未得到结果的 tool call」结尾。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
 		}
 	case "dup-tool-result":
 		// 同一 call_id 两条结果。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			toolResult("c1", "first"),
-			toolResult("c1", "second"),
-			user("ok?"),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			toolResultMsg("c1", "first"),
+			toolResultMsg("c1", "second"),
+			userMsg("ok?"),
 		}
 	case "tool-result-mismatch-call":
 		// 结果的 call_id 指向不存在的调用。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			toolResult("zzz", "orphan"),
-			user("ok?"),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			toolResultMsg("zzz", "orphan"),
+			userMsg("ok?"),
 		}
 	case "orphan-result-with-id":
 		// 结果带 tool_call_id 但全程没有任何 call：区分「无 id」与「无匹配 call」。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("hi"),
-			toolResult("zzz", "orphan"),
-			user("what did the tool return?"),
+			userMsg("hi"),
+			toolResultMsg("zzz", "orphan"),
+			userMsg("what did the tool return?"),
 		}
 	case "tool-call-invalid-json-arg":
 		// 回放历史里的非法 JSON 参数。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{bad json`),
-			user("ok?"),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{bad json`),
+			userMsg("ok?"),
 		}
 	case "tool-name":
 		// 可疑工具名逐个打：tool-name "mcp::x" / "a b" / "工具" / "a.b" / ""
 		if len(args) < 2 {
 			return fmt.Errorf("tool-name needs a name argument (use empty string for empty)")
 		}
-		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{user("call the tool now")}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{userMsg("call the tool now")}
 		req.Tools = []*devinproto.ExaChatPb_ChatToolDefinition{{
 			Name:             proto.String(args[1]),
 			Description:      proto.String("test tool"),
@@ -1335,43 +1332,43 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	case "gap-tool-result":
 		// call 与 result 之间夹一条 USER（mid-conversation system 降级形态）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			user("[system] reminder: be concise"),
-			toolResult("c1", "file contents here"),
-			user("what did you find?"),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			userMsg("[system] reminder: be concise"),
+			toolResultMsg("c1", "file contents here"),
+			userMsg("what did you find?"),
 		}
 	case "dup-call-id":
 		// 两条 call prompt 用同一个 call id（客户端重复记录调用）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Read a.txt"),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			assistantCall("c1", "read_file", `{"path":"a.txt"}`),
-			toolResult("c1", "file contents"),
-			user("ok?"),
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			assistantCallMsg("c1", "read_file", `{"path":"a.txt"}`),
+			toolResultMsg("c1", "file contents"),
+			userMsg("ok?"),
 		}
 	case "tool-result-image":
 		// TOOL prompt 挂图片：上游是否消费 tool 结果里的图。
-		tr := toolResult("c1", "screenshot attached")
+		tr := toolResultMsg("c1", "screenshot attached")
 		tr.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
 			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
 		}}
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Take a screenshot then tell me the dominant color."),
-			assistantCall("c1", "take_screenshot", `{}`),
+			userMsg("Take a screenshot then tell me the dominant color."),
+			assistantCallMsg("c1", "take_screenshot", `{}`),
 			tr,
-			user("What color is it? Answer in one word."),
+			userMsg("What color is it? Answer in one word."),
 		}
 	case "user-image-file":
 		// USER prompt 挂图片对照组：验证上游确实消费用户消息里的图。
-		m := user("What is the dominant color of the attached image? Answer in one word.")
+		m := userMsg("What is the dominant color of the attached image? Answer in one word.")
 		m.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
 			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
 		}}
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
 	case "pdf-as-image":
 		// 文档通道探测：mime_type=application/pdf 是否被 Images 通道接受。
-		m := user("What is in this document? One sentence.")
+		m := userMsg("What is in this document? One sentence.")
 		m.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
 			Base64Data: proto.String(tinyPNG()), MimeType: proto.String("application/pdf"),
 		}}
@@ -1379,8 +1376,8 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	case "custom-tool-call-flag":
 		// 历史回放带 is_custom_tool_call=true + invalid_json_str 的 call。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
-			user("Apply this patch: *** Begin Patch\n*** Update File: x.go\n@@\n+x\n*** End Patch"),
-			{MessageId: proto.String(uuid()),
+			userMsg("Apply this patch: *** Begin Patch\n*** Update File: x.go\n@@\n+x\n*** End Patch"),
+			{MessageId: proto.String(randid.UUID()),
 				Source: devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
 				ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 					Id:               proto.String("c1"),
@@ -1388,8 +1385,8 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 					IsCustomToolCall: proto.Bool(true),
 					InvalidJsonStr:   proto.String("*** Begin Patch\n*** Update File: x.go\n@@\n+x\n*** End Patch"),
 				}}},
-			toolResult("c1", "applied"),
-			user("did it apply?"),
+			toolResultMsg("c1", "applied"),
+			userMsg("did it apply?"),
 		}
 	default:
 		return fmt.Errorf("unknown edge case %q", args[0])
