@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	devinproto "local/devinproto"
+
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/WncFht/devin2api/internal/llm"
 )
@@ -67,6 +71,11 @@ type responseDecoder struct {
 	// customTools 是本次请求按 freeform/custom 语义声明的工具名集合；
 	// 这些工具在 wire 上是单参数 function 包装形态，响应要解包回原文。
 	customTools map[string]bool
+	// driftWarned 表示本流已告警过上游 schema 漂移（unknown 字段），
+	// 同一流逐帧重复刷同一条告警没有新增信息。
+	driftWarned bool
+	// stopReasonWarned 表示本流已告警过未知 stop_reason 枚举值。
+	stopReasonWarned bool
 }
 
 // toolState 保存一次 Devin 工具调用的累计状态。
@@ -161,6 +170,7 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 	if response == nil || decoder.finished {
 		return nil
 	}
+	decoder.noteSchemaDrift(response)
 	decoder.updateMetadata(response)
 	if decoder.stoppedByPattern {
 		// 停止序列已截断对外输出；继续消费上游帧仅为 usage 统计完整。
@@ -186,11 +196,64 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 		events = decoder.endText(events)
 		events = decoder.decodeTool(events, delta)
 	}
-	if response.GetStopReason() != devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED {
+	if reason := response.GetStopReason(); reason != devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_UNSPECIFIED {
 		decoder.hasStopReason = true
-		decoder.stopReason = mapStopReason(response.GetStopReason())
+		decoder.stopReason = mapStopReason(reason)
+		if !decoder.stopReasonWarned && reason.Descriptor().Values().ByNumber(reason.Number()) == nil {
+			// 枚举值不在我们编译的 proto 定义里：上游新增了停止原因
+			// 形态。mapStopReason 的 default 把它静默归 Stop——告警
+			// 留下数值，避免新语义被吞成正常结束而无迹可查。
+			decoder.stopReasonWarned = true
+			slog.Warn("upstream sent undeclared stop_reason value; mapped to stop",
+				"value", int(reason.Number()))
+		}
 	}
 	return events
+}
+
+// noteSchemaDrift 检查上游帧在我们 proto 定义之外携带的字段：上游 schema
+// 演进的新字段经 proto 解码静默落进 unknown 区，「上游加了字段我们看不见」
+// 只能靠这里暴露。每流至多告警一次；覆盖帧顶层与两个最常见的语义嵌套
+// （usage、tool_call delta）——漂移若发生在这些位置，影响的是计费与调用。
+func (decoder *responseDecoder) noteSchemaDrift(response *devinproto.GetChatMessageResponse) {
+	if decoder.driftWarned {
+		return
+	}
+	warn := func(scope string, message proto.Message) {
+		if decoder.driftWarned {
+			return
+		}
+		unknown := message.ProtoReflect().GetUnknown()
+		if len(unknown) == 0 {
+			return
+		}
+		decoder.driftWarned = true
+		slog.Warn("upstream response carried fields outside our proto schema; decode may be drifting",
+			"scope", scope, "fields", unknownFieldNumbers(unknown))
+	}
+	warn("frame", response)
+	if usage := response.GetUsage(); usage != nil {
+		warn("usage", usage)
+	}
+	for _, delta := range response.GetDeltaToolCalls() {
+		warn("tool_call", delta)
+	}
+}
+
+// unknownFieldNumbers 从 unknown 区解出顶层字段号列表：告警带上号码才能
+// 对照上游新 proto 定位是哪个字段在漂移。解析失败（截断/非法 wire）时
+// 返回已解出的前缀——unknown 区来自已 unmarshal 成功的帧，实际不可达。
+func unknownFieldNumbers(raw []byte) []int {
+	var numbers []int
+	for len(raw) > 0 {
+		number, _, length := protowire.ConsumeField(raw)
+		if length < 0 {
+			break
+		}
+		numbers = append(numbers, int(number))
+		raw = raw[length:]
+	}
+	return numbers
 }
 
 // finish 在流终止（正常 EOF 或错误）时产出收尾事件：错误走 fail
@@ -587,9 +650,6 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 	events = decoder.endThinking(events)
 	events = decoder.endText(events)
 	for _, state := range decoder.tools {
-		if !state.emitted {
-			continue
-		}
 		// 在结束时一次性把 Builder 中的完整参数转成 JSON，避免中间反复解析/拷贝。
 		state.call.Arguments = json.RawMessage(state.arguments.String())
 		if state.wrapped {

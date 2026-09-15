@@ -194,14 +194,24 @@ var toolDefinitionCache = struct {
 }{items: make(map[string]*devinproto.ExaChatPb_ChatToolDefinition)}
 
 // convertToolDefinition 保留工具身份和 JSON Schema 约束，仅移除自然语言注释。
-// 工具名先做本地校验：上游实测只接受 [A-Za-z0-9_-]（mcp__a__b 合法，
-// a.b / mcp::x / CJK 全部 invalid_argument: an internal error occurred），
-// 提前报成可读的 invalid_argument，比上游的模糊文案可排障。
-// 不做静默改名——改写会让客户端历史回灌的 tool_call 名对不上。
+// 工具名的字符集校验在 llm.ToolDefinition.Validate 入口完成（上游实测只
+// 接受 [A-Za-z0-9_-]，a.b / mcp::x / CJK 全被 invalid_argument 模糊拒绝），
+// 到达这里的名字必然合法——历史回放里的非法名上游反而照收
+// （probe edge history-tool-name 实测），字符集门槛只立在声明上。
+// 不做静默改名——改写会让客户端历史回灌的 tool_call 名对不上，也毁掉
+// 名字本身的语义信号。
+// Name/Description 均发原名——真实描述不走 description 字段（来历见下），
+// 而是经 withToolDescriptions 并入 system prompt。
+//
+// description 字段发名不发真描述的考证：抓包
+// outputs/exa.api_server_pb.ApiServerService/GetChatMessage/{01..07}/request.txt
+// 证明真实 CLI（chisel 3000.2.17）在 tools[].description 发完整自然语言
+// 描述（23 个工具全带），我们的掏空形态是有意偏离——schema 内的自然语言
+// 注解已实证触发上游工具分类（isNaturalLanguageAnnotation），description
+// 字段喂养的是同一条上游工具认知通道；把真描述转投 system prompt 是在
+// 保留语义信息的同时避开该通道的指纹/分类面。属指纹对抗遗留决策：上游
+// 从未被实证拒绝真描述，若要恢复真描述应先跑探针验证再改这里。
 func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
-	if !validToolName(tool.Name) {
-		return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("tool name %q contains characters outside [A-Za-z0-9_-], which the upstream rejects", tool.Name)}
-	}
 	cacheKey := tool.Name + "\x00" + string(tool.InputSchema)
 	toolDefinitionCache.Lock()
 	cached := toolDefinitionCache.items[cacheKey]
@@ -229,19 +239,6 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 	toolDefinitionCache.items[cacheKey] = converted
 	toolDefinitionCache.Unlock()
 	return converted, nil
-}
-
-// validToolName 匹配上游实测的工具名字符集。
-func validToolName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		if r != '_' && r != '-' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
-			return false
-		}
-	}
-	return true
 }
 
 // stripSchemaAnnotations 剥掉 input schema 里上游不接受的注解键

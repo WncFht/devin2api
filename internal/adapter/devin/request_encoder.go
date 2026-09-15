@@ -43,6 +43,13 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	executionID := randid.UUID()
 	name, version, os := config.ClientIdentity()
 	metadata := upstream.BuildMetadata(binding.Token, name, version, os, 366)
+	// tool_choice=none 上游是真执行禁用（实测模型自述「工具被禁用」）：
+	// 工具声明与描述注入对模型都是不可用的噪音，不进 wire。
+	noTools := request.ToolChoice != nil && request.ToolChoice.Mode == llm.ToolChoiceNone
+	systemPrompt := request.SystemPrompt
+	if !noTools {
+		systemPrompt = withToolDescriptions(systemPrompt, request.Tools)
+	}
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),
 		MaxTokens:      proto.Uint64(128000),
@@ -72,7 +79,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	}
 	result := &devinproto.GetChatMessageRequest{
 		Metadata: metadata,
-		Prompt:   proto.String(withToolDescriptions(request.SystemPrompt, request.Tools)),
+		Prompt:   proto.String(systemPrompt),
 		// 上游 prompt 前缀缓存：system prompt 是稳定前缀，标记 EPHEMERAL 断点。
 		SystemPromptCacheOptions: ephemeralCacheOptions(),
 		ChatModelUid:             proto.String(binding.Model),
@@ -145,12 +152,14 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// 它的 TOOL 结果，否则 invalid_argument。客户端历史（OpenAI/Anthropic）是
 	// 「全部调用 → 全部结果」的分组结构，这里按 call id 重排成交错配对。
 	result.ChatMessagePrompts, repairs.ReorderedPrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
-	for _, tool := range request.Tools {
-		converted, err := convertToolDefinition(tool)
-		if err != nil {
-			return nil, repairs, err
+	if !noTools {
+		for _, tool := range request.Tools {
+			converted, err := convertToolDefinition(tool)
+			if err != nil {
+				return nil, repairs, err
+			}
+			result.Tools = append(result.Tools, converted)
 		}
-		result.Tools = append(result.Tools, converted)
 	}
 	// 最后一条消息标记 EPHEMERAL 断点：缓存到此为止的全部历史前缀，
 	// 下一轮新消息追加在断点后即可命中缓存。
@@ -324,7 +333,11 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 		}
 		for _, call := range calls {
 			toolCall := &devinproto.ExaCodeiumCommonPb_ChatToolCall{
-				Id:   proto.String(call.ID),
+				Id: proto.String(call.ID),
+				// 历史调用名原样上行：上游的字符集门槛只查 tools 声明，
+				// 历史名带 . / : / CJK 实测照收（probe edge
+				// history-tool-name）；llm.ToolCall.Validate 不查字符集，
+				// 此通道收到的名字本来就可含声明层会拒的字符。
 				Name: proto.String(call.Name),
 			}
 			if call.Custom {
