@@ -29,6 +29,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/api/common"
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
@@ -80,6 +81,12 @@ type App struct {
 	// apiKeyMu 保护它：配置 reload 会运行时换值。
 	apiKeyMu sync.RWMutex
 	apiKey   string
+	// tokens 是下游 auth token 仓（移植面板的多 key 体系）；nil 表示未启用。
+	// master key 与有效 token 都能过 /v1 鉴权；token 另有并发/模型/费用准入。
+	tokens *authtoken.Store
+	// tokenCostFn 把一次请求的 token 用量折成美元（目录价口径），
+	// 供 token 费用窗口记账；nil 时成本记 0。
+	tokenCostFn func(model string, input, output, cacheRead, cacheWrite int64) float64
 	// concurrency 限制同时处理的 /v1/* 请求数。
 	concurrency chan struct{}
 	// wsConns 限制下游 WebSocket 连接数。连接占用 fd+goroutine，与上游并发
@@ -122,6 +129,12 @@ func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debu
 // Metrics 返回常驻运行计数器，供面板 stats 端点读取。
 func (application *App) Metrics() *obs.Metrics {
 	return application.metrics
+}
+
+// SetAuthTokens 注入下游令牌仓与成本折算函数；应在 Router 之前调用。
+func (application *App) SetAuthTokens(tokens *authtoken.Store, costFn func(model string, input, output, cacheRead, cacheWrite int64) float64) {
+	application.tokens = tokens
+	application.tokenCostFn = costFn
 }
 
 // SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
@@ -545,41 +558,60 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// apiKeyMiddleware 校验 OpenAI 兼容接口的 API Key。
-// 支持标准 Authorization: Bearer <key> 与兼容头 X-Api-Key: <key>。
+// presentedCredential 提取请求携带的下游凭据：Bearer 优先，X-Api-Key 兜底。
+func presentedCredential(request *http.Request) string {
+	if auth := request.Header.Get("Authorization"); auth != "" {
+		const prefix = "Bearer "
+		if strings.HasPrefix(auth, prefix) {
+			return strings.TrimSpace(auth[len(prefix):])
+		}
+	}
+	if key := request.Header.Get("X-Api-Key"); key != "" {
+		return strings.TrimSpace(key)
+	}
+	return ""
+}
+
+// authenticate 判定下游凭据：master key 命中→(nil,true)；auth token 命中→
+// (token,true)；未设 master key 且无令牌→(nil,true) 开放模式；其余→false。
+// apiKeyMiddleware 与 createCompletion 共用——WS 轮次的内层请求不经过
+// middleware，令牌准入在 createCompletion 里必须能独立重演这套判定。
+func (application *App) authenticate(credential string) (*authtoken.Token, bool) {
+	application.apiKeyMu.RLock()
+	expected := application.apiKey
+	application.apiKeyMu.RUnlock()
+	masterSet := strings.TrimSpace(expected) != ""
+	if masterSet && credential != "" {
+		expectedHash := sha256.Sum256([]byte(expected))
+		providedHash := sha256.Sum256([]byte(credential))
+		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1 {
+			return nil, true
+		}
+	}
+	if application.tokens != nil {
+		if t, ok := application.tokens.Resolve(credential); ok {
+			return t, true
+		}
+	}
+	if !masterSet && (application.tokens == nil || application.tokens.Empty()) {
+		return nil, true
+	}
+	return nil, false
+}
+
+// apiKeyMiddleware 校验 OpenAI 兼容接口的下游凭据：master key 或有效
+// auth token 皆可；两者都不配时（开放模式）不校验。
 func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		application.apiKeyMu.RLock()
-		expected := application.apiKey
-		application.apiKeyMu.RUnlock()
-		if strings.TrimSpace(expected) == "" {
-			next.ServeHTTP(writer, request)
-			return
-		}
-
-		var provided string
-		if auth := request.Header.Get("Authorization"); auth != "" {
-			const prefix = "Bearer "
-			if strings.HasPrefix(auth, prefix) {
-				provided = strings.TrimSpace(auth[len(prefix):])
+		provided := presentedCredential(request)
+		if _, ok := application.authenticate(provided); !ok {
+			if provided == "" {
+				application.noteReject(obs.RejectMissingAPIKey, request, http.StatusUnauthorized)
+				writeAuthError(writer, "Missing API key")
+			} else {
+				application.noteReject(obs.RejectInvalidAPIKey, request, http.StatusUnauthorized)
+				writeAuthError(writer, "Invalid API key")
 			}
-		}
-		if provided == "" {
-			if key := request.Header.Get("X-Api-Key"); key != "" {
-				provided = strings.TrimSpace(key)
-			}
-		}
-		if provided == "" {
-			application.noteReject(obs.RejectMissingAPIKey, request, http.StatusUnauthorized)
-			writeAuthError(writer, "Missing API key")
-			return
-		}
-
-		expectedHash := sha256.Sum256([]byte(expected))
-		providedHash := sha256.Sum256([]byte(provided))
-		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
-			application.noteReject(obs.RejectInvalidAPIKey, request, http.StatusUnauthorized)
-			writeAuthError(writer, "Invalid API key")
 			return
 		}
 		next.ServeHTTP(writer, request)
@@ -615,6 +647,12 @@ func (application *App) createCompletion(
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
 	startedAt := time.Now()
 	responseBytes := 0
+	// authTok 是本次请求解析到的下游令牌（master key/开放模式为 nil）；
+	// tokenAcquired 标记并发槽已占，defer 据此配对 Release；tokenBlocked
+	// 标记准入拒绝——被拒请求不进令牌统计（ccLoad 在代理层前就返回）。
+	var authTok *authtoken.Token
+	tokenAcquired := false
+	tokenBlocked := false
 	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
 	//（超时/断连/对端 RST）不产生调试目录与 index 行——它们与鉴权、
 	// 并发、排空拒绝同口径，是唯一痕迹在 http.rejects 里的管线前拒绝。
@@ -642,6 +680,33 @@ func (application *App) createCompletion(
 	defer func() {
 		recorder.Complete(completion)
 		reqMetrics.Finish(completion.StatusCode, responseBytes, completion.Result)
+		if authTok != nil && !tokenBlocked {
+			// 令牌统计回写（ccLoad updateTokenStats 同口径：499 跳过、
+			// token/费用只记 2xx）；FirstByteSec 取自上游首字节标记。
+			res := authtoken.Result{
+				StatusCode:       completion.StatusCode,
+				Stream:           completion.Stream,
+				DurationSec:      time.Since(startedAt).Seconds(),
+				InputTokens:      completion.Usage.Input,
+				OutputTokens:     completion.Usage.Output,
+				CacheReadTokens:  completion.Usage.CacheRead,
+				CacheWriteTokens: completion.Usage.CacheWrite,
+			}
+			if firstMS := recorder.FirstUpstreamMS(); firstMS > 0 {
+				res.FirstByteSec = float64(firstMS) / 1000
+			}
+			if application.tokenCostFn != nil {
+				model := completion.Model
+				if model == "" {
+					model = completion.RequestedModel
+				}
+				res.CostUSD = application.tokenCostFn(model, res.InputTokens, res.OutputTokens, res.CacheReadTokens, res.CacheWriteTokens)
+			}
+			application.tokens.AddResult(authTok.ID, res)
+		}
+		if tokenAcquired {
+			application.tokens.Release(authTok.ID)
+		}
 		if completion.PrematureEndTurn {
 			slog.Warn("premature end_turn", "dir", debugRef(recorder), "model", completion.Model)
 		}
@@ -699,6 +764,38 @@ func (application *App) createCompletion(
 		// sanitizeRequest 会原地改写 messages 的共享 slice——推迟读
 		// 既会数据竞争，也会把「客户端原文」记成改写后内容。
 		recorder.WriteJSON(debuglog.StageRequestMessages, debuglog.RequestMessagesProjection(messages))
+	}
+	// 令牌准入（ccLoad RequireAPIAuth/enforceTokenLimits 同序）：先占并发槽，
+	// 再查模型白名单，最后查费用窗口。HTTP 路径上 apiKeyMiddleware 已验过
+	// 凭据，这里是幂等复核；WS 轮次的内层请求不走 middleware，靠它兜底。
+	if tok, ok := application.authenticate(presentedCredential(request)); ok {
+		authTok = tok
+	} else {
+		// 只可能两种情形：master key 在请求处理中被热改，或 WS 会话建立后
+		// 令牌被删/过期——都按 401 收尾。
+		tokenBlocked = true
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusUnauthorized, errors.New("invalid or expired api token"))
+		return
+	}
+	if authTok != nil {
+		active, limit, ok := application.tokens.Acquire(authTok.ID)
+		if !ok {
+			tokenBlocked = true
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit))
+			return
+		}
+		tokenAcquired = true
+		if !authTok.IsModelAllowed(messages.Model) {
+			tokenBlocked = true
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
+			return
+		}
+		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
+			tokenBlocked = true
+			windowName := map[string]string{"daily": "Daily", "monthly": "Monthly", "total": "Total"}[window]
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
+			return
+		}
 	}
 	ctx := debuglog.WithRecorder(reqCtx, recorder)
 	if options.Stream {
@@ -844,14 +941,9 @@ func clientRequestID(request *http.Request) string {
 
 // requestCredentialHash 计算请求携带凭据的短哈希用于按 key 关联日志；
 // 未携带凭据时返回空串。永远不落明文——SHA-256 前 8 字节。
+// auth token 的 sha256(明文)[:16] 与其 KeyHash 同值，日志行据此关联令牌。
 func requestCredentialHash(request *http.Request) string {
-	credential := ""
-	if auth := request.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		credential = strings.TrimSpace(auth[len("Bearer "):])
-	} else if key := request.Header.Get("X-Api-Key"); key != "" {
-		credential = strings.TrimSpace(key)
-	}
-	return hashCredential(credential)
+	return hashCredential(presentedCredential(request))
 }
 
 func hashCredential(credential string) string {

@@ -27,6 +27,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/dashboard"
@@ -237,6 +238,23 @@ func main() {
 	ccPanel := ccpanel.New(panel, debugManager, application.Metrics(), serviceConfig.Devin.BaseURL, serviceConfig.Server.MaxConcurrency)
 	ccPanel.SetVersion(resolved)
 	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
+	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
+	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
+	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
+	// input 价，与 ccpanel cellCost 同口径）。
+	tokenStore, err := authtoken.New(absoluteStateDir)
+	if err != nil {
+		slog.Error("load auth tokens failed", "error", err)
+		os.Exit(1)
+	}
+	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
+		p, ok := panel.CatalogPrices(context.Background())[model]
+		if !ok {
+			return 0
+		}
+		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
+	})
+	ccPanel.SetTokenStore(tokenStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
