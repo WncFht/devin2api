@@ -37,10 +37,14 @@ import (
 )
 
 // DashboardRegistrar 描述面板路由注册所需的最小能力。
+// 移植面板（ccpanel）用全部五个动词；旧面板只用 Get/Post。
 type DashboardRegistrar interface {
 	Register(mux interface {
 		Get(pattern string, handlerFn http.HandlerFunc)
 		Post(pattern string, handlerFn http.HandlerFunc)
+		Put(pattern string, handlerFn http.HandlerFunc)
+		Patch(pattern string, handlerFn http.HandlerFunc)
+		Delete(pattern string, handlerFn http.HandlerFunc)
 	})
 }
 
@@ -70,6 +74,8 @@ type App struct {
 	debugManager *debuglog.Manager
 	// dashboard 是可选的管理面板处理器；nil 表示不启用面板。
 	dashboard DashboardRegistrar
+	// ccPanel 是可选的移植面板（ccLoad 契约）处理器；与 dashboard 并存。
+	ccPanel DashboardRegistrar
 	// apiKey 是可选的 OpenAI 兼容接口访问密钥；为空则不校验。
 	// apiKeyMu 保护它：配置 reload 会运行时换值。
 	apiKeyMu sync.RWMutex
@@ -130,6 +136,11 @@ func (application *App) SetDashboard(d DashboardRegistrar) {
 	application.dashboard = d
 }
 
+// SetCCPanel 注入移植面板（ccLoad 契约）处理器；与 dashboard 并存不互斥。
+func (application *App) SetCCPanel(d DashboardRegistrar) {
+	application.ccPanel = d
+}
+
 // SetVersion 记录构建版本，由 main 通过 -ldflags -X 注入。
 func (application *App) SetVersion(version string) {
 	application.version = version
@@ -166,6 +177,9 @@ func (application *App) Router() http.Handler {
 	})
 	if application.dashboard != nil {
 		application.dashboard.Register(router)
+	}
+	if application.ccPanel != nil {
+		application.ccPanel.Register(router)
 	}
 	return router
 }

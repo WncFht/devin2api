@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 )
 
 // apiUsage 返回 index.jsonl 聚合快照，并按模型目录价附估算成本。
@@ -60,6 +61,41 @@ type modelCatalogEntry struct {
 	cached        float64
 	output        float64
 	contextTokens int64
+}
+
+// CatalogPrice 是模型目录中单模型的 token 单价（$/1M tokens）。
+// 移植面板（ccpanel）按它把 token 用量折算成估算成本。
+type CatalogPrice struct {
+	Input  float64
+	Cached float64
+	Output float64
+}
+
+// CatalogPrices 返回上游目录价目表（uid→单价）；目录不可用时返回空表。
+func (h *Handler) CatalogPrices(ctx context.Context) map[string]CatalogPrice {
+	catalog := h.modelCatalogMap(ctx)
+	out := make(map[string]CatalogPrice, len(catalog))
+	for uid, c := range catalog {
+		out[uid] = CatalogPrice{Input: c.input, Cached: c.cached, Output: c.output}
+	}
+	return out
+}
+
+// ModelUIDs 返回上游目录中全部模型 uid（排序后），供移植面板合成
+// 渠道模型清单。
+func (h *Handler) ModelUIDs(ctx context.Context) []string {
+	models, err := h.cachedModels(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		if uid, _ := m["uid"].(string); uid != "" {
+			out = append(out, uid)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // modelCatalogMap 从模型目录缓存取 uid → 价格与上下文窗口。

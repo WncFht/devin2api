@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/web/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.json">
+  <meta name="theme-color" content="#3b82f6">
+  <title data-i18n="login.title">登录 - ccLoad</title>
+  <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/login.js?v=__VERSION__"></script>
+</head>
+<body>
+  <!-- 动画背景 -->
+  <div class="login-background">
+    <div class="floating-shapes">
+      <div class="shape shape-1"></div>
+      <div class="shape shape-2"></div>
+      <div class="shape shape-3"></div>
+      <div class="shape shape-4"></div>
+      <div class="shape shape-5"></div>
+    </div>
+  </div>
+
+  <div class="login-page">
+    <div class="login-container animate-slide-up">
+      <!-- Logo和品牌 -->
+      <div class="login-brand">
+        <div class="login-brand-row">
+          <div class="brand-logo">
+            <img class="logo-icon animate-float" src="/web/favicon.svg" alt="">
+          </div>
+          <svg class="login-brand-wordmark" viewBox="0 0 132 36" role="img" aria-label="ccLoad">
+            <use href="/web/brand-wordmark.svg#brand-wordmark" width="132" height="36"></use>
+          </svg>
+        </div>
+        <p class="brand-subtitle" data-i18n="login.brandSubtitle">智能API代理管理系统</p>
+      </div>
+
+      <!-- 登录表单 -->
+      <div class="login-form-container">
+        <div class="login-header">
+          <h2 id="login-title" data-i18n="login.adminLogin">管理员登录</h2>
+          <p id="login-hint" data-i18n="login.passwordHint">请输入您的管理密码以访问系统</p>
+        </div>
+
+        <div class="login-mode-tabs" role="tablist" aria-label="登录方式">
+          <button type="button" class="login-mode-tab active" data-login-mode="admin" role="tab" aria-selected="true" data-i18n="login.adminTab">管理员密码</button>
+          <button type="button" class="login-mode-tab" data-login-mode="api_token" role="tab" aria-selected="false" data-i18n="login.apiTokenTab">API Token</button>
+        </div>
+
+        <div id="error-message" class="error-notification hidden">
+          <svg class="error-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.18 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+          </svg>
+          <span id="error-text"></span>
+        </div>
+
+        <form id="login-form" class="login-form">
+          <div id="admin-credential-group" class="form-group">
+            <label for="password" class="form-label">
+              <svg class="label-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+              </svg>
+              <span data-i18n="login.passwordLabel">管理密码</span>
+            </label>
+            <div class="input-container">
+              <input type="password" id="password" name="password" class="form-input" required autofocus data-i18n-placeholder="login.passwordPlaceholder" placeholder="请输入管理密码" />
+              <div class="input-decoration"></div>
+            </div>
+          </div>
+
+          <div id="api-token-credential-group" class="form-group hidden">
+            <label for="api-token" class="form-label">
+              <svg class="label-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+              </svg>
+              <span data-i18n="login.apiTokenLabel">API Token</span>
+            </label>
+            <div class="input-container">
+              <input type="password" id="api-token" name="api-token" class="form-input" autocomplete="off" data-i18n-placeholder="login.apiTokenPlaceholder" placeholder="请输入 API Token" />
+              <div class="input-decoration"></div>
+            </div>
+          </div>
+
+          <button type="submit" class="login-button" id="login-button">
+            <span class="button-content">
+              <svg class="button-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/>
+              </svg>
+              <span class="button-text" data-i18n="login.loginButton">登录系统</span>
+            </span>
+            <div class="button-loader">
+              <div class="spinner"></div>
+            </div>
+          </button>
+        </form>
+
+        <!-- 安全提示 -->
+        <div class="security-notice">
+          <svg class="notice-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.031 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+          </svg>
+          <div class="notice-text">
+            <div class="notice-title" data-i18n="login.securityTitle">安全保护</div>
+            <div class="notice-desc" data-i18n="login.securityDesc">您的登录会话将在24小时后自动过期</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 功能特色展示 -->
+    <div class="features-showcase animate-slide-up animate-delay-2">
+      <h3 data-i18n="login.featuresTitle">系统特性</h3>
+      <div class="features-grid">
+        <div class="feature-item">
+          <div class="feature-icon">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <div class="feature-content">
+            <h4 data-i18n="login.feature1Title">智能路由</h4>
+            <p data-i18n="login.feature1Desc">基于负载均衡的智能请求分发</p>
+          </div>
+        </div>
+        <div class="feature-item">
+          <div class="feature-icon">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <div class="feature-content">
+            <h4 data-i18n="login.feature2Title">故障切换</h4>
+            <p data-i18n="login.feature2Desc">自动检测并切换到可用节点</p>
+          </div>
+        </div>
+        <div class="feature-item">
+          <div class="feature-icon">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+            </svg>
+          </div>
+          <div class="feature-content">
+            <h4 data-i18n="login.feature3Title">实时监控</h4>
+            <p data-i18n="login.feature3Desc">详细的请求统计和性能分析</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+</body>
+</html>

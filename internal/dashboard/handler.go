@@ -174,9 +174,13 @@ func (h *Handler) passwordSnapshot() (string, [32]byte) {
 }
 
 // Register 将面板路由注册到 mux。有 token 即可启用；密码仅控制是否登录。
+// mux 形参与 app.DashboardRegistrar 的契约一致（本面板只用 Get/Post）。
 func (h *Handler) Register(mux interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
 	Post(pattern string, handlerFn http.HandlerFunc)
+	Put(pattern string, handlerFn http.HandlerFunc)
+	Patch(pattern string, handlerFn http.HandlerFunc)
+	Delete(pattern string, handlerFn http.HandlerFunc)
 }) {
 	mux.Get("/panel", h.servePanel)
 	mux.Post("/panel/login", h.handleLogin)
@@ -532,21 +536,11 @@ func (h *Handler) isAuthenticated(r *http.Request) (authed, locked bool) {
 	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
 	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
 	if auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-		provided := sha256.Sum256([]byte(auth))
-		ip := remoteIP(r)
-		if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) == 1 {
-			// 与表单登录同口径：正确凭据清掉该 IP 的失败账本。
-			h.sessionMu.RLock()
-			_, hasEntry := h.loginFailures[ip]
-			h.sessionMu.RUnlock()
-			if hasEntry {
-				h.sessionMu.Lock()
-				delete(h.loginFailures, ip)
-				h.sessionMu.Unlock()
-			}
+		var bearerOK bool
+		bearerOK, locked = h.checkPasswordCredential(auth, passwordHash, remoteIP(r))
+		if bearerOK {
 			return true, false
 		}
-		locked = h.noteLoginFailure(ip)
 	}
 	cookie, err := r.Cookie("devin_panel_session")
 	if err != nil {
@@ -565,6 +559,51 @@ func (h *Handler) isAuthenticated(r *http.Request) (authed, locked bool) {
 		return false, locked
 	}
 	return true, false
+}
+
+// checkPasswordCredential 校验单份密码凭据（Bearer 头或登录表单的明文），
+// 成功清该 IP 的失败账本，失败计入账本并报告是否已进入锁定期。
+// isAuthenticated 的 Bearer 分支与移植面板的 CheckPanel* 共用同一口径。
+func (h *Handler) checkPasswordCredential(provided string, passwordHash [32]byte, ip string) (ok, locked bool) {
+	sum := sha256.Sum256([]byte(provided))
+	if subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1 {
+		// 与表单登录同口径：正确凭据清掉该 IP 的失败账本。
+		h.sessionMu.RLock()
+		_, hasEntry := h.loginFailures[ip]
+		h.sessionMu.RUnlock()
+		if hasEntry {
+			h.sessionMu.Lock()
+			delete(h.loginFailures, ip)
+			h.sessionMu.Unlock()
+		}
+		return true, false
+	}
+	return false, h.noteLoginFailure(ip)
+}
+
+// CheckPanelBearer 校验 Authorization: Bearer 头中的密码凭据，供移植面板
+// （ccLoad 契约的 /admin、/dashboard 路由）复用同一密码与同一 IP 爆破账本；
+// 不发 cookie、不查 session 表——移植前端把密码本身当 Bearer token 用。
+func (h *Handler) CheckPanelBearer(r *http.Request) (authed, locked bool) {
+	password, passwordHash := h.passwordSnapshot()
+	if password == "" {
+		return true, false
+	}
+	auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return false, false
+	}
+	return h.checkPasswordCredential(auth, passwordHash, remoteIP(r))
+}
+
+// CheckPanelPassword 校验登录表单提交的明文密码（移植面板 /login 用）；
+// 语义同 handleLogin 的密码分支：正确密码在锁定期内也放行并清账本。
+func (h *Handler) CheckPanelPassword(pw string, r *http.Request) (ok, locked bool) {
+	password, passwordHash := h.passwordSnapshot()
+	if password == "" {
+		return true, false
+	}
+	return h.checkPasswordCredential(pw, passwordHash, remoteIP(r))
 }
 
 func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request) bool {

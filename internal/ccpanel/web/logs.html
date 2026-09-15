@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/web/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.json">
+  <meta name="theme-color" content="#3b82f6">
+  <title data-i18n="logs.title">请求日志 - Claude Code & Codex Proxy</title>
+  <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/channels.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/highlight-theme.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/logs.css?v=__VERSION__">
+  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/filter-state.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/filter-query.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/markdown-renderer.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/merged-response-client.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/logs.js?v=__VERSION__"></script>
+  <script src="/web/assets/js/marked.min.js?v=__VERSION__"></script>
+  <script src="/web/assets/js/purify.min.js?v=__VERSION__"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- 主内容区域 -->
+    <main class="main-content">
+      <div class="content-area">
+        <div data-page-filters="logs"></div>
+
+  
+        <!-- 日志列表 -->
+        <section class="mb-2">
+          <div class="glass-card">
+           
+            
+            <!-- 日志表格 -->
+            <div class="table-container logs-table-container mobile-card-table-container" style="position: relative;">
+              <!-- 列显隐下拉面板 -->
+              <div id="colToggleMenu" class="logs-col-toggle-menu" hidden>
+                <div class="logs-col-toggle-list" id="colToggleList"></div>
+              </div>
+              <table class="modern-table logs-table mobile-card-table">
+                <thead>
+                  <tr>
+                    <th class="logs-col-time"><button class="logs-col-toggle-btn" type="button" data-action="toggle-col-menu" data-i18n-title="logs.colSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg></button><span data-i18n="logs.colTime">时间</span></th>
+                    <th class="logs-col-ip" data-i18n="logs.colIP">IP</th>
+                    <th class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
+                    <th class="logs-col-api-key" data-i18n="logs.colApiKey">渠道Key</th>
+                    <th class="logs-col-channel" data-i18n="logs.colChannel">渠道</th>
+                    <th class="logs-col-model" data-i18n="common.model">模型</th>
+                    <th class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
+                    <th class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
+                    <th class="logs-col-speed" data-i18n="logs.colSpeed">速度(tok/s)</th>
+                    <th class="logs-col-input" data-i18n="logs.colInput">输入</th>
+                    <th class="logs-col-output" data-i18n="logs.colOutput">输出</th>
+                    <th class="logs-col-cache-read" data-i18n="logs.colCacheRead">缓存读</th>
+                    <th class="logs-col-cache-write" data-i18n="logs.colCacheWrite">缓存建</th>
+                    <th class="logs-col-cache-util" data-i18n="logs.colCacheUtil">缓存命中%</th>
+                    <th class="logs-col-cost" data-i18n="logs.colCost" data-i18n-title="logs.costTooltipHeader" title="标准成本：单价（美元/百万 Token）× 数量 = 费用">成本</th>
+                    <th class="logs-col-message" data-i18n="logs.colMessage">信息</th>
+                  </tr>
+                </thead>
+                <tbody id="tbody">
+                  <tr>
+                    <td colspan="16" class="loading-state">
+                      <div class="loading-spinner loading-spinner--block"></div>
+                      <span data-i18n="logs.loading">正在加载日志...</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- 底部分页控制 -->
+        <section class="mb-2">
+          <div class="glass-card logs-pagination-card">
+            <div class="flex justify-center items-center">
+              <div class="pagination-controls logs-pagination-controls">
+                <button id="logs_first2" class="btn btn-secondary btn-sm" type="button" data-action="first-logs-page">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 17l-5-5 5-5"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18V6"/>
+                  </svg>
+                  <span data-i18n="common.firstPage">首页</span>
+                </button>
+                <button id="logs_prev2" class="btn btn-secondary btn-sm" type="button" data-action="prev-logs-page">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 18l-6-6 6-6"/>
+                  </svg>
+                  <span data-i18n="common.prevPage">上一页</span>
+                </button>
+                <span class="pagination-info logs-pagination-info">
+                  <span data-i18n="logs.pagePrefix">第</span> <span id="logs_current_page2">1</span> <span data-i18n="logs.pageMid">页，共</span> <span id="logs_total_pages2">1</span> <span data-i18n="logs.pageSuffix">页</span>
+                  <span class="logs-pagination-separator">|</span>
+                  <span data-i18n="logs.jumpTo">跳转到</span>
+                  <input
+                    type="number"
+                    id="logs_jump_page"
+                    class="logs-jump-input"
+                    min="1"
+                    max="1"
+                    data-i18n-placeholder="logs.pagePlaceholder"
+                    placeholder="页码"
+                  />
+                  <span data-i18n="logs.pageUnit">页</span>
+                </span>
+                <button id="logs_next2" class="btn btn-secondary btn-sm" type="button" data-action="next-logs-page">
+                  <span data-i18n="common.nextPage">下一页</span>
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 6l6 6-6 6"/>
+                  </svg>
+                </button>
+                <button id="logs_last2" class="btn btn-secondary btn-sm" type="button" data-action="last-logs-page">
+                  <span data-i18n="common.lastPage">尾页</span>
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 7l5 5-5 5"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 6v12"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- 测试 API Key 模态框 -->
+  <div id="testKeyModal" class="modal">
+    <div class="modal-content test-modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title"><span data-i18n="logs.testKeyTitle">测试 API Key</span> - <span id="testKeyChannelName"></span></h2>
+        <button type="button" class="close-btn" data-action="close-test-key-modal">&times;</button>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" data-i18n="logs.apiKeyLabel">API Key</label>
+        <code id="testKeyDisplay" class="logs-test-key-display"></code>
+        <small id="testKeyIndexInfo" class="logs-test-key-index"></small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="testKeyModel" data-i18n="logs.testModel">测试模型</label>
+        <select id="testKeyModel" class="form-input">
+          <option value="" data-i18n="common.loading">加载中...</option>
+        </select>
+        <small class="logs-test-key-hint">
+          <span data-i18n="logs.originalModel">日志中的模型:</span> <code id="testKeyOriginalModel" class="logs-test-key-original"></code>
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="testKeyContent" data-i18n="logs.testContent">测试内容</label>
+        <input type="text" id="testKeyContent" class="form-input" data-i18n-placeholder="logs.testContentPlaceholder" placeholder="输入测试消息内容">
+      </div>
+
+      <div class="form-group">
+        <label class="logs-stream-toggle">
+          <input type="checkbox" id="testKeyStream" checked>
+          <span class="form-label" data-i18n="logs.enableStream">启用流式响应</span>
+        </label>
+      </div>
+
+      <!-- 测试进度 -->
+      <div id="testKeyProgress" class="test-progress">
+        <div class="loading-spinner"></div>
+        <p data-i18n="logs.testingKey">正在测试 API Key...</p>
+      </div>
+
+      <!-- 测试结果 -->
+      <div id="testKeyResult" class="test-result">
+        <div id="testKeyResultContent"></div>
+        <div id="testKeyResultDetails" class="test-details"></div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn btn-secondary" data-action="close-test-key-modal" data-i18n="common.close">关闭</button>
+        <button type="button" id="runKeyTestBtn" class="btn btn-primary" data-action="run-key-test" data-i18n="logs.startTest">开始测试</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 空状态模板 -->
+  <template id="tpl-log-empty">
+    <tr>
+      <td colspan="{{colspan}}" class="empty-state">
+        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--neutral" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        <div class="empty-state-title" data-i18n="logs.noData">暂无日志数据</div>
+        <div data-i18n="logs.adjustFilter">请调整筛选条件或检查时间范围</div>
+      </td>
+    </tr>
+  </template>
+
+  <!-- Debug Log 模态框 -->
+  <div id="debugLogModal" class="modal">
+    <div class="modal-content upstream-detail-modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title">
+          <span data-i18n="logs.debugLogTitle">Debug Log</span>
+          <span id="debugLogStatus" class="debug-log-status" hidden></span>
+        </h2>
+        <button type="button" class="close-btn" data-action="close-debug-log-modal">&times;</button>
+      </div>
+      <div id="debugLogLoading" style="text-align: center; padding: 2rem; display: none;">
+        <span data-i18n="logs.loading">加载中...</span>
+      </div>
+      <div id="debugLogError" style="text-align: center; padding: 2rem; color: var(--danger-600); display: none;"></div>
+      <div id="debugLogContent" style="display: none; flex: 1; min-height: 0; flex-direction: column;">
+        <div class="upstream-detail-tabs">
+          <button type="button" id="debugRequestTabBtn" class="upstream-tab active" data-tab="request" data-i18n="logs.debugRequest">Request</button>
+          <button type="button" id="debugTranslatedRequestTabBtn" class="upstream-tab" data-tab="translated-request" data-i18n="logs.debugTranslatedRequest" hidden>Translated Request</button>
+          <button type="button" id="debugResponseTabBtn" class="upstream-tab" data-tab="response" data-i18n="logs.debugResponse">Response</button>
+          <button type="button" id="debugTranslatedResponseTabBtn" class="upstream-tab" data-tab="translated-response" data-i18n="logs.debugTranslatedResponse" hidden>Translated Response</button>
+          <button type="button" id="debugWrapBtn" class="upstream-copy-btn upstream-wrap-btn active" data-action="toggle-debug-wrap" data-i18n="logs.debugWrap" aria-pressed="true">换行</button>
+          <button type="button" class="upstream-copy-btn upstream-copy-btn--tabs" data-copy-target="debugReqRaw" data-i18n="common.copy">复制</button>
+          <button type="button" id="debugMergeBtn" class="upstream-copy-btn upstream-merge-btn" data-action="merge-debug-response" data-i18n="logs.debugMerge" aria-pressed="false" hidden>合并</button>
+        </div>
+        <div id="debugTabRequest" class="upstream-tab-panel active" data-tab="request">
+          <pre id="debugReqRaw" class="upstream-pre upstream-pre--full"></pre>
+        </div>
+        <div id="debugTabTranslatedRequest" class="upstream-tab-panel" data-tab="translated-request">
+          <pre id="debugTranslatedReqRaw" class="upstream-pre upstream-pre--full"></pre>
+        </div>
+        <div id="debugTabResponse" class="upstream-tab-panel" data-tab="response">
+          <pre id="debugRespRaw" class="upstream-pre upstream-pre--full"></pre>
+          <div id="debugRespMerged" class="upstream-merged-markdown upstream-pre--full" hidden><div class="chat-message chat-message--assistant"><div class="chat-message-content"></div></div></div>
+        </div>
+        <div id="debugTabTranslatedResponse" class="upstream-tab-panel" data-tab="translated-response">
+          <pre id="debugTranslatedRespRaw" class="upstream-pre upstream-pre--full"></pre>
+          <div id="debugTranslatedRespMerged" class="upstream-merged-markdown upstream-pre--full" hidden><div class="chat-message chat-message--assistant"><div class="chat-message-content"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 加载状态模板 -->
+  <template id="tpl-log-loading">
+    <tr>
+      <td colspan="{{colspan}}" class="loading-state">
+        <div class="loading-spinner loading-spinner--block"></div>
+        <span data-i18n="logs.loading">正在加载日志...</span>
+      </td>
+    </tr>
+  </template>
+
+  <!-- 错误状态模板 -->
+  <template id="tpl-log-error">
+    <tr>
+      <td colspan="{{colspan}}" class="empty-state">
+        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.18 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+        </svg>
+        <div class="empty-state-title empty-state-title--error" data-i18n="logs.loadFailed">加载失败</div>
+        <div data-i18n="logs.checkNetwork">请检查网络连接或重试</div>
+      </td>
+    </tr>
+  </template>
+
+</body>
+</html>

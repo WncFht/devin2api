@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/web/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.json">
+  <meta name="theme-color" content="#3b82f6">
+  <title data-i18n="tokens.title">API访问令牌 - Claude Code & Codex Proxy</title>
+  <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/tokens.css?v=__VERSION__">
+  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/token-expiry.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/tokens.js?v=__VERSION__"></script>
+</head>
+<body>
+  <div class="app-container">
+    <main class="main-content">
+      <div class="content-area">
+        <header class="mt-2 mb-4">
+          <div class="glass-card tokens-hero-card">
+            <div class="tokens-hero-bar">
+              <div>
+                <h1 class="page-title mb-2" data-i18n="tokens.pageTitle">API访问令牌</h1>
+                <p class="page-subtitle tokens-page-subtitle" data-i18n="tokens.pageSubtitle">管理用于 API (/v1/*) 访问的令牌</p>
+              </div>
+              <button type="button" data-action="show-create-modal" class="btn btn-primary tokens-create-btn" data-i18n="tokens.createToken">
+                + 创建令牌
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <!-- 时间范围选择器 -->
+        <section class="mb-2">
+          <div class="time-range-container">
+            <div id="tokens-time-range" class="time-range-selector"></div>
+          </div>
+        </section>
+
+        <section>
+          <!-- 令牌表格 -->
+          <div id="tokens-container" class="token-table mobile-card-table-container"></div>
+
+          <!-- 空状态 -->
+          <div id="empty-state" class="glass-card tokens-empty-state">
+            <div class="tokens-empty-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+                <circle cx="8.5" cy="12" r="4.5" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M12.8 12H21V14.6H19.2V16.4H17.4V14.6H15.6V13H12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <h3 class="tokens-empty-title" data-i18n="tokens.emptyTitle">暂无API令牌</h3>
+            <p class="tokens-empty-desc" data-i18n="tokens.emptyDesc">点击"创建令牌"按钮,生成第一个API访问令牌</p>
+            <button type="button" data-action="show-create-modal" class="btn btn-primary" data-i18n="tokens.createTokenBtn">创建令牌</button>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- 创建令牌对话框 -->
+  <div id="createModal" class="modal">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.createModalTitle">创建API令牌</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-create-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label" data-i18n="tokens.descriptionLabel">描述 *</label>
+          <input type="text" id="tokenDescription" class="form-input" data-i18n-placeholder="tokens.descriptionPlaceholder" placeholder="请输入令牌用途描述" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" data-i18n="tokens.expiryLabel">过期时间</label>
+          <select id="tokenExpiry" class="form-input" data-expiry-select data-change-action="toggle-custom-expiry"></select>
+        </div>
+
+        <div id="customExpiryContainer" class="form-group token-custom-expiry">
+          <label class="form-label" data-i18n="tokens.customExpiryLabel">自定义过期时间</label>
+          <input type="datetime-local" id="customExpiry" class="form-input">
+        </div>
+
+        <div class="form-group form-row-inline">
+          <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
+          <div class="form-row-inline__content token-limit-control">
+            <div class="token-limit-input-line">
+              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <input type="number" id="tokenDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group form-row-inline">
+          <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
+          <div class="form-row-inline__content token-limit-control">
+            <div class="token-limit-input-line">
+              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <input type="number" id="tokenMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group form-row-inline">
+          <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
+          <div class="form-row-inline__content token-limit-control">
+            <div class="token-limit-input-line">
+              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <input type="number" id="tokenCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group form-row-inline">
+          <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
+          <div class="form-row-inline__content token-limit-control">
+            <div class="token-limit-input-line">
+              <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
+              <input type="number" id="tokenMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
+              <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="token-active-label">
+            <input type="checkbox" id="tokenActive" checked class="control-checkbox">
+            <span data-i18n="tokens.enableToken">启用令牌</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-create-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
+        <button type="button" data-action="create-token" class="btn btn-primary" data-i18n="tokens.createBtn">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 显示新令牌对话框 -->
+  <div id="tokenResultModal" class="modal">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.resultModalTitle">令牌创建成功</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-token-result-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="token-result-warning">
+          <div class="token-result-warning-title" data-i18n="tokens.resultWarningTitle">⚠️ 重要提示:</div>
+          <div class="token-result-warning-desc" data-i18n="tokens.resultWarningDesc">
+            请立即复制并保存此令牌。关闭此窗口后,您将无法再次查看完整令牌。
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" data-i18n="tokens.resultTokenLabel">API令牌(请妥善保管)</label>
+          <div class="token-result-value-wrap">
+            <textarea id="newTokenValue" readonly class="form-input token-result-value"></textarea>
+            <button type="button" data-action="copy-token-result" class="btn btn-secondary token-result-copy-btn" data-i18n="common.copy">
+              复制
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-token-result-modal" class="btn btn-primary" data-i18n="tokens.resultSavedBtn">我已保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编辑令牌对话框 -->
+  <div id="editModal" class="modal">
+    <div class="modal-content modal-content--wide token-edit-modal">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.editModalTitle">编辑令牌</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-edit-modal">&times;</button>
+      </div>
+      <div class="modal-body token-edit-body token-edit-layout">
+        <input type="hidden" id="editTokenId">
+
+        <div class="token-edit-sidebar">
+          <section class="token-edit-section token-edit-section--basic" data-token-edit-section="basic">
+            <h3 class="token-edit-section-title">基础信息</h3>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--token">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.table.token">令牌</label>
+              <input type="text" id="editTokenValue" class="form-input field-grow token-edit-token-value" readonly spellcheck="false">
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--description">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.editDescLabel">描述</label>
+              <input type="text" id="editTokenDescription" class="form-input field-grow">
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--expiry">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.expiryLabel">过期时间</label>
+              <select id="editTokenExpiry" class="form-input field-grow" data-expiry-select data-change-action="toggle-edit-custom-expiry"></select>
+            </div>
+
+            <div id="editCustomExpiryContainer" class="form-group token-edit-custom-expiry">
+              <div class="form-row-inline token-edit-field token-edit-field--custom-expiry">
+                <label class="form-label form-row-inline__label" data-i18n="tokens.customLabel">自定义</label>
+                <input type="datetime-local" id="editCustomExpiry" class="form-input field-grow">
+              </div>
+            </div>
+          </section>
+
+          <section class="token-edit-section token-edit-section--quota" data-token-edit-section="quota">
+            <h3 class="token-edit-section-title">配额信息</h3>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
+              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
+                <div class="token-limit-input-line token-edit-cost-row">
+                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <input type="number" id="editDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+                </div>
+                <div class="token-limit-meta token-edit-cost-meta">
+                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
+                  <span id="editDailyCostUsedDisplay" class="token-edit-cost-used"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
+              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
+                <div class="token-limit-input-line token-edit-cost-row">
+                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <input type="number" id="editMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+                </div>
+                <div class="token-limit-meta token-edit-cost-meta">
+                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
+                  <span id="editMonthlyCostUsedDisplay" class="token-edit-cost-used"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
+              <div class="form-row-inline__content token-limit-control token-edit-cost-control">
+                <div class="token-limit-input-line token-edit-cost-row">
+                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <input type="number" id="editCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
+                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+                </div>
+                <div class="token-limit-meta token-edit-cost-meta">
+                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
+                  <span id="editCostUsedDisplay" class="token-edit-cost-used"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--concurrency">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
+              <div class="form-row-inline__content token-limit-control">
+                <div class="token-limit-input-line">
+                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
+                  <input type="number" id="editMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
+                  <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group token-edit-active-row">
+              <label class="token-edit-active-label">
+                <input type="checkbox" id="editTokenActive" class="control-checkbox">
+                <span data-i18n="tokens.enableToken">启用令牌</span>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div class="token-edit-main">
+          <!-- 渠道限制区域 -->
+          <section class="token-edit-section token-edit-section--channels token-edit-channels-section" data-token-edit-section="channels">
+            <div class="token-edit-section-header token-edit-channels-header">
+              <h3 class="token-edit-section-title token-edit-channels-title">
+                <span data-i18n="tokens.channelRestriction">渠道限制</span>
+                <span class="token-edit-channels-meta"><span data-i18n="tokens.channelCountPrefix">共</span> <span id="editAllowedChannelsCount">0</span> <span id="editChannelCountSuffix" data-i18n="tokens.channelCountSuffixAllow">个渠道（空表示允许所有）</span></span>
+              </h3>
+              <div class="token-edit-channels-actions">
+                <label class="token-edit-restriction-filter">
+                  <span data-i18n="tokens.filterChannels">过滤渠道</span>
+                  <input type="search" id="allowedChannelFilterInput" class="form-input token-edit-restriction-filter-input"
+                    data-i18n-placeholder="tokens.searchChannelPlaceholder" placeholder="搜索渠道..."
+                    data-input-action="filter-allowed-channels">
+                </label>
+                <select id="editChannelRestrictionMode" class="form-input token-edit-channels-mode" data-change-action="change-channel-restriction-mode" title="渠道限制模式">
+                  <option value="allow" data-i18n="tokens.channelModeAllow">白名单</option>
+                  <option value="deny" data-i18n="tokens.channelModeDeny">黑名单</option>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm token-edit-channels-btn" data-action="show-channel-select-modal" data-i18n-title="tokens.selectChannelTitle" title="从渠道列表中选择" data-i18n="tokens.selectChannel">
+                  + 选择渠道
+                </button>
+                <button type="button" id="batchDeleteAllowedChannelsBtn" data-action="batch-delete-allowed-channels" disabled
+                  class="btn btn-secondary btn-sm token-edit-channels-btn token-edit-channels-btn--batch" data-i18n="tokens.deleteSelected">
+                  删除选中
+                </button>
+              </div>
+            </div>
+            <div class="inline-table-container mobile-inline-table-container token-edit-channels-table">
+              <table class="inline-table mobile-inline-table allowed-channels-table">
+                <thead>
+                  <tr class="allowed-channels-table-head">
+                    <th class="allowed-channel-col-select-head">
+                      <input type="checkbox" id="selectAllAllowedChannels" data-change-action="toggle-select-all-allowed-channels">
+                    </th>
+                    <th class="allowed-channel-col-name-head" data-i18n="tokens.channelName">渠道</th>
+                    <th class="allowed-channel-col-actions-head"></th>
+                  </tr>
+                </thead>
+                <tbody id="allowedChannelsTableBody">
+                  <!-- 动态渲染 -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- 模型限制区域 -->
+          <section class="token-edit-section token-edit-section--models token-edit-models-section" data-token-edit-section="models">
+            <div class="token-edit-section-header token-edit-models-header">
+              <h3 class="token-edit-section-title token-edit-models-title">
+                <span data-i18n="tokens.modelRestriction">模型限制</span>
+                <span class="token-edit-models-meta"><span data-i18n="tokens.modelCountPrefix">共</span> <span id="editAllowedModelsCount">0</span> <span data-i18n="tokens.modelCountSuffix">个模型（空表示允许所有）</span></span>
+              </h3>
+              <div class="token-edit-models-actions">
+                <label class="token-edit-restriction-filter">
+                  <span data-i18n="tokens.filterModels">过滤模型</span>
+                  <input type="search" id="allowedModelFilterInput" class="form-input token-edit-restriction-filter-input"
+                    data-i18n-placeholder="tokens.searchModelPlaceholder" placeholder="搜索模型..."
+                    data-input-action="filter-allowed-models">
+                </label>
+                <button type="button" class="btn btn-secondary btn-sm token-edit-models-btn" data-action="show-model-select-modal" data-i18n-title="tokens.selectFromListTitle" title="从渠道模型列表中选择" data-i18n="tokens.selectFromList">
+                  + 从列表选择
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm token-edit-models-btn" data-action="show-model-import-modal" data-i18n-title="tokens.manualInputTitle" title="手动输入模型名称" data-i18n="tokens.manualInput">
+                  + 手动输入
+                </button>
+                <button type="button" id="batchDeleteAllowedModelsBtn" data-action="batch-delete-allowed-models" disabled
+                  class="btn btn-secondary btn-sm token-edit-models-btn token-edit-models-btn--batch" data-i18n="tokens.deleteSelected">
+                  删除选中
+                </button>
+              </div>
+            </div>
+            <div class="inline-table-container mobile-inline-table-container token-edit-models-table">
+              <table class="inline-table mobile-inline-table allowed-models-table">
+                <thead>
+                  <tr class="allowed-models-table-head">
+                    <th class="allowed-model-col-select-head">
+                      <input type="checkbox" id="selectAllAllowedModels" data-change-action="toggle-select-all-allowed-models">
+                    </th>
+                    <th class="allowed-model-col-name-head" data-i18n="tokens.modelName">模型名称</th>
+                    <th class="allowed-model-col-actions-head"></th>
+                  </tr>
+                </thead>
+                <tbody id="allowedModelsTableBody">
+                  <!-- 动态渲染 -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-edit-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
+        <button type="button" data-action="update-token" class="btn btn-primary" data-i18n="common.save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 渠道选择对话框 -->
+  <div id="channelSelectModal" class="modal">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.selectChannelTitle">选择渠道</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-channel-select-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group channel-select-filter-row">
+          <input type="text" id="channelSearchInput" class="form-input" data-i18n-placeholder="tokens.searchChannelPlaceholder" placeholder="搜索渠道..." data-input-action="filter-available-channels">
+        </div>
+        <div id="selectAllChannelsContainer">
+          <label class="channel-select-all-label">
+            <input type="checkbox" id="selectAllChannelsCheckbox" class="channel-select-all-checkbox" data-change-action="toggle-select-all-channels">
+            <span data-i18n="tokens.selectAllCurrent">全选当前列表</span>
+            <span id="visibleChannelsCount"></span>
+          </label>
+        </div>
+        <div id="availableChannelsContainer" class="scroll-pane scroll-pane--sm">
+          <!-- 动态渲染可选渠道列表 -->
+        </div>
+        <div class="channel-select-summary">
+          <span data-i18n="tokens.selectedPrefix">已选择</span> <span id="selectedChannelsCount">0</span> <span data-i18n="tokens.selectedChannelSuffix">个渠道</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-channel-select-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
+        <button type="button" data-action="confirm-channel-selection" class="btn btn-primary" data-i18n="tokens.confirmAdd">确定添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模型选择对话框 -->
+  <div id="modelSelectModal" class="modal">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.selectModelTitle">选择模型</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-model-select-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <input type="text" id="modelSearchInput" class="form-input" data-i18n-placeholder="tokens.searchModelPlaceholder" placeholder="搜索模型..." data-input-action="filter-available-models">
+        </div>
+        <div id="selectAllContainer">
+          <label class="model-select-all-label">
+            <input type="checkbox" id="selectAllModelsCheckbox" class="model-select-all-checkbox" data-change-action="toggle-select-all-models">
+            <span data-i18n="tokens.selectAllCurrent">全选当前列表</span>
+            <span id="visibleModelsCount"></span>
+          </label>
+        </div>
+        <div id="availableModelsContainer" class="scroll-pane scroll-pane--sm">
+          <!-- 动态渲染可选模型列表 -->
+        </div>
+        <div class="model-select-summary">
+          <span data-i18n="tokens.selectedPrefix">已选择</span> <span id="selectedModelsCount">0</span> <span data-i18n="tokens.selectedSuffix">个模型</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-model-select-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
+        <button type="button" data-action="confirm-model-selection" class="btn btn-primary" data-i18n="tokens.confirmAdd">确定添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量导入模型对话框 -->
+  <div id="modelImportModal" class="modal token-model-import-modal">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title" data-i18n="tokens.importModelTitle">手动输入模型</h2>
+        <button type="button" class="close-btn" aria-label="Close" data-action="close-model-import-modal">&times;</button>
+      </div>
+      <div class="modal-body token-model-import-body">
+        <div class="form-group model-import-group">
+          <label class="form-label model-import-label"><span data-i18n="tokens.inputModelLabel">输入模型名称</span> <span class="model-import-hint" data-i18n="tokens.inputModelHint">(支持逗号或换行分隔)</span></label>
+          <textarea
+            id="tokenModelImportTextarea"
+            class="form-input model-import-textarea"
+            rows="8"
+            placeholder="gpt-4o,gpt-4o-mini&#10;claude-3-5-sonnet-20241022&#10;claude-3-5-haiku-latest"
+            data-input-action="update-model-import-preview"
+          ></textarea>
+        </div>
+        <div class="token-model-import-tip">
+          <strong data-i18n="tokens.importTipTitle">提示：</strong><span data-i18n="tokens.importTipDesc">支持逗号分隔 <code class="token-model-import-code">model1,model2</code> 或每行一个模型，自动去重</span>
+        </div>
+        <div id="tokenModelImportPreview" class="token-model-import-preview">
+          <span data-i18n="tokens.willAddPrefix">将添加</span> <span id="tokenModelImportCount">0</span> <span data-i18n="tokens.willAddSuffix">个模型</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" data-action="close-model-import-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
+        <button type="button" data-action="confirm-model-import" class="btn btn-primary" data-i18n="tokens.confirmAdd">确定添加</button>
+      </div>
+    </div>
+  </div>
+
+  <template id="tpl-token-expiry-options">
+    <option value="never" data-i18n="tokens.expiryNever">永不过期</option>
+    <option value="30d" data-i18n="tokens.expiry30d">30天后过期</option>
+    <option value="90d" data-i18n="tokens.expiry90d">90天后过期</option>
+    <option value="180d" data-i18n="tokens.expiry180d">180天后过期</option>
+    <option value="365d" data-i18n="tokens.expiry365d">1年后过期</option>
+    <option value="custom" data-i18n="tokens.expiryCustom">自定义...</option>
+  </template>
+
+  <!-- 令牌行模板 -->
+  <template id="tpl-token-row">
+    <tr class="mobile-card-row token-card-row" data-token-id="{{id}}">
+      <td class="tokens-col-token" data-mobile-label="{{mobileLabelToken}}">
+        <div class="token-row-primary"><span class="token-display token-display-{{statusClass}}">{{maskedToken}}</span></div>
+        <div class="token-row-description">{{description}}</div>
+        <div class="token-row-meta">{{createdAt}}{{createdLabel}} · {{expiresAt}}</div>
+      </td>
+      <td class="tokens-col-calls" data-mobile-label="{{mobileLabelCalls}}">{{{callsHtml}}}</td>
+      <td class="tokens-col-success-rate" data-mobile-label="{{mobileLabelSuccessRate}}">{{{successRateHtml}}}</td>
+      <td class="tokens-col-rpm" data-mobile-label="{{mobileLabelRpm}}">{{{rpmHtml}}}</td>
+      <td class="tokens-col-token-usage" data-mobile-label="{{mobileLabelTokenUsage}}">{{{tokensHtml}}}</td>
+      <td class="tokens-col-cost {{costCellClass}}" data-mobile-label="{{mobileLabelCost}}">{{{costHtml}}}</td>
+      <td class="tokens-col-concurrency" data-mobile-label="{{mobileLabelConcurrency}}">{{{concurrencyHtml}}}</td>
+      <td class="tokens-col-stream {{streamCellClass}}" data-mobile-label="{{mobileLabelStream}}">{{{streamAvgHtml}}}</td>
+      <td class="tokens-col-non-stream {{nonStreamCellClass}}" data-mobile-label="{{mobileLabelNonStream}}">{{{nonStreamAvgHtml}}}</td>
+      <td class="tokens-col-last-used" data-mobile-label="{{mobileLabelLastUsed}}">{{{lastUsed}}}</td>
+      <td class="tokens-col-actions" data-mobile-label="{{mobileLabelActions}}">
+        <div class="token-row-actions">
+          <button type="button" class="btn-copy-token btn-icon token-row-action-btn" data-token="{{token}}"
+            data-i18n-title="common.copy" title="复制" aria-label="复制">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M5 15H4C2.9 15 2 14.1 2 13V4C2 2.9 2.9 2 4 2H13C14.1 2 15 2.9 15 4V5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+          <button type="button" class="btn-icon btn-edit token-row-action-btn"
+            data-i18n-title="common.edit" title="编辑" aria-label="编辑">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 17.25V21H6.75L17.81 9.94L14.06 6.19L3 17.25Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20.71 7.04C21.1 6.65 21.1 6.02 20.71 5.63L18.37 3.29C17.98 2.9 17.35 2.9 16.96 3.29L15.13 5.12L18.88 8.87L20.71 7.04Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button type="button" class="btn-icon btn-danger btn-delete token-row-action-btn"
+            data-i18n-title="common.delete" title="删除" aria-label="删除">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 6H21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M8 6V4H16V6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6L18 20H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </td>
+    </tr>
+  </template>
+
+</body>
+</html>

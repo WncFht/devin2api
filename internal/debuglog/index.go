@@ -6,7 +6,10 @@ package debuglog
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -196,6 +199,61 @@ func optionalLatency(ms int64) *int64 {
 		return nil
 	}
 	return &ms
+}
+
+// ScanIndex 从 offset 起增量扫描 index.jsonl 的完整行，逐条交给 fn。
+// 文件被截断重建（size<offset，见 truncateIndexLocked）时先调 resetFn
+// （可为 nil，调用方在此丢弃旧派生状态），随后从 0 重扫整个文件。
+// 返回下一次调用应传入的偏移。
+//
+// 并发安全建立在写路径的 Flush 粒度上：appendIndex 每条都是
+// 完整行+换行后一次 Flush，读者永远看不到半行；扫描不持锁，
+// 截断恰好落在 stat 与读之间的极小窗口由「只处理到最后一个换行」兜底。
+func (manager *Manager) ScanIndex(offset int64, resetFn func(), fn func(IndexEntry)) (int64, error) {
+	if manager == nil || manager.root == "" {
+		return 0, os.ErrNotExist
+	}
+	path := filepath.Join(manager.root, IndexFile)
+	info, err := os.Stat(path)
+	if err != nil {
+		return offset, err
+	}
+	if info.Size() < offset {
+		if resetFn != nil {
+			resetFn()
+		}
+		offset = 0
+	}
+	if info.Size() == offset {
+		return offset, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return offset, err
+	}
+	defer func() { _ = file.Close() }()
+	data := make([]byte, info.Size()-offset)
+	n, readErr := file.ReadAt(data, offset)
+	data = data[:n]
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return offset, readErr
+	}
+	// 只消费到最后一个换行符；残余尾巴留给下一次扫描。
+	if cut := bytes.LastIndexByte(data, '\n'); cut < 0 {
+		return offset, nil
+	} else {
+		data = data[:cut+1]
+	}
+	for line := range bytes.Lines(data) {
+		if len(line) <= 1 {
+			continue
+		}
+		var e IndexEntry
+		if json.Unmarshal(line, &e) == nil {
+			fn(e)
+		}
+	}
+	return offset + int64(len(data)), nil
 }
 
 // releaseDir 把目录移出活跃集合，允许清理器回收它。

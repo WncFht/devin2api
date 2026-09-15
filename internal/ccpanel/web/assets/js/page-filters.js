@@ -1,0 +1,207 @@
+(function () {
+  function joinClasses(...classes) {
+    return classes.filter(Boolean).join(' ');
+  }
+
+  function buildFilterGroup(content, extraClass = '') {
+    return `<div class="${joinClasses('filter-group', extraClass)}">${content}</div>`;
+  }
+
+  function buildFilterLabel(forId, i18nKey, text) {
+    return `<label for="${forId}" class="filter-label" data-i18n="${i18nKey}">${text}</label>`;
+  }
+
+  function buildSelect(id, optionsHtml = '', extraClass = '') {
+    return `<select id="${id}" class="${joinClasses('filter-select', extraClass)}">${optionsHtml}</select>`;
+  }
+
+  function buildInput(type, id, placeholderKey, placeholder, extraClass = '') {
+    return `<input type="${type}" id="${id}" class="${joinClasses('filter-input', extraClass)}" data-i18n-placeholder="${placeholderKey}" placeholder="${placeholder}">`;
+  }
+
+  function buildSharedFields(config) {
+    const groupClass = config.groupClass || '';
+    const checkboxGroupClass = config.checkboxGroupClass || groupClass;
+    const timeRangeGroupClass = joinClasses(groupClass, config.timeRangeGroupClass);
+    const timeRangeControlClass = joinClasses('filter-control--compact', 'filter-control--time-range', config.timeRangeControlClass);
+    const channelIdGroupClass = joinClasses(groupClass, config.channelIdGroupClass);
+    const channelIdControlClass = joinClasses('filter-control--narrow', config.channelIdControlClass);
+    const authTokenGroupClass = joinClasses(groupClass, 'filter-group--auth-token', config.authTokenGroupClass);
+    const authTokenControlClass = joinClasses('filter-control--wide', config.authTokenControlClass);
+    const hideZeroSuccess = `<div class="${joinClasses('filter-group', 'filter-group--checkbox', checkboxGroupClass)}">
+              <label class="filter-checkbox-label">
+                <input type="checkbox" id="f_hide_zero_success" checked>
+                <span data-i18n="stats.hideZeroSuccess">隐藏0成功</span>
+              </label>
+            </div>`;
+    const filterButtonControl = '<button id="btn_filter" type="button" class="btn btn-primary filter-btn" data-i18n="common.filter">筛选</button>';
+    const clearButtonControl = '<button id="btn_clear_filters" type="button" class="btn btn-secondary filter-btn" data-i18n="common.clear">清空</button>';
+    const filterButton = `<div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
+              ${clearButtonControl}
+              ${filterButtonControl}
+            </div>`;
+    return {
+      timeRange: buildFilterGroup(
+        `${buildFilterLabel('f_hours', 'stats.timeRange', '时间范围')}
+        <div id="f_hours_custom_range_host" class="filter-custom-range-host">
+          ${buildSelect('f_hours', '\n                <!-- 动态生成选项 by date-range-selector.js -->\n              ', timeRangeControlClass)}
+        </div>`,
+        timeRangeGroupClass
+      ),
+      channelId: buildFilterGroup(
+        `${buildFilterLabel('f_id', 'stats.channelId', '渠道ID')}
+        ${buildInput('number', 'f_id', 'stats.inputIdPlaceholder', '输入ID...', channelIdControlClass)}`,
+        channelIdGroupClass
+      ),
+      channelIdCombobox: buildFilterGroup(
+        `${buildFilterLabel('f_id', 'stats.channelId', '渠道ID')}
+        <div class="filter-combobox-wrapper filter-control--compact">
+          <input id="f_id" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_id_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        groupClass
+      ),
+      channelName: buildFilterGroup(
+        `${buildFilterLabel('f_name', 'stats.channelName', '渠道名')}
+        ${buildInput('text', 'f_name', 'stats.containsTextPlaceholder', '包含文本...')}`,
+        groupClass
+      ),
+      modelText: buildFilterGroup(
+        `${buildFilterLabel('f_model', 'common.model', '模型')}
+        ${buildInput('text', 'f_model', 'stats.containsTextPlaceholder', '包含文本...')}`,
+        groupClass
+      ),
+      modelSelect: buildFilterGroup(
+        `${buildFilterLabel('f_model', 'common.model', '模型')}
+        ${buildSelect('f_model', '\n                <option value="" data-i18n="trend.allModels">全部模型</option>\n                <!-- 动态加载模型列表 -->\n              ', 'filter-control--wide')}`,
+        groupClass
+      ),
+      channelNameCombobox: buildFilterGroup(
+        `${buildFilterLabel('f_name', 'stats.channelName', '渠道名')}
+        <div class="filter-combobox-wrapper filter-control--channel-name">
+          <input id="f_name" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_name_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        joinClasses(groupClass, 'filter-group--channel-name')
+      ),
+      clientProtocol: buildFilterGroup(
+        `${buildFilterLabel('f_client_protocol', 'modelTest.clientProtocol', '请求协议')}
+        ${buildSelect('f_client_protocol', `
+                <option value="" data-i18n="stats.allClientProtocols">全部协议</option>
+                <option value="anthropic" data-i18n="modelTest.clientProtocolAnthropic">Claude Code</option>
+                <option value="codex" data-i18n="modelTest.clientProtocolCodex">Codex</option>
+                <option value="openai" data-i18n="modelTest.clientProtocolOpenAI">OpenAI</option>
+                <option value="gemini" data-i18n="modelTest.clientProtocolGemini">Gemini</option>
+              `, 'filter-control--compact')}`,
+        groupClass
+      ),
+      modelCombobox: buildFilterGroup(
+        `${buildFilterLabel('f_model', 'common.model', '模型')}
+        <div class="filter-combobox-wrapper filter-control--wide filter-control--model">
+          <input id="f_model" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_model_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        joinClasses(groupClass, 'filter-group--model')
+      ),
+      authToken: buildFilterGroup(
+        `${buildFilterLabel('f_auth_token', 'stats.token', '令牌')}
+        ${buildSelect('f_auth_token', '\n                <option value="" data-i18n="stats.allTokens">全部令牌</option>\n                <!-- 动态加载令牌列表 -->\n              ', authTokenControlClass)}`,
+        authTokenGroupClass
+      ),
+      status: buildFilterGroup(
+        `${buildFilterLabel('f_status', 'logs.statusCode', '状态码')}
+        <div class="filter-combobox-wrapper filter-control--narrow filter-control--status">
+          <input id="f_status" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_status_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        joinClasses(groupClass, 'filter-group--status')
+      ),
+      logSource: buildFilterGroup(
+        `${buildFilterLabel('f_log_source', 'logs.logSource', '日志来源')}
+        ${buildSelect('f_log_source', `
+                <option value="proxy" data-i18n="logs.sourceProxy">请求日志</option>
+                <option value="detection" data-i18n="logs.sourceDetection">检测日志</option>
+                <option value="checkin" data-i18n="logs.sourceCheckin">签到</option>
+                <option value="all" data-i18n="logs.sourceAll">全部日志</option>
+              `, 'filter-control--compact')}`,
+        groupClass
+      ),
+      hideZeroSuccess,
+      filterButton,
+      logsSummary: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
+              ${clearButtonControl}
+              ${filterButtonControl}
+            </div></div>`,
+      statsSummary: `<div class="stats-filter-summary-row">${hideZeroSuccess}<div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
+              ${clearButtonControl}
+              ${filterButtonControl}
+            </div></div>`
+    };
+  }
+
+  const LAYOUTS = {
+    stats: {
+      barClass: 'filter-bar stats-filter-bar mt-2',
+      controlsClass: 'filter-controls stats-filter-controls',
+      groupClass: 'stats-filter-group',
+      checkboxGroupClass: 'stats-filter-group stats-filter-group--checkbox',
+      actionsClass: 'stats-filter-actions',
+      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelCombobox', 'authToken', 'statsSummary']
+    },
+    logs: {
+      barClass: 'filter-bar logs-filter-bar mt-2',
+      controlsClass: 'filter-controls logs-filter-controls',
+      groupClass: 'logs-filter-group',
+      timeRangeGroupClass: 'logs-filter-group--range',
+      timeRangeControlClass: 'logs-filter-control--range',
+      authTokenGroupClass: 'logs-filter-group--token',
+      authTokenControlClass: 'logs-filter-control--token',
+      actionsClass: 'logs-filter-actions',
+      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelCombobox', 'logSource', 'status', 'authToken', 'logsSummary']
+    },
+    trend: {
+      barClass: 'filter-bar mt-2',
+      controlsClass: 'filter-controls trend-filter-controls',
+      groupClass: '',
+      actionsClass: '',
+      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelSelect', 'authToken', 'filterButton']
+    }
+  };
+
+  function renderLayout(layoutName) {
+    const config = LAYOUTS[layoutName];
+    if (!config) {
+      console.error(`[PageFilters] Unknown layout: ${layoutName}`);
+      return '';
+    }
+
+    const fields = buildSharedFields(config);
+    const content = config.items
+      .map((item) => fields[item] || '')
+      .filter(Boolean)
+      .join('\n');
+
+    return `<div class="${config.barClass}">
+          <div class="${config.controlsClass}">
+            ${content}
+          </div>
+        </div>`;
+  }
+
+  function initPageFilters(root = document) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+
+    root.querySelectorAll('[data-page-filters]').forEach((container) => {
+      const layoutName = container.getAttribute('data-page-filters');
+      if (!layoutName) return;
+      container.innerHTML = renderLayout(layoutName);
+    });
+  }
+
+  window.PageFilters = {
+    renderLayout,
+    initPageFilters
+  };
+
+  initPageFilters();
+})();

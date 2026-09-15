@@ -27,6 +27,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
+	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -231,6 +232,12 @@ func main() {
 	})
 	panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 	application.SetDashboard(panel)
+	// 移植面板（ccLoad 契约）与旧面板并存：同一密码门槛，/web、/admin、
+	// /dashboard、/public、/login、/logout 挂在根路径。
+	ccPanel := ccpanel.New(panel, debugManager, application.Metrics(), serviceConfig.Devin.BaseURL, serviceConfig.Server.MaxConcurrency)
+	ccPanel.SetVersion(resolved)
+	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
+	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 

@@ -1,0 +1,2038 @@
+// 系统设置页面
+const t = window.t;
+
+let originalSettings = {}; // 保存原始值用于比较
+let settingDefinitions = new Map();
+let runtimeMetricsLoading = false;
+let runtimeMetricsPreviousFocus = null;
+let runtimeMetricsRefreshTimer = null;
+const RUNTIME_METRICS_REFRESH_MS = 3000;
+let globalCooldownRulesPreviousFocus = null;
+let multimodalFallbackPreviousFocus = null;
+let multimodalFallbackDraft = [];
+let multimodalFallbackModelOptions = null;
+let customPricingPreviousFocus = null;
+let customPricingDraft = [];
+let customPricingModelFilter = '';
+// 系统分层定价模型的 ID 集合（在草稿内的任何位置都不允许保存）。
+// 只存 ID 而非 DOM 状态，重渲染后依然有效。
+const customPricingTieredModels = new Set();
+
+const globalCooldownRulesSettingKey = 'global_cooldown_detection_rules';
+const modelMultimodalFallbackSettingKey = 'model_multimodal_fallback';
+const modelCustomPricingSettingKey = 'model_custom_pricing';
+const maxMultimodalFallbackMappings = 64;
+const maxCustomPricingBytes = 1024 * 1024;
+const maxCustomPricingModels = 512;
+const customPricingBasicFields = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price'];
+const customPricingHighContextFields = ['input_price_high', 'output_price_high', 'cache_read_price_high', 'cache_write_price_high'];
+// 后端契约只接受显式列出的字段；系统价格里仅供内部使用的字段（分层表、
+// 缓存读计入分档、图像费率）在预填时必须剔除，否则保存会被拒绝。
+const customPricingContractFields = new Set([
+  ...customPricingBasicFields, ...customPricingHighContextFields
+]);
+
+function projectCustomPricingDefaults(pricing) {
+  const projected = {};
+  for (const field of customPricingContractFields) {
+    if (pricing && Object.prototype.hasOwnProperty.call(pricing, field)) projected[field] = pricing[field];
+  }
+  return projected;
+}
+
+const containerImageManagedDisabledReason = 'container_image_managed';
+const advancedSettingKeys = new Set([
+  globalCooldownRulesSettingKey,
+  'auto_refresh_interval_seconds',
+  'active_request_title_enabled',
+  'codex_map_429_to_503',
+  'model_catalog_sync_interval_hours',
+  'model_fuzzy_match'
+]);
+
+const byteSettingKeys = new Set([
+  'max_body_bytes',
+  'max_image_body_bytes',
+  'responses_ws_max_transcript_bytes'
+]);
+const oauthBaseURLSettingKeys = new Set([
+  'codex_base_url',
+  'xai_base_url',
+  'antigravity_url',
+  'anthropic_base_url'
+]);
+const oauthBaseURLPlaceholders = new Map([
+  ['CODEX_BASE_URL', 'https://chatgpt.com/backend-api/codex/responses'],
+  ['XAI_BASE_URL', 'https://cli-chat-proxy.grok.com/v1'],
+  ['ANTIGRAVITY_URL', 'https://daily-cloudcode-pa.googleapis.com'],
+  ['ANTHROPIC_BASE_URL', 'https://api.anthropic.com']
+]);
+const bytesPerMiB = 1024 * 1024;
+const maxDurationSeconds = 9223372036;
+const maxDurationMinutes = 153722867;
+const maxDurationHours = 2562047;
+
+const selectSettingOptions = new Map([
+  ['auto_update_channel', [
+    { value: 'stable', labelKey: 'settings.updateChannel.stable' },
+    { value: 'preview', labelKey: 'settings.updateChannel.preview' }
+  ]],
+  ['channel_stats_range', [
+    { value: 'today', labelKey: 'index.timeRange.today' },
+    { value: 'yesterday', labelKey: 'index.timeRange.yesterday' },
+    { value: 'day_before_yesterday', labelKey: 'index.timeRange.dayBeforeYesterday' },
+    { value: 'this_week', labelKey: 'index.timeRange.thisWeek' },
+    { value: 'last_week', labelKey: 'index.timeRange.lastWeek' },
+    { value: 'this_month', labelKey: 'index.timeRange.thisMonth' },
+    { value: 'last_month', labelKey: 'index.timeRange.lastMonth' }
+  ]],
+  ['log_channel_click_action', [
+    { value: 'edit', labelKey: 'settings.logChannelClickAction.edit' },
+    { value: 'navigate', labelKey: 'settings.logChannelClickAction.navigate' }
+  ]]
+]);
+
+const numericSettingConstraints = new Map([
+  ['antigravity_max_idle_conns_per_host', { min: 1, max: 100 }],
+  ['antigravity_idle_conn_timeout_seconds', { min: 1, max: 210 }],
+  ['max_key_retries', { min: 1 }],
+  ['max_concurrency', { min: 1 }],
+  ['max_body_bytes', { min: 1 / bytesPerMiB }],
+  ['max_image_body_bytes', { min: 1 / bytesPerMiB }],
+  ['http_read_timeout_seconds', { min: 0, max: maxDurationSeconds }],
+  ['log_retention_days', { min: -1, max: 365 }],
+  ['cooldown_auth_seconds', { min: 1, max: maxDurationSeconds }],
+  ['cooldown_server_seconds', { min: 1, max: maxDurationSeconds }],
+  ['cooldown_timeout_seconds', { min: 1, max: maxDurationSeconds }],
+  ['cooldown_rate_limit_seconds', { min: 1, max: maxDurationSeconds }],
+  ['cooldown_min_seconds', { min: 1, max: maxDurationSeconds }],
+  ['cooldown_max_seconds', { min: 1, max: maxDurationSeconds }],
+  ['model_catalog_sync_interval_hours', { min: 0, max: maxDurationHours }],
+  ['auto_update_interval_hours', { min: 0, max: maxDurationHours }],
+  ['success_rate_penalty_weight', { min: 0 }],
+  ['health_score_window_minutes', { min: 1, max: maxDurationMinutes }],
+  ['health_score_update_interval', { min: 1, max: maxDurationSeconds }],
+  ['health_min_confident_sample', { min: 1 }],
+  ['ttfb_penalty_weight', { min: 0 }],
+  ['ttfb_max_slow_ratio', { min: 0 }],
+  ['ttfb_min_confident_sample', { min: 1 }],
+  ['debug_log_retention_minutes', { min: 1, max: 1440 }],
+  ['auto_refresh_interval_seconds', { min: 0, max: maxDurationSeconds }],
+  ['responses_ws_max_sessions', { min: 0 }],
+  ['responses_ws_session_ttl_minutes', { min: 0, max: maxDurationMinutes }],
+  ['responses_ws_max_transcript_bytes', { min: 0 }],
+  ['responses_ws_max_connections', { min: 0 }],
+  ['responses_ws_max_connections_per_token', { min: 0 }]
+]);
+
+function settingValueForDisplay(key, value) {
+  const normalizedValue = String(value ?? '');
+  if (!byteSettingKeys.has(key)) return normalizedValue;
+
+  const bytes = Number(normalizedValue);
+  return Number.isFinite(bytes) ? String(bytes / bytesPerMiB) : normalizedValue;
+}
+
+function settingValueForStorage(key, value) {
+  const normalizedValue = String(value ?? '');
+  if (!byteSettingKeys.has(key)) return normalizedValue;
+
+  const mebibytes = Number(normalizedValue);
+  const bytes = Math.round(mebibytes * bytesPerMiB);
+  return Number.isFinite(bytes) ? String(bytes) : normalizedValue;
+}
+
+function numericConstraintFor(setting) {
+  const configured = numericSettingConstraints.get(setting.key);
+  if (configured) return configured;
+  if (setting.value_type === 'duration') return { min: 0, max: maxDurationSeconds };
+  return null;
+}
+
+function numericInputAttributes(setting) {
+  const constraint = numericConstraintFor(setting);
+  const attributes = ['required'];
+  if (constraint?.min !== undefined) attributes.push(`min="${constraint.min}"`);
+  if (constraint?.max !== undefined) attributes.push(`max="${constraint.max}"`);
+  const acceptsFraction = setting.value_type === 'float' || byteSettingKeys.has(setting.key);
+  attributes.push(`step="${acceptsFraction ? 'any' : '1'}"`);
+  return attributes.join(' ');
+}
+
+function validateOptionalOAuthURLInput(value) {
+  const normalizedValue = String(value ?? '').trim();
+  if (normalizedValue === '') return '';
+
+  const schemeSeparator = normalizedValue.indexOf('://');
+  if (schemeSeparator >= 0) {
+    const correction = normalizedValue.slice(schemeSeparator + 3);
+    if (/^https?:\/\//.test(correction)) {
+      return t('settings.validation.oauthURLDuplicatedScheme', { url: correction });
+    }
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(normalizedValue);
+  } catch (_) {
+    return t('settings.validation.oauthURLInvalid');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return t('settings.validation.oauthURLInvalid');
+  }
+  if (parsed.username || parsed.password) {
+    return t('settings.validation.oauthURLCredentials');
+  }
+  if (parsed.search || parsed.hash) {
+    return t('settings.validation.oauthURLQueryOrFragment');
+  }
+  return '';
+}
+
+function validateSettingInput(setting, value) {
+  const normalizedValue = String(value ?? '');
+  if (selectSettingOptions.has(setting.key)) {
+    const valid = selectSettingOptions.get(setting.key).some((option) => option.value === normalizedValue);
+    return valid ? '' : t('settings.validation.selectListed');
+  }
+  if (setting.key === 'channel_test_content' && normalizedValue.trim() === '') {
+    return t('settings.validation.testContentRequired');
+  }
+  if (oauthBaseURLSettingKeys.has(String(setting.key || '').toLowerCase())) {
+    return validateOptionalOAuthURLInput(normalizedValue);
+  }
+
+  if (setting.key === modelCustomPricingSettingKey) {
+    return validateCustomPricingInput(normalizedValue);
+  }
+
+  const numeric = setting.value_type === 'int'
+    || setting.value_type === 'float'
+    || setting.value_type === 'duration'
+    || byteSettingKeys.has(setting.key);
+  if (!numeric) return '';
+
+  if (normalizedValue.trim() === '') return t('settings.validation.numberRequired');
+  const number = Number(normalizedValue);
+  if (!Number.isFinite(number)) return t('settings.validation.finiteNumber');
+  if (!byteSettingKeys.has(setting.key) && setting.value_type !== 'float' && !Number.isSafeInteger(number)) {
+    return t('settings.validation.wholeNumber');
+  }
+
+  const constraint = numericConstraintFor(setting);
+  if (constraint?.min !== undefined && number < constraint.min) {
+    return t('settings.validation.minimum', { value: constraint.min });
+  }
+  if (constraint?.max !== undefined && number > constraint.max) {
+    return t('settings.validation.maximum', { value: constraint.max });
+  }
+  if (setting.key === 'log_retention_days' && number !== -1 && (number < 1 || number > 365)) {
+    return t('settings.validation.logRetention');
+  }
+
+  if (byteSettingKeys.has(setting.key)) {
+    const bytes = Math.round(number * bytesPerMiB);
+    if (!Number.isSafeInteger(bytes)) return t('settings.validation.smallerSize');
+    if (number !== 0 && bytes === 0) return t('settings.validation.zeroOrOneByte');
+    if (setting.key !== 'responses_ws_max_transcript_bytes' && bytes < 1) {
+      return t('settings.validation.oneByteMinimum');
+    }
+  }
+  return '';
+}
+
+function validateCustomPricingInput(value) {
+  if (new TextEncoder().encode(value).length > maxCustomPricingBytes) {
+    return t('settings.validation.customPricingTooLarge');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch (_) {
+    return t('settings.validation.customPricingJSON');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return t('settings.validation.customPricingObject');
+  }
+  const ids = new Set();
+  const validID = /^[a-z0-9][a-z0-9._:/-]*$/;
+  const allowedFields = new Set([...customPricingContractFields]);
+  const finiteNonNegative = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  const checkObjectFields = (object, fields) => Object.keys(object).every((key) => fields.has(key));
+  const checkPrices = (object) => Object.values(object).every(finiteNonNegative);
+  for (const [rawID, object] of Object.entries(parsed)) {
+    const id = rawID.trim().toLowerCase();
+    if (!validID.test(id) || /\s/.test(id) || ids.has(id)) return t('settings.validation.customPricingModelID');
+    ids.add(id);
+    if (ids.size > maxCustomPricingModels || !object || typeof object !== 'object' || Array.isArray(object)) {
+      return ids.size > maxCustomPricingModels
+        ? t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels })
+        : t('settings.validation.customPricingObject');
+    }
+    if (!checkObjectFields(object, allowedFields) || !checkPrices(object)) return t('settings.validation.customPricingFields');
+  }
+  return '';
+}
+
+const runtimeMetricDomains = [
+  {
+    sourceKey: 'process',
+    titleKey: 'settings.runtimeMetrics.group.process',
+    descriptionKey: 'settings.runtimeMetrics.processNote',
+    metrics: [
+      { key: 'uptime_seconds', labelKey: 'settings.runtimeMetrics.metric.uptime', format: 'duration' },
+      { key: 'concurrency_slots_in_use', labelKey: 'settings.runtimeMetrics.metric.concurrencySlotsInUse' },
+      { key: 'max_concurrency', labelKey: 'settings.runtimeMetrics.metric.maxConcurrency' },
+      { key: 'goroutines', labelKey: 'settings.runtimeMetrics.metric.goroutines' }
+    ]
+  },
+  {
+    sourceKey: 'process',
+    titleKey: 'settings.runtimeMetrics.group.resources',
+    descriptionKey: 'settings.runtimeMetrics.resourcesNote',
+    metrics: [
+      { key: 'cpu_usage_percent', labelKey: 'settings.runtimeMetrics.metric.cpuUsagePercent', format: 'percent' },
+      { key: 'cpu_user_seconds', labelKey: 'settings.runtimeMetrics.metric.cpuUserSeconds', format: 'seconds' },
+      { key: 'cpu_system_seconds', labelKey: 'settings.runtimeMetrics.metric.cpuSystemSeconds', format: 'seconds' },
+      { key: 'rss_bytes', labelKey: 'settings.runtimeMetrics.metric.rssBytes', format: 'bytes', zeroUnavailable: true },
+      { key: 'max_rss_bytes', labelKey: 'settings.runtimeMetrics.metric.maxRssBytes', format: 'bytes', zeroUnavailable: true },
+      { key: 'heap_alloc_bytes', labelKey: 'settings.runtimeMetrics.metric.heapAllocBytes', format: 'bytes' },
+      { key: 'heap_sys_bytes', labelKey: 'settings.runtimeMetrics.metric.heapSysBytes', format: 'bytes' },
+      { key: 'gc_count', labelKey: 'settings.runtimeMetrics.metric.gcCount' },
+      { key: 'gc_pause_total_ns', labelKey: 'settings.runtimeMetrics.metric.gcPauseTotal', format: 'durationNs' },
+      { key: 'gc_cpu_percent', labelKey: 'settings.runtimeMetrics.metric.gcCpuPercent', format: 'percent' },
+      { key: 'sse_framing_repairs', labelKey: 'settings.runtimeMetrics.metric.sseFramingRepairs' }
+    ]
+  },
+  {
+    sourceKey: 'http_proxy',
+    titleKey: 'settings.runtimeMetrics.group.httpProxy',
+    descriptionKey: 'settings.runtimeMetrics.httpProxyNote',
+    metrics: [
+      { key: 'active_requests', labelKey: 'settings.runtimeMetrics.metric.httpActiveRequests' },
+      { key: 'completed_requests', labelKey: 'settings.runtimeMetrics.metric.httpCompletedRequests' },
+      { key: 'non_error_responses', labelKey: 'settings.runtimeMetrics.metric.httpNonErrorResponses' },
+      { key: 'client_error_responses', labelKey: 'settings.runtimeMetrics.metric.httpClientErrorResponses' },
+      { key: 'server_error_responses', labelKey: 'settings.runtimeMetrics.metric.httpServerErrorResponses' },
+      { key: 'streaming_requests', labelKey: 'settings.runtimeMetrics.metric.httpStreamingRequests' },
+      { key: 'non_streaming_requests', labelKey: 'settings.runtimeMetrics.metric.httpNonStreamingRequests' },
+      { key: 'request_body_bytes', labelKey: 'settings.runtimeMetrics.metric.httpRequestBodyBytes', format: 'bytes' },
+      { key: 'response_body_bytes', labelKey: 'settings.runtimeMetrics.metric.httpResponseBodyBytes', format: 'bytes' }
+    ]
+  },
+  {
+    sourceKey: 'logs',
+    titleKey: 'settings.runtimeMetrics.group.logs',
+    descriptionKey: 'settings.runtimeMetrics.logsNote',
+    metrics: [
+      { key: 'backlog_entries', labelKey: 'settings.runtimeMetrics.metric.logBacklogEntries' },
+      { key: 'queue_capacity_entries', labelKey: 'settings.runtimeMetrics.metric.logQueueCapacityEntries' },
+      { key: 'dropped_entries', labelKey: 'settings.runtimeMetrics.metric.logDroppedEntries' },
+      { key: 'persistence_failed_entries', labelKey: 'settings.runtimeMetrics.metric.logPersistenceFailedEntries' }
+    ]
+  },
+  {
+    sourceKey: 'storage',
+    titleKey: 'settings.runtimeMetrics.group.storage',
+    descriptionKey: 'settings.runtimeMetrics.storageNote',
+    optional: true,
+    metrics: [
+      { key: 'primary_sync_pending', labelKey: 'settings.runtimeMetrics.metric.primarySyncPending' },
+      { key: 'primary_sync_failures', labelKey: 'settings.runtimeMetrics.metric.primarySyncFailures' },
+      { key: 'primary_sync_dropped', labelKey: 'settings.runtimeMetrics.metric.primarySyncDropped' },
+      { key: 'sqlite_read_failures', labelKey: 'settings.runtimeMetrics.metric.sqliteReadFailures' },
+      { key: 'analytics_reads_primary', labelKey: 'settings.runtimeMetrics.metric.analyticsReadsPrimary', format: 'boolean' },
+      { key: 'primary_sync_last_success_unix_ms', labelKey: 'settings.runtimeMetrics.metric.primarySyncLastSuccess', format: 'unixMilliseconds' }
+    ]
+  }
+];
+
+const responsesRuntimeMetricGroups = [
+  {
+    titleKey: 'settings.runtimeMetrics.group.sessions',
+    metrics: [
+      { key: 'sessions', labelKey: 'settings.runtimeMetrics.metric.sessions' },
+      { key: 'max_sessions', labelKey: 'settings.runtimeMetrics.metric.maxSessions' },
+      { key: 'active_attachments', labelKey: 'settings.runtimeMetrics.metric.activeAttachments' }
+    ]
+  },
+  {
+    titleKey: 'settings.runtimeMetrics.group.downstream',
+    metrics: [
+      { key: 'downstream_connections', labelKey: 'settings.runtimeMetrics.metric.downstreamConnections' },
+      { key: 'max_downstream_connections', labelKey: 'settings.runtimeMetrics.metric.maxDownstreamConnections' },
+      { key: 'max_downstream_connections_per_token', labelKey: 'settings.runtimeMetrics.metric.maxDownstreamConnectionsPerToken' },
+      { key: 'rejected_downstream_connections', labelKey: 'settings.runtimeMetrics.metric.rejectedDownstreamConnections' }
+    ]
+  },
+  {
+    titleKey: 'settings.runtimeMetrics.group.upstream',
+    metrics: [
+      { key: 'upstream_connections', labelKey: 'settings.runtimeMetrics.metric.upstreamConnections' },
+      { key: 'upstream_handshakes', labelKey: 'settings.runtimeMetrics.metric.upstreamHandshakes' },
+      { key: 'upstream_reuses', labelKey: 'settings.runtimeMetrics.metric.upstreamReuses' },
+      { key: 'reconnects', labelKey: 'settings.runtimeMetrics.metric.reconnects' },
+      { key: 'upstream_heartbeat_failures', labelKey: 'settings.runtimeMetrics.metric.upstreamHeartbeatFailures' },
+      { key: 'upstream_queued_read_bytes', labelKey: 'settings.runtimeMetrics.metric.upstreamQueuedReadBytes', format: 'bytes' },
+      { key: 'oldest_upstream_connection_seconds', labelKey: 'settings.runtimeMetrics.metric.oldestUpstreamConnection', format: 'duration' }
+    ]
+  },
+  {
+    titleKey: 'settings.runtimeMetrics.group.responsesEvents',
+    metrics: [
+      { key: 'ttl_expired', labelKey: 'settings.runtimeMetrics.metric.ttlExpired' },
+      { key: 'capacity_rejected', labelKey: 'settings.runtimeMetrics.metric.capacityRejected' },
+      { key: 'budget_rejected', labelKey: 'settings.runtimeMetrics.metric.budgetRejected' },
+      { key: 'previous_response_misses', labelKey: 'settings.runtimeMetrics.metric.previousResponseMisses' }
+    ]
+  }
+];
+
+function bindSettingsPageActions() {
+  const saveAllBtn = document.getElementById('save-all-btn');
+  if (saveAllBtn && !saveAllBtn.dataset.bound) {
+    saveAllBtn.addEventListener('click', () => {
+      saveAllSettings();
+    });
+    saveAllBtn.dataset.bound = '1';
+  }
+
+  const runtimeMetricsBtn = document.getElementById('runtime-metrics-btn');
+  if (runtimeMetricsBtn && !runtimeMetricsBtn.dataset.bound) {
+    runtimeMetricsBtn.addEventListener('click', openRuntimeMetricsModal);
+    runtimeMetricsBtn.dataset.bound = '1';
+  }
+
+  const multimodalFallbackBtn = document.getElementById('model-multimodal-fallback-btn');
+  if (multimodalFallbackBtn && !multimodalFallbackBtn.dataset.bound) {
+    multimodalFallbackBtn.addEventListener('click', (event) => openMultimodalFallbackModal(event.currentTarget));
+    multimodalFallbackBtn.dataset.bound = '1';
+  }
+
+  const customPricingBtn = document.getElementById('model-custom-pricing-btn');
+  if (customPricingBtn && !customPricingBtn.dataset.bound) {
+    customPricingBtn.addEventListener('click', (event) => openCustomPricingModal(event.currentTarget));
+    customPricingBtn.dataset.bound = '1';
+  }
+
+  const refreshBtn = document.getElementById('refresh-runtime-metrics-btn');
+  if (refreshBtn && !refreshBtn.dataset.bound) {
+    refreshBtn.addEventListener('click', loadRuntimeMetrics);
+    refreshBtn.dataset.bound = '1';
+  }
+
+  document.querySelectorAll('[data-action="close-runtime-metrics"]').forEach((btn) => {
+    if (btn.dataset.bound) return;
+    btn.addEventListener('click', closeRuntimeMetricsModal);
+    btn.dataset.bound = '1';
+  });
+
+  const modal = document.getElementById('runtimeMetricsModal');
+  if (modal && !modal.dataset.bound) {
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) closeRuntimeMetricsModal();
+    });
+    modal.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeRuntimeMetricsModal();
+    });
+    modal.dataset.bound = '1';
+  }
+
+  bindGlobalCooldownRulesModal();
+  bindMultimodalFallbackModal();
+  bindCustomPricingModal();
+}
+
+function bindGlobalCooldownRulesModal() {
+  const modal = document.getElementById('customRulesModal');
+  if (!modal || modal.dataset.bound) return;
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      closeGlobalCooldownRulesModal();
+      return;
+    }
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const index = Number(button.dataset.cooldownDetectionIndex);
+    switch (button.dataset.action) {
+      case 'close-global-cooldown-rules':
+        closeGlobalCooldownRulesModal();
+        break;
+      case 'apply-global-cooldown-rules':
+        applyGlobalCooldownRules();
+        break;
+      case 'add-cooldown-detection-rule':
+        window.addCooldownDetectionRule?.();
+        break;
+      case 'remove-cooldown-detection-rule':
+        window.removeCooldownDetectionRule?.(index);
+        break;
+      case 'move-cooldown-detection-rule':
+        window.moveCooldownDetectionRule?.(index, Number(button.dataset.cooldownDetectionDirection));
+        break;
+      case 'test-cooldown-detection-rules':
+        window.testCooldownDetectionRules?.();
+        break;
+    }
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeGlobalCooldownRulesModal();
+      return;
+    }
+    if (event.key === 'Tab') trapModalFocus(modal, event);
+  });
+  modal.dataset.bound = '1';
+}
+
+function trapModalFocus(modal, event) {
+  const focusable = Array.from(modal.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )).filter((element) => !element.hidden && element.offsetParent !== null);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function parseGlobalCooldownRules(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function globalCooldownRuleCount(value) {
+  const parsed = parseGlobalCooldownRules(value);
+  return Array.isArray(parsed.rules) ? parsed.rules.length : 0;
+}
+
+function updateGlobalCooldownRulesSummary(value) {
+  const summary = document.getElementById('global-cooldown-rules-summary');
+  if (!summary) return;
+  summary.textContent = t('settings.globalCooldownRules.ruleCount', {
+    count: globalCooldownRuleCount(value)
+  });
+}
+
+function openGlobalCooldownRulesModal(trigger) {
+  const modal = document.getElementById('customRulesModal');
+  const input = document.getElementById(globalCooldownRulesSettingKey);
+  if (!modal || !input || typeof window.resetCooldownDetectionState !== 'function') return;
+
+  globalCooldownRulesPreviousFocus = trigger || document.activeElement;
+  window.resetCooldownDetectionState(parseGlobalCooldownRules(input.value));
+  window.beginCooldownDetectionDraft?.();
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+}
+
+function closeGlobalCooldownRulesModal() {
+  const modal = document.getElementById('customRulesModal');
+  if (!modal) return;
+
+  window.discardCooldownDetectionDraft?.();
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-container')?.removeAttribute('inert');
+  if (globalCooldownRulesPreviousFocus?.isConnected) globalCooldownRulesPreviousFocus.focus();
+  globalCooldownRulesPreviousFocus = null;
+}
+
+function applyGlobalCooldownRules() {
+  if (!window.validateCooldownDetectionDraft?.()) return;
+  if (!window.commitCooldownDetectionRules?.()) return;
+
+  const input = document.getElementById(globalCooldownRulesSettingKey);
+  if (!input) return;
+  const payload = window.collectCooldownDetectionRulesForSubmit?.();
+  input.value = JSON.stringify(payload || {});
+  markChanged(input);
+  updateGlobalCooldownRulesSummary(input.value);
+  closeGlobalCooldownRulesModal();
+}
+
+// ===== 多模态回退模型映射编辑器 =====
+// 草稿三段式：打开时从 hidden input 解析进 DOM，编辑只改对话框 DOM，
+// 取消即丢弃；应用时才收集 DOM 写回 hidden input。
+
+function parseMultimodalFallback(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed).map(([from, to]) => ({ from, to: String(to ?? '') }));
+  } catch (_) {
+    return [];
+  }
+}
+
+function multimodalFallbackCount(value) {
+  return parseMultimodalFallback(value).length;
+}
+
+function updateMultimodalFallbackSummary(value) {
+  const summary = document.getElementById('model-multimodal-fallback-summary');
+  if (!summary) return;
+  summary.textContent = t('settings.multimodalFallback.ruleCount', {
+    count: multimodalFallbackCount(value)
+  });
+}
+
+// 与后端 RoutingModelName 近似：剥掉尾部思考后缀（如 (max)）并统一小写，
+// 仅用于编辑器的重复/自映射提示，权威校验在后端。
+function normalizeModelKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s*\([^()]*\)\s*$/, '');
+}
+
+function multimodalFallbackOptionSources() {
+  if (Array.isArray(multimodalFallbackModelOptions)) return multimodalFallbackModelOptions;
+  // 加载失败时至少保留当前草稿里出现的模型，已配值不至于从下拉里消失。
+  const seen = new Set();
+  for (const row of multimodalFallbackDraft) {
+    for (const name of [row.from, row.to]) {
+      if (name) seen.add(name);
+    }
+  }
+  return Array.from(seen).sort();
+}
+
+function multimodalFallbackOptionsHtml(selected) {
+  const options = multimodalFallbackOptionSources();
+  if (selected && !options.includes(selected)) options.unshift(selected);
+  return options.map((name) => (
+    `<option value="${escapeHtml(name)}"${name === selected ? ' selected' : ''}>${escapeHtml(name)}</option>`
+  )).join('');
+}
+
+function renderMultimodalFallbackRow(pair) {
+  return `
+    <div class="multimodal-fallback-row">
+      <select class="form-input multimodal-fallback-select" data-field="from" aria-label="${escapeHtml(t('settings.multimodalFallback.fromModel'))}">
+        ${multimodalFallbackOptionsHtml(pair.from)}
+      </select>
+      <span class="multimodal-fallback-arrow" aria-hidden="true">&rarr;</span>
+      <select class="form-input multimodal-fallback-select" data-field="to" aria-label="${escapeHtml(t('settings.multimodalFallback.fallbackModel'))}">
+        ${multimodalFallbackOptionsHtml(pair.to)}
+      </select>
+      <button type="button" class="btn-icon multimodal-fallback-remove-btn" data-action="remove-multimodal-fallback-row"
+        aria-label="${escapeHtml(t('settings.multimodalFallback.removeRow'))}">&times;</button>
+    </div>`;
+}
+
+function renderMultimodalFallbackDraft() {
+  const container = document.getElementById('multimodalFallbackRows');
+  const empty = document.getElementById('multimodalFallbackEmpty');
+  if (!container) return;
+  container.innerHTML = multimodalFallbackDraft.map(renderMultimodalFallbackRow).join('');
+  if (empty) empty.hidden = multimodalFallbackDraft.length > 0;
+}
+
+async function loadMultimodalFallbackModelOptions() {
+  if (multimodalFallbackModelOptions !== null) return;
+  try {
+    const data = await fetchDataWithAuth('/admin/channels/filter-options?status=enabled');
+    multimodalFallbackModelOptions = Array.isArray(data?.models) ? data.models : [];
+  } catch (err) {
+    console.error('加载模型候选失败:', err);
+    multimodalFallbackModelOptions = [];
+  }
+}
+
+function showMultimodalFallbackError(message) {
+  const error = document.getElementById('multimodalFallbackError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.hidden = !message;
+}
+
+async function openMultimodalFallbackModal(trigger) {
+  const modal = document.getElementById('multimodalFallbackModal');
+  const input = document.getElementById(modelMultimodalFallbackSettingKey);
+  if (!modal || !input) return;
+
+  multimodalFallbackPreviousFocus = trigger || document.activeElement;
+  multimodalFallbackDraft = parseMultimodalFallback(input.value);
+  showMultimodalFallbackError(null);
+  await loadMultimodalFallbackModelOptions();
+  renderMultimodalFallbackDraft();
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+}
+
+function closeMultimodalFallbackModal() {
+  const modal = document.getElementById('multimodalFallbackModal');
+  if (!modal) return;
+
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-container')?.removeAttribute('inert');
+  if (multimodalFallbackPreviousFocus?.isConnected) multimodalFallbackPreviousFocus.focus();
+  multimodalFallbackPreviousFocus = null;
+  multimodalFallbackDraft = [];
+}
+
+function addMultimodalFallbackRow() {
+  // 现有行的选择值由 DOM 持有；追加后会全量重绘，先把用户编辑同步回草稿，
+  // 否则重绘会用打开弹窗时的旧值覆盖现有行。
+  const container = document.getElementById('multimodalFallbackRows');
+  if (container) multimodalFallbackDraft = collectMultimodalFallbackDraft();
+  if (multimodalFallbackDraft.length >= maxMultimodalFallbackMappings) {
+    showMultimodalFallbackError(t('settings.multimodalFallback.errorLimit', { max: maxMultimodalFallbackMappings }));
+    return;
+  }
+  multimodalFallbackDraft.push({ from: '', to: '' });
+  renderMultimodalFallbackDraft();
+}
+
+function removeMultimodalFallbackRow(row) {
+  const container = document.getElementById('multimodalFallbackRows');
+  if (container) multimodalFallbackDraft = collectMultimodalFallbackDraft();
+  const index = Array.from(row.parentNode?.children || []).indexOf(row);
+  if (index >= 0) multimodalFallbackDraft.splice(index, 1);
+  row.remove();
+  const empty = document.getElementById('multimodalFallbackEmpty');
+  if (empty) empty.hidden = multimodalFallbackDraft.length > 0;
+}
+
+// 收集对话框 DOM 中的映射。select 值由 searchable-select 增强层同步回原生
+// select（dispatchSelectionEvents），DOM 就是当前草稿的真源。
+function collectMultimodalFallbackDraft() {
+  const rows = [];
+  const container = document.getElementById('multimodalFallbackRows');
+  if (container) {
+    container.querySelectorAll('.multimodal-fallback-row').forEach((row) => {
+      rows.push({
+        from: String(row.querySelector('select[data-field="from"]')?.value || '').trim(),
+        to: String(row.querySelector('select[data-field="to"]')?.value || '').trim()
+      });
+    });
+  }
+  return rows;
+}
+
+function validateMultimodalFallbackRows(rows) {
+  if (rows.length > maxMultimodalFallbackMappings) {
+    return t('settings.multimodalFallback.errorLimit', { max: maxMultimodalFallbackMappings });
+  }
+  const seen = new Set();
+  for (const row of rows) {
+    if (!row.from || !row.to) return t('settings.multimodalFallback.errorBlank');
+    const fromKey = normalizeModelKey(row.from);
+    const toKey = normalizeModelKey(row.to);
+    if (fromKey === toKey) return t('settings.multimodalFallback.errorSelf', { model: row.from });
+    if (seen.has(fromKey)) return t('settings.multimodalFallback.errorDuplicate', { model: row.from });
+    seen.add(fromKey);
+  }
+  return null;
+}
+
+async function applyMultimodalFallback() {
+  const rows = collectMultimodalFallbackDraft();
+  const error = validateMultimodalFallbackRows(rows);
+  if (error) {
+    showMultimodalFallbackError(error);
+    return;
+  }
+  const mapping = {};
+  for (const row of rows) mapping[row.from] = row.to;
+
+  const value = JSON.stringify(mapping);
+  if (value === originalSettings[modelMultimodalFallbackSettingKey]) {
+    closeMultimodalFallbackModal();
+    return;
+  }
+
+  const modal = document.getElementById('multimodalFallbackModal');
+  const applyButton = modal?.querySelector('[data-action="apply-multimodal-fallback"]');
+  if (applyButton?.disabled) return;
+  if (applyButton) {
+    applyButton.disabled = true;
+    applyButton.setAttribute('aria-busy', 'true');
+  }
+  showMultimodalFallbackError(null);
+
+  try {
+    const result = await fetchDataWithAuth('/admin/settings/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [modelMultimodalFallbackSettingKey]: value })
+    });
+    syncSettingState(modelMultimodalFallbackSettingKey, value);
+    closeMultimodalFallbackModal();
+    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
+  } catch (err) {
+    console.error('保存多模态回退映射异常:', err);
+    showMultimodalFallbackError(t('settings.msg.saveFailed') + ': ' + err.message);
+  } finally {
+    if (applyButton) {
+      applyButton.disabled = false;
+      applyButton.removeAttribute('aria-busy');
+    }
+  }
+}
+
+function bindMultimodalFallbackModal() {
+  const modal = document.getElementById('multimodalFallbackModal');
+  if (!modal || modal.dataset.bound) return;
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      closeMultimodalFallbackModal();
+      return;
+    }
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    switch (button.dataset.action) {
+      case 'close-multimodal-fallback':
+        closeMultimodalFallbackModal();
+        break;
+      case 'apply-multimodal-fallback':
+        applyMultimodalFallback();
+        break;
+      case 'add-multimodal-fallback-row':
+        addMultimodalFallbackRow();
+        break;
+      case 'remove-multimodal-fallback-row':
+        removeMultimodalFallbackRow(button.closest('.multimodal-fallback-row'));
+        break;
+    }
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMultimodalFallbackModal();
+      return;
+    }
+    if (event.key === 'Tab') trapModalFocus(modal, event);
+  });
+  modal.dataset.bound = '1';
+}
+
+// ===== 自定义模型价格编辑器 =====
+// 价格设置在这里以结构化表格编辑，提交时仍复用 model_custom_pricing 设置接口。
+
+const customPricingFieldLabelKeys = {
+  input_price: 'settings.customPricing.inputPrice',
+  output_price: 'settings.customPricing.outputPrice',
+  cache_read_price: 'settings.customPricing.cacheReadPrice',
+  cache_write_price: 'settings.customPricing.cacheWritePrice',
+  cache_write_price_high: 'settings.customPricing.cacheWritePriceHigh',
+  cache_read_price_high: 'settings.customPricing.cacheReadPriceHigh',
+  input_price_high: 'settings.customPricing.inputPriceHigh',
+  output_price_high: 'settings.customPricing.outputPriceHigh'
+};
+
+function parseCustomPricing(value) {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed).map(([model, pricing]) => ({
+      model,
+      pricing: pricing && typeof pricing === 'object' && !Array.isArray(pricing) ? pricing : {}
+    }));
+  } catch (_) {
+    return [];
+  }
+}
+
+function updateCustomPricingSummary(value) {
+  const summary = document.getElementById('model-custom-pricing-summary');
+  if (!summary) return;
+  summary.textContent = t('settings.customPricing.modelCount', {
+    count: parseCustomPricing(value).length
+  });
+}
+
+function customPricingDisplayNumber(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  return String(value);
+}
+
+function customPricingNumberControl(field, value) {
+  const label = escapeHtml(t(customPricingFieldLabelKeys[field] || field));
+  return `<input type="number" class="form-input custom-pricing-number" data-cp-field="${field}"
+    min="0" step="any" inputmode="decimal"
+    value="${escapeHtml(customPricingDisplayNumber(value))}"
+    aria-label="${label}" title="${label}">`;
+}
+
+function renderCustomPricingModel(entry, modelIndex) {
+  const pricing = entry.pricing || {};
+  const highContextDescription = escapeHtml(t('settings.customPricing.highContextDescription'));
+
+  // 高上下文四项与基础四价同列同序，标签由表头承担。
+  // 关键：输入框必须落在真正的 <td> 里，列宽由表格列算法统一决定。
+  // 用 grid/flex 容器会算出与列宽无关的宽度，两行输入框永远对不齐。
+  const highContextCells = customPricingHighContextFields
+    .map((field) => `<td>${customPricingNumberControl(field, pricing[field])}</td>`)
+    .join('');
+
+  return `
+    <tr class="custom-pricing-model-row" data-model-index="${modelIndex}">
+      <td>
+        <div class="custom-pricing-model-cell">
+          <input type="text" class="form-input custom-pricing-model-id-input" data-cp-field="model_id" value="${escapeHtml(entry.model || '')}" spellcheck="false" required aria-label="${escapeHtml(t('settings.customPricing.modelId'))}" title="${escapeHtml(t('settings.customPricing.modelId'))}">
+          <span class="custom-pricing-model-status" data-cp-status role="status" hidden></span>
+        </div>
+      </td>
+      <td>${customPricingNumberControl('input_price', pricing.input_price)}</td>
+      <td>${customPricingNumberControl('output_price', pricing.output_price)}</td>
+      <td>${customPricingNumberControl('cache_read_price', pricing.cache_read_price)}</td>
+      <td>${customPricingNumberControl('cache_write_price', pricing.cache_write_price)}</td>
+      <td><button type="button" class="btn-icon" data-action="remove-custom-pricing-model" data-model-index="${modelIndex}" aria-label="${escapeHtml(t('settings.customPricing.removeModel'))}">&times;</button></td>
+    </tr>
+    <tr class="custom-pricing-high-row" data-model-index="${modelIndex}">
+      <td>
+        <span class="custom-pricing-high-label" title="${highContextDescription}">${escapeHtml(t('settings.customPricing.highContextPricing'))}</span>
+      </td>
+      ${highContextCells}
+      <td></td>
+    </tr>`;
+}
+
+function readCustomPricingNumber(input) {
+  const value = String(input?.value ?? '').trim();
+  if (value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : NaN;
+}
+
+// 一个模型占两行：基础价行 + 高上下文值行。
+// 两行靠 data-model-index 配对，不再靠 nextElementSibling 猜位置——
+// 行数或顺序一变，猜测就会静默错位（漏读价格、删错行）。
+function customPricingHighRow(modelRow) {
+  const index = modelRow?.dataset.modelIndex;
+  if (index === undefined) return null;
+  for (let row = modelRow.nextElementSibling; row; row = row.nextElementSibling) {
+    // 本组两行相邻且 index 相同；遇到下个模型的行说明本组已结束。
+    if (row.dataset.modelIndex !== index) break;
+    if (row.classList.contains('custom-pricing-high-row')) return row;
+  }
+  return null;
+}
+
+function collectCustomPricingEntries() {
+  const entries = [];
+  document.querySelectorAll('#customPricingRows .custom-pricing-model-row').forEach((row) => {
+    const high = customPricingHighRow(row);
+    const pricing = {};
+    for (const field of customPricingBasicFields) {
+      const value = readCustomPricingNumber(row.querySelector(`[data-cp-field="${field}"]`));
+      if (value !== null) pricing[field] = value;
+    }
+    if (high) {
+      for (const field of customPricingHighContextFields) {
+        const value = readCustomPricingNumber(high.querySelector(`[data-cp-field="${field}"]`));
+        if (value !== null) pricing[field] = value;
+      }
+    }
+    entries.push({
+      model: String(row.querySelector('[data-cp-field="model_id"]')?.value || '').trim(),
+      pricing
+    });
+  });
+  return entries;
+}
+
+function validateCustomPricingEntries(entries) {
+  if (entries.length > maxCustomPricingModels) {
+    return t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels });
+  }
+  const seen = new Set();
+  const validID = /^[a-z0-9][a-z0-9._:/-]*$/;
+  for (const entry of entries) {
+    const id = entry.model.toLowerCase();
+    if (!validID.test(id) || /\s/.test(id)) return t('settings.validation.customPricingModelID');
+    if (seen.has(id)) return t('settings.validation.customPricingModelID');
+    if (customPricingTieredModels.has(id)) return t('settings.validation.customPricingTiered', { model: entry.model });
+    seen.add(id);
+  }
+  const payload = {};
+  for (const entry of entries) payload[entry.model] = entry.pricing;
+  return validateCustomPricingInput(JSON.stringify(payload));
+}
+
+function customPricingEntriesToJSON(entries) {
+  const payload = {};
+  for (const entry of entries) payload[entry.model] = entry.pricing;
+  return JSON.stringify(payload);
+}
+
+function canonicalizeCustomPricing(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeCustomPricing);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((result, key) => {
+      result[key] = canonicalizeCustomPricing(value[key]);
+      return result;
+    }, {});
+  }
+  return value;
+}
+
+function customPricingEquivalent(first, second) {
+  const toMap = (value) => parseCustomPricing(value).reduce((result, entry) => {
+    result[entry.model.trim().toLowerCase()] = canonicalizeCustomPricing(entry.pricing);
+    return result;
+  }, {});
+  return JSON.stringify(canonicalizeCustomPricing(toMap(first))) === JSON.stringify(canonicalizeCustomPricing(toMap(second)));
+}
+
+function renderCustomPricingDraft() {
+  const rows = document.getElementById('customPricingRows');
+  const empty = document.getElementById('customPricingEmpty');
+  if (!rows) return;
+  rows.innerHTML = customPricingDraft.map(renderCustomPricingModel).join('');
+  if (empty) empty.hidden = customPricingDraft.length > 0;
+  applyCustomPricingFilter();
+}
+
+function applyCustomPricingFilter() {
+  const search = document.getElementById('customPricingSearch');
+  if (search) customPricingModelFilter = String(search.value || '').trim().toLowerCase();
+  document.querySelectorAll('#customPricingRows .custom-pricing-model-row').forEach((row) => {
+    const model = String(row.querySelector('[data-cp-field="model_id"]')?.value || '').toLowerCase();
+    const hidden = customPricingModelFilter !== '' && !model.includes(customPricingModelFilter);
+    const high = customPricingHighRow(row);
+    row.hidden = hidden;
+    if (high) high.hidden = hidden;
+  });
+}
+
+function setCustomPricingModelStatus(row, message, state = '') {
+  const status = row?.querySelector('[data-cp-status]');
+  if (!status) return;
+  status.textContent = message || '';
+  status.hidden = !message;
+  status.dataset.state = state;
+}
+
+async function loadCustomPricingDefaults(input) {
+  const row = input?.closest('.custom-pricing-model-row');
+  const modelID = String(input?.value || '').trim().toLowerCase();
+  if (!row || !modelID || row.dataset.defaultModelId === modelID) return;
+
+  const modelIndex = Number(row.dataset.modelIndex);
+  const entries = collectCustomPricingEntries();
+  const entry = entries[modelIndex];
+  if (!entry) return;
+  row.dataset.defaultModelId = modelID;
+
+  // 已有值时不自动改写，避免覆盖用户正在编辑的配置。
+  if (Object.keys(entry.pricing || {}).length > 0) return;
+
+  setCustomPricingModelStatus(row, t('settings.customPricing.loadingDefaults'), 'loading');
+  try {
+    const result = await fetchDataWithAuth(`/admin/model-pricing?model=${encodeURIComponent(modelID)}`);
+    if (!row.isConnected || String(row.querySelector('[data-cp-field="model_id"]')?.value || '').trim().toLowerCase() !== modelID) return;
+    if (!result?.found || !result.pricing || typeof result.pricing !== 'object') {
+      setCustomPricingModelStatus(row, t('settings.customPricing.defaultNotFound'), 'empty');
+      return;
+    }
+    const latestEntries = collectCustomPricingEntries();
+    if (latestEntries[modelIndex] && Object.keys(latestEntries[modelIndex].pricing || {}).length > 0) {
+      setCustomPricingModelStatus(row, '', '');
+      return;
+    }
+
+    // 系统分层定价（Qwen 全系价格只存在分层表里）无法用自定义价格完整表达，
+    // 预填会丢掉中间档导致静默少计费，这里拒绝预填并保留系统价格。
+    const systemTiers = result.pricing.token_pricing_tiers;
+    if (Array.isArray(systemTiers) && systemTiers.length > 0) {
+      customPricingTieredModels.add(modelID);
+      setCustomPricingModelStatus(row, t('settings.customPricing.tieredNotOverridable'), 'empty');
+      return;
+    }
+
+    latestEntries[modelIndex].pricing = projectCustomPricingDefaults(result.pricing);
+    customPricingDraft = latestEntries;
+    renderCustomPricingDraft();
+    const renderedRow = document.querySelector(`#customPricingRows .custom-pricing-model-row[data-model-index="${modelIndex}"]`);
+    setCustomPricingModelStatus(renderedRow, t('settings.customPricing.defaultLoaded'), 'success');
+    renderedRow?.querySelector('[data-cp-field="model_id"]')?.focus();
+  } catch (err) {
+    console.warn('加载系统模型价格失败:', err);
+    if (row.isConnected) setCustomPricingModelStatus(row, t('settings.customPricing.defaultLoadFailed'), 'error');
+  }
+}
+
+function showCustomPricingError(message) {
+  const error = document.getElementById('customPricingError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.hidden = !message;
+}
+
+function openCustomPricingModal(trigger) {
+  const modal = document.getElementById('customPricingModal');
+  const input = document.getElementById(modelCustomPricingSettingKey);
+  if (!modal || !input) return;
+  customPricingPreviousFocus = trigger || document.activeElement;
+  customPricingDraft = parseCustomPricing(input.value);
+  customPricingModelFilter = '';
+  customPricingTieredModels.clear();
+  const search = document.getElementById('customPricingSearch');
+  if (search) search.value = '';
+  showCustomPricingError(null);
+  renderCustomPricingDraft();
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+}
+
+function closeCustomPricingModal() {
+  const modal = document.getElementById('customPricingModal');
+  if (!modal) return;
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-container')?.removeAttribute('inert');
+  if (customPricingPreviousFocus?.isConnected) customPricingPreviousFocus.focus();
+  customPricingPreviousFocus = null;
+  customPricingDraft = [];
+}
+
+function addCustomPricingModel() {
+  const search = document.getElementById('customPricingSearch');
+  if (search && search.value) {
+    search.value = '';
+    customPricingModelFilter = '';
+  }
+  customPricingDraft = collectCustomPricingEntries();
+  if (customPricingDraft.length >= maxCustomPricingModels) {
+    showCustomPricingError(t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels }));
+    return;
+  }
+  customPricingDraft.push({ model: '', pricing: {} });
+  renderCustomPricingDraft();
+  const modelRows = document.querySelectorAll('#customPricingRows .custom-pricing-model-row');
+  modelRows[modelRows.length - 1]?.querySelector('[data-cp-field="model_id"]')?.focus();
+}
+
+function removeCustomPricingModel(button) {
+  const row = button?.closest('.custom-pricing-model-row');
+  if (!row) return;
+  const high = customPricingHighRow(row);
+  row.remove();
+  high?.remove();
+  customPricingDraft = collectCustomPricingEntries();
+  renderCustomPricingDraft();
+}
+
+async function applyCustomPricing() {
+  const entries = collectCustomPricingEntries();
+  const validationError = validateCustomPricingEntries(entries);
+  if (validationError) {
+    showCustomPricingError(validationError);
+    return;
+  }
+  const value = customPricingEntriesToJSON(entries);
+  const current = document.getElementById(modelCustomPricingSettingKey)?.value || '{}';
+  if (customPricingEquivalent(current, value)) {
+    closeCustomPricingModal();
+    return;
+  }
+
+  const modal = document.getElementById('customPricingModal');
+  const applyButton = modal?.querySelector('[data-action="apply-custom-pricing"]');
+  if (applyButton?.disabled) return;
+  if (applyButton) {
+    applyButton.disabled = true;
+    applyButton.setAttribute('aria-busy', 'true');
+  }
+  showCustomPricingError(null);
+  try {
+    const result = await fetchDataWithAuth('/admin/settings/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [modelCustomPricingSettingKey]: value })
+    });
+    syncSettingState(modelCustomPricingSettingKey, value);
+    closeCustomPricingModal();
+    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
+  } catch (err) {
+    console.error('保存自定义模型价格异常:', err);
+    showCustomPricingError(t('settings.msg.saveFailed') + ': ' + err.message);
+  } finally {
+    if (applyButton) {
+      applyButton.disabled = false;
+      applyButton.removeAttribute('aria-busy');
+    }
+  }
+}
+
+function bindCustomPricingModal() {
+  const modal = document.getElementById('customPricingModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      closeCustomPricingModal();
+      return;
+    }
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    switch (button.dataset.action) {
+      case 'close-custom-pricing': closeCustomPricingModal(); break;
+      case 'apply-custom-pricing': applyCustomPricing(); break;
+      case 'add-custom-pricing-model': addCustomPricingModel(); break;
+      case 'remove-custom-pricing-model': removeCustomPricingModel(button); break;
+    }
+  });
+  modal.addEventListener('input', (event) => {
+    if (event.target.id === 'customPricingSearch' || event.target.matches('[data-cp-field="model_id"]')) applyCustomPricingFilter();
+  });
+  modal.addEventListener('focusout', (event) => {
+    if (event.target.matches('[data-cp-field="model_id"]')) loadCustomPricingDefaults(event.target);
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && event.target.matches('[data-cp-field="model_id"]')) {
+      event.preventDefault();
+      loadCustomPricingDefaults(event.target);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeCustomPricingModal();
+      return;
+    }
+    if (event.key === 'Tab') trapModalFocus(modal, event);
+  });
+  modal.dataset.bound = '1';
+}
+
+function openRuntimeMetricsModal() {
+  const modal = document.getElementById('runtimeMetricsModal');
+  if (!modal) return;
+
+  runtimeMetricsPreviousFocus = document.activeElement;
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+  loadRuntimeMetrics();
+  if (runtimeMetricsRefreshTimer === null) {
+    runtimeMetricsRefreshTimer = setInterval(() => loadRuntimeMetrics({ silent: true }), RUNTIME_METRICS_REFRESH_MS);
+  }
+}
+
+function closeRuntimeMetricsModal() {
+  const modal = document.getElementById('runtimeMetricsModal');
+  if (!modal) return;
+
+  if (runtimeMetricsRefreshTimer !== null) {
+    clearInterval(runtimeMetricsRefreshTimer);
+    runtimeMetricsRefreshTimer = null;
+  }
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  if (runtimeMetricsPreviousFocus?.isConnected) runtimeMetricsPreviousFocus.focus();
+  runtimeMetricsPreviousFocus = null;
+}
+
+function normalizeRuntimeMetric(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function runtimeMetricsLocale() {
+  return window.i18n?.getLocale?.() || document.documentElement.lang || 'zh-CN';
+}
+
+function formatRuntimeInteger(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  return new Intl.NumberFormat(runtimeMetricsLocale(), { maximumFractionDigits: 0 }).format(numeric);
+}
+
+function formatRuntimeDecimal(value, maximumFractionDigits = 1) {
+  return new Intl.NumberFormat(runtimeMetricsLocale(), { maximumFractionDigits }).format(value);
+}
+
+function formatRuntimeBytes(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let unitIndex = 0;
+  let amount = numeric;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex++;
+  }
+  const digits = unitIndex === 0 ? 0 : 1;
+  return `${formatRuntimeDecimal(amount, digits)} ${units[unitIndex]}`;
+}
+
+function formatRuntimeDuration(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+
+  const seconds = Math.round(numeric);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return t('common.timeHM', { h: hours, m: minutes });
+  if (minutes > 0) return t('common.timeMS', { m: minutes, s: seconds % 60 });
+  return t('common.timeS', { s: seconds });
+}
+
+function formatRuntimeBoolean(value) {
+  if (typeof value !== 'boolean') return '—';
+  return t(value ? 'common.yes' : 'common.no');
+}
+
+function formatRuntimeTimestamp(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null || numeric <= 0) return '—';
+  const date = new Date(numeric);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(runtimeMetricsLocale());
+}
+
+function formatRuntimePercent(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  return `${formatRuntimeDecimal(numeric, 1)}%`;
+}
+
+function formatRuntimeSeconds(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  if (numeric < 60) return t('common.timeS', { s: formatRuntimeDecimal(numeric, 1) });
+  return formatRuntimeDuration(numeric);
+}
+
+function formatRuntimeDurationNs(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  if (numeric < 1e9) return `${formatRuntimeDecimal(numeric / 1e6, 1)} ms`;
+  return formatRuntimeDuration(numeric / 1e9);
+}
+
+function formatRuntimeMetric(metric, stats) {
+  if (metric.zeroUnavailable && normalizeRuntimeMetric(stats[metric.key]) === 0) return '—';
+  if (metric.format === 'bytes') return formatRuntimeBytes(stats[metric.key]);
+  if (metric.format === 'duration') return formatRuntimeDuration(stats[metric.key]);
+  if (metric.format === 'seconds') return formatRuntimeSeconds(stats[metric.key]);
+  if (metric.format === 'durationNs') return formatRuntimeDurationNs(stats[metric.key]);
+  if (metric.format === 'percent') return formatRuntimePercent(stats[metric.key]);
+  if (metric.format === 'boolean') return formatRuntimeBoolean(stats[metric.key]);
+  if (metric.format === 'unixMilliseconds') return formatRuntimeTimestamp(stats[metric.key]);
+  if (metric.format === 'text') {
+    const value = stats[metric.key];
+    return value === null || value === undefined || String(value).trim() === '' ? '—' : String(value);
+  }
+  return formatRuntimeInteger(stats[metric.key]);
+}
+
+function renderRuntimeMetricCard(metric, stats) {
+  return `
+    <div class="runtime-metric-card">
+      <span class="runtime-metric-label">${escapeHtml(t(metric.labelKey))}</span>
+      <strong class="runtime-metric-value">${escapeHtml(formatRuntimeMetric(metric, stats))}</strong>
+      <code class="runtime-metric-key">${escapeHtml(metric.key)}</code>
+    </div>`;
+}
+
+function renderRuntimeMetricDomain(domain, payload) {
+  const stats = payload[domain.sourceKey];
+  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) {
+    return domain.optional ? '' : `
+      <section class="runtime-metrics-section">
+        <div class="runtime-metrics-section-header">
+          <h3>${escapeHtml(t(domain.titleKey))}</h3>
+        </div>
+        <p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.groupUnavailable'))}</p>
+      </section>`;
+  }
+  return `
+    <section class="runtime-metrics-section">
+      <div class="runtime-metrics-section-header">
+        <h3>${escapeHtml(t(domain.titleKey))}</h3>
+      </div>
+      <p class="runtime-metrics-section-description">${escapeHtml(t(domain.descriptionKey))}</p>
+      <div class="runtime-metrics-grid">
+        ${domain.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}
+      </div>
+    </section>`;
+}
+
+function renderRuntimeMetricGroup(group, stats) {
+  return `
+    <section class="runtime-metrics-subsection">
+      <div class="runtime-metrics-subsection-header">
+        <h4>${escapeHtml(t(group.titleKey))}</h4>
+      </div>
+      <div class="runtime-metrics-grid">
+        ${group.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}
+      </div>
+    </section>`;
+}
+
+function renderTranscriptUsage(stats) {
+  const used = normalizeRuntimeMetric(stats.transcript_bytes);
+  const budget = normalizeRuntimeMetric(stats.max_transcript_bytes);
+  const percent = used !== null && budget !== null && budget > 0
+    ? (used / budget) * 100
+    : null;
+
+  let state = 'unavailable';
+  if (percent !== null) {
+    if (percent > 100) state = 'exceeded';
+    else if (percent >= 80) state = 'warning';
+    else state = 'normal';
+  }
+
+  const stateLabel = t(`settings.runtimeMetrics.transcriptStatus.${state}`);
+  const percentLabel = percent === null ? '—' : `${formatRuntimeDecimal(percent, 1)}%`;
+  const progressValue = percent === null ? 0 : Math.min(100, Math.max(0, percent));
+  const progressAria = percent === null
+    ? ''
+    : `aria-valuenow="${Math.round(progressValue)}"`;
+
+  return `
+    <section class="runtime-transcript-card">
+      <div class="runtime-metrics-subsection-header">
+        <h4>${escapeHtml(t('settings.runtimeMetrics.group.transcript'))}</h4>
+        <span class="runtime-transcript-status runtime-transcript-status--${state}">${escapeHtml(stateLabel)}</span>
+      </div>
+      <div class="runtime-transcript-summary">
+        <strong>${escapeHtml(formatRuntimeBytes(used))} / ${escapeHtml(formatRuntimeBytes(budget))}</strong>
+        <span>${escapeHtml(percentLabel)}</span>
+      </div>
+      <div class="runtime-transcript-progress" role="progressbar" aria-label="${escapeHtml(t('settings.runtimeMetrics.group.transcript'))}" aria-valuemin="0" aria-valuemax="100" ${progressAria}>
+        <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--${state}" style="width: ${progressValue}%"></span>
+      </div>
+      <div class="runtime-transcript-details">
+        <span><b>${escapeHtml(t('settings.runtimeMetrics.metric.transcriptBytes'))}: ${escapeHtml(formatRuntimeBytes(used))}</b><code>transcript_bytes</code></span>
+        <span><b>${escapeHtml(t('settings.runtimeMetrics.metric.maxTranscriptBytes'))}: ${escapeHtml(formatRuntimeBytes(budget))}</b><code>max_transcript_bytes</code></span>
+      </div>
+      <p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.transcriptNote'))}</p>
+    </section>`;
+}
+
+function renderRuntimeMetrics(stats) {
+  const content = document.getElementById('runtime-metrics-content');
+  if (!content) return;
+
+  const domains = runtimeMetricDomains.map((domain) => renderRuntimeMetricDomain(domain, stats)).join('');
+  const responses = stats.responses_websocket;
+  let responsesSection = '';
+  if (responses && typeof responses === 'object' && !Array.isArray(responses)) {
+    const groups = responsesRuntimeMetricGroups.map((group) => renderRuntimeMetricGroup(group, responses)).join('');
+    responsesSection = `
+    <section class="runtime-metrics-section runtime-responses-section">
+      <div class="runtime-metrics-section-header">
+        <h3>${escapeHtml(t('settings.runtimeMetrics.group.responses'))}</h3>
+      </div>
+      <p class="runtime-metrics-section-description">${escapeHtml(t('settings.runtimeMetrics.responsesNote'))}</p>
+      ${renderTranscriptUsage(responses)}
+      ${groups}
+      <p class="runtime-metrics-note runtime-metrics-note--footer">${escapeHtml(t('settings.runtimeMetrics.cumulativeNote'))}</p>
+    </section>`;
+  }
+
+  content.innerHTML = `
+    ${domains}
+    ${responsesSection}`;
+}
+
+function renderRuntimeMetricsLoading() {
+  const content = document.getElementById('runtime-metrics-content');
+  if (!content) return;
+  content.innerHTML = `
+    <div class="runtime-metrics-message">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(t('settings.runtimeMetrics.loading'))}</span>
+    </div>`;
+}
+
+function renderRuntimeMetricsError(error) {
+  const content = document.getElementById('runtime-metrics-content');
+  if (!content) return;
+  const message = error?.message || t('settings.runtimeMetrics.loadFailed');
+  content.innerHTML = `
+    <div class="runtime-metrics-message runtime-metrics-message--error" role="alert">
+      <strong>${escapeHtml(t('settings.runtimeMetrics.loadFailed'))}</strong>
+      <span>${escapeHtml(message)}</span>
+    </div>`;
+}
+
+async function loadRuntimeMetrics(options) {
+  if (runtimeMetricsLoading) return;
+  // 手动刷新按钮的 click 事件会把 MouseEvent 传进来,此时 silent 恒为 false
+  const silent = options?.silent === true;
+
+  const content = document.getElementById('runtime-metrics-content');
+  const refreshBtn = document.getElementById('refresh-runtime-metrics-btn');
+  const updatedAt = document.getElementById('runtime-metrics-updated-at');
+  runtimeMetricsLoading = true;
+  if (content) content.setAttribute('aria-busy', 'true');
+  if (!silent) {
+    if (refreshBtn) refreshBtn.disabled = true;
+    if (updatedAt) updatedAt.textContent = '';
+    renderRuntimeMetricsLoading();
+  }
+
+  try {
+    const data = await fetchDataWithAuth('/admin/runtime-metrics');
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error(t('settings.runtimeMetrics.invalidResponse'));
+    }
+
+    renderRuntimeMetrics(data);
+    if (updatedAt) {
+      const time = new Date().toLocaleString(runtimeMetricsLocale());
+      updatedAt.textContent = t('settings.runtimeMetrics.updatedAt', { time });
+    }
+  } catch (error) {
+    console.error('Failed to load runtime metrics:', error);
+    renderRuntimeMetricsError(error);
+  } finally {
+    runtimeMetricsLoading = false;
+    if (content) content.setAttribute('aria-busy', 'false');
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function getSettingGroupInfo(key) {
+  const k = String(key || '').toLowerCase();
+
+  const defs = [
+    { id: 'advanced', nameKey: 'settings.group.advanced', order: 70, match: () => advancedSettingKeys.has(k) },
+    { id: 'channel', nameKey: 'settings.group.channel', order: 10, match: () => k.startsWith('channel_') || k === 'max_key_retries' },
+
+    { id: 'upstream-connection', nameKey: 'settings.group.upstreamConnection', order: 19, match: () => k === 'upstream_connection_reuse_limit_seconds' || ['antigravity_connection_reuse_enabled', 'antigravity_max_idle_conns_per_host', 'antigravity_idle_conn_timeout_seconds'].includes(k) || oauthBaseURLSettingKeys.has(k) },
+    { id: 'websocket', nameKey: 'settings.group.websocket', order: 25, match: () => k.startsWith('responses_ws_') },
+    { id: 'stream-timeout', nameKey: 'settings.group.streamTimeout', order: 20, match: () => k === 'stream_timeout' || k.endsWith('_first_byte_timeout') },
+    { id: 'non-stream-timeout', nameKey: 'settings.group.nonStreamTimeout', order: 21, match: () => k === 'non_stream_timeout' || k.endsWith('_non_stream_timeout') },
+    { id: 'limits', nameKey: 'settings.group.limits', order: 26, match: () => k === 'max_concurrency' || k.endsWith('_body_bytes') || k === 'http_read_timeout_seconds' },
+    { id: 'health', nameKey: 'settings.group.health', order: 30, match: () => k.includes('health_score') || k.includes('success_rate') || k.includes('penalty_weight') || k.includes('ttfb') || k === 'enable_health_score' || k === 'health_min_confident_sample' },
+    { id: 'billing', nameKey: 'settings.group.billing', order: 35, match: () => k === modelCustomPricingSettingKey },
+    { id: 'cooldown', nameKey: 'settings.group.cooldown', order: 40, match: () => k.startsWith('cooldown_') },
+    { id: 'log', nameKey: 'settings.group.log', order: 50, match: () => k.startsWith('log_') || k.startsWith('debug_') },
+    { id: 'access', nameKey: 'settings.group.access', order: 60, match: () => k.includes('auth_') },
+    { id: 'update', nameKey: 'settings.group.update', order: 65, match: () => k.startsWith('auto_update_') },
+  ];
+
+  for (const d of defs) {
+    if (d.match()) return { ...d, name: t(d.nameKey) };
+  }
+  return { id: 'advanced', nameKey: 'settings.group.advanced', name: t('settings.group.advanced'), order: 70 };
+}
+
+function getSettingOrder(key) {
+  const orders = {
+    upstream_connection_reuse_limit_seconds: 90,
+    antigravity_connection_reuse_enabled: 91,
+    antigravity_max_idle_conns_per_host: 92,
+    antigravity_idle_conn_timeout_seconds: 93,
+    codex_base_url: 91,
+    xai_base_url: 92,
+    antigravity_url: 93,
+    anthropic_base_url: 94,
+    upstream_first_byte_timeout: 100,
+    stream_timeout: 101,
+    non_stream_timeout: 102,
+    anthropic_first_byte_timeout: 110,
+    anthropic_non_stream_timeout: 111,
+    codex_first_byte_timeout: 120,
+    codex_non_stream_timeout: 121,
+    openai_first_byte_timeout: 130,
+    openai_non_stream_timeout: 131,
+    gemini_first_byte_timeout: 140,
+    gemini_non_stream_timeout: 141,
+    max_concurrency: 200,
+    max_body_bytes: 201,
+    max_image_body_bytes: 202,
+    http_read_timeout_seconds: 203,
+    cooldown_fallback_enabled: 300,
+    cooldown_auth_seconds: 301,
+    cooldown_server_seconds: 302,
+    cooldown_timeout_seconds: 303,
+    cooldown_rate_limit_seconds: 304,
+    cooldown_min_seconds: 305,
+    cooldown_max_seconds: 306,
+    global_cooldown_detection_rules: 700,
+    model_custom_pricing: 710
+  };
+  const normalizedKey = String(key || '').toLowerCase();
+  return orders[normalizedKey] ?? 1000;
+}
+
+function isModalSettingKey(key) {
+  return key === modelMultimodalFallbackSettingKey || key === modelCustomPricingSettingKey;
+}
+
+function groupSettings(settings) {
+  const groupsById = new Map();
+
+  for (const s of settings) {
+    const g = getSettingGroupInfo(s.key);
+    if (!groupsById.has(g.id)) {
+      groupsById.set(g.id, { id: g.id, name: g.name, order: g.order, settings: [] });
+    }
+    groupsById.get(g.id).settings.push(s);
+  }
+
+  const groups = Array.from(groupsById.values())
+    .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+
+  for (const g of groups) {
+    g.settings.sort((a, b) => {
+      const orderDiff = getSettingOrder(a.key) - getSettingOrder(b.key);
+      if (orderDiff !== 0) return orderDiff;
+      return String(a.key).localeCompare(String(b.key));
+    });
+  }
+
+  return groups;
+}
+
+function renderGroupNav(groups) {
+  const nav = document.getElementById('settings-group-nav');
+  const navSection = document.getElementById('settings-group-nav-section');
+  if (!nav) return;
+
+  nav.innerHTML = '';
+  const hasMultipleGroups = Array.isArray(groups) && groups.length > 1;
+  if (navSection) navSection.hidden = !hasMultipleGroups;
+  if (!hasMultipleGroups) return;
+
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const btn = document.createElement('button');
+    btn.className = 'time-range-btn' + (i === 0 ? ' active' : '');
+    btn.dataset.group = g.id;
+    btn.textContent = t(`settings.nav.${g.id}`);
+    btn.title = g.name;
+    btn.addEventListener('click', () => {
+      // 移除所有按钮的 active 状态
+      nav.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      // 滚动到对应分组
+      const target = document.getElementById(`settings-group-${g.id}`);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    nav.appendChild(btn);
+  }
+}
+
+function refreshSettingsTranslations() {
+  const groups = groupSettings(Array.from(settingDefinitions.values()))
+    .map((group) => ({ ...group, settings: group.settings.filter((setting) => !isModalSettingKey(setting.key)) }))
+    .filter((group) => group.settings.length > 0);
+  for (const group of groups) {
+    const button = document.querySelector(`#settings-group-nav [data-group="${group.id}"]`);
+    if (button) {
+      button.textContent = t(`settings.nav.${group.id}`);
+      button.title = group.name;
+    }
+    const title = document.querySelector(`#settings-group-${group.id} .setting-group-title`);
+    if (title) title.textContent = group.name;
+  }
+  for (const setting of settingDefinitions.values()) {
+    const row = document.querySelector(`.setting-data-row[data-key="${setting.key}"]`);
+    if (!row) continue;
+    const description = row.querySelector('.setting-col-description');
+    const key = `settings.desc.${setting.key}`;
+    const translated = t(key);
+    description.textContent = translated !== key ? translated : setting.description;
+    description.dataset.mobileLabel = t('settings.configItem');
+    row.querySelector('.setting-col-value').dataset.mobileLabel = t('settings.currentValue');
+    row.querySelector('.setting-col-actions').dataset.mobileLabel = t('common.actions');
+  }
+  updateGlobalCooldownRulesSummary(document.getElementById(globalCooldownRulesSettingKey)?.value || '');
+  updateMultimodalFallbackSummary(document.getElementById(modelMultimodalFallbackSettingKey)?.value || '');
+  updateCustomPricingSummary(document.getElementById(modelCustomPricingSettingKey)?.value || '');
+}
+
+async function loadSettings() {
+  try {
+    const data = await fetchDataWithAuth('/admin/settings');
+    if (!Array.isArray(data)) throw new Error(t('settings.msg.invalidResponse'));
+    renderSettings(data);
+  } catch (err) {
+    console.error('Failed to load settings:', err);
+    showError(t('settings.msg.loadFailed') + ': ' + err.message);
+  }
+}
+
+function renderSettings(settings) {
+  const tbody = document.getElementById('settings-tbody');
+  originalSettings = {};
+  settingDefinitions = new Map(settings.map((setting) => [setting.key, setting]));
+  tbody.innerHTML = '';
+
+  // 初始化事件委托（仅一次）
+  initSettingsEventDelegation();
+
+  for (const s of settings) {
+    const displayValue = settingValueForDisplay(s.key, s.value);
+    originalSettings[s.key] = displayValue;
+    if (!isModalSettingKey(s.key)) continue;
+    const target = document.getElementById(s.key);
+    if (target) target.value = displayValue;
+    const buttonID = s.key === modelMultimodalFallbackSettingKey
+      ? 'model-multimodal-fallback-btn'
+      : 'model-custom-pricing-btn';
+    const button = document.getElementById(buttonID);
+    if (button) button.disabled = s.editable === false;
+    if (s.key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(displayValue);
+    else updateCustomPricingSummary(displayValue);
+  }
+
+  const groups = groupSettings(settings)
+    .map((group) => ({ ...group, settings: group.settings.filter((setting) => !isModalSettingKey(setting.key)) }))
+    .filter((group) => group.settings.length > 0);
+  renderGroupNav(groups);
+
+  for (const g of groups) {
+    const groupRow = TemplateEngine.render('tpl-setting-group-row', {
+      groupId: g.id,
+      groupName: g.name,
+      groupNoticeHtml: renderSettingGroupNotice(g)
+    });
+    if (groupRow) tbody.appendChild(groupRow);
+
+    for (const s of g.settings) {
+      const displayValue = settingValueForDisplay(s.key, s.value);
+      // 优先使用语言包中的描述，若没有则回退到后端返回的描述
+      const descKey = `settings.desc.${s.key}`;
+      const translatedDesc = t(descKey);
+      const description = (translatedDesc !== descKey) ? translatedDesc : s.description;
+      const row = TemplateEngine.render('tpl-setting-row', {
+        key: s.key,
+        description: description,
+        inputHtml: renderInput({ ...s, value: displayValue }),
+        resetDisabledAttributes: settingDisabledAttributes(s),
+        mobileLabelDescription: t('settings.configItem'),
+        mobileLabelValue: t('settings.currentValue'),
+        mobileLabelActions: t('common.actions')
+      });
+      if (row) tbody.appendChild(row);
+    }
+  }
+}
+
+function renderSettingGroupNotice(group) {
+  const containerManaged = group.id === 'update' && group.settings.some((setting) => (
+    setting.editable === false && setting.disabled_reason === containerImageManagedDisabledReason
+  ));
+  if (!containerManaged) return '';
+
+  return `
+    <div class="settings-group-notice" role="note">
+      <p data-i18n="settings.update.containerManaged">${escapeHtml(t('settings.update.containerManaged'))}</p>
+      <ul>
+        <li><span data-i18n="settings.update.stableImage">${escapeHtml(t('settings.update.stableImage'))}</span>: <code>ghcr.io/caidaoli/ccload:latest</code></li>
+        <li><span data-i18n="settings.update.betaImage">${escapeHtml(t('settings.update.betaImage'))}</span>: <code>ghcr.io/caidaoli/ccload:beta</code></li>
+      </ul>
+      <p data-i18n="settings.update.applyImage">${escapeHtml(t('settings.update.applyImage'))}</p>
+      <code class="settings-group-notice-command">docker compose pull &amp;&amp; docker compose up -d</code>
+    </div>`;
+}
+
+function settingDisabledAttributes(setting) {
+  return setting.editable === false ? 'disabled' : '';
+}
+
+// 初始化事件委托（替代 inline onclick）
+function initSettingsEventDelegation() {
+  const tbody = document.getElementById('settings-tbody');
+  if (!tbody || tbody.dataset.delegated) return;
+  tbody.dataset.delegated = 'true';
+
+  // 重置按钮点击
+  tbody.addEventListener('click', (e) => {
+    const editGlobalRulesBtn = e.target.closest('[data-action="edit-global-cooldown-rules"]');
+    if (editGlobalRulesBtn) {
+      openGlobalCooldownRulesModal(editGlobalRulesBtn);
+      return;
+    }
+    const updateCheckBtn = e.target.closest('[data-action="check-for-updates"]');
+    if (updateCheckBtn) {
+      checkForUpdates(updateCheckBtn);
+      return;
+    }
+    const resetBtn = e.target.closest('.setting-reset-btn');
+    if (resetBtn) {
+      resetSetting(resetBtn.dataset.key);
+    }
+  });
+
+  // 输入变更
+  tbody.addEventListener('change', (e) => {
+    const input = e.target.closest('input, select');
+    if (input) markChanged(input);
+  });
+}
+
+// 手动触发完整更新流程：检查、下载、校验、替换，之后由服务端等待空闲重启。
+async function checkForUpdates(button) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.setAttribute?.('aria-busy', 'true');
+  try {
+    const result = await fetchDataWithAuth('/admin/update/check', { method: 'POST' });
+    if (result.pending_restart) {
+      showSuccess(t('settings.updateCheck.pendingRestart', { version: result.pending_version }));
+    } else if (result.has_update) {
+      showSuccess(t('settings.updateCheck.found', { version: result.latest_version }));
+    } else {
+      showSuccess(t('settings.updateCheck.upToDate', { version: result.latest_version }));
+    }
+  } catch (err) {
+    showError(t('settings.updateCheck.failed') + ': ' + err.message);
+  } finally {
+    button.disabled = false;
+    button.removeAttribute?.('aria-busy');
+  }
+}
+
+function renderInput(setting) {
+  const safeKey = escapeHtml(setting.key);
+  const safeValue = escapeHtml(setting.value);
+  const placeholder = oauthBaseURLPlaceholders.get(setting.key);
+  const placeholderAttribute = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : '';
+  const wideTextInput = setting.key === 'channel_test_content' || oauthBaseURLPlaceholders.has(setting.key);
+  const disabledAttributes = settingDisabledAttributes(setting);
+  const numericAttributes = numericInputAttributes(setting);
+
+  if (setting.key === globalCooldownRulesSettingKey) {
+    const count = globalCooldownRuleCount(setting.value);
+    return `
+      <div class="global-cooldown-rules-control">
+        <input type="hidden" id="${safeKey}" value="${safeValue}">
+        <button type="button" class="btn btn-secondary" data-action="edit-global-cooldown-rules" data-i18n="settings.globalCooldownRules.edit" ${disabledAttributes}>
+          ${escapeHtml(t('settings.globalCooldownRules.edit'))}
+        </button>
+        <span id="global-cooldown-rules-summary" class="global-cooldown-rules-summary">
+          ${escapeHtml(t('settings.globalCooldownRules.ruleCount', { count }))}
+        </span>
+      </div>`;
+  }
+
+  const selectOptions = selectSettingOptions.get(setting.key);
+  if (selectOptions) {
+    const optionsHtml = selectOptions.map(({ value, labelKey }) => (
+      `<option value="${value}" data-i18n="${labelKey}" ${setting.value === value ? 'selected' : ''}>${escapeHtml(t(labelKey))}</option>`
+    )).join('');
+    const selectHtml = `
+      <select id="${safeKey}" class="settings-input settings-input--select" ${disabledAttributes}>
+        ${optionsHtml}
+      </select>`;
+    // 更新渠道旁提供手动检测按钮；容器模式（editable=false）不渲染、后端同样拒绝。
+    if (setting.key === 'auto_update_channel' && setting.editable !== false) {
+      return `
+        <div class="settings-update-channel-control">
+          ${selectHtml}
+          <button type="button" class="btn btn-secondary settings-update-check-btn" data-action="check-for-updates" data-i18n="settings.updateCheck.check">
+            ${escapeHtml(t('settings.updateCheck.check'))}
+          </button>
+        </div>`;
+    }
+    return selectHtml;
+  }
+
+  if (byteSettingKeys.has(setting.key)) {
+    return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+  }
+
+  switch (setting.value_type) {
+    case 'bool':
+      const isTrue = setting.value === 'true' || setting.value === '1';
+      return `
+        <div class="settings-bool-group">
+          <label class="settings-bool-option">
+            <input type="radio" name="${safeKey}" value="true" ${isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.enable">${t('common.enable')}</span>
+          </label>
+          <label class="settings-bool-option">
+            <input type="radio" name="${safeKey}" value="false" ${!isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.disable">${t('common.disable')}</span>
+          </label>
+        </div>`;
+    case 'int':
+    case 'duration':
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+    case 'float':
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+    default:
+      return `<input type="text" id="${safeKey}" value="${safeValue}" ${placeholderAttribute} class="settings-input settings-input--text${wideTextInput ? ' settings-input--wide' : ''}" ${disabledAttributes}>`;
+  }
+}
+
+function markChanged(input) {
+  input.removeAttribute?.('aria-invalid');
+  const row = input.closest('tr');
+  if (!row) return; // 常驻控制区（如多模态回退 hidden input）没有表格行可高亮
+  let key, currentValue;
+
+  if (input.type === 'radio') {
+    key = input.name;
+    const checkedRadio = row.querySelector(`input[name="${key}"]:checked`);
+    currentValue = checkedRadio ? checkedRadio.value : '';
+  } else {
+    key = input.id;
+    currentValue = input.value;
+  }
+
+  if (currentValue !== originalSettings[key]) {
+    row.style.background = 'rgba(59, 130, 246, 0.08)';
+  } else {
+    row.style.background = '';
+  }
+}
+
+function setSettingInvalid(key, invalid) {
+  const control = getSettingControl(key);
+  if (!control) return;
+  const inputs = control.radios ? Array.from(control.radios) : [control.input];
+  for (const input of inputs) {
+    if (invalid) input.setAttribute?.('aria-invalid', 'true');
+    else input.removeAttribute?.('aria-invalid');
+  }
+  if (invalid) control.input?.focus?.();
+}
+
+function getSettingControl(key) {
+  const input = document.getElementById(key);
+  if (input) {
+    return {
+      input,
+      row: input.closest('tr'),
+      value: input.value
+    };
+  }
+
+  const radios = document.querySelectorAll(`input[name="${key}"]`);
+  if (radios.length === 0) return null;
+
+  const checkedRadio = document.querySelector(`input[name="${key}"]:checked`);
+  return {
+    input: radios[0],
+    radios,
+    row: radios[0].closest('tr'),
+    value: checkedRadio ? checkedRadio.value : ''
+  };
+}
+
+function setSettingControlValue(key, value) {
+  const normalizedValue = settingValueForDisplay(key, value);
+  const control = getSettingControl(key);
+
+  if (control?.radios) {
+    for (const radio of control.radios) {
+      radio.checked = radio.value === normalizedValue
+        || (normalizedValue === '1' && radio.value === 'true')
+        || (normalizedValue === '0' && radio.value === 'false');
+    }
+  } else if (control?.input) {
+    control.input.value = normalizedValue;
+  }
+
+  if (key === globalCooldownRulesSettingKey) updateGlobalCooldownRulesSummary(normalizedValue);
+  if (key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(normalizedValue);
+  if (key === modelCustomPricingSettingKey) updateCustomPricingSummary(normalizedValue);
+  return control;
+}
+
+function syncSettingState(key, value) {
+  const normalizedValue = settingValueForDisplay(key, value);
+  const control = setSettingControlValue(key, value);
+
+  originalSettings[key] = normalizedValue;
+  if (control?.row) {
+    control.row.style.background = '';
+  }
+}
+
+async function saveAllSettings() {
+  // 收集所有变更
+  const updates = {};
+
+  for (const key of Object.keys(originalSettings)) {
+    const control = getSettingControl(key);
+    if (!control) continue;
+
+    const currentValue = control.value;
+    if (currentValue !== originalSettings[key]) {
+      const setting = settingDefinitions.get(key);
+      const validationError = setting ? validateSettingInput(setting, currentValue) : '';
+      if (validationError) {
+        setSettingInvalid(key, true);
+        showError(t('settings.msg.invalidValue', { key, reason: validationError }));
+        return;
+      }
+      setSettingInvalid(key, false);
+      updates[key] = settingValueForStorage(key, currentValue);
+    }
+  }
+
+  if (Object.keys(updates).length === 0) {
+    window.showNotification(t('settings.msg.noChanges'), 'info');
+    return;
+  }
+
+  if ('cooldown_min_seconds' in updates || 'cooldown_max_seconds' in updates) {
+    const minSeconds = Number(getSettingControl('cooldown_min_seconds')?.value);
+    const maxSeconds = Number(getSettingControl('cooldown_max_seconds')?.value);
+    if (minSeconds > maxSeconds) {
+      setSettingInvalid('cooldown_min_seconds', true);
+      setSettingInvalid('cooldown_max_seconds', true);
+      showError(t('settings.msg.invalidCooldownBounds'));
+      return;
+    }
+  }
+
+  if (!confirm(t('settings.msg.confirmSave'))) return;
+
+  // 使用批量更新接口（单次请求，事务保护）
+  try {
+    const result = await fetchDataWithAuth('/admin/settings/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+
+    for (const [key, value] of Object.entries(updates)) {
+      syncSettingState(key, value);
+    }
+
+    showSuccess(result?.message || t('settings.msg.savedCount', { count: Object.keys(updates).length }));
+  } catch (err) {
+    console.error('保存异常:', err);
+    showError(t('settings.msg.saveFailed') + ': ' + err.message);
+  }
+}
+
+function resetSetting(key) {
+  const setting = settingDefinitions.get(key);
+  if (!setting) {
+    showError(t('settings.msg.resetUnavailable', { key }));
+    return;
+  }
+
+  const control = setSettingControlValue(key, setting.default_value ?? '');
+  if (control?.input) markChanged(control.input);
+}
+
+window.i18n?.onLocaleChange?.(refreshSettingsTranslations);
+
+window.initPageBootstrap({
+  topbarKey: 'settings',
+  run: () => {
+    bindSettingsPageActions();
+    loadSettings();
+  }
+});

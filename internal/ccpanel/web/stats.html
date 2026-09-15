@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/web/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
+  <link rel="apple-touch-icon" href="/web/apple-touch-icon.png">
+  <link rel="manifest" href="/web/manifest.json">
+  <meta name="theme-color" content="#3b82f6">
+  <title data-i18n="stats.title">调用统计 - Claude Code & Codex Proxy</title>
+  <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
+  <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/channels.css?v=__VERSION__">
+  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/echarts.min.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/filter-state.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/filter-query.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/stats.js?v=__VERSION__"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- 主内容区域 -->
+    <main class="main-content">
+      <div class="content-area">
+        <div data-page-filters="stats"></div>
+
+        <!-- 统计详情表格 -->
+        <section class="mb-8">
+		          <div class="glass-card stats-detail-card">
+            <h3 class="section-title stats-detail-heading mb-6">
+              <span class="stats-detail-heading-main">
+                <svg class="inline-block w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                </svg>
+                <span data-i18n="stats.detailTitle">详细统计数据</span>
+                <small class="stats-detail-sort-hint" data-i18n="stats.sortByPriority">
+                  按优先级、名称排序
+                </small>
+              </span>
+              <!-- 表格/图表切换按钮 -->
+              <div class="view-toggle-group" id="view-toggle-group">
+                <button type="button" class="view-toggle-btn active" data-view="table">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                  </svg>
+                  <span data-i18n="stats.viewTable">表格</span>
+                </button>
+                <button type="button" class="view-toggle-btn" data-view="chart">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"/>
+                  </svg>
+                  <span data-i18n="stats.viewChart">图表</span>
+                </button>
+              </div>
+            </h3>
+            
+            <!-- 统计表格 -->
+            <script>
+              // 立即恢复视图状态，避免闪烁
+              (function() {
+                try {
+                  var savedView = localStorage.getItem('stats.view');
+                  if (savedView === 'chart') {
+                    document.documentElement.classList.add('stats-view-init-chart');
+                  }
+                } catch(_) {}
+              })();
+            </script>
+            <div class="table-container stats-table-container mobile-card-table-container" id="stats-table-view">
+              <table class="modern-table stats-table mobile-card-table">
+                <thead>
+                  <tr>
+                    <th class="sortable" data-column="channel_name">
+                      <span data-i18n="stats.channelName">渠道名称</span>
+                      <span class="sort-indicator" id="sort-channel_name"></span>
+                    </th>
+                    <th class="sortable" data-column="model">
+                      <span data-i18n="common.model">模型</span>
+                      <span class="sort-indicator" id="sort-model"></span>
+                    </th>
+                    <th class="sortable stats-header-accent--success" data-column="success">
+                      <span data-i18n="common.success">成功</span>
+                      <span class="sort-indicator" id="sort-success"></span>
+                    </th>
+                    <th class="sortable stats-header-accent--error" data-column="error">
+                      <span data-i18n="common.failed">失败</span>
+                      <span class="sort-indicator" id="sort-error"></span>
+                    </th>
+                    <th class="sortable" data-column="avg_first_byte_time">
+                      <span data-i18n="stats.avgFirstByte">首字/耗时(秒)</span>
+                      <span class="sort-indicator" id="sort-avg_first_byte_time"></span>
+                    </th>
+                    <th class="sortable" data-column="avg_speed">
+                      <span data-i18n="stats.avgSpeed">Tok/s</span>
+                      <span class="sort-indicator" id="sort-avg_speed"></span>
+                    </th>
+                    <th class="sortable" data-column="rpm" data-i18n-title="stats.rpmTitle" title="每分钟请求数(峰值/平均/最近)">
+                      <span data-i18n="stats.rpm">RPM(峰/均/近)</span>
+                      <span class="sort-indicator" id="sort-rpm"></span>
+                    </th>
+                    <th class="sortable" data-column="total_input_tokens">
+                      <span data-i18n="stats.inputTokens">输入</span>
+                      <span class="sort-indicator" id="sort-total_input_tokens"></span>
+                    </th>
+                    <th class="sortable" data-column="total_output_tokens">
+                      <span data-i18n="stats.outputTokens">输出</span>
+                      <span class="sort-indicator" id="sort-total_output_tokens"></span>
+                    </th>
+                    <th class="sortable stats-header-accent--cache-read" data-column="total_cache_read">
+                      <span data-i18n="stats.cacheRead">缓存读取</span>
+                      <span class="sort-indicator" id="sort-total_cache_read"></span>
+                    </th>
+                    <th class="sortable stats-header-accent--cache-create" data-column="total_cache_creation">
+                      <span data-i18n="stats.cacheCreation">缓存创建</span>
+                      <span class="sort-indicator" id="sort-total_cache_creation"></span>
+                    </th>
+                    <th data-column="cache_util">
+                      <span data-i18n="stats.cacheUtil">缓存命中</span>
+                    </th>
+                    <th class="sortable stats-header-accent--cost" data-column="total_cost">
+                      <span data-i18n="stats.costUsd">成本</span>
+                      <span class="sort-indicator" id="sort-total_cost"></span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody id="stats_tbody">
+                  <tr>
+                    <td colspan="13" class="loading-state">
+                      <div class="loading-spinner loading-spinner--block"></div>
+                      <span data-i18n="stats.loading">正在加载统计数据...</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 图表视图 -->
+            <div id="stats-chart-view" class="hidden">
+              <div class="charts-grid">
+                <!-- 第1行：调用次数 -->
+                <!-- 渠道调用次数饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartChannelCalls">渠道调用次数</h4>
+                  <div id="chart-channel-calls" class="pie-chart-container"></div>
+                </div>
+                <!-- 模型调用次数饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartModelCalls">模型调用次数</h4>
+                  <div id="chart-model-calls" class="pie-chart-container"></div>
+                </div>
+                <!-- 第2行：成本 -->
+                <!-- 渠道成本饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartChannelCost">渠道成本</h4>
+                  <div id="chart-channel-cost" class="pie-chart-container"></div>
+                </div>
+                <!-- 模型成本饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartModelCost">模型成本</h4>
+                  <div id="chart-model-cost" class="pie-chart-container"></div>
+                </div>
+                <!-- 第3行：Token用量 -->
+                <!-- 渠道Token用量饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartChannelTokens">渠道Token用量</h4>
+                  <div id="chart-channel-tokens" class="pie-chart-container"></div>
+                </div>
+                <!-- 模型Token用量饼图 -->
+                <div class="chart-card">
+                  <h4 class="chart-title" data-i18n="stats.chartModelTokens">模型Token用量</h4>
+                  <div id="chart-model-tokens" class="pie-chart-container"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- 加载状态模板 -->
+  <template id="tpl-stats-loading">
+    <tr>
+      <td colspan="{{colspan}}" class="loading-state">
+        <div class="loading-spinner loading-spinner--block"></div>
+        <span data-i18n="stats.loading">正在加载统计数据...</span>
+      </td>
+    </tr>
+  </template>
+
+  <!-- 错误状态模板 -->
+  <template id="tpl-stats-error">
+    <tr>
+      <td colspan="{{colspan}}" class="empty-state">
+        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.18 16.5c-.77.833.192 2.5 1.732 2.5z"/>
+        </svg>
+        <div class="empty-state-title empty-state-title--error" data-i18n="stats.loadFailed">加载失败</div>
+        <div data-i18n="stats.checkNetwork">请检查网络连接或重试</div>
+      </td>
+    </tr>
+  </template>
+
+  <!-- 空数据状态模板 -->
+  <template id="tpl-stats-empty">
+    <tr>
+      <td colspan="{{colspan}}" class="empty-state">
+        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--neutral" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+        </svg>
+        <div class="empty-state-title" data-i18n="stats.noData">暂无统计数据</div>
+        <div data-i18n="stats.adjustFilter">请调整筛选条件或检查时间范围</div>
+      </td>
+    </tr>
+  </template>
+
+  <!-- 数据行模板 -->
+  <template id="tpl-stats-row">
+    <tr class="mobile-card-row stats-data-row">
+      <td class="stats-col-channel" data-mobile-label="{{mobileLabelChannel}}">
+        <a href="#" class="config-name channel-link" data-channel-name="{{channelNameAttr}}" title="查看该渠道的日志">{{channelName}}</a>
+        {{{channelIdBadge}}}
+        {{{healthIndicator}}}
+      </td>
+      <td class="stats-col-model" data-mobile-label="{{mobileLabelModel}}">{{{modelDisplay}}}</td>
+      <td class="stats-col-success" data-mobile-label="{{mobileLabelSuccess}}">{{{successDisplay}}}</td>
+      <td class="stats-col-error" data-mobile-label="{{mobileLabelError}}"><span class="error-count">{{errorCount}}</span></td>
+      <td class="stats-col-timing {{timingCellClass}}" data-mobile-label="{{mobileLabelTiming}}">{{{avgFirstByteTime}}}</td>
+      <td class="stats-col-speed {{speedCellClass}}" data-mobile-label="{{mobileLabelSpeed}}">{{{avgSpeed}}}</td>
+      <td class="stats-col-rpm" data-mobile-label="{{mobileLabelRpm}}">{{{rpm}}}</td>
+      <td class="stats-col-input {{inputCellClass}}" data-mobile-label="{{mobileLabelInput}}">{{{inputTokens}}}</td>
+      <td class="stats-col-output {{outputCellClass}}" data-mobile-label="{{mobileLabelOutput}}">{{{outputTokens}}}</td>
+      <td class="stats-col-cache-read {{cacheReadCellClass}}" data-mobile-label="{{mobileLabelCacheRead}}">{{{cacheReadTokens}}}</td>
+      <td class="stats-col-cache-create {{cacheCreateCellClass}}" data-mobile-label="{{mobileLabelCacheCreate}}">{{{cacheCreationTokens}}}</td>
+      <td class="stats-col-cache-util {{cacheUtilCellClass}}" data-mobile-label="{{mobileLabelCacheUtil}}">{{{cacheUtilText}}}</td>
+      <td class="stats-col-cost {{costCellClass}}" data-mobile-label="{{mobileLabelCost}}">{{{costText}}}</td>
+    </tr>
+  </template>
+
+  <!-- 合计行模板 -->
+  <template id="tpl-stats-total">
+    <tr class="mobile-card-row stats-total-row">
+      <td colspan="2" class="stats-col-total-label" data-mobile-label="{{mobileLabelSummary}}" data-i18n="stats.total">合计</td>
+      <td class="stats-col-success" data-mobile-label="{{mobileLabelSuccess}}">{{{successDisplay}}}</td>
+      <td class="stats-col-error" data-mobile-label="{{mobileLabelError}}"><span class="error-count">{{errorCount}}</span></td>
+      <td class="stats-col-timing {{timingCellClass}}" data-mobile-label="{{mobileLabelTiming}}">{{{avgFirstByteTime}}}</td>
+      <td class="stats-col-speed {{speedCellClass}}" data-mobile-label="{{mobileLabelSpeed}}">{{{avgSpeed}}}</td>
+      <td class="stats-col-rpm" data-mobile-label="{{mobileLabelRpm}}">{{{rpm}}}</td>
+      <td class="stats-col-input" data-mobile-label="{{mobileLabelInput}}">{{inputTokens}}</td>
+      <td class="stats-col-output" data-mobile-label="{{mobileLabelOutput}}">{{outputTokens}}</td>
+      <td class="stats-col-cache-read" data-mobile-label="{{mobileLabelCacheRead}}"><span class="stats-value-success">{{cacheReadTokens}}</span></td>
+      <td class="stats-col-cache-create" data-mobile-label="{{mobileLabelCacheCreate}}"><span class="stats-value-primary">{{cacheCreationTokens}}</span></td>
+      <td class="stats-col-cache-util" data-mobile-label="{{mobileLabelCacheUtil}}">{{{cacheUtilText}}}</td>
+      <td class="stats-col-cost" data-mobile-label="{{mobileLabelCost}}">{{{costText}}}</td>
+    </tr>
+  </template>
+
+</body>
+</html>
