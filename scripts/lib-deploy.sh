@@ -203,6 +203,12 @@ install_binary() {
 	echo "==> installed ${BIN_DIR}/devin-2api (config.yaml → ${CONFIG_DIR})"
 }
 
+# install_rotate_script：把 copytruncate 轮转脚本装到 BIN_DIR（脱离仓库路径
+# 也能被定时任务引用——worktree 部署会整个重铺 staging，仓库路径不可靠）。
+install_rotate_script() {
+	install -m 755 scripts/rotate-logs.sh "${BIN_DIR}/devin-2api-logrotate"
+}
+
 # migrate_legacy_runtime <旧运行目录>：把上一版「单运行目录」布局迁到拆分
 # 布局——config.yaml 入 CONFIG_DIR、logs/ 逐项并入 STATE_DIR/logs，删旧
 # 二进制与 .handoff.pid（登记在册的残留交接进程 SIGTERM 退场）。同名冲突
@@ -495,6 +501,10 @@ spawn_handoff() {
 	startline=0
 	[[ -f "${logf}" ]] && startline="$(wc -l <"${logf}" | tr -d ' ')"
 	(
+		# TZ 显式剥掉：经 ssh 拉起的会话可能带调用方 TZ（实测注入 UTC），
+		# 与托管实例（无 TZ，走 /etc/localtime）的日志时区不一致。unset 后
+		# 两侧同走系统时区。
+		unset TZ
 		cd "${STATE_DIR}" && exec env DEVIN2API_REUSEPORT=1 \
 			"${BIN_DIR}/devin-2api" -config "${CONFIG_DIR}/config.yaml" -state-dir "${STATE_DIR}"
 	) >>"${STATE_DIR}/logs/stdout.log" 2>>"${logf}" &
@@ -575,8 +585,8 @@ handoff_restart() {
 		warn "交接进程未接管（可能已崩）——退化为等托管新实例直接上线"
 		return 0
 	fi
-	echo "==> 交接进程已接管全部新连接；等托管新实例拉起（旧实例排空，上限 ~310s）" >&2
-	if ! mpid="$(wait_managed_pid 310 "${old_pid}" "${tpid}")"; then
+	echo "==> 交接进程已接管全部新连接；等托管新实例拉起（旧实例排空，上限 ~660s）" >&2
+	if ! mpid="$(wait_managed_pid 660 "${old_pid}" "${tpid}")"; then
 		warn "托管实例未在预期内复活——交接进程 pid=${tpid} 继续服役，pidfile 保留供下次部署回收"
 		return 0
 	fi

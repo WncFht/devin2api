@@ -33,7 +33,7 @@ svc_pid()     { launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \
 svc_restart() { launchctl kickstart -k "gui/$(id -u)/${LABEL}"; }
 
 # plist_content：目标服务定义。EnvironmentVariables 注入 reuseport 是
-# 重叠交接的前提；ExitTimeOut 须覆盖二进制 drainTimeout（300s）+退出余量。
+# 重叠交接的前提；ExitTimeOut 须覆盖二进制 drainTimeout（600s）+退出余量。
 plist_content() {
 	cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,12 +57,59 @@ plist_content() {
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>ThrottleInterval</key><integer>5</integer>
-	<key>ExitTimeOut</key><integer>330</integer>
+	<key>ExitTimeOut</key><integer>660</integer>
 	<key>StandardOutPath</key><string>${STATE_DIR}/logs/stdout.log</string>
 	<key>StandardErrorPath</key><string>${STATE_DIR}/logs/stderr.log</string>
 </dict>
 </plist>
 EOF
+}
+
+# logrotate 用独立 agent：StartInterval 每天跑一次 copytruncate 轮转，
+# 与主服务解耦——它的 bootout/bootstrap 不影响服务在途请求。
+LOGROTATE_LABEL="${LABEL}.logrotate"
+LOGROTATE_PLIST="${HOME}/Library/LaunchAgents/${LOGROTATE_LABEL}.plist"
+
+logrotate_plist_content() {
+	cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>${LOGROTATE_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${BIN_DIR}/devin-2api-logrotate</string>
+		<string>${STATE_DIR}/logs</string>
+	</array>
+	<key>StartInterval</key><integer>86400</integer>
+	<key>StandardOutPath</key><string>${STATE_DIR}/logs/logrotate.out</string>
+	<key>StandardErrorPath</key><string>${STATE_DIR}/logs/logrotate.err</string>
+</dict>
+</plist>
+EOF
+}
+
+# sync_logrotate_agent：agent 缺失生成、漂移重写后 bootout+bootstrap
+# 生效（StartInterval 任务无状态，重载成本为零）。
+sync_logrotate_agent() {
+	local changed=0
+	if [[ ! -f "${LOGROTATE_PLIST}" ]]; then
+		logrotate_plist_content >"${LOGROTATE_PLIST}"
+		changed=1
+	elif ! logrotate_plist_content | cmp -s - "${LOGROTATE_PLIST}"; then
+		logrotate_plist_content >"${LOGROTATE_PLIST}"
+		changed=1
+	fi
+	if launchctl print "gui/$(id -u)/${LOGROTATE_LABEL}" >/dev/null 2>&1; then
+		[[ "${changed}" == "1" ]] && launchctl bootout "gui/$(id -u)/${LOGROTATE_LABEL}" 2>/dev/null || true
+	else
+		changed=1
+	fi
+	if [[ "${changed}" == "1" ]]; then
+		launchctl bootstrap "gui/$(id -u)" "${LOGROTATE_PLIST}"
+		echo "==> logrotate agent loaded (${LOGROTATE_LABEL}, daily)"
+	fi
 }
 
 do_uninstall() {
@@ -76,6 +123,15 @@ do_uninstall() {
 	if [[ -f "${PLIST}" ]]; then
 		rm -f "${PLIST}"
 		echo "==> removed ${PLIST}"
+		did=1
+	fi
+	if launchctl print "gui/$(id -u)/${LOGROTATE_LABEL}" >/dev/null 2>&1; then
+		launchctl bootout "gui/$(id -u)/${LOGROTATE_LABEL}"
+		did=1
+	fi
+	if [[ -f "${LOGROTATE_PLIST}" ]]; then
+		rm -f "${LOGROTATE_PLIST}"
+		rm -f "${BIN_DIR}/devin-2api-logrotate"
 		did=1
 	fi
 	remove_installed_binary && did=1
@@ -115,6 +171,7 @@ check_port_available "${LAUNCHD_PID:-0}"
 VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
+install_rotate_script
 # 旧版单运行目录布局迁移：macOS 下只剩清理 LEGACY_RUNTIME 里的旧二进制
 # 与 .handoff.pid（config/logs 本就与 CONFIG_DIR/STATE_DIR 同路径）。
 migrate_legacy_runtime "${LEGACY_RUNTIME}"
@@ -137,6 +194,7 @@ if ! launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
 	launchctl bootstrap "gui/$(id -u)" "${PLIST}"
 	FRESH_BOOT=1
 fi
+sync_logrotate_agent
 
 if [[ "${NO_RESTART}" == "1" ]]; then
 	echo "done (binary swapped, restart skipped)"
@@ -168,8 +226,8 @@ else
 fi
 
 echo "==> waiting for healthz version=${VERSION} (old pid: ${OLD_PID:-?})"
-# 交接路径几秒内即达；回退路径最坏要等 300s 排空 + KeepAlive 重拉。
-RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 330)" || {
+# 交接路径几秒内即达；回退路径最坏要等 600s 排空 + KeepAlive 重拉。
+RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 660)" || {
 	echo "healthz 未出现新版本 (last=${RUNNING})" >&2
 	dump_recent_log
 	exit 1

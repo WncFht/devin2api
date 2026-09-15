@@ -36,7 +36,7 @@ svc_pid()     { systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null; 
 svc_restart() { systemctl --user restart "${UNIT}"; }
 
 # unit_content：目标服务定义。Environment 注入 reuseport 是重叠交接的前提；
-# TimeoutStopSec 须覆盖二进制 drainTimeout（300s）+退出余量。
+# TimeoutStopSec 须覆盖二进制 drainTimeout（600s）+退出余量。
 unit_content() {
 	cat <<EOF
 [Unit]
@@ -49,7 +49,7 @@ WorkingDirectory=${STATE_DIR}
 Environment=DEVIN2API_REUSEPORT=1
 Restart=always
 RestartSec=5
-TimeoutStopSec=330
+TimeoutStopSec=660
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -62,16 +62,75 @@ WantedBy=default.target
 EOF
 }
 
+# 日志轮转走独立的 oneshot service + daily timer——oneshot 无状态，
+# enable --now 与重载都不影响主服务在途请求。
+LOGROTATE_SERVICE="devin-2api-logrotate.service"
+LOGROTATE_TIMER="devin-2api-logrotate.timer"
+
+logrotate_service_content() {
+	cat <<EOF
+[Unit]
+Description=devin-2api log rotation (copytruncate)
+
+[Service]
+Type=oneshot
+ExecStart=${BIN_DIR}/devin-2api-logrotate ${STATE_DIR}/logs
+ReadWritePaths=${STATE_DIR}
+EOF
+}
+
+logrotate_timer_content() {
+	cat <<EOF
+[Unit]
+Description=daily devin-2api log rotation
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+# sync_logrotate_timer：单元缺失生成、漂移重写后 daemon-reload；
+# timer 幂等 enable --now。
+sync_logrotate_timer() {
+	local changed=0
+	for f in "${LOGROTATE_SERVICE}" "${LOGROTATE_TIMER}"; do
+		local content_fn="logrotate_${f##*.}_content"
+		if [[ ! -f "${UNIT_DIR}/${f}" ]] || ! "${content_fn}" | cmp -s - "${UNIT_DIR}/${f}"; then
+			"${content_fn}" >"${UNIT_DIR}/${f}"
+			changed=1
+		fi
+	done
+	if [[ "${changed}" == "1" ]]; then
+		systemctl --user daemon-reload
+		echo "==> logrotate units updated"
+	fi
+	systemctl --user enable --now "${LOGROTATE_TIMER}" >/dev/null 2>&1 ||
+		systemctl --user enable "${LOGROTATE_TIMER}"
+}
+
 do_uninstall() {
 	local did=0
 	retire_stale_transient
 	if systemctl --user cat "${UNIT}" >/dev/null 2>&1; then
 		systemctl --user disable --now "${UNIT}"
 		rm -f "${UNIT_DIR}/${UNIT}"
-		systemctl --user daemon-reload
 		echo "==> unit disabled and removed (${UNIT_DIR}/${UNIT})"
 		did=1
 	fi
+	if systemctl --user cat "${LOGROTATE_TIMER}" >/dev/null 2>&1; then
+		systemctl --user disable --now "${LOGROTATE_TIMER}"
+		did=1
+	fi
+	if [[ -f "${UNIT_DIR}/${LOGROTATE_SERVICE}" || -f "${UNIT_DIR}/${LOGROTATE_TIMER}" ]]; then
+		rm -f "${UNIT_DIR}/${LOGROTATE_SERVICE}" "${UNIT_DIR}/${LOGROTATE_TIMER}"
+		rm -f "${BIN_DIR}/devin-2api-logrotate"
+		did=1
+	fi
+	[[ "${did}" == "1" ]] && systemctl --user daemon-reload
 	remove_installed_binary && did=1
 	[[ -f "${CONFIG_DIR}/config.yaml" || -d "${STATE_DIR}/logs" ]] &&
 		echo "    保留 ${CONFIG_DIR}/config.yaml 与 ${STATE_DIR}/logs/；彻底清理: rm -rf '${CONFIG_DIR}' '${STATE_DIR}'"
@@ -105,6 +164,7 @@ check_port_available "${MANAGED_PID:-0}"
 VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
+install_rotate_script
 # 旧版单运行目录（~/.local/share/devin-2api）迁移：config 入 CONFIG_DIR、
 # logs 入 STATE_DIR、删旧二进制；目标已存在不覆盖。
 migrate_legacy_runtime "${LEGACY_RUNTIME}"
@@ -132,6 +192,7 @@ if ! systemctl --user cat "${UNIT}" >/dev/null 2>&1; then
 elif [[ "${UNIT_RELOAD}" == "1" ]]; then
 	systemctl --user daemon-reload
 fi
+sync_logrotate_timer
 
 if [[ "${NO_RESTART}" == "1" ]]; then
 	echo "done (binary swapped, restart skipped)"
@@ -154,8 +215,8 @@ else
 fi
 
 echo "==> waiting for healthz version=${VERSION} (old pid: ${OLD_PID:-?})"
-# 交接路径几秒内即达；回退路径最坏要等 300s 排空 + Restart 重拉。
-RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 330)" || {
+# 交接路径几秒内即达；回退路径最坏要等 600s 排空 + Restart 重拉。
+RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 660)" || {
 	echo "healthz 未出现新版本 (last=${RUNNING})" >&2
 	dump_recent_log
 	exit 1
