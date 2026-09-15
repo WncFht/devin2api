@@ -1242,6 +1242,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				}
 				events := stream.release(stream.decoder.finish(upstreamErr))
 				if upstreamErr == nil && stream.handleServerCalls(ctx, &events) {
+					// 续轮换流前先把本跳尾帧（toolcall_end/托管结果）下发——
+					// 直接 continue 会把它们吞掉，客户端的调用项永远不收口。
+					stream.queue = events
 					continue
 				}
 				stream.applyCostsCarry(events)
@@ -1276,6 +1279,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				slog.Warn("upstream held connection after stop reason; finishing after tail grace")
 				events := stream.release(stream.decoder.finish(nil))
 				if stream.handleServerCalls(ctx, &events) {
+					stream.queue = events
 					continue
 				}
 				stream.applyCostsCarry(events)

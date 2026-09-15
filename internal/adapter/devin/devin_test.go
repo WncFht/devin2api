@@ -817,6 +817,90 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 	}
 }
 
+// TestServerToolContinuationPairsAllCalls 的测试动机是钉住多跳托管续轮
+// 的两处回归：换流时本跳尾帧（toolcall_end/server_tool_result）必须照常
+// 下发，且续轮 wire 要为前序各跳已回答的 Server 调用补齐结果——漏发
+// 会把未配对调用裸发上行，被上游以 invalid_argument 拒收。
+func TestServerToolContinuationPairsAllCalls(t *testing.T) {
+	ctx := context.Background()
+	functionCall := devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL
+	stopPattern := devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN
+	call := func(id, arguments string) *devinproto.GetChatMessageResponse {
+		return &devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+			Id: proto.String(id), Name: proto.String("web_search"), ArgumentsJson: proto.String(arguments)}}}
+	}
+	hops := [][]*devinproto.GetChatMessageResponse{
+		{call("c0", `{"query":"first"}`), {StopReason: functionCall.Enum()}},
+		{call("c1", `{"query":"second"}`), {StopReason: functionCall.Enum()}},
+		{{DeltaText: proto.String("final answer")}, {StopReason: stopPattern.Enum()}},
+	}
+	newDecoder := func() *responseDecoder {
+		decoder := newResponseDecoder("model", nil, nil)
+		decoder.serverTools = map[string]bool{"web_search": true}
+		return decoder
+	}
+	var resultSets [][]llm.ToolResultMessage
+	hop := 0
+	stream := &responseStream{
+		frames:  pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: hops[0]}),
+		cancel:  func() {},
+		decoder: newDecoder(),
+		search: func(_ context.Context, query string, _, _ []string, _ uint32) (webSearchOutcome, error) {
+			return webSearchOutcome{
+				results: []llm.WebSearchResult{{Title: "t-" + query, URL: "https://example.com/" + query}},
+				summary: "summary " + query,
+			}, nil
+		},
+	}
+	stream.continueTurn = func(_ llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		resultSets = append(resultSets, results)
+		hop++
+		decoder := newDecoder()
+		decoder.start()
+		decoder.partial.Content = append([]llm.Content(nil), seed...)
+		return pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: hops[hop]}), func() {}, decoder, nil
+	}
+
+	var events []llm.ResponseEvent
+	var done *llm.AssistantMessage
+	for {
+		event, err := stream.Recv(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+		if event.Type == llm.ResponseEventDone {
+			done = event.Message
+		}
+	}
+	if done == nil {
+		t.Fatal("stream ended without done event")
+	}
+	var results, callEnds int
+	for _, event := range events {
+		switch event.Type {
+		case llm.ResponseEventServerToolResult:
+			results++
+		case llm.ResponseEventToolCallEnd:
+			callEnds++
+		}
+	}
+	if results != 2 || callEnds != 2 {
+		t.Fatalf("server_tool_result=%d toolcall_end=%d, want 2 each (tail frames must reach the client on hop switch)", results, callEnds)
+	}
+	if len(resultSets) != 2 {
+		t.Fatalf("continuations = %d, want 2", len(resultSets))
+	}
+	// 第二跳的续轮必须携带两个调用的结果——首跳结果已在 partial 中，
+	// 不带会让 assistant 上的 c0 调用在 wire 上无配对结果。
+	if len(resultSets[1]) != 2 || resultSets[1][0].ToolCallID != "c0" || resultSets[1][1].ToolCallID != "c1" {
+		t.Fatalf("second continuation results = %#v, want c0+c1", resultSets[1])
+	}
+}
+
 // TestResponseDecoderRejectsEOFWithoutStopReason 的测试动机是防止把上游截断伪装成
 // 正常结束：Devin 的正常收尾必带 stopReason 帧，干净 EOF 却缺它说明流被截断。
 func TestResponseDecoderRejectsEOFWithoutStopReason(t *testing.T) {

@@ -325,7 +325,6 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		return false
 	}
 	resultEvents := make([]llm.ResponseEvent, 0, len(serverCalls))
-	resultMessages := make([]llm.ToolResultMessage, 0, len(serverCalls))
 	for _, call := range serverCalls {
 		var result llm.ServerToolResult
 		if stream.hops >= maxServerSearchHops {
@@ -338,8 +337,18 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 			result = stream.executeServerCall(ctx, call)
 		}
 		resultEvents = append(resultEvents, stream.decoder.appendServerResult(result))
+	}
+	// 续轮 wire 上每个 Server 调用都要有配对结果：partial 里的结果块
+	//（含前序各跳已回答的）按内容序收集成 TOOL 消息序列——只带本跳
+	// 结果会把早先已回答的调用裸发上行，触发上游 invalid_argument。
+	resultMessages := make([]llm.ToolResultMessage, 0, len(serverCalls))
+	for _, block := range stream.decoder.partial.Content {
+		result, ok := block.(llm.ServerToolResult)
+		if !ok {
+			continue
+		}
 		resultMessages = append(resultMessages, llm.ToolResultMessage{
-			ToolCallID: call.ID, IsError: result.IsError, TimestampMS: time.Now().UnixMilli(),
+			ToolCallID: result.ToolCallID, IsError: result.IsError, TimestampMS: time.Now().UnixMilli(),
 			Content: []llm.Content{llm.TextContent{Text: result.Text}},
 		})
 	}
