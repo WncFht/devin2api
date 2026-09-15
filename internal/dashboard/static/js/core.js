@@ -111,7 +111,9 @@ const TIME_FMT = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-
 const DATETIME_FMT = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 export function fmtTime(iso) {
   const d = new Date(iso);
-  if (isNaN(d)) return iso || '-';
+  // 解析失败返回占位符而非原样透传：该值会进 innerHTML，原文回显
+  // 会把 hash/输入里的任意字符串变成注入面。
+  if (isNaN(d)) return '-';
   const t = TIME_FMT.format(d);
   if (d.toDateString() === new Date().toDateString()) return t;
   return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + t;
@@ -142,10 +144,11 @@ export function money(v) {
   return '<span class="num">$' + n.toFixed(n >= 10 ? 1 : n >= 1 ? 2 : 3) + '</span>';
 }
 export function statusClass(code) {
+  // NaN 会漏过全部比较落成 status-ok——矩阵 tooltip 的 "?" 桶不能染绿。
+  if (!Number.isFinite(code) || code <= 0) return 'muted';
   if (code >= 500) return 'status-err';
   if (code === 429) return 'status-rl';
   if (code >= 400) return 'status-warn';
-  if (code <= 0) return 'muted';
   return 'status-ok';
 }
 // 结果 badge：语义分层——failed 红、aborted/disconnected 琥珀（非错误）、
@@ -158,10 +161,11 @@ export function resultBadge(result) {
   const m = map[result] || ['muted', result || '-'];
   return '<span class="rbadge r-' + m[0] + '">' + esc(m[1]) + '</span>';
 }
-// 阈值着色：秒值与百分比分档上色的统一口径。
-export function secClass(v, okLim, warnLim) {
-  const s = Number(v) / 1000;
-  return s < okLim ? 'status-ok' : s < warnLim ? 'status-warn' : 'status-err';
+// 阈值着色：毫秒值与百分比分档上色的统一口径——耗时类阈值按毫秒给
+// （30s/60s → 30000/60000），命中率类用 rateClass。
+export function msClass(v, okLim, warnLim) {
+  const ms = Number(v);
+  return ms < okLim ? 'status-ok' : ms < warnLim ? 'status-warn' : 'status-err';
 }
 export function rateClass(pct, okLim, warnLim) {
   const p = Number(pct);
@@ -351,6 +355,19 @@ export function titleBadge(n) {
   document.title = (n > 0 ? '(' + n + ') ' : '') + baseTitle;
 }
 
+// burnText 把配额燃烧预测翻成一句人话：负速率=窗口内有重置/回充
+// （差分为负，报「回充」比报负数诚实），survives_until_reset=按当前
+// 速率撑得到重置点，否则报外推耗尽时刻。
+export function burnText(f) {
+  // burn_per_hour 缺席=后端没算出预测（样本不足），不是「烧速为 0」。
+  if (!f || f.burn_per_hour == null) return '';
+  const rate = Number(f.burn_per_hour);
+  if (rate <= 0) return '窗口内有回充或重置，暂不外推';
+  if (f.survives_until_reset) return '按当前速率可撑到重置 · 燃烧 ' + rate.toFixed(2) + '%/h';
+  if (f.exhausted_at) return '约 ' + Number(f.hours_left || 0).toFixed(1) + 'h 后耗尽 · 燃烧 ' + rate.toFixed(2) + '%/h';
+  return '燃烧 ' + rate.toFixed(2) + '%/h';
+}
+
 // ---------- 路由与轮询 ----------
 // hash 形如 #requests&model=x&result=failed：首段是 tab 名，其余是页面内过滤参数。
 export const Tabs = {
@@ -365,6 +382,9 @@ export const Tabs = {
     document.querySelectorAll('#topNav a').forEach(a => a.classList.toggle('on', a.dataset.tab === name));
     this.handlers[name] && this.handlers[name]();
     Polls.reset(name);
+    // 在途数徽标只在轮询 active 的页（总览/请求）刷新——停在不轮询的
+    // 页上旧 (N) 会一直挂着，进新页先清掉，轮询页下一轮自重写。
+    titleBadge(0);
     // 页切换后已挂起的图表恢复显示，需要按新尺寸重排。
     setTimeout(() => {
       if (!window.echarts) return;

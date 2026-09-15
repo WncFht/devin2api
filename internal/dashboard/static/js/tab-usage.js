@@ -7,7 +7,7 @@
 
 import {
   $, api, esc, fmtNum, fmtMs, fmtTime, fmtRel, money,
-  secClass, rateClass, slaRate, hitRate, avgTps, kpi, meta,
+  msClass, rateClass, slaRate, hitRate, avgTps, kpi, meta,
   sumTotals, Tabs, Polls, morph, loadPref, savePref,
 } from './core.js';
 import { Charts } from './charts.js';
@@ -177,9 +177,15 @@ function render() {
     };
     const rows = allRows.slice();
     if (mSortKey && mSortDir && MCOLS[mSortKey]) {
-      rows.sort((a, b) => (MCOLS[mSortKey](a) - MCOLS[mSortKey](b)) * mSortDir);
+      // 缺省哨兵 -1 恒排最后：升序时若按裸值比它们会冒充最小值跑到最前。
+      rows.sort((a, b) => {
+        const av = MCOLS[mSortKey](a), bv = MCOLS[mSortKey](b);
+        if (av === -1) return 1;
+        if (bv === -1) return -1;
+        return (av - bv) * mSortDir;
+      });
     }
-    const sth = (k, label) => '<th class="sortable" data-msort="' + k + '">' + label +
+    const sth = (k, label) => '<th class="sortable" tabindex="0" role="button" data-msort="' + k + '">' + label +
       '<span class="sort-ind">' + (mSortKey === k ? (mSortDir === -1 ? ' ↓' : ' ↑') : '') + '</span></th>';
     const tt = sumTotals(allRows);
     const ttCost = allRows.reduce((a, m) => a + (m.est_cost || 0), 0);
@@ -218,8 +224,8 @@ function render() {
         '<td class="mono">' + (tps >= 0 ? tps.toFixed(1) + ' tok/s' : '-') + '</td>' +
         (wide ? '<td class="mono">' + lenCell + '</td><td class="mono">' + fillCell + '</td>' +
           '<td>' + costCell + '</td>' +
-          '<td class="mono ' + secClass(m.avg_duration_ms, 30000, 60000) + '">' + fmtMs(Math.round(m.avg_duration_ms || 0)) + '</td>' +
-          '<td class="mono ' + secClass(m.avg_ttfb_ms, 5000, 10000) + '">' + fmtMs(Math.round(m.avg_ttfb_ms || 0)) + '</td>' +
+          '<td class="mono ' + msClass(m.avg_duration_ms, 30000, 60000) + '">' + fmtMs(Math.round(m.avg_duration_ms || 0)) + '</td>' +
+          '<td class="mono ' + msClass(m.avg_ttfb_ms, 5000, 10000) + '">' + fmtMs(Math.round(m.avg_ttfb_ms || 0)) + '</td>' +
           '<td class="mono muted" title="' + esc(m.last_at || '') + '">' + fmtRel(m.last_at) + '</td>' : '') + '</tr>';
     });
     // 加权合计行：命中率/decode 均速按总量加权重算，不按行平均；
@@ -272,6 +278,7 @@ function drawCharts(pts, fine, tokenMix, barRows) {
     if (gm) flowSeries[0].markArea = gm;
     Charts.render($('uFlow'), {
       dataZoom: Charts.zoom(pts),
+      zoomKey: range,
       yAxis: [{}, { splitLine: { show: false }, axisLabel: { formatter: v => fmtNum(v), color: C.axis, fontSize: F.xs } }],
       series: flowSeries,
     });
@@ -321,17 +328,17 @@ function drawCharts(pts, fine, tokenMix, barRows) {
   }
 }
 
+function applySort(k) {
+  if (mSortKey !== k) { mSortKey = k; mSortDir = -1; }
+  else mSortDir = mSortDir === -1 ? 1 : 0;
+  savePref('usage.msort', { key: mSortKey, dir: mSortDir });
+  render();
+}
+
 // 事件委托：chips / stage / model / key 链接 / 表头排序
 document.getElementById('page-usage').addEventListener('click', e => {
   const st2 = e.target.closest('th[data-msort]');
-  if (st2) {
-    const k = st2.dataset.msort;
-    if (mSortKey !== k) { mSortKey = k; mSortDir = -1; }
-    else mSortDir = mSortDir === -1 ? 1 : 0;
-    savePref('usage.msort', { key: mSortKey, dir: mSortDir });
-    render();
-    return;
-  }
+  if (st2) { applySort(st2.dataset.msort); return; }
   const rc = e.target.closest('[data-range]');
   if (rc) { range = rc.dataset.range; savePref('usage.range', range); renderChips(); render(); return; }
   const st = e.target.closest('[data-stage]');

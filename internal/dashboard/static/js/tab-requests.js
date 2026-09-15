@@ -8,7 +8,7 @@
 
 import {
   $, api, apiRaw, esc, debounce, fmtMs, fmtBytes, fmtNum, fmtTime,
-  secClass, statusClass, resultBadge, copyText, confirmBox, toast,
+  msClass, statusClass, resultBadge, copyText, confirmBox, toast,
   titleBadge, Tabs, Polls, morph, parseHash, writeHash, summarizeRejects,
 } from './core.js';
 
@@ -82,8 +82,8 @@ function rowHtml(e) {
     '<td>' + esc(e.api || '-') + '</td>' +
     '<td><span class="' + statusClass(e.status_code) + ' mono">' + esc(e.status_code) + '</span>' + resultBadge(e.result) + stream + retry + rl + stage + '</td>' +
     '<td>' + esc(e.requested_model || '-') + resolved + mismatch + premature + '</td>' +
-    '<td class="mono ' + secClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
-    '<td class="mono ' + secClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
+    '<td class="mono ' + msClass(e.duration_ms, 30000, 60000) + '">' + fmtMs(e.duration_ms) + '</td>' +
+    '<td class="mono ' + msClass(e.first_upstream_ms, 5000, 10000) + '">' + fmtMs(e.first_upstream_ms) + '</td>' +
     '<td class="mono">↓' + fmtNum(e.input_tokens) + ' ↑' + fmtNum(e.output_tokens) + cache + '</td>' +
     '<td class="mono muted">' + esc(e.client_ip || '') + keyh + '</td></tr>';
 }
@@ -133,7 +133,19 @@ function detailInnerHtml(d) {
     }
   });
   html += '</div>';
-  if (openFile) html += '<div class="file-view">' + esc(fileText) + '</div>';
+  if (openFile) {
+    if (openFile.binary) {
+      const raw = '/panel/api/requests/' + encodeURIComponent(openFile.dir) + '/file/' +
+        openFile.name.split('/').map(encodeURIComponent).join('/') + '?raw=1';
+      html += '<div class="file-view">二进制文件 · ' + fmtBytes(openFile.size || 0) +
+        ' · <a href="' + esc(raw) + '" target="_blank" rel="noopener">打开原始内容</a>' +
+        (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(openFile.name)
+          ? '<img class="file-img" src="' + esc(raw) + '" alt="' + esc(openFile.name) + '">' : '') +
+        '</div>';
+    } else {
+      html += '<div class="file-view">' + esc(fileText) + '</div>';
+    }
+  }
   if (!d.meta) html += '<div class="note">meta.json 缺失或已损坏</div>';
   return html;
 }
@@ -210,6 +222,8 @@ function saveFilterHash() {
   if (Tabs.current !== 'requests') return;
   const p = new URLSearchParams();
   FILTER_IDS.forEach(id => { const el = $(id); if (el && el.value) p.set(id, el.value); });
+  // 详情展开态也随 hash 走：离开再回来/刷新时 #requests&dir=X 深链仍在。
+  if (expandedDir) p.set('dir', expandedDir);
   writeHash('requests', p);
 }
 function restoreFilterHash() {
@@ -253,7 +267,10 @@ async function load() {
     if (data.disabled) {
       lastList = []; prevDirs = null;
       morph($('reqBody'), '<tr><td colspan="8" class="loading">调试日志未启用（config: debug.enabled）</td></tr>');
-      reqCount.textContent = ''; moreBtn.style.display = 'none'; return;
+      reqCount.textContent = ''; moreBtn.style.display = 'none';
+      // 早退也要清提示区——上一轮的拒绝/锁定 hint 会留在原地冒充现状。
+      $('reqHint').style.display = 'none';
+      return;
     }
     lastList = data.requests || [];
     render();
@@ -300,7 +317,7 @@ function tick() {
   loadActive().then(load);
 }
 
-export function resetAndLoad() { reqLimit = 100; prevDirs = null; tick(); }
+function resetAndLoad() { reqLimit = 100; prevDirs = null; tick(); }
 
 // ---------- 行内详情 ----------
 function toggleDetail(dir) {
@@ -330,8 +347,8 @@ async function fillDetail(dir) {
 }
 
 async function openFileView(dir, name, merged) {
-  // 再点同一个文件名 = 关闭查看区，恢复列表自动刷新。
-  if (openFile && openFile.dir === dir && openFile.name === name && !openFile.merged && !merged) {
+  // 再点同一个查看目标（文件名或合并视图）= 关闭查看区，恢复列表自动刷新。
+  if (openFile && openFile.dir === dir && openFile.name === name && openFile.merged === !!merged) {
     openFile = null; fileText = ''; render(); return;
   }
   const mine = { dir, name, merged: !!merged };
@@ -352,6 +369,12 @@ async function openFileView(dir, name, merged) {
       if (d.truncated) text = '[已截断] 06-http-response.jsonl 超 4MB 读取上限，仅前段帧参与合并——响应后半可能缺失。\n\n' + text;
     } else {
       const d = await api('/requests/' + encodeURIComponent(dir) + '/file/' + name.split('/').map(encodeURIComponent).join('/'));
+      if (openFile !== mine) return;
+      if (d.binary) {
+        // 二进制附件（图片等）：JSON 文本视图装不下字节，交给 ?raw=1 原始内容。
+        mine.binary = true; mine.size = d.size; fileText = '';
+        render(); return;
+      }
       text = d.text || '';
       if (name.endsWith('.json')) {
         try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) {}
@@ -391,9 +414,14 @@ export function jumpRequests(kv) {
   reqLimit = 100; prevDirs = null;
   const p = new URLSearchParams();
   FILTER_IDS.forEach(id => { const el = $(id); if (el && el.value) p.set(id, el.value); });
-  const target = '#requests' + (p.toString() ? '&' + p.toString() : '');
-  if (Tabs.current === 'requests') tick(); // 同页 hashchange 不触发 apply，手动重载
-  else location.hash = target;
+  if (Tabs.current === 'requests') {
+    // 打开的文件视图会暂停 tick——跳转即新筛选上下文，先关掉再手动重载，
+    // 否则同页跳转看着像没反应。
+    openFile = null; fileText = '';
+    tick();
+  } else {
+    location.hash = '#requests' + (p.toString() ? '&' + p.toString() : '');
+  }
 }
 
 // ---------- 事件委托与注册 ----------

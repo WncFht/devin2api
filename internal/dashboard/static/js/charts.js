@@ -86,9 +86,12 @@ export const Charts = (() => {
   // 饥饿兜底：指针长期停在图上时冻结会无限顺延，挂起超过 30s 的旧 option
   // 直接渲染——画面新鲜度比 tooltip 稳定更需要。
   // deferred 用 WeakMap：容器被 morph 丢弃后条目随元素 GC，不留死引用。
-  const deferred = new WeakMap(), leaveBound = new WeakSet();
+  const deferred = new WeakMap(), leaveBound = new WeakSet(), zoomKeys = new WeakMap();
+  // zoomKey 标记 x 轴域身份（如用量页的范围选择）：域变了旧缩放窗可能
+  // 整个落在新域外，恢复会把画面钳成一条细缝——同 key 才恢复缩放。
   function render(el, option) {
     if (!el || !window.echarts) return null;
+    const zoomKey = option.zoomKey;
     let inst = window.echarts.getInstanceByDom(el);
     const pend = deferred.get(el);
     if (inst && el.matches(':hover') && (!pend || Date.now() - pend.at < 30000)) {
@@ -125,9 +128,12 @@ export const Charts = (() => {
     ['tooltip', 'legend'].forEach(k => {
       if (opt[k] && !Array.isArray(opt[k])) opt[k] = Object.assign({}, base()[k], opt[k]);
     });
-    if (savedZoom && opt.dataZoom) {
+    if (savedZoom && opt.dataZoom && zoomKeys.get(el) === zoomKey) {
       opt.dataZoom = opt.dataZoom.map(z => Object.assign({}, z, savedZoom));
     }
+    zoomKeys.set(el, zoomKey);
+    // zoomKey 是本函数的调度标记，不透给 echarts。
+    delete opt.zoomKey;
     inst.setOption(opt, { notMerge: true });
     return inst;
   }
