@@ -44,10 +44,17 @@ devin:
   force_http1: true
   # 客户端模型名 → 上游真实 UID 的别名映射（可选）。
   # 例如客户端发 swe-2 / glm-5.2，上游实际 UID 是 swe-2-max / glm-5-2。
+  # 匹配顺序：精确命中 → 大小写不敏感命中 → "*" 兜底键（任意未命中
+  # 名字都改写到其目标，适合客户端硬编码模型名的场景）。链式映射在
+  # 加载时自动展开到最终目标；空键/空目标/大小写重复键/环会拒绝启动。
+  # 别名也作用于请求缺省模型时的 devin.model；目标可以是 router uid
+  #（会自动走 AssignModel 解析）。别名条目出现在 /v1/models 列表里，
+  # 带 alias_of 标记，能力位继承自目标。
   # aliases:
   #   swe-2: "swe-2-max"
   #   glm-5.2: "glm-5-2"
   #   glm-5.3-max: "glm-5-3-max"
+  #   "*": "glm-5-2"
   # 发给上游 metadata 的客户端身份；默认与真实 Devin CLI 抓包一致
   #（chisel / 3000.2.17 / mac）。上游若给新模型加版本门（某模型突然
   # not_found 或 permission_denied），bump client_version 即可，不必发版。

@@ -70,6 +70,7 @@ func main() {
 	// （KnownFields+server.listen 必填）——校验失败的 yaml 被整体丢弃，
 	// 连其中本可用的 devin.token 也不可见；probe 场景下靠回落链兜底。
 	cfg, _ := config.Load("config.yaml")
+	aliases = cfg.Devin.Aliases
 	token := resolveToken(cfg)
 	if token == "" {
 		fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
@@ -183,6 +184,20 @@ func resolveToken(cfg config.Config) string {
 		return cfg.Devin.Token
 	}
 	return config.ResolveDevinToken()
+}
+
+// aliases 是 main 从 config.yaml 读出的 devin.aliases。
+var aliases map[string]string
+
+// aliasModel 把 -model 标志值按 devin.aliases 解析成上游 uid——与代理
+// Stream 同一语义（精确 → 折叠 → "*" 兜底），探针发别名即复现客户端
+// 真实请求路径；命中时打印改写让输出可解释。
+func aliasModel(name string) string {
+	resolved := devin.ResolveModelAlias(aliases, name)
+	if resolved != name {
+		fmt.Printf("alias: %s -> %s\n", name, resolved)
+	}
+	return resolved
 }
 
 // metadata 组装上游 Metadata；fingerprint=false 时不带设备指纹字段。
@@ -408,6 +423,7 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*model = aliasModel(*model)
 	var sharedCascade string
 	if *resolveModel {
 		sharedCascade = randid.UUID()
@@ -742,6 +758,7 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*model = aliasModel(*model)
 
 	mk := func(msgs []*devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.GetChatMessageRequest {
 		return &devinproto.GetChatMessageRequest{
@@ -894,6 +911,7 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*model = aliasModel(*model)
 	call1 := toolCall("chatcmpl-tool-aaa1", "exec", `{"command":"ls"}`)
 	call2 := toolCall("chatcmpl-tool-bbb2", "read_file", `{"path":"README.md"}`)
 	thinking := "I should list the directory and read the readme in parallel."
@@ -1040,6 +1058,7 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	*model = aliasModel(*model)
 	filler := strings.Repeat("lorem ipsum dolor sit amet ", *kb*1024/27)
 	req := &devinproto.GetChatMessageRequest{
 		Metadata:      metadata(token, true),
@@ -1163,6 +1182,7 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
+	*model = aliasModel(*model)
 	imageB64 := tinyPNG()
 	if *imageFile != "" {
 		raw, rerr := os.ReadFile(*imageFile)

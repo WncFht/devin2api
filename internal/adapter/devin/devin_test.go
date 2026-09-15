@@ -1942,3 +1942,30 @@ func TestDecoderToEncoderReplayContract(t *testing.T) {
 		t.Fatalf("call/result not adjacent: %#v", prompts)
 	}
 }
+
+// TestResolveModelAlias 钉住别名匹配优先级：精确 > 大小写折叠 > "*" 兜底，
+// 全未命中原样返回。
+func TestResolveModelAlias(t *testing.T) {
+	aliases := map[string]string{
+		"swe-2": "swe-2-max",
+		"GLM":   "glm-5-2",
+		"*":     "fallback-uid",
+	}
+	cases := []struct{ in, want string }{
+		{"swe-2", "swe-2-max"},    // 精确
+		{"glm", "glm-5-2"},        // 折叠命中 GLM
+		{"SWE-2", "swe-2-max"},    // 折叠命中（精确未中）
+		{"other", "fallback-uid"}, // "*" 兜底
+	}
+	for _, c := range cases {
+		if got := ResolveModelAlias(aliases, c.in); got != c.want {
+			t.Fatalf("ResolveModelAlias(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := ResolveModelAlias(map[string]string{"swe-2": "swe-2-max"}, "other"); got != "other" {
+		t.Fatalf("no wildcard: ResolveModelAlias = %q, want passthrough", got)
+	}
+	if got := ResolveModelAlias(nil, "x"); got != "x" {
+		t.Fatalf("nil aliases: ResolveModelAlias = %q, want passthrough", got)
+	}
+}

@@ -34,6 +34,9 @@ type ModelInfo struct {
 	ContextTokens int
 	// MaxOutputTokens 是上游声明的单次输出 token 上限；未知为 0。
 	MaxOutputTokens int
+	// AliasOf 非空表示该条目是客户端别名而非真实 uid：以 ID 发出
+	// 的请求实际改写到 AliasOf 运行，能力位继承自目标条目。
+	AliasOf string
 }
 
 // Adapter 将供应商无关的请求上下文转换为具体供应商调用，并返回有序响应流。

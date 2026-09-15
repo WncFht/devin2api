@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -296,6 +297,26 @@ func isUnauthenticated(err error) bool {
 	return errors.As(err, &connectErr) && connectErr.Code() == connect.CodeUnauthenticated
 }
 
+// ResolveModelAlias 把客户端模型名改写为上游 uid：精确命中 → 大小写
+// 折叠命中 → "*" 兜底键；全部未中时原样返回。aliases 来自 config 加载
+// 期归一化（键已 trim、链式已展开、大小写重复被拒），折叠兜底只做
+// 线性扫描——别名表规模小，且只在精确未命中时发生。导出供 cmd/probe
+// 与代理保持同一路径语义。
+func ResolveModelAlias(aliases map[string]string, model string) string {
+	if target, ok := aliases[model]; ok {
+		return target
+	}
+	for name, target := range aliases {
+		if strings.EqualFold(name, model) {
+			return target
+		}
+	}
+	if target, ok := aliases["*"]; ok {
+		return target
+	}
+	return model
+}
+
 // Stream 将一份中间请求转换为 Devin RPC，并返回一份中间响应事件流。
 // request 已在三个 DecodeRequest 末尾过一遍 context.Validate()——
 // 唯一调用路径是解码后的 startStreamPump，这里不再重扫（单个
@@ -307,9 +328,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if model == "" {
 		model = cfg.Model
 	}
-	if alias, ok := cfg.Aliases[model]; ok && strings.TrimSpace(alias) != "" {
-		model = strings.TrimSpace(alias)
-	}
+	model = ResolveModelAlias(cfg.Aliases, model)
 	recorder := debuglog.FromContext(ctx)
 	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
 	adapter.ensureCatalog(ctx)
@@ -324,7 +343,6 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
-	cfg = adapter.currentConfig()
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
 	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
@@ -826,6 +844,46 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 				// 配置模型无法从 Devin 获取图片能力，默认按支持图片处理更友好。
 				SupportsImages: true,
 			})
+		}
+	}
+
+	// 别名条目进目录：按 /v1/models 选模型的客户端才能发现别名。
+	// "*" 是兜底匹配符而非可命名模型，不进列表。能力位继承自目标
+	// 条目（别名请求实际跑的是目标）；目标缺席时退回与配置模型同策
+	// 的占位。别名键撞上真实 uid 时改写原条目为 alias_of 形态——
+	// 该名字的请求已被改道，展示目标能力位才是真实行为。
+	byID := make(map[string]int, len(models))
+	for i, m := range models {
+		byID[m.ID] = i
+	}
+	aliasNames := make([]string, 0, len(cfg.Aliases))
+	for name := range cfg.Aliases {
+		if name != "*" {
+			aliasNames = append(aliasNames, name)
+		}
+	}
+	sort.Strings(aliasNames)
+	for _, name := range aliasNames {
+		target := cfg.Aliases[name]
+		entry := adapter.ModelInfo{ID: name, Created: now, OwnedBy: "devin", AliasOf: target, SupportsImages: true}
+		if i, ok := byID[target]; ok {
+			t := models[i]
+			entry.SupportsImages = t.SupportsImages
+			entry.SupportsToolCalls = t.SupportsToolCalls
+			entry.SupportsParallelToolCalls = t.SupportsParallelToolCalls
+			entry.SupportsThinking = t.SupportsThinking
+			entry.PreserveThinking = t.PreserveThinking
+			entry.IsModelRouter = t.IsModelRouter
+			entry.ContextTokens = t.ContextTokens
+			entry.MaxOutputTokens = t.MaxOutputTokens
+		}
+		if i, ok := byID[name]; ok {
+			entry.Created = models[i].Created
+			entry.OwnedBy = models[i].OwnedBy
+			models[i] = entry
+		} else {
+			byID[name] = len(models)
+			models = append(models, entry)
 		}
 	}
 
