@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -184,11 +185,16 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode error: %v", err)
 	}
-	if len(encoded) != 1 {
-		t.Fatalf("event count = %d, want 1", len(encoded))
+	// 错误 chunk 之后尾随 [DONE] 终止帧：缺它时部分客户端把流尾
+	// 判成传输截断而非终态错误。
+	if len(encoded) != 2 {
+		t.Fatalf("event count = %d, want 2", len(encoded))
 	}
 	if encoded[0].Name != "" {
 		t.Fatalf("error chunk should be data-only, got event name %q", encoded[0].Name)
+	}
+	if encoded[1].Name != common.SSEDone {
+		t.Fatalf("second event should be [DONE], got %q", encoded[1].Name)
 	}
 	data := decodeEventData(t, encoded[0])
 	if data["object"] != "chat.completion.chunk" {

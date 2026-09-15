@@ -168,6 +168,24 @@ func UpstreamErrorDetails(failure *llm.Failure) map[string]any {
 	return details
 }
 
+// StreamError 收敛三面流式失败帧的共用前奏：从终止事件取出分类记录，
+// 限流消息统一补 "try again in Ns" 等待提示（fallback 是错误本身为空时
+// 的兜底文案），产出 BuildErrorPayload 结果与对应 HTTP status。
+// openAI 选定 OpenAI 方言（error.type 命名 + "param":null 字段），false
+// 走 Anthropic 方言。各面 encoder 只负责把 payload 装进自己的 wire 帧。
+func StreamError(event llm.ResponseEvent, fallbackMessage string, openAI bool) (map[string]any, int) {
+	failure := llm.FailureOf(event.Error)
+	message := fallbackMessage
+	if failure.Error() != "" {
+		message = RetryAfterHint(failure, time.Now())
+	}
+	errorType, openAIParam := AnthropicErrorType(failure), false
+	if openAI {
+		errorType, openAIParam = OpenAIErrorType(failure), true
+	}
+	return BuildErrorPayload(message, failure, errorType, event.Error.DebugRef, openAIParam), HTTPStatus(failure)
+}
+
 // BuildErrorPayload 组装协议错误对象的 error 字段：message/type/code 三键、
 // openAIParam 为 true 时附带 OpenAI 风格的 "param":null，再并入上游排障
 // 字段（upstream_trace_id/retry_after）与调试目录引用 debug_ref。
