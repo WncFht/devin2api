@@ -168,14 +168,18 @@ func New(config Config) (*Adapter, error) {
 	}
 	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
 
+	// 上行链路（直连 GCP）单连接吞吐实测仅 ~200KB/s，而 chat 请求体重发
+	// 全量上下文常达数百 KB——请求体 gzip 实测把建流到首字从 ~5s 压回 ~1.5s。
+	gzipSend := connect.WithSendGzip()
+
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
-	adapter.streamClient = devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL)
+	adapter.streamClient = devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL, gzipSend)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
 	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	adapter.apiClient = devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL)
+	adapter.apiClient = devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL, gzipSend)
 
 	return adapter, nil
 }

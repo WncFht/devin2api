@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
@@ -123,7 +124,7 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 		passwordHash:  sha256.Sum256([]byte(password)),
 		baseURL:       trimmedURL,
 		tokenFunc:     tokenFunc,
-		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, trimmedURL),
+		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, trimmedURL, connect.WithSendGzip()),
 		httpClient:    httpClient,
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),

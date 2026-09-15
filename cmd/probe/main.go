@@ -103,8 +103,8 @@ func main() {
 		os.Exit(1)
 	}
 	httpClient := &http.Client{Transport: upstream.NewBasicAuthTransportFunc(transport, func() string { return token })}
-	client := devinprotoconnect.NewApiServerServiceClient(httpClient, baseURL)
-	lsClient := devinprotoconnect.NewExaLanguageServerPb_LanguageServerServiceClient(httpClient, baseURL)
+	client := devinprotoconnect.NewApiServerServiceClient(httpClient, baseURL, connect.WithSendGzip())
+	lsClient := devinprotoconnect.NewExaLanguageServerPb_LanguageServerServiceClient(httpClient, baseURL, connect.WithSendGzip())
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
