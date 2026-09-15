@@ -17,7 +17,10 @@ type protocolEncoder interface {
 	// NewStreamEncoder 创建与本次 HTTP 请求绑定的流式编码器。
 	NewStreamEncoder(model string, includeUsage bool) streamEncoder
 	// EncodeFinal 把最终助手消息编码为完整的非流式 JSON 响应体。
-	EncodeFinal(message *llm.AssistantMessage) ([]byte, error)
+	// model 是回显给客户端的模型名——客户端请求原文（可能是别名）；
+	// 为空时编码器回落到上游声明/解析后的 uid。流式路径在
+	// NewStreamEncoder 拿同一名，两种模式回显一致。
+	EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error)
 	// EncodeError 把错误编码为该协议形状的错误 JSON 体——非流式心跳
 	// 已提交 200 后，错误只能以错误体下发，形状按客户端协议决定。
 	EncodeError(err error, debugRef string) []byte
@@ -104,8 +107,8 @@ func (p responsesProtocol) NewStreamEncoder(model string, _ bool) streamEncoder 
 	return responses.NewStreamEncoder(model)
 }
 
-func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
-	return responses.EncodeResponse(message)
+func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
+	return responses.EncodeResponse(message, model)
 }
 
 func (p responsesProtocol) EncodeError(err error, debugRef string) []byte {
@@ -129,8 +132,8 @@ func (p chatProtocol) NewStreamEncoder(model string, includeUsage bool) streamEn
 	return chat.NewStreamEncoder(model, includeUsage)
 }
 
-func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
-	return chat.EncodeResponse(message)
+func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
+	return chat.EncodeResponse(message, model)
 }
 
 func (p chatProtocol) EncodeError(err error, debugRef string) []byte {
@@ -160,8 +163,8 @@ func (p anthropicProtocol) NewStreamEncoder(model string, _ bool) streamEncoder 
 	return messages.NewStreamEncoder(model)
 }
 
-func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage) ([]byte, error) {
-	return messages.EncodeResponse(message)
+func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
+	return messages.EncodeResponse(message, model)
 }
 
 func (p anthropicProtocol) EncodeError(err error, debugRef string) []byte {

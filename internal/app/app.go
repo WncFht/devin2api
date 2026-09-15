@@ -212,7 +212,7 @@ func modelEntry(m adapter.ModelInfo) map[string]any {
 	if ownedBy == "" {
 		ownedBy = "devin"
 	}
-	return map[string]any{
+	entry := map[string]any{
 		"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
 		"supports_images":              m.SupportsImages,
 		"supports_tool_calls":          m.SupportsToolCalls,
@@ -223,6 +223,11 @@ func modelEntry(m adapter.ModelInfo) map[string]any {
 		"context_tokens":               m.ContextTokens,
 		"max_output_tokens":            m.MaxOutputTokens,
 	}
+	// alias_of 标记该 id 是客户端别名：请求会被改写到目标 uid 运行。
+	if m.AliasOf != "" {
+		entry["alias_of"] = m.AliasOf
+	}
+	return entry
 }
 
 // listModels 返回 OpenAI 兼容的 GET /v1/models 列表。
@@ -709,7 +714,7 @@ func (application *App) createCompletion(
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
-	body, err = protocol.EncodeFinal(message)
+	body, err = protocol.EncodeFinal(message, strings.TrimSpace(messages.Model))
 	if err != nil {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return

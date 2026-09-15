@@ -57,11 +57,15 @@ func NewStreamEncoder(model string, includeUsage bool) *StreamEncoder {
 }
 
 // EncodeResponse 把最终助手消息编码为非流式 Chat Completions JSON。
-func EncodeResponse(message *llm.AssistantMessage) ([]byte, error) {
+// model 是回显给客户端的模型名（请求原文，可能是别名）；为空时
+// 回落到上游声明的 actual uid 再到解析后的请求 uid。
+func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error) {
 	if message == nil {
 		return nil, errors.New("response message is nil")
 	}
-	model := message.ResponseModel
+	if model == "" {
+		model = message.ResponseModel
+	}
 	if model == "" {
 		model = message.Model
 	}

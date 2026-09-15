@@ -222,7 +222,7 @@ func TestEncodeResponseFinal(t *testing.T) {
 		StopReason:    llm.StopReasonStop,
 		Usage:         llm.Usage{Input: 10, Output: 5, CacheRead: 3, CacheWrite: 2},
 	}
-	body, err := EncodeResponse(final)
+	body, err := EncodeResponse(final, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter"
@@ -245,7 +246,7 @@ func (application *App) streamCompletion(
 	}
 
 	completion.StatusCode = http.StatusOK
-	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, messages.Model, options, prelude, firstErr)
+	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, strings.TrimSpace(messages.Model), options, prelude, firstErr)
 	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {
