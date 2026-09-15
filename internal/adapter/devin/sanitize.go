@@ -97,8 +97,10 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 	// 指纹是整句，"For clear communication…" 前缀与 "MUST avoid" 缺一不可）。
 	rule("cc-subagent-emojis", `(?i)For clear communication with the user the assistant MUST avoid using emojis\.`, "Keep communication with the user clear and free of emojis.", "avoid using emojis"),
 	// Codex CLI 系提示词指纹（codex 0.153.x 模板逐句/逐组合 bisect 实证）：
-	// "Codex refers to" 定义句整句触发，去掉 "Codex" 或缩短尾部即放行。
-	rule("codex-opensource-def", `(?i)Codex refers to the open-source agentic coding interface`, "Codex is the open-source coding interface", "codex refers to the open-source"),
+	// 触发点是 "Codex refers to … interface" 完整跨度——截短到
+	// open-source 即止、去掉 "Codex" 主语均放行；中间词属指纹一部分，
+	// 用 [^\n.]* 覆盖变体但不跨句。
+	rule("codex-opensource-def", `(?i)Codex refers to the open-source[^\n.]*interface`, "Codex is the open-source coding interface", "codex refers to the open-source"),
 	// plan 状态句对：仅「batch-complete」紧跟「Finish with all items…」
 	// 该顺序相邻时触发，单独任一句、倒序或中间插句均放行。
 	rule("codex-plan-statuses", `(?i)Do not batch-complete multiple items after the fact\. Finish with all items completed or explicitly canceled/deferred before ending the turn\.`, "Do not batch-complete multiple items after the fact. Before ending the turn, leave all items completed or explicitly canceled/deferred.", "do not batch-complete multiple items"),
