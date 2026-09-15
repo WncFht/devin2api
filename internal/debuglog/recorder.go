@@ -283,14 +283,15 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 		// 快照之外，由实时路径自计。任一行恰入账一次，无锁读则边界前后
 		// 都可能与 appendIndex 交错，把同一行计两遍。
 		manager.mutex.Lock()
-		data, err := TailRead(filepath.Join(root, IndexFile), usageReplayTailBytes)
+		indexPath := filepath.Join(root, IndexFile)
+		data, err := TailRead(indexPath, usageReplayTailBytes)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
 			// 完成的行会被回放假设覆盖、又被实时路径跳过，永久漏记。
 			manager.mutex.Unlock()
 			time.Sleep(200 * time.Millisecond)
 			manager.mutex.Lock()
-			data, err = TailRead(filepath.Join(root, IndexFile), usageReplayTailBytes)
+			data, err = TailRead(indexPath, usageReplayTailBytes)
 		}
 		manager.indexSnapshotted = true
 		manager.mutex.Unlock()
@@ -300,6 +301,13 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 				slog.Warn("debuglog: replay index tail failed", "error", err)
 			}
 			return
+		}
+		// 回放窗口与 indexFileCap 同值，正常时文件整体被覆盖；文件比
+		// 读到的内容大说明上限被撑破（外部追加/双写/常量漂移），最旧
+		// 的行对聚合静默不可见——值得告警而不是无声丢历史。
+		if info, statErr := os.Stat(indexPath); statErr == nil && info.Size() > int64(len(data)) {
+			slog.Warn("debuglog: index.jsonl exceeds replay window; oldest entries excluded from usage stats",
+				"size", info.Size(), "replayed_bytes", len(data))
 		}
 		if parsed := manager.usage.replayLines(data); parsed > 0 {
 			slog.Info("debuglog: replayed request index", "entries", parsed)
