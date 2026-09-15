@@ -419,7 +419,7 @@ func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
     ]}
   ],
   "tools":[
-    {"type":"web_search_preview"},
+    {"type":"image_generation"},
     {"type":"function","name":"known","parameters":{"type":"object"}}
   ]
 }`), true)

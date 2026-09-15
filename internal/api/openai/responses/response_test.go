@@ -11,7 +11,7 @@ import (
 
 // TestStreamEncoderEncodesReasoningAndToolItems 的测试动机是保证思考和工具调用作为独立 output item 完整结束并进入最终 output。
 func TestStreamEncoderEncodesReasoningAndToolItems(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	thinking := llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "encrypted"}
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking, call}, StopReason: llm.StopReasonPending}
@@ -87,7 +87,7 @@ func TestStreamEncoderEncodesReasoningAndToolItems(t *testing.T) {
 
 // TestStreamEncoderEncodesFinalTextMessage 的测试动机是保证 final answer 同时具备 message item 和 output_text content part 生命周期。
 func TestStreamEncoderEncodesFinalTextMessage(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	text := llm.TextContent{Text: "final answer"}
 	partial := &llm.AssistantMessage{Content: []llm.Content{text}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{text}, StopReason: llm.StopReasonStop}
@@ -130,7 +130,7 @@ func TestStreamEncoderEncodesFinalTextMessage(t *testing.T) {
 // 签名帧到达只累积不关项——收尾三帧推迟到 Done 前的兜底 flush 统一发出，
 // 因此 reasoning 的 output_item.done 落在 tool call 的 done 之后。
 func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
 	partial := &llm.AssistantMessage{
 		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}, call},
@@ -184,7 +184,7 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 // 流终止的 flush——首个分片就关项会让 output_item.done 携带截断签名，
 // 客户端下轮回放被上游 invalid_argument 拒（与 anthropic 侧同策）。
 func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	partial := &llm.AssistantMessage{
 		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}},
 		StopReason: llm.StopReasonPending,
@@ -221,7 +221,7 @@ func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
 // 可能只发签名没有思考正文：解码器合成 thinking_start/end 后，reasoning item
 // 必须正常关闭且签名不翻倍。
 func TestStreamEncoderEncodesSignatureOnlyReasoning(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	thinking := llm.ThinkingContent{ThinkingSignature: "sig"}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonStop}
@@ -246,7 +246,7 @@ func TestStreamEncoderEncodesSignatureOnlyReasoning(t *testing.T) {
 
 // TestStreamEncoderRejectsUnknownEvent 的测试动机是避免未知核心事件被静默丢弃并产生不完整 SSE。
 func TestStreamEncoderRejectsUnknownEvent(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	if _, err := encoder.Encode(llm.ResponseEvent{Type: "unknown"}); err == nil {
 		t.Fatal("Encode() error = nil, want unknown event error")
 	}
@@ -254,7 +254,7 @@ func TestStreamEncoderRejectsUnknownEvent(t *testing.T) {
 
 // TestStreamEncoderRejectsDoneWithOpenItem 的测试动机是防止未产生 item done 的残缺 output 被包装成成功响应。
 func TestStreamEncoderRejectsDoneWithOpenItem(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	partial := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "partial"}}, StopReason: llm.StopReasonPending}
 	if _, err := encoder.Encode(llm.ResponseEvent{Type: llm.ResponseEventTextStart, ContentIndex: 0, Partial: partial}); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestStreamEncoderRejectsDoneWithOpenItem(t *testing.T) {
 
 // TestStreamEncoderEncodesLengthAsIncomplete 的测试动机是避免达到 token 上限时向调用方谎报 completed。
 func TestStreamEncoderEncodesLengthAsIncomplete(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
 		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonLength, Message: &llm.AssistantMessage{StopReason: llm.StopReasonLength}},
@@ -358,7 +358,7 @@ func nestedString(t *testing.T, value map[string]any, parent string, field strin
 // （序列化 reasoning item 数组）下行时 item id 还原为内层真实 rs_*，
 // encrypted_content 携带签名原文 blob 供下一轮回放识别。
 func TestStreamEncoderOpenAISignatureRestoresItemID(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	blob := `[{"id":"rs_real1","type":"reasoning","encrypted_content":"gAAA","summary":[],"content":[],"status":""}]`
 	thinking := llm.ThinkingContent{ThinkingSignature: blob, SignatureType: "openai", Redacted: true}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
@@ -381,7 +381,7 @@ func TestStreamEncoderOpenAISignatureRestoresItemID(t *testing.T) {
 // TestStreamEncoderMessageItemUsesOutputID 验证上游 output_id（msg_*）
 // 直接作为 message item id 下发，与上游记录对齐。
 func TestStreamEncoderMessageItemUsesOutputID(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	partial := &llm.AssistantMessage{OutputID: "msg_up1", Content: []llm.Content{llm.TextContent{}}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{OutputID: "msg_up1", Content: []llm.Content{llm.TextContent{Text: "hi"}}, StopReason: llm.StopReasonStop}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -400,7 +400,7 @@ func TestStreamEncoderMessageItemUsesOutputID(t *testing.T) {
 // TestStreamEncoderCustomToolCall 验证 Custom 调用按 custom_tool_call item
 // 下发：input 字段携带非 JSON 原文而非 arguments。
 func TestStreamEncoderCustomToolCall(t *testing.T) {
-	encoder := NewStreamEncoder("gpt-test")
+	encoder := NewStreamEncoder("gpt-test", nil)
 	call := llm.ToolCall{ID: "c1", Name: "apply_patch", Arguments: json.RawMessage("*** Begin Patch"), Custom: true}
 	partial := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonToolUse}

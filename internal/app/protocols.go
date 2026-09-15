@@ -15,12 +15,12 @@ import (
 // protocolEncoder 抽象流式与非流式协议编码。
 type protocolEncoder interface {
 	// NewStreamEncoder 创建与本次 HTTP 请求绑定的流式编码器。
-	NewStreamEncoder(model string, includeUsage bool) streamEncoder
+	NewStreamEncoder(model string, options protocolOptions) streamEncoder
 	// EncodeFinal 把最终助手消息编码为完整的非流式 JSON 响应体。
 	// model 是回显给客户端的模型名——客户端请求原文（可能是别名）；
 	// 为空时编码器回落到上游声明/解析后的 uid。流式路径在
 	// NewStreamEncoder 拿同一名，两种模式回显一致。
-	EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error)
+	EncodeFinal(message *llm.AssistantMessage, model string, options protocolOptions) ([]byte, error)
 	// EncodeError 把错误编码为该协议形状的错误 JSON 体——非流式心跳
 	// 已提交 200 后，错误只能以错误体下发，形状按客户端协议决定。
 	EncodeError(err error, debugRef string) []byte
@@ -98,17 +98,20 @@ type streamEncoder interface {
 type protocolOptions struct {
 	Stream       bool
 	IncludeUsage bool
+	// ToolNameMap 是 namespace 展平名到客户端面向名的还原表
+	//（responses 侧 {ns}__{sub} → {ns}.{sub}）；其余协议恒为空。
+	ToolNameMap map[string]string
 }
 
 // responsesProtocol 实现 OpenAI Responses API 协议。
 type responsesProtocol struct{}
 
-func (p responsesProtocol) NewStreamEncoder(model string, _ bool) streamEncoder {
-	return responses.NewStreamEncoder(model)
+func (p responsesProtocol) NewStreamEncoder(model string, options protocolOptions) streamEncoder {
+	return responses.NewStreamEncoder(model, options.ToolNameMap)
 }
 
-func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
-	return responses.EncodeResponse(message, model)
+func (p responsesProtocol) EncodeFinal(message *llm.AssistantMessage, model string, options protocolOptions) ([]byte, error) {
+	return responses.EncodeResponse(message, model, options.ToolNameMap)
 }
 
 func (p responsesProtocol) EncodeError(err error, debugRef string) []byte {
@@ -128,11 +131,11 @@ func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byt
 // chatProtocol 实现 OpenAI Chat Completions 协议。
 type chatProtocol struct{}
 
-func (p chatProtocol) NewStreamEncoder(model string, includeUsage bool) streamEncoder {
-	return chat.NewStreamEncoder(model, includeUsage)
+func (p chatProtocol) NewStreamEncoder(model string, options protocolOptions) streamEncoder {
+	return chat.NewStreamEncoder(model, options.IncludeUsage)
 }
 
-func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
+func (p chatProtocol) EncodeFinal(message *llm.AssistantMessage, model string, _ protocolOptions) ([]byte, error) {
 	return chat.EncodeResponse(message, model)
 }
 
@@ -159,11 +162,11 @@ func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 // anthropicProtocol 实现 Anthropic Messages 协议。
 type anthropicProtocol struct{}
 
-func (p anthropicProtocol) NewStreamEncoder(model string, _ bool) streamEncoder {
+func (p anthropicProtocol) NewStreamEncoder(model string, _ protocolOptions) streamEncoder {
 	return messages.NewStreamEncoder(model)
 }
 
-func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage, model string) ([]byte, error) {
+func (p anthropicProtocol) EncodeFinal(message *llm.AssistantMessage, model string, _ protocolOptions) ([]byte, error) {
 	return messages.EncodeResponse(message, model)
 }
 
@@ -226,6 +229,7 @@ func decodeResponsesRequest(data []byte, collectDropped bool) (llm.RequestMessag
 	return adapted.Context, protocolOptions{
 		Stream:       adapted.Options.Stream,
 		IncludeUsage: false,
+		ToolNameMap:  adapted.Options.ToolNameMap,
 	}, nil
 }
 

@@ -755,7 +755,7 @@ func (application *App) createCompletion(
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
-	body, err = protocol.EncodeFinal(message, strings.TrimSpace(messages.Model))
+	body, err = protocol.EncodeFinal(message, strings.TrimSpace(messages.Model), options)
 	if err != nil {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return

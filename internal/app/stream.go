@@ -298,7 +298,7 @@ func writeProtocolStream(
 	prelude []llm.ResponseEvent,
 	preludeErr error,
 ) (*llm.AssistantMessage, error) {
-	encoder := protocol.NewStreamEncoder(model, options.IncludeUsage)
+	encoder := protocol.NewStreamEncoder(model, options)
 	var latest *llm.AssistantMessage
 	// batch 累计本批次的编码字节：泵 channel 持续供给时多个事件并入同一批，
 	// 一次 Write+Flush；channel 空了立即落盘，空闲路径与逐事件写出等价。
