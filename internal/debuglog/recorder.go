@@ -521,6 +521,9 @@ func mkdirRequestDir(path string) error {
 }
 
 // enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
+// 丢弃计数的归属恰在 closed 置位那刻切分：此前进 recorder.dropped，
+// 由 Complete 收尾时一并折进 droppedTotal；此后直接折进 droppedTotal——
+// 迟到入队（如未 join 的泵 goroutine）的丢弃不能落进无人再读的字段。
 func (recorder *Recorder) enqueue(task writeTask) {
 	if recorder == nil {
 		return
@@ -529,6 +532,7 @@ func (recorder *Recorder) enqueue(task writeTask) {
 	defer recorder.mutex.Unlock()
 	if recorder.closed {
 		recorder.dropped.Add(1)
+		recorder.manager.droppedTotal.Add(1)
 		return
 	}
 	select {
@@ -864,6 +868,10 @@ func (recorder *Recorder) Complete(completion Completion) {
 	recorder.closed = true
 	recorder.abortCancel = nil
 	close(recorder.tasks)
+	// 折算必须在锁内完成：迟到的入队在 closed 置位后走 enqueue 的
+	// closed 分支自折 droppedTotal；拖出锁外会把窗口内的迟到丢弃
+	// 既算进 dropped.Load() 又算进对方的自折——双计。
+	recorder.manager.droppedTotal.Add(recorder.dropped.Load())
 	recorder.mutex.Unlock()
 	if recorder.aborted.Load() && completion.Result == "disconnected" {
 		completion.Result = "aborted"
@@ -872,7 +880,6 @@ func (recorder *Recorder) Complete(completion Completion) {
 	recorder.writeMeta(&completion)
 	recorder.manager.appendIndex(recorder, &completion)
 	recorder.manager.releaseDir(recorder.directory)
-	recorder.manager.droppedTotal.Add(recorder.dropped.Load())
 }
 
 // appendJSONL 把一行已序列化记录写进指定 JSONL 文件的缓冲；仅写 worker 调用。
