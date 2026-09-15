@@ -168,7 +168,8 @@ func usage() {
   misc                        adjacent endpoints: embeddings/extchat/status/config/command configs
   edge <case> [flags]         targeted edge-case histories (case names in source switch)
     -model uid                chat_model_uid (default swe-2-max)
-    -image-file path          attach a real png instead of the tiny 1x1 blue png`)
+    -image-file path          attach a real png instead of the tiny 1x1 blue png
+    -prompt text              user prompt text for prompt-driven cases (e.g. user-image-prompt)`)
 }
 
 // resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
@@ -1158,6 +1159,7 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
 	imageFile := fs.String("image-file", "", "png file to attach instead of tinyPNG")
+	prompt := fs.String("prompt", "", "user prompt text for prompt-driven cases")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -1368,6 +1370,18 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
 		}}
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
+	case "user-image-prompt":
+		// 与 user-image-file 同形但问法可控（-prompt）：定向探测图是否
+		// 真被消费——比如问图里不存在的内容、要求复述 OCR 文本等。
+		text := *prompt
+		if text == "" {
+			text = "What is the dominant color of the attached image? Answer in one word."
+		}
+		m := userMsg(text)
+		m.Images = []*devinproto.ExaCodeiumCommonPb_ImageData{{
+			Base64Data: proto.String(imageB64), MimeType: proto.String("image/png"),
+		}}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{m}
 	case "pdf-as-image":
 		// 文档通道探测：mime_type=application/pdf 是否被 Images 通道接受。
 		m := userMsg("What is in this document? One sentence.")
@@ -1389,6 +1403,59 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 				}}},
 			toolResultMsg("c1", "applied"),
 			userMsg("did it apply?"),
+		}
+	case "parallel-call-id-frames":
+		// 诱导单轮并行调用：观察 delta_tool_calls 的 id 帧形态——每个
+		// 调用的首帧是否都带 id、无 id 续帧怎么分布，决定解码器
+		// 「无 id 帧按位置归并末位调用」规则的正确性。必须逐帧看，
+		// 所以直接走 frames 输出。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			userMsg("Call read_file twice in the same turn: once with path a.txt, once with path b.txt. Issue both tool calls together, not sequentially."),
+		}
+		req.Tools = []*devinproto.ExaChatPb_ChatToolDefinition{{
+			Name:             proto.String("read_file"),
+			Description:      proto.String("read_file"),
+			JsonSchemaString: proto.String(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+		}}
+		req.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
+			Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: "auto"},
+		}
+		return runStream(ctx, client, req, true, "")
+	case "n-tools-limit":
+		// 工具声明数量上限探测：n-tools-limit 200 逐档试，看上游在第
+		// 几档开始 invalid_argument 或静默截断（真实客户端工具集约 23 个，
+		// 我们的代理会把客户端的完整 MCP 工具集原样转发）。
+		if len(args) < 2 {
+			return fmt.Errorf("n-tools-limit needs a count argument")
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 1 {
+			return fmt.Errorf("n-tools-limit bad count %q", args[1])
+		}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{userMsg("Call tool_0 now.")}
+		for i := 0; i < n; i++ {
+			req.Tools = append(req.Tools, &devinproto.ExaChatPb_ChatToolDefinition{
+				Name:             proto.String(fmt.Sprintf("tool_%d", i)),
+				Description:      proto.String("t"),
+				JsonSchemaString: proto.String(`{"type":"object"}`),
+			})
+		}
+		req.ToolChoice = &devinproto.ExaChatPb_ChatToolChoice{
+			Choice: &devinproto.ExaChatPb_ChatToolChoice_OptionName{OptionName: "required"},
+		}
+	case "history-tool-name":
+		// 历史 tool_call 带非法字符名（tool-name case 只测过声明名）。
+		// 上游若同拒，适配层须转义历史名；若放行，转义反而损毁语义。
+		// 用法：history-tool-name <name>（默认 a.b）。
+		name := "a.b"
+		if len(args) >= 2 {
+			name = args[1]
+		}
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			userMsg("Read a.txt"),
+			assistantCallMsg("c1", name, `{"path":"a.txt"}`),
+			toolResultMsg("c1", "file contents"),
+			userMsg("ok?"),
 		}
 	default:
 		return fmt.Errorf("unknown edge case %q", args[0])
