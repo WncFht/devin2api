@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/WncFht/devin2api/internal/api/common"
@@ -31,6 +32,13 @@ type contentBlockState struct {
 	// pendingSig 表示思考块正文已结束但尚未发出 content_block_stop，
 	// 等待可能尾随到达的签名帧，避免签名落成独立的畸形思考块。
 	pendingSig bool
+	// stopDeferred 表示该块的 End 事件已到达、但存在更早下标的
+	// pendingSig 思考块尚未关块：挂起块要等流末签名，若让后块先落
+	// stop，规范客户端按关块序聚合时最后一个完成的就是思考块——
+	// Claude Code -p 的 result 取最后一条 assistant 快照的文本，
+	// 会拿到 thinking-only 快照而返回空串。stop 统一推迟到收尾
+	// 按下标序补发，保证最后关闭的总是下标最大的块。
+	stopDeferred bool
 	// redacted 表示该思考块正文被上游隐藏（ThinkingRedacted），
 	// 收尾时应发 redacted_thinking 块而非 thinking 块。
 	redacted bool
@@ -160,8 +168,13 @@ func (encoder *StreamEncoder) textDelta(event llm.ResponseEvent) ([]SSEEvent, er
 // endText 发 content_block_stop；正文经 text_delta 全部下发完毕，
 // spec 的 stop 帧只带 type/index——不再回读 event.Content 补回声。
 func (encoder *StreamEncoder) endText(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if encoder.block(event.ContentIndex, "text") == nil {
+	state := encoder.block(event.ContentIndex, "text")
+	if state == nil {
 		return nil, fmt.Errorf("text end at content index %d without text_start", event.ContentIndex)
+	}
+	if encoder.earlierPending(state.index) {
+		state.stopDeferred = true
+		return nil, nil
 	}
 	return []SSEEvent{encoder.event("content_block_stop", map[string]any{
 		"type":  "content_block_stop",
@@ -223,7 +236,17 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 		return nil, nil
 	}
 	if state.redacted {
+		if encoder.earlierPending(state.index) {
+			state.stopDeferred = true
+			return nil, nil
+		}
 		return encoder.stopThinking(state), nil
+	}
+	if encoder.earlierPending(state.index) {
+		// 签名虽已就绪，但前序思考块还挂着：立即关块会让下标大的
+		// 块先收尾，同样产出 thinking-last 的块序——推迟到 flush 统一按序发。
+		state.stopDeferred = true
+		return nil, nil
 	}
 	// 签名随 thinking_end 一次到齐（含 decodeLateSignature 合成块的
 	// Start+End 路径——openai 体制签名是唯一思考产物）：规范客户端只
@@ -249,27 +272,55 @@ func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) ([]SSEE
 	return nil, nil
 }
 
-// flushPendingThinking 在流终止（finish/failed）前补发挂起的思考块收尾，
-// 上游没有尾随签名时保证块仍按序正常关闭。签名帧可能隔着后续内容块
-// 才到（实测 thinking_end → toolcall_* → signature），中途不调用以免
-// 提前关块导致迟到签名被静默丢弃。挂起期间累积的签名以单条
-// signature_delta（完整串）在 content_block_stop 前下发——规范客户端
-// 对 signature 是赋值语义，多片增量等于只留末片。
+// flushPendingThinking 在流终止（finish/failed）前补发挂起块的收尾：
+// pendingSig 的思考块等尾随签名，stopDeferred 的后置块在等前者关块。
+// 签名帧可能隔着后续内容块才到（实测 thinking_end → toolcall_* →
+// signature），中途不调用以免提前关块导致迟到签名被静默丢弃。补发
+// 严格按下标序：规范客户端按关块序聚合 assistant 快照、最后一个收尾
+// 块决定流式 result 文本，乱序关块（文字先关、思考后关）会让
+// Claude Code -p 取到 thinking-only 快照返回空串。挂起期间累积的
+// 签名以单条 signature_delta（完整串）在 content_block_stop 前下发
+// ——规范客户端对 signature 是赋值语义，多片增量等于只留末片。
 func (encoder *StreamEncoder) flushPendingThinking() []SSEEvent {
-	var events []SSEEvent
+	var pending []*contentBlockState
 	for _, state := range encoder.blocks {
-		if !state.pendingSig {
+		if state.pendingSig || state.stopDeferred {
+			pending = append(pending, state)
+		}
+	}
+	slices.SortFunc(pending, func(a, b *contentBlockState) int {
+		return a.index - b.index
+	})
+	var events []SSEEvent
+	for _, state := range pending {
+		state.pendingSig = false
+		state.stopDeferred = false
+		if state.kind == "thinking" {
+			if !state.redacted && state.signature.Len() > 0 {
+				events = append(events, encoder.emitBlockDelta(state.index, blockDelta{
+					Type: "signature_delta", Signature: state.signature.String(),
+				}))
+			}
+			events = append(events, encoder.stopThinking(state)...)
 			continue
 		}
-		state.pendingSig = false
-		if !state.redacted && state.signature.Len() > 0 {
-			events = append(events, encoder.emitBlockDelta(state.index, blockDelta{
-				Type: "signature_delta", Signature: state.signature.String(),
-			}))
-		}
-		events = append(events, encoder.stopThinking(state)...)
+		events = append(events, encoder.event("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": state.index,
+		}))
 	}
 	return events
+}
+
+// earlierPending 报告是否存在下标更小、尚未关块的挂起思考块——有则当前
+// 块的 stop 应推迟到收尾统一下发，保持 content_block_stop 按下标序落地。
+func (encoder *StreamEncoder) earlierPending(index int) bool {
+	for _, state := range encoder.blocks {
+		if state.index < index && state.pendingSig {
+			return true
+		}
+	}
+	return false
 }
 
 // stopThinking 发思考块的收尾事件。spec 的 stop 帧只带 type/index；
@@ -336,8 +387,13 @@ func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) ([]SSEEvent,
 // endToolUse 发工具块的 content_block_stop；完整 input 已由
 // input_json_delta 增量送达，spec 的 stop 帧只带 type/index。
 func (encoder *StreamEncoder) endToolUse(event llm.ResponseEvent) ([]SSEEvent, error) {
-	if encoder.block(event.ContentIndex, "tool_use") == nil {
+	state := encoder.block(event.ContentIndex, "tool_use")
+	if state == nil {
 		return nil, fmt.Errorf("tool use end at content index %d without toolcall_start", event.ContentIndex)
+	}
+	if encoder.earlierPending(state.index) {
+		state.stopDeferred = true
+		return nil, nil
 	}
 	return []SSEEvent{encoder.event("content_block_stop", map[string]any{
 		"type":  "content_block_stop",

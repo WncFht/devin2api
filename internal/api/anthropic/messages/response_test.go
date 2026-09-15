@@ -65,6 +65,9 @@ func TestStreamEncoderEmitsToolUse(t *testing.T) {
 // TestStreamEncoderHoldsThinkingForLateSignature 的测试动机是上游实测帧序
 // thinking_end → toolcall_* → thinking_signature：thinking 块必须挂起等待
 // 隔块的尾随签名，完整签名由流收尾时的 flush 以单条 signature_delta 下发。
+// 后置块的 stop 不得提前落地：规范客户端按关块序聚合 assistant 快照，
+// 最后收尾的若是 thinking 块，Claude Code -p 的 result 会拿到空文本——
+// 因此所有挂起收尾在 flush 里严格按下标序补发。
 func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	encoder := NewStreamEncoder("claude-test")
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
@@ -101,8 +104,8 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	want := []string{
 		"message_start", "content_block_start", "content_block_delta",
 		"content_block_start", "content_block_delta",
-		"content_block_stop",
-		"content_block_delta", "content_block_stop",
+		"content_block_delta",
+		"content_block_stop", "content_block_stop",
 		"message_delta", "message_stop",
 	}
 	if len(names) != len(want) {
@@ -113,20 +116,65 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 			t.Fatalf("event[%d] = %q, want %q (all: %v)", index, names[index], name, names)
 		}
 	}
-	// index=1 的工具块先收尾；挂起思考块的签名随 flush 以单条
-	// signature_delta 下发，紧跟其 content_block_stop。
-	toolStop := decodeEventData(t, encoded[5])
-	if toolStop["index"] != float64(1) {
-		t.Fatalf("tool stop block = %#v", toolStop)
-	}
-	signatureDelta := decodeEventData(t, encoded[6])
+	// 挂起思考块的签名随 flush 以单条 signature_delta 下发，所有
+	// content_block_stop 严格按下标序补发：index=0 的思考块先收尾，
+	// index=1 的工具块最后关闭——最后完成的块不再是无文本的思考块。
+	signatureDelta := decodeEventData(t, encoded[5])
 	delta := signatureDelta["delta"].(map[string]any)
 	if delta["type"] != "signature_delta" || delta["signature"] != "sig" || signatureDelta["index"] != float64(0) {
 		t.Fatalf("signature delta = %#v", signatureDelta)
 	}
-	thinkingStop := decodeEventData(t, encoded[7])
+	thinkingStop := decodeEventData(t, encoded[6])
 	if thinkingStop["index"] != float64(0) || thinkingStop["content_block"] != nil {
 		t.Fatalf("thinking stop block = %#v", thinkingStop)
+	}
+	toolStop := decodeEventData(t, encoded[7])
+	if toolStop["index"] != float64(1) || toolStop["content_block"] != nil {
+		t.Fatalf("tool stop block = %#v", toolStop)
+	}
+}
+
+// TestStreamEncoderClosesBlocksInIndexOrder 复现 swe-2 实测帧序
+// thinking_end(0) → text_*(1) → signature(0) → done：挂起思考块把
+// content_block_stop 拖到流末，若文字块的 stop 照常先落地，Claude Code
+// 按关块序产出的最后一个 assistant 快照只含 thinking、result 为空。
+// 所有收尾必须按下标序补发——最后一个 content_block_stop 属于文字块。
+func TestStreamEncoderClosesBlocksInIndexOrder(t *testing.T) {
+	encoder := NewStreamEncoder("claude-test")
+	partial := &llm.AssistantMessage{
+		Content: []llm.Content{
+			llm.ThinkingContent{Thinking: "inspect"},
+			llm.TextContent{Text: "4"},
+		},
+		StopReason: llm.StopReasonPending,
+	}
+	final := &llm.AssistantMessage{
+		Content: []llm.Content{
+			llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"},
+			llm.TextContent{Text: "4"},
+		},
+		StopReason: llm.StopReasonStop,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+		{Type: llm.ResponseEventTextStart, ContentIndex: 1, Partial: partial},
+		{Type: llm.ResponseEventTextDelta, ContentIndex: 1, Delta: "4", Partial: partial},
+		{Type: llm.ResponseEventTextEnd, ContentIndex: 1, Content: "4", Partial: partial},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: final},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	var stops []float64
+	for _, event := range encoded {
+		data := decodeEventData(t, event)
+		if data["type"] == "content_block_stop" {
+			stops = append(stops, data["index"].(float64))
+		}
+	}
+	if len(stops) != 2 || stops[0] != 0 || stops[1] != 1 {
+		t.Fatalf("stop order = %v, want [0 1]", stops)
 	}
 }
 
