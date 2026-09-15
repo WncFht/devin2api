@@ -228,7 +228,7 @@ func modelEntry(m adapter.ModelInfo) map[string]any {
 func (application *App) listModels(writer http.ResponseWriter, request *http.Request) {
 	models, err := application.adapter.ListModels(request.Context())
 	if err != nil {
-		writeJSONError(writer, http.StatusBadGateway, err.Error())
+		writeUpstreamCatalogError(writer, err)
 		return
 	}
 	data := make([]map[string]any, 0, len(models))
@@ -243,12 +243,12 @@ func (application *App) listModels(writer http.ResponseWriter, request *http.Req
 func (application *App) getModel(writer http.ResponseWriter, request *http.Request) {
 	id := chi.URLParam(request, "model")
 	if id == "" {
-		writeJSONError(writer, http.StatusBadRequest, "model id is required")
+		writeJSONError(writer, http.StatusBadRequest, "model id is required", "invalid_request_error")
 		return
 	}
 	models, err := application.adapter.ListModels(request.Context())
 	if err != nil {
-		writeJSONError(writer, http.StatusBadGateway, err.Error())
+		writeUpstreamCatalogError(writer, err)
 		return
 	}
 	for _, m := range models {
@@ -258,14 +258,29 @@ func (application *App) getModel(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 	}
-	writeJSONError(writer, http.StatusNotFound, fmt.Sprintf("model %q not found", id))
+	writeJSONError(writer, http.StatusNotFound, fmt.Sprintf("model %q not found", id), "invalid_request_error")
 }
 
-func writeJSONError(writer http.ResponseWriter, status int, message string) {
+// writeUpstreamCatalogError 上报模型目录拉取失败：除 429（透传限流语义
+// + Retry-After，客户端按语义退避）外一律 502——目录失败是上游责任，
+// 上游的 4xx 方言（unauthenticated 等）漏给客户端会被误当成自身凭据错。
+func writeUpstreamCatalogError(writer http.ResponseWriter, err error) {
+	failure := llm.Classify(err)
+	status := common.HTTPStatus(failure)
+	if status != http.StatusTooManyRequests && status < 500 {
+		status = http.StatusBadGateway
+	}
+	if failure.RetryAfterSeconds > 0 {
+		writer.Header().Set("Retry-After", strconv.Itoa(failure.RetryAfterSeconds))
+	}
+	writeJSONError(writer, status, err.Error(), common.OpenAIErrorType(failure))
+}
+
+func writeJSONError(writer http.ResponseWriter, status int, message string, errType string) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"error": map[string]any{"message": message, "type": "invalid_request_error", "code": nil, "param": nil},
+		"error": map[string]any{"message": message, "type": errType, "code": nil, "param": nil},
 	})
 }
 
@@ -578,7 +593,8 @@ func (application *App) createCompletion(
 	defer ticker.Stop()
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)
 	if err != nil {
-		noteRetryAfter(recorder, llm.Classify(err))
+		failure := llm.Classify(err)
+		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			completion.Result = "disconnected"
 			recorder.WriteError("client_disconnected", err)
@@ -596,7 +612,7 @@ func (application *App) createCompletion(
 			recorder.WriteError("response_event", err)
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(llm.Classify(err)), err)
+		completion.StatusCode = writeLoggedError(writer, recorder, protocol, "response_event", common.HTTPStatus(failure), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
