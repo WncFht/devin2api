@@ -12,16 +12,18 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
+func f64(v float64) *float64 { return &v }
+
 // TestForecastBurnRate 验证线性差分得到的燃烧速率与耗尽时刻。
 func TestForecastBurnRate(t *testing.T) {
 	now := time.Now().Unix()
 	points := []quotaPoint{
-		{At: now - 7200, DailyRemaining: 80, DailyResetAt: now + 100000},
-		{At: now - 3600, DailyRemaining: 70},
-		{At: now, DailyRemaining: 60, DailyResetAt: now + 100000},
+		{At: now - 7200, DailyRemaining: f64(80), DailyResetAt: now + 100000},
+		{At: now - 3600, DailyRemaining: f64(70)},
+		{At: now, DailyRemaining: f64(60), DailyResetAt: now + 100000},
 	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return p.DailyRemaining },
+		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
 		func(p quotaPoint) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")
@@ -45,11 +47,11 @@ func TestForecastBurnRate(t *testing.T) {
 func TestForecastSurvivesUntilReset(t *testing.T) {
 	now := time.Now().Unix()
 	points := []quotaPoint{
-		{At: now - 3600, DailyRemaining: 91, DailyResetAt: now + 36000},
-		{At: now, DailyRemaining: 90, DailyResetAt: now + 36000},
+		{At: now - 3600, DailyRemaining: f64(91), DailyResetAt: now + 36000},
+		{At: now, DailyRemaining: f64(90), DailyResetAt: now + 36000},
 	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return p.DailyRemaining },
+		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
 		func(p quotaPoint) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")
@@ -85,7 +87,7 @@ func TestQuotaFileRoundTrip(t *testing.T) {
 	}
 	path := filepath.Join(root, quotaFileName)
 	for i, remaining := range []float64{90, 85, 80} {
-		point := quotaPoint{At: 1700000000 + int64(i*600), DailyRemaining: remaining}
+		point := quotaPoint{At: 1700000000 + int64(i*600), DailyRemaining: f64(remaining)}
 		data, _ := json.Marshal(point)
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -98,11 +100,19 @@ func TestQuotaFileRoundTrip(t *testing.T) {
 	h := &Handler{debugManager: debuglog.NewManager(root, debuglog.RetentionPolicy{})}
 	defer h.debugManager.Close()
 	points := h.readQuotaHistory()
-	if len(points) != 3 || points[2].DailyRemaining != 80 {
+	if len(points) != 3 || floatOr0(points[2].DailyRemaining) != 80 {
 		t.Fatalf("points = %+v", points)
 	}
+	// 未上报的字段保持 nil 往返——指针字段就是为了区分「没报」与「报到 0%」。
+	var bare quotaPoint
+	if err := json.Unmarshal([]byte(`{"at":1}`), &bare); err != nil {
+		t.Fatal(err)
+	}
+	if bare.DailyRemaining != nil {
+		t.Fatalf("DailyRemaining = %v, want nil for unreported field", *bare.DailyRemaining)
+	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return p.DailyRemaining },
+		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
 		func(p quotaPoint) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")

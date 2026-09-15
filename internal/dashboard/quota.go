@@ -31,8 +31,10 @@ type quotaPoint struct {
 	// At 是采样时刻（unix 秒）。
 	At int64 `json:"at"`
 	// DailyRemaining/WeeklyRemaining 是日/周配额剩余百分比（0-100）。
-	DailyRemaining  float64 `json:"daily_remaining,omitempty"`
-	WeeklyRemaining float64 `json:"weekly_remaining,omitempty"`
+	// 指针保留「上游没报」与「真到 0」的区分：omitempty 会把 0% 序列化成
+	// 缺席，恰恰在耗尽时刻让前端什么都不显示。
+	DailyRemaining  *float64 `json:"daily_remaining"`
+	WeeklyRemaining *float64 `json:"weekly_remaining"`
 	// DailyResetAt/WeeklyResetAt 是日/周配额重置时刻（unix 秒）。
 	DailyResetAt  int64 `json:"daily_reset_at,omitempty"`
 	WeeklyResetAt int64 `json:"weekly_reset_at,omitempty"`
@@ -81,8 +83,8 @@ func (h *Handler) sampleQuota(path string) {
 	}
 	point := quotaPoint{
 		At:              time.Now().Unix(),
-		DailyRemaining:  floatAny(plan["daily_quota_remaining"]),
-		WeeklyRemaining: floatAny(plan["weekly_quota_remaining"]),
+		DailyRemaining:  planFloat(plan, "daily_quota_remaining"),
+		WeeklyRemaining: planFloat(plan, "weekly_quota_remaining"),
 		DailyResetAt:    int64(floatAny(plan["daily_quota_reset"])),
 		WeeklyResetAt:   int64(floatAny(plan["weekly_quota_reset"])),
 		PromptCredits:   floatAny(plan["available_prompt_credits"]),
@@ -196,8 +198,8 @@ func (h *Handler) apiQuota(w http.ResponseWriter, r *http.Request) {
 	points := h.readQuotaHistory()
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"points": points,
-		"daily":  forecast(points, 24*time.Hour, func(p quotaPoint) float64 { return p.DailyRemaining }, func(p quotaPoint) int64 { return p.DailyResetAt }),
-		"weekly": forecast(points, 7*24*time.Hour, func(p quotaPoint) float64 { return p.WeeklyRemaining }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
+		"daily":  forecast(points, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
+		"weekly": forecast(points, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
 	})
 }
 
@@ -222,4 +224,24 @@ func floatAny(v any) float64 {
 		return f
 	}
 	return 0
+}
+
+// planFloat 取 planStatus 里的数值字段；键缺席返回 nil——quotaPoint 的
+// 指针字段靠它保住「未上报」与「0%」的区分。
+func planFloat(plan map[string]any, key string) *float64 {
+	v, ok := plan[key]
+	if !ok {
+		return nil
+	}
+	f := floatAny(v)
+	return &f
+}
+
+// floatOr0 解引用配额指针；nil（上游未上报）按 0 参与差分，与此前
+// 字段缺席落 0 的口径一致。
+func floatOr0(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
