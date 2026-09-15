@@ -127,6 +127,8 @@ func TestStreamEncoderEncodesFinalTextMessage(t *testing.T) {
 // TestStreamEncoderHoldsReasoningForLateSignature 的测试动机是上游实测帧序
 // thinking_end → toolcall_* → thinking_signature：reasoning item 必须挂起等待
 // 隔块的尾随签名，而不是提前关闭把签名撞成 already-closed 错误。
+// 签名帧到达只累积不关项——收尾三帧推迟到 Done 前的兜底 flush 统一发出，
+// 因此 reasoning 的 output_item.done 落在 tool call 的 done 之后。
 func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test")
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
@@ -160,13 +162,13 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 		"response.output_item.added", "response.reasoning_summary_part.added",
 		"response.reasoning_summary_text.delta",
 		"response.output_item.added", "response.function_call_arguments.delta",
+		"response.function_call_arguments.done", "response.output_item.done",
 		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
 		"response.output_item.done",
-		"response.function_call_arguments.done", "response.output_item.done",
 		"response.completed",
 	})
 	assertSequenceNumbers(t, encoded)
-	reasoningDone := decodeEventData(t, encoded[9])
+	reasoningDone := decodeEventData(t, encoded[11])
 	if got := nestedString(t, reasoningDone, "item", "encrypted_content"); got != "sig" {
 		t.Fatalf("reasoning encrypted_content = %q, want sig", got)
 	}
@@ -174,6 +176,44 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 	output := completed["response"].(map[string]any)["output"].([]any)
 	if got := output[0].(map[string]any)["encrypted_content"]; got != "sig" {
 		t.Fatalf("completed reasoning output = %#v", output[0])
+	}
+}
+
+// TestStreamEncoderAccumulatesSignatureFragments 钉住上游把思考签名拆成
+// 多帧的形态：每个 thinking_signature 事件只累积进 item，收尾三帧推迟到
+// 流终止的 flush——首个分片就关项会让 output_item.done 携带截断签名，
+// 客户端下轮回放被上游 invalid_argument 拒（与 anthropic 侧同策）。
+func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test")
+	partial := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect"}},
+		StopReason: llm.StopReasonPending,
+	}
+	final := &llm.AssistantMessage{
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "AAABBB"}},
+		StopReason: llm.StopReasonStop,
+	}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
+		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "AAA", Partial: final},
+		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "BBB", Partial: final},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	assertEventNames(t, encoded, []string{
+		"response.created", "response.in_progress",
+		"response.output_item.added", "response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
+		"response.output_item.done",
+		"response.completed",
+	})
+	assertSequenceNumbers(t, encoded)
+	done := decodeEventData(t, encoded[7])
+	if got := nestedString(t, done, "item", "encrypted_content"); got != "AAABBB" {
+		t.Fatalf("reasoning encrypted_content = %q, want AAABBB", got)
 	}
 }
 

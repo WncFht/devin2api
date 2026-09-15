@@ -115,10 +115,11 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	if encoder.completed {
 		return nil, fmt.Errorf("response stream is already completed")
 	}
-	// 上游把思考签名作为正文之后的尾随帧发送，且可能隔着整个 toolcall
-	// 块才到（实测 thinking_end → toolcall_* → thinking_signature）。中途
-	// 不提前补发 reasoning 收尾，把等待窗口保留到流终止；签名事件到达时
-	// 由 reasoningSignature 自行收尾。Done 之前兜底关闭，防挂起 item 拦下完成。
+	// 上游把思考签名作为正文之后的尾随帧发送，可能隔着整个 toolcall
+	// 块才到、还可能拆成多帧（实测 thinking_end → toolcall_* →
+	// thinking_signature）。签名事件只累积不关项——首个分片就收尾会把
+	// 截断签名写进 output_item.done；收尾统一由 Done 前的兜底 flush
+	// 发出，防挂起 item 拦下完成。
 	var prefix []SSEEvent
 	if event.Type == llm.ResponseEventDone {
 		prefix = encoder.flushPendingReasoning()
@@ -266,11 +267,14 @@ func (encoder *StreamEncoder) reasoningDone(item *streamItem) []SSEEvent {
 	}
 }
 
-// reasoningSignature 把尾随签名并入 reasoning item：挂起时补发收尾；
-// item 已关闭时（签名随 thinking_end 同帧到达、或兜底 flush 后仍有迟到帧）
-// 只补写 completed output 里的 encrypted_content，不再重发事件；
-// 下标没有 reasoning item 属解码器 bug（start 先于块事件的契约被破坏），
-// 显式报错而非静默丢弃。
+// reasoningSignature 把尾随签名并入 reasoning item：Responses 没有增量
+// 签名通道（encrypted_content 只出现在 item 载荷里），签名事件只累积、
+// 保持挂起，由流终止的 flushPendingReasoning 发带全量签名的收尾三帧——
+// 上游可把签名拆成多帧，首个分片就关项会让 output_item.done 携带截断
+// 签名，客户端下轮回放被上游 invalid_argument 拒。
+// item 已关闭时（签名随 thinking_end 同帧到齐、或 flush 后仍有迟到帧）
+// 只补写 completed output 的 encrypted_content；下标没有 reasoning item
+// 属解码器 bug（start 先于块事件的契约被破坏），显式报错而非静默丢弃。
 func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item := encoder.items[event.ContentIndex]
 	if item == nil || item.kind != "reasoning" {
@@ -281,12 +285,8 @@ func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSE
 		if completed, ok := encoder.output[item.outputIndex].(map[string]any); ok {
 			completed["encrypted_content"] = item.encryptedContent
 		}
-		return nil, nil
 	}
-	if !item.pendingDone {
-		return nil, nil
-	}
-	return encoder.reasoningDone(item), nil
+	return nil, nil
 }
 
 // flushPendingReasoning 在流终止（Done）前补发挂起的 reasoning 收尾，
