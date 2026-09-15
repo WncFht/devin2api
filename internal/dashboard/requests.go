@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -301,8 +302,26 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"file not found"}`))
 		return
 	}
+	name := chi.URLParam(r, "*")
+	// ?raw=1 原样回字节：图片等附件要保真，JSON 视图装不下它们。
+	if r.URL.Query().Get("raw") == "1" {
+		w.Header().Set("Content-Type", http.DetectContentType(data))
+		_, _ = w.Write(h.maskToken(data))
+		return
+	}
+	// 二进制标 binary 由前端给下载/预览入口——强转 string 再经
+	// json.Encoder 会把非法 UTF-8 烧成 U+FFFD，附件内容全毁。
+	if !utf8.Valid(data) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":      name,
+			"size":      total,
+			"truncated": truncated,
+			"binary":    true,
+		})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"name":      chi.URLParam(r, "*"),
+		"name":      name,
 		"size":      total,
 		"truncated": truncated,
 		"text":      string(h.maskToken(data)),
