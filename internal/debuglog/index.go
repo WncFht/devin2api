@@ -80,7 +80,8 @@ type IndexEntry struct {
 }
 
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
-// 每行一次 Flush：索引是排障证据，崩溃后也不能丢尾巴。
+// 每行一次 Flush：索引是排障证据，进程崩溃也不能丢尾巴（Flush 只到
+// 内核页缓存——断电级故障不在担保范围）。
 func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()

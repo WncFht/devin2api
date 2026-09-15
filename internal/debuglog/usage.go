@@ -153,7 +153,7 @@ type usageMinBucket struct {
 	requests       int64
 	errors         int64
 	disconnected   int64
-	rateLimited    int64 // status_code==429
+	rateLimited    int64 // isRateLimited 判定（status 429 或 rate_limited 标记）
 	clientFaults   int64 // errorOwner==client
 	upstreamFaults int64 // errorOwner==upstream
 	input          int64
