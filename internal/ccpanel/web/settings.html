@@ -50,15 +50,18 @@
             <button id="runtime-metrics-btn" type="button" class="btn btn-secondary settings-runtime-metrics-btn" data-i18n="settings.runtimeMetrics.button">
               运行状态
             </button>
-            <button id="model-multimodal-fallback-btn" type="button" class="btn btn-secondary settings-multimodal-fallback-btn" data-i18n="settings.multimodalFallback.edit">
+            <!-- 多模态回退/自定义定价：本服务不发出这两个设置键，入口隐藏
+                 （.btn 的 display:inline-flex 压过 hidden 属性，须 inline
+                 style）；模态与隐藏 input 留置——settings.js 按 id 读写。 -->
+            <button id="model-multimodal-fallback-btn" type="button" class="btn btn-secondary settings-multimodal-fallback-btn" data-i18n="settings.multimodalFallback.edit" style="display:none">
               多模态回退
             </button>
-            <span id="model-multimodal-fallback-summary" class="settings-multimodal-fallback-summary"></span>
+            <span id="model-multimodal-fallback-summary" class="settings-multimodal-fallback-summary" hidden></span>
             <input type="hidden" id="model_multimodal_fallback" value="{}">
-            <button id="model-custom-pricing-btn" type="button" class="btn btn-secondary settings-custom-pricing-btn" data-i18n="settings.customPricing.edit">
+            <button id="model-custom-pricing-btn" type="button" class="btn btn-secondary settings-custom-pricing-btn" data-i18n="settings.customPricing.edit" style="display:none">
               模型价格
             </button>
-            <span id="model-custom-pricing-summary" class="settings-custom-pricing-summary"></span>
+            <span id="model-custom-pricing-summary" class="settings-custom-pricing-summary" hidden></span>
             <input type="hidden" id="model_custom_pricing" value="{}">
             <button id="save-all-btn" class="btn btn-primary settings-save-btn" data-i18n="settings.saveAll">
               保存所有更改

@@ -44,6 +44,9 @@ type Handler struct {
 	tokens *authtoken.Store
 	// models 是模型注册表仓；nil 时 /admin/model-registry 返回 503。
 	models *modelreg.Store
+	// settings 是运行时设置键仓（panel-settings.json）；nil 时 /admin/settings
+	// 返回空表。
+	settings *PanelSettings
 
 	versionMu sync.RWMutex
 	version   string
@@ -99,6 +102,11 @@ func (h *Handler) SetModelRegistry(s *modelreg.Store) {
 	h.models = s
 }
 
+// SetSettingsStore 注入运行时设置键仓（/admin/settings 用）。
+func (h *Handler) SetSettingsStore(s *PanelSettings) {
+	h.settings = s
+}
+
 // Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为
 // 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
 func (h *Handler) Register(mux interface {
@@ -141,6 +149,11 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/admin/channels/{id}", h.withAuth(h.adminGetChannel))
 	mux.Get("/admin/channels/{id}/keys", h.withAuth(h.adminChannelKeys))
 	mux.Get("/admin/settings", h.withAuth(h.adminListSettings))
+	mux.Get("/admin/settings/{key}", h.withAuth(h.adminGetSetting))
+	mux.Put("/admin/settings/{key}", h.withAuth(h.adminUpdateSetting))
+	mux.Post("/admin/settings/{key}/reset", h.withAuth(h.adminResetSetting))
+	mux.Post("/admin/settings/batch", h.withAuth(h.adminBatchUpdateSettings))
+	mux.Post("/admin/update/check", h.withAuth(h.adminUpdateCheck))
 	mux.Get("/admin/auth-tokens", h.withAuth(h.adminListAuthTokens))
 	mux.Post("/admin/auth-tokens", h.withAuth(h.adminCreateAuthToken))
 	mux.Put("/admin/auth-tokens/{id}", h.withAuth(h.adminUpdateAuthToken))

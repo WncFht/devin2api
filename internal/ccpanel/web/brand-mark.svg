@@ -1,0 +1,18 @@
+<svg width="88" height="60" viewBox="8 6 88 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="brand-gradient" x1="0" y1="0" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#1d9bf0"/>
+      <stop offset="0.55" stop-color="#367df4"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+    <mask id="brand-c-mask">
+      <rect width="112" height="72" fill="#000"/>
+      <circle cx="49" cy="36" r="30" fill="#fff"/>
+      <circle cx="49" cy="36" r="16" fill="#000"/>
+      <path d="M52 36 90 4v64Z" fill="#000"/>
+    </mask>
+  </defs>
+
+  <rect x="19" y="6" width="60" height="60" fill="url(#brand-gradient)" mask="url(#brand-c-mask)"/>
+  <path fill="url(#brand-gradient)" fill-rule="evenodd" d="M59.4 36c4-4 8-8 12-11 8-4 16 2 16 11s-8 15-16 11c-4-3-8-7-12-11Zm17-4a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/>
+</svg>

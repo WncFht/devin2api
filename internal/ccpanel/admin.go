@@ -179,12 +179,6 @@ func (h *Handler) adminChannelKeys(w http.ResponseWriter, r *http.Request) {
 	}}, 1)
 }
 
-// adminListSettings 实现 GET /admin/settings：S6 之前无运行时设置项，
-// 返回空表（前端只要求数组）。
-func (h *Handler) adminListSettings(w http.ResponseWriter, _ *http.Request) {
-	respondOK(w, []any{})
-}
-
 // adminListAuthTokens 实现 GET /admin/auth-tokens：令牌表 + range 时叠加
 // duration/rpm/is_today 全局统计，并用时间窗聚合同名覆盖各令牌的累计
 // 字段（ccLoad HandleListAuthTokens + GetAuthTokenStatsInRange 语义：

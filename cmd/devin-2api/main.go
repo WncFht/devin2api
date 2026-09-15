@@ -195,6 +195,17 @@ func main() {
 	})
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
+	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对
+	// debug 开关/保留策略恒赢 config.yaml（先建仓再重放，让面板改的
+	// 值在启动时就生效；默认值在重放前采样，即 config 派生态）。
+	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, debugManager)
+	if err != nil {
+		slog.Error("load panel settings failed", "error", err)
+		os.Exit(1)
+	}
+	if err := settingsStore.ApplyAll(); err != nil {
+		slog.Warn("panel settings replay failed", "error", err)
+	}
 	application := app.New(devinAdapter, serviceConfig.Server, debugManager)
 	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
@@ -226,7 +237,7 @@ func main() {
 	panel.SetAliasesFunc(devinAdapter.Aliases)
 	panel.SetConfigOps(dashboard.ConfigOps{
 		Reload: func() (*dashboard.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager)
+			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager, settingsStore)
 		},
 		Current: func() map[string]any {
 			return runtimeConfigView(absoluteConfigPath)
@@ -265,6 +276,7 @@ func main() {
 	}
 	application.SetModelRegistry(modelStore)
 	ccPanel.SetModelRegistry(modelStore)
+	ccPanel.SetSettingsStore(settingsStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
@@ -325,7 +337,7 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // transport 固化字段（base_url/proxy/force_http1）与监听参数进
 // requires_restart，调用方据此知道哪些改动仍在 pending。
-func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager) (*dashboard.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*dashboard.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -367,6 +379,11 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	if debugManager.Policy() != newPolicy {
 		debugManager.SetPolicy(newPolicy)
 		report.Applied = append(report.Applied, "debug.retention")
+	}
+	// 面板覆盖项恒赢 config.yaml：上面的 SetEnabled/SetPolicy 刚按
+	// 文件值重置过，panel-settings.json 里登记的键要重放压回去。
+	if err := settings.ApplyAll(); err != nil {
+		slog.Warn("panel settings replay failed", "error", err)
 	}
 	if *pcfg.Debug.QuotaIntervalMinutes != *cfg.Debug.QuotaIntervalMinutes {
 		report.RequiresRestart = append(report.RequiresRestart, "debug.quota_interval_minutes")

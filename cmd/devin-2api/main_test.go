@@ -17,6 +17,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
+	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -110,12 +111,16 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	settings, err := ccpanel.NewPanelSettings(dir, manager)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 丢 model 整单拒绝。
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -123,7 +128,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager)
+	report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -134,7 +139,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 }
@@ -275,7 +280,11 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager)
+			settings, err := ccpanel.NewPanelSettings(dir, manager)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}
