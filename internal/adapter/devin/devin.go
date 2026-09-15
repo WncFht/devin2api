@@ -313,13 +313,15 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	recorder := debuglog.FromContext(ctx)
 	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
 	adapter.ensureCatalog(ctx)
-	adapter.warnIfModelAbsentFromCatalog(model)
-	if err := adapter.validateImagesForModel(request, model); err != nil {
-		return nil, err
-	}
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
 	if err != nil {
 		recorder.WriteError(debuglog.ErrStageDevinConnect, err)
+		return nil, err
+	}
+	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
+	// 目录能力位与最终承担请求的模型无关。
+	adapter.warnIfModelAbsentFromCatalog(model)
+	if err := adapter.validateImagesForModel(request, model); err != nil {
 		return nil, err
 	}
 	cfg = adapter.currentConfig()
