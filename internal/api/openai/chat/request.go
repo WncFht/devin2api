@@ -125,17 +125,29 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 
 	context := llm.RequestMessages{Model: request.Model}
 	context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
+	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；选中的指针
+	// 非正时静默丢弃会让调用方以为上限已生效——记 Dropped 透出。
 	maxTokensValue := request.MaxCompletionTokens
+	droppedMaxTokens := "field:max_completion_tokens"
 	if maxTokensValue == nil {
 		maxTokensValue = request.MaxTokens
+		droppedMaxTokens = "field:max_tokens"
 	}
-	if maxTokensValue != nil && *maxTokensValue > 0 {
-		context.MaxTokens = maxTokensValue
+	if maxTokensValue != nil {
+		if *maxTokensValue > 0 {
+			context.MaxTokens = maxTokensValue
+		} else {
+			context.Dropped = append(context.Dropped, droppedMaxTokens)
+		}
 	}
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
-	if request.TopK != nil && *request.TopK > 0 {
-		context.TopK = request.TopK
+	if request.TopK != nil {
+		if *request.TopK > 0 {
+			context.TopK = request.TopK
+		} else {
+			context.Dropped = append(context.Dropped, "field:top_k")
+		}
 	}
 	context.Seed = request.Seed
 	// 上游 CASCADE 通道只支持单次补全：num_completions>1 会中途崩流，
