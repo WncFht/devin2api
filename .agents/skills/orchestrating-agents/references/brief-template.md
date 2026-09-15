@@ -1,43 +1,41 @@
-# Brief template
+# 任务书模板
 
-Paste-ready skeleton for an `Agent` dispatch. Fill the slots; delete lines that don't apply. The `PROTOCOL` line is what makes the tree recursive — every node that may spawn carries it forward into its own briefs.
+`Agent` 派生时可直接粘贴的骨架。填空；用不到的行删掉。`PROTOCOL` 一段是让树递归的关键——每个允许再派生的节点，都要把它原样带进自己的任务书。
 
 ```text
-You are <label>, a worker node in an agent tree.
-PROTOCOL: invoke the Skill `orchestrating-agents` if it is listed for you;
-otherwise Read <abs path to this skill>/SKILL.md and follow it. Apply the same
-rules — brief, budget, report contract — to any children you dispatch.
+你是 <label>，一棵代理树中的工人节点。
+PROTOCOL：如果你的 skill 列表里有 `orchestrating-agents`，先调用它；否则
+Read <skill 的绝对路径>/SKILL.md 并照做。你若再派子节点，同样按这套规则
+给它们写任务书、预算和汇报契约。
 
-TASK: <one-sentence objective>
+任务：<一句话目标>
 
-CONTEXT YOU NEED:
-<files, pasted errors, prior findings — everything; the worker sees nothing else>
+你需要的上下文：
+<文件、报错原文、已有结论——全放进来，工人除此之外什么都看不见>
 
-IN SCOPE: <what to touch / investigate>
-OUT OF SCOPE: <explicit do-NOT list — files, approaches, side effects>
+范围内：<要动 / 要查什么>
+范围外：<明确的「不许做」清单——文件、方案、副作用>
 
-EVIDENCE RULES: every claim cites the command you ran and its output. Check
-primary sources — docs, code, a real run; never answer API/flag/version
-questions from memory. Budget ≈<n> tool calls; spend them on verification,
-not hedging.
+证据规则：每条结论都要附你跑过的命令和输出。查一手来源——文档、代码、
+真实运行；API / 参数 / 版本类问题禁止凭记忆作答。工具调用预算约 <n> 次，
+花在验证上，别花在措辞对冲上。
 
-SPAWNING: SUBTREE_BUDGET=<k>  DEPTH=<d>  MAX_DEPTH=<usually 2>
-<if k>1 and d<MAX_DEPTH:> You may dispatch children whose SUBTREE_BUDGETs sum
-to ≤<k-1>; each carries DEPTH=<d+1> and this PROTOCOL block.
-<if k=1 or d=MAX_DEPTH:> Do not spawn subagents.
+派生：SUBTREE_BUDGET=<k>  DEPTH=<d>  MAX_DEPTH=<通常 2>
+<若 k>1 且 d<MAX_DEPTH：>可再派子节点，它们的 SUBTREE_BUDGET 之和 ≤<k-1>，
+各自带 DEPTH=<d+1> 和这段 PROTOCOL。
+<若 k=1 或 d=MAX_DEPTH：>禁止派生子代理。
 
-ARTIFACTS: write large outputs to <run dir>/<label>-*.md; report paths,
-don't paste bulk.
+产物：大输出写到 <运行目录>/<label>-*.md，汇报里给路径，不贴大段原文。
 
-REPORT back exactly one status:
-- DONE — result + the evidence behind each claim
-- DONE_WITH_CONCERNS — result + what to double-check
-- NEEDS_CONTEXT — exactly what you're missing
-- BLOCKED — why, and what you already tried
+汇报只许一种状态：
+- DONE——结果 + 每条结论的证据
+- DONE_WITH_CONCERNS——结果 + 需要复核的点
+- NEEDS_CONTEXT——具体缺什么
+- BLOCKED——原因，以及已经试过什么
 ```
 
-Notes on filling it:
+填写要点：
 
-- **CONTEXT YOU NEED is the make-or-break slot.** A vague brief produces agents that duplicate each other or answer the wrong question. Paste the actual error text, the actual file paths, the constraints you already know.
-- **Tool-call budget** comes from the effort table in SKILL.md — 3–10 for a fact check, 10–15 for a comparison. It is a floor as much as a ceiling: a worker that stops at 2 calls on a 15-call budget didn't look hard enough.
-- **OUT OF SCOPE earns its keep** even when it feels obvious — "do NOT modify production code", "do NOT just raise the timeout; find the real cause", "do NOT touch files outside pkg/x".
+- **「你需要的上下文」决定成败。** 空洞的任务书产出的是互相重复或答非所问的代理。贴真实报错、真实文件路径、你已确认的约束。
+- **工具调用预算**取自 SKILL.md 的分级表——查证 3–10 次，对比 10–15 次。它既是上限也是下限：15 次预算只花 2 次就收工的代理，是看得不够。
+- **「范围外」再显然也值得写**——「不许动生产代码」「不许靠调大超时糊弄，找真因」「不许碰 pkg/x 以外的文件」。

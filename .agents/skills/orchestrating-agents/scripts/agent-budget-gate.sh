@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# PreToolUse hook: hard cap on Agent spawns per session.
+# PreToolUse hook：按会话给 Agent 派生数设总量上限。
 #
-# Register in .claude/settings.json (or settings.local.json):
+# 在 .claude/settings.json（或 settings.local.json）里注册：
 #
 #   "hooks": {
 #     "PreToolUse": [{
 #       "matcher": "Agent",
 #       "hooks": [{"type": "command",
-#                  "command": "<abs path>/agent-budget-gate.sh"}]
+#                  "command": "<绝对路径>/agent-budget-gate.sh"}]
 #     }]
 #   }
 #
-# Cap via env AGENT_BUDGET (default 20). State: one marker file per spawn in
-# ${TMPDIR}/claude-agent-budget/<session_id>/ — counts every Agent call in the
-# session, including spawns issued inside subagents.
+# 上限用环境变量 AGENT_BUDGET 调（默认 20）。状态：每次派生在
+# ${TMPDIR}/claude-agent-budget/<session_id>/ 下落一个标记文件——
+# 统计本会话内全部 Agent 调用，包括子代理内部发起的派生。
 #
-# Past the cap the hook returns permissionDecision=deny; the reason is fed back
-# to the model, so the run winds down with existing agents instead of dying.
+# 超限时返回 permissionDecision=deny，原因反馈给模型，
+# 运行得以用已有代理收尾，而不是无声中断。
 
 set -euo pipefail
 
@@ -28,8 +28,8 @@ dir="${TMPDIR:-/tmp}/claude-agent-budget/$session"
 lock="$dir.lock"
 mkdir -p "$dir"
 
-# mkdir is atomic on POSIX: spin until we hold the lock. Parallel Agent calls
-# fire parallel hooks, so the count-and-claim must be serialized.
+# mkdir 在 POSIX 上是原子的：抢不到就自旋。并行的 Agent 调用触发并行
+# hook，「计数 + 占位」必须串行化，否则两个调用会同时看到同一个计数。
 until mkdir "$lock" 2>/dev/null; do :; done
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
@@ -43,6 +43,6 @@ jq -n --arg cap "$cap" '{
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
     permissionDecision: "deny",
-    permissionDecisionReason: ("Agent budget exhausted (" + $cap + " per session). Finish with existing agents, or report partial results.")
+    permissionDecisionReason: ("Agent 预算已耗尽（每会话 " + $cap + " 个）。请用已有代理收尾，或如实汇报部分结果。")
   }
 }'

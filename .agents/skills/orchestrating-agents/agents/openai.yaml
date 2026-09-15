@@ -1,3 +1,3 @@
 interface:
-  display_name: "Orchestrating Agents"
-  short_description: "Run large work as a budgeted subagent tree"
+  display_name: "编排子代理"
+  short_description: "把大任务拆成有预算的子代理树"

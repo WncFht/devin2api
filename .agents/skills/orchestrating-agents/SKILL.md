@@ -1,99 +1,99 @@
 ---
 name: orchestrating-agents
-description: Run large or uncertain work as a budgeted tree of subagents with evidence gates. Use when a task exceeds one context, spans independent sub-problems, needs real research or experimentation rather than a guessed answer, or when the user asks to fan out / delegate / orchestrate.
+description: 把庞大或不确定的任务拆成有预算上限的子代理树来做，全程以证据为准。当任务超出单个上下文的规模、可拆成多个独立子问题、需要真实调研或实验而不是凭记忆下结论，或用户明确要求 fan out / 分派 / 编排时使用。
 ---
 
-# Orchestrating Agents
+# 编排子代理
 
-Big tasks fail two ways. **Flat**: one context does everything serially — reading, exploring, implementing, verifying all compete for the same window, so each stays shallow. **Lazy**: conclusions drawn from memory, or from a subagent's own report, instead of from evidence.
+大任务有两种死法。**摊平**：一个上下文串行做完所有事——读代码、探路、实现、验证挤在同一个窗口里，每件都做得浅。**偷懒**：凭记忆下结论，或者拿子代理自己的汇报当事实，而不是看证据。
 
-This skill prevents both. You run the work as a **tree**: scout the problem yourself, decompose it into independent problems, dispatch one subagent per problem with a written **brief** and a **budget**, steer them mid-flight, and verify their output before integrating. You are the tech lead of a small team: the team does the digging, you do the judging.
+这个 skill 防的就是这两样。把工作组织成一棵**树**：先亲自侦察问题，拆成互相独立的子问题，每个子问题派一个子代理、附一份书面**任务书**和一份**预算**，途中可以纠偏，回收时亲自验证再合并。你的角色是小团队的技术负责人：团队负责挖，你负责判。
 
-## The gate
+## 闸门
 
-Fan-out is a tool for scale and isolation, not a default. Work alone when:
+fan-out 是规模和隔离的手段，不是默认动作。以下情况自己做：
 
-- One command or one file answers the question.
-- The problems share a root cause, or would edit the same files.
-- You are still exploring what the problem even is — scout first, fan out once the shape is known.
-- The value doesn't justify the cost: a busy tree burns roughly an order of magnitude more tokens than a single thread.
+- 一条命令、一个文件就能回答的问题。
+- 子问题同根同因，或者要改同一批文件。
+- 问题本身还没摸清——先侦察，等形状清楚了再拆。
+- 收益配不上成本：一棵忙碌的子代理树，token 消耗大约是单线程的一个数量级。
 
-Delegation is also a place to hide laziness. Two rules bind the orchestrator itself:
+派活本身也是偷懒的一种形式。对编排者有两条约束：
 
-- **Verify what you rely on.** Any evidence your global judgment stands on, you check personally — read the diff, re-run the command. A worker's report is a claim, not a fact.
-- **The buck stops in the tree.** Before declaring the whole task done, some node — usually you — must have exercised the result end to end: ran the app, re-ran the original failing symptom, read the merged diff.
+- **依赖什么，亲自验什么。** 你的全局判断靠哪份证据，哪份证据就要亲自过目——读 diff、重跑命令。工人的汇报是主张，不是事实。
+- **责任不出树。** 宣布整棵树完成之前，必须有某个节点——通常是你——端到端跑过最终结果：把应用跑起来、把最初的故障现象重放一遍、读完合并后的完整 diff。
 
-## Scout, then split
+## 先侦察，再拆分
 
-Decomposition quality is set before the first dispatch. Spend a bounded amount of your own effort — a handful of reads, one real run — to learn the terrain: where the seams are, what's already known, what a worker will trip on. Then carve along the boundaries you actually saw.
+拆得好不好，在第一次派生之前就定了。先花自己有限的力气——几次阅读、一次真跑——摸清地形：边界在哪、已知什么、工人会踩什么坑。然后沿着你实际看到的缝切。
 
-An orchestrator that splits blind produces overlapping agents and vague briefs. If you can't yet write a brief with real file names and real error text, you haven't scouted enough.
+盲目拆分的编排者，产出的是互相重叠的代理和空洞的任务书。如果任务书里还写不出真实的文件名和真实的报错文本，说明侦察得不够。
 
-## Budget
+## 预算
 
-Every tree has a **total cap** — default 20 agents per task, adjust to the task. You cannot count agents globally (nodes can't see each other), so the cap is enforced by **arithmetic, not vigilance**:
+每棵树有一个**总量上限**——默认 20 个代理，按任务调。全局计数做不到（节点互相看不见），所以上限靠**算术而不是警惕**来保证：
 
-- You start holding the whole budget.
-- Every brief you dispatch carries `SUBTREE_BUDGET=k`: the maximum number of agents that subtree may contain, counting itself.
-- You hand out disjoint shares summing to ≤ your remaining budget. A node may spend at most `SUBTREE_BUDGET - 1` on children, and each child's own `SUBTREE_BUDGET` bounds its subtree. Total spawned stays under the cap by construction.
-- `SUBTREE_BUDGET=1` forbids spawning outright. `DEPTH=d` records how far below you the node sits; `MAX_DEPTH` in its brief forbids spawning at that depth even with budget left — otherwise one budget of 5 can degenerate into a chain five agents deep.
+- 开局时全部预算在你手里。
+- 派出的每份任务书都带 `SUBTREE_BUDGET=k`：这棵子树最多容纳的代理数，包含它自己。
+- 你分出去的份额互不相交，总和 ≤ 手里剩余预算。一个节点最多拿 `SUBTREE_BUDGET - 1` 分给子节点，每个子节点的 `SUBTREE_BUDGET` 又约束它的整棵子树。派生总数天然封顶。
+- `SUBTREE_BUDGET=1` 直接禁止再派生。`DEPTH=d` 记录该节点在你之下第几层；任务书里的 `MAX_DEPTH` 到层即禁派，哪怕预算没花完——否则一份 5 的预算可能退化成一条五层深的链。
 
-Keep the tree bushy, not deep: root → workers → leaf helpers covers almost everything. Dispatch in **waves of 3–5** — multiple `Agent` calls in one response run in parallel; across responses they serialize. Waves beat both the serial drip and the 15-wide fan-out: reviews land as results arrive, and conflicting edits surface while the tree is still small.
+树要扁不要深：根 → 工人 → 叶子助手，覆盖绝大多数场景。按**每波 3–5 个**派发——同一条回复里的多个 `Agent` 调用才真正并行，跨回复就变成串行。波浪式好过逐滴串行，也好过一次铺开 15 个：结果到了评审就能跟上，编辑冲突在树还小时就暴露。
 
-Effort scales with the task:
+投入按任务分级：
 
-| Task shape                           | Agents        | Per-agent tool calls |
-| ------------------------------------ | ------------- | -------------------- |
-| Fact check, single question          | 0–1           | 3–10                 |
-| Comparison, a few independent angles | 2–4           | 10–15 each           |
-| Many independent domains             | up to the cap | divided by domain    |
+| 任务形状             | 代理数   | 单代理工具调用 |
+| -------------------- | -------- | -------------- |
+| 查证事实、单一问题   | 0–1      | 3–10           |
+| 对比类、几个独立角度 | 2–4      | 各 10–15       |
+| 多个独立领域         | 直到上限 | 按领域分       |
 
-For a hard cap the model can't reason its way around, register `scripts/agent-budget-gate.sh` as a `PreToolUse` hook on the `Agent` tool. It counts spawns in the session and denies past the cap, feeding the reason back so the run winds down instead of dying.
+要一道模型绕不过去的闸门，把 `scripts/agent-budget-gate.sh` 注册成 `Agent` 工具的 `PreToolUse` hook。它按会话计数，超限返回 deny 并把原因反馈给模型，运行得以用已有代理收尾，而不是无声中断。
 
-## The brief
+## 任务书
 
-Workers get a fresh context: they cannot see your conversation. The brief is all they get — it must be **self-contained**: objective, scope boundaries (an explicit "do NOT" list), the evidence you already hold (paste the error, name the files), constraints, tool-call budget, `SUBTREE_BUDGET`/`DEPTH`, and the report format.
+工人拿到的是全新上下文：看不见你的对话。任务书是它的全部输入——必须**自包含**：目标、边界（明确的「不许做」清单）、你手里已有的证据（贴报错原文、点文件名）、约束、工具调用预算、`SUBTREE_BUDGET`/`DEPTH`、汇报格式。
 
-Every brief orders **evidence over opinion**: the worker shows the command and output behind every claim — "tests pass" means the run's tail, not its word. Point workers at primary sources — the docs, the code, a real run — and forbid answering from memory on anything that drifts: APIs, flags, versions, prices.
+每份任务书都要写明**证据优先**：工人的每个结论都要附跑过的命令和输出——「测试通过」指的是这次运行的末尾输出，不是它自己的说法。引导工人查一手来源——官方文档、代码本体、真实运行——凡是会漂移的东西（API、命令行参数、版本号、价格）一律禁止凭记忆作答。
 
-Give every dispatch a distinct label; you will steer by name later. Template: `references/brief-template.md`.
+每次派生起个能区分的名字，后面纠偏按名找人。模板见 `references/brief-template.md`。
 
-## The report contract
+## 汇报契约
 
-Every worker reports exactly one status, plus evidence:
+每个工人只汇报一种状态，附证据：
 
-- **DONE** — the result and the evidence for each claim (command outputs, diff paths, artifact files).
-- **DONE_WITH_CONCERNS** — done, with a list of what to double-check.
-- **NEEDS_CONTEXT** — blocked on information only you hold; states exactly what's missing.
-- **BLOCKED** — cannot proceed; states why and what was already tried.
+- **DONE**——结果，以及每条结论背后的证据（命令输出、diff 路径、产物文件）。
+- **DONE_WITH_CONCERNS**——做完了，同时列出需要复核的点。
+- **NEEDS_CONTEXT**——卡在只有你掌握的信息上；说清缺什么。
+- **BLOCKED**——走不下去；说清原因和已经试过什么。
 
-Long artifacts go to files in the run's workspace; the report returns paths, not bulk.
+大产物写进本次运行的工作目录文件，汇报里给路径，不贴大段原文。
 
-## Steering
+## 途中纠偏
 
-You can talk to a live or finished agent by name — `SendMessage` resumes it with its full transcript intact. Steering mid-flight is cheaper than restarting, and the agent keeps everything it learned.
+你可以按名字对活着或已结束的代理说话——`SendMessage` 会带着完整 transcript 把它续起来跑。途中纠偏比重开便宜，学到的上下文也不丢。
 
-- **NEEDS_CONTEXT** → answer it via `SendMessage`; the worker resumes where it stopped.
-- **Off-course** → send a correction ("drop approach B, the constraint was X"), not a new dispatch.
-- **Fix rounds**: rounds 1–3, send the findings back to the same agent. Round 4+, open a fresh agent — a new reader sees what a stale context has rationalized away — and consider a stronger model. Cap fix rounds at 5, then **adjudicate**: fix what's load-bearing yourself, or record a ruling that consciously defers it.
-- Never force a stuck agent to retry an unchanged approach. Same input, same wall.
+- **NEEDS_CONTEXT** → 用 `SendMessage` 把缺的信息补给它；它从停下的地方继续。
+- **跑偏了** → 发一条纠正（「放弃 B 方案，约束其实是 X」），而不是重新派一个。
+- **返修轮次**：第 1–3 轮把评审发现发回原代理；第 4 轮起开新代理——新读者能看见旧上下文已经合理化掉的问题——并考虑换更强的模型。返修封顶 5 轮，到顶**裁决**：承重的你自己修，其余记一条 ruling 明确挂起。
+- 永远别让卡住的代理原样重试。同样的输入，同样的墙。
 
-Use `ListAgents` to reconcile who's still running against the ledger.
+用 `ListAgents` 核对还在跑的节点和台账是否对得上。
 
-## Review
+## 评审
 
-The implementer never reviews its own work. For each DONE: re-run the cheap claims, read the diff behind the load-bearing ones, check for collisions with other agents' edits, and look for systematic errors — an agent repeats a wrong assumption faithfully across every file it touches.
+实现者永远不评审自己的活。对每个 DONE：便宜的断言重跑一遍，承重的断言读它背后的 diff，检查和其他代理的编辑有没有撞车，留心系统性错误——代理会把一个错误假设忠实地复制到它碰过的每个文件里。
 
-Judge the artifact, not the story. An agent that wandered but produced verified output succeeded; a clean narrative with unverified claims did not.
+看产物，不看故事。绕了路但产出经过验证的代理算成功；叙事漂亮但结论没验证的不算。
 
-## Ledger
+## 台账
 
-For runs beyond a few agents, keep a file — `work/orch-<slug>/ledger.md` (`work/` is gitignored here; elsewhere use any scratch dir). One line per dispatch: label, brief path, budget share, status, rulings. It survives context compression and makes the budget auditable. Keep briefs and large artifacts under the same directory.
+代理数稍多的运行，建一个文件——`work/orch-<slug>/ledger.md`（本仓库 `work/` 已 gitignore；别的仓库用任意 scratch 目录）。每派一行：名字、任务书路径、预算份额、状态、ruling。它扛得住 context 压缩，也让预算可查账。任务书和大产物放同一目录。
 
-## Completion checklist
+## 收尾清单
 
-- [ ] Every dispatched agent resolved: done, ruled, or reported as a gap.
-- [ ] Budget accounting clean: spent ≤ cap, no unaccounted children.
-- [ ] Load-bearing claims verified against evidence you saw yourself.
-- [ ] Cross-agent edits checked for conflicts; the full suite / whole-program run passed after integration.
-- [ ] Rulings listed in the final report: what was deferred, and why.
+- [ ] 每个派出的代理都有结论：完成、裁决挂起、或如实报告为缺口。
+- [ ] 预算对账干净：已用 ≤ 上限，没有账外子节点。
+- [ ] 承重结论都对着你亲眼见过的证据验过。
+- [ ] 跨代理编辑查过冲突；合并后全量测试 / 整体运行通过。
+- [ ] 最终报告列出所有 ruling：挂起了什么、为什么。
