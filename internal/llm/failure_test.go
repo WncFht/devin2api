@@ -60,6 +60,18 @@ func TestUpstreamFault(t *testing.T) {
 	if got := ClassifyText("invalid_argument: protocol error: incomplete envelope: read: connection reset by peer"); !got.UpstreamFault {
 		t.Fatalf("frame truncation must be UpstreamFault: %+v", got)
 	}
+	if got := ClassifyText("unavailable: stream error: stream ID 1; REFUSED_STREAM; received from peer"); !got.UpstreamFault {
+		t.Fatalf("http2 RST_STREAM must be UpstreamFault: %+v", got)
+	}
+	// ENHANCE_YOUR_CALM 被 connect-go 映成 resource_exhausted——传输
+	// 事件不是上游限流：UpstreamFault 置位且 RateLimited 抑制（不上闩、
+	// 不下发 rate_limit_exceeded）。
+	if got := ClassifyText("resource_exhausted: bandwidth exhausted: stream error: stream ID 5; ENHANCE_YOUR_CALM; received from peer"); !got.UpstreamFault || got.RateLimited {
+		t.Fatalf("transport-masqueraded resource_exhausted must be UpstreamFault, not RateLimited: %+v", got)
+	}
+	if got := ClassifyText("unavailable: http2: server sent GOAWAY and closed the connection; LastStreamID=9, ErrCode=NO_ERROR"); !got.UpstreamFault {
+		t.Fatalf("http2 GOAWAY must be UpstreamFault: %+v", got)
+	}
 	if got := Classify(io.EOF); !got.UpstreamFault {
 		t.Fatalf("bare EOF must be UpstreamFault: %+v", got)
 	}
@@ -69,6 +81,10 @@ func TestUpstreamFault(t *testing.T) {
 	if got := ClassifyText("invalid_argument: bad request"); got.UpstreamFault || !got.ClientFixable {
 		t.Fatalf("plain invalid_argument must stay ClientFixable: %+v", got)
 	}
+	// 真·上游限流（EndStream 尾帧语义拒绝）不受传输措辞影响。
+	if got := ClassifyText("resource_exhausted: Reached overall message rate limit. Your limit will reset in 3 minutes."); got.UpstreamFault || !got.RateLimited {
+		t.Fatalf("real rate limit must stay RateLimited, not UpstreamFault: %+v", got)
+	}
 }
 
 // TestRetryAfterSeconds 验证从上游限流文案解析重置窗口——上游没有
@@ -77,19 +93,25 @@ func TestRetryAfterSeconds(t *testing.T) {
 	if seconds := ClassifyText("resource_exhausted: rate limited. Your limit will reset in 42 seconds.").RetryAfterSeconds; seconds != 42 {
 		t.Fatalf("RetryAfterSeconds = %d, want 42", seconds)
 	}
-	if seconds := ClassifyText("resource_exhausted: quota exceeded").RetryAfterSeconds; seconds != 0 {
-		t.Fatal("no reset hint must report 0")
+	if failure := ClassifyText("resource_exhausted: quota exceeded"); failure.RetryAfterSeconds != 0 || failure.ResetHint {
+		t.Fatal("no reset hint must report 0 and no hint")
 	}
-	if seconds := ClassifyText("reset in 0 seconds").RetryAfterSeconds; seconds != 0 {
-		t.Fatal("zero reset must report 0")
+	// 显式 0 与无 hint 是两态：秒数同为 0，但 ResetHint 标记声明在场。
+	if failure := ClassifyText("reset in 0 seconds"); failure.RetryAfterSeconds != 0 || !failure.ResetHint {
+		t.Fatal("explicit zero reset must report 0 with hint present")
 	}
 }
 
 // TestRateLimitReset 在 rategate_test.go 里有分钟桶界对齐的全量用例，
-// 这里只验证方法入口的零值行为。
+// 这里验证方法入口的零值行为与显式 0 声明。
 func TestRateLimitResetZero(t *testing.T) {
 	if _, ok := ClassifyText("plain error").RateLimitReset(time.Now()); ok {
 		t.Fatal("no reset hint must report false")
+	}
+	// 显式 0 秒：声明的重置时刻即现在——闩按它即刻过期而非套兜底闩。
+	now := time.Now()
+	if reset, ok := ClassifyText("reset in 0 seconds").RateLimitReset(now); !ok || !reset.Equal(now) {
+		t.Fatalf("explicit zero reset = %v,%v, want now,true", reset, ok)
 	}
 }
 

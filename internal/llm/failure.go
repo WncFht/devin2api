@@ -53,7 +53,10 @@ type Failure struct {
 
 	// ContextLength 表示请求超出上游上下文窗口——客户端可修正。
 	ContextLength bool
-	// RateLimited 表示限流类失败（resource_exhausted 或本地闸门）。
+	// RateLimited 表示限流类失败（resource_exhausted 或本地闸门）；
+	// UpstreamFault 置位时恒假——传输断裂伪装的该 code（如 http2
+	// ENHANCE_YOUR_CALM 被 connect-go 映成 resource_exhausted）不是
+	// 上游限流信号。
 	RateLimited bool
 	// Canceled 表示客户端主动断连/取消。
 	Canceled bool
@@ -65,6 +68,11 @@ type Failure struct {
 	ClientFixable bool
 	// TraceID 是上游错误尾缀 "(trace ID: …)" 提取出的排障锚点。
 	TraceID string
+	// ResetHint 表示上游文案携带了 reset 声明（含显式 0）——
+	// RetryAfterSeconds==0 因此分两种语义：无声明，与「重置时刻即
+	// 现在」。实测 "reset in 0 seconds" 全在桶界到达：新桶已爆、
+	// 无追加封禁，RateLimitReset 对后者返回 now。
+	ResetHint bool
 }
 
 // Error 保持既有线格式 "<code>: <msg>"——旧文本契约（日志、客户端
@@ -138,8 +146,6 @@ func derive(failure *Failure) *Failure {
 			break
 		}
 	}
-	failure.RateLimited = failure.RateLimited ||
-		failure.Code == "resource_exhausted" || failure.LocalGate
 	failure.Canceled = failure.Canceled ||
 		failure.Code == "canceled" ||
 		errors.Is(failure.Cause, context.Canceled) ||
@@ -151,6 +157,12 @@ func derive(failure *Failure) *Failure {
 	failure.UpstreamFault = failure.UpstreamFault ||
 		strings.Contains(message, internalErrorMarker) ||
 		transportBreak(failure)
+	// UpstreamFault 置位时 code 声称的语义不可信：resource_exhausted
+	// 也可能是传输断裂的伪装（http2 ENHANCE_YOUR_CALM），不能拿去
+	// 上冷却闩或对客户端标 rate_limit_exceeded。
+	failure.RateLimited = failure.RateLimited ||
+		(!failure.UpstreamFault &&
+			(failure.Code == "resource_exhausted" || failure.LocalGate))
 	failure.ClientFixable = failure.ClientFixable ||
 		(!failure.UpstreamFault &&
 			(failure.ContextLength || requestCodeSet[failure.Code]))
@@ -158,7 +170,7 @@ func derive(failure *Failure) *Failure {
 		failure.TraceID = match[1]
 	}
 	if failure.RetryAfterSeconds == 0 {
-		failure.RetryAfterSeconds, failure.RetryAfterMinute = parseResetHint(failure.Message)
+		failure.RetryAfterSeconds, failure.RetryAfterMinute, failure.ResetHint = parseResetHint(failure.Message)
 	}
 	return failure
 }
@@ -170,8 +182,10 @@ const internalErrorMarker = "an internal error occurred"
 
 // transportBreak 判定传输层断裂：connect-go 把 RoundTrip/读写断包成
 // CodeUnavailable、envelope 帧截断包成 CodeInvalidArgument "protocol
-// error: ..."、流中段裸 EOF 包成 CodeUnknown——判据看 unwrap 链里的
-// io/net 错误与 connect 的固定措辞，而不是 code 本身。已归取消/超时的
+// error: ..."、流中段裸 EOF 包成 CodeUnknown、对端 RST_STREAM/GOAWAY
+// 映成语义 code（REFUSED_STREAM→unavailable、ENHANCE_YOUR_CALM→
+// resource_exhausted 等）——判据看 unwrap 链里的 io/net 错误与
+// connect/http2 栈的固定措辞，而不是 code 本身。已归取消/超时的
 // 不算传输故障。
 func transportBreak(failure *Failure) bool {
 	if failure.Canceled || failure.Timeout {
@@ -184,8 +198,40 @@ func transportBreak(failure *Failure) bool {
 	if errors.As(failure.Cause, &netErr) {
 		return true
 	}
-	return (failure.Code == "invalid_argument" || failure.Code == "internal") &&
-		strings.HasPrefix(failure.Message, "protocol error:")
+	return IsHTTP2TransportError(failure.Message) ||
+		((failure.Code == "invalid_argument" || failure.Code == "internal") &&
+			strings.HasPrefix(failure.Message, "protocol error:"))
+}
+
+// http2TransportMarkers 是本地 http2 栈写进错误文案的固定措辞。
+// connect-go 把对端 RST_STREAM 按尾缀 code 映射为语义 code（v1.20.0
+// error.go wrapIfRSTError：REFUSED_STREAM→unavailable、
+// PROTOCOL_ERROR/INTERNAL_ERROR 等→internal、ENHANCE_YOUR_CALM→
+// resource_exhausted、INADEQUATE_SECURITY→permission_denied、
+// CANCEL→canceled/deadline_exceeded）；vendored http2 类型不可导出，
+// 只能认文案——形如 "stream error: stream ID N; CODE; received from
+// peer"，ENHANCE_YOUR_CALM/INADEQUATE_SECURITY 外层再套
+// "bandwidth exhausted: "/"transport protocol insecure: " 前缀，故只能
+// Contains 不能 HasPrefix。GOAWAY 不走该映射，建连期以
+// "unavailable: http2: server sent GOAWAY and closed the connection; ..."
+// 透出。真正的上游语义错误经 EndStream 尾帧送达（connect 收到尾帧错误时
+// 优先于传输错误返回，protocol_connect.go Receive 的 serverErr 分支），
+// 不会携带这些本地措辞——命中即传输断裂，映射出的 code 与语义无关。
+var http2TransportMarkers = []string{
+	"stream error: stream ID ",
+	"http2: server sent GOAWAY",
+}
+
+// IsHTTP2TransportError 判定错误文案是否携带本地 http2 栈的传输措辞
+// （RST_STREAM/GOAWAY）。connect.Error 的 Message() 或整条 Error()
+// 文本都可传入——标记串不会出现在 code 前缀里。
+func IsHTTP2TransportError(message string) bool {
+	for _, marker := range http2TransportMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // connectCodes 是 Connect 协议全部错误码——文本兜底时只有前缀命中该集合
@@ -240,42 +286,53 @@ var traceIDPattern = regexp.MustCompile(`\(trace ID: ([^)\s]+)\)`)
 // detail，这句文案是唯一可行动的 hint。
 var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+)\s*(seconds?|minutes?)`)
 
-// parseResetHint 从文案解析限流重置秒数与粒度；无 hint 返回 0。
-// 返回的字面秒数（分钟按 60 折算）；要拿可行动的等待时长/绝对时刻用
-// RateLimitReset——分钟 hint 是桶界的 floor 取整，需向上对齐。
-func parseResetHint(message string) (seconds int, minute bool) {
+// parseResetHint 从文案解析限流重置声明，返回三态：无 hint（ok=false）、
+// 显式 0（ok=true 且 seconds=0——上游在桶界到达时报 "reset in 0 seconds"，
+// 语义是「新桶已爆、无追加封禁」，重置时刻即现在）、正数等待。
+// 返回字面秒数（分钟按 60 折算）；要拿可行动的等待时长/绝对时刻用
+// RateLimitReset——分钟 hint 是桶界剩余时长的 floor 取整，需向上对齐。
+func parseResetHint(message string) (seconds int, minute bool, ok bool) {
 	match := rateLimitResetPattern.FindStringSubmatch(message)
 	if len(match) != 3 {
-		return 0, false
+		return 0, false, false
 	}
 	n, err := strconv.Atoi(match[1])
-	if err != nil || n <= 0 {
-		return 0, false
+	if err != nil {
+		return 0, false, false
 	}
 	if strings.HasPrefix(match[2], "minute") {
-		return n * 60, true
+		return n * 60, true, true
 	}
-	return n, false
+	return n, false, true
 }
 
 // RateLimitReset 把限流重置时刻解析为绝对时刻：生产侧已知的精确秒数
 // 直接 now+N；分钟级 hint 是上游对当前分钟桶剩余时长的 floor 取整
 // （"reset in 1 minute" 实际指本桶结束，最晚 ~119s 后），按上游分钟桶
 // 模型向上对齐到下一个 :59 秒桶界——上游时钟约快 1s，实测桶界落在本地
-// :58.5~:59.5。
+// :58.5~:59.5。显式 0 秒声明（"reset in 0 seconds"，ResetHint 置位）
+// 返回 now——冷却闩按声明时刻即刻过期，而不是套兜底闩时长。
 func (failure *Failure) RateLimitReset(now time.Time) (time.Time, bool) {
-	if failure == nil || failure.RetryAfterSeconds <= 0 {
+	if failure == nil {
 		return time.Time{}, false
 	}
-	if !failure.RetryAfterMinute {
-		return now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second), true
+	if failure.RetryAfterSeconds <= 0 && !failure.ResetHint {
+		return time.Time{}, false
 	}
-	// now+Nmin 落入的分钟桶的 :59 边界；若该时刻本身已过 :59，
-	// 取下一个分钟的 :59。
-	target := now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second)
-	reset := target.Truncate(time.Minute).Add(59 * time.Second)
-	if !reset.After(target) {
-		reset = reset.Add(time.Minute)
+	if failure.RetryAfterMinute {
+		// now+Nmin 落入的分钟桶的 :59 边界；若该时刻本身已过 :59，
+		// 取下一个分钟的 :59。N=0（"reset in 0 minutes"）对齐到本桶
+		// :59——分钟粒度的 0 是 floor 取整，真实剩余最长 ~59s。
+		target := now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second)
+		reset := target.Truncate(time.Minute).Add(59 * time.Second)
+		if !reset.After(target) {
+			reset = reset.Add(time.Minute)
+		}
+		return reset, true
 	}
-	return reset, true
+	if failure.RetryAfterSeconds <= 0 {
+		// 显式 0 秒：声明的重置时刻即现在。
+		return now, true
+	}
+	return now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second), true
 }
