@@ -127,23 +127,10 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 				if event.Type != llm.ResponseEventStart {
 					recorder.NoteUpstreamLatency()
 				}
-				if recorder != nil {
-					// 多数事件的投影只读标量字段，建树推迟到日志 worker——
-					// 泵 goroutine 只付一次 channel send。例外按
-					// ResponseEventProjection 的解引用点逐一判定：Partial 只在
-					// Start 读、ToolCall 只在 ToolCallEnd 读、Message/Error 存在
-					// 即读；这些指针指向 decoder 跨帧续改的活对象，worker 里
-					// 解引用会与泵协程并发读写竞争，必须就地求值。
-					var projected any
-					if event.Message != nil || event.Error != nil || event.ToolCall != nil ||
-						(event.Type == llm.ResponseEventStart && event.Partial != nil) {
-						projected = debuglog.ResponseEventProjection(event)
-					} else {
-						ev := event
-						projected = func() any { return debuglog.ResponseEventProjection(ev) }
-					}
-					recorder.AppendJSONL(debuglog.StageResponseEvents, string(event.Type), projected)
-				}
+				// 投影就地/推迟求值的判定归 debuglog 所有：哪些字段指向
+				// decoder 跨帧续改的活对象由 ResponseEventProjection 的
+				// 解引用点决定，见 RecordResponseEvent。
+				recorder.RecordResponseEvent(event)
 			}
 			select {
 			case items <- pumpItem{event: event, err: err}:

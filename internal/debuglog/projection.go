@@ -45,6 +45,32 @@ func RequestMessagesProjection(request llm.RequestMessages) map[string]any {
 	return result
 }
 
+// RecordResponseEvent 把一条上游响应事件记入 05 阶段 JSONL。投影的求值
+// 位置由本包按 eventProjectsLiveFields 判定：含 decoder 活对象指针的事件
+// 必须在调用方 goroutine 就地投影（写 worker 里解引用会与泵协程并发读写
+// 竞争），纯标量事件打包成 thunk 推迟到 worker——热路径只付一次入队。
+func (recorder *Recorder) RecordResponseEvent(event llm.ResponseEvent) {
+	if recorder == nil {
+		return
+	}
+	var value any
+	if eventProjectsLiveFields(event) {
+		value = ResponseEventProjection(event)
+	} else {
+		ev := event
+		value = func() any { return ResponseEventProjection(ev) }
+	}
+	recorder.AppendJSONL(StageResponseEvents, string(event.Type), value)
+}
+
+// eventProjectsLiveFields 判定投影是否会解引用 decoder 跨帧续改的活对象；
+// 条件必须与 ResponseEventProjection 的解引用点保持同步（同文件相邻可审）：
+// Partial 只在 Start 读、ToolCall 只在 ToolCallEnd 携带、Message/Error 存在即读。
+func eventProjectsLiveFields(event llm.ResponseEvent) bool {
+	return event.Message != nil || event.Error != nil || event.ToolCall != nil ||
+		(event.Type == llm.ResponseEventStart && event.Partial != nil)
+}
+
 // ResponseEventProjection 将响应事件转成避免重复完整 Partial 的日志结构。
 func ResponseEventProjection(event llm.ResponseEvent) map[string]any {
 	result := map[string]any{"type": event.Type}
