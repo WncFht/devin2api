@@ -4,7 +4,7 @@
 /probe
 /bin/
 /work/
-# 现在是符号链接（指向 ~/Library/Application Support/devin-2api/logs）
+# 现在是符号链接（指向平台状态目录下的 logs/）
 /logs
 /build/
 

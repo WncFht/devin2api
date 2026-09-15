@@ -57,7 +57,7 @@ check "限定 Linux" has scripts/deploy-linux.sh 'Linux'
 check "Restart=always" has scripts/deploy-linux.sh 'Restart=always'
 check "优雅停止窗口" has scripts/deploy-linux.sh 'TimeoutStopSec='
 check "systemctl --user" has scripts/deploy-linux.sh 'systemctl --user'
-check "日志落运行目录" has scripts/deploy-linux.sh 'StandardOutput=append:'
+check "日志落状态目录" has scripts/deploy-linux.sh 'StandardOutput=append:'
 
 echo "== deploy-remote.sh（开发机 → 生产机驱动）=="
 check "目标机走 DEVIN2API_HOST" has scripts/deploy-remote.sh 'DEVIN2API_HOST'

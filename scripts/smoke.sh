@@ -7,7 +7,7 @@
 # 配额，一条探针覆盖「配置加载 → 鉴权 → adapter → 上游 RPC」整条链。
 #
 # 用法: scripts/smoke.sh [--port 3005] [--config <config.yaml 路径>] [--no-upstream]
-#   --config 缺省 ./config.yaml；独立运行目录由 mktemp 提供，logs 不污染
+#   --config 缺省 ./config.yaml；独立状态目录由 mktemp 提供，logs 不污染
 #   真实实例。端口被占或实例中途退出都会明确报错。
 #   --no-upstream 跳过真上游探针（断言 /v1/models 对空 token 明确 502），
 #   给 CI 这类无 token 环境用；两种模式都验证 SIGTERM 优雅退出。
@@ -55,7 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 独立运行目录：listen 改到冒烟端口；logs/gate-state 都落临时目录。
+# 独立状态目录：listen 改到冒烟端口；logs/gate-state 都落临时目录。
 # 只换行尾 :port 段、保留既有 host——源配置若绑 127.0.0.1，整值替换成
 # ":PORT" 会让冒烟实例短暂暴露到全部接口。
 sed -E "/^[[:space:]]*listen:/s/:[0-9]+([\"']?[[:space:]]*)$/:$PORT\1/" "$SRC_CONFIG" >"$WORK/config.yaml"

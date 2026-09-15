@@ -110,7 +110,7 @@ Intermediate tools are converted into Devin native function tools (name and JSON
 
 ## Debug logging
 
-When `debug.enabled: true`, each request gets a staged log directory under `logs/<request-time>/` next to the config file, useful for pinpointing failures at any hop of "HTTP ⇄ intermediate ⇄ upstream":
+When `debug.enabled: true`, each request gets a staged log directory under `<state-dir>/logs/<request-time>/` (the repo `logs/` symlink points at that directory), useful for pinpointing failures at any hop of "HTTP ⇄ intermediate ⇄ upstream":
 
 ```text
 meta.json                  # request outcome summary (status, model, duration)

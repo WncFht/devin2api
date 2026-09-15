@@ -1,6 +1,6 @@
 // probe 是对 Devin 上游做受控实验的命令行工具。
 // 用法：go run ./cmd/probe <subcommand> [flags]
-// token 从 DEVIN_TOKEN 环境变量读；缺省时回落解析仓库根目录 config.yaml 的 devin.token。
+// token 从 DEVIN_TOKEN 环境变量读；缺省时按 config.ResolveConfigPath 链（DEVIN2API_CONFIG → ./config.yaml → 平台默认目录）解析 devin.token。
 package main
 
 import (

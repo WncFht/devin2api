@@ -137,7 +137,7 @@ WantedBy=default.target
 
 ```bash
 systemctl --user status devin-2api          # 状态（MainPID、内存）
-systemctl --user restart devin-2api         # 重启（SIGTERM → 60s 内强杀）
+systemctl --user restart devin-2api         # 重启（SIGTERM → TimeoutStopSec=330 排空窗口后强杀）
 systemctl --user stop devin-2api            # 停止
 journalctl --user -u devin-2api -f          # unit 事件日志（slog 在 logs/stderr.log）
 tail -f logs/stderr.log                     # 进程日志

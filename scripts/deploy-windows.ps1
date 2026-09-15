@@ -226,7 +226,7 @@ function Ensure-Config {
     if ($InRepo -and (Test-Path $RepoConfig)) {
         if ((Test-Path $RuntimeConfig) -and
             (Get-FileHash $RepoConfig).Hash -ne (Get-FileHash $RuntimeConfig).Hash) {
-            Warn "config.yaml 与运行目录不一致，以仓库版本覆盖（权威副本在仓库）"
+            Warn "config.yaml 与配置目录不一致，以仓库版本覆盖（权威副本在仓库）"
         }
         Copy-Item $RepoConfig $RuntimeConfig -Force
         return
@@ -235,7 +235,7 @@ function Ensure-Config {
 
     $example = Join-Path $RepoRoot 'config.example.yaml'
     if (-not (Test-Path $example)) { $example = Join-Path $RuntimeDir 'config.example.yaml' }
-    if (-not (Test-Path $example)) { Die "找不到 config.example.yaml（仓库根或运行目录下都没有）" }
+    if (-not (Test-Path $example)) { Die "找不到 config.example.yaml（仓库根或安装目录下都没有）" }
 
     Note "first install: 从 config.example.yaml 生成 config.yaml"
     Copy-Item $example $RuntimeConfig

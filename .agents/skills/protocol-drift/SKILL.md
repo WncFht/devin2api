@@ -40,8 +40,8 @@ go run ./cmd/protocensus census -max-dirs 500  # newest N dirs only
 ```
 
 (`task census [MAX_DIRS=N]` wraps the same command when go-task is
-installed.) Reads `logs/` by default; the repo `logs/` is a symlink to the
-runtime directory, so this inspects production traffic.
+installed.) Reads `logs/` by default; the repo `logs/` is a symlink into the
+platform state dir's `logs/`, so this inspects production traffic.
 
 ## Read the report
 
