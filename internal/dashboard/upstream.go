@@ -131,44 +131,49 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	// 按请求打一行，抬到 status 让 agent 程序化可得。
 	go func() {
 		defer wg.Done()
-		resultMu.Lock()
-		defer resultMu.Unlock()
 		if h.aliasesFunc == nil {
 			return
 		}
+		// 与其余五路同序：先拉取与计算、末段一次 resultMu 写结果——
+		// 慢目录拉取不该把整扇聚合互斥到底，也避免 resultMu→modelsMu
+		// 的嵌套锁序日后长成真死锁。
 		models, err := h.cachedModels(ctx)
+		var absent []string
+		var shadowed []string
+		if err == nil {
+			uids := make(map[string]struct{}, len(models))
+			for _, m := range models {
+				if uid, ok := m["uid"].(string); ok && uid != "" {
+					uids[uid] = struct{}{}
+				}
+			}
+			for name, target := range h.aliasesFunc() {
+				target = strings.TrimSpace(target)
+				if target == "" {
+					continue
+				}
+				if _, ok := uids[target]; !ok {
+					absent = append(absent, name+"→"+target)
+				}
+				// 别名名本身是目录里的真模型：请求全部被改写，原模型变得
+				// 不可达——多半是借用官方名过客户端校验（如 claude-* 名单），
+				// 但值得显式留痕，免得日后查"为什么模型行为对不上目录"。
+				if _, ok := uids[name]; ok {
+					shadowed = append(shadowed, name+"→"+target)
+				}
+			}
+			slices.Sort(shadowed)
+		}
+		resultMu.Lock()
+		defer resultMu.Unlock()
 		if err != nil {
 			result["alias_check_error"] = err.Error()
 			return
-		}
-		uids := make(map[string]struct{}, len(models))
-		for _, m := range models {
-			if uid, ok := m["uid"].(string); ok && uid != "" {
-				uids[uid] = struct{}{}
-			}
-		}
-		var absent []string
-		var shadowed []string
-		for name, target := range h.aliasesFunc() {
-			target = strings.TrimSpace(target)
-			if target == "" {
-				continue
-			}
-			if _, ok := uids[target]; !ok {
-				absent = append(absent, name+"→"+target)
-			}
-			// 别名名本身是目录里的真模型：请求全部被改写，原模型变得
-			// 不可达——多半是借用官方名过客户端校验（如 claude-* 名单），
-			// 但值得显式留痕，免得日后查"为什么模型行为对不上目录"。
-			if _, ok := uids[name]; ok {
-				shadowed = append(shadowed, name+"→"+target)
-			}
 		}
 		if len(absent) > 0 {
 			result["alias_targets_absent"] = absent
 		}
 		if len(shadowed) > 0 {
-			slices.Sort(shadowed)
 			result["alias_shadows_catalog"] = shadowed
 		}
 	}()
@@ -351,23 +356,59 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
 }
 
+// cachedModels 返回 TTL 内的模型目录缓存；过期时经 singleflight 收敛为
+// 单次上游拉取：等待方挂 done channel 而非写锁排队——RPC 最坏 610s，
+// 锁内等待不吃 ctx，断连的调用方会永远卡在队列里。
 func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
-	h.modelsMu.RLock()
-	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
-		cached := h.modelsCache
+	for {
+		h.modelsMu.RLock()
+		if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
+			cached := h.modelsCache
+			h.modelsMu.RUnlock()
+			return cached, nil
+		}
 		h.modelsMu.RUnlock()
-		return cached, nil
-	}
-	h.modelsMu.RUnlock()
 
-	// 写锁内复查后再拉取：TTL 过期瞬间的并发 miss 收敛为单次上游调用。
-	h.modelsMu.Lock()
-	defer h.modelsMu.Unlock()
-	if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
-		return h.modelsCache, nil
-	}
+		h.modelsMu.Lock()
+		if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
+			cached := h.modelsCache
+			h.modelsMu.Unlock()
+			return cached, nil
+		}
+		if h.modelsFetch != nil {
+			done := h.modelsFetch
+			h.modelsMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		h.modelsFetch = make(chan struct{})
+		h.modelsMu.Unlock()
 
-	// CLI 版响应与 Cascade 版模型表一致，并多出 subagent_default_model_uid 等字段。
+		// 目录是 handler 级共享缓存：单个调用方断连不应掐死其他等待者
+		// 共用的拉取——脱离调用方 ctx，apiClient 的 610s 上限仍兜底。
+		models, err := h.fetchModels(context.WithoutCancel(ctx))
+
+		h.modelsMu.Lock()
+		if err == nil {
+			h.modelsCache = models
+			h.modelsExpiry = time.Now().Add(h.cacheTTL)
+		}
+		// 先写缓存再 close：被唤醒的等待方回到循环立刻读到新值，
+		// 失败时缓存保持旧值，下一个醒来的等待方顺位成为新的拉取者。
+		close(h.modelsFetch)
+		h.modelsFetch = nil
+		h.modelsMu.Unlock()
+		return models, err
+	}
+}
+
+// fetchModels 拉取并投影上游模型目录；CLI 版响应与 Cascade 版模型表一致，
+// 并多出 subagent_default_model_uid 等字段。
+func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
 	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
@@ -492,8 +533,6 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 		models = append(models, m)
 	}
 
-	h.modelsCache = models
-	h.modelsExpiry = time.Now().Add(h.cacheTTL)
 	return models, nil
 }
 

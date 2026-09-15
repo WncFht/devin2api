@@ -118,6 +118,13 @@ type Adapter struct {
 	// 20s 内 1.1 万次）。窗口内有旧缓存回旧值，否则回 modelsErr。
 	modelsRetryUntil time.Time
 	modelsErr        error
+	// modelsFetch 非 nil 表示有目录拉取在锁外进行中：等待者 select 该
+	// channel（吃自己的 ctx，断连可中途退出），拉取方提交缓存/冷却
+	// 之后 close 它，被唤醒方重走复查路径拿结果。
+	modelsFetch chan struct{}
+	// warnedAbsentModels 给「模型缺席目录」告警按 uid 去重：别名目标
+	// 是配置级事实，每进程警一次足够，不该按请求频率刷屏。
+	warnedAbsentModels sync.Map
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
@@ -580,6 +587,12 @@ func isTransientConnectError(err error) bool {
 	if llm.IsHTTP2TransportError(connectErr.Message()) {
 		return true
 	}
+	// h1 连接池形态（force_http1）：池复用到对端已关闭的空闲连接时报
+	// "server closed idle connection"，失败发生在任何字节写出之前，
+	// 与 RST/GOAWAY 同属传输断裂，重试安全。
+	if llm.IsIdleConnClosedError(connectErr.Message()) {
+		return true
+	}
 	code := connectErr.Code()
 	return (code == connect.CodeInvalidArgument || code == connect.CodeInternal) &&
 		strings.HasPrefix(connectErr.Message(), "protocol error:")
@@ -630,6 +643,11 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 			return
 		}
 	}
+	// 缺席是配置级事实（别名目标或 client_version 问题），按 uid 每进程
+	// 警一次足够——别名改写后每个请求都路过这里，不去重会按请求频率刷屏。
+	if _, loaded := adapter.warnedAbsentModels.LoadOrStore(model, struct{}{}); loaded {
+		return
+	}
 	slog.Warn("model absent from upstream catalog; upstream will likely return a vague permission_denied",
 		"model", model, "hint", "check devin.aliases target or bump devin.client_version")
 }
@@ -638,7 +656,8 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 // 缺席告警都以目录为依据，目录从未加载过时这些检查静默失效。
 // TTL 缓存使命中期的调用只是读锁；拉取失败放行，维持「交给上游裁决」的旧行为。
 func (adapter *Adapter) ensureCatalog(ctx context.Context) {
-	if _, err := adapter.ListModels(ctx); err != nil {
+	// 调用方 ctx 已死（客户端断连/进程排空）时的失败是噪声不是信号。
+	if _, err := adapter.ListModels(ctx); err != nil && ctx.Err() == nil {
 		slog.Warn("model catalog unavailable; router detection skipped", "error", err)
 	}
 }
@@ -756,32 +775,94 @@ func modelLikelySupportsImages(model string) bool {
 }
 
 // ListModels 通过 GetCliModelConfigs 拉取可用模型目录，结果带 TTL 缓存。
+// 并发 miss 收敛为单次上游调用（singleflight）：拉取在锁外进行且 detach
+// 自调用方 ctx——目录是 adapter 级共享状态，一个客户端断连不该掐死
+// 全体等待者共享的拉取；等待者吃自己的 ctx，可随时退出。
+// 缓存/冷却先于 close(fetch) 提交，被唤醒方走复查只会看到已提交状态。
 // CLI 版响应比 Cascade 版多 subagent_default_model_uid/default_override_model_config，
 // 且 modelInfo.modelFeatures 提供 tool_calls/thinking/parallel 能力位。
 func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
-	a.modelsMu.RLock()
-	if a.models != nil && time.Now().Before(a.modelsExpiry) {
-		cached := a.models
-		a.modelsMu.RUnlock()
-		return cached, nil
-	}
-	a.modelsMu.RUnlock()
-
-	// 写锁内复查后再拉取：TTL 过期瞬间的并发 miss 收敛为单次上游调用，
-	// 等待者拿到同一个结果而不是各自打一遍 GetCliModelConfigs。
-	a.modelsMu.Lock()
-	defer a.modelsMu.Unlock()
-	if a.models != nil && time.Now().Before(a.modelsExpiry) {
-		return a.models, nil
-	}
-	// 失败冷却期不再打上游：有旧值回旧值，空缓存回上次错误。
-	if time.Now().Before(a.modelsRetryUntil) {
-		if a.models != nil {
-			return a.models, nil
+	for {
+		a.modelsMu.RLock()
+		if a.models != nil && time.Now().Before(a.modelsExpiry) {
+			cached := a.models
+			a.modelsMu.RUnlock()
+			return cached, nil
 		}
-		return nil, a.modelsErr
-	}
+		a.modelsMu.RUnlock()
 
+		a.modelsMu.Lock()
+		if a.models != nil && time.Now().Before(a.modelsExpiry) {
+			models := a.models
+			a.modelsMu.Unlock()
+			return models, nil
+		}
+		// 失败冷却期不再打上游：有旧值回旧值，空缓存回上次错误。
+		if time.Now().Before(a.modelsRetryUntil) {
+			if a.models != nil {
+				models := a.models
+				a.modelsMu.Unlock()
+				return models, nil
+			}
+			err := a.modelsErr
+			a.modelsMu.Unlock()
+			return nil, err
+		}
+		if fetch := a.modelsFetch; fetch != nil {
+			a.modelsMu.Unlock()
+			select {
+			case <-fetch:
+				continue // 拉取方已提交缓存或冷却，复查拿结果
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		a.modelsFetch = make(chan struct{})
+		a.modelsMu.Unlock()
+
+		models, err := a.fetchModelCatalog(context.WithoutCancel(ctx))
+
+		a.modelsMu.Lock()
+		done := a.modelsFetch
+		a.modelsFetch = nil
+		if err != nil {
+			// 拉取方自身断连不代表上游失败：ctx 取消不上冷却。
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				backoff := catalogRetryBackoff
+				if failure := llm.Classify(err); failure.RetryAfterSeconds > 0 {
+					backoff = time.Duration(failure.RetryAfterSeconds) * time.Second
+				}
+				a.modelsRetryUntil = time.Now().Add(backoff)
+				a.modelsErr = err
+			}
+			// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
+			// 能力位校验同时失去依据，比数据稍旧危害更大。
+			stale := a.models
+			a.modelsMu.Unlock()
+			close(done)
+			if stale != nil {
+				// 调用方 ctx 已死（排空/断连）时的失败属噪声不报。
+				if ctx.Err() == nil {
+					slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
+				}
+				return stale, nil
+			}
+			return nil, err
+		}
+		a.models = models
+		a.modelsExpiry = time.Now().Add(a.modelsCacheTTL)
+		a.modelsRetryUntil = time.Time{}
+		a.modelsErr = nil
+		a.modelsMu.Unlock()
+		close(done)
+		return models, nil
+	}
+}
+
+// fetchModelCatalog 执行一次 GetCliModelConfigs 拉取并整形目录（去重、
+// 配置模型补位、别名条目合并）。锁外运行——并发收敛、缓存提交与失败
+// 冷却都归 ListModels。
+func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, error) {
 	// config 经 currentConfig 取快照：写路径是 ApplyConfig 持 configMu
 	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
 	cfg := a.currentConfig()
@@ -790,23 +871,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
 	if err != nil {
-		wrapped := fmt.Errorf("devin GetCliModelConfigs: %w", err)
-		// 客户端断连的 ctx 取消不是上游失败，不上冷却。
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			backoff := catalogRetryBackoff
-			if failure := llm.Classify(err); failure.RetryAfterSeconds > 0 {
-				backoff = time.Duration(failure.RetryAfterSeconds) * time.Second
-			}
-			a.modelsRetryUntil = time.Now().Add(backoff)
-			a.modelsErr = wrapped
-		}
-		// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
-		// 能力位校验同时失去依据，比数据稍旧危害更大。
-		if a.models != nil {
-			slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
-			return a.models, nil
-		}
-		return nil, wrapped
+		return nil, fmt.Errorf("devin GetCliModelConfigs: %w", err)
 	}
 	now := time.Now().Unix()
 	models := make([]adapter.ModelInfo, 0, len(resp.Msg.GetClientModelConfigs()))

@@ -11,10 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	devinproto "local/devinproto"
+	"local/devinproto/devinprotoconnect"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -1971,5 +1974,96 @@ func TestResolveModelAlias(t *testing.T) {
 	}
 	if got := ResolveModelAlias(nil, "x"); got != "x" {
 		t.Fatalf("nil aliases: ResolveModelAlias = %q, want passthrough", got)
+	}
+}
+
+// stubModelConfigsClient 只实现 GetCliModelConfigs——接口其余方法经内嵌
+// 类型兜底（本测试不会触达）。calls 记上游调用次数，release 闸门让全部
+// 并发等待者挂上 fetch 后才放行拉取。
+type stubModelConfigsClient struct {
+	devinprotoconnect.ApiServerServiceClient
+	calls   atomic.Int32
+	release chan struct{}
+}
+
+func (stub *stubModelConfigsClient) GetCliModelConfigs(ctx context.Context, _ *connect.Request[devinproto.GetCliModelConfigsRequest]) (*connect.Response[devinproto.GetCliModelConfigsResponse], error) {
+	stub.calls.Add(1)
+	select {
+	case <-stub.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return connect.NewResponse(&devinproto.GetCliModelConfigsResponse{}), nil
+}
+
+// TestListModelsSingleflight 验证并发 miss 收敛为单次上游拉取：N 个并发
+// 调用共享同一个 fetch，拉取方提交缓存后等待者走复查路径拿到同一份结果。
+func TestListModelsSingleflight(t *testing.T) {
+	stub := &stubModelConfigsClient{release: make(chan struct{})}
+	a := &Adapter{apiClient: stub, modelsCacheTTL: time.Minute}
+	const waiters = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, waiters)
+	start := make(chan struct{})
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := a.ListModels(context.Background()); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	// 等拉取方真正进入上游调用，再留一小段让其余等待者全部挂上 fetch。
+	for stub.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(stub.release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("ListModels() error = %v", err)
+	}
+	if got := stub.calls.Load(); got != 1 {
+		t.Fatalf("GetCliModelConfigs calls = %d, want 1", got)
+	}
+}
+
+// TestListModelsWaiterCancel 验证等待方吃自己的 ctx：拉取还挂着时
+// 断连的等待者立即退出，不陪跑到拉取结束；拉取方自身不受影响。
+func TestListModelsWaiterCancel(t *testing.T) {
+	stub := &stubModelConfigsClient{release: make(chan struct{})}
+	a := &Adapter{apiClient: stub, modelsCacheTTL: time.Minute}
+	fetcherDone := make(chan error, 1)
+	go func() {
+		_, err := a.ListModels(context.Background())
+		fetcherDone <- err
+	}()
+	for stub.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	waiterCtx, cancel := context.WithCancel(context.Background())
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := a.ListModels(waiterCtx)
+		waiterDone <- err
+	}()
+	// 等等待者挂上 fetch 再取消它的 ctx。
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-waiterDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waiter ListModels() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled waiter did not exit")
+	}
+	close(stub.release)
+	if err := <-fetcherDone; err != nil {
+		t.Fatalf("fetcher ListModels() error = %v", err)
 	}
 }

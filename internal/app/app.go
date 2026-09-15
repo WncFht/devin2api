@@ -150,12 +150,19 @@ func (application *App) Router() http.Handler {
 		protected.Group(func(ws chi.Router) {
 			ws.Get("/v1/responses", application.createResponsesWebSocket)
 		})
-		protected.Use(application.concurrencyMiddleware)
+		// /v1/models 是元数据读，不占并发槽：慢目录拉取下一条轻量
+		// 请求不该烧槽位到 ReadTimeout；上游侧由目录 singleflight 与
+		// 失败冷却自保。
 		protected.Get("/v1/models", application.listModels)
 		protected.Get("/v1/models/{model}", application.getModel)
-		protected.Post("/v1/responses", application.createResponses)
-		protected.Post("/v1/chat/completions", application.createChatCompletions)
-		protected.Post("/v1/messages", application.createMessages)
+		// chi 不允许在同一 mux 上先注册路由再 Use——并发闸门单独开一组，
+		// 组内 Use 先于路由注册，组外的 models/WS 不受它约束。
+		protected.Group(func(gated chi.Router) {
+			gated.Use(application.concurrencyMiddleware)
+			gated.Post("/v1/responses", application.createResponses)
+			gated.Post("/v1/chat/completions", application.createChatCompletions)
+			gated.Post("/v1/messages", application.createMessages)
+		})
 	})
 	if application.dashboard != nil {
 		application.dashboard.Register(router)
