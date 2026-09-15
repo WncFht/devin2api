@@ -68,9 +68,15 @@ devin:
   #   决定限流期间打到上游的速率与解闩探测频率。默认 8。
   # gate_default_latch_seconds: 上游未声明 reset 时刻时的兜底闩时长
   #   秒数。默认 60。
+  # gate_window_offset_seconds: 上游分钟桶界在本地分钟内的估计位置
+  #   （第几秒）；实测桶界在本地 :59 附近（上游时钟快 ~0.5s）。默认 0。
+  # gate_window_guard_seconds: 估计桶界两侧的停发死区秒数，覆盖桶界
+  #   估计误差与上游多分片漂移；死区内请求睡到下一窗口开放。默认 2。
   # gate_max_hold_seconds: 15
   # gate_drip_interval_seconds: 8
   # gate_default_latch_seconds: 60
+  # gate_window_offset_seconds: 0
+  # gate_window_guard_seconds: 2
 
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /panel。

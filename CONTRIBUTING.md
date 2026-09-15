@@ -2,8 +2,6 @@
 
 Thanks for considering contributing to `devin-2api`. This guide covers the architecture, the dev environment, and how to submit changes.
 
-> **English** | [中文](CONTRIBUTING.zh-CN.md)
-
 ## Project positioning (read this first)
 
 `devin-2api` is a **protocol adapter**: HTTP speaks OpenAI Responses, the upstream is Devin Connect, and a vendor-neutral model layer (`internal/llm`) isolates the two — so new upstreams can be added behind the same HTTP surface by implementing the adapter interface. Agent-loop semantics stay equivalent — not provider request-structure equivalent.
@@ -46,7 +44,7 @@ OpenAI Responses HTTP ──► llm intermediate layer ──► Devin Connect R
 
 Full request lifecycle:
 
-1. an API surface (`/v1/responses`, `/v1/chat/completions`, or `/v1/messages`) receives the request JSON (body capped at 8 MiB); `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport instead;
+1. an API surface (`/v1/responses`, `/v1/chat/completions`, or `/v1/messages`) receives the request JSON (body capped at 32 MiB); `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport instead;
 2. that surface's `DecodeRequest` converts the request into `llm.RequestMessages` (system prompt, message history, tool definitions) plus generation options;
 3. `adapter.Stream` hands the vendor-neutral context to the configured adapter and returns an `llm.ResponseStream`;
 4. the Devin adapter translates the intermediate model into a `GetChatMessageRequest` (protobuf), reads upstream frames over a Connect stream, and a `responseDecoder` interprets each frame into zero or more `llm.ResponseEvent`s;
@@ -64,7 +62,7 @@ The semantic model shared by all adapters, defined in `internal/llm`:
 | `Message`          | `UserMessage` / `AssistantMessage` / `ToolResultMessage` (role decided by `Role()`)    |
 | `Content`          | Content blocks: `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall`        |
 | `ToolDefinition`   | Tool name + description + JSON Schema input                                            |
-| `ResponseEvent`    | Incremental events (12 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …) |
+| `ResponseEvent`    | Incremental events (13 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …) |
 | `AssistantMessage` | Final aggregated message incl. `Usage`, `StopReason`, provider metadata                |
 
 Message history is a **complete, replayable conversation across providers**: thinking signatures, tool-call IDs, and usage fields are designed to be passed verbatim into the next request round (see the comments on `TextSignature`, `ThinkingSignature`, etc. in `request.go`).
@@ -78,7 +76,7 @@ Message history is a **complete, replayable conversation across providers**: thi
 ```bash
 brew install protobuf
 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.19.1
+go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.20.0
 ```
 
 - Formatting toolchain: `npm install` pins prettier/markdownlint-cli2/git-format-staged from `package.json`, `brew install autocorrect`, then `pre-commit install` — commits run markdownlint --fix then `autocorrect | prettier` on `*.md`, and gofmt on `*.go`; the latter two rewrite only staged content in the index via git-format-staged, never the working tree. Manual checks: `npm run format:check` / `npm run lint:md`
@@ -138,7 +136,7 @@ The admin panel at `/panel` (login: `dashboard.password`) renders these logs as 
 2. **Formatted**: `gofmt -l .` produces no output
 3. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
 4. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
-5. **No real tokens**: `config.yaml` is tracked by git; make sure no real `devin.token` is committed (add it to `.gitignore` if needed)
+5. **No real tokens**: `config.yaml` is gitignored; keep it that way and make sure no real `devin.token` ends up in any committed file (pre-commit runs gitleaks to catch committed secrets)
 
 ## Submitting changes
 
@@ -236,15 +234,29 @@ The generated code is **committed to git** (it is the `replace` target in `go.mo
 cmd/
   devin-2api/       # entrypoint: load config, assemble deps, serve HTTP
   protoextract/     # tool: extract embedded protobuf descriptors from binaries
+  protocensus/      # tool: census/diff descriptor sets across debug log dirs (task census)
+  probe/            # tool: direct Connect-RPC live probes against the upstream
+  upstreamstub/     # tool: local upstream stub replaying transport failure scenarios
+  loadtest/         # tool: load generator for the HTTP surfaces
 internal/
-  adapter/          # adapter boundary (interface Adapter)
+  adapter/          # adapter boundary (interface Adapter, Unavailable placeholder)
     devin/          # Devin Connect adapter: request/response conversion + tool-definition sanitizing
-  api/openai/
-    responses/      # OpenAI Responses HTTP codec (JSON request, JSON/SSE response)
+  api/
+    anthropic/
+      messages/     # Anthropic Messages HTTP codec
+    openai/
+      chat/         # OpenAI Chat Completions HTTP codec
+      responses/    # OpenAI Responses HTTP codec (JSON request, JSON/SSE response)
+    common/         # shared surface plumbing: error normalization, tool-choice parsing
   app/              # chi routing, request lifecycle, error handling
   config/           # YAML config loading and validation
+  dashboard/        # /panel admin UI + /panel/api aggregation endpoints
   debuglog/         # per-request staged debug logs (redaction + externalized images)
+  httpproxy/        # upstream HTTP client construction (proxy, force_http1)
   llm/              # vendor-neutral intermediate model (request, response, event stream)
+  obs/              # process/HTTP metrics behind /panel/api/stats
+  randid/           # random ID generation (X-Request-Id / debug dir names)
+  upstream/         # shared upstream wire helpers (request metadata, auth transport)
 outputs/
   devin-proto/      # raw descriptors extracted from the Devin binary, committed
   devin-proto-go/   # generated Go bindings, committed; regenerated by task generate

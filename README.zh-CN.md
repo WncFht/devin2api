@@ -161,7 +161,7 @@ curl http://localhost:8080/v1/messages \
 | `server.listen`                                  | HTTP 监听地址                                                                                               | 是                                                                                                 |
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                        | `1024`                                                                                             |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                      | 配置了 `devin.token` 后必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                          | 否——未配置时接口返回 503                                                                           |
+| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                          | 否——未配置时接口返回 502                                                                           |
 | `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                        | 配置了 `devin.token` 后必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）                                                   | 无                                                                                                 |
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                              | `chisel` / `3000.2.17` / `mac`                                                                     |
@@ -171,12 +171,15 @@ curl http://localhost:8080/v1/messages \
 | `devin.gate_max_hold_seconds`                    | 闩内排队允许的最长等待秒数，超出快速失败 `429` + `Retry-After`                                              | `15`                                                                                               |
 | `devin.gate_drip_interval_seconds`               | 闩内放行探针的间隔秒数——决定限流期间打到上游的速率与解闩探测频率                                            | `8`                                                                                                |
 | `devin.gate_default_latch_seconds`               | 上游 `resource_exhausted` 未声明 reset 时刻时的兜底闩时长秒数                                               | `60`                                                                                               |
+| `devin.gate_window_offset_seconds`               | 上游分钟桶界在本地分钟内的估计位置（第几秒）                                                                | `0`（本地 `:00`；实测桶界在本地 `:59` 附近）                                                       |
+| `devin.gate_window_guard_seconds`                | 估计桶界两侧的停发死区秒数——死区内请求睡到下一窗口开放                                                      | `2`                                                                                                |
 | `debug.enabled`                                  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                             | `false`                                                                                            |
 | `debug.retention_days`                           | 请求日志目录保留天数；`<=0` 不按时间清理                                                                    | `14`                                                                                               |
 | `debug.max_total_mb`                             | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                | `1024`                                                                                             |
 | `debug.payload_hours`                            | 大体积阶段文件（03/04/06 与 attachments/）保留小时数，超时剥离负载保留 meta/error 证据                      | `24`                                                                                               |
 | `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                           | `32`                                                                                               |
 | `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                         | `5`                                                                                                |
+| `debug.pprof_listen`                             | pprof/fgprof 剖析端点的独立监听地址（如 `127.0.0.1:6060`）；端点无鉴权——只绑回环地址                        | 空（不启用）                                                                                       |
 | `dashboard.password`                             | `/panel` 管理面板密码；留空免登录                                                                           | 无                                                                                                 |
 | `auth.api_key`                                   | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递 | 无（开放）                                                                                         |
 
@@ -203,7 +206,7 @@ auth:
 注意：
 
 - token 等敏感字段在日志中会被脱敏为 `<redacted>`，不会泄露；
-- `devin.token` 为空时，`/v1/*` 接口返回 `503 provider_configuration`；
+- `devin.token` 为空时，`/v1/*` 接口返回 `502`，错误类型 `server_error`（message 为 `provider adapter is not configured`）；
 - `config.yaml` 已在 `.gitignore` 中——真实 token 不要入库；pre-commit 挂了 gitleaks 会拦误提交的 secret。
 
 ## 文档

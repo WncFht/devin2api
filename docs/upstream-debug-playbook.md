@@ -60,18 +60,19 @@ curl -sN http://localhost:3003/v1/responses \
 
 传输断裂类故障（envelope 截断/连接重置）可用 `cmd/upstreamstub` 本地复现：起桩监听后把测试实例 `devin.base_url` 指过去，用 `-scenario` 选故障形态，验证重试链路与 stage 归类：
 
-| 场景                            | 桩行为                                      | 预期归类                                             |
-| ------------------------------- | ------------------------------------------- | ---------------------------------------------------- |
-| `precontent`                    | 元数据帧后半帧前缀截断                      | transport，pre-content 重发一次                      |
-| `midcontent`                    | 内容帧后截断                                | transport，不重发（已产出内容）                      |
-| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`） | 透明自愈，`retries:1`                                |
-| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）              | transport；pre-content 重发                          |
-| `bare-end`                      | 有 EndStream 无 stopReason                  | `provider_stream`，"ended without generated content" |
-| `endstream-error`               | EndStream 携带限流错误                      | `devin_connect` 语义错误 + 速率闩                    |
-| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                   | transport，pre-content 重发一次                      |
-| `stall`                         | 建流后零帧挂死                              | 120s 看门狗判死 → 重发 → transport                   |
-| `end-hang`                      | 完整终止序列后 body 不收尾                  | stopReason 后 15s 尾部宽限到点按正常 EOF 干净收尾    |
-| `heartbeat`                     | 周期无事件帧续命                            | 零事件帧不喂「无进度」期限 → 10min 兜底收尾          |
+| 场景                            | 桩行为                                                            | 预期归类                                             |
+| ------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
+| `precontent`                    | 元数据帧后半帧前缀截断                                            | transport，pre-content 重发一次                      |
+| `midcontent`                    | 内容帧后截断                                                      | transport，不重发（已产出内容）                      |
+| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`）                       | 透明自愈，`retries:1`                                |
+| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）                                    | transport；pre-content 重发                          |
+| `bare-end`                      | 有 EndStream 无 stopReason                                        | `provider_stream`，"ended without generated content" |
+| `endstream-error`               | EndStream 携带限流错误                                            | `devin_connect` 语义错误 + 速率闩                    |
+| `stream`                        | 正常全流基线（`-deltas`/`-delta-bytes`/`-interval`/`-ttfb` 可调） | 非故障形态：completed，验证正常通路与时延分解        |
+| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                                         | transport，pre-content 重发一次                      |
+| `stall`                         | 建流后零帧挂死                                                    | 120s 看门狗判死 → 重发 → transport                   |
+| `end-hang`                      | 完整终止序列后 body 不收尾                                        | stopReason 后 15s 尾部宽限到点按正常 EOF 干净收尾    |
+| `heartbeat`                     | 周期无事件帧续命                                                  | 零事件帧不喂「无进度」期限 → 10min 兜底收尾          |
 
 看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ `upstreamNoProgressTimeout`（10min，只认产出事件帧的内容进度探测）。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。
 
@@ -169,12 +170,12 @@ curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
 
 - 本机示例渠道 id=293（`http://127.0.0.1:3003`），模型表在 `channel_models`，`redirect_model` 可做别名（与 devin-2api 的 `devin.aliases` 二选一即可，现在后者统一管）。
 - **`protocol_transform_mode` 用 `local`**（原生直通）：`auto` 会把 `/v1/messages` 转成 `/v1/responses` 再转回来，ccload 的 codex→anthropic 转换会把尾随签名落成独立的空 thinking 块（Claude Code 收到后 result 为空）。它是 `channels` 表列，写库即热生效（走缓存失效）——需要重启的只有 `system_settings`。
-- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed`/`error` 事件也算失败），连续失败会把渠道打冷却。devin-2api 的应对分三层：① 首个上游事件前不下发 `start`，上游零帧报错（`permission_denied` 等）走真实 HTTP 4xx，ccload 按客户端错误透传不冷却渠道；② 唯一的例外是上下文超长——为了让 Codex 收到 `response.failed`（它只在 SSE 事件里认 `error.code=="context_length_exceeded"`），会先补发一个合成 `start` 再发 error 事件，事件顶层 `status:413` 让 ccload 仍按客户端级分类、不冷却；③ 流式中途（已有语义输出、连接已提交后）的错误事件同样在 data 里带顶层 `status`，ccload 按真实语义分类且事件原文会继续透传给客户端。
+- ccload 会统计 SSE 级失败（HTTP 200 + `response.failed`/`error` 事件也算失败），连续失败会把渠道打冷却。devin-2api 的应对分三层：① 首个上游事件前不下发 `start`，上游零帧报错（`permission_denied` 等）走真实 HTTP 4xx，ccload 按客户端错误透传不冷却渠道；② 例外有两个，都只在 `StreamErrorEvents` 面（OpenAI 流式）先补合成 `start` 再发 error 事件（`internal/app/stream.go`）：上下文超长——为了让 Codex 收到 `response.failed`（它只在 SSE 事件里认 `error.code=="context_length_exceeded"`），事件顶层 `status:413` 让 ccload 仍按客户端级分类、不冷却；**流式面 429 同理**——OpenAI 流式客户端的可重试通道只有流内事件（Codex 把 HTTP 429 硬编码为不重试，只把流内错误进重试循环），429 也走 200 + error 事件下发；③ 流式中途（已有语义输出、连接已提交后）的错误事件同样在 data 里带顶层 `status`，ccload 按真实语义分类且事件原文会继续透传给客户端。
 - `.env` 里的 `CCLOAD_API_TOKENS` 是入站客户端 key；`auth_tokens` 表是持久化的 token（明文）。
 
 ## 运维坑
 
-- **重启腰斩在途流**：托管重启（`kickstart -k`、`systemctl --user restart`）和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在前置网关侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外停止超时已设为 60s（launchd `ExitTimeOut` / systemd `TimeoutStopSec`），优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
+- **重启腰斩在途流**：托管重启（`kickstart -k`、`systemctl --user restart`）和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在前置网关侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外停止超时已设为 330s（launchd `ExitTimeOut` / systemd `TimeoutStopSec`，覆盖二进制 300s 排空上限），优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
 - **不要手动跑 `./devin-2api` 抢监听端口**：手动实例和托管器的自动重拉（launchd KeepAlive / systemd Restart=always）会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经托管器启停。
 - **macOS 特有——launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。详见 `deployment.md`。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。

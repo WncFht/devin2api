@@ -54,5 +54,5 @@
 ## 已知边界
 
 - 免费档模型 (swe-2-\*) 缓存是 best-effort 前缀匹配 (~75-90% 命中),偶发逐出属正常
-- 重启 devin-2api 仍会结束在途请求，但 launchd `ExitTimeOut=60` 给了优雅退出窗口——SIGTERM 后在途流可跑完；`kill -9` 跳过该窗口，禁用
+- 重启 devin-2api 仍会结束在途请求，但 launchd `ExitTimeOut=330`（覆盖二进制 300s 排空上限）给了优雅退出窗口——SIGTERM 后在途流可跑完；`kill -9` 跳过该窗口，禁用
 - 上游错误按层级分类：`permission_denied`/`prompt too long` 等请求级错误在首个上游事件前以真实 HTTP 4xx 返回（不冷却渠道）；流式中途的错误事件带顶层 `status` 供 ccload 精确分类——只有传输级故障 (EOF/连接重置) 才会进入模型/渠道冷却
