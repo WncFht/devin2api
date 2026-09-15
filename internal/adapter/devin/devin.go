@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -337,6 +338,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	model = ResolveModelAlias(cfg.Aliases, model)
 	recorder := debuglog.FromContext(ctx)
+	if request.ServerSearch != nil {
+		// 服务端托管搜索侧请求（CC WebSearch）：不经 GetChatMessage，
+		// 模型路由/图片校验与本次请求无关，同步执行搜索后返回预成形
+		// 事件流——产出前的失败保持真实 HTTP 状态码语义。
+		recorder.SetResolvedModel(model)
+		return adapter.runServerSearch(ctx, request, model)
+	}
 	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
 	adapter.ensureCatalog(ctx)
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
@@ -425,10 +433,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 不再按文本反推。
 		return nil, llm.Classify(err)
 	}
-	return &responseStream{
+	serverTools := serverToolNames(request.Tools)
+	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
+	decoder.serverTools = serverTools
+	response := &responseStream{
 		frames:   pumpUpstream(streamCtx, stream),
 		cancel:   cancel,
-		decoder:  newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools)),
+		decoder:  decoder,
 		recorder: recorder,
 		gate:     adapter.gate,
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
@@ -476,9 +487,45 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
 		},
 		newDecoder: func() *responseDecoder {
-			return newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
+			rebuilt := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
+			rebuilt.serverTools = serverTools
+			return rebuilt
 		},
-	}, nil
+	}
+	if len(serverTools) > 0 {
+		// 托管工具声明在场才接管：模型发出 Server 调用时由
+		// handleServerCalls 代执行（search）并续轮（continueTurn）。
+		response.search = adapter.runWebSearch
+		response.continueTurn = func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+			continued := request
+			continued.Messages = append(append([]llm.Message{}, request.Messages...), assistant)
+			for _, result := range results {
+				continued.Messages = append(continued.Messages, result)
+			}
+			nextBinding := binding
+			nextBinding.Token = adapter.currentToken()
+			rebuilt, _, err := buildRequest(continued, cfg, nextBinding)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			noteRetry("server_tool continuation", rebuilt, false)
+			nextCtx, nextCancel := context.WithCancel(ctx)
+			next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt)
+			if err != nil {
+				nextCancel()
+				return nil, nil, nil, err
+			}
+			continuedDecoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
+			continuedDecoder.serverTools = serverTools
+			// start 先跑：partial 元数据初始化后再播种旧内容——客户端
+			// 已见过本轮的 start，续轮不产第二个（started 已置位，
+			// Recv 里 pendingStart 为空）。
+			continuedDecoder.start()
+			continuedDecoder.partial.Content = slices.Clone(seed)
+			return pumpUpstream(nextCtx, next), nextCancel, continuedDecoder, nil
+		}
+	}
+	return response, nil
 }
 
 // maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
@@ -1077,6 +1124,19 @@ type responseStream struct {
 	reopen func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error)
 	// newDecoder 重建响应解码器供重试使用；nil 时不可重试。
 	newDecoder func() *responseDecoder
+	// search 是服务端托管搜索的执行入口（runWebSearch）；nil 表示
+	// 本请求没有托管工具声明，handleServerCalls 不会触发。
+	search func(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error)
+	// continueTurn 在纯托管回合执行完搜索后续轮：assistant 是不含
+	// 结果块的 wire 回显，results 是各调用的 TOOL 结果消息，seed
+	// 是含结果块的完整内容（新解码器的 ContentIndex 种子）。nil
+	// 表示本请求无托管工具，流上不会产出 Server 调用。
+	continueTurn func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error)
+	// hops 是已执行的服务端托管续轮数，封顶见 maxServerSearchHops。
+	hops int
+	// costsCarry 累计已完成的托管续轮跳的上游 CreditCost：上游按跳
+	// 分别记账，收尾时并入最终 Done 的 Usage（见 applyCostsCarry）。
+	costsCarry int64
 	// stall 是跨 Recv 复用的静默看门狗计时器；首次等待时创建。
 	stall *time.Timer
 	// progress 是「无内容进度」期限计时器：只有产出事件的帧喂它，
@@ -1181,6 +1241,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 					continue
 				}
 				events := stream.release(stream.decoder.finish(upstreamErr))
+				if upstreamErr == nil && stream.handleServerCalls(ctx, &events) {
+					continue
+				}
+				stream.applyCostsCarry(events)
 				if upstreamErr == nil && emptyEndTurn(events) && stream.tryReopen(nil, true) {
 					continue
 				}
@@ -1211,6 +1275,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				// connect-go 的排空会一直等）——按正常 EOF 收尾。
 				slog.Warn("upstream held connection after stop reason; finishing after tail grace")
 				events := stream.release(stream.decoder.finish(nil))
+				if stream.handleServerCalls(ctx, &events) {
+					continue
+				}
+				stream.applyCostsCarry(events)
 				if emptyEndTurn(events) && stream.tryReopen(nil, true) {
 					continue
 				}

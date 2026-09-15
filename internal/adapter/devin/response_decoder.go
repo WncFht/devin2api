@@ -72,6 +72,10 @@ type responseDecoder struct {
 	// customTools 是本次请求按 freeform/custom 语义声明的工具名集合；
 	// 这些工具在 wire 上是单参数 function 包装形态，响应要解包回原文。
 	customTools map[string]bool
+	// serverTools 是本次请求按服务端托管语义声明的工具名集合
+	//（OpenAI {"type":"web_search"} 的 function 诱饵）；命中的调用
+	// 标 call.Server，由流的续轮机制代执行而非交给客户端。
+	serverTools map[string]bool
 	// driftWarned 表示本流已告警过上游 schema 漂移（unknown 字段），
 	// 同一流逐帧重复刷同一条告警没有新增信息。
 	driftWarned bool
@@ -126,6 +130,21 @@ func customToolNames(tools []llm.ToolDefinition) map[string]bool {
 	var names map[string]bool
 	for _, tool := range tools {
 		if tool.Custom {
+			if names == nil {
+				names = make(map[string]bool)
+			}
+			names[tool.Name] = true
+		}
+	}
+	return names
+}
+
+// serverToolNames 返回请求里按服务端托管语义声明的工具名集合，
+// 供解码器把对应调用标记为代理代执行（call.Server）。
+func serverToolNames(tools []llm.ToolDefinition) map[string]bool {
+	var names map[string]bool
+	for _, tool := range tools {
+		if tool.Server {
 			if names == nil {
 				names = make(map[string]bool)
 			}
@@ -355,6 +374,46 @@ func (decoder *responseDecoder) updateMetadata(response *devinproto.GetChatMessa
 			}
 		}
 	}
+	// 计费读数在帧顶层（非 usage 子消息）：任一字段在场即建 Costs，
+	// 各字段取最新上报值——它们是快照语义，末帧携带最终读数。
+	if response.CreditCost != nil || response.CommittedCreditCost != nil ||
+		response.CommittedAcuCost != nil || response.CommittedQuotaCostBasisPoints != nil ||
+		response.CommittedOverageCostCents != nil {
+		costs := decoder.partial.Usage.Costs
+		if costs == nil {
+			costs = &llm.UpstreamCosts{}
+			decoder.partial.Usage.Costs = costs
+		}
+		if response.CreditCost != nil {
+			costs.CreditCost = int64(response.GetCreditCost())
+		}
+		if response.CommittedCreditCost != nil {
+			costs.CommittedCreditCost = int64(response.GetCommittedCreditCost())
+		}
+		if response.CommittedAcuCost != nil {
+			costs.CommittedAcuCost = response.GetCommittedAcuCost()
+		}
+		if response.CommittedQuotaCostBasisPoints != nil {
+			costs.CommittedQuotaCostBasisPoints = response.GetCommittedQuotaCostBasisPoints()
+		}
+		if response.CommittedOverageCostCents != nil {
+			costs.CommittedOverageCostCents = response.GetCommittedOverageCostCents()
+		}
+	}
+}
+
+// appendServerResult 把一次服务端托管执行的结果追加为 partial 内容块
+// 并产出对应事件：块位置即 ContentIndex，编码器按 ToolCallID 与前面的
+// Server ToolCall 配对渲染托管结果形态。由 handleServerCalls 在 complete
+// 产事件后调用——此时 finished 已置位，本方法只做追加不再产生收尾事件，
+// 续轮路径下这份 partial 同时是下一轮解码器的内容种子。
+func (decoder *responseDecoder) appendServerResult(result llm.ServerToolResult) llm.ResponseEvent {
+	decoder.partial.Content = append(decoder.partial.Content, result)
+	index := len(decoder.partial.Content) - 1
+	return llm.ResponseEvent{
+		Type: llm.ResponseEventServerToolResult, ContentIndex: index,
+		ServerResult: &result, Partial: decoder.snapshot(),
+	}
 }
 
 // decodeThinking 处理思考增量：未开块时先建块并发 ThinkingStart，
@@ -489,6 +548,11 @@ func (decoder *responseDecoder) decodeTool(events []llm.ResponseEvent, delta *de
 			// 语义标记，参数片段在 complete 统一解包。
 			state.call.Custom = true
 			state.wrapped = true
+		}
+		if decoder.serverTools[delta.GetName()] {
+			// 托管声明工具：模型发出的调用由代理代调上游专用 RPC
+			// 执行（handleServerCalls），标记供编码器选托管渲染形态。
+			state.call.Server = true
 		}
 	}
 	if delta.GetIsCustomToolCall() {
