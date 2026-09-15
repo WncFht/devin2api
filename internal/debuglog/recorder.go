@@ -47,26 +47,36 @@ type Manager struct {
 	root string
 	// now 返回当前时间；测试会固定它以验证同秒目录分配。
 	now func() time.Time
-	// mutex 串行化目录分配、index.jsonl 追加和 activeDirs 维护。
+	// mutex 串行化目录名分配与 activeDirs 维护——锁内只做内存操作，
+	// mkdir/索引写盘一律在锁外（见 indexMu）：一次磁盘停滞曾让所有
+	// 排队请求的 ReadTimeout 在持锁等待中过期，锁一释放即批量假死。
 	mutex sync.Mutex
 	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
 	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
 	activeDirs map[string]*Recorder
+	// takenNames 记录本进程已知存在于磁盘、但不在 activeDirs 的目录名
+	//（mkdir EEXIST 撞到的遗留目录）——锁内选名时跳过它们，避免同秒
+	// 重启后反复撞名。只有撞名才入账，体量极小。
+	takenNames map[string]struct{}
 	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
 	enabled atomic.Bool
 	// policy 是日志生命周期策略；policyMu 保护它：配置 reload 会运行时换值，
 	// cleaner 协程与 Stats 每轮经 Policy() 取快照。
 	policyMu sync.RWMutex
 	policy   RetentionPolicy
+	// indexMu 串行化 index.jsonl 的全部 IO（惰性打开/追加/Flush/截断重写）
+	// 与启动回放的快照边界——索引写盘与目录分配分锁，索引侧的磁盘停滞
+	// 不再堵死 Start。
+	indexMu sync.Mutex
 	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
 	indexFile   *os.File
 	indexWriter *bufio.Writer
 	// indexBytes 跟踪 index.jsonl 当前体积，超 indexFileCap 时保尾部一半重写。
 	indexBytes int64
-	// indexSnapshotted 标记启动回放已在 mutex 内截取索引快照：此前完成的
+	// indexSnapshotted 标记启动回放已在 indexMu 内截取索引快照：此前完成的
 	// 请求其索引行已在快照内、由回放统一入账，appendIndex 不再单独累加；
 	// 此后写入的行在快照之外，必须由实时路径自计——任一行恰入账一次。
-	indexSnapshotted bool
+	indexSnapshotted atomic.Bool
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期；nil 表示未启动。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
@@ -266,6 +276,7 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 		root:       root,
 		now:        time.Now,
 		activeDirs: make(map[string]*Recorder),
+		takenNames: make(map[string]struct{}),
 		policy:     policy,
 		usage:      newUsageAggregator(),
 		replayDone: make(chan struct{}),
@@ -281,24 +292,25 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 	}
 	go func() {
 		defer close(manager.replayDone)
-		// 快照边界必须持锁划定：appendIndex 在同一 mutex 内完成「写文件
+		// 快照边界必须持锁划定：appendIndex 在同一 indexMu 内完成「写文件
 		// +条件入账」——边界前写入的行全部落在快照内，其自身入账被
 		// indexSnapshotted 闸门跳过、由回放统一补记；边界后写入的行在
 		// 快照之外，由实时路径自计。任一行恰入账一次，无锁读则边界前后
-		// 都可能与 appendIndex 交错，把同一行计两遍。
-		manager.mutex.Lock()
+		// 都可能与 appendIndex 交错，把同一行计两遍。indexMu 而非
+		// manager.mutex：回放是磁盘 IO，不该占目录分配锁。
+		manager.indexMu.Lock()
 		indexPath := filepath.Join(root, IndexFile)
 		data, err := TailRead(indexPath, usageReplayTailBytes)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
 			// 完成的行会被回放假设覆盖、又被实时路径跳过，永久漏记。
-			manager.mutex.Unlock()
+			manager.indexMu.Unlock()
 			time.Sleep(200 * time.Millisecond)
-			manager.mutex.Lock()
+			manager.indexMu.Lock()
 			data, err = TailRead(indexPath, usageReplayTailBytes)
 		}
-		manager.indexSnapshotted = true
-		manager.mutex.Unlock()
+		manager.indexSnapshotted.Store(true)
+		manager.indexMu.Unlock()
 		if err != nil {
 			// 索引不存在（首装）是常态；其他读失败意味着窗口统计丢历史，值得告警。
 			if !errors.Is(err, os.ErrNotExist) {
@@ -334,8 +346,8 @@ func (manager *Manager) Close() {
 		close(manager.cleanerStop)
 		<-manager.cleanerDone
 	}
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.indexMu.Lock()
+	defer manager.indexMu.Unlock()
 	if manager.indexWriter != nil {
 		if err := manager.indexWriter.Flush(); err != nil {
 			manager.ioErrors.Add(1)
@@ -459,30 +471,33 @@ func (manager *Manager) Abort(dir string) bool {
 }
 
 // Start 为一个 HTTP 请求创建按进入秒命名的独立日志目录。
+// 目录名在锁内预订（写入 activeDirs），mkdir 移到锁外：磁盘停滞只拖慢
+// 本请求，不再堵死全部排队请求的目录分配。EEXIST 撞名说明磁盘上有
+// 本进程不知道的遗留目录（同秒重启等），记入 takenNames 后换名重试。
 func (manager *Manager) Start(meta RequestMeta) *Recorder {
 	if manager == nil || manager.root == "" || !manager.enabled.Load() {
 		return nil
 	}
-	now := manager.now()
+	lockWaitAt := time.Now()
 	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	if waited := time.Since(lockWaitAt); waited > 5*time.Second {
+		// 正常锁内只有内存操作，等这么久意味着有路径又把 IO 带进了锁——告警。
+		slog.Warn("debuglog: dir allocation lock wait exceeded", "waited", waited.String())
+	}
+	now := manager.now()
 	base := now.Format("20060102-150405")
 	for suffix := 1; ; suffix++ {
 		name := base
 		if suffix > 1 {
 			name = fmt.Sprintf("%s-%02d", base, suffix)
 		}
-		directory := filepath.Join(manager.root, name)
-		if err := mkdirRequestDir(directory); err != nil {
-			if os.IsExist(err) {
-				continue
-			}
-			// 建目录失败返回 nil = 本请求静默无日志；ioErrors 计数 +
-			// Warn 让「日志为什么没了」可查（磁盘满/权限等）。
-			manager.ioErrors.Add(1)
-			slog.Warn("debuglog: create request dir failed", "dir", name, "error", err)
-			return nil
+		if _, ok := manager.activeDirs[name]; ok {
+			continue
 		}
+		if _, ok := manager.takenNames[name]; ok {
+			continue
+		}
+		directory := filepath.Join(manager.root, name)
 		recorder := &Recorder{
 			manager:          manager,
 			directory:        directory,
@@ -501,11 +516,27 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.firstUpstreamMS.Store(-1)
 		recorder.firstClientMS.Store(-1)
 		manager.activeDirs[name] = recorder
-		go recorder.runWriter()
-		// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
-		// 同时把同步写盘移出 manager.mutex——目录分配锁不该挡文件 IO。
-		recorder.enqueue(func() { recorder.writeMeta(nil) })
-		return recorder
+		manager.mutex.Unlock()
+		err := mkdirRequestDir(directory)
+		if err == nil {
+			go recorder.runWriter()
+			// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
+			// 同时把同步写盘移出 manager.mutex——目录分配锁不该挡文件 IO。
+			recorder.enqueue(func() { recorder.writeMeta(nil) })
+			return recorder
+		}
+		manager.mutex.Lock()
+		delete(manager.activeDirs, name)
+		if os.IsExist(err) {
+			manager.takenNames[name] = struct{}{}
+			continue
+		}
+		manager.mutex.Unlock()
+		// 建目录失败返回 nil = 本请求静默无日志；ioErrors 计数 +
+		// Warn 让「日志为什么没了」可查（磁盘满/权限等）。
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: create request dir failed", "dir", name, "error", err)
+		return nil
 	}
 }
 

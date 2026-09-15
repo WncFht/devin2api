@@ -18,7 +18,9 @@ import (
 
 const (
 	// usageReplayTailBytes 是启动回放读取 index.jsonl 的尾部上限。
-	usageReplayTailBytes = 64 << 20
+	// 256MB 对应 ~14 天全量历史（实测 ~18MB/天）；此前 64MB 窗口在
+	// 高流量期会让 8 天细粒度趋势静默退化到 ~3.5 天。
+	usageReplayTailBytes = 256 << 20
 	// usageSampleCapacity 是延迟蓄水池容量（最近 N 条完成请求）。
 	usageSampleCapacity = 4096
 	// usageMinBuckets 是细粒度趋势保留的 10 分钟桶数（8 天）。

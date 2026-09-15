@@ -481,17 +481,17 @@ func TestIndexSnapshottedGate(t *testing.T) {
 
 	// 人为回到落定前状态：完成的请求只写索引行，不进聚合——
 	// 该行本应由回放快照补记（测试里快照已取过，故总量保持 0）。
-	manager.mutex.Lock()
-	manager.indexSnapshotted = false
-	manager.mutex.Unlock()
+	manager.indexMu.Lock()
+	manager.indexSnapshotted.Store(false)
+	manager.indexMu.Unlock()
 	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
 	if got := manager.usage.snapshot().Entries; got != 0 {
 		t.Fatalf("pre-snapshot entry counted: entries=%d, want 0", got)
 	}
 
-	manager.mutex.Lock()
-	manager.indexSnapshotted = true
-	manager.mutex.Unlock()
+	manager.indexMu.Lock()
+	manager.indexSnapshotted.Store(true)
+	manager.indexMu.Unlock()
 	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
 	if got := manager.usage.snapshot().Entries; got != 1 {
 		t.Fatalf("post-snapshot entry lost: entries=%d, want 1", got)

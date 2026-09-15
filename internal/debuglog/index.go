@@ -82,21 +82,9 @@ type IndexEntry struct {
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
 // 每行一次 Flush：索引是排障证据，进程崩溃也不能丢尾巴（Flush 只到
 // 内核页缓存——断电级故障不在担保范围）。
+// 条目序列化在锁外完成；indexMu 只罩住 index.jsonl 自身的 IO 与
+// 快照闸门——索引磁盘停滞不堵目录分配（见 manager.mutex 注释）。
 func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
-	if manager.indexWriter == nil {
-		file, err := os.OpenFile(filepath.Join(manager.root, IndexFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			manager.ioErrors.Add(1)
-			return
-		}
-		manager.indexFile = file
-		manager.indexWriter = bufio.NewWriter(file)
-		if info, statErr := file.Stat(); statErr == nil {
-			manager.indexBytes = info.Size()
-		}
-	}
 	entry := IndexEntry{
 		Dir:               filepath.Base(recorder.directory),
 		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
@@ -141,6 +129,20 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		manager.ioErrors.Add(1)
 		return
 	}
+	manager.indexMu.Lock()
+	defer manager.indexMu.Unlock()
+	if manager.indexWriter == nil {
+		file, err := os.OpenFile(filepath.Join(manager.root, IndexFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			manager.ioErrors.Add(1)
+			return
+		}
+		manager.indexFile = file
+		manager.indexWriter = bufio.NewWriter(file)
+		if info, statErr := file.Stat(); statErr == nil {
+			manager.indexBytes = info.Size()
+		}
+	}
 	if _, err := manager.indexWriter.Write(data); err != nil {
 		manager.ioErrors.Add(1)
 		return
@@ -154,7 +156,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 	// 回放快照落定前完成的请求不单独入账：其索引行已在回放快照内，
 	// 由回放统一计入；落定后的行快照不可见，必须由实时路径累加——
 	// 闸门保证任一行恰入账一次（见 NewManager 的回放协程）。
-	if manager.indexSnapshotted {
+	if manager.indexSnapshotted.Load() {
 		manager.usage.add(entry)
 	}
 	if manager.indexBytes > indexFileCap {
@@ -162,7 +164,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 	}
 }
 
-// truncateIndexLocked 把 index.jsonl 截到尾部一半大小；调用方持有 mutex。
+// truncateIndexLocked 把 index.jsonl 截到尾部一半大小；调用方持有 indexMu。
 // 截断失败只记 ioErrors：写入器重置为惰性重开，索引继续追加不受影响。
 func (manager *Manager) truncateIndexLocked() {
 	if err := manager.indexWriter.Flush(); err != nil {
