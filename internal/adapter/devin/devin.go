@@ -72,9 +72,6 @@ type Config struct {
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
 	TokenSource func() string
-	// ModelAssignmentJWT 是 router uid 经 AssignModel 解析出的绑定 jwt，
-	// 由 Stream 按请求设置（与 Token/Model 一样是每次调用覆盖的字段）。
-	ModelAssignmentJWT string
 }
 
 // clientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -212,9 +209,8 @@ func (adapter *Adapter) GateStats() GateStats {
 func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []string) {
 	adapter.configMu.Lock()
 	prev := adapter.config
-	// 运行时字段不归配置管：状态文件路径与 JWT 缓存沿用旧值。
+	// 运行时字段不归配置管：状态文件路径沿用旧值。
 	next.GateStatePath = prev.GateStatePath
-	next.ModelAssignmentJWT = prev.ModelAssignmentJWT
 	adapter.config = next
 	adapter.configMu.Unlock()
 
