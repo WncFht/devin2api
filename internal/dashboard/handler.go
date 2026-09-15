@@ -199,7 +199,9 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.debugManager != nil {
 		payload["debuglog"] = h.debugManager.Stats()
-		payload["usage"] = h.debugManager.UsageStats()
+		// /stats 走 1Hz 轮询且前端只读 ttfb/duration 两行——全量
+		// UsageStats 快照（数百 KB JSON + 全桶排序）留给 /usage。
+		payload["usage"] = h.debugManager.UsageLatency()
 	}
 	if h.gateStats != nil {
 		payload["gate"] = h.gateStats()

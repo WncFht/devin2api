@@ -674,6 +674,19 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 	return snap
 }
 
+// latencySummary 只返回全局延迟分位数两行——/panel/api/stats 的 1Hz
+// 轮询只消费 usage.ttfb/usage.duration，而全量 snapshot 要遍历 1152
+// 个分钟桶各排序一份样本副本、再按模型与 key 各排 2048 样本环、
+// 深拷贝 per-model-day，为两行数据做数百 KB 的活不划算。
+func (a *usageAggregator) latencySummary() map[string]latencyStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return map[string]latencyStats{
+		"duration": a.durationSamples.stats(),
+		"ttfb":     a.ttfbSamples.stats(),
+	}
+}
+
 // sampleSummary 返回样本的均值与 p95；空样本返回零值。
 func sampleSummary(samples []int64) (avg, p95 int64) {
 	if len(samples) == 0 {
