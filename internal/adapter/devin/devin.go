@@ -381,7 +381,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			}
 			recorder.WriteError(stage, err)
 		}
-		// 错误分类记录随车携带——下游经 common.Classify 取回结构事实，
+		// 错误分类记录随车携带——下游经 llm.Classify 取回结构事实，
 		// 不再按文本反推。
 		return nil, llm.Classify(err)
 	}
