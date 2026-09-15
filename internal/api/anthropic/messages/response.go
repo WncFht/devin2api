@@ -118,6 +118,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		return encoder.toolUseDelta(event)
 	case llm.ResponseEventToolCallEnd:
 		return encoder.endToolUse(event)
+	case llm.ResponseEventServerToolResult:
+		return encoder.serverToolResult(event), nil
 	case llm.ResponseEventDone:
 		return encoder.finish(event), nil
 	case llm.ResponseEventError:
@@ -367,19 +369,25 @@ func (encoder *StreamEncoder) stopThinking(state *contentBlockState) []SSEEvent 
 }
 
 // startToolUse 登记工具块状态并发 tool_use 类型的 content_block_start。
+// 托管调用（ToolCall.Server）发 server_tool_use——Anthropic 服务端工具的
+// 原生块形态；input 增量与 tool_use 共用 input_json_delta。
 func (encoder *StreamEncoder) startToolUse(event llm.ResponseEvent) []SSEEvent {
-	state := &contentBlockState{index: event.ContentIndex, kind: "tool_use"}
+	kind := "tool_use"
+	if call, ok := common.ContentAt[llm.ToolCall](event.Partial, event.ContentIndex); ok && call.Server {
+		kind = "server_tool_use"
+	}
+	state := &contentBlockState{index: event.ContentIndex, kind: kind}
 	encoder.blocks = append(encoder.blocks, state)
 	return []SSEEvent{encoder.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
 		"index":         event.ContentIndex,
-		"content_block": map[string]any{"type": "tool_use", "id": event.ToolCallID, "name": event.ToolName, "input": map[string]any{}},
+		"content_block": map[string]any{"type": kind, "id": event.ToolCallID, "name": event.ToolName, "input": map[string]any{}},
 	})}
 }
 
 // toolUseDelta 把参数增量发为 input_json_delta。
 func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) ([]SSEEvent, error) {
-	state := encoder.block(event.ContentIndex, "tool_use")
+	state := encoder.block(event.ContentIndex, "tool_use", "server_tool_use")
 	if state == nil {
 		return nil, fmt.Errorf("tool use delta at content index %d without toolcall_start", event.ContentIndex)
 	}
@@ -391,7 +399,7 @@ func (encoder *StreamEncoder) toolUseDelta(event llm.ResponseEvent) ([]SSEEvent,
 // endToolUse 发工具块的 content_block_stop；完整 input 已由
 // input_json_delta 增量送达，spec 的 stop 帧只带 type/index。
 func (encoder *StreamEncoder) endToolUse(event llm.ResponseEvent) ([]SSEEvent, error) {
-	state := encoder.block(event.ContentIndex, "tool_use")
+	state := encoder.block(event.ContentIndex, "tool_use", "server_tool_use")
 	if state == nil {
 		return nil, fmt.Errorf("tool use end at content index %d without toolcall_start", event.ContentIndex)
 	}
@@ -403,6 +411,62 @@ func (encoder *StreamEncoder) endToolUse(event llm.ResponseEvent) ([]SSEEvent, e
 		"type":  "content_block_stop",
 		"index": event.ContentIndex,
 	})}, nil
+}
+
+// serverToolResult 发完整的 <tool>_tool_result 块（当前只有
+// web_search_tool_result 一个生产者）：托管结果没有增量形态，
+// content_block_start 一次带全量 content 后随即 stop。块不登记进
+// blocks——不会有增量帧到达，也不参与挂起块的收尾序。
+func (encoder *StreamEncoder) serverToolResult(event llm.ResponseEvent) []SSEEvent {
+	return []SSEEvent{
+		encoder.event("content_block_start", map[string]any{
+			"type":          "content_block_start",
+			"index":         event.ContentIndex,
+			"content_block": anthropicServerToolResultBlock(*event.ServerResult),
+		}),
+		encoder.event("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": event.ContentIndex,
+		}),
+	}
+}
+
+// anthropicServerToolResultBlock 渲染托管工具结果块：正常结果按
+// {type:"<tool>_tool_result", tool_use_id, content:[web_search_result…]}
+// 形态——条目只带 title/url，上游不给 Anthropic 的加密锚点字段；
+// 失败结果是 {content:{type:"<tool>_tool_result_error",error_code}}。
+func anthropicServerToolResultBlock(result llm.ServerToolResult) map[string]any {
+	block := map[string]any{"type": result.ToolName + "_tool_result", "tool_use_id": result.ToolCallID}
+	if result.IsError {
+		block["content"] = map[string]any{
+			"type":       result.ToolName + "_tool_result_error",
+			"error_code": anthropicServerToolErrorCode(result.ErrorCode),
+		}
+		return block
+	}
+	entries := make([]any, 0, len(result.Results))
+	for _, item := range result.Results {
+		entries = append(entries, map[string]any{
+			"type": "web_search_result", "title": item.Title, "url": item.URL, "page_age": nil,
+		})
+	}
+	block["content"] = entries
+	return block
+}
+
+// anthropicServerToolErrorCode 把内部/connect 错误码映到 Anthropic
+// web_search_tool_result_error 的枚举；未列出的归并 unavailable。
+func anthropicServerToolErrorCode(code string) string {
+	switch code {
+	case "max_uses_exceeded", "too_many_requests", "query_too_long", "invalid_tool_input":
+		return code
+	case "invalid_arguments", "invalid_argument":
+		return "invalid_tool_input"
+	case "resource_exhausted":
+		return "too_many_requests"
+	default:
+		return "unavailable"
+	}
 }
 
 // anthropicToolInput 把工具调用参数转成 Anthropic input 对象。Custom 调用的
@@ -458,11 +522,17 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	}))
 }
 
-// block 按下标和类型找已登记的内容块。
-func (encoder *StreamEncoder) block(index int, kind string) *contentBlockState {
+// block 按下标和类型找已登记的内容块；kinds 多值用于同族块
+// （tool_use 与 server_tool_use 的增量/stop 走同一组帧）。
+func (encoder *StreamEncoder) block(index int, kinds ...string) *contentBlockState {
 	for _, state := range encoder.blocks {
-		if state.index == index && state.kind == kind {
-			return state
+		if state.index != index {
+			continue
+		}
+		for _, kind := range kinds {
+			if state.kind == kind {
+				return state
+			}
 		}
 	}
 	return nil
@@ -516,7 +586,13 @@ func messageToAnthropic(message *llm.AssistantMessage) []any {
 			}
 			blocks = append(blocks, b)
 		case llm.ToolCall:
-			blocks = append(blocks, map[string]any{"type": "tool_use", "id": content.ID, "name": content.Name, "input": anthropicToolInput(content)})
+			blockType := "tool_use"
+			if content.Server {
+				blockType = "server_tool_use"
+			}
+			blocks = append(blocks, map[string]any{"type": blockType, "id": content.ID, "name": content.Name, "input": anthropicToolInput(content)})
+		case llm.ServerToolResult:
+			blocks = append(blocks, anthropicServerToolResultBlock(content))
 		}
 	}
 	return blocks

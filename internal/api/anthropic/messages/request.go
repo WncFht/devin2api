@@ -46,6 +46,19 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// 以下为实测上游接受的可选透传位：strict 是 Anthropic 工具顶层字段，
+	// annotations 是 MCP 形态的工具注解（只消费 readOnlyHint），
+	// server_name/attribution_field_names 同名直传。
+	Strict      bool `json:"strict,omitempty"`
+	Annotations *struct {
+		ReadOnlyHint bool `json:"readOnlyHint,omitempty"`
+	} `json:"annotations,omitempty"`
+	ServerName            string   `json:"server_name,omitempty"`
+	AttributionFieldNames []string `json:"attribution_field_names,omitempty"`
+	// 服务端搜索工具（web_search_*）声明携带的域过滤参数；工具本体不
+	// 转发，参数喂给 Flow A 侧请求短路的搜索 RPC。
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 // anthropicRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
@@ -134,22 +147,57 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if err := appendMessages(&context, request.Messages); err != nil {
 		return AdaptedRequest{}, err
 	}
+	droppedTools := make(map[string]bool)
 	for _, tool := range request.Tools {
 		if !clientExecutedToolType(tool.Type) {
 			// server tool（web_search_*/web_fetch_*/code_execution_* 等）
 			// 由供应商托管执行，上游 Devin 无对应物，转发只会制造废工具。
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
+			droppedTools[tool.Name] = true
 			continue
 		}
 		schema := tool.InputSchema
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object"}`)
 		}
-		context.Tools = append(context.Tools, llm.ToolDefinition{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: schema,
-		})
+		definition := llm.ToolDefinition{
+			Name:                  tool.Name,
+			Description:           tool.Description,
+			InputSchema:           schema,
+			Strict:                tool.Strict,
+			ServerName:            tool.ServerName,
+			AttributionFieldNames: tool.AttributionFieldNames,
+		}
+		if tool.Annotations != nil {
+			definition.ReadOnlyHint = tool.Annotations.ReadOnlyHint
+		}
+		context.Tools = append(context.Tools, definition)
+	}
+	// Claude Code 的 WebSearch 是专用侧请求：tools 只含 web_search_* 变体
+	// 且 tool_choice 允许或指名搜索。判定标记置位后由适配器在打
+	// GetChatMessage 之前整体短路成一次托管搜索（见 devin.runServerSearch）；
+	// 末条 user 文本抽不出查询时不短路，退回通用翻译路径。
+	if isServerSearchRequest(request.Tools, context.ToolChoice) {
+		if query := serverSearchQuery(context.Messages); query != "" {
+			var allowed, blocked []string
+			for _, tool := range request.Tools {
+				allowed = append(allowed, tool.AllowedDomains...)
+				blocked = append(blocked, tool.BlockedDomains...)
+			}
+			context.ServerSearch = &llm.ServerSearchRequest{
+				Query:          query,
+				AllowedDomains: allowed,
+				BlockedDomains: blocked,
+			}
+		}
+	}
+	// tool_choice 指名了被丢的服务端工具时降级为 auto：名字在声明表
+	// 之外会被适配器按「指名不存在的工具」打 400，而客户端的本意只是
+	// 「用它声明过的搜索」——auto 保留模型在剩余工具里的选择权。从未
+	// 声明过的名字不降级，留给上游/适配器的指名校验报错。
+	if choice := context.ToolChoice; choice != nil && choice.Mode == llm.ToolChoiceNamed && droppedTools[choice.ToolName] {
+		context.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
+		context.Dropped = append(context.Dropped, "tool_choice:"+choice.ToolName)
 	}
 	// 相邻 assistant 回合先合并（与 chat/responses 两面同走 IR 层共享
 	// 实现）：客户端发连续 assistant 消息时 wire 上的假回合边界会
@@ -190,6 +238,60 @@ func clientExecutedToolType(toolType string) bool {
 		}
 	}
 	return false
+}
+
+// isServerSearchRequest 判定「WebSearch 专用侧请求」：tools 整表都是
+// web_search_* 服务端托管变体，且 tool_choice 缺省/auto/any 或指名的
+// 正是这批搜索工具。tool_choice=none 或指名非搜索工具不算——那仍是
+// 普通请求，只是恰好没声明客户端工具。
+func isServerSearchRequest(tools []Tool, choice *llm.ToolChoice) bool {
+	if len(tools) == 0 {
+		return false
+	}
+	for _, tool := range tools {
+		if tool.Type != "web_search" && !strings.HasPrefix(tool.Type, "web_search_") {
+			return false
+		}
+	}
+	if choice == nil {
+		return true
+	}
+	switch choice.Mode {
+	case llm.ToolChoiceAuto, llm.ToolChoiceRequired:
+		return true
+	case llm.ToolChoiceNamed:
+		for _, tool := range tools {
+			if tool.Name == choice.ToolName {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// ccSearchQueryPrefix 是 Claude Code WebSearch 侧请求 user 消息的固定
+// 模板前缀。
+const ccSearchQueryPrefix = "Perform a web search for the query: "
+
+// serverSearchQuery 取末条 user 消息的末尾非空文本作搜索查询；命中
+// CC 模板前缀时剥离。模板漂移（前缀缺席）时整段文本仍是可用查询。
+func serverSearchQuery(messages []llm.Message) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		user, ok := messages[index].(llm.UserMessage)
+		if !ok {
+			continue
+		}
+		for block := len(user.Content) - 1; block >= 0; block-- {
+			text, ok := user.Content[block].(llm.TextContent)
+			if !ok || strings.TrimSpace(text.Text) == "" {
+				continue
+			}
+			return strings.TrimSpace(strings.TrimPrefix(text.Text, ccSearchQueryPrefix))
+		}
+	}
+	return ""
 }
 
 // appendSystem 把 system 字段（字符串或块数组）并入 SystemPrompt。
@@ -255,17 +357,17 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 		}
 		context.Messages = append(context.Messages, messages...)
 	case "assistant":
-		content, err := decodeAssistantContent(context, message.Content)
+		messages, err := decodeAssistantContent(context, message.Content)
 		if err != nil {
 			return err
 		}
-		if len(content) == 0 && len(bytes.TrimSpace(message.Content)) > 0 {
-			context.Dropped = append(context.Dropped, "empty_message:assistant")
+		if len(messages) == 0 {
+			if len(bytes.TrimSpace(message.Content)) > 0 {
+				context.Dropped = append(context.Dropped, "empty_message:assistant")
+			}
+			messages = []llm.Message{llm.AssistantMessage{TimestampMS: time.Now().UnixMilli()}}
 		}
-		context.Messages = append(context.Messages, llm.AssistantMessage{
-			Content:     content,
-			TimestampMS: time.Now().UnixMilli(),
-		})
+		context.Messages = append(context.Messages, messages...)
 	default:
 		context.Dropped = append(context.Dropped, "role:"+message.Role)
 	}
@@ -350,20 +452,38 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 	return result, nil
 }
 
-// decodeAssistantContent 解码 assistant 消息的 text/thinking/tool_use 块。
-func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
+// decodeAssistantContent 解码 assistant 消息为消息序列：text/thinking/
+// tool_use 聚进当前 assistant 内容；server_tool_use 是服务端托管调用块
+// （Server 标记的 ToolCall，同样留在 assistant 内容里）；*_tool_result
+// 是服务端已完成执行的结果块——回放 wire 上结果须走 TOOL prompt 与调用
+// 配对，故在该处截断 assistant 段、拆出独立 ToolResultMessage。
+func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Message, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return []llm.Content{llm.TextContent{Text: ""}}, nil
+		return []llm.Message{llm.AssistantMessage{
+			Content:     []llm.Content{llm.TextContent{Text: ""}},
+			TimestampMS: time.Now().UnixMilli(),
+		}}, nil
 	}
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
-		return []llm.Content{llm.TextContent{Text: text}}, nil
+		return []llm.Message{llm.AssistantMessage{
+			Content:     []llm.Content{llm.TextContent{Text: text}},
+			TimestampMS: time.Now().UnixMilli(),
+		}}, nil
 	}
 	var parts []json.RawMessage
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, fmt.Errorf("decode assistant content: %w", err)
 	}
+	var messages []llm.Message
 	content := make([]llm.Content, 0, len(parts))
+	flush := func() {
+		if len(content) == 0 {
+			return
+		}
+		messages = append(messages, llm.AssistantMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
+		content = nil
+	}
 	for index, part := range parts {
 		var header struct {
 			Type      string          `json:"type"`
@@ -374,6 +494,8 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) (
 			ID        string          `json:"id"`
 			Name      string          `json:"name"`
 			Input     json.RawMessage `json:"input"`
+			ToolUseID string          `json:"tool_use_id"`
+			Content   json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
@@ -397,11 +519,80 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) (
 		case "tool_use":
 			args, custom := common.NormalizeToolArguments(header.Input)
 			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args, Custom: custom})
+		case "server_tool_use":
+			args, custom := common.NormalizeToolArguments(header.Input)
+			content = append(content, llm.ToolCall{ID: header.ID, Name: header.Name, Arguments: args, Custom: custom, Server: true})
 		default:
+			if strings.HasSuffix(header.Type, "_tool_result") {
+				flush()
+				messages = append(messages, decodeServerToolResult(header.Type, header.ToolUseID, header.Content))
+				continue
+			}
 			context.Dropped = append(context.Dropped, "assistant_block:"+header.Type)
 		}
 	}
-	return content, nil
+	flush()
+	return messages, nil
+}
+
+// decodeServerToolResult 把 assistant 流内嵌的 *_tool_result 块拆成
+// ToolResultMessage。web_search_tool_result 的 content 是
+// web_search_result 条目数组——逐条取 title/url 渲成清单，Anthropic
+// 侧的锚点字段（encrypted_content/page_age）对上游无意义且体积大，
+// 剥离。错误形态 content 是 {"type":"..._error","error_code":...}
+// 对象。其余托管结果变体按紧凑 JSON 原文转文本，模型按字段自行消费。
+func decodeServerToolResult(blockType, toolUseID string, raw json.RawMessage) llm.ToolResultMessage {
+	result := llm.ToolResultMessage{ToolCallID: toolUseID, TimestampMS: time.Now().UnixMilli()}
+	trimmed := bytes.TrimSpace(raw)
+	text := ""
+	if len(trimmed) > 0 {
+		if trimmed[0] == '{' {
+			var failure struct {
+				Type      string `json:"type"`
+				ErrorCode string `json:"error_code"`
+			}
+			if json.Unmarshal(trimmed, &failure) == nil && strings.HasSuffix(failure.Type, "_error") {
+				result.IsError = true
+				if failure.ErrorCode == "" {
+					failure.ErrorCode = "unknown_error"
+				}
+				text = blockType + ": " + failure.ErrorCode
+			}
+		}
+		if !result.IsError && blockType == "web_search_tool_result" && trimmed[0] == '[' {
+			var entries []struct {
+				Type  string `json:"type"`
+				Title string `json:"title"`
+				URL   string `json:"url"`
+			}
+			if json.Unmarshal(trimmed, &entries) == nil {
+				var list strings.Builder
+				count := 0
+				for _, entry := range entries {
+					if entry.Type != "web_search_result" || entry.URL == "" {
+						continue
+					}
+					count++
+					fmt.Fprintf(&list, "\n%d. %s — %s", count, entry.Title, entry.URL)
+				}
+				if count == 0 {
+					text = "web search returned no results"
+				} else {
+					text = "Search results:" + list.String()
+				}
+			}
+		}
+		if text == "" && !result.IsError {
+			var compact bytes.Buffer
+			if json.Compact(&compact, trimmed) == nil {
+				text = compact.String()
+			} else {
+				text = string(trimmed)
+			}
+		}
+	}
+	result.Content = []llm.Content{llm.TextContent{Text: text}}
+	return result
 }
 
 // decodeToolResult 把 tool_result 块解码为 ToolResultMessage；tool_use_id
