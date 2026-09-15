@@ -163,3 +163,31 @@ func TestLoginFailureSweep(t *testing.T) {
 		t.Fatalf("loginFailures = %d entries, want stale entries swept", len(handler.loginFailures))
 	}
 }
+
+// TestBearerFailureSharesLoginLedger 验证 Bearer 认证失败与表单登录共用
+// 同一 IP 账本——只守 login 端点等于把全速穷举通道留给 Bearer。
+func TestBearerFailureSharesLoginLedger(t *testing.T) {
+	handler, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bearer := func(password string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/panel/api/stats", nil)
+		request.RemoteAddr = "1.2.3.4:5678"
+		request.Header.Set("Authorization", "Bearer "+password)
+		return request
+	}
+	for i := 0; i < loginMaxFails; i++ {
+		if handler.isAuthenticated(bearer("wrong")) {
+			t.Fatalf("attempt %d: wrong Bearer must not authenticate", i)
+		}
+	}
+	state := handler.loginFailures["1.2.3.4"]
+	if state == nil || !time.Now().Before(state.lockedUntil) {
+		t.Fatalf("after %d Bearer failures IP must be locked: %+v", loginMaxFails, state)
+	}
+	// 锁定只抬高爆破代价：正确密码在锁定期内仍放行（与表单登录一致）。
+	if !handler.isAuthenticated(bearer("pw")) {
+		t.Fatal("correct Bearer must authenticate even under lockout")
+	}
+}

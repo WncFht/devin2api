@@ -427,37 +427,11 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := remoteIP(r)
 	provided := sha256.Sum256([]byte(r.FormValue("password")))
 	if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) != 1 {
-		h.sessionMu.Lock()
-		now := time.Now()
-		state := h.loginFailures[ip]
-		if state == nil {
-			state = &loginFail{}
-			h.loginFailures[ip] = state
-		}
-		if now.Before(state.lockedUntil) {
-			state.lastSeen = now
-			h.sessionMu.Unlock()
+		if h.noteLoginFailure(ip) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
 			return
 		}
-		// 距上次失败超过一个锁定周期视为新一波尝试：陈旧计数跨时间
-		// 累积会把低频手滑误算成爆破。
-		if now.Sub(state.lastSeen) > loginLockout {
-			state.fails = 0
-		}
-		state.lastSeen = now
-		state.fails++
-		if state.fails >= loginMaxFails {
-			state.fails = 0
-			state.lockedUntil = now.Add(loginLockout)
-		}
-		// 机会清扫：纯爆破流量永远不走成功路径，失败条目只增不扫会
-		// 无界增长——按与 session 相同的水位顺手清掉已失效条目。
-		if len(h.loginFailures) > sessionSweepThreshold {
-			h.sweepLoginFailures(now)
-		}
-		h.sessionMu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"密码错误"}`))
 		return
@@ -510,6 +484,39 @@ func (h *Handler) sweepLoginFailures(now time.Time) {
 	}
 }
 
+// noteLoginFailure 把一次密码校验失败计入 IP 账本（表单登录与 Bearer
+// 认证共用），返回该 IP 当前是否处于锁定期；顺带按水位机会清扫过期
+// 条目——纯爆破流量不走成功路径，失败条目只增不扫会无界增长。
+func (h *Handler) noteLoginFailure(ip string) bool {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+	now := time.Now()
+	state := h.loginFailures[ip]
+	if state == nil {
+		state = &loginFail{}
+		h.loginFailures[ip] = state
+	}
+	if now.Before(state.lockedUntil) {
+		state.lastSeen = now
+		return true
+	}
+	// 距上次失败超过一个锁定周期视为新一波尝试：陈旧计数跨时间
+	// 累积会把低频手滑误算成爆破。
+	if now.Sub(state.lastSeen) > loginLockout {
+		state.fails = 0
+	}
+	state.lastSeen = now
+	state.fails++
+	if state.fails >= loginMaxFails {
+		state.fails = 0
+		state.lockedUntil = now.Add(loginLockout)
+	}
+	if len(h.loginFailures) > sessionSweepThreshold {
+		h.sweepLoginFailures(now)
+	}
+	return false
+}
+
 func (h *Handler) isAuthenticated(r *http.Request) bool {
 	password, passwordHash := h.passwordSnapshot()
 	if password == "" {
@@ -517,11 +524,14 @@ func (h *Handler) isAuthenticated(r *http.Request) bool {
 	}
 	// Agent 友好：除 session cookie 外，允许直接用 Bearer 密码访问 API，
 	// 省去先登录拿 cookie 的交互步骤（curl -H 'Authorization: Bearer <密码>'）。
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		provided := sha256.Sum256([]byte(strings.TrimPrefix(auth, "Bearer ")))
+	if auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		provided := sha256.Sum256([]byte(auth))
 		if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) == 1 {
 			return true
 		}
+		// Bearer 失败与表单登录共用同一 IP 账本——只守 login 端点等于
+		// 把全速穷举通道留给 Bearer。
+		h.noteLoginFailure(remoteIP(r))
 	}
 	cookie, err := r.Cookie("devin_panel_session")
 	if err != nil {
