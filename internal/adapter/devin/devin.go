@@ -74,9 +74,9 @@ type Config struct {
 	TokenSource func() string
 }
 
-// clientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
-// Devin CLI 抓包一致的默认值。
-func (config Config) clientIdentity() (name, version, os string) {
+// ClientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
+// Devin CLI 抓包一致的默认值。cmd/probe 复用它保持与代理同一指纹。
+func (config Config) ClientIdentity() (name, version, os string) {
 	name = strings.TrimSpace(config.ClientName)
 	if name == "" {
 		name = defaultClientName
@@ -625,7 +625,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	if ok {
 		return cached, nil
 	}
-	name, version, os := adapter.currentConfig().clientIdentity()
+	name, version, os := adapter.currentConfig().ClientIdentity()
 	resp, err := adapter.apiClient.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
 		ModelRouterUid: proto.String(routerUID),
@@ -728,7 +728,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	// config 经 currentConfig 取快照：写路径是 ApplyConfig 持 configMu
 	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
 	cfg := a.currentConfig()
-	name, version, os := cfg.clientIdentity()
+	name, version, os := cfg.ClientIdentity()
 	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))

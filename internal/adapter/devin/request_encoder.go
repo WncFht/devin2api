@@ -32,7 +32,7 @@ type callBinding struct {
 }
 
 // buildRequest 把中间请求投影为上游 wire 格式：静态身份取 config
-// （Client* 与 clientIdentity 默认值），每次调用可变的凭据/路由取
+// （Client* 与 ClientIdentity 默认值），每次调用可变的凭据/路由取
 // binding。返回 repairs 记录转换中的静默修复计数，随请求日志落盘。
 func buildRequest(request llm.RequestMessages, config Config, binding callBinding) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
 	var repairs llm.RequestRepairs
@@ -41,7 +41,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// 「账号 + 内容前缀」键控，ID 不参与匹配。
 	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randid.UUID()
-	name, version, os := config.clientIdentity()
+	name, version, os := config.ClientIdentity()
 	metadata := upstream.BuildMetadata(binding.Token, name, version, os, 366)
 	completion := &devinproto.ExaCodeiumCommonPb_CompletionConfiguration{
 		NumCompletions: proto.Uint64(1),

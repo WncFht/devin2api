@@ -179,7 +179,7 @@ func (config *Config) Validate() error {
 	}
 	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
 	if strings.TrimSpace(config.Devin.Token) == "" {
-		config.Devin.Token = resolveDevinToken()
+		config.Devin.Token = ResolveDevinToken()
 	}
 	return nil
 }
@@ -187,11 +187,12 @@ func (config *Config) Validate() error {
 // devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key。
 var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*"([^"]+)"`)
 
-// resolveDevinToken 从本地 Devin 客户端状态中发现 session token。
+// ResolveDevinToken 从本地 Devin 客户端状态中发现 session token。
 // 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与 Devin CLI 登录产物
 // credentials.toml（路径见 devinCredentialsPaths，随平台变化）。
-// 找不到返回空串，由调用方决定是否报错。
-func resolveDevinToken() string {
+// 找不到返回空串，由调用方决定是否报错。cmd/probe 等工具在 config.yaml
+// 缺失时也走这条链。
+func ResolveDevinToken() string {
 	for _, name := range []string{"DEVIN_TOKEN", "WINDSURF_API_KEY"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			return value
