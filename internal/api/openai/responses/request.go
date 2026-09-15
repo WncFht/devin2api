@@ -132,6 +132,11 @@ func DecodeRequest(data []byte) (AdaptedRequest, error) {
 	if err := appendInputMessages(&context, request.Input); err != nil {
 		return AdaptedRequest{}, err
 	}
+	// 空 input 放行进上游只会换回一条上游语义错误——与 chat/anthropic
+	// 两个前端一致，本地 400 让调用方立刻拿到可行动的报错。
+	if len(context.Messages) == 0 {
+		return AdaptedRequest{}, errors.New("responses request input is required")
+	}
 	for _, tool := range request.Tools {
 		switch tool.Type {
 		case "function":
@@ -204,10 +209,8 @@ func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage) erro
 			return fmt.Errorf("input[%d]: %w", index, err)
 		}
 	}
-	if len(pending.texts) > 0 || pending.signature != "" {
-		// 输入尾部孤儿 reasoning：其后没有可挂的 assistant 产出。
-		context.Dropped = append(context.Dropped, "reasoning:orphan")
-	}
+	// 输入尾部孤儿 reasoning：其后没有可挂的 assistant 产出。
+	dropPendingReasoning(context, &pending)
 	context.Messages = mergeAdjacentAssistantTurns(context.Messages)
 	return nil
 }
@@ -275,6 +278,16 @@ func consumePendingThinking(pending *pendingReasoning) []llm.Content {
 	}
 	*pending = pendingReasoning{}
 	return []llm.Content{block}
+}
+
+// dropPendingReasoning 丢弃未挂到 assistant 产出的 reasoning 缓冲并留痕——
+// 与输入尾部孤儿共用 "reasoning:orphan" 标记；此前中途截断的丢弃完全不可见，
+// 解码是过滤层，丢弃必须进 Dropped 才能对账。
+func dropPendingReasoning(context *llm.RequestMessages, pending *pendingReasoning) {
+	if len(pending.texts) > 0 || pending.signature != "" {
+		context.Dropped = append(context.Dropped, "reasoning:orphan")
+	}
+	*pending = pendingReasoning{}
 }
 
 // classifyReasoningSignature 识别回放进 input 的 encrypted_content 属于哪种
@@ -379,7 +392,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		return nil
 	case "function_call_output", "custom_tool_call_output":
 		// reasoning 与产出之间插入结果项 → reasoning 成孤儿，丢弃缓冲。
-		*pending = pendingReasoning{}
+		dropPendingReasoning(context, pending)
 		// 客户端对调用 ID 字段名有四种植法（call_id 是规范，其余来自
 		// Chat 习惯/驼峰序列化/id 即调用 id 的实现），按序兼容取第一个非空。
 		var item struct {
@@ -475,7 +488,7 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	switch role {
 	case "user":
 		// 非 assistant 产出介入 → 缓冲的 reasoning 成孤儿，丢弃。
-		*pending = pendingReasoning{}
+		dropPendingReasoning(context, pending)
 		context.Messages = append(context.Messages, llm.UserMessage{Content: content, TimestampMS: time.Now().UnixMilli()})
 	case "assistant":
 		content = append(consumePendingThinking(pending), content...)
@@ -487,7 +500,7 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 		}
 		context.Messages = append(context.Messages, assistant)
 	case "system", "developer":
-		*pending = pendingReasoning{}
+		dropPendingReasoning(context, pending)
 		text := common.ContentText(content)
 		if context.SystemPrompt != "" && text != "" {
 			context.SystemPrompt += "\n"
