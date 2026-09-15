@@ -12,7 +12,19 @@ INTERVAL="${1:-30}"
 # 对齐，仓根跑默认参数不会留下未忽略的探测文件。
 OUT="${2:-outputs/quota-probe-$(date +%Y%m%d-%H%M%S).jsonl}"
 mkdir -p "$(dirname "$OUT")"
-CONF="${3:-$HOME/Library/Application Support/devin-2api/config.yaml}"
+# 配置路径与二进制解析链一致：参数 > DEVIN2API_CONFIG > ./config.yaml >
+# 平台默认（macOS Application Support，Linux $XDG_CONFIG_HOME）。
+if [[ -n "${3:-}" ]]; then
+  CONF="$3"
+elif [[ -n "${DEVIN2API_CONFIG:-}" ]]; then
+  CONF="$DEVIN2API_CONFIG"
+elif [[ -f config.yaml ]]; then
+  CONF=config.yaml
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+  CONF="$HOME/Library/Application Support/devin-2api/config.yaml"
+else
+  CONF="${XDG_CONFIG_HOME:-$HOME/.config}/devin-2api/config.yaml"
+fi
 TOKEN=$(grep -E '^[[:space:]]+token:' "$CONF" | head -1 | sed 's/.*token:[[:space:]]*//')
 URL='https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus'
 

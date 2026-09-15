@@ -1,7 +1,10 @@
 # lib-deploy.sh — deploy.sh（macOS/launchd）与 deploy-linux.sh（systemd --user）
 # 共用的发布下载、版本校验、健康检查与首装预检函数。
-# 前提：调用方已 cd 到仓库根，且定义了 RUNTIME。PORT/HEALTH_URL 由
-# detect_port 生成（config.yaml 就绪后再调用，首次调用只为 --check）。
+# 前提：调用方已 cd 到仓库根，且定义了 BIN_DIR/CONFIG_DIR/STATE_DIR
+# （平台规范布局：二进制入 ~/.local/bin，配置入平台 config dir，logs/ 与
+# 状态文件入平台 state dir）与 LEGACY_RUNTIME（上一版单运行目录路径，
+# 供迁移与 --check 回退）。PORT/HEALTH_URL 由 detect_port 生成
+# （config.yaml 就绪后再调用，首次调用只为 --check）。
 
 # 告警/错误一律走 stderr——多处函数经 $() 捕获 stdout，混入噪音会污染
 # 返回值。tty 上加颜色便于人类扫读。
@@ -29,7 +32,9 @@ deploy_usage() {
 首装与升级同一条命令：服务未安装时自动生成服务定义并拉起；config.yaml
 缺失时从 config.example.yaml 生成——写入随机 auth.api_key 与
 dashboard.password，devin.token 在终端下提示粘贴，否则置空走自动发现。
-覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_RUNTIME / DEVIN2API_PORT。
+覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_BIN_DIR / DEVIN2API_CONFIG_DIR /
+DEVIN2API_STATE_DIR / DEVIN2API_PORT（DEVIN2API_RUNTIME 视作 STATE_DIR 的
+兼容别名）。
 EOF
 }
 
@@ -182,19 +187,63 @@ smoke_version() {
 	}
 }
 
-# install_binary <new_binary>：装入 RUNTIME 并同步仓库 config.yaml；
-# 仓库内 logs 符号链接指向运行目录，排障路径与 AGENTS.md 约定一致。
+# install_binary <new_binary>：装入 BIN_DIR 并把仓库 config.yaml 同步到
+# CONFIG_DIR（权威副本在仓库）；仓库内 logs 符号链接指向 STATE_DIR/logs，
+# 排障路径与 AGENTS.md 约定一致。
 install_binary() {
-	mkdir -p "${RUNTIME}/logs"
-	mv "$1" "${RUNTIME}/devin-2api"
-	cmp -s config.yaml "${RUNTIME}/config.yaml" 2>/dev/null ||
-		warn "config.yaml 与运行目录不一致，以仓库版本覆盖（权威副本在仓库）"
-	cp config.yaml "${RUNTIME}/config.yaml"
+	mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${STATE_DIR}/logs"
+	mv "$1" "${BIN_DIR}/devin-2api"
+	cmp -s config.yaml "${CONFIG_DIR}/config.yaml" 2>/dev/null ||
+		warn "config.yaml 与 ${CONFIG_DIR} 不一致，以仓库版本覆盖（权威副本在仓库）"
+	cp config.yaml "${CONFIG_DIR}/config.yaml"
 	# logs 已是真实目录（本地 -config config.yaml 跑过）则不动，避免吞掉现场。
 	if [[ -L logs || ! -e logs ]]; then
-		ln -sfn "${RUNTIME}/logs" logs
+		ln -sfn "${STATE_DIR}/logs" logs
 	fi
-	echo "==> installed ${RUNTIME}/devin-2api (config.yaml synced from repo)"
+	echo "==> installed ${BIN_DIR}/devin-2api (config.yaml → ${CONFIG_DIR})"
+}
+
+# migrate_legacy_runtime <旧运行目录>：把上一版「单运行目录」布局迁到拆分
+# 布局——config.yaml 入 CONFIG_DIR、logs/ 逐项并入 STATE_DIR/logs，删旧
+# 二进制与 .handoff.pid（登记在册的残留交接进程 SIGTERM 退场）。同名冲突
+# 不覆盖——.jsonl 属追加日志把旧尾部接上，其余留给人工。可重入：迁移跑在
+# 老实例排空前，在途请求仍会往旧路径补写尾账，各 deploy 脚本在重启验证后
+# 再调一次收编。macOS 下旧运行目录与 CONFIG_DIR/STATE_DIR 同路径，只剩
+# 删旧二进制一件事。
+migrate_legacy_runtime() {
+	local old="$1" pid item base
+	[[ -d "${old}" ]] || return 0
+	pid="$(cat "${old}/.handoff.pid" 2>/dev/null || true)"
+	rm -f "${old}/.handoff.pid"
+	# pid 复用防护与 retire_stale_transient 同理：确认仍是 devin-2api 再发信号。
+	if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null &&
+		pgrep -x devin-2api | grep -qx "${pid}"; then
+		echo "==> 旧布局残留的交接进程 pid=${pid} 退场（SIGTERM）" >&2
+		kill "${pid}" 2>/dev/null || true
+	fi
+	rm -f "${old}/devin-2api"
+	[[ "${old}" == "${CONFIG_DIR}" || "${old}" == "${STATE_DIR}" ]] && return 0
+	if [[ -f "${old}/config.yaml" && ! -f "${CONFIG_DIR}/config.yaml" ]]; then
+		mkdir -p "${CONFIG_DIR}"
+		mv "${old}/config.yaml" "${CONFIG_DIR}/config.yaml"
+		echo "==> 迁移 ${old}/config.yaml → ${CONFIG_DIR}/" >&2
+	fi
+	if [[ -d "${old}/logs" ]]; then
+		mkdir -p "${STATE_DIR}/logs"
+		for item in "${old}/logs"/*; do
+			[[ -e "${item}" ]] || continue
+			base="$(basename "${item}")"
+			if [[ ! -e "${STATE_DIR}/logs/${base}" ]]; then
+				mv "${item}" "${STATE_DIR}/logs/${base}"
+			elif [[ -f "${item}" && "${base}" == *.jsonl ]]; then
+				cat "${item}" >>"${STATE_DIR}/logs/${base}" && rm -f "${item}"
+				echo "==> 合并 ${old}/logs/${base} 尾部 → ${STATE_DIR}/logs/" >&2
+			fi
+		done
+		rmdir "${old}/logs" 2>/dev/null || true
+	fi
+	rmdir "${old}" 2>/dev/null ||
+		warn "旧运行目录 ${old} 有残留（同名冲突不覆盖）——确认后可手动删除"
 }
 
 # yaml_scalar <key>：取 config.yaml 里首个 "key: value" 的值（去单/双
@@ -415,7 +464,7 @@ wait_healthz_version() {
 # 没有 env 时交接进程 bind 必失败——spawn 探测失败后自动退化为经典重启。
 
 # handoff_pidfile：交接进程 pid 记录——部署中断残留供下次部署回收。
-handoff_pidfile() { printf '%s' "${RUNTIME}/.handoff.pid"; }
+handoff_pidfile() { printf '%s' "${STATE_DIR}/.handoff.pid"; }
 
 # retire_stale_transient：回收上次部署中断留下的交接进程。它排在托管
 # 实例之后绑定，且 drain 起点已关 listener——不抢流量，SIGTERM 让它在
@@ -442,12 +491,13 @@ retire_stale_transient() {
 # stdout 只输出 pid；失败（早夭/超时未就绪）返回 1 并已自行清理。
 spawn_handoff() {
 	local logf startline pid
-	logf="${RUNTIME}/logs/stderr.log"
+	logf="${STATE_DIR}/logs/stderr.log"
 	startline=0
 	[[ -f "${logf}" ]] && startline="$(wc -l <"${logf}" | tr -d ' ')"
 	(
-		cd "${RUNTIME}" && exec env DEVIN2API_REUSEPORT=1 ./devin-2api -config "${RUNTIME}/config.yaml"
-	) >>"${RUNTIME}/logs/stdout.log" 2>>"${logf}" &
+		cd "${STATE_DIR}" && exec env DEVIN2API_REUSEPORT=1 \
+			"${BIN_DIR}/devin-2api" -config "${CONFIG_DIR}/config.yaml" -state-dir "${STATE_DIR}"
+	) >>"${STATE_DIR}/logs/stdout.log" 2>>"${logf}" &
 	pid=$!
 	printf '%s' "${pid}" >"$(handoff_pidfile)"
 	for _ in $(seq 40); do
@@ -577,28 +627,40 @@ smoke_upstream() {
 
 # dump_recent_log：失败时把服务 stderr 尾部打到调用方终端，省一次翻文件。
 dump_recent_log() {
-	local f="${RUNTIME}/logs/stderr.log"
+	local f="${STATE_DIR}/logs/stderr.log"
 	[[ -f "${f}" ]] || return 0
 	echo "--- tail ${f} ---" >&2
 	tail -n 15 "${f}" >&2
 }
 
 # check_versions 对比 已安装/运行中/最新 release 版本；不一致返回 1。
+# 已安装版本先看 BIN_DIR（新布局），不存在再试 LEGACY_RUNTIME（旧布局），
+# 让迁移前的 --check 也能报真实状态。
 check_versions() {
 	local installed running latest
-	installed="$("${RUNTIME}/devin-2api" -version 2>/dev/null || echo '<未安装>')"
+	installed="$("${BIN_DIR}/devin-2api" -version 2>/dev/null ||
+		"${LEGACY_RUNTIME:-/nonexistent}/devin-2api" -version 2>/dev/null || echo '<未安装>')"
 	running="$(healthz_version "${HEALTH_URL}")"
 	latest="$(latest_release_tag 2>/dev/null || echo '<查询失败>')"
 	printf 'installed: %s\nrunning:   %s\nlatest:    %s\n' "${installed}" "${running:-<未运行>}" "${latest}"
 	[[ "${installed}" == "${latest}" ]]
 }
 
-# remove_installed_binary：删运行目录二进制；config.yaml 与 logs/ 保留。
-# 删了返回 0，本就不存在返回 1。
+# remove_installed_binary：删 BIN_DIR 二进制与旧布局残留；config.yaml 与
+# logs/ 保留。删了返回 0，本就不存在返回 1。
 remove_installed_binary() {
-	[[ -f "${RUNTIME}/devin-2api" ]] || return 1
-	rm -f "${RUNTIME}/devin-2api"
-	echo "==> removed ${RUNTIME}/devin-2api"
+	local removed=1
+	if [[ -f "${BIN_DIR}/devin-2api" ]]; then
+		rm -f "${BIN_DIR}/devin-2api"
+		echo "==> removed ${BIN_DIR}/devin-2api"
+		removed=0
+	fi
+	if [[ -n "${LEGACY_RUNTIME:-}" && -f "${LEGACY_RUNTIME}/devin-2api" ]]; then
+		rm -f "${LEGACY_RUNTIME}/devin-2api"
+		echo "==> removed ${LEGACY_RUNTIME}/devin-2api (旧布局)"
+		removed=0
+	fi
+	return "${removed}"
 }
 
 # print_summary <version> <服务管理命令>：收尾报告——装在哪、怎么停、
@@ -606,10 +668,12 @@ remove_installed_binary() {
 print_summary() {
 	cat <<EOF
 ==> deployed $1
-    运行目录 : ${RUNTIME}（binary + config.yaml + logs/）
+    二进制   : ${BIN_DIR}/devin-2api
+    配置     : ${CONFIG_DIR}/config.yaml（权威副本在仓库，部署时同步）
+    状态/日志: ${STATE_DIR}/logs（仓库 logs/ 软链同指）
     监听     : http://localhost:${PORT}（面板 /panel，凭据见 config.yaml）
     服务管理 : $2
-    日志     : tail -f ${RUNTIME}/logs/stderr.log
+    日志     : tail -f ${STATE_DIR}/logs/stderr.log
 EOF
 }
 

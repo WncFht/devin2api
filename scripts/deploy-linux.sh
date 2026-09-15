@@ -2,7 +2,10 @@
 # deploy-linux.sh — deploy.sh 的 Linux 对应物：systemd --user 托管 devin-2api。
 # 用法见 --help；参数语义与 macOS 版一致。
 #
-# 运行目录 ${XDG_DATA_HOME:-~/.local/share}/devin-2api（二进制+config.yaml+logs），
+# XDG 规范布局：二进制 ${HOME}/.local/bin，config.yaml 入
+# ${XDG_CONFIG_HOME:-~/.config}/devin-2api，logs/ 与状态文件入
+# ${XDG_STATE_HOME:-~/.local/state}/devin-2api（旧版统一运行目录
+# ${XDG_DATA_HOME:-~/.local/share}/devin-2api 由 migrate_legacy_runtime 收编）；
 # unit 写在 ${XDG_CONFIG_HOME:-~/.config}/systemd/user/devin-2api.service；
 # 未加载时自动生成并 enable --now——首装与升级同一条命令。
 #
@@ -23,7 +26,10 @@ command -v systemctl >/dev/null || {
 
 UNIT="devin-2api.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
-RUNTIME="${DEVIN2API_RUNTIME:-${XDG_DATA_HOME:-${HOME}/.local/share}/devin-2api}"
+BIN_DIR="${DEVIN2API_BIN_DIR:-${HOME}/.local/bin}"
+CONFIG_DIR="${DEVIN2API_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/devin-2api}"
+STATE_DIR="${DEVIN2API_STATE_DIR:-${DEVIN2API_RUNTIME:-${XDG_STATE_HOME:-${HOME}/.local/state}/devin-2api}}"
+LEGACY_RUNTIME="${XDG_DATA_HOME:-${HOME}/.local/share}/devin-2api"
 
 # 服务管理动词：lib-deploy.sh 的 handoff_* 族经它们抹平 launchd/systemd 差异。
 svc_pid()     { systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null; }
@@ -38,8 +44,8 @@ Description=devin-2api — OpenAI/Anthropic-compatible proxy for Devin
 After=network-online.target
 
 [Service]
-ExecStart=${RUNTIME}/devin-2api -config ${RUNTIME}/config.yaml
-WorkingDirectory=${RUNTIME}
+ExecStart=${BIN_DIR}/devin-2api -config ${CONFIG_DIR}/config.yaml -state-dir ${STATE_DIR}
+WorkingDirectory=${STATE_DIR}
 Environment=DEVIN2API_REUSEPORT=1
 Restart=always
 RestartSec=5
@@ -47,9 +53,9 @@ TimeoutStopSec=330
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=${RUNTIME}
-StandardOutput=append:${RUNTIME}/logs/stdout.log
-StandardError=append:${RUNTIME}/logs/stderr.log
+ReadWritePaths=${STATE_DIR}
+StandardOutput=append:${STATE_DIR}/logs/stdout.log
+StandardError=append:${STATE_DIR}/logs/stderr.log
 
 [Install]
 WantedBy=default.target
@@ -67,8 +73,8 @@ do_uninstall() {
 		did=1
 	fi
 	remove_installed_binary && did=1
-	[[ -f "${RUNTIME}/config.yaml" || -d "${RUNTIME}/logs" ]] &&
-		echo "    保留 ${RUNTIME} 下 config.yaml 与 logs/；彻底清理: rm -rf '${RUNTIME}'"
+	[[ -f "${CONFIG_DIR}/config.yaml" || -d "${STATE_DIR}/logs" ]] &&
+		echo "    保留 ${CONFIG_DIR}/config.yaml 与 ${STATE_DIR}/logs/；彻底清理: rm -rf '${CONFIG_DIR}' '${STATE_DIR}'"
 	[[ "${did}" == "0" ]] && echo "nothing to remove"
 }
 
@@ -99,11 +105,14 @@ check_port_available "${MANAGED_PID:-0}"
 VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
+# 旧版单运行目录（~/.local/share/devin-2api）迁移：config 入 CONFIG_DIR、
+# logs 入 STATE_DIR、删旧二进制；目标已存在不覆盖。
+migrate_legacy_runtime "${LEGACY_RUNTIME}"
 
 # unit 与模板对齐：缺失生成、漂移重写后 daemon-reload——restart 使用
 # 已载入的新定义（env 变更本次 restart 即生效，与 launchd 需
 # bootout+bootstrap 不同）。ProtectSystem=strict 把全盘挂只读，
-# ReadWritePaths 只对运行目录放行写——credentials.toml 等 token 来源
+# ReadWritePaths 只对状态目录放行写——credentials.toml 等 token 来源
 # 只读不受影响。
 FRESH_BOOT=0
 UNIT_RELOAD=0
@@ -163,5 +172,8 @@ fi
 
 smoke_rc=0
 smoke_upstream || smoke_rc=$?
+# 第二遍收编：排空窗口期老实例往旧路径补写的请求目录/jsonl 尾账，
+# 此刻老进程已死，合并后旧目录应能整体 rmdir。
+migrate_legacy_runtime "${LEGACY_RUNTIME}"
 print_summary "${RUNNING}" "systemctl --user restart ${UNIT}（重启）；--uninstall 卸载"
 exit "${smoke_rc}"

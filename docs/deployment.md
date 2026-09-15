@@ -1,12 +1,14 @@
 # 部署（launchd / systemd / 裸进程）
 
-三平台拓扑：
+三平台拓扑——各平台按自己的目录规范分家（二进制 / 配置 / 状态日志三类不再同居一个运行目录）：
 
-| 平台    | 托管方式                                   | 运行目录（二进制 + config.yaml + logs/）      | 服务定义位置                                        | 部署命令                     |
-| ------- | ------------------------------------------ | --------------------------------------------- | --------------------------------------------------- | ---------------------------- |
-| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/Library/Application Support/devin-2api`    | `~/Library/LaunchAgents/com.$USER.devin-2api.plist` | `scripts/deploy.sh`          |
-| Linux   | systemd `--user` unit `devin-2api.service` | `${XDG_DATA_HOME:-~/.local/share}/devin-2api` | `${XDG_CONFIG_HOME:-~/.config}/systemd/user/`       | `scripts/deploy-linux.sh`    |
-| Windows | 无服务化，裸 exe 前台跑                    | `%LOCALAPPDATA%\Programs\devin-2api`          | —                                                   | `scripts/deploy-windows.ps1` |
+| 平台    | 托管方式                                   | 二进制                                              | 配置                                                   | 状态/日志                                                                | 部署命令                     |
+| ------- | ------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ | ---------------------------- |
+| macOS   | launchd 用户代理 `com.$USER.devin-2api`    | `~/.local/bin/devin-2api`                           | `~/Library/Application Support/devin-2api/config.yaml` | 同配置目录（`logs/` 子目录；macOS 无独立 state 惯例，维持 app 目录模型） | `scripts/deploy.sh`          |
+| Linux   | systemd `--user` unit `devin-2api.service` | `~/.local/bin/devin-2api`                           | `${XDG_CONFIG_HOME:-~/.config}/devin-2api/config.yaml` | `${XDG_STATE_HOME:-~/.local/state}/devin-2api`                           | `scripts/deploy-linux.sh`    |
+| Windows | 无服务化，裸 exe 前台跑                    | `%LOCALAPPDATA%\Programs\devin-2api\devin-2api.exe` | `%APPDATA%\devin-2api\config.yaml`                     | `%LOCALAPPDATA%\devin-2api`                                              | `scripts/deploy-windows.ps1` |
+
+二进制的路径解析链（服务定义里全部显式传 flag，链只对裸跑生效）：配置文件 `-config` flag → `DEVIN2API_CONFIG` env → `./config.yaml`（存在才选，仓库开发/Windows 解压即跑）→ 上表平台默认；状态目录 `-state-dir` flag → `DEVIN2API_STATE_DIR` env → 上表平台默认。启动日志 `paths resolved` 一行打出实际生效的两个路径。
 
 三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
@@ -14,9 +16,9 @@
 
 ## 跨平台共同约定
 
-- **logs/ 永远在 config.yaml 同目录**：请求级 debug 目录、`index.jsonl`、`quota.jsonl` 都在运行目录的 `logs/` 下；`stdout.log`/`stderr.log` 是进程输出。仓库里的 `logs/` 只是指向本机运行目录的符号链接（开发便利，非必需）。
+- **logs/ 永远在状态目录下**：请求级 debug 目录、`index.jsonl`、`quota.jsonl`、`gate-state.json` 都在 `<state-dir>/logs/` 下；`stdout.log`/`stderr.log` 是进程输出。仓库里的 `logs/` 只是指向本机状态目录的符号链接（开发便利，非必需）。旧版「单运行目录」布局由部署脚本自动迁移（`migrate_legacy_runtime`）：config/logs 挪到平台目录、删旧二进制，目标已存在时不覆盖。
 - **优雅排空是硬要求**：进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）——收到信号进入 draining：`/healthz` 继续应答但带 `draining: true`，新的 `/v1/*` 立即 `503 + Retry-After: 1`，在途请求跑完；排空上限 300s，超时强关剩余连接。两个服务定义都给 330s 停止超时覆盖该上限加余量。重启只发 SIGTERM，禁用 `kill -9` 抢时间（Ctrl+C 在 Windows 前台触发同一套排空）。listener 在排空期的行为取决于 `DEVIN2API_REUSEPORT`：未开启时保持打开（新请求拿应用层 503 而非内核拒绝）；开启时立即关闭——reuseport 组内新连接按绑定序（macOS）或哈希（Linux）落到组内其它 socket，旧实例只有让出监听，deploy 预置的交接进程才能接管。
-- **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 300s 排空上限约束，也不再需要等空闲窗口。交接进程 pid 记录在 `<运行目录>/.handoff.pid`；部署中断残留时下次部署自动回收。回退路径：在跑的旧实例没有 reuseport env 时交接进程 bind 失败，自动退化经典「等空闲 + 重启」——每个失败分支都不劣于旧部署语义。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
+- **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 300s 排空上限约束，也不再需要等空闲窗口。交接进程 pid 记录在 `<状态目录>/.handoff.pid`；部署中断残留时下次部署自动回收。回退路径：在跑的旧实例没有 reuseport env 时交接进程 bind 失败，自动退化经典「等空闲 + 重启」——每个失败分支都不劣于旧部署语义。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
 - **单实例**：托管器（KeepAlive/Restart=always）会与手动起的实例互抢监听端口，交替时全部在途流被掐。所有实例必须经托管器启停；冒烟验证用空闲端口起临时二进制，验证完立即关闭，不留常驻侧实例。
 - **版本可见性**：`main.version` 由构建期 `-X` 注入（`git describe --tags --always --dirty` 或 tag 名），`stderr.log` 启动行、`/healthz`、`-version` flag 三处可查。部署后脚本轮询 `/healthz` 直到 version 等于刚部署的版本——排空期旧进程仍在应答旧版本，首次 200 不代表切换完成。
 - 重启、换二进制前先确认目标端口上没有遗留测试进程（`lsof -nP -iTCP:<port> -sTCP:LISTEN`，Windows 用 `netstat -ano | findstr <port>`）。
@@ -25,13 +27,13 @@
 
 ```
 launchd (gui/<uid> 用户域, 无需 sudo)
-  └─ devin-2api -config $RT/config.yaml   ($RT = ~/Library/Application Support/devin-2api)
-       ├─ config.yaml 同目录 logs/         请求级 debug 目录 + index.jsonl
+  └─ ~/.local/bin/devin-2api -config $RT/config.yaml -state-dir $RT   ($RT = ~/Library/Application Support/devin-2api)
+       ├─ $RT/logs/                          请求级 debug 目录 + index.jsonl
        ├─ logs/stdout.log                 面板渲染等 fmt 输出
        └─ logs/stderr.log                 slog 结构化进程日志
 ```
 
-**运行目录与仓库分离**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。因此二进制、`config.yaml`、`logs/` 都放在 `~/Library/Application Support/devin-2api/`（不受 TCC 保护）。`config.yaml` 的权威副本仍是仓库里那份，`deploy.sh` 每次部署同步到运行目录；单改配置可 `cp config.yaml "$RT/" && launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
+**与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本仍是仓库里那份，`deploy.sh` 每次部署同步到 `$RT`；单改配置可 `cp config.yaml "$RT/" && launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
 
 请求级 debug 日志的生命周期由 `debug.retention_days` / `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs` 自管；launchd 侧无需额外配置。
 
@@ -45,9 +47,11 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 	<key>Label</key><string>com.$USER.devin-2api</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/<user>/Library/Application Support/devin-2api/devin-2api</string>
+		<string>/Users/<user>/.local/bin/devin-2api</string>
 		<string>-config</string>
 		<string>/Users/<user>/Library/Application Support/devin-2api/config.yaml</string>
+		<string>-state-dir</string>
+		<string>/Users/<user>/Library/Application Support/devin-2api</string>
 	</array>
 	<key>WorkingDirectory</key><string>/Users/<user>/Library/Application Support/devin-2api</string>
 	<key>EnvironmentVariables</key>
@@ -97,7 +101,7 @@ tail -f logs/stderr.log                                                       # 
 
 ### 可选增强
 
-- **config 改动自动重启**：plist 加 `WatchPaths` 指向运行目录的 `config.yaml`，保存即触发重启。代价是任何 mtime 变化（包括编辑器误触、`deploy.sh` 的同步）都会重启。
+- **config 改动自动重启**：plist 加 `WatchPaths` 指向配置目录的 `config.yaml`，保存即触发重启。代价是任何 mtime 变化（包括编辑器误触、`deploy.sh` 的同步）都会重启。
 - **新编译二进制立刻 kickstart 的注意**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。
 
 ## Linux（systemd --user）
@@ -110,8 +114,8 @@ Description=devin-2api — OpenAI/Anthropic-compatible proxy for Devin
 After=network-online.target
 
 [Service]
-ExecStart=<运行目录>/devin-2api -config <运行目录>/config.yaml
-WorkingDirectory=<运行目录>
+ExecStart=~/.local/bin/devin-2api -config ~/.config/devin-2api/config.yaml -state-dir ~/.local/state/devin-2api
+WorkingDirectory=~/.local/state/devin-2api
 Environment=DEVIN2API_REUSEPORT=1
 Restart=always
 RestartSec=5
@@ -119,15 +123,15 @@ TimeoutStopSec=330
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=<运行目录>
-StandardOutput=append:<运行目录>/logs/stdout.log
-StandardError=append:<运行目录>/logs/stderr.log
+ReadWritePaths=~/.local/state/devin-2api
+StandardOutput=append:~/.local/state/devin-2api/logs/stdout.log
+StandardError=append:~/.local/state/devin-2api/logs/stderr.log
 
 [Install]
 WantedBy=default.target
 ```
 
-与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=330` ≈ `ExitTimeOut`，`Environment=DEVIN2API_REUSEPORT=1` ≈ `EnvironmentVariables`，stdout/stderr 同样落运行目录文件（不走 journal，排障路径与 macOS 一致）。
+与 macOS 版的对应关系：`Restart=always` + `RestartSec=5` ≈ `KeepAlive` + `ThrottleInterval`，`TimeoutStopSec=330` ≈ `ExitTimeOut`，`Environment=DEVIN2API_REUSEPORT=1` ≈ `EnvironmentVariables`，stdout/stderr 同样落状态目录文件（不走 journal，排障路径与 macOS 一致）。注意 systemd `--user` 上下文里 `XDG_CONFIG_HOME`/`XDG_STATE_HOME` 通常不设，unit 一律用部署期展开的绝对路径。
 
 常用命令：
 
@@ -146,9 +150,9 @@ tail -f logs/stderr.log                     # 进程日志
 
 ## Windows（裸进程）
 
-不做服务化：`devin-2api.exe` 与 `config.yaml` 放同一目录，前台启动。Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）；关窗、`taskkill /F`、`Stop-Process` 都是强杀。`logs/` 落在 config.yaml 同目录。release zip 内含 exe + `config.example.yaml` + LICENSE。
+不做服务化：`devin-2api.exe` 前台启动，Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）；关窗、`taskkill /F`、`Stop-Process` 都是强杀。部署布局按 Microsoft 惯例拆开：exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，`config.yaml` 在 `%APPDATA%\devin-2api`（roaming），`logs\` 在 `%LOCALAPPDATA%\devin-2api`（machine-local）。不用部署脚本直接跑 zip 里的 exe 也可以——`./config.yaml` 存在即被选中（解析链见上），但状态目录仍回落 `%LOCALAPPDATA%\devin-2api`。release zip 内含 exe + `config.example.yaml` + LICENSE。
 
-`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `auth.api_key`/`dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
+`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `auth.api_key`/`dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`（覆盖 exe 安装目录；配置/状态目录由 `DEVIN2API_CONFIG_DIR`/`DEVIN2API_STATE_DIR` env 覆盖）。旧版「exe 同目录放 config/logs」布局由 `Move-LegacyLayout` 自动迁移。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
 
 ## 面板与 agent 访问
 

@@ -74,13 +74,13 @@ docker run --rm -p 8080:8080 \
 
 以服务方式运行（可选）：
 
-| 平台    | 托管方式                                 | 运行目录（二进制 + 配置 + 日志）           | 安装 / 升级                  |
-| ------- | ---------------------------------------- | ------------------------------------------ | ---------------------------- |
-| macOS   | launchd 代理                             | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`          |
-| Linux   | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh`    |
-| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | `%LOCALAPPDATA%\Programs\devin-2api`       | `scripts/deploy-windows.ps1` |
+| 平台    | 托管方式                                 | 布局                                                                                                      | 安装 / 升级                  |
+| ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| macOS   | launchd 代理                             | 二进制 `~/.local/bin` · 配置 + 状态 `~/Library/Application Support/devin-2api`                            | `scripts/deploy.sh`          |
+| Linux   | `systemd --user`                         | 二进制 `~/.local/bin` · 配置 `~/.config/devin-2api` · 状态 `~/.local/state/devin-2api`                    | `scripts/deploy-linux.sh`    |
+| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe `%LOCALAPPDATA%\Programs\devin-2api` · 配置 `%APPDATA%\devin-2api` · 状态 `%LOCALAPPDATA%\devin-2api` | `scripts/deploy-windows.ps1` |
 
-两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进运行目录、在仓库内维护指向运行目录日志的 `logs` 符号链接，所以先 clone 再跑：
+二进制按平台惯例解析路径：配置走 `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → 上表平台默认；状态目录走 `-state-dir` → `DEVIN2API_STATE_DIR` → 平台默认。两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进平台配置目录、在仓库内维护指向状态目录的 `logs` 符号链接，所以先 clone 再跑：
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api

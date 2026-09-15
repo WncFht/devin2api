@@ -110,14 +110,14 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, devinAdapter, application, panel, manager); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, devinAdapter, application, panel, manager); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 }
@@ -249,7 +249,7 @@ auth:
 
 			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
 			defer manager.Close()
-			devinAdapter, err := devin.New(devinConfigFrom(prev, configPath))
+			devinAdapter, err := devin.New(devinConfigFrom(prev, configPath, filepath.Join(dir, "logs")))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,7 +258,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, devinAdapter, application, panel, manager)
+			report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

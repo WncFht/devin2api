@@ -66,10 +66,12 @@ func main() {
 		os.Exit(2)
 	}
 	// config.yaml 读取失败按零值继续：token 与身份仍有环境变量、
-	// CLI 凭证文件与默认常量的完整回落链。注意 Load 走全量 Validate
+	// CLI 凭证文件与默认常量的完整回落链。路径走与服务相同的解析链
+	// （./config.yaml → 平台默认目录）。注意 Load 走全量 Validate
 	// （KnownFields+server.listen 必填）——校验失败的 yaml 被整体丢弃，
 	// 连其中本可用的 devin.token 也不可见；probe 场景下靠回落链兜底。
-	cfg, _ := config.Load("config.yaml")
+	probeConfigPath, _ := config.ResolveConfigPath("")
+	cfg, _ := config.Load(probeConfigPath)
 	aliases = cfg.Devin.Aliases
 	token := resolveToken(cfg)
 	if token == "" {

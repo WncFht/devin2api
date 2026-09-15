@@ -240,6 +240,78 @@ func normalizeAliases(aliases map[string]string) (map[string]string, error) {
 	return normalized, nil
 }
 
+// ResolveConfigPath 按优先级解析配置文件路径：显式 -config flag →
+// DEVIN2API_CONFIG 环境变量 → ./config.yaml（存在才选，仓库内开发便利，
+// Windows zip 解压即跑同理）→ DefaultConfigPath 平台规范位置。
+// 返回值可能指向不存在的文件——Load 的报错会带上该路径，指向规范安装位置。
+func ResolveConfigPath(flagPath string) (string, error) {
+	if flagPath != "" {
+		return flagPath, nil
+	}
+	if env := strings.TrimSpace(os.Getenv("DEVIN2API_CONFIG")); env != "" {
+		return env, nil
+	}
+	if _, err := os.Stat("config.yaml"); err == nil {
+		return "config.yaml", nil
+	}
+	return DefaultConfigPath()
+}
+
+// ResolveStateDir 按优先级解析状态根目录（logs/、gate-state.json 等运行期
+// 产物的归属）：-state-dir flag → DEVIN2API_STATE_DIR → DefaultStateDir。
+func ResolveStateDir(flagDir string) (string, error) {
+	if flagDir != "" {
+		return flagDir, nil
+	}
+	if env := strings.TrimSpace(os.Getenv("DEVIN2API_STATE_DIR")); env != "" {
+		return env, nil
+	}
+	return DefaultStateDir()
+}
+
+// DefaultConfigPath 返回平台规范的默认配置文件位置：Linux/Unix 为
+// $XDG_CONFIG_HOME/devin-2api/config.yaml（os.UserConfigDir 已含 XDG 兜底），
+// macOS 为 ~/Library/Application Support/devin-2api/config.yaml，
+// Windows 为 %APPDATA%\devin-2api\config.yaml。
+func DefaultConfigPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+	return filepath.Join(dir, "devin-2api", "config.yaml"), nil
+}
+
+// DefaultStateDir 返回平台规范的状态/日志根目录：Linux/Unix 为
+// $XDG_STATE_HOME/devin-2api（缺省 ~/.local/state/devin-2api，stdlib 无
+// UserStateDir 故手写）；macOS 与配置同目录（Application Support 无独立
+// state 惯例，维持 app 目录模型）；Windows 为 %LOCALAPPDATA%\devin-2api
+// （os.UserCacheDir——日志/状态是 machine-local，不进漫游配置）。
+func DefaultStateDir() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		dir, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user cache dir: %w", err)
+		}
+		return filepath.Join(dir, "devin-2api"), nil
+	case "darwin":
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user config dir: %w", err)
+		}
+		return filepath.Join(dir, "devin-2api"), nil
+	default:
+		if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+			return filepath.Join(dir, "devin-2api"), nil
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home dir: %w", err)
+		}
+		return filepath.Join(home, ".local", "state", "devin-2api"), nil
+	}
+}
+
 // devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key。
 var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\s*=\s*"([^"]+)"`)
 

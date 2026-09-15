@@ -74,13 +74,13 @@ docker run --rm -p 8080:8080 \
 
 Run as a service (optional):
 
-| Platform | Supervisor                               | Runtime dir (binary + config + logs)       | Install / upgrade            |
-| -------- | ---------------------------------------- | ------------------------------------------ | ---------------------------- |
-| macOS    | launchd agent                            | `~/Library/Application Support/devin-2api` | `scripts/deploy.sh`          |
-| Linux    | `systemd --user`                         | `~/.local/share/devin-2api`                | `scripts/deploy-linux.sh`    |
-| Windows  | none — console, or NSSM / Task Scheduler | `%LOCALAPPDATA%\Programs\devin-2api`       | `scripts/deploy-windows.ps1` |
+| Platform | Supervisor                               | Layout                                                                                                       | Install / upgrade            |
+| -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| macOS    | launchd agent                            | bin `~/.local/bin` · config+state `~/Library/Application Support/devin-2api`                                 | `scripts/deploy.sh`          |
+| Linux    | `systemd --user`                         | bin `~/.local/bin` · config `~/.config/devin-2api` · state `~/.local/state/devin-2api`                       | `scripts/deploy-linux.sh`    |
+| Windows  | none — console, or NSSM / Task Scheduler | exe `%LOCALAPPDATA%\Programs\devin-2api` · config `%APPDATA%\devin-2api` · state `%LOCALAPPDATA%\devin-2api` | `scripts/deploy-windows.ps1` |
 
-Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works. They treat the repo as home — syncing `config.yaml` into the runtime dir and keeping a `logs` symlink inside the repo — so clone first, then run:
+The binary resolves its paths per platform convention: config via `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → the platform default above; state via `-state-dir` → `DEVIN2API_STATE_DIR` → platform default. Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works. They treat the repo as home — syncing `config.yaml` into the platform config dir and keeping a `logs` symlink inside the repo pointing at the state dir — so clone first, then run:
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api

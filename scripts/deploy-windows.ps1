@@ -8,7 +8,7 @@
 #   -Check      只对比 已安装/运行中/最新 release 版本，不做变更
 #   -Uninstall  移除 exe 等安装产物（保留 config.yaml 与 logs\）
 #   -Force      允许强杀正在运行的实例（等价关窗，在途请求会断；否则提示手动 Ctrl+C）
-#   -RuntimeDir 覆盖安装目录（默认 %LOCALAPPDATA%\Programs\devin-2api，或 env DEVIN2API_RUNTIME）
+#   -RuntimeDir 覆盖 exe 安装目录（默认 %LOCALAPPDATA%\Programs\devin-2api）
 #   -Help       显示用法
 #
 # 首装与升级同一条命令：config.yaml 缺失时自动从 config.example.yaml 生成——
@@ -39,14 +39,21 @@ function Usage { Get-Content $PSCommandPath -TotalCount 20 | Where-Object { $_ -
 if ($Help) { Usage; exit 0 }
 
 # ---------- 布局 ----------
-# 仓库内运行（scripts\ 下）时仓库是家：config.yaml 由仓库同步进运行目录；
-# 单文件下载运行时（无仓库上下文）直接在运行目录里生成配置。
+# 平台规范布局（Microsoft 分法）：exe 入 %LOCALAPPDATA%\Programs\devin-2api
+# （per-user Program Files），config.yaml 入 %APPDATA%\devin-2api（roaming
+# 配置随账号走），logs\ 与状态文件入 %LOCALAPPDATA%\devin-2api（machine-local
+# 输出）。仓库内运行（scripts\ 下）时仓库 config.yaml 是权威副本、由部署
+# 同步进 ConfigDir；单文件下载运行时直接生成。env 覆盖：
+# DEVIN2API_CONFIG_DIR / DEVIN2API_STATE_DIR；DEVIN2API_RUNTIME 是旧版单
+# 目录变量的兼容别名，映射到 StateDir。
 $ScriptDir = Split-Path -Parent $PSCommandPath
 $RepoRoot = Split-Path -Parent $ScriptDir
 $InRepo = Test-Path (Join-Path $RepoRoot 'go.mod')
-if ($RuntimeDir -eq '') { $RuntimeDir = if ($env:DEVIN2API_RUNTIME) { $env:DEVIN2API_RUNTIME } else { Join-Path $env:LOCALAPPDATA 'Programs\devin-2api' } }
+if ($RuntimeDir -eq '') { $RuntimeDir = Join-Path $env:LOCALAPPDATA 'Programs\devin-2api' }
+$ConfigDir = if ($env:DEVIN2API_CONFIG_DIR) { $env:DEVIN2API_CONFIG_DIR } else { Join-Path $env:APPDATA 'devin-2api' }
+$StateDir = if ($env:DEVIN2API_STATE_DIR) { $env:DEVIN2API_STATE_DIR } elseif ($env:DEVIN2API_RUNTIME) { $env:DEVIN2API_RUNTIME } else { Join-Path $env:LOCALAPPDATA 'devin-2api' }
 $RuntimeExe = Join-Path $RuntimeDir 'devin-2api.exe'
-$RuntimeConfig = Join-Path $RuntimeDir 'config.yaml'
+$RuntimeConfig = Join-Path $ConfigDir 'config.yaml'
 $RepoConfig = Join-Path $RepoRoot 'config.yaml'
 $UpstreamSlug = 'WncFht/devin2api'
 
@@ -185,7 +192,36 @@ function Get-TokenSource([string]$file) {
     return ""
 }
 
+# Move-LegacyLayout：旧版把 config.yaml 与 logs\ 放在 exe 同目录——迁到
+# ConfigDir/StateDir。logs 逐项并入：目标缺名直接搬，同名 .jsonl 属追加
+# 日志把旧尾部接上，其余同名冲突不覆盖，残留目录留给用户确认。
+function Move-LegacyLayout {
+    $legacyConfig = Join-Path $RuntimeDir 'config.yaml'
+    if ((Test-Path $legacyConfig) -and ($legacyConfig -ne $RuntimeConfig) -and -not (Test-Path $RuntimeConfig)) {
+        New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+        Move-Item $legacyConfig $RuntimeConfig
+        Note "迁移 $legacyConfig → $ConfigDir\"
+    }
+    $legacyLogs = Join-Path $RuntimeDir 'logs'
+    if (Test-Path $legacyLogs) {
+        $targetLogs = Join-Path $StateDir 'logs'
+        New-Item -ItemType Directory -Force -Path $targetLogs | Out-Null
+        foreach ($item in Get-ChildItem $legacyLogs) {
+            $dest = Join-Path $targetLogs $item.Name
+            if (-not (Test-Path $dest)) {
+                Move-Item $item.FullName $dest
+            } elseif (-not $item.PSIsContainer -and $item.Name -like '*.jsonl') {
+                Get-Content $item.FullName | Add-Content $dest
+                Remove-Item $item.FullName
+                Note "合并 $legacyLogs\$($item.Name) 尾部 → $targetLogs\"
+            }
+        }
+        Remove-Item $legacyLogs -ErrorAction SilentlyContinue
+    }
+}
+
 function Ensure-Config {
+    New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
     # 仓库模式：仓库 config.yaml 是权威副本，直接同步（与 bash 版语义一致）。
     if ($InRepo -and (Test-Path $RepoConfig)) {
         if ((Test-Path $RuntimeConfig) -and
@@ -256,7 +292,7 @@ function Assert-PortAvailable([int]$p) {
 
 # ---------- 安装 / 校验 ----------
 function Install-Binary {
-    New-Item -ItemType Directory -Force -Path $RuntimeDir, (Join-Path $RuntimeDir 'logs') | Out-Null
+    New-Item -ItemType Directory -Force -Path $RuntimeDir, $ConfigDir, (Join-Path $StateDir 'logs') | Out-Null
     Stop-DirInstance   # Windows 锁运行中的 exe——覆盖前必须让位
 
     if ($Release -ne '') {
@@ -333,7 +369,9 @@ function Test-Upstream([int]$p) {
 function Write-Summary([string]$version, [int]$p) {
     Write-Host @"
 ==> deployed $version
-    目录     : $RuntimeDir（exe + config.yaml + logs\）
+    exe      : $RuntimeExe
+    配置     : $RuntimeConfig
+    状态/日志: $StateDir\logs
     监听     : http://localhost:$p（面板 /panel，凭据见 config.yaml）
     运行方式 : 独立控制台窗口前台跑——停止在窗口里 Ctrl+C；关窗是强杀会掐断在途请求
     常驻     : Windows 不做服务化；要开机自起可用任务计划程序或 NSSM（见 docs/deployment.md）
@@ -346,6 +384,7 @@ New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 $exeVersion = if (Test-Path $RuntimeExe) { Invoke-NativeQuiet { & $RuntimeExe -version 2>$null } } else { '<未安装>' }
 $runningVersion = ""
 $configPort = Read-ListenPort $RuntimeConfig
+if ($configPort -le 0) { $configPort = Read-ListenPort (Join-Path $RuntimeDir 'config.yaml') }   # 旧布局兜底
 $probePort = if ($configPort -gt 0) { $configPort } else { 8080 }
 if (Test-PortOccupied $probePort) { $runningVersion = Get-HealthzVersion $probePort }
 
@@ -366,12 +405,16 @@ if ($Uninstall) {
         $p = Join-Path $RuntimeDir $f
         if (Test-Path $p) { Remove-Item $p -Force; Note "removed $p" }
     }
-    if ((Test-Path $RuntimeConfig) -or (Test-Path (Join-Path $RuntimeDir 'logs'))) {
-        Write-Host "    保留 $RuntimeDir 下 config.yaml 与 logs\；彻底清理: Remove-Item -Recurse '$RuntimeDir'"
+    if ((Test-Path $RuntimeConfig) -or (Test-Path (Join-Path $StateDir 'logs'))) {
+        Write-Host "    保留 $RuntimeConfig 与 $StateDir\logs\；彻底清理: Remove-Item -Recurse '$ConfigDir' '$StateDir' '$RuntimeDir'"
+    }
+    if ((Test-Path (Join-Path $RuntimeDir 'config.yaml')) -or (Test-Path (Join-Path $RuntimeDir 'logs'))) {
+        Write-Host "    旧布局残留：$RuntimeDir 下仍有 config.yaml/logs\——下次部署会自动迁移"
     }
     exit 0
 }
 
+Move-LegacyLayout
 Assert-Preflight
 $port = Read-ListenPort $RuntimeConfig
 if ($port -le 0) { Die "config.yaml 的 server.listen 解析不出端口" }
@@ -383,7 +426,7 @@ if ($NoStart) { Write-Host "done (installed, not started)"; exit 0 }
 
 # 独立控制台窗口启动——窗口归用户所有，Ctrl+C 走优雅排空。
 Note "start: $RuntimeExe（新控制台窗口）"
-Start-Process -FilePath $RuntimeExe -ArgumentList '-config', "`"$RuntimeConfig`"" -WorkingDirectory $RuntimeDir
+Start-Process -FilePath $RuntimeExe -ArgumentList '-config', "`"$RuntimeConfig`"", '-state-dir', "`"$StateDir`"" -WorkingDirectory $StateDir
 
 # 无服务管理器可委托，进程起没起来只能看 healthz；30s 足够覆盖慢启动。
 $running = ''

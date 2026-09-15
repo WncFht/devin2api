@@ -63,16 +63,16 @@ $$
 ## 复现
 
 ```bash
-# 1. 加密采集（独立于代理进程，token 从运行目录 config.yaml 读）
+# 1. 加密采集（独立于代理进程，token 从配置目录的 config.yaml 读）
 nohup scripts/quota/poll.sh 30 /tmp/quota.jsonl &
 
 # 2. 正常用付费模型产生燃烧（index.jsonl 自动记录）
 
 # 3. 拟合（uv 起隔离环境；catalog 也可给 http://localhost:<port>/panel/api/models --key <api_key>）
-#    index.jsonl 在运行目录的 logs/ 下（config.yaml 同目录，平台路径见 deployment.md）
+#    index.jsonl 在状态目录的 logs/ 下（平台路径见 deployment.md）
 uv run --with numpy --with matplotlib scripts/quota/fit.py \
   --status outputs/quota-probe-2026-09-13.jsonl \
-  --index <运行目录>/logs/index.jsonl \
+  --index <状态目录>/logs/index.jsonl \
   --catalog outputs/model-catalog-2026-09-13.json \
   --out outputs/quota-fit.png
 ```

@@ -65,7 +65,7 @@ grep -q "listen[[:space:]]*:[[:space:]]*\"*:$PORT" "$WORK/config.yaml" || {
 }
 
 go build -o "$WORK/devin-2api" ./cmd/devin-2api
-"$WORK/devin-2api" -config "$WORK/config.yaml" >"$WORK/stdout.log" 2>"$WORK/stderr.log" &
+"$WORK/devin-2api" -config "$WORK/config.yaml" -state-dir "$WORK" >"$WORK/stdout.log" 2>"$WORK/stderr.log" &
 SMOKE_PID=$!
 
 for _ in $(seq 1 75); do

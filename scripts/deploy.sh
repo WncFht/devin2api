@@ -17,11 +17,16 @@ source scripts/lib-deploy.sh
 # 需要固定名时可用 DEVIN2API_LABEL 覆盖。
 LABEL="${DEVIN2API_LABEL:-com.${USER}.devin-2api}"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-# 运行目录独立于仓库：launchd 子进程对 ~/Desktop 的每次 open 都会被
-# TCC 桌面文件夹授权挂起（仓库在 Desktop 下时 exec/config/logs 全部卡死），
-# 因此二进制、config.yaml、logs/ 一律放 Application Support，仓库只保留
-# logs -> RUNTIME/logs 的符号链接供排障读取。
-RUNTIME="${DEVIN2API_RUNTIME:-${HOME}/Library/Application Support/devin-2api}"
+# 平台规范布局：二进制入 ~/.local/bin（用户级 bin 惯例，在 PATH 上可直接
+# 调用）；配置与状态同放 Application Support——launchd 子进程对 ~/Desktop
+# 的每次 open 都会被 TCC 桌面文件夹授权挂起（仓库在 Desktop 下时
+# exec/config/logs 全部卡死），Application Support 不受 TCC 保护；macOS
+# 无独立 state dir 惯例，维持 app 目录模型。仓库只保留 logs ->
+# STATE_DIR/logs 的符号链接供排障读取。
+BIN_DIR="${DEVIN2API_BIN_DIR:-${HOME}/.local/bin}"
+CONFIG_DIR="${DEVIN2API_CONFIG_DIR:-${HOME}/Library/Application Support/devin-2api}"
+STATE_DIR="${DEVIN2API_STATE_DIR:-${DEVIN2API_RUNTIME:-${HOME}/Library/Application Support/devin-2api}}"
+LEGACY_RUNTIME="${HOME}/Library/Application Support/devin-2api"
 
 # 服务管理动词：lib-deploy.sh 的 handoff_* 族经它们抹平 launchd/systemd 差异。
 svc_pid()     { launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}'; }
@@ -38,11 +43,13 @@ plist_content() {
 	<key>Label</key><string>${LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>${RUNTIME}/devin-2api</string>
+		<string>${BIN_DIR}/devin-2api</string>
 		<string>-config</string>
-		<string>${RUNTIME}/config.yaml</string>
+		<string>${CONFIG_DIR}/config.yaml</string>
+		<string>-state-dir</string>
+		<string>${STATE_DIR}</string>
 	</array>
-	<key>WorkingDirectory</key><string>${RUNTIME}</string>
+	<key>WorkingDirectory</key><string>${STATE_DIR}</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>DEVIN2API_REUSEPORT</key><string>1</string>
@@ -51,8 +58,8 @@ plist_content() {
 	<key>KeepAlive</key><true/>
 	<key>ThrottleInterval</key><integer>5</integer>
 	<key>ExitTimeOut</key><integer>330</integer>
-	<key>StandardOutPath</key><string>${RUNTIME}/logs/stdout.log</string>
-	<key>StandardErrorPath</key><string>${RUNTIME}/logs/stderr.log</string>
+	<key>StandardOutPath</key><string>${STATE_DIR}/logs/stdout.log</string>
+	<key>StandardErrorPath</key><string>${STATE_DIR}/logs/stderr.log</string>
 </dict>
 </plist>
 EOF
@@ -72,8 +79,8 @@ do_uninstall() {
 		did=1
 	fi
 	remove_installed_binary && did=1
-	[[ -f "${RUNTIME}/config.yaml" || -d "${RUNTIME}/logs" ]] &&
-		echo "    保留 ${RUNTIME} 下 config.yaml 与 logs/；彻底清理: rm -rf '${RUNTIME}'"
+	[[ -f "${CONFIG_DIR}/config.yaml" || -d "${STATE_DIR}/logs" ]] &&
+		echo "    保留 ${CONFIG_DIR}/config.yaml 与 ${STATE_DIR}/logs/；彻底清理: rm -rf '${CONFIG_DIR}' '${STATE_DIR}'"
 	[[ "${did}" == "0" ]] && echo "nothing to remove"
 }
 
@@ -108,6 +115,9 @@ check_port_available "${LAUNCHD_PID:-0}"
 VERSION="$(build_or_download "${RELEASE_TAG}")"
 smoke_version ./devin-2api.new "${VERSION}"
 install_binary devin-2api.new
+# 旧版单运行目录布局迁移：macOS 下只剩清理 LEGACY_RUNTIME 里的旧二进制
+# 与 .handoff.pid（config/logs 本就与 CONFIG_DIR/STATE_DIR 同路径）。
+migrate_legacy_runtime "${LEGACY_RUNTIME}"
 
 # plist 与模板对齐：缺失生成、漂移重写。job 定义只在 bootstrap 时载入，
 # kickstart 不重读文件——已加载服务的 plist 变更只能 bootout+bootstrap
@@ -171,5 +181,8 @@ echo "==> running: pid=${NEW_PID:-?} version=${RUNNING}"
 # healthz 只证明进程活着；真链路冒烟打 /v1/models 验证上游鉴权。
 smoke_rc=0
 smoke_upstream || smoke_rc=$?
+# 第二遍收编排空窗口期老实例往旧路径补写的尾账（macOS 下旧目录与
+# STATE_DIR 同路径，此调用近似空转）。
+migrate_legacy_runtime "${LEGACY_RUNTIME}"
 print_summary "${RUNNING}" "launchctl kickstart -k gui/$(id -u)/${LABEL}（重启）；--uninstall 卸载"
 exit "${smoke_rc}"

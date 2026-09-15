@@ -100,7 +100,8 @@ var lastReloadPtr atomic.Pointer[dashboard.ConfigReloadReport]
 var reloadMu sync.Mutex
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "YAML 配置文件路径")
+	configPath := flag.String("config", "", "YAML 配置文件路径；缺省按 $DEVIN2API_CONFIG → ./config.yaml → 平台默认目录解析")
+	stateDir := flag.String("state-dir", "", "日志与状态文件根目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
 	flag.Parse()
 	resolved := resolvedVersion()
@@ -111,9 +112,32 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	absoluteConfigPath, err := filepath.Abs(*configPath)
+	resolvedConfigPath, err := config.ResolveConfigPath(*configPath)
 	if err != nil {
 		slog.Error("resolve config path failed", "error", err)
+		os.Exit(1)
+	}
+	absoluteConfigPath, err := filepath.Abs(resolvedConfigPath)
+	if err != nil {
+		slog.Error("resolve config path failed", "error", err)
+		os.Exit(1)
+	}
+	resolvedStateDir, err := config.ResolveStateDir(*stateDir)
+	if err != nil {
+		slog.Error("resolve state dir failed", "error", err)
+		os.Exit(1)
+	}
+	absoluteStateDir, err := filepath.Abs(resolvedStateDir)
+	if err != nil {
+		slog.Error("resolve state dir failed", "error", err)
+		os.Exit(1)
+	}
+	// logRoot 是所有运行期产物（请求 debug 目录、index.jsonl、quota.jsonl、
+	// gate-state.json、stdout/stderr.log）的统一归属，独立于配置文件位置——
+	// 配置是用户输入，状态目录是程序输出，按平台规范分家。
+	logRoot := filepath.Join(absoluteStateDir, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		slog.Error("create state dir failed", "dir", logRoot, "error", err)
 		os.Exit(1)
 	}
 	serviceConfig, err := config.Load(absoluteConfigPath)
@@ -121,6 +145,7 @@ func main() {
 		slog.Error("load config failed", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("paths resolved", "config", absoluteConfigPath, "state_dir", absoluteStateDir)
 	runtimeConfigPtr.Store(&runtimeConfigState{
 		cfg: serviceConfig, loadedAt: time.Now(), fileMtime: configFileMtime(absoluteConfigPath),
 	})
@@ -148,7 +173,7 @@ func main() {
 	var devinAdapter *devin.Adapter
 	var tokenFunc func() string
 	if serviceConfig.Devin.Token != "" {
-		configured, createErr := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath))
+		configured, createErr := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath, logRoot))
 		if createErr != nil {
 			slog.Error("create devin adapter failed", "error", createErr)
 			os.Exit(1)
@@ -161,7 +186,6 @@ func main() {
 	}
 	// 管理器总是创建：enabled 只控制新请求是否写目录，历史查询、
 	// 用量回放、清理与配额采样不随开关停掉，面板也可运行时热切换。
-	logRoot := filepath.Join(filepath.Dir(absoluteConfigPath), "logs")
 	debugManager := debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
 		Days:          *serviceConfig.Debug.RetentionDays,
 		MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
@@ -200,7 +224,7 @@ func main() {
 		panel.SetAliasesFunc(devinAdapter.Aliases)
 		panel.SetConfigOps(dashboard.ConfigOps{
 			Reload: func() (*dashboard.ConfigReloadReport, error) {
-				return reloadRuntimeConfig(absoluteConfigPath, devinAdapter, application, panel, debugManager)
+				return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager)
 			},
 			Current: func() map[string]any {
 				return runtimeConfigView(absoluteConfigPath)
@@ -230,7 +254,8 @@ func main() {
 
 // devinConfigFrom 把启动配置映射为 Devin adapter 配置；启动与配置
 // 热重载共用同一映射，保证 ApplyConfig 看到的字段口径与 New 一致。
-func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Config {
+// logRoot 决定 gate-state.json 的落点（沿用 logs/ 内的既有位置）。
+func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) devin.Config {
 	return devin.Config{
 		BaseURL:       serviceConfig.Devin.BaseURL,
 		Token:         serviceConfig.Devin.Token,
@@ -249,7 +274,7 @@ func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Confi
 			WindowOffset: time.Duration(serviceConfig.Devin.GateWindowOffsetSeconds) * time.Second,
 			WindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
 		},
-		GateStatePath: filepath.Join(filepath.Dir(configPath), "logs", "gate-state.json"),
+		GateStatePath: filepath.Join(logRoot, "gate-state.json"),
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 		TokenSource: func() string {
@@ -267,7 +292,7 @@ func devinConfigFrom(serviceConfig config.Config, configPath string) devin.Confi
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // transport 固化字段（base_url/proxy/force_http1）与监听参数进
 // requires_restart，调用方据此知道哪些改动仍在 pending。
-func reloadRuntimeConfig(configPath string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager) (*dashboard.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager) (*dashboard.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -286,7 +311,7 @@ func reloadRuntimeConfig(configPath string, devinAdapter *devin.Adapter, applica
 		return nil, errors.New("devin.token, devin.model and devin.base_url must be non-empty while the adapter is live")
 	}
 	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath))
+	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
 	report.Applied = append(report.Applied, applied...)
 	report.RequiresRestart = append(report.RequiresRestart, cold...)
 	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，

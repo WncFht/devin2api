@@ -132,17 +132,17 @@ Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST
 部署两跳，两机各一个实例：
 
 - 生产实例在 Mac（fht-mba，archbox 经 tailscale 免密 ssh 可达）：从 archbox 用 `scripts/deploy-remote.sh` 一键驱动——默认 worktree 模式把本地工作树（含未提交改动）推到 Mac staging 构建部署；`--ref <ref>`（默认 origin/main）部署已推送状态、`--release <tag|latest>` 装预编译资产、`--check` 并排对比两实例版本。Mac 上手动路径仍是 pull 后 `scripts/deploy.sh`；launchd `com.fanghaotian.devin-2api` :3003。
-- 验证实例在 archbox：`scripts/deploy-linux.sh` 维护的 systemd --user 服务（运行目录 `~/.local/share/devin-2api`），在 linux/amd64 上验行为与排障——两侧 deploy 脚本共享 `scripts/lib-deploy.sh`，语义一致。
+- 验证实例在 archbox：`scripts/deploy-linux.sh` 维护的 systemd --user 服务（XDG 布局：二进制 `~/.local/bin`、config `~/.config/devin-2api`、状态与 logs `~/.local/state/devin-2api`），在 linux/amd64 上验行为与排障——两侧 deploy 脚本共享 `scripts/lib-deploy.sh`，语义一致。
 
 ## 部署（单实例约定）
 
 本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003（config 的 `server.listen`，作者本机取值），plist 与原理见 docs/deployment.md。
 
-- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入运行目录并同步 config → reuseport 交接进程预接管 → `kickstart -k` → 托管新实例拉起后退交接 → healthz 校验版本）。
-- 运行目录是 `~/Library/Application Support/devin-2api/`（二进制+config.yaml+logs），不是仓库：launchd 子进程对 ~/Desktop 的 open 会被 TCC 授权判定永久挂起。仓库 `logs/` 是指向运行目录的符号链接，排障路径照旧。
+- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/Library/Application Support/devin-2api/` → reuseport 交接进程预接管 → `kickstart -k` → 托管新实例拉起后退交接 → healthz 校验版本）。
+- macOS 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 与 logs/ 在 `~/Library/Application Support/devin-2api/`（TCC 保护目录之外——launchd 子进程对 ~/Desktop 的 open 会被授权判定永久挂起）。仓库 `logs/` 是指向该目录的符号链接，排障路径照旧。
 - **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
 - 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=330` 覆盖 300s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。
 - 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 
-其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，运行目录 `${XDG_DATA_HOME:-~/.local/share}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。
+其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，XDG 三目录：bin `~/.local/bin`、config `${XDG_CONFIG_HOME:-~/.config}/devin-2api`、state `${XDG_STATE_HOME:-~/.local/state}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空；exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，config 在 `%APPDATA%\devin-2api`，state 在 `%LOCALAPPDATA%\devin-2api`）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。二进制自身的路径解析链：`-config` > `DEVIN2API_CONFIG` > `./config.yaml` > 平台默认；`-state-dir` > `DEVIN2API_STATE_DIR` > 平台默认。
