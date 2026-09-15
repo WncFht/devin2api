@@ -77,3 +77,42 @@ func TestLoadEnablesDebugLoggingExplicitly(t *testing.T) {
 		t.Fatal("Debug.Enabled = false, want explicitly enabled")
 	}
 }
+
+// TestNormalizeAliases 钉住别名归一化契约：trim、链式展开、合法 "*" 兜底键；
+// 空键/空目标/"*" 目标/大小写重复/环都在加载期报错而不是运行时静默漂移。
+func TestNormalizeAliases(t *testing.T) {
+	valid := map[string]string{
+		" swe-2 ": "swe-2-max",
+		"a":       "b",
+		"b":       "real-uid",
+		"*":       "glm-5-2",
+	}
+	got, err := normalizeAliases(valid)
+	if err != nil {
+		t.Fatalf("normalizeAliases() error = %v", err)
+	}
+	want := map[string]string{"swe-2": "swe-2-max", "a": "real-uid", "b": "real-uid", "*": "glm-5-2"}
+	if len(got) != len(want) {
+		t.Fatalf("normalized = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("normalized[%q] = %q, want %q (full map %v)", k, got[k], v, got)
+		}
+	}
+
+	invalid := []map[string]string{
+		{"  ": "x"},                    // 空键
+		{"a": "  "},                    // 空目标
+		{"a": "*"},                     // "*" 不能作目标
+		{"A": "x", "a": "y"},           // 大小写重复
+		{"a": "b", "b": "a"},           // 环
+		{"a": "a"},                     // 自环
+		{"a": "b", "b": "c", "c": "b"}, // 中间环
+	}
+	for i, m := range invalid {
+		if _, err := normalizeAliases(m); err == nil {
+			t.Fatalf("case %d: normalizeAliases(%v) error = nil, want rejection", i, m)
+		}
+	}
+}

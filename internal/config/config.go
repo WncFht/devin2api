@@ -177,11 +177,67 @@ func (config *Config) Validate() error {
 		minutes := 5
 		config.Debug.QuotaIntervalMinutes = &minutes
 	}
+	aliases, err := normalizeAliases(config.Devin.Aliases)
+	if err != nil {
+		return err
+	}
+	config.Devin.Aliases = aliases
 	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
 	if strings.TrimSpace(config.Devin.Token) == "" {
 		config.Devin.Token = ResolveDevinToken()
 	}
 	return nil
+}
+
+// normalizeAliases 归一化 devin.aliases：键与目标去空白，拒绝空键、
+// 空目标、把 "*" 当目标用（"*" 只作兜底键）、trim 后重复键与仅大小写
+// 不同的键（折叠匹配要求无歧义）；随后把链式映射展开成最终目标并检出
+// 环（a→b、b→c 归一成 a→c、b→c；a→a 按环报错）。展开发生在加载期，
+// 运行时按 精确 → 折叠 → "*" 顺序单跳查找即可。
+func normalizeAliases(aliases map[string]string) (map[string]string, error) {
+	if len(aliases) == 0 {
+		return aliases, nil
+	}
+	normalized := make(map[string]string, len(aliases))
+	folded := make(map[string]string, len(aliases))
+	for key, target := range aliases {
+		key = strings.TrimSpace(key)
+		target = strings.TrimSpace(target)
+		if key == "" {
+			return nil, errors.New(`devin.aliases contains an empty key`)
+		}
+		if target == "" {
+			return nil, fmt.Errorf("devin.aliases[%q] has an empty target", key)
+		}
+		if target == "*" {
+			return nil, fmt.Errorf("devin.aliases[%q]: \"*\" is only valid as a catch-all key, not a target", key)
+		}
+		if prev, ok := normalized[key]; ok && prev != target {
+			return nil, fmt.Errorf("devin.aliases: key %q maps to both %q and %q", key, prev, target)
+		}
+		if prev, ok := folded[strings.ToLower(key)]; ok && prev != key {
+			return nil, fmt.Errorf("devin.aliases: keys %q and %q differ only by case", prev, key)
+		}
+		normalized[key] = target
+		folded[strings.ToLower(key)] = key
+	}
+	for key := range normalized {
+		seen := map[string]bool{key: true}
+		target := normalized[key]
+		for {
+			next, ok := normalized[target]
+			if !ok {
+				break
+			}
+			if seen[target] {
+				return nil, fmt.Errorf("devin.aliases: cycle detected through %q", key)
+			}
+			seen[target] = true
+			target = next
+		}
+		normalized[key] = target
+	}
+	return normalized, nil
 }
 
 // devinCredentialsTokenPattern 匹配 credentials.toml 中的 windsurf_api_key。
