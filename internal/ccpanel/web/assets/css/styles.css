@@ -2507,6 +2507,12 @@ body {
     --topbar-offset: 144px;
   }
 
+  /* 窄屏下 topbar-right 超出视口：版本徽章与 GitHub 图标让位——
+     仓库入口在 brand 链接上已有，版本号在旧版面板页脚仍可见。 */
+  .version-group {
+    display: none;
+  }
+
   .grid-cols-4,
   .grid-cols-3,
   .grid-cols-2 {
@@ -3047,6 +3053,7 @@ body {
   font-weight: var(--font-semibold);
   color: var(--neutral-800);
   border-bottom: 2px solid var(--neutral-200);
+  white-space: nowrap;
 }
 
 .modern-table td {
@@ -6751,7 +6758,8 @@ body.web-role-api-token .filter-group--auth-token {
   }
 
   .topnav {
-    justify-content: center;
+    /* safe center：内容超宽时回退为 start 对齐，避免居中溢出把最左导航项裁掉 */
+    justify-content: safe center;
     overflow-x: auto;
     scrollbar-width: thin;
   }

@@ -362,7 +362,7 @@
     }
 
     .logs-filter-control--token {
-      max-width: 100px;
+      max-width: 124px;
     }
 
     .logs-filter-controls .filter-control--model {
@@ -837,17 +837,17 @@
       background: var(--surface-bg-muted);
     }
 
-    /* 固定宽度列 */
-    .logs-table th:nth-child(1),
-    .logs-table td:nth-child(1) {
+    /* 固定宽度列一律按列类名选择，不用 nth-child：ccload 原版按渠道列还在时的
+       位置编号，移植后列序前移导致 nth-child(7) 的 60px 钳错位打到 timing 列，
+       表头「首字/耗时(秒)」被压出单元格。 */
+    .logs-table .logs-col-time {
       width: 110px;
       /* 时间: MM-DD HH:mm:ss */
       min-width: 110px;
       max-width: 110px;
     }
 
-    .logs-table th:nth-child(2),
-    .logs-table td:nth-child(2) {
+    .logs-table .logs-col-ip {
       width: 110px;
       /* IP: xxx.xxx.*.* */
       min-width: 110px;
@@ -855,8 +855,7 @@
       text-align: center;
     }
 
-    .logs-table th:nth-child(7),
-    .logs-table td:nth-child(7) {
+    .logs-table .logs-col-status {
       width: 60px;
       /* 状态码: 200/403/500 */
       min-width: 60px;
@@ -864,17 +863,15 @@
       text-align: center;
     }
 
-    .logs-table th:nth-child(14),
-    .logs-table td:nth-child(14) {
-      width: 70px;
-      /* 缓存命中 */
-      min-width: 70px;
-      max-width: 70px;
+    .logs-table .logs-col-cache-util {
+      width: 78px;
+      /* 缓存命中（en 'Cache Hit' 需 ~74px） */
+      min-width: 78px;
+      max-width: 78px;
       padding-right: var(--space-2);
     }
 
-    .logs-table th:nth-child(16),
-    .logs-table td:nth-child(16) {
+    .logs-table .logs-col-message {
       min-width: 120px;
     }
 
