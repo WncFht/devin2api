@@ -182,9 +182,13 @@
       }
     }
 
-    async function loadData() {
+    let trendLoadInFlight = false;
+
+    async function loadData(skipLoading) {
+      if (trendLoadInFlight) return;
+      trendLoadInFlight = true;
       try {
-        renderTrendLoading();
+        if (!skipLoading) renderTrendLoading();
 
         // 从 DOM 元素读取当前选择的时间范围和模型
         const rangeSelect = document.getElementById('f_hours');
@@ -257,7 +261,10 @@
       } catch (error) {
         console.error('加载趋势数据失败:', error);
         try { if (window.showError) window.showError(t('trend.loadDataFailed')); } catch(_){}
-        renderTrendError();
+        // 已有数据时保留旧图，只提示错误；首载失败才切错误视图
+        if (!window.trendData || !window.trendData.length) renderTrendError();
+      } finally {
+        trendLoadInFlight = false;
       }
     }
 
@@ -1156,7 +1163,7 @@
                 // TPS：K/M 缩写 + /s
                 if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M/s';
                 if (value >= 1000) return (value / 1000).toFixed(1) + 'K/s';
-                return value + '/s';
+                return value.toFixed(1) + '/s';
               } else if (trendType === 'cache_hit') {
                 // 缓存命中率：百分比
                 return Math.round(value) + '%';
@@ -1686,7 +1693,7 @@ function shouldShowZoom(points, hours, trendType) {
       const sec = currentTrendRefreshSec();
       trendRefreshTimer = setInterval(() => {
         if (document.hidden) return;
-        loadData();
+        loadData(true);
         loadWarmStatus();
       }, sec * 1000);
     }
