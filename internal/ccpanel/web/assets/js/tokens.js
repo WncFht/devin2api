@@ -1,6 +1,7 @@
     const t = window.t;
     const API_BASE = '/admin';
     let allTokens = [];
+    let masterKey = null;    // config auth.api_key 的只读投影 {configured, key_hash}
     let isToday = true;      // 是否为本日（本日才显示最近一分钟）
 
     // 当前选中的时间范围(默认为本日)
@@ -226,13 +227,43 @@
 
         const data = await fetchDataWithAuth(url);
         allTokens = (data && data.tokens) || [];
+        masterKey = (data && data.master_key) || null;
         isToday = !!(data && data.is_today);
+        renderMasterKey();
         renderTokens();
       } catch (error) {
         
         console.error('Failed to load tokens:', error);
         window.showNotification(t('tokens.msg.loadFailed') + ': ' + error.message, 'error');
       }
+    }
+
+    // 主密钥卡：把 config auth.api_key 显示成与令牌同级的凭据条目——
+    // 「二选一」不再是隐藏语义，页面上能直接看到它配没配、哈希是多少
+    // （与 index.jsonl 的 key_hash 对照）、以及它走 config 热重载而非本页编辑。
+    function renderMasterKey() {
+      const slot = document.getElementById('master-key-card');
+      if (!slot) return;
+      if (!masterKey) {
+        slot.innerHTML = '';
+        return;
+      }
+      const configured = !!masterKey.configured;
+      // 主密钥与令牌全空 = /v1 开放模式（authenticate 不校验任何凭据），
+      // 这是安全相关状态，必须显式亮出来而不是藏进「二选一」的话术里。
+      const openMode = !configured && allTokens.length === 0;
+      const status = configured
+        ? `<span class="master-key-status is-on">${t('tokens.master.configured')}</span><code class="master-key-hash">key_hash ${escapeHtml(masterKey.key_hash || '')}</code>`
+        : `<span class="master-key-status is-off">${t('tokens.master.notConfigured')}</span>`;
+      slot.innerHTML = `
+        <div class="glass-card master-key-card${openMode ? ' master-key-card--warn' : ''}">
+          <div class="master-key-row">
+            <span class="master-key-badge">${t('tokens.master.badge')}</span>
+            <span class="master-key-title">${t('tokens.master.title')}</span>
+            ${status}
+          </div>
+          <p class="master-key-desc">${openMode ? t('tokens.master.openWarning') : t('tokens.master.desc')}</p>
+        </div>`;
     }
 
     function renderTokens() {

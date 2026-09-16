@@ -934,6 +934,13 @@ window.I18N_LOCALES['en'] = {
   // Empty state
   'tokens.emptyTitle': 'No API Tokens',
   'tokens.emptyDesc': 'Click "Create Token" button to generate your first API access token',
+  // Master key card (read-only projection of config auth.api_key)
+  'tokens.master.badge': 'BUILT-IN',
+  'tokens.master.title': 'Master key (auth.api_key)',
+  'tokens.master.configured': 'Configured',
+  'tokens.master.notConfigured': 'Not configured',
+  'tokens.master.desc': 'Calls /v1 like the tokens below but bypasses model allowlists and quotas; managed in config.yaml, applied on hot reload',
+  'tokens.master.openWarning': 'No master key and no tokens below — /v1 currently accepts any credential (open mode)',
   // Create modal
   'tokens.createModalTitle': 'Create API Token',
   'tokens.descriptionLabel': 'Description *',

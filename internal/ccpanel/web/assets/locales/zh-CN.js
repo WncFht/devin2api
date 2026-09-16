@@ -934,6 +934,13 @@ window.I18N_LOCALES['zh-CN'] = {
   // 空状态
   'tokens.emptyTitle': '暂无API令牌',
   'tokens.emptyDesc': '点击"创建令牌"按钮,生成第一个API访问令牌',
+  // 主密钥卡（config auth.api_key 的只读投影）
+  'tokens.master.badge': '内置',
+  'tokens.master.title': '主密钥（auth.api_key）',
+  'tokens.master.configured': '已配置',
+  'tokens.master.notConfigured': '未配置',
+  'tokens.master.desc': '与下方令牌一样能调 /v1，但不受白名单/限额约束；在 config.yaml 里改，热重载即生效',
+  'tokens.master.openWarning': '主密钥未配置且下方没有令牌——/v1 当前不校验任何凭据（开放模式），谁拿到地址谁就能用',
   // 创建对话框
   'tokens.createModalTitle': '创建API令牌',
   'tokens.descriptionLabel': '描述 *',
