@@ -404,10 +404,15 @@ func (encoder *StreamEncoder) startToolCall(event llm.ResponseEvent) ([]SSEEvent
 		// item id 用 ws_+调用 id：回放时剥前缀即还原出调用 id，
 		// call/result 对的 wire 配对随历史自然保持（cliproxyapi 同例）。
 		item.id = "ws_" + item.callID
-		return []SSEEvent{encoder.emit("response.output_item.added", map[string]any{
-			"output_index": item.outputIndex,
-			"item":         map[string]any{"id": item.id, "type": "web_search_call", "status": "in_progress"},
-		})}, nil
+		return []SSEEvent{
+			encoder.emit("response.output_item.added", map[string]any{
+				"output_index": item.outputIndex,
+				"item":         map[string]any{"id": item.id, "type": "web_search_call", "status": "in_progress"},
+			}),
+			encoder.emit("response.web_search_call.in_progress", map[string]any{
+				"item_id": item.id, "output_index": item.outputIndex,
+			}),
+		}, nil
 	}
 	item.name = encoder.restoreToolName(event.ToolName)
 	addedItem := map[string]any{
@@ -460,8 +465,11 @@ func (encoder *StreamEncoder) endToolCall(event llm.ResponseEvent) ([]SSEEvent, 
 	if item.kind == "web_search_call" {
 		// 完整参数存进 value 供收尾时还原 action.query；此时执行尚未发生，
 		// 过早关项会让 done() 的「无悬空 item」校验抓到未完结的托管调用。
+		// 参数齐全即进入执行——对齐真实流发 searching 状态迁移。
 		item.value.WriteString(arguments)
-		return nil, nil
+		return []SSEEvent{encoder.emit("response.web_search_call.searching", map[string]any{
+			"item_id": item.id, "output_index": item.outputIndex,
+		})}, nil
 	}
 	completedItem := map[string]any{
 		"id": item.id, "type": item.kind, "status": "completed",

@@ -426,3 +426,55 @@ func TestStreamEncoderCustomToolCall(t *testing.T) {
 		t.Fatal("custom_tool_call must not carry arguments field")
 	}
 }
+
+// TestStreamEncoderWebSearchCallLifecycle 钉住托管搜索 item 的完整状态迁移：
+// added(in_progress) → in_progress → searching → completed → done，
+// 与真实 OpenAI 流一致；参数 delta 被吞掉，query 随收尾的 action 下发。
+func TestStreamEncoderWebSearchCallLifecycle(t *testing.T) {
+	encoder := NewStreamEncoder("gpt-test", nil)
+	call := llm.ToolCall{ID: "call-9", Name: "web_search", Arguments: json.RawMessage(`{"query":"golang"}`), Server: true}
+	result := llm.ServerToolResult{
+		ToolCallID: "call-9", ToolName: "web_search",
+		Text: "go1.27", Results: []llm.WebSearchResult{{Title: "Go", URL: "https://go.dev", Summary: "site"}},
+	}
+	partial := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonPending}
+	final := &llm.AssistantMessage{Content: []llm.Content{call, result}, StopReason: llm.StopReasonStop}
+	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
+		{Type: llm.ResponseEventStart, Partial: &llm.AssistantMessage{StopReason: llm.StopReasonPending}},
+		{Type: llm.ResponseEventToolCallStart, ContentIndex: 0, ToolCallID: "call-9", ToolName: "web_search", Partial: partial},
+		{Type: llm.ResponseEventToolCallDelta, ContentIndex: 0, ToolCallID: "call-9", Delta: `{"query":`, Partial: partial},
+		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 0, ToolCall: &call, Partial: partial},
+		{Type: llm.ResponseEventServerToolResult, ContentIndex: 1, ServerResult: &result, Partial: &llm.AssistantMessage{Content: []llm.Content{call, result}}},
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
+	})
+	wantNames := []string{
+		"response.created", "response.in_progress",
+		"response.output_item.added", "response.web_search_call.in_progress",
+		"response.web_search_call.searching", "response.web_search_call.completed",
+		"response.output_item.done", "response.completed",
+	}
+	assertEventNames(t, encoded, wantNames)
+	assertSequenceNumbers(t, encoded)
+
+	added := decodeEventData(t, encoded[2])
+	if got := nestedString(t, added, "item", "id"); got != "ws_call-9" {
+		t.Fatalf("item id = %q, want ws_call-9", got)
+	}
+	done := decodeEventData(t, encoded[6])
+	item := done["item"].(map[string]any)
+	if item["status"] != "completed" {
+		t.Fatalf("ws item status = %v", item["status"])
+	}
+	action := item["action"].(map[string]any)
+	if action["type"] != "search" || action["query"] != "golang" {
+		t.Fatalf("action = %#v", action)
+	}
+	results := item["results"].([]any)
+	if len(results) != 1 || results[0].(map[string]any)["url"] != "https://go.dev" {
+		t.Fatalf("results = %#v", results)
+	}
+	output := decodeEventData(t, encoded[7])["response"].(map[string]any)["output"].([]any)
+	if output[0].(map[string]any)["type"] != "web_search_call" {
+		t.Fatalf("final output = %#v", output)
+	}
+}
