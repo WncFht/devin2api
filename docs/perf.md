@@ -45,6 +45,8 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 
 落盘位置：`logs/<dir>/meta.json`（单请求详情）与 `logs/index.jsonl` 的同名可选字段（批量 `jq` 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
 
+`connect` 段另带连接画像：`upstream_conn_reused`/`upstream_conn_idle_ms`（index 侧 `conn_reused`/`conn_idle_ms`）记录成功建流那次发送是否复用了 idle 连接（httptrace `GotConn`）。`connect` 偏高时它是分水岭：`reused=true` 说明大头在上游响应头延迟（上游排队/思考，本地可优化空间小），`reused=false` 则是 TCP+TLS 握手成本（本地保温/复用策略的覆盖问题）。
+
 读法：本机桩（interval=0）下 decode/transform 是主项属正常——桩没有网络与思考延迟，代理自身开销被放大显示；真实上游下 `connect`+`upstream_ttft` 通常占绝对大头，此时分解的价值是确认 egress/transform 没有异常回退。
 
 ![延迟分解各段耗时](images/perf-latency-segments.png)

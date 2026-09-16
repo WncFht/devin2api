@@ -101,14 +101,14 @@
 
 # 服务排障（对运行中的实例）
 
-本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值），非流式错误体还带 `stage`（写出错误的 HTTP 处理层）。失败的首因分层 stage 以 `error.json`/`index.jsonl` 为准：`devin_transport` 是连接被截断类传输故障（含 connect.Error 包装的 EOF/帧截断），`devin_connect` 是上游语义拒绝（参数/权限/限流），`rate_gate` 是本地速率闸门快败（未触达上游，含续试重打被闩拦），`request_build` 是本地请求投影失败（tool_choice 指空等参数校验，未触达上游）；客户端断连记 `client_disconnected`，响应未提交时 status 记 499。管线前拒绝（鉴权 401 / 并发 429 / 排空 503 / WS 准入 / 读体失败 `http_read`）不产生调试目录、不进 index.jsonl：查 `/panel/api/stats` 的 `http.rejects`（分原因计数 + 最近事件环），跨重启痕迹在 `stderr.log` 的 `request rejected` 行（reason 同源）。
+本服务为 agent 调试设计：每个 `/v1/*` 响应带 `X-Request-Id` 头，值即本次请求的调试目录名（`logs/<dir>/`）；错误响应体与流式错误事件另含 `debug_ref`（同值），非流式错误体还带 `stage`（写出错误的 HTTP 处理层）。失败的首因分层 stage 以 `error.json`/`index.jsonl` 为准：`devin_transport` 是连接被截断类传输故障（含 connect.Error 包装的 EOF/帧截断），`devin_connect` 是上游语义拒绝（参数/权限/限流），`rate_gate` 是本地速率闸门快败（未触达上游，含续试重打被闩拦），`request_build` 是本地请求投影失败（tool_choice 指空等参数校验，未触达上游）；客户端断连记 `client_disconnected`，响应未提交时 status 记 499。stderr `request failed` 行的 `stage=` 是捕获点（哪个错误出口写出的响应）、`error_stage=` 才是归原点（与 index 同名值）——闸门拒绝常在 `provider_stream` 出口被捕获，两层都写在同一行里；本地闸门快败只记 Info 级（预期整形，非故障）。管线前拒绝（鉴权 401 / 并发 429 / 排空 503 / WS 准入 / 读体失败 `http_read`）不产生调试目录、不进 index.jsonl：查 `/panel/api/stats` 的 `http.rejects`（分原因计数 + 最近事件环），跨重启痕迹在 `stderr.log` 的 `request rejected` 行（reason 同源）。
 
 工作流：
 
 1. 失败/可疑请求 → 取响应头 `X-Request-Id` 或错误体 `error.debug_ref` 得到 `<dir>`。
 2. 读 `logs/<dir>/meta.json`（结果、三段模型、五段延迟分解 `request_ready/upstream_sent/upstream_open/first_upstream/first_client_ms`、token、upstream_request_id）与 `error.json`（首个失败点）。延迟分解字段的段语义见 `docs/perf.md`；`repairs` 是投影/sanitize 修复计数——CC 流量有 ~15 hits/req 的基线，异常信号是命中规则 id 集合的漂移而非总数涨落。
 3. 需要细节再按序读阶段文件：`01-http-request.json`（客户端原文）→ `02-request-messages.json`（中间投影）→ `03-devin-request.json`（上游 wire）→ `04-devin-response.jsonl`（上游原始帧）→ `05/06`（内部事件 / 下发客户端的 SSE）。上游重试（token 自愈/空响应/transport 重开）时每次续试写 `03-devin-request.attemptN.json`，并在 04 中插入 `retry_attempt` 标记行分隔各次尝试的原始帧；次数与原因另落 `index.jsonl` 的 `retries` 与 meta.json 的 `retry_attempts`。
-4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`、`client_request_id`、key 哈希、全部 token 分类、重发次数 `retries`），`grep` 即可；更早历史被 retention 清理后索引仍在。
+4. 批量检索用 `logs/index.jsonl`（每完成请求一行摘要，含 `error_stage`/`error_message`（终结性失败才落；目录被保留策略淘汰后仍可归因）、`conn_reused`/`conn_idle_ms`（成功建流的连接画像）、`client_request_id`、key 哈希、全部 token 分类、重发次数 `retries`），`grep` 即可；更早历史被 retention 清理后索引仍在。
 5. 进程级信号看 `logs/stderr.log`（slog 结构化行，每请求一行摘要 + 拒绝/清理告警）；面板数据可用 `curl -H 'Authorization: Bearer <dashboard.password>' localhost:<port>/panel/api/*` 程序化访问，`/panel/api` 返回端点目录。
 
 聚合与生命周期：
