@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -45,6 +46,8 @@ type Handler struct {
 	// masterKeyFunc 返回当前生效的 auth.api_key（热重载后为新值），
 	// 探活鉴权与令牌页主密钥卡共用。
 	masterKeyFunc func() string
+	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
+	warmStats func() devin.WarmStats
 
 	versionMu sync.RWMutex
 	version   string
@@ -125,6 +128,11 @@ func (h *Handler) SetProbeHandler(handler http.Handler) {
 // SetMasterKeyFunc 注入 auth.api_key 读取函数。
 func (h *Handler) SetMasterKeyFunc(fn func() string) {
 	h.masterKeyFunc = fn
+}
+
+// SetWarmStats 注入前缀保温簿记读取函数（/admin/runtime-metrics 的 warm 组）。
+func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
+	h.warmStats = fn
 }
 
 // Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为

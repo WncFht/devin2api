@@ -76,6 +76,8 @@ type Handler struct {
 	version string
 	// gateStats 返回速率闸门快照；nil 时 stats 不输出 gate 段。
 	gateStats func() devin.GateStats
+	// warmStats 返回前缀保温簿记快照；nil 时 stats 不输出 warm 段。
+	warmStats func() devin.WarmStats
 	// aliasesFunc 返回当前生效的模型别名映射；nil 时 status 不做缺席校验。
 	aliasesFunc func() map[string]string
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
@@ -150,6 +152,11 @@ func (h *Handler) SetGateStats(fn func() devin.GateStats) {
 	h.gateStats = fn
 }
 
+// SetWarmStats 注入前缀保温快照源。
+func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
+	h.warmStats = fn
+}
+
 // SetAliasesFunc 注入当前别名映射源，供 status 端点做目录缺席校验。
 func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
 	h.aliasesFunc = fn
@@ -214,6 +221,9 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.gateStats != nil {
 		payload["gate"] = h.gateStats()
+	}
+	if h.warmStats != nil {
+		payload["warm"] = h.warmStats()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

@@ -324,5 +324,29 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 			"persistence_failed_entries": stats["io_errors"],
 		}
 	}
+	// warm 组投前缀保温簿记；hit_rate 由 hits/(hits+misses) 派生，
+	// cr=0 的 ping 不计入 misses（簿记侧口径），故命中率只反映真实命中。
+	if h.warmStats != nil {
+		warm := h.warmStats()
+		pingTotal := warm.PingHits + warm.PingMisses
+		hitRate := 0.0
+		if pingTotal > 0 {
+			hitRate = float64(warm.PingHits) / float64(pingTotal) * 100
+		}
+		data["warm"] = map[string]any{
+			"enabled":        warm.Enabled,
+			"entries":        warm.Entries,
+			"promoted":       warm.Promoted,
+			"suspects":       warm.Suspects,
+			"retained_bytes": warm.RetainedBytes,
+			"pings_sent":     warm.PingsSent,
+			"ping_hits":      warm.PingHits,
+			"ping_misses":    warm.PingMisses,
+			"ping_hit_rate":  hitRate,
+			"ping_skips":     warm.PingSkips,
+			"ping_errors":    warm.PingErrors,
+			"retired":        warm.Retired,
+		}
+	}
 	respondOK(w, data)
 }

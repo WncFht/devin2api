@@ -233,6 +233,7 @@ func main() {
 	}
 	panel.SetVersion(resolved)
 	panel.SetGateStats(devinAdapter.GateStats)
+	panel.SetWarmStats(devinAdapter.WarmStats)
 	panel.SetAliasesFunc(devinAdapter.Aliases)
 	panel.SetConfigOps(dashboard.ConfigOps{
 		Reload: func() (*dashboard.ConfigReloadReport, error) {
@@ -250,6 +251,7 @@ func main() {
 	ccPanel.SetVersion(resolved)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
+	ccPanel.SetWarmStats(devinAdapter.WarmStats)
 	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
