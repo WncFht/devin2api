@@ -169,4 +169,6 @@ func (h *Handler) Register(mux interface {
 	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
 	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))
+	mux.Get("/admin/quota", h.withAuth(h.adminQuota))
+	mux.Get("/admin/status", h.withAuth(h.adminStatus))
 }

@@ -206,18 +206,24 @@ func forecast(points []quotaPoint, lookback time.Duration, pick func(quotaPoint)
 	return out
 }
 
+// QuotaReport 返回配额历史曲线与按最近窗口燃烧速率外推的预测；
+// 旧面板 /panel/api/quota 与移植面板 /admin/quota 共用。
+func (h *Handler) QuotaReport() map[string]any {
+	points := h.readQuotaHistory()
+	return map[string]any{
+		"points": points,
+		"daily":  forecast(points, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
+		"weekly": forecast(points, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
+	}
+}
+
 // apiQuota 返回配额历史与燃烧速率预测。
 func (h *Handler) apiQuota(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	points := h.readQuotaHistory()
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"points": points,
-		"daily":  forecast(points, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
-		"weekly": forecast(points, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
-	})
+	_ = json.NewEncoder(w).Encode(h.QuotaReport())
 }
 
 // floatAny 把 fetchUserStatus 产出的宽松数值统一成 float64。

@@ -38,6 +38,14 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
 	defer cancel()
 
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(h.StatusReport(ctx))
+}
+
+// StatusReport 六路并行聚合上游状态：账户/plan/容量/IDE 状态/模型状态/
+// 供应商/别名缺席校验。单路失败只落 *_error 键，不拖垮整体。
+// 旧面板 /panel/api/status 与移植面板 /admin/status 共用本方法。
+func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 	result := map[string]any{}
 	var resultMu sync.Mutex
 
@@ -180,8 +188,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result)
+	return result
 }
 
 // fetchUserStatus 调用官方 seat_management JSON Connect 路径。
