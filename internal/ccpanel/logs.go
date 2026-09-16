@@ -235,12 +235,47 @@ func parseRequestFilter(r *http.Request) debuglog.RequestFilter {
 	return filter
 }
 
+// requestFilter 是 logs/export/matrix 三个列表类端点共用的筛选解析：
+// 旧面板词汇（q/status 表达式/status_class/result/model/error_stage/
+// since/until）与 ccLoad 词汇（range/start_time/end_time/status_code）
+// 并存。时间窗逐侧落定：显式 since/until(RFC3339) 优先——matrix 下钻
+// 钉历史窗口靠它；缺席侧回落到 resolveRange（range 契约，默认 today）。
+func (h *Handler) requestFilter(r *http.Request) debuglog.RequestFilter {
+	filter := parseRequestFilter(r)
+	since, until, _ := resolveRange(r, time.Now())
+	if filter.Since.IsZero() {
+		filter.Since = since
+	}
+	if filter.Until.IsZero() {
+		filter.Until = until
+	}
+	if filter.Status == "" {
+		if code, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("status_code"))); err == nil && code > 0 {
+			filter.Status = strconv.Itoa(code)
+		}
+	}
+	return filter
+}
+
+// respondLogEntries 写日志列表信封：data=行数组、count=窗内命中总数、
+// has_more=索引尾部窗外仍有更早历史；另附带 rejects 管线前拒绝环
+// （形状同 runtime-metrics 的 http.rejects）——拒绝不进索引，列表页靠
+// 它提示「表里看不到 401/429」。
+func (h *Handler) respondLogEntries(w http.ResponseWriter, entries []logEntry, total int, hasMore bool) {
+	var rejects any
+	if h.metrics != nil {
+		rejects = h.metrics.Rejects()
+	}
+	writeEnvelope(w, http.StatusOK, apiResponse{
+		Success: true, Data: entries, Count: total, HasMore: hasMore, Rejects: rejects,
+	})
+}
+
 // dashboardLogs 实现 ccLoad 的 /dashboard|/admin/logs（HandleErrors）：
 // data=日志行数组（新在前），count=窗口内命中总数；limit 默认 200、上限 1000。
 // count 以 index.jsonl 尾部读取窗（≈4MB/万行）为准——窗口外仍有历史时
 // （ListRequests.HasMore）count 是下界，与 ccLoad 的 SQL COUNT(*) 口径有偏差。
 func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
-	since, until, _ := resolveRange(r, time.Now())
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 {
@@ -257,19 +292,10 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	// token 维度由 logScope 判空或收敛成 key_hash 比较。
 	kh, excluded := h.logScope(r)
 	if h.debug == nil || excluded {
-		respondOKCount(w, []logEntry{}, 0)
+		h.respondLogEntries(w, []logEntry{}, 0, false)
 		return
 	}
-	filter := parseRequestFilter(r)
-	// 时间窗以 resolveRange（range/start/end 契约）为准——它带默认窗，
-	// 查询串里的 since/until 留给筛选语义不覆盖列表窗口。
-	filter.Since, filter.Until = since, until
-	if filter.Status == "" {
-		if code, err := strconv.Atoi(strings.TrimSpace(q.Get("status_code"))); err == nil && code > 0 {
-			filter.Status = strconv.Itoa(code)
-		}
-	}
-	result := h.debug.ListRequests(-1, filter)
+	result := h.debug.ListRequests(-1, h.requestFilter(r))
 
 	api := strings.TrimSpace(q.Get("api"))
 	upstream := strings.ToLower(strings.TrimSpace(q.Get("upstream_protocol")))
@@ -314,7 +340,7 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		total++
 	}
-	respondOKCount(w, entries, total)
+	h.respondLogEntries(w, entries, total, result.HasMore)
 }
 
 // dashboardLogsBootstrap 实现 /dashboard|/admin/logs/bootstrap

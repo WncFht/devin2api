@@ -186,7 +186,7 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
-	result := h.debug.ListRequests(requestsFetchCap, parseRequestFilter(r))
+	result := h.debug.ListRequests(requestsFetchCap, h.requestFilter(r))
 	if result.HasMore {
 		w.Header().Set("X-Truncated", "true")
 	}
@@ -261,7 +261,7 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, map[string]any{"entries": []matrixEntry{}, "total": 0, "truncated": false, "disabled": true})
 		return
 	}
-	filter := parseRequestFilter(r)
+	filter := h.requestFilter(r)
 	result := h.debug.ListRequests(requestsFetchCap, filter)
 	entries := make([]matrixEntry, 0, len(result.Entries))
 	for _, e := range result.Entries {
