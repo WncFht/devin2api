@@ -1,13 +1,44 @@
 const t = window.t;
+const i18nText = window.i18nText || ((key, fallback) => fallback || key);
+
+// ── 后端契约（ccpanel 迁移路由）─────────────────────────────────
+// 列表/导出/筛选选项走 /admin/logs* 与 /admin/models；调试目录文件与
+// 服务端合并视图走 /admin/debug-logs/{id}/*——{id} 是 started_at 的
+// epoch 毫秒（日志行 id 同口径）。进行中的请求用 active-requests 列表
+// 的 start_time（同 UnixMilli）反查目录，FNV 哈希 id 不能解析目录。
+const LOGS_LIST_URL = '/admin/logs';
+const LOGS_BOOTSTRAP_URL = '/admin/logs/bootstrap';
+const LOGS_MODELS_URL = '/admin/models';
+const LOGS_EXPORT_URL = '/admin/logs/export';
+const debugLogUrl = (id) => `/admin/debug-logs/${encodeURIComponent(id)}`;
+const debugLogFileUrl = (id, name) =>
+  `${debugLogUrl(id)}/file/${String(name).split('/').map(encodeURIComponent).join('/')}`;
+const debugLogMergedUrl = (id) => `${debugLogUrl(id)}/merged`;
+const activeDebugLogUrl = (id) => `/admin/active-requests/${encodeURIComponent(id)}/debug-log`;
+const activeAbortUrl = (id) => `/admin/active-requests/${encodeURIComponent(id)}/abort`;
+
+// 失败阶段枚举（internal/debuglog/stages.go ErrStage* 快照）：
+// 下拉静态候选；新阶段出现时可经 combobox 自定义输入提交。
+const LOGS_ERROR_STAGES = [
+  'http_read', 'http_decode', 'request_build', 'provider_stream', 'http_stream',
+  'response_event', 'http_encode', 'client_disconnected', 'devin_connect',
+  'devin_transport', 'rate_gate', 'token_limit', 'model_disabled'
+];
+
+// status 筛选是表达式语法（逗号 OR，单项 499|4xx|>=400|<300|!200|!2xx），
+// 预设常用档；观察到的具体状态码由 mergeLogsFilterOptions 补进候选尾部。
+const LOGS_STATUS_PRESETS = ['2xx', '4xx', '5xx', '499', '!2xx', '>=400'];
 
 let currentLogsPage = 1;
-let logsPageSize = 15;
+let logsPageSize = 100;
 let totalLogsPages = 1;
 let totalLogs = 0;
 let currentLogsCustomTimeRange = null;
 let authTokens = []; // 令牌列表
 let logsModelCombobox = null; // 模型筛选组合框
 let logsStatusCombobox = null; // 状态码筛选组合框
+let logsErrorStageCombobox = null; // 失败阶段筛选组合框
+let lastLogsHintData = null; // 最近一次列表响应的 {rejects, has_more}，供语言切换重渲
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
 let logsExactModelValue = '';
@@ -673,10 +704,12 @@ async function load(skipLoading = false) {
     }
 
     const params = buildLogsRequestParams();
-    const response = await fetchAPIWithAuth('/dashboard/logs?' + params.toString());
+    const response = await fetchAPIWithAuth(LOGS_LIST_URL + '?' + params.toString());
     if (!response.success) throw new Error(response.error || '无法加载请求日志');
 
     const data = response.data || [];
+    // 提示条（管线前拒绝 + 截断信号）与列表渲染同源更新。
+    updateLogsListHint(response);
 
     // 把日志中出现的模型/状态码合并进筛选下拉（无需刷新页面）
     mergeLogsFilterOptions(data);
@@ -724,11 +757,115 @@ async function load(skipLoading = false) {
     console.error('加载日志失败:', error);
     try { if (window.showError) window.showError('无法加载请求日志'); } catch (_) { }
     renderLogsError();
+    updateLogsListHint(null);
   } finally {
     logsLoadInFlight = false;
     if (logsLoadPending) {
       logsLoadPending = false;
       scheduleLoad();
+    }
+  }
+}
+
+// ── 列表提示条（rejects 事件环 + has_more 截断）─────────────────
+// 管线前拒绝（鉴权 401/并发 429/排空 503/读体中断）不产生调试目录、不进
+// index.jsonl——用户在列表找这类失败天然扑空，提示条把事件环聚合成一行
+// 说明并指向统计页（runtime-metrics 的 rejects 组同源）。has_more 表示
+// 命中超出索引尾部读取窗，count 是下界。
+// rejects/has_more 作为 envelope 顶层 sibling 捎回（先例：
+// /admin/active-requests 的 active_request_title_enabled）。
+const LOGS_REJECT_HINT_WINDOW_MS = 15 * 60000;
+
+function summarizeLogsRejects(rejects, windowMs) {
+  const labels = {};
+  (rejects?.labels || []).forEach((item) => {
+    if (item && item.reason) labels[item.reason] = item.label || item.reason;
+  });
+  const recent = Array.isArray(rejects?.recent) ? rejects.recent : [];
+  const sinceMs = Date.now() - windowMs;
+  const byReason = {};
+  let n = 0;
+  recent.forEach((event) => {
+    if (Number(event?.at) * 1000 <= sinceMs) return;
+    n += 1;
+    const reason = String(event?.reason || '');
+    byReason[reason] = (byReason[reason] || 0) + 1;
+  });
+  const parts = Object.keys(byReason).map((key) => `${labels[key] || key} ${byReason[key]}`);
+  return { n, parts };
+}
+
+function updateLogsListHint(response) {
+  const el = document.getElementById('logsListHint');
+  if (!el) return;
+  const rejects = response?.rejects;
+  const hasMore = response?.has_more === true;
+  lastLogsHintData = { rejects, has_more: hasMore };
+
+  const parts = [];
+  const rej = summarizeLogsRejects(rejects, LOGS_REJECT_HINT_WINDOW_MS);
+  if (rej.n) {
+    const text = i18nText(
+      'logs.rejectsHint',
+      '近 15 分钟本地拒绝 {count} 条（{detail}）——管线前拒绝不进索引',
+      { count: rej.n, detail: rej.parts.join(' · ') }
+    );
+    const link = i18nText('logs.rejectsGotoStats', '前往统计页');
+    parts.push(`<div class="logs-list-hint-item">${escapeHtml(text)} <a class="logs-hint-link" href="/web/stats.html">${escapeHtml(link)}</a></div>`);
+  }
+  if (hasMore) {
+    parts.push(`<div class="logs-list-hint-item">${escapeHtml(i18nText(
+      'logs.hasMoreHint',
+      '更早历史在索引扫描窗口之外，可缩小时间窗或筛选条件，也可 grep logs/index.jsonl'
+    ))}</div>`);
+  }
+
+  if (parts.length === 0) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  el.innerHTML = parts.join('');
+  el.hidden = false;
+}
+
+// ── 导出 ──────────────────────────────────────────────────────
+// /admin/logs/export 直出 CSV/JSON 文件（非 envelope）：响应头
+// X-Truncated: true 表示命中超过单次扫描上限（2000 行）。
+async function exportLogs(format) {
+  const params = buildLogsRequestParams();
+  params.delete('limit');
+  params.delete('offset');
+  params.set('format', format);
+  try {
+    const res = await fetchWithAuth(`${LOGS_EXPORT_URL}?${params.toString()}`);
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try {
+        const payload = await res.json();
+        if (payload && payload.error) message = payload.error;
+      } catch (_) { /* 非 JSON 错误体 */ }
+      throw new Error(message);
+    }
+    const truncated = res.headers.get('X-Truncated') === 'true';
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = format === 'csv' ? 'requests.csv' : 'requests.json';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    if (truncated && window.showWarning) {
+      window.showWarning(i18nText(
+        'logs.exportTruncated',
+        '导出结果已截断：命中超过扫描上限，请缩小时间窗或筛选条件'
+      ));
+    }
+  } catch (error) {
+    if (window.showError) {
+      window.showError(i18nText('logs.exportFailed', '导出失败：{message}', { message: error.message || error }));
     }
   }
 }
@@ -756,10 +893,13 @@ function filterActiveRequests(requests) {
   });
 }
 
-function shouldSkipActiveRequestsFetch(hours, status, logSource) {
-  if (hours && hours !== 'today') return true;
-  if (status) return true;
-  return logSource !== 'proxy' && logSource !== 'all';
+// 进行中的请求没有最终状态码/结果/失败阶段，q 子串筛选也可能误伤——这些
+// 维度任一命中时不再把活跃行混进列表；model/api/token 仍由
+// filterActiveRequests 客户端侧过滤。
+function shouldSkipActiveRequestsFetch(filters) {
+  if (filters.range && filters.range !== 'today') return true;
+  if (filters.status || filters.q || filters.statusClass || filters.result || filters.errorStage) return true;
+  return filters.logSource !== 'proxy' && filters.logSource !== 'all';
 }
 
 // 处理从 ui.js 推送的活动请求数据（不再自行发起网络请求）
@@ -776,12 +916,7 @@ function handleActiveRequestsData(rawActiveRequests) {
   }
 
   // 筛选条件不匹配时跳过
-  const hours = (document.getElementById('f_hours')?.value || '').trim();
-  const status = logsStatusCombobox
-    ? String(logsStatusCombobox.getValue() || '').trim()
-    : (document.getElementById('f_status')?.value || '').trim();
-  const logSource = (document.getElementById('f_log_source')?.value || 'proxy').trim();
-  if (shouldSkipActiveRequestsFetch(hours, status, logSource)) {
+  if (shouldSkipActiveRequestsFetch(getLogsFilters())) {
     clearActiveRequestsRows();
     lastActiveRequestStates = null;
     return;
@@ -962,7 +1097,7 @@ async function abortActiveRequest(button) {
   button.textContent = (typeof t === 'function' ? t('logs.aborting') : '中断中') || '中断中';
 
   try {
-    const { payload } = await fetchAPIWithAuthRaw(`/admin/active-requests/${encodeURIComponent(id)}/abort`, { method: 'POST' });
+    const { payload } = await fetchAPIWithAuthRaw(activeAbortUrl(id), { method: 'POST' });
     if (!payload.success) throw new Error(payload.error || '中断失败');
   } catch (e) {
     // 中断没打出去就恢复按钮，否则这一行会永远卡在「中断中」
@@ -1295,7 +1430,10 @@ function applyLogsFilterValues(filters) {
     range: 'f_hours',
     api: 'f_api',
     logSource: 'f_log_source',
-    authToken: 'f_auth_token'
+    authToken: 'f_auth_token',
+    q: 'f_q',
+    statusClass: 'f_status_class',
+    result: 'f_result'
   });
 
   // 模型通过 combobox 恢复
@@ -1305,6 +1443,10 @@ function applyLogsFilterValues(filters) {
 
   if (logsStatusCombobox && filters.status !== undefined) {
     logsStatusCombobox.setValue(filters.status || '', filters.status || t('logs.allStatusCodes'));
+  }
+
+  if (logsErrorStageCombobox && filters.errorStage !== undefined) {
+    logsErrorStageCombobox.setValue(filters.errorStage || '', filters.errorStage || i18nText('logs.allErrorStages', '全部阶段'));
   }
 
 }
@@ -1345,7 +1487,7 @@ async function loadLogsFilterOptions(range) {
     const params = new URLSearchParams();
     const r = range || document.getElementById('f_hours')?.value || 'today';
     appendLogsTimeRangeParams(params, { range: r });
-    const resp = await fetchDataWithAuth('/dashboard/models?' + params.toString()) || {};
+    const resp = await fetchDataWithAuth(LOGS_MODELS_URL + '?' + params.toString()) || {};
     const rawModels = Array.isArray(resp.models) ? resp.models : [];
     const rawStatusCodes = Array.isArray(resp.status_codes) ? resp.status_codes : [];
 
@@ -1425,10 +1567,42 @@ function initLogsStatusCombobox(initialValue) {
     attachMode: true,
     initialValue: initialValue || '',
     initialLabel: initialValue || t('logs.allStatusCodes'),
+    // 状态表达式（200 / 4xx / >=400 / !2xx / 逗号 OR）——自定义输入放行
+    allowCustomInput: true,
+    commitEmptyAsFirst: true,
+    getOptions: () => {
+      const seen = new Set(LOGS_STATUS_PRESETS);
+      return [
+        { value: '', label: t('logs.allStatusCodes') },
+        ...LOGS_STATUS_PRESETS.map(v => ({ value: v, label: v })),
+        ...(window.availableLogsStatusCodes || [])
+          .map(String)
+          .filter(code => !seen.has(code))
+          .map(code => ({ value: code, label: code }))
+      ];
+    },
+    onSelect: () => {
+      applyFilter();
+    }
+  });
+}
+
+// 失败阶段筛选：候选来自 ErrStage 枚举快照（LOGS_ERROR_STAGES），
+// allowCustomInput 让尚未进枚举的新阶段也能直接输入提交。
+function initLogsErrorStageCombobox(initialValue) {
+  if (typeof window.createSearchableCombobox !== 'function') return;
+  if (!document.getElementById('f_error_stage')) return;
+  logsErrorStageCombobox = window.createSearchableCombobox({
+    inputId: 'f_error_stage',
+    dropdownId: 'f_error_stage_dropdown',
+    attachMode: true,
+    initialValue: initialValue || '',
+    initialLabel: initialValue || i18nText('logs.allErrorStages', '全部阶段'),
+    allowCustomInput: true,
     commitEmptyAsFirst: true,
     getOptions: () => [
-      { value: '', label: t('logs.allStatusCodes') },
-      ...(window.availableLogsStatusCodes || []).map(code => ({ value: String(code), label: String(code) }))
+      { value: '', label: i18nText('logs.allErrorStages', '全部阶段') },
+      ...LOGS_ERROR_STAGES.map(stage => ({ value: stage, label: stage }))
     ],
     onSelect: () => {
       applyFilter();
@@ -1462,11 +1636,16 @@ async function initFilters(restoredFilters, preloaded) {
 
   initLogsModelCombobox(restoredFilters.model || '');
   initLogsStatusCombobox(restoredFilters.status || '');
+  initLogsErrorStageCombobox(restoredFilters.errorStage || '');
   applyLogsFilterValues(restoredFilters);
   const apiSelect = document.getElementById('f_api');
   if (apiSelect) {
     apiSelect.addEventListener('change', applyFilter);
   }
+  document.getElementById('f_status_class')?.addEventListener('change', applyFilter);
+  document.getElementById('f_result')?.addEventListener('change', applyFilter);
+  document.getElementById('btn_export_csv')?.addEventListener('click', () => exportLogs('csv'));
+  document.getElementById('btn_export_json')?.addEventListener('click', () => exportLogs('json'));
   syncLogSourceVisibility();
   const [tokens] = await Promise.all([
     window.initAuthTokenFilter({
@@ -1493,8 +1672,8 @@ async function initFilters(restoredFilters, preloaded) {
 
   window.bindFilterApplyInputs({
     apply: applyFilter,
-    debounceInputIds: [],
-    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source']
+    debounceInputIds: ['f_q'],
+    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_status_class', 'f_result', 'f_q']
   });
 }
 
@@ -1584,7 +1763,13 @@ const LOGS_FILTER_FIELDS = [
     defaultValue: ''
   },
   { key: 'logSource', queryKeys: ['log_source'], requestKey: 'log_source', defaultValue: 'proxy' },
-  { key: 'status', queryKeys: ['status_code'], defaultValue: '' },
+  // status 是表达式参数（499|4xx|>=400|!2xx 逗号 OR）；status_code 仅作
+  // 旧链接/旧本地存档的恢复入口，请求一律发 status——同给时后端 status 赢。
+  { key: 'status', queryKeys: ['status', 'status_code'], defaultValue: '' },
+  { key: 'q', queryKeys: ['q'], defaultValue: '' },
+  { key: 'statusClass', queryKeys: ['status_class'], defaultValue: '' },
+  { key: 'result', queryKeys: ['result'], defaultValue: '' },
+  { key: 'errorStage', queryKeys: ['error_stage'], defaultValue: '' },
   { key: 'authToken', queryKeys: ['auth_token_id'], defaultValue: '' }
 ];
 
@@ -1595,10 +1780,16 @@ function getLogsFilters() {
     : (logSourceSelect.value || 'proxy').trim();
   const model = logsModelCombobox ? logsModelCombobox.getValue() : (document.getElementById('f_model')?.value || '').trim();
   const status = logsStatusCombobox ? logsStatusCombobox.getValue() : (document.getElementById('f_status')?.value || '').trim();
+  const errorStage = logsErrorStageCombobox
+    ? String(logsErrorStageCombobox.getValue() || '').trim()
+    : (document.getElementById('f_error_stage')?.value || '').trim();
   const baseValues = window.readFilterControlValues({
     range: { id: 'f_hours', defaultValue: 'today', trim: true },
     api: { id: 'f_api', trim: true },
-    authToken: { id: 'f_auth_token', trim: true }
+    authToken: { id: 'f_auth_token', trim: true },
+    q: { id: 'f_q', trim: true },
+    statusClass: { id: 'f_status_class', trim: true },
+    result: { id: 'f_result', trim: true }
   });
   const hasCustomRange = baseValues.range === 'custom' && currentLogsCustomTimeRange;
 
@@ -1608,6 +1799,7 @@ function getLogsFilters() {
     customEndTime: hasCustomRange ? String(currentLogsCustomTimeRange.endMs) : '',
     model,
     status,
+    errorStage,
     modelExact: isExactLogsModelFilter(model),
     logSource
   };
@@ -1656,7 +1848,7 @@ window.initPageBootstrap({
   appendLogsTimeRangeParams(bootstrapParams, { range: restoredFilters.range || 'today' });
 
   // Wave 1：bootstrap 合并页面初始化请求
-  const bootstrap = await fetchDataWithAuth('/dashboard/logs/bootstrap?' + bootstrapParams.toString()).catch(() => null);
+  const bootstrap = await fetchDataWithAuth(LOGS_BOOTSTRAP_URL + '?' + bootstrapParams.toString()).catch(() => null);
 
   // 从 bootstrap 数据应用设置（bootstrap 失败时各字段回退到原有 fetch 路径）
   if (bootstrap) {
@@ -1687,6 +1879,12 @@ window.initPageBootstrap({
   // 订阅 ui.js 的活动请求推送（全站唯一轮询源，可见性由 ui.js 统一管理）
   if (typeof window.onActiveRequestsData === 'function') {
     window.onActiveRequestsData(handleActiveRequestsData);
+  }
+
+  // 列表自动刷新（system_settings.auto_refresh_interval_seconds，0=禁用；
+  // 隐藏/弹窗时跳过，回前台补一轮）——与 index/stats 同一 helper。
+  if (typeof window.createAutoRefresh === 'function') {
+    window.createAutoRefresh({ load: () => load(true) }).init();
   }
 
   // ESC键关闭模态框
@@ -1928,15 +2126,17 @@ const debugMergedStates = {
   'translated-response': { visible: false, sourceBody: null, loading: false }
 };
 
+// debugFileContext 记录当前模态框对应的可解析目录 id（started_at epoch
+// 毫秒——files/merged 端点的 {id}）与已打开文件名/大小；活跃请求模态框的
+// log_id 是 FNV 哈希不能解析目录，fileId 由活跃列表 start_time 反查。
+let debugFileContext = null;
+
 async function showDebugLogModal(logId) {
-  return showDebugLogModalFromUrl(`/admin/debug-logs/${logId}`, { activeRequestId: 0 });
+  return showDebugLogModalFromUrl(debugLogUrl(logId), { activeRequestId: 0, fileId: logId });
 }
 
 async function showActiveDebugLogModal(activeRequestId) {
-  return showDebugLogModalFromUrl(
-    `/admin/active-requests/${activeRequestId}/debug-log`,
-    { activeRequestId }
-  );
+  return showDebugLogModalFromUrl(activeDebugLogUrl(activeRequestId), { activeRequestId });
 }
 
 async function showDebugLogModalFromUrl(url, opts = {}) {
@@ -1947,6 +2147,15 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
 
   // 若上一次模态框未清理，先停掉旧的轮询
   stopActiveDebugLogPolling();
+
+  const requestedActiveId = Number(opts.activeRequestId) || 0;
+  debugFileContext = {
+    fileId: opts.fileId ? String(opts.fileId)
+      : (requestedActiveId > 0 ? resolveActiveDebugFileId(requestedActiveId) : ''),
+    activeRequestId: requestedActiveId,
+    openName: null,
+    openSize: null
+  };
 
   loading.style.display = '';
   error.style.display = 'none';
@@ -1961,6 +2170,8 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
   configureDebugProtocolTabs(null);
   activateDebugTab('request');
   resetDebugMergedResponses();
+  resetDebugFileView();
+  renderDebugFileList(null);
   applyDebugLogWrapMode();
   updateDebugResponseActionButtons();
 
@@ -1986,6 +2197,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
     window.setHighlightedCodeContent('debugTranslatedReqRaw', composeDebugTranslatedRequest(data), 'request');
     window.setHighlightedCodeContent('debugRespRaw', composeDebugRawResponse(data), 'response');
     window.setHighlightedCodeContent('debugTranslatedRespRaw', composeDebugTranslatedResponse(data), 'response');
+    renderDebugFileList(data);
     resetDebugMergedResponses();
 
     // 如果是实时活跃请求，启动轮询
@@ -2045,8 +2257,7 @@ async function refreshActiveDebugLogOnce(activeRequestId) {
   }
   activeDebugLogRefreshInFlight = true;
   try {
-    const url = `/admin/active-requests/${activeRequestId}/debug-log`;
-    const { res, payload } = await fetchAPIWithAuthRaw(url);
+    const { res, payload } = await fetchAPIWithAuthRaw(activeDebugLogUrl(activeRequestId));
     if (!payload.success) {
       if (res.status === 404) {
         // 请求已结束，停止轮询并提示，保留最后一次成功拉到的快照
@@ -2073,6 +2284,24 @@ function updateDebugLogContentPreserveScroll(data) {
   updateDebugPanePreserveScroll('debugTranslatedReqRaw', composeDebugTranslatedRequest(data), 'request');
   updateDebugPanePreserveScroll('debugRespRaw', composeDebugRawResponse(data), 'response');
   updateDebugPanePreserveScroll('debugTranslatedRespRaw', composeDebugTranslatedResponse(data), 'response');
+  // 上游重试会换目录（start_time 变）：轮询时向活跃列表重解析 fileId，
+  // 让 files/merged 始终指向当前目录。
+  if (debugFileContext?.activeRequestId) {
+    const resolved = resolveActiveDebugFileId(debugFileContext.activeRequestId);
+    if (resolved) debugFileContext.fileId = resolved;
+  }
+  renderDebugFileList(data);
+  // 进行中请求仍在写文件：清单里已打开文件的大小变了才重拉内容
+  if (debugFileContext?.openName) {
+    const entry = (Array.isArray(data?.files) ? data.files : [])
+      .find(f => String(f?.name) === debugFileContext.openName);
+    if (!entry) {
+      resetDebugFileView();
+      renderDebugFileList(data);
+    } else if (Number(entry.size) !== debugFileContext.openSize) {
+      void loadDebugFile(debugFileContext.openName);
+    }
+  }
   for (const tab of Object.keys(debugResponseViews)) {
     if (debugMergedStates[tab].visible) {
       void refreshDebugMergedResponse(data, tab);
@@ -2129,6 +2358,8 @@ function closeDebugLogModal() {
   setDebugLogStatus(null);
   currentDebugLogData = null;
   resetDebugMergedResponses();
+  resetDebugFileView();
+  debugFileContext = null;
   document.getElementById('debugLogModal').classList.remove('show');
 }
 
@@ -2167,7 +2398,8 @@ function updateDebugResponseActionButtons() {
     response: debugMergedStates.response.visible ? 'debugRespMerged' : 'debugRespRaw',
     'translated-response': debugMergedStates['translated-response'].visible
       ? 'debugTranslatedRespMerged'
-      : 'debugTranslatedRespRaw'
+      : 'debugTranslatedRespRaw',
+    files: 'debugFileRaw'
   };
   const copyBtn = document.querySelector('#debugLogModal .upstream-copy-btn--tabs');
   if (copyBtn) {
@@ -2218,7 +2450,27 @@ function resetDebugMergedResponses() {
     if (merged) merged.hidden = true;
     window.MarkdownRenderer.renderResponse(view.mergedId, { reasoning: '', content: '' });
   }
+  const note = document.getElementById('debugMergedNote');
+  if (note) {
+    note.hidden = true;
+    note.textContent = '';
+  }
   updateDebugResponseActionButtons();
+}
+
+function showDebugMergedNote(truncated) {
+  const note = document.getElementById('debugMergedNote');
+  if (!note) return;
+  if (truncated) {
+    note.textContent = i18nText(
+      'logs.mergedTruncated',
+      '响应流超过读取上限，仅合并了前段帧——后半可能缺失'
+    );
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+    note.textContent = '';
+  }
 }
 
 async function refreshDebugMergedResponse(data, tab) {
@@ -2233,7 +2485,21 @@ async function refreshDebugMergedResponse(data, tab) {
     content: (typeof t === 'function' ? t('common.loading') : '加载中...') || '加载中...',
   });
   try {
-    const merged = await window.MergedResponseClient.mergeUpstreamResponse(sourceBody);
+    // translated-response 的源是 06（客户端线上帧）：目录 id 可解析时走
+    // 服务端合并 GET /admin/debug-logs/{id}/merged——与 POST
+    // merged-response 共用后端 mergeResponseBody，省去把 06 原文上送
+    // 一趟，并能拿到 truncated 标记（>4MB 只合并前段）标注在视图上方。
+    // response 页签（04 上游帧）与活跃请求无目录 id 时仍走 POST 上传。
+    const fileId = tab === 'translated-response' ? (debugFileContext?.fileId || '') : '';
+    let merged;
+    if (fileId) {
+      const resp = await fetchDataWithAuth(debugLogMergedUrl(fileId)) || {};
+      merged = { reasoning: resp.reasoning, content: resp.content, tools: resp.tools };
+      showDebugMergedNote(resp.truncated === true);
+    } else {
+      merged = await window.MergedResponseClient.mergeUpstreamResponse(sourceBody);
+      showDebugMergedNote(false);
+    }
     state.sourceBody = sourceBody;
     updateDebugPanePreserveScroll(view.mergedId, merged, 'markdown');
   } catch (e) {
@@ -2243,6 +2509,223 @@ async function refreshDebugMergedResponse(data, tab) {
     });
   } finally {
     state.loading = false;
+  }
+}
+
+// ── Files 页签：调试目录文件清单 ──────────────────────────────────
+// 详情响应的 files[]（{name,size}）列出目录内全部留痕文件（01-06 阶段、
+// error.json、attachments/…）；点击经 /file/{name} 读取——JSON 美化、
+// JSONL 逐行加「#seq +ms event」头注，二进制走 ?raw=1 原始字节预览/打开。
+function resolveActiveDebugFileId(activeRequestId) {
+  const req = latestActiveRequests.find(r => String(r?.id) === String(activeRequestId));
+  const startMs = Number(req?.start_time);
+  return Number.isFinite(startMs) && startMs > 0 ? String(Math.trunc(startMs)) : '';
+}
+
+function resetDebugFileView() {
+  if (debugFileContext) {
+    debugFileContext.openName = null;
+    debugFileContext.openSize = null;
+  }
+  const view = document.getElementById('debugFileView');
+  if (view) view.hidden = true;
+  const pre = document.getElementById('debugFileRaw');
+  if (pre) {
+    pre._rawText = '';
+    pre.innerHTML = '';
+    pre.hidden = false;
+  }
+  const binary = document.getElementById('debugFileBinary');
+  if (binary) {
+    binary.hidden = true;
+    binary.innerHTML = '';
+  }
+}
+
+function renderDebugFileList(data) {
+  const tabBtn = document.getElementById('debugFilesTabBtn');
+  const list = document.getElementById('debugFileList');
+  if (!tabBtn || !list) return;
+  const files = Array.isArray(data?.files) ? data.files : [];
+  tabBtn.hidden = files.length === 0;
+  if (files.length === 0) {
+    list.innerHTML = '';
+    if (debugFileContext?.openName) resetDebugFileView();
+    if (document.querySelector('#debugLogModal .upstream-tab.active')?.dataset.tab === 'files') {
+      activateDebugTab('request');
+    }
+    return;
+  }
+  list.innerHTML = files.map((file) => {
+    const name = String(file?.name || '');
+    const open = debugFileContext && debugFileContext.openName === name;
+    return `<button type="button" class="debug-file-item${open ? ' active' : ''}" data-debug-file="${escapeHtml(name)}">`
+      + `<span class="debug-file-item-name">${escapeHtml(name)}</span>`
+      + `<span class="debug-file-item-size">${escapeHtml(formatBytes(Number(file?.size) || 0))}</span>`
+      + '</button>';
+  }).join('');
+}
+
+// JSONL 逐行加「#seq +elapsed_ms event」头注（沿用旧面板口径）；
+// data 截断 2000 字符避免单行撑爆视图。
+function formatLogsJsonlLines(text) {
+  return String(text || '').split('\n').filter(Boolean).map((line) => {
+    try {
+      const o = JSON.parse(line);
+      const head = (o.seq ? '#' + o.seq + ' ' : '')
+        + (o.elapsed_ms != null ? '+' + o.elapsed_ms + 'ms ' : '')
+        + (o.event || '');
+      return head + '  ' + JSON.stringify(o.data !== undefined ? o.data : o).slice(0, 2000);
+    } catch (e) {
+      return line;
+    }
+  }).join('\n\n');
+}
+
+async function toggleDebugFile(name) {
+  if (!debugFileContext) return;
+  // 再点同一个文件名 = 收起查看区
+  if (debugFileContext.openName === name) {
+    resetDebugFileView();
+    renderDebugFileList(currentDebugLogData);
+    return;
+  }
+  debugFileContext.openName = name;
+  renderDebugFileList(currentDebugLogData);
+  await loadDebugFile(name);
+}
+
+async function loadDebugFile(name) {
+  const view = document.getElementById('debugFileView');
+  const nameEl = document.getElementById('debugFileViewName');
+  const binaryEl = document.getElementById('debugFileBinary');
+  if (!view) return;
+  view.hidden = false;
+  if (binaryEl) {
+    binaryEl.hidden = true;
+    binaryEl.innerHTML = '';
+  }
+  const pre = document.getElementById('debugFileRaw');
+  if (pre) pre.hidden = false;
+  if (nameEl) nameEl.textContent = name;
+  updateDebugFileRawButtons(false);
+  window.setHighlightedCodeContent('debugFileRaw', i18nText('common.loading', '加载中...'), 'text');
+
+  const fileId = debugFileContext?.fileId;
+  if (!fileId) {
+    window.setHighlightedCodeContent(
+      'debugFileRaw',
+      i18nText('logs.debugFileNoDir', '无法定位调试目录（请求可能刚结束或已清理）'),
+      'text'
+    );
+    return;
+  }
+  try {
+    const data = await fetchDataWithAuth(debugLogFileUrl(fileId, name));
+    // 期间用户切换/收起了文件——晚到的内容直接丢弃
+    if (debugFileContext?.openName !== name) return;
+    debugFileContext.openSize = Number(data?.size) || null;
+    if (data?.binary) {
+      renderDebugFileBinary(name, data);
+      return;
+    }
+    let text = String(data?.text ?? '');
+    let mode = 'text';
+    if (/\.json$/i.test(name)) {
+      text = formatJsonSafe(text);
+      mode = 'json';
+    } else if (/\.jsonl$/i.test(name)) {
+      text = formatLogsJsonlLines(text);
+    }
+    if (data?.truncated) {
+      text += `\n\n${i18nText('logs.fileTruncated', '… 已截断（文件超过读取上限，仅显示前段）')}`;
+    }
+    window.setHighlightedCodeContent('debugFileRaw', text, mode);
+  } catch (e) {
+    if (debugFileContext?.openName !== name) return;
+    window.setHighlightedCodeContent('debugFileRaw', e?.message || '读取失败', 'text');
+  }
+}
+
+// 二进制附件（图片等）：JSON 文本视图装不下字节，给「打开原始内容」
+// 入口；图片扩展名额外经 ?raw=1 拉 objectURL 预览。
+function renderDebugFileBinary(name, data) {
+  const binaryEl = document.getElementById('debugFileBinary');
+  const pre = document.getElementById('debugFileRaw');
+  if (!binaryEl) return;
+  if (pre) {
+    pre._rawText = '';
+    pre.innerHTML = '';
+    pre.hidden = true;
+  }
+  updateDebugFileRawButtons(true);
+  binaryEl.innerHTML = `<div class="debug-file-binary-info">${escapeHtml(i18nText(
+    'logs.debugFileBinary',
+    '二进制文件（{size}）——用「打开原始内容」查看',
+    { size: formatBytes(Number(data?.size) || 0) }
+  ))}</div>`;
+  binaryEl.hidden = false;
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico)$/i.test(name)) {
+    void previewDebugFileImage(name, binaryEl);
+  }
+}
+
+async function previewDebugFileImage(name, container) {
+  const fileId = debugFileContext?.fileId;
+  if (!fileId) return;
+  try {
+    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
+    if (!res.ok || debugFileContext?.openName !== name) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.className = 'debug-file-preview';
+    img.alt = name;
+    img.src = url;
+    img.onload = () => URL.revokeObjectURL(url);
+    container.appendChild(img);
+  } catch (_) { /* 预览失败仅保留信息行 */ }
+}
+
+function updateDebugFileRawButtons(isBinary) {
+  // 二进制内容复制成文本是乱码——复制原始按钮只对文本文件有意义
+  const copyBtn = document.getElementById('debugFileRawBtn');
+  if (copyBtn) copyBtn.hidden = !!isBinary;
+}
+
+async function copyDebugFileRaw(btn) {
+  const name = debugFileContext?.openName;
+  const fileId = debugFileContext?.fileId;
+  if (!name || !fileId) return;
+  try {
+    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    await window.copyToClipboard(text);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✓';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+    }
+  } catch (e) {
+    if (window.showError) window.showError(e?.message || '读取失败');
+  }
+}
+
+async function openDebugFileRaw() {
+  const name = debugFileContext?.openName;
+  const fileId = debugFileContext?.fileId;
+  if (!name || !fileId) return;
+  try {
+    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank', 'noopener');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    if (window.showError) window.showError(e?.message || '读取失败');
   }
 }
 
@@ -2266,6 +2749,24 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
     const wrapBtn = e.target.closest('#debugLogModal [data-action="toggle-debug-wrap"]');
     if (wrapBtn) {
       setDebugLogWrapEnabled(!debugLogWrapEnabled);
+      return;
+    }
+
+    const fileItem = e.target.closest('#debugLogModal [data-debug-file]');
+    if (fileItem) {
+      void toggleDebugFile(fileItem.dataset.debugFile);
+      return;
+    }
+
+    const fileRawBtn = e.target.closest('#debugLogModal [data-action="copy-debug-file-raw"]');
+    if (fileRawBtn) {
+      void copyDebugFileRaw(fileRawBtn);
+      return;
+    }
+
+    const fileOpenBtn = e.target.closest('#debugLogModal [data-action="open-debug-file-raw"]');
+    if (fileOpenBtn) {
+      void openDebugFileRaw();
       return;
     }
 
@@ -2295,5 +2796,6 @@ if (typeof window !== 'undefined') {
       renderLogs(displayedLogs);
       window.i18n.translatePage();
     }
+    if (lastLogsHintData) updateLogsListHint(lastLogsHintData);
   });
 }

@@ -1011,3 +1011,102 @@
     .logs-table tr.pending-row:hover td {
       background: var(--logs-pending-row-hover-bg);
     }
+
+    /* 列表提示条：管线前拒绝事件环 + has_more 截断信号 */
+    .logs-list-hint {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+      font-size: var(--text-sm);
+    }
+
+    .logs-list-hint-item {
+      padding: var(--space-2) var(--space-3);
+      border-radius: 8px;
+      background: var(--surface-bg-strong);
+      border: 1px solid var(--surface-border);
+      color: var(--neutral-600);
+      line-height: 1.5;
+    }
+
+    .logs-list-hint-item a {
+      color: inherit;
+      text-decoration: underline;
+    }
+
+    /* 调试目录文件列表与查看器 */
+    .debug-file-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+      margin-bottom: var(--space-3);
+    }
+
+    .debug-file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-3);
+      width: 100%;
+      padding: var(--space-2) var(--space-3);
+      border-radius: 8px;
+      border: 1px solid var(--surface-border);
+      background: var(--surface-bg-strong);
+      color: var(--neutral-800);
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .debug-file-item:hover {
+      border-color: var(--surface-border-strong);
+    }
+
+    .debug-file-item.active {
+      border-color: var(--primary-500);
+      font-weight: var(--font-semibold);
+    }
+
+    .debug-file-item-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-family-mono);
+    }
+
+    .debug-file-item-size {
+      flex: 0 0 auto;
+      color: var(--neutral-600);
+      font-size: var(--text-sm);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .debug-file-view-bar {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-bottom: var(--space-2);
+    }
+
+    .debug-file-view-name {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-family-mono);
+      font-weight: var(--font-semibold);
+    }
+
+    .debug-file-binary {
+      padding: var(--space-3);
+      color: var(--neutral-600);
+      line-height: 1.6;
+    }
+
+    .debug-merged-note {
+      margin-bottom: var(--space-2);
+      color: var(--warning-600);
+      font-size: var(--text-sm);
+    }

@@ -88,6 +88,41 @@
         </div>`,
         joinClasses(groupClass, 'filter-group--status')
       ),
+      search: buildFilterGroup(
+        `${buildFilterLabel('f_q', 'logs.search', '搜索')}
+        ${buildInput('text', 'f_q', 'logs.searchPlaceholder', 'dir/模型/路径/请求ID...', 'filter-control--wide')}`,
+        groupClass
+      ),
+      statusClass: buildFilterGroup(
+        `${buildFilterLabel('f_status_class', 'logs.statusClass', '状态段')}
+        ${buildSelect('f_status_class', `
+                <option value="" data-i18n="logs.allStatusClasses">全部状态段</option>
+                <option value="2xx">2xx</option>
+                <option value="3xx">3xx</option>
+                <option value="4xx">4xx</option>
+                <option value="5xx">5xx</option>
+              `, 'filter-control--compact')}`,
+        groupClass
+      ),
+      result: buildFilterGroup(
+        `${buildFilterLabel('f_result', 'logs.result', '结果')}
+        ${buildSelect('f_result', `
+                <option value="" data-i18n="logs.allResults">全部结果</option>
+                <option value="completed" data-i18n="logs.resultCompleted">完成</option>
+                <option value="failed" data-i18n="logs.resultFailed">失败</option>
+                <option value="disconnected" data-i18n="logs.resultDisconnected">断连</option>
+                <option value="aborted" data-i18n="logs.resultAborted">中断</option>
+              `, 'filter-control--compact')}`,
+        groupClass
+      ),
+      errorStage: buildFilterGroup(
+        `${buildFilterLabel('f_error_stage', 'logs.errorStage', '失败阶段')}
+        <div class="filter-combobox-wrapper filter-control--compact filter-control--error-stage">
+          <input id="f_error_stage" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_error_stage_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        joinClasses(groupClass, 'filter-group--error-stage')
+      ),
       logSource: buildFilterGroup(
         `${buildFilterLabel('f_log_source', 'logs.logSource', '日志来源')}
         ${buildSelect('f_log_source', `
@@ -101,6 +136,8 @@
       hideZeroSuccess,
       filterButton,
       logsSummary: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
+              <button id="btn_export_csv" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportCsv">导出CSV</button>
+              <button id="btn_export_json" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportJson">导出JSON</button>
               ${clearButtonControl}
               ${filterButtonControl}
             </div></div>`,
@@ -129,7 +166,7 @@
       authTokenGroupClass: 'logs-filter-group--token',
       authTokenControlClass: 'logs-filter-control--token',
       actionsClass: 'logs-filter-actions',
-      items: ['timeRange', 'api', 'modelCombobox', 'logSource', 'status', 'authToken', 'logsSummary']
+      items: ['timeRange', 'search', 'api', 'modelCombobox', 'status', 'statusClass', 'result', 'errorStage', 'logSource', 'authToken', 'logsSummary']
     },
     trend: {
       barClass: 'filter-bar mt-2',
