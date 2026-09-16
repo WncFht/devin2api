@@ -124,28 +124,19 @@ var upstreamSanitizeRules = []upstreamSanitizeRule{
 func sanitizeRequest(request llm.RequestMessages) (llm.RequestMessages, map[string]int) {
 	hits := make(map[string]int)
 	request.SystemPrompt = sanitizeUpstreamText(request.SystemPrompt, true, hits)
-	for index, message := range request.Messages {
+	for _, message := range request.Messages {
+		// Content 切片与消息值共享底层数组，块内改写就地生效，无需写回。
 		switch typed := message.(type) {
 		case llm.UserMessage:
-			typed.Content = sanitizeContents(typed.Content, hits)
-			request.Messages[index] = typed
+			sanitizeContents(typed.Content, hits)
 		case llm.AssistantMessage:
-			typed.Content = sanitizeContents(typed.Content, hits)
-			request.Messages[index] = typed
+			sanitizeContents(typed.Content, hits)
 		case llm.ToolResultMessage:
-			typed.Content = sanitizeContents(typed.Content, hits)
-			request.Messages[index] = typed
+			sanitizeContents(typed.Content, hits)
 		}
 	}
 	for index, tool := range request.Tools {
 		request.Tools[index].Description = sanitizeUpstreamText(tool.Description, true, hits)
-	}
-	// 「声明了 tools 但 system prompt 为空」早期实测触发 permission_denied；
-	// 2026-09-15 复测（显式空串与字段缺席两种形态、带 tools）均被上游
-	// 正常接受——断言已不可复现，注入兜底保留为无害的中性默认。
-	if strings.TrimSpace(request.SystemPrompt) == "" && len(request.Tools) > 0 {
-		request.SystemPrompt = "You are an AI coding assistant."
-		hits["inject-empty-system"]++
 	}
 	return request, hits
 }

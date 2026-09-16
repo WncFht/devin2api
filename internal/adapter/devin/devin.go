@@ -1302,7 +1302,6 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				progress.Reset(upstreamNoProgressTimeout)
 			}
 			stream.queue = stream.release(events)
-			stream.finished = stream.decoder.finished
 		case <-stall.C:
 			// 上游静默超时：取消底层流打断泵协程；已缓冲未消费的帧
 			// 补记进原始日志留证，然后按传输错误收尾。
@@ -1385,9 +1384,7 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	stream.cancel()
 	stream.frames = frames
 	stream.cancel = cancel
-	if stream.newDecoder != nil {
-		stream.decoder = stream.newDecoder()
-	}
+	stream.decoder = stream.newDecoder()
 	stream.started = false
 	stream.pendingStart = nil
 	stream.finished = false
@@ -1409,8 +1406,7 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 		if event.Type != llm.ResponseEventDone {
 			continue
 		}
-		return event.Message != nil &&
-			event.Message.StopReason == llm.StopReasonStop &&
+		return event.Message.StopReason == llm.StopReasonStop &&
 			len(event.Message.Content) == 0
 	}
 	return false

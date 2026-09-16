@@ -289,10 +289,7 @@ func (gate *rateGate) persistState(until time.Time) {
 	if gate.statePath == "" {
 		return
 	}
-	data, err := json.Marshal(gateStateFile{LimitedUntil: until})
-	if err != nil {
-		return
-	}
+	data, _ := json.Marshal(gateStateFile{LimitedUntil: until})
 	tmp := gate.statePath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		slog.Warn("rate gate state write failed", "error", err)

@@ -413,7 +413,7 @@ func (stream *responseStream) applyCostsCarry(events []llm.ResponseEvent) {
 		return
 	}
 	for index, event := range events {
-		if event.Type != llm.ResponseEventDone || event.Message == nil {
+		if event.Type != llm.ResponseEventDone {
 			continue
 		}
 		if event.Message.Usage.Costs == nil {

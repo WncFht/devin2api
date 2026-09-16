@@ -187,7 +187,7 @@ func (decoder *responseDecoder) snapshot() *llm.AssistantMessage {
 // 思考、文本、工具增量、停止原因依次走子解码器，共享同一 events
 // 切片追加。已 finished 或停止序列截断后的帧只更新元数据。
 func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageResponse) []llm.ResponseEvent {
-	if response == nil || decoder.finished {
+	if decoder.finished {
 		return nil
 	}
 	decoder.noteSchemaDrift(response)
@@ -716,9 +716,6 @@ func (decoder *responseDecoder) findTool(delta *devinproto.ExaCodeiumCommonPb_Ch
 // 打开的 thinking/text/tool 块（工具参数此时一次性成形并修偏），
 // 最后发 Done——partial 即最终消息。
 func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEvent {
-	if decoder.finished {
-		return nil
-	}
 	events := make([]llm.ResponseEvent, 0, len(decoder.tools)*3+3)
 	decoder.partial.StopReason = reason
 	events = decoder.endThinking(events)
@@ -758,11 +755,9 @@ func (decoder *responseDecoder) complete(reason llm.StopReason) []llm.ResponseEv
 
 // fail 产出错误终止事件：partial 标记 error、携带原文与分类记录
 // （消费方经 Failure 取 type/status/retry 结构事实，不再按文本反推），
-// Done 语义由消费方按 Reason=error 映射为协议错误帧。重复调用返回空。
+// Done 语义由消费方按 Reason=error 映射为协议错误帧。仅由 finish 调用——
+// 重复抑制在 finish 入口守卫。
 func (decoder *responseDecoder) fail(err error) []llm.ResponseEvent {
-	if decoder.finished {
-		return nil
-	}
 	decoder.partial.StopReason = llm.StopReasonError
 	decoder.partial.ErrorMessage = err.Error()
 	decoder.partial.Failure = llm.Classify(err)
@@ -830,9 +825,6 @@ func repairLeakedXMLArguments(raw string) (json.RawMessage, bool) {
 	for _, match := range matches {
 		object[match[1]] = strings.TrimSpace(match[2])
 	}
-	data, err := json.Marshal(object)
-	if err != nil {
-		return nil, false
-	}
+	data, _ := json.Marshal(object)
 	return data, true
 }
