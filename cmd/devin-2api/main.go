@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,15 +234,17 @@ func main() {
 	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, ccpanel.SettingsDeps{
 		Debug:       debugManager,
 		DevinConfig: devinAdapter.CurrentConfig,
-		// 面板写入与 config reload 共用 ApplyConfig 提交点；端点三件套
-		// 变化时面板自身的上游调用束跟随换绑（reload 路径的同款同步）。
-		ApplyDevin: func(next devin.Config) error {
-			prev := devinAdapter.CurrentConfig()
-			if _, err := devinAdapter.ApplyConfig(next); err != nil {
+		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
+		// 提交点）；端点三件套变化时面板自身的上游调用束跟随换绑。
+		UpdateDevin: func(mutate func(*devin.Config) error) error {
+			applied, err := devinAdapter.UpdateConfig(mutate)
+			if err != nil {
 				return err
 			}
-			if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
-				return ccPanel.SetUpstream(next.BaseURL, next.Proxy, next.ForceHTTP1)
+			if slices.Contains(applied, "devin.base_url") || slices.Contains(applied, "devin.proxy") ||
+				slices.Contains(applied, "devin.force_http1") {
+				cur := devinAdapter.CurrentConfig()
+				return ccPanel.SetUpstream(cur.BaseURL, cur.Proxy, cur.ForceHTTP1)
 			}
 			return nil
 		},

@@ -289,23 +289,54 @@ func (adapter *Adapter) WarmStats() WarmStats {
 // 在途调用持旧引用跑完。返回的列表只含值发生变化的字段。
 func (adapter *Adapter) ApplyConfig(next Config) (applied []string, err error) {
 	adapter.configMu.Lock()
-	prev := adapter.config
+	prev, newLink, err := adapter.commitConfigLocked(next)
+	adapter.configMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return adapter.finishConfigApply(prev, next, newLink), nil
+}
+
+// UpdateConfig 在 configMu 下克隆当前配置交给 mutate 改字段、再走
+// ApplyConfig 同一提交路径——克隆与提交之间插不进另一场 ApplyConfig，
+// 消灭面板单字段热改与 config reload 的 lost-update。
+// 返回的 applied 列表与 ApplyConfig 同语义。
+func (adapter *Adapter) UpdateConfig(mutate func(*Config) error) (applied []string, err error) {
+	adapter.configMu.Lock()
+	next := adapter.config
+	if err := mutate(&next); err != nil {
+		adapter.configMu.Unlock()
+		return nil, err
+	}
+	prev, newLink, err := adapter.commitConfigLocked(next)
+	adapter.configMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return adapter.finishConfigApply(prev, next, newLink), nil
+}
+
+// commitConfigLocked 是 ApplyConfig/UpdateConfig 共享的持锁段：prev
+// 快照、运行时字段继承、端点三件套变化时预构建新调用束（先构建后提交：
+// proxy 串非法等失败整体返回错误，旧配置继续服役）、换值。调用方必须
+// 持 configMu；解锁后的收尾见 finishConfigApply。
+func (adapter *Adapter) commitConfigLocked(next Config) (prev Config, newLink *upstreamLink, err error) {
+	prev = adapter.config
 	// 运行时字段不归配置管：状态文件路径沿用旧值。
 	next.GateStatePath = prev.GateStatePath
-
-	// 端点三件套烤进 transport，换值需整体重建调用束。先构建后提交：
-	// proxy 串非法等失败时整体返回错误，旧配置（含 config 快照）继续服役。
-	var newLink *upstreamLink
 	if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
 		newLink, err = newUpstreamLink(next, adapter.currentToken)
 		if err != nil {
-			adapter.configMu.Unlock()
-			return nil, err
+			return prev, nil, err
 		}
 	}
 	adapter.config = next
-	adapter.configMu.Unlock()
+	return prev, newLink, nil
+}
 
+// finishConfigApply 是解锁后的后提交段：新调用束原子换指针并回收旧
+// transport、回写 token/闸门/保温参数、按 prev→next 差集算 applied。
+func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLink) (applied []string) {
 	if newLink != nil {
 		old := adapter.linkPtr.Swap(newLink)
 		// 旧 transport 的 idle 池收掉；在途流持旧 client 引用跑完。
@@ -407,7 +438,7 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied []string, err error) {
 	if prev.ForceHTTP1 != next.ForceHTTP1 {
 		applied = append(applied, "devin.force_http1")
 	}
-	return applied, nil
+	return applied
 }
 
 // reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；

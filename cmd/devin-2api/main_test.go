@@ -111,9 +111,12 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
-		Debug:             manager,
-		DevinConfig:       devinAdapter.CurrentConfig,
-		ApplyDevin:        func(next devin.Config) error { _, err := devinAdapter.ApplyConfig(next); return err },
+		Debug:       manager,
+		DevinConfig: devinAdapter.CurrentConfig,
+		UpdateDevin: func(mutate func(*devin.Config) error) error {
+			_, err := devinAdapter.UpdateConfig(mutate)
+			return err
+		},
 		MaxConcurrency:    application.MaxConcurrency,
 		SetMaxConcurrency: application.SetMaxConcurrency,
 		QuotaInterval:     panel.QuotaInterval,
@@ -304,9 +307,12 @@ auth:
 				t.Fatal(err)
 			}
 			settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
-				Debug:             manager,
-				DevinConfig:       devinAdapter.CurrentConfig,
-				ApplyDevin:        func(next devin.Config) error { _, err := devinAdapter.ApplyConfig(next); return err },
+				Debug:       manager,
+				DevinConfig: devinAdapter.CurrentConfig,
+				UpdateDevin: func(mutate func(*devin.Config) error) error {
+					_, err := devinAdapter.UpdateConfig(mutate)
+					return err
+				},
 				MaxConcurrency:    application.MaxConcurrency,
 				SetMaxConcurrency: application.SetMaxConcurrency,
 				QuotaInterval:     panel.QuotaInterval,

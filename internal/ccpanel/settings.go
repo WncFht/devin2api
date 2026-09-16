@@ -47,8 +47,10 @@ type SettingsDeps struct {
 	Debug *debuglog.Manager
 	// DevinConfig 返回 adapter 当前生效配置快照。
 	DevinConfig func() devin.Config
-	// ApplyDevin 把整份配置回灌 adapter（devin.Adapter.ApplyConfig）。
-	ApplyDevin func(devin.Config) error
+	// UpdateDevin 在 adapter configMu 下克隆当前配置交给回调改字段后整体
+	// 提交（devin.Adapter.UpdateConfig）——克隆与提交之间插不进 reload，
+	// 单字段热改不会把并发的 reload 整份配置顶回去。
+	UpdateDevin func(func(*devin.Config) error) error
 	// MaxConcurrency/SetMaxConcurrency 是 /v1 并发闸的读写（CAS 计数器）。
 	MaxConcurrency    func() int
 	SetMaxConcurrency func(int)
@@ -132,16 +134,12 @@ func setPolicyField(debug *debuglog.Manager, mutate func(*debuglog.RetentionPoli
 	}
 }
 
-// devinField 生成「克隆 devin.Config 快照→改单字段→整体 ApplyConfig」的
-// apply：与 config reload 同路径，端点三件套变化时内部重建调用束；
-// mutate 内的解析错误在提交前拦截。
+// devinField 生成「adapter 内克隆当前配置→改单字段→整体提交」的 apply：
+// 与 config reload 同路径，端点三件套变化时内部重建调用束；mutate 内的
+// 解析错误在提交前拦截。
 func devinField(deps SettingsDeps, mutate func(*devin.Config, string) error) func(string) error {
 	return func(v string) error {
-		cfg := deps.DevinConfig()
-		if err := mutate(&cfg, v); err != nil {
-			return err
-		}
-		return deps.ApplyDevin(cfg)
+		return deps.UpdateDevin(func(c *devin.Config) error { return mutate(c, v) })
 	}
 }
 
