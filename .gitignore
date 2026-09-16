@@ -41,6 +41,8 @@ multi-harness-eval/runs/
 
 # cliproxyapi 调研语料（~118MB，可由调研脚本重建；结论已沉淀进 notes/）
 /outputs/cliproxy-research/
+# 外部参考 clone（只读对照用，随时可重拉）
+/cliproxyapi/
 
 # 本地 agent 技能/配置（不入库）
 /.devin/
