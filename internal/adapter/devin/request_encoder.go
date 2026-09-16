@@ -37,8 +37,8 @@ type callBinding struct {
 func buildRequest(request llm.RequestMessages, config Config, binding callBinding) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
 	var repairs llm.RequestRepairs
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
-	// ID，使命中更稳（实测稳定 ~7/8 vs 全随机波动）；缓存匹配本身是
-	// 「账号 + 内容前缀」键控，ID 不参与匹配。
+	// ID。实测（2026-09-16 保温实验）：同内容换 SessionKey 派生 ID 后
+	// cache_read=0，ID 参与缓存键或路由——稳定派生是命中前提。
 	trajectoryID, cascadeID := deriveSessionIDs(request)
 	executionID := randid.UUID()
 	name, version, os := config.ClientIdentity()
