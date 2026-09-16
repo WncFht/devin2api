@@ -564,14 +564,14 @@
     document.getElementById('new-model-name').value = '';
     document.getElementById('new-model-target').value = '';
     const modal = document.getElementById('addModelModal');
-    modal.style.display = 'block';
+    modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
     setTimeout(() => document.getElementById('new-model-name').focus(), 50);
   }
 
   function closeAddModal() {
     const modal = document.getElementById('addModelModal');
-    modal.style.display = 'none';
+    modal.classList.remove('show');
     modal.setAttribute('aria-hidden', 'true');
   }
 
@@ -586,7 +586,7 @@
     // resolved 偏离但 redirect_model 为空 → config 别名在生效，提示这层区别
     document.getElementById('redirect-alias-note').hidden = !(isRedirected(row) && !row.redirect_model);
     const modal = document.getElementById('redirectModal');
-    modal.style.display = 'block';
+    modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
     renderRedirectList();
     setTimeout(() => { search.focus(); search.select(); }, 50);
@@ -594,7 +594,7 @@
 
   function closeRedirectModal() {
     const modal = document.getElementById('redirectModal');
-    modal.style.display = 'none';
+    modal.classList.remove('show');
     modal.setAttribute('aria-hidden', 'true');
     redirectRow = null;
   }
