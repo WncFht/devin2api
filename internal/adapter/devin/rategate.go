@@ -223,25 +223,35 @@ func newRateGate(params GateConfig, statePath string) *rateGate {
 	return gate
 }
 
+// NormalizeGateConfig 把无效闸门参数回落到默认：时长 <=0、桶界估计
+// 折进 [0,60)、死区 <=0 或吞掉整窗。MaxRPM 原样保留——<=0 是「不限速」
+// 的合法语义，不是缺省。运行时与面板展示共用此函数，两处口径一致。
+func NormalizeGateConfig(params GateConfig) GateConfig {
+	params.MaxHold = gateDurationOrDefault(params.MaxHold, gateDefaultMaxHold)
+	params.DripInterval = gateDurationOrDefault(params.DripInterval, gateDefaultDripInterval)
+	params.DefaultLatch = gateDurationOrDefault(params.DefaultLatch, gateDefaultLatch)
+	params.WindowOffset %= windowPeriod
+	if params.WindowOffset < 0 {
+		params.WindowOffset += windowPeriod
+	}
+	if params.WindowGuard <= 0 || 2*params.WindowGuard >= windowPeriod {
+		params.WindowGuard = gateDefaultWindowGuard
+	}
+	return params
+}
+
 // setParams 原位更新闸门参数（reload 热路径）：闩态保留，窗口参数变化
 // 后下一次 wait/stats 按新边界重算当前桶，桶起点不同即开新桶重新计数。
 func (gate *rateGate) setParams(params GateConfig) {
+	params = NormalizeGateConfig(params)
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	gate.maxHold = gateDurationOrDefault(params.MaxHold, gateDefaultMaxHold)
-	gate.dripInterval = gateDurationOrDefault(params.DripInterval, gateDefaultDripInterval)
-	gate.defaultLatch = gateDurationOrDefault(params.DefaultLatch, gateDefaultLatch)
-	offset := params.WindowOffset % windowPeriod
-	if offset < 0 {
-		offset += windowPeriod
-	}
-	guard := params.WindowGuard
-	if guard <= 0 || 2*guard >= windowPeriod {
-		guard = gateDefaultWindowGuard
-	}
+	gate.maxHold = params.MaxHold
+	gate.dripInterval = params.DripInterval
+	gate.defaultLatch = params.DefaultLatch
 	gate.quota = params.MaxRPM
-	gate.windowOpen = (offset + guard) % windowPeriod
-	gate.usable = windowPeriod - 2*guard
+	gate.windowOpen = (params.WindowOffset + params.WindowGuard) % windowPeriod
+	gate.usable = windowPeriod - 2*params.WindowGuard
 }
 
 // gateDurationOrDefault 把 <=0 的时长参数回落到默认值。

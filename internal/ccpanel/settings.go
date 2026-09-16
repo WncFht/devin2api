@@ -360,8 +360,11 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_client_name",
 			typ:  "string",
 			desc: "发给上游的客户端名 metadata.extension_name/ide_name（devin.client_name）；空用内置默认",
-			def:  func() string { return d0().Devin.ClientName },
-			live: devinLive(deps, func(c devin.Config) string { return c.ClientName }),
+			def: func() string {
+				n, _, _ := d0().Devin.ClientIdentity()
+				return n
+			},
+			live: devinLive(deps, func(c devin.Config) string { n, _, _ := c.ClientIdentity(); return n }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
 				return &c.ClientName
 			}, nil)),
@@ -370,8 +373,11 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_client_version",
 			typ:  "string",
 			desc: "客户端版本号 metadata.extension_version/ide_version（devin.client_version）；空用内置默认",
-			def:  func() string { return d0().Devin.ClientVersion },
-			live: devinLive(deps, func(c devin.Config) string { return c.ClientVersion }),
+			def: func() string {
+				_, v, _ := d0().Devin.ClientIdentity()
+				return v
+			},
+			live: devinLive(deps, func(c devin.Config) string { _, v, _ := c.ClientIdentity(); return v }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
 				return &c.ClientVersion
 			}, nil)),
@@ -380,8 +386,11 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_client_os",
 			typ:  "string",
 			desc: "客户端系统 metadata.os（devin.client_os）；空用内置默认",
-			def:  func() string { return d0().Devin.ClientOS },
-			live: devinLive(deps, func(c devin.Config) string { return c.ClientOS }),
+			def: func() string {
+				_, _, o := d0().Devin.ClientIdentity()
+				return o
+			},
+			live: devinLive(deps, func(c devin.Config) string { _, _, o := c.ClientIdentity(); return o }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
 				return &c.ClientOS
 			}, nil)),
@@ -391,8 +400,8 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_max_rpm",
 			typ:  "int",
 			desc: "每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速",
-			def:  func() string { return strconv.Itoa(d0().Devin.Gate.MaxRPM) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Gate.MaxRPM) }),
+			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).MaxRPM) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeGateConfig(c.Gate).MaxRPM) }),
 			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
 				return &c.Gate.MaxRPM
 			})),
@@ -402,9 +411,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 15",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Gate.MaxHold })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).MaxHold })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Gate.MaxHold })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).MaxHold })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.MaxHold })),
 		},
 		{
@@ -412,9 +421,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Gate.DripInterval })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DripInterval })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Gate.DripInterval })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DripInterval })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.DripInterval })),
 		},
 		{
@@ -422,9 +431,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Gate.DefaultLatch })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DefaultLatch })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Gate.DefaultLatch })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).DefaultLatch })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.DefaultLatch })),
 		},
 		{
@@ -432,9 +441,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Gate.WindowOffset })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowOffset })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Gate.WindowOffset })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowOffset })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.WindowOffset })),
 		},
 		{
@@ -442,9 +451,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Gate.WindowGuard })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowGuard })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Gate.WindowGuard })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowGuard })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.WindowGuard })),
 		},
 		// ---- 前缀保温 ----
@@ -452,8 +461,8 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "warm_prefix_enabled",
 			typ:  "bool",
 			desc: "前缀保温总开关（devin.warm_prefix_enabled）：静默会话按节拍重放请求体给上游 prompt cache 续期",
-			def:  func() string { return strconv.FormatBool(d0().Devin.Warm.Enabled) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.Warm.Enabled) }),
+			def:  func() string { return strconv.FormatBool(devin.NormalizeWarmConfig(d0().Devin.Warm).Enabled) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(devin.NormalizeWarmConfig(c.Warm).Enabled) }),
 			apply: devinField(deps, func(c *devin.Config, v string) error {
 				b, err := strconv.ParseBool(strings.TrimSpace(v))
 				if err != nil {
@@ -468,17 +477,21 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "每条保温谱系的 ping 节拍秒数（devin.warm_prefix_interval_seconds，须明显低于上游 ~780s TTL）；<=0 默认 180",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Warm.Interval })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).Interval })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Warm.Interval })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).Interval })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.Interval })),
 		},
 		{
 			key:  "warm_prefix_jitter_ratio",
 			typ:  "float",
 			desc: "ping 节拍抖动幅度 ±比例（devin.warm_prefix_jitter_ratio，防同刻齐射打满分钟桶）；取值 (0,1)，<=0 默认 0.15",
-			def:  func() string { return strconv.FormatFloat(d0().Devin.Warm.JitterRatio, 'g', -1, 64) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatFloat(c.Warm.JitterRatio, 'g', -1, 64) }),
+			def: func() string {
+				return strconv.FormatFloat(devin.NormalizeWarmConfig(d0().Devin.Warm).JitterRatio, 'g', -1, 64)
+			},
+			live: devinLive(deps, func(c devin.Config) string {
+				return strconv.FormatFloat(devin.NormalizeWarmConfig(c.Warm).JitterRatio, 'g', -1, 64)
+			}),
 			apply: devinField(deps, func(c *devin.Config, v string) error {
 				f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
 				if err != nil {
@@ -497,16 +510,18 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:   "warm_prefix_max_streams",
 			typ:   "int",
 			desc:  "同时保温的谱系数上限（devin.warm_prefix_max_streams）；<=0 默认 256",
-			def:   func() string { return strconv.Itoa(d0().Devin.Warm.MaxStreams) },
-			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Warm.MaxStreams) }),
+			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxStreams) },
+			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeWarmConfig(c.Warm).MaxStreams) }),
 			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MaxStreams })),
 		},
 		{
 			key:  "warm_prefix_max_retained_mb",
 			typ:  "int",
 			desc: "保留请求体内存总量上限 MB（devin.warm_prefix_max_retained_mb，超限按 LRU 驱逐）；<=0 默认 96",
-			def:  func() string { return strconv.FormatInt(d0().Devin.Warm.MaxRetainedMB, 10) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatInt(c.Warm.MaxRetainedMB, 10) }),
+			def:  func() string { return strconv.FormatInt(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxRetainedMB, 10) },
+			live: devinLive(deps, func(c devin.Config) string {
+				return strconv.FormatInt(devin.NormalizeWarmConfig(c.Warm).MaxRetainedMB, 10)
+			}),
 			apply: devinField(deps, func(c *devin.Config, v string) error {
 				n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 				if err != nil {
@@ -520,8 +535,8 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:   "warm_prefix_min_prefix_tokens",
 			typ:   "int",
 			desc:  "谱系可保温的最低前缀 token 数（devin.warm_prefix_min_prefix_tokens，低于此冷启动够便宜不烧 RPM）；<=0 默认 8192",
-			def:   func() string { return strconv.Itoa(d0().Devin.Warm.MinPrefixTokens) },
-			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Warm.MinPrefixTokens) }),
+			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MinPrefixTokens) },
+			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeWarmConfig(c.Warm).MinPrefixTokens) }),
 			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MinPrefixTokens })),
 		},
 		{
@@ -529,9 +544,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "含阻塞型 pending 工具调用的谱系最长保温静默秒数（devin.warm_prefix_blocked_max_idle_seconds）；<=0 默认 14400",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Warm.BlockedMaxIdle })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).BlockedMaxIdle })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Warm.BlockedMaxIdle })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).BlockedMaxIdle })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.BlockedMaxIdle })),
 		},
 		{
@@ -539,9 +554,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "无 pending 或仅用户节奏 pending 的谱系最长静默秒数（devin.warm_prefix_userpaced_max_idle_seconds）；<=0 默认 2700",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Warm.UserPacedMaxIdle })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UserPacedMaxIdle })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Warm.UserPacedMaxIdle })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UserPacedMaxIdle })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.UserPacedMaxIdle })),
 		},
 		{
@@ -549,9 +564,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "已完成 subagent 谱系最长保温静默秒数（devin.warm_prefix_subdone_max_idle_seconds）；<=0 默认 600",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Warm.SubDoneMaxIdle })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).SubDoneMaxIdle })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Warm.SubDoneMaxIdle })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).SubDoneMaxIdle })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.SubDoneMaxIdle })),
 		},
 		{
@@ -559,25 +574,25 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			typ:  "int",
 			desc: "无法分类流的最长保温静默秒数兜底（devin.warm_prefix_unknown_max_idle_seconds）；<=0 默认 1800",
 			def: func() string {
-				return secondsOf(func(c devin.Config) time.Duration { return c.Warm.UnknownMaxIdle })(d0().Devin)
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UnknownMaxIdle })(d0().Devin)
 			},
-			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.Warm.UnknownMaxIdle })),
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeWarmConfig(c.Warm).UnknownMaxIdle })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Warm.UnknownMaxIdle })),
 		},
 		{
 			key:   "warm_prefix_blocked_names",
 			typ:   "json",
 			desc:  "判为阻塞型的 pending 工具名表（devin.warm_prefix_blocked_names），JSON 数组；空数组用内置默认",
-			def:   func() string { return jsonString(d0().Devin.Warm.BlockedNames, "[]") },
-			live:  devinLive(deps, func(c devin.Config) string { return jsonString(c.Warm.BlockedNames, "[]") }),
+			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).BlockedNames, "[]") },
+			live:  devinLive(deps, func(c devin.Config) string { return jsonString(devin.NormalizeWarmConfig(c.Warm).BlockedNames, "[]") }),
 			apply: devinField(deps, mutateNames(func(c *devin.Config) *[]string { return &c.Warm.BlockedNames })),
 		},
 		{
 			key:   "warm_prefix_userpaced_names",
 			typ:   "json",
 			desc:  "判为用户节奏型的 pending 工具名表（devin.warm_prefix_userpaced_names），JSON 数组；空数组用内置默认",
-			def:   func() string { return jsonString(d0().Devin.Warm.UserPacedNames, "[]") },
-			live:  devinLive(deps, func(c devin.Config) string { return jsonString(c.Warm.UserPacedNames, "[]") }),
+			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).UserPacedNames, "[]") },
+			live:  devinLive(deps, func(c devin.Config) string { return jsonString(devin.NormalizeWarmConfig(c.Warm).UserPacedNames, "[]") }),
 			apply: devinField(deps, mutateNames(func(c *devin.Config) *[]string { return &c.Warm.UserPacedNames })),
 		},
 		// ---- 服务与日志 ----

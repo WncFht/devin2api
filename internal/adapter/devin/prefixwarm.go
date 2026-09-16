@@ -85,9 +85,9 @@ type WarmConfig struct {
 	UserPacedNames []string
 }
 
-// normalizeWarmConfig 把无效值回落到默认值：时长/上限 <=0、抖动出
-// (0,1) 区间、名表为空。
-func normalizeWarmConfig(params WarmConfig) WarmConfig {
+// NormalizeWarmConfig 把无效值回落到默认值：时长/上限 <=0、抖动出
+// (0,1) 区间、名表为空。运行时与面板展示共用此函数，两处口径一致。
+func NormalizeWarmConfig(params WarmConfig) WarmConfig {
 	if params.Interval <= 0 {
 		params.Interval = 180 * time.Second
 	}
@@ -285,7 +285,7 @@ func (w *cacheWarmer) setParams(next WarmConfig) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.params = normalizeWarmConfig(next)
+	w.params = NormalizeWarmConfig(next)
 	if !w.params.Enabled {
 		w.entries = make(map[warmLineageKey]*warmEntry)
 		w.retainedBytes = 0
