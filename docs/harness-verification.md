@@ -4,20 +4,20 @@
 
 ## 验证矩阵
 
-| 场景                               | Claude Code                                                | pi                               | kimi-code                          | Codex                                                  |
-| ---------------------------------- | ---------------------------------------------------------- | -------------------------------- | ---------------------------------- | ------------------------------------------------------ |
-| 单轮问答                           | ✅                                                         | ✅                               | ✅                                 | ✅                                                     |
-| 多轮记忆                           | ✅ `--continue` 回忆 codeword                              | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅                                                     |
-| 单工具调用 (写 + 读文件)           | ✅ Write/Read                                              | ✅ write/read                    | ✅ write/read                      | ✅                                                     |
-| 并行工具调用                       | ✅                                                         | ✅ 同轮读两文件                  | ✅ 同轮读两文件                    | ✅ 2 call + 2 result                                   |
-| 图像输入                           | ✅ 识别纯蓝 PNG                                            | ✅ `@blue.png` 识别颜色          | ✅ `image_in` 读 PNG 识别颜色      | ✅ `exec -i` 识别纯蓝 PNG                              |
-| 并发会话                           | ✅ CC+Codex 并行                                           | ✅ pi+kimi 并行                  | ✅                                 | ✅ CC+Codex 并行                                       |
-| 多步任务 (写文件+bash 执行 + 汇报) | ✅                                                         | ✅                               | ✅                                 | ✅                                                     |
-| 流式                               | ✅                                                         | ✅                               | ✅                                 | ✅                                                     |
-| 前缀缓存                           | ✅ 后续轮 `cache_read` ~25.5k                              | ✅ `cache_read` 53k–111k         | ✅ `cache_read` ~17.7k             | ✅                                                     |
-| thinking/签名                      | ✅ 尾随签名已合并修复                                      | ✅ `thinking:enabled,8192` 正常  | ✅ thinking 输出正常               | ✅                                                     |
-| subagent/skill/MCP                 | ✅ 7 种内置 agent + Skill + `mcp__` 工具全通（指纹已改写） | ✅                               | —                                  | ✅ 模板全过；`apply_patch`(custom) 被丢，走 shell 兜底 |
-| 客户端压缩                         | ✅ 自带，~202k 实测自动触发                                | pi 自带 (16k reserve/20k recent) | kimi-code 自带                     | ✅ `auto_compact`，resume 240k 实测触发                |
+| 场景                               | Claude Code                                                | pi                               | kimi-code                          | Codex                                                                                                                     |
+| ---------------------------------- | ---------------------------------------------------------- | -------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 单轮问答                           | ✅                                                         | ✅                               | ✅                                 | ✅                                                                                                                        |
+| 多轮记忆                           | ✅ `--continue` 回忆 codeword                              | ✅ `--continue` 回忆 `JAGUAR-77` | ✅ `-r <session>` 回忆 `MANTIS-33` | ✅                                                                                                                        |
+| 单工具调用 (写 + 读文件)           | ✅ Write/Read                                              | ✅ write/read                    | ✅ write/read                      | ✅                                                                                                                        |
+| 并行工具调用                       | ✅                                                         | ✅ 同轮读两文件                  | ✅ 同轮读两文件                    | ✅ 2 call + 2 result                                                                                                      |
+| 图像输入                           | ✅ 识别纯蓝 PNG                                            | ✅ `@blue.png` 识别颜色          | ✅ `image_in` 读 PNG 识别颜色      | ✅ `exec -i` 识别纯蓝 PNG                                                                                                 |
+| 并发会话                           | ✅ CC+Codex 并行                                           | ✅ pi+kimi 并行                  | ✅                                 | ✅ CC+Codex 并行                                                                                                          |
+| 多步任务 (写文件+bash 执行 + 汇报) | ✅                                                         | ✅                               | ✅                                 | ✅                                                                                                                        |
+| 流式                               | ✅                                                         | ✅                               | ✅                                 | ✅                                                                                                                        |
+| 前缀缓存                           | ✅ 后续轮 `cache_read` ~25.5k                              | ✅ `cache_read` 53k–111k         | ✅ `cache_read` ~17.7k             | ✅                                                                                                                        |
+| thinking/签名                      | ✅ 尾随签名已合并修复                                      | ✅ `thinking:enabled,8192` 正常  | ✅ thinking 输出正常               | ✅                                                                                                                        |
+| subagent/skill/MCP                 | ✅ 7 种内置 agent + Skill + `mcp__` 工具全通（指纹已改写） | ✅                               | —                                  | ✅ `apply_patch`(custom)、`collaboration.*` 子代理（namespace 展平过境）、托管 `web_search`（代理代执行上游搜索 RPC）全通 |
+| 客户端压缩                         | ✅ 自带，~202k 实测自动触发                                | pi 自带 (16k reserve/20k recent) | kimi-code 自带                     | ✅ `auto_compact`，resume 240k 实测触发                                                                                   |
 
 ## 各客户端接入时踩过的坑 (已修)
 
@@ -47,7 +47,8 @@
 ### Codex
 
 - 93KB 真实请求 (2 call + 2 result) 验证通过
-- `apply_patch` 实际走 `exec_command` shell 命令而非 FREEFORM tool call——`/v1/responses` 适配层只认 `type:"function"`，`custom`/`web_search`/`mcp`/`local_shell` 类型静默丢弃（wire 上 `tools:[]`），Codex 用 shell 兜底功能完整
+- **0.154.0 工具对齐**（2026-09-15 全量实测，逐工具强制调用 + tool_result 回环，原始记录 `notes/archive/2026-09-15-tool-alignment.md`）：声明 13 条**全通**——`exec_command/write_stdin/list_mcp_resources/list_mcp_resource_templates/read_mcp_resource/request_user_input/view_image/get_goal/create_goal/update_goal` 与 `apply_patch`（`type:"custom"` 经包装绕行，流式 `custom_tool_call_input.*` 事件完整，真实 e2e 补丁落盘成功）。
+- 曾不可用的两条已修（2026-09-16 上线实测）：`namespace collaboration` 展平为 `collaboration__X` 声明、响应侧改回带点调用名，codex 按 `collaboration.spawn_agent` 分发正常；托管 `web_search` 投影为带真实 Cascade schema 的 Server 诱饵 function，模型调用时代理由上游 `GetWebSearchResults` 代执行并续轮，`web_search_call` 输出项与 `in_progress`/`searching` 生命周期事件完整。续轮不再透传指名 tool_choice（修复前 `{"type":"web_search"}` 强发会滚到 8 跳封顶，9 次搜索 + 8 份重复答复）。旧版本里 `apply_patch` 走 `exec_command` shell 兜底；0.153.3 时代 `custom` 类型曾被丢，现为正常通道。
 - 0.153.3 备选模板三条指纹（open-source 定义句 / plan 状态句对 / ANSI 转义句）已入 `sanitize.go`——换模型家族映射时会踩到，已提前改写
 - 工具调用历史曾触发 `invalid_argument` → 代理已做 call→result 配对重排
 
