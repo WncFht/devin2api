@@ -140,6 +140,10 @@ ref)
   fi
   cmd="git -C \"${STAGING}\" fetch origin --tags --quiet"
   cmd+=" && git -C \"${STAGING}\" checkout --detach -f $(shq "${REF}")"
+  # checkout -f 不清未跟踪文件：此前 worktree 部署的残留（如他人未提交
+  # WIP 的 .go）会混进包目录把源码构建带炸。ref 语义是「部署已推送
+  # 状态」，故清干净；gitignore 项（staging config.yaml）不受影响。
+  cmd+=" && git -C \"${STAGING}\" clean -fd"
   cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
