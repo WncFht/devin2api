@@ -30,9 +30,6 @@ const (
 )
 
 func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	// 面板聚合多个上游调用，给足时间避免单个慢接口拖垮整体；
 	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
 	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
@@ -343,9 +340,6 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 }
 
 func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	// 模型目录可能较大，给足时间并复用缓存；与 ResponseHeaderTimeout 对齐。
 	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
 	defer cancel()

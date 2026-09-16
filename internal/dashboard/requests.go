@@ -26,9 +26,6 @@ const requestsFetchCap = 2000
 // ?q= 子串、?status=499|!200|>=400|4xx（逗号 OR）、?status_class=2xx|4xx|5xx、
 // ?result=、?model=、?error_stage=、?since=/?until=RFC3339 时间窗。
 func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeJSON(w, http.StatusOK, json.RawMessage(`{"requests":[],"disabled":true}`))
 		return
@@ -90,9 +87,6 @@ type matrixEntry struct {
 // 扫描上限直接用满 requestsFetchCap——走 /requests?limit=500 的列表
 // 口径在高流量下盖不满 30 分钟分桶窗口。
 func (h *Handler) apiRequestMatrix(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeJSON(w, http.StatusOK, json.RawMessage(`{"entries":[],"disabled":true}`))
 		return
@@ -161,9 +155,6 @@ func parseRequestFilter(params map[string][]string) debuglog.RequestFilter {
 
 // apiExportRequests 把筛选后的请求摘要导出为 JSON 数组或 CSV。
 func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
@@ -220,9 +211,6 @@ func csvEscape(s string) string {
 // apiMergedResponse 把请求目录内 06-http-response.jsonl 的 SSE 帧合并成
 // 可读的最终响应文本（同类调试面板的响应合并同款），原始帧仍可读。
 func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
@@ -243,9 +231,6 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 // apiActiveRequests 返回仍在进行中的请求快照：已耗时、丢弃数、
 // 已落盘文件清单——请求未结束就能检查它收到过什么（同类实现同款）。
 func (h *Handler) apiActiveRequests(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	active := []debuglog.ActiveRequest{}
 	if h.debugManager != nil {
 		active = h.debugManager.ActiveRequests()
@@ -255,9 +240,6 @@ func (h *Handler) apiActiveRequests(w http.ResponseWriter, r *http.Request) {
 
 // apiRequestDetail 返回单个请求目录的 meta.json 与文件清单。
 func (h *Handler) apiRequestDetail(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
@@ -276,9 +258,6 @@ func (h *Handler) apiRequestDetail(w http.ResponseWriter, r *http.Request) {
 // apiRequestFile 返回请求目录内单个文件的内容；JSON/JSONL 原文回传，
 // 由前端按需美化。大小超上限时截断并标记 truncated。
 func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
@@ -321,9 +300,6 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 // apiAbortRequest 中断一个仍在进行中的请求（取消其 ctx，客户端看到连接断开）。
 // 给 agent 提供中止卡死请求的手段；已完结或不存在的目录返回 404。
 func (h *Handler) apiAbortRequest(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil || !h.debugManager.Abort(chi.URLParam(r, "dir")) {
 		writeError(w, http.StatusNotFound, "no active request for dir")
 		return
@@ -333,9 +309,6 @@ func (h *Handler) apiAbortRequest(w http.ResponseWriter, r *http.Request) {
 
 // apiProcessLog 返回进程 stderr 日志尾部（slog 行），支持 ?offset= 增量拉取。
 func (h *Handler) apiProcessLog(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
@@ -354,9 +327,6 @@ func (h *Handler) apiProcessLog(w http.ResponseWriter, r *http.Request) {
 
 // apiDebugToggle 运行时切换请求日志开关；body {"enabled":bool}。
 func (h *Handler) apiDebugToggle(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeError(w, http.StatusNotFound, "debug log disabled at startup")
 		return

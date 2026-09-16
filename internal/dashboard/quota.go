@@ -219,9 +219,6 @@ func (h *Handler) QuotaReport() map[string]any {
 
 // apiQuota 返回配额历史与燃烧速率预测。
 func (h *Handler) apiQuota(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	writeJSON(w, http.StatusOK, h.QuotaReport())
 }
 

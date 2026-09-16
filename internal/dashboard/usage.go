@@ -11,9 +11,6 @@ import (
 // apiUsage 返回 index.jsonl 聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.debugManager == nil {
 		writeJSON(w, http.StatusOK, json.RawMessage(`{"disabled":true}`))
 		return

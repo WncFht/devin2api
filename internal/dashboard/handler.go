@@ -184,32 +184,29 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/panel", h.servePanel)
 	mux.Post("/panel/login", h.handleLogin)
 	mux.Get("/panel/static/*", h.serveStatic)
-	mux.Get("/panel/api", h.apiIndex)
-	mux.Get("/panel/api/status", h.apiStatus)
-	mux.Get("/panel/api/models", h.apiModels)
-	mux.Get("/panel/api/stats", h.apiStats)
-	mux.Get("/panel/api/requests", h.apiRequests)
-	mux.Get("/panel/api/requests/matrix", h.apiRequestMatrix)
-	mux.Get("/panel/api/requests/export", h.apiExportRequests)
-	mux.Get("/panel/api/requests/active", h.apiActiveRequests)
-	mux.Get("/panel/api/requests/{dir}", h.apiRequestDetail)
-	mux.Get("/panel/api/requests/{dir}/merged", h.apiMergedResponse)
-	mux.Get("/panel/api/requests/{dir}/file/*", h.apiRequestFile)
-	mux.Post("/panel/api/requests/{dir}/abort", h.apiAbortRequest)
-	mux.Get("/panel/api/logs", h.apiProcessLog)
-	mux.Get("/panel/api/quota", h.apiQuota)
-	mux.Get("/panel/api/usage", h.apiUsage)
-	mux.Post("/panel/api/debug/toggle", h.apiDebugToggle)
-	mux.Get("/panel/api/config", h.apiConfigCurrent)
-	mux.Post("/panel/api/config/reload", h.apiConfigReload)
+	mux.Get("/panel/api", h.authed(h.apiIndex))
+	mux.Get("/panel/api/status", h.authed(h.apiStatus))
+	mux.Get("/panel/api/models", h.authed(h.apiModels))
+	mux.Get("/panel/api/stats", h.authed(h.apiStats))
+	mux.Get("/panel/api/requests", h.authed(h.apiRequests))
+	mux.Get("/panel/api/requests/matrix", h.authed(h.apiRequestMatrix))
+	mux.Get("/panel/api/requests/export", h.authed(h.apiExportRequests))
+	mux.Get("/panel/api/requests/active", h.authed(h.apiActiveRequests))
+	mux.Get("/panel/api/requests/{dir}", h.authed(h.apiRequestDetail))
+	mux.Get("/panel/api/requests/{dir}/merged", h.authed(h.apiMergedResponse))
+	mux.Get("/panel/api/requests/{dir}/file/*", h.authed(h.apiRequestFile))
+	mux.Post("/panel/api/requests/{dir}/abort", h.authed(h.apiAbortRequest))
+	mux.Get("/panel/api/logs", h.authed(h.apiProcessLog))
+	mux.Get("/panel/api/quota", h.authed(h.apiQuota))
+	mux.Get("/panel/api/usage", h.authed(h.apiUsage))
+	mux.Post("/panel/api/debug/toggle", h.authed(h.apiDebugToggle))
+	mux.Get("/panel/api/config", h.authed(h.apiConfigCurrent))
+	mux.Post("/panel/api/config/reload", h.authed(h.apiConfigReload))
 }
 
 // apiStats 返回代理自身运行指标：请求计数、错误分类、流式占比、字节量，
 // 以及调试日志管道自观测数据（丢弃数、活跃目录数）。
 func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	payload := map[string]any{"version": h.version}
 	if h.metrics != nil {
 		payload["http"] = h.metrics.Snapshot()
@@ -229,9 +226,6 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 // apiConfigCurrent 返回脱敏后的生效配置视图（文件键名与 config.yaml 一致，
 // token/api_key/password 以 sha256 前缀代替明文）。实现见 main 的装配。
 func (h *Handler) apiConfigCurrent(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.configOps == nil || h.configOps.Current == nil {
 		http.NotFound(w, r)
 		return
@@ -243,9 +237,6 @@ func (h *Handler) apiConfigCurrent(w http.ResponseWriter, r *http.Request) {
 // 返回 applied（已生效）与 requires_restart（要重启才生效）两组字段名，
 // 让调用方明确知道哪些改动仍在 pending。
 func (h *Handler) apiConfigReload(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	if h.configOps == nil || h.configOps.Reload == nil {
 		http.NotFound(w, r)
 		return
@@ -261,9 +252,6 @@ func (h *Handler) apiConfigReload(w http.ResponseWriter, r *http.Request) {
 // apiIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明。
 // 让初次接触的调用方无需读代码即可发现检索入口与日志布局。
 func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
-	if !h.requireAuth(w, r) {
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "devin-2api",
 		"version": h.version,
@@ -591,6 +579,17 @@ func (h *Handler) CheckPanelPassword(pw string, r *http.Request) (ok, locked boo
 		return true, false
 	}
 	return h.checkPasswordCredential(pw, passwordHash, remoteIP(r))
+}
+
+// authed 给需鉴权的面板端点套 requireAuth 前置：未授权时 401/429 已写回。
+// serveStatic 的 panel.css 例外（登录页自身要渲染）在路由处单独判，不走这里。
+func (h *Handler) authed(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.requireAuth(w, r) {
+			return
+		}
+		fn(w, r)
+	}
 }
 
 func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request) bool {
