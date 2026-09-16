@@ -169,5 +169,7 @@ Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST
 - 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
 - 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
+- 多个会话可能共用同一工作树：`deploy-remote.sh` 的 worktree 模式把工作树整体打包（含他人未提交 WIP），脏树部署前先确认树上文件的归属与可编译性。
+- 提交/部署命令不要把 `cmd | tail` 接进 `&&` 链：管道洗掉退出码，曾把「nothing to commit」当成可重试错误反复触发部署（25 分钟 20+ 次生产重启）。
 
 其它平台的对应物：Linux 用 `scripts/deploy-linux.sh`（systemd --user，XDG 三目录：bin `~/.local/bin`、config `${XDG_CONFIG_HOME:-~/.config}/devin-2api`、state `${XDG_STATE_HOME:-~/.local/state}/devin-2api`，unit 生成在 `~/.config/systemd/user/`）；Windows 不做服务化，裸 exe 前台跑（Ctrl+C 触发同一套优雅排空；exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，config 在 `%APPDATA%\devin-2api`，state 在 `%LOCALAPPDATA%\devin-2api`）。两平台脚本与 macOS 版共享 `scripts/lib-deploy.sh`（release 下载/校验、healthz 版本轮询、stray 检查）。二进制自身的路径解析链：`-config` > `DEVIN2API_CONFIG` > `./config.yaml` > 平台默认；`-state-dir` > `DEVIN2API_STATE_DIR` > 平台默认。
