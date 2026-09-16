@@ -208,6 +208,33 @@ func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 	return kh, false
 }
 
+// parseRequestFilter 从查询串构建索引侧结构化筛选：q 为子串，status 是
+// 状态表达式（499/4xx/>=400/!200，逗号 OR），status_class/result/model/
+// error_stage/since/until 为精确或时间条件。dashboardLogs 与导出端点共用。
+func parseRequestFilter(r *http.Request) debuglog.RequestFilter {
+	q := r.URL.Query()
+	get := func(key string) string { return strings.TrimSpace(q.Get(key)) }
+	filter := debuglog.RequestFilter{
+		Query:       get("q"),
+		StatusClass: get("status_class"),
+		Status:      get("status"),
+		Result:      get("result"),
+		Model:       get("model"),
+		ErrorStage:  get("error_stage"),
+	}
+	if since := get("since"); since != "" {
+		if parsed, err := time.Parse(time.RFC3339, since); err == nil {
+			filter.Since = parsed
+		}
+	}
+	if until := get("until"); until != "" {
+		if parsed, err := time.Parse(time.RFC3339, until); err == nil {
+			filter.Until = parsed
+		}
+	}
+	return filter
+}
+
 // dashboardLogs 实现 ccLoad 的 /dashboard|/admin/logs（HandleErrors）：
 // data=日志行数组（新在前），count=窗口内命中总数；limit 默认 200、上限 1000。
 // count 以 index.jsonl 尾部读取窗（≈4MB/万行）为准——窗口外仍有历史时
@@ -233,15 +260,19 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		respondOKCount(w, []logEntry{}, 0)
 		return
 	}
-	filter := debuglog.RequestFilter{Since: since, Until: until}
-	if code, err := strconv.Atoi(strings.TrimSpace(q.Get("status_code"))); err == nil && code > 0 {
-		filter.Status = strconv.Itoa(code)
+	filter := parseRequestFilter(r)
+	// 时间窗以 resolveRange（range/start/end 契约）为准——它带默认窗，
+	// 查询串里的 since/until 留给筛选语义不覆盖列表窗口。
+	filter.Since, filter.Until = since, until
+	if filter.Status == "" {
+		if code, err := strconv.Atoi(strings.TrimSpace(q.Get("status_code"))); err == nil && code > 0 {
+			filter.Status = strconv.Itoa(code)
+		}
 	}
 	result := h.debug.ListRequests(-1, filter)
 
 	api := strings.TrimSpace(q.Get("api"))
 	upstream := strings.ToLower(strings.TrimSpace(q.Get("upstream_protocol")))
-	model := strings.TrimSpace(q.Get("model"))
 	modelLike := strings.TrimSpace(q.Get("model_like"))
 	// log_source 行级口径：proxy 排除探针行，manual_test 只留探针行；
 	// ""/all 全放（探针行在「全部日志」下可见，与 ccLoad 一致）。
@@ -263,11 +294,8 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		if upstream != "" && upstream != "all" && upstream != "devin" {
 			return false
 		}
-		// model 精确命中请求模型或生效模型（别名场景两侧都可能被用户选中）；
-		// model_like 同口径取子串。
-		if model != "" && e.RequestedModel != model && e.Model != model {
-			return false
-		}
+		// model_like 同口径取子串（model 精确筛选由 filter.Model 在索引侧完成，
+		// 覆盖 RequestedModel/Model/ResponseModel 三个字段）。
 		if modelLike != "" && !strings.Contains(e.RequestedModel, modelLike) && !strings.Contains(e.Model, modelLike) {
 			return false
 		}
@@ -366,7 +394,9 @@ func (h *Handler) adminMergedResponse(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	respondOK(w, mergeResponseBody(req.RespBody))
+	// 上传的 resp_body 是用户贴的调试内容，合并前先过 token 字面值脱敏——
+	// 面板回显口径与目录读路径一致。
+	respondOK(w, mergeResponseBody(string(h.maskToken([]byte(req.RespBody)))))
 }
 
 // respondDebugLogUnavailable 对应 ccLoad 的 404+debugLogUnavailableInfo：
@@ -417,8 +447,19 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 		StatusCode int    `json:"status_code"`
 		Result     string `json:"result"`
 	}
-	if data, _, _, err := h.debug.ReadFile(dir, debuglog.MetaFile); err == nil {
-		_ = json.Unmarshal(data, &meta)
+	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
+	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
+	// 不外流，meta 本体不需要过 maskToken。
+	if detail, err := h.debug.Detail(dir); err == nil {
+		_ = json.Unmarshal(detail.Meta, &meta)
+		resp["files"] = detail.Files
+	}
+	// 读路径按最近见过的 token 字面值兜底脱敏——写路径的 secretKey
+	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
+	// token 在这里罩住；自愈轮换后旧 token 仍在 recentTokens 集合内。
+	readStage := func(name string) ([]byte, error) {
+		data, _, _, err := h.debug.ReadFile(dir, name)
+		return h.maskToken(data), err
 	}
 	if started, err := time.Parse(time.RFC3339Nano, meta.StartedAt); err == nil {
 		resp["created_at"] = started.Unix()
@@ -430,7 +471,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 
 	// 01：客户端原始请求 → original_*；缺席时 protocol_transformed 留缺省，
 	// 前端「请求」页签回落到 req_*（上游 wire）而不是空面板。
-	if data, _, _, err := h.debug.ReadFile(dir, debuglog.StageHTTPRequest); err == nil {
+	if data, err := readStage(debuglog.StageHTTPRequest); err == nil {
 		var original struct {
 			Path    string          `json:"path"`
 			Headers json.RawMessage `json:"headers"`
@@ -449,7 +490,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	var reqBody bytes.Buffer
 	if names, err := debuglog.DevinRequestStages(filepath.Join(h.debug.Root(), dir)); err == nil {
 		for _, name := range names {
-			data, _, _, err := h.debug.ReadFile(dir, name)
+			data, err := readStage(name)
 			if err != nil {
 				continue
 			}
@@ -469,7 +510,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	addDebugResponseBody(resp, "req_body", reqBody.Bytes())
 
 	// 04：上游原始帧原文 → resp_body。
-	if data, _, _, err := h.debug.ReadFile(dir, debuglog.StageDevinResponse); err == nil {
+	if data, err := readStage(debuglog.StageDevinResponse); err == nil {
 		addDebugResponseBody(resp, "resp_body", data)
 	}
 
@@ -478,7 +519,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	// 上游 wire 语义；其余（transport/rate_gate/本地层）记 0——
 	// 「未形成完整上游响应」由 upstream_error 补充说明。
 	var errStage, errMessage string
-	if data, _, _, err := h.debug.ReadFile(dir, debuglog.ErrorFile); err == nil {
+	if data, err := readStage(debuglog.ErrorFile); err == nil {
 		var e struct {
 			Stage   string `json:"stage"`
 			Message string `json:"message"`
@@ -498,7 +539,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	}
 
 	// 06：下发客户端的记录帧重建线上字节流。
-	if data, _, _, err := h.debug.ReadFile(dir, debuglog.StageHTTPResponse); err == nil {
+	if data, err := readStage(debuglog.StageHTTPResponse); err == nil {
 		addDebugResponseBody(resp, "translated_resp_body", rebuildClientWire(data))
 	}
 	return resp

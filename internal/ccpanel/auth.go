@@ -189,6 +189,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case "api_token":
 		if h.tokens != nil {
 			if _, ok := h.tokens.Resolve(req.Token); ok {
+				h.clearLoginFailure(remoteIP(r))
 				respondOK(w, map[string]any{
 					"token":     req.Token,
 					"expiresIn": 86400,
@@ -196,6 +197,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+		}
+		// 令牌爆破面与密码等价（都直开面板只读面），共用同一按 IP
+		// 失败账本：失败计数与 admin 分支同语义进 ledger。
+		if h.noteLoginFailure(remoteIP(r)) {
+			respondError(w, http.StatusTooManyRequests, "Too many failed login attempts")
+			return
 		}
 		respondError(w, http.StatusUnauthorized, "Invalid credentials")
 	default:
@@ -253,19 +260,17 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// withWebAuth 是 /dashboard 组的门槛：admin Bearer 直通；否则尝试把
-// Bearer 解析为下游令牌（api_token 身份进 ctx，handler 据 TokenID/KeyHash
-// 收敛数据范围）。面板密码为空（开放面板）时无 Bearer 也按 admin 放行——
+// withWebAuth 是 /dashboard 组的门槛：api_token Bearer 先解析（有效令牌
+// 直接进 api_token 身份并清失败账本）；解析不中再走密码校验——有效令牌
+// 若在密码校验上计失败，持钥人每请求 +1，5 次后被误判锁定。校验失败的
+// Bearer 由 CheckPanelBearer 计入共享 IP 账本（一次失败只计一次，两种
+// 凭据不重复记）。面板密码为空（开放面板）时无 Bearer 也按 admin 放行——
 // CheckPanelBearer 的开放语义已覆盖这条。
 func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authed, locked := h.CheckPanelBearer(r)
-		if authed {
-			next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
-			return
-		}
-		if !locked && h.tokens != nil {
+		if h.tokens != nil {
 			if t, ok := h.tokens.Resolve(bearerToken(r)); ok {
+				h.clearLoginFailure(remoteIP(r))
 				next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{
 					Role:    "api_token",
 					TokenID: t.ID,
@@ -273,6 +278,11 @@ func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 				})))
 				return
 			}
+		}
+		authed, locked := h.CheckPanelBearer(r)
+		if authed {
+			next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
+			return
 		}
 		if locked {
 			respondError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")

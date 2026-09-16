@@ -35,6 +35,10 @@ type Handler struct {
 	// 面板是唯一持密码的端点，爆破代价要抬高。
 	loginMu       sync.RWMutex
 	loginFailures map[string]*loginFail
+	// recentTokens 是最近见过的上游凭据（token 自愈轮换会换新）：
+	// maskToken 按这个集合脱敏，旧请求目录里的历史 token 字面值也罩住。
+	tokenMu      sync.Mutex
+	recentTokens []string
 
 	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
