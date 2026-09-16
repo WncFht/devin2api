@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -185,17 +186,12 @@ func mutateString(field func(*devin.Config) *string, validate func(string) error
 	}
 }
 
-// mutateInt 生成 int 字段的 mutate：十进制整数，可选校验（nil 放行）。
-func mutateInt(field func(*devin.Config) *int, validate func(int) error) func(*devin.Config, string) error {
+// mutateInt 生成 int 字段的 mutate：十进制整数直接写入。
+func mutateInt(field func(*devin.Config) *int) func(*devin.Config, string) error {
 	return func(c *devin.Config, v string) error {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil {
 			return fmt.Errorf("value must be an integer: %w", err)
-		}
-		if validate != nil {
-			if err := validate(n); err != nil {
-				return err
-			}
 		}
 		*field(c) = n
 		return nil
@@ -209,6 +205,9 @@ func mutateSeconds(field func(*devin.Config) *time.Duration) func(*devin.Config,
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		if err != nil {
 			return fmt.Errorf("value must be an integer (seconds): %w", err)
+		}
+		if int64(n) > math.MaxInt64/int64(time.Second) {
+			return fmt.Errorf("value overflows duration: %d", n)
 		}
 		*field(c) = time.Duration(n) * time.Second
 		return nil
@@ -396,7 +395,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Gate.MaxRPM) }),
 			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
 				return &c.Gate.MaxRPM
-			}, nil)),
+			})),
 		},
 		{
 			key:  "gate_max_hold_seconds",
@@ -485,7 +484,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 				if err != nil {
 					return fmt.Errorf("value must be a number: %w", err)
 				}
-				if f >= 1 {
+				// !(f<1) 一并拦 NaN/+Inf：NaN 存进去下游 normalize 的
+				// <=0||>=1 比较全 false 会漏过，time.Duration(NaN) 是垃圾值。
+				if !(f < 1) {
 					return errors.New("warm_prefix_jitter_ratio must be < 1 (<=0 resets to default 0.15)")
 				}
 				c.Warm.JitterRatio = f
@@ -498,7 +499,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			desc:  "同时保温的谱系数上限（devin.warm_prefix_max_streams）；<=0 默认 256",
 			def:   func() string { return strconv.Itoa(d0().Devin.Warm.MaxStreams) },
 			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Warm.MaxStreams) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MaxStreams }, nil)),
+			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MaxStreams })),
 		},
 		{
 			key:  "warm_prefix_max_retained_mb",
@@ -521,7 +522,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			desc:  "谱系可保温的最低前缀 token 数（devin.warm_prefix_min_prefix_tokens，低于此冷启动够便宜不烧 RPM）；<=0 默认 8192",
 			def:   func() string { return strconv.Itoa(d0().Devin.Warm.MinPrefixTokens) },
 			live:  devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.Warm.MinPrefixTokens) }),
-			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MinPrefixTokens }, nil)),
+			apply: devinField(deps, mutateInt(func(c *devin.Config) *int { return &c.Warm.MinPrefixTokens })),
 		},
 		{
 			key:  "warm_prefix_blocked_max_idle_seconds",
@@ -652,6 +653,9 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 				n, err := strconv.Atoi(strings.TrimSpace(v))
 				if err != nil {
 					return fmt.Errorf("value must be an integer (minutes): %w", err)
+				}
+				if int64(n) > math.MaxInt64/int64(time.Minute) {
+					return fmt.Errorf("value overflows duration: %d", n)
 				}
 				deps.SetQuotaInterval(time.Duration(n) * time.Minute)
 				return nil
