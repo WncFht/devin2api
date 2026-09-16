@@ -384,12 +384,13 @@
       nameTd.dataset.mobileLabel = labels.model;
       const label = (c && c.label) || r.model;
       const strong = h('div');
+      strong.style.overflowWrap = 'anywhere';
       const strongText = h('strong', null, label);
       strong.appendChild(strongText);
       nameTd.appendChild(strong);
       if (label !== r.model) {
         const sub = h('div', null, r.model);
-        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);';
+        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);overflow-wrap:anywhere;';
         nameTd.appendChild(sub);
       }
       if (r.has_override) {
@@ -401,7 +402,7 @@
       // 目录外名字（别名/注册表/流量来源）在名称下补一行等宽小字 uid。
       if (!c) {
         const sub = h('div', null, r.model);
-        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);';
+        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);overflow-wrap:anywhere;';
         nameTd.appendChild(sub);
       }
 

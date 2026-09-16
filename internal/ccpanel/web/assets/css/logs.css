@@ -344,7 +344,7 @@
     }
 
     .logs-filter-group.filter-group--model {
-      flex-basis: 200px;
+      flex-basis: 216px;
     }
 
     .logs-filter-group.filter-group--status {
@@ -740,6 +740,11 @@
         min-width: 0;
       }
 
+      .logs-table .logs-col-api-key,
+      .logs-table .logs-col-timing {
+        white-space: normal !important;
+      }
+
       .logs-table .logs-col-api-key code {
         word-break: break-all;
       }
@@ -756,6 +761,13 @@
 
       .logs-table .logs-col-timing .log-timing-separator {
         display: none;
+      }
+
+      .logs-table .logs-col-timing::before {
+        flex: 0 1 auto;
+        min-width: 0;
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .logs-filter-controls {
