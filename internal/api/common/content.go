@@ -23,6 +23,12 @@ func invalidRequest(format string, args ...any) *llm.Failure {
 	return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf(format, args...)}
 }
 
+// JSONBlank 判定原始 JSON 为空或字面 null——字段缺席与显式 null 同义。
+func JSONBlank(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
 // DecodeContent 把 JSON 字符串或 part 数组解码为中间内容块。
 // 解码时被丢弃/降级的 part 记入 dropped（"content_part:<type>"），
 // 调用方接 RequestMessages.Dropped——「解码即过滤」的静默面需要可观测。
@@ -96,7 +102,7 @@ func DecodeImagePart(raw json.RawMessage) (llm.ImageContent, error) {
 
 	candidates := []json.RawMessage{envelope.ImageURL, envelope.Image, envelope.Source}
 	for _, candidate := range candidates {
-		if len(bytes.TrimSpace(candidate)) == 0 || bytes.Equal(bytes.TrimSpace(candidate), []byte("null")) {
+		if JSONBlank(candidate) {
 			continue
 		}
 		if image, err := DecodeImageValue(candidate); err == nil {

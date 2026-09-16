@@ -3,7 +3,6 @@
 package common
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -18,7 +17,7 @@ import (
 // 上游没有对应物：记 dropped 透出并按 auto 放行——这类约束指向的工具本来
 // 就在 tools 里被丢弃，为不可满足的强制条件 400 掉整个请求没有意义。
 func ParseOpenAIToolChoice(raw json.RawMessage, dropped *[]string) (*llm.ToolChoice, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if JSONBlank(raw) {
 		return nil, nil
 	}
 	var name string
@@ -65,7 +64,7 @@ func ParseOpenAIToolChoice(raw json.RawMessage, dropped *[]string) (*llm.ToolCho
 // 第二个返回值是 disable_parallel_tool_use；历史上本代理解析过
 // 非规范的 "disable_parallel_tool_calls" 拼写，两个键都接受（任一 true 即禁用）。
 func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if JSONBlank(raw) {
 		return nil, false, nil
 	}
 	var object struct {
@@ -99,8 +98,7 @@ func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error
 // {}（上游只认 JSON 对象）；非 JSON 对象原文（畸形 JSON、标量）标记 custom
 // 走 Custom 通道保真上行——吞成 {} 会让上游看到的调用语义悄悄变空。
 func NormalizeToolArguments(raw json.RawMessage) (json.RawMessage, bool) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	if JSONBlank(raw) {
 		return json.RawMessage(`{}`), false
 	}
 	if !llm.IsJSONObject(raw) {

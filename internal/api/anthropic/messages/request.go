@@ -139,7 +139,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 			context.SessionKey = metadata.UserID
 		}
 	}
-	if len(bytes.TrimSpace(request.System)) > 0 && !bytes.Equal(bytes.TrimSpace(request.System), []byte("null")) {
+	if !common.JSONBlank(request.System) {
 		if err := appendSystem(&context, request.System); err != nil {
 			return AdaptedRequest{}, err
 		}
@@ -377,7 +377,7 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 // decodeAnthropicUserMessages 把 Anthropic user 消息 content 拆分为一个或多个中间消息。
 // tool_result 内容块会生成独立的 llm.ToolResultMessage。
 func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Message, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return []llm.Message{llm.UserMessage{
 			Content:     []llm.Content{llm.TextContent{Text: ""}},
 			TimestampMS: time.Now().UnixMilli(),
@@ -458,7 +458,7 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 // 是服务端已完成执行的结果块——回放 wire 上结果须走 TOOL prompt 与调用
 // 配对，故在该处截断 assistant 段、拆出独立 ToolResultMessage。
 func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Message, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return []llm.Message{llm.AssistantMessage{
 			Content:     []llm.Content{llm.TextContent{Text: ""}},
 			TimestampMS: time.Now().UnixMilli(),
@@ -616,7 +616,7 @@ func decodeToolResult(context *llm.RequestMessages, toolUseID string, raw json.R
 
 // decodeAnthropicContent 把原始 JSON 解码为 text / image 内容块。
 func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
 	var text string

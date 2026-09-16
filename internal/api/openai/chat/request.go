@@ -183,7 +183,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if request.ParallelToolCalls != nil && !*request.ParallelToolCalls {
 		context.DisableParallelToolCalls = true
 	}
-	if len(bytes.TrimSpace(request.Stop)) > 0 && !bytes.Equal(bytes.TrimSpace(request.Stop), []byte("null")) {
+	if !common.JSONBlank(request.Stop) {
 		var stops []string
 		if err := json.Unmarshal(request.Stop, &stops); err != nil {
 			var single string
@@ -352,7 +352,7 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 // content 在场但解不出内容块（空数组/全部 part 不识）时同样落成
 // 空文本占位保住轮次，并记 empty_message:user——与 anthropic 面同口径。
 func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return []llm.Content{llm.TextContent{Text: ""}}, nil
 	}
 	content, err := common.DecodeContent(raw, &context.Dropped)
@@ -370,7 +370,7 @@ func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm
 // （含旧版 function_call 单字段形态）。
 func decodeAssistantContent(context *llm.RequestMessages, message Message, callIDs map[string]struct{}, functionIDs map[string]string) ([]llm.Content, error) {
 	var content []llm.Content
-	if len(bytes.TrimSpace(message.Content)) > 0 && !bytes.Equal(bytes.TrimSpace(message.Content), []byte("null")) {
+	if !common.JSONBlank(message.Content) {
 		decoded, err := common.DecodeContent(message.Content, &context.Dropped)
 		if err != nil {
 			return nil, err
@@ -422,7 +422,7 @@ func decodeAssistantContent(context *llm.RequestMessages, message Message, callI
 // "auto"/"none" 字符串或 {"name":X} 对象；空/null 输入返回 (nil, true)
 // 表示字段缺席，其余不识形态返回 ok=false 由调用方记 dropped。
 func parseLegacyFunctionCall(raw json.RawMessage) (*llm.ToolChoice, bool) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return nil, true
 	}
 	var mode string

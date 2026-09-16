@@ -391,7 +391,7 @@ func renderWebSearchResults(query string, results []webSearchResultEntry) string
 // 面向的 {ns}.{sub}（或 name+namespace 分字段形态），进 wire 前改回
 // {ns}__{sub} 与声明名保持一致。
 func appendInputMessages(context *llm.RequestMessages, raw json.RawMessage, nameMaps *toolNameMaps) error {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if common.JSONBlank(raw) {
 		return nil
 	}
 	var text string
