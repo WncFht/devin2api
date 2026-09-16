@@ -129,6 +129,8 @@ type Adapter struct {
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
+	// warmer 焐住上游 idle 连接池，省掉每请求的 TCP+TLS 握手段。
+	warmer *connWarmer
 	// assignments 缓存 (router uid, cascade id) 的 AssignModel 解析结果：
 	// assignment jwt 绑 cascade_id（上游实测），同会话内复用省去
 	// 每请求一次的解析往返。
@@ -175,6 +177,7 @@ func New(config Config) (*Adapter, error) {
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
 	adapter.streamClient = devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL, gzipSend)
+	adapter.warmer = newConnWarmer(base, config.BaseURL)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
@@ -182,6 +185,13 @@ func New(config Config) (*Adapter, error) {
 	adapter.apiClient = devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL, gzipSend)
 
 	return adapter, nil
+}
+
+// Close 停掉焐池协程等后台资源；进程退出是最兜底的生命周期。
+func (adapter *Adapter) Close() {
+	if adapter.warmer != nil {
+		adapter.warmer.Close()
+	}
 }
 
 // currentToken 返回当前生效的上游凭据。
@@ -549,6 +559,7 @@ const maxConnectAttempts = 3
 // 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
 func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
+	adapter.warmer.kickRequest()
 	// sent/open 埋点幂等（CAS -1）：重试时 sent 留在首次发送、open 记首个
 	// 成功的建流，sent→open 的差值如实包含退避重试耗时。
 	recorder := debuglog.FromContext(ctx)
@@ -763,6 +774,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 		return cached, nil
 	}
 	name, version, os := adapter.currentConfig().ClientIdentity()
+	adapter.warmer.kickRequest()
 	resp, err := adapter.apiClient.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
 		ModelRouterUid: proto.String(routerUID),

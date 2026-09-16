@@ -182,6 +182,7 @@ func main() {
 		slog.Error("create devin adapter failed", "error", err)
 		os.Exit(1)
 	}
+	defer devinAdapter.Close()
 	// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
 	// 自愈更新 token 后，面板的上游调用自动跟随新值。
 	tokenFunc := devinAdapter.TokenFunc()
