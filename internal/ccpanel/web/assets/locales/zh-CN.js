@@ -2395,5 +2395,20 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.msg.saved': '已保存',
   'models.msg.saveFailed': '保存失败',
   'models.msg.loadFailed': '加载模型失败',
-  'models.msg.enterName': '请输入模型名'
+  'models.msg.enterName': '请输入模型名',
+  'models.pageTitle': '模型注册表',
+  'models.pageSubtitle': '对外模型名的启用开关与重定向；重定向在别名解析之前生效',
+  'models.summary': '共 {total} 个 · 启用 {enabled} · 禁用 {disabled} · 重定向 {redirected}',
+  'models.filter.disabled': '已禁用',
+  'models.filter.redirected': '已重定向',
+  'models.filter.override': '有覆盖',
+  'models.add.modalTitle': '添加模型',
+  'models.add.nameLabel': '对外模型名',
+  'models.add.targetLabel': '重定向目标（可选）',
+  'models.src.catalog': '目录',
+  'models.src.alias': '别名',
+  'models.src.registry': '注册表',
+  'models.src.traffic': '流量',
+  'models.emptyTitle': '暂无模型',
+  'models.emptyDesc': '没有匹配筛选条件的模型'
 };

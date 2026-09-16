@@ -2395,5 +2395,20 @@ window.I18N_LOCALES['en'] = {
   'models.msg.saved': 'Saved',
   'models.msg.saveFailed': 'Save failed',
   'models.msg.loadFailed': 'Failed to load models',
-  'models.msg.enterName': 'Please enter a model name'
+  'models.msg.enterName': 'Please enter a model name',
+  'models.pageTitle': 'Model Registry',
+  'models.pageSubtitle': 'Enable switch and redirect for public model names; redirect resolves before the alias chain',
+  'models.summary': '{total} total · {enabled} enabled · {disabled} disabled · {redirected} redirected',
+  'models.filter.disabled': 'Disabled',
+  'models.filter.redirected': 'Redirected',
+  'models.filter.override': 'Overridden',
+  'models.add.modalTitle': 'Add Model',
+  'models.add.nameLabel': 'Public model name',
+  'models.add.targetLabel': 'Redirect target (optional)',
+  'models.src.catalog': 'catalog',
+  'models.src.alias': 'alias',
+  'models.src.registry': 'registry',
+  'models.src.traffic': 'traffic',
+  'models.emptyTitle': 'No models',
+  'models.emptyDesc': 'No models match the current filters'
 };

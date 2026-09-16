@@ -491,11 +491,17 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
   const badgeHtml = redirectBadge || effort || tokens > 0
     ? `<span class="model-badges">${redirectBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
     : '';
+  // 重定向时行内透出目标模型名——原 ccLoad 只在 hover tooltip 里给，
+  // 扫列表时看不到转发落点。
+  const redirectInline = redirected
+    ? `<span class="model-redirect-inline" style="color: var(--color-text-secondary); font-size: var(--text-xs);">→ ${escapeHtml(actualModel)}</span>`
+    : '';
 
   return `<span class="model-display">
       <span class="${classes.join(' ')}"${title}>
         <span class="model-text">${escapeHtml(model)}</span>
       </span>
+      ${redirectInline}
       ${badgeHtml}
     </span>`;
 }

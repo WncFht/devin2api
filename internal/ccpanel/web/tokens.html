@@ -287,8 +287,10 @@
         </div>
 
         <div class="token-edit-main">
-          <!-- 渠道限制区域 -->
-          <section class="token-edit-section token-edit-section--channels token-edit-channels-section" data-token-edit-section="channels">
+          <!-- 渠道限制区域：本服务单上游、渠道恒为合成渠道，区块隐藏
+               （display:flex 压过 hidden 属性，须 inline style）；元素保留，
+               tokens.js 仍按 id 写入计数与列表。 -->
+          <section class="token-edit-section token-edit-section--channels token-edit-channels-section" data-token-edit-section="channels" style="display:none">
             <div class="token-edit-section-header token-edit-channels-header">
               <h3 class="token-edit-section-title token-edit-channels-title">
                 <span data-i18n="tokens.channelRestriction">渠道限制</span>
