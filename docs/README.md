@@ -25,11 +25,12 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 部署与工程
 
-| 文档            | 用途                                                                                                             |
-| --------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `deployment.md` | 部署：macOS launchd / Linux systemd --user / Windows 裸进程，平台目录布局、优雅排空、单实例约定、stderr 日志轮转 |
-| `toolchain.md`  | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族                                 |
-| `perf.md`       | 性能工作流：pprof/fgprof 端点、loadtest+upstreamstub 压测、延迟分解字段、benchstat 验收、PGO                     |
+| 文档               | 用途                                                                                                             |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `deployment.md`    | 部署：macOS launchd / Linux systemd --user / Windows 裸进程，平台目录布局、优雅排空、单实例约定、stderr 日志轮转 |
+| `config-reload.md` | config.yaml 热重载：热/冷键分界、面板覆盖恒赢文件的不变量、新键加热重载面的步骤                                  |
+| `toolchain.md`     | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本族                                 |
+| `perf.md`          | 性能工作流：pprof/fgprof 端点、loadtest+upstreamstub 压测、延迟分解字段、benchstat 验收、PGO                     |
 
 ## 速查入口
 
