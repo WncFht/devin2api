@@ -321,6 +321,7 @@ window.I18N_LOCALES['en'] = {
   'trend.typeDuration': 'Duration',
   'trend.typeTokens': 'Token Usage',
   'trend.typeCost': 'Cost',
+  'trend.typeCacheHit': 'Cache Hit Rate',
   'trend.modelFilter': 'Model Filter',
   'trend.selectModels': 'Select Models',
   'trend.loading': 'Loading trend data...',
@@ -348,6 +349,9 @@ window.I18N_LOCALES['en'] = {
   'trend.minute': 'minute(s)',
   'trend.fetchDataFailed': 'Failed to fetch trend data',
   'trend.loadDataFailed': 'Unable to load trend data',
+  'trend.cacheHitRate': 'Cache Hit Rate',
+  'trend.warmStatus': 'Prefix warm: {entries} warming · {pings} pings · {rate} hit',
+  'trend.warmStatusDisabled': 'Prefix warm: disabled',
 
   // ============================================================
   // Logs
@@ -523,6 +527,20 @@ window.I18N_LOCALES['en'] = {
   'settings.runtimeMetrics.metric.capacityRejected': 'Session capacity rejections',
   'settings.runtimeMetrics.metric.budgetRejected': 'Transcript budget rejections',
   'settings.runtimeMetrics.metric.previousResponseMisses': 'Previous response misses',
+  'settings.runtimeMetrics.group.warm': 'Prefix Warming',
+  'settings.runtimeMetrics.warmNote': 'Prefix warming retains the latest request per lineage and replays it with MaxTokens=1 during silent periods to keep the upstream prompt cache alive. Hit rate covers warm pings only, not real request traffic.',
+  'settings.runtimeMetrics.metric.warmEnabled': 'Warming enabled',
+  'settings.runtimeMetrics.metric.warmEntries': 'Retained lineages',
+  'settings.runtimeMetrics.metric.warmPromoted': 'Actively warmed lineages',
+  'settings.runtimeMetrics.metric.warmSuspects': 'Suspected superseded',
+  'settings.runtimeMetrics.metric.warmRetainedBytes': 'Retained request bytes',
+  'settings.runtimeMetrics.metric.warmPingsSent': 'Warm pings sent',
+  'settings.runtimeMetrics.metric.warmPingHits': 'Ping cache hits',
+  'settings.runtimeMetrics.metric.warmPingMisses': 'Ping cache misses',
+  'settings.runtimeMetrics.metric.warmPingHitRate': 'Ping hit rate',
+  'settings.runtimeMetrics.metric.warmPingSkips': 'Gate-skipped pings',
+  'settings.runtimeMetrics.metric.warmPingErrors': 'Ping send failures',
+  'settings.runtimeMetrics.metric.warmRetired': 'Retired lineages',
   // Group names
   'settings.nav.stream-timeout': 'Stream Timeout',
   'settings.nav.non-stream-timeout': 'Non-stream Timeout',

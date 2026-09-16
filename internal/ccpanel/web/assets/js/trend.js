@@ -261,6 +261,38 @@
       }
     }
 
+    // 保温机制摘要：复用 /admin/runtime-metrics 的 warm 组；api_token 身份
+    // 无 admin 权限——端点回 401 会被 fetchWithAuth 踢去登录页，这里按
+    // 角色直接跳过；组未投影（未接线）或失败时同样保持隐藏。
+    async function loadWarmStatus() {
+      const item = document.getElementById('warm-status-item');
+      const label = document.getElementById('warm-status');
+      if (!item || !label) return;
+      if (window.isAPITokenRole && window.isAPITokenRole()) return;
+      try {
+        const data = await fetchDataWithAuth('/admin/runtime-metrics');
+        const warm = data ? data.warm : null;
+        if (!warm) {
+          item.style.display = 'none';
+          return;
+        }
+        if (!warm.enabled) {
+          label.textContent = t('trend.warmStatusDisabled');
+        } else {
+          const total = (warm.ping_hits || 0) + (warm.ping_misses || 0);
+          const rate = total > 0 ? ((warm.ping_hits / total) * 100).toFixed(1) + '%' : '—';
+          label.textContent = t('trend.warmStatus', {
+            entries: warm.promoted || 0,
+            pings: warm.pings_sent || 0,
+            rate: rate
+          });
+        }
+        item.style.display = '';
+      } catch (_) {
+        item.style.display = 'none';
+      }
+    }
+
     function computeBucketMin(hours) {
       if (hours <= 1) return 1; // 1分钟
       if (hours <= 6) return 2; // 2分钟
@@ -577,6 +609,39 @@
             return total > 0 ? total / bucketMin : 0;
           })
         });
+      } else if (trendType === 'cache_hit') {
+        // 缓存命中趋势：cache_read / (cache_read + input)——input 口径不含 cache_read
+        series.push({
+          name: t('trend.cacheHitRate'),
+          type: 'line',
+          smooth: 0.25,
+          symbol: 'circle',
+          symbolSize: 4,
+          showSymbol: false,
+          sampling: 'lttb',
+          connectNulls: false,
+          emphasis: { focus: 'series', showSymbol: true },
+          itemStyle: {
+            color: '#f97316'
+          },
+          lineStyle: {
+            width: 2,
+            color: '#f97316',
+            cap: 'round',
+            join: 'round'
+          },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(249, 115, 22, 0.18)' },
+              { offset: 1, color: 'rgba(249, 115, 22, 0.00)' }
+            ])
+          },
+          data: window.trendData.map(point => {
+            const hit = point.cache_read_tokens || 0;
+            const total = hit + (point.input_tokens || 0);
+            return total > 0 ? (hit / total) * 100 : null;
+          })
+        });
       }
 
       // 为每个可见模型添加对应趋势线
@@ -794,6 +859,38 @@
               data: rpmData
             });
           }
+        } else if (trendType === 'cache_hit') {
+          // 缓存命中趋势：模型缓存命中率（与聚合线同式）
+          const hitData = new Array(dataLen);
+          let hasData = false;
+
+          for (let i = 0; i < dataLen; i++) {
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const hit = modelData ? (modelData.cache_read_tokens || 0) : 0;
+            const total = modelData ? hit + (modelData.input_tokens || 0) : 0;
+            if (total > 0) {
+              hitData[i] = (hit / total) * 100;
+              hasData = true;
+            } else {
+              hitData[i] = null;
+            }
+          }
+
+          if (hasData) {
+            series.push({
+              name: modelName,
+              type: 'line',
+              smooth: 0.25,
+              symbol: 'none',
+              sampling: 'lttb',
+              connectNulls: false,
+              emphasis: { focus: 'series' },
+              itemStyle: { color: color },
+              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
+              data: hitData
+            });
+          }
         }
       }
 
@@ -812,7 +909,7 @@
       const yAxisScale = (trendType === 'first_byte' || trendType === 'duration');
       const useLatencyAxis = (trendType === 'first_byte' || trendType === 'duration');
       const yAxisMin = useLatencyAxis ? latencyAxisMin : 0;
-      const yAxisMax = useLatencyAxis ? latencyAxisMax : null;
+      const yAxisMax = useLatencyAxis ? latencyAxisMax : (trendType === 'cache_hit' ? 100 : null);
       const chartTheme = getTrendChartTheme();
 
       const chartType = window.currentTrendChartType === 'bar' ? 'bar' : 'line';
@@ -885,6 +982,9 @@
               } else if (window.currentTrendType === 'rpm') {
                 // RPM：保留1位小数
                 formattedValue = value.toFixed(1) + '/min';
+              } else if (window.currentTrendType === 'cache_hit') {
+                // 缓存命中率：百分比
+                formattedValue = value.toFixed(1) + '%';
               } else {
                 // 调用次数：整数
                 formattedValue = Math.round(value).toString();
@@ -986,6 +1086,9 @@
               } else if (trendType === 'rpm') {
                 // RPM：保留1位小数
                 return value.toFixed(1);
+              } else if (trendType === 'cache_hit') {
+                // 缓存命中率：百分比
+                return Math.round(value) + '%';
               } else {
                 // 调用次数：K/M格式
                 if (value >= 1000000) return (value / 1000000) + 'M';
@@ -1500,7 +1603,7 @@ function shouldShowZoom(points, hours, trendType) {
       bindToggles();
       bindModelFilterControls();
 
-      // 模型选项与令牌选项互不依赖
+      // 模型选项与令牌选项互不依赖；保温摘要走 /admin 端点，失败自行隐藏
       const [, authTokens] = await Promise.all([
         loadModels(),
         window.initAuthTokenFilter({
@@ -1510,7 +1613,8 @@ function shouldShowZoom(points, hours, trendType) {
             tokenPrefix: t('trend.tokenPrefix'),
             restoreValue: window.currentAuthToken
           }
-        })
+        }),
+        loadWarmStatus()
       ]);
       window.authTokens = authTokens;
 
@@ -1531,7 +1635,7 @@ function shouldShowZoom(points, hours, trendType) {
       });
 
       // 定期刷新数据（每5分钟）
-      setInterval(loadData, 5 * 60 * 1000);
+      setInterval(() => { loadData(); loadWarmStatus(); }, 5 * 60 * 1000);
       }
     });
 
@@ -1669,7 +1773,7 @@ function shouldShowZoom(points, hours, trendType) {
 
         // 恢复趋势类型
         window.currentTrendType = 'first_byte';
-        if (['count', 'rpm', 'first_byte', 'duration', 'tokens', 'cost'].includes(restoredFilters.trendType)) {
+        if (['count', 'rpm', 'first_byte', 'duration', 'tokens', 'cost', 'cache_hit'].includes(restoredFilters.trendType)) {
           window.currentTrendType = restoredFilters.trendType;
         }
 

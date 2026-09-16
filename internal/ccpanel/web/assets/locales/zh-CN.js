@@ -321,6 +321,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.typeDuration': '总耗时',
   'trend.typeTokens': 'Token用量',
   'trend.typeCost': '费用消耗',
+  'trend.typeCacheHit': '缓存命中率',
   'trend.modelFilter': '模型筛选',
   'trend.selectModels': '选择模型',
   'trend.loading': '正在加载趋势数据...',
@@ -348,6 +349,9 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.minute': '分钟',
   'trend.fetchDataFailed': '获取趋势数据失败',
   'trend.loadDataFailed': '无法加载趋势数据',
+  'trend.cacheHitRate': '缓存命中率',
+  'trend.warmStatus': '前缀保温：{entries} 条在保温 · ping {pings} 次 · 命中率 {rate}',
+  'trend.warmStatusDisabled': '前缀保温：未开启',
 
   // ============================================================
   // 日志
@@ -523,6 +527,20 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.runtimeMetrics.metric.capacityRejected': '会话容量拒绝',
   'settings.runtimeMetrics.metric.budgetRejected': 'Transcript 预算拒绝',
   'settings.runtimeMetrics.metric.previousResponseMisses': 'Previous response 未命中',
+  'settings.runtimeMetrics.group.warm': '前缀保温',
+  'settings.runtimeMetrics.warmNote': '前缀保温保留最近请求并在静默期以 MaxTokens=1 重放，维持上游 prompt 缓存血统存活；命中率只统计保温 ping，不含真实请求流量。',
+  'settings.runtimeMetrics.metric.warmEnabled': '保温开关',
+  'settings.runtimeMetrics.metric.warmEntries': '留存血统数',
+  'settings.runtimeMetrics.metric.warmPromoted': '保温中血统数',
+  'settings.runtimeMetrics.metric.warmSuspects': '疑似被取代数',
+  'settings.runtimeMetrics.metric.warmRetainedBytes': '留存请求字节',
+  'settings.runtimeMetrics.metric.warmPingsSent': '保温 ping 发送数',
+  'settings.runtimeMetrics.metric.warmPingHits': 'ping 命中数',
+  'settings.runtimeMetrics.metric.warmPingMisses': 'ping 未命中数',
+  'settings.runtimeMetrics.metric.warmPingHitRate': 'ping 命中率',
+  'settings.runtimeMetrics.metric.warmPingSkips': '闸门拦截跳过数',
+  'settings.runtimeMetrics.metric.warmPingErrors': 'ping 发送失败数',
+  'settings.runtimeMetrics.metric.warmRetired': '已退休血统数',
   // 分组名称
   'settings.nav.stream-timeout': '流式超时',
   'settings.nav.non-stream-timeout': '非流式超时',

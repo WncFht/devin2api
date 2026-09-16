@@ -249,6 +249,26 @@ const runtimeMetricDomains = [
       { key: 'analytics_reads_primary', labelKey: 'settings.runtimeMetrics.metric.analyticsReadsPrimary', format: 'boolean' },
       { key: 'primary_sync_last_success_unix_ms', labelKey: 'settings.runtimeMetrics.metric.primarySyncLastSuccess', format: 'unixMilliseconds' }
     ]
+  },
+  {
+    sourceKey: 'warm',
+    titleKey: 'settings.runtimeMetrics.group.warm',
+    descriptionKey: 'settings.runtimeMetrics.warmNote',
+    optional: true,
+    metrics: [
+      { key: 'enabled', labelKey: 'settings.runtimeMetrics.metric.warmEnabled', format: 'boolean' },
+      { key: 'entries', labelKey: 'settings.runtimeMetrics.metric.warmEntries' },
+      { key: 'promoted', labelKey: 'settings.runtimeMetrics.metric.warmPromoted' },
+      { key: 'suspects', labelKey: 'settings.runtimeMetrics.metric.warmSuspects' },
+      { key: 'retained_bytes', labelKey: 'settings.runtimeMetrics.metric.warmRetainedBytes', format: 'bytes' },
+      { key: 'pings_sent', labelKey: 'settings.runtimeMetrics.metric.warmPingsSent' },
+      { key: 'ping_hits', labelKey: 'settings.runtimeMetrics.metric.warmPingHits' },
+      { key: 'ping_misses', labelKey: 'settings.runtimeMetrics.metric.warmPingMisses' },
+      { key: 'ping_hit_rate', labelKey: 'settings.runtimeMetrics.metric.warmPingHitRate', format: 'percent' },
+      { key: 'ping_skips', labelKey: 'settings.runtimeMetrics.metric.warmPingSkips' },
+      { key: 'ping_errors', labelKey: 'settings.runtimeMetrics.metric.warmPingErrors' },
+      { key: 'retired', labelKey: 'settings.runtimeMetrics.metric.warmRetired' }
+    ]
   }
 ];
 
