@@ -2151,3 +2151,95 @@ func TestListModelsWaiterCancel(t *testing.T) {
 		t.Fatalf("fetcher ListModels() error = %v", err)
 	}
 }
+
+// TestServerToolMixedTurnKeepsDone 钉住混合回合的收尾语义：同一跳里客户端
+// 调用与托管调用并存时，代理执行托管搜索、把结果事件插进尾帧，但 Done
+// 必须保留——客户端调用还等客户端执行，续轮责任不在代理。
+func TestServerToolMixedTurnKeepsDone(t *testing.T) {
+	ctx := context.Background()
+	functionCall := devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL
+	call := func(id, name, arguments string) *devinproto.GetChatMessageResponse {
+		return &devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+			Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(arguments)}}}
+	}
+	decoder := newResponseDecoder("model", nil, nil)
+	decoder.serverTools = map[string]bool{"web_search": true}
+	continued := false
+	stream := &responseStream{
+		frames: pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+			call("c0", "web_search", `{"query":"q"}`),
+			call("c1", "get_weather", `{"city":"sh"}`),
+			{StopReason: functionCall.Enum()},
+		}}),
+		cancel:  func() {},
+		decoder: decoder,
+		search: func(_ context.Context, query string, _, _ []string, _ uint32) (webSearchOutcome, error) {
+			return webSearchOutcome{summary: "ans " + query}, nil
+		},
+		continueTurn: func(_ llm.AssistantMessage, _ []llm.ToolResultMessage, _ []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+			continued = true
+			return nil, nil, nil, errors.New("must not continue a mixed turn")
+		},
+	}
+	var events []llm.ResponseEvent
+	for {
+		event, err := stream.Recv(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if continued {
+		t.Fatal("mixed turn triggered a continuation")
+	}
+	last := events[len(events)-1]
+	if last.Type != llm.ResponseEventDone || last.Reason != llm.StopReasonToolUse {
+		t.Fatalf("last event = %v, want Done(tool_use)", last.Type)
+	}
+	var serverResults, callEnds int
+	for _, event := range events {
+		switch event.Type {
+		case llm.ResponseEventServerToolResult:
+			serverResults++
+			if event.ServerResult.ToolCallID != "c0" {
+				t.Fatalf("server result for %q, want c0", event.ServerResult.ToolCallID)
+			}
+		case llm.ResponseEventToolCallEnd:
+			callEnds++
+		}
+	}
+	if serverResults != 1 || callEnds != 2 {
+		t.Fatalf("serverResults=%d callEnds=%d, want 1 and 2", serverResults, callEnds)
+	}
+}
+
+// TestResponseDecoderReadsCreditCostFrame 钉住帧顶层计费字段的解码：上游
+// 在末帧携带 credit_cost/committed_* 快照（当前实测模型均未上报，只能靠
+// 单测固定解码面），任一字段在场即建 Usage.Costs。
+func TestResponseDecoderReadsCreditCostFrame(t *testing.T) {
+	decoder := newResponseDecoder("model", nil, nil)
+	decoder.start()
+	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("ok")})
+	decoder.decode(&devinproto.GetChatMessageResponse{
+		StopReason:                    devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum(),
+		CreditCost:                    proto.Int32(42),
+		CommittedCreditCost:           proto.Int32(1000),
+		CommittedAcuCost:              proto.Float64(1.5),
+		CommittedQuotaCostBasisPoints: proto.Int64(700),
+		CommittedOverageCostCents:     proto.Int64(3),
+	})
+	events := decoder.finish(nil)
+	done := events[len(events)-1]
+	costs := done.Message.Usage.Costs
+	if costs == nil {
+		t.Fatal("done usage missing costs")
+	}
+	if costs.CreditCost != 42 || costs.CommittedCreditCost != 1000 ||
+		costs.CommittedAcuCost != 1.5 || costs.CommittedQuotaCostBasisPoints != 700 ||
+		costs.CommittedOverageCostCents != 3 {
+		t.Fatalf("costs = %#v", costs)
+	}
+}
