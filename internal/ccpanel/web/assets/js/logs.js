@@ -1908,7 +1908,8 @@ async function initFilters(restoredFilters, preloaded) {
   window.bindFilterApplyInputs({
     apply: applyFilter,
     debounceInputIds: ['f_q'],
-    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_status_class', 'f_result', 'f_q']
+    // f_q 只走 input 防抖：同时挂 Enter 会在键入后 500ms 内重复触发 apply
+    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_status_class', 'f_result']
   });
 }
 
@@ -2539,7 +2540,6 @@ function updateDebugLogContentPreserveScroll(data) {
       .find(f => String(f?.name) === debugFileContext.openName);
     if (!entry) {
       resetDebugFileView();
-      renderDebugFileList(data);
     } else if (Number(entry.size) !== debugFileContext.openSize) {
       void loadDebugFile(debugFileContext.openName);
     }
@@ -2866,7 +2866,9 @@ async function loadDebugFile(name) {
     const data = await fetchDataWithAuth(debugLogFileUrl(fileId, name));
     // 期间用户切换/收起了文件——晚到的内容直接丢弃
     if (debugFileContext?.openName !== name) return;
-    debugFileContext.openSize = Number(data?.size) || null;
+    // 0 字节文件要存 0 而非 null——null 会让轮询判成「大小变了」每拍重拉
+    const openSize = Number(data?.size);
+    debugFileContext.openSize = Number.isFinite(openSize) ? openSize : null;
     if (data?.binary) {
       renderDebugFileBinary(name, data);
       return;
@@ -2925,6 +2927,7 @@ async function previewDebugFileImage(name, container) {
     img.alt = name;
     img.src = url;
     img.onload = () => URL.revokeObjectURL(url);
+    img.onerror = () => URL.revokeObjectURL(url);
     container.appendChild(img);
   } catch (_) { /* 预览失败仅保留信息行 */ }
 }
