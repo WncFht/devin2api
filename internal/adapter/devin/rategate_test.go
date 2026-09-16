@@ -455,3 +455,93 @@ func TestRateGateSetParamsPreservesLatch(t *testing.T) {
 		t.Fatal("quota=0 should disable window limit")
 	}
 }
+
+// 闩外可发区间且配额未满、无排队者：ping 放行并计入本桶配额。
+func TestRateGateTryAdmitPass(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	pinGateClock(gate, 10)
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit = false, want admit in sendable window with free quota")
+	}
+	if gate.bucketUsed != 1 {
+		t.Fatalf("bucketUsed = %d, want 1 (admitted ping counts into bucket)", gate.bucketUsed)
+	}
+}
+
+// 闩内一律拒绝：配额再空也不放行——冷却期恰是最不该打上游的时刻，
+// ping 不占滴灌探针槽，被拒也不计桶。
+func TestRateGateTryAdmitLatchedRejects(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true while latched, want false (no drip-slot stealing)")
+	}
+	if gate.bucketUsed != 0 {
+		t.Fatalf("bucketUsed = %d, want 0 (rejected ping must not count)", gate.bucketUsed)
+	}
+}
+
+// 死区内不放行：ping 与正式请求一样不得在桶界两侧冒险发送。
+func TestRateGateTryAdmitDeadZoneRejects(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	pinGateClock(gate, 59)
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true in dead zone, want false")
+	}
+}
+
+// 本桶配额打满不放行：桶计数与 wait 共享同一本账。
+func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait error = %v, want pass (fills bucket)", err)
+	}
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true with full bucket, want false")
+	}
+}
+
+// 有排队等待者不放行：ping 不与睡醒者同权抢配额，排队者优先。
+func TestRateGateTryAdmitWaitersBlock(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	pinGateClock(gate, 10)
+	gate.mu.Lock()
+	gate.waiters = 1
+	gate.mu.Unlock()
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true with queued waiters, want false (queued first)")
+	}
+}
+
+// quota<=0 不做窗口限速：死区内也放行（与 wait 的零配额口径一致）。
+func TestRateGateTryAdmitZeroQuota(t *testing.T) {
+	gate := newRateGate(GateConfig{}, "")
+	pinGateClock(gate, 59) // 死区
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit = false with quota<=0, want true (no window limit)")
+	}
+}
+
+// nil 闸门放行：与 wait 的 nil 接收者语义一致。
+func TestRateGateTryAdmitNilGate(t *testing.T) {
+	var gate *rateGate
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit on nil gate = false, want true")
+	}
+}
+
+// ping 占用的是正式请求的配额：tryAdmit 放行后 wait 看到满桶——
+// 两条路径共用 bucketUsed 一本账。
+func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	pinGateClock(gate, 10)
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit = false, want admit")
+	}
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+		t.Fatalf("wait after admitted ping error = %v, want *llm.Failure (bucket exhausted by ping)", err)
+	}
+}

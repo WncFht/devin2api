@@ -501,6 +501,38 @@ func (gate *rateGate) wait(ctx context.Context) error {
 	}
 }
 
+// tryAdmit 给后台流量（前缀保温 ping）一条不排队、不偷槽的准入路径：
+// 闩内一律拒绝（不占滴灌探针槽——冷却期恰是最不该打上游的时刻）；
+// 闩外仅当当前处于可发区间、本桶配额未满且没有排队等待者时放行并计
+// 入桶计数（排队者优先——ping 与睡醒者同权抢配额会让整形形同虚设）。
+// 与 wait 的区别：不睡眠、不预约、不产事件；被拒调用方跳过本轮即可。
+func (gate *rateGate) tryAdmit() bool {
+	if gate == nil {
+		return true
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	now := gate.now()
+	gate.expireIfDue(now)
+	// 计数桶随窗口边界滚动，与 wait 同一本账。
+	ws := gate.windowStart(now)
+	if !ws.Equal(gate.bucketStart) {
+		gate.bucketStart = ws
+		gate.bucketUsed = 0
+	}
+	if now.Before(gate.limitedUntil) {
+		return false
+	}
+	if gate.quota <= 0 {
+		return true
+	}
+	if now.Sub(ws) < gate.usable && gate.bucketUsed < gate.quota && gate.waiters == 0 {
+		gate.bucketUsed++
+		return true
+	}
+	return false
+}
+
 // noteUpstreamError 用上游失败刷新冷却闩；只有 resource_exhausted 与
 // 限流有关，其余错误原样忽略。闩只延长不提前；只有闩被延长时才重置
 // 滴灌时钟——截止未变的重复拒绝说明窗口未过，原探测节奏仍然成立，
