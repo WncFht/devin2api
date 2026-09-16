@@ -110,7 +110,17 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, err := ccpanel.NewPanelSettings(dir, manager)
+	settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+		Debug:             manager,
+		DevinConfig:       devinAdapter.CurrentConfig,
+		ApplyDevin:        func(next devin.Config) error { _, err := devinAdapter.ApplyConfig(next); return err },
+		MaxConcurrency:    application.MaxConcurrency,
+		SetMaxConcurrency: application.SetMaxConcurrency,
+		QuotaInterval:     panel.QuotaInterval,
+		SetQuotaInterval:  panel.SetQuotaInterval,
+		PprofListen:       currentPprofListen,
+		SetPprofListen:    rebindPprof,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +303,17 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			settings, err := ccpanel.NewPanelSettings(dir, manager)
+			settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+				Debug:             manager,
+				DevinConfig:       devinAdapter.CurrentConfig,
+				ApplyDevin:        func(next devin.Config) error { _, err := devinAdapter.ApplyConfig(next); return err },
+				MaxConcurrency:    application.MaxConcurrency,
+				SetMaxConcurrency: application.SetMaxConcurrency,
+				QuotaInterval:     panel.QuotaInterval,
+				SetQuotaInterval:  panel.SetQuotaInterval,
+				PprofListen:       currentPprofListen,
+				SetPprofListen:    rebindPprof,
+			})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -101,7 +101,7 @@ func (config Config) ClientIdentity() (name, version, os string) {
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
 	// configMu 保护 config：ApplyConfig 热路径整体换值，读侧经
-	// currentConfig 取快照。
+	// CurrentConfig 取快照。
 	configMu sync.RWMutex
 	config   Config
 	// token 是当前生效的上游凭据：unauthenticated 自愈会原地更新，
@@ -261,8 +261,8 @@ func (adapter *Adapter) TokenFunc() func() string {
 	return adapter.currentToken
 }
 
-// currentConfig 返回当前生效配置的读快照。
-func (adapter *Adapter) currentConfig() Config {
+// CurrentConfig 返回当前生效配置的读快照。
+func (adapter *Adapter) CurrentConfig() Config {
 	adapter.configMu.RLock()
 	defer adapter.configMu.RUnlock()
 	return adapter.config
@@ -270,7 +270,7 @@ func (adapter *Adapter) currentConfig() Config {
 
 // Aliases 返回当前生效的模型别名映射，供面板做目录缺席校验。
 func (adapter *Adapter) Aliases() map[string]string {
-	return adapter.currentConfig().Aliases
+	return adapter.CurrentConfig().Aliases
 }
 
 // GateStats 返回速率闸门状态快照，供面板 stats 端点透出。
@@ -414,7 +414,7 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied []string, err error) {
 // 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
 // 凭据静默失效是排障天敌，进程日志里必须留痕。
 func (adapter *Adapter) reloadToken() bool {
-	source := adapter.currentConfig().TokenSource
+	source := adapter.CurrentConfig().TokenSource
 	if source == nil {
 		return false
 	}
@@ -466,7 +466,7 @@ func ResolveModelAlias(aliases map[string]string, model string) string {
 // arguments 的 json.Valid 曾被扫三次）。
 func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
 	request, sanitizeHits := sanitizeRequest(request)
-	cfg := adapter.currentConfig()
+	cfg := adapter.CurrentConfig()
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
 		model = cfg.Model
@@ -927,7 +927,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	if ok {
 		return cached, nil
 	}
-	name, version, os := adapter.currentConfig().ClientIdentity()
+	name, version, os := adapter.CurrentConfig().ClientIdentity()
 	link := adapter.link()
 	link.warmer.kickRequest()
 	resp, err := link.api.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
@@ -1091,9 +1091,9 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 // 配置模型补位、别名条目合并）。锁外运行——并发收敛、缓存提交与失败
 // 冷却都归 ListModels。
 func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, error) {
-	// config 经 currentConfig 取快照：写路径是 ApplyConfig 持 configMu
+	// config 经 CurrentConfig 取快照：写路径是 ApplyConfig 持 configMu
 	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
-	cfg := a.currentConfig()
+	cfg := a.CurrentConfig()
 	name, version, os := cfg.ClientIdentity()
 	resp, err := a.link().api.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),

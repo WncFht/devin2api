@@ -565,7 +565,7 @@ func (w *cacheWarmer) sendOnce(ctx context.Context, entry *warmEntry) (int64, er
 		}
 		binding.ModelAssignmentJWT = assignment.jwt
 	}
-	req, _, err := buildRequest(entry.retained, w.adapter.currentConfig(), binding)
+	req, _, err := buildRequest(entry.retained, w.adapter.CurrentConfig(), binding)
 	if err != nil {
 		return 0, err
 	}

@@ -87,9 +87,9 @@ func TestNormalizeAliases(t *testing.T) {
 		"b":       "real-uid",
 		"*":       "glm-5-2",
 	}
-	got, err := normalizeAliases(valid)
+	got, err := NormalizeAliases(valid)
 	if err != nil {
-		t.Fatalf("normalizeAliases() error = %v", err)
+		t.Fatalf("NormalizeAliases() error = %v", err)
 	}
 	want := map[string]string{"swe-2": "swe-2-max", "a": "real-uid", "b": "real-uid", "*": "glm-5-2"}
 	if len(got) != len(want) {
@@ -111,8 +111,8 @@ func TestNormalizeAliases(t *testing.T) {
 		{"a": "b", "b": "c", "c": "b"}, // 中间环
 	}
 	for i, m := range invalid {
-		if _, err := normalizeAliases(m); err == nil {
-			t.Fatalf("case %d: normalizeAliases(%v) error = nil, want rejection", i, m)
+		if _, err := NormalizeAliases(m); err == nil {
+			t.Fatalf("case %d: NormalizeAliases(%v) error = nil, want rejection", i, m)
 		}
 	}
 }

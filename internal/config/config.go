@@ -220,7 +220,7 @@ func (config *Config) Validate() error {
 		minutes := 5
 		config.Debug.QuotaIntervalMinutes = &minutes
 	}
-	aliases, err := normalizeAliases(config.Devin.Aliases)
+	aliases, err := NormalizeAliases(config.Devin.Aliases)
 	if err != nil {
 		return err
 	}
@@ -232,12 +232,13 @@ func (config *Config) Validate() error {
 	return nil
 }
 
-// normalizeAliases 归一化 devin.aliases：键与目标去空白，拒绝空键、
+// NormalizeAliases 归一化 devin.aliases：键与目标去空白，拒绝空键、
 // 空目标、把 "*" 当目标用（"*" 只作兜底键）、trim 后重复键与仅大小写
 // 不同的键（折叠匹配要求无歧义）；随后把链式映射展开成最终目标并检出
 // 环（a→b、b→c 归一成 a→c、b→c；a→a 按环报错）。展开发生在加载期，
-// 运行时按 精确 → 折叠 → "*" 顺序单跳查找即可。
-func normalizeAliases(aliases map[string]string) (map[string]string, error) {
+// 运行时按 精确 → 折叠 → "*" 顺序单跳查找即可。导出供面板设置页
+// （/admin/settings 的 devin_aliases 键）复用同一套校验。
+func NormalizeAliases(aliases map[string]string) (map[string]string, error) {
 	if len(aliases) == 0 {
 		return aliases, nil
 	}

@@ -193,17 +193,6 @@ func main() {
 	})
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
-	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对
-	// debug 开关/保留策略恒赢 config.yaml（先建仓再重放，让面板改的
-	// 值在启动时就生效；默认值在重放前采样，即 config 派生态）。
-	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, debugManager)
-	if err != nil {
-		slog.Error("load panel settings failed", "error", err)
-		os.Exit(1)
-	}
-	if err := settingsStore.ApplyAll(); err != nil {
-		slog.Warn("panel settings replay failed", "error", err)
-	}
 	application := app.New(devinAdapter, serviceConfig.Server, debugManager)
 	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
@@ -236,6 +225,40 @@ func main() {
 	ccPanel.SetWarmStats(devinAdapter.WarmStats)
 	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
+	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对被登记键
+	// 恒赢 config.yaml。构造须在 app/panel 装配与 SetQuotaInterval 之后——
+	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
+	// 先建仓再重放，让面板改的值在启动时就生效。
+	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, ccpanel.SettingsDeps{
+		Debug:       debugManager,
+		DevinConfig: devinAdapter.CurrentConfig,
+		// 面板写入与 config reload 共用 ApplyConfig 提交点；端点三件套
+		// 变化时面板自身的上游调用束跟随换绑（reload 路径的同款同步）。
+		ApplyDevin: func(next devin.Config) error {
+			prev := devinAdapter.CurrentConfig()
+			if _, err := devinAdapter.ApplyConfig(next); err != nil {
+				return err
+			}
+			if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
+				return ccPanel.SetUpstream(next.BaseURL, next.Proxy, next.ForceHTTP1)
+			}
+			return nil
+		},
+		MaxConcurrency:    application.MaxConcurrency,
+		SetMaxConcurrency: application.SetMaxConcurrency,
+		QuotaInterval:     ccPanel.QuotaInterval,
+		SetQuotaInterval:  ccPanel.SetQuotaInterval,
+		PprofListen:       currentPprofListen,
+		SetPprofListen:    rebindPprof,
+	})
+	if err != nil {
+		slog.Error("load panel settings failed", "error", err)
+		os.Exit(1)
+	}
+	if err := settingsStore.ApplyAll(); err != nil {
+		slog.Warn("panel settings replay failed", "error", err)
+	}
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*ccpanel.ConfigReloadReport, error) {
 			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, ccPanel, debugManager, settingsStore)
@@ -244,7 +267,6 @@ func main() {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
-	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按

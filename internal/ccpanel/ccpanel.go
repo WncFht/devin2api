@@ -67,9 +67,11 @@ type Handler struct {
 	modelStatusesExpiry time.Time
 
 	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
-	// cancel 旧协程按新间隔重起（配置 reload 热路径）。
-	quotaMu     sync.Mutex
-	quotaCancel context.CancelFunc
+	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
+	// 记最近一次请求的周期，供设置页回读。
+	quotaMu       sync.Mutex
+	quotaCancel   context.CancelFunc
+	quotaInterval time.Duration
 
 	// debug 是 index.jsonl 与请求目录的读取入口。
 	debug *debuglog.Manager

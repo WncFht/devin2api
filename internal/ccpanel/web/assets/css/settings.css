@@ -1,0 +1,13 @@
+/* 设置页专属样式：json 类设置键用多行编辑框承载。
+   通用 .settings-input 外观在 styles.css；这里只补 textarea 的尺寸与字体。
+   移动端（styles.css 末尾 media query）已对 td.setting-col-value 下
+   textarea 做整行占满处理，无需重复。 */
+
+.settings-input--json {
+  width: min(420px, 100%);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+}

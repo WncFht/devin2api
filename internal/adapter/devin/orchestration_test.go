@@ -570,7 +570,7 @@ func TestApplyConfigSwitchesEndpoint(t *testing.T) {
 	if _, err := adapter.ApplyConfig(Config{BaseURL: srv2.URL, Model: "m", Token: "t", Proxy: "://bad-proxy"}); err == nil {
 		t.Fatal("ApplyConfig with bad proxy should fail")
 	}
-	if got := adapter.currentConfig().BaseURL; got != srv1.URL {
+	if got := adapter.CurrentConfig().BaseURL; got != srv1.URL {
 		t.Fatalf("config committed after failed rebuild: base_url=%q", got)
 	}
 

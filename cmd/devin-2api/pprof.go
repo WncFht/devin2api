@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,14 +26,21 @@ var (
 	pprofAddr   string
 )
 
-// applyPprofListen 把 pprof 监听状态对齐到目标地址：与已绑地址相同
-// no-op；换绑先 Close 旧 server 并归还进程级采样开关；addr 非空则
-// 起新 listener，bind 失败不致命（与启动语义一致，错误已写日志）。
+// applyPprofListen 把 pprof 监听状态对齐到目标地址；bind 失败不致命
+// （与启动/reload 语义一致，错误已写日志）。面板设置页需要显式成败，
+// 走 rebindPprof 拿错误返回。
 func applyPprofListen(addr string) {
+	_ = rebindPprof(addr)
+}
+
+// rebindPprof 换绑 pprof 监听：与已绑地址相同 no-op；换绑先 Close 旧
+// server 并归还进程级采样开关；addr 非空则起新 listener，bind 失败
+// 返回错误且 pprofAddr 置空（上次失败地址不落账，同值重写即重试）。
+func rebindPprof(addr string) error {
 	pprofMu.Lock()
 	defer pprofMu.Unlock()
 	if addr == pprofAddr {
-		return
+		return nil
 	}
 	if pprofServer != nil {
 		_ = pprofServer.Close()
@@ -44,12 +52,22 @@ func applyPprofListen(addr string) {
 		runtime.SetMutexProfileFraction(0)
 	}
 	if addr == "" {
-		return
+		return nil
 	}
 	if server := startPprofServer(addr); server != nil {
 		pprofServer = server
 		pprofAddr = addr
+		return nil
 	}
+	return fmt.Errorf("pprof listen on %q failed", addr)
+}
+
+// currentPprofListen 返回当前实际绑定的 pprof 监听地址（空=未启用），
+// 供面板设置页回读生效值。
+func currentPprofListen() string {
+	pprofMu.Lock()
+	defer pprofMu.Unlock()
+	return pprofAddr
 }
 
 // startPprofServer 在独立监听地址上暴露 Go 运行时剖析端点。

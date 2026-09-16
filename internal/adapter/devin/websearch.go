@@ -53,7 +53,7 @@ type webSearchOutcome struct {
 func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32, stem string) (webSearchOutcome, error) {
 	var outcome webSearchOutcome
 	recorder := debuglog.FromContext(ctx)
-	name, version, os := adapter.currentConfig().ClientIdentity()
+	name, version, os := adapter.CurrentConfig().ClientIdentity()
 	domains := allowedDomains
 	if len(domains) == 0 {
 		domains = []string{""}

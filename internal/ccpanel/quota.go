@@ -81,6 +81,9 @@ type quotaPoint struct {
 func (h *Handler) SetQuotaInterval(interval time.Duration) {
 	h.quotaMu.Lock()
 	defer h.quotaMu.Unlock()
+	// 记录最近一次请求值（含停采的 <=0）：ticker 起跑后自身不暴露周期，
+	// 面板设置页回读生效值要靠这个簿记。
+	h.quotaInterval = interval
 	if h.quotaCancel != nil {
 		h.quotaCancel()
 		h.quotaCancel = nil
@@ -104,6 +107,14 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// QuotaInterval 返回最近一次 SetQuotaInterval 请求的采样周期（<=0 表示
+// 已停采），供面板设置页回读生效值。
+func (h *Handler) QuotaInterval() time.Duration {
+	h.quotaMu.Lock()
+	defer h.quotaMu.Unlock()
+	return h.quotaInterval
 }
 
 // sampleQuota 拉取一次账户状态并把 plan_status 快照追加到 quota.jsonl。

@@ -1,5 +1,6 @@
 // 系统设置页面
 const t = window.t;
+const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 
 let originalSettings = {}; // 保存原始值用于比较
 let settingDefinitions = new Map();
@@ -78,11 +79,20 @@ const numericSettingConstraints = new Map([
   ['log_retention_days', { min: -1, max: 365 }],
   ['model_catalog_sync_interval_hours', { min: 0, max: maxDurationHours }],
   ['auto_refresh_interval_seconds', { min: 0, max: maxDurationSeconds }],
+  ['warm_prefix_jitter_ratio', { max: 1 }],
   ['responses_ws_max_sessions', { min: 0 }],
   ['responses_ws_session_ttl_minutes', { min: 0, max: maxDurationMinutes }],
   ['responses_ws_max_transcript_bytes', { min: 0 }],
   ['responses_ws_max_connections', { min: 0 }],
   ['responses_ws_max_connections_per_token', { min: 0 }]
+]);
+
+// json 设置键的顶层形状约束：别名表是对象，工具名表是数组。
+// 形状不符在保存前就拦下，其余语义校验（元素非空等）归后端。
+const jsonSettingShapes = new Map([
+  ['devin_aliases', 'object'],
+  ['warm_prefix_blocked_names', 'array'],
+  ['warm_prefix_userpaced_names', 'array']
 ]);
 
 function settingValueForDisplay(key, value) {
@@ -123,6 +133,25 @@ function validateSettingInput(setting, value) {
   const normalizedValue = String(value ?? '');
   if (setting.key === modelCustomPricingSettingKey) {
     return validateCustomPricingInput(normalizedValue);
+  }
+
+  if (setting.value_type === 'json') {
+    const trimmed = normalizedValue.trim();
+    if (trimmed === '') return '';
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (_) {
+      return i18nText('settings.validation.invalidJSON', '必须是合法 JSON');
+    }
+    const shape = jsonSettingShapes.get(setting.key);
+    if (shape === 'object' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+      return i18nText('settings.validation.invalidJSONObject', '必须是 JSON 对象，如 {"客户端模型名":"上游UID"}');
+    }
+    if (shape === 'array' && !Array.isArray(parsed)) {
+      return i18nText('settings.validation.invalidJSONArray', '必须是 JSON 数组，如 ["工具名"]');
+    }
+    return '';
   }
 
   const numeric = setting.value_type === 'int'
@@ -1975,6 +2004,13 @@ function getSettingGroupInfo(key) {
   const defs = [
     { id: 'advanced', nameKey: 'settings.group.advanced', order: 70, match: () => advancedSettingKeys.has(k) },
 
+    // devin_* 匹配讲究先后：max_rpm 属闸门、client_* 属身份，须先排掉，
+    // 余下的 devin_* 才归上游端点组。
+    { id: 'gate', nameKey: 'settings.group.gate', order: 22, fb: '速率闸门', match: () => k === 'devin_max_rpm' || k.startsWith('gate_') },
+    { id: 'warm', nameKey: 'settings.group.warm', order: 23, fb: '前缀保温', match: () => k.startsWith('warm_prefix_') },
+    { id: 'identity', nameKey: 'settings.group.identity', order: 15, fb: '客户端身份', match: () => k.startsWith('devin_client_') },
+    { id: 'upstream', nameKey: 'settings.group.upstream', order: 10, fb: '上游端点', match: () => k.startsWith('devin_') },
+
     { id: 'websocket', nameKey: 'settings.group.websocket', order: 25, match: () => k.startsWith('responses_ws_') },
     { id: 'stream-timeout', nameKey: 'settings.group.streamTimeout', order: 20, match: () => k === 'stream_timeout' || k.endsWith('_first_byte_timeout') },
     { id: 'non-stream-timeout', nameKey: 'settings.group.nonStreamTimeout', order: 21, match: () => k === 'non_stream_timeout' || k.endsWith('_non_stream_timeout') },
@@ -1985,13 +2021,39 @@ function getSettingGroupInfo(key) {
   ];
 
   for (const d of defs) {
-    if (d.match()) return { ...d, name: t(d.nameKey) };
+    if (d.match()) return { ...d, name: i18nText(d.nameKey, d.fb || d.nameKey) };
   }
-  return { id: 'advanced', nameKey: 'settings.group.advanced', name: t('settings.group.advanced'), order: 70 };
+  return { id: 'advanced', nameKey: 'settings.group.advanced', name: i18nText('settings.group.advanced', '高级'), order: 70 };
 }
 
 function getSettingOrder(key) {
   const orders = {
+    devin_base_url: 10,
+    devin_proxy: 11,
+    devin_force_http1: 12,
+    devin_model: 13,
+    devin_aliases: 14,
+    devin_client_name: 30,
+    devin_client_version: 31,
+    devin_client_os: 32,
+    devin_max_rpm: 40,
+    gate_max_hold_seconds: 41,
+    gate_drip_interval_seconds: 42,
+    gate_default_latch_seconds: 43,
+    gate_window_offset_seconds: 44,
+    gate_window_guard_seconds: 45,
+    warm_prefix_enabled: 50,
+    warm_prefix_interval_seconds: 51,
+    warm_prefix_jitter_ratio: 52,
+    warm_prefix_max_streams: 53,
+    warm_prefix_max_retained_mb: 54,
+    warm_prefix_min_prefix_tokens: 55,
+    warm_prefix_blocked_max_idle_seconds: 56,
+    warm_prefix_userpaced_max_idle_seconds: 57,
+    warm_prefix_subdone_max_idle_seconds: 58,
+    warm_prefix_unknown_max_idle_seconds: 59,
+    warm_prefix_blocked_names: 60,
+    warm_prefix_userpaced_names: 61,
     upstream_first_byte_timeout: 100,
     stream_timeout: 101,
     non_stream_timeout: 102,
@@ -2007,6 +2069,13 @@ function getSettingOrder(key) {
     max_body_bytes: 201,
     max_image_body_bytes: 202,
     http_read_timeout_seconds: 203,
+    debug_log_enabled: 300,
+    log_retention_days: 301,
+    log_max_total_mb: 302,
+    log_payload_hours: 303,
+    log_keep_error_dirs: 304,
+    debug_quota_interval_minutes: 305,
+    debug_pprof_listen: 306,
     model_custom_pricing: 710
   };
   const normalizedKey = String(key || '').toLowerCase();
@@ -2057,7 +2126,7 @@ function renderGroupNav(groups) {
     const btn = document.createElement('button');
     btn.className = 'time-range-btn' + (i === 0 ? ' active' : '');
     btn.dataset.group = g.id;
-    btn.textContent = t(`settings.nav.${g.id}`);
+    btn.textContent = i18nText(`settings.nav.${g.id}`, g.name);
     btn.title = g.name;
     btn.addEventListener('click', () => {
       // 移除所有按钮的 active 状态
@@ -2078,7 +2147,7 @@ function refreshSettingsTranslations() {
   for (const group of groups) {
     const button = document.querySelector(`#settings-group-nav [data-group="${group.id}"]`);
     if (button) {
-      button.textContent = t(`settings.nav.${group.id}`);
+      button.textContent = i18nText(`settings.nav.${group.id}`, group.name);
       button.title = group.name;
     }
     const title = document.querySelector(`#settings-group-${group.id} .setting-group-title`);
@@ -2088,9 +2157,7 @@ function refreshSettingsTranslations() {
     const row = document.querySelector(`.setting-data-row[data-key="${setting.key}"]`);
     if (!row) continue;
     const description = row.querySelector('.setting-col-description');
-    const key = `settings.desc.${setting.key}`;
-    const translated = t(key);
-    description.textContent = translated !== key ? translated : setting.description;
+    description.textContent = i18nText(`settings.desc.${setting.key}`, setting.description);
     description.dataset.mobileLabel = t('settings.configItem');
     row.querySelector('.setting-col-value').dataset.mobileLabel = t('settings.currentValue');
     row.querySelector('.setting-col-actions').dataset.mobileLabel = t('common.actions');
@@ -2152,9 +2219,7 @@ function renderSettings(settings) {
     for (const s of g.settings) {
       const displayValue = settingValueForDisplay(s.key, s.value);
       // 优先使用语言包中的描述，若没有则回退到后端返回的描述
-      const descKey = `settings.desc.${s.key}`;
-      const translatedDesc = t(descKey);
-      const description = (translatedDesc !== descKey) ? translatedDesc : s.description;
+      const description = i18nText(`settings.desc.${s.key}`, s.description);
       const row = TemplateEngine.render('tpl-setting-row', {
         key: s.key,
         description: description,
@@ -2189,7 +2254,7 @@ function initSettingsEventDelegation() {
 
   // 输入变更
   tbody.addEventListener('change', (e) => {
-    const input = e.target.closest('input, select');
+    const input = e.target.closest('input, select, textarea');
     if (input) markChanged(input);
   });
 }
@@ -2221,6 +2286,8 @@ function renderInput(setting) {
       return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
     case 'float':
       return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+    case 'json':
+      return `<textarea id="${safeKey}" class="settings-input settings-input--json" rows="3" spellcheck="false" ${disabledAttributes}>${safeValue}</textarea>`;
     default:
       return `<input type="text" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--text" ${disabledAttributes}>`;
   }
