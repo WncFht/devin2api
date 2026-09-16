@@ -200,6 +200,14 @@ type Recorder struct {
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，writeMeta/appendIndex 读，走 mutex 同步。
 	retries []retryAttempt
+	// firstError 是首个失败点的同步记录：WriteError 调用时 CAS 抢占
+	//（first-write-wins），writeLoggedError 的 WARN 行与 appendIndex
+	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
+	//「失败点」。error.json 落盘仍在 worker 内由 errorWritten 去重。
+	firstError atomic.Pointer[errorRecord]
+	// upstreamConn 是成功建流那次发送的连接来源（复用/新建与 idle
+	// 时长）；connect 段延迟靠它拆成「握手成本」与「上游响应头延迟」。
+	upstreamConn atomic.Pointer[connInfo]
 	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
 	// 构建请求后写入；Complete 时随 meta.json 与 index 落盘。
 	repairs atomic.Pointer[llm.RequestRepairs]
@@ -215,8 +223,6 @@ type Recorder struct {
 	jsonlFiles map[string]*jsonlFile
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
-	// errorStage 记录首个错误的阶段名，随索引落盘供按失败点检索。
-	errorStage string
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
 	ioErrSeen map[string]struct{}
 }
@@ -227,6 +233,21 @@ type retryAttempt struct {
 	Attempt   int    `json:"attempt"`
 	Cause     string `json:"cause"`
 	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+// errorRecord 是首个失败点的同步快照：stage 是归原点阶段名
+// （index error_stage 同源），message 是错误文案（截断后随索引落盘，
+// 请求目录被淘汰后仍可归因）。
+type errorRecord struct {
+	stage   string
+	message string
+}
+
+// connInfo 是一次成功建流所用连接的画像：reused 表示命中 idle 池复用，
+// idleMS 是该连接在池中的空闲时长。
+type connInfo struct {
+	reused bool
+	idleMS int64
 }
 
 // writeTask 是交给写 worker 的一次作业，worker 内串行执行。
@@ -300,6 +321,9 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 		// manager.mutex：回放是磁盘 IO，不该占目录分配锁。
 		manager.indexMu.Lock()
 		indexPath := filepath.Join(root, IndexFile)
+		// 尺寸必须在读之前取：读后 stat 会把回放窗口内的并发追加误判成
+		// 截断（文件在两次调用之间增长）——高负载时这是必然假阳性。
+		info, statErr := os.Stat(indexPath)
 		data, err := TailRead(indexPath, usageReplayTailBytes)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
@@ -307,6 +331,7 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 			manager.indexMu.Unlock()
 			time.Sleep(200 * time.Millisecond)
 			manager.indexMu.Lock()
+			info, statErr = os.Stat(indexPath)
 			data, err = TailRead(indexPath, usageReplayTailBytes)
 		}
 		manager.indexSnapshotted.Store(true)
@@ -318,10 +343,10 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 			}
 			return
 		}
-		// 回放窗口与 indexFileCap 同值，正常时文件整体被覆盖；文件比
-		// 读到的内容大说明上限被撑破（外部追加/双写/常量漂移），最旧
+		// 回放窗口与 indexFileCap 同值，正常时文件整体被覆盖；读前的文件
+		// 比读到的内容大说明上限被撑破（外部追加/双写/常量漂移），最旧
 		// 的行对聚合静默不可见——值得告警而不是无声丢历史。
-		if info, statErr := os.Stat(indexPath); statErr == nil && info.Size() > int64(len(data)) {
+		if statErr == nil && info.Size() > int64(len(data)) {
 			slog.Warn("debuglog: index.jsonl exceeds replay window; oldest entries excluded from usage stats",
 				"size", info.Size(), "replayed_bytes", len(data))
 		}
@@ -919,19 +944,24 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 }
 
 // WriteError 写入请求失败的阶段和错误摘要；只保留首个错误。
+// stage/message 在调用时同步抢占（first-write-wins）——调用方紧接着
+// 就能经 FirstError 读到归原点；error.json 落盘仍在写 worker 内去重。
 func (recorder *Recorder) WriteError(stage string, err error) {
 	if recorder == nil || err == nil {
 		return
 	}
+	recorder.firstError.CompareAndSwap(nil, &errorRecord{stage: stage, message: err.Error()})
 	recorder.enqueue(func() {
 		if recorder.errorWritten {
 			return
 		}
 		recorder.errorWritten = true
-		recorder.errorStage = stage
+		// 写盘内容取同步抢占的胜出版本：与 index error_stage/
+		// error_message 逐字节一致，不随任务入队顺序漂移。
+		recorded := recorder.firstError.Load()
 		value := recorder.sanitize(map[string]any{
-			"stage":      stage,
-			"message":    err.Error(),
+			"stage":      recorded.stage,
+			"message":    recorded.message,
 			"elapsed_ms": time.Since(recorder.startedAt).Milliseconds(),
 		})
 		data, marshalErr := json.MarshalIndent(value, "", "  ")
@@ -942,6 +972,28 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 			recorder.noteIOErr("file", err)
 		}
 	})
+}
+
+// FirstError 返回首个失败点的阶段与错误文案；未记录时返回空串。
+// 等价于 error.json 的 stage/message 两字段，供写日志行与索引时取
+// 归原点——WriteError 的 stage 实参是捕获点，两者可能不同。
+func (recorder *Recorder) FirstError() (stage, message string) {
+	if recorder == nil {
+		return "", ""
+	}
+	if recorded := recorder.firstError.Load(); recorded != nil {
+		return recorded.stage, recorded.message
+	}
+	return "", ""
+}
+
+// NoteUpstreamConn 记录成功建流所用连接的画像；last-write-wins，
+// 调用点紧跟首个成功的 NoteUpstreamOpen。
+func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
+	if recorder == nil {
+		return
+	}
+	recorder.upstreamConn.Store(&connInfo{reused: reused, idleMS: idle.Milliseconds()})
 }
 
 // Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
@@ -1053,6 +1105,12 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if recorder.rateLimited.Load() {
 		meta["rate_limited"] = true
+	}
+	if conn := recorder.upstreamConn.Load(); conn != nil {
+		// 连接画像拆开 connect 段：reused=false 时 sent→open 含完整
+		// TCP+TLS 握手，reused=true 时该段基本是上游响应头延迟。
+		meta["upstream_conn_reused"] = conn.reused
+		meta["upstream_conn_idle_ms"] = conn.idleMS
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		meta["repairs"] = repairs

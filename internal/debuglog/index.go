@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	"github.com/WncFht/devin2api/internal/llm"
 )
@@ -63,8 +64,14 @@ type IndexEntry struct {
 	// 让调用方能用自己的 ID 反查本次请求。
 	ClientRequestID string `json:"client_request_id,omitempty"`
 	// ErrorStage 是首个失败阶段（http_decode/provider_stream/http_stream 等），
-	// 让 grep 直接定位失败发生在哪一层。
-	ErrorStage    string `json:"error_stage,omitempty"`
+	// 让 grep 直接定位失败发生在哪一层。只在终结性失败（result!=completed）
+	// 时落盘：中途被重试救回的错误仍留在目录 error.json 与 retry_attempts
+	// 里，进索引会把「发生过失败」与「请求失败」混成一桶。
+	ErrorStage string `json:"error_stage,omitempty"`
+	// ErrorMessage 是首个失败的错误文案（与 error.json 的 message 同源，
+	// 截断至 errorMessageCap 字节）。目录被保留策略淘汰后，索引行仍能
+	// 回答「为什么败」——此前只剩阶段名，归因必须靠目录在场。
+	ErrorMessage  string `json:"error_message,omitempty"`
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
 	// RetryAfterSeconds 是上游限流给出的 reset 秒数 hint，
 	// 供聚合区分「有退避提示的限流」与「裸限流」；非限流请求为 0。
@@ -83,7 +90,16 @@ type IndexEntry struct {
 	// Repairs 是请求投影为上游 wire 格式时的静默修复动作总数
 	//（重排/降级/剥离/指纹改写），明细在同名 meta.json 字段。
 	Repairs int `json:"repairs,omitempty"`
+	// ConnReused 标记成功建流那次发送是否复用了 idle 连接；指针是为了
+	// 区分「未记录」（nil，省略）与「复用失败新建」（false）——connect
+	// 段偏高时靠它区分「握手成本」与「上游响应头延迟」。
+	ConnReused *bool  `json:"conn_reused,omitempty"`
+	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
 }
+
+// errorMessageCap 是 index 行 error_message 的截断字节数：保留首个失败
+// 的可归因文本，又不让超大错误文案把索引行撑变形。
+const errorMessageCap = 300
 
 // appendIndex 在请求完成后把摘要写入 index.jsonl。
 // 每行一次 Flush：索引是排障证据，进程崩溃也不能丢尾巴（Flush 只到
@@ -121,12 +137,23 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		ClientIP:          recorder.requestMeta.ClientIP,
 		KeyHash:           recorder.requestMeta.KeyHash,
 		ClientRequestID:   recorder.requestMeta.ClientRequestID,
-		ErrorStage:        recorder.errorStage,
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
 		RateLimited:       recorder.rateLimited.Load(),
 		Retries:           len(recorder.retryAttempts()),
 		PrematureEndTurn:  completion.PrematureEndTurn,
+	}
+	if completion.Result != "completed" {
+		// error 字段只对终结性失败出账：被重试救回的中间错误留在目录
+		// error.json 与 meta.retry_attempts，不污染按失败点检索的口径。
+		if stage, message := recorder.FirstError(); stage != "" {
+			entry.ErrorStage = stage
+			entry.ErrorMessage = truncateRunes(message, errorMessageCap)
+		}
+	}
+	if conn := recorder.upstreamConn.Load(); conn != nil {
+		entry.ConnReused = &conn.reused
+		entry.ConnIdleMS = &conn.idleMS
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		entry.Repairs = repairs.Total()
@@ -211,6 +238,18 @@ func optionalLatency(ms int64) *int64 {
 		return nil
 	}
 	return &ms
+}
+
+// truncateRunes 按字节截断到 cap，但不在多字节 rune 中间切断。
+func truncateRunes(s string, cap int) string {
+	if len(s) <= cap {
+		return s
+	}
+	cut := cap
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // ScanIndex 从 offset 起增量扫描 index.jsonl 的完整行，逐条交给 fn。
