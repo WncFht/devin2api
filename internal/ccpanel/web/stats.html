@@ -163,7 +163,7 @@
           </div>
         </section>
 
-        <!-- 服务观测：/admin/usage 聚合快照（SLA 归因 / 请求趋势 / 延迟分位 / 错误阶段 / 按 Key / 上下文填充） -->
+        <!-- 服务观测：/admin/usage 聚合快照（SLA 归因 / 延迟分位 / 错误阶段 / 上下文填充） -->
         <section class="mb-8" id="usage-observ-section" hidden>
           <div class="glass-card stats-detail-card">
             <h3 class="section-title stats-detail-heading mb-6">
@@ -182,80 +182,59 @@
               </div>
               <div class="runtime-metrics-grid" id="usage-faults-grid"></div>
             </section>
-            <section class="runtime-metrics-subsection" id="usage-trend-block" hidden>
-              <div class="runtime-metrics-subsection-header">
-                <h4 data-i18n="stats.usageTrendTitle">请求趋势</h4>
-              </div>
-              <div class="usage-chart usage-chart--wide" id="usage-trend-chart"></div>
-            </section>
             <section class="runtime-metrics-subsection" id="usage-latency-block" hidden>
               <div class="runtime-metrics-subsection-header">
                 <h4 data-i18n="stats.usageLatencyTitle">延迟分位</h4>
               </div>
-              <div class="stats-duo">
-                <div class="usage-chart" id="usage-latency-chart"></div>
-                <div class="table-container">
-                  <table class="modern-table">
-                    <thead>
-                      <tr>
-                        <th data-i18n="stats.usageLatencyMetric">指标</th>
-                        <th data-i18n="stats.usageLatencySamples">样本</th>
-                        <th>p50</th>
-                        <th>p90</th>
-                        <th>p95</th>
-                        <th>p99</th>
-                        <th data-i18n="stats.usageLatencyMax">最大</th>
-                      </tr>
-                    </thead>
-                    <tbody id="usage-latency-tbody"></tbody>
-                  </table>
-                </div>
+              <div class="table-container">
+                <table class="modern-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="stats.usageLatencyMetric">指标</th>
+                      <th data-i18n="stats.usageLatencySamples">样本</th>
+                      <th>p50</th>
+                      <th>p90</th>
+                      <th>p95</th>
+                      <th>p99</th>
+                      <th data-i18n="stats.usageLatencyMax">最大</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usage-latency-tbody"></tbody>
+                </table>
               </div>
             </section>
             <section class="runtime-metrics-subsection" id="usage-stages-block" hidden>
               <div class="runtime-metrics-subsection-header">
                 <h4 data-i18n="stats.usageStagesTitle">错误阶段分布</h4>
               </div>
-              <div class="stats-duo">
-                <div class="usage-chart" id="usage-stages-chart"></div>
-                <div class="table-container">
-                  <table class="modern-table">
-                    <thead>
-                      <tr>
-                        <th data-i18n="stats.usageStageName">阶段</th>
-                        <th data-i18n="stats.usageStageCount">次数</th>
-                        <th data-i18n="stats.usageStageShare">占比</th>
-                      </tr>
-                    </thead>
-                    <tbody id="usage-stages-tbody"></tbody>
-                  </table>
-                </div>
+              <div class="table-container">
+                <table class="modern-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="stats.usageStageName">阶段</th>
+                      <th data-i18n="stats.usageStageCount">次数</th>
+                      <th data-i18n="stats.usageStageShare">占比</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usage-stages-tbody"></tbody>
+                </table>
               </div>
-            </section>
-            <section class="runtime-metrics-subsection" id="usage-keys-block" hidden>
-              <div class="runtime-metrics-subsection-header">
-                <h4 data-i18n="stats.usageKeysTitle">按 Key 用量</h4>
-              </div>
-              <div class="usage-chart usage-chart--wide" id="usage-keys-chart"></div>
             </section>
             <section class="runtime-metrics-subsection" id="usage-ctxfill-block" hidden>
               <div class="runtime-metrics-subsection-header">
                 <h4 data-i18n="stats.usageCtxFillTitle">上下文填充</h4>
               </div>
-              <div class="stats-duo">
-                <div class="usage-chart" id="usage-ctxfill-chart"></div>
-                <div class="table-container">
-                  <table class="modern-table">
-                    <thead>
-                      <tr>
-                        <th data-i18n="common.model">模型</th>
-                        <th data-i18n="stats.usageCtxFillPct">填充率</th>
-                        <th data-i18n="stats.usageCtxFillTokens">均占用/窗口</th>
-                      </tr>
-                    </thead>
-                    <tbody id="usage-ctxfill-tbody"></tbody>
-                  </table>
-                </div>
+              <div class="table-container">
+                <table class="modern-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="common.model">模型</th>
+                      <th data-i18n="stats.usageCtxFillPct">填充率</th>
+                      <th data-i18n="stats.usageCtxFillTokens">均占用/窗口</th>
+                    </tr>
+                  </thead>
+                  <tbody id="usage-ctxfill-tbody"></tbody>
+                </table>
               </div>
             </section>
             <div class="runtime-metrics-note runtime-metrics-note--footer" id="usage-observ-footnote"></div>

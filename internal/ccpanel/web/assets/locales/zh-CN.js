@@ -329,10 +329,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'stats.usageCtxFillTitle': '上下文填充',
   'stats.usageCtxFillPct': '填充率',
   'stats.usageCtxFillTokens': '均占用/窗口',
-  'stats.usageTrendTitle': '请求趋势',
-  'stats.usageKeysTitle': '按 Key 用量',
-  'stats.usageKeyDirect': '主密钥/直连',
-  'stats.seriesDisconnected': '断连',
 
   // ============================================================
   // 请求趋势

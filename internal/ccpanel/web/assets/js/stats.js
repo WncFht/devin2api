@@ -730,8 +730,6 @@
         }
       }).then((tokens) => {
         authTokens = tokens;
-        // 令牌描述到达后重绘按 Key 图（标签从 hash 换成描述）
-        if (usageData) renderUsageKeys(usageData);
       });
 
       // 事件监听
@@ -1154,7 +1152,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         entries: Number(snap.entries) || 0,
         points: Array.isArray(snap.points) ? snap.points : [],
         days: Array.isArray(snap.days) ? snap.days : [],
-        keys: Array.isArray(snap.keys) ? snap.keys : [],
         errorStages: (snap.error_stages && typeof snap.error_stages === 'object') ? snap.error_stages : {},
         duration: snap.duration || null,
         ttfb: snap.ttfb || null,
@@ -1253,7 +1250,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
     function renderUsageObserv() {
       const section = document.getElementById('usage-observ-section');
       if (!section) return;
-      const blocks = ['usage-faults-block', 'usage-trend-block', 'usage-latency-block', 'usage-stages-block', 'usage-keys-block', 'usage-ctxfill-block'];
+      const blocks = ['usage-faults-block', 'usage-latency-block', 'usage-stages-block', 'usage-ctxfill-block'];
       const empty = document.getElementById('usage-observ-empty');
       const footnote = document.getElementById('usage-observ-footnote');
       const note = document.getElementById('usage-observ-note');
@@ -1280,10 +1277,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       if (empty) empty.hidden = true;
 
       renderUsageFaults(usageRangeTotals(usageData));
-      renderUsageTrend(usageData);
       renderUsageLatency(usageData);
       renderUsageStages(usageData);
-      renderUsageKeys(usageData);
       renderUsageCtxFill(usageData);
       if (footnote) {
         footnote.textContent = usageT('stats.usageFootnote', '窗口起点 {start} · 聚合 {entries} 条请求', {
@@ -1322,332 +1317,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       block.hidden = false;
     }
 
-    // ========== 观测块图表 ==========
-    // 实例一律进 chartInstances 缓存：窗口 resize 与主题切换由公共监听器统一重绘。
-    // 每个渲染函数自带「无数据则藏块」语义，hidden 块里的容器不会被 echarts.init。
-    const USAGE_CHART_COLORS = {
-      requests: '#3b82f6', success: '#10b981', error: '#ef4444',
-      disconnected: '#94a3b8', ttfb: '#0ea5e9', duration: '#a855f7',
-      stage: '#f97316', ctxNormal: '#10b981', ctxWarn: '#f59e0b', ctxOver: '#ef4444'
-    };
-
-    function usageEChart(id) {
-      const el = document.getElementById(id);
-      if (!el) return null;
-      if (!chartInstances[id]) chartInstances[id] = echarts.init(el);
-      return chartInstances[id];
-    }
-
-    // 观测图公共件：tooltip/坐标轴取主题色，与主图视图一致
-    function usageChartShell() {
-      const th = getStatsChartTheme();
-      return {
-        theme: th,
-        tooltip: {
-          confine: true,
-          backgroundColor: th.tooltipBg,
-          borderColor: th.tooltipBorder,
-          borderWidth: 1,
-          textStyle: { color: th.tooltipText, fontSize: 12 }
-        },
-        axisLabel: { color: th.mutedText, fontSize: 11 },
-        axisLine: { lineStyle: { color: th.axisLine } },
-        splitLine: { lineStyle: { color: th.splitLine, type: 'dashed' } },
-        legend: { top: 0, right: 8, textStyle: { color: th.mutedText, fontSize: 11 }, itemWidth: 16, itemHeight: 8 }
-      };
-    }
-
-    // 横向条形骨架：y 轴类目顶大底小，formatter 由调用方给
-    function usageHBarOption(categories, series, tooltipFormatter, xFormatter, legend) {
-      const shell = usageChartShell();
-      return {
-        backgroundColor: 'transparent',
-        tooltip: Object.assign(shell.tooltip, {
-          trigger: 'axis',
-          axisPointer: { type: 'shadow' },
-          formatter: tooltipFormatter
-        }),
-        legend: legend ? shell.legend : undefined,
-        grid: { left: 8, right: 28, top: legend ? 26 : 8, bottom: 4, containLabel: true },
-        xAxis: {
-          type: 'value',
-          axisLabel: Object.assign({ formatter: xFormatter }, shell.axisLabel),
-          axisLine: shell.axisLine,
-          splitLine: shell.splitLine
-        },
-        yAxis: {
-          type: 'category',
-          data: categories,
-          inverse: true,
-          axisLabel: shell.axisLabel,
-          axisLine: shell.axisLine,
-          axisTick: { show: false }
-        },
-        series
-      };
-    }
-
-    function usagePad2(n) {
-      return String(n).padStart(2, '0');
-    }
-
-    // 请求趋势：跟随页面时间范围——≤8 天切 10 分钟桶，更长窗口落日表
-    //（points 只保留 8 天细粒度，长窗切片会缺头段，口径与 usageRangeTotals 一致）。
-    function renderUsageTrend(u) {
-      const block = document.getElementById('usage-trend-block');
-      if (!block) return;
-      const [since, until] = statsRangeSecs();
-      const labels = [];
-      const reqs = [];
-      const errs = [];
-
-      if (until - since <= 8 * 86400) {
-        const shortFmt = (until - since) <= 86400;
-        for (const p of u.points) {
-          if (p.at < since || p.at >= until) continue;
-          const d = new Date(p.at * 1000);
-          labels.push(shortFmt
-            ? `${usagePad2(d.getHours())}:${usagePad2(d.getMinutes())}`
-            : `${d.getMonth() + 1}/${d.getDate()} ${usagePad2(d.getHours())}:${usagePad2(d.getMinutes())}`);
-          reqs.push(Number(p.requests) || 0);
-          errs.push(Number(p.errors) || 0);
-        }
-      } else {
-        const days = new Set();
-        const d = new Date(since * 1000);
-        d.setHours(0, 0, 0, 0);
-        while (d.getTime() < until * 1000) {
-          days.add(d.getFullYear() + '-' + usagePad2(d.getMonth() + 1) + '-' + usagePad2(d.getDate()));
-          d.setDate(d.getDate() + 1);
-        }
-        u.days
-          .filter(row => days.has(row.date))
-          .sort((a, b) => (a.date < b.date ? -1 : 1))
-          .forEach(row => {
-            labels.push(row.date.slice(5));
-            reqs.push(Number(row.requests) || 0);
-            errs.push(Number(row.errors) || 0);
-          });
-      }
-
-      if (!labels.length) {
-        block.hidden = true;
-        return;
-      }
-      block.hidden = false;
-      const chart = usageEChart('usage-trend-chart');
-      if (!chart) return;
-      const shell = usageChartShell();
-      chart.setOption({
-        backgroundColor: 'transparent',
-        tooltip: Object.assign(shell.tooltip, { trigger: 'axis' }),
-        legend: shell.legend,
-        grid: { left: 8, right: 16, top: 28, bottom: 4, containLabel: true },
-        xAxis: {
-          type: 'category',
-          data: labels,
-          boundaryGap: false,
-          axisLabel: Object.assign({ hideOverlap: true }, shell.axisLabel),
-          axisLine: shell.axisLine
-        },
-        yAxis: {
-          type: 'value',
-          minInterval: 1,
-          axisLabel: shell.axisLabel,
-          splitLine: shell.splitLine
-        },
-        series: [
-          {
-            name: usageT('stats.usageRequests', '请求数'),
-            type: 'line', smooth: 0.25, showSymbol: false, sampling: 'lttb',
-            data: reqs,
-            itemStyle: { color: USAGE_CHART_COLORS.requests },
-            lineStyle: { width: 2, color: USAGE_CHART_COLORS.requests },
-            areaStyle: {
-              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                { offset: 0, color: 'rgba(59, 130, 246, 0.18)' },
-                { offset: 1, color: 'rgba(59, 130, 246, 0.00)' }
-              ])
-            }
-          },
-          {
-            name: t('common.failed'),
-            type: 'line', smooth: 0.25, showSymbol: false, sampling: 'lttb',
-            data: errs,
-            itemStyle: { color: USAGE_CHART_COLORS.error },
-            lineStyle: { width: 1.5, color: USAGE_CHART_COLORS.error }
-          }
-        ]
-      }, true);
-    }
-
-    // 延迟分位：TTFB/总耗时两行分位画成分组条形，和表格同一份数据
-    function renderUsageLatencyChart(u) {
-      const has = st => st && Number(st.samples) > 0;
-      if (!has(u.ttfb) && !has(u.duration)) return;
-      const chart = usageEChart('usage-latency-chart');
-      if (!chart) return;
-      const shell = usageChartShell();
-      const cats = ['P50', 'P90', 'P95', 'P99', 'MAX'];
-      const vals = st => [st.p50, st.p90, st.p95, st.p99, st.max].map(ms => (Number(ms) || 0) / 1000);
-      const series = [];
-      if (has(u.ttfb)) {
-        series.push({
-          name: usageT('stats.usageLatencyTtfb', '上游首字'),
-          type: 'bar', barMaxWidth: 16, data: vals(u.ttfb),
-          itemStyle: { color: USAGE_CHART_COLORS.ttfb, borderRadius: [3, 3, 0, 0] }
-        });
-      }
-      if (has(u.duration)) {
-        series.push({
-          name: usageT('stats.usageLatencyDuration', '总耗时'),
-          type: 'bar', barMaxWidth: 16, data: vals(u.duration),
-          itemStyle: { color: USAGE_CHART_COLORS.duration, borderRadius: [3, 3, 0, 0] }
-        });
-      }
-      chart.setOption({
-        backgroundColor: 'transparent',
-        tooltip: Object.assign(shell.tooltip, {
-          trigger: 'axis',
-          axisPointer: { type: 'shadow' },
-          valueFormatter: v => (Number(v) || 0).toFixed(2) + 's'
-        }),
-        legend: shell.legend,
-        grid: { left: 8, right: 16, top: 26, bottom: 4, containLabel: true },
-        xAxis: {
-          type: 'category',
-          data: cats,
-          axisLabel: shell.axisLabel,
-          axisLine: shell.axisLine,
-          axisTick: { alignWithLabel: true, lineStyle: { color: shell.theme.axisLine } }
-        },
-        yAxis: {
-          type: 'value',
-          axisLabel: Object.assign({ formatter: v => v + 's' }, shell.axisLabel),
-          splitLine: shell.splitLine
-        },
-        series
-      }, true);
-    }
-
-    // 错误阶段分布：与表格同序的横向条形（窗口累计）
-    function renderUsageStagesChart(stages, total) {
-      if (!stages.length) return;
-      const chart = usageEChart('usage-stages-chart');
-      if (!chart) return;
-      const cats = stages.map(([stage]) => stage);
-      const option = usageHBarOption(
-        cats,
-        [{
-          name: usageT('stats.usageStageCount', '次数'),
-          type: 'bar', barMaxWidth: 16,
-          data: stages.map(([, n]) => Number(n) || 0),
-          itemStyle: { color: USAGE_CHART_COLORS.stage, borderRadius: [0, 3, 3, 0] }
-        }],
-        params => {
-          const p = params[0];
-          const pct = total > 0 ? (Number(p.value) / total * 100).toFixed(1) : '0.0';
-          return `${escapeHtml(p.name)}<br/>${formatNumber(p.value)} (${pct}%)`;
-        },
-        v => formatNumber(v)
-      );
-      chart.setOption(option, true);
-    }
-
-    // 按 Key 用量：key_hash（16 hex）聚合行；能映射到令牌描述就用描述，
-    // 空 hash（主密钥/开放面板准入）单列「主密钥/直连」。
-    function usageKeyLabel(name) {
-      if (!name) return usageT('stats.usageKeyDirect', '主密钥/直连');
-      const tok = (authTokens || []).find(tk => (tk.token || '').slice(0, 16) === name);
-      if (tok) return tok.description || `${t('stats.tokenPrefix')}${tok.id}`;
-      return name;
-    }
-
-    function renderUsageKeys(u) {
-      const block = document.getElementById('usage-keys-block');
-      if (!block) return;
-      const rows = (u.keys || [])
-        .filter(k => Number(k.requests) > 0)
-        .sort((a, b) => b.requests - a.requests)
-        .slice(0, 10);
-      if (!rows.length) {
-        block.hidden = true;
-        return;
-      }
-      block.hidden = false;
-      const chart = usageEChart('usage-keys-chart');
-      if (!chart) return;
-      const cats = rows.map(k => usageKeyLabel(k.name));
-      const option = usageHBarOption(
-        cats,
-        [
-          {
-            name: t('common.success'),
-            type: 'bar', stack: 'req', barMaxWidth: 18,
-            data: rows.map(k => Math.max(0, (Number(k.requests) || 0) - (Number(k.errors) || 0) - (Number(k.disconnected) || 0))),
-            itemStyle: { color: USAGE_CHART_COLORS.success }
-          },
-          {
-            name: t('common.failed'),
-            type: 'bar', stack: 'req', barMaxWidth: 18,
-            data: rows.map(k => Number(k.errors) || 0),
-            itemStyle: { color: USAGE_CHART_COLORS.error }
-          },
-          {
-            name: usageT('stats.seriesDisconnected', '断连'),
-            type: 'bar', stack: 'req', barMaxWidth: 18,
-            data: rows.map(k => Number(k.disconnected) || 0),
-            itemStyle: { color: USAGE_CHART_COLORS.disconnected, borderRadius: [0, 3, 3, 0] }
-          }
-        ],
-        params => {
-          const k = rows[params[0].dataIndex];
-          const lines = [`<b>${escapeHtml(cats[params[0].dataIndex])}</b>`];
-          params.forEach(p => {
-            lines.push(`${p.marker} ${escapeHtml(p.seriesName)}: ${formatNumber(p.value)}`);
-          });
-          lines.push(`${escapeHtml(usageT('stats.tooltipInput', '输入'))}: ${formatNumber(k.input_tokens || 0)}`);
-          lines.push(`${escapeHtml(usageT('stats.tooltipOutput', '输出'))}: ${formatNumber(k.output_tokens || 0)}`);
-          const cache = (Number(k.cache_read_tokens) || 0) + (Number(k.cache_write_tokens) || 0);
-          if (cache > 0) {
-            lines.push(`${escapeHtml(usageT('stats.tooltipCacheRead', '缓存读'))}+${escapeHtml(usageT('stats.tooltipCacheWrite', '缓存写'))}: ${formatNumber(cache)}`);
-          }
-          return lines.join('<br/>');
-        },
-        v => formatNumber(v),
-        true
-      );
-      chart.setOption(option, true);
-    }
-
-    // 上下文填充：与表格同序的横向条形，颜色按档位（<50 正常 / <80 警示 / 其余超限）
-    function renderUsageCtxFillChart(rows) {
-      if (!rows.length) return;
-      const chart = usageEChart('usage-ctxfill-chart');
-      if (!chart) return;
-      const cats = rows.map(m => m.name || usageT('stats.unknownModel', '未知模型'));
-      const toneColor = pct => pct < 50 ? USAGE_CHART_COLORS.ctxNormal
-        : pct < 80 ? USAGE_CHART_COLORS.ctxWarn : USAGE_CHART_COLORS.ctxOver;
-      const option = usageHBarOption(
-        cats,
-        [{
-          name: usageT('stats.usageCtxFillPct', '填充率'),
-          type: 'bar', barMaxWidth: 16,
-          data: rows.map(m => ({
-            value: Number(m.context_fill_pct) || 0,
-            itemStyle: { color: toneColor(Number(m.context_fill_pct) || 0), borderRadius: [0, 3, 3, 0] }
-          }))
-        }],
-        params => {
-          const m = rows[params[0].dataIndex];
-          const pct = Number(params[0].value) || 0;
-          return `${escapeHtml(cats[params[0].dataIndex])}<br/>${pct.toFixed(1)}% · ${formatNumber(Math.round(Number(m.avg_context_tokens) || 0))}/${formatNumber(m.context_tokens)}`;
-        },
-        v => v + '%'
-      );
-      chart.setOption(option, true);
-    }
-
     // 分位行：样本为 0 的指标整行不渲染；阈值着色复用 timingColor 口径
     //（TTFB 5s/10s，耗时 30s/60s），与统计表首字/耗时列一致。
     function renderUsageLatency(u) {
@@ -1666,7 +1335,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         row('stats.usageLatencyDuration', '总耗时', u.duration, getDurationTimingColor);
       tbody.innerHTML = html;
       block.hidden = !html;
-      if (html) renderUsageLatencyChart(u);
     }
 
     function usageStageRows(u) {
@@ -1699,7 +1367,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         </tr>`;
       }).join('');
       block.hidden = false;
-      renderUsageStagesChart(stages, total);
     }
 
     // 上下文填充率 = 平均单请求占用（输入+两向缓存）÷ 模型窗口上限，
@@ -1731,7 +1398,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         </tr>`;
       }).join('');
       block.hidden = false;
-      renderUsageCtxFillChart(rows);
     }
 
     // ========== 图表视图功能 ==========

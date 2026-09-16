@@ -329,10 +329,6 @@ window.I18N_LOCALES['en'] = {
   'stats.usageCtxFillTitle': 'Context Fill',
   'stats.usageCtxFillPct': 'Fill Rate',
   'stats.usageCtxFillTokens': 'Avg Used / Window',
-  'stats.usageTrendTitle': 'Request Trend',
-  'stats.usageKeysTitle': 'Usage by Key',
-  'stats.usageKeyDirect': 'Master key / direct',
-  'stats.seriesDisconnected': 'Disconnected',
 
   // ============================================================
   // Trends
