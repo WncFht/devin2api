@@ -5,6 +5,7 @@ package dashboard
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -82,6 +83,10 @@ type Handler struct {
 	aliasesFunc func() map[string]string
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
+	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
+	// cancel 旧协程按新间隔重起（配置 reload 热路径）。
+	quotaMu     sync.Mutex
+	quotaCancel context.CancelFunc
 }
 
 // ConfigOps 是面板配置端点的操作面：Reload 重读并热应用配置文件，

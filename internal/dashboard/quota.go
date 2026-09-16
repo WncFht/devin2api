@@ -57,19 +57,34 @@ type quotaPoint struct {
 	TopUpStatus       string `json:"top_up_transaction_status,omitempty"`
 }
 
-// StartQuotaSampler 启动后台配额采样协程；interval<=0 或日志未启用时不启动。
+// SetQuotaInterval 设定后台配额采样周期；interval<=0 或日志未启用时停采。
+// 可被重复调用（配置 reload 热路径）：cancel 旧协程按新间隔重起，变更点
+// 多采一个点——无害，反而给曲线留了变更标记。
 // 采样失败只记一行进程日志，不影响面板与请求链路。
-func (h *Handler) StartQuotaSampler(interval time.Duration) {
+func (h *Handler) SetQuotaInterval(interval time.Duration) {
+	h.quotaMu.Lock()
+	defer h.quotaMu.Unlock()
+	if h.quotaCancel != nil {
+		h.quotaCancel()
+		h.quotaCancel = nil
+	}
 	if interval <= 0 || h.debugManager == nil || h.debugManager.Root() == "" {
 		return
 	}
 	path := filepath.Join(h.debugManager.Root(), quotaFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.quotaCancel = cancel
 	go func() {
 		h.sampleQuota(path)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			h.sampleQuota(path)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.sampleQuota(path)
+			}
 		}
 	}()
 }

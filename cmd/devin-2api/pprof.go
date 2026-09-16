@@ -8,11 +8,49 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/felixge/fgprof"
 )
+
+// pprof 监听的可变状态：启动与配置 reload 共用 applyPprofListen 换绑。
+// pprofAddr 记的是当前实际绑定的地址而非配置值——上次 bind 失败
+// （addr 已写日志、server 为 nil）时同值 reload 会重试，瞬时
+// EADDRINUSE 可自愈。
+var (
+	pprofMu     sync.Mutex
+	pprofServer *http.Server
+	pprofAddr   string
+)
+
+// applyPprofListen 把 pprof 监听状态对齐到目标地址：与已绑地址相同
+// no-op；换绑先 Close 旧 server 并归还进程级采样开关；addr 非空则
+// 起新 listener，bind 失败不致命（与启动语义一致，错误已写日志）。
+func applyPprofListen(addr string) {
+	pprofMu.Lock()
+	defer pprofMu.Unlock()
+	if addr == pprofAddr {
+		return
+	}
+	if pprofServer != nil {
+		_ = pprofServer.Close()
+		pprofServer = nil
+		pprofAddr = ""
+		// block/mutex 采样率是开 listener 时配的进程级开关——listener
+		// 关了要把采样还回去，否则白留开销却没有出口。
+		runtime.SetBlockProfileRate(0)
+		runtime.SetMutexProfileFraction(0)
+	}
+	if addr == "" {
+		return
+	}
+	if server := startPprofServer(addr); server != nil {
+		pprofServer = server
+		pprofAddr = addr
+	}
+}
 
 // startPprofServer 在独立监听地址上暴露 Go 运行时剖析端点。
 // 与主监听分离的原因：pprof 端点无鉴权，回环地址是唯一信任边界——

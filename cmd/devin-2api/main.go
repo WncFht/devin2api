@@ -166,11 +166,9 @@ func main() {
 
 	// pprof 侦听是可选的第二端口：空值不启用（默认）。监听失败不致命——
 	// 剖析是诊断辅助，不该让主服务起不来；错误日志已说明原因。
-	if addr := serviceConfig.Debug.PprofListen; addr != "" {
-		if pprofServer := startPprofServer(addr); pprofServer != nil {
-			defer func() { _ = pprofServer.Close() }()
-		}
-	}
+	// applyPprofListen 与配置 reload 共用同一换绑路径，退出时置空关闭。
+	applyPprofListen(serviceConfig.Debug.PprofListen)
+	defer func() { applyPprofListen("") }()
 
 	// token 允许为空启动：凭据是运行时字段——/panel/api/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
@@ -244,7 +242,7 @@ func main() {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
-	panel.StartQuotaSampler(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+	panel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 	application.SetDashboard(panel)
 	// 移植面板（ccLoad 契约）与旧面板并存：同一密码门槛，/web、/admin、
 	// /dashboard、/public、/login、/logout 挂在根路径。
@@ -392,10 +390,12 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		slog.Warn("panel settings replay failed", "error", err)
 	}
 	if *pcfg.Debug.QuotaIntervalMinutes != *cfg.Debug.QuotaIntervalMinutes {
-		report.RequiresRestart = append(report.RequiresRestart, "debug.quota_interval_minutes")
+		panel.SetQuotaInterval(time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute)
+		report.Applied = append(report.Applied, "debug.quota_interval_minutes")
 	}
 	if pcfg.Debug.PprofListen != cfg.Debug.PprofListen {
-		report.RequiresRestart = append(report.RequiresRestart, "debug.pprof_listen")
+		applyPprofListen(cfg.Debug.PprofListen)
+		report.Applied = append(report.Applied, "debug.pprof_listen")
 	}
 	if pcfg.Server.Listen != cfg.Server.Listen {
 		report.RequiresRestart = append(report.RequiresRestart, "server.listen")
