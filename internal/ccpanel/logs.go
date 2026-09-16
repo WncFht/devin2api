@@ -296,14 +296,35 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := h.debug.ListRequests(-1, h.requestFilter(r))
+	match := h.logRowMatch(r, kh)
 
+	prices := h.CatalogPrices(r.Context())
+	entries := make([]logEntry, 0, min(limit, len(result.Entries)))
+	total := 0
+	for _, e := range result.Entries {
+		if !match(e) {
+			continue
+		}
+		if total >= offset && len(entries) < limit {
+			entries = append(entries, h.projectLogEntry(e, prices))
+		}
+		total++
+	}
+	h.respondLogEntries(w, entries, total, result.HasMore)
+}
+
+// logRowMatch 是 logs 列表/导出共用的行级（内存）筛选：kh 非空只放该
+// key_hash 的行；log_source 按探针行口径（proxy 排除探针行、manual_test
+// 只留探针行、""/all 全放，与 ccLoad 一致）；api/upstream_protocol 精确、
+// model_like 子串（model 精确筛选已在索引侧由 filter.Model 完成，覆盖
+// RequestedModel/Model/ResponseModel 三个字段）。
+func (h *Handler) logRowMatch(r *http.Request, kh string) func(debuglog.IndexEntry) bool {
+	q := r.URL.Query()
 	api := strings.TrimSpace(q.Get("api"))
 	upstream := strings.ToLower(strings.TrimSpace(q.Get("upstream_protocol")))
 	modelLike := strings.TrimSpace(q.Get("model_like"))
-	// log_source 行级口径：proxy 排除探针行，manual_test 只留探针行；
-	// ""/all 全放（探针行在「全部日志」下可见，与 ccLoad 一致）。
 	src := strings.TrimSpace(q.Get("log_source"))
-	match := func(e debuglog.IndexEntry) bool {
+	return func(e debuglog.IndexEntry) bool {
 		if kh != "" && e.KeyHash != kh {
 			return false
 		}
@@ -320,27 +341,11 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		if upstream != "" && upstream != "all" && upstream != "devin" {
 			return false
 		}
-		// model_like 同口径取子串（model 精确筛选由 filter.Model 在索引侧完成，
-		// 覆盖 RequestedModel/Model/ResponseModel 三个字段）。
 		if modelLike != "" && !strings.Contains(e.RequestedModel, modelLike) && !strings.Contains(e.Model, modelLike) {
 			return false
 		}
 		return true
 	}
-
-	prices := h.CatalogPrices(r.Context())
-	entries := make([]logEntry, 0, min(limit, len(result.Entries)))
-	total := 0
-	for _, e := range result.Entries {
-		if !match(e) {
-			continue
-		}
-		if total >= offset && len(entries) < limit {
-			entries = append(entries, h.projectLogEntry(e, prices))
-		}
-		total++
-	}
-	h.respondLogEntries(w, entries, total, result.HasMore)
 }
 
 // dashboardLogsBootstrap 实现 /dashboard|/admin/logs/bootstrap

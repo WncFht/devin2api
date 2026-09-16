@@ -181,23 +181,36 @@ func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
 
 // adminLogsExport 把筛选后的请求摘要导出为 JSON 数组或 CSV；
 // 触及扫描上限时带 X-Truncated: true 头（导出体本身无元数据位）。
+// 筛选口径与列表端点完全一致：requestFilter 索引级 + logRowMatch 行级
+// （api/log_source/model_like/auth_token_id 同样在导出生效）。
 func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 	if h.debug == nil {
 		respondError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
-	result := h.debug.ListRequests(requestsFetchCap, h.requestFilter(r))
+	kh, excluded := h.logScope(r)
+	var result debuglog.ListResult
+	if !excluded {
+		result = h.debug.ListRequests(requestsFetchCap, h.requestFilter(r))
+	}
+	match := h.logRowMatch(r, kh)
+	entries := make([]debuglog.IndexEntry, 0, len(result.Entries))
+	for _, e := range result.Entries {
+		if match(e) {
+			entries = append(entries, e)
+		}
+	}
 	if result.HasMore {
 		w.Header().Set("X-Truncated", "true")
 	}
 	if r.URL.Query().Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="requests.csv"`)
-		writeRequestsCSV(w, result.Entries)
+		writeRequestsCSV(w, entries)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(result.Entries)
+	_ = json.NewEncoder(w).Encode(entries)
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
