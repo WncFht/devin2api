@@ -390,7 +390,8 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	applied, err := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
+	devinCfg := devinConfigFrom(cfg, configPath, logRoot)
+	applied, err := devinAdapter.ApplyConfig(devinCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -429,11 +430,6 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		debugManager.SetPolicy(newPolicy)
 		report.Applied = append(report.Applied, "debug.retention")
 	}
-	// 面板覆盖项恒赢 config.yaml：上面的 SetEnabled/SetPolicy 刚按
-	// 文件值重置过，panel-settings.json 里登记的键要重放压回去。
-	if err := settings.ApplyAll(); err != nil {
-		slog.Warn("panel settings replay failed", "error", err)
-	}
 	if *pcfg.Debug.QuotaIntervalMinutes != *cfg.Debug.QuotaIntervalMinutes {
 		panel.SetQuotaInterval(time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute)
 		report.Applied = append(report.Applied, "debug.quota_interval_minutes")
@@ -448,6 +444,20 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	if pcfg.Server.MaxConcurrency != cfg.Server.MaxConcurrency {
 		application.SetMaxConcurrency(cfg.Server.MaxConcurrency)
 		report.Applied = append(report.Applied, "server.max_concurrency")
+	}
+	// 面板覆盖项恒赢 config.yaml：先把各键的「文件值」默认快照重灌成
+	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
+	// panel-settings.json 里登记的覆盖键压回文件值。
+	settings.ResampleDefaults(ccpanel.SettingDefaults{
+		Devin:          devinCfg,
+		MaxConcurrency: cfg.Server.MaxConcurrency,
+		QuotaInterval:  time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute,
+		PprofListen:    cfg.Debug.PprofListen,
+		DebugEnabled:   cfg.Debug.Enabled,
+		Policy:         newPolicy,
+	})
+	if err := settings.ApplyAll(); err != nil {
+		slog.Warn("panel settings replay failed", "error", err)
 	}
 	runtimeConfigPtr.Store(&runtimeConfigState{cfg: cfg, loadedAt: time.Now(), fileMtime: configFileMtime(configPath)})
 	lastReloadPtr.Store(report)
