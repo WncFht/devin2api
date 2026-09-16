@@ -5,7 +5,7 @@
 # 按 echarts 官方的按需引入方式以 esbuild 打包，产物 ~630KB。
 #
 # 用法: scripts/build-echarts.sh [echarts版本，默认 5.6.0]
-# 产物直接覆盖 internal/dashboard/static/echarts.min.js，提交进仓库——
+# 产物直接覆盖 internal/ccpanel/web/assets/js/echarts.min.js，提交进仓库——
 # 单二进制 embed 发布链不引入前端构建步骤，此脚本只在升级版本时手动跑。
 set -euo pipefail
 
@@ -48,5 +48,5 @@ window.echarts = echarts;
 EOF
 
 ./node_modules/.bin/esbuild entry.js --bundle --minify --format=iife --outfile=echarts.min.js
-cp echarts.min.js "$REPO/internal/dashboard/static/echarts.min.js"
-echo "echarts.min.js rebuilt: echarts@$VER → $(du -h "$REPO/internal/dashboard/static/echarts.min.js" | cut -f1)"
+cp echarts.min.js "$REPO/internal/ccpanel/web/assets/js/echarts.min.js"
+echo "echarts.min.js rebuilt: echarts@$VER → $(du -h "$REPO/internal/ccpanel/web/assets/js/echarts.min.js" | cut -f1)"

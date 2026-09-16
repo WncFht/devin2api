@@ -16,7 +16,7 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 - **限流闸门**——上游 `resource_exhausted` 触发本地冷却闩：排队请求短暂等待后快速失败 `429` + `Retry-After`，不再捶打已被限流的上游；闩内按滴灌节奏放探针探测恢复；闩状态落盘 `logs/gate-state.json`，重启后未过期自动恢复。可选 `max_rpm` 令牌桶在触闩前先行整形出站压力
 - **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；请求日志开启时（`debug.enabled`，随仓库示例配置默认开启）每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
 - **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型目录
-- **`/panel` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录，以及多数字段可热加载的脱敏配置视图
+- **`/web` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录，以及多数字段可热加载的脱敏配置视图
 - **部署简单**——单一静态二进制，[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
 
 ## 快速开始
@@ -108,7 +108,7 @@ curl http://localhost:8080/healthz
 - `POST /v1/chat/completions`——OpenAI Chat Completions
 - `POST /v1/messages`——Anthropic Messages
 - `GET /v1/models`、`GET /v1/models/{model}`——上游模型目录与能力位
-- `GET /panel`——管理面板（请求浏览、用量、配额、进程指标）；`dashboard.password` 保护
+- `GET /web/*`——管理面板（请求浏览、用量、配额、进程指标）；`dashboard.password` 保护
 
 本代理是**无状态**的：每个 HTTP 请求都要携带完整对话历史——`previous_response_id` 会被显式拒绝而不是静默丢上下文（没有服务端响应存储，响应如实上报 `store=false`）。WebSocket transport 下由会话状态机按连接维护多轮上下文，增量 input 会被透明展开为完整 transcript。
 
@@ -180,7 +180,7 @@ curl http://localhost:8080/v1/messages \
 | `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                                                            | `32`                                                                        |
 | `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                                                          | `5`                                                                         |
 | `debug.pprof_listen`                             | pprof/fgprof 剖析端点的独立监听地址（如 `127.0.0.1:6060`）；端点无鉴权——只绑回环地址                                                         | 空（不启用）                                                                |
-| `dashboard.password`                             | `/panel` 管理面板密码；留空免登录                                                                                                            | 无                                                                          |
+| `dashboard.password`                             | `/web` 管理面板密码；留空免登录                                                                                                              | 无                                                                          |
 | `auth.api_key`                                   | `/v1/*` 接口的访问密钥；留空则不校验。客户端可通过 `Authorization: Bearer <key>` 或 `X-Api-Key: <key>` 传递                                  | 无（开放）                                                                  |
 
 ```yaml
@@ -196,7 +196,7 @@ debug:
     enabled: false
 
 dashboard:
-    password: "" # /panel 登录密码；留空免登录
+    password: "" # /web 登录密码；留空免登录
 
 auth:
     # 填入强密码以保护 /v1/*；留空则不校验。

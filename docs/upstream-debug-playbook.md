@@ -20,7 +20,7 @@ client (cc / codex / kimi-cli / ...)
 | 现象                                                                                                                                            | 层               | 含义                                                                                                                        | 处理                                                                                                                                                            |
 | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | HTTP 401                                                                                                                                        | devin-2api       | api_key 不对                                                                                                                | 查 `auth.api_key` / 请求头                                                                                                                                      |
-| HTTP 401 `authentication_error`（上游 `unauthenticated`）                                                                                       | 上游             | `devin.token` 为空或失效；代理不本地拦截，`unauthenticated` 先触发 `reloadToken` 从凭据来源重读并透明重试一次，仍失败才下发 | 补 token 到自动发现链任一来源即自愈，免重启；或改 config.yaml 后 `POST /panel/api/config/reload`                                                                |
+| HTTP 401 `authentication_error`（上游 `unauthenticated`）                                                                                       | 上游             | `devin.token` 为空或失效；代理不本地拦截，`unauthenticated` 先触发 `reloadToken` 从凭据来源重读并透明重试一次，仍失败才下发 | 补 token 到自动发现链任一来源即自愈，免重启；或改 config.yaml 后 `POST /admin/config/reload`                                                                    |
 | `error_stage=request_build`（如 `tool_choice` 指向 `tools` 里不存在的工具）                                                                     | devin-2api       | 本地请求投影失败：构造 wire 时的参数校验拒绝，从未触达上游                                                                  | 看 `error.json` 的 message 定位字段；属客户端请求缺陷，不是上游拒绝                                                                                             |
 | `permission_denied`（无 policy 文案）                                                                                                           | 上游             | 模型 UID 不存在/无权                                                                                                        | **先查 `devin.aliases` 目标是否还活着**（stderr 有 `model absent from upstream catalog` Warn 即此情形），再查模型名拼写                                         |
 | 某模型突然 `not_found`/`permission_denied`                                                                                                      | 上游             | 上游可能给该模型加了版本门                                                                                                  | bump `devin.client_version` 到最新 CLI 版本再试                                                                                                                 |
@@ -95,10 +95,11 @@ curl -sN http://localhost:3003/v1/responses \
 ### 4. 看生成的 wire（debug 日志）
 
 ```bash
-# 优先热切换：POST /panel/api/debug/toggle，不用重启
-curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
-  -H "Authorization: Bearer <dashboard.password>"
-# 改 config.yaml 后也可 POST /panel/api/config/reload 热应用，
+# 优先热切换：PUT /admin/settings/debug_log_enabled，不用重启
+curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
+  -H "Authorization: Bearer <dashboard.password>" \
+  -H 'Content-Type: application/json' -d '{"value":"true"}'
+# 改 config.yaml 后也可 POST /admin/config/reload 热应用，
 # 返回里 requires_restart 列出的字段才需要托管重启（冷路径）
 # 复现一次请求，然后看 logs/<时间戳>/03-devin-request.json
 ```
@@ -178,7 +179,7 @@ curl -s -X POST http://localhost:<port>/panel/api/debug/toggle \
 ## 运维坑
 
 - **重启腰斩在途流**：托管重启（`kickstart -k`、`systemctl --user restart`）和 `kill -9` 会立刻掐断所有进行中的 SSE 响应，客户端视角就是"回答突然停止"。改配置/二进制前先在前置网关侧停流量或挑空闲窗口；调试时优先用备用端口起第二个实例（`listen: ":3004"`）验证，不要动在线实例。另外停止超时已设为 660s（launchd `ExitTimeOut` / systemd `TimeoutStopSec`，覆盖二进制 600s 排空上限），优雅退出期间在途流会继续跑完，不要用 `kill -9` 抢时间。
-- **不要手动跑 `./devin-2api` 抢监听端口**：手动实例和托管器的自动重拉（launchd KeepAlive / systemd Restart=always）会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经托管器启停。bind 连续失败（重启风暴）会落 `logs/bind-failure.json` 标记（`first_at`/`last_at`/`count`/`holder`）并暴露到 `/panel/api/stats` 的 `last_bind_failure`——排查「服务反复起不来」先看这两处。
+- **不要手动跑 `./devin-2api` 抢监听端口**：手动实例和托管器的自动重拉（launchd KeepAlive / systemd Restart=always）会互相抢端口（每 5s 崩溃循环），谁抢到谁服务，交替时全部在途流被掐。所有实例必须经托管器启停。bind 连续失败（重启风暴）会落 `logs/bind-failure.json` 标记（`first_at`/`last_at`/`count`/`holder`）并暴露到 `/admin/runtime-metrics`——排查「服务反复起不来」先看这两处。
 - **meta.json 的 `repairs` 计数有基线、不是故障**：CC 类客户端每请求重发同一套系统提示词，指纹改写与投影修复必然命中——实测基线 ~6–17 hits/req。要盯的是命中规则 id 集合的漂移（出现新 id = 客户端换了提示词文案，可能要吃新指纹），而不是总数的正常涨落。
 - **macOS 特有——launchd + 新编译二进制**：`go build` 覆盖二进制后立刻 kickstart，dyld 可能卡在 Gatekeeper 检查（进程 `S` 态、无监听、无日志）。`sample <pid>` 看栈确认后 `kill -9` 等 KeepAlive 重拉即可；稳妥做法是先 build 再停旧进程。详见 `deployment.md`。
 - **CLI 抓包实验后遗症**：恢复 `credentials.toml` 后，已开的 CLI 会话需发任意消息重连。

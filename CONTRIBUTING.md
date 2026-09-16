@@ -130,7 +130,7 @@ Concurrent requests in the same second are distinguished by an incrementing suff
 
 `logs/index.jsonl` appends one summary line per completed request (result, model, `error_stage`, token classes, key hash) — it survives retention cleanup and backs the panel's usage aggregation. `logs/quota.jsonl` holds quota snapshots sampled every `debug.quota_interval_minutes`. Retention is tiered: `debug.retention_days` deletes whole dirs by age, `debug.max_total_mb` evicts oldest first, `debug.payload_hours` strips the large stage files (03/04/06/attachments) while keeping meta/error/01/02/05 evidence, and `debug.keep_error_dirs` protects the newest N failed dirs during size eviction.
 
-The admin panel at `/panel` (login: `dashboard.password`) renders these logs as a request browser and exposes `/panel/api/*` for programmatic access — `/panel/api` returns the endpoint catalog; `/panel/api/debug/toggle` hot-switches request logging without a restart.
+The admin panel at `/web` (login: `dashboard.password`) renders these logs as a request browser and exposes `/admin/*` for programmatic access — `/admin/api` returns the endpoint catalog; `PUT /admin/settings/debug_log_enabled` hot-switches request logging without a restart.
 
 ## Before submitting
 
@@ -253,14 +253,13 @@ internal/
     common/         # shared surface plumbing: error normalization, tool-choice parsing
   app/              # chi routing, request lifecycle, error handling
   authtoken/        # downstream API token store (auth_tokens.json): /v1 admission concurrency/cost/model limits
-  ccpanel/          # ported admin panel (ccLoad contract): /web, /public, /dashboard/*, /admin/*
+  ccpanel/          # admin panel (ccLoad contract): /web, /public, /dashboard/*, /admin/*
   config/           # YAML config loading and validation
-  dashboard/        # /panel admin UI + /panel/api aggregation endpoints
   debuglog/         # per-request staged debug logs (redaction + externalized images)
   httpproxy/        # upstream HTTP client construction (proxy, force_http1)
   llm/              # vendor-neutral intermediate model (request, response, event stream)
   modelreg/         # global model registry (models.json): disable/redirect overlays before alias resolution
-  obs/              # process/HTTP metrics behind /panel/api/stats
+  obs/              # process/HTTP metrics behind /admin/runtime-metrics
   randid/           # random ID generation (X-Request-Id / debug dir names)
   upstream/         # shared upstream wire helpers (request metadata, auth transport)
 outputs/

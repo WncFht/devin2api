@@ -124,7 +124,7 @@ devin:
   # warm_prefix_userpaced_names: [AskUserQuestion, ExitPlanMode, request_user_input]
 
 dashboard:
-  # 管理面板密码；留空则无需登录，直接进入 /panel。
+  # 管理面板密码；留空则无需登录，直接进入 /web。
   password: ""
 
 auth:

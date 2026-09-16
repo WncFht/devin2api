@@ -16,7 +16,7 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 - **Rate-limit gate** — upstream `resource_exhausted` trips a local cooldown latch: queued requests wait briefly then fast-fail `429` + `Retry-After` instead of hammering a limited upstream, drip-released probes detect recovery, and latch state persists across restarts (`logs/gate-state.json`). An optional `max_rpm` token bucket shapes outbound pressure before the latch ever trips
 - **Normalized error contract** — upstream error codes map to proper HTTP status and per-protocol error types; rate limits become `429` + `Retry-After`; with request logging on (`debug.enabled`, on in the shipped `config.example.yaml`) every request carries `X-Request-Id`/`debug_ref` pointing at its debug directory
 - **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from the upstream model catalog
-- **Admin panel at `/panel`** — request browser, usage/cost aggregation, quota tracking, process metrics, per-request debug directories, and a redacted config view with hot reload for most fields
+- **Admin panel at `/web`** — request browser, usage/cost aggregation, quota tracking, process metrics, per-request debug directories, and a redacted config view with hot reload for most fields
 - **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 
 ## Quick start
@@ -108,7 +108,7 @@ Endpoints:
 - `POST /v1/chat/completions` — OpenAI Chat Completions
 - `POST /v1/messages` — Anthropic Messages
 - `GET /v1/models`, `GET /v1/models/{model}` — upstream model catalog with capability flags
-- `GET /panel` — admin panel (request browser, usage, quota, process stats); `dashboard.password` protects it
+- `GET /web/*` — admin panel (request browser, usage, quota, process stats); `dashboard.password` protects it
 
 The proxy is **stateless**: every HTTP request must carry the full conversation — `previous_response_id` is rejected with an explicit error rather than silently dropping context (there is no server-side response store; the response reports `store=false`). Over the WebSocket transport, multi-turn sessions are maintained per connection and incremental inputs are expanded into full transcripts transparently.
 
@@ -180,7 +180,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `debug.keep_error_dirs`                          | Newest N failed dirs (with `error.json`) protected from size eviction                                                                                             | `32`                                                                              |
 | `debug.quota_interval_minutes`                   | Quota snapshot interval into `logs/quota.jsonl`; `<=0` disables                                                                                                   | `5`                                                                               |
 | `debug.pprof_listen`                             | Separate listen address for the pprof/fgprof profiling endpoints (e.g. `127.0.0.1:6060`); unauthenticated — loopback only                                         | empty (disabled)                                                                  |
-| `dashboard.password`                             | `/panel` admin password; empty = no login required                                                                                                                | none                                                                              |
+| `dashboard.password`                             | `/web` admin password; empty = no login required                                                                                                                  | none                                                                              |
 | `auth.api_key`                                   | API key for `/v1/*` endpoints; empty disables auth. Clients may send `Authorization: Bearer <key>` or `X-Api-Key: <key>`                                          | none (open)                                                                       |
 
 ```yaml
@@ -196,7 +196,7 @@ debug:
     enabled: false
 
 dashboard:
-    password: "" # /panel login; empty = open
+    password: "" # /web login; empty = open
 
 auth:
     # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.

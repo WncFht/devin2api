@@ -154,16 +154,15 @@ tail -f logs/stderr.log                     # 进程日志
 
 ## 面板与 agent 访问
 
-`/panel` 是人看板的入口；其下 API 同时面向 agent 程序化消费。`dashboard.password` 非空时除 cookie 登录外，可直接 `Authorization: Bearer <面板密码>` 访问（免去 cookie 交互）：
+`/web/index.html` 是人看板的入口；其下 API 同时面向 agent 程序化消费：`/admin/*` 走 Bearer、`/dashboard/*` 走 cookie 会话、`/public/*` 公开。`dashboard.password` 非空时除 cookie 登录外，可直接 `Authorization: Bearer <面板密码>` 访问（免去 cookie 交互）：
 
 ```bash
-curl -s -H 'Authorization: Bearer <password>' localhost:<port>/panel/api/stats
-curl -s -H 'Authorization: Bearer <password>' 'localhost:<port>/panel/api/requests?limit=20&q=failed'
-curl -s -H 'Authorization: Bearer <password>' localhost:<port>/panel/api/requests/active
-curl -s -H 'Authorization: Bearer <password>' localhost:<port>/panel/api/requests/<dir>
-curl -s -H 'Authorization: Bearer <password>' localhost:<port>/panel/api/requests/<dir>/file/04-devin-response.jsonl
+curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/runtime-metrics
+curl -s -H 'Authorization: Bearer <password>' 'localhost:<port>/admin/logs?limit=20&status_code=500'
+curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/active-requests
+curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/<id>
 ```
 
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
-除 `/panel` 外，服务另内嵌一套移植自 ccLoad（MIT）的管理面板，入口 `/web/index.html`，登录用同一 `dashboard.password`；其 API 挂在根路径 `/admin/*`、`/dashboard/*`、`/public/*`，同样接受 `Bearer <面板密码>`。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/费用与并发限额，与 `auth.api_key` 主 key 并行准入）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/费用与并发限额，与 `auth.api_key` 主 key 并行准入）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。

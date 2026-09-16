@@ -8,8 +8,8 @@ index.jsonl 里每个付费请求按目录价折算 est$（含 cache_write，按
 
 依赖: uv run --with numpy --with matplotlib scripts/quota/fit.py \
         --status quota-probe.jsonl --index index.jsonl --catalog models.json [--out fit.png]
-catalog 参数也可以是面板地址，如 http://localhost:3003/panel/api/models
-（该端点需 -H 'Authorization: Bearer <api_key>'，用 --key 传入）。
+catalog 参数也可以是面板地址，如 http://localhost:3003/admin/model-registry
+（该端点需 -H 'Authorization: Bearer <dashboard.password>'，用 --key 传入）。
 """
 import argparse
 import datetime
@@ -28,7 +28,7 @@ def parse_ts(s):
 
 
 def load_catalog(src, key):
-    """读模型目录；支持本地 JSON 或面板 API URL。"""
+    """读模型目录；支持本地 JSON 或面板 /admin/model-registry URL。"""
     if src.startswith("http"):
         req = urllib.request.Request(src)
         if key:
@@ -39,6 +39,10 @@ def load_catalog(src, key):
     models = data["models"] if isinstance(data, dict) else data
     if isinstance(models, dict):
         return models
+    # /admin/model-registry 行把目录挂在 catalog 子字段（别名/纯注册表行
+    # catalog 为 null，天然滤掉）；平面 [{uid,...}] 快照原样兼容。
+    if models and isinstance(models[0], dict) and "catalog" in models[0]:
+        return {r["catalog"]["uid"]: r["catalog"] for r in models if r.get("catalog")}
     return {m["uid"]: m for m in models}
 
 
@@ -46,8 +50,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--status", required=True, help="poll.sh 产出的配额 JSONL")
     ap.add_argument("--index", required=True, help="logs/index.jsonl")
-    ap.add_argument("--catalog", required=True, help="模型目录 JSON 或 /panel/api/models URL")
-    ap.add_argument("--key", default="", help="面板 API key（catalog 为 URL 时用）")
+    ap.add_argument("--catalog", required=True, help="模型目录 JSON 或 /admin/model-registry URL")
+    ap.add_argument("--key", default="", help="面板密码 dashboard.password（catalog 为 URL 时用）")
     ap.add_argument("--out", default="", help="输出 PNG 路径（给了才画图）")
     ap.add_argument("--lag", type=int, default=60, help="入账延迟秒数（燃烧前移量）")
     args = ap.parse_args()

@@ -20,7 +20,7 @@ $$
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | 配额快照   | `scripts/quota/poll.sh` 每 30s 打一次 `GetUserStatus`[^connect]，记 `daily/weeklyQuotaRemainingPercent`；另有 daemon 每 5 分钟一条写 `logs/quota.jsonl` 保底 | 本机采集示例：`outputs/quota-probe-2026-09-13.jsonl`                                                                                       |
 | 逐请求摘要 | `logs/index.jsonl`                                                                                                                                           | 每个代理请求一行：模型、`input/output/cache_read/cache_write_tokens`、result、秒级时间戳                                                   |
-| 模型目录   | `GetCliModelConfigs` 缓存的 `/panel/api/models` 快照                                                                                                         | 191 个模型的 `credit_multiplier`、cost_tier、展示价（in/cached/out，无 cache_write 维）；本机示例：`outputs/model-catalog-2026-09-13.json` |
+| 模型目录   | `GetCliModelConfigs` 缓存快照（面板 `/admin/model-registry` 各行的 `catalog` 字段透出同一份）                                                                | 191 个模型的 `credit_multiplier`、cost_tier、展示价（in/cached/out，无 cache_write 维）；本机示例：`outputs/model-catalog-2026-09-13.json` |
 
 配额字段是 **int32 整数百分比**且向下取整——1% 的粒度决定了只能用"翻转点"做方程：两次相邻采样间掉了 k 个点，即该窗口真实燃烧量落在 $((k-1)D, (k+1)D)$，D 为每点对应的美元数。上游入账还有 ~1–3 分钟延迟，所以拟合时把请求时间戳整体前移一个 lag 再扫参。
 
@@ -68,7 +68,7 @@ nohup scripts/quota/poll.sh 30 /tmp/quota.jsonl &
 
 # 2. 正常用付费模型产生燃烧（index.jsonl 自动记录）
 
-# 3. 拟合（uv 起隔离环境；catalog 也可给 http://localhost:<port>/panel/api/models --key <api_key>）
+# 3. 拟合（uv 起隔离环境；catalog 也可给 http://localhost:<port>/admin/model-registry --key <面板密码>）
 #    index.jsonl 在状态目录的 logs/ 下（平台路径见 deployment.md）
 uv run --with numpy --with matplotlib scripts/quota/fit.py \
   --status outputs/quota-probe-2026-09-13.jsonl \
@@ -81,7 +81,7 @@ uv run --with numpy --with matplotlib scripts/quota/fit.py \
 
 ## 对 est_cost 的修正
 
-`internal/dashboard/usage.go` 的 est_cost 原本漏算 cache_write（字段采集了但没进公式），已按本结论修复为 `(input + cache_write)·p_in`（commit 78b6ede）。修复后面板 est_cost 与配额实际燃烧同口径。
+面板侧 est_cost 原本漏算 cache_write（字段采集了但没进公式），已按本结论修复为 `(input + cache_write)·p_in`（commit 78b6ede；现实现见 `internal/ccpanel/logs.go` 的 `logCostBreakdown` 与 `cellCostNG`）。修复后面板 est_cost 与配额实际燃烧同口径。
 
 ### 参考文献
 
