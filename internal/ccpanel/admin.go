@@ -250,8 +250,9 @@ func (h *Handler) adminModelPricing(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminRuntimeMetrics 实现 GET /admin/runtime-metrics：把 obs 快照与
-// debuglog 自观测投影成 ccLoad 的 process/http_proxy/logs 分组形状。
-// responses_websocket 组本服务无会话仓，给零值。
+// debuglog 自观测投影成 ccLoad 的 process/http_proxy/logs 分组形状；
+// 另投 gate/rejects/rates/trend/debuglog/usage/warm 组承接旧面板
+// /panel/api/stats 的排障口径。responses_websocket 组本服务无会话仓，给零值。
 func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 	snap := map[string]any{}
 	if h.metrics != nil {
@@ -323,6 +324,25 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 			"dropped_entries":            stats["dropped_log_events"],
 			"persistence_failed_entries": stats["io_errors"],
 		}
+		// debuglog 组是全量自观测（含 last_bind_failure 监听争夺取证、
+		// 保留策略回显）；logs 组只是 ccLoad 契约的四键投影。
+		data["debuglog"] = stats
+	}
+	// rates/trend 是 Snapshot 原生键（RPM/QPS、60 分钟 10s 桶）；
+	// rejects 是管线前拒绝的分原因计数与最近事件环——它们不产生调试
+	// 目录，这里是唯一透出点。
+	if h.metrics != nil {
+		data["rates"] = snap["rates"]
+		data["trend"] = snap["trend_minutes"]
+		data["rejects"] = h.metrics.Rejects()
+	}
+	// usage 组只投全局延迟分位数两行（ttfb/duration）；全量聚合视图
+	// 在 /admin/usage——轮询端点不背全桶排序的成本。Manager 方法自带
+	// nil 守护，h.debug 为 nil 时返回 nil 投空组。
+	data["usage"] = h.debug.UsageLatency()
+	// gate 组是速率闸门快照（闩态/配额/排队 + events 闩迁移事件环）。
+	if h.gateStats != nil {
+		data["gate"] = h.gateStats()
 	}
 	// warm 组投前缀保温簿记；hit_rate 由 hits/(hits+misses) 派生，
 	// cr=0 的 ping 不计入 misses（簿记侧口径），故命中率只反映真实命中。
