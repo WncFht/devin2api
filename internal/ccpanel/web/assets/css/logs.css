@@ -211,10 +211,6 @@
       font-feature-settings: "tnum";
     }
 
-    .token-metric-value.token-empty {
-      color: var(--neutral-500);
-    }
-
     .stream-flag {
       display: inline-block;
       margin-left: 6px;
@@ -372,10 +368,6 @@
     .logs-filter-controls .filter-control--status {
       min-width: 80px;
       max-width: 90px;
-    }
-
-    .logs-filter-info {
-      white-space: nowrap;
     }
 
     .log-source-badge {
@@ -793,13 +785,6 @@
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
         align-items: center;
-      }
-
-      .logs-filter-summary-row .logs-filter-info {
-        width: auto;
-        min-width: 0;
-        text-align: left;
-        justify-self: start;
       }
 
       .logs-filter-summary-row .logs-filter-actions {
