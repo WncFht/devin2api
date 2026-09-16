@@ -414,8 +414,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.colMessage': '信息',
   'logs.colSettings': '列显隐设置',
   'logs.sourceProxy': '请求日志',
-  'logs.sourceDetection': '检测日志',
-  'logs.sourceCheckin': '签到',
   'logs.sourceAll': '全部日志',
   'logs.sourceScheduledCheckBadge': '定时',
   'logs.sourceManualTestBadge': '手动',

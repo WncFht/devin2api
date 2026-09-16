@@ -182,28 +182,28 @@
           <button type="button" class="upstream-copy-btn upstream-copy-btn--tabs" data-copy-target="debugReqRaw" data-i18n="common.copy">复制</button>
           <button type="button" id="debugMergeBtn" class="upstream-copy-btn upstream-merge-btn" data-action="merge-debug-response" data-i18n="logs.debugMerge" aria-pressed="false" hidden>合并</button>
         </div>
-        <div id="debugTabRequest" class="upstream-tab-panel active" data-tab="request">
+        <div class="upstream-tab-panel active" data-tab="request">
           <pre id="debugReqRaw" class="upstream-pre upstream-pre--full"></pre>
         </div>
-        <div id="debugTabTranslatedRequest" class="upstream-tab-panel" data-tab="translated-request">
+        <div class="upstream-tab-panel" data-tab="translated-request">
           <pre id="debugTranslatedReqRaw" class="upstream-pre upstream-pre--full"></pre>
         </div>
-        <div id="debugTabResponse" class="upstream-tab-panel" data-tab="response">
+        <div class="upstream-tab-panel" data-tab="response">
           <pre id="debugRespRaw" class="upstream-pre upstream-pre--full"></pre>
           <div id="debugRespMerged" class="upstream-merged-markdown upstream-pre--full" hidden><div class="chat-message chat-message--assistant"><div class="chat-message-content"></div></div></div>
         </div>
-        <div id="debugTabTranslatedResponse" class="upstream-tab-panel" data-tab="translated-response">
+        <div class="upstream-tab-panel" data-tab="translated-response">
           <pre id="debugTranslatedRespRaw" class="upstream-pre upstream-pre--full"></pre>
           <div id="debugMergedNote" class="debug-merged-note" hidden></div>
           <div id="debugTranslatedRespMerged" class="upstream-merged-markdown upstream-pre--full" hidden><div class="chat-message chat-message--assistant"><div class="chat-message-content"></div></div></div>
         </div>
-        <div id="debugTabFiles" class="upstream-tab-panel" data-tab="files">
+        <div class="upstream-tab-panel" data-tab="files">
           <div id="debugFileList" class="debug-file-list"></div>
           <div id="debugFileView" class="debug-file-view" hidden>
             <div class="debug-file-view-bar">
               <span id="debugFileViewName" class="debug-file-view-name"></span>
               <button type="button" id="debugFileRawBtn" class="upstream-copy-btn" data-action="copy-debug-file-raw" data-i18n="logs.debugFileCopyRaw">复制原始</button>
-              <button type="button" id="debugFileOpenRawBtn" class="upstream-copy-btn" data-action="open-debug-file-raw" data-i18n="logs.debugFileOpenRaw">打开原始内容</button>
+              <button type="button" class="upstream-copy-btn" data-action="open-debug-file-raw" data-i18n="logs.debugFileOpenRaw">打开原始内容</button>
             </div>
             <pre id="debugFileRaw" class="upstream-pre upstream-pre--full"></pre>
             <div id="debugFileBinary" class="debug-file-binary" hidden></div>

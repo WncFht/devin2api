@@ -2214,8 +2214,7 @@ function renderSettings(settings) {
   for (const g of groups) {
     const groupRow = TemplateEngine.render('tpl-setting-group-row', {
       groupId: g.id,
-      groupName: g.name,
-      groupNoticeHtml: ''
+      groupName: g.name
     });
     if (groupRow) tbody.appendChild(groupRow);
 

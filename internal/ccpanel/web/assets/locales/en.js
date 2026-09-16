@@ -414,8 +414,6 @@ window.I18N_LOCALES['en'] = {
   'logs.colMessage': 'Message',
   'logs.colSettings': 'Column visibility settings',
   'logs.sourceProxy': 'Request Logs',
-  'logs.sourceDetection': 'Detection Logs',
-  'logs.sourceCheckin': 'Check-ins',
   'logs.sourceAll': 'All Logs',
   'logs.sourceScheduledCheckBadge': 'Scheduled',
   'logs.sourceManualTestBadge': 'Manual',
