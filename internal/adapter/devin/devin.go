@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"slices"
 	"sort"
 	"strings"
@@ -588,9 +589,17 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			}
 		}
 		recorder.NoteUpstreamSend()
-		stream, err := adapter.streamClient.GetChatMessage(ctx, connect.NewRequest(protoRequest))
+		// httptrace 随 ctx 进 transport：GotConn 报告本次发送拿到的是
+		// 复用连接还是新握手——connect 段偏慢时据此区分「dial+TLS 成本」
+		// 与「上游响应头延迟」两类成因。
+		var conn httptrace.GotConnInfo
+		traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { conn = info },
+		})
+		stream, err := adapter.streamClient.GetChatMessage(traceCtx, connect.NewRequest(protoRequest))
 		if err == nil {
 			recorder.NoteUpstreamOpen()
+			recorder.NoteUpstreamConn(conn.Reused, conn.IdleTime)
 			return stream, nil
 		}
 		lastErr = err
