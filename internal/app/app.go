@@ -724,9 +724,6 @@ func (application *App) createCompletion(
 		if tokenAcquired {
 			application.tokens.Release(authTok.ID)
 		}
-		if completion.PrematureEndTurn {
-			slog.Warn("premature end_turn", "dir", debugRef(recorder), "model", completion.Model)
-		}
 		slog.Info("request",
 			"api", api, "method", request.Method, "path", request.URL.Path,
 			"status", completion.StatusCode, "result", completion.Result,
@@ -1027,7 +1024,21 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	failure := llm.Classify(err)
 	recorder.WriteError(stage, err)
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
-	slog.Warn("request failed", "stage", stage, "status", status, "error", obs.Diagnostic(err))
+	// stage 是捕获点（本函数被哪层错误出口调用），error_stage 是归原点
+	//（index.jsonl 的同名值）——闸门拒绝会在 provider_stream 出口被捕获，
+	// 但归原点是 rate_gate；两层都写出来排障时才不会读岔。
+	originStage, _ := recorder.FirstError()
+	if originStage == "" {
+		originStage = stage
+	}
+	logAttrs := []any{"stage", stage, "error_stage", originStage, "status", status, "error", obs.Diagnostic(err)}
+	if failure.LocalGate {
+		// 本地闸门快败是主动整形而非故障：压测/超额期每分钟几十条，
+		// WARN 级别会把真正的异常淹掉。
+		slog.Info("request failed", logAttrs...)
+	} else {
+		slog.Warn("request failed", logAttrs...)
+	}
 	// 客户端可修正的错误统一报 invalid_request_error（两个协议对该语义
 	// 同名），便于 IDE 直接展示；状态码同样压回 4xx。
 	clientFixable := status == http.StatusBadRequest ||
