@@ -4482,6 +4482,59 @@ body {
   overflow-wrap: anywhere;
 }
 
+.runtime-metric-sub {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.runtime-metric-value {
+  overflow-wrap: anywhere;
+}
+
+/* 配额页字段行：label 小字在上、值在下，长值（邮箱/ID/周期）在格内换行 */
+.quota-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px 20px;
+}
+
+.quota-kv {
+  min-width: 0;
+}
+
+.quota-kv-k {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.quota-kv-v {
+  color: var(--color-text);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.quota-bool {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.quota-bool--yes {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success-600);
+}
+
+.quota-bool--no {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--color-text-secondary);
+}
+
 .runtime-transcript-card {
   margin-top: 12px;
   padding: 15px;

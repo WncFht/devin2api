@@ -1,6 +1,8 @@
 // 配额页：GET /admin/quota（quota.jsonl 采样曲线 + 燃烧速率预测）与
 // GET /admin/status（账户/plan/容量/IDE/模型状态/供应商六路聚合）。
 // 两源独立加载，任一失败只影响对应区块；全部上游字段经 escapeHtml 渲染。
+// 呈现对齐旧面板配额页：KPI 卡（label+大值+预测副行）、kv 字段行、
+// 供应商 chips、仅列异常模型——原始字段名不上屏。
 (function () {
   const t = window.t;
   let quota = null;
@@ -49,10 +51,9 @@
   function esc(v) { return window.escapeHtml(v); }
 
   function pct(v) {
-    if (v === null || v === undefined || v === '') return '—';
+    if (v === null || v === undefined || v === '') return null;
     const n = Number(v);
-    if (!Number.isFinite(n)) return '—';
-    return (Math.round(n * 10) / 10) + '%';
+    return Number.isFinite(n) ? n : null;
   }
 
   function num(v) {
@@ -63,30 +64,67 @@
 
   function microUSD(v) {
     const n = Number(v);
-    if (!Number.isFinite(n) || n === 0) return '—';
+    if (!Number.isFinite(n) || n === 0) return null;
     return '$' + (n / 1e6).toFixed(2);
   }
 
   function yesNo(v) { return v ? t('common.yes') : t('common.no'); }
 
+  function boolBadge(v) {
+    const yes = !!v;
+    return `<span class="quota-bool quota-bool--${yes ? 'yes' : 'no'}">${esc(yesNo(v))}</span>`;
+  }
+
   // unix 秒与 RFC3339 字符串双形态时刻（quota 点是 unix，status 里是 RFC3339）。
   function anyTime(v) {
-    if (v === null || v === undefined || v === '' || v === 0) return '—';
+    if (v === null || v === undefined || v === '' || v === 0) return null;
     if (typeof v === 'number') return new Date(v * 1000).toLocaleString();
     const d = new Date(v);
     return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
   }
 
+  // 套餐周期这类只关心日的字段渲染成本地日期。
+  function fmtDay(v) {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? String(v || '') : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  }
+
+  // 距 unix 秒时刻的倒计时（"3天4小时"/"5小时12分"），已过期返回 null。
+  function untilText(unixSec) {
+    if (!unixSec) return null;
+    const ms = unixSec * 1000 - Date.now();
+    if (!Number.isFinite(ms) || ms <= 0) return null;
+    const m = Math.round(ms / 60000);
+    const d = Math.floor(m / 1440);
+    const h = Math.floor((m % 1440) / 60);
+    const mm = m % 60;
+    if (d > 0) return t('quota.inDaysHours', { d, h });
+    if (h > 0) return t('quota.inHoursMinutes', { h, m: mm });
+    return t('quota.inMinutes', { m: Math.max(1, mm) });
+  }
+
   function text(v) {
-    if (v === null || v === undefined || v === '') return '—';
+    if (v === null || v === undefined || v === '') return null;
     return String(v);
   }
 
-  function metricCard(label, value, key) {
+  // forecast 形状：remaining/reset_at/burn_per_day 恒在；burn>0 时另有
+  // exhausted_at（重置前烧完）或 survives_until_reset（本周期烧不完）。
+  function burnText(f) {
+    if (!f || f.burn_per_hour == null) return '';
+    const rate = Number(f.burn_per_hour);
+    if (rate <= 0) return t('quota.burn.refilled');
+    const burn = t('quota.burn.rate', { rate: rate.toFixed(2) });
+    if (f.survives_until_reset) return t('quota.burn.survives') + ' · ' + burn;
+    if (f.exhausted_at) return t('quota.burn.exhaust', { h: Number(f.hours_left || 0).toFixed(1) }) + ' · ' + burn;
+    return burn;
+  }
+
+  function kpiCard(label, valueHtml, sub, tone) {
     return `<div class="runtime-metric-card">
       <span class="runtime-metric-label">${esc(label)}</span>
-      <strong class="runtime-metric-value">${esc(value)}</strong>
-      <code class="runtime-metric-key">${esc(key)}</code>
+      <strong class="runtime-metric-value"${tone ? ` style="color:${tone};"` : ''}>${valueHtml}</strong>
+      ${sub ? `<span class="runtime-metric-sub">${sub}</span>` : ''}
     </div>`;
   }
 
@@ -104,6 +142,28 @@
     </section>`;
   }
 
+  // kv 字段行：label 小字在上、值在下；值为 null 的字段整项不渲染。
+  function kv(label, valueHtml) {
+    if (valueHtml === null || valueHtml === undefined || valueHtml === '') return '';
+    return `<div class="quota-kv"><span class="quota-kv-k">${esc(label)}</span><span class="quota-kv-v">${valueHtml}</span></div>`;
+  }
+
+  function kvGrid(items) {
+    const inner = items.filter(Boolean).join('');
+    return inner ? `<div class="quota-kv-grid">${inner}</div>` : '';
+  }
+
+  // 月度额度与可用余额合成「已用 X / 月 Y（剩 Z）」；monthly≤0 时只显示可用量。
+  // 上游用 -1 表示不按固定额度计费——负值一律渲染成「不限」而不是裸数字。
+  function creditUsage(monthly, available) {
+    const m = Number(monthly);
+    const a = available == null ? NaN : Number(available);
+    if (Number.isFinite(a) && a < 0) return t('quota.creditUnlimited');
+    if (!Number.isFinite(m) || m <= 0) return Number.isFinite(a) ? t('quota.creditAvail', { n: num(a) }) : null;
+    if (!Number.isFinite(a)) return t('quota.creditMonthly', { n: num(m) });
+    return t('quota.creditUsed', { used: num(Math.max(0, m - a)), total: num(m), avail: num(a) });
+  }
+
   // ---- KPI ----
 
   function latestPoint() {
@@ -111,13 +171,9 @@
     return pts && pts.length ? pts[pts.length - 1] : null;
   }
 
-  // forecast 形状：remaining/reset_at/burn_per_day 恒在；burn>0 时另有
-  // exhausted_at（重置前烧完）或 survives_until_reset（本周期烧不完）。
-  function forecastView(f) {
-    if (!f) return ['—', 'forecast'];
-    if (f.exhausted_at) return [anyTime(f.exhausted_at), 'exhausted_at'];
-    if (f.survives_until_reset) return [t('quota.kpi.survivesUntilReset'), 'reset_at → ' + anyTime(f.reset_at)];
-    return [t('quota.kpi.noBurn'), 'burn ≤ 0'];
+  function toneFor(remaining) {
+    if (remaining === null) return '';
+    return remaining > 50 ? 'var(--success-600)' : remaining > 20 ? 'var(--warning-600)' : 'var(--error-600)';
   }
 
   function renderKpi() {
@@ -129,13 +185,18 @@
     const last = latestPoint();
     const daily = quota && quota.daily;
     const weekly = quota && quota.weekly;
-    const [etaVal, etaKey] = forecastView(daily);
+    const dp = last ? pct(last.daily_remaining) : null;
+    const wp = last ? pct(last.weekly_remaining) : null;
+    const resetCard = (label, unixSec) => {
+      const inTxt = untilText(unixSec);
+      const at = anyTime(unixSec);
+      return kpiCard(label, esc(inTxt || at || '—'), inTxt && at ? esc(at) : '');
+    };
     grid.innerHTML = [
-      metricCard(t('quota.kpi.dailyRemaining'), pct(last && last.daily_remaining), 'daily_quota_remaining'),
-      metricCard(t('quota.kpi.weeklyRemaining'), pct(last && last.weekly_remaining), 'weekly_quota_remaining'),
-      metricCard(t('quota.kpi.dailyBurn'), daily ? num(daily.burn_per_day) + '%' : '—', 'daily burn_per_day'),
-      metricCard(t('quota.kpi.weeklyBurn'), weekly ? num(weekly.burn_per_day) + '%' : '—', 'weekly burn_per_day'),
-      metricCard(t('quota.kpi.forecast'), etaVal, etaKey)
+      kpiCard(t('quota.kpi.dailyRemaining'), dp === null ? '—' : dp.toFixed(1) + '%', esc(burnText(daily)), toneFor(dp)),
+      kpiCard(t('quota.kpi.weeklyRemaining'), wp === null ? '—' : wp.toFixed(1) + '%', esc(burnText(weekly)), toneFor(wp)),
+      resetCard(t('quota.kpi.dailyReset'), last && last.daily_reset_at),
+      resetCard(t('quota.kpi.weeklyReset'), last && last.weekly_reset_at)
     ].join('');
   }
 
@@ -238,50 +299,43 @@
     const pi = status.plan_info || {};
     const tu = p.top_up_status || {};
 
-    const userCards = [
-      metricCard(t('quota.f.name'), text(u.name), 'name'),
-      metricCard(t('quota.f.email'), text(u.email), 'email'),
-      metricCard(t('quota.f.pro'), u.pro === undefined ? '—' : yesNo(u.pro), 'pro'),
-      metricCard(t('quota.f.teamsTier'), text(u.teams_tier), 'teams_tier'),
-      metricCard(t('quota.f.usedPromptCredits'), num(u.used_prompt_credits), 'used_prompt_credits'),
-      metricCard(t('quota.f.usedFlowCredits'), num(u.used_flow_credits), 'used_flow_credits'),
-      metricCard(t('quota.f.maxPremiumChat'), num(u.max_premium_chat), 'max_premium_chat'),
-      metricCard(t('quota.f.userId'), text(u.user_id), 'user_id'),
-      metricCard(t('quota.f.teamId'), text(u.team_id), 'team_id')
+    const userItems = [
+      kv(t('quota.f.name'), esc(text(u.name))),
+      kv(t('quota.f.email'), esc(text(u.email))),
+      kv(t('quota.f.pro'), u.pro === undefined ? null : boolBadge(u.pro)),
+      kv(t('quota.f.teamsTier'), esc(text(u.teams_tier))),
+      kv(t('quota.f.userId'), esc(text(u.user_id))),
+      kv(t('quota.f.teamId'), esc(text(u.team_id)))
     ];
 
-    const planName = p.plan_name || pi.plan_name;
-    const planCards = [
-      metricCard(t('quota.f.planName'), text(planName), 'plan_name'),
-      metricCard(t('quota.f.billingStrategy'), text(p.billing_strategy || pi.billing_strategy), 'billing_strategy'),
-      metricCard(t('quota.f.monthlyPromptCredits'), num(p.monthly_prompt_credits ?? pi.monthly_prompt_credits), 'monthly_prompt_credits'),
-      metricCard(t('quota.f.monthlyFlowCredits'), num(p.monthly_flow_credits ?? pi.monthly_flow_credits), 'monthly_flow_credits'),
-      metricCard(t('quota.f.availablePrompt'), num(p.available_prompt_credits), 'available_prompt_credits'),
-      metricCard(t('quota.f.availableFlow'), num(p.available_flow_credits), 'available_flow_credits'),
-      metricCard(t('quota.f.availableFlex'), num(p.available_flex_credits), 'available_flex_credits'),
-      metricCard(t('quota.f.usedPromptCredits'), num(p.used_prompt_credits), 'used_prompt_credits'),
-      metricCard(t('quota.f.usedFlowCredits'), num(p.used_flow_credits), 'used_flow_credits'),
-      metricCard(t('quota.f.usedFlex'), num(p.used_flex_credits), 'used_flex_credits'),
-      metricCard(t('quota.f.acu'), num(p.acu_consumed) + ' / ' + num(p.acu_limit), 'acu_consumed / acu_limit'),
-      metricCard(t('quota.f.overageBalance'), microUSD(p.overage_balance_micros), 'overage_balance_micros'),
-      metricCard(t('quota.f.planPeriod'), text(p.plan_start) + ' ~ ' + text(p.plan_end), 'plan_start ~ plan_end'),
-      metricCard(t('quota.f.isTeams'), (p.is_teams ?? pi.is_teams) === undefined ? '—' : yesNo(p.is_teams ?? pi.is_teams), 'is_teams'),
-      metricCard(t('quota.f.isEnterprise'), (p.is_enterprise ?? pi.is_enterprise) === undefined ? '—' : yesNo(p.is_enterprise ?? pi.is_enterprise), 'is_enterprise'),
-      metricCard(t('quota.f.hasPaidFeatures'), (p.has_paid_features ?? pi.has_paid_features) === undefined ? '—' : yesNo(p.has_paid_features ?? pi.has_paid_features), 'has_paid_features'),
-      metricCard(t('quota.f.graceStatus'), text(p.grace_period_status), 'grace_period_status'),
-      metricCard(t('quota.f.graceEnd'), anyTime(p.grace_period_end), 'grace_period_end'),
-      metricCard(t('quota.f.orphanedCut'), p.was_reduced_by_orphaned_usage === undefined ? '—' : yesNo(p.was_reduced_by_orphaned_usage), 'was_reduced_by_orphaned_usage'),
-      metricCard(t('quota.f.topUpEnabled'), tu.enabled === undefined ? '—' : yesNo(tu.enabled), 'top_up_status.enabled'),
-      metricCard(t('quota.f.topUpStatus'), text(tu.transaction_status), 'top_up_status.transaction_status'),
-      metricCard(t('quota.f.topUpMonthly'), num(tu.monthly_amount), 'top_up_status.monthly_amount'),
-      metricCard(t('quota.f.topUpSpent'), num(tu.spent), 'top_up_status.spent'),
-      metricCard(t('quota.f.topUpIncrement'), num(tu.increment), 'top_up_status.increment'),
-      metricCard(t('quota.f.topUpCriteriaMet'), tu.criteria_met === undefined ? '—' : yesNo(tu.criteria_met), 'top_up_status.criteria_met')
+    const period = (text(p.plan_start) && text(p.plan_end))
+      ? esc(fmtDay(p.plan_start) + ' ~ ' + fmtDay(p.plan_end))
+      : null;
+    const planItems = [
+      kv(t('quota.f.planName'), esc(text(p.plan_name || pi.plan_name))),
+      kv(t('quota.f.billingStrategy'), esc(text(p.billing_strategy || pi.billing_strategy))),
+      kv(t('quota.f.promptCredits'), esc(creditUsage(p.monthly_prompt_credits ?? pi.monthly_prompt_credits, p.available_prompt_credits))),
+      kv(t('quota.f.flowCredits'), esc(creditUsage(p.monthly_flow_credits ?? pi.monthly_flow_credits, p.available_flow_credits))),
+      kv(t('quota.f.flexCredits'), esc(creditUsage(undefined, p.available_flex_credits))),
+      kv(t('quota.f.acu'), p.acu_consumed === undefined && p.acu_limit === undefined ? null : esc(num(p.acu_consumed) + ' / ' + num(p.acu_limit))),
+      kv(t('quota.f.overageBalance'), esc(microUSD(p.overage_balance_micros))),
+      kv(t('quota.f.planPeriod'), period),
+      kv(t('quota.f.isTeams'), (p.is_teams ?? pi.is_teams) === undefined ? null : boolBadge(p.is_teams ?? pi.is_teams)),
+      kv(t('quota.f.isEnterprise'), (p.is_enterprise ?? pi.is_enterprise) === undefined ? null : boolBadge(p.is_enterprise ?? pi.is_enterprise)),
+      kv(t('quota.f.graceStatus'), esc(text(p.grace_period_status))),
+      kv(t('quota.f.graceEnd'), esc(anyTime(p.grace_period_end))),
+      kv(t('quota.f.topUpEnabled'), tu.enabled === undefined ? null : boolBadge(tu.enabled)),
+      kv(t('quota.f.topUpStatus'), esc(text(tu.transaction_status))),
+      kv(t('quota.f.topUpMonthly'), tu.monthly_amount === undefined ? null : esc(num(tu.monthly_amount))),
+      kv(t('quota.f.topUpSpent'), tu.spent === undefined ? null : esc(num(tu.spent)))
     ];
 
+    const userGrid = kvGrid(userItems);
+    const planGrid = kvGrid(planItems);
     root.innerHTML =
-      subsec('quota.userTitle', `<div class="runtime-metrics-grid">${userCards.join('')}</div>`) +
-      subsec('quota.planTitle', `<div class="runtime-metrics-grid">${planCards.join('')}</div>`);
+      (userGrid ? subsec('quota.userTitle', userGrid) : '') +
+      (planGrid ? subsec('quota.planTitle', planGrid) : '') +
+      (!userGrid && !planGrid ? `<div style="color:var(--color-text-secondary);">${esc(t('quota.noAccountData'))}</div>` : '');
   }
 
   // ---- 上游健康 ----
@@ -323,25 +377,26 @@
       html += subsec('quota.health.capacity', errBlock(status.capacity_error));
     } else {
       const c = status.capacity || {};
-      html += subsec('quota.health.capacity', `<div class="runtime-metrics-grid">${[
-        metricCard(t('quota.f.hasCapacity'), c.has_capacity === undefined ? '—' : yesNo(c.has_capacity), 'has_capacity'),
-        metricCard(t('quota.f.activeSessions'), num(c.active_sessions), 'active_sessions'),
-        metricCard(t('quota.f.capacityMessage'), text(c.message), 'message')
-      ].join('')}</div>`);
+      const capGrid = kvGrid([
+        kv(t('quota.f.hasCapacity'), c.has_capacity === undefined ? null : boolBadge(c.has_capacity)),
+        kv(t('quota.f.activeSessions'), c.active_sessions === undefined ? null : esc(num(c.active_sessions))),
+        kv(t('quota.f.capacityMessage'), esc(text(c.message)))
+      ]);
+      if (capGrid) html += subsec('quota.health.capacity', capGrid);
     }
 
-    // IDE 状态
+    // IDE 状态：level 缺席分两态——status_error 是拉取失败，否则是真无数据。
     if (status.status_error) {
       html += subsec('quota.health.ide', errBlock(status.status_error));
-    } else {
-      const ide = status.ide_status || {};
-      const level = text(ide.level);
-      const levelHtml = `<span style="color:${levelColor(ide.level)};font-weight:600;">${esc(level)}</span>`;
-      html += subsec('quota.health.ide', `<div class="runtime-metrics-grid">${[
-        `<div class="runtime-metric-card"><span class="runtime-metric-label">${esc(t('quota.f.ideLevel'))}</span><strong class="runtime-metric-value">${levelHtml}</strong><code class="runtime-metric-key">ide_status.level</code></div>`,
-        metricCard(t('quota.f.ideMessage'), text(ide.message), 'ide_status.message'),
-        metricCard(t('quota.f.reviewPrompt'), status.show_review_prompt === undefined ? '—' : yesNo(status.show_review_prompt), 'show_review_prompt')
-      ].join('')}</div>`);
+    } else if (status.ide_status) {
+      const ide = status.ide_status;
+      const level = ide.level && ide.level !== 'UNSPECIFIED' ? ide.level : '—';
+      const ideGrid = kvGrid([
+        kv(t('quota.f.ideLevel'), `<span style="color:${levelColor(ide.level)};font-weight:600;">${esc(level)}</span>`),
+        kv(t('quota.f.ideMessage'), esc(text(ide.message))),
+        kv(t('quota.f.reviewPrompt'), status.show_review_prompt === undefined ? null : boolBadge(status.show_review_prompt))
+      ]);
+      if (ideGrid) html += subsec('quota.health.ide', ideGrid);
     }
 
     // 供应商
@@ -355,16 +410,21 @@
       html += subsec('quota.health.providers', `<div>${chips}</div>`);
     }
 
-    // 模型状态：全 OK 显示汇总，否则逐条列异常
+    // 模型状态：全 OK 只报汇总行，有异常逐条列出。
     if (status.model_status_error) {
       html += subsec('quota.health.modelStatuses', errBlock(status.model_status_error));
     } else {
       const list = Array.isArray(status.model_statuses) ? status.model_statuses : [];
       const bad = list.filter((s) => !OK_STATUS.has(String(s.status || '').toLowerCase()));
-      const inner = bad.length === 0
+      const inner = list.length === 0
+        ? `<div style="color:var(--color-text-secondary);">${esc(t('quota.health.noData'))}</div>`
+        : bad.length === 0
         ? `<div style="color:var(--color-text-secondary);">${esc(t('quota.health.allOk', { count: list.length }))}</div>`
-        : `<div class="runtime-metrics-grid">${bad.map((s) =>
-            `<div class="runtime-metric-card"><span class="runtime-metric-label">${esc(s.model_uid || s.model)}</span><strong class="runtime-metric-value" style="color:${levelColor(s.status)};">${esc(s.status)}</strong><code class="runtime-metric-key">${esc(s.message || '')}</code></div>`).join('')}</div>`;
+        : `<div class="quota-kv-grid">${bad.map((s) =>
+            kv(s.model_uid || s.model || '-',
+              `<span style="color:${levelColor(s.status)};font-weight:600;">${esc(s.status)}</span>` +
+              (s.message ? `<span style="color:var(--color-text-secondary);"> · ${esc(s.message)}</span>` : ''))
+          ).join('')}</div>`;
       html += subsec('quota.health.modelStatuses', inner);
     }
 
