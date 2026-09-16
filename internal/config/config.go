@@ -86,6 +86,49 @@ type DevinConfig struct {
 	// GateWindowGuardSeconds 是桶界两侧的停发死区秒数：覆盖桶界估计
 	// 误差与多分片漂移，死区内请求睡到下一窗口；<=0 默认 2。
 	GateWindowGuardSeconds int `yaml:"gate_window_guard_seconds"`
+	// WarmPrefixEnabled 是前缀保温总开关：为 true 时对保留的会话谱系
+	// 按节拍重放最近请求体，给上游 prompt cache 续期，压住 subagent
+	// 等待结束后的冷 prefill。默认 false（灰度开关）；热重载生效，
+	// 关闭立即停掉保温调度。
+	WarmPrefixEnabled bool `yaml:"warm_prefix_enabled"`
+	// WarmPrefixIntervalSeconds 是每条保留谱系的 ping 节拍秒数：必须
+	// 明显低于上游滑动 TTL（标称 ~780s、实测有效 ~690s）让条目不死
+	// ——ping 只能续命不能复活；<=0 默认 180。
+	WarmPrefixIntervalSeconds int `yaml:"warm_prefix_interval_seconds"`
+	// WarmPrefixJitterRatio 是节拍抖动幅度（±比例）：防止同批静默的
+	// 谱系同刻齐射打满上游分钟桶；<=0 默认 0.15。
+	WarmPrefixJitterRatio float64 `yaml:"warm_prefix_jitter_ratio"`
+	// WarmPrefixMaxStreams 是同时保留保温的谱系数上限；<=0 默认 256。
+	WarmPrefixMaxStreams int `yaml:"warm_prefix_max_streams"`
+	// WarmPrefixMaxRetainedMB 是保留请求体的总字节上限（MB）：超限按
+	// LRU 驱逐、可疑条目先挤；<=0 默认 96。
+	WarmPrefixMaxRetainedMB int64 `yaml:"warm_prefix_max_retained_mb"`
+	// WarmPrefixMinPrefixTokens 是谱系可保温的最低前缀 token 数（观测
+	// 或估计值）：低于它冷 prefill 足够便宜（~48ms/1K tok），不值得
+	// 烧 RPM；<=0 默认 8192。
+	WarmPrefixMinPrefixTokens int `yaml:"warm_prefix_min_prefix_tokens"`
+	// WarmPrefixBlockedMaxIdleSeconds 是存在阻塞型 pending 工具调用
+	// （agent/task/wait 类）的谱系最长保温空闲秒数；<=0 默认
+	// 14400（4h）。
+	WarmPrefixBlockedMaxIdleSeconds int `yaml:"warm_prefix_blocked_max_idle_seconds"`
+	// WarmPrefixUserPacedMaxIdleSeconds 是无 pending 或仅剩用户节奏
+	// pending（AskUserQuestion/ExitPlanMode/request_user_input）的
+	// 谱系最长保温空闲秒数；<=0 默认 2700（45min）。
+	WarmPrefixUserPacedMaxIdleSeconds int `yaml:"warm_prefix_userpaced_max_idle_seconds"`
+	// WarmPrefixSubDoneMaxIdleSeconds 是已完成 subagent（带 sub 标记
+	// 且无 pending）的谱系最长保温空闲秒数，覆盖 SendMessage/agentId
+	// 复活长尾；<=0 默认 600（10min）。
+	WarmPrefixSubDoneMaxIdleSeconds int `yaml:"warm_prefix_subdone_max_idle_seconds"`
+	// WarmPrefixUnknownMaxIdleSeconds 是无法分类的流（无会话标记、
+	// 非 CC/codex 客户端）的最长保温空闲秒数兜底；<=0 默认 1800。
+	WarmPrefixUnknownMaxIdleSeconds int `yaml:"warm_prefix_unknown_max_idle_seconds"`
+	// WarmPrefixBlockedNames 是把 pending 工具调用判为阻塞型的名字集；
+	// 空列表回退内置默认 {Agent, Task, Workflow, wait_agent}。
+	WarmPrefixBlockedNames []string `yaml:"warm_prefix_blocked_names"`
+	// WarmPrefixUserPacedNames 是把 pending 判为用户节奏的名字集；
+	// 空列表回退内置默认
+	// {AskUserQuestion, ExitPlanMode, request_user_input}。
+	WarmPrefixUserPacedNames []string `yaml:"warm_prefix_userpaced_names"`
 }
 
 // DebugConfig 保存请求级调试日志配置。

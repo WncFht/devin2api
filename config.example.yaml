@@ -84,6 +84,44 @@ devin:
   # gate_default_latch_seconds: 60
   # gate_window_offset_seconds: 0
   # gate_window_guard_seconds: 2
+  # 前缀保温（prefix-replay warming）：对保留的会话谱系按节拍重放最近
+  # 请求体，给上游 prompt cache 续期，压住 subagent 长时间等待结束后
+  # 恢复轮次的冷 prefill。默认关闭（灰度开关），其余参数通常无需调整：
+  # warm_prefix_interval_seconds: 每条保留谱系的 ping 节拍秒数；须明显
+  #   低于上游滑动 TTL（标称 ~780s、实测有效 ~690s），ping 只能续命
+  #   不能复活。默认 180。
+  # warm_prefix_jitter_ratio: 节拍 ±抖动比例，防同批静默谱系同刻齐射。
+  #   默认 0.15。
+  # warm_prefix_max_streams: 同时保留保温的谱系数上限。默认 256。
+  # warm_prefix_max_retained_mb: 保留请求体总量上限（MB），超限 LRU
+  #   驱逐。默认 96。
+  # warm_prefix_min_prefix_tokens: 可保温的最低前缀 token 数；以下冷
+  #   prefill 足够便宜，不值得烧 RPM。默认 8192。
+  # warm_prefix_blocked_max_idle_seconds: 有阻塞型 pending（agent/
+  #   task/wait 类）的谱系最长保温空闲秒数。默认 14400（4h）。
+  # warm_prefix_userpaced_max_idle_seconds: 无 pending 或仅剩用户节奏
+  #   pending（AskUserQuestion/ExitPlanMode/request_user_input）的最长
+  #   保温空闲秒数。默认 2700（45min）。
+  # warm_prefix_subdone_max_idle_seconds: 已完成 subagent 的复活长尾
+  #   保温空闲秒数。默认 600（10min）。
+  # warm_prefix_unknown_max_idle_seconds: 无会话标记流的兜底空闲秒数。
+  #   默认 1800。
+  # warm_prefix_blocked_names / warm_prefix_userpaced_names: pending
+  #   工具调用的两档分类名集；留空用内置默认
+  #   {Agent, Task, Workflow, wait_agent} 与
+  #   {AskUserQuestion, ExitPlanMode, request_user_input}。
+  # warm_prefix_enabled: false
+  # warm_prefix_interval_seconds: 180
+  # warm_prefix_jitter_ratio: 0.15
+  # warm_prefix_max_streams: 256
+  # warm_prefix_max_retained_mb: 96
+  # warm_prefix_min_prefix_tokens: 8192
+  # warm_prefix_blocked_max_idle_seconds: 14400
+  # warm_prefix_userpaced_max_idle_seconds: 2700
+  # warm_prefix_subdone_max_idle_seconds: 600
+  # warm_prefix_unknown_max_idle_seconds: 1800
+  # warm_prefix_blocked_names: [Agent, Task, Workflow, wait_agent]
+  # warm_prefix_userpaced_names: [AskUserQuestion, ExitPlanMode, request_user_input]
 
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /panel。

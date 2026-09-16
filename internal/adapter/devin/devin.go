@@ -72,6 +72,8 @@ type Config struct {
 	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
 	// 裸发会把限流续长。
 	GateStatePath string
+	// Warm 是前缀保温参数组；字段语义与默认值回落见 WarmConfig。
+	Warm WarmConfig
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
@@ -130,6 +132,9 @@ type Adapter struct {
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
+	// warm 是前缀保温簿记与调度器：跟踪 lineage 的上游缓存存活，
+	// 静默期按节奏发 mt=1 重放续命。New 中随 adapter 创建。
+	warm *cacheWarmer
 	// assignments 缓存 (router uid, cascade id) 的 AssignModel 解析结果：
 	// assignment jwt 绑 cascade_id（上游实测），同会话内复用省去
 	// 每请求一次的解析往返。
@@ -184,6 +189,7 @@ func New(config Config) (*Adapter, error) {
 		return nil, err
 	}
 	adapter.linkPtr.Store(link)
+	adapter.warm = newCacheWarmer(adapter, config.Warm)
 
 	return adapter, nil
 }
@@ -226,9 +232,19 @@ func (adapter *Adapter) link() *upstreamLink {
 
 // Close 停掉焐池协程等后台资源；进程退出是最兜底的生命周期。
 func (adapter *Adapter) Close() {
+	if adapter.warm != nil {
+		adapter.warm.Close()
+	}
 	if link := adapter.link(); link != nil {
 		link.warmer.Close()
 	}
+}
+
+// BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
+// 排空起点即停发一切保温 ping——排空语义是不再制造新上游工作，保留表
+// 留作 stats 观测，条目自然到期退役。
+func (adapter *Adapter) BeginDrain() {
+	adapter.warm.BeginDrain()
 }
 
 // currentToken 返回当前生效的上游凭据。
@@ -260,6 +276,11 @@ func (adapter *Adapter) Aliases() map[string]string {
 // GateStats 返回速率闸门状态快照，供面板 stats 端点透出。
 func (adapter *Adapter) GateStats() GateStats {
 	return adapter.gate.stats()
+}
+
+// WarmStats 返回前缀保温簿记快照，供面板 stats 端点透出。
+func (adapter *Adapter) WarmStats() WarmStats {
+	return adapter.warm.stats()
 }
 
 // ApplyConfig 热应用新配置：读侧每次请求取快照的字段（model、aliases、
@@ -339,6 +360,43 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied []string, err error) {
 	}
 	if prev.Gate.WindowGuard != next.Gate.WindowGuard {
 		applied = append(applied, "devin.gate_window_guard_seconds")
+	}
+	adapter.warm.setParams(next.Warm)
+	if prev.Warm.Enabled != next.Warm.Enabled {
+		applied = append(applied, "devin.warm_prefix_enabled")
+	}
+	if prev.Warm.Interval != next.Warm.Interval {
+		applied = append(applied, "devin.warm_prefix_interval_seconds")
+	}
+	if prev.Warm.JitterRatio != next.Warm.JitterRatio {
+		applied = append(applied, "devin.warm_prefix_jitter_ratio")
+	}
+	if prev.Warm.MaxStreams != next.Warm.MaxStreams {
+		applied = append(applied, "devin.warm_prefix_max_streams")
+	}
+	if prev.Warm.MaxRetainedMB != next.Warm.MaxRetainedMB {
+		applied = append(applied, "devin.warm_prefix_max_retained_mb")
+	}
+	if prev.Warm.MinPrefixTokens != next.Warm.MinPrefixTokens {
+		applied = append(applied, "devin.warm_prefix_min_prefix_tokens")
+	}
+	if prev.Warm.BlockedMaxIdle != next.Warm.BlockedMaxIdle {
+		applied = append(applied, "devin.warm_prefix_blocked_max_idle_seconds")
+	}
+	if prev.Warm.UserPacedMaxIdle != next.Warm.UserPacedMaxIdle {
+		applied = append(applied, "devin.warm_prefix_userpaced_max_idle_seconds")
+	}
+	if prev.Warm.SubDoneMaxIdle != next.Warm.SubDoneMaxIdle {
+		applied = append(applied, "devin.warm_prefix_subdone_max_idle_seconds")
+	}
+	if prev.Warm.UnknownMaxIdle != next.Warm.UnknownMaxIdle {
+		applied = append(applied, "devin.warm_prefix_unknown_max_idle_seconds")
+	}
+	if !slices.Equal(prev.Warm.BlockedNames, next.Warm.BlockedNames) {
+		applied = append(applied, "devin.warm_prefix_blocked_names")
+	}
+	if !slices.Equal(prev.Warm.UserPacedNames, next.Warm.UserPacedNames) {
+		applied = append(applied, "devin.warm_prefix_userpaced_names")
 	}
 	if prev.BaseURL != next.BaseURL {
 		applied = append(applied, "devin.base_url")
@@ -424,6 +482,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
 	adapter.ensureCatalog(ctx)
+	// requestedUID 记下路由判定前的 uid：命中 router 时保温条目要用它
+	// 重建 assignment jwt（绑 cascade_id），否则 ping 重放丢绑定。
+	requestedUID := model
 	model, assignmentJWT, err := adapter.resolveModelRouting(ctx, request, model)
 	if err != nil {
 		// AssignModel 同属上游建连期 RPC：传输断裂与语义拒绝分层。
@@ -449,6 +510,18 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
 	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
+	// 保温 lineage 键在本请求定稿后计算：sanitize 后的 request 与解析后
+	// 的 wire uid 是重放等价性判定的全部输入。面板探活走真实 /v1 管线
+	// 但不属于客户端会话（无 SessionKey、内容固定会撞同一 fallback
+	// lineage），按 client_request_id 豁免出簿记。
+	warmKey := adapter.warm.keyOf(request, model)
+	if recorder.ClientRequestID() == debuglog.ProbeClientRequestID {
+		warmKey = warmLineageKey{}
+	}
+	warmRouter := ""
+	if assignmentJWT != "" {
+		warmRouter = requestedUID
+	}
 	protoRequest, repairs, err := buildRequest(request, cfg, binding)
 	if err != nil {
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
@@ -477,7 +550,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// streamCtx 由 responseStream 持有：看门狗判死或客户端断开时
 	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
 	streamCtx, cancel := context.WithCancel(ctx)
-	stream, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest)
+	stream, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
 	if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
 		// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
 		// 用新凭据重建请求重试一次。token 未变化时不重试。
@@ -485,7 +558,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
 			protoRequest = rebuilt
 			noteRetry("unauthenticated: token reloaded", protoRequest, false)
-			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest)
+			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
 		}
 	}
 	if err != nil {
@@ -510,6 +583,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 不再按文本反推。
 		return nil, llm.Classify(err)
 	}
+	// 客户端请求成功开流才更新 retained——续试变体（continueEmpty 追加
+	// 的合成 "continue"、continueTurn 的内部编码续轮）客户端下一发不会
+	// 逐字节复现，存了就是保温死分支。
+	adapter.warm.retain(warmKey, request, model, warmRouter)
 	serverTools := serverToolNames(request.Tools)
 	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
 	decoder.serverTools = serverTools
@@ -519,6 +596,8 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		decoder:  decoder,
 		recorder: recorder,
 		gate:     adapter.gate,
+		warm:     adapter.warm,
+		warmKey:  warmKey,
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
@@ -548,7 +627,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
 			if err == nil {
 				noteRetry(causeText, rebuilt, continueEmpty)
-				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt)
+				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt, warmKey)
 			}
 			if err != nil {
 				retryCancel()
@@ -597,7 +676,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			}
 			noteRetry("server_tool continuation", rebuilt, false)
 			nextCtx, nextCancel := context.WithCancel(ctx)
-			next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt)
+			next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
 			if err != nil {
 				nextCancel()
 				return nil, nil, nil, err
@@ -620,7 +699,7 @@ const maxConnectAttempts = 3
 
 // getChatMessageWithRetry 在流建立前重试瞬时传输错误（EOF/连接重置/超时）。
 // 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
-func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
+func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest, warmKey warmLineageKey) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
 	link := adapter.link()
 	link.warmer.kickRequest()
@@ -652,6 +731,9 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 			}
 		}
 		recorder.NoteUpstreamSend()
+		// 保温簿记的 lastTouch 只看客户端可归因上行：每次真实发送
+		//（含瞬时重试）都刷新——ping 不走本函数，记独立的 lastPingAt。
+		adapter.warm.noteSend(warmKey)
 		// httptrace 随 ctx 进 transport：GotConn 报告本次发送拿到的是
 		// 复用连接还是新握手——connect 段偏慢时据此区分「dial+TLS 成本」
 		// 与「上游响应头延迟」两类成因。
@@ -1215,6 +1297,10 @@ type responseStream struct {
 	upstreamConfirmed bool
 	// gate 是上游消息速率闸门：流内 resource_exhausted 也要喂冷却闩。
 	gate *rateGate
+	// warm/warmKey 是本流所属保温 lineage 的簿记句柄：流正常收尾的
+	// Done 事件触发条目分类与 prefix 尺寸观测（见 release）。
+	warm    *cacheWarmer
+	warmKey warmLineageKey
 	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
 	retried bool
 	// reopen 在可重试的 pre-content 失败（传输断裂、凭据自愈后的
@@ -1518,6 +1604,15 @@ func (stream *responseStream) drainFrames() {
 // start 事件；若首批就是错误事件（上游在产出内容前失败），丢弃 start，
 // 让错误成为流的第一个对外事件。
 func (stream *responseStream) release(events []llm.ResponseEvent) []llm.ResponseEvent {
+	// Done 只在正常收尾路径存在（fail 产 Error 事件）——拿最终消息进
+	// 保温簿记：pending 调用名表决定保温档位，usage 的 input+cache_read
+	// 是前缀尺寸的真实读数。托管续轮的中间跳 Done 也过这里：其 pending
+	// 只含 Server 调用（不算客户端 pending），会被最终跳覆写，无害。
+	for _, event := range events {
+		if event.Type == llm.ResponseEventDone && event.Message != nil {
+			stream.warm.noteCompleted(stream.warmKey, event.Message)
+		}
+	}
 	if len(events) == 0 || len(stream.pendingStart) == 0 {
 		return events
 	}

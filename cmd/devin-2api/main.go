@@ -324,6 +324,20 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 			WindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
 		},
 		GateStatePath: filepath.Join(logRoot, "gate-state.json"),
+		Warm: devin.WarmConfig{
+			Enabled:          serviceConfig.Devin.WarmPrefixEnabled,
+			Interval:         time.Duration(serviceConfig.Devin.WarmPrefixIntervalSeconds) * time.Second,
+			JitterRatio:      serviceConfig.Devin.WarmPrefixJitterRatio,
+			MaxStreams:       serviceConfig.Devin.WarmPrefixMaxStreams,
+			MaxRetainedMB:    serviceConfig.Devin.WarmPrefixMaxRetainedMB,
+			MinPrefixTokens:  serviceConfig.Devin.WarmPrefixMinPrefixTokens,
+			BlockedMaxIdle:   time.Duration(serviceConfig.Devin.WarmPrefixBlockedMaxIdleSeconds) * time.Second,
+			UserPacedMaxIdle: time.Duration(serviceConfig.Devin.WarmPrefixUserPacedMaxIdleSeconds) * time.Second,
+			SubDoneMaxIdle:   time.Duration(serviceConfig.Devin.WarmPrefixSubDoneMaxIdleSeconds) * time.Second,
+			UnknownMaxIdle:   time.Duration(serviceConfig.Devin.WarmPrefixUnknownMaxIdleSeconds) * time.Second,
+			BlockedNames:     serviceConfig.Devin.WarmPrefixBlockedNames,
+			UserPacedNames:   serviceConfig.Devin.WarmPrefixUserPacedNames,
+		},
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 		TokenSource: func() string {
