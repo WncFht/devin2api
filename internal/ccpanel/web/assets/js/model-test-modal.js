@@ -1,14 +1,17 @@
 // 模型探活模态：logs 行内「测试」与模型注册表「探活」共用一份实现。
 // 首次 openModelTestModal 时把 DOM 注入 body——页面无需内嵌标记；
-// 模型清单取自 GET /admin/model-registry，探针打 POST /admin/model-test
-// （与 ccLoad 渠道测试同契约，走真实 /v1 管线）。
+// 探针打 POST /admin/model-test（与 ccLoad 渠道测试同契约，走真实 /v1 管线）。
+// 模型固定为入口行给定的名字（上游只有一个账号，没有换模型探的意义）；
+// 测试内容默认 ccLoad 的默认探活语，可改。
 (function () {
   const t = (key, params) => (typeof window.t === 'function' ? window.t(key, params) : key);
   const esc = (s) => (typeof window.escapeHtml === 'function' ? window.escapeHtml(String(s ?? '')) : String(s ?? ''));
 
+  // 与 ccLoad DefaultChannelTestContent 同值；后端 model-test 缺省也用它。
+  const DEFAULT_CONTENT = 'sonnet 4.0的发布日期是什么';
+
   const IDS = {
     modal: 'modelTestModal',
-    model: 'mtmModel',
     protocol: 'mtmProtocol',
     content: 'mtmContent',
     stream: 'mtmStream',
@@ -16,8 +19,7 @@
     result: 'mtmResult',
     resultContent: 'mtmResultContent',
     resultDetails: 'mtmResultDetails',
-    runBtn: 'mtmRunBtn',
-    hint: 'mtmHint'
+    runBtn: 'mtmRunBtn'
   };
 
   let injected = false;
@@ -36,14 +38,6 @@
       </div>
 
       <div class="form-group">
-        <label class="form-label" for="${IDS.model}" data-i18n="logs.testModel">测试模型</label>
-        <select id="${IDS.model}" class="form-input">
-          <option value="" data-i18n="common.loading">加载中...</option>
-        </select>
-        <small id="${IDS.hint}" style="display: block; margin-top: 4px; font-size: 12px; color: var(--neutral-500);"></small>
-      </div>
-
-      <div class="form-group">
         <label class="form-label" for="${IDS.protocol}" data-i18n="probe.protocol">客户端协议</label>
         <select id="${IDS.protocol}" class="form-input">
           <option value="anthropic">Anthropic (/v1/messages)</option>
@@ -59,7 +53,7 @@
 
       <div class="form-group">
         <label class="logs-stream-toggle">
-          <input type="checkbox" id="${IDS.stream}" checked>
+          <input type="checkbox" id="${IDS.stream}">
           <span class="form-label" data-i18n="logs.enableStream">启用流式响应</span>
         </label>
       </div>
@@ -127,64 +121,28 @@
     el(IDS.runBtn).disabled = false;
   }
 
-  // openModelTestModal({model, clientProtocol, content, hint}) 打开探活模态。
-  // clientProtocol 决定协议下拉预选；content 是测试内容初值（缺省 ping）。
-  async function openModelTestModal(opts) {
+  // openModelTestModal({model, clientProtocol, content}) 打开探活模态。
+  // model 必填；clientProtocol 决定协议下拉预选；content 缺省用默认探活语。
+  function openModelTestModal(opts) {
     ensureModal();
     opts = opts || {};
     state = {
       model: opts.model || '',
-      clientProtocol: opts.clientProtocol || 'anthropic',
-      content: opts.content || 'ping',
-      hint: opts.hint || ''
+      clientProtocol: opts.clientProtocol || 'anthropic'
     };
     document.getElementById('mtmTitle').textContent = state.model;
-    el(IDS.content).value = state.content;
-    el(IDS.stream).checked = true;
+    el(IDS.content).value = opts.content || DEFAULT_CONTENT;
+    el(IDS.stream).checked = false;
     el(IDS.protocol).value = ['anthropic', 'openai', 'codex'].includes(state.clientProtocol)
       ? state.clientProtocol
       : 'anthropic';
-    el(IDS.hint).textContent = state.hint;
     resetResult();
-    const modelSelect = el(IDS.model);
-    modelSelect.innerHTML = `<option value="">${esc(t('common.loading'))}</option>`;
     el(IDS.modal).classList.add('show');
     el(IDS.modal).setAttribute('aria-hidden', 'false');
-
-    try {
-      const registry = await window.fetchDataWithAuth('/admin/model-registry');
-      const names = ((registry && registry.models) || [])
-        .map((m) => (typeof m === 'string' ? m : m.model))
-        .filter(Boolean);
-      modelSelect.innerHTML = '';
-      const list = names.length ? names : (state.model ? [state.model] : []);
-      list.forEach((name) => {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name;
-        modelSelect.appendChild(opt);
-      });
-      modelSelect.value = list.includes(state.model) ? state.model : list[0];
-    } catch (err) {
-      modelSelect.innerHTML = '';
-      if (state.model) {
-        const opt = document.createElement('option');
-        opt.value = state.model;
-        opt.textContent = state.model;
-        modelSelect.appendChild(opt);
-        modelSelect.value = state.model;
-      }
-      el(IDS.hint).textContent = t('probe.loadModelsFailed') + ': ' + err.message;
-    }
   }
 
   async function runTest() {
-    if (!state) return;
-    const model = el(IDS.model).value;
-    if (!model) {
-      if (window.showError) window.showError(t('probe.selectModel'));
-      return;
-    }
+    if (!state || !state.model) return;
     el(IDS.progress).classList.add('show');
     el(IDS.result).classList.remove('show', 'success', 'error');
     el(IDS.runBtn).disabled = true;
@@ -193,9 +151,9 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model,
+          model: state.model,
           stream: el(IDS.stream).checked,
-          content: el(IDS.content).value.trim() || 'ping',
+          content: el(IDS.content).value.trim() || DEFAULT_CONTENT,
           client_protocol: el(IDS.protocol).value
         })
       });

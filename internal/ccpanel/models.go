@@ -151,6 +151,10 @@ const modelTestTimeout = 60 * time.Second
 // probeMaxTokens 约束探针产出上限：够模型给出可见回复，又控制单次探活成本。
 const probeMaxTokens = 1024
 
+// defaultProbeContent 是探活缺省提示词，与前端模态的默认测试内容同值
+// （ccLoad 默认探活语）——问日期类事实，能区分「真回了内容」与「回了壳」。
+const defaultProbeContent = "sonnet 4.0的发布日期是什么"
+
 // probeRawBodyLimit 是回传给前端的原始响应体截断长度。
 const probeRawBodyLimit = 32 << 10
 
@@ -262,7 +266,7 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	content := req.Content
 	if strings.TrimSpace(content) == "" {
-		content = "ping"
+		content = defaultProbeContent
 	}
 	key := ""
 	if h.masterKeyFunc != nil {

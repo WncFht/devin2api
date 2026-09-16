@@ -227,7 +227,7 @@
 
   function badge(text, color, title) {
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
-    return `<span class="model-badge" style="background:${color}18;color:${color};border:1px solid ${color}44;"${titleAttr}>${escapeHtml(text)}</span>`;
+    return `<span class="model-badge" style="background:${color}18;color:${color};border:1px solid ${color}44;margin:0 4px 2px 0;"${titleAttr}>${escapeHtml(text)}</span>`;
   }
 
   function catalogBadges(r) {
@@ -409,8 +409,10 @@
       providerTd.dataset.mobileLabel = labels.provider;
       if (c) {
         providerTd.appendChild(h('div', null, c.provider || '—'));
-        const apiSub = [c.api_provider !== c.provider ? c.api_provider : '', c.pricing_type]
-          .filter(Boolean).join(' · ');
+        const apiSub = [
+          c.api_provider && c.api_provider !== c.provider && c.api_provider !== 'UNSPECIFIED' ? c.api_provider : '',
+          c.pricing_type && c.pricing_type !== 'STATIC_CREDIT' ? c.pricing_type : ''
+        ].filter(Boolean).join(' · ');
         if (apiSub) {
           const sub = h('div', null, apiSub);
           sub.style.cssText = 'font-size:11px;color:var(--color-text-secondary);font-family:monospace;';
@@ -471,9 +473,6 @@
       const resolvedTd = h('td');
       resolvedTd.dataset.mobileLabel = labels.resolved;
       if (r.resolved && r.resolved !== r.model) {
-        const arrow = h('span', null, '→ ');
-        arrow.style.color = 'var(--color-text-secondary)';
-        resolvedTd.appendChild(arrow);
         resolvedTd.appendChild(h('span', 'model-tag', r.resolved));
       } else {
         resolvedTd.appendChild(h('span', null, '—')).style.color = 'var(--color-text-secondary)';
@@ -534,9 +533,8 @@
     } else if (btn.dataset.action === 'delete') {
       if (window.confirm(t('models.confirmDelete', { model: row.model }))) removeOverride(row.model);
     } else if (btn.dataset.action === 'test') {
-      // 探活模态共享自 logs 页：模型预选本行，协议默认 anthropic，
-      // 内容用 bootstrap 的默认测试语。
-      window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic', content: 'ping' });
+      // 探活模态共享自 logs 页：模型锁定本行，协议默认 anthropic。
+      window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic' });
     }
   }
 

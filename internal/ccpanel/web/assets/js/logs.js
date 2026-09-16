@@ -11,7 +11,6 @@ let logsStatusCombobox = null; // 状态码筛选组合框
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
 let logsExactModelValue = '';
-let logsDefaultTestContent = 'ping'; // 探活模态的默认测试内容
 
 let latestActiveRequests = []; // 缓存 ui.js 最近一次推送的活动请求，供 load() 即时刷新
 let lastActiveRequestStates = null; // Map<id, fingerprint>：上次活跃请求状态，用于检测请求结束/上游重试
@@ -1741,8 +1740,7 @@ window.initPageBootstrap({
         if (typeof window.openModelTestModal === 'function') {
           window.openModelTestModal({
             model: probeBtn.dataset.probeModel || '',
-            clientProtocol: apiToClientProtocol(probeBtn.dataset.probeApi),
-            content: logsDefaultTestContent
+            clientProtocol: apiToClientProtocol(probeBtn.dataset.probeApi)
           });
         }
         return;
