@@ -386,7 +386,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 日志
   // ============================================================
-  'logs.title': '请求日志 - Claude Code & Codex Proxy',
+  'logs.title': '请求日志 - Devin2API',
   'logs.statusCode': '状态码',
   'logs.allStatusCodes': '全部',
   'logs.logSource': '来源',

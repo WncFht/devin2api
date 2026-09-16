@@ -386,7 +386,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Logs
   // ============================================================
-  'logs.title': 'Request Logs - Claude Code & Codex Proxy',
+  'logs.title': 'Request Logs - Devin2API',
   'logs.statusCode': 'Status',
   'logs.allStatusCodes': 'All',
   'logs.logSource': 'Source',
