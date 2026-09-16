@@ -266,16 +266,20 @@ type Store struct {
 	nextID int64
 	byHash map[string]*Token
 	byID   map[int64]*Token
+	// byKeyHash 以 index.jsonl 的 key_hash（16 hex 截断）为键，是
+	// LookupByKeyHash 的倒排——日志行投影逐行调用，线性扫描是隐性热点。
+	byKeyHash map[string]*Token
 }
 
 // New 加载 stateDir/auth_tokens.json；文件缺失以空仓起步，损坏时把
 // 原文件改名留档后空仓起步（不静默吞掉坏数据）。
 func New(stateDir string) (*Store, error) {
 	s := &Store{
-		path:   filepath.Join(stateDir, "auth_tokens.json"),
-		nextID: 1,
-		byHash: map[string]*Token{},
-		byID:   map[int64]*Token{},
+		path:      filepath.Join(stateDir, "auth_tokens.json"),
+		nextID:    1,
+		byHash:    map[string]*Token{},
+		byID:      map[int64]*Token{},
+		byKeyHash: map[string]*Token{},
 	}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -295,6 +299,7 @@ func New(stateDir string) (*Store, error) {
 		}
 		s.byHash[t.Hash] = t
 		s.byID[t.ID] = t
+		s.byKeyHash[t.KeyHash()] = t
 	}
 	if f.NextID > 0 {
 		s.nextID = f.NextID
@@ -350,12 +355,8 @@ func (s *Store) LookupByKeyHash(keyHash string) (*Token, bool) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, t := range s.byHash {
-		if t.KeyHash() == keyHash {
-			return t, true
-		}
-	}
-	return nil, false
+	t, ok := s.byKeyHash[keyHash]
+	return t, ok
 }
 
 // List 返回按 ID 排序的全部令牌快照。
@@ -389,6 +390,7 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 	t.CreatedAt = time.Now()
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
+	s.byKeyHash[t.KeyHash()] = t
 	return plain, s.saveLocked()
 }
 
@@ -403,8 +405,10 @@ func (s *Store) Update(t *Token) error {
 		return errors.New("token not found")
 	}
 	delete(s.byHash, s.byID[t.ID].Hash)
+	delete(s.byKeyHash, s.byID[t.ID].KeyHash())
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
+	s.byKeyHash[t.KeyHash()] = t
 	return s.saveLocked()
 }
 
@@ -417,6 +421,7 @@ func (s *Store) Delete(id int64) error {
 		return nil
 	}
 	delete(s.byHash, t.Hash)
+	delete(s.byKeyHash, t.KeyHash())
 	delete(s.byID, id)
 	return s.saveLocked()
 }
