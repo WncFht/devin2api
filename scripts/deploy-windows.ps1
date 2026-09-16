@@ -362,7 +362,7 @@ function Test-Upstream([int]$p) {
     else { Warn "服务已运行但 /v1/models 返回 HTTP $(if ($code) { $code } else { '<timeout>' })——上游链路未通过" }
     $src = Get-TokenSource $RuntimeConfig
     if ($src -eq '') { Warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启" }
-    else { Warn "token 来源 $src——可能已过期；排障看 logs\index.jsonl 与 /panel" }
+    else { Warn "token 来源 $src——可能已过期；排障看 logs\index.jsonl 与 /web" }
     return $false
 }
 
@@ -372,7 +372,7 @@ function Write-Summary([string]$version, [int]$p) {
     exe      : $RuntimeExe
     配置     : $RuntimeConfig
     状态/日志: $StateDir\logs
-    监听     : http://localhost:$p（面板 /panel，凭据见 config.yaml）
+    监听     : http://localhost:$p（面板 /web，凭据见 config.yaml）
     运行方式 : 独立控制台窗口前台跑——停止在窗口里 Ctrl+C；关窗是强杀会掐断在途请求
     常驻     : Windows 不做服务化；要开机自起可用任务计划程序或 NSSM（见 docs/deployment.md）
 "@

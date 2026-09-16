@@ -182,7 +182,7 @@ type warmEntry struct {
 	observedModels map[string]struct{}
 }
 
-// WarmStats 是保温簿记快照，面板 /panel/api/stats 的 warm 段透出。
+// WarmStats 是保温簿记快照，/admin/runtime-metrics 的 warm 组透出。
 // PingsSent 只计打完的 ping；PingHits/Misses 按上游回报 cache_read>0
 // 分桶；PingSkips 是闸门 tryAdmit 拒掉的轮次（未触达上游）；
 // PingErrors 是发送出错的轮次（不当 miss 证据）；Retired 是条目被

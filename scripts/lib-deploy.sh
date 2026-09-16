@@ -634,7 +634,7 @@ smoke_upstream() {
 	if [[ -z "${src}" ]]; then
 		warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启"
 	else
-		warn "token 来源 ${src}——可能已过期；排障看 logs/index.jsonl 与 /panel"
+		warn "token 来源 ${src}——可能已过期；排障看 logs/index.jsonl 与 /web"
 	fi
 	return 1
 }
@@ -685,7 +685,7 @@ print_summary() {
     二进制   : ${BIN_DIR}/devin-2api
     配置     : ${CONFIG_DIR}/config.yaml（权威副本在仓库，部署时同步）
     状态/日志: ${STATE_DIR}/logs（仓库 logs/ 软链同指）
-    监听     : http://localhost:${PORT}（面板 /panel，凭据见 config.yaml）
+    监听     : http://localhost:${PORT}（面板 /web，凭据见 config.yaml）
     服务管理 : $2
     日志     : tail -f ${STATE_DIR}/logs/stderr.log
 EOF

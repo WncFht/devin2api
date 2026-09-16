@@ -278,7 +278,7 @@ func (adapter *Adapter) GateStats() GateStats {
 	return adapter.gate.stats()
 }
 
-// WarmStats 返回前缀保温簿记快照，供面板 stats 端点透出。
+// WarmStats 返回前缀保温簿记快照，供 /admin/runtime-metrics 透出。
 func (adapter *Adapter) WarmStats() WarmStats {
 	return adapter.warm.stats()
 }
