@@ -850,19 +850,6 @@ window.WebAuth = window.WebAuth || {
     document.body.appendChild(bgAnimElement);
   }
 
-  // 暂停/恢复背景动画（性能优化：减少文件选择器打开时的CPU占用）
-  window.pauseBackgroundAnimation = function () {
-    if (bgAnimElement) {
-      bgAnimElement.style.animationPlayState = 'paused';
-    }
-  }
-
-  window.resumeBackgroundAnimation = function () {
-    if (bgAnimElement) {
-      bgAnimElement.style.animationPlayState = 'running';
-    }
-  }
-
   window.initTopbar = function initTopbar(activeKey) {
     document.body.classList.add('top-layout');
     document.body.classList.toggle('web-role-api-token', window.isAPITokenRole());
@@ -1463,26 +1450,6 @@ window.WebAuth = window.WebAuth || {
     return `<span class="${classes.join(' ')}"><span class="cost-stack-standard">${format(info.standardCost)}</span><span class="cost-stack-effective">${format(info.effectiveCost)}</span></span>`;
   }
 
-  /**
-   * 构建单元格右上角倍率角标
-   * @param {number} multiplierMin - 倍率区间下限
-   * @param {number} multiplierMax - 倍率区间上限（缺省或等于下限时按单值显示）
-   * @returns {string}
-   */
-  function buildCornerMultiplierBadge(multiplierMin, multiplierMax) {
-    const lo = Number(multiplierMin);
-    if (!Number.isFinite(lo)) return '';
-    const hi = Number(multiplierMax);
-    let text;
-    if (Number.isFinite(hi) && Math.abs(hi - lo) >= 1e-9) {
-      text = `${formatCostMultiplierValue(lo)}–${formatCostMultiplierValue(hi)}`;
-    } else {
-      text = formatCostMultiplier(lo);
-    }
-    if (!text) return '';
-    return `<sup class="cell-multiplier-badge">${text}</sup>`;
-  }
-
   // 格式化数字显示（通用：K/M缩写）
   function formatNumber(num) {
     const n = Number(num);
@@ -1539,7 +1506,6 @@ window.WebAuth = window.WebAuth || {
   window.formatCostPair = formatCostPair;
   window.getCostDisplayInfo = getCostDisplayInfo;
   window.buildCostStackHtml = buildCostStackHtml;
-  window.buildCornerMultiplierBadge = buildCornerMultiplierBadge;
   window.getFirstByteTimingColor = getFirstByteTimingColor;
   window.getDurationTimingColor = getDurationTimingColor;
   window.formatNumber = formatNumber;
