@@ -170,8 +170,8 @@ func (s *wsSession) normalizeRequest(payload []byte) (json.RawMessage, error) {
 }
 
 // inheritWSFields 是续轮请求（合并与替换共用）的字段规范化：剥掉 WS 信封
-// 字段，继承上一轮的 model/instructions（增量帧常省略这两个字段），
-// 强制 stream=true。
+// 字段，继承上一轮的 model/instructions/prompt_cache_key/user（增量帧常
+// 省略这些会话级字段），强制 stream=true。
 func inheritWSFields(top, last map[string]json.RawMessage) error {
 	delete(top, "type")
 	delete(top, "previous_response_id")
@@ -189,6 +189,22 @@ func inheritWSFields(top, last map[string]json.RawMessage) error {
 		if instructions, has := last["instructions"]; has {
 			top["instructions"] = instructions
 		}
+	}
+	// prompt_cache_key/user 是 SessionKey 来源（会话级缓存命名空间与
+	// trajectory 身份），客户端只在首帧携带时后续轮次也必须继承。
+	for _, key := range []string{"prompt_cache_key", "user"} {
+		if strings.TrimSpace(wsMapString(top, key)) != "" {
+			continue
+		}
+		value := strings.TrimSpace(wsMapString(last, key))
+		if value == "" {
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		top[key] = encoded
 	}
 	top["stream"] = json.RawMessage("true")
 	return nil

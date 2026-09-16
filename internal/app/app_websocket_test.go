@@ -686,6 +686,78 @@ func TestWebSocketNoUpgradeRejected(t *testing.T) {
 	}
 }
 
+// TestWebSocketSessionKeyInheritance 验证会话标识按连接继承：
+// prompt_cache_key/user 是 SessionKey 来源（上游 trajectory 与缓存命名
+// 空间），客户端只在首帧携带时续轮必须继承——缺失或显式空白都会退回
+// 上一帧的值，而不是退回内容哈希派生导致会话中途断裂。
+func TestWebSocketSessionKeyInheritance(t *testing.T) {
+	fake := &wsScriptAdapter{scripts: [][]llm.ResponseEvent{
+		wsTextTurnScript("one"),
+		wsTextTurnScript("two"),
+		wsTextTurnScript("three"),
+		wsTextTurnScript("four"),
+		wsTextTurnScript("five"),
+	}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	server := httptest.NewServer(application.Router())
+	t.Cleanup(server.Close)
+
+	// prompt_cache_key 只在首帧出现：续帧省略或显式空白都应继承首帧值。
+	conn := dialWS(t, server)
+	wsWriteJSON(t, conn, map[string]any{
+		"type":             "response.create",
+		"model":            "gpt-test",
+		"prompt_cache_key": "sess-cache-1",
+		"input":            []any{wsUserItem("one")},
+	})
+	completed := wsReadUntil(t, conn, "response.completed")
+	responseID := wsEventResponseID(t, completed)
+
+	wsWriteJSON(t, conn, map[string]any{
+		"type":                 "response.create",
+		"previous_response_id": responseID,
+		"input":                []any{wsUserItem("two")},
+	})
+	completed = wsReadUntil(t, conn, "response.completed")
+	responseID = wsEventResponseID(t, completed)
+
+	wsWriteJSON(t, conn, map[string]any{
+		"type":                 "response.create",
+		"previous_response_id": responseID,
+		"prompt_cache_key":     "",
+		"input":                []any{wsUserItem("three")},
+	})
+	wsReadUntil(t, conn, "response.completed")
+
+	// user 是 SessionKey 的回退来源，同样按会话继承。
+	conn2 := dialWS(t, server)
+	wsWriteJSON(t, conn2, map[string]any{
+		"type":  "response.create",
+		"model": "gpt-test",
+		"user":  "user-7",
+		"input": []any{wsUserItem("four")},
+	})
+	completed = wsReadUntil(t, conn2, "response.completed")
+	responseID = wsEventResponseID(t, completed)
+	wsWriteJSON(t, conn2, map[string]any{
+		"type":                 "response.create",
+		"previous_response_id": responseID,
+		"input":                []any{wsUserItem("five")},
+	})
+	wsReadUntil(t, conn2, "response.completed")
+
+	requests := fake.recordedRequests()
+	want := []string{"sess-cache-1", "sess-cache-1", "sess-cache-1", "user-7", "user-7"}
+	if len(requests) != len(want) {
+		t.Fatalf("adapter calls = %d, want %d", len(requests), len(want))
+	}
+	for i, request := range requests {
+		if request.SessionKey != want[i] {
+			t.Fatalf("request %d SessionKey = %q, want %q", i, request.SessionKey, want[i])
+		}
+	}
+}
+
 // TestWebSocketInboundQueueByteLimit 验证入队字节闸：turn 进行中积压的
 // 客户端帧总量超过 wsMaxQueuedBytes（64MiB）时服务端回 close 1009 断连。
 // 按帧数限额会让 16×32MiB≈512MiB/连接成为最坏值，字节预算才是内存闸。
