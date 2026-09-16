@@ -17,7 +17,9 @@ import (
 	"connectrpc.com/connect"
 
 	devinproto "local/devinproto"
+	"local/devinproto/devinprotoconnect"
 
+	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/upstream"
 )
 
@@ -28,6 +30,64 @@ const (
 	// 生成的 connect 包名 ExaSeatManagementPb_SeatManagementService 在上游会 404。
 	seatUserStatusPath = "/exa.seat_management_pb.SeatManagementService/GetUserStatus"
 )
+
+// panelUpstream 是一次「上游端点」的固化产物：面板自身的 connect client
+// 与裸 transport 绑在同一份 base_url/proxy/force_http1 上。endpoint 配置
+// 热应用时 SetUpstream 整体重建、原子换指针；在途调用持旧引用跑完。
+type panelUpstream struct {
+	// baseURL 已归一化去尾随斜杠（尾随斜杠会让 Connect 调用路径出 "//"）。
+	baseURL   string
+	apiClient devinprotoconnect.ApiServerServiceClient
+	// baseTransport 供 seat 类裸 POST 复用代理拨号（它们自带 Bearer，
+	// 不能走 apiClient 的 Basic 改写）；退役时 CloseIdleConnections 收
+	// idle 池，在途请求持引用跑完。
+	baseTransport *http.Transport
+}
+
+// newPanelUpstream 按端点参数构建面板的上游调用束：transport 经 tokenFunc
+// 每次请求取凭据（adapter 自愈换 token 后面板跟随新值）。面板调用可能
+// 遇上游长时思考/排队，610s 超时与 ResponseHeaderTimeout 对齐。
+// proxy 串非法等构建失败返回 error，调用方整体不提交。
+func newPanelUpstream(baseURL, proxy string, forceHTTP1 bool, tokenFunc func() string) (*panelUpstream, error) {
+	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
+	if err != nil {
+		return nil, fmt.Errorf("proxy transport: %w", err)
+	}
+	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
+	trimmed := strings.TrimRight(baseURL, "/")
+	return &panelUpstream{
+		baseURL: trimmed,
+		apiClient: devinprotoconnect.NewApiServerServiceClient(
+			&http.Client{Transport: transport, Timeout: 610 * time.Second},
+			trimmed, connect.WithSendGzip()),
+		baseTransport: base,
+	}, nil
+}
+
+// SetUpstream 热换面板上游端点（配置 reload 热路径）：整体重建调用束
+// 并原子换指针；构建失败整体不提交，旧端点继续服役。
+func (h *Handler) SetUpstream(baseURL, proxy string, forceHTTP1 bool) error {
+	up, err := newPanelUpstream(baseURL, proxy, forceHTTP1, h.tokenFunc)
+	if err != nil {
+		return err
+	}
+	old := h.upstreamPtr.Swap(up)
+	if old != nil {
+		old.baseTransport.CloseIdleConnections()
+	}
+	return nil
+}
+
+// currentUpstream 返回当前生效的上游调用束快照；New 之后恒非 nil。
+func (h *Handler) currentUpstream() *panelUpstream {
+	return h.upstreamPtr.Load()
+}
+
+// BaseURL 返回当前生效的上游地址（归一化后），供移植面板投到日志行与
+// 调试响应——与面板自身上游调用同一来源，endpoint 热应用后跟随新值。
+func (h *Handler) BaseURL() string {
+	return h.currentUpstream().baseURL
+}
 
 func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	// 面板聚合多个上游调用，给足时间避免单个慢接口拖垮整体；
@@ -71,7 +131,7 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 
 	go func() {
 		defer wg.Done()
-		capResp, err := h.apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
+		capResp, err := h.currentUpstream().apiClient.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{
 			Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
@@ -89,7 +149,7 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 
 	go func() {
 		defer wg.Done()
-		statusResp, err := h.apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
+		statusResp, err := h.currentUpstream().apiClient.GetStatus(ctx, connect.NewRequest(&devinproto.GetStatusRequest{
 			Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 		}))
 		resultMu.Lock()
@@ -204,7 +264,8 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	url := h.baseURL + seatUserStatusPath
+	up := h.currentUpstream()
+	url := up.baseURL + seatUserStatusPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, nil, err
@@ -215,7 +276,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 
 	// 使用不带 Basic 改写的 client，避免 authTransport 覆盖 Bearer；但复用代理 transport。
 	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
-	client := &http.Client{Timeout: 610 * time.Second, Transport: h.baseTransport}
+	client := &http.Client{Timeout: 610 * time.Second, Transport: up.baseTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, nil, err
@@ -406,7 +467,7 @@ func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
 // fetchModels 拉取并投影上游模型目录；CLI 版响应与 Cascade 版模型表一致，
 // 并多出 subagent_default_model_uid 等字段。
 func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
-	resp, err := h.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
+	resp, err := h.currentUpstream().apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {
@@ -548,7 +609,7 @@ func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error)
 		return h.providersCache, nil
 	}
 
-	providerResp, err := h.apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
+	providerResp, err := h.currentUpstream().apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
 	if err != nil {
 		return nil, err
 	}
@@ -580,7 +641,7 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, er
 		return h.modelStatusesCache, nil
 	}
 
-	modelStatusResp, err := h.apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
+	modelStatusResp, err := h.currentUpstream().apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
 	if err != nil {

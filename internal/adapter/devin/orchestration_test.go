@@ -497,7 +497,7 @@ func TestOrchestrationModelRouterAssign(t *testing.T) {
 
 // TestOrchestrationApplyConfig 验证热应用：运行时字段（model/token/闸门）
 // 换值即生效——下一次 Stream 的 wire 模型与 Authorization 同步切换；
-// 烤进 transport 的字段（base_url）列入 requiresRestart。
+// 端点三件套不变时不触发调用束重建。
 func TestOrchestrationApplyConfig(t *testing.T) {
 	stub := &stubUpstream{
 		catalog: []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)},
@@ -519,14 +519,14 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 		Aliases: map[string]string{"b": "stub-model"},
 		Gate:    GateConfig{MaxRPM: 60},
 	}
-	applied, restart := adapter.ApplyConfig(next)
+	applied, err := adapter.ApplyConfig(next)
+	if err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
 	for _, want := range []string{"devin.model", "devin.token", "devin.aliases", "devin.max_rpm"} {
 		if !slices.Contains(applied, want) {
 			t.Fatalf("applied %v missing %q", applied, want)
 		}
-	}
-	if len(restart) != 0 {
-		t.Fatalf("requiresRestart = %v, want empty", restart)
 	}
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
@@ -539,5 +539,55 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 	}
 	if stub.auths[0] != "Basic tok2-tok2" {
 		t.Fatalf("auth after ApplyConfig = %q", stub.auths[0])
+	}
+}
+
+// TestApplyConfigSwitchesEndpoint 验证端点三件套热应用：base_url 换值触发
+// 调用束整体重建，下一次 Stream 落到新上游；构建失败（非法 proxy）时
+// 整体不提交——config 快照与调用束都留在旧端点。
+func TestApplyConfigSwitchesEndpoint(t *testing.T) {
+	chat := func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+		return stubSend(stream, stubMeta(), stubDelta("x"), stubStop())
+	}
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("m", false)}
+	stub1 := &stubUpstream{catalog: catalog, chat: chat}
+	stub2 := &stubUpstream{catalog: catalog, chat: chat}
+	srv1 := stubServer(t, stub1, nil)
+	srv2 := stubServer(t, stub2, nil)
+	adapter := stubAdapter(t, srv1, Config{Model: "m", Token: "t"})
+
+	stream, err := adapter.Stream(context.Background(), stubRequest())
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	stubDrain(t, stream)
+	if stub1.chatCalls.Load() != 1 || stub2.chatCalls.Load() != 0 {
+		t.Fatalf("before reload: stub1=%d stub2=%d, want 1/0", stub1.chatCalls.Load(), stub2.chatCalls.Load())
+	}
+
+	// 非法 proxy 先行验证「构建失败整体不提交」：config 不换值、
+	// 调用束不换指针，后续请求仍落在当前端点。
+	if _, err := adapter.ApplyConfig(Config{BaseURL: srv2.URL, Model: "m", Token: "t", Proxy: "://bad-proxy"}); err == nil {
+		t.Fatal("ApplyConfig with bad proxy should fail")
+	}
+	if got := adapter.currentConfig().BaseURL; got != srv1.URL {
+		t.Fatalf("config committed after failed rebuild: base_url=%q", got)
+	}
+
+	applied, err := adapter.ApplyConfig(Config{BaseURL: srv2.URL, Model: "m", Token: "t"})
+	if err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	if !slices.Contains(applied, "devin.base_url") {
+		t.Fatalf("applied %v missing devin.base_url", applied)
+	}
+
+	stream, err = adapter.Stream(context.Background(), stubRequest())
+	if err != nil {
+		t.Fatalf("Stream after endpoint swap: %v", err)
+	}
+	stubDrain(t, stream)
+	if stub1.chatCalls.Load() != 1 || stub2.chatCalls.Load() != 1 {
+		t.Fatalf("after reload: stub1=%d stub2=%d, want 1/1", stub1.chatCalls.Load(), stub2.chatCalls.Load())
 	}
 }

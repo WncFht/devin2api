@@ -86,7 +86,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "server_search_call", map[string]any{"stage": stage, "domain": domain})
 		}
 		recordProtoJSON(recorder, stage, request)
-		response, err := adapter.apiClient.GetWebSearchResults(ctx, connect.NewRequest(request))
+		response, err := adapter.link().api.GetWebSearchResults(ctx, connect.NewRequest(request))
 		if err != nil {
 			adapter.gate.noteUpstreamError(err)
 			stage := debuglog.ErrStageDevinConnect

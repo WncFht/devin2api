@@ -134,7 +134,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 		API:                      e.API,
 		UpstreamProtocol:         "devin",
 		ClientIP:                 e.ClientIP,
-		BaseURL:                  h.baseURL,
+		BaseURL:                  h.panel.BaseURL(),
 		InputTokens:              e.InputTokens,
 		OutputTokens:             e.OutputTokens,
 		ReasoningTokens:          e.ReasoningTokens,
@@ -461,9 +461,10 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 		}
 	}
 	// 上游 procedure 按 wire 体形辨：搜索调用无 chatMessagePrompts。
-	reqURL := h.baseURL + "/exa.api_server_pb.ApiServerService/GetChatMessage"
+	baseURL := h.panel.BaseURL()
+	reqURL := baseURL + "/exa.api_server_pb.ApiServerService/GetChatMessage"
 	if reqBody.Len() > 0 && !bytes.Contains(reqBody.Bytes(), []byte(`"chatMessagePrompts"`)) {
-		reqURL = h.baseURL + "/exa.api_server_pb.ApiServerService/GetWebSearchResults"
+		reqURL = baseURL + "/exa.api_server_pb.ApiServerService/GetWebSearchResults"
 	}
 	resp["req_url"] = reqURL
 	addDebugResponseBody(resp, "req_body", reqBody.Bytes())

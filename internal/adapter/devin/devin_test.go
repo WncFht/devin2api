@@ -2084,7 +2084,8 @@ func (stub *stubModelConfigsClient) GetCliModelConfigs(ctx context.Context, _ *c
 // 调用共享同一个 fetch，拉取方提交缓存后等待者走复查路径拿到同一份结果。
 func TestListModelsSingleflight(t *testing.T) {
 	stub := &stubModelConfigsClient{release: make(chan struct{})}
-	a := &Adapter{apiClient: stub, modelsCacheTTL: time.Minute}
+	a := &Adapter{modelsCacheTTL: time.Minute}
+	a.linkPtr.Store(&upstreamLink{api: stub})
 	const waiters = 8
 	var wg sync.WaitGroup
 	errs := make(chan error, waiters)
@@ -2120,7 +2121,8 @@ func TestListModelsSingleflight(t *testing.T) {
 // 断连的等待者立即退出，不陪跑到拉取结束；拉取方自身不受影响。
 func TestListModelsWaiterCancel(t *testing.T) {
 	stub := &stubModelConfigsClient{release: make(chan struct{})}
-	a := &Adapter{apiClient: stub, modelsCacheTTL: time.Minute}
+	a := &Adapter{modelsCacheTTL: time.Minute}
+	a.linkPtr.Store(&upstreamLink{api: stub})
 	fetcherDone := make(chan error, 1)
 	go func() {
 		_, err := a.ListModels(context.Background())

@@ -10,24 +10,19 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"connectrpc.com/connect"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/debuglog"
-	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/WncFht/devin2api/internal/randid"
-	"github.com/WncFht/devin2api/internal/upstream"
-
-	"local/devinproto/devinprotoconnect"
 )
 
 // Handler 是面板 HTTP 处理器。
@@ -38,12 +33,14 @@ type Handler struct {
 	// passwordHash 是面板密码的 SHA-256：比较走定长哈希，既不向
 	// ConstantTimeCompare 泄漏长度，也与 apiKeyMiddleware 的口径一致。
 	passwordHash [32]byte
-	baseURL      string
+	// upstreamPtr 是面板自身上游调用束（baseURL/apiClient/baseTransport
+	// 绑同一份 base_url/proxy/force_http1）：endpoint 热应用整体重建换
+	// 指针，在途调用持旧引用跑完。读侧经 currentUpstream() 取快照；
+	// New 之后恒非 nil。
+	upstreamPtr atomic.Pointer[panelUpstream]
 	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
 	tokenFunc     func() string
-	apiClient     devinprotoconnect.ApiServerServiceClient
-	baseTransport http.RoundTripper
 	sessionMu     sync.RWMutex
 	sessionTokens map[string]time.Time
 	// recentTokens 是最近见过的上游凭据（token 自愈轮换会换新）：
@@ -113,29 +110,22 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 	if tokenFunc == nil {
 		tokenFunc = func() string { return "" }
 	}
-	base, err := httpproxy.NewTransport(proxy, forceHTTP1)
+	up, err := newPanelUpstream(baseURL, proxy, forceHTTP1, tokenFunc)
 	if err != nil {
-		return nil, fmt.Errorf("proxy transport: %w", err)
+		return nil, err
 	}
-	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
-	// 面板可能遇到上游长时思考/排队，超时与 ResponseHeaderTimeout 对齐。
-	httpClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	// baseURL 归一化一次，Connect 客户端与 fetchUserStatus 用同一形态——
-	// 尾随斜杠的 devin.base_url 会让 Connect 调用路径出 "//"。
-	trimmedURL := strings.TrimRight(baseURL, "/")
-	return &Handler{
+	h := &Handler{
 		password:      password,
 		passwordHash:  sha256.Sum256([]byte(password)),
-		baseURL:       trimmedURL,
 		tokenFunc:     tokenFunc,
-		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, trimmedURL, connect.WithSendGzip()),
-		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
 		loginFailures: make(map[string]*loginFail),
 		cacheTTL:      5 * time.Minute,
 		metrics:       metrics,
 		debugManager:  debugManager,
-	}, nil
+	}
+	h.upstreamPtr.Store(up)
+	return h, nil
 }
 
 // SetVersion 记录构建版本，stats/index 端点透出，供排障辨认运行中的二进制。

@@ -27,8 +27,6 @@ type Handler struct {
 	debug *debuglog.Manager
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
-	// baseURL 是当前上游地址，投到日志行与调试响应的 base_url/req_url。
-	baseURL string
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
 	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
 	maxConcurrencyFunc func() int
@@ -60,12 +58,11 @@ type Handler struct {
 
 // New 创建移植面板处理器。panel 为鉴权与目录委托对象，不得为 nil；
 // debug/metrics 可为 nil（对应端点降级为空数据）。
-func New(panel *dashboard.Handler, debug *debuglog.Manager, metrics *obs.Metrics, baseURL string) *Handler {
+func New(panel *dashboard.Handler, debug *debuglog.Manager, metrics *obs.Metrics) *Handler {
 	return &Handler{
 		panel:     panel,
 		debug:     debug,
 		metrics:   metrics,
-		baseURL:   baseURL,
 		startedAt: time.Now(),
 		ru:        newRollup(),
 	}

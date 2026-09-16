@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	devinproto "local/devinproto"
@@ -98,18 +99,17 @@ func (config Config) ClientIdentity() (name, version, os string) {
 // Adapter 调用 Devin 的 ApiServerService/GetChatMessage。
 type Adapter struct {
 	// configMu 保护 config：ApplyConfig 热路径整体换值，读侧经
-	// currentConfig 取快照。proxy/base_url/force_http1 等烤进
-	// transport 的字段虽在结构里但换值不生效（见 ApplyConfig）。
+	// currentConfig 取快照。
 	configMu sync.RWMutex
 	config   Config
 	// token 是当前生效的上游凭据：unauthenticated 自愈会原地更新，
 	// transport 经 tokenFunc 每次请求读取，无需重建 HTTP 客户端。
 	tokenMu sync.RWMutex
 	token   string
-	// streamClient 无 Client.Timeout（SSE 长连接靠 Transport 层超时兜底）；
-	// apiClient 有 610s 整体超时，用于模型目录等普通调用。
-	streamClient   devinprotoconnect.ApiServerServiceClient
-	apiClient      devinprotoconnect.ApiServerServiceClient
+	// linkPtr 是绑死 base_url/proxy/force_http1 的上游调用束：endpoint
+	// 热应用时整体重建换指针（见 ApplyConfig），在途调用持旧引用跑完。
+	// 读侧经 link() 取快照；New 之后恒非 nil。
+	linkPtr        atomic.Pointer[upstreamLink]
 	modelsMu       sync.RWMutex
 	models         []adapter.ModelInfo
 	modelsExpiry   time.Time
@@ -130,8 +130,6 @@ type Adapter struct {
 	// gate 是上游消息速率闸门：令牌桶主动限速 + 上游限流冷却闩。
 	// 每次 GetChatMessage 发送（含自愈/重开重试）前都要过闸。
 	gate *rateGate
-	// warmer 焐住上游 idle 连接池，省掉每请求的 TCP+TLS 握手段。
-	warmer *connWarmer
 	// assignments 缓存 (router uid, cascade id) 的 AssignModel 解析结果：
 	// assignment jwt 绑 cascade_id（上游实测），同会话内复用省去
 	// 每请求一次的解析往返。
@@ -143,6 +141,22 @@ type Adapter struct {
 type resolvedAssignment struct {
 	modelUID string
 	jwt      string
+}
+
+// upstreamLink 是一次「上游端点」的固化产物：stream/api 两个 connect
+// client 与焐池 connWarmer 绑在同一份 base_url/proxy/force_http1 与同一
+// 个 *http.Transport 上。endpoint 配置热应用时整体重建、原子换指针；
+// 旧 link 被在途调用持有，直到引用自然散尽。
+type upstreamLink struct {
+	// transport 是底层拨号/代理 transport，warmer 与两个 client 共享；
+	// 退役时 CloseIdleConnections 收掉 idle 池（在途流不受影响）。
+	transport *http.Transport
+	// stream 无 Client.Timeout（SSE 长连接靠 Transport 层超时兜底）；
+	// api 有 610s 整体超时，用于模型目录等普通调用。
+	stream devinprotoconnect.ApiServerServiceClient
+	api    devinprotoconnect.ApiServerServiceClient
+	// warmer 焐住 transport 的 idle 连接池，省掉每请求的 TCP+TLS 握手段。
+	warmer *connWarmer
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
@@ -158,10 +172,6 @@ func New(config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return nil, errors.New("devin model is required")
 	}
-	base, err := httpproxy.NewTransport(config.Proxy, config.ForceHTTP1)
-	if err != nil {
-		return nil, fmt.Errorf("create proxy transport: %w", err)
-	}
 	adapter := &Adapter{
 		config:         config,
 		token:          config.Token,
@@ -169,7 +179,24 @@ func New(config Config) (*Adapter, error) {
 		gate:           newRateGate(config.Gate, config.GateStatePath),
 		assignments:    make(map[string]resolvedAssignment),
 	}
-	transport := upstream.NewBasicAuthTransportFunc(base, adapter.currentToken)
+	link, err := newUpstreamLink(config, adapter.currentToken)
+	if err != nil {
+		return nil, err
+	}
+	adapter.linkPtr.Store(link)
+
+	return adapter, nil
+}
+
+// newUpstreamLink 按端点参数构建上游调用束：transport 经 tokenFunc 每次
+// 请求取凭据（unauthenticated 自愈与 token 热应用原地生效，无需重建）。
+// proxy 串非法等构建失败返回 error，调用方整体不提交。
+func newUpstreamLink(config Config, tokenFunc func() string) (*upstreamLink, error) {
+	base, err := httpproxy.NewTransport(config.Proxy, config.ForceHTTP1)
+	if err != nil {
+		return nil, fmt.Errorf("create proxy transport: %w", err)
+	}
+	transport := upstream.NewBasicAuthTransportFunc(base, tokenFunc)
 
 	// 上行链路（直连 GCP）单连接吞吐实测仅 ~200KB/s，而 chat 请求体重发
 	// 全量上下文常达数百 KB——请求体 gzip 实测把建流到首字从 ~5s 压回 ~1.5s。
@@ -177,21 +204,30 @@ func New(config Config) (*Adapter, error) {
 
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
-	adapter.streamClient = devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL, gzipSend)
-	adapter.warmer = newConnWarmer(base, config.BaseURL)
+	stream := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL, gzipSend)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
 	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	adapter.apiClient = devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL, gzipSend)
+	api := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL, gzipSend)
 
-	return adapter, nil
+	return &upstreamLink{
+		transport: base,
+		stream:    stream,
+		api:       api,
+		warmer:    newConnWarmer(base, config.BaseURL),
+	}, nil
+}
+
+// link 返回当前生效的上游调用束快照；New 之后恒非 nil。
+func (adapter *Adapter) link() *upstreamLink {
+	return adapter.linkPtr.Load()
 }
 
 // Close 停掉焐池协程等后台资源；进程退出是最兜底的生命周期。
 func (adapter *Adapter) Close() {
-	if adapter.warmer != nil {
-		adapter.warmer.Close()
+	if link := adapter.link(); link != nil {
+		link.warmer.Close()
 	}
 }
 
@@ -228,15 +264,41 @@ func (adapter *Adapter) GateStats() GateStats {
 
 // ApplyConfig 热应用新配置：读侧每次请求取快照的字段（model、aliases、
 // client_*）与闸门参数/token 直接换值即生效；烤进 transport 的
-// base_url/proxy/force_http1 换值不生效，列入 requiresRestart 由调用方
-// 回报。返回的两个列表只含值发生变化的字段。
-func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []string) {
+// base_url/proxy/force_http1 变化时整体重建上游调用束并原子换指针，
+// 在途调用持旧引用跑完。返回的列表只含值发生变化的字段。
+func (adapter *Adapter) ApplyConfig(next Config) (applied []string, err error) {
 	adapter.configMu.Lock()
 	prev := adapter.config
 	// 运行时字段不归配置管：状态文件路径沿用旧值。
 	next.GateStatePath = prev.GateStatePath
+
+	// 端点三件套烤进 transport，换值需整体重建调用束。先构建后提交：
+	// proxy 串非法等失败时整体返回错误，旧配置（含 config 快照）继续服役。
+	var newLink *upstreamLink
+	if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
+		newLink, err = newUpstreamLink(next, adapter.currentToken)
+		if err != nil {
+			adapter.configMu.Unlock()
+			return nil, err
+		}
+	}
 	adapter.config = next
 	adapter.configMu.Unlock()
+
+	if newLink != nil {
+		old := adapter.linkPtr.Swap(newLink)
+		// 旧 transport 的 idle 池收掉；在途流持旧 client 引用跑完。
+		old.transport.CloseIdleConnections()
+		// warmer 停表要等进行中的 warmOnce（最坏 ~15s），异步收不堵 reload。
+		go old.warmer.Close()
+		if prev.BaseURL != next.BaseURL {
+			// assignment jwt 绑 cascade_id 且只对签发它的上游有效——
+			// 换端点后旧缓存全部失效，清空在新端点重解析。
+			adapter.assignmentsMu.Lock()
+			clear(adapter.assignments)
+			adapter.assignmentsMu.Unlock()
+		}
+	}
 
 	if prev.Model != next.Model {
 		applied = append(applied, "devin.model")
@@ -279,15 +341,15 @@ func (adapter *Adapter) ApplyConfig(next Config) (applied, requiresRestart []str
 		applied = append(applied, "devin.gate_window_guard_seconds")
 	}
 	if prev.BaseURL != next.BaseURL {
-		requiresRestart = append(requiresRestart, "devin.base_url")
+		applied = append(applied, "devin.base_url")
 	}
 	if prev.Proxy != next.Proxy {
-		requiresRestart = append(requiresRestart, "devin.proxy")
+		applied = append(applied, "devin.proxy")
 	}
 	if prev.ForceHTTP1 != next.ForceHTTP1 {
-		requiresRestart = append(requiresRestart, "devin.force_http1")
+		applied = append(applied, "devin.force_http1")
 	}
-	return applied, requiresRestart
+	return applied, nil
 }
 
 // reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
@@ -560,7 +622,8 @@ const maxConnectAttempts = 3
 // 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
 func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
 	var lastErr error
-	adapter.warmer.kickRequest()
+	link := adapter.link()
+	link.warmer.kickRequest()
 	// sent/open 埋点幂等（CAS -1）：重试时 sent 留在首次发送、open 记首个
 	// 成功的建流，sent→open 的差值如实包含退避重试耗时。
 	recorder := debuglog.FromContext(ctx)
@@ -596,7 +659,7 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 		traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 			GotConn: func(info httptrace.GotConnInfo) { conn = info },
 		})
-		stream, err := adapter.streamClient.GetChatMessage(traceCtx, connect.NewRequest(protoRequest))
+		stream, err := link.stream.GetChatMessage(traceCtx, connect.NewRequest(protoRequest))
 		if err == nil {
 			recorder.NoteUpstreamOpen()
 			recorder.NoteUpstreamConn(conn.Reused, conn.IdleTime)
@@ -783,8 +846,9 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 		return cached, nil
 	}
 	name, version, os := adapter.currentConfig().ClientIdentity()
-	adapter.warmer.kickRequest()
-	resp, err := adapter.apiClient.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
+	link := adapter.link()
+	link.warmer.kickRequest()
+	resp, err := link.api.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
 		ModelRouterUid: proto.String(routerUID),
 		CascadeId:      proto.String(cascadeID),
@@ -949,7 +1013,7 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
 	cfg := a.currentConfig()
 	name, version, os := cfg.ClientIdentity()
-	resp, err := a.apiClient.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
+	resp, err := a.link().api.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))
 	if err != nil {

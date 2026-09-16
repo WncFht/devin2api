@@ -69,7 +69,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			Streaming:         ar.Meta.API == "responses-ws",
 			API:               ar.Meta.API,
 			APIKeyUsed:        ar.Meta.KeyHash,
-			BaseURL:           h.baseURL,
+			BaseURL:           h.panel.BaseURL(),
 			BytesReceived:     ar.ClientBytes,
 			CostMultiplier:    1,
 			UpstreamWebsocket: ar.Meta.API == "responses-ws",

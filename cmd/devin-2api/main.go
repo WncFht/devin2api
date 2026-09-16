@@ -246,7 +246,7 @@ func main() {
 	application.SetDashboard(panel)
 	// 移植面板（ccLoad 契约）与旧面板并存：同一密码门槛，/web、/admin、
 	// /dashboard、/public、/login、/logout 挂在根路径。
-	ccPanel := ccpanel.New(panel, debugManager, application.Metrics(), serviceConfig.Devin.BaseURL)
+	ccPanel := ccpanel.New(panel, debugManager, application.Metrics())
 	ccPanel.SetVersion(resolved)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
@@ -339,8 +339,8 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 // reloadRuntimeConfig 重读配置文件并把可安全换值的字段热应用；校验失败
 // 直接返回错误、旧配置继续服役（validate-then-commit）。只报告值发生
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
-// transport 固化字段（base_url/proxy/force_http1）与监听参数进
-// requires_restart，调用方据此知道哪些改动仍在 pending。
+// 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
+// transport 固化的端点三件套走调用束原子换指针热生效。
 func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*dashboard.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
@@ -356,12 +356,23 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	applied, cold := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
+	applied, err := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
+	if err != nil {
+		return nil, err
+	}
 	report.Applied = append(report.Applied, applied...)
-	report.RequiresRestart = append(report.RequiresRestart, cold...)
 	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
 	// 而本函数只能经 panel 端点触达。
 	pcfg := runtimeConfigPtr.Load().cfg
+	if pcfg.Devin.BaseURL != cfg.Devin.BaseURL || pcfg.Devin.Proxy != cfg.Devin.Proxy ||
+		*pcfg.Devin.ForceHTTP1 != *cfg.Devin.ForceHTTP1 {
+		// adapter 侧调用束已在 ApplyConfig 内换好（同参数构建成功是前提）；
+		// 面板自身的上游调用束跟随同一端点——ccpanel 的展示地址经
+		// panel.BaseURL 透出，无需单独同步。
+		if err := panel.SetUpstream(cfg.Devin.BaseURL, cfg.Devin.Proxy, *cfg.Devin.ForceHTTP1); err != nil {
+			return nil, err
+		}
+	}
 	if pcfg.Auth.APIKey != cfg.Auth.APIKey {
 		application.SetAPIKey(cfg.Auth.APIKey)
 		report.Applied = append(report.Applied, "auth.api_key")
