@@ -3,7 +3,7 @@
 
     window.trendData = null;
     window.currentRange = 'today'; // 默认"本日"
-    window.currentTrendType = 'first_byte'; // 默认显示首字响应趋势 (count/rpm/first_byte/duration/tokens/cost)
+    window.currentTrendType = 'first_byte'; // 默认显示首字响应趋势 (count/rpm/tps/first_byte/duration/tokens/cost)
     window.currentTrendChartType = 'line'; // 默认使用折线图，可切换为柱状图
     window.currentModel = ''; // 当前选中的模型（空字符串表示全部模型）
     window.currentAuthToken = ''; // 当前选中的令牌（空字符串表示全部令牌）
@@ -609,6 +609,31 @@
             return total > 0 ? total / bucketMin : 0;
           })
         });
+      } else if (trendType === 'tps') {
+        // TPS趋势：四类 token 的每秒速率 = 桶内计数 / (bucketMin*60)，与 tokens 视图同分解
+        const bucketSec = (window.currentHours ? computeBucketMin(window.currentHours) : 5) * 60;
+        const tpsSeriesDefs = [
+          { field: 'input_tokens', name: t('trend.inputTokens'), color: '#3b82f6' },
+          { field: 'output_tokens', name: t('trend.outputTokens'), color: '#10b981' },
+          { field: 'cache_read_tokens', name: t('trend.cacheRead'), color: '#f97316' },
+          { field: 'cache_creation_tokens', name: t('trend.cacheCreate'), color: '#a855f7' }
+        ];
+        tpsSeriesDefs.forEach(def => {
+          series.push({
+            name: def.name,
+            type: 'line',
+            smooth: 0.25,
+            symbol: 'circle',
+            symbolSize: 4,
+            showSymbol: false,
+            sampling: 'lttb',
+            connectNulls: false,
+            emphasis: { focus: 'series', showSymbol: true },
+            itemStyle: { color: def.color },
+            lineStyle: { width: 2, color: def.color, cap: 'round', join: 'round' },
+            data: window.trendData.map(point => (Number(point[def.field]) || 0) / bucketSec)
+          });
+        });
       } else if (trendType === 'cache_hit') {
         // 缓存命中趋势：cache_read / (cache_read + input)——input 口径不含 cache_read
         series.push({
@@ -859,6 +884,38 @@
               data: rpmData
             });
           }
+        } else if (trendType === 'tps') {
+          // TPS趋势：模型每秒 token 速率（输入+输出，与 tokens 视图的模型口径一致）
+          const bucketSec = (window.currentHours ? computeBucketMin(window.currentHours) : 5) * 60;
+          const tpsData = new Array(dataLen);
+          let hasData = false;
+
+          for (let i = 0; i < dataLen; i++) {
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
+            if (total > 0) {
+              tpsData[i] = total / bucketSec;
+              hasData = true;
+            } else {
+              tpsData[i] = null;
+            }
+          }
+
+          if (hasData) {
+            series.push({
+              name: modelName,
+              type: 'line',
+              smooth: 0.25,
+              symbol: 'none',
+              sampling: 'lttb',
+              connectNulls: false,
+              emphasis: { focus: 'series' },
+              itemStyle: { color: color },
+              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
+              data: tpsData
+            });
+          }
         } else if (trendType === 'cache_hit') {
           // 缓存命中趋势：模型缓存命中率（与聚合线同式）
           const hitData = new Array(dataLen);
@@ -982,6 +1039,15 @@
               } else if (window.currentTrendType === 'rpm') {
                 // RPM：保留1位小数
                 formattedValue = value.toFixed(1) + '/min';
+              } else if (window.currentTrendType === 'tps') {
+                // TPS：每秒 token 数，K/M 缩写
+                if (value >= 1000000) {
+                  formattedValue = (value / 1000000).toFixed(1) + 'M/s';
+                } else if (value >= 1000) {
+                  formattedValue = (value / 1000).toFixed(1) + 'K/s';
+                } else {
+                  formattedValue = value.toFixed(1) + '/s';
+                }
               } else if (window.currentTrendType === 'cache_hit') {
                 // 缓存命中率：百分比
                 formattedValue = value.toFixed(1) + '%';
@@ -1086,6 +1152,11 @@
               } else if (trendType === 'rpm') {
                 // RPM：保留1位小数
                 return value.toFixed(1);
+              } else if (trendType === 'tps') {
+                // TPS：K/M 缩写 + /s
+                if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M/s';
+                if (value >= 1000) return (value / 1000).toFixed(1) + 'K/s';
+                return value + '/s';
               } else if (trendType === 'cache_hit') {
                 // 缓存命中率：百分比
                 return Math.round(value) + '%';
@@ -1592,6 +1663,46 @@ function shouldShowZoom(points, hours, trendType) {
       } catch (_) {}
     }
 
+    // 自动刷新：工具栏 select 控制间隔（10s/30s/1min/5min），默认 10s，
+    // 选择存 localStorage，切换即重建定时器；页面隐藏时跳过 tick。
+    const TREND_REFRESH_KEY = 'trend.refreshSec';
+    const TREND_REFRESH_OPTIONS = [10, 30, 60, 300];
+    const TREND_REFRESH_DEFAULT = 10;
+    let trendRefreshTimer = null;
+
+    function currentTrendRefreshSec() {
+      try {
+        const v = Number(localStorage.getItem(TREND_REFRESH_KEY));
+        if (TREND_REFRESH_OPTIONS.includes(v)) return v;
+      } catch (_) {}
+      return TREND_REFRESH_DEFAULT;
+    }
+
+    function startTrendRefresh() {
+      if (trendRefreshTimer !== null) {
+        clearInterval(trendRefreshTimer);
+        trendRefreshTimer = null;
+      }
+      const sec = currentTrendRefreshSec();
+      trendRefreshTimer = setInterval(() => {
+        if (document.hidden) return;
+        loadData();
+        loadWarmStatus();
+      }, sec * 1000);
+    }
+
+    function initTrendRefreshControl() {
+      const select = document.getElementById('f_refresh_interval');
+      if (select) {
+        select.value = String(currentTrendRefreshSec());
+        select.addEventListener('change', () => {
+          try { localStorage.setItem(TREND_REFRESH_KEY, select.value); } catch (_) {}
+          startTrendRefresh();
+        });
+      }
+      startTrendRefresh();
+    }
+
     // 页面初始化
     window.initPageBootstrap({
       topbarKey: 'trend',
@@ -1634,8 +1745,8 @@ function shouldShowZoom(points, hours, trendType) {
         }
       });
 
-      // 定期刷新数据（每5分钟）
-      setInterval(() => { loadData(); loadWarmStatus(); }, 5 * 60 * 1000);
+      // 定期刷新数据（间隔由工具栏 select 控制，默认 10s）
+      initTrendRefreshControl();
       }
     });
 
@@ -1773,7 +1884,7 @@ function shouldShowZoom(points, hours, trendType) {
 
         // 恢复趋势类型
         window.currentTrendType = 'first_byte';
-        if (['count', 'rpm', 'first_byte', 'duration', 'tokens', 'cost', 'cache_hit'].includes(restoredFilters.trendType)) {
+        if (['count', 'rpm', 'tps', 'first_byte', 'duration', 'tokens', 'cost', 'cache_hit'].includes(restoredFilters.trendType)) {
           window.currentTrendType = restoredFilters.trendType;
         }
 
