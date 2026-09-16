@@ -585,6 +585,21 @@ func (recorder *Recorder) DirectoryPath() string {
 	return recorder.directory
 }
 
+// ClientRequestID 返回客户端自带的关联 ID（X-Request-Id/X-Client-Request-Id
+// 等，建目录时快照进 requestMeta 后不再变，读侧免锁）。adapter 层用它识别
+// 面板探活等内部流量——它们走真实 /v1 管线但不属于客户端会话簿记。
+func (recorder *Recorder) ClientRequestID() string {
+	if recorder == nil {
+		return ""
+	}
+	return recorder.requestMeta.ClientRequestID
+}
+
+// ProbeClientRequestID 是面板探活请求打在 client_request_id 上的留痕值。
+// 发送方（ccpanel 模型探针）与多个消费方（日志页 manual_test 归组、
+// adapter 保温簿记豁免）共认同一常量，故定义在本包而不是任一消费侧。
+const ProbeClientRequestID = "panel-probe"
+
 // WithRecorder 将本次请求 recorder 放入 context 供供应商 adapter 使用。
 func WithRecorder(ctx context.Context, recorder *Recorder) context.Context {
 	if recorder == nil {

@@ -114,7 +114,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 	// 面板探活行（X-Client-Request-Id: panel-probe）记 manual_test——
 	// 与 ccLoad 同语义：带「手动测试」徽标，不计入默认 proxy 视图。
 	logSource := "proxy"
-	if e.ClientRequestID == probeClientRequestID {
+	if e.ClientRequestID == debuglog.ProbeClientRequestID {
 		logSource = "manual_test"
 	}
 	entry := logEntry{
@@ -251,7 +251,7 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		if kh != "" && e.KeyHash != kh {
 			return false
 		}
-		isProbe := e.ClientRequestID == probeClientRequestID
+		isProbe := e.ClientRequestID == debuglog.ProbeClientRequestID
 		if src == "proxy" && isProbe {
 			return false
 		}

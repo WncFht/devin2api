@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
+	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 )
 
@@ -311,10 +312,6 @@ func (h *Handler) resolvedModel(name string) string {
 	return target
 }
 
-// probeClientRequestID 是探活请求打在 index.jsonl 的 client_request_id
-// 留痕值：日志页凭它把探针行归入 manual_test（ccLoad 同语义）。
-const probeClientRequestID = "panel-probe"
-
 // adminModelTest 实现 POST /admin/model-test：面板探活入口，返回形状与
 // ccLoad HandleChannelTest 对齐（success/message/status_code/duration_ms/
 // first_byte_duration_ms/actual_model/response_text/api_response/error/
@@ -416,7 +413,7 @@ func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path
 	}
 	probeReq.Header.Set("Authorization", "Bearer "+key)
 	probeReq.Header.Set("Content-Type", "application/json")
-	probeReq.Header.Set("X-Client-Request-Id", probeClientRequestID)
+	probeReq.Header.Set("X-Client-Request-Id", debuglog.ProbeClientRequestID)
 	rec := &probeRecorder{ResponseRecorder: httptest.NewRecorder()}
 	started := time.Now()
 	h.probeHandler.ServeHTTP(rec, probeReq)
