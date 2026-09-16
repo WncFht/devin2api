@@ -69,7 +69,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			Streaming:         ar.Meta.API == "responses-ws",
 			API:               ar.Meta.API,
 			APIKeyUsed:        ar.Meta.KeyHash,
-			BaseURL:           h.panel.BaseURL(),
+			BaseURL:           h.BaseURL(),
 			BytesReceived:     ar.ClientBytes,
 			CostMultiplier:    1,
 			UpstreamWebsocket: ar.Meta.API == "responses-ws",
@@ -165,7 +165,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 	// token/成本求和含 499 行，TTFB/RT 均值含全部状态（stream 取 fbt
 	// 样本、non-stream 取 duration 样本），stream/non_stream 计数非 499。
 	// master key/开放模式的行无对应令牌，自然不落入任何令牌。
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 	type tokenAgg struct {
 		t    cellTotals
 		cost float64
@@ -232,7 +232,7 @@ func (h *Handler) adminModelPricing(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "missing model id")
 		return
 	}
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 	p, found := prices[model]
 	pricing := map[string]any{
 		"input_price":  p.Input,

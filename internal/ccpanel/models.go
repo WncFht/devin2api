@@ -38,7 +38,7 @@ func (h *Handler) modelNamesUnion(r *http.Request) map[string][]string {
 			src[name] = append(src[name], s)
 		}
 	}
-	for _, uid := range h.panel.ModelUIDs(r.Context()) {
+	for _, uid := range h.ModelUIDs(r.Context()) {
 		add(uid, "catalog")
 	}
 	if h.aliasesFunc != nil {
@@ -74,7 +74,7 @@ func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 	// 目录行按 uid 键控，并入注册表行——目录外的名字（别名键、纯注册表项、
 	// 未登记的直通流量名）Catalog 为空。
 	catalogByUID := map[string]map[string]any{}
-	for _, m := range h.panel.CatalogModels(r.Context()) {
+	for _, m := range h.CatalogModels(r.Context()) {
 		if uid, _ := m["uid"].(string); uid != "" {
 			catalogByUID[uid] = m
 		}

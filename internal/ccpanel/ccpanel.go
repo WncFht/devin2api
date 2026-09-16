@@ -1,33 +1,80 @@
 // Package ccpanel 内嵌移植自 ccLoad（MIT，作者 caidaoli）的管理面板，
 // 按其原路径契约挂在主 mux 上：/web/* 静态资源、/login|/logout、
-// /public/*、/dashboard/*、/admin/*。与旧版 /panel 共存，互不占路。
+// /public/*、/dashboard/*、/admin/*。它是本服务唯一的管理面板——原
+// /panel 时代的后端能力（上游客户端、目录缓存、密码与爆破账本、
+// token 脱敏、配置自省、配额采样）已并入本包。
 //
-// 鉴权委托给 dashboard.Handler：移植前端把 dashboard.password 本身当
-// Bearer token（登录接口返回 token=密码），复用同一 IP 爆破账本，
-// 无会话表、跨重启不掉线。
+// 鉴权：移植前端把 dashboard.password 本身当 Bearer token（登录接口
+// 返回 token=密码），配合按 IP 的爆破账本；无会话表、跨重启不掉线。
 package ccpanel
 
 import (
+	"context"
+	"crypto/sha256"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
-	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
 )
 
-// Handler 提供移植面板的全部路由。
+// Handler 提供面板的全部路由与后端服务。
 type Handler struct {
-	// panel 复用旧面板的密码快照、爆破账本与模型目录缓存。
-	panel *dashboard.Handler
+	// authMu 保护 password/passwordHash：配置 reload 会运行时换值。
+	authMu   sync.RWMutex
+	password string
+	// passwordHash 是面板密码的 SHA-256：比较走定长哈希，既不向
+	// ConstantTimeCompare 泄漏长度，也与 apiKeyMiddleware 的口径一致。
+	passwordHash [32]byte
+	// loginMu 保护 loginFailures：按客户端 IP 记录连续登录失败与锁定期——
+	// 面板是唯一持密码的端点，爆破代价要抬高。
+	loginMu       sync.RWMutex
+	loginFailures map[string]*loginFail
+
+	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
+	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
+	tokenFunc func() string
+	// upstreamPtr 持有当前生效的上游调用束（connect client、裸 transport
+	// 与归一化 baseURL 固化在同一份 base_url/proxy/force_http1 上）：
+	// endpoint 配置热应用时 SetUpstream 整体重建、原子换指针，
+	// 在途调用持旧引用跑完。New 之后恒非 nil。
+	upstreamPtr atomic.Pointer[panelUpstream]
+
+	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存可显著降低上游压力。
+	// 每个缓存各持一把锁——拉取上游发生在写锁内（锁内复查把并发 miss 收敛成
+	// 单次 RPC），共用一把会让一个慢接口（上限 610s）堵住无关缓存的读。
+	cacheTTL     time.Duration
+	modelsMu     sync.RWMutex
+	modelsCache  []map[string]any
+	modelsExpiry time.Time
+	// modelsFetch 非空表示有目录拉取在途（singleflight 的 done channel）；
+	// 由 modelsMu 保护，关闭即完成信号。
+	modelsFetch         chan struct{}
+	providersMu         sync.RWMutex
+	providersCache      []map[string]any
+	providersExpiry     time.Time
+	modelStatusesMu     sync.RWMutex
+	modelStatusesCache  []map[string]any
+	modelStatusesExpiry time.Time
+
+	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
+	// cancel 旧协程按新间隔重起（配置 reload 热路径）。
+	quotaMu     sync.Mutex
+	quotaCancel context.CancelFunc
+
 	// debug 是 index.jsonl 与请求目录的读取入口。
 	debug *debuglog.Manager
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
+	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
+	gateStats func() devin.GateStats
+	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
+	configOps *ConfigOps
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
 	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
 	maxConcurrencyFunc func() int
@@ -59,16 +106,31 @@ type Handler struct {
 	ru *rollup
 }
 
-// New 创建移植面板处理器。panel 为鉴权与目录委托对象，不得为 nil；
-// debug/metrics 可为 nil（对应端点降级为空数据）。
-func New(panel *dashboard.Handler, debug *debuglog.Manager, metrics *obs.Metrics) *Handler {
-	return &Handler{
-		panel:     panel,
-		debug:     debug,
-		metrics:   metrics,
-		startedAt: time.Now(),
-		ru:        newRollup(),
+// New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
+// forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
+// tokenFunc 每次求值返回当前上游凭据（与 adapter 的自愈共用同一来源）；
+// nil 视为恒空凭据。metrics/debug 允许为 nil（对应端点降级为空数据）。
+func New(password, baseURL string, tokenFunc func() string, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debug *debuglog.Manager) (*Handler, error) {
+	if tokenFunc == nil {
+		tokenFunc = func() string { return "" }
 	}
+	up, err := newPanelUpstream(baseURL, proxy, forceHTTP1, tokenFunc)
+	if err != nil {
+		return nil, err
+	}
+	h := &Handler{
+		password:      password,
+		passwordHash:  sha256.Sum256([]byte(password)),
+		tokenFunc:     tokenFunc,
+		loginFailures: make(map[string]*loginFail),
+		cacheTTL:      5 * time.Minute,
+		metrics:       metrics,
+		debug:         debug,
+		startedAt:     time.Now(),
+		ru:            newRollup(),
+	}
+	h.upstreamPtr.Store(up)
+	return h, nil
 }
 
 // SetVersion 记录构建版本（__VERSION__ 替换与 /public/version 用）。
@@ -83,6 +145,32 @@ func (h *Handler) Version() string {
 	h.versionMu.RLock()
 	defer h.versionMu.RUnlock()
 	return h.version
+}
+
+// SetPassword 运行时更换面板密码（配置 reload 热路径）。换密码的运维
+// 语义是踢人——前端拿旧 Bearer 立即 401。
+func (h *Handler) SetPassword(password string) {
+	h.authMu.Lock()
+	h.password = password
+	h.passwordHash = sha256.Sum256([]byte(password))
+	h.authMu.Unlock()
+}
+
+// passwordSnapshot 返回密码与哈希的一致性快照。
+func (h *Handler) passwordSnapshot() (string, [32]byte) {
+	h.authMu.RLock()
+	defer h.authMu.RUnlock()
+	return h.password, h.passwordHash
+}
+
+// SetGateStats 注入速率闸门快照源（runtime-metrics 的 gate 组）。
+func (h *Handler) SetGateStats(fn func() devin.GateStats) {
+	h.gateStats = fn
+}
+
+// SetConfigOps 注入配置自省与热重载操作面（/admin/config*）。
+func (h *Handler) SetConfigOps(ops ConfigOps) {
+	h.configOps = &ops
 }
 
 // SetAliasesFunc 注入别名表读取函数。
@@ -135,7 +223,7 @@ func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
 	h.warmStats = fn
 }
 
-// Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为
+// Register 把面板路由挂到 mux。/web、/login、/logout、/public 为
 // 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
 func (h *Handler) Register(mux interface {
 	Get(pattern string, handlerFn http.HandlerFunc)

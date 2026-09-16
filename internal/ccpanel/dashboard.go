@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/WncFht/devin2api/internal/dashboard"
 )
 
 // resolveRange 复刻 ccLoad PaginationParams.GetTimeRange 的口径：
@@ -87,7 +85,7 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	since, until, rangeName := resolveRange(r, now)
 	isToday := rangeName == "today"
 	match, kh, excluded := h.queryScope(r)
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 
 	byAPI := map[string]*endpointStat{}
 	var grand endpointStat
@@ -191,7 +189,7 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	bucketSec := int64(bucketMin) * 60
 	match, _, excluded := h.queryScope(r)
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 
 	type bucketAgg struct {
 		total     cellTotals
@@ -290,18 +288,18 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 // cellCost 按目录价折算单格成本（含 499 行的 token 口径，summary/stats/
 // token 覆盖用）；无目录价的模型贡献 0。
 // 与旧面板 usage 页同口径：cache_write 按 input 价计费（目录无独立价格维）。
-func cellCost(key cellKey, c cellTotals, prices map[string]dashboard.CatalogPrice) float64 {
+func cellCost(key cellKey, c cellTotals, prices map[string]CatalogPrice) float64 {
 	return tokenCost(key.model, c.inTok, c.outTok, c.cacheRead, c.cacheWrite, prices)
 }
 
 // cellCostNG 与 cellCost 同式，但取非 499 行的 token 口径（metrics/health 用）。
-func cellCostNG(key cellKey, c cellTotals, prices map[string]dashboard.CatalogPrice) float64 {
+func cellCostNG(key cellKey, c cellTotals, prices map[string]CatalogPrice) float64 {
 	return tokenCost(key.model, c.inTokNG, c.outTokNG, c.cacheReadNG, c.cacheWriteNG, prices)
 }
 
 // tokenCost 是目录价折算公式：prompt 侧 input+cache_write 按 input 价、
 // cache_read 按 cached 价、output 按 output 价，目录单位是 USD/百万 token。
-func tokenCost(model string, in, out, cacheRead, cacheWrite int64, prices map[string]dashboard.CatalogPrice) float64 {
+func tokenCost(model string, in, out, cacheRead, cacheWrite int64, prices map[string]CatalogPrice) float64 {
 	p, ok := prices[model]
 	if !ok {
 		return 0

@@ -38,9 +38,8 @@ import (
 	"github.com/WncFht/devin2api/internal/randid"
 )
 
-// DashboardRegistrar 描述面板路由注册所需的最小能力。
-// 移植面板（ccpanel）用全部五个动词；旧面板只用 Get/Post。
-type DashboardRegistrar interface {
+// PanelRegistrar 描述面板路由注册所需的最小能力。
+type PanelRegistrar interface {
 	Register(mux interface {
 		Get(pattern string, handlerFn http.HandlerFunc)
 		Post(pattern string, handlerFn http.HandlerFunc)
@@ -74,10 +73,8 @@ type App struct {
 	serverConfig config.ServerConfig
 	// debugManager 为每次兼容 API 请求创建独立的写盘日志。
 	debugManager *debuglog.Manager
-	// dashboard 是可选的管理面板处理器；nil 表示不启用面板。
-	dashboard DashboardRegistrar
-	// ccPanel 是可选的移植面板（ccLoad 契约）处理器；与 dashboard 并存。
-	ccPanel DashboardRegistrar
+	// ccPanel 是可选的管理面板（ccLoad 契约）处理器；nil 表示不启用面板。
+	ccPanel PanelRegistrar
 	// apiKey 是可选的 OpenAI 兼容接口访问密钥；为空则不校验。
 	// apiKeyMu 保护它：配置 reload 会运行时换值。
 	apiKeyMu sync.RWMutex
@@ -180,13 +177,8 @@ func (application *App) APIKey() string {
 	return application.apiKey
 }
 
-// SetDashboard 注入管理面板处理器。
-func (application *App) SetDashboard(d DashboardRegistrar) {
-	application.dashboard = d
-}
-
-// SetCCPanel 注入移植面板（ccLoad 契约）处理器；与 dashboard 并存不互斥。
-func (application *App) SetCCPanel(d DashboardRegistrar) {
+// SetCCPanel 注入管理面板（ccLoad 契约）处理器。
+func (application *App) SetCCPanel(d PanelRegistrar) {
 	application.ccPanel = d
 }
 
@@ -224,9 +216,6 @@ func (application *App) Router() http.Handler {
 			gated.Post("/v1/messages", application.createMessages)
 		})
 	})
-	if application.dashboard != nil {
-		application.dashboard.Register(router)
-	}
 	if application.ccPanel != nil {
 		application.ccPanel.Register(router)
 	}
@@ -719,7 +708,7 @@ func (application *App) createCompletion(
 			cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
 		})
 		// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
-		// agent 拿到后可直接查 index.jsonl 或 /panel/api/requests/{dir}。
+		// agent 拿到后可直接查 index.jsonl 或 /admin/debug-logs/{dir}。
 		// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
 		if ref := debugRef(recorder); ref != "" {
 			writer.Header().Set("X-Request-Id", ref)

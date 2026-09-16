@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/WncFht/devin2api/internal/dashboard"
 )
 
 // statsEntry 对应 ccLoad model.StatsEntry 的渠道列收缩版：stats 页按模型
@@ -130,7 +128,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		respond([]statsEntry{}, zeroRPMStats())
 		return
 	}
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 
 	type modelAgg struct {
 		t    cellTotals
@@ -237,7 +235,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 // isToday 取最近 4h 按 5min×48 桶，否则按 range/48 桶。
 // 格子分辨率 10min：今日档一个格子跨两个桶，按重叠秒数比例分摊计数
 // （成功率/均值不变，计数为区间估计）。单上游无渠道聚合时间线。
-func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match func(cellKey) bool, prices map[string]dashboard.CatalogPrice) map[string][]healthPoint {
+func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match func(cellKey) bool, prices map[string]CatalogPrice) map[string][]healthPoint {
 	const numBuckets = 48
 	var healthStart time.Time
 	var bucketSec int64

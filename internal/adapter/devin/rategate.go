@@ -160,7 +160,7 @@ type gateStateFile struct {
 	LimitedUntil time.Time `json:"limited_until"`
 }
 
-// GateStats 是闸门状态快照，面板 /panel/api/stats 的 gate 段透出。
+// GateStats 是闸门状态快照，面板 /admin/runtime-metrics 的 gate 段透出。
 type GateStats struct {
 	Latched       bool        `json:"latched"`
 	LimitedUntil  *time.Time  `json:"limited_until,omitempty"`

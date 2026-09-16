@@ -24,7 +24,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
@@ -98,7 +97,7 @@ type logEntry struct {
 // projectLogEntry 把一条 index.jsonl 摘要投影成日志页行。message 列复刻
 // ccLoad 语义（成功="ok"，失败=result[:error_stage]）——前端要求它非空才
 // 渲染调试入口。
-func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashboard.CatalogPrice) logEntry {
+func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]CatalogPrice) logEntry {
 	started, _ := time.Parse(time.RFC3339Nano, e.StartedAt)
 	actual := e.Model
 	if actual == e.RequestedModel {
@@ -134,7 +133,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 		API:                      e.API,
 		UpstreamProtocol:         "devin",
 		ClientIP:                 e.ClientIP,
-		BaseURL:                  h.panel.BaseURL(),
+		BaseURL:                  h.BaseURL(),
 		InputTokens:              e.InputTokens,
 		OutputTokens:             e.OutputTokens,
 		ReasoningTokens:          e.ReasoningTokens,
@@ -275,7 +274,7 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	prices := h.panel.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(r.Context())
 	entries := make([]logEntry, 0, min(limit, len(result.Entries)))
 	total := 0
 	for _, e := range result.Entries {
@@ -461,7 +460,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 		}
 	}
 	// 上游 procedure 按 wire 体形辨：搜索调用无 chatMessagePrompts。
-	baseURL := h.panel.BaseURL()
+	baseURL := h.BaseURL()
 	reqURL := baseURL + "/exa.api_server_pb.ApiServerService/GetChatMessage"
 	if reqBody.Len() > 0 && !bytes.Contains(reqBody.Bytes(), []byte(`"chatMessagePrompts"`)) {
 		reqURL = baseURL + "/exa.api_server_pb.ApiServerService/GetWebSearchResults"

@@ -2,7 +2,7 @@
 // 进行中请求的活快照。写入面见 recorder.go/index.go。
 //
 // 这些接口服务两个消费者：面板的请求浏览页，以及 agent 直接 curl
-// /panel/api/requests* 做程序化排障——所有返回都是 JSON 可消费结构。
+// /admin/logs* 与 /admin/debug-logs/{id} 做程序化排障——所有返回都是 JSON 可消费结构。
 package debuglog
 
 import (

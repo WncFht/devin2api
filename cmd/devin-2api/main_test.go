@@ -19,7 +19,6 @@ import (
 	"github.com/WncFht/devin2api/internal/app"
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
-	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
@@ -107,7 +106,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := app.New(devinAdapter, config.ServerConfig{}, manager)
-	panel, err := dashboard.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+	panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +147,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 // 反射枚举 config.Config 的全部 yaml 叶子字段，逐字段变异后走真实
 // reloadRuntimeConfig——任一字段既不在 applied 也不在 requires_restart，
 // 测试即失败。新增配置项漏接热更链时第一时间暴露，而不是静默躺在
-// /panel/api/config 里显示已生效。
+// /admin/config 里显示已生效。
 func TestReloadClassifiesEveryConfigField(t *testing.T) {
 	baseYAML := `server:
   listen: '127.0.0.1:1'
@@ -290,7 +289,7 @@ auth:
 				t.Fatal(err)
 			}
 			application := app.New(devinAdapter, config.ServerConfig{}, manager)
-			panel, err := dashboard.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+			panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
 			if err != nil {
 				t.Fatal(err)
 			}

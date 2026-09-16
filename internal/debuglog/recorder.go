@@ -483,7 +483,7 @@ func (manager *Manager) UsageStats() UsageSnapshot {
 	return manager.usage.snapshot()
 }
 
-// UsageLatency 返回全局延迟分位数摘要——/panel/api/stats 的 1Hz 轮询
+// UsageLatency 返回全局延迟分位数摘要——/admin/runtime-metrics 的轮询
 // 只消费这两行；全量聚合视图见 UsageStats。阻塞语义与 UsageStats 一致。
 func (manager *Manager) UsageLatency() map[string]latencyStats {
 	if manager == nil {

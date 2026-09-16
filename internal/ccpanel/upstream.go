@@ -1,6 +1,6 @@
-// 本文件是与 Devin 上游通信的部分：/panel/api/status 聚合端点、
+// 本文件是与 Devin 上游通信的部分：/admin/status 聚合端点、
 // 模型目录/供应商/模型状态的拉取与缓存、Connect metadata 构造、鉴权 transport。
-package dashboard
+package ccpanel
 
 import (
 	"bytes"
@@ -89,18 +89,8 @@ func (h *Handler) BaseURL() string {
 	return h.currentUpstream().baseURL
 }
 
-func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
-	// 面板聚合多个上游调用，给足时间避免单个慢接口拖垮整体；
-	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
-	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
-	defer cancel()
-
-	writeJSON(w, http.StatusOK, h.StatusReport(ctx))
-}
-
 // StatusReport 六路并行聚合上游状态：账户/plan/容量/IDE 状态/模型状态/
 // 供应商/别名缺席校验。单路失败只落 *_error 键，不拖垮整体。
-// 旧面板 /panel/api/status 与移植面板 /admin/status 共用本方法。
 func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 	result := map[string]any{}
 	var resultMu sync.Mutex
@@ -398,20 +388,6 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 		}
 	}
 	return user, plan, planInfo, nil
-}
-
-func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
-	// 模型目录可能较大，给足时间并复用缓存；与 ResponseHeaderTimeout 对齐。
-	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
-	defer cancel()
-
-	models, err := h.cachedModels(ctx)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 // cachedModels 返回 TTL 内的模型目录缓存；过期时经 singleflight 收敛为

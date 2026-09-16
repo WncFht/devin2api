@@ -30,7 +30,6 @@ import (
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
-	"github.com/WncFht/devin2api/internal/dashboard"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 )
@@ -95,7 +94,7 @@ type runtimeConfigState struct {
 }
 
 var runtimeConfigPtr atomic.Pointer[runtimeConfigState]
-var lastReloadPtr atomic.Pointer[dashboard.ConfigReloadReport]
+var lastReloadPtr atomic.Pointer[ccpanel.ConfigReloadReport]
 
 // reloadMu 串行化热重载：ApplyConfig→SetAPIKey→…→runtimeConfigPtr.Store
 // 是一串多步提交，并发 reload 交错会让配置快照与生效值分叉。
@@ -170,7 +169,7 @@ func main() {
 	applyPprofListen(serviceConfig.Debug.PprofListen)
 	defer func() { applyPprofListen("") }()
 
-	// token 允许为空启动：凭据是运行时字段——/panel/api/config/reload
+	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
 	// 空 token 起不来的话「先起服务后配凭据」没有任何热补入口。
 	// devinAdapter 保留具体类型引用：配置热重载（ApplyConfig）、闸门状态
@@ -226,32 +225,26 @@ func main() {
 	application.SetVersion(resolved)
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
 	// 上游相关调用靠 tokenFunc 现取，凭据补进后自动恢复。
-	panel, err := dashboard.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+	// /web、/admin、/dashboard、/public、/login、/logout 挂在根路径。
+	ccPanel, err := ccpanel.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
 	if err != nil {
-		slog.Error("create dashboard failed", "error", err)
+		slog.Error("create panel failed", "error", err)
 		os.Exit(1)
 	}
-	panel.SetVersion(resolved)
-	panel.SetGateStats(devinAdapter.GateStats)
-	panel.SetWarmStats(devinAdapter.WarmStats)
-	panel.SetAliasesFunc(devinAdapter.Aliases)
-	panel.SetConfigOps(dashboard.ConfigOps{
-		Reload: func() (*dashboard.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, panel, debugManager, settingsStore)
+	ccPanel.SetVersion(resolved)
+	ccPanel.SetGateStats(devinAdapter.GateStats)
+	ccPanel.SetWarmStats(devinAdapter.WarmStats)
+	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
+	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
+	ccPanel.SetConfigOps(ccpanel.ConfigOps{
+		Reload: func() (*ccpanel.ConfigReloadReport, error) {
+			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, ccPanel, debugManager, settingsStore)
 		},
 		Current: func() map[string]any {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
-	panel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
-	application.SetDashboard(panel)
-	// 移植面板（ccLoad 契约）与旧面板并存：同一密码门槛，/web、/admin、
-	// /dashboard、/public、/login、/logout 挂在根路径。
-	ccPanel := ccpanel.New(panel, debugManager, application.Metrics())
-	ccPanel.SetVersion(resolved)
-	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
-	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
-	ccPanel.SetWarmStats(devinAdapter.WarmStats)
+	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
@@ -262,7 +255,7 @@ func main() {
 		os.Exit(1)
 	}
 	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
-		p, ok := panel.CatalogPrices(context.Background())[model]
+		p, ok := ccPanel.CatalogPrices(context.Background())[model]
 		if !ok {
 			return 0
 		}
@@ -357,7 +350,7 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *dashboard.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*dashboard.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*ccpanel.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -371,7 +364,7 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	if strings.TrimSpace(cfg.Devin.Model) == "" || strings.TrimSpace(cfg.Devin.BaseURL) == "" {
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
-	report := &dashboard.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
+	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
 	applied, err := devinAdapter.ApplyConfig(devinConfigFrom(cfg, configPath, logRoot))
 	if err != nil {
 		return nil, err
@@ -383,8 +376,8 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	if pcfg.Devin.BaseURL != cfg.Devin.BaseURL || pcfg.Devin.Proxy != cfg.Devin.Proxy ||
 		*pcfg.Devin.ForceHTTP1 != *cfg.Devin.ForceHTTP1 {
 		// adapter 侧调用束已在 ApplyConfig 内换好（同参数构建成功是前提）；
-		// 面板自身的上游调用束跟随同一端点——ccpanel 的展示地址经
-		// panel.BaseURL 透出，无需单独同步。
+		// 面板自身的上游调用束跟随同一端点，展示地址经 BaseURL 透出，
+		// 无需单独同步。
 		if err := panel.SetUpstream(cfg.Devin.BaseURL, cfg.Devin.Proxy, *cfg.Devin.ForceHTTP1); err != nil {
 			return nil, err
 		}

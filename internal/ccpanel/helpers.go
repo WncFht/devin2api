@@ -1,8 +1,7 @@
 // 本文件是面板内部的通用小工具：枚举名缩短、any 类型提取、截断。
-package dashboard
+package ccpanel
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -18,47 +17,6 @@ func remoteIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
-}
-
-// maskToken 对回显给面板的日志字节做字面值兜底脱敏：写路径的 secretKey
-// 名单只能覆盖结构化键名，token 若出现在自由文本（请求 body 原文、上游
-// 错误文案）里会漏出，读路径再按最近见过的 token 字面值过一遍——
-// 自愈轮换后旧 token 仍可能躺在旧请求目录里。
-func (h *Handler) maskToken(data []byte) []byte {
-	if len(data) == 0 {
-		return data
-	}
-	for _, token := range h.noteToken(h.tokenFunc()) {
-		if token == "" {
-			continue
-		}
-		// token 含 " 或 \ 时在 JSON 文本（meta.json 的字符串值）里以
-		// 转义形态出现，只换原始字节会静默漏遮——先替换 json.Marshal
-		// 产出的转义形态再替换原始形态：顺序不能反，以 \ 结尾的 token
-		// 原始形态是转义形态的前缀，先吃原始形态会留下孤立反斜杠，
-		// 既漏遮又破坏 JSON 转义。
-		if escaped, err := json.Marshal(token); err == nil {
-			if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) {
-				data = bytes.ReplaceAll(data, esc, []byte("<redacted>"))
-			}
-		}
-		data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
-	}
-	return data
-}
-
-// noteToken 记录最近见过的上游 token（去重、保留最近 8 个），返回脱敏
-// 要覆盖的字面值集合。
-func (h *Handler) noteToken(token string) []string {
-	h.tokenMu.Lock()
-	defer h.tokenMu.Unlock()
-	if token != "" && (len(h.recentTokens) == 0 || h.recentTokens[0] != token) {
-		h.recentTokens = append([]string{token}, h.recentTokens...)
-		if len(h.recentTokens) > 8 {
-			h.recentTokens = h.recentTokens[:8]
-		}
-	}
-	return h.recentTokens
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。
@@ -175,18 +133,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
-}
-
-// writeJSON 以 application/json 写回 payload；status 非 200 时显式 WriteHeader。
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	if status != http.StatusOK {
-		w.WriteHeader(status)
-	}
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-// writeError 是 {"error": msg} 形态的 writeJSON。
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

@@ -240,7 +240,7 @@ func (m *Metrics) Snapshot() map[string]any {
 }
 
 // Rejects 返回管线前拒绝的分原因计数与最近事件（新在前），供 stats 快照
-// 与 /panel/api/requests 复用同一份数据。
+// 与 /admin/logs 复用同一份数据。
 // 计数是进程内存值，重启清零；跨重启的拒绝痕迹在 stderr.log 的
 // "request rejected" 行里（reason 字段与这里同源）。
 func (m *Metrics) Rejects() map[string]any {
