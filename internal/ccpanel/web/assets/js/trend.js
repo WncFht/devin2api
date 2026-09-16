@@ -227,43 +227,19 @@
         // 构建模型数据缓存（一次遍历，供后续 hasModelData 使用）
         buildModelDataCache(window.trendData);
 
-        // 修复：智能初始化模型序列显示状态（处理localStorage过时数据）
-        // 默认不显示任何模型序列，只显示总数
-        if (window.visibleModels.size === 0) {
-          // 首次访问：不默认显示任何模型序列
-          console.log('初始化模型显示状态（首次访问）- 默认仅显示总数');
-          // 不添加任何模型到 visibleModels，保持为空集合
-        } else {
-          // 修复：验证并清理localStorage中过时的模型选择
-          console.log('验证现有模型选择状态...', Array.from(window.visibleModels));
+        // 首次访问默认只显示总数；已有选择时剔除数据里已不存在的模型。
+        if (window.visibleModels.size > 0) {
           const validModels = new Set();
-
-          // 检查每个已保存模型是否在当前数据中存在
           window.visibleModels.forEach(modelName => {
             if (hasModelData(modelName, window.trendData)) {
               validModels.add(modelName);
-            } else {
-              console.log(`清理过时模型: ${modelName}（数据中不存在）`);
             }
           });
-
-          // 更新visibleModels为验证后的集合
           window.visibleModels = validModels;
           persistModelState();
-          console.log('更新后的可见模型:', Array.from(window.visibleModels));
         }
-        
-        // 添加调试信息显示
-        const debugSince = metrics.res.headers.get('X-Debug-Since');
-        const debugPoints = metrics.res.headers.get('X-Debug-Points');
-        const debugTotal = metrics.res.headers.get('X-Debug-Total');
 
-        console.log('趋势数据调试信息:', {
-          since: debugSince,
-          points: debugPoints,
-          total: debugTotal,
-          dataLength: trendData.length
-        });
+        const debugTotal = metrics.res.headers.get('X-Debug-Total');
 
         updateModelFilter();
         renderChart();
