@@ -18,6 +18,9 @@ type apiResponse struct {
 	// Rejects 附带管线前拒绝环（401/429 等不进索引的拒绝），形状与
 	// runtime-metrics 的 http.rejects 相同——列表页用它提示「拒绝不在表里」。
 	Rejects any `json:"rejects,omitempty"`
+	// ActiveRequestTitleEnabled 是 ccLoad 在活跃请求列表信封外的顶层扩展；
+	// 指针类型保证显式 false 也会上 wire（omitempty 对裸 bool 会吞掉 false）。
+	ActiveRequestTitleEnabled *bool `json:"active_request_title_enabled,omitempty"`
 }
 
 func respondOK(w http.ResponseWriter, data any) {

@@ -1,7 +1,6 @@
 package ccpanel
 
 import (
-	"encoding/json"
 	"hash/fnv"
 	"net/http"
 	"sort"
@@ -85,13 +84,10 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 	sort.Slice(out, func(i, j int) bool { return out[i].StartTime < out[j].StartTime })
 	// ccLoad 在信封外多带一个 active_request_title_enabled 顶层字段；
 	// 本服务无标题生成能力，恒 false。
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"success":                      true,
-		"data":                         out,
-		"error":                        "",
-		"count":                        len(out),
-		"active_request_title_enabled": false,
+	titleEnabled := false
+	writeEnvelope(w, http.StatusOK, apiResponse{
+		Success: true, Data: out, Count: len(out),
+		ActiveRequestTitleEnabled: &titleEnabled,
 	})
 }
 
