@@ -33,14 +33,34 @@ func applyPprofListen(addr string) {
 	_ = rebindPprof(addr)
 }
 
-// rebindPprof 换绑 pprof 监听：与已绑地址相同 no-op；换绑先 Close 旧
-// server 并归还进程级采样开关；addr 非空则起新 listener，bind 失败
-// 返回错误且 pprofAddr 置空（上次失败地址不落账，同值重写即重试）。
+// rebindPprof 换绑 pprof 监听：与已绑地址相同 no-op；addr 非空先 bind
+// 新地址——bind 失败旧 listener 保住不掉线（面板 PUT 拿错误返回时
+// 当前剖析端点仍可用）；bind 成功才 Close 旧 server 并归还进程级
+// 采样开关，再挂上新 listener。
 func rebindPprof(addr string) error {
 	pprofMu.Lock()
 	defer pprofMu.Unlock()
 	if addr == pprofAddr {
 		return nil
+	}
+	var listener net.Listener
+	if addr != "" {
+		// 跟随主监听同一 reuseport 开关：reuseport 交接部署时旧进程最长
+		// 300s 排空期内仍占着 pprof 口，不叠加 REUSEPORT 会让新实例终身
+		// 失去剖析端点（bind 失败后无人重试）。交接窗口内请求可能落到
+		// 任一进程——排障时多看一眼 pid 即可。
+		lc := &net.ListenConfig{KeepAlive: 3 * time.Minute}
+		if reusePortEnabled() {
+			lc.Control = func(_, _ string, c syscall.RawConn) error {
+				return setReusePort(c)
+			}
+		}
+		l, err := lc.Listen(context.Background(), "tcp", addr)
+		if err != nil {
+			slog.Error("pprof listen failed", "addr", addr, "error", err)
+			return fmt.Errorf("pprof listen on %q: %w", addr, err)
+		}
+		listener = l
 	}
 	if pprofServer != nil {
 		_ = pprofServer.Close()
@@ -51,15 +71,12 @@ func rebindPprof(addr string) error {
 		runtime.SetBlockProfileRate(0)
 		runtime.SetMutexProfileFraction(0)
 	}
-	if addr == "" {
+	if listener == nil {
 		return nil
 	}
-	if server := startPprofServer(addr); server != nil {
-		pprofServer = server
-		pprofAddr = addr
-		return nil
-	}
-	return fmt.Errorf("pprof listen on %q failed", addr)
+	pprofServer = servePprof(addr, listener)
+	pprofAddr = addr
+	return nil
 }
 
 // currentPprofListen 返回当前实际绑定的 pprof 监听地址（空=未启用），
@@ -70,12 +87,12 @@ func currentPprofListen() string {
 	return pprofAddr
 }
 
-// startPprofServer 在独立监听地址上暴露 Go 运行时剖析端点。
+// servePprof 在已 bind 的 listener 上暴露 Go 运行时剖析端点并开服。
 // 与主监听分离的原因：pprof 端点无鉴权，回环地址是唯一信任边界——
 // 配置应绑 127.0.0.1，跨机访问走 ssh 端口转发而不是放开监听。
 // block/mutex 采样率只在侦听器开启时设置：两者带持续开销，
 // 默认关闭保持生产路径干净。
-func startPprofServer(addr string) *http.Server {
+func servePprof(addr string, listener net.Listener) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -93,21 +110,6 @@ func startPprofServer(addr string) *http.Server {
 	mux.Handle("/debug/fgprof", fgprof.Handler())
 
 	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	// 跟随主监听同一 reuseport 开关：reuseport 交接部署时旧进程最长
-	// 300s 排空期内仍占着 pprof 口，不叠加 REUSEPORT 会让新实例终身
-	// 失去剖析端点（bind 失败后无人重试）。交接窗口内请求可能落到
-	// 任一进程——排障时多看一眼 pid 即可。
-	lc := &net.ListenConfig{KeepAlive: 3 * time.Minute}
-	if reusePortEnabled() {
-		lc.Control = func(_, _ string, c syscall.RawConn) error {
-			return setReusePort(c)
-		}
-	}
-	listener, err := lc.Listen(context.Background(), "tcp", addr)
-	if err != nil {
-		slog.Error("pprof listen failed", "addr", addr, "error", err)
-		return nil
-	}
 	// 阻塞剖析按「每累计 1ms 阻塞采样一次」取——代理的阻塞大头是
 	// channel/锁等待，1ms 粒度足够覆盖锁竞争又不过度采样。放在成功
 	// bind 之后：失败路径不该留着采样开销却没有出口。
