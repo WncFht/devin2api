@@ -623,7 +623,7 @@ func TestWebSocketConcurrencySlotIsPerTurn(t *testing.T) {
 	responseID := wsEventResponseID(t, completed)
 
 	// 占满唯一并发槽，下一轮应收到 rate_limit error 而不是被挤断。
-	application.concurrency <- struct{}{}
+	application.concurrencyInUse.Add(1)
 	wsWriteJSON(t, conn, map[string]any{
 		"type":                 "response.create",
 		"previous_response_id": responseID,
@@ -632,7 +632,7 @@ func TestWebSocketConcurrencySlotIsPerTurn(t *testing.T) {
 	if errObj := wsAssertError(t, wsReadUntil(t, conn, "error")); errObj["type"] != "rate_limit_error" {
 		t.Fatalf("error type = %v, want rate_limit_error", errObj)
 	}
-	<-application.concurrency
+	application.concurrencyInUse.Add(-1)
 
 	// 释放后同一条连接继续跑。
 	wsWriteJSON(t, conn, map[string]any{
