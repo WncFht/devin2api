@@ -167,40 +167,6 @@
       color: var(--neutral-500);
     }
 
-    .logs-table .channel-link {
-      padding: 0;
-      border: none;
-      background: transparent;
-      font: inherit;
-      cursor: pointer;
-      display: inline;
-      min-width: 0;
-      text-align: left;
-    }
-
-    .log-channel-cell {
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-      width: 100%;
-      min-width: 0;
-      padding-right: 52px;
-      vertical-align: middle;
-    }
-
-    .log-channel-badges {
-      position: absolute;
-      top: -6px;
-      right: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 3px;
-      white-space: nowrap;
-      pointer-events: none;
-    }
-
     .log-channel-badge {
       display: inline-flex;
       align-items: center;
@@ -214,72 +180,9 @@
       box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.04);
     }
 
-    .log-channel-multiplier-badge {
-      color: var(--warning-700);
-      background: var(--warning-100);
-    }
-
     .log-channel-websocket-badge {
       color: var(--primary-700);
       background: var(--primary-100);
-    }
-
-    /* 测试模态框样式 */
-    .test-modal-content {
-      max-width: 700px;
-      max-height: 90vh;
-      overflow-y: auto;
-    }
-
-    .test-progress {
-      display: none;
-      text-align: center;
-      padding: var(--space-4);
-      background: var(--neutral-50);
-      border-radius: 8px;
-      margin: var(--space-4) 0;
-    }
-
-    .test-progress.show {
-      display: block;
-    }
-
-    .test-progress p {
-      margin-top: var(--space-2);
-      color: var(--neutral-600);
-    }
-
-    .test-result {
-      display: none;
-      padding: var(--space-4);
-      border-radius: 8px;
-      margin: var(--space-4) 0;
-    }
-
-    .test-result.show {
-      display: block;
-    }
-
-    .test-result.success {
-      background: var(--success-50);
-      border: 1px solid var(--success-200);
-    }
-
-    .test-result.error {
-      background: var(--error-50);
-      border: 1px solid var(--error-200);
-    }
-
-    .test-details {
-      margin-top: var(--space-3);
-      font-size: 0.9em;
-      color: var(--neutral-700);
-    }
-
-    .test-details h4 {
-      margin: var(--space-3) 0 var(--space-2);
-      font-size: 0.95em;
-      font-weight: 600;
     }
 
     /* 加载动画 */
@@ -332,19 +235,6 @@
       font-family: var(--font-family-mono);
       font-size: 0.85em;
       color: var(--neutral-600);
-    }
-
-    .logs-api-key-group {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      justify-content: center;
-    }
-
-    .logs-api-key-actions {
-      display: inline-flex;
-      align-items: center;
-      gap: 1px;
     }
 
     .logs-table th,
@@ -449,16 +339,8 @@
       flex: 0 1 116px;
     }
 
-    .logs-filter-group--channel-id {
-      flex: 0 1 134px;
-    }
-
     .logs-filter-group--token {
       flex: 0 1 134px;
-    }
-
-    .logs-filter-group.filter-group--channel-name {
-      flex-basis: 214px;
     }
 
     .logs-filter-group.filter-group--model {
@@ -479,15 +361,10 @@
       max-width: 80px;
     }
 
-    .logs-filter-control--channel-id {
-      max-width: 72px;
-    }
-
     .logs-filter-control--token {
       max-width: 100px;
     }
 
-    .logs-filter-controls .filter-control--channel-name,
     .logs-filter-controls .filter-control--model {
       min-width: 160px;
     }
@@ -552,44 +429,6 @@
 
     .logs-pagination-card {
       padding: var(--space-2);
-    }
-
-    .logs-test-key-display {
-      display: block;
-      padding: 8px;
-      background: var(--neutral-100);
-      border-radius: 4px;
-      color: var(--neutral-700);
-    }
-
-    .logs-test-key-index,
-    .logs-test-key-hint {
-      display: block;
-      color: var(--neutral-600);
-      font-size: 0.85em;
-    }
-
-    .logs-test-key-index {
-      margin-top: 6px;
-    }
-
-    .logs-test-key-hint {
-      margin-top: 4px;
-    }
-
-    .logs-test-key-original {
-      color: var(--neutral-700);
-    }
-
-    .logs-stream-toggle {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-    }
-
-    .logs-stream-toggle .form-label {
-      margin: 0;
     }
 
     .debug-log-status {
@@ -781,56 +620,52 @@
         order: 2;
       }
 
-      .logs-table .logs-col-channel {
+      .logs-table .logs-col-model {
         order: 3;
       }
 
-      .logs-table .logs-col-model {
+      .logs-table .logs-col-api-key {
         order: 4;
       }
 
-      .logs-table .logs-col-api-key {
+      .logs-table .logs-col-token-desc {
         order: 5;
       }
 
-      .logs-table .logs-col-token-desc {
+      .logs-table .logs-col-ip {
         order: 6;
       }
 
-      .logs-table .logs-col-ip {
+      .logs-table .logs-col-timing {
         order: 7;
       }
 
-      .logs-table .logs-col-timing {
+      .logs-table .logs-col-speed {
         order: 8;
       }
 
-      .logs-table .logs-col-speed {
+      .logs-table .logs-col-input {
         order: 9;
       }
 
-      .logs-table .logs-col-input {
+      .logs-table .logs-col-output {
         order: 10;
       }
 
-      .logs-table .logs-col-output {
+      .logs-table .logs-col-cache-read {
         order: 11;
       }
 
-      .logs-table .logs-col-cache-read {
+      .logs-table .logs-col-cache-write {
         order: 12;
       }
 
-      .logs-table .logs-col-cache-write {
+      .logs-table .logs-col-cache-util {
         order: 13;
       }
 
-      .logs-table .logs-col-cache-util {
-        order: 14;
-      }
-
       .logs-table .logs-col-cost {
-        order: 15;
+        order: 14;
       }
 
       .logs-table .logs-col-message {
@@ -841,7 +676,6 @@
 
       .logs-table .logs-col-time,
       .logs-table .logs-col-status,
-      .logs-table .logs-col-channel,
       .logs-table .logs-col-model,
       .logs-table .logs-col-api-key,
       .logs-table .logs-col-token-desc,
@@ -864,7 +698,6 @@
 
       .logs-table .logs-col-time::before,
       .logs-table .logs-col-status::before,
-      .logs-table .logs-col-channel::before,
       .logs-table .logs-col-model::before,
       .logs-table .logs-col-api-key::before,
       .logs-table .logs-col-token-desc::before,
@@ -888,7 +721,6 @@
         display: none !important;
       }
 
-      .logs-table .logs-col-channel,
       .logs-table .logs-col-model,
       .logs-table .logs-col-message {
         align-items: flex-start;
@@ -903,7 +735,6 @@
         white-space: normal;
       }
 
-      .logs-table .logs-col-channel .channel-link,
       .logs-table .logs-col-model .model-tag,
       .logs-table .logs-col-message {
         min-width: 0;
@@ -1101,21 +932,6 @@
     .logs-table .logs-col-model>.model-display .model-badges {
       top: 2px;
       right: 4px;
-    }
-
-    /* 重定向落点：与请求标签同形的第二枚 chip，箭头分隔，warning 色与 ↪ 角标呼应 */
-    .model-redirect-arrow {
-      margin: 0 1px;
-      color: var(--neutral-400);
-      font-size: 0.85em;
-      vertical-align: middle;
-    }
-
-    .model-tag.model-redirect-target {
-      background: rgba(245, 158, 11, 0.12);
-      color: var(--warning-500);
-      font-size: 0.85em;
-      padding: 1px 7px;
     }
 
     /* 重定向角标 - 显示在右上角 */

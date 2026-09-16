@@ -6,19 +6,15 @@ let totalLogsPages = 1;
 let totalLogs = 0;
 let currentLogsCustomTimeRange = null;
 let authTokens = []; // 令牌列表
-let logsChannelNameCombobox = null; // 渠道名筛选组合框
 let logsModelCombobox = null; // 模型筛选组合框
 let logsStatusCombobox = null; // 状态码筛选组合框
-window.logsChannels = []; // 渠道列表（来自 /admin/models）
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
-let logsExactChannelNameValue = '';
 let logsExactModelValue = '';
-let logsDefaultTestContent = 'sonnet 4.0的发布日期是什么'; // 默认测试内容（从设置加载）
-let logChannelClickAction = 'edit'; // 日志页渠道名点击行为：edit|navigate
+let logsDefaultTestContent = 'ping'; // 探活模态的默认测试内容
 
 let latestActiveRequests = []; // 缓存 ui.js 最近一次推送的活动请求，供 load() 即时刷新
-let lastActiveRequestStates = null; // Map<id, fingerprint>：上次活跃请求状态，用于检测请求结束/渠道切换
+let lastActiveRequestStates = null; // Map<id, fingerprint>：上次活跃请求状态，用于检测请求结束/上游重试
 let logsLoadInFlight = false;
 let logsLoadPending = false;
 // logsLoadScheduled 已被 _scheduleLoadTimer 取代
@@ -31,7 +27,6 @@ const LOG_COLUMNS = [
   { key: 'ip',          cls: 'logs-col-ip',          i18n: 'logs.colIP' },
   { key: 'tokenDesc',   cls: 'logs-col-token-desc',  i18n: 'logs.colTokenDesc' },
   { key: 'apiKey',      cls: 'logs-col-api-key',     i18n: 'logs.colApiKey' },
-  { key: 'channel',     cls: 'logs-col-channel',     i18n: 'logs.colChannel' },
   { key: 'model',       cls: 'logs-col-model',       i18n: 'common.model' },
   { key: 'status',      cls: 'logs-col-status',      i18n: 'logs.statusCode' },
   { key: 'timing',      cls: 'logs-col-timing',      i18n: 'logs.colTiming' },
@@ -166,21 +161,9 @@ function logsFilterMatchesExactValue(value, exactValue) {
   return Boolean(normalizedValue) && normalizedValue === normalizeLogsFilterValue(exactValue);
 }
 
-function isExactLogsChannelNameFilter(value) {
-  const channelNameOptions = (window.logsChannels || []).map(ch => ch && ch.name);
-  return logsFilterMatchesOption(value, channelNameOptions) ||
-    logsFilterMatchesExactValue(value, logsExactChannelNameValue);
-}
-
 function isExactLogsModelFilter(value) {
   return logsFilterMatchesOption(value, window.availableLogsModels || []) ||
     logsFilterMatchesExactValue(value, logsExactModelValue);
-}
-
-function getLogsChannelNameFilterKey(value, values) {
-  return (values && values.channelNameExact) || isExactLogsChannelNameFilter(value)
-    ? 'channel_name'
-    : 'channel_name_like';
 }
 
 function getLogsModelFilterKey(value, values) {
@@ -188,14 +171,10 @@ function getLogsModelFilterKey(value, values) {
 }
 
 function rememberExactLogsFilters(filters = {}, urlParams = null) {
-  const hasExactChannelName = urlParams
-    ? urlParams.has('channel_name')
-    : filters.channelNameExact === true;
   const hasExactModel = urlParams
     ? urlParams.has('model')
     : filters.modelExact === true;
 
-  logsExactChannelNameValue = hasExactChannelName ? (filters.channelName || '') : '';
   logsExactModelValue = hasExactModel ? (filters.model || '') : '';
 }
 
@@ -310,27 +289,23 @@ function clearActiveRequestsRows() {
   document.querySelectorAll('tr.pending-row').forEach(el => el.remove());
 }
 
+// 单上游下没有渠道/Key 轮换维度：指纹用 start_time，同一 id 重启一次
+// 尝试即视为新轮次，触发一次日志刷新（完成的尝试已落索引）。
 function activeRequestFingerprint(req) {
-  if (!req || !req.channel_id) return ''; // 渠道未选中阶段不参与切换检测，避免初始化触发误刷新
-  return `${req.channel_id}|${req.base_url || ''}|${req.api_key_used || ''}`;
+  return String(req?.start_time || '');
 }
 
-function buildChannelTrigger(channelId, channelName, baseURL = '') {
-  if (!channelId || !channelName) {
-    return '<span style="color: var(--neutral-500);">-</span>';
+// index.jsonl 的 api 原值 → 探活端点协议（/admin/model-test 的 client_protocol）。
+function apiToClientProtocol(api) {
+  switch (api) {
+    case 'openai-chat':
+      return 'openai';
+    case 'openai-responses':
+    case 'responses-ws':
+      return 'codex';
+    default:
+      return 'anthropic';
   }
-
-  const channelTooltip = baseURL ? ` title="${escapeHtml(baseURL)}"` : '';
-  return `<button type="button" class="channel-link" data-channel-id="${channelId}"${channelTooltip}>${escapeHtml(channelName)}</button>`;
-}
-
-function buildActiveRequestChannelDisplay(req) {
-  if (!req.channel_id || !req.channel_name) {
-    return '<span style="color: var(--neutral-500);">-</span>';
-  }
-
-  const channelHtml = buildChannelTrigger(req.channel_id, req.channel_name, req.base_url || '');
-  return buildLogChannelCell(channelHtml, req.cost_multiplier, req.upstream_websocket);
 }
 
 function activeRequestStatusLabel(req) {
@@ -350,44 +325,16 @@ function buildActiveRequestStatusHtml(req) {
   return `<span class="status-pending active-upstream-status">${escapeHtml(activeRequestStatusLabel(req))}</span>`;
 }
 
-function buildLogChannelCell(channelHtml, multiplierValue, upstreamWebsocket) {
-  const badges = [];
-  if (upstreamWebsocket === true) {
-    badges.push('<sup class="log-channel-badge log-channel-websocket-badge">ws</sup>');
-  }
-  const multiplier = Number(multiplierValue);
-  if (Number.isFinite(multiplier) && multiplier >= 0 && Math.abs(multiplier - 1) >= 1e-9) {
-    const multiplierText = formatMultiplierText(multiplier);
-    badges.push(`<sup class="log-channel-badge log-channel-multiplier-badge">${multiplierText}</sup>`);
-  }
-  if (badges.length === 0) return channelHtml;
-
-  return `<span class="log-channel-cell">${channelHtml}<span class="log-channel-badges">${badges.join('')}</span></span>`;
-}
-
 function formatMultiplierText(multiplier) {
   return `${Number(multiplier.toFixed(2)).toString()}x`;
 }
 
-function buildLogChannelDisplay(entry) {
-  const configInfo = entry.channel_name ||
-    (entry.channel_id ? `渠道 #${entry.channel_id}` :
-      (entry.message === 'exhausted backends' ? '系统（所有渠道失败）' :
-        entry.message === 'no available upstream (all cooled or none)' ? '系统（无可用渠道）' : '系统'));
-  const channelTooltip = entry.base_url ? ` title="${escapeHtml(entry.base_url)}"` : '';
-
-  if (!entry.channel_id) {
-    return `<span style="color: var(--neutral-500);"${channelTooltip}>${escapeHtml(configInfo)}</span>`;
-  }
-
-  const channelHtml = buildChannelTrigger(entry.channel_id, entry.channel_name || '', entry.base_url || '');
-  return buildLogChannelCell(channelHtml, entry.cost_multiplier, entry.upstream_websocket);
-}
 // 生成流式标志HTML（公共函数，避免重复）
 function getStreamFlagHtml(isStreaming) {
+  const label = escapeHtml(t('logs.streamFlag'));
   return isStreaming
-    ? '<span class="stream-flag">流</span>'
-    : '<span class="stream-flag placeholder">流</span>';
+    ? `<span class="stream-flag" title="${escapeHtml(t('logs.streamFlagTip'))}">${label}</span>`
+    : `<span class="stream-flag placeholder">${label}</span>`;
 }
 
 function buildTimingSeparatorHtml() {
@@ -437,8 +384,8 @@ function buildThinkingEffortBadge(thinkingEffort, reasoningTokens) {
     .filter(Boolean)
     .join(' ');
   const titleParts = [];
-  if (effort) titleParts.push(`思考等级: ${escapeHtml(effort)}`);
-  if (tokens > 0) titleParts.push(`思考/推理Token: ${tokens}`);
+  if (effort) titleParts.push(`${t('logs.tip.thinkingEffort')}: ${escapeHtml(effort)}`);
+  if (tokens > 0) titleParts.push(`${t('logs.tip.reasoningTokens')}: ${tokens}`);
   const title = titleParts.join('&#10;');
   return `<sup class="thinking-effort-badge" title="${title}">${escapeHtml(text)}</sup>`;
 }
@@ -463,7 +410,9 @@ function isPrefixOrSuffixVariant(model, actualModel) {
   return prefixLen > 0 && suffixLen > 0 && prefixLen + suffixLen === short.length;
 }
 
-function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningTokens) {
+// 模型列只渲染请求模型一个 tag：重定向落点收进 tag 悬浮提示，WS 传输与
+// 思考等级以角标呈现。
+function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningTokens, upstreamWebsocket) {
   if (!model) {
     return '<span style="color: var(--neutral-500);">-</span>';
   }
@@ -475,35 +424,30 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
   const titleParts = [];
   if (redirected) {
     classes.push('model-redirected');
-    titleParts.push(`请求模型: ${escapeHtml(model)}`);
-    titleParts.push(`实际模型: ${escapeHtml(actualModel)}`);
+    titleParts.push(`${t('logs.tip.requestedModel')}: ${escapeHtml(model)}`);
+    titleParts.push(`${t('logs.tip.actualModel')}: ${escapeHtml(actualModel)}`);
   }
   if (effort) {
     classes.push('model-thinking');
-    titleParts.push(`思考等级: ${escapeHtml(effort)}`);
+    titleParts.push(`${t('logs.tip.thinkingEffort')}: ${escapeHtml(effort)}`);
   }
   if (tokens > 0) {
     classes.push('model-thinking');
-    titleParts.push(`思考/推理Token: ${tokens}`);
+    titleParts.push(`${t('logs.tip.reasoningTokens')}: ${tokens}`);
   }
   const title = titleParts.length > 0 ? ` title="${titleParts.join('&#10;')}"` : '';
   const redirectBadge = redirected ? '<sup class="redirect-badge">↪</sup>' : '';
-  const badgeHtml = redirectBadge || effort || tokens > 0
-    ? `<span class="model-badges">${redirectBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
+  const wsBadge = upstreamWebsocket === true
+    ? '<sup class="log-channel-badge log-channel-websocket-badge">ws</sup>'
     : '';
-  // 重定向时把落点渲染成第二个 model-tag：扫描列表时「请求名 → 落点名」
-  // 是一对同形态的标签，比灰字注释好读；↪ 角标保持 ccLoad 原样。
-  const redirectInline = redirected
-    ? `<span class="model-redirect-arrow" aria-hidden="true">→</span>` +
-      `<span class="model-tag model-redirect-target" title="实际模型: ${escapeHtml(actualModel)}">` +
-      `<span class="model-text">${escapeHtml(actualModel)}</span></span>`
+  const badgeHtml = redirectBadge || wsBadge || effort || tokens > 0
+    ? `<span class="model-badges">${redirectBadge}${wsBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
     : '';
 
   return `<span class="model-display">
       <span class="${classes.join(' ')}"${title}>
         <span class="model-text">${escapeHtml(model)}</span>
       </span>
-      ${redirectInline}
       ${badgeHtml}
     </span>`;
 }
@@ -514,7 +458,6 @@ function getLogMobileLabels() {
     ip: escapeHtml(t('logs.colIP')),
     tokenDesc: escapeHtml(t('logs.colTokenDesc')),
     apiKey: escapeHtml(t('logs.colApiKey')),
-    channel: escapeHtml(t('logs.colChannel')),
     model: escapeHtml(t('common.model')),
     status: escapeHtml(t('logs.statusCode')),
     timing: escapeHtml(t('logs.colTiming')),
@@ -571,7 +514,7 @@ function renderLogSourceBadge(logSource) {
 
 function canInspectDebugLog(entry) {
   const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
-  return !isTokenSession && Number(entry?.channel_id) > 0;
+  return !isTokenSession && Number(entry?.id) > 0;
 }
 
 function buildLogMessageContent(entry) {
@@ -736,7 +679,7 @@ async function load(skipLoading = false) {
 
     const data = response.data || [];
 
-    // 把日志中出现的渠道/模型合并进筛选下拉（无需刷新页面）
+    // 把日志中出现的模型/状态码合并进筛选下拉（无需刷新页面）
     mergeLogsFilterOptions(data);
 
     // 精确计算总页数（基于后端返回的count字段）
@@ -794,23 +737,17 @@ async function load(skipLoading = false) {
 // 根据当前筛选条件过滤活跃请求
 function filterActiveRequests(requests) {
   const filters = getLogsFilters();
-  const channelName = normalizeLogsFilterValue(filters.channelName);
   const model = normalizeLogsFilterValue(filters.model);
-  const channelNameExact = filters.channelNameExact;
   const modelExact = filters.modelExact;
-  const clientProtocol = normalizeLogsFilterValue(filters.clientProtocol);
+  const api = normalizeLogsFilterValue(filters.api);
   const tokenId = (document.getElementById('f_auth_token')?.value || '').trim();
 
   return requests.filter(req => {
-    if (channelName) {
-      const name = normalizeLogsFilterValue(typeof req.channel_name === 'string' ? req.channel_name : '');
-      if (channelNameExact ? name !== channelName : !name.includes(channelName)) return false;
-    }
     if (model) {
       const reqModel = normalizeLogsFilterValue(req.model || '');
       if (modelExact ? reqModel !== model : !reqModel.includes(model)) return false;
     }
-    if (clientProtocol && normalizeLogsFilterValue(req.client_protocol) !== clientProtocol) return false;
+    if (api && normalizeLogsFilterValue(req.api) !== api) return false;
     // 令牌ID精确匹配
     if (tokenId) {
       if (req.token_id === undefined || req.token_id === null || req.token_id === 0) return false;
@@ -851,10 +788,10 @@ function handleActiveRequestsData(rawActiveRequests) {
     return;
   }
 
-  // 进行中的请求（尚未落库）所属渠道/模型也补充进筛选下拉
+  // 进行中的请求（尚未落库）的模型/状态码也补充进筛选下拉
   mergeLogsFilterOptions(latestActiveRequests);
 
-  // 检测"需要刷新日志"：ID 消失（请求结束）或 fingerprint 变化（渠道/Key/URL 切换 → 上次尝试已失败并写入日志）
+  // 检测"需要刷新日志"：ID 消失（请求结束）或 fingerprint 变化（上游重试 → 上次尝试已写入日志）
   const currentStates = new Map();
   for (const req of latestActiveRequests) {
     if (req && (req.id !== undefined && req.id !== null)) {
@@ -870,7 +807,7 @@ function handleActiveRequestsData(rawActiveRequests) {
         break;
       }
       if (lastFp && currentFp && lastFp !== currentFp) {
-        needRefresh = true; // 同 ID 切换了渠道/Key/URL = 上次尝试已写日志
+        needRefresh = true; // 同 ID 的 start_time 变了 = 上次尝试已写日志
         break;
       }
     }
@@ -925,9 +862,8 @@ function renderActiveRequests(activeRequests) {
 
     const durationDisplay = startMs ? buildActiveRequestTimingHtml(req, elapsedRaw, elapsed) : '-';
 
-    const channelDisplay = buildActiveRequestChannelDisplay(req);
     const statusDisplay = buildActiveRequestStatusHtml(req);
-    const modelDisplay = buildLogModelDisplay(req.model, '', req.thinking_effort, req.reasoning_tokens);
+    const modelDisplay = buildLogModelDisplay(req.model, '', req.thinking_effort, req.reasoning_tokens, req.upstream_websocket);
     const tokenDescDisplay = buildActiveRequestTokenDescDisplay(req);
     const tokenDescCellClass = `logs-col-token-desc${tokenDescDisplay ? '' : ' mobile-empty-cell'}`;
     const abortDisplay = buildActiveRequestAbortHtml(req, id, startMs);
@@ -947,15 +883,13 @@ function renderActiveRequests(activeRequests) {
       // 更新现有行的动态字段
       const timingCell = existingRow.querySelector('.logs-col-timing');
       if (timingCell) timingCell.innerHTML = `${durationDisplay} ${streamFlag}`;
-      const channelCell = existingRow.querySelector('.logs-col-channel');
-      if (channelCell) channelCell.innerHTML = channelDisplay;
       const statusCell = existingRow.querySelector('.logs-col-status');
       if (statusCell) statusCell.innerHTML = statusDisplay;
       const compactStatus = existingRow.querySelector('.active-upstream-status');
       if (compactStatus && !statusCell) compactStatus.textContent = activeRequestStatusLabel(req);
       const msgCell = existingRow.querySelector('.logs-col-message');
       if (msgCell) msgCell.innerHTML = infoContent;
-      // 中断入口随渠道切换与中断状态变化，必须每轮重画
+      // 中断入口随上游重试与中断状态变化，必须每轮重画
       const speedCell = existingRow.querySelector('.logs-col-speed');
       if (speedCell) {
         speedCell.innerHTML = abortDisplay;
@@ -987,7 +921,6 @@ function renderActiveRequests(activeRequests) {
             <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</td>
             <td class="${tokenDescCellClass}" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
             <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${keyDisplay}</td>
-            <td class="logs-col-channel" data-mobile-label="${logMobileLabels.channel}" style="text-align: left;">${channelDisplay}</td>
             <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
             <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}">${statusDisplay}</td>
             <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${durationDisplay} ${streamFlag}</td>
@@ -1044,7 +977,7 @@ function getTableColspan() {
   const table = document.getElementById('tbody')?.closest('table')
     || document.querySelector('.logs-table');
   const headerCells = table ? table.querySelectorAll('thead th') : [];
-  return headerCells.length || 16; // fallback到16列（日志页默认列数）
+  return headerCells.length || 15; // fallback到15列（日志页默认列数）
 }
 
 function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) {
@@ -1126,17 +1059,17 @@ function renderLogs(data) {
     // 0.5. API访问令牌描述
     const tokenDescDisplay = buildLogTokenDescDisplay(entry.auth_token_description);
 
-    // 1. 渠道信息显示（鼠标移上去时显示URL）
-    const configDisplay = buildLogChannelDisplay(entry);
-
     // 2. 状态码样式
     const statusClass = (entry.status_code >= 200 && entry.status_code < 300) ?
       'status-success' : 'status-error';
     const statusCode = entry.status_code;
 
-    // 3. 模型显示（支持重定向与思考等级角标）
+    // 3. 模型显示（重定向落点在 tag 悬浮提示里）；非 2xx 行给探活入口
     const displayedActualModel = entry.actual_model || entry.response_model;
-    const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.thinking_effort, entry.reasoning_tokens);
+    const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.thinking_effort, entry.reasoning_tokens, entry.upstream_websocket);
+    const probeDisplay = !(statusCode >= 200 && statusCode < 300) && entry.model
+      ? `<button type="button" class="test-key-btn" data-probe-model="${escapeHtml(entry.model)}" data-probe-api="${escapeHtml(entry.api || '')}" title="${escapeHtml(t('logs.probeModel'))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
+      : '';
 
     // 4. 响应时间显示(流式/非流式)
     const hasDuration = entry.duration !== undefined && entry.duration !== null;
@@ -1162,31 +1095,10 @@ function renderLogs(data) {
       ? ''
       : `<span class="token-metric-value" style="color: var(--neutral-700);">${logSpeed.toFixed(1)}</span>`;
 
-    // 5. API Key显示(含按钮组)
-    let apiKeyDisplay = '';
-    if (entry.api_key_used && entry.channel_id && entry.model) {
-      const sc = entry.status_code || 0;
-      const showTestBtn = sc !== 200;
-      const showDeleteBtn = sc === 401 || sc === 403;
-      const attr = (value) => escapeHtml(value || '');
-      const keyHashAttr = attr(entry.api_key_hash);
-
-      const testBtnIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-      const deleteBtnIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M3 6H21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M8 6V4H16V6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6L18 20H6L5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 11V17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
-      let buttons = '';
-      if (showTestBtn) {
-        buttons += `<button class="test-key-btn" data-action="test" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" data-model="${attr(entry.model)}" data-client-protocol="${attr(entry.client_protocol)}" title="测试此 API Key">${testBtnIcon}</button>`;
-      }
-      if (showDeleteBtn) {
-        buttons += `<button class="test-key-btn" style="color: var(--error-600);" data-action="delete" data-channel-id="${entry.channel_id}" data-channel-name="${attr(entry.channel_name)}" data-api-key="${attr(entry.api_key_used)}" data-api-key-hash="${keyHashAttr}" title="删除此 API Key">${deleteBtnIcon}</button>`;
-      }
-
-      apiKeyDisplay = `<div class="logs-api-key-group"><code class="logs-api-key-text logs-mono-text">${escapeHtml(entry.api_key_used)}</code><span class="logs-api-key-actions">${buttons}</span></div>`;
-    } else if (entry.api_key_used) {
-      apiKeyDisplay = `<code class="logs-api-key-text logs-mono-text">${escapeHtml(entry.api_key_used)}</code>`;
-    } else {
-      apiKeyDisplay = '<span style="color: var(--neutral-500);">-</span>';
-    }
+    // 5. Key 哈希显示（本服务 api_key_used 就是 key_hash）
+    const apiKeyDisplay = entry.api_key_used
+      ? `<code class="logs-api-key-text logs-mono-text">${escapeHtml(entry.api_key_used)}</code>`
+      : '<span style="color: var(--neutral-500);">-</span>';
 
     // 6. Token统计显示(0值为空)
     const tokenValue = (value, color) => {
@@ -1218,8 +1130,7 @@ function renderLogs(data) {
           <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;">${clientIPDisplay}</td>
           <td class="logs-col-token-desc" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
           <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${apiKeyDisplay}</td>
-          <td class="logs-col-channel" data-mobile-label="${logMobileLabels.channel}" style="text-align: left;">${configDisplay}</td>
-          <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
+          <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
           <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}">${statusCode}</span></td>
           <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${responseTimingDisplay}</td>
           <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${speedDisplay}</td>
@@ -1305,7 +1216,7 @@ function jumpToPage() {
     jumpPageInput.value = ''; // 清空无效输入
     if (window.showError) {
       try {
-        window.showError(`请输入有效的页码 (1-${totalLogsPages})`);
+        window.showError(t('logs.invalidPage', { total: totalLogsPages }));
       } catch (_) { }
     }
     return;
@@ -1361,7 +1272,6 @@ async function resetLogsFilters() {
   totalLogsPages = 1;
   rememberExactLogsFilters({
     ...defaults,
-    channelNameExact: false,
     modelExact: false
   });
 
@@ -1384,15 +1294,10 @@ async function resetLogsFilters() {
 function applyLogsFilterValues(filters) {
   window.applyFilterControlValues(filters, {
     range: 'f_hours',
-    clientProtocol: 'f_client_protocol',
+    api: 'f_api',
     logSource: 'f_log_source',
     authToken: 'f_auth_token'
   });
-
-  // 渠道名通过 combobox 恢复
-  if (logsChannelNameCombobox && filters.channelName !== undefined) {
-    logsChannelNameCombobox.setValue(filters.channelName || '', filters.channelName || t('stats.allChannels'));
-  }
 
   // 模型通过 combobox 恢复
   if (logsModelCombobox && filters.model !== undefined) {
@@ -1443,15 +1348,12 @@ async function loadLogsFilterOptions(range) {
     appendLogsTimeRangeParams(params, { range: r });
     const resp = await fetchDataWithAuth('/dashboard/models?' + params.toString()) || {};
     const rawModels = Array.isArray(resp.models) ? resp.models : [];
-    const rawChannels = Array.isArray(resp.channels) ? resp.channels : [];
     const rawStatusCodes = Array.isArray(resp.status_codes) ? resp.status_codes : [];
 
     window.availableLogsModels = [...new Set(rawModels)];
-    window.logsChannels = rawChannels;
     window.availableLogsStatusCodes = [...new Set(rawStatusCodes
       .map(Number)
       .filter(code => Number.isInteger(code) && code >= 100 && code <= 999))];
-    if (logsChannelNameCombobox) logsChannelNameCombobox.refresh();
     if (logsModelCombobox) logsModelCombobox.refresh();
     if (logsStatusCombobox) logsStatusCombobox.refresh();
   } catch (error) {
@@ -1459,15 +1361,13 @@ async function loadLogsFilterOptions(range) {
   }
 }
 
-// 从日志/活跃请求数据中提取渠道名与请求模型，去重合并进筛选下拉。
-// 根因：/admin/models 的 distinct 查询滞后于刚落库或进行中的请求，
-// 导致列表里能看到的渠道/模型在下拉里缺失，必须刷新页面才更新。
+// 从日志/活跃请求数据中提取请求模型与状态码，去重合并进筛选下拉。
+// 根因：bootstrap 的 distinct 集合滞后于刚落库或进行中的请求，
+// 导致列表里能看到的模型/状态码在下拉里缺失，必须刷新页面才更新。
 // 此处做到“所见即可筛选”，无需刷新。
 function mergeLogsFilterOptions(entries) {
   if (!Array.isArray(entries) || entries.length === 0) return;
 
-  const channels = Array.isArray(window.logsChannels) ? window.logsChannels : [];
-  const knownNames = new Set(channels.map(ch => ch && ch.name).filter(Boolean));
   const models = Array.isArray(window.availableLogsModels) ? window.availableLogsModels : [];
   const knownModels = new Set(models);
   const statusCodes = Array.isArray(window.availableLogsStatusCodes) ? window.availableLogsStatusCodes : [];
@@ -1475,12 +1375,6 @@ function mergeLogsFilterOptions(entries) {
   let changed = false;
 
   for (const entry of entries) {
-    const name = String(entry?.channel_name || '').trim();
-    if (name && !knownNames.has(name)) {
-      knownNames.add(name);
-      channels.push({ id: Number(entry?.channel_id) || 0, name });
-      changed = true;
-    }
     const model = String(entry?.model || '').trim();
     if (model && !knownModels.has(model)) {
       knownModels.add(model);
@@ -1496,33 +1390,10 @@ function mergeLogsFilterOptions(entries) {
   }
 
   if (!changed) return;
-  window.logsChannels = channels;
   window.availableLogsModels = models;
   window.availableLogsStatusCodes = statusCodes.sort((a, b) => a - b);
-  if (logsChannelNameCombobox) logsChannelNameCombobox.refresh();
   if (logsModelCombobox) logsModelCombobox.refresh();
   if (logsStatusCombobox) logsStatusCombobox.refresh();
-}
-
-function initLogsChannelNameCombobox(initialValue) {
-  if (typeof window.createSearchableCombobox !== 'function') return;
-  if (!document.getElementById('f_name')) return;
-  logsChannelNameCombobox = window.createSearchableCombobox({
-    inputId: 'f_name',
-    dropdownId: 'f_name_dropdown',
-    attachMode: true,
-    initialValue: initialValue || '',
-    initialLabel: initialValue || t('stats.allChannels'),
-    allowCustomInput: true,
-    commitEmptyAsFirst: true,
-    getOptions: () => [
-      { value: '', label: t('stats.allChannels') },
-      ...(window.logsChannels || []).map(ch => ({ value: ch.name, label: ch.name }))
-    ],
-    onSelect: () => {
-      applyFilter();
-    }
-  });
 }
 
 function initLogsModelCombobox(initialValue) {
@@ -1590,13 +1461,12 @@ async function initFilters(restoredFilters, preloaded) {
     }
   });
 
-  initLogsChannelNameCombobox(restoredFilters.channelName || '');
   initLogsModelCombobox(restoredFilters.model || '');
   initLogsStatusCombobox(restoredFilters.status || '');
   applyLogsFilterValues(restoredFilters);
-  const clientProtocolSelect = document.getElementById('f_client_protocol');
-  if (clientProtocolSelect) {
-    clientProtocolSelect.addEventListener('change', applyFilter);
+  const apiSelect = document.getElementById('f_api');
+  if (apiSelect) {
+    apiSelect.addEventListener('change', applyFilter);
   }
   syncLogSourceVisibility();
   const [tokens] = await Promise.all([
@@ -1625,7 +1495,7 @@ async function initFilters(restoredFilters, preloaded) {
   window.bindFilterApplyInputs({
     apply: applyFilter,
     debounceInputIds: [],
-    enterInputIds: ['f_hours', 'f_client_protocol', 'f_auth_token', 'f_log_source']
+    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source']
   });
 }
 
@@ -1638,16 +1508,8 @@ function initLogsPageActions() {
         'prev-logs-page': () => prevLogsPage(),
         'next-logs-page': () => nextLogsPage(),
         'last-logs-page': () => lastLogsPage(),
-        'close-test-key-modal': () => closeTestKeyModal(),
         'close-debug-log-modal': () => closeDebugLogModal(),
-        'run-key-test': () => runKeyTest(),
-        'toggle-col-menu': () => toggleColMenu(),
-        'toggle-response': (actionTarget) => {
-          const responseTarget = actionTarget.dataset.responseTarget;
-          if (responseTarget && typeof window.toggleResponse === 'function') {
-            window.toggleResponse(responseTarget);
-          }
-        }
+        'toggle-col-menu': () => toggleColMenu()
       }
     });
   }
@@ -1686,103 +1548,6 @@ function formatTime(timeStr) {
   }
 }
 
-const apiKeyHashCache = new Map();
-
-function maskKeyForCompare(key) {
-  if (!key) return '';
-  if (key.length <= 6) return '****';
-  return `${key.slice(0, 3)}.${key.slice(-3)}`;
-}
-
-function findKeyIndexCandidatesByMaskedKey(apiKeys, maskedKey) {
-  if (!maskedKey || !apiKeys || !apiKeys.length) return [];
-  const target = maskedKey.trim();
-  const candidates = [];
-
-  for (const k of apiKeys) {
-    const rawKey = (k && (k.api_key || k.key)) || '';
-    if (maskKeyForCompare(rawKey) !== target) continue;
-    if (k && typeof k.key_index === 'number') {
-      candidates.push(k.key_index);
-    }
-  }
-
-  return candidates;
-}
-
-function findUniqueKeyIndexByMaskedKey(apiKeys, maskedKey) {
-  const candidates = findKeyIndexCandidatesByMaskedKey(apiKeys, maskedKey);
-  if (candidates.length !== 1) {
-    return { keyIndex: null, matchCount: candidates.length };
-  }
-
-  return { keyIndex: candidates[0], matchCount: 1 };
-}
-
-async function sha256Hex(value) {
-  if (!value) return '';
-  const key = `sha256:${value}`;
-  if (apiKeyHashCache.has(key)) {
-    return apiKeyHashCache.get(key);
-  }
-
-  const canHash = typeof crypto !== 'undefined' && crypto.subtle && typeof TextEncoder !== 'undefined';
-  if (!canHash) return '';
-
-  try {
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-    const hex = Array.from(new Uint8Array(digest))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
-    apiKeyHashCache.set(key, hex);
-    return hex;
-  } catch (err) {
-    console.warn('计算 API Key 哈希失败，将回退掩码匹配:', err);
-    return '';
-  }
-}
-
-async function findUniqueKeyIndexByHash(apiKeys, apiKeyHash) {
-  if (!apiKeyHash || !apiKeys || !apiKeys.length) {
-    return { keyIndex: null, matchCount: 0 };
-  }
-
-  const target = apiKeyHash.trim().toLowerCase();
-  const candidates = [];
-
-  for (const k of apiKeys) {
-    const rawKey = (k && (k.api_key || k.key)) || '';
-    if (!rawKey) continue;
-    const hashed = await sha256Hex(rawKey);
-    if (!hashed || hashed !== target) continue;
-    if (k && typeof k.key_index === 'number') {
-      candidates.push(k.key_index);
-    }
-  }
-
-  if (candidates.length !== 1) {
-    return { keyIndex: null, matchCount: candidates.length };
-  }
-  return { keyIndex: candidates[0], matchCount: 1 };
-}
-
-async function resolveKeyIndexForLogEntry(apiKeys, maskedKey, apiKeyHash) {
-  if (apiKeyHash) {
-    const byHash = await findUniqueKeyIndexByHash(apiKeys, apiKeyHash);
-    if (byHash.keyIndex !== null || byHash.matchCount > 1) {
-      return { ...byHash, method: 'hash' };
-    }
-  }
-
-  const byMask = findUniqueKeyIndexByMaskedKey(apiKeys, maskedKey);
-  return { ...byMask, method: 'mask' };
-}
-
-function updateTestKeyIndexInfo(text) {
-  const el = document.getElementById('testKeyIndexInfo');
-  if (el) el.textContent = text || '';
-}
-
 // 注销功能（已由 ui.js 的 onLogout 统一处理）
 
 // localStorage key for logs page filters
@@ -1811,14 +1576,7 @@ const LOGS_FILTER_FIELDS = [
       return false;
     }
   },
-  { key: 'clientProtocol', queryKeys: ['client_protocol'], defaultValue: '' },
-  {
-    key: 'channelName',
-    queryKeys: ['channel_name', 'channel_name_like'],
-    paramKey: getLogsChannelNameFilterKey,
-    requestKey: getLogsChannelNameFilterKey,
-    defaultValue: ''
-  },
+  { key: 'api', queryKeys: ['api'], defaultValue: '' },
   {
     key: 'model',
     queryKeys: ['model', 'model_like'],
@@ -1837,11 +1595,10 @@ function getLogsFilters() {
     ? 'proxy'
     : (logSourceSelect.value || 'proxy').trim();
   const model = logsModelCombobox ? logsModelCombobox.getValue() : (document.getElementById('f_model')?.value || '').trim();
-  const channelName = logsChannelNameCombobox ? logsChannelNameCombobox.getValue() : (document.getElementById('f_name')?.value || '').trim();
   const status = logsStatusCombobox ? logsStatusCombobox.getValue() : (document.getElementById('f_status')?.value || '').trim();
   const baseValues = window.readFilterControlValues({
     range: { id: 'f_hours', defaultValue: 'today', trim: true },
-    clientProtocol: { id: 'f_client_protocol', trim: true },
+    api: { id: 'f_api', trim: true },
     authToken: { id: 'f_auth_token', trim: true }
   });
   const hasCustomRange = baseValues.range === 'custom' && currentLogsCustomTimeRange;
@@ -1853,8 +1610,6 @@ function getLogsFilters() {
     model,
     status,
     modelExact: isExactLogsModelFilter(model),
-    channelName,
-    channelNameExact: isExactLogsChannelNameFilter(channelName),
     logSource
   };
 }
@@ -1895,7 +1650,6 @@ window.initPageBootstrap({
   }
   rememberExactLogsFilters({
     ...restoredFilters,
-    channelNameExact: !hasUrlParams && savedFilters?.channelNameExact === true,
     modelExact: !hasUrlParams && savedFilters?.modelExact === true
   }, hasUrlParams ? u : null);
   // 构造 bootstrap 请求参数（和 loadLogsFilterOptions 一致）
@@ -1907,15 +1661,10 @@ window.initPageBootstrap({
 
   // 从 bootstrap 数据应用设置（bootstrap 失败时各字段回退到原有 fetch 路径）
   if (bootstrap) {
-    if (bootstrap.channel_test_content) logsDefaultTestContent = bootstrap.channel_test_content;
-    const clickAction = String(bootstrap.log_channel_click_action || '').trim().toLowerCase();
-    logChannelClickAction = clickAction === 'navigate' ? 'navigate' : 'edit';
     window.availableLogsModels = [...new Set(bootstrap.models || [])];
-    window.logsChannels = bootstrap.channels || [];
     window.availableLogsStatusCodes = [...new Set((bootstrap.status_codes || [])
       .map(Number)
       .filter(code => Number.isInteger(code) && code >= 100 && code <= 999))];
-    if (logsChannelNameCombobox) logsChannelNameCombobox.refresh();
     if (logsModelCombobox) logsModelCombobox.refresh();
     if (logsStatusCombobox) logsStatusCombobox.refresh();
   }
@@ -1949,7 +1698,9 @@ window.initPageBootstrap({
         closeDebugLogModal();
         return;
       }
-      closeTestKeyModal();
+      if (typeof window.closeModelTestModal === 'function') {
+        window.closeModelTestModal();
+      }
     }
   });
 
@@ -1984,34 +1735,17 @@ window.initPageBootstrap({
         return;
       }
 
-      const channelBtn = e.target.closest('.channel-link[data-channel-id]');
-      if (channelBtn) {
-        const channelId = parseInt(channelBtn.dataset.channelId, 10);
-        if (Number.isFinite(channelId) && channelId > 0) {
-          if (logChannelClickAction === 'navigate') {
-            window.location.href = `/web/channels.html?id=${channelId}#channel-${channelId}`;
-          } else if (typeof openLogChannelEditor === 'function') {
-            openLogChannelEditor(channelId);
-          }
+      // 非 2xx 行的模型探活入口（按该行实际入口协议预填）
+      const probeBtn = e.target.closest('[data-probe-model]');
+      if (probeBtn) {
+        if (typeof window.openModelTestModal === 'function') {
+          window.openModelTestModal({
+            model: probeBtn.dataset.probeModel || '',
+            clientProtocol: apiToClientProtocol(probeBtn.dataset.probeApi),
+            content: logsDefaultTestContent
+          });
         }
         return;
-      }
-
-      const btn = e.target.closest('.test-key-btn[data-action]');
-      if (!btn) return;
-
-      const action = btn.dataset.action;
-      const channelId = parseInt(btn.dataset.channelId);
-      const channelName = btn.dataset.channelName || '';
-      const apiKey = btn.dataset.apiKey || '';
-      const apiKeyHash = btn.dataset.apiKeyHash || '';
-      const model = btn.dataset.model || '';
-      const clientProtocol = btn.dataset.clientProtocol || 'anthropic';
-
-      if (action === 'test') {
-        testKey(channelId, channelName, apiKey, model, apiKeyHash, clientProtocol);
-      } else if (action === 'delete') {
-        deleteKeyFromLog(channelId, channelName, apiKey, apiKeyHash);
       }
     });
   }
@@ -2037,7 +1771,6 @@ window.addEventListener('pageshow', async function (event) {
       }
       rememberExactLogsFilters({
         ...restoredFilters,
-        channelNameExact: savedFilters.channelNameExact === true,
         modelExact: savedFilters.modelExact === true
       });
 
@@ -2059,288 +1792,6 @@ window.addEventListener('pageshow', async function (event) {
   }
 });
 
-// ========== API Key 测试功能 ==========
-let testingKeyData = null;
-
-async function testKey(channelId, channelName, apiKey, model, apiKeyHash = '', clientProtocol = 'anthropic') {
-  testingKeyData = {
-    channelId,
-    channelName,
-    maskedApiKey: apiKey,
-    apiKeyHash,
-    originalModel: model,
-    clientProtocol,
-    keyIndex: null
-  };
-
-  // 填充模态框基本信息
-  document.getElementById('testKeyChannelName').textContent = channelName;
-  document.getElementById('testKeyDisplay').textContent = apiKey;
-  document.getElementById('testKeyOriginalModel').textContent = model;
-
-  // 重置状态
-  resetTestKeyModal();
-  updateTestKeyIndexInfo('');
-
-  // 显示模态框
-  document.getElementById('testKeyModal').classList.add('show');
-
-  // 异步加载渠道配置以获取支持的模型列表 + Keys 用于 key_index 匹配
-  try {
-    const [channel, apiKeysRaw] = await Promise.all([
-      fetchDataWithAuth(`/admin/channels/${channelId}`),
-      fetchDataWithAuth(`/admin/channels/${channelId}/keys`)
-    ]);
-    const apiKeys = apiKeysRaw || [];
-
-    const { keyIndex: matchedIndex, matchCount, method } = await resolveKeyIndexForLogEntry(apiKeys, apiKey, apiKeyHash);
-    testingKeyData.keyIndex = matchedIndex;
-    if (apiKeys.length > 0) {
-      updateTestKeyIndexInfo(
-        matchedIndex !== null
-          ? method === 'hash'
-            ? `匹配到 Key #${matchedIndex + 1}（哈希精确匹配），按日志所用Key测试`
-            : `匹配到 Key #${matchedIndex + 1}（掩码匹配），按日志所用Key测试`
-          : matchCount > 1
-            ? method === 'hash'
-              ? `匹配到 ${matchCount} 个哈希相同 Key，已回退默认顺序测试`
-              : `匹配到 ${matchCount} 个同掩码 Key，为避免误测将按默认顺序测试`
-            : '未匹配到日志中的 Key，将按默认顺序测试'
-      );
-    } else {
-      updateTestKeyIndexInfo('未获取到渠道 Key，将按默认顺序测试');
-    }
-
-    // 填充模型下拉列表
-    const modelSelect = document.getElementById('testKeyModel');
-    modelSelect.innerHTML = '';
-
-    if (channel.models && channel.models.length > 0) {
-      // channel.models 是 ModelEntry 对象数组，需访问 .model 属性
-      channel.models.forEach(m => {
-        const modelName = m.model || m; // 兼容字符串和对象
-        const option = document.createElement('option');
-        option.value = modelName;
-        option.textContent = modelName;
-        modelSelect.appendChild(option);
-      });
-
-      // 如果日志中的模型在支持列表中，则预选；否则选择第一个
-      const modelNames = channel.models.map(m => m.model || m);
-      if (modelNames.includes(model)) {
-        modelSelect.value = model;
-      } else {
-        modelSelect.value = modelNames[0];
-      }
-    } else {
-      // 没有配置模型，使用日志中的模型
-      const option = document.createElement('option');
-      option.value = model;
-      option.textContent = model;
-      modelSelect.appendChild(option);
-      modelSelect.value = model;
-    }
-  } catch (e) {
-    console.error('加载渠道配置失败', e);
-    // 降级方案：使用日志中的模型
-    const modelSelect = document.getElementById('testKeyModel');
-    modelSelect.innerHTML = '';
-    const option = document.createElement('option');
-    option.value = model;
-    option.textContent = model;
-    modelSelect.appendChild(option);
-    modelSelect.value = model;
-    updateTestKeyIndexInfo('渠道配置加载失败，将按默认顺序测试');
-  }
-}
-
-function closeTestKeyModal() {
-  document.getElementById('testKeyModal').classList.remove('show');
-  testingKeyData = null;
-}
-
-function resetTestKeyModal() {
-  document.getElementById('testKeyProgress').classList.remove('show');
-  document.getElementById('testKeyResult').classList.remove('show', 'success', 'error');
-  document.getElementById('runKeyTestBtn').disabled = false;
-  document.getElementById('testKeyContent').value = logsDefaultTestContent;
-  document.getElementById('testKeyStream').checked = true;
-  updateTestKeyIndexInfo('');
-  // 重置模型选择框
-  const modelSelect = document.getElementById('testKeyModel');
-  modelSelect.innerHTML = '<option value="">加载中...</option>';
-}
-
-async function runKeyTest() {
-  if (!testingKeyData) return;
-
-  const modelSelect = document.getElementById('testKeyModel');
-  const contentInput = document.getElementById('testKeyContent');
-  const streamCheckbox = document.getElementById('testKeyStream');
-  const selectedModel = modelSelect.value;
-  const testContent = contentInput.value.trim() || logsDefaultTestContent;
-  const streamEnabled = streamCheckbox.checked;
-
-  if (!selectedModel) {
-    if (window.showError) window.showError('请选择一个测试模型');
-    return;
-  }
-
-  // 显示进度
-  document.getElementById('testKeyProgress').classList.add('show');
-  document.getElementById('testKeyResult').classList.remove('show');
-  document.getElementById('runKeyTestBtn').disabled = true;
-
-  try {
-    // 构建测试请求（使用用户选择的模型）
-    const testRequest = {
-      model: selectedModel,
-      stream: streamEnabled,
-      content: testContent,
-      client_protocol: testingKeyData.clientProtocol || 'anthropic'
-    };
-    if (testingKeyData && testingKeyData.keyIndex !== null && testingKeyData.keyIndex !== undefined) {
-      testRequest.key_index = testingKeyData.keyIndex;
-    }
-
-    const testResult = await fetchDataWithAuth(`/admin/channels/${testingKeyData.channelId}/test`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(testRequest)
-    });
-
-    displayKeyTestResult(testResult || { success: false, error: '空响应' });
-  } catch (e) {
-    console.error('测试失败', e);
-    displayKeyTestResult({
-      success: false,
-      error: '测试请求失败: ' + e.message
-    });
-  } finally {
-    document.getElementById('testKeyProgress').classList.remove('show');
-    document.getElementById('runKeyTestBtn').disabled = false;
-  }
-}
-
-function displayKeyTestResult(result) {
-  const testResultDiv = document.getElementById('testKeyResult');
-  const contentDiv = document.getElementById('testKeyResultContent');
-  const detailsDiv = document.getElementById('testKeyResultDetails');
-
-  testResultDiv.classList.remove('success', 'error');
-  testResultDiv.classList.add('show');
-
-  if (result.success) {
-    testResultDiv.classList.add('success');
-    contentDiv.innerHTML = `
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 18px;">✅</span>
-            <strong>${escapeHtml(result.message || 'API测试成功')}</strong>
-          </div>
-        `;
-
-    let details = `响应时间: ${result.duration_ms}ms`;
-    if (result.status_code) {
-      details += ` | 状态码: ${result.status_code}`;
-    }
-
-    // 显示响应文本
-    if (result.response_text) {
-      details += `
-            <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">API 响应内容</h4>
-              <div style="padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--neutral-700); white-space: pre-wrap; font-family: monospace; font-size: 0.9em; max-height: 300px; overflow-y: auto;">${escapeHtml(result.response_text)}</div>
-            </div>
-          `;
-    }
-
-    // 显示完整API响应
-    if (result.api_response) {
-      const responseId = 'api-response-' + Date.now();
-      details += `
-            <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">完整 API 响应</h4>
-              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${responseId}" style="margin-bottom: 8px;">显示/隐藏 JSON</button>
-              <div id="${responseId}" style="display: none; padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--neutral-700); white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 400px; overflow-y: auto;">${escapeHtml(JSON.stringify(result.api_response, null, 2))}</div>
-            </div>
-          `;
-    }
-
-    detailsDiv.innerHTML = details;
-  } else {
-    testResultDiv.classList.add('error');
-    contentDiv.innerHTML = `
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 18px;">❌</span>
-            <strong>测试失败</strong>
-          </div>
-        `;
-
-    let details = `<p style="color: var(--error-600); margin-top: 8px;">${escapeHtml(result.error || '未知错误')}</p>`;
-
-    if (result.status_code) {
-      details += `<p style="margin-top: 8px;">状态码: ${result.status_code}</p>`;
-    }
-
-    if (result.raw_response) {
-      const rawId = 'raw-response-' + Date.now();
-      details += `
-            <div style="margin-top: 12px;">
-              <h4 style="margin-bottom: 8px; color: var(--neutral-700);">原始响应</h4>
-              <button type="button" class="btn btn-secondary btn-sm" data-action="toggle-response" data-response-target="${rawId}" style="margin-bottom: 8px;">显示/隐藏</button>
-              <div id="${rawId}" style="display: none; padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--error-700); white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 400px; overflow-y: auto;">${escapeHtml(result.raw_response)}</div>
-            </div>
-          `;
-    }
-
-    detailsDiv.innerHTML = details;
-  }
-}
-
-// ========== 删除 Key（从日志列表入口） ==========
-async function deleteKeyFromLog(channelId, channelName, maskedApiKey, apiKeyHash = '') {
-  if (!channelId || !maskedApiKey) return;
-
-  const confirmDel = confirm(`确定删除渠道“${channelName || ('#' + channelId)}”中的此Key (${maskedApiKey}) 吗？`);
-  if (!confirmDel) return;
-
-  try {
-    // 通过 logs 返回的哈希优先精确匹配 key_index；无哈希时回退掩码匹配
-    const apiKeys = await fetchDataWithAuth(`/admin/channels/${channelId}/keys`);
-    const { keyIndex, matchCount, method } = await resolveKeyIndexForLogEntry(apiKeys, maskedApiKey, apiKeyHash);
-    if (keyIndex === null) {
-      if (matchCount > 1) {
-        alert(method === 'hash'
-          ? '匹配到多个同哈希 Key，为避免误删已阻止操作，请到渠道管理页手动删除。'
-          : '匹配到多个同掩码 Key，为避免误删已阻止操作，请到渠道管理页手动删除。');
-      } else {
-        alert('未能匹配到该Key，请检查渠道配置。');
-      }
-      return;
-    }
-
-    // 删除Key
-    const delResult = await fetchDataWithAuth(`/admin/channels/${channelId}/keys/${keyIndex}`, { method: 'DELETE' });
-
-    alert(`已删除 Key #${keyIndex + 1} (${maskedApiKey})`);
-
-    // 如果没有剩余Key，询问是否删除渠道
-    if (delResult && delResult.remaining_keys === 0) {
-      const delChannel = confirm('该渠道已无可用Key，是否删除整个渠道？');
-      if (delChannel) {
-        const chResp = await fetchAPIWithAuth(`/admin/channels/${channelId}`, { method: 'DELETE' });
-        if (!chResp.success) throw new Error(chResp.error || '删除渠道失败');
-        alert('渠道已删除');
-      }
-    }
-
-    // 刷新日志列表
-    load();
-  } catch (e) {
-    console.error('删除Key失败', e);
-    alert(e.message || '删除Key失败');
-  }
-}
 
 // ============================================================================
 // Debug Log Modal

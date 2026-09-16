@@ -2601,6 +2601,75 @@ body {
   min-height: min(680px, calc(100vh - 32px));
 }
 
+/* 探活模态（model-test-modal.js 注入，logs/models 页共用） */
+.test-modal-content {
+  max-width: 700px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.test-progress {
+  display: none;
+  text-align: center;
+  padding: var(--space-4);
+  background: var(--neutral-50);
+  border-radius: 8px;
+  margin: var(--space-4) 0;
+}
+
+.test-progress.show {
+  display: block;
+}
+
+.test-progress p {
+  margin-top: var(--space-2);
+  color: var(--neutral-600);
+}
+
+.test-result {
+  display: none;
+  padding: var(--space-4);
+  border-radius: 8px;
+  margin: var(--space-4) 0;
+}
+
+.test-result.show {
+  display: block;
+}
+
+.test-result.success {
+  background: var(--success-50);
+  border: 1px solid var(--success-200);
+}
+
+.test-result.error {
+  background: var(--error-50);
+  border: 1px solid var(--error-200);
+}
+
+.test-details {
+  margin-top: var(--space-3);
+  font-size: 0.9em;
+  color: var(--neutral-700);
+}
+
+.test-details h4 {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: 0.95em;
+  font-weight: 600;
+}
+
+.logs-stream-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.logs-stream-toggle .form-label {
+  margin: 0;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -3511,42 +3580,6 @@ body {
   pointer-events: none;
 }
 
-.model-test-table {
-  width: 100%;
-  table-layout: fixed;
-  font-size: 13px;
-  min-width: 900px;
-}
-
-.model-test-table .channel-link {
-  padding: 0;
-  border: none;
-  background: transparent;
-  font: inherit;
-  cursor: pointer;
-  display: inline;
-}
-
-.model-test-table .model-test-row--muted {
-  background: rgba(148, 163, 184, 0.14);
-  color: var(--color-text-secondary);
-}
-
-.model-test-table .model-test-row--muted .channel-link,
-.model-test-table .model-test-row--muted .channel-link:hover,
-.model-test-table .model-test-row--muted .ch-priority-input {
-  color: var(--color-text-secondary);
-}
-
-.model-test-table .ch-priority-input {
-  background: transparent;
-}
-
-.model-test-empty-row td {
-  text-align: center;
-  color: var(--color-text-secondary);
-  padding: 40px;
-}
 
 .image-test-panel {
   padding: 24px;
@@ -5468,27 +5501,6 @@ html[data-theme="system"][data-resolved-theme="dark"] .has-upstream-detail:hover
   color: var(--primary-200);
 }
 
-html[data-theme="dark"] .model-test-table .channel-link,
-html[data-theme="system"][data-resolved-theme="dark"] .model-test-table .channel-link,
-html[data-theme="dark"] .logs-table .channel-link,
-html[data-theme="system"][data-resolved-theme="dark"] .logs-table .channel-link {
-  color: var(--primary-300);
-}
-
-html[data-theme="dark"] .model-test-table .channel-link:hover,
-html[data-theme="system"][data-resolved-theme="dark"] .model-test-table .channel-link:hover,
-html[data-theme="dark"] .logs-table .channel-link:hover,
-html[data-theme="system"][data-resolved-theme="dark"] .logs-table .channel-link:hover {
-  color: var(--primary-200);
-}
-
-html[data-theme="dark"] .model-test-table .model-test-row--muted .channel-link,
-html[data-theme="system"][data-resolved-theme="dark"] .model-test-table .model-test-row--muted .channel-link,
-html[data-theme="dark"] .model-test-table .model-test-row--muted .channel-link:hover,
-html[data-theme="system"][data-resolved-theme="dark"] .model-test-table .model-test-row--muted .channel-link:hover {
-  color: var(--color-text-secondary);
-}
-
 /* ===== 日志和统计页面样式 ===== */
 .status-error {
   color: var(--error-400);
@@ -5507,15 +5519,6 @@ html[data-theme="system"][data-resolved-theme="dark"] .model-test-table .model-t
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
   border: 1px solid var(--neutral-200);
-}
-
-.channel-link {
-  color: var(--primary-600);
-  text-decoration: none;
-}
-
-.channel-link:hover {
-  text-decoration: underline;
 }
 
 .model-tag {

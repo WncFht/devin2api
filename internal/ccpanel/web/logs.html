@@ -28,6 +28,7 @@
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/markdown-renderer.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/merged-response-client.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/model-test-modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/logs.js?v=__VERSION__"></script>
   <script src="/web/assets/js/marked.min.js?v=__VERSION__"></script>
   <script src="/web/assets/js/purify.min.js?v=__VERSION__"></script>
@@ -57,8 +58,7 @@
                     <th class="logs-col-time"><button class="logs-col-toggle-btn" type="button" data-action="toggle-col-menu" data-i18n-title="logs.colSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg></button><span data-i18n="logs.colTime">时间</span></th>
                     <th class="logs-col-ip" data-i18n="logs.colIP">IP</th>
                     <th class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
-                    <th class="logs-col-api-key" data-i18n="logs.colApiKey">渠道Key</th>
-                    <th class="logs-col-channel" data-i18n="logs.colChannel">渠道</th>
+                    <th class="logs-col-api-key" data-i18n="logs.colApiKey">Key 哈希</th>
                     <th class="logs-col-model" data-i18n="common.model">模型</th>
                     <th class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
                     <th class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
@@ -74,7 +74,7 @@
                 </thead>
                 <tbody id="tbody">
                   <tr>
-                    <td colspan="16" class="loading-state">
+                    <td colspan="15" class="loading-state">
                       <div class="loading-spinner loading-spinner--block"></div>
                       <span data-i18n="logs.loading">正在加载日志...</span>
                     </td>
@@ -137,61 +137,6 @@
         </section>
       </div>
     </main>
-  </div>
-
-  <!-- 测试 API Key 模态框 -->
-  <div id="testKeyModal" class="modal">
-    <div class="modal-content test-modal-content">
-      <div class="modal-header">
-        <h2 class="modal-title"><span data-i18n="logs.testKeyTitle">测试 API Key</span> - <span id="testKeyChannelName"></span></h2>
-        <button type="button" class="close-btn" data-action="close-test-key-modal">&times;</button>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" data-i18n="logs.apiKeyLabel">API Key</label>
-        <code id="testKeyDisplay" class="logs-test-key-display"></code>
-        <small id="testKeyIndexInfo" class="logs-test-key-index"></small>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="testKeyModel" data-i18n="logs.testModel">测试模型</label>
-        <select id="testKeyModel" class="form-input">
-          <option value="" data-i18n="common.loading">加载中...</option>
-        </select>
-        <small class="logs-test-key-hint">
-          <span data-i18n="logs.originalModel">日志中的模型:</span> <code id="testKeyOriginalModel" class="logs-test-key-original"></code>
-        </small>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="testKeyContent" data-i18n="logs.testContent">测试内容</label>
-        <input type="text" id="testKeyContent" class="form-input" data-i18n-placeholder="logs.testContentPlaceholder" placeholder="输入测试消息内容">
-      </div>
-
-      <div class="form-group">
-        <label class="logs-stream-toggle">
-          <input type="checkbox" id="testKeyStream" checked>
-          <span class="form-label" data-i18n="logs.enableStream">启用流式响应</span>
-        </label>
-      </div>
-
-      <!-- 测试进度 -->
-      <div id="testKeyProgress" class="test-progress">
-        <div class="loading-spinner"></div>
-        <p data-i18n="logs.testingKey">正在测试 API Key...</p>
-      </div>
-
-      <!-- 测试结果 -->
-      <div id="testKeyResult" class="test-result">
-        <div id="testKeyResultContent"></div>
-        <div id="testKeyResultDetails" class="test-details"></div>
-      </div>
-
-      <div class="form-actions">
-        <button type="button" class="btn btn-secondary" data-action="close-test-key-modal" data-i18n="common.close">关闭</button>
-        <button type="button" id="runKeyTestBtn" class="btn btn-primary" data-action="run-key-test" data-i18n="logs.startTest">开始测试</button>
-      </div>
-    </div>
   </div>
 
   <!-- 空状态模板 -->

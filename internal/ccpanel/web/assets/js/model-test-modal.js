@@ -40,7 +40,7 @@
         <select id="${IDS.model}" class="form-input">
           <option value="" data-i18n="common.loading">加载中...</option>
         </select>
-        <small id="${IDS.hint}" class="logs-test-key-hint"></small>
+        <small id="${IDS.hint}" style="display: block; margin-top: 4px; font-size: 12px; color: var(--neutral-500);"></small>
       </div>
 
       <div class="form-group">

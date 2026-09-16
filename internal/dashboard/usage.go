@@ -119,3 +119,13 @@ func (h *Handler) modelCatalogMap(ctx context.Context) map[string]modelCatalogEn
 	}
 	return out
 }
+
+// CatalogModels 返回上游模型目录缓存的原始行（uid/label/价格/能力标记等），
+// 供移植面板把目录信息并入模型注册表页。缓存不可用时返回 nil。
+func (h *Handler) CatalogModels(ctx context.Context) []map[string]any {
+	models, err := h.cachedModels(ctx)
+	if err != nil {
+		return nil
+	}
+	return models
+}

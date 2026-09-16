@@ -17,6 +17,7 @@
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/model-test-modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/models.js?v=__VERSION__"></script>
 </head>
 <body>
@@ -47,18 +48,60 @@
             <input id="models-filter" type="search" class="form-input" style="max-width: 240px; margin-left: auto;"
               data-i18n-placeholder="models.filterPlaceholder" placeholder="筛选模型名" spellcheck="false">
           </div>
+          <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-3);">
+            <select id="f-provider" class="form-input" style="width: auto; min-width: 120px;">
+              <option value="" data-i18n="models.filter.allProviders">全部供应商</option>
+            </select>
+            <select id="f-api" class="form-input" style="width: auto; min-width: 110px;">
+              <option value="" data-i18n="models.filter.allApis">全部 API</option>
+            </select>
+            <select id="f-tier" class="form-input" style="width: auto; min-width: 100px;">
+              <option value="" data-i18n="models.filter.allTiers">全部档位</option>
+              <option value="free">free</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+            <select id="f-pricing" class="form-input" style="width: auto; min-width: 110px;">
+              <option value="" data-i18n="models.filter.allPricings">全部定价</option>
+            </select>
+            <select id="f-sort" class="form-input" style="width: auto; min-width: 150px; margin-left: auto;" data-i18n-aria-label="models.sort.label" aria-label="排序">
+              <option value="default" data-i18n="models.sort.default">默认排序</option>
+              <option value="mult_asc" data-i18n="models.sort.multAsc">倍率 低→高</option>
+              <option value="mult_desc" data-i18n="models.sort.multDesc">倍率 高→低</option>
+              <option value="in_asc" data-i18n="models.sort.priceInAsc">输入价 低→高</option>
+              <option value="in_desc" data-i18n="models.sort.priceInDesc">输入价 高→低</option>
+              <option value="out_asc" data-i18n="models.sort.priceOutAsc">输出价 低→高</option>
+              <option value="out_desc" data-i18n="models.sort.priceOutDesc">输出价 高→低</option>
+              <option value="name" data-i18n="models.sort.name">名称 A→Z</option>
+            </select>
+          </div>
+          <div id="models-tag-chips" class="time-range-selector" style="margin-top: var(--space-2); flex-wrap: wrap;">
+            <button type="button" class="time-range-btn" data-tag="free" data-i18n="models.tag.free">免费</button>
+            <button type="button" class="time-range-btn" data-tag="promo" data-i18n="models.tag.promo">促销</button>
+            <button type="button" class="time-range-btn" data-tag="img" data-i18n="models.tag.img">图像</button>
+            <button type="button" class="time-range-btn" data-tag="beta">BETA</button>
+            <button type="button" class="time-range-btn" data-tag="new">NEW</button>
+            <button type="button" class="time-range-btn" data-tag="fast">FAST</button>
+            <button type="button" class="time-range-btn" data-tag="premium">Premium</button>
+            <button type="button" class="time-range-btn" data-tag="rec" data-i18n="models.tag.rec">推荐</button>
+            <button type="button" class="time-range-btn" data-tag="empty_mult" data-i18n="models.tag.emptyMult">无倍率</button>
+            <button type="button" class="time-range-btn" data-tag="disabled" data-i18n="models.tag.catalogDisabled">目录禁用</button>
+          </div>
         </section>
 
-        <section class="glass-card mb-6">
+        <section class="glass-card mb-2">
           <div class="table-container mobile-card-table-container">
             <table class="modern-table mobile-card-table">
-              <colgroup>
-                <col style="width: 25%"><col style="width: 14%"><col style="width: 9%">
-                <col style="width: 19%"><col style="width: 20%"><col style="width: 13%">
-              </colgroup>
               <thead>
                 <tr>
                   <th data-i18n="models.col.model">模型</th>
+                  <th data-i18n="models.col.provider">供应商</th>
+                  <th data-i18n="models.col.tags">特性</th>
+                  <th data-i18n="models.col.multiplier">倍率</th>
+                  <th data-i18n="models.col.priceIn">输入价</th>
+                  <th data-i18n="models.col.priceCached">缓存价</th>
+                  <th data-i18n="models.col.priceOut">输出价</th>
                   <th data-i18n="models.col.source">来源</th>
                   <th data-i18n="models.col.enabled">启用</th>
                   <th data-i18n="models.col.redirect">重定向到</th>
@@ -74,6 +117,63 @@
               </svg>
               <h3 data-i18n="models.emptyTitle" style="margin-bottom: var(--space-1);">暂无模型</h3>
               <p data-i18n="models.emptyDesc" style="font-size: var(--text-sm);">没有匹配筛选条件的模型</p>
+            </div>
+          </div>
+          <p class="page-subtitle" style="padding: 0 var(--space-4) var(--space-3); font-size: var(--text-xs);" data-i18n="models.priceNote">倍率 = 上游 credit 消耗倍率；价格单位 $ / 1M tokens</p>
+        </section>
+
+        <section class="mb-2">
+          <div class="glass-card logs-pagination-card">
+            <div class="flex justify-center items-center">
+              <div class="pagination-controls logs-pagination-controls">
+                <button id="models_first" class="btn btn-secondary btn-sm" type="button" data-action="first-page">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 17l-5-5 5-5"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18V6"/>
+                  </svg>
+                  <span data-i18n="common.firstPage">首页</span>
+                </button>
+                <button id="models_prev" class="btn btn-secondary btn-sm" type="button" data-action="prev-page">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 18l-6-6 6-6"/>
+                  </svg>
+                  <span data-i18n="common.prevPage">上一页</span>
+                </button>
+                <span class="pagination-info logs-pagination-info">
+                  <span data-i18n="logs.pagePrefix">第</span> <span id="models_current_page">1</span> <span data-i18n="logs.pageMid">页，共</span> <span id="models_total_pages">1</span> <span data-i18n="logs.pageSuffix">页</span>
+                  <span class="logs-pagination-separator">|</span>
+                  <span data-i18n="logs.jumpTo">跳转到</span>
+                  <input
+                    type="number"
+                    id="models_jump_page"
+                    class="logs-jump-input"
+                    min="1"
+                    max="1"
+                    data-i18n-placeholder="logs.pagePlaceholder"
+                    placeholder="页码"
+                  />
+                  <span data-i18n="logs.pageUnit">页</span>
+                  <span class="logs-pagination-separator">|</span>
+                  <select id="models_page_size" class="form-input" style="width: auto; padding: 2px 6px; font-size: var(--text-xs);">
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </span>
+                <button id="models_next" class="btn btn-secondary btn-sm" type="button" data-action="next-page">
+                  <span data-i18n="common.nextPage">下一页</span>
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 6l6 6-6 6"/>
+                  </svg>
+                </button>
+                <button id="models_last" class="btn btn-secondary btn-sm" type="button" data-action="last-page">
+                  <span data-i18n="common.lastPage">尾页</span>
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 7l5 5-5 5"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 6v12"/>
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
         </section>
