@@ -209,7 +209,7 @@
     const c = r.catalog;
     if (!c) return '—';
     if (c.cost_tier === 'free' && (!c.credit_multiplier || c.credit_multiplier === 0)) {
-      return `<span class="model-badge" style="background:rgba(16,185,129,0.15);color:#34d399;">0 (FREE)</span>`;
+      return badge('0 (FREE)', '#34d399');
     }
     if (!c.multiplier_known || c.credit_multiplier === 0) {
       return `<span style="color: var(--color-text-secondary);" title="${escapeHtml(t('models.mult.unknownTip'))}">— / ≈1.0</span>`;
@@ -227,7 +227,7 @@
 
   function badge(text, color, title) {
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
-    return `<span class="model-badge" style="background:${color}18;color:${color};border:1px solid ${color}44;margin:0 4px 2px 0;"${titleAttr}>${escapeHtml(text)}</span>`;
+    return `<span class="model-badge" style="--badge-color:${color};"${titleAttr}>${escapeHtml(text)}</span>`;
   }
 
   function catalogBadges(r) {

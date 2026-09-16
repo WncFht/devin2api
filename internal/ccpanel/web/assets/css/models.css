@@ -1,0 +1,50 @@
+/* 模型注册表页专用样式：特性标签筛选与行内徽标统一走无边框软胶囊 */
+
+.tag-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-chip {
+  padding: 4px 13px;
+  border: none;
+  border-radius: 999px;
+  background: var(--neutral-100);
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tag-chip:hover {
+  background: var(--neutral-200);
+  color: var(--neutral-900);
+}
+
+.tag-chip.active {
+  background: rgba(79, 70, 229, 0.14);
+  color: #4f46e5;
+  font-weight: 500;
+}
+
+/* 行内特性徽标：颜色由 models.js 经 --badge-color 注入，
+   底色用 color-mix 取 14% 同色系透明，不加边框 */
+.model-badge {
+  --badge-color: var(--neutral-500);
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  background: color-mix(in srgb, var(--badge-color) 14%, transparent);
+  color: var(--badge-color);
+  white-space: nowrap;
+}
