@@ -223,8 +223,7 @@ func (h *Handler) apiStats(w http.ResponseWriter, r *http.Request) {
 	if h.gateStats != nil {
 		payload["gate"] = h.gateStats()
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // apiConfigCurrent 返回脱敏后的生效配置视图（文件键名与 config.yaml 一致，
@@ -237,8 +236,7 @@ func (h *Handler) apiConfigCurrent(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.configOps.Current())
+	writeJSON(w, http.StatusOK, h.configOps.Current())
 }
 
 // apiConfigReload 重读配置文件并热应用；校验失败 422 且旧配置继续服役。
@@ -254,13 +252,10 @@ func (h *Handler) apiConfigReload(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := h.configOps.Reload()
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(report)
+	writeJSON(w, http.StatusOK, report)
 }
 
 // apiIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明。
@@ -269,8 +264,7 @@ func (h *Handler) apiIndex(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "devin-2api",
 		"version": h.version,
 		"auth":    "dashboard.password 非空时可用 cookie 会话或 Authorization: Bearer <密码>",
@@ -423,23 +417,19 @@ const (
 )
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	// 所有分支都回 JSON——错误路径此前漏设 Content-Type。
-	w.Header().Set("Content-Type", "application/json")
 	password, passwordHash := h.passwordSnapshot()
 	if password == "" {
-		_, _ = w.Write([]byte(`{"ok":true,"open":true}`))
+		writeJSON(w, http.StatusOK, json.RawMessage(`{"ok":true,"open":true}`))
 		return
 	}
 	ip := remoteIP(r)
 	provided := sha256.Sum256([]byte(r.FormValue("password")))
 	if subtle.ConstantTimeCompare(provided[:], passwordHash[:]) != 1 {
 		if h.noteLoginFailure(ip) {
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
+			writeError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")
 			return
 		}
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"密码错误"}`))
+		writeError(w, http.StatusUnauthorized, "密码错误")
 		return
 	}
 	// 密码正确时即使 IP 在锁定期内也放行并清零——锁定只为抬高爆破
@@ -460,8 +450,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := randid.Hex(32)
 	if err != nil {
 		h.sessionMu.Unlock()
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"会话创建失败"}`))
+		writeError(w, http.StatusInternalServerError, "会话创建失败")
 		return
 	}
 	h.sessionTokens[sessionID] = now.Add(24 * time.Hour)
@@ -476,7 +465,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// 同站导航不受影响。
 		SameSite: http.SameSiteLaxMode,
 	})
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	writeJSON(w, http.StatusOK, json.RawMessage(`{"ok":true}`))
 }
 
 // sweepLoginFailures 清掉锁定已过期且闲置超过一个锁定周期的失败条目。
@@ -609,13 +598,10 @@ func (h *Handler) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	if authed {
 		return true
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if locked {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"登录尝试过多，请稍后再试"}`))
+		writeError(w, http.StatusTooManyRequests, "登录尝试过多，请稍后再试")
 		return false
 	}
-	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = w.Write([]byte(`{"error":"未授权"}`))
+	writeError(w, http.StatusUnauthorized, "未授权")
 	return false
 }

@@ -176,3 +176,17 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// writeJSON 以 application/json 写回 payload；status 非 200 时显式 WriteHeader。
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// writeError 是 {"error": msg} 形态的 writeJSON。
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}

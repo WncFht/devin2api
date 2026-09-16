@@ -14,9 +14,8 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		_, _ = w.Write([]byte(`{"disabled":true}`))
+		writeJSON(w, http.StatusOK, json.RawMessage(`{"disabled":true}`))
 		return
 	}
 	snap := h.debugManager.UsageStats()
@@ -45,7 +44,7 @@ func (h *Handler) apiUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		models = append(models, row)
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"snapshot":      snap,
 		"models":        models,
 		"est_cost":      totalCost,

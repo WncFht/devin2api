@@ -38,8 +38,7 @@ func (h *Handler) apiStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
 	defer cancel()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.StatusReport(ctx))
+	writeJSON(w, http.StatusOK, h.StatusReport(ctx))
 }
 
 // StatusReport 六路并行聚合上游状态：账户/plan/容量/IDE 状态/模型状态/
@@ -353,14 +352,11 @@ func (h *Handler) apiModels(w http.ResponseWriter, r *http.Request) {
 
 	models, err := h.cachedModels(ctx)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 // cachedModels 返回 TTL 内的模型目录缓存；过期时经 singleflight 收敛为

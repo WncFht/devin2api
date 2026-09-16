@@ -222,8 +222,7 @@ func (h *Handler) apiQuota(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(h.QuotaReport())
+	writeJSON(w, http.StatusOK, h.QuotaReport())
 }
 
 // floatAny 把 fetchUserStatus 产出的宽松数值统一成 float64。

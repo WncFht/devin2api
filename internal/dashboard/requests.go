@@ -29,9 +29,8 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		_, _ = w.Write([]byte(`{"requests":[],"disabled":true}`))
+		writeJSON(w, http.StatusOK, json.RawMessage(`{"requests":[],"disabled":true}`))
 		return
 	}
 	result := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query()))
@@ -65,7 +64,7 @@ func (h *Handler) apiRequests(w http.ResponseWriter, r *http.Request) {
 	if h.metrics != nil {
 		payload["rejects"] = h.metrics.Rejects()
 	}
-	_ = json.NewEncoder(w).Encode(payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // matrixEntry 是健康矩阵用的条目投影：只带分桶（started_at）与归因/悬停
@@ -94,9 +93,8 @@ func (h *Handler) apiRequestMatrix(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		_, _ = w.Write([]byte(`{"entries":[],"disabled":true}`))
+		writeJSON(w, http.StatusOK, json.RawMessage(`{"entries":[],"disabled":true}`))
 		return
 	}
 	filter := parseRequestFilter(r.URL.Query())
@@ -125,7 +123,7 @@ func (h *Handler) apiRequestMatrix(w http.ResponseWriter, r *http.Request) {
 			truncated = tailStart.After(filter.Since)
 		}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"entries":   entries,
 		"total":     len(entries),
 		"truncated": truncated,
@@ -167,8 +165,7 @@ func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	result := h.debugManager.ListRequests(requestsFetchCap, parseRequestFilter(r.URL.Query()))
@@ -183,8 +180,7 @@ func (h *Handler) apiExportRequests(w http.ResponseWriter, r *http.Request) {
 		writeRequestsCSV(w, result.Entries)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result.Entries)
+	writeJSON(w, http.StatusOK, result.Entries)
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
@@ -227,21 +223,18 @@ func (h *Handler) apiMergedResponse(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	data, _, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), debuglog.StageHTTPResponse)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"response stream file not found"}`))
+		writeError(w, http.StatusNotFound, "response stream file not found")
 		return
 	}
 	// truncated 透传读取截断位：>4MB 的 06 只合并前 4MB，没有它
 	// 调用方会把残缺流当成完整响应。
-	_ = json.NewEncoder(w).Encode(struct {
+	writeJSON(w, http.StatusOK, struct {
 		mergedStream
 		Truncated bool `json:"truncated"`
 	}{mergeStreamEvents(h.maskToken(data)), truncated})
@@ -253,12 +246,11 @@ func (h *Handler) apiActiveRequests(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	active := []debuglog.ActiveRequest{}
 	if h.debugManager != nil {
 		active = h.debugManager.ActiveRequests()
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"active": active})
+	writeJSON(w, http.StatusOK, map[string]any{"active": active})
 }
 
 // apiRequestDetail 返回单个请求目录的 meta.json 与文件清单。
@@ -266,22 +258,19 @@ func (h *Handler) apiRequestDetail(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	detail, err := h.debugManager.Detail(chi.URLParam(r, "dir"))
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"request log not found or already cleaned"}`))
+		writeError(w, http.StatusNotFound, "request log not found or already cleaned")
 		return
 	}
 	// meta.json 含 client.user_agent 等自由文本，写路径键名脱敏
 	// 覆盖不到值内 token，读路径按字面值再兜底一遍。
 	detail.Meta = json.RawMessage(h.maskToken(detail.Meta))
-	_ = json.NewEncoder(w).Encode(detail)
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // apiRequestFile 返回请求目录内单个文件的内容；JSON/JSONL 原文回传，
@@ -290,16 +279,13 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	data, total, truncated, err := h.debugManager.ReadFile(chi.URLParam(r, "dir"), chi.URLParam(r, "*"))
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"file not found"}`))
+		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 	name := chi.URLParam(r, "*")
@@ -316,7 +302,7 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 	// 二进制标 binary 由前端给下载/预览入口——强转 string 再经
 	// json.Encoder 会把非法 UTF-8 烧成 U+FFFD，附件内容全毁。
 	if !utf8.Valid(data) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"name":      name,
 			"size":      total,
 			"truncated": truncated,
@@ -324,7 +310,7 @@ func (h *Handler) apiRequestFile(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"name":      name,
 		"size":      total,
 		"truncated": truncated,
@@ -338,13 +324,11 @@ func (h *Handler) apiAbortRequest(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil || !h.debugManager.Abort(chi.URLParam(r, "dir")) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"no active request for dir"}`))
+		writeError(w, http.StatusNotFound, "no active request for dir")
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"aborted": true})
+	writeJSON(w, http.StatusOK, map[string]any{"aborted": true})
 }
 
 // apiProcessLog 返回进程 stderr 日志尾部（slog 行），支持 ?offset= 增量拉取。
@@ -352,20 +336,17 @@ func (h *Handler) apiProcessLog(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
 	data, next, err := h.debugManager.ReadProcessLog(offset)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"process log unavailable"}`))
+		writeError(w, http.StatusNotFound, "process log unavailable")
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"text":        string(h.maskToken(data)),
 		"next_offset": next,
 	})
@@ -376,20 +357,17 @@ func (h *Handler) apiDebugToggle(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAuth(w, r) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if h.debugManager == nil {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"debug log disabled at startup"}`))
+		writeError(w, http.StatusNotFound, "debug log disabled at startup")
 		return
 	}
 	var body struct {
 		Enabled *bool `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"body must be {\"enabled\":bool}"}`))
+		writeError(w, http.StatusBadRequest, `body must be {"enabled":bool}`)
 		return
 	}
 	h.debugManager.SetEnabled(*body.Enabled)
-	_ = json.NewEncoder(w).Encode(map[string]any{"enabled": h.debugManager.Enabled()})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": h.debugManager.Enabled()})
 }
