@@ -153,6 +153,14 @@ func (application *App) SetAPIKey(apiKey string) {
 	application.apiKeyMu.Unlock()
 }
 
+// APIKey 返回当前生效的访问密钥（配置热重载后为新值）；移植面板的
+// 探活与主密钥展示用它读取运行时值。
+func (application *App) APIKey() string {
+	application.apiKeyMu.RLock()
+	defer application.apiKeyMu.RUnlock()
+	return application.apiKey
+}
+
 // SetDashboard 注入管理面板处理器。
 func (application *App) SetDashboard(d DashboardRegistrar) {
 	application.dashboard = d

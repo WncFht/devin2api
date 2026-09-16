@@ -1,9 +1,15 @@
 package ccpanel
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/modelreg"
@@ -126,4 +132,99 @@ func (h *Handler) adminDeleteModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondOK(w, map[string]any{"deleted": true})
+}
+
+// modelTestTimeout 是单次探活的上限：探针走真实上游往返，拉长到分钟级
+// 才有意义地区分「上游慢」与「上游挂」；同时不能无限占住面板请求。
+const modelTestTimeout = 60 * time.Second
+
+// adminModelTest 实现 POST /admin/model-test {model}：经注入的进程内根路由
+// 发一次真实 /v1/messages 探针（max_tokens=1，非流式），过完整鉴权/并发
+// 闸门/注册表准入/重定向/别名/上游管线——与 ccLoad 渠道测试同语义，返回的
+// 是真实往返结果而非配置静态检查。探针在 index.jsonl 里以
+// client_request_id=panel-probe 留痕，request_id 回传供定位调试目录。
+func (h *Handler) adminModelTest(w http.ResponseWriter, r *http.Request) {
+	if h.probeHandler == nil {
+		respondError(w, http.StatusServiceUnavailable, "model test unavailable")
+		return
+	}
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		respondError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	key := ""
+	if h.masterKeyFunc != nil {
+		key = strings.TrimSpace(h.masterKeyFunc())
+	}
+	// 主密钥为空但令牌仓非空时探针没有可用明文凭据（仓里只存哈希）；
+	// 全空即开放模式，占位凭据也能过 authenticate。
+	if key == "" && h.tokens != nil && !h.tokens.Empty() {
+		respondError(w, http.StatusBadRequest, "auth.api_key is empty and auth tokens exist: configure a master key to run probes")
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":      model,
+		"max_tokens": 1,
+		"stream":     false,
+		"messages":   []map[string]any{{"role": "user", "content": "ping"}},
+	})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(r.Context(), modelTestTimeout)
+	defer cancel()
+	probeReq := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)).WithContext(probeCtx)
+	if key == "" {
+		key = "panel-probe"
+	}
+	probeReq.Header.Set("Authorization", "Bearer "+key)
+	probeReq.Header.Set("Content-Type", "application/json")
+	probeReq.Header.Set("X-Client-Request-Id", "panel-probe")
+	rec := httptest.NewRecorder()
+	started := time.Now()
+	h.probeHandler.ServeHTTP(rec, probeReq)
+	res := rec.Result()
+	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	out := map[string]any{
+		"ok":          res.StatusCode >= 200 && res.StatusCode < 300,
+		"status_code": res.StatusCode,
+		"latency_ms":  time.Since(started).Milliseconds(),
+		"request_id":  res.Header.Get("X-Request-Id"),
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		out["error"] = probeErrorSummary(respBody)
+	}
+	respondOK(w, out)
+}
+
+// probeErrorSummary 从探针错误响应里摘一句可读原因：优先 error.message
+// （Anthropic 形态错误体），摘不到就截原文前 200 字节。
+func probeErrorSummary(body []byte) string {
+	var shaped struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+		Stage string `json:"stage"`
+	}
+	if err := json.Unmarshal(body, &shaped); err == nil && shaped.Error.Message != "" {
+		if shaped.Stage != "" {
+			return shaped.Stage + ": " + shaped.Error.Message
+		}
+		return shaped.Error.Message
+	}
+	s := strings.TrimSpace(string(body))
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }

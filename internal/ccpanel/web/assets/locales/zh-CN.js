@@ -2410,5 +2410,13 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.src.registry': '注册表',
   'models.src.traffic': '流量',
   'models.emptyTitle': '暂无模型',
-  'models.emptyDesc': '没有匹配筛选条件的模型'
+  'models.emptyDesc': '没有匹配筛选条件的模型',
+  'models.action.test': '探活',
+  'models.action.delete': '删除',
+  'models.aliasPlaceholder': '经别名 → {target}',
+  'models.msg.testing': '探活中…',
+  'models.msg.testOk': '探活成功 {model} · {latency}ms',
+  'models.msg.testFail': '探活失败 {model} · HTTP {status} {error}',
+  'models.msg.deleted': '已删除',
+  'models.confirmDelete': '确认删除 {model} 的注册项？',
 };

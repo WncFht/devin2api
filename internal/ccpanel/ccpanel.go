@@ -47,6 +47,12 @@ type Handler struct {
 	// settings 是运行时设置键仓（panel-settings.json）；nil 时 /admin/settings
 	// 返回空表。
 	settings *PanelSettings
+	// probeHandler 是应用根路由（含 /v1 管线），模型探活经它发进程内
+	// 真实请求；nil 时 /admin/model-test 返回 503。
+	probeHandler http.Handler
+	// masterKeyFunc 返回当前生效的 auth.api_key（热重载后为新值），
+	// 探活鉴权与令牌页主密钥卡共用。
+	masterKeyFunc func() string
 
 	versionMu sync.RWMutex
 	version   string
@@ -107,6 +113,17 @@ func (h *Handler) SetSettingsStore(s *PanelSettings) {
 	h.settings = s
 }
 
+// SetProbeHandler 注入应用根路由；模型探活在进程内 ServeHTTP，走与外部
+// 请求完全相同的鉴权/准入/重定向/上游路径。
+func (h *Handler) SetProbeHandler(handler http.Handler) {
+	h.probeHandler = handler
+}
+
+// SetMasterKeyFunc 注入 auth.api_key 读取函数。
+func (h *Handler) SetMasterKeyFunc(fn func() string) {
+	h.masterKeyFunc = fn
+}
+
 // Register 把移植面板路由挂到 mux。/web、/login、/logout、/public 为
 // 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
 func (h *Handler) Register(mux interface {
@@ -160,6 +177,7 @@ func (h *Handler) Register(mux interface {
 	mux.Delete("/admin/auth-tokens/{id}", h.withAuth(h.adminDeleteAuthToken))
 	mux.Get("/admin/models", h.withAuth(h.dashboardModels))
 	mux.Get("/admin/model-registry", h.withAuth(h.adminModelRegistry))
+	mux.Post("/admin/model-test", h.withAuth(h.adminModelTest))
 	mux.Put("/admin/model-registry", h.withAuth(h.adminPutModel))
 	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))

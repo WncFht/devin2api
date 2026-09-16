@@ -280,6 +280,10 @@ func main() {
 	ccPanel.SetSettingsStore(settingsStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
+	// 探活走进程内根路由：与外部请求共用鉴权/准入/重定向/上游管线；
+	// 主密钥读运行时值（热重载后跟随新 key）。
+	ccPanel.SetProbeHandler(server.Handler)
+	ccPanel.SetMasterKeyFunc(application.APIKey)
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -1103,6 +1103,21 @@
       right: 4px;
     }
 
+    /* 重定向落点：与请求标签同形的第二枚 chip，箭头分隔，warning 色与 ↪ 角标呼应 */
+    .model-redirect-arrow {
+      margin: 0 1px;
+      color: var(--neutral-400);
+      font-size: 0.85em;
+      vertical-align: middle;
+    }
+
+    .model-tag.model-redirect-target {
+      background: rgba(245, 158, 11, 0.12);
+      color: var(--warning-500);
+      font-size: 0.85em;
+      padding: 1px 7px;
+    }
+
     /* 重定向角标 - 显示在右上角 */
     .redirect-badge {
       background: var(--warning-500);

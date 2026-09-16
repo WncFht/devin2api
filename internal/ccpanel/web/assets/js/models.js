@@ -70,9 +70,15 @@
     });
   }
 
+  // 重定向的判定看 resolved !== model：注册表 redirect_model 与 config
+  // 别名都会让最终解析名偏离原值，「已重定向」筛选要两种都盖住。
+  function isRedirected(r) {
+    return !!r.resolved && r.resolved !== r.model;
+  }
+
   function renderSummary() {
     const enabled = rows.filter((r) => r.enabled).length;
-    const redirected = rows.filter((r) => r.redirect_model).length;
+    const redirected = rows.filter(isRedirected).length;
     document.getElementById('models-summary').textContent = t('models.summary', {
       total: rows.length,
       enabled,
@@ -85,7 +91,7 @@
     return rows.filter((r) => {
       if (filterText && !r.model.toLowerCase().includes(filterText)) return false;
       if (filterMode === 'disabled') return !r.enabled;
-      if (filterMode === 'redirected') return !!r.redirect_model;
+      if (filterMode === 'redirected') return isRedirected(r);
       if (filterMode === 'override') return !!r.has_override;
       return true;
     });
@@ -160,7 +166,9 @@
       input.setAttribute('list', 'models-target-list');
       input.dataset.model = r.model;
       input.value = r.redirect_model || '';
-      input.placeholder = '—';
+      // 无注册表重定向但 resolved 已偏离（config 别名在生效）时，把落点
+      // 写进占位符——空输入框读不出「它其实被别名转走了」。
+      input.placeholder = isRedirected(r) ? t('models.aliasPlaceholder', { target: r.resolved }) : '—';
       input.spellcheck = false;
       input.style.minWidth = '160px';
       redirectTd.appendChild(input);
@@ -178,11 +186,24 @@
 
       const actionsTd = h('td');
       actionsTd.dataset.mobileLabel = labels.actions;
+      actionsTd.style.whiteSpace = 'nowrap';
+      const test = h('button', 'btn btn-secondary', t('models.action.test'));
+      test.type = 'button';
+      test.dataset.action = 'test';
+      test.dataset.model = r.model;
+      test.style.padding = '4px 10px';
+      test.title = t('models.action.test');
+      actionsTd.appendChild(test);
       if (r.has_override) {
-        const reset = h('button', 'btn btn-secondary', t('models.action.reset'));
+        // 纯注册表行删覆盖即整行消失，标「删除」；目录/别名/流量行删覆盖
+        // 只是回到默认态，标「重置」——同一个 DELETE，语义按后果分。
+        const registryOnly = (r.sources || []).every((s) => s === 'registry');
+        const reset = h('button', 'btn btn-secondary', registryOnly ? t('models.action.delete') : t('models.action.reset'));
         reset.type = 'button';
-        reset.dataset.action = 'reset';
+        reset.dataset.action = registryOnly ? 'delete' : 'reset';
         reset.dataset.model = r.model;
+        reset.style.padding = '4px 10px';
+        reset.style.marginLeft = '6px';
         actionsTd.appendChild(reset);
       }
 
@@ -209,6 +230,10 @@
       save(row.model, !row.enabled, row.redirect_model || '');
     } else if (btn.dataset.action === 'reset') {
       removeOverride(row.model);
+    } else if (btn.dataset.action === 'delete') {
+      if (window.confirm(t('models.confirmDelete', { model: row.model }))) removeOverride(row.model);
+    } else if (btn.dataset.action === 'test') {
+      testModel(row, btn);
     }
   }
 
@@ -258,6 +283,35 @@
       await loadModels();
     } catch (error) {
       window.showNotification(t('models.msg.saveFailed') + ': ' + error.message, 'error');
+    }
+  }
+
+  // 探活打一次真实 /v1/messages（max_tokens=1）：按钮短暂进 loading，
+  // 结果 toast 报状态码与耗时；request_id 在日志里按 client_request_id=
+  // panel-probe 可查。
+  async function testModel(row, btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = t('models.msg.testing');
+    try {
+      const res = await window.fetchDataWithAuth('/admin/model-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: row.model })
+      });
+      if (res && res.ok) {
+        window.showNotification(t('models.msg.testOk', { model: row.model, latency: res.latency_ms }), 'success');
+      } else {
+        window.showNotification(
+          t('models.msg.testFail', { model: row.model, status: (res && res.status_code) || '?', error: (res && res.error) || '' }),
+          'error'
+        );
+      }
+    } catch (error) {
+      window.showNotification(t('models.msg.testFail', { model: row.model, status: '-', error: error.message }), 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
     }
   }
 

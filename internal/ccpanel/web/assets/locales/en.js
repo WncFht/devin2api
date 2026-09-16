@@ -2410,5 +2410,13 @@ window.I18N_LOCALES['en'] = {
   'models.src.registry': 'registry',
   'models.src.traffic': 'traffic',
   'models.emptyTitle': 'No models',
-  'models.emptyDesc': 'No models match the current filters'
+  'models.emptyDesc': 'No models match the current filters',
+  'models.action.test': 'Test',
+  'models.action.delete': 'Delete',
+  'models.aliasPlaceholder': 'via alias → {target}',
+  'models.msg.testing': 'Testing…',
+  'models.msg.testOk': 'Test passed: {model} · {latency}ms',
+  'models.msg.testFail': 'Test failed: {model} · HTTP {status} {error}',
+  'models.msg.deleted': 'Deleted',
+  'models.confirmDelete': 'Delete the registry entry for {model}?'
 };
