@@ -670,6 +670,7 @@ window.I18N_LOCALES['en'] = {
   'models.emptyTitle': 'No models',
   'models.emptyDesc': 'No models match the current filters',
   'models.action.test': 'Test',
+  'models.action.chat': 'Chat',
   'models.action.delete': 'Delete',
   'models.aliasPlaceholder': 'via alias → {target}',
   'models.confirmDelete': 'Delete the registry entry for {model}?',
@@ -733,6 +734,23 @@ window.I18N_LOCALES['en'] = {
   'probe.requestFailed': 'Probe request failed',
   'probe.emptyResult': 'Empty response',
   'probe.unknownError': 'Unknown error',
+
+  // ---- Multi-turn chat test / Token Playground (chat-modal.js) ----
+  'chat.title': 'Chat Test',
+  'chat.playgroundTitle': 'Token Playground',
+  'chat.tokenPlaceholder': 'Paste token plaintext (sk-...)',
+  'chat.tokenHint': 'Token plaintext is only shown at creation — paste it again',
+  'chat.modelPlaceholder': 'Type or pick a model',
+  'chat.inputPlaceholder': 'Type a message — Enter to send, Shift+Enter for newline',
+  'chat.send': 'Send',
+  'chat.clear': 'Clear',
+  'chat.emptyHint': 'Send a message to start a multi-turn chat',
+  'chat.waiting': 'Waiting…',
+  'chat.failed': 'Request failed',
+  'chat.emptyResponse': '(empty response)',
+  'chat.missingToken': 'Paste an API token first',
+  'chat.missingModel': 'Enter a model name',
+  'tokens.action.test': 'Test',
 
   // ---- Logs page additions ----
   'logs.streamFlag': 'stream',

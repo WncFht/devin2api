@@ -155,8 +155,14 @@
       if (!container) return;
 
       container.addEventListener('click', (e) => {
-        const target = e.target.closest('.btn-copy-token, .btn-edit, .btn-delete');
+        const target = e.target.closest('.btn-copy-token, .btn-edit, .btn-delete, .btn-play');
         if (!target) return;
+
+        // 处理 Playground 按钮（粘贴令牌明文直连 /v1 试聊）
+        if (target.classList.contains('btn-play')) {
+          if (typeof window.openChatModal === 'function') window.openChatModal({ mode: 'token' });
+          return;
+        }
 
         // 处理复制令牌按钮
         if (target.classList.contains('btn-copy-token')) {
@@ -624,6 +630,7 @@
           <td class="tokens-col-actions" data-mobile-label="${t('tokens.table.actions')}">
             <div class="token-row-actions">
               <button class="btn-copy-token btn btn-secondary token-row-action-btn" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>
+              <button class="btn btn-secondary btn-play token-row-action-btn">${t('tokens.action.test')}</button>
               <button class="btn btn-secondary btn-edit token-row-action-btn">${t('common.edit')}</button>
               <button class="btn btn-danger btn-delete token-row-action-btn">${t('common.delete')}</button>
             </div>

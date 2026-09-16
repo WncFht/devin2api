@@ -203,6 +203,84 @@ func probeRequestSpec(clientProtocol, model, content string, stream bool) (path 
 	return path, body, err
 }
 
+// modelChatMessage 是多轮试聊请求里的一帧：role 只允许
+// user/assistant/system，其它取值在准入处 400 拒掉。
+type modelChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// modelChatRequest 是 POST /admin/model-chat 的请求体：messages 至少一条，
+// 其余字段语义与 modelTestRequest 相同。
+type modelChatRequest struct {
+	Model          string             `json:"model"`
+	ClientProtocol string             `json:"client_protocol"`
+	Messages       []modelChatMessage `json:"messages"`
+	Stream         bool               `json:"stream"`
+}
+
+// probeChatRequestSpec 把多轮消息投影到三个 /v1 入口的合法载荷：openai 的
+// messages 原样透传；anthropic 不允许 system 混在 messages 里，提为顶层
+// system 字段（多条以 \n\n 拼接）；codex 折成 responses 的 message item
+// 数组——assistant 回合的 content 用 output_text，其余用 input_text。
+func probeChatRequestSpec(clientProtocol, model string, msgs []modelChatMessage, stream bool) (path string, body []byte, err error) {
+	var payload map[string]any
+	switch clientProtocol {
+	case "openai":
+		path = "/v1/chat/completions"
+		payload = map[string]any{
+			"model":      model,
+			"stream":     stream,
+			"max_tokens": probeMaxTokens,
+			"messages":   msgs,
+		}
+	case "codex":
+		path = "/v1/responses"
+		input := make([]map[string]any, 0, len(msgs))
+		for _, m := range msgs {
+			contentType := "input_text"
+			if m.Role == "assistant" {
+				contentType = "output_text"
+			}
+			input = append(input, map[string]any{
+				"type": "message",
+				"role": m.Role,
+				"content": []map[string]any{
+					{"type": contentType, "text": m.Content},
+				},
+			})
+		}
+		payload = map[string]any{
+			"model":             model,
+			"stream":            stream,
+			"max_output_tokens": probeMaxTokens,
+			"input":             input,
+		}
+	default:
+		path = "/v1/messages"
+		var sysParts []string
+		chatMsgs := make([]modelChatMessage, 0, len(msgs))
+		for _, m := range msgs {
+			if m.Role == "system" {
+				sysParts = append(sysParts, m.Content)
+			} else {
+				chatMsgs = append(chatMsgs, m)
+			}
+		}
+		payload = map[string]any{
+			"model":      model,
+			"stream":     stream,
+			"max_tokens": probeMaxTokens,
+			"messages":   chatMsgs,
+		}
+		if len(sysParts) > 0 {
+			payload["system"] = strings.Join(sysParts, "\n\n")
+		}
+	}
+	body, err = json.Marshal(payload)
+	return path, body, err
+}
+
 // probeRecorder 在 httptest.ResponseRecorder 上记录首个字节写出的时刻——
 // 流式探活的首字延迟（first_byte_duration_ms）由此得来。
 type probeRecorder struct {
@@ -234,7 +312,7 @@ func (h *Handler) resolvedModel(name string) string {
 }
 
 // probeClientRequestID 是探活请求打在 index.jsonl 的 client_request_id
-// 留痕值；日志页凭它把探针行归入 manual_test（ccLoad 同语义）。
+// 留痕值：日志页凭它把探针行归入 manual_test（ccLoad 同语义）。
 const probeClientRequestID = "panel-probe"
 
 // adminModelTest 实现 POST /admin/model-test：面板探活入口，返回形状与
@@ -268,6 +346,58 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(content) == "" {
 		content = defaultProbeContent
 	}
+	path, body, err := probeRequestSpec(strings.ToLower(strings.TrimSpace(req.ClientProtocol)), model, content, req.Stream)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.serveProbeRequest(w, r, path, body, model, req.ClientProtocol, req.Stream)
+}
+
+// adminModelChat 实现 POST /admin/model-chat：多轮试聊入口，与探活共用
+// serveProbeRequest 的执行与返回形状，差别只在请求体把单条 content 换成
+// messages 数组（role ∈ user/assistant/system，至少一条）。
+func (h *Handler) adminModelChat(w http.ResponseWriter, r *http.Request) {
+	if h.probeHandler == nil {
+		respondError(w, http.StatusServiceUnavailable, "model chat unavailable")
+		return
+	}
+	var req modelChatRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		respondError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	if len(req.Messages) == 0 {
+		respondError(w, http.StatusBadRequest, "messages is required")
+		return
+	}
+	for _, m := range req.Messages {
+		switch m.Role {
+		case "user", "assistant", "system":
+		default:
+			respondError(w, http.StatusBadRequest, "invalid message role: "+m.Role)
+			return
+		}
+	}
+	path, body, err := probeChatRequestSpec(strings.ToLower(strings.TrimSpace(req.ClientProtocol)), model, req.Messages, req.Stream)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.serveProbeRequest(w, r, path, body, model, req.ClientProtocol, req.Stream)
+}
+
+// serveProbeRequest 是探针执行的共用尾段：把已构造好的 /v1 请求发给注入的
+// 进程内根路由，并组装前端消费的结果对象（success/status_code/duration_ms/
+// first_byte_duration_ms/actual_model/response_text/api_response/error/
+// raw_response）。key 解析、60s 超时、panel-probe 留痕、流式首字节计时对
+// 单轮探活与多轮试聊完全一致。
+func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path string, body []byte, model, clientProtocol string, stream bool) {
 	key := ""
 	if h.masterKeyFunc != nil {
 		key = strings.TrimSpace(h.masterKeyFunc())
@@ -276,11 +406,6 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	// 全空即开放模式，占位凭据也能过 authenticate。
 	if key == "" && h.tokens != nil && !h.tokens.Empty() {
 		respondError(w, http.StatusBadRequest, "auth.api_key is empty and auth tokens exist: configure a master key to run probes")
-		return
-	}
-	path, body, err := probeRequestSpec(strings.ToLower(strings.TrimSpace(req.ClientProtocol)), model, content, req.Stream)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	probeCtx, cancel := context.WithTimeout(r.Context(), modelTestTimeout)
@@ -303,16 +428,16 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 		"success":         ok,
 		"status_code":     res.StatusCode,
 		"duration_ms":     time.Since(started).Milliseconds(),
-		"is_streaming":    req.Stream,
+		"is_streaming":    stream,
 		"actual_model":    h.resolvedModel(model),
-		"client_protocol": probeProtocolName(req.ClientProtocol),
+		"client_protocol": probeProtocolName(clientProtocol),
 		"request_id":      res.Header.Get("X-Request-Id"),
 	}
-	if req.Stream && !rec.firstAt.IsZero() {
+	if stream && !rec.firstAt.IsZero() {
 		out["first_byte_duration_ms"] = rec.firstAt.Sub(started).Milliseconds()
 	}
 	if ok {
-		if req.Stream {
+		if stream {
 			out["message"] = "API测试成功（流式）"
 		} else {
 			out["message"] = "API测试成功"
@@ -326,7 +451,7 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 		case merged.Reasoning != "":
 			out["response_text"] = merged.Reasoning
 		}
-		if !req.Stream {
+		if !stream {
 			var parsed any
 			if json.Unmarshal(respBody, &parsed) == nil {
 				out["api_response"] = parsed

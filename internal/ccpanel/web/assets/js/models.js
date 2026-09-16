@@ -489,6 +489,14 @@
       test.style.padding = '4px 10px';
       test.title = t('models.action.test');
       actionsTd.appendChild(test);
+      const chat = h('button', 'btn btn-secondary', t('models.action.chat'));
+      chat.type = 'button';
+      chat.dataset.action = 'chat';
+      chat.dataset.model = r.model;
+      chat.style.padding = '4px 10px';
+      chat.style.marginLeft = '6px';
+      chat.title = t('models.action.chat');
+      actionsTd.appendChild(chat);
       if (r.has_override) {
         // 纯注册表行删覆盖即整行消失，标「删除」；目录/别名/流量行删覆盖
         // 只是回到默认态，标「重置」——同一个 DELETE，语义按后果分。
@@ -536,6 +544,8 @@
     } else if (btn.dataset.action === 'test') {
       // 探活模态共享自 logs 页：模型锁定本行，协议默认 anthropic。
       window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic' });
+    } else if (btn.dataset.action === 'chat') {
+      window.openChatModal({ mode: 'admin', model: row.model, clientProtocol: 'anthropic' });
     }
   }
 

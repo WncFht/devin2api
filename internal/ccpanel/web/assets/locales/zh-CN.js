@@ -670,6 +670,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.emptyTitle': '暂无模型',
   'models.emptyDesc': '没有匹配筛选条件的模型',
   'models.action.test': '探活',
+  'models.action.chat': '会话',
   'models.action.delete': '删除',
   'models.aliasPlaceholder': '经别名 → {target}',
   'models.confirmDelete': '确认删除 {model} 的注册项？',
@@ -733,6 +734,23 @@ window.I18N_LOCALES['zh-CN'] = {
   'probe.requestFailed': '探活请求失败',
   'probe.emptyResult': '空响应',
   'probe.unknownError': '未知错误',
+
+  // ---- 多轮会话测试 / Token Playground（chat-modal.js） ----
+  'chat.title': '会话测试',
+  'chat.playgroundTitle': 'Token Playground',
+  'chat.tokenPlaceholder': '粘贴令牌明文（sk-...）',
+  'chat.tokenHint': '令牌明文仅在创建时可见，请重新粘贴',
+  'chat.modelPlaceholder': '输入或选择模型名',
+  'chat.inputPlaceholder': '输入消息，Enter 发送，Shift+Enter 换行',
+  'chat.send': '发送',
+  'chat.clear': '清空会话',
+  'chat.emptyHint': '发送一条消息开始多轮会话',
+  'chat.waiting': '等待响应…',
+  'chat.failed': '请求失败',
+  'chat.emptyResponse': '（空响应）',
+  'chat.missingToken': '请先粘贴 API Token',
+  'chat.missingModel': '请填写模型名',
+  'tokens.action.test': '测试',
 
   // ---- 日志页补充 ----
   'logs.streamFlag': '流',

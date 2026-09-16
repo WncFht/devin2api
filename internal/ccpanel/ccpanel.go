@@ -165,6 +165,7 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/admin/models", h.withAuth(h.dashboardModels))
 	mux.Get("/admin/model-registry", h.withAuth(h.adminModelRegistry))
 	mux.Post("/admin/model-test", h.withAuth(h.adminModelTest))
+	mux.Post("/admin/model-chat", h.withAuth(h.adminModelChat))
 	mux.Put("/admin/model-registry", h.withAuth(h.adminPutModel))
 	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
