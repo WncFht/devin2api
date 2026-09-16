@@ -248,8 +248,9 @@ func main() {
 	application.SetDashboard(panel)
 	// 移植面板（ccLoad 契约）与旧面板并存：同一密码门槛，/web、/admin、
 	// /dashboard、/public、/login、/logout 挂在根路径。
-	ccPanel := ccpanel.New(panel, debugManager, application.Metrics(), serviceConfig.Devin.BaseURL, serviceConfig.Server.MaxConcurrency)
+	ccPanel := ccpanel.New(panel, debugManager, application.Metrics(), serviceConfig.Devin.BaseURL)
 	ccPanel.SetVersion(resolved)
+	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
 	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
@@ -400,7 +401,8 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		report.RequiresRestart = append(report.RequiresRestart, "server.listen")
 	}
 	if pcfg.Server.MaxConcurrency != cfg.Server.MaxConcurrency {
-		report.RequiresRestart = append(report.RequiresRestart, "server.max_concurrency")
+		application.SetMaxConcurrency(cfg.Server.MaxConcurrency)
+		report.Applied = append(report.Applied, "server.max_concurrency")
 	}
 	runtimeConfigPtr.Store(&runtimeConfigState{cfg: cfg, loadedAt: time.Now(), fileMtime: configFileMtime(configPath)})
 	lastReloadPtr.Store(report)

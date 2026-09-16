@@ -91,8 +91,11 @@ type App struct {
 	// tokenCostFn 把一次请求的 token 用量折成美元（目录价口径），
 	// 供 token 费用窗口记账；nil 时成本记 0。
 	tokenCostFn func(model string, input, output, cacheRead, cacheWrite int64) float64
-	// concurrency 限制同时处理的 /v1/* 请求数。
-	concurrency chan struct{}
+	// concurrencyLimit 是同时处理的 /v1/* 请求数上限（配置 reload 热换值）；
+	// concurrencyInUse 是已占槽数。chan cap 换 CAS 计数器——获取本来就是
+	// 非阻塞 try（满了 429），原子计数语义等价且上限可变。
+	concurrencyLimit atomic.Int64
+	concurrencyInUse atomic.Int64
 	// wsConns 限制下游 WebSocket 连接数。连接占用 fd+goroutine，与上游并发
 	// 槽分开计量——空闲长连接不该烧并发额度；槽按轮次在 WS 循环里获取。
 	wsConns chan struct{}
@@ -115,19 +118,35 @@ type App struct {
 
 // New 创建一个使用指定供应商适配器的 HTTP 应用。
 func New(providerAdapter adapter.Adapter, serverConfig config.ServerConfig, debugManager *debuglog.Manager) *App {
-	limit := serverConfig.MaxConcurrency
-	if limit <= 0 {
-		limit = defaultMaxConcurrency
-	}
-	return &App{
+	application := &App{
 		adapter:      providerAdapter,
 		serverConfig: serverConfig,
 		debugManager: debugManager,
-		concurrency:  make(chan struct{}, limit),
 		wsConns:      make(chan struct{}, wsMaxConnections),
 		metrics:      obs.NewMetrics(),
 		startedAt:    time.Now(),
 	}
+	application.concurrencyLimit.Store(int64(normalizeMaxConcurrency(serverConfig.MaxConcurrency)))
+	return application
+}
+
+// normalizeMaxConcurrency 归一并发上限：0/负值按默认上限处理。
+func normalizeMaxConcurrency(limit int) int {
+	if limit <= 0 {
+		return defaultMaxConcurrency
+	}
+	return limit
+}
+
+// SetMaxConcurrency 热换 /v1 并发槽上限（配置 reload 路径）。缩容到在途
+// 数以下时新 acquire 全拒直到自然排空——正是目标语义，无存量迁移问题。
+func (application *App) SetMaxConcurrency(limit int) {
+	application.concurrencyLimit.Store(int64(normalizeMaxConcurrency(limit)))
+}
+
+// MaxConcurrency 返回当前生效的并发上限（归一后的值）。
+func (application *App) MaxConcurrency() int {
+	return int(application.concurrencyLimit.Load())
 }
 
 // Metrics 返回常驻运行计数器，供面板 stats 端点读取。
@@ -533,15 +552,19 @@ func (application *App) admitTurn() (reason obs.RejectReason, status int, releas
 	if application.draining.Load() {
 		return obs.RejectDraining, http.StatusServiceUnavailable, release
 	}
-	select {
-	case application.concurrency <- struct{}{}:
-		release = func() {
-			<-application.concurrency
-			application.inflight.Done()
+	limit := application.concurrencyLimit.Load()
+	for {
+		cur := application.concurrencyInUse.Load()
+		if cur >= limit {
+			return obs.RejectConcurrencyLimit, http.StatusTooManyRequests, release
 		}
-		return "", 0, release
-	default:
-		return obs.RejectConcurrencyLimit, http.StatusTooManyRequests, release
+		if application.concurrencyInUse.CompareAndSwap(cur, cur+1) {
+			release = func() {
+				application.concurrencyInUse.Add(-1)
+				application.inflight.Done()
+			}
+			return "", 0, release
+		}
 	}
 }
 

@@ -29,9 +29,9 @@ type Handler struct {
 	metrics *obs.Metrics
 	// baseURL 是当前上游地址，投到日志行与调试响应的 base_url/req_url。
 	baseURL string
-	// maxConcurrency 是 /v1 管线的全局并发上限（0=无限制），
-	// 投影到 runtime-metrics 的 max_concurrency。
-	maxConcurrency int
+	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
+	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
+	maxConcurrencyFunc func() int
 	// aliasesFunc 返回模型别名表（注册表落地前的静态种子）。
 	aliasesFunc func() map[string]string
 	// tokens 是下游令牌仓；nil 时 api_token 登录与令牌端点不可用。
@@ -60,15 +60,14 @@ type Handler struct {
 
 // New 创建移植面板处理器。panel 为鉴权与目录委托对象，不得为 nil；
 // debug/metrics 可为 nil（对应端点降级为空数据）。
-func New(panel *dashboard.Handler, debug *debuglog.Manager, metrics *obs.Metrics, baseURL string, maxConcurrency int) *Handler {
+func New(panel *dashboard.Handler, debug *debuglog.Manager, metrics *obs.Metrics, baseURL string) *Handler {
 	return &Handler{
-		panel:          panel,
-		debug:          debug,
-		metrics:        metrics,
-		baseURL:        baseURL,
-		maxConcurrency: maxConcurrency,
-		startedAt:      time.Now(),
-		ru:             newRollup(),
+		panel:     panel,
+		debug:     debug,
+		metrics:   metrics,
+		baseURL:   baseURL,
+		startedAt: time.Now(),
+		ru:        newRollup(),
 	}
 }
 
@@ -89,6 +88,20 @@ func (h *Handler) Version() string {
 // SetAliasesFunc 注入别名表读取函数。
 func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
 	h.aliasesFunc = fn
+}
+
+// SetMaxConcurrencyFunc 注入 /v1 并发上限读取函数。
+func (h *Handler) SetMaxConcurrencyFunc(fn func() int) {
+	h.maxConcurrencyFunc = fn
+}
+
+// maxConcurrency 返回全局并发上限的运行时值；未注入 getter 时按 0
+// （无限制）透出。
+func (h *Handler) maxConcurrency() int {
+	if h.maxConcurrencyFunc == nil {
+		return 0
+	}
+	return h.maxConcurrencyFunc()
 }
 
 // SetTokenStore 注入下游令牌仓（api_token 登录与 /admin/auth-tokens 用）。

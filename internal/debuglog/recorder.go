@@ -77,7 +77,7 @@ type Manager struct {
 	// 请求其索引行已在快照内、由回放统一入账，appendIndex 不再单独累加；
 	// 此后写入的行在快照之外，必须由实时路径自计——任一行恰入账一次。
 	indexSnapshotted atomic.Bool
-	// cleanerStop/cleanerDone 控制后台清理协程生命周期；nil 表示未启动。
+	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
 	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
@@ -289,7 +289,7 @@ type attachmentReference struct {
 }
 
 // NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
-// policy 控制后台清理；任一维度启用即启动清理协程。
+// policy 控制后台清理；清理协程恒启动（全零策略下空转），热改策略即时生效。
 // 启动时异步回放 index.jsonl 尾部重建用量聚合——尾部上限 64MB，同步解析会
 // 拖住 listen 之后的首次应答；UsageStats 在读侧等回放完成，不会返回半成数据。
 func NewManager(root string, policy RetentionPolicy) *Manager {
@@ -354,11 +354,12 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 			slog.Info("debuglog: replayed request index", "entries", parsed)
 		}
 	}()
-	if policy.Days > 0 || policy.MaxTotalMB > 0 || policy.PayloadHours > 0 {
-		manager.cleanerStop = make(chan struct{})
-		manager.cleanerDone = make(chan struct{})
-		go manager.runCleaner()
-	}
+	// cleaner 恒启动：策略全零时 cleanOnce 空转（每 5min 一次 ReadDir），
+	// 若按初始策略条件启动，全零起步的进程热开保留策略（SetPolicy）后
+	// 无人消费——热路径会是死开关。
+	manager.cleanerStop = make(chan struct{})
+	manager.cleanerDone = make(chan struct{})
+	go manager.runCleaner()
 	return manager
 }
 
@@ -367,6 +368,7 @@ func (manager *Manager) Close() {
 	if manager == nil {
 		return
 	}
+	// root 为空的禁用管理器提前返回、不起 cleaner（cleanerStop 为 nil）。
 	if manager.cleanerStop != nil {
 		close(manager.cleanerStop)
 		<-manager.cleanerDone

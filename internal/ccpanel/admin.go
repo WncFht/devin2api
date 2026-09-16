@@ -286,7 +286,7 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 	process := map[string]any{
 		"uptime_seconds":           int64(time.Since(h.startedAt).Seconds()),
 		"concurrency_slots_in_use": getI64(snap, "active_requests"),
-		"max_concurrency":          h.maxConcurrency,
+		"max_concurrency":          h.maxConcurrency(),
 		"goroutines":               getInt(proc, "goroutines"),
 		"cpu_usage_percent":        getF64(proc, "cpu_percent"),
 		"cpu_user_seconds":         getF64(proc, "cpu_seconds"),
