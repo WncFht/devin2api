@@ -509,6 +509,9 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		}
 		response.continueTurn = func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
 			continued := request
+			// 指名/required 的强制只在首发成立：续轮原样带上会让上游每跳
+			// 都强发同一调用（实测 named web_search 滚到 hops 封顶）。
+			continued.ToolChoice = nil
 			continued.Messages = append(append([]llm.Message{}, request.Messages...), assistant)
 			for _, result := range results {
 				continued.Messages = append(continued.Messages, result)
