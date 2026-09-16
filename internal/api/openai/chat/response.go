@@ -72,7 +72,7 @@ func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error)
 	if model == "" {
 		model = "devin"
 	}
-	messageObj, toolCalls := messageToChat(message)
+	messageObj, _ := messageToChat(message)
 	response := map[string]any{
 		"id":      randid.Prefixed("chatcmpl-"),
 		"object":  "chat.completion",
@@ -84,9 +84,6 @@ func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error)
 			"finish_reason": finishReason(message.StopReason),
 		}},
 		"usage": chatUsage(message.Usage),
-	}
-	if len(toolCalls) > 0 {
-		response["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"] = toolCalls
 	}
 	return json.Marshal(response)
 }
@@ -128,7 +125,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventError:
 		return encoder.failed(event), nil
 	default:
-		return nil, fmt.Errorf("unsupported response event type %q", event.Type)
+		panic(fmt.Sprintf("validated event type %q has no encoder arm", event.Type))
 	}
 }
 

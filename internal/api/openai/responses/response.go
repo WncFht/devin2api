@@ -166,7 +166,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	case llm.ResponseEventError:
 		events, err = encoder.failed(event), nil
 	default:
-		return nil, fmt.Errorf("unsupported response event type %q", event.Type)
+		panic(fmt.Sprintf("validated event type %q has no encoder arm", event.Type))
 	}
 	if err != nil {
 		return nil, err
