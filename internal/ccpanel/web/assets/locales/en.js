@@ -12,54 +12,31 @@ window.I18N_LOCALES['en'] = {
   'common.close': 'Close',
   'common.confirm': 'Confirm',
   'common.loading': 'Loading...',
-  'common.search': 'Search',
   'common.filter': 'Filter',
-  'common.sort': 'Sort',
-  'common.export': 'Export',
-  'common.import': 'Import',
-  'common.test': 'Test',
   'common.copy': 'Copy',
   'common.copied': 'Copied',
   'common.enable': 'Enable',
   'common.disable': 'Disable',
-  'common.enabled': 'Enabled',
-  'common.disabled': 'Disabled',
   'common.all': 'All',
-  'common.none': 'None',
   'common.yes': 'Yes',
   'common.no': 'No',
   'common.success': 'Success',
-  'common.error': 'Error',
-  'common.warning': 'Warning',
-  'common.info': 'Info',
   'common.login': 'Login',
   'common.logout': 'Logout',
-  'common.status': 'Status',
   'common.actions': 'Actions',
-  'common.detail': 'Detail',
-  'common.name': 'Name',
-  'common.type': 'Type',
-  'common.priority': 'Priority',
   'common.model': 'Model',
-  'common.models': 'Models',
   'common.apiResponsesWs': 'Codex WS',
   'common.cost': 'Cost',
-  'common.total': 'Total',
-  'common.requests': 'Requests',
   'nav.activeRequestsTitle': 'Active[{count}]-',
-  'common.tokens': 'Tokens',
   'common.input': 'Input',
   'common.output': 'Output',
   'common.cacheRead': 'Cache Read',
   'common.cacheCreate': 'Cache Create',
-  'common.successRate': 'Success Rate',
   'common.failed': 'Failed',
-  'common.unknown': 'Unknown',
   'common.firstPage': 'First',
   'common.prevPage': 'Previous',
   'common.nextPage': 'Next',
   'common.lastPage': 'Last',
-  'common.seconds': 's',
   'common.timeHM': '{h}h {m}m',
   'common.timeMS': '{m}m {s}s',
   'common.timeS': '{s}s',
@@ -73,7 +50,6 @@ window.I18N_LOCALES['en'] = {
   'nav.stats': 'Statistics',
   'nav.trend': 'Trends',
   'nav.logs': 'Logs',
-  'nav.modelTest': 'Model Test',
   'nav.settings': 'Settings',
   'nav.legacy': 'Legacy Panel',
   'nav.githubRepo': 'GitHub Repository',
@@ -107,8 +83,6 @@ window.I18N_LOCALES['en'] = {
   'login.feature2Desc': 'Auto-detect and switch to available nodes',
   'login.feature3Title': 'Real-time Monitoring',
   'login.feature3Desc': 'Detailed request statistics and performance analysis',
-  'login.invalidPassword': 'Invalid password, please try again',
-  'login.loginFailed': 'Login failed',
 
   // ============================================================
   // Index Overview
@@ -140,37 +114,8 @@ window.I18N_LOCALES['en'] = {
   'index.health.unavailable': 'Health data is temporarily unavailable. The next refresh will retry.',
   'index.health.noData': 'No request data for {period}',
   'index.health.summary': 'Service success rate for {period}: {rate}; {success} succeeded and {error} failed',
-  // ============================================================
-  // ============================================================
-  'common.clearSearch': 'Clear search',
   'common.selectAll': 'Select all/Deselect all',
   'common.clear': 'Clear',
-  'common.searchType': 'Search type...',
-
-
-  // Delete Confirmation (flattened keys)
-
-  // Test Modal (flattened keys)
-
-  // Key Import (flattened keys)
-
-  // Model Import (flattened keys)
-
-  // Sort Modal (flattened keys)
-
-
-  // Delete Confirmation
-
-  // Test Modal
-
-  // Key Import
-
-  // Model Import
-
-  // Sort Modal
-
-  // Status and Messages
-
 
   // ============================================================
   // API Tokens
@@ -180,18 +125,6 @@ window.I18N_LOCALES['en'] = {
   'tokens.pageSubtitle': 'Manage tokens for API (/v1/*) access',
   'tokens.createToken': '+ Create Token',
   'tokens.createTokenBtn': 'Create Token',
-  'tokens.addToken': '+ Add Token',
-  'tokens.tokenName': 'Token Name',
-  'tokens.tokenKey': 'Token Key',
-  'tokens.costLimit': 'Cost Limit',
-  'tokens.costUsed': 'Cost Used',
-  'tokens.allowedModels': 'Allowed Models',
-  'tokens.allModels': 'All Models',
-  'tokens.requestCount': 'Request Count',
-  'tokens.lastUsed': 'Last Used',
-  'tokens.createdAt': 'Created At',
-  'tokens.never': 'Never',
-  'tokens.unlimited': 'Unlimited',
   // Empty state
   'tokens.emptyTitle': 'No API Tokens',
   'tokens.emptyDesc': 'Click "Create Token" button to generate your first API access token',
@@ -259,20 +192,9 @@ window.I18N_LOCALES['en'] = {
   'tokens.willAddPrefix': 'Will add',
   'tokens.willAddSuffix': 'models',
   // Legacy compatibility
-  'tokens.modal.addTitle': 'Add Token',
-  'tokens.modal.editTitle': 'Edit Token',
-  'tokens.modal.tokenNamePlaceholder': 'Enter token name',
-  'tokens.modal.regenerateKey': 'Regenerate Key',
-  'tokens.modal.copyKey': 'Copy Key',
-  'tokens.modal.costLimitHint': '0 means unlimited',
-  'tokens.modal.allowedModelsHint': 'Comma separated, empty means all models',
-  'tokens.delete.confirm': 'Are you sure you want to delete token "{name}"?',
-  'tokens.msg.saveSuccess': 'Token saved successfully',
   'tokens.msg.deleteSuccess': 'Token deleted successfully',
   'tokens.msg.copySuccess': 'Key copied to clipboard',
-  'tokens.msg.regenerateSuccess': 'Key regenerated successfully',
   // Table headers
-  'tokens.table.description': 'Description',
   'tokens.table.token': 'Token',
   'tokens.table.callCount': 'Call Count',
   'tokens.table.successRate': 'Success Rate',
@@ -308,7 +230,6 @@ window.I18N_LOCALES['en'] = {
   'tokens.msg.enterDescription': 'Please enter a description',
   'tokens.msg.selectExpiry': 'Please select expiry time',
   'tokens.msg.costLimitNegative': 'Cost limit cannot be negative',
-  'tokens.msg.maxConcurrencyNegative': 'Concurrency limit cannot be negative',
   'tokens.msg.maxConcurrencyInteger': 'Concurrency limit must be a non-negative integer',
   'tokens.msg.createSuccess': 'Token created successfully',
   'tokens.msg.createFailed': 'Failed to create',
@@ -366,18 +287,6 @@ window.I18N_LOCALES['en'] = {
   'stats.chartModelCalls': 'Model Calls',
   'stats.chartModelCost': 'Model Cost',
   'stats.chartModelTokens': 'Model Token Usage',
-  // Legacy compatibility
-  'stats.totalRequests': 'Total Requests',
-  'stats.successRequests': 'Successful Requests',
-  'stats.failedRequests': 'Failed Requests',
-  'stats.totalCost': 'Total Cost',
-  'stats.avgLatency': 'Average Latency',
-  'stats.byModel': 'By Model',
-  'stats.byToken': 'By Token',
-  'stats.modelName': 'Model Name',
-  'stats.tokenName': 'Token Name',
-  'stats.cacheTokens': 'Cache Tokens',
-  'stats.latency': 'Latency',
   // Health chart tooltip
   'stats.healthNoData': 'No data',
   'stats.tooltipSuccess': 'Success',
@@ -417,16 +326,6 @@ window.I18N_LOCALES['en'] = {
   'trend.loading': 'Loading trend data...',
   'trend.loadFailed': 'Load Failed',
   'trend.checkNetwork': 'Please check network connection or retry',
-  'trend.timeRange': 'Time Range',
-  'trend.last24Hours': 'Last 24 Hours',
-  'trend.last7Days': 'Last 7 Days',
-  'trend.last30Days': 'Last 30 Days',
-  'trend.requestTrend': 'Request Trend',
-  'trend.costTrend': 'Cost Trend',
-  'trend.latencyTrend': 'Latency Trend',
-  'trend.chartRequests': 'Requests',
-  'trend.chartCost': 'Cost ($)',
-  'trend.chartLatency': 'Latency (ms)',
   // Trend chart dynamic text
   'trend.dataInterval': 'Update interval: {interval} | Data points: {points} | Total requests: {total}',
   'trend.dataDisplay': '{range} data display',
@@ -457,7 +356,6 @@ window.I18N_LOCALES['en'] = {
   'logs.statusCode': 'Status',
   'logs.allStatusCodes': 'All',
   'logs.logSource': 'Source',
-  'logs.statusPlaceholder': 'e.g. 200 / 403',
   'logs.colTime': 'Time',
   'logs.colIP': 'IP',
   'logs.colTokenDesc': 'Token',
@@ -484,8 +382,6 @@ window.I18N_LOCALES['en'] = {
   'logs.sourceProxy': 'Request Logs',
   'logs.sourceDetection': 'Detection Logs',
   'logs.sourceCheckin': 'Check-ins',
-  'logs.sourceScheduledCheck': 'Daily scheduled checks',
-  'logs.sourceManualTest': 'Manual Tests',
   'logs.sourceAll': 'All Logs',
   'logs.sourceScheduledCheckBadge': 'Scheduled',
   'logs.sourceManualTestBadge': 'Manual',
@@ -515,9 +411,6 @@ window.I18N_LOCALES['en'] = {
   'logs.debugRaw': 'Raw',
   'logs.debugRefreshing': 'Refreshing…',
   'logs.debugRequestFinished': 'Request finished',
-  'logs.debugMethod': 'Method',
-  'logs.debugHeaders': 'Headers',
-  'logs.debugNotFound': 'Debug log not found (not enabled or already expired)',
   'logs.debugUnavailableTitle': 'No debug log is available for this record',
   'logs.debugUnavailableHintDisabled': 'Debug logging was disabled when this request was processed, so the raw upstream request/response was never stored.',
   'logs.debugUnavailableHintExpired': 'Debug logging is enabled now, so the more likely reason is that this record was already cleaned up after the retention window.',
@@ -531,34 +424,10 @@ window.I18N_LOCALES['en'] = {
   'logs.upstreamStatusRetrying': 'Retrying upstream',
   'logs.receivedBytes': 'Received {bytes}',
   'logs.upstreamDetails': 'Upstream details',
-  'logs.testModel': 'Test Model',
   'logs.testContent': 'Test Content',
   'logs.testContentPlaceholder': 'Enter test message content',
   'logs.enableStream': 'Enable streaming response',
   'logs.startTest': 'Start Test',
-  'logs.filter': 'Filter Logs',
-  'logs.levelAll': 'All Levels',
-  'logs.levelError': 'Error',
-  'logs.levelWarning': 'Warning',
-  'logs.levelInfo': 'Info',
-  'logs.levelDebug': 'Debug',
-  'logs.typeAll': 'All Types',
-  'logs.typeRequest': 'Request',
-  'logs.typeSystem': 'System',
-  'logs.searchPlaceholder': 'Search log content...',
-  'logs.refresh': 'Refresh',
-  'logs.autoRefresh': 'Auto Refresh',
-  'logs.noLogs': 'No logs',
-  'logs.loadMore': 'Load More',
-  'logs.timestamp': 'Time',
-  'logs.level': 'Level',
-  'logs.type': 'Type',
-  'logs.message': 'Message',
-  'logs.details': 'Details',
-
-  // ============================================================
-  // Model Test
-  // ============================================================
 
   // ============================================================
   // Settings
@@ -673,20 +542,6 @@ window.I18N_LOCALES['en'] = {
   'settings.group.access': 'Access Control',
   'settings.group.advanced': 'Advanced',
 
-  // Original settings
-  'settings.general': 'General Settings',
-  'settings.security': 'Security Settings',
-  'settings.advanced': 'Advanced Settings',
-  'settings.adminPassword': 'Admin Password',
-  'settings.changePassword': 'Change Password',
-  'settings.currentPassword': 'Current Password',
-  'settings.newPassword': 'New Password',
-  'settings.confirmPassword': 'Confirm Password',
-  'settings.logLevel': 'Log Level',
-  'settings.logRetention': 'Log Retention (Days)',
-  'settings.maxRetries': 'Max Retries',
-  'settings.timeout': 'Request Timeout (seconds)',
-  'settings.saveSettings': 'Save Settings',
   // Setting descriptions (mapped to backend keys)
   'settings.desc.log_retention_days': 'Log retention days (-1 = permanent, 1-365 days)',
   'settings.multimodalFallback.edit': 'Multimodal fallback',
@@ -734,10 +589,7 @@ window.I18N_LOCALES['en'] = {
   'settings.customPricing.defaultLoaded': 'System defaults loaded',
   'settings.customPricing.defaultNotFound': 'No system price found; enter values manually',
   'settings.customPricing.defaultLoadFailed': 'Could not load system prices; enter values manually',
-  'settings.desc.debug_log_enabled': 'Enable debug logging (record raw upstream request/response data)',
-  'settings.desc.auto_refresh_interval_seconds': 'Page auto-refresh interval (seconds, 0 = disabled, recommended ≥30; skipped while a modal is open)',
   // Messages
-  'settings.msg.saveSuccess': 'Settings saved successfully',
   'settings.msg.saveFailed': 'Settings save failed',
   'settings.msg.loadFailed': 'Failed to load settings',
   'settings.msg.invalidResponse': 'Invalid response format',
@@ -762,60 +614,25 @@ window.I18N_LOCALES['en'] = {
   'settings.validation.customPricingModelLimit': 'The model count must not exceed {max}.',
   'settings.validation.customPricingFields': 'Custom pricing contains unknown fields or an invalid number.',
   'settings.validation.customPricingTiered': 'Model {model} uses system token-tier pricing and cannot be overridden; remove the row.',
-  'settings.msg.passwordChanged': 'Password changed successfully',
-  'settings.msg.passwordMismatch': 'Passwords do not match',
-  'settings.msg.wrongPassword': 'Current password is incorrect',
 
   // ============================================================
   // Version and Footer
   // ============================================================
   'version.checkUpdate': 'View releases page',
   'version.hasUpdate': 'New version available: {version}',
-  'version.github': 'GitHub Repository',
 
   // ============================================================
   // Confirmation Dialogs
   // ============================================================
   'confirm.logout': 'Are you sure you want to logout?',
-  'confirm.delete': 'Are you sure you want to delete?',
-  'confirm.discard': 'Are you sure you want to discard changes?',
 
   // ============================================================
   // Error Messages
   // ============================================================
-  'error.network': 'Network error, please check connection',
-  'error.unauthorized': 'Unauthorized, please login again',
-  'error.forbidden': 'No permission to perform this action',
-  'error.notFound': 'Resource not found',
-  'error.serverError': 'Server error',
-  'error.timeout': 'Request timeout',
-  'error.unknown': 'Unknown error',
   'error.emptyResponse': 'Empty response',
   'error.invalidJson': 'Response is not JSON',
   'error.invalidFormat': 'Response format invalid',
   'error.requestFailed': 'Request failed',
-
-  // ============================================================
-  // ============================================================
-  // Status and Badges
-  // Action Buttons
-  // Modal Titles
-  // Card Display
-  // Empty States
-  // Stats Display
-  // Table headers
-  // Copy Naming
-  // Notification Messages
-  // Key Export
-  // Key Import
-  // Model Management
-
-
-
-
-
-  // ============================================================
-  // ============================================================
 
   // ============================================================
   // Model Registry
@@ -830,7 +647,6 @@ window.I18N_LOCALES['en'] = {
   'models.col.enabled': 'Enabled',
   'models.col.redirect': 'Redirect To',
   'models.col.resolved': 'Resolved',
-  'models.empty': 'No models',
   'models.action.enable': 'Enable model',
   'models.action.disable': 'Disable model',
   'models.action.reset': 'Reset',
@@ -856,10 +672,6 @@ window.I18N_LOCALES['en'] = {
   'models.action.test': 'Test',
   'models.action.delete': 'Delete',
   'models.aliasPlaceholder': 'via alias → {target}',
-  'models.msg.testing': 'Testing…',
-  'models.msg.testOk': 'Test passed: {model} · {latency}ms',
-  'models.msg.testFail': 'Test failed: {model} · HTTP {status} {error}',
-  'models.msg.deleted': 'Deleted',
   'models.confirmDelete': 'Delete the registry entry for {model}?',
 
   // ---- Catalog columns and filters (merged from the legacy catalog page) ----
@@ -869,7 +681,6 @@ window.I18N_LOCALES['en'] = {
   'models.col.priceIn': 'Input',
   'models.col.priceCached': 'Cached',
   'models.col.priceOut': 'Output',
-  'models.col.pricing': 'Pricing',
   'models.filter.allProviders': 'All providers',
   'models.filter.allApis': 'All APIs',
   'models.filter.allTiers': 'All tiers',
@@ -886,10 +697,6 @@ window.I18N_LOCALES['en'] = {
   'models.tag.free': 'Free',
   'models.tag.promo': 'Promo',
   'models.tag.img': 'Image',
-  'models.tag.beta': 'BETA',
-  'models.tag.new': 'NEW',
-  'models.tag.fast': 'FAST',
-  'models.tag.premium': 'Premium',
   'models.tag.rec': 'Recommended',
   'models.tag.emptyMult': 'No multiplier',
   'models.tag.catalogDisabled': 'Catalog-disabled',
@@ -897,21 +704,12 @@ window.I18N_LOCALES['en'] = {
   'models.badge.low': 'LOW',
   'models.badge.medium': 'MEDIUM',
   'models.badge.high': 'HIGH',
-  'models.badge.promo': 'PROMO',
-  'models.badge.beta': 'BETA',
-  'models.badge.new': 'NEW',
-  'models.badge.fast': 'FAST',
-  'models.badge.img': 'img',
-  'models.badge.premium': 'Premium',
   'models.badge.rec': 'Recommended',
   'models.badge.capLimited': 'Capped',
   'models.badge.warning': 'Warning',
   'models.badge.disabled': 'Disabled',
-  'models.badge.alias': 'Alias',
   'models.mult.unknownTip': 'Upstream did not publish a multiplier; treat as baseline 1.0',
-  'models.aliasBadgeTip': 'Client alias in config resolves to this catalog uid',
   'models.count': 'Showing {shown} / {total}',
-  'models.noMatch': 'No matching models',
   'models.priceNote': 'Multiplier = upstream credit burn rate; prices in $ / 1M tokens',
 
   // ============================================================
@@ -932,8 +730,6 @@ window.I18N_LOCALES['en'] = {
   'probe.rawResponse': 'Raw response',
   'probe.toggleJson': 'Show/hide JSON',
   'probe.toggle': 'Show/hide',
-  'probe.selectModel': 'Select a model',
-  'probe.loadModelsFailed': 'Failed to load model list',
   'probe.requestFailed': 'Probe request failed',
   'probe.emptyResult': 'Empty response',
   'probe.unknownError': 'Unknown error',
@@ -945,8 +741,6 @@ window.I18N_LOCALES['en'] = {
   'logs.tip.actualModel': 'Actual model',
   'logs.tip.thinkingEffort': 'Thinking effort',
   'logs.tip.reasoningTokens': 'Reasoning tokens',
-  'logs.apiFilter': 'Endpoint',
-  'logs.allApis': 'All endpoints',
   'logs.probeModel': 'Probe this model',
   'logs.invalidPage': 'Enter a valid page number (1-{total})',
 
@@ -956,6 +750,7 @@ window.I18N_LOCALES['en'] = {
   'settings.desc.log_payload_hours': 'Hours to keep bulky stage files (after that, strip 03/04/06 and attachments but keep meta/error evidence; <=0 never strip)',
   'settings.desc.log_keep_error_dirs': 'Number of newest error dirs protected from capacity eviction (<=0 no protection)',
   'settings.desc.auto_refresh_interval_seconds': 'Page auto-refresh interval in seconds (0=off, >=30 recommended; skipped while a dialog is open)',
+  'settings.desc.debug_log_retention_minutes': 'Request log retention (minutes)',
 
   // ---- Quota page ----
   'quota.title': 'Quota',

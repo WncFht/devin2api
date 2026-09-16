@@ -63,7 +63,6 @@ const numericSettingConstraints = new Map([
   ['http_read_timeout_seconds', { min: 0, max: maxDurationSeconds }],
   ['log_retention_days', { min: -1, max: 365 }],
   ['model_catalog_sync_interval_hours', { min: 0, max: maxDurationHours }],
-  ['debug_log_retention_minutes', { min: 1, max: 1440 }],
   ['auto_refresh_interval_seconds', { min: 0, max: maxDurationSeconds }],
   ['responses_ws_max_sessions', { min: 0 }],
   ['responses_ws_session_ttl_minutes', { min: 0, max: maxDurationMinutes }],

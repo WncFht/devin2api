@@ -12,54 +12,31 @@ window.I18N_LOCALES['zh-CN'] = {
   'common.close': '关闭',
   'common.confirm': '确认',
   'common.loading': '加载中...',
-  'common.search': '搜索',
   'common.filter': '筛选',
-  'common.sort': '排序',
-  'common.export': '导出',
-  'common.import': '导入',
-  'common.test': '测试',
   'common.copy': '复制',
   'common.copied': '已复制',
   'common.enable': '启用',
   'common.disable': '禁用',
-  'common.enabled': '已启用',
-  'common.disabled': '已禁用',
   'common.all': '全部',
-  'common.none': '无',
   'common.yes': '是',
   'common.no': '否',
   'common.success': '成功',
-  'common.error': '错误',
-  'common.warning': '警告',
-  'common.info': '提示',
   'common.login': '登录',
   'common.logout': '注销',
-  'common.status': '状态',
   'common.actions': '操作',
-  'common.detail': '详情',
-  'common.name': '名称',
-  'common.type': '类型',
-  'common.priority': '优先级',
   'common.model': '模型',
-  'common.models': '模型',
   'common.apiResponsesWs': 'Codex WS',
   'common.cost': '成本',
-  'common.total': '总计',
-  'common.requests': '请求',
   'nav.activeRequestsTitle': '请求中[{count}]-',
-  'common.tokens': 'Token',
   'common.input': '输入',
   'common.output': '输出',
   'common.cacheRead': '缓存读',
   'common.cacheCreate': '缓存创',
-  'common.successRate': '成功率',
   'common.failed': '失败',
-  'common.unknown': '未知',
   'common.firstPage': '首页',
   'common.prevPage': '上一页',
   'common.nextPage': '下一页',
   'common.lastPage': '尾页',
-  'common.seconds': '秒',
   'common.timeHM': '{h}小时{m}分',
   'common.timeMS': '{m}分{s}秒',
   'common.timeS': '{s}秒',
@@ -73,7 +50,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'nav.stats': '调用统计',
   'nav.trend': '请求趋势',
   'nav.logs': '日志',
-  'nav.modelTest': '模型测试',
   'nav.settings': '设置',
   'nav.legacy': '旧版面板',
   'nav.githubRepo': 'GitHub仓库',
@@ -107,8 +83,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'login.feature2Desc': '自动检测并切换到可用节点',
   'login.feature3Title': '实时监控',
   'login.feature3Desc': '详细的请求统计和性能分析',
-  'login.invalidPassword': '密码错误，请重试',
-  'login.loginFailed': '登录失败',
 
   // ============================================================
   // 首页概览
@@ -140,37 +114,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'index.health.unavailable': '健康数据暂时无法加载，将在下次刷新时重试。',
   'index.health.noData': '{period}暂无请求数据',
   'index.health.summary': '{period}服务成功率 {rate}，成功 {success} 次，失败 {error} 次',
-  // ============================================================
-  // ============================================================
-  'common.clearSearch': '清空搜索',
   'common.selectAll': '全选/取消全选',
   'common.clear': '清空',
-  'common.searchType': '搜索类型...',
-
-
-  // 删除确认（扁平化键名）
-
-  // 测试模态框（扁平化键名）
-
-  // Key导入（扁平化键名）
-
-  // 模型导入（扁平化键名）
-
-  // 排序模态框（扁平化键名）
-
-
-  // 删除确认
-
-  // 测试模态框
-
-  // Key导入
-
-  // 模型导入
-
-  // 排序模态框
-
-  // 状态和消息
-
 
   // ============================================================
   // API令牌
@@ -180,18 +125,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'tokens.pageSubtitle': '管理用于 API (/v1/*) 访问的令牌',
   'tokens.createToken': '+ 创建令牌',
   'tokens.createTokenBtn': '创建令牌',
-  'tokens.addToken': '+ 添加令牌',
-  'tokens.tokenName': '令牌名称',
-  'tokens.tokenKey': '令牌密钥',
-  'tokens.costLimit': '费用限额',
-  'tokens.costUsed': '已用费用',
-  'tokens.allowedModels': '允许模型',
-  'tokens.allModels': '所有模型',
-  'tokens.requestCount': '请求次数',
-  'tokens.lastUsed': '最后使用',
-  'tokens.createdAt': '创建时间',
-  'tokens.never': '从未',
-  'tokens.unlimited': '无限制',
   // 空状态
   'tokens.emptyTitle': '暂无API令牌',
   'tokens.emptyDesc': '点击"创建令牌"按钮,生成第一个API访问令牌',
@@ -259,20 +192,9 @@ window.I18N_LOCALES['zh-CN'] = {
   'tokens.willAddPrefix': '将添加',
   'tokens.willAddSuffix': '个模型',
   // 旧版兼容
-  'tokens.modal.addTitle': '添加令牌',
-  'tokens.modal.editTitle': '编辑令牌',
-  'tokens.modal.tokenNamePlaceholder': '输入令牌名称',
-  'tokens.modal.regenerateKey': '重新生成密钥',
-  'tokens.modal.copyKey': '复制密钥',
-  'tokens.modal.costLimitHint': '0 表示无限制',
-  'tokens.modal.allowedModelsHint': '逗号分隔，留空表示允许所有模型',
-  'tokens.delete.confirm': '确定要删除令牌 "{name}" 吗？',
-  'tokens.msg.saveSuccess': '令牌保存成功',
   'tokens.msg.deleteSuccess': '令牌删除成功',
   'tokens.msg.copySuccess': '密钥已复制到剪贴板',
-  'tokens.msg.regenerateSuccess': '密钥已重新生成',
   // 新增：表头
-  'tokens.table.description': '描述',
   'tokens.table.token': '令牌',
   'tokens.table.callCount': '调用次数',
   'tokens.table.successRate': '成功率',
@@ -308,7 +230,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'tokens.msg.enterDescription': '请输入描述',
   'tokens.msg.selectExpiry': '请选择过期时间',
   'tokens.msg.costLimitNegative': '限额不能为负数',
-  'tokens.msg.maxConcurrencyNegative': '并发上限不能为负数',
   'tokens.msg.maxConcurrencyInteger': '并发上限必须是大于等于 0 的整数',
   'tokens.msg.createSuccess': '令牌创建成功',
   'tokens.msg.createFailed': '创建失败',
@@ -366,18 +287,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'stats.chartModelCalls': '模型调用次数',
   'stats.chartModelCost': '模型成本',
   'stats.chartModelTokens': '模型Token用量',
-  // 保留旧版兼容
-  'stats.totalRequests': '总请求数',
-  'stats.successRequests': '成功请求',
-  'stats.failedRequests': '失败请求',
-  'stats.totalCost': '总成本',
-  'stats.avgLatency': '平均延迟',
-  'stats.byModel': '按模型统计',
-  'stats.byToken': '按令牌统计',
-  'stats.modelName': '模型名称',
-  'stats.tokenName': '令牌名称',
-  'stats.cacheTokens': '缓存Token',
-  'stats.latency': '延迟',
   // 健康图表 tooltip
   'stats.healthNoData': '无数据',
   'stats.tooltipSuccess': '成功',
@@ -417,16 +326,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.loading': '正在加载趋势数据...',
   'trend.loadFailed': '加载失败',
   'trend.checkNetwork': '请检查网络连接或重试',
-  'trend.timeRange': '时间范围',
-  'trend.last24Hours': '最近24小时',
-  'trend.last7Days': '最近7天',
-  'trend.last30Days': '最近30天',
-  'trend.requestTrend': '请求趋势',
-  'trend.costTrend': '成本趋势',
-  'trend.latencyTrend': '延迟趋势',
-  'trend.chartRequests': '请求数',
-  'trend.chartCost': '成本($)',
-  'trend.chartLatency': '延迟(ms)',
   // 趋势图表动态文本
   'trend.dataInterval': '数据更新间隔：{interval} | 数据点：{points} | 总请求：{total}',
   'trend.dataDisplay': '{range}数据展示',
@@ -457,7 +356,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.statusCode': '状态码',
   'logs.allStatusCodes': '全部',
   'logs.logSource': '来源',
-  'logs.statusPlaceholder': '如 200 / 403',
   'logs.colTime': '时间',
   'logs.colIP': 'IP',
   'logs.colTokenDesc': '令牌',
@@ -484,8 +382,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.sourceProxy': '请求日志',
   'logs.sourceDetection': '检测日志',
   'logs.sourceCheckin': '签到',
-  'logs.sourceScheduledCheck': '每日定时检测',
-  'logs.sourceManualTest': '手动测试',
   'logs.sourceAll': '全部日志',
   'logs.sourceScheduledCheckBadge': '定时',
   'logs.sourceManualTestBadge': '手动',
@@ -515,9 +411,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.debugRaw': '原始',
   'logs.debugRefreshing': '正在更新…',
   'logs.debugRequestFinished': '请求已结束',
-  'logs.debugMethod': '方法',
-  'logs.debugHeaders': '头部',
-  'logs.debugNotFound': 'Debug日志不存在（未启用或已过期）',
   'logs.debugUnavailableTitle': '这条记录没有可查看的 Debug 日志',
   'logs.debugUnavailableHintDisabled': '该请求发生时未开启 Debug 日志，因此没有保存上游原始请求/响应。',
   'logs.debugUnavailableHintExpired': '当前已开启 Debug 日志，更可能是这条记录已超过保留时长被自动清理。',
@@ -531,34 +424,10 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.upstreamStatusRetrying': '重试中',
   'logs.receivedBytes': '已接收 {bytes}',
   'logs.upstreamDetails': '上游详情',
-  'logs.testModel': '测试模型',
   'logs.testContent': '测试内容',
   'logs.testContentPlaceholder': '输入测试消息内容',
   'logs.enableStream': '启用流式响应',
   'logs.startTest': '开始测试',
-  'logs.filter': '筛选日志',
-  'logs.levelAll': '所有级别',
-  'logs.levelError': '错误',
-  'logs.levelWarning': '警告',
-  'logs.levelInfo': '信息',
-  'logs.levelDebug': '调试',
-  'logs.typeAll': '所有类型',
-  'logs.typeRequest': '请求',
-  'logs.typeSystem': '系统',
-  'logs.searchPlaceholder': '搜索日志内容...',
-  'logs.refresh': '刷新',
-  'logs.autoRefresh': '自动刷新',
-  'logs.noLogs': '暂无日志',
-  'logs.loadMore': '加载更多',
-  'logs.timestamp': '时间',
-  'logs.level': '级别',
-  'logs.type': '类型',
-  'logs.message': '消息',
-  'logs.details': '详情',
-
-  // ============================================================
-  // 模型测试
-  // ============================================================
 
   // ============================================================
   // 设置
@@ -673,20 +542,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.group.access': '访问控制',
   'settings.group.advanced': '高级',
 
-  // 原有设置项
-  'settings.general': '通用设置',
-  'settings.security': '安全设置',
-  'settings.advanced': '高级设置',
-  'settings.adminPassword': '管理密码',
-  'settings.changePassword': '修改密码',
-  'settings.currentPassword': '当前密码',
-  'settings.newPassword': '新密码',
-  'settings.confirmPassword': '确认密码',
-  'settings.logLevel': '日志级别',
-  'settings.logRetention': '日志保留天数',
-  'settings.maxRetries': '最大重试次数',
-  'settings.timeout': '请求超时(秒)',
-  'settings.saveSettings': '保存设置',
   // 设置项描述（与后端 key 对应）
   'settings.desc.log_retention_days': '日志保留天数(-1永久保留,1-365天)',
   'settings.multimodalFallback.edit': '多模态回退',
@@ -734,10 +589,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.customPricing.defaultLoaded': '已加载系统默认价格',
   'settings.customPricing.defaultNotFound': '未找到系统价格，请手动填写',
   'settings.customPricing.defaultLoadFailed': '系统价格加载失败，请手动填写',
-  'settings.desc.debug_log_enabled': '启用Debug日志(记录上游请求/响应原始数据)',
-  'settings.desc.auto_refresh_interval_seconds': '页面自动刷新间隔(秒,0=禁用,建议≥30;有对话框打开时跳过本次刷新)',
   // 消息
-  'settings.msg.saveSuccess': '设置保存成功',
   'settings.msg.saveFailed': '设置保存失败',
   'settings.msg.loadFailed': '加载配置失败',
   'settings.msg.invalidResponse': '响应格式错误',
@@ -762,60 +614,25 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.validation.customPricingModelLimit': '模型数量不能超过 {max} 个。',
   'settings.validation.customPricingFields': '自定义价格包含未知字段或非法数值。',
   'settings.validation.customPricingTiered': '模型 {model} 使用系统 Token 分层定价，不能自定义覆盖；请删除该行。',
-  'settings.msg.passwordChanged': '密码修改成功',
-  'settings.msg.passwordMismatch': '两次输入的密码不一致',
-  'settings.msg.wrongPassword': '当前密码错误',
 
   // ============================================================
   // 版本和页脚
   // ============================================================
   'version.checkUpdate': '点击查看发布页面',
   'version.hasUpdate': '点击查看新版本: {version}',
-  'version.github': 'GitHub仓库',
 
   // ============================================================
   // 确认对话框
   // ============================================================
   'confirm.logout': '确定要注销吗？',
-  'confirm.delete': '确定要删除吗？',
-  'confirm.discard': '确定要放弃更改吗？',
 
   // ============================================================
   // 错误消息
   // ============================================================
-  'error.network': '网络错误，请检查连接',
-  'error.unauthorized': '未授权，请重新登录',
-  'error.forbidden': '没有权限执行此操作',
-  'error.notFound': '资源不存在',
-  'error.serverError': '服务器错误',
-  'error.timeout': '请求超时',
-  'error.unknown': '未知错误',
   'error.emptyResponse': '空响应',
   'error.invalidJson': '响应不是JSON',
   'error.invalidFormat': '响应格式不符合APIResponse',
   'error.requestFailed': '请求失败',
-
-  // ============================================================
-  // ============================================================
-  // 状态与徽章
-  // 操作按钮
-  // 模态框标题
-  // 卡片显示
-  // 空状态
-  // 统计显示
-  // 表格列头
-  // 复制命名
-  // 消息通知
-  // Key导出
-  // Key导入
-  // 模型管理
-
-
-
-
-
-  // ============================================================
-  // ============================================================
 
   // ============================================================
   // 模型注册表
@@ -830,7 +647,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.col.enabled': '启用',
   'models.col.redirect': '重定向到',
   'models.col.resolved': '实际解析',
-  'models.empty': '暂无模型',
   'models.action.enable': '启用模型',
   'models.action.disable': '停用模型',
   'models.action.reset': '重置',
@@ -856,10 +672,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.action.test': '探活',
   'models.action.delete': '删除',
   'models.aliasPlaceholder': '经别名 → {target}',
-  'models.msg.testing': '探活中…',
-  'models.msg.testOk': '探活成功 {model} · {latency}ms',
-  'models.msg.testFail': '探活失败 {model} · HTTP {status} {error}',
-  'models.msg.deleted': '已删除',
   'models.confirmDelete': '确认删除 {model} 的注册项？',
 
   // ---- 目录列与筛选（旧面板模型目录页并入） ----
@@ -869,7 +681,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.col.priceIn': '输入价',
   'models.col.priceCached': '缓存价',
   'models.col.priceOut': '输出价',
-  'models.col.pricing': '定价',
   'models.filter.allProviders': '全部供应商',
   'models.filter.allApis': '全部 API',
   'models.filter.allTiers': '全部档位',
@@ -886,10 +697,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.tag.free': '免费',
   'models.tag.promo': '促销',
   'models.tag.img': '图像',
-  'models.tag.beta': 'BETA',
-  'models.tag.new': 'NEW',
-  'models.tag.fast': 'FAST',
-  'models.tag.premium': 'Premium',
   'models.tag.rec': '推荐',
   'models.tag.emptyMult': '无倍率',
   'models.tag.catalogDisabled': '目录禁用',
@@ -897,21 +704,12 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.badge.low': 'LOW',
   'models.badge.medium': 'MEDIUM',
   'models.badge.high': 'HIGH',
-  'models.badge.promo': 'PROMO',
-  'models.badge.beta': 'BETA',
-  'models.badge.new': 'NEW',
-  'models.badge.fast': 'FAST',
-  'models.badge.img': 'img',
-  'models.badge.premium': 'Premium',
   'models.badge.rec': '推荐',
   'models.badge.capLimited': '限容',
   'models.badge.warning': '警告',
   'models.badge.disabled': '禁用',
-  'models.badge.alias': '别名',
   'models.mult.unknownTip': '上游未单独下发倍率，通常按基准 1.0',
-  'models.aliasBadgeTip': 'config 别名指向此目录 uid',
   'models.count': '显示 {shown} / 共 {total} 个',
-  'models.noMatch': '无匹配模型',
   'models.priceNote': '倍率 = 上游 credit 消耗倍率；价格单位 $ / 1M tokens',
 
   // ============================================================
@@ -932,8 +730,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'probe.rawResponse': '原始响应',
   'probe.toggleJson': '显示/隐藏 JSON',
   'probe.toggle': '显示/隐藏',
-  'probe.selectModel': '请选择模型',
-  'probe.loadModelsFailed': '模型清单加载失败',
   'probe.requestFailed': '探活请求失败',
   'probe.emptyResult': '空响应',
   'probe.unknownError': '未知错误',
@@ -945,8 +741,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.tip.actualModel': '实际模型',
   'logs.tip.thinkingEffort': '思考等级',
   'logs.tip.reasoningTokens': '思考/推理Token',
-  'logs.apiFilter': '入口',
-  'logs.allApis': '全部入口',
   'logs.probeModel': '探活此模型',
   'logs.invalidPage': '请输入有效的页码 (1-{total})',
 
@@ -956,6 +750,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.desc.log_payload_hours': '大体积阶段文件保留小时数(超时剥离03/04/06与附件,保留meta/error等证据,<=0不剥离)',
   'settings.desc.log_keep_error_dirs': '容量淘汰时受保护的最新失败目录数(<=0不保护)',
   'settings.desc.auto_refresh_interval_seconds': '页面自动刷新间隔(秒,0=禁用,建议>=30;有对话框打开时跳过本次刷新)',
+  'settings.desc.debug_log_retention_minutes': '请求日志保留时长(分钟)',
 
   // ---- 配额页 ----
   'quota.title': '配额',
