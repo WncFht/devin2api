@@ -146,7 +146,6 @@ window.WebAuth = window.WebAuth || {
     { key: 'quota', labelKey: 'nav.quota', href: '/web/quota.html', icon: iconPercent },
     { key: 'logs', labelKey: 'nav.logs', href: '/web/logs.html', icon: iconAlert },
     { key: 'settings', labelKey: 'nav.settings', href: '/web/settings.html', icon: iconSettings },
-    { key: 'legacy', labelKey: 'nav.legacy', href: '/panel', icon: iconSettings },
   ];
   const THEME_STORAGE_KEY = 'ccload_theme';
   const THEME_MODES = ['system', 'light', 'dark'];

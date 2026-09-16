@@ -51,7 +51,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'nav.trend': '请求趋势',
   'nav.logs': '日志',
   'nav.settings': '设置',
-  'nav.legacy': '旧版面板',
   'nav.githubRepo': 'GitHub仓库',
   'theme.label': '配色方案',
   'theme.system': '跟随系统',

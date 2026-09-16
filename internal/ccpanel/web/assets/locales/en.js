@@ -51,7 +51,6 @@ window.I18N_LOCALES['en'] = {
   'nav.trend': 'Trends',
   'nav.logs': 'Logs',
   'nav.settings': 'Settings',
-  'nav.legacy': 'Legacy Panel',
   'nav.githubRepo': 'GitHub Repository',
   'theme.label': 'Color scheme',
   'theme.system': 'Follow System',
