@@ -252,7 +252,7 @@ func (h *Handler) adminModelPricing(w http.ResponseWriter, r *http.Request) {
 // adminRuntimeMetrics 实现 GET /admin/runtime-metrics：把 obs 快照与
 // debuglog 自观测投影成 ccLoad 的 process/http_proxy/logs 分组形状；
 // 另投 gate/rejects/rates/trend/debuglog/usage/warm 组承接旧面板
-// /panel/api/stats 的排障口径。responses_websocket 组本服务无会话仓，给零值。
+// stats 端点的排障口径。responses_websocket 组本服务无会话仓，给零值。
 func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 	snap := map[string]any{}
 	if h.metrics != nil {

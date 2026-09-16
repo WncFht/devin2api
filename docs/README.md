@@ -41,4 +41,4 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 - 上游 429 频发 → `upstream-rate-limit.md`（模型）+ `rategate.go`（实现）
 - 发版/格式化/CI → `toolchain.md`
 - 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ `logs/<debug_ref>/meta.json` 延迟分解字段
-- subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/panel/api/stats` 的 warm 段
+- subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/admin/runtime-metrics` 的 warm 段

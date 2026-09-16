@@ -78,7 +78,7 @@ ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱�
 
 资源与生命周期：谱系数与 retained 字节双帽 `warm_prefix_max_streams`（默认 256）/`warm_prefix_max_retained_mb`（默认 96），触顶先挤 suspect 再按 lastTouch LRU 挤。`retained_bytes` 只计 prompt 内容字段（system+ 消息文本 + 工具声明），不含 JSON 包装，比完整请求体小是正常口径。簿记全在内存，重启即清空——存活流的第一发真实请求自然重暖。排空（BeginDrain）后停发 ping，条目表留作观测，退役与淘汰判定照常。`warm_prefix_*` 全部参数热重载（热键清单见 config-reload.md）；enabled 热关掉即停调度并清空条目表，释放 retained 内存。
 
-观测面：`/panel/api/stats` 与 `/admin/runtime-metrics` 的 `warm` 段透出 `enabled`、`entries`（留存谱系）、`promoted`（保温中）、`suspects`、`retained_bytes`、`pings_sent`、`ping_hits`/`ping_misses`、`ping_skips`（闸门拒）、`ping_errors`、`retired`；runtime-metrics 另派生 `ping_hit_rate`。命中率口径只算 ping 自身、不含真实流量；面板「趋势」页顶部状态条与「设置」页运行指标组有同名展示。开启方式：config.yaml 置 `devin.warm_prefix_enabled: true` 后 POST `/panel/api/config/reload` 即时生效。
+观测面：`/admin/runtime-metrics` 的 `warm` 段透出 `enabled`、`entries`（留存谱系）、`promoted`（保温中）、`suspects`、`retained_bytes`、`pings_sent`、`ping_hits`/`ping_misses`、`ping_skips`（闸门拒）、`ping_errors`、`retired`，另派生 `ping_hit_rate`。命中率口径只算 ping 自身、不含真实流量；面板「趋势」页顶部状态条与「设置」页运行指标组有同名展示。开启方式：config.yaml 置 `devin.warm_prefix_enabled: true` 后 POST `/admin/config/reload` 即时生效。
 
 ## 已知边界
 
