@@ -63,7 +63,7 @@ echo "== deploy-remote.sh（开发机 → 生产机驱动）=="
 check "目标机走 DEVIN2API_HOST" has scripts/deploy-remote.sh 'DEVIN2API_HOST'
 check "非交互 SSH（BatchMode）" has scripts/deploy-remote.sh 'BatchMode=yes'
 check "worktree 文件集用 git ls-files 定界" has scripts/deploy-remote.sh 'ls-files'
-check "生产 config.yaml 取自远端仓库" has scripts/deploy-remote.sh 'REMOTE_REPO}/config.yaml'
+check "生产 config.yaml 取自远端 live 实例" has scripts/deploy-remote.sh 'CONFIG_LIVE}'
 
 echo "== deploy-windows.ps1（Windows 裸进程）=="
 check "ps1 存在" test -f scripts/deploy-windows.ps1
