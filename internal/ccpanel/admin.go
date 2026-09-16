@@ -14,17 +14,16 @@ import (
 	"github.com/WncFht/devin2api/internal/authtoken"
 )
 
-// activeRequest 是 ccLoad ActiveRequest 的 wire 形状；本服务无多上游，
-// 渠道字段恒为合成渠道，upstream_protocol 留空（上游恒为 devin）。
+// activeRequest 是 ccLoad ActiveRequest 的 wire 形状收缩版；本服务无多
+// 上游，api 取 index.jsonl 入口端点原值，upstream_protocol 留空
+// （上游恒为 devin）。
 type activeRequest struct {
 	ID                  int64   `json:"id"`
 	Model               string  `json:"model"`
 	ClientIP            string  `json:"client_ip"`
 	StartTime           int64   `json:"start_time"`
 	Streaming           bool    `json:"is_streaming"`
-	ChannelID           int64   `json:"channel_id,omitempty"`
-	ChannelName         string  `json:"channel_name,omitempty"`
-	ClientProtocol      string  `json:"client_protocol,omitempty"`
+	API                 string  `json:"api,omitempty"`
 	UpstreamProtocol    string  `json:"upstream_protocol,omitempty"`
 	APIKeyUsed          string  `json:"api_key_used,omitempty"`
 	TokenID             int64   `json:"token_id,omitempty"`
@@ -68,9 +67,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			ClientIP:          ar.Meta.ClientIP,
 			StartTime:         ar.StartedAt.UnixMilli(),
 			Streaming:         ar.Meta.API == "responses-ws",
-			ChannelID:         synthChannelID,
-			ChannelName:       synthChannelName,
-			ClientProtocol:    clientProtocol(ar.Meta.API),
+			API:               ar.Meta.API,
 			APIKeyUsed:        ar.Meta.KeyHash,
 			BaseURL:           h.baseURL,
 			BytesReceived:     ar.ClientBytes,
@@ -117,66 +114,6 @@ func (h *Handler) adminAbortActiveRequest(w http.ResponseWriter, r *http.Request
 		}
 	}
 	respondError(w, http.StatusNotFound, "active request not found or not abortable")
-}
-
-// synthChannelConfig 返回合成渠道的 ccLoad Config 形状——本服务只有一条
-// 上游，渠道页未移植，此投影只为满足前端对渠道下拉/详情的引用。
-func (h *Handler) synthChannelConfig(r *http.Request) map[string]any {
-	models := make([]map[string]any, 0)
-	for _, name := range h.channelModelNames(r) {
-		models = append(models, map[string]any{"model": name})
-	}
-	return map[string]any{
-		"id":                      synthChannelID,
-		"name":                    synthChannelName,
-		"auth_type":               "api_key",
-		"protocol_transform_mode": "auto",
-		"urls":                    []map[string]any{{"url": h.baseURL}},
-		"priority":                0,
-		"rpm_limit":               0,
-		"max_concurrency":         0,
-		"enabled":                 true,
-		"models":                  models,
-		"cost_multiplier":         1.0,
-		"daily_cost_limit":        0.0,
-	}
-}
-
-// adminListChannels 实现 GET /admin/channels：恒返回单元素合成渠道表。
-func (h *Handler) adminListChannels(w http.ResponseWriter, r *http.Request) {
-	respondOKCount(w, []map[string]any{h.synthChannelConfig(r)}, 1)
-}
-
-// adminGetChannel 实现 GET /admin/channels/{id}：只认合成渠道 id=1。
-func (h *Handler) adminGetChannel(w http.ResponseWriter, r *http.Request) {
-	if chi.URLParam(r, "id") != strconv.Itoa(synthChannelID) {
-		respondError(w, http.StatusNotFound, "channel not found")
-		return
-	}
-	respondOK(w, h.synthChannelConfig(r))
-}
-
-// adminChannelKeys 实现 GET /admin/channels/{id}/keys：合成一条上游 key 行。
-// api_key 不落明文（上游凭据不出面板），给脱敏占位串。
-func (h *Handler) adminChannelKeys(w http.ResponseWriter, r *http.Request) {
-	if chi.URLParam(r, "id") != strconv.Itoa(synthChannelID) {
-		respondError(w, http.StatusNotFound, "channel not found")
-		return
-	}
-	respondOKCount(w, []map[string]any{{
-		"id":                   1,
-		"channel_id":           synthChannelID,
-		"key_index":            0,
-		"api_key":              "***",
-		"note":                 "upstream credential",
-		"key_strategy":         "sequential",
-		"disabled":             false,
-		"cost_multiplier":      1.0,
-		"cooldown_until":       0,
-		"cooldown_duration_ms": 0,
-		"created_at":           h.startedAt.Format(time.RFC3339),
-		"updated_at":           h.startedAt.Format(time.RFC3339),
-	}}, 1)
 }
 
 // adminListAuthTokens 实现 GET /admin/auth-tokens：令牌表 + range 时叠加

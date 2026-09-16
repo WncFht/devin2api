@@ -14,8 +14,9 @@ func (h *Handler) publicVersion(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// publicProtocols 实现 GET /public/protocols：本服务入口协议固定三类。
+// publicProtocols 实现 GET /public/protocols：本服务入口端点固定四类
+// （值与 index.jsonl 的 api 字段同口径）。
 func (h *Handler) publicProtocols(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	respondOK(w, []string{"anthropic", "codex", "openai"})
+	respondOK(w, []string{"anthropic", "openai-chat", "openai-responses", "responses-ws"})
 }

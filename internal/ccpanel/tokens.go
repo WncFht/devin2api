@@ -79,18 +79,6 @@ func (f tokenLimitFields) validateLimits(w http.ResponseWriter) bool {
 	return true
 }
 
-// normalizeChannelMode 规范化 channel_restriction_mode：空视为 allow。
-func normalizeChannelMode(mode string) (string, bool) {
-	switch mode {
-	case "", "allow":
-		return "allow", true
-	case "deny":
-		return "deny", true
-	default:
-		return "", false
-	}
-}
-
 // tokensUnavailable 在令牌仓未接线时回 503（开发期中间态）。
 func (h *Handler) tokensUnavailable(w http.ResponseWriter) bool {
 	if h.tokens == nil {
@@ -107,12 +95,10 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Description            string   `json:"description"`
-		ExpiresAt              *int64   `json:"expires_at"`
-		IsActive               *bool    `json:"is_active"`
-		AllowedModels          []string `json:"allowed_models"`
-		AllowedChannelIDs      []int64  `json:"allowed_channel_ids"`
-		ChannelRestrictionMode string   `json:"channel_restriction_mode"`
+		Description   string   `json:"description"`
+		ExpiresAt     *int64   `json:"expires_at"`
+		IsActive      *bool    `json:"is_active"`
+		AllowedModels []string `json:"allowed_models"`
 		tokenLimitFields
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
@@ -126,18 +112,11 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 	if !req.validateLimits(w) {
 		return
 	}
-	mode, ok := normalizeChannelMode(req.ChannelRestrictionMode)
-	if !ok {
-		respondError(w, http.StatusBadRequest, `channel_restriction_mode must be "allow" or "deny", got "`+req.ChannelRestrictionMode+`"`)
-		return
-	}
 	t := &authtoken.Token{
-		Description:            req.Description,
-		ExpiresAt:              req.ExpiresAt,
-		IsActive:               req.IsActive == nil || *req.IsActive,
-		AllowedModels:          req.AllowedModels,
-		AllowedChannelIDs:      req.AllowedChannelIDs,
-		ChannelRestrictionMode: mode,
+		Description:   req.Description,
+		ExpiresAt:     req.ExpiresAt,
+		IsActive:      req.IsActive == nil || *req.IsActive,
+		AllowedModels: req.AllowedModels,
 	}
 	req.applyTo(t)
 	plain, err := h.tokens.Create(t)
@@ -146,16 +125,14 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondOK(w, map[string]any{
-		"id":                       t.ID,
-		"token":                    plain,
-		"description":              t.Description,
-		"created_at":               t.CreatedAt,
-		"expires_at":               t.ExpiresAt,
-		"is_active":                t.IsActive,
-		"allowed_models":           t.AllowedModels,
-		"allowed_channel_ids":      t.AllowedChannelIDs,
-		"channel_restriction_mode": t.ChannelRestrictionMode,
-		"max_concurrency":          t.MaxConcurrency,
+		"id":              t.ID,
+		"token":           plain,
+		"description":     t.Description,
+		"created_at":      t.CreatedAt,
+		"expires_at":      t.ExpiresAt,
+		"is_active":       t.IsActive,
+		"allowed_models":  t.AllowedModels,
+		"max_concurrency": t.MaxConcurrency,
 	})
 }
 
@@ -171,12 +148,10 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Description            *string           `json:"description"`
-		IsActive               *bool             `json:"is_active"`
-		ExpiresAt              optionalInt64JSON `json:"expires_at"`
-		AllowedModels          *[]string         `json:"allowed_models"`
-		AllowedChannelIDs      *[]int64          `json:"allowed_channel_ids"`
-		ChannelRestrictionMode *string           `json:"channel_restriction_mode"`
+		Description   *string           `json:"description"`
+		IsActive      *bool             `json:"is_active"`
+		ExpiresAt     optionalInt64JSON `json:"expires_at"`
+		AllowedModels *[]string         `json:"allowed_models"`
 		tokenLimitFields
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
@@ -185,15 +160,6 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if !req.validateLimits(w) {
 		return
-	}
-	var mode string
-	if req.ChannelRestrictionMode != nil {
-		var ok bool
-		mode, ok = normalizeChannelMode(*req.ChannelRestrictionMode)
-		if !ok {
-			respondError(w, http.StatusBadRequest, `channel_restriction_mode must be "allow" or "deny", got "`+*req.ChannelRestrictionMode+`"`)
-			return
-		}
 	}
 	t, ok := h.tokens.Get(id)
 	if !ok {
@@ -211,12 +177,6 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AllowedModels != nil {
 		t.AllowedModels = *req.AllowedModels
-	}
-	if req.AllowedChannelIDs != nil {
-		t.AllowedChannelIDs = *req.AllowedChannelIDs
-	}
-	if req.ChannelRestrictionMode != nil {
-		t.ChannelRestrictionMode = mode
 	}
 	req.applyTo(t)
 	if err := h.tokens.Update(t); err != nil {

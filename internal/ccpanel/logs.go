@@ -28,10 +28,6 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 )
 
-// defaultChannelTestContent 是 ccLoad config.DefaultChannelTestContent 的
-// 同值常量：渠道测试模态的默认提问内容。
-const defaultChannelTestContent = "sonnet 4.0的发布日期是什么"
-
 // maxMergedDebugResponseBodyBytes 是 merged-response 请求体上限（ccLoad 同名常量同值）。
 const maxMergedDebugResponseBodyBytes = 16 * 1024 * 1024
 
@@ -64,7 +60,8 @@ func newLogCostComponent(quantity int64, pricePerMillion float64) logCostCompone
 // wire 形状。字段含义差异：model=客户端请求模型、actual_model=解析后发给
 // 上游的 uid（与 model 相同则省略，同 ccLoad「未重定向」语义）、
 // api_key_used/api_key_hash 都是本服务的 key_hash（无明文可脱敏）、
-// upstream_protocol 恒 "devin"、cost_multiplier 恒 1。
+// api=index.jsonl 的入口端点原值、upstream_protocol 恒 "devin"、
+// cost_multiplier 恒 1；单上游无渠道维（channel_* 字段不投）。
 type logEntry struct {
 	ID                       int64             `json:"id"`
 	Time                     int64             `json:"time"` // unix 秒（ccLoad JSONTime 序列化口径）
@@ -72,8 +69,6 @@ type logEntry struct {
 	ActualModel              string            `json:"actual_model,omitempty"`
 	ResponseModel            string            `json:"response_model,omitempty"`
 	LogSource                string            `json:"log_source,omitempty"`
-	ChannelID                int64             `json:"channel_id"`
-	ChannelName              string            `json:"channel_name,omitempty"`
 	StatusCode               int               `json:"status_code"`
 	Message                  string            `json:"message"`
 	Duration                 float64           `json:"duration"`
@@ -84,7 +79,7 @@ type logEntry struct {
 	APIKeyHash               string            `json:"api_key_hash,omitempty"`
 	AuthTokenID              int64             `json:"auth_token_id"`
 	AuthTokenDescription     string            `json:"auth_token_description"`
-	ClientProtocol           string            `json:"client_protocol,omitempty"`
+	API                      string            `json:"api,omitempty"`
 	UpstreamProtocol         string            `json:"upstream_protocol,omitempty"`
 	ClientIP                 string            `json:"client_ip"`
 	BaseURL                  string            `json:"base_url,omitempty"`
@@ -116,15 +111,19 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 			message = e.Result + ": " + e.ErrorStage
 		}
 	}
+	// 面板探活行（X-Client-Request-Id: panel-probe）记 manual_test——
+	// 与 ccLoad 同语义：带「手动测试」徽标，不计入默认 proxy 视图。
+	logSource := "proxy"
+	if e.ClientRequestID == probeClientRequestID {
+		logSource = "manual_test"
+	}
 	entry := logEntry{
 		ID:                       started.UnixMilli(),
 		Time:                     started.Unix(),
 		Model:                    e.RequestedModel,
 		ActualModel:              actual,
 		ResponseModel:            e.ResponseModel,
-		LogSource:                "proxy",
-		ChannelID:                synthChannelID,
-		ChannelName:              synthChannelName,
+		LogSource:                logSource,
 		StatusCode:               e.StatusCode,
 		Message:                  message,
 		Duration:                 float64(e.DurationMS) / 1000,
@@ -132,7 +131,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 		UpstreamWebsocket:        e.API == "responses-ws",
 		APIKeyUsed:               e.KeyHash,
 		APIKeyHash:               e.KeyHash,
-		ClientProtocol:           clientProtocol(e.API),
+		API:                      e.API,
 		UpstreamProtocol:         "devin",
 		ClientIP:                 e.ClientIP,
 		BaseURL:                  h.baseURL,
@@ -179,16 +178,13 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]dashb
 
 // logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
 // 该 key_hash 的索引行；excluded 表示筛选条件不可能命中，直接回空集。
-// 范围来源与 queryScope 同源（api_token 身份 + channel_*、auth_token_id、
-// log_source 筛选），作用对象换成索引行——model/proto 等行级维度由
+// 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
+// log_source 筛选），作用对象换成索引行——model/api 等行级维度由
 // 调用方的 match 处理。
 func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 	q := r.URL.Query()
-	if channelQueryExcluded(q) {
-		return "", true
-	}
 	switch strings.TrimSpace(q.Get("log_source")) {
-	case "", "all", "proxy":
+	case "", "all", "proxy", "manual_test":
 	default:
 		return "", true
 	}
@@ -232,7 +228,7 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	// 一级筛选走索引读取（时间窗 + 状态码），二级筛选在内存做——
-	// channel/token 维度由 logScope 判空或收敛成 key_hash 比较。
+	// token 维度由 logScope 判空或收敛成 key_hash 比较。
 	kh, excluded := h.logScope(r)
 	if h.debug == nil || excluded {
 		respondOKCount(w, []logEntry{}, 0)
@@ -244,15 +240,25 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	result := h.debug.ListRequests(-1, filter)
 
-	proto := strings.ToLower(strings.TrimSpace(q.Get("client_protocol")))
+	api := strings.TrimSpace(q.Get("api"))
 	upstream := strings.ToLower(strings.TrimSpace(q.Get("upstream_protocol")))
 	model := strings.TrimSpace(q.Get("model"))
 	modelLike := strings.TrimSpace(q.Get("model_like"))
+	// log_source 行级口径：proxy 排除探针行，manual_test 只留探针行；
+	// ""/all 全放（探针行在「全部日志」下可见，与 ccLoad 一致）。
+	src := strings.TrimSpace(q.Get("log_source"))
 	match := func(e debuglog.IndexEntry) bool {
 		if kh != "" && e.KeyHash != kh {
 			return false
 		}
-		if proto != "" && proto != "all" && clientProtocol(e.API) != proto {
+		isProbe := e.ClientRequestID == probeClientRequestID
+		if src == "proxy" && isProbe {
+			return false
+		}
+		if src == "manual_test" && !isProbe {
+			return false
+		}
+		if api != "" && api != "all" && e.API != api {
 			return false
 		}
 		if upstream != "" && upstream != "all" && upstream != "devin" {
@@ -304,13 +310,9 @@ func (h *Handler) dashboardLogsBootstrap(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	respondOK(w, map[string]any{
-		"channel_test_content": defaultChannelTestContent,
-		// 渠道跳转设置项待 S6 设置引擎；空值由前端回落到默认 'edit'。
-		"log_channel_click_action": "",
-		"auth_tokens":              tokens,
-		"models":                   h.ru.modelSet(h.debug, identityFrom(r).KeyHash),
-		"channels":                 []map[string]any{{"id": synthChannelID, "name": synthChannelName}},
-		"status_codes":             h.ru.statusCodeSet(h.debug),
+		"auth_tokens":  tokens,
+		"models":       h.ru.modelSet(h.debug, identityFrom(r).KeyHash),
+		"status_codes": h.ru.statusCodeSet(h.debug),
 	})
 }
 

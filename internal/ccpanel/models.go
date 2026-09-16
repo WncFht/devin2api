@@ -15,15 +15,17 @@ import (
 )
 
 // modelRow 是 /admin/model-registry merged 视图的行形状：模型名、来源
-// 标记、覆盖层字段（enabled/redirect_model）与最终解析名同列——管理端
-// 一眼看到「这个名字实际会路由到哪」。
+// 标记、覆盖层字段（enabled/redirect_model）、最终解析名，外加 catalog
+// 子对象（上游目录的 label/价格/倍率/能力标记，目录外的名字为 null）——
+// 管理端一眼看到「这个名字实际会路由到哪、值多少钱、有什么能力」。
 type modelRow struct {
-	Model         string   `json:"model"`
-	Enabled       bool     `json:"enabled"`
-	RedirectModel string   `json:"redirect_model,omitempty"`
-	Resolved      string   `json:"resolved"`
-	Sources       []string `json:"sources"`
-	HasOverride   bool     `json:"has_override"`
+	Model         string         `json:"model"`
+	Enabled       bool           `json:"enabled"`
+	RedirectModel string         `json:"redirect_model,omitempty"`
+	Resolved      string         `json:"resolved"`
+	Sources       []string       `json:"sources"`
+	HasOverride   bool           `json:"has_override"`
+	Catalog       map[string]any `json:"catalog,omitempty"`
 }
 
 // modelNamesUnion 返回对外模型名的并集：目录 uid ∪ 别名键 ∪ 注册表名 ∪
@@ -68,6 +70,14 @@ func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	src := h.modelNamesUnion(r)
+	// 目录行按 uid 键控，并入注册表行——目录外的名字（别名键、纯注册表项、
+	// 未登记的直通流量名）Catalog 为空。
+	catalogByUID := map[string]map[string]any{}
+	for _, m := range h.panel.CatalogModels(r.Context()) {
+		if uid, _ := m["uid"].(string); uid != "" {
+			catalogByUID[uid] = m
+		}
+	}
 	rows := make([]modelRow, 0, len(src))
 	for name, sources := range src {
 		e, has := overrides[name]
@@ -82,6 +92,7 @@ func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 			Resolved:      devin.ResolveModelAlias(aliases, target),
 			Sources:       sources,
 			HasOverride:   has,
+			Catalog:       catalogByUID[name],
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Model < rows[j].Model })
@@ -218,6 +229,10 @@ func (h *Handler) resolvedModel(name string) string {
 	return target
 }
 
+// probeClientRequestID 是探活请求打在 index.jsonl 的 client_request_id
+// 留痕值；日志页凭它把探针行归入 manual_test（ccLoad 同语义）。
+const probeClientRequestID = "panel-probe"
+
 // adminModelTest 实现 POST /admin/model-test：面板探活入口，返回形状与
 // ccLoad HandleChannelTest 对齐（success/message/status_code/duration_ms/
 // first_byte_duration_ms/actual_model/response_text/api_response/error/
@@ -272,7 +287,7 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	probeReq.Header.Set("Authorization", "Bearer "+key)
 	probeReq.Header.Set("Content-Type", "application/json")
-	probeReq.Header.Set("X-Client-Request-Id", "panel-probe")
+	probeReq.Header.Set("X-Client-Request-Id", probeClientRequestID)
 	rec := &probeRecorder{ResponseRecorder: httptest.NewRecorder()}
 	started := time.Now()
 	h.probeHandler.ServeHTTP(rec, probeReq)

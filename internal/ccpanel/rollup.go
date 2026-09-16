@@ -349,19 +349,3 @@ func (r *rollup) lastByModel(m *debuglog.Manager, kh string) map[string]modelLas
 	}
 	return out
 }
-
-// clientProtocol 把入口 api 标识映射成 ccLoad 的 client_protocol 键：
-// anthropic 直连、openai-chat 是 OpenAI 兼容、responses 系（含 WS 轮次）
-// 是 Codex 前端。空 api 的行（早期索引）归入 "unknown"。
-func clientProtocol(api string) string {
-	switch api {
-	case "anthropic":
-		return "anthropic"
-	case "openai-chat":
-		return "openai"
-	case "openai-responses", "responses-ws":
-		return "codex"
-	default:
-		return "unknown"
-	}
-}

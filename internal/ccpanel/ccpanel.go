@@ -19,12 +19,6 @@ import (
 	"github.com/WncFht/devin2api/internal/obs"
 )
 
-// synthChannelID 是合成渠道的固定 ID：移植前端的渠道下拉、日志行
-// 渠道跳转、test-key 模态都要求至少一个渠道存在，本服务只有一条
-// 上游，统一投影成 id=1 name="devin-2api"。
-const synthChannelID = 1
-const synthChannelName = "devin-2api"
-
 // Handler 提供移植面板的全部路由。
 type Handler struct {
 	// panel 复用旧面板的密码快照、爆破账本与模型目录缓存。
@@ -33,7 +27,7 @@ type Handler struct {
 	debug *debuglog.Manager
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
-	// baseURL 是当前上游地址，投影到合成渠道的 base_url。
+	// baseURL 是当前上游地址，投到日志行与调试响应的 base_url/req_url。
 	baseURL string
 	// maxConcurrency 是 /v1 管线的全局并发上限（0=无限制），
 	// 投影到 runtime-metrics 的 max_concurrency。
@@ -102,8 +96,7 @@ func (h *Handler) SetTokenStore(s *authtoken.Store) {
 	h.tokens = s
 }
 
-// SetModelRegistry 注入模型注册表仓（/admin/model-registry 与渠道模型
-// 清单投影用）。
+// SetModelRegistry 注入模型注册表仓（/admin/model-registry 用）。
 func (h *Handler) SetModelRegistry(s *modelreg.Store) {
 	h.models = s
 }
@@ -148,8 +141,6 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/dashboard/stats", h.withWebAuth(h.dashboardStats))
 	mux.Get("/dashboard/stats/filter-options", h.withWebAuth(h.dashboardStatsFilterOptions))
 	mux.Get("/dashboard/models", h.withWebAuth(h.dashboardModels))
-	mux.Get("/dashboard/channels", h.withWebAuth(h.dashboardChannels))
-	mux.Get("/dashboard/channels/filter-options", h.withWebAuth(h.channelFilterOptions))
 
 	mux.Get("/admin/active-requests", h.withAuth(h.adminActiveRequests))
 	mux.Get("/admin/active-requests/{id}/debug-log", h.withAuth(h.adminActiveRequestDebugLog))
@@ -161,10 +152,6 @@ func (h *Handler) Register(mux interface {
 	mux.Get("/admin/metrics", h.withAuth(h.dashboardMetrics))
 	mux.Get("/admin/stats", h.withAuth(h.dashboardStats))
 	mux.Get("/admin/stats/filter-options", h.withAuth(h.dashboardStatsFilterOptions))
-	mux.Get("/admin/channels", h.withAuth(h.adminListChannels))
-	mux.Get("/admin/channels/filter-options", h.withAuth(h.channelFilterOptions))
-	mux.Get("/admin/channels/{id}", h.withAuth(h.adminGetChannel))
-	mux.Get("/admin/channels/{id}/keys", h.withAuth(h.adminChannelKeys))
 	mux.Get("/admin/settings", h.withAuth(h.adminListSettings))
 	mux.Get("/admin/settings/{key}", h.withAuth(h.adminGetSetting))
 	mux.Put("/admin/settings/{key}", h.withAuth(h.adminUpdateSetting))

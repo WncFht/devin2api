@@ -60,12 +60,8 @@ type Token struct {
 	MonthlyLimitMicroUSD int64 `json:"cost_monthly_limit_micro_usd"`
 	MonthlyPeriodStart   int64 `json:"cost_monthly_period_start"`
 
-	AllowedModels []string `json:"allowed_models,omitempty"`
-	// 渠道限制字段只为契约兼容而存：本服务只有一条合成上游（id=1），
-	// allow 列表不含 1 或 deny 列表含 1 时该令牌全部请求被拒。
-	AllowedChannelIDs      []int64 `json:"allowed_channel_ids,omitempty"`
-	ChannelRestrictionMode string  `json:"channel_restriction_mode,omitempty"`
-	MaxConcurrency         int     `json:"max_concurrency"`
+	AllowedModels  []string `json:"allowed_models,omitempty"`
+	MaxConcurrency int      `json:"max_concurrency"`
 
 	inflight int64 // 在途并发计数，不序列化
 }
@@ -103,8 +99,6 @@ type View struct {
 	AvgRPM                   float64   `json:"avg_rpm,omitempty"`
 	RecentRPM                float64   `json:"recent_rpm,omitempty"`
 	AllowedModels            []string  `json:"allowed_models,omitempty"`
-	AllowedChannelIDs        []int64   `json:"allowed_channel_ids,omitempty"`
-	ChannelRestrictionMode   string    `json:"channel_restriction_mode,omitempty"`
 	MaxConcurrency           int       `json:"max_concurrency"`
 }
 
@@ -119,10 +113,6 @@ func (t *Token) API() View {
 	monthlyUsed := t.MonthlyUsedMicroUSD
 	if t.MonthlyPeriodStart != monthStart {
 		monthlyUsed = 0
-	}
-	mode := t.ChannelRestrictionMode
-	if mode == "" {
-		mode = "allow"
 	}
 	return View{
 		ID:                       t.ID,
@@ -151,8 +141,6 @@ func (t *Token) API() View {
 		CostMonthlyUsedUSD:       float64(monthlyUsed) / 1e6,
 		CostMonthlyLimitUSD:      float64(t.MonthlyLimitMicroUSD) / 1e6,
 		AllowedModels:            t.AllowedModels,
-		AllowedChannelIDs:        t.AllowedChannelIDs,
-		ChannelRestrictionMode:   mode,
 		MaxConcurrency:           t.MaxConcurrency,
 	}
 }
@@ -184,21 +172,6 @@ func (t *Token) IsModelAllowed(model string) bool {
 		}
 	}
 	return false
-}
-
-// channelAllowed 执行渠道限制：合成渠道恒为 id=1，allow 空表不限制。
-func (t *Token) channelAllowed() bool {
-	if len(t.AllowedChannelIDs) == 0 {
-		return true
-	}
-	listed := false
-	for _, id := range t.AllowedChannelIDs {
-		if id == 1 {
-			listed = true
-			break
-		}
-	}
-	return listed != (t.ChannelRestrictionMode == "deny")
 }
 
 // HasCostLimit 报告是否配置了任一费用限额。
@@ -341,7 +314,7 @@ func HashToken(plain string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期 + 渠道策略放行。
+// Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期。
 // 命中即刷新 LastUsedAt（内存态，随后续落盘固化）。
 func (s *Store) Resolve(plain string) (*Token, bool) {
 	if plain == "" {
@@ -350,7 +323,7 @@ func (s *Store) Resolve(plain string) (*Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.byHash[HashToken(plain)]
-	if !ok || !t.IsValid() || !t.channelAllowed() {
+	if !ok || !t.IsValid() {
 		return nil, false
 	}
 	now := time.Now().UnixMilli()

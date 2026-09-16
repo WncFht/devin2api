@@ -3,7 +3,6 @@ package ccpanel
 import (
 	"math"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,12 +11,9 @@ import (
 	"github.com/WncFht/devin2api/internal/dashboard"
 )
 
-// statsEntry 对应 ccLoad model.StatsEntry：stats 页按 (渠道,模型) 聚合的行。
-// 渠道恒为合成渠道；模型维=生效模型（cellKey.model 同口径）。
+// statsEntry 对应 ccLoad model.StatsEntry 的渠道列收缩版：stats 页按模型
+// 聚合的行（模型维=生效模型，cellKey.model 同口径）。本服务单上游无渠道维。
 type statsEntry struct {
-	ChannelID               *int          `json:"channel_id,omitempty"`
-	ChannelName             string        `json:"channel_name"`
-	ChannelPriority         *int          `json:"channel_priority,omitempty"`
 	Model                   string        `json:"model"`
 	Success                 int64         `json:"success"`
 	Error                   int64         `json:"error"`
@@ -59,33 +55,15 @@ type healthPoint struct {
 	EffectiveCost    float64   `json:"effective_cost"`
 }
 
-// channelQueryExcluded 判定渠道维筛选是否排除掉唯一的合成渠道；
-// ccLoad 的 channel 过滤无匹配即 isEmpty=true，整个结果为空集。
-func channelQueryExcluded(q url.Values) bool {
-	if id := strings.TrimSpace(q.Get("channel_id")); id != "" && id != strconv.Itoa(synthChannelID) {
-		return true
-	}
-	if name := strings.TrimSpace(q.Get("channel_name")); name != "" && name != synthChannelName {
-		return true
-	}
-	if like := strings.TrimSpace(q.Get("channel_name_like")); like != "" && !strings.Contains(synthChannelName, like) {
-		return true
-	}
-	return false
-}
-
 // queryScope 把一次统计查询的数据范围折成格子谓词 + 限定的 key_hash。
 // 范围来源两类：api_token 身份（强制只看自己的行）与 query 筛选
-// （channel_*、auth_token_id、client_protocol、model、model_like）。
+// （api、auth_token_id、model、model_like）。
 // 返回的 kh 是收敛后的单令牌 key_hash（api_token 身份或 auth_token_id
 // 参数命中时），供 last/recent 辅助结构沿用同一范围；excluded=true
-// 表示条件不可能命中（渠道不匹配、auth_token_id 查无令牌、或与
-// api_token 身份冲突），调用方直接回空集。
+// 表示条件不可能命中（auth_token_id 查无令牌、或与 api_token 身份
+// 冲突），调用方直接回空集。
 func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, kh string, excluded bool) {
 	q := r.URL.Query()
-	if channelQueryExcluded(q) {
-		return nil, "", true
-	}
 	if id := identityFrom(r); id.Role == "api_token" {
 		kh = id.KeyHash
 		if kh == "" {
@@ -104,17 +82,17 @@ func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, kh stri
 		}
 		kh = tkh
 	}
-	proto := strings.TrimSpace(q.Get("client_protocol"))
+	api := strings.TrimSpace(q.Get("api"))
 	model := strings.TrimSpace(q.Get("model"))
 	modelLike := strings.TrimSpace(q.Get("model_like"))
-	if kh == "" && proto == "" && model == "" && modelLike == "" {
+	if kh == "" && api == "" && model == "" && modelLike == "" {
 		return nil, "", false
 	}
 	return func(k cellKey) bool {
 		if kh != "" && k.kh != kh {
 			return false
 		}
-		if proto != "" && clientProtocol(k.api) != proto {
+		if api != "" && k.api != api {
 			return false
 		}
 		if model != "" && k.model != model {
@@ -127,10 +105,10 @@ func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, kh stri
 	}, kh, false
 }
 
-// dashboardStats 实现 ccLoad 的 /dashboard|/admin/stats：
-// {stats:[StatsEntry per model], channel_health:{“1”:[48点]},
-// duration_seconds, rpm_stats, is_today}。success/error/total/499 口径与
-// ccLoad GetStats SQL 逐条对齐（success=2xx，error=非2xx非499，total=非499）。
+// dashboardStats 实现 /dashboard|/admin/stats：
+// {stats:[StatsEntry per model], duration_seconds, rpm_stats, is_today}。
+// success/error/total/499 口径与 ccLoad GetStats SQL 逐条对齐
+// （success=2xx，error=非2xx非499，total=非499）。
 func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, rangeName := resolveRange(r, now)
@@ -139,14 +117,9 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	if duration < 1 {
 		duration = 1
 	}
-	respond := func(stats []statsEntry, channelHealth []healthPoint, rpm map[string]any) {
-		var ch map[int][]healthPoint
-		if channelHealth != nil {
-			ch = map[int][]healthPoint{synthChannelID: channelHealth}
-		}
+	respond := func(stats []statsEntry, rpm map[string]any) {
 		respondOK(w, map[string]any{
 			"stats":            stats,
-			"channel_health":   ch,
 			"duration_seconds": duration,
 			"rpm_stats":        rpm,
 			"is_today":         isToday,
@@ -154,7 +127,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	}
 	match, kh, excluded := h.queryScope(r)
 	if excluded {
-		respond([]statsEntry{}, nil, zeroRPMStats())
+		respond([]statsEntry{}, zeroRPMStats())
 		return
 	}
 	prices := h.panel.CatalogPrices(r.Context())
@@ -188,22 +161,17 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(models)
 
-	perModel, channelTL := h.healthTimelines(since, until, isToday, match, prices)
+	perModel := h.healthTimelines(since, until, isToday, match, prices)
 
-	chID := synthChannelID
-	prio := 0
 	entries := make([]statsEntry, 0, len(models))
 	for _, m := range models {
 		a := aggs[m]
 		e := statsEntry{
-			ChannelID:       &chID,
-			ChannelName:     synthChannelName,
-			ChannelPriority: &prio,
-			Model:           m,
-			Success:         a.t.ok,
-			Error:           a.t.requests - a.t.ok - a.t.gone,
-			Total:           a.t.requests - a.t.gone,
-			HealthTimeline:  perModel[m],
+			Model:          m,
+			Success:        a.t.ok,
+			Error:          a.t.requests - a.t.ok - a.t.gone,
+			Total:          a.t.requests - a.t.gone,
+			HealthTimeline: perModel[m],
 		}
 		if a.t.nFirstOK > 0 {
 			v := float64(a.t.sumFirstOKMS) / float64(a.t.nFirstOK) / 1000
@@ -262,14 +230,14 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, e)
 	}
-	respond(entries, channelTL, h.rpmStatsFiltered(since, until, match, isToday, strings.TrimSpace(r.URL.Query().Get("model")), kh))
+	respond(entries, h.rpmStatsFiltered(since, until, match, isToday, strings.TrimSpace(r.URL.Query().Get("model")), kh))
 }
 
-// healthTimelines 复刻 ccLoad fillHealthTimeline：isToday 取最近 4h 按
-// 5min×48 桶，否则按 range/48 桶；返回 per-model 时间线与渠道聚合时间线。
+// healthTimelines 复刻 ccLoad fillHealthTimeline 的 per-model 部分：
+// isToday 取最近 4h 按 5min×48 桶，否则按 range/48 桶。
 // 格子分辨率 10min：今日档一个格子跨两个桶，按重叠秒数比例分摊计数
-// （成功率/均值不变，计数为区间估计）。
-func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match func(cellKey) bool, prices map[string]dashboard.CatalogPrice) (map[string][]healthPoint, []healthPoint) {
+// （成功率/均值不变，计数为区间估计）。单上游无渠道聚合时间线。
+func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match func(cellKey) bool, prices map[string]dashboard.CatalogPrice) map[string][]healthPoint {
 	const numBuckets = 48
 	var healthStart time.Time
 	var bucketSec int64
@@ -367,49 +335,7 @@ func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match fu
 		}
 		perModel[m] = pts
 	}
-	if len(perModel) == 0 {
-		return perModel, nil
-	}
-
-	// 渠道聚合：ccLoad 同款按桶索引合并，均值用 success 数加权。
-	channel := make([]healthPoint, numBuckets)
-	for i := range channel {
-		channel[i] = healthPoint{
-			Ts:          time.Unix(startUnix+int64(i)*bucketSec, 0),
-			SuccessRate: -1,
-		}
-	}
-	for _, pts := range perModel {
-		for i, pt := range pts {
-			if pt.SuccessRate < 0 {
-				continue
-			}
-			ch := &channel[i]
-			if ch.SuccessRate < 0 {
-				*ch = pt
-				continue
-			}
-			oldSucc, newSucc := ch.Success, pt.Success
-			if tot := oldSucc + newSucc; tot > 0 {
-				w := float64(tot)
-				ch.AvgFirstByteTime = (ch.AvgFirstByteTime*float64(oldSucc) + pt.AvgFirstByteTime*float64(newSucc)) / w
-				ch.AvgDuration = (ch.AvgDuration*float64(oldSucc) + pt.AvgDuration*float64(newSucc)) / w
-			}
-			ch.Success += pt.Success
-			ch.Error += pt.Error
-			ch.RateLimited += pt.RateLimited
-			if tot := ch.Success + ch.Error; tot > 0 {
-				ch.SuccessRate = float64(ch.Success) / float64(tot)
-			}
-			ch.InputTokens += pt.InputTokens
-			ch.OutputTokens += pt.OutputTokens
-			ch.CacheReadTokens += pt.CacheReadTokens
-			ch.CacheWriteTokens += pt.CacheWriteTokens
-			ch.Cost += pt.Cost
-			ch.EffectiveCost += pt.EffectiveCost
-		}
-	}
-	return perModel, channel
+	return perModel
 }
 
 // rpmStatsFiltered 由 10 分钟格子推导 RPM/QPS：计数口径非 499
@@ -452,7 +378,7 @@ func (h *Handler) rpmStatsFiltered(since, until time.Time, match func(cellKey) b
 	}
 }
 
-// zeroRPMStats 返回全零 rpm_stats（渠道过滤排空时的响应件）。
+// zeroRPMStats 返回全零 rpm_stats（筛选排空时的响应件）。
 func zeroRPMStats() map[string]any {
 	return map[string]any{
 		"peak_rpm": 0.0, "peak_qps": 0.0,
@@ -462,14 +388,10 @@ func zeroRPMStats() map[string]any {
 }
 
 // dashboardStatsFilterOptions 实现 /dashboard|/admin/stats/filter-options：
-// 范围内出现过的模型名 + 合成渠道名（channel 过滤命中排除时为空表）。
+// 范围内出现过的模型名表（auth_token_id 查无令牌等排空场景为空表）。
 func (h *Handler) dashboardStatsFilterOptions(w http.ResponseWriter, r *http.Request) {
 	since, until, _ := resolveRange(r, time.Now())
 	match, _, excluded := h.queryScope(r)
-	channelNames := []string{}
-	if !excluded {
-		channelNames = []string{synthChannelName}
-	}
 	set := map[string]struct{}{}
 	if !excluded {
 		h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
@@ -488,31 +410,6 @@ func (h *Handler) dashboardStatsFilterOptions(w http.ResponseWriter, r *http.Req
 	}
 	sort.Strings(models)
 	respondOK(w, map[string]any{
-		"channel_names": channelNames,
-		"models":        models,
+		"models": models,
 	})
-}
-
-// dashboardChannels 实现 /dashboard/channels：dashboardChannelView 形状的
-// 合成渠道单行（渠道页未移植，此投影喂趋势/统计页的渠道下拉）。
-func (h *Handler) dashboardChannels(w http.ResponseWriter, r *http.Request) {
-	if channelQueryExcluded(r.URL.Query()) || strings.TrimSpace(r.URL.Query().Get("status")) == "disabled" {
-		respondOKCount(w, []any{}, 0)
-		return
-	}
-	models := make([]map[string]any, 0)
-	for _, name := range h.channelModelNames(r) {
-		models = append(models, map[string]any{"model": name})
-	}
-	respondOKCount(w, []map[string]any{{
-		"id":                      synthChannelID,
-		"name":                    synthChannelName,
-		"urls":                    []map[string]any{{"url": h.baseURL}},
-		"protocol_transform_mode": "auto",
-		"priority":                0,
-		"enabled":                 true,
-		"models":                  models,
-		"cost_multiplier_min":     1.0,
-		"cost_multiplier_max":     1.0,
-	}}, 1)
 }

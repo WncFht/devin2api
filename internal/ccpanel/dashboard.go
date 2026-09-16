@@ -2,7 +2,6 @@ package ccpanel
 
 import (
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -64,10 +63,10 @@ func resolveRange(r *http.Request, now time.Time) (since, until time.Time, range
 	}
 }
 
-// protocolStat 对应 ccLoad 的 ClientProtocolStats / AuthTypeStats（字段同名）。
-type protocolStat struct {
-	ClientProtocol           string  `json:"client_protocol,omitempty"`
-	AuthType                 string  `json:"auth_type,omitempty"`
+// endpointStat 是 /dashboard/summary 按入口端点分组的用量行；
+// api 取 index.jsonl 的原值（anthropic/openai-chat/openai-responses/responses-ws）。
+type endpointStat struct {
+	API                      string  `json:"api,omitempty"`
 	TotalRequests            int64   `json:"total_requests"`
 	SuccessRequests          int64   `json:"success_requests"`
 	ErrorRequests            int64   `json:"error_requests"`
@@ -79,10 +78,10 @@ type protocolStat struct {
 	EffectiveCost            float64 `json:"effective_cost"`
 }
 
-// dashboardSummary 实现 ccLoad 的 /dashboard/summary：按入口协议与渠道认证
-// 类型（本服务恒 api_key）分组的用量卡片。口径对齐 GetClientProtocolStats/
-// GetAuthTypeStats：success=2xx、error=非2xx非499、total=success+error，
-// token/成本求和含 499 行；api_token 身份收敛到自己的 key_hash 行。
+// dashboardSummary 实现 /dashboard/summary：按入口端点（index.jsonl api
+// 字段）分组的用量卡片。口径对齐 ccLoad GetClientProtocolStats：
+// success=2xx、error=非2xx非499、total=success+error，token/成本求和
+// 含 499 行；api_token 身份收敛到自己的 key_hash 行。
 func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, rangeName := resolveRange(r, now)
@@ -90,21 +89,20 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	match, kh, excluded := h.queryScope(r)
 	prices := h.panel.CatalogPrices(r.Context())
 
-	byProtocol := map[string]*protocolStat{}
-	var grand protocolStat
+	byAPI := map[string]*endpointStat{}
+	var grand endpointStat
 	if !excluded {
 		h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
 			if match != nil && !match(key) {
 				return
 			}
-			proto := clientProtocol(key.api)
-			stat := byProtocol[proto]
+			stat := byAPI[key.api]
 			if stat == nil {
-				stat = &protocolStat{ClientProtocol: proto}
-				byProtocol[proto] = stat
+				stat = &endpointStat{API: key.api}
+				byAPI[key.api] = stat
 			}
 			cost := cellCost(key, c, prices)
-			for _, dst := range []*protocolStat{stat, &grand} {
+			for _, dst := range []*endpointStat{stat, &grand} {
 				dst.TotalRequests += c.requests - c.gone
 				dst.SuccessRequests += c.ok
 				dst.ErrorRequests += c.requests - c.ok - c.gone
@@ -118,15 +116,9 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	protocols := make(map[string]protocolStat, len(byProtocol))
-	for k, v := range byProtocol {
-		protocols[k] = *v
-	}
-	// 认证类型卡按上游渠道 auth_type 分组：唯一合成渠道恒 api_key。
-	grand.AuthType = "api_key"
-	byAuth := map[string]protocolStat{}
-	if grand.TotalRequests > 0 {
-		byAuth["api_key"] = grand
+	apis := make(map[string]endpointStat, len(byAPI))
+	for k, v := range byAPI {
+		apis[k] = *v
 	}
 
 	duration := until.Sub(since).Seconds()
@@ -138,21 +130,20 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 		rpm = h.rpmStatsFiltered(since, until, match, isToday, "", kh)
 	}
 	respondOK(w, map[string]any{
-		"total_requests":     grand.TotalRequests,
-		"success_requests":   grand.SuccessRequests,
-		"error_requests":     grand.ErrorRequests,
-		"range":              rangeName,
-		"duration_seconds":   duration,
-		"rpm_stats":          rpm,
-		"is_today":           isToday,
-		"by_client_protocol": protocols,
-		"by_auth_type":       byAuth,
+		"total_requests":   grand.TotalRequests,
+		"success_requests": grand.SuccessRequests,
+		"error_requests":   grand.ErrorRequests,
+		"range":            rangeName,
+		"duration_seconds": duration,
+		"rpm_stats":        rpm,
+		"is_today":         isToday,
+		"by_api":           apis,
 	})
 }
 
-// metricPoint/metricChannel 对应 ccLoad 的 MetricPoint/ChannelMetric：
-// channels 按模型名键控（本服务无多上游渠道，模型即最细维度）。
-type metricChannel struct {
+// metricPoint/metricModel 对应 ccLoad 的 MetricPoint/ChannelMetric：
+// models 按模型名键控（本服务无多上游渠道，模型即最细维度）。
+type metricModel struct {
 	Success                 int64    `json:"success"`
 	Error                   int64    `json:"error"`
 	AvgFirstByteTimeSeconds *float64 `json:"avg_first_byte_time_seconds,omitempty"`
@@ -166,24 +157,24 @@ type metricChannel struct {
 }
 
 type metricPoint struct {
-	Ts                      time.Time                `json:"ts"`
-	Success                 int64                    `json:"success"`
-	Error                   int64                    `json:"error"`
-	AvgFirstByteTimeSeconds *float64                 `json:"avg_first_byte_time_seconds,omitempty"`
-	AvgDurationSeconds      *float64                 `json:"avg_duration_seconds,omitempty"`
-	TotalCost               *float64                 `json:"total_cost,omitempty"`
-	EffectiveCost           *float64                 `json:"effective_cost,omitempty"`
-	FirstByteSampleCount    int64                    `json:"first_byte_count,omitempty"`
-	DurationSampleCount     int64                    `json:"duration_count,omitempty"`
-	InputTokens             int64                    `json:"input_tokens,omitempty"`
-	OutputTokens            int64                    `json:"output_tokens,omitempty"`
-	CacheReadTokens         int64                    `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens     int64                    `json:"cache_creation_tokens,omitempty"`
-	Channels                map[string]metricChannel `json:"channels,omitempty"`
+	Ts                      time.Time              `json:"ts"`
+	Success                 int64                  `json:"success"`
+	Error                   int64                  `json:"error"`
+	AvgFirstByteTimeSeconds *float64               `json:"avg_first_byte_time_seconds,omitempty"`
+	AvgDurationSeconds      *float64               `json:"avg_duration_seconds,omitempty"`
+	TotalCost               *float64               `json:"total_cost,omitempty"`
+	EffectiveCost           *float64               `json:"effective_cost,omitempty"`
+	FirstByteSampleCount    int64                  `json:"first_byte_count,omitempty"`
+	DurationSampleCount     int64                  `json:"duration_count,omitempty"`
+	InputTokens             int64                  `json:"input_tokens,omitempty"`
+	OutputTokens            int64                  `json:"output_tokens,omitempty"`
+	CacheReadTokens         int64                  `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens     int64                  `json:"cache_creation_tokens,omitempty"`
+	Models                  map[string]metricModel `json:"models,omitempty"`
 }
 
 // dashboardMetrics 实现 /dashboard/metrics：按 bucket_min 聚合的时间桶点列，
-// channels 键为模型名（本服务无多上游渠道，模型即最细维度）。口径对齐
+// models 键为模型名（本服务无多上游渠道，模型即最细维度）。口径对齐
 // ccLoad AggregateRangeWithFilter：success=2xx、error=非2xx非499，
 // token/成本只计非 499 行（NG 字段），均值样本为 2xx 且时值>0 的行。
 // 无论有无数据都补出 [since,until] 对齐 bucket 边界的满序列（metrics_finalize
@@ -266,9 +257,9 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 		p := metricPoint{Ts: time.Unix(b, 0)}
 		if a := buckets[b]; a != nil {
 			fill(&p, a.total, a.cost)
-			p.Channels = make(map[string]metricChannel, len(a.byModel))
+			p.Models = make(map[string]metricModel, len(a.byModel))
 			for model, t := range a.byModel {
-				mc := metricChannel{
+				mc := metricModel{
 					Success:             t.ok,
 					Error:               t.requests - t.ok - t.gone,
 					InputTokens:         t.inTokNG,
@@ -288,7 +279,7 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 					mc.TotalCost = &c
 					mc.EffectiveCost = &c
 				}
-				p.Channels[model] = mc
+				p.Models[model] = mc
 			}
 		}
 		points = append(points, p)
@@ -319,46 +310,11 @@ func tokenCost(model string, in, out, cacheRead, cacheWrite int64, prices map[st
 }
 
 // dashboardModels 实现 /dashboard/models 与 /admin/models：
-// 日志里出现过的模型 + 合成渠道 + 出现过的状态码。
+// 日志里出现过的模型 + 出现过的状态码。
 // api_token 身份收敛到自己产生过流量的模型。
 func (h *Handler) dashboardModels(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, map[string]any{
 		"models":       h.ru.modelSet(h.debug, identityFrom(r).KeyHash),
-		"channels":     []map[string]any{{"id": synthChannelID, "name": synthChannelName}},
 		"status_codes": h.ru.statusCodeSet(h.debug),
 	})
-}
-
-// channelFilterOptions 实现 /admin/channels/filter-options 与
-// /dashboard/channels/filter-options：单渠道名 + 注册表模型名表。
-func (h *Handler) channelFilterOptions(w http.ResponseWriter, r *http.Request) {
-	models := map[string]struct{}{}
-	for _, m := range h.channelModelNames(r) {
-		models[m] = struct{}{}
-	}
-	for _, m := range h.ru.modelSet(h.debug, identityFrom(r).KeyHash) {
-		models[m] = struct{}{}
-	}
-	list := make([]string, 0, len(models))
-	for m := range models {
-		list = append(list, m)
-	}
-	sort.Strings(list)
-	respondOK(w, map[string]any{
-		"channel_names": []string{synthChannelName},
-		"models":        list,
-	})
-}
-
-// channelModelNames 返回合成渠道对外的模型名表：目录 ∪ 别名 ∪ 注册表 ∪
-// 流量中见过的模型名（与注册表页同一并集——注册表项可能创造目录外的
-// 对外名字，流量名则覆盖未登记的直通名）。
-func (h *Handler) channelModelNames(r *http.Request) []string {
-	set := h.modelNamesUnion(r)
-	out := make([]string, 0, len(set))
-	for m := range set {
-		out = append(out, m)
-	}
-	sort.Strings(out)
-	return out
 }
