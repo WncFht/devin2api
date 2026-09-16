@@ -17,7 +17,7 @@
 
 ## pprof 端点
 
-`config.yaml` 里设 `debug.pprof_listen: "127.0.0.1:6060"` 后，进程在该地址起一个**独立 mux** 的 HTTP 服务，与主端口隔离：无鉴权，只应绑回环地址，跨机用 `ssh -L` 转发。该字段在 `requires_restart` 列表中，热重载不生效。
+`config.yaml` 里设 `debug.pprof_listen: "127.0.0.1:6060"` 后，进程在该地址起一个**独立 mux** 的 HTTP 服务，与主端口隔离：无鉴权，只应绑回环地址，跨机用 `ssh -L` 转发。该字段可热重载——`POST /panel/api/config/reload` 换绑或置空关闭，bind 失败不致命且同值 reload 会重试。
 
 端点清单（GET）：
 

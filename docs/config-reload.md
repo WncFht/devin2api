@@ -6,18 +6,22 @@
 
 ## 当前分界
 
-热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、或有专门的运行时 setter（token、闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）。
-冷键的共同特征：值在启动时烤进了不在重载面上的对象——transport（base_url/proxy/force_http1 进了 http.Client）、listener（server.listen）、srv 配置（max_concurrency 是 HTTPServer 字段）、定时器周期（quota_interval_minutes 是已启动的 ticker）。
+热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（token、闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。
+冷键只剩 server.listen：Serve 无法换绑端口，同一问题的更难版本（换进程）已由 reuseport 交接部署解决，进程内换监听收益小、排空语义一样绕不过。
 
-| 热应用（applied）                                                                                 | 需重启（requires_restart）                        |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| devin.model / devin.aliases / devin.client_name / client_version / client_os                      | devin.base_url / devin.proxy / devin.force_http1  |
-| devin.token                                                                                       | server.listen / server.max_concurrency            |
-| devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        | debug.quota_interval_minutes / debug.pprof_listen |
-| devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                                                   |
-| auth.api_key / dashboard.password                                                                 |                                                   |
-| debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs） |                                                   |
+| 热应用（applied）                                                                                 | 需重启（requires_restart） |
+| ------------------------------------------------------------------------------------------------- | -------------------------- |
+| devin.model / devin.aliases / devin.client_name / client_version / client_os                      | server.listen              |
+| devin.base_url / devin.proxy / devin.force_http1                                                  |                            |
+| devin.token                                                                                       |                            |
+| devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        |                            |
+| devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                            |
+| auth.api_key / dashboard.password                                                                 |                            |
+| debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs） |                            |
+| debug.quota_interval_minutes / debug.pprof_listen                                                 |                            |
+| server.max_concurrency                                                                            |                            |
 
+端点三件套的热更语义：ApplyConfig 先用新参数构建整个上游调用束（transport + stream/api client + 焐池 warmer），构建失败（如非法 proxy）整单 422、旧配置继续服役；构建成功才换 config 快照并原子换指针。在途调用持旧 link 跑完，旧 transport 只收 idle 池；换 base_url 还会清空 AssignModel 缓存（jwt 绑 cascade_id，旧端点的解析对新上游无效）。面板经 `panel.SetUpstream` 跟随同一端点，移植面板的展示地址读 `panel.BaseURL()` 同源透出。
 注意 `devin.client_*` 只影响 chat 路径：面板自身的 seat 类上游调用固定用 windsurf 身份，不随这个键变。
 
 ## 面板覆盖恒赢文件
@@ -28,7 +32,7 @@
 
 ## 以后加新热键的步骤
 
-1. 确认字段的运行时持有者可变：快照读取（如 adapter.config）加一对字段比较即可；烤进 transport/listener/ticker 的字段要么改造持有者（重建 transport 涉及在途连接与连接池排空，成本高），要么老实进 requires_restart。
+1. 确认字段的运行时持有者可变：快照读取（如 adapter.config）加一对字段比较即可；烤进 transport/ticker/listener 的字段参考既有先例改造持有者——端点三件套是「重建调用束 + 原子换指针」（devin.go 的 upstreamLink、dashboard 的 panelUpstream），ticker 是「cancel 重起」（SetQuotaInterval），listener 不做（见下）。
 2. 在 `reloadRuntimeConfig`（cmd/devin-2api/main.go）里加 prev/next 比较与 setter 调用，字段名进 `applied`。
 3. 若字段同时想进面板设置页，在 `internal/ccpanel/settings.go` 的键表登记并在 ApplyAll 里接 setter——登记即获得「面板赢」语义，不需要额外代码。
 4. 验证：`curl -X POST -H "Authorization: Bearer <pw>" localhost:<port>/panel/api/config/reload` 看 applied 列表；`GET /panel/api/config` 看生效视图。
@@ -36,4 +40,3 @@
 ## 已排除的方向
 
 `server.listen` 热更意味着关旧 listener 开新的——reuseport 交接流程（deploy.sh）已经解决了同一问题的更难版本（换进程），进程内换监听收益小、排空语义却一样绕不过，不做。
-transport 三件套（base_url/proxy/force_http1）热更要做连接池迁移，同理搁置；真改就重启。
