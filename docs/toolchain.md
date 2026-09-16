@@ -8,6 +8,7 @@
 
 - `*.md`：`markdownlint-cli2 --fix` 原地修可自动修的规则 → `autocorrect --stdin | prettier` 写 index。markdownlint 原地改写文件时会 fail 一次，**重新 `git add` 再提交**即可，不是错误。
 - `*.go`：`gofmt` 走同一机制。
+- 全补丁：gitleaks 密钥扫描（v8.30.1 上游 hook，自定义规则在 `.gitleaks.toml`——GitHub push protection 只认标准 pattern，`devin-session-token$` 这类自有格式靠它拦）。
 - markdownlint / prettier / autocorrect 的版本锁定在 `package.json`（`npm install` + `npm ci` 在 CI 复现），autocorrect 本机经 `brew install autocorrect` 提供。
 
 ## 2. 本地验证
@@ -24,7 +25,9 @@
 | `npm run format:check` / `lint:md`   | markdown 格式/规则                                           | 与 pre-commit 同套版本                                                                                                                      |
 | `actionlint`（若装了）               | workflow 语法                                                | CI 不跑它，本地自查                                                                                                                         |
 
-前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`。
+前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`。Linux 无 brew 时的等价装法（archbox 实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
+
+写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（smoke/release/perf-snapshot/deploy-remote 全是这个写法，新脚本照抄）。
 
 ## 3. 版本解析链（4 级 fallback）
 
@@ -75,7 +78,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 ## 6. 部署脚本族 + 资产断言
 
 - `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
-- `scripts/deploy-remote.sh` 是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 仍取远端仓库的权威副本），`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。
+- `scripts/deploy-remote.sh` 是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar，复制远端在跑实例的 live 配置——`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`），`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。
 - `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。
 
@@ -85,7 +88,24 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 - **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有 12 个：`codebase-design`、`diagnosing-bugs`、`extract-embedded-protos`、`fix-it-never-work-around-it`、`go-comment-conventions`、`golang-pro`、`improve-codebase-architecture`、`llm-core-types`、`observability-first-debugging`、`orchestrating-agents`、`protocol-drift`、`release-runbook`。
 - **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、`docs/`（活文档目录，索引 `docs/README.md`：上游协议逆向、排障手册、客户端接入、配额计费、部署、本文档）。`notes/` 是本机私有工作区（gitignore），只放 `archive/` 日期快照。
 
-## 8. 速查
+## 8. 运维与实验脚本（`scripts/`）
+
+会话排障与上游调研沉淀下来的手工工具，不进 CI：
+
+| 脚本                              | 干什么                                                                                                                                                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033，key 自动读 config.yaml），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步 |
+| `index-stream-stats.py`           | join 请求目录与 index.jsonl 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--logs-dir` 默认按平台探测                                              |
+| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                |
+| `drift-corpus-scan.py`            | 扫 logs 语料统计各协议的漂移形状分布（`--logs-dir`）                                                                                                                                           |
+| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                          |
+| `remote-logs.sh`                  | fht-mba 生产实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish                                                                                              |
+| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可 `--host` 走 ssh                                                                                           |
+| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                  |
+
+脏树时拿干净构建验证的配方：`git worktree add $W/wt HEAD && go build -C $W/wt -o $W/devin-2api ./cmd/devin-2api` 出 HEAD 态二进制 → scratch 目录备一份 `config.yaml`（`listen` 换空闲端口、`debug.enabled: true`）→ `-state-dir .` 让 logs 落本地 → `(nohup … &)` 起 → 测完 `git worktree remove --force` 收尾。多人共用工作树时这是不动主树的验证通道。
+
+## 9. 速查
 
 ```bash
 # 提交前

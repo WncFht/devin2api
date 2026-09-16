@@ -4,13 +4,13 @@ Thanks for considering contributing to `devin-2api`. This guide covers the archi
 
 ## Project positioning (read this first)
 
-`devin-2api` is a **protocol adapter**: HTTP speaks OpenAI Responses, the upstream is Devin Connect, and a vendor-neutral model layer (`internal/llm`) isolates the two — so new upstreams can be added behind the same HTTP surface by implementing the adapter interface. Agent-loop semantics stay equivalent — not provider request-structure equivalent.
+`devin-2api` is a **protocol adapter**: HTTP speaks OpenAI Responses / Chat Completions / Anthropic Messages, the upstream is Devin Connect, and a vendor-neutral model layer (`internal/llm`) isolates the two — so new upstreams can be added behind the same HTTP surface by implementing the adapter interface. Agent-loop semantics stay equivalent — not provider request-structure equivalent.
 
 Every change must respect this boundary: an upstream must not bypass the `llm` intermediate layer — the HTTP protocol and any upstream protocol must never be mapped directly:
 
 ```text
-OpenAI Responses HTTP ──► llm intermediate layer ──► Devin Connect RPC
-   (codec)                  (semantic model)           (adapter)
+OpenAI / Anthropic HTTP ──► llm intermediate layer ──► Devin Connect RPC
+        (codec)               (semantic model)           (adapter)
 ```
 
 - The HTTP codec only understands the OpenAI protocol, never Devin;
@@ -56,14 +56,14 @@ Full request lifecycle:
 
 The semantic model shared by all adapters, defined in `internal/llm`:
 
-| Concept            | Description                                                                            |
-| ------------------ | -------------------------------------------------------------------------------------- |
-| `RequestMessages`  | Full request context: `SystemPrompt` + chronologically ordered `Messages` + `Tools`    |
-| `Message`          | `UserMessage` / `AssistantMessage` / `ToolResultMessage` (role decided by `Role()`)    |
-| `Content`          | Content blocks: `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall`        |
-| `ToolDefinition`   | Tool name + description + JSON Schema input                                            |
-| `ResponseEvent`    | Incremental events (13 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …) |
-| `AssistantMessage` | Final aggregated message incl. `Usage`, `StopReason`, provider metadata                |
+| Concept            | Description                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------------------------- |
+| `RequestMessages`  | Full request context: `SystemPrompt` + chronologically ordered `Messages` + `Tools`                  |
+| `Message`          | `UserMessage` / `AssistantMessage` / `ToolResultMessage` (role decided by `Role()`)                  |
+| `Content`          | Content blocks: `TextContent` / `ThinkingContent` / `ImageContent` / `ToolCall` / `ServerToolResult` |
+| `ToolDefinition`   | Tool name + description + JSON Schema input                                                          |
+| `ResponseEvent`    | Incremental events (14 kinds: `start`, `text_delta`, `toolcall_*`, `done`, `error`, …)               |
+| `AssistantMessage` | Final aggregated message incl. `Usage`, `StopReason`, provider metadata                              |
 
 Message history is a **complete, replayable conversation across providers**: thinking signatures, tool-call IDs, and usage fields are designed to be passed verbatim into the next request round (see the comments on `TextSignature`, `ThinkingSignature`, etc. in `request.go`).
 
@@ -99,9 +99,9 @@ go run ./cmd/devin-2api -config config.yaml
 
 All three surfaces decode into the same `llm.RequestMessages` and re-encode the same `llm.ResponseEvent` stream — so upstream quirks (tool-call pairing, fingerprint sanitizing, thinking signatures) are handled once, centrally.
 
-- `POST /v1/responses` — subset of the OpenAI Responses API: `input` (string or items: `message`, `function_call`, `function_call_output`, `reasoning`), `instructions`, `tools`, `stream`, `max_output_tokens`, `temperature`, `top_p`, `tool_choice`, `parallel_tool_calls`, `previous_response_id`, `prompt_cache_key`, `user`. `content` parts: `input_text`, `output_text`, `text`, `input_image` (base64 data URL). `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport (`responses_websockets=2026-02-06`), mapping each SSE event to one text frame.
-- `POST /v1/chat/completions` — OpenAI Chat: `messages`, `tools`, `tool_choice`, `stream`/`stream_options.include_usage`, `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `stop`, `response_format`, `parallel_tool_calls`, `prompt_cache_key`, `user`.
-- `POST /v1/messages` — Anthropic Messages: `system`, `messages` (text / `image` / `tool_use` / `tool_result` / `thinking`+`signature` blocks), `tools`, `tool_choice`, `max_tokens`, `stop_sequences`, `thinking`, `metadata.user_id` (used as the session key for cache affinity).
+- `POST /v1/responses` — subset of the OpenAI Responses API: `input` (string or items: `message`, `function_call`, `function_call_output`, `custom_tool_call`, `custom_tool_call_output`, `reasoning`), `instructions`, `tools`, `stream`, `max_output_tokens`, `temperature`, `top_p`, `tool_choice`, `parallel_tool_calls`, `previous_response_id`, `prompt_cache_key`, `user`. `content` parts: `input_text`, `output_text`, `text`, `input_image` (base64 data URL). `GET /v1/responses` upgrades to the OpenAI Responses WebSocket transport (`responses_websockets=2026-02-06`), mapping each SSE event to one text frame.
+- `POST /v1/chat/completions` — OpenAI Chat: `messages`, `tools`, `tool_choice`, `stream`/`stream_options.include_usage`, `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `stop`, `parallel_tool_calls`, `prompt_cache_key`, `user`, `n`, plus legacy `functions`/`function_call`. Unconsumed top-level fields (`response_format`, `reasoning_effort`, `store`, …) are recorded as dropped, not silently ignored.
+- `POST /v1/messages` — Anthropic Messages: `system`, `messages` (text / `image` / `tool_use` / `tool_result` / `thinking`+`signature` / `redacted_thinking` blocks), `tools`, `tool_choice`, `max_tokens`, `stream`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata.user_id` (used as the session key for cache affinity). The top-level `thinking` param has no upstream counterpart and is recorded as dropped.
 - `GET /v1/models` + `GET /v1/models/{model}` — upstream model list with capability flags (`context_tokens`, `max_output_tokens`, `supports_tool_calls`, `supports_parallel_tool_calls`, `supports_thinking`, `preserve_thinking`, `supports_images`).
 
 ### Tool description passing
@@ -116,7 +116,9 @@ When `debug.enabled: true`, each request gets a staged log directory under `<sta
 meta.json                  # request outcome summary (status, model, duration)
 01-http-request.json       # raw HTTP request (redacted)
 02-request-messages.json   # converted intermediate request context
-03-devin-request.json      # proto request sent upstream (as JSON)
+03-devin-request.json      # proto request sent upstream (as JSON); retries add
+                           # .attemptN.json shards, managed search calls use the
+                           # .searchN stem under the same prefix
 04-devin-response.jsonl    # raw upstream response frames
 05-response-events.jsonl   # intermediate response events
 06-http-response.jsonl     # final response/SSE events written to the client
@@ -133,10 +135,11 @@ The admin panel at `/panel` (login: `dashboard.password`) renders these logs as 
 ## Before submitting
 
 1. **Tests pass**: `go test ./...`
-2. **Formatted**: `gofmt -l .` produces no output
-3. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
-4. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
-5. **No real tokens**: `config.yaml` is gitignored; keep it that way and make sure no real `devin.token` ends up in any committed file (pre-commit runs gitleaks to catch committed secrets)
+2. **Linted**: `golangci-lint run` is clean (`.golangci.yml`: default:none + explicit bodyclose/errcheck/govet/revive/staticcheck/unused) — CI runs the same job
+3. **Formatted**: `gofmt -l .` produces no output (or `golangci-lint fmt` for gofmt+goimports)
+4. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
+5. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
+6. **No real tokens**: `config.yaml` is gitignored; keep it that way and make sure no real `devin.token` ends up in any committed file (pre-commit runs gitleaks to catch committed secrets)
 
 ## Submitting changes
 
@@ -249,11 +252,14 @@ internal/
       responses/    # OpenAI Responses HTTP codec (JSON request, JSON/SSE response)
     common/         # shared surface plumbing: error normalization, tool-choice parsing
   app/              # chi routing, request lifecycle, error handling
+  authtoken/        # downstream API token store (auth_tokens.json): /v1 admission concurrency/cost/model limits
+  ccpanel/          # ported admin panel (ccLoad contract): /web, /public, /dashboard/*, /admin/*
   config/           # YAML config loading and validation
   dashboard/        # /panel admin UI + /panel/api aggregation endpoints
   debuglog/         # per-request staged debug logs (redaction + externalized images)
   httpproxy/        # upstream HTTP client construction (proxy, force_http1)
   llm/              # vendor-neutral intermediate model (request, response, event stream)
+  modelreg/         # global model registry (models.json): disable/redirect overlays before alias resolution
   obs/              # process/HTTP metrics behind /panel/api/stats
   randid/           # random ID generation (X-Request-Id / debug dir names)
   upstream/         # shared upstream wire helpers (request metadata, auth transport)

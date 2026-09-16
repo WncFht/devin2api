@@ -14,6 +14,7 @@
 | devin.model / devin.aliases / devin.client_name / client_version / client_os                      | devin.base_url / devin.proxy / devin.force_http1  |
 | devin.token                                                                                       | server.listen / server.max_concurrency            |
 | devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        | debug.quota_interval_minutes / debug.pprof_listen |
+| devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                                                   |
 | auth.api_key / dashboard.password                                                                 |                                                   |
 | debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs） |                                                   |
 

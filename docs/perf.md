@@ -45,6 +45,8 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 
 落盘位置：`logs/<dir>/meta.json`（单请求详情）与 `logs/index.jsonl` 的同名可选字段（批量 `jq` 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
 
+index.jsonl 做命中率聚合时的口径陷阱：必须过滤 `result=="completed" && input_tokens+cache_read_tokens>0`——rate_gate 快败、客户端断连等 0-token 行与 failed 高度重合，不过滤会被当 miss 污染比率；上游 `cache_creation` 恒 0，判活只看 `cache_read`。流级画像（静默间隔→命中率、miss 归因）用 `scripts/index-stream-stats.py`。
+
 `connect` 段另带连接画像：`upstream_conn_reused`/`upstream_conn_idle_ms`（index 侧 `conn_reused`/`conn_idle_ms`）记录成功建流那次发送是否复用了 idle 连接（httptrace `GotConn`）。`connect` 偏高时它是分水岭：`reused=true` 说明大头在上游响应头延迟（上游排队/思考，本地可优化空间小），`reused=false` 则是 TCP+TLS 握手成本（本地保温/复用策略的覆盖问题）。
 
 读法：本机桩（interval=0）下 decode/transform 是主项属正常——桩没有网络与思考延迟，代理自身开销被放大显示；真实上游下 `connect`+`upstream_ttft` 通常占绝对大头，此时分解的价值是确认 egress/transform 没有异常回退。
@@ -56,7 +58,7 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 标准一轮优化测量：
 
 ```bash
-# 1. 改前：微基准基线 + 一次完整快照（默认桩 200×32B delta、8 并发、15s 剖析）
+# 1. 改前：微基准基线 + 一次完整快照（默认桩 200×32B delta、8 并发、25s 剖析）
 scripts/bench.sh before
 scripts/perf-snapshot.sh --out outputs/perf/before
 
@@ -72,13 +74,13 @@ scripts/perf-snapshot.sh --out outputs/perf/after
 ~/go/bin/benchstat outputs/bench/before.txt outputs/bench/after.txt
 ```
 
-`perf-snapshot.sh` 常用参数：`--concurrency/--requests`（压测强度）、`--deltas/--delta-bytes/--interval/--ttfb`（桩的流形态）、`--profile-seconds`（剖析窗）、`--debug`（开启 debuglog，测日志管道自身开销）。端口冲突或桩起不来会在前置检查直接报出。
+`perf-snapshot.sh` 常用参数：`--concurrency/--requests`（压测强度）、`--deltas/--delta-bytes/--interval/--ttfb`（桩的流形态）、`--profile-seconds`（剖析窗）、`--debug on|off`（debuglog 默认 on——测日志管道自身开销；`--debug off` 剥离该路径）。端口冲突或桩起不来会在前置检查直接报出。
 
 注意两点测量卫生：基准进程的 slog 输出会混进 `go test` stdout 让 benchstat 无法解析，`bench_perf_test.go` 已把日志阈值抬到 Error——新增基准若引入日志路径需同样处理；macOS 自带 bash 3.2 下脚本避免 `mapfile`、变量紧邻中文时用 `${var}` 花括号。
 
 ## PGO
 
-`cmd/devin-2api/default.pgo` 被 `go build` 自动拾取（`go version -m <binary>` 可见 `-pgo=` 行），无需构建参数。剖面来自 stub 压测下的 15s CPU 样本，覆盖 SSE 编码、proto 解码、JSON 热路径。
+`cmd/devin-2api/default.pgo` 被 `go build` 自动拾取（`go version -m <binary>` 可见 `-pgo=` 行），无需构建参数。剖面来自 stub 压测下的 15s CPU 样本，覆盖 SSE 编码、proto 解码、JSON 热路径。注意 `go test` 同样会拾取 default.pgo——低核数 runner（含 macOS CI）上 PGO 编译开销能把测试拖死，资源受限环境跑测试加 `-pgo=off`。
 
 刷新流程：跑一轮 `perf-snapshot.sh`（或等价负载）→ `cp outputs/perf/<ts>/cpu.pb.gz cmd/devin-2api/default.pgo` → 提交。Go 文档建议把剖面随源码入库以保证可复现构建；负载形态显著变化时刷新一次即可，不必随每次提交更新。
 

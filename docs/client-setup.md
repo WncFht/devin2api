@@ -122,7 +122,7 @@ model_auto_compact_token_limit = 230000
 base_url = "http://127.0.0.1:49173/v1"
 ```
 
-Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 通过 `exec_command` shell 命令执行，不走 tool call，无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
+Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 是 `type:"custom"` 工具调用（0.154.0 起经代理包装过境，实测补丁落盘；更早版本走 `exec_command` shell 兜底），无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
 
 上游限流（429）对 Codex 只经流内错误事件重试——codex-rs 对 HTTP 429 一律终止（`retry_429` 硬编码 false），代理已把 pre-stream 429 转成 `response.failed` 事件下发，Codex 按事件里的 `try again in Ns` 睡到解闩再续。默认 `stream_max_retries = 5` 大约只覆盖不到一分钟的限流窗口；常见的一分钟桶限流建议在 `[model_providers.OpenAI]` 块内加一行 `stream_max_retries = 100`（上限 100）。
 
@@ -148,3 +148,5 @@ codex exec -m swe-2-max-ws \
 - **工具调用配对**:上游强制 call→result 紧邻配对，代理已自动重排，客户端无感。
 - **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
 - **排查**:任何问题先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体),再开 devin-2api debug 看 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
+- **base URL 写 `http://[::1]:<port>` 最稳**：服务绑 `*`（IPv6 双栈 socket）时 `::1` 直连本机；`127.0.0.1` 会被 IDE 的 IPv4 端口转发静默 shadow（VS Code Remote-SSH autoForwardPorts 会把 loopback 绑成隧道，特征是 connect 成功但零字节——curl 000 而非 refused），`localhost` 则依赖 resolver 顺序可能先撞 v4 squatter。诊断与处置见 `upstream-debug-playbook.md` 运维坑节。
+- **跨机访问走 tailscale IP，不走 loopback 转发**：作者拓扑里生产实例在 fht-mba，archbox/其它机器经 `http://100.105.212.52:3003` 访问（本机示例，按自己的 tailnet 替换）；archbox 出向有本地并发闸（gwcap，swe-2-medium ≤4 并发），压测/批跑时注意上限。

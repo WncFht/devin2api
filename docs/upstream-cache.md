@@ -42,11 +42,24 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 
 1. `buildRequest` 无条件发送 `system_prompt_cache_options` + 末条消息 `prompt_cache_options`（EPHEMERAL）。免费档下无副作用，付费档可获得完整 write→read 计量。
 2. `trajectory_id`/`cascade_id` 由 `deriveSessionIDs` 派生：有 `SessionKey`（`user`/`prompt_cache_key`/`metadata.user_id`，三者均为会话级）时直接以它为种——压缩改写消息后轨迹仍然连续；无 key 时退回「系统提示头 4KB + 首条消息文本头 1KB」内容哈希。`execution_id` 与消息 `message_id` 保持每次随机。
-3. 上游 cache 计量透传到 `usage.input_tokens_details.cached_tokens` / `cache_write_tokens`。
+3. 上游 cache 计量按协议透出：Responses `usage.input_tokens_details.cached_tokens`/`cache_write_tokens`、chat `prompt_tokens_details` 同名字段、Anthropic `cache_read_input_tokens`/`cache_creation_input_tokens`。
 4. sanitize 改写是确定性的（同输入必同输出），不影响缓存键稳定。
+
+## 受控实测的缓存语义（2026-09-15，archbox :3033 暖臂实验）
+
+用受控探针臂（独立 `metadata.user_id` + padded system prompt，绝对偏移时刻表发 seed/ping/probe，`scripts/cache-probe.py` 为该实验骨架的入库形态）测出的机制级结论：
+
+- **滑动 TTL 标称 ~780s**：每次命中把寿命续满（滑动窗而非固定过期），≥840s 静默后死透；另有 **~10% 逐请求早夭 lottery**——未到期也偶发 miss，属上游逐出噪声。
+- **复用规则是逐字前缀**：已缓存的整条存储区间必须是新请求 token-0 起的逐字前缀才命中；中间改写一个 token，其后部分整体失效。
+- **命名空间按 SessionKey→trajectoryID 隔离**：不同 SessionKey 派生的轨迹互不可见缓存。
+- **死后 verbatim 重写只恢复 ~7%**：缓存过期后原样重发同一前缀，命中率恢复极低——等 TTL 自然死亡的 lineage 基本救不回，要靠保温维持。
+- **`cache_creation` 恒 0**：免费档响应不写 create 计量，判活只能看 `cache_read`。
+- **keepalive 可续命**：180s 间隔、`max_tokens=1` 的 verbatim ping（与 seed 完全同前缀）实证把 lineage 续过 3.2×TTL，对照组全死。这是「subagent 等待期缓存不失温」的可用手段。
+- **上游模型相位漂移**：wire 恒发 `swe-2-max` 时，响应侧模型署名以 ~30s 相位在 swe-2-max 与 opus 间交替；翻转对命中率 52% vs 同模型对 98%。直发真实 uid `claude-opus-4-6` 被接受且**跨 uid 命中**——请求里的 model uid 不进缓存键，但响应署名漂移会影响按 model 分桶的命中率统计口径。
 
 ## 已知边界
 
 - 免费档命中非保证：偶发 miss 是上游逐出/冷启动，非代理问题。
 - `permission_denied`（含内容策略拦截）在免费档表现非确定性——同一 prompt 可能先封后放（WindsurfAPI 亦记录此现象）。
 - 多 token 轮换会破坏按账号键控的缓存（粘账号才有意义）；当前单 token 无此问题。
+- 命中率统计口径：`index.jsonl` 聚合时必须过滤 `result=="completed" && input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。
