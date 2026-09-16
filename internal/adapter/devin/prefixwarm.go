@@ -91,7 +91,9 @@ func normalizeWarmConfig(params WarmConfig) WarmConfig {
 	if params.Interval <= 0 {
 		params.Interval = 180 * time.Second
 	}
-	if params.JitterRatio <= 0 || params.JitterRatio >= 1 {
+	// 归一用 !(0<r<1) 而非 <=0||>=1：NaN（yaml .nan / ParseFloat("nan")）
+	// 在两个比较下都是 false 会漏过，Duration(NaN) 是垃圾值。
+	if !(params.JitterRatio > 0 && params.JitterRatio < 1) {
 		params.JitterRatio = 0.15
 	}
 	if params.MaxStreams <= 0 {
