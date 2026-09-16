@@ -549,6 +549,7 @@
       }
 
       const totalRow = TemplateEngine.render('tpl-stats-total', {
+        totalLabel: t('stats.total'),
         successDisplay: totalSuccessDisplay,
         errorCount: formatNumber(totalError),
         rpm: totalRpmHtml,
