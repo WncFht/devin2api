@@ -131,7 +131,7 @@ Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST
 
 部署两跳，两机各一个实例：
 
-- 生产实例在 Mac（fht-mba，archbox 经 tailscale 免密 ssh 可达）：从 archbox 用 `scripts/deploy-remote.sh` 一键驱动——默认 worktree 模式把本地工作树（含未提交改动）推到 Mac staging 构建部署；`--ref <ref>`（默认 origin/main）部署已推送状态、`--release <tag|latest>` 装预编译资产、`--check` 并排对比两实例版本。Mac 上手动路径仍是 pull 后 `scripts/deploy.sh`；launchd `com.fanghaotian.devin-2api` :3003。
+- 生产实例在 Mac（fht-mba，archbox 经 tailscale 免密 ssh 可达）：从 archbox 用 `scripts/deploy-remote.sh` 一键驱动——默认 worktree 模式把本地工作树（含未提交改动）推到 Mac staging 构建部署；`--ref <ref>`（默认 origin/main）部署已推送状态、`--release <tag|latest>` 装预编译资产、`--check` 并排对比两实例版本。**Mac 端不留仓库 clone**——所有远端操作落 `~/.cache/devin-2api-staging`（tar 自带 .git，可随时重铺）；生产 config 权威副本是 live `~/Library/Application Support/devin-2api/config.yaml`。launchd `com.fanghaotian.devin-2api` :3003。
 - 验证实例在 archbox：`scripts/deploy-linux.sh` 维护的 systemd --user 服务（XDG 布局：二进制 `~/.local/bin`、config `~/.config/devin-2api`、状态与 logs `~/.local/state/devin-2api`），在 linux/amd64 上验行为与排障——两侧 deploy 脚本共享 `scripts/lib-deploy.sh`，语义一致。
 
 ## 部署（单实例约定）
