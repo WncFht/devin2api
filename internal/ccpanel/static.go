@@ -1,6 +1,8 @@
 package ccpanel
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"io/fs"
@@ -53,20 +55,47 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		sum := sha256.Sum256(body)
 		entry = &staticEntry{etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+		if len(body) >= 1024 {
+			entry.gz = gzipBody(body)
+		}
 		h.staticEntries.Store(name, entry)
 	}
 	w.Header().Set("Content-Type", ccContentType(name))
 	w.Header().Set("Cache-Control", "public, no-cache")
 	w.Header().Set("ETag", entry.etag)
+	// 响应体随客户端 Accept-Encoding 变体——无论 200 还是 304 都要声明。
+	w.Header().Set("Vary", "Accept-Encoding")
 	if r.Header.Get("If-None-Match") == entry.etag {
 		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if entry.gz != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(entry.gz)
 		return
 	}
 	_, _ = w.Write(body)
 }
 
+// staticEntry 缓存资源名 → {etag, gzip 预压缩体}：内容随二进制固定，
+// 按名惰性算一次。gzip 只服务 ≥1KB 的资源：echarts 这类大体积依赖
+// 经 tailnet 远程访问面板时差距明显；小于阈值时压缩头开销比省的字节还多。
 type staticEntry struct {
 	etag string
+	gz   []byte // nil 表示不值得压缩
+}
+
+// gzipBody 预压缩静态体；失败返回 nil（调用方按不压缩处理）。
+func gzipBody(body []byte) []byte {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(body); err != nil {
+		return nil
+	}
+	if err := gw.Close(); err != nil {
+		return nil
+	}
+	return buf.Bytes()
 }
 
 // ccContentType 按扩展名给移植资源定 MIME。
