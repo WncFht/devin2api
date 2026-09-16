@@ -7,13 +7,10 @@
     window.currentTrendChartType = 'line'; // 默认使用折线图，可切换为柱状图
     window.currentModel = ''; // 当前选中的模型（空字符串表示全部模型）
     window.currentAuthToken = ''; // 当前选中的令牌（空字符串表示全部令牌）
-    window.currentClientProtocol = ''; // 当前选中的客户端入口协议
-    window.currentChannelName = ''; // 当前选中的渠道名称
+    window.currentAPI = ''; // 当前选中的入口端点（index.jsonl api 原值）
     let currentTrendCustomTimeRange = null;
     window.chartInstance = null;
-    window.channels = [];
-    window.visibleChannels = new Set(); // 可见渠道集合
-    let trendChannelNameCombobox = null; // 渠道名筛选组合框
+    window.visibleModels = new Set(); // 可见模型序列集合
     window.availableModels = []; // 可用模型列表
     window.authTokens = []; // 令牌列表
 
@@ -77,17 +74,9 @@
           return false;
         }
       },
-      { key: 'clientProtocol', queryKeys: ['client_protocol'], defaultValue: '' },
+      { key: 'api', queryKeys: ['api'], defaultValue: '' },
       { key: 'model', queryKeys: ['model'], defaultValue: '' },
-      { key: 'authToken', queryKeys: ['token'], requestKey: 'auth_token_id', defaultValue: '' },
-      {
-        key: 'channelName',
-        queryKeys: ['channel_name_like'],
-        defaultValue: '',
-        includeInQuery() {
-          return false;
-        }
-      }
+      { key: 'authToken', queryKeys: ['token'], requestKey: 'auth_token_id', defaultValue: '' }
     ];
     const TREND_MODELS_REQUEST_FIELDS = TREND_FILTER_FIELDS.filter((field) => field.key === 'range');
 
@@ -99,10 +88,9 @@
         customStartTime: hasCustomRange ? String(currentTrendCustomTimeRange.startMs) : '',
         customEndTime: hasCustomRange ? String(currentTrendCustomTimeRange.endMs) : '',
         trendType: window.currentTrendType || 'first_byte',
-        clientProtocol: window.currentClientProtocol || '',
+        api: window.currentAPI || '',
         model: window.currentModel || '',
-        authToken: window.currentAuthToken || '',
-        channelName: window.currentChannelName || ''
+        authToken: window.currentAuthToken || ''
       };
     }
 
@@ -151,7 +139,7 @@
       return params;
     }
 
-    // 加载当前时间范围内的可用模型和渠道列表
+    // 加载当前时间范围内的可用模型列表
     async function loadModels(range) {
       try {
         const filters = {
@@ -164,14 +152,9 @@
 
         const resp = await fetchDataWithAuth(url) || {};
         const rawModels = Array.isArray(resp.models) ? resp.models : [];
-        const rawChannels = Array.isArray(resp.channels) ? resp.channels : [];
 
         // 去重：使用 Set 确保模型名称唯一
         window.availableModels = [...new Set(rawModels)];
-
-        // 更新渠道列表（仅有日志数据的渠道）
-        window.channels = rawChannels;
-        if (trendChannelNameCombobox) trendChannelNameCombobox.refresh();
 
         // 填充模型选择器
         const modelSelect = document.getElementById('f_model');
@@ -216,18 +199,15 @@
           window.currentModel = modelSelect.value || '';
         }
 
-        const clientProtocolSelect = document.getElementById('f_client_protocol');
-        if (clientProtocolSelect) {
-          window.currentClientProtocol = clientProtocolSelect.value || '';
+        const apiSelect = document.getElementById('f_api');
+        if (apiSelect) {
+          window.currentAPI = apiSelect.value || '';
         }
 
         const tokenSelect = document.getElementById('f_auth_token');
         if (tokenSelect) {
           window.currentAuthToken = tokenSelect.value || '';
         }
-
-        // 读取渠道名筛选（combobox）
-        window.currentChannelName = trendChannelNameCombobox ? trendChannelNameCombobox.getValue() : '';
 
         const hours = getTrendRangeHours(currentRange);
         window.currentHours = hours; // 同步到全局变量，供 renderChart 使用
@@ -244,33 +224,33 @@
 
         window.trendData = metrics.payload.data || [];
 
-        // 构建渠道数据缓存（一次遍历，供后续 hasChannelData 使用）
-        buildChannelDataCache(window.trendData);
+        // 构建模型数据缓存（一次遍历，供后续 hasModelData 使用）
+        buildModelDataCache(window.trendData);
 
-        // 修复：智能初始化渠道显示状态（处理localStorage过时数据）
-        // 默认不显示任何渠道，只显示总数
-        if (window.visibleChannels.size === 0) {
-          // 首次访问：不默认显示任何渠道
-          console.log('初始化渠道显示状态（首次访问）- 默认仅显示总数');
-          // 不添加任何渠道到 visibleChannels，保持为空集合
+        // 修复：智能初始化模型序列显示状态（处理localStorage过时数据）
+        // 默认不显示任何模型序列，只显示总数
+        if (window.visibleModels.size === 0) {
+          // 首次访问：不默认显示任何模型序列
+          console.log('初始化模型显示状态（首次访问）- 默认仅显示总数');
+          // 不添加任何模型到 visibleModels，保持为空集合
         } else {
-          // 修复：验证并清理localStorage中过时的渠道选择
-          console.log('验证现有渠道选择状态...', Array.from(window.visibleChannels));
-          const validChannels = new Set();
+          // 修复：验证并清理localStorage中过时的模型选择
+          console.log('验证现有模型选择状态...', Array.from(window.visibleModels));
+          const validModels = new Set();
 
-          // 检查每个已保存渠道是否在当前数据中存在
-          window.visibleChannels.forEach(channelName => {
-            if (hasChannelData(channelName, window.trendData)) {
-              validChannels.add(channelName);
+          // 检查每个已保存模型是否在当前数据中存在
+          window.visibleModels.forEach(modelName => {
+            if (hasModelData(modelName, window.trendData)) {
+              validModels.add(modelName);
             } else {
-              console.log(`清理过时渠道: ${channelName}（数据中不存在）`);
+              console.log(`清理过时模型: ${modelName}（数据中不存在）`);
             }
           });
 
-          // 更新visibleChannels为验证后的集合
-          window.visibleChannels = validChannels;
-          persistChannelState();
-          console.log('更新后的可见渠道:', Array.from(window.visibleChannels));
+          // 更新visibleModels为验证后的集合
+          window.visibleModels = validModels;
+          persistModelState();
+          console.log('更新后的可见模型:', Array.from(window.visibleModels));
         }
         
         // 添加调试信息显示
@@ -282,11 +262,10 @@
           since: debugSince,
           points: debugPoints,
           total: debugTotal,
-          dataLength: trendData.length,
-          channelsCount: window.channels.length
+          dataLength: trendData.length
         });
 
-        updateChannelFilter();
+        updateModelFilter();
         renderChart();
 
         // 更新分桶提示
@@ -370,8 +349,8 @@
           { xAxis: timestamps[end] }
         ]));
 
-      // 为每个可见渠道生成颜色
-      const channelColors = generateChannelColors(window.visibleChannels);
+      // 为每个可见模型序列生成颜色
+      const modelColors = generateModelColors(window.visibleModels);
 
       // 准备series数据
       const series = [];
@@ -624,17 +603,17 @@
         });
       }
 
-      // 为每个可见渠道添加对应趋势线
+      // 为每个可见模型添加对应趋势线
       // 优化：使用 for 循环替代 forEach，预分配数组
-      const visibleChannelsArray = Array.from(window.visibleChannels);
-      const visibleCount = visibleChannelsArray.length;
+      const visibleModelsArray = Array.from(window.visibleModels);
+      const visibleCount = visibleModelsArray.length;
 
       for (let ci = 0; ci < visibleCount; ci++) {
-        const channelName = visibleChannelsArray[ci];
-        const color = channelColors[channelName];
+        const modelName = visibleModelsArray[ci];
+        const color = modelColors[modelName];
 
         if (trendType === 'count') {
-          // 调用次数趋势：渠道成功/失败线
+          // 调用次数趋势：模型成功/失败线
           // 优化：单次遍历同时提取 success 和 error 数据
           const successData = new Array(dataLen);
           const errorData = new Array(dataLen);
@@ -642,10 +621,10 @@
           let errorTotal = 0;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const success = channelData ? (channelData.success || 0) : 0;
-            const error = channelData ? (channelData.error || 0) : 0;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const success = modelData ? (modelData.success || 0) : 0;
+            const error = modelData ? (modelData.error || 0) : 0;
             successData[i] = success;
             errorData[i] = error;
             successTotal += success;
@@ -655,7 +634,7 @@
           // 成功线
           if (successTotal > 0) {
             series.push({
-              name: t('trend.channelSuccess', { channel: channelName }),
+              name: t('trend.modelSuccess', { model: modelName }),
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -671,7 +650,7 @@
           // 失败线
           if (errorTotal > 0) {
             series.push({
-              name: t('trend.channelFailed', { channel: channelName }),
+              name: t('trend.modelFailed', { model: modelName }),
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -684,14 +663,14 @@
             });
           }
         } else if (trendType === 'first_byte') {
-          // 首字响应时间趋势：渠道平均首字响应时间线
+          // 首字响应时间趋势：模型平均首字响应时间线
           const fbtData = new Array(dataLen);
           let hasData = false;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const fbt = channelData ? channelData.avg_first_byte_time_seconds : null;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const fbt = modelData ? modelData.avg_first_byte_time_seconds : null;
             if (fbt != null && fbt > 0) {
               fbtData[i] = fbt;
               hasData = true;
@@ -702,7 +681,7 @@
 
           if (hasData) {
             series.push({
-              name: channelName,
+              name: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -715,14 +694,14 @@
             });
           }
         } else if (trendType === 'duration') {
-          // 总耗时趋势：渠道平均总耗时线
+          // 总耗时趋势：模型平均总耗时线
           const durData = new Array(dataLen);
           let hasData = false;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const dur = channelData ? channelData.avg_duration_seconds : null;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const dur = modelData ? modelData.avg_duration_seconds : null;
             if (dur != null && dur > 0) {
               durData[i] = dur;
               hasData = true;
@@ -733,7 +712,7 @@
 
           if (hasData) {
             series.push({
-              name: channelName,
+              name: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -746,14 +725,14 @@
             });
           }
         } else if (trendType === 'tokens') {
-          // Token用量趋势：渠道Token线（输入+输出合计）
+          // Token用量趋势：模型Token线（输入+输出合计）
           const tokenData = new Array(dataLen);
           let hasData = false;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const total = channelData ? ((channelData.input_tokens || 0) + (channelData.output_tokens || 0)) : 0;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
             if (total > 0) {
               tokenData[i] = total;
               hasData = true;
@@ -764,7 +743,7 @@
 
           if (hasData) {
             series.push({
-              name: channelName,
+              name: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -777,14 +756,14 @@
             });
           }
         } else if (trendType === 'cost') {
-          // 费用消耗趋势：渠道费用线
+          // 费用消耗趋势：模型费用线
           const costData = new Array(dataLen);
           let hasData = false;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const cost = channelData ? channelData.total_cost : null;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const cost = modelData ? modelData.total_cost : null;
             if (cost != null && cost > 0) {
               costData[i] = cost;
               hasData = true;
@@ -795,7 +774,7 @@
 
           if (hasData) {
             series.push({
-              name: channelName,
+              name: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -808,15 +787,15 @@
             });
           }
         } else if (trendType === 'rpm') {
-          // RPM趋势：渠道每分钟请求数
+          // RPM趋势：模型每分钟请求数
           const bucketMin = window.currentHours ? computeBucketMin(window.currentHours) : 5;
           const rpmData = new Array(dataLen);
           let hasData = false;
 
           for (let i = 0; i < dataLen; i++) {
-            const channels = trendData[i].channels;
-            const channelData = channels ? channels[channelName] : null;
-            const total = channelData ? ((channelData.success || 0) + (channelData.error || 0)) : 0;
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
             if (total > 0) {
               rpmData[i] = total / bucketMin;
               hasData = true;
@@ -827,7 +806,7 @@
 
           if (hasData) {
             series.push({
-              name: channelName,
+              name: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -1289,34 +1268,34 @@ function shouldShowZoom(points, hours, trendType) {
       return (n < 10 ? '0' : '') + n;
     }
     
-    // ===== 渠道数据缓存（避免重复遍历 trendData）=====
-    // 缓存结构: { channelName: { success, error, hasData } }
-    window._channelDataCache = null;
-    window._channelDataCacheVersion = 0;
+    // ===== 模型序列数据缓存（避免重复遍历 trendData）=====
+    // 缓存结构: { modelName: { success, error, hasData } }
+    window._modelDataCache = null;
+    window._modelDataCacheVersion = 0;
 
-    // 构建渠道数据缓存：一次遍历 trendData，统计所有渠道
-    function buildChannelDataCache(trendData) {
+    // 构建模型数据缓存：一次遍历 trendData，统计所有模型
+    function buildModelDataCache(trendData) {
       const cache = {};
       if (!trendData || !trendData.length) {
-        window._channelDataCache = cache;
-        window._channelDataCacheVersion++;
+        window._modelDataCache = cache;
+        window._modelDataCacheVersion++;
         return cache;
       }
 
-      // 单次遍历：收集所有渠道的统计数据
+      // 单次遍历：收集所有模型的统计数据
       for (let i = 0, len = trendData.length; i < len; i++) {
-        const channels = trendData[i].channels;
-        if (!channels) continue;
+        const models = trendData[i].models;
+        if (!models) continue;
 
-        const names = Object.keys(channels);
+        const names = Object.keys(models);
         for (let j = 0, nLen = names.length; j < nLen; j++) {
           const name = names[j];
-          const chData = channels[name];
+          const mData = models[name];
           if (!cache[name]) {
             cache[name] = { success: 0, error: 0 };
           }
-          cache[name].success += chData.success || 0;
-          cache[name].error += chData.error || 0;
+          cache[name].success += mData.success || 0;
+          cache[name].error += mData.error || 0;
         }
       }
 
@@ -1327,25 +1306,25 @@ function shouldShowZoom(points, hours, trendType) {
         cache[name].hasData = (cache[name].success + cache[name].error) > 0;
       }
 
-      window._channelDataCache = cache;
-      window._channelDataCacheVersion++;
+      window._modelDataCache = cache;
+      window._modelDataCacheVersion++;
       return cache;
     }
 
-    // 检查渠道是否有数据（使用缓存）
-    function hasChannelData(channelName, trendData) {
+    // 检查模型是否有数据（使用缓存）
+    function hasModelData(modelName, trendData) {
       // 如果缓存不存在或为空，先构建缓存
-      if (!window._channelDataCache) {
-        buildChannelDataCache(trendData);
+      if (!window._modelDataCache) {
+        buildModelDataCache(trendData);
       }
 
-      const cached = window._channelDataCache[channelName];
+      const cached = window._modelDataCache[modelName];
       return cached ? cached.hasData : false;
     }
 
-    // 生成渠道颜色（避免与总体趋势线颜色冲突）
+    // 生成模型序列颜色（避免与总体趋势线颜色冲突）
     // 总体趋势线保留颜色: #10b981(绿), #ef4444(红), #0ea5e9(天蓝), #a855f7(紫), #f97316(橙)
-    function generateChannelColors(channels) {
+    function generateModelColors(models) {
       const colors = [
         '#3b82f6', // 蓝色
         '#06b6d4', // 青色
@@ -1364,62 +1343,57 @@ function shouldShowZoom(points, hours, trendType) {
         '#dc2626'  // 深红色
       ];
 
-      const channelColors = {};
-      const channelArray = Array.from(channels);
+      const modelColors = {};
+      const modelArray = Array.from(models);
       const colorsLen = colors.length;
 
-      for (let i = 0, len = channelArray.length; i < len; i++) {
-        channelColors[channelArray[i]] = colors[i % colorsLen];
+      for (let i = 0, len = modelArray.length; i < len; i++) {
+        modelColors[modelArray[i]] = colors[i % colorsLen];
       }
 
-      return channelColors;
+      return modelColors;
     }
-    
-    // 更新渠道筛选器 - 显示所有有数据的渠道（包括未配置的渠道）
-    // 优化：直接使用缓存获取有数据的渠道，避免重复遍历 trendData
-    function updateChannelFilter() {
-      const filterList = document.getElementById('channel-filter-list');
+
+    // 更新模型筛选器 - 显示所有有数据的模型
+    // 优化：直接使用缓存获取有数据的模型，避免重复遍历 trendData
+    function updateModelFilter() {
+      const filterList = document.getElementById('model-filter-list');
       if (!filterList) return;
 
-      // 直接从缓存获取所有有数据的渠道名称
-      const allChannelNames = new Set();
+      // 直接从缓存获取所有有数据的模型名称
+      const allModelNames = new Set();
 
       // 使用缓存：O(1) 查找
-      if (window._channelDataCache) {
-        const cachedNames = Object.keys(window._channelDataCache);
+      if (window._modelDataCache) {
+        const cachedNames = Object.keys(window._modelDataCache);
         for (let i = 0, len = cachedNames.length; i < len; i++) {
           const name = cachedNames[i];
-          if (window._channelDataCache[name].hasData) {
-            allChannelNames.add(name);
+          if (window._modelDataCache[name].hasData) {
+            allModelNames.add(name);
           }
         }
       }
 
       // 生成颜色映射
-      const channelColors = generateChannelColors(allChannelNames);
+      const modelColors = generateModelColors(allModelNames);
 
       // 使用 DocumentFragment 批量插入 DOM
       const fragment = document.createDocumentFragment();
-      const sortedNames = Array.from(allChannelNames).sort();
+      const sortedNames = Array.from(allModelNames).sort();
 
       for (let i = 0, len = sortedNames.length; i < len; i++) {
-        const channelName = sortedNames[i];
-        const isVisible = window.visibleChannels.has(channelName);
+        const modelName = sortedNames[i];
+        const isVisible = window.visibleModels.has(modelName);
+        const displayName = modelName === '' ? t('trend.unknown') : modelName;
 
-        // Add special marker for "Unknown Channel"
-        const unknownChannelName = t('trend.unknownChannel');
-        const displayName = channelName === 'Unknown Channel' || channelName === unknownChannelName
-          ? `${unknownChannelName} ⚠️`
-          : channelName;
-
-        const item = TemplateEngine.render('tpl-channel-filter-item', {
+        const item = TemplateEngine.render('tpl-model-filter-item', {
           checkedClass: isVisible ? 'checked' : '',
-          color: channelColors[channelName],
+          color: modelColors[modelName],
           displayName: displayName
         });
         if (item) {
           item.addEventListener('click', () => {
-            toggleChannel(channelName);
+            toggleModel(modelName);
           });
           fragment.appendChild(item);
         }
@@ -1428,136 +1402,115 @@ function shouldShowZoom(points, hours, trendType) {
       filterList.innerHTML = '';
       filterList.appendChild(fragment);
     }
-    
-    // 切换渠道显示/隐藏
-    function toggleChannel(channelName) {
-      if (window.visibleChannels.has(channelName)) {
-        window.visibleChannels.delete(channelName);
+
+    // 切换模型序列显示/隐藏
+    function toggleModel(modelName) {
+      if (window.visibleModels.has(modelName)) {
+        window.visibleModels.delete(modelName);
       } else {
-        window.visibleChannels.add(channelName);
+        window.visibleModels.add(modelName);
       }
-      
-      updateChannelFilter();
+
+      updateModelFilter();
       renderChart();
-      persistChannelState();
+      persistModelState();
     }
-    
-    // 全选渠道 - 选择所有有数据的渠道（包括未配置的渠道）
-    // 优化：直接使用缓存获取有数据的渠道
-    function selectAllChannels() {
-      if (window._channelDataCache) {
-        const names = Object.keys(window._channelDataCache);
+
+    // 全选模型 - 选择所有有数据的模型
+    // 优化：直接使用缓存获取有数据的模型
+    function selectAllModels() {
+      if (window._modelDataCache) {
+        const names = Object.keys(window._modelDataCache);
         for (let i = 0, len = names.length; i < len; i++) {
           const name = names[i];
-          if (window._channelDataCache[name].hasData) {
-            window.visibleChannels.add(name);
+          if (window._modelDataCache[name].hasData) {
+            window.visibleModels.add(name);
           }
         }
       }
 
-      updateChannelFilter();
+      updateModelFilter();
       renderChart();
-      persistChannelState();
+      persistModelState();
     }
-    
+
     // 清空选择
-    function clearAllChannels() {
-      window.visibleChannels.clear();
-      
-      updateChannelFilter();
+    function clearAllModels() {
+      window.visibleModels.clear();
+
+      updateModelFilter();
       renderChart();
-      persistChannelState();
+      persistModelState();
     }
-    
-    // 切换渠道筛选器显示/隐藏
-    function toggleChannelFilter() {
-      const dropdown = document.getElementById('channel-filter-dropdown');
+
+    // 切换模型筛选器显示/隐藏
+    function toggleModelFilter() {
+      const dropdown = document.getElementById('model-filter-dropdown');
       if (!dropdown) return;
-      
+
       const isVisible = dropdown.style.display === 'block';
       dropdown.style.display = isVisible ? 'none' : 'block';
-      
+
       if (!isVisible) {
         // 点击外部关闭
         setTimeout(() => {
-          document.addEventListener('click', closeChannelFilter, true);
+          document.addEventListener('click', closeModelFilter, true);
         }, 10);
       }
     }
 
-    function bindChannelFilterControls() {
-      const channelFilterToggle = document.getElementById('btn-channel-filter-toggle');
-      if (channelFilterToggle) {
-        channelFilterToggle.addEventListener('click', () => {
-          toggleChannelFilter();
+    function bindModelFilterControls() {
+      const modelFilterToggle = document.getElementById('btn-model-filter-toggle');
+      if (modelFilterToggle) {
+        modelFilterToggle.addEventListener('click', () => {
+          toggleModelFilter();
         });
       }
 
-      const selectAllBtn = document.getElementById('btn-select-all-channels');
+      const selectAllBtn = document.getElementById('btn-select-all-models');
       if (selectAllBtn) {
         selectAllBtn.addEventListener('click', () => {
-          selectAllChannels();
+          selectAllModels();
         });
       }
 
-      const clearAllBtn = document.getElementById('btn-clear-all-channels');
+      const clearAllBtn = document.getElementById('btn-clear-all-models');
       if (clearAllBtn) {
         clearAllBtn.addEventListener('click', () => {
-          clearAllChannels();
+          clearAllModels();
         });
       }
     }
-    
-    function closeChannelFilter(event) {
-      const dropdown = document.getElementById('channel-filter-dropdown');
+
+    function closeModelFilter(event) {
+      const dropdown = document.getElementById('model-filter-dropdown');
       const container = document.querySelector('.channel-filter-container');
-      
+
       if (!dropdown || !container) return;
-      
+
       if (!container.contains(event.target)) {
         dropdown.style.display = 'none';
-        document.removeEventListener('click', closeChannelFilter, true);
+        document.removeEventListener('click', closeModelFilter, true);
       }
     }
-    
-    // 持久化渠道状态
-    function persistChannelState() {
+
+    // 持久化模型序列可见状态
+    function persistModelState() {
       try {
-        const visibleArray = Array.from(window.visibleChannels);
-        localStorage.setItem('trend.visibleChannels', JSON.stringify(visibleArray));
-      } catch (_) {}
-    }
-    
-    // 恢复渠道状态
-    function restoreChannelState() {
-      try {
-        const saved = localStorage.getItem('trend.visibleChannels');
-        if (saved) {
-          const visibleArray = JSON.parse(saved);
-          window.visibleChannels = new Set(visibleArray);
-        }
+        const visibleArray = Array.from(window.visibleModels);
+        localStorage.setItem('trend.visibleModels', JSON.stringify(visibleArray));
       } catch (_) {}
     }
 
-    function initTrendChannelNameCombobox(initialValue) {
-      if (typeof window.createSearchableCombobox !== 'function') return;
-      if (!document.getElementById('f_name')) return;
-      trendChannelNameCombobox = window.createSearchableCombobox({
-        inputId: 'f_name',
-        dropdownId: 'f_name_dropdown',
-        attachMode: true,
-        initialValue: initialValue || '',
-        initialLabel: initialValue || t('stats.allChannels'),
-        getOptions: () => [
-          { value: '', label: t('stats.allChannels') },
-          ...(window.channels || []).map(ch => ({ value: ch.name, label: ch.name }))
-        ],
-        onSelect: () => {
-          window.currentChannelName = trendChannelNameCombobox.getValue();
-          persistState();
-          loadData();
+    // 恢复模型序列可见状态
+    function restoreModelState() {
+      try {
+        const saved = localStorage.getItem('trend.visibleModels');
+        if (saved) {
+          const visibleArray = JSON.parse(saved);
+          window.visibleModels = new Set(visibleArray);
         }
-      });
+      } catch (_) {}
     }
 
     // 页面初始化
@@ -1565,16 +1518,13 @@ function shouldShowZoom(points, hours, trendType) {
       topbarKey: 'trend',
       run: async () => {
       restoreState();
-      restoreChannelState();
+      restoreModelState();
       applyRangeUI();
 
       bindToggles();
-      bindChannelFilterControls();
+      bindModelFilterControls();
 
-      // 初始化渠道名 combobox
-      initTrendChannelNameCombobox(window.currentChannelName);
-
-      // 模型/渠道选项与令牌选项互不依赖
+      // 模型选项与令牌选项互不依赖
       const [, authTokens] = await Promise.all([
         loadModels(),
         window.initAuthTokenFilter({
@@ -1641,10 +1591,10 @@ function shouldShowZoom(points, hours, trendType) {
         });
       }
 
-      const clientProtocolSelect = document.getElementById('f_client_protocol');
-      if (clientProtocolSelect) {
-        clientProtocolSelect.addEventListener('change', (e) => {
-          window.currentClientProtocol = e.target.value || '';
+      const apiSelect = document.getElementById('f_api');
+      if (apiSelect) {
+        apiSelect.addEventListener('change', (e) => {
+          window.currentAPI = e.target.value || '';
           persistState();
           loadData();
         });
@@ -1668,22 +1618,19 @@ function shouldShowZoom(points, hours, trendType) {
         });
       }
 
-      // 渠道ID和渠道名已改为 combobox，onSelect 回调自动触发 persistState + loadData
       document.getElementById('btn_clear_filters')?.addEventListener('click', resetTrendFilters);
     }
 
     async function resetTrendFilters() {
       window.currentModel = '';
-      window.currentClientProtocol = '';
+      window.currentAPI = '';
       window.currentAuthToken = '';
-      window.currentChannelName = '';
       window.applyFilterControlValues({ range: 'today' }, {
         range: 'f_hours',
         model: 'f_model',
-        clientProtocol: 'f_client_protocol',
+        api: 'f_api',
         authToken: 'f_auth_token'
       });
-      trendChannelNameCombobox?.setValue('', t('stats.allChannels'));
       await handleTrendRangeChange('today');
     }
 
@@ -1753,18 +1700,15 @@ function shouldShowZoom(points, hours, trendType) {
         // 恢复模型选择
         window.currentModel = restoredFilters.model || '';
 
-        // 恢复客户端入口协议
-        window.currentClientProtocol = restoredFilters.clientProtocol || '';
-        const clientProtocolSelect = document.getElementById('f_client_protocol');
-        if (clientProtocolSelect) {
-          clientProtocolSelect.value = window.currentClientProtocol;
+        // 恢复入口端点
+        window.currentAPI = restoredFilters.api || '';
+        const apiSelect = document.getElementById('f_api');
+        if (apiSelect) {
+          apiSelect.value = window.currentAPI;
         }
 
         // 恢复令牌选择
         window.currentAuthToken = restoredFilters.authToken || '';
-
-        // 恢复渠道名（combobox 初始化时通过 initialValue 恢复）
-        window.currentChannelName = restoredFilters.channelName || '';
       } catch (_) {}
     }
 

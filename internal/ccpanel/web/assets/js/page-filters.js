@@ -24,8 +24,6 @@
     const checkboxGroupClass = config.checkboxGroupClass || groupClass;
     const timeRangeGroupClass = joinClasses(groupClass, config.timeRangeGroupClass);
     const timeRangeControlClass = joinClasses('filter-control--compact', 'filter-control--time-range', config.timeRangeControlClass);
-    const channelIdGroupClass = joinClasses(groupClass, config.channelIdGroupClass);
-    const channelIdControlClass = joinClasses('filter-control--narrow', config.channelIdControlClass);
     const authTokenGroupClass = joinClasses(groupClass, 'filter-group--auth-token', config.authTokenGroupClass);
     const authTokenControlClass = joinClasses('filter-control--wide', config.authTokenControlClass);
     const hideZeroSuccess = `<div class="${joinClasses('filter-group', 'filter-group--checkbox', checkboxGroupClass)}">
@@ -48,24 +46,6 @@
         </div>`,
         timeRangeGroupClass
       ),
-      channelId: buildFilterGroup(
-        `${buildFilterLabel('f_id', 'stats.channelId', '渠道ID')}
-        ${buildInput('number', 'f_id', 'stats.inputIdPlaceholder', '输入ID...', channelIdControlClass)}`,
-        channelIdGroupClass
-      ),
-      channelIdCombobox: buildFilterGroup(
-        `${buildFilterLabel('f_id', 'stats.channelId', '渠道ID')}
-        <div class="filter-combobox-wrapper filter-control--compact">
-          <input id="f_id" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_id_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
-        groupClass
-      ),
-      channelName: buildFilterGroup(
-        `${buildFilterLabel('f_name', 'stats.channelName', '渠道名')}
-        ${buildInput('text', 'f_name', 'stats.containsTextPlaceholder', '包含文本...')}`,
-        groupClass
-      ),
       modelText: buildFilterGroup(
         `${buildFilterLabel('f_model', 'common.model', '模型')}
         ${buildInput('text', 'f_model', 'stats.containsTextPlaceholder', '包含文本...')}`,
@@ -76,22 +56,14 @@
         ${buildSelect('f_model', '\n                <option value="" data-i18n="trend.allModels">全部模型</option>\n                <!-- 动态加载模型列表 -->\n              ', 'filter-control--wide')}`,
         groupClass
       ),
-      channelNameCombobox: buildFilterGroup(
-        `${buildFilterLabel('f_name', 'stats.channelName', '渠道名')}
-        <div class="filter-combobox-wrapper filter-control--channel-name">
-          <input id="f_name" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_name_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
-        joinClasses(groupClass, 'filter-group--channel-name')
-      ),
-      clientProtocol: buildFilterGroup(
-        `${buildFilterLabel('f_client_protocol', 'modelTest.clientProtocol', '请求协议')}
-        ${buildSelect('f_client_protocol', `
-                <option value="" data-i18n="stats.allClientProtocols">全部协议</option>
-                <option value="anthropic" data-i18n="modelTest.clientProtocolAnthropic">Claude Code</option>
-                <option value="codex" data-i18n="modelTest.clientProtocolCodex">Codex</option>
-                <option value="openai" data-i18n="modelTest.clientProtocolOpenAI">OpenAI</option>
-                <option value="gemini" data-i18n="modelTest.clientProtocolGemini">Gemini</option>
+      api: buildFilterGroup(
+        `${buildFilterLabel('f_api', 'stats.api', '入口')}
+        ${buildSelect('f_api', `
+                <option value="" data-i18n="stats.allApis">全部入口</option>
+                <option value="anthropic">/v1/messages</option>
+                <option value="openai-chat">/v1/chat/completions</option>
+                <option value="openai-responses">/v1/responses</option>
+                <option value="responses-ws">/v1/responses (WS)</option>
               `, 'filter-control--compact')}`,
         groupClass
       ),
@@ -146,7 +118,7 @@
       groupClass: 'stats-filter-group',
       checkboxGroupClass: 'stats-filter-group stats-filter-group--checkbox',
       actionsClass: 'stats-filter-actions',
-      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelCombobox', 'authToken', 'statsSummary']
+      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'statsSummary']
     },
     logs: {
       barClass: 'filter-bar logs-filter-bar mt-2',
@@ -157,14 +129,14 @@
       authTokenGroupClass: 'logs-filter-group--token',
       authTokenControlClass: 'logs-filter-control--token',
       actionsClass: 'logs-filter-actions',
-      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelCombobox', 'logSource', 'status', 'authToken', 'logsSummary']
+      items: ['timeRange', 'api', 'modelCombobox', 'logSource', 'status', 'authToken', 'logsSummary']
     },
     trend: {
       barClass: 'filter-bar mt-2',
       controlsClass: 'filter-controls trend-filter-controls',
       groupClass: '',
       actionsClass: '',
-      items: ['timeRange', 'clientProtocol', 'channelNameCombobox', 'modelSelect', 'authToken', 'filterButton']
+      items: ['timeRange', 'api', 'modelSelect', 'authToken', 'filterButton']
     }
   };
 

@@ -290,53 +290,6 @@
         </div>
 
         <div class="token-edit-main">
-          <!-- 渠道限制区域：本服务单上游、渠道恒为合成渠道，区块隐藏
-               （display:flex 压过 hidden 属性，须 inline style）；元素保留，
-               tokens.js 仍按 id 写入计数与列表。 -->
-          <section class="token-edit-section token-edit-section--channels token-edit-channels-section" data-token-edit-section="channels" style="display:none">
-            <div class="token-edit-section-header token-edit-channels-header">
-              <h3 class="token-edit-section-title token-edit-channels-title">
-                <span data-i18n="tokens.channelRestriction">渠道限制</span>
-                <span class="token-edit-channels-meta"><span data-i18n="tokens.channelCountPrefix">共</span> <span id="editAllowedChannelsCount">0</span> <span id="editChannelCountSuffix" data-i18n="tokens.channelCountSuffixAllow">个渠道（空表示允许所有）</span></span>
-              </h3>
-              <div class="token-edit-channels-actions">
-                <label class="token-edit-restriction-filter">
-                  <span data-i18n="tokens.filterChannels">过滤渠道</span>
-                  <input type="search" id="allowedChannelFilterInput" class="form-input token-edit-restriction-filter-input"
-                    data-i18n-placeholder="tokens.searchChannelPlaceholder" placeholder="搜索渠道..."
-                    data-input-action="filter-allowed-channels">
-                </label>
-                <select id="editChannelRestrictionMode" class="form-input token-edit-channels-mode" data-change-action="change-channel-restriction-mode" title="渠道限制模式">
-                  <option value="allow" data-i18n="tokens.channelModeAllow">白名单</option>
-                  <option value="deny" data-i18n="tokens.channelModeDeny">黑名单</option>
-                </select>
-                <button type="button" class="btn btn-secondary btn-sm token-edit-channels-btn" data-action="show-channel-select-modal" data-i18n-title="tokens.selectChannelTitle" title="从渠道列表中选择" data-i18n="tokens.selectChannel">
-                  + 选择渠道
-                </button>
-                <button type="button" id="batchDeleteAllowedChannelsBtn" data-action="batch-delete-allowed-channels" disabled
-                  class="btn btn-secondary btn-sm token-edit-channels-btn token-edit-channels-btn--batch" data-i18n="tokens.deleteSelected">
-                  删除选中
-                </button>
-              </div>
-            </div>
-            <div class="inline-table-container mobile-inline-table-container token-edit-channels-table">
-              <table class="inline-table mobile-inline-table allowed-channels-table">
-                <thead>
-                  <tr class="allowed-channels-table-head">
-                    <th class="allowed-channel-col-select-head">
-                      <input type="checkbox" id="selectAllAllowedChannels" data-change-action="toggle-select-all-allowed-channels">
-                    </th>
-                    <th class="allowed-channel-col-name-head" data-i18n="tokens.channelName">渠道</th>
-                    <th class="allowed-channel-col-actions-head"></th>
-                  </tr>
-                </thead>
-                <tbody id="allowedChannelsTableBody">
-                  <!-- 动态渲染 -->
-                </tbody>
-              </table>
-            </div>
-          </section>
-
           <!-- 模型限制区域 -->
           <section class="token-edit-section token-edit-section--models token-edit-models-section" data-token-edit-section="models">
             <div class="token-edit-section-header token-edit-models-header">
@@ -351,7 +304,7 @@
                     data-i18n-placeholder="tokens.searchModelPlaceholder" placeholder="搜索模型..."
                     data-input-action="filter-allowed-models">
                 </label>
-                <button type="button" class="btn btn-secondary btn-sm token-edit-models-btn" data-action="show-model-select-modal" data-i18n-title="tokens.selectFromListTitle" title="从渠道模型列表中选择" data-i18n="tokens.selectFromList">
+                <button type="button" class="btn btn-secondary btn-sm token-edit-models-btn" data-action="show-model-select-modal" data-i18n-title="tokens.selectFromListTitle" title="从模型列表中选择" data-i18n="tokens.selectFromList">
                   + 从列表选择
                 </button>
                 <button type="button" class="btn btn-secondary btn-sm token-edit-models-btn" data-action="show-model-import-modal" data-i18n-title="tokens.manualInputTitle" title="手动输入模型名称" data-i18n="tokens.manualInput">
@@ -385,38 +338,6 @@
       <div class="modal-footer">
         <button type="button" data-action="close-edit-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
         <button type="button" data-action="update-token" class="btn btn-primary" data-i18n="common.save">保存</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 渠道选择对话框 -->
-  <div id="channelSelectModal" class="modal">
-    <div class="modal-content modal-content--sm">
-      <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.selectChannelTitle">选择渠道</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-channel-select-modal">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div class="form-group channel-select-filter-row">
-          <input type="text" id="channelSearchInput" class="form-input" data-i18n-placeholder="tokens.searchChannelPlaceholder" placeholder="搜索渠道..." data-input-action="filter-available-channels">
-        </div>
-        <div id="selectAllChannelsContainer">
-          <label class="channel-select-all-label">
-            <input type="checkbox" id="selectAllChannelsCheckbox" class="channel-select-all-checkbox" data-change-action="toggle-select-all-channels">
-            <span data-i18n="tokens.selectAllCurrent">全选当前列表</span>
-            <span id="visibleChannelsCount"></span>
-          </label>
-        </div>
-        <div id="availableChannelsContainer" class="scroll-pane scroll-pane--sm">
-          <!-- 动态渲染可选渠道列表 -->
-        </div>
-        <div class="channel-select-summary">
-          <span data-i18n="tokens.selectedPrefix">已选择</span> <span id="selectedChannelsCount">0</span> <span data-i18n="tokens.selectedChannelSuffix">个渠道</span>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button type="button" data-action="close-channel-select-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
-        <button type="button" data-action="confirm-channel-selection" class="btn btn-primary" data-i18n="tokens.confirmAdd">确定添加</button>
       </div>
     </div>
   </div>

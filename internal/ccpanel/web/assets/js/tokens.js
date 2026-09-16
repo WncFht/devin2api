@@ -11,19 +11,10 @@
     // 模型限制相关状态（2026-01新增）
     let editAllowedModels = [];              // 编辑模态框中当前的模型限制列表
     let selectedAllowedModelIndices = new Set(); // 已选中的模型索引（批量删除用）
-    let allChannels = [];                    // 渠道数据缓存
-    let availableModelsCache = [];           // 可用模型缓存
-    let protocolDisplayNameMap = new Map(); // 协议显示名缓存
-    let protocolDisplayNamesPromise = null; // 协议显示名加载中的 Promise
+    let availableModelsCache = [];           // 可用模型缓存（/admin/model-registry 合并视图）
     let selectedModelsForAdd = new Set();    // 模型选择对话框中已选的模型
     let currentVisibleModels = [];            // 当前可见的模型列表（用于全选功能）
-    let editAllowedChannelIDs = [];           // 编辑模态框中当前的渠道限制列表
-    let editChannelRestrictionMode = 'allow'; // allow|deny
-    let selectedAllowedChannelIDs = new Set(); // 已选中的渠道ID（批量删除用）
-    let currentAllowedChannelFilter = '';
     let currentAllowedModelFilter = '';
-    let selectedChannelsForAdd = new Set();   // 渠道选择对话框中已选的渠道ID
-    let currentVisibleChannels = [];          // 当前可见的渠道列表（用于全选功能）
     let initialEditExpiryState = { type: 'never', value: '' };
 
     // 对话框栈，用于 ESC 键层级关闭
@@ -82,9 +73,8 @@
       // 加载令牌列表(默认显示本日统计)
       loadTokens();
 
-      // 预加载渠道数据（用于模型选择）
-      loadChannelsData();
-      ensureProtocolDisplayNameMap();
+      // 预加载可用模型清单（模型选择弹窗数据源）
+      loadAvailableModels();
 
       initPageActionDelegation();
 
@@ -93,7 +83,6 @@
 
       // 监听语言切换事件，重新渲染令牌相关动态内容
       window.i18n.onLocaleChange(() => {
-        renderAllowedChannelsTable();
         renderAllowedModelsTable();
         renderTokens();
       });
@@ -121,10 +110,6 @@
           'show-model-select-modal': () => showModelSelectModal(),
           'show-model-import-modal': () => showModelImportModal(),
           'batch-delete-allowed-models': () => batchDeleteSelectedAllowedModels(),
-          'show-channel-select-modal': () => showChannelSelectModal(),
-          'batch-delete-allowed-channels': () => batchDeleteSelectedAllowedChannels(),
-          'close-channel-select-modal': () => closeChannelSelectModal(),
-          'confirm-channel-selection': () => confirmChannelSelection(),
           'close-model-select-modal': () => closeModelSelectModal(),
           'confirm-model-selection': () => confirmModelSelection(),
           'close-model-import-modal': () => closeModelImportModal(),
@@ -133,12 +118,6 @@
             const index = Number(actionTarget.dataset.index);
             if (!Number.isNaN(index)) {
               removeAllowedModel(index);
-            }
-          },
-          'remove-allowed-channel': (actionTarget) => {
-            const channelID = Number(actionTarget.dataset.channelId);
-            if (!Number.isNaN(channelID)) {
-              removeAllowedChannel(channelID);
             }
           }
         },
@@ -151,20 +130,8 @@
             document.getElementById('editCustomExpiryContainer').style.display =
               actionTarget.value === 'custom' ? 'block' : 'none';
           },
-          'toggle-select-all-allowed-channels': (actionTarget) => toggleSelectAllAllowedChannels(actionTarget.checked),
-          'change-channel-restriction-mode': (actionTarget) => {
-            editChannelRestrictionMode = normalizeChannelRestrictionMode(actionTarget.value);
-            updateChannelRestrictionModeUI();
-          },
-          'toggle-select-all-channels': (actionTarget) => toggleSelectAllChannels(actionTarget.checked),
           'toggle-select-all-allowed-models': (actionTarget) => toggleSelectAllAllowedModels(actionTarget.checked),
           'toggle-select-all-models': (actionTarget) => toggleSelectAllModels(actionTarget.checked),
-          'toggle-allowed-channel': (actionTarget) => {
-            const channelID = Number(actionTarget.dataset.channelId);
-            if (!Number.isNaN(channelID)) {
-              toggleAllowedChannelSelection(channelID, actionTarget.checked);
-            }
-          },
           'toggle-allowed-model': (actionTarget) => {
             const index = Number(actionTarget.dataset.index);
             if (!Number.isNaN(index)) {
@@ -173,9 +140,7 @@
           }
         },
         input: {
-          'filter-available-channels': (actionTarget) => filterAvailableChannels(actionTarget.value),
           'filter-available-models': (actionTarget) => filterAvailableModels(actionTarget.value),
-          'filter-allowed-channels': (actionTarget) => filterAllowedChannels(actionTarget.value),
           'filter-allowed-models': (actionTarget) => filterAllowedModels(actionTarget.value),
           'update-model-import-preview': () => updateModelImportPreview()
         }
@@ -807,21 +772,6 @@
       if (allowedModelFilterInput) allowedModelFilterInput.value = '';
       renderAllowedModelsTable();
 
-      // 初始化渠道限制状态（2026-04新增）
-      editAllowedChannelIDs = (token.allowed_channel_ids || []).slice();
-      editChannelRestrictionMode = normalizeChannelRestrictionMode(token.channel_restriction_mode);
-      selectedAllowedChannelIDs.clear();
-      currentAllowedChannelFilter = '';
-      const allowedChannelFilterInput = document.getElementById('allowedChannelFilterInput');
-      if (allowedChannelFilterInput) allowedChannelFilterInput.value = '';
-      const modeSelect = document.getElementById('editChannelRestrictionMode');
-      if (modeSelect) modeSelect.value = editChannelRestrictionMode;
-      updateChannelRestrictionModeUI();
-      renderAllowedChannelsTable();
-      if (allChannels.length === 0) {
-        loadChannelsData().then(() => renderAllowedChannelsTable());
-      }
-
       document.getElementById('editModal').style.display = 'block';
       pushModal(closeEditModal);
     }
@@ -836,13 +786,6 @@
       editAllowedModels = [];
       selectedAllowedModelIndices.clear();
       currentAllowedModelFilter = '';
-      editAllowedChannelIDs = [];
-      editChannelRestrictionMode = 'allow';
-      selectedAllowedChannelIDs.clear();
-      currentAllowedChannelFilter = '';
-      const modeSelect = document.getElementById('editChannelRestrictionMode');
-      if (modeSelect) modeSelect.value = 'allow';
-      updateChannelRestrictionModeUI();
       popModal();
     }
 
@@ -895,8 +838,6 @@
             description,
             is_active: isActive,
             ...expiryUpdate,
-            allowed_channel_ids: editAllowedChannelIDs,
-            channel_restriction_mode: normalizeChannelRestrictionMode(editChannelRestrictionMode),
             allowed_models: editAllowedModels,  // 2026-01新增：模型限制
             cost_daily_limit_usd: dailyCostLimitUSD,
             cost_monthly_limit_usd: monthlyCostLimitUSD,
@@ -933,94 +874,24 @@
     // ============================================================================
 
     /**
-     * 加载渠道数据（用于模型选择）
+     * 加载可用模型清单（/admin/model-registry 合并视图：目录∪别名∪注册表∪流量）。
+     * 单上游无渠道维，模型选择弹窗直接取全量启用模型名。
      */
-    async function loadChannelsData() {
+    async function loadAvailableModels() {
       try {
-        const data = await fetchDataWithAuth(`${API_BASE}/channels`);
-        // API 直接返回渠道数组
-        allChannels = Array.isArray(data) ? data : (data && data.channels) || [];
-        // 聚合可用模型
-        availableModelsCache = getAvailableModels();
+        const data = await fetchDataWithAuth(`${API_BASE}/model-registry`);
+        const rows = (data && data.models) || [];
+        availableModelsCache = rows
+          .filter(r => r && r.enabled !== false && r.model)
+          .map(r => r.model)
+          .sort();
       } catch (error) {
-        console.error('Failed to load channels data:', error);
+        console.error('Failed to load model registry:', error);
       }
-    }
-
-    /**
-     * 从渠道数据聚合所有模型（去重+排序）
-     */
-    function getAvailableModels() {
-      const modelSet = new Set();
-      allChannels.forEach(ch => {
-        (ch.models || []).forEach(m => {
-          if (m.model) modelSet.add(m.model);
-        });
-      });
-      return Array.from(modelSet).sort();
-    }
-
-    function normalizeChannelRestrictionMode(mode) {
-      return String(mode || '').toLowerCase() === 'deny' ? 'deny' : 'allow';
-    }
-
-    function updateChannelRestrictionModeUI() {
-      const suffix = document.getElementById('editChannelCountSuffix');
-      if (!suffix) return;
-      const key = editChannelRestrictionMode === 'deny'
-        ? 'tokens.channelCountSuffixDeny'
-        : 'tokens.channelCountSuffixAllow';
-      suffix.setAttribute('data-i18n', key);
-      suffix.textContent = t(key);
-    }
-
-    function getAvailableModelsForCurrentChannelRestriction() {
-      if (editAllowedChannelIDs.length === 0) {
-        return availableModelsCache;
-      }
-
-      const restrictedChannelIDs = new Set(editAllowedChannelIDs);
-      const deny = editChannelRestrictionMode === 'deny';
-      const modelSet = new Set();
-      allChannels.forEach(ch => {
-        const id = normalizeChannelID(ch.id);
-        const inList = restrictedChannelIDs.has(id);
-        if (deny) {
-          if (inList) return;
-        } else if (!inList) {
-          return;
-        }
-        (ch.models || []).forEach(m => {
-          if (m.model) modelSet.add(m.model);
-        });
-      });
-      return Array.from(modelSet).sort();
-    }
-
-    function normalizeChannelID(value) {
-      const id = Number(value);
-      return Number.isFinite(id) ? id : 0;
-    }
-
-    function getChannelByID(channelID) {
-      return allChannels.find(ch => normalizeChannelID(ch.id) === channelID) || null;
-    }
-
-    function getChannelDisplayName(channelID) {
-      const channel = getChannelByID(channelID);
-      return channel?.name || t('common.unknown');
     }
 
     function normalizeRestrictionFilter(value) {
       return String(value || '').trim().toLowerCase();
-    }
-
-    function getVisibleAllowedChannelIDs() {
-      const filter = normalizeRestrictionFilter(currentAllowedChannelFilter);
-      if (!filter) return editAllowedChannelIDs;
-      return editAllowedChannelIDs.filter((channelID) =>
-        getChannelDisplayName(channelID).toLowerCase().includes(filter)
-      );
     }
 
     function getVisibleAllowedModelEntries() {
@@ -1030,349 +901,9 @@
       return entries.filter(({ model }) => String(model).toLowerCase().includes(filter));
     }
 
-    function filterAllowedChannels(searchText) {
-      currentAllowedChannelFilter = searchText;
-      renderAllowedChannelsTable();
-    }
-
     function filterAllowedModels(searchText) {
       currentAllowedModelFilter = searchText;
       renderAllowedModelsTable();
-    }
-
-    function sortAllowedChannelIDs() {
-      editAllowedChannelIDs.sort((a, b) => {
-        const nameA = getChannelDisplayName(a).toLowerCase();
-        const nameB = getChannelDisplayName(b).toLowerCase();
-        if (nameA < nameB) return -1;
-        if (nameA > nameB) return 1;
-        return a - b;
-      });
-    }
-
-    function renderAllowedChannelsTable() {
-      const tbody = document.getElementById('allowedChannelsTableBody');
-      const countSpan = document.getElementById('editAllowedChannelsCount');
-      const selectAllCheckbox = document.getElementById('selectAllAllowedChannels');
-      const mobileLabelChannelName = t('tokens.channelName');
-      const mobileLabelActions = t('tokens.table.actions');
-      const visibleChannelIDs = getVisibleAllowedChannelIDs();
-
-      if (!tbody) return;
-
-      if (countSpan) countSpan.textContent = editAllowedChannelIDs.length;
-      updateBatchDeleteChannelsBtn();
-
-      if (selectAllCheckbox) {
-        const selectedVisibleCount = visibleChannelIDs.filter((channelID) => selectedAllowedChannelIDs.has(channelID)).length;
-        selectAllCheckbox.checked = visibleChannelIDs.length > 0 && selectedVisibleCount === visibleChannelIDs.length;
-        selectAllCheckbox.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleChannelIDs.length;
-      }
-
-      if (editAllowedChannelIDs.length === 0) {
-        tbody.innerHTML = `
-          <tr class="allowed-channels-empty-row">
-            <td colspan="3" class="allowed-channels-empty-cell">
-              ${t('tokens.noChannelRestriction')}
-            </td>
-          </tr>
-        `;
-        return;
-      }
-      if (visibleChannelIDs.length === 0) {
-        tbody.innerHTML = `
-          <tr class="allowed-channels-empty-row">
-            <td colspan="3" class="allowed-channels-empty-cell">
-              ${t('tokens.noMatchingChannel')}
-            </td>
-          </tr>
-        `;
-        return;
-      }
-
-      tbody.innerHTML = visibleChannelIDs.map((channelID) => `
-        <tr class="mobile-inline-row allowed-channel-row">
-          <td class="allowed-channel-col-select mobile-inline-no-label">
-            <input type="checkbox" class="allowed-channel-checkbox" data-channel-id="${channelID}"
-              data-change-action="toggle-allowed-channel"
-              ${selectedAllowedChannelIDs.has(channelID) ? 'checked' : ''}
-            >
-          </td>
-          <td class="allowed-channel-col-name" data-mobile-label="${mobileLabelChannelName}">${escapeHtml(getChannelDisplayName(channelID))}</td>
-          <td class="allowed-channel-col-actions" data-mobile-label="${mobileLabelActions}">
-            <button type="button" class="allowed-channel-remove-btn btn btn-secondary btn-sm" data-action="remove-allowed-channel" data-channel-id="${channelID}">${t('common.delete')}</button>
-          </td>
-        </tr>
-      `).join('');
-    }
-
-    function toggleAllowedChannelSelection(channelID, checked) {
-      if (checked) {
-        selectedAllowedChannelIDs.add(channelID);
-      } else {
-        selectedAllowedChannelIDs.delete(channelID);
-      }
-      updateBatchDeleteChannelsBtn();
-      updateSelectAllAllowedChannelsCheckbox();
-    }
-
-    function toggleSelectAllAllowedChannels(checked) {
-      if (checked) {
-        getVisibleAllowedChannelIDs().forEach(channelID => selectedAllowedChannelIDs.add(channelID));
-      } else {
-        getVisibleAllowedChannelIDs().forEach(channelID => selectedAllowedChannelIDs.delete(channelID));
-      }
-      renderAllowedChannelsTable();
-    }
-
-    function updateBatchDeleteChannelsBtn() {
-      const btn = document.getElementById('batchDeleteAllowedChannelsBtn');
-      if (btn) {
-        btn.disabled = selectedAllowedChannelIDs.size === 0;
-      }
-    }
-
-    function updateSelectAllAllowedChannelsCheckbox() {
-      const checkbox = document.getElementById('selectAllAllowedChannels');
-      if (checkbox) {
-        const visibleChannelIDs = getVisibleAllowedChannelIDs();
-        const selectedVisibleCount = visibleChannelIDs.filter((channelID) => selectedAllowedChannelIDs.has(channelID)).length;
-        checkbox.checked = visibleChannelIDs.length > 0 && selectedVisibleCount === visibleChannelIDs.length;
-        checkbox.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleChannelIDs.length;
-      }
-    }
-
-    function removeAllowedChannel(channelID) {
-      editAllowedChannelIDs = editAllowedChannelIDs.filter(id => id !== channelID);
-      selectedAllowedChannelIDs.delete(channelID);
-      renderAllowedChannelsTable();
-    }
-
-    function batchDeleteSelectedAllowedChannels() {
-      if (selectedAllowedChannelIDs.size === 0) return;
-
-      editAllowedChannelIDs = editAllowedChannelIDs.filter(id => !selectedAllowedChannelIDs.has(id));
-      selectedAllowedChannelIDs.clear();
-      renderAllowedChannelsTable();
-    }
-
-    async function showChannelSelectModal() {
-      if (allChannels.length === 0) {
-        await loadChannelsData();
-      }
-      await ensureProtocolDisplayNameMap();
-      selectedChannelsForAdd.clear();
-      document.getElementById('channelSearchInput').value = '';
-      renderAvailableChannels('');
-      document.getElementById('channelSelectModal').style.display = 'block';
-      pushModal(closeChannelSelectModal);
-    }
-
-    function closeChannelSelectModal() {
-      document.getElementById('channelSelectModal').style.display = 'none';
-      selectedChannelsForAdd.clear();
-      popModal();
-    }
-
-    function filterAvailableChannels(searchText) {
-      renderAvailableChannels(searchText);
-    }
-
-    function normalizeProtocolValue(value) {
-      return String(value || '').trim().toLowerCase();
-    }
-
-    function buildProtocolDisplayNameMap(protocols) {
-      const map = new Map();
-      (Array.isArray(protocols) ? protocols : []).forEach((protocol) => {
-        const protocolKey = normalizeProtocolValue(protocol && protocol.value);
-        const displayName = String(protocol && protocol.display_name || '').trim();
-        if (!displayName) return;
-        map.set(protocolKey, displayName);
-      });
-      return map;
-    }
-
-    async function ensureProtocolDisplayNameMap() {
-      if (protocolDisplayNameMap.size > 0) {
-        return protocolDisplayNameMap;
-      }
-      if (protocolDisplayNamesPromise) {
-        return protocolDisplayNamesPromise;
-      }
-
-      protocolDisplayNamesPromise = (async () => {
-        try {
-          if (window.ProtocolManager && typeof window.ProtocolManager.getProtocols === 'function') {
-            const protocols = await window.ProtocolManager.getProtocols();
-            protocolDisplayNameMap = buildProtocolDisplayNameMap(protocols);
-          }
-        } catch (error) {
-          console.error('Failed to load protocol display names:', error);
-        } finally {
-          protocolDisplayNamesPromise = null;
-        }
-        return protocolDisplayNameMap;
-      })();
-
-      return protocolDisplayNamesPromise;
-    }
-
-    function getChannelProtocols(channel) {
-      return Array.from(new Set(
-        (Array.isArray(channel?.urls) ? channel.urls : [])
-          .flatMap(entry => Array.isArray(entry?.protocols) ? entry.protocols : [])
-          .map(normalizeProtocolValue)
-          .filter(Boolean)
-      ));
-    }
-
-    function getProtocolLabel(protocol) {
-      const normalizedProtocol = normalizeProtocolValue(protocol);
-      return protocolDisplayNameMap.get(normalizedProtocol) || normalizedProtocol;
-    }
-
-    function matchesChannelSearchText(channel, searchText) {
-      const search = String(searchText || '').trim().toLowerCase();
-      if (!search) return true;
-
-      const protocols = getChannelProtocols(channel);
-      const protocolText = protocols.map(getProtocolLabel).join(' ').toLowerCase();
-      const name = String(channel?.name || '').toLowerCase();
-      const id = String(channel?.id || '');
-
-      return name.includes(search) ||
-        protocols.some(protocol => protocol.includes(search)) ||
-        protocolText.includes(search) ||
-        id.includes(search);
-    }
-
-    function renderAvailableChannels(searchText) {
-      const container = document.getElementById('availableChannelsContainer');
-      const countSpan = document.getElementById('selectedChannelsCount');
-      const selectAllContainer = document.getElementById('selectAllChannelsContainer');
-      const selectAllCheckbox = document.getElementById('selectAllChannelsCheckbox');
-      const visibleChannelsCount = document.getElementById('visibleChannelsCount');
-      if (!container) return;
-
-      const existingChannelIDs = new Set(editAllowedChannelIDs);
-      const availableChannels = allChannels.filter(ch => !existingChannelIDs.has(normalizeChannelID(ch.id)));
-      let channels = availableChannels;
-
-      if (searchText) {
-        channels = channels.filter(ch => matchesChannelSearchText(ch, searchText));
-      }
-
-      currentVisibleChannels = channels;
-      if (countSpan) countSpan.textContent = selectedChannelsForAdd.size;
-
-      if (channels.length === 0) {
-        const hasFilter = Boolean(searchText);
-        const message = hasFilter
-          ? t('tokens.noMatchingChannel')
-          : allChannels.length === 0
-            ? t('tokens.noChannelsConfigured')
-            : t('tokens.allChannelsAdded');
-        container.innerHTML = `<div class="available-channels-empty">${message}</div>`;
-        if (selectAllContainer) selectAllContainer.style.display = 'none';
-        container.classList.add('available-channels-container--standalone');
-        container.classList.remove('available-channels-container--stacked');
-        return;
-      }
-
-      if (selectAllContainer) {
-        selectAllContainer.style.display = 'block';
-      }
-      container.classList.add('available-channels-container--stacked');
-      container.classList.remove('available-channels-container--standalone');
-
-      if (selectAllCheckbox) {
-        const allSelected = channels.every(ch => selectedChannelsForAdd.has(normalizeChannelID(ch.id)));
-        selectAllCheckbox.checked = allSelected;
-        selectAllCheckbox.indeterminate = !allSelected && channels.some(ch => selectedChannelsForAdd.has(normalizeChannelID(ch.id)));
-      }
-      if (visibleChannelsCount) {
-        visibleChannelsCount.textContent = t('tokens.visibleChannelsCount', { count: channels.length });
-      }
-
-      container.innerHTML = `<div class="channel-option-list">${channels.map(ch => {
-        const channelID = normalizeChannelID(ch.id);
-        const protocols = getChannelProtocols(ch);
-        const protocolText = protocols.length > 0
-          ? protocols.map(getProtocolLabel).join(', ')
-          : t('channels.urlProtocolAuto');
-        return `
-          <label class="channel-option-item" data-channel-id="${channelID}">
-            <input type="checkbox" class="channel-option-checkbox" data-channel-id="${channelID}"
-              ${selectedChannelsForAdd.has(channelID) ? 'checked' : ''}>
-            <span class="channel-option-label">${escapeHtml(ch.name || t('common.unknown'))}</span>
-            <span class="channel-option-meta">#${channelID} · ${escapeHtml(protocolText)}</span>
-          </label>
-        `;
-      }).join('')}</div>`;
-
-      if (!container.dataset.delegated) {
-        container.addEventListener('change', (e) => {
-          const checkbox = e.target.closest('.channel-option-checkbox');
-          if (checkbox) {
-            toggleChannelForAdd(normalizeChannelID(checkbox.dataset.channelId), checkbox.checked);
-          }
-        });
-        container.dataset.delegated = '1';
-      }
-    }
-
-    function toggleChannelForAdd(channelID, checked) {
-      if (checked) {
-        selectedChannelsForAdd.add(channelID);
-      } else {
-        selectedChannelsForAdd.delete(channelID);
-      }
-      document.getElementById('selectedChannelsCount').textContent = selectedChannelsForAdd.size;
-      updateSelectAllChannelsCheckboxState();
-    }
-
-    function updateSelectAllChannelsCheckboxState() {
-      const selectAllCheckbox = document.getElementById('selectAllChannelsCheckbox');
-      if (!selectAllCheckbox || currentVisibleChannels.length === 0) return;
-
-      const allSelected = currentVisibleChannels.every(ch => selectedChannelsForAdd.has(normalizeChannelID(ch.id)));
-      selectAllCheckbox.checked = allSelected;
-      selectAllCheckbox.indeterminate = !allSelected && currentVisibleChannels.some(ch => selectedChannelsForAdd.has(normalizeChannelID(ch.id)));
-    }
-
-    function toggleSelectAllChannels(checked) {
-      currentVisibleChannels.forEach(ch => {
-        const channelID = normalizeChannelID(ch.id);
-        if (checked) {
-          selectedChannelsForAdd.add(channelID);
-        } else {
-          selectedChannelsForAdd.delete(channelID);
-        }
-      });
-      document.getElementById('selectedChannelsCount').textContent = selectedChannelsForAdd.size;
-      const searchText = document.getElementById('channelSearchInput')?.value || '';
-      renderAvailableChannels(searchText);
-    }
-
-    function confirmChannelSelection() {
-      if (selectedChannelsForAdd.size === 0) {
-        window.showNotification(t('tokens.msg.selectAtLeastOneChannel'), 'warning');
-        return;
-      }
-
-      const addedCount = selectedChannelsForAdd.size;
-      const existingChannelIDs = new Set(editAllowedChannelIDs);
-      selectedChannelsForAdd.forEach(channelID => {
-        if (!existingChannelIDs.has(channelID)) {
-          editAllowedChannelIDs.push(channelID);
-        }
-      });
-
-      sortAllowedChannelIDs();
-      closeChannelSelectModal();
-      renderAllowedChannelsTable();
-      window.showNotification(t('tokens.msg.channelsAdded', { count: addedCount }), 'success');
     }
 
     /**
@@ -1521,8 +1052,8 @@
      * 显示模型选择对话框
      */
     async function showModelSelectModal() {
-      if (allChannels.length === 0) {
-        await loadChannelsData();
+      if (availableModelsCache.length === 0) {
+        await loadAvailableModels();
       }
       selectedModelsForAdd.clear();
       document.getElementById('modelSearchInput').value = '';
@@ -1560,7 +1091,7 @@
 
       // 过滤已添加的模型
       const existingModels = new Set(editAllowedModels.map(m => m.toLowerCase()));
-      const sourceModels = getAvailableModelsForCurrentChannelRestriction();
+      const sourceModels = availableModelsCache;
       let models = sourceModels.filter(m => !existingModels.has(m.toLowerCase()));
 
       // 搜索过滤
@@ -1581,7 +1112,7 @@
         const message = searchText
           ? t('tokens.noMatchingModel')
           : isEmptyCache
-            ? t('tokens.channelNoModel')
+            ? t('tokens.noModelsAvailable')
             : t('tokens.allModelsAdded');
         container.innerHTML = `
           <div class="available-models-empty">

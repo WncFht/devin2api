@@ -7,7 +7,6 @@ let runtimeMetricsLoading = false;
 let runtimeMetricsPreviousFocus = null;
 let runtimeMetricsRefreshTimer = null;
 const RUNTIME_METRICS_REFRESH_MS = 3000;
-let globalCooldownRulesPreviousFocus = null;
 let multimodalFallbackPreviousFocus = null;
 let multimodalFallbackDraft = [];
 let multimodalFallbackModelOptions = null;
@@ -18,7 +17,6 @@ let customPricingModelFilter = '';
 // 只存 ID 而非 DOM 状态，重渲染后依然有效。
 const customPricingTieredModels = new Set();
 
-const globalCooldownRulesSettingKey = 'global_cooldown_detection_rules';
 const modelMultimodalFallbackSettingKey = 'model_multimodal_fallback';
 const modelCustomPricingSettingKey = 'model_custom_pricing';
 const maxMultimodalFallbackMappings = 64;
@@ -40,9 +38,7 @@ function projectCustomPricingDefaults(pricing) {
   return projected;
 }
 
-const containerImageManagedDisabledReason = 'container_image_managed';
 const advancedSettingKeys = new Set([
-  globalCooldownRulesSettingKey,
   'auto_refresh_interval_seconds',
   'active_request_title_enabled',
   'codex_map_429_to_503',
@@ -55,67 +51,18 @@ const byteSettingKeys = new Set([
   'max_image_body_bytes',
   'responses_ws_max_transcript_bytes'
 ]);
-const oauthBaseURLSettingKeys = new Set([
-  'codex_base_url',
-  'xai_base_url',
-  'antigravity_url',
-  'anthropic_base_url'
-]);
-const oauthBaseURLPlaceholders = new Map([
-  ['CODEX_BASE_URL', 'https://chatgpt.com/backend-api/codex/responses'],
-  ['XAI_BASE_URL', 'https://cli-chat-proxy.grok.com/v1'],
-  ['ANTIGRAVITY_URL', 'https://daily-cloudcode-pa.googleapis.com'],
-  ['ANTHROPIC_BASE_URL', 'https://api.anthropic.com']
-]);
 const bytesPerMiB = 1024 * 1024;
 const maxDurationSeconds = 9223372036;
 const maxDurationMinutes = 153722867;
 const maxDurationHours = 2562047;
 
-const selectSettingOptions = new Map([
-  ['auto_update_channel', [
-    { value: 'stable', labelKey: 'settings.updateChannel.stable' },
-    { value: 'preview', labelKey: 'settings.updateChannel.preview' }
-  ]],
-  ['channel_stats_range', [
-    { value: 'today', labelKey: 'index.timeRange.today' },
-    { value: 'yesterday', labelKey: 'index.timeRange.yesterday' },
-    { value: 'day_before_yesterday', labelKey: 'index.timeRange.dayBeforeYesterday' },
-    { value: 'this_week', labelKey: 'index.timeRange.thisWeek' },
-    { value: 'last_week', labelKey: 'index.timeRange.lastWeek' },
-    { value: 'this_month', labelKey: 'index.timeRange.thisMonth' },
-    { value: 'last_month', labelKey: 'index.timeRange.lastMonth' }
-  ]],
-  ['log_channel_click_action', [
-    { value: 'edit', labelKey: 'settings.logChannelClickAction.edit' },
-    { value: 'navigate', labelKey: 'settings.logChannelClickAction.navigate' }
-  ]]
-]);
-
 const numericSettingConstraints = new Map([
-  ['antigravity_max_idle_conns_per_host', { min: 1, max: 100 }],
-  ['antigravity_idle_conn_timeout_seconds', { min: 1, max: 210 }],
-  ['max_key_retries', { min: 1 }],
   ['max_concurrency', { min: 1 }],
   ['max_body_bytes', { min: 1 / bytesPerMiB }],
   ['max_image_body_bytes', { min: 1 / bytesPerMiB }],
   ['http_read_timeout_seconds', { min: 0, max: maxDurationSeconds }],
   ['log_retention_days', { min: -1, max: 365 }],
-  ['cooldown_auth_seconds', { min: 1, max: maxDurationSeconds }],
-  ['cooldown_server_seconds', { min: 1, max: maxDurationSeconds }],
-  ['cooldown_timeout_seconds', { min: 1, max: maxDurationSeconds }],
-  ['cooldown_rate_limit_seconds', { min: 1, max: maxDurationSeconds }],
-  ['cooldown_min_seconds', { min: 1, max: maxDurationSeconds }],
-  ['cooldown_max_seconds', { min: 1, max: maxDurationSeconds }],
   ['model_catalog_sync_interval_hours', { min: 0, max: maxDurationHours }],
-  ['auto_update_interval_hours', { min: 0, max: maxDurationHours }],
-  ['success_rate_penalty_weight', { min: 0 }],
-  ['health_score_window_minutes', { min: 1, max: maxDurationMinutes }],
-  ['health_score_update_interval', { min: 1, max: maxDurationSeconds }],
-  ['health_min_confident_sample', { min: 1 }],
-  ['ttfb_penalty_weight', { min: 0 }],
-  ['ttfb_max_slow_ratio', { min: 0 }],
-  ['ttfb_min_confident_sample', { min: 1 }],
   ['debug_log_retention_minutes', { min: 1, max: 1440 }],
   ['auto_refresh_interval_seconds', { min: 0, max: maxDurationSeconds }],
   ['responses_ws_max_sessions', { min: 0 }],
@@ -159,49 +106,8 @@ function numericInputAttributes(setting) {
   return attributes.join(' ');
 }
 
-function validateOptionalOAuthURLInput(value) {
-  const normalizedValue = String(value ?? '').trim();
-  if (normalizedValue === '') return '';
-
-  const schemeSeparator = normalizedValue.indexOf('://');
-  if (schemeSeparator >= 0) {
-    const correction = normalizedValue.slice(schemeSeparator + 3);
-    if (/^https?:\/\//.test(correction)) {
-      return t('settings.validation.oauthURLDuplicatedScheme', { url: correction });
-    }
-  }
-
-  let parsed;
-  try {
-    parsed = new URL(normalizedValue);
-  } catch (_) {
-    return t('settings.validation.oauthURLInvalid');
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return t('settings.validation.oauthURLInvalid');
-  }
-  if (parsed.username || parsed.password) {
-    return t('settings.validation.oauthURLCredentials');
-  }
-  if (parsed.search || parsed.hash) {
-    return t('settings.validation.oauthURLQueryOrFragment');
-  }
-  return '';
-}
-
 function validateSettingInput(setting, value) {
   const normalizedValue = String(value ?? '');
-  if (selectSettingOptions.has(setting.key)) {
-    const valid = selectSettingOptions.get(setting.key).some((option) => option.value === normalizedValue);
-    return valid ? '' : t('settings.validation.selectListed');
-  }
-  if (setting.key === 'channel_test_content' && normalizedValue.trim() === '') {
-    return t('settings.validation.testContentRequired');
-  }
-  if (oauthBaseURLSettingKeys.has(String(setting.key || '').toLowerCase())) {
-    return validateOptionalOAuthURLInput(normalizedValue);
-  }
-
   if (setting.key === modelCustomPricingSettingKey) {
     return validateCustomPricingInput(normalizedValue);
   }
@@ -438,53 +344,8 @@ function bindSettingsPageActions() {
     modal.dataset.bound = '1';
   }
 
-  bindGlobalCooldownRulesModal();
   bindMultimodalFallbackModal();
   bindCustomPricingModal();
-}
-
-function bindGlobalCooldownRulesModal() {
-  const modal = document.getElementById('customRulesModal');
-  if (!modal || modal.dataset.bound) return;
-
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      closeGlobalCooldownRulesModal();
-      return;
-    }
-    const button = event.target.closest('[data-action]');
-    if (!button) return;
-    const index = Number(button.dataset.cooldownDetectionIndex);
-    switch (button.dataset.action) {
-      case 'close-global-cooldown-rules':
-        closeGlobalCooldownRulesModal();
-        break;
-      case 'apply-global-cooldown-rules':
-        applyGlobalCooldownRules();
-        break;
-      case 'add-cooldown-detection-rule':
-        window.addCooldownDetectionRule?.();
-        break;
-      case 'remove-cooldown-detection-rule':
-        window.removeCooldownDetectionRule?.(index);
-        break;
-      case 'move-cooldown-detection-rule':
-        window.moveCooldownDetectionRule?.(index, Number(button.dataset.cooldownDetectionDirection));
-        break;
-      case 'test-cooldown-detection-rules':
-        window.testCooldownDetectionRules?.();
-        break;
-    }
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeGlobalCooldownRulesModal();
-      return;
-    }
-    if (event.key === 'Tab') trapModalFocus(modal, event);
-  });
-  modal.dataset.bound = '1';
 }
 
 function trapModalFocus(modal, event) {
@@ -501,67 +362,6 @@ function trapModalFocus(modal, event) {
     event.preventDefault();
     first.focus();
   }
-}
-
-function parseGlobalCooldownRules(value) {
-  try {
-    const parsed = JSON.parse(String(value || '{}'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch (_) {
-    return {};
-  }
-}
-
-function globalCooldownRuleCount(value) {
-  const parsed = parseGlobalCooldownRules(value);
-  return Array.isArray(parsed.rules) ? parsed.rules.length : 0;
-}
-
-function updateGlobalCooldownRulesSummary(value) {
-  const summary = document.getElementById('global-cooldown-rules-summary');
-  if (!summary) return;
-  summary.textContent = t('settings.globalCooldownRules.ruleCount', {
-    count: globalCooldownRuleCount(value)
-  });
-}
-
-function openGlobalCooldownRulesModal(trigger) {
-  const modal = document.getElementById('customRulesModal');
-  const input = document.getElementById(globalCooldownRulesSettingKey);
-  if (!modal || !input || typeof window.resetCooldownDetectionState !== 'function') return;
-
-  globalCooldownRulesPreviousFocus = trigger || document.activeElement;
-  window.resetCooldownDetectionState(parseGlobalCooldownRules(input.value));
-  window.beginCooldownDetectionDraft?.();
-  document.querySelector('.app-container')?.setAttribute('inert', '');
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
-}
-
-function closeGlobalCooldownRulesModal() {
-  const modal = document.getElementById('customRulesModal');
-  if (!modal) return;
-
-  window.discardCooldownDetectionDraft?.();
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  document.querySelector('.app-container')?.removeAttribute('inert');
-  if (globalCooldownRulesPreviousFocus?.isConnected) globalCooldownRulesPreviousFocus.focus();
-  globalCooldownRulesPreviousFocus = null;
-}
-
-function applyGlobalCooldownRules() {
-  if (!window.validateCooldownDetectionDraft?.()) return;
-  if (!window.commitCooldownDetectionRules?.()) return;
-
-  const input = document.getElementById(globalCooldownRulesSettingKey);
-  if (!input) return;
-  const payload = window.collectCooldownDetectionRulesForSubmit?.();
-  input.value = JSON.stringify(payload || {});
-  markChanged(input);
-  updateGlobalCooldownRulesSummary(input.value);
-  closeGlobalCooldownRulesModal();
 }
 
 // ===== 多模态回退模型映射编辑器 =====
@@ -642,7 +442,7 @@ function renderMultimodalFallbackDraft() {
 async function loadMultimodalFallbackModelOptions() {
   if (multimodalFallbackModelOptions !== null) return;
   try {
-    const data = await fetchDataWithAuth('/admin/channels/filter-options?status=enabled');
+    const data = await fetchDataWithAuth('/admin/models');
     multimodalFallbackModelOptions = Array.isArray(data?.models) ? data.models : [];
   } catch (err) {
     console.error('加载模型候选失败:', err);
@@ -1511,19 +1311,14 @@ function getSettingGroupInfo(key) {
 
   const defs = [
     { id: 'advanced', nameKey: 'settings.group.advanced', order: 70, match: () => advancedSettingKeys.has(k) },
-    { id: 'channel', nameKey: 'settings.group.channel', order: 10, match: () => k.startsWith('channel_') || k === 'max_key_retries' },
 
-    { id: 'upstream-connection', nameKey: 'settings.group.upstreamConnection', order: 19, match: () => k === 'upstream_connection_reuse_limit_seconds' || ['antigravity_connection_reuse_enabled', 'antigravity_max_idle_conns_per_host', 'antigravity_idle_conn_timeout_seconds'].includes(k) || oauthBaseURLSettingKeys.has(k) },
     { id: 'websocket', nameKey: 'settings.group.websocket', order: 25, match: () => k.startsWith('responses_ws_') },
     { id: 'stream-timeout', nameKey: 'settings.group.streamTimeout', order: 20, match: () => k === 'stream_timeout' || k.endsWith('_first_byte_timeout') },
     { id: 'non-stream-timeout', nameKey: 'settings.group.nonStreamTimeout', order: 21, match: () => k === 'non_stream_timeout' || k.endsWith('_non_stream_timeout') },
     { id: 'limits', nameKey: 'settings.group.limits', order: 26, match: () => k === 'max_concurrency' || k.endsWith('_body_bytes') || k === 'http_read_timeout_seconds' },
-    { id: 'health', nameKey: 'settings.group.health', order: 30, match: () => k.includes('health_score') || k.includes('success_rate') || k.includes('penalty_weight') || k.includes('ttfb') || k === 'enable_health_score' || k === 'health_min_confident_sample' },
     { id: 'billing', nameKey: 'settings.group.billing', order: 35, match: () => k === modelCustomPricingSettingKey },
-    { id: 'cooldown', nameKey: 'settings.group.cooldown', order: 40, match: () => k.startsWith('cooldown_') },
     { id: 'log', nameKey: 'settings.group.log', order: 50, match: () => k.startsWith('log_') || k.startsWith('debug_') },
     { id: 'access', nameKey: 'settings.group.access', order: 60, match: () => k.includes('auth_') },
-    { id: 'update', nameKey: 'settings.group.update', order: 65, match: () => k.startsWith('auto_update_') },
   ];
 
   for (const d of defs) {
@@ -1534,14 +1329,6 @@ function getSettingGroupInfo(key) {
 
 function getSettingOrder(key) {
   const orders = {
-    upstream_connection_reuse_limit_seconds: 90,
-    antigravity_connection_reuse_enabled: 91,
-    antigravity_max_idle_conns_per_host: 92,
-    antigravity_idle_conn_timeout_seconds: 93,
-    codex_base_url: 91,
-    xai_base_url: 92,
-    antigravity_url: 93,
-    anthropic_base_url: 94,
     upstream_first_byte_timeout: 100,
     stream_timeout: 101,
     non_stream_timeout: 102,
@@ -1557,14 +1344,6 @@ function getSettingOrder(key) {
     max_body_bytes: 201,
     max_image_body_bytes: 202,
     http_read_timeout_seconds: 203,
-    cooldown_fallback_enabled: 300,
-    cooldown_auth_seconds: 301,
-    cooldown_server_seconds: 302,
-    cooldown_timeout_seconds: 303,
-    cooldown_rate_limit_seconds: 304,
-    cooldown_min_seconds: 305,
-    cooldown_max_seconds: 306,
-    global_cooldown_detection_rules: 700,
     model_custom_pricing: 710
   };
   const normalizedKey = String(key || '').toLowerCase();
@@ -1653,7 +1432,6 @@ function refreshSettingsTranslations() {
     row.querySelector('.setting-col-value').dataset.mobileLabel = t('settings.currentValue');
     row.querySelector('.setting-col-actions').dataset.mobileLabel = t('common.actions');
   }
-  updateGlobalCooldownRulesSummary(document.getElementById(globalCooldownRulesSettingKey)?.value || '');
   updateMultimodalFallbackSummary(document.getElementById(modelMultimodalFallbackSettingKey)?.value || '');
   updateCustomPricingSummary(document.getElementById(modelCustomPricingSettingKey)?.value || '');
 }
@@ -1702,7 +1480,7 @@ function renderSettings(settings) {
     const groupRow = TemplateEngine.render('tpl-setting-group-row', {
       groupId: g.id,
       groupName: g.name,
-      groupNoticeHtml: renderSettingGroupNotice(g)
+      groupNoticeHtml: ''
     });
     if (groupRow) tbody.appendChild(groupRow);
 
@@ -1726,24 +1504,6 @@ function renderSettings(settings) {
   }
 }
 
-function renderSettingGroupNotice(group) {
-  const containerManaged = group.id === 'update' && group.settings.some((setting) => (
-    setting.editable === false && setting.disabled_reason === containerImageManagedDisabledReason
-  ));
-  if (!containerManaged) return '';
-
-  return `
-    <div class="settings-group-notice" role="note">
-      <p data-i18n="settings.update.containerManaged">${escapeHtml(t('settings.update.containerManaged'))}</p>
-      <ul>
-        <li><span data-i18n="settings.update.stableImage">${escapeHtml(t('settings.update.stableImage'))}</span>: <code>ghcr.io/caidaoli/ccload:latest</code></li>
-        <li><span data-i18n="settings.update.betaImage">${escapeHtml(t('settings.update.betaImage'))}</span>: <code>ghcr.io/caidaoli/ccload:beta</code></li>
-      </ul>
-      <p data-i18n="settings.update.applyImage">${escapeHtml(t('settings.update.applyImage'))}</p>
-      <code class="settings-group-notice-command">docker compose pull &amp;&amp; docker compose up -d</code>
-    </div>`;
-}
-
 function settingDisabledAttributes(setting) {
   return setting.editable === false ? 'disabled' : '';
 }
@@ -1756,16 +1516,6 @@ function initSettingsEventDelegation() {
 
   // 重置按钮点击
   tbody.addEventListener('click', (e) => {
-    const editGlobalRulesBtn = e.target.closest('[data-action="edit-global-cooldown-rules"]');
-    if (editGlobalRulesBtn) {
-      openGlobalCooldownRulesModal(editGlobalRulesBtn);
-      return;
-    }
-    const updateCheckBtn = e.target.closest('[data-action="check-for-updates"]');
-    if (updateCheckBtn) {
-      checkForUpdates(updateCheckBtn);
-      return;
-    }
     const resetBtn = e.target.closest('.setting-reset-btn');
     if (resetBtn) {
       resetSetting(resetBtn.dataset.key);
@@ -1779,72 +1529,11 @@ function initSettingsEventDelegation() {
   });
 }
 
-// 手动触发完整更新流程：检查、下载、校验、替换，之后由服务端等待空闲重启。
-async function checkForUpdates(button) {
-  if (button.disabled) return;
-  button.disabled = true;
-  button.setAttribute?.('aria-busy', 'true');
-  try {
-    const result = await fetchDataWithAuth('/admin/update/check', { method: 'POST' });
-    if (result.pending_restart) {
-      showSuccess(t('settings.updateCheck.pendingRestart', { version: result.pending_version }));
-    } else if (result.has_update) {
-      showSuccess(t('settings.updateCheck.found', { version: result.latest_version }));
-    } else {
-      showSuccess(t('settings.updateCheck.upToDate', { version: result.latest_version }));
-    }
-  } catch (err) {
-    showError(t('settings.updateCheck.failed') + ': ' + err.message);
-  } finally {
-    button.disabled = false;
-    button.removeAttribute?.('aria-busy');
-  }
-}
-
 function renderInput(setting) {
   const safeKey = escapeHtml(setting.key);
   const safeValue = escapeHtml(setting.value);
-  const placeholder = oauthBaseURLPlaceholders.get(setting.key);
-  const placeholderAttribute = placeholder ? `placeholder="${escapeHtml(placeholder)}"` : '';
-  const wideTextInput = setting.key === 'channel_test_content' || oauthBaseURLPlaceholders.has(setting.key);
   const disabledAttributes = settingDisabledAttributes(setting);
   const numericAttributes = numericInputAttributes(setting);
-
-  if (setting.key === globalCooldownRulesSettingKey) {
-    const count = globalCooldownRuleCount(setting.value);
-    return `
-      <div class="global-cooldown-rules-control">
-        <input type="hidden" id="${safeKey}" value="${safeValue}">
-        <button type="button" class="btn btn-secondary" data-action="edit-global-cooldown-rules" data-i18n="settings.globalCooldownRules.edit" ${disabledAttributes}>
-          ${escapeHtml(t('settings.globalCooldownRules.edit'))}
-        </button>
-        <span id="global-cooldown-rules-summary" class="global-cooldown-rules-summary">
-          ${escapeHtml(t('settings.globalCooldownRules.ruleCount', { count }))}
-        </span>
-      </div>`;
-  }
-
-  const selectOptions = selectSettingOptions.get(setting.key);
-  if (selectOptions) {
-    const optionsHtml = selectOptions.map(({ value, labelKey }) => (
-      `<option value="${value}" data-i18n="${labelKey}" ${setting.value === value ? 'selected' : ''}>${escapeHtml(t(labelKey))}</option>`
-    )).join('');
-    const selectHtml = `
-      <select id="${safeKey}" class="settings-input settings-input--select" ${disabledAttributes}>
-        ${optionsHtml}
-      </select>`;
-    // 更新渠道旁提供手动检测按钮；容器模式（editable=false）不渲染、后端同样拒绝。
-    if (setting.key === 'auto_update_channel' && setting.editable !== false) {
-      return `
-        <div class="settings-update-channel-control">
-          ${selectHtml}
-          <button type="button" class="btn btn-secondary settings-update-check-btn" data-action="check-for-updates" data-i18n="settings.updateCheck.check">
-            ${escapeHtml(t('settings.updateCheck.check'))}
-          </button>
-        </div>`;
-    }
-    return selectHtml;
-  }
 
   if (byteSettingKeys.has(setting.key)) {
     return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
@@ -1868,7 +1557,7 @@ function renderInput(setting) {
     case 'float':
       return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
     default:
-      return `<input type="text" id="${safeKey}" value="${safeValue}" ${placeholderAttribute} class="settings-input settings-input--text${wideTextInput ? ' settings-input--wide' : ''}" ${disabledAttributes}>`;
+      return `<input type="text" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--text" ${disabledAttributes}>`;
   }
 }
 
@@ -1941,7 +1630,6 @@ function setSettingControlValue(key, value) {
     control.input.value = normalizedValue;
   }
 
-  if (key === globalCooldownRulesSettingKey) updateGlobalCooldownRulesSummary(normalizedValue);
   if (key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(normalizedValue);
   if (key === modelCustomPricingSettingKey) updateCustomPricingSummary(normalizedValue);
   return control;
@@ -1982,17 +1670,6 @@ async function saveAllSettings() {
   if (Object.keys(updates).length === 0) {
     window.showNotification(t('settings.msg.noChanges'), 'info');
     return;
-  }
-
-  if ('cooldown_min_seconds' in updates || 'cooldown_max_seconds' in updates) {
-    const minSeconds = Number(getSettingControl('cooldown_min_seconds')?.value);
-    const maxSeconds = Number(getSettingControl('cooldown_max_seconds')?.value);
-    if (minSeconds > maxSeconds) {
-      setSettingInvalid('cooldown_min_seconds', true);
-      setSettingInvalid('cooldown_max_seconds', true);
-      showError(t('settings.msg.invalidCooldownBounds'));
-      return;
-    }
   }
 
   if (!confirm(t('settings.msg.confirmSave'))) return;

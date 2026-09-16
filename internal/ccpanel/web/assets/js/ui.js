@@ -968,12 +968,12 @@ window.WebAuth = window.WebAuth || {
   // 复用公共工具（DRY）：真实实现由下方公共工具模块导出到 window.escapeHtml
   const escapeHtml = (str) => window.escapeHtml(str);
 
-  // 协议显示名由 locales 提供（与 model-test.js 共用词条）
+  // 入口端点显示名由 locales 提供；值与 index.jsonl 的 api 字段同口径
   const PROTOCOL_LABEL_KEYS = {
     anthropic: 'modelTest.clientProtocolAnthropic',
-    codex: 'modelTest.clientProtocolCodex',
-    openai: 'modelTest.clientProtocolOpenAI',
-    gemini: 'modelTest.clientProtocolGemini'
+    'openai-chat': 'modelTest.clientProtocolOpenAI',
+    'openai-responses': 'modelTest.clientProtocolCodex',
+    'responses-ws': 'common.apiResponsesWs'
   };
 
   function protocolDisplayName(value) {

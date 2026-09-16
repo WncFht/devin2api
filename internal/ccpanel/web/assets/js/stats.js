@@ -1,6 +1,6 @@
     // 常量定义
     const t = window.t;
-    const STATS_TABLE_COLUMNS = 13; // 统计表列数
+    const STATS_TABLE_COLUMNS = 12; // 统计表列数
 
     let statsData = null;
     let rpmStats = null; // 全局RPM统计（峰值、平均、最近一分钟）
@@ -9,11 +9,8 @@
     let currentStatsCustomTimeRange = null;
     let authTokens = []; // 令牌列表
     let hideZeroSuccess = true; // 是否隐藏0成功的模型（默认开启）
-    let statsChannelNameOptions = []; // 从统计数据中提取的渠道名列表
     let statsModelOptions = []; // 从统计数据中提取的模型列表
-    let statsChannelNameCombobox = null; // 渠道名筛选组合框实例
     let statsModelCombobox = null; // 模型筛选组合框实例
-    let statsExactChannelNameValue = '';
     let statsExactModelValue = '';
     let sortState = {
       column: null,
@@ -41,20 +38,9 @@
       return Boolean(normalizedValue) && normalizedValue === normalizeStatsFilterValue(exactValue);
     }
 
-    function isExactStatsChannelNameFilter(value) {
-      return statsFilterMatchesOption(value, statsChannelNameOptions) ||
-        statsFilterMatchesExactValue(value, statsExactChannelNameValue);
-    }
-
     function isExactStatsModelFilter(value) {
       return statsFilterMatchesOption(value, statsModelOptions) ||
         statsFilterMatchesExactValue(value, statsExactModelValue);
-    }
-
-    function getStatsChannelNameFilterKey(value, values) {
-      return (values && values.channelNameExact) || isExactStatsChannelNameFilter(value)
-        ? 'channel_name'
-        : 'channel_name_like';
     }
 
     function getStatsModelFilterKey(value, values) {
@@ -62,14 +48,10 @@
     }
 
     function rememberExactStatsFilters(filters = {}, urlParams = null) {
-      const hasExactChannelName = urlParams
-        ? urlParams.has('channel_name')
-        : filters.channelNameExact === true;
       const hasExactModel = urlParams
         ? urlParams.has('model')
         : filters.modelExact === true;
 
-      statsExactChannelNameValue = hasExactChannelName ? (filters.channelName || '') : '';
       statsExactModelValue = hasExactModel ? (filters.model || '') : '';
     }
 
@@ -121,7 +103,7 @@
         isToday = statsData.is_today !== false;
         populateStatsComboboxOptions();
 
-        // 初始化时应用默认排序（优先级→渠道名称→模型名称）
+        // 初始化时应用默认排序（模型名称）
         applyDefaultSorting();
 
         renderStatsTable();
@@ -203,7 +185,7 @@
     }
 
     function applySorting() {
-      // 如果没有排序状态，从原始数据恢复默认排序（优先级→渠道名称→模型名称）
+      // 如果没有排序状态，从原始数据恢复默认排序（模型名称）
       if (!sortState.column || !sortState.order) {
         if (statsData && statsData.originalStats) {
           statsData.stats = [...statsData.originalStats];
@@ -223,10 +205,6 @@
         let valueA, valueB;
 
         switch (column) {
-          case 'channel_name':
-            valueA = (a.channel_name || '').toLowerCase();
-            valueB = (b.channel_name || '').toLowerCase();
-            break;
           case 'model':
             valueA = (a.model || '').toLowerCase();
             valueB = (b.model || '').toLowerCase();
@@ -340,8 +318,8 @@
         return `<span class="stats-value-muted">${t('stats.unknownModel')}</span>`;
       }
 
-      const modelLink = `<a href="#" class="model-tag model-link" data-model="${escapeHtml(entry.model)}" data-channel-name="${escapeHtml(entry.channel_name)}" title="${t('stats.viewLogsTitle')}">${escapeHtml(entry.model)}</a>`;
-      return `<span class="stats-model-cell">${modelLink}${buildCornerMultiplierBadge(entry.cost_multiplier_min, entry.cost_multiplier_max)}</span>`;
+      const modelLink = `<a href="#" class="model-tag model-link" data-model="${escapeHtml(entry.model)}" title="${t('stats.viewLogsTitle')}">${escapeHtml(entry.model)}</a>`;
+      return `<span class="stats-model-cell">${modelLink}</span>`;
     }
 
     function buildStatsCostDisplay(standardCost, effectiveCost) {
@@ -444,10 +422,6 @@
         const healthIndicator = buildHealthIndicator(entry.health_timeline, successRate / 100);
 
         const row = TemplateEngine.render('tpl-stats-row', {
-          channelId: entry.channel_id,
-          channelNameAttr: entry.channel_name,
-          channelName: entry.channel_name,
-          channelIdBadge: entry.channel_id ? `<span class="channel-id">(ID: ${entry.channel_id})</span>` : '',
           healthIndicator: healthIndicator,
           modelDisplay: modelDisplay,
           successDisplay: successDisplay,
@@ -469,7 +443,6 @@
           cacheUtilCellClass: cacheUtilCellClass,
           costText: costText,
           costCellClass: costCellClass,
-          mobileLabelChannel: t('stats.channelName'),
           mobileLabelModel: t('common.model'),
           mobileLabelSuccess: t('common.success'),
           mobileLabelError: t('common.failed'),
@@ -636,16 +609,14 @@
       hideZeroSuccess = true;
       rememberExactStatsFilters({
         ...defaults,
-        channelNameExact: false,
         modelExact: false
       });
 
       window.applyFilterControlValues(defaults, {
         range: 'f_hours',
-        clientProtocol: 'f_client_protocol',
+        api: 'f_api',
         authToken: 'f_auth_token'
       });
-      statsChannelNameCombobox?.setValue('', t('stats.allChannels'));
       statsModelCombobox?.setValue('', t('trend.allModels'));
 
       const hideZeroCheckbox = document.getElementById('f_hide_zero_success');
@@ -661,26 +632,6 @@
         historyMethod: 'replaceState'
       });
       loadStats();
-    }
-
-    function initStatsChannelNameCombobox(initialValue) {
-      statsChannelNameCombobox = window.createSearchableCombobox({
-        inputId: 'f_name',
-        dropdownId: 'f_name_dropdown',
-        attachMode: true,
-        allowCustomInput: true,
-        commitEmptyAsFirst: true,
-        initialValue: initialValue || '',
-        initialLabel: initialValue || t('stats.allChannels'),
-        getOptions: () => [
-          { value: '', label: t('stats.allChannels') },
-          ...statsChannelNameOptions.map(n => ({ value: n, label: n }))
-        ],
-        onSelect: () => {
-          window.persistFilterState({ key: STATS_FILTER_KEY, getValues: getStatsFilters });
-          applyFilter();
-        }
-      });
     }
 
     function initStatsModelCombobox(initialValue) {
@@ -712,11 +663,7 @@
         appendStatsTimeRangeParams(params, getStatsFilters());
         const data = await fetchDataWithAuth('/dashboard/stats/filter-options?' + params.toString());
         if (data) {
-          statsChannelNameOptions = data.channel_names || [];
           statsModelOptions = data.models || [];
-          if (statsChannelNameCombobox) {
-            statsChannelNameCombobox.refresh();
-          }
           if (statsModelCombobox) {
             statsModelCombobox.refresh();
           }
@@ -731,10 +678,9 @@
     }
 
     function initFilters(restoredFilters) {
-      const name = restoredFilters.channelName || '';
       const range = restoredFilters.range || 'today';
       const model = restoredFilters.model || '';
-      const clientProtocol = restoredFilters.clientProtocol || '';
+      const api = restoredFilters.api || '';
       const authToken = restoredFilters.authToken || '';
 
       window.initSavedDateRangeFilter({
@@ -757,13 +703,12 @@
         }
       });
 
-      initStatsChannelNameCombobox(name);
       initStatsModelCombobox(model);
 
-      const clientProtocolSelect = document.getElementById('f_client_protocol');
-      if (clientProtocolSelect) {
-        clientProtocolSelect.value = clientProtocol;
-        clientProtocolSelect.addEventListener('change', applyFilter);
+      const apiSelect = document.getElementById('f_api');
+      if (apiSelect) {
+        apiSelect.value = api;
+        apiSelect.addEventListener('change', applyFilter);
       }
 
       window.initAuthTokenFilter({
@@ -788,7 +733,7 @@
       window.bindFilterApplyInputs({
         apply: applyFilter,
         debounceInputIds: [],
-        enterInputIds: ['f_hours', 'f_client_protocol', 'f_auth_token']
+        enterInputIds: ['f_hours', 'f_api', 'f_auth_token']
       });
     }
 
@@ -808,7 +753,7 @@
       }
     }
 
-    // 应用默认排序:按渠道优先级降序,相同优先级按渠道名称升序,相同渠道按模型名称升序
+    // 应用默认排序:按模型名称升序
     // 如果用户已选择自定义排序，则保持用户的排序
     function applyDefaultSorting() {
       if (!statsData || !statsData.stats || statsData.stats.length === 0) return;
@@ -825,24 +770,8 @@
         return;
       }
 
-      // 按渠道优先级降序，再按渠道名称和模型名称升序
-      statsData.stats.sort((a, b) => {
-        // 按优先级降序（数值大的在前）
-        const priorityA = a.channel_priority ?? 0;
-        const priorityB = b.channel_priority ?? 0;
-        if (priorityA !== priorityB) return priorityB - priorityA;
-
-        // 优先级相同时,按渠道名称升序
-        const channelA = (a.channel_name || '').toLowerCase();
-        const channelB = (b.channel_name || '').toLowerCase();
-        const channelCompare = channelA.localeCompare(channelB, 'zh-CN');
-        if (channelCompare !== 0) return channelCompare;
-
-        // 渠道名称相同时,按模型名称升序
-        const modelA = (a.model || '').toLowerCase();
-        const modelB = (b.model || '').toLowerCase();
-        return modelA.localeCompare(modelB, 'zh-CN');
-      });
+      statsData.stats.sort((a, b) =>
+        (a.model || '').toLowerCase().localeCompare((b.model || '').toLowerCase(), 'zh-CN'));
     }
 
     // 渲染令牌选择器（支持语言切换时重新渲染）
@@ -1037,15 +966,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
           return false;
         }
       },
-      { key: 'channelId', queryKeys: ['channel_id'], defaultValue: '' },
-      { key: 'clientProtocol', queryKeys: ['client_protocol'], defaultValue: '' },
-      {
-        key: 'channelName',
-        queryKeys: ['channel_name', 'channel_name_like'],
-        paramKey: getStatsChannelNameFilterKey,
-        requestKey: getStatsChannelNameFilterKey,
-        defaultValue: ''
-      },
+      { key: 'api', queryKeys: ['api'], defaultValue: '' },
       {
         key: 'model',
         queryKeys: ['model', 'model_like'],
@@ -1057,11 +978,10 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
     ];
 
     function getStatsFilters() {
-      const channelName = statsChannelNameCombobox ? statsChannelNameCombobox.getValue() : '';
       const model = statsModelCombobox ? statsModelCombobox.getValue() : '';
       const baseValues = window.readFilterControlValues({
         range: { id: 'f_hours', defaultValue: 'today', trim: true },
-        clientProtocol: { id: 'f_client_protocol', trim: true },
+        api: { id: 'f_api', trim: true },
         authToken: { id: 'f_auth_token', trim: true }
       });
       const hasCustomRange = baseValues.range === 'custom' && currentStatsCustomTimeRange;
@@ -1069,8 +989,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         ...baseValues,
         customStartTime: hasCustomRange ? String(currentStatsCustomTimeRange.startMs) : '',
         customEndTime: hasCustomRange ? String(currentStatsCustomTimeRange.endMs) : '',
-        channelName,
-        channelNameExact: isExactStatsChannelNameFilter(channelName),
         model,
         modelExact: isExactStatsModelFilter(model),
         hideZeroSuccess: hideZeroSuccess
@@ -1130,7 +1048,6 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       }
       rememberExactStatsFilters({
         ...restoredFilters,
-        channelNameExact: !hasUrlParams && savedFilters?.channelNameExact === true,
         modelExact: !hasUrlParams && savedFilters?.modelExact === true
       }, hasUrlParams ? u : null);
       // 恢复隐藏0成功选项状态（从 localStorage 读取，默认 true）
@@ -1172,33 +1089,16 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         }
       });
 
-      // 事件委托：处理统计表格中的渠道名称和模型名称点击
+      // 事件委托：处理统计表格中的模型名称点击（跳日志页按模型过滤）
       const statsTableBody = document.getElementById('stats_tbody');
       if (statsTableBody) {
         statsTableBody.addEventListener('click', (e) => {
-          // 处理渠道名称点击
-          const channelLink = e.target.closest('.channel-link[data-channel-name]');
-          if (channelLink) {
-            e.preventDefault();
-            const channelName = channelLink.dataset.channelName;
-            if (channelName) {
-              const params = buildStatsLogLinkParams({ channel_name: channelName });
-              window.location.href = `/web/logs.html?${params.toString()}`;
-            }
-            return;
-          }
-
-          // 处理模型名称点击
           const modelLink = e.target.closest('.model-link[data-model]');
           if (modelLink) {
             e.preventDefault();
             const model = modelLink.dataset.model;
-            const channelName = modelLink.dataset.channelName;
             if (model) {
-              const params = buildStatsLogLinkParams({
-                channel_name: channelName,
-                model
-              });
+              const params = buildStatsLogLinkParams({ model });
               window.location.href = `/web/logs.html?${params.toString()}`;
             }
             return;
@@ -1281,25 +1181,17 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       }
 
       // 聚合数据（只统计成功调用）
-      const channelCallsMap = {}; // 渠道 -> 成功调用次数
-      const channelTokensMap = {}; // 渠道 -> Token用量
       const modelCallsMap = {}; // 模型 -> 成功调用次数
       const modelTokensMap = {}; // 模型 -> Token用量
-      const channelCostMap = {}; // 渠道 -> 成本（美元）
       const modelCostMap = {}; // 模型 -> 成本（美元）
 
       for (const entry of statsData.stats) {
-        const channelName = entry.channel_name || t('stats.unknownChannel');
         const modelName = entry.model || t('stats.unknownModel');
         const successCount = entry.success || 0;
         const totalTokens = (entry.total_input_tokens || 0) + (entry.total_output_tokens || 0) + (entry.total_cache_read_input_tokens || 0) + (entry.total_cache_creation_input_tokens || 0);
 
         // 只统计成功调用
         if (successCount > 0) {
-          // 渠道调用次数
-          channelCallsMap[channelName] = (channelCallsMap[channelName] || 0) + successCount;
-          // 渠道Token用量
-          channelTokensMap[channelName] = (channelTokensMap[channelName] || 0) + totalTokens;
           // 模型调用次数
           modelCallsMap[modelName] = (modelCallsMap[modelName] || 0) + successCount;
           // 模型Token用量
@@ -1312,22 +1204,16 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
           ? Number(entry.effective_cost) || 0
           : cost;
         if (cost > 0 || effectiveCost > 0) {
-          if (!channelCostMap[channelName]) channelCostMap[channelName] = { standard: 0, effective: 0 };
-          channelCostMap[channelName].standard += cost;
-          channelCostMap[channelName].effective += effectiveCost;
           if (!modelCostMap[modelName]) modelCostMap[modelName] = { standard: 0, effective: 0 };
           modelCostMap[modelName].standard += cost;
           modelCostMap[modelName].effective += effectiveCost;
         }
       }
 
-      // 渲染6个饼图
+      // 渲染3个模型饼图
       const unitTimes = t('stats.unitTimes');
-      renderPieChart('chart-channel-calls', channelCallsMap, unitTimes);
-      renderPieChart('chart-channel-tokens', channelTokensMap, '');
       renderPieChart('chart-model-calls', modelCallsMap, unitTimes);
       renderPieChart('chart-model-tokens', modelTokensMap, '');
-      renderPieChart('chart-channel-cost', channelCostMap, '$');
       renderPieChart('chart-model-cost', modelCostMap, '$');
     }
 

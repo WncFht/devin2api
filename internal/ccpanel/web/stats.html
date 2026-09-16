@@ -42,8 +42,8 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
                 </svg>
                 <span data-i18n="stats.detailTitle">详细统计数据</span>
-                <small class="stats-detail-sort-hint" data-i18n="stats.sortByPriority">
-                  按优先级、名称排序
+                <small class="stats-detail-sort-hint" data-i18n="stats.sortByName">
+                  按模型名称排序
                 </small>
               </span>
               <!-- 表格/图表切换按钮 -->
@@ -80,10 +80,6 @@
               <table class="modern-table stats-table mobile-card-table">
                 <thead>
                   <tr>
-                    <th class="sortable" data-column="channel_name">
-                      <span data-i18n="stats.channelName">渠道名称</span>
-                      <span class="sort-indicator" id="sort-channel_name"></span>
-                    </th>
                     <th class="sortable" data-column="model">
                       <span data-i18n="common.model">模型</span>
                       <span class="sort-indicator" id="sort-model"></span>
@@ -135,7 +131,7 @@
                 </thead>
                 <tbody id="stats_tbody">
                   <tr>
-                    <td colspan="13" class="loading-state">
+                    <td colspan="12" class="loading-state">
                       <div class="loading-spinner loading-spinner--block"></div>
                       <span data-i18n="stats.loading">正在加载统计数据...</span>
                     </td>
@@ -147,33 +143,15 @@
             <!-- 图表视图 -->
             <div id="stats-chart-view" class="hidden">
               <div class="charts-grid">
-                <!-- 第1行：调用次数 -->
-                <!-- 渠道调用次数饼图 -->
-                <div class="chart-card">
-                  <h4 class="chart-title" data-i18n="stats.chartChannelCalls">渠道调用次数</h4>
-                  <div id="chart-channel-calls" class="pie-chart-container"></div>
-                </div>
                 <!-- 模型调用次数饼图 -->
                 <div class="chart-card">
                   <h4 class="chart-title" data-i18n="stats.chartModelCalls">模型调用次数</h4>
                   <div id="chart-model-calls" class="pie-chart-container"></div>
                 </div>
-                <!-- 第2行：成本 -->
-                <!-- 渠道成本饼图 -->
-                <div class="chart-card">
-                  <h4 class="chart-title" data-i18n="stats.chartChannelCost">渠道成本</h4>
-                  <div id="chart-channel-cost" class="pie-chart-container"></div>
-                </div>
                 <!-- 模型成本饼图 -->
                 <div class="chart-card">
                   <h4 class="chart-title" data-i18n="stats.chartModelCost">模型成本</h4>
                   <div id="chart-model-cost" class="pie-chart-container"></div>
-                </div>
-                <!-- 第3行：Token用量 -->
-                <!-- 渠道Token用量饼图 -->
-                <div class="chart-card">
-                  <h4 class="chart-title" data-i18n="stats.chartChannelTokens">渠道Token用量</h4>
-                  <div id="chart-channel-tokens" class="pie-chart-container"></div>
                 </div>
                 <!-- 模型Token用量饼图 -->
                 <div class="chart-card">
@@ -227,12 +205,7 @@
   <!-- 数据行模板 -->
   <template id="tpl-stats-row">
     <tr class="mobile-card-row stats-data-row">
-      <td class="stats-col-channel" data-mobile-label="{{mobileLabelChannel}}">
-        <a href="#" class="config-name channel-link" data-channel-name="{{channelNameAttr}}" title="查看该渠道的日志">{{channelName}}</a>
-        {{{channelIdBadge}}}
-        {{{healthIndicator}}}
-      </td>
-      <td class="stats-col-model" data-mobile-label="{{mobileLabelModel}}">{{{modelDisplay}}}</td>
+      <td class="stats-col-model" data-mobile-label="{{mobileLabelModel}}">{{{modelDisplay}}}{{{healthIndicator}}}</td>
       <td class="stats-col-success" data-mobile-label="{{mobileLabelSuccess}}">{{{successDisplay}}}</td>
       <td class="stats-col-error" data-mobile-label="{{mobileLabelError}}"><span class="error-count">{{errorCount}}</span></td>
       <td class="stats-col-timing {{timingCellClass}}" data-mobile-label="{{mobileLabelTiming}}">{{{avgFirstByteTime}}}</td>
@@ -250,7 +223,7 @@
   <!-- 合计行模板 -->
   <template id="tpl-stats-total">
     <tr class="mobile-card-row stats-total-row">
-      <td colspan="2" class="stats-col-total-label" data-mobile-label="{{mobileLabelSummary}}">{{totalLabel}}</td>
+      <td class="stats-col-total-label" data-mobile-label="{{mobileLabelSummary}}">{{totalLabel}}</td>
       <td class="stats-col-success" data-mobile-label="{{mobileLabelSuccess}}">{{{successDisplay}}}</td>
       <td class="stats-col-error" data-mobile-label="{{mobileLabelError}}"><span class="error-count">{{errorCount}}</span></td>
       <td class="stats-col-timing {{timingCellClass}}" data-mobile-label="{{mobileLabelTiming}}">{{{avgFirstByteTime}}}</td>

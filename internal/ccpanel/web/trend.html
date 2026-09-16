@@ -81,24 +81,24 @@
                     data-i18n="trend.barChart"
                   >柱状图</button>
                 </div>
-                <!-- 渠道筛选器 -->
+                <!-- 模型序列筛选器 -->
                 <div class="channel-filter-container">
-                  <button class="btn btn-secondary btn-sm" id="btn-channel-filter-toggle" type="button">
+                  <button class="btn btn-secondary btn-sm" id="btn-model-filter-toggle" type="button">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4"/>
                     </svg>
-                    <span data-i18n="trend.channelFilter">渠道筛选</span>
+                    <span data-i18n="trend.modelFilter">模型筛选</span>
                   </button>
-                  <div class="channel-filter-dropdown hidden" id="channel-filter-dropdown">
+                  <div class="channel-filter-dropdown hidden" id="model-filter-dropdown">
                     <div class="filter-header">
-                      <span data-i18n="trend.selectChannels">选择渠道</span>
+                      <span data-i18n="trend.selectModels">选择模型</span>
                       <div class="filter-actions">
-                        <button class="filter-action" id="btn-select-all-channels" type="button" data-i18n="common.selectAll">全选</button>
-                        <button class="filter-action" id="btn-clear-all-channels" type="button" data-i18n="common.clear">清空</button>
+                        <button class="filter-action" id="btn-select-all-models" type="button" data-i18n="common.selectAll">全选</button>
+                        <button class="filter-action" id="btn-clear-all-models" type="button" data-i18n="common.clear">清空</button>
                       </div>
                     </div>
-                    <div class="filter-content" id="channel-filter-list">
-                      <!-- 动态生成渠道列表 -->
+                    <div class="filter-content" id="model-filter-list">
+                      <!-- 动态生成模型列表 -->
                     </div>
                   </div>
                 </div>
@@ -144,8 +144,8 @@
   </div>
 
 
-  <!-- 渠道筛选项模板 -->
-  <template id="tpl-channel-filter-item">
+  <!-- 模型筛选项模板 -->
+  <template id="tpl-model-filter-item">
     <div class="channel-filter-item">
       <div class="channel-checkbox {{checkedClass}}"></div>
       <div class="channel-color-indicator" style="background-color: {{color}}"></div>

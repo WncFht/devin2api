@@ -633,7 +633,7 @@
   }
 
   function markCopied(btn) {
-    const copiedLabel = label('channels.batchRefreshCopied', '已复制');
+    const copiedLabel = label('common.copied', '已复制');
     const originalTitle = btn.title;
     const originalLabel = btn.getAttribute('aria-label');
     btn.classList.add('chat-code-copy-btn--copied');
