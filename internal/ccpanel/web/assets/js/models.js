@@ -1,7 +1,7 @@
 // 模型注册表页：GET/PUT/DELETE /admin/model-registry 的 merged 视图。
 // 每行 = 对外模型名（目录 ∪ 别名 ∪ 注册表 ∪ 流量）+ 上游目录详情
 // （label/供应商/倍率/价格/能力徽标，挂在 row.catalog）+ 启用开关 +
-// 重定向输入；筛选 = 状态 pills + 目录属性（供应商/API/档位/定价/特性
+// 重定向选择弹窗；筛选 = 状态 pills + 目录属性（供应商/API/档位/定价/特性
 // chips）+ 名称搜索，客户端分页。
 (function () {
   const t = window.t;
@@ -90,7 +90,6 @@
       });
       document.getElementById('add-model-btn').addEventListener('click', openAddModal);
       document.getElementById('models-tbody').addEventListener('click', onTableClick);
-      document.getElementById('models-tbody').addEventListener('change', onTableChange);
       document.querySelector('.logs-pagination-card').addEventListener('click', (e) => {
         const btn = e.target.closest('[data-action]');
         if (!btn) return;
@@ -110,8 +109,25 @@
         if (e.target.id === 'addModelModal' || e.target.closest('[data-action="close-add-modal"]')) closeAddModal();
         if (e.target.closest('[data-action="confirm-add-model"]')) addModel();
       });
+      document.getElementById('redirect-search').addEventListener('input', renderRedirectList);
+      document.getElementById('redirect-search').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const first = document.querySelector('#redirect-model-list .redirect-item');
+        if (first) applyRedirect(first.dataset.model);
+      });
+      document.getElementById('redirect-model-list').addEventListener('click', (e) => {
+        const item = e.target.closest('.redirect-item');
+        if (item) applyRedirect(item.dataset.model);
+      });
+      document.getElementById('redirectModal').addEventListener('click', (e) => {
+        if (e.target.id === 'redirectModal' || e.target.closest('[data-action="close-redirect-modal"]')) closeRedirectModal();
+        if (e.target.closest('[data-action="clear-redirect"]')) applyRedirect('');
+      });
       document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeAddModal();
+        if (e.key === 'Escape') {
+          closeAddModal();
+          closeRedirectModal();
+        }
       });
       const savedSort = localStorage.getItem('models.sort');
       if (savedSort && [...document.getElementById('f-sort').options].some((o) => o.value === savedSort)) {
@@ -369,7 +385,6 @@
       priceOut: t('models.col.priceOut'),
       source: t('models.col.source'),
       enabled: t('models.col.enabled'),
-      redirect: t('models.col.redirect'),
       resolved: t('models.col.resolved'),
       actions: t('common.actions')
     };
@@ -457,27 +472,22 @@
       sw.appendChild(h('span', 'channel-enable-switch__knob'));
       enabledTd.appendChild(sw);
 
-      const redirectTd = h('td');
-      redirectTd.dataset.mobileLabel = labels.redirect;
-      const input = h('input', 'form-input');
-      input.type = 'text';
-      input.setAttribute('list', 'models-target-list');
-      input.dataset.model = r.model;
-      input.value = r.redirect_model || '';
-      // 无注册表重定向但 resolved 已偏离（config 别名在生效）时，把落点
-      // 写进占位符——空输入框读不出「它其实被别名转走了」。
-      input.placeholder = isRedirected(r) ? t('models.aliasPlaceholder', { target: r.resolved }) : '—';
-      input.spellcheck = false;
-      input.style.minWidth = '140px';
-      redirectTd.appendChild(input);
-
       const resolvedTd = h('td');
       resolvedTd.dataset.mobileLabel = labels.resolved;
+      const resolvedWrap = h('div', 'resolved-cell');
       if (r.resolved && r.resolved !== r.model) {
-        resolvedTd.appendChild(h('span', 'model-tag', r.resolved));
+        resolvedWrap.appendChild(h('span', 'model-tag', r.resolved));
       } else {
-        resolvedTd.appendChild(h('span', null, '—')).style.color = 'var(--color-text-secondary)';
+        resolvedWrap.appendChild(h('span', null, '—')).style.color = 'var(--color-text-secondary)';
       }
+      const editBtn = h('button', 'redirect-edit-btn');
+      editBtn.type = 'button';
+      editBtn.dataset.action = 'redirect';
+      editBtn.dataset.model = r.model;
+      editBtn.title = t('models.redirect.open');
+      editBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+      resolvedWrap.appendChild(editBtn);
+      resolvedTd.appendChild(resolvedWrap);
 
       const actionsTd = h('td');
       actionsTd.dataset.mobileLabel = labels.actions;
@@ -519,7 +529,6 @@
       tr.appendChild(outTd);
       tr.appendChild(srcTd);
       tr.appendChild(enabledTd);
-      tr.appendChild(redirectTd);
       tr.appendChild(resolvedTd);
       tr.appendChild(actionsTd);
       tbody.appendChild(tr);
@@ -546,17 +555,9 @@
       window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic' });
     } else if (btn.dataset.action === 'chat') {
       window.openChatModal({ mode: 'admin', model: row.model, clientProtocol: 'anthropic' });
+    } else if (btn.dataset.action === 'redirect') {
+      openRedirectModal(row);
     }
-  }
-
-  function onTableChange(e) {
-    const input = e.target.closest('input[data-model]');
-    if (!input) return;
-    const row = rowOf(input.dataset.model);
-    if (!row) return;
-    const target = input.value.trim();
-    if (target === (row.redirect_model || '')) return;
-    save(row.model, row.enabled, target);
   }
 
   function openAddModal() {
@@ -572,6 +573,71 @@
     const modal = document.getElementById('addModelModal');
     modal.style.display = 'none';
     modal.setAttribute('aria-hidden', 'true');
+  }
+
+  // ---- 重定向目标选择弹窗：搜索过滤全部已知模型名，点选即存 ----
+  let redirectRow = null;
+
+  function openRedirectModal(row) {
+    redirectRow = row;
+    document.getElementById('redirect-model-name').textContent = row.model;
+    const search = document.getElementById('redirect-search');
+    search.value = row.redirect_model || '';
+    // resolved 偏离但 redirect_model 为空 → config 别名在生效，提示这层区别
+    document.getElementById('redirect-alias-note').hidden = !(isRedirected(row) && !row.redirect_model);
+    const modal = document.getElementById('redirectModal');
+    modal.style.display = 'block';
+    modal.setAttribute('aria-hidden', 'false');
+    renderRedirectList();
+    setTimeout(() => { search.focus(); search.select(); }, 50);
+  }
+
+  function closeRedirectModal() {
+    const modal = document.getElementById('redirectModal');
+    modal.style.display = 'none';
+    modal.setAttribute('aria-hidden', 'true');
+    redirectRow = null;
+  }
+
+  function renderRedirectList() {
+    if (!redirectRow) return;
+    const typed = document.getElementById('redirect-search').value.trim();
+    const q = typed.toLowerCase();
+    const list = document.getElementById('redirect-model-list');
+    list.innerHTML = '';
+    const cur = redirectRow.redirect_model || '';
+    const items = rows
+      .filter((r) => r.model !== redirectRow.model)
+      .filter((r) => !q || r.model.toLowerCase().includes(q) ||
+        (((r.catalog && r.catalog.label) || '').toLowerCase().includes(q)));
+    items.forEach((r) => {
+      const item = h('button', 'redirect-item' + (r.model === cur ? ' redirect-item--active' : ''));
+      item.type = 'button';
+      item.dataset.model = r.model;
+      item.appendChild(h('span', 'redirect-item-name', r.model));
+      const label = r.catalog && r.catalog.label;
+      if (label && label !== r.model) item.appendChild(h('span', 'redirect-item-label', label));
+      list.appendChild(item);
+    });
+    // 输入不是已知模型名时给「直接使用」伪项，保住原 datalist 的自由输入能力
+    if (typed && !items.some((r) => r.model.toLowerCase() === q)) {
+      const item = h('button', 'redirect-item redirect-item--custom');
+      item.type = 'button';
+      item.dataset.model = typed;
+      item.appendChild(h('span', 'redirect-item-name', t('models.redirect.useInput', { target: typed })));
+      list.appendChild(item);
+    }
+    if (!list.children.length) {
+      list.appendChild(h('div', 'redirect-empty', t('models.redirect.empty')));
+    }
+  }
+
+  function applyRedirect(target) {
+    if (!redirectRow) return;
+    const row = redirectRow;
+    closeRedirectModal();
+    if ((row.redirect_model || '') === target) return;
+    save(row.model, row.enabled, target);
   }
 
   async function save(model, enabled, redirectModel) {

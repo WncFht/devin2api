@@ -645,7 +645,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.col.model': '模型',
   'models.col.source': '来源',
   'models.col.enabled': '启用',
-  'models.col.redirect': '重定向到',
   'models.col.resolved': '实际解析',
   'models.action.enable': '启用模型',
   'models.action.disable': '停用模型',
@@ -672,7 +671,13 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.action.test': '探活',
   'models.action.chat': '会话',
   'models.action.delete': '删除',
-  'models.aliasPlaceholder': '经别名 → {target}',
+  'models.redirect.open': '选择重定向目标',
+  'models.redirect.title': '重定向到',
+  'models.redirect.search': '搜索模型名',
+  'models.redirect.clear': '清除重定向',
+  'models.redirect.useInput': '使用「{target}」',
+  'models.redirect.aliasNote': '当前经别名解析，非注册表重定向',
+  'models.redirect.empty': '没有匹配的模型',
   'models.confirmDelete': '确认删除 {model} 的注册项？',
 
   // ---- 目录列与筛选（旧面板模型目录页并入） ----

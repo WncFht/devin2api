@@ -94,7 +94,7 @@
 
         <section class="glass-card mb-2">
           <div class="table-container mobile-card-table-container">
-            <table class="modern-table mobile-card-table">
+            <table class="modern-table mobile-card-table models-table">
               <thead>
                 <tr>
                   <th data-i18n="models.col.model">模型</th>
@@ -106,7 +106,6 @@
                   <th data-i18n="models.col.priceOut">输出价</th>
                   <th data-i18n="models.col.source">来源</th>
                   <th data-i18n="models.col.enabled">启用</th>
-                  <th data-i18n="models.col.redirect">重定向到</th>
                   <th data-i18n="models.col.resolved">实际解析</th>
                   <th data-i18n="common.actions">操作</th>
                 </tr>
@@ -205,6 +204,26 @@
       <div class="modal-footer custom-rules-footer">
         <button type="button" class="btn btn-secondary" data-action="close-add-modal" data-i18n="common.cancel">取消</button>
         <button type="button" class="btn btn-primary" data-action="confirm-add-model" data-i18n="common.add">添加</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 重定向目标选择对话框：搜索过滤 + 点选应用，页脚可清除 -->
+  <div id="redirectModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="modal-content modal-content--sm">
+      <div class="modal-header">
+        <h2 class="modal-title"><span data-i18n="models.redirect.title">重定向到</span> · <span id="redirect-model-name"></span></h2>
+        <button type="button" class="close-btn" data-action="close-redirect-modal" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input id="redirect-search" class="form-input" data-i18n-placeholder="models.redirect.search"
+          placeholder="搜索模型名" spellcheck="false" autocomplete="off">
+        <p id="redirect-alias-note" class="chat-hint" data-i18n="models.redirect.aliasNote" hidden>当前经别名解析，非注册表重定向</p>
+        <div id="redirect-model-list" class="redirect-list"></div>
+      </div>
+      <div class="modal-footer custom-rules-footer">
+        <button type="button" id="redirect-clear" class="btn btn-secondary" data-action="clear-redirect" data-i18n="models.redirect.clear">清除重定向</button>
+        <button type="button" class="btn btn-secondary" data-action="close-redirect-modal" data-i18n="common.cancel">取消</button>
       </div>
     </div>
   </div>

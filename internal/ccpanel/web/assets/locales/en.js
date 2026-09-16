@@ -645,7 +645,6 @@ window.I18N_LOCALES['en'] = {
   'models.col.model': 'Model',
   'models.col.source': 'Source',
   'models.col.enabled': 'Enabled',
-  'models.col.redirect': 'Redirect To',
   'models.col.resolved': 'Resolved',
   'models.action.enable': 'Enable model',
   'models.action.disable': 'Disable model',
@@ -672,7 +671,13 @@ window.I18N_LOCALES['en'] = {
   'models.action.test': 'Test',
   'models.action.chat': 'Chat',
   'models.action.delete': 'Delete',
-  'models.aliasPlaceholder': 'via alias → {target}',
+  'models.redirect.open': 'Choose redirect target',
+  'models.redirect.title': 'Redirect to',
+  'models.redirect.search': 'Search models',
+  'models.redirect.clear': 'Clear redirect',
+  'models.redirect.useInput': 'Use "{target}"',
+  'models.redirect.aliasNote': 'Resolved via config alias, not a registry redirect',
+  'models.redirect.empty': 'No matching models',
   'models.confirmDelete': 'Delete the registry entry for {model}?',
 
   // ---- Catalog columns and filters (merged from the legacy catalog page) ----

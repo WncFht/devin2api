@@ -48,3 +48,94 @@
   color: var(--badge-color);
   white-space: nowrap;
 }
+
+/* 表格模式下列多：给足 min-width 让容器横向滚动，别把模型列压成高瘦行。
+   ≤768px 走 mobile-card 卡片布局，min-width 反而坏事，故只在宽屏生效 */
+@media (min-width: 769px) {
+  .models-table {
+    min-width: 1160px;
+  }
+}
+
+/* 实际解析列：解析名 + 重定向编辑入口 */
+.resolved-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.redirect-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.redirect-edit-btn:hover {
+  background: var(--neutral-100);
+  color: var(--neutral-900);
+}
+
+/* 重定向选择弹窗的候选列表 */
+.redirect-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-3);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.redirect-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.redirect-item:hover {
+  background: var(--neutral-100);
+}
+
+.redirect-item--active {
+  background: rgba(79, 70, 229, 0.1);
+}
+
+.redirect-item-name {
+  font-family: monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.redirect-item-label {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.redirect-item--custom .redirect-item-name {
+  font-family: inherit;
+  color: #4f46e5;
+}
+
+.redirect-empty {
+  padding: var(--space-4);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
