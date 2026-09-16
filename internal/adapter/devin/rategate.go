@@ -39,7 +39,7 @@ const (
 //     单一上游桶内，单桶可见计数永不超配额。桶内不做秒级整形：上游
 //     只按分钟计数，桶内瞬发与均摊在它的计数器里等价，叠加平滑层
 //     只增加本地延迟。窗口配额耗尽或落在死区内的请求睡到下一窗口
-//     开放；预计等待超 maxHold 的直接本地 429 + Retry-After 快败。
+//     开放；累计等待将超 maxHold 的直接本地 429 + Retry-After 快败。
 //  2. 冷却闩：上游 resource_exhausted 声明「reset in N」时上闩到
 //     该时刻（分钟 hint 向上对齐到 :59 桶界）。上游限流器实测按
 //     分钟桶计数且把被拒尝试也计入，闩内若整队睡到恢复时刻再齐射，
@@ -416,9 +416,10 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 //     retryAfter 报闩剩余——客户端睡到恢复时刻重试比按槽位节奏轮询
 //     更省重试预算；
 //   - 闩外：可发区间内配额未满立即放行；配额耗尽或在死区内睡到
-//     下一窗口开放，预计等待超 maxHold 同样返回闸门拒绝；
+//     下一窗口开放，预计等待超出剩余预算（累计上限 maxHold）同样
+//     返回闸门拒绝；
 //   - 睡眠不做配额预约：窗口开放时睡醒者与新到者一起竞争，抢不到
-//     的看到满桶按新一轮等待决定再睡或快败——分钟粒度下排序公平性
+//     的看到满桶按剩余预算决定再睡或快败——分钟粒度下排序公平性
 //     不值得换复杂度。睡醒后不直接放行，回到循环首重新评估——
 //     睡眠期间闩态可能已变。
 func (gate *rateGate) wait(ctx context.Context) error {
@@ -426,6 +427,12 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		return nil
 	}
 	sleeping := false // 标记本请求占着一个 waiters 名额
+	// 等待预算约束「累计等待」而非「单次睡眠」：睡醒后要重新抢配额，
+	// maxHold 超过一个窗口周期时逐睡校验会放行多轮睡眠，累计等待
+	// 膨胀到 ~maxHold+60s——预算从进入起算，预计等待超出剩余额度
+	// 即快败。maxHold 须在锁内读（setParams 热更新），deadline 因此
+	// 惰性到首个持锁循环才落定。
+	var deadline time.Time
 	for {
 		gate.mu.Lock()
 		if sleeping {
@@ -439,6 +446,9 @@ func (gate *rateGate) wait(ctx context.Context) error {
 			return context.Cause(ctx)
 		}
 		now := gate.now()
+		if deadline.IsZero() {
+			deadline = now.Add(gate.maxHold)
+		}
 		// 闩到期是自然失效而非解闩（没有成功帧证据）。
 		gate.expireIfDue(now)
 		// 计数桶随窗口边界滚动：过期桶的用量不结转。
@@ -473,7 +483,7 @@ func (gate *rateGate) wait(ctx context.Context) error {
 			return nil
 		}
 		wait := ws.Add(windowPeriod).Sub(now)
-		if wait > gate.maxHold {
+		if now.Add(wait).After(deadline) {
 			gate.rejectHold++
 			gate.mu.Unlock()
 			return gateRejection(wait)
