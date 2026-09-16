@@ -29,6 +29,94 @@ const LOGS_ERROR_STAGES = [
 // 预设常用档；观察到的具体状态码由 mergeLogsFilterOptions 补进候选尾部。
 const LOGS_STATUS_PRESETS = ['2xx', '4xx', '5xx', '499', '!2xx', '>=400'];
 
+// ── 机器值 → 人性化标签（展示层映射，wire 值不变）───────────────
+// error_stage 与 internal/debuglog/stages.go 的 ErrStage* 枚举一一对应，
+// result 对应 debuglog Completion.Result。未知值兜底显示原值，原值始终
+// 进 title 或标签括号供排障核对。
+const LOGS_ERROR_STAGE_LABELS = {
+  http_read:           ['logs.stage.httpRead',           '读取请求失败'],
+  http_decode:         ['logs.stage.httpDecode',         '请求解码失败'],
+  request_build:       ['logs.stage.requestBuild',       '请求构建失败'],
+  provider_stream:     ['logs.stage.providerStream',     '上游流中断'],
+  http_stream:         ['logs.stage.httpStream',         '响应下发失败'],
+  response_event:      ['logs.stage.responseEvent',      '响应事件失败'],
+  http_encode:         ['logs.stage.httpEncode',         '响应编码失败'],
+  client_disconnected: ['logs.stage.clientDisconnected', '客户端断连'],
+  devin_connect:       ['logs.stage.devinConnect',       '上游拒绝'],
+  devin_transport:     ['logs.stage.devinTransport',     '上游传输中断'],
+  rate_gate:           ['logs.stage.rateGate',           '速率闸门拦截'],
+  token_limit:         ['logs.stage.tokenLimit',         '令牌准入拒绝'],
+  model_disabled:      ['logs.stage.modelDisabled',      '模型已停用']
+};
+
+const LOGS_RESULT_LABELS = {
+  completed:    ['logs.resultCompleted',    '完成'],
+  failed:       ['logs.resultFailed',       '失败'],
+  disconnected: ['logs.resultDisconnected', '断连'],
+  aborted:      ['logs.resultAborted',      '中断']
+};
+
+// 常见状态码的一行含义提示（title 悬浮，不替代数字本体）。
+const LOGS_STATUS_HINTS = {
+  200: ['logs.statusHint.200', '成功'],
+  400: ['logs.statusHint.400', '请求无效'],
+  401: ['logs.statusHint.401', '鉴权失败'],
+  403: ['logs.statusHint.403', '无权访问'],
+  404: ['logs.statusHint.404', '接口不存在'],
+  408: ['logs.statusHint.408', '请求超时'],
+  409: ['logs.statusHint.409', '请求冲突'],
+  413: ['logs.statusHint.413', '请求体超限'],
+  422: ['logs.statusHint.422', '参数校验失败'],
+  429: ['logs.statusHint.429', '限流拒绝'],
+  499: ['logs.statusHint.499', '客户端断连'],
+  500: ['logs.statusHint.500', '内部错误'],
+  502: ['logs.statusHint.502', '上游网关错误'],
+  503: ['logs.statusHint.503', '服务不可用'],
+  504: ['logs.statusHint.504', '网关超时']
+};
+
+function logsErrorStageLabel(stage) {
+  const item = LOGS_ERROR_STAGE_LABELS[stage];
+  return item ? i18nText(item[0], item[1]) : String(stage || '');
+}
+
+// 筛选下拉里的人性化标签：「中文（原值）」——原值可搜可见，提交仍是原值。
+function logsErrorStageOptionLabel(stage) {
+  const label = logsErrorStageLabel(stage);
+  return label === stage ? label : `${label}（${stage}）`;
+}
+
+function logsResultLabel(result) {
+  const item = LOGS_RESULT_LABELS[result];
+  return item ? i18nText(item[0], item[1]) : String(result || '');
+}
+
+function logsStatusHint(code) {
+  const item = LOGS_STATUS_HINTS[Number(code)];
+  return item ? i18nText(item[0], item[1]) : '';
+}
+
+// index.jsonl 的 message 契约：completed → "ok"；否则 "result[: error_stage]"。
+function humanizeLogMessage(raw) {
+  const text = String(raw || '');
+  if (!text) return { text: '', title: '' };
+  if (text === 'ok') return { text: logsResultLabel('completed'), title: text };
+  const sep = text.indexOf(':');
+  const result = (sep === -1 ? text : text.slice(0, sep)).trim();
+  const stage = sep === -1 ? '' : text.slice(sep + 1).trim();
+  const parts = [logsResultLabel(result)];
+  if (stage) parts.push(logsErrorStageLabel(stage));
+  return { text: parts.join(' · '), title: text };
+}
+
+// key_hash 是 16 位十六进制（SHA-256 前 8 字节）：列表截前 8 位，全量进 title。
+function buildKeyHashDisplay(hash) {
+  const h = String(hash || '');
+  if (!h) return '<span style="color: var(--neutral-500);">-</span>';
+  const short = h.length > 10 ? `${h.slice(0, 8)}…` : h;
+  return `<code class="logs-api-key-text logs-mono-text" title="${escapeHtml(h)}">${escapeHtml(short)}</code>`;
+}
+
 let currentLogsPage = 1;
 let logsPageSize = 100;
 let totalLogsPages = 1;
@@ -96,7 +184,11 @@ function saveColVisibility() {
   }
 }
 
+// time 列承载列设置入口（齿轮），隐藏它会关掉唯一入口——固定不可隐藏。
+const LOGS_LOCKED_COL = 'time';
+
 function isColVisible(key) {
+  if (key === LOGS_LOCKED_COL) return true;
   return colVisibility[key] !== false;
 }
 
@@ -121,20 +213,27 @@ function renderColToggleMenu() {
   list.innerHTML = '';
   for (const col of LOG_COLUMNS) {
     const visible = isColVisible(col.key);
+    const locked = col.key === LOGS_LOCKED_COL;
     const item = document.createElement('label');
     item.className = 'logs-col-toggle-item';
     item.dataset.colKey = col.key;
     item.dataset.visible = String(visible);
-    item.innerHTML = `<span class="logs-col-toggle-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span>${t(col.i18n)}</span>`;
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const newVisible = !isColVisible(col.key);
-      colVisibility[col.key] = newVisible;
-      item.dataset.visible = String(newVisible);
-      saveColVisibility();
-      applyColVisibility();
-    });
+    if (locked) {
+      item.dataset.locked = 'true';
+      item.title = i18nText('logs.colSettingsLocked', '该列承载列设置入口，固定显示');
+    }
+    item.innerHTML = `<span class="logs-col-toggle-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span>${escapeHtml(i18nText(col.i18n, col.i18n))}</span>`;
+    if (!locked) {
+      item.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const newVisible = !isColVisible(col.key);
+        colVisibility[col.key] = newVisible;
+        item.dataset.visible = String(newVisible);
+        saveColVisibility();
+        applyColVisibility();
+      });
+    }
     list.appendChild(item);
   }
 }
@@ -466,9 +565,13 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
     titleParts.push(`${t('logs.tip.reasoningTokens')}: ${tokens}`);
   }
   const title = titleParts.length > 0 ? ` title="${titleParts.join('&#10;')}"` : '';
-  const redirectBadge = redirected ? '<sup class="redirect-badge">↪</sup>' : '';
+  // 徽标自带 title：模型 tag 的悬浮提示覆盖不到角标区域，悬停徽标也要能
+  // 直接看到转发落点 / WS 通道说明。
+  const redirectBadge = redirected
+    ? `<sup class="redirect-badge" title="${escapeHtml(i18nText('logs.tip.redirectedTo', '转发至 {model}', { model: actualModel }))}">↪</sup>`
+    : '';
   const wsBadge = upstreamWebsocket === true
-    ? '<sup class="log-channel-badge log-channel-websocket-badge">ws</sup>'
+    ? `<sup class="log-channel-badge log-channel-websocket-badge" title="${escapeHtml(i18nText('logs.tip.upstreamWebsocket', '上游走 WebSocket 通道'))}">ws</sup>`
     : '';
   const badgeHtml = redirectBadge || wsBadge || effort || tokens > 0
     ? `<span class="model-badges">${redirectBadge}${wsBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
@@ -549,18 +652,20 @@ function canInspectDebugLog(entry) {
 
 function buildLogMessageContent(entry) {
   const sourceBadge = renderLogSourceBadge(entry.log_source || 'proxy');
-  const messageText = escapeHtml(entry.message || '');
-  if (!sourceBadge && !messageText) {
+  const msg = humanizeLogMessage(entry.message);
+  if (!sourceBadge && !msg.text) {
     return '';
   }
+  // 机器原文（"failed: devin_connect"）进 title，展示人性化短标签。
+  const titleAttr = msg.title && msg.title !== msg.text ? ` title="${escapeHtml(msg.title)}"` : '';
 
   let inner;
   if (!canInspectDebugLog(entry)) {
-    inner = `<span>${messageText}</span>`;
+    inner = `<span${titleAttr}>${escapeHtml(msg.text)}</span>`;
   } else {
     const logId = Number(entry?.id);
     const logIdAttr = Number.isFinite(logId) && logId > 0 ? ` data-log-id="${logId}"` : '';
-    inner = `<span class="debug-log-link has-upstream-detail"${logIdAttr}>${messageText}</span>`;
+    inner = `<span class="debug-log-link has-upstream-detail"${logIdAttr}${titleAttr}>${escapeHtml(msg.text)}</span>`;
   }
   return `${sourceBadge}${inner}`;
 }
@@ -1003,11 +1108,8 @@ function renderActiveRequests(activeRequests) {
     const abortDisplay = buildActiveRequestAbortHtml(req, id, startMs);
     const speedCellClass = `logs-col-speed${abortDisplay ? '' : ' mobile-empty-cell'}`;
 
-    // Key显示
-    let keyDisplay = '<span style="color: var(--neutral-500);">-</span>';
-    if (req.api_key_used) {
-      keyDisplay = `<span class="logs-api-key-text logs-mono-text">${escapeHtml(req.api_key_used)}</span>`;
-    }
+    // Key显示（key_hash 截断 + title 全量，与完成行同口径）
+    const keyDisplay = buildKeyHashDisplay(req.api_key_used);
 
     const infoContent = buildActiveRequestInfoContent(req);
 
@@ -1106,12 +1208,10 @@ async function abortActiveRequest(button) {
   }
 }
 
-// ✅ 动态计算列数（避免硬编码维护成本）
+// ✅ 动态计算列数（避免硬编码维护成本）——按可见列计，列显隐与
+// colspan/紧凑布局保持同步。
 function getTableColspan() {
-  const table = document.getElementById('tbody')?.closest('table')
-    || document.querySelector('.logs-table');
-  const headerCells = table ? table.querySelectorAll('thead th') : [];
-  return headerCells.length || 15; // fallback到15列（日志页默认列数）
+  return LOG_COLUMNS.reduce((n, col) => n + (isColVisible(col.key) ? 1 : 0), 0) || 15;
 }
 
 function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) {
@@ -1193,10 +1293,12 @@ function renderLogs(data) {
     // 0.5. API访问令牌描述
     const tokenDescDisplay = buildLogTokenDescDisplay(entry.auth_token_description);
 
-    // 2. 状态码样式
+    // 2. 状态码样式（数字本体不动，含义进 title）
     const statusClass = (entry.status_code >= 200 && entry.status_code < 300) ?
       'status-success' : 'status-error';
     const statusCode = entry.status_code;
+    const statusHint = logsStatusHint(statusCode);
+    const statusTitleAttr = statusHint ? ` title="${escapeHtml(statusHint)}"` : '';
 
     // 3. 模型显示（重定向落点在 tag 悬浮提示里）；非 2xx 行给探活入口
     const displayedActualModel = entry.actual_model || entry.response_model;
@@ -1229,10 +1331,8 @@ function renderLogs(data) {
       ? ''
       : `<span class="token-metric-value" style="color: var(--neutral-700);">${logSpeed.toFixed(1)}</span>`;
 
-    // 5. Key 哈希显示（本服务 api_key_used 就是 key_hash）
-    const apiKeyDisplay = entry.api_key_used
-      ? `<code class="logs-api-key-text logs-mono-text">${escapeHtml(entry.api_key_used)}</code>`
-      : '<span style="color: var(--neutral-500);">-</span>';
+    // 5. Key 哈希显示（本服务 api_key_used 就是 key_hash，截断 + title 全量）
+    const apiKeyDisplay = buildKeyHashDisplay(entry.api_key_used);
 
     // 6. Token统计显示(0值为空)
     const tokenValue = (value, color) => {
@@ -1265,7 +1365,7 @@ function renderLogs(data) {
           <td class="logs-col-token-desc" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
           <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${apiKeyDisplay}</td>
           <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
-          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}">${statusCode}</span></td>
+          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${statusCode}</span></td>
           <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${responseTimingDisplay}</td>
           <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${speedDisplay}</td>
           <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="text-align: right; white-space: nowrap;">${inputTokensDisplay}</td>
@@ -1446,7 +1546,12 @@ function applyLogsFilterValues(filters) {
   }
 
   if (logsErrorStageCombobox && filters.errorStage !== undefined) {
-    logsErrorStageCombobox.setValue(filters.errorStage || '', filters.errorStage || i18nText('logs.allErrorStages', '全部阶段'));
+    const stage = String(filters.errorStage || '').trim();
+    // 已选阶段显示人性化标签（原值在括号里），非枚举的自定义输入原样显示。
+    logsErrorStageCombobox.setValue(
+      stage,
+      stage ? logsErrorStageOptionLabel(stage) : i18nText('logs.allErrorStages', '全部阶段')
+    );
   }
 
 }
@@ -1597,12 +1702,14 @@ function initLogsErrorStageCombobox(initialValue) {
     dropdownId: 'f_error_stage_dropdown',
     attachMode: true,
     initialValue: initialValue || '',
-    initialLabel: initialValue || i18nText('logs.allErrorStages', '全部阶段'),
+    initialLabel: initialValue
+      ? logsErrorStageOptionLabel(initialValue)
+      : i18nText('logs.allErrorStages', '全部阶段'),
     allowCustomInput: true,
     commitEmptyAsFirst: true,
     getOptions: () => [
       { value: '', label: i18nText('logs.allErrorStages', '全部阶段') },
-      ...LOGS_ERROR_STAGES.map(stage => ({ value: stage, label: stage }))
+      ...LOGS_ERROR_STAGES.map(stage => ({ value: stage, label: logsErrorStageOptionLabel(stage) }))
     ],
     onSelect: () => {
       applyFilter();
@@ -1887,15 +1994,22 @@ window.initPageBootstrap({
     window.createAutoRefresh({ load: () => load(true) }).init();
   }
 
-  // ESC键关闭模态框
+  // ESC键关闭模态框与列显隐菜单
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      const colMenu = document.getElementById('colToggleMenu');
+      if (colMenu && !colMenu.hidden) {
+        colMenu.hidden = true;
+        return;
+      }
       const debugModal = document.getElementById('debugLogModal');
       if (debugModal && debugModal.classList.contains('show')) {
         closeDebugLogModal();
         return;
       }
-      if (typeof window.closeModelTestModal === 'function') {
+      // 探活模态 DOM 懒注入：未打开过时不存在，直接调 close 会 null.classList。
+      const modelTestModal = document.getElementById('modelTestModal');
+      if (modelTestModal?.classList.contains('show') && typeof window.closeModelTestModal === 'function') {
         window.closeModelTestModal();
       }
     }

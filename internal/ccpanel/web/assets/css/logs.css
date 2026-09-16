@@ -27,7 +27,7 @@
       border: none;
       background: transparent;
       cursor: pointer;
-      color: var(--neutral-400);
+      color: var(--neutral-500);
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -40,7 +40,8 @@
       flex-shrink: 0;
     }
 
-    .logs-col-toggle-btn:hover {
+    .logs-col-toggle-btn:hover,
+    .logs-col-toggle-btn:focus-visible {
       color: var(--primary-600);
       background: var(--primary-50);
     }
@@ -108,6 +109,16 @@
 
     .logs-col-toggle-item[data-visible="false"] .logs-col-toggle-check svg {
       display: none;
+    }
+
+    /* 承载设置入口的列固定显示：锁定项不响应点击 */
+    .logs-col-toggle-item[data-locked="true"] {
+      cursor: default;
+      opacity: 0.75;
+    }
+
+    .logs-col-toggle-item[data-locked="true"]:hover {
+      background: transparent;
     }
 
     .test-key-btn {
