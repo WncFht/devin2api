@@ -81,11 +81,23 @@ const (
 // 词干加 "." 前缀匹配可同时圈出主文件与全部重试分片。
 const devinRequestStageStem = "03-devin-request"
 
+// StageDevinRequestStem 导出 devinRequestStageStem：托管搜索的调用方
+// 需要词干（不带 .json）派生自己的请求文件名。
+const StageDevinRequestStem = devinRequestStageStem
+
 // StageDevinRequestAttempt 返回第 attempt 次（attempt>=2）上游重发的
 // 请求文件名；与首个请求的 StageDevinRequest 共享 devinRequestStageStem。
 func StageDevinRequestAttempt(attempt int) string {
 	return fmt.Sprintf("%s.attempt%d.json", devinRequestStageStem, attempt)
 }
+
+// StageDevinSearchStem 是托管搜索调用请求文件名的词干工厂：seq 为请求内
+// 的搜索调用序号（跨续轮跳与跨域统一递增），返回词干如
+// "03-devin-request.search3"，调用方拼 ".json" / ".attemptN.json"。
+// Flow B 续轮里 chat 重发占用了 attemptN 编号空间，搜索调用必须用独立
+// 词干才不覆盖 chat 请求记录；共享 devinRequestStageStem 前缀让
+// payload 剥离与 DevinRequestStages 枚举自动覆盖这些文件。
+const StageDevinSearchStem = devinRequestStageStem + ".search"
 
 // DevinRequestStages 列出请求目录内全部上游 wire 请求文件——首个请求加
 // attemptN 重试分片，按文件名字典序返回（主文件在前）。census 类消费者

@@ -499,7 +499,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if len(serverTools) > 0 {
 		// 托管工具声明在场才接管：模型发出 Server 调用时由
 		// handleServerCalls 代执行（search）并续轮（continueTurn）。
-		response.search = adapter.runWebSearch
+		// 搜索调用的请求记录用 searchN 词干：主文件与 attemptN 编号
+		// 已被 chat 首发/续轮占用（见 runWebSearch 的 stem 说明）。
+		searchSeq := 0
+		response.search = func(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error) {
+			searchSeq++
+			stem := fmt.Sprintf("%s%d", debuglog.StageDevinSearchStem, searchSeq)
+			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem)
+		}
 		response.continueTurn = func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
 			continued := request
 			continued.Messages = append(append([]llm.Message{}, request.Messages...), assistant)

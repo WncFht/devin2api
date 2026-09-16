@@ -44,7 +44,13 @@ type webSearchOutcome struct {
 // blockedDomains 上游无对应字段，结果侧按 host 后缀过滤。每次调用都过
 // 速率闸门——上游对 unary 调用同样计配额。返回的错误已经 llm.Classify
 // 分类并写入 error.json。
-func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error) {
+//
+// stem 决定本次调用的请求记录文件名（stem+".json"，多域扇出的第 N 域
+// 为 stem+".attemptN.json"）：Flow A 整体短路时搜索就是首个上游请求，
+// 传 "03-devin-request" 占主文件位；Flow B 续轮内 chat 重发已占用
+// 主文件与 attemptN 编号空间，必须传 StageDevinSearchStem+seq 的独立
+// 词干，否则每次搜索都覆盖首个 chat 请求、扇出文件与续轮分片互撞。
+func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32, stem string) (webSearchOutcome, error) {
 	var outcome webSearchOutcome
 	recorder := debuglog.FromContext(ctx)
 	name, version, os := adapter.currentConfig().ClientIdentity()
@@ -70,15 +76,16 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			request.Domain = proto.String(domain)
 		}
 		recorder.NoteUpstreamSend()
-		// 搜索请求占用与 GetChatMessage 同一组阶段文件：首调进
-		// 03-devin-request，多域扇出的后续调用进 attemptN 并在 04 留
-		// 分界行，否则 04 的多份搜索响应无法归因到具体调用。
-		if attempt == 0 {
-			recordProtoJSON(recorder, debuglog.StageDevinRequest, request)
-		} else {
-			recorder.AppendJSONL(debuglog.StageDevinResponse, "server_search_call", map[string]any{"attempt": attempt + 1, "domain": domain})
-			recordProtoJSON(recorder, debuglog.StageDevinRequestAttempt(attempt+1), request)
+		// 请求记录文件名由调用方给的词干派生；非 03 主文件的调用在
+		// 04 留归因标记，否则多份搜索响应无法对应到具体请求文件。
+		stage := stem + ".json"
+		if attempt > 0 {
+			stage = fmt.Sprintf("%s.attempt%d.json", stem, attempt+1)
 		}
+		if stage != debuglog.StageDevinRequest {
+			recorder.AppendJSONL(debuglog.StageDevinResponse, "server_search_call", map[string]any{"stage": stage, "domain": domain})
+		}
+		recordProtoJSON(recorder, stage, request)
 		response, err := adapter.apiClient.GetWebSearchResults(ctx, connect.NewRequest(request))
 		if err != nil {
 			adapter.gate.noteUpstreamError(err)
@@ -183,7 +190,7 @@ func (stream *serverSearchStream) Recv(context.Context) (llm.ResponseEvent, erro
 // 正是 Anthropic 服务端搜索在 /v1/messages 上的原生形态。
 func (adapter *Adapter) runServerSearch(ctx context.Context, request llm.RequestMessages, model string) (llm.ResponseStream, error) {
 	search := request.ServerSearch
-	outcome, err := adapter.runWebSearch(ctx, search.Query, search.AllowedDomains, search.BlockedDomains, serverSearchResultLimit)
+	outcome, err := adapter.runWebSearch(ctx, search.Query, search.AllowedDomains, search.BlockedDomains, serverSearchResultLimit, debuglog.StageDevinRequestStem)
 	if err != nil {
 		return nil, err
 	}
