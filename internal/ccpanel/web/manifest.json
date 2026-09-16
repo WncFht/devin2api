@@ -1,7 +1,7 @@
 {
-  "name": "Claude Code & Codex Proxy",
-  "short_name": "ccLoad",
-  "description": "Claude API代理管理服务",
+  "name": "Devin2API",
+  "short_name": "Devin2API",
+  "description": "Devin API 代理服务",
   "start_url": "/web/index.html",
   "display": "standalone",
   "background_color": "#ffffff",

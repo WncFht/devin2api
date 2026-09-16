@@ -337,8 +337,8 @@ window.WebAuth = window.WebAuth || {
   }
 
   // GitHub仓库地址
-  const GITHUB_REPO_URL = 'https://github.com/caidaoli/ccLoad';
-  const GITHUB_RELEASES_URL = 'https://github.com/caidaoli/ccLoad/releases';
+  const GITHUB_REPO_URL = 'https://github.com/WncFht/devin2api';
+  const GITHUB_RELEASES_URL = 'https://github.com/WncFht/devin2api/releases';
 
   // 版本信息
   let versionInfo = null;
@@ -682,11 +682,11 @@ window.WebAuth = window.WebAuth || {
   function createBrandWordmark() {
     const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-    el.setAttribute('viewBox', '0 0 132 36');
+    el.setAttribute('viewBox', '0 0 176 36');
     el.setAttribute('aria-hidden', 'true');
     el.classList.add('brand-wordmark');
     use.setAttribute('href', '/web/brand-wordmark.svg#brand-wordmark');
-    use.setAttribute('width', '132');
+    use.setAttribute('width', '176');
     use.setAttribute('height', '36');
     el.appendChild(use);
     return el;
@@ -714,7 +714,7 @@ window.WebAuth = window.WebAuth || {
         target: '_blank',
         rel: 'noopener noreferrer',
         title: t('nav.githubRepo'),
-        'aria-label': 'ccLoad — API Load Balancer & Proxy'
+        'aria-label': 'Devin2API — Devin API Proxy'
       }, [
         _activeWrap,
         wordmark

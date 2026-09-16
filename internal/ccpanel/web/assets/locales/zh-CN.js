@@ -61,7 +61,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 登录页
   // ============================================================
-  'login.title': '登录 - ccLoad',
+  'login.title': '登录 - Devin2API',
   'login.brandSubtitle': '智能API代理管理系统',
   'login.adminLogin': '管理员登录',
   'login.passwordHint': '请输入您的管理密码以访问系统',
@@ -87,7 +87,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 首页概览
   // ============================================================
-  'index.title': 'Claude Code & Codex Proxy 代理服务',
+  'index.title': 'Devin2API 代理服务',
   'index.timeRange.today': '本日',
   'index.timeRange.yesterday': '昨日',
   'index.timeRange.dayBeforeYesterday': '前日',
@@ -120,7 +120,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // API令牌
   // ============================================================
-  'tokens.title': 'API令牌 - Claude Code & Codex Proxy',
+  'tokens.title': 'API令牌 - Devin2API',
   'tokens.pageTitle': 'API访问令牌',
   'tokens.pageSubtitle': '管理用于 API (/v1/*) 访问的令牌',
   'tokens.createToken': '+ 创建令牌',
@@ -254,7 +254,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 调用统计
   // ============================================================
-  'stats.title': '调用统计 - Claude Code & Codex Proxy',
+  'stats.title': '调用统计 - Devin2API',
   'stats.timeRange': '范围',
   'stats.token': '令牌',
   'stats.allTokens': '全部令牌',
@@ -309,7 +309,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 请求趋势
   // ============================================================
-  'trend.title': '请求趋势 - Claude Code & Codex Proxy',
+  'trend.title': '请求趋势 - Devin2API',
   'trend.chartTitle': '请求趋势图表',
   'trend.chartType': '图表类型',
   'trend.lineChart': '折线图',
@@ -432,14 +432,14 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 设置
   // ============================================================
-  'settings.title': '系统设置 - Claude Code & Codex Proxy',
+  'settings.title': '系统设置 - Devin2API',
   'settings.configItem': '配置项',
   'settings.currentValue': '当前值',
   'settings.saveAll': '保存所有更改',
   'settings.resetToDefault': '重置为默认值',
   'settings.runtimeMetrics.button': '查看运行状态',
   'settings.runtimeMetrics.title': '进程运行状态',
-  'settings.runtimeMetrics.description': '当前 ccLoad 进程与各运行子系统的资源占用和状态',
+  'settings.runtimeMetrics.description': '当前 Devin2API 进程与各运行子系统的资源占用和状态',
   'settings.runtimeMetrics.refresh': '刷新',
   'settings.runtimeMetrics.loading': '正在读取运行指标...',
   'settings.runtimeMetrics.loadFailed': '运行指标加载失败',
@@ -637,7 +637,7 @@ window.I18N_LOCALES['zh-CN'] = {
   // ============================================================
   // 模型注册表
   // ============================================================
-  'models.title': '模型注册表 - Claude Code & Codex Proxy',
+  'models.title': '模型注册表 - Devin2API',
   'models.filterPlaceholder': '筛选模型名',
   'models.add.namePlaceholder': '对外模型名',
   'models.add.targetPlaceholder': '重定向目标（可选）',

@@ -61,7 +61,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Login Page
   // ============================================================
-  'login.title': 'Login - ccLoad',
+  'login.title': 'Login - Devin2API',
   'login.brandSubtitle': 'Intelligent API Proxy Management System',
   'login.adminLogin': 'Admin Login',
   'login.passwordHint': 'Enter your admin password to access the system',
@@ -87,7 +87,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Index Overview
   // ============================================================
-  'index.title': 'Claude Code & Codex Proxy Service',
+  'index.title': 'Devin2API Proxy Service',
   'index.timeRange.today': 'Today',
   'index.timeRange.yesterday': 'Yesterday',
   'index.timeRange.dayBeforeYesterday': 'Day Before',
@@ -120,7 +120,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // API Tokens
   // ============================================================
-  'tokens.title': 'API Tokens - Claude Code & Codex Proxy',
+  'tokens.title': 'API Tokens - Devin2API',
   'tokens.pageTitle': 'API Access Tokens',
   'tokens.pageSubtitle': 'Manage tokens for API (/v1/*) access',
   'tokens.createToken': '+ Create Token',
@@ -254,7 +254,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Statistics
   // ============================================================
-  'stats.title': 'Statistics - Claude Code & Codex Proxy',
+  'stats.title': 'Statistics - Devin2API',
   'stats.timeRange': 'Time Range',
   'stats.token': 'Token',
   'stats.allTokens': 'All Tokens',
@@ -309,7 +309,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Trends
   // ============================================================
-  'trend.title': 'Trends - Claude Code & Codex Proxy',
+  'trend.title': 'Trends - Devin2API',
   'trend.chartTitle': 'Request Trend Chart',
   'trend.chartType': 'Chart type',
   'trend.lineChart': 'Line',
@@ -432,14 +432,14 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Settings
   // ============================================================
-  'settings.title': 'System Settings - Claude Code & Codex Proxy',
+  'settings.title': 'System Settings - Devin2API',
   'settings.configItem': 'Configuration',
   'settings.currentValue': 'Current Value',
   'settings.saveAll': 'Save All Changes',
   'settings.resetToDefault': 'Reset to default',
   'settings.runtimeMetrics.button': 'View Runtime Status',
   'settings.runtimeMetrics.title': 'Process Runtime Status',
-  'settings.runtimeMetrics.description': 'Resource usage and status for the current ccLoad process and its runtime subsystems',
+  'settings.runtimeMetrics.description': 'Resource usage and status for the current Devin2API process and its runtime subsystems',
   'settings.runtimeMetrics.refresh': 'Refresh',
   'settings.runtimeMetrics.loading': 'Loading runtime metrics...',
   'settings.runtimeMetrics.loadFailed': 'Failed to load runtime metrics',
@@ -637,7 +637,7 @@ window.I18N_LOCALES['en'] = {
   // ============================================================
   // Model Registry
   // ============================================================
-  'models.title': 'Model Registry - Claude Code & Codex Proxy',
+  'models.title': 'Model Registry - Devin2API',
   'models.filterPlaceholder': 'Filter model names',
   'models.add.namePlaceholder': 'Public model name',
   'models.add.targetPlaceholder': 'Redirect target (optional)',

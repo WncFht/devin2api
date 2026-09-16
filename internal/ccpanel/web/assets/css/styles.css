@@ -1,4 +1,4 @@
-/* 现代化UI界面样式系统 - ccLoad代理管理界面 */
+/* 现代化UI界面样式系统 - Devin2API 代理管理界面 */
 
 /* ===== CSS 变量和设计令牌 ===== */
 :root {
@@ -506,7 +506,7 @@ body {
 
 .brand-wordmark {
   display: block;
-  width: 132px;
+  width: 176px;
   height: 36px;
   color: color-mix(in srgb, var(--topbar-fg) 88%, #071b35);
 }
@@ -1904,7 +1904,7 @@ body {
   }
 
   .brand-wordmark {
-    width: 103px;
+    width: 137px;
     height: 28px;
   }
 
@@ -4954,7 +4954,7 @@ body.trend-page .chart-info {
 
 .login-brand-wordmark {
   display: block;
-  width: 176px;
+  width: 220px;
   height: auto;
   color: var(--neutral-900);
 }
@@ -5340,7 +5340,7 @@ body.web-role-api-token .filter-group--auth-token {
   }
 
   .login-brand-wordmark {
-    width: 156px;
+    width: 190px;
   }
 
   .modal-content {
