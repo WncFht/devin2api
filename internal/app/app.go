@@ -191,6 +191,10 @@ func (application *App) SetVersion(version string) {
 func (application *App) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Get("/healthz", application.health)
+	// ccLoad 行为：裸根重定向到面板首页（静态页自身做登录门）。
+	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/index.html", http.StatusFound)
+	})
 	router.Group(func(protected chi.Router) {
 		// request-id 最先挂上：连同鉴权/并发拒绝在内的所有 /v1/* 响应
 		// 都需要 Anthropic 形态的请求 ID。
