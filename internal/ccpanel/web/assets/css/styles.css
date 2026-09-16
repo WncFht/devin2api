@@ -1850,6 +1850,7 @@ body {
   grid-template-columns: repeat(2, 1fr);
 }
 
+/* ===== 加载状态 ===== */
 .loading-spinner {
   width: 20px;
   height: 20px;
@@ -3693,6 +3694,7 @@ body {
   color: var(--neutral-600);
 }
 
+/* ===== 渠道管理专用样式 ===== */
 .btn-icon {
   background: var(--surface-bg);
   border: 1px solid var(--neutral-300);
@@ -4323,6 +4325,7 @@ a.model-tag.model-link:hover {
   color: var(--error-400);
 }
 
+/* ===== 统计页面专用样式 ===== */
 .stats-view-init-chart #stats-table-view {
   display: none !important;
 }
@@ -5477,7 +5480,7 @@ body.web-role-api-token .filter-group--auth-token {
   text-align: right;
 }
 
-/* ===== 位置工具类 ===== */
+/* ===== 背景工具类 ===== */
 .border-none {
   border: none;
 }
@@ -6362,6 +6365,7 @@ body.web-role-api-token .filter-group--auth-token {
   border-radius: 0 0 var(--radius-md) var(--radius-md);
 }
 
+/* ===== Chat Panel (对话模式) ===== */
 /* 消息气泡 */
 .chat-message {
   max-width: 80%;
@@ -6905,6 +6909,7 @@ html[data-theme="dark"] .chat-message .chat-patch-number {
   }
 }
 
+/* 输入区 */
 .chat-input {
   flex: 1 1 auto;
   min-width: 0;
