@@ -6,14 +6,14 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 上游协议与行为（逆向结论）
 
-| 文档                              | 用途                                                                                             |
-| --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `upstream-protocol.md`            | 上游协议逆向参考：请求/响应字段契约、帧形态与签名体制、工具调用矩阵、错误分类、RPC 面            |
-| `upstream-policy-fingerprints.md` | content-policy 指纹实证：触发器形态、客户端全模板探测结果、`sanitize.go` 新规则维护流程          |
-| `upstream-cache.md`               | 上游前缀缓存机制逆向：命中条件、EPHEMERAL 断点、trajectory 稳定性                                |
-| `upstream-compaction.md`          | 压缩责任划分：上游不压缩，压缩义务全在客户端；代理侧只需保证窗口声明一致                         |
-| `upstream-rate-limit.md`          | 上游消息限流（429）模型：分钟桶量化 + 概率执行，本地滴灌闩的设计依据与实现状态，整形语义选型决策 |
-| `quota-billing.md`                | 配额计费模型反推：日/周额度大小、cache_write 按 input 价计费、est_cost 口径                      |
+| 文档                              | 用途                                                                                                 |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `upstream-protocol.md`            | 上游协议逆向参考：请求/响应字段契约、帧形态与签名体制、工具调用矩阵、错误分类、RPC 面                |
+| `upstream-policy-fingerprints.md` | content-policy 指纹实证：触发器形态、客户端全模板探测结果、`sanitize.go` 新规则维护流程              |
+| `upstream-cache.md`               | 上游前缀缓存机制逆向与前缀保温实现：命中条件、EPHEMERAL 断点、trajectory 稳定性、prefix warming 调度 |
+| `upstream-compaction.md`          | 压缩责任划分：上游不压缩，压缩义务全在客户端；代理侧只需保证窗口声明一致                             |
+| `upstream-rate-limit.md`          | 上游消息限流（429）模型：分钟桶量化 + 概率执行，本地滴灌闩的设计依据与实现状态，整形语义选型决策     |
+| `quota-billing.md`                | 配额计费模型反推：日/周额度大小、cache_write 按 input 价计费、est_cost 口径                          |
 
 ## 排障与接入
 
@@ -41,3 +41,4 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 - 上游 429 频发 → `upstream-rate-limit.md`（模型）+ `rategate.go`（实现）
 - 发版/格式化/CI → `toolchain.md`
 - 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ `logs/<debug_ref>/meta.json` 延迟分解字段
+- subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/panel/api/stats` 的 warm 段

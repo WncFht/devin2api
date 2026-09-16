@@ -57,6 +57,29 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 - **keepalive 可续命**：180s 间隔、`max_tokens=1` 的 verbatim ping（与 seed 完全同前缀）实证把 lineage 续过 3.2×TTL，对照组全死。这是「subagent 等待期缓存不失温」的可用手段。
 - **上游模型相位漂移**：wire 恒发 `swe-2-max` 时，响应侧模型署名以 ~30s 相位在 swe-2-max 与 opus 间交替；翻转对命中率 52% vs 同模型对 98%。直发真实 uid `claude-opus-4-6` 被接受且**跨 uid 命中**——请求里的 model uid 不进缓存键，但响应署名漂移会影响按 model 分桶的命中率统计口径。
 
+## 前缀保温（prefix warming）
+
+「keepalive 可续命」的实测结论已落成代理内建调度器（`internal/adapter/devin/prefixwarm.go`，总开关 `devin.warm_prefix_enabled`，默认关、灰度放出）：每条会话谱系留存最近一次 sanitize 后的客户端请求体，静默期按 `warm_prefix_interval_seconds`（默认 180s）加 ±`warm_prefix_jitter_ratio`（默认 0.15）抖动的节拍，重放 `max_tokens=1` 的逐字 ping 给上游滑动 TTL（标称 ~780s）续命，压住 subagent 长等待、用户离开后首轮的冷 prefill。ping 拿 retained 走 buildRequest 原路径重建 wire 体——token、message_id、step_index、execution_id、assignment jwt 全部新鲜，只压 MaxTokens；这些字段本就不进缓存 token 流。调度由 30s 清扫节拍驱动：interval 只决定条目到期时刻，实际 ping 周期被清扫节拍向下取整，观测端至少等 ~35s 才能看到第一发 ping。
+
+谱系键 warmLineageKey 是「前缀逐字相等」的最小判据：SessionKey、system 头 4KB、工具声明全量、首条消息头 1KB、解析后 wire uid 五维，任一维漂移即换键。条目「晋升」为保温对象需同时满足：第 2 发真追加的成功上行（逐字重发/探针不计，microcompact 类原地改写重置计数）与前缀达 `warm_prefix_min_prefix_tokens`（默认 8192 token；观测过 usage 用实测 input+cache_read，未观测按 retained 字节/4 估）。同 SessionKey 内与新到谱系恰好一维相异的旧条目标 suspect——compaction 换首消息、auto-update 改 system 头、模型漂移这类「旧流从此永久静默」的形态；宽限 2×Interval 无真实上行即退役。
+
+ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱系 verbatim 重发也救不回（实测恢复 ~7%），故退役只认四类证据——客户端可归因上行静默超时、suspect 宽限期满、容量淘汰、自愈后仍语义错误；ping 的 cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身已完成重写兜底）。其二，准入过闸门 `tryAdmit`：闩内一律拒，闩外只在可发区间、配额有余、无排队者时放行——不排队不偷槽，被拒跳过本轮（计 `ping_skips`）；ping 撞 resource_exhausted 照喂冷却闩，它常最先发现上游饱和。其三，错误分类：凭证味失败（unauthenticated/permission_denied）自愈重发一次，仍 ClientFixable（invalid_argument/ContextLength/permission_denied 等）才退役，传输/限流/超时类只跳本轮。ping 是内部流量：直连 streamClient、绕过 app/recorder，不进 index.jsonl、调试目录与面板请求列表。
+
+静默分级只决定「最多保多久」——resume 越不可能，烧 ping 越不值：
+
+| 档位      | 判定（按最后一发干净收尾响应的 pending）                                       | 默认最长静默 | 配置键                                   |
+| --------- | ------------------------------------------------------------------------------ | ------------ | ---------------------------------------- |
+| blocked   | pending 含阻塞派发或普通工具（权限提示与普通工具 wire 不可分，catch-all 统归） | 4h           | `warm_prefix_blocked_max_idle_seconds`   |
+| userpaced | 无 pending（轮结束等用户）或 pending 全为提问类工具                            | 45min        | `warm_prefix_userpaced_max_idle_seconds` |
+| subdone   | 带 subagent 标记的流已跑完（SendMessage/agentId 复活长尾）                     | 10min        | `warm_prefix_subdone_max_idle_seconds`   |
+| unknown   | 无 SessionKey 或尚无已完成响应可分类，兜底档                                   | 30min        | `warm_prefix_unknown_max_idle_seconds`   |
+
+两档工具名表 `warm_prefix_blocked_names`/`warm_prefix_userpaced_names` 可配（默认 {Agent, Task, Workflow, wait_agent} 与 {AskUserQuestion, ExitPlanMode, request_user_input}）；名表主要为可观测性存在，catch-all 条款已把一切非 userpaced pending 归 blocked。
+
+资源与生命周期：谱系数与 retained 字节双帽 `warm_prefix_max_streams`（默认 256）/`warm_prefix_max_retained_mb`（默认 96），触顶先挤 suspect 再按 lastTouch LRU 挤。`retained_bytes` 只计 prompt 内容字段（system+ 消息文本 + 工具声明），不含 JSON 包装，比完整请求体小是正常口径。簿记全在内存，重启即清空——存活流的第一发真实请求自然重暖。排空（BeginDrain）后停发 ping，条目表留作观测，退役与淘汰判定照常。`warm_prefix_*` 全部参数热重载（热键清单见 config-reload.md）；enabled 热关掉即停调度并清空条目表，释放 retained 内存。
+
+观测面：`/panel/api/stats` 与 `/admin/runtime-metrics` 的 `warm` 段透出 `enabled`、`entries`（留存谱系）、`promoted`（保温中）、`suspects`、`retained_bytes`、`pings_sent`、`ping_hits`/`ping_misses`、`ping_skips`（闸门拒）、`ping_errors`、`retired`；runtime-metrics 另派生 `ping_hit_rate`。命中率口径只算 ping 自身、不含真实流量；面板「趋势」页顶部状态条与「设置」页运行指标组有同名展示。开启方式：config.yaml 置 `devin.warm_prefix_enabled: true` 后 POST `/panel/api/config/reload` 即时生效。
+
 ## 已知边界
 
 - 免费档命中非保证：偶发 miss 是上游逐出/冷启动，非代理问题。
