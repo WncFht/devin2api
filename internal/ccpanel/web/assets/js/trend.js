@@ -183,9 +183,15 @@
     }
 
     let trendLoadInFlight = false;
+    let trendLoadPending = false;
 
     async function loadData(skipLoading) {
-      if (trendLoadInFlight) return;
+      // 与 logs.js 同款：在途时记 pending 而不是丢——加载中改筛选或点
+      // 应用的意图不该被静默吞掉
+      if (trendLoadInFlight) {
+        trendLoadPending = true;
+        return;
+      }
       trendLoadInFlight = true;
       try {
         if (!skipLoading) renderTrendLoading();
@@ -265,6 +271,10 @@
         if (!window.trendData || !window.trendData.length) renderTrendError();
       } finally {
         trendLoadInFlight = false;
+        if (trendLoadPending) {
+          trendLoadPending = false;
+          void loadData(true);
+        }
       }
     }
 
