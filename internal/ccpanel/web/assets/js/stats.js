@@ -11,6 +11,8 @@
     let hideZeroSuccess = true; // 是否隐藏0成功的模型（默认开启）
     let statsModelOptions = []; // 从统计数据中提取的模型列表
     let statsModelCombobox = null; // 模型筛选组合框实例
+    let usageData = null;      // /admin/usage 规范化快照；null=未拉到
+    let usageDisabled = false; // 快照 disabled 标记（调试日志未启用）
     let statsExactModelValue = '';
     let sortState = {
       column: null,
@@ -96,6 +98,8 @@
         renderStatsLoading();
 
         const params = buildStatsRequestParams();
+        // 用量观测是独立失败域：端点未部署/未启用只影响观测卡，不拖垮统计表
+        const usagePromise = loadUsageObserv();
         // 后端返回格式: {"success":true,"data":{"stats":[...],"duration_seconds":...,"rpm_stats":{...},"is_today":...}}
         statsData = (await fetchDataWithAuth('/dashboard/stats?' + params.toString())) || { stats: [] };
         durationSeconds = statsData.duration_seconds || 1; // 防止除零
@@ -113,6 +117,8 @@
         if (currentView === 'chart') {
           renderCharts();
         }
+
+        await usagePromise;
 
       } catch (error) {
         console.error('Failed to load stats:', error);
@@ -1084,6 +1090,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         renderTokenSelect();
         renderStatsTable();
         updateRpmHeader();
+        renderUsageObserv();
         if (currentView === 'chart') {
           renderCharts();
         }
@@ -1112,6 +1119,282 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       }
       }
     });
+
+    // ========== 服务观测（/admin/usage 聚合快照）==========
+    // 快照各组时间维不同：SLA 归因卡按页面时间范围用 10 分钟桶（points，
+    // 8 天）或日表（days，31 天）在客户端切片；延迟分位是定长蓄水池、
+    // 错误阶段与上下文填充是窗口累计，均无范围维，卡片按窗口口径展示。
+    const usageT = (key, fallback, params) => window.i18nText(key, fallback, params);
+
+    const USAGE_TOTAL_FIELDS = [
+      'requests', 'errors', 'disconnected', 'rate_limited',
+      'client_faults', 'upstream_faults',
+      'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+      'reasoning_tokens', 'total_tokens', 'gen_ms', 'gen_tokens'
+    ];
+
+    function sumUsageTotals(list) {
+      const totals = {};
+      USAGE_TOTAL_FIELDS.forEach(k => { totals[k] = 0; });
+      (list || []).forEach(p => USAGE_TOTAL_FIELDS.forEach(k => { totals[k] += Number(p[k]) || 0; }));
+      return totals;
+    }
+
+    // 形状适配：老面板 {snapshot:{...}, models:[...], est_cost, ...}；
+    // snapshot 键缺失时按平铺形状兜底。
+    function normalizeUsage(data) {
+      if (!data || typeof data !== 'object' || data.disabled) return null;
+      const snap = (data.snapshot && typeof data.snapshot === 'object') ? data.snapshot : data;
+      const models = Array.isArray(data.models) ? data.models
+        : (Array.isArray(snap.models) ? snap.models : []);
+      return {
+        windowStart: snap.window_start || '',
+        entries: Number(snap.entries) || 0,
+        points: Array.isArray(snap.points) ? snap.points : [],
+        days: Array.isArray(snap.days) ? snap.days : [],
+        errorStages: (snap.error_stages && typeof snap.error_stages === 'object') ? snap.error_stages : {},
+        duration: snap.duration || null,
+        ttfb: snap.ttfb || null,
+        models
+      };
+    }
+
+    // 与后端 resolveRange 同口径（周一为一周起点、非法 custom 回落 today），
+    // 返回 [since, until) unix 秒。
+    function statsRangeSecs() {
+      const now = Date.now();
+      const dayMs = 86400000;
+      const beginDay = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+      const beginWeek = ms => { const s = beginDay(ms); return s - ((new Date(s).getDay() + 6) % 7) * dayMs; };
+      const beginMonth = ms => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); };
+      const today = () => [beginDay(now) / 1000, now / 1000];
+      const filters = getStatsFilters();
+      switch (filters.range || 'today') {
+        case 'yesterday': {
+          const s = beginDay(now - dayMs);
+          return [s / 1000, (s + dayMs) / 1000];
+        }
+        case 'day_before_yesterday': {
+          const s = beginDay(now - 2 * dayMs);
+          return [s / 1000, (s + dayMs) / 1000];
+        }
+        case 'this_week': return [beginWeek(now) / 1000, now / 1000];
+        case 'last_week': {
+          const s = beginWeek(now - 7 * dayMs);
+          return [s / 1000, (s + 7 * dayMs) / 1000];
+        }
+        case 'this_month': return [beginMonth(now) / 1000, now / 1000];
+        case 'last_month': {
+          const d = new Date(now);
+          return [new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime() / 1000, beginMonth(now) / 1000];
+        }
+        case 'custom': {
+          const s = Number(filters.customStartTime);
+          const u = Number(filters.customEndTime);
+          return (s > 0 && u > s) ? [s / 1000, Math.min(u, now) / 1000] : today();
+        }
+        default: return today();
+      }
+    }
+
+    // 范围切片：≤8 天用 10 分钟桶，更长窗口用日表；细粒度窗外零命中
+    // 时回落日表（自定义范围可能整段落在 points 覆盖之前）。
+    function usageRangeTotals(u) {
+      const [since, until] = statsRangeSecs();
+      if (until - since <= 8 * 86400) {
+        const t = sumUsageTotals(u.points.filter(p => p.at >= since && p.at < until));
+        if (t.requests > 0) return t;
+      }
+      const days = new Set();
+      const d = new Date(since * 1000);
+      d.setHours(0, 0, 0, 0);
+      while (d.getTime() < until * 1000) {
+        days.add(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
+        d.setDate(d.getDate() + 1);
+      }
+      return sumUsageTotals(u.days.filter(row => days.has(row.date)));
+    }
+
+    // SLA 口径成功率：分母剔除客户端责任与 429 后，服务端失分占比取反；
+    // 分母为 0（只有客户端/限流流量）返回 null。
+    function usageSlaRate(totals) {
+      const base = (totals.requests || 0) - (totals.client_faults || 0) - (totals.rate_limited || 0);
+      if (base <= 0) return null;
+      return (base - (totals.upstream_faults || 0)) / base * 100;
+    }
+
+    function usageKpiCard(labelKey, fallback, valueHtml, sub, color) {
+      return `<div class="runtime-metric-card">
+        <span class="runtime-metric-label">${escapeHtml(usageT(labelKey, fallback))}</span>
+        <strong class="runtime-metric-value"${color ? ` style="color:${color};"` : ''}>${valueHtml}</strong>
+        ${sub ? `<span class="runtime-metric-sub">${sub}</span>` : ''}
+      </div>`;
+    }
+
+    async function loadUsageObserv() {
+      try {
+        const data = await fetchDataWithAuth('/admin/usage');
+        usageDisabled = Boolean(data && data.disabled);
+        usageData = normalizeUsage(data);
+      } catch (error) {
+        // 保留上一份快照：自动刷新时单次失败不清空已渲染内容
+        console.error('[Stats] 加载服务观测失败:', error);
+      }
+      try {
+        renderUsageObserv();
+      } catch (error) {
+        console.error('[Stats] 渲染服务观测失败:', error);
+      }
+    }
+
+    function renderUsageObserv() {
+      const section = document.getElementById('usage-observ-section');
+      if (!section) return;
+      const blocks = ['usage-faults-block', 'usage-latency-block', 'usage-stages-block', 'usage-ctxfill-block'];
+      const empty = document.getElementById('usage-observ-empty');
+      const footnote = document.getElementById('usage-observ-footnote');
+      const note = document.getElementById('usage-observ-note');
+
+      // 拉取失败（端点未部署等）：整卡隐藏，页面维持旧观
+      if (!usageData && !usageDisabled) {
+        section.hidden = true;
+        return;
+      }
+      section.hidden = false;
+      if (note) {
+        note.textContent = usageT('stats.usageScopeNote', '归因卡跟随时间范围 · 分位/阶段/填充为窗口累计');
+      }
+
+      if (usageDisabled || !usageData) {
+        blocks.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = true; });
+        if (footnote) footnote.textContent = '';
+        if (empty) {
+          empty.hidden = false;
+          empty.textContent = usageT('stats.usageDisabled', '调试日志未启用，无用量统计。');
+        }
+        return;
+      }
+      if (empty) empty.hidden = true;
+
+      renderUsageFaults(usageRangeTotals(usageData));
+      renderUsageLatency(usageData);
+      renderUsageStages(usageData);
+      renderUsageCtxFill(usageData);
+      if (footnote) {
+        footnote.textContent = usageT('stats.usageFootnote', '窗口起点 {start} · 聚合 {entries} 条请求', {
+          start: usageData.windowStart || '-',
+          entries: formatNumber(usageData.entries)
+        });
+      }
+    }
+
+    function renderUsageFaults(totals) {
+      const block = document.getElementById('usage-faults-block');
+      const grid = document.getElementById('usage-faults-grid');
+      if (!block || !grid) return;
+      const sla = usageSlaRate(totals);
+      const slaColor = sla === null ? '' :
+        sla >= 99 ? 'var(--success-600)' : sla >= 95 ? 'var(--warning-600)' : 'var(--error-600)';
+      grid.innerHTML = [
+        usageKpiCard('stats.usageSla', 'SLA 成功率',
+          sla === null ? '—' : sla.toFixed(1) + '%',
+          escapeHtml(usageT('stats.usageSlaSub', '剔除客户端责任与 429')),
+          slaColor),
+        usageKpiCard('stats.usageRequests', '请求数',
+          formatNumber(totals.requests),
+          escapeHtml(usageT('stats.usageRequestsSub', '失败 {errors} · 断连 {disconnected}', {
+            errors: formatNumber(totals.errors),
+            disconnected: formatNumber(totals.disconnected)
+          }))),
+        usageKpiCard('stats.usageUpstreamFaults', '服务端失分',
+          formatNumber(totals.upstream_faults), '',
+          totals.upstream_faults > 0 ? 'var(--error-600)' : ''),
+        usageKpiCard('stats.usageClientFaults', '客户端责任',
+          formatNumber(totals.client_faults), ''),
+        usageKpiCard('stats.usageRateLimited', '限流 429',
+          formatNumber(totals.rate_limited), '')
+      ].join('');
+      block.hidden = false;
+    }
+
+    // 分位行：样本为 0 的指标整行不渲染；阈值着色复用 timingColor 口径
+    //（TTFB 5s/10s，耗时 30s/60s），与统计表首字/耗时列一致。
+    function renderUsageLatency(u) {
+      const block = document.getElementById('usage-latency-block');
+      const tbody = document.getElementById('usage-latency-tbody');
+      if (!block || !tbody) return;
+      const row = (labelKey, fallback, st, colorFn) => {
+        if (!st || !(Number(st.samples) > 0)) return '';
+        const cells = [st.p50, st.p90, st.p95, st.p99, st.max].map(ms => {
+          const sec = (Number(ms) || 0) / 1000;
+          return `<td><span class="stats-value-dynamic" style="--stats-accent:${colorFn(sec)};">${sec.toFixed(2)}s</span></td>`;
+        }).join('');
+        return `<tr><td>${escapeHtml(usageT(labelKey, fallback))}</td><td>${formatNumber(st.samples)}</td>${cells}</tr>`;
+      };
+      const html = row('stats.usageLatencyTtfb', '上游首字', u.ttfb, getFirstByteTimingColor) +
+        row('stats.usageLatencyDuration', '总耗时', u.duration, getDurationTimingColor);
+      tbody.innerHTML = html;
+      block.hidden = !html;
+    }
+
+    function renderUsageStages(u) {
+      const block = document.getElementById('usage-stages-block');
+      const tbody = document.getElementById('usage-stages-tbody');
+      if (!block || !tbody) return;
+      const stages = Object.entries(u.errorStages)
+        .filter(([, n]) => Number(n) > 0)
+        .sort((a, b) => b[1] - a[1]);
+      if (!stages.length) {
+        block.hidden = true;
+        return;
+      }
+      const total = stages.reduce((s, [, n]) => s + Number(n), 0);
+      tbody.innerHTML = stages.map(([stage, n]) => {
+        const pct = total > 0 ? Number(n) / total * 100 : 0;
+        return `<tr>
+          <td><a class="model-link" href="/web/logs.html?error_stage=${encodeURIComponent(stage)}">${escapeHtml(stage)}</a></td>
+          <td>${formatNumber(n)}</td>
+          <td><div style="display:flex;align-items:center;gap:8px;">
+            <div class="runtime-transcript-progress" style="flex:1;min-width:64px;">
+              <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--exceeded" style="width:${pct.toFixed(1)}%"></span>
+            </div>
+            <span class="stats-value-dynamic">${pct.toFixed(1)}%</span>
+          </div></td>
+        </tr>`;
+      }).join('');
+      block.hidden = false;
+    }
+
+    // 上下文填充率 = 平均单请求占用（输入+两向缓存）÷ 模型窗口上限，
+    // 衡量「窗口挤不挤」；按填充率降序取前 8 个模型。
+    function renderUsageCtxFill(u) {
+      const block = document.getElementById('usage-ctxfill-block');
+      const tbody = document.getElementById('usage-ctxfill-tbody');
+      if (!block || !tbody) return;
+      const rows = u.models
+        .filter(m => m && m.context_fill_pct != null)
+        .sort((a, b) => b.context_fill_pct - a.context_fill_pct)
+        .slice(0, 8);
+      if (!rows.length) {
+        block.hidden = true;
+        return;
+      }
+      tbody.innerHTML = rows.map(m => {
+        const pct = Number(m.context_fill_pct) || 0;
+        const tone = pct < 50 ? 'normal' : pct < 80 ? 'warning' : 'exceeded';
+        return `<tr>
+          <td>${escapeHtml(m.name || usageT('stats.unknownModel', '未知模型'))}</td>
+          <td><div style="display:flex;align-items:center;gap:8px;">
+            <div class="runtime-transcript-progress" style="flex:1;min-width:64px;">
+              <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--${tone}" style="width:${Math.min(100, pct).toFixed(1)}%"></span>
+            </div>
+            <span class="stats-value-dynamic">${pct.toFixed(0)}%</span>
+          </div></td>
+          <td>${formatNumber(Math.round(Number(m.avg_context_tokens) || 0))}/${formatNumber(m.context_tokens)}</td>
+        </tr>`;
+      }).join('');
+      block.hidden = false;
+    }
 
     // ========== 图表视图功能 ==========
     let currentView = 'table'; // 当前视图: 'table' | 'chart'
