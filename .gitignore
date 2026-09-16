@@ -66,4 +66,7 @@ multi-harness-eval/runs/
 # Python 字节码缓存（scripts/quota/fit.py 等）
 __pycache__/
 
+# toolalign 实跑结果（可再生，不进库）
+/scripts/toolalign/results-*.jsonl
+
 /outputs/quota-probe-*.jsonl
