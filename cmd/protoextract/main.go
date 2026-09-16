@@ -75,7 +75,9 @@ func main() {
 
 	all := sortedDescriptors(files)
 	descriptorSet := &descriptorpb.FileDescriptorSet{File: all}
-	writeProtoBinary(filepath.Join(outputDir, "descriptors.pb"), descriptorSet)
+	descriptorBin, err := proto.Marshal(descriptorSet)
+	check(err)
+	check(os.WriteFile(filepath.Join(outputDir, "descriptors.pb"), descriptorBin, 0o644))
 
 	if resolutionErr := resolveDescriptors(descriptorSet); resolutionErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: descriptor set is not fully resolvable: %v\n", resolutionErr)
@@ -169,12 +171,6 @@ func sortedDescriptors(files map[string]*descriptorpb.FileDescriptorProto) []*de
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].GetName() < all[j].GetName() })
 	return all
-}
-
-func writeProtoBinary(path string, message proto.Message) {
-	data, err := proto.Marshal(message)
-	check(err)
-	check(os.WriteFile(path, data, 0o644))
 }
 
 // resolveDescriptors 只做整体可解性校验：返回值即唯一消费物（调用方只看

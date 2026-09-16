@@ -54,11 +54,11 @@ func (recorder *Recorder) RecordResponseEvent(event llm.ResponseEvent) {
 		return
 	}
 	recorder.AppendJSONL(StageResponseEvents, string(event.Type),
-		func() any { return ResponseEventProjection(event) })
+		func() any { return responseEventProjection(event) })
 }
 
-// ResponseEventProjection 将响应事件转成避免重复完整 Partial 的日志结构。
-func ResponseEventProjection(event llm.ResponseEvent) map[string]any {
+// responseEventProjection 将响应事件转成避免重复完整 Partial 的日志结构。
+func responseEventProjection(event llm.ResponseEvent) map[string]any {
 	result := map[string]any{"type": event.Type}
 	switch event.Type {
 	case llm.ResponseEventTextStart, llm.ResponseEventTextDelta, llm.ResponseEventTextEnd,

@@ -301,9 +301,6 @@ func appendExample(ex []string, dir string) []string {
 func (c *census) neverSeen() []string {
 	out := []string{}
 	for typeName, ms := range c.Messages {
-		if ms.Occurrences == 0 {
-			continue
-		}
 		d, err := protoregistry.GlobalFiles.FindDescriptorByName(protoreflect.FullName(typeName))
 		if err != nil {
 			continue

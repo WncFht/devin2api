@@ -283,10 +283,6 @@ func TestErrorOwnerAndSLA(t *testing.T) {
 	if m.ClientFaults != 2 || m.UpstreamFaults != 1 || m.RateLimited != 1 {
 		t.Fatalf("faults = %+v", m)
 	}
-	// slable = 6 - 2 - 1 = 3；SLA = (3-1)/3 ≈ 0.667。
-	if want := 2.0 / 3.0; m.SLASuccessRate < want-1e-9 || m.SLASuccessRate > want+1e-9 {
-		t.Fatalf("sla_success_rate = %v, want %v", m.SLASuccessRate, want)
-	}
 	// 聚合层级同步：窗口 totals 与 10 分钟桶也要带归因计数。
 	if snap.Window.ClientFaults != 2 || snap.Window.UpstreamFaults != 1 {
 		t.Fatalf("window = %+v", snap.Window)

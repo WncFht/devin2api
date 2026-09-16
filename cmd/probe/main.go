@@ -938,15 +938,12 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
 		Prompt:    proto.String("What word did you just say? One word only."),
 	}
-	return runStream(ctx, client, mk([]*devinproto.ExaChatPb_ChatMessagePrompt{q1cpy(q1), asst, q2}), false, "")
-}
-
-func q1cpy(m *devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.ExaChatPb_ChatMessagePrompt {
-	return &devinproto.ExaChatPb_ChatMessagePrompt{
+	q1replay := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randid.UUID()),
-		Source:    m.Source,
-		Prompt:    m.Prompt,
+		Source:    q1.Source,
+		Prompt:    q1.Prompt,
 	}
+	return runStream(ctx, client, mk([]*devinproto.ExaChatPb_ChatMessagePrompt{q1replay, asst, q2}), false, "")
 }
 
 // ---- hist: synthetic assistant-turn wire shapes ----

@@ -164,8 +164,6 @@ type ActiveRequest struct {
 	DroppedEvents uint64 `json:"dropped_events"`
 	// Abortable 表示请求 ctx 已挂接取消函数、可被面板中断。
 	Abortable bool `json:"abortable"`
-	// Files 是目录内目前已落盘的文件清单。
-	Files []RequestFileInfo `json:"files"`
 }
 
 // ActiveRequests 返回仍在写入的请求目录快照（同类代理的
@@ -183,9 +181,7 @@ func (manager *Manager) ActiveRequests() []ActiveRequest {
 	manager.mutex.Unlock()
 	out := make([]ActiveRequest, 0, len(recorders))
 	for _, recorder := range recorders {
-		snap := recorder.snapshot()
-		snap.Files = listRequestFiles(recorder.directory)
-		out = append(out, snap)
+		out = append(out, recorder.snapshot())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out

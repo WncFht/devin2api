@@ -42,7 +42,6 @@ type Handler struct {
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
 	tokenFunc     func() string
 	apiClient     devinprotoconnect.ApiServerServiceClient
-	httpClient    *http.Client
 	baseTransport http.RoundTripper
 	sessionMu     sync.RWMutex
 	sessionTokens map[string]time.Time
@@ -125,7 +124,6 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 		baseURL:       trimmedURL,
 		tokenFunc:     tokenFunc,
 		apiClient:     devinprotoconnect.NewApiServerServiceClient(httpClient, trimmedURL, connect.WithSendGzip()),
-		httpClient:    httpClient,
 		baseTransport: base,
 		sessionTokens: make(map[string]time.Time),
 		loginFailures: make(map[string]*loginFail),
@@ -478,7 +476,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// 同站导航不受影响。
 		SameSite: http.SameSiteLaxMode,
 	})
-	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 

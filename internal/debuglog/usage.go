@@ -178,7 +178,6 @@ func pushSample(samples *[]int64, head *int, v int64) {
 type usageMinPoint struct {
 	At int64 `json:"at"` // 桶起点 unix 秒
 	usageTotals
-	AvgDur  int64 `json:"avg_duration_ms"`
 	DurP95  int64 `json:"duration_p95_ms"`
 	AvgTTFB int64 `json:"avg_ttfb_ms"`
 	TTFBP95 int64 `json:"ttfb_p95_ms"`
@@ -192,16 +191,9 @@ type dimensionAgg struct {
 	SumDuration int64   `json:"-"`
 	TTFBSamples int64   `json:"-"`
 	SumTTFB     int64   `json:"-"`
-	LastResult  string  `json:"last_result,omitempty"`
-	LastStatus  int     `json:"last_status,omitempty"`
 	LastAt      string  `json:"last_at,omitempty"`
 	AvgDuration float64 `json:"avg_duration_ms"`
 	AvgTTFB     float64 `json:"avg_ttfb_ms"`
-	SuccessRate float64 `json:"success_rate"`
-	// SLASuccessRate 是服务端口径成功率：分母剔除客户端责任与 429
-	// 限流条目，剩余请求中 upstream 失分占比取反——回答「服务本身
-	// 可靠吗」而不是「客户端有没有正确使用」。
-	SLASuccessRate float64 `json:"sla_success_rate"`
 	// InTok/OutTok 分位数描述该模型的请求体量分布：计费与上下文窗口
 	// 占用都跟长度强相关，均值会掩盖长尾（见 dimensionSampleCapacity）。
 	InTokP50  int64 `json:"input_p50,omitempty"`
@@ -224,7 +216,6 @@ type latencyStats struct {
 	P90     int64 `json:"p90"`
 	P95     int64 `json:"p95"`
 	P99     int64 `json:"p99"`
-	Avg     int64 `json:"avg"`
 	Max     int64 `json:"max"`
 }
 
@@ -298,10 +289,6 @@ func (r *sampleRing) stats() latencyStats {
 	sorted := make([]int64, r.size)
 	copy(sorted, r.vals[:r.size])
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	var sum int64
-	for _, v := range sorted {
-		sum += v
-	}
 	pick := func(q float64) int64 {
 		idx := int(q * float64(len(sorted)-1))
 		return sorted[idx]
@@ -312,7 +299,6 @@ func (r *sampleRing) stats() latencyStats {
 		P90:     pick(0.90),
 		P95:     pick(0.95),
 		P99:     pick(0.99),
-		Avg:     sum / int64(len(sorted)),
 		Max:     sorted[len(sorted)-1],
 	}
 }
@@ -482,8 +468,6 @@ func (d *dimensionAgg) addEntry(e IndexEntry) {
 	if d.outTokSamples != nil && e.OutputTokens > 0 {
 		d.outTokSamples.push(e.OutputTokens)
 	}
-	d.LastResult = e.Result
-	d.LastStatus = e.StatusCode
 	d.LastAt = e.StartedAt
 }
 
@@ -494,14 +478,6 @@ func (d *dimensionAgg) finish() {
 	}
 	if d.TTFBSamples > 0 {
 		d.AvgTTFB = float64(d.SumTTFB) / float64(d.TTFBSamples)
-	}
-	if total := d.Requests; total > 0 {
-		d.SuccessRate = float64(total-d.Errors-d.Disconnected) / float64(total)
-	}
-	// SLA 口径：分母只留「服务端承诺内」的请求——客户端责任与限流
-	// 条目整体剔除，upstream 失分占比取反。
-	if slable := d.Requests - d.ClientFaults - d.RateLimited; slable > 0 {
-		d.SLASuccessRate = float64(slable-d.UpstreamFaults) / float64(slable)
 	}
 	if st := d.inTokSamples.stats(); st.Samples > 0 {
 		d.InTokP50, d.InTokP95 = st.P50, st.P95
@@ -569,7 +545,7 @@ func (a *usageAggregator) snapshot() UsageSnapshot {
 		point := usageMinPoint{At: s * 600}
 		if bucket.at == s*600 {
 			point.usageTotals = bucket.usageTotals
-			point.AvgDur, point.DurP95 = sampleSummary(bucket.durs)
+			_, point.DurP95 = sampleSummary(bucket.durs)
 			point.AvgTTFB, point.TTFBP95 = sampleSummary(bucket.ttfbs)
 		}
 		snap.Points = append(snap.Points, point)

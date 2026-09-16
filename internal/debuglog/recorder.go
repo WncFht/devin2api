@@ -612,9 +612,6 @@ func mkdirRequestDir(path string) error {
 // 由 Complete 收尾时一并折进 droppedTotal；此后直接折进 droppedTotal——
 // 迟到入队（如未 join 的泵 goroutine）的丢弃不能落进无人再读的字段。
 func (recorder *Recorder) enqueue(task writeTask) {
-	if recorder == nil {
-		return
-	}
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
 	if recorder.closed {

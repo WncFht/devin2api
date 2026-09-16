@@ -229,8 +229,8 @@ func equalFoldKey(span []byte, name string) bool {
 }
 
 func (recorder *Recorder) extractImage(value map[string]any) (attachmentReference, bool) {
-	mimeType, _ := stringField(value, "mime_type", "mimeType", "MIMEType")
-	encoded, _ := stringField(value, "data", "base64_data", "base64Data", "Data")
+	mimeType := stringField(value, "mime_type", "mimeType", "MIMEType")
+	encoded := stringField(value, "data", "base64_data", "base64Data", "Data")
 	if !strings.HasPrefix(mimeType, "image/") || encoded == "" {
 		return attachmentReference{}, false
 	}
@@ -295,11 +295,11 @@ func imageExtension(mimeType string) string {
 	}
 }
 
-func stringField(value map[string]any, keys ...string) (string, bool) {
+func stringField(value map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if text, ok := value[key].(string); ok {
-			return text, true
+			return text
 		}
 	}
-	return "", false
+	return ""
 }

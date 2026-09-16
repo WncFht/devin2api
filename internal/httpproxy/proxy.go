@@ -69,15 +69,12 @@ func defaultTransport(forceHTTP1 bool) *http.Transport {
 	// 提高连接池上限，减少“太多人同时使用”时的连接创建/回收压力。
 	transport.MaxIdleConns = 2000
 	transport.MaxIdleConnsPerHost = 200
-	transport.MaxConnsPerHost = 0
 	transport.IdleConnTimeout = 120 * time.Second
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	// 仅限制等待响应头的时间，SSE 流本身不会被此超时打断；
 	// 支持上游长时思考/排队，设置为 600 秒。
 	transport.ResponseHeaderTimeout = 600 * time.Second
 	transport.ExpectContinueTimeout = 1 * time.Second
-	// 允许响应 gzip 解压（DisableCompression 只管下行，不影响上行 body）。
-	transport.DisableCompression = false
 	if forceHTTP1 {
 		// 强制 HTTP/1.1：每请求独立 TCP 连接（连接池复用空闲连接），
 		// 避免 HTTP/2 单连接多 stream 复用被上游串行处理导致并发卡住。
