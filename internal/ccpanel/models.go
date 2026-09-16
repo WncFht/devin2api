@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -138,19 +137,105 @@ func (h *Handler) adminDeleteModel(w http.ResponseWriter, r *http.Request) {
 // 才有意义地区分「上游慢」与「上游挂」；同时不能无限占住面板请求。
 const modelTestTimeout = 60 * time.Second
 
-// adminModelTest 实现 POST /admin/model-test {model}：经注入的进程内根路由
-// 发一次真实 /v1/messages 探针（max_tokens=1，非流式），过完整鉴权/并发
-// 闸门/注册表准入/重定向/别名/上游管线——与 ccLoad 渠道测试同语义，返回的
-// 是真实往返结果而非配置静态检查。探针在 index.jsonl 里以
-// client_request_id=panel-probe 留痕，request_id 回传供定位调试目录。
+// probeMaxTokens 约束探针产出上限：够模型给出可见回复，又控制单次探活成本。
+const probeMaxTokens = 1024
+
+// probeRawBodyLimit 是回传给前端的原始响应体截断长度。
+const probeRawBodyLimit = 32 << 10
+
+// modelTestRequest 是探活请求体：model 必填；stream/content/client_protocol
+// 缺省时退化为最小 ping（非流式、anthropic 协议、固定提示词）。
+// client_protocol 取 anthropic/openai/codex，决定打哪个 /v1 入口。
+type modelTestRequest struct {
+	Model          string `json:"model"`
+	Stream         bool   `json:"stream"`
+	Content        string `json:"content"`
+	ClientProtocol string `json:"client_protocol"`
+}
+
+// probeRequestSpec 把探活参数映射到具体 /v1 入口与请求体——三协议各用
+// 最简合法载荷：anthropic/openai 是 messages 数组，codex 是字符串 input。
+func probeRequestSpec(clientProtocol, model, content string, stream bool) (path string, body []byte, err error) {
+	var payload map[string]any
+	switch clientProtocol {
+	case "openai":
+		path = "/v1/chat/completions"
+		payload = map[string]any{
+			"model":      model,
+			"stream":     stream,
+			"max_tokens": probeMaxTokens,
+			"messages":   []map[string]any{{"role": "user", "content": content}},
+		}
+	case "codex":
+		path = "/v1/responses"
+		payload = map[string]any{
+			"model":             model,
+			"stream":            stream,
+			"max_output_tokens": probeMaxTokens,
+			"input":             content,
+		}
+	default:
+		clientProtocol = "anthropic"
+		path = "/v1/messages"
+		payload = map[string]any{
+			"model":      model,
+			"stream":     stream,
+			"max_tokens": probeMaxTokens,
+			"messages":   []map[string]any{{"role": "user", "content": content}},
+		}
+	}
+	body, err = json.Marshal(payload)
+	return path, body, err
+}
+
+// probeRecorder 在 httptest.ResponseRecorder 上记录首个字节写出的时刻——
+// 流式探活的首字延迟（first_byte_duration_ms）由此得来。
+type probeRecorder struct {
+	*httptest.ResponseRecorder
+	firstAt time.Time
+}
+
+func (r *probeRecorder) Write(p []byte) (int, error) {
+	if r.firstAt.IsZero() {
+		r.firstAt = time.Now()
+	}
+	return r.ResponseRecorder.Write(p)
+}
+
+// resolvedModel 返回模型经注册表覆盖与别名链后的最终解析名，与 /v1
+// 准入后的解析路径一致；探活结果的 actual_model 用它（Anthropic 响应体
+// 回显的是请求名，拿不到真实落点）。
+func (h *Handler) resolvedModel(name string) string {
+	target := name
+	if h.models != nil {
+		if e, ok := h.models.Entries()[name]; ok && e.RedirectModel != "" {
+			target = e.RedirectModel
+		}
+	}
+	if h.aliasesFunc != nil {
+		return devin.ResolveModelAlias(h.aliasesFunc(), target)
+	}
+	return target
+}
+
+// adminModelTest 实现 POST /admin/model-test：面板探活入口，返回形状与
+// ccLoad HandleChannelTest 对齐（success/message/status_code/duration_ms/
+// first_byte_duration_ms/actual_model/response_text/api_response/error/
+// raw_response），前端的探活模态原样可消费。
 func (h *Handler) adminModelTest(w http.ResponseWriter, r *http.Request) {
+	h.runModelProbe(w, r)
+}
+
+// runModelProbe 是探活共用 runner：经注入的进程内根路由发一次真实 /v1
+// 请求，过完整鉴权/并发闸门/注册表准入/重定向/别名/上游管线——返回的是
+// 真实往返结果而非配置静态检查。探针在 index.jsonl 里以
+// client_request_id=panel-probe 留痕，request_id 回传供定位调试目录。
+func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	if h.probeHandler == nil {
 		respondError(w, http.StatusServiceUnavailable, "model test unavailable")
 		return
 	}
-	var req struct {
-		Model string `json:"model"`
-	}
+	var req modelTestRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid json body")
 		return
@@ -159,6 +244,10 @@ func (h *Handler) adminModelTest(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		respondError(w, http.StatusBadRequest, "model is required")
 		return
+	}
+	content := req.Content
+	if strings.TrimSpace(content) == "" {
+		content = "ping"
 	}
 	key := ""
 	if h.masterKeyFunc != nil {
@@ -170,40 +259,88 @@ func (h *Handler) adminModelTest(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "auth.api_key is empty and auth tokens exist: configure a master key to run probes")
 		return
 	}
-	body, err := json.Marshal(map[string]any{
-		"model":      model,
-		"max_tokens": 1,
-		"stream":     false,
-		"messages":   []map[string]any{{"role": "user", "content": "ping"}},
-	})
+	path, body, err := probeRequestSpec(strings.ToLower(strings.TrimSpace(req.ClientProtocol)), model, content, req.Stream)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	probeCtx, cancel := context.WithTimeout(r.Context(), modelTestTimeout)
 	defer cancel()
-	probeReq := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body)).WithContext(probeCtx)
+	probeReq := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)).WithContext(probeCtx)
 	if key == "" {
 		key = "panel-probe"
 	}
 	probeReq.Header.Set("Authorization", "Bearer "+key)
 	probeReq.Header.Set("Content-Type", "application/json")
 	probeReq.Header.Set("X-Client-Request-Id", "panel-probe")
-	rec := httptest.NewRecorder()
+	rec := &probeRecorder{ResponseRecorder: httptest.NewRecorder()}
 	started := time.Now()
 	h.probeHandler.ServeHTTP(rec, probeReq)
+
 	res := rec.Result()
-	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	respBody := rec.Body.Bytes()
+	ok := res.StatusCode >= 200 && res.StatusCode < 300
 	out := map[string]any{
-		"ok":          res.StatusCode >= 200 && res.StatusCode < 300,
-		"status_code": res.StatusCode,
-		"latency_ms":  time.Since(started).Milliseconds(),
-		"request_id":  res.Header.Get("X-Request-Id"),
+		"success":         ok,
+		"status_code":     res.StatusCode,
+		"duration_ms":     time.Since(started).Milliseconds(),
+		"is_streaming":    req.Stream,
+		"actual_model":    h.resolvedModel(model),
+		"client_protocol": probeProtocolName(req.ClientProtocol),
+		"request_id":      res.Header.Get("X-Request-Id"),
 	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
+	if req.Stream && !rec.firstAt.IsZero() {
+		out["first_byte_duration_ms"] = rec.firstAt.Sub(started).Milliseconds()
+	}
+	if ok {
+		if req.Stream {
+			out["message"] = "API测试成功（流式）"
+		} else {
+			out["message"] = "API测试成功"
+		}
+		// 响应摘要从管线原文合并：SSE 流折叠成可读正文，整段 JSON 取
+		// content 块；思考型模型正文为空时退到 reasoning 段兜底。
+		merged := mergeResponseBody(string(respBody))
+		switch {
+		case merged.Content != "":
+			out["response_text"] = merged.Content
+		case merged.Reasoning != "":
+			out["response_text"] = merged.Reasoning
+		}
+		if !req.Stream {
+			var parsed any
+			if json.Unmarshal(respBody, &parsed) == nil {
+				out["api_response"] = parsed
+			}
+		}
+	} else {
 		out["error"] = probeErrorSummary(respBody)
+		if trimmed := truncateProbeBody(respBody); trimmed != "" {
+			out["raw_response"] = trimmed
+		}
 	}
 	respondOK(w, out)
+}
+
+// probeProtocolName 把请求里的 client_protocol 归一到三协议名。
+func probeProtocolName(clientProtocol string) string {
+	switch strings.ToLower(strings.TrimSpace(clientProtocol)) {
+	case "openai":
+		return "openai"
+	case "codex":
+		return "codex"
+	default:
+		return "anthropic"
+	}
+}
+
+// truncateProbeBody 截断回传给前端的原始响应体。
+func truncateProbeBody(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if len(s) > probeRawBodyLimit {
+		s = s[:probeRawBodyLimit] + "\n...(truncated)"
+	}
+	return s
 }
 
 // probeErrorSummary 从探针错误响应里摘一句可读原因：优先 error.message
