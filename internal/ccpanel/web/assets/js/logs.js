@@ -10,6 +10,7 @@ const LOGS_LIST_URL = '/admin/logs';
 const LOGS_BOOTSTRAP_URL = '/admin/logs/bootstrap';
 const LOGS_MODELS_URL = '/admin/models';
 const LOGS_EXPORT_URL = '/admin/logs/export';
+const LOGS_STATS_URL = '/admin/stats';
 const debugLogUrl = (id) => `/admin/debug-logs/${encodeURIComponent(id)}`;
 const debugLogFileUrl = (id, name) =>
   `${debugLogUrl(id)}/file/${String(name).split('/').map(encodeURIComponent).join('/')}`;
@@ -126,7 +127,8 @@ let authTokens = []; // 令牌列表
 let logsModelCombobox = null; // 模型筛选组合框
 let logsStatusCombobox = null; // 状态码筛选组合框
 let logsErrorStageCombobox = null; // 失败阶段筛选组合框
-let lastLogsHintData = null; // 最近一次列表响应的 {rejects, has_more}，供语言切换重渲
+let lastLogsHintData = null; // 最近一次列表响应的 {rejects}，供语言切换重渲
+let lastLogsMetricsData = null; // 最近一次指标条响应（/admin/stats data），供语言切换重渲
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
 let logsExactModelValue = '';
@@ -807,13 +809,15 @@ async function load(skipLoading = false) {
     if (!skipLoading) {
       renderLogsLoading();
     }
+    // 指标条与列表同一节拍刷新（自动刷新/筛选/翻页都经过 load）
+    loadLogsMetrics();
 
     const params = buildLogsRequestParams();
     const response = await fetchAPIWithAuth(LOGS_LIST_URL + '?' + params.toString());
     if (!response.success) throw new Error(response.error || '无法加载请求日志');
 
     const data = response.data || [];
-    // 提示条（管线前拒绝 + 截断信号）与列表渲染同源更新。
+    // 提示条（管线前拒绝事件环）与列表渲染同源更新。
     updateLogsListHint(response);
 
     // 把日志中出现的模型/状态码合并进筛选下拉（无需刷新页面）
@@ -872,12 +876,11 @@ async function load(skipLoading = false) {
   }
 }
 
-// ── 列表提示条（rejects 事件环 + has_more 截断）─────────────────
+// ── 列表提示条（rejects 事件环）────────────────────────────────
 // 管线前拒绝（鉴权 401/并发 429/排空 503/读体中断）不产生调试目录、不进
 // index.jsonl——用户在列表找这类失败天然扑空，提示条把事件环聚合成一行
-// 说明并指向统计页（runtime-metrics 的 rejects 组同源）。has_more 表示
-// 命中超出索引尾部读取窗，count 是下界。
-// rejects/has_more 作为 envelope 顶层 sibling 捎回（先例：
+// 说明并指向统计页（runtime-metrics 的 rejects 组同源）。
+// rejects 作为 envelope 顶层 sibling 捎回（先例：
 // /admin/active-requests 的 active_request_title_enabled）。
 const LOGS_REJECT_HINT_WINDOW_MS = 15 * 60000;
 
@@ -904,34 +907,159 @@ function updateLogsListHint(response) {
   const el = document.getElementById('logsListHint');
   if (!el) return;
   const rejects = response?.rejects;
-  const hasMore = response?.has_more === true;
-  lastLogsHintData = { rejects, has_more: hasMore };
+  lastLogsHintData = { rejects };
 
-  const parts = [];
   const rej = summarizeLogsRejects(rejects, LOGS_REJECT_HINT_WINDOW_MS);
-  if (rej.n) {
-    const text = i18nText(
-      'logs.rejectsHint',
-      '近 15 分钟本地拒绝 {count} 条（{detail}）——管线前拒绝不进索引',
-      { count: rej.n, detail: rej.parts.join(' · ') }
-    );
-    const link = i18nText('logs.rejectsGotoStats', '前往统计页');
-    parts.push(`<div class="logs-list-hint-item">${escapeHtml(text)} <a class="logs-hint-link" href="/web/stats.html">${escapeHtml(link)}</a></div>`);
-  }
-  if (hasMore) {
-    parts.push(`<div class="logs-list-hint-item">${escapeHtml(i18nText(
-      'logs.hasMoreHint',
-      '更早历史在索引扫描窗口之外，可缩小时间窗或筛选条件，也可 grep logs/index.jsonl'
-    ))}</div>`);
-  }
-
-  if (parts.length === 0) {
+  if (!rej.n) {
     el.hidden = true;
     el.innerHTML = '';
     return;
   }
-  el.innerHTML = parts.join('');
+  const text = i18nText(
+    'logs.rejectsHint',
+    '近 15 分钟本地拒绝 {count} 条（{detail}）——管线前拒绝不进索引',
+    { count: rej.n, detail: rej.parts.join(' · ') }
+  );
+  const link = i18nText('logs.rejectsGotoStats', '前往统计页');
+  el.innerHTML = `<div class="logs-list-hint-item">${escapeHtml(text)} <a class="logs-hint-link" href="/web/stats.html">${escapeHtml(link)}</a></div>`;
   el.hidden = false;
+}
+
+// ── 当前总况指标条（/admin/stats 窗口聚合）─────────────────────
+// 与统计页同源的 rollup 格子聚合，覆盖整个时间窗（不受列表索引尾部
+// 读取窗限制）。筛选只透传端点支持的 api/model(_like)/auth_token_id——
+// q/status/status_class/result/error_stage/log_source 是列表行级条件，
+// 统计侧不生效；model 精确匹配只看生效模型，不含 response_model 维。
+function buildLogsMetricsParams() {
+  const filters = getLogsFilters();
+  const params = new URLSearchParams();
+  appendLogsTimeRangeParams(params, filters);
+  // api=all 在列表侧是通配语义；stats 端点按精确匹配，传它会聚出空集
+  if (filters.api && filters.api !== 'all') params.set('api', filters.api);
+  if (filters.authToken) params.set('auth_token_id', filters.authToken);
+  const model = String(filters.model || '').trim();
+  if (model) params.set(getLogsModelFilterKey(model, filters), model);
+  return params;
+}
+
+// 速率类数值：>=1000 走 K/M 缩写，小值留两位小数；0/非法显示占位符
+function formatLogsMetricRate(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  if (n >= 1000) return formatNumber(Math.round(n));
+  if (n >= 10) return n.toFixed(1);
+  return n.toFixed(2);
+}
+
+function logsMetricCard(label, value, sub, title, color) {
+  return `<div class="runtime-metric-card" title="${escapeHtml(title)}">` +
+    `<span class="runtime-metric-label">${escapeHtml(label)}</span>` +
+    `<strong class="runtime-metric-value"${color ? ` style="color:${color};"` : ''}>${escapeHtml(value)}</strong>` +
+    (sub ? `<span class="runtime-metric-sub">${escapeHtml(sub)}</span>` : '') +
+    `</div>`;
+}
+
+function renderLogsMetrics(data) {
+  const el = document.getElementById('logsMetrics');
+  if (!el) return;
+  lastLogsMetricsData = data;
+  const stats = Array.isArray(data?.stats) ? data.stats : [];
+  const durationSec = Number(data?.duration_seconds) || 0;
+  const rpm = data?.rpm_stats || {};
+  const isToday = data?.is_today !== false;
+
+  // 逐模型行累计 token 总量；首字/耗时按成功数加权（同统计页合计行口径）
+  let inTok = 0, outTok = 0, crTok = 0, cwTok = 0;
+  let ttfbSum = 0, ttfbN = 0, durSum = 0, durN = 0;
+  for (const e of stats) {
+    inTok += Number(e?.total_input_tokens) || 0;
+    outTok += Number(e?.total_output_tokens) || 0;
+    crTok += Number(e?.total_cache_read_input_tokens) || 0;
+    cwTok += Number(e?.total_cache_creation_input_tokens) || 0;
+    const ok = Number(e?.success) || 0;
+    const fbt = Number(e?.avg_first_byte_time_seconds) || 0;
+    const dur = Number(e?.avg_duration_seconds) || 0;
+    if (ok > 0 && fbt > 0) { ttfbSum += fbt * ok; ttfbN += ok; }
+    if (ok > 0 && dur > 0) { durSum += dur * ok; durN += ok; }
+  }
+
+  const avgRpm = Number(rpm.avg_rpm) || 0;
+  const rpmSub = [
+    Number(rpm.peak_rpm) > 0
+      ? i18nText('logs.metricPeakSub', '峰值 {value}', { value: formatLogsMetricRate(rpm.peak_rpm) })
+      : '',
+    isToday && Number(rpm.recent_rpm) > 0
+      ? i18nText('logs.metricRecentSub', '最近 {value}', { value: formatLogsMetricRate(rpm.recent_rpm) })
+      : ''
+  ].filter(Boolean).join(' · ');
+
+  const tps = durationSec > 0 ? (inTok + outTok + crTok + cwTok) / durationSec : 0;
+  const outRate = durationSec > 0 ? outTok / durationSec : 0;
+  const tpsSub = outRate > 0
+    ? i18nText('logs.metricOutputSub', '输出 {value}/s', { value: formatLogsMetricRate(outRate) })
+    : '';
+
+  const ttfb = ttfbN > 0 ? ttfbSum / ttfbN : 0;
+  const avgDur = durN > 0 ? durSum / durN : 0;
+  const ttfbSub = avgDur > 0
+    ? i18nText('logs.metricAvgDurationSub', '均耗时 {value}s', { value: avgDur.toFixed(1) })
+    : '';
+
+  const cacheDenom = inTok + crTok + cwTok;
+  const cachePct = cacheDenom > 0 && crTok > 0 ? (crTok / cacheDenom) * 100 : 0;
+  const cacheSub = (crTok > 0 || cwTok > 0)
+    ? i18nText('logs.metricCacheSub', '读 {read} · 建 {write}', {
+        read: formatNumber(crTok),
+        write: formatNumber(cwTok)
+      })
+    : '';
+
+  el.innerHTML = `<div class="runtime-metrics-grid">` +
+    logsMetricCard(
+      i18nText('trend.typeRpm', 'RPM'),
+      formatLogsMetricRate(avgRpm),
+      rpmSub,
+      i18nText('logs.metricRpmTitle', '窗口内平均每分钟请求数（不含 499 断连）'),
+      avgRpm > 0 ? window.getRpmColor(avgRpm) : ''
+    ) +
+    logsMetricCard(
+      i18nText('logs.metricTps', 'Token 速率'),
+      formatLogsMetricRate(tps),
+      tpsSub,
+      i18nText('logs.metricTpsTitle', '窗口内每秒 token 吞吐（输入+输出+缓存读+缓存建合计 ÷ 窗口秒数）'),
+      ''
+    ) +
+    logsMetricCard(
+      i18nText('probe.firstByte', '首字'),
+      ttfb > 0 ? ttfb.toFixed(2) + 's' : '-',
+      ttfbSub,
+      i18nText('logs.metricTtfbTitle', '流式 2xx 请求平均首字时间（按成功数加权）'),
+      ttfb > 0 ? window.getFirstByteTimingColor(ttfb) : ''
+    ) +
+    logsMetricCard(
+      i18nText('trend.cacheHitRate', '缓存命中率'),
+      cachePct > 0 ? cachePct.toFixed(1) + '%' : '-',
+      cacheSub,
+      i18nText('logs.metricCacheTitle', '缓存读 ÷（输入+缓存读+缓存建），同表格缓存命中列口径'),
+      ''
+    ) +
+    `</div>`;
+  el.title = i18nText(
+    'logs.metricsScopeTitle',
+    '窗口聚合：时间范围与入口/模型/令牌筛选生效；搜索、状态码、结果、失败阶段、日志来源不参与统计'
+  );
+  el.hidden = false;
+}
+
+async function loadLogsMetrics() {
+  if (!document.getElementById('logsMetrics')) return;
+  try {
+    const data = await fetchDataWithAuth(LOGS_STATS_URL + '?' + buildLogsMetricsParams().toString());
+    renderLogsMetrics(data || {});
+  } catch (error) {
+    console.error('加载指标条失败:', error);
+    // 保留上一帧数据，下个节拍自动重试
+  }
 }
 
 // ── 导出 ──────────────────────────────────────────────────────
@@ -2911,5 +3039,6 @@ if (typeof window !== 'undefined') {
       window.i18n.translatePage();
     }
     if (lastLogsHintData) updateLogsListHint(lastLogsHintData);
+    if (lastLogsMetricsData) renderLogsMetrics(lastLogsMetricsData);
   });
 }

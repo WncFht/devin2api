@@ -1023,7 +1023,24 @@
       background: var(--logs-pending-row-hover-bg);
     }
 
-    /* 列表提示条：管线前拒绝事件环 + has_more 截断信号 */
+    /* 当前总况指标条：复用 runtime-metric 卡片语言，压缩留白贴合列表头区 */
+    .logs-metrics {
+      margin-bottom: var(--space-3);
+    }
+
+    .logs-metrics .runtime-metric-card {
+      padding: var(--space-2) var(--space-3);
+    }
+
+    .logs-metrics .runtime-metric-label {
+      min-height: 0;
+    }
+
+    .logs-metrics .runtime-metric-value {
+      margin: var(--space-1) 0;
+    }
+
+    /* 列表提示条：管线前拒绝事件环 */
     .logs-list-hint {
       display: flex;
       flex-direction: column;
