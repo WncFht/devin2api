@@ -17,6 +17,20 @@ let customPricingModelFilter = '';
 // 只存 ID 而非 DOM 状态，重渲染后依然有效。
 const customPricingTieredModels = new Set();
 
+let effectiveConfigData = null;
+let processLogPreviousFocus = null;
+let processLogPollTimer = null;
+let processLogOffset = 0;
+let processLogBuffer = '';
+let processLogPaused = false;
+let processLogFollow = true;
+let processLogLoading = false;
+const PROCESS_LOG_REFRESH_MS = 5000;
+// 缓冲封顶：跟随模式长期运行时 DOM 不无限增长。
+const PROCESS_LOG_BUFFER_CAP = 256 * 1024;
+// 级别过滤保留无 level= 的行（堆栈续行、手写输出等），不静默吞内容。
+const PROCESS_LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+
 const modelMultimodalFallbackSettingKey = 'model_multimodal_fallback';
 const modelCustomPricingSettingKey = 'model_custom_pricing';
 const maxMultimodalFallbackMappings = 64;
@@ -226,6 +240,63 @@ const runtimeMetricDomains = [
     ]
   },
   {
+    sourceKey: 'rates',
+    titleKey: 'settings.runtimeMetrics.group.rates',
+    descriptionKey: 'settings.runtimeMetrics.ratesNote',
+    optional: true,
+    metrics: [
+      { key: 'rpm_current', labelKey: 'settings.runtimeMetrics.metric.rpmCurrent' },
+      { key: 'rpm_peak', labelKey: 'settings.runtimeMetrics.metric.rpmPeak' },
+      { key: 'rpm_avg', labelKey: 'settings.runtimeMetrics.metric.rpmAvg', format: 'decimal' },
+      { key: 'qps_current', labelKey: 'settings.runtimeMetrics.metric.qpsCurrent', format: 'decimal' }
+    ]
+  },
+  {
+    sourceKey: 'trend',
+    titleKey: 'settings.runtimeMetrics.group.trend',
+    descriptionKey: 'settings.runtimeMetrics.trendNote',
+    optional: true,
+    allowArray: true,
+    metrics: [],
+    renderExtra: renderTrendChart
+  },
+  {
+    sourceKey: 'gate',
+    titleKey: 'settings.runtimeMetrics.group.gate',
+    descriptionKey: 'settings.runtimeMetrics.gateNote',
+    optional: true,
+    metrics: [
+      { key: 'latched', labelKey: 'settings.runtimeMetrics.metric.gateLatched', format: 'boolean' },
+      { key: 'limited_until', labelKey: 'settings.runtimeMetrics.metric.gateLimitedUntil', format: 'isoTime' },
+      { key: 'sendable', labelKey: 'settings.runtimeMetrics.metric.gateSendable', format: 'boolean' },
+      { key: 'window_used', labelKey: 'settings.runtimeMetrics.metric.gateWindowUsed' },
+      { key: 'window_quota', labelKey: 'settings.runtimeMetrics.metric.gateWindowQuota' },
+      { key: 'waiters', labelKey: 'settings.runtimeMetrics.metric.gateWaiters' },
+      { key: 'latch_count', labelKey: 'settings.runtimeMetrics.metric.gateLatchCount' },
+      { key: 'drip_count', labelKey: 'settings.runtimeMetrics.metric.gateDripCount' },
+      { key: 'reject_latched_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectLatched' },
+      { key: 'reject_hold_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectHold' },
+      { key: 'window_next', labelKey: 'settings.runtimeMetrics.metric.gateWindowNext', format: 'isoTime' }
+    ],
+    renderExtra: renderGateExtra
+  },
+  {
+    sourceKey: 'rejects',
+    titleKey: 'settings.runtimeMetrics.group.rejects',
+    descriptionKey: 'settings.runtimeMetrics.rejectsNote',
+    optional: true,
+    metrics: [],
+    renderExtra: renderRejectsExtra
+  },
+  {
+    sourceKey: 'usage',
+    titleKey: 'settings.runtimeMetrics.group.usage',
+    descriptionKey: 'settings.runtimeMetrics.usageNote',
+    optional: true,
+    metrics: [],
+    renderExtra: renderUsageLatencyExtra
+  },
+  {
     sourceKey: 'logs',
     titleKey: 'settings.runtimeMetrics.group.logs',
     descriptionKey: 'settings.runtimeMetrics.logsNote',
@@ -235,6 +306,23 @@ const runtimeMetricDomains = [
       { key: 'dropped_entries', labelKey: 'settings.runtimeMetrics.metric.logDroppedEntries' },
       { key: 'persistence_failed_entries', labelKey: 'settings.runtimeMetrics.metric.logPersistenceFailedEntries' }
     ]
+  },
+  {
+    sourceKey: 'debuglog',
+    titleKey: 'settings.runtimeMetrics.group.debuglog',
+    descriptionKey: 'settings.runtimeMetrics.debuglogNote',
+    optional: true,
+    metrics: [
+      { key: 'enabled', labelKey: 'settings.runtimeMetrics.metric.debuglogEnabled', format: 'boolean' },
+      { key: 'active_request_dirs', labelKey: 'settings.runtimeMetrics.metric.debuglogActiveDirs' },
+      { key: 'index_bytes', labelKey: 'settings.runtimeMetrics.metric.debuglogIndexBytes', format: 'bytes' },
+      { key: 'retention_days', labelKey: 'settings.runtimeMetrics.metric.debuglogRetentionDays' },
+      { key: 'max_total_mb', labelKey: 'settings.runtimeMetrics.metric.debuglogMaxTotalMb' },
+      { key: 'payload_hours', labelKey: 'settings.runtimeMetrics.metric.debuglogPayloadHours' },
+      { key: 'keep_error_dirs', labelKey: 'settings.runtimeMetrics.metric.debuglogKeepErrorDirs' },
+      { key: 'log_root', labelKey: 'settings.runtimeMetrics.metric.debuglogLogRoot', format: 'text' }
+    ],
+    renderExtra: renderDebuglogExtra
   },
   {
     sourceKey: 'storage',
@@ -328,6 +416,24 @@ function bindSettingsPageActions() {
     runtimeMetricsBtn.dataset.bound = '1';
   }
 
+  const processLogBtn = document.getElementById('process-log-btn');
+  if (processLogBtn && !processLogBtn.dataset.bound) {
+    processLogBtn.addEventListener('click', openProcessLogModal);
+    processLogBtn.dataset.bound = '1';
+  }
+
+  const configRefreshBtn = document.getElementById('effective-config-refresh-btn');
+  if (configRefreshBtn && !configRefreshBtn.dataset.bound) {
+    configRefreshBtn.addEventListener('click', loadEffectiveConfig);
+    configRefreshBtn.dataset.bound = '1';
+  }
+
+  const configReloadBtn = document.getElementById('effective-config-reload-btn');
+  if (configReloadBtn && !configReloadBtn.dataset.bound) {
+    configReloadBtn.addEventListener('click', reloadEffectiveConfig);
+    configReloadBtn.dataset.bound = '1';
+  }
+
   const multimodalFallbackBtn = document.getElementById('model-multimodal-fallback-btn');
   if (multimodalFallbackBtn && !multimodalFallbackBtn.dataset.bound) {
     multimodalFallbackBtn.addEventListener('click', (event) => openMultimodalFallbackModal(event.currentTarget));
@@ -365,6 +471,7 @@ function bindSettingsPageActions() {
 
   bindMultimodalFallbackModal();
   bindCustomPricingModal();
+  bindProcessLogModal();
 }
 
 function trapModalFocus(modal, event) {
@@ -1139,15 +1246,39 @@ function formatRuntimeDurationNs(value) {
   return formatRuntimeDuration(numeric / 1e9);
 }
 
+// gate/usage 的时间字段是 RFC3339 字符串（ISO），与 unixMilliseconds 不同源。
+function formatRuntimeISOTime(value) {
+  if (typeof value !== 'string' || value.trim() === '') return '—';
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? '—' : new Date(time).toLocaleString(runtimeMetricsLocale());
+}
+
+function formatRuntimeNumber(value, digits = 2) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  return formatRuntimeDecimal(numeric, digits);
+}
+
+// 毫秒级时长：usage 分位数（int64 ms）与闩事件时长（at/until 差值）共用。
+function formatRuntimeMilliseconds(value) {
+  const numeric = normalizeRuntimeMetric(value);
+  if (numeric === null) return '—';
+  if (numeric < 1000) return `${formatRuntimeDecimal(numeric, 0)} ms`;
+  return formatRuntimeSeconds(numeric / 1000);
+}
+
 function formatRuntimeMetric(metric, stats) {
   if (metric.zeroUnavailable && normalizeRuntimeMetric(stats[metric.key]) === 0) return '—';
   if (metric.format === 'bytes') return formatRuntimeBytes(stats[metric.key]);
   if (metric.format === 'duration') return formatRuntimeDuration(stats[metric.key]);
   if (metric.format === 'seconds') return formatRuntimeSeconds(stats[metric.key]);
   if (metric.format === 'durationNs') return formatRuntimeDurationNs(stats[metric.key]);
+  if (metric.format === 'milliseconds') return formatRuntimeMilliseconds(stats[metric.key]);
   if (metric.format === 'percent') return formatRuntimePercent(stats[metric.key]);
+  if (metric.format === 'decimal') return formatRuntimeNumber(stats[metric.key]);
   if (metric.format === 'boolean') return formatRuntimeBoolean(stats[metric.key]);
   if (metric.format === 'unixMilliseconds') return formatRuntimeTimestamp(stats[metric.key]);
+  if (metric.format === 'isoTime') return formatRuntimeISOTime(stats[metric.key]);
   if (metric.format === 'text') {
     const value = stats[metric.key];
     return value === null || value === undefined || String(value).trim() === '' ? '—' : String(value);
@@ -1166,7 +1297,11 @@ function renderRuntimeMetricCard(metric, stats) {
 
 function renderRuntimeMetricDomain(domain, payload) {
   const stats = payload[domain.sourceKey];
-  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) {
+  // trend 组载荷是桶数组而非对象，allowArray 放行给 renderExtra 自己处理。
+  const hasData = domain.allowArray
+    ? Array.isArray(stats)
+    : stats !== null && stats !== undefined && typeof stats === 'object' && !Array.isArray(stats);
+  if (!hasData) {
     return domain.optional ? '' : `
       <section class="runtime-metrics-section">
         <div class="runtime-metrics-section-header">
@@ -1175,15 +1310,18 @@ function renderRuntimeMetricDomain(domain, payload) {
         <p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.groupUnavailable'))}</p>
       </section>`;
   }
+  const grid = domain.metrics.length
+    ? `<div class="runtime-metrics-grid">${domain.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}</div>`
+    : '';
+  const extra = typeof domain.renderExtra === 'function' ? domain.renderExtra(stats, payload) : '';
   return `
     <section class="runtime-metrics-section">
       <div class="runtime-metrics-section-header">
         <h3>${escapeHtml(t(domain.titleKey))}</h3>
       </div>
       <p class="runtime-metrics-section-description">${escapeHtml(t(domain.descriptionKey))}</p>
-      <div class="runtime-metrics-grid">
-        ${domain.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}
-      </div>
+      ${grid}
+      ${extra}
     </section>`;
 }
 
@@ -1197,6 +1335,208 @@ function renderRuntimeMetricGroup(group, stats) {
         ${group.metrics.map((metric) => renderRuntimeMetricCard(metric, stats)).join('')}
       </div>
     </section>`;
+}
+
+function renderRuntimeMetricTable(headers, rowsHtml) {
+  return `
+    <div class="table-container">
+      <table class="modern-table">
+        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+}
+
+// 速率闸门附加块：闩中横幅 + 闩迁移事件表（新在前，label 由服务端随事件下发）。
+function renderGateExtra(stats) {
+  let html = '';
+  if (stats.latched) {
+    html += `<div class="custom-rules-error" role="alert">${escapeHtml(t('settings.runtimeMetrics.gateLatchedBanner', { until: formatRuntimeISOTime(stats.limited_until) }))}</div>`;
+  }
+  const events = Array.isArray(stats.events) ? stats.events.slice(0, 20) : [];
+  if (!events.length) return html;
+
+  const rows = events.map((event) => {
+    const at = Date.parse(event.at);
+    const until = event.until ? Date.parse(event.until) : NaN;
+    let detail = '';
+    if (event.kind === 'latched' && Number.isFinite(at) && Number.isFinite(until)) {
+      detail = t('settings.runtimeMetrics.gateDetailLatch', { duration: formatRuntimeMilliseconds(until - at) });
+    } else if (event.kind === 'released' && Number.isFinite(at) && Number.isFinite(until)) {
+      detail = t('settings.runtimeMetrics.gateDetailReleased', { duration: formatRuntimeMilliseconds(Math.max(0, until - at)) });
+    } else if (event.kind === 'restored') {
+      detail = t('settings.runtimeMetrics.gateDetailRestored');
+    }
+    return `<tr>
+      <td>${escapeHtml(Number.isFinite(at) ? new Date(at).toLocaleString(runtimeMetricsLocale()) : '—')}</td>
+      <td>${escapeHtml(event.label || event.kind || '—')}</td>
+      <td>${escapeHtml(formatRuntimeISOTime(event.until))}</td>
+      <td>${escapeHtml(detail || '—')}</td>
+    </tr>`;
+  }).join('');
+
+  html += `
+    <div class="runtime-metrics-subsection-header">
+      <h4>${escapeHtml(t('settings.runtimeMetrics.gateEvents'))}</h4>
+    </div>
+    ${renderRuntimeMetricTable([
+      t('settings.runtimeMetrics.eventColTime'),
+      t('settings.runtimeMetrics.gateEventColKind'),
+      t('settings.runtimeMetrics.gateEventColUntil'),
+      t('settings.runtimeMetrics.gateEventColDetail')
+    ], rows)}`;
+  return html;
+}
+
+// 管线前拒绝：分原因计数卡 + 最近事件表——这类请求不产生调试目录与
+// 索引行，这里是唯一结构化足迹。reason 显示名取服务端下发的 labels。
+function renderRejectsExtra(stats) {
+  const byReason = stats.by_reason && typeof stats.by_reason === 'object' ? stats.by_reason : {};
+  const labels = {};
+  for (const entry of stats.labels || []) {
+    if (entry && entry.reason) labels[entry.reason] = entry.label;
+  }
+  const ordered = Object.keys(labels).concat(Object.keys(byReason).filter((k) => !(k in labels)));
+  const cards = ordered
+    .filter((reason) => (normalizeRuntimeMetric(byReason[reason]) || 0) > 0)
+    .map((reason) => `
+      <div class="runtime-metric-card">
+        <span class="runtime-metric-label">${escapeHtml(labels[reason] || reason)}</span>
+        <strong class="runtime-metric-value">${escapeHtml(formatRuntimeInteger(byReason[reason]))}</strong>
+        <code class="runtime-metric-key">${escapeHtml(reason)}</code>
+      </div>`);
+
+  let html = cards.length
+    ? `<div class="runtime-metrics-grid">${cards.join('')}</div>`
+    : `<p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.rejectsNone'))}</p>`;
+
+  const recent = Array.isArray(stats.recent) ? stats.recent.slice(0, 30) : [];
+  if (recent.length) {
+    const rows = recent.map((event) => {
+      const at = normalizeRuntimeMetric(event.at);
+      const ua = event.user_agent ? String(event.user_agent) : '';
+      const who = escapeHtml(event.ip || '—')
+        + (event.key_hash ? ` <code class="runtime-metric-key">${escapeHtml(event.key_hash)}</code>` : '')
+        + (ua ? `<div title="${escapeHtml(ua)}">${escapeHtml(ua.length > 48 ? ua.slice(0, 48) + '…' : ua)}</div>` : '');
+      return `<tr>
+        <td>${escapeHtml(at !== null ? new Date(at * 1000).toLocaleString(runtimeMetricsLocale()) : '—')}</td>
+        <td><span class="runtime-transcript-status runtime-transcript-status--warning" title="${escapeHtml(event.reason || '')}">${escapeHtml(labels[event.reason] || event.reason || '—')}</span></td>
+        <td>${escapeHtml(String(event.status ?? '—'))}</td>
+        <td>${escapeHtml(event.path || '—')}</td>
+        <td>${who}</td>
+      </tr>`;
+    }).join('');
+    html += `
+      <div class="runtime-metrics-subsection-header">
+        <h4>${escapeHtml(t('settings.runtimeMetrics.rejectsRecent'))}</h4>
+      </div>
+      ${renderRuntimeMetricTable([
+        t('settings.runtimeMetrics.eventColTime'),
+        t('settings.runtimeMetrics.rejectColReason'),
+        t('settings.runtimeMetrics.rejectColStatus'),
+        t('settings.runtimeMetrics.rejectColPath'),
+        t('settings.runtimeMetrics.rejectColClient')
+      ], rows)}`;
+    if (stats.recent.length > recent.length) {
+      html += `<p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.rejectsTruncated', { count: recent.length }))}</p>`;
+    }
+  }
+  return html;
+}
+
+// 60 分钟逐 10 秒请求/错误趋势的 SVG 迷你图；闩时段（gate.latch_ranges）
+// 叠琥珀底色，拒绝风暴/流量塌陷与「当时在闩内」直接对得上。
+function renderTrendChart(trend, payload) {
+  if (!trend.length) return '';
+  let totalRequests = 0;
+  let totalErrors = 0;
+  let peak = 0;
+  for (const point of trend) {
+    const requests = normalizeRuntimeMetric(point.requests) || 0;
+    const errors = normalizeRuntimeMetric(point.errors) || 0;
+    totalRequests += requests;
+    totalErrors += errors;
+    peak = Math.max(peak, requests, errors);
+  }
+
+  const width = 720;
+  const height = 72;
+  const count = trend.length;
+  const xAt = (index) => (count > 1 ? (index / (count - 1)) * width : width / 2);
+  const yAt = (value) => height - (peak > 0 ? (value / peak) * (height - 4) : 0) - 2;
+  const pathOf = (field) => trend
+    .map((point, index) => `${index === 0 ? 'M' : 'L'}${xAt(index).toFixed(1)},${yAt(normalizeRuntimeMetric(point[field]) || 0).toFixed(1)}`)
+    .join(' ');
+  const requestPath = pathOf('requests');
+  const errorPath = pathOf('errors');
+  const areaPath = `${requestPath} L${width},${height} L0,${height} Z`;
+
+  let latchRects = '';
+  const t0 = (trend[0].at || 0) * 1000;
+  const t1 = (trend[count - 1].at || 0) * 1000;
+  if (t1 > t0 && Array.isArray(payload?.gate?.latch_ranges)) {
+    latchRects = payload.gate.latch_ranges.map((range) => {
+      const start = range.start ? Date.parse(range.start) : t0;
+      const end = Date.parse(range.end);
+      if (!Number.isFinite(end)) return '';
+      const x0 = Math.max(0, ((Math.max(start, t0) - t0) / (t1 - t0)) * width);
+      const x1 = Math.min(width, ((Math.min(end, t1) - t0) / (t1 - t0)) * width);
+      if (x1 <= x0) return '';
+      return `<rect x="${x0.toFixed(1)}" y="0" width="${(x1 - x0).toFixed(1)}" height="${height}" style="fill:var(--warning-500, #f59e0b); opacity:0.18"></rect>`;
+    }).join('');
+  }
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
+      aria-label="${escapeHtml(t('settings.runtimeMetrics.group.trend'))}"
+      style="display:block; width:100%; height:${height}px; margin:4px 0 8px">
+      ${latchRects}
+      <path d="${areaPath}" style="fill:var(--primary-500, #3b82f6); opacity:0.18"></path>
+      <path d="${requestPath}" style="fill:none; stroke:var(--primary-500, #3b82f6); stroke-width:1.5" vector-effect="non-scaling-stroke"></path>
+      <path d="${errorPath}" style="fill:none; stroke:var(--error-500, #ef4444); stroke-width:1.5" vector-effect="non-scaling-stroke"></path>
+    </svg>
+    <p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.trendSummary', {
+      requests: formatRuntimeInteger(totalRequests),
+      errors: formatRuntimeInteger(totalErrors)
+    }))}</p>`;
+}
+
+// index.jsonl 蓄水池的全局延迟分位数：ttfb（流式首字节）与 duration
+// （总时长）两行，值均为毫秒。
+function renderUsageLatencyExtra(stats) {
+  const series = [
+    { key: 'ttfb', labelKey: 'settings.runtimeMetrics.usageTtfb' },
+    { key: 'duration', labelKey: 'settings.runtimeMetrics.usageDuration' }
+  ];
+  const rows = series.map(({ key, labelKey }) => {
+    const latency = stats[key];
+    if (!latency || typeof latency !== 'object' || Array.isArray(latency)) return '';
+    const cell = (value) => `<td>${escapeHtml(formatRuntimeMilliseconds(value))}</td>`;
+    return `<tr>
+      <td>${escapeHtml(t(labelKey))}</td>
+      <td>${escapeHtml(formatRuntimeInteger(latency.samples))}</td>
+      ${cell(latency.p50)}${cell(latency.p90)}${cell(latency.p95)}${cell(latency.p99)}${cell(latency.max)}
+    </tr>`;
+  }).join('');
+  if (!rows) return '';
+  return renderRuntimeMetricTable([
+    t('settings.runtimeMetrics.usageColMetric'),
+    t('settings.runtimeMetrics.usageColSamples'),
+    'p50', 'p90', 'p95', 'p99', 'max'
+  ], rows);
+}
+
+// last_bind_failure 是最近一次监听端口争夺的取证记录（EADDRINUSE
+// 重启风暴）；缺失即未发生过，不透出。
+function renderDebuglogExtra(stats) {
+  const failure = stats.last_bind_failure;
+  if (!failure || typeof failure !== 'object' || Array.isArray(failure)) return '';
+  return `<div class="custom-rules-error" role="alert">${escapeHtml(t('settings.runtimeMetrics.bindFailure', {
+    count: failure.count ?? '—',
+    addr: failure.addr || '—',
+    holder: failure.holder || '—',
+    time: formatRuntimeISOTime(failure.last_at)
+  }))}</div>`;
 }
 
 function renderTranscriptUsage(stats) {
@@ -1322,6 +1662,310 @@ async function loadRuntimeMetrics(options) {
     runtimeMetricsLoading = false;
     if (content) content.setAttribute('aria-busy', 'false');
     if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+// ===== 进程 stderr 日志查看器 =====
+// offset 增量拉取；next_offset 回缩说明 stderr.log 已被新进程重写——
+// 拿到的是新文件 tail 而非增量，往旧缓冲追加会重复整段尾巴，整换。
+
+function openProcessLogModal() {
+  const modal = document.getElementById('processLogModal');
+  if (!modal) return;
+
+  processLogPreviousFocus = document.activeElement;
+  processLogOffset = 0;
+  processLogBuffer = '';
+  processLogPaused = false;
+  updateProcessLogPauseButton();
+  const follow = document.getElementById('process-log-follow');
+  processLogFollow = follow ? follow.checked : true;
+  document.querySelector('.app-container')?.setAttribute('inert', '');
+  modal.classList.add('show');
+  modal.setAttribute('aria-hidden', 'false');
+  modal.querySelector('.close-btn')?.focus();
+  loadProcessLogDebugState();
+  loadProcessLog(0);
+  startProcessLogPolling();
+}
+
+function closeProcessLogModal() {
+  const modal = document.getElementById('processLogModal');
+  if (!modal) return;
+
+  stopProcessLogPolling();
+  modal.classList.remove('show');
+  modal.setAttribute('aria-hidden', 'true');
+  document.querySelector('.app-container')?.removeAttribute('inert');
+  if (processLogPreviousFocus?.isConnected) processLogPreviousFocus.focus();
+  processLogPreviousFocus = null;
+}
+
+function startProcessLogPolling() {
+  if (processLogPollTimer !== null || processLogPaused || !processLogFollow) return;
+  processLogPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    loadProcessLog(processLogOffset, { silent: true });
+  }, PROCESS_LOG_REFRESH_MS);
+}
+
+function stopProcessLogPolling() {
+  if (processLogPollTimer !== null) {
+    clearInterval(processLogPollTimer);
+    processLogPollTimer = null;
+  }
+}
+
+function updateProcessLogPauseButton() {
+  const btn = document.getElementById('process-log-pause-btn');
+  if (btn) btn.textContent = t(processLogPaused ? 'settings.processLog.resume' : 'settings.processLog.pause');
+}
+
+function setProcessLogPaused(paused) {
+  processLogPaused = paused;
+  updateProcessLogPauseButton();
+  if (paused) {
+    stopProcessLogPolling();
+    return;
+  }
+  loadProcessLog(processLogOffset, { silent: true });
+  startProcessLogPolling();
+}
+
+async function loadProcessLog(offset, options) {
+  if (processLogLoading) return;
+  const silent = options?.silent === true;
+  processLogLoading = true;
+  const refreshBtn = document.getElementById('process-log-refresh-btn');
+  const updatedAt = document.getElementById('process-log-updated-at');
+  if (!silent && refreshBtn) refreshBtn.disabled = true;
+
+  try {
+    const data = await fetchDataWithAuth('/admin/process-log?offset=' + (offset || 0));
+    const next = Number(data?.next_offset) || 0;
+    const isDelta = offset > 0 && next >= processLogOffset;
+    processLogBuffer = isDelta ? processLogBuffer + (data?.text || '') : String(data?.text || '');
+    if (processLogBuffer.length > PROCESS_LOG_BUFFER_CAP) {
+      processLogBuffer = processLogBuffer.slice(-PROCESS_LOG_BUFFER_CAP);
+    }
+    processLogOffset = next;
+    renderProcessLog();
+    if (updatedAt) {
+      updatedAt.textContent = t('settings.runtimeMetrics.updatedAt', { time: new Date().toLocaleString(runtimeMetricsLocale()) });
+    }
+  } catch (err) {
+    console.error('Failed to load process log:', err);
+    // 缓冲已有内容时保留视图只在底栏记错误；空缓冲才把错误写进视图。
+    const view = document.getElementById('process-log-view');
+    if (view && !processLogBuffer) {
+      view.textContent = t('settings.processLog.unavailable') + ': ' + err.message;
+    }
+    if (updatedAt) {
+      updatedAt.textContent = t('settings.processLog.fetchFailed', { message: err.message });
+    }
+  } finally {
+    processLogLoading = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function renderProcessLog() {
+  const view = document.getElementById('process-log-view');
+  const content = document.getElementById('process-log-content');
+  if (!view) return;
+
+  const level = document.getElementById('process-log-level')?.value || '';
+  let text = processLogBuffer;
+  if (level) {
+    const min = PROCESS_LOG_LEVELS[level] ?? 0;
+    text = processLogBuffer.split('\n').filter((line) => {
+      const match = /level=(\w+)/.exec(line);
+      return !match || PROCESS_LOG_LEVELS[match[1]] === undefined || PROCESS_LOG_LEVELS[match[1]] >= min;
+    }).join('\n');
+  }
+  view.textContent = text || t('settings.processLog.empty');
+  if (processLogFollow && content) content.scrollTop = content.scrollHeight;
+}
+
+function bindProcessLogModal() {
+  const modal = document.getElementById('processLogModal');
+  if (!modal || modal.dataset.bound) return;
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      closeProcessLogModal();
+      return;
+    }
+    const button = event.target.closest('[data-action]');
+    if (button?.dataset.action === 'close-process-log') closeProcessLogModal();
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeProcessLogModal();
+      return;
+    }
+    if (event.key === 'Tab') trapModalFocus(modal, event);
+  });
+
+  const pauseBtn = document.getElementById('process-log-pause-btn');
+  if (pauseBtn) pauseBtn.addEventListener('click', () => setProcessLogPaused(!processLogPaused));
+
+  const refreshBtn = document.getElementById('process-log-refresh-btn');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => loadProcessLog(processLogOffset));
+
+  const clearBtn = document.getElementById('process-log-clear-btn');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      // 只清视图：offset 不动，下一轮增量只追加新行。
+      processLogBuffer = '';
+      renderProcessLog();
+    });
+  }
+
+  // procFollow 语义：跟随开关是拉取总开关——勾选=5s 轮询+滚底，取消=停拉。
+  const follow = document.getElementById('process-log-follow');
+  if (follow) {
+    follow.addEventListener('change', () => {
+      processLogFollow = follow.checked;
+      if (!processLogFollow) {
+        stopProcessLogPolling();
+        return;
+      }
+      renderProcessLog();
+      loadProcessLog(processLogOffset, { silent: true });
+      startProcessLogPolling();
+    });
+  }
+
+  const debugToggle = document.getElementById('process-log-debug-toggle');
+  if (debugToggle) debugToggle.addEventListener('change', () => setProcessLogDebugEnabled(debugToggle));
+
+  const level = document.getElementById('process-log-level');
+  if (level) level.addEventListener('change', renderProcessLog);
+
+  modal.dataset.bound = '1';
+}
+
+// 请求日志开关复用 settings 键仓：GET/PUT /admin/settings/debug_log_enabled，
+// 与设置表里的同一行共享状态，写成功后同步原值避免该行被误判为脏。
+async function loadProcessLogDebugState() {
+  const toggle = document.getElementById('process-log-debug-toggle');
+  if (!toggle) return;
+  try {
+    const row = await fetchDataWithAuth('/admin/settings/debug_log_enabled');
+    toggle.checked = row?.value === 'true';
+  } catch (err) {
+    console.error('Failed to load debug_log_enabled:', err);
+  }
+}
+
+async function setProcessLogDebugEnabled(toggle) {
+  const next = toggle.checked;
+  toggle.disabled = true;
+  try {
+    await fetchDataWithAuth('/admin/settings/debug_log_enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: String(next) })
+    });
+    syncSettingState('debug_log_enabled', String(next));
+    // 开启后立刻补拉一轮：debug 关闭时 process-log 端点 404，开关是恢复入口。
+    if (next) loadProcessLog(processLogOffset, { silent: true });
+  } catch (err) {
+    toggle.checked = !next;
+    showError(t('settings.processLog.debugToggleFailed', { message: err.message }));
+  } finally {
+    toggle.disabled = false;
+  }
+}
+
+// ===== 生效配置 =====
+// 文件为事实源：展示最后一次加载的脱敏视图；改 config.yaml 后点
+// 「重新加载」热应用，requires_restart 列出的字段需托管重启。
+
+async function loadEffectiveConfig() {
+  const banner = document.getElementById('effective-config-banner');
+  try {
+    effectiveConfigData = await fetchDataWithAuth('/admin/config');
+    renderEffectiveConfig();
+  } catch (err) {
+    console.error('Failed to load effective config:', err);
+    effectiveConfigData = null;
+    if (banner) {
+      banner.hidden = false;
+      banner.textContent = t('settings.effectiveConfig.loadFailed') + ': ' + err.message;
+    }
+  }
+}
+
+function renderEffectiveConfig() {
+  const data = effectiveConfigData || {};
+  const staleBadge = document.getElementById('effective-config-stale');
+  const banner = document.getElementById('effective-config-banner');
+  const meta = document.getElementById('effective-config-meta');
+  const isStale = data.stale === true;
+
+  if (staleBadge) staleBadge.hidden = !isStale;
+  if (banner) {
+    banner.hidden = !isStale;
+    banner.textContent = isStale ? t('settings.effectiveConfig.staleBanner') : '';
+  }
+
+  if (meta) {
+    const rows = [
+      ['settings.effectiveConfig.path', data.path],
+      ['settings.effectiveConfig.loadedAt', formatRuntimeISOTime(data.loaded_at)],
+      ['settings.effectiveConfig.fileMtime', formatRuntimeISOTime(data.file_mtime)],
+      ['settings.effectiveConfig.state', isStale ? t('settings.effectiveConfig.stateStale') : t('settings.effectiveConfig.stateFresh')]
+    ];
+    const reload = data.last_reload;
+    if (reload && typeof reload === 'object' && !Array.isArray(reload)) {
+      rows.push(['settings.effectiveConfig.lastReload', formatRuntimeISOTime(reload.at)]);
+      rows.push(['settings.effectiveConfig.applied', (reload.applied || []).join(', ') || t('settings.effectiveConfig.none')]);
+      rows.push(['settings.effectiveConfig.requiresRestart', (reload.requires_restart || []).join(', ') || t('settings.effectiveConfig.none')]);
+    }
+    meta.innerHTML = rows.map(([labelKey, value]) => `
+      <div class="quota-kv">
+        <span class="quota-kv-k">${escapeHtml(t(labelKey))}</span>
+        <span class="quota-kv-v">${escapeHtml(value === null || value === undefined || value === '' ? '—' : String(value))}</span>
+      </div>`).join('');
+  }
+
+  const view = data.config && typeof data.config === 'object'
+    ? JSON.stringify(data.config, null, 2)
+    : String(data.error || t('settings.effectiveConfig.notLoaded'));
+  setHighlightedCodeContent('effective-config-json', view, 'json');
+}
+
+async function reloadEffectiveConfig() {
+  const btn = document.getElementById('effective-config-reload-btn');
+  if (btn?.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+  }
+
+  try {
+    const report = await fetchDataWithAuth('/admin/config/reload', { method: 'POST' });
+    const applied = Array.isArray(report?.applied) ? report.applied : [];
+    const cold = Array.isArray(report?.requires_restart) ? report.requires_restart : [];
+    const appliedText = applied.join(', ') || t('settings.effectiveConfig.reloadedNoChanges');
+    if (cold.length) {
+      window.showWarning(t('settings.effectiveConfig.reloadedWithRestart', { applied: appliedText, keys: cold.join(', ') }));
+    } else {
+      showSuccess(t('settings.effectiveConfig.reloaded', { keys: appliedText }));
+    }
+    // 热字段（debug.enabled 等）可能刚变，连带刷新配置视图。
+    await loadEffectiveConfig();
+  } catch (err) {
+    console.error('配置重载异常:', err);
+    showError(t('settings.effectiveConfig.reloadFailed') + ': ' + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
   }
 }
 
@@ -1453,6 +2097,8 @@ function refreshSettingsTranslations() {
   }
   updateMultimodalFallbackSummary(document.getElementById(modelMultimodalFallbackSettingKey)?.value || '');
   updateCustomPricingSummary(document.getElementById(modelCustomPricingSettingKey)?.value || '');
+  if (effectiveConfigData) renderEffectiveConfig();
+  updateProcessLogPauseButton();
 }
 
 async function loadSettings() {
@@ -1730,5 +2376,6 @@ window.initPageBootstrap({
   run: () => {
     bindSettingsPageActions();
     loadSettings();
+    loadEffectiveConfig();
   }
 });

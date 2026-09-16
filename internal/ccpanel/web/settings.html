@@ -11,10 +11,12 @@
   <title data-i18n="settings.title">系统设置 - Devin2API</title>
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/highlight-theme.css?v=__VERSION__">
   <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
   <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
@@ -49,6 +51,9 @@
             <button id="runtime-metrics-btn" type="button" class="btn btn-secondary settings-runtime-metrics-btn" data-i18n="settings.runtimeMetrics.button">
               运行状态
             </button>
+            <button id="process-log-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.button">
+              进程日志
+            </button>
             <!-- 多模态回退/自定义定价：本服务不发出这两个设置键，入口隐藏
                  （.btn 的 display:inline-flex 压过 hidden 属性，须 inline
                  style）；模态与隐藏 input 留置——settings.js 按 id 读写。 -->
@@ -65,6 +70,22 @@
             <button id="save-all-btn" class="btn btn-primary settings-save-btn" data-i18n="settings.saveAll">
               保存所有更改
             </button>
+          </div>
+        </section>
+
+        <!-- 生效配置：最后一次成功加载的 config.yaml 脱敏视图 -->
+        <section class="glass-card mb-6" id="effective-config-card">
+          <div class="effective-config-header">
+            <h3 class="section-title" data-i18n="settings.effectiveConfig.title">生效配置</h3>
+            <span id="effective-config-stale" class="runtime-transcript-status runtime-transcript-status--warning" data-i18n="settings.effectiveConfig.stale" hidden>已过期</span>
+          </div>
+          <p class="runtime-metrics-section-description" data-i18n="settings.effectiveConfig.description">最后一次成功加载的 config.yaml 脱敏视图；凭据以 sha256 前缀代替明文。文件被改过时点「重新加载」热应用。</p>
+          <div id="effective-config-banner" class="custom-rules-error" role="alert" hidden></div>
+          <div id="effective-config-meta" class="quota-kv-grid"></div>
+          <pre id="effective-config-json" class="upstream-pre effective-config-json"></pre>
+          <div class="settings-save-actions">
+            <button id="effective-config-refresh-btn" type="button" class="btn btn-secondary" data-i18n="settings.effectiveConfig.refresh">刷新视图</button>
+            <button id="effective-config-reload-btn" type="button" class="btn btn-primary" data-i18n="settings.effectiveConfig.reload">重新加载配置</button>
           </div>
         </section>
       </div>
@@ -89,6 +110,53 @@
         <div class="runtime-metrics-footer-actions">
           <button id="refresh-runtime-metrics-btn" type="button" class="btn btn-secondary" data-i18n="settings.runtimeMetrics.refresh">刷新</button>
           <button type="button" class="btn btn-primary" data-action="close-runtime-metrics" data-i18n="common.close">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 进程 stderr 日志查看器 -->
+  <div id="processLogModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="processLogTitle" aria-hidden="true">
+    <div class="modal-content runtime-metrics-modal">
+      <div class="modal-header runtime-metrics-modal-header">
+        <div>
+          <h2 id="processLogTitle" class="modal-title" data-i18n="settings.processLog.title">进程日志</h2>
+          <p class="modal-description" data-i18n="settings.processLog.description">进程 stderr（slog 行）尾部；跟随开启时每 5 秒增量拉取，清空只清当前视图不影响文件。</p>
+        </div>
+        <button type="button" class="close-btn" data-action="close-process-log" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
+      </div>
+
+      <div class="process-log-toolbar">
+        <label class="process-log-follow" data-i18n-title="settings.processLog.debugToggleHint" title="debug_log_enabled 设置键">
+          <input type="checkbox" id="process-log-debug-toggle">
+          <span data-i18n="settings.processLog.debugToggle">请求日志</span>
+        </label>
+        <select id="process-log-level" class="form-input process-log-level" data-i18n-aria-label="settings.processLog.level" aria-label="级别">
+          <option value="" data-i18n="settings.processLog.levelAll">全部级别</option>
+          <option value="DEBUG">DEBUG</option>
+          <option value="INFO">INFO</option>
+          <option value="WARN">WARN</option>
+          <option value="ERROR">ERROR</option>
+        </select>
+        <label class="process-log-follow">
+          <input type="checkbox" id="process-log-follow" checked>
+          <span data-i18n="settings.processLog.follow">自动滚动</span>
+        </label>
+        <div class="process-log-toolbar-actions">
+          <button id="process-log-pause-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.pause">暂停</button>
+          <button id="process-log-refresh-btn" type="button" class="btn btn-secondary" data-i18n="settings.runtimeMetrics.refresh">刷新</button>
+          <button id="process-log-clear-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.clearView">清空视图</button>
+        </div>
+      </div>
+
+      <div id="process-log-content" class="runtime-metrics-content process-log-content">
+        <pre id="process-log-view" class="upstream-pre upstream-pre--full process-log-pre" style="white-space:pre-wrap; overflow-wrap:anywhere; margin:0"></pre>
+      </div>
+
+      <div class="runtime-metrics-modal-footer">
+        <span id="process-log-updated-at" class="runtime-metrics-updated-at"></span>
+        <div class="runtime-metrics-footer-actions">
+          <button type="button" class="btn btn-primary" data-action="close-process-log" data-i18n="common.close">关闭</button>
         </div>
       </div>
     </div>

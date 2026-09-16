@@ -3557,6 +3557,50 @@ body {
   font-size: 11px;
 }
 
+.process-log-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.process-log-level {
+  width: auto;
+  min-width: 8rem;
+}
+
+.process-log-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 0.86rem;
+}
+
+.process-log-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.process-log-pre {
+  max-height: none;
+}
+
+.effective-config-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.effective-config-json {
+  margin-top: 12px;
+  max-height: 360px;
+}
+
 .runtime-metrics-footer-actions {
   display: flex;
   gap: 8px;
