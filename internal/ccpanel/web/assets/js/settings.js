@@ -79,7 +79,7 @@ const numericSettingConstraints = new Map([
   ['log_retention_days', { min: -1, max: 365 }],
   ['model_catalog_sync_interval_hours', { min: 0, max: maxDurationHours }],
   ['auto_refresh_interval_seconds', { min: 0, max: maxDurationSeconds }],
-  ['warm_prefix_jitter_ratio', { max: 1 }],
+  ['warm_prefix_jitter_ratio', { maxExclusive: 1 }],
   ['responses_ws_max_sessions', { min: 0 }],
   ['responses_ws_session_ttl_minutes', { min: 0, max: maxDurationMinutes }],
   ['responses_ws_max_transcript_bytes', { min: 0 }],
@@ -173,6 +173,9 @@ function validateSettingInput(setting, value) {
   }
   if (constraint?.max !== undefined && number > constraint.max) {
     return t('settings.validation.maximum', { value: constraint.max });
+  }
+  if (constraint?.maxExclusive !== undefined && number >= constraint.maxExclusive) {
+    return t('settings.validation.maximumExclusive', { value: constraint.maxExclusive });
   }
   if (setting.key === 'log_retention_days' && number !== -1 && (number < 1 || number > 365)) {
     return t('settings.validation.logRetention');

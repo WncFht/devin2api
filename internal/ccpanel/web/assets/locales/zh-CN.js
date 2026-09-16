@@ -753,6 +753,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.validation.wholeNumber': '请输入整数。',
   'settings.validation.minimum': '请输入不小于 {value} 的值。',
   'settings.validation.maximum': '请输入不大于 {value} 的值。',
+  'settings.validation.maximumExclusive': '请输入小于 {value} 的值。',
   'settings.validation.logRetention': '请输入 -1，或 1 到 365 之间的值。',
   'settings.validation.smallerSize': '请输入更小的大小。',
   'settings.validation.zeroOrOneByte': '请输入 0，或至少 1 字节的大小。',

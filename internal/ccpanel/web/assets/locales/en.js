@@ -753,6 +753,7 @@ window.I18N_LOCALES['en'] = {
   'settings.validation.wholeNumber': 'Enter a whole number.',
   'settings.validation.minimum': 'Enter {value} or greater.',
   'settings.validation.maximum': 'Enter {value} or less.',
+  'settings.validation.maximumExclusive': 'Enter less than {value}.',
   'settings.validation.logRetention': 'Enter -1 or a value from 1 to 365.',
   'settings.validation.smallerSize': 'Enter a smaller size.',
   'settings.validation.zeroOrOneByte': 'Enter 0 or a size of at least 1 byte.',
