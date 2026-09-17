@@ -232,3 +232,148 @@ func TestWithToolDescriptionsRealSetStaysFull(t *testing.T) {
 		t.Fatalf("section overflowed soft cap: %d > %d", len(prompt), toolPreambleSoftBytes)
 	}
 }
+
+// TestConditionalRequiredSpecDetectsUniformUnless 的测试动机是合成
+// anyOf 的触发条件必须精确：全部必填标记字段共享同一 unless 子句、
+// 子句解出同层存在的条件字段，三者缺一即不猜——猜错的 anyOf 会把
+// 本来合法的调用判成 schema 违约。
+func TestConditionalRequiredSpecDetectsUniformUnless(t *testing.T) {
+	cond, marked, ok := conditionalRequiredSpec(json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"delaySeconds":{"type":"number","description":"Seconds. Required unless ` + "`stop` is true" + `."},
+			"noop":{"type":"boolean","description":"Idle tick. Required unless ` + "`stop` is true" + `."},
+			"prompt":{"type":"string","description":"The loop input. Required unless ` + "`stop` is true" + `."},
+			"reason":{"type":"string","description":"Why this delay. Required unless ` + "`stop` is true" + `."},
+			"stop":{"type":"boolean","description":"Set true to end the loop."}
+		}
+	}`))
+	if !ok || cond != "stop" {
+		t.Fatalf("cond = %q ok = %v", cond, ok)
+	}
+	wantMarked := []string{"delaySeconds", "noop", "prompt", "reason"}
+	if len(marked) != len(wantMarked) {
+		t.Fatalf("marked = %v", marked)
+	}
+	for i, name := range wantMarked {
+		if marked[i] != name {
+			t.Fatalf("marked[%d] = %q, want %q", i, marked[i], name)
+		}
+	}
+}
+
+// TestConditionalRequiredSpecRejectsAmbiguous 覆盖拒合成的边界：子句
+// 不一致、条件字段缺席、条件字段自身必填、已有 anyOf/oneOf——这些形态
+// 合成 anyOf 都会写出错误或冗余约束。
+func TestConditionalRequiredSpecRejectsAmbiguous(t *testing.T) {
+	cases := map[string]string{
+		"mixed clauses": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required unless ` + "`x` is true" + `."},
+			"b":{"type":"string","description":"Fill. Required unless ` + "`y` is true" + `."},
+			"x":{"type":"boolean"},"y":{"type":"boolean"}}}`,
+		"clause field missing": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required unless ` + "`ghost` is true" + `."}}}`,
+		"no clause": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required."},
+			"stop":{"type":"boolean"}}}`,
+		"cond field required": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required unless ` + "`stop` is true" + `."},
+			"stop":{"type":"boolean","description":"Always."}},
+			"required":["stop"]}`,
+		"cond field marked": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required unless ` + "`stop` is true" + `."},
+			"stop":{"type":"boolean","description":"Required unless ` + "`a` is true" + `."}}}`,
+		"has anyOf": `{"type":"object","properties":{
+			"a":{"type":"string","description":"Fill. Required unless ` + "`stop` is true" + `."},
+			"stop":{"type":"boolean"}},
+			"anyOf":[{"required":["stop"]}]}`,
+	}
+	for name, schema := range cases {
+		if cond, marked, ok := conditionalRequiredSpec(json.RawMessage(schema)); ok {
+			t.Fatalf("%s: synthesized (cond=%q marked=%v), want rejected", name, cond, marked)
+		}
+	}
+}
+
+// TestInjectConditionalRequiredDemotesMarked 的测试动机是合成分支的
+// 前提：marked 字段必须离开顶层 required[]——否则 stop 分支仍被顶层
+// 约束强制带上全量字段，anyOf 形同虚设。
+func TestInjectConditionalRequiredDemotesMarked(t *testing.T) {
+	got := injectConditionalRequired(json.RawMessage(`{
+		"type":"object",
+		"properties":{"a":{"type":"string"},"b":{"type":"string"},"stop":{"type":"boolean"}},
+		"required":["a","stop_anchor"],
+		"additionalProperties":false
+	}`), "stop", []string{"a", "b"})
+	var object map[string]any
+	if err := json.Unmarshal(got, &object); err != nil {
+		t.Fatal(err)
+	}
+	// "a" 被降级出顶层 required，无关字段保留。
+	required, _ := object["required"].([]any)
+	if len(required) != 1 || required[0] != "stop_anchor" {
+		t.Fatalf("required = %v, want [stop_anchor]", required)
+	}
+	branches, _ := object["anyOf"].([]any)
+	if len(branches) != 2 {
+		t.Fatalf("anyOf = %v", object["anyOf"])
+	}
+	branch0 := branches[0].(map[string]any)["required"].([]any)
+	if len(branch0) != 1 || branch0[0] != "stop" {
+		t.Fatalf("cond branch = %v", branch0)
+	}
+	branch1 := branches[1].(map[string]any)["required"].([]any)
+	if len(branch1) != 2 || branch1[0] != "a" || branch1[1] != "b" {
+		t.Fatalf("marked branch = %v", branch1)
+	}
+}
+
+// TestConvertToolDefinitionSynthesizesAnyOfOnRealFixture 用真实 CC 28
+// 工具集钉住端到端行为：ScheduleWakeup 的 wire schema 必须长出
+// anyOf 条件必填（e2e 实测这把全字段命中率从 ~50% 推到 13/16，且
+// stop 分支调用保持干净 {stop:true}），其余工具不得被波及。
+func TestConvertToolDefinitionSynthesizesAnyOfOnRealFixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/cc_tools.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	sawScheduleWakeup := false
+	for _, item := range fixture.Tools {
+		converted, err := convertToolDefinition(llm.ToolDefinition{Name: item.Name, InputSchema: item.InputSchema})
+		if err != nil {
+			t.Fatalf("%s: %v", item.Name, err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal([]byte(converted.GetJsonSchemaString()), &schema); err != nil {
+			t.Fatalf("%s: wire schema unparseable", item.Name)
+		}
+		_, hasAnyOf := schema["anyOf"]
+		if item.Name != "ScheduleWakeup" {
+			if hasAnyOf {
+				t.Fatalf("%s: unexpected anyOf synthesized", item.Name)
+			}
+			continue
+		}
+		sawScheduleWakeup = true
+		if !hasAnyOf {
+			t.Fatalf("ScheduleWakeup: anyOf missing from wire schema")
+		}
+		encoded, _ := json.Marshal(schema["anyOf"])
+		want := `[{"required":["stop"]},{"required":["delaySeconds","noop","prompt","reason"]}]`
+		if string(encoded) != want {
+			t.Fatalf("ScheduleWakeup anyOf = %s, want %s", encoded, want)
+		}
+	}
+	if !sawScheduleWakeup {
+		t.Fatal("fixture lost ScheduleWakeup")
+	}
+}
