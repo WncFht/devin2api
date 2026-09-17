@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,38 +23,52 @@ import (
 var descriptionListItemPattern = regexp.MustCompile(`^(?:[-*+]\s+|\d+[.):]\s+|\[\d+\]\s+)(.+)$`)
 
 // 注入段预算分级（参照 WindsurfAPI 的 full→compact→skinny 阶梯）：
-// 软顶以内放行首个够小的形态；最省的 skinny 也过硬顶时报 400——
-// 病态工具量下的无界注入会把 prompt 顶到上游体量上限，错误尽早显式。
+// 软顶以内放行 full；超出先降 compact（prose 逐条截断、Parameters
+// 摘要保留）、再降 skinny（纯名清单——工具名是最后保住的语义信号）；
+// compact/skinny 过硬顶时报 400——病态工具量下的无界注入会把 prompt
+// 顶到上游体量上限，错误尽早显式。软顶按真实客户端工具集校准：CC
+// 28 工具全文+摘要实测 ~75KB（swe-2-max 窗口 262k tok，注入段在
+// EPHEMERAL 缓存断点内，冷会话一次性成本）。
 const (
-	toolPreambleSoftBytes = 24000
-	toolPreambleHardBytes = 48000
+	toolPreambleSoftBytes = 96000
+	toolPreambleHardBytes = 256000
 	// toolDescriptionCompactRunes 是 compact 档每条说明的字符预算：
 	// 截尾保留开头——「是什么/何时用」的导引信号都在前段。
 	toolDescriptionCompactRunes = 400
+	// 摘要侧预算：字段描述截断线、每工具摘要行数、嵌套递归深度。
+	// 上游实测（cmd/probe toolchan）模型会读注入段的字段级需求文本——
+	// "Required unless `stop` is true" 这类条件必填只活在 prose 里，
+	// 摘要把 schema 剥注解时杀死的信息在同一安全通道内救回。
+	toolParamDescRunes   = 240
+	toolParamDigestLines = 64
+	toolParamDigestDepth = 3
 )
 
 // toolSectionEntry 是注入段的一条工具说明：name 是工具名，description
-// 是 formatToolDescription 归一后的全文。
-type toolSectionEntry struct{ name, description string }
+// 是 formatToolDescription 归一后的全文，paramsDigest 是从原始
+// InputSchema 提升的字段级描述摘要（schema 注解剥离后唯一幸存通道，
+// 不受 compact 截断影响）。
+type toolSectionEntry struct{ name, description, paramsDigest string }
 
 // withToolDescriptions 把非空工具说明追加到 Devin system prompt，供模型理解
-// 原生工具用途。full 档超软顶先降 compact（逐条截断）、再降 skinny（纯名
-// 清单——工具名是最后保住的语义信号）；skinny 仍过硬顶返回错误。
+// 原生工具用途。full 档超软顶先降 compact（prose 逐条截断）、再降 skinny
+// （纯名清单）；skinny 仍过硬顶返回错误。
 func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (string, error) {
 	var entries []toolSectionEntry
 	for _, tool := range tools {
 		description := strings.TrimSpace(tool.Description)
-		if description == "" {
+		digest := extractParamDigest(tool.InputSchema)
+		if description == "" && digest == "" {
 			continue
 		}
-		entries = append(entries, toolSectionEntry{tool.Name, formatToolDescription(description)})
+		entries = append(entries, toolSectionEntry{tool.Name, formatToolDescription(description), digest})
 	}
 	if len(entries) == 0 {
 		return systemPrompt, nil
 	}
 	section := renderToolSection(entries, 0)
 	if len(section) > toolPreambleSoftBytes {
-		if compact := renderToolSection(entries, toolDescriptionCompactRunes); len(compact) <= toolPreambleSoftBytes {
+		if compact := renderToolSection(entries, toolDescriptionCompactRunes); len(compact) <= toolPreambleHardBytes {
 			section = compact
 		} else {
 			section = renderToolSection(entries, -1)
@@ -73,8 +88,9 @@ func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (stri
 	return trimmedPrompt + "\n\n" + section, nil
 }
 
-// renderToolSection 按档渲染注入段：truncate 为 0 是 full（说明全文）、
-// 正值是 compact（每条说明截到该字符数）、-1 是 skinny（纯名清单）。
+// renderToolSection 按档渲染注入段：truncate 为 0 是 full（说明全文 +
+// 摘要）、正值是 compact（说明截到该字符数，摘要始终完整）、-1 是
+// skinny（纯名清单）。
 func renderToolSection(entries []toolSectionEntry, truncate int) string {
 	var section strings.Builder
 	if truncate < 0 {
@@ -95,9 +111,144 @@ func renderToolSection(entries []toolSectionEntry, truncate int) string {
 		section.WriteString(escapeXMLAttribute(item.name))
 		section.WriteString("\">\n")
 		section.WriteString(escapeXMLText(description))
+		if item.paramsDigest != "" {
+			section.WriteString("\n\nParameters:\n")
+			section.WriteString(escapeXMLText(item.paramsDigest))
+		}
 		section.WriteString("\n</tool>")
 	}
 	return section.String()
+}
+
+// extractParamDigest 从原始 InputSchema 提取字段级描述渲染成摘要行：
+// stripSchemaValueAnnotations 会把这些注解从 wire schema 剥掉，这里在
+// 剥离发生前把它们搬进注入段——条件必填、取值约束这类只存在于字段
+// prose 的语义由此存活。properties 嵌套递归（数组项经 items 下钻），
+// 输出按字段名排序保证确定性。
+func extractParamDigest(schema json.RawMessage) string {
+	var root any
+	if err := json.Unmarshal(schema, &root); err != nil {
+		return ""
+	}
+	var lines []string
+	collectParamLines(root, "", 0, &lines)
+	return strings.Join(lines, "\n")
+}
+
+// collectParamLines 递归收集 properties 字段的描述行：prefix 是嵌套
+// 路径（"a." / "a[]."），depth 封顶防病态 schema。description 缺席时
+// 退回 title；字段在同级 required[] 里标 (required)。
+func collectParamLines(node any, prefix string, depth int, lines *[]string) {
+	if depth > toolParamDigestDepth || len(*lines) >= toolParamDigestLines {
+		return
+	}
+	object, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	properties, ok := object["properties"].(map[string]any)
+	if !ok {
+		return
+	}
+	required := make(map[string]bool)
+	if list, ok := object["required"].([]any); ok {
+		for _, item := range list {
+			if name, ok := item.(string); ok {
+				required[name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(properties))
+	for name := range properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if len(*lines) >= toolParamDigestLines {
+			return
+		}
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		doc, _ := property["description"].(string)
+		if doc == "" {
+			doc, _ = property["title"].(string)
+		}
+		doc = strings.Join(strings.Fields(doc), " ")
+		if doc != "" {
+			var line strings.Builder
+			line.WriteString("- ")
+			line.WriteString(prefix)
+			line.WriteString(name)
+			line.WriteString(" (")
+			line.WriteString(schemaTypeName(property["type"]))
+			if required[name] || claimsRequired(doc) {
+				line.WriteString(", required")
+			}
+			line.WriteString("): ")
+			line.WriteString(fieldDocDigest(doc))
+			*lines = append(*lines, line.String())
+		}
+		collectParamLines(property, prefix+name+".", depth+1, lines)
+		if items, ok := property["items"].(map[string]any); ok {
+			collectParamLines(items, prefix+name+"[].", depth+1, lines)
+		}
+	}
+}
+
+// claimsRequired 判定字段描述是否声明了必填语义——条件必填
+// （"Required unless `stop` is true"）只活在 prose 里、不进 required[]，
+// 在摘要行头补标 required 防止模型把它当可选字段跳过。先把否定形态
+// （"not required"/"optional" 等）抹掉再匹配，避免误标。
+func claimsRequired(doc string) bool {
+	lower := strings.ToLower(doc)
+	for _, neg := range []string{"not required", "n't required", "no longer required", "never required", "optional"} {
+		lower = strings.ReplaceAll(lower, neg, "")
+	}
+	return strings.Contains(lower, "required") || strings.Contains(lower, "必填")
+}
+
+// fieldDocDigest 把字段描述压进单行预算：超长时头部截断，但原文里含
+// "required"/"必填" 的句子若被截掉则补回末尾——条件必填约定俗成写在字段
+// 描述尾部（"Required unless `stop` is true"），纯头部截断会系统性杀死它
+// （e2e 实测：ScheduleWakeup 的 noop/prompt 恰好是描述最长的两个字段，
+// 尾句截掉后模型即省略这两字段）。
+func fieldDocDigest(doc string) string {
+	if utf8.RuneCountInString(doc) <= toolParamDescRunes {
+		return doc
+	}
+	truncated := truncateRunes(doc, toolParamDescRunes)
+	last := ""
+	for _, sentence := range splitDescriptionSentences(doc) {
+		if strings.Contains(strings.ToLower(sentence), "required") || strings.Contains(sentence, "必填") {
+			last = sentence
+		}
+	}
+	if last == "" || strings.Contains(truncated, last) {
+		return truncated
+	}
+	return truncated + " " + truncateRunes(last, toolParamDescRunes)
+}
+
+// schemaTypeName 把 schema type 字段渲染成短标记：字符串原样、数组
+// 以 | 连接、缺省 any。
+func schemaTypeName(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []any:
+		names := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if name, ok := item.(string); ok {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			return strings.Join(names, "|")
+		}
+	}
+	return "any"
 }
 
 // truncateRunes 按字符数截断并加省略号；优先落在词边界（不回头超过
