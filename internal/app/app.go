@@ -653,22 +653,24 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 }
 
 func (application *App) createResponses(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "openai-responses", decodeResponsesRequest, responsesProtocol{})
+	application.createCompletion(writer, request, "openai-responses", responsesProtocol{})
 }
 
 func (application *App) createChatCompletions(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "openai-chat", decodeChatRequest, chatProtocol{})
+	application.createCompletion(writer, request, "openai-chat", chatProtocol{})
 }
 
 func (application *App) createMessages(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "anthropic", decodeAnthropicRequest, anthropicProtocol{})
+	application.createCompletion(writer, request, "anthropic", anthropicProtocol{})
 }
 
+// createCompletion 是三个 HTTP 入口与 WS 轮次的共用管线。api 只是日志
+// 归因标签（HTTP 入口名或 responses-ws）——协议行为差异全部由
+// protocol 携带，不从 api 反推。
 func (application *App) createCompletion(
 	writer http.ResponseWriter,
 	request *http.Request,
 	api string,
-	decoder decodeRequestFunc,
 	protocol protocolEncoder,
 ) {
 	reqMetrics := application.metrics.Begin()
@@ -785,7 +787,7 @@ func (application *App) createCompletion(
 	}
 	// collectDropped 门控解码期对请求体的二次全量扫描（顶层未消费字段
 	// 收集）——Dropped 的唯一读者是 02 投影，recorder 为 nil 时纯烧 CPU。
-	messages, options, err := decoder(body, recorder != nil)
+	messages, options, err := protocol.DecodeRequest(body, recorder != nil)
 	if err != nil {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
@@ -867,14 +869,9 @@ func (application *App) createCompletion(
 	out := &streamWriter{writer: writer, recorder: recorder}
 	if flusher, ok := writer.(http.Flusher); ok {
 		out.flusher = flusher
-		// "\n" 心跳只发给 OpenAI 系（Codex 约 30s 无字节弃连）。
-		// Anthropic 非流式在上游思考窗口保持静默：Anthropic SDK 系客户端
-		// 容忍分钟级首字等待，而任何提前写出的字节都把状态提交为 200，
-		// 之后的失败只能以「200 + 错误体」下发——Claude Code 把它判为
-		// malformed response 并终止整轮，不可重试。
-		if api != "anthropic" {
-			out.heartbeat = []byte("\n")
-		}
+		// 非流式心跳载荷是协议行为（OpenAI 系 "\n"、Anthropic 静默），
+		// 由协议实现给出——api 标签只做日志归因，不当行为开关。
+		out.heartbeat = protocol.NonStreamHeartbeat()
 	}
 	streamCtx, stopStream := context.WithCancel(ctx)
 	defer stopStream()
@@ -886,15 +883,7 @@ func (application *App) createCompletion(
 		failure := llm.Classify(err)
 		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
-			completion.Result = "disconnected"
-			// 未提交时按 499（nginx 约定的客户端关闭）入账——断连不该
-			// 记成 500 污染 server_error 聚合；心跳已提交 200 的按线上实况记。
-			if !out.committed {
-				completion.StatusCode = 499
-			} else {
-				completion.StatusCode = http.StatusOK
-			}
-			recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
+			out.finishDisconnected(&completion, err)
 			return
 		}
 		if out.committed {
@@ -902,8 +891,7 @@ func (application *App) createCompletion(
 			// 前导 \n 是合法 JSON 空白，客户端解析出 error 字段。
 			completion.StatusCode = http.StatusOK
 			if writeErr := out.writeContent(protocol.EncodeError(err, debugRef(recorder))); writeErr != nil {
-				completion.Result = "disconnected"
-				recorder.WriteError(debuglog.ErrStageClientDisconnected, writeErr)
+				out.finishDisconnected(&completion, writeErr)
 				return
 			}
 			recorder.WriteError(debuglog.ErrStageResponseEvent, err)
@@ -918,17 +906,8 @@ func (application *App) createCompletion(
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return
 	}
-	// committed 必须在写出前采样：write 内部先置位再写，写失败后
-	// 再读已区分不出「此前心跳已提交 200」与「首个字节就没发出去」。
-	wasCommitted := out.committed
 	if err := out.writeContent(body); err != nil {
-		completion.Result = "disconnected"
-		if !wasCommitted {
-			completion.StatusCode = 499
-		} else {
-			completion.StatusCode = http.StatusOK
-		}
-		recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
+		out.finishDisconnected(&completion, err)
 		return
 	}
 	responseBytes += out.bytes
@@ -986,11 +965,45 @@ func clientIP(request *http.Request) string {
 	return host
 }
 
+// correlationHeader 是一个携带请求级身份的下游头。WS 内层请求不经过
+// middleware，头只能由 runWSTurn 照 forward 标记逐一手动透传——清单漏
+// 一项，对应凭据/关联 ID 就在 WS 轮次静默丢失。requestID 为真的头是
+// clientRequestID 的候选（清单顺序即取信优先级）；projection 非空的头
+// 以该 snake 键名落进 01-http-request.json 的 headers 投影。
+type correlationHeader struct {
+	name       string // canonical 头名，Header.Get/Set 直接可用
+	projection string // 请求投影的 headers 键名；空串表示不投影
+	requestID  bool   // clientRequestID 认可的关联 ID 候选
+	forward    bool   // WS 轮次把它从升级请求透传进内层请求
+}
+
+var correlationHeaders = []correlationHeader{
+	// 下游凭据：authenticate 与 requestCredentialHash 从它们取凭据。
+	{name: "Authorization", forward: true},
+	{name: "X-Api-Key", forward: true},
+	// 客户端关联 ID 候选，按优先级序。X-Request-Id 不透传：它是升级请求
+	// 级的关联 ID，WS 每轮各记各的调试记录，透传会让整条连接共享一个 ID。
+	{name: "X-Request-Id", requestID: true},
+	{name: "X-Session-Id", requestID: true, forward: true},
+	{name: "X-Client-Request-Id", requestID: true, forward: true, projection: "x_client_request_id"},
+	// User-Agent 进 meta 与 01 投影；其余是 Codex 会话/轮次粘性的私有头，
+	// 内层链路无人读取，透传只为保留客户端身份面完整。
+	{name: "User-Agent", forward: true, projection: "user_agent"},
+	{name: "Session-Id", forward: true},
+	{name: "Session_id", forward: true},
+	{name: "Thread-Id", forward: true},
+	{name: "X-Codex-Turn-Metadata", forward: true},
+}
+
 // clientRequestID 提取客户端自带的关联 ID，供其事后按自己的 ID 反查日志。
-// 只认常见关联头；长度截断防止异常大的头放大日志体积。
+// 候选头是 correlationHeaders 里 requestID 标记的子集；长度截断防止
+// 异常大的头放大日志体积。
 func clientRequestID(request *http.Request) string {
-	for _, header := range []string{"X-Request-Id", "X-Session-Id", "X-Client-Request-Id"} {
-		if value := strings.TrimSpace(request.Header.Get(header)); value != "" {
+	for _, header := range correlationHeaders {
+		if !header.requestID {
+			continue
+		}
+		if value := strings.TrimSpace(request.Header.Get(header.name)); value != "" {
 			if len(value) > 128 {
 				return value[:128]
 			}
@@ -1030,16 +1043,20 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 	if !json.Valid(body) {
 		parsedBody = string(body)
 	}
+	headers := map[string]string{
+		"accept":       request.Header.Get("Accept"),
+		"content_type": request.Header.Get("Content-Type"),
+	}
+	for _, header := range correlationHeaders {
+		if header.projection != "" {
+			headers[header.projection] = request.Header.Get(header.name)
+		}
+	}
 	return map[string]any{
-		"method": request.Method,
-		"path":   request.URL.Path,
-		"headers": map[string]string{
-			"accept":              request.Header.Get("Accept"),
-			"content_type":        request.Header.Get("Content-Type"),
-			"user_agent":          request.Header.Get("User-Agent"),
-			"x_client_request_id": request.Header.Get("X-Client-Request-Id"),
-		},
-		"body": parsedBody,
+		"method":  request.Method,
+		"path":    request.URL.Path,
+		"headers": headers,
+		"body":    parsedBody,
 	}
 }
 

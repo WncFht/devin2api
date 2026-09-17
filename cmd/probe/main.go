@@ -1,6 +1,6 @@
 // probe 是对 Devin 上游做受控实验的命令行工具。
-// 用法：go run ./cmd/probe [-account name] <subcommand> [flags]
-// token 从 DEVIN_TOKEN 环境变量读；缺省时按 config.ResolveConfigPath 链（DEVIN2API_CONFIG → ./config.yaml → 平台默认目录）取 devin.accounts 首号（-account 可点名），再不行走 CLI 凭证发现链。
+// 用法：go run ./cmd/probe [-account name] [-state-dir dir] <subcommand> [flags]
+// token 从 DEVIN_TOKEN 环境变量读；缺省时按 config.ResolveConfigPath 链（DEVIN2API_CONFIG → ./config.yaml → 平台默认目录）取 devin.accounts 声明集，经 -state-dir 链（→ $DEVIN2API_STATE_DIR → 平台默认）找到 devin-2api.db 则再过 DB 覆盖行 merge 出生效口径（-account 可点名），再不行走 CLI 凭证发现链。
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,10 +24,12 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/randid"
+	"github.com/WncFht/devin2api/internal/store"
 	"github.com/WncFht/devin2api/internal/upstream"
 )
 
@@ -64,6 +67,7 @@ func main() {
 	// 子命令名即分界线，其余参数原样转交子命令。
 	topFlags := flag.NewFlagSet("probe", flag.ContinueOnError)
 	accountName := topFlags.String("account", "", "凭据取 devin.accounts 中该名账号；缺省用首号")
+	stateDir := topFlags.String("state-dir", "", "读 devin-2api.db 账号覆盖行的状态目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
 	if err := topFlags.Parse(os.Args[1:]); err != nil {
 		usage()
 		os.Exit(2)
@@ -88,7 +92,7 @@ func main() {
 	probeConfigPath, _ := config.ResolveConfigPath("")
 	cfg, _ := config.Load(probeConfigPath)
 	aliases = cfg.Devin.Aliases
-	token := resolveToken(cfg, *accountName)
+	token := resolveToken(cfg, probeStore(*stateDir), *accountName)
 	if token == "" {
 		if *accountName != "" {
 			fmt.Fprintf(os.Stderr, "no token: devin.accounts has no account %q (or set DEVIN_TOKEN)\n", *accountName)
@@ -159,15 +163,47 @@ func usage() {
     -skip-mcp-skills          skip GetMcpServerStates/GetAllSkills calls`)
 }
 
+// probeStore 打开状态库读面板写过的账号覆盖行：先 os.Stat 挡——
+// store.Open 会顺手建库，probe 不该为一次读在用户机器上留新文件。
+// 库缺席或打不开按无库继续（退回 config.yaml 口径），离线诊断工具
+// 不为主库故障为难使用者。
+func probeStore(stateDirFlag string) *store.Store {
+	dir, err := config.ResolveStateDir(stateDirFlag)
+	if err != nil {
+		return nil
+	}
+	dbPath := filepath.Join(dir, "devin-2api.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil
+	}
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: open state db %s: %v\n", dbPath, err)
+		return nil
+	}
+	return db
+}
+
 // resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
-// 不改配置），随后按 -account 点名或默认首号取 devin.accounts 条目的
-// token（Load 已把 credentials_file 型条目解成文件内容）；点名未中
-// 是硬错误（静默换号会把实验打到错的账号上）；accounts 缺失或文件
-// 不可读时走 Devin CLI 凭证发现链兜底。probe 是单发工具，逐号探测
-// 不在职责内。
-func resolveToken(cfg config.Config, accountName string) string {
+// 不改配置）。有库时走 accounts.ResolveToken——DB 覆盖行与 config
+// 声明 merge 后的生效口径，与服务发请求时同源；点名未中（无名/墓碑）
+// 是硬错误，静默换号会把实验打到错的账号上。无库或 merge 失败回落
+// config.yaml 声明集，再走 Devin CLI 凭证发现链兜底。probe 是单发
+// 工具，逐号探测不在职责内。
+func resolveToken(cfg config.Config, db *store.Store, accountName string) string {
 	if token := os.Getenv("DEVIN_TOKEN"); token != "" {
 		return token
+	}
+	if db != nil {
+		token, err := accounts.ResolveToken(context.Background(), db, cfg.Devin.Accounts, accountName)
+		if err == nil {
+			return token
+		}
+		if accountName != "" {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return ""
+		}
+		fmt.Fprintf(os.Stderr, "warning: state db resolve failed, falling back to config.yaml: %v\n", err)
 	}
 	if accountName != "" {
 		for _, acc := range cfg.Devin.Accounts {
@@ -211,6 +247,34 @@ func metadata(token string, fingerprint bool) *devinproto.ExaCodeiumCommonPb_Met
 func j(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// baseRequest 组装各子命令共用的 CASCADE 请求骨架：真指纹 metadata、
+// 默认 system prompt、model、CASCADE 类型、补全配置、DEFAULT planner
+// 与 executionId。调用方只写各自的 delta——换 prompt/metadata、追加
+// prompts/tools、markCascade 补会话标识，或像 bigctx 显式摘
+// plannerMode 控制变量。
+func baseRequest(token, model string) *devinproto.GetChatMessageRequest {
+	return &devinproto.GetChatMessageRequest{
+		Metadata:      metadata(token, true),
+		Prompt:        proto.String("You are a helpful assistant."),
+		ChatModelUid:  proto.String(model),
+		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
+		Configuration: defaultCompletionConfig(),
+		PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
+		ExecutionId:   proto.String(randid.UUID()),
+	}
+}
+
+// markCascade 给请求补一条新 cascade 会话标识（cascadeId + 轨迹引用），
+// 复放/历史类子命令模拟真实客户端的多步会话形态。
+func markCascade(req *devinproto.GetChatMessageRequest) {
+	req.CascadeId = proto.String(randid.UUID())
+	req.TrajectoryReference = &devinproto.ExaCortexPb_CortexTrajectoryReference{
+		TrajectoryId:   proto.String(randid.UUID()),
+		TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
+		StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
+	}
 }
 
 // defaultCompletionConfig 返回与真实 CLI 抓包一致的默认补全配置；
@@ -491,18 +555,16 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		m.DisableTelemetry = proto.Bool(true)
 		m.UserAgent = proto.String("devin/" + clientVersion)
 	}
-	req := &devinproto.GetChatMessageRequest{
-		Metadata:     m,
-		Prompt:       nonEmpty(sysPrompt),
-		ChatModelUid: nonEmpty(*model),
-	}
+	// metadata/prompt/modelUid 三个槽从 base 换掉：m 带 -meta-extras /
+	// -no-fingerprint 变量，sysPrompt 来自 flag，model 空串时保持缺席
+	// （nonEmpty 语义）而非上空串。
+	req := baseRequest(token, *model)
+	req.Metadata = m
+	req.Prompt = nonEmpty(sysPrompt)
+	req.ChatModelUid = nonEmpty(*model)
 	if *emptySys {
 		req.Prompt = proto.String("")
 	}
-	req.RequestType = devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum()
-	req.Configuration = defaultCompletionConfig()
-	req.PlannerMode = devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum()
-	req.ExecutionId = proto.String(randid.UUID())
 	if *numCompletions > 0 {
 		req.Configuration.NumCompletions = proto.Uint64(uint64(*numCompletions))
 	}
@@ -828,22 +890,10 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	*model = aliasModel(*model)
 
 	mk := func(msgs []*devinproto.ExaChatPb_ChatMessagePrompt) *devinproto.GetChatMessageRequest {
-		return &devinproto.GetChatMessageRequest{
-			Metadata:      metadata(token, true),
-			Prompt:        proto.String("You are a helpful assistant."),
-			ChatModelUid:  proto.String(*model),
-			RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-			Configuration: defaultCompletionConfig(),
-			CascadeId:     proto.String(randid.UUID()),
-			PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-			ExecutionId:   proto.String(randid.UUID()),
-			TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
-				TrajectoryId:   proto.String(randid.UUID()),
-				TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
-				StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
-			},
-			ChatMessagePrompts: msgs,
-		}
+		req := baseRequest(token, *model)
+		markCascade(req)
+		req.ChatMessagePrompts = msgs
+		return req
 	}
 
 	// step 1: ask a question that triggers thinking
@@ -1030,25 +1080,12 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		}
 	}
 	msgs = append(msgs, userMsg("What files did you see? One line."))
-	req := &devinproto.GetChatMessageRequest{
-		Metadata:      metadata(token, true),
-		Prompt:        proto.String("You are a helpful assistant."),
-		ChatModelUid:  proto.String(*model),
-		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: defaultCompletionConfig(),
-		CascadeId:     proto.String(randid.UUID()),
-		PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-		ExecutionId:   proto.String(randid.UUID()),
-		TrajectoryReference: &devinproto.ExaCortexPb_CortexTrajectoryReference{
-			TrajectoryId:   proto.String(randid.UUID()),
-			TrajectoryType: devinproto.ExaCortexPb_CortexTrajectoryType_ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE.Enum(),
-			StepType:       devinproto.ExaCortexPb_CortexStepType_ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT.Enum(),
-		},
-		ChatMessagePrompts: msgs,
-		Tools: []*devinproto.ExaChatPb_ChatToolDefinition{
-			{Name: proto.String("exec"), Description: proto.String("run a command"), JsonSchemaString: proto.String(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
-			{Name: proto.String("read_file"), Description: proto.String("read a file"), JsonSchemaString: proto.String(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		},
+	req := baseRequest(token, *model)
+	markCascade(req)
+	req.ChatMessagePrompts = msgs
+	req.Tools = []*devinproto.ExaChatPb_ChatToolDefinition{
+		{Name: proto.String("exec"), Description: proto.String("run a command"), JsonSchemaString: proto.String(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`)},
+		{Name: proto.String("read_file"), Description: proto.String("read a file"), JsonSchemaString: proto.String(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
 	}
 	return runStream(ctx, client, req, false, "")
 }
@@ -1128,19 +1165,15 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	}
 	*model = aliasModel(*model)
 	filler := strings.Repeat("lorem ipsum dolor sit amet ", *kb*1024/27)
-	req := &devinproto.GetChatMessageRequest{
-		Metadata:      metadata(token, true),
-		Prompt:        proto.String("You are a helpful assistant."),
-		ChatModelUid:  proto.String(*model),
-		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: defaultCompletionConfig(),
-		ExecutionId:   proto.String(randid.UUID()),
-		ChatMessagePrompts: []*devinproto.ExaChatPb_ChatMessagePrompt{{
-			MessageId: proto.String(randid.UUID()),
-			Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
-			Prompt:    proto.String(filler + "\nReply: ok"),
-		}},
-	}
+	req := baseRequest(token, *model)
+	// 测的是纯上下文边界：plannerMode 与 cascade 标识都是变量，
+	// 显式摘掉保持单变量对照。
+	req.PlannerMode = nil
+	req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{{
+		MessageId: proto.String(randid.UUID()),
+		Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
+		Prompt:    proto.String(filler + "\nReply: ok"),
+	}}
 	return runStream(ctx, client, req, false, "")
 }
 
@@ -1267,15 +1300,7 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if len(args) == 0 {
 		return fmt.Errorf("edge needs a case name")
 	}
-	req := &devinproto.GetChatMessageRequest{
-		Metadata:      metadata(token, true),
-		Prompt:        proto.String("You are a helpful assistant."),
-		ChatModelUid:  proto.String(*model),
-		RequestType:   devinproto.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE.Enum(),
-		Configuration: defaultCompletionConfig(),
-		PlannerMode:   devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
-		ExecutionId:   proto.String(randid.UUID()),
-	}
+	req := baseRequest(token, *model)
 	switch args[0] {
 	case "orphan-tool-result":
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{

@@ -28,10 +28,9 @@ import (
 // testPoolConfig 返回一条指向本机即拒端点的 lane 配置。
 func testPoolConfig(name string) Config {
 	return Config{
-		Name:    name,
-		BaseURL: "http://127.0.0.1:1",
-		Model:   "m",
-		Token:   "tok-" + name,
+		Identity: LaneIdentity{Name: name, Token: "tok-" + name},
+		Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"},
+		Model:    "m",
 	}
 }
 
@@ -211,8 +210,8 @@ func TestPoolInStreamFailover(t *testing.T) {
 	srvDead := stubServer(t, dead, nil)
 	srvGood := stubServer(t, good, nil)
 	pool := newTestPool(t,
-		Config{Name: "dead", BaseURL: srvDead.URL, Model: "stub-model", Token: "tok-dead"},
-		Config{Name: "good", BaseURL: srvGood.URL, Model: "stub-model", Token: "tok-good"},
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
 	)
 
 	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
@@ -281,8 +280,8 @@ func TestPoolInStreamNoFailoverAfterContent(t *testing.T) {
 	srvFlaky := stubServer(t, flaky, nil)
 	srvIdle := stubServer(t, idle, nil)
 	pool := newTestPool(t,
-		Config{Name: "flaky", BaseURL: srvFlaky.URL, Model: "stub-model", Token: "tok-f"},
-		Config{Name: "idle", BaseURL: srvIdle.URL, Model: "stub-model", Token: "tok-i"},
+		Config{Identity: LaneIdentity{Name: "flaky", Token: "tok-f"}, Endpoint: Endpoint{BaseURL: srvFlaky.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "idle", Token: "tok-i"}, Endpoint: Endpoint{BaseURL: srvIdle.URL}, Model: "stub-model"},
 	)
 
 	stream, err := pool.Stream(context.Background(), pinnedRequest(pool, "flaky"))
@@ -318,11 +317,13 @@ func TestPoolInStreamNoFailoverAfterContent(t *testing.T) {
 // 同样解禁；后到标记只延长不缩短。
 func TestPoolLaneAuthCooldown(t *testing.T) {
 	lane, err := newPoolLane(Config{
-		Name:        "x",
-		BaseURL:     "http://127.0.0.1:1",
-		Model:       "m",
-		Token:       "tok-x",
-		TokenSource: func() string { return "tok-y" },
+		Identity: LaneIdentity{
+			Name:        "x",
+			Token:       "tok-x",
+			TokenSource: func() string { return "tok-y" },
+		},
+		Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"},
+		Model:    "m",
 	})
 	if err != nil {
 		t.Fatalf("newPoolLane: %v", err)
@@ -379,7 +380,7 @@ func TestPoolApplyConfigs(t *testing.T) {
 	laneA := poolLaneByName(pool, "a")
 
 	applied, err := pool.ApplyConfigs([]Config{
-		{Name: "a", BaseURL: "http://127.0.0.1:1", Model: "m", Token: "tok-a2"},
+		{Identity: LaneIdentity{Name: "a", Token: "tok-a2"}, Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"}, Model: "m"},
 		testPoolConfig("c"),
 	})
 	if err != nil {
@@ -426,10 +427,10 @@ func TestNewPoolValidation(t *testing.T) {
 	if len(pool.snapshot()) != 0 {
 		t.Fatal("NewPool(nil) must produce an empty lane set")
 	}
-	if _, err := NewPool([]Config{{Name: "bad", BaseURL: "http://127.0.0.1:1"}}); err == nil {
+	if _, err := NewPool([]Config{{Identity: LaneIdentity{Name: "bad"}, Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"}}}); err == nil {
 		t.Fatal("NewPool with missing model must fail")
 	}
-	if _, err := NewPool([]Config{testPoolConfig("ok"), {Name: "bad", BaseURL: "http://127.0.0.1:1"}}); err == nil {
+	if _, err := NewPool([]Config{testPoolConfig("ok"), {Identity: LaneIdentity{Name: "bad"}, Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"}}}); err == nil {
 		t.Fatal("NewPool must fail when any lane fails to build")
 	}
 }
@@ -465,7 +466,7 @@ func TestPoolKeyedViews(t *testing.T) {
 	if token := pool.TokenFunc()(); token != "tok-a" {
 		t.Fatalf("TokenFunc() = %q, want first lane token tok-a", token)
 	}
-	if name := pool.CurrentConfig().Name; name != "a" {
+	if name := pool.CurrentConfig().Identity.Name; name != "a" {
 		t.Fatalf("CurrentConfig().Name = %q, want a", name)
 	}
 }

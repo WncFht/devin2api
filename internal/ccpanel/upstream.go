@@ -189,7 +189,7 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 			return
 		}
 		// 与其余五路同序：先拉取与计算、末段一次 resultMu 写结果——
-		// 慢目录拉取不该把整扇聚合互斥到底，也避免 resultMu→modelsMu
+		// 慢目录拉取不该把整扇聚合互斥到底，也避免 resultMu→缓存锁
 		// 的嵌套锁序日后长成真死锁。
 		models, err := h.cachedModels(ctx)
 		var absent []string
@@ -397,54 +397,10 @@ func (h *Handler) fetchUserStatusAs(ctx context.Context, token string) (user, pl
 	return user, plan, planInfo, nil
 }
 
-// cachedModels 返回 TTL 内的模型目录缓存；过期时经 singleflight 收敛为
-// 单次上游拉取：等待方挂 done channel 而非写锁排队——RPC 最坏 610s，
-// 锁内等待不吃 ctx，断连的调用方会永远卡在队列里。
+// cachedModels 返回 TTL 内的模型目录缓存；缓存与并发收敛由
+// h.modelsCache（ttlCache）承担，拉取在锁外跑。
 func (h *Handler) cachedModels(ctx context.Context) ([]map[string]any, error) {
-	for {
-		h.modelsMu.RLock()
-		if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
-			cached := h.modelsCache
-			h.modelsMu.RUnlock()
-			return cached, nil
-		}
-		h.modelsMu.RUnlock()
-
-		h.modelsMu.Lock()
-		if h.modelsCache != nil && time.Now().Before(h.modelsExpiry) {
-			cached := h.modelsCache
-			h.modelsMu.Unlock()
-			return cached, nil
-		}
-		if h.modelsFetch != nil {
-			done := h.modelsFetch
-			h.modelsMu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		h.modelsFetch = make(chan struct{})
-		h.modelsMu.Unlock()
-
-		// 目录是 handler 级共享缓存：单个调用方断连不应掐死其他等待者
-		// 共用的拉取——脱离调用方 ctx，apiClient 的 610s 上限仍兜底。
-		models, err := h.fetchModels(context.WithoutCancel(ctx))
-
-		h.modelsMu.Lock()
-		if err == nil {
-			h.modelsCache = models
-			h.modelsExpiry = time.Now().Add(h.cacheTTL)
-		}
-		// 先写缓存再 close：被唤醒的等待方回到循环立刻读到新值，
-		// 失败时缓存保持旧值，下一个醒来的等待方顺位成为新的拉取者。
-		close(h.modelsFetch)
-		h.modelsFetch = nil
-		h.modelsMu.Unlock()
-		return models, err
-	}
+	return h.modelsCache.Get(ctx)
 }
 
 // fetchModels 拉取并投影上游模型目录；CLI 版响应与 Cascade 版模型表一致，
@@ -582,14 +538,11 @@ func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
 // ctx——锁只护缓存读写。并发 miss 各打一趟、写侧复查竞胜者为准；
 // 唯一调用路径（StatusReport）已被 statusSnapshot 的 singleflight 收敛。
 func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error) {
-	h.providersMu.RLock()
-	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
-		cached := h.providersCache
-		h.providersMu.RUnlock()
-		return cached, nil
-	}
-	h.providersMu.RUnlock()
+	return h.providersCache.Get(ctx)
+}
 
+// fetchProviders 拉取并投影上游供应商列表；TTL/收敛由 providersCache 承担。
+func (h *Handler) fetchProviders(ctx context.Context) ([]map[string]any, error) {
 	providerResp, err := h.currentUpstream().apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
 	if err != nil {
 		return nil, err
@@ -601,28 +554,17 @@ func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error)
 			"display_name": p.GetDisplayName(),
 		})
 	}
-
-	h.providersMu.Lock()
-	defer h.providersMu.Unlock()
-	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
-		return h.providersCache, nil
-	}
-	h.providersCache = providers
-	h.providersExpiry = time.Now().Add(h.cacheTTL)
 	return providers, nil
 }
 
 // cachedModelStatuses 返回 TTL 内的模型状态缓存；锁安排同
 // cachedProviders（RPC 在锁外，写侧复查竞胜者）。
 func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, error) {
-	h.modelStatusesMu.RLock()
-	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
-		cached := h.modelStatusesCache
-		h.modelStatusesMu.RUnlock()
-		return cached, nil
-	}
-	h.modelStatusesMu.RUnlock()
+	return h.modelStatusesCache.Get(ctx)
+}
 
+// fetchModelStatuses 拉取并投影上游模型状态表；TTL/收敛由 modelStatusesCache 承担。
+func (h *Handler) fetchModelStatuses(ctx context.Context) ([]map[string]any, error) {
 	modelStatusResp, err := h.currentUpstream().apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
 	}))
@@ -638,13 +580,5 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, er
 			"message":   s.GetMessage(),
 		})
 	}
-
-	h.modelStatusesMu.Lock()
-	defer h.modelStatusesMu.Unlock()
-	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
-		return h.modelStatusesCache, nil
-	}
-	h.modelStatusesCache = statuses
-	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
 	return statuses, nil
 }

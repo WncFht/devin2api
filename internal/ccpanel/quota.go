@@ -31,51 +31,16 @@ func (h *Handler) adminStatus(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, h.statusSnapshot(r.Context()))
 }
 
-// statusCacheTTL 是 /admin/status 聚合快照的缓存寿命：面板按页面加载
-// 与轮询消费，秒级陈旧无感；statusFetch 非空表示有聚合在途
-// （singleflight 的 done channel），关闭即完成信号。
-const statusCacheTTL = 30 * time.Second
-
-// statusSnapshot 返回 TTL 内的 StatusReport 缓存；过期时 singleflight
-// 收敛为单趟上游聚合——并发等待方挂 done channel 而不是各打一遍
-// 六路 RPC。失败分支也以 *_error 键存进快照（StatusReport 的既定语义），
-// 陈旧上限即 TTL。
+// statusSnapshot 返回 TTL 内的 StatusReport 缓存；并发收敛与超时兜底
+// 由 statusCache（ttlCache）承担。等待方断连吃 ctx 取消——映射为
+// fetch_error 键回给前端，与 StatusReport 单路失败落 *_error 键的
+// 既定语义一致。
 func (h *Handler) statusSnapshot(ctx context.Context) map[string]any {
-	for {
-		h.statusMu.Lock()
-		if !h.statusAt.IsZero() && time.Since(h.statusAt) < statusCacheTTL {
-			snap := h.statusSnap
-			h.statusMu.Unlock()
-			return snap
-		}
-		if h.statusFetch != nil {
-			done := h.statusFetch
-			h.statusMu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return map[string]any{"fetch_error": ctx.Err().Error()}
-			}
-		}
-		h.statusFetch = make(chan struct{})
-		h.statusMu.Unlock()
-
-		// 快照是 handler 级共享缓存：单个调用方断连不应掐死其他等待者
-		// 共用的聚合。WithoutCancel 剥掉请求 ctx 的取消与截止，上游 RPC
-		// 的超时下限重新挂（610s，对齐原 adminStatus 语义）。
-		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 610*time.Second)
-		snap := h.StatusReport(fetchCtx)
-		cancel()
-
-		h.statusMu.Lock()
-		h.statusSnap = snap
-		h.statusAt = time.Now()
-		close(h.statusFetch)
-		h.statusFetch = nil
-		h.statusMu.Unlock()
-		return snap
+	snap, err := h.statusCache.Get(ctx)
+	if err != nil {
+		return map[string]any{"fetch_error": err.Error()}
 	}
+	return snap
 }
 
 // 配额快照的行类型是 store.QuotaSample——表行与 /admin/quota 的

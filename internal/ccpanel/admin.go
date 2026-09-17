@@ -13,6 +13,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
+	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -62,9 +63,9 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 		}
 		status := "requesting"
 		switch {
-		case ar.State == "waiting_upstream" && ar.Retries > 0:
+		case ar.State == debuglog.StateWaitingUpstream && ar.Retries > 0:
 			status = "retrying"
-		case ar.State == "receiving_upstream" || ar.State == "streaming_client":
+		case ar.State == debuglog.StateReceivingUpstream || ar.State == debuglog.StateStreamingClient:
 			status = "receiving"
 		}
 		row := activeRequest{

@@ -75,10 +75,11 @@ func TestInsertLogDerivations(t *testing.T) {
 		t.Fatalf("log_source=%q upstream_protocol=%q, want proxy/devin", source, proto)
 	}
 
-	// 面板探活行归 manual_test。
+	// log_source 原样落字段——proxy/manual_test 分类归写方 debuglog，
+	// store 只兜底空值（上行已验）。显式值不被改写。
 	if _, err := s.InsertLog(ctx, &LogRow{
 		Dir: "probe-1", StartedAt: started, Method: "POST", Path: "/v1/messages",
-		StatusCode: 200, ClientRequestID: probeClientRequestID,
+		StatusCode: 200, ClientRequestID: "panel-probe", LogSource: "manual_test",
 	}); err != nil {
 		t.Fatalf("InsertLog probe: %v", err)
 	}
@@ -93,6 +94,43 @@ func TestInsertLogDerivations(t *testing.T) {
 	// dir 唯一：重复插入报错。
 	if _, err := s.InsertLog(ctx, &LogRow{Dir: "probe-1", StartedAt: started}); err == nil {
 		t.Fatal("duplicate dir should fail")
+	}
+}
+
+// TestLogColumnListMatchesSchema 钉住 logColumnList 与 logs 表 DDL 的
+// 对齐：清单是 INSERT/SELECT 的单一事实源，加列时漏改任何一侧
+// （清单多了不存在列 → INSERT 报错；DDL 多了列 → 读侧漂移）在此暴露。
+func TestLogColumnListMatchesSchema(t *testing.T) {
+	s := openTemp(t)
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('logs')`)
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		got[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// time/minute_bucket 是 InsertLog 派生列，不进 LogRow 字段清单。
+	want := map[string]bool{"time": true, "minute_bucket": true}
+	for _, c := range logColumnList {
+		want[c] = true
+	}
+	for c := range want {
+		if !got[c] {
+			t.Fatalf("logColumnList 列 %q 不在 logs 表 DDL 里", c)
+		}
+	}
+	for c := range got {
+		if !want[c] {
+			t.Fatalf("logs 表 DDL 列 %q 不在 logColumnList（或派生列集合）里", c)
+		}
 	}
 }
 

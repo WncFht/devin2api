@@ -26,34 +26,22 @@ type DebugFileInfo struct {
 }
 
 // PutDebugFile 写 debug_files 一行（同名覆写）：meta.json 等
-// 可重写文件走这里。超阈值内容透明压缩（usize=解压前尺寸）。
+// 可重写文件走这里。
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
-	stored, usize := encodePayload(content)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
+		`INSERT OR REPLACE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
+		dir, name, content, time.Now().UnixMilli())
 	return err
 }
 
-// PutDebugFileIfAbsent 只在 (dir,name) 不存在时写入——error.json 的
-// first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
-func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
-	stored, usize := encodePayload(content)
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
-	return err
-}
-
-// ClaimDebugFile 是带占位语义的 IfAbsent 变体：无行时插入并返回
-// true，已有行则原样保留并返回 false——目录分配把它当原子占位用
-// （等价文件时代 mkdir 的 EEXIST），与 PutDebugFileIfAbsent 的差别
-// 只在是否报告本次真正写入。
+// ClaimDebugFile 只在 (dir,name) 不存在时写入：无行时插入并返回
+// true，已有行则原样保留并返回 false。两类调用方共用——目录分配拿
+// 它当原子占位（等价文件时代 mkdir 的 EEXIST），error.json 等
+// first-write-wins 文件忽略返回值（首个失败点最有诊断价值）。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
-	stored, usize := encodePayload(content)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
+		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
+		dir, name, content, time.Now().UnixMilli())
 	if err != nil {
 		return false, err
 	}
@@ -65,8 +53,8 @@ func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []
 // 查询在无命中行时也返回一行，首个 chunk 得 seq=0。写连接池单连接
 // 串行化下整条语句原子；同事务内连续执行时子查询读到本批已写行，
 // seq 随批次单调递增。
-const appendChunkSQL = `INSERT INTO debug_chunks(dir, name, seq, data, usize)
-	SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?
+const appendChunkSQL = `INSERT INTO debug_chunks(dir, name, seq, data)
+	SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?
 	FROM debug_chunks WHERE dir=? AND name=?`
 
 // DebugChunk 是一次刷写里单个 JSONL 文件的待追加批：data 内可含多行
@@ -94,8 +82,7 @@ func (s *Store) AppendDebugChunks(ctx context.Context, dir string, chunks []Debu
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, c := range chunks {
-		stored, usize := encodePayload(c.Data)
-		if _, err := tx.ExecContext(ctx, appendChunkSQL, dir, c.Name, stored, usize, dir, c.Name); err != nil {
+		if _, err := tx.ExecContext(ctx, appendChunkSQL, dir, c.Name, c.Data, dir, c.Name); err != nil {
 			return err
 		}
 	}
@@ -112,34 +99,10 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	if limit <= 0 {
 		limit = math.MaxInt64
 	}
-	var usize int64
 	err = s.ro.QueryRowContext(ctx,
-		`SELECT usize, LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
-		dir, name).Scan(&usize, &total)
+		`SELECT SUBSTR(content, 1, ?), LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+		limit, dir, name).Scan(&data, &total)
 	if err == nil {
-		if usize == 0 {
-			// 未压缩行维持截断读：SUBSTR 只取前缀，total 即库存尺寸。
-			if err = s.ro.QueryRowContext(ctx,
-				`SELECT SUBSTR(content, 1, ?) FROM debug_files WHERE dir=? AND name=?`,
-				limit, dir, name).Scan(&data); err != nil {
-				return nil, 0, false, err
-			}
-			return data, total, true, nil
-		}
-		// 压缩行不能 SUBSTR 截断（魔数前缀是帧头不是内容）：
-		// 整读解压后 Go 侧截断，total 报解压前尺寸。
-		var stored []byte
-		if err = s.ro.QueryRowContext(ctx,
-			`SELECT content FROM debug_files WHERE dir=? AND name=?`,
-			dir, name).Scan(&stored); err != nil {
-			return nil, 0, false, err
-		}
-		if data, err = decodePayload(stored); err != nil {
-			return nil, 0, false, err
-		}
-		if total = usize; int64(len(data)) > limit {
-			data = data[:limit]
-		}
 		return data, total, true, nil
 	}
 	if err != sql.ErrNoRows {
@@ -148,7 +111,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 
 	var chunks int
 	err = s.ro.QueryRowContext(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN usize > 0 THEN usize ELSE LENGTH(data) END), 0) FROM debug_chunks WHERE dir=? AND name=?`,
+		`SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM debug_chunks WHERE dir=? AND name=?`,
 		dir, name).Scan(&chunks, &total)
 	if err != nil {
 		return nil, 0, false, err
@@ -166,9 +129,6 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	for rows.Next() && int64(buf.Len()) < limit {
 		var chunk []byte
 		if err := rows.Scan(&chunk); err != nil {
-			return nil, 0, false, err
-		}
-		if chunk, err = decodePayload(chunk); err != nil {
 			return nil, 0, false, err
 		}
 		if remain := limit - int64(buf.Len()); int64(len(chunk)) > remain {
@@ -208,9 +168,9 @@ func (s *Store) DebugFileNames(ctx context.Context, dir string) ([]string, error
 func (s *Store) DebugFileList(ctx context.Context, dir string) ([]DebugFileInfo, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT name, SUM(sz) FROM (
-			SELECT name, CASE WHEN usize > 0 THEN usize ELSE LENGTH(content) END AS sz FROM debug_files WHERE dir=?
+			SELECT name, LENGTH(content) AS sz FROM debug_files WHERE dir=?
 			UNION ALL
-			SELECT name, CASE WHEN usize > 0 THEN usize ELSE LENGTH(data) END AS sz FROM debug_chunks WHERE dir=?
+			SELECT name, LENGTH(data) AS sz FROM debug_chunks WHERE dir=?
 		) GROUP BY name ORDER BY name`,
 		dir, dir)
 	if err != nil {

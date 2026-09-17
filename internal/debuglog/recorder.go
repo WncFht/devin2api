@@ -46,6 +46,11 @@ type RetentionPolicy struct {
 	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数（含 error.json 的目录）；
 	// 超过该数量的旧失败目录仍可被淘汰，时间清理不受影响。<=0 不保护。
 	KeepErrorDirs int
+	// LogRowDays 是 logs 表摘要行的时间保留天数（面板可热改）；<=0 不按
+	// 时间清理。与目录的 Days 是两条独立生命周期轴：行是检索面、目录是
+	// 证据面。行删除由 store.Maintain 执行（main 侧周期任务），不在
+	// debug 目录清理器里——debug 关时表级保洁不停。
+	LogRowDays int64
 }
 
 // Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
@@ -75,10 +80,6 @@ type Manager struct {
 	policy   RetentionPolicy
 	// store 是 logs 表的持久层；nil 时 insertLog 静默跳过（测试/未接线）。
 	store *store.Store
-	// logRowRetentionDays 是 logs 行的时间保留天数（面板可热改）；
-	// <=0 不按时间清理。与目录的 policy.Days 是两条独立的生命周期轴：
-	// 行是检索面、目录是证据面。
-	logRowRetentionDays atomic.Int64
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
@@ -171,7 +172,7 @@ type Recorder struct {
 	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
 	// writeMeta/insertLog 读，与 retries 同一把锁。
-	accountAttempts []accountAttempt
+	accountAttempts []AccountAttempt
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
@@ -204,7 +205,7 @@ type Recorder struct {
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，writeMeta/insertLog 读，走 mutex 同步。
-	retries []retryAttempt
+	retries []RetryAttempt
 	// firstError 是首个失败点的同步记录：WriteError 调用时 CAS 抢占
 	//（first-write-wins），writeLoggedError 的 WARN 行与 insertLog
 	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
@@ -232,26 +233,6 @@ type Recorder struct {
 	errorWritten bool
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
 	ioErrSeen map[string]struct{}
-}
-
-// retryAttempt 是一次上游重发的记录：attempt 是请求体序号（2 起），
-// cause 是触发原因（token 自愈/空响应续说/transport 断裂重开）。
-type retryAttempt struct {
-	Attempt   int    `json:"attempt"`
-	Cause     string `json:"cause"`
-	ElapsedMS int64  `json:"elapsed_ms"`
-}
-
-// accountAttempt 是号池内一次失败尝试的记录：account 是被试的 lane，
-// code/message 是它放弃时的分类码与文案（截断至 errorMessageCap）。
-// 注意 error.json 是 first-write-wins：failover 救回的请求目录里仍
-// 留有首个失败 lane 的 error.json——它描述的是「第一次失败」而非
-// 「最终下发给客户端的结果」，终局 lane 看 upstream_account。
-type accountAttempt struct {
-	Account   string `json:"account"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message,omitempty"`
-	ElapsedMS int64  `json:"elapsed_ms"`
 }
 
 // errorRecord 是首个失败点的同步快照：stage 是归原点阶段名
@@ -305,6 +286,12 @@ type attachmentReference struct {
 // policy 控制后台清理；清理协程恒启动（全零策略下空转），热改策略即时生效。
 // st 是 logs 表的持久层句柄——历史行已由启动导入器搬入库，无需回放。
 func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
+	// 构造期未显式给值时回填默认：LogRowDays 是面板侧热改的运维旋钮，
+	// 没有 config 对应键——0 在构造期表示「未设置」而非「禁用」
+	//（运行期经 SetPolicy 写 0 才是显式禁用）。
+	if policy.LogRowDays == 0 {
+		policy.LogRowDays = DefaultLogRowRetentionDays
+	}
 	manager := &Manager{
 		root:       root,
 		now:        time.Now,
@@ -314,7 +301,6 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 		store:      st,
 	}
 	manager.enabled.Store(true)
-	manager.logRowRetentionDays.Store(DefaultLogRowRetentionDays)
 	if root == "" {
 		return manager
 	}
@@ -341,24 +327,8 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 }
 
 // DefaultLogRowRetentionDays 是 logs 行的默认时间保留天数；
-// 面板设置项的 def 展示同源引用。
+// 面板设置项的 def 展示与 NewManager 构造期默认值同源引用。
 const DefaultLogRowRetentionDays = 90
-
-// SetLogRowRetentionDays 热改 logs 行的时间保留天数；<=0 关闭按时间清理。
-func (manager *Manager) SetLogRowRetentionDays(days int64) {
-	if manager == nil {
-		return
-	}
-	manager.logRowRetentionDays.Store(days)
-}
-
-// LogRowRetentionDays 返回当前 logs 行保留天数。
-func (manager *Manager) LogRowRetentionDays() int64 {
-	if manager == nil {
-		return 0
-	}
-	return manager.logRowRetentionDays.Load()
-}
 
 // Close 停止后台清理协程；进程退出前调用一次。
 func (manager *Manager) Close() {
@@ -452,7 +422,7 @@ func (manager *Manager) Stats() map[string]any {
 		"io_errors":              manager.ioErrors.Load(),
 		"log_rows":               logRows,
 		"db_bytes":               dbBytes,
-		"log_row_retention_days": manager.LogRowRetentionDays(),
+		"log_row_retention_days": policy.LogRowDays,
 		"retention_days":         policy.Days,
 		"max_total_mb":           policy.MaxTotalMB,
 		"payload_hours":          policy.PayloadHours,
@@ -832,7 +802,7 @@ func (recorder *Recorder) NoteRetryAttempt(attempt int, cause string) {
 		return
 	}
 	recorder.mutex.Lock()
-	recorder.retries = append(recorder.retries, retryAttempt{
+	recorder.retries = append(recorder.retries, RetryAttempt{
 		Attempt:   attempt,
 		Cause:     cause,
 		ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
@@ -841,10 +811,10 @@ func (recorder *Recorder) NoteRetryAttempt(attempt int, cause string) {
 }
 
 // retryAttempts 返回重发记录的拷贝；无重发返回 nil。
-func (recorder *Recorder) retryAttempts() []retryAttempt {
+func (recorder *Recorder) retryAttempts() []RetryAttempt {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
-	return append([]retryAttempt(nil), recorder.retries...)
+	return append([]RetryAttempt(nil), recorder.retries...)
 }
 
 // SetUpstreamAccount 记录最终服务本请求的上游账号（号池 lane 名）。
@@ -868,7 +838,7 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	if recorder == nil {
 		return
 	}
-	attempt := accountAttempt{
+	attempt := AccountAttempt{
 		Account:   account,
 		ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
 	}
@@ -883,10 +853,10 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 
 // upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
 // 一把锁取齐两者——writeMeta 与 insertLog 都要这对值。
-func (recorder *Recorder) upstreamAttribution() (string, []accountAttempt) {
+func (recorder *Recorder) upstreamAttribution() (string, []AccountAttempt) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
-	return recorder.upstreamAccount, append([]accountAttempt(nil), recorder.accountAttempts...)
+	return recorder.upstreamAccount, append([]AccountAttempt(nil), recorder.accountAttempts...)
 }
 
 // Abort 中断请求：标记 aborted 并调用挂接的取消函数。
@@ -927,12 +897,12 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 	accountSwitches := len(recorder.accountAttempts)
 	recorder.mutex.Unlock()
 	firstUpstream := optionalLatency(recorder.firstUpstreamMS.Load())
-	state := "waiting_upstream"
+	state := StateWaitingUpstream
 	switch {
 	case recorder.firstClientMS.Load() >= 0:
-		state = "streaming_client"
+		state = StateStreamingClient
 	case firstUpstream != nil:
-		state = "receiving_upstream"
+		state = StateReceivingUpstream
 	}
 	return ActiveRequest{
 		Dir:             recorder.dir,
@@ -1062,7 +1032,9 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		if st == nil {
 			return
 		}
-		if err := st.PutDebugFileIfAbsent(context.Background(), recorder.dir, ErrorFile, append(data, '\n')); err != nil {
+		// claimed 被忽略：errorWritten 已去重，ClaimDebugFile 的 INSERT OR
+		// IGNORE 只是 DB 层对 first-write-wins 的再兜底。
+		if _, err := st.ClaimDebugFile(context.Background(), recorder.dir, ErrorFile, append(data, '\n')); err != nil {
 			recorder.noteIOErr("file", err)
 		}
 	})
@@ -1133,123 +1105,73 @@ func (recorder *Recorder) appendJSONL(name string, data []byte) {
 
 // writeMeta 写 meta.json：创建时（completion 为 nil）落进入时刻与客户端
 // 元信息，Complete 时（非 nil）补完结时刻、耗时、状态码、结果与用量。
-// 仅写 worker 与 Complete 收尾（writerDone 关闭后）调用。
+// schema 是 MetaSummary（meta.go）——键名即字段名，omitempty 复刻旧
+// map 写法的出现条件；仅写 worker 与 Complete 收尾（writerDone 关闭后）
+// 调用。
 func (recorder *Recorder) writeMeta(completion *Completion) {
-	meta := map[string]any{
-		"started_at": recorder.startedAt.Format(time.RFC3339Nano),
-		"method":     recorder.requestMeta.Method,
-		"path":       recorder.requestMeta.Path,
+	meta := MetaSummary{
+		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
+		Method:            recorder.requestMeta.Method,
+		Path:              recorder.requestMeta.Path,
+		API:               recorder.requestMeta.API,
+		DroppedEvents:     recorder.dropped.Load(),
+		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
+		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
+		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
+		FirstUpstreamMS:   optionalLatency(recorder.firstUpstreamMS.Load()),
+		FirstClientMS:     optionalLatency(recorder.firstClientMS.Load()),
+		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
+		RateLimited:       recorder.rateLimited.Load(),
+		Repairs:           recorder.repairs.Load(),
+		RetryAttempts:     recorder.retryAttempts(),
 	}
-	if recorder.requestMeta.API != "" {
-		meta["api"] = recorder.requestMeta.API
+	client := MetaClient{
+		IP:        recorder.requestMeta.ClientIP,
+		UserAgent: recorder.requestMeta.UserAgent,
+		KeyHash:   recorder.effectiveKeyHash(),
+		RequestID: recorder.requestMeta.ClientRequestID,
 	}
-	client := map[string]any{}
-	if recorder.requestMeta.ClientIP != "" {
-		client["ip"] = recorder.requestMeta.ClientIP
-	}
-	if recorder.requestMeta.UserAgent != "" {
-		client["user_agent"] = recorder.requestMeta.UserAgent
-	}
-	if keyHash := recorder.effectiveKeyHash(); keyHash != "" {
-		client["key_hash"] = keyHash
-	}
-	if recorder.requestMeta.ClientRequestID != "" {
-		client["request_id"] = recorder.requestMeta.ClientRequestID
-	}
-	if len(client) > 0 {
-		meta["client"] = client
-	}
-	if ready := recorder.requestReadyMS.Load(); ready >= 0 {
-		meta["request_ready_ms"] = ready
-	}
-	if sent := recorder.upstreamSentMS.Load(); sent >= 0 {
-		meta["upstream_sent_ms"] = sent
-	}
-	if open := recorder.upstreamOpenMS.Load(); open >= 0 {
-		meta["upstream_open_ms"] = open
-	}
-	if first := recorder.firstUpstreamMS.Load(); first >= 0 {
-		meta["first_upstream_ms"] = first
-	}
-	if first := recorder.firstClientMS.Load(); first >= 0 {
-		meta["first_client_ms"] = first
-	}
-	if dropped := recorder.dropped.Load(); dropped > 0 {
-		meta["dropped_events"] = dropped
-	}
-	if retry := recorder.retryAfterSeconds.Load(); retry > 0 {
-		meta["retry_after_seconds"] = retry
-	}
-	if recorder.rateLimited.Load() {
-		meta["rate_limited"] = true
+	if client != (MetaClient{}) {
+		meta.Client = &client
 	}
 	if conn := recorder.upstreamConn.Load(); conn != nil {
-		// 连接画像拆开 connect 段：reused=false 时 sent→open 含完整
-		// TCP+TLS 握手，reused=true 时该段基本是上游响应头延迟。
-		meta["upstream_conn_reused"] = conn.reused
-		meta["upstream_conn_idle_ms"] = conn.idleMS
+		meta.UpstreamConnReused = &conn.reused
+		meta.UpstreamConnIdleMS = &conn.idleMS
 	}
-	if repairs := recorder.repairs.Load(); repairs != nil {
-		meta["repairs"] = repairs
-	}
-	if retries := recorder.retryAttempts(); len(retries) > 0 {
-		meta["retry_attempts"] = retries
-	}
-	// 号池归因沿用 upstream_* 扁平词表：account 是最终服务 lane，
-	// attempts 是 failover 前的有序失败尝试（含 code 与截断文案）。
-	// 全 lane 失败时 account 为空，attempts 仍要落——它是唯一痕迹。
-	account, attempts := recorder.upstreamAttribution()
-	if account != "" {
-		meta["upstream_account"] = account
-	}
-	if len(attempts) > 0 {
-		meta["upstream_attempts"] = attempts
-	}
+	meta.UpstreamAccount, meta.UpstreamAttempts = recorder.upstreamAttribution()
 	if completion != nil {
 		finishedAt := time.Now()
-		meta["finished_at"] = finishedAt.Format(time.RFC3339Nano)
-		meta["duration_ms"] = finishedAt.Sub(recorder.startedAt).Milliseconds()
-		meta["status_code"] = completion.StatusCode
-		meta["result"] = completion.Result
-		meta["model"] = completion.Model
-		meta["provider"] = completion.Provider
-		meta["stream"] = completion.Stream
-		if completion.RequestedModel != "" {
-			meta["requested_model"] = completion.RequestedModel
-		}
-		if completion.ResponseModel != "" {
-			meta["response_model"] = completion.ResponseModel
-		}
-		if completion.ModelMismatch {
-			meta["model_mismatch"] = true
-		}
-		if completion.PrematureEndTurn {
-			meta["premature_end_turn"] = true
-		}
-		if completion.UpstreamRequestID != "" {
-			meta["upstream_request_id"] = completion.UpstreamRequestID
-		}
+		durationMS := finishedAt.Sub(recorder.startedAt).Milliseconds()
+		meta.DurationMS = &durationMS
+		meta.FinishedAt = finishedAt.Format(time.RFC3339Nano)
+		meta.StatusCode = &completion.StatusCode
+		meta.Result = &completion.Result
+		meta.Model = &completion.Model
+		meta.Provider = &completion.Provider
+		meta.Stream = &completion.Stream
+		meta.RequestedModel = completion.RequestedModel
+		meta.ResponseModel = completion.ResponseModel
+		meta.ModelMismatch = completion.ModelMismatch
+		meta.PrematureEndTurn = completion.PrematureEndTurn
+		meta.UpstreamRequestID = completion.UpstreamRequestID
 		if completion.Usage != (llm.Usage{}) {
-			usageMeta := map[string]any{
-				"input":       completion.Usage.Input,
-				"output":      completion.Usage.Output,
-				"cache_read":  completion.Usage.CacheRead,
-				"cache_write": completion.Usage.CacheWrite,
-				"reasoning":   reasoningTokens(completion.Usage),
-				"total":       completion.Usage.TotalTokens,
+			meta.Usage = &MetaUsage{
+				Input:      completion.Usage.Input,
+				Output:     completion.Usage.Output,
+				CacheRead:  completion.Usage.CacheRead,
+				CacheWrite: completion.Usage.CacheWrite,
+				Reasoning:  reasoningTokens(completion.Usage),
+				Total:      completion.Usage.TotalTokens,
 			}
-			// 上游计费读数原样保留：credit_cost 是单请求可加总口径，
-			// committed_* 系是该时刻的账户侧快照，进索引求和没有语义。
 			if costs := completion.Usage.Costs; costs != nil {
-				usageMeta["costs"] = map[string]any{
-					"credit_cost":                       costs.CreditCost,
-					"committed_credit_cost":             costs.CommittedCreditCost,
-					"committed_acu_cost":                costs.CommittedAcuCost,
-					"committed_quota_cost_basis_points": costs.CommittedQuotaCostBasisPoints,
-					"committed_overage_cost_cents":      costs.CommittedOverageCostCents,
+				meta.Usage.Costs = &MetaCosts{
+					CreditCost:                    costs.CreditCost,
+					CommittedCreditCost:           costs.CommittedCreditCost,
+					CommittedAcuCost:              costs.CommittedAcuCost,
+					CommittedQuotaCostBasisPoints: costs.CommittedQuotaCostBasisPoints,
+					CommittedOverageCostCents:     costs.CommittedOverageCostCents,
 				}
 			}
-			meta["usage"] = usageMeta
 		}
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")

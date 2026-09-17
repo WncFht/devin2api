@@ -526,7 +526,7 @@ func TestBuildRequestIgnoresEmptyToolDescriptions(t *testing.T) {
 
 // TestResponseDecoderMapsOneFrameToOrderedEvents 的测试动机是明确一个 Devin protobuf 帧可以包含多个 loop 语义。
 func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	events := decoder.start()
 	if len(events) != 1 || events[0].Type != llm.ResponseEventStart {
 		t.Fatalf("start events = %#v", events)
@@ -570,7 +570,7 @@ func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
 // TestResponseDecoderMergesLateSignature 的测试动机是保证正文之后的
 // 尾随签名帧合并回上一个思考块，而不是落成独立的空思考块。
 func TestResponseDecoderMergesLateSignature(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
@@ -591,7 +591,7 @@ func TestResponseDecoderMergesLateSignature(t *testing.T) {
 // 上游只有签名没有思考正文：合成块必须走 start/end 完整生命周期，编码器从
 // Partial 边界取签名；发 thinking_signature 会与边界读取叠加翻倍并让 item 悬挂。
 func TestResponseDecoderSynthesizesThinkingForBareSignature(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{
 		DeltaSignature:     proto.String("sig"),
@@ -623,7 +623,7 @@ func TestResponseDecoderSynthesizesThinkingForBareSignature(t *testing.T) {
 
 // TestResponseDecoderAggregatesToolArgumentFragments 的测试动机是保证事件保留原始增量，同时最终工具调用具有完整参数。
 func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	first := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String("call"), Name: proto.String("exec")}}})
 	if len(first) != 1 || first[0].Type != llm.ResponseEventToolCallStart {
@@ -669,7 +669,7 @@ func TestResponseDecoderAggregatesToolArgumentFragments(t *testing.T) {
 // 合成占位发出 ToolCallStart 后真实 id 晚到，事件侧必须继续用占位 id
 // （客户端已按它对账），而最终消息的内容块要回填真 id 供下轮回放。
 func TestResponseDecoderBindsLateToolCallID(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	first := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 		Name: proto.String("exec"), ArgumentsJson: proto.String(`{"command":"`),
@@ -700,7 +700,7 @@ func TestResponseDecoderBindsLateToolCallID(t *testing.T) {
 // TestResponseDecoderSplitsSecondIdlessCall 验证带新名字的后续无 id 帧开启
 // 新调用而不是并入上一个——无 id 续帧按位置归并，但名字不同就是另一次调用。
 func TestResponseDecoderSplitsSecondIdlessCall(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 		Id: proto.String("a"), Name: proto.String("exec"),
@@ -720,7 +720,7 @@ func TestResponseDecoderSplitsSecondIdlessCall(t *testing.T) {
 // wire 包装形态：start 即标记 Custom（下游 item kind 是 custom_tool_call），
 // {"input":"<原文>"} 片段流中不产生 delta，结束帧解包成 freeform 原文。
 func TestResponseDecoderUnwrapsCustomToolArguments(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, map[string]bool{"apply_patch": true})
+	decoder := newResponseDecoder("model", nil, map[string]bool{"apply_patch": true}, nil)
 	decoder.start()
 	first := decoder.decode(&devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String("apply_patch_0"), Name: proto.String("apply_patch")}}})
 	if len(first) != 1 || first[0].Type != llm.ResponseEventToolCallStart {
@@ -756,7 +756,7 @@ func TestResponseDecoderUnwrapsCustomToolArguments(t *testing.T) {
 
 // TestResponseDecoderConsumesUsageAfterStopReason 的测试动机是匹配 Devin 在停止原因后发送最终 token 统计帧的真实顺序。
 func TestResponseDecoderConsumesUsageAfterStopReason(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("complete")})
 	stopEvents := decoder.decode(&devinproto.GetChatMessageResponse{
@@ -792,7 +792,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 		}},
 		{},
 	}}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil, nil, nil)}
 	var done llm.ResponseEvent
 	for {
 		event, err := stream.Recv(context.Background())
@@ -835,7 +835,7 @@ func TestServerToolContinuationPairsAllCalls(t *testing.T) {
 		{{DeltaText: proto.String("final answer")}, {StopReason: stopPattern.Enum()}},
 	}
 	newDecoder := func() *responseDecoder {
-		decoder := newResponseDecoder("model", nil, nil)
+		decoder := newResponseDecoder("model", nil, nil, nil)
 		decoder.serverTools = map[string]bool{"web_search": true}
 		return decoder
 	}
@@ -852,7 +852,13 @@ func TestServerToolContinuationPairsAllCalls(t *testing.T) {
 			}, nil
 		},
 	}
-	stream.continueTurn = func(_ llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+	stream.extend = func(_ string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		var results []llm.ToolResultMessage
+		for _, message := range extra {
+			if result, ok := message.(llm.ToolResultMessage); ok {
+				results = append(results, result)
+			}
+		}
 		resultSets = append(resultSets, results)
 		hop++
 		decoder := newDecoder()
@@ -904,7 +910,7 @@ func TestServerToolContinuationPairsAllCalls(t *testing.T) {
 // TestResponseDecoderRejectsEOFWithoutStopReason 的测试动机是防止把上游截断伪装成
 // 正常结束：Devin 的正常收尾必带 stopReason 帧，干净 EOF 却缺它说明流被截断。
 func TestResponseDecoderRejectsEOFWithoutStopReason(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("partial")})
 	event := decoder.finish(nil)[0]
@@ -915,7 +921,7 @@ func TestResponseDecoderRejectsEOFWithoutStopReason(t *testing.T) {
 
 // TestResponseDecoderRejectsEmptyNormalEOF 的测试动机是避免把未产生任何内容的异常空流误报为成功。
 func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	event := decoder.finish(nil)[0]
 	if event.Type != llm.ResponseEventError || event.Error == nil || event.Error.ErrorMessage != "devin stream ended without generated content" {
@@ -925,7 +931,7 @@ func TestResponseDecoderRejectsEmptyNormalEOF(t *testing.T) {
 
 // TestResponseDecoderCompletesPartialWithThinking 验证 STOP_REASON_PARTIAL 不吞掉已生成的思考/文本。
 func TestResponseDecoderCompletesPartialWithThinking(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello"), StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_PARTIAL.Enum()})
@@ -1196,7 +1202,7 @@ func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
 	stream := &responseStream{
 		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))}),
 		cancel:  func() {},
-		decoder: newResponseDecoder("model", nil, nil),
+		decoder: newResponseDecoder("model", nil, nil, nil),
 	}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
@@ -1217,7 +1223,7 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
 		{DeltaText: proto.String("hi")},
 	}}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	first, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1242,7 +1248,7 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	upstreamStallTimeout = 20 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1269,7 +1275,7 @@ func TestResponseStreamTailGraceFinishesAfterStopReason(t *testing.T) {
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
 	}}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	for i := 0; i < 16; i++ {
 		event, err := stream.Recv(context.Background())
 		if err == io.EOF {
@@ -1303,7 +1309,7 @@ func TestResponseStreamNoProgressWatchdog(t *testing.T) {
 	receiver := &hangAfterReceiver{release: make(chan struct{}),
 		responses: []*devinproto.GetChatMessageResponse{meta(), meta(), meta()}}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1329,7 +1335,7 @@ func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
 			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
 		},
 	}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	// 先排空首批内容事件（start/text_start/text_delta），此后只剩心跳帧。
 	for drained := false; !drained; {
 		event, err := stream.Recv(context.Background())
@@ -1357,7 +1363,7 @@ func TestResponseStreamReleasesStartOnHoldTimeout(t *testing.T) {
 	startHoldTimeout = 20 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1375,7 +1381,7 @@ func TestResponseStreamReleasesStartOnHoldTimeout(t *testing.T) {
 func TestResponseStreamStopsOnContextCancel(t *testing.T) {
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -1450,7 +1456,7 @@ func TestBuildRequestToolChoiceMapping(t *testing.T) {
 // TestResponseDecoderLocalStopSequence 验证上游不执行 stop_patterns 时
 // 解码层本地截断：命中处关闭文字块，剩余上游帧只更新用量。
 func TestResponseDecoderLocalStopSequence(t *testing.T) {
-	decoder := newResponseDecoder("model", []string{"STOP"}, nil)
+	decoder := newResponseDecoder("model", []string{"STOP"}, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hello STOP world")})
 	var text string
@@ -1482,7 +1488,7 @@ func TestResponseDecoderLocalStopSequence(t *testing.T) {
 // TestResponseDecoderStopSequenceAcrossDeltas 验证跨帧停止序列：
 // 第一帧尾部的疑似前缀不下发，第二帧补全后立即截断。
 func TestResponseDecoderStopSequenceAcrossDeltas(t *testing.T) {
-	decoder := newResponseDecoder("model", []string{"XYZ"}, nil)
+	decoder := newResponseDecoder("model", []string{"XYZ"}, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("abc XY")})
 	var emitted string
@@ -1519,7 +1525,7 @@ func TestResponseDecoderStopSequenceAcrossDeltas(t *testing.T) {
 // 多字节 rune：safe 是字节下界，落在 UTF-8 序列中间时下发半个 rune 会被
 // 编码端替成 U+FFFD，残续字节再产一个——客户端永久丢字符。
 func TestResponseDecoderStopSequenceRuneBoundary(t *testing.T) {
-	decoder := newResponseDecoder("model", []string{"STOP"}, nil)
+	decoder := newResponseDecoder("model", []string{"STOP"}, nil, nil)
 	decoder.start()
 	var emitted string
 	for _, event := range decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("ab中文cd")}) {
@@ -1547,7 +1553,7 @@ func TestResponseDecoderStopSequenceRuneBoundary(t *testing.T) {
 // TestResponseDecoderNoStopMatchFlushesTail 验证未命中时保留的尾部
 // 在文字块关闭时随最后一个 delta 全部下发。
 func TestResponseDecoderNoStopMatchFlushesTail(t *testing.T) {
-	decoder := newResponseDecoder("model", []string{"STOP"}, nil)
+	decoder := newResponseDecoder("model", []string{"STOP"}, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("hi")})
 	if len(events) != 1 || events[0].Type != llm.ResponseEventTextStart {
@@ -1602,7 +1608,7 @@ func TestRepairLeakedXMLArguments(t *testing.T) {
 // output_id 随帧落进中间模型：回放时缺 signature_type 实测触发上游
 // invalid_argument，output_id 是 OpenAI 侧 message item 的真实 id。
 func TestResponseDecoderStoresSignatureTypeAndOutputID(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{
 		DeltaThinking:      proto.String("think"),
@@ -1630,7 +1636,7 @@ func TestResponseDecoderStoresSignatureTypeAndOutputID(t *testing.T) {
 // 空块（start+end 一对，签名经共享 Partial 传达）让 /v1/responses 下游
 // 拿得到 reasoning item。
 func TestResponseDecoderLateSignatureSynthesizesBlock(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	events := decoder.decode(&devinproto.GetChatMessageResponse{
 		DeltaSignature:     proto.String(`[{"id":"rs_9","type":"reasoning","encrypted_content":"gAAA"}]`),
@@ -1657,7 +1663,7 @@ func TestResponseDecoderLateSignatureSynthesizesBlock(t *testing.T) {
 // TestResponseDecoderCustomToolCall 验证 is_custom_tool_call + invalid_json_str
 // 把非 JSON 参数原文（如补丁文本）透传为 Custom 调用，而不是吞成 {}。
 func TestResponseDecoderCustomToolCall(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{
 		DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
@@ -1805,12 +1811,12 @@ func TestResponseStreamReopensBeforeContent(t *testing.T) {
 	stream := &responseStream{
 		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: io.ErrUnexpectedEOF}),
 		cancel:  func() {},
-		decoder: newResponseDecoder("model", nil, nil),
+		decoder: newResponseDecoder("model", nil, nil, nil),
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return pumpUpstream(context.Background(), second), func() {}, nil
 		},
-		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil) },
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil, nil) },
 	}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
@@ -1834,12 +1840,12 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 	stream := &responseStream{
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
-		decoder: newResponseDecoder("model", nil, nil),
+		decoder: newResponseDecoder("model", nil, nil, nil),
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return nil, nil, cause
 		},
-		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil) },
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil, nil) },
 	}
 	// 先消费 start/text 事件，之后 EOF 无 stopReason → 报截断错误而非重试。
 	for {
@@ -1860,15 +1866,15 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 // 不同的新凭据才更新；同 token 或空值视为自愈失败。
 func TestReloadToken(t *testing.T) {
 	adapter := &Adapter{token: "old"}
-	adapter.config.TokenSource = func() string { return "old" }
+	adapter.config.Identity.TokenSource = func() string { return "old" }
 	if adapter.reloadToken() {
 		t.Fatal("same token must not count as reload")
 	}
-	adapter.config.TokenSource = func() string { return "" }
+	adapter.config.Identity.TokenSource = func() string { return "" }
 	if adapter.reloadToken() {
 		t.Fatal("empty token must not count as reload")
 	}
-	adapter.config.TokenSource = func() string { return "new" }
+	adapter.config.Identity.TokenSource = func() string { return "new" }
 	if !adapter.reloadToken() || adapter.currentToken() != "new" {
 		t.Fatal("expected token reload to swap credentials")
 	}
@@ -1888,7 +1894,7 @@ func TestResponseStreamContinuesEmptyEndTurn(t *testing.T) {
 	stream := &responseStream{
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
-		decoder: newResponseDecoder("model", nil, nil),
+		decoder: newResponseDecoder("model", nil, nil, nil),
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			if !continueEmpty {
 				return nil, nil, cause
@@ -1896,7 +1902,7 @@ func TestResponseStreamContinuesEmptyEndTurn(t *testing.T) {
 			continued = true
 			return pumpUpstream(context.Background(), second), func() {}, nil
 		},
-		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil) },
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil, nil) },
 	}
 	var text strings.Builder
 	for {
@@ -1934,7 +1940,7 @@ func TestResponseStreamEmptyEndTurnSurfacesWithoutRetry(t *testing.T) {
 	stream := &responseStream{
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
-		decoder: newResponseDecoder("model", nil, nil),
+		decoder: newResponseDecoder("model", nil, nil, nil),
 	}
 	var done *llm.ResponseEvent
 	for {
@@ -1960,7 +1966,7 @@ func TestResponseStreamEmptyEndTurnSurfacesWithoutRetry(t *testing.T) {
 // 这是 CPA 多轮会话事故（签名丢失/乱序配对）在我们链路上的对应防回归点。
 func TestDecoderToEncoderReplayContract(t *testing.T) {
 	// 第一拍：上游帧 → AssistantMessage（decoder 输出，不带 finish 错误）。
-	decoder := newResponseDecoder("swe-2-max", nil, nil)
+	decoder := newResponseDecoder("swe-2-max", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{
 		DeltaThinking: proto.String("need to read the file"),
@@ -2164,7 +2170,7 @@ func TestServerToolMixedTurnKeepsDone(t *testing.T) {
 		return &devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 			Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(arguments)}}}
 	}
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.serverTools = map[string]bool{"web_search": true}
 	continued := false
 	stream := &responseStream{
@@ -2178,7 +2184,7 @@ func TestServerToolMixedTurnKeepsDone(t *testing.T) {
 		search: func(_ context.Context, query string, _, _ []string, _ uint32) (webSearchOutcome, error) {
 			return webSearchOutcome{summary: "ans " + query}, nil
 		},
-		continueTurn: func(_ llm.AssistantMessage, _ []llm.ToolResultMessage, _ []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		extend: func(_ string, _ []llm.Message, _ []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
 			continued = true
 			return nil, nil, nil, errors.New("must not continue a mixed turn")
 		},
@@ -2222,7 +2228,7 @@ func TestServerToolMixedTurnKeepsDone(t *testing.T) {
 // 在末帧携带 credit_cost/committed_* 快照（当前实测模型均未上报，只能靠
 // 单测固定解码面），任一字段在场即建 Usage.Costs。
 func TestResponseDecoderReadsCreditCostFrame(t *testing.T) {
-	decoder := newResponseDecoder("model", nil, nil)
+	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("ok")})
 	decoder.decode(&devinproto.GetChatMessageResponse{

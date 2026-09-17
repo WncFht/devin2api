@@ -179,56 +179,55 @@ func (w *wsResponseWriter) wrapErrorPayload(payload []byte) []byte {
 	return event
 }
 
-// writeFrame 解析单条 SSE 帧，把 data 行作为 JSON 文本消息发出。
-// 帧级职责：收集 output item、识别终结事件、镜像 message_too_big 为 close 1009。
-// SSE 注释行（": ..."）转换为 WebSocket Ping，承担同等的保活作用。
-// 事件名取 event: 行（AppendSSE 恒写）——只有需要字段树的事件才整帧
-// Unmarshal，delta 类帧原样透传。
+// writeFrame 处理经 Write 到达的完整帧。协议事件不经过这里——它们由
+// sseEventSink 直收（见 WriteSSEEvent）；Write 只还会见到两类字节：
+// SSE 注释行（": keepalive"，转换为 WebSocket Ping 承担同等保活作用）
+// 与非 SSE 的裸载荷（未成形残余在 flushTail 兜底）。
 func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if bytes.HasPrefix(frame, []byte(":")) {
 		return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteDeadline))
 	}
-	var data []byte
-	var eventName string
-	for _, line := range bytes.Split(frame, []byte("\n")) {
-		line = bytes.TrimSuffix(line, []byte("\r"))
-		switch {
-		case bytes.HasPrefix(line, []byte("data: ")):
-			data = append(data, line[len("data: "):]...)
-		case bytes.HasPrefix(line, []byte("data:")):
-			data = append(data, line[len("data:"):]...)
-		case bytes.HasPrefix(line, []byte("event: ")):
-			eventName = string(line[len("event: "):])
-		case bytes.HasPrefix(line, []byte("event:")):
-			eventName = string(line[len("event:"):])
-		}
+	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
+	return w.conn.WriteMessage(websocket.TextMessage, frame)
+}
+
+// WriteSSEEvent 实现 sseEventSink：编码后的协议事件以 (name, data) 直达，
+// 省掉「渲染成 event:/data: 文本再解析回来」的往返。帧级职责不变：
+// 收集 output item、识别终结事件、镜像 message_too_big 为 close 1009、
+// 给首个 response.created 注入 debug_ref——事件名已在手上，只有需要
+// 字段树的事件才 Unmarshal data，delta 类事件原样透传。
+func (w *wsResponseWriter) WriteSSEEvent(name string, data []byte) error {
+	if w.err != nil {
+		return w.err
 	}
 	if len(data) == 0 {
 		return nil
 	}
-	if !wsFrameNeedsFields(eventName) {
-		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-		return w.conn.WriteMessage(websocket.TextMessage, data)
+	if !wsFrameNeedsFields(name) {
+		w.err = writeWSPayload(w.conn, data)
+		return w.err
 	}
 	// 单帧一次解析：type/error.code/response.id/item 从同一棵字段树直取。
-	// 非 object JSON（数组/标量/非法文本）与原 json.Valid 分支等价——
-	// 原样透传文本帧。
+	// 非 object JSON（数组/标量/非法文本）原样透传文本帧。
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
-		_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-		return w.conn.WriteMessage(websocket.TextMessage, data)
+		w.err = writeWSPayload(w.conn, data)
+		return w.err
 	}
-	eventType := eventName
+	eventType := name
 	if eventType == "" {
 		eventType = wsRawString(fields["type"])
 	}
 	if err := w.collectOutputItem(eventType, fields); err != nil {
+		w.err = err
 		return err
 	}
 	switch eventType {
 	case "response.completed", "response.done", "response.incomplete":
 		w.completed = true
 		w.surfaced = true
+		// data 是编码器产出的切片，本轮内还会被后续事件复用——
+		// 终结 payload 要持有到 turn 结束，复制一份脱离共享缓冲。
 		w.lastTerminal = bytes.Clone(data)
 		w.completedResponseID = wsJSONString(fields["response"], "id")
 	case "response.failed":
@@ -243,7 +242,8 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 			websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "upstream websocket message too big"),
 			time.Now().Add(wsWriteDeadline),
 		)
-		return errWSConnectionClosed
+		w.err = errWSConnectionClosed
+		return w.err
 	}
 	// surfaced 语义 = 客户端已收到可终结本轮的信号（终结事件/error 事件/
 	// flushTail 兜底）。普通增量帧不算——只发过 delta 就断流仍属于
@@ -254,14 +254,14 @@ func (w *wsResponseWriter) writeFrame(frame []byte) error {
 	if eventType == "response.created" && !w.debugRefSent {
 		data = w.withDebugRef(data, fields)
 	}
-	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-	return w.conn.WriteMessage(websocket.TextMessage, data)
+	w.err = writeWSPayload(w.conn, data)
+	return w.err
 }
 
-// wsFrameNeedsFields 判定事件是否需要在帧级解出字段树：output_item.done
+// wsFrameNeedsFields 判定事件是否需要解出字段树：output_item.done
 // 收 item、终结事件取 response.id、created 注入 debug_ref、error 查
-// code——其余事件（delta 等）data 原样透传。event 行缺席的帧返回 true：
-// 退回按 data.type 分发的解析路径，与逐帧全解析的旧行为等价。
+// code——其余事件（delta 等）data 原样透传。事件名为空（data-only 帧）
+// 返回 true：退回按 data.type 分发的解析路径。
 func wsFrameNeedsFields(eventName string) bool {
 	switch eventName {
 	case "response.output_item.done",
@@ -669,18 +669,14 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 		return nil, err
 	}
 	innerRequest.Header.Set("Content-Type", "application/json")
-	// innerRequest 不经过 HTTP middleware，鉴权与日志关联所需的头逐一手动透传：
-	// createCompletion 的凭据哈希、clientRequestID、UserAgent 都从这里取。
-	// X-Request-Id 不透传——那是升级请求级的关联 ID，每轮各记各的调试记录。
-	for _, name := range []string{
-		"Authorization", "X-Api-Key", "X-Session-Id", "User-Agent",
-		"Session-Id", "Session_id", "Thread-Id", "X-Codex-Turn-Metadata",
-		// clientRequestID（app.go:638）与请求投影都读它，不透传则
-		// WS 轮次的调试记录无法按客户端 ID 反查。
-		"X-Client-Request-Id",
-	} {
-		if value := upgradeRequest.Header.Get(name); value != "" {
-			innerRequest.Header.Set(name, value)
+	// innerRequest 不经过 HTTP middleware，鉴权与日志关联所需的头由
+	// correlationHeaders 单源驱动逐个透传——漏一项就静默丢头。
+	for _, header := range correlationHeaders {
+		if !header.forward {
+			continue
+		}
+		if value := upgradeRequest.Header.Get(header.name); value != "" {
+			innerRequest.Header.Set(header.name, value)
 		}
 	}
 	innerRequest.RemoteAddr = upgradeRequest.RemoteAddr
@@ -688,7 +684,7 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	turnWriter := newWSResponseWriter(conn)
 	// api 标签由调用方固定为 responses-ws：innerRequest 不再经 HTTP 路由，
 	// writer 类型断言无法区分（旧的 isWS 分支已移除）。
-	application.createCompletion(turnWriter, innerRequest, "responses-ws", decodeResponsesRequest, responsesProtocol{})
+	application.createCompletion(turnWriter, innerRequest, "responses-ws", responsesProtocol{})
 	turnWriter.flushTail()
 	if turnWriter.err != nil {
 		return turnWriter, turnWriter.err

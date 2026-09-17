@@ -180,24 +180,18 @@ func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPric
 	return entry
 }
 
-// logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
-// 该 key_hash 的行；excluded 表示筛选条件不可能命中，直接回空集。
-// 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
-// log_source 合法性校验），行级维度全部下推 LogQuery。
-func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
-	q := r.URL.Query()
-	switch strings.TrimSpace(q.Get("log_source")) {
-	case "", "all", "proxy", "manual_test":
-	default:
-		return "", true
-	}
+// scopeKeyHash 把请求的数据范围收敛成 key_hash：api_token 身份强制只看
+// 自己令牌的行（KeyHash 缺失即排空）；auth_token_id 参数把指定令牌解析
+// 成 key_hash——查无令牌或与 api_token 身份冲突都判 excluded（条件不可能
+// 命中，调用方回空集）。logScope/queryScope 共用这段解析。
+func (h *Handler) scopeKeyHash(r *http.Request) (kh string, excluded bool) {
 	if id := identityFrom(r); id.Role == "api_token" {
 		kh = id.KeyHash
 		if kh == "" {
 			return "", true
 		}
 	}
-	if raw := strings.TrimSpace(q.Get("auth_token_id")); raw != "" {
+	if raw := strings.TrimSpace(r.URL.Query().Get("auth_token_id")); raw != "" {
 		tkh := ""
 		if tid, err := strconv.ParseInt(raw, 10, 64); err == nil && h.tokens != nil {
 			if t, ok := h.tokens.Get(tid); ok {
@@ -210,6 +204,19 @@ func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 		kh = tkh
 	}
 	return kh, false
+}
+
+// logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
+// 该 key_hash 的行；excluded 表示筛选条件不可能命中，直接回空集。
+// 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
+// log_source 合法性校验），行级维度全部下推 LogQuery。
+func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
+	switch strings.TrimSpace(r.URL.Query().Get("log_source")) {
+	case "", "all", "proxy", "manual_test":
+	default:
+		return "", true
+	}
+	return h.scopeKeyHash(r)
 }
 
 // logQuery 是 logs/export/matrix 三个列表类端点共用的筛选解析：
@@ -453,13 +460,6 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 		"resp_headers": "{}",
 	}
 
-	var meta struct {
-		StartedAt        string            `json:"started_at"`
-		StatusCode       int               `json:"status_code"`
-		Result           string            `json:"result"`
-		UpstreamAccount  string            `json:"upstream_account"`
-		UpstreamAttempts []json.RawMessage `json:"upstream_attempts"`
-	}
 	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
 	// 不外流，meta 本体不需要过 maskToken。目录整个不在时投影无意义，
@@ -468,7 +468,12 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	if err != nil {
 		return nil
 	}
-	_ = json.Unmarshal(detail.Meta, &meta)
+	// meta.json 缺席或损坏时 Summary 为 nil：按零值投影——created_at
+	// 回落 fallbackMS、完结块字段一律零值，与旧匿名解码失败同口径。
+	meta := detail.Summary
+	if meta == nil {
+		meta = &debuglog.MetaSummary{}
+	}
 	resp["files"] = detail.Files
 	// 读路径按最近见过的 token 字面值兜底脱敏——写路径的 secretKey
 	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
@@ -482,7 +487,13 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	} else {
 		resp["created_at"] = fallbackMS / 1000
 	}
-	resp["translated_resp_status"] = meta.StatusCode
+	// MetaSummary 的完结块字段是指针（区分「完结写了零值」与「创建期
+	// 未写」）；投影到 wire 时按零值落，两种缺席形态同口径。
+	statusCode := 0
+	if meta.StatusCode != nil {
+		statusCode = *meta.StatusCode
+	}
+	resp["translated_resp_status"] = statusCode
 	resp["translated_resp_headers"] = "{}"
 	// 号池归因投到详情首屏：与 logs 表的 account/account_switches
 	// 同口径（switches=失败尝试条数），免去为看归属再抓 meta.json。
@@ -553,10 +564,10 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 		}
 	}
 	switch {
-	case meta.Result == "completed":
+	case meta.Result != nil && *meta.Result == "completed":
 		resp["resp_status"] = 200
-	case errStage == debuglog.ErrStageDevinConnect && meta.StatusCode > 0:
-		resp["resp_status"] = meta.StatusCode
+	case errStage == debuglog.ErrStageDevinConnect && statusCode > 0:
+		resp["resp_status"] = statusCode
 	}
 	if errMessage != "" {
 		resp["upstream_error"] = errStage + ": " + errMessage

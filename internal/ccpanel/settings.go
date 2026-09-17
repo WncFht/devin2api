@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -81,6 +82,13 @@ type SettingDefaults struct {
 
 // PanelSettings 管理 settings 表与键注册表。
 type PanelSettings struct {
+	// writeMu 串行化 set/reset/ApplyAll 的 apply→persist→提交整条线：
+	// apply 可能很慢（UpdateDevin 会重建上游连接束、SetPprofListen 要
+	// bind），把它放出 s.mu 之外后读侧 List/Get 不再被慢应用堵住；
+	// 写-写仍需互斥，否则同键的并发 set/reset 会让「最后落库的覆盖」
+	// 与「最后进子系统的值」分家。
+	writeMu sync.Mutex
+	// mu 只守 byKey/values/updated 的短临界区簿记。
 	mu       sync.Mutex
 	st       *store.Store
 	defs     []settingDef
@@ -272,34 +280,34 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_base_url",
 			typ:  "string",
 			desc: "上游 Devin Connect 基础地址（devin.base_url）；换端点会重建上游连接束并清空 AssignModel 缓存",
-			def:  func() string { return d0().Devin.BaseURL },
-			live: devinLive(deps, func(c devin.Config) string { return c.BaseURL }),
+			def:  func() string { return d0().Devin.Endpoint.BaseURL },
+			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.BaseURL }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.BaseURL
+				return &c.Endpoint.BaseURL
 			}, requireAbsoluteURL("devin_base_url"))),
 		},
 		{
 			key:  "devin_proxy",
 			typ:  "string",
 			desc: "上游代理地址（devin.proxy，http/https/socks5，可带 userinfo）；空为直连或走系统环境变量",
-			def:  func() string { return d0().Devin.Proxy },
-			live: devinLive(deps, func(c devin.Config) string { return c.Proxy }),
+			def:  func() string { return d0().Devin.Endpoint.Proxy },
+			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.Proxy }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.Proxy
+				return &c.Endpoint.Proxy
 			}, nil)),
 		},
 		{
 			key:  "devin_force_http1",
 			typ:  "bool",
 			desc: "强制 HTTP/1.1 每请求独立连接（devin.force_http1）；关闭走 HTTP/2 单连接多路复用",
-			def:  func() string { return strconv.FormatBool(d0().Devin.ForceHTTP1) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.ForceHTTP1) }),
+			def:  func() string { return strconv.FormatBool(d0().Devin.Endpoint.ForceHTTP1) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.Endpoint.ForceHTTP1) }),
 			apply: devinField(deps, func(c *devin.Config, v string) error {
 				b, err := strconv.ParseBool(strings.TrimSpace(v))
 				if err != nil {
 					return fmt.Errorf("value must be a boolean: %w", err)
 				}
-				c.ForceHTTP1 = b
+				c.Endpoint.ForceHTTP1 = b
 				return nil
 			}),
 		},
@@ -641,19 +649,12 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.KeepErrorDirs = n }),
 		},
 		{
-			key:  "log_row_retention_days",
-			typ:  "int",
-			desc: "logs 表摘要行保留天数(独立于调试记录保留,<=0不清理)",
-			def:  func() string { return strconv.FormatInt(debuglog.DefaultLogRowRetentionDays, 10) },
-			live: func() string { return strconv.FormatInt(debug.LogRowRetentionDays(), 10) },
-			apply: func(v string) error {
-				n, err := strconv.Atoi(strings.TrimSpace(v))
-				if err != nil {
-					return fmt.Errorf("value must be an integer (days): %w", err)
-				}
-				debug.SetLogRowRetentionDays(int64(n))
-				return nil
-			},
+			key:   "log_row_retention_days",
+			typ:   "int",
+			desc:  "logs 表摘要行保留天数(独立于调试记录保留,<=0不清理)",
+			def:   func() string { return strconv.FormatInt(debuglog.DefaultLogRowRetentionDays, 10) },
+			live:  func() string { return strconv.FormatInt(debug.Policy().LogRowDays, 10) },
+			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.LogRowDays = int64(n) }),
 		},
 		{
 			key:  "debug_quota_interval_minutes",
@@ -714,18 +715,28 @@ func (s *PanelSettings) loadDefaults() SettingDefaults {
 
 // ApplyAll 重放全部覆盖项（启动加载后与 config reload 后调用——
 // reload 会按 config.yaml 重置 debug 开关/策略，覆盖键须压回去）。
-// 单项失败不中断后续重放，聚合返回错误。
+// writeMu 持满整个重放：与并发 set/reset 同键交错会让「子系统最终
+// 生效值」与「库里最终覆盖」分家。单项失败不中断后续重放，聚合返回。
 func (s *PanelSettings) ApplyAll() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	var errs []error
-	for _, d := range s.defs {
-		v, ok := s.values[d.key]
-		if !ok || d.apply == nil {
-			continue
+	type item struct {
+		d *settingDef
+		v string
+	}
+	items := make([]item, 0, len(s.values))
+	for i := range s.defs {
+		d := &s.defs[i]
+		if v, ok := s.values[d.key]; ok && d.apply != nil {
+			items = append(items, item{d, v})
 		}
-		if err := d.apply(v); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", d.key, err))
+	}
+	s.mu.Unlock()
+	var errs []error
+	for _, it := range items {
+		if err := it.d.apply(it.v); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", it.d.key, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -775,14 +786,21 @@ func (s *PanelSettings) Get(key string) (map[string]any, bool) {
 }
 
 // set 校验并应用单键（apply 含类型校验），成功后入库并更新覆盖表。
-// 先写库后改内存：写失败时两侧一致保持旧值。调用方不得持锁。
+// apply 在锁外跑（慢路径），持久化失败时回灌进入前的生效值补偿——
+// 不让「runtime 已改、库里没有」的分裂态活到重启才发现。
 func (s *PanelSettings) set(key, value string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	d, ok := s.byKey[key]
 	if !ok {
+		s.mu.Unlock()
 		return errSettingNotFound
 	}
+	prev, hadOverride := s.values[key]
+	s.mu.Unlock()
+
 	if err := d.apply(value); err != nil {
 		return err
 	}
@@ -790,32 +808,53 @@ func (s *PanelSettings) set(key, value string) error {
 	// 不同于 store.SetSetting 零值的毫秒默认。
 	ts := time.Now().Unix()
 	if err := s.st.SetSetting(context.Background(), key, value, ts); err != nil {
+		if !hadOverride {
+			prev = d.def()
+		}
+		if cerr := d.apply(prev); cerr != nil {
+			slog.Warn("settings: compensate apply failed after persist error", "key", key, "error", cerr)
+		}
 		return err
 	}
+	s.mu.Lock()
 	s.values[key] = value
 	s.updated[key] = ts
+	s.mu.Unlock()
 	return nil
 }
 
-// reset 应用文件默认值后删除覆盖。先应用后删行再改内存：应用失败时
-// 覆盖原样保留，不会出现「内存已删、库里还在」的半更新态。
+// reset 应用文件默认值后删除覆盖。应用失败时覆盖原样保留；删行失败
+// 时回灌旧覆盖值补偿——与 set 同一份「不让分裂态出门」口径。
 func (s *PanelSettings) reset(key string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	d, ok := s.byKey[key]
 	if !ok {
+		s.mu.Unlock()
 		return errSettingNotFound
 	}
+	prev, hadOverride := s.values[key]
+	s.mu.Unlock()
+
 	if d.apply != nil {
 		if err := d.apply(d.def()); err != nil {
 			return err
 		}
 	}
 	if err := s.st.DeleteSetting(context.Background(), key); err != nil {
+		if d.apply != nil && hadOverride {
+			if cerr := d.apply(prev); cerr != nil {
+				slog.Warn("settings: compensate apply failed after delete error", "key", key, "error", cerr)
+			}
+		}
 		return err
 	}
+	s.mu.Lock()
 	delete(s.values, key)
 	delete(s.updated, key)
+	s.mu.Unlock()
 	return nil
 }
 
@@ -853,8 +892,7 @@ func (h *Handler) adminUpdateSetting(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value string `json:"value"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if err := h.settings.set(chi.URLParam(r, "key"), req.Value); err != nil {
@@ -896,8 +934,7 @@ func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req map[string]string
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	keys := make([]string, 0, len(req))

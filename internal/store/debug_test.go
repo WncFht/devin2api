@@ -42,15 +42,17 @@ func TestDebugFileRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPutDebugFileIfAbsent(t *testing.T) {
+func TestClaimDebugFile(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	// error.json first-write-wins：第二次写入必须被忽略。
-	if err := s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("first")); err != nil {
-		t.Fatal(err)
+	claimed, err := s.ClaimDebugFile(ctx, "d1", "error.json", []byte("first"))
+	if err != nil || !claimed {
+		t.Fatalf("first claim = %v,%v", claimed, err)
 	}
-	if err := s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("second")); err != nil {
-		t.Fatal(err)
+	claimed, err = s.ClaimDebugFile(ctx, "d1", "error.json", []byte("second"))
+	if err != nil || claimed {
+		t.Fatalf("second claim = %v,%v", claimed, err)
 	}
 	data, _, _, err := s.DebugFile(ctx, "d1", "error.json", 0)
 	if err != nil || string(data) != "first" {
@@ -187,7 +189,7 @@ func TestDebugFileNamesAndDirs(t *testing.T) {
 	}
 }
 
-func TestDeleteDebugPayloadFiles(t *testing.T) {
+func TestDeleteDebugPayloadsBefore(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	must := func(err error) {
@@ -196,16 +198,19 @@ func TestDeleteDebugPayloadFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"meta.json", "03-devin-request.json", "attachments/image-001.png"} {
+	for _, name := range []string{"meta.json", "03-devin-request.json", "03-devin-request.attempt2.json", "attachments/image-001.png"} {
 		must(s.PutDebugFile(ctx, "d1", name, []byte("x")))
 	}
 	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("a")))
 	must(s.AppendDebugChunk(ctx, "d1", "06-http-response.jsonl", []byte("b")))
 	must(s.AppendDebugChunk(ctx, "d1", "05-response-events.jsonl", []byte("c")))
+	must(s.PutDebugFile(ctx, "d2", "03-devin-request.json", []byte("y")))
 
-	// 剥离 03/04/06/attachments，证据文件留下。
-	must(s.DeleteDebugPayloadFiles(ctx, "d1",
-		[]string{"03-devin-request.json", "04-devin-response.jsonl", "06-http-response.jsonl", "attachments/image-001.png"}))
+	// 剥离 bound 之下目录的 03*/04/06/attachments，证据文件留下；
+	// bound 之外的 d2 不动。
+	must(s.DeleteDebugPayloadsBefore(ctx, "d2",
+		[]string{"04-devin-response.jsonl", "06-http-response.jsonl"},
+		[]string{"03-devin-request.", "attachments/"}))
 	names, err := s.DebugFileNames(ctx, "d1")
 	if err != nil {
 		t.Fatal(err)
@@ -213,8 +218,15 @@ func TestDeleteDebugPayloadFiles(t *testing.T) {
 	if !slices.Equal(names, []string{"05-response-events.jsonl", "meta.json"}) {
 		t.Fatalf("after strip = %v", names)
 	}
-	// 空清单是空操作。
-	must(s.DeleteDebugPayloadFiles(ctx, "d1", nil))
+	names, err = s.DebugFileNames(ctx, "d2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(names, []string{"03-devin-request.json"}) {
+		t.Fatalf("d2 = %v", names)
+	}
+	// 空名单是空操作。
+	must(s.DeleteDebugPayloadsBefore(ctx, "", nil, nil))
 }
 
 func TestDeleteDebugDirsBefore(t *testing.T) {
@@ -231,8 +243,17 @@ func TestDeleteDebugDirsBefore(t *testing.T) {
 		must(s.PutDebugFile(ctx, dir, "meta.json", []byte("x")))
 		must(s.AppendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("y")))
 	}
-	must(s.DeleteDebugDirsBefore(ctx, "20260910-120000"))
+	// exclude 豁免 keep_error_dirs 保护集内的过期目录。
+	must(s.DeleteDebugDirsBefore(ctx, "20260910-120000", []string{"20260909-235959"}))
 	dirs, err := s.DebugDirs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(dirs, []string{"20260909-235959", "20260910-120000-01"}) {
+		t.Fatalf("after excluded retention = %v", dirs)
+	}
+	must(s.DeleteDebugDirsBefore(ctx, "20260910-120000", nil))
+	dirs, err = s.DebugDirs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

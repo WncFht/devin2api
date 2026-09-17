@@ -5,7 +5,6 @@ package ccpanel
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -31,59 +30,25 @@ const matrixErrorMessageCap = 120
 
 // adminAPIIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明，
 // 让初次接触的调用方无需读代码即可发现检索入口与日志布局。
+// 端点清单由 routes 表生成（doc 非空的行），与挂载集同源不会漂移。
 func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
+	rts := h.routes()
+	endpoints := make([]map[string]string, 0, len(rts))
+	for _, rt := range rts {
+		if rt.doc == "" {
+			continue
+		}
+		endpoints = append(endpoints, map[string]string{
+			"method":      rt.method,
+			"path":        rt.docPath,
+			"description": rt.doc,
+		})
+	}
 	respondOK(w, map[string]any{
-		"service": "devin-2api",
-		"version": h.Version(),
-		"auth":    "dashboard.password 非空时 POST /login 拿 token（=密码本身），随后 Authorization: Bearer <token>；密码为空时全部端点开放",
-		"endpoints": []map[string]string{
-			{"method": "GET", "path": "/admin/status", "description": "账户/套餐/容量/渠道/模型状态告警 + devin.aliases 校验（alias_targets_absent 目标缺席 / alias_shadows_catalog 遮蔽真 uid）"},
-			{"method": "GET", "path": "/admin/models", "description": "模型目录含能力位与价格"},
-			{"method": "GET", "path": "/admin/runtime-metrics", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + gate 速率闸门状态 + warm 前缀保温簿记"},
-			{"method": "GET", "path": "/admin/accounts", "description": "号池账号聚合视图：source(config|panel|tombstoned)+credential+disabled+token_sha+lane/gate/warm 快照+inflight+quota 摘要+usage(P2)"},
-			{"method": "POST", "path": "/admin/accounts", "description": "建号 {name, token?|credentials_file?, disabled?}；整表校验失败 400，重名/墓碑名 409"},
-			{"method": "PUT", "path": "/admin/accounts/{name}", "description": "改凭据/停启用 {token?,credentials_file?,disabled?} 指针语义；config 名首写自动建覆盖行；tombstoned 409 须先 restore"},
-			{"method": "DELETE", "path": "/admin/accounts/{name}", "description": "config 名置墓碑（可 restore，覆盖保留复活）；panel 名物理删"},
-			{"method": "POST", "path": "/admin/accounts/{name}/restore", "description": "墓碑还活：deleted=0 重推回池；活号 409"},
-			{"method": "POST", "path": "/admin/accounts/{name}/clear-cooldown", "description": "清池侧两档冷却（auth+unhealthy）立即回候选；不动 gate 闩与 last_failure 证据"},
-			{"method": "POST", "path": "/admin/accounts/{name}/quota/refresh", "description": "即采一次该号配额（不经 lane；disabled 可刷 tombstoned 404）；502 上游失败"},
-			{"method": "GET", "path": "/admin/accounts/cli-credentials", "description": "Devin CLI 凭证发现链探针 {available,path,parsable,suggested_name}；不回传内容"},
-			{"method": "GET", "path": "/admin/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
-			{"method": "POST", "path": "/admin/config/reload", "description": "重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
-			{"method": "GET", "path": "/admin/usage", "description": "logs 表聚合：今日/窗口累计、model_days 模型×日矩阵、按模型/按 key、错误阶段、10 分钟粒度趋势、p50/p95/p99、目录价估算成本"},
-			{"method": "GET", "path": "/admin/logs?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=&until=", "description": "最近请求（新在前）；q 子串（含 error_message）或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；since/until 钉时间窗；has_more 提示尾部窗外仍有更早历史，rejects 附管线前拒绝环（401/429 不进索引）"},
-			{"method": "GET", "path": "/admin/logs/matrix?since=", "description": "健康矩阵紧凑条目：只投影分桶与归因所需字段，不分页（扫描上限 2000）；truncated 为真表示 since 窗口覆盖不完整"},
-			{"method": "GET", "path": "/admin/logs/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSON 数组）；触及扫描上限带 X-Truncated: true"},
-			{"method": "GET", "path": "/admin/logs/bootstrap", "description": "日志页筛选初始化：模型清单、状态码观察值等一次拉齐"},
-			{"method": "GET", "path": "/admin/stats?range=", "description": "面板统计聚合（rpm_stats/按模型/按令牌用量等，dashboardStats 同形）"},
-			{"method": "GET", "path": "/admin/stats/filter-options", "description": "stats 页筛选项候选（模型名等）"},
-			{"method": "GET", "path": "/admin/metrics", "description": "dashboardMetrics 同形：概要计数与速率"},
-			{"method": "GET", "path": "/admin/active-requests", "description": "进行中请求活快照：阶段状态、模型、已下发字节、已写文件、丢弃数"},
-			{"method": "GET", "path": "/admin/active-requests/{id}/debug-log", "description": "进行中请求的调试投影（目录已建即按 debug-logs/{id} 口径投影）"},
-			{"method": "GET", "path": "/admin/debug-logs/{id}", "description": "单请求 meta.json + 文件清单；id 是日志行自增 id（迁移前的 started_at 毫秒戳链接仍可解析）"},
-			{"method": "GET", "path": "/admin/debug-logs/{id}/merged", "description": "把 06-http-response.jsonl 的 SSE 帧合并成可读的最终响应（reasoning/content/tools）"},
-			{"method": "POST", "path": "/admin/debug-logs/merged-response", "description": "上传体合并版：body {\"resp_body\"}（前端可 gzip），与 GET merged 共用同一合并器"},
-			{"method": "GET", "path": "/admin/debug-logs/{id}/file/{name}", "description": "读取请求目录内文件（顶层或 attachments/），超 4MB 截断；?raw=1 原样回字节（CSP sandbox + nosniff）"},
-			{"method": "POST", "path": "/admin/active-requests/{id}/abort", "description": "中断进行中请求（取消 ctx）；无活跃请求时 404"},
-			{"method": "GET", "path": "/admin/process-log?offset=", "description": "进程 stderr 日志尾部；offset>0 增量拉取，响应带 next_offset"},
-			{"method": "GET", "path": "/admin/quota", "description": "配额历史快照（quota_samples 表）+ 按燃烧速率外推的耗尽时间"},
-			{"method": "GET", "path": "/admin/settings", "description": "运行时设置全表：键、当前值、默认、是否有面板覆盖"},
-			{"method": "GET", "path": "/admin/settings/{key}", "description": "单个运行时设置（含覆盖来源标记）"},
-			{"method": "PUT", "path": "/admin/settings/{key}", "description": "运行时设置覆盖（debug.enabled/保留策略等），body {\"value\": \"...\"}；对 config.yaml 恒赢"},
-			{"method": "POST", "path": "/admin/settings/{key}/reset", "description": "删除该键的面板覆盖，回落 config.yaml/默认值"},
-			{"method": "POST", "path": "/admin/settings/batch", "description": "批量设置覆盖，body {\"key\": \"value\", ...}"},
-			{"method": "GET", "path": "/admin/auth-tokens?range=", "description": "下游令牌表 + range 内时间窗聚合统计（覆盖累计字段）；行含 anonymous 标记匿名通道"},
-			{"method": "POST", "path": "/admin/auth-tokens", "description": "创建下游令牌（并发槽/RPM/5h|日|周|月费用窗口/模型白名单），明文仅此一次返回；anonymous=true 建匿名通道行（无凭据准入，不返回明文）"},
-			{"method": "PUT", "path": "/admin/auth-tokens/{id}", "description": "更新令牌（启用/各窗口限额/max_rpm/白名单等）"},
-			{"method": "DELETE", "path": "/admin/auth-tokens/{id}", "description": "删除令牌（幂等）"},
-			{"method": "GET", "path": "/admin/model-registry", "description": "模型注册表：启用/停用、redirect_model（别名解析前改写）、覆盖标记；各行 catalog 字段透出目录价"},
-			{"method": "PUT", "path": "/admin/model-registry", "description": "写注册条目（启用/禁用/redirect_model）"},
-			{"method": "DELETE", "path": "/admin/model-registry", "description": "删注册条目"},
-			{"method": "GET", "path": "/admin/model-pricing?model=", "description": "单模型目录价投影（found=false 表示无目录价）"},
-			{"method": "POST", "path": "/admin/model-test", "description": "模型连通性探针（结果记 log_source=manual_test 的日志行）"},
-			{"method": "POST", "path": "/admin/model-chat", "description": "面板内对话式模型测试（同 manual_test 归因）"},
-			{"method": "POST", "path": "/admin/update/check", "description": "检查上游 release 是否有新版本"},
-		},
+		"service":   "devin-2api",
+		"version":   h.Version(),
+		"auth":      "dashboard.password 非空时 POST /login 拿 token（=密码本身），随后 Authorization: Bearer <token>；密码为空时全部端点开放",
+		"endpoints": endpoints,
 		"debug_workflow": []string{
 			"每个 /v1/* 响应带 X-Request-Id 头（=调试目录名）；错误体含 debug_ref 与 stage 字段",
 			"凭 X-Request-Id 到 /admin/logs?q=<dir> 找到 log_id（logs 表自增主键），再调 /admin/debug-logs/{id} 拿 meta 与文件清单，逐个 file/ 读取",
@@ -254,25 +219,21 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	entries := make([]debuglog.IndexEntry, 0, len(rows))
-	for _, row := range rows {
-		entries = append(entries, debuglog.IndexEntryFromRow(row))
-	}
-	if total > int64(len(entries)) {
+	if total > int64(len(rows)) {
 		w.Header().Set("X-Truncated", "true")
 	}
 	if r.URL.Query().Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="requests.csv"`)
-		writeRequestsCSV(w, entries)
+		writeRequestsCSV(w, rows)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(entries)
+	_ = json.NewEncoder(w).Encode(rows)
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
-func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
+func writeRequestsCSV(w http.ResponseWriter, entries []*store.LogRow) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
 	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches,error_message\n")
@@ -285,7 +246,7 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
 		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d,%s\n",
-			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
+			csvEscape(e.Dir), csvEscape(e.StartedAt.Format(time.RFC3339Nano)), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
@@ -354,10 +315,9 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	entries := make([]matrixEntry, 0, len(rows))
-	for _, row := range rows {
-		e := debuglog.IndexEntryFromRow(row)
+	for _, e := range rows {
 		entries = append(entries, matrixEntry{
-			StartedAt:       e.StartedAt,
+			StartedAt:       e.StartedAt.Format(time.RFC3339Nano),
 			Model:           e.Model,
 			RequestedModel:  e.RequestedModel,
 			StatusCode:      e.StatusCode,
@@ -381,70 +341,6 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// usageCacheTTL 是 /admin/usage 聚合快照的新鲜窗口：面板按轮询
-// 消费，过期不阻塞——有旧快照直接发旧值并后台重算（stale-while-
-// revalidate）；usageFetch 非空表示有聚合在途（singleflight 的
-// done channel），关闭即完成信号。
-const usageCacheTTL = 5 * time.Second
-
-// usageSnapshot 返回 UsageStats 快照：TTL 内直接命中；过期且有旧值
-// 时先回旧值、由首个过期调用方触发后台刷新；仅在没有任何快照时
-// （首次加载）同步等一趟聚合。
-func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error) {
-	for {
-		h.usageMu.Lock()
-		fresh := !h.usageAt.IsZero() && time.Since(h.usageAt) < usageCacheTTL
-		if fresh {
-			snap := h.usageSnap
-			h.usageMu.Unlock()
-			return snap, nil
-		}
-		if h.usageFetch != nil {
-			done := h.usageFetch
-			stale := h.usageSnap
-			hasStale := !h.usageAt.IsZero()
-			h.usageMu.Unlock()
-			if hasStale {
-				return stale, nil // 刷新由在途者收尾
-			}
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return store.UsageSnapshot{}, ctx.Err()
-			}
-		}
-		done := make(chan struct{})
-		h.usageFetch = done
-		stale := h.usageSnap
-		hasStale := !h.usageAt.IsZero()
-		h.usageMu.Unlock()
-		if hasStale {
-			go func() { _ = h.runUsageFetch(done) }()
-			return stale, nil
-		}
-		if err := h.runUsageFetch(done); err != nil {
-			return store.UsageSnapshot{}, err
-		}
-	}
-}
-
-// runUsageFetch 执行一趟 UsageStats 聚合、刷新缓存并关闭 done 通知
-// 等待方。用 Background ctx：快照是 handler 级共享缓存，单个调用方
-// 断连不应掐死共用的计算。
-func (h *Handler) runUsageFetch(done chan struct{}) error {
-	snap, err := h.store.UsageStats(context.Background())
-	h.usageMu.Lock()
-	if err == nil {
-		h.usageSnap = snap
-		h.usageAt = time.Now()
-	}
-	close(done)
-	h.usageFetch = nil
-	h.usageMu.Unlock()
-	return err
-}
-
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
@@ -452,7 +348,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, map[string]any{"disabled": true})
 		return
 	}
-	snap, err := h.usageSnapshot(r.Context())
+	snap, err := h.usageCache.Get(r.Context())
 	if err != nil {
 		slog.Warn("ccpanel: usage stats query failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "usage query failed")
