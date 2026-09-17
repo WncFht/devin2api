@@ -45,11 +45,18 @@ devin:
   # 进程 CWD）。两条目引用同一有效 token 或同一 credentials_file 按
   # 配置错误拒绝。会话按亲和键钉选到号、失败按词表换号，详见
   # docs/devin-accounts.md。
+  # 可选逐号字段：priority 是池级排序元数据（大的优先被新会话选中，
+  # 默认 0）；max_rpm 覆盖该号自己的分钟窗口配额（0 = 继承
+  # devin.max_rpm）。面板还可写 notes 备注与 credentials_content
+  # 粘贴上传。
   # accounts:
   #   - name: "main"
   #     token: "<main 号 session token>"
+  #     priority: 10
   #   - name: "backup"
   #     credentials_file: "/home/user/.local/share/devin/credentials.toml"
+  # session_affinity_ttl_seconds: 3600  # 会话→lane 绑定的滑动 TTL（命中续期）
+  # quota_low_threshold_percent: 15     # weekly 配额低于此百分比时该号对新会话降权
   # model: "swe-2-max"
   model: "glm-5-2"
   # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://

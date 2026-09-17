@@ -6,7 +6,7 @@
 
 临时配置写 `devin.accounts`：`good`（真实 token）与 `bad`（固定无效 token `devin-session-token$invalid.badtoken.for-smoke`，`DEVIN_TOKEN_BAD` 可覆盖）。
 
-钉选判定在脚本内用 sha256sum 复刻：`affinity = sha256(user)[0:16] hex`，lane 分 `sha256(affinity|name)` 升序取首——与 `SessionAffinityKey`/`orderedLanes` 同种子同序，因此脚本能预知每个会话键钉到哪条 lane，并从候选键里各挑 3 个钉到 bad / good。
+钉选判定在脚本内用 sha256sum 复刻：`affinity = sha256(user)[0:16] hex`，rendezvous 分 `sha256(affinity|name)` 升序——与 `SessionAffinityKey`/`rankLanes` 同种子同序（完整排序是绑定命中 → 健康桶 → priority 降序 → rendezvous 分，脚本两号同 priority 且未绑定时即退化为分数序），因此脚本能预知每个会话键钉到哪条 lane，并从候选键里各挑 3 个钉到 bad / good。亲和键先取请求头链（`X-Claude-Code-Session-Id` → `X-Session-ID` → `X-Session-Affinity` → `X-Conversation-Id` → `X-Thread-Id`），脚本不传头时回落 body 的 `user` 字段。
 
 断言围绕四条行为：rendezvous 钉选（同键恒落同 lane）、failover 换号（钉到 bad 的首击经 unauthenticated 失败转投 good，logs 行 `account_switches>=1`）、凭据冷却降级（bad 标记冷却后同键直发 good、零换号）、归因字段（logs 行 `account`、meta `upstream_account`/`upstream_attempts`、runtime-metrics `accounts` 段、per-lane `runtime_state` 的 `gate:<name>` 键）。
 
