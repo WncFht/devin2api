@@ -2068,6 +2068,27 @@ initLogsPageActions();
 applyColVisibility();
 document.addEventListener('click', closeColMenuOnClickOutside);
 
+// ESC键关闭模态框与列显隐菜单——同在 bootstrap 之前绑定，慢会话下也可用
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const colMenu = document.getElementById('colToggleMenu');
+    if (colMenu && !colMenu.hidden) {
+      colMenu.hidden = true;
+      return;
+    }
+    const debugModal = document.getElementById('debugLogModal');
+    if (debugModal && debugModal.classList.contains('show')) {
+      closeDebugLogModal();
+      return;
+    }
+    // 探活模态 DOM 懒注入：未打开过时不存在，直接调 close 会 null.classList。
+    const modelTestModal = document.getElementById('modelTestModal');
+    if (modelTestModal?.classList.contains('show') && typeof window.closeModelTestModal === 'function') {
+      window.closeModelTestModal();
+    }
+  }
+});
+
 // 页面初始化
 window.initPageBootstrap({
   topbarKey: 'logs',
@@ -2134,27 +2155,6 @@ window.initPageBootstrap({
   if (typeof window.createAutoRefresh === 'function') {
     window.createAutoRefresh({ load: () => load(true) }).init();
   }
-
-  // ESC键关闭模态框与列显隐菜单
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      const colMenu = document.getElementById('colToggleMenu');
-      if (colMenu && !colMenu.hidden) {
-        colMenu.hidden = true;
-        return;
-      }
-      const debugModal = document.getElementById('debugLogModal');
-      if (debugModal && debugModal.classList.contains('show')) {
-        closeDebugLogModal();
-        return;
-      }
-      // 探活模态 DOM 懒注入：未打开过时不存在，直接调 close 会 null.classList。
-      const modelTestModal = document.getElementById('modelTestModal');
-      if (modelTestModal?.classList.contains('show') && typeof window.closeModelTestModal === 'function') {
-        window.closeModelTestModal();
-      }
-    }
-  });
 
   // 事件委托：处理日志表格中的按钮点击
   const tbody = document.getElementById('tbody');
