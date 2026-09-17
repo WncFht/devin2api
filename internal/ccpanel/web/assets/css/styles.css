@@ -672,6 +672,8 @@ body {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  -webkit-mask-image: linear-gradient(180deg, #000 160px, transparent 420px);
+  mask-image: linear-gradient(180deg, #000 160px, transparent 420px);
   background:
     radial-gradient(550px 300px at 20% 10%, rgba(59, 130, 246, 0.14), transparent 60%),
     radial-gradient(650px 320px at 80% 5%, rgba(236, 72, 153, 0.12), transparent 60%),
@@ -776,6 +778,11 @@ body {
 
 .channel-cost {
   text-align: right;
+  white-space: nowrap;
+}
+
+.channel-cost:has(.cost-value:empty) {
+  display: none;
 }
 
 .cost-label {
@@ -1211,7 +1218,7 @@ body {
 
 .toggle-btn.active {
   background: var(--surface-bg-strong);
-  color: #4f46e5;
+  color: var(--primary-600);
   font-weight: 650;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.1);
   transform: none;
@@ -1263,7 +1270,7 @@ body {
 
 .time-range-btn.active {
   background: transparent;
-  color: #4f46e5;
+  color: var(--primary-600);
   font-weight: 500;
 }
 
@@ -1789,6 +1796,8 @@ body {
     overflow-x: auto;
     white-space: nowrap;
     justify-content: flex-start;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
   }
 
   .time-range-selector::-webkit-scrollbar {
@@ -5053,7 +5062,6 @@ body.web-role-api-token #btn_export_json {
 
   .features-showcase {
     max-width: 420px;
-    order: -1;
     padding: var(--space-6);
   }
 
@@ -5857,6 +5865,8 @@ body.web-role-api-token #btn_export_json {
     width: 100%;
     max-width: 100%;
     padding-bottom: 2px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
   }
 
   .trend-chart-toolbar .toggle-btn {
