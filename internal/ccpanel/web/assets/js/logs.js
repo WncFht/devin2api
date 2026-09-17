@@ -447,10 +447,6 @@ function buildActiveRequestStatusHtml(req) {
   return `<span class="status-pending active-upstream-status">${escapeHtml(activeRequestStatusLabel(req))}</span>`;
 }
 
-function formatMultiplierText(multiplier) {
-  return `${Number(multiplier.toFixed(2)).toString()}x`;
-}
-
 // 生成流式标志HTML（公共函数，避免重复）
 function getStreamFlagHtml(isStreaming) {
   const label = escapeHtml(t('logs.streamFlag'));
@@ -482,34 +478,16 @@ function buildActiveRequestTimingHtml(req, elapsedRaw, elapsedText) {
   return durationDisplay;
 }
 
-function normalizeThinkingEffortDisplay(value) {
-  const effort = String(value || '').trim().toLowerCase();
-  // thinking.type=disabled 表示思考关闭，等同未设置思考等级，不作为 badge 展示
-  if (effort === 'disabled') return '';
-  return effort;
-}
-
-function thinkingEffortBadgeText(value) {
-  return normalizeThinkingEffortDisplay(value);
-}
-
 function normalizeReasoningTokens(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
 }
 
-function buildThinkingEffortBadge(thinkingEffort, reasoningTokens) {
-  const effort = normalizeThinkingEffortDisplay(thinkingEffort);
+function buildReasoningTokensBadge(reasoningTokens) {
   const tokens = normalizeReasoningTokens(reasoningTokens);
-  if (!effort && tokens === 0) return '';
-  const text = [thinkingEffortBadgeText(effort), tokens > 0 ? String(tokens) : '']
-    .filter(Boolean)
-    .join(' ');
-  const titleParts = [];
-  if (effort) titleParts.push(`${t('logs.tip.thinkingEffort')}: ${escapeHtml(effort)}`);
-  if (tokens > 0) titleParts.push(`${t('logs.tip.reasoningTokens')}: ${tokens}`);
-  const title = titleParts.join('&#10;');
-  return `<sup class="thinking-effort-badge" title="${title}">${escapeHtml(text)}</sup>`;
+  if (tokens === 0) return '';
+  const title = `${t('logs.tip.reasoningTokens')}: ${tokens}`;
+  return `<sup class="thinking-effort-badge" title="${title}">${escapeHtml(String(tokens))}</sup>`;
 }
 
 // 判断两个模型名是否只是前缀/后缀写法不同，此类差异不算模型重定向：
@@ -533,14 +511,13 @@ function isPrefixOrSuffixVariant(model, actualModel) {
 }
 
 // 模型列渲染「请求模型」tag；重定向时落点模型直接跟在 ↪ 后可见
-// （原名仍进 tag 悬浮提示），WS 传输与思考等级以角标呈现。
-function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningTokens, upstreamWebsocket) {
+// （原名仍进 tag 悬浮提示），WS 传输与推理 token 数以角标呈现。
+function buildLogModelDisplay(model, actualModel, reasoningTokens, upstreamWebsocket) {
   if (!model) {
     return '<span style="color: var(--neutral-500);">-</span>';
   }
 
   const redirected = actualModel && actualModel !== model && !isPrefixOrSuffixVariant(model, actualModel);
-  const effort = normalizeThinkingEffortDisplay(thinkingEffort);
   const tokens = normalizeReasoningTokens(reasoningTokens);
   const classes = ['model-tag'];
   const titleParts = [];
@@ -548,10 +525,6 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
     classes.push('model-redirected');
     titleParts.push(`${t('logs.tip.requestedModel')}: ${escapeHtml(model)}`);
     titleParts.push(`${t('logs.tip.actualModel')}: ${escapeHtml(actualModel)}`);
-  }
-  if (effort) {
-    classes.push('model-thinking');
-    titleParts.push(`${t('logs.tip.thinkingEffort')}: ${escapeHtml(effort)}`);
   }
   if (tokens > 0) {
     classes.push('model-thinking');
@@ -564,8 +537,8 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
   const wsBadge = upstreamWebsocket === true
     ? `<sup class="log-channel-badge log-channel-websocket-badge" title="${escapeHtml(i18nText('logs.tip.upstreamWebsocket', '上游走 WebSocket 通道'))}">ws</sup>`
     : '';
-  const badgeHtml = wsBadge || effort || tokens > 0
-    ? `<span class="model-badges">${wsBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
+  const badgeHtml = wsBadge || tokens > 0
+    ? `<span class="model-badges">${wsBadge}${buildReasoningTokensBadge(tokens)}</span>`
     : '';
 
   return `<span class="model-display">
@@ -621,19 +594,12 @@ function buildLogTokenDescDisplay(label) {
   return `<span class="logs-token-desc-text" title="${escapeHtml(text)}">${escapeHtml(formatLogTokenDescLabel(text))}</span>`;
 }
 
+// 后端 log_source 只产出 proxy/manual_test（面板探活行），无其他来源。
 function renderLogSourceBadge(logSource) {
-  switch (logSource) {
-    case 'scheduled_check':
-      return `<span class="log-source-badge log-source-badge--scheduled">${escapeHtml(t('logs.sourceScheduledCheckBadge'))}</span>`;
-    case 'manual_test':
-      return `<span class="log-source-badge log-source-badge--manual">${escapeHtml(t('logs.sourceManualTestBadge'))}</span>`;
-    case 'manual_chat':
-      return `<span class="log-source-badge log-source-badge--manual">${escapeHtml(t('logs.sourceManualChatBadge'))}</span>`;
-    case 'checkin':
-      return `<span class="log-source-badge log-source-badge--checkin">${escapeHtml(t('logs.sourceCheckinBadge'))}</span>`;
-    default:
-      return '';
+  if (logSource === 'manual_test') {
+    return `<span class="log-source-badge log-source-badge--manual">${escapeHtml(t('logs.sourceManualTestBadge'))}</span>`;
   }
+  return '';
 }
 
 function canInspectDebugLog(entry) {
@@ -664,15 +630,8 @@ function buildLogMessageContent(entry) {
 function getLogCostInfo(entry) {
   const standardCost = Number(entry?.cost) || 0;
   if (standardCost <= 0) return null;
-
-  const rawMultiplier = Number(entry?.cost_multiplier);
-  const multiplier = (Number.isFinite(rawMultiplier) && rawMultiplier >= 0) ? rawMultiplier : 1;
-  const responseEffectiveCost = Number(entry?.effective_cost);
-  const effectiveCost = Number.isFinite(responseEffectiveCost)
-    ? responseEffectiveCost
-    : standardCost * multiplier;
-
-  return getCostDisplayInfo(standardCost, effectiveCost);
+  // 目录价即成交价：cost_multiplier 恒 1、effective_cost 不投影，无倍率双价。
+  return getCostDisplayInfo(standardCost, standardCost);
 }
 
 function formatLogCostFormulaValue(value) {
@@ -701,36 +660,7 @@ function buildLogCostTooltip(entry, costInfo) {
 
 function buildLogCostDisplay(entry, costInfo = getLogCostInfo(entry)) {
   if (!costInfo) return '';
-
-  const badgeParts = [];
-
-  const tierMultiplier = Number(entry?.cost_breakdown?.service_tier_multiplier);
-  if (Number.isFinite(tierMultiplier) && tierMultiplier > 0 && Math.abs(tierMultiplier - 1) >= 1e-9) {
-    const multiplierText = formatMultiplierText(tierMultiplier);
-    switch (entry?.service_tier) {
-      case 'priority':
-        badgeParts.push(`<sup class="log-cost-badge log-cost-badge--priority">${multiplierText}</sup>`);
-        break;
-      case 'flex':
-        badgeParts.push(`<sup class="log-cost-badge log-cost-badge--flex">${multiplierText}</sup>`);
-        break;
-      case 'fast':
-        badgeParts.push(`<sup class="log-cost-badge log-cost-badge--fast">\u26A1${multiplierText}</sup>`);
-        break;
-    }
-  }
-
-  const badgesHtml = badgeParts.length
-    ? `<span class="log-cost-badges">${badgeParts.join('')}</span>`
-    : '';
-  const costClasses = `log-cost${costInfo.hasMultiplier ? ' log-cost--with-multiplier' : ''}${badgeParts.length ? ' log-cost--with-badges' : ''}`;
-  const openingTag = `<span class="${costClasses}">`;
-
-  if (!costInfo.hasMultiplier) {
-    return `${openingTag}${badgesHtml}<span class="log-cost-effective">${formatCost(costInfo.standardCost)}</span></span>`;
-  }
-
-  return `${openingTag}${badgesHtml}<span class="log-cost-standard">${formatCost(costInfo.standardCost)}</span><span class="log-cost-effective">${formatCost(costInfo.effectiveCost)}</span></span>`;
+  return `<span class="log-cost"><span class="log-cost-effective">${formatCost(costInfo.standardCost)}</span></span>`;
 }
 
 function formatDebugSettingValue(setting) {
@@ -1238,7 +1168,7 @@ function renderActiveRequests(activeRequests) {
     const durationDisplay = startMs ? buildActiveRequestTimingHtml(req, elapsedRaw, elapsed) : '-';
 
     const statusDisplay = buildActiveRequestStatusHtml(req);
-    const modelDisplay = buildLogModelDisplay(req.model, '', req.thinking_effort, req.reasoning_tokens, req.upstream_websocket);
+    const modelDisplay = buildLogModelDisplay(req.model, '', req.reasoning_tokens, req.upstream_websocket);
     const tokenDescDisplay = buildActiveRequestTokenDescDisplay(req);
     const tokenDescCellClass = `logs-col-token-desc${tokenDescDisplay ? '' : ' mobile-empty-cell'}`;
     const abortDisplay = buildActiveRequestAbortHtml(req, id, startMs);
@@ -1360,24 +1290,16 @@ function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) 
   return `<span class="token-metric-value" style="color: var(--success-600);">${pct.toFixed(1)}%</span>`;
 }
 
-// buildCacheCreationDisplay 渲染缓存建列，分桶角标按实际数据判定。
-// 上游给了 5m/1h 明细就显示，不看模型名或协议——走 codex 协议的 gpt 模型同样
-// 会上报分桶，用模型名判断会把这些真实分桶吞掉。
+// buildCacheCreationDisplay 渲染缓存建列，5m 分桶角标按实际数据判定，不看
+// 模型名或协议——走 codex 协议的 gpt 模型同样会上报分桶，用模型名判断会把
+// 真实分桶吞掉。1h 分桶投影端从不赋值（恒 0），不渲染。
 function buildCacheCreationDisplay(entry) {
   const total = entry.cache_creation_input_tokens || 0;
   if (total <= 0) return '';
 
-  const cache5m = entry.cache_5m_input_tokens || 0;
-  const cache1h = entry.cache_1h_input_tokens || 0;
-
-  let badge = '';
-  if (cache5m > 0 && cache1h === 0) {
-    badge = ' <sup style="color: var(--primary-500); font-size: 0.75em; font-weight: 600;">5m</sup>';
-  } else if (cache1h > 0 && cache5m === 0) {
-    badge = ' <sup style="color: var(--warning-600); font-size: 0.75em; font-weight: 600;">1h</sup>';
-  } else if (cache5m > 0 && cache1h > 0) {
-    badge = ' <sup style="color: var(--primary-500); font-size: 0.75em; font-weight: 600;">5m</sup><sup style="color: var(--warning-600); font-size: 0.75em; font-weight: 600;">+1h</sup>';
-  }
+  const badge = (entry.cache_5m_input_tokens || 0) > 0
+    ? ' <sup style="color: var(--primary-500); font-size: 0.75em; font-weight: 600;">5m</sup>'
+    : '';
   return `<span class="token-metric-value" style="color: var(--primary-600);">${total.toLocaleString()}${badge}</span>`;
 }
 
@@ -1439,7 +1361,7 @@ function renderLogs(data) {
     // 3. 模型显示（重定向落点在 tag 悬浮提示里）；非 2xx 行给探活入口——
     // /admin/model-test 仅 admin 可达且消耗上游配额，api_token 会话不渲染入口
     const displayedActualModel = entry.actual_model || entry.response_model;
-    const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.thinking_effort, entry.reasoning_tokens, entry.upstream_websocket);
+    const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.reasoning_tokens, entry.upstream_websocket);
     const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
     const probeDisplay = !(statusCode >= 200 && statusCode < 300) && entry.model && !isTokenSession
       ? `<button type="button" class="test-key-btn" data-probe-model="${escapeHtml(entry.model)}" data-probe-api="${escapeHtml(entry.api || '')}" title="${escapeHtml(t('logs.probeModel'))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
