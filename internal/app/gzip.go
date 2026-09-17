@@ -54,7 +54,14 @@ func (w *gzipResponseWriter) WriteHeader(code int) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
 		ct := w.Header().Get("Content-Type")
-		w.skip = strings.HasPrefix(ct, "text/event-stream") || w.Header().Get("Content-Encoding") != ""
+		// SSE/已编码响应透传；无响应体的状态码（1xx/204/304）与重定向
+		// 同样不装 gzip——空载荷挂 Content-Encoding 是畸形响应，
+		// 重定向自带的迷你 HTML 也不值得一压。
+		w.skip = strings.HasPrefix(ct, "text/event-stream") ||
+			w.Header().Get("Content-Encoding") != "" ||
+			code < http.StatusOK || code == http.StatusNoContent ||
+			code == http.StatusNotModified ||
+			(code >= http.StatusMultipleChoices && code < http.StatusBadRequest)
 		if !w.skip {
 			w.gz = gzip.NewWriter(w.ResponseWriter)
 			w.Header().Set("Content-Encoding", "gzip")

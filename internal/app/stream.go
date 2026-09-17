@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -45,12 +46,14 @@ type streamWriter struct {
 	bytes int
 }
 
-// write 写一段响应体并立即 flush。
+// write 写一段响应体并立即 flush。committed 在 Write 成功后才置位——
+// 首字节 EPIPE 时它必须仍为 false，外层错误出口才分得清「响应行已提交
+// 200」与「什么都没上链路」（应记 499+disconnected）。
 func (out *streamWriter) write(p []byte) error {
-	out.committed = true
 	if _, err := out.writer.Write(p); err != nil {
 		return err
 	}
+	out.committed = true
 	out.bytes += len(p)
 	out.recorder.AddClientBytes(int64(len(p)))
 	out.flusher.Flush()
@@ -184,7 +187,14 @@ func (application *App) streamCompletion(
 	defer ticker.Stop()
 
 	firstEvent, firstErr := out.awaitEvent(streamCtx, items, ticker)
-	if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+	if errors.Is(firstErr, io.EOF) && streamCtx.Err() == nil {
+		// 上游在首事件前裸 EOF（adapter Recv 契约允许）：无内容可下发，
+		// 包上显式语义走下方统一错误出口——下 200 空流会把上游故障记成
+		// completed。取消竞态导致的 channel 关闭不改写，进块内由 ctx
+		// 检查按断连归因。
+		firstErr = fmt.Errorf("response stream ended before the first event: %w", firstErr)
+	}
+	if firstErr != nil {
 		// 建流后首事件前的断连/中止先按取消归因——context.Canceled 会被
 		// 分类记录映成 499，走 writeLoggedError 就把断连
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
@@ -197,7 +207,13 @@ func (application *App) streamCompletion(
 			} else {
 				completion.StatusCode = http.StatusOK
 			}
-			recorder.WriteError(debuglog.ErrStageClientDisconnected, firstErr)
+			// ctx 已取消时 Cause 是权威归因（abort 原因/取消语义），
+			// firstErr 可能只是 channel 关闭物化出的裸 EOF。
+			cause := firstErr
+			if streamCtx.Err() != nil {
+				cause = context.Cause(streamCtx)
+			}
+			recorder.WriteError(debuglog.ErrStageClientDisconnected, cause)
 			return
 		}
 		firstFailure := llm.Classify(firstErr)
@@ -258,7 +274,9 @@ func (application *App) streamCompletion(
 	}
 
 	completion.StatusCode = http.StatusOK
-	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, strings.TrimSpace(messages.Model), options, prelude, firstErr)
+	// 回显客户端原始请求名而非 redirect 后的内部名（RequestedModel 在
+	// 注册表改写前采样）——客户端不能看到自己没请求的模型名。
+	message, streamErr := writeProtocolStream(streamCtx, out, items, ticker, recorder, protocol, strings.TrimSpace(completion.RequestedModel), options, prelude, firstErr)
 	updateCompletionIdentity(completion, messages, message)
 	*responseBytes += out.bytes
 	if streamErr != nil {

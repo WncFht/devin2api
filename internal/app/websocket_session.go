@@ -249,7 +249,9 @@ func (s *wsSession) finalizeReplacement(top map[string]json.RawMessage) (json.Ra
 
 // normalizeInitialRequest 处理首轮 response.create：剥离 WS 信封字段，
 // 强制 stream=true，input 缺省补空数组，model 必填。
-// 首轮 input 允许字符串形态——只对数组形态做解析与配对校验。
+// 首轮 input 允许字符串形态（续轮必须数组，见 normalizeRequest）——回放
+// 状态里要换成等价的合成 message 项，否则续轮合并的 transcript 会静默
+// 丢掉首轮用户消息。
 func (s *wsSession) normalizeInitialRequest(top map[string]json.RawMessage) (json.RawMessage, error) {
 	if strings.TrimSpace(wsMapString(top, "model")) == "" {
 		return nil, errors.New("missing model in response.create request")
@@ -262,6 +264,24 @@ func (s *wsSession) normalizeInitialRequest(top map[string]json.RawMessage) (jso
 		top["input"] = json.RawMessage("[]")
 	} else if wsIsJSONArray(input) {
 		items = wsParseItems(input)
+	} else {
+		// 字符串 input 在本轮原样透传上游（协议层 appendInputMessages 把
+		// 它落成 user 文本）；stagedItems 里换成等价的 message 项计入回放。
+		var text string
+		if err := json.Unmarshal(input, &text); err == nil {
+			raw, err := json.Marshal(map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []map[string]string{
+					{"type": "input_text", "text": text},
+				},
+			})
+			if err == nil {
+				var fields wsItemFields
+				_ = json.Unmarshal(raw, &fields)
+				items = []wsItem{{raw: raw, fields: fields}}
+			}
+		}
 	}
 	top["stream"] = json.RawMessage("true")
 	return s.finishNormalize(top, items)
@@ -270,7 +290,12 @@ func (s *wsSession) normalizeInitialRequest(top map[string]json.RawMessage) (jso
 // wsGenerateDisabled 判定 Codex 的预热帧：{"type":"response.create","generate":false,...}
 // 预热不打上游，本地合成 created+completed，但 input 要计入 transcript（客户端
 // 下一轮会 previous_response_id 指向它）。
+// payload 可能达 32MiB：先字节级预筛再全量解析顶层字段树——预热帧稀少，
+// 不含 "generate" 键名的帧直接放行（reader 的 response.cancel 同款判法）。
 func wsGenerateDisabled(payload []byte) bool {
+	if !bytes.Contains(payload, []byte(`"generate"`)) {
+		return false
+	}
 	raw, has, _ := wsJSONField(payload, "generate")
 	if !has {
 		return false

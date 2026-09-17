@@ -445,9 +445,9 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 处理 ping/pong/close 控制帧，且这是发现客户端断连的唯一手段。
 	// channel 带缓冲：turn 进行中读到的数据帧排队等主循环，控制帧照常应答；
 	// 读端一旦出错立即 cancelConn，让在途上游随 ctx 取消而不是空跑到结束。
-	// 积压闸门按总字节（wsMaxQueuedBytes）而非帧数：小帧流水线不受帧数
-	// 限制影响，超出预算时满帧已在内存——断连比阻塞读循环诚实（阻塞会
-	// 让 ping/pong/close 与断连检测一并停摆）。
+	// 积压闸门有两道：总字节 wsMaxQueuedBytes 与 channel 帧容量——任一超出
+	// 都 close 断连而非阻塞读循环（阻塞会让 ping/pong/close 与断连检测
+	// 一并停摆）。
 	messages := make(chan wsInboundMessage, 64)
 	var queuedBytes atomic.Int64
 	// 当前轮次的取消句柄：turn 期间主循环阻塞在 runWSTurn 不读
@@ -456,6 +456,13 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 没有可取消对象，照常排队由主循环回 unsupported_event。
 	var turnMu sync.Mutex
 	var turnCancel context.CancelFunc
+	// PongHandler 续约 read deadline：reader 的 deadline 由 ping/pong 心跳与
+	// 客户端消息共同维持，纯空闲（客户端一言不发）的连接也靠这个活过 idle 窗。
+	// handler 必须先于 reader goroutine 安装——ReadMessage 一跑起来就可能
+	// 派发 unsolicited pong，边读边装 handler 是 data race。
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsIdleTimeout))
+	})
 	go func() {
 		defer close(messages)
 		first := true
@@ -498,14 +505,17 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 			case <-connCtx.Done():
 				queuedBytes.Add(-frameBytes)
 				return
+			default:
+				// 帧容量排满（小帧流水线超产，字节闸门兜不住的形态）：
+				// 与字节超限同策 close 1009 断连。
+				_ = conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "inbound frame queue full"),
+					time.Now().Add(wsWriteDeadline))
+				cancelConn()
+				return
 			}
 		}
 	}()
-	// PongHandler 续约 read deadline：reader 的 deadline 由 ping/pong 心跳与
-	// 客户端消息共同维持，纯空闲（客户端一言不发）的连接也靠这个活过 idle 窗。
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(wsIdleTimeout))
-	})
 	go func() {
 		ticker := time.NewTicker(wsPingInterval)
 		defer ticker.Stop()
