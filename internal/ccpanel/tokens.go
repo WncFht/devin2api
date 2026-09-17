@@ -120,6 +120,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		IsActive      *bool    `json:"is_active"`
 		AllowedModels []string `json:"allowed_models"`
 		Anonymous     bool     `json:"anonymous"`
+		Class         string   `json:"class"`
 		tokenLimitFields
 	}
 	if !decodeJSON(w, r, &req) {
@@ -132,6 +133,10 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Description = "anonymous"
 	}
+	if !authtoken.ValidateClass(req.Class) {
+		respondError(w, http.StatusBadRequest, "class must be 'fg' or 'bg'")
+		return
+	}
 	if !req.validateLimits(w) {
 		return
 	}
@@ -140,6 +145,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     req.ExpiresAt,
 		IsActive:      req.IsActive == nil || *req.IsActive,
 		AllowedModels: req.AllowedModels,
+		Class:         authtoken.NormalizeClass(req.Class),
 	}
 	req.applyTo(t)
 	if req.Anonymous {
@@ -171,6 +177,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		"allowed_models":  t.AllowedModels,
 		"max_concurrency": t.MaxConcurrency,
 		"max_rpm":         t.MaxRPM,
+		"class":           t.Class,
 	})
 }
 
@@ -190,9 +197,14 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 		IsActive      *bool             `json:"is_active"`
 		ExpiresAt     optionalInt64JSON `json:"expires_at"`
 		AllowedModels *[]string         `json:"allowed_models"`
+		Class         *string           `json:"class"`
 		tokenLimitFields
 	}
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Class != nil && !authtoken.ValidateClass(*req.Class) {
+		respondError(w, http.StatusBadRequest, "class must be 'fg' or 'bg'")
 		return
 	}
 	if !req.validateLimits(w) {
@@ -214,6 +226,9 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AllowedModels != nil {
 		t.AllowedModels = *req.AllowedModels
+	}
+	if req.Class != nil {
+		t.Class = authtoken.NormalizeClass(*req.Class)
 	}
 	req.applyTo(t)
 	if err := h.tokens.Update(t); err != nil {

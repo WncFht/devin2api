@@ -38,8 +38,12 @@ type Handler struct {
 	loginFailures map[string]*loginFail
 	// recentTokens 是最近见过的上游凭据（token 自愈轮换会换新）：
 	// maskToken 按这个集合脱敏，旧请求目录里的历史 token 字面值也罩住。
+	// seedTokens 是启动时播种的常驻集合（config 声明的账号凭据 +
+	// upstream_accounts 仓行）：重启后 recentTokens 环是空的，旧调试
+	// 目录里的凭据字面值仍须罩住——它无容量上限、常驻不淘汰。
 	tokenMu      sync.Mutex
 	recentTokens []string
+	seedTokens   map[string]struct{}
 
 	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
@@ -236,6 +240,23 @@ func (h *Handler) SetAccountQuotaSignal(fn func(name string, dailyRemainingPct, 
 // 当前 lane 集合，账号热增删后无需重注册。
 func (h *Handler) SetPoolTokenFuncs(fn func() map[string]func() string) {
 	h.poolTokenFuncs = fn
+}
+
+// NoteUpstreamTokens 把一批已知上游凭据字面值登记进常驻脱敏集合
+// （seedTokens）：装配层启动时用 config 声明的账号凭据与
+// upstream_accounts 仓的存量行播种——重启前写入的旧调试目录里
+// 的凭据字面量不能依赖「本进程见过」的 recentTokens 环兜底。
+func (h *Handler) NoteUpstreamTokens(tokens ...string) {
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	if h.seedTokens == nil {
+		h.seedTokens = make(map[string]struct{}, len(tokens))
+	}
+	for _, token := range tokens {
+		if token != "" {
+			h.seedTokens[token] = struct{}{}
+		}
+	}
 }
 
 // SetConfigOps 注入配置自省与热重载操作面（/admin/config*）。

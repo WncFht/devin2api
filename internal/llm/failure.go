@@ -48,6 +48,10 @@ type Failure struct {
 	// RetryAfterMinute 为真表示 hint 以分钟粒度给出：重置时刻须按上游
 	// 分钟桶界向上对齐（floor 取整的剩余时长），不能当精确秒数用。
 	RetryAfterMinute bool
+	// GateReason 是本地闸门拒绝的归因（latch/quota/hold——词表由
+	// rate gate 产出），仅 LocalGate 置位时有值；HTTP 层据此写
+	// X-Gate-Reason 响应头。
+	GateReason string
 
 	// 以下由 Classify 派生填充。
 
@@ -87,9 +91,9 @@ func (e *Failure) Error() string {
 // Unwrap 暴露原始错误链，context.Canceled/DeadlineExceeded 等哨兵仍可判定。
 func (e *Failure) Unwrap() error { return e.Cause }
 
-// Classify 把任意错误归一为分类记录：*Failure 直取并补齐派生字段，
-// *connect.Error 取结构字段，其余按文本兜底（前缀 code + 标记匹配）。
-// 派生是幂等的纯计算，重复调用结果一致。
+// Classify 把任意错误归一为分类记录：*Failure 拷贝后补齐派生字段（生产
+// 侧原对象不回写），*connect.Error 取结构字段，其余按文本兜底（前缀
+// code + 标记匹配）。派生是幂等的纯计算，重复调用结果一致。
 func Classify(err error) *Failure {
 	if err == nil {
 		return nil
@@ -99,7 +103,12 @@ func Classify(err error) *Failure {
 	var connectErr *connect.Error
 	switch {
 	case errors.As(err, &typed):
-		failure = typed
+		// typed 仍挂在生产侧错误链上被并发共享，字段不能回写；Cause
+		// 换完整外层链——Join/多 %w 在 Failure 之外的兄弟
+		// （context.Canceled 等哨兵）只看 typed.Cause 会丢。
+		copied := *typed
+		copied.Cause = err
+		failure = &copied
 	case errors.As(err, &connectErr):
 		// Message 不含 code 前缀，Failure.Error() 重组即原线文本；
 		// 空 message 时不再回填 connectErr.Error()——那会引入前缀重复。
@@ -136,9 +145,13 @@ func ClassifyText(message string) *Failure {
 	return derive(failure)
 }
 
-// derive 按原始字段补齐派生字段；生产侧已置位的字段保持不变——生产侧
-// 能以文本标记以外的方式结构知道这些事实（本地闸门、上游细节字段）。
+// derive 按原始字段补齐派生字段，在输入的副本上写——输入可能是生产侧
+// 共享的 *Failure（错误链上的原对象、AssistantMessage.Failure），就地写
+// 会让并发 Classify/FailureOf 撞同一对象。生产侧已置位的字段保持不变：
+// 生产侧能以文本标记以外的方式结构知道这些事实（本地闸门、上游细节字段）。
 func derive(failure *Failure) *Failure {
+	derived := *failure
+	failure = &derived
 	message := strings.ToLower(failure.Message)
 	for _, marker := range contextLengthMarkers {
 		if strings.Contains(message, marker) {
@@ -314,7 +327,9 @@ func parseResetHint(message string) (seconds int, minute bool, ok bool) {
 	if err != nil {
 		return 0, false, false
 	}
-	if strings.HasPrefix(match[2], "minute") {
+	// 正则带 (?i)，命中的单位大小写不定——先归一再判，"MINUTES" 直接
+	// 比会落进秒分支，分钟 hint 被当秒解析，等待差 60 倍。
+	if strings.HasPrefix(strings.ToLower(match[2]), "minute") {
 		return n * 60, true, true
 	}
 	return n, false, true

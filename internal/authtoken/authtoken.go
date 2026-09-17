@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -76,6 +77,10 @@ type Token struct {
 	// 请求数上限（固定分钟桶计数，重启归零不持久化）。0 均为不限制。
 	MaxConcurrency int `json:"max_concurrency"`
 	MaxRPM         int `json:"max_rpm"`
+	// Class 是请求类标记：fg（前台，默认）经速率闸门按原规则准入；
+	// bg（后台，无人值守批跑）在同一条闸门上叠加动态预留约束——
+	// 语义见 docs/gate-classes.md。空值按 fg 处理。
+	Class string `json:"class"`
 
 	inflight  int64 // 在途并发计数，不序列化
 	rpmBucket int64 // 当前 RPM 计数的分钟桶（unix 秒/60），不序列化
@@ -85,6 +90,27 @@ type Token struct {
 // AnonymousHash 是空明文的存储哈希：Hash 等于它的行即「匿名通道」——
 // 未携带凭据的 /v1 请求按该行准入。明文为空串，没有可出示的令牌值。
 var AnonymousHash = HashToken("")
+
+// 令牌请求类取值：fg 是默认与全部存量语义，bg 在速率闸门里走动态
+// 预留约束。ValidateClass 是管理面输入校验；NormalizeClass 是持久化
+// 前的兜底归一——空值/未知值都落成 fg，保证库里只有两值。
+const (
+	ClassFG = "fg"
+	ClassBG = "bg"
+)
+
+// ValidateClass 报告 class 是否合法取值（fg/bg/空——空表示默认 fg）。
+func ValidateClass(class string) bool {
+	return class == "" || class == ClassFG || class == ClassBG
+}
+
+// NormalizeClass 把空值与非法值归一成 fg——写库前的兜底，列默认值同向。
+func NormalizeClass(class string) string {
+	if class == ClassBG {
+		return ClassBG
+	}
+	return ClassFG
+}
 
 // IsAnonymous 报告该令牌是不是匿名通道行。
 func (t *Token) IsAnonymous() bool { return t.Hash == AnonymousHash }
@@ -128,6 +154,7 @@ type View struct {
 	AllowedModels            []string  `json:"allowed_models,omitempty"`
 	MaxConcurrency           int       `json:"max_concurrency"`
 	MaxRPM                   int       `json:"max_rpm"`
+	Class                    string    `json:"class"`
 	// Anonymous 标记该行是匿名通道（空明文占位行）——面板据此显示
 	// "(anonymous)" 而非掩码哈希，且不展示任何可复制的凭据。
 	Anonymous bool `json:"anonymous,omitempty"`
@@ -178,6 +205,7 @@ func (t *Token) API() View {
 		AllowedModels:            t.AllowedModels,
 		MaxConcurrency:           t.MaxConcurrency,
 		MaxRPM:                   t.MaxRPM,
+		Class:                    NormalizeClass(t.Class),
 		Anonymous:                t.IsAnonymous(),
 	}
 }
@@ -287,6 +315,23 @@ func (t *Token) CostLimitState(now time.Time) (used, limit int64, window string,
 	return 0, 0, "", false
 }
 
+// clone 返回令牌的深拷贝：指针字段复制指向值、AllowedModels 拷底层
+// 数组；inflight/rpm* 瞬态字段随结构体值拷贝带过。Store 对外只给
+// 快照——仓内对象不出 s.mu，准入热路径与管理面改单互不竞态。
+func (t *Token) clone() *Token {
+	c := *t
+	if t.ExpiresAt != nil {
+		v := *t.ExpiresAt
+		c.ExpiresAt = &v
+	}
+	if t.LastUsedAt != nil {
+		v := *t.LastUsedAt
+		c.LastUsedAt = &v
+	}
+	c.AllowedModels = slices.Clone(t.AllowedModels)
+	return &c
+}
+
 func usdToMicro(usd float64) int64 {
 	if usd <= 0 {
 		return 0
@@ -340,6 +385,7 @@ func rowFromToken(t *Token) *store.TokenRow {
 		WeeklyPeriodStart: t.CostWeeklyPeriodStart,
 		AllowedModels:     t.AllowedModels,
 		MaxConcurrency:    t.MaxConcurrency, MaxRPM: t.MaxRPM,
+		Class: NormalizeClass(t.Class),
 	}
 }
 
@@ -366,6 +412,7 @@ func tokenFromRow(r *store.TokenRow) *Token {
 		CostWeeklyPeriodStart: r.WeeklyPeriodStart,
 		AllowedModels:         r.AllowedModels,
 		MaxConcurrency:        r.MaxConcurrency, MaxRPM: r.MaxRPM,
+		Class: NormalizeClass(r.Class),
 	}
 }
 
@@ -382,8 +429,11 @@ type writeTask struct {
 // 同时守护 Resolve/Acquire/AllowRPM 等准入检查，一次 sqlite 抖动会
 // 瞬堵所有新请求鉴权。全部写经 writes 队列由单 worker 顺序落盘：
 // 入队发生在 s.mu 内，队列序即旧的锁内写序——先排的统计快照不会
-// 覆盖后到的管理面写。统计写是全量行快照，丢弃中间帧由下一帧自愈。
+// 覆盖后到的管理面写；管理面写的提交方同样在释锁后才等落库结果。
+// 统计写是全量行快照，丢弃中间帧由下一帧自愈。
 // LastUsedAt 只在内存里更新，随本行下一次写回顺带持久化。
+// 返回 *Token 的方法（Resolve/Get/Lookup*/List/Ensure）一律给
+// 深拷贝快照：签发后管理员改单不影响在途请求，这就是正确语义。
 type Store struct {
 	mu     sync.Mutex
 	db     *store.Store
@@ -412,7 +462,6 @@ func New(st *store.Store) (*Store, error) {
 		writes:    make(chan writeTask, 1024),
 		writeDone: make(chan struct{}),
 	}
-	go s.writeWorker()
 	rows, err := st.ListTokens(context.Background())
 	if err != nil {
 		return nil, err
@@ -423,6 +472,7 @@ func New(st *store.Store) (*Store, error) {
 		s.byID[t.ID] = t
 		s.byKeyHash[t.KeyHash()] = t
 	}
+	go s.writeWorker()
 	return s, nil
 }
 
@@ -442,8 +492,8 @@ func (s *Store) writeWorker() {
 }
 
 // submitSync 把一条管理面写排进队列并返回完成句柄；调用方持 s.mu
-// 保证入队序与内存变更序一致，之后阻塞读 done 等落库结果——与旧
-// 实现在锁内同步写库的可见性语义相同。仓已关闭时返回 nil。
+// 入队（队列序=内存变更序），释锁后才阻塞读 done 等落库结果——
+// 等库不持锁，sqlite 抖动不会冻住准入路径。仓已关闭时返回 nil。
 func (s *Store) submitSync(run func(context.Context) error) chan error {
 	if s.closed {
 		return nil
@@ -489,10 +539,10 @@ func HashToken(plain string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期。
+// Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期，返回快照。
 // 空明文同路径解析——命中哈希为 sha256("") 的匿名通道行即按该令牌
-// 准入（仓内无此行时照旧 miss）。命中即刷新 LastUsedAt（内存态，
-// 随本行后续写回固化）。
+// 准入（仓内无此行时照旧 miss）。命中即刷新 LastUsedAt（写仓内真
+// 对象，随本行后续写回固化；返回的快照含新值）。
 func (s *Store) Resolve(plain string) (*Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -504,20 +554,23 @@ func (s *Store) Resolve(plain string) (*Token, bool) {
 	if t.LastUsedAt == nil || now > *t.LastUsedAt {
 		t.LastUsedAt = &now
 	}
-	return t, true
+	return t.clone(), true
 }
 
-// Get 按 ID 取令牌。
+// Get 按 ID 取令牌，返回快照。
 func (s *Store) Get(id int64) (*Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.byID[id]
-	return t, ok
+	if !ok {
+		return nil, false
+	}
+	return t.clone(), true
 }
 
 // LookupByKeyHash 按 logs 表的 key_hash（哈希前 16 hex）反查令牌，
-// 供日志行投影 auth_token_id/description。已删除的令牌查不到，调用方
-// 按未知处理。
+// 返回快照，供日志行投影 auth_token_id/description。已删除的令牌
+// 查不到，调用方按未知处理。
 func (s *Store) LookupByKeyHash(keyHash string) (*Token, bool) {
 	if len(keyHash) != 16 {
 		return nil, false
@@ -525,7 +578,28 @@ func (s *Store) LookupByKeyHash(keyHash string) (*Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.byKeyHash[keyHash]
-	return t, ok
+	if !ok {
+		return nil, false
+	}
+	return t.clone(), true
+}
+
+// LookupByKeyHashes 是 LookupByKeyHash 的批量版：一次持锁查多个
+// key_hash，命中键映射到令牌快照；未命中或长度非法的键不进图。
+// 日志行批量投影用它替代逐行独占 mu。
+func (s *Store) LookupByKeyHashes(keyHashes []string) map[string]*Token {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*Token, len(keyHashes))
+	for _, kh := range keyHashes {
+		if len(kh) != 16 {
+			continue
+		}
+		if t, ok := s.byKeyHash[kh]; ok {
+			out[kh] = t.clone()
+		}
+	}
+	return out
 }
 
 // List 返回按 ID 排序的全部令牌快照。
@@ -534,14 +608,15 @@ func (s *Store) List() []*Token {
 	defer s.mu.Unlock()
 	out := make([]*Token, 0, len(s.byID))
 	for _, t := range s.byID {
-		out = append(out, t)
+		out = append(out, t.clone())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
 // Create 生成 64 字符 hex 明文令牌并入库；明文经返回值给出，只此一次。
-// id 由 auth_tokens 的自增主键分配。
+// id 由 auth_tokens 的自增主键分配——落库拿到 id 才进索引：明文尚未
+// 交付调用方，提前可解析没有意义。随机哈希不会与既有行冲突，无需占位。
 func (s *Store) Create(t *Token) (plain string, err error) {
 	if err := t.ValidateUsageLimits(); err != nil {
 		return "", err
@@ -551,18 +626,18 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 		return "", err
 	}
 	plain = hex.EncodeToString(raw)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	t.Hash = HashToken(plain)
 	t.CreatedAt = time.Now()
-	row := rowFromToken(t)
+	stored := t.clone()
+	row := rowFromToken(stored)
 	var id int64
+	s.mu.Lock()
 	done := s.submitSync(func(ctx context.Context) error {
 		var err error
 		id, err = s.db.InsertToken(ctx, row)
 		return err
 	})
+	s.mu.Unlock()
 	if done == nil {
 		return "", errors.New("auth token store closed")
 	}
@@ -570,28 +645,36 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 		return "", err
 	}
 	t.ID = id
-	s.byHash[t.Hash] = t
-	s.byID[t.ID] = t
-	s.byKeyHash[t.KeyHash()] = t
+	stored.ID = id
+	s.mu.Lock()
+	s.byHash[stored.Hash] = stored
+	s.byID[stored.ID] = stored
+	s.byKeyHash[stored.KeyHash()] = stored
+	s.mu.Unlock()
 	return plain, nil
 }
 
 // Ensure 按明文播种：哈希已存在时原样返回 (existing, false, nil)，
 // 否则把 t 入库并返回 (t, true, nil)。幂等——调用方不区分「刚建」
 // 与「早就有」。匿名通道用 plain="" 播种。
+// 入队的同一临界区占住 byHash/byKeyHash 位防同哈希并发插入；自增 id
+// 落库后才进 byID——窗口内 Resolve 命中的快照带 id 0，Acquire/
+// AddResult 按「已删」旁路放行，等价于行刚创建尚未可见。
 func (s *Store) Ensure(plain string, t *Token) (*Token, bool, error) {
 	if err := t.ValidateUsageLimits(); err != nil {
 		return nil, false, err
 	}
 	hash := HashToken(plain)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if existing, ok := s.byHash[hash]; ok {
-		return existing, false, nil
+		c := existing.clone()
+		s.mu.Unlock()
+		return c, false, nil
 	}
 	t.Hash = hash
 	t.CreatedAt = time.Now()
-	row := rowFromToken(t)
+	stored := t.clone()
+	row := rowFromToken(stored)
 	var id int64
 	done := s.submitSync(func(ctx context.Context) error {
 		var err error
@@ -599,38 +682,57 @@ func (s *Store) Ensure(plain string, t *Token) (*Token, bool, error) {
 		return err
 	})
 	if done == nil {
+		s.mu.Unlock()
 		return nil, false, errors.New("auth token store closed")
 	}
+	s.byHash[hash] = stored
+	s.byKeyHash[stored.KeyHash()] = stored
+	s.mu.Unlock()
 	if err := <-done; err != nil {
+		s.mu.Lock()
+		delete(s.byHash, hash)
+		delete(s.byKeyHash, stored.KeyHash())
+		s.mu.Unlock()
 		return nil, false, err
 	}
+	s.mu.Lock()
+	stored.ID = id
+	s.byID[id] = stored
+	s.mu.Unlock()
 	t.ID = id
-	s.byHash[t.Hash] = t
-	s.byID[t.ID] = t
-	s.byKeyHash[t.KeyHash()] = t
 	return t, true, nil
 }
 
-// Update 覆盖写一条令牌（调用方先 Get 再改字段）。
+// Update 覆盖写一条令牌：调用方先 Get 拿快照、改副本、再回传。
+// 锁内先校验传入副本，失败则内存态原样返回错误；通过后原子换索引
+// （inflight/rpm 瞬态计数从旧对象继承）并入队落库，释锁再等写库
+// 结果——等库不持锁。落库失败时内存已换，与改前同口径：内存为准，
+// 行随该令牌下一次写回收敛。
 func (s *Store) Update(t *Token) error {
+	s.mu.Lock()
 	if err := t.ValidateUsageLimits(); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	old, ok := s.byID[t.ID]
 	if !ok {
+		s.mu.Unlock()
 		return errors.New("token not found")
 	}
+	stored := t.clone()
+	stored.inflight = old.inflight
+	stored.rpmBucket = old.rpmBucket
+	stored.rpmCount = old.rpmCount
 	delete(s.byHash, old.Hash)
 	delete(s.byKeyHash, old.KeyHash())
-	s.byHash[t.Hash] = t
-	s.byID[t.ID] = t
-	s.byKeyHash[t.KeyHash()] = t
-	row := rowFromToken(t)
+	s.byHash[stored.Hash] = stored
+	s.byID[stored.ID] = stored
+	s.byKeyHash[stored.KeyHash()] = stored
+	row := rowFromToken(stored)
 	done := s.submitSync(func(ctx context.Context) error {
 		return s.db.UpsertToken(ctx, row)
 	})
+	s.mu.Unlock()
 	if done == nil {
 		return errors.New("auth token store closed")
 	}
@@ -638,11 +740,12 @@ func (s *Store) Update(t *Token) error {
 }
 
 // Delete 移除令牌；不存在时按成功处理（幂等删除）。
+// 索引摘除与入队在同一临界区，释锁后才等落库结果。
 func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	t, ok := s.byID[id]
 	if !ok {
+		s.mu.Unlock()
 		return nil
 	}
 	delete(s.byHash, t.Hash)
@@ -651,6 +754,7 @@ func (s *Store) Delete(id int64) error {
 	done := s.submitSync(func(ctx context.Context) error {
 		return s.db.DeleteToken(ctx, id)
 	})
+	s.mu.Unlock()
 	if done == nil {
 		return nil // 仓已关：行已出内存索引，幂等删除语义不变
 	}

@@ -476,8 +476,12 @@ func TestResponsesHandlerTokenCost5hLimitReturns429(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Ensure 返回快照：用量字段须经 Update 落回仓内才参与准入判定。
 	tok.Cost5hAnchor = time.Now().UnixMilli()
 	tok.Cost5hUsedMicroUSD = 1_000_000
+	if err := store.Update(tok); err != nil {
+		t.Fatal(err)
+	}
 
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
 	application.SetAuthTokens(store, nil)
@@ -997,8 +1001,9 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 }
 
 // TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前
-// 拒绝入账：504（可重试档，见 handler 注释）+ rejects 计数，不产生调试
-// 记录与 logs 行——完整请求从未到达，与鉴权/并发拒绝同口径。
+// 拒绝入账：504（可重试档，见 handler 注释）+ rejects 计数 + 一条
+// log_source=rejected 留存行；不产生调试目录——完整请求从未到达，
+// 与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	st := openTokenDB(t)
 	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
@@ -1021,6 +1026,19 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	}
 	if len(dirs) != 0 {
 		t.Fatalf("read failure produced debug dirs %v", dirs)
+	}
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{LogSource: "rejected"})
+	if err != nil {
+		t.Fatalf("SearchLogs rejected: %v", err)
+	}
+	if len(rows) != 1 || rows[0].StatusCode != http.StatusGatewayTimeout ||
+		rows[0].Result != "rejected" || rows[0].ErrorStage != debuglog.ErrStagePrePipeline ||
+		rows[0].ErrorMessage != string(obs.RejectHTTPRead) || rows[0].API != "openai-responses" {
+		t.Fatalf("rejected log row = %+v", rows)
+	}
+	// 默认日志视图看不到 rejected 行——留存检索须显式取。
+	if n, _, err := st.SearchLogs(context.Background(), store.LogQuery{}); err != nil || len(n) != 0 {
+		t.Fatalf("默认视图含 rejected 行: %v err=%v", n, err)
 	}
 }
 

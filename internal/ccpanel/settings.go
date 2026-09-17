@@ -72,12 +72,13 @@ type SettingsDeps struct {
 // 与 reset 回落目标都读它——不重灌的话 reload 后 reset 会应用启动时
 // 的旧默认，default_value 展示也过期。
 type SettingDefaults struct {
-	Devin          devin.Config
-	MaxConcurrency int
-	QuotaInterval  time.Duration
-	PprofListen    string
-	DebugEnabled   bool
-	Policy         debuglog.RetentionPolicy
+	Devin           devin.Config
+	MaxConcurrency  int
+	QuotaInterval   time.Duration
+	PprofListen     string
+	DebugEnabled    bool
+	DebugErrorsOnly bool
+	Policy          debuglog.RetentionPolicy
 }
 
 // PanelSettings 管理 settings 表与键注册表。
@@ -109,12 +110,13 @@ func NewPanelSettings(st *store.Store, deps SettingsDeps) (*PanelSettings, error
 		updated: map[string]int64{},
 	}
 	s.defaults.Store(SettingDefaults{
-		Devin:          deps.DevinConfig(),
-		MaxConcurrency: deps.MaxConcurrency(),
-		QuotaInterval:  deps.QuotaInterval(),
-		PprofListen:    deps.PprofListen(),
-		DebugEnabled:   deps.Debug.Enabled(),
-		Policy:         deps.Debug.Policy(),
+		Devin:           deps.DevinConfig(),
+		MaxConcurrency:  deps.MaxConcurrency(),
+		QuotaInterval:   deps.QuotaInterval(),
+		PprofListen:     deps.PprofListen(),
+		DebugEnabled:    deps.Debug.Enabled(),
+		DebugErrorsOnly: deps.Debug.ErrorsOnly(),
+		Policy:          deps.Debug.Policy(),
 	})
 	s.defs = s.buildSettingDefs(deps)
 	for i := range s.defs {
@@ -196,7 +198,7 @@ func mutateSeconds(field func(*devin.Config) *time.Duration) func(*devin.Config,
 		if err != nil {
 			return fmt.Errorf("value must be an integer (seconds): %w", err)
 		}
-		if int64(n) > math.MaxInt64/int64(time.Second) {
+		if int64(n) > math.MaxInt64/int64(time.Second) || int64(n) < math.MinInt64/int64(time.Second) {
 			return fmt.Errorf("value overflows duration: %d", n)
 		}
 		*field(c) = time.Duration(n) * time.Second
@@ -446,6 +448,26 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).WindowGuard })),
 			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.WindowGuard })),
 		},
+		{
+			key:  "gate_bg_max_hold_seconds",
+			typ:  "int",
+			desc: "bg 类请求闸内排队预算秒数（devin.gate_bg_max_hold_seconds，fg 走 gate_max_hold_seconds）；<=0 默认 120",
+			def: func() string {
+				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).BgMaxHold })(d0().Devin)
+			},
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).BgMaxHold })),
+			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.Gate.BgMaxHold })),
+		},
+		{
+			key:  "gate_bg_reserve_margin",
+			typ:  "int",
+			desc: "bg 准入预留公式的固定安全边际条数（devin.gate_bg_reserve_margin）；<=0 默认 4",
+			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).BgReserveMargin) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(devin.NormalizeGateConfig(c.Gate).BgReserveMargin) }),
+			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
+				return &c.Gate.BgReserveMargin
+			})),
+		},
 		// ---- 前缀保温 ----
 		{
 			key:  "warm_prefix_enabled",
@@ -617,6 +639,21 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			},
 		},
 		{
+			key:  "debug_log_errors_only",
+			typ:  "bool",
+			desc: "只保留失败请求的调试记录(干净完成的请求完结即删payload,logs摘要行仍保留)",
+			def:  func() string { return strconv.FormatBool(d0().DebugErrorsOnly) },
+			live: func() string { return strconv.FormatBool(debug.ErrorsOnly()) },
+			apply: func(v string) error {
+				b, err := strconv.ParseBool(v)
+				if err != nil {
+					return fmt.Errorf("value must be a boolean: %w", err)
+				}
+				debug.SetErrorsOnly(b)
+				return nil
+			},
+		},
+		{
 			key:   "log_retention_days",
 			typ:   "int",
 			desc:  "日志保留天数(-1永久保留,1-365天)",
@@ -667,7 +704,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 				if err != nil {
 					return fmt.Errorf("value must be an integer (minutes): %w", err)
 				}
-				if int64(n) > math.MaxInt64/int64(time.Minute) {
+				if int64(n) > math.MaxInt64/int64(time.Minute) || int64(n) < math.MinInt64/int64(time.Minute) {
 					return fmt.Errorf("value overflows duration: %d", n)
 				}
 				deps.SetQuotaInterval(time.Duration(n) * time.Minute)
@@ -742,19 +779,23 @@ func (s *PanelSettings) ApplyAll() error {
 	return errors.Join(errs...)
 }
 
+// valueOf 返回键的生效值：覆盖在册取覆盖值，否则取 live（无 live
+// 取 def）。row 投影与 set/reset 的回滚目标同源。
+func (s *PanelSettings) valueOf(d *settingDef) string {
+	if v, overridden := s.values[d.key]; overridden {
+		return v
+	}
+	if d.live != nil {
+		return d.live()
+	}
+	return d.def()
+}
+
 // row 把键投影成 ccLoad SystemSetting 的 wire 形状。
 func (s *PanelSettings) row(d *settingDef) map[string]any {
-	value, overridden := s.values[d.key]
-	if !overridden {
-		if d.live != nil {
-			value = d.live()
-		} else {
-			value = d.def()
-		}
-	}
 	return map[string]any{
 		"key":           d.key,
-		"value":         value,
+		"value":         s.valueOf(d),
 		"value_type":    d.typ,
 		"description":   d.desc,
 		"default_value": d.def(),
@@ -839,6 +880,7 @@ func (s *PanelSettings) reset(key string) error {
 	s.mu.Unlock()
 
 	if d.apply != nil {
+		prev = s.valueOf(d)
 		if err := d.apply(d.def()); err != nil {
 			return err
 		}

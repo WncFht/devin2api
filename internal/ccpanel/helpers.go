@@ -39,7 +39,7 @@ func (h *Handler) maskToken(data []byte) []byte {
 			tokens = append(tokens, fn())
 		}
 	}
-	for _, token := range h.noteTokens(tokens...) {
+	for _, token := range h.maskTokenSet(tokens) {
 		if token == "" {
 			continue
 		}
@@ -58,9 +58,10 @@ func (h *Handler) maskToken(data []byte) []byte {
 	return data
 }
 
-// noteTokens 记录最近见过的上游 token（去重、保留最近 16 个——号池下
-// 每号各占若干槽），返回脱敏要覆盖的字面值集合。
-func (h *Handler) noteTokens(tokens ...string) []string {
+// maskTokenSet 把本批新见过的 token 记入 recentTokens 环（去重、保留
+// 最近 16 个——号池下每号各占若干槽），返回脱敏要覆盖的字面值全集：
+// 常驻播种集合与环的并集，同一把锁取齐。
+func (h *Handler) maskTokenSet(tokens []string) []string {
 	h.tokenMu.Lock()
 	defer h.tokenMu.Unlock()
 	for _, token := range tokens {
@@ -72,7 +73,12 @@ func (h *Handler) noteTokens(tokens ...string) []string {
 	if len(h.recentTokens) > 16 {
 		h.recentTokens = h.recentTokens[:16]
 	}
-	return h.recentTokens
+	out := make([]string, 0, len(h.recentTokens)+len(h.seedTokens))
+	out = append(out, h.recentTokens...)
+	for token := range h.seedTokens {
+		out = append(out, token)
+	}
+	return out
 }
 
 // shortEnum 剥掉生成枚举名的长前缀（ExaCodeiumCommonPb_X_），只留可读尾段。

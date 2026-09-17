@@ -297,6 +297,12 @@ func SniffImageMIME(encoded string) string {
 
 // ContentText 拼接内容块中的全部 TextContent 正文。
 func ContentText(content []llm.Content) string {
+	// 单文本块是常态：直挂原串免一次 Builder 整段拷贝。
+	if len(content) == 1 {
+		if single, ok := content[0].(llm.TextContent); ok {
+			return single.Text
+		}
+	}
 	var builder strings.Builder
 	for _, block := range content {
 		if text, ok := block.(llm.TextContent); ok {

@@ -158,6 +158,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 | trailing-assistant / 空 user / dup message id / thinking-only assistant | 全部正常                                                                                                                |
 | redacted thinking + 伪造 `sealed.v1.` 签名                              | 正常                                                                                                                    |
 | 空 assistant(SYSTEM source) + user "continue"                           | 正常续说——`continueEmpty` 重发路径的形态依据                                                                            |
+| 半截 assistant（句中截断/无签名 thinking）+ user "continue"             | 正常续说（含 mid-word 接续）——`tryResume` post-commit 续传的形态依据（`edge stall-resume-*`）                           |
 
 含义：`RequestMessages.DemoteOrphanToolResults`（IR 层）+ `pairToolCallsWithResults`（wire 层）是承重墙；孤儿 result 的 demote 是安全降级（有挂起 call 时上游按位置容忍 id 不匹配）。
 

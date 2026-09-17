@@ -110,6 +110,14 @@ type DevinConfig struct {
 	// GateWindowGuardSeconds 是桶界两侧的停发死区秒数：覆盖桶界估计
 	// 误差与多分片漂移，死区内请求睡到下一窗口；<=0 默认 2。
 	GateWindowGuardSeconds int `yaml:"gate_window_guard_seconds"`
+	// GateBgMaxHoldSeconds 是 bg 类请求的闸内排队预算秒数（fg 走
+	// gate_max_hold_seconds）：无人值守负载等得起，给到两个窗口让
+	// 批跑宁可排队也不快败空转；<=0 默认 120。
+	GateBgMaxHoldSeconds int `yaml:"gate_bg_max_hold_seconds"`
+	// GateBgReserveMargin 是 bg 准入预留公式的固定安全边际（条）：
+	// 叠加在 fg 速率 EMA 外推与 fg 排队数之上，吸收估计滞后与小
+	// 并发突发；<=0 默认 4。
+	GateBgReserveMargin int `yaml:"gate_bg_reserve_margin"`
 	// WarmPrefixEnabled 是前缀保温总开关：为 true 时对保留的会话谱系
 	// 按节拍重放最近请求体，给上游 prompt cache 续期，压住 subagent
 	// 等待结束后的冷 prefill。默认 false（灰度开关）；热重载生效，
@@ -176,6 +184,10 @@ type DebugConfig struct {
 	PayloadHours *int `yaml:"payload_hours"`
 	// KeepErrorDirs 是容量淘汰时受保护的最新失败 dir 数；<=0 不保护。默认 32。
 	KeepErrorDirs *int `yaml:"keep_error_dirs"`
+	// ErrorsOnly 只保留失败请求的调试 payload：干净完成（completed 且
+	// 无 premature_end_turn 标记）的请求在完结时整删目录行，logs 摘要行
+	// 照常落库——大流量部署下调试库体积收敛到故障面。默认 false。
+	ErrorsOnly bool `yaml:"errors_only"`
 	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 quota_samples
 	// 表；<=0 不采样。默认 5。
 	QuotaIntervalMinutes *int `yaml:"quota_interval_minutes"`

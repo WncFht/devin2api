@@ -45,8 +45,18 @@ func TestAnchoredWindowsChargeAndRollover(t *testing.T) {
 		t.Fatalf("Ensure = (%v, %v), want created", err, created)
 	}
 
+	// 快照语义：AddResult 写仓内对象，断言前用 Get 重新取快照。
+	snap := func() *Token {
+		got, ok := store.Get(tok.ID)
+		if !ok {
+			t.Fatal("token missing from store")
+		}
+		return got
+	}
+
 	charge := Result{StatusCode: 200, CostUSD: 1.5}
 	store.AddResult(tok.ID, charge)
+	tok = snap()
 	if tok.Cost5hAnchor <= 0 || tok.CostWeeklyPeriodStart <= 0 {
 		t.Fatalf("anchors not set: 5h=%d weekly=%d", tok.Cost5hAnchor, tok.CostWeeklyPeriodStart)
 	}
@@ -56,6 +66,7 @@ func TestAnchoredWindowsChargeAndRollover(t *testing.T) {
 	anchor5h, anchorWeekly := tok.Cost5hAnchor, tok.CostWeeklyPeriodStart
 
 	store.AddResult(tok.ID, charge)
+	tok = snap()
 	if tok.Cost5hUsedMicroUSD != 3_000_000 || tok.CostWeeklyUsedMicroUSD != 3_000_000 {
 		t.Fatalf("used after 2nd charge = 5h:%d weekly:%d, want 3000000 each", tok.Cost5hUsedMicroUSD, tok.CostWeeklyUsedMicroUSD)
 	}
@@ -63,11 +74,14 @@ func TestAnchoredWindowsChargeAndRollover(t *testing.T) {
 		t.Fatal("in-window charge must not move the anchor")
 	}
 
-	// 锚点过期：用量读取归 0，不计超额。
+	// 锚点过期：用量读取归 0，不计超额。改快照字段经 Update 落进仓。
 	expired5h := time.Now().Add(-6 * time.Hour).UnixMilli()
 	expiredWeekly := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
 	tok.Cost5hAnchor = expired5h
 	tok.CostWeeklyPeriodStart = expiredWeekly
+	if err := store.Update(tok); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, window, exceeded := store.CostLimitState(tok.ID); exceeded {
 		t.Fatalf("expired windows reported exceeded (window %q)", window)
 	}
@@ -77,6 +91,7 @@ func TestAnchoredWindowsChargeAndRollover(t *testing.T) {
 
 	// 过期后下一笔记账重锚，窗口用量只剩新账。
 	store.AddResult(tok.ID, charge)
+	tok = snap()
 	if tok.Cost5hUsedMicroUSD != 1_500_000 || tok.CostWeeklyUsedMicroUSD != 1_500_000 {
 		t.Fatalf("post-rollover used = 5h:%d weekly:%d, want 1500000 each", tok.Cost5hUsedMicroUSD, tok.CostWeeklyUsedMicroUSD)
 	}
@@ -110,6 +125,9 @@ func TestCostLimitStateNames5hAndWeekly(t *testing.T) {
 				t.Fatal(err)
 			}
 			tc.apply(tok)
+			if err := store.Update(tok); err != nil {
+				t.Fatal(err)
+			}
 			used, limit, window, exceeded := store.CostLimitState(tok.ID)
 			if !exceeded || window != tc.window || used != 1_000_000 || limit != 1_000_000 {
 				t.Fatalf("CostLimitState = used %d limit %d window %q exceeded %v", used, limit, window, exceeded)
@@ -201,8 +219,9 @@ func TestAllowRPMLimitsAndRollsBucket(t *testing.T) {
 		t.Fatalf("3rd AllowRPM = (%d, %d, %v), want rejected", used, limit, ok)
 	}
 
-	// 分钟桶翻页：模拟桶过期后计数清零。
-	tok.rpmBucket--
+	// 分钟桶翻页：模拟桶过期后计数清零。rpmBucket 是瞬态字段、不经
+	// Update 覆盖写（Update 从仓内旧对象继承瞬态），同包直拨仓内对象。
+	store.byID[tok.ID].rpmBucket--
 	if used, _, ok := store.AllowRPM(tok.ID); !ok || used != 1 {
 		t.Fatalf("post-rollover AllowRPM = (%d, _, %v), want fresh count", used, ok)
 	}

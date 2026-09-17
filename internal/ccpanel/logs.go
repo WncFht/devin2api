@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/store"
 )
@@ -106,7 +107,7 @@ type logEntry struct {
 // projectLogEntry 把一条 logs 表行投影成日志页行。message 列复刻
 // ccLoad 语义（成功="ok"，失败=result[:error_stage]）——前端要求它非空才
 // 渲染调试入口。
-func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPrice) logEntry {
+func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPrice, tokensByHash map[string]*authtoken.Token) logEntry {
 	actual := e.Model
 	if actual == e.RequestedModel {
 		actual = ""
@@ -149,11 +150,11 @@ func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPric
 	}
 	// key_hash 反查令牌投影 auth_token_id/description；master key 与开放
 	// 模式的行（无对应令牌）留零值，ccLoad 的 NULL 列同语义。
-	if h.tokens != nil && e.KeyHash != "" {
-		if t, ok := h.tokens.LookupByKeyHash(e.KeyHash); ok {
-			entry.AuthTokenID = t.ID
-			entry.AuthTokenDescription = t.Description
-		}
+	// tokensByHash 由调用方按整页批量反查（LookupByKeyHashes）——逐行
+	// 走仓查询是隐性热点。
+	if t, ok := tokensByHash[e.KeyHash]; ok {
+		entry.AuthTokenID = t.ID
+		entry.AuthTokenDescription = t.Description
 	}
 	if e.FirstUpstreamMS != nil {
 		entry.FirstByteTime = float64(*e.FirstUpstreamMS) / 1000
@@ -212,7 +213,7 @@ func (h *Handler) scopeKeyHash(r *http.Request) (kh string, excluded bool) {
 // log_source 合法性校验），行级维度全部下推 LogQuery。
 func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 	switch strings.TrimSpace(r.URL.Query().Get("log_source")) {
-	case "", "all", "proxy", "manual_test":
+	case "", "all", "proxy", "manual_test", "rejected":
 	default:
 		return "", true
 	}
@@ -267,11 +268,14 @@ func (h *Handler) logQuery(r *http.Request) (store.LogQuery, bool) {
 
 // respondLogEntries 写日志列表信封：data=行数组、count=命中总数、
 // has_more=窗外仍有更早历史；另附带 rejects 管线前拒绝环（形状同
-// runtime-metrics 的 http.rejects）——拒绝不进 logs 表，列表页靠
-// 它提示「表里看不到 401/429」。
-func (h *Handler) respondLogEntries(w http.ResponseWriter, entries []logEntry, total int, hasMore bool) {
+// runtime-metrics 的 http.rejects）——拒绝行以 log_source=rejected
+// 落表但被默认视图剔除，事件环给列表页一个「最近拒绝了什么」的直读窗。
+// rejects 是全局环（含各来源
+// ip/key_hash/ua/path），只对 admin 身份附——api_token 的数据范围
+// 限定在自己令牌的行，全局环会把他人流量痕迹泄漏给持钥人。
+func (h *Handler) respondLogEntries(w http.ResponseWriter, r *http.Request, entries []logEntry, total int, hasMore bool) {
 	var rejects any
-	if h.metrics != nil {
+	if h.metrics != nil && identityFrom(r).Role == "admin" {
 		rejects = h.metrics.Rejects()
 	}
 	writeEnvelope(w, http.StatusOK, apiResponse{
@@ -299,28 +303,45 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	lq, excluded := h.logQuery(r)
 	lq.Limit = limit
 	lq.Offset = offset
+	// before_id 是 keyset 翻页游标（传上一页最旧行的 id）：深页
+	// OFFSET 随页深线性退化，id 范围谓词走主键恒定成本。两参数
+	// 并存时谓词取交（id<before_id 且按 offset 跳行），前端只传其一。
+	if beforeID, err := strconv.ParseInt(q.Get("before_id"), 10, 64); err == nil && beforeID > 0 {
+		lq.BeforeID = beforeID
+	}
 	if h.store == nil || excluded {
-		h.respondLogEntries(w, []logEntry{}, 0, false)
+		h.respondLogEntries(w, r, []logEntry{}, 0, false)
 		return
 	}
 	rows, total, err := h.store.SearchLogs(r.Context(), lq)
 	if err != nil {
+		// 静默回空 200 会让前端分不出「没数据」与「查询挂了」。
 		slog.Warn("ccpanel: logs search failed", "error", err)
-		h.respondLogEntries(w, []logEntry{}, 0, false)
+		respondError(w, http.StatusInternalServerError, "logs query failed")
 		return
 	}
 	prices := h.CatalogPrices(r.Context())
+	var tokensByHash map[string]*authtoken.Token
+	if h.tokens != nil {
+		hashes := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if row.KeyHash != "" {
+				hashes = append(hashes, row.KeyHash)
+			}
+		}
+		tokensByHash = h.tokens.LookupByKeyHashes(hashes)
+	}
 	entries := make([]logEntry, 0, len(rows))
 	for _, row := range rows {
-		entries = append(entries, h.projectLogEntry(row, prices))
+		entries = append(entries, h.projectLogEntry(row, prices, tokensByHash))
 	}
 	hasMore := total > int64(offset+len(rows))
 	if !hasMore {
-		if before, err := h.store.ExistsLogBefore(r.Context(), lq.SinceMS); err == nil {
+		if before, err := h.store.ExistsLogBefore(r.Context(), lq); err == nil {
 			hasMore = before
 		}
 	}
-	h.respondLogEntries(w, entries, int(total), hasMore)
+	h.respondLogEntries(w, r, entries, int(total), hasMore)
 }
 
 // dashboardLogsBootstrap 实现 /dashboard|/admin/logs/bootstrap
@@ -536,12 +557,15 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 		}
 	}
 	// 上游 procedure 按 wire 体形辨：搜索调用无 chatMessagePrompts。
-	baseURL := h.BaseURL()
-	reqURL := baseURL + "/exa.api_server_pb.ApiServerService/GetChatMessage"
-	if reqBody.Len() > 0 && !bytes.Contains(reqBody.Bytes(), []byte(`"chatMessagePrompts"`)) {
-		reqURL = baseURL + "/exa.api_server_pb.ApiServerService/GetWebSearchResults"
+	// req_url 只在确有上游请求体时投影——request_build 失败的请求从未
+	// 发出上游调用，投出 GetChatMessage 会让前端误显示发送行为。
+	if reqBody.Len() > 0 {
+		reqURL := h.BaseURL() + "/exa.api_server_pb.ApiServerService/GetChatMessage"
+		if !bytes.Contains(reqBody.Bytes(), []byte(`"chatMessagePrompts"`)) {
+			reqURL = h.BaseURL() + "/exa.api_server_pb.ApiServerService/GetWebSearchResults"
+		}
+		resp["req_url"] = reqURL
 	}
-	resp["req_url"] = reqURL
 	addDebugResponseBody(resp, "req_body", reqBody.Bytes())
 
 	// 04：上游原始帧原文 → resp_body。

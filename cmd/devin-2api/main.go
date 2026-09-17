@@ -96,6 +96,13 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
+	// DEVIN2API_HANDOFF 由 deploy 的交接进程携带（scripts/lib-deploy.sh
+	// spawn_handoff）：它是 reuseport 队列里接住端口的短命占位——旧实例
+	// 排空、托管实例拉起之间，新连接真实落在它身上，所以请求服务路径
+	// 照常装配；但后台维护与一次性播种全部归托管实例——两进程并发做
+	// 同一份维护只会重复打上游、重复写库或在 UNIQUE 约束上互相打断。
+	handoff := os.Getenv("DEVIN2API_HANDOFF") != ""
+
 	if *exportLegacyDir != "" {
 		if err := runExportLegacy(*exportLegacyDir); err != nil {
 			slog.Error("export legacy state failed", "error", err)
@@ -167,9 +174,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = dbStore.Close() }()
-	if err := dbStore.ImportLegacy(context.Background(), absoluteStateDir, logRoot); err != nil {
-		slog.Error("import legacy state failed", "error", err)
-		os.Exit(1)
+	// 文件时代状态的一次性导入是迁移维护而非服务依赖（能走 reuseport
+	// 交接的旧实例必然已是 DB 时代、导入早完成），交接进程跳过。
+	if !handoff {
+		if err := dbStore.ImportLegacy(context.Background(), absoluteStateDir, logRoot); err != nil {
+			slog.Error("import legacy state failed", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
@@ -211,13 +222,13 @@ func main() {
 		KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
 	}, dbStore)
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
+	debugManager.SetErrorsOnly(serviceConfig.Debug.ErrorsOnly)
 	defer debugManager.Close()
 	// 遗留磁盘请求目录的后台导入：逐目录事务搬进 debug 两表后删目录，
 	// 断点记在 runtime_state，崩溃重启续传。异步跑——大目录导入不该
 	// 拖住就绪；导入途中同秒新目录的 claim 由 DB 占位与 takenNames 兜底。
-	// reuseport 交接进程（DEVIN2API_HANDOFF）不跑：它只是接住端口的
-	// 短命分身，与托管实例并发导入会在同一目录的 UNIQUE 上互相打断。
-	if os.Getenv("DEVIN2API_HANDOFF") == "" {
+	// 交接进程不跑：它与托管实例并发导入会在同一目录的 UNIQUE 上互相打断。
+	if !handoff {
 		go func() {
 			if err := dbStore.ImportDebugDirs(context.Background(), logRoot, "import_debug_progress"); err != nil {
 				slog.Warn("import legacy debug dirs failed", "error", err)
@@ -229,19 +240,22 @@ func main() {
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，
 	// 与 Finish 实时路径一致；管线前 Reject 不进表，这部分计数不回放。
 	// 50000 是上限；LogTrendSeeds 本身只取最近 60 分钟完成的行。
-	if seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000); err == nil {
-		for _, seed := range seeds {
-			application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
+	// 交接进程跳过：它的进程内指标随退出丢弃，扫表是白做的启动耗时。
+	if !handoff {
+		if seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000); err == nil {
+			for _, seed := range seeds {
+				application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
+			}
+		} else {
+			slog.Warn("seed trend buckets failed", "error", err)
 		}
-	} else {
-		slog.Warn("seed trend buckets failed", "error", err)
 	}
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
 	// 上游相关调用靠 tokenFunc 现取，凭据补进后自动恢复。
 	// /web、/admin、/dashboard、/public、/login、/logout 挂在根路径。
-	ccPanel, err := ccpanel.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+	ccPanel, err := ccpanel.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
 	if err != nil {
 		slog.Error("create panel failed", "error", err)
 		os.Exit(1)
@@ -260,7 +274,27 @@ func main() {
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	// 持久层须在 SetQuotaInterval 前注入：采样协程起跑时快照读它。
 	ccPanel.SetStore(dbStore)
-	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+	// maskToken 常驻脱敏集合播种：config 声明的凭据与 upstream_accounts
+	// 仓的存量行都登记——重启后 recentTokens 环是空的，旧调试目录里的
+	// 凭据字面值照样罩得住。行内 token 含脱敏哈希形态也无妨（明文位
+	// 不命中就不替换）。
+	{
+		var tokenSeeds []string
+		for _, acc := range serviceConfig.Devin.Accounts {
+			tokenSeeds = append(tokenSeeds, acc.Token)
+		}
+		if rows, err := dbStore.ListAccounts(context.Background()); err == nil {
+			for _, row := range rows {
+				tokenSeeds = append(tokenSeeds, row.Token)
+			}
+		}
+		ccPanel.NoteUpstreamTokens(tokenSeeds...)
+	}
+	// 交接进程不起配额采样协程：起跑即对每个账号打一次上游并写
+	// quota_samples，与托管实例的采样重复且互相计数。
+	if !handoff {
+		ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
+	}
 	// 运行时设置键仓：覆盖项落 settings 表；覆盖项对被登记键
 	// 恒赢 config.yaml。构造须在 app/panel 装配与 SetQuotaInterval 之后——
 	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
@@ -295,8 +329,12 @@ func main() {
 		slog.Error("load panel settings failed", "error", err)
 		os.Exit(1)
 	}
-	if err := settingsStore.ApplyAll(); err != nil {
-		slog.Warn("panel settings replay failed", "error", err)
+	// 交接进程不重放面板覆盖：窗口内按文件配置服务即可，覆盖重放会
+	// 顺带把配额采样等后台组件也点起来。
+	if !handoff {
+		if err := settingsStore.ApplyAll(); err != nil {
+			slog.Warn("panel settings replay failed", "error", err)
+		}
 	}
 	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
@@ -321,7 +359,10 @@ func main() {
 	ccPanel.SetTokenStore(tokenStore)
 	// auth.api_key 不是准入旁路而是播种源：非空时确保仓内有对应普通
 	// 令牌行；reload 路径在 reloadRuntimeConfig 里同样补种。
-	seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
+	// 交接进程跳过播种——种子行由托管实例的 boot/reload 负责。
+	if !handoff {
+		seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
+	}
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*ccpanel.ConfigReloadReport, error) {
 			return reloadRuntimeConfig(rt, application, ccPanel, debugManager, settingsStore, tokenStore)
@@ -522,6 +563,10 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 		debugManager.SetEnabled(cfg.Debug.Enabled)
 		report.Applied = append(report.Applied, "debug.enabled")
 	}
+	if pcfg.Debug.ErrorsOnly != cfg.Debug.ErrorsOnly {
+		debugManager.SetErrorsOnly(cfg.Debug.ErrorsOnly)
+		report.Applied = append(report.Applied, "debug.errors_only")
+	}
 	newPolicy := debuglog.RetentionPolicy{
 		Days:          *cfg.Debug.RetentionDays,
 		MaxTotalMB:    *cfg.Debug.MaxTotalMB,
@@ -555,12 +600,13 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
 	// settings 表里登记的覆盖键压回文件值。
 	settings.ResampleDefaults(ccpanel.SettingDefaults{
-		Devin:          accounts.BaseConfig(cfg),
-		MaxConcurrency: cfg.Server.MaxConcurrency,
-		QuotaInterval:  time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute,
-		PprofListen:    cfg.Debug.PprofListen,
-		DebugEnabled:   cfg.Debug.Enabled,
-		Policy:         newPolicy,
+		Devin:           accounts.BaseConfig(cfg),
+		MaxConcurrency:  cfg.Server.MaxConcurrency,
+		QuotaInterval:   time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute,
+		PprofListen:     cfg.Debug.PprofListen,
+		DebugEnabled:    cfg.Debug.Enabled,
+		DebugErrorsOnly: cfg.Debug.ErrorsOnly,
+		Policy:          newPolicy,
 	})
 	if err := settings.ApplyAll(); err != nil {
 		slog.Warn("panel settings replay failed", "error", err)
@@ -601,6 +647,9 @@ func reusePortEnabled() bool {
 	return reusePortSupported && (v == "1" || strings.EqualFold(v, "true"))
 }
 
+// run 启动 HTTP 服务直到 ctx 取消（SIGINT/SIGTERM），随后优雅排空：
+// 关 keep-alive 让复用连接流走、reuseport 下立即释放 listener 给接替
+// 进程、等在途请求排空后关闭服务器。
 func run(ctx context.Context, application *app.App, server *http.Server, listener net.Listener) error {
 	result := make(chan error, 1)
 	go func() {

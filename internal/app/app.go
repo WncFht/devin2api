@@ -4,13 +4,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -526,9 +526,10 @@ func (application *App) WaitDrain(ctx context.Context) error {
 	return application.inflight.Wait(ctx)
 }
 
-// noteReject 统一记录一次管线前拒绝：分原因计数、事件环与进程日志同源。
-// 这类请求没有调试记录与 logs 行——计数/事件环供面板查，slog 行是唯一
-// 跨重启留存的足迹（部署后查排空期拒绝就靠它）。
+// noteReject 统一记录一次管线前拒绝：分原因计数、事件环、进程日志
+// 与 logs 表留存行同源。这类请求没有调试目录——计数/事件环供面板
+// 直读，logs 行（log_source=rejected，默认视图与聚合剔除）是跨重启
+// 可检索的足迹，slog 行是 db 不可用时的兜底。
 func (application *App) noteReject(reason obs.RejectReason, request *http.Request, status int) {
 	event := obs.RejectEvent{
 		Status:    status,
@@ -538,9 +539,35 @@ func (application *App) noteReject(reason obs.RejectReason, request *http.Reques
 		UserAgent: request.UserAgent(),
 	}
 	application.metrics.Reject(reason, event)
+	application.debugManager.NoteReject(debuglog.RequestMeta{
+		Method:          request.Method,
+		Path:            request.URL.Path,
+		API:             rejectAPI(request),
+		ClientIP:        event.IP,
+		KeyHash:         event.KeyHash,
+		ClientRequestID: clientRequestID(request),
+	}, status, string(reason))
 	slog.Warn("request rejected",
 		"reason", string(reason), "status", status, "path", request.URL.Path,
 		"client_ip", event.IP, "key_hash", event.KeyHash, "ua", event.UserAgent)
+}
+
+// rejectAPI 给管线前拒绝行推导入口协议：拒绝发生在路由分派之后、
+// createCompletion 之前，api 列只能按方法+路径映射，与 Router 里的
+// 注册表同一份对应关系；/v1/models 等元数据路由无协议身份，留空。
+func rejectAPI(request *http.Request) string {
+	switch request.URL.Path {
+	case "/v1/messages":
+		return "anthropic"
+	case "/v1/chat/completions":
+		return "openai-chat"
+	case "/v1/responses":
+		if request.Method == http.MethodGet {
+			return "responses-ws"
+		}
+		return "openai-responses"
+	}
+	return ""
 }
 
 // admitTurn 做一次 /v1 轮次准入：inflight.Add 先行（排空等待才能覆盖所有
@@ -756,7 +783,14 @@ func (application *App) createCompletion(
 	}()
 
 	// 图片 base64 会显著放大 JSON；与常见 IDE 多图请求对齐到 32MiB。
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 32<<20))
+	// 按 Content-Length 预扩缓冲：裸 ReadAll 从 512B 倍增，数百 KB 体的
+	// 中段拷贝是读入路径的分配大头（profiler 实测 ~2.4x 体积的临时量）。
+	var bodyBuf bytes.Buffer
+	if n := request.ContentLength; n > 0 {
+		bodyBuf.Grow(int(min(n, 32<<20)))
+	}
+	_, err := bodyBuf.ReadFrom(http.MaxBytesReader(writer, request.Body, 32<<20))
+	body := bodyBuf.Bytes()
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -802,6 +836,7 @@ func (application *App) createCompletion(
 	completion.Stream = options.Stream
 	reqMetrics.Observe(options.Stream, len(body))
 	recorder.SetModel(messages.Model)
+	recorder.SetStream(options.Stream)
 	if recorder != nil {
 		// 02 投影必须就地求值、不能推迟到日志 worker：adapter 的
 		// sanitizeRequest 会原地改写 messages 的共享 slice——推迟读
@@ -820,6 +855,22 @@ func (application *App) createCompletion(
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusUnauthorized, errors.New("invalid or expired api token"))
 		return
 	}
+	// 请求类随令牌解析落定：挂进 reqCtx 供闸门 wait 路径分级准入，
+	// gateHeaderWriter 在首字节写出前把放行回执 stamp 成 X-Gate-* 头。
+	// 其后的准入拒绝（并发/费用/模型白名单）也在包装层覆盖内，同样
+	// 回显 X-Gate-Class。匿名通道（authTok 为 nil）按 fg 处理。
+	gateClass := ""
+	if authTok != nil {
+		gateClass = authTok.Class
+	}
+	reqCtx, gateCtx := adapter.WithGateContext(reqCtx, gateClass)
+	// WS 写出方跳过包装：升级握手后响应头已发出，stamp 无从落地；
+	// 包上一层还会让 streamWriter 的 sseEventSink 断言失配，事件
+	// 退化成 SSE 文本帧写进 WS 连接。
+	if _, isEventSink := writer.(sseEventSink); !isEventSink {
+		writer = &gateHeaderWriter{ResponseWriter: writer, gate: gateCtx}
+	}
+	recorder.SetClass(gateCtx.Class)
 	if authTok != nil {
 		// 匿名通道请求不带凭据，recorder 采样不到 key_hash——拿到令牌后
 		// 回填，index/meta/进行中行才把匿名流量归到该行。
@@ -906,7 +957,9 @@ func (application *App) createCompletion(
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
-	body, err = protocol.EncodeFinal(message, strings.TrimSpace(messages.Model), options)
+	// 回显客户端原始请求名而非 redirect 后的内部名——RequestedModel
+	// 在注册表改写前采样，流式路径在 streamCompletion 里取同一字段。
+	body, err = protocol.EncodeFinal(message, strings.TrimSpace(completion.RequestedModel), options)
 	if err != nil {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return
@@ -1110,6 +1163,11 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
+		// 闸门拒绝的归因（latch/quota/hold）由生产侧结构携带——
+		// bg 客户端据此区分「桶满睡到下窗」与「闩内睡到解闩」。
+		if failure.GateReason != "" {
+			writer.Header().Set("X-Gate-Reason", failure.GateReason)
+		}
 		if resetAt, ok := failure.RateLimitReset(time.Now()); ok {
 			// 显式 0 秒 hint（刚过桶界、新桶已爆、无追加罚）解出
 			// resetAt=now——等价于「无退避指导」，不写头保持原状。

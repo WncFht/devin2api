@@ -42,6 +42,8 @@ type activeRequest struct {
 	DebugLogAvailable   bool    `json:"debug_log_available,omitempty"`
 	UpstreamStatus      string  `json:"upstream_status"`
 	Abortable           bool    `json:"abortable,omitempty"`
+	// Class 是令牌声明的请求类（fg/bg）——闸门分级准入语义随请求携带。
+	Class string `json:"class,omitempty"`
 }
 
 // activeRequestID 把目录名映射成正 int64——移植前端的请求 id 是数字，
@@ -73,7 +75,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			Model:             model,
 			ClientIP:          ar.Meta.ClientIP,
 			StartTime:         ar.StartedAt.UnixMilli(),
-			Streaming:         ar.Meta.API == "responses-ws",
+			Streaming:         ar.Meta.Stream,
 			API:               ar.Meta.API,
 			APIKeyUsed:        ar.Meta.KeyHash,
 			Account:           ar.Account,
@@ -85,6 +87,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			DebugLogAvailable: true,
 			UpstreamStatus:    status,
 			Abortable:         ar.Abortable,
+			Class:             ar.Meta.Class,
 		}
 		if ar.FirstUpstreamMS != nil {
 			row.ClientFirstByteTime = float64(*ar.FirstUpstreamMS) / 1000

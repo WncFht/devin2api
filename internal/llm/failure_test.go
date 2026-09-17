@@ -22,16 +22,23 @@ func TestClassifyConnectError(t *testing.T) {
 	}
 }
 
-// TestClassifyTypedFailure 验证已分类记录直取且派生幂等——重复 Classify
-// 结果一致，生产侧已置位字段不被重置。
+// TestClassifyTypedFailure 验证已分类记录在副本上派生——生产侧原对象
+// 不被回写（并发 Classify 共享它是安全的），已置位字段不被重置，重复
+// Classify 幂等；Cause 保留外层完整链，Join 在 Failure 之外的兄弟仍可判定。
 func TestClassifyTypedFailure(t *testing.T) {
 	produced := &Failure{Code: "resource_exhausted", Message: "local gate", LocalGate: true, RetryAfterSeconds: 30}
 	got := Classify(produced)
-	if got != produced {
-		t.Fatal("Classify must return the same record for a typed Failure")
+	if got == produced {
+		t.Fatal("Classify must derive on a copy, not write back into the shared record")
+	}
+	if produced.RateLimited {
+		t.Fatalf("derived fields must not leak into the producer's record: %+v", produced)
 	}
 	if !got.RateLimited || !got.LocalGate || got.RetryAfterSeconds != 30 {
 		t.Fatalf("producer fields must survive derive: %+v", got)
+	}
+	if wrapped := Classify(errors.Join(produced, context.Canceled)); !wrapped.Canceled || !errors.Is(wrapped.Cause, context.Canceled) {
+		t.Fatalf("outer chain siblings must stay visible through Cause: %+v", wrapped)
 	}
 	// 二次分类结果一致（幂等）。
 	if again := Classify(got); again.RetryAfterSeconds != 30 || !again.RateLimited {
@@ -109,6 +116,11 @@ func TestRetryAfterSeconds(t *testing.T) {
 	// 显式 0 与无 hint 是两态：秒数同为 0，但 ResetHint 标记声明在场。
 	if failure := ClassifyText("reset in 0 seconds"); failure.RetryAfterSeconds != 0 || !failure.ResetHint {
 		t.Fatal("explicit zero reset must report 0 with hint present")
+	}
+	// 正则带 (?i)，单位大小写不定——"Minutes" 必须归一后判分钟粒度，
+	// 落秒分支会把等待缩 60 倍。
+	if failure := ClassifyText("resource_exhausted: rate limited. Your limit will reset in 2 Minutes."); failure.RetryAfterSeconds != 120 || !failure.RetryAfterMinute {
+		t.Fatalf("case-insensitive minute hint = %ds,minute=%v, want 120s,true", failure.RetryAfterSeconds, failure.RetryAfterMinute)
 	}
 }
 

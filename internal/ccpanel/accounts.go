@@ -80,6 +80,8 @@ func (h *Handler) accountOpsUnavailable(w http.ResponseWriter) bool {
 // accountSnapshots 是一次聚合组装用的全部运行时快照：快照源各取一次
 // 按名分发，列表路径不必逐号重查 quota 历史（SQL）与活跃请求集。
 // 无该名条目一律缺席（map 零值），由 view 落成 null。
+// quotaOnly 非空时只读该名的样本序列——单号视图（写端点回包）不必为
+// 一条序列扫全表；空串走全量 QuotaReport（列表路径一次取齐）。
 type accountSnapshots struct {
 	laneStates map[string]devin.LaneState
 	gates      map[string]devin.GateStats
@@ -89,7 +91,7 @@ type accountSnapshots struct {
 	usage      map[string]map[string]any // 逐号 usage 投影，由调用方按名填
 }
 
-func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
+func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accountSnapshots {
 	snap := accountSnapshots{
 		laneStates: map[string]devin.LaneState{},
 		gates:      map[string]devin.GateStats{},
@@ -115,7 +117,16 @@ func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
 			snap.inflight[ar.Account]++
 		}
 	}
-	if accounts, ok := h.QuotaReport(ctx)["accounts"].(map[string]any); ok {
+	if quotaOnly != "" {
+		if h.store != nil {
+			series, err := h.store.ListQuotaSamples(ctx, quotaOnly, 0, quotaHistoryCap)
+			if err != nil {
+				slog.Warn("quota history read failed", "account", quotaOnly, "error", err)
+			} else if len(series) > 0 {
+				snap.quota[quotaOnly] = h.quotaSeriesReport(quotaOnly, series)
+			}
+		}
+	} else if accounts, ok := h.QuotaReport(ctx)["accounts"].(map[string]any); ok {
 		snap.quota = accounts
 	}
 	return snap
@@ -125,7 +136,7 @@ func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
 // 身份字段 + lane/gate/warm 快照 + inflight + quota 摘要 + usage。
 // 写端点回包与 GET 列表共用同一投影，schema 只有这一处来源。
 func (h *Handler) accountView(ctx context.Context, acc *store.ResolvedAccount) map[string]any {
-	snap := h.accountSnapshots(ctx)
+	snap := h.accountSnapshots(ctx, acc.Name)
 	snap.usage[acc.Name] = h.accountUsage(ctx, acc.Name)
 	return buildAccountView(acc, snap)
 }
@@ -245,7 +256,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	snap := h.accountSnapshots(r.Context())
+	snap := h.accountSnapshots(r.Context(), "")
 	views := make([]map[string]any, 0, len(accounts))
 	for i := range accounts {
 		snap.usage[accounts[i].Name] = h.accountUsage(r.Context(), accounts[i].Name)

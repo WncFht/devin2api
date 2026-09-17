@@ -43,6 +43,7 @@ func writeTestConfig(t *testing.T, dir, body string) (string, config.Config) {
 	return configPath, cfg
 }
 
+// testAccountStore 在临时目录开一个测试用 SQLite store，随测试结束关闭。
 func testAccountStore(t *testing.T, dir string) *store.Store {
 	t.Helper()
 	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
@@ -53,6 +54,7 @@ func testAccountStore(t *testing.T, dir string) *store.Store {
 	return dbStore
 }
 
+// testPool 建一个空 devin.Pool，随测试结束关闭。
 func testPool(t *testing.T) *devin.Pool {
 	t.Helper()
 	pool, err := devin.NewPool(nil)
@@ -484,6 +486,7 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	}
 }
 
+// mustEffective 取 ops.Effective 结果，出错即 fail。
 func mustEffective(t *testing.T, ops ccpanel.AccountOps, ctx context.Context) []store.ResolvedAccount {
 	t.Helper()
 	resolved, err := ops.Effective(ctx)
