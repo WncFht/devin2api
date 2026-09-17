@@ -70,6 +70,10 @@ const (
 	// ErrStageModelDisabled 是模型注册表准入拒绝（模型被停用），
 	// 请求未触达上游；同样发生在解码后，留有调试目录。
 	ErrStageModelDisabled = "model_disabled"
+	// ErrStagePrePipeline 是管线前拒绝（鉴权 401/并发 429/排空 503/
+	// WS 准入/读体中断）：请求从未进入处理管线，无调试目录，
+	// logs 行仅作留存检索（log_source=rejected 与服役流量分域）。
+	ErrStagePrePipeline = "pre_pipeline"
 )
 
 // devinRequestStageStem 是上游请求文件名的公共词干：首个请求是
