@@ -217,21 +217,26 @@ install_rotate_script() {
 
 # migrate_legacy_runtime <旧运行目录>：把上一版「单运行目录」布局迁到拆分
 # 布局——config.yaml 入 CONFIG_DIR、logs/ 逐项并入 STATE_DIR/logs，删旧
-# 二进制与 .handoff.pid（登记在册的残留交接进程 SIGTERM 退场）。同名冲突
-# 不覆盖——.jsonl 属追加日志把旧尾部接上，其余留给人工。可重入：迁移跑在
-# 老实例排空前，在途请求仍会往旧路径补写尾账，各 deploy 脚本在重启验证后
-# 再调一次收编。macOS 下旧运行目录与 CONFIG_DIR/STATE_DIR 同路径，只剩
-# 删旧二进制一件事。
+# 二进制；旧布局是独立目录时另回收其 .handoff.pid（登记在册的残留交接
+# 进程 SIGTERM 退场）。同名冲突不覆盖——.jsonl 属追加日志把旧尾部接上，
+# 其余留给人工。可重入：迁移跑在老实例排空前，在途请求仍会往旧路径补写
+# 尾账，各 deploy 脚本在重启验证后再调一次收编。macOS 下旧运行目录与
+# CONFIG_DIR/STATE_DIR 同路径，只剩删旧二进制一件事——那里的
+# .handoff.pid 是当前布局的交接登记表：本函数在部署收尾还会被调一遍，
+# 此时当次交接进程可能仍在排空，把它当残留清掉等于强杀在途请求（排空期
+# 第二发信号走默认动作立即退出），必须跳过。
 migrate_legacy_runtime() {
 	local old="$1" pid item base
 	[[ -d "${old}" ]] || return 0
-	pid="$(cat "${old}/.handoff.pid" 2>/dev/null || true)"
-	rm -f "${old}/.handoff.pid"
-	# pid 复用防护与 retire_stale_transient 同理：确认仍是 devin-2api 再发信号。
-	if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null &&
-		pgrep -x devin-2api | grep -qx "${pid}"; then
-		echo "==> 旧布局残留的交接进程 pid=${pid} 退场（SIGTERM）" >&2
-		kill "${pid}" 2>/dev/null || true
+	if [[ "${old}" != "${CONFIG_DIR}" && "${old}" != "${STATE_DIR}" ]]; then
+		pid="$(cat "${old}/.handoff.pid" 2>/dev/null || true)"
+		rm -f "${old}/.handoff.pid"
+		# pid 复用防护与 retire_stale_transient 同理：确认仍是 devin-2api 再发信号。
+		if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null &&
+			pgrep -x devin-2api | grep -qx "${pid}"; then
+			echo "==> 旧布局残留的交接进程 pid=${pid} 退场（SIGTERM）" >&2
+			kill "${pid}" 2>/dev/null || true
+		fi
 	fi
 	rm -f "${old}/devin-2api"
 	[[ "${old}" == "${CONFIG_DIR}" || "${old}" == "${STATE_DIR}" ]] && return 0
