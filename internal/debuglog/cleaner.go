@@ -68,6 +68,7 @@ func (manager *Manager) cleanOnce() int {
 	if manager.store == nil {
 		return 0
 	}
+	defer manager.pruneStorage()
 	ctx := context.Background()
 	dirs, err := manager.store.DebugDirs(ctx)
 	if err != nil {
@@ -201,6 +202,21 @@ func (manager *Manager) cleanOnce() int {
 		removed++
 	}
 	return removed
+}
+
+// pruneStorage 在 cleanOnce 各出口统一收尾（defer 触发）：恢复
+// quota_samples 的文件时代行数界，并把本轮删除腾出的 freelist 页
+// 还给库文件（auto_vacuum 只挂页不回缩，否则 db_bytes 永久虚高）。
+func (manager *Manager) pruneStorage() {
+	ctx := context.Background()
+	if _, err := manager.store.PruneQuotaSamples(ctx); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: prune quota samples failed", "error", err)
+	}
+	if err := manager.store.IncrementalVacuum(ctx); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: incremental vacuum failed", "error", err)
+	}
 }
 
 // cleanLogRows 按 LogRowRetentionDays 删除 logs 表的过期行；失败记
