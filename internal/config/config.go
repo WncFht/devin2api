@@ -162,7 +162,9 @@ type DashboardConfig struct {
 
 // AuthConfig 保存对外 OpenAI 兼容接口的访问控制配置。
 type AuthConfig struct {
-	// APIKey 是客户端访问 /v1/* 接口所需的密钥；为空时不启用鉴权。
+	// APIKey 是下游令牌的播种源而非准入旁路：启动与 reload 时若仓内
+	// 没有对应哈希行，它被写成一条普通 auth token（描述
+	// "config: auth.api_key"）；留空则不再补种。
 	APIKey string `yaml:"api_key"`
 }
 

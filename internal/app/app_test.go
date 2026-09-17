@@ -18,11 +18,27 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter"
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
 )
+
+// newTokenStore 建一个以 plain 为令牌的下游仓并接到 application——
+// /v1 准入的唯一判定源是令牌仓（无凭据旁路），要 401 场景就得仓内
+// 有行。plain 为空串时种的是匿名通道行（无凭据请求按它准入）。
+func newTokenStore(t *testing.T, plain string) *authtoken.Store {
+	t.Helper()
+	store, err := authtoken.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Ensure(plain, &authtoken.Token{Description: "test", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
 
 type fakeAdapter struct {
 	lastRequest llm.RequestMessages
@@ -301,11 +317,12 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	}
 }
 
-// TestResponsesHandlerRejectsMissingAPIKey 验证未提供密钥时 /v1/* 返回 401。
+// TestResponsesHandlerRejectsMissingAPIKey 验证仓内有令牌时未提供密钥的
+// /v1/* 请求返回 401（匿名通道未开——仓内唯一的行不是匿名行）。
 func TestResponsesHandlerRejectsMissingAPIKey(t *testing.T) {
 	fake := &fakeAdapter{}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
-	application.SetAPIKey("secret-key")
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -322,7 +339,7 @@ func TestResponsesHandlerRejectsMissingAPIKey(t *testing.T) {
 func TestResponsesHandlerRejectsInvalidAPIKey(t *testing.T) {
 	fake := &fakeAdapter{}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
-	application.SetAPIKey("secret-key")
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	request.Header.Set("Authorization", "Bearer wrong-key")
 	response := httptest.NewRecorder()
@@ -336,7 +353,7 @@ func TestResponsesHandlerRejectsInvalidAPIKey(t *testing.T) {
 func TestResponsesHandlerAcceptsBearerAPIKey(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
-	application.SetAPIKey("secret-key")
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer secret-key")
@@ -351,7 +368,7 @@ func TestResponsesHandlerAcceptsBearerAPIKey(t *testing.T) {
 func TestResponsesHandlerAcceptsXApiKeyHeader(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
-	application.SetAPIKey("secret-key")
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", "secret-key")
@@ -362,15 +379,121 @@ func TestResponsesHandlerAcceptsXApiKeyHeader(t *testing.T) {
 	}
 }
 
-// TestResponsesHandlerHealthIsUnprotected 验证 /healthz 不受 API Key 保护。
+// TestResponsesHandlerHealthIsUnprotected 验证 /healthz 不受令牌仓保护。
 func TestResponsesHandlerHealthIsUnprotected(t *testing.T) {
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, nil)
-	application.SetAPIKey("secret-key")
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestResponsesHandlerOpenModeWhenTokenStoreEmpty 验证令牌仓为空时 /v1
+// 不校验凭据（开放模式）：无凭据请求直接放行。
+func TestResponsesHandlerOpenModeWhenTokenStoreEmpty(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	store, err := authtoken.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAuthTokens(store, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestResponsesHandlerAnonymousChannelAdmits 验证匿名通道行：无凭据请求
+// 按该行准入；坏凭据仍 401（匿名行只兜「没带凭据」，不豁免「带错凭据」）。
+func TestResponsesHandlerAnonymousChannelAdmits(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAuthTokens(newTokenStore(t, ""), nil)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("no-credential status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+
+	bad := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	bad.Header.Set("Authorization", "Bearer wrong-key")
+	badResponse := httptest.NewRecorder()
+	application.Router().ServeHTTP(badResponse, bad)
+	if badResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("bad-credential status = %d, want 401", badResponse.Code)
+	}
+}
+
+// TestResponsesHandlerTokenRPMLimitReturns429 验证令牌 max_rpm 在准入链
+// 上执行：超过分钟桶上限的请求按 token_limit 429 拒绝。
+func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	store, err := authtoken.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Ensure("secret-key", &authtoken.Token{Description: "t", IsActive: true, MaxRPM: 1}); err != nil {
+		t.Fatal(err)
+	}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAuthTokens(store, nil)
+
+	first := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	first.Header.Set("Authorization", "Bearer secret-key")
+	firstResponse := httptest.NewRecorder()
+	application.Router().ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200: %s", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	second := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	second.Header.Set("Authorization", "Bearer secret-key")
+	secondResponse := httptest.NewRecorder()
+	application.Router().ServeHTTP(secondResponse, second)
+	if secondResponse.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429: %s", secondResponse.Code, secondResponse.Body.String())
+	}
+	if !strings.Contains(secondResponse.Body.String(), "rate limit") {
+		t.Fatalf("body = %s, want rate-limit message", secondResponse.Body.String())
+	}
+}
+
+// TestResponsesHandlerTokenCost5hLimitReturns429 验证 5h 锚定窗口超额按
+// token_limit 429 拒绝，错误信息带窗口名。
+func TestResponsesHandlerTokenCost5hLimitReturns429(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
+	store, err := authtoken.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := store.Ensure("secret-key", &authtoken.Token{
+		Description: "t", IsActive: true, MaxConcurrency: 5, Cost5hLimitMicroUSD: 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok.Cost5hAnchor = time.Now().UnixMilli()
+	tok.Cost5hUsedMicroUSD = 1_000_000
+
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAuthTokens(store, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
+	request.Header.Set("Authorization", "Bearer secret-key")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "5h cost limit") {
+		t.Fatalf("body = %s, want 5h window named", response.Body.String())
 	}
 }
 

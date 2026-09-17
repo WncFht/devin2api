@@ -187,7 +187,9 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		respondError(w, http.StatusUnauthorized, "Invalid credentials")
 	case "api_token":
-		if h.tokens != nil {
+		// 空 token 不得参与解析：Resolve("") 会命中匿名通道行——
+		// 匿名行是 /v1 无凭据流量的准入载体，不是可登录面板的凭据。
+		if h.tokens != nil && req.Token != "" {
 			if _, ok := h.tokens.Resolve(req.Token); ok {
 				h.clearLoginFailure(remoteIP(r))
 				respondOK(w, map[string]any{
@@ -268,8 +270,10 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // CheckPanelBearer 的开放语义已覆盖这条。
 func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.tokens != nil {
-			if t, ok := h.tokens.Resolve(bearerToken(r)); ok {
+		// Bearer 缺席时不进 Resolve：匿名通道行的哈希就是空明文的
+		// 哈希，不挡这一下，无凭据请求会被当成 api_token 身份放行。
+		if tok := bearerToken(r); tok != "" && h.tokens != nil {
+			if t, ok := h.tokens.Resolve(tok); ok {
 				h.clearLoginFailure(remoteIP(r))
 				next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{
 					Role:    "api_token",

@@ -262,18 +262,11 @@ func main() {
 	if err := settingsStore.ApplyAll(); err != nil {
 		slog.Warn("panel settings replay failed", "error", err)
 	}
-	ccPanel.SetConfigOps(ccpanel.ConfigOps{
-		Reload: func() (*ccpanel.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, ccPanel, debugManager, settingsStore)
-		},
-		Current: func() map[string]any {
-			return runtimeConfigView(absoluteConfigPath)
-		},
-	})
 	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
-	// input 价，与 ccpanel cellCost 同口径）。
+	// input 价，与 ccpanel cellCost 同口径）。建仓先于 SetConfigOps——
+	// reload 闭包要捕获它给 auth.api_key 补种。
 	tokenStore, err := authtoken.New(absoluteStateDir)
 	if err != nil {
 		slog.Error("load auth tokens failed", "error", err)
@@ -287,6 +280,17 @@ func main() {
 		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
 	})
 	ccPanel.SetTokenStore(tokenStore)
+	// auth.api_key 不是准入旁路而是播种源：非空时确保仓内有对应普通
+	// 令牌行；reload 路径在 reloadRuntimeConfig 里同样补种。
+	seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
+	ccPanel.SetConfigOps(ccpanel.ConfigOps{
+		Reload: func() (*ccpanel.ConfigReloadReport, error) {
+			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, ccPanel, debugManager, settingsStore, tokenStore)
+		},
+		Current: func() map[string]any {
+			return runtimeConfigView(absoluteConfigPath)
+		},
+	})
 	// 模型注册表：models.json 落状态目录根；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
 	modelStore, err := modelreg.New(absoluteStateDir)
@@ -370,12 +374,33 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 	}
 }
 
+// seedConfigAPIKey 把 auth.api_key 播种成一条普通令牌行（描述
+// "config: auth.api_key"）。幂等：哈希已在仓内（含被停用的行）原样
+// 跳过；空值不种。播种失败只告警——种子不该阻断启动/reload。
+func seedConfigAPIKey(tokens *authtoken.Store, apiKey string) {
+	key := strings.TrimSpace(apiKey)
+	if key == "" || tokens == nil {
+		return
+	}
+	_, created, err := tokens.Ensure(key, &authtoken.Token{
+		Description: "config: auth.api_key",
+		IsActive:    true,
+	})
+	if err != nil {
+		slog.Warn("seed auth.api_key token failed", "error", err)
+		return
+	}
+	if created {
+		slog.Info("seeded auth.api_key as auth token")
+	}
+}
+
 // reloadRuntimeConfig 重读配置文件并把可安全换值的字段热应用；校验失败
 // 直接返回错误、旧配置继续服役（validate-then-commit）。只报告值发生
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*ccpanel.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -412,6 +437,9 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		application.SetAPIKey(cfg.Auth.APIKey)
 		report.Applied = append(report.Applied, "auth.api_key")
 	}
+	// 每次 reload 都补种（不只 key 变化时）：种子行被删后下一次
+	// reload/重启重新长出；彻底移除要清空配置值再删行。
+	seedConfigAPIKey(tokens, cfg.Auth.APIKey)
 	if pcfg.Dashboard.Password != cfg.Dashboard.Password {
 		panel.SetPassword(cfg.Dashboard.Password)
 		report.Applied = append(report.Applied, "dashboard.password")

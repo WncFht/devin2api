@@ -165,4 +165,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
-面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/费用与并发限额，与 `auth.api_key` 主 key 并行准入）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。

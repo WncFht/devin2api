@@ -399,19 +399,28 @@ func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path
 	if h.masterKeyFunc != nil {
 		key = strings.TrimSpace(h.masterKeyFunc())
 	}
-	// 主密钥为空但令牌仓非空时探针没有可用明文凭据（仓里只存哈希）；
-	// 全空即开放模式，占位凭据也能过 authenticate。
+	// api_key 为空且仓非空时探针没有可出示的明文凭据（仓里只存哈希），
+	// 唯一的出路是匿名通道行——它按无凭据准入，探针连 Authorization
+	// 都不用带。仓全空即开放模式，占位凭据也能过 authenticate。
+	anonymous := false
 	if key == "" && h.tokens != nil && !h.tokens.Empty() {
-		respondError(w, http.StatusBadRequest, "auth.api_key is empty and auth tokens exist: configure a master key to run probes")
-		return
+		if _, ok := h.tokens.Resolve(""); !ok {
+			respondError(w, http.StatusBadRequest, "auth.api_key is empty and no anonymous channel exists: configure auth.api_key or enable the anonymous channel to run probes")
+			return
+		}
+		anonymous = true
 	}
 	probeCtx, cancel := context.WithTimeout(r.Context(), modelTestTimeout)
 	defer cancel()
 	probeReq := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)).WithContext(probeCtx)
-	if key == "" {
-		key = "panel-probe"
+	if anonymous {
+		// 无凭据准入：不带 Authorization 才会命中匿名通道行。
+	} else {
+		if key == "" {
+			key = "panel-probe"
+		}
+		probeReq.Header.Set("Authorization", "Bearer "+key)
 	}
-	probeReq.Header.Set("Authorization", "Bearer "+key)
 	probeReq.Header.Set("Content-Type", "application/json")
 	probeReq.Header.Set("X-Client-Request-Id", debuglog.ProbeClientRequestID)
 	rec := &probeRecorder{ResponseRecorder: httptest.NewRecorder()}
