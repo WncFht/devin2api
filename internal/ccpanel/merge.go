@@ -115,7 +115,7 @@ func stripHTTPResponseEnvelope(raw string) string {
 		return strings.TrimSpace(raw)
 	}
 	firstLine := strings.TrimSpace(strings.Split(raw, "\n")[0])
-	if !strings.HasPrefix(strings.ToUpper(firstLine), "HTTP ") {
+	if !strings.HasPrefix(strings.ToUpper(firstLine), "HTTP/") {
 		return strings.TrimSpace(raw)
 	}
 	return strings.TrimSpace(raw[headerBreak+2:])
