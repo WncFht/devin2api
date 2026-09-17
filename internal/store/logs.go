@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 )
@@ -13,7 +14,9 @@ import (
 type LogRow struct {
 	// ID 是自增日志行号——面板 log_id 与 last_*_id 的身份；读侧回填。
 	ID int64 `json:"-"`
-	// LogSource 是写入时定版的来源（proxy/manual_test）；读侧回填。
+	// LogSource 是写入时定版的来源：写侧置值即生效（rejected 行靠它
+	// 与服役流量分域），留空时 InsertLog 回落 'proxy'——业务分类归
+	// 写方（debuglog.logRowFor / 导入器各自定版）；读路径回填库内原值。
 	LogSource string `json:"-"`
 	// UpstreamProtocol 保留过滤维度的统一形状（当前恒 devin）；读侧回填。
 	UpstreamProtocol string `json:"-"`
@@ -95,12 +98,15 @@ type LogRow struct {
 	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
 }
 
-// logColumnList 是 logs 行的单一列清单：SELECT 列序即 scanLogRow 的
-// Scan 顺序，INSERT 列序由它派生（logInsertColumnList）。schema.go 的
-// CREATE TABLE 是该清单的 DDL 落点——加列只改清单、字段、scan、写侧
-// 赋值，SQL 文本不再多处重复。
+// logColumnList 是 logs 表全部列，顺序与 schema.go 的 CREATE TABLE
+// 一致（加列两边同步改）。读/写列清单由它剔除派生：
+//   - INSERT 剔除 id（自增）与 upstream_protocol（恒默认值 'devin'）；
+//   - SELECT 剔除 time/minute_bucket（读侧以 started_at 呈现，毫秒
+//     谓词仍走原始列）。
+//
+// scanLogRow 按 SELECT 派生序逐列绑定，加列时须补它的 case。
 var logColumnList = []string{
-	"id", "dir", "started_at", "duration_ms",
+	"id", "dir", "time", "minute_bucket", "started_at", "duration_ms",
 	"request_ready_ms", "upstream_sent_ms", "upstream_open_ms", "first_upstream_ms", "first_client_ms",
 	"api", "method", "path", "status_code", "result",
 	"requested_model", "model", "response_model", "model_mismatch", "stream",
@@ -111,43 +117,44 @@ var logColumnList = []string{
 	"conn_reused", "conn_idle_ms", "log_source", "upstream_protocol",
 }
 
-// logColumns 是行扫描的 SELECT 列清单。
-var logColumns = strings.Join(logColumnList, ", ")
+var (
+	// logSelectCols 是行扫描的列集（顺序即 scanLogRow 的 Scan 顺序）。
+	logSelectCols = logColumnsExcept("time", "minute_bucket")
+	logWriteCols  = logColumnsExcept("id", "upstream_protocol")
+	// logColumns 是行扫描的 SELECT 列清单字面量（SearchLogs/exportIndex 用）。
+	logColumns = strings.Join(logSelectCols, ", ")
+	// logsInsertSQL 的列清单与占位符都由 logWriteCols 派生，不手数字面量。
+	// import.go 的 ON CONFLICT(dir) 变体共用此语句。
+	logsInsertSQL = `INSERT INTO logs(` + strings.Join(logWriteCols, ", ") +
+		`) VALUES(` + placeholders(len(logWriteCols)) + `)`
+	// logsBatchInsertSQL 是写 worker 批量收尾用的幂等变体：idx_logs_dir
+	// 唯一索引下重复行静默跳过——单个坏行不能把共享事务拖成永久重试。
+	logsBatchInsertSQL = strings.Replace(logsInsertSQL, `INSERT INTO`, `INSERT OR IGNORE INTO`, 1)
+)
 
-// logInsertColumns 派生 INSERT 列序：去掉 id（自增）与
-// upstream_protocol（DDL DEFAULT 'devin' 供值），dir 之后补
-// time/minute_bucket 两个 InsertLog 派生列。
-var logInsertColumns = func() []string {
-	cols := make([]string, 0, len(logColumnList))
+// logColumnsExcept 从 logColumnList 剔除指定列（保持原序）。
+func logColumnsExcept(drop ...string) []string {
+	out := make([]string, 0, len(logColumnList)-len(drop))
 	for _, c := range logColumnList {
-		switch c {
-		case "id", "upstream_protocol":
-			continue
-		case "dir":
-			cols = append(cols, "dir", "time", "minute_bucket")
-			continue
+		if !slices.Contains(drop, c) {
+			out = append(out, c)
 		}
-		cols = append(cols, c)
 	}
-	return cols
-}()
+	return out
+}
 
-// logsInsertSQL 的占位符由 placeholders 按列数派生，避免手数字面量
-// 与列清单漂移。import.go 的 ON CONFLICT(dir) 变体共用此语句。
-var logsInsertSQL = `INSERT INTO logs(` + strings.Join(logInsertColumns, ", ") +
-	`) VALUES(` + placeholders(len(logInsertColumns)) + `)`
-
-// InsertLog 写入一条请求日志行，返回自增 id。time/minute_bucket 由
-// StartedAt 派生；log_source 原样落字段（业务分类归写方
-// debuglog.insertLog），空值回落 'proxy' 与 DDL 默认值同口径。
-func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
+// logInsertArgs 按 logWriteCols 序展开一行的 INSERT 实参；time/
+// minute_bucket 由 StartedAt 派生，log_source 空值回落 'proxy' 与
+// DDL 默认值同口径。InsertLog 与 WriteDebugBatch 的批量日志行共用
+// 同一投影，列序只在此维护一份。
+func logInsertArgs(e *LogRow) []any {
 	ms := e.StartedAt.UnixMilli()
 	source := e.LogSource
 	if source == "" {
 		source = "proxy"
 	}
-	res, err := s.db.ExecContext(ctx, logsInsertSQL,
-		e.Dir, ms, ms/60000, e.StartedAt.Format(time.RFC3339Nano), e.DurationMS,
+	return []any{
+		e.Dir, ms, ms / 60000, e.StartedAt.Format(time.RFC3339Nano), e.DurationMS,
 		e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
 		e.API, e.Method, e.Path, e.StatusCode, e.Result,
 		e.RequestedModel, e.Model, e.ResponseModel, e.ModelMismatch, e.Stream,
@@ -155,7 +162,14 @@ func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
 		e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
 		e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
 		e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-		e.ConnReused, e.ConnIdleMS, source)
+		e.ConnReused, e.ConnIdleMS, source,
+	}
+}
+
+// InsertLog 写入一条请求日志行，返回自增 id。log_source 原样落字段
+// （业务分类归写方 debuglog.logRowFor 与导入器）。
+func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
+	res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
 	if err != nil {
 		return 0, err
 	}

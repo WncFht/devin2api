@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -129,6 +131,70 @@ func TestDebugFileTruncation(t *testing.T) {
 	data, total, _, _ = s.DebugFile(ctx, "d1", "05-response-events.jsonl", 100)
 	if string(data) != "aaaabbbbcccc" || total != 12 {
 		t.Fatalf("over-cap = %q,%d", data, total)
+	}
+}
+
+func TestDebugFileCompression(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	// 可压缩大内容：库存 gzip 帧，usize 记解压前尺寸。
+	payload := bytes.Repeat([]byte(`{"k":"value"} `), 512)
+	if err := s.PutDebugFile(ctx, "d1", "big.json", payload); err != nil {
+		t.Fatal(err)
+	}
+	var usize, stored int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT usize, LENGTH(content) FROM debug_files WHERE dir='d1' AND name='big.json'`).Scan(&usize, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if usize != int64(len(payload)) || stored >= usize {
+		t.Fatalf("usize=%d stored=%d, want usize=%d > stored", usize, stored, len(payload))
+	}
+	data, total, ok, err := s.DebugFile(ctx, "d1", "big.json", 0)
+	if err != nil || !ok || !bytes.Equal(data, payload) || total != int64(len(payload)) {
+		t.Fatalf("compressed read = %d,%d,%v,%v", len(data), total, ok, err)
+	}
+	// 截断读作用在解压后的内容上，total 仍是逻辑尺寸。
+	data, total, _, err = s.DebugFile(ctx, "d1", "big.json", 10)
+	if err != nil || !bytes.Equal(data, payload[:10]) || total != int64(len(payload)) {
+		t.Fatalf("compressed trunc = %q,%d,%v", data, total, err)
+	}
+	// chunk 路径同一语义。
+	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", payload); err != nil {
+		t.Fatal(err)
+	}
+	data, total, ok, err = s.DebugFile(ctx, "d1", "04-devin-response.jsonl", 0)
+	if err != nil || !ok || !bytes.Equal(data, payload) || total != int64(len(payload)) {
+		t.Fatalf("compressed chunk = %d,%d,%v,%v", len(data), total, ok, err)
+	}
+	// DebugFileList 报逻辑尺寸而非库存尺寸。
+	files, err := s.DebugFileList(ctx, "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Name == "big.json" && f.Size != int64(len(payload)) {
+			t.Fatalf("list size = %d, want %d", f.Size, len(payload))
+		}
+	}
+	// 压不出 ≥10% 收益的内容原样入库（usize=0），读回不变。
+	rnd := make([]byte, 4096)
+	if _, err := rand.Read(rnd); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutDebugFile(ctx, "d1", "rnd.bin", rnd); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT usize FROM debug_files WHERE dir='d1' AND name='rnd.bin'`).Scan(&usize); err != nil {
+		t.Fatal(err)
+	}
+	if usize != 0 {
+		t.Fatalf("incompressible usize = %d, want 0", usize)
+	}
+	data, _, ok, err = s.DebugFile(ctx, "d1", "rnd.bin", 0)
+	if err != nil || !ok || !bytes.Equal(data, rnd) {
+		t.Fatalf("raw read = %d,%v,%v", len(data), ok, err)
 	}
 }
 

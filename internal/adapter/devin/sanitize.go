@@ -13,6 +13,7 @@ package devin
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -168,42 +169,83 @@ func sanitizeContents(content []llm.Content, hits map[string]int) []llm.Content 
 	return content
 }
 
-// sanitizeBucketsAll / sanitizeBucketsMessages 把全部（或仅非 promptOnly）
-// trigger 按首字节折小写（b | 0x20）分桶：预筛逐字节查桶，桶命中再做
-// EqualFold 前缀比对。干净文本（绝大多数块）单趟扫描、零分配返回，
-// 免去逐规则 strings.Contains 全扫和 ToLower 整文拷贝。
+// sanitizeFold 是 ASCII 大小写折叠表（A-Z → a-z，其余原样）。trigger
+// 均为小写 ASCII 字面量，折叠表归一即等价 EqualFold 的 ASCII 语义。
+var sanitizeFold = func() [256]byte {
+	var table [256]byte
+	for b := 0; b < 256; b++ {
+		c := byte(b)
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		table[b] = c
+	}
+	return table
+}()
+
+// sanitizePairAll / sanitizePairMessages 把规则按 trigger 折叠后的前两
+// 字节分进 64K 桶，桶内存规则序号。双字节前缀让干净正文几乎探不到候选
+// （单字节桶下每个字母位都要 EqualFold 扇出，是 sanitize 的 CPU 大头）；
+// includePromptOnly=false 的表剔除 promptOnly 规则——消息正文不走那批。
 var (
-	sanitizeBucketsAll      = triggerBuckets(true)
-	sanitizeBucketsMessages = triggerBuckets(false)
+	sanitizePairAll      = buildSanitizePairs(true)
+	sanitizePairMessages = buildSanitizePairs(false)
 )
 
-// triggerBuckets 建预筛桶：按 trigger 首字节折小写（b|0x20）把规则
-// 分进 256 桶。includePromptOnly 为 false 时剔除只作用于 prompt/工具
-// 描述的规则——消息正文不走那批。
-func triggerBuckets(includePromptOnly bool) [256][]string {
-	var buckets [256][]string
-	for _, rule := range upstreamSanitizeRules {
+// buildSanitizePairs 建双字节前缀桶表；trigger 少于 2 字节或含大写是
+// 编码错误（折叠匹配会静默失效），init 期 panic 尽早暴露。
+func buildSanitizePairs(includePromptOnly bool) *[65536][]uint8 {
+	if len(upstreamSanitizeRules) > 64 {
+		panic("devin: too many sanitize rules for bitmask")
+	}
+	var buckets [65536][]uint8
+	for index, rule := range upstreamSanitizeRules {
+		trigger := rule.trigger
+		if len(trigger) < 2 || trigger != strings.ToLower(trigger) {
+			panic(fmt.Sprintf("devin: sanitize rule %s has bad trigger %q", rule.id, trigger))
+		}
 		if rule.promptOnly && !includePromptOnly {
 			continue
 		}
-		buckets[rule.trigger[0]|0x20] = append(buckets[rule.trigger[0]|0x20], rule.trigger)
+		key := uint16(sanitizeFold[trigger[0]])<<8 | uint16(sanitizeFold[trigger[1]])
+		buckets[key] = append(buckets[key], uint8(index))
 	}
-	return buckets
+	return &buckets
 }
 
-// hasSanitizeTrigger 逐字节扫描文本：命中字节桶再做 EqualFold 短前缀
-// 比对。任一 trigger 出现即返回 true（可能存在规则命中），全否则文本
-// 一定干净——桶按 trigger 首字节索引，规则不可能绕过对应桶。
-func hasSanitizeTrigger(text string, buckets *[256][]string) bool {
-	for i := 0; i < len(text); i++ {
-		for _, trigger := range buckets[text[i]|0x20] {
-			if len(text)-i >= len(trigger) && strings.EqualFold(text[i:i+len(trigger)], trigger) {
-				return true
+// sanitizeCandidateRules 单趟扫描文本，返回可能命中的规则位集：每个位置
+// 用折叠前两字节探桶，命中再做整词折叠比对置位。折叠只可能假阳（非字母
+// 折叠歧义），不会漏真 trigger——位集为 0 即文本一定干净。
+func sanitizeCandidateRules(text string, buckets *[65536][]uint8) (found uint64) {
+	for i := 0; i+1 < len(text); i++ {
+		key := uint16(sanitizeFold[text[i]])<<8 | uint16(sanitizeFold[text[i+1]])
+		for _, index := range buckets[key] {
+			if found>>index&1 != 0 {
+				continue
+			}
+			trigger := upstreamSanitizeRules[index].trigger
+			if len(text)-i < len(trigger) {
+				continue
+			}
+			window := text[i : i+len(trigger)]
+			j := 0
+			for ; j < len(trigger); j++ {
+				if sanitizeFold[window[j]] != trigger[j] {
+					break
+				}
+			}
+			if j == len(trigger) {
+				found |= 1 << index
 			}
 		}
 	}
-	return false
+	return found
 }
+
+// maxSanitizePasses 是改写-复扫轮数上限：某轮替换产物可能引入新 trigger
+// （含跨替换边界的拼合），复扫把残存指纹兜住；理论上规则间循环改写才
+// 会触到上限，此时遗留指纹交还上游裁决，不无限空转。
+const maxSanitizePasses = 4
 
 // sanitizeUpstreamText 按规则集改写文本并把命中数累加进 hits（由
 // sanitizeRequest 统一分配）；替换串允许含 $ 捕获组引用，故命中数
@@ -212,29 +254,30 @@ func sanitizeUpstreamText(text string, includePromptOnly bool, hits map[string]i
 	if text == "" {
 		return text
 	}
-	buckets := &sanitizeBucketsMessages
+	buckets := sanitizePairMessages
 	if includePromptOnly {
-		buckets = &sanitizeBucketsAll
+		buckets = sanitizePairAll
 	}
-	if !hasSanitizeTrigger(text, buckets) {
-		return text
+	for pass := 0; ; pass++ {
+		// 每条规则的 trigger 是该 pattern 任何匹配必然包含的字面词；
+		// 位集预筛只放行可能命中的规则，免去逐规则 Contains 全扫。
+		found := sanitizeCandidateRules(text, buckets)
+		if found == 0 || pass == maxSanitizePasses-1 {
+			return text
+		}
+		rewrote := false
+		for index, rule := range upstreamSanitizeRules {
+			if found>>index&1 == 0 {
+				continue
+			}
+			if matches := rule.pattern.FindAllStringIndex(text, -1); len(matches) > 0 {
+				hits[rule.id] += len(matches)
+				text = rule.pattern.ReplaceAllString(text, rule.replacement)
+				rewrote = true
+			}
+		}
+		if !rewrote {
+			return text
+		}
 	}
-	// 每条规则的 trigger 是该 pattern 任何匹配必然包含的字面词；
-	// 预筛命中后仍按 trigger 逐规则跳过，再做正则改写。
-	lower := strings.ToLower(text)
-	for _, rule := range upstreamSanitizeRules {
-		if rule.promptOnly && !includePromptOnly {
-			continue
-		}
-		if !strings.Contains(lower, rule.trigger) {
-			continue
-		}
-		if matches := rule.pattern.FindAllStringIndex(text, -1); len(matches) > 0 {
-			hits[rule.id] += len(matches)
-			text = rule.pattern.ReplaceAllString(text, rule.replacement)
-			// 替换产物可能包含后续规则的触发词，lower 跟随 text 重算。
-			lower = strings.ToLower(text)
-		}
-	}
-	return text
 }

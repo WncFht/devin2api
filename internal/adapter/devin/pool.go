@@ -494,17 +494,17 @@ func (lane *poolLane) verdict() laneVerdict {
 		v.hardDown = true
 		v.reasons = append(v.reasons, "generic_cooldown")
 	}
-	stats := lane.adapter.GateStats()
-	if stats.Latched {
+	snap := lane.adapter.gate.admissionSnapshot()
+	if snap.Latched {
 		v.reasons = append(v.reasons, "gate_latched")
 	}
 	// 桶满与死区同记 gate_window_full：两者都是「窗口侧暂不可发」，
 	// 审计词表不区分死区/满桶。
-	windowBlocked := stats.WindowQuota > 0 && (!stats.Sendable || stats.WindowUsed >= stats.WindowQuota)
+	windowBlocked := snap.WindowQuota > 0 && (!snap.Sendable || snap.WindowUsed >= snap.WindowQuota)
 	if windowBlocked {
 		v.reasons = append(v.reasons, "gate_window_full")
 	}
-	v.healthy = !v.hardDown && !stats.Latched && !windowBlocked
+	v.healthy = !v.hardDown && !snap.Latched && !windowBlocked
 	v.bucket = 2
 	if v.healthy {
 		v.bucket = 0
@@ -1123,8 +1123,7 @@ func (pool *Pool) CurrentConfig() Config {
 
 // errNoUpstreamAccounts 是空池（含「全 lane 被 disabled/墓碑摘出
 // 生效集」的同形态）的统一失败：没有可触达的上游。非 ClientFixable——
-// /v1 侧映射 5xx；每次新建实例是因为 Classify 的派生补齐会原地写字段，
-// 共享实例在并发下是数据竞争。
+// /v1 侧映射 5xx。每次新建实例：Failure 惯例上不共享可复用对象。
 func errNoUpstreamAccounts() *llm.Failure {
 	return &llm.Failure{Code: "unavailable", Message: "no upstream accounts configured"}
 }

@@ -140,6 +140,12 @@ func (manager *Manager) cleanOnce() int {
 
 	// 容量淘汰：总量超限后从最旧的目录开始回收，直到回到上限内。
 	// 最近 policy.KeepErrorDirs 个失败目录受保护：失败现场恰恰是日后最想回看的。
+	// DBBytes 是库文件+WAL 的物理尺寸，必不小于 debug payload 合计——
+	// 它没超限时直接跳过 DebugDirSizes 的全表聚合扫（5min 一轮，在 GB
+	// 级库上是一大笔固定开销）。
+	if manager.store.DBBytes() <= maxBytes {
+		return removed
+	}
 	sizes, err := manager.store.DebugDirSizes(ctx)
 	if err != nil {
 		manager.ioErrors.Add(1)
@@ -190,7 +196,7 @@ var errorSigLongRun = regexp.MustCompile(`[0-9a-fA-F]{8,}|[0-9]{4,}`)
 // 各自独占签名，不参与归并。龄删与容量淘汰两处调用共用同一豁免口径。
 func (manager *Manager) protectedErrorDirs(ctx context.Context, candidates []string, errorDirs map[string]bool, keepErrorDirs int) map[string]bool {
 	protected := map[string]bool{}
-	if keepErrorDirs <= 0 {
+	if keepErrorDirs <= 0 || len(errorDirs) == 0 {
 		return protected
 	}
 	sigs, err := manager.store.DebugErrorSignatures(ctx)

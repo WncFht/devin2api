@@ -9,7 +9,6 @@ import (
 	"context"
 	"database/sql"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -25,6 +24,7 @@ const logDecodeCond = `result = 'completed' AND first_upstream_ms IS NOT NULL AN
 // 反向依赖 debuglog 的阶段常量，'http_read'/'http_decode' 字面量对应
 // ErrStageHTTPRead/HTTPDecode，两边必须同步改）。
 const logOwnerCase = `CASE
+		WHEN result = 'rejected' THEN 'none'
 		WHEN status_code = 429 OR rate_limited != 0 THEN 'business_limited'
 		WHEN result IN ('disconnected', 'aborted') THEN 'client'
 		WHEN status_code < 400 AND result != 'failed' THEN 'none'
@@ -236,18 +236,16 @@ func sampleSummary(samples []int64) (avg, p95 int64) {
 // 多重集，与旧蓄水池「最近 N 条入样」同口径）。account 非空时按读侧
 // 折叠口径过滤单 lane（'default' 命中 ”+'default' 两群）。
 func (s *Store) recentSamples(ctx context.Context, column string, nonNull bool, account string) ([]int64, error) {
-	query := `SELECT ` + column + ` FROM logs`
-	var conds []string
+	// rejected 行是管线前拒绝的留存记录，无时长/token——进样本只会
+	// 把分位数拉向 0，全部聚合口径一致剔除。
+	query := `SELECT ` + column + ` FROM logs WHERE log_source != 'rejected'`
 	var args []any
 	if nonNull {
-		conds = append(conds, column+` IS NOT NULL`)
+		query += ` AND ` + column + ` IS NOT NULL`
 	}
 	if account != "" {
-		conds = append(conds, logAccountExpr+` = ?`)
+		query += ` AND ` + logAccountExpr + ` = ?`
 		args = append(args, account)
-	}
-	if len(conds) > 0 {
-		query += ` WHERE ` + strings.Join(conds, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	rows, err := s.ro.QueryContext(ctx, query, append(args, usageSampleCapacity)...)
@@ -299,17 +297,19 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = totalRows.Close() }()
 	totals := map[int64]UsageTotals{}
 	for totalRows.Next() {
 		var slot int64
 		var t UsageTotals
 		if err := totalRows.Scan(append([]any{&slot}, usageTotalsDests(&t)...)...); err != nil {
-			_ = totalRows.Close()
 			return nil, err
 		}
 		totals[slot] = t
 	}
-	if err := totalRows.Close(); err != nil {
+	// Close 只回收迭代器不报中途错误——迭代中断（ctx 取消/IO 故障）
+	// 走 Err()，漏检会把截断结果当完整聚合。
+	if err := totalRows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -327,6 +327,7 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = sampleRows.Close() }()
 	type samples struct {
 		durs  []int64
 		ttfbs []int64
@@ -336,7 +337,6 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 		var slot, dur, rnDur, rnTTFB int64
 		var fup sql.NullInt64
 		if err := sampleRows.Scan(&slot, &dur, &fup, &rnDur, &rnTTFB); err != nil {
-			_ = sampleRows.Close()
 			return nil, err
 		}
 		ss := perSlot[slot]
@@ -351,7 +351,7 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 			ss.ttfbs = append(ss.ttfbs, fup.Int64)
 		}
 	}
-	if err := sampleRows.Close(); err != nil {
+	if err := sampleRows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -382,7 +382,7 @@ func (s *Store) dimAggs(ctx context.Context, dimExpr string, minBucket int64) ([
 			COALESCE(SUM(first_upstream_ms), 0),
 			MAX(id), started_at
 		FROM (SELECT `+dimExpr+` AS dim, * FROM logs)
-		WHERE dim != '' AND minute_bucket >= ? GROUP BY dim`, minBucket)
+		WHERE dim != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY dim`, minBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -470,7 +470,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// 每次面板轮询，minute_bucket 下界把成本钉在窗口体积上。
 	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
 	if err := s.ro.QueryRowContext(ctx,
-		`SELECT COUNT(*), MIN(time) FROM logs WHERE minute_bucket >= ?`, minBucket).
+		`SELECT COUNT(*), MIN(time) FROM logs WHERE minute_bucket >= ? AND log_source != 'rejected'`, minBucket).
 		Scan(&snap.Entries, &minMS); err != nil {
 		return snap, err
 	}
@@ -481,16 +481,16 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
-		`SELECT `+usageTotalsCols+` FROM logs WHERE minute_bucket >= ?`, minBucket),
+		`SELECT `+usageTotalsCols+` FROM logs WHERE minute_bucket >= ? AND log_source != 'rejected'`, minBucket),
 		&snap.Window); err != nil {
 		return snap, err
 	}
 	// 今日单列查询而非从 days 里挑：31 天上限外若有未来日期的行，
 	// today 也不该被挤掉。本地日界在 Go 侧算好打成毫秒界——
-	// strftime(localtime) 谓词不可索引，time 范围可走 idx_logs_time。
+	// strftime(localtime) 谓词不可索引，time 范围可走 idx_logs_time_status。
 	dayStart, dayEnd := dayBoundsMS(time.Now())
 	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
-		`SELECT `+usageTotalsCols+` FROM logs WHERE time >= ? AND time < ?`,
+		`SELECT `+usageTotalsCols+` FROM logs WHERE time >= ? AND time < ? AND log_source != 'rejected'`,
 		dayStart, dayEnd), &snap.Today); err != nil {
 		return snap, err
 	}
@@ -499,37 +499,37 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// ModelDays 只投影同日键集合（旧快照语义）。
 	dayRows, err := s.ro.QueryContext(ctx,
 		`SELECT `+logDayExpr+` AS day,`+usageTotalsCols+` FROM logs
-		WHERE minute_bucket >= ? GROUP BY day ORDER BY day DESC LIMIT ?`, minBucket, usageMaxDays)
+		WHERE minute_bucket >= ? AND log_source != 'rejected' GROUP BY day ORDER BY day DESC LIMIT ?`, minBucket, usageMaxDays)
 	if err != nil {
 		return snap, err
 	}
+	defer func() { _ = dayRows.Close() }()
 	kept := map[string]bool{}
 	for dayRows.Next() {
 		var row UsageDayRow
 		if err := dayRows.Scan(append([]any{&row.Date}, usageTotalsDests(&row.UsageTotals)...)...); err != nil {
-			_ = dayRows.Close()
 			return snap, err
 		}
 		snap.Days = append(snap.Days, row)
 		kept[row.Date] = true
 	}
-	if err := dayRows.Close(); err != nil {
+	if err := dayRows.Err(); err != nil {
 		return snap, err
 	}
 
 	mdayRows, err := s.ro.QueryContext(ctx,
 		`SELECT emodel, day,`+usageTotalsCols+` FROM (
 			SELECT `+logEModelExpr+` AS emodel, `+logDayExpr+` AS day, * FROM logs
-		) WHERE emodel != '' AND minute_bucket >= ? GROUP BY emodel, day`, minBucket)
+		) WHERE emodel != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY emodel, day`, minBucket)
 	if err != nil {
 		return snap, err
 	}
+	defer func() { _ = mdayRows.Close() }()
 	modelDays := map[string]map[string]UsageTotals{}
 	for mdayRows.Next() {
 		var emodel, day string
 		var t UsageTotals
 		if err := mdayRows.Scan(append([]any{&emodel, &day}, usageTotalsDests(&t)...)...); err != nil {
-			_ = mdayRows.Close()
 			return snap, err
 		}
 		if !kept[day] {
@@ -542,7 +542,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		}
 		dm[day] = t
 	}
-	if err := mdayRows.Close(); err != nil {
+	if err := mdayRows.Err(); err != nil {
 		return snap, err
 	}
 	if len(modelDays) > 0 {
@@ -550,20 +550,20 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	stageRows, err := s.ro.QueryContext(ctx,
-		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' AND minute_bucket >= ? GROUP BY error_stage`, minBucket)
+		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY error_stage`, minBucket)
 	if err != nil {
 		return snap, err
 	}
+	defer func() { _ = stageRows.Close() }()
 	for stageRows.Next() {
 		var stage string
 		var n int64
 		if err := stageRows.Scan(&stage, &n); err != nil {
-			_ = stageRows.Close()
 			return snap, err
 		}
 		snap.ErrorStages[stage] = n
 	}
-	if err := stageRows.Close(); err != nil {
+	if err := stageRows.Err(); err != nil {
 		return snap, err
 	}
 
@@ -639,18 +639,21 @@ func sortDimsByRequests(in []DimensionAgg) []DimensionAgg {
 // 每条的 rpm 是其完成时刻前 60s 内启动的请求数（含自身）——旧版按
 // 完成序的 starts 窗口计数会漏掉「窗口内启动但完成更晚」的行，SQL
 // 版按启动时刻精确计数，口径相同但覆盖更完整。
+// 外层谓词+ORDER BY id DESC 由部分索引 idx_logs_limited_id 供序：
+// 只扫命中行的 id 序，429 稀少时也不再近似全表扫。
 func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	// 相关子查询里 endExpr 必须带 logs. 限定：裸列名会被内层 l2 遮蔽。
 	// 内层窗口条件整数除法等价改写为 l2.time 的毫秒闭区间
 	// （s/1000 > E-60 ⟺ s >= (E-59)*1000；s/1000 <= E ⟺ s <= E*1000+999），
-	// 从全表 COUNT 变成 idx_logs_time 范围扫。
+	// 从全表 COUNT 变成 idx_logs_time_status 范围扫。
 	const endExpr = `logs.time/1000 + logs.duration_ms/1000`
 	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+endExpr+`, `+logEModelExpr+`, error_stage,
 			(SELECT COUNT(*) FROM logs l2
 				WHERE l2.time >= (`+endExpr+` - 59) * 1000
-					AND l2.time <= (`+endExpr+`) * 1000 + 999)
-		FROM logs WHERE status_code = 429 OR rate_limited != 0
+					AND l2.time <= (`+endExpr+`) * 1000 + 999
+					AND l2.log_source != 'rejected')
+		FROM logs WHERE (status_code = 429 OR rate_limited != 0) AND log_source != 'rejected'
 		ORDER BY id DESC LIMIT ?`, rateLimitEventCap)
 	if err != nil {
 		return nil, err

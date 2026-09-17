@@ -40,10 +40,10 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	if strings.Contains(httpLog, "secret") || strings.Contains(httpLog, image) {
 		t.Fatalf("request log contains a secret or inline image: %s", httpLog)
 	}
-	if !strings.Contains(httpLog, `"f": "client-field"`) {
+	if !strings.Contains(httpLog, `"f":"client-field"`) {
 		t.Fatalf("non-metadata \"f\" key was over-redacted: %s", httpLog)
 	}
-	if !strings.Contains(httpLog, `"file": "attachments/image-001.png"`) {
+	if !strings.Contains(httpLog, `"file":"attachments/image-001.png"`) {
 		t.Fatalf("request log has no attachment reference: %s", httpLog)
 	}
 	devinLog := readTestFile(t, manager, recorder.dir, "03-devin-request.json")
@@ -145,15 +145,15 @@ func TestSanitizeEscapedAndHyphenatedKeys(t *testing.T) {
 	}
 }
 
-// TestIOErrorsCountedOncePerKind 验证 worker 内写库失败计入 ioErrors，
+// TestIOErrorsCountedOncePerKind 验证写管道内写库失败计入 ioErrors，
 // 且同目录同类别失败只记一笔。
 func TestIOErrorsCountedOncePerKind(t *testing.T) {
 	st := openTestStore(t)
 	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
 	defer manager.Close()
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
-	// 关掉 store 后所有写库作业都失败：file 类（01/03/meta）一笔、
-	// jsonl 类（04 flush）一笔；Complete 的日志行插入再贡献一笔。
+	// 关掉 store 后所有写库作业都失败：暂存文件、chunk 与 Complete 的
+	// 日志行/收尾同一批事务提交，"batch" 类失败只记一笔。
 	if err := st.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +161,8 @@ func TestIOErrorsCountedOncePerKind(t *testing.T) {
 	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": 2})
 	recorder.AppendJSONL("04-devin-response.jsonl", "e", map[string]any{"x": 1})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
-	if got := manager.Stats()["io_errors"]; got != uint64(3) {
-		t.Fatalf("io_errors = %v, want 3（file/jsonl/log 行各一笔）", got)
+	if got := manager.Stats()["io_errors"]; got != uint64(1) {
+		t.Fatalf("io_errors = %v, want 1（batch 一笔）", got)
 	}
 }
 
@@ -241,18 +241,23 @@ func TestDroppedCounterOnClosedQueue(t *testing.T) {
 	}
 }
 
-// TestDroppedCounterOnFullQueue 验证队列打满时 enqueue 走 default 丢弃：
-// 不起写 worker，让 tasks 永远排满——第 writeQueueSize+1 个任务必掉。
+// TestDroppedCounterOnFullQueue 验证编码分片队列打满时 enqueue 走
+// default 丢弃：手工搭一个不起编码/写协程的 manager，小容量分片队列
+// 填满后下一个任务必掉。
 func TestDroppedCounterOnFullQueue(t *testing.T) {
-	recorder := &Recorder{tasks: make(chan writeTask, writeQueueSize)}
-	task := writeTask(func() {})
-	for i := 0; i < writeQueueSize; i++ {
-		recorder.enqueue(task)
+	manager := &Manager{
+		queues:     []chan writeTask{make(chan writeTask, 4)},
+		insertQ:    make(chan insertOp, 4),
+		workerGone: make(chan struct{}),
+	}
+	recorder := &Recorder{manager: manager}
+	for i := 0; i < 4; i++ {
+		recorder.enqueue(func() {})
 	}
 	if got := recorder.dropped.Load(); got != 0 {
 		t.Fatalf("dropped = %d after filling queue, want 0", got)
 	}
-	recorder.enqueue(task)
+	recorder.enqueue(func() {})
 	if got := recorder.dropped.Load(); got != 1 {
 		t.Fatalf("dropped = %d after overflow, want 1", got)
 	}
@@ -338,5 +343,51 @@ func TestActiveRequestsSnapshot(t *testing.T) {
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 	if got := manager.ActiveRequests(); len(got) != 0 {
 		t.Fatalf("ActiveRequests after Complete = %+v", got)
+	}
+}
+
+// TestErrorsOnlyDropsCleanDirs 验证 errors-only 模式：干净完成的请求完结
+// 即剥掉全部 payload（meta/error 锚点保留、logs 摘要行仍落），失败与
+// premature_end_turn 可疑成功保留完整证据目录。
+func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	manager.SetErrorsOnly(true)
+	defer manager.Close()
+
+	clean := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	clean.WriteJSON("01-http-request.json", map[string]any{"x": 1})
+	clean.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	clean.Complete(Completion{StatusCode: 200, Result: "completed"})
+	detail, err := manager.Detail(clean.dir)
+	if err != nil {
+		t.Fatalf("clean dir Detail: %v（meta 锚点应保留）", err)
+	}
+	for _, f := range detail.Files {
+		if f.Name != MetaFile {
+			t.Fatalf("clean dir retains payload file %q, want meta.json only", f.Name)
+		}
+	}
+	// logs 行不受 errors-only 影响——payload 面收敛，检索面不丢。
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil || len(rows) != 1 || rows[0].Dir != clean.dir {
+		t.Fatalf("clean request log row = %+v err=%v", rows, err)
+	}
+
+	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	failed.WriteError(ErrStageDevinConnect, os.ErrPermission)
+	failed.Complete(Completion{StatusCode: 500, Result: "failed"})
+	if _, err := manager.Detail(failed.dir); err != nil {
+		t.Fatalf("failed dir must be kept: %v", err)
+	}
+	if _, _, _, err := manager.ReadFile(failed.dir, ErrorFile); err != nil {
+		t.Fatalf("failed dir error.json: %v", err)
+	}
+
+	suspicious := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	suspicious.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	suspicious.Complete(Completion{StatusCode: 200, Result: "completed", PrematureEndTurn: true})
+	if _, _, _, err := manager.ReadFile(suspicious.dir, "04-devin-response.jsonl"); err != nil {
+		t.Fatalf("premature_end_turn dir must keep payload: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -792,7 +793,7 @@ func TestResponseStreamReadsUsageFrameAfterStopReason(t *testing.T) {
 		}},
 		{},
 	}}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil, nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("requested-model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
 	var done llm.ResponseEvent
 	for {
 		event, err := stream.Recv(context.Background())
@@ -835,9 +836,7 @@ func TestServerToolContinuationPairsAllCalls(t *testing.T) {
 		{{DeltaText: proto.String("final answer")}, {StopReason: stopPattern.Enum()}},
 	}
 	newDecoder := func() *responseDecoder {
-		decoder := newResponseDecoder("model", nil, nil, nil)
-		decoder.serverTools = map[string]bool{"web_search": true}
-		return decoder
+		return newResponseDecoder("model", nil, nil, map[string]bool{"web_search": true})
 	}
 	var resultSets [][]llm.ToolResultMessage
 	hop := 0
@@ -845,6 +844,7 @@ func TestServerToolContinuationPairsAllCalls(t *testing.T) {
 		frames:  pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: hops[0]}),
 		cancel:  func() {},
 		decoder: newDecoder(),
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		search: func(_ context.Context, query string, _, _ []string, _ uint32) (webSearchOutcome, error) {
 			return webSearchOutcome{
 				results: []llm.WebSearchResult{{Title: "t-" + query, URL: "https://example.com/" + query}},
@@ -1200,6 +1200,7 @@ func TestIsTransientConnectError(t *testing.T) {
 // 渠道故障并冷却整个渠道。
 func TestResponseStreamYieldsErrorBeforeStart(t *testing.T) {
 	stream := &responseStream{
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: connect.NewError(connect.CodePermissionDenied, errors.New("blocked by content policy"))}),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil, nil, nil),
@@ -1223,7 +1224,7 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 		{Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{InputTokens: proto.Uint64(1)}},
 		{DeltaText: proto.String("hi")},
 	}}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
 	first, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1248,7 +1249,7 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	upstreamStallTimeout = 20 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{gate: newRateGate(GateConfig{}, nil, ""), frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1275,7 +1276,7 @@ func TestResponseStreamTailGraceFinishesAfterStopReason(t *testing.T) {
 		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
 	}}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
 	for i := 0; i < 16; i++ {
 		event, err := stream.Recv(context.Background())
 		if err == io.EOF {
@@ -1309,7 +1310,7 @@ func TestResponseStreamNoProgressWatchdog(t *testing.T) {
 	receiver := &hangAfterReceiver{release: make(chan struct{}),
 		responses: []*devinproto.GetChatMessageResponse{meta(), meta(), meta()}}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1335,7 +1336,7 @@ func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
 			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
 		},
 	}
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
 	// 先排空首批内容事件（start/text_start/text_delta），此后只剩心跳帧。
 	for drained := false; !drained; {
 		event, err := stream.Recv(context.Background())
@@ -1354,6 +1355,297 @@ func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
 	}
 }
 
+// TestResponseStreamResumesAfterStall 的测试动机是钉住 post-commit 截断
+// 续传的对外形态：内容已下发后上游被静默看门狗杀死时不再直接报错，
+// 而是回显已产出内容 + "continue" 重发续传——客户端先收到在飞块的
+// end 接缝（干净块边界），续流内容开新块，全程只有一个 start。
+func TestResponseStreamResumesAfterStall(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamStallTimeout = 20 * time.Millisecond
+	ctx := context.Background()
+	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("partial ")},
+		{DeltaText: proto.String("text")},
+	}}
+	defer close(receiver.release)
+	var cause string
+	var extra []llm.Message
+	var seed []llm.Content
+	stream := &responseStream{
+		frames:  pumpUpstream(ctx, receiver),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
+	}
+	stream.extend = func(resumeCause string, messages []llm.Message, seedContent []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		cause, extra, seed = resumeCause, messages, seedContent
+		decoder := newResponseDecoder("model", nil, nil, nil)
+		decoder.start()
+		decoder.partial.Content = append([]llm.Content(nil), seedContent...)
+		return pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+			{DeltaText: proto.String("continued")},
+			{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+		}}), func() {}, decoder, nil
+	}
+	var types []llm.ResponseEventType
+	var done *llm.AssistantMessage
+	for {
+		event, err := stream.Recv(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			t.Fatalf("unexpected error event: %#v", event.Error)
+		}
+		types = append(types, event.Type)
+		if event.Type == llm.ResponseEventDone {
+			done = event.Message
+		}
+	}
+	want := []llm.ResponseEventType{
+		llm.ResponseEventStart,
+		llm.ResponseEventTextStart, llm.ResponseEventTextDelta, llm.ResponseEventTextDelta,
+		llm.ResponseEventTextEnd, // 接缝：截断块干净收口
+		llm.ResponseEventTextStart, llm.ResponseEventTextDelta, llm.ResponseEventTextEnd,
+		llm.ResponseEventDone,
+	}
+	if !slices.Equal(types, want) {
+		t.Fatalf("events = %v, want %v", types, want)
+	}
+	if !strings.HasPrefix(cause, "resume: ") || !strings.Contains(cause, "stalled") {
+		t.Fatalf("resume cause = %q, want resume: ...stalled...", cause)
+	}
+	// 续传 wire 形态：assistant 回显携带物化后的半截文本，追加 "continue"。
+	if len(extra) != 2 {
+		t.Fatalf("extra = %#v, want [assistant echo, continue]", extra)
+	}
+	assistant, ok := extra[0].(llm.AssistantMessage)
+	if !ok || len(assistant.Content) != 1 {
+		t.Fatalf("extra[0] = %#v, want assistant echo with one block", extra[0])
+	}
+	if text, ok := assistant.Content[0].(llm.TextContent); !ok || text.Text != "partial text" {
+		t.Fatalf("echoed block = %#v, want materialized partial text", assistant.Content[0])
+	}
+	user, ok := extra[1].(llm.UserMessage)
+	if !ok || len(user.Content) != 1 || user.Content[0].(llm.TextContent).Text != "continue" {
+		t.Fatalf("extra[1] = %#v, want continue user message", extra[1])
+	}
+	if len(seed) != 1 || seed[0].(llm.TextContent).Text != "partial text" {
+		t.Fatalf("seed = %#v, want materialized content", seed)
+	}
+	if done == nil || done.StopReason != llm.StopReasonStop || len(done.Content) != 2 {
+		t.Fatalf("done = %#v, want stop with two text blocks", done)
+	}
+}
+
+// TestResponseStreamDoesNotResumeInFlightToolCall 的测试动机是钉住续传
+// 的拒绝边界：在飞工具调用的 arguments 是截断 JSON，回传会被上游参数
+// 校验拒掉、丢弃又让客户端已见调用与上游历史分叉——只能按错误透传。
+func TestResponseStreamDoesNotResumeInFlightToolCall(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamStallTimeout = 20 * time.Millisecond
+	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
+		{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
+			Id: proto.String("c0"), Name: proto.String("shell"), ArgumentsJson: proto.String(`{"cmd":`),
+		}}},
+	}}
+	defer close(receiver.release)
+	resumed := false
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), receiver),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
+		extend: func(_ string, _ []llm.Message, _ []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+			resumed = true
+			return nil, nil, nil, errors.New("must not resume an in-flight tool call")
+		},
+	}
+	for {
+		event, err := stream.Recv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			if !strings.Contains(event.Error.ErrorMessage, "stalled") {
+				t.Fatalf("error = %q, want stall error", event.Error.ErrorMessage)
+			}
+			break
+		}
+	}
+	if resumed {
+		t.Fatal("must not resume with an in-flight tool call")
+	}
+}
+
+// TestResponseStreamResumeAttemptsCapped 的测试动机是钉住续传预算：
+// 每次续传都把整段上下文重发再计费一遍，续上的流再被杀死时不能无限
+// 滚上游配额——触顶后按 stall 错误透传。
+func TestResponseStreamResumeAttemptsCapped(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(n int) { maxStreamResumes = n }(maxStreamResumes)
+	upstreamStallTimeout = 20 * time.Millisecond
+	maxStreamResumes = 1
+	release := make(chan struct{})
+	defer close(release)
+	first := &hangAfterReceiver{release: release, responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("x")},
+	}}
+	resumes := 0
+	stream := &responseStream{
+		frames:  pumpUpstream(context.Background(), first),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
+	}
+	stream.extend = func(_ string, _ []llm.Message, seedContent []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		resumes++
+		decoder := newResponseDecoder("model", nil, nil, nil)
+		decoder.start()
+		decoder.partial.Content = append([]llm.Content(nil), seedContent...)
+		// 续上的流再次挂死：第二次 stall 应命中预算上限而非再续。
+		return pumpUpstream(context.Background(), &hangAfterReceiver{release: release}), func() {}, decoder, nil
+	}
+	for {
+		event, err := stream.Recv(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			if !strings.Contains(event.Error.ErrorMessage, "stalled") {
+				t.Fatalf("error = %q, want stall error", event.Error.ErrorMessage)
+			}
+			break
+		}
+	}
+	if resumes != 1 {
+		t.Fatalf("resumes = %d, want exactly 1 (capped)", resumes)
+	}
+}
+
+// TestResponseStreamResumesSilentEOF 的测试动机是钉住静默截断的续传：
+// 干净 EOF 无 stopReason 与传输断裂同级——上游帧序正常收尾必带
+// stopReason，缺它就是应用层截断，按同一套回显续传而不是报错。
+func TestResponseStreamResumesSilentEOF(t *testing.T) {
+	ctx := context.Background()
+	first := &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("cut")},
+	}}
+	var cause string
+	stream := &responseStream{
+		frames:  pumpUpstream(ctx, first),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
+	}
+	stream.extend = func(resumeCause string, _ []llm.Message, seedContent []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		cause = resumeCause
+		decoder := newResponseDecoder("model", nil, nil, nil)
+		decoder.start()
+		decoder.partial.Content = append([]llm.Content(nil), seedContent...)
+		return pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+			{DeltaText: proto.String(" rest")},
+			{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+		}}), func() {}, decoder, nil
+	}
+	var text strings.Builder
+	var done *llm.AssistantMessage
+	for {
+		event, err := stream.Recv(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			t.Fatalf("unexpected error event: %#v", event.Error)
+		}
+		text.WriteString(event.Delta)
+		if event.Type == llm.ResponseEventDone {
+			done = event.Message
+		}
+	}
+	if cause != "resume: devin stream ended without stop reason" {
+		t.Fatalf("resume cause = %q, want silent-truncation cause", cause)
+	}
+	if text.String() != "cut rest" {
+		t.Fatalf("text = %q, want cut rest", text.String())
+	}
+	if done == nil || done.StopReason != llm.StopReasonStop || len(done.Content) != 2 {
+		t.Fatalf("done = %#v, want stop with two text blocks", done)
+	}
+}
+
+// TestResponseStreamResumeStripsPartialThinkingSignature 的测试动机是
+// 钉住在飞 thinking 块的回显形态：截断点的签名是残片，回传可能被
+// 上游验签拒掉——回显剥成无签名 thinking（实测接受），种子内容保留
+// 原样保住客户端已见事件与 partial 的一致性。
+func TestResponseStreamResumeStripsPartialThinkingSignature(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamStallTimeout = 20 * time.Millisecond
+	ctx := context.Background()
+	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
+		{DeltaThinking: proto.String("thinking so far"), DeltaSignature: proto.String("sigfrag")},
+	}}
+	defer close(receiver.release)
+	var extra []llm.Message
+	var seed []llm.Content
+	stream := &responseStream{
+		frames:  pumpUpstream(ctx, receiver),
+		cancel:  func() {},
+		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
+	}
+	stream.extend = func(_ string, messages []llm.Message, seedContent []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		extra, seed = messages, seedContent
+		decoder := newResponseDecoder("model", nil, nil, nil)
+		decoder.start()
+		decoder.partial.Content = append([]llm.Content(nil), seedContent...)
+		return pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
+			{DeltaText: proto.String("answer")},
+			{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+		}}), func() {}, decoder, nil
+	}
+	var sawThinkingEnd bool
+	for {
+		event, err := stream.Recv(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == llm.ResponseEventError {
+			t.Fatalf("unexpected error event: %#v", event.Error)
+		}
+		if event.Type == llm.ResponseEventThinkingEnd {
+			sawThinkingEnd = true
+		}
+	}
+	if !sawThinkingEnd {
+		t.Fatal("seam must close the in-flight thinking block")
+	}
+	assistant, ok := extra[0].(llm.AssistantMessage)
+	if !ok || len(assistant.Content) == 0 {
+		t.Fatalf("extra[0] = %#v, want assistant echo", extra[0])
+	}
+	thinking, ok := assistant.Content[len(assistant.Content)-1].(llm.ThinkingContent)
+	if !ok {
+		t.Fatalf("echoed last block = %#v, want thinking", assistant.Content[len(assistant.Content)-1])
+	}
+	if thinking.ThinkingSignature != "" || thinking.SignatureType != "" {
+		t.Fatalf("echoed thinking signature = %q/%q, want stripped", thinking.ThinkingSignature, thinking.SignatureType)
+	}
+	seeded, ok := seed[len(seed)-1].(llm.ThinkingContent)
+	if !ok || seeded.ThinkingSignature != "sigfrag" {
+		t.Fatalf("seeded thinking = %#v, want original signature kept", seed[len(seed)-1])
+	}
+}
+
 // TestResponseStreamReleasesStartOnHoldTimeout 的测试动机是：上游建流后
 // 长时间静默时，扣留的 start 必须先行下发——否则客户端在 ~30s 无数据
 // 处弃连（中间网关只在首个协议事件后才向客户端放通字节），一条本来
@@ -1363,7 +1655,7 @@ func TestResponseStreamReleasesStartOnHoldTimeout(t *testing.T) {
 	startHoldTimeout = 20 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{gate: newRateGate(GateConfig{}, nil, ""), frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1381,7 +1673,7 @@ func TestResponseStreamReleasesStartOnHoldTimeout(t *testing.T) {
 func TestResponseStreamStopsOnContextCancel(t *testing.T) {
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
-	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	stream := &responseStream{gate: newRateGate(GateConfig{}, nil, ""), frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -1812,6 +2104,7 @@ func TestResponseStreamReopensBeforeContent(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), &errorDevinResponseReceiver{err: io.ErrUnexpectedEOF}),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return pumpUpstream(context.Background(), second), func() {}, nil
@@ -1841,6 +2134,7 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return nil, nil, cause
@@ -1895,6 +2189,7 @@ func TestResponseStreamContinuesEmptyEndTurn(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			if !continueEmpty {
 				return nil, nil, cause
@@ -1941,6 +2236,7 @@ func TestResponseStreamEmptyEndTurnSurfacesWithoutRetry(t *testing.T) {
 		frames:  pumpUpstream(context.Background(), first),
 		cancel:  func() {},
 		decoder: newResponseDecoder("model", nil, nil, nil),
+		gate:    newRateGate(GateConfig{}, nil, ""),
 	}
 	var done *llm.ResponseEvent
 	for {
@@ -2170,8 +2466,7 @@ func TestServerToolMixedTurnKeepsDone(t *testing.T) {
 		return &devinproto.GetChatMessageResponse{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 			Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(arguments)}}}
 	}
-	decoder := newResponseDecoder("model", nil, nil, nil)
-	decoder.serverTools = map[string]bool{"web_search": true}
+	decoder := newResponseDecoder("model", nil, nil, map[string]bool{"web_search": true})
 	continued := false
 	stream := &responseStream{
 		frames: pumpUpstream(ctx, &fakeDevinResponseReceiver{responses: []*devinproto.GetChatMessageResponse{
@@ -2181,6 +2476,7 @@ func TestServerToolMixedTurnKeepsDone(t *testing.T) {
 		}}),
 		cancel:  func() {},
 		decoder: decoder,
+		gate:    newRateGate(GateConfig{}, nil, ""),
 		search: func(_ context.Context, query string, _, _ []string, _ uint32) (webSearchOutcome, error) {
 			return webSearchOutcome{summary: "ans " + query}, nil
 		},

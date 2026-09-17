@@ -87,7 +87,7 @@ func TestSanitizeRuleLiveness(t *testing.T) {
 		t.Fatalf("witness/rule table mismatch, missing witnesses: %v, stale witnesses: %v", missing, extra)
 	}
 
-	for _, rule := range upstreamSanitizeRules {
+	for index, rule := range upstreamSanitizeRules {
 		if rule.trigger == "" {
 			t.Errorf("%s: empty trigger", rule.id)
 		}
@@ -101,8 +101,8 @@ func TestSanitizeRuleLiveness(t *testing.T) {
 			if !strings.Contains(strings.ToLower(witness), rule.trigger) {
 				t.Errorf("%s: witness %q lacks trigger %q", rule.id, witness, rule.trigger)
 			}
-			if !hasSanitizeTrigger(witness, &sanitizeBucketsAll) {
-				t.Errorf("%s: witness %q missed by bucket prefilter", rule.id, witness)
+			if sanitizeCandidateRules(witness, sanitizePairAll)>>uint(index)&1 == 0 {
+				t.Errorf("%s: witness %q missed by pair prefilter", rule.id, witness)
 			}
 			if !rule.pattern.MatchString(witness) {
 				t.Errorf("%s: pattern does not match witness %q", rule.id, witness)

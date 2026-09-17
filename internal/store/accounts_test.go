@@ -281,10 +281,10 @@ func TestAccountMetaColumns(t *testing.T) {
 	}
 }
 
-// TestEnsureAccountColumns 验证存量表（首发形状、无新列）经
-// applySchema 幂等补齐 priority/max_rpm/notes：Open 走 ALTER 路径后
+// TestAccountColumnsMigration 验证存量表（首发形状、无新列）经
+// 版本化迁移幂等补齐 priority/max_rpm/notes：Open 走 ALTER 路径后
 // 新列可正常读写。
-func TestEnsureAccountColumns(t *testing.T) {
+func TestAccountColumnsMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode=WAL", path))
 	if err != nil {

@@ -4,9 +4,13 @@
 // JSONL（04/05/06）按 flush 批追加为 chunks 行。
 //
 // Package debuglog 负责记录兼容 API 请求在 HTTP、中间模型和供应商协议之间的转换过程。
-// 所有写库作业经每请求一个有界任务队列交给单 worker 串行执行——
-// 事件顺序即入队顺序，热路径只承担一次 channel send；队列满时丢弃并计数，
-// 观测系统自身降级不拖垮请求。生命周期管理（保留期/总量清理）见 cleaner.go。
+// 写路径是两段流水线：请求 goroutine 只把任务排进按目录名哈希的分片队列
+// （热路径一次 channel send），encoderShards 个编码协程并行消费——
+// sanitize/marshal/压缩这些 CPU 密集段在多核上摊平，同一 recorder 恒落
+// 同一分片使分片内 FIFO 即该请求的事件序；编码产物经 insertQ 汇聚给
+// 唯一的写 worker，它独占 store 写连接做暂存与 200ms 合批提交——写库
+// 竞争在结构上归零。两级队列任一满即丢弃并计数，观测系统自身降级不拖垮
+// 请求。生命周期管理（保留期/总量清理）见 cleaner.go。
 package debuglog
 
 import (
@@ -17,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,13 +31,45 @@ import (
 	"github.com/WncFht/devin2api/internal/store"
 )
 
-// writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
-const writeQueueSize = 4096
+// encoderShards 是分片队列与编码协程的数量：编码（sanitize/marshal/
+// gzip）是日志管道唯一的 CPU 密集段，单协程曾是高峰期批量丢弃的根因；
+// 上限 8 防大核机器上编码协程反挤数据面。
+var encoderShards = min(8, max(2, runtime.GOMAXPROCS(0)-2))
+
+// globalQueueSize 是全部请求共享的编码队列总容量（各分片均摊）。入队方
+// 只做 µs 级的序号分配+channel send，容量需吸收分片级突发——一个请求的
+// 全部事件落同一分片（目录名哈希），单请求流式期可产数百条记录，
+// 2048/分片在几条并发流同片突发时整段溢出丢弃；8192/分片覆盖 ~16 条
+// 并发突发流。积压超界即丢弃计数——观测内存不随流量膨胀。
+const globalQueueSize = 65536
+
+// insertQueueSize 是编码产物待落库队列的容量：编码协程推满即阻塞形成
+// 背压（分片队列随之积压、入队端开始丢弃），bound 住「已编码未入库」的
+// 内存水位。容量须盖住一次批量事务的提交窗口——实测满载下大 flush 事务
+// 可达数百毫秒，4096 在峰速 ~19k ops/s 时撑不到 250ms，提交期间在飞
+// 请求整段流被丢弃（每请求数百条）；16384 覆盖 ~860ms 峰值摄入。
+const insertQueueSize = 16384
 
 // chunkFlushInterval 是 JSONL 缓冲合批提交周期：窗口内各文件缓冲合并为
 // 一个事务一次 commit，把高频流式期的逐行 fsync 压到每秒数次；窗口长度
 // 同时是进行中请求的已提交前缀对面板可见的延迟上限。
 const chunkFlushInterval = 200 * time.Millisecond
+
+// completionFlushGap 是完成收尾的攒批间隙：Complete 的排空哨兵抵达写
+// worker 后不单独提交，距上次冲刷不足该间隙时攒进下次批量事务——
+// 高 rps 下收尾与常规缓冲共用一次 commit，Complete 的等待上限被压到
+// 间隙+事务时长量级；写队列瞬时排空或超时则立即冲刷，不加等待。
+const completionFlushGap = 50 * time.Millisecond
+
+// storeOpTimeout 是日志写路径单次 store 调用的上限。观测管道不能拿无界
+// ctx 进 SQLite：库卡死时无界调用会把写 worker 与 Complete 收尾 goroutine
+// 永久挂起（activeDirs 不释放）；分钟级超时会丢观测副本但不拖死数据面。
+const storeOpTimeout = 2 * time.Minute
+
+// storeCtx 返回带 storeOpTimeout 上限的 ctx，供写路径的 store 调用。
+func storeCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), storeOpTimeout)
+}
 
 // RetentionPolicy 是请求日志的生命周期策略。
 type RetentionPolicy struct {
@@ -74,15 +111,57 @@ type Manager struct {
 	takenNames map[string]struct{}
 	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
 	enabled atomic.Bool
+	// errorsOnly 只保留失败请求的调试 payload：干净完成的请求在 Complete
+	// 时整删目录行（含 claim 的空 meta 占位），logs 摘要行照常落库。
+	errorsOnly atomic.Bool
 	// policy 是日志生命周期策略；policyMu 保护它：配置 reload 会运行时换值，
 	// cleaner 协程与 Stats 每轮经 Policy() 取快照。
 	policyMu sync.RWMutex
 	policy   RetentionPolicy
-	// store 是 logs 表的持久层；nil 时 insertLog 静默跳过（测试/未接线）。
+	// logRowRetentionDays 是 logs 摘要行的时间保留天数（独立于 payload
+	// 保留），面板设置项热改走 SetLogRowRetentionDays。
+	logRowRetentionDays atomic.Int64
+	// store 是 logs 表的持久层；nil 时日志行静默跳过（测试/未接线）。
 	store *store.Store
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
+	// queues 是按目录名哈希分片的编码任务队列（长 encoderShards），
+	// insertQ 是编码产物汇给写 worker 的队列；workerStop/workerGone 是
+	// 关停协议——Close 关 workerStop，编码协程排空各自分片后退，写
+	// worker 收干 insertQ、冲刷残余缓冲再关 workerGone。workerGone 同时
+	// 是 Complete 哨兵与迟到入队在 worker 已退场景下的兜底逃生口。
+	queues     []chan writeTask
+	insertQ    chan insertOp
+	workerStop chan struct{}
+	workerGone chan struct{}
+	// encWG 计在役编码协程，encodersDone 在它们全部退出后关闭——关停时
+	// 写 worker 必须先等编码侧排空（否则任务转成 op 的途中 insertQ
+	// 已无人续收会死锁）。
+	encWG        sync.WaitGroup
+	encodersDone chan struct{}
+	// closing 置位（Close 开始）后 enqueue 直接丢弃——关停期入队方
+	// 立即降级，不向正在排空的队列再压任务。
+	closing atomic.Bool
+	// dirtyBufs 是有未冲刷 JSONL 缓冲的 recorder 集合，flush tick 只扫
+	// 它而不是全部活跃目录。仅写 worker goroutine 读写（任务体也在其
+	// 内执行），无需加锁。
+	dirtyBufs map[*Recorder]struct{}
+	// pendingCompletions 是已抵达写 worker、待随下次批量事务提交的
+	// 收尾集合（终态 meta 已暂存进各自 stagedFiles，日志行已按完成
+	// 时刻构建）；事务成功后逐项关闭 recorder.drained 放行 Complete。
+	// 仅写 worker 读写，fallbackMu 兜底路径除外。
+	pendingCompletions []completionItem
+	// lastFlush 是上次批量事务的发起时刻：completionFlushGap 内到达的
+	// 收尾攒成一批，超时或写队列排空即随当前 op 立即冲刷。
+	lastFlush time.Time
+	// fallbackMu 串行化写 worker 死后的兜底收尾：workerGone 关闭后多个
+	// Complete 可同时在调用方直跑 queueCompletion/flushAll，此时写侧
+	// 私有状态已无人持有，调用方之间需互斥。写 worker 存活期它从不被取。
+	fallbackMu sync.Mutex
+	// pendingCompletionCount 镜像 pendingCompletions 长度供 Stats 读
+	//（写 worker 私有切片不能跨 goroutine 取 len）。
+	pendingCompletionCount atomic.Int64
 	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
 	droppedTotal atomic.Uint64
 	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
@@ -109,6 +188,12 @@ type RequestMeta struct {
 	// ClientRequestID 是客户端自带的关联 ID（X-Request-Id/X-Session-Id），
 	// 让调用方能用自己的 ID 检索本次请求。
 	ClientRequestID string `json:"client_request_id,omitempty"`
+	// Stream 表示请求是否要求流式响应；请求体解码后才确定，由
+	// SetStream 回填（requestMeta 快照先于解码创建）。
+	Stream bool `json:"stream,omitempty"`
+	// Class 是令牌声明的请求类（fg/bg——闸门分级准入词表）；令牌
+	// 解析后由 SetClass 回填，进行中行与 meta.json client 块同出。
+	Class string `json:"class,omitempty"`
 }
 
 // Completion 是请求结束时写入 meta.json 的结果摘要。
@@ -150,8 +235,8 @@ type Recorder struct {
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
 	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
-	// keyHash、retries、upstreamAccount、accountAttempts、poolCandidates；
-	// worker 自身状态无锁。
+	// keyHash、retries、sequences、upstreamAccount、accountAttempts、
+	// poolCandidates；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -166,21 +251,33 @@ type Recorder struct {
 	// 凭据，requestMeta.KeyHash 为空——拿到令牌后回填，index/meta 才能把
 	// 匿名流量归到该令牌行。非空时优先于 requestMeta.KeyHash。
 	keyHash string
+	// stream 是解码出 options 后回填的流式标记：requestMeta 快照先于
+	// 请求体解码创建，进行中行的 Meta.Stream 由它在 snapshot 时补投。
+	stream bool
+	// requestClass 是令牌准入解析后回填的请求类（fg/bg）：requestMeta
+	// 快照先于令牌解析创建，snapshot/metaJSON 由它补投 Meta.Class。
+	requestClass string
 	// upstreamAccount 是最终服务本请求的上游账号名（号池 lane 名；
 	// 历史行有 ''/'default' 残留）；号池 failover 时它只记成功那次的归属，
 	// 之前的失败尝试落在 accountAttempts。
 	upstreamAccount string
 	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
-	// writeMeta/insertLog 读，与 retries 同一把锁。
+	// metaJSON/logRowFor 读，与 retries 同一把锁。
 	accountAttempts []AccountAttempt
 	// poolCandidates 是开流前的候选序快照（含每 lane 降级原因），
-	// 由 Pool.Stream 排序后登记，writeMeta 落 meta.pool_candidates。
+	// 由 Pool.Stream 排序后登记，metaJSON 落 meta.pool_candidates。
 	poolCandidates []PoolCandidate
-	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
-	tasks chan writeTask
-	// writerDone 在 worker 排空队列并关闭文件后关闭。
-	writerDone chan struct{}
+	// drained 在覆盖本请求收尾的批量事务提交后由写 worker 关闭：
+	// Complete 的排空哨兵在本请求自己的分片 FIFO 里排在全部已入队
+	// 任务之后，它对应的 op 把收尾挂进 pendingCompletions，事务成功
+	//（或失败放行）即说明前序任务都已随同一事务落库。
+	drained chan struct{}
+	// completionQueued 保证收尾只入列一次：哨兵 op 与 workerGone 兜底
+	// 可能都走到 queueCompletion（哨兵已入列而 Complete 恰选了
+	// workerGone 分支）；重复入列会向 logs 写重复行（dir 唯一约束
+	// 还会把整批拖进失败重试）。
+	completionQueued atomic.Bool
 	// dropped 是本次请求被丢弃的写任务数。
 	dropped atomic.Uint64
 	// aborted 标记请求被面板主动中断（区别于客户端自行断连）。
@@ -208,10 +305,13 @@ type Recorder struct {
 	rateLimited atomic.Bool
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
-	// 追加，writeMeta/insertLog 读，走 mutex 同步。
+	// 追加，metaJSON/logRowFor 读，走 mutex 同步。
 	retries []RetryAttempt
+	// sequences 保存每个 JSONL 文件各自的递增序号：序号在入队前的
+	// 临界区分配（record 含 Seq 须在 marshal 前定版），等于入队次序。
+	sequences map[string]int
 	// firstError 是首个失败点的同步记录：WriteError 调用时 CAS 抢占
-	//（first-write-wins），writeLoggedError 的 WARN 行与 insertLog
+	//（first-write-wins），writeLoggedError 的 WARN 行与日志行
 	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
 	//「失败点」。error.json 落盘仍在 worker 内由 errorWritten 去重。
 	firstError atomic.Pointer[errorRecord]
@@ -222,13 +322,20 @@ type Recorder struct {
 	// 构建请求后写入；Complete 时随 meta.json 与日志行出账。
 	repairs atomic.Pointer[llm.RequestRepairs]
 
-	// 以下字段仅由写 worker 访问，无需加锁：
-	// sequences 保存每个 JSONL 文件各自的递增序号。
-	sequences map[string]int
 	// attachmentByHash 用于复用在多个转换阶段重复出现的同一附件。
-	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
-	attachmentCount int
+	// 两者只在编码协程上被 sanitize 访问——同一 recorder 的任务恒落同一
+	// 分片队列、由同一协程串行执行，故无需加锁。
+	attachmentByHash map[string]attachmentReference
+	attachmentCount  int
+	// shard 是本 recorder 的编码分片下标（按目录名哈希，Start 时定版）——
+	// 分片内 FIFO 保证本请求的事件序即入队序。
+	shard int
+
+	// 以下字段仅由写 worker 访问，无需加锁：
+	// stagedFiles 按文件名暂存已编码的整文件行；刷写周期与 chunkBufs
+	// 一起合并为一个跨目录事务提交（编码在调用方完成，worker 只暂存）。
+	stagedFiles map[string]stagedFile
 	// chunkBufs 按 JSONL 文件名缓冲已序列化行；每个刷写周期全部非空
 	// 缓冲合并为一个事务提交为 debug_chunks 行（追加行代替整文件重写，
 	// 已提交前缀对面板实时可见，见 chunkFlushInterval）。
@@ -254,8 +361,32 @@ type connInfo struct {
 	idleMS int64
 }
 
-// writeTask 是交给写 worker 的一次作业，worker 内串行执行。
-type writeTask func()
+// writeTask 是排进分片编码队列的一次作业：run 在编码协程上执行，承担
+// evalDeferred/sanitize/marshal/压缩，产物经 pushInsert 汇给写 worker。
+// 携带 recorder 是为了故障归属（panic 告警定位目录）与 op 的落库路由。
+type writeTask struct {
+	recorder *Recorder
+	run      func()
+}
+
+// insertOp 是编码完成、待写 worker 落库的一次作业：apply 只在写 worker
+// 上串行执行，承担 µs 级暂存（stageFile/appendJSONL）或 Complete 的
+// 收尾入列。DB 写全部收敛到写 worker 后，store 写连接在结构上无竞争。
+type insertOp struct {
+	recorder *Recorder
+	apply    func()
+}
+
+// completionItem 是写 worker 上待随批量事务落库的一份收尾：终态 meta
+// 在入列时已暂存进 stagedFiles，logRow 按完成时刻构建好（时点字段
+// 不随冲刷等待漂移），strip 记录 errors_only 判定。事务提交后关闭
+// recorder.drained 放行 Complete；signaled 防止失败重试时重复关闭。
+type completionItem struct {
+	recorder *Recorder
+	logRow   *store.LogRow
+	strip    bool
+	signaled bool
+}
 
 // JSONLRecord 是一个 JSONL 文件中的统一行信封。
 type JSONLRecord struct {
@@ -267,8 +398,10 @@ type JSONLRecord struct {
 	ElapsedMS int64 `json:"elapsed_ms"`
 	// Event 是协议事件名；没有独立事件名时省略。
 	Event string `json:"event,omitempty"`
-	// Data 是本行记录的结构化内容。
-	Data any `json:"data"`
+	// Data 是本行记录的结构化内容：写方产物已是脱敏后的 JSON 字节
+	//（sanitizeJSON），RawMessage 让信封 marshal 只付一次 compaction
+	// 扫描而不是重走反射编码。
+	Data json.RawMessage `json:"data"`
 }
 
 // contextKey 是 request context 中 recorder 的私有键类型。
@@ -297,12 +430,22 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 		policy.LogRowDays = DefaultLogRowRetentionDays
 	}
 	manager := &Manager{
-		root:       root,
-		now:        time.Now,
-		activeDirs: make(map[string]*Recorder),
-		takenNames: make(map[string]struct{}),
-		policy:     policy,
-		store:      st,
+		root:         root,
+		now:          time.Now,
+		activeDirs:   make(map[string]*Recorder),
+		takenNames:   make(map[string]struct{}),
+		policy:       policy,
+		store:        st,
+		queues:       make([]chan writeTask, encoderShards),
+		insertQ:      make(chan insertOp, insertQueueSize),
+		workerStop:   make(chan struct{}),
+		workerGone:   make(chan struct{}),
+		encodersDone: make(chan struct{}),
+		dirtyBufs:    make(map[*Recorder]struct{}),
+	}
+	shardCap := max(2048, globalQueueSize/encoderShards)
+	for i := range manager.queues {
+		manager.queues[i] = make(chan writeTask, shardCap)
 	}
 	manager.enabled.Store(true)
 	if root == "" {
@@ -323,9 +466,19 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 	}
 	// cleaner 恒启动：策略全零时 cleanOnce 空转（每 5min 一次 ReadDir），
 	// 若按初始策略条件启动，全零起步的进程热开保留策略（SetPolicy）后
-	// 无人消费——热路径会是死开关。
+	// 无人消费——热路径会是死开关。编码协程与写 worker 同理恒启动：
+	// enabled 热开关只截断 Start，已入队任务仍要有人消费。
 	manager.cleanerStop = make(chan struct{})
 	manager.cleanerDone = make(chan struct{})
+	for shard := range manager.queues {
+		manager.encWG.Add(1)
+		go manager.runEncoder(shard)
+	}
+	go func() {
+		manager.encWG.Wait()
+		close(manager.encodersDone)
+	}()
+	go manager.runWriter()
 	go manager.runCleaner()
 	return manager
 }
@@ -334,13 +487,35 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 // 面板设置项的 def 展示与 NewManager 构造期默认值同源引用。
 const DefaultLogRowRetentionDays = 90
 
-// Close 停止后台清理协程；进程退出前调用一次。
+// SetLogRowRetentionDays 热改 logs 行的时间保留天数；<=0 关闭按时间清理。
+func (manager *Manager) SetLogRowRetentionDays(days int64) {
+	if manager == nil {
+		return
+	}
+	manager.logRowRetentionDays.Store(days)
+}
+
+// LogRowRetentionDays 返回当前 logs 行保留天数。
+func (manager *Manager) LogRowRetentionDays() int64 {
+	if manager == nil {
+		return 0
+	}
+	return manager.logRowRetentionDays.Load()
+}
+
+// Close 排空写队列并停止后台协程；进程退出前调用一次。
+// 顺序：closing 截断新任务 → workerStop 令写 worker 排空退出（残余
+// 缓冲随最后一轮 flush 落库）→ 再停 cleaner——清理协程的收尾 vacuum
+// 跑在全部写面静止之后。
 func (manager *Manager) Close() {
 	if manager == nil {
 		return
 	}
-	// root 为空的禁用管理器提前返回、不起 cleaner（cleanerStop 为 nil）。
+	// root 为空的禁用管理器提前返回、不起协程（cleanerStop 为 nil）。
 	if manager.cleanerStop != nil {
+		manager.closing.Store(true)
+		close(manager.workerStop)
+		<-manager.workerGone
 		close(manager.cleanerStop)
 		<-manager.cleanerDone
 	}
@@ -358,6 +533,20 @@ func (manager *Manager) SetEnabled(enabled bool) {
 // 不报 enabled——healthz 之类读它判服务状态。
 func (manager *Manager) Enabled() bool {
 	return manager != nil && manager.enabled.Load() && manager.root != ""
+}
+
+// SetErrorsOnly 运行时切换「只留失败请求 payload」；对已完成请求不追溯，
+// 只影响此后完结的请求。
+func (manager *Manager) SetErrorsOnly(errorsOnly bool) {
+	if manager == nil {
+		return
+	}
+	manager.errorsOnly.Store(errorsOnly)
+}
+
+// ErrorsOnly 返回当前是否只保留失败请求的 payload。
+func (manager *Manager) ErrorsOnly() bool {
+	return manager != nil && manager.errorsOnly.Load()
 }
 
 // SetPolicy 运行时更换日志生命周期策略（配置 reload 热路径）；cleaner
@@ -397,10 +586,6 @@ func (manager *Manager) Stats() map[string]any {
 	}
 	manager.mutex.Lock()
 	active := len(manager.activeDirs)
-	queued := 0
-	for _, recorder := range manager.activeDirs {
-		queued += len(recorder.tasks)
-	}
 	manager.mutex.Unlock()
 	var logRows, dbBytes int64
 	if manager.store != nil {
@@ -415,13 +600,20 @@ func (manager *Manager) Stats() map[string]any {
 	if data, err := os.ReadFile(filepath.Join(manager.root, BindFailureFile)); err == nil && json.Valid(data) {
 		bindFailure = data
 	}
+	// 积压口径 = 编码分片未消费任务 + 已编码未落库 op 之和。
+	queued := len(manager.insertQ)
+	for _, queue := range manager.queues {
+		queued += len(queue)
+	}
 	policy := manager.Policy()
 	stats := map[string]any{
 		"log_root":               manager.root,
 		"enabled":                manager.enabled.Load(),
+		"errors_only":            manager.errorsOnly.Load(),
 		"active_request_dirs":    active,
 		"queued_log_events":      queued,
-		"queue_capacity":         active * writeQueueSize,
+		"pending_completions":    manager.pendingCompletionCount.Load(),
+		"queue_capacity":         globalQueueSize + insertQueueSize,
 		"dropped_log_events":     manager.droppedTotal.Load(),
 		"io_errors":              manager.ioErrors.Load(),
 		"log_rows":               logRows,
@@ -485,10 +677,11 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			dir:              name,
 			startedAt:        now,
 			requestMeta:      meta,
-			tasks:            make(chan writeTask, writeQueueSize),
-			writerDone:       make(chan struct{}),
+			shard:            shardOf(name),
+			drained:          make(chan struct{}),
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
+			stagedFiles:      make(map[string]stagedFile),
 			chunkBufs:        make(map[string]*bytes.Buffer),
 			ioErrSeen:        make(map[string]struct{}),
 		}
@@ -501,10 +694,16 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		manager.mutex.Unlock()
 		claimed, err := manager.claimDir(name)
 		if err == nil && claimed {
-			go recorder.runWriter()
-			// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
-			// 同时把同步写库移出 manager.mutex——目录分配锁不该挡 DB IO。
-			recorder.enqueue(func() { recorder.writeMeta(nil) })
+			// meta.json 作为首个任务入队：编码在分片协程完成、落库由写
+			// worker 合批提交，claim 的空行占位已先保证目录名不被撞走。
+			recorder.enqueue(func() {
+				if data := recorder.metaJSON(nil); data != nil {
+					stored, usize := store.EncodePayload(data)
+					recorder.pushInsert(func() {
+						recorder.stageFile(MetaFile, stored, usize, false)
+					})
+				}
+			})
 			return recorder
 		}
 		manager.mutex.Lock()
@@ -529,7 +728,9 @@ func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	if manager.store == nil {
 		return true, nil
 	}
-	return manager.store.ClaimDebugFile(context.Background(), name, MetaFile, []byte{})
+	ctx, cancel := storeCtx()
+	defer cancel()
+	return manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
 }
 
 // Dir 返回本请求的调试目录名（即 X-Request-Id/debug_ref）；
@@ -570,80 +771,292 @@ func FromContext(ctx context.Context) *Recorder {
 	return recorder
 }
 
-// enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
-// 丢弃计数的归属恰在 closed 置位那刻切分：此前进 recorder.dropped，
-// 由 Complete 收尾时一并折进 droppedTotal；此后直接折进 droppedTotal——
-// 迟到入队（如未 join 的泵 goroutine）的丢弃不能落进无人再读的字段。
-func (recorder *Recorder) enqueue(task writeTask) {
+// shardOf 把目录名哈希到编码分片下标：同 dir 恒同分片，编码协程间互不
+// 干扰地保持每请求的事件序。
+func shardOf(dir string) int {
+	h := uint32(2166136261)
+	for i := 0; i < len(dir); i++ {
+		h = (h ^ uint32(dir[i])) * 16777619
+	}
+	return int(h % uint32(encoderShards))
+}
+
+// enqueue 把一个编码任务排进本请求的分片队列；队列满、已关闭或关停中
+// 则丢弃并计数。丢弃计数的归属恰在 closed 置位那刻切分：此前进
+// recorder.dropped，由 Complete 收尾时一并折进 droppedTotal；此后直接
+// 折进 droppedTotal——迟到入队（如未 join 的泵 goroutine）的丢弃不能
+// 落进无人再读的字段。
+// 持锁发送：closed 判定与入队在同一把锁内完成，Complete 置位后不可能
+// 再有任务渗进队列（否则它会排在排空哨兵之后，冲掉的缓冲永不再刷）。
+func (recorder *Recorder) enqueue(task func()) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
-	if recorder.closed {
+	recorder.enqueueLocked(task)
+}
+
+// enqueueLocked 是 enqueue 的临界区形态：调用方已持有 recorder.mutex
+// （AppendJSONL 需要序号分配与入队同临界区——分持两把锁会让序号序与
+// 队列序错位）。发送是非阻塞 select，持锁期间不会挂起。
+func (recorder *Recorder) enqueueLocked(task func()) {
+	if recorder.closed || recorder.manager.closing.Load() {
 		recorder.dropped.Add(1)
 		recorder.manager.droppedTotal.Add(1)
 		return
 	}
 	select {
-	case recorder.tasks <- task:
+	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
+	case <-recorder.manager.workerGone:
+		recorder.dropped.Add(1)
+		recorder.manager.droppedTotal.Add(1)
 	default:
 		recorder.dropped.Add(1)
 	}
 }
 
-// runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
-// chunk 缓冲按 chunkFlushInterval 周期合并提交（进行中的请求对面板仍有
-// 亚秒级可见性，而高频流式期不再每批帧各付一次 commit）；tasks 关闭后
-// 排空残余任务，统一 flush 收尾。
-func (recorder *Recorder) runWriter() {
+// pushInsert 把编码完成的作业交给写 worker；在编码协程上调用。写 worker
+// 存活期间阻塞送达——insertQ 满即把背压传回分片队列，由入队端按丢弃
+// 语义降级；worker 已退（关停收尾）则丢弃计数，编码协程不得陪葬。
+func (recorder *Recorder) pushInsert(apply func()) {
+	select {
+	case recorder.manager.insertQ <- insertOp{recorder: recorder, apply: apply}:
+	case <-recorder.manager.workerGone:
+		recorder.manager.droppedTotal.Add(1)
+	}
+}
+
+// runEncoder 是一个分片的编码协程：串行消费分片队列——同 recorder 的
+// 任务在本协程上保序执行，sanitize/marshal/压缩等 CPU 密集段随分片数
+// 摊到多核。收到关停信号后排空本分片残余任务再退出。
+func (manager *Manager) runEncoder(shard int) {
+	defer manager.encWG.Done()
+	queue := manager.queues[shard]
+	for {
+		select {
+		case task := <-queue:
+			manager.runTask(task)
+		case <-manager.workerStop:
+			for {
+				select {
+				case task := <-queue:
+					manager.runTask(task)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// runWriter 是全局写协程：独占 store 写连接，把各编码协程汇来的 op
+// （暂存/冲刷/收尾）串行落地；各请求的 chunk 缓冲按 chunkFlushInterval
+// 合并成一个跨目录事务提交（进行中的请求对面板仍有亚秒级可见性，高频
+// 流式期不再每请求每批帧各付一次 commit）。收到关停信号后先等编码协程
+// 排空（它们退出前仍会向 insertQ 推 op，只等不收会互相憋死），收干
+// insertQ、冲刷全部脏缓冲再退出。
+func (manager *Manager) runWriter() {
+	// workerGone 走 defer：worker 以任何路径退出都必须关闭它，
+	// Complete 的哨兵等待与迟到入队都在拿它兜底。
+	defer close(manager.workerGone)
 	flushTick := time.NewTicker(chunkFlushInterval)
 	defer flushTick.Stop()
 	for {
 		select {
-		case task, ok := <-recorder.tasks:
-			if !ok {
-				recorder.flushJSONL()
-				recorder.chunkBufs = nil
-				close(recorder.writerDone)
-				return
-			}
-			task()
+		case op := <-manager.insertQ:
+			manager.runOp(op)
 		case <-flushTick.C:
-			recorder.flushJSONL()
+			manager.flushAll()
+		case <-manager.workerStop:
+			for {
+				select {
+				case op := <-manager.insertQ:
+					manager.runOp(op)
+				case <-manager.encodersDone:
+					for {
+						select {
+						case op := <-manager.insertQ:
+							manager.runOp(op)
+						default:
+							manager.flushAll()
+							return
+						}
+					}
+				}
+			}
 		}
 	}
 }
 
-// flushJSONL 把全部非空 JSONL 缓冲合成一个事务提交为 chunk 行；仅写
-// 协程调用。事务原子：失败时缓冲整体保留，下个周期整体重发，不会
-// 出现半截批次（区别于 bufio 的「已写部分留不住」）。
-func (recorder *Recorder) flushJSONL() {
-	st := recorder.manager.store
-	if st == nil {
-		for name := range recorder.chunkBufs {
-			delete(recorder.chunkBufs, name)
+// runTask 执行一次编码作业并兜底 panic：编码任务 panic 若不 recover
+// 就是未恢复的 goroutine panic，直接崩掉整个进程——观测管道故障绝不能
+// 带走数据面。panic 计入 ioErrors，「日志为什么缺了一段」保持可查。
+func (manager *Manager) runTask(task writeTask) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: encode task panicked", "dir", task.recorder.dir, "panic", recovered)
 		}
+	}()
+	task.run()
+}
+
+// runOp 在写 worker 上执行一个落库 op，panic 兜底口径同 runTask。
+func (manager *Manager) runOp(op insertOp) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: insert op panicked", "dir", op.recorder.dir, "panic", recovered)
+		}
+	}()
+	op.apply()
+}
+
+// queueCompletion 把一份完成收尾挂上写侧状态：终态 meta 暂存进
+// stagedFiles、本目录标脏、日志行与 errors_only 剥离标记打包进
+// pendingCompletions——不单独提交事务，随下次批量冲刷与在飞缓冲
+// 同批落库（completionFlushGap 内攒批）。仅写 worker 与 fallbackMu
+// 兜底路径调用。
+func (manager *Manager) queueCompletion(recorder *Recorder, completion Completion) {
+	if !recorder.completionQueued.CompareAndSwap(false, true) {
 		return
 	}
-	var chunks []store.DebugChunk
+	if data := recorder.metaJSON(&completion); data != nil {
+		stored, usize := store.EncodePayload(data)
+		recorder.stageFile(MetaFile, stored, usize, false)
+	}
+	manager.dirtyBufs[recorder] = struct{}{}
+	// errors-only 的收敛点：写面随哨兵到齐而静止，干净完成的请求剥掉
+	// 全部 payload 只留 meta/error 锚点——logs 行照常落，目录名仍被
+	// meta 占位（防同秒复用撞 logs.dir UNIQUE）。带 premature_end_turn
+	// 的「可疑成功」保留——它恰是行为异常的取证面。
+	manager.pendingCompletions = append(manager.pendingCompletions, completionItem{
+		recorder: recorder,
+		logRow:   manager.logRowFor(recorder, &completion),
+		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn,
+	})
+	manager.pendingCompletionCount.Store(int64(len(manager.pendingCompletions)))
+	// 写队列已空说明没有积压：立即冲刷，Complete 不附加攒批等待；
+	// 积压中则攒到 completionFlushGap 或下个 flush tick。
+	if len(manager.insertQ) == 0 || time.Since(manager.lastFlush) >= completionFlushGap {
+		manager.flushAll()
+	}
+}
+
+// pendingBatch 汇出本目录当前暂存的整文件行与 chunk 行；仅写 worker
+// 调用（stagedFiles/chunkBufs 是它的私有状态）。
+func (recorder *Recorder) pendingBatch() ([]store.DebugFileRow, []store.DebugChunkRow) {
+	var files []store.DebugFileRow
+	for name, staged := range recorder.stagedFiles {
+		files = append(files, store.DebugFileRow{
+			Dir:      recorder.dir,
+			Name:     name,
+			Stored:   staged.stored,
+			Usize:    staged.usize,
+			IfAbsent: staged.ifAbsent,
+		})
+	}
+	var rows []store.DebugChunkRow
 	for name, buf := range recorder.chunkBufs {
 		if buf.Len() > 0 {
-			chunks = append(chunks, store.DebugChunk{Name: name, Data: buf.Bytes()})
+			rows = append(rows, store.DebugChunkRow{Dir: recorder.dir, Name: name, Data: buf.Bytes()})
 		}
 	}
-	if len(chunks) == 0 {
+	return files, rows
+}
+
+// flushAll 把全部脏目录的暂存文件与 JSONL 缓冲、待收尾的剥离与日志行
+// 合成一个跨目录事务提交；仅写 worker（及 fallbackMu 兜底路径）调用。
+// 事务原子：失败时缓冲整体保留、目录留在 dirtyBufs、收尾留在
+// pendingCompletions 下轮重试——但各项的 drained 照常放行，Complete
+// 不为病态 DB 陪葬；因此 logRow/strip 的失败语义从「当场丢弃」变成
+// 「随批次重试」，覆盖力只增不减。
+func (manager *Manager) flushAll() {
+	if len(manager.dirtyBufs) == 0 && len(manager.pendingCompletions) == 0 {
 		return
 	}
-	if err := st.AppendDebugChunks(context.Background(), recorder.dir, chunks); err != nil {
-		recorder.noteIOErr("jsonl", err)
+	st := manager.store
+	if st == nil {
+		for recorder := range manager.dirtyBufs {
+			for name := range recorder.chunkBufs {
+				delete(recorder.chunkBufs, name)
+			}
+			clear(recorder.stagedFiles)
+			delete(manager.dirtyBufs, recorder)
+		}
+		for _, item := range manager.pendingCompletions {
+			if !item.signaled {
+				close(item.recorder.drained)
+			}
+		}
+		manager.pendingCompletions = nil
+		manager.pendingCompletionCount.Store(0)
 		return
 	}
-	for _, c := range chunks {
-		recorder.chunkBufs[c.Name].Reset()
+	var batch store.DebugBatch
+	for recorder := range manager.dirtyBufs {
+		files, rows := recorder.pendingBatch()
+		batch.Files = append(batch.Files, files...)
+		batch.Chunks = append(batch.Chunks, rows...)
 	}
+	for _, item := range manager.pendingCompletions {
+		if item.strip {
+			batch.StripDirs = append(batch.StripDirs, item.recorder.dir)
+		}
+		if item.logRow != nil {
+			batch.LogRows = append(batch.LogRows, item.logRow)
+		}
+	}
+	manager.lastFlush = time.Now()
+	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
+		for recorder := range manager.dirtyBufs {
+			delete(manager.dirtyBufs, recorder)
+		}
+		for _, item := range manager.pendingCompletions {
+			if !item.signaled {
+				close(item.recorder.drained)
+			}
+		}
+		manager.pendingCompletions = nil
+		manager.pendingCompletionCount.Store(0)
+		return
+	}
+	ctx, cancel := storeCtx()
+	err := st.WriteDebugBatch(ctx, batch)
+	cancel()
+	if err != nil {
+		for recorder := range manager.dirtyBufs {
+			recorder.noteIOErr("batch", err)
+		}
+		for index := range manager.pendingCompletions {
+			item := &manager.pendingCompletions[index]
+			if !item.signaled {
+				close(item.recorder.drained)
+				item.signaled = true
+			}
+		}
+		return
+	}
+	for recorder := range manager.dirtyBufs {
+		// 成功后放行同类告警：ioErrSeen 的一次性去重不该把恢复后的
+		// 再次故障永久静默。
+		delete(recorder.ioErrSeen, "batch")
+		clear(recorder.stagedFiles)
+		for _, buf := range recorder.chunkBufs {
+			buf.Reset()
+		}
+		delete(manager.dirtyBufs, recorder)
+	}
+	for _, item := range manager.pendingCompletions {
+		if !item.signaled {
+			close(item.recorder.drained)
+		}
+	}
+	manager.pendingCompletions = nil
+	manager.pendingCompletionCount.Store(0)
 }
 
 // noteIOErr 把本目录一次写失败计入 manager.ioErrors 并告警；同一类别
 // （kind）只记一笔——DB 持续故障若逐帧计数，总量会失真到无法反映
-// 影响面。仅在写 worker 与 Complete 收尾（writerDone 关闭后，与其构成
+// 影响面。仅在写 worker 与 Complete 收尾（drained 关闭后，与其构成
 // happens-after）调用，去重集合无需加锁。
 func (recorder *Recorder) noteIOErr(kind string, err error) {
 	if _, ok := recorder.ioErrSeen[kind]; ok {
@@ -749,6 +1162,28 @@ func (recorder *Recorder) SetKeyHash(keyHash string) {
 	}
 	recorder.mutex.Lock()
 	recorder.keyHash = keyHash
+	recorder.mutex.Unlock()
+}
+
+// SetStream 在请求体解码出 options 后回填流式标记：进行中列表的
+// is_streaming 依赖它（requestMeta 在解码前已快照，等不到 options）。
+func (recorder *Recorder) SetStream(stream bool) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.stream = stream
+	recorder.mutex.Unlock()
+}
+
+// SetClass 在令牌准入解析出请求类后回填（fg/bg）：进行中行的
+// Meta.Class 与 meta.json client 块由它在 snapshot/metaJSON 时补投。
+func (recorder *Recorder) SetClass(class string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.requestClass = class
 	recorder.mutex.Unlock()
 }
 
@@ -869,7 +1304,7 @@ func (recorder *Recorder) NotePoolCandidates(candidates []PoolCandidate) {
 }
 
 // upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
-// 一把锁取齐两者——writeMeta 与 insertLog 都要这对值。
+// 一把锁取齐两者——metaJSON 与 logRowFor 都要这对值。
 func (recorder *Recorder) upstreamAttribution() (string, []AccountAttempt) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
@@ -893,7 +1328,7 @@ func (recorder *Recorder) Abort() bool {
 	return true
 }
 
-// snapshot 返回进行中请求的活快照：队列积压、首字节计时、阶段状态、模型。
+// snapshot 返回进行中请求的活快照：首字节计时、阶段状态、模型与丢弃计数。
 // State 分三档：waiting_upstream（上游未回首事件）→ receiving_upstream
 // （上游在回但未下发客户端内容）→ streaming_client（正在向客户端流出）。
 func (recorder *Recorder) snapshot() ActiveRequest {
@@ -904,6 +1339,8 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 	if recorder.keyHash != "" {
 		meta.KeyHash = recorder.keyHash
 	}
+	meta.Stream = recorder.stream
+	meta.Class = recorder.requestClass
 	retries := len(recorder.retries)
 	var lastRetryCause string
 	if retries > 0 {
@@ -935,16 +1372,14 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		State:           state,
 		FirstUpstreamMS: firstUpstream,
 		ClientBytes:     recorder.clientBytes.Load(),
-		QueuedEvents:    len(recorder.tasks),
 		DroppedEvents:   recorder.dropped.Load(),
 		Abortable:       abortable,
 	}
 }
 
 // evalDeferred 展开调用方传入的延迟求值 thunk：传 func() any 时投影/建树
-// 在写 worker 内执行，请求/泵 goroutine 只承担一次 channel send——热路径
-// 不为日志付同步的 marshal/投影成本。注意调用方须保证 thunk 捕获的数据
-// 在 worker 执行期间不被并发改写（不可变值或已冻结的快照）。
+// 推迟到编码协程上执行——投影本身也是编码成本的一部分，不该由请求
+// goroutine 付。约定不变：thunk 捕获的数据在入队后不得再被改写。
 func evalDeferred(value any) any {
 	if thunk, ok := value.(func() any); ok {
 		return thunk()
@@ -952,33 +1387,41 @@ func evalDeferred(value any) any {
 	return value
 }
 
-// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON
-// 文件（debug_files 行）。value 可为 func() any 延迟求值（语义见 evalDeferred）。
+// stagedFile 是待刷写的一行整文件：stored 为调用方已编码的入库字节，
+// ifAbsent 对应 INSERT OR IGNORE（error.json 的 first-write-wins）。
+type stagedFile struct {
+	stored   []byte
+	usize    int64
+	ifAbsent bool
+}
+
+// stageFile 把已编码的整文件行按名暂存并标记本目录脏；仅写 worker
+// 调用。同窗口同名后写覆盖（等价 OR REPLACE 语义）；两边都是
+// ifAbsent 时保留先到者（first-write-wins）。
+func (recorder *Recorder) stageFile(name string, stored []byte, usize int64, ifAbsent bool) {
+	if old, ok := recorder.stagedFiles[name]; ok && old.ifAbsent && ifAbsent {
+		return
+	}
+	recorder.stagedFiles[name] = stagedFile{stored: stored, usize: usize, ifAbsent: ifAbsent}
+	recorder.manager.dirtyBufs[recorder] = struct{}{}
+}
+
+// WriteJSON 将一个阶段快照排入编码队列：sanitize/marshal/压缩都在编码
+// 协程上完成，产物暂存后随周期合批写为 debug_files 行。value 可为
+// func() any 延迟求值（语义见 evalDeferred）。大体积阶段文件用紧凑
+// JSON——体积与 marshal 成本都省约三成，meta.json/error.json 两个
+// 人工常读的小文件例外保留缩进。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
 	}
 	recorder.enqueue(func() {
-		value = recorder.sanitize(evalDeferred(value))
-		data, err := json.MarshalIndent(value, "", "  ")
-		if err != nil {
-			return
-		}
-		data = append(data, '\n')
-		recorder.putFile(name, data)
+		data := recorder.sanitizeJSON(evalDeferred(value))
+		stored, usize := store.EncodePayload(append(data, '\n'))
+		recorder.pushInsert(func() {
+			recorder.stageFile(name, stored, usize, false)
+		})
 	})
-}
-
-// putFile 覆写一个整文件行（meta/01/02/03 与 error.json 之外的写都走这里）；
-// store 未接线时静默跳过——payload 是观测副本，不反向决定请求成败。
-func (recorder *Recorder) putFile(name string, data []byte) {
-	st := recorder.manager.store
-	if st == nil {
-		return
-	}
-	if err := st.PutDebugFile(context.Background(), recorder.dir, name, data); err != nil {
-		recorder.noteIOErr("file", err)
-	}
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -987,21 +1430,33 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
 	}
-	recorder.enqueue(func() {
-		recorder.sequences[name]++
+	// 打戳在入队时刻：Time/ElapsedMS 的语义是「事件发生时」，在编码
+	// 协程执行时刻打戳会让队列积压期的行系统性偏大——与 retryAttempt/
+	// accountAttempt 的调用时刻打戳同口径。
+	at := time.Now()
+	// 序号分配与入队在同一临界区：record 含 Seq 须在 marshal 前定版，
+	// 临界区序即队列序；分持两把锁会让序号序与队列序错位。任务被丢弃
+	// 会留下序号空洞——读侧只按 seq 排序不假设连续，无害。
+	recorder.mutex.Lock()
+	recorder.sequences[name]++
+	seq := recorder.sequences[name]
+	recorder.enqueueLocked(func() {
 		record := JSONLRecord{
-			Seq:       recorder.sequences[name],
-			Time:      time.Now().Format(time.RFC3339Nano),
-			ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
+			Seq:       seq,
+			Time:      at.Format(time.RFC3339Nano),
+			ElapsedMS: at.Sub(recorder.startedAt).Milliseconds(),
 			Event:     event,
-			Data:      recorder.sanitize(evalDeferred(value)),
+			Data:      recorder.sanitizeJSON(evalDeferred(value)),
 		}
 		data, err := json.Marshal(record)
 		if err != nil {
 			return
 		}
-		recorder.appendJSONL(name, data)
+		recorder.pushInsert(func() {
+			recorder.appendJSONL(name, data)
+		})
 	})
+	recorder.mutex.Unlock()
 }
 
 // AppendValueJSONL 将一个结构化值直接追加为 JSONL 行，不添加事件信封。
@@ -1011,11 +1466,10 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 		return
 	}
 	recorder.enqueue(func() {
-		data, err := json.Marshal(recorder.sanitize(evalDeferred(value)))
-		if err != nil {
-			return
-		}
-		recorder.appendJSONL(name, data)
+		data := recorder.sanitizeJSON(evalDeferred(value))
+		recorder.pushInsert(func() {
+			recorder.appendJSONL(name, data)
+		})
 	})
 }
 
@@ -1028,32 +1482,30 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		return
 	}
 	recorder.firstError.CompareAndSwap(nil, &errorRecord{stage: stage, message: err.Error()})
+	// elapsed_ms 记录错误发生时刻，在入队时打戳（同 AppendJSONL 口径）。
+	elapsedMS := time.Since(recorder.startedAt).Milliseconds()
 	recorder.enqueue(func() {
-		if recorder.errorWritten {
-			return
-		}
-		recorder.errorWritten = true
 		// 落库内容取同步抢占的胜出版本：与 index error_stage/
 		// error_message 逐字节一致，不随任务入队顺序漂移。
 		recorded := recorder.firstError.Load()
-		value := recorder.sanitize(map[string]any{
+		var data bytes.Buffer
+		if err := json.Indent(&data, recorder.sanitizeJSON(map[string]any{
 			"stage":      recorded.stage,
 			"message":    recorded.message,
-			"elapsed_ms": time.Since(recorder.startedAt).Milliseconds(),
+			"elapsed_ms": elapsedMS,
+		}), "", "  "); err != nil {
+			return
+		}
+		stored, usize := store.EncodePayload(append(data.Bytes(), '\n'))
+		recorder.pushInsert(func() {
+			// 去重判定留在写 worker：同目录多个 WriteError 任务产出的 op
+			// 按序串行执行，首个到达者胜出——编码途中的丢失由下次调用兜底。
+			if recorder.errorWritten {
+				return
+			}
+			recorder.errorWritten = true
+			recorder.stageFile(ErrorFile, stored, usize, true)
 		})
-		data, marshalErr := json.MarshalIndent(value, "", "  ")
-		if marshalErr != nil {
-			return
-		}
-		st := recorder.manager.store
-		if st == nil {
-			return
-		}
-		// claimed 被忽略：errorWritten 已去重，ClaimDebugFile 的 INSERT OR
-		// IGNORE 只是 DB 层对 first-write-wins 的再兜底。
-		if _, err := st.ClaimDebugFile(context.Background(), recorder.dir, ErrorFile, append(data, '\n')); err != nil {
-			recorder.noteIOErr("file", err)
-		}
 	})
 }
 
@@ -1079,9 +1531,9 @@ func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
 	recorder.upstreamConn.Store(&connInfo{reused: reused, idleMS: idle.Milliseconds()})
 }
 
-// Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
-// 向 logs 表插入请求行并释放目录的清理保护。幂等：二次调用直接
-// 返回——否则 writeMeta 与日志行会重复落一份。
+// Complete 停止受理新写任务、投入排空哨兵等本请求前序作业全部落库，
+// 然后向 logs 表插入请求行并释放目录的清理保护。
+// 幂等：二次调用直接返回——否则 meta.json 与日志行会重复落一份。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
@@ -1093,7 +1545,6 @@ func (recorder *Recorder) Complete(completion Completion) {
 	}
 	recorder.closed = true
 	recorder.abortCancel = nil
-	close(recorder.tasks)
 	// 折算必须在锁内完成：迟到的入队在 closed 置位后走 enqueue 的
 	// closed 分支自折 droppedTotal；拖出锁外会把窗口内的迟到丢弃
 	// 既算进 dropped.Load() 又算进对方的自折——双计。
@@ -1102,14 +1553,46 @@ func (recorder *Recorder) Complete(completion Completion) {
 	if recorder.aborted.Load() && completion.Result == "disconnected" {
 		completion.Result = "aborted"
 	}
-	<-recorder.writerDone
-	recorder.writeMeta(&completion)
-	recorder.manager.insertLog(recorder, &completion)
-	recorder.manager.releaseDir(recorder.dir)
+	// 排空哨兵走本请求自己的分片：分片 FIFO 保证编码协程跑到它时，本
+	// 请求已入队的任务都已编码并推进 insertQ；哨兵 op 再经 insertQ FIFO
+	// 落在全部前序 op 之后——写 worker 执行到它即「本请求写面已齐」，
+	// 收尾挂进 pendingCompletions 随批量事务提交（不单独付一次
+	// commit），drained 在覆盖它的事务落库（或失败放行）后关闭，
+	// Complete 返回即 payload/日志行/errors-only 剥离已提交。
+	// worker 已退（关停中）时哨兵可能永远送不到/执行不到，走
+	// workerGone 兜底在调用方直跑同一份收尾。
+	manager := recorder.manager
+	drained := false
+	select {
+	case manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: func() {
+		recorder.pushInsert(func() {
+			manager.queueCompletion(recorder, completion)
+		})
+	}}:
+		select {
+		case <-recorder.drained:
+			drained = true
+		case <-manager.workerGone:
+		}
+	case <-manager.workerGone:
+	}
+	if !drained {
+		// 写 worker 已退：哨兵要么没排进队列、要么其 op 被 pushInsert
+		// 的 workerGone 分支丢弃、要么收尾已入列但 Complete 恰选中
+		// workerGone 分支——queueCompletion 的 CAS 让重复入列变空操作。
+		// 多个 Complete 可同时走到这里，fallbackMu 接管写侧状态的独占。
+		manager.fallbackMu.Lock()
+		manager.queueCompletion(recorder, completion)
+		manager.flushAll()
+		manager.fallbackMu.Unlock()
+	}
+	manager.releaseDir(recorder.dir)
 }
 
-// appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲；
-// 缓冲按 chunkFlushInterval 周期随同事务合批入库。仅写 worker 调用。
+// appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲，并把本
+// recorder 登进 dirtyBufs——flush tick 只扫脏集。缓冲按
+// chunkFlushInterval 周期随同事务合批入库。仅写 worker 调用
+// （dirtyBufs 是它的私有状态，不加锁）。
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
 	buf := recorder.chunkBufs[name]
 	if buf == nil {
@@ -1118,14 +1601,15 @@ func (recorder *Recorder) appendJSONL(name string, data []byte) {
 	}
 	buf.Write(data)
 	buf.WriteByte('\n')
+	recorder.manager.dirtyBufs[recorder] = struct{}{}
 }
 
-// writeMeta 写 meta.json：创建时（completion 为 nil）落进入时刻与客户端
-// 元信息，Complete 时（非 nil）补完结时刻、耗时、状态码、结果与用量。
-// schema 是 MetaSummary（meta.go）——键名即字段名，omitempty 复刻旧
-// map 写法的出现条件；仅写 worker 与 Complete 收尾（writerDone 关闭后）
-// 调用。
-func (recorder *Recorder) writeMeta(completion *Completion) {
+// metaJSON 序列化 meta.json：创建时（completion 为 nil）落进入时刻与
+// 客户端元信息，Complete 时（非 nil）补完结时刻、耗时、状态码、结果与
+// 用量。schema 是 MetaSummary（meta.go）——键名即字段名，omitempty
+// 复刻旧 map 写法的出现条件。纯函数只读 recorder 快照状态，编码协程/
+// 写 worker/收尾兜底三路都可调用；marshal 失败返回 nil。
+func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	meta := MetaSummary{
 		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
 		Method:            recorder.requestMeta.Method,
@@ -1148,6 +1632,9 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		KeyHash:   recorder.effectiveKeyHash(),
 		RequestID: recorder.requestMeta.ClientRequestID,
 	}
+	recorder.mutex.Lock()
+	client.Class = recorder.requestClass
+	recorder.mutex.Unlock()
 	if client != (MetaClient{}) {
 		meta.Client = &client
 	}
@@ -1195,9 +1682,10 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 		}
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
-	if err == nil {
-		recorder.putFile(MetaFile, append(data, '\n'))
+	if err != nil {
+		return nil
 	}
+	return append(data, '\n')
 }
 
 // validLogName 校验阶段文件名：禁止目录穿越，且必须带期望扩展名。

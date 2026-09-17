@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/store"
@@ -512,18 +513,6 @@ func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
 	}
 }
 
-// 有排队等待者不放行：ping 不与睡醒者同权抢配额，排队者优先。
-func TestRateGateTryAdmitWaitersBlock(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
-	pinGateClock(gate, 10)
-	gate.mu.Lock()
-	gate.waiters = 1
-	gate.mu.Unlock()
-	if gate.tryAdmit() {
-		t.Fatal("tryAdmit = true with queued waiters, want false (queued first)")
-	}
-}
-
 // quota<=0 不做窗口限速：死区内也放行（与 wait 的零配额口径一致）。
 func TestRateGateTryAdmitZeroQuota(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
@@ -552,5 +541,190 @@ func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
 	var gateErr *llm.Failure
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
 		t.Fatalf("wait after admitted ping error = %v, want *llm.Failure (bucket exhausted by ping)", err)
+	}
+}
+
+// bg 准入让出预留槽：quota-margin 个槽内 bg 与 fg 同权放行，越过
+// quota-reserve 后 bg 快败（reason=quota、Retry-After 报下一窗口、
+// 记 rejectBgReserve），fg 不受预留约束照常放行到满桶。
+func TestRateGateBgReserveBlocks(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	pinGateClock(gate, 10)
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	for i := 0; i < 2; i++ {
+		if err := gate.wait(bgCtx); err != nil {
+			t.Fatalf("bg wait %d error = %v, want pass (within quota-reserve)", i, err)
+		}
+	}
+	err := gate.wait(bgCtx)
+	var gateErr *llm.Failure
+	if !errors.As(err, &gateErr) {
+		t.Fatalf("bg wait error = %v, want *llm.Failure (reserve blocked)", err)
+	}
+	if gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("GateReason = %q, want quota", gateErr.GateReason)
+	}
+	// :10 预留阻塞 → 下一窗口 :02+60 开放，retryAfter ≈ 52s。
+	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 53 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
+	}
+	// fg 仍放行到满桶：预留只对 bg 生效。
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("fg wait error = %v, want pass (reserve only constrains bg)", err)
+	}
+	stats := gate.stats()
+	if stats.RejectBgReserve != 1 {
+		t.Fatalf("RejectBgReserve = %d, want 1", stats.RejectBgReserve)
+	}
+	if stats.WindowUsed != 3 || stats.WindowUsedFg != 1 || stats.WindowUsedBg != 2 {
+		t.Fatalf("window used = %d (fg %d, bg %d), want 3 (1, 2)", stats.WindowUsed, stats.WindowUsedFg, stats.WindowUsedBg)
+	}
+	if stats.Reserve != 1 {
+		t.Fatalf("Reserve = %d, want 1 (margin only, no EMA/waiters)", stats.Reserve)
+	}
+}
+
+// 预留随可发区间衰减：窗口前段 EMA 外推的预留把 bg 封零（快败），
+// 尾段衰减到 margin 附近后 bg 吃到 fg 没用的尾槽——工作保守性。
+func TestRateGateBgReserveDecaysToTailFill(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	clock := pinGateClock(gate, 10)
+	gate.mu.Lock()
+	gate.fgRateEMA = 2 // 条/窗：:10 时可发区间剩 48s → 外推 ceil(2*48/60)=2
+	gate.mu.Unlock()
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	// :10 预留 = 2+1=3=quota：bg 被封零快败。
+	var gateErr *llm.Failure
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bg wait at window head error = %v, want *llm.Failure reason=quota", err)
+	}
+	// :57 可发区间剩 ~1s：外推项 ceil(2*1/60)=1，预留降到 2，
+	// bg 拿到 quota-reserve=1 个尾槽。
+	clock.t = clock.t.Add(47 * time.Second)
+	if err := gate.wait(bgCtx); err != nil {
+		t.Fatalf("bg wait at window tail error = %v, want pass (reserve decayed)", err)
+	}
+	stats := gate.stats()
+	if stats.Reserve != 2 {
+		t.Fatalf("Reserve = %d, want 2 (extrapolated 1 + margin 1)", stats.Reserve)
+	}
+	if stats.WindowUsedBg != 1 {
+		t.Fatalf("WindowUsedBg = %d, want 1 (tail fill)", stats.WindowUsedBg)
+	}
+}
+
+// waiters_fg 显式计入预留：上一桶没挤上的 fg 在新窗口是既得需求，
+// 空桶也要为它让位——bg 在桶空时仍被拒，fg 照常放行。
+func TestRateGateBgReserveCountsFgWaiters(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	pinGateClock(gate, 10)
+	gate.mu.Lock()
+	gate.waitersFg = 2
+	gate.mu.Unlock()
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	// reserve = 0(EMA) + 2(waiters) + 1(margin) = 3 = quota：bg 封零。
+	var gateErr *llm.Failure
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bg wait error = %v, want *llm.Failure reason=quota", err)
+	}
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("fg wait error = %v, want pass", err)
+	}
+}
+
+// fg 准入速率 EMA 在桶翻页时折叠：本窗 fg 放行数按 α=0.2 并入，
+// 空窗再衰减一档——bg 预留的需求外推项以它为输入。
+func TestRateGateFgRateEMAFoldsAtRoll(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5, BgReserveMargin: 1}, nil, "")
+	clock := pinGateClock(gate, 10)
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	for i := 0; i < 2; i++ {
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("fg wait %d error = %v, want pass", i, err)
+		}
+	}
+	if err := gate.wait(bgCtx); err != nil {
+		t.Fatalf("bg wait error = %v, want pass", err)
+	}
+	// 翻页：fgWindow=2 折叠进 EMA（bg 不计入 fg 需求样本）。
+	clock.t = clock.t.Add(time.Minute)
+	if rate := gate.stats().FgRate; rate < 0.39 || rate > 0.41 {
+		t.Fatalf("FgRate = %v, want ~0.4 (2 fg admissions folded)", rate)
+	}
+	// 空窗再翻页：EMA *= 0.8。
+	clock.t = clock.t.Add(time.Minute)
+	if rate := gate.stats().FgRate; rate < 0.31 || rate > 0.33 {
+		t.Fatalf("FgRate = %v, want ~0.32 (decayed on empty window)", rate)
+	}
+}
+
+// bg 快败语义：死区/桶满与 fg 同形按窗口节奏拒绝；预留阻塞单独记
+// rejectBgReserve 不复用 rejectHold，让「礼让强度」与「排队预算
+// 耗尽」可区分。
+func TestRateGateRejectionReasons(t *testing.T) {
+	// 闩内：reason=latch。
+	gate := newRateGate(GateConfig{}, nil, "")
+	pinGateClock(gate, 10)
+	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
+		t.Fatalf("latched wait error = %v, want *llm.Failure reason=latch", err)
+	}
+	// fg 死区：reason=hold。
+	fresh := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
+	pinGateClock(fresh, 58.5)
+	if err := fresh.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonHold {
+		t.Fatalf("dead-zone wait error = %v, want *llm.Failure reason=hold", err)
+	}
+	// fg 桶满：reason=quota。
+	full := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
+	pinGateClock(full, 10)
+	if err := full.wait(context.Background()); err != nil {
+		t.Fatalf("fg wait error = %v, want pass", err)
+	}
+	if err := full.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bucket-full wait error = %v, want *llm.Failure reason=quota", err)
+	}
+}
+
+// 放行回执经 GateContext 回填：class/lane/窗口账/排队耗时随
+// X-Gate-* 头数据源透出；未挂接 ctx 的请求不产生回执。
+func TestRateGateVerdictReceipt(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 6, BgReserveMargin: 1}, nil, "gate:yanjian")
+	pinGateClock(gate, 10)
+	ctx, gc := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	if err := gate.wait(ctx); err != nil {
+		t.Fatalf("bg wait error = %v, want pass", err)
+	}
+	v := gc.Verdict()
+	if v == nil {
+		t.Fatal("Verdict = nil, want admission receipt")
+	}
+	if v.Class != adapter.ClassBG || v.Lane != "yanjian" {
+		t.Fatalf("verdict = %+v, want class=bg lane=yanjian", v)
+	}
+	if v.WindowUsed != 1 || v.WindowQuota != 6 {
+		t.Fatalf("verdict window = %d/%d, want 1/6", v.WindowUsed, v.WindowQuota)
+	}
+	// :10 → 下一窗口 :02+60，reset ≈ 52s。
+	if v.WindowResetSec < 50 || v.WindowResetSec > 53 {
+		t.Fatalf("WindowResetSec = %d, want ~52", v.WindowResetSec)
+	}
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("bare-ctx wait error = %v, want pass", err)
+	}
+}
+
+// tryAdmit 计入 bg 账：保温 ping 视同最低优先级背景流量，
+// window_used_bg 的观测口径含它。
+func TestRateGateTryAdmitCountsBg(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
+	pinGateClock(gate, 10)
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit = false, want admit")
+	}
+	stats := gate.stats()
+	if stats.WindowUsed != 1 || stats.WindowUsedBg != 1 || stats.WindowUsedFg != 0 {
+		t.Fatalf("window used = %d (fg %d, bg %d), want 1 (0, 1)", stats.WindowUsed, stats.WindowUsedFg, stats.WindowUsedBg)
 	}
 }

@@ -27,24 +27,110 @@ const logEModelExpr = `CASE WHEN model != '' THEN model ELSE requested_model END
 // ”+'default' 两群，真名参数只命中真名行；写侧不做折叠，新行恒写真名。
 const logAccountExpr = `COALESCE(NULLIF(account,''),'default')`
 
-// scanLogRow 按 logColumnList（logs.go）顺序扫一行。布尔与可空列走 NullInt64
-// 中转——database/sql 不支持 int64→bool/**T 的直接反射转换。
+// scanLogRow 按 logSelectCols 顺序扫一行——dests 由列清单驱动生成，
+// 列序错位的唯一表现是加列漏 case 时 Scan 报 nil 目的地。布尔与可空
+// 列走 NullInt64 中转——database/sql 不支持 int64→bool/**T 的直接
+// 反射转换。
 func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	var r LogRow
 	var started string
 	var ready, sent, open, firstUp, firstCli sql.NullInt64
 	var modelMismatch, stream, rateLimited, premature int64
 	var connReused, connIdle sql.NullInt64
-	dests := []any{
-		&r.ID, &r.Dir, &started, &r.DurationMS,
-		&ready, &sent, &open, &firstUp, &firstCli,
-		&r.API, &r.Method, &r.Path, &r.StatusCode, &r.Result,
-		&r.RequestedModel, &r.Model, &r.ResponseModel, &modelMismatch, &stream,
-		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.ReasoningTokens, &r.TotalTokens,
-		&r.CreditCost, &r.UpstreamRequestID, &r.ClientIP, &r.KeyHash, &r.ClientRequestID,
-		&r.ErrorStage, &r.ErrorMessage, &r.DroppedEvents, &r.RetryAfterSeconds, &rateLimited,
-		&r.Retries, &r.Account, &r.AccountSwitches, &premature, &r.Repairs,
-		&connReused, &connIdle, &r.LogSource, &r.UpstreamProtocol,
+	dests := make([]any, 0, len(logSelectCols))
+	for _, col := range logSelectCols {
+		var d any
+		switch col {
+		case "id":
+			d = &r.ID
+		case "dir":
+			d = &r.Dir
+		case "started_at":
+			d = &started
+		case "duration_ms":
+			d = &r.DurationMS
+		case "request_ready_ms":
+			d = &ready
+		case "upstream_sent_ms":
+			d = &sent
+		case "upstream_open_ms":
+			d = &open
+		case "first_upstream_ms":
+			d = &firstUp
+		case "first_client_ms":
+			d = &firstCli
+		case "api":
+			d = &r.API
+		case "method":
+			d = &r.Method
+		case "path":
+			d = &r.Path
+		case "status_code":
+			d = &r.StatusCode
+		case "result":
+			d = &r.Result
+		case "requested_model":
+			d = &r.RequestedModel
+		case "model":
+			d = &r.Model
+		case "response_model":
+			d = &r.ResponseModel
+		case "model_mismatch":
+			d = &modelMismatch
+		case "stream":
+			d = &stream
+		case "input_tokens":
+			d = &r.InputTokens
+		case "output_tokens":
+			d = &r.OutputTokens
+		case "cache_read_tokens":
+			d = &r.CacheReadTokens
+		case "cache_write_tokens":
+			d = &r.CacheWriteTokens
+		case "reasoning_tokens":
+			d = &r.ReasoningTokens
+		case "total_tokens":
+			d = &r.TotalTokens
+		case "credit_cost":
+			d = &r.CreditCost
+		case "upstream_request_id":
+			d = &r.UpstreamRequestID
+		case "client_ip":
+			d = &r.ClientIP
+		case "key_hash":
+			d = &r.KeyHash
+		case "client_request_id":
+			d = &r.ClientRequestID
+		case "error_stage":
+			d = &r.ErrorStage
+		case "error_message":
+			d = &r.ErrorMessage
+		case "dropped_events":
+			d = &r.DroppedEvents
+		case "retry_after_seconds":
+			d = &r.RetryAfterSeconds
+		case "rate_limited":
+			d = &rateLimited
+		case "retries":
+			d = &r.Retries
+		case "account":
+			d = &r.Account
+		case "account_switches":
+			d = &r.AccountSwitches
+		case "premature_end_turn":
+			d = &premature
+		case "repairs":
+			d = &r.Repairs
+		case "conn_reused":
+			d = &connReused
+		case "conn_idle_ms":
+			d = &connIdle
+		case "log_source":
+			d = &r.LogSource
+		case "upstream_protocol":
+			d = &r.UpstreamProtocol
+		}
+		dests = append(dests, d)
 	}
 	if err := rows.Scan(dests...); err != nil {
 		return nil, err
@@ -92,7 +178,9 @@ type LogQuery struct {
 	// Account 是上游账号 lane 名过滤，走读侧折叠口径
 	//（logAccountExpr：'default' 命中 ''+'default' 两群）。
 	Account string
-	// LogSource/API/UpstreamProtocol 为空或 "all" 不过滤，否则精确匹配。
+	// LogSource 为空时默认剔除 rejected（管线前拒绝行有自己的计数
+	// 与事件环，落表只为留存检索，不与服役流量混排）；"all" 不过滤，
+	// 其余值精确匹配。API/UpstreamProtocol 为空或 "all" 不过滤。
 	LogSource        string
 	API              string
 	UpstreamProtocol string
@@ -103,6 +191,9 @@ type LogQuery struct {
 	StatusClass      string
 	Result           string
 	ErrorStage       string
+	// BeforeID 是 keyset 游标：只取 id 小于它的行。翻页传「上一页
+	// 最旧行的 id」即可走主键范围扫，替代随页深线性退化的 OFFSET。
+	BeforeID int64
 	// Limit<=0 表示不限（LIMIT -1）；Offset<0 按 0。
 	Limit  int
 	Offset int
@@ -128,8 +219,15 @@ func (q LogQuery) where() (string, []any) {
 	if q.Account != "" {
 		add(logAccountExpr+" = ?", q.Account)
 	}
-	if q.LogSource != "" && q.LogSource != "all" {
+	switch q.LogSource {
+	case "":
+		add("log_source != ?", "rejected")
+	case "all":
+	default:
 		add("log_source = ?", q.LogSource)
+	}
+	if q.BeforeID > 0 {
+		add("id < ?", q.BeforeID)
 	}
 	if q.API != "" && q.API != "all" {
 		add("api = ?", q.API)
@@ -282,12 +380,25 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	return rows, total, nil
 }
 
-// ExistsLogBefore 报告是否存在 time 早于 ms 的行（has_more 的
-// 「索引尾部窗外仍有更早历史」投影）。
-func (s *Store) ExistsLogBefore(ctx context.Context, ms int64) (bool, error) {
+// ExistsLogBefore 报告在 q 的筛选口径下是否仍存在 time 早于
+// q.SinceMS 的行（has_more 的「窗口下界之外仍有更早历史」投影）。
+// 沿用同一 where 编译——不带筛选的无条件探测会让过滤翻页窗外无命中
+// 时也报 has_more。
+func (s *Store) ExistsLogBefore(ctx context.Context, q LogQuery) (bool, error) {
+	bound := q.SinceMS
+	// 时间窗与分页维度不参与「更早历史」判定：窗口下界换成 time<bound，
+	// 上界天然蕴含；Limit/Offset/BeforeID 是页内游标不是筛选条件。
+	q.SinceMS, q.UntilMS, q.Limit, q.Offset, q.BeforeID = 0, 0, 0, 0, 0
+	where, args := q.where()
+	if where == "" {
+		where = " WHERE "
+	} else {
+		where += " AND "
+	}
 	var n int64
 	err := s.ro.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM logs WHERE time < ?)`, ms).Scan(&n)
+		`SELECT EXISTS(SELECT 1 FROM logs`+where+`time < ?)`,
+		append(args, bound)...).Scan(&n)
 	return n != 0, err
 }
 
@@ -376,9 +487,12 @@ type LogScope struct {
 }
 
 // where 返回追加在 WHERE/AND 链上的条件片段（含前导 " AND "）与参数。
+// 聚合口径恒剔除 rejected 行：管线前拒绝没有 token/时长，计入只会
+// 污染请求数、成功率与延迟分布——它们的观测面是 rejects 计数与环。
 func (sc LogScope) where() (string, []any) {
 	var b strings.Builder
 	var args []any
+	b.WriteString(` AND log_source != 'rejected'`)
 	if sc.KeyHash != "" {
 		b.WriteString(` AND key_hash = ?`)
 		args = append(args, sc.KeyHash)
@@ -544,7 +658,7 @@ const logRecentEndExpr = `time/1000 + duration_ms/1000`
 
 // LogRecentWindow 聚合最近 seconds 秒内完成的条目（recent 环的 SQL 版）。
 // 完成时刻表达式不可索引，用 time > (cut-3600s) 预筛把扫描圈进
-// idx_logs_time 范围——duration 受排空上限约束（≪3600s），不漏行。
+// idx_logs_time_status 范围——duration 受排空上限约束（≪3600s），不漏行。
 func (s *Store) LogRecentWindow(ctx context.Context, seconds int64, sc LogScope) (LogRecentAgg, error) {
 	var a LogRecentAgg
 	cut := time.Now().Unix() - seconds
@@ -594,41 +708,62 @@ type LogModelLast struct {
 	OKID      int64
 }
 
+// logEModels 返回 logs 里出现过的全部生效模型名（含 ” 组——
+// 双空行在内部聚合口径里也算一组，与对外 LogModels 的排除不同）。
+// DISTINCT 走 idx_logs_emodel_id 的覆盖扫描，不触表行。
+func (s *Store) logEModels(ctx context.Context) ([]string, error) {
+	rows, err := s.ro.QueryContext(ctx, `SELECT DISTINCT `+logEModelExpr+` FROM logs`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // LogLastByModel 返回各生效模型的最近快照；kh 非空时只看该令牌的行。
-// 每模型最新行用 GROUP BY + 裸列绑定 MAX(id) 单遍聚合（SQLite 保证
-// bare column 取自唯一 max 聚合的达成行），替代两遍全表 ROW_NUMBER；
-// emodel=” 组同样保留（与旧口径一致）。
+// 逐模型 emodel=? ORDER BY id DESC LIMIT 1 点查走 idx_logs_emodel_id
+// （模型数远小于行数），替代两遍无时间界 GROUP BY 全表扫。
 func (s *Store) LogLastByModel(ctx context.Context, kh string) (map[string]LogModelLast, error) {
+	emodels, err := s.logEModels(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]LogModelLast{}
 	khCond := ""
-	var args []any
+	var khArgs []any
 	if kh != "" {
 		khCond = ` AND key_hash = ?`
-		args = append(args, kh)
+		khArgs = []any{kh}
 	}
 	latest := func(cond string, apply func(m *LogModelLast, at, id int64, status int, result string)) error {
-		rows, err := s.ro.QueryContext(ctx, `
-			SELECT emodel, time, MAX(id), status_code, result FROM (
-				SELECT `+logEModelExpr+` AS emodel, time, id, status_code, result
-				FROM logs WHERE `+cond+khCond+`
-			) GROUP BY emodel`, args...)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var emodel string
+		query := `SELECT time, id, status_code, result FROM logs
+			WHERE ` + logEModelExpr + ` = ? AND ` + cond + ` AND log_source != 'rejected'` + khCond + `
+			ORDER BY id DESC LIMIT 1`
+		for _, m := range emodels {
 			var at, id int64
 			var status int
 			var result string
-			if err := rows.Scan(&emodel, &at, &id, &status, &result); err != nil {
+			err := s.ro.QueryRowContext(ctx, query,
+				append([]any{m}, khArgs...)...).Scan(&at, &id, &status, &result)
+			if err == sql.ErrNoRows {
+				continue
+			}
+			if err != nil {
 				return err
 			}
-			cur := out[emodel]
+			cur := out[m]
 			apply(&cur, at, id, status, result)
-			out[emodel] = cur
+			out[m] = cur
 		}
-		return rows.Err()
+		return nil
 	}
 	if err := latest(`status_code != 499`, func(m *LogModelLast, at, id int64, status int, result string) {
 		m.ReqAt, m.ReqID, m.ReqStatus, m.ReqResult = at, id, status, result
@@ -657,7 +792,7 @@ func (s *Store) LogTrendSeeds(ctx context.Context, limit int) ([]LogTrendSeed, e
 	rows, err := s.ro.QueryContext(ctx, `
 		SELECT time + duration_ms,
 			CASE WHEN status_code >= 400 OR (result != '' AND result != 'completed') THEN 1 ELSE 0 END
-		FROM logs WHERE time + duration_ms >= ?
+		FROM logs WHERE time + duration_ms >= ? AND log_source != 'rejected'
 		ORDER BY id DESC LIMIT ?`, cut, limit)
 	if err != nil {
 		return nil, err

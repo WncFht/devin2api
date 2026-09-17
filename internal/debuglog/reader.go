@@ -168,8 +168,6 @@ type ActiveRequest struct {
 	FirstUpstreamMS *int64 `json:"first_upstream_ms"`
 	// ClientBytes 是已下发给客户端的累计字节数。
 	ClientBytes int64 `json:"client_bytes"`
-	// QueuedEvents 是写队列中积压的任务数。
-	QueuedEvents int `json:"queued_events"`
 	// DroppedEvents 是目前已被丢弃的写任务数。
 	DroppedEvents uint64 `json:"dropped_events"`
 	// Abortable 表示请求 ctx 已挂接取消函数、可被面板中断。

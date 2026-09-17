@@ -95,10 +95,9 @@ func TestImportIndexBadLines(t *testing.T) {
 	migrated(t, filepath.Join(logRoot, "index.jsonl"))
 }
 
-// TestImportIndexOversizedLine 固定「单行超 4MB」的现行行为：Scanner 报
-// ErrTooLong → 整个 index 源回滚（前面的好行也不入库）、文件保留原名、
-// 排在后面的 quota/gate 等源不再尝试。注意这比文件时代 ScanIndex
-// （整文件读入、无行长限制）更严格——属语义差异而非纯坏行跳过。
+// TestImportIndexOversizedLine 固定「单行超 4MB」的现行行为：ReadBytes
+// 无行长上限，超大行与其他行一样入库，后续源照常导入——不再出现
+// ErrTooLong 整体中止导致的重启 crash loop。
 func TestImportIndexOversizedLine(t *testing.T) {
 	base := t.TempDir()
 	stateDir := filepath.Join(base, "state")
@@ -106,7 +105,7 @@ func TestImportIndexOversizedLine(t *testing.T) {
 	if err := os.MkdirAll(logRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	giant := `{"dir":"huge","pad":"` + strings.Repeat("x", 4<<20) + `"}`
+	giant := `{"dir":"huge","started_at":"2026-09-17T10:00:00Z","pad":"` + strings.Repeat("x", 4<<20) + `"}`
 	writeJSONLines(t, filepath.Join(logRoot, "index.jsonl"), []string{
 		indexLine("before"), giant, indexLine("after"),
 	})
@@ -115,25 +114,16 @@ func TestImportIndexOversizedLine(t *testing.T) {
 
 	s := openTemp(t)
 	ctx := context.Background()
-	err := s.ImportLegacy(ctx, stateDir, logRoot)
-	if err == nil || !strings.Contains(err.Error(), "import index") {
-		t.Fatalf("err = %v, want wrapped 'import index' failure", err)
+	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
+		t.Fatalf("ImportLegacy: %v", err)
 	}
-	if n := tableCount(t, s, "logs"); n != 0 {
-		t.Fatalf("logs = %d, want 0 (tx rolled back)", n)
+	if n := tableCount(t, s, "logs"); n != 3 {
+		t.Fatalf("logs = %d, want 3 (oversized line included)", n)
 	}
-	// 源文件保留原名等人工处理；后续源（quota）连尝试都没发生。
-	if _, statErr := os.Stat(filepath.Join(logRoot, "index.jsonl")); statErr != nil {
-		t.Fatal("index.jsonl should stay in place after failed import")
-	}
-	if _, statErr := os.Stat(filepath.Join(logRoot, "quota.jsonl")); statErr != nil {
-		t.Fatal("quota.jsonl untouched")
-	}
-	if n := tableCount(t, s, "quota_samples"); n != 0 {
-		t.Fatalf("quota_samples = %d, want 0", n)
-	}
-	if hasState(t, s, "import_base_done") {
-		t.Fatal("import_base_done set despite failure")
+	migrated(t, filepath.Join(logRoot, "index.jsonl"))
+	migrated(t, filepath.Join(logRoot, "quota.jsonl"))
+	if n := tableCount(t, s, "quota_samples"); n != 1 {
+		t.Fatalf("quota_samples = %d, want 1", n)
 	}
 }
 

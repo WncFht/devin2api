@@ -5,8 +5,9 @@ import (
 )
 
 // schemaStatements 是全量建表/建索引 DDL，逐条幂等执行（CREATE
-// IF NOT EXISTS）。新增列走 schema_migrations 版本化演进，启动路径
-// 只允许只增不删。
+// IF NOT EXISTS）。存量库的列演进（ALTER/回填）走 migrations.go 的
+// 版本化迁移；冗余索引等历史对象由 applySchema 末尾的 DROP IF
+// EXISTS 幂等清残。
 var schemaStatements = []string{
 	// logs：每完成请求一行，列镜像 LogRow 全集（logColumnList 是
 	// 代码层单一事实源），外加 minute_bucket（time/60000，聚合索引
@@ -60,8 +61,9 @@ var schemaStatements = []string{
 		log_source TEXT NOT NULL DEFAULT 'proxy',
 		upstream_protocol TEXT NOT NULL DEFAULT 'devin'
 	)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_dir ON logs(dir)`,
-	`CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(time)`,
+	// 部分唯一索引：dir='' 的 rejected 留存行没有目录身份，不入
+	// 唯一约束——全列 UNIQUE 会让第二条拒绝行永久撞约束失败。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_dir ON logs(dir) WHERE dir != ''`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_time_status ON logs(time, status_code)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_time_model ON logs(time, model)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_minute_model ON logs(minute_bucket, model)`,
@@ -73,6 +75,10 @@ var schemaStatements = []string{
 	// 全走它——emodel 是 CASE 表达式，不可索引化时这些查询全是
 	// 全表扫+排序。
 	`CREATE INDEX IF NOT EXISTS idx_logs_emodel_id ON logs((CASE WHEN model != '' THEN model ELSE requested_model END), id)`,
+	// 429/限流行的部分索引：rateLimitEvents 的「最近 N 条」ORDER BY id
+	// DESC 直接由它供序，扫描体积=命中行数而非全表；不匹配的行不进
+	// 索引，InsertLog 为常态行付的写代价≈0。
+	`CREATE INDEX IF NOT EXISTS idx_logs_limited_id ON logs(id) WHERE status_code = 429 OR rate_limited != 0`,
 
 	// debug payload：键是目录名（dir 仍作 X-Request-Id/debug_ref
 	// 身份），不是 logs.id——飞行中请求的 payload 先于 Complete 才
@@ -86,6 +92,7 @@ var schemaStatements = []string{
 		name TEXT NOT NULL,
 		content BLOB NOT NULL,
 		updated_at INTEGER NOT NULL,
+		usize INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (dir, name)
 	)`,
 	`CREATE TABLE IF NOT EXISTS debug_chunks (
@@ -93,8 +100,14 @@ var schemaStatements = []string{
 		name TEXT NOT NULL,
 		seq INTEGER NOT NULL,
 		data BLOB NOT NULL,
+		usize INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (dir, name, seq)
 	)`,
+	// name 单列索引：清理器的 error.json 目录枚举（DebugDirsContaining
+	// 与 DebugErrorSignatures 的 name=? 探针）走它直接定位；PK 最左列
+	// 是 dir，name 谓词借不上，无索引时每轮清理全扫两张 blob 大表。
+	`CREATE INDEX IF NOT EXISTS idx_debug_files_name ON debug_files(name)`,
+	`CREATE INDEX IF NOT EXISTS idx_debug_chunks_name ON debug_chunks(name)`,
 
 	// auth_tokens：列镜像 authtoken.Token 持久字段；inflight/
 	// rpmBucket/rpmCount 是瞬态字段不进库。token 存 sha256 全 hex，
@@ -135,7 +148,8 @@ var schemaStatements = []string{
 		cost_weekly_period_start INTEGER NOT NULL DEFAULT 0,
 		allowed_models TEXT NOT NULL DEFAULT '[]',
 		max_concurrency INTEGER NOT NULL DEFAULT 0,
-		max_rpm INTEGER NOT NULL DEFAULT 0
+		max_rpm INTEGER NOT NULL DEFAULT 0,
+		class TEXT NOT NULL DEFAULT 'fg'
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS model_registry (
@@ -206,63 +220,24 @@ var schemaStatements = []string{
 		notes TEXT
 	)`,
 
+	// schema_migrations：版本化迁移登记表，migrations.go 的 runner
+	// 读写——version 作幂等键，存量库的列演进经它逐版本推进。
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version TEXT PRIMARY KEY,
 		applied_at INTEGER NOT NULL
 	)`,
 }
 
-// accountColumnMigrations 是 upstream_accounts 在首发建表后追加的可空
-// 列：新库的 CREATE TABLE 已带它们，这里只给存量库幂等补齐。无版本
-// 框架——PRAGMA table_info 探缺席列再 ALTER TABLE ADD COLUMN，重复
-// 执行安全。
-var accountColumnMigrations = []struct {
-	name string
-	ddl  string
-}{
-	{"priority", `ALTER TABLE upstream_accounts ADD COLUMN priority INTEGER`},
-	{"max_rpm", `ALTER TABLE upstream_accounts ADD COLUMN max_rpm INTEGER`},
-	{"notes", `ALTER TABLE upstream_accounts ADD COLUMN notes TEXT`},
-}
-
-// applySchema 顺序执行全部 DDL 再跑列补齐；幂等，可重复调用。
+// applySchema 顺序执行全部 DDL；幂等，可重复调用。末尾清一次历史
+// 残留对象：idx_logs_time 被 idx_logs_time_status 最左前缀完全覆盖
+// （time 范围/排序走后者等价），旧库删它省掉每行白付的一份索引写。
+// 存量库的列演进不在此做——统一走 migrations.go 的版本化迁移。
 func applySchema(db *sql.DB) error {
 	for _, stmt := range schemaStatements {
 		if _, err := db.Exec(stmt); err != nil {
 			return err
 		}
 	}
-	return ensureAccountColumns(db)
-}
-
-// ensureAccountColumns 给存量 upstream_accounts 表补缺席列；
-// 新库列已齐，PRAGMA table_info 一探即退。
-func ensureAccountColumns(db *sql.DB) error {
-	rows, err := db.Query(`PRAGMA table_info(upstream_accounts)`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	existing := map[string]bool{}
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, colType string
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		existing[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, m := range accountColumnMigrations {
-		if existing[m.name] {
-			continue
-		}
-		if _, err := db.Exec(m.ddl); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := db.Exec(`DROP INDEX IF EXISTS idx_logs_time`)
+	return err
 }

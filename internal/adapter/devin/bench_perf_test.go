@@ -17,7 +17,7 @@ import (
 )
 
 // BenchmarkSanitizeText 测量规则预筛在「干净长文本」上的成本：
-// ToLower 一次 + ~30 个 trigger 的 Contains 全扫。
+// 双字节桶一趟扫描，干净时零分配直返。
 func BenchmarkSanitizeText(b *testing.B) {
 	// 模拟一个真实客户端 system prompt：干净、大、无 trigger。
 	text := strings.Repeat("You are a helpful coding assistant. The user asked to refactor the module. ", 2000)

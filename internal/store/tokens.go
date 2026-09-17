@@ -46,6 +46,7 @@ type TokenRow struct {
 	AllowedModels            []string
 	MaxConcurrency           int
 	MaxRPM                   int
+	Class                    string
 }
 
 // tokenColumnList 是 auth_tokens 的全部列（含 id，37 列），
@@ -60,7 +61,7 @@ var tokenColumnList = []string{
 	"cost_monthly_used_microusd", "cost_monthly_limit_microusd", "cost_monthly_period_start",
 	"cost_5h_used_microusd", "cost_5h_limit_microusd", "cost_5h_anchor",
 	"cost_weekly_used_microusd", "cost_weekly_limit_microusd", "cost_weekly_period_start",
-	"allowed_models", "max_concurrency", "max_rpm",
+	"allowed_models", "max_concurrency", "max_rpm", "class",
 }
 
 var (
@@ -86,11 +87,11 @@ func tokenArgs(t *TokenRow, allowed string) []any {
 		t.MonthlyUsedMicroUSD, t.MonthlyLimitMicroUSD, t.MonthlyPeriodStart,
 		t.Cost5hUsedMicroUSD, t.Cost5hLimitMicroUSD, t.Cost5hAnchor,
 		t.WeeklyUsedMicroUSD, t.WeeklyLimitMicroUSD, t.WeeklyPeriodStart,
-		allowed, t.MaxConcurrency, t.MaxRPM,
+		allowed, t.MaxConcurrency, t.MaxRPM, t.Class,
 	}
 }
 
-func scanToken(row interface{ Scan(...any) error }) (*TokenRow, error) {
+func scanToken(row sqlScanner) (*TokenRow, error) {
 	var t TokenRow
 	var allowed string
 	err := row.Scan(&t.ID, &t.Token, &t.Description, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.IsActive,
@@ -102,7 +103,7 @@ func scanToken(row interface{ Scan(...any) error }) (*TokenRow, error) {
 		&t.MonthlyUsedMicroUSD, &t.MonthlyLimitMicroUSD, &t.MonthlyPeriodStart,
 		&t.Cost5hUsedMicroUSD, &t.Cost5hLimitMicroUSD, &t.Cost5hAnchor,
 		&t.WeeklyUsedMicroUSD, &t.WeeklyLimitMicroUSD, &t.WeeklyPeriodStart,
-		&allowed, &t.MaxConcurrency, &t.MaxRPM)
+		&allowed, &t.MaxConcurrency, &t.MaxRPM, &t.Class)
 	if err != nil {
 		return nil, err
 	}

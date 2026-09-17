@@ -7,7 +7,7 @@
 package debuglog
 
 import (
-	"context"
+	"log/slog"
 	"time"
 	"unicode/utf8"
 
@@ -15,7 +15,7 @@ import (
 	"github.com/WncFht/devin2api/internal/store"
 )
 
-// 日志行 log_source 的定版值：写入时由 insertLog 按客户端关联 ID 归类——
+// 日志行 log_source 的定版值：写入时由 logRowFor 按客户端关联 ID 归类——
 // 面板探活记 manual_test，与 ccLoad 同语义，不计入默认 proxy 视图。
 const (
 	LogSourceProxy      = "proxy"
@@ -26,17 +26,18 @@ const (
 // 的可归因文本，又不让超大错误文案把行撑变形。
 const errorMessageCap = 300
 
-// insertLog 在请求完成后把摘要行插入 logs 表。
-// store 为 nil（测试或 DB 未接线）时静默跳过：日志行是观测副本，
-// 不该反过来决定请求能否完结——失败只记 ioErrors。
-func (manager *Manager) insertLog(recorder *Recorder, completion *Completion) {
-	dir := recorder.dir
-	if manager.store == nil || dir == "" {
-		return
+// logRowFor 构建完成请求的 logs 摘要行；store 为 nil（测试或 DB 未
+// 接线）或 dir 为空时返回 nil——日志行是观测副本，不反向决定请求
+// 能否完结。在收尾 op 入列时刻调用：duration 等时点字段取完成瞬间
+// 口径，不随批量冲刷的等待漂移。落库由写 worker 合并进批量事务
+// （runWriter → flushAll），失败重试随批次走。
+func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *store.LogRow {
+	if manager.store == nil || recorder.dir == "" {
+		return nil
 	}
 	account, accountAttempts := recorder.upstreamAttribution()
-	row := store.LogRow{
-		Dir:               dir,
+	row := &store.LogRow{
+		Dir:               recorder.dir,
 		StartedAt:         recorder.startedAt,
 		DurationMS:        time.Since(recorder.startedAt).Milliseconds(),
 		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
@@ -66,7 +67,7 @@ func (manager *Manager) insertLog(recorder *Recorder, completion *Completion) {
 		KeyHash:           recorder.effectiveKeyHash(),
 		ClientRequestID:   recorder.requestMeta.ClientRequestID,
 		// 来源分类在这里定版（面板探活归 manual_test）：业务口径归
-		// debuglog 写方，store.InsertLog 原样落字段。
+		// debuglog 写方，store 侧原样落字段。
 		LogSource:         LogSourceProxy,
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
@@ -94,8 +95,38 @@ func (manager *Manager) insertLog(recorder *Recorder, completion *Completion) {
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		row.Repairs = repairs.Total()
 	}
-	if _, err := manager.store.InsertLog(context.Background(), &row); err != nil {
+	return row
+}
+
+// NoteReject 把一次管线前拒绝（鉴权 401/并发 429/排空 503/WS 准入/
+// 读体中断）落为 logs 表一行：dir 留空（没有调试目录），result 记
+// rejected，log_source=rejected 把它与服役流量分域——默认列表与全部
+// 聚合口径剔除，只为留存检索（此前拒绝的跨重启痕迹只剩 stderr.log，
+// 无 key/来源维度可查）。同步写而非走全局队列：拒绝发生在 recorder
+// 创建之前，无目录可排；拒绝低频，写库失败只记 ioErrors。
+func (manager *Manager) NoteReject(meta RequestMeta, status int, reason string) {
+	if manager == nil || manager.store == nil {
+		return
+	}
+	row := store.LogRow{
+		LogSource:       "rejected",
+		StartedAt:       manager.now(),
+		API:             meta.API,
+		Method:          meta.Method,
+		Path:            meta.Path,
+		StatusCode:      status,
+		Result:          "rejected",
+		ClientIP:        meta.ClientIP,
+		KeyHash:         meta.KeyHash,
+		ClientRequestID: meta.ClientRequestID,
+		ErrorStage:      ErrStagePrePipeline,
+		ErrorMessage:    truncateRunes(reason, errorMessageCap),
+	}
+	ctx, cancel := storeCtx()
+	defer cancel()
+	if _, err := manager.store.InsertLog(ctx, &row); err != nil {
 		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: insert rejected log failed", "path", meta.Path, "error", err)
 	}
 }
 
@@ -118,6 +149,11 @@ func isRateLimited(e *store.LogRow) bool {
 //     编码失败）——SLA 口径里唯一算失分的类别；
 //   - ""：非失败请求。
 func ErrorOwner(e *store.LogRow) string {
+	// rejected 行是管线前拒绝的留存记录：既非客户端断连也非上游
+	// 失分，观测面在 rejects 计数与事件环，责任归因恒为空。
+	if e.Result == "rejected" {
+		return ""
+	}
 	if isRateLimited(e) {
 		return "business_limited"
 	}

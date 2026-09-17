@@ -189,8 +189,14 @@ func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
 // deriveSessionIDs 为一次请求派生上游 trajectory/cascade ID。
 // SessionKey（CC metadata.user_id 内含 session_id、Codex prompt_cache_key
 // 为线程级）本身即会话级标识，直接做种——压缩改写消息内容也不影响轨迹
-// 连续性。无 SessionKey 时退回「系统提示头 4KB + 首条消息文本头 1KB」
-// 内容哈希：同一会话多轮回放前缀不变 → 稳定，不同会话 → 自然分散。
+// 连续性。无 SessionKey 时退回「系统提示头 4KB + 首条消息文本头 1KB +
+// 客户端模型名 + 工具声明哈希」内容哈希：同一会话多轮回放前缀不变 →
+// 稳定；tools/model 进种子后，共享 system prompt 的客户端（CC）里
+// 首消息雷同的不同会话不再必然折叠进同一上游轨迹——会话内 tools/model
+// 漂移会换轨迹，但注入段变化本来就让前缀缓存分叉，代价一致。
+// 残余盲区：首消息+system+tools+model 全同且无 SessionKey 的请求仍同
+// seed——它与「同一会话的重发」在请求边界上不可区分，要隔离须由
+// 客户端提供会话标识。
 func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
 	sum := sha256.Sum256(sessionSeed(request))
 	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
@@ -206,7 +212,8 @@ func SessionAffinityKey(request llm.RequestMessages) string {
 
 // sessionSeed 构造会话稳定种子：SessionKey 优先（CC metadata.user_id、
 // Codex prompt_cache_key），空则退回「system 头 4KB + 首条消息文本头
-// 1KB」内容哈希——同会话多轮回放前缀不变故稳定，不同会话自然分散。
+// 1KB + 客户端模型名 + 工具声明哈希」内容哈希——同会话多轮回放前缀
+// 不变故稳定，不同会话形态自然分散。残余盲区见 deriveSessionIDs。
 func sessionSeed(request llm.RequestMessages) []byte {
 	// bytes.Buffer 的 Bytes() 零拷贝交给 Sum256；strings.Builder 则需
 	// 先 String() 再 []byte() 多一份全量拷贝。
@@ -231,6 +238,13 @@ func sessionSeed(request llm.RequestMessages) []byte {
 			seed.WriteString(text)
 			break
 		}
+		// 会话形态维：request.Model 是客户端指名（别名解析前），
+		// hashTools 与 warm lineage 键同口径——零字段请求与「同会话
+		// 重发」不可区分是固有边界，不在这里发明会话身份。
+		seed.WriteByte(0)
+		seed.WriteString(request.Model)
+		seed.WriteByte(0)
+		seed.WriteString(hashTools(request.Tools))
 	}
 	return seed.Bytes()
 }
@@ -471,6 +485,14 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 	prompt := &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randid.UUID()),
 		Source:    source.Enum(),
+	}
+	// 单文本块是绝大多数消息的形态：直挂原文串省去 Builder 整段拷贝
+	// （历史重发时这条路径拷贝全部上下文，是投影分配大头）。
+	if len(content) == 1 {
+		if single, ok := content[0].(llm.TextContent); ok {
+			prompt.Prompt = proto.String(single.Text)
+			return prompt
+		}
 	}
 	var text strings.Builder
 	for _, block := range content {

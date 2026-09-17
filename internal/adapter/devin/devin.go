@@ -4,6 +4,7 @@
 package devin
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -255,16 +256,27 @@ func newUpstreamLink(config Config, tokenFunc func() string) (*upstreamLink, err
 
 	// 上行链路（直连 GCP）单连接吞吐实测仅 ~200KB/s，而 chat 请求体重发
 	// 全量上下文常达数百 KB——请求体 gzip 实测把建流到首字从 ~5s 压回 ~1.5s。
-	gzipSend := connect.WithSendGzip()
+	// 用 BestSpeed 档替代默认档：对数百 KB 的 proto 文本压缩率同量级，
+	// 压缩 CPU 省约 2/3（profiler 实测默认档占数据面 ~21%）；解压侧工厂
+	// 与 connect 内置默认一致，仅替换注册项。
+	gzipSend := []connect.ClientOption{
+		connect.WithAcceptCompression("gzip",
+			func() connect.Decompressor { return &gzip.Reader{} },
+			func() connect.Compressor {
+				zw, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+				return zw
+			}),
+		connect.WithSendCompression("gzip"),
+	}
 
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
-	stream := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.Endpoint.BaseURL, gzipSend)
+	stream := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.Endpoint.BaseURL, gzipSend...)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
 	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	api := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.Endpoint.BaseURL, gzipSend)
+	api := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.Endpoint.BaseURL, gzipSend...)
 
 	return &upstreamLink{
 		transport: base,
@@ -443,6 +455,12 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	}
 	if prev.Gate.WindowGuard != next.Gate.WindowGuard {
 		applied = append(applied, "devin.gate_window_guard_seconds")
+	}
+	if prev.Gate.BgMaxHold != next.Gate.BgMaxHold {
+		applied = append(applied, "devin.gate_bg_max_hold_seconds")
+	}
+	if prev.Gate.BgReserveMargin != next.Gate.BgReserveMargin {
+		applied = append(applied, "devin.gate_bg_reserve_margin")
 	}
 	adapter.warm.setParams(next.Warm)
 	if prev.Warm.Enabled != next.Warm.Enabled {

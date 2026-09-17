@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,28 +129,6 @@ type legacySettingsFile struct {
 	Updated map[string]int64  `json:"updated,omitempty"`
 }
 
-type legacyQuotaPoint struct {
-	At                        int64    `json:"at"`
-	Account                   string   `json:"account"`
-	DailyRemaining            *float64 `json:"daily_remaining"`
-	WeeklyRemaining           *float64 `json:"weekly_remaining"`
-	DailyResetAt              int64    `json:"daily_reset_at"`
-	WeeklyResetAt             int64    `json:"weekly_reset_at"`
-	PromptCredits             float64  `json:"prompt_credits"`
-	FlowCredits               float64  `json:"flow_credits"`
-	FlexCredits               float64  `json:"flex_credits"`
-	ACUConsumed               float64  `json:"acu_consumed"`
-	ACULimit                  float64  `json:"acu_limit"`
-	UsedPromptCredits         float64  `json:"used_prompt_credits"`
-	UsedFlowCredits           float64  `json:"used_flow_credits"`
-	UsedFlexCredits           float64  `json:"used_flex_credits"`
-	GracePeriodStatus         string   `json:"grace_period_status"`
-	GracePeriodEnd            int64    `json:"grace_period_end"`
-	WasReducedByOrphanedUsage bool     `json:"was_reduced_by_orphaned_usage"`
-	TopUpEnabled              bool     `json:"top_up_enabled"`
-	TopUpTransactionStatus    string   `json:"top_up_transaction_status"`
-}
-
 // ImportLegacy 把文件时代的持久化搬进库。触发条件是「源文件存在」
 // 而不是一次性标记：分阶段落地期间旧写路径（D2–D6 切换前仍在写
 // index.jsonl/auth_tokens.json 等）会在导入后重建同名文件，再次
@@ -157,6 +136,8 @@ type legacyQuotaPoint struct {
 // 标记」的同一事务内提交，导入全部幂等（dir 唯一索引、token 按
 // token 列去重、(account,at) 配额去重、KV 覆盖），成功后原文件改名
 // <name>.migrated。可重复调用，无文件时退化成几次 stat。
+// imported:<src> 与 import_base_done 只写不读——纯粹的一次性留痕，
+// 供排障确认「那次导入跑过」，不参与任何判定。
 func (s *Store) ImportLegacy(ctx context.Context, stateDir, logRoot string) error {
 	sources := []struct {
 		name string
@@ -190,7 +171,10 @@ func (s *Store) ImportLegacy(ctx context.Context, stateDir, logRoot string) erro
 }
 
 // importIndex 把 index.jsonl 逐行转成 logs 行；损坏行（截断尾部）
-// 跳过，与文件时代 ScanIndex 的容忍语义一致。
+// 跳过，与文件时代 ScanIndex 的容忍语义一致。用 ReadBytes 行循环而
+// 非 bufio.Scanner——Scanner 的行上限会把超长行变成整体中止
+// （ImportLegacy 报错 → 文件不改名 → 重启再炸），坏行跳过语义
+// 只在逐行容忍下成立。
 func (s *Store) importIndex(ctx context.Context, path string) error {
 	return s.withSourceTx(ctx, "index", func(tx *sql.Tx) error {
 		f, err := os.Open(path)
@@ -198,42 +182,42 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 			return skipMissing(err)
 		}
 		defer func() { _ = f.Close() }()
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for sc.Scan() {
-			line := sc.Bytes()
-			if len(line) == 0 {
-				continue
-			}
+		reader := bufio.NewReaderSize(f, 64*1024)
+		for {
+			line, err := reader.ReadBytes('\n')
 			var e legacyIndexEntry
-			if json.Unmarshal(line, &e) != nil {
-				continue
+			if len(line) > 0 && json.Unmarshal(line, &e) == nil {
+				if started, perr := time.Parse(time.RFC3339Nano, e.StartedAt); perr == nil {
+					source := "proxy"
+					if e.ClientRequestID == probeClientRequestID {
+						source = "manual_test"
+					}
+					ms := started.UnixMilli()
+					// ON CONFLICT(dir)：dir 部分唯一索引把「标记丢失后的重跑」
+					// 变成幂等空操作，不会卡死导入；WHERE 子句须与索引的
+					// 部分谓词一致，SQLite 才认这个冲突目标。
+					if _, err := tx.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) WHERE dir != '' DO NOTHING`,
+						e.Dir, ms, ms/60000, started.Format(time.RFC3339Nano), e.DurationMS,
+						e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
+						e.API, e.Method, e.Path, e.StatusCode, e.Result,
+						e.RequestedModel, e.Model, e.ResponseModel, e.ModelMismatch, e.Stream,
+						e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
+						e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
+						e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
+						e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
+						e.ConnReused, e.ConnIdleMS, source); err != nil {
+						return err
+					}
+				}
 			}
-			started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
+			if err == io.EOF {
+				break
+			}
 			if err != nil {
-				continue
-			}
-			source := "proxy"
-			if e.ClientRequestID == probeClientRequestID {
-				source = "manual_test"
-			}
-			ms := started.UnixMilli()
-			// ON CONFLICT(dir)：dir 唯一索引把「标记丢失后的重跑」
-			// 变成幂等空操作，不会卡死导入。
-			if _, err := tx.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) DO NOTHING`,
-				e.Dir, ms, ms/60000, started.Format(time.RFC3339Nano), e.DurationMS,
-				e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
-				e.API, e.Method, e.Path, e.StatusCode, e.Result,
-				e.RequestedModel, e.Model, e.ResponseModel, e.ModelMismatch, e.Stream,
-				e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
-				e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
-				e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
-				e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-				e.ConnReused, e.ConnIdleMS, source); err != nil {
 				return err
 			}
 		}
-		return sc.Err()
+		return nil
 	})
 }
 
@@ -361,29 +345,34 @@ func (s *Store) importQuota(ctx context.Context, path string) error {
 			return skipMissing(err)
 		}
 		defer func() { _ = f.Close() }()
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 16*1024), 1024*1024)
-		for sc.Scan() {
-			var q legacyQuotaPoint
-			if json.Unmarshal(sc.Bytes(), &q) != nil {
-				continue
+		reader := bufio.NewReaderSize(f, 16*1024)
+		for {
+			line, err := reader.ReadBytes('\n')
+			var q QuotaSample
+			if len(line) > 0 && json.Unmarshal(line, &q) == nil {
+				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_samples(
+					at, account, daily_remaining, weekly_remaining, daily_reset_at, weekly_reset_at,
+					prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
+					used_prompt_credits, used_flow_credits, used_flex_credits,
+					grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
+					top_up_enabled, top_up_transaction_status
+				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+					q.At, q.Account, q.DailyRemaining, q.WeeklyRemaining, q.DailyResetAt, q.WeeklyResetAt,
+					q.PromptCredits, q.FlowCredits, q.FlexCredits, q.ACUConsumed, q.ACULimit,
+					q.UsedPromptCredits, q.UsedFlowCredits, q.UsedFlexCredits,
+					q.GracePeriodStatus, q.GracePeriodEnd, q.WasReducedByOrphanedUsage,
+					q.TopUpEnabled, q.TopUpTransactionStatus); err != nil {
+					return err
+				}
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_samples(
-				at, account, daily_remaining, weekly_remaining, daily_reset_at, weekly_reset_at,
-				prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
-				used_prompt_credits, used_flow_credits, used_flex_credits,
-				grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
-				top_up_enabled, top_up_transaction_status
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				q.At, q.Account, q.DailyRemaining, q.WeeklyRemaining, q.DailyResetAt, q.WeeklyResetAt,
-				q.PromptCredits, q.FlowCredits, q.FlexCredits, q.ACUConsumed, q.ACULimit,
-				q.UsedPromptCredits, q.UsedFlowCredits, q.UsedFlexCredits,
-				q.GracePeriodStatus, q.GracePeriodEnd, q.WasReducedByOrphanedUsage,
-				q.TopUpEnabled, q.TopUpTransactionStatus); err != nil {
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
 				return err
 			}
 		}
-		return sc.Err()
+		return nil
 	})
 }
 
@@ -420,7 +409,8 @@ func (s *Store) importGateStates(ctx context.Context, logRoot string) error {
 
 // withSourceTx 在单事务里跑 fn 再写 imported:<name> 标记；fn 返回
 // skipMissing 归一的 nil（源文件缺席）时照样提交标记，语义是
-// 「该源已处理，无需再理」。
+// 「该源已处理，无需再理」。标记是只写不读的一次性留痕——重跑判定
+// 靠源文件存在性而非标记，崩溃重试由数据行幂等兜底。
 func (s *Store) withSourceTx(ctx context.Context, name string, fn func(tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

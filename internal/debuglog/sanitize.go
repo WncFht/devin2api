@@ -14,43 +14,39 @@ import (
 	"fmt"
 	"mime"
 	"strings"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// sanitize 把待写值归一成 any 树后递归脱敏。map/slice/string 本身已是
-// any 树节点（投影函数的产物），直接递归；json.RawMessage（03/04 的
-// protojson 帧、06 的 SSE data）只需一次 unmarshal——此前先 marshal 回
-// 字节再 unmarshal 是纯浪费。注意 map/slice 输入会被原地改写（secret 键
-// 遮盖、图片提取），调用方传入的都是当次投影专用结构，原地改写是安全的。
-func (recorder *Recorder) sanitize(value any) any {
-	var generic any
-	switch value := value.(type) {
-	case json.Marshaler:
-		// RawMessage 与惰性序列化包装（protoJSON 等）共用此路：序列化在
-		// worker 内发生，调用方 goroutine 不承担 marshal 成本。快路径
-		// 预筛不敏感即原样透传——记录多为自产 SSE 帧与 proto 投影，完整
-		// unmarshal+树遍历+marshal 在每条 delta 上是纯开销。
-		data, err := value.MarshalJSON()
-		if err != nil {
-			return map[string]any{"serialization_error": err.Error()}
-		}
+// sanitizeJSON 把待写值序列化为脱敏后的 JSON 字节：先拿到原始 JSON
+// （json.Marshaler 用其 MarshalJSON——protoJSON/SSE 包装的惰性序列化
+// 留在编码协程；其余类型一次 json.Marshal），rawNeedsSanitize 预筛
+// 干净即原样采用——绝大多数记录是自产投影/SSE 帧，unmarshal 建树+
+// 树遍历+重排的三趟成本在每条 delta 上是纯开销；命中敏感键或内联
+// 图片才走完整脱敏。与旧 sanitize 的语义差异：map/slice 输入不再被
+// 原地改写（脱敏作用于 unmarshal 出的私有副本），返回值作
+// JSONLRecord.Data 时外层 marshal 只付一次 compaction 扫描。
+func (recorder *Recorder) sanitizeJSON(value any) []byte {
+	var data []byte
+	var err error
+	if marshaler, ok := value.(json.Marshaler); ok {
+		data, err = marshaler.MarshalJSON()
+	} else {
+		data, err = json.Marshal(value)
+	}
+	if err == nil {
 		if !rawNeedsSanitize(data) {
-			return json.RawMessage(data)
+			return data
 		}
-		if err := json.Unmarshal(data, &generic); err != nil {
-			return map[string]any{"serialization_error": err.Error()}
-		}
-	case map[string]any, []any, string:
-		generic = value
-	default:
-		data, err := json.Marshal(value)
-		if err != nil {
-			return map[string]any{"serialization_error": err.Error()}
-		}
-		if err := json.Unmarshal(data, &generic); err != nil {
-			return map[string]any{"serialization_error": err.Error()}
+		var generic any
+		if err = json.Unmarshal(data, &generic); err == nil {
+			if data, err = json.Marshal(recorder.sanitizeValue(generic, false)); err == nil {
+				return data
+			}
 		}
 	}
-	return recorder.sanitizeValue(generic, false)
+	fallback, _ := json.Marshal(map[string]any{"serialization_error": err.Error()})
+	return fallback
 }
 
 // sanitizeValue 递归脱敏 any 树。metadataScope 标记当前子树是否位于某个
@@ -271,6 +267,8 @@ func (recorder *Recorder) writeDataURL(value string) (attachmentReference, bool)
 func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachmentReference {
 	hashBytes := sha256.Sum256(data)
 	hash := hex.EncodeToString(hashBytes[:])
+	// 查重表只在编码协程上访问：同一 recorder 的任务恒由同一分片协程
+	// 串行执行，map 无并发读写。
 	if reference, ok := recorder.attachmentByHash[hash]; ok {
 		return reference
 	}
@@ -279,9 +277,14 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 	// name 是 debug_files 行键，形如 "attachments/image-001.png"——与
 	// 01/02 JSON 体内的 file 指针及 /file/{name} 端点入参同形。
 	name := fmt.Sprintf("%s/image-%03d%s", AttachmentsDir, recorder.attachmentCount, extension)
-	recorder.putFile(name, data)
 	reference := attachmentReference{File: name, MIMEType: mimeType, Size: len(data), SHA256: hash}
 	recorder.attachmentByHash[hash] = reference
+	// 附件 op 先于引用它的父文件 op 推进 insertQ（同一编码协程顺序
+	// 推送），读侧不会在文件引用就绪时找不到附件行。
+	stored, usize := store.EncodePayload(data)
+	recorder.pushInsert(func() {
+		recorder.stageFile(name, stored, usize, false)
+	})
 	return reference
 }
 

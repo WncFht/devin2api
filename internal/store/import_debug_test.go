@@ -144,8 +144,8 @@ func TestImportDebugDirs(t *testing.T) {
 	}
 }
 
-// TestImportDebugDirsResume 验证断点续传：进度标记之前的目录已入库
-// （只剩删盘兜底），之后的才导入。
+// TestImportDebugDirsResume 验证断点续传：水位线之下且已入库的目录
+// 只删盘不重复导入；水位线之后的正常导入。
 func TestImportDebugDirsResume(t *testing.T) {
 	base := t.TempDir()
 	logRoot := filepath.Join(base, "logs")
@@ -153,15 +153,22 @@ func TestImportDebugDirsResume(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
+	// 水位线下的 dir1 已在库（上轮已导入）：不应被磁盘版覆盖。
+	if err := s.PutDebugFile(ctx, "20260910-120000", "meta.json", []byte("live")); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetState(ctx, "import_debug_progress", "20260910-120000"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ImportDebugDirs(ctx, logRoot, "import_debug_progress"); err != nil {
 		t.Fatalf("ImportDebugDirs: %v", err)
 	}
-	// dir1 未入库（进度水位之下），但磁盘目录已被兜底删除。
-	if _, _, ok, _ := s.DebugFile(ctx, "20260910-120000", "meta.json", 0); ok {
-		t.Fatal("dir1 should not be imported")
+	data, _, _, _ := s.DebugFile(ctx, "20260910-120000", "meta.json", 0)
+	if string(data) != "live" {
+		t.Fatalf("meta = %q, want live", data)
+	}
+	if _, _, ok, _ := s.DebugFile(ctx, "20260910-120000", "error.json", 0); ok {
+		t.Fatal("dir1 error.json should not be merged")
 	}
 	if _, err := os.Stat(filepath.Join(logRoot, "20260910-120000")); !os.IsNotExist(err) {
 		t.Fatal("dir1 should be deleted")

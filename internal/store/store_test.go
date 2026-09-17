@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -349,5 +351,43 @@ func TestModelRegistry(t *testing.T) {
 	models, _ = s.ListModels(ctx)
 	if len(models) != 1 {
 		t.Fatalf("after delete len = %d", len(models))
+	}
+}
+
+// IncrementalVacuum 须把 freelist 收干到阈值之下（分块循环，墙钟预算内
+// 反复回收），而非旧实现的单轮 512 页封顶——后者在高摄入下永远追不上
+// freelist 增长，.db 文件停在历史高水位。
+func TestIncrementalVacuumDrainsFreelist(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	// 不可压缩 payload 才真实占页；64×64KB ≈ 4MB，freelist 远超单块上限。
+	payload := make([]byte, 64*1024)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	for i := 0; i < 64; i++ {
+		dir := fmt.Sprintf("d%03d", i)
+		if err := s.PutDebugFile(ctx, dir, "big.bin", payload); err != nil {
+			t.Fatalf("PutDebugFile: %v", err)
+		}
+	}
+	if err := s.DeleteDebugDirsBefore(ctx, "e", nil); err != nil {
+		t.Fatalf("DeleteDebugDirsBefore: %v", err)
+	}
+	var free int64
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatalf("freelist_count: %v", err)
+	}
+	if free <= vacuumChunkPages {
+		t.Fatalf("freelist %d not above one chunk, test vacuous", free)
+	}
+	if err := s.IncrementalVacuum(ctx); err != nil {
+		t.Fatalf("IncrementalVacuum: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		t.Fatalf("freelist_count after: %v", err)
+	}
+	if free >= vacuumMinPages {
+		t.Fatalf("freelist not drained: %d pages remain", free)
 	}
 }

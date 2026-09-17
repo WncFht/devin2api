@@ -62,6 +62,12 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	// 列演进走版本化迁移：幂等建表只管新库全量 DDL，存量库的
+	// ALTER/回填由 runner 按 schema_migrations 登记跳过。
+	if err := applyMigrations(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("apply migrations: %w", err)
+	}
 
 	// 读池在写库建好 schema 之后打开：WAL 下读者拿连接级快照，
 	// 与写者互不阻塞。并发数取面板页一次加载的端点扇出量级。
@@ -80,12 +86,37 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, ro: ro, path: path}, nil
 }
 
+// vacuumMinPages 以下不值得动： freelist 太小，搬页成本换不回磁盘。
+// vacuumChunkPages 给单次 incremental_vacuum 调用封顶（实测 8.3GB 库上
+// 512 页约 8ms），写连接占压钳在毫秒级；无界调用在 GB 级 freelist 上会
+// 长时间独占写连接，曾把 debug 写队列压到丢事件。vacuumBudget 给一轮
+// Maintain 的回收总量封顶——固定页数上限在高摄入下永远追不上 freelist
+// 增长（512 页/5min 是旧病：.db 停在历史高水位不再回缩），按墙钟预算
+// 循环小块回收则摄入越快单轮收得越多，跨轮收敛。
+const (
+	vacuumMinPages   = 64
+	vacuumChunkPages = 512
+	vacuumBudget     = 2 * time.Second
+)
+
 // IncrementalVacuum 回收 freelist 页——auto_vacuum=INCREMENTAL 只把
 // 删除页挂进 freelist，不显式跑这步 .db 文件不回缩（db_bytes 会与
-// 实际占用分叉）。cleaner 淘汰大批行后调一次即可。
+// 实际占用分叉）。按 vacuumChunkPages 小块循环：每次调用间释放写连接，
+// 让批量写事务与清洁工删除插队，直到 freelist 清空或耗尽墙钟预算。
 func (s *Store) IncrementalVacuum(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`)
-	return err
+	deadline := time.Now().Add(vacuumBudget)
+	for {
+		var free int64
+		if err := s.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+			return err
+		}
+		if free < vacuumMinPages || !time.Now().Before(deadline) {
+			return nil
+		}
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA incremental_vacuum(%d)`, vacuumChunkPages)); err != nil {
+			return err
+		}
+	}
 }
 
 // Maintain 执行一轮库级周期养护：logs 行按龄删除（logRowDays<=0 时

@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"hash"
 	"math/rand"
 	"slices"
 	"strings"
@@ -254,9 +255,6 @@ func newCacheWarmer(adapter *Adapter, params WarmConfig) *cacheWarmer {
 // Close 停掉调度协程，幂等。排空语义是不再制造新上游工作；已在途的
 // ping 随自己 60s 的 ctx 超时自然收尾，不另等。
 func (w *cacheWarmer) Close() {
-	if w == nil {
-		return
-	}
 	w.closeOnce.Do(func() {
 		close(w.stop)
 		<-w.done
@@ -268,9 +266,6 @@ func (w *cacheWarmer) Close() {
 // 可能长达数分钟，静默超期的条目留着只会白占 retained 内存。
 // 幂等；进程若取消排空无回路（排空后唯一去向是退出）。
 func (w *cacheWarmer) BeginDrain() {
-	if w == nil {
-		return
-	}
 	w.mu.Lock()
 	w.drained = true
 	w.mu.Unlock()
@@ -280,9 +275,6 @@ func (w *cacheWarmer) BeginDrain() {
 // 缩容即刻按同一淘汰序压回帽内。Enabled=false 停调度并清空条目表
 // 释放 retained 内存——重开时各流的第一发真实请求自然重建簿记。
 func (w *cacheWarmer) setParams(next WarmConfig) {
-	if w == nil {
-		return
-	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.params = NormalizeWarmConfig(next)
@@ -297,9 +289,6 @@ func (w *cacheWarmer) setParams(next WarmConfig) {
 // keyOf 计算请求的 lineage 键；功能关闭时返回零键让下游全 no-op，
 // 省掉每请求一次的哈希开销。
 func (w *cacheWarmer) keyOf(request llm.RequestMessages, resolvedUID string) warmLineageKey {
-	if w == nil {
-		return warmLineageKey{}
-	}
 	w.mu.Lock()
 	enabled := w.params.Enabled
 	w.mu.Unlock()
@@ -320,7 +309,7 @@ func (w *cacheWarmer) keyOf(request llm.RequestMessages, resolvedUID string) war
 // 在首个开流成功后创建，此前的发送没有可记对象；首发/续试重发/
 // continueTurn 各跳都在此记账，ping 自己只写 lastPingAt。
 func (w *cacheWarmer) noteSend(key warmLineageKey) {
-	if w == nil || key == (warmLineageKey{}) {
+	if key == (warmLineageKey{}) {
 		return
 	}
 	w.mu.Lock()
@@ -342,7 +331,7 @@ func (w *cacheWarmer) noteSend(key warmLineageKey) {
 // （microcompact 类前缀失配）sends 归 1 重新计。随后做超任扫描与
 // 容量淘汰。续试变体不入表——调用方只在客户端原形态上调用。
 func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wireUID, routerUID string) {
-	if w == nil || key == (warmLineageKey{}) {
+	if key == (warmLineageKey{}) {
 		return
 	}
 	w.mu.Lock()
@@ -389,7 +378,7 @@ func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wi
 // response_model 进观测集；usage 的 input+cache_read 是前缀体量实测，
 // 替换 retained 估算值。
 func (w *cacheWarmer) noteCompleted(key warmLineageKey, msg *llm.AssistantMessage) {
-	if w == nil || key == (warmLineageKey{}) {
+	if key == (warmLineageKey{}) {
 		return
 	}
 	w.mu.Lock()
@@ -412,9 +401,6 @@ func (w *cacheWarmer) noteCompleted(key warmLineageKey, msg *llm.AssistantMessag
 
 // stats 返回簿记快照；顺带按当前参数统计 promoted/suspect 现值。
 func (w *cacheWarmer) stats() WarmStats {
-	if w == nil {
-		return WarmStats{}
-	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	stats := WarmStats{
@@ -543,11 +529,14 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 		entry.lastPingAt = now
 	}
 	entry.nextDue = w.dueAfterLocked(now)
-	if err != nil && llm.Classify(err).ClientFixable {
+	if err != nil && llm.Classify(err).ClientFixable && entry.digest == snap.digest {
 		// 自愈后仍是语义拒绝（invalid_argument/failed_precondition/
 		// ContextLength/permission_denied）：前缀形态上游不再接受，
 		// 留着只会持续打空——退役。凭证类（unauthenticated）与环境类
 		//（传输/限流/取消/超时/未分类）只跳本轮，不作退役证据。
+		// digest 判等挡掉「发送期间同键被 retain 换新内容」的误杀：
+		// retain 原地改写同一条目，指针复查检不出来——本次 ping 打的
+		// 是 snap 旧形态，它的语义拒绝不构成新内容的死刑证据。
 		w.removeLocked(entry)
 	}
 }
@@ -795,9 +784,8 @@ func firstText(request llm.RequestMessages) string {
 
 // hashTools 把工具声明序列化为规范字节流取 sha256：工具段经
 // withToolDescriptions 注入 system 尾，MCP 上下线/权限变更会让注入段
-// 漂移而 sysHash4K 不变——声明的全部 wire 字段（名/说明/schema/
-// custom/server/strict/只读位/MCP 归属/归因名单）按序进哈希，任何
-// 漂移都换键，旧 retained 自然闲置过期而不是 ping 出自报 hit。
+// 漂移而 sysHash4K 不变——声明的全部 wire 字段按序进哈希，任何漂移
+// 都换键，旧 retained 自然闲置过期而不是 ping 出自报 hit。
 func hashTools(tools []llm.ToolDefinition) string {
 	if len(tools) == 0 {
 		return ""
@@ -810,29 +798,38 @@ func hashTools(tools []llm.ToolDefinition) string {
 		h.Write([]byte(s))
 	}
 	for _, tool := range tools {
-		put(tool.Name)
-		put(tool.Description)
-		put(string(tool.InputSchema))
-		put(tool.ServerName)
-		var flags byte
-		if tool.Custom {
-			flags |= 1
-		}
-		if tool.Server {
-			flags |= 2
-		}
-		if tool.Strict {
-			flags |= 4
-		}
-		if tool.ReadOnlyHint {
-			flags |= 8
-		}
-		h.Write([]byte{flags})
-		for _, name := range tool.AttributionFieldNames {
-			put(name)
-		}
+		putTool(h, put, tool)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// putTool 把一份工具声明的全部身份字段按序写进 h：名/说明/schema/
+// ServerName/custom·server·strict·只读位合成的 flags/归因名单——「哪些
+// wire 字段构成工具身份」的清单只在这里存在一份，ToolDefinition 增
+// 字段只改这里。put 由调用方提供：fingerprintRequest 的版本顺带累加
+// 体量估计。
+func putTool(h hash.Hash, put func(string), tool llm.ToolDefinition) {
+	put(tool.Name)
+	put(tool.Description)
+	put(string(tool.InputSchema))
+	put(tool.ServerName)
+	var flags byte
+	if tool.Custom {
+		flags |= 1
+	}
+	if tool.Server {
+		flags |= 2
+	}
+	if tool.Strict {
+		flags |= 4
+	}
+	if tool.ReadOnlyHint {
+		flags |= 8
+	}
+	h.Write([]byte{flags})
+	for _, name := range tool.AttributionFieldNames {
+		put(name)
+	}
 }
 
 // fingerprintRequest 估算请求体体量并对全量内容取指纹：体量供
@@ -851,27 +848,7 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 	}
 	put(request.SystemPrompt)
 	for _, tool := range request.Tools {
-		put(tool.Name)
-		put(tool.Description)
-		put(string(tool.InputSchema))
-		put(tool.ServerName)
-		var flags byte
-		if tool.Custom {
-			flags |= 1
-		}
-		if tool.Server {
-			flags |= 2
-		}
-		if tool.Strict {
-			flags |= 4
-		}
-		if tool.ReadOnlyHint {
-			flags |= 8
-		}
-		h.Write([]byte{flags})
-		for _, name := range tool.AttributionFieldNames {
-			put(name)
-		}
+		putTool(h, put, tool)
 	}
 	for _, message := range request.Messages {
 		var content []llm.Content

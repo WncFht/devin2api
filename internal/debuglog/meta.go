@@ -1,4 +1,4 @@
-// 本文件定义 meta.json 的 schema：写方（Recorder.writeMeta）组
+// 本文件定义 meta.json 的 schema：写方（Recorder.metaJSON）组
 // MetaSummary marshal 落盘，读方（Detail.Summary、FindDirByStartedAt
 // 与面板投影）解码同一类型——键名集中在一处定义，写读两侧不再靠
 // map 字面量与匿名 struct 各自维持。
@@ -73,6 +73,8 @@ type MetaClient struct {
 	KeyHash   string `json:"key_hash,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
+	// Class 是令牌准入解析出的请求类（fg/bg）；匿名/未解析为空。
+	Class string `json:"class,omitempty"`
 }
 
 // MetaUsage 是 meta.json 的 usage 块：完结时上游报告的最终 token 用量，

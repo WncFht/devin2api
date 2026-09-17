@@ -1,5 +1,5 @@
 // 本文件验证请求日志行的字段口径：error_* 只在终结性失败时落行、
-// 连接画像随成功建流出账。写路径是 Complete→insertLog→logs 表。
+// 连接画像随成功建流出账。写路径是 Complete→logRowFor→批量事务→logs 表。
 package debuglog
 
 import (
