@@ -99,6 +99,9 @@ func EncodeResponse(message *llm.AssistantMessage, model string, toolNameMap map
 	if model == "" {
 		model = message.Model
 	}
+	if model == "" {
+		model = "devin"
+	}
 	responseID := message.ResponseID
 	if !strings.HasPrefix(responseID, "resp_") {
 		responseID = randid.Prefixed("resp_")
@@ -581,7 +584,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
 	// 事件顶层 error 与 response.error 共用同一份 payload（spec 位置与
 	// 排障位置同事实源），debug_ref 等排障字段两处一致。
-	errorPayload, status := common.StreamError(event, "response stream failed", true)
+	errorPayload, status := common.StreamErrorOpenAI(event, "response stream failed")
 	response := baseResponse(encoder.responseID, encoder.model, encoder.createdAt, "failed")
 	response["error"] = errorPayload
 	// 挂起的 reasoning item 先补发收尾再下发失败事件，与 Done 路径一致——
@@ -658,7 +661,10 @@ func (encoder *StreamEncoder) emit(name string, payload map[string]any) SSEEvent
 
 // deltaEvent 是高频增量事件的固定编码形态：键集与 emit(map) 产出逐一
 // 对应，但走 struct 编码——省掉每帧一次 map 反射 marshal。omitempty
-// 指针字段保证缺省键不出现，与各事件原 map 键集一致。
+// 字段保证缺省键不出现，与各事件原 map 键集一致。Logprobs 用 any 而非
+// []any：omitempty 对接口只判 nil，output_text.delta 赋的空切片才能
+// 发出 "logprobs":[]（与 content_part.added/output_text.done 的 map
+// 编码键集一致），其余增量事件留 nil 不落键。
 type deltaEvent struct {
 	Type           string `json:"type"`
 	SequenceNumber int64  `json:"sequence_number"`
@@ -667,7 +673,7 @@ type deltaEvent struct {
 	ContentIndex   *int   `json:"content_index,omitempty"`
 	SummaryIndex   *int   `json:"summary_index,omitempty"`
 	Delta          string `json:"delta"`
-	Logprobs       []any  `json:"logprobs,omitempty"`
+	Logprobs       any    `json:"logprobs,omitempty"`
 }
 
 // emitDelta 补 sequence_number 后用 struct 编码一帧增量 SSE。

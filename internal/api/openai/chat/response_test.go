@@ -259,11 +259,12 @@ func TestMessageToChatKeepsTextWithToolCalls(t *testing.T) {
 		llm.TextContent{Text: "let me check"},
 		llm.ToolCall{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
 	}}
-	object, calls := messageToChat(message)
+	object := messageToChat(message)
+	calls, _ := object["tool_calls"].([]any)
 	if object["content"] != "let me check" || len(calls) != 1 {
 		t.Fatalf("message = %#v, calls = %#v", object, calls)
 	}
-	onlyCall, _ := messageToChat(&llm.AssistantMessage{Content: []llm.Content{
+	onlyCall := messageToChat(&llm.AssistantMessage{Content: []llm.Content{
 		llm.ToolCall{ID: "c1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
 	}})
 	if content, ok := onlyCall["content"]; !ok || content != nil {

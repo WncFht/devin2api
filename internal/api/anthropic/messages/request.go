@@ -108,22 +108,10 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if collectDropped {
 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, anthropicRequestFields)...)
 	}
-	if request.MaxTokens != nil {
-		if *request.MaxTokens > 0 {
-			context.MaxTokens = request.MaxTokens
-		} else {
-			context.Dropped = append(context.Dropped, "field:max_tokens")
-		}
-	}
+	context.MaxTokens = common.PositiveIntOrDrop(request.MaxTokens, &context.Dropped, "field:max_tokens")
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
-	if request.TopK != nil {
-		if *request.TopK > 0 {
-			context.TopK = request.TopK
-		} else {
-			context.Dropped = append(context.Dropped, "field:top_k")
-		}
-	}
+	context.TopK = common.PositiveIntOrDrop(request.TopK, &context.Dropped, "field:top_k")
 	context.StopSequences = request.StopSequences
 	toolChoice, disableParallel, err := common.ParseAnthropicToolChoice(request.ToolChoice)
 	if err != nil {
@@ -317,10 +305,7 @@ func appendSystem(context *llm.RequestMessages, raw json.RawMessage) error {
 			context.Dropped = append(context.Dropped, "system_block:"+block.Type)
 			continue
 		}
-		if context.SystemPrompt != "" && block.Text != "" {
-			context.SystemPrompt += "\n"
-		}
-		context.SystemPrompt += block.Text
+		context.SystemPrompt = common.AppendSystemPrompt(context.SystemPrompt, block.Text)
 	}
 	return nil
 }
@@ -369,7 +354,10 @@ func appendMessage(context *llm.RequestMessages, message Message) error {
 		}
 		context.Messages = append(context.Messages, messages...)
 	default:
+		// 未知 role 不静默丢——整条降级为 USER 文本保住内容，
+		// 与 responses/chat 两面前端同口径。
 		context.Dropped = append(context.Dropped, "role:"+message.Role)
+		context.Messages = append(context.Messages, common.DemotedRoleMessage(message.Role, message.Content))
 	}
 	return nil
 }
@@ -653,7 +641,12 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 			content = append(content, image)
 		case "resource":
 			// MCP tool_result 的 resource 块：text 直接展开；blob 按图片或占位降级。
+			// resource 字段缺席时与其他不识块同口径——记 Dropped 加占位文本。
 			if header.Resource == nil {
+				context.Dropped = append(context.Dropped, "content_block:"+header.Type)
+				content = append(content, llm.TextContent{
+					Text: "[content omitted: " + header.Type + " block not supported]",
+				})
 				continue
 			}
 			switch {

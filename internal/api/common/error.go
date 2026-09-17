@@ -171,12 +171,24 @@ func UpstreamErrorDetails(failure *llm.Failure) map[string]any {
 	return details
 }
 
-// StreamError 收敛三面流式失败帧的共用前奏：从终止事件取出分类记录，
+// StreamErrorOpenAI 产出 OpenAI 方言的流式失败前奏：error.type 用
+// OpenAI 命名并附带 "param":null 字段。
+func StreamErrorOpenAI(event llm.ResponseEvent, fallbackMessage string) (map[string]any, int) {
+	return streamError(event, fallbackMessage, true)
+}
+
+// StreamErrorAnthropic 产出 Anthropic 方言的流式失败前奏：error.type 用
+// Anthropic 命名，不带 "param" 字段。
+func StreamErrorAnthropic(event llm.ResponseEvent, fallbackMessage string) (map[string]any, int) {
+	return streamError(event, fallbackMessage, false)
+}
+
+// streamError 收敛三面流式失败帧的共用前奏：从终止事件取出分类记录，
 // 限流消息统一补 "try again in Ns" 等待提示（fallback 是错误本身为空时
 // 的兜底文案），产出 BuildErrorPayload 结果与对应 HTTP status。
 // openAI 选定 OpenAI 方言（error.type 命名 + "param":null 字段），false
 // 走 Anthropic 方言。各面 encoder 只负责把 payload 装进自己的 wire 帧。
-func StreamError(event llm.ResponseEvent, fallbackMessage string, openAI bool) (map[string]any, int) {
+func streamError(event llm.ResponseEvent, fallbackMessage string, openAI bool) (map[string]any, int) {
 	failure := llm.FailureOf(event.Error)
 	message := fallbackMessage
 	if failure.Error() != "" {

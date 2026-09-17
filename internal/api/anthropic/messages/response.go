@@ -415,20 +415,26 @@ func (encoder *StreamEncoder) endToolUse(event llm.ResponseEvent) ([]SSEEvent, e
 
 // serverToolResult 发完整的 <tool>_tool_result 块（当前只有
 // web_search_tool_result 一个生产者）：托管结果没有增量形态，
-// content_block_start 一次带全量 content 后随即 stop。块不登记进
-// blocks——不会有增量帧到达，也不参与挂起块的收尾序。
+// content_block_start 一次带全量 content 后随即 stop。块仍登记进
+// blocks 并过 earlierPending：前序思考块挂起等签名时立即关块，会让
+// 低下标思考块推迟到 flush 才关——破坏「最后关闭的是最大下标块」
+// 不变量，复现 thinking-only 快照空串故障。stop 推迟由收尾统一下发。
 func (encoder *StreamEncoder) serverToolResult(event llm.ResponseEvent) []SSEEvent {
-	return []SSEEvent{
-		encoder.event("content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         event.ContentIndex,
-			"content_block": anthropicServerToolResultBlock(*event.ServerResult),
-		}),
-		encoder.event("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": event.ContentIndex,
-		}),
+	state := &contentBlockState{index: event.ContentIndex, kind: event.ServerResult.ToolName + "_tool_result"}
+	encoder.blocks = append(encoder.blocks, state)
+	start := encoder.event("content_block_start", map[string]any{
+		"type":          "content_block_start",
+		"index":         event.ContentIndex,
+		"content_block": anthropicServerToolResultBlock(*event.ServerResult),
+	})
+	if encoder.earlierPending(state.index) {
+		state.stopDeferred = true
+		return []SSEEvent{start}
 	}
+	return []SSEEvent{start, encoder.event("content_block_stop", map[string]any{
+		"type":  "content_block_stop",
+		"index": event.ContentIndex,
+	})}
 }
 
 // anthropicServerToolResultBlock 渲染托管工具结果块：正常结果按
@@ -513,7 +519,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// data: {"type":"error","error":{"type":"...","message":"..."}}
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误，
 	// error.code 让上下文超长被识别为请求级问题而非渠道故障。
-	errorPayload, status := common.StreamError(event, "anthropic message stream failed", false)
+	errorPayload, status := common.StreamErrorAnthropic(event, "anthropic message stream failed")
 	events := encoder.flushPendingThinking()
 	return append(events, encoder.event("error", map[string]any{
 		"type":   "error",

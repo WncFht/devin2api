@@ -144,10 +144,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	}
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
-	context.SessionKey = request.PromptCacheKey
-	if context.SessionKey == "" {
-		context.SessionKey = request.User
-	}
+	context.SessionKey = common.SessionKey(request.PromptCacheKey, request.User)
 	// 工具声明先于 input 解析：namespace 展平的双向映射既要在响应侧还原
 	// 带点全名，也要在本函数内回写历史 function_call 名与 tool_choice 指名。
 	nameMaps := &toolNameMaps{restore: map[string]string{}, flatten: map[string]string{}}
@@ -219,6 +216,15 @@ func (maps *toolNameMaps) wire(name string) string {
 // 模型发出的调用由代理代调上游 GetWebSearchResults；其余服务端类型
 // （file_search/mcp/tool_search/computer_use_* 等）无桥接通道，记 dropped。
 func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefix, dottedPrefix string, nameMaps *toolNameMaps) {
+	// 先整层收集客户端声明名：web_search 诱饵的去重判定要查全表——同名
+	// function/custom 可能排在诱饵声明之后，只回扫已收录项会漏判，
+	// wire 上两个同名声明会被上游拒绝。
+	declared := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" || tool.Type == "custom" {
+			declared[flatPrefix+tool.Name] = true
+		}
+	}
 	for _, tool := range tools {
 		switch tool.Type {
 		case "function":
@@ -261,18 +267,13 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 			appendToolDefinitions(context, tool.Tools, flatPrefix+namespace+"__", dottedPrefix+namespace+".", nameMaps)
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 			// 同名工具已在声明表时不叠加：客户端自实现的 web_search
-			// function 保持客户端语义，不被劫持为托管执行。
-			declared := false
-			for _, existing := range context.Tools {
-				if existing.Name == flatPrefix+"web_search" {
-					declared = true
-					break
-				}
-			}
-			if declared {
+			// function 保持客户端语义，不被劫持为托管执行。占位进
+			// declared 防同表多个 web_search 声明各放一份诱饵。
+			if declared[flatPrefix+"web_search"] {
 				context.Dropped = append(context.Dropped, "tool:"+tool.Type)
 				continue
 			}
+			declared[flatPrefix+"web_search"] = true
 			nameMaps.add(flatPrefix+"web_search", dottedPrefix+"web_search")
 			context.Tools = append(context.Tools, llm.ToolDefinition{
 				Name:        flatPrefix + "web_search",
@@ -353,13 +354,11 @@ func qualifyToolName(namespace, name string) string {
 }
 
 // wireToolName 把回放的调用名改写为 wire 展平名：独立 namespace 字段先
-// 合名，否则按展平映射查带点全名，都不中则原样（本来就是展平名或非
-// 命名空间工具）。
+// 合名（name 已带前缀时 qualifyToolName 原样返回带点全名），再过展平
+// 映射把带点全名换回 {ns}__{sub}——与 parseResponsesToolChoice 同型。
+// 不中的名字原样（本来就是展平名或非命名空间工具）。
 func wireToolName(name, namespace string, nameMaps *toolNameMaps) string {
-	if namespace != "" {
-		return qualifyToolName(namespace, name)
-	}
-	return nameMaps.wire(name)
+	return nameMaps.wire(qualifyToolName(namespace, name))
 }
 
 // webSearchResultEntry 是回放 web_search_call item 里 results 数组的元素形态。
@@ -680,12 +679,17 @@ func toolOutputLooksLikeParts(raw json.RawMessage) bool {
 	return false
 }
 
-// appendMessageItem 把一条 message item 按 role 解码进会话；未知 role 记 Dropped。
+// appendMessageItem 把一条 message item 按 role 解码进会话；未知 role 记
+// Dropped 并降级为 USER 文本保住内容——与本函数未知 item type 同口径。
 func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role string, pending *pendingReasoning) error {
 	switch role {
 	case "user", "assistant", "system", "developer":
 	default:
 		context.Dropped = append(context.Dropped, "message_role:"+role)
+		context.Messages = append(context.Messages, llm.UserMessage{
+			Content:     []llm.Content{llm.TextContent{Text: "[message role=" + role + "]\n" + string(raw)}},
+			TimestampMS: time.Now().UnixMilli(),
+		})
 		return nil
 	}
 	var item struct {
@@ -726,10 +730,7 @@ func appendMessageItem(context *llm.RequestMessages, raw json.RawMessage, role s
 	case "system", "developer":
 		dropPendingReasoning(context, pending)
 		text := common.ContentText(content)
-		if context.SystemPrompt != "" && text != "" {
-			context.SystemPrompt += "\n"
-		}
-		context.SystemPrompt += text
+		context.SystemPrompt = common.AppendSystemPrompt(context.SystemPrompt, text)
 	}
 	return nil
 }

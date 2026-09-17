@@ -144,22 +144,10 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 		maxTokensValue = request.MaxTokens
 		droppedMaxTokens = "field:max_tokens"
 	}
-	if maxTokensValue != nil {
-		if *maxTokensValue > 0 {
-			context.MaxTokens = maxTokensValue
-		} else {
-			context.Dropped = append(context.Dropped, droppedMaxTokens)
-		}
-	}
+	context.MaxTokens = common.PositiveIntOrDrop(maxTokensValue, &context.Dropped, droppedMaxTokens)
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
-	if request.TopK != nil {
-		if *request.TopK > 0 {
-			context.TopK = request.TopK
-		} else {
-			context.Dropped = append(context.Dropped, "field:top_k")
-		}
-	}
+	context.TopK = common.PositiveIntOrDrop(request.TopK, &context.Dropped, "field:top_k")
 	context.Seed = request.Seed
 	// 上游 CASCADE 通道只支持单次补全：num_completions>1 会中途崩流，
 	// 本地尽早拒绝比打到上游更可读。
@@ -198,10 +186,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 			context.StopSequences = stops
 		}
 	}
-	context.SessionKey = request.PromptCacheKey
-	if context.SessionKey == "" {
-		context.SessionKey = request.User
-	}
+	context.SessionKey = common.SessionKey(request.PromptCacheKey, request.User)
 	// callIDs 登记已发出的全部调用 id（含 tool_call 真 id 与旧版
 	// function_call 的合成 id）：function_call 没有 id 字段，要造
 	// call_function_N 序数 id，造之前必须确认不与既有 id 撞车。
@@ -284,10 +269,7 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 			context.Dropped = append(context.Dropped, "empty_message:"+message.Role)
 		}
 		text := common.ContentText(content)
-		if context.SystemPrompt != "" && text != "" {
-			context.SystemPrompt += "\n"
-		}
-		context.SystemPrompt += text
+		context.SystemPrompt = common.AppendSystemPrompt(context.SystemPrompt, text)
 	case "user":
 		content, err := decodeUserContent(context, message.Content)
 		if err != nil {
@@ -343,7 +325,10 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 			TimestampMS: time.Now().UnixMilli(),
 		})
 	default:
+		// 未知 role 不静默丢——整条降级为 USER 文本保住内容，
+		// 与 responses/anthropic 两面前端同口径。
 		context.Dropped = append(context.Dropped, "role:"+message.Role)
+		context.Messages = append(context.Messages, common.DemotedRoleMessage(message.Role, message.Content))
 	}
 	return nil
 }

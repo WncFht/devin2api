@@ -426,22 +426,22 @@ func TestDecodeRequestIgnoresUnsupportedExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 未知 item 降级为 USER 文本保住内容：additional_tools 与无 type 项
-	// 各产生一条降级消息，future_role 消息被丢弃，可识别内容不受影响。
-	if len(request.Context.Messages) != 3 {
-		t.Fatalf("message count = %d, want 3", len(request.Context.Messages))
+	// 未知 item 降级为 USER 文本保住内容：additional_tools、无 type 项与
+	// future_role 消息各产生一条降级消息，可识别内容不受影响。
+	if len(request.Context.Messages) != 4 {
+		t.Fatalf("message count = %d, want 4", len(request.Context.Messages))
 	}
-	for index := 0; index < 2; index++ {
+	for index := 0; index < 3; index++ {
 		message, ok := request.Context.Messages[index].(llm.UserMessage)
 		if !ok {
 			t.Fatalf("message %d type = %T, want llm.UserMessage", index, request.Context.Messages[index])
 		}
 		text := message.Content[0].(llm.TextContent).Text
-		if !strings.HasPrefix(text, "[input item type=") {
+		if !strings.HasPrefix(text, "[input item type=") && !strings.HasPrefix(text, "[message role=") {
 			t.Fatalf("demoted message %d = %q", index, text)
 		}
 	}
-	message, ok := request.Context.Messages[2].(llm.UserMessage)
+	message, ok := request.Context.Messages[3].(llm.UserMessage)
 	if !ok {
 		t.Fatalf("message type = %T, want llm.UserMessage", request.Context.Messages[2])
 	}

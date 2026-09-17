@@ -72,7 +72,7 @@ func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error)
 	if model == "" {
 		model = "devin"
 	}
-	messageObj, _ := messageToChat(message)
+	messageObj := messageToChat(message)
 	response := map[string]any{
 		"id":      randid.Prefixed("chatcmpl-"),
 		"object":  "chat.completion",
@@ -249,7 +249,7 @@ func (encoder *StreamEncoder) failed(event llm.ResponseEvent) []SSEEvent {
 	// 这里生成一个带 error 字段的 chat.completion.chunk，
 	// 让 openai-python 等客户端看到 data.error 后抛出异常。
 	// 顶层 status 供下游网关按真实 HTTP 语义分类错误。
-	errorPayload, status := common.StreamError(event, "chat completion stream failed", true)
+	errorPayload, status := common.StreamErrorOpenAI(event, "chat completion stream failed")
 	data, _ := json.Marshal(map[string]any{
 		"id":      encoder.responseID,
 		"object":  "chat.completion.chunk",
@@ -333,8 +333,8 @@ func (encoder *StreamEncoder) chunk(choices []chatChoice, usage any) SSEEvent {
 	return SSEEvent{Name: "", Data: data}
 }
 
-// messageToChat 把最终消息投影成 chat message 对象与 tool_calls 数组。
-func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
+// messageToChat 把最终消息投影成 chat message 对象。
+func messageToChat(message *llm.AssistantMessage) map[string]any {
 	var textParts []string
 	var reasoningParts []string
 	var toolCalls []any
@@ -367,7 +367,7 @@ func messageToChat(message *llm.AssistantMessage) (map[string]any, []any) {
 			messageObj["content"] = nil
 		}
 	}
-	return messageObj, toolCalls
+	return messageObj
 }
 
 // chatUsage 投影 Chat Completions usage 形态，含 cache 与 reasoning 明细。
