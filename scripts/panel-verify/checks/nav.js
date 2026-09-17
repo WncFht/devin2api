@@ -1,4 +1,4 @@
-// checks/nav.js — 断点×语言矩阵下的 topnav 完整性：8 项链接全部存在、
+// checks/nav.js — 断点×语言矩阵下的 topnav 完整性：9 项链接全部存在、
 // 没有链接被裁出可达区域（>768px nav 允许 overflow-x:auto 滚动，
 // 「可达」= 链接右缘不超过 nav.scrollWidth 覆盖范围；≤768px 换行
 // 独占一行必须全部落在 nav 矩形内）、页面无横向溢出。
@@ -44,10 +44,10 @@ const MATRIX = [
     const tag = `${w}-${locale}`;
     R.check(!!r, `${tag}: topnav present`);
     if (r) {
-      R.check(r.keys.length === 8, `${tag}: 8 nav items (got ${r.keys.length})`);
+      R.check(r.keys.length === 9, `${tag}: 9 nav items (got ${r.keys.length})`);
       R.check(r.unreachable.length === 0, `${tag}: all links reachable${r.unreachable.length ? ' — ' + r.unreachable : ''}${r.scrollable ? ' (scrollable)' : ''}`);
       R.check(!r.docOverflow, `${tag}: no document horizontal overflow`);
-      await R.shotOnFail(p, tag, r.keys.length === 8 && r.unreachable.length === 0 && !r.docOverflow);
+      await R.shotOnFail(p, tag, r.keys.length === 9 && r.unreachable.length === 0 && !r.docOverflow);
     } else {
       await R.shotOnFail(p, tag, false);
     }
