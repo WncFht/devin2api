@@ -188,14 +188,20 @@ smoke_version() {
 }
 
 # install_binary <new_binary>：装入 BIN_DIR 并把仓库 config.yaml 同步到
-# CONFIG_DIR（权威副本在仓库）；仓库内 logs 符号链接指向 STATE_DIR/logs，
-# 排障路径与 AGENTS.md 约定一致。
+# CONFIG_DIR。live config 是权威副本——deploy-remote 各模式在 deploy.sh
+# 前已把它刷进 staging，正常路径下 cmp 必相等。只在 live 缺失时从仓库
+# 副本恢复；live 存在且不一致说明同步被绕过（手动 deploy.sh、staging
+# 残留旧快照），告警并保留 live——绝不把陈旧快照盖回 live。仓库内 logs
+# 符号链接指向 STATE_DIR/logs，排障路径与 AGENTS.md 约定一致。
 install_binary() {
 	mkdir -p "${BIN_DIR}" "${CONFIG_DIR}" "${STATE_DIR}/logs"
 	mv "$1" "${BIN_DIR}/devin-2api"
-	cmp -s config.yaml "${CONFIG_DIR}/config.yaml" 2>/dev/null ||
-		warn "config.yaml 与 ${CONFIG_DIR} 不一致，以仓库版本覆盖（权威副本在仓库）"
-	cp config.yaml "${CONFIG_DIR}/config.yaml"
+	if [[ ! -f "${CONFIG_DIR}/config.yaml" ]]; then
+		warn "${CONFIG_DIR}/config.yaml 缺失——从仓库副本恢复"
+		cp config.yaml "${CONFIG_DIR}/config.yaml"
+	elif ! cmp -s config.yaml "${CONFIG_DIR}/config.yaml" 2>/dev/null; then
+		warn "config.yaml 与 ${CONFIG_DIR} 不一致——live 是权威副本故保留，仓库侧差异被忽略"
+	fi
 	# logs 已是真实目录（本地 -config config.yaml 跑过）则不动，避免吞掉现场。
 	if [[ -L logs || ! -e logs ]]; then
 		ln -sfn "${STATE_DIR}/logs" logs
@@ -683,7 +689,7 @@ print_summary() {
 	cat <<EOF
 ==> deployed $1
     二进制   : ${BIN_DIR}/devin-2api
-    配置     : ${CONFIG_DIR}/config.yaml（权威副本在仓库，部署时同步）
+    配置     : ${CONFIG_DIR}/config.yaml（权威副本——直接编辑此文件，仓库侧只是部署期镜像）
     状态/日志: ${STATE_DIR}/logs（仓库 logs/ 软链同指）
     监听     : http://localhost:${PORT}（面板 /web，凭据见 config.yaml）
     服务管理 : $2

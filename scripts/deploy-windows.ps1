@@ -42,8 +42,9 @@ if ($Help) { Usage; exit 0 }
 # 平台规范布局（Microsoft 分法）：exe 入 %LOCALAPPDATA%\Programs\devin-2api
 # （per-user Program Files），config.yaml 入 %APPDATA%\devin-2api（roaming
 # 配置随账号走），logs\ 与状态文件入 %LOCALAPPDATA%\devin-2api（machine-local
-# 输出）。仓库内运行（scripts\ 下）时仓库 config.yaml 是权威副本、由部署
-# 同步进 ConfigDir；单文件下载运行时直接生成。env 覆盖：
+# 输出）。config.yaml 的权威副本是 ConfigDir 里那份（live，与 bash 版一致）
+# ——缺失时由仓库副本恢复，存在且不一致时保留 live 并告警；单文件下载运行
+# 时直接生成。env 覆盖：
 # DEVIN2API_CONFIG_DIR / DEVIN2API_STATE_DIR；DEVIN2API_RUNTIME 是旧版单
 # 目录变量的兼容别名，映射到 StateDir。
 $ScriptDir = Split-Path -Parent $PSCommandPath
@@ -222,13 +223,14 @@ function Move-LegacyLayout {
 
 function Ensure-Config {
     New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
-    # 仓库模式：仓库 config.yaml 是权威副本，直接同步（与 bash 版语义一致）。
+    # 仓库模式：live config 是权威副本（与 bash 版语义一致）——缺失时从
+    # 仓库副本恢复；存在且不一致时保留 live 并告警，不拿仓库侧覆盖。
     if ($InRepo -and (Test-Path $RepoConfig)) {
-        if ((Test-Path $RuntimeConfig) -and
-            (Get-FileHash $RepoConfig).Hash -ne (Get-FileHash $RuntimeConfig).Hash) {
-            Warn "config.yaml 与配置目录不一致，以仓库版本覆盖（权威副本在仓库）"
+        if (-not (Test-Path $RuntimeConfig)) {
+            Copy-Item $RepoConfig $RuntimeConfig -Force
+        } elseif ((Get-FileHash $RepoConfig).Hash -ne (Get-FileHash $RuntimeConfig).Hash) {
+            Warn "config.yaml 与配置目录不一致——live 是权威副本故保留，仓库侧差异被忽略"
         }
-        Copy-Item $RepoConfig $RuntimeConfig -Force
         return
     }
     if (Test-Path $RuntimeConfig) { return }

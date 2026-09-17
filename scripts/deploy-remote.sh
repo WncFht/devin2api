@@ -11,8 +11,10 @@
 #     给出提示）。
 #   --release：远端 deploy.sh 直接下载预编译资产，不碰远端 git 状态。
 #
-# config.yaml 不进 staging tar：worktree 部署时从远端在跑实例的 config.yaml
-# 复制——生产配置的权威副本是 live 配置，本地开发配置不会意外盖上生产。
+# config.yaml 不进 staging tar：三种模式部署前都把远端在跑实例的 config.yaml
+# 复制进 staging——生产配置的权威副本是 live 配置，本地开发配置与 staging
+# 里的旧快照都不会盖上生产。staging config 同时是 deploy.sh 预检（端口、
+# api_key、token 来源）的读取对象，不刷新会让这些检查打到陈旧值上。
 # Mac 端不保留仓库 clone：所有远端操作都落 staging，避免有人在 Mac 仓库里
 # 直接 deploy.sh 部署了落后/分叉的历史。
 set -euo pipefail
@@ -107,6 +109,11 @@ if [[ "${MODE}" != "worktree" ]]; then
   ssh -o BatchMode=yes "${HOST}" "test -d \"${STAGING}/.git\"" ||
     die "远端 staging 不存在：${HOST}:${STAGING}——先跑一次 worktree 部署落盘"
 fi
+# ref/release 都要把 live config 同步进 staging 再部署（见文件头说明）。
+if [[ "${MODE}" == "ref" || "${MODE}" == "release" ]]; then
+  ssh -o BatchMode=yes "${HOST}" "test -f \"${CONFIG_LIVE}\"" ||
+    die "远端缺 live config.yaml（${HOST}:${CONFIG_LIVE}）"
+fi
 
 # 远端命令一律用 && 串联（对端登录 shell 是 fish，不能用 set -e/{ } 等
 # bash 语法）；deploy.sh 显式以 bash 执行。
@@ -124,8 +131,16 @@ check)
   fi
   exit "${rc}"
   ;;
-uninstall | release)
+uninstall)
   cmd="bash \"${STAGING}/scripts/deploy.sh\""
+  for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
+  exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
+  ;;
+release)
+  # 同 ref 分支：先把 staging config 刷成 live 副本，deploy.sh 的预检
+  # （端口/api_key/token 来源）与 install_binary 都读它。
+  cmd="cp \"${CONFIG_LIVE}\" \"${STAGING}/config.yaml\""
+  cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"
   ;;
@@ -144,6 +159,11 @@ ref)
   # WIP 的 .go）会混进包目录把源码构建带炸。ref 语义是「部署已推送
   # 状态」，故清干净；gitignore 项（staging config.yaml）不受影响。
   cmd+=" && git -C \"${STAGING}\" clean -fd"
+  # staging config.yaml 是 gitignore 项，checkout/clean 都不碰——残留的是
+  # 上一次部署时的快照。deploy.sh 预检（端口/api_key/token 来源）读它，
+  # install_binary 又拿它同步 live；不先刷成 live 副本会把 live 侧的
+  # 改动（如 devin.accounts）静默回滚成旧快照。
+  cmd+=" && cp \"${CONFIG_LIVE}\" \"${STAGING}/config.yaml\""
   cmd+=" && bash \"${STAGING}/scripts/deploy.sh\""
   for a in ${FWD[@]+"${FWD[@]}"}; do cmd+=" $(shq "$a")"; done
   exec ssh -o BatchMode=yes "${HOST}" "${cmd}"

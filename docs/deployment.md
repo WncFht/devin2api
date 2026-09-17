@@ -33,7 +33,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
        └─ logs/stderr.log                 slog 结构化进程日志
 ```
 
-**与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本仍是仓库里那份，`deploy.sh` 每次部署同步到 `$RT`；单改配置可 `cp config.yaml "$RT/" && launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
+**与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本是 `$RT` 里那份（live）：deploy-remote 各模式部署前把它刷进 staging 供 `deploy.sh` 预检读取，`install_binary` 只在 live 缺失时从仓库副本恢复、存在且不一致时保留 live 并告警。改配置直接编辑 `$RT/config.yaml` 后 `POST /admin/config/reload` 热应用；仅 `server.listen` 等冷键需 `launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
 
 请求级 debug 日志的生命周期由 `debug.retention_days` / `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs` 自管；launchd 侧无需额外配置。
 
