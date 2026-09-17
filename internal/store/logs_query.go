@@ -21,6 +21,12 @@ import (
 // 与旧聚合（cellKey.model、perModel、lastByModel）同口径。
 const logEModelExpr = `CASE WHEN model != '' THEN model ELSE requested_model END`
 
+// logAccountExpr 是上游账号 lane 名的读侧折叠投影：号池前时代的 ”
+// 行并进 'default' 桶（对齐 QuotaReport 的 ”→default 合流口径）。
+// 所有按号过滤/分组的读路径统一用它——过滤参数 'default' 命中
+// ”+'default' 两群，真名参数只命中真名行；写侧不做折叠，新行恒写真名。
+const logAccountExpr = `COALESCE(NULLIF(account,''),'default')`
+
 // logColumns 是行扫描的 SELECT 列清单（顺序即 scanLogRow 的 Scan 顺序）。
 const logColumns = `id, dir, started_at, duration_ms,
 	request_ready_ms, upstream_sent_ms, upstream_open_ms, first_upstream_ms, first_client_ms,
@@ -94,7 +100,8 @@ type LogQuery struct {
 	UntilMS int64
 	// KeyHash 收敛数据范围（api_token 身份/auth_token_id 参数解析结果）。
 	KeyHash string
-	// Account 是上游账号 lane 名精确过滤。
+	// Account 是上游账号 lane 名过滤，走读侧折叠口径
+	//（logAccountExpr：'default' 命中 ''+'default' 两群）。
 	Account string
 	// LogSource/API/UpstreamProtocol 为空或 "all" 不过滤，否则精确匹配。
 	LogSource        string
@@ -130,7 +137,7 @@ func (q LogQuery) where() (string, []any) {
 		add("key_hash = ?", q.KeyHash)
 	}
 	if q.Account != "" {
-		add("account = ?", q.Account)
+		add(logAccountExpr+" = ?", q.Account)
 	}
 	if q.LogSource != "" && q.LogSource != "all" {
 		add("log_source = ?", q.LogSource)
@@ -369,12 +376,14 @@ func (s *Store) LogStatusCodes(ctx context.Context) ([]int, error) {
 }
 
 // LogScope 是聚合查询的范围谓词（旧 cellKey 行级筛选的下推版）：
-// model 精确命中生效模型，modelLike 是它的子串匹配。
+// model 精确命中生效模型，modelLike 是它的子串匹配，account 按读侧
+// 折叠口径过滤上游账号 lane（'default' 命中 ”+'default' 两群）。
 type LogScope struct {
 	KeyHash   string
 	API       string
 	Model     string
 	ModelLike string
+	Account   string
 }
 
 // where 返回追加在 WHERE/AND 链上的条件片段（含前导 " AND "）与参数。
@@ -396,6 +405,10 @@ func (sc LogScope) where() (string, []any) {
 	if sc.ModelLike != "" {
 		b.WriteString(` AND INSTR(` + logEModelExpr + `, ?) > 0`)
 		args = append(args, sc.ModelLike)
+	}
+	if sc.Account != "" {
+		b.WriteString(` AND ` + logAccountExpr + ` = ?`)
+		args = append(args, sc.Account)
 	}
 	return b.String(), args
 }
@@ -564,22 +577,16 @@ func (s *Store) LogRecentWindow(ctx context.Context, seconds int64, sc LogScope)
 	return a, err
 }
 
-// LogRecentRPM 返回最近 60 秒内完成的非 499 请求数；model/kh 非空时
-// 分别按生效模型、key_hash 过滤。time 预筛同 LogRecentWindow。
-func (s *Store) LogRecentRPM(ctx context.Context, model, kh string) (float64, error) {
+// LogRecentRPM 返回最近 60 秒内完成的非 499 请求数；sc 为零值时全量
+// （model 生效模型、kh、account 逐维下推，per-account 变体即
+// LogScope{Account: lane}）。time 预筛同 LogRecentWindow。
+func (s *Store) LogRecentRPM(ctx context.Context, sc LogScope) (float64, error) {
 	cut := time.Now().Unix() - 60
-	query := `SELECT COUNT(*) FROM logs WHERE status_code != 499 AND time > ? AND ` + logRecentEndExpr + ` > ?`
-	args := []any{(cut - 3600) * 1000, cut}
-	if model != "" {
-		query += ` AND ` + logEModelExpr + ` = ?`
-		args = append(args, model)
-	}
-	if kh != "" {
-		query += ` AND key_hash = ?`
-		args = append(args, kh)
-	}
+	scopeWhere, scopeArgs := sc.where()
 	var n int64
-	if err := s.ro.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE status_code != 499 AND time > ? AND `+logRecentEndExpr+` > ?`+scopeWhere,
+		append([]any{(cut - 3600) * 1000, cut}, scopeArgs...)...).Scan(&n); err != nil {
 		return 0, err
 	}
 	return float64(n), nil

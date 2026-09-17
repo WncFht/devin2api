@@ -26,6 +26,7 @@ func (scope statScope) logScope() store.LogScope {
 		API:       scope.api,
 		Model:     scope.model,
 		ModelLike: scope.modelLike,
+		Account:   scope.account,
 	}
 }
 
@@ -57,7 +58,7 @@ func (h *Handler) recentRPM(ctx context.Context, model, kh string) float64 {
 	if h.store == nil {
 		return 0
 	}
-	v, err := h.store.LogRecentRPM(ctx, model, kh)
+	v, err := h.store.LogRecentRPM(ctx, store.LogScope{Model: model, KeyHash: kh})
 	if err != nil {
 		slog.Warn("ccpanel: recent rpm query failed", "error", err)
 	}
