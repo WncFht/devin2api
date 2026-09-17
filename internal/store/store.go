@@ -9,6 +9,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -50,6 +51,14 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 	return &Store{db: db, path: path}, nil
+}
+
+// IncrementalVacuum 回收 freelist 页——auto_vacuum=INCREMENTAL 只把
+// 删除页挂进 freelist，不显式跑这步 .db 文件不回缩（db_bytes 会与
+// 实际占用分叉）。cleaner 淘汰大批行后调一次即可。
+func (s *Store) IncrementalVacuum(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`)
+	return err
 }
 
 // DBBytes 返回库文件与 WAL 的磁盘占用合计（Stats 的 db_bytes 口径）。
