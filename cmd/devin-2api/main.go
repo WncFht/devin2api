@@ -201,12 +201,23 @@ func main() {
 	// devinPool 保留具体类型引用：配置热重载（ApplyConfigs）、闸门状态
 	// （GateStats）、别名校验（Aliases）与逐账号凭据源（TokenFuncs）
 	// 都挂在它上面；单号部署是 N=1 的退化形态，不走分支。
-	devinPool, err := devin.NewPool(devinConfigsFrom(serviceConfig, absoluteConfigPath, dbStore))
+	// 池空集起步、立即走 applyAccounts 首推：boot 与 reload/CRUD 共用
+	// 同一条「DB 行 ∪ config 声明 merge → 整表校验 → ApplyConfigs」
+	// 路径——面板建的号、disabled 与墓碑标记在启动时就生效，不存在
+	// 「boot 忘了 merge overlay」的旁路。
+	devinPool, err := devin.NewPool(nil)
 	if err != nil {
 		slog.Error("create devin adapter failed", "error", err)
 		os.Exit(1)
 	}
 	defer devinPool.Close()
+	reloadMu.Lock()
+	_, _, err = applyAccounts(context.Background(), serviceConfig, absoluteConfigPath, dbStore, devinPool, nil)
+	reloadMu.Unlock()
+	if err != nil {
+		slog.Error("apply account configs failed", "error", err)
+		os.Exit(1)
+	}
 	// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
 	// 自愈更新 token 后，面板的上游调用自动跟随新值。号池下面板 MVP
 	// 固定绑首号；逐号凭据源另经 SetPoolTokenFuncs 喂给脱敏与配额采样。
@@ -272,8 +283,10 @@ func main() {
 	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
 	// 先建仓再重放，让面板改的值在启动时就生效。
 	settingsStore, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
-		Debug:       debugManager,
-		DevinConfig: devinPool.CurrentConfig,
+		Debug: debugManager,
+		// 空池时 CurrentConfig 回零值 Config，devin_model 等键的 def
+		// 与 reset 回落会跟着空转——回落到文件投影的 base 模板。
+		DevinConfig: func() devin.Config { return devinConfigSnapshot(devinPool) },
 		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
 		// 提交点）；端点三件套变化时面板自身的上游调用束跟随换绑。
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
@@ -331,6 +344,9 @@ func main() {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
+	// /admin/accounts 操作面：行写入+重推+回滚的编排在 ops 闭包内
+	// 完成，面板 handler 只做请求解码与 sentinel→状态码映射。
+	ccPanel.SetAccountOps(newAccountOps(absoluteConfigPath, dbStore, devinPool, settingsStore))
 	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
 	modelStore, err := modelreg.New(dbStore)
@@ -402,14 +418,13 @@ func runExportLegacy(dir string) error {
 	return err
 }
 
-// devinConfigsFrom 把启动配置映射为每 lane 一份的 Devin adapter 配置：
-// 端点/指纹/闸门/保温是全局字段各 lane 共享，Name/Token/TokenSource
-// 按账号各自落地，闸门状态存储各 lane 共用同一库（键按 lane 名派生
-// gate:<name>，隐式单 lane 即 gate:default——与导入器对存量
-// gate-state*.json 的命名一致）。启动与配置热重载共用同一映射，保证
-// ApplyConfigs 看到的字段口径与 NewPool 一致。
-func devinConfigsFrom(serviceConfig config.Config, configPath string, gateStore *store.Store) []devin.Config {
-	base := devin.Config{
+// devinBaseConfig 把 devin.* 全局字段投影成 lane 无关的 adapter 配置
+// 模板：端点/指纹/闸门/保温各 lane 共享同一组值。devinConfigsFrom 逐
+// lane 复制它再叠加 Name/Token/TokenSource；空池时它还是 settings
+// 默认值（devin_model 等键的 def 展示与 reset 回落目标）的兜底形态——
+// 文件值口径，不是零值。
+func devinBaseConfig(serviceConfig config.Config) devin.Config {
+	return devin.Config{
 		BaseURL:       serviceConfig.Devin.BaseURL,
 		Model:         serviceConfig.Devin.Model,
 		Proxy:         serviceConfig.Devin.Proxy,
@@ -441,28 +456,35 @@ func devinConfigsFrom(serviceConfig config.Config, configPath string, gateStore 
 			UserPacedNames:   serviceConfig.Devin.WarmPrefixUserPacedNames,
 		},
 	}
-	if len(serviceConfig.Devin.Accounts) == 0 {
-		lane := base
-		lane.Name = config.DefaultAccountName
-		lane.Token = serviceConfig.Devin.Token
-		lane.GateStateStore = gateStore
-		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
-		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
-		lane.TokenSource = func() string {
-			reloaded, err := config.Load(configPath)
-			if err != nil {
-				return ""
-			}
-			return reloaded.Devin.Token
-		}
-		return []devin.Config{lane}
+}
+
+// devinConfigSnapshot 是 settings 的 devin 配置快照源：有 lane 时读首
+// lane 活配置（面板覆盖与热应用后的口径）；空池回落到最近加载配置
+// 投影出的 base 模板，def 展示与 reset 回落仍按文件值给默认。
+func devinConfigSnapshot(pool *devin.Pool) devin.Config {
+	if cfg := pool.CurrentConfig(); cfg.Name != "" {
+		return cfg
 	}
-	lanes := make([]devin.Config, 0, len(serviceConfig.Devin.Accounts))
-	for _, account := range serviceConfig.Devin.Accounts {
-		lane := base
+	if cur := runtimeConfigPtr.Load(); cur != nil {
+		return devinBaseConfig(cur.cfg)
+	}
+	return devin.Config{}
+}
+
+// devinConfigsFrom 把「合成+校验后的生效账号集」映射成每 lane 一份的
+// adapter 配置：accounts 入参必须是 applyAccounts 里经 ResolveAccounts
+// 校验、锚定、补齐过的生效集（非 cfg.Devin.Accounts 直取——overlay
+// 行覆盖已并入生效集）。Name/Token/GateStateStore/TokenSource 按账号
+// 落地，闸门状态各 lane 共用同一库（键按 lane 名派生 gate:<name>）。
+// boot/reload/CRUD 都经 applyAccounts 走这里，ApplyConfigs 与 NewPool
+// 看到的字段口径一致。
+func devinConfigsFrom(serviceConfig config.Config, accounts []config.DevinAccountConfig, configPath string, dbStore *store.Store) []devin.Config {
+	lanes := make([]devin.Config, 0, len(accounts))
+	for _, account := range accounts {
+		lane := devinBaseConfig(serviceConfig)
 		lane.Name = account.Name
 		lane.Token = account.Token
-		lane.GateStateStore = gateStore
+		lane.GateStateStore = dbStore
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
 			// 即跟随续期——fht-mba 的 B 号正是这个形态。
@@ -471,15 +493,20 @@ func devinConfigsFrom(serviceConfig config.Config, configPath string, gateStore 
 				return config.TokenFromCredentialsFile(credentialsFile)
 			}
 		} else {
-			// 字面量 token 账号：重读配置文件按名找回本账号的当前
-			// token——编辑 config.yaml 就是它的自愈来源。
+			// 字面量 token 账号：自愈源是「当下生效集」——重读文件拿
+			// 声明集再过 DB 行 merge，面板写过的行覆盖值与 config 编辑
+			// 同权，单号改凭据两条路都救得回来。
 			name := account.Name
 			lane.TokenSource = func() string {
 				reloaded, err := config.Load(configPath)
 				if err != nil {
 					return ""
 				}
-				for _, acc := range reloaded.Devin.Accounts {
+				effective, err := dbStore.EffectiveAccounts(context.Background(), reloaded.Devin.Accounts)
+				if err != nil {
+					return ""
+				}
+				for _, acc := range effective {
 					if acc.Name == name {
 						return acc.Token
 					}
@@ -492,17 +519,391 @@ func devinConfigsFrom(serviceConfig config.Config, configPath string, gateStore 
 	return lanes
 }
 
-// accountNames 返回配置声明的 lane 名序（accounts 模式按条目，单号
-// 模式是单元素 default）——reload 报告据此识别账号集合变化。
-func accountNames(devinCfg config.DevinConfig) []string {
-	if len(devinCfg.Accounts) == 0 {
-		return []string{config.DefaultAccountName}
+// applyAccounts 是账号集合的唯一重推入口（boot/reload/CRUD 三路共用，
+// 调用方须持 reloadMu）：DB 行与 config 声明 merge 出生效集 → 剔除
+// 墓碑与停用 → 整表干跑校验（reload 校验失败即拒载、旧配置继续服役；
+// CRUD 失败回传给写端点）→ 逐 lane 映射 → ApplyConfigs 名键差集热换
+// （同名 lane 走 ApplyConfig 保 warm 谱系/assignments/在途流，新增建
+// lane，摘下异步 Close）→ settings 非空时重放面板覆盖（必须在
+// ApplyConfigs 之后，新建 lane 才吃得到 devin_model 等覆盖）→ 收
+// 死墓碑。空生效集合法：空集即全部 lane 被摘出。返回生效视图与
+// ApplyConfigs 的字段差集。
+func applyAccounts(ctx context.Context, cfg config.Config, configPath string, dbStore *store.Store, devinPool *devin.Pool, settings *ccpanel.PanelSettings) ([]store.ResolvedAccount, []string, error) {
+	resolved, err := dbStore.EffectiveAccounts(ctx, cfg.Devin.Accounts)
+	if err != nil {
+		return nil, nil, err
 	}
-	names := make([]string, 0, len(devinCfg.Accounts))
-	for _, account := range devinCfg.Accounts {
-		names = append(names, account.Name)
+	synthesized, err := config.ResolveAccounts(laneAccountConfigs(resolved), filepath.Dir(configPath))
+	if err != nil {
+		return nil, nil, err
+	}
+	applied, err := devinPool.ApplyConfigs(devinConfigsFrom(cfg, synthesized, configPath, dbStore))
+	if err != nil {
+		return nil, nil, err
+	}
+	if settings != nil {
+		if err := settings.ApplyAll(); err != nil {
+			slog.Warn("panel settings replay failed", "error", err)
+		}
+	}
+	if n, err := dbStore.GCTombstonedAccounts(ctx, declaredAccountNames(cfg)); err != nil {
+		slog.Warn("tombstoned accounts gc failed", "error", err)
+	} else if n > 0 {
+		slog.Info("collected dead tombstone accounts", "count", n)
+	}
+	return resolved, applied, nil
+}
+
+// laneAccountConfigs 投影该进池的账号（非墓碑且未停用）成声明形状——
+// 喂整表校验与 devinConfigsFrom；校验锚定/补齐后再进 lane 映射。
+func laneAccountConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
+	out := make([]config.DevinAccountConfig, 0, len(resolved))
+	for _, acc := range resolved {
+		if acc.Source == store.AccountSourceTombstoned || acc.Disabled {
+			continue
+		}
+		out = append(out, config.DevinAccountConfig{
+			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+		})
+	}
+	return out
+}
+
+// candidateAccountConfigs 投影写入前干跑校验的账号集：非墓碑条目全部
+// 参与（含停用——停用是静止 lane，enable 即转正，凭据合法性必须在
+// 写入时证明，否则坏行能落库、等 enable 才爆）。
+func candidateAccountConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
+	out := make([]config.DevinAccountConfig, 0, len(resolved))
+	for _, acc := range resolved {
+		if acc.Source == store.AccountSourceTombstoned {
+			continue
+		}
+		out = append(out, config.DevinAccountConfig{
+			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+		})
+	}
+	return out
+}
+
+// declaredAccountNames 返回 config 声明名集——GCTombstonedAccounts 的
+// 「仍受声明保护」白名单：不在集里的墓碑已死透，可以物理收。
+func declaredAccountNames(cfg config.Config) []string {
+	names := make([]string, 0, len(cfg.Devin.Accounts))
+	for _, acc := range cfg.Devin.Accounts {
+		names = append(names, acc.Name)
 	}
 	return names
+}
+
+// poolLaneNames 返回池中现存 lane 名序（排序后）——reload 报告的
+// 「重推前 lane 名集」取它而不是 config 声明序：overlay 行（面板建
+// 的号、disabled、墓碑）让声明集与 lane 集分叉。
+func poolLaneNames(pool *devin.Pool) []string {
+	states := pool.AccountLaneStates()
+	names := make([]string, 0, len(states))
+	for name := range states {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// effectiveLaneNames 返回生效集里该进池的名序（非墓碑且未停用，排序
+// 后）——与 poolLaneNames 同口径，reload 据此比对出账号集合变化。
+func effectiveLaneNames(resolved []store.ResolvedAccount) []string {
+	names := make([]string, 0, len(resolved))
+	for _, acc := range resolved {
+		if acc.Source == store.AccountSourceTombstoned || acc.Disabled {
+			continue
+		}
+		names = append(names, acc.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// findResolved 按名找生效视图条目；不在集里返回 nil。
+func findResolved(resolved []store.ResolvedAccount, name string) *store.ResolvedAccount {
+	for i := range resolved {
+		if resolved[i].Name == name {
+			return &resolved[i]
+		}
+	}
+	return nil
+}
+
+// findAccountRow 按名找库行（含墓碑）；无行返回 nil。
+func findAccountRow(rows []*store.AccountRow, name string) *store.AccountRow {
+	for _, row := range rows {
+		if row.Name == name {
+			return row
+		}
+	}
+	return nil
+}
+
+// synthesizedAccount 按名找干跑校验后的条目；调用方保证名在候选集
+// 内（刚写入的行非墓碑必在），找不到是装配 bug，直接暴露。
+func synthesizedAccount(synthesized []config.DevinAccountConfig, name string) config.DevinAccountConfig {
+	for _, acc := range synthesized {
+		if acc.Name == name {
+			return acc
+		}
+	}
+	return config.DevinAccountConfig{}
+}
+
+// replaceAccountRow 返回把 rows 里同名行换成 row（无同名则追加）的新
+// 切片——构造「写入后」的行集喂干跑校验，不碰库里旧行。
+func replaceAccountRow(rows []*store.AccountRow, row *store.AccountRow) []*store.AccountRow {
+	out := make([]*store.AccountRow, 0, len(rows)+1)
+	replaced := false
+	for _, existing := range rows {
+		if existing.Name == row.Name {
+			out = append(out, row)
+			replaced = true
+		} else {
+			out = append(out, existing)
+		}
+	}
+	if !replaced {
+		out = append(out, row)
+	}
+	return out
+}
+
+// rollbackAccountRow 在重推失败后把行写回 apply 前快照（快照 nil 即
+// 「写前无行」→ 物理删）。回滚失败只告警：重推错误本身已回传给
+// 操作者，残留行会在下一次成功重推时被同一规则重新评价。
+func rollbackAccountRow(ctx context.Context, dbStore *store.Store, name string, old *store.AccountRow) {
+	var err error
+	if old == nil {
+		err = dbStore.DeleteAccount(ctx, name)
+	} else {
+		err = dbStore.UpsertAccount(ctx, old)
+	}
+	if err != nil {
+		slog.Warn("account row rollback failed", "name", name, "error", err)
+	}
+}
+
+// newAccountOps 装配 /admin/accounts 的操作面：六个闭包全部在
+// reloadMu 下跑——行写入、applyAccounts 重推与失败回滚是一条多步
+// 提交，和 reload 共用同一把串行化锁才不跟热更交错。写动作同一骨架：
+// 预检（存在性/状态/干跑整表校验）→ 行写入 → applyAccounts → 失败
+// 按写前快照回滚行 → 成功回该名生效视图。
+func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Pool, settings *ccpanel.PanelSettings) ccpanel.AccountOps {
+	configDir := filepath.Dir(configPath)
+	push := func(ctx context.Context) ([]store.ResolvedAccount, error) {
+		resolved, _, err := applyAccounts(ctx, runtimeConfigPtr.Load().cfg, configPath, dbStore, devinPool, settings)
+		return resolved, err
+	}
+	return ccpanel.AccountOps{
+		Effective: func(ctx context.Context) ([]store.ResolvedAccount, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			return dbStore.EffectiveAccounts(ctx, runtimeConfigPtr.Load().cfg.Devin.Accounts)
+		},
+		Create: func(ctx context.Context, in ccpanel.AccountWrite) (*store.ResolvedAccount, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			cfg := runtimeConfigPtr.Load().cfg
+			if strings.TrimSpace(cfg.Devin.BaseURL) == "" || strings.TrimSpace(cfg.Devin.Model) == "" {
+				return nil, errors.New("devin.base_url / devin.model required before adding accounts")
+			}
+			rows, err := dbStore.ListAccounts(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// config 声明名、活行与墓碑行（含死墓碑）同撞「已存在」：
+			// 声明名的覆盖要走 Update，墓碑名的单出口是 restore。
+			if findAccountRow(rows, in.Name) != nil || declaredAccount(cfg, in.Name) {
+				return nil, fmt.Errorf("account %q: %w", in.Name, store.ErrAccountExists)
+			}
+			row := &store.AccountRow{
+				Name:            in.Name,
+				Token:           strings.TrimSpace(in.Token),
+				CredentialsFile: strings.TrimSpace(in.CredentialsFile),
+				Disabled:        in.Disabled,
+			}
+			// 干跑整表校验先于行写入：合成集非法（零凭据/重名/重
+			// token/文件不可解）直接拒绝，库里不留脏行。
+			synthesized, err := config.ResolveAccounts(candidateAccountConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, append(rows, row))), configDir)
+			if err != nil {
+				return nil, err
+			}
+			// 行存锚定后的绝对路径：merge 不做二次锚定，加载期「相对
+			// 锚 configDir」的规则要在行写入侧复刻。
+			if row.CredentialsFile != "" {
+				row.CredentialsFile = synthesizedAccount(synthesized, in.Name).CredentialsFile
+			}
+			if err := dbStore.UpsertAccount(ctx, row); err != nil {
+				return nil, err
+			}
+			resolved, err := push(ctx)
+			if err != nil {
+				rollbackAccountRow(ctx, dbStore, in.Name, nil)
+				return nil, err
+			}
+			return findResolved(resolved, in.Name), nil
+		},
+		Update: func(ctx context.Context, name string, patch ccpanel.AccountPatch) (*store.ResolvedAccount, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			cfg := runtimeConfigPtr.Load().cfg
+			rows, err := dbStore.ListAccounts(ctx)
+			if err != nil {
+				return nil, err
+			}
+			acc := findResolved(store.MergeAccounts(cfg.Devin.Accounts, rows), name)
+			if acc == nil {
+				return nil, fmt.Errorf("account %q: %w", name, store.ErrAccountNotFound)
+			}
+			if acc.Source == store.AccountSourceTombstoned {
+				return nil, fmt.Errorf("account %q: %w", name, store.ErrAccountTombstoned)
+			}
+			oldRow := findAccountRow(rows, name)
+			row := &store.AccountRow{Name: name}
+			if oldRow != nil {
+				*row = *oldRow
+			}
+			// 指针字段区分缺席与显式空：显式 "" 落 NULL 即「清行覆盖」
+			// （config 名回落 config 值），缺席不动旧值。
+			if patch.Token != nil {
+				row.Token = strings.TrimSpace(*patch.Token)
+			}
+			if patch.CredentialsFile != nil {
+				row.CredentialsFile = strings.TrimSpace(*patch.CredentialsFile)
+			}
+			if patch.Disabled != nil {
+				row.Disabled = *patch.Disabled
+			}
+			synthesized, err := config.ResolveAccounts(candidateAccountConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row))), configDir)
+			if err != nil {
+				return nil, err
+			}
+			if row.CredentialsFile != "" {
+				row.CredentialsFile = synthesizedAccount(synthesized, name).CredentialsFile
+			}
+			if err := dbStore.UpsertAccount(ctx, row); err != nil {
+				return nil, err
+			}
+			resolved, err := push(ctx)
+			if err != nil {
+				rollbackAccountRow(ctx, dbStore, name, oldRow)
+				return nil, err
+			}
+			return findResolved(resolved, name), nil
+		},
+		Delete: func(ctx context.Context, name string) (*store.ResolvedAccount, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			cfg := runtimeConfigPtr.Load().cfg
+			rows, err := dbStore.ListAccounts(ctx)
+			if err != nil {
+				return nil, err
+			}
+			acc := findResolved(store.MergeAccounts(cfg.Devin.Accounts, rows), name)
+			if acc == nil || acc.Source == store.AccountSourceTombstoned {
+				// 墓碑的单出口是 restore；死墓碑与无名同归 not found。
+				return nil, fmt.Errorf("account %q: %w", name, store.ErrAccountNotFound)
+			}
+			oldRow := findAccountRow(rows, name)
+			if acc.ConfigDeclared {
+				// config 名物理删会在下一次 merge 里复活成 config 源
+				// ——只能立墓碑压住；覆盖字段原样保留（restore 原样
+				// 复活，disabled/凭据覆盖不丢）。
+				tomb := &store.AccountRow{Name: name}
+				if oldRow != nil {
+					*tomb = *oldRow
+				}
+				tomb.Deleted = true
+				if err := dbStore.UpsertAccount(ctx, tomb); err != nil {
+					return nil, err
+				}
+			} else if err := dbStore.DeleteAccount(ctx, name); err != nil {
+				return nil, err
+			}
+			if _, err := push(ctx); err != nil {
+				rollbackAccountRow(ctx, dbStore, name, oldRow)
+				return nil, err
+			}
+			// 回「删除前」视图：handler 只读 ConfigDeclared 挑响应形态
+			// （tombstoned:true vs deleted:true），它在删除前后同值。
+			return acc, nil
+		},
+		Restore: func(ctx context.Context, name string) (*store.ResolvedAccount, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			cfg := runtimeConfigPtr.Load().cfg
+			rows, err := dbStore.ListAccounts(ctx)
+			if err != nil {
+				return nil, err
+			}
+			acc := findResolved(store.MergeAccounts(cfg.Devin.Accounts, rows), name)
+			if acc == nil {
+				return nil, fmt.Errorf("account %q: %w", name, store.ErrAccountNotFound)
+			}
+			if acc.Source != store.AccountSourceTombstoned {
+				return nil, fmt.Errorf("account %q: %w", name, store.ErrAccountNotTombstoned)
+			}
+			oldRow := findAccountRow(rows, name)
+			row := *oldRow
+			row.Deleted = false
+			if err := dbStore.UpsertAccount(ctx, &row); err != nil {
+				return nil, err
+			}
+			resolved, err := push(ctx)
+			if err != nil {
+				rollbackAccountRow(ctx, dbStore, name, oldRow)
+				return nil, err
+			}
+			return findResolved(resolved, name), nil
+		},
+		ClearCooldown: func(name string) bool {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			return devinPool.ClearCooldown(name)
+		},
+		TokenOf: func(ctx context.Context, name string) (string, error) {
+			reloadMu.Lock()
+			defer reloadMu.Unlock()
+			resolved, err := dbStore.EffectiveAccounts(ctx, runtimeConfigPtr.Load().cfg.Devin.Accounts)
+			if err != nil {
+				return "", err
+			}
+			acc := findResolved(resolved, name)
+			if acc == nil || acc.Source == store.AccountSourceTombstoned {
+				return "", fmt.Errorf("account %q: %w", name, store.ErrAccountNotFound)
+			}
+			// credentials_file 型现读文件：CLI 续期直接改写文件，生效
+			// 凭据以文件内容为准；读不出回落已合并的 token（行覆盖或
+			// config 值——「都给」形态下它是初始值兜底）。
+			if acc.CredentialsFile != "" {
+				if token := config.TokenFromCredentialsFile(acc.CredentialsFile); token != "" {
+					return token, nil
+				}
+			}
+			if acc.Token != "" {
+				return acc.Token, nil
+			}
+			return "", fmt.Errorf("account %q has no resolvable credential", name)
+		},
+	}
+}
+
+// declaredAccount 报 name 是否被 config.yaml 声明——声明名即便没有
+// overlay 行也占着「已存在」语义：面板建同名号必须走 Update 覆盖
+// 路径，不能 Create 出第二条身份。
+func declaredAccount(cfg config.Config, name string) bool {
+	for _, acc := range cfg.Devin.Accounts {
+		if acc.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // seedConfigAPIKey 把 auth.api_key 播种成一条普通令牌行（描述
@@ -546,17 +947,23 @@ func reloadRuntimeConfig(configPath string, dbStore *store.Store, devinPool *dev
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	devinCfgs := devinConfigsFrom(cfg, configPath, dbStore)
 	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
 	// 而本函数只能经 panel 端点触达。
 	pcfg := runtimeConfigPtr.Load().cfg
-	applied, err := devinPool.ApplyConfigs(devinCfgs)
+	preLaneNames := poolLaneNames(devinPool)
+	// 账号集合走唯一重推入口：merge overlay → 整表干跑校验 →
+	// ApplyConfigs。校验失败整单 422，lanes 与库行都没动——
+	// 旧配置继续服役。面板覆盖重放不在此做：下方字段差集 →
+	// ResampleDefaults → ApplyAll 的顺序必须保住（覆盖恒赢文件值）。
+	resolved, applied, err := applyAccounts(context.Background(), cfg, configPath, dbStore, devinPool, nil)
 	if err != nil {
 		return nil, err
 	}
 	report.Applied = append(report.Applied, applied...)
-	// lane 增删不进任何单 lane 的字段差集，按名序比对单独上报。
-	if !slices.Equal(accountNames(pcfg.Devin), accountNames(cfg.Devin)) {
+	// lane 增删不进任何单 lane 的字段差集：按「重推前池内名集 vs
+	// 新生效名集」比对单独上报——声明序不能当判据（overlay 行让
+	// 声明集与 lane 集分叉）。
+	if !slices.Equal(preLaneNames, effectiveLaneNames(resolved)) {
 		report.Applied = append(report.Applied, "devin.accounts")
 	}
 	if pcfg.Devin.BaseURL != cfg.Devin.BaseURL || pcfg.Devin.Proxy != cfg.Devin.Proxy ||
@@ -612,7 +1019,7 @@ func reloadRuntimeConfig(configPath string, dbStore *store.Store, devinPool *dev
 	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
 	// settings 表里登记的覆盖键压回文件值。
 	settings.ResampleDefaults(ccpanel.SettingDefaults{
-		Devin:          devinCfgs[0],
+		Devin:          devinBaseConfig(cfg),
 		MaxConcurrency: cfg.Server.MaxConcurrency,
 		QuotaInterval:  time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute,
 		PprofListen:    cfg.Debug.PprofListen,
@@ -658,7 +1065,7 @@ func runtimeConfigView(configPath string) map[string]any {
 // devin.proxy 允许 http://user:pass@host 形式，userinfo 同样是凭据：
 // 清掉整段 User 保留 host，排障仍能辨认代理指向。
 func redactConfigSecrets(fields map[string]any) {
-	for _, path := range [][2]string{{"devin", "token"}, {"auth", "api_key"}, {"dashboard", "password"}} {
+	for _, path := range [][2]string{{"auth", "api_key"}, {"dashboard", "password"}} {
 		section, ok := fields[path[0]].(map[string]any)
 		if !ok {
 			continue
