@@ -1,0 +1,48 @@
+{
+  "cascadeId": "e61b314e-eba8-49f2-aabe-27ecb9a53031",
+  "chatMessagePrompts": [
+    {
+      "messageId": "<volatile>",
+      "prompt": "answer without tools",
+      "promptCacheOptions": {
+        "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+      },
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER"
+    }
+  ],
+  "chatModelUid": "glm-5-2",
+  "configuration": {
+    "maxNewlines": "400",
+    "maxTokens": "128000",
+    "numCompletions": "1",
+    "temperature": 1,
+    "topK": "40",
+    "topP": 0.95
+  },
+  "executionId": "<volatile>",
+  "metadata": {
+    "apiKey": "golden-token",
+    "extensionName": "chisel",
+    "extensionVersion": "3000.2.17",
+    "f": "<volatile>",
+    "ideName": "chisel",
+    "ideVersion": "3000.2.17",
+    "locale": "en",
+    "os": "mac"
+  },
+  "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+  "prompt": "You are a coding assistant.",
+  "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
+  "systemPromptCacheOptions": {
+    "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+  },
+  "toolChoice": {
+    "optionName": "none"
+  },
+  "trajectoryReference": {
+    "stepIndex": "<volatile>",
+    "stepType": "ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT",
+    "trajectoryId": "9948617a-8fff-4621-8389-5f86ebf4418a",
+    "trajectoryType": "ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "cascadeId": "b821acbb-7eed-447f-b585-92b7b0823455",
+  "chatMessagePrompts": [
+    {
+      "messageId": "<volatile>",
+      "prompt": "check the file",
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER"
+    },
+    {
+      "messageId": "<volatile>",
+      "prompt": "Let me read it.",
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM",
+      "toolCalls": [
+        {
+          "argumentsJson": "{\"path\":\"main.go\"}",
+          "id": "call_1",
+          "name": "read_file"
+        }
+      ]
+    },
+    {
+      "messageId": "<volatile>",
+      "prompt": "package main\n",
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL",
+      "toolCallId": "call_1",
+      "toolResultIsError": false
+    },
+    {
+      "messageId": "<volatile>",
+      "prompt": "now fix it",
+      "promptCacheOptions": {
+        "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+      },
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER"
+    }
+  ],
+  "chatModelUid": "glm-5-2",
+  "configuration": {
+    "maxNewlines": "400",
+    "maxTokens": "128000",
+    "numCompletions": "1",
+    "temperature": 1,
+    "topK": "40",
+    "topP": 0.95
+  },
+  "executionId": "<volatile>",
+  "metadata": {
+    "apiKey": "golden-token",
+    "extensionName": "chisel",
+    "extensionVersion": "3000.2.17",
+    "f": "<volatile>",
+    "ideName": "chisel",
+    "ideVersion": "3000.2.17",
+    "locale": "en",
+    "os": "mac"
+  },
+  "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+  "prompt": "You are a coding assistant.\n\n# tools descriptions\n<tool name=\"read_file\">\n1. Read a file from the workspace\n</tool>",
+  "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
+  "systemPromptCacheOptions": {
+    "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+  },
+  "tools": [
+    {
+      "description": "read_file",
+      "jsonSchemaString": "{\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}",
+      "name": "read_file"
+    }
+  ],
+  "trajectoryReference": {
+    "stepIndex": "<volatile>",
+    "stepType": "ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT",
+    "trajectoryId": "a3782e77-66cc-4235-8949-b3594bbe7fe6",
+    "trajectoryType": "ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE"
+  }
+}

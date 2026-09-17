@@ -1,0 +1,53 @@
+{
+  "cascadeId": "9536b7e2-48bc-4d91-9030-e148d353e5fb",
+  "chatMessagePrompts": [
+    {
+      "messageId": "<volatile>",
+      "prompt": "Read main.go then summarize.",
+      "promptCacheOptions": {
+        "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+      },
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER"
+    }
+  ],
+  "chatModelUid": "glm-5-2",
+  "configuration": {
+    "maxNewlines": "400",
+    "maxTokens": "128000",
+    "numCompletions": "1",
+    "temperature": 1,
+    "topK": "40",
+    "topP": 0.95
+  },
+  "executionId": "<volatile>",
+  "metadata": {
+    "apiKey": "golden-token",
+    "extensionName": "chisel",
+    "extensionVersion": "3000.2.17",
+    "f": "<volatile>",
+    "ideName": "chisel",
+    "ideVersion": "3000.2.17",
+    "locale": "en",
+    "os": "mac"
+  },
+  "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+  "prompt": "You are a coding assistant.\n\n# tools descriptions\n<tool name=\"read_file\">\n1. Read a file from the workspace\n</tool>",
+  "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
+  "systemPromptCacheOptions": {
+    "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+  },
+  "tools": [
+    {
+      "description": "read_file",
+      "jsonSchemaString": "{\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}",
+      "name": "read_file",
+      "readOnlyHint": true
+    }
+  ],
+  "trajectoryReference": {
+    "stepIndex": "<volatile>",
+    "stepType": "ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT",
+    "trajectoryId": "6313e93f-c46f-401b-a5e8-94f89c6b8fee",
+    "trajectoryType": "ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE"
+  }
+}

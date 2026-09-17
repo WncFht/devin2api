@@ -1,0 +1,60 @@
+{
+  "cascadeId": "b0fbf02b-da52-40cb-a746-623f451ffaa2",
+  "chatMessagePrompts": [
+    {
+      "messageId": "<volatile>",
+      "prompt": "hi",
+      "promptCacheOptions": {
+        "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+      },
+      "source": "ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER"
+    }
+  ],
+  "chatModelUid": "glm-5-2",
+  "configuration": {
+    "maxNewlines": "400",
+    "maxTokens": "4096",
+    "numCompletions": "1",
+    "seed": "42",
+    "stopPatterns": [
+      "STOP"
+    ],
+    "temperature": 0.2,
+    "topK": "10",
+    "topP": 0.8
+  },
+  "executionId": "<volatile>",
+  "metadata": {
+    "apiKey": "golden-token",
+    "extensionName": "chisel",
+    "extensionVersion": "3000.2.17",
+    "f": "<volatile>",
+    "ideName": "chisel",
+    "ideVersion": "3000.2.17",
+    "locale": "en",
+    "os": "mac"
+  },
+  "modelAssignmentJwt": "golden-router-jwt",
+  "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+  "prompt": "You are a coding assistant.\n\n# tools descriptions\n<tool name=\"read_file\">\n1. Read a file\n</tool>",
+  "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
+  "systemPromptCacheOptions": {
+    "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"
+  },
+  "toolChoice": {
+    "toolName": "read_file"
+  },
+  "tools": [
+    {
+      "description": "read_file",
+      "jsonSchemaString": "{\"type\":\"object\"}",
+      "name": "read_file"
+    }
+  ],
+  "trajectoryReference": {
+    "stepIndex": "<volatile>",
+    "stepType": "ExaCortexPb_CortexStepType_CORTEX_STEP_TYPE_USER_INPUT",
+    "trajectoryId": "f9fab4ef-8986-4796-9249-24691d6c2600",
+    "trajectoryType": "ExaCortexPb_CortexTrajectoryType_CORTEX_TRAJECTORY_TYPE_CASCADE"
+  }
+}
