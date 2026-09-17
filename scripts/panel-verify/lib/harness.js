@@ -10,7 +10,7 @@ const ADMIN_PW = process.env.PV_ADMIN_PW || 'testpw';
 const API_TOKEN = process.env.PV_API_TOKEN || 'testkey';
 const SHOTS = process.env.PV_SHOTS || path.join(__dirname, '..', 'shots');
 
-const PAGES = ['index', 'tokens', 'models', 'stats', 'trend', 'quota', 'logs', 'settings'];
+const PAGES = ['index', 'tokens', 'models', 'stats', 'trend', 'accounts', 'logs', 'settings'];
 // api_token 角色可见的 nav 子集；其余页面会被重定向回 index。
 const API_TOKEN_NAV = ['index', 'stats', 'trend', 'logs'];
 
