@@ -598,8 +598,9 @@ type LogModelLast struct {
 }
 
 // LogLastByModel 返回各生效模型的最近快照；kh 非空时只看该令牌的行。
-// 两个窗口查询各自取每模型最新行（time DESC, id DESC）；emodel=” 组
-// 同样保留（与旧口径一致）。
+// 每模型最新行用 GROUP BY + 裸列绑定 MAX(id) 单遍聚合（SQLite 保证
+// bare column 取自唯一 max 聚合的达成行），替代两遍全表 ROW_NUMBER；
+// emodel=” 组同样保留（与旧口径一致）。
 func (s *Store) LogLastByModel(ctx context.Context, kh string) (map[string]LogModelLast, error) {
 	out := map[string]LogModelLast{}
 	khCond := ""
@@ -610,11 +611,10 @@ func (s *Store) LogLastByModel(ctx context.Context, kh string) (map[string]LogMo
 	}
 	latest := func(cond string, apply func(m *LogModelLast, at, id int64, status int, result string)) error {
 		rows, err := s.ro.QueryContext(ctx, `
-			SELECT emodel, time, id, status_code, result FROM (
-				SELECT `+logEModelExpr+` AS emodel, time, id, status_code, result,
-					ROW_NUMBER() OVER (PARTITION BY `+logEModelExpr+` ORDER BY id DESC) AS rn
+			SELECT emodel, time, MAX(id), status_code, result FROM (
+				SELECT `+logEModelExpr+` AS emodel, time, id, status_code, result
 				FROM logs WHERE `+cond+khCond+`
-			) WHERE rn = 1`, args...)
+			) GROUP BY emodel`, args...)
 		if err != nil {
 			return err
 		}

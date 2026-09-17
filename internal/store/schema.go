@@ -68,6 +68,11 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_logs_minute_api ON logs(minute_bucket, api)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_time_keyhash ON logs(time, key_hash)`,
 	`CREATE INDEX IF NOT EXISTS idx_logs_minute_keyhash_status ON logs(minute_bucket, key_hash, status_code)`,
+	// 生效模型（model 退化 requested_model）的表达式索引：面板的
+	// GROUP BY emodel / DISTINCT / 「每模型最近 N 条」相关 LIMIT
+	// 全走它——emodel 是 CASE 表达式，不可索引化时这些查询全是
+	// 全表扫+排序。
+	`CREATE INDEX IF NOT EXISTS idx_logs_emodel_id ON logs((CASE WHEN model != '' THEN model ELSE requested_model END), id)`,
 
 	// debug payload：键是目录名（dir 仍作 X-Request-Id/debug_ref
 	// 身份），不是 logs.id——飞行中请求的 payload 先于 Complete 才

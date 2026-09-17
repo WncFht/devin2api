@@ -176,8 +176,8 @@ type RateLimitEvent struct {
 
 // UsageSnapshot 是聚合结果的完整快照（JSON 形状与旧版一致）。
 type UsageSnapshot struct {
-	WindowStart string          `json:"window_start"` // 最早一条日志的时间
-	Entries     int64           `json:"entries"`      // 参与聚合的行数
+	WindowStart string          `json:"window_start"` // 窗口内最早一条日志的时间
+	Entries     int64           `json:"entries"`      // 窗口内参与聚合的行数
 	Today       UsageTotals     `json:"today"`
 	Window      UsageTotals     `json:"window"`
 	Days        []UsageDayRow   `json:"days"`   // 新在前
@@ -355,11 +355,11 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinP
 	return points, nil
 }
 
-// dimAggs 按维度表达式（emodel 或 key_hash）聚合：totals + 时长和 +
-// TTFB 样本均值 + 末次 started_at（MAX(id) 所在行的裸列取自该行——
-// SQLite 保证 bare column 绑定到唯一 min/max 聚合的达成行，等价于
-// 旧按完成序追加的「最后一行覆盖」语义）。
-func (s *Store) dimAggs(ctx context.Context, dimExpr string) ([]DimensionAgg, error) {
+// dimAggs 按维度表达式（emodel 或 key_hash）聚合窗口内行：totals +
+// 时长和 + TTFB 样本均值 + 末次 started_at（MAX(id) 所在行的裸列取自
+// 该行——SQLite 保证 bare column 绑定到唯一 min/max 聚合的达成行，
+// 等价于旧按完成序追加的「最后一行覆盖」语义）。
+func (s *Store) dimAggs(ctx context.Context, dimExpr string, minBucket int64) ([]DimensionAgg, error) {
 	rows, err := s.ro.QueryContext(ctx, `
 		SELECT dim,`+usageTotalsCols+`,
 			COALESCE(SUM(duration_ms), 0),
@@ -367,7 +367,7 @@ func (s *Store) dimAggs(ctx context.Context, dimExpr string) ([]DimensionAgg, er
 			COALESCE(SUM(first_upstream_ms), 0),
 			MAX(id), started_at
 		FROM (SELECT `+dimExpr+` AS dim, * FROM logs)
-		WHERE dim != '' GROUP BY dim`)
+		WHERE dim != '' AND minute_bucket >= ? GROUP BY dim`, minBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -396,37 +396,45 @@ func (s *Store) dimAggs(ctx context.Context, dimExpr string) ([]DimensionAgg, er
 
 // modelTokenSamples 返回每个生效模型最近 dimensionSampleCapacity 条
 // input_tokens 与（仅 output>0 行的）output_tokens 样本集；两个环
-// 独立计数，取回行后按各自的 rn 再闸一次。
-func (s *Store) modelTokenSamples(ctx context.Context) (inTok, outTok map[string][]int64, err error) {
-	rows, err := s.ro.QueryContext(ctx, `
-		SELECT emodel, input_tokens, output_tokens, rn_in, rn_out FROM (
-			SELECT emodel, input_tokens, output_tokens,
-				ROW_NUMBER() OVER (PARTITION BY emodel ORDER BY id DESC) AS rn_in,
-				ROW_NUMBER() OVER (PARTITION BY emodel, output_tokens > 0 ORDER BY id DESC) AS rn_out
-			FROM (SELECT `+logEModelExpr+` AS emodel, id, input_tokens, output_tokens FROM logs)
-			WHERE emodel != ''
-		) WHERE rn_in <= ? OR (output_tokens > 0 AND rn_out <= ?)`,
-		dimensionSampleCapacity, dimensionSampleCapacity)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() { _ = rows.Close() }()
+// 独立取数。逐模型走 idx_logs_emodel_id 的 ORDER BY id DESC LIMIT
+// 索引扫描——成本只与样本量挂钩；旧窗口函数实现是全表排序，成本
+// 随保留期线性退化。
+func (s *Store) modelTokenSamples(ctx context.Context, models []string) (inTok, outTok map[string][]int64, err error) {
 	inTok = map[string][]int64{}
 	outTok = map[string][]int64{}
-	for rows.Next() {
-		var emodel string
-		var in, out, rnIn, rnOut int64
-		if err := rows.Scan(&emodel, &in, &out, &rnIn, &rnOut); err != nil {
+	sample := func(query, model string) ([]int64, error) {
+		rows, err := s.ro.QueryContext(ctx, query, model, dimensionSampleCapacity)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		var out []int64
+		for rows.Next() {
+			var v int64
+			if err := rows.Scan(&v); err != nil {
+				return nil, err
+			}
+			out = append(out, v)
+		}
+		return out, rows.Err()
+	}
+	for _, m := range models {
+		in, err := sample(`SELECT input_tokens FROM logs WHERE `+logEModelExpr+` = ? ORDER BY id DESC LIMIT ?`, m)
+		if err != nil {
 			return nil, nil, err
 		}
-		if rnIn <= dimensionSampleCapacity {
-			inTok[emodel] = append(inTok[emodel], in)
+		out, err := sample(`SELECT output_tokens FROM logs WHERE `+logEModelExpr+` = ? AND output_tokens > 0 ORDER BY id DESC LIMIT ?`, m)
+		if err != nil {
+			return nil, nil, err
 		}
-		if out > 0 && rnOut <= dimensionSampleCapacity {
-			outTok[emodel] = append(outTok[emodel], out)
+		if len(in) > 0 {
+			inTok[m] = in
+		}
+		if len(out) > 0 {
+			outTok[m] = out
 		}
 	}
-	return inTok, outTok, rows.Err()
+	return inTok, outTok, nil
 }
 
 // UsageStats 返回 logs 表全量聚合快照：窗口/今日/逐日累计、按模型/按
@@ -442,7 +450,13 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	var minMS sql.NullInt64
-	if err := s.ro.QueryRowContext(ctx, `SELECT COUNT(*), MIN(time) FROM logs`).Scan(&snap.Entries, &minMS); err != nil {
+	// 聚合窗口收敛到最近 usageMaxDays 天：旧内存聚合器本来也只覆盖
+	// 索引尾部窗口；无界全表扫会把整个保留期（90 天）的行数线性摊进
+	// 每次面板轮询，minute_bucket 下界把成本钉在窗口体积上。
+	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(*), MIN(time) FROM logs WHERE minute_bucket >= ?`, minBucket).
+		Scan(&snap.Entries, &minMS); err != nil {
 		return snap, err
 	}
 	if minMS.Valid {
@@ -451,7 +465,9 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		snap.WindowStart = time.Time{}.Format(time.RFC3339)
 	}
 
-	if err := scanUsageTotals(s.ro.QueryRowContext(ctx, `SELECT `+usageTotalsCols+` FROM logs`), &snap.Window); err != nil {
+	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
+		`SELECT `+usageTotalsCols+` FROM logs WHERE minute_bucket >= ?`, minBucket),
+		&snap.Window); err != nil {
 		return snap, err
 	}
 	// 今日单列查询而非从 days 里挑：31 天上限外若有未来日期的行，
@@ -467,7 +483,8 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// 逐日聚合（新在前，上限 usageMaxDays）；kept 记录保留日键，
 	// ModelDays 只投影同日键集合（旧快照语义）。
 	dayRows, err := s.ro.QueryContext(ctx,
-		`SELECT `+logDayExpr+` AS day,`+usageTotalsCols+` FROM logs GROUP BY day ORDER BY day DESC LIMIT ?`, usageMaxDays)
+		`SELECT `+logDayExpr+` AS day,`+usageTotalsCols+` FROM logs
+		WHERE minute_bucket >= ? GROUP BY day ORDER BY day DESC LIMIT ?`, minBucket, usageMaxDays)
 	if err != nil {
 		return snap, err
 	}
@@ -488,7 +505,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	mdayRows, err := s.ro.QueryContext(ctx,
 		`SELECT emodel, day,`+usageTotalsCols+` FROM (
 			SELECT `+logEModelExpr+` AS emodel, `+logDayExpr+` AS day, * FROM logs
-		) WHERE emodel != '' GROUP BY emodel, day`)
+		) WHERE emodel != '' AND minute_bucket >= ? GROUP BY emodel, day`, minBucket)
 	if err != nil {
 		return snap, err
 	}
@@ -518,7 +535,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	stageRows, err := s.ro.QueryContext(ctx,
-		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' GROUP BY error_stage`)
+		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' AND minute_bucket >= ? GROUP BY error_stage`, minBucket)
 	if err != nil {
 		return snap, err
 	}
@@ -536,12 +553,17 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	// 维度行：perModel 带 token 分位数，perKey 没有（旧版 keys 的
-	// inTokSamples 是 nil 不入样）。
-	models, err := s.dimAggs(ctx, logEModelExpr)
+	// inTokSamples 是 nil 不入样）。分位数样本逐模型走索引取数，
+	// 输入清单即 dimAggs 已聚合出的窗口内模型集合。
+	models, err := s.dimAggs(ctx, logEModelExpr, minBucket)
 	if err != nil {
 		return snap, err
 	}
-	inTok, outTok, err := s.modelTokenSamples(ctx)
+	modelNames := make([]string, 0, len(models))
+	for _, m := range models {
+		modelNames = append(modelNames, m.Name)
+	}
+	inTok, outTok, err := s.modelTokenSamples(ctx, modelNames)
 	if err != nil {
 		return snap, err
 	}
@@ -553,7 +575,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 			models[i].OutTokP50, models[i].OutTokP95 = st.P50, st.P95
 		}
 	}
-	keys, err := s.dimAggs(ctx, "key_hash")
+	keys, err := s.dimAggs(ctx, "key_hash", minBucket)
 	if err != nil {
 		return snap, err
 	}
