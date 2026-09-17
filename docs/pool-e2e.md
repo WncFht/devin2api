@@ -14,7 +14,7 @@
 
 ```bash
 DEVIN_TOKEN_GOOD=<tok> scripts/devin-pool-smoke.sh [--port 3199]
-scripts/devin-pool-smoke.sh --config config.yaml   # 从配置取 devin.token/model/base_url
+scripts/devin-pool-smoke.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
 ```
 
 构建临时二进制 → 空闲端口起独立实例（`-state-dir` 指向 mktemp 目录，不污染真实状态）→ 两轮 12 个 `POST /v1/chat/completions`（`user` 字段做亲和键、`X-Client-Request-Id` 做关联、`max_tokens:8` 压成本）→ 查 `logs` 表与 `/admin/runtime-metrics` 断言。

@@ -4,7 +4,8 @@
 # 反推额度时需要比面板默认 5 分钟更密的点，本脚本默认 30 秒。
 #
 # 用法: poll.sh [间隔秒] [输出文件] [config.yaml]
-# token 从 config.yaml 的 devin.token 读取；Ctrl-C 停止。
+# token 从 config.yaml 首个 devin.accounts 条目的 token 读（条目只给
+# credentials_file 时解出该文件的 windsurf_api_key）；Ctrl-C 停止。
 set -u
 
 INTERVAL="${1:-30}"
@@ -25,7 +26,14 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
 else
   CONF="${XDG_CONFIG_HOME:-$HOME/.config}/devin-2api/config.yaml"
 fi
-TOKEN=$(grep -E '^[[:space:]]+token:' "$CONF" | head -1 | sed 's/.*token:[[:space:]]*//')
+TOKEN=$(grep -E '^[[:space:]]+token:' "$CONF" | head -1 | sed 's/.*token:[[:space:]]*//' | tr -d '"'"'")
+if [[ -z "$TOKEN" ]]; then
+  CREDS=$(grep -E '^[[:space:]]+credentials_file:' "$CONF" | head -1 | sed 's/.*credentials_file:[[:space:]]*//' | tr -d '"'"'")
+  CREDS="${CREDS/#\~/$HOME}"
+  [[ -n "$CREDS" && "$CREDS" != /* ]] && CREDS="$(dirname "$CONF")/$CREDS"
+  [[ -n "$CREDS" && -f "$CREDS" ]] &&
+    TOKEN=$(sed -nE 's/^[[:space:]]*windsurf_api_key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$CREDS" | head -1)
+fi
 URL='https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus'
 
 while true; do

@@ -31,7 +31,8 @@ deploy_usage() {
 
 首装与升级同一条命令：服务未安装时自动生成服务定义并拉起；config.yaml
 缺失时从 config.example.yaml 生成——写入随机 auth.api_key 与
-dashboard.password，devin.token 在终端下提示粘贴，否则置空走自动发现。
+dashboard.password，终端下提示粘贴 Devin session token（写入
+devin.accounts 首条），否则留空池——面板 /web/accounts.html 再加号。
 覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_BIN_DIR / DEVIN2API_CONFIG_DIR /
 DEVIN2API_STATE_DIR / DEVIN2API_PORT（DEVIN2API_RUNTIME 视作 STATE_DIR 的
 兼容别名）。
@@ -300,8 +301,10 @@ gen_secret() {
 
 # ensure_config：config.yaml 缺失时从 config.example.yaml 生成——写入随机
 # auth.api_key 与 dashboard.password（示例默认 ":8080" 全网卡监听，裸 key
-# 等于把配额和面板开放给 LAN）；devin.token 在终端下提示粘贴，否则置空
-# 走自动发现。已有 config.yaml 时不动——用户手写优先。
+# 等于把配额和面板开放给 LAN）；终端下提示粘贴 Devin session token，
+# 粘贴了就在 devin: 段首注入 devin.accounts 首条（名 main），否则留
+# 空池——空池合法，面板 /web/accounts.html 随时加号。已有 config.yaml
+# 时不动——用户手写优先。
 ensure_config() {
 	[[ -f config.yaml ]] && return 0
 	[[ -f config.example.yaml ]] ||
@@ -314,30 +317,36 @@ ensure_config() {
 	local token=""
 	# -r/-w 测的是权限不是控制终端——无 tty 环境下 open /dev/tty 才失败。
 	if (exec 3<>/dev/tty) 2>/dev/null; then
-		printf 'Devin session token（devin-session-token$...，留空走自动发现）: ' >/dev/tty
+		printf 'Devin session token（devin-session-token$...，留空起空池后面板加号）: ' >/dev/tty
 		IFS= read -r -s token </dev/tty || true
 		printf '\n' >/dev/tty
 	fi
-	set_yaml_scalar token "${token}" config.yaml
+	# accounts 是列表嵌套块，set_yaml_scalar 只能写标量——awk 在 devin:
+	# 行后整体插入（map 内键序无关）。token 用 yaml 单引号包裹。
+	[[ -n "${token}" ]] &&
+		awk -v tok="${token}" '
+			{ print }
+			!done && /^devin:/ {
+				print "  accounts:";
+				print "    - name: '"'"'main'"'"'";
+				print "      token: '"'"'" tok "'"'"'";
+				done=1
+			}' config.yaml >config.yaml.tmp &&
+		mv config.yaml.tmp config.yaml
 }
 
-# token_source_desc 描述启动时 token 将来自何处；无处可寻返回空。
-# 与 config.Load 的发现链一致：配置值 → env → credentials.toml。
+# token_source_desc 描述启动时凭据将来自何处；无处可寻返回空。
+# 凭据只认 devin.accounts 声明（env/credentials.toml 发现链已不进
+# load 路径）；面板库里的 panel 行不在此探——脚本视角只报 config 层。
 token_source_desc() {
 	[[ -n "$(yaml_scalar token)" ]] && {
-		printf 'config.yaml devin.token'
+		printf 'config.yaml devin.accounts[].token'
 		return 0
 	}
-	[[ -n "${DEVIN_TOKEN:-}" ]] && {
-		printf 'env DEVIN_TOKEN'
-		return 0
-	}
-	[[ -n "${WINDSURF_API_KEY:-}" ]] && {
-		printf 'env WINDSURF_API_KEY'
-		return 0
-	}
-	[[ -f "${HOME}/.local/share/devin/credentials.toml" ]] && {
-		printf '~/.local/share/devin/credentials.toml'
+	local creds
+	creds="$(yaml_scalar credentials_file)"
+	[[ -n "${creds}" ]] && {
+		printf 'config.yaml devin.accounts[].credentials_file (%s)' "${creds}"
 		return 0
 	}
 	printf ''
@@ -366,17 +375,17 @@ preflight_deploy() {
 
 	ensure_config
 
-	# 模板占位 token 会屏蔽自动发现并让上游全部 401/403——拒绝部署。
+	# 模板占位 token 会让上游全部 401/403——拒绝部署。
 	grep -q 'devin-session-token\$mock-token' config.yaml &&
-		die "devin.token 仍是模板占位值（mock-token）：请编辑 config.yaml 填真实 token，或置空走自动发现"
+		die "config.yaml 仍是模板占位 token（mock-token）：请在 devin.accounts 填真实号凭据"
 
 	local src
 	src="$(token_source_desc)"
 	if [[ -z "${src}" ]]; then
-		warn "未发现 token 来源（config/env/credentials.toml 均无）"
-		warn "空 token 启动的实例 /v1/* 不可用且不自愈——配置 token 后须重启服务"
+		warn "config.yaml 未声明 devin.accounts（面板已建的号除外）"
+		warn "空池起跑的实例 /v1/* 不可用——面板 /web/accounts.html 加号即热上线，免重启"
 	else
-		echo "==> token 来源: ${src}" >&2
+		echo "==> 凭据来源: ${src}" >&2
 	fi
 
 	# 非回环监听 + 空 api_key = 把配额开放给整个网络（README 明确警告）。

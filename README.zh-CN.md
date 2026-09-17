@@ -23,10 +23,7 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 
 ### 1. 提供 Devin token
 
-devin-2api 使用你的 Devin 会话 token（`devin-session-token$...`）向上游鉴权。`config.yaml` 里 `devin.token` 留空时按顺序自动发现：
-
-1. `DEVIN_TOKEN` 或 `WINDSURF_API_KEY` 环境变量；
-2. Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`（其次 `%LOCALAPPDATA%\devin\credentials.toml`）。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
+devin-2api 使用 Devin 会话 token（`devin-session-token$...`）向上游鉴权，每个上游账号在 `devin.accounts` 里声明一条——单号部署就是只写一条的池，空池同样合法：先起服务，事后在面板 `/web/accounts.html` 加号即可，免重启。每条账号给 `token`（字面量）与/或 `credentials_file`（指向 Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`）。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
 
 macOS 下也可从 Devin 应用本地状态提取：
 
@@ -35,7 +32,7 @@ sqlite3 ~/Library/"Application Support"/Devin/User/globalStorage/state.vscdb \
   "SELECT json_extract(value, '$.apiKey') FROM ItemTable WHERE key='windsurfAuthStatus';"
 ```
 
-token 会过期。上游回 `unauthenticated` 时适配器会重读同一条来源链——Devin CLI 续期改写 `credentials.toml` 后，代理无需重启即自愈。
+token 会过期。上游回 `unauthenticated` 时 lane 会重解该号生效凭据（行覆盖 → config 声明 → `credentials_file` 重读）——Devin CLI 续期改写 `credentials.toml` 或面板改号后，代理无需重启即自愈。
 
 ### 2. 配置
 
@@ -43,7 +40,7 @@ token 会过期。上游回 `unauthenticated` 时适配器会重读同一条来�
 cp config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，填入你的 token（基于 `config.example.yaml` 起步时只需填 `devin.token`——base_url 和 model 已有示例值）。
+编辑 `config.yaml`，在 `devin.accounts` 下声明你的账号（基于 `config.example.yaml` 起步时只需一条 `{name, token}`——base_url 和 model 已有示例值）。
 
 ### 3. 启动
 
@@ -56,7 +53,7 @@ chmod +x devin-2api-linux-amd64
 ./devin-2api-linux-amd64 -config config.yaml
 ```
 
-Windows：解压 `devin-2api-windows-amd64.zip`，编辑 `config.yaml`（token 可留空——第 1 节第 2 条让 Windsurf 内嵌的 `devin.exe` 产出凭证文件），在控制台运行 `devin-2api.exe -config config.yaml`。Ctrl+C 触发优雅排空；关窗和 `taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径。
+Windows：解压 `devin-2api-windows-amd64.zip`，编辑 `config.yaml`（账号可只给 `credentials_file`——第 1 节让 Windsurf 内嵌的 `devin.exe` 产出凭证文件），在控制台运行 `devin-2api.exe -config config.yaml`。Ctrl+C 触发优雅排空；关窗和 `taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径。
 
 源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
 
@@ -87,7 +84,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
 ```
 
-首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `auth.api_key`/`dashboard.password`，并提示粘贴 Devin token——留空走自动发现）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
+首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `auth.api_key`/`dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
 
 Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 
@@ -161,7 +158,7 @@ curl http://localhost:8080/v1/messages \
 | `server.listen`                                  | HTTP 监听地址                                                                                                                                                             | 是                                                                          |
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                                                                                      | `1024`                                                                      |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                                                                                    | 必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.token`                                    | Devin 会话 token（`devin-session-token$...`）；留空则从环境变量 / 凭据文件自动发现                                                                                        | 否——未配置时接口返回 401                                                    |
+| `devin.accounts`                                 | 上游账号池条目 `{name, token, credentials_file}`——`token`/`credentials_file` 至少给一个；空列表是合法空池（账号可在面板 `/web/accounts.html` 在线管理）                   | 否——无账号时 `/v1` 返回 `unavailable`                                       |
 | `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                                                                                      | 必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）；匹配顺序：精确 → 大小写不敏感 → `"*"` 兜底；别名列进 `/v1/models` 并带 `alias_of`                              | 无                                                                          |
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                                                                                            | `chisel` / `3000.2.17` / `mac`                                              |
@@ -189,7 +186,9 @@ server:
 
 devin:
     base_url: "https://server.codeium.com"
-    token: "devin-session-token$..."
+    accounts:
+        - name: "main"
+          token: "devin-session-token$..."
     model: "glm-5-2"
 
 debug:
@@ -206,7 +205,7 @@ auth:
 注意：
 
 - token 等敏感字段在日志中会被脱敏为 `<redacted>`，不会泄露；
-- `devin.token` 为空时，请求照常发到上游并返回 `401`，错误类型 `authentication_error`——token 出现在自动发现链任一来源后下一个请求即恢复，无需重启；
+- 不配任何账号即空池：`/v1` 请求快速失败返回 `unavailable`——面板 `/web/accounts.html` 加号或 `devin.accounts` 声明后 reload 即恢复，均免重启；
 - `config.yaml` 已在 `.gitignore` 中——真实 token 不要入库；pre-commit 挂了 gitleaks 会拦误提交的 secret。
 
 ## 文档

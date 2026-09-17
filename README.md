@@ -23,10 +23,7 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 
 ### 1. Provide a Devin token
 
-devin-2api authenticates to Devin with your Devin session token (`devin-session-token$...`). If `devin.token` is left empty in `config.yaml`, the adapter discovers one automatically, in order:
-
-1. `DEVIN_TOKEN` or `WINDSURF_API_KEY` environment variable;
-2. the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux; `%APPDATA%\devin\credentials.toml` (then `%LOCALAPPDATA%\devin\credentials.toml`) on Windows. The Windows CLI is not distributed standalone but ships inside the [Windsurf desktop app](https://devin.ai/download) — after installing it, `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` produces the file above.
+devin-2api authenticates to Devin with Devin session tokens (`devin-session-token$...`), one per upstream account in `devin.accounts` — the pool model covers single-account setups too (`accounts` is just a one-entry list), and an empty pool is legal: boot first, add accounts later from the panel (`/web/accounts.html`) without a restart. Each entry takes `token` (literal) and/or `credentials_file` (points at the Devin CLI credential file — `~/.local/share/devin/credentials.toml` on macOS/Linux; `%APPDATA%\devin\credentials.toml` on Windows). The Windows CLI is not distributed standalone but ships inside the [Windsurf desktop app](https://devin.ai/download) — after installing it, `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` produces the file above.
 
 On macOS you can also extract the token from the Devin app's local state:
 
@@ -35,7 +32,7 @@ sqlite3 ~/Library/"Application Support"/Devin/User/globalStorage/state.vscdb \
   "SELECT json_extract(value, '$.apiKey') FROM ItemTable WHERE key='windsurfAuthStatus';"
 ```
 
-Tokens expire. When upstream answers `unauthenticated`, the adapter re-reads the same source chain — so if the Devin CLI refreshes `credentials.toml`, the proxy heals itself without a restart.
+Tokens expire. When upstream answers `unauthenticated`, the lane re-resolves that account's credential (row override → config entry → `credentials_file` re-read) — so a CLI refresh of `credentials.toml` or a panel edit heals the proxy without a restart.
 
 ### 2. Configure
 
@@ -43,7 +40,7 @@ Tokens expire. When upstream answers `unauthenticated`, the adapter re-reads the
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` and fill in your token (starting from `config.example.yaml`, you only need to fill in `devin.token` — the base URL and model are pre-filled as examples).
+Edit `config.yaml` and declare your account under `devin.accounts` (starting from `config.example.yaml`, a single `{name, token}` entry is enough — the base URL and model are pre-filled as examples).
 
 ### 3. Run
 
@@ -56,7 +53,7 @@ chmod +x devin-2api-linux-amd64
 ./devin-2api-linux-amd64 -config config.yaml
 ```
 
-On Windows: unzip `devin-2api-windows-amd64.zip`, edit `config.yaml` (the token may stay empty — step 1 item 2 covers the Windsurf-bundled `devin.exe` that produces the credential file), then run `devin-2api.exe -config config.yaml` in a console. Ctrl+C triggers the same graceful drain; closing the window and `taskkill /F` do not — Windows offers no graceful kill for console processes.
+On Windows: unzip `devin-2api-windows-amd64.zip`, edit `config.yaml` (an account may carry only `credentials_file` — step 1 covers the Windsurf-bundled `devin.exe` that produces the credential file), then run `devin-2api.exe -config config.yaml` in a console. Ctrl+C triggers the same graceful drain; closing the window and `taskkill /F` do not — Windows offers no graceful kill for console processes.
 
 From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
 
@@ -87,7 +84,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS: scripts/deploy.sh
 ```
 
-On first run `config.yaml` is generated from `config.example.yaml` with a random `auth.api_key`/`dashboard.password`, and you're prompted for the Devin token (left empty it falls back to auto-discovery); to preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
+On first run `config.yaml` is generated from `config.example.yaml` with a random `auth.api_key`/`dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); to preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
 
 On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
 
@@ -161,7 +158,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `server.listen`                                  | HTTP listen address                                                                                                                                                                               | Yes                                                                               |
 | `server.max_concurrency`                         | Max concurrent `/v1/*` requests                                                                                                                                                                   | `1024`                                                                            |
 | `devin.base_url`                                 | Devin Connect service base URL                                                                                                                                                                    | Yes (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
-| `devin.token`                                    | Devin session token (`devin-session-token$...`); empty = discover from env / credentials file                                                                                                     | No — endpoints return 401 until a token is discoverable                           |
+| `devin.accounts`                                 | Upstream account pool entries `{name, token, credentials_file}` — `token`/`credentials_file` at least one; empty list = legal empty pool (manage accounts live from `/web/accounts.html`)         | No — `/v1` returns `unavailable` until an account exists                          |
 | `devin.model`                                    | Devin chat model UID (e.g. `glm-5-2`)                                                                                                                                                             | Yes (no default in code)                                                          |
 | `devin.aliases`                                  | Client model name → upstream UID map (`swe-2: swe-2-max`); match order exact → case-insensitive → `"*"` catch-all; aliases appear in `/v1/models` with `alias_of`                                 | none                                                                              |
 | `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata                                                                                                                                                         | `chisel` / `3000.2.17` / `mac`                                                    |
@@ -189,7 +186,9 @@ server:
 
 devin:
     base_url: "https://server.codeium.com"
-    token: "devin-session-token$..."
+    accounts:
+        - name: "main"
+          token: "devin-session-token$..."
     model: "glm-5-2"
 
 debug:
@@ -206,7 +205,7 @@ auth:
 Notes:
 
 - tokens are never written to logs (redacted as `<redacted>`);
-- if `devin.token` is empty, requests still go upstream and return `401` with type `authentication_error` — once a token shows up in any discovery source the next request succeeds, no restart needed;
+- with no accounts configured the pool is empty: `/v1` requests fail fast with `unavailable` — add an account from the panel (`/web/accounts.html`) or `devin.accounts` + reload, no restart needed either way;
 - `config.yaml` is gitignored — keep real tokens out of git anyway; pre-commit runs gitleaks to catch committed secrets.
 
 ## Documentation

@@ -183,13 +183,12 @@ function Read-ListenPort([string]$file) {
 }
 
 # ---------- 配置引导 ----------
-# token 发现链与 config.go 一致：配置值 → env → credentials.toml（Windows 双路径）。
+# 凭据只认 devin.accounts 声明（env/credentials.toml 发现链已不进 load
+# 路径）；面板库里的 panel 行不在此探——脚本视角只报 config 层。
 function Get-TokenSource([string]$file) {
-    if ((Get-YamlScalar 'token' $file) -ne '') { return 'config.yaml devin.token' }
-    if ($env:DEVIN_TOKEN) { return 'env DEVIN_TOKEN' }
-    if ($env:WINDSURF_API_KEY) { return 'env WINDSURF_API_KEY' }
-    if (Test-Path (Join-Path $env:APPDATA 'devin\credentials.toml')) { return '%APPDATA%\devin\credentials.toml' }
-    if (Test-Path (Join-Path $env:LOCALAPPDATA 'devin\credentials.toml')) { return '%LOCALAPPDATA%\devin\credentials.toml' }
+    if ((Get-YamlScalar 'token' $file) -ne '') { return 'config.yaml devin.accounts[].token' }
+    $creds = Get-YamlScalar 'credentials_file' $file
+    if ($creds -ne '') { return "config.yaml devin.accounts[].credentials_file ($creds)" }
     return ""
 }
 
@@ -250,8 +249,22 @@ function Ensure-Config {
     Set-YamlScalar 'listen' "127.0.0.1:$port" $RuntimeConfig
 
     $token = ""
-    try { $token = Read-Host "Devin session token（devin-session-token`$...，留空走自动发现）" } catch { }
-    if ($token) { Set-YamlScalar 'token' $token $RuntimeConfig }
+    try { $token = Read-Host "Devin session token（devin-session-token`$...，留空起空池后面板加号）" } catch { }
+    # accounts 是列表嵌套块，Set-YamlScalar 只能写标量——在 devin: 行后
+    # 整体插入首条（map 内键序无关）。token 用 yaml 单引号包裹。
+    if ($token) {
+        $escaped = $token -replace "'", "''"
+        $out = @()
+        $injected = $false
+        foreach ($l in [System.IO.File]::ReadAllLines($RuntimeConfig)) {
+            $out += $l
+            if (-not $injected -and $l -match '^devin:') {
+                $out += "  accounts:", "    - name: 'main'", "      token: '$escaped'"
+                $injected = $true
+            }
+        }
+        [System.IO.File]::WriteAllLines($RuntimeConfig, $out)
+    }
 }
 
 function Assert-Preflight {
@@ -263,16 +276,16 @@ function Assert-Preflight {
     Ensure-Config
 
     if (Select-String -Path $RuntimeConfig -Pattern 'devin-session-token\$mock-token' -Quiet) {
-        Die "devin.token 仍是模板占位值（mock-token）：请编辑 $RuntimeConfig 填真实 token，或置空走自动发现"
+        Die "config.yaml 仍是模板占位 token（mock-token）：请在 devin.accounts 填真实号凭据"
     }
     $src = Get-TokenSource $RuntimeConfig
     if ($src -eq '') {
-        Warn "未发现 token 来源（config/env/credentials.toml 均无）"
-        Warn "空 token 启动的实例 /v1/* 不可用且不自愈——可执行 Windsurf 内置 CLI 生成凭证："
+        Warn "config.yaml 未声明 devin.accounts（面板已建的号除外）"
+        Warn "空池起跑的实例 /v1/* 不可用——面板 /web/accounts.html 加号即热上线，免重启"
+        Warn "  也可执行 Windsurf 内置 CLI 生成凭证后用 credentials_file 引用："
         Warn '  & "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login'
-        Warn "  （会弹浏览器登录 Devin 账号）然后把实例重启"
     }
-    else { Note "token 来源: $src" }
+    else { Note "凭据来源: $src" }
 
     $listen = Get-YamlScalar 'listen' $RuntimeConfig
     if ($listen -notmatch '^(127\.|localhost:|\[::1\])' -and (Get-YamlScalar 'api_key' $RuntimeConfig) -eq '') {
