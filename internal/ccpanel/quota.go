@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -102,7 +103,7 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.quotaCancel = cancel
 	go func() {
-		h.sampleQuota()
+		h.sampleQuota(ctx)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -110,7 +111,7 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.sampleQuota()
+				h.sampleQuota(ctx)
 			}
 		}
 	}()
@@ -126,10 +127,14 @@ func (h *Handler) QuotaInterval() time.Duration {
 
 // sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照写入
 // quota_samples（每行带 account 字段，两号曲线分开画）。账号间按名序
-// 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。
-func (h *Handler) sampleQuota() {
+// 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。ctx 是采样
+// 协程的生命周期：SetQuotaInterval 停采/重起会打断在途轮次。
+func (h *Handler) sampleQuota(ctx context.Context) {
 	for _, account := range h.quotaAccounts() {
-		h.sampleAccountQuota(account.name, account.token)
+		if ctx.Err() != nil {
+			return
+		}
+		h.sampleAccountQuota(ctx, account.name, account.token)
 	}
 }
 
@@ -167,9 +172,10 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 	return accounts
 }
 
-// sampleAccountQuota 拉取一个账号的状态并写入一行配额快照。
-func (h *Handler) sampleAccountQuota(account, token string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+// sampleAccountQuota 拉取一个账号的状态并写入一行配额快照；ctx 挂在
+// 采样协程生命周期上，单号上限 120s。
+func (h *Handler) sampleAccountQuota(ctx context.Context, account, token string) {
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	if _, _, err := h.captureAccountQuota(ctx, account, token); err != nil {
 		slog.Warn("quota sample failed", "account", account, "error", err)
@@ -272,7 +278,12 @@ func (h *Handler) readQuotaHistory(ctx context.Context) []*store.QuotaSample {
 	return points
 }
 
-// forecast 用最近 lookback 窗口内的首尾两点差分估算燃烧速率与耗尽时刻。
+// forecast 用最近 lookback 窗口内的逐相邻样本差分估算燃烧速率与耗尽
+// 时刻：分子分母同步累计——只把「两端都报了数且 remaining 未上升」的
+// 相邻段计入消耗与时长；remaining 上升的相邻段是周期重置边界，跳过
+// （首尾两点差分遇到跨重置窗口会把回满错算成负消耗，烧着却报烧不完）；
+// pick 返回 NaN 表示「上游没报」，含 NaN 端点的段不可测、不计入——
+// 把 nil 当 0% 会伪造一次烧到 0 的差分。
 // 配额只剩百分比语义：日配额在 daily_reset_at 重置，周配额同理；
 // 「耗尽」指按当前速率在重置前把剩余百分比烧完。
 func forecast(points []*store.QuotaSample, lookback time.Duration, pick func(*store.QuotaSample) float64, resetAt func(*store.QuotaSample) int64) map[string]any {
@@ -281,38 +292,50 @@ func forecast(points []*store.QuotaSample, lookback time.Duration, pick func(*st
 	}
 	last := points[len(points)-1]
 	cutoff := last.At - int64(lookback.Seconds())
-	first := points[0]
+	start := 0
 	for i := len(points) - 2; i >= 0; i-- {
 		if points[i].At <= cutoff {
 			break
 		}
-		first = points[i]
+		start = i
 	}
-	if first.At == last.At {
+	var consumed float64
+	var measured int64
+	for i := start + 1; i < len(points); i++ {
+		prev, cur := pick(points[i-1]), pick(points[i])
+		if math.IsNaN(prev) || math.IsNaN(cur) || cur > prev {
+			continue
+		}
+		consumed += prev - cur
+		measured += points[i].At - points[i-1].At
+	}
+	if measured <= 0 {
 		return nil
 	}
-	hours := float64(last.At-first.At) / 3600
-	rate := (pick(first) - pick(last)) / hours // 百分比/小时，消耗为正
+	hours := float64(measured) / 3600
+	rate := consumed / hours // 百分比/小时，消耗为正
 	out := map[string]any{
 		"window_hours":  hours,
-		"remaining":     pick(last),
 		"reset_at":      resetAt(last),
 		"burn_per_hour": rate,
 		"burn_per_day":  rate * 24,
 	}
-	if rate > 0 {
-		hoursLeft := pick(last) / rate
-		exhaustedAt := last.At + int64(hoursLeft*3600)
-		// 外推的耗尽时刻越过重置点就没有物理意义：配额在 reset_at
-		// 先回满，本周期烧不完——报 survives_until_reset 而非一个
-		// 不可能发生的 exhausted_at。reset_at 未知或已过期时无法
-		// 判定边界，按原样报 exhausted_at。
-		if reset := resetAt(last); reset > last.At && exhaustedAt > reset {
-			out["survives_until_reset"] = true
-		} else {
-			out["exhausted_at"] = exhaustedAt
+	if rem := pick(last); !math.IsNaN(rem) {
+		out["remaining"] = rem
+		if rate > 0 {
+			hoursLeft := rem / rate
+			exhaustedAt := last.At + int64(hoursLeft*3600)
+			// 外推的耗尽时刻越过重置点就没有物理意义：配额在 reset_at
+			// 先回满，本周期烧不完——报 survives_until_reset 而非一个
+			// 不可能发生的 exhausted_at。reset_at 未知或已过期时无法
+			// 判定边界，按原样报 exhausted_at。
+			if reset := resetAt(last); reset > last.At && exhaustedAt > reset {
+				out["survives_until_reset"] = true
+			} else {
+				out["exhausted_at"] = exhaustedAt
+			}
+			out["hours_left"] = hoursLeft
 		}
-		out["hours_left"] = hoursLeft
 	}
 	return out
 }
@@ -333,33 +356,14 @@ func (h *Handler) QuotaReport(ctx context.Context) map[string]any {
 		}
 		byAccount[name] = append(byAccount[name], point)
 	}
-	reportFor := func(series []*store.QuotaSample) map[string]any {
-		return map[string]any{
-			"points": series,
-			"daily":  forecast(series, 24*time.Hour, func(p *store.QuotaSample) float64 { return floatOr0(p.DailyRemaining) }, func(p *store.QuotaSample) int64 { return p.DailyResetAt }),
-			"weekly": forecast(series, 7*24*time.Hour, func(p *store.QuotaSample) float64 { return floatOr0(p.WeeklyRemaining) }, func(p *store.QuotaSample) int64 { return p.WeeklyResetAt }),
-		}
-	}
 	names := make([]string, 0, len(byAccount))
 	for name := range byAccount {
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	h.quotaUserMu.Lock()
-	users := make(map[string]map[string]any, len(h.quotaUsers))
-	for name, u := range h.quotaUsers {
-		users[name] = u
-	}
-	h.quotaUserMu.Unlock()
 	accounts := make(map[string]any, len(names))
 	for _, name := range names {
-		report := reportFor(byAccount[name])
-		// user 是采样顺带取回的身份快照：只对确有该号记录的 lane
-		// 投影，重启后首个采样点落盘前的缺席交给前端渲染成未知。
-		if u, ok := users[name]; ok {
-			report["user"] = u
-		}
-		accounts[name] = report
+		accounts[name] = h.quotaSeriesReport(name, byAccount[name])
 	}
 	out := map[string]any{"accounts": accounts}
 	// 镜像跟随最新鲜的序列而非名序首个：被移出号池的号曲线停更，
@@ -378,6 +382,24 @@ func (h *Handler) QuotaReport(ctx context.Context) map[string]any {
 		out["weekly"] = mirror["weekly"]
 	}
 	return out
+}
+
+// quotaSeriesReport 用一条样本序列构建单号报告：points 曲线 + 日/周
+// forecast，并并入该号的身份快照（采样顺带取回；只对确有记录的 lane
+// 投影，重启后首个采样点落盘前的缺席交给前端渲染成未知）。单号视图
+// （accounts 写端点回包）也走它，免去为一条序列扫全表。
+func (h *Handler) quotaSeriesReport(name string, series []*store.QuotaSample) map[string]any {
+	report := map[string]any{
+		"points": series,
+		"daily":  forecast(series, 24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.DailyRemaining) }, func(p *store.QuotaSample) int64 { return p.DailyResetAt }),
+		"weekly": forecast(series, 7*24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.WeeklyRemaining) }, func(p *store.QuotaSample) int64 { return p.WeeklyResetAt }),
+	}
+	h.quotaUserMu.Lock()
+	if u, ok := h.quotaUsers[name]; ok {
+		report["user"] = u
+	}
+	h.quotaUserMu.Unlock()
+	return report
 }
 
 // floatAny 把 fetchUserStatus 产出的宽松数值统一成 float64。
@@ -414,11 +436,21 @@ func planFloat(plan map[string]any, key string) *float64 {
 	return &f
 }
 
-// floatOr0 解引用配额指针；nil（上游未上报）按 0 参与差分，与此前
-// 字段缺席落 0 的口径一致。
+// floatOr0 解引用配额指针，nil（上游未上报）按 0 返回——只用于展示性
+// 读取；forecast 差分走 remainingOrNaN，那里必须把「没报」与「真到 0」
+// 区分开。
 func floatOr0(v *float64) float64 {
 	if v == nil {
 		return 0
+	}
+	return *v
+}
+
+// remainingOrNaN 解引用配额指针，nil 编码为 NaN——forecast 靠它识别
+// 「这段不可测」而不把缺席伪造成 0%（那会谎报一次烧尽的差分）。
+func remainingOrNaN(v *float64) float64 {
+	if v == nil {
+		return math.NaN()
 	}
 	return *v
 }

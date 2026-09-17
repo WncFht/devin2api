@@ -23,13 +23,15 @@ type webIdentity struct {
 
 type identityContextKey struct{}
 
-// identityFrom 取请求的面板身份；未经 withWebAuth 的链路返回 admin
-// （本地面板语义：到得了 handler 必有身份，缺省按 admin 不丢数据）。
+// identityFrom 取请求的面板身份；未经 withAuth/withWebAuth 的链路按
+// 最小权限返回 api_token 空凭据：下游调用点以 Role=="api_token" 收敛
+// 数据范围，空 KeyHash 自然筛成空集——新端点忘包 middleware 时回空
+// 而非静默给 admin 全量（fail-closed）。
 func identityFrom(r *http.Request) webIdentity {
 	if id, ok := r.Context().Value(identityContextKey{}).(webIdentity); ok {
 		return id
 	}
-	return webIdentity{Role: "admin"}
+	return webIdentity{Role: "api_token"}
 }
 
 // bearerToken 提取 Authorization: Bearer 的凭据部分。
@@ -105,8 +107,10 @@ func (h *Handler) sweepLoginFailures(now time.Time) {
 	}
 }
 
-// clearLoginFailure 清掉该 IP 的失败账本——正确凭据在锁定期内也放行
-// 并清零：锁定只为抬高爆破代价，持对凭据的真用户不被挡在门外。
+// clearLoginFailure 清掉该 IP 的失败账本——持对面板密码在锁定期内也
+// 放行并清零：锁定只为抬高爆破代价，持对凭据的真用户不被挡在门外。
+// 只有密码凭据验证成功才清零：api_token 成功只是「持有某下游令牌」，
+// 若也清零，持钥人可交替令牌命中+密码猜测全速绕过锁定爆破密码。
 func (h *Handler) clearLoginFailure(ip string) {
 	h.loginMu.RLock()
 	_, hasEntry := h.loginFailures[ip]
@@ -144,6 +148,16 @@ func (h *Handler) CheckPanelBearer(r *http.Request) (authed, locked bool) {
 		return false, false
 	}
 	return h.checkPasswordCredential(auth, passwordHash, remoteIP(r))
+}
+
+// isPanelPassword 判定一份凭据是否即面板密码（面板开放时任何凭据都
+// 按 admin 算）。播种进仓的 auth.api_key 常被用户直接当管理凭据登录
+// （甚至是唯一 secret）：令牌命中 Resolve 后仍要用它把管理员从
+// api_token 受限身份捞回 admin。纯哈希比较，不进失败账本。
+func (h *Handler) isPanelPassword(cred string) bool {
+	password, passwordHash := h.passwordSnapshot()
+	sum := sha256.Sum256([]byte(cred))
+	return password == "" || subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1
 }
 
 // CheckPanelPassword 校验登录表单提交的明文密码（/login admin 模式用）。
@@ -191,7 +205,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// 匿名行是 /v1 无凭据流量的准入载体，不是可登录面板的凭据。
 		if h.tokens != nil && req.Token != "" {
 			if _, ok := h.tokens.Resolve(req.Token); ok {
-				h.clearLoginFailure(remoteIP(r))
+				// 令牌登录成功不清爆破账本：账本只对「证明持有面板
+				// 密码」的成功清零，见 clearLoginFailure。
 				respondOK(w, map[string]any{
 					"token":     req.Token,
 					"expiresIn": 86400,
@@ -219,36 +234,62 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // dashboardSession 实现 GET /dashboard/session：按身份回角色形状——
 // admin 只有 role；api_token 附带 ccLoad 契约的令牌视图字段。
+// 未知角色（含未经 middleware 的缺省身份）按 401 拒——fail-closed。
 func (h *Handler) dashboardSession(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r)
-	if id.Role == "api_token" && h.tokens != nil {
-		if t, ok := h.tokens.Get(id.TokenID); ok && t.IsValid() {
-			models := t.AllowedModels
-			if models == nil {
-				models = []string{}
+	switch id.Role {
+	case "api_token":
+		if h.tokens != nil {
+			if t, ok := h.tokens.Get(id.TokenID); ok && t.IsValid() {
+				models := t.AllowedModels
+				if models == nil {
+					models = []string{}
+				}
+				api := t.API()
+				respondOK(w, map[string]any{
+					"role":            "api_token",
+					"auth_token_id":   t.ID,
+					"description":     t.Description,
+					"allowed_models":  models,
+					"cost_used_usd":   api.CostUsedUSD,
+					"cost_limit_usd":  api.CostLimitUSD,
+					"max_concurrency": t.MaxConcurrency,
+				})
+				return
 			}
-			api := t.API()
-			respondOK(w, map[string]any{
-				"role":            "api_token",
-				"auth_token_id":   t.ID,
-				"description":     t.Description,
-				"allowed_models":  models,
-				"cost_used_usd":   api.CostUsedUSD,
-				"cost_limit_usd":  api.CostLimitUSD,
-				"max_concurrency": t.MaxConcurrency,
-			})
-			return
 		}
 		respondError(w, http.StatusUnauthorized, "API Token 已失效")
-		return
+	case "admin":
+		respondOK(w, map[string]any{"role": "admin"})
+	default:
+		respondError(w, http.StatusUnauthorized, "未授权访问，请先登录")
 	}
-	respondOK(w, map[string]any{"role": "admin"})
 }
 
 // withAuth 是 /admin 组的 Bearer 门槛：只认面板密码（admin）。
+// 有效下游令牌先经 Resolve 分流，再进密码校验——令牌有效但非面板
+// 密码是角色不足（403，见下），不能落进密码比对的失败账本：否则
+// 持钥人每请求 /admin 一次 +1，5 次后 IP 被误判锁定连 /login 都 429。
+// 令牌即密码（播种进仓的 auth.api_key 当管理凭据用）仍按 admin 放行。
 // 401 触发前端 fetchWithAuth 跳回 /web/login.html；429 复用爆破锁定语义。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Bearer 缺席时不进 Resolve：匿名通道行的哈希就是空明文的
+		// 哈希，不挡这一下，无凭据请求会被当成有效令牌 403 掉而非 401。
+		if tok := bearerToken(r); tok != "" && h.tokens != nil {
+			if _, ok := h.tokens.Resolve(tok); ok {
+				if h.isPanelPassword(tok) {
+					h.clearLoginFailure(remoteIP(r))
+					next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
+					return
+				}
+				// 有效令牌但非密码：api_token 只读身份在摸 /admin
+				// （admin-only）。回 403 而非 401——fetchWithAuth 把
+				// 401 当凭据失效清 token 踢回登录页，令牌其实仍有效。
+				respondError(w, http.StatusForbidden, "API 令牌为只读身份，无权访问管理端点")
+				return
+			}
+		}
 		authed, locked := h.CheckPanelBearer(r)
 		if authed {
 			next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
@@ -263,10 +304,11 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withWebAuth 是 /dashboard 组的门槛：api_token Bearer 先解析（有效令牌
-// 直接进 api_token 身份并清失败账本）；解析不中再走密码校验——有效令牌
-// 若在密码校验上计失败，持钥人每请求 +1，5 次后被误判锁定。校验失败的
-// Bearer 由 CheckPanelBearer 计入共享 IP 账本（一次失败只计一次，两种
-// 凭据不重复记）。面板密码为空（开放面板）时无 Bearer 也按 admin 放行——
+// 直接进 api_token 身份——仅令牌即密码时清失败账本，纯令牌身份不清，
+// 理由见 clearLoginFailure）；解析不中再走密码校验——有效令牌若在密码
+// 校验上计失败，持钥人每请求 +1，5 次后被误判锁定。校验失败的 Bearer
+// 由 CheckPanelBearer 计入共享 IP 账本（一次失败只计一次，两种凭据不
+// 重复记）。面板密码为空（开放面板）时无 Bearer 也按 admin 放行——
 // CheckPanelBearer 的开放语义已覆盖这条。
 func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -274,19 +316,11 @@ func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		// 哈希，不挡这一下，无凭据请求会被当成 api_token 身份放行。
 		if tok := bearerToken(r); tok != "" && h.tokens != nil {
 			if t, ok := h.tokens.Resolve(tok); ok {
-				// 密码优先于令牌身份：播种进仓的 auth.api_key 常被用户
-				// 直接当管理凭据登录（甚至是唯一 secret），面板开放时
-				// 任何凭据也本就该是 admin——这时判成 api_token 只会
-				// 把管理员锁进受限视图。纯哈希比较，不进失败账本。
-				password, passwordHash := h.passwordSnapshot()
-				bearerHash := sha256.Sum256([]byte(tok))
-				if password == "" ||
-					subtle.ConstantTimeCompare(bearerHash[:], passwordHash[:]) == 1 {
+				if h.isPanelPassword(tok) {
 					h.clearLoginFailure(remoteIP(r))
 					next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
 					return
 				}
-				h.clearLoginFailure(remoteIP(r))
 				next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{
 					Role:    "api_token",
 					TokenID: t.ID,

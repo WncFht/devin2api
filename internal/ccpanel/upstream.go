@@ -216,6 +216,7 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 					shadowed = append(shadowed, name+"→"+target)
 				}
 			}
+			slices.Sort(absent)
 			slices.Sort(shadowed)
 		}
 		resultMu.Lock()
@@ -576,6 +577,10 @@ func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
 	return models, nil
 }
 
+// cachedProviders 返回 TTL 内的供应商列表缓存。RPC 在锁外进行：写锁
+// 横跨上游调用（上限 610s）时，并发等待方阻塞在 Lock 上且不吃各自
+// ctx——锁只护缓存读写。并发 miss 各打一趟、写侧复查竞胜者为准；
+// 唯一调用路径（StatusReport）已被 statusSnapshot 的 singleflight 收敛。
 func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error) {
 	h.providersMu.RLock()
 	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
@@ -584,12 +589,6 @@ func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error)
 		return cached, nil
 	}
 	h.providersMu.RUnlock()
-
-	h.providersMu.Lock()
-	defer h.providersMu.Unlock()
-	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
-		return h.providersCache, nil
-	}
 
 	providerResp, err := h.currentUpstream().apiClient.GetModelProviders(ctx, connect.NewRequest(&devinproto.GetModelProvidersRequest{}))
 	if err != nil {
@@ -603,11 +602,18 @@ func (h *Handler) cachedProviders(ctx context.Context) ([]map[string]any, error)
 		})
 	}
 
+	h.providersMu.Lock()
+	defer h.providersMu.Unlock()
+	if h.providersCache != nil && time.Now().Before(h.providersExpiry) {
+		return h.providersCache, nil
+	}
 	h.providersCache = providers
 	h.providersExpiry = time.Now().Add(h.cacheTTL)
 	return providers, nil
 }
 
+// cachedModelStatuses 返回 TTL 内的模型状态缓存；锁安排同
+// cachedProviders（RPC 在锁外，写侧复查竞胜者）。
 func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, error) {
 	h.modelStatusesMu.RLock()
 	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
@@ -616,12 +622,6 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, er
 		return cached, nil
 	}
 	h.modelStatusesMu.RUnlock()
-
-	h.modelStatusesMu.Lock()
-	defer h.modelStatusesMu.Unlock()
-	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
-		return h.modelStatusesCache, nil
-	}
 
 	modelStatusResp, err := h.currentUpstream().apiClient.GetModelStatuses(ctx, connect.NewRequest(&devinproto.GetModelStatusesRequest{
 		Metadata: upstream.BuildMetadata(h.tokenFunc(), clientName, clientVersion, "win", 32),
@@ -639,6 +639,11 @@ func (h *Handler) cachedModelStatuses(ctx context.Context) ([]map[string]any, er
 		})
 	}
 
+	h.modelStatusesMu.Lock()
+	defer h.modelStatusesMu.Unlock()
+	if h.modelStatusesCache != nil && time.Now().Before(h.modelStatusesExpiry) {
+		return h.modelStatusesCache, nil
+	}
 	h.modelStatusesCache = statuses
 	h.modelStatusesExpiry = time.Now().Add(h.cacheTTL)
 	return statuses, nil

@@ -138,7 +138,12 @@ func (h *Handler) adminDeleteModel(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusServiceUnavailable, "model registry unavailable")
 		return
 	}
-	if err := h.models.Delete(r.URL.Query().Get("model")); err != nil {
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		respondError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	if err := h.models.Delete(model); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

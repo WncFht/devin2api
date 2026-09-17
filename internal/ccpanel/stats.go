@@ -120,7 +120,12 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	// （Σ输出 ÷ Σ生成时长，同表格速度列口径）；ttfb 沿用格子口径；
 	// cache_pct 同缓存命中列。
 	recentBlock := func(sec int64) map[string]any {
-		a := h.recentWindow(ctx, sec, scope)
+		// excluded（筛选条件不可能命中）时连查询都不发：scope.kh 为空会
+		// 返回全局真实计数，与 stats=[]/rpm=0 的排空口径自相矛盾。
+		var a store.LogRecentAgg
+		if !excluded {
+			a = h.recentWindow(ctx, sec, scope)
+		}
 		out := map[string]any{"requests": a.Req}
 		if a.Req > 0 {
 			out["rpm"] = float64(a.Req) * 60 / float64(sec)
