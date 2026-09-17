@@ -906,7 +906,7 @@ window.WebAuth = window.WebAuth || {
   // 复用公共工具（DRY）：真实实现由下方公共工具模块导出到 window.escapeHtml
   const escapeHtml = (str) => window.escapeHtml(str);
 
-  // 入口端点显示名由 locales 提供；值与 index.jsonl 的 api 字段同口径
+  // 入口端点显示名由 locales 提供；值与 logs 表的 api 字段同口径
   const PROTOCOL_LABEL_KEYS = {
     anthropic: 'modelTest.clientProtocolAnthropic',
     'openai-chat': 'modelTest.clientProtocolOpenAI',

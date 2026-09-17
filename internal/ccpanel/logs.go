@@ -61,7 +61,7 @@ func newLogCostComponent(quantity int64, pricePerMillion float64) logCostCompone
 // wire 形状。字段含义差异：model=客户端请求模型、actual_model=解析后发给
 // 上游的 uid（与 model 相同则省略，同 ccLoad「未重定向」语义）、
 // api_key_used/api_key_hash 都是本服务的 key_hash（无明文可脱敏）、
-// api=index.jsonl 的入口端点原值、upstream_protocol 恒 "devin"、
+// api=logs 表的入口端点原值、upstream_protocol 恒 "devin"、
 // cost_multiplier 恒 1；单上游无渠道维（channel_* 字段不投）。
 type logEntry struct {
 	ID            int64  `json:"id"`
@@ -72,7 +72,7 @@ type logEntry struct {
 	LogSource     string `json:"log_source,omitempty"`
 	StatusCode    int    `json:"status_code"`
 	Message       string `json:"message"`
-	// ErrorMessage 是首个失败的完整错误文案（index.jsonl 同源，≤300B）；
+	// ErrorMessage 是首个失败的完整错误文案（logs 表同源，≤300B）；
 	// message 列只放 result[:error_stage] 短形态，长文案经本字段透出。
 	ErrorMessage         string  `json:"error_message,omitempty"`
 	Duration             float64 `json:"duration"`
@@ -86,7 +86,7 @@ type logEntry struct {
 	API                  string  `json:"api,omitempty"`
 	UpstreamProtocol     string  `json:"upstream_protocol,omitempty"`
 	// Account 是最终服务本请求的上游账号（号池 lane 名），
-	// AccountSwitches 是 failover 换号次数；与 index.jsonl 同名同源。
+	// AccountSwitches 是 failover 换号次数；与 logs 表同名同源。
 	Account                  string            `json:"account,omitempty"`
 	AccountSwitches          int               `json:"account_switches,omitempty"`
 	ClientIP                 string            `json:"client_ip"`
@@ -484,7 +484,7 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	}
 	resp["translated_resp_status"] = meta.StatusCode
 	resp["translated_resp_headers"] = "{}"
-	// 号池归因投到详情首屏：与 index.jsonl 的 account/account_switches
+	// 号池归因投到详情首屏：与 logs 表的 account/account_switches
 	// 同口径（switches=失败尝试条数），免去为看归属再抓 meta.json。
 	if meta.UpstreamAccount != "" {
 		resp["account"] = meta.UpstreamAccount

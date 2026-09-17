@@ -322,7 +322,7 @@ func (h *Handler) adminModelTest(w http.ResponseWriter, r *http.Request) {
 
 // runModelProbe 是探活共用 runner：经注入的进程内根路由发一次真实 /v1
 // 请求，过完整鉴权/并发闸门/注册表准入/重定向/别名/上游管线——返回的是
-// 真实往返结果而非配置静态检查。探针在 index.jsonl 里以
+// 真实往返结果而非配置静态检查。探针在 logs 表里以
 // client_request_id=panel-probe 留痕，request_id 回传供定位调试目录。
 func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 	if h.probeHandler == nil {

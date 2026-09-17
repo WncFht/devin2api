@@ -1,7 +1,7 @@
     // 统计数据管理
     let statsData = { by_api: {} };
 
-    // 四个入口端点卡片的展示顺序；键与 index.jsonl 的 api 字段同口径。
+    // 四个入口端点卡片的展示顺序；键与 logs 表 的 api 字段同口径。
     const ENDPOINT_CARD_KEYS = Object.freeze([
       'anthropic', 'openai-chat', 'openai-responses', 'responses-ws'
     ]);

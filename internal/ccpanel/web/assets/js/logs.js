@@ -4,9 +4,9 @@ const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 // ── 后端契约（ccpanel 迁移路由）─────────────────────────────────
 // 列表/筛选选项/指标条走 /dashboard/* 镜像——与 /admin 同一批 handler，
 // withWebAuth 两种角色都放行，api_token 身份下按 KeyHash 收敛；否则
-// api_token 会话首个抓取 401 就会把整页弹回登录。调试目录文件与服务端
+// api_token 会话首个抓取 401 就会把整页弹回登录。调试文件与服务端
 // 合并视图留在 /admin/debug-logs/{id}/*——{id} 是日志行自增主键（迁移前
-// 的 started_at 毫秒戳链接仍由后端兜底解析），目录无属主校验，不对
+// 的 started_at 毫秒戳链接仍由后端兜底解析），记录无属主校验，不对
 // api_token 开放。进行中的请求用 active-requests 列表的 start_time
 // （UnixMilli）反查目录，FNV 哈希 id 不能解析目录。
 const LOGS_LIST_URL = '/dashboard/logs';
@@ -100,7 +100,7 @@ function logsStatusHint(code) {
   return item ? i18nText(item[0], item[1]) : '';
 }
 
-// index.jsonl 的 message 契约：completed → "ok"；否则 "result[: error_stage]"。
+// logs 表的 message 契约：completed → "ok"；否则 "result[: error_stage]"。
 function humanizeLogMessage(raw) {
   const text = String(raw || '');
   if (!text) return { text: '', title: '' };
@@ -418,7 +418,7 @@ function activeRequestFingerprint(req) {
   return String(req?.start_time || '');
 }
 
-// index.jsonl 的 api 原值 → 探活端点协议（/admin/model-test 的 client_protocol）。
+// logs 表的 api 原值 → 探活端点协议（/admin/model-test 的 client_protocol）。
 function apiToClientProtocol(api) {
   switch (api) {
     case 'openai-chat':
@@ -816,8 +816,8 @@ async function load(skipLoading = false) {
 }
 
 // ── 列表提示条（rejects 事件环）────────────────────────────────
-// 管线前拒绝（鉴权 401/并发 429/排空 503/读体中断）不产生调试目录、不进
-// index.jsonl——用户在列表找这类失败天然扑空，提示条把事件环聚合成一行
+// 管线前拒绝（鉴权 401/并发 429/排空 503/读体中断）不产生调试记录、不进
+// logs 表——用户在列表找这类失败天然扑空，提示条把事件环聚合成一行
 // 说明并指向统计页（runtime-metrics 的 rejects 组同源）。
 // rejects 作为 envelope 顶层 sibling 捎回（先例：
 // /admin/active-requests 的 active_request_title_enabled）。
@@ -2713,7 +2713,7 @@ async function refreshDebugMergedResponse(data, tab) {
   }
 }
 
-// ── Files 页签：调试目录文件清单 ──────────────────────────────────
+// ── Files 页签：调试记录文件清单 ──────────────────────────────────
 // 详情响应的 files[]（{name,size}）列出目录内全部留痕文件（01-06 阶段、
 // error.json、attachments/…）；点击经 /file/{name} 读取——JSON 美化、
 // JSONL 逐行加「#seq +ms event」头注，二进制走 ?raw=1 原始字节预览/打开。
@@ -2816,7 +2816,7 @@ async function loadDebugFile(name) {
   if (!fileId) {
     window.setHighlightedCodeContent(
       'debugFileRaw',
-      i18nText('logs.debugFileNoDir', '无法定位调试目录（请求可能刚结束或已清理）'),
+      i18nText('logs.debugFileNoDir', '无法定位调试记录（请求可能刚结束或已清理）'),
       'text'
     );
     return;

@@ -17,7 +17,7 @@ import (
 )
 
 // activeRequest 是 ccLoad ActiveRequest 的 wire 形状收缩版；本服务无多
-// 上游，api 取 index.jsonl 入口端点原值，upstream_protocol 留空
+// 上游，api 取 logs 表入口端点原值，upstream_protocol 留空
 // （上游恒为 devin）。
 type activeRequest struct {
 	ID               int64  `json:"id"`
@@ -29,7 +29,7 @@ type activeRequest struct {
 	UpstreamProtocol string `json:"upstream_protocol,omitempty"`
 	APIKeyUsed       string `json:"api_key_used,omitempty"`
 	// Account 是已选定服务本请求的上游账号（号池 lane 名），
-	// AccountSwitches 是至今的 failover 换号次数；与 index.jsonl 同名同源。
+	// AccountSwitches 是至今的 failover 换号次数；与 logs 表同名同源。
 	Account             string  `json:"account,omitempty"`
 	AccountSwitches     int     `json:"account_switches,omitempty"`
 	TokenID             int64   `json:"token_id,omitempty"`

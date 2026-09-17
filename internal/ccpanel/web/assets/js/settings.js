@@ -1422,8 +1422,8 @@ function renderGateExtra(stats) {
   return html;
 }
 
-// 管线前拒绝：分原因计数卡 + 最近事件表——这类请求不产生调试目录与
-// 索引行，这里是唯一结构化足迹。reason 显示名取服务端下发的 labels。
+// 管线前拒绝：分原因计数卡 + 最近事件表——这类请求不产生调试记录与
+// logs 行，这里是唯一结构化足迹。reason 显示名取服务端下发的 labels。
 function renderRejectsExtra(stats) {
   const byReason = stats.by_reason && typeof stats.by_reason === 'object' ? stats.by_reason : {};
   const labels = {};
@@ -1535,7 +1535,7 @@ function renderTrendChart(trend, payload) {
     }))}</p>`;
 }
 
-// index.jsonl 蓄水池的全局延迟分位数：ttfb（流式首字节）与 duration
+// logs 表蓄水池的全局延迟分位数：ttfb（流式首字节）与 duration
 // （总时长）两行，值均为毫秒。
 function renderUsageLatencyExtra(stats) {
   const series = [
