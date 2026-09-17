@@ -229,9 +229,14 @@ code="$(req GET /admin/accounts)"
 if unimpl "$code"; then
 	skip "GET /admin/accounts 未实现 (HTTP $code)"
 elif [[ "$code" == 200 ]]; then
-	list="$(jqr '.data.accounts[].name' "$(cat "$WORK/last.json")" | sort | paste -sd, -)"
-	if [[ -z "$list" ]]; then
-		ok "空池 GET /admin/accounts 空列表"
+	body="$(cat "$WORK/last.json")"
+	list="$(jqr '.data.accounts[].name' "$body" | paste -sd, -)"
+	cnt="$(jqr '.count' "$body")"
+	n="$(jqr '.data.accounts|length' "$body")"
+	if [[ "$cnt" != "$n" ]]; then
+		bad "GET /admin/accounts count=$cnt ≠ accounts 实长 $n"
+	elif [[ -z "$list" ]]; then
+		ok "空池 GET /admin/accounts {count:0,accounts:[]}"
 	elif [[ "$list" == "default" ]]; then
 		ok "空池仅剩过渡 default lane（devin.token 配置仍在生效）"
 	else
@@ -262,6 +267,11 @@ elif [[ "$code" =~ ^2 ]]; then
 	else
 		bad "runtime-metrics 缺 accounts.t1（有: $(jqr '.accounts|keys[]' "$rt" | paste -sd, -)）"
 	fi
+	# 冻结契约：重名（含墓碑名）409、非法名/校验失败 400。
+	code="$(req POST /admin/accounts '{"name":"t1","token":"e2e-fake-token-t1b"}')"
+	[[ "$code" == 409 ]] && ok "POST 重名 t1 → 409" || bad "POST 重名 t1 HTTP $code（契约 409）"
+	code="$(req POST /admin/accounts '{"name":"bad name!","token":"x"}')"
+	[[ "$code" == 400 ]] && ok "POST 非法名 → 400" || bad "POST 非法名 HTTP $code（契约 400）"
 else
 	bad "POST t1 HTTP $code: $(head -c 200 "$WORK/last.json")"
 fi
@@ -272,6 +282,16 @@ if unimpl "$code"; then
 	skip "POST t2 credentials_file 未实现 (HTTP $code)"
 elif [[ "$code" =~ ^2 ]]; then
 	wait_name t2 present && ok "POST t2 → GET 列出（双 panel lane）" || bad "POST t2 后 GET 未见 t2"
+	# 冻结契约：GET 项无 token 明文（只有 token_sha + credential 种类）；
+	# 排序 = config 声明序在前（default），panel 名按 created_at,name 追加。
+	body="$(req GET /admin/accounts >/dev/null; cat "$WORK/last.json")"
+	if grep -q 'e2e-fake-token' <<<"$body"; then
+		bad "GET /admin/accounts 泄漏 token 明文"
+	else
+		ok "GET /admin/accounts 无 token 明文"
+	fi
+	first="$(jqr '.data.accounts[0].name' "$body")"
+	[[ "$first" == "default" ]] && ok "排序契约 config 名在前" || note "排序: 首项=$first（契约 config 序在前）"
 else
 	bad "POST t2 HTTP $code: $(head -c 200 "$WORK/last.json")"
 fi
@@ -296,24 +316,58 @@ else
 	bad "归因探针 HTTP $code（假 base_url 下应为 4xx/5xx）"
 fi
 
-# ============ 5. DELETE t1 → 墓碑语义 ============
+# ============ 5. DELETE → 墓碑/物理删双轨 ============
+# 5a. panel 名 t1 → {name,deleted:true}，GET 消失。
 code="$(req DELETE /admin/accounts/t1)"
 if unimpl "$code"; then
 	skip "DELETE /admin/accounts/t1 未实现 (HTTP $code)"
 elif [[ "$code" =~ ^2 ]]; then
-	note "DELETE t1 响应: $(head -c 200 "$WORK/last.json")"
+	dflag="$(jqr '.data.deleted' "$(cat "$WORK/last.json")")"
+	[[ -z "$dflag" ]] && dflag="$(jqr '.deleted' "$(cat "$WORK/last.json")")"
 	if wait_name t1 absent; then
-		ok "DELETE t1 后离队（panel 名物理删）"
-	elif [[ "$(acct_field t1 source)" == "tombstoned" ]]; then
-		ok "DELETE t1 → tombstoned 在列"
+		[[ "$dflag" == true ]] && ok "DELETE t1 → {deleted:true} 离队" || ok "DELETE t1 离队（deleted 标记=$dflag）"
 	else
-		bad "DELETE t1 后仍在列 source=$(acct_field t1 source)"
+		bad "DELETE panel 名 t1 后仍在列 source=$(acct_field t1 source)（契约=物理删）"
 	fi
 else
 	bad "DELETE t1 HTTP $code"
 fi
 
-# ============ 6. 恢复 ============
+# 5b. config 名 default → {name,tombstoned:true}，GET 仍列 source=tombstoned。
+code="$(req DELETE /admin/accounts/default)"
+if unimpl "$code"; then
+	skip "DELETE config 名 default 未实现 (HTTP $code)"
+elif [[ "$code" =~ ^2 ]]; then
+	tflag="$(jqr '.data.tombstoned' "$(cat "$WORK/last.json")")"
+	[[ -z "$tflag" ]] && tflag="$(jqr '.tombstoned' "$(cat "$WORK/last.json")")"
+	if [[ "$(acct_field default source)" == "tombstoned" ]]; then
+		ok "DELETE default → tombstoned 在列（墓碑=$tflag）"
+		# 冻结契约：PUT 墓碑名 409（须先 restore）。
+		c409="$(req PUT /admin/accounts/default '{"disabled":true}')"
+		[[ "$c409" == 409 ]] && ok "PUT 墓碑 default → 409" || note "PUT 墓碑 HTTP $c409（契约 409）"
+	elif wait_name default absent; then
+		bad "DELETE config 名 default 直接消失（契约=tombstoned 仍在列）"
+	else
+		bad "DELETE default 后 source=$(acct_field default source)"
+	fi
+elif [[ "$code" == 404 ]]; then
+	note "DELETE default → 404（devin.token 隐式 lane 可能不进 config 名集）"
+else
+	bad "DELETE default HTTP $code"
+fi
+
+# ============ 6. 恢复（restore 墓碑 / 重建 panel 删）============
+code="$(req POST /admin/accounts/default/restore)"
+if [[ "$code" =~ ^2 ]]; then
+	[[ "$(acct_field default source)" == "config" || "$(acct_field default disabled)" == "false" ]] \
+		&& ok "restore default → 墓碑复活回队" || bad "restore default 2xx 但 source=$(acct_field default source)"
+elif [[ "$code" == 404 || "$code" == 409 ]]; then
+	note "restore default HTTP $code（无墓碑可复——5b 未走墓碑路径）"
+elif unimpl "$code"; then
+	skip "restore 未实现 (HTTP $code)"
+else
+	bad "restore default HTTP $code"
+fi
 code="$(req POST /admin/accounts/t1/restore)"
 if [[ "$code" =~ ^2 ]]; then
 	wait_name t1 present && ok "restore t1 回队" || bad "restore 2xx 但 t1 未回队"
@@ -332,22 +386,33 @@ else
 fi
 
 # ============ 7. clear-cooldown / quota-refresh ============
-for ep in clear-cooldown quota/refresh; do
-	code="$(req POST "/admin/accounts/t2/$ep")"
-	if unimpl "$code"; then
-		skip "POST t2/$ep 未实现 (HTTP $code)"
-	elif [[ "$code" =~ ^5 ]]; then
-		bad "POST t2/$ep HTTP $code（要 sane，不是 5xx）"
-	else
-		ok "POST t2/$ep HTTP $code sane"
-	fi
-done
+# 冻结契约：clear-cooldown 200 {cleared:true} / 404 无活 lane；
+# quota/refresh 200 / 404 不在生效集 / 502 上游失败（假 token 即此档）。
+code="$(req POST /admin/accounts/t2/clear-cooldown)"
+if unimpl "$code"; then
+	skip "POST t2/clear-cooldown 未实现 (HTTP $code)"
+elif [[ "$code" =~ ^2 || "$code" == 404 ]]; then
+	ok "POST t2/clear-cooldown HTTP $code sane"
+else
+	bad "POST t2/clear-cooldown HTTP $code"
+fi
+code="$(req POST /admin/accounts/t2/quota/refresh)"
+if unimpl "$code"; then
+	skip "POST t2/quota/refresh 未实现 (HTTP $code)"
+elif [[ "$code" =~ ^2 || "$code" == 404 || "$code" == 502 ]]; then
+	ok "POST t2/quota/refresh HTTP $code sane（502=上游失败定档）"
+else
+	bad "POST t2/quota/refresh HTTP $code"
+fi
 
 # ============ 8. PUT t2 disabled → 在列但排除 ============
 code="$(req PUT /admin/accounts/t2 '{"disabled":true}')"
 if unimpl "$code"; then
 	skip "PUT /admin/accounts/t2 未实现 (HTTP $code)"
 elif [[ "$code" =~ ^2 ]]; then
+	# 冻结契约：PUT 无名 404。
+	c404="$(req PUT /admin/accounts/nonexist '{"disabled":true}')"
+	[[ "$c404" == 404 ]] && ok "PUT 无名 → 404" || note "PUT 无名 HTTP $c404（契约 404）"
 	if wait_name t2 present && [[ "$(acct_field t2 disabled)" == "true" ]]; then
 		before="$(dbq 'SELECT COUNT(*) FROM logs' || echo 0)"
 		vreq "$PROBE" >/dev/null
@@ -394,8 +459,15 @@ elif [[ "$code" == 200 ]]; then
 	body="$(cat "$WORK/last.json")"
 	avail="$(jqr '.available' "$body")"; [[ -z "$avail" ]] && avail="$(jqr '.data.available' "$body")"
 	path="$(jqr '.path' "$body")";       [[ -z "$path" ]] && path="$(jqr '.data.path' "$body")"
-	if [[ "$avail" =~ ^(true|false)$ ]]; then
-		ok "cli-credentials 形状 {available:$avail, path:${path:-<empty>}}"
+	if [[ "$avail" == true && -n "$path" ]]; then
+		ok "cli-credentials {available:true, path:$path, parsable:$(jqr '.parsable' "$body")}"
+	elif [[ "$avail" == false ]]; then
+		# 冻结契约：available:false 时 parsable/suggested_name 附加键缺席。
+		if grep -q '"parsable"\|"suggested_name"' <<<"$body"; then
+			bad "cli-credentials available=false 但附加键在场: $(head -c 200 "$WORK/last.json")"
+		else
+			ok "cli-credentials {available:false} 附加键缺席"
+		fi
 	else
 		bad "cli-credentials 形状异常: $(head -c 200 "$WORK/last.json")"
 	fi
