@@ -1680,11 +1680,11 @@ function shouldShowZoom(points, hours, trendType) {
       } catch (_) {}
     }
 
-    // 自动刷新：工具栏 select 控制间隔（10s/30s/1min/5min），默认 10s，
+    // 自动刷新：工具栏 select 控制间隔（10s/30s/1min/5min），默认 60s，
     // 选择存 localStorage，切换即重建定时器；页面隐藏时跳过 tick。
     const TREND_REFRESH_KEY = 'trend.refreshSec';
     const TREND_REFRESH_OPTIONS = [10, 30, 60, 300];
-    const TREND_REFRESH_DEFAULT = 10;
+    const TREND_REFRESH_DEFAULT = 60;
     let trendRefreshTimer = null;
 
     function currentTrendRefreshSec() {
@@ -1762,7 +1762,7 @@ function shouldShowZoom(points, hours, trendType) {
         }
       });
 
-      // 定期刷新数据（间隔由工具栏 select 控制，默认 10s）
+      // 定期刷新数据（间隔由工具栏 select 控制，默认 60s）
       initTrendRefreshControl();
       }
     });

@@ -21,34 +21,9 @@
 
     /* API Key 测试按钮样式 */
 
-    /* 列显隐切换按钮 */
-    .logs-col-toggle-btn {
-      padding: 0;
-      border: none;
-      background: transparent;
-      cursor: pointer;
-      color: var(--neutral-500);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      border-radius: 3px;
-      transition: color 0.15s, background 0.15s;
-      vertical-align: middle;
-      margin-right: 2px;
-      flex-shrink: 0;
-    }
-
-    .logs-col-toggle-btn:hover,
-    .logs-col-toggle-btn:focus-visible {
-      color: var(--primary-600);
-      background: var(--primary-50);
-    }
-
-    /* 列显隐下拉面板 */
+    /* 列显隐下拉面板：入口在工具栏，JS 按触发按钮的视口坐标定位 */
     .logs-col-toggle-menu {
-      position: absolute;
+      position: fixed;
       top: 0;
       left: 0;
       z-index: 100;
@@ -111,15 +86,6 @@
       display: none;
     }
 
-    /* 承载设置入口的列固定显示：锁定项不响应点击 */
-    .logs-col-toggle-item[data-locked="true"] {
-      cursor: default;
-      opacity: 0.75;
-    }
-
-    .logs-col-toggle-item[data-locked="true"]:hover {
-      background: transparent;
-    }
 
     .test-key-btn {
       padding: 0;
@@ -329,13 +295,35 @@
       color: var(--neutral-400);
     }
 
+    /* 顶部工具栏：标签置顶、控件等高，三段分区（时间范围 / 过滤条件 / 行操作） */
     .logs-filter-controls {
-      gap: 10px;
+      gap: 8px 16px;
+      align-items: flex-end;
+    }
+
+    .logs-filter-section {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 8px 12px;
+      min-width: 0;
+    }
+
+    .logs-filter-section--filters {
+      flex: 1 1 auto;
+    }
+
+    .logs-filter-section--actions {
+      flex: 0 0 auto;
+      margin-left: auto;
     }
 
     .logs-filter-group {
-      flex: 1 1 180px;
+      flex: 1 1 140px;
       min-width: 0;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 3px;
     }
 
     .logs-filter-group[hidden] {
@@ -351,17 +339,31 @@
     }
 
     .logs-filter-group.filter-group--model {
-      flex-basis: 216px;
+      flex-basis: 200px;
     }
 
     .logs-filter-group.filter-group--status {
-      flex: 0 1 136px;
+      flex: 0 1 116px;
+    }
+
+    .logs-filter-group .filter-label {
+      margin-right: 0;
     }
 
     .logs-filter-group .filter-input,
     .logs-filter-group .filter-select {
       width: 100%;
       min-width: 0;
+      height: 32px;
+      padding-top: 0;
+      padding-bottom: 0;
+      box-sizing: border-box;
+    }
+
+    .logs-filter-actions .btn {
+      height: 32px;
+      padding: 0 12px;
+      gap: 5px;
     }
 
     .logs-filter-control--range {
@@ -777,6 +779,11 @@
         gap: 6px;
       }
 
+      /* 分区包装只用于桌面分组，移动端展平回两列网格 */
+      .logs-filter-section {
+        display: contents;
+      }
+
       .logs-filter-group {
         display: grid;
         grid-template-columns: 72px minmax(0, 1fr);
@@ -792,6 +799,7 @@
       }
 
       .logs-filter-summary-row {
+        grid-column: 1 / -1;
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
@@ -909,7 +917,27 @@
     }
 
     .model-tag.model-redirected {
-      padding-right: 18px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-wrap: wrap;
+      max-width: 100%;
+    }
+
+    .model-tag.model-redirected .model-text {
+      max-width: 120px;
+    }
+
+    .model-redirect-arrow {
+      flex-shrink: 0;
+      color: var(--warning-600);
+      font-weight: 700;
+      font-size: 0.9em;
+      line-height: 1;
+    }
+
+    .model-text--actual {
+      font-weight: 600;
     }
 
     .model-text {
@@ -937,17 +965,6 @@
     .logs-table .logs-col-model>.model-display .model-badges {
       top: 2px;
       right: 4px;
-    }
-
-    /* 重定向角标 - 显示在右上角 */
-    .redirect-badge {
-      background: var(--warning-500);
-      color: white;
-      font-size: 0.65em;
-      padding: 2px 4px;
-      border-radius: 8px;
-      font-weight: 600;
-      line-height: 1;
     }
 
     .thinking-effort-badge {
