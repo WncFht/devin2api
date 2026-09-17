@@ -6,6 +6,8 @@
 # 用法: scripts/golden-diff.sh <old-binary> <new-binary> <state-dir> [config.yaml] [--traffic]
 #   old/new 二进制各自起在空闲端口（config.yaml 的 listen 被临时改写），
 #   state-dir 被复制两份互不污染。输出逐端点 PASS/DIFF 与首个差异摘要。
+#   GD_PORT_BASE 改基准端口（默认 41711，new 侧 +1）——并发跑多份对拍
+#   时各给一段，否则 healthz 会串到别人实例上（已踩过）。
 #
 # 三个阶段：
 #   1. reads   —— JSON 端点逐字段对账 + export 的 CSV 逐字节 / JSON 轻归一化
@@ -123,6 +125,8 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
   | walk(if type=="number" and (. != floor) then (.*1e9|round)/1e9 else . end)
+  | walk(if type=="object" and (.health_timeline|type)=="array"
+      then .health_timeline |= (to_entries | map(.value.ts = .key)) else . end)
 '
 
 # 轻归一化：export 的是历史行本体——time/dir/started_at 是必须一致的
@@ -170,16 +174,28 @@ boot() { # bin statedir port -> pid
 	echo $!
 }
 
-for spec in "OLD:$OLD_BIN:41711" "NEW:$NEW_BIN:41712"; do
+OLDP="${GD_PORT_BASE:-41711}" NEWP=$((OLDP+1))
+for spec in "OLD:$OLD_BIN:$OLDP" "NEW:$NEW_BIN:$NEWP"; do
 	IFS=: read -r tag bin port <<<"$spec"
 	st="$WORK/$tag"
 	pid="$(boot "$bin" "$st" "$port")"
 	PIDS+=("$pid")
+	# healthz 通不算数：reuseport 允许两个实例并绑同端口，健康应答
+	# 可能来自别的对拍实例。身份核对 = 我方 pid 存活 + healthz 返回
+	# 的 version 含本二进制的 vcs.revision 前缀（buildinfo 取不到时
+	# 只能退化为存活校验）。
+	want_rev="$(go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=//p' | cut -c1-7)"
+	ok=0
 	for i in $(seq 1 50); do
-		curl -sf "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && break
-		sleep 0.2
-		[[ $i == 50 ]] && { echo "$tag 实例未起来" >&2; cat "$st/boot.log" >&2; exit 1; }
+		kill -0 "$pid" 2>/dev/null || { echo "$tag 进程已退出" >&2; cat "$st/boot.log" >&2; exit 1; }
+		hz="$(curl -sf "http://127.0.0.1:$port/healthz" 2>/dev/null)" || { sleep 0.2; continue; }
+		if [[ -n "$want_rev" ]]; then
+			got="$(echo "$hz" | jq -r '.version // ""')"
+			[[ "$got" == *"$want_rev"* ]] || { echo "$tag 端口 $port 上是异己实例 version=$got（期望含 $want_rev）——换 GD_PORT_BASE" >&2; exit 1; }
+		fi
+		ok=1; break
 	done
+	[[ $ok == 1 ]] || { echo "$tag 实例未起来" >&2; cat "$st/boot.log" >&2; exit 1; }
 done
 
 PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
@@ -189,7 +205,6 @@ API_KEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*/
 VAUTH=()
 [[ -n "$API_KEY" ]] && VAUTH=(-H "Authorization: Bearer $API_KEY")
 
-OLDP=41711 NEWP=41712
 fail=0
 
 fetch() { # port path -> body or CURL_FAIL
@@ -217,6 +232,13 @@ reads() { # 标签前缀
 			# loaded_at/path 是逐进程态——剥离后比配置本体。
 			/admin/config) extra='| walk(if type=="object" then del(.file_mtime,.loaded_at,.path,.listen) else . end)' ;;
 		esac
+		if [[ -n "$p" ]]; then
+			# traffic 段的探针请求两侧各自真实计时：新侧写路径多一次
+			# SQL INSERT，duration 相差几 ms——omitempty 让 0ms 侧整个
+			# dur_s/gen_ms 字段缺省、3ms 侧出现，聚合均值也吃进这
+			# 几 ms。post/ 轮把这些探针时长衍生物剥掉，只对结构。
+			extra="$extra"'| walk(if type=="object" then del(.dur_s,.tps,.gen_ms,.avg_duration_ms,.avg_duration_seconds,.avg_first_byte_time_seconds) else . end)'
+		fi
 		a="$(fetch "$OLDP" "$ep" | jq -S "$NORMALIZE $extra" 2>/dev/null || echo CURL_FAIL)"
 		b="$(fetch "$NEWP" "$ep" | jq -S "$NORMALIZE $extra" 2>/dev/null || echo CURL_FAIL)"
 		report "$p$ep" "$a" "$b"
