@@ -32,38 +32,71 @@ for a in "$@"; do [[ "$a" == "--traffic" ]] && TRAFFIC=1; done
 # update/check）与进程日志（process-log 各侧 stderr 不同）不进来——
 # 对账只管确定性存储投影。volatile 字段（时间戳、指针、id、uptime、
 # goroutine 类进程态）在 normalize 中剔除——契约对账只关心结构与非瞬态值。
+W="since=2026-09-15T00:00:00Z&until=2026-09-18T00:00:00Z" # 覆盖全量数据的显式历史窗
 ENDPOINTS=(
 	"/admin/logs?limit=200"
 	"/admin/logs?limit=50&offset=150"
+	"/admin/logs?limit=1"
 	"/admin/logs?status=4xx&limit=200"
 	"/admin/logs?status_code=500&limit=200"
 	"/admin/logs?result=failed&limit=200"
 	"/admin/logs?model_like=swe&limit=200"
 	"/admin/logs?log_source=all&limit=500"
-	"/admin/logs?since=2026-09-15T00:00:00Z&until=2026-09-18T00:00:00Z&limit=500"
+	"/admin/logs?log_source=proxy&$W&limit=200"
+	"/admin/logs?$W&limit=500"
+	"/admin/logs?$W&limit=500&offset=4000"
+	"/admin/logs?range=yesterday&limit=200"
+	"/admin/logs?range=this_week&limit=500"
+	"/admin/logs?range=last_week&limit=500"
+	"/admin/logs?range=custom&start_time=1758000000000&end_time=1789900000000&limit=500"
+	"/admin/logs?api=anthropic&$W&limit=300"
+	"/admin/logs?api=openai-chat&$W&limit=300"
+	"/admin/logs?api=responses-ws&$W&limit=50"
+	"/admin/logs?upstream_protocol=devin&$W&limit=200"
+	"/admin/logs?auth_token_id=4&$W&limit=300"
+	"/admin/logs?q=swe-2&$W&limit=300"
+	"/admin/logs?q=devin_connect&$W&limit=100"
+	"/admin/logs?status=%21200&$W&limit=300"
+	"/admin/logs?status=%3E%3D400&$W&limit=300"
+	"/admin/logs?status=200,500&$W&limit=300"
+	"/admin/logs?status_class=5xx&$W&limit=300"
+	"/admin/logs?error_stage=devin_connect&$W&limit=100"
+	"/admin/logs?error_stage=rate_gate&$W&limit=100"
+	"/admin/logs?error_stage=client_disconnected&$W&limit=100"
+	"/admin/logs?account=gd-nonexist&$W&limit=50"
 	"/admin/logs/bootstrap"
 	"/admin/logs/matrix"
 	"/admin/logs/matrix?since=2026-09-15T00:00:00Z"
+	"/admin/logs/matrix?since=2026-09-16T00:00:00Z"
+	"/admin/logs/matrix?since=2030-01-01T00:00:00Z"
 	"/admin/usage"
 	"/admin/stats"
-	"/admin/stats?range=7d"
+	"/admin/stats?range=yesterday"
+	"/admin/stats?range=this_month"
 	"/admin/stats/filter-options"
 	"/admin/metrics"
 	"/admin/quota"
 	"/admin/auth-tokens"
+	"/admin/auth-tokens?range=this_week"
 	"/admin/model-registry"
+	"/admin/models"
 	"/admin/config"
 	"/admin/settings"
+	"/admin/settings/debug_log_enabled"
 	"/admin/runtime-metrics"
 	"/admin/active-requests"
 	"/dashboard/summary"
 	"/dashboard/metrics"
 	"/dashboard/stats"
+	"/dashboard/stats?range=this_week"
 	"/dashboard/stats/filter-options"
 	"/dashboard/logs?limit=50"
+	"/dashboard/logs?status=4xx&limit=50"
+	"/dashboard/logs?range=this_week&limit=100"
 	"/dashboard/logs/bootstrap"
 	"/dashboard/models"
 	"/dashboard/session"
+	"/public/protocols"
 	"/admin/api"
 )
 
@@ -89,6 +122,7 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
   .log_root,.index_bytes,.db_bytes) else . end);
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
+  | walk(if type=="number" and (. != floor) then (.*1e9|round)/1e9 else . end)
 '
 
 # 轻归一化：export 的是历史行本体——time/dir/started_at 是必须一致的
