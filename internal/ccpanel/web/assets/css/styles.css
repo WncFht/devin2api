@@ -1481,7 +1481,9 @@ body {
 }
 
 .form-input:focus {
-  outline: none;
+  /* transparent outline 在正常渲染下不可见,forced-colors 模式下
+     系统会把它绘制成可见焦点框——box-shadow 在那里不渲染 */
+  outline: 2px solid transparent;
   border-color: var(--primary-500);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
   transform: none;
