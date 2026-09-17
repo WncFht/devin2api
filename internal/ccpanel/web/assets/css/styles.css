@@ -5132,7 +5132,15 @@ body.web-role-api-token #btn_export_json {
   }
 }
 
-@media (max-width: 1500px) and (min-width: 769px) {
+/* 中屏隐藏导航图标换单行容量：纯文字链接能压到 ~730px，与右侧控件组
+   单行放进 ≥1200px 视口；图标是装饰性内容，不影响可达性。 */
+@media (max-width: 1400px) and (min-width: 769px) {
+  .topnav-link svg {
+    display: none;
+  }
+}
+
+@media (max-width: 1199px) and (min-width: 769px) {
   :root {
     --topbar-offset: 108px;
   }
