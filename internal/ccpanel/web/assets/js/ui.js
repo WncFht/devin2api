@@ -390,12 +390,10 @@ window.WebAuth = window.WebAuth || {
     return el;
   }
 
-  // ---- 活动请求指示器（脉冲 + 角标 + favicon/标题）----
+  // ---- 活动请求指示器（favicon 角标 + 标题闪烁）----
   // 全站唯一轮询源：拉取完整 payload 后自己消费 count，同时推送 data 给订阅者（如 logs.js）
   const ACTIVE_POLL_MS = 2000;
   let _activeTimer = null;
-  let _activeWrap = null;        // .brand-icon-wrap 元素
-  let _activeBadge = null;       // .brand-badge 元素
   let _faviconBase = null;       // 预加载的 favicon 底图 Image
   let _origFaviconLinks = null;  // 页面初始 favicon 集合快照（用于完整恢复）
   let _lastBadgeCount = -1;      // 去重：仅数量变化时重绘 favicon
@@ -409,7 +407,7 @@ window.WebAuth = window.WebAuth || {
   let _activeTitleEnabled = false;
   let _faviconPulseOn = false;
 
-  function brandBadgeLabel(count) {
+  function activeCountLabel(count) {
     return count > 999 ? '999+' : String(count);
   }
 
@@ -546,7 +544,7 @@ window.WebAuth = window.WebAuth || {
   }
 
   function activeTitleLabel(count) {
-    const label = brandBadgeLabel(count);
+    const label = activeCountLabel(count);
     const fallback = `请求中[${label}]-`;
     if (typeof t === 'function') {
       const translated = t('nav.activeRequestsTitle', { count: label });
@@ -610,11 +608,6 @@ window.WebAuth = window.WebAuth || {
 
   function updateActiveIndicator(count, titleEnabled) {
     _activeTitleCount = count;
-    // 页面内 logo：脉冲 + 角标
-    if (_activeWrap) {
-      _activeWrap.classList.toggle('is-active', count > 0);
-      if (_activeBadge) _activeBadge.textContent = brandBadgeLabel(count);
-    }
     // 标签页 favicon 角标（仅在数量变化时重绘，省 toDataURL 开销）
     if (count !== _lastBadgeCount) {
       _lastBadgeCount = count;
@@ -678,47 +671,9 @@ window.WebAuth = window.WebAuth || {
     }
   }
 
-  function createBrandWordmark() {
-    const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-    el.setAttribute('viewBox', '0 0 176 36');
-    el.setAttribute('aria-hidden', 'true');
-    el.classList.add('brand-wordmark');
-    use.setAttribute('href', '/web/brand-wordmark.svg#brand-wordmark');
-    use.setAttribute('width', '176');
-    use.setAttribute('height', '36');
-    el.appendChild(use);
-    return el;
-  }
-
   function buildTopbar(active) {
     const bar = h('header', { class: 'topbar' });
 
-    // 图标与字标独立复用；活动动画层只属于图标
-    const iconImg = h('img', { class: 'brand-mark', src: '/web/brand-mark.svg', alt: '' });
-    const wordmark = createBrandWordmark();
-    const speedLines = h('span', { class: 'brand-speed-lines', 'aria-hidden': 'true' }, [
-      h('i'), h('i'), h('i'), h('i'), h('i')
-    ]);
-    const flowDots = h('span', { class: 'brand-flow-dots', 'aria-hidden': 'true' }, [
-      h('i'), h('i'), h('i')
-    ]);
-    _activeBadge = h('span', { class: 'brand-badge' }, '0');
-    _activeWrap = h('span', { class: 'brand-icon-wrap' }, [speedLines, iconImg, flowDots, _activeBadge]);
-
-    const left = h('div', { class: 'topbar-left' }, [
-      h('a', {
-        class: 'brand',
-        href: GITHUB_REPO_URL,
-        target: '_blank',
-        rel: 'noopener noreferrer',
-        title: t('nav.githubRepo'),
-        'aria-label': 'Devin2API — Devin API Proxy'
-      }, [
-        _activeWrap,
-        wordmark
-      ])
-    ]);
     const role = window.getWebRole();
     const visibleNavKeys = new Set(window.WebAuth.filterNavigation(NAVS.map((item) => item.key), role));
     const nav = h('nav', { class: 'topnav' }, [
@@ -769,7 +724,7 @@ window.WebAuth = window.WebAuth || {
         onclick: loggedIn ? onLogout : () => location.href = window.getLoginUrl()
       }, t(loggedIn ? 'common.logout' : 'common.login'))
     ].filter(Boolean));
-    bar.appendChild(left); bar.appendChild(nav); bar.appendChild(right);
+    bar.appendChild(nav); bar.appendChild(right);
     return bar;
   }
 

@@ -478,221 +478,13 @@ body {
   z-index: 300;
 }
 
-.topbar-left {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
-}
-
-.brand {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 4px;
-  text-decoration: none;
-}
-
-.brand:hover {
-  opacity: 0.8;
-}
-
-.brand-mark {
-  display: block;
-  width: 54px;
-  height: 36px;
-  filter: drop-shadow(0 4px 10px rgba(59, 130, 246, 0.2));
-}
-
-.brand-wordmark {
-  display: block;
-  width: 176px;
-  height: 36px;
-  color: color-mix(in srgb, var(--topbar-fg) 88%, #071b35);
-}
-
-/* 活动请求指示器：速度线、流动圆点与角标 */
-.brand-icon-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-
-.brand-speed-lines,
-.brand-flow-dots {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.brand-speed-lines {
-  overflow: visible;
-}
-
-.brand-flow-dots {
-  overflow: hidden;
-}
-
-.brand-speed-lines i {
-  position: absolute;
-  left: -10px;
-  width: 17px;
-  height: 2px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, rgba(96, 165, 250, 0.08), rgba(96, 165, 250, 0.72));
-}
-
-.brand-speed-lines i:nth-child(1) {
-  top: 8px;
-  left: -3px;
-  width: 10px;
-}
-
-.brand-speed-lines i:nth-child(2) {
-  top: 12px;
-  left: -7px;
-  width: 14px;
-}
-
-.brand-speed-lines i:nth-child(3) {
-  top: 16px;
-}
-
-.brand-speed-lines i:nth-child(4) {
-  top: 20px;
-  left: -7px;
-  width: 14px;
-}
-
-.brand-speed-lines i:nth-child(5) {
-  top: 24px;
-  left: -3px;
-  width: 10px;
-}
-
-.brand-flow-dots i {
-  position: absolute;
-  right: -4px;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: #60a5fa;
-  box-shadow: 0 0 5px rgba(59, 130, 246, 0.65);
-  opacity: 0;
-}
-
-.brand-flow-dots i:nth-child(1) {
-  top: 11px;
-}
-
-.brand-flow-dots i:nth-child(2) {
-  top: 17px;
-}
-
-.brand-flow-dots i:nth-child(3) {
-  top: 23px;
-}
-
-.brand-icon-wrap.is-active .brand-speed-lines i {
-  animation: brand-line-drift 1.15s ease-in-out infinite alternate;
-}
-
-.brand-icon-wrap.is-active .brand-speed-lines i:nth-child(2) {
-  animation-delay: -0.23s;
-}
-
-.brand-icon-wrap.is-active .brand-speed-lines i:nth-child(3) {
-  animation-delay: -0.46s;
-}
-
-.brand-icon-wrap.is-active .brand-speed-lines i:nth-child(4) {
-  animation-delay: -0.69s;
-}
-
-.brand-icon-wrap.is-active .brand-speed-lines i:nth-child(5) {
-  animation-delay: -0.92s;
-}
-
-.brand-icon-wrap.is-active .brand-flow-dots i {
-  animation: brand-dot-flow 1.8s linear infinite;
-}
-
-.brand-icon-wrap.is-active .brand-flow-dots i:nth-child(2) {
-  animation-delay: -0.6s;
-}
-
-.brand-icon-wrap.is-active .brand-flow-dots i:nth-child(3) {
-  animation-delay: -1.2s;
-}
-
-.brand-badge {
-  position: absolute;
-  top: -10px;
-  right: 0;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #fb923c, #f97316);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-}
-
-.brand-icon-wrap.is-active .brand-badge {
-  display: flex;
-}
-
-@keyframes brand-line-drift {
-  from {
-    transform: translateX(-3px);
-    opacity: 0.35;
-  }
-
-  to {
-    transform: translateX(3px);
-    opacity: 0.9;
-  }
-}
-
-@keyframes brand-dot-flow {
-  0% {
-    transform: translateX(0) scale(0.65);
-    opacity: 0;
-  }
-
-  18%, 72% {
-    opacity: 0.85;
-  }
-
-  100% {
-    transform: translateX(-48px) scale(1);
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .brand-icon-wrap.is-active .brand-speed-lines i,
-  .brand-icon-wrap.is-active .brand-flow-dots i {
-    animation: none;
-  }
-}
-
 .topnav {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   flex: 1;
   min-width: 0;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .topnav-link {
@@ -1896,61 +1688,6 @@ body {
     flex-wrap: wrap;
   }
 
-  .topbar-left {
-    min-width: 0;
-    order: 1;
-    flex: 1 1 0;
-    gap: var(--space-2);
-  }
-
-  .brand {
-    min-width: 0;
-    gap: 4px;
-    max-width: 100%;
-  }
-
-  .brand-mark {
-    width: 44px;
-    height: 28px;
-  }
-
-  .brand-wordmark {
-    width: 137px;
-    height: 28px;
-  }
-
-  .brand-speed-lines i:nth-child(1) {
-    top: 5px;
-  }
-
-  .brand-speed-lines i:nth-child(2) {
-    top: 9px;
-  }
-
-  .brand-speed-lines i:nth-child(3) {
-    top: 13px;
-  }
-
-  .brand-speed-lines i:nth-child(4) {
-    top: 17px;
-  }
-
-  .brand-speed-lines i:nth-child(5) {
-    top: 21px;
-  }
-
-  .brand-flow-dots i:nth-child(1) {
-    top: 7px;
-  }
-
-  .brand-flow-dots i:nth-child(2) {
-    top: 12px;
-  }
-
-  .brand-flow-dots i:nth-child(3) {
-    top: 17px;
-  }
-
   .topnav {
     order: 3;
     flex: 0 0 100%;
@@ -1982,7 +1719,7 @@ body {
 
   .topbar-right {
     order: 2;
-    margin-left: 0;
+    margin-left: auto;
     flex: 0 0 auto;
     gap: 4px;
     flex-wrap: nowrap;
@@ -2240,24 +1977,13 @@ body {
   }
 }
 
-@media (max-width: 360px) {
-  .brand-wordmark {
-    display: none;
-  }
-
-  .brand-mark {
-    width: 44px;
-    height: 32px;
-  }
-}
-
 @media (max-width: 480px) {
   :root {
     --topbar-offset: 144px;
   }
 
-  /* 窄屏下 topbar-right 超出视口：版本徽章与 GitHub 图标让位——
-     仓库入口在 brand 链接上已有，版本号在旧版面板页脚仍可见。 */
+  /* 窄屏下 topbar-right 超出视口：版本徽章与 GitHub 图标让位，
+     保证主题/语言/登出控件可达。 */
   .version-group {
     display: none;
   }
@@ -5375,8 +5101,6 @@ body.web-role-api-token .filter-group--auth-token {
   }
 
   .topnav {
-    /* safe center：内容超宽时回退为 start 对齐，避免居中溢出把最左导航项裁掉 */
-    justify-content: safe center;
     overflow-x: auto;
     scrollbar-width: thin;
   }
@@ -5399,11 +5123,6 @@ body.web-role-api-token .filter-group--auth-token {
     flex-wrap: wrap;
     align-items: center;
     padding: 8px var(--space-4);
-  }
-
-  .topbar-left {
-    order: 1;
-    flex: 1 1 0;
   }
 
   .topbar-right {
