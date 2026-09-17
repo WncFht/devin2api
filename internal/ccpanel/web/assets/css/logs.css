@@ -809,6 +809,11 @@
       .logs-filter-summary-row .logs-filter-actions {
         width: auto;
         justify-self: end;
+        /* 按钮组内容宽于视口时向右溢出会把首个按钮裁出屏幕——
+           限宽 + 允许换行，保持右对齐 */
+        max-width: 100%;
+        flex-wrap: wrap;
+        justify-content: flex-end;
       }
 
       .logs-filter-summary-row .logs-filter-actions .btn {
