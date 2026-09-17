@@ -106,6 +106,7 @@ func main() {
 	configPath := flag.String("config", "", "YAML 配置文件路径；缺省按 $DEVIN2API_CONFIG → ./config.yaml → 平台默认目录解析")
 	stateDir := flag.String("state-dir", "", "日志与状态文件根目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
+	exportLegacyDir := flag.String("export-legacy", "", "把 <dir>/devin-2api.db 逐表导出为文件时代状态文件（logs/index.jsonl、auth_tokens.json、models.json、panel-settings.json、quota.jsonl、gate-state*.json）后退出；回滚文件版二进制或 DB 取证时用，不起服务")
 	flag.Parse()
 	resolved := resolvedVersion()
 	if *showVersion {
@@ -114,6 +115,14 @@ func main() {
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if *exportLegacyDir != "" {
+		if err := runExportLegacy(*exportLegacyDir); err != nil {
+			slog.Error("export legacy state failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	resolvedConfigPath, err := config.ResolveConfigPath(*configPath)
 	if err != nil {
@@ -354,6 +363,43 @@ func main() {
 		slog.Error("serve HTTP failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runExportLegacy 实现 -export-legacy：打开 <dir>/devin-2api.db，把各表
+// 写回文件时代布局后返回，不起服务。DB 缺席直接报错——store.Open 会顺带
+// 建空库，静默导出一套空文件比报错更危险（看着像「状态本来就空」）。
+// 导出过程对每个源独立结算：部分失败时已写出的文件仍然有效，错误汇总
+// 由调用方反映到退出码。
+func runExportLegacy(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	dbPath := filepath.Join(abs, "devin-2api.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("state db %s: %w", dbPath, err)
+	}
+	dbStore, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dbStore.Close() }()
+	logRoot := filepath.Join(abs, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		return err
+	}
+	rep, err := dbStore.ExportLegacy(context.Background(), abs, logRoot)
+	for _, p := range rep.Written {
+		slog.Info("exported", "file", p)
+	}
+	for _, note := range rep.Notices {
+		slog.Warn("export diverted", "detail", note)
+	}
+	if rep.DebugRows > 0 {
+		slog.Warn("debug payload left in db", "rows", rep.DebugRows,
+			"detail", "debug_files/debug_chunks are not exported; request dirs will not be restored")
+	}
+	return err
 }
 
 // devinConfigsFrom 把启动配置映射为每 lane 一份的 Devin adapter 配置：

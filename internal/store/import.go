@@ -12,9 +12,10 @@ import (
 	"time"
 )
 
-// legacyToken/legacyTokenFile 是 auth_tokens.json 的读入形状——
+// legacyToken/legacyTokenFile 是 auth_tokens.json 的读写形状——
 // store 不能 import authtoken（方向相反），这里自持最小镜像。
-// 字段名与 authtoken.Token/tokenFile 的 JSON tag 保持一致。
+// JSON tag 与文件时代 authtoken.Token/tokenFile 逐字段一致（含
+// omitempty 分布），导入（Unmarshal）与导出（Marshal）共用。
 type legacyTokenFile struct {
 	NextID int64          `json:"next_id"`
 	Tokens []*legacyToken `json:"tokens"`
@@ -25,8 +26,8 @@ type legacyToken struct {
 	Hash           string  `json:"token"`
 	Description    string  `json:"description"`
 	CreatedAt      string  `json:"created_at"`
-	ExpiresAt      *int64  `json:"expires_at"`
-	LastUsedAt     *int64  `json:"last_used_at"`
+	ExpiresAt      *int64  `json:"expires_at,omitempty"`
+	LastUsedAt     *int64  `json:"last_used_at,omitempty"`
 	IsActive       bool    `json:"is_active"`
 	SuccessCount   int64   `json:"success_count"`
 	FailureCount   int64   `json:"failure_count"`
@@ -57,67 +58,68 @@ type legacyToken struct {
 	WeeklyLimitMicroUSD  int64 `json:"cost_weekly_limit_micro_usd"`
 	WeeklyPeriodStart    int64 `json:"cost_weekly_period_start"`
 
-	AllowedModels  []string `json:"allowed_models"`
+	AllowedModels  []string `json:"allowed_models,omitempty"`
 	MaxConcurrency int      `json:"max_concurrency"`
 	MaxRPM         int      `json:"max_rpm"`
 }
 
-// legacyIndexEntry 是 index.jsonl 一行的读入形状（镜像
-// debuglog.IndexEntry 的 JSON tag；started_at 是 RFC3339Nano）。
+// legacyIndexEntry 是 index.jsonl 一行的读写形状——JSON tag 与文件时代
+// debuglog.IndexEntry 逐字段一致（含 omitempty 分布）；started_at 是
+// RFC3339Nano。导入与导出共用，保证 round-trip 字段逐一对齐。
 type legacyIndexEntry struct {
 	Dir               string `json:"dir"`
 	StartedAt         string `json:"started_at"`
 	DurationMS        int64  `json:"duration_ms"`
-	RequestReadyMS    *int64 `json:"request_ready_ms"`
-	UpstreamSentMS    *int64 `json:"upstream_sent_ms"`
-	UpstreamOpenMS    *int64 `json:"upstream_open_ms"`
-	FirstUpstreamMS   *int64 `json:"first_upstream_ms"`
-	FirstClientMS     *int64 `json:"first_client_ms"`
-	API               string `json:"api"`
+	RequestReadyMS    *int64 `json:"request_ready_ms,omitempty"`
+	UpstreamSentMS    *int64 `json:"upstream_sent_ms,omitempty"`
+	UpstreamOpenMS    *int64 `json:"upstream_open_ms,omitempty"`
+	FirstUpstreamMS   *int64 `json:"first_upstream_ms,omitempty"`
+	FirstClientMS     *int64 `json:"first_client_ms,omitempty"`
+	API               string `json:"api,omitempty"`
 	Method            string `json:"method"`
 	Path              string `json:"path"`
 	StatusCode        int    `json:"status_code"`
 	Result            string `json:"result"`
-	RequestedModel    string `json:"requested_model"`
-	Model             string `json:"model"`
-	ResponseModel     string `json:"response_model"`
-	ModelMismatch     bool   `json:"model_mismatch"`
+	RequestedModel    string `json:"requested_model,omitempty"`
+	Model             string `json:"model,omitempty"`
+	ResponseModel     string `json:"response_model,omitempty"`
+	ModelMismatch     bool   `json:"model_mismatch,omitempty"`
 	Stream            bool   `json:"stream"`
-	InputTokens       int64  `json:"input_tokens"`
-	OutputTokens      int64  `json:"output_tokens"`
-	CacheReadTokens   int64  `json:"cache_read_tokens"`
-	CacheWriteTokens  int64  `json:"cache_write_tokens"`
-	ReasoningTokens   int64  `json:"reasoning_tokens"`
-	TotalTokens       int64  `json:"total_tokens"`
-	CreditCost        int64  `json:"credit_cost"`
-	UpstreamRequestID string `json:"upstream_request_id"`
-	ClientIP          string `json:"client_ip"`
-	KeyHash           string `json:"key_hash"`
-	ClientRequestID   string `json:"client_request_id"`
-	ErrorStage        string `json:"error_stage"`
-	ErrorMessage      string `json:"error_message"`
-	DroppedEvents     uint64 `json:"dropped_events"`
-	RetryAfterSeconds int64  `json:"retry_after_seconds"`
-	RateLimited       bool   `json:"rate_limited"`
-	Retries           int    `json:"retries"`
-	Account           string `json:"account"`
-	AccountSwitches   int    `json:"account_switches"`
-	PrematureEndTurn  bool   `json:"premature_end_turn"`
-	Repairs           int    `json:"repairs"`
-	ConnReused        *bool  `json:"conn_reused"`
-	ConnIdleMS        *int64 `json:"conn_idle_ms"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	CacheReadTokens   int64  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens  int64  `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens   int64  `json:"reasoning_tokens,omitempty"`
+	TotalTokens       int64  `json:"total_tokens,omitempty"`
+	CreditCost        int64  `json:"credit_cost,omitempty"`
+	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
+	ClientIP          string `json:"client_ip,omitempty"`
+	KeyHash           string `json:"key_hash,omitempty"`
+	ClientRequestID   string `json:"client_request_id,omitempty"`
+	ErrorStage        string `json:"error_stage,omitempty"`
+	ErrorMessage      string `json:"error_message,omitempty"`
+	DroppedEvents     uint64 `json:"dropped_events,omitempty"`
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+	RateLimited       bool   `json:"rate_limited,omitempty"`
+	Retries           int    `json:"retries,omitempty"`
+	Account           string `json:"account,omitempty"`
+	AccountSwitches   int    `json:"account_switches,omitempty"`
+	PrematureEndTurn  bool   `json:"premature_end_turn,omitempty"`
+	Repairs           int    `json:"repairs,omitempty"`
+	ConnReused        *bool  `json:"conn_reused,omitempty"`
+	ConnIdleMS        *int64 `json:"conn_idle_ms,omitempty"`
 }
 
 type legacyRegistryFile struct {
 	Models map[string]struct {
-		RedirectModel string `json:"redirect_model"`
-		Disabled      bool   `json:"disabled"`
+		RedirectModel string `json:"redirect_model,omitempty"`
+		Disabled      bool   `json:"disabled,omitempty"`
 	} `json:"models"`
 }
 
 type legacySettingsFile struct {
 	Values  map[string]string `json:"values"`
-	Updated map[string]int64  `json:"updated"`
+	Updated map[string]int64  `json:"updated,omitempty"`
 }
 
 type legacyQuotaPoint struct {
