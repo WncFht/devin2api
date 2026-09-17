@@ -221,7 +221,9 @@ func (application *App) Router() http.Handler {
 		})
 	})
 	if application.ccPanel != nil {
-		application.ccPanel.Register(router)
+		// gzip 只压 /admin|/dashboard 的 JSON 响应（见 gzipPanelMiddleware
+		// 的判定）；/v1 的 SSE/WS 不在该子树内。
+		application.ccPanel.Register(router.With(gzipPanelMiddleware))
 	}
 	return router
 }
