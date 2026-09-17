@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/WncFht/devin2api/internal/config"
 )
@@ -113,8 +116,6 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 	return out
 }
 
-var errAccountsNotImplemented = errors.New("store: upstream_accounts not implemented")
-
 // 账号操作的领域错误（%w 包装携带名字）：ops 层（main）只产语义错误，
 // HTTP 状态码映射归面板 handlers——同一条件在不同端点状态码不同
 // （PUT tombstoned=409 而 quota/refresh tombstoned=404）。
@@ -129,31 +130,114 @@ var (
 	ErrAccountNotTombstoned = errors.New("account is not tombstoned")
 )
 
+// accountColumnList 是 upstream_accounts 的全部列，INSERT/SELECT 共用
+// 同一份列清单；token/credentials_file 可空，读写两侧做 ""/NULL 互转。
+var accountColumnList = []string{
+	"name", "token", "credentials_file", "disabled", "deleted", "created_at", "updated_at",
+}
+
+var (
+	accountColumns = strings.Join(accountColumnList, ", ")
+	// created_at 不进 DO UPDATE——首插值永久保留，updated_at 恒刷成 now。
+	accountUpsert = `INSERT INTO upstream_accounts(` + accountColumns + `) VALUES(` +
+		placeholders(len(accountColumnList)) + `) ON CONFLICT(name) DO UPDATE SET
+		token=excluded.token, credentials_file=excluded.credentials_file,
+		disabled=excluded.disabled, deleted=excluded.deleted, updated_at=excluded.updated_at`
+)
+
+// nullAccountField 把 "" 落成 NULL：可空列的 NULL 语义是「无行覆盖」，
+// 与空串区分（读侧 NULL→""，见 scanAccount）。
+func nullAccountField(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func scanAccount(row interface{ Scan(...any) error }) (*AccountRow, error) {
+	var a AccountRow
+	var token, credentialsFile sql.NullString
+	err := row.Scan(&a.Name, &token, &credentialsFile, &a.Disabled, &a.Deleted,
+		&a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	a.Token = token.String
+	a.CredentialsFile = credentialsFile.String
+	return &a, nil
+}
+
 // ListAccounts 返回全部行含墓碑，ORDER BY created_at, name。
 func (s *Store) ListAccounts(ctx context.Context) ([]*AccountRow, error) {
-	return nil, errAccountsNotImplemented
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+accountColumns+` FROM upstream_accounts ORDER BY created_at, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*AccountRow
+	for rows.Next() {
+		a, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // GetAccount 按名取行；不存在时 ok=false。
 func (s *Store) GetAccount(ctx context.Context, name string) (row *AccountRow, ok bool, err error) {
-	return nil, false, errAccountsNotImplemented
+	a, err := scanAccount(s.db.QueryRowContext(ctx,
+		`SELECT `+accountColumns+` FROM upstream_accounts WHERE name=?`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return a, true, nil
 }
 
 // UpsertAccount INSERT ... ON CONFLICT(name) DO UPDATE；created_at 只在
-// 首插写，updated_at 恒刷新。
+// 首插写（row.CreatedAt 为 0 时取 now），updated_at 恒刷新成 now。整行
+// 覆盖语义——调用方做部分字段补丁时须先读后写；token/credentials_file
+// 传 "" 落 NULL，即清掉行覆盖。
 func (s *Store) UpsertAccount(ctx context.Context, row *AccountRow) error {
-	return errAccountsNotImplemented
+	now := time.Now().UnixMilli()
+	created := row.CreatedAt
+	if created == 0 {
+		created = now
+	}
+	_, err := s.db.ExecContext(ctx, accountUpsert, row.Name,
+		nullAccountField(row.Token), nullAccountField(row.CredentialsFile),
+		row.Disabled, row.Deleted, created, now)
+	return err
 }
 
-// DeleteAccount 物理删行（纯面板名与墓碑 GC 用）。
+// DeleteAccount 物理删行（纯面板名与墓碑 GC 用）；名不存在是空操作。
 func (s *Store) DeleteAccount(ctx context.Context, name string) error {
-	return errAccountsNotImplemented
+	_, err := s.db.ExecContext(ctx, `DELETE FROM upstream_accounts WHERE name=?`, name)
+	return err
 }
 
-// GCTombstonedAccounts 收死墓碑：deleted=1 AND name NOT IN declared。
-// 只在重推成功后由装配层调，读路径不做写。返回删除行数。
+// GCTombstonedAccounts 收死墓碑：deleted=1 AND name NOT IN declared
+// （declared 为空时收掉全部墓碑）。只在重推成功后由装配层调，读路径
+// 不做写。返回删除行数。
 func (s *Store) GCTombstonedAccounts(ctx context.Context, declared []string) (int64, error) {
-	return 0, errAccountsNotImplemented
+	query := `DELETE FROM upstream_accounts WHERE deleted=1`
+	var args []any
+	if len(declared) > 0 {
+		query += ` AND name NOT IN (` + placeholders(len(declared)) + `)`
+		for _, name := range declared {
+			args = append(args, name)
+		}
+	}
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // EffectiveAccounts 是读路径便捷封装：ListAccounts + MergeAccounts。
