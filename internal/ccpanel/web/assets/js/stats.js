@@ -1422,7 +1422,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
     // 切换视图
     function switchView(view) {
       currentView = view;
-      document.documentElement.classList.toggle('stats-view-init-chart', view === 'chart');
+      // 移除防闪烁预显类，此后视图显隐完全由下面的内联 display 控制
+      document.documentElement.classList.remove('stats-view-init-chart');
 
       // 持久化视图状态
       try {

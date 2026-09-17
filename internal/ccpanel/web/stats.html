@@ -66,13 +66,15 @@
             
             <!-- 统计表格 -->
             <script>
-              // 立即恢复视图状态，避免闪烁
+              // 立即恢复视图状态，避免闪烁：根类驱动两个视图的显隐（此时视图节点尚未解析），
+              // 按钮激活态直接落到 .active 上；JS 接管后由 switchView 的内联 display 控制
               (function() {
                 try {
-                  var savedView = localStorage.getItem('stats.view');
-                  if (savedView === 'chart') {
-                    document.documentElement.classList.add('stats-view-init-chart');
-                  }
+                  if (localStorage.getItem('stats.view') !== 'chart') return;
+                  document.documentElement.classList.add('stats-view-init-chart');
+                  document.querySelectorAll('#view-toggle-group .view-toggle-btn').forEach(function(b) {
+                    b.classList.toggle('active', b.dataset.view === 'chart');
+                  });
                 } catch(_) {}
               })();
             </script>
@@ -140,8 +142,8 @@
               </table>
             </div>
 
-            <!-- 图表视图 -->
-            <div id="stats-chart-view" class="hidden">
+            <!-- 图表视图（初始 display:none，由 switchView 内联样式接管） -->
+            <div id="stats-chart-view" style="display:none">
               <div class="charts-grid">
                 <!-- 模型调用次数饼图 -->
                 <div class="chart-card">

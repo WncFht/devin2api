@@ -8,8 +8,17 @@
   api.startSearchableSelectEnhancement();
 })(typeof window !== 'undefined' ? window : globalThis, function (root) {
   const enhancedSelects = new WeakMap();
+  const boundSelects = new WeakSet();
   let nextSelectID = 0;
   let documentObserver = null;
+
+  const selectObserverOptions = {
+    attributes: true,
+    attributeFilter: ['disabled', 'required', 'value', 'selected', 'label'],
+    childList: true,
+    subtree: true,
+    characterData: true
+  };
 
   function selectOptions(select) {
     return Array.from(select?.options || [])
@@ -181,28 +190,33 @@
     const instance = { select, input, dropdown, wrapper, combobox, sync: syncFromSelect };
     enhancedSelects.set(select, instance);
 
-    observeProperty(select, 'value', syncFromSelect);
-    observeProperty(select, 'selectedIndex', syncFromSelect);
-    observeProperty(select, 'disabled', syncFromSelect);
+    // select 元素级 hook 只绑一次：实例离树即拆，元素可能重新入树再增强；
+    // 全部经 enhancedSelects 寻址当前实例，旧闭包不滞留任何实例引用
+    if (!boundSelects.has(select)) {
+      boundSelects.add(select);
+      const forwardSync = () => enhancedSelects.get(select)?.sync();
+      observeProperty(select, 'value', forwardSync);
+      observeProperty(select, 'selectedIndex', forwardSync);
+      observeProperty(select, 'disabled', forwardSync);
+      select.addEventListener('change', forwardSync);
+      select.addEventListener('invalid', () => {
+        const current = enhancedSelects.get(select);
+        if (!current) return;
+        current.input.setAttribute('aria-invalid', 'true');
+        root.setTimeout?.(() => current.input.focus(), 0);
+      });
+    }
 
     input.addEventListener('mousedown', syncFromSelect, true);
-    select.addEventListener('change', syncFromSelect);
-    select.addEventListener('invalid', () => {
-      input.setAttribute('aria-invalid', 'true');
-      root.setTimeout?.(() => input.focus(), 0);
-    });
-    select.form?.addEventListener('reset', () => root.queueMicrotask?.(syncFromSelect));
+    if (select.form) {
+      instance.boundForm = select.form;
+      instance.formResetHandler = () => root.queueMicrotask?.(syncFromSelect);
+      select.form.addEventListener('reset', instance.formResetHandler);
+    }
 
     if (typeof root.MutationObserver === 'function') {
-      const observer = new root.MutationObserver(syncFromSelect);
-      observer.observe(select, {
-        attributes: true,
-        attributeFilter: ['disabled', 'required', 'value', 'selected', 'label'],
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-      instance.observer = observer;
+      instance.observer = new root.MutationObserver(syncFromSelect);
+      instance.observer.observe(select, selectObserverOptions);
     }
 
     syncFromSelect();
@@ -217,6 +231,28 @@
     return selects.map(enhanceNativeSelect).filter(Boolean);
   }
 
+  // 离树拆实例：observer 经回调持有整棵实例图，不断开则 select 永不回收；
+  // combobox 的 document/window 监听与 form 的 reset 监听也要一并卸下。
+  // 元素级 hook 靠 forward 寻址当前实例可留在元素上，节点重新入树即走完整再增强。
+  function releaseSelect(select) {
+    const instance = enhancedSelects.get(select);
+    if (!instance) return;
+    instance.observer?.disconnect();
+    instance.combobox?.destroy();
+    instance.boundForm?.removeEventListener('reset', instance.formResetHandler);
+    instance.wrapper?.remove();
+    select.classList?.remove('searchable-select-native');
+    select.removeAttribute?.('aria-hidden');
+    select.removeAttribute?.('tabindex');
+    enhancedSelects.delete(select);
+  }
+
+  function releaseRemovedSelects(node) {
+    if (!node) return;
+    if (node.matches?.('select')) releaseSelect(node);
+    if (node.querySelectorAll) node.querySelectorAll('select').forEach(releaseSelect);
+  }
+
   function startSearchableSelectEnhancement() {
     const document = root.document;
     if (!document || documentObserver) return;
@@ -226,6 +262,7 @@
     documentObserver = new root.MutationObserver((records) => {
       records.forEach((record) => {
         record.addedNodes.forEach(node => enhanceNativeSelects(node));
+        record.removedNodes.forEach(releaseRemovedSelects);
       });
     });
     documentObserver.observe(document.documentElement, { childList: true, subtree: true });

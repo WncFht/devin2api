@@ -900,7 +900,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.badge.warning': '警告',
   'models.badge.disabled': '禁用',
   'models.mult.unknownTip': '上游未单独下发倍率，通常按基准 1.0',
-  'models.count': '显示 {shown} / 共 {total} 个',
+  'models.count': '筛选 {shown} 个',
   'models.priceNote': '倍率 = 上游 credit 消耗倍率；价格单位 $ / 1M tokens',
 
   // ============================================================
@@ -1057,6 +1057,7 @@ window.I18N_LOCALES['zh-CN'] = {
 
   'nav.accounts': '上游账号',
   'accounts.title': '上游账号',
+  'accounts.pageSubtitle': '各上游账号的速率闸门、连接保温与配额快照',
   'accounts.refresh': '刷新',
   'accounts.loading': '正在加载账号数据...',
   'accounts.updatedAt': '更新于 {time}',

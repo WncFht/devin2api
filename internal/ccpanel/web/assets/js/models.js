@@ -25,7 +25,8 @@
     traffic: ['rgba(148, 163, 184, 0.15)', 'var(--color-text-secondary)']
   };
 
-  const TIER_BADGE = { free: '#10b981', low: '#3b82f6', medium: '#f59e0b', high: '#ef4444' };
+  // 档级徽章走冷色递升阶（浅蓝→蓝→紫），不用告警色的红/琥珀
+  const TIER_BADGE = { free: '#10b981', low: '#60a5fa', medium: '#3b82f6', high: '#8b5cf6' };
 
   window.initPageBootstrap({
     topbarKey: 'models',
@@ -200,15 +201,20 @@
     return !!r.resolved && r.resolved !== r.model;
   }
 
-  function renderSummary() {
+  function renderSummary(shown = rows.length) {
     const enabled = rows.filter((r) => r.enabled).length;
     const redirected = rows.filter(isRedirected).length;
-    document.getElementById('models-summary').textContent = t('models.summary', {
+    let text = t('models.summary', {
       total: rows.length,
       enabled,
       disabled: rows.length - enabled,
       redirected
     });
+    // 筛选中才追加命中数；全量时总数已在 summary 里
+    if (shown < rows.length) {
+      text += ' · ' + t('models.count', { shown });
+    }
+    document.getElementById('models-summary').textContent = text;
   }
 
   // ---- 目录属性：倍率/徽标/标签筛选，移植自旧面板模型目录页 ----
@@ -367,13 +373,7 @@
     updatePagination(visible.length);
     const pageRows = visible.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     document.getElementById('models-empty').hidden = visible.length > 0;
-    document.getElementById('models-summary').textContent =
-      t('models.summary', {
-        total: rows.length,
-        enabled: rows.filter((r) => r.enabled).length,
-        disabled: rows.filter((r) => !r.enabled).length,
-        redirected: rows.filter(isRedirected).length
-      }) + ' · ' + t('models.count', { shown: visible.length, total: rows.length });
+    renderSummary(visible.length);
 
     const labels = {
       model: t('models.col.model'),

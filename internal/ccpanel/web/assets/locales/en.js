@@ -901,7 +901,7 @@ window.I18N_LOCALES['en'] = {
   'models.badge.warning': 'Warning',
   'models.badge.disabled': 'Disabled',
   'models.mult.unknownTip': 'Upstream did not publish a multiplier; treat as baseline 1.0',
-  'models.count': 'Showing {shown} / {total}',
+  'models.count': '{shown} filtered',
   'models.priceNote': 'Multiplier = upstream credit burn rate; prices in $ / 1M tokens',
 
   // ============================================================
@@ -1058,6 +1058,7 @@ window.I18N_LOCALES['en'] = {
 
   'nav.accounts': 'Accounts',
   'accounts.title': 'Upstream Accounts',
+  'accounts.pageSubtitle': 'Per-account rate gate, connection warming, and quota snapshots',
   'accounts.refresh': 'Refresh',
   'accounts.loading': 'Loading account data...',
   'accounts.updatedAt': 'Updated {time}',

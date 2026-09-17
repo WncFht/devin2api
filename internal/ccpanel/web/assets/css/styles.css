@@ -1089,7 +1089,10 @@ body {
 }
 
 /* 切换按钮组（趋势页复用） - Apple UI 风格 (可用性优先) */
-.toggle-group {
+/* 分段控件：toggle-group / time-range-selector / view-toggle-group 同一控件语言 */
+.toggle-group,
+.time-range-selector,
+.view-toggle-group {
   display: inline-flex;
   gap: 2px;
   background: var(--surface-bg);
@@ -1098,7 +1101,9 @@ body {
   border: 1px solid var(--surface-border);
 }
 
-.toggle-btn {
+.toggle-btn,
+.time-range-btn,
+.view-toggle-btn {
   padding: 7px 14px;
   border-radius: 7px;
   color: var(--neutral-700);
@@ -1112,28 +1117,27 @@ body {
   border: none;
   background: transparent;
   position: relative;
-  overflow: hidden;
-  letter-spacing: -0.01em;
-  text-shadow: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-height: 32px;
+  white-space: nowrap;
 }
 
-.toggle-btn:hover {
+.toggle-btn:hover,
+.time-range-btn:hover,
+.view-toggle-btn:hover {
   color: var(--neutral-900);
   background: var(--surface-hover);
-  transform: none;
 }
 
-.toggle-btn.active {
+.toggle-btn.active,
+.time-range-btn.active,
+.view-toggle-btn.active {
   background: var(--surface-bg-strong);
   color: var(--primary-600);
   font-weight: 650;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.1);
-  transform: none;
-  text-shadow: none;
 }
 
 /* 时间范围选择器 */
@@ -1145,44 +1149,11 @@ body {
 }
 
 .time-range-selector {
-  display: inline-flex;
-  gap: 0;
-  background: var(--surface-bg-strong);
-  padding: 4px;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   max-width: 100%;
 }
 
-.time-range-btn {
-  padding: 6px 16px;
-  border-radius: 6px;
-  color: var(--neutral-600);
-  font-weight: 400;
-  font-size: 14px;
-  line-height: 1.5;
-  cursor: pointer;
-  user-select: none;
-  transition: all 0.15s ease;
-  border: none;
-  background: transparent;
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
-  white-space: nowrap;
-}
-
-.time-range-btn:hover {
-  color: var(--neutral-900);
-  background: var(--surface-hover);
-}
-
-.time-range-btn.active {
-  background: transparent;
-  color: var(--primary-600);
-  font-weight: 500;
+.time-range-selector {
+  max-width: 100%;
 }
 
 .filter-custom-range-host {
@@ -3870,24 +3841,15 @@ a.model-tag.model-link:hover {
 }
 
 /* ===== 统计页面专用样式 ===== */
+/* stats-view-init-chart 只在 JS 接管前生效：内联脚本加类预显图表视图；
+   !important 用于压过 #stats-chart-view 标记上的 display:none；
+   switchView 首次运行时移除该类，之后显隐由内联 display 控制 */
 .stats-view-init-chart #stats-table-view {
   display: none !important;
 }
 
 .stats-view-init-chart #stats-chart-view {
   display: block !important;
-}
-
-.stats-view-init-chart .view-toggle-btn[data-view="table"] {
-  background: transparent;
-  color: var(--neutral-600);
-  box-shadow: none;
-}
-
-.stats-view-init-chart .view-toggle-btn[data-view="chart"] {
-  background: var(--surface-bg-strong);
-  color: var(--primary-600);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .stats-detail-heading {
@@ -6102,38 +6064,9 @@ html[data-resolved-theme="dark"] .chat-message .chat-patch-number {
   border-color: var(--neutral-400);
 }
 
-.view-toggle-group {
-  display: flex;
-  gap: 4px;
-  background: var(--neutral-100);
-  padding: 4px;
-  border-radius: 8px;
-}
-
+/* view-toggle 差异只剩：按钮带图标需要内距，图标尺寸固定 */
 .view-toggle-btn {
-  display: flex;
-  align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  border: none;
-  background: transparent;
-  color: var(--neutral-600);
-  font-size: 13px;
-  font-weight: 500;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.view-toggle-btn:hover {
-  color: var(--neutral-800);
-  background: var(--neutral-200);
-}
-
-.view-toggle-btn.active {
-  background: var(--surface-bg-strong);
-  color: var(--primary-600);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .view-toggle-btn svg {

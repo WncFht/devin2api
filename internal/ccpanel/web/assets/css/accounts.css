@@ -1,5 +1,41 @@
 /* 上游账号池页专属样式 */
 
+/* 页头与分区卡：布局对齐 models 页的 head 卡约定 */
+.accounts-head-card {
+  padding: var(--space-5) var(--space-6);
+}
+
+.accounts-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.accounts-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+#accounts-updated-at {
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.accounts-section-card {
+  padding: var(--space-6);
+}
+
+.accounts-kpi-grid {
+  margin-top: var(--space-4);
+}
+
+.accounts-grid-full {
+  grid-column: 1 / -1;
+}
+
 /* 全池脉冲条：每 lane 一竖条，色即主状态 */
 .accounts-pulse {
   display: flex;
