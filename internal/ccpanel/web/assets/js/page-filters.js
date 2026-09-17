@@ -166,12 +166,8 @@
       authTokenGroupClass: 'logs-filter-group--token',
       authTokenControlClass: 'logs-filter-control--token',
       actionsClass: 'logs-filter-actions',
-      // 三段分区：时间范围 / 过滤条件 / 行操作，视觉上各成一簇
-      sections: [
-        { cls: 'logs-filter-section logs-filter-section--range', items: ['timeRange'] },
-        { cls: 'logs-filter-section logs-filter-section--filters', items: ['search', 'api', 'modelCombobox', 'status', 'statusClass', 'result', 'errorStage', 'logSource', 'authToken'] },
-        { cls: 'logs-filter-section logs-filter-section--actions', items: ['logsSummary'] }
-      ]
+      // 单条 flex-wrap 流：时间范围与各过滤项顺序排布，行操作（logsSummary）靠右收尾
+      items: ['timeRange', 'search', 'api', 'modelCombobox', 'status', 'statusClass', 'result', 'errorStage', 'logSource', 'authToken', 'logsSummary']
     },
     trend: {
       barClass: 'filter-bar mt-2',
@@ -190,13 +186,10 @@
     }
 
     const fields = buildSharedFields(config);
-    const renderItems = (items) => items
+    const content = (config.items || [])
       .map((item) => fields[item] || '')
       .filter(Boolean)
       .join('\n');
-    const content = config.sections
-      ? config.sections.map((section) => `<div class="${section.cls}">${renderItems(section.items)}</div>`).join('\n')
-      : renderItems(config.items);
 
     return `<div class="${config.barClass}">
           <div class="${config.controlsClass}">

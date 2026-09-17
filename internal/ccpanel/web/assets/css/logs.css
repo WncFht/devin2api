@@ -34,7 +34,7 @@
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
       padding: 6px 0;
       min-width: 150px;
-      max-height: 400px;
+      max-height: min(400px, 70vh);
       overflow-y: auto;
     }
 
@@ -296,27 +296,10 @@
       color: var(--neutral-400);
     }
 
-    /* 顶部工具栏：标签置顶、控件等高，三段分区（时间范围 / 过滤条件 / 行操作） */
+    /* 顶部工具栏：标签置顶、控件等高，单条 flex-wrap 流，行操作靠右收尾 */
     .logs-filter-controls {
       gap: 8px 16px;
       align-items: flex-end;
-    }
-
-    .logs-filter-section {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: flex-end;
-      gap: 8px 12px;
-      min-width: 0;
-    }
-
-    .logs-filter-section--filters {
-      flex: 1 1 auto;
-    }
-
-    .logs-filter-section--actions {
-      flex: 0 0 auto;
-      margin-left: auto;
     }
 
     .logs-filter-group {
@@ -444,6 +427,12 @@
 
     .logs-pagination-card {
       padding: var(--space-2);
+    }
+
+    /* 单页结果时整条分页都是禁用态噪音；logs.js 把跳转输入框的 max
+       同步成总页数，max=1 即只有一页，整卡隐藏（含尚未加载时） */
+    .logs-pagination-card:has(#logs_jump_page[max="1"]) {
+      display: none;
     }
 
     .debug-log-status {
@@ -789,11 +778,6 @@
         gap: 6px;
       }
 
-      /* 分区包装只用于桌面分组，移动端展平回两列网格 */
-      .logs-filter-section {
-        display: contents;
-      }
-
       .logs-filter-group {
         display: grid;
         grid-template-columns: 72px minmax(0, 1fr);
@@ -879,6 +863,12 @@
 
     .logs-table tbody td:nth-child(even) {
       background: var(--surface-bg-muted);
+    }
+
+    /* 空值单元格不铺列底色，免得整列空格也被高亮成有内容。
+       位置必须在 pending-row 规则之前，进行中行的整行高亮不被戳破 */
+    .logs-table tbody td:empty {
+      background: transparent;
     }
 
     /* 固定宽度列一律按列类名选择，不用 nth-child：ccload 原版按渠道列还在时的
