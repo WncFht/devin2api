@@ -73,15 +73,27 @@ func normalize(name string, e Entry) (string, Entry, error) {
 func (s *Store) Lookup(name string) (Entry, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if e, ok := s.entries[name]; ok {
-		return e, true
-	}
-	for n, e := range s.entries {
-		if strings.EqualFold(n, name) {
-			return e, true
-		}
+	if key, ok := s.foldKey(name); ok {
+		return s.entries[key], true
 	}
 	return Entry{}, false
+}
+
+// foldKey 按 Lookup 的命中口径找现存键：先精确、再 EqualFold，返回
+// 表内键（保留注册时的大小写）。entries 键、SQLite TEXT 等值都是大小写
+// 敏感比较，写路径必须经过它归键——否则 Set("Claude-X") 后
+// Delete("claude-x") 两侧都删不掉，重置静默空转而模型保持停用。
+// 调用方须持锁。
+func (s *Store) foldKey(name string) (string, bool) {
+	if _, ok := s.entries[name]; ok {
+		return name, true
+	}
+	for n := range s.entries {
+		if strings.EqualFold(n, name) {
+			return n, true
+		}
+	}
+	return "", false
 }
 
 // Set 覆盖写一条注册项并入库；项退化为全默认（启用且无重定向）时自动
@@ -94,6 +106,11 @@ func (s *Store) Set(name string, e Entry) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 已存在大小写变体时沿用其键：不然同一模型会并存两行覆盖，
+	// 折叠命中退化成 map 遍历顺序抽签。
+	if key, ok := s.foldKey(name); ok {
+		name = key
+	}
 	if !e.Disabled && e.RedirectModel == "" {
 		if err := s.st.DeleteModel(context.Background(), name); err != nil {
 			return err
@@ -112,10 +129,18 @@ func (s *Store) Set(name string, e Entry) error {
 	return nil
 }
 
-// Delete 移除覆盖；不存在时按成功处理（幂等删除）。
+// Delete 移除覆盖；不存在时按成功处理（幂等删除）。键口径同 Lookup
+// （见 foldKey）；入名先过 normalize——带首尾空白的名字同样是删不掉的变体。
 func (s *Store) Delete(name string) error {
+	name, _, err := normalize(name, Entry{})
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if key, ok := s.foldKey(name); ok {
+		name = key
+	}
 	if err := s.st.DeleteModel(context.Background(), name); err != nil {
 		return err
 	}
