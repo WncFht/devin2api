@@ -218,7 +218,7 @@ type RequestFilter struct {
 	// Until 只保留开始时间早于该时刻的请求；零值不限。
 	// 矩阵格子下钻用它把列表钉在一个历史窗口内，而不是从现在往回滚。
 	Until time.Time
-	// Query 保留原有子串匹配：命中 dir/model/key_hash/client_request_id/path。
+	// Query 保留原有子串匹配：命中 dir/model/key_hash/client_request_id/path/error_message 等行内字段。
 	Query string
 }
 
@@ -346,7 +346,7 @@ func (f RequestFilter) match(e IndexEntry, conds []statusCond) bool {
 	if f.Query != "" {
 		haystack := e.Dir + " " + e.Method + " " + e.Path + " " + e.Model + " " +
 			e.RequestedModel + " " + e.ResponseModel + " " + e.KeyHash + " " +
-			e.ClientRequestID + " " + e.ErrorStage + " " + e.Result
+			e.ClientRequestID + " " + e.ErrorStage + " " + e.ErrorMessage + " " + e.Result
 		if !strings.Contains(strings.ToLower(haystack), f.Query) {
 			return false
 		}

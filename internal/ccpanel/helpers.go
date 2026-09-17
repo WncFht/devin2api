@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // remoteIP 返回请求来源 IP（去端口）；登录限速按它归并。
@@ -170,10 +171,15 @@ func rfc3339Any(vals ...any) string {
 	return s
 }
 
-// truncate 把 s 截到 n 字节并以 "..." 结尾；不超原样返回。
+// truncate 把 s 截到至多 n 字节并以 "..." 结尾；不切在多字节 rune 中间，
+// 不超原样返回。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
