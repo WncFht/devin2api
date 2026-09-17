@@ -151,6 +151,7 @@ const LOG_COLUMNS = [
   { key: 'tokenDesc',   cls: 'logs-col-token-desc',  i18n: 'logs.colTokenDesc' },
   { key: 'apiKey',      cls: 'logs-col-api-key',     i18n: 'logs.colApiKey' },
   { key: 'model',       cls: 'logs-col-model',       i18n: 'common.model' },
+  { key: 'account',     cls: 'logs-col-account',     i18n: 'logs.colAccount' },
   { key: 'status',      cls: 'logs-col-status',      i18n: 'logs.statusCode' },
   { key: 'timing',      cls: 'logs-col-timing',      i18n: 'logs.colTiming' },
   { key: 'speed',       cls: 'logs-col-speed',       i18n: 'logs.colSpeed' },
@@ -556,6 +557,7 @@ function getLogMobileLabels() {
     tokenDesc: escapeHtml(t('logs.colTokenDesc')),
     apiKey: escapeHtml(t('logs.colApiKey')),
     model: escapeHtml(t('common.model')),
+    account: escapeHtml(t('logs.colAccount')),
     status: escapeHtml(t('logs.statusCode')),
     timing: escapeHtml(t('logs.colTiming')),
     speed: escapeHtml(t('logs.colSpeed')),
@@ -592,6 +594,18 @@ function buildLogTokenDescDisplay(label) {
   const text = String(label || '');
   if (!text) return '<span style="color: var(--neutral-500);">-</span>';
   return `<span class="logs-token-desc-text" title="${escapeHtml(text)}">${escapeHtml(formatLogTokenDescLabel(text))}</span>`;
+}
+
+// 号池 lane 名归因：account 是终局 lane；switches>0 说明 failover 救回，
+// 角标透出换号次数（细节在请求目录 meta.json 的 upstream_attempts）。
+function buildAccountDisplay(account, switches) {
+  const name = String(account || '');
+  if (!name) return '';
+  const count = Number(switches) || 0;
+  const badge = count > 0
+    ? `<sup class="logs-account-switches" title="${escapeHtml(t('logs.accountSwitchesTooltip', { count }))}">+${count}</sup>`
+    : '';
+  return `<span class="logs-mono-text" title="${escapeHtml(name)}">${escapeHtml(name)}</span>${badge}`;
 }
 
 // 后端 log_source 只产出 proxy/manual_test（面板探活行），无其他来源。
@@ -1178,6 +1192,8 @@ function renderActiveRequests(activeRequests) {
     const tokenDescCellClass = `logs-col-token-desc${tokenDescDisplay ? '' : ' mobile-empty-cell'}`;
     const abortDisplay = buildActiveRequestAbortHtml(req, id, startMs);
     const speedCellClass = `logs-col-speed${abortDisplay ? '' : ' mobile-empty-cell'}`;
+    const accountDisplay = buildAccountDisplay(req.account, req.account_switches);
+    const accountCellClass = `logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}`;
 
     // Key显示（key_hash 截断 + title 全量，与完成行同口径）
     const keyDisplay = buildKeyHashDisplay(req.api_key_used);
@@ -1192,6 +1208,12 @@ function renderActiveRequests(activeRequests) {
       if (timingCell) timingCell.innerHTML = `${durationDisplay} ${streamFlag}`;
       const statusCell = existingRow.querySelector('.logs-col-status');
       if (statusCell) statusCell.innerHTML = statusDisplay;
+      // failover 换号会改写 req.account，每轮同步
+      const accountCell = existingRow.querySelector('.logs-col-account');
+      if (accountCell) {
+        accountCell.innerHTML = accountDisplay;
+        accountCell.classList.toggle('mobile-empty-cell', !accountDisplay);
+      }
       const compactStatus = existingRow.querySelector('.active-upstream-status');
       if (compactStatus && !statusCell) compactStatus.textContent = activeRequestStatusLabel(req);
       const msgCell = existingRow.querySelector('.logs-col-message');
@@ -1205,6 +1227,8 @@ function renderActiveRequests(activeRequests) {
         const compactAbort = existingRow.querySelector('.active-abort-slot');
         if (compactAbort) compactAbort.innerHTML = abortDisplay;
       }
+      const compactAccount = existingRow.querySelector('.active-account-slot');
+      if (compactAccount) compactAccount.innerHTML = accountDisplay;
     } else {
       // 创建新行
       const row = document.createElement('tr');
@@ -1217,6 +1241,7 @@ function renderActiveRequests(activeRequests) {
               <span style="margin-left: 8px;">${formatTime(req.start_time)}</span>
               <span class="logs-mono-text" style="margin-left: 8px;" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</span>
               <span style="margin-left: 8px;">${modelDisplay}</span>
+              <span class="active-account-slot" style="margin-left: 8px;">${accountDisplay}</span>
               <span style="margin-left: 8px;">${durationDisplay} ${streamFlag}</span>
               <span style="margin-left: 8px;">${infoContent}</span>
               <span class="active-abort-slot" style="margin-left: 8px;">${abortDisplay}</span>
@@ -1229,6 +1254,7 @@ function renderActiveRequests(activeRequests) {
             <td class="${tokenDescCellClass}" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
             <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${keyDisplay}</td>
             <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
+            <td class="${accountCellClass}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
             <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}">${statusDisplay}</td>
             <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${durationDisplay} ${streamFlag}</td>
             <td class="${speedCellClass}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${abortDisplay}</td>
@@ -1282,7 +1308,7 @@ async function abortActiveRequest(button) {
 // ✅ 动态计算列数（避免硬编码维护成本）——按可见列计，列显隐与
 // colspan/紧凑布局保持同步。
 function getTableColspan() {
-  return LOG_COLUMNS.reduce((n, col) => n + (isColVisible(col.key) ? 1 : 0), 0) || 15;
+  return LOG_COLUMNS.reduce((n, col) => n + (isColVisible(col.key) ? 1 : 0), 0) || 16;
 }
 
 function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) {
@@ -1422,6 +1448,7 @@ function renderLogs(data) {
       entry.cache_creation_input_tokens
     );
     const messageContent = buildLogMessageContent(entry);
+    const accountDisplay = buildAccountDisplay(entry.account, entry.account_switches);
 
     // === 直接拼接行 HTML ===
     htmlParts[i] = `<tr class="mobile-card-row logs-table-row">
@@ -1430,6 +1457,7 @@ function renderLogs(data) {
           <td class="logs-col-token-desc" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
           <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${apiKeyDisplay}</td>
           <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
+          <td class="logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
           <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${statusCode}</span></td>
           <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${responseTimingDisplay}</td>
           <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${speedDisplay}</td>

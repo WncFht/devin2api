@@ -408,6 +408,8 @@ window.I18N_LOCALES['en'] = {
   'logs.colIP': 'IP',
   'logs.colTokenDesc': 'Token',
   'logs.colApiKey': 'Key Hash',
+  'logs.colAccount': 'Account',
+  'logs.accountSwitchesTooltip': 'Landed here after {count} account failover(s)',
   'logs.colTiming': 'TTFT/Duration(s)',
   'logs.colSpeed': 'Tok/s',
   'logs.abort': 'Abort',

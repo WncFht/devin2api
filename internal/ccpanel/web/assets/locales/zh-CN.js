@@ -407,6 +407,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.colIP': 'IP',
   'logs.colTokenDesc': '令牌',
   'logs.colApiKey': 'Key 哈希',
+  'logs.colAccount': '账号',
+  'logs.accountSwitchesTooltip': '换号 {count} 次后落到此账号',
   'logs.colTiming': '首字/耗时(秒)',
   'logs.colSpeed': 'Tok/s',
   'logs.abort': '中断',

@@ -407,6 +407,18 @@
       background: var(--notification-warning-bg);
     }
 
+    /* 号池换号角标：sup 贴在 lane 名后透出 failover 次数 */
+    .logs-account-switches {
+      margin-left: 3px;
+      padding: 0 4px;
+      border-radius: 999px;
+      font-size: 0.72em;
+      font-weight: 700;
+      line-height: 1.4;
+      color: var(--warning-700, #b45309);
+      background: var(--warning-100, #fef3c7);
+    }
+
     /* 失败行 error_message：压在人性化标签下的次级小字行 */
     .log-error-text {
       display: block;
@@ -647,48 +659,52 @@
         order: 3;
       }
 
-      .logs-table .logs-col-api-key {
+      .logs-table .logs-col-account {
         order: 4;
       }
 
-      .logs-table .logs-col-token-desc {
+      .logs-table .logs-col-api-key {
         order: 5;
       }
 
-      .logs-table .logs-col-ip {
+      .logs-table .logs-col-token-desc {
         order: 6;
       }
 
-      .logs-table .logs-col-timing {
+      .logs-table .logs-col-ip {
         order: 7;
       }
 
-      .logs-table .logs-col-speed {
+      .logs-table .logs-col-timing {
         order: 8;
       }
 
-      .logs-table .logs-col-input {
+      .logs-table .logs-col-speed {
         order: 9;
       }
 
-      .logs-table .logs-col-output {
+      .logs-table .logs-col-input {
         order: 10;
       }
 
-      .logs-table .logs-col-cache-read {
+      .logs-table .logs-col-output {
         order: 11;
       }
 
-      .logs-table .logs-col-cache-write {
+      .logs-table .logs-col-cache-read {
         order: 12;
       }
 
-      .logs-table .logs-col-cache-util {
+      .logs-table .logs-col-cache-write {
         order: 13;
       }
 
-      .logs-table .logs-col-cost {
+      .logs-table .logs-col-cache-util {
         order: 14;
+      }
+
+      .logs-table .logs-col-cost {
+        order: 15;
       }
 
       .logs-table .logs-col-message {
@@ -700,6 +716,7 @@
       .logs-table .logs-col-time,
       .logs-table .logs-col-status,
       .logs-table .logs-col-model,
+      .logs-table .logs-col-account,
       .logs-table .logs-col-api-key,
       .logs-table .logs-col-token-desc,
       .logs-table .logs-col-ip,
@@ -722,6 +739,7 @@
       .logs-table .logs-col-time::before,
       .logs-table .logs-col-status::before,
       .logs-table .logs-col-model::before,
+      .logs-table .logs-col-account::before,
       .logs-table .logs-col-api-key::before,
       .logs-table .logs-col-token-desc::before,
       .logs-table .logs-col-ip::before,
