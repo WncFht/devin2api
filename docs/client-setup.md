@@ -2,7 +2,7 @@
 
 > 本文示例基于作者本机部署：`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3003(api_key)→ Devin 上游`。按自己的部署替换地址与凭据；ccload 的 token/渠道 id 是 ccload 侧的配置，不是本仓库的一部分。
 
-所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3003`、key 换成 `config.yaml` 里的 `auth.api_key` 即可。
+所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3003`、key 换成任一有效下游令牌即可（默认 `config.yaml` 的 `auth.api_key` 已播种成一条普通令牌行）。
 
 ## Claude Code
 

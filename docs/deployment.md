@@ -154,7 +154,7 @@ tail -f logs/stderr.log                     # 进程日志
 
 ## 面板与 agent 访问
 
-`/web/index.html` 是人看板的入口；其下 API 同时面向 agent 程序化消费：`/admin/*` 走 Bearer、`/dashboard/*` 走 cookie 会话、`/public/*` 公开。`dashboard.password` 非空时除 cookie 登录外，可直接 `Authorization: Bearer <面板密码>` 访问（免去 cookie 交互）：
+`/web/index.html` 是人看板的入口；其下 API 同时面向 agent 程序化消费：`/admin/*` 只认面板密码 Bearer（admin 身份）、`/dashboard/*` 认两类 Bearer——面板密码 → admin、下游令牌 → api_token 只读身份（数据按该令牌收敛）、`/public/*` 公开。全程无 cookie——`POST /login` body `{mode:"admin"|"api_token", password|token}` 返回的 token 就是凭据本身。`dashboard.password` 非空时可直接 `Authorization: Bearer <面板密码>` 访问：
 
 ```bash
 curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/runtime-metrics
@@ -165,4 +165,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
-面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
