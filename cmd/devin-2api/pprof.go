@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -116,6 +117,24 @@ func servePprof(addr string, listener net.Listener) *http.Server {
 	runtime.SetBlockProfileRate(int(time.Millisecond))
 	runtime.SetMutexProfileFraction(10)
 	slog.Info("pprof endpoints listening", "addr", "http://"+addr+"/debug/pprof/")
-	go func() { _ = server.Serve(listener) }()
+	go func() {
+		err := server.Serve(listener)
+		// Serve 返回只有两条路：rebindPprof 主动 Close（pprofServer/pprofAddr
+		// 已在锁内清掉，恒等检查落空直接返回）与 listener 病死。病死时若
+		// 不清 pprofAddr，同值 PUT/reload 会因「地址未变」早退，剖析端点
+		// 永久失联——清掉状态让下次同值重绑能重试，采样开关也随之归还。
+		pprofMu.Lock()
+		defer pprofMu.Unlock()
+		if pprofServer != server {
+			return
+		}
+		if !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("pprof server died", "addr", addr, "error", err)
+		}
+		pprofServer = nil
+		pprofAddr = ""
+		runtime.SetBlockProfileRate(0)
+		runtime.SetMutexProfileFraction(0)
+	}()
 	return server
 }

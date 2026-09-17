@@ -57,6 +57,7 @@ var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServi
 // 代理走同一套指纹，实验结果才可迁移。
 var clientName, clientVersion, clientOS string
 
+// main 解析全局 -account、解析 token/身份/传输后按子命令名分派。
 func main() {
 	// 顶层 flag 先于子命令解析：-account 是全局参数（选凭据号），
 	// 子命令 flag 集各自独立。flag 停在第一个非 flag 参数——
@@ -128,52 +129,14 @@ func main() {
 	}
 }
 
+// usage 打印子命令总表；chat 的 flag 集太大不内联，以 -h 自助列出。
 func usage() {
 	fmt.Fprintln(os.Stderr, `subcommands:
   configs                     dump GetCliModelConfigs (raw + router/feature summary)
   status                      CheckChatCapacity + CheckUserMessageRateLimit + GetModelStatuses + GetModelProviders
   assign <uid> [uid...]       AssignModel for each router uid
   chat [flags]                one GetChatMessage stream, dump all frames
-    -model uid                chat_model_uid (default swe-2-max)
-    -prompt text              user prompt (default "Reply exactly: pong")
-    -system text              system prompt (default "You are a helpful assistant.")
-    -system-as-message        send system prompt as SYSTEM_PROMPT-source message, drop top-level prompt
-    -system-empty             send prompt field as explicit empty string
-    -tool name                add a JSON-schema tool (repeatable: -tool a -tool b)
-    -tool-schema json         schema for the corresponding -tool (positional)
-    -custom-tool name         add is_custom_tool with lark grammar (name)
-    -raw-schema               send invalid json_schema_string on tools
-    -tool-extras              strict+read_only_hint+server_name+attribution on tools
-    -tool-choice opt:v|tool:v tool_choice oneof
-    -disable-parallel         disable_parallel_tool_calls=true
-    -provider-source N|name   provider_source enum
-    -prompt-id s              prompt_id field
-    -num-tokens n             per-message num_tokens on last user msg
-    -planner-mode N|name      planner_mode enum
-    -step-type N|name         trajectory step_type enum
-    -step-index n             trajectoryReference.step_index (session-monotonic counter)
-    -request-type N|name      request_type enum
-    -language N|name          language enum
-    -chat-model-name s        chat_model_name field
-    -no-fingerprint           omit metadata.f
-    -no-ids                   omit trajectory/cascade ids
-    -trajectory-id s          explicit trajectory_id (share across calls)
-    -cascade-id s             explicit cascade_id (share across calls to test concurrency)
-    -max-tokens n             configuration.max_tokens
-    -num-completions n        configuration.num_completions
-    -stop-pattern s           configuration.stop_patterns[0]
-    -temperature f            configuration.temperature (default 1)
-    -top-p f                  configuration.top_p (default 0.95)
-    -top-k n                  configuration.top_k (default 40)
-    -images n                 attach n copies of a tiny png to the user msg
-    -internal-model N         use_internal_chat_model + internal_chat_model=N
-    -assign-jwt s             model_assignment_jwt
-    -resolve                  run AssignModel first, use returned uid+jwt
-    -resolve-only             run AssignModel but keep chat_model_uid (jwt/model mismatch test)
-    -router uid               router uid for -resolve (defaults to -model)
-    -meta-extras              send session_id/request_id/device_fingerprint/disable_telemetry
-    -frames                   print every frame protojson (default: field inventory + text)
-    -dump dir                 write each frame protojson to dir/NN.json
+                              (full flag list: probe chat -h)
   replay [flags]              two-step: call once, then replay assistant msg with variants
     -model uid                chat_model_uid (default swe-2-max)
     -prompt text              step-1 user prompt
@@ -244,6 +207,7 @@ func metadata(token string, fingerprint bool) *devinproto.ExaCodeiumCommonPb_Met
 	return upstream.BuildMetadata(token, clientName, clientVersion, clientOS, fingerprintBytes)
 }
 
+// j 把任意值压成单行 JSON 供摘要输出。
 func j(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -264,6 +228,7 @@ func defaultCompletionConfig() *devinproto.ExaCodeiumCommonPb_CompletionConfigur
 
 // ---- 消息构造器：hist/edge 的各 case 共用同一套 wire 形态 ----
 
+// userMsg 造一条 USER 源消息。
 func userMsg(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
 	return &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId: proto.String(randid.UUID()),
@@ -281,18 +246,21 @@ func assistantMsg() *devinproto.ExaChatPb_ChatMessagePrompt {
 	}
 }
 
+// assistantTextMsg 造一条带正文的 assistant（SYSTEM 源）消息。
 func assistantTextMsg(text string) *devinproto.ExaChatPb_ChatMessagePrompt {
 	m := assistantMsg()
 	m.Prompt = proto.String(text)
 	return m
 }
 
+// assistantCallMsg 造一条带单个 tool call 的 assistant 消息。
 func assistantCallMsg(id, name, argsJSON string) *devinproto.ExaChatPb_ChatMessagePrompt {
 	m := assistantMsg()
 	m.ToolCalls = []*devinproto.ExaCodeiumCommonPb_ChatToolCall{toolCall(id, name, argsJSON)}
 	return m
 }
 
+// toolResultMsg 造一条 TOOL 源消息，tool_call_id 指回对应调用。
 func toolResultMsg(callID, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
 	return &devinproto.ExaChatPb_ChatMessagePrompt{
 		MessageId:  proto.String(randid.UUID()),
@@ -302,6 +270,7 @@ func toolResultMsg(callID, text string) *devinproto.ExaChatPb_ChatMessagePrompt 
 	}
 }
 
+// toolCall 造一条 ChatToolCall（id/name/JSON 参数原文）。
 func toolCall(id, name, argsJSON string) *devinproto.ExaCodeiumCommonPb_ChatToolCall {
 	return &devinproto.ExaCodeiumCommonPb_ChatToolCall{
 		Id: proto.String(id), Name: proto.String(name), ArgumentsJson: proto.String(argsJSON),
@@ -310,6 +279,8 @@ func toolCall(id, name, argsJSON string) *devinproto.ExaCodeiumCommonPb_ChatTool
 
 // ---- configs ----
 
+// cmdConfigs dump GetCliModelConfigs：原始 protojson 落盘，终端打印
+// 每模型的 router/family/能力矩阵摘要。
 func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	resp, err := client.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: metadata(token, true),
@@ -350,6 +321,8 @@ func cmdConfigs(ctx context.Context, client devinprotoconnect.ApiServerServiceCl
 
 // ---- status ----
 
+// cmdStatus 连打四个只读状态 RPC（容量/限流/模型状态/provider），
+// 单端失败不中断后续探测。
 func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	if r, err := client.CheckChatCapacity(ctx, connect.NewRequest(&devinproto.CheckChatCapacityRequest{Metadata: metadata(token, true)})); err != nil {
 		fmt.Println("CheckChatCapacity ERR:", err)
@@ -380,6 +353,8 @@ func cmdStatus(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- assign ----
 
+// cmdAssign 对每个 router uid 调一次 AssignModel，打印返回的
+// assignment（uid/harness/jwt），单号失败不中断。
 func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("assign needs at least one uid")
@@ -402,14 +377,22 @@ func cmdAssign(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- chat ----
 
+// toolList 是可重复 flag 的收集器（-tool a -tool b）。
 type toolList []string
 
+// String 实现 flag.Value。
 func (t *toolList) String() string { return strings.Join(*t, ",") }
+
+// Set 实现 flag.Value：每次出现追加一项。
 func (t *toolList) Set(v string) error {
 	*t = append(*t, v)
 	return nil
 }
 
+// cmdChat 发一条可全字段定制的 GetChatMessage 流：系统提示形态、
+// 工具声明矩阵（schema/desc/strict/readonly/custom/computer_use）、
+// trajectory/cascade id、completion 配置与 AssignModel 前置均可控，
+// 输出交给 runStream。
 func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
@@ -463,6 +446,11 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	frames := fs.Bool("frames", false, "")
 	dumpDir := fs.String("dump", "", "")
 	if err := fs.Parse(args); err != nil {
+		// ContinueOnError 下 flag 包已把完整默认值表打到 stderr；
+		// -h 是 usage() 指向的自助路径，不算失败。
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	*model = aliasModel(*model)
@@ -741,12 +729,16 @@ func enumByName[T interface {
 	}
 }
 
+// tinyPNG 返回 1x1 纯蓝 PNG 的 base64，作图片通道的最小载荷。
 func tinyPNG() string {
 	// 1x1 纯蓝 PNG
 	b, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// runStream 发 GetChatMessage 并消费整流：汇总字段出现频次、usage、
+// stopReason、拼接文本/thinking/tool calls；showFrames 逐帧打印
+// protojson，dumpDir 非空时每帧另存 NN.json。
 func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, req *devinproto.GetChatMessageRequest, showFrames bool, dumpDir string) error {
 	reqJSON, _ := marshal.Marshal(req)
 	fmt.Println("== request:", string(reqJSON)[:min(len(reqJSON), 2000)])
@@ -822,6 +814,9 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- replay: capture assistant output then replay with variants ----
 
+// cmdReplay 两步实验：先发一题引出 thinking，再把捕获的 assistant
+// 回合按 -variant 变形（去签名/伪签名/改 thinking 等）回放进历史，
+// 观察上游对签名-正文一致性的校验边界。
 func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
@@ -973,6 +968,8 @@ func cmdReplay(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- hist: synthetic assistant-turn wire shapes ----
 
+// cmdHist 造一段含 thinking+双 tool call 的合成历史，按 -shape 选
+// 合并/拆分形态发上游，验证不同 wire 排布是否都被接受。
 func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("hist", flag.ContinueOnError)
 	shape := fs.String("shape", "merged", "")
@@ -1120,6 +1117,8 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 
 // ---- bigctx ----
 
+// cmdBigctx 发一条 -kb 指定大小的单用户消息，探测上游请求体/
+// 上下文上限的报错码。
 func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("bigctx", flag.ContinueOnError)
 	kb := fs.Int("kb", 1024, "")
@@ -1147,6 +1146,8 @@ func cmdBigctx(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 
 // ---- misc: adjacent endpoints ----
 
+// cmdMisc 探测主链路之外的相邻端点：embeddings、外部 chat 补全流、
+// status/config/command 模型配置。
 func cmdMisc(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, _ []string) error {
 	emb, err := client.GetEmbeddings(ctx, connect.NewRequest(&devinproto.GetEmbeddingsRequest{
 		Request: &devinproto.ExaCodeiumCommonPb_EmbeddingsRequest{
@@ -1243,6 +1244,8 @@ func dumpConnectErr(err error) {
 
 // ---- edge cases ----
 
+// cmdEdge 按 case 名分派一组定向边界形态（孤儿 tool 结果、截断续传、
+// 非法签名、图片/PDF 通道等），逐个验证上游校验行为。
 func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, argv []string) error {
 	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
 	model := fs.String("model", "swe-2-max", "")
@@ -1323,6 +1326,32 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 		// 历史以 assistant 文本结尾（Anthropic prefill 形态）。
 		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
 			userMsg("List two colors."), assistantTextMsg("1. Blue"),
+		}
+	case "stall-resume-text":
+		// 中流 stall 续传形态：assistant 回合被截在半截，追加 continue
+		// 让模型续说。判定看续流是接着数（续传成功）还是从头重数。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			userMsg("Count from 1 to 20, one number per line, no other text."),
+			assistantTextMsg("1\n2\n3\n4\n5\n6\n7"),
+			userMsg("continue"),
+		}
+	case "stall-resume-midsentence":
+		// 句子中间截断（连标点都没有）——续写接缝质量的极限形态。
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			userMsg("Explain in one paragraph why the sky is blue."),
+			assistantTextMsg("The sky appears blue because sunlight is scattered by air molecules, and shorter blue wavelengths scat"),
+			userMsg("continue"),
+		}
+	case "stall-resume-thinking":
+		// 在飞 thinking 块的回传形态：有正文无签名（截断在签名到达前）。
+		// 验证上游是否接受无签名 thinking 历史。
+		thinking := assistantMsg()
+		thinking.Thinking = proto.String("The user wants counting. I will list numbers sequentially.")
+		thinking.Prompt = proto.String("1\n2\n3")
+		req.ChatMessagePrompts = []*devinproto.ExaChatPb_ChatMessagePrompt{
+			userMsg("Count from 1 to 10, one number per line, no other text."),
+			thinking,
+			userMsg("continue"),
 		}
 	case "trailing-tool-result":
 		// 历史以 tool 结果结尾且无后续 user（IDE 恢复会话的形态）。
@@ -1552,6 +1581,7 @@ func cmdEdge(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	return runStream(ctx, client, req, false, "")
 }
 
+// nonEmpty 空串返回 nil（字段省略），非空返回 *string。
 func nonEmpty(s string) *string {
 	if s == "" {
 		return nil
@@ -1559,6 +1589,7 @@ func nonEmpty(s string) *string {
 	return proto.String(s)
 }
 
+// trunc 把字符串截到前 n 字节。
 func trunc(s string, n int) string {
 	if len(s) > n {
 		return s[:n]
@@ -1568,6 +1599,8 @@ func trunc(s string, n int) string {
 
 // ---- websearch ----
 
+// cmdWebsearch 调 GetWebSearchResults，探测 query/limit/domain/mode
+// 与第三方 provider+model 组合字段。
 func cmdWebsearch(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("websearch", flag.ExitOnError)
 	query := fs.String("query", "", "search query (required)")
