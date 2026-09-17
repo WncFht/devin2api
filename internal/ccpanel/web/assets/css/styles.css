@@ -2148,7 +2148,7 @@ body {
 
 .filter-input:focus,
 .filter-select:focus {
-  outline: none;
+  outline: 2px solid transparent;
   border-color: var(--primary-500);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
@@ -6341,7 +6341,7 @@ html[data-resolved-theme="dark"] .chat-message .chat-patch-number {
 }
 
 .channel-enable-switch:focus-visible {
-  outline: none;
+  outline: 2px solid transparent;
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.22);
 }
 
@@ -6564,7 +6564,7 @@ html[data-resolved-theme="dark"] .chat-message .chat-patch-number {
 }
 
 .logs-pagination-card .logs-jump-input:focus {
-  outline: none;
+  outline: 2px solid transparent;
   border-color: var(--primary-500);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
   background: var(--field-bg-focus);
@@ -6593,7 +6593,7 @@ html[data-resolved-theme="dark"] .chat-message .chat-patch-number {
 }
 
 .modal-inline-select:focus {
-  outline: none;
+  outline: 2px solid transparent;
   border-color: var(--primary-500);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
