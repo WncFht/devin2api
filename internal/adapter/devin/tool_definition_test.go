@@ -3,6 +3,8 @@ package devin
 
 import (
 	"encoding/json"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -106,5 +108,127 @@ func TestConvertToolDefinitionStripsAnnotationsButKeepsSchema(t *testing.T) {
 	defaultValue := metadata["default"].(map[string]any)
 	if defaultValue["description"] != "literal business value" {
 		t.Fatalf("schema literal was changed: %#v", defaultValue)
+	}
+}
+
+// TestExtractParamDigestHoistsFieldDescriptions 的测试动机是字段级
+// prose 是条件必填的唯一载体，剥注解后必须有幸存通道。
+func TestExtractParamDigestHoistsFieldDescriptions(t *testing.T) {
+	digest := extractParamDigest(json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"delaySeconds":{"type":"number","description":"Seconds from now. Required unless \"stop\" is true."},
+			"stop":{"type":"boolean","title":"End the loop."},
+			"nested":{"type":"object","properties":{"inner":{"type":"string","description":"inner doc"}}},
+			"itemsList":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string","description":"item name doc"}}}},
+			"nodoc":{"type":"string"},
+			"bad":{"type":"string","description":""},
+			"cond":{"type":"string","description":"Fill it. Required unless \"stop\" is true."},
+			"neg":{"type":"string","description":"Purely optional, not required."}
+		},
+		"required":["delaySeconds"]
+	}`))
+	want := `- cond (string, required): Fill it. Required unless "stop" is true.
+- delaySeconds (number, required): Seconds from now. Required unless "stop" is true.
+- itemsList[].name (string): item name doc
+- neg (string): Purely optional, not required.
+- nested.inner (string): inner doc
+- stop (boolean): End the loop.`
+	if digest != want {
+		t.Fatalf("digest = %q, want %q", digest, want)
+	}
+}
+
+// TestFieldDocDigestRescuesRequiredTail 的测试动机是 e2e 实证的事故里
+// 程碑：条件必填写在长字段描述尾部时头部截断会把它杀掉（noop/prompt
+// 被模型整体省略），摘要必须把这种句子救回。
+func TestFieldDocDigestRescuesRequiredTail(t *testing.T) {
+	long := strings.Repeat("Padding detail about semantics. ", 12) + "Required unless `stop` is true."
+	got := fieldDocDigest(long)
+	if !strings.HasSuffix(got, "Required unless `stop` is true.") {
+		t.Fatalf("required tail lost: %q", got)
+	}
+	// 截断线内已含 required 句时不重复追加。
+	short := "Fill me. Required always. " + strings.Repeat("extra ", 50)
+	got = fieldDocDigest(short)
+	if strings.Count(got, "Required always.") != 1 {
+		t.Fatalf("required sentence duplicated: %q", got)
+	}
+}
+
+// TestRenderToolSectionDigestSurvivesCompact 的测试动机是 compact
+// 截断只应裁导引 prose，不能吃掉摘要里的必填语义（ScheduleWakeup
+// 事故形态：3396 字符描述被截在「何时用」讲完处，字段需求全丢）。
+func TestRenderToolSectionDigestSurvivesCompact(t *testing.T) {
+	entries := []toolSectionEntry{{
+		name:         "ScheduleWakeup",
+		description:  strings.Repeat("Sentence about usage. ", 40), // 800 chars > compact 预算
+		paramsDigest: `- noop (boolean): Required unless "stop" is true.`,
+	}}
+	compact := renderToolSection(entries, toolDescriptionCompactRunes)
+	if !strings.Contains(compact, "Parameters:\n- noop (boolean): Required unless \"stop\" is true.\n</tool>") {
+		t.Fatalf("digest missing from compact entry: %q", compact)
+	}
+	if strings.Contains(compact, strings.Repeat("Sentence about usage. ", 21)) {
+		t.Fatalf("description was not truncated: %q", compact)
+	}
+	// skinny 档连摘要也不发——纯名清单是最后兜底。
+	skinny := renderToolSection(entries, -1)
+	if skinny != "# available tools: ScheduleWakeup" {
+		t.Fatalf("skinny = %q", skinny)
+	}
+}
+
+// TestWithToolDescriptionsFieldOnlyToolGetsEntry 的测试动机是无顶层
+// 描述但有字段文档的工具（部分 MCP 工具形态）也要产出条目。
+func TestWithToolDescriptionsFieldOnlyToolGetsEntry(t *testing.T) {
+	prompt, err := withToolDescriptions("", []llm.ToolDefinition{{
+		Name:        "field_only",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"string","description":"the x field"}}}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# tools descriptions\n<tool name=\"field_only\">\n\n\nParameters:\n- x (string): the x field\n</tool>"
+	if prompt != want {
+		t.Fatalf("prompt = %q, want %q", prompt, want)
+	}
+}
+
+// TestWithToolDescriptionsRealSetStaysFull 的测试动机是用真实 CC
+// 28 工具集（dump 提取）钉住 full 档覆盖率：软顶内不截断，
+// ScheduleWakeup 的条件必填经摘要存活。
+func TestWithToolDescriptionsRealSetStaysFull(t *testing.T) {
+	data, err := os.ReadFile("testdata/cc_tools.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Tools []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"input_schema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	tools := make([]llm.ToolDefinition, 0, len(fixture.Tools))
+	for _, item := range fixture.Tools {
+		tools = append(tools, llm.ToolDefinition{Name: item.Name, Description: item.Description, InputSchema: item.InputSchema})
+	}
+	prompt, err := withToolDescriptions("sys", tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 全文存活的标志：ScheduleWakeup 描述尾部的 delaySeconds 选型章节。
+	if !strings.Contains(prompt, "Picking delaySeconds") {
+		t.Fatalf("full description was truncated: prompt tail = %q", prompt[len(prompt)-400:])
+	}
+	if !strings.Contains(prompt, "- noop (boolean, required)") || !strings.Contains(prompt, "Required unless `stop` is true") {
+		t.Fatalf("ScheduleWakeup digest missing conditional-required info")
+	}
+	if len(prompt) > toolPreambleSoftBytes {
+		t.Fatalf("section overflowed soft cap: %d > %d", len(prompt), toolPreambleSoftBytes)
 	}
 }

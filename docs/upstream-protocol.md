@@ -19,6 +19,7 @@
 - `configs`/`status`/`assign`/`misc`：`GetCliModelConfigs`、`CheckChatCapacity`/`CheckUserMessageRateLimit`/`GetModelStatuses`/`GetModelProviders`、`AssignModel`、`GetEmbeddings`/`GetStatus`/`GetConfig`/`GetCommandModelConfigs`/旧 chat 面。
 - `bigctx -kb N`：发 ~N KB 单条 user 消息观察错误码，探 prompt 长度上限的边界行为。
 - `websearch -query <q>`：直连 `GetWebSearchResults` 打靶（`-limit`/`-domain`/`-mode`/`-provider`/`-wmodel`）。
+- `toolchan <变体|all> [-n N] [-prompt 文本]`：工具文档通道可读性判别——合成工具字段魔法值只写进单一被测通道（description/schema 字段描述/system 注入段/required/anyOf），`sw-*` 变体用真实 ScheduleWakeup 定义复现事故与修复形态。
 - `registry`：LanguageServerService 的 `GetSystemPromptAndTools`/`GetMcpServerStates`/`GetAllSkills` 按 planner-mode 分档探测——**整族在 server.codeium.com 不 host（两种包名路径全 404）**，工具注册表/system prompt 是客户端编译产物不走线上 RPC，该子命令的价值是阴性结论存档。
 
 抓真实 CLI 流量的方法（`credentials.toml` 指本地捕获服务器 + 回放启动 RPC）见 `upstream-debug-playbook.md`「逆向参考」。

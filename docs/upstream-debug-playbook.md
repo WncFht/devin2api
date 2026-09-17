@@ -130,7 +130,7 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 3. **thinking 挂每条 assistant 消息**（#11），签名 #12 跟 thinking 走。
 4. **tool result 文本不能为空**，空则占位 `[tool result]`。
 5. **完全空的 assistant 轮跳过**（实测诱发上游反复返回空回复）。
-6. **工具 schema 剥离**：`Description` 换工具名、剥 annotations（`convertToolDefinition`，防 Cursor 类 MCP-gate 指纹）。
+6. **工具 schema 剥离**：`Description` 换工具名、剥 annotations（`convertToolDefinition`，防 Cursor 类 MCP-gate 指纹）。被剥掉的信息经 `withToolDescriptions` 搬进 system prompt 尾的 `# tools descriptions` 段：每个工具一条 `<tool name="…">`，内含编号化说明全文 + `Parameters:` 字段摘要（从原始 `input_schema` 的字段级 `description`/`title` 提升——条件必填如 "Required unless `stop` is true" 只活在字段 prose 里，剥离后摘要就是它唯一的幸存通道；行头对 prose 声明必填的字段补标 `required`，超长描述截头时 required 尾句必保留）。注入段按预算分级：96KB 软顶内全文，超出降 compact（说明截 400 runes、摘要完整），再超降 skinny（纯名清单），skinny 过 256KB 硬顶报 `tool_preamble_too_large` 400。实证记录见 `notes/archive/2026-09-17-schedulewakeup-conditional-required.md`。
 7. **特征句指纹库**（`permission_denied`）：对 system prompt / 消息 / 工具描述做等义改写，规则在 `sanitize.go`——对齐 WindsurfAPI 实证规则 + 本项目 bisect 新增的 CC/Codex 指纹（tool-call 冒号句、CC 2.1.x 提示词行、subagent emoji 禁令、Codex 模板三条等，逐条实证记录见 `upstream-policy-fingerprints.md`）。
 8. ~~空 system prompt + 带 tools 会被拒~~：**2026-09-12 实测已不成立**——上游不再因此拒绝，代码也已不再注入兜底 system prompt（仅 `withToolDescriptions` 把工具说明并入 system 字段）。保留此条仅为解释旧记录。
 9. **前缀缓存**：内容前缀即命中，无需会话状态；`trajectory_id`/`cascade_id` 稳定 + EPHEMERAL 断点可提升命中率（详见 `upstream-cache.md`）。

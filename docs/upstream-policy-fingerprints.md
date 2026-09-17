@@ -94,17 +94,17 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 
 ### 实测通过
 
-| 面           | 实验                                                                                                               | 结果                                                                                                  |
-| ------------ | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| MCP 工具名   | 声明 `mcp__ide__getDiagnostics` 并强制调用                                                                         | 模型正确发 `tool_use`，id 形如 `mcp__ide__getDiagnostics_0`，名与参数（`{"file":"main.go"}`）完整回传 |
-| MCP 工具数量 | 声明 50 个 `mcp__srvN__tool` / 150 个普通工具                                                                      | 200，无数量上限迹象                                                                                   |
-| MCP 结果带图 | `tool_result` 内嵌 image 块（截图模式）                                                                            | 200，图片正常进 wire `images` 字段                                                                    |
-| 图片输入     | 64×64 PNG 作为 user 内容                                                                                           | 200，模型可描述内容（`supports_images:true` 属实）                                                    |
-| thinking     | `thinking:{type:enabled}` + 回放伪造 `sealed.v1.` 签名                                                             | 200，上游不校验历史签名的真实性                                                                       |
-| max_tokens   | 200000                                                                                                             | 200（上限内静默接受）                                                                                 |
-| 注入文本     | `<system-reminder>` skill 列表、agent 类型列表、`# MCP Server Instructions` 块、SKILL.md/agent.md frontmatter 正文 | 全部 200                                                                                              |
-| CC 工具描述  | 真实请求的 29 个工具描述（Agent/Skill/Workflow/TaskCreate/CronCreate/SendMessage/ReportFindings/mcp__ide__\* 等）  | 全部 200（描述经 `# tools descriptions` 段并入 system prompt）                                        |
-| Codex 模板   | skills-usage 段（`## Skills` / `### Available skills`）、autonomous loop ×2                                        | 200                                                                                                   |
+| 面           | 实验                                                                                                               | 结果                                                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| MCP 工具名   | 声明 `mcp__ide__getDiagnostics` 并强制调用                                                                         | 模型正确发 `tool_use`，id 形如 `mcp__ide__getDiagnostics_0`，名与参数（`{"file":"main.go"}`）完整回传   |
+| MCP 工具数量 | 声明 50 个 `mcp__srvN__tool` / 150 个普通工具                                                                      | 200，无数量上限迹象                                                                                     |
+| MCP 结果带图 | `tool_result` 内嵌 image 块（截图模式）                                                                            | 200，图片正常进 wire `images` 字段                                                                      |
+| 图片输入     | 64×64 PNG 作为 user 内容                                                                                           | 200，模型可描述内容（`supports_images:true` 属实）                                                      |
+| thinking     | `thinking:{type:enabled}` + 回放伪造 `sealed.v1.` 签名                                                             | 200，上游不校验历史签名的真实性                                                                         |
+| max_tokens   | 200000                                                                                                             | 200（上限内静默接受）                                                                                   |
+| 注入文本     | `<system-reminder>` skill 列表、agent 类型列表、`# MCP Server Instructions` 块、SKILL.md/agent.md frontmatter 正文 | 全部 200                                                                                                |
+| CC 工具描述  | 真实请求的 29 个工具描述（Agent/Skill/Workflow/TaskCreate/CronCreate/SendMessage/ReportFindings/mcp__ide__\* 等）  | 全部 200（描述经 `# tools descriptions` 段并入 system prompt，字段级文档以 `Parameters:` 摘要同行下发） |
+| Codex 模板   | skills-usage 段（`## Skills` / `### Available skills`）、autonomous loop ×2                                        | 200                                                                                                     |
 
 ### 实测发现的限制
 
