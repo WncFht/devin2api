@@ -248,7 +248,8 @@ func statusTermSQL(t string) (string, int, bool) {
 	return frag, val, true
 }
 
-// SearchLogs 返回命中行（新在前，time/id 双键倒序）与命中总数 total
+// SearchLogs 返回命中行（新在前，id 倒序=旧 index 追加序倒排的忠实
+// 移植——行只在完成时落库，id 序即完成序）与命中总数 total
 // （分页前的完整计数——COUNT(*) OVER() 与旧「窗口内扫到的命中数」不同，
 // 旧口径只是读取窗口内的命中，新口径是 SQL 精确值）。
 func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, total int64, err error) {
@@ -260,7 +261,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	offset := max(q.Offset, 0)
 	sqlRows, err := s.db.QueryContext(ctx,
 		`SELECT `+logColumns+`, COUNT(*) OVER() FROM logs`+where+
-			` ORDER BY time DESC, id DESC LIMIT ? OFFSET ?`,
+			` ORDER BY id DESC LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -273,7 +274,18 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 		}
 		rows = append(rows, r)
 	}
-	return rows, total, sqlRows.Err()
+	if err := sqlRows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// offset 越过命中尾部时窗口函数没有行可挂，total 留在零值——
+	// 补一次标量计数把真实命中数还给分页器（空结果同样走这里）。
+	if len(rows) == 0 {
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+	}
+	return rows, total, nil
 }
 
 // ExistsLogBefore 报告是否存在 time 早于 ms 的行（has_more 的
@@ -600,7 +612,7 @@ func (s *Store) LogLastByModel(ctx context.Context, kh string) (map[string]LogMo
 		rows, err := s.db.QueryContext(ctx, `
 			SELECT emodel, time, id, status_code, result FROM (
 				SELECT `+logEModelExpr+` AS emodel, time, id, status_code, result,
-					ROW_NUMBER() OVER (PARTITION BY `+logEModelExpr+` ORDER BY time DESC, id DESC) AS rn
+					ROW_NUMBER() OVER (PARTITION BY `+logEModelExpr+` ORDER BY id DESC) AS rn
 				FROM logs WHERE `+cond+khCond+`
 			) WHERE rn = 1`, args...)
 		if err != nil {
@@ -649,7 +661,7 @@ func (s *Store) LogTrendSeeds(ctx context.Context, limit int) ([]LogTrendSeed, e
 		SELECT time + duration_ms,
 			CASE WHEN status_code >= 400 OR (result != '' AND result != 'completed') THEN 1 ELSE 0 END
 		FROM logs WHERE time + duration_ms >= ?
-		ORDER BY time DESC, id DESC LIMIT ?`, cut, limit)
+		ORDER BY id DESC LIMIT ?`, cut, limit)
 	if err != nil {
 		return nil, err
 	}
