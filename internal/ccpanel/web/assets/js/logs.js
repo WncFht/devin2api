@@ -5,10 +5,10 @@ const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 // 列表/筛选选项/指标条走 /dashboard/* 镜像——与 /admin 同一批 handler，
 // withWebAuth 两种角色都放行，api_token 身份下按 KeyHash 收敛；否则
 // api_token 会话首个抓取 401 就会把整页弹回登录。调试目录文件与服务端
-// 合并视图留在 /admin/debug-logs/{id}/*——{id} 是 started_at 的
-// epoch 毫秒（日志行 id 同口径），目录无属主校验，不对 api_token 开放。
-// 进行中的请求用 active-requests 列表的 start_time（同 UnixMilli）
-// 反查目录，FNV 哈希 id 不能解析目录。
+// 合并视图留在 /admin/debug-logs/{id}/*——{id} 是日志行自增主键（迁移前
+// 的 started_at 毫秒戳链接仍由后端兜底解析），目录无属主校验，不对
+// api_token 开放。进行中的请求用 active-requests 列表的 start_time
+// （UnixMilli）反查目录，FNV 哈希 id 不能解析目录。
 const LOGS_LIST_URL = '/dashboard/logs';
 const LOGS_BOOTSTRAP_URL = '/dashboard/logs/bootstrap';
 const LOGS_MODELS_URL = '/dashboard/models';
@@ -2327,9 +2327,10 @@ const debugMergedStates = {
   'translated-response': { visible: false, sourceBody: null, loading: false }
 };
 
-// debugFileContext 记录当前模态框对应的可解析目录 id（started_at epoch
-// 毫秒——files/merged 端点的 {id}）与已打开文件名/大小；活跃请求模态框的
-// log_id 是 FNV 哈希不能解析目录，fileId 由活跃列表 start_time 反查。
+// debugFileContext 记录当前模态框对应的可解析目录 id（files/merged 端点
+// 的 {id}：日志行自增 id，或历史链接的 started_at 毫秒戳）与已打开文件
+// 名/大小；活跃请求模态框的 log_id 是 FNV 哈希不能解析目录，fileId 由
+// 活跃列表 start_time 反查。
 let debugFileContext = null;
 
 async function showDebugLogModal(logId) {
