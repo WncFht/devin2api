@@ -3,7 +3,7 @@
 
     window.trendData = null;
     window.currentRange = 'today'; // 默认"本日"
-    window.currentTrendType = 'first_byte'; // 默认显示首字响应趋势 (count/rpm/tps/first_byte/duration/tokens/cost)
+    window.currentTrendType = 'first_byte'; // 默认显示首字响应趋势 (count/rpm/tps/error_rate/first_byte/duration/tokens/cost/cache_hit)
     window.currentTrendChartType = 'line'; // 默认使用折线图，可切换为柱状图
     window.currentModel = ''; // 当前选中的模型（空字符串表示全部模型）
     window.currentAuthToken = ''; // 当前选中的令牌（空字符串表示全部令牌）
@@ -256,14 +256,14 @@
         updateModelFilter();
         renderChart();
 
-        // 更新分桶提示
+        // 更新分桶提示：尾部带本次拉取时刻，自动刷新时看数据新不新
         const iv = document.getElementById('bucket-interval');
         if (iv) {
           iv.textContent = t('trend.dataInterval', {
             interval: formatInterval(window.currentBucketSec),
             points: trendData.length,
             total: debugTotal || t('trend.unknown')
-          });
+          }) + ' · ' + t('trend.updatedAt', { time: fmtBucketTime(Date.now(), false, true) });
         }
         // 信息片宽度随数据变化，可能改变切换组是否溢出
         updateToolbarScrollHint();
@@ -703,6 +703,39 @@
             return [tsMs[i], total > 0 ? (hit / total) * 100 : null];
           })
         });
+      } else if (trendType === 'error_rate') {
+        // 错误率趋势：error/(success+error)——低流量期的失败尖峰在次数视图里被压扁，
+        // 归一化后才看得见；空桶为 null 不画点
+        series.push({
+          name: t('trend.errorRate'),
+          type: 'line',
+          smooth: 0.25,
+          symbol: 'circle',
+          symbolSize: 4,
+          showSymbol: false,
+          sampling: 'lttb',
+          connectNulls: false,
+          emphasis: { focus: 'series', showSymbol: true },
+          itemStyle: {
+            color: '#ef4444'
+          },
+          lineStyle: {
+            width: 2,
+            color: '#ef4444',
+            cap: 'round',
+            join: 'round'
+          },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(239, 68, 68, 0.16)' },
+              { offset: 1, color: 'rgba(239, 68, 68, 0.00)' }
+            ])
+          },
+          data: window.trendData.map((point, i) => {
+            const total = (point.success || 0) + (point.error || 0);
+            return [tsMs[i], total > 0 ? ((point.error || 0) / total) * 100 : null];
+          })
+        });
       }
 
       // 为每个可见模型添加对应趋势线
@@ -993,6 +1026,38 @@
               data: hitData
             });
           }
+        } else if (trendType === 'error_rate') {
+          // 错误率趋势：模型失败率（与聚合线同式）
+          const errRateData = new Array(dataLen);
+          let hasData = false;
+
+          for (let i = 0; i < dataLen; i++) {
+            const models = trendData[i].models;
+            const modelData = models ? models[modelName] : null;
+            const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
+            if (total > 0) {
+              errRateData[i] = [tsMs[i], ((modelData.error || 0) / total) * 100];
+              hasData = true;
+            } else {
+              errRateData[i] = [tsMs[i], null];
+            }
+          }
+
+          if (hasData) {
+            series.push({
+              name: modelName,
+              drillModel: modelName,
+              type: 'line',
+              smooth: 0.25,
+              symbol: 'none',
+              sampling: 'lttb',
+              connectNulls: false,
+              emphasis: { focus: 'series' },
+              itemStyle: { color: color },
+              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
+              data: errRateData
+            });
+          }
         }
       }
 
@@ -1087,7 +1152,7 @@
           data: series.map(s => s.name),
           top: 10,
           left: 16,
-          right: 16,
+          right: 48, // 右上角留给导出按钮
           textStyle: {
             color: chartTheme.mutedText,
             fontSize: 11
@@ -1102,6 +1167,19 @@
           pageTextStyle: {
             color: chartTheme.mutedText,
             fontSize: 10
+          }
+        },
+        toolbox: {
+          right: 10,
+          top: 6,
+          feature: {
+            saveAsImage: {
+              title: t('trend.saveAsImage'),
+              name: 'devin-trend',
+              backgroundColor: chartTheme.surface,
+              pixelRatio: 2,
+              iconStyle: { borderColor: chartTheme.mutedText }
+            }
           }
         },
         grid: {
@@ -1333,7 +1411,9 @@
       if (!base || !Array.isArray(base.data)) return;
       const chartTheme = getTrendChartTheme();
 
-      const values = base.data.filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0);
+      const values = base.data
+        .filter(d => Array.isArray(d) && typeof d[1] === 'number' && Number.isFinite(d[1]) && d[1] > 0)
+        .map(d => d[1]);
       if (values.length < 5) return;
 
       const p50 = percentile(values, 0.50);
@@ -1442,7 +1522,7 @@
         if (value >= 1000) return (value / 1000).toFixed(1) + 'K/s';
         return value.toFixed(1) + '/s';
       }
-      if (trendType === 'cache_hit') {
+      if (trendType === 'cache_hit' || trendType === 'error_rate') {
         return value.toFixed(1) + '%';
       }
       if (compact) {
@@ -1962,7 +2042,7 @@
 
         // 恢复趋势类型
         window.currentTrendType = 'first_byte';
-        if (['count', 'rpm', 'tps', 'first_byte', 'duration', 'tokens', 'cost', 'cache_hit'].includes(restoredFilters.trendType)) {
+        if (['count', 'rpm', 'tps', 'error_rate', 'first_byte', 'duration', 'tokens', 'cost', 'cache_hit'].includes(restoredFilters.trendType)) {
           window.currentTrendType = restoredFilters.trendType;
         }
 
