@@ -14,6 +14,8 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
+// TestPrepareFreshOutputDeletesExistingContents 验证输出目录被整体重建：
+// 陈旧文件删除、目录保留、两个返回值均为绝对路径。
 func TestPrepareFreshOutputDeletesExistingContents(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "language-server")
@@ -44,6 +46,9 @@ func TestPrepareFreshOutputDeletesExistingContents(t *testing.T) {
 	}
 }
 
+// TestValidateDestructiveOutputPathRejectsBroadOrSourceContainingTargets
+// 验证根目录/家目录/包含 cwd 或源二进制的输出路径被 RemoveAll 前拦下，
+// 安全的同级目录放行。
 func TestValidateDestructiveOutputPathRejectsBroadOrSourceContainingTargets(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "bin", "language-server")
@@ -64,6 +69,9 @@ func TestValidateDestructiveOutputPathRejectsBroadOrSourceContainingTargets(t *t
 	}
 }
 
+// TestScanFileDescriptorsHandlesProto2CommentsAndDuplicates 验证二进制
+// 扫描：同名候选保留带注释的高质量副本、proto2 语法缺省不回填、
+// public/option dependency 原样保留。
 func TestScanFileDescriptorsHandlesProto2CommentsAndDuplicates(t *testing.T) {
 	proto2Poor := testFile("example/legacy.proto", "example.legacy", "", "Legacy")
 	proto2Rich := proto.Clone(proto2Poor).(*descriptorpb.FileDescriptorProto)
@@ -109,6 +117,10 @@ func TestScanFileDescriptorsHandlesProto2CommentsAndDuplicates(t *testing.T) {
 	}
 }
 
+// TestFlattenDescriptorsProducesOneCompilableWireCompatibleFile 是展平
+// 主链路的端到端验证：跨包类型改名重写、proto3 optional 合成 oneof
+// 拆除、packed 线网编码保留、proto2 required/default 保留、严格解析
+// 成功即 bundle 自洽可编译。
 func TestFlattenDescriptorsProducesOneCompilableWireCompatibleFile(t *testing.T) {
 	root := &descriptorpb.FileDescriptorProto{
 		Name:       proto.String("api.proto"),
@@ -222,9 +234,12 @@ func TestFlattenDescriptorsProducesOneCompilableWireCompatibleFile(t *testing.T)
 		t.Fatalf("method types not rewritten: input=%q output=%q", method.GetInputType(), method.GetOutputType())
 	}
 
-	bundle, err := renderFlattened(flat, 3, protoprint.Printer{})
+	bundle, compilable, err := renderFlattened(flat, 3, protoprint.Printer{})
 	if err != nil {
 		t.Fatalf("render flattened proto: %v", err)
+	}
+	if !compilable {
+		t.Fatal("self-contained flattened descriptor must report compilable")
 	}
 	text := string(bundle)
 	for _, want := range []string{
@@ -244,6 +259,8 @@ func TestFlattenDescriptorsProducesOneCompilableWireCompatibleFile(t *testing.T)
 	}
 }
 
+// TestManifestReportsMissingDependenciesAndCommentCoverage 验证 manifest
+// 上报缺失依赖、注释覆盖率，以及 compilable=true 时的可编译标记。
 func TestManifestReportsMissingDependenciesAndCommentCoverage(t *testing.T) {
 	file := testFile("example/service.proto", "example", "proto3", "Request")
 	file.Dependency = []string{"missing/types.proto"}
@@ -255,7 +272,7 @@ func TestManifestReportsMissingDependenciesAndCommentCoverage(t *testing.T) {
 		}},
 	}
 
-	manifest := buildManifest("binary", defaultBundleName, []*descriptorpb.FileDescriptorProto{file}, scanStats{Candidates: 1}, flattenMetadata{Package: "example", Syntax: "proto2"})
+	manifest := buildManifest("binary", defaultBundleName, []*descriptorpb.FileDescriptorProto{file}, scanStats{Candidates: 1}, flattenMetadata{Package: "example", Syntax: "proto2"}, true)
 	if len(manifest.MissingDependencies) != 1 || manifest.MissingDependencies[0] != "missing/types.proto" {
 		t.Fatalf("unexpected missing dependencies: %v", manifest.MissingDependencies)
 	}
@@ -267,6 +284,7 @@ func TestManifestReportsMissingDependenciesAndCommentCoverage(t *testing.T) {
 	}
 }
 
+// findMessage 按名找顶层消息，找不到即 fail。
 func findMessage(t *testing.T, file *descriptorpb.FileDescriptorProto, name string) *descriptorpb.DescriptorProto {
 	t.Helper()
 	for _, message := range file.GetMessageType() {
@@ -278,6 +296,7 @@ func findMessage(t *testing.T, file *descriptorpb.FileDescriptorProto, name stri
 	return nil
 }
 
+// testFile 造一个只含一条 string 字段消息的最小 FileDescriptorProto。
 func testFile(name, pkg, syntax, messageName string) *descriptorpb.FileDescriptorProto {
 	file := &descriptorpb.FileDescriptorProto{
 		Name:    proto.String(name),
@@ -299,6 +318,7 @@ func testFile(name, pkg, syntax, messageName string) *descriptorpb.FileDescripto
 	return file
 }
 
+// writeDescriptorForTest 把描述符 marshal 后追加进缓冲，模拟二进制内嵌。
 func writeDescriptorForTest(t *testing.T, out *bytes.Buffer, file *descriptorpb.FileDescriptorProto) {
 	t.Helper()
 	data, err := proto.Marshal(file)
@@ -308,6 +328,8 @@ func writeDescriptorForTest(t *testing.T, out *bytes.Buffer, file *descriptorpb.
 	out.Write(data)
 }
 
+// TestIndividualProtoCanBeReconstructed 验证单个描述符经 protodesc
+// 解析后能被 protoprint 还原成含原消息声明的 .proto 源。
 func TestIndividualProtoCanBeReconstructed(t *testing.T) {
 	file := testFile("example/simple.proto", "example", "proto3", "Simple")
 	fd, err := protodesc.NewFile(file, nil)

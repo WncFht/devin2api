@@ -37,6 +37,9 @@ type flattenState struct {
 	mappings       []symbolMapping
 }
 
+// flattenDescriptors 把多文件描述符集合并成一个 proto2 单文件：根包
+// 符号保留原名，非根包符号加包前缀重命名，类型引用逐处改写，源码注释
+// 按新声明位次重映射；返回展平文件与重命名元数据（供 manifest 上报）。
 func flattenDescriptors(files []*descriptorpb.FileDescriptorProto, preferredPackage string) (*descriptorpb.FileDescriptorProto, flattenMetadata, error) {
 	rootPackage := chooseRootPackage(files, preferredPackage)
 	state := &flattenState{
@@ -135,6 +138,8 @@ func flattenDescriptors(files []*descriptorpb.FileDescriptorProto, preferredPack
 	return flat, metadata, nil
 }
 
+// chooseRootPackage 选 bundle 的根包：preferred 在场即用，否则取字典序
+// 最小的非空包名；全无包名时落到固定占位包。
 func chooseRootPackage(files []*descriptorpb.FileDescriptorProto, preferred string) string {
 	for _, file := range files {
 		if file.GetPackage() == preferred {
@@ -159,6 +164,8 @@ func chooseRootPackage(files []*descriptorpb.FileDescriptorProto, preferred stri
 	return "protoextract_flattened"
 }
 
+// registerFileSymbols 登记一个文件的全部顶层符号：根包文件直接用原名，
+// 其他包加 CamelCase 前缀；撞名经 reserve 加序号，原名→新名写映射表。
 func (state *flattenState) registerFileSymbols(file *descriptorpb.FileDescriptorProto) {
 	prefix := packagePrefix(file.GetPackage())
 	root := file.GetPackage() == state.rootPackage
@@ -224,6 +231,8 @@ func (state *flattenState) registerFileSymbols(file *descriptorpb.FileDescriptor
 	}
 }
 
+// registerNestedMessageSymbols 递归登记嵌套消息与嵌套枚举：嵌套名不参与
+// 顶层改名（展平只动顶层声明），但要进 typeNames/enumValues 供引用改写查。
 func (state *flattenState) registerNestedMessageSymbols(originalParent, flattenedParent string, message *descriptorpb.DescriptorProto) {
 	for _, nested := range message.GetNestedType() {
 		original := qualify(originalParent, nested.GetName())
@@ -243,6 +252,7 @@ func (state *flattenState) registerNestedMessageSymbols(originalParent, flattene
 	}
 }
 
+// reserve 占用一个顶层名：撞名时追加 _2、_3… 序号直到空闲。
 func (state *flattenState) reserve(candidate string) string {
 	name := candidate
 	for suffix := 2; ; suffix++ {
@@ -254,10 +264,13 @@ func (state *flattenState) reserve(candidate string) string {
 	}
 }
 
+// addMapping 追加一条原名→展平名映射记录。
 func (state *flattenState) addMapping(kind, original, flattened string) {
 	state.mappings = append(state.mappings, symbolMapping{Kind: kind, Original: original, Flattened: flattened})
 }
 
+// rewriteMessage 就地改写消息副本：清自定义选项、拆 proto3 optional
+// 合成 oneof、重写字段/扩展的类型引用，并递归处理嵌套声明。
 func (state *flattenState) rewriteMessage(file *descriptorpb.FileDescriptorProto, original string, message *descriptorpb.DescriptorProto) error {
 	message.Options = cleanMessageOptions(message.GetOptions())
 	if err := removeSyntheticOneofs(message); err != nil {
@@ -283,6 +296,7 @@ func (state *flattenState) rewriteMessage(file *descriptorpb.FileDescriptorProto
 	return nil
 }
 
+// rewriteEnum 就地改写枚举副本：按映射表替换被改名的枚举值并清掉值级选项。
 func (state *flattenState) rewriteEnum(original string, enum *descriptorpb.EnumDescriptorProto) {
 	enum.Options = cleanEnumOptions(enum.GetOptions())
 	for _, value := range enum.GetValue() {
@@ -293,6 +307,8 @@ func (state *flattenState) rewriteEnum(original string, enum *descriptorpb.EnumD
 	}
 }
 
+// rewriteService 就地改写服务副本：清服务/方法选项并把方法的输入输出
+// 类型名重定向到展平后的符号。
 func (state *flattenState) rewriteService(service *descriptorpb.ServiceDescriptorProto) {
 	service.Options = nil
 	for _, method := range service.GetMethod() {
@@ -302,6 +318,9 @@ func (state *flattenState) rewriteService(service *descriptorpb.ServiceDescripto
 	}
 }
 
+// rewriteField 就地改写字段副本：类型/extendee 引用重定向、枚举默认值
+// 跟随改名、扩展字段清 json_name（.proto 源里不可拼写）、packed 选项按
+// 原文件语法显式落定、剥掉 proto3_optional 标记。
 func (state *flattenState) rewriteField(file *descriptorpb.FileDescriptorProto, field *descriptorpb.FieldDescriptorProto) {
 	isExtension := field.GetExtendee() != ""
 	originalType := strings.TrimPrefix(field.GetTypeName(), ".")
@@ -324,6 +343,8 @@ func (state *flattenState) rewriteField(file *descriptorpb.FileDescriptorProto, 
 	field.Proto3Optional = nil
 }
 
+// rewriteTypeName 把一个 .pkg.Type 引用重定向到展平后的全限定名；
+// 不在映射表里的名字原样返回（标量字段为空串、外部缺依赖类型原样保留）。
 func (state *flattenState) rewriteTypeName(name string) string {
 	if name == "" {
 		return ""
@@ -335,6 +356,7 @@ func (state *flattenState) rewriteTypeName(name string) string {
 	return name
 }
 
+// optionalString 把空串折成 nil 指针：描述符里空名等价于字段缺席。
 func optionalString(value string) *string {
 	if value == "" {
 		return nil
@@ -342,6 +364,9 @@ func optionalString(value string) *string {
 	return proto.String(value)
 }
 
+// effectivePacked 计算字段的真实 packed 编码：proto3 标量/枚举 repeated
+// 默认 packed，proto2 默认不 packed，显式 options.packed 恒优先——展平
+// 后统一写 proto2 语法，必须把隐式默认落成显式选项保住线网编码。
 func effectivePacked(file *descriptorpb.FileDescriptorProto, field *descriptorpb.FieldDescriptorProto) bool {
 	if field.GetLabel() != descriptorpb.FieldDescriptorProto_LABEL_REPEATED || !isPackable(field.GetType()) {
 		return false
@@ -352,6 +377,7 @@ func effectivePacked(file *descriptorpb.FileDescriptorProto, field *descriptorpb
 	return file.GetSyntax() == "proto3"
 }
 
+// isPackable 报字段类型是否可 packed 编码（数值/布尔/枚举标量）。
 func isPackable(kind descriptorpb.FieldDescriptorProto_Type) bool {
 	switch kind {
 	case descriptorpb.FieldDescriptorProto_TYPE_DOUBLE,
@@ -374,6 +400,9 @@ func isPackable(kind descriptorpb.FieldDescriptorProto_Type) bool {
 	}
 }
 
+// removeSyntheticOneofs 拆掉 proto3 optional 编译器合成的单成员 oneof：
+// proto2 源不允许这种形态，optional 关键字直接表达 presence。引用被拆
+// oneof 的字段重置索引，其余 oneof 索引重排；索引错位按结构损伤报错。
 func removeSyntheticOneofs(message *descriptorpb.DescriptorProto) error {
 	removed := make(map[int32]struct{})
 	for _, field := range message.GetField() {
@@ -414,6 +443,8 @@ func removeSyntheticOneofs(message *descriptorpb.DescriptorProto) error {
 	return nil
 }
 
+// cleanMessageOptions 只保留对展平 bundle 有语义的消息选项
+// （message_set_wire_format、map_entry），其余全部剥掉。
 func cleanMessageOptions(options *descriptorpb.MessageOptions) *descriptorpb.MessageOptions {
 	if options == nil {
 		return nil
@@ -431,6 +462,7 @@ func cleanMessageOptions(options *descriptorpb.MessageOptions) *descriptorpb.Mes
 	return clean
 }
 
+// cleanEnumOptions 只保留 allow_alias（影响枚举编译合法性），其余剥掉。
 func cleanEnumOptions(options *descriptorpb.EnumOptions) *descriptorpb.EnumOptions {
 	if options == nil || options.AllowAlias == nil {
 		return nil
@@ -438,6 +470,9 @@ func cleanEnumOptions(options *descriptorpb.EnumOptions) *descriptorpb.EnumOptio
 	return &descriptorpb.EnumOptions{AllowAlias: proto.Bool(options.GetAllowAlias())}
 }
 
+// remapSourceInfo 把一份文件的 SourceCodeInfo 路径按展平文件里的声明
+// 偏移重编号；无法落到声明上的 location（文件级注释等）把注释文本提出
+// 到返回值的第二槽，由调用方汇进 bundle 头部。
 func remapSourceInfo(file *descriptorpb.FileDescriptorProto, messageOffset, enumOffset, serviceOffset, extensionOffset int) (*descriptorpb.SourceCodeInfo, []string) {
 	if file.GetSourceCodeInfo() == nil {
 		return nil, nil
@@ -472,6 +507,7 @@ func remapSourceInfo(file *descriptorpb.FileDescriptorProto, messageOffset, enum
 	return mapped, unmapped
 }
 
+// locationCommentText 提取一条 location 携带的全部注释并冠以来源文件名。
 func locationCommentText(fileName string, location *descriptorpb.SourceCodeInfo_Location) string {
 	var parts []string
 	parts = append(parts, location.GetLeadingDetachedComments()...)
@@ -487,6 +523,7 @@ func locationCommentText(fileName string, location *descriptorpb.SourceCodeInfo_
 	return fmt.Sprintf("Comments from %s:\n%s", fileName, strings.Join(parts, "\n"))
 }
 
+// mergeSourceInfo 把一份 SourceCodeInfo 的 location 追加进另一份。
 func mergeSourceInfo(current, addition *descriptorpb.SourceCodeInfo) *descriptorpb.SourceCodeInfo {
 	if addition == nil || len(addition.GetLocation()) == 0 {
 		return current
@@ -498,6 +535,8 @@ func mergeSourceInfo(current, addition *descriptorpb.SourceCodeInfo) *descriptor
 	return current
 }
 
+// filterSourceInfo 复核重映射后的 location 路径在展平文件里真实存在
+// （改名/删字段会让路径悬空）；悬空项把注释文本提出到第二返回值。
 func filterSourceInfo(file *descriptorpb.FileDescriptorProto, originalName string, source *descriptorpb.SourceCodeInfo) (*descriptorpb.SourceCodeInfo, []string) {
 	if source == nil {
 		return nil, nil
@@ -516,6 +555,8 @@ func filterSourceInfo(file *descriptorpb.FileDescriptorProto, originalName strin
 	return valid, removed
 }
 
+// sourcePathExists 沿 source location 的字段号/下标交替路径逐级下钻，
+// 验证路径在描述符消息上可解。
 func sourcePathExists(message protoreflect.Message, path []int32) bool {
 	if len(path) == 0 {
 		return true
@@ -559,6 +600,7 @@ func sourcePathExists(message protoreflect.Message, path []int32) bool {
 	return true
 }
 
+// qualify 按 proto 全限定名规则用点拼接父子名；任一侧为空时回另一侧。
 func qualify(parent, name string) string {
 	if parent == "" {
 		return name
@@ -569,6 +611,7 @@ func qualify(parent, name string) string {
 	return parent + "." + name
 }
 
+// shortName 取全限定名的最后一段（去掉包/父消息前缀）。
 func shortName(fullName string) string {
 	if index := strings.LastIndexByte(fullName, '.'); index >= 0 {
 		return fullName[index+1:]
@@ -576,6 +619,8 @@ func shortName(fullName string) string {
 	return fullName
 }
 
+// packagePrefix 把包名转成 CamelCase 前缀（exa.chat_pb → ExaChatPb），
+// 非字母数字字符当分词界；空包名回固定占位 "NoPackage"。
 func packagePrefix(pkg string) string {
 	var out strings.Builder
 	upper := true
