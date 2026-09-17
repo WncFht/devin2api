@@ -291,12 +291,13 @@ st=1
 [[ "$(jq -r 'index("good") != null and index("bad") != null' <<<"$accounts_json")" == true ]] && st=0
 check "runtime-metrics accounts 含 good+bad（实测 $accounts_json）" "$st"
 
-# gate-state-<name>.json 按 lane 分文件落盘（无闩事件时可能尚未写——仅报告）。
+# 闸门闩态按 lane 入库（runtime_state 键 gate:<name>；无闩事件时无行——仅报告）。
 for name in good bad; do
-	if [[ -f "$LOGS/gate-state-$name.json" ]]; then
-		echo "INFO  gate-state-$name.json 存在: $(tr -d '\n' <"$LOGS/gate-state-$name.json" | head -c 200)"
+	row="$(sqlite3 "$STATE_DIR/devin-2api.db" "SELECT value FROM runtime_state WHERE key='gate:$name'" 2>/dev/null || true)"
+	if [[ -n "$row" ]]; then
+		echo "INFO  gate:$name 已持久化: $(head -c 200 <<<"$row")"
 	else
-		echo "INFO  gate-state-$name.json 未落盘（本路径仅在闩事件时写）"
+		echo "INFO  gate:$name 无持久态（本路径仅在闩事件时写）"
 	fi
 done
 

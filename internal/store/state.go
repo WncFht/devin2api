@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// GateStateKey 是 lane 冷却闩在 runtime_state 里的键名约定：gate:<lane>，
+// 隐式单 lane 记 gate:default。devin 闸门的读写与导入器对
+// gate-state*.json 的搬移共用这一约定。
+func GateStateKey(lane string) string {
+	return "gate:" + lane
+}
+
 // GetState 读 runtime_state 一键；不存在返回 ok=false。
 func (s *Store) GetState(ctx context.Context, key string) (value string, ok bool, err error) {
 	err = s.db.QueryRowContext(ctx,

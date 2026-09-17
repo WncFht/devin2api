@@ -21,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // Handler 提供面板的全部路由与后端服务。
@@ -86,6 +87,10 @@ type Handler struct {
 
 	// debug 是 index.jsonl 与请求目录的读取入口。
 	debug *debuglog.Manager
+	// store 是 SQLite 持久层：配额样本的写入与历史曲线读取都走它。
+	// 须在 SetQuotaInterval 前注入（采样协程起跑时定生死）；nil 时
+	// 停采、配额历史为空——与无 debug manager 的降级口径一致。
+	store *store.Store
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
 	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
@@ -238,6 +243,12 @@ func (h *Handler) maxConcurrency() int {
 		return 0
 	}
 	return h.maxConcurrencyFunc()
+}
+
+// SetStore 注入 SQLite 持久层（配额采样写入与历史读取的底仓）。
+// 须在 SetQuotaInterval 前调用——采样协程按起跑时的句柄工作。
+func (h *Handler) SetStore(s *store.Store) {
+	h.store = s
 }
 
 // SetTokenStore 注入下游令牌仓（api_token 登录与 /admin/auth-tokens 用）。

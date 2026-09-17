@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/api/common"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 func rateLimitErr(text string) error {
@@ -49,7 +49,7 @@ func offsetGateClock(gate *rateGate, sec float64) {
 // 限流闩未到声明时刻：wait 本地拒绝且 retryAfter 等于闩剩余时长
 // （分钟 hint 已向上对齐到 :59 桶界，实际可达 N*60+59s）。
 func TestRateGateLatchRejectsUntilReset(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Please try again later. Your limit will reset in 8 minutes. (trace ID: x)"))
 	err := gate.wait(context.Background())
 	var failure *llm.Failure
@@ -68,7 +68,7 @@ func TestRateGateLatchRejectsUntilReset(t *testing.T) {
 // 闩内不排队：无论闩剩余长短都立即快败，Retry-After 报闩剩余，
 // 由客户端睡到恢复时刻再来，而不是占着并发槽空等。
 func TestRateGateLatchFastFails(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	start := time.Now()
 	err := gate.wait(context.Background())
@@ -84,7 +84,7 @@ func TestRateGateLatchFastFails(t *testing.T) {
 // 闩内按滴灌间隔放行探针：槽空闲 → 放行；槽被占 → 快败。
 // 探针是限流期间唯一到达上游的请求，负责探出解闩又不给上游续债。
 func TestRateGateDripReleasesProbes(t *testing.T) {
-	gate := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond}, "")
+	gate := newRateGate(GateConfig{DripInterval: 50 * time.Millisecond}, nil, "")
 	clock := pinGateClock(gate, 10) // 可发区间内
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
@@ -109,7 +109,7 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 // 死区内不放探针：滴灌槽空着但落在桶界死区时照样快败——桶界附近的
 // 发送可能落进相邻真实上游桶白送计数。
 func TestRateGateDripRespectsDeadZone(t *testing.T) {
-	gate := newRateGate(GateConfig{DripInterval: time.Millisecond}, "")
+	gate := newRateGate(GateConfig{DripInterval: time.Millisecond}, nil, "")
 	clock := pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 60 seconds."))
 	clock.t = clock.t.Add(48 * time.Second) // :58，闩内且进死区，槽已开
@@ -126,7 +126,7 @@ func TestRateGateDripRespectsDeadZone(t *testing.T) {
 // 任一上游成功帧立即解闩：边际态下拒绝是概率执行，
 // 成功帧是窗口已过的证据，不该再闩到声明时刻。
 func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	var gateErr *llm.Failure
@@ -141,7 +141,7 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 
 // 非限流错误不上闩；新闩只延长不提前。
 func TestRateGateLatchSelective(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")))
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait error = %v, want nil (no latch)", err)
@@ -160,7 +160,7 @@ func TestRateGateLatchSelective(t *testing.T) {
 // 两种形态都不再落 60s 兜底闩（旧实现把它当无 hint，实测桶界上
 // 每次 0-hint 都把闩续 60s 并重置滴灌，限流被自我续长）。
 func TestRateGateZeroSecondHint(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	clock := pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	latchedUntil := gate.limitedUntil
@@ -171,7 +171,7 @@ func TestRateGateZeroSecondHint(t *testing.T) {
 		t.Fatalf("0-hint while latched must not extend latch or re-arm drip: until=%v drip=%v", gate.limitedUntil, gate.nextDrip)
 	}
 	// 无闩：0-hint 闩到 now 即刻过期，后续请求正常放行。
-	fresh := newRateGate(GateConfig{}, "")
+	fresh := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(fresh, 10)
 	fresh.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
 	if err := fresh.wait(context.Background()); err != nil {
@@ -185,7 +185,7 @@ func TestRateGateZeroSecondHint(t *testing.T) {
 // http2 ENHANCE_YOUR_CALM 被 connect-go 映成 resource_exhausted——
 // 那是传输层事件不是上游限流，不能拿来上闩。
 func TestRateGateIgnoresTransportMasquerade(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted,
 		errors.New("bandwidth exhausted: stream error: stream ID 5; ENHANCE_YOUR_CALM; received from peer")))
@@ -200,7 +200,7 @@ func TestRateGateIgnoresTransportMasquerade(t *testing.T) {
 // 分钟窗口配额：本桶放行数打满后，请求睡到下一窗口；预计等待超过
 // maxHold 时本地拒绝，而不是放行去上游续债。
 func TestRateGateWindowQuotaReject(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 2}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 2}, nil, "")
 	pinGateClock(gate, 10)
 	for i := 0; i < 2; i++ {
 		if err := gate.wait(context.Background()); err != nil {
@@ -220,7 +220,7 @@ func TestRateGateWindowQuotaReject(t *testing.T) {
 
 // 窗口翻转重新计数：上一桶的用量不结转。
 func TestRateGateWindowRollover(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	clock := pinGateClock(gate, 10)
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("first wait error = %v, want pass", err)
@@ -237,7 +237,7 @@ func TestRateGateWindowRollover(t *testing.T) {
 // 死区内请求睡到下一窗口开放再放行，而不是立即快败——
 // 等待在 maxHold 内就值得睡。
 func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	offsetGateClock(gate, 1.9) // 死区尾，距 :02 开放 ~100ms
 	start := time.Now()
 	if err := gate.wait(context.Background()); err != nil {
@@ -250,7 +250,7 @@ func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
 
 // 死区等待超 maxHold 直接快败，Retry-After 报到下一窗口的剩余。
 func TestRateGateDeadZoneFastFails(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
 	pinGateClock(gate, 58.5) // 死区头，下一窗口 ~3.5s > maxHold
 	err := gate.wait(context.Background())
 	var gateErr *llm.Failure
@@ -264,7 +264,7 @@ func TestRateGateDeadZoneFastFails(t *testing.T) {
 
 // quota<=0 不做窗口限速：死区内也直接放行。
 func TestRateGateZeroQuotaUnlimited(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 59) // 死区
 	for i := 0; i < 3; i++ {
 		if err := gate.wait(context.Background()); err != nil {
@@ -275,7 +275,7 @@ func TestRateGateZeroQuotaUnlimited(t *testing.T) {
 
 // 等待中 ctx 取消：返回取消原因，waiters 名额归还。
 func TestRateGateWaitCancelRefunds(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	offsetGateClock(gate, 58.2) // 死区，睡到 :02 约 3.8s < maxHold
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
@@ -350,7 +350,7 @@ func TestRateLimitResetBucketAlignsMinutes(t *testing.T) {
 // 闩时段还原：事件环按写入序重放，上闩开窗、延闩推右端、解闩/到期关窗；
 // 闩中时段收到 now，开窗滚出环外的在闩时段给 nil Start。
 func TestRateGateLatchRanges(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	clock := pinGateClock(gate, 10)
 	// 闩 1：上闩 → 延闩 → 提前解闩，产出一段 [latchAt, releaseAt]，
 	// 右端是延闩后的截止对不上的解闩时刻。
@@ -392,17 +392,22 @@ func TestRateGateLatchRanges(t *testing.T) {
 	}
 }
 
-// 冷却闩落盘与恢复：上闩写状态文件，新实例（模拟重启）恢复未过期的闩，
-// 防止重启后裸发把上游限流续长；解闩清文件，过期文件被忽略并清除。
+// 冷却闩持久化与恢复：上闩写 runtime_state 行，新实例（模拟重启）恢复
+// 未过期的闩，防止重启后裸发把上游限流续长；解闩删行，过期行被忽略
+// 并清除。
 func TestRateGateLatchPersistRestore(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "gate-state.json")
-	gate := newRateGate(GateConfig{MaxRPM: 60}, path)
+	st, _, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 60}, st, "gate:test")
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("state file not written: %v", err)
+	if _, ok, err := st.GetState(context.Background(), "gate:test"); err != nil || !ok {
+		t.Fatalf("state not persisted: ok=%v err=%v", ok, err)
 	}
 
-	restarted := newRateGate(GateConfig{MaxRPM: 60}, path)
+	restarted := newRateGate(GateConfig{MaxRPM: 60}, st, "gate:test")
 	stats := restarted.stats()
 	if !stats.Latched || stats.LimitedUntil == nil {
 		t.Fatalf("restarted gate should restore latch, stats = %+v", stats)
@@ -412,8 +417,8 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 	}
 
 	restarted.noteUpstreamSuccess()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("release should remove state file, err = %v", err)
+	if _, ok, err := st.GetState(context.Background(), "gate:test"); err != nil || ok {
+		t.Fatalf("release should remove state row, ok=%v err=%v", ok, err)
 	}
 	if restarted.stats().Latched {
 		t.Fatal("release should unlatch")
@@ -421,26 +426,30 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 }
 
 func TestRateGateStateExpiredIgnored(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "gate-state.json")
-	past := gateStateFile{LimitedUntil: time.Now().Add(-time.Minute)}
+	st, _, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	past := gateState{LimitedUntil: time.Now().Add(-time.Minute)}
 	data, err := json.Marshal(past)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := st.SetState(context.Background(), "gate:test", string(data)); err != nil {
 		t.Fatal(err)
 	}
-	gate := newRateGate(GateConfig{}, path)
+	gate := newRateGate(GateConfig{}, st, "gate:test")
 	if gate.stats().Latched {
 		t.Fatal("expired state must not latch")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("expired state file should be removed")
+	if _, ok, err := st.GetState(context.Background(), "gate:test"); err != nil || ok {
+		t.Fatalf("expired state row should be removed, ok=%v err=%v", ok, err)
 	}
 }
 
 func TestRateGateSetParamsPreservesLatch(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 60}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 60}, nil, "")
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
 	gate.setParams(GateConfig{MaxRPM: 30})
 	stats := gate.stats()
@@ -458,7 +467,7 @@ func TestRateGateSetParamsPreservesLatch(t *testing.T) {
 
 // 闩外可发区间且配额未满、无排队者：ping 放行并计入本桶配额。
 func TestRateGateTryAdmitPass(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
 	if !gate.tryAdmit() {
 		t.Fatal("tryAdmit = false, want admit in sendable window with free quota")
@@ -471,7 +480,7 @@ func TestRateGateTryAdmitPass(t *testing.T) {
 // 闩内一律拒绝：配额再空也不放行——冷却期恰是最不该打上游的时刻，
 // ping 不占滴灌探针槽，被拒也不计桶。
 func TestRateGateTryAdmitLatchedRejects(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	if gate.tryAdmit() {
@@ -484,7 +493,7 @@ func TestRateGateTryAdmitLatchedRejects(t *testing.T) {
 
 // 死区内不放行：ping 与正式请求一样不得在桶界两侧冒险发送。
 func TestRateGateTryAdmitDeadZoneRejects(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 59)
 	if gate.tryAdmit() {
 		t.Fatal("tryAdmit = true in dead zone, want false")
@@ -493,7 +502,7 @@ func TestRateGateTryAdmitDeadZoneRejects(t *testing.T) {
 
 // 本桶配额打满不放行：桶计数与 wait 共享同一本账。
 func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	pinGateClock(gate, 10)
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait error = %v, want pass (fills bucket)", err)
@@ -505,7 +514,7 @@ func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
 
 // 有排队等待者不放行：ping 不与睡醒者同权抢配额，排队者优先。
 func TestRateGateTryAdmitWaitersBlock(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 5}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
 	gate.mu.Lock()
 	gate.waiters = 1
@@ -517,7 +526,7 @@ func TestRateGateTryAdmitWaitersBlock(t *testing.T) {
 
 // quota<=0 不做窗口限速：死区内也放行（与 wait 的零配额口径一致）。
 func TestRateGateTryAdmitZeroQuota(t *testing.T) {
-	gate := newRateGate(GateConfig{}, "")
+	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 59) // 死区
 	if !gate.tryAdmit() {
 		t.Fatal("tryAdmit = false with quota<=0, want true (no window limit)")
@@ -535,7 +544,7 @@ func TestRateGateTryAdmitNilGate(t *testing.T) {
 // ping 占用的是正式请求的配额：tryAdmit 放行后 wait 看到满桶——
 // 两条路径共用 bucketUsed 一本账。
 func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, "")
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	pinGateClock(gate, 10)
 	if !gate.tryAdmit() {
 		t.Fatal("tryAdmit = false, want admit")

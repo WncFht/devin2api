@@ -103,7 +103,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 
 	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
 	defer manager.Close()
-	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
+	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -151,7 +151,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -162,7 +162,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 }
@@ -313,7 +313,7 @@ auth:
 
 			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
 			defer manager.Close()
-			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
+			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +348,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

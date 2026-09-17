@@ -2,7 +2,7 @@
 // 两个端点。
 //
 // /admin/status 每次都会取回日/周配额剩余百分比与重置时间，但看完即弃。
-// 这里按固定间隔把快照追加到 logs/quota.jsonl，面板据此画出配额曲线，
+// 这里按固定间隔把快照写入 quota_samples 表，面板据此画出配额曲线，
 // 并用最近窗口的消耗速率外推耗尽时刻——回答「按现在的用法还能撑多久」。
 package ccpanel
 
@@ -11,20 +11,17 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // adminQuota 实现 GET /admin/quota：日/周配额历史曲线与燃烧速率预测。
 // 账户计费数据只对 admin 开放。
 func (h *Handler) adminQuota(w http.ResponseWriter, r *http.Request) {
-	respondOK(w, h.QuotaReport())
+	respondOK(w, h.QuotaReport(r.Context()))
 }
 
 // adminStatus 实现 GET /admin/status：上游账户/plan/容量/IDE/模型状态/
@@ -37,50 +34,14 @@ func (h *Handler) adminStatus(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, h.StatusReport(ctx))
 }
 
-// quotaFileName 是配额历史文件名，位于日志根目录下。
-const quotaFileName = "quota.jsonl"
+// 配额快照的行类型是 store.QuotaSample——表行与 /admin/quota 的
+// points 线格式共用一个形状（字段 JSON tag 与被取代的 quota.jsonl
+// 行一致）。Daily/WeeklyRemaining 是 *float64：保留「上游没报」
+// （nil/NULL）与「真到 0」的区分，耗尽时刻前端仍能画出 0%。
 
-// quotaFileCap 是配额文件体积上限；超限后保留尾部一半重写。
-// 每条约 200B，4MB 约覆盖 2 万条（默认 5 分钟一条 ≈ 69 天）。
-const quotaFileCap = 4 << 20
-
-// quotaPoint 是一次配额快照。
-type quotaPoint struct {
-	// At 是采样时刻（unix 秒）。
-	At int64 `json:"at"`
-	// Account 是号池 lane 名：每号配额独立采样独立成行——两号的配额
-	// 曲线分开画是号池的直接收益度量。旧行/单号形态该字段缺席。
-	Account string `json:"account,omitempty"`
-	// DailyRemaining/WeeklyRemaining 是日/周配额剩余百分比（0-100）。
-	// 指针保留「上游没报」与「真到 0」的区分：omitempty 会把 0% 序列化成
-	// 缺席，恰恰在耗尽时刻让前端什么都不显示。
-	DailyRemaining  *float64 `json:"daily_remaining"`
-	WeeklyRemaining *float64 `json:"weekly_remaining"`
-	// DailyResetAt/WeeklyResetAt 是日/周配额重置时刻（unix 秒）。
-	DailyResetAt  int64 `json:"daily_reset_at,omitempty"`
-	WeeklyResetAt int64 `json:"weekly_reset_at,omitempty"`
-	// 以下为零散额度字段，原样透传便于面板展示。
-	PromptCredits float64 `json:"prompt_credits,omitempty"`
-	FlowCredits   float64 `json:"flow_credits,omitempty"`
-	FlexCredits   float64 `json:"flex_credits,omitempty"`
-	ACUConsumed   float64 `json:"acu_consumed,omitempty"`
-	ACULimit      float64 `json:"acu_limit,omitempty"`
-	UsedPrompt    float64 `json:"used_prompt_credits,omitempty"`
-	UsedFlow      float64 `json:"used_flow_credits,omitempty"`
-	UsedFlex      float64 `json:"used_flex_credits,omitempty"`
-	// 宽限与自动加额状态：配额烧穿后不是立即断供，grace_period_status
-	// 为 ACTIVE 时宽限期计数中，grace_period_end 是宽限截止（unix 秒）；
-	// top_up_* 记录自动加额开关与最近一次加额交易状态。
-	GracePeriodStatus string `json:"grace_period_status,omitempty"`
-	GracePeriodEnd    int64  `json:"grace_period_end,omitempty"`
-	OrphanedUsageCut  bool   `json:"was_reduced_by_orphaned_usage,omitempty"`
-	TopUpEnabled      bool   `json:"top_up_enabled,omitempty"`
-	TopUpStatus       string `json:"top_up_transaction_status,omitempty"`
-}
-
-// SetQuotaInterval 设定后台配额采样周期；interval<=0 或日志未启用时停采。
-// 可被重复调用（配置 reload 热路径）：cancel 旧协程按新间隔重起，变更点
-// 多采一个点——无害，反而给曲线留了变更标记。
+// SetQuotaInterval 设定后台配额采样周期；interval<=0 或持久层未注入时
+// 停采。可被重复调用（配置 reload 热路径）：cancel 旧协程按新间隔重起，
+// 变更点多采一个点——无害，反而给曲线留了变更标记。
 // 采样失败只记一行进程日志，不影响面板与请求链路。
 func (h *Handler) SetQuotaInterval(interval time.Duration) {
 	h.quotaMu.Lock()
@@ -92,14 +53,13 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 		h.quotaCancel()
 		h.quotaCancel = nil
 	}
-	if interval <= 0 || h.debug == nil || h.debug.Root() == "" {
+	if interval <= 0 || h.store == nil {
 		return
 	}
-	path := filepath.Join(h.debug.Root(), quotaFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	h.quotaCancel = cancel
 	go func() {
-		h.sampleQuota(path)
+		h.sampleQuota()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -107,7 +67,7 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.sampleQuota(path)
+				h.sampleQuota()
 			}
 		}
 	}()
@@ -121,17 +81,17 @@ func (h *Handler) QuotaInterval() time.Duration {
 	return h.quotaInterval
 }
 
-// sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照追加到
-// quota.jsonl（每行带 account 字段，两号曲线分开画）。账号间按名序
+// sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照写入
+// quota_samples（每行带 account 字段，两号曲线分开画）。账号间按名序
 // 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。
-func (h *Handler) sampleQuota(path string) {
+func (h *Handler) sampleQuota() {
 	for _, account := range h.quotaAccounts() {
-		h.sampleAccountQuota(path, account.name, account.token)
+		h.sampleAccountQuota(account.name, account.token)
 	}
 }
 
-// quotaAccount 是配额采样的一个账号视角：name 落 quota.jsonl 的
-// account 字段，token 是该 lane 的当前凭据。
+// quotaAccount 是配额采样的一个账号视角：name 落 quota_samples 的
+// account 列，token 是该 lane 的当前凭据。
 type quotaAccount struct {
 	name  string
 	token string
@@ -160,8 +120,8 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 	return accounts
 }
 
-// sampleAccountQuota 拉取一个账号的状态并追加一行配额快照。
-func (h *Handler) sampleAccountQuota(path, account, token string) {
+// sampleAccountQuota 拉取一个账号的状态并写入一行配额快照。
+func (h *Handler) sampleAccountQuota(account, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	user, plan, _, err := h.fetchUserStatusAs(ctx, token)
@@ -183,77 +143,55 @@ func (h *Handler) sampleAccountQuota(path, account, token string) {
 	}
 	h.quotaUserMu.Unlock()
 	if plan == nil {
-		// 上游 200 但缺 planStatus：不写点也不报错会把 quota.jsonl
-		// 变成静默空文件，留一行痕迹说明「拉到了但无配额数据」。
+		// 上游 200 但缺 planStatus：不写点也不报错会让曲线静默断档，
+		// 留一行痕迹说明「拉到了但无配额数据」。
 		slog.Warn("quota sample skipped: userStatus carried no planStatus", "account", account)
 		return
 	}
-	point := quotaPoint{
-		At:              time.Now().Unix(),
-		Account:         account,
-		DailyRemaining:  planFloat(plan, "daily_quota_remaining"),
-		WeeklyRemaining: planFloat(plan, "weekly_quota_remaining"),
-		DailyResetAt:    int64(floatAny(plan["daily_quota_reset"])),
-		WeeklyResetAt:   int64(floatAny(plan["weekly_quota_reset"])),
-		PromptCredits:   floatAny(plan["available_prompt_credits"]),
-		FlowCredits:     floatAny(plan["available_flow_credits"]),
-		FlexCredits:     floatAny(plan["available_flex_credits"]),
-		ACUConsumed:     floatAny(plan["acu_consumed"]),
-		ACULimit:        floatAny(plan["acu_limit"]),
-		UsedPrompt:      floatAny(plan["used_prompt_credits"]),
-		UsedFlow:        floatAny(plan["used_flow_credits"]),
-		UsedFlex:        floatAny(plan["used_flex_credits"]),
+	point := &store.QuotaSample{
+		At:                time.Now().Unix(),
+		Account:           account,
+		DailyRemaining:    planFloat(plan, "daily_quota_remaining"),
+		WeeklyRemaining:   planFloat(plan, "weekly_quota_remaining"),
+		DailyResetAt:      int64(floatAny(plan["daily_quota_reset"])),
+		WeeklyResetAt:     int64(floatAny(plan["weekly_quota_reset"])),
+		PromptCredits:     floatAny(plan["available_prompt_credits"]),
+		FlowCredits:       floatAny(plan["available_flow_credits"]),
+		FlexCredits:       floatAny(plan["available_flex_credits"]),
+		ACUConsumed:       floatAny(plan["acu_consumed"]),
+		ACULimit:          floatAny(plan["acu_limit"]),
+		UsedPromptCredits: floatAny(plan["used_prompt_credits"]),
+		UsedFlowCredits:   floatAny(plan["used_flow_credits"]),
+		UsedFlexCredits:   floatAny(plan["used_flex_credits"]),
 		// plan["grace_period_status"] 已经 fetchUserStatus 的 shortEnum
 		// 缩成尾段；grace_period_end 是归一后的 RFC3339，转回 unix 秒。
-		GracePeriodStatus: strAny(plan["grace_period_status"]),
-		GracePeriodEnd:    rfc3339Unix(plan["grace_period_end"]),
-		OrphanedUsageCut:  boolAny(plan["was_reduced_by_orphaned_usage"]),
+		GracePeriodStatus:         strAny(plan["grace_period_status"]),
+		GracePeriodEnd:            rfc3339Unix(plan["grace_period_end"]),
+		WasReducedByOrphanedUsage: boolAny(plan["was_reduced_by_orphaned_usage"]),
 	}
 	if tu, ok := plan["top_up_status"].(map[string]any); ok {
 		point.TopUpEnabled = boolAny(tu["enabled"])
-		point.TopUpStatus = strAny(tu["transaction_status"])
+		point.TopUpTransactionStatus = strAny(tu["transaction_status"])
 	}
-	data, err := json.Marshal(point)
-	if err != nil {
-		return
-	}
-	if info, statErr := os.Stat(path); statErr == nil && info.Size() > quotaFileCap {
-		if _, err := debuglog.TruncateToTail(path, quotaFileCap/2); err != nil {
-			slog.Warn("quota history truncate failed", "error", err)
-		}
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		slog.Warn("quota sample open failed", "error", err)
-		return
-	}
-	defer func() { _ = file.Close() }()
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		slog.Warn("quota sample write failed", "error", err)
+	if err := h.store.InsertQuotaSample(ctx, point); err != nil {
+		slog.Warn("quota sample persist failed", "account", account, "error", err)
 	}
 }
 
-// quotaHistoryCap 是单次读取的历史行数上限；默认 5 分钟间隔下约覆盖 34 天。
+// quotaHistoryCap 是单次读取的历史样本数上限；默认 5 分钟间隔下约覆盖
+// 34 天。
 const quotaHistoryCap = 10000
 
-// readQuotaHistory 读取 quota.jsonl 尾部 quotaHistoryCap 条有效行。
-// 按行数上限折算字节上限（~256B/行）只读文件尾部，多年运行的文件不再整读；
-// 截断点的首行残段解析失败自然跳过。
-func (h *Handler) readQuotaHistory() []quotaPoint {
-	if h.debug == nil || h.debug.Root() == "" {
+// readQuotaHistory 读 quota_samples 尾部 quotaHistoryCap 条（at 升序）。
+// 按号分组的裁剪在 QuotaReport 侧做；库查询失败按无历史降级。
+func (h *Handler) readQuotaHistory(ctx context.Context) []*store.QuotaSample {
+	if h.store == nil {
 		return nil
 	}
-	path := filepath.Join(h.debug.Root(), quotaFileName)
-	data, err := debuglog.TailRead(path, quotaHistoryCap*256)
+	points, err := h.store.ListQuotaSamples(ctx, "", 0)
 	if err != nil {
+		slog.Warn("quota history read failed", "error", err)
 		return nil
-	}
-	var points []quotaPoint
-	for line := range strings.Lines(string(data)) {
-		var point quotaPoint
-		if json.Unmarshal([]byte(strings.TrimSpace(line)), &point) == nil {
-			points = append(points, point)
-		}
 	}
 	if len(points) > quotaHistoryCap {
 		points = points[len(points)-quotaHistoryCap:]
@@ -264,7 +202,7 @@ func (h *Handler) readQuotaHistory() []quotaPoint {
 // forecast 用最近 lookback 窗口内的首尾两点差分估算燃烧速率与耗尽时刻。
 // 配额只剩百分比语义：日配额在 daily_reset_at 重置，周配额同理；
 // 「耗尽」指按当前速率在重置前把剩余百分比烧完。
-func forecast(points []quotaPoint, lookback time.Duration, pick func(quotaPoint) float64, resetAt func(quotaPoint) int64) map[string]any {
+func forecast(points []*store.QuotaSample, lookback time.Duration, pick func(*store.QuotaSample) float64, resetAt func(*store.QuotaSample) int64) map[string]any {
 	if len(points) < 2 {
 		return nil
 	}
@@ -311,20 +249,20 @@ func forecast(points []quotaPoint, lookback time.Duration, pick func(quotaPoint)
 // points/daily/weekly 镜像尾点 At 最大（最新鲜）的那条序列作后
 // 兼容视图——单号部署时与升级前输出逐字段一致（历史无 account
 // 字段的行归入 "default" 桶，与隐式单 lane 同名自然合流）。
-func (h *Handler) QuotaReport() map[string]any {
-	byAccount := map[string][]quotaPoint{}
-	for _, point := range h.readQuotaHistory() {
+func (h *Handler) QuotaReport(ctx context.Context) map[string]any {
+	byAccount := map[string][]*store.QuotaSample{}
+	for _, point := range h.readQuotaHistory(ctx) {
 		name := point.Account
 		if name == "" {
 			name = "default"
 		}
 		byAccount[name] = append(byAccount[name], point)
 	}
-	reportFor := func(series []quotaPoint) map[string]any {
+	reportFor := func(series []*store.QuotaSample) map[string]any {
 		return map[string]any{
 			"points": series,
-			"daily":  forecast(series, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
-			"weekly": forecast(series, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
+			"daily":  forecast(series, 24*time.Hour, func(p *store.QuotaSample) float64 { return floatOr0(p.DailyRemaining) }, func(p *store.QuotaSample) int64 { return p.DailyResetAt }),
+			"weekly": forecast(series, 7*24*time.Hour, func(p *store.QuotaSample) float64 { return floatOr0(p.WeeklyRemaining) }, func(p *store.QuotaSample) int64 { return p.WeeklyResetAt }),
 		}
 	}
 	names := make([]string, 0, len(byAccount))
@@ -390,7 +328,7 @@ func floatAny(v any) float64 {
 	return 0
 }
 
-// planFloat 取 planStatus 里的数值字段；键缺席返回 nil——quotaPoint 的
+// planFloat 取 planStatus 里的数值字段；键缺席返回 nil——QuotaSample 的
 // 指针字段靠它保住「未上报」与「0%」的区分。
 func planFloat(plan map[string]any, key string) *float64 {
 	v, ok := plan[key]
