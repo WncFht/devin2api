@@ -135,26 +135,28 @@
     const gate = a.gate || {};
     const out = [];
     const future = (iso) => iso && Date.parse(iso) > now;
+    // 异常 pill 带 act='evidence'——点击开「为什么病了」证据抽屉（ops）。
+    const sick = { act: 'evidence' };
     // has_override = config 声明的号带活覆盖行——「面板改过」注记徽标，
     // 与状态无关恒在末位（disabled 常由覆盖行造成，早退分支同样带上）。
     const overridePill = a.has_override === true ? [{ tone: 'idle', text: t('accounts.src.override') }] : [];
     if (a.source === 'tombstoned') return [{ tone: 'idle', text: t('accounts.st.tombstoned') }, ...overridePill];
     if (a.disabled) return [{ tone: 'idle', text: t('accounts.st.disabled') }, ...overridePill];
     if (future(lane.auth_cooldown_until)) {
-      out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }) });
+      out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }), ...sick });
     }
     if (gate.latched) {
-      out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched') });
+      out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched'), ...sick });
     }
     const q = a.quota || {};
     const exhausted = (q.daily && q.daily.remaining <= 0) || (q.weekly && q.weekly.remaining <= 0);
-    if (exhausted) out.push({ tone: 'bad', text: t('accounts.st.exhausted') });
+    if (exhausted) out.push({ tone: 'bad', text: t('accounts.st.exhausted'), ...sick });
     if (future(lane.unhealthy_until)) {
-      out.push({ tone: 'warn', text: t('accounts.st.cooldown', { left: countdown(lane.unhealthy_until) }) });
+      out.push({ tone: 'warn', text: t('accounts.st.cooldown', { left: countdown(lane.unhealthy_until) }), ...sick });
     }
     if (!out.length) {
       if (!a.lane && !a.gate) out.push({ tone: 'idle', text: t('accounts.noData') });
-      else if (lane.healthy === false) out.push({ tone: 'warn', text: t('accounts.st.unready') });
+      else if (lane.healthy === false) out.push({ tone: 'warn', text: t('accounts.st.unready'), ...sick });
       else out.push({ tone: 'ok', text: t('accounts.st.ok') });
     }
     if (gate.waiters > 0) out.push({ tone: 'warn', text: t('accounts.pill.waiters', { n: gate.waiters }) });
@@ -174,14 +176,25 @@
     const src = (a.source === 'config' || a.source === 'panel')
       ? `<span class="acct-pill acct-pill--idle">${esc(t('accounts.src.' + a.source))}</span>`
       : '';
+    // priority 非零时显式徽标（0 是缺省不吵）；notes 有则随行显示。
+    const pri = Number(a.priority) > 0
+      ? `<span class="acct-pill acct-pill--idle" title="${esc(t('accounts.f.priority'))}">P${Number(a.priority)}</span>`
+      : '';
+    const notes = a.notes
+      ? `<span class="acct-notes" title="${esc(String(a.notes))}">${esc(String(a.notes))}</span>`
+      : '';
     return `<div class="acct-card-head">
-      <div class="acct-card-title"><span class="acct-name">${esc(a.name || '')}</span>${identity}${src}</div>
+      <div class="acct-card-title"><span class="acct-name">${esc(a.name || '')}</span>${identity}${src}${pri}${notes}</div>
       <div class="acct-badges">${pillsBlock(a)}</div>
     </div>`;
   }
 
   function pillsBlock(a) {
-    return pillList(a).map((p) => `<span class="acct-pill acct-pill--${p.tone}">${esc(p.text)}</span>`).join('');
+    const name = (a && a.name) || '';
+    return pillList(a).map((p) => {
+      const act = p.act ? ` data-act="${esc(p.act)}" data-acct="${esc(name)}" role="button" tabindex="0"` : '';
+      return `<span class="acct-pill acct-pill--${p.tone}${p.act ? ' acct-pill--link' : ''}"${act}>${esc(p.text)}</span>`;
+    }).join('');
   }
 
   function failureBlock(a) {
@@ -189,7 +202,7 @@
     if (!lane.last_failure_at) return '';
     const code = lane.last_failure_code || t('accounts.st.unknownError');
     const msg = lane.last_failure_message ? ` — ${lane.last_failure_message}` : '';
-    return `<div class="acct-failure" title="${esc(code + msg)}">
+    return `<div class="acct-failure acct-failure--link" data-act="evidence" data-acct="${esc(a.name || '')}" role="button" tabindex="0" title="${esc(code + msg)}">
       ${esc(t('accounts.lastFailure'))}: ${esc(code)} · ${esc(relTime(lane.last_failure_at))}
     </div>`;
   }
@@ -409,17 +422,29 @@
     };
   }
 
+  // 幂等同步：同签名直接返回（自动刷新不闪），签名变才 setOption 更新数据；
+  // 元素已脱离 DOM 的僵尸实例顺带回收（diff 重渲会换掉 .acct-curve 元素）。
   function curveInit(el, points) {
     if (!el || !window.echarts) return;
-    const prev = charts.get(el);
-    if (prev) { prev.chart.dispose(); charts.delete(el); }
+    for (const [node, it] of charts) {
+      if (!node.isConnected) { it.chart.dispose(); charts.delete(node); }
+    }
     const pts = (Array.isArray(points) ? points : []).filter((p) =>
       p && (p.daily_remaining !== undefined || p.weekly_remaining !== undefined));
     if (!pts.length) return;
+    const sig = JSON.stringify(pts.map((p) => [p.at, p.daily_remaining ?? null, p.weekly_remaining ?? null]));
+    const prev = charts.get(el);
+    if (prev) {
+      if (prev.sig === sig) return;
+      prev.chart.setOption(curveOption(pts));
+      prev.sig = sig;
+      prev.points = pts;
+      return;
+    }
     const chart = echarts.init(el, null, { renderer: 'canvas' });
     chart.setOption(curveOption(pts), true);
     chart.resize();
-    charts.set(el, { chart, points: pts });
+    charts.set(el, { chart, points: pts, sig });
   }
 
   function disposeCharts() {

@@ -1456,6 +1456,7 @@ window.WebAuth = window.WebAuth || {
   // 页面自动刷新（基于 system_settings.auto_refresh_interval_seconds）
   // 用法：const ar = window.createAutoRefresh({ load: () => loadStats() }); ar.init();
   // 行为：间隔>0 启动 setInterval；tick 时若 document.hidden 或 .modal.show 存在则跳过；
+  //       options.skip() 为页面自加的暂停条件（返回 true 跳过本轮）；
   //       visibilitychange 隐藏时 stop，恢复时立即刷新一次并重启。
   const AUTO_REFRESH_CACHE_KEY = '__autoRefreshIntervalSec';
   const AUTO_REFRESH_CACHE_TTL_MS = 60 * 1000;
@@ -1504,6 +1505,8 @@ window.WebAuth = window.WebAuth || {
       if (typeof document === 'undefined') return true;
       if (document.hidden) return true;
       if (document.querySelector('.modal.show')) return true;
+      // options.skip 让页面加自己的暂停条件（如 accounts 页抽屉打开）。
+      if (typeof options.skip === 'function' && options.skip()) return true;
       return false;
     }
 
