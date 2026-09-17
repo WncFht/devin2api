@@ -83,6 +83,17 @@ type Config struct {
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
 	TokenSource func() string
+	// Priority 是池级排序元数据：值越大越优先被新会话选中，同优先级
+	// 内回 rendezvous 钉选序。它不是 lane 运行参数——ApplyConfig 不
+	// 消费它，Pool.ApplyConfigs 直接读进 lane 排序键。
+	Priority int
+	// SessionAffinityTTLSeconds 是会话绑定的滑动 TTL 秒数：命中即续期，
+	// 0 回落默认 3600。全局字段各 lane 一致，Pool 读首 lane 值。
+	SessionAffinityTTLSeconds int
+	// QuotaLowThresholdPercent 是配额降权阈值：weekly 剩余百分比低于
+	// 它时 lane 对新会话降档（已绑定会话不受影响）；0 回落默认 15，
+	// 负值关闭降权。全局字段各 lane 一致。
+	QuotaLowThresholdPercent int
 }
 
 // ClientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -444,6 +455,14 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	}
 	if prev.ForceHTTP1 != next.ForceHTTP1 {
 		applied = append(applied, "devin.force_http1")
+	}
+	// 池级调度旋钮：config 整体换值即生效（affinityTTL/NoteQuotaSample
+	// 每次经 CurrentConfig 现读），无 adapter 侧回写动作。
+	if prev.SessionAffinityTTLSeconds != next.SessionAffinityTTLSeconds {
+		applied = append(applied, "devin.session_affinity_ttl_seconds")
+	}
+	if prev.QuotaLowThresholdPercent != next.QuotaLowThresholdPercent {
+		applied = append(applied, "devin.quota_low_threshold_percent")
 	}
 	return applied
 }

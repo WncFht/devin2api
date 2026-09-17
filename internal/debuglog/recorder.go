@@ -172,6 +172,9 @@ type Recorder struct {
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
 	// writeMeta/insertLog 读，与 retries 同一把锁。
 	accountAttempts []accountAttempt
+	// poolCandidates 是开流前的候选序快照（含每 lane 降级原因），
+	// 由 Pool.Stream 排序后登记，writeMeta 落 meta.pool_candidates。
+	poolCandidates []PoolCandidate
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
@@ -252,6 +255,17 @@ type accountAttempt struct {
 	Code      string `json:"code,omitempty"`
 	Message   string `json:"message,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+// PoolCandidate 是号池一次选号的候选快照行：Name 是 lane 名，Healthy/
+// Bound 是当时判定位，Reason 是它被降级/跳过的归因词表（bound、
+// auth_cooldown、generic_cooldown、gate_latched、gate_window_full、
+// quota_low；首位被选中者可空）。整张表回答「这次为什么去了这个号」。
+type PoolCandidate struct {
+	Name    string `json:"name"`
+	Healthy bool   `json:"healthy"`
+	Bound   bool   `json:"bound,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // errorRecord 是首个失败点的同步快照：stage 是归原点阶段名
@@ -881,6 +895,19 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	recorder.mutex.Unlock()
 }
 
+// NotePoolCandidates 登记号池开流前的候选序快照：Pool.Stream 排完序
+// 调一次，回答「这次为什么去了这个号」——被降级 lane 的 Reason 是
+// 归因词表（见 PoolCandidate）。多次调用后者覆盖前者（换号重选时
+// 保留最新一轮决策现场）。
+func (recorder *Recorder) NotePoolCandidates(candidates []PoolCandidate) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.poolCandidates = candidates
+	recorder.mutex.Unlock()
+}
+
 // upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
 // 一把锁取齐两者——writeMeta 与 insertLog 都要这对值。
 func (recorder *Recorder) upstreamAttribution() (string, []accountAttempt) {
@@ -1204,6 +1231,12 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if len(attempts) > 0 {
 		meta["upstream_attempts"] = attempts
+	}
+	recorder.mutex.Lock()
+	poolCandidates := append([]PoolCandidate(nil), recorder.poolCandidates...)
+	recorder.mutex.Unlock()
+	if len(poolCandidates) > 0 {
+		meta["pool_candidates"] = poolCandidates
 	}
 	if completion != nil {
 		finishedAt := time.Now()
