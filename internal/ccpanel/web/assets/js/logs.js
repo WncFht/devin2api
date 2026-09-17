@@ -2057,14 +2057,16 @@ function buildLogsRequestParams() {
   return params;
 }
 
+// 列显隐的绑定不依赖网络，提到 bootstrap 之外：run() 要等
+// /dashboard/session 返回才执行，慢会话期间按钮曾是死的。
+initLogsPageActions();
+applyColVisibility();
+document.addEventListener('click', closeColMenuOnClickOutside);
+
 // 页面初始化
 window.initPageBootstrap({
   topbarKey: 'logs',
   run: async () => {
-  initLogsPageActions();
-  applyColVisibility();
-  document.addEventListener('click', closeColMenuOnClickOutside);
-
   // 优先从 URL 读取，其次从 localStorage 恢复，默认 all
   const u = new URLSearchParams(location.search);
   const hasUrlParams = u.toString().length > 0;
