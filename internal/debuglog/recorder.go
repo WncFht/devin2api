@@ -29,6 +29,11 @@ import (
 // writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
 const writeQueueSize = 4096
 
+// chunkFlushInterval 是 JSONL 缓冲合批提交周期：窗口内各文件缓冲合并为
+// 一个事务一次 commit，把高频流式期的逐行 fsync 压到每秒数次；窗口长度
+// 同时是进行中请求的已提交前缀对面板可见的延迟上限。
+const chunkFlushInterval = 200 * time.Millisecond
+
 // RetentionPolicy 是请求日志的生命周期策略。
 type RetentionPolicy struct {
 	// Days 是请求目录整体保留天数；<=0 不按时间清理。
@@ -219,9 +224,9 @@ type Recorder struct {
 	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
 	attachmentCount int
-	// chunkBufs 按 JSONL 文件名缓冲已序列化行；队列排空时每个非空
-	// 缓冲作为一条 debug_chunks 行提交（追加行代替整文件重写，已
-	// 提交前缀对面板实时可见）。
+	// chunkBufs 按 JSONL 文件名缓冲已序列化行；每个刷写周期全部非空
+	// 缓冲合并为一个事务提交为 debug_chunks 行（追加行代替整文件重写，
+	// 已提交前缀对面板实时可见，见 chunkFlushInterval）。
 	chunkBufs map[string]*bytes.Buffer
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
@@ -611,25 +616,31 @@ func (recorder *Recorder) enqueue(task writeTask) {
 }
 
 // runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
-// 队列排空时把缓冲提交为 chunk 行（进行中的请求对面板也应实时可读，
-// 不能只等 Complete）；tasks 关闭后排空残余任务，统一 flush 收尾。
+// chunk 缓冲按 chunkFlushInterval 周期合并提交（进行中的请求对面板仍有
+// 亚秒级可见性，而高频流式期不再每批帧各付一次 commit）；tasks 关闭后
+// 排空残余任务，统一 flush 收尾。
 func (recorder *Recorder) runWriter() {
-	for task := range recorder.tasks {
-		task()
-		// len(channel) 的竞态无碍：多看一个任务只是少提交一次，
-		// 关闭前的统一 flush 仍兜底。
-		if len(recorder.tasks) == 0 {
+	flushTick := time.NewTicker(chunkFlushInterval)
+	defer flushTick.Stop()
+	for {
+		select {
+		case task, ok := <-recorder.tasks:
+			if !ok {
+				recorder.flushJSONL()
+				recorder.chunkBufs = nil
+				close(recorder.writerDone)
+				return
+			}
+			task()
+		case <-flushTick.C:
 			recorder.flushJSONL()
 		}
 	}
-	recorder.flushJSONL()
-	recorder.chunkBufs = nil
-	close(recorder.writerDone)
 }
 
-// flushJSONL 把每个非空 JSONL 缓冲提交为一条 chunk 行；仅写协程调用。
-// 单条 INSERT 是原子的：失败时缓冲保留，下次 flush 整体重发，
-// 不会出现半截批次（区别于 bufio 的「已写部分留不住」）。
+// flushJSONL 把全部非空 JSONL 缓冲合成一个事务提交为 chunk 行；仅写
+// 协程调用。事务原子：失败时缓冲整体保留，下个周期整体重发，不会
+// 出现半截批次（区别于 bufio 的「已写部分留不住」）。
 func (recorder *Recorder) flushJSONL() {
 	st := recorder.manager.store
 	if st == nil {
@@ -638,15 +649,21 @@ func (recorder *Recorder) flushJSONL() {
 		}
 		return
 	}
+	var chunks []store.DebugChunk
 	for name, buf := range recorder.chunkBufs {
-		if buf.Len() == 0 {
-			continue
+		if buf.Len() > 0 {
+			chunks = append(chunks, store.DebugChunk{Name: name, Data: buf.Bytes()})
 		}
-		if err := st.AppendDebugChunk(context.Background(), recorder.dir, name, buf.Bytes()); err != nil {
-			recorder.noteIOErr("jsonl", err)
-			continue
-		}
-		buf.Reset()
+	}
+	if len(chunks) == 0 {
+		return
+	}
+	if err := st.AppendDebugChunks(context.Background(), recorder.dir, chunks); err != nil {
+		recorder.noteIOErr("jsonl", err)
+		return
+	}
+	for _, c := range chunks {
+		recorder.chunkBufs[c.Name].Reset()
 	}
 }
 
@@ -1103,7 +1120,7 @@ func (recorder *Recorder) Complete(completion Completion) {
 }
 
 // appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲；
-// 缓冲在队列排空时作为一条 chunk 行入库。仅写 worker 调用。
+// 缓冲按 chunkFlushInterval 周期随同事务合批入库。仅写 worker 调用。
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
 	buf := recorder.chunkBufs[name]
 	if buf == nil {

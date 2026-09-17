@@ -25,13 +25,56 @@ func (h *Handler) adminQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminStatus 实现 GET /admin/status：上游账户/plan/容量/IDE/模型状态/
-// 供应商的六路聚合。
+// 供应商的六路聚合。整页结果进 statusSnapshot 的短 TTL 缓存。
 func (h *Handler) adminStatus(w http.ResponseWriter, r *http.Request) {
-	// 面板聚合多个上游调用，给足时间避免单个慢接口拖垮整体；
-	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。
-	ctx, cancel := context.WithTimeout(r.Context(), 610*time.Second)
-	defer cancel()
-	respondOK(w, h.StatusReport(ctx))
+	respondOK(w, h.statusSnapshot(r.Context()))
+}
+
+// statusCacheTTL 是 /admin/status 聚合快照的缓存寿命：面板按页面加载
+// 与轮询消费，秒级陈旧无感；statusFetch 非空表示有聚合在途
+// （singleflight 的 done channel），关闭即完成信号。
+const statusCacheTTL = 30 * time.Second
+
+// statusSnapshot 返回 TTL 内的 StatusReport 缓存；过期时 singleflight
+// 收敛为单趟上游聚合——并发等待方挂 done channel 而不是各打一遍
+// 六路 RPC。失败分支也以 *_error 键存进快照（StatusReport 的既定语义），
+// 陈旧上限即 TTL。
+func (h *Handler) statusSnapshot(ctx context.Context) map[string]any {
+	for {
+		h.statusMu.Lock()
+		if !h.statusAt.IsZero() && time.Since(h.statusAt) < statusCacheTTL {
+			snap := h.statusSnap
+			h.statusMu.Unlock()
+			return snap
+		}
+		if h.statusFetch != nil {
+			done := h.statusFetch
+			h.statusMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return map[string]any{"fetch_error": ctx.Err().Error()}
+			}
+		}
+		h.statusFetch = make(chan struct{})
+		h.statusMu.Unlock()
+
+		// 快照是 handler 级共享缓存：单个调用方断连不应掐死其他等待者
+		// 共用的聚合。WithoutCancel 剥掉请求 ctx 的取消与截止，上游 RPC
+		// 的超时下限重新挂（610s，对齐原 adminStatus 语义）。
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 610*time.Second)
+		snap := h.StatusReport(fetchCtx)
+		cancel()
+
+		h.statusMu.Lock()
+		h.statusSnap = snap
+		h.statusAt = time.Now()
+		close(h.statusFetch)
+		h.statusFetch = nil
+		h.statusMu.Unlock()
+		return snap
+	}
 }
 
 // 配额快照的行类型是 store.QuotaSample——表行与 /admin/quota 的

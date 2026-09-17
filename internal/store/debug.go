@@ -57,16 +57,44 @@ func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []
 	return n > 0, err
 }
 
-// AppendDebugChunk 追加一行到 debug_chunks，seq 由同一条 INSERT 内的
-// 子查询取 MAX(seq)+1——聚合查询在无命中行时也返回一行，首个 chunk
-// 得 seq=0；单连接串行化下整条语句原子，无需外层事务。
+// appendChunkSQL 的 seq 由同一条 INSERT 内的子查询取 MAX(seq)+1——聚合
+// 查询在无命中行时也返回一行，首个 chunk 得 seq=0。写连接池单连接
+// 串行化下整条语句原子；同事务内连续执行时子查询读到本批已写行，
+// seq 随批次单调递增。
+const appendChunkSQL = `INSERT INTO debug_chunks(dir, name, seq, data)
+	SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?
+	FROM debug_chunks WHERE dir=? AND name=?`
+
+// DebugChunk 是一次刷写里单个 JSONL 文件的待追加批：data 内可含多行
+// 已序列化记录，入库为一行 chunk。
+type DebugChunk struct {
+	Name string
+	Data []byte
+}
+
+// AppendDebugChunk 追加一行到 debug_chunks（AppendDebugChunks 的单条形态）。
 func (s *Store) AppendDebugChunk(ctx context.Context, dir, name string, data []byte) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO debug_chunks(dir, name, seq, data)
-		 SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?
-		 FROM debug_chunks WHERE dir=? AND name=?`,
-		dir, name, data, dir, name)
-	return err
+	return s.AppendDebugChunks(ctx, dir, []DebugChunk{{Name: name, Data: data}})
+}
+
+// AppendDebugChunks 把一个刷写周期的全部 chunk 合并进一个事务：每行
+// INSERT 一次 commit/fsync 改为整批一次；任一失败整体回滚，调用方
+// 保留全部缓冲下次重发，不会出现半截批次。
+func (s *Store) AppendDebugChunks(ctx context.Context, dir string, chunks []DebugChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, c := range chunks {
+		if _, err := tx.ExecContext(ctx, appendChunkSQL, dir, c.Name, c.Data, dir, c.Name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // DebugFile 读一个文件的内容：先查 debug_files（整文件），miss 则按
