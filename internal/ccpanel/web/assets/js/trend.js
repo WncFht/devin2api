@@ -364,28 +364,22 @@
         attachChartResizeObserver(chartDom);
       }
 
-      // 准备时间数据（优化：使用 for 循环替代 map）
+      // 时间轴用真实毫秒戳：刻度由 ECharts 贴整点、缩放后密度自适应，
+      // 稀疏数据的位置也不再被 category 等距化失真
       const trendData = window.trendData;
       const dataLen = trendData.length;
-      const timestamps = new Array(dataLen);
-      const useShortFormat = window.currentHours <= 24;
-
+      const bucketMs = (window.currentBucketSec || 600) * 1000;
+      const tsMs = new Array(dataLen);
       for (let i = 0; i < dataLen; i++) {
-        const point = trendData[i];
-        const date = new Date(point.ts || point.Ts);
-        if (useShortFormat) {
-          timestamps[i] = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-        } else {
-          timestamps[i] = `${date.getMonth()+1}/${date.getDate()} ${pad(date.getHours())}:00`;
-        }
+        tsMs[i] = new Date(trendData[i].ts || trendData[i].Ts).getTime();
       }
 
       const noRequestRanges = computeNoRequestRanges(trendData);
       const markAreaData = noRequestRanges
         .filter(([start, end]) => (end - start + 1) >= 3) // 太短的空窗不要标，避免噪音
         .map(([start, end]) => ([
-          { xAxis: timestamps[start] },
-          { xAxis: timestamps[end] }
+          { xAxis: tsMs[start] },
+          { xAxis: tsMs[end] + bucketMs }
         ]));
 
       // 为每个可见模型序列生成颜色
@@ -394,7 +388,27 @@
       // 准备series数据
       const series = [];
       const trendType = window.currentTrendType;
-      const showZoom = shouldShowZoom(timestamps.length, window.currentHours, trendType);
+
+      // 保留旧缩放窗口跨全量重绘：setOption(notMerge) 会重置 dataZoom，
+      // 这里在重建前读回上次的 ms 窗口；窗口贴着数据尾端视为"追最新"，
+      // 数据变长后继续保持贴尾，否则按原窗口恢复（出界则丢弃）
+      const showSlider = window.currentHours > 24;
+      let zoomRestore = null;
+      if (window.chartInstance && tsMs.length) {
+        const dz = window.chartInstance.getOption()?.dataZoom?.[0];
+        const dataStart = tsMs[0];
+        const dataEnd = tsMs[dataLen - 1] + bucketMs;
+        if (dz && Number.isFinite(dz.startValue) && Number.isFinite(dz.endValue)
+            && dz.endValue > dataStart && dz.startValue < dataEnd) {
+          const prevEnd = window._trendDataEnd || 0;
+          const followTail = prevEnd > 0 && dz.endValue >= prevEnd - bucketMs * 0.5;
+          zoomRestore = {
+            startValue: Math.max(dz.startValue, dataStart),
+            endValue: followTail ? dataEnd : Math.min(dz.endValue, dataEnd)
+          };
+        }
+      }
+      window._trendDataEnd = tsMs.length ? tsMs[dataLen - 1] + bucketMs : 0;
 
       // 根据趋势类型准备不同的总体数据
       if (trendType === 'count') {
@@ -424,10 +438,7 @@
               { offset: 1, color: 'rgba(16, 185, 129, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
-            const val = point.success || 0;
-            return val; // 0值显示为基线，避免大段空白
-          })
+          data: window.trendData.map((point, i) => [tsMs[i], point.success || 0])
         });
 
         series.push({
@@ -455,10 +466,7 @@
               { offset: 1, color: 'rgba(239, 68, 68, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
-            const val = point.error || 0;
-            return val; // 0值显示为基线，避免大段空白
-          })
+          data: window.trendData.map((point, i) => [tsMs[i], point.error || 0])
         });
       } else if (trendType === 'first_byte') {
 	        // 首字响应时间趋势：添加总体平均首字响应时间线
@@ -487,9 +495,9 @@
               { offset: 1, color: 'rgba(14, 165, 233, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
+          data: window.trendData.map((point, i) => {
             const fbt = point.avg_first_byte_time_seconds;
-            return (fbt != null && fbt > 0) ? fbt : null; // 秒
+            return [tsMs[i], (fbt != null && fbt > 0) ? fbt : null]; // 秒
           })
         });
       } else if (trendType === 'duration') {
@@ -519,9 +527,9 @@
               { offset: 1, color: 'rgba(168, 85, 247, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
+          data: window.trendData.map((point, i) => {
             const dur = point.avg_duration_seconds;
-            return (dur != null && dur > 0) ? dur : null; // 秒
+            return [tsMs[i], (dur != null && dur > 0) ? dur : null]; // 秒
           })
         });
       } else if (trendType === 'tokens') {
@@ -538,7 +546,7 @@
           emphasis: { focus: 'series', showSymbol: true },
           itemStyle: { color: '#3b82f6' },
           lineStyle: { width: 2, color: '#3b82f6', cap: 'round', join: 'round' },
-          data: window.trendData.map(point => point.input_tokens || 0)
+          data: window.trendData.map((point, i) => [tsMs[i], point.input_tokens || 0])
         });
         series.push({
           name: t('trend.outputTokens'),
@@ -552,7 +560,7 @@
           emphasis: { focus: 'series', showSymbol: true },
           itemStyle: { color: '#10b981' },
           lineStyle: { width: 2, color: '#10b981', cap: 'round', join: 'round' },
-          data: window.trendData.map(point => point.output_tokens || 0)
+          data: window.trendData.map((point, i) => [tsMs[i], point.output_tokens || 0])
         });
         series.push({
           name: t('trend.cacheRead'),
@@ -566,7 +574,7 @@
           emphasis: { focus: 'series', showSymbol: true },
           itemStyle: { color: '#f97316' },
           lineStyle: { width: 2, color: '#f97316', cap: 'round', join: 'round' },
-          data: window.trendData.map(point => point.cache_read_tokens || 0)
+          data: window.trendData.map((point, i) => [tsMs[i], point.cache_read_tokens || 0])
         });
         series.push({
           name: t('trend.cacheCreate'),
@@ -580,7 +588,7 @@
           emphasis: { focus: 'series', showSymbol: true },
           itemStyle: { color: '#a855f7' },
           lineStyle: { width: 2, color: '#a855f7', cap: 'round', join: 'round' },
-          data: window.trendData.map(point => point.cache_creation_tokens || 0)
+          data: window.trendData.map((point, i) => [tsMs[i], point.cache_creation_tokens || 0])
         });
       } else if (trendType === 'cost') {
         // 费用消耗趋势：添加总体费用线
@@ -609,10 +617,7 @@
               { offset: 1, color: 'rgba(249, 115, 22, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
-            const cost = point.total_cost;
-            return cost || 0;
-          })
+          data: window.trendData.map((point, i) => [tsMs[i], point.total_cost || 0])
         });
       } else if (trendType === 'rpm') {
         // RPM趋势：每分钟请求数 = (success + error) * 60 / bucketSec
@@ -635,9 +640,9 @@
               { offset: 1, color: 'rgba(59, 130, 246, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
+          data: window.trendData.map((point, i) => {
             const total = (point.success || 0) + (point.error || 0);
-            return total > 0 ? total * 60 / bucketSec : 0;
+            return [tsMs[i], total > 0 ? total * 60 / bucketSec : 0];
           })
         });
       } else if (trendType === 'tps') {
@@ -662,7 +667,7 @@
             emphasis: { focus: 'series', showSymbol: true },
             itemStyle: { color: def.color },
             lineStyle: { width: 2, color: def.color, cap: 'round', join: 'round' },
-            data: window.trendData.map(point => (Number(point[def.field]) || 0) / bucketSec)
+            data: window.trendData.map((point, i) => [tsMs[i], (Number(point[def.field]) || 0) / bucketSec])
           });
         });
       } else if (trendType === 'cache_hit') {
@@ -692,10 +697,10 @@
               { offset: 1, color: 'rgba(249, 115, 22, 0.00)' }
             ])
           },
-          data: window.trendData.map(point => {
+          data: window.trendData.map((point, i) => {
             const hit = point.cache_read_tokens || 0;
             const total = hit + (point.input_tokens || 0);
-            return total > 0 ? (hit / total) * 100 : null;
+            return [tsMs[i], total > 0 ? (hit / total) * 100 : null];
           })
         });
       }
@@ -722,8 +727,8 @@
             const modelData = models ? models[modelName] : null;
             const success = modelData ? (modelData.success || 0) : 0;
             const error = modelData ? (modelData.error || 0) : 0;
-            successData[i] = success;
-            errorData[i] = error;
+            successData[i] = [tsMs[i], success];
+            errorData[i] = [tsMs[i], error];
             successTotal += success;
             errorTotal += error;
           }
@@ -732,6 +737,7 @@
           if (successTotal > 0) {
             series.push({
               name: t('trend.modelSuccess', { model: modelName }),
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -748,6 +754,7 @@
           if (errorTotal > 0) {
             series.push({
               name: t('trend.modelFailed', { model: modelName }),
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -769,16 +776,17 @@
             const modelData = models ? models[modelName] : null;
             const fbt = modelData ? modelData.avg_first_byte_time_seconds : null;
             if (fbt != null && fbt > 0) {
-              fbtData[i] = fbt;
+              fbtData[i] = [tsMs[i], fbt];
               hasData = true;
             } else {
-              fbtData[i] = null;
+              fbtData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -800,16 +808,17 @@
             const modelData = models ? models[modelName] : null;
             const dur = modelData ? modelData.avg_duration_seconds : null;
             if (dur != null && dur > 0) {
-              durData[i] = dur;
+              durData[i] = [tsMs[i], dur];
               hasData = true;
             } else {
-              durData[i] = null;
+              durData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -831,16 +840,17 @@
             const modelData = models ? models[modelName] : null;
             const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
             if (total > 0) {
-              tokenData[i] = total;
+              tokenData[i] = [tsMs[i], total];
               hasData = true;
             } else {
-              tokenData[i] = null;
+              tokenData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -862,16 +872,17 @@
             const modelData = models ? models[modelName] : null;
             const cost = modelData ? modelData.total_cost : null;
             if (cost != null && cost > 0) {
-              costData[i] = cost;
+              costData[i] = [tsMs[i], cost];
               hasData = true;
             } else {
-              costData[i] = null;
+              costData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -894,16 +905,17 @@
             const modelData = models ? models[modelName] : null;
             const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
             if (total > 0) {
-              rpmData[i] = total * 60 / bucketSec;
+              rpmData[i] = [tsMs[i], total * 60 / bucketSec];
               hasData = true;
             } else {
-              rpmData[i] = null;
+              rpmData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -926,16 +938,17 @@
             const modelData = models ? models[modelName] : null;
             const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
             if (total > 0) {
-              tpsData[i] = total / bucketSec;
+              tpsData[i] = [tsMs[i], total / bucketSec];
               hasData = true;
             } else {
-              tpsData[i] = null;
+              tpsData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -958,16 +971,17 @@
             const hit = modelData ? (modelData.cache_read_tokens || 0) : 0;
             const total = modelData ? hit + (modelData.input_tokens || 0) : 0;
             if (total > 0) {
-              hitData[i] = (hit / total) * 100;
+              hitData[i] = [tsMs[i], (hit / total) * 100];
               hasData = true;
             } else {
-              hitData[i] = null;
+              hitData[i] = [tsMs[i], null];
             }
           }
 
           if (hasData) {
             series.push({
               name: modelName,
+              drillModel: modelName,
               type: 'line',
               smooth: 0.25,
               symbol: 'none',
@@ -987,21 +1001,38 @@
         enhanceLatencySeries(series);
       }
 
+      series.forEach(s => {
+        // 系列点可点击钻取日志页——指针样式给提示
+        s.cursor = 'pointer';
+        // connectNulls:false 下孤立点渲染为空——序列有空洞时把点显出来
+        if (Array.isArray(s.data) && s.data.some(d => d && d[1] == null)) {
+          s.showSymbol = true;
+          if (s.symbol === 'none') s.symbol = 'circle';
+          s.symbolSize = s.symbolSize || 4;
+        }
+      });
+
       // ECharts 配置
       const legendHeight = 28;
       const gridTopPx = legendHeight + 18;
-      const gridBottomPx = showZoom ? 70 : 48;
+      const gridBottomPx = showSlider ? 70 : 48;
       const gridRightPx = (trendType === 'first_byte' || trendType === 'duration') ? 44 : 28;
-      const xAxisLabelInterval = computeXAxisLabelInterval(timestamps.length, 10);
-      const xAxisRotate = (window.currentHours > 24 || window.innerWidth < 640) ? 45 : 0;
+      const multiDay = window.currentHours > 24;
+      const showSec = (window.currentBucketSec || 600) < 60;
       const yAxisScale = (trendType === 'first_byte' || trendType === 'duration');
       const useLatencyAxis = (trendType === 'first_byte' || trendType === 'duration');
       const yAxisMin = useLatencyAxis ? latencyAxisMin : 0;
       const yAxisMax = useLatencyAxis ? latencyAxisMax : (trendType === 'cache_hit' ? 100 : null);
       const chartTheme = getTrendChartTheme();
+      const hasRequests = trendData.some(p => (p.success || 0) + (p.error || 0) > 0);
 
       const chartType = window.currentTrendChartType === 'bar' ? 'bar' : 'line';
+      const zoomSpan = zoomRestore
+        ? { startValue: zoomRestore.startValue, endValue: zoomRestore.endValue }
+        : {};
       const option = {
+        // 首渲保留一次淡入，数据刷新/切图即时到位——自动刷新下重画不扫动
+        animation: !window._trendChartPainted,
         backgroundColor: 'transparent',
         title: {
           show: false
@@ -1029,7 +1060,7 @@
             const point = (dataIndex != null && window.trendData && window.trendData[dataIndex]) ? window.trendData[dataIndex] : null;
             const totalReq = point ? ((point.success || 0) + (point.error || 0)) : null;
 
-            let html = `<div style="font-weight: 600; margin-bottom: 6px;">${params[0].axisValue}</div>`;
+            let html = `<div style="font-weight: 600; margin-bottom: 6px;">${fmtBucketTime(params[0].axisValue, multiDay, showSec, false)}</div>`;
             if (totalReq != null) {
               const hint = totalReq === 0
                 ? `<span style="color: ${chartTheme.mutedText};">${t('trend.noRequestInPeriod')}</span>`
@@ -1038,62 +1069,17 @@
             }
             params.forEach(param => {
               const color = param.color;
-              const value = param.value;
-              let formattedValue;
-
-              // 根据当前趋势类型格式化数值
-              if (value == null) {
-                formattedValue = 'N/A';
-              } else if (window.currentTrendType === 'first_byte' || window.currentTrendType === 'duration') {
-                // 首块响应体时间/总耗时：秒
-                formattedValue = value.toFixed(1) + 's';
-              } else if (window.currentTrendType === 'cost') {
-                // 费用消耗：美元格式
-                if (value >= 1) {
-                  formattedValue = '$' + value.toFixed(2);
-                } else if (value >= 0.01) {
-                  formattedValue = '$' + value.toFixed(4);
-                } else if (value > 0) {
-                  formattedValue = '$' + value.toFixed(6);
-                } else {
-                  formattedValue = '$0.00';
-                }
-              } else if (window.currentTrendType === 'tokens') {
-                // Token用量：K/M格式
-                if (value >= 1000000) {
-                  formattedValue = (value / 1000000).toFixed(1) + 'M';
-                } else if (value >= 1000) {
-                  formattedValue = (value / 1000).toFixed(1) + 'K';
-                } else {
-                  formattedValue = value.toString();
-                }
-              } else if (window.currentTrendType === 'rpm') {
-                // RPM：保留1位小数
-                formattedValue = value.toFixed(1) + '/min';
-              } else if (window.currentTrendType === 'tps') {
-                // TPS：每秒 token 数，K/M 缩写
-                if (value >= 1000000) {
-                  formattedValue = (value / 1000000).toFixed(1) + 'M/s';
-                } else if (value >= 1000) {
-                  formattedValue = (value / 1000).toFixed(1) + 'K/s';
-                } else {
-                  formattedValue = value.toFixed(1) + '/s';
-                }
-              } else if (window.currentTrendType === 'cache_hit') {
-                // 缓存命中率：百分比
-                formattedValue = value.toFixed(1) + '%';
-              } else {
-                // 调用次数：整数
-                formattedValue = Math.round(value).toString();
-              }
+              const value = Array.isArray(param.value) ? param.value[1] : param.value;
+              if (value == null) return; // 无数据序列不打 N/A 行
 
               html += `
                 <div style="display: flex; align-items: center; gap: 8px; margin: 4px 0;">
                   <span style="display: inline-block; width: 10px; height: 10px; background: ${color}; border-radius: 50%;"></span>
-                  <span>${param.seriesName}: ${formattedValue}</span>
+                  <span>${param.seriesName}: ${formatTrendValue(window.currentTrendType, value)}</span>
                 </div>
               `;
             });
+            html += `<div style="margin-top: 6px; color: ${chartTheme.mutedText}; font-size: 11px;">${t('trend.drillHint')}</div>`;
             return html;
           }
         },
@@ -1126,24 +1112,21 @@
           containLabel: true
         },
         xAxis: {
-          type: 'category',
+          type: 'time',
           boundaryGap: chartType === 'bar',
-          data: timestamps,
+          min: tsMs[0],
+          max: tsMs[dataLen - 1] + bucketMs,
           axisLine: {
             lineStyle: {
               color: chartTheme.axisLine
             }
           },
-          axisTick: {
-            alignWithLabel: true,
-            lineStyle: { color: chartTheme.axisLine }
-          },
           axisLabel: {
             color: chartTheme.mutedText,
             fontSize: 11,
-            rotate: xAxisRotate,
+            rotate: window.innerWidth < 640 ? 45 : 0,
             hideOverlap: true,
-            interval: xAxisLabelInterval
+            formatter: (v) => fmtBucketTime(v, multiDay, showSec || v % 60000 !== 0, 'boundary')
           },
           splitLine: {
             show: true,
@@ -1166,38 +1149,7 @@
           axisLabel: {
             color: chartTheme.mutedText,
             fontSize: 11,
-            formatter: function(value) {
-              if (trendType === 'first_byte' || trendType === 'duration') {
-                // 首块响应体时间/总耗时：秒格式
-                return value.toFixed(1) + 's';
-              } else if (trendType === 'cost') {
-                // 费用消耗：美元格式
-                if (value >= 1) return '$' + value.toFixed(2);
-                if (value >= 0.01) return '$' + value.toFixed(4);
-                return '$' + value.toFixed(6);
-              } else if (trendType === 'tokens') {
-                // Token用量：K/M格式
-                if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
-                if (value >= 1000) return (value / 1000).toFixed(1) + 'K';
-                return value;
-              } else if (trendType === 'rpm') {
-                // RPM：保留1位小数
-                return value.toFixed(1);
-              } else if (trendType === 'tps') {
-                // TPS：K/M 缩写 + /s
-                if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M/s';
-                if (value >= 1000) return (value / 1000).toFixed(1) + 'K/s';
-                return value.toFixed(1) + '/s';
-              } else if (trendType === 'cache_hit') {
-                // 缓存命中率：百分比
-                return Math.round(value) + '%';
-              } else {
-                // 调用次数：K/M格式
-                if (value >= 1000000) return (value / 1000000) + 'M';
-                if (value >= 1000) return (value / 1000) + 'K';
-                return value;
-              }
-            }
+            formatter: (value) => formatTrendValue(trendType, value, true)
           },
           splitLine: {
             lineStyle: {
@@ -1207,20 +1159,21 @@
           }
         },
         series: applyNoRequestMarkArea(applyTrendChartType(series, chartType), markAreaData),
-        dataZoom: showZoom ? [
+        // inside 缩放常驻（滚轮/拖拽），滑块只在跨天长窗出现——短窗用不上还吃高度；
+        // zoomSpan 回写上次缩放窗口，自动刷新/切图不丢视野
+        dataZoom: [
           {
             type: 'inside',
-            start: 0,
-            end: 100,
-            minValueSpan: 10
+            minValueSpan: bucketMs * 5,
+            ...zoomSpan
           },
-          {
+          ...(showSlider ? [{
             show: true,
             type: 'slider',
             bottom: 18,
-            start: 0,
-            end: 100,
             height: 20,
+            minValueSpan: bucketMs * 5,
+            ...zoomSpan,
             borderColor: chartTheme.axisLine,
             backgroundColor: chartTheme.surfaceMuted,
             fillerColor: 'rgba(59, 130, 246, 0.16)',
@@ -1232,14 +1185,29 @@
               color: chartTheme.mutedText,
               fontSize: 10
             }
+          }] : [])
+        ],
+        // 全空窗口直接给文字占位，不留一张"零值平线"的假图
+        graphic: hasRequests ? [] : [{
+          type: 'text',
+          left: 'center',
+          top: '55%',
+          silent: true,
+          style: {
+            text: t('trend.noDataInRange'),
+            fill: chartTheme.mutedText,
+            fontSize: 13
           }
-        ] : [],
-        animationDuration: 1000,
+        }],
+        animationDuration: 450,
         animationEasing: 'cubicInOut'
       };
 
       // 设置配置并渲染
       window.chartInstance.setOption(option, true); // true 表示不合并，全量更新
+      window._trendChartPainted = true;
+      window._trendSeriesDefs = series; // 点击钻取时回查 drillModel
+      bindTrendDrill(window.chartInstance);
     }
 
     function applyTrendChartType(series, chartType) {
@@ -1302,17 +1270,6 @@
       });
 
       window.chartResizeObserver.observe(chartDom);
-    }
-
-function shouldShowZoom(points, hours, trendType) {
-	if (hours > 24) return true;
-	if (trendType === 'first_byte' || trendType === 'duration') return points >= 60;
-	return points >= 120;
-}
-
-    function computeXAxisLabelInterval(points, maxLabels) {
-      if (!points || points <= maxLabels) return 0;
-      return Math.max(0, Math.ceil(points / maxLabels) - 1);
     }
 
     // 标注无请求区间：视觉上解释“断线/空窗”，同时不篡改数据语义
@@ -1445,6 +1402,75 @@ function shouldShowZoom(points, hours, trendType) {
       if (sec >= 3600) return Math.round(sec / 360) / 10 + ' ' + t('trend.hour');
       if (sec >= 60) return Math.round(sec / 6) / 10 + ' ' + t('trend.minute');
       return sec + ' ' + t('trend.second');
+    }
+
+    // fmtBucketTime：时间轴刻度与 tooltip 头的桶时刻文本。跨天时轴刻度
+    // 只在 0 点露日期（dateMode='boundary'），tooltip 头总是带日期（'always'）。
+    function fmtBucketTime(ms, multiDay, withSec, dateMode) {
+      const d = new Date(ms);
+      let hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+      if (withSec) hm += ':' + pad(d.getSeconds());
+      if (!multiDay) return hm;
+      const date = (d.getMonth() + 1) + '/' + d.getDate();
+      if (dateMode === 'boundary') {
+        return (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0) ? date : hm;
+      }
+      return date + ' ' + hm;
+    }
+
+    // formatTrendValue：tooltip 行值与 y 轴刻度共用一套数值格式；
+    // compact=true 给轴刻度（count 用 K/M、rpm 不带后缀），防两处漂移。
+    function formatTrendValue(trendType, value, compact) {
+      if (trendType === 'first_byte' || trendType === 'duration') {
+        return value.toFixed(1) + 's';
+      }
+      if (trendType === 'cost') {
+        if (value >= 1) return '$' + value.toFixed(2);
+        if (value >= 0.01) return '$' + value.toFixed(4);
+        return value > 0 ? '$' + value.toFixed(6) : '$0.00';
+      }
+      if (trendType === 'tokens') {
+        if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M';
+        if (value >= 1000) return (value / 1000).toFixed(1) + 'K';
+        return String(value);
+      }
+      if (trendType === 'rpm') {
+        return compact ? value.toFixed(1) : value.toFixed(1) + '/min';
+      }
+      if (trendType === 'tps') {
+        if (value >= 1000000) return (value / 1000000).toFixed(1) + 'M/s';
+        if (value >= 1000) return (value / 1000).toFixed(1) + 'K/s';
+        return value.toFixed(1) + '/s';
+      }
+      if (trendType === 'cache_hit') {
+        return value.toFixed(1) + '%';
+      }
+      if (compact) {
+        if (value >= 1000000) return (value / 1000000) + 'M';
+        if (value >= 1000) return (value / 1000) + 'K';
+      }
+      return String(Math.round(value));
+    }
+
+    // 点击数据点 → 新窗口打开该桶时间窗的日志页；模型序列构建时挂
+    // drillModel（seriesName 是格式化文案不能反解），总量线只带时间窗
+    function bindTrendDrill(chart) {
+      if (chart._trendDrillBound) return;
+      chart._trendDrillBound = true;
+      chart.on('click', (params) => {
+        if (params.componentType !== 'series' || !Array.isArray(params.value)) return;
+        const startMs = Math.floor(params.value[0]);
+        if (!Number.isFinite(startMs)) return;
+        const q = new URLSearchParams({
+          range: 'custom',
+          start_time: String(startMs),
+          end_time: String(startMs + (window.currentBucketSec || 600) * 1000)
+        });
+        const def = (window._trendSeriesDefs || [])[params.seriesIndex];
+        if (def && def.drillModel) q.set('model', def.drillModel);
+        if (window.currentAPI) q.set('api', window.currentAPI);
+        window.open('/web/logs.html?' + q.toString(), '_blank');
+      });
     }
 
     // 工具函数
@@ -1722,7 +1748,7 @@ function shouldShowZoom(points, hours, trendType) {
 
     // 切换组被工具栏挤出内滚动时挂渐隐提示；宽度够时无类不遮
     function updateToolbarScrollHint() {
-      const group = document.querySelector('.trend-chart-toolbar .toggle-group');
+      const group = document.getElementById('trend-type-group');
       if (!group) return;
       group.classList.toggle('is-scrollable', group.scrollWidth > group.clientWidth + 1);
     }
