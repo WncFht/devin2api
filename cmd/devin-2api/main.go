@@ -272,6 +272,9 @@ func main() {
 	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
 	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
 	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
+	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
+	// 降权簿记（quota_low 阈值判定在 adapter 内）。
+	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)
 	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
 	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
@@ -349,7 +352,7 @@ func main() {
 	})
 	// /admin/accounts 操作面：行写入+重推+回滚的编排在 ops 闭包内
 	// 完成，面板 handler 只做请求解码与 sentinel→状态码映射。
-	ccPanel.SetAccountOps(newAccountOps(absoluteConfigPath, dbStore, devinPool, settingsStore))
+	ccPanel.SetAccountOps(newAccountOps(absoluteConfigPath, absoluteStateDir, dbStore, devinPool, settingsStore))
 	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
 	modelStore, err := modelreg.New(dbStore)
@@ -436,6 +439,9 @@ func devinBaseConfig(serviceConfig config.Config) devin.Config {
 		ClientName:    serviceConfig.Devin.ClientName,
 		ClientVersion: serviceConfig.Devin.ClientVersion,
 		ClientOS:      serviceConfig.Devin.ClientOS,
+		// 会话亲和 TTL 与配额降权阈值是全局字段，经 base 模板铺进各 lane。
+		SessionAffinityTTLSeconds: serviceConfig.Devin.SessionAffinityTTLSeconds,
+		QuotaLowThresholdPercent:  serviceConfig.Devin.QuotaLowThresholdPercent,
 		Gate: devin.GateConfig{
 			MaxRPM:       serviceConfig.Devin.MaxRPM,
 			MaxHold:      time.Duration(serviceConfig.Devin.GateMaxHoldSeconds) * time.Second,
@@ -487,6 +493,11 @@ func devinConfigsFrom(serviceConfig config.Config, accounts []config.DevinAccoun
 		lane := devinBaseConfig(serviceConfig)
 		lane.Name = account.Name
 		lane.Token = account.Token
+		lane.Priority = account.Priority
+		// 号级 max_rpm 覆盖全局闸门配额；0 继承 devin.max_rpm。
+		if account.MaxRPM > 0 {
+			lane.Gate.MaxRPM = account.MaxRPM
+		}
 		lane.GateStateStore = dbStore
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
@@ -567,6 +578,7 @@ func laneAccountConfigs(resolved []store.ResolvedAccount) []config.DevinAccountC
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out
@@ -583,6 +595,7 @@ func candidateAccountConfigs(resolved []store.ResolvedAccount) []config.DevinAcc
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out
@@ -694,8 +707,9 @@ func rollbackAccountRow(ctx context.Context, dbStore *store.Store, name string, 
 // reloadMu 下跑——行写入、applyAccounts 重推与失败回滚是一条多步
 // 提交，和 reload 共用同一把串行化锁才不跟热更交错。写动作同一骨架：
 // 预检（存在性/状态/干跑整表校验）→ 行写入 → applyAccounts → 失败
-// 按写前快照回滚行 → 成功回该名生效视图。
-func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Pool, settings *ccpanel.PanelSettings) ccpanel.AccountOps {
+// 按写前快照回滚行 → 成功回该名生效视图。stateDir 是
+// credentials_content 粘贴上传的落盘根（account-credentials/ 子目录）。
+func newAccountOps(configPath, stateDir string, dbStore *store.Store, devinPool *devin.Pool, settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 	configDir := filepath.Dir(configPath)
 	push := func(ctx context.Context) ([]store.ResolvedAccount, error) {
 		resolved, _, err := applyAccounts(ctx, runtimeConfigPtr.Load().cfg, configPath, dbStore, devinPool, settings)
@@ -728,6 +742,25 @@ func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Poo
 				Token:           strings.TrimSpace(in.Token),
 				CredentialsFile: strings.TrimSpace(in.CredentialsFile),
 				Disabled:        in.Disabled,
+				Priority:        in.Priority,
+				MaxRPM:          in.MaxRPM,
+			}
+			if in.Notes != nil {
+				row.Notes = *in.Notes
+			}
+			// credentials_content 是粘贴上传：先证明能解出 token 再落盘
+			// 到状态目录管理位，行存绝对路径。落盘先于干跑——合成校验
+			// 要按 credentials_file 口径重读它；后续步骤失败留下的是
+			// 未被引用的文件，惰性无害。
+			if in.CredentialsContent != "" {
+				if config.TokenFromCredentialsContent([]byte(in.CredentialsContent)) == "" {
+					return nil, errors.New("credentials_content carries no windsurf_api_key")
+				}
+				path, err := writeAccountCredentialsFile(stateDir, in.Name, in.CredentialsContent)
+				if err != nil {
+					return nil, fmt.Errorf("write credentials_content: %w", err)
+				}
+				row.CredentialsFile = path
 			}
 			// 干跑整表校验先于行写入：合成集非法（零凭据/重名/重
 			// token/文件不可解）直接拒绝，库里不留脏行。
@@ -772,7 +805,8 @@ func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Poo
 				*row = *oldRow
 			}
 			// 指针字段区分缺席与显式空：显式 "" 落 NULL 即「清行覆盖」
-			// （config 名回落 config 值），缺席不动旧值。
+			// （config 名回落 config 值），缺席不动旧值。priority/max_rpm
+			// 的 0 是真实覆盖值——指针语义表达不了「清回 NULL」。
 			if patch.Token != nil {
 				row.Token = strings.TrimSpace(*patch.Token)
 			}
@@ -781,6 +815,32 @@ func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Poo
 			}
 			if patch.Disabled != nil {
 				row.Disabled = *patch.Disabled
+			}
+			if patch.Priority != nil {
+				row.Priority = patch.Priority
+			}
+			if patch.MaxRPM != nil {
+				row.MaxRPM = patch.MaxRPM
+			}
+			if patch.Notes != nil {
+				row.Notes = *patch.Notes
+			}
+			// credentials_content 同 Create：显式空串清 credentials_file
+			// 覆盖（不落盘），非空先验 token 再写管理位。落盘先于干跑，
+			// 失败残留的孤儿文件惰性无害。
+			if patch.CredentialsContent != nil {
+				if *patch.CredentialsContent == "" {
+					row.CredentialsFile = ""
+				} else {
+					if config.TokenFromCredentialsContent([]byte(*patch.CredentialsContent)) == "" {
+						return nil, errors.New("credentials_content carries no windsurf_api_key")
+					}
+					path, err := writeAccountCredentialsFile(stateDir, name, *patch.CredentialsContent)
+					if err != nil {
+						return nil, fmt.Errorf("write credentials_content: %w", err)
+					}
+					row.CredentialsFile = path
+				}
 			}
 			synthesized, err := config.ResolveAccounts(candidateAccountConfigs(
 				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row))), configDir)
@@ -894,7 +954,48 @@ func newAccountOps(configPath string, dbStore *store.Store, devinPool *devin.Poo
 			}
 			return "", fmt.Errorf("account %q has no resolvable credential", name)
 		},
+		// CredentialOf 解析一次写输入将生效的凭据（verify 探测用）：
+		// content 直解；file 走整表校验的锚定/现读合成（~/ 展开、相对
+		// 锚 configDir），file 优先于 token——与 TokenOf/池侧 lane 的
+		// 「文件是自愈源、字面量是兜底」同口径。纯解析不落盘。
+		CredentialOf: func(in ccpanel.AccountWrite) (string, error) {
+			if in.CredentialsContent != "" {
+				if token := config.TokenFromCredentialsContent([]byte(in.CredentialsContent)); token != "" {
+					return token, nil
+				}
+				return "", errors.New("credentials_content carries no windsurf_api_key")
+			}
+			if in.CredentialsFile != "" {
+				synthesized, err := config.ResolveAccounts([]config.DevinAccountConfig{{
+					Name: in.Name, CredentialsFile: in.CredentialsFile,
+				}}, configDir)
+				if err != nil {
+					return "", err
+				}
+				return synthesized[0].Token, nil
+			}
+			if in.Token != "" {
+				return in.Token, nil
+			}
+			return "", errors.New("one of token/credentials_file/credentials_content is required")
+		},
 	}
+}
+
+// writeAccountCredentialsFile 把粘贴的 credentials.toml 落进状态目录
+// 的 account-credentials/<name>.toml（0600 凭据件、0700 目录）；
+// name 已过账号名正则，路径无注入面。返回绝对路径供行 CredentialsFile
+// 置位。同名的覆盖写语义顺带给 Update 复用（改内容=改文件）。
+func writeAccountCredentialsFile(stateDir, name, content string) (string, error) {
+	dir := filepath.Join(stateDir, "account-credentials")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name+".toml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // declaredAccount 报 name 是否被 config.yaml 声明——声明名即便没有

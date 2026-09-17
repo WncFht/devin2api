@@ -234,7 +234,7 @@ func TestAccountOpsLifecycle(t *testing.T) {
 	if _, _, err := applyAccounts(ctx, cfg, configPath, dbStore, pool, nil); err != nil {
 		t.Fatal(err)
 	}
-	ops := newAccountOps(configPath, dbStore, pool, nil)
+	ops := newAccountOps(configPath, dir, dbStore, pool, nil)
 
 	// 建号：撞 config 名 → ErrAccountExists；零凭据 → 校验错。
 	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "alpha", Token: "x"}); !errors.Is(err, store.ErrAccountExists) {
@@ -357,7 +357,7 @@ func TestAccountOpsCredentialsFile(t *testing.T) {
 	runtimeConfigPtr.Store(&runtimeConfigState{cfg: cfg, loadedAt: time.Now()})
 	t.Cleanup(func() { runtimeConfigPtr.Store(nil) })
 	pool := testPool(t)
-	ops := newAccountOps(configPath, dbStore, pool, nil)
+	ops := newAccountOps(configPath, dir, dbStore, pool, nil)
 
 	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "cf", CredentialsFile: "creds.toml"})
 	if err != nil {
@@ -368,6 +368,70 @@ func TestAccountOpsCredentialsFile(t *testing.T) {
 	}
 	if token, err := ops.TokenOf(ctx, "cf"); err != nil || token != "tok-cf" {
 		t.Fatalf("TokenOf(cf) = %q, %v", token, err)
+	}
+}
+
+// TestAccountOpsCredentialsContent 验证 credentials_content 粘贴上传：
+// 内容先过 token 解析校验，再落盘 <stateDir>/account-credentials/<name>.toml
+// （0600），行 CredentialsFile 存该绝对路径；CredentialOf 三源解析与
+// Create 同口径（content 直解、file 锚定现读、token 兜底）。
+func TestAccountOpsCredentialsContent(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
+	dbStore := testAccountStore(t, dir)
+	ctx := context.Background()
+	runtimeConfigPtr.Store(&runtimeConfigState{cfg: cfg, loadedAt: time.Now()})
+	t.Cleanup(func() { runtimeConfigPtr.Store(nil) })
+	pool := testPool(t)
+	ops := newAccountOps(configPath, dir, dbStore, pool, nil)
+
+	content := "windsurf_api_key = \"tok-paste\"\n"
+	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "cc", CredentialsContent: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(dir, "account-credentials", "cc.toml")
+	if created.CredentialsFile != managed {
+		t.Fatalf("CredentialsFile = %q, want managed %q", created.CredentialsFile, managed)
+	}
+	data, err := os.ReadFile(managed)
+	if err != nil || string(data) != content {
+		t.Fatalf("managed file = %q, %v", data, err)
+	}
+	if info, _ := os.Stat(managed); info.Mode().Perm() != 0o600 {
+		t.Fatalf("managed file mode = %v, want 0600", info.Mode())
+	}
+	if token, err := ops.TokenOf(ctx, "cc"); err != nil || token != "tok-paste" {
+		t.Fatalf("TokenOf(cc) = %q, %v", token, err)
+	}
+	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "bad", CredentialsContent: "no key here"}); err == nil {
+		t.Fatal("create with unresolvable credentials_content should fail")
+	}
+	// Update 路径：换新内容落同一管理位；显式空串清 credentials_file。
+	newContent := "windsurf_api_key = \"tok-paste2\"\n"
+	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &newContent}); err != nil {
+		t.Fatal(err)
+	}
+	if token, _ := ops.TokenOf(ctx, "cc"); token != "tok-paste2" {
+		t.Fatalf("TokenOf(cc) after content update = %q", token)
+	}
+	empty, lit := "", "tok-lit"
+	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &empty, Token: &lit}); err != nil {
+		t.Fatal(err)
+	}
+	if acc := findResolved(mustEffective(t, ops, ctx), "cc"); acc == nil || acc.CredentialsFile != "" {
+		t.Fatalf("cc after empty content = %+v, want credentials_file cleared", acc)
+	}
+
+	// CredentialOf：content 直解、file 锚定、token 兜底、全缺报错。
+	if token, err := ops.CredentialOf(ccpanel.AccountWrite{CredentialsContent: content}); err != nil || token != "tok-paste" {
+		t.Fatalf("CredentialOf(content) = %q, %v", token, err)
+	}
+	if token, err := ops.CredentialOf(ccpanel.AccountWrite{Token: "tok-lit"}); err != nil || token != "tok-lit" {
+		t.Fatalf("CredentialOf(token) = %q, %v", token, err)
+	}
+	if _, err := ops.CredentialOf(ccpanel.AccountWrite{}); err == nil {
+		t.Fatal("CredentialOf(empty) should fail")
 	}
 }
 
