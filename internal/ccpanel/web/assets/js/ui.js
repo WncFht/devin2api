@@ -801,14 +801,6 @@ window.WebAuth = window.WebAuth || {
     location.href = '/web/login.html';
   }
 
-  let bgAnimElement = null;
-
-  function injectBackground() {
-    if (document.querySelector('.bg-anim')) return;
-    bgAnimElement = h('div', { class: 'bg-anim' });
-    document.body.appendChild(bgAnimElement);
-  }
-
   window.initTopbar = function initTopbar(activeKey) {
     document.body.classList.add('top-layout');
     document.body.classList.toggle('web-role-api-token', window.isAPITokenRole());
@@ -822,9 +814,6 @@ window.WebAuth = window.WebAuth || {
     // 插入顶部条
     const topbar = buildTopbar(activeKey);
     document.body.appendChild(topbar);
-
-    // 背景动效
-    injectBackground();
 
     // 初始化版本显示
     initVersionDisplay();
