@@ -1,16 +1,18 @@
-// 本文件实现单次 HTTP 请求的分阶段调试日志目录和 JSON/JSONL 写盘。
+// 本文件实现单次 HTTP 请求的分阶段调试 payload 写入：目录名即请求身份
+// （X-Request-Id/debug_ref），内容落在 store 的 debug_files/debug_chunks
+// 两表——整文件（meta/01/02/03/error/attachments）是 files 行，流式
+// JSONL（04/05/06）按 flush 批追加为 chunks 行。
 //
 // Package debuglog 负责记录兼容 API 请求在 HTTP、中间模型和供应商协议之间的转换过程。
-// 所有写盘作业经每请求一个有界任务队列交给单 worker 串行执行——
+// 所有写库作业经每请求一个有界任务队列交给单 worker 串行执行——
 // 事件顺序即入队顺序，热路径只承担一次 channel send；队列满时丢弃并计数，
 // 观测系统自身降级不拖垮请求。生命周期管理（保留期/总量清理）见 cleaner.go。
 package debuglog
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -55,9 +57,10 @@ type Manager struct {
 	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
 	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
 	activeDirs map[string]*Recorder
-	// takenNames 记录本进程已知存在于磁盘、但不在 activeDirs 的目录名
-	//（mkdir EEXIST 撞到的遗留目录）——锁内选名时跳过它们，避免同秒
-	// 重启后反复撞名。只有撞名才入账，体量极小。
+	// takenNames 记录本进程已知被占、但不在 activeDirs 的目录名——
+	// NewManager 把盘上待导入的遗留目录播种进来，claim 撞名（已入库
+	// 的同名目录）也入账——锁内选名时跳过它们，避免同秒重启后反复
+	// 撞名。体量极小（遗留目录数 + 撞名次数）。
 	takenNames map[string]struct{}
 	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
 	enabled atomic.Bool
@@ -130,12 +133,12 @@ type Completion struct {
 	PrematureEndTurn bool
 }
 
-// Recorder 保存单次请求的目录、开始时间和异步写队列。
+// Recorder 保存单次请求的目录名、开始时间和异步写队列。
 type Recorder struct {
 	// manager 回指所属 Manager，Complete 时写索引并释放目录保护。
 	manager *Manager
-	// directory 是本次请求的日志目录。
-	directory string
+	// dir 是本次请求的调试目录名（内嵌进入时刻，不再对应磁盘目录）。
+	dir string
 	// startedAt 是 HTTP 请求进入应用的时间。
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
@@ -216,8 +219,10 @@ type Recorder struct {
 	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
 	attachmentCount int
-	// jsonlFiles 保存已打开的 JSONL 文件，避免每帧重复 open/close。
-	jsonlFiles map[string]*jsonlFile
+	// chunkBufs 按 JSONL 文件名缓冲已序列化行；队列排空时每个非空
+	// 缓冲作为一条 debug_chunks 行提交（追加行代替整文件重写，已
+	// 提交前缀对面板实时可见）。
+	chunkBufs map[string]*bytes.Buffer
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
@@ -261,12 +266,6 @@ type connInfo struct {
 
 // writeTask 是交给写 worker 的一次作业，worker 内串行执行。
 type writeTask func()
-
-// jsonlFile 保存单个已打开的 JSONL 文件句柄及其缓冲写。
-type jsonlFile struct {
-	file   *os.File
-	writer *bufio.Writer
-}
 
 // JSONLRecord 是一个 JSONL 文件中的统一行信封。
 type JSONLRecord struct {
@@ -317,6 +316,15 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 	// 提前建好根目录：stderr.log 等顶层文件不经过 Start() 的惰性建目录。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("debuglog: create log root failed", "root", root, "error", err)
+	}
+	// 把盘上遗留的请求目录（待导入或导入失败）播种进撞名集：它们对
+	// claim 不可见（行还没进库），不挡住会同秒重启把新请求撞进旧目录名。
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && requestDirPattern.MatchString(entry.Name()) {
+				manager.takenNames[entry.Name()] = struct{}{}
+			}
+		}
 	}
 	// cleaner 恒启动：策略全零时 cleanOnce 空转（每 5min 一次 ReadDir），
 	// 若按初始策略条件启动，全零起步的进程热开保留策略（SetPolicy）后
@@ -465,10 +473,11 @@ func (manager *Manager) Abort(dir string) bool {
 	return recorder.Abort()
 }
 
-// Start 为一个 HTTP 请求创建按进入秒命名的独立日志目录。
-// 目录名在锁内预订（写入 activeDirs），mkdir 移到锁外：磁盘停滞只拖慢
-// 本请求，不再堵死全部排队请求的目录分配。EEXIST 撞名说明磁盘上有
-// 本进程不知道的遗留目录（同秒重启等），记入 takenNames 后换名重试。
+// Start 为一个 HTTP 请求分配按进入秒命名的调试目录名。
+// 目录名在锁内预订（写入 activeDirs），claim 落库移到锁外：DB 停滞只
+// 拖慢本请求，不再堵死全部排队请求的目录分配。claim 未抢到说明库里
+// 已有同名目录（同秒重启等），记入 takenNames 后换名重试——等价文件
+// 时代 mkdir 的 EEXIST。
 func (manager *Manager) Start(meta RequestMeta) *Recorder {
 	if manager == nil || manager.root == "" || !manager.enabled.Load() {
 		return nil
@@ -492,17 +501,16 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		if _, ok := manager.takenNames[name]; ok {
 			continue
 		}
-		directory := filepath.Join(manager.root, name)
 		recorder := &Recorder{
 			manager:          manager,
-			directory:        directory,
+			dir:              name,
 			startedAt:        now,
 			requestMeta:      meta,
 			tasks:            make(chan writeTask, writeQueueSize),
 			writerDone:       make(chan struct{}),
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
-			jsonlFiles:       make(map[string]*jsonlFile),
+			chunkBufs:        make(map[string]*bytes.Buffer),
 			ioErrSeen:        make(map[string]struct{}),
 		}
 		recorder.requestReadyMS.Store(-1)
@@ -512,35 +520,46 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.firstClientMS.Store(-1)
 		manager.activeDirs[name] = recorder
 		manager.mutex.Unlock()
-		err := mkdirRequestDir(directory)
-		if err == nil {
+		claimed, err := manager.claimDir(name)
+		if err == nil && claimed {
 			go recorder.runWriter()
 			// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
-			// 同时把同步写盘移出 manager.mutex——目录分配锁不该挡文件 IO。
+			// 同时把同步写库移出 manager.mutex——目录分配锁不该挡 DB IO。
 			recorder.enqueue(func() { recorder.writeMeta(nil) })
 			return recorder
 		}
 		manager.mutex.Lock()
 		delete(manager.activeDirs, name)
-		if os.IsExist(err) {
+		if err == nil {
 			manager.takenNames[name] = struct{}{}
 			continue
 		}
 		manager.mutex.Unlock()
-		// 建目录失败返回 nil = 本请求静默无日志；ioErrors 计数 +
-		// Warn 让「日志为什么没了」可查（磁盘满/权限等）。
+		// 占位失败返回 nil = 本请求静默无日志；ioErrors 计数 +
+		// Warn 让「日志为什么没了」可查（DB 满/锁超时等）。
 		manager.ioErrors.Add(1)
-		slog.Warn("debuglog: create request dir failed", "dir", name, "error", err)
+		slog.Warn("debuglog: claim request dir failed", "dir", name, "error", err)
 		return nil
 	}
 }
 
-// DirectoryPath 返回本请求的日志目录绝对路径；禁用态 recorder 为空串。
-func (recorder *Recorder) DirectoryPath() string {
+// claimDir 把目录名在持久层原子占位：插入空 meta.json 行成功=抢到名。
+// store 为 nil（测试/未接线）时无共享状态可撞，直接视为占位成功——
+// 名分配只剩本进程内存集合一重判定。
+func (manager *Manager) claimDir(name string) (claimed bool, err error) {
+	if manager.store == nil {
+		return true, nil
+	}
+	return manager.store.ClaimDebugFile(context.Background(), name, MetaFile, []byte{})
+}
+
+// Dir 返回本请求的调试目录名（即 X-Request-Id/debug_ref）；
+// 禁用态 recorder 为空串。
+func (recorder *Recorder) Dir() string {
 	if recorder == nil {
 		return ""
 	}
-	return recorder.directory
+	return recorder.dir
 }
 
 // ClientRequestID 返回客户端自带的关联 ID（X-Request-Id/X-Client-Request-Id
@@ -572,16 +591,6 @@ func FromContext(ctx context.Context) *Recorder {
 	return recorder
 }
 
-// mkdirRequestDir 创建请求日志目录；根目录在运行期被删时重建父目录后重试一次。
-// 不预先 MkdirAll——根目录由 NewManager 建好，每请求一次 stat 是无谓开销。
-func mkdirRequestDir(path string) error {
-	err := os.Mkdir(path, 0o700)
-	if errors.Is(err, os.ErrNotExist) && os.MkdirAll(filepath.Dir(path), 0o700) == nil {
-		err = os.Mkdir(path, 0o700)
-	}
-	return err
-}
-
 // enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
 // 丢弃计数的归属恰在 closed 置位那刻切分：此前进 recorder.dropped，
 // 由 Complete 收尾时一并折进 droppedTotal；此后直接折进 droppedTotal——
@@ -602,38 +611,47 @@ func (recorder *Recorder) enqueue(task writeTask) {
 }
 
 // runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
-// 队列排空时把缓冲刷盘（进行中的请求目录对面板也应实时可读，不能只等
-// Complete）；tasks 关闭后排空残余任务，统一刷盘并关闭所有 JSONL 文件。
+// 队列排空时把缓冲提交为 chunk 行（进行中的请求对面板也应实时可读，
+// 不能只等 Complete）；tasks 关闭后排空残余任务，统一 flush 收尾。
 func (recorder *Recorder) runWriter() {
 	for task := range recorder.tasks {
 		task()
-		// len(channel) 的竞态无碍：多看一个任务只是少刷一次，
+		// len(channel) 的竞态无碍：多看一个任务只是少提交一次，
 		// 关闭前的统一 flush 仍兜底。
 		if len(recorder.tasks) == 0 {
 			recorder.flushJSONL()
 		}
 	}
-	for _, f := range recorder.jsonlFiles {
-		if err := f.writer.Flush(); err != nil {
-			recorder.noteIOErr("jsonl", err)
-		}
-		_ = f.file.Close()
-	}
-	recorder.jsonlFiles = nil
+	recorder.flushJSONL()
+	recorder.chunkBufs = nil
 	close(recorder.writerDone)
 }
 
-// flushJSONL 把已打开 JSONL 文件的缓冲写落盘；仅写协程调用。
+// flushJSONL 把每个非空 JSONL 缓冲提交为一条 chunk 行；仅写协程调用。
+// 单条 INSERT 是原子的：失败时缓冲保留，下次 flush 整体重发，
+// 不会出现半截批次（区别于 bufio 的「已写部分留不住」）。
 func (recorder *Recorder) flushJSONL() {
-	for _, f := range recorder.jsonlFiles {
-		if err := f.writer.Flush(); err != nil {
-			recorder.noteIOErr("jsonl", err)
+	st := recorder.manager.store
+	if st == nil {
+		for name := range recorder.chunkBufs {
+			delete(recorder.chunkBufs, name)
 		}
+		return
+	}
+	for name, buf := range recorder.chunkBufs {
+		if buf.Len() == 0 {
+			continue
+		}
+		if err := st.AppendDebugChunk(context.Background(), recorder.dir, name, buf.Bytes()); err != nil {
+			recorder.noteIOErr("jsonl", err)
+			continue
+		}
+		buf.Reset()
 	}
 }
 
 // noteIOErr 把本目录一次写失败计入 manager.ioErrors 并告警；同一类别
-// （kind）只记一笔——磁盘满等持续故障若逐帧计数，总量会失真到无法反映
+// （kind）只记一笔——DB 持续故障若逐帧计数，总量会失真到无法反映
 // 影响面。仅在写 worker 与 Complete 收尾（writerDone 关闭后，与其构成
 // happens-after）调用，去重集合无需加锁。
 func (recorder *Recorder) noteIOErr(kind string, err error) {
@@ -642,7 +660,7 @@ func (recorder *Recorder) noteIOErr(kind string, err error) {
 	}
 	recorder.ioErrSeen[kind] = struct{}{}
 	recorder.manager.ioErrors.Add(1)
-	slog.Warn("debuglog: write failed", "dir", filepath.Base(recorder.directory), "kind", kind, "error", err)
+	slog.Warn("debuglog: write failed", "dir", recorder.dir, "kind", kind, "error", err)
 }
 
 // NoteRequestReady 记录请求体解码+投影完成、泵协程即将调 adapter.Stream
@@ -900,7 +918,7 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		state = "receiving_upstream"
 	}
 	return ActiveRequest{
-		Dir:             filepath.Base(recorder.directory),
+		Dir:             recorder.dir,
 		Meta:            meta,
 		Model:           model,
 		ResolvedModel:   resolved,
@@ -930,8 +948,8 @@ func evalDeferred(value any) any {
 	return value
 }
 
-// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON 文件。
-// value 可为 func() any 延迟求值（语义见 evalDeferred）。
+// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON
+// 文件（debug_files 行）。value 可为 func() any 延迟求值（语义见 evalDeferred）。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
@@ -943,10 +961,20 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 			return
 		}
 		data = append(data, '\n')
-		if err := os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600); err != nil {
-			recorder.noteIOErr("file", err)
-		}
+		recorder.putFile(name, data)
 	})
+}
+
+// putFile 覆写一个整文件行（meta/01/02/03 与 error.json 之外的写都走这里）；
+// store 未接线时静默跳过——payload 是观测副本，不反向决定请求成败。
+func (recorder *Recorder) putFile(name string, data []byte) {
+	st := recorder.manager.store
+	if st == nil {
+		return
+	}
+	if err := st.PutDebugFile(context.Background(), recorder.dir, name, data); err != nil {
+		recorder.noteIOErr("file", err)
+	}
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -989,7 +1017,8 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 
 // WriteError 写入请求失败的阶段和错误摘要；只保留首个错误。
 // stage/message 在调用时同步抢占（first-write-wins）——调用方紧接着
-// 就能经 FirstError 读到归原点；error.json 落盘仍在写 worker 内去重。
+// 就能经 FirstError 读到归原点；error.json 落库仍在写 worker 内去重，
+// 并经 INSERT OR IGNORE 在 DB 层再兜一次 first-write-wins。
 func (recorder *Recorder) WriteError(stage string, err error) {
 	if recorder == nil || err == nil {
 		return
@@ -1000,7 +1029,7 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 			return
 		}
 		recorder.errorWritten = true
-		// 写盘内容取同步抢占的胜出版本：与 index error_stage/
+		// 落库内容取同步抢占的胜出版本：与 index error_stage/
 		// error_message 逐字节一致，不随任务入队顺序漂移。
 		recorded := recorder.firstError.Load()
 		value := recorder.sanitize(map[string]any{
@@ -1012,7 +1041,11 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		if marshalErr != nil {
 			return
 		}
-		if err := os.WriteFile(filepath.Join(recorder.directory, ErrorFile), append(data, '\n'), 0o600); err != nil {
+		st := recorder.manager.store
+		if st == nil {
+			return
+		}
+		if err := st.PutDebugFileIfAbsent(context.Background(), recorder.dir, ErrorFile, append(data, '\n')); err != nil {
 			recorder.noteIOErr("file", err)
 		}
 	})
@@ -1066,36 +1099,19 @@ func (recorder *Recorder) Complete(completion Completion) {
 	<-recorder.writerDone
 	recorder.writeMeta(&completion)
 	recorder.manager.insertLog(recorder, &completion)
-	recorder.manager.releaseDir(recorder.directory)
+	recorder.manager.releaseDir(recorder.dir)
 }
 
-// appendJSONL 把一行已序列化记录写进指定 JSONL 文件的缓冲；仅写 worker 调用。
+// appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲；
+// 缓冲在队列排空时作为一条 chunk 行入库。仅写 worker 调用。
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
-	jf, err := recorder.getJSONLFile(name)
-	if err != nil {
-		recorder.noteIOErr("jsonl", err)
-		return
+	buf := recorder.chunkBufs[name]
+	if buf == nil {
+		buf = &bytes.Buffer{}
+		recorder.chunkBufs[name] = buf
 	}
-	if _, err := jf.writer.Write(data); err != nil {
-		recorder.noteIOErr("jsonl", err)
-	}
-	if err := jf.writer.WriteByte('\n'); err != nil {
-		recorder.noteIOErr("jsonl", err)
-	}
-}
-
-// getJSONLFile 返回指定 JSONL 文件的缓冲写句柄，按需惰性打开；仅写 worker 调用。
-func (recorder *Recorder) getJSONLFile(name string) (*jsonlFile, error) {
-	if f, ok := recorder.jsonlFiles[name]; ok {
-		return f, nil
-	}
-	file, err := os.OpenFile(filepath.Join(recorder.directory, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	f := &jsonlFile{file: file, writer: bufio.NewWriter(file)}
-	recorder.jsonlFiles[name] = f
-	return f, nil
+	buf.Write(data)
+	buf.WriteByte('\n')
 }
 
 // writeMeta 写 meta.json：创建时（completion 为 nil）落进入时刻与客户端
@@ -1221,9 +1237,7 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err == nil {
-		if err := os.WriteFile(filepath.Join(recorder.directory, MetaFile), append(data, '\n'), 0o600); err != nil {
-			recorder.noteIOErr("file", err)
-		}
+		recorder.putFile(MetaFile, append(data, '\n'))
 	}
 }
 

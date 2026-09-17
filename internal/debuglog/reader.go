@@ -1,13 +1,13 @@
 // 本文件实现调试日志的读取面：单请求目录详情与文件内容、进行中
-// 请求的活快照。日志行检索已迁入 store（logs 表）；写入面见
-// recorder.go/index.go。
+// 请求的活快照。日志行检索与请求 payload 都落在 store（logs 表 +
+// debug_files/debug_chunks 两表）；写入面见 recorder.go/index.go。
 //
 // 这些接口服务两个消费者：面板的请求浏览页，以及 agent 直接 curl
 // /admin/logs* 与 /admin/debug-logs/{id} 做程序化排障——所有返回都是 JSON 可消费结构。
 package debuglog
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -20,7 +20,7 @@ import (
 // fileReadCap 是单文件读取上限；超出时截断并在响应里标记 truncated。
 const fileReadCap = 4 << 20
 
-// requestDirPattern 约束请求目录名，防止路径穿越读取任意目录。
+// requestDirPattern 约束请求目录名，防止伪造目录名探测库内其它行。
 // 同秒后缀按 %02d 生成、位数不设上限：同秒第 100+ 个请求会得到三位
 // 后缀（-100），必须同样被接受。
 var requestDirPattern = regexp.MustCompile(`^\d{8}-\d{6}(-\d{2,})?$`)
@@ -39,94 +39,96 @@ type RequestDetail struct {
 	Dir string `json:"dir"`
 	// Meta 是 meta.json 的原始 JSON；缺失或损坏时为 null。
 	Meta json.RawMessage `json:"meta"`
-	// Files 列出目录内全部可读文件（含 attachments 子目录）。
+	// Files 列出目录内全部可读文件（含 attachments 名下文件）。
 	Files []RequestFileInfo `json:"files"`
 }
 
 // Detail 读取一个已完成或进行中请求目录的 meta.json 与文件清单。
-// dir 必须匹配请求目录命名模式，防止面板端点被用于遍历任意路径。
+// dir 必须匹配请求目录命名模式。目录名只在 claim 落库那一刻起算存在；
+// 文件清单为空且不在活跃集（日志行在而 payload 已被淘汰）时回
+// os.ErrNotExist——恢复「目录已删」的 404 语义而不是 200 空数据。
 func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
-	if manager == nil || manager.root == "" || !requestDirPattern.MatchString(dir) {
+	if manager == nil || !requestDirPattern.MatchString(dir) {
 		return nil, os.ErrNotExist
 	}
-	root := filepath.Join(manager.root, dir)
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() {
-		return nil, os.ErrNotExist
-	}
-	detail := &RequestDetail{Dir: dir}
-	if data, err := os.ReadFile(filepath.Join(root, MetaFile)); err == nil && json.Valid(data) {
-		detail.Meta = json.RawMessage(data)
-	}
-	detail.Files = listRequestFiles(root)
-	return detail, nil
-}
-
-// listRequestFiles 列出请求目录内全部常规文件（含一层 attachments 子目录）。
-func listRequestFiles(root string) []RequestFileInfo {
 	var files []RequestFileInfo
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || path == root {
-			return nil
+	if manager.store != nil {
+		list, err := manager.store.DebugFileList(context.Background(), dir)
+		if err != nil {
+			return nil, err
 		}
-		rel, _ := filepath.Rel(root, path)
-		depth := strings.Count(rel, string(filepath.Separator))
-		if info.IsDir() {
-			if depth > 0 {
-				return filepath.SkipDir // 只下钻一层子目录（attachments）
-			}
-			return nil
+		for _, f := range list {
+			files = append(files, RequestFileInfo{Name: f.Name, Size: f.Size})
 		}
-		if info.Mode().IsRegular() {
-			files = append(files, RequestFileInfo{Name: filepath.ToSlash(rel), Size: info.Size()})
+	}
+	if len(files) == 0 {
+		manager.mutex.Lock()
+		_, active := manager.activeDirs[dir]
+		manager.mutex.Unlock()
+		if !active {
+			return nil, os.ErrNotExist
 		}
-		return nil
-	})
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	return files
+	}
+	detail := &RequestDetail{Dir: dir, Files: files}
+	if manager.store != nil {
+		if data, _, ok, err := manager.store.DebugFile(context.Background(), dir, MetaFile, fileReadCap); err == nil && ok && json.Valid(data) {
+			detail.Meta = json.RawMessage(data)
+		}
+	}
+	return detail, nil
 }
 
 // ReadFile 读取请求目录内指定文件；超过 fileReadCap 时返回截断前缀。
 // total 返回文件真实大小，便于调用方提示「已截断」。name 允许顶层文件
 // 或 attachments/ 下一层文件，其余路径一律拒绝。
 func (manager *Manager) ReadFile(dir, name string) (data []byte, total int64, truncated bool, err error) {
-	if manager == nil || manager.root == "" || !requestDirPattern.MatchString(dir) || !validFileRelPath(name) {
+	if manager == nil || manager.store == nil || !requestDirPattern.MatchString(dir) || !validFileRelPath(name) {
 		return nil, 0, false, os.ErrNotExist
 	}
-	path := filepath.Join(manager.root, dir, filepath.FromSlash(name))
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, 0, false, os.ErrNotExist
-	}
-	file, err := os.Open(path)
+	data, total, ok, err := manager.store.DebugFile(context.Background(), dir, name, fileReadCap)
 	if err != nil {
 		return nil, 0, false, err
 	}
-	defer func() { _ = file.Close() }()
-	readSize := info.Size()
-	if readSize > fileReadCap {
-		readSize = fileReadCap
-		truncated = true
+	if !ok {
+		return nil, 0, false, os.ErrNotExist
 	}
-	data = make([]byte, readSize)
-	if _, err = file.ReadAt(data, 0); err != nil {
-		return nil, 0, false, err
-	}
-	return data, info.Size(), truncated, nil
+	return data, total, total > int64(len(data)), nil
 }
 
-// validFileRelPath 校验相对路径：顶层文件或 attachments/ 下一层，
-// 拒绝穿越、绝对路径和非规范形式。
+// validFileRelPath 校验目录内文件名的合法形状：顶层文件或
+// attachments/ 下一层，拒绝空段、穿越段与反斜杠。入库后名字只是行键，
+// 校验的意义收窄为「只允许面板契约里的两种形态」，不再承担防路径穿越。
 func validFileRelPath(name string) bool {
 	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
 		return false
 	}
-	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
-	if clean != name || strings.HasPrefix(clean, "..") {
-		return false
+	parts := strings.Split(name, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
 	}
-	parts := strings.Split(clean, "/")
 	return len(parts) == 1 || (len(parts) == 2 && parts[0] == AttachmentsDir)
+}
+
+// DevinRequestStages 列出请求目录内全部上游 wire 请求文件名——首个请求加
+// attemptN/searchN 分片，按名字字典序返回。census 类消费者与面板的
+// req_body 拼接都经它枚举，重试写进上游的 wire 形态才不会逃出覆盖统计。
+func (manager *Manager) DevinRequestStages(dir string) ([]string, error) {
+	if manager == nil || manager.store == nil || !requestDirPattern.MatchString(dir) {
+		return nil, os.ErrNotExist
+	}
+	names, err := manager.store.DebugFileNames(context.Background(), dir)
+	if err != nil {
+		return nil, err
+	}
+	var stages []string
+	for _, name := range names {
+		if strings.HasPrefix(name, devinRequestStageStem) && strings.HasSuffix(name, ".json") {
+			stages = append(stages, name)
+		}
+	}
+	return stages, nil
 }
 
 // ActiveRequest 是一个仍在进行中的请求的可观测快照。
@@ -169,7 +171,7 @@ type ActiveRequest struct {
 
 // ActiveRequests 返回仍在写入的请求目录快照（同类代理的
 // active-requests/debug-log 同款能力：请求未结束就能看已收到的帧）。
-// JSONL 内容经 bufio 缓冲，文件清单可能略滞后于实际收到的事件。
+// JSONL 内容按 flush 批提交，文件清单可能略滞后于实际收到的事件。
 func (manager *Manager) ActiveRequests() []ActiveRequest {
 	if manager == nil {
 		return nil
@@ -192,22 +194,37 @@ func (manager *Manager) ActiveRequests() []ActiveRequest {
 // 目录名只有秒级精度（本地时区 20060102-150405 前缀 + 同秒 -NN 后缀），
 // 同秒多个候选经各自 meta.json 的 started_at 精确比对消歧。
 // 供 ccpanel 把日志行 id（started_at 毫秒戳）映射回调试目录。
+// 活跃请求先查内存——claim 行虽即时落库，meta.json 内容要等首个写
+// 任务跑完才有 started_at，毫秒级查询窗口内只能靠 recorder 记的时刻。
 func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
-	if manager == nil || manager.root == "" {
+	if manager == nil {
 		return "", false
 	}
-	base := time.UnixMilli(ms).Format("20060102-150405")
-	entries, err := os.ReadDir(manager.root)
+	manager.mutex.Lock()
+	var matched string
+	for dir, recorder := range manager.activeDirs {
+		if recorder.startedAt.UnixMilli() == ms && (matched == "" || dir < matched) {
+			matched = dir
+		}
+	}
+	manager.mutex.Unlock()
+	if matched != "" {
+		return matched, true
+	}
+	if manager.store == nil {
+		return "", false
+	}
+	ctx := context.Background()
+	dirs, err := manager.store.DebugDirsByPrefix(ctx, time.UnixMilli(ms).Format("20060102-150405"))
 	if err != nil {
 		return "", false
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() || !strings.HasPrefix(name, base) || !requestDirPattern.MatchString(name) {
+	for _, dir := range dirs {
+		if !requestDirPattern.MatchString(dir) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(manager.root, name, MetaFile))
-		if err != nil {
+		data, _, ok, err := manager.store.DebugFile(ctx, dir, MetaFile, fileReadCap)
+		if err != nil || !ok {
 			continue
 		}
 		var meta struct {
@@ -218,7 +235,7 @@ func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
 		}
 		started, err := time.Parse(time.RFC3339Nano, meta.StartedAt)
 		if err == nil && started.UnixMilli() == ms {
-			return name, true
+			return dir, true
 		}
 	}
 	return "", false
@@ -286,32 +303,4 @@ func TailRead(path string, max int64) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
-}
-
-// TruncateToTail 把 path 文件截到末尾至多 keep 字节：读取尾部、丢弃被截断
-// 的首行残段后原地重写，返回实际保留的字节数。文件本就不超过 keep 时
-// 不改写，直接返回其大小。供 JSONL 类追加日志（index/quota）的容量收口
-// 共用——截断点落在行中间时残留半行对按行消费者是毒数据，必须丢弃。
-func TruncateToTail(path string, keep int64) (int64, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	if info.Size() <= keep {
-		return info.Size(), nil
-	}
-	data, err := TailRead(path, keep)
-	if err != nil {
-		return 0, err
-	}
-	if idx := bytes.IndexByte(data, '\n'); idx >= 0 {
-		data = data[idx+1:]
-	} else {
-		// 整个尾部是一行残段，全丢弃留空文件。
-		data = nil
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return 0, err
-	}
-	return int64(len(data)), nil
 }

@@ -182,39 +182,33 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
+	ref := response.Header().Get("X-Request-Id")
+	if ref == "" {
+		t.Fatal("missing X-Request-Id header")
+	}
+	detail, err := manager.Detail(ref)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Detail(%q): %v", ref, err)
 	}
-	var requestDirs []os.DirEntry
-	for _, entry := range entries {
-		if entry.IsDir() {
-			requestDirs = append(requestDirs, entry)
-		}
+	present := map[string]bool{}
+	for _, f := range detail.Files {
+		present[f.Name] = true
 	}
-	if len(requestDirs) != 1 {
-		t.Fatalf("request directory count = %d, want 1", len(requestDirs))
-	}
-	entries = requestDirs
-	directory := filepath.Join(root, entries[0].Name())
 	for _, name := range []string{"meta.json", "01-http-request.json", "02-request-messages.json", "05-response-events.jsonl", "06-http-response.jsonl"} {
-		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
-			t.Errorf("%s: %v", name, err)
+		if !present[name] {
+			t.Errorf("%s missing from files %v", name, detail.Files)
 		}
 	}
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(meta), `"result": "completed"`) || !strings.Contains(string(meta), `"provider": "devin"`) {
-		t.Fatalf("meta = %s", meta)
+	if !strings.Contains(string(detail.Meta), `"result": "completed"`) || !strings.Contains(string(detail.Meta), `"provider": "devin"`) {
+		t.Fatalf("meta = %s", detail.Meta)
 	}
 }
 
@@ -232,7 +226,8 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
 	st := openTokenDB(t)
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, st))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, st)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},
 		{"type":"function_call","call_id":"call-1","name":"exec","arguments":"{}"},
@@ -243,12 +238,7 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, entries[0].Name())
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
+	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,18 +266,15 @@ func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
 		},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := os.ReadFile(filepath.Join(root, entries[0].Name(), "meta.json"))
+	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,23 +291,20 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, entries[0].Name())
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
+	dir := response.Header().Get("X-Request-Id")
+	meta, _, _, err := manager.ReadFile(dir, "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(meta), `"result": "failed"`) {
 		t.Fatalf("meta = %s", meta)
 	}
-	errorLog, err := os.ReadFile(filepath.Join(directory, "error.json"))
+	errorLog, _, _, err := manager.ReadFile(dir, "error.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +755,8 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
 	st := openTokenDB(t)
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, st))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, st)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 
 	// 成功前即失败：上游首个事件就是错误 → 非 200 HTTP 错误响应。
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
@@ -783,8 +768,8 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 	if dir == "" {
 		t.Fatal("missing X-Request-Id header")
 	}
-	if _, err := os.Stat(filepath.Join(root, dir)); err != nil {
-		t.Fatalf("X-Request-Id %q does not map to a log dir: %v", dir, err)
+	if _, err := manager.Detail(dir); err != nil {
+		t.Fatalf("X-Request-Id %q does not map to a debug dir: %v", dir, err)
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"debug_ref":"`+dir+`"`) || !strings.Contains(body, `"stage":"response_event"`) {
@@ -1015,7 +1000,8 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 // 拒绝入账：400 + rejects 计数，不产生调试目录与 index 行——完整请求
 // 从未到达，与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, nil)
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1029,14 +1015,12 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 1 {
 		t.Fatalf("http_read rejects = %d, want 1", got)
 	}
-	entries, err := os.ReadDir(manager.Root())
+	dirs, err := st.DebugDirs(context.Background())
 	if err != nil {
-		t.Fatalf("read log root: %v", err)
+		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			t.Fatalf("read failure produced request dir %s", entry.Name())
-		}
+	if len(dirs) != 0 {
+		t.Fatalf("read failure produced debug dirs %v", dirs)
 	}
 }
 
@@ -1044,7 +1028,7 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 // 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与目录都在，
 // rejects 计数不应增长。
 func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, nil)
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, openTokenDB(t))
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1059,7 +1043,7 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 	if ref == "" {
 		t.Fatal("413 response missing X-Request-Id debug ref")
 	}
-	if info, err := os.Stat(filepath.Join(manager.Root(), ref)); err != nil || !info.IsDir() {
+	if _, err := manager.Detail(ref); err != nil {
 		t.Fatalf("debug dir %s missing: %v", ref, err)
 	}
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 0 {

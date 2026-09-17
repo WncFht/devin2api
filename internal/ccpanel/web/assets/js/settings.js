@@ -347,7 +347,8 @@ const runtimeMetricDomains = [
     metrics: [
       { key: 'enabled', labelKey: 'settings.runtimeMetrics.metric.debuglogEnabled', format: 'boolean' },
       { key: 'active_request_dirs', labelKey: 'settings.runtimeMetrics.metric.debuglogActiveDirs' },
-      { key: 'index_bytes', labelKey: 'settings.runtimeMetrics.metric.debuglogIndexBytes', format: 'bytes' },
+      { key: 'log_rows', labelKey: 'settings.runtimeMetrics.metric.debuglogLogRows' },
+      { key: 'db_bytes', labelKey: 'settings.runtimeMetrics.metric.debuglogDbBytes', format: 'bytes' },
       { key: 'retention_days', labelKey: 'settings.runtimeMetrics.metric.debuglogRetentionDays' },
       { key: 'max_total_mb', labelKey: 'settings.runtimeMetrics.metric.debuglogMaxTotalMb' },
       { key: 'payload_hours', labelKey: 'settings.runtimeMetrics.metric.debuglogPayloadHours' },

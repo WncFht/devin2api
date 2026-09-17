@@ -77,7 +77,7 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 		"debug_workflow": []string{
 			"每个 /v1/* 响应带 X-Request-Id 头（=调试目录名）；错误体含 debug_ref 与 stage 字段",
 			"凭 X-Request-Id 到 /admin/logs?q=<dir> 找到 log_id（logs 表自增主键），再调 /admin/debug-logs/{id} 拿 meta 与文件清单，逐个 file/ 读取",
-			"请求目录仍在磁盘 logs/{dir}/（meta.json、01-06 阶段文件、error.json、attachments/）；摘要行在状态目录的 devin-2api.db（SQLite logs 表）",
+			"请求目录 payload 在状态目录的 devin-2api.db（SQLite debug_files/debug_chunks 两表：meta.json、01-06 阶段文件、error.json、attachments/），摘要行在 logs 表；磁盘 logs/ 只剩 stderr.log 等顶层文件",
 		},
 	})
 }
