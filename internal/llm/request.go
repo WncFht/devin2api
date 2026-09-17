@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 )
 
 // MessageRole 标识一条中间消息在对话中的角色。
@@ -142,6 +143,10 @@ type ToolChoice struct {
 }
 
 // Message 是用户、助手或工具结果消息的统一接口。
+// 契约：生产方一律以值形态存进切片（UserMessage，而非 *UserMessage）。
+// 值接收者方法让指针形态同样满足接口，但 DemoteOrphanToolResults 与
+// MergeAdjacentAssistantTurns 的 type switch 只认值形态——混入指针会
+// 过 Validate 却被正规化静默跳过。
 type Message interface {
 	// Role 返回消息在对话中的角色。
 	Role() MessageRole
@@ -480,18 +485,27 @@ func (request *RequestMessages) MergeAdjacentAssistantTurns() {
 			continue
 		}
 		// 两段相邻文本之间补换行：convertMessage 对多块 TextContent 无分隔
-		// 直连，不补会把回合内两条 message 的正文粘连。
+		// 直连，不补会把回合内两条 message 的正文粘连。拼装走新切片——
+		// append 进 last.Content 的备用 cap 可能写进与 assistant.Content
+		// 共享的底层数组（解码器子切片），先污染后复制。
+		content := make([]Content, 0, len(last.Content)+1+len(assistant.Content))
+		content = append(content, last.Content...)
 		if len(last.Content) > 0 && len(assistant.Content) > 0 {
 			_, prevText := last.Content[len(last.Content)-1].(TextContent)
 			_, nextText := assistant.Content[0].(TextContent)
 			if prevText && nextText {
-				last.Content = append(last.Content, TextContent{Text: "\n"})
+				content = append(content, TextContent{Text: "\n"})
 			}
 		}
-		last.Content = append(last.Content, assistant.Content...)
+		last.Content = append(content, assistant.Content...)
 		if assistant.OutputID != "" {
 			last.OutputID = assistant.OutputID
 		}
+		// 回合如何结束由末段说了算——前段的 stop/length 是铺平留下的
+		// 中途状态；末段带 ToolCall 时归 toolUse。Diagnostics 是累计
+		// 记录，两段全保留。
+		last.StopReason = assistant.StopReason
+		last.Diagnostics = slices.Concat(last.Diagnostics, assistant.Diagnostics)
 		for _, block := range assistant.Content {
 			if _, isCall := block.(ToolCall); isCall {
 				last.StopReason = StopReasonToolUse
@@ -503,20 +517,20 @@ func (request *RequestMessages) MergeAdjacentAssistantTurns() {
 	request.Messages = merged
 }
 
+// validateContent 检查内容块非空、类型在白名单内且各自合法。allowed 只有
+// 两三个枚举值，线性比较替代逐消息建 map——几百条历史消息就是几百次小
+// 分配，全在每请求热路径上。
 func validateContent(content []Content, allowed ...ContentType) error {
-	allowedTypes := make(map[ContentType]struct{}, len(allowed))
-	for _, contentType := range allowed {
-		allowedTypes[contentType] = struct{}{}
-	}
 	for index, block := range content {
 		if block == nil {
 			return fmt.Errorf("content block %d is nil", index)
 		}
-		if _, ok := allowedTypes[block.ContentType()]; !ok {
-			return fmt.Errorf("content block %d has disallowed type %q", index, block.ContentType())
+		contentType := block.ContentType()
+		if !slices.Contains(allowed, contentType) {
+			return fmt.Errorf("content block %d has disallowed type %q", index, contentType)
 		}
 		if err := block.Validate(); err != nil {
-			return fmt.Errorf("content block %d (%s): %w", index, block.ContentType(), err)
+			return fmt.Errorf("content block %d (%s): %w", index, contentType, err)
 		}
 	}
 	return nil

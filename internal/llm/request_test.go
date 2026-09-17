@@ -193,3 +193,36 @@ func TestMergeAdjacentAssistantTurns(t *testing.T) {
 		t.Fatalf("message[3] = %#v, want separate assistant turn", request.Messages[3])
 	}
 }
+
+// TestMergeAdjacentAssistantTurnsSharedBacking 验证合并拼装走新切片：
+// 两条消息的 Content 共享同一底层数组时（解码器子切片形态），插入 "\n"
+// 不得覆盖被合并段的首块；回合结束原因取末段而非前段残留。
+func TestMergeAdjacentAssistantTurnsSharedBacking(t *testing.T) {
+	backing := make([]Content, 2, 8)
+	backing[0] = TextContent{Text: "先"}
+	backing[1] = TextContent{Text: "后"}
+	request := RequestMessages{
+		Messages: []Message{
+			AssistantMessage{Content: backing[:1], StopReason: StopReasonStop},
+			AssistantMessage{Content: backing[1:2], StopReason: StopReasonLength},
+		},
+	}
+	request.MergeAdjacentAssistantTurns()
+
+	if len(request.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(request.Messages))
+	}
+	merged, ok := request.Messages[0].(AssistantMessage)
+	if !ok {
+		t.Fatalf("message[0] = %T, want AssistantMessage", request.Messages[0])
+	}
+	if len(merged.Content) != 3 {
+		t.Fatalf("merged content = %#v, want text+\\n+text", merged.Content)
+	}
+	if tail, ok := merged.Content[2].(TextContent); !ok || tail.Text != "后" {
+		t.Fatalf("merged content[2] = %#v, want second segment text intact", merged.Content[2])
+	}
+	if merged.StopReason != StopReasonLength {
+		t.Fatalf("merged StopReason = %q, want last segment's %q", merged.StopReason, StopReasonLength)
+	}
+}
