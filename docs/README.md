@@ -13,6 +13,7 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 | `upstream-cache.md`               | 上游前缀缓存机制逆向与前缀保温实现：命中条件、EPHEMERAL 断点、trajectory 稳定性、prefix warming 调度 |
 | `upstream-compaction.md`          | 压缩责任划分：上游不压缩，压缩义务全在客户端；代理侧只需保证窗口声明一致                             |
 | `upstream-rate-limit.md`          | 上游消息限流（429）模型：分钟桶量化 + 概率执行，本地滴灌闩的设计依据与实现状态，整形语义选型决策     |
+| `gate-classes.md`                 | 闸门 fg/bg 请求类：key→class 映射、动态预留公式、X-Gate-* 响应头、bg 快败语义与观测字段              |
 | `quota-billing.md`                | 配额计费模型反推：日/周额度大小、cache_write 按 input 价计费、est_cost 口径                          |
 
 ## 排障与接入
