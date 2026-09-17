@@ -191,6 +191,10 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	match, _, excluded := h.queryScope(r)
 	prices := h.CatalogPrices(r.Context())
 
+	// totalReqs 是范围内命中行的总请求数（非 499，同 summary.total_requests
+	// 与图表 requestCount 口径），经 X-Debug-Total 头给趋势页页脚——边界
+	// 半格也计入，比前端对满序列求和更贴近查询窗口真实值。
+	var totalReqs int64
 	type bucketAgg struct {
 		total     cellTotals
 		cost      float64
@@ -203,6 +207,7 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 			if match != nil && !match(key) {
 				return
 			}
+			totalReqs += c.requests - c.gone
 			// 整格归入槽起点所在桶：bucket 不是 10 分钟倍数时边界有
 			// ±10 分钟错位（格子分辨率下限），前端常用档位均为整倍数。
 			b := key.slot / bucketSec * bucketSec
@@ -282,6 +287,7 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		points = append(points, p)
 	}
+	w.Header().Set("X-Debug-Total", strconv.FormatInt(totalReqs, 10))
 	respondOK(w, points)
 }
 
