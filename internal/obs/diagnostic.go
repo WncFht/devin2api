@@ -24,7 +24,10 @@ const (
 
 var (
 	// sensitiveAssignmentPattern 匹配 k=v / "k": "v" 形式的敏感赋值，保留键名。
-	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(["']?(?:access[\s_-]*token|refresh[\s_-]*token|id[\s_-]*token|api[\s_-]*key|client[\s_-]*secret|proxy[\s_-]*authorization|authorization|password|credential|session[\s_-]*token|secret|token|fingerprint)["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+[^\s,;]+|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;&}\]]+)`)
+	// 键名名单与 debuglog/sanitize.go 的 secretKeyNames 同源（那边是归一化
+	// 键名、这边按 [\s_-]* 分隔匹配原文）——增删要两侧同步。cookie 一项
+	// 同时覆盖 set-cookie（子串命中）。
+	sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(["']?(?:access[\s_-]*token|refresh[\s_-]*token|id[\s_-]*token|api[\s_-]*key|access[\s_-]*key|client[\s_-]*secret|proxy[\s_-]*authorization|authorization|password|credential|session[\s_-]*token|secret|token|fingerprint|cookie|model[\s_-]*assignment[\s_-]*jwt)["']?\s*[:=]\s*)(?:(?:bearer|basic)\s+[^\s,;]+|"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;&}\]]+)`)
 	bearerPattern              = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[^\s,;]+`)
 	urlUserinfoPattern         = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@`)
 	httpStatusPattern          = regexp.MustCompile(`(?i)\bstatus(?:\s+code)?\s*[:=]?\s*([1-5][0-9]{2})\b`)
