@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # devin-pool-smoke.sh — 多账号池端到端冒烟：双 lane（好号 + 故意坏号）起临时
 # 实例，验证 rendezvous 钉选、unauthenticated failover 换号、凭据冷却降级，
-# 以及 index.jsonl / meta.json / runtime-metrics 的逐账号归因字段。
+# 以及 logs 表 / meta.json / runtime-metrics 的逐账号归因字段。
 #
 # 用法:
 #   DEVIN_TOKEN_GOOD=<tok> scripts/devin-pool-smoke.sh [--port 3199]
@@ -56,7 +56,11 @@ BASE_URL="${BASE_URL:-https://server.codeium.com}"
 	exit 1
 }
 command -v jq >/dev/null || {
-	echo "需要 jq 解析 index.jsonl / runtime-metrics" >&2
+	echo "需要 jq 解析 logs 表导出 / runtime-metrics" >&2
+	exit 1
+}
+command -v sqlite3 >/dev/null || {
+	echo "需要 sqlite3 导出 logs 表 / 读 runtime_state" >&2
 	exit 1
 }
 if curl -sf "http://localhost:$PORT/healthz" >/dev/null 2>&1; then
@@ -184,6 +188,13 @@ echo "== 第二轮（全部 6 键重发，验证钉选稳定 + 降级持续）"
 run_chats r2 "${BAD_KEYS[@]}" "${GOOD_KEYS[@]}"
 sleep 1
 
+# logs 表导出成 JSONL（docs 的「先导出再喂」口径），下游 jq 断言与文件时代同形。
+INDEX="$WORK/index.jsonl"
+sqlite3 -readonly -json "$STATE_DIR/devin-2api.db" "SELECT * FROM logs ORDER BY id" | jq -c '.[]' >"$INDEX" || {
+	echo "logs 表导出失败（sqlite3 报错或 db 不可读）" >&2
+	: >"$INDEX"
+}
+
 PASS=0
 FAIL=0
 check() { # check <断言名> <0 通过|非0 失败>
@@ -196,14 +207,14 @@ check() { # check <断言名> <0 通过|非0 失败>
 	fi
 }
 index_field() { # index_field <reqid> <jq-expr>
-	[[ -f "$LOGS/index.jsonl" ]] || return 0
-	jq -r "select(.client_request_id==\"$1\") | $2" "$LOGS/index.jsonl" 2>/dev/null | head -1 || true
+	[[ -f "$INDEX" ]] || return 0
+	jq -r "select(.client_request_id==\"$1\") | $2" "$INDEX" 2>/dev/null | head -1 || true
 }
 
 echo "== 断言"
-if [[ -f "$LOGS/index.jsonl" ]]; then
+if [[ -f "$INDEX" ]]; then
 	echo "-- 索引摘要（crid/status/account/switches）"
-	jq -r 'select((.client_request_id // "") | startswith("smoke-")) | "  \(.client_request_id)  \(.status_code)  account=\(.account // "-")  switches=\(.account_switches // 0)"' "$LOGS/index.jsonl"
+	jq -r 'select((.client_request_id // "") | startswith("smoke-")) | "  \(.client_request_id)  \(.status_code)  account=\(.account // "-")  switches=\(.account_switches // 0)"' "$INDEX"
 fi
 bad_http=0
 while read -r reqid code; do
@@ -217,13 +228,13 @@ check "12 个请求全部 HTTP 200" "$bad_http"
 
 index_total=0
 smoke_entries=0
-if [[ -f "$LOGS/index.jsonl" ]]; then
-	index_total="$(wc -l <"$LOGS/index.jsonl")"
-	smoke_entries="$(jq -c 'select((.client_request_id // "") | startswith("smoke-"))' "$LOGS/index.jsonl" | wc -l)"
+if [[ -f "$INDEX" ]]; then
+	index_total="$(wc -l <"$INDEX")"
+	smoke_entries="$(jq -c 'select((.client_request_id // "") | startswith("smoke-"))' "$INDEX" | wc -l)"
 fi
 st=1
 [[ "$index_total" -ge 12 && "$smoke_entries" -eq 12 ]] && st=0
-check "index.jsonl 含 12 条冒烟请求（总 $index_total 条）" "$st"
+check "logs 表导出含 12 条冒烟请求（总 $index_total 条）" "$st"
 
 bad_account=0
 for key in "${BAD_KEYS[@]}" "${GOOD_KEYS[@]}"; do

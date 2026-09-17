@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # perf-snapshot.sh — 一次性能快照：源码构建 → upstreamstub 正常全流后端 →
 # 空闲端口临时实例（pprof 开）→ loadtest 压测 → 抓取 CPU/heap/fgprof
-# 剖析 → 聚合 index.jsonl 的延迟分解字段。全程不碰真实上游与配额，
+# 剖析 → 聚合 logs 表导出行的延迟分解字段。全程不碰真实上游与配额，
 # 产物落 outputs/perf/<时间戳>/，临时目录退出即清。
 #
 # 用法: scripts/perf-snapshot.sh [--requests 100] [--concurrency 8]
@@ -94,7 +94,9 @@ EOF
 	>"$WORK/stub.log" 2>&1 &
 STUB_PID=$!
 PIDS+=($STUB_PID)
-"$WORK/devin-2api" -config "$WORK/config.yaml" >"$WORK/instance.log" 2>&1 &
+# -state-dir 钉到临时目录：缺省解析会落平台默认状态目录，临时实例的
+# 压测行会写进本机真实实例的 devin-2api.db。
+"$WORK/devin-2api" -config "$WORK/config.yaml" -state-dir "$WORK/state" >"$WORK/instance.log" 2>&1 &
 PIDS+=($!)
 
 # stub 与实例分别验活：stub 绑定失败会在 log.Fatal 后退出，
@@ -146,12 +148,19 @@ cat "$OUT/load-sustained.txt" | sed 's/^/  /'
 curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/heap" -o "$OUT/heap.pb.gz"
 curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/goroutine?debug=1" -o "$OUT/goroutine.txt"
 
-# index.jsonl 的延迟分解：ready/sent/open/first_upstream/first_client
-# 五点相减得四段耗时分布，回答「延迟加在链路的哪一段」。
-INDEX="$WORK/logs/index.jsonl"
-if [[ -f "$INDEX" ]] && command -v python3 >/dev/null; then
-	cp "$INDEX" "$OUT/index.jsonl"
-	python3 - "$INDEX" >"$OUT/latency-segments.txt" <<'PY'
+# logs 表的延迟分解：ready/sent/open/first_upstream/first_client
+# 五点相减得四段耗时分布，回答「延迟加在链路的哪一段」。logs 表在
+# 临时 -state-dir 的 devin-2api.db；导出 JSONL 后走原聚合。
+DB="$WORK/state/devin-2api.db"
+if [[ -f "$DB" ]] && command -v python3 >/dev/null; then
+	if ! command -v sqlite3 >/dev/null; then
+		echo "sqlite3 不可用——跳过 logs 表导出与延迟分解" >&2
+	else
+		INDEX="$OUT/index.jsonl"
+		sqlite3 -readonly -json "$DB" "SELECT * FROM logs ORDER BY id" |
+			python3 -c 'import json,sys
+for r in json.load(sys.stdin): print(json.dumps(r))' >"$INDEX"
+		python3 - "$INDEX" >"$OUT/latency-segments.txt" <<'PY'
 import json, sys, statistics
 segs = {"decode": [], "transform": [], "connect": [], "upstream_ttft": [], "egress": []}
 for line in open(sys.argv[1]):
@@ -172,8 +181,9 @@ for name, vals in segs.items():
     p = lambda q: vals[min(int(len(vals) * q), len(vals) - 1)]
     print(f"{name:<16} {statistics.mean(vals):7.1f} {p(.5):7} {p(.9):7} {p(.99):7}")
 PY
-	echo "== 服务端延迟分解（index.jsonl）=="
-	cat "$OUT/latency-segments.txt"
+		echo "== 服务端延迟分解（logs 表导出）=="
+		cat "$OUT/latency-segments.txt"
+	fi
 fi
 
 cat <<EOF
