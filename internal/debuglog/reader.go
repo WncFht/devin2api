@@ -41,6 +41,9 @@ type RequestDetail struct {
 	Meta json.RawMessage `json:"meta"`
 	// Files 列出目录内全部可读文件（含 attachments 名下文件）。
 	Files []RequestFileInfo `json:"files"`
+	// Summary 是 meta.json 解码后的 typed 视图；缺失或损坏时为 null。
+	// 消费方要字段语义时读它，不必再对 Meta 做匿名 struct 解码。
+	Summary *MetaSummary `json:"summary,omitempty"`
 }
 
 // Detail 读取一个已完成或进行中请求目录的 meta.json 与文件清单。
@@ -73,6 +76,10 @@ func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
 	if manager.store != nil {
 		if data, _, ok, err := manager.store.DebugFile(context.Background(), dir, MetaFile, fileReadCap); err == nil && ok && json.Valid(data) {
 			detail.Meta = json.RawMessage(data)
+			var summary MetaSummary
+			if json.Unmarshal(data, &summary) == nil {
+				detail.Summary = &summary
+			}
 		}
 	}
 	return detail, nil
@@ -227,9 +234,7 @@ func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
 		if err != nil || !ok {
 			continue
 		}
-		var meta struct {
-			StartedAt string `json:"started_at"`
-		}
+		var meta MetaSummary
 		if json.Unmarshal(data, &meta) != nil {
 			continue
 		}

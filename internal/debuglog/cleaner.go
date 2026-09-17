@@ -8,8 +8,9 @@
 //     （meta/error/01/02/05）留满整周期——库里的大头是负载，
 //     留小文件不影响排障入口；
 //   - 容量淘汰时保护最近 N 个失败目录（含 error.json），成功请求先删；
-//   - stderr.log 等顶层文件不属于请求目录，留盘不管；logs 表行的时间
-//     清理见 cleanLogRows（与 payload 保留是两条独立轴）。
+//   - stderr.log 等顶层文件不属于请求目录，留盘不管；logs 表行、
+//     quota_samples 行数与 freelist 回收归 store.Maintain（main.go
+//     ticker 驱动），与这里的目录保留是两条独立轴。
 package debuglog
 
 import (
@@ -60,15 +61,13 @@ func (manager *Manager) runCleaner() {
 }
 
 // cleanOnce 执行一轮清理，返回删除的目录数。
-// 顺序：logs 行按龄删除 → 剥离超龄负载 → 删超龄目录 →
-// 总量超限从最旧淘汰（受保护的失败目录与活跃目录除外）。
+// 顺序：剥离超龄负载 → 删超龄目录 → 总量超限从最旧淘汰（受保护的
+// 失败目录与活跃目录除外）。
 // 目录名内嵌 "20060102-150405" 时间戳：字典序界即时间界。
 func (manager *Manager) cleanOnce() int {
-	manager.cleanLogRows()
 	if manager.store == nil {
 		return 0
 	}
-	defer manager.pruneStorage()
 	ctx := context.Background()
 	dirs, err := manager.store.DebugDirs(ctx)
 	if err != nil {
@@ -202,33 +201,4 @@ func (manager *Manager) cleanOnce() int {
 		removed++
 	}
 	return removed
-}
-
-// pruneStorage 在 cleanOnce 各出口统一收尾（defer 触发）：恢复
-// quota_samples 的文件时代行数界，并把本轮删除腾出的 freelist 页
-// 还给库文件（auto_vacuum 只挂页不回缩，否则 db_bytes 永久虚高）。
-func (manager *Manager) pruneStorage() {
-	ctx := context.Background()
-	if _, err := manager.store.PruneQuotaSamples(ctx); err != nil {
-		manager.ioErrors.Add(1)
-		slog.Warn("debuglog: prune quota samples failed", "error", err)
-	}
-	if err := manager.store.IncrementalVacuum(ctx); err != nil {
-		manager.ioErrors.Add(1)
-		slog.Warn("debuglog: incremental vacuum failed", "error", err)
-	}
-}
-
-// cleanLogRows 按 LogRowRetentionDays 删除 logs 表的过期行；失败记
-// ioErrors 并告警——行清理是周期任务，一次失败不该静默漂移。
-func (manager *Manager) cleanLogRows() {
-	days := manager.LogRowRetentionDays()
-	if manager.store == nil || days <= 0 {
-		return
-	}
-	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
-	if _, err := manager.store.DeleteLogsBefore(context.Background(), cutoff); err != nil {
-		manager.ioErrors.Add(1)
-		slog.Warn("debuglog: clean log rows failed", "error", err)
-	}
 }

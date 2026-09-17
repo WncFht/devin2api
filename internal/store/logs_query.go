@@ -27,18 +27,7 @@ const logEModelExpr = `CASE WHEN model != '' THEN model ELSE requested_model END
 // ”+'default' 两群，真名参数只命中真名行；写侧不做折叠，新行恒写真名。
 const logAccountExpr = `COALESCE(NULLIF(account,''),'default')`
 
-// logColumns 是行扫描的 SELECT 列清单（顺序即 scanLogRow 的 Scan 顺序）。
-const logColumns = `id, dir, started_at, duration_ms,
-	request_ready_ms, upstream_sent_ms, upstream_open_ms, first_upstream_ms, first_client_ms,
-	api, method, path, status_code, result,
-	requested_model, model, response_model, model_mismatch, stream,
-	input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, total_tokens,
-	credit_cost, upstream_request_id, client_ip, key_hash, client_request_id,
-	error_stage, error_message, dropped_events, retry_after_seconds, rate_limited,
-	retries, account, account_switches, premature_end_turn, repairs,
-	conn_reused, conn_idle_ms, log_source, upstream_protocol`
-
-// scanLogRow 按 logColumns 顺序扫一行。布尔与可空列走 NullInt64
+// scanLogRow 按 logColumnList（logs.go）顺序扫一行。布尔与可空列走 NullInt64
 // 中转——database/sql 不支持 int64→bool/**T 的直接反射转换。
 func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	var r LogRow

@@ -8,10 +8,10 @@ import (
 // IF NOT EXISTS）。新增列走 schema_migrations 版本化演进，启动路径
 // 只允许只增不删。
 var schemaStatements = []string{
-	// logs：每完成请求一行，列镜像 debuglog.IndexEntry 全集，外加
-	// minute_bucket（time/60000，聚合索引支点）、log_source
-	// （proxy/manual_test，写入时定版）与 upstream_protocol（恒
-	// devin，保留过滤维度的统一形状）。
+	// logs：每完成请求一行，列镜像 LogRow 全集（logColumnList 是
+	// 代码层单一事实源），外加 minute_bucket（time/60000，聚合索引
+	// 支点）、log_source（proxy/manual_test，写入时定版）与
+	// upstream_protocol（恒 devin，保留过滤维度的统一形状）。
 	`CREATE TABLE IF NOT EXISTS logs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		dir TEXT NOT NULL,

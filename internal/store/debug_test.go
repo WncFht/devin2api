@@ -42,15 +42,17 @@ func TestDebugFileRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPutDebugFileIfAbsent(t *testing.T) {
+func TestClaimDebugFile(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	// error.json first-write-wins：第二次写入必须被忽略。
-	if err := s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("first")); err != nil {
-		t.Fatal(err)
+	claimed, err := s.ClaimDebugFile(ctx, "d1", "error.json", []byte("first"))
+	if err != nil || !claimed {
+		t.Fatalf("first claim = %v,%v", claimed, err)
 	}
-	if err := s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("second")); err != nil {
-		t.Fatal(err)
+	claimed, err = s.ClaimDebugFile(ctx, "d1", "error.json", []byte("second"))
+	if err != nil || claimed {
+		t.Fatalf("second claim = %v,%v", claimed, err)
 	}
 	data, _, _, err := s.DebugFile(ctx, "d1", "error.json", 0)
 	if err != nil || string(data) != "first" {

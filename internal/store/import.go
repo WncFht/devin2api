@@ -63,6 +63,12 @@ type legacyToken struct {
 	MaxRPM         int      `json:"max_rpm"`
 }
 
+// probeClientRequestID 镜像 debuglog.ProbeClientRequestID——store 是被
+// debuglog 导入的下层包，不能反向引用常量。仅剩 importIndex 一处消费：
+// legacy index.jsonl 行不带 log_source，分类规则（面板探活归
+// manual_test）属文件格式翻译，随 importer 退役一起删。
+const probeClientRequestID = "panel-probe"
+
 // legacyIndexEntry 是 index.jsonl 一行的读写形状——JSON tag 与文件时代
 // debuglog.IndexEntry 逐字段一致（含 omitempty 分布）；started_at 是
 // RFC3339Nano。导入与导出共用，保证 round-trip 字段逐一对齐。

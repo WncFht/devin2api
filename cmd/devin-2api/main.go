@@ -376,6 +376,25 @@ func main() {
 		stop()
 	}()
 	defer stop()
+	// 库级周期养护（logs 行按龄删除、quota_samples 行数界、freelist
+	// 回收）：养护对象是库不是调试目录，由这里驱动而非 debuglog
+	// cleaner——后者随 debug.enabled/root 关停，保洁不该跟着停。
+	// 节奏沿用原 cleaner 的 5 分钟；LogRowDays 每拍现读 Policy()，
+	// 面板热改即时生效。
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := dbStore.Maintain(context.Background(), debugManager.Policy().LogRowDays); err != nil {
+					slog.Warn("store maintain failed", "error", err)
+				}
+			}
+		}
+	}()
 	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
 	signal.Ignore(syscall.SIGHUP)
 	if err := run(ctx, application, server, listener); err != nil {
@@ -1002,6 +1021,10 @@ func reloadRuntimeConfig(configPath string, dbStore *store.Store, devinPool *dev
 		MaxTotalMB:    *cfg.Debug.MaxTotalMB,
 		PayloadHours:  *cfg.Debug.PayloadHours,
 		KeepErrorDirs: *cfg.Debug.KeepErrorDirs,
+		// LogRowDays 没有 config 对应键（面板专属旋钮）：reload 不该
+		// 重置它——沿用生效值参与比较与提交，否则每次 reload 清零、
+		// logs 行按龄清理被静默关闭。
+		LogRowDays: debugManager.Policy().LogRowDays,
 	}
 	if debugManager.Policy() != newPolicy {
 		debugManager.SetPolicy(newPolicy)

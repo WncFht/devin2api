@@ -33,19 +33,10 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 	return err
 }
 
-// PutDebugFileIfAbsent 只在 (dir,name) 不存在时写入——error.json 的
-// first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
-func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-		dir, name, content, time.Now().UnixMilli())
-	return err
-}
-
-// ClaimDebugFile 是带占位语义的 IfAbsent 变体：无行时插入并返回
-// true，已有行则原样保留并返回 false——目录分配把它当原子占位用
-// （等价文件时代 mkdir 的 EEXIST），与 PutDebugFileIfAbsent 的差别
-// 只在是否报告本次真正写入。
+// ClaimDebugFile 只在 (dir,name) 不存在时写入：无行时插入并返回
+// true，已有行则原样保留并返回 false。两类调用方共用——目录分配拿
+// 它当原子占位（等价文件时代 mkdir 的 EEXIST），error.json 等
+// first-write-wins 文件忽略返回值（首个失败点最有诊断价值）。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
 	res, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,

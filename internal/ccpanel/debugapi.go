@@ -251,25 +251,21 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	entries := make([]debuglog.IndexEntry, 0, len(rows))
-	for _, row := range rows {
-		entries = append(entries, debuglog.IndexEntryFromRow(row))
-	}
-	if total > int64(len(entries)) {
+	if total > int64(len(rows)) {
 		w.Header().Set("X-Truncated", "true")
 	}
 	if r.URL.Query().Get("format") == "csv" {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="requests.csv"`)
-		writeRequestsCSV(w, entries)
+		writeRequestsCSV(w, rows)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(entries)
+	_ = json.NewEncoder(w).Encode(rows)
 }
 
 // writeRequestsCSV 把请求摘要写成 CSV；指针字段用空串表示缺失。
-func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
+func writeRequestsCSV(w http.ResponseWriter, entries []*store.LogRow) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
 	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches,error_message\n")
@@ -282,7 +278,7 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
 		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d,%s\n",
-			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
+			csvEscape(e.Dir), csvEscape(e.StartedAt.Format(time.RFC3339Nano)), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
@@ -351,10 +347,9 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	entries := make([]matrixEntry, 0, len(rows))
-	for _, row := range rows {
-		e := debuglog.IndexEntryFromRow(row)
+	for _, e := range rows {
 		entries = append(entries, matrixEntry{
-			StartedAt:       e.StartedAt,
+			StartedAt:       e.StartedAt.Format(time.RFC3339Nano),
 			Model:           e.Model,
 			RequestedModel:  e.RequestedModel,
 			StatusCode:      e.StatusCode,

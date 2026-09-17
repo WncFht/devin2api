@@ -137,7 +137,7 @@ func TestErrorOwner(t *testing.T) {
 		// 上游返回的 4xx（非请求体阶段）同样记服务端失分。
 		{404, "failed", "devin_connect", "upstream"},
 	} {
-		if got := ErrorOwner(IndexEntry{StatusCode: tc.status, Result: tc.result, ErrorStage: tc.stage}); got != tc.want {
+		if got := ErrorOwner(&store.LogRow{StatusCode: tc.status, Result: tc.result, ErrorStage: tc.stage}); got != tc.want {
 			t.Fatalf("ErrorOwner(%d/%s/%s) = %q, want %q", tc.status, tc.result, tc.stage, got, tc.want)
 		}
 	}
@@ -218,7 +218,7 @@ func TestAbortActiveRequest(t *testing.T) {
 	recorder.SetAbort(cancel)
 
 	active := manager.ActiveRequests()
-	if len(active) != 1 || !active[0].Abortable || active[0].State != "waiting_upstream" {
+	if len(active) != 1 || !active[0].Abortable || active[0].State != StateWaitingUpstream {
 		t.Fatalf("active = %+v", active)
 	}
 	if !manager.Abort(dir) {

@@ -12,8 +12,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -84,6 +86,28 @@ func Open(path string) (*Store, error) {
 func (s *Store) IncrementalVacuum(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	return err
+}
+
+// Maintain 执行一轮库级周期养护：logs 行按龄删除（logRowDays<=0 时
+// 跳过）、quota_samples 恢复到行数界、回收 freelist 页。三项互相
+// 独立，单项失败不阻断后续——错误经 errors.Join 汇总返回，调用方
+// 记日志即可。原 debuglog.cleanOnce 的收尾职责上移到这里：养护对象
+// 是库不是目录，由 main.go 的 ticker 驱动。
+func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
+	var errs []error
+	if logRowDays > 0 {
+		cutoff := time.Now().Add(-time.Duration(logRowDays) * 24 * time.Hour).UnixMilli()
+		if _, err := s.DeleteLogsBefore(ctx, cutoff); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if _, err := s.PruneQuotaSamples(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.IncrementalVacuum(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // DBBytes 返回库文件与 WAL 的磁盘占用合计（Stats 的 db_bytes 口径）。
