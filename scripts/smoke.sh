@@ -55,7 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 独立状态目录：listen 改到冒烟端口；logs/gate-state 都落临时目录。
+# 独立状态目录：listen 改到冒烟端口；devin-2api.db 与 logs/ 都落临时目录。
 # 只换行尾 :port 段、保留既有 host——源配置若绑 127.0.0.1，整值替换成
 # ":PORT" 会让冒烟实例短暂暴露到全部接口。
 sed -E "/^[[:space:]]*listen:/s/:[0-9]+([\"']?[[:space:]]*)$/:$PORT\1/" "$SRC_CONFIG" >"$WORK/config.yaml"

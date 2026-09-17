@@ -211,7 +211,7 @@ type cacheWarmer struct {
 	adapter *Adapter
 	// sendPing 是 ping 发送出口：生产实现 adapter.sendWarmPing（直连
 	// streamClient、绕过 app/recorder——ping 是内部流量，不进
-	// index.jsonl/调试目录）；测试注入假实现。
+	// logs 表/调试记录）；测试注入假实现。
 	sendPing func(ctx context.Context, req *devinproto.GetChatMessageRequest) (cacheRead int64, err error)
 	// now 是时钟源，测试替换为假钟后调度/退休判定全部可手动推进。
 	now func() time.Time

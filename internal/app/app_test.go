@@ -997,7 +997,7 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 }
 
 // TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前
-// 拒绝入账：400 + rejects 计数，不产生调试目录与 index 行——完整请求
+// 拒绝入账：400 + rejects 计数，不产生调试记录与 logs 行——完整请求
 // 从未到达，与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	st := openTokenDB(t)
@@ -1024,8 +1024,8 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	}
 }
 
-// TestRequestTooLargeKeepsDebugDir 验证 ≥32MiB 的真实载荷保留调试目录：
-// 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与目录都在，
+// TestRequestTooLargeKeepsDebugDir 验证 ≥32MiB 的真实载荷保留调试记录：
+// 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与调试记录都在，
 // rejects 计数不应增长。
 func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, openTokenDB(t))

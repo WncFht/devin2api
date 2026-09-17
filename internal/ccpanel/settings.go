@@ -619,7 +619,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:   "log_max_total_mb",
 			typ:   "int",
-			desc:  "日志总容量上限(MB,<=0不限制,超限从最旧目录开始清理)",
+			desc:  "日志总容量上限(MB,<=0不限制,超限从最旧请求记录开始清理)",
 			def:   func() string { return strconv.FormatInt(d0().Policy.MaxTotalMB, 10) },
 			live:  func() string { return strconv.FormatInt(debug.Policy().MaxTotalMB, 10) },
 			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.MaxTotalMB = int64(n) }),
@@ -627,7 +627,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:   "log_payload_hours",
 			typ:   "int",
-			desc:  "大体积阶段文件保留小时数(超时剥离03/04/06与附件,保留meta/error等证据,<=0不剥离)",
+			desc:  "大体积阶段记录保留小时数(超时剥离03/04/06与附件,保留meta/error等证据,<=0不剥离)",
 			def:   func() string { return strconv.Itoa(d0().Policy.PayloadHours) },
 			live:  func() string { return strconv.Itoa(debug.Policy().PayloadHours) },
 			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.PayloadHours = n }),
@@ -635,7 +635,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:   "log_keep_error_dirs",
 			typ:   "int",
-			desc:  "容量淘汰时受保护的最新失败目录数(<=0不保护)",
+			desc:  "容量淘汰时受保护的最新失败请求记录数(<=0不保护)",
 			def:   func() string { return strconv.Itoa(d0().Policy.KeepErrorDirs) },
 			live:  func() string { return strconv.Itoa(debug.Policy().KeepErrorDirs) },
 			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.KeepErrorDirs = n }),
@@ -643,7 +643,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:  "log_row_retention_days",
 			typ:  "int",
-			desc: "logs 表摘要行保留天数(独立于目录保留,<=0不清理)",
+			desc: "logs 表摘要行保留天数(独立于调试记录保留,<=0不清理)",
 			def:  func() string { return strconv.FormatInt(debuglog.DefaultLogRowRetentionDays, 10) },
 			live: func() string { return strconv.FormatInt(debug.LogRowRetentionDays(), 10) },
 			apply: func(v string) error {

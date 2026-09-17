@@ -5,7 +5,7 @@
 //
 // 与 ccLoad 的一处有意偏差：不支持「直接出示哈希」双路径——哈希在
 // 面板列表里可见，若接受哈希当凭据，看过面板的人就拿到可用令牌。
-// 索引关联用截断哈希：index.jsonl 的 key_hash = sha256(明文)[:8字节]
+// 索引关联用截断哈希：logs 表的 key_hash = sha256(明文)[:8字节]
 // 即 Token.Hash 的前 16 个 hex 字符。
 package authtoken
 
@@ -203,7 +203,7 @@ func anchoredWindowUsed(used, anchor int64, window time.Duration, now time.Time)
 	return used
 }
 
-// KeyHash 返回该令牌在 index.jsonl 里的 key_hash（全哈希前 16 hex）。
+// KeyHash 返回该令牌在 logs 表里的 key_hash（全哈希前 16 hex）。
 func (t *Token) KeyHash() string {
 	if len(t.Hash) < 16 {
 		return ""
@@ -377,7 +377,7 @@ type Store struct {
 	db     *store.Store
 	byHash map[string]*Token
 	byID   map[int64]*Token
-	// byKeyHash 以 index.jsonl 的 key_hash（16 hex 截断）为键，是
+	// byKeyHash 以 logs 表的 key_hash（16 hex 截断）为键，是
 	// LookupByKeyHash 的倒排——日志行投影逐行调用，线性扫描是隐性热点。
 	byKeyHash map[string]*Token
 }
@@ -436,7 +436,7 @@ func (s *Store) Get(id int64) (*Token, bool) {
 	return t, ok
 }
 
-// LookupByKeyHash 按 index.jsonl 的 key_hash（哈希前 16 hex）反查令牌，
+// LookupByKeyHash 按 logs 表的 key_hash（哈希前 16 hex）反查令牌，
 // 供日志行投影 auth_token_id/description。已删除的令牌查不到，调用方
 // 按未知处理。
 func (s *Store) LookupByKeyHash(keyHash string) (*Token, bool) {
