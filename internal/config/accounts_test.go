@@ -243,7 +243,9 @@ func TestLoadAccountsCredentialsFilePathResolution(t *testing.T) {
 
 	t.Run("tilde expands via HOME", func(t *testing.T) {
 		dir := t.TempDir()
+		// os.UserHomeDir 在 unix 读 HOME、windows 读 USERPROFILE，两个都设
 		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
 		writeTestFile(t, filepath.Join(dir, "creds.toml"), "windsurf_api_key = \"tok-tilde\"\n")
 		config, err := loadWithDevin(t, dir, "  accounts:\n    - name: alpha\n      credentials_file: '~/creds.toml'\n")
 		if err != nil {

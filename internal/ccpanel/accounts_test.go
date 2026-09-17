@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -282,10 +283,22 @@ func TestAdminAccountsOpsUnavailable(t *testing.T) {
 	}
 }
 
+// setDataHome 把 CLI 凭据发现要读的数据目录指到 dir：unix 认
+// XDG_DATA_HOME，windows 认 APPDATA/LOCALAPPDATA（见 DevinCredentialsPaths）。
+func setDataHome(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", dir)
+		t.Setenv("LOCALAPPDATA", dir)
+	} else {
+		t.Setenv("XDG_DATA_HOME", dir)
+	}
+}
+
 func TestAdminCLICredentials(t *testing.T) {
 	t.Run("parsable", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", dir)
+		setDataHome(t, dir)
 		path := filepath.Join(dir, "devin", "credentials.toml")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -308,7 +321,7 @@ func TestAdminCLICredentials(t *testing.T) {
 	})
 	t.Run("unparsable", func(t *testing.T) {
 		dir := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", dir)
+		setDataHome(t, dir)
 		path := filepath.Join(dir, "devin", "credentials.toml")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -329,7 +342,7 @@ func TestAdminCLICredentials(t *testing.T) {
 		}
 	})
 	t.Run("absent", func(t *testing.T) {
-		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		setDataHome(t, t.TempDir())
 		recorder := httptest.NewRecorder()
 		(&Handler{}).adminCLICredentials(recorder, httptest.NewRequest(http.MethodGet, "/admin/accounts/cli-credentials", nil))
 		var env struct {
