@@ -69,8 +69,11 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 				value[key] = "<redacted>"
 			}
 		}
-		if reference, ok := recorder.extractImage(value); ok {
-			return reference
+		if dataKey, reference, ok := recorder.extractImage(value); ok {
+			// 只把携带 base64 正文的键换成附件引用：兄弟键（type:"image"、
+			// cache_control 等）是投影证据的一部分，整节点替换会把它们
+			// 从落盘 JSON 里抹掉。
+			value[dataKey] = reference
 		}
 		for key, item := range value {
 			value[key] = recorder.sanitizeValue(item, metadataScope || isMetadataKey(key))
@@ -101,6 +104,8 @@ func (recorder *Recorder) sanitizeValue(value any, metadataScope bool) any {
 
 // secretKeyNames 是会被脱敏的 JSON 键名（剔除 '_'/'-'、小写归一化后的形态）。
 // secretKey 与 rawNeedsSanitize 共用同一份名单，避免两处漂移。
+// obs/diagnostic.go 的 sensitiveAssignmentPattern 是本名单在自由文本错误上的
+// 正则形态（那边按 [\s_-]* 分隔匹配原文键名）——增删要两侧同步。
 var secretKeyNames = []string{
 	"authorization", "cookie", "setcookie", "apikey", "accesskey", "token",
 	"sessiontoken", "accesstoken", "refreshtoken", "bearertoken", "password",
@@ -226,17 +231,28 @@ func equalFoldKey(span []byte, name string) bool {
 	return i == len(span)
 }
 
-func (recorder *Recorder) extractImage(value map[string]any) (attachmentReference, bool) {
+// extractImage 识别「mime_type: image/* + data/base64*」形状的图片节点；
+// 命中时返回携带 base64 正文的键名与写好的附件引用，由调用方原地替换该键。
+func (recorder *Recorder) extractImage(value map[string]any) (string, attachmentReference, bool) {
 	mimeType := stringField(value, "mime_type", "mimeType", "MIMEType")
-	encoded := stringField(value, "data", "base64_data", "base64Data", "Data")
-	if !strings.HasPrefix(mimeType, "image/") || encoded == "" {
-		return attachmentReference{}, false
+	if !strings.HasPrefix(mimeType, "image/") {
+		return "", attachmentReference{}, false
+	}
+	var encoded, dataKey string
+	for _, key := range []string{"data", "base64_data", "base64Data", "Data"} {
+		if text, ok := value[key].(string); ok && text != "" {
+			encoded, dataKey = text, key
+			break
+		}
+	}
+	if encoded == "" {
+		return "", attachmentReference{}, false
 	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return attachmentReference{}, false
+		return "", attachmentReference{}, false
 	}
-	return recorder.writeAttachment(data, mimeType), true
+	return dataKey, recorder.writeAttachment(data, mimeType), true
 }
 
 func (recorder *Recorder) writeDataURL(value string) (attachmentReference, bool) {
