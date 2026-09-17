@@ -14,6 +14,13 @@ const probeClientRequestID = "panel-probe"
 // 一一对应（time/minute_bucket/started_at/log_source 由
 // InsertLog 从 StartedAt/ClientRequestID 派生，不在字段里）。
 type LogRow struct {
+	// ID 是自增日志行号——面板 log_id 与 last_*_id 的身份；读侧回填。
+	ID int64
+	// LogSource 是写入时定版的来源（proxy/manual_test）；读侧回填。
+	LogSource string
+	// UpstreamProtocol 保留过滤维度的统一形状（当前恒 devin）；读侧回填。
+	UpstreamProtocol string
+
 	Dir               string
 	StartedAt         time.Time
 	DurationMS        int64

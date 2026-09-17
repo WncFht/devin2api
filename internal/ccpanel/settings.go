@@ -641,6 +641,21 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			apply: setPolicyField(debug, func(p *debuglog.RetentionPolicy, n int) { p.KeepErrorDirs = n }),
 		},
 		{
+			key:  "log_row_retention_days",
+			typ:  "int",
+			desc: "logs 表摘要行保留天数(独立于目录保留,<=0不清理)",
+			def:  func() string { return strconv.FormatInt(debuglog.DefaultLogRowRetentionDays, 10) },
+			live: func() string { return strconv.FormatInt(debug.LogRowRetentionDays(), 10) },
+			apply: func(v string) error {
+				n, err := strconv.Atoi(strings.TrimSpace(v))
+				if err != nil {
+					return fmt.Errorf("value must be an integer (days): %w", err)
+				}
+				debug.SetLogRowRetentionDays(int64(n))
+				return nil
+			},
+		},
+		{
 			key:  "debug_quota_interval_minutes",
 			typ:  "int",
 			desc: "配额快照采样间隔分钟（debug.quota_interval_minutes，写 quota_samples 表）；<=0 不采样",

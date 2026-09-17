@@ -2,6 +2,7 @@
 package debuglog
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -9,12 +10,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // TestRecorderWritesRedactedStagesAndAttachments 的测试动机是防止诊断日志泄露凭据或重复嵌入大图片。
 func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	recorder := NewManager(root, RetentionPolicy{}).Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
+	recorder := NewManager(root, RetentionPolicy{}, nil).Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
 	if recorder == nil {
 		t.Fatal("Start() = nil")
 	}
@@ -61,7 +64,7 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 
 // TestManagerAllocatesCollisionSuffix 的测试动机是保证同秒并发请求不会共写同一个目录。
 func TestManagerAllocatesCollisionSuffix(t *testing.T) {
-	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{})
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil)
 	manager.now = func() time.Time { return time.Date(2027, time.January, 1, 23, 54, 54, 0, time.Local) }
 	first := manager.Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
 	second := manager.Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
@@ -78,7 +81,7 @@ func TestManagerAllocatesCollisionSuffix(t *testing.T) {
 
 // TestWriteErrorKeepsFirstCause 的测试动机是让最接近故障源的阶段不被外层通用错误覆盖。
 func TestWriteErrorKeepsFirstCause(t *testing.T) {
-	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}).Start(RequestMeta{})
+	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil).Start(RequestMeta{})
 	recorder.WriteError("devin_connect", os.ErrPermission)
 	recorder.WriteError("provider_stream", os.ErrNotExist)
 	// 写任务经队列异步执行，Complete 排空后才能读到文件。
@@ -92,7 +95,7 @@ func TestWriteErrorKeepsFirstCause(t *testing.T) {
 // TestSameSecondSuffixBeyondPattern 验证同秒第 100+ 个请求的目录名仍被
 // 读取面接受：%02d 后缀位数不设上限，三位数后缀不得被 requestDirPattern 拒绝。
 func TestSameSecondSuffixBeyondPattern(t *testing.T) {
-	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{})
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil)
 	manager.now = func() time.Time { return time.Date(2027, time.January, 1, 23, 54, 54, 0, time.Local) }
 	var recorders []*Recorder
 	for i := 0; i < 105; i++ {
@@ -120,7 +123,7 @@ func TestSameSecondSuffixBeyondPattern(t *testing.T) {
 // TestSanitizeEscapedAndHyphenatedKeys 验证预筛无法按字节判别的敏感键名
 // ——JSON 转义拼写的键名与连字符变体——仍被完整脱敏，不以原文落盘。
 func TestSanitizeEscapedAndHyphenatedKeys(t *testing.T) {
-	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}).Start(RequestMeta{})
+	recorder := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil).Start(RequestMeta{})
 	// 键名用 JSON \u 转义拼写：字节预筛看到的不是解码后的 "apikey"，
 	// 必须靠「键名含转义→慢路径」兜底，否则原文落盘。
 	escapedKey := `{"api` + "\\u006b" + `ey":"secret","plain":1}`
@@ -139,7 +142,7 @@ func TestSanitizeEscapedAndHyphenatedKeys(t *testing.T) {
 // 且同目录同类别失败只记一笔。
 func TestIOErrorsCountedOncePerKind(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	manager := NewManager(root, RetentionPolicy{}, nil)
 	defer manager.Close()
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
 	// 目录消失后所有文件写与 JSONL 打开都会失败：
@@ -170,25 +173,33 @@ func readTestBytes(t *testing.T, path string) []byte {
 	return data
 }
 
-// TestIndexWrittenOnComplete 验证全局索引每完成一个请求追加一行可定位摘要。
+// TestIndexWrittenOnComplete 验证每完成一个请求向 logs 表落一行可定位摘要。
 func TestIndexWrittenOnComplete(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", ClientIP: "127.0.0.1", KeyHash: "abcd1234"})
 	recorder.NoteUpstreamLatency()
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "swe-2-max", RequestedModel: "swe-2", ResponseModel: "swe-2-max", Stream: true, UpstreamRequestID: "req-1"})
-	index := readTestFile(t, filepath.Join(root, "index.jsonl"))
-	for _, want := range []string{`"dir":`, `"api":"anthropic"`, `"requested_model":"swe-2"`, `"response_model":"swe-2-max"`, `"upstream_request_id":"req-1"`, `"key_hash":"abcd1234"`, `"first_upstream_ms"`} {
-		if !strings.Contains(index, want) {
-			t.Fatalf("index.jsonl missing %s: %s", want, index)
-		}
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.Dir == "" || row.API != "anthropic" || row.RequestedModel != "swe-2" ||
+		row.ResponseModel != "swe-2-max" || row.UpstreamRequestID != "req-1" ||
+		row.KeyHash != "abcd1234" || row.FirstUpstreamMS == nil {
+		t.Fatalf("log row missing fields: %+v", row)
 	}
 }
 
 // TestCleanerRemovesExpiredDirs 验证清理器删除超龄目录、跳过活跃目录、不碰索引文件。
 func TestCleanerRemovesExpiredDirs(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{Days: 7})
+	manager := NewManager(root, RetentionPolicy{Days: 7}, nil)
 	defer manager.Close()
 
 	old := filepath.Join(root, "20200101-000000")
@@ -219,7 +230,7 @@ func TestCleanerRemovesExpiredDirs(t *testing.T) {
 // TestDroppedCounterOnClosedQueue 验证 Complete 之后的写入被丢弃并计数。
 func TestDroppedCounterOnClosedQueue(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	manager := NewManager(root, RetentionPolicy{}, nil)
 	recorder := manager.Start(RequestMeta{})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 	recorder.WriteJSON("late.json", map[string]any{"x": 1})
@@ -245,21 +256,25 @@ func TestDroppedCounterOnFullQueue(t *testing.T) {
 	}
 }
 
-// TestReaderListDetailAndFiles 验证索引倒读、单请求详情与文件读取接口。
+// TestReaderListDetailAndFiles 验证日志行倒读、单请求详情与文件读取接口。
 func TestReaderListDetailAndFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 	for _, model := range []string{"m-a", "m-b"} {
 		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 		recorder.WriteJSON("03-devin-request.json", map[string]any{"model": model})
 		recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: model})
 	}
-	result := manager.ListRequests(10, RequestFilter{})
-	if len(result.Entries) != 2 || result.Entries[0].Model != "m-b" || result.Entries[1].Model != "m-a" {
-		t.Fatalf("ListRequests order = %+v", result.Entries)
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	detail, err := manager.Detail(result.Entries[0].Dir)
+	if len(rows) != 2 || rows[0].Model != "m-b" || rows[1].Model != "m-a" {
+		t.Fatalf("SearchLogs order = %+v", rows)
+	}
+	detail, err := manager.Detail(rows[0].Dir)
 	if err != nil {
 		t.Fatalf("Detail: %v", err)
 	}
@@ -273,7 +288,7 @@ func TestReaderListDetailAndFiles(t *testing.T) {
 	if !strings.Contains(strings.Join(names, ","), "meta.json") || !strings.Contains(strings.Join(names, ","), "03-devin-request.json") {
 		t.Fatalf("files = %v", names)
 	}
-	data, total, truncated, err := manager.ReadFile(result.Entries[0].Dir, "03-devin-request.json")
+	data, total, truncated, err := manager.ReadFile(rows[0].Dir, "03-devin-request.json")
 	if err != nil || truncated || total == 0 || !strings.Contains(string(data), "m-b") {
 		t.Fatalf("ReadFile = %q total=%d truncated=%v err=%v", data, total, truncated, err)
 	}
@@ -282,7 +297,7 @@ func TestReaderListDetailAndFiles(t *testing.T) {
 // TestReaderRejectsTraversal 验证目录名与文件名的路径穿越防护。
 func TestReaderRejectsTraversal(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	manager := NewManager(root, RetentionPolicy{}, nil)
 	defer manager.Close()
 	recorder := manager.Start(RequestMeta{})
 	dir := filepath.Base(recorder.directory)
@@ -303,7 +318,7 @@ func TestReaderRejectsTraversal(t *testing.T) {
 // TestActiveRequestsSnapshot 验证进行中请求的活快照在 Complete 后消失。
 func TestActiveRequestsSnapshot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	manager := NewManager(root, RetentionPolicy{}, nil)
 	defer manager.Close()
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 	active := manager.ActiveRequests()

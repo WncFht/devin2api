@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
@@ -41,15 +42,15 @@ type RetentionPolicy struct {
 }
 
 // Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
-// 全局索引（index.jsonl）、用量聚合器与后台清理器。
+// 日志行的 store 句柄与后台清理器。
 type Manager struct {
 	// root 是所有请求日志目录的根路径；空值表示禁用调试日志。
 	root string
 	// now 返回当前时间；测试会固定它以验证同秒目录分配。
 	now func() time.Time
 	// mutex 串行化目录名分配与 activeDirs 维护——锁内只做内存操作，
-	// mkdir/索引写盘一律在锁外（见 indexMu）：一次磁盘停滞曾让所有
-	// 排队请求的 ReadTimeout 在持锁等待中过期，锁一释放即批量假死。
+	// mkdir 一律在锁外：一次磁盘停滞曾让所有排队请求的 ReadTimeout
+	// 在持锁等待中过期，锁一释放即批量假死。
 	mutex sync.Mutex
 	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
 	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
@@ -64,35 +65,19 @@ type Manager struct {
 	// cleaner 协程与 Stats 每轮经 Policy() 取快照。
 	policyMu sync.RWMutex
 	policy   RetentionPolicy
-	// indexMu 串行化 index.jsonl 的全部 IO（惰性打开/追加/Flush/截断重写）
-	// 与启动回放的快照边界——索引写盘与目录分配分锁，索引侧的磁盘停滞
-	// 不再堵死 Start。
-	indexMu sync.Mutex
-	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
-	indexFile   *os.File
-	indexWriter *bufio.Writer
-	// indexBytes 跟踪 index.jsonl 当前体积，超 indexFileCap 时保尾部一半重写。
-	indexBytes int64
-	// indexSnapshotted 标记启动回放已在 indexMu 内截取索引快照：此前完成的
-	// 请求其索引行已在快照内、由回放统一入账，appendIndex 不再单独累加；
-	// 此后写入的行在快照之外，必须由实时路径自计——任一行恰入账一次。
-	indexSnapshotted atomic.Bool
+	// store 是 logs 表的持久层；nil 时 insertLog 静默跳过（测试/未接线）。
+	store *store.Store
+	// logRowRetentionDays 是 logs 行的时间保留天数（面板可热改）；
+	// <=0 不按时间清理。与目录的 policy.Days 是两条独立的生命周期轴：
+	// 行是检索面、目录是证据面。
+	logRowRetentionDays atomic.Int64
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
 	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
 	droppedTotal atomic.Uint64
-	// ioErrors 汇总索引与阶段文件的写失败数——日志管道自身故障不静默。
+	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
 	ioErrors atomic.Uint64
-	// usage 是 index.jsonl 的内存聚合器；启动时回放、请求完成时累加。
-	usage *usageAggregator
-	// replayDone 在启动回放结束时关闭；UsageStats 等它而不是返回半成数据。
-	replayDone chan struct{}
-	// listCache 是 ListRequests 的尾部窗口解析缓存，listCacheMu 保护；
-	// 面板轮询（概览矩阵 1s、请求页 1-5s）反复扫同一 index.jsonl，
-	// 文件 (size,mtime) 没变就免掉 4MB 尾读 + 全量 JSON 解析。
-	listCacheMu sync.Mutex
-	listCache   listIndexCache
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -177,7 +162,7 @@ type Recorder struct {
 	upstreamAccount string
 	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
-	// writeMeta/appendIndex 读，与 retries 同一把锁。
+	// writeMeta/insertLog 读，与 retries 同一把锁。
 	accountAttempts []accountAttempt
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
@@ -202,7 +187,7 @@ type Recorder struct {
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
-	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
+	// meta.json 与日志行出账，检索/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
 	// rateLimited 标记本请求被限流语义终结（上游 429 或本地闸门快败）。
 	// 流内错误事件下发的限流 HTTP 状态仍是 200，单靠 status_code 认不出——
@@ -210,10 +195,10 @@ type Recorder struct {
 	rateLimited atomic.Bool
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
-	// 追加，writeMeta/appendIndex 读，走 mutex 同步。
+	// 追加，writeMeta/insertLog 读，走 mutex 同步。
 	retries []retryAttempt
 	// firstError 是首个失败点的同步记录：WriteError 调用时 CAS 抢占
-	//（first-write-wins），writeLoggedError 的 WARN 行与 appendIndex
+	//（first-write-wins），writeLoggedError 的 WARN 行与 insertLog
 	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
 	//「失败点」。error.json 落盘仍在 worker 内由 errorWritten 去重。
 	firstError atomic.Pointer[errorRecord]
@@ -221,7 +206,7 @@ type Recorder struct {
 	// 时长）；connect 段延迟靠它拆成「握手成本」与「上游响应头延迟」。
 	upstreamConn atomic.Pointer[connInfo]
 	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
-	// 构建请求后写入；Complete 时随 meta.json 与 index 落盘。
+	// 构建请求后写入；Complete 时随 meta.json 与日志行出账。
 	repairs atomic.Pointer[llm.RequestRepairs]
 
 	// 以下字段仅由写 worker 访问，无需加锁：
@@ -314,70 +299,25 @@ type attachmentReference struct {
 
 // NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
 // policy 控制后台清理；清理协程恒启动（全零策略下空转），热改策略即时生效。
-// 启动时异步回放 index.jsonl 尾部重建用量聚合——尾部上限 64MB，同步解析会
-// 拖住 listen 之后的首次应答；UsageStats 在读侧等回放完成，不会返回半成数据。
-func NewManager(root string, policy RetentionPolicy) *Manager {
+// st 是 logs 表的持久层句柄——历史行已由启动导入器搬入库，无需回放。
+func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 	manager := &Manager{
 		root:       root,
 		now:        time.Now,
 		activeDirs: make(map[string]*Recorder),
 		takenNames: make(map[string]struct{}),
 		policy:     policy,
-		usage:      newUsageAggregator(),
-		replayDone: make(chan struct{}),
+		store:      st,
 	}
 	manager.enabled.Store(true)
+	manager.logRowRetentionDays.Store(DefaultLogRowRetentionDays)
 	if root == "" {
-		close(manager.replayDone)
 		return manager
 	}
-	// 提前建好根目录：quota.jsonl/stderr.log 等顶层文件不经过 Start() 的惰性建目录。
+	// 提前建好根目录：stderr.log 等顶层文件不经过 Start() 的惰性建目录。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("debuglog: create log root failed", "root", root, "error", err)
 	}
-	go func() {
-		defer close(manager.replayDone)
-		// 快照边界必须持锁划定：appendIndex 在同一 indexMu 内完成「写文件
-		// +条件入账」——边界前写入的行全部落在快照内，其自身入账被
-		// indexSnapshotted 闸门跳过、由回放统一补记；边界后写入的行在
-		// 快照之外，由实时路径自计。任一行恰入账一次，无锁读则边界前后
-		// 都可能与 appendIndex 交错，把同一行计两遍。indexMu 而非
-		// manager.mutex：回放是磁盘 IO，不该占目录分配锁。
-		manager.indexMu.Lock()
-		indexPath := filepath.Join(root, IndexFile)
-		// 尺寸必须在读之前取：读后 stat 会把回放窗口内的并发追加误判成
-		// 截断（文件在两次调用之间增长）——高负载时这是必然假阳性。
-		info, statErr := os.Stat(indexPath)
-		data, err := TailRead(indexPath, usageReplayTailBytes)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
-			// 完成的行会被回放假设覆盖、又被实时路径跳过，永久漏记。
-			manager.indexMu.Unlock()
-			time.Sleep(200 * time.Millisecond)
-			manager.indexMu.Lock()
-			info, statErr = os.Stat(indexPath)
-			data, err = TailRead(indexPath, usageReplayTailBytes)
-		}
-		manager.indexSnapshotted.Store(true)
-		manager.indexMu.Unlock()
-		if err != nil {
-			// 索引不存在（首装）是常态；其他读失败意味着窗口统计丢历史，值得告警。
-			if !errors.Is(err, os.ErrNotExist) {
-				slog.Warn("debuglog: replay index tail failed", "error", err)
-			}
-			return
-		}
-		// 回放窗口与 indexFileCap 同值，正常时文件整体被覆盖；读前的文件
-		// 比读到的内容大说明上限被撑破（外部追加/双写/常量漂移），最旧
-		// 的行对聚合静默不可见——值得告警而不是无声丢历史。
-		if statErr == nil && info.Size() > int64(len(data)) {
-			slog.Warn("debuglog: index.jsonl exceeds replay window; oldest entries excluded from usage stats",
-				"size", info.Size(), "replayed_bytes", len(data))
-		}
-		if parsed := manager.usage.replayLines(data); parsed > 0 {
-			slog.Info("debuglog: replayed request index", "entries", parsed)
-		}
-	}()
 	// cleaner 恒启动：策略全零时 cleanOnce 空转（每 5min 一次 ReadDir），
 	// 若按初始策略条件启动，全零起步的进程热开保留策略（SetPolicy）后
 	// 无人消费——热路径会是死开关。
@@ -387,7 +327,27 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 	return manager
 }
 
-// Close 停止后台清理并关闭索引文件句柄；进程退出前调用一次。
+// DefaultLogRowRetentionDays 是 logs 行的默认时间保留天数；
+// 面板设置项的 def 展示同源引用。
+const DefaultLogRowRetentionDays = 90
+
+// SetLogRowRetentionDays 热改 logs 行的时间保留天数；<=0 关闭按时间清理。
+func (manager *Manager) SetLogRowRetentionDays(days int64) {
+	if manager == nil {
+		return
+	}
+	manager.logRowRetentionDays.Store(days)
+}
+
+// LogRowRetentionDays 返回当前 logs 行保留天数。
+func (manager *Manager) LogRowRetentionDays() int64 {
+	if manager == nil {
+		return 0
+	}
+	return manager.logRowRetentionDays.Load()
+}
+
+// Close 停止后台清理协程；进程退出前调用一次。
 func (manager *Manager) Close() {
 	if manager == nil {
 		return
@@ -396,16 +356,6 @@ func (manager *Manager) Close() {
 	if manager.cleanerStop != nil {
 		close(manager.cleanerStop)
 		<-manager.cleanerDone
-	}
-	manager.indexMu.Lock()
-	defer manager.indexMu.Unlock()
-	if manager.indexWriter != nil {
-		if err := manager.indexWriter.Flush(); err != nil {
-			manager.ioErrors.Add(1)
-		}
-		_ = manager.indexFile.Close()
-		manager.indexWriter = nil
-		manager.indexFile = nil
 	}
 }
 
@@ -465,9 +415,12 @@ func (manager *Manager) Stats() map[string]any {
 		queued += len(recorder.tasks)
 	}
 	manager.mutex.Unlock()
-	var indexBytes int64
-	if info, err := os.Stat(filepath.Join(manager.root, IndexFile)); err == nil {
-		indexBytes = info.Size()
+	var logRows, dbBytes int64
+	if manager.store != nil {
+		if n, err := manager.store.LogCount(context.Background()); err == nil {
+			logRows = n
+		}
+		dbBytes = manager.store.DBBytes()
 	}
 	// bind-failure.json 由 main 侧在 listen 绑定失败时写入；缺失/损坏
 	// 都不透出——面板只需知道「最近一次为什么没绑上」，没有就是没发生过。
@@ -477,44 +430,25 @@ func (manager *Manager) Stats() map[string]any {
 	}
 	policy := manager.Policy()
 	stats := map[string]any{
-		"log_root":            manager.root,
-		"enabled":             manager.enabled.Load(),
-		"active_request_dirs": active,
-		"queued_log_events":   queued,
-		"queue_capacity":      active * writeQueueSize,
-		"dropped_log_events":  manager.droppedTotal.Load(),
-		"io_errors":           manager.ioErrors.Load(),
-		"index_bytes":         indexBytes,
-		"retention_days":      policy.Days,
-		"max_total_mb":        policy.MaxTotalMB,
-		"payload_hours":       policy.PayloadHours,
-		"keep_error_dirs":     policy.KeepErrorDirs,
+		"log_root":               manager.root,
+		"enabled":                manager.enabled.Load(),
+		"active_request_dirs":    active,
+		"queued_log_events":      queued,
+		"queue_capacity":         active * writeQueueSize,
+		"dropped_log_events":     manager.droppedTotal.Load(),
+		"io_errors":              manager.ioErrors.Load(),
+		"log_rows":               logRows,
+		"db_bytes":               dbBytes,
+		"log_row_retention_days": manager.LogRowRetentionDays(),
+		"retention_days":         policy.Days,
+		"max_total_mb":           policy.MaxTotalMB,
+		"payload_hours":          policy.PayloadHours,
+		"keep_error_dirs":        policy.KeepErrorDirs,
 	}
 	if bindFailure != nil {
 		stats["last_bind_failure"] = bindFailure
 	}
 	return stats
-}
-
-// UsageStats 返回 index.jsonl 的聚合快照（今日/窗口累计、按模型、按 key、
-// 错误阶段、小时趋势、延迟分位数）。启动回放完成前调用会阻塞到回放结束，
-// 保证面板看到的口径是完整的而不是部分数据。
-func (manager *Manager) UsageStats() UsageSnapshot {
-	if manager == nil {
-		return UsageSnapshot{}
-	}
-	<-manager.replayDone
-	return manager.usage.snapshot()
-}
-
-// UsageLatency 返回全局延迟分位数摘要——/admin/runtime-metrics 的轮询
-// 只消费这两行；全量聚合视图见 UsageStats。阻塞语义与 UsageStats 一致。
-func (manager *Manager) UsageLatency() map[string]latencyStats {
-	if manager == nil {
-		return nil
-	}
-	<-manager.replayDone
-	return manager.usage.latencySummary()
 }
 
 // Abort 中断指定进行中请求的 ctx；目录不存在或不可中断时返回 false。
@@ -913,7 +847,7 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 }
 
 // upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
-// 一把锁取齐两者——writeMeta 与 appendIndex 都要这对值。
+// 一把锁取齐两者——writeMeta 与 insertLog 都要这对值。
 func (recorder *Recorder) upstreamAttribution() (string, []accountAttempt) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
@@ -1107,8 +1041,8 @@ func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
 }
 
 // Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
-// 追加全局索引行并释放目录的清理保护。幂等：二次调用直接返回——
-// 否则 writeMeta 与 index 行会重复落一份。
+// 向 logs 表插入请求行并释放目录的清理保护。幂等：二次调用直接
+// 返回——否则 writeMeta 与日志行会重复落一份。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
@@ -1131,7 +1065,7 @@ func (recorder *Recorder) Complete(completion Completion) {
 	}
 	<-recorder.writerDone
 	recorder.writeMeta(&completion)
-	recorder.manager.appendIndex(recorder, &completion)
+	recorder.manager.insertLog(recorder, &completion)
 	recorder.manager.releaseDir(recorder.directory)
 }
 

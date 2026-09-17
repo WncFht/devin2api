@@ -1,16 +1,19 @@
 package ccpanel
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // statsEntry 对应 ccLoad model.StatsEntry 的渠道列收缩版：stats 页按模型
-// 聚合的行（模型维=生效模型，cellKey.model 同口径）。本服务单上游无渠道维。
+// 聚合的行（模型维=生效模型，LogCellKey.Model 同口径）。本服务单上游无渠道维。
 type statsEntry struct {
 	Model                   string   `json:"model"`
 	Success                 int64    `json:"success"`
@@ -58,7 +61,7 @@ type healthPoint struct {
 
 // statScope 是一次统计查询收敛后的过滤值：kh 为限定 key_hash（api_token
 // 身份或 auth_token_id 参数命中时），api/model/modelLike 来自 query——
-// recent 环等无格子键的辅助结构沿用同一范围。
+// 与 store.LogScope 一一对应，经 logScope() 下推到 SQL。
 type statScope struct {
 	kh        string
 	api       string
@@ -66,17 +69,17 @@ type statScope struct {
 	modelLike string
 }
 
-// queryScope 把一次统计查询的数据范围折成格子谓词 + statScope。
+// queryScope 把一次统计查询的数据范围折成 statScope。
 // 范围来源两类：api_token 身份（强制只看自己的行）与 query 筛选
 // （api、auth_token_id、model、model_like）。excluded=true 表示条件
 // 不可能命中（auth_token_id 查无令牌、或与 api_token 身份冲突），
 // 调用方直接回空集。
-func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, scope statScope, excluded bool) {
+func (h *Handler) queryScope(r *http.Request) (scope statScope, excluded bool) {
 	q := r.URL.Query()
 	if id := identityFrom(r); id.Role == "api_token" {
 		scope.kh = id.KeyHash
 		if scope.kh == "" {
-			return nil, scope, true
+			return scope, true
 		}
 	}
 	if raw := strings.TrimSpace(q.Get("auth_token_id")); raw != "" {
@@ -87,31 +90,14 @@ func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, scope s
 			}
 		}
 		if tkh == "" || (scope.kh != "" && tkh != scope.kh) {
-			return nil, scope, true
+			return scope, true
 		}
 		scope.kh = tkh
 	}
 	scope.api = strings.TrimSpace(q.Get("api"))
 	scope.model = strings.TrimSpace(q.Get("model"))
 	scope.modelLike = strings.TrimSpace(q.Get("model_like"))
-	if scope.kh == "" && scope.api == "" && scope.model == "" && scope.modelLike == "" {
-		return nil, scope, false
-	}
-	return func(k cellKey) bool {
-		if scope.kh != "" && k.kh != scope.kh {
-			return false
-		}
-		if scope.api != "" && k.api != scope.api {
-			return false
-		}
-		if scope.model != "" && k.model != scope.model {
-			return false
-		}
-		if scope.modelLike != "" && !strings.Contains(k.model, scope.modelLike) {
-			return false
-		}
-		return true
-	}, scope, false
+	return scope, false
 }
 
 // dashboardStats 实现 /dashboard|/admin/stats：
@@ -119,6 +105,7 @@ func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, scope s
 // success/error/total/499 口径与 ccLoad GetStats SQL 逐条对齐
 // （success=2xx，error=非2xx非499，total=非499）。
 func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	now := time.Now()
 	since, until, rangeName := resolveRange(r, now)
 	isToday := rangeName == "today"
@@ -126,27 +113,27 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	if duration < 1 {
 		duration = 1
 	}
-	match, scope, excluded := h.queryScope(r)
+	scope, excluded := h.queryScope(r)
 	// recentBlock 聚合短窗（10s/60s）指标：req 非 499；tps 是生成速率
 	// （Σ输出 ÷ Σ生成时长，同表格速度列口径）；ttfb 沿用格子口径；
-	// cache_pct 同缓存命中列。recent 环容量 61s，覆盖两个窗。
+	// cache_pct 同缓存命中列。
 	recentBlock := func(sec int64) map[string]any {
-		a := h.ru.recentWindow(h.debug, sec, scope.api, scope.model, scope.modelLike, scope.kh)
-		out := map[string]any{"requests": a.req}
-		if a.req > 0 {
-			out["rpm"] = float64(a.req) * 60 / float64(sec)
+		a := h.recentWindow(ctx, sec, scope)
+		out := map[string]any{"requests": a.Req}
+		if a.Req > 0 {
+			out["rpm"] = float64(a.Req) * 60 / float64(sec)
 		}
-		if a.genMS > 0 {
-			out["tps"] = float64(a.outTok) * 1000 / float64(a.genMS)
+		if a.GenMS > 0 {
+			out["tps"] = float64(a.OutTok) * 1000 / float64(a.GenMS)
 		}
-		if a.nFirst > 0 {
-			out["ttfb_s"] = float64(a.firstMS) / float64(a.nFirst) / 1000
+		if a.NFirst > 0 {
+			out["ttfb_s"] = float64(a.FirstMS) / float64(a.NFirst) / 1000
 		}
-		if a.nDur > 0 {
-			out["dur_s"] = float64(a.durMS) / float64(a.nDur) / 1000
+		if a.NDur > 0 {
+			out["dur_s"] = float64(a.DurMS) / float64(a.NDur) / 1000
 		}
-		if d := a.inTok + a.crTok + a.cwTok; d > 0 {
-			out["cache_pct"] = float64(a.crTok) * 100 / float64(d)
+		if d := a.InTok + a.CrTok + a.CwTok; d > 0 {
+			out["cache_pct"] = float64(a.CrTok) * 100 / float64(d)
 		}
 		return out
 	}
@@ -163,70 +150,69 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		respond([]statsEntry{}, zeroRPMStats())
 		return
 	}
-	prices := h.CatalogPrices(r.Context())
+	prices := h.CatalogPrices(ctx)
 
 	type modelAgg struct {
-		t    cellTotals
+		t    store.LogCellTotals
 		cost float64
 		peak int64 // 单槽非 499 峰值（per-model peak_rpm 的分子）
 	}
 	aggs := map[string]*modelAgg{}
-	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-		if match != nil && !match(key) {
-			return
-		}
-		a := aggs[key.model]
+	h.eachCell(ctx, since, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
+		a := aggs[key.Model]
 		if a == nil {
 			a = &modelAgg{}
-			aggs[key.model] = a
+			aggs[key.Model] = a
 		}
 		a.t = addCells(a.t, c)
 		a.cost += cellCost(key, c, prices)
-		if n := c.requests - c.gone; n > a.peak {
+		if n := c.Requests - c.Gone; n > a.peak {
 			a.peak = n
 		}
 	})
 
-	last := h.ru.lastByModel(h.debug, scope.kh)
+	last := h.lastByModel(ctx, scope.kh)
 	models := make([]string, 0, len(aggs))
 	for m := range aggs {
 		models = append(models, m)
 	}
 	sort.Strings(models)
 
-	perModel := h.healthTimelines(since, until, isToday, match, prices)
+	perModel := h.healthTimelines(ctx, since, until, isToday, scope, prices)
 
 	entries := make([]statsEntry, 0, len(models))
 	for _, m := range models {
 		a := aggs[m]
 		e := statsEntry{
 			Model:          m,
-			Success:        a.t.ok,
-			Error:          a.t.requests - a.t.ok - a.t.gone,
-			Total:          a.t.requests - a.t.gone,
+			Success:        a.t.OK,
+			Error:          a.t.Requests - a.t.OK - a.t.Gone,
+			Total:          a.t.Requests - a.t.Gone,
 			HealthTimeline: perModel[m],
 		}
-		if a.t.nFirstOK > 0 {
-			v := float64(a.t.sumFirstOKMS) / float64(a.t.nFirstOK) / 1000
+		if a.t.NFirstOK > 0 {
+			v := float64(a.t.SumFirstOKMS) / float64(a.t.NFirstOK) / 1000
 			e.AvgFirstByteTimeSeconds = &v
 		}
-		if a.t.nDur > 0 {
-			v := float64(a.t.sumDurMS) / float64(a.t.nDur) / 1000
+		if a.t.NDur > 0 {
+			v := float64(a.t.SumDurMS) / float64(a.t.NDur) / 1000
 			e.AvgDurationSeconds = &v
 		}
 		if l, ok := last[m]; ok {
-			if l.okAt > 0 {
-				at := l.okAt
+			if l.OKAt > 0 {
+				at := l.OKAt
+				id := l.OKID
 				e.LastSuccessAt = &at
-				e.LastSuccessID = &at // 日志行 id 即 started_at 毫秒戳（S2 投影口径）
+				e.LastSuccessID = &id // 日志行 id 现为 logs 表自增主键（旧为 started_at 毫秒戳）
 			}
-			if l.reqAt > 0 {
-				at := l.reqAt
-				status := l.reqStatus
+			if l.ReqAt > 0 {
+				at := l.ReqAt
+				id := l.ReqID
+				status := l.ReqStatus
 				e.LastRequestAt = &at
-				e.LastRequestID = &at
+				e.LastRequestID = &id
 				e.LastRequestStatus = &status
-				e.LastRequestMessage = l.reqResult
+				e.LastRequestMessage = l.ReqResult
 			}
 		}
 		if a.peak > 0 {
@@ -238,27 +224,27 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 			e.AvgRPM = &v
 		}
 		if isToday {
-			if v := h.ru.recentRPM(h.debug, m, scope.kh); v > 0 {
+			if v := h.recentRPM(ctx, m, scope.kh); v > 0 {
 				e.RecentRPM = &v
 				if e.PeakRPM == nil || *e.PeakRPM < v {
 					e.PeakRPM = &v
 				}
 			}
 		}
-		if a.t.inTok > 0 {
-			e.TotalInputTokens = &a.t.inTok
+		if a.t.InTok > 0 {
+			e.TotalInputTokens = &a.t.InTok
 		}
-		if a.t.outTok > 0 {
-			e.TotalOutputTokens = &a.t.outTok
+		if a.t.OutTok > 0 {
+			e.TotalOutputTokens = &a.t.OutTok
 		}
-		if a.t.cacheRead > 0 {
-			e.TotalCacheReadTokens = &a.t.cacheRead
+		if a.t.CacheRead > 0 {
+			e.TotalCacheReadTokens = &a.t.CacheRead
 		}
-		if a.t.cacheWrite > 0 {
-			e.TotalCacheWriteTokens = &a.t.cacheWrite
+		if a.t.CacheWrite > 0 {
+			e.TotalCacheWriteTokens = &a.t.CacheWrite
 		}
-		if a.t.sumGenMS > 0 {
-			e.GenMS = &a.t.sumGenMS
+		if a.t.SumGenMS > 0 {
+			e.GenMS = &a.t.SumGenMS
 		}
 		if a.cost > 0 {
 			e.TotalCost = &a.cost
@@ -266,14 +252,14 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, e)
 	}
-	respond(entries, h.rpmStatsFiltered(since, until, match, isToday, scope.model, scope.kh))
+	respond(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model))
 }
 
 // healthTimelines 复刻 ccLoad fillHealthTimeline 的 per-model 部分：
 // isToday 取最近 4h 按 5min×48 桶，否则按 range/48 桶。
 // 格子分辨率 10min：今日档一个格子跨两个桶，按重叠秒数比例分摊计数
 // （成功率/均值不变，计数为区间估计）。单上游无渠道聚合时间线。
-func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match func(cellKey) bool, prices map[string]CatalogPrice) map[string][]healthPoint {
+func (h *Handler) healthTimelines(ctx context.Context, since, until time.Time, isToday bool, scope statScope, prices map[string]CatalogPrice) map[string][]healthPoint {
 	const numBuckets = 48
 	var healthStart time.Time
 	var bucketSec int64
@@ -298,16 +284,13 @@ func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match fu
 		durSum, durN, firstSum, firstN float64
 	}
 	perModelF := map[string]*[numBuckets]fBucket{}
-	h.ru.eachCell(h.debug, healthStart, until, func(key cellKey, c cellTotals) {
-		if match != nil && !match(key) {
-			return
-		}
-		fb := perModelF[key.model]
+	h.eachCell(ctx, healthStart, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
+		fb := perModelF[key.Model]
 		if fb == nil {
 			fb = &[numBuckets]fBucket{}
-			perModelF[key.model] = fb
+			perModelF[key.Model] = fb
 		}
-		cellStart, cellEnd := key.slot, key.slot+rollupSlotSeconds
+		cellStart, cellEnd := key.Slot, key.Slot+rollupSlotSeconds
 		cost := cellCostNG(key, c, prices)
 		i0 := int((cellStart - startUnix) / bucketSec)
 		i1 := int((cellEnd - 1 - startUnix) / bucketSec)
@@ -322,18 +305,18 @@ func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match fu
 			}
 			share := float64(ov) / rollupSlotSeconds
 			b := &fb[i]
-			b.succ += float64(c.ok) * share
-			b.err += float64(c.requests-c.ok-c.gone) * share
-			b.lim += float64(c.limited) * share
-			b.inT += float64(c.inTokNG) * share
-			b.outT += float64(c.outTokNG) * share
-			b.cr += float64(c.cacheReadNG) * share
-			b.cw += float64(c.cacheWriteNG) * share
+			b.succ += float64(c.OK) * share
+			b.err += float64(c.Requests-c.OK-c.Gone) * share
+			b.lim += float64(c.Limited) * share
+			b.inT += float64(c.InTokNG) * share
+			b.outT += float64(c.OutTokNG) * share
+			b.cr += float64(c.CacheReadNG) * share
+			b.cw += float64(c.CacheWriteNG) * share
 			b.cost += cost * share
-			b.durSum += float64(c.sumDurOKMS) * share
-			b.durN += float64(c.nDurOK) * share
-			b.firstSum += float64(c.sumFirstOKMS) * share
-			b.firstN += float64(c.nFirstOK) * share
+			b.durSum += float64(c.SumDurOKMS) * share
+			b.durN += float64(c.NDurOK) * share
+			b.firstSum += float64(c.SumFirstOKMS) * share
+			b.firstN += float64(c.NFirstOK) * share
 		}
 	})
 
@@ -376,16 +359,13 @@ func (h *Handler) healthTimelines(since, until time.Time, isToday bool, match fu
 
 // rpmStatsFiltered 由 10 分钟格子推导 RPM/QPS：计数口径非 499
 // （ccLoad GetRPMStats 的 WHERE status_code != 499），peak 取单槽
-// 峰值折算分钟速率。recent_rpm 仅 isToday 有效，取 recent 环的真实
-// 60s 计数，并按 ccLoad 口径把 peak 抬到不低于 recent（格子折算的
-// 峰值会低估瞬时峰值）；recentModel/kh 分别按模型与令牌收敛计数。
-func (h *Handler) rpmStatsFiltered(since, until time.Time, match func(cellKey) bool, isToday bool, recentModel, kh string) map[string]any {
+// 峰值折算分钟速率。recent_rpm 仅 isToday 有效，取最近 60s 的真实
+// 完成计数，并按 ccLoad 口径把 peak 抬到不低于 recent（格子折算的
+// 峰值会低估瞬时峰值）；recentModel/scope.kh 分别按模型与令牌收敛。
+func (h *Handler) rpmStatsFiltered(ctx context.Context, since, until time.Time, scope statScope, isToday bool, recentModel string) map[string]any {
 	var total, peak int64
-	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-		if match != nil && !match(key) {
-			return
-		}
-		n := c.requests - c.gone
+	h.eachCell(ctx, since, until, scope, func(_ store.LogCellKey, c store.LogCellTotals) {
+		n := c.Requests - c.Gone
 		total += n
 		if n > peak {
 			peak = n
@@ -399,7 +379,7 @@ func (h *Handler) rpmStatsFiltered(since, until time.Time, match func(cellKey) b
 	avgRPM := float64(total) / minutes
 	recent := 0.0
 	if isToday {
-		recent = h.ru.recentRPM(h.debug, recentModel, kh)
+		recent = h.recentRPM(ctx, recentModel, scope.kh)
 		if peakRPM < recent {
 			peakRPM = recent
 		}
@@ -427,17 +407,13 @@ func zeroRPMStats() map[string]any {
 // 范围内出现过的模型名表（auth_token_id 查无令牌等排空场景为空表）。
 func (h *Handler) dashboardStatsFilterOptions(w http.ResponseWriter, r *http.Request) {
 	since, until, _ := resolveRange(r, time.Now())
-	match, _, excluded := h.queryScope(r)
+	scope, excluded := h.queryScope(r)
 	set := map[string]struct{}{}
 	if !excluded {
-		h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-			if key.model == "" {
-				return
+		h.eachCell(r.Context(), since, until, scope, func(key store.LogCellKey, _ store.LogCellTotals) {
+			if key.Model != "" {
+				set[key.Model] = struct{}{}
 			}
-			if match != nil && !match(key) {
-				return
-			}
-			set[key.model] = struct{}{}
 		})
 	}
 	models := make([]string, 0, len(set))

@@ -51,7 +51,7 @@ func (h *Handler) modelNamesUnion(r *http.Request) map[string][]string {
 			add(name, "registry")
 		}
 	}
-	for _, m := range h.ru.modelSet(h.debug, "") {
+	for _, m := range h.modelSet(r.Context(), "") {
 		add(m, "traffic")
 	}
 	return src

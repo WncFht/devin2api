@@ -3,7 +3,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -183,7 +182,7 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -232,7 +231,8 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 		},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	st := openTokenDB(t)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, st))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},
 		{"type":"function_call","call_id":"call-1","name":"exec","arguments":"{}"},
@@ -255,12 +255,12 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 	if !strings.Contains(string(meta), `"premature_end_turn": true`) {
 		t.Fatalf("meta = %s, want premature_end_turn", meta)
 	}
-	index, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	if !strings.Contains(string(index), `"premature_end_turn":true`) {
-		t.Fatalf("index = %s, want premature_end_turn", index)
+	if len(rows) != 1 || !rows[0].PrematureEndTurn {
+		t.Fatalf("log row = %+v, want premature_end_turn", rows)
 	}
 }
 
@@ -276,7 +276,7 @@ func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
 		},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -304,7 +304,7 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -517,7 +517,7 @@ func TestResponsesHandlerIgnoresLogInitializationFailure(t *testing.T) {
 	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -770,7 +770,8 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 		Error: &llm.AssistantMessage{ErrorMessage: "invalid_argument: broken"},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	st := openTokenDB(t)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, st))
 
 	// 成功前即失败：上游首个事件就是错误 → 非 200 HTTP 错误响应。
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
@@ -789,13 +790,12 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 	if !strings.Contains(body, `"debug_ref":"`+dir+`"`) || !strings.Contains(body, `"stage":"response_event"`) {
 		t.Fatalf("error body missing debug_ref/stage: %s", body)
 	}
-	indexData, readErr := os.ReadFile(filepath.Join(root, "index.jsonl"))
-	if readErr != nil {
-		t.Fatal(readErr)
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	index := string(indexData)
-	if !strings.Contains(index, `"client_request_id":"agent-corr-1"`) || !strings.Contains(index, `"error_stage":"response_event"`) {
-		t.Fatalf("index missing correlation fields: %s", index)
+	if len(rows) != 1 || rows[0].ClientRequestID != "agent-corr-1" || rows[0].ErrorStage != "response_event" {
+		t.Fatalf("log row missing correlation fields: %+v", rows)
 	}
 }
 
@@ -807,7 +807,7 @@ func TestStreamErrorCarriesDebugRef(t *testing.T) {
 			Error: &llm.AssistantMessage{ErrorMessage: "upstream exploded"}},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -1015,7 +1015,7 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 // 拒绝入账：400 + rejects 计数，不产生调试目录与 index 行——完整请求
 // 从未到达，与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, nil)
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1044,7 +1044,7 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 // 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与目录都在，
 // rejects 计数不应增长。
 func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, nil)
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1070,7 +1070,8 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 // TestClientDisconnectRecords499 验证未提交响应前的断连按 499+disconnected
 // 入账而不是 500+failed——断连是客户端责任，不能污染 server_error 聚合。
 func TestClientDisconnectRecords499(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
 	t.Cleanup(func() { manager.Close() })
 	fake := &blockedStreamAdapter{entered: make(chan struct{})}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
@@ -1087,16 +1088,16 @@ func TestClientDisconnectRecords499(t *testing.T) {
 	cancel()
 	<-done
 
-	data, err := os.ReadFile(filepath.Join(manager.Root(), debuglog.IndexFile))
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatalf("read index: %v", err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	var entry debuglog.IndexEntry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
-		t.Fatalf("parse index line: %v (%s)", err, data)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(rows))
 	}
+	entry := rows[0]
 	if entry.StatusCode != 499 || entry.Result != "disconnected" {
-		t.Fatalf("index entry = status %d result %q, want 499/disconnected", entry.StatusCode, entry.Result)
+		t.Fatalf("log row = status %d result %q, want 499/disconnected", entry.StatusCode, entry.Result)
 	}
 	if entry.ErrorStage != debuglog.ErrStageClientDisconnected {
 		t.Fatalf("error_stage = %q, want client_disconnected", entry.ErrorStage)

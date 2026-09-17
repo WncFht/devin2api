@@ -2,6 +2,7 @@ package ccpanel
 
 import (
 	"hash/fnv"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // activeRequest 是 ccLoad ActiveRequest 的 wire 形状收缩版；本服务无多
@@ -149,7 +151,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	data["duration_seconds"] = duration
 	data["is_today"] = isToday
-	data["rpm_stats"] = h.rpmStatsFiltered(since, until, nil, isToday, "", "")
+	data["rpm_stats"] = h.rpmStatsFiltered(r.Context(), since, until, statScope{}, isToday, "")
 
 	// 时间窗覆盖：按 key_hash 聚合格子，逐令牌覆盖累计字段。
 	// 口径对齐 GetAuthTokenStatsInRange：success/failure 计数非 499，
@@ -158,23 +160,23 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 	// 开放模式（空仓）的请求无凭据可关联，自然不落入任何令牌。
 	prices := h.CatalogPrices(r.Context())
 	type tokenAgg struct {
-		t    cellTotals
+		t    store.LogCellTotals
 		cost float64
 		peak int64 // 单槽非 499 峰值（peak_rpm 的分子，折算分钟速率）
 	}
 	byKH := map[string]*tokenAgg{}
-	h.ru.eachCell(h.debug, since, until, func(key cellKey, c cellTotals) {
-		if key.kh == "" {
+	h.eachCell(r.Context(), since, until, statScope{}, func(key store.LogCellKey, c store.LogCellTotals) {
+		if key.KeyHash == "" {
 			return
 		}
-		a := byKH[key.kh]
+		a := byKH[key.KeyHash]
 		if a == nil {
 			a = &tokenAgg{}
-			byKH[key.kh] = a
+			byKH[key.KeyHash] = a
 		}
 		a.t = addCells(a.t, c)
 		a.cost += cellCost(key, c, prices)
-		if n := c.requests - c.gone; n > a.peak {
+		if n := c.Requests - c.Gone; n > a.peak {
 			a.peak = n
 		}
 	})
@@ -184,29 +186,29 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		if a == nil {
 			a = &tokenAgg{} // 范围内无数据：清零覆盖（ccLoad 同款语义）
 		}
-		ov.SuccessCount = a.t.ok
-		ov.FailureCount = a.t.requests - a.t.ok - a.t.gone
-		ov.PromptTokensTotal = a.t.inTok
-		ov.CompletionTokensTotal = a.t.outTok
-		ov.CacheReadTokensTotal = a.t.cacheRead
-		ov.CacheCreationTokensTotal = a.t.cacheWrite
+		ov.SuccessCount = a.t.OK
+		ov.FailureCount = a.t.Requests - a.t.OK - a.t.Gone
+		ov.PromptTokensTotal = a.t.InTok
+		ov.CompletionTokensTotal = a.t.OutTok
+		ov.CacheReadTokensTotal = a.t.CacheRead
+		ov.CacheCreationTokensTotal = a.t.CacheWrite
 		ov.TotalCostUSD = a.cost
 		ov.EffectiveCostUSD = a.cost
 		ov.StreamAvgTTFB = 0
-		if a.t.nFirstStream > 0 {
-			ov.StreamAvgTTFB = float64(a.t.sumFirstStreamMS) / float64(a.t.nFirstStream) / 1000
+		if a.t.NFirstStream > 0 {
+			ov.StreamAvgTTFB = float64(a.t.SumFirstStreamMS) / float64(a.t.NFirstStream) / 1000
 		}
 		ov.NonStreamAvgRT = 0
-		if a.t.nNonStream > 0 {
-			ov.NonStreamAvgRT = float64(a.t.sumDurNonStreamMS) / float64(a.t.nNonStream) / 1000
+		if a.t.NNonStream > 0 {
+			ov.NonStreamAvgRT = float64(a.t.SumDurNonStreamMS) / float64(a.t.NNonStream) / 1000
 		}
-		ov.StreamCount = a.t.nStreamNG
-		ov.NonStreamCount = a.t.nNonStreamNG
+		ov.StreamCount = a.t.NStreamNG
+		ov.NonStreamCount = a.t.NNonStreamNG
 		ov.PeakRPM = float64(a.peak) / (rollupSlotSeconds / 60)
 		ov.AvgRPM = float64(ov.SuccessCount+ov.FailureCount) * 60 / duration
 		ov.RecentRPM = 0
 		if isToday {
-			ov.RecentRPM = h.ru.recentRPM(h.debug, "", t.KeyHash())
+			ov.RecentRPM = h.recentRPM(r.Context(), "", t.KeyHash())
 			if ov.PeakRPM < ov.RecentRPM {
 				ov.PeakRPM = ov.RecentRPM
 			}
@@ -244,7 +246,7 @@ func (h *Handler) adminModelPricing(w http.ResponseWriter, r *http.Request) {
 // debuglog 自观测投影成 ccLoad 的 process/http_proxy/logs 分组形状；
 // 另投 gate/rejects/rates/trend/debuglog/usage/warm 组承接旧面板
 // stats 端点的排障口径。responses_websocket 组本服务无会话仓，给零值。
-func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := map[string]any{}
 	if h.metrics != nil {
 		snap = h.metrics.Snapshot()
@@ -328,9 +330,14 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 		data["rejects"] = h.metrics.Rejects()
 	}
 	// usage 组只投全局延迟分位数两行（ttfb/duration）；全量聚合视图
-	// 在 /admin/usage——轮询端点不背全桶排序的成本。Manager 方法自带
-	// nil 守护，h.debug 为 nil 时返回 nil 投空组。
-	data["usage"] = h.debug.UsageLatency()
+	// 在 /admin/usage——轮询端点不背全桶排序的成本。
+	if h.store != nil {
+		if lat, err := h.store.LogLatency(r.Context()); err == nil {
+			data["usage"] = lat
+		} else {
+			slog.Warn("ccpanel: log latency query failed", "error", err)
+		}
+	}
 	// gate 组是速率闸门快照（闩态/配额/排队 + events 闩迁移事件环）。
 	if h.gateStats != nil {
 		data["gate"] = h.gateStats()

@@ -19,7 +19,8 @@ import (
 
 // Store 包装 *sql.DB，对外只暴露领域方法。
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open 打开（或创建）path 处的库；created 报告文件是本次新建的——
@@ -52,7 +53,18 @@ func Open(path string) (*Store, bool, error) {
 		_ = db.Close()
 		return nil, false, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db}, created, nil
+	return &Store{db: db, path: path}, created, nil
+}
+
+// DBBytes 返回库文件与 WAL 的磁盘占用合计（Stats 的 db_bytes 口径）。
+func (s *Store) DBBytes() int64 {
+	var total int64
+	for _, suffix := range []string{"", "-wal"} {
+		if info, err := os.Stat(s.path + suffix); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 // Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。
