@@ -14,7 +14,7 @@
     function showError(message) {
       if (window.showError) try { window.showError(message); } catch (_) {}
       errorText.textContent = message;
-      errorMessage.style.display = 'flex';
+      errorMessage.classList.remove('hidden');
       
       // 添加摇晃动画
       errorMessage.style.animation = 'none';
@@ -23,7 +23,7 @@
     }
 
     function hideError() {
-      errorMessage.style.display = 'none';
+      errorMessage.classList.add('hidden');
     }
 
     function setLoading(loading) {

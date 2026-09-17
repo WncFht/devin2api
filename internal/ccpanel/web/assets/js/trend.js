@@ -320,14 +320,14 @@
 
     function renderTrendLoading() {
       document.getElementById('chart-loading').style.display = 'flex';
-      document.getElementById('chart-error').style.display = 'none';
-      document.getElementById('chart').style.display = 'none';
+      document.getElementById('chart-error').classList.add('hidden');
+      document.getElementById('chart').classList.add('hidden');
     }
 
     function renderTrendError() {
       document.getElementById('chart-loading').style.display = 'none';
-      document.getElementById('chart-error').style.display = 'flex';
-      document.getElementById('chart').style.display = 'none';
+      document.getElementById('chart-error').classList.remove('hidden');
+      document.getElementById('chart').classList.add('hidden');
     }
 
     function renderChart() {
@@ -338,8 +338,8 @@
 
       // 显示图表容器
       document.getElementById('chart-loading').style.display = 'none';
-      document.getElementById('chart-error').style.display = 'none';
-      document.getElementById('chart').style.display = 'block';
+      document.getElementById('chart-error').classList.add('hidden');
+      document.getElementById('chart').classList.remove('hidden');
 
       // 初始化或获取 ECharts 实例
       const chartDom = document.getElementById('chart');
@@ -1615,8 +1615,8 @@ function shouldShowZoom(points, hours, trendType) {
       const dropdown = document.getElementById('model-filter-dropdown');
       if (!dropdown) return;
 
-      const isVisible = dropdown.style.display === 'block';
-      dropdown.style.display = isVisible ? 'none' : 'block';
+      const isVisible = !dropdown.classList.contains('hidden');
+      dropdown.classList.toggle('hidden', isVisible);
 
       if (!isVisible) {
         // 点击外部关闭
@@ -1656,7 +1656,7 @@ function shouldShowZoom(points, hours, trendType) {
       if (!dropdown || !container) return;
 
       if (!container.contains(event.target)) {
-        dropdown.style.display = 'none';
+        dropdown.classList.add('hidden');
         document.removeEventListener('click', closeModelFilter, true);
       }
     }
@@ -1942,7 +1942,7 @@ function shouldShowZoom(points, hours, trendType) {
     }
 
     window.i18n?.onLocaleChange?.(() => {
-      if (window.chartInstance && document.getElementById('chart').style.display !== 'none') renderChart();
+      if (window.chartInstance && !document.getElementById('chart').classList.contains('hidden')) renderChart();
     });
 
     // 注销功能（已由 ui.js 的 onLogout 统一处理）

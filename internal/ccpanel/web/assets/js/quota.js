@@ -204,11 +204,9 @@
 
   function setChartState(loading, err, empty) {
     document.getElementById('quota-chart-loading').style.display = loading ? 'flex' : 'none';
-    document.getElementById('quota-chart-error').style.display = err ? 'flex' : 'none';
-    const emptyEl = document.getElementById('quota-chart-empty');
-    emptyEl.classList.toggle('hidden', !empty);
-    emptyEl.style.display = empty ? 'flex' : 'none';
-    document.getElementById('quota-chart').style.display = (!loading && !err && !empty) ? 'block' : 'none';
+    document.getElementById('quota-chart-error').classList.toggle('hidden', !err);
+    document.getElementById('quota-chart-empty').classList.toggle('hidden', !empty);
+    document.getElementById('quota-chart').classList.toggle('hidden', loading || err || empty);
   }
 
   function renderChart() {
