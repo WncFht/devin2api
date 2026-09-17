@@ -116,6 +116,9 @@ type Handler struct {
 	accountGateStats  func() map[string]devin.GateStats
 	accountWarmStats  func() map[string]devin.WarmStats
 	accountLaneStates func() map[string]devin.LaneState
+	// accountQuotaSignal 把一次成功的上游配额探测结果回灌给池侧
+	// （quota 降权信号源，参数是日/周剩余百分比）；nil 时只采样不回灌。
+	accountQuotaSignal func(name string, dailyRemainingPct, weeklyRemainingPct float64)
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
 	// accountOps 挂 /admin/accounts 账号 CRUD 与行操作面；nil 时
@@ -226,6 +229,12 @@ func (h *Handler) SetAccountWarmStats(fn func() map[string]devin.WarmStats) {
 // accounts 组按号透出）。
 func (h *Handler) SetAccountLaneStates(fn func() map[string]devin.LaneState) {
 	h.accountLaneStates = fn
+}
+
+// SetAccountQuotaSignal 注入配额探测回灌口：每次成功的逐号配额采样
+// 与 test 探测把日/周剩余百分比喂给池侧降权簿记。
+func (h *Handler) SetAccountQuotaSignal(fn func(name string, dailyRemainingPct, weeklyRemainingPct float64)) {
+	h.accountQuotaSignal = fn
 }
 
 // SetPoolTokenFuncs 注入号池凭据源读取函数（按账号名索引的 map）：
@@ -366,6 +375,7 @@ func (h *Handler) Register(mux interface {
 	mux.Post("/admin/accounts/{name}/restore", h.withAuth(h.adminRestoreAccount))
 	mux.Post("/admin/accounts/{name}/clear-cooldown", h.withAuth(h.adminClearAccountCooldown))
 	mux.Post("/admin/accounts/{name}/quota/refresh", h.withAuth(h.adminRefreshAccountQuota))
+	mux.Post("/admin/accounts/{name}/test", h.withAuth(h.adminTestAccount))
 	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))
 	mux.Get("/admin/quota", h.withAuth(h.adminQuota))
 	mux.Get("/admin/status", h.withAuth(h.adminStatus))
