@@ -84,7 +84,7 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, rangeName := resolveRange(r, now)
 	isToday := rangeName == "today"
-	match, kh, excluded := h.queryScope(r)
+	match, scope, excluded := h.queryScope(r)
 	prices := h.CatalogPrices(r.Context())
 
 	byAPI := map[string]*endpointStat{}
@@ -125,7 +125,7 @@ func (h *Handler) dashboardSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	rpm := zeroRPMStats()
 	if !excluded {
-		rpm = h.rpmStatsFiltered(since, until, match, isToday, "", kh)
+		rpm = h.rpmStatsFiltered(since, until, match, isToday, "", scope.kh)
 	}
 	respondOK(w, map[string]any{
 		"total_requests":   grand.TotalRequests,

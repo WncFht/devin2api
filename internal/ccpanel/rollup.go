@@ -9,6 +9,7 @@ package ccpanel
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,15 +60,28 @@ type cellTotals struct {
 	// 非 499 行按 stream 拆分：token 统计 stream_count/non_stream_count
 	nStreamNG    int64
 	nNonStreamNG int64
+	// sumGenMS 是生成时长和：stream 行扣首字（dur−fbt），非 stream/无
+	// fbt 行取全时长——TPS（输出 token/生成秒）的分母，同速度列口径。
+	sumGenMS int64
 }
 
 // recentPoint 是 recent 环的一条记录；model/kh 供 per-model/per-token
 // recent_rpm，gone 让 RPM 口径剔除客户端断连（ccLoad status_code != 499 同款）。
+// token/时长/首字字段供短窗聚合（10s/60s 的速率与均值）。
 type recentPoint struct {
-	end   int64
-	model string
-	kh    string
-	gone  bool
+	end     int64
+	model   string
+	api     string
+	kh      string
+	gone    bool
+	stream  bool
+	ok2xx   bool
+	inTok   int64
+	outTok  int64
+	crTok   int64
+	cwTok   int64
+	durMS   int64
+	firstMS int64
 }
 
 // modelLast 记录单 (模型,key_hash) 的最近时刻（毫秒戳）：req* 是最近
@@ -156,6 +170,11 @@ func (r *rollup) add(e debuglog.IndexEntry) {
 	if e.DurationMS > 0 {
 		c.nDur++
 		c.sumDurMS += e.DurationMS
+		gen := e.DurationMS
+		if e.FirstUpstreamMS != nil && *e.FirstUpstreamMS > 0 && *e.FirstUpstreamMS < e.DurationMS {
+			gen = e.DurationMS - *e.FirstUpstreamMS
+		}
+		c.sumGenMS += gen
 	}
 	if e.Stream && ok2xx && e.FirstUpstreamMS != nil && *e.FirstUpstreamMS > 0 {
 		c.sumFirstOKMS += *e.FirstUpstreamMS
@@ -192,7 +211,17 @@ func (r *rollup) add(e debuglog.IndexEntry) {
 	}
 	// recent 环形：条目按完成序近似到达，超水位时裁到最新完成时刻前 61s。
 	end := started.Unix() + e.DurationMS/1000
-	r.recent = append(r.recent, recentPoint{end: end, model: model, kh: e.KeyHash, gone: gone})
+	var firstMS int64
+	if e.FirstUpstreamMS != nil {
+		firstMS = *e.FirstUpstreamMS
+	}
+	r.recent = append(r.recent, recentPoint{
+		end: end, model: model, api: e.API, kh: e.KeyHash,
+		gone: gone, stream: e.Stream, ok2xx: ok2xx,
+		inTok: e.InputTokens, outTok: e.OutputTokens,
+		crTok: e.CacheReadTokens, cwTok: e.CacheWriteTokens,
+		durMS: e.DurationMS, firstMS: firstMS,
+	})
 	if len(r.recent) > 4096 {
 		cut := end - 61
 		keep := r.recent[:0]
@@ -296,6 +325,71 @@ func (r *rollup) recentRPM(m *debuglog.Manager, model, kh string) float64 {
 	return float64(n)
 }
 
+// recentAgg 是 recent 环上一个短窗的聚合：req 只数非 499（RPM 口径），
+// token 全量累计（与格子 summary 口径一致）；genMS 是生成时长和（stream
+// 行扣首字、其余取全时长），firstMS/nFirst 沿用格子 TTFB 口径
+// （stream && 2xx && fbt>0）。
+type recentAgg struct {
+	req     int64
+	inTok   int64
+	outTok  int64
+	crTok   int64
+	cwTok   int64
+	durMS   int64
+	nDur    int64
+	genMS   int64
+	firstMS int64
+	nFirst  int64
+}
+
+// recentWindow 聚合最近 seconds 秒内完成的条目；api/model/modelLike/kh
+// 与 queryScope 同义（api/model 精确、modelLike 子串、kh 精确）。
+func (r *rollup) recentWindow(m *debuglog.Manager, seconds int64, api, model, modelLike, kh string) recentAgg {
+	r.refresh(m)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cut := time.Now().Unix() - seconds
+	var a recentAgg
+	for _, s := range r.recent {
+		if s.end <= cut {
+			continue
+		}
+		if api != "" && s.api != api {
+			continue
+		}
+		if model != "" && s.model != model {
+			continue
+		}
+		if modelLike != "" && !strings.Contains(s.model, modelLike) {
+			continue
+		}
+		if kh != "" && s.kh != kh {
+			continue
+		}
+		if !s.gone {
+			a.req++
+		}
+		a.inTok += s.inTok
+		a.outTok += s.outTok
+		a.crTok += s.crTok
+		a.cwTok += s.cwTok
+		if s.durMS > 0 {
+			a.durMS += s.durMS
+			a.nDur++
+		}
+		gen := s.durMS
+		if s.firstMS > 0 && s.firstMS < s.durMS {
+			gen = s.durMS - s.firstMS
+		}
+		a.genMS += gen
+		if s.stream && s.ok2xx && s.firstMS > 0 {
+			a.firstMS += s.firstMS
+			a.nFirst++
+		}
+	}
+	return a
+}
+
 // addCells 返回 a+b 的逐字段和。
 func addCells(a, b cellTotals) cellTotals {
 	a.requests += b.requests
@@ -322,6 +416,7 @@ func addCells(a, b cellTotals) cellTotals {
 	a.nNonStream += b.nNonStream
 	a.nStreamNG += b.nStreamNG
 	a.nNonStreamNG += b.nNonStreamNG
+	a.sumGenMS += b.sumGenMS
 	return a
 }
 

@@ -12,28 +12,31 @@ import (
 // statsEntry 对应 ccLoad model.StatsEntry 的渠道列收缩版：stats 页按模型
 // 聚合的行（模型维=生效模型，cellKey.model 同口径）。本服务单上游无渠道维。
 type statsEntry struct {
-	Model                   string        `json:"model"`
-	Success                 int64         `json:"success"`
-	Error                   int64         `json:"error"`
-	Total                   int64         `json:"total"`
-	AvgFirstByteTimeSeconds *float64      `json:"avg_first_byte_time_seconds,omitempty"`
-	AvgDurationSeconds      *float64      `json:"avg_duration_seconds,omitempty"`
-	LastSuccessAt           *int64        `json:"last_success_at,omitempty"`
-	LastSuccessID           *int64        `json:"last_success_id,omitempty"`
-	LastRequestAt           *int64        `json:"last_request_at,omitempty"`
-	LastRequestID           *int64        `json:"last_request_id,omitempty"`
-	LastRequestStatus       *int          `json:"last_request_status,omitempty"`
-	LastRequestMessage      string        `json:"last_request_message,omitempty"`
-	PeakRPM                 *float64      `json:"peak_rpm,omitempty"`
-	AvgRPM                  *float64      `json:"avg_rpm,omitempty"`
-	RecentRPM               *float64      `json:"recent_rpm,omitempty"`
-	TotalInputTokens        *int64        `json:"total_input_tokens,omitempty"`
-	TotalOutputTokens       *int64        `json:"total_output_tokens,omitempty"`
-	TotalCacheReadTokens    *int64        `json:"total_cache_read_input_tokens,omitempty"`
-	TotalCacheWriteTokens   *int64        `json:"total_cache_creation_input_tokens,omitempty"`
-	TotalCost               *float64      `json:"total_cost,omitempty"`
-	EffectiveCost           *float64      `json:"effective_cost,omitempty"`
-	HealthTimeline          []healthPoint `json:"health_timeline,omitempty"`
+	Model                   string   `json:"model"`
+	Success                 int64    `json:"success"`
+	Error                   int64    `json:"error"`
+	Total                   int64    `json:"total"`
+	AvgFirstByteTimeSeconds *float64 `json:"avg_first_byte_time_seconds,omitempty"`
+	AvgDurationSeconds      *float64 `json:"avg_duration_seconds,omitempty"`
+	LastSuccessAt           *int64   `json:"last_success_at,omitempty"`
+	LastSuccessID           *int64   `json:"last_success_id,omitempty"`
+	LastRequestAt           *int64   `json:"last_request_at,omitempty"`
+	LastRequestID           *int64   `json:"last_request_id,omitempty"`
+	LastRequestStatus       *int     `json:"last_request_status,omitempty"`
+	LastRequestMessage      string   `json:"last_request_message,omitempty"`
+	PeakRPM                 *float64 `json:"peak_rpm,omitempty"`
+	AvgRPM                  *float64 `json:"avg_rpm,omitempty"`
+	RecentRPM               *float64 `json:"recent_rpm,omitempty"`
+	TotalInputTokens        *int64   `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens       *int64   `json:"total_output_tokens,omitempty"`
+	TotalCacheReadTokens    *int64   `json:"total_cache_read_input_tokens,omitempty"`
+	TotalCacheWriteTokens   *int64   `json:"total_cache_creation_input_tokens,omitempty"`
+	TotalCost               *float64 `json:"total_cost,omitempty"`
+	EffectiveCost           *float64 `json:"effective_cost,omitempty"`
+	// GenMS 是生成时长合计毫秒（stream 扣首字、其余全时长）——窗口
+	// TPS = Σ输出 ÷ Σgen 的分母，同表格速度列口径。
+	GenMS          *int64        `json:"gen_ms,omitempty"`
+	HealthTimeline []healthPoint `json:"health_timeline,omitempty"`
 }
 
 // healthPoint 对应 ccLoad model.HealthPoint（健康指示块的单点）。
@@ -53,19 +56,27 @@ type healthPoint struct {
 	EffectiveCost    float64   `json:"effective_cost"`
 }
 
-// queryScope 把一次统计查询的数据范围折成格子谓词 + 限定的 key_hash。
+// statScope 是一次统计查询收敛后的过滤值：kh 为限定 key_hash（api_token
+// 身份或 auth_token_id 参数命中时），api/model/modelLike 来自 query——
+// recent 环等无格子键的辅助结构沿用同一范围。
+type statScope struct {
+	kh        string
+	api       string
+	model     string
+	modelLike string
+}
+
+// queryScope 把一次统计查询的数据范围折成格子谓词 + statScope。
 // 范围来源两类：api_token 身份（强制只看自己的行）与 query 筛选
-// （api、auth_token_id、model、model_like）。
-// 返回的 kh 是收敛后的单令牌 key_hash（api_token 身份或 auth_token_id
-// 参数命中时），供 last/recent 辅助结构沿用同一范围；excluded=true
-// 表示条件不可能命中（auth_token_id 查无令牌、或与 api_token 身份
-// 冲突），调用方直接回空集。
-func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, kh string, excluded bool) {
+// （api、auth_token_id、model、model_like）。excluded=true 表示条件
+// 不可能命中（auth_token_id 查无令牌、或与 api_token 身份冲突），
+// 调用方直接回空集。
+func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, scope statScope, excluded bool) {
 	q := r.URL.Query()
 	if id := identityFrom(r); id.Role == "api_token" {
-		kh = id.KeyHash
-		if kh == "" {
-			return nil, "", true
+		scope.kh = id.KeyHash
+		if scope.kh == "" {
+			return nil, scope, true
 		}
 	}
 	if raw := strings.TrimSpace(q.Get("auth_token_id")); raw != "" {
@@ -75,32 +86,32 @@ func (h *Handler) queryScope(r *http.Request) (match func(cellKey) bool, kh stri
 				tkh = t.KeyHash()
 			}
 		}
-		if tkh == "" || (kh != "" && tkh != kh) {
-			return nil, "", true
+		if tkh == "" || (scope.kh != "" && tkh != scope.kh) {
+			return nil, scope, true
 		}
-		kh = tkh
+		scope.kh = tkh
 	}
-	api := strings.TrimSpace(q.Get("api"))
-	model := strings.TrimSpace(q.Get("model"))
-	modelLike := strings.TrimSpace(q.Get("model_like"))
-	if kh == "" && api == "" && model == "" && modelLike == "" {
-		return nil, "", false
+	scope.api = strings.TrimSpace(q.Get("api"))
+	scope.model = strings.TrimSpace(q.Get("model"))
+	scope.modelLike = strings.TrimSpace(q.Get("model_like"))
+	if scope.kh == "" && scope.api == "" && scope.model == "" && scope.modelLike == "" {
+		return nil, scope, false
 	}
 	return func(k cellKey) bool {
-		if kh != "" && k.kh != kh {
+		if scope.kh != "" && k.kh != scope.kh {
 			return false
 		}
-		if api != "" && k.api != api {
+		if scope.api != "" && k.api != scope.api {
 			return false
 		}
-		if model != "" && k.model != model {
+		if scope.model != "" && k.model != scope.model {
 			return false
 		}
-		if modelLike != "" && !strings.Contains(k.model, modelLike) {
+		if scope.modelLike != "" && !strings.Contains(k.model, scope.modelLike) {
 			return false
 		}
 		return true
-	}, kh, false
+	}, scope, false
 }
 
 // dashboardStats 实现 /dashboard|/admin/stats：
@@ -115,15 +126,39 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	if duration < 1 {
 		duration = 1
 	}
+	match, scope, excluded := h.queryScope(r)
+	// recentBlock 聚合短窗（10s/60s）指标：req 非 499；tps 是生成速率
+	// （Σ输出 ÷ Σ生成时长，同表格速度列口径）；ttfb 沿用格子口径；
+	// cache_pct 同缓存命中列。recent 环容量 61s，覆盖两个窗。
+	recentBlock := func(sec int64) map[string]any {
+		a := h.ru.recentWindow(h.debug, sec, scope.api, scope.model, scope.modelLike, scope.kh)
+		out := map[string]any{"requests": a.req}
+		if a.req > 0 {
+			out["rpm"] = float64(a.req) * 60 / float64(sec)
+		}
+		if a.genMS > 0 {
+			out["tps"] = float64(a.outTok) * 1000 / float64(a.genMS)
+		}
+		if a.nFirst > 0 {
+			out["ttfb_s"] = float64(a.firstMS) / float64(a.nFirst) / 1000
+		}
+		if a.nDur > 0 {
+			out["dur_s"] = float64(a.durMS) / float64(a.nDur) / 1000
+		}
+		if d := a.inTok + a.crTok + a.cwTok; d > 0 {
+			out["cache_pct"] = float64(a.crTok) * 100 / float64(d)
+		}
+		return out
+	}
 	respond := func(stats []statsEntry, rpm map[string]any) {
 		respondOK(w, map[string]any{
 			"stats":            stats,
 			"duration_seconds": duration,
 			"rpm_stats":        rpm,
 			"is_today":         isToday,
+			"recent":           map[string]any{"s10": recentBlock(10), "s60": recentBlock(60)},
 		})
 	}
-	match, kh, excluded := h.queryScope(r)
 	if excluded {
 		respond([]statsEntry{}, zeroRPMStats())
 		return
@@ -152,7 +187,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
-	last := h.ru.lastByModel(h.debug, kh)
+	last := h.ru.lastByModel(h.debug, scope.kh)
 	models := make([]string, 0, len(aggs))
 	for m := range aggs {
 		models = append(models, m)
@@ -203,7 +238,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 			e.AvgRPM = &v
 		}
 		if isToday {
-			if v := h.ru.recentRPM(h.debug, m, kh); v > 0 {
+			if v := h.ru.recentRPM(h.debug, m, scope.kh); v > 0 {
 				e.RecentRPM = &v
 				if e.PeakRPM == nil || *e.PeakRPM < v {
 					e.PeakRPM = &v
@@ -222,13 +257,16 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		if a.t.cacheWrite > 0 {
 			e.TotalCacheWriteTokens = &a.t.cacheWrite
 		}
+		if a.t.sumGenMS > 0 {
+			e.GenMS = &a.t.sumGenMS
+		}
 		if a.cost > 0 {
 			e.TotalCost = &a.cost
 			e.EffectiveCost = &a.cost
 		}
 		entries = append(entries, e)
 	}
-	respond(entries, h.rpmStatsFiltered(since, until, match, isToday, strings.TrimSpace(r.URL.Query().Get("model")), kh))
+	respond(entries, h.rpmStatsFiltered(since, until, match, isToday, scope.model, scope.kh))
 }
 
 // healthTimelines 复刻 ccLoad fillHealthTimeline 的 per-model 部分：

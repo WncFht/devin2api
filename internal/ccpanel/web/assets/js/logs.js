@@ -966,16 +966,28 @@ function renderLogsMetrics(data) {
   const stats = Array.isArray(data?.stats) ? data.stats : [];
   const durationSec = Number(data?.duration_seconds) || 0;
   const rpm = data?.rpm_stats || {};
-  const isToday = data?.is_today !== false;
+  const recent = data?.recent || {};
 
-  // 逐模型行累计 token 总量；首字/耗时按成功数加权（同统计页合计行口径）
-  let inTok = 0, outTok = 0, crTok = 0, cwTok = 0;
+  // 四张卡的副行统一为短窗均值：10s 与 1m 两个实时窗口（recent 环聚合，
+  // 与主值同口径）。窗口内补充信息（峰值/均耗时/读写量）进 tooltip。
+  const fmtSec = (v) => { const n = Number(v); return n > 0 ? n.toFixed(2) + 's' : '-'; };
+  const fmtPct = (v) => { const n = Number(v); return n > 0 ? n.toFixed(1) + '%' : '-'; };
+  const winSub = (key, fmt) => i18nText('logs.metricWinSub', '10s {a} · 1m {b}', {
+    a: fmt(recent?.s10?.[key]),
+    b: fmt(recent?.s60?.[key])
+  });
+  const titleExtra = (base, extra) => extra ? base + ' · ' + extra : base;
+
+  // 逐模型行累计 token 总量；首字/耗时按成功数加权，gen_ms 是
+  // Σ生成时长（stream 扣首字）——TPS 分母，同表格速度列合计口径。
+  let inTok = 0, outTok = 0, crTok = 0, cwTok = 0, genMS = 0;
   let ttfbSum = 0, ttfbN = 0, durSum = 0, durN = 0;
   for (const e of stats) {
     inTok += Number(e?.total_input_tokens) || 0;
     outTok += Number(e?.total_output_tokens) || 0;
     crTok += Number(e?.total_cache_read_input_tokens) || 0;
     cwTok += Number(e?.total_cache_creation_input_tokens) || 0;
+    genMS += Number(e?.gen_ms) || 0;
     const ok = Number(e?.success) || 0;
     const fbt = Number(e?.avg_first_byte_time_seconds) || 0;
     const dur = Number(e?.avg_duration_seconds) || 0;
@@ -984,63 +996,70 @@ function renderLogsMetrics(data) {
   }
 
   const avgRpm = Number(rpm.avg_rpm) || 0;
-  const rpmSub = [
+  const rpmTitle = titleExtra(
+    i18nText('logs.metricRpmTitle', '窗口内平均每分钟请求数（不含 499 断连）'),
     Number(rpm.peak_rpm) > 0
       ? i18nText('logs.metricPeakSub', '峰值 {value}', { value: formatLogsMetricRate(rpm.peak_rpm) })
-      : '',
-    isToday && Number(rpm.recent_rpm) > 0
-      ? i18nText('logs.metricRecentSub', '最近 {value}', { value: formatLogsMetricRate(rpm.recent_rpm) })
       : ''
-  ].filter(Boolean).join(' · ');
+  );
 
-  const tps = durationSec > 0 ? (inTok + outTok + crTok + cwTok) / durationSec : 0;
+  const tps = genMS > 0 ? outTok * 1000 / genMS : 0;
   const outRate = durationSec > 0 ? outTok / durationSec : 0;
-  const tpsSub = outRate > 0
-    ? i18nText('logs.metricOutputSub', '输出 {value}/s', { value: formatLogsMetricRate(outRate) })
-    : '';
+  const tpsTitle = titleExtra(
+    i18nText('logs.metricTpsTitle', 'Σ输出 token ÷ Σ生成时长（流式扣首字）——同表格 Tok/s 列口径'),
+    outRate > 0
+      ? i18nText('logs.metricOutputSub', '输出 {value}/s', { value: formatLogsMetricRate(outRate) })
+      : ''
+  );
 
   const ttfb = ttfbN > 0 ? ttfbSum / ttfbN : 0;
   const avgDur = durN > 0 ? durSum / durN : 0;
-  const ttfbSub = avgDur > 0
-    ? i18nText('logs.metricAvgDurationSub', '均耗时 {value}s', { value: avgDur.toFixed(1) })
-    : '';
+  const ttfbTitle = titleExtra(
+    i18nText('logs.metricTtfbTitle', '流式 2xx 请求平均首字时间（按成功数加权）'),
+    avgDur > 0
+      ? i18nText('logs.metricAvgDurationSub', '均耗时 {value}s', { value: avgDur.toFixed(1) })
+      : ''
+  );
 
   const cacheDenom = inTok + crTok + cwTok;
   const cachePct = cacheDenom > 0 && crTok > 0 ? (crTok / cacheDenom) * 100 : 0;
-  const cacheSub = (crTok > 0 || cwTok > 0)
-    ? i18nText('logs.metricCacheSub', '读 {read} · 建 {write}', {
-        read: formatNumber(crTok),
-        write: formatNumber(cwTok)
-      })
-    : '';
+  const cacheTitle = titleExtra(
+    i18nText('logs.metricCacheTitle', '缓存读 ÷（输入+缓存读+缓存建），同表格缓存命中列口径'),
+    (crTok > 0 || cwTok > 0)
+      ? i18nText('logs.metricCacheSub', '读 {read} · 建 {write}', {
+          read: formatNumber(crTok),
+          write: formatNumber(cwTok)
+        })
+      : ''
+  );
 
   el.innerHTML = `<div class="runtime-metrics-grid">` +
     logsMetricCard(
       i18nText('trend.typeRpm', 'RPM'),
       formatLogsMetricRate(avgRpm),
-      rpmSub,
-      i18nText('logs.metricRpmTitle', '窗口内平均每分钟请求数（不含 499 断连）'),
+      winSub('rpm', formatLogsMetricRate),
+      rpmTitle,
       avgRpm > 0 ? window.getRpmColor(avgRpm) : ''
     ) +
     logsMetricCard(
-      i18nText('logs.metricTps', 'Token 速率'),
+      i18nText('logs.metricTps', 'TPS'),
       formatLogsMetricRate(tps),
-      tpsSub,
-      i18nText('logs.metricTpsTitle', '窗口内每秒 token 吞吐（输入+输出+缓存读+缓存建合计 ÷ 窗口秒数）'),
+      winSub('tps', formatLogsMetricRate),
+      tpsTitle,
       ''
     ) +
     logsMetricCard(
       i18nText('probe.firstByte', '首字'),
       ttfb > 0 ? ttfb.toFixed(2) + 's' : '-',
-      ttfbSub,
-      i18nText('logs.metricTtfbTitle', '流式 2xx 请求平均首字时间（按成功数加权）'),
+      winSub('ttfb_s', fmtSec),
+      ttfbTitle,
       ttfb > 0 ? window.getFirstByteTimingColor(ttfb) : ''
     ) +
     logsMetricCard(
       i18nText('trend.cacheHitRate', '缓存命中率'),
       cachePct > 0 ? cachePct.toFixed(1) + '%' : '-',
-      cacheSub,
-      i18nText('logs.metricCacheTitle', '缓存读 ÷（输入+缓存读+缓存建），同表格缓存命中列口径'),
+      winSub('cache_pct', fmtPct),
+      cacheTitle,
       ''
     ) +
     `</div>`;
