@@ -733,7 +733,7 @@ async function load(skipLoading = false) {
 
     const params = buildLogsRequestParams();
     const response = await fetchAPIWithAuth(LOGS_LIST_URL + '?' + params.toString());
-    if (!response.success) throw new Error(response.error || '无法加载请求日志');
+    if (!response.success) throw new Error(response.error || i18nText('logs.loadFailed', '无法加载请求日志'));
 
     const data = response.data || [];
     // 提示条（管线前拒绝事件环）与列表渲染同源更新。
@@ -783,7 +783,7 @@ async function load(skipLoading = false) {
 
   } catch (error) {
     console.error('加载日志失败:', error);
-    try { if (window.showError) window.showError('无法加载请求日志'); } catch (_) { }
+    try { if (window.showError) window.showError(i18nText('logs.loadFailed', '无法加载请求日志')); } catch (_) { }
     renderLogsError();
     updateLogsListHint(null);
   } finally {
@@ -1266,11 +1266,11 @@ async function abortActiveRequest(button) {
 
   try {
     const { payload } = await fetchAPIWithAuthRaw(activeAbortUrl(id), { method: 'POST' });
-    if (!payload.success) throw new Error(payload.error || '中断失败');
+    if (!payload.success) throw new Error(payload.error || i18nText('logs.abortFailed', '中断失败'));
   } catch (e) {
     // 中断没打出去就恢复按钮，否则这一行会永远卡在「中断中」
     abortingActiveRequests.delete(id);
-    alert(e.message || '中断失败');
+    alert(e.message || i18nText('logs.abortFailed', '中断失败'));
   }
 }
 
@@ -2361,7 +2361,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
         error.style.display = '';
         return;
       }
-      throw new Error(payload.error || '加载失败');
+      throw new Error(payload.error || i18nText('logs.debugLoadFailed', '加载失败'));
     }
 
     const data = payload.data || {};
@@ -2384,7 +2384,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
     }
   } catch (e) {
     loading.style.display = 'none';
-    error.textContent = e.message || '加载失败';
+    error.textContent = e.message || i18nText('logs.debugLoadFailed', '加载失败');
     error.style.display = '';
   }
 }
