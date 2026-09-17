@@ -11,6 +11,7 @@
   <title data-i18n="quota.title">配额 - Devin2API</title>
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
+  <link rel="stylesheet" href="/web/assets/css/quota.css?v=__VERSION__">
   <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
   <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
@@ -26,16 +27,16 @@
       <div class="content-area">
         <!-- 页头：标题 + 更新时间 + 刷新 -->
         <section class="mb-6">
-          <div class="glass-card" style="padding: var(--space-4) var(--space-6);">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-              <h3 class="section-title" style="margin:0;">
+          <div class="glass-card quota-head-card">
+            <div class="quota-head-row">
+              <h3 class="section-title">
                 <svg class="inline-block w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
                 <span data-i18n="quota.title">配额</span>
               </h3>
-              <div style="display:flex;align-items:center;gap:12px;">
-                <span id="quota-updated-at" style="color:var(--color-text-secondary);font-size:12px;"></span>
+              <div class="quota-head-meta">
+                <span id="quota-updated-at" class="quota-updated"></span>
                 <button type="button" class="btn btn-secondary btn-sm" id="quota-refresh">
                   <span data-i18n="quota.refresh">刷新</span>
                 </button>
@@ -46,10 +47,10 @@
 
         <!-- 配额 KPI -->
         <section class="mb-6">
-          <div class="glass-card" style="padding: var(--space-6);">
+          <div class="glass-card quota-card">
             <h3 class="section-title mb-4" data-i18n="quota.kpiTitle">配额概览</h3>
             <div class="runtime-metrics-grid" id="quota-kpi-grid">
-              <div class="loading-state" style="grid-column:1/-1;">
+              <div class="loading-state quota-grid-loading">
                 <div class="loading-spinner loading-spinner--block"></div>
                 <span data-i18n="quota.loading">正在加载配额数据...</span>
               </div>
@@ -59,9 +60,9 @@
 
         <!-- 配额曲线 -->
         <section class="mb-6">
-          <div class="glass-card" style="padding: var(--space-6);">
+          <div class="glass-card quota-card">
             <h3 class="section-title mb-4" data-i18n="quota.curveTitle">配额曲线</h3>
-            <div class="chart-container" style="height:360px;">
+            <div class="chart-container quota-chart">
               <div class="chart-loading" id="quota-chart-loading">
                 <div class="loading-spinner"></div>
                 <div data-i18n="quota.loading">正在加载配额数据...</div>
@@ -73,7 +74,7 @@
                 <div class="error-title" data-i18n="quota.loadFailed">加载失败</div>
                 <div class="error-message" id="quota-chart-error-msg" data-i18n="quota.checkNetwork">请检查网络连接或重试</div>
               </div>
-              <div class="empty-state hidden" id="quota-chart-empty" style="position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;">
+              <div class="empty-state hidden" id="quota-chart-empty">
                 <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--neutral" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/>
                 </svg>
@@ -87,7 +88,7 @@
 
         <!-- 账户与计划 -->
         <section class="mb-6">
-          <div class="glass-card" style="padding: var(--space-6);">
+          <div class="glass-card quota-card">
             <h3 class="section-title mb-4" data-i18n="quota.accountTitle">账户与计划</h3>
             <div id="quota-account">
               <div class="loading-state">
@@ -100,7 +101,7 @@
 
         <!-- 上游状态 -->
         <section class="mb-6">
-          <div class="glass-card" style="padding: var(--space-6);">
+          <div class="glass-card quota-card">
             <h3 class="section-title mb-4" data-i18n="quota.healthTitle">上游状态</h3>
             <div id="quota-health">
               <div class="loading-state">

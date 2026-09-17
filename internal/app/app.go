@@ -764,10 +764,14 @@ func (application *App) createCompletion(
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
-		application.noteReject(obs.RejectHTTPRead, request, http.StatusBadRequest)
-		completion.StatusCode = http.StatusBadRequest
+		// 读体失败（超时/截断）按 504 下发而非 400：4xx 在 Claude Code
+		// 等客户端是不可重试错误、直接杀掉轮次（subagent 连根死），
+		// 5xx 才进标准重试预算——请求没读完是传输抖动，不是客户端
+		// 可修正的错误。
+		application.noteReject(obs.RejectHTTPRead, request, http.StatusGatewayTimeout)
+		completion.StatusCode = http.StatusGatewayTimeout
 		writer.Header().Set("Content-Type", "application/json")
-		writer.WriteHeader(http.StatusBadRequest)
+		writer.WriteHeader(http.StatusGatewayTimeout)
 		_, _ = writer.Write(protocol.EncodeError(fmt.Errorf("read request: %w", err), ""))
 		return
 	}

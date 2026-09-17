@@ -1,10 +1,10 @@
-// checks/login.js — UI 登录链路：admin 密码登录拿满 8 项 nav；
+// checks/login.js — UI 登录链路：admin 密码登录拿满 9 项 nav；
 // api_token 登录（auth.api_key 播种行）应得 api_token 角色，
 // nav 只剩白名单 4 项，访问受限页被重定向回 index。
 //
 // 受限视图断言只在密码面板成立：开放面板（dashboard.password 为空）下
 // withWebAuth 把任何有效凭据判成 admin，/dashboard/session 回 admin、
-// nav 满 8 项。这里先探令牌的有效角色再决定断言哪一边；令牌不在仓
+// nav 满 9 项。这里先探令牌的有效角色再决定断言哪一边；令牌不在仓
 // （开放面板无播种行命中）时整段跳过。
 const { firefox, BASE, ADMIN_PW, API_TOKEN, API_TOKEN_NAV, loginData, sessionRole, watchErrors, makeReporter } = require('../lib/harness');
 
@@ -24,9 +24,9 @@ const { firefox, BASE, ADMIN_PW, API_TOKEN, API_TOKEN_NAV, loginData, sessionRol
   await p.waitForSelector('.topnav', { timeout: 8000 }).catch(() => {});
   const nav = await p.$$eval('.topnav .topnav-link', (els) => els.map((a) => a.dataset.navKey));
   R.check(p.url().includes('/web/'), `admin login lands on panel (url=${p.url()})`);
-  R.check(nav.length === 8, `admin nav has 8 items (got ${nav.length}: ${nav})`);
+  R.check(nav.length === 9, `admin nav has 9 items (got ${nav.length}: ${nav})`);
   R.check(errs.length === 0, `no console errors during admin login${errs.length ? ' — ' + errs.join(' | ') : ''}`);
-  await R.shotOnFail(p, 'admin', errs.length === 0 && nav.length === 8);
+  await R.shotOnFail(p, 'admin', errs.length === 0 && nav.length === 9);
   await ctx.close();
 
   // 2. api_token 登录：先探有效角色，再决定断言受限视图还是开放面板视图
@@ -71,8 +71,8 @@ const { firefox, BASE, ADMIN_PW, API_TOKEN, API_TOKEN_NAV, loginData, sessionRol
       // 开放面板：登录链路照跑，但 session 应把角色纠成 admin、nav 满 8 项
       R.check(p2.url().includes('/web/'), `api_token login lands on panel (url=${p2.url()})`);
       R.check(role === 'admin', `open panel session role=admin (got ${role})`);
-      R.check(nav2.length === 8, `open panel nav has 8 items (got ${nav2.length})`);
-      await R.shotOnFail(p2, 'apitoken', p2.url().includes('/web/') && role === 'admin' && nav2.length === 8);
+      R.check(nav2.length === 9, `open panel nav has 9 items (got ${nav2.length})`);
+      await R.shotOnFail(p2, 'apitoken', p2.url().includes('/web/') && role === 'admin' && nav2.length === 9);
     }
     R.check(errs2.length === 0, `no console errors during api_token login${errs2.length ? ' — ' + errs2.join(' | ') : ''}`);
     await ctx2.close();

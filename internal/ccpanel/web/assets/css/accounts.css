@@ -51,7 +51,7 @@
 }
 
 .acct-name {
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--font-family-mono);
   font-size: 16px;
   font-weight: 700;
 }

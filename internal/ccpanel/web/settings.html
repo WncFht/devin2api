@@ -55,15 +55,14 @@
             <button id="process-log-btn" type="button" class="btn btn-secondary" data-i18n="settings.processLog.button">
               进程日志
             </button>
-            <!-- 多模态回退/自定义定价：本服务不发出这两个设置键，入口隐藏
-                 （.btn 的 display:inline-flex 压过 hidden 属性，须 inline
-                 style）；模态与隐藏 input 留置——settings.js 按 id 读写。 -->
-            <button id="model-multimodal-fallback-btn" type="button" class="btn btn-secondary settings-multimodal-fallback-btn" data-i18n="settings.multimodalFallback.edit" style="display:none">
+            <!-- 多模态回退/自定义定价：本服务不发出这两个设置键，入口隐藏；
+                 模态与隐藏 input 留置——settings.js 按 id 读写。 -->
+            <button id="model-multimodal-fallback-btn" type="button" class="btn btn-secondary settings-multimodal-fallback-btn" data-i18n="settings.multimodalFallback.edit" hidden>
               多模态回退
             </button>
             <span id="model-multimodal-fallback-summary" class="settings-multimodal-fallback-summary" hidden></span>
             <input type="hidden" id="model_multimodal_fallback" value="{}">
-            <button id="model-custom-pricing-btn" type="button" class="btn btn-secondary settings-custom-pricing-btn" data-i18n="settings.customPricing.edit" style="display:none">
+            <button id="model-custom-pricing-btn" type="button" class="btn btn-secondary settings-custom-pricing-btn" data-i18n="settings.customPricing.edit" hidden>
               模型价格
             </button>
             <span id="model-custom-pricing-summary" class="settings-custom-pricing-summary" hidden></span>
@@ -151,7 +150,7 @@
       </div>
 
       <div id="process-log-content" class="runtime-metrics-content process-log-content">
-        <pre id="process-log-view" class="upstream-pre upstream-pre--full process-log-pre" style="white-space:pre-wrap; overflow-wrap:anywhere; margin:0"></pre>
+        <pre id="process-log-view" class="upstream-pre upstream-pre--full process-log-pre"></pre>
       </div>
 
       <div class="runtime-metrics-modal-footer">

@@ -1,0 +1,20 @@
+[Unit]
+Description=nft REDIRECT outbound tcp/3003 -> gw-cap-proxy :3399
+BindsTo=gw-cap-proxy.service
+After=gw-cap-proxy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sh -c 'for i in $$(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:3399/__gwcap/healthz && exit 0; sleep 0.2; done; echo "gw-cap-proxy not ready" >&2; exit 1'
+ExecStart=/usr/bin/nft -f /usr/local/libexec/gwcap/redirect.nft
+# 代理回包 unNAT 后 src=网关 tailscale IP、iif=lo，会被 tailscaled 的 ts-input 反欺骗规则丢弃；
+# nft base-chain 的 accept 是链局部的，必须在 ip filter INPUT 内、ts-input 跳板之前放行。
+# tailscaled 重启会把 jump ts-input 重插回顶部，故另由 tailscaled.service.d/gwcap.conf
+# 的 ExecStartPost 再调一次 ensure-bypass.sh 兜底。
+ExecStartPost=/usr/local/libexec/gwcap/ensure-bypass.sh
+ExecStop=/usr/bin/nft delete table inet gwcap
+ExecStopPost=-/usr/local/libexec/gwcap/ensure-bypass.sh remove
+
+[Install]
+WantedBy=multi-user.target

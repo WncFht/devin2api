@@ -997,8 +997,8 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 }
 
 // TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前
-// 拒绝入账：400 + rejects 计数，不产生调试记录与 logs 行——完整请求
-// 从未到达，与鉴权/并发拒绝同口径。
+// 拒绝入账：504（可重试档，见 handler 注释）+ rejects 计数，不产生调试
+// 记录与 logs 行——完整请求从未到达，与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	st := openTokenDB(t)
 	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
@@ -1009,8 +1009,8 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", response.Code)
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504", response.Code)
 	}
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 1 {
 		t.Fatalf("http_read rejects = %d, want 1", got)
