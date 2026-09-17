@@ -8,16 +8,29 @@ linters:
   enable:
     - bodyclose
     - errcheck
+    - gosec
     - govet
     - revive
     - staticcheck
     - unused
   settings:
+    # 只报高严重度高置信度：代理项目对口的是注入/文件权限/弱随机
+    # 这一类；低置信档位在 parser/字符串处理代码上噪音太大。
+    gosec:
+      severity: high
+      confidence: high
     revive:
       rules:
         # 导出符号注释不是本仓库约定（docstring 风格见 CLAUDE.md）
         - name: exported
           disabled: true
+  exclusions:
+    rules:
+      # cmd/* 全是本地开发 CLI：读 argv 指定的二进制、写 argv 指定的
+      # 目录就是它们的契约，G703 的污点视角在这里是误报。
+      - path: ^cmd/
+        linters:
+          - gosec
 
 formatters:
   enable:
