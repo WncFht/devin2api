@@ -135,8 +135,11 @@
     const gate = a.gate || {};
     const out = [];
     const future = (iso) => iso && Date.parse(iso) > now;
-    if (a.source === 'tombstoned') return [{ tone: 'idle', text: t('accounts.st.tombstoned') }];
-    if (a.disabled) return [{ tone: 'idle', text: t('accounts.st.disabled') }];
+    // has_override = config 声明的号带活覆盖行——「面板改过」注记徽标，
+    // 与状态无关恒在末位（disabled 常由覆盖行造成，早退分支同样带上）。
+    const overridePill = a.has_override === true ? [{ tone: 'idle', text: t('accounts.src.override') }] : [];
+    if (a.source === 'tombstoned') return [{ tone: 'idle', text: t('accounts.st.tombstoned') }, ...overridePill];
+    if (a.disabled) return [{ tone: 'idle', text: t('accounts.st.disabled') }, ...overridePill];
     if (future(lane.auth_cooldown_until)) {
       out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }) });
     }
@@ -158,7 +161,7 @@
     if (gate.window_quota > 0 && gate.sendable === false && !gate.latched) {
       out.push({ tone: 'warn', text: t('accounts.pill.deadzone') });
     }
-    return out;
+    return out.concat(overridePill);
   }
 
   // ---- 卡区块 ----
