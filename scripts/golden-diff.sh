@@ -48,6 +48,8 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
   .duration_seconds,.cpu_usage_percent,.cpu_user_seconds,.gc_cpu_percent,
   .gc_pause_total_ns,.heap_alloc_bytes,.heap_sys_bytes,.max_rss_bytes,
   .rss_bytes,.uptime_seconds,
+  .window_hours,.burn_per_hour,.burn_per_day,.hours_left,.exhausted_at,
+  .survives_until_reset,.remaining,.reset_at,
   .log_root,.index_bytes,.db_bytes) else . end);
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
@@ -68,6 +70,9 @@ boot() { # bin statedir port -> pid
 	# config 不随 state 目录走（部署布局里二者分家），用 4 号参数或仓库 config.yaml；
 	# listen 行整行替换为 127.0.0.1:<port>，冒烟端口不外绑。
 	sed -E "s/^[[:space:]]*listen:.*/  listen: \"127.0.0.1:$port\"/" "$CONFIG" >"$st/config.yaml"
+	# 关掉启动即采的配额采样：两侧各采一条会造成 forecast 窗口末点漂移，
+	# 对账只验证导入的历史点与同一套 Go 预测代码。
+	sed -i -E 's/^([[:space:]]*quota_interval_minutes:).*/\1 0/' "$st/config.yaml"
 	"$bin" -config "$st/config.yaml" -state-dir "$st" >"$st/boot.log" 2>&1 &
 	echo $!
 }
