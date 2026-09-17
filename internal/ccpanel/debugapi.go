@@ -409,17 +409,19 @@ func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error
 		hasStale := !h.usageAt.IsZero()
 		h.usageMu.Unlock()
 		if hasStale {
-			go h.runUsageFetch(done)
+			go func() { _ = h.runUsageFetch(done) }()
 			return stale, nil
 		}
-		return h.runUsageFetch(done)
+		if err := h.runUsageFetch(done); err != nil {
+			return store.UsageSnapshot{}, err
+		}
 	}
 }
 
 // runUsageFetch 执行一趟 UsageStats 聚合、刷新缓存并关闭 done 通知
 // 等待方。用 Background ctx：快照是 handler 级共享缓存，单个调用方
 // 断连不应掐死共用的计算。
-func (h *Handler) runUsageFetch(done chan struct{}) (store.UsageSnapshot, error) {
+func (h *Handler) runUsageFetch(done chan struct{}) error {
 	snap, err := h.store.UsageStats(context.Background())
 	h.usageMu.Lock()
 	if err == nil {
@@ -429,7 +431,7 @@ func (h *Handler) runUsageFetch(done chan struct{}) (store.UsageSnapshot, error)
 	close(done)
 	h.usageFetch = nil
 	h.usageMu.Unlock()
-	return snap, err
+	return err
 }
 
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
