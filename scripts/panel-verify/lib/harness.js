@@ -27,6 +27,17 @@ async function loginData(mode, credential) {
   return body.data;
 }
 
+// sessionRole 探某凭据经 /dashboard/session 判出的有效角色：POST /login
+// 回包里的 role 是登录入口视角，api_token 登录在开放面板下也回 api_token；
+// session 才是 withWebAuth 的真实判定（开放面板一切凭据归 admin）。
+// checks/login.js 用它区分「受限视图可断言」与「开放面板该改断言」。
+async function sessionRole(token) {
+  const resp = await fetch(`${BASE}/dashboard/session`, { headers: { Authorization: `Bearer ${token}` } });
+  const body = await resp.json();
+  if (!body.success) throw new Error(`session probe failed: ${resp.status} ${JSON.stringify(body).slice(0, 200)}`);
+  return body.data.role;
+}
+
 // adminContext 返回已种好 ccload 三件套的 browser context，面板跳过登录页。
 async function adminContext(browser, opts = {}) {
   const data = await loginData('admin', ADMIN_PW);
@@ -69,4 +80,4 @@ function makeReporter(name) {
   };
 }
 
-module.exports = { firefox, BASE, ADMIN_PW, API_TOKEN, SHOTS, PAGES, API_TOKEN_NAV, loginData, adminContext, watchErrors, makeReporter };
+module.exports = { firefox, BASE, ADMIN_PW, API_TOKEN, SHOTS, PAGES, API_TOKEN_NAV, loginData, sessionRole, adminContext, watchErrors, makeReporter };
