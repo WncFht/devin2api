@@ -369,9 +369,21 @@ func tokenFromRow(r *store.TokenRow) *Token {
 	}
 }
 
+// writeTask 是排进持久化队列的一条写：run 由单 worker 顺序执行；
+// done 非空时提交方同步等结果（管理面写保留「同步返回写库错误」的
+// 语义），nil 即火忘（统计回写）。
+type writeTask struct {
+	run  func(context.Context) error
+	done chan error
+}
+
 // Store 管理 auth_tokens 表与内存索引。所有变更写穿透到表（单行
-// upsert/delete，替代整文件重写）；LastUsedAt 只在内存里更新，
-// 随本行下一次写回顺带持久化。
+// upsert/delete，替代整文件重写），但落库不在 s.mu 内联执行——s.mu
+// 同时守护 Resolve/Acquire/AllowRPM 等准入检查，一次 sqlite 抖动会
+// 瞬堵所有新请求鉴权。全部写经 writes 队列由单 worker 顺序落盘：
+// 入队发生在 s.mu 内，队列序即旧的锁内写序——先排的统计快照不会
+// 覆盖后到的管理面写。统计写是全量行快照，丢弃中间帧由下一帧自愈。
+// LastUsedAt 只在内存里更新，随本行下一次写回顺带持久化。
 type Store struct {
 	mu     sync.Mutex
 	db     *store.Store
@@ -380,6 +392,13 @@ type Store struct {
 	// byKeyHash 以 logs 表的 key_hash（16 hex 截断）为键，是
 	// LookupByKeyHash 的倒排——日志行投影逐行调用，线性扫描是隐性热点。
 	byKeyHash map[string]*Token
+	// writes 是全部 auth_tokens 写的串行队列；writeDone 在 worker
+	// 排空退出时关闭；closed 由 Close 置位，之后的入队被拒绝。
+	// droppedPersist 记队列满丢弃的统计写（s.mu 内计数）。
+	writes         chan writeTask
+	writeDone      chan struct{}
+	closed         bool
+	droppedPersist int
 }
 
 // New 从 auth_tokens 表水合全部行建内存索引；旧 auth_tokens.json 的迁移
@@ -390,7 +409,10 @@ func New(st *store.Store) (*Store, error) {
 		byHash:    map[string]*Token{},
 		byID:      map[int64]*Token{},
 		byKeyHash: map[string]*Token{},
+		writes:    make(chan writeTask, 1024),
+		writeDone: make(chan struct{}),
 	}
+	go s.writeWorker()
 	rows, err := st.ListTokens(context.Background())
 	if err != nil {
 		return nil, err
@@ -402,6 +424,63 @@ func New(st *store.Store) (*Store, error) {
 		s.byKeyHash[t.KeyHash()] = t
 	}
 	return s, nil
+}
+
+// writeWorker 顺序消费 writes 队列直落库；通道关闭后把剩余写排空再退。
+// run 只碰 db（快照在入队时已固化），不回头拿 s.mu——与等待 done 的
+// 提交方无锁互依。
+func (s *Store) writeWorker() {
+	defer close(s.writeDone)
+	for task := range s.writes {
+		err := task.run(context.Background())
+		if task.done != nil {
+			task.done <- err
+		} else if err != nil {
+			slog.Warn("persist token write failed", "error", err)
+		}
+	}
+}
+
+// submitSync 把一条管理面写排进队列并返回完成句柄；调用方持 s.mu
+// 保证入队序与内存变更序一致，之后阻塞读 done 等落库结果——与旧
+// 实现在锁内同步写库的可见性语义相同。仓已关闭时返回 nil。
+func (s *Store) submitSync(run func(context.Context) error) chan error {
+	if s.closed {
+		return nil
+	}
+	done := make(chan error, 1)
+	s.writes <- writeTask{run: run, done: done}
+	return done
+}
+
+// submitStats 排一条统计快照写（火忘）：队列满即丢弃——快照是全量
+// 行，下一笔 AddResult 自然补齐，不能让 sqlite 积压回灌准入锁。
+// 调用方须持 s.mu。
+func (s *Store) submitStats(run func(context.Context) error) {
+	if s.closed {
+		return
+	}
+	select {
+	case s.writes <- writeTask{run: run}:
+	default:
+		if s.droppedPersist%100 == 0 {
+			slog.Warn("token stats persist queue full, dropping writes", "dropped", s.droppedPersist+1)
+		}
+		s.droppedPersist++
+	}
+}
+
+// Close 关闭写队列并等 worker 排空在途与已排队的写——优雅退出不丢
+// 统计回写（被 SIGKILL 截断的按计数器口径可丢）。之后到达的管理面写
+// 报错、统计写丢弃。
+func (s *Store) Close() {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.writes)
+	}
+	s.mu.Unlock()
+	<-s.writeDone
 }
 
 // HashToken 计算明文令牌的存储哈希（sha256 全 hex）。
@@ -477,8 +556,17 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 	defer s.mu.Unlock()
 	t.Hash = HashToken(plain)
 	t.CreatedAt = time.Now()
-	id, err := s.db.InsertToken(context.Background(), rowFromToken(t))
-	if err != nil {
+	row := rowFromToken(t)
+	var id int64
+	done := s.submitSync(func(ctx context.Context) error {
+		var err error
+		id, err = s.db.InsertToken(ctx, row)
+		return err
+	})
+	if done == nil {
+		return "", errors.New("auth token store closed")
+	}
+	if err := <-done; err != nil {
 		return "", err
 	}
 	t.ID = id
@@ -503,8 +591,17 @@ func (s *Store) Ensure(plain string, t *Token) (*Token, bool, error) {
 	}
 	t.Hash = hash
 	t.CreatedAt = time.Now()
-	id, err := s.db.InsertToken(context.Background(), rowFromToken(t))
-	if err != nil {
+	row := rowFromToken(t)
+	var id int64
+	done := s.submitSync(func(ctx context.Context) error {
+		var err error
+		id, err = s.db.InsertToken(ctx, row)
+		return err
+	})
+	if done == nil {
+		return nil, false, errors.New("auth token store closed")
+	}
+	if err := <-done; err != nil {
 		return nil, false, err
 	}
 	t.ID = id
@@ -530,7 +627,14 @@ func (s *Store) Update(t *Token) error {
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
 	s.byKeyHash[t.KeyHash()] = t
-	return s.db.UpsertToken(context.Background(), rowFromToken(t))
+	row := rowFromToken(t)
+	done := s.submitSync(func(ctx context.Context) error {
+		return s.db.UpsertToken(ctx, row)
+	})
+	if done == nil {
+		return errors.New("auth token store closed")
+	}
+	return <-done
 }
 
 // Delete 移除令牌；不存在时按成功处理（幂等删除）。
@@ -544,7 +648,13 @@ func (s *Store) Delete(id int64) error {
 	delete(s.byHash, t.Hash)
 	delete(s.byKeyHash, t.KeyHash())
 	delete(s.byID, id)
-	return s.db.DeleteToken(context.Background(), id)
+	done := s.submitSync(func(ctx context.Context) error {
+		return s.db.DeleteToken(ctx, id)
+	})
+	if done == nil {
+		return nil // 仓已关：行已出内存索引，幂等删除语义不变
+	}
+	return <-done
 }
 
 // Acquire 占用一个令牌并发槽；到顶返回 (active, limit, false)。
@@ -652,9 +762,10 @@ func (s *Store) AddResult(id int64, r Result) {
 	} else {
 		t.FailureCount++
 	}
-	if err := s.db.UpsertToken(context.Background(), rowFromToken(t)); err != nil {
-		slog.Warn("persist token stats failed", "token_id", id, "error", err)
-	}
+	row := rowFromToken(t)
+	s.submitStats(func(ctx context.Context) error {
+		return s.db.UpsertToken(ctx, row)
+	})
 }
 
 // Empty 报告仓内是否一个令牌都没有；开放模式判定用——仓空时 /v1

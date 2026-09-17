@@ -312,6 +312,9 @@ func main() {
 		slog.Error("load auth tokens failed", "error", err)
 		os.Exit(1)
 	}
+	// 先于 dbStore.Close 排空统计写队列（defer 逆序执行，本句晚
+	// 注册先跑）：排空期完成的请求回写经队列落库，不留尾巴。
+	defer tokenStore.Close()
 	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
 		p, ok := ccPanel.CatalogPrices(context.Background())[model]
 		if !ok {
