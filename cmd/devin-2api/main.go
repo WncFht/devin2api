@@ -135,10 +135,10 @@ func main() {
 		slog.Error("resolve state dir failed", "error", err)
 		os.Exit(1)
 	}
-	// logRoot 是 logs/ 运行期产物（请求 debug 目录、stdout/stderr.log
+	// logRoot 是 logs/ 运行期产物（stdout/stderr.log、bind-failure.json
 	// 等）的统一归属，独立于配置文件位置——配置是用户输入，状态目录是
-	// 程序输出，按平台规范分家。请求摘要行、配额样本与闸门闩态已入库
-	//（devin-2api.db 落状态根，稍后打开）。
+	// 程序输出，按平台规范分家。请求摘要行、调试 payload、配额样本与
+	// 闸门闩态已入库（devin-2api.db 落状态根，稍后打开）。
 	logRoot := filepath.Join(absoluteStateDir, "logs")
 	if err := os.MkdirAll(logRoot, 0o755); err != nil {
 		slog.Error("create state dir failed", "dir", logRoot, "error", err)
