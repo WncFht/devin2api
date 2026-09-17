@@ -11,3 +11,30 @@
   resize: vertical;
   white-space: pre;
 }
+
+/* styles.css ≤768px 把分组导航整段 display:none !important（7 组堆成长页）；
+   这里改回横向滚动条——time-range-selector 窄屏本就 overflow-x:auto，
+   只需复位桌面端对 .settings-group-nav 的 wrap/visible 覆盖。
+   !important 必需：同优先级拼加载顺序，本文件后加载；[hidden] 选择器
+   优先级更高，单组时仍隐藏，不受影响。 */
+@media (max-width: 768px) {
+  .settings-group-nav-section {
+    display: block !important;
+  }
+
+  .settings-group-nav-container {
+    justify-content: flex-start;
+  }
+
+  .settings-group-nav {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+
+  .settings-group-nav::-webkit-scrollbar {
+    display: none;
+  }
+}

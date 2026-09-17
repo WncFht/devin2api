@@ -55,13 +55,35 @@
   .models-table {
     min-width: 1160px;
   }
+
+  /* 数字列右对齐：th 4-7 = 倍率/输入价/缓存价/输出价；
+     三个价格 td 由 models.js 内联 right，倍率格在这里补上 */
+  .models-table th:nth-child(4),
+  .models-table th:nth-child(5),
+  .models-table th:nth-child(6),
+  .models-table th:nth-child(7),
+  .models-table td:nth-child(4) {
+    text-align: right;
+  }
 }
 
-/* 实际解析列：解析名 + 重定向编辑入口 */
+/* 实际解析列：解析名 + 重定向编辑入口；
+   负 margin + hover 底色把「— + 铅笔」读成一个可点区域 */
 .resolved-cell {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.resolved-cell:hover {
+  background: var(--neutral-100);
+}
+
+.resolved-cell:hover .redirect-edit-btn {
+  color: var(--neutral-900);
 }
 
 .redirect-edit-btn {

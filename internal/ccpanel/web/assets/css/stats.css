@@ -29,4 +29,10 @@
     justify-self: start;
     align-self: center;
   }
+
+  /* 卡片默认可视区两格一行，左右相邻的 label-value 混读
+     （「输出 31 缓存读取 468」）；每个指标格独占一行 */
+  .stats-table .mobile-card-row > td {
+    grid-column: 1 / -1;
+  }
 }
