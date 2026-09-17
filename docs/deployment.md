@@ -12,7 +12,7 @@
 
 三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
-另有开发机侧的远程驱动 `scripts/deploy-remote.sh`：免密 SSH 到部署目标（`DEVIN2API_HOST`，本机示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。
+另有开发机侧的远程驱动 `scripts/deploy-remote.sh`：免密 SSH 到部署目标（`DEVIN2API_HOST`，本机示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
 ## 跨平台共同约定
 
