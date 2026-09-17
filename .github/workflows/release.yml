@@ -3,11 +3,51 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # 手动重发：在 Actions 页面选 tag ref 触发——发布资产坏了/缺了不用
+  # 重打 tag（铁律：已推送的 tag 永不重打）。validate job 负责把
+  # 误选 branch ref 的 dispatch 拦在门外。
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  # tag 形态与注解性校验：dispatch 可以选任意 ref，release.yml 的全部
+  # 下游语义（版本号、tag 注解取 notes）都依赖它真指着 annotated tag。
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert annotated v* tag on remote
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) echo "::error::release 必须由 v* tag 触发或在 tag ref 上 dispatch（got $GITHUB_REF）"; exit 1 ;;
+          esac
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          type="$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")"
+          [[ "$type" == "tag" ]] || {
+            echo "::error::${GITHUB_REF_NAME} 是 lightweight tag（$type），tag 注解是 release notes 的唯一事实源"
+            exit 1
+          }
+          # tag 落点必须与本次运行的提交一致：dispatch 选了别的 ref 时
+          # GITHUB_SHA 是所选 ref 的顶端，与 tag 指向不同即拒绝。
+          target="$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")"
+          [[ "$target" == "$GITHUB_SHA" ]] || {
+            echo "::error::tag ${GITHUB_REF_NAME} 指向 $target，与运行提交 $GITHUB_SHA 不一致"
+            exit 1
+          }
+
   test:
     name: Test
+    needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,12 +56,13 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Test
-        run: go test ./...
+        run: go test -shuffle=on ./...
 
   binaries:
     name: Build ${{ matrix.asset }}
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     strategy:
@@ -97,6 +138,7 @@ jobs:
     name: Publish Docker image + release
     needs: [test, binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       packages: write
@@ -168,6 +210,39 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 浮动 tag 一致性断言：推完镜像后回读远端 manifest digest，
+      # latest/minor/major 必须与精确版本同 digest——串线（别名指到
+      # 别的构建）在发布当场炸，而不是等用户 pull 到错版本。
+      - name: Verify published image aliases
+        run: |
+          set -euo pipefail
+          GHCR="ghcr.io/${GITHUB_REPOSITORY,,}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          digest_of() {
+            docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
+          }
+          base="$(digest_of "$GHCR:$VERSION")"
+          [[ -n "$base" ]] || { echo "::error::读不到 $GHCR:$VERSION 的 manifest digest"; exit 1; }
+          check_repo() {
+            local repo="$1"
+            local d
+            d="$(digest_of "$repo:$VERSION")"
+            [[ "$d" == "$base" ]] || { echo "::error::$repo:$VERSION digest $d != GHCR $base"; exit 1; }
+            if [[ "$VERSION" != *-* ]]; then
+              for tag in latest "${VERSION%.*}" "${VERSION%%.*}"; do
+                [[ "$repo" == ghcr.io/* || "$tag" == "latest" ]] || continue
+                d="$(digest_of "$repo:$tag")"
+                [[ "$d" == "$base" ]] || { echo "::error::$repo:$tag digest $d != $base"; exit 1; }
+              done
+            fi
+          }
+          check_repo "$GHCR"
+          if [[ -n "${DOCKERHUB_USERNAME}" ]]; then
+            # DockerHub 只推 :VERSION 与 :latest（见上方 TAGS 计算）
+            check_repo "docker.io/${DOCKERHUB_USERNAME}/devin-2api"
+          fi
+          echo "digest verified: $base"
 
       - name: Create checksums
         working-directory: dist
