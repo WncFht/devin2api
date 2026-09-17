@@ -30,9 +30,11 @@ type QuotaSample struct {
 	TopUpTransactionStatus    string   `json:"top_up_transaction_status,omitempty"`
 }
 
-// InsertQuotaSample 追加一条配额快照。
+// InsertQuotaSample 追加一条配额快照。(account,at) 有唯一索引——
+// 同秒撞车（导入与实时采样并行、间隔配成 <1s）时丢新点不报错，
+// 与导入路径的 OR IGNORE 口径一致。
 func (s *Store) InsertQuotaSample(ctx context.Context, q *QuotaSample) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO quota_samples(
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_samples(
 		at, account, daily_remaining, weekly_remaining, daily_reset_at, weekly_reset_at,
 		prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
 		used_prompt_credits, used_flow_credits, used_flex_credits,
@@ -47,9 +49,13 @@ func (s *Store) InsertQuotaSample(ctx context.Context, q *QuotaSample) error {
 	return err
 }
 
-// ListQuotaSamples 按时间升序返回某账号 since 之后的快照；
+// ListQuotaSamples 按时间升序返回某账号 since 之后的快照，至多 limit
+// 条（取最新者——SQL 倒序截断后 Go 侧反转回升序）；limit<=0 不限。
 // account 为空串时返回全部账号（兼容单号时代无 account 字段的行）。
-func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int64) ([]*QuotaSample, error) {
+func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int64, limit int) ([]*QuotaSample, error) {
+	if limit <= 0 {
+		limit = -1
+	}
 	query := `SELECT at, account, daily_remaining, weekly_remaining, daily_reset_at, weekly_reset_at,
 		prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
 		used_prompt_credits, used_flow_credits, used_flex_credits,
@@ -61,7 +67,8 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 		query += ` AND account=?`
 		args = append(args, account)
 	}
-	query += ` ORDER BY at`
+	query += ` ORDER BY at DESC LIMIT ?`
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -80,5 +87,28 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 		}
 		out = append(out, &q)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// quotaSampleKeep 是 quota_samples 的全局行数帽——对齐文件时代
+// ~4MB quota.jsonl ≈ 2 万行的保留边界。
+const quotaSampleKeep = 20000
+
+// PruneQuotaSamples 把 quota_samples 截到最新 quotaSampleKeep 行
+// （同秒并列按 id 取新者，帽是精确界）。返回删除行数。
+func (s *Store) PruneQuotaSamples(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM quota_samples WHERE id NOT IN (
+			SELECT id FROM quota_samples ORDER BY at DESC, id DESC LIMIT ?)`,
+		quotaSampleKeep)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

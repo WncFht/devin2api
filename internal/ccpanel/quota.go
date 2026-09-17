@@ -182,19 +182,17 @@ func (h *Handler) sampleAccountQuota(account, token string) {
 // 34 天。
 const quotaHistoryCap = 10000
 
-// readQuotaHistory 读 quota_samples 尾部 quotaHistoryCap 条（at 升序）。
-// 按号分组的裁剪在 QuotaReport 侧做；库查询失败按无历史降级。
+// readQuotaHistory 读 quota_samples 尾部 quotaHistoryCap 条（at 升序，
+// 截断下推 SQL LIMIT）。按号分组的裁剪在 QuotaReport 侧做；库查询失败
+// 按无历史降级。
 func (h *Handler) readQuotaHistory(ctx context.Context) []*store.QuotaSample {
 	if h.store == nil {
 		return nil
 	}
-	points, err := h.store.ListQuotaSamples(ctx, "", 0)
+	points, err := h.store.ListQuotaSamples(ctx, "", 0, quotaHistoryCap)
 	if err != nil {
 		slog.Warn("quota history read failed", "error", err)
 		return nil
-	}
-	if len(points) > quotaHistoryCap {
-		points = points[len(points)-quotaHistoryCap:]
 	}
 	return points
 }

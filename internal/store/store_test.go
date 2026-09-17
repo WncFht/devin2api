@@ -215,13 +215,19 @@ func TestQuotaSamples(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("InsertQuotaSample 3: %v", err)
 	}
+	// 同 (account,at) 撞车静默丢新点（OR IGNORE），不报错。
+	if err := s.InsertQuotaSample(ctx, &QuotaSample{
+		At: 1700000060, Account: "default", DailyRemaining: &rem,
+	}); err != nil {
+		t.Fatalf("InsertQuotaSample dup: %v", err)
+	}
 
-	got, err := s.ListQuotaSamples(ctx, "default", 0)
+	got, err := s.ListQuotaSamples(ctx, "default", 0, 0)
 	if err != nil {
 		t.Fatalf("ListQuotaSamples: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
+		t.Fatalf("len = %d, want 2 (dup dropped)", len(got))
 	}
 	if got[0].DailyRemaining == nil || *got[0].DailyRemaining != rem {
 		t.Fatalf("DailyRemaining = %v", got[0].DailyRemaining)
@@ -230,18 +236,54 @@ func TestQuotaSamples(t *testing.T) {
 		t.Fatalf("DailyRemaining = %v, want nil", *got[1].DailyRemaining)
 	}
 	// since 过滤 + account 过滤。
-	got, err = s.ListQuotaSamples(ctx, "default", 1700000060)
+	got, err = s.ListQuotaSamples(ctx, "default", 1700000060, 0)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("since filter: %v %v", got, err)
 	}
-	got, err = s.ListQuotaSamples(ctx, "randall", 0)
+	got, err = s.ListQuotaSamples(ctx, "randall", 0, 0)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("randall filter: %v %v", got, err)
+	}
+	// limit 截尾取最新 N 条，返回仍升序。
+	got, err = s.ListQuotaSamples(ctx, "", 0, 2)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("limit: %v %v", got, err)
+	}
+	if got[0].At != 1700000030 || got[1].At != 1700000060 {
+		t.Fatalf("limit order: %v %v", got[0].At, got[1].At)
+	}
+}
+
+func TestPruneQuotaSamples(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	for i := 0; i < quotaSampleKeep+5; i++ {
+		if err := s.InsertQuotaSample(ctx, &QuotaSample{At: int64(1000 + i)}); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	n, err := s.PruneQuotaSamples(ctx)
+	if err != nil {
+		t.Fatalf("PruneQuotaSamples: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("pruned = %d, want 5", n)
+	}
+	var cnt, minAt int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(at) FROM quota_samples`).Scan(&cnt, &minAt); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if cnt != quotaSampleKeep || minAt != 1005 {
+		t.Fatalf("after prune: count=%d min=%d, want %d/1005", cnt, minAt, quotaSampleKeep)
+	}
+	// 不足帽时调用安全（不删行）。
+	if n, err = s.PruneQuotaSamples(ctx); err != nil || n != 0 {
+		t.Fatalf("second prune = %d,%v want 0,nil", n, err)
 	}
 }
 
 func TestModelRegistry(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.SetModel(ctx, ModelEntry{Model: "claude-x", RedirectModel: "claude-y"}); err != nil {
 		t.Fatalf("SetModel: %v", err)
