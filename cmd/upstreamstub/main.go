@@ -24,6 +24,8 @@ import (
 
 var requestCount atomic.Int64
 
+// main 起上游桩服务：GetChatMessage 按 -scenario 产出预设帧形态，
+// 其余 RPC 一律断开连接。
 func main() {
 	listen := flag.String("listen", "127.0.0.1:48090", "监听地址")
 	scenario := flag.String("scenario", "precontent",
@@ -206,6 +208,7 @@ func endStream(payload string) []byte {
 	return append(out, payload...)
 }
 
+// marshal 按客户端请求的 wire 编码（connect+proto 或 connect+json）序列化响应。
 func marshal(msg *devinproto.GetChatMessageResponse, json bool) ([]byte, error) {
 	if json {
 		return protojson.Marshal(msg)
@@ -213,6 +216,7 @@ func marshal(msg *devinproto.GetChatMessageResponse, json bool) ([]byte, error) 
 	return proto.Marshal(msg)
 }
 
+// metaFrame 造流首的元数据响应帧（message_id/request_id/timestamp/usage）。
 func metaFrame() *devinproto.GetChatMessageResponse {
 	return &devinproto.GetChatMessageResponse{
 		MessageId: proto.String("bot-stub"),
@@ -224,16 +228,19 @@ func metaFrame() *devinproto.GetChatMessageResponse {
 	}
 }
 
+// deltaText 造一帧增量文本响应。
 func deltaText(text string) *devinproto.GetChatMessageResponse {
 	return &devinproto.GetChatMessageResponse{DeltaText: proto.String(text)}
 }
 
+// stopFrame 造带 stop_reason 的终止响应帧。
 func stopFrame() *devinproto.GetChatMessageResponse {
 	return &devinproto.GetChatMessageResponse{
 		StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum(),
 	}
 }
 
+// join 把多条已编码 envelope 顺序拼接成一个响应体。
 func join(frames ...[]byte) []byte {
 	var out []byte
 	for _, f := range frames {

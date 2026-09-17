@@ -32,6 +32,8 @@ type result struct {
 	errMsg string
 }
 
+// main 解析压测参数后按固定并发打目标端点，聚合报告 TTFB/总时长
+// 分位数、吞吐与错误分布。
 func main() {
 	url := flag.String("url", "http://localhost:3003/v1/chat/completions", "目标端点")
 	key := flag.String("key", "", "auth.api_key（空 = 不携带凭据）")
@@ -161,6 +163,7 @@ func report(results []result, elapsed time.Duration) {
 	}
 }
 
+// avg 返回算术平均值（ms）。
 func avg(values []float64) float64 {
 	var sum float64
 	for _, v := range values {

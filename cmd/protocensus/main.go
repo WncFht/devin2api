@@ -63,6 +63,8 @@ type census struct {
 	currentDir string
 }
 
+// main 按子命令名分派：census 扫调试库流量做字段普查，diff 对比
+// 两份 FileDescriptorSet 报协议漂移。
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -84,6 +86,7 @@ func main() {
 	}
 }
 
+// usage 打印两个子命令的用法。
 func usage() {
 	fmt.Fprintln(os.Stderr, `subcommands:
   census [-db PATH] [-max-dirs N]
@@ -109,6 +112,8 @@ func messageDesc(name protoreflect.FullName) (protoreflect.MessageDescriptor, er
 
 // ---- census ----
 
+// cmdCensus 遍历 devin-2api.db 调试表里的请求/响应 wire 记录，按生成
+// 代码注册的描述符统计字段覆盖率、未知键与枚举异常值。
 func cmdCensus(args []string) error {
 	fs := flag.NewFlagSet("census", flag.ContinueOnError)
 	dbPath := fs.String("db", "devin-2api.db", "devin-2api state database")
@@ -186,6 +191,7 @@ func requestDirs(ctx context.Context, st *store.Store, maxDirs int) ([]string, e
 	return dirs, nil
 }
 
+// newCensus 建一份空普查累计器（消息表 + unknown 表 + 枚举异常表）。
 func newCensus() *census {
 	return &census{
 		Messages: map[string]*msgCensus{},
@@ -218,6 +224,7 @@ func (c *census) walk(md protoreflect.MessageDescriptor, obj map[string]any) {
 	}
 }
 
+// recordUnknown 记一次描述符外的 JSON 键，按 typeName|key 聚合并留样例 dir。
 func (c *census) recordUnknown(typeName, key string) {
 	id := typeName + "|" + key
 	u := c.unknown[id]
@@ -253,6 +260,7 @@ func (c *census) walkValue(fd protoreflect.FieldDescriptor, val any) {
 	c.walkSingle(fd, val)
 }
 
+// walkSingle 处理单值：消息/组递归 walk，枚举走成员校验，标量无需动作。
 func (c *census) walkSingle(fd protoreflect.FieldDescriptor, val any) {
 	switch fd.Kind() {
 	case protoreflect.MessageKind, protoreflect.GroupKind:
@@ -290,6 +298,7 @@ func (c *census) checkEnum(fd protoreflect.FieldDescriptor, val any) {
 	a.Examples = appendExample(a.Examples, c.currentDir)
 }
 
+// appendExample 给异常条目追加样例 dir：去重、最多留 3 个。
 func appendExample(ex []string, dir string) []string {
 	if dir == "" || len(ex) >= 3 {
 		return ex
@@ -326,6 +335,7 @@ func (c *census) neverSeen() []string {
 	return out
 }
 
+// printReport 把请求/响应两侧普查结果编码成 JSON 写 stdout。
 func printReport(dirs, frames int, req, resp *census) error {
 	report := map[string]any{
 		"dirs_scanned":    dirs,
@@ -338,6 +348,8 @@ func printReport(dirs, frames int, req, resp *census) error {
 	return enc.Encode(report)
 }
 
+// censusSection 把单侧普查展开成报告节：消息命中表、零命中字段、
+// unknown 键与枚举异常各按计数降序。
 func censusSection(c *census) map[string]any {
 	unknown := []unknownKey{}
 	for _, u := range c.unknown {
@@ -375,6 +387,8 @@ type symbolTable struct {
 	types   map[string]bool   // 消息/枚举/服务全限定名集合
 }
 
+// cmdDiff 对比两份 FileDescriptorSet 的符号表，输出 added/removed/
+// changed 三类漂移。
 func cmdDiff(args []string) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: diff OLD.pb NEW.pb")
@@ -435,6 +449,7 @@ func loadSymbols(path string) (*symbolTable, error) {
 	return t, nil
 }
 
+// indexMessage 把消息（含嵌套消息/枚举）的全部符号登进符号表。
 func (t *symbolTable) indexMessage(prefix string, m *descriptorpb.DescriptorProto) {
 	fqn := join(prefix, m.GetName())
 	t.types[fqn] = true
@@ -450,6 +465,7 @@ func (t *symbolTable) indexMessage(prefix string, m *descriptorpb.DescriptorProt
 	}
 }
 
+// indexEnum 登记枚举类型名与每个枚举成员的取值。
 func (t *symbolTable) indexEnum(fqn string, e *descriptorpb.EnumDescriptorProto) {
 	t.types[fqn] = true
 	for _, v := range e.GetValue() {
