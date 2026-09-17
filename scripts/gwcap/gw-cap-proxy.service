@@ -1,0 +1,19 @@
+[Unit]
+Description=Local gateway concurrency cap proxy (model-gated semaphore)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=gwcap
+Group=gwcap
+Environment=GWCAP_LIMIT=20
+ExecStart=/usr/bin/python3 /usr/local/libexec/gwcap/gw-cap-proxy.py
+Restart=always
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
