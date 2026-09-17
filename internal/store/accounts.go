@@ -154,7 +154,7 @@ func nullAccountField(s string) any {
 	return s
 }
 
-func scanAccount(row interface{ Scan(...any) error }) (*AccountRow, error) {
+func scanAccount(row sqlScanner) (*AccountRow, error) {
 	var a AccountRow
 	var token, credentialsFile sql.NullString
 	err := row.Scan(&a.Name, &token, &credentialsFile, &a.Disabled, &a.Deleted,
@@ -169,7 +169,7 @@ func scanAccount(row interface{ Scan(...any) error }) (*AccountRow, error) {
 
 // ListAccounts 返回全部行含墓碑，ORDER BY created_at, name。
 func (s *Store) ListAccounts(ctx context.Context) ([]*AccountRow, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT `+accountColumns+` FROM upstream_accounts ORDER BY created_at, name`)
 	if err != nil {
 		return nil, err
@@ -188,7 +188,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]*AccountRow, error) {
 
 // GetAccount 按名取行；不存在时 ok=false。
 func (s *Store) GetAccount(ctx context.Context, name string) (row *AccountRow, ok bool, err error) {
-	a, err := scanAccount(s.db.QueryRowContext(ctx,
+	a, err := scanAccount(s.ro.QueryRowContext(ctx,
 		`SELECT `+accountColumns+` FROM upstream_accounts WHERE name=?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
