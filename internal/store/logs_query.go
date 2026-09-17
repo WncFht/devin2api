@@ -261,7 +261,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 		limit = -1 // SQLite LIMIT -1 = 不限，占位符语义统一
 	}
 	offset := max(q.Offset, 0)
-	sqlRows, err := s.db.QueryContext(ctx,
+	sqlRows, err := s.ro.QueryContext(ctx,
 		`SELECT `+logColumns+` FROM logs`+where+
 			` ORDER BY id DESC LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...)
@@ -279,7 +279,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	if err := sqlRows.Err(); err != nil {
 		return nil, 0, err
 	}
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.ro.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -290,7 +290,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 // 「索引尾部窗外仍有更早历史」投影）。
 func (s *Store) ExistsLogBefore(ctx context.Context, ms int64) (bool, error) {
 	var n int64
-	err := s.db.QueryRowContext(ctx,
+	err := s.ro.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM logs WHERE time < ?)`, ms).Scan(&n)
 	return n != 0, err
 }
@@ -307,7 +307,7 @@ func (s *Store) DeleteLogsBefore(ctx context.Context, ms int64) (int64, error) {
 
 // LogDirByID 按自增 id 反查调试目录名与请求时刻（毫秒）。
 func (s *Store) LogDirByID(ctx context.Context, id int64) (dir string, timeMS int64, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT dir, time FROM logs WHERE id = ?`, id).Scan(&dir, &timeMS)
+	err = s.ro.QueryRowContext(ctx, `SELECT dir, time FROM logs WHERE id = ?`, id).Scan(&dir, &timeMS)
 	if err == sql.ErrNoRows {
 		return "", 0, false, nil
 	}
@@ -320,7 +320,7 @@ func (s *Store) LogDirByID(ctx context.Context, id int64) (dir string, timeMS in
 // LogCount 返回 logs 表行数（Stats 的 log_rows 口径）。
 func (s *Store) LogCount(ctx context.Context) (int64, error) {
 	var n int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM logs`).Scan(&n)
+	err := s.ro.QueryRowContext(ctx, `SELECT COUNT(*) FROM logs`).Scan(&n)
 	return n, err
 }
 
@@ -333,7 +333,7 @@ func (s *Store) LogModels(ctx context.Context, kh string) ([]string, error) {
 		query += ` AND key_hash = ?`
 		args = append(args, kh)
 	}
-	sqlRows, err := s.db.QueryContext(ctx, query+` ORDER BY 1`, args...)
+	sqlRows, err := s.ro.QueryContext(ctx, query+` ORDER BY 1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +351,7 @@ func (s *Store) LogModels(ctx context.Context, kh string) ([]string, error) {
 
 // LogStatusCodes 返回出现过的状态码集合（升序，不含 0 占位）。
 func (s *Store) LogStatusCodes(ctx context.Context) ([]int, error) {
-	sqlRows, err := s.db.QueryContext(ctx,
+	sqlRows, err := s.ro.QueryContext(ctx,
 		`SELECT DISTINCT status_code FROM logs WHERE status_code != 0 ORDER BY status_code`)
 	if err != nil {
 		return nil, err
@@ -498,7 +498,7 @@ func (s *Store) LogCells(ctx context.Context, sinceSec, untilSec int64, sc LogSc
 	query := `SELECT time/600000*600 AS slot, api, ` + logEModelExpr + ` AS emodel, key_hash,` +
 		logCellCols + ` FROM logs WHERE time >= ? AND time < ?` + scopeWhere +
 		` GROUP BY slot, api, emodel, key_hash`
-	sqlRows, err := s.db.QueryContext(ctx, query, append([]any{lo, hi}, scopeArgs...)...)
+	sqlRows, err := s.ro.QueryContext(ctx, query, append([]any{lo, hi}, scopeArgs...)...)
 	if err != nil {
 		return err
 	}
@@ -546,7 +546,7 @@ func (s *Store) LogRecentWindow(ctx context.Context, seconds int64, sc LogScope)
 	var a LogRecentAgg
 	cut := time.Now().Unix() - seconds
 	scopeWhere, scopeArgs := sc.where()
-	err := s.db.QueryRowContext(ctx, `SELECT
+	err := s.ro.QueryRowContext(ctx, `SELECT
 		COALESCE(SUM(CASE WHEN status_code != 499 THEN 1 ELSE 0 END), 0),
 		COALESCE(SUM(input_tokens), 0),
 		COALESCE(SUM(output_tokens), 0),
@@ -579,7 +579,7 @@ func (s *Store) LogRecentRPM(ctx context.Context, model, kh string) (float64, er
 		args = append(args, kh)
 	}
 	var n int64
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+	if err := s.ro.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	return float64(n), nil
@@ -609,7 +609,7 @@ func (s *Store) LogLastByModel(ctx context.Context, kh string) (map[string]LogMo
 		args = append(args, kh)
 	}
 	latest := func(cond string, apply func(m *LogModelLast, at, id int64, status int, result string)) error {
-		rows, err := s.db.QueryContext(ctx, `
+		rows, err := s.ro.QueryContext(ctx, `
 			SELECT emodel, time, id, status_code, result FROM (
 				SELECT `+logEModelExpr+` AS emodel, time, id, status_code, result,
 					ROW_NUMBER() OVER (PARTITION BY `+logEModelExpr+` ORDER BY id DESC) AS rn
@@ -657,7 +657,7 @@ type LogTrendSeed struct {
 // 按完成时刻过滤」的路径，窗口谓词直接下推。
 func (s *Store) LogTrendSeeds(ctx context.Context, limit int) ([]LogTrendSeed, error) {
 	cut := time.Now().Add(-time.Hour).UnixMilli()
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT time + duration_ms,
 			CASE WHEN status_code >= 400 OR (result != '' AND result != 'completed') THEN 1 ELSE 0 END
 		FROM logs WHERE time + duration_ms >= ?

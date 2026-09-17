@@ -239,7 +239,7 @@ func (s *Store) recentSamples(ctx context.Context, column string, nonNull bool) 
 		query += ` WHERE ` + column + ` IS NOT NULL`
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, usageSampleCapacity)
+	rows, err := s.ro.QueryContext(ctx, query, usageSampleCapacity)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +280,7 @@ func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error)
 func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinPoint, error) {
 	minSlot := currentSlot - usageMinBuckets + 1
 	minBucket := minSlot * 10
-	totalRows, err := s.db.QueryContext(ctx,
+	totalRows, err := s.ro.QueryContext(ctx,
 		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ? GROUP BY slot`, minBucket)
 	if err != nil {
 		return nil, err
@@ -302,7 +302,7 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinP
 	// 每桶的 dur/ttfb 样本各取最近 cap 条：durs 按 id 倒序前 N；
 	// ttfb 只在非空行里取前 N（旧 pushSample 只入非 nil 值）。两个环
 	// 独立计数，所以取回行后要按各自的 rn 再闸一次。
-	sampleRows, err := s.db.QueryContext(ctx, `
+	sampleRows, err := s.ro.QueryContext(ctx, `
 		SELECT slot, duration_ms, first_upstream_ms, rn_dur, rn_ttfb FROM (
 			SELECT time/600000 AS slot, duration_ms, first_upstream_ms,
 				ROW_NUMBER() OVER (PARTITION BY time/600000 ORDER BY id DESC) AS rn_dur,
@@ -360,7 +360,7 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinP
 // SQLite 保证 bare column 绑定到唯一 min/max 聚合的达成行，等价于
 // 旧按完成序追加的「最后一行覆盖」语义）。
 func (s *Store) dimAggs(ctx context.Context, dimExpr string) ([]DimensionAgg, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT dim,`+usageTotalsCols+`,
 			COALESCE(SUM(duration_ms), 0),
 			SUM(first_upstream_ms IS NOT NULL),
@@ -398,7 +398,7 @@ func (s *Store) dimAggs(ctx context.Context, dimExpr string) ([]DimensionAgg, er
 // input_tokens 与（仅 output>0 行的）output_tokens 样本集；两个环
 // 独立计数，取回行后按各自的 rn 再闸一次。
 func (s *Store) modelTokenSamples(ctx context.Context) (inTok, outTok map[string][]int64, err error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT emodel, input_tokens, output_tokens, rn_in, rn_out FROM (
 			SELECT emodel, input_tokens, output_tokens,
 				ROW_NUMBER() OVER (PARTITION BY emodel ORDER BY id DESC) AS rn_in,
@@ -442,7 +442,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	var minMS sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), MIN(time) FROM logs`).Scan(&snap.Entries, &minMS); err != nil {
+	if err := s.ro.QueryRowContext(ctx, `SELECT COUNT(*), MIN(time) FROM logs`).Scan(&snap.Entries, &minMS); err != nil {
 		return snap, err
 	}
 	if minMS.Valid {
@@ -451,14 +451,14 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		snap.WindowStart = time.Time{}.Format(time.RFC3339)
 	}
 
-	if err := scanUsageTotals(s.db.QueryRowContext(ctx, `SELECT `+usageTotalsCols+` FROM logs`), &snap.Window); err != nil {
+	if err := scanUsageTotals(s.ro.QueryRowContext(ctx, `SELECT `+usageTotalsCols+` FROM logs`), &snap.Window); err != nil {
 		return snap, err
 	}
 	// 今日单列查询而非从 days 里挑：31 天上限外若有未来日期的行，
 	// today 也不该被挤掉。本地日界在 Go 侧算好打成毫秒界——
 	// strftime(localtime) 谓词不可索引，time 范围可走 idx_logs_time。
 	dayStart, dayEnd := dayBoundsMS(time.Now())
-	if err := scanUsageTotals(s.db.QueryRowContext(ctx,
+	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
 		`SELECT `+usageTotalsCols+` FROM logs WHERE time >= ? AND time < ?`,
 		dayStart, dayEnd), &snap.Today); err != nil {
 		return snap, err
@@ -466,7 +466,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 
 	// 逐日聚合（新在前，上限 usageMaxDays）；kept 记录保留日键，
 	// ModelDays 只投影同日键集合（旧快照语义）。
-	dayRows, err := s.db.QueryContext(ctx,
+	dayRows, err := s.ro.QueryContext(ctx,
 		`SELECT `+logDayExpr+` AS day,`+usageTotalsCols+` FROM logs GROUP BY day ORDER BY day DESC LIMIT ?`, usageMaxDays)
 	if err != nil {
 		return snap, err
@@ -485,7 +485,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		return snap, err
 	}
 
-	mdayRows, err := s.db.QueryContext(ctx,
+	mdayRows, err := s.ro.QueryContext(ctx,
 		`SELECT emodel, day,`+usageTotalsCols+` FROM (
 			SELECT `+logEModelExpr+` AS emodel, `+logDayExpr+` AS day, * FROM logs
 		) WHERE emodel != '' GROUP BY emodel, day`)
@@ -517,7 +517,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		snap.ModelDays = modelDays
 	}
 
-	stageRows, err := s.db.QueryContext(ctx,
+	stageRows, err := s.ro.QueryContext(ctx,
 		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' GROUP BY error_stage`)
 	if err != nil {
 		return snap, err
@@ -607,7 +607,7 @@ func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	// （s/1000 > E-60 ⟺ s >= (E-59)*1000；s/1000 <= E ⟺ s <= E*1000+999），
 	// 从全表 COUNT 变成 idx_logs_time 范围扫。
 	const endExpr = `logs.time/1000 + logs.duration_ms/1000`
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+endExpr+`, `+logEModelExpr+`, error_stage,
 			(SELECT COUNT(*) FROM logs l2
 				WHERE l2.time >= (`+endExpr+` - 59) * 1000

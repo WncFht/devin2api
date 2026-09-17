@@ -79,7 +79,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	if limit <= 0 {
 		limit = math.MaxInt64
 	}
-	err = s.db.QueryRowContext(ctx,
+	err = s.ro.QueryRowContext(ctx,
 		`SELECT SUBSTR(content, 1, ?), LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
 		limit, dir, name).Scan(&data, &total)
 	if err == nil {
@@ -90,7 +90,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	}
 
 	var chunks int
-	err = s.db.QueryRowContext(ctx,
+	err = s.ro.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM debug_chunks WHERE dir=? AND name=?`,
 		dir, name).Scan(&chunks, &total)
 	if err != nil {
@@ -99,7 +99,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	if chunks == 0 {
 		return nil, 0, false, nil
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT data FROM debug_chunks WHERE dir=? AND name=? ORDER BY seq`, dir, name)
 	if err != nil {
 		return nil, 0, false, err
@@ -125,7 +125,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 // DebugFileNames 返回目录内全部文件名（两表 UNION DISTINCT，按名排序）——
 // 剥离负载时按 isPayloadName 类谓词筛选的枚举源。
 func (s *Store) DebugFileNames(ctx context.Context, dir string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT name FROM debug_files WHERE dir=? UNION SELECT name FROM debug_chunks WHERE dir=? ORDER BY name`,
 		dir, dir)
 	if err != nil {
@@ -147,7 +147,7 @@ func (s *Store) DebugFileNames(ctx context.Context, dir string) ([]string, error
 // 端点的 Files 清单等价物。同名文件在两表并存时尺寸合并（正常写入
 // 路径按扩展名分表，不会撞名）。
 func (s *Store) DebugFileList(ctx context.Context, dir string) ([]DebugFileInfo, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT name, SUM(sz) FROM (
 			SELECT name, LENGTH(content) AS sz FROM debug_files WHERE dir=?
 			UNION ALL
@@ -172,7 +172,7 @@ func (s *Store) DebugFileList(ctx context.Context, dir string) ([]DebugFileInfo,
 // DebugDirs 返回库中全部调试目录名，按名排序——目录名内嵌
 // "20060102-150405" 时间戳，字典序即时间序，清理器直接复用该序。
 func (s *Store) DebugDirs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT dir FROM debug_files UNION SELECT dir FROM debug_chunks ORDER BY dir`)
 	if err != nil {
 		return nil, err
@@ -194,7 +194,7 @@ func (s *Store) DebugDirs(ctx context.Context) ([]string, error) {
 // 目录时先圈同秒候选，再逐目录比对 meta.json 消歧。GLOB 前缀可走
 // 索引；调用方保证 prefix 不含通配符（时间戳格式只含数字与 '-'）。
 func (s *Store) DebugDirsByPrefix(ctx context.Context, prefix string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT dir FROM debug_files WHERE dir GLOB ? UNION SELECT dir FROM debug_chunks WHERE dir GLOB ? ORDER BY dir`,
 		prefix+"*", prefix+"*")
 	if err != nil {
@@ -214,7 +214,7 @@ func (s *Store) DebugDirsByPrefix(ctx context.Context, prefix string) ([]string,
 
 // DebugDirSizes 返回各目录内容字节数合计，供 max_total_mb 容量淘汰。
 func (s *Store) DebugDirSizes(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT dir, SUM(sz) FROM (
 			SELECT dir, LENGTH(content) AS sz FROM debug_files
 			UNION ALL
@@ -239,7 +239,7 @@ func (s *Store) DebugDirSizes(ctx context.Context) (map[string]int64, error) {
 // DebugDirsContaining 返回含指定文件名（如 error.json）的目录集合——
 // keep_error_dirs 容量淘汰的保护集来源。文件与 chunk 两表都查。
 func (s *Store) DebugDirsContaining(ctx context.Context, name string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT dir FROM debug_files WHERE name=? UNION SELECT dir FROM debug_chunks WHERE name=?`,
 		name, name)
 	if err != nil {

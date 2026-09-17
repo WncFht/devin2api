@@ -141,7 +141,7 @@ func (s *Store) UpsertToken(ctx context.Context, t *TokenRow) error {
 // ListTokens 返回全部令牌行（含停用），按 id 升序——与旧文件
 // 的排序语义一致。
 func (s *Store) ListTokens(ctx context.Context) ([]*TokenRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+tokenColumns+` FROM auth_tokens ORDER BY id`)
+	rows, err := s.ro.QueryContext(ctx, `SELECT `+tokenColumns+` FROM auth_tokens ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}

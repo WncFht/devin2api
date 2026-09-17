@@ -85,7 +85,7 @@ func (s *Store) ImportDebugDirs(ctx context.Context, logRoot, progressKey string
 // debugDirExists 报告目录在两表中是否已有任何行。
 func (s *Store) debugDirExists(ctx context.Context, dir string) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.ro.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM debug_files WHERE dir=?) OR EXISTS(SELECT 1 FROM debug_chunks WHERE dir=?)`,
 		dir, dir).Scan(&n)
 	return n != 0, err

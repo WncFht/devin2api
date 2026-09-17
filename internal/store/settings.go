@@ -20,7 +20,7 @@ func (s *Store) SetSetting(ctx context.Context, key, value string, updatedAt int
 
 // GetSetting 读一个设置键；不存在返回 ok=false。
 func (s *Store) GetSetting(ctx context.Context, key string) (value string, updatedAt int64, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx,
+	err = s.ro.QueryRowContext(ctx,
 		`SELECT value, updated_at FROM settings WHERE "key"=?`, key).Scan(&value, &updatedAt)
 	if err == sql.ErrNoRows {
 		return "", 0, false, nil
@@ -39,7 +39,7 @@ func (s *Store) DeleteSetting(ctx context.Context, key string) error {
 
 // ListSettings 返回全部设置键值与各自更新时间。
 func (s *Store) ListSettings(ctx context.Context) (values map[string]string, updated map[string]int64, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT "key", value, updated_at FROM settings`)
+	rows, err := s.ro.QueryContext(ctx, `SELECT "key", value, updated_at FROM settings`)
 	if err != nil {
 		return nil, nil, err
 	}

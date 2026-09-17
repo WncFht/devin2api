@@ -69,7 +69,7 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 	}
 	query += ` ORDER BY at DESC LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

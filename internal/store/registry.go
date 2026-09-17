@@ -33,7 +33,7 @@ func (s *Store) DeleteModel(ctx context.Context, model string) error {
 
 // ListModels 返回全部注册项，按 model 排序。
 func (s *Store) ListModels(ctx context.Context) ([]ModelEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT model, redirect_model, disabled, updated_at FROM model_registry ORDER BY model`)
 	if err != nil {
 		return nil, err

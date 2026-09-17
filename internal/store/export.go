@@ -74,7 +74,7 @@ func (s *Store) ExportLegacy(ctx context.Context, stateDir, logRoot string) (*Ex
 		rep.Written = append(rep.Written, paths...)
 		rep.Notices = append(rep.Notices, notices...)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT
+	if err := s.ro.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(*) FROM debug_files)+(SELECT COUNT(*) FROM debug_chunks)`).
 		Scan(&rep.DebugRows); err != nil {
 		errs = append(errs, fmt.Errorf("export debug probe: %w", err))
@@ -86,7 +86,7 @@ func (s *Store) ExportLegacy(ctx context.Context, stateDir, logRoot string) (*Ex
 // logColumns——id/log_source/upstream_protocol/minute_bucket 是库内
 // 派生列，不进文件格式（重导入时照常再生）。
 func (s *Store) exportIndex(ctx context.Context, target string) (string, string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+logColumns+` FROM logs ORDER BY time, id`)
+	rows, err := s.ro.QueryContext(ctx, `SELECT `+logColumns+` FROM logs ORDER BY time, id`)
 	if err != nil {
 		return "", "", err
 	}
@@ -169,7 +169,7 @@ func (s *Store) exportSettings(ctx context.Context, target string) (string, stri
 // exportQuota 把 quota_samples 按时间序写成 quota.jsonl；QuotaSample 的
 // JSON tag 即文件时代行格式。id 参与排序保证同 at 的稳定次序。
 func (s *Store) exportQuota(ctx context.Context, target string) (string, string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT at, account, daily_remaining, weekly_remaining,
+	rows, err := s.ro.QueryContext(ctx, `SELECT at, account, daily_remaining, weekly_remaining,
 		daily_reset_at, weekly_reset_at, prompt_credits, flow_credits, flex_credits,
 		acu_consumed, acu_limit, used_prompt_credits, used_flow_credits, used_flex_credits,
 		grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
@@ -203,7 +203,7 @@ func (s *Store) exportQuota(ctx context.Context, target string) (string, string,
 // gate:default → gate-state.json，gate:<lane> → gate-state-<lane>.json；
 // value 即文件原文（导入时原样入库），逐字节写回。
 func (s *Store) exportGateStates(ctx context.Context, logRoot string) ([]string, []string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT "key", value FROM runtime_state WHERE "key" LIKE 'gate:%' ORDER BY "key"`)
 	if err != nil {
 		return nil, nil, err

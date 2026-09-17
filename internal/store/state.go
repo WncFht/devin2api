@@ -15,7 +15,7 @@ func GateStateKey(lane string) string {
 
 // GetState 读 runtime_state 一键；不存在返回 ok=false。
 func (s *Store) GetState(ctx context.Context, key string) (value string, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx,
+	err = s.ro.QueryRowContext(ctx,
 		`SELECT value FROM runtime_state WHERE "key"=?`, key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", false, nil

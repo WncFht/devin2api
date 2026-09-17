@@ -3,9 +3,10 @@
 // 它取代原先的 index.jsonl/auth_tokens.json/models.json/
 // panel-settings.json/quota.jsonl/gate-state*.json 文件持久化。
 //
-// 单连接串行化全部读写（ccLoad 实证：SQLite 多连接高并发写触发
-// BUSY/DEADLOCK）；本服务写量级远低于 SQLite 上限，热读靠调用方
-// 内存索引与 WAL 读放大容忍。
+// 读写分离双池：写只走 db（单连接串行化——ccLoad 实证 SQLite 多连接
+// 高并发写触发 BUSY/DEADLOCK）；读只走 ro（WAL 下多读者与写者并行，
+// query_only pragma 在连接级拒绝写语句）。面板聚合读不再与日志写、
+// 配额采样、retention 清扫互相排队。
 package store
 
 import (
@@ -17,9 +18,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Store 包装 *sql.DB，对外只暴露领域方法。
+// Store 包装读写两个 *sql.DB，对外只暴露领域方法。
 type Store struct {
-	db   *sql.DB
+	// db 是写池：MaxOpenConns=1，串行化全部写（含 tx）与必要的
+	// 写后读（import 流程）。ro 是读池：只跑 SELECT——靠约定维持，
+	// query_only pragma 兜底把误写变成显式错误而非静默写竞争。
+	db *sql.DB
+	ro *sql.DB
+
 	path string
 }
 
@@ -50,7 +56,22 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db, path: path}, nil
+
+	// 读池在写库建好 schema 之后打开：WAL 下读者拿连接级快照，
+	// 与写者互不阻塞。并发数取面板页一次加载的端点扇出量级。
+	ro, err := sql.Open("sqlite", dsn+"&_pragma=query_only(1)")
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open read pool: %w", err)
+	}
+	ro.SetMaxOpenConns(4)
+	ro.SetMaxIdleConns(4)
+	if err := ro.Ping(); err != nil {
+		// 读池起不来时退化回写池串行读——功能不变，只是失去并行。
+		_ = ro.Close()
+		ro = db
+	}
+	return &Store{db: db, ro: ro, path: path}, nil
 }
 
 // IncrementalVacuum 回收 freelist 页——auto_vacuum=INCREMENTAL 只把
@@ -72,8 +93,12 @@ func (s *Store) DBBytes() int64 {
 	return total
 }
 
-// Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。
+// Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。读池退化
+// 复用写池时 ro==db，避免重复 Close。
 func (s *Store) Close() error {
+	if s.ro != s.db {
+		_ = s.ro.Close()
+	}
 	return s.db.Close()
 }
 
