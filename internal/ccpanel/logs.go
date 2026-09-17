@@ -460,13 +460,6 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 		"resp_headers": "{}",
 	}
 
-	var meta struct {
-		StartedAt        string            `json:"started_at"`
-		StatusCode       int               `json:"status_code"`
-		Result           string            `json:"result"`
-		UpstreamAccount  string            `json:"upstream_account"`
-		UpstreamAttempts []json.RawMessage `json:"upstream_attempts"`
-	}
 	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
 	// 不外流，meta 本体不需要过 maskToken。目录整个不在时投影无意义，
@@ -475,7 +468,12 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	if err != nil {
 		return nil
 	}
-	_ = json.Unmarshal(detail.Meta, &meta)
+	// meta.json 缺席或损坏时 Summary 为 nil：按零值投影——created_at
+	// 回落 fallbackMS、完结块字段一律零值，与旧匿名解码失败同口径。
+	meta := detail.Summary
+	if meta == nil {
+		meta = &debuglog.MetaSummary{}
+	}
 	resp["files"] = detail.Files
 	// 读路径按最近见过的 token 字面值兜底脱敏——写路径的 secretKey
 	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
@@ -489,7 +487,13 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	} else {
 		resp["created_at"] = fallbackMS / 1000
 	}
-	resp["translated_resp_status"] = meta.StatusCode
+	// MetaSummary 的完结块字段是指针（区分「完结写了零值」与「创建期
+	// 未写」）；投影到 wire 时按零值落，两种缺席形态同口径。
+	statusCode := 0
+	if meta.StatusCode != nil {
+		statusCode = *meta.StatusCode
+	}
+	resp["translated_resp_status"] = statusCode
 	resp["translated_resp_headers"] = "{}"
 	// 号池归因投到详情首屏：与 logs 表的 account/account_switches
 	// 同口径（switches=失败尝试条数），免去为看归属再抓 meta.json。
@@ -560,10 +564,10 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 		}
 	}
 	switch {
-	case meta.Result == "completed":
+	case meta.Result != nil && *meta.Result == "completed":
 		resp["resp_status"] = 200
-	case errStage == debuglog.ErrStageDevinConnect && meta.StatusCode > 0:
-		resp["resp_status"] = meta.StatusCode
+	case errStage == debuglog.ErrStageDevinConnect && statusCode > 0:
+		resp["resp_status"] = statusCode
 	}
 	if errMessage != "" {
 		resp["upstream_error"] = errStage + ": " + errMessage
