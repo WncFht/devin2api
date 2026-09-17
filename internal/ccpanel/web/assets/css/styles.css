@@ -753,6 +753,17 @@ body {
   color: var(--neutral-700);
 }
 
+/* dev 构建的 describe 串（v0.12.1-0.20260917…）能把导航挤到裁剪——
+   限宽省略，完整版本留在 badge 的 title/跳转链接里 */
+#version-display {
+  display: inline-block;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
 /* 有新版本时显示小圆点 */
 .version-badge.has-update::after {
   content: '';
@@ -5377,7 +5388,7 @@ body.web-role-api-token .filter-group--auth-token {
   }
 }
 
-@media (max-width: 1280px) and (min-width: 769px) {
+@media (max-width: 1500px) and (min-width: 769px) {
   :root {
     --topbar-offset: 108px;
   }
