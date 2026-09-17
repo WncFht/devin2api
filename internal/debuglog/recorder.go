@@ -155,8 +155,8 @@ type Recorder struct {
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
-	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、retries；
-	// worker 自身状态无锁。
+	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
+	// keyHash、retries；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -167,6 +167,10 @@ type Recorder struct {
 	// resolvedModel 是别名解析与路由判定后实际发给上游的 uid；
 	// 进行中行据此把模型列渲染成「请求名 → 实际 uid」，不必等完成。
 	resolvedModel string
+	// keyHash 是准入阶段回填的令牌 key_hash 覆盖值：匿名通道请求不携带
+	// 凭据，requestMeta.KeyHash 为空——拿到令牌后回填，index/meta 才能把
+	// 匿名流量归到该令牌行。非空时优先于 requestMeta.KeyHash。
+	keyHash string
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
@@ -774,6 +778,28 @@ func (recorder *Recorder) SetResolvedModel(model string) {
 	recorder.mutex.Unlock()
 }
 
+// SetKeyHash 在准入解析出令牌后回填 key_hash：匿名通道请求不带凭据，
+// requestMeta.KeyHash 为空，靠它把 index/meta/进行中行归到该令牌。
+func (recorder *Recorder) SetKeyHash(keyHash string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.keyHash = keyHash
+	recorder.mutex.Unlock()
+}
+
+// effectiveKeyHash 返回落入 index/meta 的凭据哈希：准入覆盖值优先，
+// 未覆盖时回到请求创建时采样的 requestMeta.KeyHash。
+func (recorder *Recorder) effectiveKeyHash() string {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	if recorder.keyHash != "" {
+		return recorder.keyHash
+	}
+	return recorder.requestMeta.KeyHash
+}
+
 // AddClientBytes 累加已下发给客户端的字节数，用于进行中列表观察流出速率。
 func (recorder *Recorder) AddClientBytes(n int64) {
 	if recorder == nil || n <= 0 {
@@ -856,6 +882,10 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 	recorder.mutex.Lock()
 	model := recorder.requestedModel
 	resolved := recorder.resolvedModel
+	meta := recorder.requestMeta
+	if recorder.keyHash != "" {
+		meta.KeyHash = recorder.keyHash
+	}
 	retries := len(recorder.retries)
 	var lastRetryCause string
 	if retries > 0 {
@@ -873,7 +903,7 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 	}
 	return ActiveRequest{
 		Dir:             filepath.Base(recorder.directory),
-		Meta:            recorder.requestMeta,
+		Meta:            meta,
 		Model:           model,
 		ResolvedModel:   resolved,
 		Retries:         retries,
@@ -1087,8 +1117,8 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	if recorder.requestMeta.UserAgent != "" {
 		client["user_agent"] = recorder.requestMeta.UserAgent
 	}
-	if recorder.requestMeta.KeyHash != "" {
-		client["key_hash"] = recorder.requestMeta.KeyHash
+	if keyHash := recorder.effectiveKeyHash(); keyHash != "" {
+		client["key_hash"] = keyHash
 	}
 	if recorder.requestMeta.ClientRequestID != "" {
 		client["request_id"] = recorder.requestMeta.ClientRequestID

@@ -6,7 +6,6 @@ package app
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -75,12 +74,13 @@ type App struct {
 	debugManager *debuglog.Manager
 	// ccPanel 是可选的管理面板（ccLoad 契约）处理器；nil 表示不启用面板。
 	ccPanel PanelRegistrar
-	// apiKey 是可选的 OpenAI 兼容接口访问密钥；为空则不校验。
-	// apiKeyMu 保护它：配置 reload 会运行时换值。
+	// apiKey 是 auth.api_key 的运行时值：不再是 /v1 准入旁路——启动与
+	// reload 时它作为种子写成普通令牌行（见 main.seedConfigAPIKey）；
+	// 这里保留运行时值供面板探活当凭据用。apiKeyMu 保护它：reload 热换。
 	apiKeyMu sync.RWMutex
 	apiKey   string
-	// tokens 是下游 auth token 仓（移植面板的多 key 体系）；nil 表示未启用。
-	// master key 与有效 token 都能过 /v1 鉴权；token 另有并发/模型/费用准入。
+	// tokens 是下游 auth token 仓（移植面板的多 key 体系），/v1 准入的
+	// 唯一判定源：仓空即开放模式；nil 表示未接线（测试装配），按开放处理。
 	tokens *authtoken.Store
 	// models 是模型注册表覆盖层（停用开关与重定向）；nil 表示无注册表，
 	// 模型名直通 adapter 别名解析。
@@ -162,15 +162,16 @@ func (application *App) SetModelRegistry(models *modelreg.Store) {
 	application.models = models
 }
 
-// SetAPIKey 设置 OpenAI 兼容接口的访问密钥；应在 Router/HTTPServer 之前调用。
+// SetAPIKey 记录 auth.api_key 的运行时值（面板探活凭据用）；应在
+// Router/HTTPServer 之前调用。/v1 准入不读它——凭据准入全走令牌仓。
 func (application *App) SetAPIKey(apiKey string) {
 	application.apiKeyMu.Lock()
 	application.apiKey = apiKey
 	application.apiKeyMu.Unlock()
 }
 
-// APIKey 返回当前生效的访问密钥（配置热重载后为新值）；移植面板的
-// 探活与主密钥展示用它读取运行时值。
+// APIKey 返回 auth.api_key 的运行时值（配置热重载后为新值）；
+// 移植面板的探活用它读取凭据。
 func (application *App) APIKey() string {
 	application.apiKeyMu.RLock()
 	defer application.apiKeyMu.RUnlock()
@@ -613,35 +614,26 @@ func presentedCredential(request *http.Request) string {
 	return ""
 }
 
-// authenticate 判定下游凭据：master key 命中→(nil,true)；auth token 命中→
-// (token,true)；未设 master key 且无令牌→(nil,true) 开放模式；其余→false。
-// apiKeyMiddleware 与 createCompletion 共用——WS 轮次的内层请求不经过
-// middleware，令牌准入在 createCompletion 里必须能独立重演这套判定。
+// authenticate 判定下游凭据，令牌仓是唯一判定源：哈希命中→(token,true)
+// ——空明文凭据命中匿名通道行亦然；仓空（或未接线）→(nil,true) 开放
+// 模式；其余→false。apiKeyMiddleware 与 createCompletion 共用——WS
+// 轮次的内层请求不经过 middleware，准入在 createCompletion 里必须能
+// 独立重演这套判定。
 func (application *App) authenticate(credential string) (*authtoken.Token, bool) {
-	application.apiKeyMu.RLock()
-	expected := application.apiKey
-	application.apiKeyMu.RUnlock()
-	masterSet := strings.TrimSpace(expected) != ""
-	if masterSet && credential != "" {
-		expectedHash := sha256.Sum256([]byte(expected))
-		providedHash := sha256.Sum256([]byte(credential))
-		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1 {
-			return nil, true
-		}
+	if application.tokens == nil {
+		return nil, true
 	}
-	if application.tokens != nil {
-		if t, ok := application.tokens.Resolve(credential); ok {
-			return t, true
-		}
+	if t, ok := application.tokens.Resolve(credential); ok {
+		return t, true
 	}
-	if !masterSet && (application.tokens == nil || application.tokens.Empty()) {
+	if application.tokens.Empty() {
 		return nil, true
 	}
 	return nil, false
 }
 
-// apiKeyMiddleware 校验 OpenAI 兼容接口的下游凭据：master key 或有效
-// auth token 皆可；两者都不配时（开放模式）不校验。
+// apiKeyMiddleware 校验 OpenAI 兼容接口的下游凭据：有效 auth token
+// （含匿名通道行）才放行；仓空时（开放模式）不校验。
 func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		provided := presentedCredential(request)
@@ -688,9 +680,10 @@ func (application *App) createCompletion(
 	completion := debuglog.Completion{StatusCode: http.StatusInternalServerError, Result: "failed"}
 	startedAt := time.Now()
 	responseBytes := 0
-	// authTok 是本次请求解析到的下游令牌（master key/开放模式为 nil）；
-	// tokenAcquired 标记并发槽已占，defer 据此配对 Release；tokenBlocked
-	// 标记准入拒绝——被拒请求不进令牌统计（ccLoad 在代理层前就返回）。
+	// authTok 是本次请求解析到的下游令牌（开放模式为 nil——空仓无凭据
+	// 准入，无行可归因）；tokenAcquired 标记并发槽已占，defer 据此配对
+	// Release；tokenBlocked 标记准入拒绝——被拒请求不进令牌统计
+	//（ccLoad 在代理层前就返回）。
 	var authTok *authtoken.Token
 	tokenAcquired := false
 	tokenBlocked := false
@@ -804,18 +797,21 @@ func (application *App) createCompletion(
 		recorder.WriteJSON(debuglog.StageRequestMessages, debuglog.RequestMessagesProjection(messages))
 	}
 	// 令牌准入（ccLoad RequireAPIAuth/enforceTokenLimits 同序）：先占并发槽，
-	// 再查模型白名单，最后查费用窗口。HTTP 路径上 apiKeyMiddleware 已验过
-	// 凭据，这里是幂等复核；WS 轮次的内层请求不走 middleware，靠它兜底。
+	// 再查模型白名单、RPM 窗口，最后查费用窗口。HTTP 路径上 apiKeyMiddleware
+	// 已验过凭据，这里是幂等复核；WS 轮次的内层请求不走 middleware，靠它兜底。
 	if tok, ok := application.authenticate(presentedCredential(request)); ok {
 		authTok = tok
 	} else {
-		// 只可能两种情形：master key 在请求处理中被热改，或 WS 会话建立后
-		// 令牌被删/过期——都按 401 收尾。
+		// HTTP 路径上 middleware 已放行，走到这里失败只可能是令牌在请求
+		// 处理中被删/停用/过期，或 WS 会话建立后状态翻转——按 401 收尾。
 		tokenBlocked = true
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusUnauthorized, errors.New("invalid or expired api token"))
 		return
 	}
 	if authTok != nil {
+		// 匿名通道请求不带凭据，recorder 采样不到 key_hash——拿到令牌后
+		// 回填，index/meta/进行中行才把匿名流量归到该行。
+		recorder.SetKeyHash(authTok.KeyHash())
 		active, limit, ok := application.tokens.Acquire(authTok.ID)
 		if !ok {
 			tokenBlocked = true
@@ -828,9 +824,14 @@ func (application *App) createCompletion(
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
 			return
 		}
+		if used, limit, ok := application.tokens.AllowRPM(authTok.ID); !ok {
+			tokenBlocked = true
+			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token rate limit exceeded: %d of %d requests per minute", used, limit))
+			return
+		}
 		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
 			tokenBlocked = true
-			windowName := map[string]string{"daily": "Daily", "monthly": "Monthly", "total": "Total"}[window]
+			windowName := map[string]string{"5h": "5h", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly", "total": "Total"}[window]
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
 			return
 		}

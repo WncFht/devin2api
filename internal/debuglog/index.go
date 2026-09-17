@@ -135,7 +135,7 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		CreditCost:        creditCost(completion.Usage),
 		UpstreamRequestID: completion.UpstreamRequestID,
 		ClientIP:          recorder.requestMeta.ClientIP,
-		KeyHash:           recorder.requestMeta.KeyHash,
+		KeyHash:           recorder.effectiveKeyHash(),
 		ClientRequestID:   recorder.requestMeta.ClientRequestID,
 		DroppedEvents:     recorder.dropped.Load(),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
