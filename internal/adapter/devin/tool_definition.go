@@ -197,6 +197,143 @@ func collectParamLines(node any, prefix string, depth int, lines *[]string) {
 	}
 }
 
+// requiredUnlessPattern 提取字段描述里的统一条件子句
+// （"Required unless `stop` is true." → "`stop` is true"）。
+var requiredUnlessPattern = regexp.MustCompile(`(?i)\brequired\s+unless\s+([^.;]+)`)
+
+// conditionalRequiredFieldPattern 从统一 unless 子句里解出条件字段名：
+// 只接 "`X` is true"/"\"X\" is true" 形态（实测唯一出现的极性）。
+var conditionalRequiredFieldPattern = regexp.MustCompile("^[`'\"](\\w+)[`'\"]\\s+is\\s+true$")
+
+// conditionalRequiredSpec 检测「全部必填标记字段共享同一 unless 子句、且
+// 子句指向同层一个未标记字段」的条件必填模式（ScheduleWakeup 形态：
+// required unless `stop` is true）。命中时返回条件字段名与被条件必填的
+// 字段名清单，供 wire schema 合成 anyOf [{required:[cond]},
+// {required:[fields]}]——prose 行头标记把命中率推到 ~50% 平台后不再涨，
+// schema 层约束是模型原生解析的硬信号（sw-anyof 探针实证可读）。
+func conditionalRequiredSpec(schema json.RawMessage) (string, []string, bool) {
+	var root any
+	if err := json.Unmarshal(schema, &root); err != nil {
+		return "", nil, false
+	}
+	object, ok := root.(map[string]any)
+	if !ok {
+		return "", nil, false
+	}
+	// 客户端已声明组合结构时不叠加猜测语义。
+	if _, exists := object["anyOf"]; exists {
+		return "", nil, false
+	}
+	if _, exists := object["oneOf"]; exists {
+		return "", nil, false
+	}
+	properties, ok := object["properties"].(map[string]any)
+	if !ok {
+		return "", nil, false
+	}
+	required := make(map[string]bool)
+	if list, ok := object["required"].([]any); ok {
+		for _, item := range list {
+			if name, ok := item.(string); ok {
+				required[name] = true
+			}
+		}
+	}
+	clauses := make(map[string]bool)
+	var marked []string
+	for name, raw := range properties {
+		property, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		doc, _ := property["description"].(string)
+		if doc == "" {
+			doc, _ = property["title"].(string)
+		}
+		doc = strings.Join(strings.Fields(doc), " ")
+		if !(required[name] || claimsRequired(doc)) {
+			continue
+		}
+		clause := ""
+		if m := requiredUnlessPattern.FindStringSubmatch(doc); m != nil {
+			clause = strings.TrimRight(strings.TrimSpace(m[1]), ".")
+		}
+		clauses[clause] = true
+		marked = append(marked, name)
+	}
+	if len(marked) == 0 || len(clauses) != 1 {
+		return "", nil, false
+	}
+	var clause string
+	for sole := range clauses {
+		clause = sole
+	}
+	m := conditionalRequiredFieldPattern.FindStringSubmatch(clause)
+	if m == nil {
+		return "", nil, false
+	}
+	condField := m[1]
+	if _, exists := properties[condField]; !exists {
+		return "", nil, false
+	}
+	// 条件字段自身必填/被标记 → anyOf 分支恒真或递归语义不成立，不合成。
+	if required[condField] {
+		return "", nil, false
+	}
+	for _, name := range marked {
+		if name == condField {
+			return "", nil, false
+		}
+	}
+	sort.Strings(marked)
+	return condField, marked, true
+}
+
+// injectConditionalRequired 给 wire schema 顶层补 anyOf 条件必填
+// [{required:[condField]}, {required:[marked…]}]，并把 marked 字段从顶层
+// required[] 降级进分支——否则条件分支（如 stop:true）仍被顶层 required
+// 强制带上全量字段，条件语义被吃掉。顶层非对象 map 或已有 anyOf/oneOf
+// 时原样返回。
+func injectConditionalRequired(schema json.RawMessage, condField string, marked []string) json.RawMessage {
+	var object map[string]any
+	if err := json.Unmarshal(schema, &object); err != nil {
+		return schema
+	}
+	if _, exists := object["anyOf"]; exists {
+		return schema
+	}
+	if _, exists := object["oneOf"]; exists {
+		return schema
+	}
+	markedSet := make(map[string]bool, len(marked))
+	for _, name := range marked {
+		markedSet[name] = true
+	}
+	if list, ok := object["required"].([]any); ok {
+		kept := make([]any, 0, len(list))
+		for _, item := range list {
+			if name, ok := item.(string); ok && markedSet[name] {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		if len(kept) == 0 {
+			delete(object, "required")
+		} else {
+			object["required"] = kept
+		}
+	}
+	object["anyOf"] = []any{
+		map[string]any{"required": []string{condField}},
+		map[string]any{"required": marked},
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return schema
+	}
+	return encoded
+}
+
 // claimsRequired 判定字段描述是否声明了必填语义——条件必填
 // （"Required unless `stop` is true"）只活在 prose 里、不进 required[]，
 // 在摘要行头补标 required 防止模型把它当可选字段跳过。先把否定形态
@@ -448,6 +585,11 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 	schema, err = normalizeSchema(schema)
 	if err != nil {
 		return nil, fmt.Errorf("normalize Devin tool %q schema: %w", tool.Name, err)
+	}
+	// prose 统一 unless 子句命中时合成 anyOf 条件必填：strip 已把字段描述
+	// 剥掉，检测必须跑在原始 schema 上，合成产物写进剥离后的 wire schema。
+	if condField, marked, ok := conditionalRequiredSpec(tool.InputSchema); ok {
+		schema = injectConditionalRequired(schema, condField, marked)
 	}
 	converted := &devinproto.ExaChatPb_ChatToolDefinition{
 		Name:             proto.String(tool.Name),
