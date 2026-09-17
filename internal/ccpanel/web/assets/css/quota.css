@@ -1,0 +1,40 @@
+/* quota 页面专用样式 */
+
+.quota-head-card {
+  padding: var(--space-4) var(--space-6);
+}
+
+.quota-head-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.quota-head-row .section-title {
+  margin: 0;
+}
+
+.quota-head-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.quota-updated {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.quota-card {
+  padding: var(--space-6);
+}
+
+.quota-chart {
+  height: 360px;
+}
+
+.quota-grid-loading {
+  grid-column: 1 / -1;
+}

@@ -641,11 +641,11 @@
       document.getElementById('tokenActive').checked = true;
       document.getElementById('tokenAnonymous').checked = false;
       document.getElementById('customExpiryContainer').style.display = 'none';
-      document.getElementById('createModal').style.display = 'block';
+      document.getElementById('createModal').classList.add('show');
     }
 
     function closeCreateModal() {
-      document.getElementById('createModal').style.display = 'none';
+      document.getElementById('createModal').classList.remove('show');
     }
 
     async function createToken() {
@@ -718,7 +718,7 @@
         closeCreateModal();
         if (!anonymous && data.token) {
           document.getElementById('newTokenValue').value = data.token;
-          document.getElementById('tokenResultModal').style.display = 'block';
+          document.getElementById('tokenResultModal').classList.add('show');
         }
         loadTokens();
         window.showNotification(t(anonymous ? 'tokens.msg.anonymousCreateSuccess' : 'tokens.msg.createSuccess'), 'success');
@@ -742,7 +742,7 @@
     }
 
     function closeTokenResultModal() {
-      document.getElementById('tokenResultModal').style.display = 'none';
+      document.getElementById('tokenResultModal').classList.remove('show');
       document.getElementById('newTokenValue').value = '';
     }
 
@@ -785,12 +785,12 @@
       if (allowedModelFilterInput) allowedModelFilterInput.value = '';
       renderAllowedModelsTable();
 
-      document.getElementById('editModal').style.display = 'block';
+      document.getElementById('editModal').classList.add('show');
       pushModal(closeEditModal);
     }
 
     function closeEditModal() {
-      document.getElementById('editModal').style.display = 'none';
+      document.getElementById('editModal').classList.remove('show');
       document.getElementById('editTokenValue').value = '';
       document.getElementById('editCustomExpiry').value = '';
       document.getElementById('editCustomExpiryContainer').style.display = 'none';
@@ -1081,7 +1081,7 @@
       selectedModelsForAdd.clear();
       document.getElementById('modelSearchInput').value = '';
       renderAvailableModels('');
-      document.getElementById('modelSelectModal').style.display = 'block';
+      document.getElementById('modelSelectModal').classList.add('show');
       pushModal(closeModelSelectModal);
     }
 
@@ -1089,7 +1089,7 @@
      * 关闭模型选择对话框
      */
     function closeModelSelectModal() {
-      document.getElementById('modelSelectModal').style.display = 'none';
+      document.getElementById('modelSelectModal').classList.remove('show');
       selectedModelsForAdd.clear();
       popModal();
     }
@@ -1272,7 +1272,7 @@
     function showModelImportModal() {
       document.getElementById('tokenModelImportTextarea').value = '';
       document.getElementById('tokenModelImportPreview').style.display = 'none';
-      document.getElementById('modelImportModal').style.display = 'block';
+      document.getElementById('modelImportModal').classList.add('show');
       setTimeout(() => document.getElementById('tokenModelImportTextarea').focus(), 100);
       pushModal(closeModelImportModal);
     }
@@ -1281,7 +1281,7 @@
      * 关闭模型导入对话框
      */
     function closeModelImportModal() {
-      document.getElementById('modelImportModal').style.display = 'none';
+      document.getElementById('modelImportModal').classList.remove('show');
       popModal();
     }
 

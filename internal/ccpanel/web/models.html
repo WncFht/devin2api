@@ -27,12 +27,12 @@
     <main class="main-content">
       <div class="content-area">
         <header class="mt-2 mb-4">
-          <div class="glass-card" style="padding: var(--space-5) var(--space-6);">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-4); flex-wrap: wrap;">
+          <div class="glass-card models-head-card">
+            <div class="models-head-row">
               <div>
                 <h1 class="page-title mb-2" data-i18n="models.pageTitle">模型注册表</h1>
                 <p class="page-subtitle" data-i18n="models.pageSubtitle">对外模型名的启用开关与重定向；重定向在别名解析之前生效</p>
-                <p id="models-summary" class="page-subtitle" style="margin-top: var(--space-2);"></p>
+                <p id="models-summary" class="page-subtitle"></p>
               </div>
               <button type="button" id="add-model-btn" class="btn btn-primary" data-i18n="models.add.button">+ 添加模型</button>
             </div>
@@ -40,34 +40,34 @@
         </header>
 
         <section class="mb-2">
-          <div class="time-range-container" style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
+          <div class="time-range-container models-filter-bar">
             <div id="models-filter-pills" class="time-range-selector">
               <button type="button" class="time-range-btn active" data-filter="all" data-i18n="common.all">全部</button>
               <button type="button" class="time-range-btn" data-filter="disabled" data-i18n="models.filter.disabled">已禁用</button>
               <button type="button" class="time-range-btn" data-filter="redirected" data-i18n="models.filter.redirected">已重定向</button>
               <button type="button" class="time-range-btn" data-filter="override" data-i18n="models.filter.override">有覆盖</button>
             </div>
-            <input id="models-filter" type="search" class="form-input" style="max-width: 240px; margin-left: auto;"
+            <input id="models-filter" type="search" class="form-input"
               data-i18n-placeholder="models.filterPlaceholder" placeholder="筛选模型名" spellcheck="false">
           </div>
-          <div style="display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-3);">
-            <select id="f-provider" class="form-input" style="width: auto; min-width: 120px;">
+          <div class="models-filter-selects">
+            <select id="f-provider" class="form-input">
               <option value="" data-i18n="models.filter.allProviders">全部供应商</option>
             </select>
-            <select id="f-api" class="form-input" style="width: auto; min-width: 110px;">
+            <select id="f-api" class="form-input">
               <option value="" data-i18n="models.filter.allApis">全部 API</option>
             </select>
-            <select id="f-tier" class="form-input" style="width: auto; min-width: 100px;">
+            <select id="f-tier" class="form-input">
               <option value="" data-i18n="models.filter.allTiers">全部档位</option>
               <option value="free">free</option>
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
             </select>
-            <select id="f-pricing" class="form-input" style="width: auto; min-width: 110px;">
+            <select id="f-pricing" class="form-input">
               <option value="" data-i18n="models.filter.allPricings">全部定价</option>
             </select>
-            <select id="f-sort" class="form-input" style="width: auto; min-width: 150px; margin-left: auto;" data-i18n-aria-label="models.sort.label" aria-label="排序">
+            <select id="f-sort" class="form-input" data-i18n-aria-label="models.sort.label" aria-label="排序">
               <option value="default" data-i18n="models.sort.default">默认排序</option>
               <option value="mult_asc" data-i18n="models.sort.multAsc">倍率 低→高</option>
               <option value="mult_desc" data-i18n="models.sort.multDesc">倍率 高→低</option>
@@ -78,7 +78,7 @@
               <option value="name" data-i18n="models.sort.name">名称 A→Z</option>
             </select>
           </div>
-          <div id="models-tag-chips" class="tag-chip-list" style="margin-top: var(--space-3);">
+          <div id="models-tag-chips" class="tag-chip-list">
             <button type="button" class="tag-chip" data-tag="free" data-i18n="models.tag.free">免费</button>
             <button type="button" class="tag-chip" data-tag="promo" data-i18n="models.tag.promo">促销</button>
             <button type="button" class="tag-chip" data-tag="img" data-i18n="models.tag.img">图像</button>
@@ -112,15 +112,15 @@
               </thead>
               <tbody id="models-tbody"></tbody>
             </table>
-            <div id="models-empty" style="text-align: center; padding: var(--space-8) var(--space-4); color: var(--color-text-secondary);" hidden>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin: 0 auto var(--space-3); opacity: 0.5;" aria-hidden="true">
+            <div id="models-empty" class="empty-state" hidden>
+              <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--neutral" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                 <rect x="3" y="4" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="16" width="18" height="4" rx="1"/>
               </svg>
-              <h3 data-i18n="models.emptyTitle" style="margin-bottom: var(--space-1);">暂无模型</h3>
-              <p data-i18n="models.emptyDesc" style="font-size: var(--text-sm);">没有匹配筛选条件的模型</p>
+              <h3 class="empty-state-title" data-i18n="models.emptyTitle">暂无模型</h3>
+              <p data-i18n="models.emptyDesc">没有匹配筛选条件的模型</p>
             </div>
           </div>
-          <p class="page-subtitle" style="padding: 0 var(--space-4) var(--space-3); font-size: var(--text-xs);" data-i18n="models.priceNote">倍率 = 上游 credit 消耗倍率；价格单位 $ / 1M tokens</p>
+          <p class="page-subtitle models-price-note" data-i18n="models.priceNote">倍率 = 上游 credit 消耗倍率；价格单位 $ / 1M tokens</p>
         </section>
 
         <section class="mb-2">
@@ -155,7 +155,7 @@
                   />
                   <span data-i18n="logs.pageUnit">页</span>
                   <span class="logs-pagination-separator">|</span>
-                  <select id="models_page_size" class="form-input" style="width: auto; padding: 2px 6px; font-size: var(--text-xs);">
+                  <select id="models_page_size" class="form-input">
                     <option value="20">20</option>
                     <option value="50">50</option>
                     <option value="100">100</option>
