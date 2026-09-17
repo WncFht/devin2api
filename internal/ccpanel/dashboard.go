@@ -171,23 +171,21 @@ type metricPoint struct {
 	Models                  map[string]metricModel `json:"models,omitempty"`
 }
 
-// dashboardMetrics 实现 /dashboard/metrics：按 bucket_min 聚合的时间桶点列，
+// dashboardMetrics 实现 /dashboard/metrics：按 bucket_sec 聚合的时间桶点列，
 // models 键为模型名（本服务无多上游渠道，模型即最细维度）。口径对齐
 // ccLoad AggregateRangeWithFilter：success=2xx、error=非2xx非499，
 // token/成本只计非 499 行（NG 字段），均值样本为 2xx 且时值>0 的行。
 // 无论有无数据都补出 [since,until] 对齐 bucket 边界的满序列（metrics_finalize
-// 同款），前端按点位对齐多序列；格子粒度 10 分钟，更小的 bucket 抬到 10。
+// 同款），前端按点位对齐多序列；格子直接按桶宽出槽（下限 10s、上限 1d），
+// 点数超 maxMetricPoints 时桶宽上抬到整齐档，生效值经 X-Bucket-Sec 回传。
 func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	since, until, _ := resolveRange(r, now)
-	bucketMin, _ := strconv.Atoi(r.URL.Query().Get("bucket_min"))
-	if bucketMin <= 0 {
-		bucketMin = 5
+	bucketSec, _ := strconv.ParseInt(r.URL.Query().Get("bucket_sec"), 10, 64)
+	if bucketSec <= 0 {
+		bucketSec = rollupSlotSeconds
 	}
-	if bucketMin < 10 {
-		bucketMin = 10
-	}
-	bucketSec := int64(bucketMin) * 60
+	bucketSec = clampMetricBucket(bucketSec, until.Unix()-since.Unix())
 	scope, excluded := h.queryScope(r)
 	prices := h.CatalogPrices(r.Context())
 
@@ -203,15 +201,13 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	buckets := map[int64]*bucketAgg{}
 	if !excluded {
-		h.eachCell(r.Context(), since, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
+		h.eachCellSec(r.Context(), bucketSec, since, until, scope, func(key store.LogCellKey, c store.LogCellTotals) {
 			totalReqs += c.Requests - c.Gone
-			// 整格归入槽起点所在桶：bucket 不是 10 分钟倍数时边界有
-			// ±10 分钟错位（格子分辨率下限），前端常用档位均为整倍数。
-			b := key.Slot / bucketSec * bucketSec
-			a := buckets[b]
+			// 槽宽即桶宽，格子槽起点直接是桶号。
+			a := buckets[key.Slot]
 			if a == nil {
 				a = &bucketAgg{byModel: map[string]*store.LogCellTotals{}, modelCost: map[string]float64{}}
-				buckets[b] = a
+				buckets[key.Slot] = a
 			}
 			cost := cellCostNG(key, c, prices)
 			a.cost += cost
@@ -285,7 +281,35 @@ func (h *Handler) dashboardMetrics(w http.ResponseWriter, r *http.Request) {
 		points = append(points, p)
 	}
 	w.Header().Set("X-Debug-Total", strconv.FormatInt(totalReqs, 10))
+	w.Header().Set("X-Bucket-Sec", strconv.FormatInt(bucketSec, 10))
 	respondOK(w, points)
+}
+
+// maxMetricPoints 是 metrics 满序列的点数上限；metricBucketSteps 是点数
+// 超限时桶宽上取的整齐档（秒），保证间隔标签始终是整秒/整分/整时。
+const maxMetricPoints = 2880
+
+var metricBucketSteps = []int64{10, 15, 20, 30, 60, 120, 180, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200, 86400}
+
+// clampMetricBucket 把请求桶宽收进 [10s,1d]，并在点数超上限时上抬到
+// 能放下的最小整齐档。
+func clampMetricBucket(bucketSec, spanSec int64) int64 {
+	if bucketSec < 10 {
+		bucketSec = 10
+	}
+	if bucketSec > 86400 {
+		bucketSec = 86400
+	}
+	if spanSec/bucketSec+1 > maxMetricPoints {
+		bucketSec = spanSec/maxMetricPoints + 1
+		for _, s := range metricBucketSteps {
+			if s >= bucketSec {
+				bucketSec = s
+				break
+			}
+		}
+	}
+	return bucketSec
 }
 
 // cellCost 按目录价折算单格成本（含 499 行的 token 口径，summary/stats/

@@ -221,10 +221,10 @@
 
         const hours = getTrendRangeHours(currentRange);
         window.currentHours = hours; // 同步到全局变量，供 renderChart 使用
-        const bucketMin = effectiveBucketMin(hours);
+        const reqBucketSec = effectiveBucketSec(hours);
 
         const metricsParams = buildTrendRequestParams({
-          bucket_min: bucketMin
+          bucket_sec: reqBucketSec
         });
         const metrics = await fetchAPIWithAuthRaw('/dashboard/metrics?' + metricsParams.toString());
 
@@ -250,6 +250,8 @@
         }
 
         const debugTotal = metrics.res.headers.get('X-Debug-Total');
+        // 后端可能因点数上限把桶宽抬档；RPM/TPS/间隔片统一吃回传的生效值
+        window.currentBucketSec = Number(metrics.res.headers.get('X-Bucket-Sec')) || reqBucketSec;
 
         updateModelFilter();
         renderChart();
@@ -258,7 +260,7 @@
         const iv = document.getElementById('bucket-interval');
         if (iv) {
           iv.textContent = t('trend.dataInterval', {
-            interval: formatInterval(bucketMin),
+            interval: formatInterval(window.currentBucketSec),
             points: trendData.length,
             total: debugTotal || t('trend.unknown')
           });
@@ -312,18 +314,22 @@
       }
     }
 
-    function computeBucketMin(hours) {
-      // 底层存储格子是 10 分钟一档，后端把更小的 bucket_min 抬到 10——
-      // 自动档在这里就按真实粒度给，免得界面显示的间隔与实际分桶不符
-      if (hours <= 24) return 10;
-      if (hours <= 72) return 15;
-      return 60;
+    // 自动分桶（秒）：按窗口长度分档，目标 ~300 点——短窗给到 10s
+    // 近实时粒度，长窗放宽到 5/15/60 分钟。后端点数上限仍会兜底，
+    // 实际生效值以响应头 X-Bucket-Sec（window.currentBucketSec）为准。
+    function computeBucketSec(hours) {
+      if (hours <= 1) return 10;
+      if (hours <= 3) return 30;
+      if (hours <= 6) return 60;
+      if (hours <= 24) return 300;
+      if (hours <= 72) return 900;
+      return 3600;
     }
 
-    // 生效分桶：用户在工具栏选的粒度（分钟）优先，0/未选 = 自动分档
-    function effectiveBucketMin(hours) {
+    // 请求分桶：用户在工具栏选的粒度（秒）优先，0/未选 = 自动分档
+    function effectiveBucketSec(hours) {
       const override = Number(localStorage.getItem(TREND_BUCKET_KEY));
-      return override > 0 ? override : computeBucketMin(hours);
+      return override > 0 ? override : computeBucketSec(hours);
     }
 
     function renderTrendLoading() {
@@ -609,8 +615,8 @@
           })
         });
       } else if (trendType === 'rpm') {
-        // RPM趋势：每分钟请求数 = (success + error) / bucketMin
-        const bucketMin = window.currentHours ? effectiveBucketMin(window.currentHours) : 10;
+        // RPM趋势：每分钟请求数 = (success + error) * 60 / bucketSec
+        const bucketSec = window.currentBucketSec || 600;
         series.push({
           name: 'RPM',
           type: 'line',
@@ -631,12 +637,12 @@
           },
           data: window.trendData.map(point => {
             const total = (point.success || 0) + (point.error || 0);
-            return total > 0 ? total / bucketMin : 0;
+            return total > 0 ? total * 60 / bucketSec : 0;
           })
         });
       } else if (trendType === 'tps') {
-        // TPS趋势：四类 token 的每秒速率 = 桶内计数 / (bucketMin*60)，与 tokens 视图同分解
-        const bucketSec = (window.currentHours ? effectiveBucketMin(window.currentHours) : 10) * 60;
+        // TPS趋势：四类 token 的每秒速率 = 桶内计数 / bucketSec，与 tokens 视图同分解
+        const bucketSec = window.currentBucketSec || 600;
         const tpsSeriesDefs = [
           { field: 'input_tokens', name: t('trend.inputTokens'), color: '#3b82f6' },
           { field: 'output_tokens', name: t('trend.outputTokens'), color: '#10b981' },
@@ -879,7 +885,7 @@
           }
         } else if (trendType === 'rpm') {
           // RPM趋势：模型每分钟请求数
-          const bucketMin = window.currentHours ? effectiveBucketMin(window.currentHours) : 10;
+          const bucketSec = window.currentBucketSec || 600;
           const rpmData = new Array(dataLen);
           let hasData = false;
 
@@ -888,7 +894,7 @@
             const modelData = models ? models[modelName] : null;
             const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
             if (total > 0) {
-              rpmData[i] = total / bucketMin;
+              rpmData[i] = total * 60 / bucketSec;
               hasData = true;
             } else {
               rpmData[i] = null;
@@ -911,7 +917,7 @@
           }
         } else if (trendType === 'tps') {
           // TPS趋势：模型每秒 token 速率（输入+输出，与 tokens 视图的模型口径一致）
-          const bucketSec = (window.currentHours ? effectiveBucketMin(window.currentHours) : 10) * 60;
+          const bucketSec = window.currentBucketSec || 600;
           const tpsData = new Array(dataLen);
           let hasData = false;
 
@@ -1434,8 +1440,11 @@ function shouldShowZoom(points, hours, trendType) {
       return sorted[lo] * (1 - w) + sorted[hi] * w;
     }
 
-    function formatInterval(min) {
-      return min >= 60 ? (min/60) + ' ' + t('trend.hour') : min + ' ' + t('trend.minute');
+    // 间隔标签：入参是秒，>=1min 折算成一位小数的分/时（整齐档整除后无小数）
+    function formatInterval(sec) {
+      if (sec >= 3600) return Math.round(sec / 360) / 10 + ' ' + t('trend.hour');
+      if (sec >= 60) return Math.round(sec / 6) / 10 + ' ' + t('trend.minute');
+      return sec + ' ' + t('trend.second');
     }
 
     // 工具函数
@@ -1695,13 +1704,14 @@ function shouldShowZoom(points, hours, trendType) {
     const TREND_REFRESH_DEFAULT = 60;
     let trendRefreshTimer = null;
 
-    // 数据粒度手动档：localStorage 存分钟数，0/未存 = 自动分档
-    const TREND_BUCKET_KEY = 'trend.bucketMin';
-    const TREND_BUCKET_OPTIONS = [10, 30, 60, 120, 360];
+    // 数据粒度手动档：localStorage 存秒数，0/未存 = 自动分档
+    const TREND_BUCKET_KEY = 'trend.bucketSec';
+    const TREND_BUCKET_OPTIONS = [10, 30, 60, 300, 600, 1800, 3600, 7200, 21600];
 
     function initTrendBucketControl() {
-      const select = document.getElementById('f_bucket_min');
+      const select = document.getElementById('f_bucket_sec');
       if (!select) return;
+      try { localStorage.removeItem('trend.bucketMin'); } catch (_) {}
       const saved = Number(localStorage.getItem(TREND_BUCKET_KEY));
       select.value = TREND_BUCKET_OPTIONS.includes(saved) ? String(saved) : '0';
       select.addEventListener('change', () => {

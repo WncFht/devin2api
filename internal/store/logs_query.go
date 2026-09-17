@@ -490,25 +490,26 @@ const logCellCols = `
 			THEN duration_ms - first_upstream_ms ELSE duration_ms END
 		ELSE 0 END), 0)`
 
-// alignUp600/alignDown600 把 unix 秒对齐到 600s 槽边界。
-func alignUp600(v int64) int64   { return v + ((600 - v%600) % 600) }
-func alignDown600(v int64) int64 { return v - ((v%600 + 600) % 600) }
+// alignUp/alignDown 把 unix 秒对齐到 w 秒槽边界。
+func alignUp(v, w int64) int64   { return v + ((w - v%w) % w) }
+func alignDown(v, w int64) int64 { return v - ((v%w + w) % w) }
 
-// LogCells 按 (槽,api,生效模型,key_hash) 聚合时间窗内的日志行，逐格回调。
-// 格子口径与旧 eachCell 一致：格子计入条件是它与 [since,until)（unix 秒）
-// 有任意重叠——即 slot+600>since 且 slot<until，翻译成行的 time 范围是
-// [alignUp600(since-599), alignDown600(until-1)+600) 毫秒。
-func (s *Store) LogCells(ctx context.Context, sinceSec, untilSec int64, sc LogScope, cb func(LogCellKey, LogCellTotals)) error {
-	if untilSec < 1 {
+// LogCells 按 (slotSec 秒槽,api,生效模型,key_hash) 聚合时间窗内的日志行，
+// 逐格回调。格子计入条件是它与 [since,until)（unix 秒）有任意重叠——
+// 即 slot+slotSec>since 且 slot<until，翻译成行的 time 范围是
+// [alignUp(since-(slotSec-1)), alignDown(until-1)+slotSec) 毫秒。
+func (s *Store) LogCells(ctx context.Context, slotSec, sinceSec, untilSec int64, sc LogScope, cb func(LogCellKey, LogCellTotals)) error {
+	if untilSec < 1 || slotSec < 1 {
 		return nil
 	}
-	lo := alignUp600(sinceSec-599) * 1000
-	hi := (alignDown600(untilSec-1) + 600) * 1000
+	lo := alignUp(sinceSec-(slotSec-1), slotSec) * 1000
+	hi := (alignDown(untilSec-1, slotSec) + slotSec) * 1000
 	if hi <= lo {
 		return nil
 	}
 	scopeWhere, scopeArgs := sc.where()
-	query := `SELECT time/600000*600 AS slot, api, ` + logEModelExpr + ` AS emodel, key_hash,` +
+	query := fmt.Sprintf(`SELECT time/%d*%d AS slot, api, `, slotSec*1000, slotSec) +
+		logEModelExpr + ` AS emodel, key_hash,` +
 		logCellCols + ` FROM logs WHERE time >= ? AND time < ?` + scopeWhere +
 		` GROUP BY slot, api, emodel, key_hash`
 	sqlRows, err := s.ro.QueryContext(ctx, query, append([]any{lo, hi}, scopeArgs...)...)

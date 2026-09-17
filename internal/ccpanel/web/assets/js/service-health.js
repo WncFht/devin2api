@@ -17,7 +17,7 @@
     const bucketMinutes = BUCKET_CHOICES.find(value => value >= requiredBucketMinutes)
       || BUCKET_CHOICES.at(-1);
     const params = new URLSearchParams(dateRangeQuery || 'range=today');
-    params.set('bucket_min', String(bucketMinutes));
+    params.set('bucket_sec', String(bucketMinutes * 60));
     return {
       query: params.toString(),
       bucketMinutes

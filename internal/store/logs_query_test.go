@@ -79,13 +79,13 @@ func TestAccountFoldFilter(t *testing.T) {
 
 	// LogCells 逐格回调，scope 过滤后格子计数只含命中群的行。
 	var cellReqs int64
-	err = s.LogCells(ctx, now.Unix()-1, now.Unix()+1, LogScope{Account: "yanjian"},
+	err = s.LogCells(ctx, 600, now.Unix()-1, now.Unix()+1, LogScope{Account: "yanjian"},
 		func(_ LogCellKey, c LogCellTotals) { cellReqs += c.Requests })
 	if err != nil || cellReqs != 3 {
 		t.Fatalf("LogCells(yanjian) = %d err=%v, want 3", cellReqs, err)
 	}
 	cellReqs = 0
-	err = s.LogCells(ctx, now.Unix()-1, now.Unix()+1, LogScope{Account: "default"},
+	err = s.LogCells(ctx, 600, now.Unix()-1, now.Unix()+1, LogScope{Account: "default"},
 		func(_ LogCellKey, c LogCellTotals) { cellReqs += c.Requests })
 	if err != nil || cellReqs != 3 {
 		t.Fatalf("LogCells(default) = %d err=%v, want 3", cellReqs, err)

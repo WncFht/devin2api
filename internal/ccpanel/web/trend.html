@@ -104,16 +104,20 @@
                     <option value="300" data-i18n="trend.refresh5min">5分钟</option>
                   </select>
                 </label>
-                <!-- 数据分桶粒度：0=自动按时间窗分档，选择存 localStorage -->
-                <label class="trend-refresh-control trend-bucket-control" for="f_bucket_min">
+                <!-- 数据分桶粒度（秒）：0=自动按时间窗分档，选择存 localStorage -->
+                <label class="trend-refresh-control trend-bucket-control" for="f_bucket_sec">
                   <span class="trend-refresh-label" data-i18n="trend.bucketLabel">数据间隔</span>
-                  <select id="f_bucket_min" class="filter-select trend-refresh-select">
+                  <select id="f_bucket_sec" class="filter-select trend-refresh-select">
                     <option value="0" data-i18n="trend.bucketAuto">自动</option>
-                    <option value="10" data-i18n="trend.bucket10m">10 分钟</option>
-                    <option value="30" data-i18n="trend.bucket30m">30 分钟</option>
-                    <option value="60" data-i18n="trend.bucket1h">1 小时</option>
-                    <option value="120" data-i18n="trend.bucket2h">2 小时</option>
-                    <option value="360" data-i18n="trend.bucket6h">6 小时</option>
+                    <option value="10" data-i18n="trend.bucket10s">10 秒</option>
+                    <option value="30" data-i18n="trend.bucket30s">30 秒</option>
+                    <option value="60" data-i18n="trend.bucket1m">1 分钟</option>
+                    <option value="300" data-i18n="trend.bucket5m">5 分钟</option>
+                    <option value="600" data-i18n="trend.bucket10m">10 分钟</option>
+                    <option value="1800" data-i18n="trend.bucket30m">30 分钟</option>
+                    <option value="3600" data-i18n="trend.bucket1h">1 小时</option>
+                    <option value="7200" data-i18n="trend.bucket2h">2 小时</option>
+                    <option value="21600" data-i18n="trend.bucket6h">6 小时</option>
                   </select>
                 </label>
                 <!-- 数据粒度与规模（原图表下方信息行上移） -->

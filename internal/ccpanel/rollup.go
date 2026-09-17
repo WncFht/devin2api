@@ -30,12 +30,18 @@ func (scope statScope) logScope() store.LogScope {
 	}
 }
 
-// eachCell 遍历 [since,until) 与 scope 相交的格子；cb 不得持有 cell 指针。
+// eachCell 以标准 10 分钟槽遍历 [since,until) 与 scope 相交的格子；
+// cb 不得持有 cell 指针。需要其它槽宽的调用方走 eachCellSec。
 func (h *Handler) eachCell(ctx context.Context, since, until time.Time, scope statScope, cb func(store.LogCellKey, store.LogCellTotals)) {
+	h.eachCellSec(ctx, rollupSlotSeconds, since, until, scope, cb)
+}
+
+// eachCellSec 按 slotSec 秒槽遍历格子，语义同 eachCell。
+func (h *Handler) eachCellSec(ctx context.Context, slotSec int64, since, until time.Time, scope statScope, cb func(store.LogCellKey, store.LogCellTotals)) {
 	if h.store == nil {
 		return
 	}
-	if err := h.store.LogCells(ctx, since.Unix(), until.Unix(), scope.logScope(), cb); err != nil {
+	if err := h.store.LogCells(ctx, slotSec, since.Unix(), until.Unix(), scope.logScope(), cb); err != nil {
 		slog.Warn("ccpanel: log cells query failed", "error", err)
 	}
 }
