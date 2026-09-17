@@ -80,6 +80,13 @@ type Handler struct {
 	usageSnap  store.UsageSnapshot
 	usageAt    time.Time
 	usageFetch chan struct{}
+	// statusMu 保护 statusSnap/statusAt/statusFetch：StatusReport 是
+	// 六路上游 RPC 的并行聚合，耗时≈最慢一路 RTT（实测 ~1s）——
+	// quota 页每次加载/轮询各付一趟。结构同上：TTL 快照 + singleflight。
+	statusMu    sync.Mutex
+	statusSnap  map[string]any
+	statusAt    time.Time
+	statusFetch chan struct{}
 
 	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
 	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
