@@ -47,7 +47,10 @@ const { firefox, BASE, ADMIN_PW, API_TOKEN, API_TOKEN_NAV, loginData, sessionRol
     await p2.click('[data-login-mode="api_token"]');
     await p2.fill('#api-token', API_TOKEN);
     await p2.click('#login-button');
-    await p2.waitForURL(/\/web\//, { timeout: 10000 }).catch(() => {});
+    // waitForURL(/\/web\//) 会原地命中 login.html 自身（它就在 /web/ 下），
+    // 紧随的 goto 会掐断在途 /login 请求——等 ccload_token 落 localStorage
+    // 才算登录提交完成。
+    await p2.waitForFunction(() => !!localStorage.getItem('ccload_token'), null, { timeout: 5000 }).catch(() => {});
     await p2.goto(`${BASE}/web/index.html`);
     await p2.waitForSelector('.topnav', { timeout: 8000 }).catch(() => {});
     await p2.waitForTimeout(800); // /dashboard/session 回角色
