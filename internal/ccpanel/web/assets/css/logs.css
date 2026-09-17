@@ -855,6 +855,19 @@
       }
     }
 
+    /* ≤480px 与全局 filter-group 约定一致：label 移到控件上方。
+       不改的话 ≤768 的 72px 标签列会继续生效，在两列网格半格里把
+       select 压到 ~76px，下拉值整段被裁掉 */
+    @media (max-width: 480px) {
+      .logs-filter-group {
+        grid-template-columns: 1fr;
+      }
+
+      .logs-filter-group .filter-label {
+        text-align: left;
+      }
+    }
+
     .logs-table th {
       text-align: center;
     }
