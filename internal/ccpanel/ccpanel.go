@@ -73,6 +73,14 @@ type Handler struct {
 	modelStatusesCache  []map[string]any
 	modelStatusesExpiry time.Time
 
+	// usageMu 保护 usageSnap/usageAt/usageFetch：UsageStats 是 logs
+	// 表上十几条聚合查询的快照，面板轮询语义容忍秒级陈旧——短
+	// TTL 缓存把一次页面扇出的并发请求收敛成一趟计算。
+	usageMu    sync.Mutex
+	usageSnap  store.UsageSnapshot
+	usageAt    time.Time
+	usageFetch chan struct{}
+
 	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
 	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
 	// 记最近一次请求的周期，供设置页回读。

@@ -5,12 +5,14 @@ package ccpanel
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -368,6 +370,50 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// usageCacheTTL 是 /admin/usage 聚合快照的缓存寿命：面板按轮询
+// 消费，秒级陈旧无感；usageFetch 非空表示有聚合在途（singleflight
+// 的 done channel），关闭即完成信号。
+const usageCacheTTL = 5 * time.Second
+
+// usageSnapshot 返回 TTL 内的 UsageStats 缓存；过期时 singleflight
+// 收敛为单次聚合——并发等待方挂 done channel 而不是各跑一遍全表扫描。
+func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error) {
+	for {
+		h.usageMu.Lock()
+		if !h.usageAt.IsZero() && time.Since(h.usageAt) < usageCacheTTL {
+			snap := h.usageSnap
+			h.usageMu.Unlock()
+			return snap, nil
+		}
+		if h.usageFetch != nil {
+			done := h.usageFetch
+			h.usageMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return store.UsageSnapshot{}, ctx.Err()
+			}
+		}
+		h.usageFetch = make(chan struct{})
+		h.usageMu.Unlock()
+
+		// 快照是 handler 级共享缓存：单个调用方断连不应掐死其他
+		// 等待者共用的聚合。
+		snap, err := h.store.UsageStats(context.WithoutCancel(ctx))
+
+		h.usageMu.Lock()
+		if err == nil {
+			h.usageSnap = snap
+			h.usageAt = time.Now()
+		}
+		close(h.usageFetch)
+		h.usageFetch = nil
+		h.usageMu.Unlock()
+		return snap, err
+	}
+}
+
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
@@ -375,7 +421,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, map[string]any{"disabled": true})
 		return
 	}
-	snap, err := h.store.UsageStats(r.Context())
+	snap, err := h.usageSnapshot(r.Context())
 	if err != nil {
 		slog.Warn("ccpanel: usage stats query failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "usage query failed")
