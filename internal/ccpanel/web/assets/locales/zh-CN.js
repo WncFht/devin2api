@@ -950,6 +950,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.debugFileBinary': '二进制文件（{size}）——用「打开原始内容」查看',
   'logs.debugFileCopyRaw': '复制原始',
   'logs.debugFileOpenRaw': '打开原始内容',
+  'logs.fileReadFailed': '读取失败',
   'logs.fileTruncated': '… 已截断（文件超过读取上限，仅显示前段）',
   'logs.mergedTruncated': '响应流超过读取上限，仅合并了前段帧——后半可能缺失',
 

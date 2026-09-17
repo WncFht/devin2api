@@ -951,6 +951,7 @@ window.I18N_LOCALES['en'] = {
   'logs.debugFileBinary': 'Binary file ({size}) — use "Open raw" to view',
   'logs.debugFileCopyRaw': 'Copy raw',
   'logs.debugFileOpenRaw': 'Open raw content',
+  'logs.fileReadFailed': 'Read failed',
   'logs.fileTruncated': '… truncated (file exceeds the read limit; only the leading part shown)',
   'logs.mergedTruncated': 'Response stream exceeded the read limit; only leading frames merged — the tail may be missing',
 

@@ -2827,7 +2827,7 @@ async function loadDebugFile(name) {
     window.setHighlightedCodeContent('debugFileRaw', text, mode);
   } catch (e) {
     if (debugFileContext?.openName !== name) return;
-    window.setHighlightedCodeContent('debugFileRaw', e?.message || '读取失败', 'text');
+    window.setHighlightedCodeContent('debugFileRaw', e?.message || i18nText('logs.fileReadFailed', '读取失败'), 'text');
   }
 }
 
@@ -2894,7 +2894,7 @@ async function copyDebugFileRaw(btn) {
       setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
     }
   } catch (e) {
-    if (window.showError) window.showError(e?.message || '读取失败');
+    if (window.showError) window.showError(e?.message || i18nText('logs.fileReadFailed', '读取失败'));
   }
 }
 
@@ -2910,7 +2910,7 @@ async function openDebugFileRaw() {
     window.open(url, '_blank', 'noopener');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   } catch (e) {
-    if (window.showError) window.showError(e?.message || '读取失败');
+    if (window.showError) window.showError(e?.message || i18nText('logs.fileReadFailed', '读取失败'));
   }
 }
 
