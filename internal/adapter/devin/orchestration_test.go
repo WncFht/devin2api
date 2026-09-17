@@ -160,7 +160,7 @@ func stubServer(t *testing.T, stub *stubUpstream, rawChat http.HandlerFunc) *htt
 // stubAdapter 起指向 stub 的真 Adapter；Gate 零值 → quota<=0 直通不等待。
 func stubAdapter(t *testing.T, srv *httptest.Server, cfg Config) *Adapter {
 	t.Helper()
-	cfg.BaseURL = srv.URL
+	cfg.Endpoint.BaseURL = srv.URL
 	adapter, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -219,7 +219,7 @@ func TestOrchestrationHappyPath(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Token: "tok"})
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
 	if err != nil {
@@ -253,10 +253,12 @@ func TestOrchestrationUnauthenticatedSelfHeal(t *testing.T) {
 	var sourceCalls atomic.Int32
 	adapter := stubAdapter(t, srv, Config{
 		Model: "stub-model",
-		Token: "old",
-		TokenSource: func() string {
-			sourceCalls.Add(1)
-			return "new"
+		Identity: LaneIdentity{
+			Token: "old",
+			TokenSource: func() string {
+				sourceCalls.Add(1)
+				return "new"
+			},
 		},
 	})
 
@@ -308,9 +310,11 @@ func TestOrchestrationUnauthenticatedSelfHealAtConnect(t *testing.T) {
 	}
 	srv := stubServer(t, stub, raw)
 	adapter := stubAdapter(t, srv, Config{
-		Model:       "stub-model",
-		Token:       "old",
-		TokenSource: func() string { return "new" },
+		Model: "stub-model",
+		Identity: LaneIdentity{
+			Token:       "old",
+			TokenSource: func() string { return "new" },
+		},
 	})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
@@ -350,7 +354,7 @@ func TestOrchestrationTruncatedStreamReopens(t *testing.T) {
 		_, _ = w.Write(good)
 	}
 	srv := stubServer(t, stub, raw)
-	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Token: "tok"})
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
 	if err != nil {
@@ -377,7 +381,7 @@ func TestOrchestrationEmptyEndTurnContinues(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Token: "tok"})
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
 	if err != nil {
@@ -407,7 +411,7 @@ func TestOrchestrationRateGateLocalReject(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Token: "tok"})
+	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Identity: LaneIdentity{Token: "tok"}})
 
 	// 第一次：上游限流 → 上闩。server-stream 的 handler 错误经 EndStream
 	// 尾帧送达，从 Recv 侧暴露为 error 事件而不是 Stream() 的返回错误。
@@ -477,7 +481,7 @@ func TestOrchestrationModelRouterAssign(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Model: "router-x", Token: "tok"})
+	adapter := stubAdapter(t, srv, Config{Model: "router-x", Identity: LaneIdentity{Token: "tok"}})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
 	if err != nil {
@@ -506,7 +510,7 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Name: "stub", Model: "stub-model", Token: "tok", Aliases: map[string]string{"a": "stub-model"}})
+	adapter := stubAdapter(t, srv, Config{Identity: LaneIdentity{Name: "stub", Token: "tok"}, Model: "stub-model", Aliases: map[string]string{"a": "stub-model"}})
 
 	if adapter.TokenFunc()() != "tok" {
 		t.Fatal("TokenFunc should read current token")
@@ -515,9 +519,11 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 		t.Fatal("Aliases should reflect config")
 	}
 	next := Config{
-		Name: "stub", BaseURL: srv.URL, Model: "other-model", Token: "tok2",
-		Aliases: map[string]string{"b": "stub-model"},
-		Gate:    GateConfig{MaxRPM: 60},
+		Identity: LaneIdentity{Name: "stub", Token: "tok2"},
+		Endpoint: Endpoint{BaseURL: srv.URL},
+		Model:    "other-model",
+		Aliases:  map[string]string{"b": "stub-model"},
+		Gate:     GateConfig{MaxRPM: 60},
 	}
 	applied, err := adapter.ApplyConfig(next)
 	if err != nil {
@@ -554,7 +560,7 @@ func TestApplyConfigSwitchesEndpoint(t *testing.T) {
 	stub2 := &stubUpstream{catalog: catalog, chat: chat}
 	srv1 := stubServer(t, stub1, nil)
 	srv2 := stubServer(t, stub2, nil)
-	adapter := stubAdapter(t, srv1, Config{Model: "m", Token: "t"})
+	adapter := stubAdapter(t, srv1, Config{Model: "m", Identity: LaneIdentity{Token: "t"}})
 
 	stream, err := adapter.Stream(context.Background(), stubRequest())
 	if err != nil {
@@ -567,14 +573,14 @@ func TestApplyConfigSwitchesEndpoint(t *testing.T) {
 
 	// 非法 proxy 先行验证「构建失败整体不提交」：config 不换值、
 	// 调用束不换指针，后续请求仍落在当前端点。
-	if _, err := adapter.ApplyConfig(Config{BaseURL: srv2.URL, Model: "m", Token: "t", Proxy: "://bad-proxy"}); err == nil {
+	if _, err := adapter.ApplyConfig(Config{Endpoint: Endpoint{BaseURL: srv2.URL, Proxy: "://bad-proxy"}, Model: "m", Identity: LaneIdentity{Token: "t"}}); err == nil {
 		t.Fatal("ApplyConfig with bad proxy should fail")
 	}
-	if got := adapter.CurrentConfig().BaseURL; got != srv1.URL {
+	if got := adapter.CurrentConfig().Endpoint.BaseURL; got != srv1.URL {
 		t.Fatalf("config committed after failed rebuild: base_url=%q", got)
 	}
 
-	applied, err := adapter.ApplyConfig(Config{BaseURL: srv2.URL, Model: "m", Token: "t"})
+	applied, err := adapter.ApplyConfig(Config{Endpoint: Endpoint{BaseURL: srv2.URL}, Model: "m", Identity: LaneIdentity{Token: "t"}})
 	if err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}

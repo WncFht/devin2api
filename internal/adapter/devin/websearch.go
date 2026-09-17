@@ -393,15 +393,9 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		return false
 	}
 	stream.hops++
-	// 换流同 tryReopen：杀旧泵、重置窗口，新解码器已播种旧内容。
-	stream.cancel()
-	stream.frames = frames
-	stream.cancel = cancel
-	stream.decoder = decoder
-	stream.started = false
-	stream.finished = false
-	stream.upstreamConfirmed = false
-	stream.progress.Reset(upstreamNoProgressTimeout)
+	// 换流不变量见 swap；续轮与 pre-content 重开的差异只在解码器
+	// 播种——这里传入的是 continueTurn 已播种旧内容的解码器。
+	stream.swap(frames, cancel, decoder)
 	return true
 }
 

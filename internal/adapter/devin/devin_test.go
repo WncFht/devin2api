@@ -1860,15 +1860,15 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 // 不同的新凭据才更新；同 token 或空值视为自愈失败。
 func TestReloadToken(t *testing.T) {
 	adapter := &Adapter{token: "old"}
-	adapter.config.TokenSource = func() string { return "old" }
+	adapter.config.Identity.TokenSource = func() string { return "old" }
 	if adapter.reloadToken() {
 		t.Fatal("same token must not count as reload")
 	}
-	adapter.config.TokenSource = func() string { return "" }
+	adapter.config.Identity.TokenSource = func() string { return "" }
 	if adapter.reloadToken() {
 		t.Fatal("empty token must not count as reload")
 	}
-	adapter.config.TokenSource = func() string { return "new" }
+	adapter.config.Identity.TokenSource = func() string { return "new" }
 	if !adapter.reloadToken() || adapter.currentToken() != "new" {
 		t.Fatal("expected token reload to swap credentials")
 	}

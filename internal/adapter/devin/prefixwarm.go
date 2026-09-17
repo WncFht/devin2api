@@ -606,9 +606,7 @@ func (w *cacheWarmer) healCredentials(entry *warmEntry) {
 		return
 	}
 	_, cascadeID := deriveSessionIDs(entry.retained)
-	w.adapter.assignmentsMu.Lock()
-	delete(w.adapter.assignments, entry.router+"|"+cascadeID)
-	w.adapter.assignmentsMu.Unlock()
+	w.adapter.invalidateAssignment(entry.router, cascadeID)
 }
 
 // isCredentialFailure 判定凭证味的失败：unauthenticated（token 死）与

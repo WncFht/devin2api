@@ -272,34 +272,34 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 			key:  "devin_base_url",
 			typ:  "string",
 			desc: "上游 Devin Connect 基础地址（devin.base_url）；换端点会重建上游连接束并清空 AssignModel 缓存",
-			def:  func() string { return d0().Devin.BaseURL },
-			live: devinLive(deps, func(c devin.Config) string { return c.BaseURL }),
+			def:  func() string { return d0().Devin.Endpoint.BaseURL },
+			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.BaseURL }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.BaseURL
+				return &c.Endpoint.BaseURL
 			}, requireAbsoluteURL("devin_base_url"))),
 		},
 		{
 			key:  "devin_proxy",
 			typ:  "string",
 			desc: "上游代理地址（devin.proxy，http/https/socks5，可带 userinfo）；空为直连或走系统环境变量",
-			def:  func() string { return d0().Devin.Proxy },
-			live: devinLive(deps, func(c devin.Config) string { return c.Proxy }),
+			def:  func() string { return d0().Devin.Endpoint.Proxy },
+			live: devinLive(deps, func(c devin.Config) string { return c.Endpoint.Proxy }),
 			apply: devinField(deps, mutateString(func(c *devin.Config) *string {
-				return &c.Proxy
+				return &c.Endpoint.Proxy
 			}, nil)),
 		},
 		{
 			key:  "devin_force_http1",
 			typ:  "bool",
 			desc: "强制 HTTP/1.1 每请求独立连接（devin.force_http1）；关闭走 HTTP/2 单连接多路复用",
-			def:  func() string { return strconv.FormatBool(d0().Devin.ForceHTTP1) },
-			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.ForceHTTP1) }),
+			def:  func() string { return strconv.FormatBool(d0().Devin.Endpoint.ForceHTTP1) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.FormatBool(c.Endpoint.ForceHTTP1) }),
 			apply: devinField(deps, func(c *devin.Config, v string) error {
 				b, err := strconv.ParseBool(strings.TrimSpace(v))
 				if err != nil {
 					return fmt.Errorf("value must be a boolean: %w", err)
 				}
-				c.ForceHTTP1 = b
+				c.Endpoint.ForceHTTP1 = b
 				return nil
 			}),
 		},

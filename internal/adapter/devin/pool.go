@@ -110,9 +110,9 @@ func NewPool(configs []Config) (*Pool, error) {
 func newPoolLane(config Config) (*poolLane, error) {
 	laneAdapter, err := New(config)
 	if err != nil {
-		return nil, fmt.Errorf("devin account %q: %w", config.Name, err)
+		return nil, fmt.Errorf("devin account %q: %w", config.Identity.Name, err)
 	}
-	return &poolLane{name: config.Name, adapter: laneAdapter}, nil
+	return &poolLane{name: config.Identity.Name, adapter: laneAdapter}, nil
 }
 
 // snapshot 返回当前 lane 集合；空池时为空切片。
@@ -123,9 +123,11 @@ func (pool *Pool) snapshot() []*poolLane {
 	return nil
 }
 
-// firstLane 返回配置序首 lane：别名/客户端指纹/闸门参数等全局字段各
-// lane 一致，面板 MVP 也固定绑首号——逐号展示是阶段 2 的事。
-// 空池返回 nil，调用方给各自视图类型的零值。
+// firstLane 返回配置序首 lane：Endpoint 与 tuning 类全局字段各 lane
+// 一致（devinConfigsFrom 逐 lane 复制同一模板），首 lane 视图只读这组；
+// Identity 类字段各 lane 各异，走 TokenFuncs/AccountLaneStates 等
+// per-lane 接口而不是这里。面板 MVP 也固定绑首号——逐号展示是阶段 2
+// 的事。空池返回 nil，调用方给各自视图类型的零值。
 func (pool *Pool) firstLane() *poolLane {
 	if lanes := pool.snapshot(); len(lanes) > 0 {
 		return lanes[0]
@@ -514,13 +516,13 @@ func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
 	next := make([]*poolLane, 0, len(configs))
 	var built []*poolLane
 	for _, config := range configs {
-		if lane, ok := byName[config.Name]; ok {
+		if lane, ok := byName[config.Identity.Name]; ok {
 			applied, err := lane.adapter.ApplyConfig(config)
 			if err != nil {
 				for _, lane := range built {
 					lane.adapter.Close()
 				}
-				return nil, fmt.Errorf("devin account %q: %w", config.Name, err)
+				return nil, fmt.Errorf("devin account %q: %w", config.Identity.Name, err)
 			}
 			for _, field := range applied {
 				appliedSet[field] = true
@@ -557,20 +559,18 @@ func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
 }
 
 // UpdateConfig 把同一 mutate 应用到每条 lane（全局字段语义不变）；
-// applied 取各 lane 差集并集。lane 身份字段（Name/Token/TokenSource）
-// 在 mutate 后强制恢复——面板契约只改全局字段，护栏挡住误写把同一
-// 身份值铺到全部 lane。
+// applied 取各 lane 差集并集。lane 身份在 mutate 后整组恢复——面板
+// 契约只改全局字段，护栏按子结构一次赋回，挡住误写把同一身份值铺到
+// 全部 lane；今后 Identity 新增字段自动进护栏，无需维护字段清单。
 func (pool *Pool) UpdateConfig(mutate func(*Config) error) ([]string, error) {
 	appliedSet := map[string]bool{}
 	for _, lane := range pool.snapshot() {
-		identity := lane.adapter.CurrentConfig()
+		prev := lane.adapter.CurrentConfig()
 		applied, err := lane.adapter.UpdateConfig(func(cfg *Config) error {
 			if err := mutate(cfg); err != nil {
 				return err
 			}
-			cfg.Name = identity.Name
-			cfg.Token = identity.Token
-			cfg.TokenSource = identity.TokenSource
+			cfg.Identity = prev.Identity
 			return nil
 		})
 		if err != nil {
@@ -684,11 +684,10 @@ func (pool *Pool) Aliases() map[string]string {
 	return nil
 }
 
-// CurrentConfig 返回首 lane 的配置快照：全局字段各 lane 一致；
-// Name/Token/TokenSource 是该 lane 自己的值，调用方
-// 展示用要意识到这点（面板 MVP 绑首号，语义恰好正确）。空池回零值
-// Config——消费侧（settings 默认值兜底、/admin/config 视图）把它当
-// 「未配置」基线处理。
+// CurrentConfig 返回首 lane 的配置快照：Endpoint 与 tuning 类全局字段
+// 各 lane 一致；Identity 是该 lane 自己的值，调用方展示用要意识到这点
+// （面板 MVP 绑首号，语义恰好正确）。空池回零值 Config——消费侧
+// （settings 默认值兜底、/admin/config 视图）把它当「未配置」基线处理。
 func (pool *Pool) CurrentConfig() Config {
 	if lane := pool.firstLane(); lane != nil {
 		return lane.adapter.CurrentConfig()

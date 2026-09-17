@@ -512,7 +512,7 @@ func TestWarmPingClientFixableRetires(t *testing.T) {
 // → 退役。自愈只一遍，不成环。
 func TestWarmPingSelfHeal(t *testing.T) {
 	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
-	w.adapter.config.TokenSource = func() string { return "fresh-token" }
+	w.adapter.config.Identity.TokenSource = func() string { return "fresh-token" }
 	var calls int
 	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
 		calls++
@@ -540,7 +540,7 @@ func TestWarmPingSelfHeal(t *testing.T) {
 
 	// 重发仍是凭证/语义拒绝 → 退役。用一只新保温器隔离 due 状态。
 	w2, clock2 := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
-	w2.adapter.config.TokenSource = func() string { return "fresh-token" }
+	w2.adapter.config.Identity.TokenSource = func() string { return "fresh-token" }
 	calls = 0
 	w2.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
 		calls++

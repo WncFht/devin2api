@@ -297,7 +297,7 @@ func main() {
 			if slices.Contains(applied, "devin.base_url") || slices.Contains(applied, "devin.proxy") ||
 				slices.Contains(applied, "devin.force_http1") {
 				cur := devinPool.CurrentConfig()
-				return ccPanel.SetUpstream(cur.BaseURL, cur.Proxy, cur.ForceHTTP1)
+				return ccPanel.SetUpstream(cur.Endpoint.BaseURL, cur.Endpoint.Proxy, cur.Endpoint.ForceHTTP1)
 			}
 			return nil
 		},
@@ -428,10 +428,12 @@ func runExportLegacy(dir string) error {
 // 文件值口径，不是零值。
 func devinBaseConfig(serviceConfig config.Config) devin.Config {
 	return devin.Config{
-		BaseURL:       serviceConfig.Devin.BaseURL,
+		Endpoint: devin.Endpoint{
+			BaseURL:    serviceConfig.Devin.BaseURL,
+			Proxy:      serviceConfig.Devin.Proxy,
+			ForceHTTP1: serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
+		},
 		Model:         serviceConfig.Devin.Model,
-		Proxy:         serviceConfig.Devin.Proxy,
-		ForceHTTP1:    serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
 		Aliases:       serviceConfig.Devin.Aliases,
 		ClientName:    serviceConfig.Devin.ClientName,
 		ClientVersion: serviceConfig.Devin.ClientVersion,
@@ -465,7 +467,7 @@ func devinBaseConfig(serviceConfig config.Config) devin.Config {
 // lane 活配置（面板覆盖与热应用后的口径）；空池回落到最近加载配置
 // 投影出的 base 模板，def 展示与 reset 回落仍按文件值给默认。
 func devinConfigSnapshot(pool *devin.Pool) devin.Config {
-	if cfg := pool.CurrentConfig(); cfg.Name != "" {
+	if cfg := pool.CurrentConfig(); cfg.Identity.Name != "" {
 		return cfg
 	}
 	if cur := runtimeConfigPtr.Load(); cur != nil {
@@ -485,14 +487,14 @@ func devinConfigsFrom(serviceConfig config.Config, accounts []config.DevinAccoun
 	lanes := make([]devin.Config, 0, len(accounts))
 	for _, account := range accounts {
 		lane := devinBaseConfig(serviceConfig)
-		lane.Name = account.Name
-		lane.Token = account.Token
+		lane.Identity.Name = account.Name
+		lane.Identity.Token = account.Token
 		lane.GateStateStore = dbStore
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
 			// 即跟随续期——fht-mba 的 B 号正是这个形态。
 			credentialsFile := account.CredentialsFile
-			lane.TokenSource = func() string {
+			lane.Identity.TokenSource = func() string {
 				return config.TokenFromCredentialsFile(credentialsFile)
 			}
 		} else {
@@ -500,7 +502,7 @@ func devinConfigsFrom(serviceConfig config.Config, accounts []config.DevinAccoun
 			// 声明集再过 DB 行 merge，面板写过的行覆盖值与 config 编辑
 			// 同权，单号改凭据两条路都救得回来。
 			name := account.Name
-			lane.TokenSource = func() string {
+			lane.Identity.TokenSource = func() string {
 				reloaded, err := config.Load(configPath)
 				if err != nil {
 					return ""
@@ -969,11 +971,13 @@ func reloadRuntimeConfig(configPath string, dbStore *store.Store, devinPool *dev
 	if !slices.Equal(preLaneNames, effectiveLaneNames(resolved)) {
 		report.Applied = append(report.Applied, "devin.accounts")
 	}
-	if pcfg.Devin.BaseURL != cfg.Devin.BaseURL || pcfg.Devin.Proxy != cfg.Devin.Proxy ||
-		*pcfg.Devin.ForceHTTP1 != *cfg.Devin.ForceHTTP1 {
-		// adapter 侧调用束已在 ApplyConfig 内换好（同参数构建成功是前提）；
-		// 面板自身的上游调用束跟随同一端点，展示地址经 BaseURL 透出，
-		// 无需单独同步。
+	// 端点三件套变化时面板自身的上游调用束跟随换绑（adapter 侧已在
+	// ApplyConfig 内换好，同参数构建成功是前提；展示地址经 BaseURL
+	// 透出，无需单独同步）。这里必须比文件级生效值而不是消费 applied
+	// 名单：applied 只汇总存活 lane 的 ApplyConfig 字段差集，lane 集
+	// 整体换届或空池期间改端点时新值烤进新 lane 不产生字段差，
+	// 走 applied 会漏掉面板换绑。
+	if devinBaseConfig(pcfg).Endpoint != devinBaseConfig(cfg).Endpoint {
 		if err := panel.SetUpstream(cfg.Devin.BaseURL, cfg.Devin.Proxy, *cfg.Devin.ForceHTTP1); err != nil {
 			return nil, err
 		}

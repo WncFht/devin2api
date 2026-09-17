@@ -48,21 +48,44 @@ const (
 	catalogRetryBackoff = 30 * time.Second
 )
 
-// Config 保存 Devin adapter 的固定上游配置。
-type Config struct {
-	// Name 是账号名：号池里每条 lane 的身份，进闸门状态键
-	// （gate:<name>）、日志与面板归因字段。
+// LaneIdentity 是一条上游账号泳道（lane）的身份字段组：号池下逐 lane
+// 各异，不参与「全局字段各 lane 一致」约定。Name 进闸门状态键
+// （gate:<name>）、日志与面板归因字段，也是 ApplyConfigs 的 lane 名键
+// 与 applied 名单（devin.accounts.<name>.token）的词干。
+type LaneIdentity struct {
 	Name string
-	// BaseURL 是 Devin Connect 服务的基础地址。
-	BaseURL string
 	// Token 是 Devin session token；不会写入日志。
 	Token string
-	// Model 是 Devin chat model UID。
-	Model string
+	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
+	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
+	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
+	TokenSource func() string
+}
+
+// Endpoint 是烤进 transport 的上游端点参数组：一经 newUpstreamLink 构建
+// 即固化进 client 与焐池，热应用时任一字段变化都触发调用束整体重建
+// （原子换指针，在途调用持旧引用跑完）。纯值类型、可 == 整比——
+// commitConfigLocked 的重建判定与 main 的 reload 端点比对都靠它。
+type Endpoint struct {
+	// BaseURL 是 Devin Connect 服务的基础地址。
+	BaseURL string
 	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
 	Proxy string
 	// ForceHTTP1 为 true 时强制 HTTP/1.1，每请求独立连接，避免 HTTP/2 单连接多 stream 并发瓶颈。
 	ForceHTTP1 bool
+}
+
+// Config 保存 Devin adapter 的配置，字段按所有权分三组：
+//   - Identity 是 lane 身份，号池下各 lane 自带一份；
+//   - Endpoint 是端点冻结集，换值即重建上游调用束；
+//   - 其余为全局可调项，号池下各 lane 共享同一组值——Pool 的
+//     first-lane 视图（CurrentConfig/Aliases 等）只读这组与 Endpoint，
+//     Identity 类一律走 TokenFuncs/AccountLaneStates 等 per-lane 接口。
+type Config struct {
+	Identity LaneIdentity
+	Endpoint Endpoint
+	// Model 是 Devin chat model UID。
+	Model string
 	// Aliases 是客户端模型名到上游真实 UID 的映射；命中时请求模型被重写。
 	Aliases map[string]string
 	// ClientName/ClientVersion/ClientOS 是发给上游的 metadata 身份字段；
@@ -73,16 +96,13 @@ type Config struct {
 	// Gate 是速率闸门参数组；字段语义与默认值回落见 GateConfig。
 	Gate GateConfig
 	// GateStateStore 非空时冷却闩截止时刻持久化到 runtime_state
-	// （键 store.GateStateKey(Name)，即 gate:<lane>），进程重启后
+	// （键 store.GateStateKey(Identity.Name)，即 gate:<lane>），进程重启后
 	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
-	// 裸发会把限流续长。
+	// 裸发会把限流续长。这是运行时句柄而非配置值：commitConfigLocked
+	// 热应用时沿用旧值，不参与 diff。
 	GateStateStore *store.Store
 	// Warm 是前缀保温参数组；字段语义与默认值回落见 WarmConfig。
 	Warm WarmConfig
-	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
-	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
-	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
-	TokenSource func() string
 }
 
 // ClientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -173,7 +193,7 @@ var _ adapter.Adapter = (*Adapter)(nil)
 
 // New 创建 Devin adapter。
 func New(config Config) (*Adapter, error) {
-	if strings.TrimSpace(config.BaseURL) == "" {
+	if strings.TrimSpace(config.Endpoint.BaseURL) == "" {
 		return nil, errors.New("devin base URL is required")
 	}
 	// token 允许为空：它是运行时字段——unauthenticated 自愈经
@@ -184,9 +204,9 @@ func New(config Config) (*Adapter, error) {
 	}
 	adapter := &Adapter{
 		config:         config,
-		token:          config.Token,
+		token:          config.Identity.Token,
 		modelsCacheTTL: 5 * time.Minute,
-		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Name)),
+		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Identity.Name)),
 		assignments:    make(map[string]resolvedAssignment),
 	}
 	link, err := newUpstreamLink(config, adapter.currentToken)
@@ -203,7 +223,7 @@ func New(config Config) (*Adapter, error) {
 // 请求取凭据（unauthenticated 自愈与 token 热应用原地生效，无需重建）。
 // proxy 串非法等构建失败返回 error，调用方整体不提交。
 func newUpstreamLink(config Config, tokenFunc func() string) (*upstreamLink, error) {
-	base, err := httpproxy.NewTransport(config.Proxy, config.ForceHTTP1)
+	base, err := httpproxy.NewTransport(config.Endpoint.Proxy, config.Endpoint.ForceHTTP1)
 	if err != nil {
 		return nil, fmt.Errorf("create proxy transport: %w", err)
 	}
@@ -215,18 +235,18 @@ func newUpstreamLink(config Config, tokenFunc func() string) (*upstreamLink, err
 
 	// SSE 流需要长期保持连接，不能设置 Client.Timeout；
 	// 但 Transport 层的 ResponseHeaderTimeout 已限制首包等待时间。
-	stream := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.BaseURL, gzipSend)
+	stream := devinprotoconnect.NewApiServerServiceClient(&http.Client{Transport: transport}, config.Endpoint.BaseURL, gzipSend)
 
 	// 普通 API 调用（如模型目录）设置整体超时，避免慢请求长时间占用 goroutine；
 	// 需要大于 ResponseHeaderTimeout，给 body 读取留余量。
 	apiHTTPClient := &http.Client{Transport: transport, Timeout: 610 * time.Second}
-	api := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.BaseURL, gzipSend)
+	api := devinprotoconnect.NewApiServerServiceClient(apiHTTPClient, config.Endpoint.BaseURL, gzipSend)
 
 	return &upstreamLink{
 		transport: base,
 		stream:    stream,
 		api:       api,
-		warmer:    newConnWarmer(base, config.BaseURL),
+		warmer:    newConnWarmer(base, config.Endpoint.BaseURL),
 	}, nil
 }
 
@@ -329,9 +349,9 @@ func (adapter *Adapter) UpdateConfig(mutate func(*Config) error) (applied []stri
 // 持 configMu；解锁后的收尾见 finishConfigApply。
 func (adapter *Adapter) commitConfigLocked(next Config) (prev Config, newLink *upstreamLink, err error) {
 	prev = adapter.config
-	// 运行时字段不归配置管：状态存储句柄沿用旧值。
+	// GateStateStore 是运行时句柄而非配置值：不归热应用管，沿用旧值。
 	next.GateStateStore = prev.GateStateStore
-	if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
+	if prev.Endpoint != next.Endpoint {
 		newLink, err = newUpstreamLink(next, adapter.currentToken)
 		if err != nil {
 			return prev, nil, err
@@ -350,7 +370,7 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		old.transport.CloseIdleConnections()
 		// warmer 停表要等进行中的 warmOnce（最坏 ~15s），异步收不堵 reload。
 		go old.warmer.Close()
-		if prev.BaseURL != next.BaseURL {
+		if prev.Endpoint.BaseURL != next.Endpoint.BaseURL {
 			// assignment jwt 绑 cascade_id 且只对签发它的上游有效——
 			// 换端点后旧缓存全部失效，清空在新端点重解析。
 			adapter.assignmentsMu.Lock()
@@ -374,11 +394,11 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	if prev.ClientOS != next.ClientOS {
 		applied = append(applied, "devin.client_os")
 	}
-	if prev.Token != next.Token {
+	if prev.Identity.Token != next.Identity.Token {
 		adapter.tokenMu.Lock()
-		adapter.token = next.Token
+		adapter.token = next.Identity.Token
 		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.accounts."+next.Name+".token")
+		applied = append(applied, "devin.accounts."+next.Identity.Name+".token")
 	}
 	adapter.gate.setParams(next.Gate)
 	if prev.Gate.MaxRPM != next.Gate.MaxRPM {
@@ -436,13 +456,13 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	if !slices.Equal(prev.Warm.UserPacedNames, next.Warm.UserPacedNames) {
 		applied = append(applied, "devin.warm_prefix_userpaced_names")
 	}
-	if prev.BaseURL != next.BaseURL {
+	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL {
 		applied = append(applied, "devin.base_url")
 	}
-	if prev.Proxy != next.Proxy {
+	if prev.Endpoint.Proxy != next.Endpoint.Proxy {
 		applied = append(applied, "devin.proxy")
 	}
-	if prev.ForceHTTP1 != next.ForceHTTP1 {
+	if prev.Endpoint.ForceHTTP1 != next.Endpoint.ForceHTTP1 {
 		applied = append(applied, "devin.force_http1")
 	}
 	return applied
@@ -452,7 +472,7 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 // 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
 // 凭据静默失效是排障天敌，进程日志里必须留痕。
 func (adapter *Adapter) reloadToken() bool {
-	source := adapter.CurrentConfig().TokenSource
+	source := adapter.CurrentConfig().Identity.TokenSource
 	if source == nil {
 		return false
 	}
@@ -994,6 +1014,16 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	adapter.assignments[key] = result
 	adapter.assignmentsMu.Unlock()
 	return result, nil
+}
+
+// invalidateAssignment 作废 (router uid, cascade id) 的 AssignModel 解析
+// 缓存：assignment jwt 绑 cascade_id 且无 TTL，凭据味失败后留着它会让
+// 重发复用同一份可疑 jwt——删掉后下一次 assignModel 重新走上游解析。
+// 键格式（router|cascade）与 assignModel 共享，全仓仅此两处拼装。
+func (adapter *Adapter) invalidateAssignment(routerUID, cascadeID string) {
+	adapter.assignmentsMu.Lock()
+	delete(adapter.assignments, routerUID+"|"+cascadeID)
+	adapter.assignmentsMu.Unlock()
 }
 
 // requestHasImages 判断请求是否含图片块（用户消息与工具结果两类），
@@ -1567,12 +1597,21 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 		return false
 	}
 	stream.retried = true
-	// 换流前先杀旧泵：stall 重开时旧泵可能还堵在 Receive 上，
-	// 不 cancel 它就带着旧 gRPC 流陪跑到请求结束。
+	stream.swap(frames, cancel, stream.newDecoder())
+	return true
+}
+
+// swap 把流换到一组新泵与解码器上：先杀旧泵（stall 重开时旧泵可能还
+// 堵在 Receive 上，不 cancel 它就带着旧 gRPC 流陪跑到请求结束），交接
+// 帧通道与 cancel，再把消费状态归零——start 扣留、事件队列、完工标记、
+// 上游确认与无进度窗口都按新流重新计起。换流不变量集中在这一个方法里；
+// 调用方的差异只在解码器播种方式：pre-content 重开经 newDecoder 重建，
+// 托管续轮传入已播种旧内容的解码器。
+func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.CancelFunc, decoder *responseDecoder) {
 	stream.cancel()
 	stream.frames = frames
 	stream.cancel = cancel
-	stream.decoder = stream.newDecoder()
+	stream.decoder = decoder
 	stream.started = false
 	stream.pendingStart = nil
 	stream.finished = false
@@ -1583,7 +1622,6 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	// 新流的无进度窗口从头计起：旧流的计时器（可能刚触发排空）
 	// 不沿用，消费方对新流重新获得完整的零事件容忍期。
 	stream.progress.Reset(upstreamNoProgressTimeout)
-	return true
 }
 
 // emptyEndTurn 判断 finish 产出的事件是否构成「正常 stop 但零内容」：

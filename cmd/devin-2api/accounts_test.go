@@ -161,15 +161,15 @@ func TestDevinConfigSnapshot(t *testing.T) {
 
 	empty := testPool(t)
 	got := devinConfigSnapshot(empty)
-	if got.Model != "m" || got.BaseURL != "https://example.com" || got.Name != "" {
+	if got.Model != "m" || got.Endpoint.BaseURL != "https://example.com" || got.Identity.Name != "" {
 		t.Fatalf("empty-pool snapshot = %+v, want base template", got)
 	}
 	pool := testPool(t)
 	if _, _, err := applyAccounts(context.Background(), cfg, configPath, dbStore, pool, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := devinConfigSnapshot(pool); got.Name != "alpha" {
-		t.Fatalf("live snapshot name = %q, want alpha (first lane)", got.Name)
+	if got := devinConfigSnapshot(pool); got.Identity.Name != "alpha" {
+		t.Fatalf("live snapshot name = %q, want alpha (first lane)", got.Identity.Name)
 	}
 }
 
@@ -198,24 +198,24 @@ devin:
 	}
 	// credentials_file 型：文件改写后 TokenSource 跟随。
 	filed := lanes[1]
-	if got := filed.TokenSource(); got != "tok-file" {
+	if got := filed.Identity.TokenSource(); got != "tok-file" {
 		t.Fatalf("cf TokenSource = %q", got)
 	}
 	if err := os.WriteFile(credFile, []byte("windsurf_api_key = \"tok-file2\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := filed.TokenSource(); got != "tok-file2" {
+	if got := filed.Identity.TokenSource(); got != "tok-file2" {
 		t.Fatalf("cf TokenSource after rotate = %q", got)
 	}
 	// literal 型：行覆盖赢 config 值。
 	alpha := lanes[0]
-	if got := alpha.TokenSource(); got != "tok-alpha" {
+	if got := alpha.Identity.TokenSource(); got != "tok-alpha" {
 		t.Fatalf("literal TokenSource = %q", got)
 	}
 	if err := dbStore.UpsertAccount(ctx, &store.AccountRow{Name: "alpha", Token: "tok-row"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := alpha.TokenSource(); got != "tok-row" {
+	if got := alpha.Identity.TokenSource(); got != "tok-row" {
 		t.Fatalf("literal TokenSource with row override = %q, want tok-row", got)
 	}
 }

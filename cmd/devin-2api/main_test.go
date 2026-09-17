@@ -50,7 +50,7 @@ func TestRunReturnsServeError(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	devinAdapter, err := devin.New(devin.Config{BaseURL: "https://example.com", Model: "m"})
+	devinAdapter, err := devin.New(devin.Config{Endpoint: devin.Endpoint{BaseURL: "https://example.com"}, Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
