@@ -5,10 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+# 同一 ref 的新 push 取消在途运行：PR 连推不排队烧 runner；main 上被
+# 取代的提交本也过不了 release.sh 的 TOCTOU 复查，跑完没有意义。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,8 +46,29 @@ jobs:
       # -pgo=off：测试二进制不需要剖面引导优化——default.pgo 会让
       # all-protos.connect.go（1.8MB 生成代码）按 PGO 变体再编一遍，
       # 在低核 runner 上数倍放大编译时长。-timeout 兜底防挂死。
+      # -shuffle=on 打乱用例顺序，抓隐式顺序依赖（全局计数器等）。
+      # -coverpkg=./... 让跨包调用计入覆盖；-race 下 covermode 须 atomic。
       - name: Test
-        run: go test -race -pgo=off -timeout 300s ./...
+        run: go test -race -pgo=off -shuffle=on -timeout 300s -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+
+      # 覆盖率只观测不设门槛：总行数打出来、profile 存 artifact，
+      # 先看见盲区在哪，再谈要不要设下限。
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt | tail -1
+          {
+            echo "### 最低覆盖的 15 个文件"
+            echo '```'
+            grep -v '^total:' coverage.txt | sort -t' ' -k3 -n | head -15
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
 
       - name: Build
         run: go build ./...
@@ -54,6 +85,7 @@ jobs:
   golangci:
     name: golangci-lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,13 +96,33 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          # 与本地 brew 版对齐；规则集见 .golangci.yml（default:none 显式启用）
+          # 与本地版对齐；规则集见 .golangci.yml（default:none 显式启用）
           version: v2.13.2
+
+  # workflow 文件自身的 lint：shellcheck 让 run: 块里的 bash 也过检查
+  # （本仓库 CI 逻辑大半是内联 shell）。版本与本地 actionlint 对齐。
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -oneline
 
   # 部署资产防回归：plist/unit/共享库的关键字段断言，改坏在 CI 先炸。
   deploy-assets:
     name: Deploy assets
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -82,6 +134,36 @@ jobs:
       # 版本计算与 publish 的全部拒绝分支，不触网。
       - name: release.sh self-test
         run: bash scripts/release-selftest.sh
+
+  # 生成物漂移门禁：outputs/devin-proto-go 是提交进 git 的生成代码，
+  # 改了 proto 忘跑 task generate 时提交物与源失配。重生成比对钉住。
+  codegen-drift:
+    name: Codegen drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      # protoc 版本必须与生成本地头一致（36.1）：codegen 头部注释里
+      # 带 protoc 版本号，不同版本会产生虚假漂移。
+      - name: Install protoc
+        run: |
+          curl -fsSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v36.1/protoc-36.1-linux-x86_64.zip
+          sudo unzip -q -o /tmp/protoc.zip -d /opt/protoc
+          echo "/opt/protoc/bin" >> "$GITHUB_PATH"
+
+      - name: Install plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.20.0
+
+      - name: Regenerate and diff
+        run: bash scripts/check-codegen.sh
 
   # 生产宿主是 macOS 而 CI 全在 ubuntu：darwin 构建此前只有交叉编译门禁，
   # 从没在真系统上跑过。这里补上真平台的测试与无 token 冒烟——exec、
@@ -100,14 +182,107 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Test
-        run: go test -pgo=off -timeout 300s ./...
+        run: go test -pgo=off -shuffle=on -timeout 300s ./...
 
       - name: Smoke without upstream
         run: bash scripts/smoke.sh --no-upstream --config config.example.yaml --port 18099
 
+  # Windows 是唯一只有交叉编译、从没跑过真机的平台：deploy-windows.ps1
+  # 与裸 exe 前台模式全靠编译期门禁兜底。真 runner 上跑全量测试 +
+  # 启动冒烟（healthz + /v1/models 空 token 明确 502），抓路径分隔、
+  # 信号、控制台行为这层编译期看不见的差异。
+  # 不验 SIGTERM 排空：Windows 优雅退出走 Ctrl+C/os.Interrupt，
+  # git-bash 的 kill 对原生进程是 TerminateProcess，drain 无从断言。
+  windows-smoke:
+    name: Windows smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Test
+        run: go test -pgo=off -shuffle=on -timeout 300s ./...
+
+      - name: Smoke (startup only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT=18097
+          WORK=.ci-smoke
+          mkdir -p "$WORK"
+          sed -E "/^[[:space:]]*listen:/s/:[0-9]+([\"']?[[:space:]]*)$/:$PORT\1/" \
+            config.example.yaml > "$WORK/config.yaml"
+          go build -pgo=off -o "$WORK/devin-2api.exe" ./cmd/devin-2api
+          "$WORK/devin-2api.exe" -config "$WORK/config.yaml" -state-dir "$WORK" \
+            >"$WORK/stdout.log" 2>"$WORK/stderr.log" &
+          PID=$!
+          ready=0
+          for _ in $(seq 1 100); do
+            if curl -sf "http://localhost:$PORT/healthz" >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            kill -0 "$PID" 2>/dev/null || {
+              echo "实例提前退出，stderr:"; tail -10 "$WORK/stderr.log"; exit 1
+            }
+            sleep 0.3
+          done
+          [[ "$ready" == 1 ]] || {
+            echo "healthz 30s 未通过"; tail -10 "$WORK/stderr.log"; exit 1
+          }
+          code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' \
+            "http://localhost:$PORT/v1/models" || true)"
+          kill "$PID" 2>/dev/null || true
+          [[ "$code" == "502" ]] || {
+            echo "/v1/models 空 token 期望 502，实得 ${code:-<timeout>}"; exit 1
+          }
+          echo "windows smoke ok: healthz + /v1/models 502"
+
+  # 面板 e2e：scripts/panel-verify 是现成的 playwright 自包含套件
+  # （临时实例 + 假上游凭据，不打真上游），此前只能本地手动跑。
+  # firefox 浏览器按 package-lock 缓存，命中后安装只剩几十秒。
+  panel-verify:
+    name: Panel e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: scripts/panel-verify/package-lock.json
+
+      - name: Install node deps
+        working-directory: scripts/panel-verify
+        run: npm ci --no-fund --no-audit
+
+      - name: Cache playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('scripts/panel-verify/package-lock.json') }}
+
+      - name: Install firefox
+        working-directory: scripts/panel-verify
+        run: npx playwright install --with-deps firefox
+
+      - name: Run panel checks
+        run: bash scripts/panel-verify/run.sh
+
   lint-markdown:
     name: Markdown
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4

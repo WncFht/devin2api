@@ -40,17 +40,23 @@
 
 ## 4. CI（`.github/workflows/ci.yml`）
 
-push 到 main 与 PR 触发，5 个并行 job：
+push 到 main 与 PR 触发。顶层 `permissions: contents: read`；`concurrency` 按 workflow+ref 取消在途（PR 连推不排队）；每个 job 有 `timeout-minutes` 护栏。9 个并行 job：
 
-- **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race` → `go build` → windows/darwin 交叉编译 + vet。
-- **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地 brew 版对齐。
+- **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race -shuffle=on -covermode=atomic -coverpkg=./...`（覆盖率只观测不设门槛，total 打日志 + profile 存 artifact）→ `go build` → windows/darwin 交叉编译 + vet。
+- **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地版对齐。
+- **actionlint**：workflow 文件自身 lint（钉 v1.7.12，shellcheck 查 run: 块内 bash）。
 - **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练。
+- **codegen-drift**：钉版 protoc + protoc-gen-go/connect-go 重跑生成 → `scripts/check-codegen.sh` 与提交的 `outputs/devin-proto-go` 逐字节比对，proto 源改了忘重新生成时拦下。
 - **darwin-smoke**（macos-latest）：生产宿主平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
+- **windows-smoke**（windows-latest）：全量测试 + 启动冒烟（healthz + `/v1/models` 空 token 502）；不验 SIGTERM 排空——Windows 优雅退出走 Ctrl+C/os.Interrupt，git-bash kill 是 TerminateProcess，无从断言。
+- **panel-verify**：`scripts/panel-verify` playwright 套件进 CI（临时实例 + 假上游凭据，不打真上游；firefox 浏览器按 package-lock 缓存）。
 - **lint-markdown**：`npm ci` → `format:check` + `lint:md`。
 
 Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 读 `go.mod` 定版本，mod 缓存按 `go.sum` 哈希、build 缓存按 job+sha（restore-keys 兜底）。
 
 `.github/workflows/security.yml` 是独立的 govulncheck job（push/PR/每周一）。**release.sh 的 CI 门禁只认名为 `CI` 的 workflow**——Security 红不挡发版（有意的：漏洞扫描是持续观察项，不是单次发布的质量门）。
+
+`.github/workflows/nightly.yml`（每日 cron + 手动 dispatch）：`upstream-probe` 在 `secrets.DEVIN_E2E_TOKEN` 配置后跑 `smoke.sh` 全真模式（真上游 RPC + SIGTERM 排空；未配置则跳过，fork 不红）；`bench` 跑 `bench.sh` 全基准并把结果存 90 天 artifact 做趋势留痕。`.github/dependabot.yml` 周更 gomod（根 + devinproto 生成模块）、github-actions、npm（根 + panel-verify）。
 
 ## 5. 发布（`scripts/release.sh` + `release.yml`）
 
@@ -69,11 +75,12 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 覆盖：dry-run 的 minor/patch/破坏性/override/chore 过滤/无提交拒绝/tag 冲突拒绝；publish 的 green 全流程（断言 tag、VERSION 回写、注解含 `## Features`——verbatim 回归）、pending→green 轮询、CI 失败拒绝、未推送拒绝、等 CI 期间 origin 被推进的 TOCTOU 拒绝。
 
-### release.yml（tag push 触发）
+### release.yml（tag push 触发，或 workflow_dispatch 在 tag ref 上手动重发）
 
+- **validate**：dispatch 防呆——断言 ref 是 `refs/tags/v*`、是 annotated tag（lightweight 取不出 notes）、tag 落点提交 == 本次运行提交。
 - **test**：同 CI 的测试。
 - **binaries**：6 个 matrix 资产（darwin/linux × amd64/arm64 裸二进制，windows 打 zip 含 exe+config.example.yaml+LICENSE），`-ldflags "-s -w -X main.version=${GITHUB_REF_NAME}"`。linux 资产过 `readelf -l` 断言无 program interpreter（CGO_ENABLED=0 的产物若有解释器说明意外引入 cgo，alpine 里跑不起来）。
-- **publish**：先下载全部二进制产物 → buildx（**无 QEMU**——`Dockerfile.release` 直接 `COPY dist/devin-2api-linux-${TARGETARCH}`，镜像字节 = release 字节，不在镜像里重编）→ GHCR 登录 + DockerHub 条件登录（secrets 配了才推）→ 推 `:<version>` `:<minor>` `:<major>`，稳定版另推 `:latest` → `sha256sum` 生成 `checksums.txt` → 取 tag 注解作 release body → `action-gh-release` 建 Release 上传 7 个资产。
+- **publish**：先下载全部二进制产物 → buildx（**无 QEMU**——`Dockerfile.release` 直接 `COPY dist/devin-2api-linux-${TARGETARCH}`，镜像字节 = release 字节，不在镜像里重编）→ GHCR 登录 + DockerHub 条件登录（secrets 配了才推）→ 推 `:<version>` `:<minor>` `:<major>`，稳定版另推 `:latest` → **digest 验证**（imagetools inspect 回读远端 manifest，浮动 tag 必须与精确版本同 digest，串线当场失败）→ `sha256sum` 生成 `checksums.txt` → 取 tag 注解作 release body → `action-gh-release` 建 Release 上传 7 个资产。
 
 ## 6. 部署脚本族 + 资产断言
 
