@@ -12,7 +12,7 @@ import (
 // TestSearchLogsFilters 验证 LogQuery 各筛选维度的下推语义与
 // total（COUNT(*) OVER()，分页前的精确命中数）。
 func TestSearchLogsFilters(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now()
 	for i, r := range []*LogRow{
@@ -76,7 +76,7 @@ func TestSearchLogsFilters(t *testing.T) {
 // TestUsageLatencyPercentiles 验证分位数口径（pick=sorted[q*(n-1)]）与
 // 样本上限：超过 usageSampleCapacity 后只留最近 N 条。
 func TestUsageLatencyPercentiles(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now()
 	for i := 1; i <= 100; i++ {
@@ -113,7 +113,7 @@ func TestUsageLatencyPercentiles(t *testing.T) {
 // TestUsageRateLimitEvents 验证上游 429 的计数与「完成时刻前 60s 内启动
 // 请求数」的 RPM 采样。
 func TestUsageRateLimitEvents(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	base := time.Now()
 	row := func(dir string, off time.Duration, status int, durMS int64) *LogRow {
@@ -157,7 +157,7 @@ func TestUsageRateLimitEvents(t *testing.T) {
 // TestUsageFaults 验证失败责任归因的聚合口径：客户端责任（断连、请求体
 // 阶段失败）与 429 限流分列，只有服务端失分计 upstream_faults。
 func TestUsageFaults(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now()
 	add := func(i, status int, result, stage string) {
@@ -202,7 +202,7 @@ func TestUsageFaults(t *testing.T) {
 // TestUsageMinBucketWraparound 验证 8 天网格的边界：早于保留窗的条目仍
 // 计入窗口 totals，但不落任何 10 分钟桶——当前桶数据不被覆盖。
 func TestUsageMinBucketWraparound(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now().Truncate(10 * time.Minute)
 	if _, err := s.InsertLog(ctx, &LogRow{

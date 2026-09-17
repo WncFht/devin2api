@@ -88,7 +88,7 @@ func TestImportLegacy(t *testing.T) {
 	logRoot := filepath.Join(stateDir, "logs")
 	writeLegacyFixtures(t, stateDir, logRoot)
 
-	s, _, err := Open(filepath.Join(base, "test.db"))
+	s, err := Open(filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestImportLegacy(t *testing.T) {
 	if err != nil || !ok || v != "false" || ts != 111 {
 		t.Fatalf("setting = %q,%d,%v,%v", v, ts, ok, err)
 	}
-	qs, err := s.ListQuotaSamples(ctx, "default", 0)
+	qs, err := s.ListQuotaSamples(ctx, "default", 0, 0)
 	if err != nil || len(qs) != 2 {
 		t.Fatalf("quota = %v %v", qs, err)
 	}
@@ -205,7 +205,7 @@ func TestImportLegacyRecreatedFiles(t *testing.T) {
 	logRoot := filepath.Join(stateDir, "logs")
 	writeLegacyFixtures(t, stateDir, logRoot)
 
-	s, _, err := Open(filepath.Join(base, "test.db"))
+	s, err := Open(filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestImportLegacyMissingFiles(t *testing.T) {
 	if err := os.MkdirAll(logRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s, _, err := Open(filepath.Join(base, "test.db"))
+	s, err := Open(filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,7 +83,7 @@ func TestForecastTooFewPoints(t *testing.T) {
 // TestQuotaStoreRoundTrip 验证采样入库与历史读取的往返，含
 // 「上游没报」字段的 NULL↔nil 保持。
 func TestQuotaStoreRoundTrip(t *testing.T) {
-	st, _, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

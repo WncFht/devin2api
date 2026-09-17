@@ -19,7 +19,7 @@ import (
 // NewManager 第三参，写完经 SearchLogs/UsageStats 读回验证。
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, _, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

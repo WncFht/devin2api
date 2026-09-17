@@ -396,7 +396,7 @@ func TestRateGateLatchRanges(t *testing.T) {
 // 未过期的闩，防止重启后裸发把上游限流续长；解闩删行，过期行被忽略
 // 并清除。
 func TestRateGateLatchPersistRestore(t *testing.T) {
-	st, _, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 }
 
 func TestRateGateStateExpiredIgnored(t *testing.T) {
-	st, _, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

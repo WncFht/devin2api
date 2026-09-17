@@ -83,7 +83,7 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	newStore := func(t *testing.T) *authtoken.Store {
 		t.Helper()
-		db, _, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+		db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -112,7 +112,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+			dbStore, err := store.Open(filepath.Join(dir, "test.db"))
 			if err != nil {
 				t.Fatal(err)
 			}

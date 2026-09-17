@@ -28,7 +28,7 @@ import (
 // openTokenDB 开一个临时 sqlite 库给令牌仓用。
 func openTokenDB(t *testing.T) *store.Store {
 	t.Helper()
-	db, _, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

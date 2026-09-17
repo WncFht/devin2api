@@ -15,7 +15,7 @@ import (
 // 与重开文件等价。
 func openDB(t *testing.T) *store.Store {
 	t.Helper()
-	st, _, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,42 +2,40 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func openTemp(t *testing.T) (*Store, bool) {
+func openTemp(t *testing.T) *Store {
 	t.Helper()
-	s, created, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s, created
+	return s
 }
 
-func TestOpenCreatedFlagAndReopen(t *testing.T) {
+func TestOpenCreatesFileAndReopens(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.db")
-	s, created, err := Open(path)
+	s, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if !created {
-		t.Fatal("first Open should report created")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("db file should exist after Open: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	s2, created2, err := Open(path)
+	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = s2.Close() }()
-	if created2 {
-		t.Fatal("reopen must not report created")
-	}
 	// schema 幂等：重开后写读正常即可。
 	if err := s2.SetState(context.Background(), "k", "v"); err != nil {
 		t.Fatalf("SetState after reopen: %v", err)
@@ -45,7 +43,7 @@ func TestOpenCreatedFlagAndReopen(t *testing.T) {
 }
 
 func TestInsertLogDerivations(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	started := time.Date(2026, 9, 17, 10, 30, 0, 123456789, time.UTC)
 	id, err := s.InsertLog(ctx, &LogRow{
@@ -99,7 +97,7 @@ func TestInsertLogDerivations(t *testing.T) {
 }
 
 func TestTokenCRUD(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	id, err := s.InsertToken(ctx, &TokenRow{
 		Token: "hash-a", Description: "first", CreatedAt: 1000,
@@ -155,7 +153,7 @@ func TestTokenCRUD(t *testing.T) {
 }
 
 func TestSettingsAndState(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.SetSetting(ctx, "debug_log_enabled", "true", 0); err != nil {
 		t.Fatalf("SetSetting: %v", err)
@@ -197,7 +195,7 @@ func TestSettingsAndState(t *testing.T) {
 }
 
 func TestQuotaSamples(t *testing.T) {
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	rem := 88.5
 	if err := s.InsertQuotaSample(ctx, &QuotaSample{

@@ -175,7 +175,7 @@ func main() {
 	// SQLite 持久层在 adapter 之前打开：号池 lane 的闸门状态与配额
 	// 采样要读它（D6 消费方），导入器也得在文件被新写路径触碰前
 	// 跑完。listen 已先行，导入期间的连接由内核 backlog 兜住。
-	dbStore, _, err := store.Open(filepath.Join(absoluteStateDir, "devin-2api.db"))
+	dbStore, err := store.Open(filepath.Join(absoluteStateDir, "devin-2api.db"))
 	if err != nil {
 		slog.Error("open store failed", "error", err)
 		os.Exit(1)

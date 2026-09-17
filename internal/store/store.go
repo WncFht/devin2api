@@ -10,7 +10,6 @@ package store
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 
@@ -23,17 +22,14 @@ type Store struct {
 	path string
 }
 
-// Open 打开（或创建）path 处的库；created 报告文件是本次新建的——
-// 调用方据此决定是否跑 ImportLegacy。schema 幂等，重复打开只做
-// CREATE IF NOT EXISTS。
-func Open(path string) (*Store, bool, error) {
-	_, statErr := os.Stat(path)
-	created := errors.Is(statErr, os.ErrNotExist)
-
+// Open 打开（或创建）path 处的库。schema 幂等，重复打开只做
+// CREATE IF NOT EXISTS；是否跑 ImportLegacy 由导入器按源文件
+// 存在性自判，Open 不报告 created。
+func Open(path string) (*Store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=wal_autocheckpoint(500)&_loc=Local", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, false, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	// 单连接是刻意的：写路径无并发诉求，串行化免除锁竞争调参。
 	db.SetMaxOpenConns(1)
@@ -41,19 +37,19 @@ func Open(path string) (*Store, bool, error) {
 
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, false, fmt.Errorf("ping sqlite: %w", err)
+		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 	// auto_vacuum 只能在新库（无用户表）建表前开启：VACUUM 对空库
 	// 只是把头部位写进文件，不重写业务数据；旧库不在启动路径做。
 	if err := enableAutoVacuumOnEmpty(db); err != nil {
 		_ = db.Close()
-		return nil, false, err
+		return nil, err
 	}
 	if err := applySchema(db); err != nil {
 		_ = db.Close()
-		return nil, false, fmt.Errorf("apply schema: %w", err)
+		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db, path: path}, created, nil
+	return &Store{db: db, path: path}, nil
 }
 
 // DBBytes 返回库文件与 WAL 的磁盘占用合计（Stats 的 db_bytes 口径）。

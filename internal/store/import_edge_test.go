@@ -76,7 +76,7 @@ func TestImportIndexBadLines(t *testing.T) {
 		indexLine("g3"),
 	})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
 		t.Fatalf("ImportLegacy: %v", err)
@@ -113,7 +113,7 @@ func TestImportIndexOversizedLine(t *testing.T) {
 	writeJSONLines(t, filepath.Join(logRoot, "quota.jsonl"),
 		[]string{`{"at":1700000000,"account":"default"}`})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	err := s.ImportLegacy(ctx, stateDir, logRoot)
 	if err == nil || !strings.Contains(err.Error(), "import index") {
@@ -149,7 +149,7 @@ func TestImportPartialSources(t *testing.T) {
 	writeJSONLines(t, filepath.Join(logRoot, "index.jsonl"),
 		[]string{indexLine("only-1"), indexLine("only-2")})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
 		t.Fatalf("ImportLegacy: %v", err)
@@ -195,7 +195,7 @@ func TestImportIdempotentRerun(t *testing.T) {
 	writeLegacyFixtures(t, stateDir, logRoot)
 	dbPath := filepath.Join(base, "test.db")
 
-	s, _, err := Open(dbPath)
+	s, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -258,12 +258,9 @@ func TestImportIdempotentRerun(t *testing.T) {
 		_ = os.Remove(dbPath + suffix)
 	}
 	writeLegacyFixtures(t, stateDir, logRoot)
-	s2, created, err := Open(dbPath)
+	s2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
-	}
-	if !created {
-		t.Fatal("rebuilt db should report created")
 	}
 	defer func() { _ = s2.Close() }()
 	if err := s2.ImportLegacy(ctx, stateDir, logRoot); err != nil {
@@ -286,7 +283,7 @@ func TestImportResumePartial(t *testing.T) {
 	logRoot := filepath.Join(stateDir, "logs")
 	writeLegacyFixtures(t, stateDir, logRoot)
 
-	s, _, err := Open(filepath.Join(base, "test.db"))
+	s, err := Open(filepath.Join(base, "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -345,7 +342,7 @@ func TestImportResumePartial(t *testing.T) {
 	}
 
 	// quota：撞键行 OR IGNORE，库内 NULL 行赢 → 仍 2 行且首行 remaining 为 nil。
-	qs, err := s.ListQuotaSamples(ctx, "default", 0)
+	qs, err := s.ListQuotaSamples(ctx, "default", 0, 0)
 	if err != nil || len(qs) != 2 {
 		t.Fatalf("quota = %v %v", qs, err)
 	}
@@ -374,7 +371,7 @@ func TestImportLargeIndex(t *testing.T) {
 	}
 	writeJSONLines(t, filepath.Join(logRoot, "index.jsonl"), lines)
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	start := time.Now()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
@@ -405,7 +402,7 @@ func TestImportEmptyFiles(t *testing.T) {
 	writeTextFile(t, filepath.Join(logRoot, "quota.jsonl"), "")
 	writeTextFile(t, filepath.Join(logRoot, "gate-state.json"), `{}`)
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
 		t.Fatalf("ImportLegacy: %v", err)
@@ -446,7 +443,7 @@ func TestImportCorruptWholeFileAborts(t *testing.T) {
 	writeJSONLines(t, filepath.Join(logRoot, "quota.jsonl"),
 		[]string{`{"at":1700000000,"account":"default"}`})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	err := s.ImportLegacy(ctx, stateDir, logRoot)
 	if err == nil || !strings.Contains(err.Error(), "import auth_tokens") {
@@ -512,7 +509,7 @@ func TestImportMigratedSemantics(t *testing.T) {
 	writeJSONLines(t, filepath.Join(logRoot, "index.jsonl"),
 		[]string{indexLine("new-1"), indexLine("new-2")})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
 		t.Fatalf("ImportLegacy: %v", err)
@@ -562,7 +559,7 @@ func TestImportQuotaMixedAccounts(t *testing.T) {
 		`{"at":"nope"}`,                                         // 坏行
 	})
 
-	s, _ := openTemp(t)
+	s := openTemp(t)
 	ctx := context.Background()
 	if err := s.ImportLegacy(ctx, stateDir, logRoot); err != nil {
 		t.Fatalf("ImportLegacy: %v", err)
@@ -578,7 +575,7 @@ func TestImportQuotaMixedAccounts(t *testing.T) {
 	if anon != 1 {
 		t.Fatalf("account='' rows = %d, want 1", anon)
 	}
-	qs, err := s.ListQuotaSamples(ctx, "default", 0)
+	qs, err := s.ListQuotaSamples(ctx, "default", 0, 0)
 	if err != nil || len(qs) != 2 {
 		t.Fatalf("default samples = %v %v", qs, err)
 	}
@@ -589,7 +586,7 @@ func TestImportQuotaMixedAccounts(t *testing.T) {
 		t.Fatalf("(default,200) daily_remaining = %v, want nil (first insert wins)",
 			*qs[1].DailyRemaining)
 	}
-	if qs, err = s.ListQuotaSamples(ctx, "randall", 0); err != nil || len(qs) != 1 {
+	if qs, err = s.ListQuotaSamples(ctx, "randall", 0, 0); err != nil || len(qs) != 1 {
 		t.Fatalf("randall samples = %v %v", qs, err)
 	}
 	migrated(t, filepath.Join(logRoot, "quota.jsonl"))

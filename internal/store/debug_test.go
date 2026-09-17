@@ -9,7 +9,7 @@ import (
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, _, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
