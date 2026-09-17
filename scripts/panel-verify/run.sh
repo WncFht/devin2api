@@ -57,13 +57,16 @@ if [[ -n "$BASE" ]]; then
 	echo "external instance: $BASE"
 else
 	command -v go >/dev/null || { echo "需要 go" >&2; exit 1; }
-	[[ -x "$ROOT/devin-2api" ]] || (cd "$ROOT" && go build ./cmd/devin-2api)
+
+	WORK="$(mktemp -d)"
+
+	# 每次现构建：web 资产 go:embed 进二进制，复用仓库根旧二进制会
+	# 拿过期前端跑检查（踩过）。产物放临时目录，不污染仓库根。
+	(cd "$ROOT" && go build -o "$WORK/devin-2api" ./cmd/devin-2api)
 
 	if [[ -z "$PORT" ]]; then
 		PORT="$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
 	fi
-
-	WORK="$(mktemp -d)"
 
 	# 最小可启动配置：devin.base_url/model 是 adapter 必填；token 填假值
 	# 避免启动时从本机 Devin CLI 凭据目录发现真实 token。password 非空 +
@@ -80,10 +83,12 @@ debug:
 devin:
   base_url: https://server.codeium.com
   model: swe-2-max
-  token: pv-fake-token
+  accounts:
+    - name: main
+      token: pv-fake-token
 EOF
 
-	"$ROOT/devin-2api" -config "$WORK/config.yaml" -state-dir "$WORK" >"$WORK/stdout.log" 2>"$WORK/stderr.log" &
+	"$WORK/devin-2api" -config "$WORK/config.yaml" -state-dir "$WORK" >"$WORK/stdout.log" 2>"$WORK/stderr.log" &
 	PV_PID=$!
 
 	ready=0
