@@ -674,12 +674,13 @@ func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	return out, nil
 }
 
-// AccountAggs 按上游账号 lane 聚合全量 logs：totals + avg TTFB + 末次
+// AccountAggs 按上游账号 lane 聚合窗口内 logs：totals + avg TTFB + 末次
 // 时刻——P2 /admin/accounts 逐号维度表的支点。” 历史行折叠进
 // 'default' 桶（logAccountExpr），与 LogScope.Account、QuotaReport
 // 的读侧口径一致，不会出现 ”/'default' 幽灵分桶。
 func (s *Store) AccountAggs(ctx context.Context) ([]DimensionAgg, error) {
-	return s.dimAggs(ctx, logAccountExpr)
+	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
+	return s.dimAggs(ctx, logAccountExpr, minBucket)
 }
 
 // AccountUsageToday 是单账号本地日界内的原始计数。
