@@ -11,10 +11,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
 	"github.com/WncFht/devin2api/internal/authtoken"
@@ -61,30 +61,6 @@ func TestRunReturnsServeError(t *testing.T) {
 	}
 }
 
-// TestRedactConfigSecretsProxyUserinfo verifies proxy URL userinfo is stripped
-// from the config introspection view while the host stays identifiable.
-func TestRedactConfigSecretsProxyUserinfo(t *testing.T) {
-	fields := map[string]any{
-		"devin": map[string]any{
-			"proxy":    "http://alice:hunter2@proxy.local:8080",
-			"accounts": []any{map[string]any{"name": "a", "token": "topsecret"}},
-		},
-	}
-	redactConfigSecrets(fields)
-	devinSection := fields["devin"].(map[string]any)
-	proxy := devinSection["proxy"].(string)
-	if strings.Contains(proxy, "alice") || strings.Contains(proxy, "hunter2") {
-		t.Fatalf("proxy userinfo leaked: %q", proxy)
-	}
-	if !strings.Contains(proxy, "proxy.local:8080") {
-		t.Fatalf("proxy host should be preserved: %q", proxy)
-	}
-	token := devinSection["accounts"].([]any)[0].(map[string]any)["token"].(string)
-	if !strings.HasPrefix(token, "sha256:") {
-		t.Fatalf("account token not redacted: %q", token)
-	}
-}
-
 // TestReloadRuntimeConfigRejectsEmptyUpstream verifies a live adapter refuses a
 // reload that drops devin.model/base_url — committing empty values would fail
 // every request. accounts 刻意不在必填集：补号的通道正是 /admin/accounts
@@ -100,12 +76,21 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeConfigPtr.Store(&runtimeConfigState{cfg: prev, loadedAt: time.Now()})
 
 	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 	defer manager.Close()
-	devinPool, err := devin.NewPool(devinConfigsFrom(prev, prev.Devin.Accounts, configPath, nil))
+	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dbStore.Close() }()
+	devinPool, err := devin.NewPool(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := accounts.New(configPath, dbStore, devinPool)
+	rt.CommitConfig(prev)
+	if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 		t.Fatal(err)
 	}
 	application := app.New(devinPool, config.ServerConfig{}, manager)
@@ -113,11 +98,6 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = dbStore.Close() }()
 	settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 		Debug:       manager,
 		DevinConfig: devinPool.CurrentConfig,
@@ -144,7 +124,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  accounts:\n    - {name: a, token: 't'}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -152,7 +132,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -166,7 +146,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 	if lanes := devinPool.AccountLaneStates(); len(lanes) != 1 {
@@ -263,7 +243,6 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			runtimeConfigPtr.Store(&runtimeConfigState{cfg: prev, loadedAt: time.Now()})
 
 			// 变异 yaml 树上该叶子：值取与 prev 不同的形态。
 			var tree map[string]any
@@ -325,8 +304,18 @@ auth:
 
 			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 			defer manager.Close()
-			devinPool, err := devin.NewPool(devinConfigsFrom(prev, prev.Devin.Accounts, configPath, nil))
+			dbStore, err := store.Open(filepath.Join(dir, "test.db"))
 			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = dbStore.Close() }()
+			devinPool, err := devin.NewPool(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt := accounts.New(configPath, dbStore, devinPool)
+			rt.CommitConfig(prev)
+			if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 				t.Fatal(err)
 			}
 			application := app.New(devinPool, config.ServerConfig{}, manager)
@@ -334,11 +323,6 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			dbStore, err := store.Open(filepath.Join(dir, "test.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = dbStore.Close() }()
 			settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 				Debug:       manager,
 				DevinConfig: devinPool.CurrentConfig,
@@ -360,7 +344,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}
