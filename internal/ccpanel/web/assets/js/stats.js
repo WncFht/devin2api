@@ -1232,6 +1232,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
     }
 
     async function loadUsageObserv() {
+      if (window.isAPITokenRole && window.isAPITokenRole()) return;
       try {
         const data = await fetchDataWithAuth('/admin/usage');
         usageDisabled = Boolean(data && data.disabled);

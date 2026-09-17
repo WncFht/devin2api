@@ -2,15 +2,18 @@ const t = window.t;
 const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 
 // ── 后端契约（ccpanel 迁移路由）─────────────────────────────────
-// 列表/导出/筛选选项走 /admin/logs* 与 /admin/models；调试目录文件与
-// 服务端合并视图走 /admin/debug-logs/{id}/*——{id} 是 started_at 的
-// epoch 毫秒（日志行 id 同口径）。进行中的请求用 active-requests 列表
-// 的 start_time（同 UnixMilli）反查目录，FNV 哈希 id 不能解析目录。
-const LOGS_LIST_URL = '/admin/logs';
-const LOGS_BOOTSTRAP_URL = '/admin/logs/bootstrap';
-const LOGS_MODELS_URL = '/admin/models';
+// 列表/筛选选项/指标条走 /dashboard/* 镜像——与 /admin 同一批 handler，
+// withWebAuth 两种角色都放行，api_token 身份下按 KeyHash 收敛；否则
+// api_token 会话首个抓取 401 就会把整页弹回登录。调试目录文件与服务端
+// 合并视图留在 /admin/debug-logs/{id}/*——{id} 是 started_at 的
+// epoch 毫秒（日志行 id 同口径），目录无属主校验，不对 api_token 开放。
+// 进行中的请求用 active-requests 列表的 start_time（同 UnixMilli）
+// 反查目录，FNV 哈希 id 不能解析目录。
+const LOGS_LIST_URL = '/dashboard/logs';
+const LOGS_BOOTSTRAP_URL = '/dashboard/logs/bootstrap';
+const LOGS_MODELS_URL = '/dashboard/models';
 const LOGS_EXPORT_URL = '/admin/logs/export';
-const LOGS_STATS_URL = '/admin/stats';
+const LOGS_STATS_URL = '/dashboard/stats';
 const debugLogUrl = (id) => `/admin/debug-logs/${encodeURIComponent(id)}`;
 const debugLogFileUrl = (id, name) =>
   `${debugLogUrl(id)}/file/${String(name).split('/').map(encodeURIComponent).join('/')}`;
@@ -1433,10 +1436,12 @@ function renderLogs(data) {
     const statusHint = logsStatusHint(statusCode);
     const statusTitleAttr = statusHint ? ` title="${escapeHtml(statusHint)}"` : '';
 
-    // 3. 模型显示（重定向落点在 tag 悬浮提示里）；非 2xx 行给探活入口
+    // 3. 模型显示（重定向落点在 tag 悬浮提示里）；非 2xx 行给探活入口——
+    // /admin/model-test 仅 admin 可达且消耗上游配额，api_token 会话不渲染入口
     const displayedActualModel = entry.actual_model || entry.response_model;
     const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.thinking_effort, entry.reasoning_tokens, entry.upstream_websocket);
-    const probeDisplay = !(statusCode >= 200 && statusCode < 300) && entry.model
+    const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
+    const probeDisplay = !(statusCode >= 200 && statusCode < 300) && entry.model && !isTokenSession
       ? `<button type="button" class="test-key-btn" data-probe-model="${escapeHtml(entry.model)}" data-probe-api="${escapeHtml(entry.api || '')}" title="${escapeHtml(t('logs.probeModel'))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
       : '';
 
