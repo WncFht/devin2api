@@ -610,7 +610,8 @@ function canInspectDebugLog(entry) {
 function buildLogMessageContent(entry) {
   const sourceBadge = renderLogSourceBadge(entry.log_source || 'proxy');
   const msg = humanizeLogMessage(entry.message);
-  if (!sourceBadge && !msg.text) {
+  const errorMessage = String(entry.error_message || '').trim();
+  if (!sourceBadge && !msg.text && !errorMessage) {
     return '';
   }
   // 机器原文（"failed: devin_connect"）进 title，展示人性化短标签。
@@ -624,7 +625,12 @@ function buildLogMessageContent(entry) {
     const logIdAttr = Number.isFinite(logId) && logId > 0 ? ` data-log-id="${logId}"` : '';
     inner = `<span class="debug-log-link has-upstream-detail"${logIdAttr}${titleAttr}>${escapeHtml(msg.text)}</span>`;
   }
-  return `${sourceBadge}${inner}`;
+  // error_message 是首个失败点的原始错误文案（仅失败行有值）：行内截
+  // ~80 字符，悬停 title 看全文，避免把 ~300B 长串铺满单元格。
+  const errorHtml = errorMessage
+    ? `<span class="log-error-text" title="${escapeHtml(errorMessage)}">${escapeHtml(errorMessage.length > 80 ? `${errorMessage.slice(0, 80)}…` : errorMessage)}</span>`
+    : '';
+  return `${sourceBadge}${inner}${errorHtml}`;
 }
 
 function getLogCostInfo(entry) {

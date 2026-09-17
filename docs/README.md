@@ -43,4 +43,3 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 - 发版/格式化/CI → `toolchain.md`
 - 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ `logs/<debug_ref>/meta.json` 延迟分解字段
 - subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/admin/runtime-metrics` 的 warm 段
-- 某号限流/配额异常、请求换号归因 → `devin-accounts.md` + `meta.json` 的 `upstream_attempts` / `/admin/runtime-metrics` 的 accounts 组

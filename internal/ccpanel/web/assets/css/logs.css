@@ -421,6 +421,15 @@
       background: var(--notification-warning-bg);
     }
 
+    /* 失败行 error_message：压在人性化标签下的次级小字行 */
+    .log-error-text {
+      display: block;
+      margin-top: 2px;
+      color: var(--neutral-500);
+      font-size: 0.82em;
+      line-height: 1.3;
+    }
+
     .logs-filter-summary-row {
       display: flex;
       align-items: center;
