@@ -33,6 +33,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
@@ -169,6 +170,20 @@ func main() {
 	// applyPprofListen 与配置 reload 共用同一换绑路径，退出时置空关闭。
 	applyPprofListen(serviceConfig.Debug.PprofListen)
 	defer func() { applyPprofListen("") }()
+
+	// SQLite 持久层在 adapter 之前打开：号池 lane 的闸门状态与配额
+	// 采样要读它（D6 消费方），导入器也得在文件被新写路径触碰前
+	// 跑完。listen 已先行，导入期间的连接由内核 backlog 兜住。
+	dbStore, _, err := store.Open(filepath.Join(absoluteStateDir, "devin-2api.db"))
+	if err != nil {
+		slog.Error("open store failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = dbStore.Close() }()
+	if err := dbStore.ImportLegacy(context.Background(), absoluteStateDir, logRoot); err != nil {
+		slog.Error("import legacy state failed", "error", err)
+		os.Exit(1)
+	}
 
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
