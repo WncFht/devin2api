@@ -111,6 +111,9 @@ type Handler struct {
 	accountLaneStates func() map[string]devin.LaneState
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
+	// accountOps 挂 /admin/accounts 账号 CRUD 与行操作面；nil 时
+	// 该族端点 503。
+	accountOps *AccountOps
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
 	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
 	maxConcurrencyFunc func() int
@@ -230,6 +233,12 @@ func (h *Handler) SetConfigOps(ops ConfigOps) {
 	h.configOps = &ops
 }
 
+// SetAccountOps 注入 /admin/accounts 账号操作面（读写跨 store 行、
+// config 声明集与 devinPool 热应用协调，实现由装配层提供）。
+func (h *Handler) SetAccountOps(ops AccountOps) {
+	h.accountOps = &ops
+}
+
 // SetAliasesFunc 注入别名表读取函数。
 func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
 	h.aliasesFunc = fn
@@ -342,6 +351,14 @@ func (h *Handler) Register(mux interface {
 	mux.Put("/admin/model-registry", h.withAuth(h.adminPutModel))
 	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
 	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
+	mux.Get("/admin/accounts", h.withAuth(h.adminAccounts))
+	mux.Post("/admin/accounts", h.withAuth(h.adminCreateAccount))
+	mux.Get("/admin/accounts/cli-credentials", h.withAuth(h.adminCLICredentials))
+	mux.Put("/admin/accounts/{name}", h.withAuth(h.adminUpdateAccount))
+	mux.Delete("/admin/accounts/{name}", h.withAuth(h.adminDeleteAccount))
+	mux.Post("/admin/accounts/{name}/restore", h.withAuth(h.adminRestoreAccount))
+	mux.Post("/admin/accounts/{name}/clear-cooldown", h.withAuth(h.adminClearAccountCooldown))
+	mux.Post("/admin/accounts/{name}/quota/refresh", h.withAuth(h.adminRefreshAccountQuota))
 	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))
 	mux.Get("/admin/quota", h.withAuth(h.adminQuota))
 	mux.Get("/admin/status", h.withAuth(h.adminStatus))

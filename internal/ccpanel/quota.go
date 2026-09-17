@@ -178,6 +178,13 @@ func (h *Handler) sampleAccountQuota(account, token string) {
 	}
 }
 
+// refreshAccountQuota 即采一次指定账号配额：拉 userStatus、落
+// quota_samples 行、更新 quotaUsers 投影，返回 {user, plan} 给
+// /admin/accounts/{name}/quota/refresh 作响应体。
+func (h *Handler) refreshAccountQuota(ctx context.Context, account, token string) (map[string]any, error) {
+	return nil, errNotImplemented
+}
+
 // quotaHistoryCap 是单次读取的历史样本数上限；默认 5 分钟间隔下约覆盖
 // 34 天。
 const quotaHistoryCap = 10000

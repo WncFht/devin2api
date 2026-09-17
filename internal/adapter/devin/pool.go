@@ -671,3 +671,10 @@ func (pool *Pool) Aliases() map[string]string {
 func (pool *Pool) CurrentConfig() Config {
 	return pool.firstLane().adapter.CurrentConfig()
 }
+
+// ClearCooldown 清该名 lane 的池侧两档冷却（badUntil 凭据冷却 +
+// unhealthyUntil 短冷却）并立即回候选；保留 lastFailure* 证据，
+// 不动 gate 闩（上游推导的真值，本地无权清）。无活 lane 返 false。
+func (pool *Pool) ClearCooldown(name string) bool {
+	return false
+}

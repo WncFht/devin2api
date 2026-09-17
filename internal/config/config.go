@@ -326,6 +326,18 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 	return nil
 }
 
+// ResolveAccounts 对一整份账号集跑整表校验（名正则/重名/凭据至少
+// 其一/重 token/重 credentials_file/文件可解 key），返回锚定好
+// credentials_file、文件型条目 token 已补成文件内容的副本；入参不动。
+// API 干跑与 reload 整表校验共用同一出口，不留平行校验。
+func ResolveAccounts(accounts []DevinAccountConfig, configDir string) ([]DevinAccountConfig, error) {
+	synthetic := &DevinConfig{Accounts: append([]DevinAccountConfig(nil), accounts...)}
+	if err := synthetic.resolveAccounts(configDir); err != nil {
+		return nil, err
+	}
+	return synthetic.Accounts, nil
+}
+
 // expandHomeDir 展开路径开头的 ~/（Go 不做 shell 式 ~ 展开，配置里
 // 写 ~/.local/share/... 是 Devin CLI 凭证文件的自然写法）。
 func expandHomeDir(path string) string {
