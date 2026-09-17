@@ -50,6 +50,9 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
   .rss_bytes,.uptime_seconds,
   .window_hours,.burn_per_hour,.burn_per_day,.hours_left,.exhausted_at,
   .survives_until_reset,.remaining,.reset_at,
+  .avg_qps,.avg_rpm,.peak_qps,.peak_rpm,.rpm,.qps,
+  .last_request_id,.last_success_id,.last_error_id,
+  .log_rows,.log_row_retention_days,
   .log_root,.index_bytes,.db_bytes) else . end);
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
