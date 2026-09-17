@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -1013,11 +1012,7 @@ func hashCredential(credential string) string {
 // debugRef 返回本请求的调试目录名作为跨接口关联引用；
 // 未启用调试日志（nil recorder）或异常路径时为空串。
 func debugRef(recorder *debuglog.Recorder) string {
-	dir := filepath.Base(recorder.DirectoryPath())
-	if dir == "." {
-		return ""
-	}
-	return dir
+	return recorder.Dir()
 }
 
 func httpRequestProjection(request *http.Request, body []byte) map[string]any {

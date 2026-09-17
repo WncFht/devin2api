@@ -18,7 +18,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -357,7 +356,13 @@ func (h *Handler) adminDebugLog(w http.ResponseWriter, r *http.Request) {
 		h.respondDebugLogUnavailable(w)
 		return
 	}
-	respondOK(w, h.debugLogResponse(dir, id, timeMS))
+	resp := h.debugLogResponse(dir, id, timeMS)
+	if resp == nil {
+		// 日志行还在但 payload 已被保留策略整体淘汰——回「目录已删」404。
+		h.respondDebugLogUnavailable(w)
+		return
+	}
+	respondOK(w, resp)
 }
 
 // adminActiveRequestDebugLog 实现 GET /admin/active-requests/{id}/debug-log：
@@ -372,8 +377,10 @@ func (h *Handler) adminActiveRequestDebugLog(w http.ResponseWriter, r *http.Requ
 	if h.debug != nil {
 		for _, ar := range h.debug.ActiveRequests() {
 			if activeRequestID(ar.Dir) == id {
-				respondOK(w, h.debugLogResponse(ar.Dir, id, id))
-				return
+				if resp := h.debugLogResponse(ar.Dir, id, id); resp != nil {
+					respondOK(w, resp)
+					return
+				}
 			}
 		}
 	}
@@ -428,7 +435,8 @@ func (h *Handler) respondDebugLogUnavailable(w http.ResponseWriter) {
 	})
 }
 
-// debugLogResponse 把一个请求目录投影成 ccLoad debugLogResponse 形状。
+// debugLogResponse 把一个请求目录投影成 ccLoad debugLogResponse 形状；
+// 目录 payload 已不存在（retention 淘汰）时返回 nil，调用方回 404。
 // fallbackMS 是 meta.json 缺席时 created_at 的兜底毫秒戳（logs 表行的
 // time 列；活跃请求路径沿用调用方 id 占位）。
 // 本服务的「协议转换」恒成立（客户端协议 → connect-RPC）：
@@ -454,11 +462,14 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	}
 	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
-	// 不外流，meta 本体不需要过 maskToken。
-	if detail, err := h.debug.Detail(dir); err == nil {
-		_ = json.Unmarshal(detail.Meta, &meta)
-		resp["files"] = detail.Files
+	// 不外流，meta 本体不需要过 maskToken。目录整个不在时投影无意义，
+	// 返回 nil 让调用方回「目录已删」——只剩日志行的请求不能回 200 空壳。
+	detail, err := h.debug.Detail(dir)
+	if err != nil {
+		return nil
 	}
+	_ = json.Unmarshal(detail.Meta, &meta)
+	resp["files"] = detail.Files
 	// 读路径按最近见过的 token 字面值兜底脱敏——写路径的 secretKey
 	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
 	// token 在这里罩住；自愈轮换后旧 token 仍在 recentTokens 集合内。
@@ -501,7 +512,7 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	// 03 + attemptN：上游 wire 请求体。多次重发按序拼接——ccLoad 的
 	// req_body 只记最后一次尝试，我们把每次尝试都留痕（重试排障要对比）。
 	var reqBody bytes.Buffer
-	if names, err := debuglog.DevinRequestStages(filepath.Join(h.debug.Root(), dir)); err == nil {
+	if names, err := h.debug.DevinRequestStages(dir); err == nil {
 		for _, name := range names {
 			data, err := readStage(name)
 			if err != nil {

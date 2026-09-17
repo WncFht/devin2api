@@ -1,21 +1,23 @@
 // 本文件实现协议普查与漂移检测：census 子命令用生成代码注册的描述符统计
-// logs/ 里真实流量出现的字段、枚举值和未知键；diff 子命令对比两次提取的
-// FileDescriptorSet，报告上游协议的新增/删除/变更。
+// devin-2api.db 调试表里真实流量出现的字段、枚举值和未知键；diff 子命令
+// 对比两次提取的 FileDescriptorSet，报告上游协议的新增/删除/变更。
 package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	_ "local/devinproto" // 注册上游描述符到全局 registry，供 census 按线网名解析
 
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -84,9 +86,10 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `subcommands:
-  census [-logs DIR] [-max-dirs N]
-                        scan request dirs, report field coverage, unknown keys,
-                        enum anomalies (default logs dir: ./logs)
+  census [-db PATH] [-max-dirs N]
+                        scan request dirs in devin-2api.db, report field
+                        coverage, unknown keys, enum anomalies
+                        (default db: ./devin-2api.db)
   diff OLD.pb NEW.pb    compare two FileDescriptorSets (descriptors.pb),
                         report added/removed/changed symbols`)
 }
@@ -108,7 +111,7 @@ func messageDesc(name protoreflect.FullName) (protoreflect.MessageDescriptor, er
 
 func cmdCensus(args []string) error {
 	fs := flag.NewFlagSet("census", flag.ContinueOnError)
-	logsDir := fs.String("logs", "logs", "debuglog directory")
+	dbPath := fs.String("db", "devin-2api.db", "devin-2api state database")
 	maxDirs := fs.Int("max-dirs", 0, "only scan newest N request dirs (0 = all)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -121,19 +124,28 @@ func cmdCensus(args []string) error {
 	if err != nil {
 		return err
 	}
-	dirs, err := requestDirs(*logsDir, *maxDirs)
+	st, err := store.Open(*dbPath)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	dirs, err := requestDirs(ctx, st, *maxDirs)
+	if err != nil {
+		return err
+	}
+	// Manager 只借它的 DevinRequestStages 枚举谓词；root 为空不建目录、
+	// 不起 cleaner，写路径全部旁路。
+	manager := debuglog.NewManager("", debuglog.RetentionPolicy{}, st)
 	req, resp := newCensus(), newCensus()
 	var frames int
 	for _, dir := range dirs {
 		req.currentDir, resp.currentDir = dir, dir
 		// 首个请求与 attemptN 重试分片都进普查——重试写给上游的 wire
 		// 形态不同（如换 model/追加 continue），漏掉会低估字段覆盖。
-		if requestStages, err := debuglog.DevinRequestStages(filepath.Join(*logsDir, dir)); err == nil {
+		if requestStages, err := manager.DevinRequestStages(dir); err == nil {
 			for _, stage := range requestStages {
-				if raw, err := os.ReadFile(filepath.Join(*logsDir, dir, stage)); err == nil {
+				if raw, _, ok, err := st.DebugFile(ctx, dir, stage, 0); err == nil && ok {
 					var obj map[string]any
 					if json.Unmarshal(raw, &obj) == nil {
 						req.walk(reqMD, obj)
@@ -141,8 +153,8 @@ func cmdCensus(args []string) error {
 				}
 			}
 		}
-		if f, err := os.Open(filepath.Join(*logsDir, dir, debuglog.StageDevinResponse)); err == nil {
-			sc := bufio.NewScanner(f)
+		if raw, _, ok, err := st.DebugFile(ctx, dir, debuglog.StageDevinResponse, 0); err == nil && ok {
+			sc := bufio.NewScanner(bytes.NewReader(raw))
 			sc.Buffer(make([]byte, 4<<20), 4<<20)
 			for sc.Scan() {
 				var obj map[string]any
@@ -156,23 +168,16 @@ func cmdCensus(args []string) error {
 			if err := sc.Err(); err != nil {
 				fmt.Fprintf(os.Stderr, "warn: scan %s/%s: %v\n", dir, debuglog.StageDevinResponse, err)
 			}
-			_ = f.Close()
 		}
 	}
 	return printReport(len(dirs), frames, req, resp)
 }
 
 // requestDirs 返回按名字倒序的请求目录名（debuglog 目录名按时间排序，名字即时间序）。
-func requestDirs(logsDir string, maxDirs int) ([]string, error) {
-	entries, err := os.ReadDir(logsDir)
+func requestDirs(ctx context.Context, st *store.Store, maxDirs int) ([]string, error) {
+	dirs, err := st.DebugDirs(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var dirs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			dirs = append(dirs, e.Name())
-		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 	if maxDirs > 0 && len(dirs) > maxDirs {

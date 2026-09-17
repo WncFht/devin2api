@@ -212,6 +212,14 @@ func main() {
 	}, dbStore)
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
+	// 遗留磁盘请求目录的后台导入：逐目录事务搬进 debug 两表后删目录，
+	// 断点记在 runtime_state，崩溃重启续传。异步跑——大目录导入不该
+	// 拖住就绪；导入途中同秒新目录的 claim 由 DB 占位与 takenNames 兜底。
+	go func() {
+		if err := dbStore.ImportDebugDirs(context.Background(), logRoot, "import_debug_progress"); err != nil {
+			slog.Warn("import legacy debug dirs failed", "error", err)
+		}
+	}()
 	application := app.New(devinPool, serviceConfig.Server, debugManager)
 	// 用 logs 表回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，

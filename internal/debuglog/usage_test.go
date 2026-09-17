@@ -152,7 +152,7 @@ func TestRetryAttemptsInIndex(t *testing.T) {
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-	dir := filepath.Base(recorder.DirectoryPath())
+	dir := recorder.dir
 	recorder.NoteRetryAttempt(2, "unauthenticated: token reloaded")
 	recorder.NoteRetryAttempt(3, "transport: EOF")
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m-x"})
@@ -165,7 +165,7 @@ func TestRetryAttemptsInIndex(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 	// meta.json 应带明细（attempt 号/原因/相对时刻），面板据此渲染链路。
-	data, err := os.ReadFile(filepath.Join(root, dir, "meta.json"))
+	data, _, _, err := manager.ReadFile(dir, MetaFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestAbortActiveRequest(t *testing.T) {
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-	dir := filepath.Base(recorder.DirectoryPath())
+	dir := recorder.dir
 	if manager.Abort(dir) {
 		t.Fatal("Abort should fail before ctx is attached")
 	}
@@ -241,73 +241,62 @@ func TestAbortActiveRequest(t *testing.T) {
 	}
 }
 
-// TestLayeredRetention 验证负载剥离与失败目录豁免。
+// TestLayeredRetention 验证负载剥离与失败目录豁免：行键名即年龄依据，
+// 2020 年的目录名远超 1 小时负载保留界。
 func TestLayeredRetention(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1}, nil)
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1}, st)
 	defer manager.Close()
 
-	// 一个 2 小时前的目录：负载应被剥离，证据保留。重试分片
-	// 03-devin-request.attempt2.json 同属负载层，必须一并剥掉。
-	old := filepath.Join(root, "20200101-000000")
+	// 重试分片 03-devin-request.attempt2.json 同属负载层，必须一并剥掉。
+	ctx := context.Background()
+	old := "20200101-000000"
 	payloads := []string{
 		"03-devin-request.json", "03-devin-request.attempt2.json",
-		"04-devin-response.jsonl", "06-http-response.jsonl",
+		"04-devin-response.jsonl", "06-http-response.jsonl", "attachments/a.bin",
 	}
-	for _, name := range append(payloads, "meta.json", "error.json") {
-		if err := os.MkdirAll(old, 0o700); err != nil {
+	for _, name := range append(payloads, MetaFile, ErrorFile) {
+		if err := st.PutDebugFile(ctx, old, name, []byte("x")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.MkdirAll(filepath.Join(old, "attachments"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(old, "attachments", "a.bin"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	oldTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
-		t.Fatal(err)
 	}
 
 	manager.cleanOnce()
-	for _, gone := range append(payloads, "attachments") {
-		if _, err := os.Stat(filepath.Join(old, gone)); !os.IsNotExist(err) {
-			t.Fatalf("payload %s should be stripped", gone)
+	names, err := st.DebugFileNames(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	for _, name := range names {
+		remaining[name] = true
+	}
+	for _, gone := range payloads {
+		if remaining[gone] {
+			t.Fatalf("payload %s should be stripped, remaining = %v", gone, names)
 		}
 	}
-	for _, keep := range []string{"meta.json", "error.json"} {
-		if _, err := os.Stat(filepath.Join(old, keep)); err != nil {
-			t.Fatalf("evidence %s should remain: %v", keep, err)
+	for _, keep := range []string{MetaFile, ErrorFile} {
+		if !remaining[keep] {
+			t.Fatalf("evidence %s should remain, remaining = %v", keep, names)
 		}
 	}
 }
 
 // TestRetentionAgesByDirName 验证计龄以目录名内嵌时间戳为准：
-// dir mtime 被刷成现在（如负载剥离后）不影响超龄目录的淘汰判定。
+// 行 updated_at 再新也不影响超龄目录的淘汰判定。
 func TestRetentionAgesByDirName(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{Days: 7, PayloadHours: 1}, nil)
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{Days: 7, PayloadHours: 1}, st)
 	defer manager.Close()
 
-	old := filepath.Join(root, "20200101-000000")
-	for _, name := range []string{"03-devin-request.json", "meta.json"} {
-		if err := os.MkdirAll(old, 0o700); err != nil {
+	ctx := context.Background()
+	for _, name := range []string{"03-devin-request.json", MetaFile} {
+		if err := st.PutDebugFile(ctx, "20200101-000000", name, []byte("x")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	now := time.Now()
-	if err := os.Chtimes(old, now, now); err != nil {
-		t.Fatal(err)
 	}
 	if removed := manager.cleanOnce(); removed != 1 {
-		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，mtime 不算数）", removed)
+		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，行新旧不算数）", removed)
 	}
 }
 

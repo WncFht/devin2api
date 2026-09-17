@@ -42,6 +42,21 @@ func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, cont
 	return err
 }
 
+// ClaimDebugFile 是带占位语义的 IfAbsent 变体：无行时插入并返回
+// true，已有行则原样保留并返回 false——目录分配把它当原子占位用
+// （等价文件时代 mkdir 的 EEXIST），与 PutDebugFileIfAbsent 的差别
+// 只在是否报告本次真正写入。
+func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
+		dir, name, content, time.Now().UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // AppendDebugChunk 追加一行到 debug_chunks，seq 由同一条 INSERT 内的
 // 子查询取 MAX(seq)+1——聚合查询在无命中行时也返回一行，首个 chunk
 // 得 seq=0；单连接串行化下整条语句原子，无需外层事务。
@@ -159,6 +174,29 @@ func (s *Store) DebugFileList(ctx context.Context, dir string) ([]DebugFileInfo,
 func (s *Store) DebugDirs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT dir FROM debug_files UNION SELECT dir FROM debug_chunks ORDER BY dir`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var dirs []string
+	for rows.Next() {
+		var dir string
+		if err := rows.Scan(&dir); err != nil {
+			return nil, err
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs, rows.Err()
+}
+
+// DebugDirsByPrefix 返回名以 prefix 开头的目录名（字典序）——dir 名
+// 前 15 字符内嵌 "20060102-150405" 时间戳，按 started_at 毫秒反查
+// 目录时先圈同秒候选，再逐目录比对 meta.json 消歧。GLOB 前缀可走
+// 索引；调用方保证 prefix 不含通配符（时间戳格式只含数字与 '-'）。
+func (s *Store) DebugDirsByPrefix(ctx context.Context, prefix string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT dir FROM debug_files WHERE dir GLOB ? UNION SELECT dir FROM debug_chunks WHERE dir GLOB ? ORDER BY dir`,
+		prefix+"*", prefix+"*")
 	if err != nil {
 		return nil, err
 	}

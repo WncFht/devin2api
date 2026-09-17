@@ -7,7 +7,6 @@ package debuglog
 
 import (
 	"context"
-	"path/filepath"
 	"time"
 	"unicode/utf8"
 
@@ -112,7 +111,7 @@ const errorMessageCap = 300
 // store 为 nil（测试或 DB 未接线）时静默跳过：日志行是观测副本，
 // 不该反过来决定请求能否完结——失败只记 ioErrors。
 func (manager *Manager) insertLog(recorder *Recorder, completion *Completion) {
-	dir := filepath.Base(recorder.directory)
+	dir := recorder.dir
 	if manager.store == nil || dir == "" {
 		return
 	}
@@ -297,8 +296,8 @@ func truncateRunes(s string, cap int) string {
 }
 
 // releaseDir 把目录移出活跃集合，允许清理器回收它。
-func (manager *Manager) releaseDir(directory string) {
+func (manager *Manager) releaseDir(dir string) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-	delete(manager.activeDirs, filepath.Base(directory))
+	delete(manager.activeDirs, dir)
 }
