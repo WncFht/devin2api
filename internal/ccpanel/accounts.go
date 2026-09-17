@@ -57,6 +57,13 @@ func (h *Handler) accountOpsUnavailable(w http.ResponseWriter) bool {
 	return true
 }
 
+// accountView 把一条生效账号投影成契约单号视图（列表项同形）：
+// 身份字段 + lane/gate/warm 快照 + inflight + quota 摘要 + usage。
+// 写端点回包与 GET 列表共用同一投影，schema 只有这一处来源。
+func (h *Handler) accountView(ctx context.Context, acc *store.ResolvedAccount) map[string]any {
+	return map[string]any{"name": acc.Name}
+}
+
 // adminAccounts 实现 GET /admin/accounts：身份（ops.Effective）+
 // 运行时快照（lane/gate/warm/inflight）+ 配额摘要的聚合视图。
 func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
