@@ -345,3 +345,40 @@ func TestLoadAccountsTrims(t *testing.T) {
 		t.Fatalf("Token = %q, want trimmed tok", account.Token)
 	}
 }
+
+// TestLoadAccountsMetaFields 验证 priority/max_rpm 号级元数据与两个
+// 全局池字段的加载：非负值原样进 DevinAccountConfig/DevinConfig，
+// 负值逐字段在加载期拒绝。
+func TestLoadAccountsMetaFields(t *testing.T) {
+	t.Run("fields load", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(),
+			"  session_affinity_ttl_seconds: 600\n  quota_low_threshold_percent: 20\n"+
+				"  accounts:\n    - name: alpha\n      token: tok\n      priority: 5\n      max_rpm: 30\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		account := config.Devin.Accounts[0]
+		if account.Priority != 5 || account.MaxRPM != 30 {
+			t.Fatalf("account = %+v", account)
+		}
+		if config.Devin.SessionAffinityTTLSeconds != 600 || config.Devin.QuotaLowThresholdPercent != 20 {
+			t.Fatalf("globals = %+v", config.Devin)
+		}
+	})
+
+	t.Run("negative priority", func(t *testing.T) {
+		_, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      token: tok\n      priority: -1\n")
+		if err == nil || !strings.Contains(err.Error(), "priority must be >= 0") {
+			t.Fatalf("Load() error = %v, want priority error", err)
+		}
+	})
+
+	t.Run("negative max_rpm", func(t *testing.T) {
+		_, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      token: tok\n      max_rpm: -5\n")
+		if err == nil || !strings.Contains(err.Error(), "max_rpm must be >= 0") {
+			t.Fatalf("Load() error = %v, want max_rpm error", err)
+		}
+	})
+}
