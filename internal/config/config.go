@@ -466,7 +466,7 @@ var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\
 
 // ResolveDevinToken 从本地 Devin 客户端状态中发现 session token。
 // 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与 Devin CLI 登录产物
-// credentials.toml（路径见 devinCredentialsPaths，随平台变化）。
+// credentials.toml（路径见 DevinCredentialsPaths，随平台变化）。
 // 找不到返回空串，由调用方决定是否报错。
 // 不进服务 load 路径（账号凭据只认 devin.accounts 声明）——消费方是
 // /admin/accounts/cli-credentials 探针与 cmd/probe 等工具的兜底链。
@@ -476,7 +476,7 @@ func ResolveDevinToken() string {
 			return value
 		}
 	}
-	for _, path := range devinCredentialsPaths() {
+	for _, path := range DevinCredentialsPaths() {
 		if token := TokenFromCredentialsFile(path); token != "" {
 			return token
 		}
@@ -505,13 +505,13 @@ func readCredentialsFile(path string) (string, error) {
 	return "", errors.New("no windsurf_api_key")
 }
 
-// devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
+// DevinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
 // Linux/macOS 上 CLI 遵循 XDG：数据目录为 $XDG_DATA_HOME，缺省
 // ~/.local/share。Windows 上 CLI 不单发，由 Windsurf 桌面端（即
 // Devin app）内置携带：resources/app/extensions/windsurf/devin/bin/devin.exe，
 // `devin.exe auth login` 写 %APPDATA%\devin\credentials.toml（已实测）；
 // %LOCALAPPDATA% 一并探测作兜底。
-func devinCredentialsPaths() []string {
+func DevinCredentialsPaths() []string {
 	var dirs []string
 	if runtime.GOOS == "windows" {
 		for _, env := range []string{"APPDATA", "LOCALAPPDATA"} {
