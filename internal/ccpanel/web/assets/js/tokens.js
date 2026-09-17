@@ -491,7 +491,7 @@
         return '<span class="token-value-muted">-</span>';
       }
 
-      const costStack = buildCostStackHtml(totalCostUsd, effectiveCostUsd, { tone: 'warning' });
+      const costStack = buildCostStackHtml(totalCostUsd, effectiveCostUsd);
       return `
         <div class="token-cost">
           ${costStack}

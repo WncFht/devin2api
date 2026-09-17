@@ -329,7 +329,7 @@
     }
 
     function buildStatsCostDisplay(standardCost, effectiveCost) {
-      return buildCostStackHtml(standardCost, effectiveCost, { tone: 'warning' });
+      return buildCostStackHtml(standardCost, effectiveCost);
     }
 
     function renderStatsTable() {

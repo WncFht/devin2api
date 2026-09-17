@@ -66,10 +66,6 @@
   margin-left: 0;
 }
 
-.trend-chart-toolbar .trend-meta-chip {
-  flex: 0 0 auto;
-}
-
 .trend-meta-chip {
   display: inline-flex;
   align-items: center;
@@ -82,6 +78,15 @@
   font-size: var(--text-xs);
   line-height: 1.4;
   white-space: nowrap;
+}
+
+/* 只读信息行：粒度与保温状态，沉到图表下方 */
+.trend-chart-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  min-height: 24px;
 }
 
 /* 趋势页工具栏：自动刷新间隔 */
@@ -116,7 +121,7 @@
   min-width: 0;
 }
 
-/* 中窄屏：控件总长超一行时自然换行（chip 掉到第二行左侧），
+/* 中窄屏：控件总长超一行时自然换行，
    不把类型切换组压成一条缝 */
 @media (max-width: 1280px) {
   .trend-chart-toolbar {
@@ -125,14 +130,14 @@
   }
 }
 
-/* 窄屏：一行放不下时类型切换组独占一行横滚，其余控件自然换行 */
+/* 窄屏：指标类型组独占一行横滚（8 项最长），图表类型组与其余控件自然换行 */
 @media (max-width: 768px) {
   .trend-chart-toolbar {
     flex-wrap: wrap;
     row-gap: 10px;
   }
 
-  .trend-chart-toolbar .toggle-group {
+  .trend-chart-toolbar #trend-type-group {
     order: -1;
     flex: 1 1 100%;
     max-width: 100%;

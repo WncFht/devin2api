@@ -840,9 +840,9 @@ window.WebAuth = window.WebAuth || {
     const el = document.createElement('div');
     el.className = `notification notification-${type}`;
     el.style.cssText = `
-      background: var(--glass-bg);
+      background: var(--surface-bg-strong);
       backdrop-filter: blur(16px);
-      border: 1px solid var(--glass-border);
+      border: 1px solid var(--surface-border);
       border-radius: var(--radius-lg);
       padding: var(--space-4) var(--space-6);
       color: var(--neutral-900);
@@ -1364,19 +1364,15 @@ window.WebAuth = window.WebAuth || {
    * 构建两行成本显示HTML
    * @param {number} standard - 标准成本
    * @param {number|null|undefined} effective - 倍率后成本
-   * @param {{tone?: 'warning'|'success', decimalPlaces?: number}} options - 样式配置
+   * @param {{inline?: boolean, decimalPlaces?: number}} options - 样式配置
    * @returns {string}
    */
   function buildCostStackHtml(standard, effective, options = {}) {
     const info = getCostDisplayInfo(standard, effective);
     if (!(info.standardCost > 0)) return '';
 
-    const tone = options.tone === 'success' ? 'success' : 'warning';
     const inline = options.inline === true;
-    const classes = ['cost-stack', `cost-stack--${tone}`];
-    if (info.hasMultiplier) {
-      classes.push('cost-stack--with-multiplier');
-    }
+    const classes = ['cost-stack'];
     if (inline) {
       classes.push('cost-stack--inline');
     }

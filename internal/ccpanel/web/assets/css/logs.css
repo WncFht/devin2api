@@ -436,13 +436,17 @@
       background: var(--warning-100, #fef3c7);
     }
 
-    /* 失败行 error_message：压在人性化标签下的次级小字行 */
+    /* 失败行 error_message：压在人性化标签下的次级小字行；
+       单行省略保持行高一致，全文在 title */
     .log-error-text {
       display: block;
       margin-top: 2px;
       color: var(--neutral-500);
       font-size: 0.82em;
       line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .logs-filter-summary-row {
@@ -609,7 +613,6 @@
     }
 
     .log-cost-effective {
-      color: var(--warning-600);
       font-weight: 600;
     }
 

@@ -35,7 +35,7 @@
 
         <!-- 趋势图表 -->
         <section class="mb-8 trend-chart-section">
-          <div class="glass-card trend-chart-card">
+          <div class="card trend-chart-card">
             <!-- 控件与图例：单行排布，窄屏时趋势类型组内部横滚 -->
             <div class="trend-chart-toolbar mb-6">
                 <!-- 趋势类型切换 -->
@@ -49,23 +49,23 @@
                   <div class="toggle-btn" data-type="cost" data-i18n="trend.typeCost">费用</div>
                   <div class="toggle-btn" data-type="cache_hit" data-i18n="trend.typeCacheHit">缓存</div>
                 </div>
-                <!-- 图表样式切换 -->
+                <!-- 图表样式切换：与趋势类型同一控件语言 -->
                 <div
-                  class="trend-chart-type-toggle"
+                  class="toggle-group trend-chart-type-toggle"
                   id="trend-chart-type-group"
                   role="group"
                   data-i18n-aria-label="trend.chartType"
                   aria-label="图表类型"
                 >
                   <button
-                    class="btn btn-secondary btn-sm trend-chart-type-btn active"
+                    class="toggle-btn trend-chart-type-btn active"
                     type="button"
                     data-chart-type="line"
                     aria-pressed="true"
                     data-i18n="trend.lineChart"
                   >折线图</button>
                   <button
-                    class="btn btn-secondary btn-sm trend-chart-type-btn"
+                    class="toggle-btn trend-chart-type-btn"
                     type="button"
                     data-chart-type="bar"
                     aria-pressed="false"
@@ -120,14 +120,6 @@
                     <option value="21600" data-i18n="trend.bucket6h">6 小时</option>
                   </select>
                 </label>
-                <!-- 数据粒度与规模（原图表下方信息行上移） -->
-                <span class="trend-meta-chip" id="bucket-interval" data-i18n="trend.dataIntervalInit">数据更新间隔：--</span>
-                <span class="trend-meta-chip" id="warm-status-item" style="display:none">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                  </svg>
-                  <span id="warm-status"></span>
-                </span>
             </div>
 
             <!-- 图表容器 -->
@@ -145,6 +137,17 @@
               </div>
               <!-- ECharts 容器 -->
               <div id="chart" class="w-full h-full hidden"></div>
+            </div>
+
+            <!-- 只读信息行：数据粒度与保温状态，不参与交互 -->
+            <div class="trend-chart-footer">
+              <span class="trend-meta-chip" id="bucket-interval" data-i18n="trend.dataIntervalInit">数据更新间隔：--</span>
+              <span class="trend-meta-chip" id="warm-status-item" style="display:none">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+                <span id="warm-status"></span>
+              </span>
             </div>
 
           </div>

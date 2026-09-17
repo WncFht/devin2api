@@ -78,13 +78,6 @@ window.I18N_LOCALES['en'] = {
   'login.networkError': 'Network connection error, please check your network and try again',
   'login.securityTitle': 'Security Protection',
   'login.securityDesc': 'Your session will expire after 24 hours',
-  'login.featuresTitle': 'Features',
-  'login.feature1Title': 'Smart Routing',
-  'login.feature1Desc': 'Load-balanced intelligent request distribution',
-  'login.feature2Title': 'Failover',
-  'login.feature2Desc': 'Auto-detect and switch to available nodes',
-  'login.feature3Title': 'Real-time Monitoring',
-  'login.feature3Desc': 'Detailed request statistics and performance analysis',
 
   // ============================================================
   // Index Overview

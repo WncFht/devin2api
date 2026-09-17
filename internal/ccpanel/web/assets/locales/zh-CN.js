@@ -78,13 +78,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'login.networkError': '网络连接错误，请检查网络后重试',
   'login.securityTitle': '安全保护',
   'login.securityDesc': '您的登录会话将在24小时后自动过期',
-  'login.featuresTitle': '系统特性',
-  'login.feature1Title': '智能路由',
-  'login.feature1Desc': '基于负载均衡的智能请求分发',
-  'login.feature2Title': '故障切换',
-  'login.feature2Desc': '自动检测并切换到可用节点',
-  'login.feature3Title': '实时监控',
-  'login.feature3Desc': '详细的请求统计和性能分析',
 
   // ============================================================
   // 首页概览

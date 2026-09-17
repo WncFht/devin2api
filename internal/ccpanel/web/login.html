@@ -20,24 +20,13 @@
   <script defer src="/web/assets/js/login.js?v=__VERSION__"></script>
 </head>
 <body>
-  <!-- 动画背景 -->
-  <div class="login-background">
-    <div class="floating-shapes">
-      <div class="shape shape-1"></div>
-      <div class="shape shape-2"></div>
-      <div class="shape shape-3"></div>
-      <div class="shape shape-4"></div>
-      <div class="shape shape-5"></div>
-    </div>
-  </div>
-
   <div class="login-page">
     <div class="login-container animate-slide-up">
       <!-- Logo和品牌 -->
       <div class="login-brand">
         <div class="login-brand-row">
           <div class="brand-logo">
-            <img class="logo-icon animate-float" src="/web/favicon.svg" alt="">
+            <img class="logo-icon" src="/web/favicon.svg" alt="">
           </div>
           <svg class="login-brand-wordmark" viewBox="0 0 176 36" role="img" aria-label="Devin2API">
             <use href="/web/brand-wordmark.svg#brand-wordmark" width="176" height="36"></use>
@@ -113,46 +102,6 @@
           <div class="notice-text">
             <div class="notice-title" data-i18n="login.securityTitle">安全保护</div>
             <div class="notice-desc" data-i18n="login.securityDesc">您的登录会话将在24小时后自动过期</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 功能特色展示 -->
-    <div class="features-showcase animate-slide-up animate-delay-2">
-      <h3 data-i18n="login.featuresTitle">系统特性</h3>
-      <div class="features-grid">
-        <div class="feature-item">
-          <div class="feature-icon">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-            </svg>
-          </div>
-          <div class="feature-content">
-            <h4 data-i18n="login.feature1Title">智能路由</h4>
-            <p data-i18n="login.feature1Desc">基于负载均衡的智能请求分发</p>
-          </div>
-        </div>
-        <div class="feature-item">
-          <div class="feature-icon">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-          </div>
-          <div class="feature-content">
-            <h4 data-i18n="login.feature2Title">故障切换</h4>
-            <p data-i18n="login.feature2Desc">自动检测并切换到可用节点</p>
-          </div>
-        </div>
-        <div class="feature-item">
-          <div class="feature-icon">
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
-            </svg>
-          </div>
-          <div class="feature-content">
-            <h4 data-i18n="login.feature3Title">实时监控</h4>
-            <p data-i18n="login.feature3Desc">详细的请求统计和性能分析</p>
           </div>
         </div>
       </div>

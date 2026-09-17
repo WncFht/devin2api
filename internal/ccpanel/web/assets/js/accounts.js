@@ -303,17 +303,17 @@
     const root = el('accounts-list');
     if (!root) return;
     if (!window.acctView || !window.acctOps) {
-      root.innerHTML = `<div class="glass-card" style="padding:var(--space-6);">${errBlock('accounts-view.js / accounts-ops.js not loaded')}</div>`;
+      root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock('accounts-view.js / accounts-ops.js not loaded')}</div>`;
       return;
     }
     window.acctView.disposeCharts();
     if (!list.length) {
-      root.innerHTML = `<div class="glass-card" style="padding:var(--space-6);">${errBlock(errMsg(runtimeErr || quotaErr || matrixErr))}</div>`;
+      root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock(errMsg(runtimeErr || quotaErr || matrixErr))}</div>`;
       return;
     }
     root.innerHTML = list.map((a) => {
       const b = window.acctView.cardBlocks(a) || {};
-      return `<div class="glass-card acct-card" data-acct="${esc(a.name)}">
+      return `<div class="card acct-card" data-acct="${esc(a.name)}">
         ${b.head || ''}
         ${b.failure || ''}
         ${window.acctOps.actionsBlock(a) || ''}

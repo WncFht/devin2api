@@ -320,8 +320,8 @@
 
 .acct-form {
   padding: var(--space-5) var(--space-6);
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--surface-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
 }
@@ -391,8 +391,8 @@ textarea.acct-form-input {
 /* 空池整页态：替代列表与概览卡 */
 .accounts-empty {
   padding: var(--space-12) var(--space-6);
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--surface-border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-sm);
   text-align: center;
