@@ -3,9 +3,10 @@
 // GET /admin/debug-logs/{id}、GET /admin/active-requests/{id}/debug-log、
 // POST /admin/debug-logs/merged-response。
 //
-// 数据源是 debuglog 的 index.jsonl + 请求目录阶段文件（替代 ccLoad 的
-// logs/debug_logs 两表）。日志行 id 用 started_at 的 epoch 毫秒——stats
-// 端点的 last_*_id 同口径，前端凭它经 FindDirByStartedAt 回查调试目录。
+// 数据源是 store 的 logs 表 + 请求目录阶段文件（替代 ccLoad 的
+// logs/debug_logs 两表）。日志行 id 是 logs 表自增主键——stats 端点的
+// last_*_id 同口径，前端凭它经 LogDirByID 回查调试目录（迁移前的
+// started_at 毫秒戳链接由 FindDirByStartedAt 兜底）。
 package ccpanel
 
 import (
@@ -15,8 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // maxMergedDebugResponseBodyBytes 是 merged-response 请求体上限（ccLoad 同名常量同值）。
@@ -59,7 +61,7 @@ func newLogCostComponent(quantity int64, pricePerMillion float64) logCostCompone
 // wire 形状。字段含义差异：model=客户端请求模型、actual_model=解析后发给
 // 上游的 uid（与 model 相同则省略，同 ccLoad「未重定向」语义）、
 // api_key_used/api_key_hash 都是本服务的 key_hash（无明文可脱敏）、
-// api=index.jsonl 的入口端点原值、upstream_protocol 恒 "devin"、
+// api=logs 表的入口端点原值、upstream_protocol 恒 "devin"、
 // cost_multiplier 恒 1；单上游无渠道维（channel_* 字段不投）。
 type logEntry struct {
 	ID            int64  `json:"id"`
@@ -70,7 +72,7 @@ type logEntry struct {
 	LogSource     string `json:"log_source,omitempty"`
 	StatusCode    int    `json:"status_code"`
 	Message       string `json:"message"`
-	// ErrorMessage 是首个失败的完整错误文案（index.jsonl 同源，≤300B）；
+	// ErrorMessage 是首个失败的完整错误文案（logs 表同源，≤300B）；
 	// message 列只放 result[:error_stage] 短形态，长文案经本字段透出。
 	ErrorMessage         string  `json:"error_message,omitempty"`
 	Duration             float64 `json:"duration"`
@@ -84,7 +86,7 @@ type logEntry struct {
 	API                  string  `json:"api,omitempty"`
 	UpstreamProtocol     string  `json:"upstream_protocol,omitempty"`
 	// Account 是最终服务本请求的上游账号（号池 lane 名），
-	// AccountSwitches 是 failover 换号次数；与 index.jsonl 同名同源。
+	// AccountSwitches 是 failover 换号次数；与 logs 表同名同源。
 	Account                  string            `json:"account,omitempty"`
 	AccountSwitches          int               `json:"account_switches,omitempty"`
 	ClientIP                 string            `json:"client_ip"`
@@ -101,11 +103,10 @@ type logEntry struct {
 	CostBreakdown            *logCostBreakdown `json:"cost_breakdown,omitempty"`
 }
 
-// projectLogEntry 把一条 index.jsonl 摘要投影成日志页行。message 列复刻
+// projectLogEntry 把一条 logs 表行投影成日志页行。message 列复刻
 // ccLoad 语义（成功="ok"，失败=result[:error_stage]）——前端要求它非空才
 // 渲染调试入口。
-func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]CatalogPrice) logEntry {
-	started, _ := time.Parse(time.RFC3339Nano, e.StartedAt)
+func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPrice) logEntry {
 	actual := e.Model
 	if actual == e.RequestedModel {
 		actual = ""
@@ -117,19 +118,13 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]Catal
 			message = e.Result + ": " + e.ErrorStage
 		}
 	}
-	// 面板探活行（X-Client-Request-Id: panel-probe）记 manual_test——
-	// 与 ccLoad 同语义：带「手动测试」徽标，不计入默认 proxy 视图。
-	logSource := "proxy"
-	if e.ClientRequestID == debuglog.ProbeClientRequestID {
-		logSource = "manual_test"
-	}
 	entry := logEntry{
-		ID:                       started.UnixMilli(),
-		Time:                     started.Unix(),
+		ID:                       e.ID,
+		Time:                     e.StartedAt.Unix(),
 		Model:                    e.RequestedModel,
 		ActualModel:              actual,
 		ResponseModel:            e.ResponseModel,
-		LogSource:                logSource,
+		LogSource:                e.LogSource,
 		StatusCode:               e.StatusCode,
 		Message:                  message,
 		ErrorMessage:             e.ErrorMessage,
@@ -139,7 +134,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]Catal
 		APIKeyUsed:               e.KeyHash,
 		APIKeyHash:               e.KeyHash,
 		API:                      e.API,
-		UpstreamProtocol:         "devin",
+		UpstreamProtocol:         e.UpstreamProtocol,
 		Account:                  e.Account,
 		AccountSwitches:          e.AccountSwitches,
 		ClientIP:                 e.ClientIP,
@@ -186,10 +181,9 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]Catal
 }
 
 // logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
-// 该 key_hash 的索引行；excluded 表示筛选条件不可能命中，直接回空集。
+// 该 key_hash 的行；excluded 表示筛选条件不可能命中，直接回空集。
 // 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
-// log_source 筛选），作用对象换成索引行——model/api 等行级维度由
-// 调用方的 match 处理。
+// log_source 合法性校验），行级维度全部下推 LogQuery。
 func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 	q := r.URL.Query()
 	switch strings.TrimSpace(q.Get("log_source")) {
@@ -218,58 +212,55 @@ func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 	return kh, false
 }
 
-// parseRequestFilter 从查询串构建索引侧结构化筛选：q 为子串，status 是
-// 状态表达式（499/4xx/>=400/!200，逗号 OR），status_class/result/model/
-// error_stage/since/until 为精确或时间条件。dashboardLogs 与导出端点共用。
-func parseRequestFilter(r *http.Request) debuglog.RequestFilter {
+// logQuery 是 logs/export/matrix 三个列表类端点共用的筛选解析：
+// 旧面板词汇（q/status 表达式/status_class/result/model/error_stage/
+// since/until/account）与 ccLoad 词汇（range/start_time/end_time/
+// status_code/api/upstream_protocol/model_like/log_source/auth_token_id）
+// 并存，全部下推 SQL。时间窗逐侧落定：显式 since/until(RFC3339) 优先——
+// matrix 下钻钉历史窗口靠它；缺席侧回落到 resolveRange（range 契约，
+// 默认 today）。excluded 表示条件不可能命中（logScope 判空）。
+func (h *Handler) logQuery(r *http.Request) (store.LogQuery, bool) {
+	kh, excluded := h.logScope(r)
 	q := r.URL.Query()
 	get := func(key string) string { return strings.TrimSpace(q.Get(key)) }
-	filter := debuglog.RequestFilter{
-		Query:       get("q"),
-		StatusClass: get("status_class"),
-		Status:      get("status"),
-		Result:      get("result"),
-		Model:       get("model"),
-		ErrorStage:  get("error_stage"),
+	lq := store.LogQuery{
+		KeyHash:          kh,
+		Account:          get("account"),
+		LogSource:        get("log_source"),
+		API:              get("api"),
+		UpstreamProtocol: strings.ToLower(get("upstream_protocol")),
+		Model:            get("model"),
+		ModelLike:        get("model_like"),
+		Query:            get("q"),
+		StatusExpr:       get("status"),
+		StatusClass:      get("status_class"),
+		Result:           get("result"),
+		ErrorStage:       get("error_stage"),
 	}
-	if since := get("since"); since != "" {
-		if parsed, err := time.Parse(time.RFC3339, since); err == nil {
-			filter.Since = parsed
-		}
-	}
-	if until := get("until"); until != "" {
-		if parsed, err := time.Parse(time.RFC3339, until); err == nil {
-			filter.Until = parsed
-		}
-	}
-	return filter
-}
-
-// requestFilter 是 logs/export/matrix 三个列表类端点共用的筛选解析：
-// 旧面板词汇（q/status 表达式/status_class/result/model/error_stage/
-// since/until）与 ccLoad 词汇（range/start_time/end_time/status_code）
-// 并存。时间窗逐侧落定：显式 since/until(RFC3339) 优先——matrix 下钻
-// 钉历史窗口靠它；缺席侧回落到 resolveRange（range 契约，默认 today）。
-func (h *Handler) requestFilter(r *http.Request) debuglog.RequestFilter {
-	filter := parseRequestFilter(r)
 	since, until, _ := resolveRange(r, time.Now())
-	if filter.Since.IsZero() {
-		filter.Since = since
-	}
-	if filter.Until.IsZero() {
-		filter.Until = until
-	}
-	if filter.Status == "" {
-		if code, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("status_code"))); err == nil && code > 0 {
-			filter.Status = strconv.Itoa(code)
+	if raw := get("since"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			since = parsed
 		}
 	}
-	return filter
+	if raw := get("until"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			until = parsed
+		}
+	}
+	lq.SinceMS = since.UnixMilli()
+	lq.UntilMS = until.UnixMilli()
+	if lq.StatusExpr == "" {
+		if code, err := strconv.Atoi(get("status_code")); err == nil && code > 0 {
+			lq.StatusExpr = strconv.Itoa(code)
+		}
+	}
+	return lq, excluded
 }
 
-// respondLogEntries 写日志列表信封：data=行数组、count=窗内命中总数、
-// has_more=索引尾部窗外仍有更早历史；另附带 rejects 管线前拒绝环
-// （形状同 runtime-metrics 的 http.rejects）——拒绝不进索引，列表页靠
+// respondLogEntries 写日志列表信封：data=行数组、count=命中总数、
+// has_more=窗外仍有更早历史；另附带 rejects 管线前拒绝环（形状同
+// runtime-metrics 的 http.rejects）——拒绝不进 logs 表，列表页靠
 // 它提示「表里看不到 401/429」。
 func (h *Handler) respondLogEntries(w http.ResponseWriter, entries []logEntry, total int, hasMore bool) {
 	var rejects any
@@ -282,9 +273,9 @@ func (h *Handler) respondLogEntries(w http.ResponseWriter, entries []logEntry, t
 }
 
 // dashboardLogs 实现 ccLoad 的 /dashboard|/admin/logs（HandleErrors）：
-// data=日志行数组（新在前），count=窗口内命中总数；limit 默认 200、上限 1000。
-// count 以 index.jsonl 尾部读取窗（≈4MB/万行）为准——窗口外仍有历史时
-// （ListRequests.HasMore）count 是下界，与 ccLoad 的 SQL COUNT(*) 口径有偏差。
+// data=日志行数组（新在前），count=筛选命中总数（SQL COUNT(*) 精确值）；
+// limit 默认 200、上限 1000。has_more=还有未翻到的命中行，或时间窗下界
+// 之外仍有更早历史。
 func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -298,64 +289,31 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	// 一级筛选走索引读取（时间窗 + 状态码），二级筛选在内存做——
-	// token 维度由 logScope 判空或收敛成 key_hash 比较。
-	kh, excluded := h.logScope(r)
-	if h.debug == nil || excluded {
+	lq, excluded := h.logQuery(r)
+	lq.Limit = limit
+	lq.Offset = offset
+	if h.store == nil || excluded {
 		h.respondLogEntries(w, []logEntry{}, 0, false)
 		return
 	}
-	result := h.debug.ListRequests(-1, h.requestFilter(r))
-	match := h.logRowMatch(r, kh)
-
+	rows, total, err := h.store.SearchLogs(r.Context(), lq)
+	if err != nil {
+		slog.Warn("ccpanel: logs search failed", "error", err)
+		h.respondLogEntries(w, []logEntry{}, 0, false)
+		return
+	}
 	prices := h.CatalogPrices(r.Context())
-	entries := make([]logEntry, 0, min(limit, len(result.Entries)))
-	total := 0
-	for _, e := range result.Entries {
-		if !match(e) {
-			continue
-		}
-		if total >= offset && len(entries) < limit {
-			entries = append(entries, h.projectLogEntry(e, prices))
-		}
-		total++
+	entries := make([]logEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, h.projectLogEntry(row, prices))
 	}
-	h.respondLogEntries(w, entries, total, result.HasMore)
-}
-
-// logRowMatch 是 logs 列表/导出共用的行级（内存）筛选：kh 非空只放该
-// key_hash 的行；log_source 按探针行口径（proxy 排除探针行、manual_test
-// 只留探针行、""/all 全放，与 ccLoad 一致）；api/upstream_protocol 精确、
-// model_like 子串（model 精确筛选已在索引侧由 filter.Model 完成，覆盖
-// RequestedModel/Model/ResponseModel 三个字段）。
-func (h *Handler) logRowMatch(r *http.Request, kh string) func(debuglog.IndexEntry) bool {
-	q := r.URL.Query()
-	api := strings.TrimSpace(q.Get("api"))
-	upstream := strings.ToLower(strings.TrimSpace(q.Get("upstream_protocol")))
-	modelLike := strings.TrimSpace(q.Get("model_like"))
-	src := strings.TrimSpace(q.Get("log_source"))
-	return func(e debuglog.IndexEntry) bool {
-		if kh != "" && e.KeyHash != kh {
-			return false
+	hasMore := total > int64(offset+len(rows))
+	if !hasMore {
+		if before, err := h.store.ExistsLogBefore(r.Context(), lq.SinceMS); err == nil {
+			hasMore = before
 		}
-		isProbe := e.ClientRequestID == debuglog.ProbeClientRequestID
-		if src == "proxy" && isProbe {
-			return false
-		}
-		if src == "manual_test" && !isProbe {
-			return false
-		}
-		if api != "" && api != "all" && e.API != api {
-			return false
-		}
-		if upstream != "" && upstream != "all" && upstream != "devin" {
-			return false
-		}
-		if modelLike != "" && !strings.Contains(e.RequestedModel, modelLike) && !strings.Contains(e.Model, modelLike) && !strings.Contains(e.ResponseModel, modelLike) {
-			return false
-		}
-		return true
 	}
+	h.respondLogEntries(w, entries, int(total), hasMore)
 }
 
 // dashboardLogsBootstrap 实现 /dashboard|/admin/logs/bootstrap
@@ -379,25 +337,32 @@ func (h *Handler) dashboardLogsBootstrap(w http.ResponseWriter, r *http.Request)
 	}
 	respondOK(w, map[string]any{
 		"auth_tokens":  tokens,
-		"models":       h.ru.modelSet(h.debug, identityFrom(r).KeyHash),
-		"status_codes": h.ru.statusCodeSet(h.debug),
+		"models":       h.modelSet(r.Context(), identityFrom(r).KeyHash),
+		"status_codes": h.statusCodeSet(r.Context()),
 	})
 }
 
-// adminDebugLog 实现 GET /admin/debug-logs/{id}：id 是 started_at 的 epoch
-// 毫秒；目录不存在（retention 清理或 id 伪造）时回 ccLoad 的 404+data 形状。
+// adminDebugLog 实现 GET /admin/debug-logs/{id}：id 是 logs 表自增主键
+// （迁移前的毫秒戳链接由 resolveDebugDir 兜底）；目录不存在（retention
+// 清理或 id 伪造）时回 ccLoad 的 404+data 形状。
 func (h *Handler) adminDebugLog(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil || id <= 0 {
 		respondError(w, http.StatusBadRequest, "invalid log_id")
 		return
 	}
-	dir, ok := h.debug.FindDirByStartedAt(id)
+	dir, timeMS, ok := h.resolveDebugDir(r, id)
 	if !ok {
 		h.respondDebugLogUnavailable(w)
 		return
 	}
-	respondOK(w, h.debugLogResponse(dir, id))
+	resp := h.debugLogResponse(dir, id, timeMS)
+	if resp == nil {
+		// 日志行还在但 payload 已被保留策略整体淘汰——回「目录已删」404。
+		h.respondDebugLogUnavailable(w)
+		return
+	}
+	respondOK(w, resp)
 }
 
 // adminActiveRequestDebugLog 实现 GET /admin/active-requests/{id}/debug-log：
@@ -412,8 +377,10 @@ func (h *Handler) adminActiveRequestDebugLog(w http.ResponseWriter, r *http.Requ
 	if h.debug != nil {
 		for _, ar := range h.debug.ActiveRequests() {
 			if activeRequestID(ar.Dir) == id {
-				respondOK(w, h.debugLogResponse(ar.Dir, id))
-				return
+				if resp := h.debugLogResponse(ar.Dir, id, id); resp != nil {
+					respondOK(w, resp)
+					return
+				}
 			}
 		}
 	}
@@ -468,13 +435,16 @@ func (h *Handler) respondDebugLogUnavailable(w http.ResponseWriter) {
 	})
 }
 
-// debugLogResponse 把一个请求目录投影成 ccLoad debugLogResponse 形状。
+// debugLogResponse 把一个请求目录投影成 ccLoad debugLogResponse 形状；
+// 目录 payload 已不存在（retention 淘汰）时返回 nil，调用方回 404。
+// fallbackMS 是 meta.json 缺席时 created_at 的兜底毫秒戳（logs 表行的
+// time 列；活跃请求路径沿用调用方 id 占位）。
 // 本服务的「协议转换」恒成立（客户端协议 → connect-RPC）：
 // original_* 来自 01（客户端原文），req_* 来自 03（上游 wire 请求，
 // 含 attemptN 重试分片），resp_* 来自 04（上游原始帧），translated_*
 // 由 06 的记录帧重建为客户端线上形态。上游请求/响应头 connect client
 // 未录制，如实给 "{}"（区别于 maskedHeaderUnavailable 的「脱敏失败」）。
-func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
+func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[string]any {
 	resp := map[string]any{
 		"log_id":       logID,
 		"req_method":   http.MethodPost,
@@ -492,11 +462,14 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	}
 	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
-	// 不外流，meta 本体不需要过 maskToken。
-	if detail, err := h.debug.Detail(dir); err == nil {
-		_ = json.Unmarshal(detail.Meta, &meta)
-		resp["files"] = detail.Files
+	// 不外流，meta 本体不需要过 maskToken。目录整个不在时投影无意义，
+	// 返回 nil 让调用方回「目录已删」——只剩日志行的请求不能回 200 空壳。
+	detail, err := h.debug.Detail(dir)
+	if err != nil {
+		return nil
 	}
+	_ = json.Unmarshal(detail.Meta, &meta)
+	resp["files"] = detail.Files
 	// 读路径按最近见过的 token 字面值兜底脱敏——写路径的 secretKey
 	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
 	// token 在这里罩住；自愈轮换后旧 token 仍在 recentTokens 集合内。
@@ -507,11 +480,11 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	if started, err := time.Parse(time.RFC3339Nano, meta.StartedAt); err == nil {
 		resp["created_at"] = started.Unix()
 	} else {
-		resp["created_at"] = logID / 1000
+		resp["created_at"] = fallbackMS / 1000
 	}
 	resp["translated_resp_status"] = meta.StatusCode
 	resp["translated_resp_headers"] = "{}"
-	// 号池归因投到详情首屏：与 index.jsonl 的 account/account_switches
+	// 号池归因投到详情首屏：与 logs 表的 account/account_switches
 	// 同口径（switches=失败尝试条数），免去为看归属再抓 meta.json。
 	if meta.UpstreamAccount != "" {
 		resp["account"] = meta.UpstreamAccount
@@ -539,7 +512,7 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	// 03 + attemptN：上游 wire 请求体。多次重发按序拼接——ccLoad 的
 	// req_body 只记最后一次尝试，我们把每次尝试都留痕（重试排障要对比）。
 	var reqBody bytes.Buffer
-	if names, err := debuglog.DevinRequestStages(filepath.Join(h.debug.Root(), dir)); err == nil {
+	if names, err := h.debug.DevinRequestStages(dir); err == nil {
 		for _, name := range names {
 			data, err := readStage(name)
 			if err != nil {

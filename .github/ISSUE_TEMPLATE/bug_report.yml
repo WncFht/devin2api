@@ -17,7 +17,7 @@ body:
       label: X-Request-Id / debug_ref
       description: >-
         失败请求响应头 X-Request-Id 的值（或错误体里的 error.debug_ref），
-        即 logs/ 下本次请求的调试目录名。没有它我们基本无法定位问题。
+        即本次请求的调试记录键。没有它我们基本无法定位问题。
       placeholder: 2026-09-14T07-12-33.456_ab12cd34
     validations:
       required: false
@@ -27,7 +27,8 @@ body:
     attributes:
       label: meta.json / error.json
       description: >-
-        logs/<dir>/ 下这两个文件的原文。注意请求体可能含隐私内容，
+        该请求调试记录中这两条内容的原文（经 /admin/debug-logs/{id}/file/{name}
+        端点或 sqlite3 查 debug_files 表取）。注意请求体可能含隐私内容，
         meta.json/error.json 本身不含请求正文，但分享前请自行确认。
       render: json
     validations:

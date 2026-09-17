@@ -21,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // TestListenURL verifies listen address descriptions used in the startup log.
@@ -54,7 +55,7 @@ func TestRunReturnsServeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := app.New(devinAdapter, config.ServerConfig{},
-		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}))
+		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil))
 	if err := run(context.Background(), application, &http.Server{}, listener); err == nil {
 		t.Fatal("run() error = nil, want serve error")
 	}
@@ -100,9 +101,9 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 	runtimeConfigPtr.Store(&runtimeConfigState{cfg: prev, loadedAt: time.Now()})
 
-	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 	defer manager.Close()
-	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
+	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,12 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dbStore.Close() }()
+	settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 		Debug:       manager,
 		DevinConfig: devinPool.CurrentConfig,
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
@@ -128,7 +134,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenStore, err := authtoken.New(dir)
+	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +143,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -145,7 +151,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -156,7 +162,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 }
@@ -305,9 +311,9 @@ auth:
 				t.Fatal(err)
 			}
 
-			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
+			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 			defer manager.Close()
-			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
+			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -316,7 +322,12 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+			dbStore, err := store.Open(filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = dbStore.Close() }()
+			settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 				Debug:       manager,
 				DevinConfig: devinPool.CurrentConfig,
 				UpdateDevin: func(mutate func(*devin.Config) error) error {
@@ -333,11 +344,11 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenStore, err := authtoken.New(dir)
+			tokenStore, err := authtoken.New(dbStore)
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

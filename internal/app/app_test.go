@@ -3,7 +3,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,14 +22,26 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/store"
 )
+
+// openTokenDB 开一个临时 sqlite 库给令牌仓用。
+func openTokenDB(t *testing.T) *store.Store {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
 // newTokenStore 建一个以 plain 为令牌的下游仓并接到 application——
 // /v1 准入的唯一判定源是令牌仓（无凭据旁路），要 401 场景就得仓内
 // 有行。plain 为空串时种的是匿名通道行（无凭据请求按它准入）。
 func newTokenStore(t *testing.T, plain string) *authtoken.Store {
 	t.Helper()
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,39 +182,33 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	}
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
+	ref := response.Header().Get("X-Request-Id")
+	if ref == "" {
+		t.Fatal("missing X-Request-Id header")
+	}
+	detail, err := manager.Detail(ref)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Detail(%q): %v", ref, err)
 	}
-	var requestDirs []os.DirEntry
-	for _, entry := range entries {
-		if entry.IsDir() {
-			requestDirs = append(requestDirs, entry)
-		}
+	present := map[string]bool{}
+	for _, f := range detail.Files {
+		present[f.Name] = true
 	}
-	if len(requestDirs) != 1 {
-		t.Fatalf("request directory count = %d, want 1", len(requestDirs))
-	}
-	entries = requestDirs
-	directory := filepath.Join(root, entries[0].Name())
 	for _, name := range []string{"meta.json", "01-http-request.json", "02-request-messages.json", "05-response-events.jsonl", "06-http-response.jsonl"} {
-		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
-			t.Errorf("%s: %v", name, err)
+		if !present[name] {
+			t.Errorf("%s missing from files %v", name, detail.Files)
 		}
 	}
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(meta), `"result": "completed"`) || !strings.Contains(string(meta), `"provider": "devin"`) {
-		t.Fatalf("meta = %s", meta)
+	if !strings.Contains(string(detail.Meta), `"result": "completed"`) || !strings.Contains(string(detail.Meta), `"provider": "devin"`) {
+		t.Fatalf("meta = %s", detail.Meta)
 	}
 }
 
@@ -220,7 +225,9 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 		},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, st)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":[
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls"}]},
 		{"type":"function_call","call_id":"call-1","name":"exec","arguments":"{}"},
@@ -231,24 +238,19 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, entries[0].Name())
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
+	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(meta), `"premature_end_turn": true`) {
 		t.Fatalf("meta = %s, want premature_end_turn", meta)
 	}
-	index, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	if !strings.Contains(string(index), `"premature_end_turn":true`) {
-		t.Fatalf("index = %s, want premature_end_turn", index)
+	if len(rows) != 1 || !rows[0].PrematureEndTurn {
+		t.Fatalf("log row = %+v, want premature_end_turn", rows)
 	}
 }
 
@@ -264,18 +266,15 @@ func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
 		},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := os.ReadFile(filepath.Join(root, entries[0].Name(), "meta.json"))
+	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,23 +291,20 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 		{Type: llm.ResponseEventError, Reason: llm.StopReasonError, Error: failed},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, openTokenDB(t))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, entries[0].Name())
-	meta, err := os.ReadFile(filepath.Join(directory, "meta.json"))
+	dir := response.Header().Get("X-Request-Id")
+	meta, _, _, err := manager.ReadFile(dir, "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(meta), `"result": "failed"`) {
 		t.Fatalf("meta = %s", meta)
 	}
-	errorLog, err := os.ReadFile(filepath.Join(directory, "error.json"))
+	errorLog, _, _, err := manager.ReadFile(dir, "error.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +391,7 @@ func TestResponsesHandlerHealthIsUnprotected(t *testing.T) {
 // 不校验凭据（开放模式）：无凭据请求直接放行。
 func TestResponsesHandlerOpenModeWhenTokenStoreEmpty(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +432,7 @@ func TestResponsesHandlerAnonymousChannelAdmits(t *testing.T) {
 // 上执行：超过分钟桶上限的请求按 token_limit 429 拒绝。
 func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +466,7 @@ func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
 // token_limit 429 拒绝，错误信息带窗口名。
 func TestResponsesHandlerTokenCost5hLimitReturns429(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +501,7 @@ func TestResponsesHandlerIgnoresLogInitializationFailure(t *testing.T) {
 	if err := os.WriteFile(blockedRoot, []byte("occupied"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(blockedRoot, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"model","input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -758,7 +754,9 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 		Error: &llm.AssistantMessage{ErrorMessage: "invalid_argument: broken"},
 	}}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(root, debuglog.RetentionPolicy{}, st)
+	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
 
 	// 成功前即失败：上游首个事件就是错误 → 非 200 HTTP 错误响应。
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-test","input":"hi"}`))
@@ -770,20 +768,19 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 	if dir == "" {
 		t.Fatal("missing X-Request-Id header")
 	}
-	if _, err := os.Stat(filepath.Join(root, dir)); err != nil {
-		t.Fatalf("X-Request-Id %q does not map to a log dir: %v", dir, err)
+	if _, err := manager.Detail(dir); err != nil {
+		t.Fatalf("X-Request-Id %q does not map to a debug dir: %v", dir, err)
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"debug_ref":"`+dir+`"`) || !strings.Contains(body, `"stage":"response_event"`) {
 		t.Fatalf("error body missing debug_ref/stage: %s", body)
 	}
-	indexData, readErr := os.ReadFile(filepath.Join(root, "index.jsonl"))
-	if readErr != nil {
-		t.Fatal(readErr)
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	index := string(indexData)
-	if !strings.Contains(index, `"client_request_id":"agent-corr-1"`) || !strings.Contains(index, `"error_stage":"response_event"`) {
-		t.Fatalf("index missing correlation fields: %s", index)
+	if len(rows) != 1 || rows[0].ClientRequestID != "agent-corr-1" || rows[0].ErrorStage != "response_event" {
+		t.Fatalf("log row missing correlation fields: %+v", rows)
 	}
 }
 
@@ -795,7 +792,7 @@ func TestStreamErrorCarriesDebugRef(t *testing.T) {
 			Error: &llm.AssistantMessage{ErrorMessage: "upstream exploded"}},
 	}}
 	root := filepath.Join(t.TempDir(), "logs")
-	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}))
+	application := New(fake, config.ServerConfig{Listen: ":0"}, debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil))
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","stream":true,"input":"hi"}`))
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
@@ -1001,9 +998,10 @@ func rejectCount(application *App, reason obs.RejectReason) uint64 {
 
 // TestReadFailureRejectedWithoutDir 验证请求体读取失败（非超限）按管线前
 // 拒绝入账：504（可重试档，见 handler 注释）+ rejects 计数，不产生调试
-// 目录与 index 行——完整请求从未到达，与鉴权/并发拒绝同口径。
+// 记录与 logs 行——完整请求从未到达，与鉴权/并发拒绝同口径。
 func TestReadFailureRejectedWithoutDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1017,22 +1015,20 @@ func TestReadFailureRejectedWithoutDir(t *testing.T) {
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 1 {
 		t.Fatalf("http_read rejects = %d, want 1", got)
 	}
-	entries, err := os.ReadDir(manager.Root())
+	dirs, err := st.DebugDirs(context.Background())
 	if err != nil {
-		t.Fatalf("read log root: %v", err)
+		t.Fatal(err)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			t.Fatalf("read failure produced request dir %s", entry.Name())
-		}
+	if len(dirs) != 0 {
+		t.Fatalf("read failure produced debug dirs %v", dirs)
 	}
 }
 
-// TestRequestTooLargeKeepsDebugDir 验证 ≥32MiB 的真实载荷保留调试目录：
-// 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与目录都在，
+// TestRequestTooLargeKeepsDebugDir 验证 ≥32MiB 的真实载荷保留调试记录：
+// 413 是请求真实到达后的拒绝（不是管线前），X-Request-Id 与调试记录都在，
 // rejects 计数不应增长。
 func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, openTokenDB(t))
 	t.Cleanup(func() { manager.Close() })
 	application := New(&fakeAdapter{}, config.ServerConfig{Listen: ":0"}, manager)
 
@@ -1047,7 +1043,7 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 	if ref == "" {
 		t.Fatal("413 response missing X-Request-Id debug ref")
 	}
-	if info, err := os.Stat(filepath.Join(manager.Root(), ref)); err != nil || !info.IsDir() {
+	if _, err := manager.Detail(ref); err != nil {
 		t.Fatalf("debug dir %s missing: %v", ref, err)
 	}
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 0 {
@@ -1058,7 +1054,8 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 // TestClientDisconnectRecords499 验证未提交响应前的断连按 499+disconnected
 // 入账而不是 500+failed——断连是客户端责任，不能污染 server_error 聚合。
 func TestClientDisconnectRecords499(t *testing.T) {
-	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{})
+	st := openTokenDB(t)
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
 	t.Cleanup(func() { manager.Close() })
 	fake := &blockedStreamAdapter{entered: make(chan struct{})}
 	application := New(fake, config.ServerConfig{Listen: ":0"}, manager)
@@ -1075,16 +1072,16 @@ func TestClientDisconnectRecords499(t *testing.T) {
 	cancel()
 	<-done
 
-	data, err := os.ReadFile(filepath.Join(manager.Root(), debuglog.IndexFile))
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatalf("read index: %v", err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	var entry debuglog.IndexEntry
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
-		t.Fatalf("parse index line: %v (%s)", err, data)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(rows))
 	}
+	entry := rows[0]
 	if entry.StatusCode != 499 || entry.Result != "disconnected" {
-		t.Fatalf("index entry = status %d result %q, want 499/disconnected", entry.StatusCode, entry.Result)
+		t.Fatalf("log row = status %d result %q, want 499/disconnected", entry.StatusCode, entry.Result)
 	}
 	if entry.ErrorStage != debuglog.ErrStageClientDisconnected {
 		t.Fatalf("error_stage = %q, want client_disconnected", entry.ErrorStage)

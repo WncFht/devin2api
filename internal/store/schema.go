@@ -1,0 +1,212 @@
+package store
+
+import (
+	"database/sql"
+)
+
+// schemaStatements 是全量建表/建索引 DDL，逐条幂等执行（CREATE
+// IF NOT EXISTS）。新增列走 schema_migrations 版本化演进，启动路径
+// 只允许只增不删。
+var schemaStatements = []string{
+	// logs：每完成请求一行，列镜像 debuglog.IndexEntry 全集，外加
+	// minute_bucket（time/60000，聚合索引支点）、log_source
+	// （proxy/manual_test，写入时定版）与 upstream_protocol（恒
+	// devin，保留过滤维度的统一形状）。
+	`CREATE TABLE IF NOT EXISTS logs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		dir TEXT NOT NULL,
+		time INTEGER NOT NULL,
+		minute_bucket INTEGER NOT NULL,
+		started_at TEXT NOT NULL,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		request_ready_ms INTEGER,
+		upstream_sent_ms INTEGER,
+		upstream_open_ms INTEGER,
+		first_upstream_ms INTEGER,
+		first_client_ms INTEGER,
+		api TEXT NOT NULL DEFAULT '',
+		method TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		status_code INTEGER NOT NULL DEFAULT 0,
+		result TEXT NOT NULL DEFAULT '',
+		requested_model TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		response_model TEXT NOT NULL DEFAULT '',
+		model_mismatch INTEGER NOT NULL DEFAULT 0,
+		stream INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+		reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		credit_cost INTEGER NOT NULL DEFAULT 0,
+		upstream_request_id TEXT NOT NULL DEFAULT '',
+		client_ip TEXT NOT NULL DEFAULT '',
+		key_hash TEXT NOT NULL DEFAULT '',
+		client_request_id TEXT NOT NULL DEFAULT '',
+		error_stage TEXT NOT NULL DEFAULT '',
+		error_message TEXT NOT NULL DEFAULT '',
+		dropped_events INTEGER NOT NULL DEFAULT 0,
+		retry_after_seconds INTEGER NOT NULL DEFAULT 0,
+		rate_limited INTEGER NOT NULL DEFAULT 0,
+		retries INTEGER NOT NULL DEFAULT 0,
+		account TEXT NOT NULL DEFAULT '',
+		account_switches INTEGER NOT NULL DEFAULT 0,
+		premature_end_turn INTEGER NOT NULL DEFAULT 0,
+		repairs INTEGER NOT NULL DEFAULT 0,
+		conn_reused INTEGER,
+		conn_idle_ms INTEGER,
+		log_source TEXT NOT NULL DEFAULT 'proxy',
+		upstream_protocol TEXT NOT NULL DEFAULT 'devin'
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_dir ON logs(dir)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(time)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_time_status ON logs(time, status_code)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_time_model ON logs(time, model)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_minute_model ON logs(minute_bucket, model)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_minute_api ON logs(minute_bucket, api)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_time_keyhash ON logs(time, key_hash)`,
+	`CREATE INDEX IF NOT EXISTS idx_logs_minute_keyhash_status ON logs(minute_bucket, key_hash, status_code)`,
+
+	// debug payload：键是目录名（dir 仍作 X-Request-Id/debug_ref
+	// 身份），不是 logs.id——飞行中请求的 payload 先于 Complete 才
+	// 落库的 logs 行存在，进程被杀的请求也可能只剩调试行。
+	// debug_files 承载一次性小文件（meta.json、
+	// error.json、attachments/*），error.json 的 first-write-wins
+	// 靠 INSERT OR IGNORE 表达；debug_chunks 承载流式 JSONL
+	// （04/05/06），每次 flush 批一行，读时 ORDER BY seq 拼接。
+	`CREATE TABLE IF NOT EXISTS debug_files (
+		dir TEXT NOT NULL,
+		name TEXT NOT NULL,
+		content BLOB NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (dir, name)
+	)`,
+	`CREATE TABLE IF NOT EXISTS debug_chunks (
+		dir TEXT NOT NULL,
+		name TEXT NOT NULL,
+		seq INTEGER NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY (dir, name, seq)
+	)`,
+
+	// auth_tokens：列镜像 authtoken.Token 持久字段；inflight/
+	// rpmBucket/rpmCount 是瞬态字段不进库。token 存 sha256 全 hex，
+	// 明文不落库。
+	`CREATE TABLE IF NOT EXISTS auth_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token TEXT NOT NULL UNIQUE,
+		description TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0,
+		expires_at INTEGER,
+		last_used_at INTEGER,
+		is_active INTEGER NOT NULL DEFAULT 1,
+		success_count INTEGER NOT NULL DEFAULT 0,
+		failure_count INTEGER NOT NULL DEFAULT 0,
+		stream_avg_ttfb REAL NOT NULL DEFAULT 0,
+		non_stream_avg_rt REAL NOT NULL DEFAULT 0,
+		stream_count INTEGER NOT NULL DEFAULT 0,
+		non_stream_count INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens_total INTEGER NOT NULL DEFAULT 0,
+		completion_tokens_total INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+		cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+		total_cost_usd REAL NOT NULL DEFAULT 0,
+		effective_cost_usd REAL NOT NULL DEFAULT 0,
+		cost_used_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_limit_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_daily_used_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_daily_limit_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_daily_period_start INTEGER NOT NULL DEFAULT 0,
+		cost_monthly_used_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_monthly_limit_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_monthly_period_start INTEGER NOT NULL DEFAULT 0,
+		cost_5h_used_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_5h_limit_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_5h_anchor INTEGER NOT NULL DEFAULT 0,
+		cost_weekly_used_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_weekly_limit_microusd INTEGER NOT NULL DEFAULT 0,
+		cost_weekly_period_start INTEGER NOT NULL DEFAULT 0,
+		allowed_models TEXT NOT NULL DEFAULT '[]',
+		max_concurrency INTEGER NOT NULL DEFAULT 0,
+		max_rpm INTEGER NOT NULL DEFAULT 0
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS model_registry (
+		model TEXT PRIMARY KEY,
+		redirect_model TEXT NOT NULL DEFAULT '',
+		disabled INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS settings (
+		"key" TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	)`,
+
+	// quota_samples：daily/weekly_remaining 可空 REAL 保留
+	// 「上游没报」与「真到 0」的区分（QuotaSample 的 *float64 语义）。
+	`CREATE TABLE IF NOT EXISTS quota_samples (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at INTEGER NOT NULL,
+		account TEXT NOT NULL DEFAULT '',
+		daily_remaining REAL,
+		weekly_remaining REAL,
+		daily_reset_at INTEGER NOT NULL DEFAULT 0,
+		weekly_reset_at INTEGER NOT NULL DEFAULT 0,
+		prompt_credits REAL NOT NULL DEFAULT 0,
+		flow_credits REAL NOT NULL DEFAULT 0,
+		flex_credits REAL NOT NULL DEFAULT 0,
+		acu_consumed REAL NOT NULL DEFAULT 0,
+		acu_limit REAL NOT NULL DEFAULT 0,
+		used_prompt_credits REAL NOT NULL DEFAULT 0,
+		used_flow_credits REAL NOT NULL DEFAULT 0,
+		used_flex_credits REAL NOT NULL DEFAULT 0,
+		grace_period_status TEXT NOT NULL DEFAULT '',
+		grace_period_end INTEGER NOT NULL DEFAULT 0,
+		was_reduced_by_orphaned_usage INTEGER NOT NULL DEFAULT 0,
+		top_up_enabled INTEGER NOT NULL DEFAULT 0,
+		top_up_transaction_status TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_quota_at ON quota_samples(at)`,
+	// (account, at) 唯一：采样间隔以分钟计天然不撞，约束只为
+	// 导入重跑（commit 后 rename 失败等断点续传场景）去重兜底。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_acct_at ON quota_samples(account, at)`,
+
+	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
+	// import_base_done / debug_dirs_imported 是导入进度标记。
+	`CREATE TABLE IF NOT EXISTS runtime_state (
+		"key" TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	)`,
+
+	// upstream_accounts：号池 lane 的持久化账号行（由邻接需求
+	// 消费，DDL 先行建表）。deleted 软删标记保留历史 lane 归因。
+	`CREATE TABLE IF NOT EXISTS upstream_accounts (
+		name TEXT PRIMARY KEY,
+		token TEXT,
+		credentials_file TEXT,
+		disabled INTEGER NOT NULL DEFAULT 0,
+		deleted INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version TEXT PRIMARY KEY,
+		applied_at INTEGER NOT NULL
+	)`,
+}
+
+// applySchema 顺序执行全部 DDL；幂等，可重复调用。
+func applySchema(db *sql.DB) error {
+	for _, stmt := range schemaStatements {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}

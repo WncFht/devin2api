@@ -19,7 +19,7 @@ import (
 func warmTestAdapter() *Adapter {
 	return &Adapter{
 		token:       "test-token",
-		gate:        newRateGate(GateConfig{}, ""),
+		gate:        newRateGate(GateConfig{}, nil, ""),
 		assignments: make(map[string]resolvedAssignment),
 	}
 }

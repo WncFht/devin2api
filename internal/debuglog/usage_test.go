@@ -1,4 +1,6 @@
-// 本文件验证 index.jsonl 的用量聚合：多维累计、延迟分位数、启动回放。
+// 本文件验证请求完成→logs 表行的端到端写路径（聚合从 store 读回）、
+// 失败责任归因、保留策略与运行时开关；纯 SQL 筛选/聚合口径的
+// 单测在 internal/store/logs_usage_test.go。
 package debuglog
 
 import (
@@ -6,17 +8,30 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// TestUsageAggregatorCounts 验证一次请求完成后各维度都被计入。
-func TestUsageAggregatorCounts(t *testing.T) {
+// openTestStore 开一个临时 sqlite 库；断言日志行的测试把它接进
+// NewManager 第三参，写完经 SearchLogs/UsageStats 读回验证。
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// TestUsageStatsFromLogRows 验证一次请求完成后各维度都被计入快照。
+func TestUsageStatsFromLogRows(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 
 	reasoning := int64(7)
@@ -29,7 +44,10 @@ func TestUsageAggregatorCounts(t *testing.T) {
 	failed.WriteError("provider_stream", os.ErrNotExist)
 	failed.Complete(Completion{StatusCode: 500, Result: "failed", Model: "swe-2-max", Usage: usageFixture(10, 0, 0, 0, nil, 10)})
 
-	snap := manager.UsageStats()
+	snap, err := st.UsageStats(context.Background())
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
 	if snap.Today.Requests != 2 || snap.Today.Errors != 1 {
 		t.Fatalf("today = %+v", snap.Today)
 	}
@@ -53,193 +71,52 @@ func TestUsageAggregatorCounts(t *testing.T) {
 	if snap.ErrorStages["provider_stream"] != 1 {
 		t.Fatalf("error_stages = %+v", snap.ErrorStages)
 	}
-	if len(snap.Points) != usageMinBuckets {
-		t.Fatalf("points len = %d", len(snap.Points))
+	if len(snap.Points) == 0 {
+		t.Fatal("points empty")
 	}
 	if snap.Duration.Samples != 2 {
 		t.Fatalf("duration stats = %+v", snap.Duration)
 	}
 }
 
-// TestUsageReplayOnRestart 验证进程重启（重建 Manager）后历史统计不丢。
-func TestUsageReplayOnRestart(t *testing.T) {
+// TestUsagePersistedAcrossManagers 验证重建 Manager 后历史统计不丢——
+// 日志行在 logs 表里，与进程内存无关。
+func TestUsagePersistedAcrossManagers(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	first := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	first := NewManager(root, RetentionPolicy{}, st)
 	recorder := first.Start(RequestMeta{Method: "POST", Path: "/v1/chat/completions", API: "openai-chat"})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(1000, 200, 0, 0, nil, 1200)})
 	first.Close()
 
-	second := NewManager(root, RetentionPolicy{})
+	second := NewManager(root, RetentionPolicy{}, st)
 	defer second.Close()
-	snap := second.UsageStats()
+	snap, err := st.UsageStats(context.Background())
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
 	if snap.Window.Requests != 1 || snap.Window.InputTokens != 1000 || snap.Window.TotalTokens != 1200 {
-		t.Fatalf("replayed window = %+v", snap.Window)
+		t.Fatalf("persisted window = %+v", snap.Window)
 	}
 	if len(snap.Models) != 1 || snap.Models[0].Name != "glm-5-2" {
-		t.Fatalf("replayed models = %+v", snap.Models)
+		t.Fatalf("persisted models = %+v", snap.Models)
 	}
-	// 回放后新请求继续累加，不重复计数。
+	// 新请求继续累加，不重复计数。
 	recorder2 := second.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 	recorder2.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(5, 5, 0, 0, nil, 10)})
-	snap = second.UsageStats()
-	if snap.Window.Requests != 2 || snap.Window.TotalTokens != 1210 {
-		t.Fatalf("post-replay window = %+v", snap.Window)
-	}
-}
-
-// TestUsagePercentiles 验证蓄水池 p50/p95/p99 与环覆盖。
-func TestUsagePercentiles(t *testing.T) {
-	agg := newUsageAggregator()
-	for i := 1; i <= 100; i++ {
-		agg.add(IndexEntry{StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: int64(i), Result: "completed"})
-	}
-	stats := agg.durationSamples.stats()
-	if stats.P50 != 50 || stats.P95 != 95 || stats.P99 != 99 || stats.Max != 100 {
-		t.Fatalf("percentiles = %+v", stats)
-	}
-	// 蓄水池超容量后只保留最近样本。
-	for i := 0; i < usageSampleCapacity; i++ {
-		agg.add(IndexEntry{StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: 1, Result: "completed"})
-	}
-	stats = agg.durationSamples.stats()
-	if stats.Samples != usageSampleCapacity {
-		t.Fatalf("samples = %d, want %d", stats.Samples, usageSampleCapacity)
-	}
-}
-
-// TestUsageRateLimitSampling 验证上游 429 单独计数，并按前 60s 窗口采样发出速率；
-// 同时验证事件经 index.jsonl 回放在重启后重建。
-func TestUsageRateLimitSampling(t *testing.T) {
-	base := time.Now()
-	// entry 以完成序构造：off 为相对 base 的启动时刻。
-	entry := func(off time.Duration, status int, durMS int64) IndexEntry {
-		return IndexEntry{
-			StartedAt:  base.Add(off).Format(time.RFC3339Nano),
-			DurationMS: durMS, StatusCode: status, Result: "completed", Model: "m-a",
-		}
-	}
-	entries := []IndexEntry{
-		entry(-120*time.Second, 200, 100), // 在 429 的 60s 窗口之外
-		entry(-30*time.Second, 200, 100),
-		entry(-20*time.Second, 200, 100),
-		entry(-10*time.Second, 200, 100),
-		// end = -5s+2s = -3s；窗口 (-63s,-3s] 内含 -30/-20/-10/-5 共 4 个 start。
-		entry(-5*time.Second, 429, 2000),
-	}
-	entries[len(entries)-1].ErrorStage = "rate_gate"
-
-	agg := newUsageAggregator()
-	for _, e := range entries {
-		agg.add(e)
-	}
-	snap := agg.snapshot()
-	if snap.Window.RateLimited != 1 {
-		t.Fatalf("window rate_limited = %d", snap.Window.RateLimited)
-	}
-	if len(snap.RateLimitEvents) != 1 {
-		t.Fatalf("rate_limit_events = %+v", snap.RateLimitEvents)
-	}
-	ev := snap.RateLimitEvents[0]
-	if ev.Model != "m-a" || ev.RPM != 4 || ev.At != base.Unix()-3 || ev.Stage != "rate_gate" {
-		t.Fatalf("event = %+v", ev)
-	}
-	if snap.Models[0].RateLimited != 1 {
-		t.Fatalf("model agg = %+v", snap.Models[0])
-	}
-
-	// 同一份 index 内容写文件回放，重启后聚合与采样应一致重建。
-	path := filepath.Join(t.TempDir(), "index.jsonl")
-	var buf strings.Builder
-	for _, e := range entries {
-		data, _ := json.Marshal(e)
-		buf.Write(data)
-		buf.WriteByte('\n')
-	}
-	if err := os.WriteFile(path, []byte(buf.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	replayed := newUsageAggregator()
-	data, err := os.ReadFile(path)
+	snap, err = st.UsageStats(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("UsageStats: %v", err)
 	}
-	replayed.replayLines(data)
-	rsnap := replayed.snapshot()
-	if rsnap.Window.RateLimited != 1 || len(rsnap.RateLimitEvents) != 1 || rsnap.RateLimitEvents[0].RPM != 4 {
-		t.Fatalf("replayed = rate_limited %d events %+v", rsnap.Window.RateLimited, rsnap.RateLimitEvents)
+	if snap.Window.Requests != 2 || snap.Window.TotalTokens != 1210 {
+		t.Fatalf("post-restart window = %+v", snap.Window)
 	}
 }
 
-// TestRequestFilters 验证结构化筛选与 has_more 信号。
-func TestRequestFilters(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
-	defer manager.Close()
-
-	cases := []struct {
-		model  string
-		status int
-		result string
-		stage  string
-	}{
-		{"m-a", 200, "completed", ""},
-		{"m-b", 400, "failed", "http_decode"},
-		{"m-a", 500, "failed", "provider_stream"},
-	}
-	for _, c := range cases {
-		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-		if c.stage != "" {
-			recorder.WriteError(c.stage, os.ErrNotExist)
-		}
-		recorder.Complete(Completion{StatusCode: c.status, Result: c.result, Model: c.model})
-	}
-
-	if got := manager.ListRequests(10, RequestFilter{StatusClass: "4xx"}); len(got.Entries) != 1 || got.Entries[0].Model != "m-b" {
-		t.Fatalf("status_class=4xx = %+v", got.Entries)
-	}
-	// status 表达式：精确/取反/比较/段位/逗号 OR；非法表达式不匹配任何条目。
-	for _, tc := range []struct {
-		expr string
-		want int
-	}{
-		{"400", 1}, {"!200", 2}, {">=400", 2}, {"<300", 1}, {"4xx", 1},
-		{"400,500", 2}, {"!2xx", 2}, {"garbage", 0}, {">=4xx", 0},
-	} {
-		if got := manager.ListRequests(10, RequestFilter{Status: tc.expr}); len(got.Entries) != tc.want {
-			t.Fatalf("status=%q = %d 条, want %d", tc.expr, len(got.Entries), tc.want)
-		}
-	}
-	if got := manager.ListRequests(10, RequestFilter{Model: "m-a"}); len(got.Entries) != 2 {
-		t.Fatalf("model=m-a = %+v", got.Entries)
-	}
-	if got := manager.ListRequests(10, RequestFilter{ErrorStage: "provider_stream"}); len(got.Entries) != 1 {
-		t.Fatalf("error_stage = %+v", got.Entries)
-	}
-	if got := manager.ListRequests(10, RequestFilter{Result: "completed"}); len(got.Entries) != 1 {
-		t.Fatalf("result=completed = %+v", got.Entries)
-	}
-	if got := manager.ListRequests(10, RequestFilter{Since: time.Now().Add(time.Hour)}); len(got.Entries) != 0 {
-		t.Fatalf("since future = %+v", got.Entries)
-	}
-	// until 把列表钉在历史窗口内：过去的上界一条不留，未来的上界全保留。
-	if got := manager.ListRequests(10, RequestFilter{Until: time.Now().Add(-time.Hour)}); len(got.Entries) != 0 {
-		t.Fatalf("until past = %+v", got.Entries)
-	}
-	if got := manager.ListRequests(10, RequestFilter{Until: time.Now().Add(time.Hour)}); len(got.Entries) != 3 {
-		t.Fatalf("until future = %+v", got.Entries)
-	}
-	// limit 用尽时应提示窗口内仍有历史。
-	if got := manager.ListRequests(1, RequestFilter{}); len(got.Entries) != 1 || !got.HasMore {
-		t.Fatalf("limit=1 = %+v has_more=%v", got.Entries, got.HasMore)
-	}
-	if got := manager.ListRequests(10, RequestFilter{}); got.HasMore {
-		t.Fatal("full scan should not report has_more")
-	}
-}
-
-// TestErrorOwnerAndSLA 验证失败责任归类与 SLA 口径：客户端责任（断连、
-// 请求体阶段失败）与 429 限流不进 SLA 分母，只有服务端失分扣分。
-func TestErrorOwnerAndSLA(t *testing.T) {
+// TestErrorOwner 验证失败责任归类：客户端责任（断连、请求体阶段失败）
+// 与 429 限流不进 SLA 分母，只有服务端失分扣分。聚合口径的同名
+// 断言在 store 包 TestUsageFaults（SQL 判定链与这里逐行对齐）。
+func TestErrorOwner(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		result string
@@ -264,58 +141,31 @@ func TestErrorOwnerAndSLA(t *testing.T) {
 			t.Fatalf("ErrorOwner(%d/%s/%s) = %q, want %q", tc.status, tc.result, tc.stage, got, tc.want)
 		}
 	}
-
-	agg := newUsageAggregator()
-	add := func(status int, result, stage string) {
-		agg.add(IndexEntry{
-			StartedAt: time.Now().Format(time.RFC3339Nano), DurationMS: 10,
-			StatusCode: status, Result: result, ErrorStage: stage, Model: "m-x",
-		})
-	}
-	add(200, "completed", "")
-	add(200, "completed", "")
-	add(429, "failed", "devin_connect")   // 限流：剔除分母
-	add(200, "disconnected", "")          // 客户端：剔除分母
-	add(400, "failed", "http_decode")     // 客户端 4xx：剔除分母
-	add(500, "failed", "provider_stream") // 服务端失分：SLA 唯一扣分项
-	snap := agg.snapshot()
-	m := snap.Models[0]
-	if m.ClientFaults != 2 || m.UpstreamFaults != 1 || m.RateLimited != 1 {
-		t.Fatalf("faults = %+v", m)
-	}
-	// 聚合层级同步：窗口 totals 与 10 分钟桶也要带归因计数。
-	if snap.Window.ClientFaults != 2 || snap.Window.UpstreamFaults != 1 {
-		t.Fatalf("window = %+v", snap.Window)
-	}
-	var sumClient, sumUpstream int64
-	for _, p := range snap.Points {
-		sumClient += p.ClientFaults
-		sumUpstream += p.UpstreamFaults
-	}
-	if sumClient != 2 || sumUpstream != 1 {
-		t.Fatalf("points faults = %d/%d", sumClient, sumUpstream)
-	}
 }
 
-// TestRetryAttemptsInIndex 验证重发计数随索引与 meta 落盘：
+// TestRetryAttemptsInIndex 验证重发计数随日志行与 meta 落盘：
 // NoteRetryAttempt 与 04 的 retry_attempt 分界行同源。
 func TestRetryAttemptsInIndex(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-	dir := filepath.Base(recorder.DirectoryPath())
+	dir := recorder.dir
 	recorder.NoteRetryAttempt(2, "unauthenticated: token reloaded")
 	recorder.NoteRetryAttempt(3, "transport: EOF")
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m-x"})
 
-	entries := manager.ListRequests(10, RequestFilter{}).Entries
-	if len(entries) != 1 || entries[0].Retries != 2 {
-		t.Fatalf("entries = %+v", entries)
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Retries != 2 {
+		t.Fatalf("rows = %+v", rows)
 	}
 	// meta.json 应带明细（attempt 号/原因/相对时刻），面板据此渲染链路。
-	data, err := os.ReadFile(filepath.Join(root, dir, "meta.json"))
+	data, _, _, err := manager.ReadFile(dir, MetaFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +186,7 @@ func TestRetryAttemptsInIndex(t *testing.T) {
 // TestSetEnabledHotToggle 验证日志开关运行时切换后 Start 立即生效。
 func TestSetEnabledHotToggle(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	manager := NewManager(root, RetentionPolicy{}, nil)
 	defer manager.Close()
 
 	manager.SetEnabled(false)
@@ -354,11 +204,12 @@ func TestSetEnabledHotToggle(t *testing.T) {
 // TestAbortActiveRequest 验证 Abort 取消挂接的 ctx 并把结果记为 aborted。
 func TestAbortActiveRequest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-	dir := filepath.Base(recorder.DirectoryPath())
+	dir := recorder.dir
 	if manager.Abort(dir) {
 		t.Fatal("Abort should fail before ctx is attached")
 	}
@@ -377,9 +228,12 @@ func TestAbortActiveRequest(t *testing.T) {
 		t.Fatal("ctx not cancelled by Abort")
 	}
 	recorder.Complete(Completion{StatusCode: 200, Result: "disconnected"})
-	result := manager.ListRequests(10, RequestFilter{Result: "aborted"})
-	if len(result.Entries) != 1 {
-		t.Fatalf("aborted entries = %+v", result.Entries)
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{Result: "aborted"})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("aborted rows = %+v", rows)
 	}
 	// 完结后再 abort 应失败。
 	if manager.Abort(dir) {
@@ -387,135 +241,62 @@ func TestAbortActiveRequest(t *testing.T) {
 	}
 }
 
-// TestLayeredRetention 验证负载剥离与失败目录豁免。
+// TestLayeredRetention 验证负载剥离与失败目录豁免：行键名即年龄依据，
+// 2020 年的目录名远超 1 小时负载保留界。
 func TestLayeredRetention(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1})
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{PayloadHours: 1, KeepErrorDirs: 1}, st)
 	defer manager.Close()
 
-	// 一个 2 小时前的目录：负载应被剥离，证据保留。重试分片
-	// 03-devin-request.attempt2.json 同属负载层，必须一并剥掉。
-	old := filepath.Join(root, "20200101-000000")
+	// 重试分片 03-devin-request.attempt2.json 同属负载层，必须一并剥掉。
+	ctx := context.Background()
+	old := "20200101-000000"
 	payloads := []string{
 		"03-devin-request.json", "03-devin-request.attempt2.json",
-		"04-devin-response.jsonl", "06-http-response.jsonl",
+		"04-devin-response.jsonl", "06-http-response.jsonl", "attachments/a.bin",
 	}
-	for _, name := range append(payloads, "meta.json", "error.json") {
-		if err := os.MkdirAll(old, 0o700); err != nil {
+	for _, name := range append(payloads, MetaFile, ErrorFile) {
+		if err := st.PutDebugFile(ctx, old, name, []byte("x")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.MkdirAll(filepath.Join(old, "attachments"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(old, "attachments", "a.bin"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	oldTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
-		t.Fatal(err)
 	}
 
 	manager.cleanOnce()
-	for _, gone := range append(payloads, "attachments") {
-		if _, err := os.Stat(filepath.Join(old, gone)); !os.IsNotExist(err) {
-			t.Fatalf("payload %s should be stripped", gone)
+	names, err := st.DebugFileNames(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	for _, name := range names {
+		remaining[name] = true
+	}
+	for _, gone := range payloads {
+		if remaining[gone] {
+			t.Fatalf("payload %s should be stripped, remaining = %v", gone, names)
 		}
 	}
-	for _, keep := range []string{"meta.json", "error.json"} {
-		if _, err := os.Stat(filepath.Join(old, keep)); err != nil {
-			t.Fatalf("evidence %s should remain: %v", keep, err)
+	for _, keep := range []string{MetaFile, ErrorFile} {
+		if !remaining[keep] {
+			t.Fatalf("evidence %s should remain, remaining = %v", keep, names)
 		}
-	}
-}
-
-// TestUsageMinBucketWraparound 验证环形槽回绕：8 天前的旧条目撞上当前桶
-// 的槽位时不得重置已计数据——旧条目的桶更新被丢弃，total 仍照常累计。
-func TestUsageMinBucketWraparound(t *testing.T) {
-	agg := newUsageAggregator()
-	now := time.Now().Truncate(10 * time.Minute)
-	agg.add(IndexEntry{StartedAt: now.Format(time.RFC3339Nano), DurationMS: 5, Result: "completed", InputTokens: 7})
-	// 恰好 usageMinBuckets 个桶（8 天）之前的条目与当前桶映射到同一槽位。
-	old := now.Add(-usageMinBuckets * 10 * time.Minute)
-	agg.add(IndexEntry{StartedAt: old.Format(time.RFC3339Nano), DurationMS: 9, Result: "completed", InputTokens: 3})
-	snap := agg.snapshot()
-	if snap.Window.Requests != 2 || snap.Window.InputTokens != 10 {
-		t.Fatalf("window = %+v", snap.Window)
-	}
-	current := snap.Points[len(snap.Points)-1]
-	if current.Requests != 1 || current.InputTokens != 7 {
-		t.Fatalf("current bucket = %+v, want requests=1 input=7", current)
-	}
-}
-
-// TestUsageReplayCountsOnce 验证回放与实时入账不重叠：无论请求完成落在
-// 回放取快照之前还是之后，其索引行都只入账一次。
-func TestUsageReplayCountsOnce(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		root := filepath.Join(t.TempDir(), "logs")
-		manager := NewManager(root, RetentionPolicy{})
-		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
-		recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m"})
-		snap := manager.UsageStats()
-		manager.Close()
-		if snap.Entries != 1 || snap.Window.Requests != 1 {
-			t.Fatalf("iter %d: entries=%d requests=%d, want 1", i, snap.Entries, snap.Window.Requests)
-		}
-	}
-}
-
-// TestIndexSnapshottedGate 验证快照闸门的边界语义：落定前 appendIndex
-// 只落盘不入账（行已在回放快照内，由回放补记）；落定后才由实时路径自计。
-func TestIndexSnapshottedGate(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{})
-	defer manager.Close()
-	<-manager.replayDone
-
-	// 人为回到落定前状态：完成的请求只写索引行，不进聚合——
-	// 该行本应由回放快照补记（测试里快照已取过，故总量保持 0）。
-	manager.indexMu.Lock()
-	manager.indexSnapshotted.Store(false)
-	manager.indexMu.Unlock()
-	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
-	if got := manager.usage.snapshot().Entries; got != 0 {
-		t.Fatalf("pre-snapshot entry counted: entries=%d, want 0", got)
-	}
-
-	manager.indexMu.Lock()
-	manager.indexSnapshotted.Store(true)
-	manager.indexMu.Unlock()
-	manager.Start(RequestMeta{Method: "POST", Path: "/x"}).Complete(Completion{StatusCode: 200, Result: "completed"})
-	if got := manager.usage.snapshot().Entries; got != 1 {
-		t.Fatalf("post-snapshot entry lost: entries=%d, want 1", got)
 	}
 }
 
 // TestRetentionAgesByDirName 验证计龄以目录名内嵌时间戳为准：
-// dir mtime 被刷成现在（如负载剥离后）不影响超龄目录的淘汰判定。
+// 行 updated_at 再新也不影响超龄目录的淘汰判定。
 func TestRetentionAgesByDirName(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	manager := NewManager(root, RetentionPolicy{Days: 7, PayloadHours: 1})
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{Days: 7, PayloadHours: 1}, st)
 	defer manager.Close()
 
-	old := filepath.Join(root, "20200101-000000")
-	for _, name := range []string{"03-devin-request.json", "meta.json"} {
-		if err := os.MkdirAll(old, 0o700); err != nil {
+	ctx := context.Background()
+	for _, name := range []string{"03-devin-request.json", MetaFile} {
+		if err := st.PutDebugFile(ctx, "20200101-000000", name, []byte("x")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(old, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	now := time.Now()
-	if err := os.Chtimes(old, now, now); err != nil {
-		t.Fatal(err)
 	}
 	if removed := manager.cleanOnce(); removed != 1 {
-		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，mtime 不算数）", removed)
+		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，行新旧不算数）", removed)
 	}
 }
 

@@ -1,16 +1,18 @@
-// 本文件实现单次 HTTP 请求的分阶段调试日志目录和 JSON/JSONL 写盘。
+// 本文件实现单次 HTTP 请求的分阶段调试 payload 写入：目录名即请求身份
+// （X-Request-Id/debug_ref），内容落在 store 的 debug_files/debug_chunks
+// 两表——整文件（meta/01/02/03/error/attachments）是 files 行，流式
+// JSONL（04/05/06）按 flush 批追加为 chunks 行。
 //
 // Package debuglog 负责记录兼容 API 请求在 HTTP、中间模型和供应商协议之间的转换过程。
-// 所有写盘作业经每请求一个有界任务队列交给单 worker 串行执行——
+// 所有写库作业经每请求一个有界任务队列交给单 worker 串行执行——
 // 事件顺序即入队顺序，热路径只承担一次 channel send；队列满时丢弃并计数，
 // 观测系统自身降级不拖垮请求。生命周期管理（保留期/总量清理）见 cleaner.go。
 package debuglog
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // writeQueueSize 是单请求写任务的排队上限；流式帧在万级以下时绰绰有余。
@@ -41,22 +44,23 @@ type RetentionPolicy struct {
 }
 
 // Manager 在固定 logs 根目录下为每次请求创建独立 recorder，并持有
-// 全局索引（index.jsonl）、用量聚合器与后台清理器。
+// 日志行的 store 句柄与后台清理器。
 type Manager struct {
 	// root 是所有请求日志目录的根路径；空值表示禁用调试日志。
 	root string
 	// now 返回当前时间；测试会固定它以验证同秒目录分配。
 	now func() time.Time
 	// mutex 串行化目录名分配与 activeDirs 维护——锁内只做内存操作，
-	// mkdir/索引写盘一律在锁外（见 indexMu）：一次磁盘停滞曾让所有
-	// 排队请求的 ReadTimeout 在持锁等待中过期，锁一释放即批量假死。
+	// mkdir 一律在锁外：一次磁盘停滞曾让所有排队请求的 ReadTimeout
+	// 在持锁等待中过期，锁一释放即批量假死。
 	mutex sync.Mutex
 	// activeDirs 记录仍有进行中请求的目录名→recorder，清理器必须跳过；
 	// 存指针是为了 ActiveRequests 能直出进行中请求的活快照。
 	activeDirs map[string]*Recorder
-	// takenNames 记录本进程已知存在于磁盘、但不在 activeDirs 的目录名
-	//（mkdir EEXIST 撞到的遗留目录）——锁内选名时跳过它们，避免同秒
-	// 重启后反复撞名。只有撞名才入账，体量极小。
+	// takenNames 记录本进程已知被占、但不在 activeDirs 的目录名——
+	// NewManager 把盘上待导入的遗留目录播种进来，claim 撞名（已入库
+	// 的同名目录）也入账——锁内选名时跳过它们，避免同秒重启后反复
+	// 撞名。体量极小（遗留目录数 + 撞名次数）。
 	takenNames map[string]struct{}
 	// enabled 是请求日志的运行时开关；关闭时 Start 返回 nil，已有目录不受影响。
 	enabled atomic.Bool
@@ -64,35 +68,19 @@ type Manager struct {
 	// cleaner 协程与 Stats 每轮经 Policy() 取快照。
 	policyMu sync.RWMutex
 	policy   RetentionPolicy
-	// indexMu 串行化 index.jsonl 的全部 IO（惰性打开/追加/Flush/截断重写）
-	// 与启动回放的快照边界——索引写盘与目录分配分锁，索引侧的磁盘停滞
-	// 不再堵死 Start。
-	indexMu sync.Mutex
-	// indexFile/indexWriter 是跨请求索引（index.jsonl）的持久句柄。
-	indexFile   *os.File
-	indexWriter *bufio.Writer
-	// indexBytes 跟踪 index.jsonl 当前体积，超 indexFileCap 时保尾部一半重写。
-	indexBytes int64
-	// indexSnapshotted 标记启动回放已在 indexMu 内截取索引快照：此前完成的
-	// 请求其索引行已在快照内、由回放统一入账，appendIndex 不再单独累加；
-	// 此后写入的行在快照之外，必须由实时路径自计——任一行恰入账一次。
-	indexSnapshotted atomic.Bool
+	// store 是 logs 表的持久层；nil 时 insertLog 静默跳过（测试/未接线）。
+	store *store.Store
+	// logRowRetentionDays 是 logs 行的时间保留天数（面板可热改）；
+	// <=0 不按时间清理。与目录的 policy.Days 是两条独立的生命周期轴：
+	// 行是检索面、目录是证据面。
+	logRowRetentionDays atomic.Int64
 	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
 	cleanerStop chan struct{}
 	cleanerDone chan struct{}
 	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
 	droppedTotal atomic.Uint64
-	// ioErrors 汇总索引与阶段文件的写失败数——日志管道自身故障不静默。
+	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
 	ioErrors atomic.Uint64
-	// usage 是 index.jsonl 的内存聚合器；启动时回放、请求完成时累加。
-	usage *usageAggregator
-	// replayDone 在启动回放结束时关闭；UsageStats 等它而不是返回半成数据。
-	replayDone chan struct{}
-	// listCache 是 ListRequests 的尾部窗口解析缓存，listCacheMu 保护；
-	// 面板轮询（概览矩阵 1s、请求页 1-5s）反复扫同一 index.jsonl，
-	// 文件 (size,mtime) 没变就免掉 4MB 尾读 + 全量 JSON 解析。
-	listCacheMu sync.Mutex
-	listCache   listIndexCache
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -145,12 +133,12 @@ type Completion struct {
 	PrematureEndTurn bool
 }
 
-// Recorder 保存单次请求的目录、开始时间和异步写队列。
+// Recorder 保存单次请求的目录名、开始时间和异步写队列。
 type Recorder struct {
 	// manager 回指所属 Manager，Complete 时写索引并释放目录保护。
 	manager *Manager
-	// directory 是本次请求的日志目录。
-	directory string
+	// dir 是本次请求的调试目录名（内嵌进入时刻，不再对应磁盘目录）。
+	dir string
 	// startedAt 是 HTTP 请求进入应用的时间。
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
@@ -177,7 +165,7 @@ type Recorder struct {
 	upstreamAccount string
 	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
-	// writeMeta/appendIndex 读，与 retries 同一把锁。
+	// writeMeta/insertLog 读，与 retries 同一把锁。
 	accountAttempts []accountAttempt
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
@@ -202,7 +190,7 @@ type Recorder struct {
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
-	// meta.json 与 index 落盘，grep/聚合不必再解析错误文案。
+	// meta.json 与日志行出账，检索/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
 	// rateLimited 标记本请求被限流语义终结（上游 429 或本地闸门快败）。
 	// 流内错误事件下发的限流 HTTP 状态仍是 200，单靠 status_code 认不出——
@@ -210,10 +198,10 @@ type Recorder struct {
 	rateLimited atomic.Bool
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
-	// 追加，writeMeta/appendIndex 读，走 mutex 同步。
+	// 追加，writeMeta/insertLog 读，走 mutex 同步。
 	retries []retryAttempt
 	// firstError 是首个失败点的同步记录：WriteError 调用时 CAS 抢占
-	//（first-write-wins），writeLoggedError 的 WARN 行与 appendIndex
+	//（first-write-wins），writeLoggedError 的 WARN 行与 insertLog
 	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
 	//「失败点」。error.json 落盘仍在 worker 内由 errorWritten 去重。
 	firstError atomic.Pointer[errorRecord]
@@ -221,7 +209,7 @@ type Recorder struct {
 	// 时长）；connect 段延迟靠它拆成「握手成本」与「上游响应头延迟」。
 	upstreamConn atomic.Pointer[connInfo]
 	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
-	// 构建请求后写入；Complete 时随 meta.json 与 index 落盘。
+	// 构建请求后写入；Complete 时随 meta.json 与日志行出账。
 	repairs atomic.Pointer[llm.RequestRepairs]
 
 	// 以下字段仅由写 worker 访问，无需加锁：
@@ -231,8 +219,10 @@ type Recorder struct {
 	attachmentByHash map[string]attachmentReference
 	// attachmentCount 是附件文件名的递增编号。
 	attachmentCount int
-	// jsonlFiles 保存已打开的 JSONL 文件，避免每帧重复 open/close。
-	jsonlFiles map[string]*jsonlFile
+	// chunkBufs 按 JSONL 文件名缓冲已序列化行；队列排空时每个非空
+	// 缓冲作为一条 debug_chunks 行提交（追加行代替整文件重写，已
+	// 提交前缀对面板实时可见）。
+	chunkBufs map[string]*bytes.Buffer
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
@@ -277,12 +267,6 @@ type connInfo struct {
 // writeTask 是交给写 worker 的一次作业，worker 内串行执行。
 type writeTask func()
 
-// jsonlFile 保存单个已打开的 JSONL 文件句柄及其缓冲写。
-type jsonlFile struct {
-	file   *os.File
-	writer *bufio.Writer
-}
-
 // JSONLRecord 是一个 JSONL 文件中的统一行信封。
 type JSONLRecord struct {
 	// Seq 是当前文件内从 1 开始的顺序号。
@@ -314,70 +298,34 @@ type attachmentReference struct {
 
 // NewManager 创建写入指定 logs 根目录的管理器；空路径返回禁用状态的管理器。
 // policy 控制后台清理；清理协程恒启动（全零策略下空转），热改策略即时生效。
-// 启动时异步回放 index.jsonl 尾部重建用量聚合——尾部上限 64MB，同步解析会
-// 拖住 listen 之后的首次应答；UsageStats 在读侧等回放完成，不会返回半成数据。
-func NewManager(root string, policy RetentionPolicy) *Manager {
+// st 是 logs 表的持久层句柄——历史行已由启动导入器搬入库，无需回放。
+func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 	manager := &Manager{
 		root:       root,
 		now:        time.Now,
 		activeDirs: make(map[string]*Recorder),
 		takenNames: make(map[string]struct{}),
 		policy:     policy,
-		usage:      newUsageAggregator(),
-		replayDone: make(chan struct{}),
+		store:      st,
 	}
 	manager.enabled.Store(true)
+	manager.logRowRetentionDays.Store(DefaultLogRowRetentionDays)
 	if root == "" {
-		close(manager.replayDone)
 		return manager
 	}
-	// 提前建好根目录：quota.jsonl/stderr.log 等顶层文件不经过 Start() 的惰性建目录。
+	// 提前建好根目录：stderr.log 等顶层文件不经过 Start() 的惰性建目录。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("debuglog: create log root failed", "root", root, "error", err)
 	}
-	go func() {
-		defer close(manager.replayDone)
-		// 快照边界必须持锁划定：appendIndex 在同一 indexMu 内完成「写文件
-		// +条件入账」——边界前写入的行全部落在快照内，其自身入账被
-		// indexSnapshotted 闸门跳过、由回放统一补记；边界后写入的行在
-		// 快照之外，由实时路径自计。任一行恰入账一次，无锁读则边界前后
-		// 都可能与 appendIndex 交错，把同一行计两遍。indexMu 而非
-		// manager.mutex：回放是磁盘 IO，不该占目录分配锁。
-		manager.indexMu.Lock()
-		indexPath := filepath.Join(root, IndexFile)
-		// 尺寸必须在读之前取：读后 stat 会把回放窗口内的并发追加误判成
-		// 截断（文件在两次调用之间增长）——高负载时这是必然假阳性。
-		info, statErr := os.Stat(indexPath)
-		data, err := TailRead(indexPath, usageReplayTailBytes)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			// 瞬态 IO 失败原地重试一次：快照没读成却照落闸门，边界前
-			// 完成的行会被回放假设覆盖、又被实时路径跳过，永久漏记。
-			manager.indexMu.Unlock()
-			time.Sleep(200 * time.Millisecond)
-			manager.indexMu.Lock()
-			info, statErr = os.Stat(indexPath)
-			data, err = TailRead(indexPath, usageReplayTailBytes)
-		}
-		manager.indexSnapshotted.Store(true)
-		manager.indexMu.Unlock()
-		if err != nil {
-			// 索引不存在（首装）是常态；其他读失败意味着窗口统计丢历史，值得告警。
-			if !errors.Is(err, os.ErrNotExist) {
-				slog.Warn("debuglog: replay index tail failed", "error", err)
+	// 把盘上遗留的请求目录（待导入或导入失败）播种进撞名集：它们对
+	// claim 不可见（行还没进库），不挡住会同秒重启把新请求撞进旧目录名。
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() && requestDirPattern.MatchString(entry.Name()) {
+				manager.takenNames[entry.Name()] = struct{}{}
 			}
-			return
 		}
-		// 回放窗口与 indexFileCap 同值，正常时文件整体被覆盖；读前的文件
-		// 比读到的内容大说明上限被撑破（外部追加/双写/常量漂移），最旧
-		// 的行对聚合静默不可见——值得告警而不是无声丢历史。
-		if statErr == nil && info.Size() > int64(len(data)) {
-			slog.Warn("debuglog: index.jsonl exceeds replay window; oldest entries excluded from usage stats",
-				"size", info.Size(), "replayed_bytes", len(data))
-		}
-		if parsed := manager.usage.replayLines(data); parsed > 0 {
-			slog.Info("debuglog: replayed request index", "entries", parsed)
-		}
-	}()
+	}
 	// cleaner 恒启动：策略全零时 cleanOnce 空转（每 5min 一次 ReadDir），
 	// 若按初始策略条件启动，全零起步的进程热开保留策略（SetPolicy）后
 	// 无人消费——热路径会是死开关。
@@ -387,7 +335,27 @@ func NewManager(root string, policy RetentionPolicy) *Manager {
 	return manager
 }
 
-// Close 停止后台清理并关闭索引文件句柄；进程退出前调用一次。
+// DefaultLogRowRetentionDays 是 logs 行的默认时间保留天数；
+// 面板设置项的 def 展示同源引用。
+const DefaultLogRowRetentionDays = 90
+
+// SetLogRowRetentionDays 热改 logs 行的时间保留天数；<=0 关闭按时间清理。
+func (manager *Manager) SetLogRowRetentionDays(days int64) {
+	if manager == nil {
+		return
+	}
+	manager.logRowRetentionDays.Store(days)
+}
+
+// LogRowRetentionDays 返回当前 logs 行保留天数。
+func (manager *Manager) LogRowRetentionDays() int64 {
+	if manager == nil {
+		return 0
+	}
+	return manager.logRowRetentionDays.Load()
+}
+
+// Close 停止后台清理协程；进程退出前调用一次。
 func (manager *Manager) Close() {
 	if manager == nil {
 		return
@@ -396,16 +364,6 @@ func (manager *Manager) Close() {
 	if manager.cleanerStop != nil {
 		close(manager.cleanerStop)
 		<-manager.cleanerDone
-	}
-	manager.indexMu.Lock()
-	defer manager.indexMu.Unlock()
-	if manager.indexWriter != nil {
-		if err := manager.indexWriter.Flush(); err != nil {
-			manager.ioErrors.Add(1)
-		}
-		_ = manager.indexFile.Close()
-		manager.indexWriter = nil
-		manager.indexFile = nil
 	}
 }
 
@@ -465,9 +423,12 @@ func (manager *Manager) Stats() map[string]any {
 		queued += len(recorder.tasks)
 	}
 	manager.mutex.Unlock()
-	var indexBytes int64
-	if info, err := os.Stat(filepath.Join(manager.root, IndexFile)); err == nil {
-		indexBytes = info.Size()
+	var logRows, dbBytes int64
+	if manager.store != nil {
+		if n, err := manager.store.LogCount(context.Background()); err == nil {
+			logRows = n
+		}
+		dbBytes = manager.store.DBBytes()
 	}
 	// bind-failure.json 由 main 侧在 listen 绑定失败时写入；缺失/损坏
 	// 都不透出——面板只需知道「最近一次为什么没绑上」，没有就是没发生过。
@@ -477,44 +438,25 @@ func (manager *Manager) Stats() map[string]any {
 	}
 	policy := manager.Policy()
 	stats := map[string]any{
-		"log_root":            manager.root,
-		"enabled":             manager.enabled.Load(),
-		"active_request_dirs": active,
-		"queued_log_events":   queued,
-		"queue_capacity":      active * writeQueueSize,
-		"dropped_log_events":  manager.droppedTotal.Load(),
-		"io_errors":           manager.ioErrors.Load(),
-		"index_bytes":         indexBytes,
-		"retention_days":      policy.Days,
-		"max_total_mb":        policy.MaxTotalMB,
-		"payload_hours":       policy.PayloadHours,
-		"keep_error_dirs":     policy.KeepErrorDirs,
+		"log_root":               manager.root,
+		"enabled":                manager.enabled.Load(),
+		"active_request_dirs":    active,
+		"queued_log_events":      queued,
+		"queue_capacity":         active * writeQueueSize,
+		"dropped_log_events":     manager.droppedTotal.Load(),
+		"io_errors":              manager.ioErrors.Load(),
+		"log_rows":               logRows,
+		"db_bytes":               dbBytes,
+		"log_row_retention_days": manager.LogRowRetentionDays(),
+		"retention_days":         policy.Days,
+		"max_total_mb":           policy.MaxTotalMB,
+		"payload_hours":          policy.PayloadHours,
+		"keep_error_dirs":        policy.KeepErrorDirs,
 	}
 	if bindFailure != nil {
 		stats["last_bind_failure"] = bindFailure
 	}
 	return stats
-}
-
-// UsageStats 返回 index.jsonl 的聚合快照（今日/窗口累计、按模型、按 key、
-// 错误阶段、小时趋势、延迟分位数）。启动回放完成前调用会阻塞到回放结束，
-// 保证面板看到的口径是完整的而不是部分数据。
-func (manager *Manager) UsageStats() UsageSnapshot {
-	if manager == nil {
-		return UsageSnapshot{}
-	}
-	<-manager.replayDone
-	return manager.usage.snapshot()
-}
-
-// UsageLatency 返回全局延迟分位数摘要——/admin/runtime-metrics 的轮询
-// 只消费这两行；全量聚合视图见 UsageStats。阻塞语义与 UsageStats 一致。
-func (manager *Manager) UsageLatency() map[string]latencyStats {
-	if manager == nil {
-		return nil
-	}
-	<-manager.replayDone
-	return manager.usage.latencySummary()
 }
 
 // Abort 中断指定进行中请求的 ctx；目录不存在或不可中断时返回 false。
@@ -531,10 +473,11 @@ func (manager *Manager) Abort(dir string) bool {
 	return recorder.Abort()
 }
 
-// Start 为一个 HTTP 请求创建按进入秒命名的独立日志目录。
-// 目录名在锁内预订（写入 activeDirs），mkdir 移到锁外：磁盘停滞只拖慢
-// 本请求，不再堵死全部排队请求的目录分配。EEXIST 撞名说明磁盘上有
-// 本进程不知道的遗留目录（同秒重启等），记入 takenNames 后换名重试。
+// Start 为一个 HTTP 请求分配按进入秒命名的调试目录名。
+// 目录名在锁内预订（写入 activeDirs），claim 落库移到锁外：DB 停滞只
+// 拖慢本请求，不再堵死全部排队请求的目录分配。claim 未抢到说明库里
+// 已有同名目录（同秒重启等），记入 takenNames 后换名重试——等价文件
+// 时代 mkdir 的 EEXIST。
 func (manager *Manager) Start(meta RequestMeta) *Recorder {
 	if manager == nil || manager.root == "" || !manager.enabled.Load() {
 		return nil
@@ -558,17 +501,16 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		if _, ok := manager.takenNames[name]; ok {
 			continue
 		}
-		directory := filepath.Join(manager.root, name)
 		recorder := &Recorder{
 			manager:          manager,
-			directory:        directory,
+			dir:              name,
 			startedAt:        now,
 			requestMeta:      meta,
 			tasks:            make(chan writeTask, writeQueueSize),
 			writerDone:       make(chan struct{}),
 			sequences:        make(map[string]int),
 			attachmentByHash: make(map[string]attachmentReference),
-			jsonlFiles:       make(map[string]*jsonlFile),
+			chunkBufs:        make(map[string]*bytes.Buffer),
 			ioErrSeen:        make(map[string]struct{}),
 		}
 		recorder.requestReadyMS.Store(-1)
@@ -578,35 +520,46 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.firstClientMS.Store(-1)
 		manager.activeDirs[name] = recorder
 		manager.mutex.Unlock()
-		err := mkdirRequestDir(directory)
-		if err == nil {
+		claimed, err := manager.claimDir(name)
+		if err == nil && claimed {
 			go recorder.runWriter()
 			// meta.json 作为首个写任务入队：保持「目录一出现就有 meta」的语义，
-			// 同时把同步写盘移出 manager.mutex——目录分配锁不该挡文件 IO。
+			// 同时把同步写库移出 manager.mutex——目录分配锁不该挡 DB IO。
 			recorder.enqueue(func() { recorder.writeMeta(nil) })
 			return recorder
 		}
 		manager.mutex.Lock()
 		delete(manager.activeDirs, name)
-		if os.IsExist(err) {
+		if err == nil {
 			manager.takenNames[name] = struct{}{}
 			continue
 		}
 		manager.mutex.Unlock()
-		// 建目录失败返回 nil = 本请求静默无日志；ioErrors 计数 +
-		// Warn 让「日志为什么没了」可查（磁盘满/权限等）。
+		// 占位失败返回 nil = 本请求静默无日志；ioErrors 计数 +
+		// Warn 让「日志为什么没了」可查（DB 满/锁超时等）。
 		manager.ioErrors.Add(1)
-		slog.Warn("debuglog: create request dir failed", "dir", name, "error", err)
+		slog.Warn("debuglog: claim request dir failed", "dir", name, "error", err)
 		return nil
 	}
 }
 
-// DirectoryPath 返回本请求的日志目录绝对路径；禁用态 recorder 为空串。
-func (recorder *Recorder) DirectoryPath() string {
+// claimDir 把目录名在持久层原子占位：插入空 meta.json 行成功=抢到名。
+// store 为 nil（测试/未接线）时无共享状态可撞，直接视为占位成功——
+// 名分配只剩本进程内存集合一重判定。
+func (manager *Manager) claimDir(name string) (claimed bool, err error) {
+	if manager.store == nil {
+		return true, nil
+	}
+	return manager.store.ClaimDebugFile(context.Background(), name, MetaFile, []byte{})
+}
+
+// Dir 返回本请求的调试目录名（即 X-Request-Id/debug_ref）；
+// 禁用态 recorder 为空串。
+func (recorder *Recorder) Dir() string {
 	if recorder == nil {
 		return ""
 	}
-	return recorder.directory
+	return recorder.dir
 }
 
 // ClientRequestID 返回客户端自带的关联 ID（X-Request-Id/X-Client-Request-Id
@@ -638,16 +591,6 @@ func FromContext(ctx context.Context) *Recorder {
 	return recorder
 }
 
-// mkdirRequestDir 创建请求日志目录；根目录在运行期被删时重建父目录后重试一次。
-// 不预先 MkdirAll——根目录由 NewManager 建好，每请求一次 stat 是无谓开销。
-func mkdirRequestDir(path string) error {
-	err := os.Mkdir(path, 0o700)
-	if errors.Is(err, os.ErrNotExist) && os.MkdirAll(filepath.Dir(path), 0o700) == nil {
-		err = os.Mkdir(path, 0o700)
-	}
-	return err
-}
-
 // enqueue 把一个写任务交给 worker；队列满或已关闭时丢弃并计数。
 // 丢弃计数的归属恰在 closed 置位那刻切分：此前进 recorder.dropped，
 // 由 Complete 收尾时一并折进 droppedTotal；此后直接折进 droppedTotal——
@@ -668,38 +611,47 @@ func (recorder *Recorder) enqueue(task writeTask) {
 }
 
 // runWriter 是单请求写协程：串行执行任务，保证 JSONL 事件序与入队序一致；
-// 队列排空时把缓冲刷盘（进行中的请求目录对面板也应实时可读，不能只等
-// Complete）；tasks 关闭后排空残余任务，统一刷盘并关闭所有 JSONL 文件。
+// 队列排空时把缓冲提交为 chunk 行（进行中的请求对面板也应实时可读，
+// 不能只等 Complete）；tasks 关闭后排空残余任务，统一 flush 收尾。
 func (recorder *Recorder) runWriter() {
 	for task := range recorder.tasks {
 		task()
-		// len(channel) 的竞态无碍：多看一个任务只是少刷一次，
+		// len(channel) 的竞态无碍：多看一个任务只是少提交一次，
 		// 关闭前的统一 flush 仍兜底。
 		if len(recorder.tasks) == 0 {
 			recorder.flushJSONL()
 		}
 	}
-	for _, f := range recorder.jsonlFiles {
-		if err := f.writer.Flush(); err != nil {
-			recorder.noteIOErr("jsonl", err)
-		}
-		_ = f.file.Close()
-	}
-	recorder.jsonlFiles = nil
+	recorder.flushJSONL()
+	recorder.chunkBufs = nil
 	close(recorder.writerDone)
 }
 
-// flushJSONL 把已打开 JSONL 文件的缓冲写落盘；仅写协程调用。
+// flushJSONL 把每个非空 JSONL 缓冲提交为一条 chunk 行；仅写协程调用。
+// 单条 INSERT 是原子的：失败时缓冲保留，下次 flush 整体重发，
+// 不会出现半截批次（区别于 bufio 的「已写部分留不住」）。
 func (recorder *Recorder) flushJSONL() {
-	for _, f := range recorder.jsonlFiles {
-		if err := f.writer.Flush(); err != nil {
-			recorder.noteIOErr("jsonl", err)
+	st := recorder.manager.store
+	if st == nil {
+		for name := range recorder.chunkBufs {
+			delete(recorder.chunkBufs, name)
 		}
+		return
+	}
+	for name, buf := range recorder.chunkBufs {
+		if buf.Len() == 0 {
+			continue
+		}
+		if err := st.AppendDebugChunk(context.Background(), recorder.dir, name, buf.Bytes()); err != nil {
+			recorder.noteIOErr("jsonl", err)
+			continue
+		}
+		buf.Reset()
 	}
 }
 
 // noteIOErr 把本目录一次写失败计入 manager.ioErrors 并告警；同一类别
-// （kind）只记一笔——磁盘满等持续故障若逐帧计数，总量会失真到无法反映
+// （kind）只记一笔——DB 持续故障若逐帧计数，总量会失真到无法反映
 // 影响面。仅在写 worker 与 Complete 收尾（writerDone 关闭后，与其构成
 // happens-after）调用，去重集合无需加锁。
 func (recorder *Recorder) noteIOErr(kind string, err error) {
@@ -708,7 +660,7 @@ func (recorder *Recorder) noteIOErr(kind string, err error) {
 	}
 	recorder.ioErrSeen[kind] = struct{}{}
 	recorder.manager.ioErrors.Add(1)
-	slog.Warn("debuglog: write failed", "dir", filepath.Base(recorder.directory), "kind", kind, "error", err)
+	slog.Warn("debuglog: write failed", "dir", recorder.dir, "kind", kind, "error", err)
 }
 
 // NoteRequestReady 记录请求体解码+投影完成、泵协程即将调 adapter.Stream
@@ -913,7 +865,7 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 }
 
 // upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
-// 一把锁取齐两者——writeMeta 与 appendIndex 都要这对值。
+// 一把锁取齐两者——writeMeta 与 insertLog 都要这对值。
 func (recorder *Recorder) upstreamAttribution() (string, []accountAttempt) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
@@ -966,7 +918,7 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		state = "receiving_upstream"
 	}
 	return ActiveRequest{
-		Dir:             filepath.Base(recorder.directory),
+		Dir:             recorder.dir,
 		Meta:            meta,
 		Model:           model,
 		ResolvedModel:   resolved,
@@ -996,8 +948,8 @@ func evalDeferred(value any) any {
 	return value
 }
 
-// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON 文件。
-// value 可为 func() any 延迟求值（语义见 evalDeferred）。
+// WriteJSON 将一个阶段快照排入队列，由 worker 序列化并写为格式化 JSON
+// 文件（debug_files 行）。value 可为 func() any 延迟求值（语义见 evalDeferred）。
 func (recorder *Recorder) WriteJSON(name string, value any) {
 	if recorder == nil || !validLogName(name, ".json") {
 		return
@@ -1009,10 +961,20 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 			return
 		}
 		data = append(data, '\n')
-		if err := os.WriteFile(filepath.Join(recorder.directory, name), data, 0o600); err != nil {
-			recorder.noteIOErr("file", err)
-		}
+		recorder.putFile(name, data)
 	})
+}
+
+// putFile 覆写一个整文件行（meta/01/02/03 与 error.json 之外的写都走这里）；
+// store 未接线时静默跳过——payload 是观测副本，不反向决定请求成败。
+func (recorder *Recorder) putFile(name string, data []byte) {
+	st := recorder.manager.store
+	if st == nil {
+		return
+	}
+	if err := st.PutDebugFile(context.Background(), recorder.dir, name, data); err != nil {
+		recorder.noteIOErr("file", err)
+	}
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -1055,7 +1017,8 @@ func (recorder *Recorder) AppendValueJSONL(name string, value any) {
 
 // WriteError 写入请求失败的阶段和错误摘要；只保留首个错误。
 // stage/message 在调用时同步抢占（first-write-wins）——调用方紧接着
-// 就能经 FirstError 读到归原点；error.json 落盘仍在写 worker 内去重。
+// 就能经 FirstError 读到归原点；error.json 落库仍在写 worker 内去重，
+// 并经 INSERT OR IGNORE 在 DB 层再兜一次 first-write-wins。
 func (recorder *Recorder) WriteError(stage string, err error) {
 	if recorder == nil || err == nil {
 		return
@@ -1066,7 +1029,7 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 			return
 		}
 		recorder.errorWritten = true
-		// 写盘内容取同步抢占的胜出版本：与 index error_stage/
+		// 落库内容取同步抢占的胜出版本：与 index error_stage/
 		// error_message 逐字节一致，不随任务入队顺序漂移。
 		recorded := recorder.firstError.Load()
 		value := recorder.sanitize(map[string]any{
@@ -1078,7 +1041,11 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		if marshalErr != nil {
 			return
 		}
-		if err := os.WriteFile(filepath.Join(recorder.directory, ErrorFile), append(data, '\n'), 0o600); err != nil {
+		st := recorder.manager.store
+		if st == nil {
+			return
+		}
+		if err := st.PutDebugFileIfAbsent(context.Background(), recorder.dir, ErrorFile, append(data, '\n')); err != nil {
 			recorder.noteIOErr("file", err)
 		}
 	})
@@ -1107,8 +1074,8 @@ func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
 }
 
 // Complete 关闭写队列、等待残余任务排空，然后写终态 meta.json、
-// 追加全局索引行并释放目录的清理保护。幂等：二次调用直接返回——
-// 否则 writeMeta 与 index 行会重复落一份。
+// 向 logs 表插入请求行并释放目录的清理保护。幂等：二次调用直接
+// 返回——否则 writeMeta 与日志行会重复落一份。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
@@ -1131,37 +1098,20 @@ func (recorder *Recorder) Complete(completion Completion) {
 	}
 	<-recorder.writerDone
 	recorder.writeMeta(&completion)
-	recorder.manager.appendIndex(recorder, &completion)
-	recorder.manager.releaseDir(recorder.directory)
+	recorder.manager.insertLog(recorder, &completion)
+	recorder.manager.releaseDir(recorder.dir)
 }
 
-// appendJSONL 把一行已序列化记录写进指定 JSONL 文件的缓冲；仅写 worker 调用。
+// appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲；
+// 缓冲在队列排空时作为一条 chunk 行入库。仅写 worker 调用。
 func (recorder *Recorder) appendJSONL(name string, data []byte) {
-	jf, err := recorder.getJSONLFile(name)
-	if err != nil {
-		recorder.noteIOErr("jsonl", err)
-		return
+	buf := recorder.chunkBufs[name]
+	if buf == nil {
+		buf = &bytes.Buffer{}
+		recorder.chunkBufs[name] = buf
 	}
-	if _, err := jf.writer.Write(data); err != nil {
-		recorder.noteIOErr("jsonl", err)
-	}
-	if err := jf.writer.WriteByte('\n'); err != nil {
-		recorder.noteIOErr("jsonl", err)
-	}
-}
-
-// getJSONLFile 返回指定 JSONL 文件的缓冲写句柄，按需惰性打开；仅写 worker 调用。
-func (recorder *Recorder) getJSONLFile(name string) (*jsonlFile, error) {
-	if f, ok := recorder.jsonlFiles[name]; ok {
-		return f, nil
-	}
-	file, err := os.OpenFile(filepath.Join(recorder.directory, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	f := &jsonlFile{file: file, writer: bufio.NewWriter(file)}
-	recorder.jsonlFiles[name] = f
-	return f, nil
+	buf.Write(data)
+	buf.WriteByte('\n')
 }
 
 // writeMeta 写 meta.json：创建时（completion 为 nil）落进入时刻与客户端
@@ -1287,9 +1237,7 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err == nil {
-		if err := os.WriteFile(filepath.Join(recorder.directory, MetaFile), append(data, '\n'), 0o600); err != nil {
-			recorder.noteIOErr("file", err)
-		}
+		recorder.putFile(MetaFile, append(data, '\n'))
 	}
 }
 

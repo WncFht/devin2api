@@ -7,7 +7,7 @@
     window.currentTrendChartType = 'line'; // 默认使用折线图，可切换为柱状图
     window.currentModel = ''; // 当前选中的模型（空字符串表示全部模型）
     window.currentAuthToken = ''; // 当前选中的令牌（空字符串表示全部令牌）
-    window.currentAPI = ''; // 当前选中的入口端点（index.jsonl api 原值）
+    window.currentAPI = ''; // 当前选中的入口端点（logs 表 api 原值）
     let currentTrendCustomTimeRange = null;
     window.chartInstance = null;
     window.visibleModels = new Set(); // 可见模型序列集合

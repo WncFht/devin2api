@@ -1,4 +1,4 @@
-// 配额页：GET /admin/quota（quota.jsonl 采样曲线 + 燃烧速率预测）与
+// 配额页：GET /admin/quota（quota_samples 采样曲线 + 燃烧速率预测）与
 // GET /admin/status（账户/plan/容量/IDE/模型状态/供应商六路聚合）。
 // 两源独立加载，任一失败只影响对应区块；全部上游字段经 escapeHtml 渲染。
 // 呈现对齐旧面板配额页：KPI 卡（label+大值+预测副行）、kv 字段行、

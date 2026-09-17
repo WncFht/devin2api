@@ -214,7 +214,7 @@ func TestPoolInStreamFailover(t *testing.T) {
 		Config{Name: "good", BaseURL: srvGood.URL, Model: "stub-model", Token: "tok-good"},
 	)
 
-	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
 	t.Cleanup(manager.Close)
 	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
 	ctx := debuglog.WithRecorder(context.Background(), recorder)

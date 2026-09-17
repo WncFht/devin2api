@@ -2,13 +2,11 @@
 //
 // 这是一份跨包契约：app/adapter 是写入侧，cleaner/dashboard/protocensus
 // 是读取侧，两处各自拼写字面量会随演进静默对不上（清理漏剥、面板读空）。
+// 入库后这些「文件名」是 debug_files/debug_chunks 行的 name 键，形状不变。
 package debuglog
 
 import (
 	"fmt"
-	"os"
-	"sort"
-	"strings"
 )
 
 const (
@@ -31,8 +29,6 @@ const (
 	MetaFile = "meta.json"
 	// ErrorFile 记录首个失败点；容量淘汰按它识别失败目录。
 	ErrorFile = "error.json"
-	// IndexFile 是跨请求索引（每完成请求追加一行摘要）。
-	IndexFile = "index.jsonl"
 	// StderrFile 是进程 stderr 日志（slog 行），部署脚本负责重定向写入。
 	StderrFile = "stderr.log"
 	// BindFailureFile 记录最近一次 listen 绑定失败（reuseport 交接争抢等），
@@ -98,22 +94,3 @@ func StageDevinRequestAttempt(attempt int) string {
 // 词干才不覆盖 chat 请求记录；共享 devinRequestStageStem 前缀让
 // payload 剥离与 DevinRequestStages 枚举自动覆盖这些文件。
 const StageDevinSearchStem = devinRequestStageStem + ".search"
-
-// DevinRequestStages 列出请求目录内全部上游 wire 请求文件——首个请求加
-// attemptN 重试分片，按文件名字典序返回（主文件在前）。census 类消费者
-// 经它枚举，重试写进上游的 wire 形态才不会逃出覆盖统计。
-func DevinRequestStages(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() && strings.HasPrefix(name, devinRequestStageStem) && strings.HasSuffix(name, ".json") {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	return names, nil
-}

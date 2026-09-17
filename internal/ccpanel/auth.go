@@ -16,7 +16,7 @@ type webIdentity struct {
 	Role string
 	// TokenID 是 api_token 身份的令牌 id；admin 为 0。
 	TokenID int64
-	// KeyHash 是令牌对应 index.jsonl 的 key_hash（哈希前 16 hex），
+	// KeyHash 是令牌对应 logs 表的 key_hash（哈希前 16 hex），
 	// 用于把 /dashboard 查询强制收敛到该令牌的数据。
 	KeyHash string
 }

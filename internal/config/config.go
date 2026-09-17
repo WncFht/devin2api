@@ -49,8 +49,8 @@ type DevinAccountConfig struct {
 	CredentialsFile string `yaml:"credentials_file"`
 }
 
-// devinAccountNamePattern 约束账号名字符集：名字要进 gate-state-<name>.json
-// 文件名与日志字段，限定字母数字连字符下划线。
+// devinAccountNamePattern 约束账号名字符集：名字要进闸门状态键
+// gate:<name> 与日志字段，限定字母数字连字符下划线。
 var devinAccountNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
 // DefaultAccountName 是隐式单 lane（devin.token 单号形态）的账号名：
@@ -158,20 +158,20 @@ type DevinConfig struct {
 
 // DebugConfig 保存请求级调试日志配置。
 type DebugConfig struct {
-	// Enabled 表示是否在配置文件同目录的 logs 下写入请求调试日志。
+	// Enabled 表示是否写入请求调试记录（debug_files/debug_chunks 表）。
 	Enabled bool `yaml:"enabled"`
-	// RetentionDays 是请求日志目录的保留天数；<=0 不按时间清理。默认 14。
+	// RetentionDays 是按 dir 归组的调试记录保留天数；<=0 不按时间清理。默认 14。
 	RetentionDays *int `yaml:"retention_days"`
-	// MaxTotalMB 是 logs 目录总量上限（MB），超限从最旧目录开始删；
+	// MaxTotalMB 是调试 payload 总量上限（MB），超限从最旧 dir 开始删；
 	// <=0 不按大小清理。默认 1024。
 	MaxTotalMB *int64 `yaml:"max_total_mb"`
-	// PayloadHours 是大体积阶段文件（03/04/06 与 attachments/）的保留小时数，
-	// 超时后剥离负载、保留证据文件；<=0 不剥离。默认 24。
+	// PayloadHours 是大体积阶段记录（03/04/06 与 attachments/）的保留小时数，
+	// 超时后剥离负载、保留证据记录；<=0 不剥离。默认 24。
 	PayloadHours *int `yaml:"payload_hours"`
-	// KeepErrorDirs 是容量淘汰时受保护的最新失败目录数；<=0 不保护。默认 32。
+	// KeepErrorDirs 是容量淘汰时受保护的最新失败 dir 数；<=0 不保护。默认 32。
 	KeepErrorDirs *int `yaml:"keep_error_dirs"`
-	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 logs/quota.jsonl；
-	// <=0 不采样。默认 5。
+	// QuotaIntervalMinutes 是配额快照采样间隔（分钟），写入 quota_samples
+	// 表；<=0 不采样。默认 5。
 	QuotaIntervalMinutes *int `yaml:"quota_interval_minutes"`
 	// PprofListen 是 pprof/fgprof 剖析端点的独立监听地址（如
 	// "127.0.0.1:6060"）；空值不启用。端点无鉴权——应只绑回环地址，
@@ -406,7 +406,7 @@ func ResolveConfigPath(flagPath string) (string, error) {
 	return DefaultConfigPath()
 }
 
-// ResolveStateDir 按优先级解析状态根目录（logs/、gate-state.json 等运行期
+// ResolveStateDir 按优先级解析状态根目录（devin-2api.db、logs/ 等运行期
 // 产物的归属）：-state-dir flag → DEVIN2API_STATE_DIR → DefaultStateDir。
 func ResolveStateDir(flagDir string) (string, error) {
 	if flagDir != "" {

@@ -84,7 +84,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 ## 7. 其它设施
 
-- **Issue 模板** `.github/ISSUE_TEMPLATE/bug_report.yml`：要 `X-Request-Id`/`debug_ref`（logs 调试目录名）、`meta.json`/`error.json`、版本、平台——与服务排障工作流（AGENTS.md「服务排障」节）对应。
+- **Issue 模板** `.github/ISSUE_TEMPLATE/bug_report.yml`：要 `X-Request-Id`/`debug_ref`（调试身份 dir 名）、`meta.json`/`error.json`、版本、平台——与服务排障工作流（AGENTS.md「服务排障」节）对应。
 - **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有 12 个：`codebase-design`、`diagnosing-bugs`、`extract-embedded-protos`、`fix-it-never-work-around-it`、`go-comment-conventions`、`golang-pro`、`improve-codebase-architecture`、`llm-core-types`、`observability-first-debugging`、`orchestrating-agents`、`protocol-drift`、`release-runbook`。
 - **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、`docs/`（活文档目录，索引 `docs/README.md`：上游协议逆向、排障手册、客户端接入、配额计费、部署、本文档）。`notes/` 是本机私有工作区（gitignore），只放 `archive/` 日期快照。
 
@@ -95,7 +95,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 | 脚本                              | 干什么                                                                                                                                                                                                               |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033，key 自动读 config.yaml），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步                       |
-| `index-stream-stats.py`           | join 请求目录与 index.jsonl 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--logs-dir` 默认按平台探测                                                                    |
+| `index-stream-stats.py`           | join `logs` 表与调试 payload 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--logs-dir` 默认按平台探测                                                                   |
 | `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                      |
 | `drift-corpus-scan.py`            | 扫 logs 语料统计各协议的漂移形状分布（`--logs-dir`）                                                                                                                                                                 |
 | `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                |

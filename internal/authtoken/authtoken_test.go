@@ -3,17 +3,33 @@
 package authtoken
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-func newStore(t *testing.T) *Store {
+// openDB 开一个临时 sqlite 库。令牌仓的「重启」用同一个 *store.Store
+// 再跑 New 即可——瞬态字段（rpm 计数/inflight）不持久化，重新水合
+// 与重开文件等价。
+func openDB(t *testing.T) *store.Store {
 	t.Helper()
-	store, err := New(t.TempDir())
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return store
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+func newStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := New(openDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // TestAnchoredWindowsChargeAndRollover 验证 5h/weekly 锚定滚动窗口：
@@ -106,8 +122,8 @@ func TestCostLimitStateNames5hAndWeekly(t *testing.T) {
 // （重启后亦同——按哈希命中原行），行被删后重启再 Ensure 重新播种。
 // 已存在但被停用的行原样返回，不被复活。
 func TestEnsureIdempotentAcrossRestart(t *testing.T) {
-	dir := t.TempDir()
-	store, err := New(dir)
+	st := openDB(t)
+	store, err := New(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +142,8 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", n)
 	}
 
-	// 重启（重新加载文件）后 Ensure 仍命中原行。
-	reopened, err := New(dir)
+	// 重启（从表重新水合）后 Ensure 仍命中原行。
+	reopened, err := New(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +166,7 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 	if err := reopened.Delete(firstID); err != nil {
 		t.Fatal(err)
 	}
-	reseeded, err := New(dir)
+	reseeded, err := New(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +182,8 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 // TestAllowRPMLimitsAndRollsBucket 验证 MaxRPM 固定分钟桶：桶内计数到顶
 // 拒绝；桶翻页（含重启后内存计数归零）恢复放行。
 func TestAllowRPMLimitsAndRollsBucket(t *testing.T) {
-	dir := t.TempDir()
-	store, err := New(dir)
+	st := openDB(t)
+	store, err := New(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,8 +207,8 @@ func TestAllowRPMLimitsAndRollsBucket(t *testing.T) {
 		t.Fatalf("post-rollover AllowRPM = (%d, _, %v), want fresh count", used, ok)
 	}
 
-	// 重启归零：rpm 计数不持久化，重载的仓从 0 计。
-	reopened, err := New(dir)
+	// 重启归零：rpm 计数不持久化，重新水合的仓从 0 计。
+	reopened, err := New(st)
 	if err != nil {
 		t.Fatal(err)
 	}

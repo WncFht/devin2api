@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/authtoken"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // TestLoginFailureSweep 验证失败路径会清扫已失效的爆破条目——纯爆破
@@ -81,11 +83,16 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	newStore := func(t *testing.T) *authtoken.Store {
 		t.Helper()
-		store, err := authtoken.New(t.TempDir())
+		db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return store
+		t.Cleanup(func() { _ = db.Close() })
+		s, err := authtoken.New(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
 	probe := func(h *Handler, bearer string) (int, string) {
 		var role string

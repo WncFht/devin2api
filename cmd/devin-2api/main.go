@@ -33,6 +33,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // version 由构建期 -ldflags "-X main.version=$(git describe --tags --always --dirty)"
@@ -105,6 +106,7 @@ func main() {
 	configPath := flag.String("config", "", "YAML 配置文件路径；缺省按 $DEVIN2API_CONFIG → ./config.yaml → 平台默认目录解析")
 	stateDir := flag.String("state-dir", "", "日志与状态文件根目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
+	exportLegacyDir := flag.String("export-legacy", "", "把 <dir>/devin-2api.db 逐表导出为文件时代状态文件（logs/index.jsonl、auth_tokens.json、models.json、panel-settings.json、quota.jsonl、gate-state*.json）后退出；回滚文件版二进制或 DB 取证时用，不起服务")
 	flag.Parse()
 	resolved := resolvedVersion()
 	if *showVersion {
@@ -113,6 +115,14 @@ func main() {
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if *exportLegacyDir != "" {
+		if err := runExportLegacy(*exportLegacyDir); err != nil {
+			slog.Error("export legacy state failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	resolvedConfigPath, err := config.ResolveConfigPath(*configPath)
 	if err != nil {
@@ -134,9 +144,10 @@ func main() {
 		slog.Error("resolve state dir failed", "error", err)
 		os.Exit(1)
 	}
-	// logRoot 是所有运行期产物（请求 debug 目录、index.jsonl、quota.jsonl、
-	// gate-state.json、stdout/stderr.log）的统一归属，独立于配置文件位置——
-	// 配置是用户输入，状态目录是程序输出，按平台规范分家。
+	// logRoot 是 logs/ 运行期产物（stdout/stderr.log、bind-failure.json
+	// 等）的统一归属，独立于配置文件位置——配置是用户输入，状态目录是
+	// 程序输出，按平台规范分家。请求摘要行、调试 payload、配额样本与
+	// 闸门闩态已入库（devin-2api.db 落状态根，稍后打开）。
 	logRoot := filepath.Join(absoluteStateDir, "logs")
 	if err := os.MkdirAll(logRoot, 0o755); err != nil {
 		slog.Error("create state dir failed", "dir", logRoot, "error", err)
@@ -170,13 +181,27 @@ func main() {
 	applyPprofListen(serviceConfig.Debug.PprofListen)
 	defer func() { applyPprofListen("") }()
 
+	// SQLite 持久层在 adapter 之前打开：号池 lane 的闸门状态与配额
+	// 采样要读它（D6 消费方），导入器也得在文件被新写路径触碰前
+	// 跑完。listen 已先行，导入期间的连接由内核 backlog 兜住。
+	dbStore, err := store.Open(filepath.Join(absoluteStateDir, "devin-2api.db"))
+	if err != nil {
+		slog.Error("open store failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = dbStore.Close() }()
+	if err := dbStore.ImportLegacy(context.Background(), absoluteStateDir, logRoot); err != nil {
+		slog.Error("import legacy state failed", "error", err)
+		os.Exit(1)
+	}
+
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
 	// 空 token 起不来的话「先起服务后配凭据」没有任何热补入口。
 	// devinPool 保留具体类型引用：配置热重载（ApplyConfigs）、闸门状态
 	// （GateStats）、别名校验（Aliases）与逐账号凭据源（TokenFuncs）
 	// 都挂在它上面；单号部署是 N=1 的退化形态，不走分支。
-	devinPool, err := devin.NewPool(devinConfigsFrom(serviceConfig, absoluteConfigPath, logRoot))
+	devinPool, err := devin.NewPool(devinConfigsFrom(serviceConfig, absoluteConfigPath, dbStore))
 	if err != nil {
 		slog.Error("create devin adapter failed", "error", err)
 		os.Exit(1)
@@ -193,26 +218,33 @@ func main() {
 		MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
 		PayloadHours:  *serviceConfig.Debug.PayloadHours,
 		KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
-	})
+	}, dbStore)
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
-	application := app.New(devinPool, serviceConfig.Server, debugManager)
-	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
-	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
-	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
-	// 异步回放：回放数千条会拖慢 listen 之后的首次应答，SeedTrend 有锁。
-	// 50000 只是「尽可能多」的软上限——实际深度受 ListRequests 的
-	// indexTailBytes（4MB 尾部）约束，正常流量下也远超 60 分钟窗口所需。
-	go func() {
-		for _, e := range debugManager.ListRequests(50000, debuglog.RequestFilter{}).Entries {
-			started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
-			if err != nil {
-				continue
+	// 遗留磁盘请求目录的后台导入：逐目录事务搬进 debug 两表后删目录，
+	// 断点记在 runtime_state，崩溃重启续传。异步跑——大目录导入不该
+	// 拖住就绪；导入途中同秒新目录的 claim 由 DB 占位与 takenNames 兜底。
+	// reuseport 交接进程（DEVIN2API_HANDOFF）不跑：它只是接住端口的
+	// 短命分身，与托管实例并发导入会在同一目录的 UNIQUE 上互相打断。
+	if os.Getenv("DEVIN2API_HANDOFF") == "" {
+		go func() {
+			if err := dbStore.ImportDebugDirs(context.Background(), logRoot, "import_debug_progress"); err != nil {
+				slog.Warn("import legacy debug dirs failed", "error", err)
 			}
-			application.Metrics().SeedTrend(started.Add(time.Duration(e.DurationMS)*time.Millisecond),
-				e.StatusCode >= 400 || (e.Result != "" && e.Result != "completed"))
+		}()
+	}
+	application := app.New(devinPool, serviceConfig.Server, debugManager)
+	// 用 logs 表回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
+	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，
+	// 与 Finish 实时路径一致；管线前 Reject 不进表，这部分计数不回放。
+	// 50000 是上限；LogTrendSeeds 本身只取最近 60 分钟完成的行。
+	if seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000); err == nil {
+		for _, seed := range seeds {
+			application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
 		}
-	}()
+	} else {
+		slog.Warn("seed trend buckets failed", "error", err)
+	}
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
@@ -232,12 +264,14 @@ func main() {
 	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
 	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
+	// 持久层须在 SetQuotaInterval 前注入：采样协程起跑时快照读它。
+	ccPanel.SetStore(dbStore)
 	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
-	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对被登记键
+	// 运行时设置键仓：覆盖项落 settings 表；覆盖项对被登记键
 	// 恒赢 config.yaml。构造须在 app/panel 装配与 SetQuotaInterval 之后——
 	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
 	// 先建仓再重放，让面板改的值在启动时就生效。
-	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, ccpanel.SettingsDeps{
+	settingsStore, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 		Debug:       debugManager,
 		DevinConfig: devinPool.CurrentConfig,
 		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
@@ -268,12 +302,12 @@ func main() {
 	if err := settingsStore.ApplyAll(); err != nil {
 		slog.Warn("panel settings replay failed", "error", err)
 	}
-	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
+	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
 	// input 价，与 ccpanel cellCost 同口径）。建仓先于 SetConfigOps——
 	// reload 闭包要捕获它给 auth.api_key 补种。
-	tokenStore, err := authtoken.New(absoluteStateDir)
+	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		slog.Error("load auth tokens failed", "error", err)
 		os.Exit(1)
@@ -291,15 +325,15 @@ func main() {
 	seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*ccpanel.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinPool, application, ccPanel, debugManager, settingsStore, tokenStore)
+			return reloadRuntimeConfig(absoluteConfigPath, dbStore, devinPool, application, ccPanel, debugManager, settingsStore, tokenStore)
 		},
 		Current: func() map[string]any {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
-	// 模型注册表：models.json 落状态目录根；/v1 准入（停用/重定向）与
+	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
-	modelStore, err := modelreg.New(absoluteStateDir)
+	modelStore, err := modelreg.New(dbStore)
 	if err != nil {
 		slog.Error("load model registry failed", "error", err)
 		os.Exit(1)
@@ -331,14 +365,50 @@ func main() {
 	}
 }
 
+// runExportLegacy 实现 -export-legacy：打开 <dir>/devin-2api.db，把各表
+// 写回文件时代布局后返回，不起服务。DB 缺席直接报错——store.Open 会顺带
+// 建空库，静默导出一套空文件比报错更危险（看着像「状态本来就空」）。
+// 导出过程对每个源独立结算：部分失败时已写出的文件仍然有效，错误汇总
+// 由调用方反映到退出码。
+func runExportLegacy(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	dbPath := filepath.Join(abs, "devin-2api.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("state db %s: %w", dbPath, err)
+	}
+	dbStore, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dbStore.Close() }()
+	logRoot := filepath.Join(abs, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		return err
+	}
+	rep, err := dbStore.ExportLegacy(context.Background(), abs, logRoot)
+	for _, p := range rep.Written {
+		slog.Info("exported", "file", p)
+	}
+	for _, note := range rep.Notices {
+		slog.Warn("export diverted", "detail", note)
+	}
+	if rep.DebugRows > 0 {
+		slog.Warn("debug payload left in db", "rows", rep.DebugRows,
+			"detail", "debug_files/debug_chunks are not exported; request dirs will not be restored")
+	}
+	return err
+}
+
 // devinConfigsFrom 把启动配置映射为每 lane 一份的 Devin adapter 配置：
-// 端点/指纹/闸门/保温是全局字段各 lane 共享，Name/Token/TokenSource/
-// GateStatePath 按账号各自落地。启动与配置热重载共用同一映射，保证
+// 端点/指纹/闸门/保温是全局字段各 lane 共享，Name/Token/TokenSource
+// 按账号各自落地，闸门状态存储各 lane 共用同一库（键按 lane 名派生
+// gate:<name>，隐式单 lane 即 gate:default——与导入器对存量
+// gate-state*.json 的命名一致）。启动与配置热重载共用同一映射，保证
 // ApplyConfigs 看到的字段口径与 NewPool 一致。
-// logRoot 决定 gate-state 文件的落点：accounts 模式每号一份
-// gate-state-<name>.json，隐式单 lane 沿用 gate-state.json（存量闩
-// 状态连续恢复）。
-func devinConfigsFrom(serviceConfig config.Config, configPath, logRoot string) []devin.Config {
+func devinConfigsFrom(serviceConfig config.Config, configPath string, gateStore *store.Store) []devin.Config {
 	base := devin.Config{
 		BaseURL:       serviceConfig.Devin.BaseURL,
 		Model:         serviceConfig.Devin.Model,
@@ -375,7 +445,7 @@ func devinConfigsFrom(serviceConfig config.Config, configPath, logRoot string) [
 		lane := base
 		lane.Name = config.DefaultAccountName
 		lane.Token = serviceConfig.Devin.Token
-		lane.GateStatePath = filepath.Join(logRoot, "gate-state.json")
+		lane.GateStateStore = gateStore
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
 		lane.TokenSource = func() string {
@@ -392,7 +462,7 @@ func devinConfigsFrom(serviceConfig config.Config, configPath, logRoot string) [
 		lane := base
 		lane.Name = account.Name
 		lane.Token = account.Token
-		lane.GateStatePath = filepath.Join(logRoot, "gate-state-"+account.Name+".json")
+		lane.GateStateStore = gateStore
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
 			// 即跟随续期——fht-mba 的 B 号正是这个形态。
@@ -461,7 +531,7 @@ func seedConfigAPIKey(tokens *authtoken.Store, apiKey string) {
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(configPath, logRoot string, devinPool *devin.Pool, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath string, dbStore *store.Store, devinPool *devin.Pool, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -476,7 +546,7 @@ func reloadRuntimeConfig(configPath, logRoot string, devinPool *devin.Pool, appl
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	devinCfgs := devinConfigsFrom(cfg, configPath, logRoot)
+	devinCfgs := devinConfigsFrom(cfg, configPath, dbStore)
 	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
 	// 而本函数只能经 panel 端点触达。
 	pcfg := runtimeConfigPtr.Load().cfg
@@ -540,7 +610,7 @@ func reloadRuntimeConfig(configPath, logRoot string, devinPool *devin.Pool, appl
 	}
 	// 面板覆盖项恒赢 config.yaml：先把各键的「文件值」默认快照重灌成
 	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
-	// panel-settings.json 里登记的覆盖键压回文件值。
+	// settings 表里登记的覆盖键压回文件值。
 	settings.ResampleDefaults(ccpanel.SettingDefaults{
 		Devin:          devinCfgs[0],
 		MaxConcurrency: cfg.Server.MaxConcurrency,

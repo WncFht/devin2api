@@ -2,15 +2,15 @@
 package ccpanel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 func f64(v float64) *float64 { return &v }
@@ -18,14 +18,14 @@ func f64(v float64) *float64 { return &v }
 // TestForecastBurnRate 验证线性差分得到的燃烧速率与耗尽时刻。
 func TestForecastBurnRate(t *testing.T) {
 	now := time.Now().Unix()
-	points := []quotaPoint{
+	points := []*store.QuotaSample{
 		{At: now - 7200, DailyRemaining: f64(80), DailyResetAt: now + 100000},
 		{At: now - 3600, DailyRemaining: f64(70)},
 		{At: now, DailyRemaining: f64(60), DailyResetAt: now + 100000},
 	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
-		func(p quotaPoint) int64 { return p.DailyResetAt })
+		func(p *store.QuotaSample) float64 { return floatOr0(p.DailyRemaining) },
+		func(p *store.QuotaSample) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")
 	}
@@ -47,13 +47,13 @@ func TestForecastBurnRate(t *testing.T) {
 // TestForecastSurvivesUntilReset 验证外推耗尽越过重置点时报 survives_until_reset。
 func TestForecastSurvivesUntilReset(t *testing.T) {
 	now := time.Now().Unix()
-	points := []quotaPoint{
+	points := []*store.QuotaSample{
 		{At: now - 3600, DailyRemaining: f64(91), DailyResetAt: now + 36000},
 		{At: now, DailyRemaining: f64(90), DailyResetAt: now + 36000},
 	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
-		func(p quotaPoint) int64 { return p.DailyResetAt })
+		func(p *store.QuotaSample) float64 { return floatOr0(p.DailyRemaining) },
+		func(p *store.QuotaSample) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")
 	}
@@ -72,49 +72,41 @@ func TestForecastSurvivesUntilReset(t *testing.T) {
 
 // TestForecastTooFewPoints 验证样本不足时不产生预测。
 func TestForecastTooFewPoints(t *testing.T) {
-	if got := forecast(nil, time.Hour, func(p quotaPoint) float64 { return 0 }, func(p quotaPoint) int64 { return 0 }); got != nil {
+	if got := forecast(nil, time.Hour, func(p *store.QuotaSample) float64 { return 0 }, func(p *store.QuotaSample) int64 { return 0 }); got != nil {
 		t.Fatalf("forecast = %+v, want nil", got)
 	}
-	if got := forecast([]quotaPoint{{At: 1}}, time.Hour, func(p quotaPoint) float64 { return 0 }, func(p quotaPoint) int64 { return 0 }); got != nil {
+	if got := forecast([]*store.QuotaSample{{At: 1}}, time.Hour, func(p *store.QuotaSample) float64 { return 0 }, func(p *store.QuotaSample) int64 { return 0 }); got != nil {
 		t.Fatalf("forecast = %+v, want nil", got)
 	}
 }
 
-// TestQuotaFileRoundTrip 验证采样写盘与历史读取的往返。
-func TestQuotaFileRoundTrip(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	if err := os.MkdirAll(root, 0o700); err != nil {
+// TestQuotaStoreRoundTrip 验证采样入库与历史读取的往返，含
+// 「上游没报」字段的 NULL↔nil 保持。
+func TestQuotaStoreRoundTrip(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, quotaFileName)
+	defer func() { _ = st.Close() }()
 	for i, remaining := range []float64{90, 85, 80} {
-		point := quotaPoint{At: 1700000000 + int64(i*600), DailyRemaining: f64(remaining)}
-		data, _ := json.Marshal(point)
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
+		point := &store.QuotaSample{At: 1700000000 + int64(i*600), DailyRemaining: f64(remaining)}
+		if err := st.InsertQuotaSample(context.Background(), point); err != nil {
 			t.Fatal(err)
 		}
-		_, _ = f.Write(append(data, '\n'))
-		_ = f.Close()
 	}
 
-	h := &Handler{debug: debuglog.NewManager(root, debuglog.RetentionPolicy{})}
-	defer h.debug.Close()
-	points := h.readQuotaHistory()
+	h := &Handler{store: st}
+	points := h.readQuotaHistory(context.Background())
 	if len(points) != 3 || floatOr0(points[2].DailyRemaining) != 80 {
 		t.Fatalf("points = %+v", points)
 	}
 	// 未上报的字段保持 nil 往返——指针字段就是为了区分「没报」与「报到 0%」。
-	var bare quotaPoint
-	if err := json.Unmarshal([]byte(`{"at":1}`), &bare); err != nil {
-		t.Fatal(err)
-	}
-	if bare.DailyRemaining != nil {
-		t.Fatalf("DailyRemaining = %v, want nil for unreported field", *bare.DailyRemaining)
+	if points[0].WeeklyRemaining != nil {
+		t.Fatalf("WeeklyRemaining = %v, want nil for unreported field", *points[0].WeeklyRemaining)
 	}
 	got := forecast(points, 24*time.Hour,
-		func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) },
-		func(p quotaPoint) int64 { return p.DailyResetAt })
+		func(p *store.QuotaSample) float64 { return floatOr0(p.DailyRemaining) },
+		func(p *store.QuotaSample) int64 { return p.DailyResetAt })
 	if got == nil {
 		t.Fatal("forecast = nil")
 	}
@@ -124,32 +116,32 @@ func TestQuotaFileRoundTrip(t *testing.T) {
 	}
 }
 
-// TestQuotaPointGraceAndTopUpFields 验证宽限/加额字段的快照形态：
-// grace_period_end 以 unix 秒落盘，缺省字段经 omitempty 不进 JSON。
-func TestQuotaPointGraceAndTopUpFields(t *testing.T) {
+// TestQuotaSampleGraceAndTopUpFields 验证宽限/加额字段的快照形态：
+// grace_period_end 以 unix 秒落库，缺省字段经 omitempty 不进 JSON。
+func TestQuotaSampleGraceAndTopUpFields(t *testing.T) {
 	end := time.Date(2026, 9, 20, 16, 0, 0, 0, time.UTC)
-	point := quotaPoint{
-		At:                end.Unix() - 3600,
-		GracePeriodStatus: "ACTIVE",
-		GracePeriodEnd:    rfc3339Unix(end.Format(time.RFC3339)),
-		OrphanedUsageCut:  true,
-		TopUpEnabled:      true,
-		TopUpStatus:       "SUCCEEDED",
+	point := &store.QuotaSample{
+		At:                        end.Unix() - 3600,
+		GracePeriodStatus:         "ACTIVE",
+		GracePeriodEnd:            rfc3339Unix(end.Format(time.RFC3339)),
+		WasReducedByOrphanedUsage: true,
+		TopUpEnabled:              true,
+		TopUpTransactionStatus:    "SUCCEEDED",
 	}
 	data, err := json.Marshal(point)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var back quotaPoint
+	var back store.QuotaSample
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatal(err)
 	}
 	if back.GracePeriodStatus != "ACTIVE" || back.GracePeriodEnd != end.Unix() ||
-		!back.OrphanedUsageCut || !back.TopUpEnabled || back.TopUpStatus != "SUCCEEDED" {
+		!back.WasReducedByOrphanedUsage || !back.TopUpEnabled || back.TopUpTransactionStatus != "SUCCEEDED" {
 		t.Fatalf("round trip = %+v", back)
 	}
 	// 空值不序列化：宽限字段在大多数快照里缺席，不能让 0/false 刷存在感。
-	var bare quotaPoint
+	var bare store.QuotaSample
 	if err := json.Unmarshal([]byte(`{"at":1}`), &bare); err != nil {
 		t.Fatal(err)
 	}

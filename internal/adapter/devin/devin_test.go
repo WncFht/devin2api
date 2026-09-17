@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // fakeDevinResponseReceiver 为 responseStream 测试提供确定顺序的 protobuf 帧。
@@ -963,8 +963,13 @@ func TestMapStopReason(t *testing.T) {
 
 // TestRecordProtoJSONRedactsMetadata 的测试动机是确保 Devin 原始请求可诊断但不会写出 token 和设备指纹。
 func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "logs")
-	recorder := debuglog.NewManager(root, debuglog.RetentionPolicy{}).Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, st)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
 	request := &devinproto.GetChatMessageRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{ApiKey: proto.String("secret-token"), F: proto.String("fingerprint")},
 		Prompt:   proto.String("hello"),
@@ -973,19 +978,14 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	recordProtoJSON(recorder, "04-devin-response.jsonl", &devinproto.GetChatMessageResponse{DeltaText: proto.String("world")})
 	recorder.Complete(debuglog.Completion{})
 
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	directory := filepath.Join(root, entries[0].Name())
-	requestLog, err := os.ReadFile(filepath.Join(directory, "03-devin-request.json"))
+	requestLog, _, _, err := manager.ReadFile(recorder.Dir(), "03-devin-request.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(requestLog), "secret-token") || strings.Contains(string(requestLog), "fingerprint") {
 		t.Fatalf("request log contains credentials: %s", requestLog)
 	}
-	responseLog, err := os.ReadFile(filepath.Join(directory, "04-devin-response.jsonl"))
+	responseLog, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}

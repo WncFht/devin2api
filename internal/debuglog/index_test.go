@@ -1,62 +1,24 @@
+// 本文件验证请求日志行的字段口径：error_* 只在终结性失败时落行、
+// 连接画像随成功建流出账。写路径是 Complete→insertLog→logs 表。
 package debuglog
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// TestIndexFileCapTruncates 验证 index.jsonl 超限后保尾部重写：
-// 文件收缩到上限一半以内、剩余行均为完整可解析的索引条目。
-func TestIndexFileCapTruncates(t *testing.T) {
-	root := t.TempDir()
-	old := indexFileCap
-	indexFileCap = 4 << 10 // 4KB：几十条摘要即可触发截断
-	defer func() { indexFileCap = old }()
-
-	manager := NewManager(root, RetentionPolicy{})
-	defer manager.Close()
-	for i := 0; i < 60; i++ {
-		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/responses"})
-		if recorder == nil {
-			t.Fatalf("request %d: Start returned nil", i)
-		}
-		recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
-	}
-	info, err := os.Stat(filepath.Join(root, "index.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() > indexFileCap {
-		t.Fatalf("index.jsonl size %d exceeds cap %d", info.Size(), indexFileCap)
-	}
-	data, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) == 0 || len(lines) >= 60 {
-		t.Fatalf("expected a truncated tail of entries, got %d lines", len(lines))
-	}
-	for i, line := range lines {
-		var entry IndexEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			t.Fatalf("line %d is a torn record: %v", i, err)
-		}
-	}
-}
-
 // TestIndexErrorFields 验证 error_stage/error_message 只在终结性失败时
-// 落索引：被重试救回的中间错误留在目录 error.json，不污染按失败点
+// 落日志行：被重试救回的中间错误留在目录 error.json，不污染按失败点
 // 检索的口径；失败请求的 error_message 与 error.json 同源且被截断。
 func TestIndexErrorFields(t *testing.T) {
 	root := t.TempDir()
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 
 	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
@@ -67,21 +29,15 @@ func TestIndexErrorFields(t *testing.T) {
 	recovered.WriteError(ErrStageDevinTransport, errors.New("mid-flight EOF"))
 	recovered.Complete(Completion{StatusCode: 200, Result: "completed"})
 
-	data, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	// 行序新在前：rows[0] 是被救回的请求，rows[1] 是终结性失败。
+	rows, total, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 index lines, got %d", len(lines))
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("expected 2 log rows, got %d (total %d)", len(rows), total)
 	}
-	var failEntry, okEntry IndexEntry
-	if err := json.Unmarshal([]byte(lines[0]), &failEntry); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(lines[1]), &okEntry); err != nil {
-		t.Fatal(err)
-	}
+	okEntry, failEntry := rows[0], rows[1]
 	if failEntry.ErrorStage != ErrStageRateGate {
 		t.Fatalf("failEntry.ErrorStage = %q, want %q", failEntry.ErrorStage, ErrStageRateGate)
 	}
@@ -91,32 +47,33 @@ func TestIndexErrorFields(t *testing.T) {
 	if okEntry.ErrorStage != "" || okEntry.ErrorMessage != "" {
 		t.Fatalf("recovered request carried error fields: stage=%q message=%q", okEntry.ErrorStage, okEntry.ErrorMessage)
 	}
-	// error.json 仍应存在于两个目录：恢复证据不随索引口径删减。
+	// error.json 仍应存在于两个目录：恢复证据不随日志行口径删减。
 	for _, dir := range []string{failEntry.Dir, okEntry.Dir} {
-		if _, err := os.Stat(filepath.Join(root, dir, ErrorFile)); err != nil {
+		if _, _, _, err := manager.ReadFile(dir, ErrorFile); err != nil {
 			t.Fatalf("error.json missing in %s: %v", dir, err)
 		}
 	}
 }
 
-// TestIndexConnReuseFields 验证成功建流的连接画像落进索引行。
+// TestIndexConnReuseFields 验证成功建流的连接画像落进日志行。
 func TestIndexConnReuseFields(t *testing.T) {
 	root := t.TempDir()
-	manager := NewManager(root, RetentionPolicy{})
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	recorder.NoteUpstreamConn(true, 42*time.Millisecond)
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 
-	data, err := os.ReadFile(filepath.Join(root, "index.jsonl"))
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("SearchLogs: %v", err)
 	}
-	var entry IndexEntry
-	if err := json.Unmarshal(bytes.TrimSpace(data), &entry); err != nil {
-		t.Fatal(err)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(rows))
 	}
+	entry := rows[0]
 	if entry.ConnReused == nil || !*entry.ConnReused {
 		t.Fatalf("ConnReused = %v, want true", entry.ConnReused)
 	}

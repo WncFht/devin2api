@@ -1,6 +1,6 @@
 // 上游账号池页：三路数据源合并出逐 lane 视图——
 //   /admin/runtime-metrics 的 accounts 组（gate/warm/lane 快照）
-//   /admin/quota 的 accounts 组（quota.jsonl 逐号曲线 + 预测 + 身份快照）
+//   /admin/quota 的 accounts 组（quota_samples 逐号曲线 + 预测 + 身份快照）
 //   /admin/logs/matrix?since=24h（逐请求 account 归因，聚合健康格与换号）
 // 只读观测页：状态优先级参考 sub2api（倒计时即状态）、ccload 的行内
 // pill 堆叠、cliproxy 的全池脉冲条与 <details> 收明细。字段未经 escapeHtml

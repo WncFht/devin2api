@@ -32,6 +32,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/httpproxy"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 	"github.com/WncFht/devin2api/internal/upstream"
 )
 
@@ -49,8 +50,9 @@ const (
 
 // Config 保存 Devin adapter 的固定上游配置。
 type Config struct {
-	// Name 是账号名：号池里每条 lane 的身份，进闸门状态文件名、
-	// 日志与面板归因字段；单号部署归一为 config.DefaultAccountName。
+	// Name 是账号名：号池里每条 lane 的身份，进闸门状态键
+	// （gate:<name>）、日志与面板归因字段；单号部署归一为
+	// config.DefaultAccountName。
 	Name string
 	// BaseURL 是 Devin Connect 服务的基础地址。
 	BaseURL string
@@ -71,10 +73,11 @@ type Config struct {
 	ClientOS      string
 	// Gate 是速率闸门参数组；字段语义与默认值回落见 GateConfig。
 	Gate GateConfig
-	// GateStatePath 非空时冷却闩截止时刻落盘到该文件，进程重启后
+	// GateStateStore 非空时冷却闩截止时刻持久化到 runtime_state
+	// （键 store.GateStateKey(Name)，即 gate:<lane>），进程重启后
 	// 未过期的闩被恢复——上游限流器把被拒尝试计入窗口，闩内重启
 	// 裸发会把限流续长。
-	GateStatePath string
+	GateStateStore *store.Store
 	// Warm 是前缀保温参数组；字段语义与默认值回落见 WarmConfig。
 	Warm WarmConfig
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
@@ -184,7 +187,7 @@ func New(config Config) (*Adapter, error) {
 		config:         config,
 		token:          config.Token,
 		modelsCacheTTL: 5 * time.Minute,
-		gate:           newRateGate(config.Gate, config.GateStatePath),
+		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Name)),
 		assignments:    make(map[string]resolvedAssignment),
 	}
 	link, err := newUpstreamLink(config, adapter.currentToken)
@@ -327,8 +330,8 @@ func (adapter *Adapter) UpdateConfig(mutate func(*Config) error) (applied []stri
 // 持 configMu；解锁后的收尾见 finishConfigApply。
 func (adapter *Adapter) commitConfigLocked(next Config) (prev Config, newLink *upstreamLink, err error) {
 	prev = adapter.config
-	// 运行时字段不归配置管：状态文件路径沿用旧值。
-	next.GateStatePath = prev.GateStatePath
+	// 运行时字段不归配置管：状态存储句柄沿用旧值。
+	next.GateStateStore = prev.GateStateStore
 	if prev.BaseURL != next.BaseURL || prev.Proxy != next.Proxy || prev.ForceHTTP1 != next.ForceHTTP1 {
 		newLink, err = newUpstreamLink(next, adapter.currentToken)
 		if err != nil {
@@ -1598,7 +1601,7 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 	return false
 }
 
-// recordUpstreamFailure 把不可重试的上游侧失败记为请求目录的首个失败点：
+// recordUpstreamFailure 把不可重试的上游侧失败记为该请求调试记录的首个失败点：
 // 传输层断裂记 devin_transport——含 connect.Error 包装的 EOF/帧截断/
 // 连接重置，判定见 isTransientConnectError；上游语义错误记 devin_connect。
 // ctx 取消不记——客户端断连由 HTTP 外层记 client_disconnected，不应被

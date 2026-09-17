@@ -1,19 +1,20 @@
-// 本文件实现调试日志的生命周期管理：分层保留请求目录。
+// 本文件实现调试日志的生命周期管理：分层保留调试 payload。
 //
 // 设计要点（参照 CLIProxyAPI log_dir_cleaner 与同类网关的调试日志短 TTL）：
 //   - 后台 ticker 周期执行，失败只告警不中断；
-//   - activeDirs 中仍在写入的目录永不删除；
+//   - activeDirs 中仍在写入的目录永不删除——删除界按活跃集的最小名钳位，
+//     等价旧实现的逐目录跳过（目录名内嵌时间戳，字典序即时间序）；
 //   - 大体积负载（上游响应/客户端 SSE/附件）先剥离，证据文件
-//     （meta/error/01/02/05）留满整周期——磁盘大头是负载，
+//     （meta/error/01/02/05）留满整周期——库里的大头是负载，
 //     留小文件不影响排障入口；
 //   - 容量淘汰时保护最近 N 个失败目录（含 error.json），成功请求先删；
-//   - index.jsonl、quota.jsonl、stderr.log 等顶层文件不属于请求目录。
+//   - stderr.log 等顶层文件不属于请求目录，留盘不管；logs 表行的时间
+//     清理见 cleanLogRows（与 payload 保留是两条独立轴）。
 package debuglog
 
 import (
+	"context"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,20 +22,20 @@ import (
 
 // cleanerInterval 是清理周期。三个维度全是粗粒度策略（小时级负载剥离、
 // 天级目录淘汰、GB 级总量软上限），不需要分钟级精度；周期放大到 5 分钟
-// 可把每轮的全树 dirSize 遍历（每目录一次 Walk）摊薄到可忽略。
+// 可把每轮的全表聚合摊薄到可忽略。
 const cleanerInterval = 5 * time.Minute
 
-// isPayloadName 判定请求目录内的「负载层」成员：体积大、只在近距排障
-// 时需要。超时后被剥离，meta.json/error.json/01/02/05 等证据继续保留。
-// devinRequestStageStem+"." 前缀同时圈出 03 主文件与全部重试分片
-// （03-devin-request.attemptN.json）——精确名匹配会漏掉分片，重试
-// 请求的大体积请求体将永不剥离。
+// isPayloadName 判定目录内（按 debug 行键名）的「负载层」成员：体积大、
+// 只在近距排障时需要。超时后被剥离，meta.json/error.json/01/02/05 等
+// 证据继续保留。devinRequestStageStem+"." 前缀同时圈出 03 主文件与全部
+// 重试分片（03-devin-request.attemptN.json）与托管搜索分片——精确名
+// 匹配会漏掉分片，重试请求的大体积请求体将永不剥离。
 func isPayloadName(name string) bool {
-	if strings.HasPrefix(name, devinRequestStageStem+".") {
+	if strings.HasPrefix(name, devinRequestStageStem+".") || strings.HasPrefix(name, AttachmentsDir+"/") {
 		return true
 	}
 	switch name {
-	case StageDevinResponse, StageHTTPResponse, AttachmentsDir:
+	case StageDevinResponse, StageHTTPResponse:
 		return true
 	}
 	return false
@@ -58,167 +59,176 @@ func (manager *Manager) runCleaner() {
 	}
 }
 
-// requestDir 是清理决策所需的目录摘要。
-type requestDir struct {
-	name     string
-	size     int64
-	at       time.Time // 计龄时刻：目录名内嵌时间戳优先，mtime 兜底
-	hasError bool      // 含 error.json，失败现场
-}
-
 // cleanOnce 执行一轮清理，返回删除的目录数。
-// 顺序：活跃目录跳过 → 剥离超龄负载 → 删超龄目录 → 总量超限从最旧淘汰
-// （受保护的失败目录除外）。
+// 顺序：logs 行按龄删除 → 剥离超龄负载 → 删超龄目录 →
+// 总量超限从最旧淘汰（受保护的失败目录与活跃目录除外）。
+// 目录名内嵌 "20060102-150405" 时间戳：字典序界即时间界。
 func (manager *Manager) cleanOnce() int {
-	entries, err := os.ReadDir(manager.root)
+	manager.cleanLogRows()
+	if manager.store == nil {
+		return 0
+	}
+	defer manager.pruneStorage()
+	ctx := context.Background()
+	dirs, err := manager.store.DebugDirs(ctx)
 	if err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: list debug dirs failed", "error", err)
 		return 0
 	}
 	manager.mutex.Lock()
 	active := make(map[string]struct{}, len(manager.activeDirs))
+	minActive := ""
 	for name := range manager.activeDirs {
 		active[name] = struct{}{}
+		if minActive == "" || name < minActive {
+			minActive = name
+		}
 	}
 	manager.mutex.Unlock()
 
 	policy := manager.Policy()
-	maxBytes := policy.MaxTotalMB << 20
 	now := time.Now()
-	ageCutoff := now.Add(-time.Duration(policy.Days) * 24 * time.Hour)
-	payloadCutoff := now.Add(-time.Duration(policy.PayloadHours) * time.Hour)
-
-	var dirs []requestDir
-	var totalBytes int64
 	removed := 0
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue // index.jsonl 等顶层文件不属于请求目录
-		}
-		if _, ok := active[entry.Name()]; ok {
-			continue // 请求仍在写入，保护其证据完整性
-		}
-		full := filepath.Join(manager.root, entry.Name())
-		// 计龄以目录名内嵌的请求进入时刻为准：stripPayload 删文件会把
-		// dir mtime 刷成剥离时刻，按 mtime 计龄会让天数淘汰被推迟、
-		// 失败目录新旧排序失真；名内时间戳不受维护操作影响。
-		// 非请求目录名（无内嵌时间戳）回退 mtime。
-		at := requestDirTime(entry.Name())
-		if at.IsZero() {
-			info, err := entry.Info()
+
+	// 负载剥离：逐目录筛出负载名删除。活跃目录整体跳过（请求还在写）。
+	if policy.PayloadHours > 0 {
+		payloadBound := now.Add(-time.Duration(policy.PayloadHours) * time.Hour).Format("20060102-150405")
+		for _, dir := range dirs {
+			if _, ok := active[dir]; ok || dir >= payloadBound {
+				continue
+			}
+			names, err := manager.store.DebugFileNames(ctx, dir)
 			if err != nil {
+				manager.ioErrors.Add(1)
+				slog.Warn("debuglog: list dir files failed", "dir", dir, "error", err)
 				continue
 			}
-			at = info.ModTime()
-		}
-		if policy.PayloadHours > 0 && at.Before(payloadCutoff) {
-			stripPayload(full)
-		}
-		if policy.Days > 0 && at.Before(ageCutoff) {
-			if os.RemoveAll(full) == nil {
-				removed++
-				continue
-			}
-		}
-		dir := requestDir{name: entry.Name(), at: at}
-		if maxBytes > 0 {
-			dir.size = dirSize(full)
-			totalBytes += dir.size
-			if policy.KeepErrorDirs > 0 {
-				if _, statErr := os.Stat(filepath.Join(full, ErrorFile)); statErr == nil {
-					dir.hasError = true
+			var payloads []string
+			for _, name := range names {
+				if isPayloadName(name) {
+					payloads = append(payloads, name)
 				}
 			}
+			if err := manager.store.DeleteDebugPayloadFiles(ctx, dir, payloads); err != nil {
+				manager.ioErrors.Add(1)
+				slog.Warn("debuglog: strip payload failed", "dir", dir, "error", err)
+			}
 		}
-		dirs = append(dirs, dir)
 	}
 
-	// 总量超限后从最旧的目录开始回收，直到回到上限内。
+	// 按龄删除：界名压到活跃集最小名之下，等价旧实现「跳过活跃目录」。
+	if policy.Days > 0 {
+		bound := now.Add(-time.Duration(policy.Days) * 24 * time.Hour).Format("20060102-150405")
+		if minActive != "" && minActive < bound {
+			bound = minActive
+		}
+		deletables := 0
+		for _, dir := range dirs {
+			if dir < bound {
+				deletables++
+			}
+		}
+		if deletables > 0 {
+			if err := manager.store.DeleteDebugDirsBefore(ctx, bound); err != nil {
+				manager.ioErrors.Add(1)
+				slog.Warn("debuglog: delete expired dirs failed", "error", err)
+			} else {
+				removed += deletables
+			}
+		}
+	}
+
+	maxBytes := policy.MaxTotalMB << 20
+	if maxBytes <= 0 {
+		return removed
+	}
+
+	// 容量淘汰：总量超限后从最旧的目录开始回收，直到回到上限内。
 	// 最近 policy.KeepErrorDirs 个失败目录受保护：失败现场恰恰是日后最想回看的。
-	if maxBytes > 0 && totalBytes > maxBytes {
-		sort.Slice(dirs, func(i, j int) bool {
-			if dirs[i].at.Equal(dirs[j].at) {
-				return dirs[i].name < dirs[j].name
-			}
-			return dirs[i].at.Before(dirs[j].at)
-		})
-		errorCount := 0
-		for _, dir := range dirs {
-			if dir.hasError {
-				errorCount++
+	sizes, err := manager.store.DebugDirSizes(ctx)
+	if err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: measure debug dirs failed", "error", err)
+		return removed
+	}
+	errorDirs := map[string]bool{}
+	if policy.KeepErrorDirs > 0 {
+		if errorDirs, err = manager.store.DebugDirsContaining(ctx, ErrorFile); err != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: list error dirs failed", "error", err)
+			errorDirs = map[string]bool{}
+		}
+	}
+	var totalBytes int64
+	var candidates []string
+	for dir, size := range sizes {
+		if _, ok := active[dir]; ok {
+			continue
+		}
+		totalBytes += size
+		candidates = append(candidates, dir)
+	}
+	if totalBytes <= maxBytes {
+		return removed
+	}
+	sort.Strings(candidates) // 名序即时间序
+	errorCount := 0
+	for _, dir := range candidates {
+		if errorDirs[dir] {
+			errorCount++
+		}
+	}
+	// candidates 按旧到新排序：前 deletableErrors 个失败目录仍可淘汰，
+	// 末尾 KeepErrorDirs 个失败目录豁免。
+	deletableErrors := errorCount - policy.KeepErrorDirs
+	for _, dir := range candidates {
+		if totalBytes <= maxBytes {
+			break
+		}
+		if errorDirs[dir] {
+			if deletableErrors > 0 {
+				deletableErrors--
+			} else {
+				continue
 			}
 		}
-		// dirs 按旧到新排序：前 deletableErrors 个失败目录仍可淘汰，
-		// 末尾 KeepErrorDirs 个失败目录豁免。
-		deletableErrors := errorCount - policy.KeepErrorDirs
-		for _, dir := range dirs {
-			if totalBytes <= maxBytes {
-				break
-			}
-			if dir.hasError {
-				if deletableErrors > 0 {
-					deletableErrors--
-				} else {
-					continue
-				}
-			}
-			if os.RemoveAll(filepath.Join(manager.root, dir.name)) == nil {
-				totalBytes -= dir.size
-				removed++
-			}
+		if err := manager.store.DeleteDebugDir(ctx, dir); err != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: evict dir failed", "dir", dir, "error", err)
+			continue
 		}
+		totalBytes -= sizes[dir]
+		removed++
 	}
 	return removed
 }
 
-// stripPayload 删除目录内的大体积负载文件，保留证据层文件。
-// 返回释放的字节数；文件本就不存在不是错误。
-func stripPayload(dir string) int64 {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
+// pruneStorage 在 cleanOnce 各出口统一收尾（defer 触发）：恢复
+// quota_samples 的文件时代行数界，并把本轮删除腾出的 freelist 页
+// 还给库文件（auto_vacuum 只挂页不回缩，否则 db_bytes 永久虚高）。
+func (manager *Manager) pruneStorage() {
+	ctx := context.Background()
+	if _, err := manager.store.PruneQuotaSamples(ctx); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: prune quota samples failed", "error", err)
 	}
-	var freed int64
-	for _, entry := range entries {
-		if !isPayloadName(entry.Name()) {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		var size int64
-		if info, statErr := entry.Info(); statErr == nil {
-			size = info.Size()
-			if info.IsDir() {
-				size = dirSize(path)
-			}
-		}
-		if os.RemoveAll(path) == nil {
-			freed += size
-		}
+	if err := manager.store.IncrementalVacuum(ctx); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: incremental vacuum failed", "error", err)
 	}
-	return freed
 }
 
-// dirSize 递归汇总目录字节数；失败文件按 0 计。
-func dirSize(root string) int64 {
-	var size int64
-	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && info.Mode().IsRegular() {
-			size += info.Size()
-		}
-		return nil
-	})
-	return size
-}
-
-// requestDirTime 解析请求目录名内嵌的进入时刻：Start 以本地时区
-// "20060102-150405" 命名（可带 -NN 同秒后缀），目录名本身即时间戳。
-// 非请求目录名或无法解析时返回零值，调用方以 dir mtime 兜底。
-func requestDirTime(name string) time.Time {
-	if !requestDirPattern.MatchString(name) {
-		return time.Time{}
+// cleanLogRows 按 LogRowRetentionDays 删除 logs 表的过期行；失败记
+// ioErrors 并告警——行清理是周期任务，一次失败不该静默漂移。
+func (manager *Manager) cleanLogRows() {
+	days := manager.LogRowRetentionDays()
+	if manager.store == nil || days <= 0 {
+		return
 	}
-	t, err := time.ParseInLocation("20060102-150405", name[:15], time.Local)
-	if err != nil {
-		return time.Time{}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	if _, err := manager.store.DeleteLogsBefore(context.Background(), cutoff); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: clean log rows failed", "error", err)
 	}
-	return t
 }

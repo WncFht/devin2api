@@ -514,9 +514,11 @@ spawn_handoff() {
 	(
 		# TZ 显式剥掉：经 ssh 拉起的会话可能带调用方 TZ（实测注入 UTC），
 		# 与托管实例（无 TZ，走 /etc/localtime）的日志时区不一致。unset 后
-		# 两侧同走系统时区。
+		# 两侧同走系统时区。DEVIN2API_HANDOFF 标记这是短命占位实例——
+		# 后台维护（遗留调试目录导入）只该由托管实例跑，两进程并发导入
+		# 会在 UNIQUE 上互相打断。
 		unset TZ
-		cd "${STATE_DIR}" && exec env DEVIN2API_REUSEPORT=1 \
+		cd "${STATE_DIR}" && exec env DEVIN2API_REUSEPORT=1 DEVIN2API_HANDOFF=1 \
 			"${BIN_DIR}/devin-2api" -config "${CONFIG_DIR}/config.yaml" -state-dir "${STATE_DIR}"
 	) >>"${STATE_DIR}/logs/stdout.log" 2>>"${logf}" &
 	pid=$!
@@ -645,7 +647,7 @@ smoke_upstream() {
 	if [[ -z "${src}" ]]; then
 		warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启"
 	else
-		warn "token 来源 ${src}——可能已过期；排障看 logs/index.jsonl 与 /web"
+		warn "token 来源 ${src}——可能已过期；排障看 /web 日志页或 sqlite3 查 logs 表"
 	fi
 	return 1
 }

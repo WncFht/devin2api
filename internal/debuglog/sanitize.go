@@ -1,7 +1,7 @@
-// 本文件实现调试日志写盘值的脱敏与附件落盘——recorder.go 的净化器实现。
+// 本文件实现调试日志写盘值的脱敏与附件落库——recorder.go 的净化器实现。
 //
 // sanitize/sanitizeValue 把投影产物归一成 any 树并遮盖敏感键；extractImage 族
-// 把 data URL / base64 图片从树中摘出写入 attachments/ 子目录并留引用指针。脱敏规则
+// 把 data URL / base64 图片从树中摘出写入 attachments/ 名下并留引用指针。脱敏规则
 // 表（secretKeyNames 等）是写盘前最后一道闸，键名匹配口径在本文件收拢。
 package debuglog
 
@@ -13,8 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"mime"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -262,16 +260,11 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 	}
 	recorder.attachmentCount++
 	extension := imageExtension(mimeType)
-	fileName := fmt.Sprintf("image-%03d%s", recorder.attachmentCount, extension)
-	relativePath := filepath.Join(AttachmentsDir, fileName)
-	directory := filepath.Join(recorder.directory, AttachmentsDir)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		recorder.noteIOErr("file", err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, fileName), data, 0o600); err != nil {
-		recorder.noteIOErr("file", err)
-	}
-	reference := attachmentReference{File: filepath.ToSlash(relativePath), MIMEType: mimeType, Size: len(data), SHA256: hash}
+	// name 是 debug_files 行键，形如 "attachments/image-001.png"——与
+	// 01/02 JSON 体内的 file 指针及 /file/{name} 端点入参同形。
+	name := fmt.Sprintf("%s/image-%03d%s", AttachmentsDir, recorder.attachmentCount, extension)
+	recorder.putFile(name, data)
+	reference := attachmentReference{File: name, MIMEType: mimeType, Size: len(data), SHA256: hash}
 	recorder.attachmentByHash[hash] = reference
 	return reference
 }

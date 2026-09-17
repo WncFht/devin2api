@@ -110,7 +110,7 @@ Intermediate tools are converted into Devin native function tools (name and JSON
 
 ## Debug logging
 
-When `debug.enabled: true`, each request gets a staged log directory under `<state-dir>/logs/<request-time>/` (the repo `logs/` symlink points at that directory), useful for pinpointing failures at any hop of "HTTP ⇄ intermediate ⇄ upstream":
+When `debug.enabled: true`, each request gets a staged debug record keyed by a dir name (`<request-time>`) inside `devin-2api.db` under the state dir — one-shot payloads (`meta.json`, `01`–`03`, `error.json`, `attachments/*`) go to the `debug_files` table, streamed JSONL (`04`–`06`) goes to `debug_chunks` — useful for pinpointing failures at any hop of "HTTP ⇄ intermediate ⇄ upstream":
 
 ```text
 meta.json                  # request outcome summary (status, model, duration)
@@ -126,9 +126,9 @@ error.json                 # first failing stage and error
 attachments/               # externalized image attachments (deduped by SHA-256)
 ```
 
-Concurrent requests in the same second are distinguished by an incrementing suffix in the directory name.
+Concurrent requests in the same second are distinguished by an incrementing suffix in the dir name.
 
-`logs/index.jsonl` appends one summary line per completed request (result, model, `error_stage`, token classes, key hash) — it survives retention cleanup and backs the panel's usage aggregation. `logs/quota.jsonl` holds quota snapshots sampled every `debug.quota_interval_minutes`. Retention is tiered: `debug.retention_days` deletes whole dirs by age, `debug.max_total_mb` evicts oldest first, `debug.payload_hours` strips the large stage files (03/04/06/attachments) while keeping meta/error/01/02/05 evidence, and `debug.keep_error_dirs` protects the newest N failed dirs during size eviction.
+The `logs` table holds one summary row per completed request (result, model, `error_stage`, token classes, key hash) — it outlives payload retention and backs the panel's usage aggregation. `quota_samples` holds quota snapshots sampled every `debug.quota_interval_minutes`. Retention is tiered: `debug.retention_days` deletes a dir's rows by age, `debug.max_total_mb` evicts oldest dir groups first, `debug.payload_hours` strips the large stage payloads (03/04/06/attachments) while keeping meta/error/01/02/05 evidence, and `debug.keep_error_dirs` protects the newest N failed dirs during size eviction.
 
 The admin panel at `/web` (login: `dashboard.password`) renders these logs as a request browser and exposes `/admin/*` for programmatic access — `/admin/api` returns the endpoint catalog; `PUT /admin/settings/debug_log_enabled` hot-switches request logging without a restart.
 
@@ -252,13 +252,13 @@ internal/
       responses/    # OpenAI Responses HTTP codec (JSON request, JSON/SSE response)
     common/         # shared surface plumbing: error normalization, tool-choice parsing
   app/              # chi routing, request lifecycle, error handling
-  authtoken/        # downstream API token store (auth_tokens.json): /v1 admission concurrency/cost/model limits
+  authtoken/        # downstream API token store (auth_tokens table): /v1 admission concurrency/cost/model limits
   ccpanel/          # admin panel (ccLoad contract): /web, /public, /dashboard/*, /admin/*
   config/           # YAML config loading and validation
   debuglog/         # per-request staged debug logs (redaction + externalized images)
   httpproxy/        # upstream HTTP client construction (proxy, force_http1)
   llm/              # vendor-neutral intermediate model (request, response, event stream)
-  modelreg/         # global model registry (models.json): disable/redirect overlays before alias resolution
+  modelreg/         # global model registry (model_registry table): disable/redirect overlays before alias resolution
   obs/              # process/HTTP metrics behind /admin/runtime-metrics
   randid/           # random ID generation (X-Request-Id / debug dir names)
   upstream/         # shared upstream wire helpers (request metadata, auth transport)

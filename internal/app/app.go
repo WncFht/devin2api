@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -526,7 +525,7 @@ func (application *App) WaitDrain(ctx context.Context) error {
 }
 
 // noteReject 统一记录一次管线前拒绝：分原因计数、事件环与进程日志同源。
-// 这类请求没有调试目录与 index 行——计数/事件环供面板查，slog 行是唯一
+// 这类请求没有调试记录与 logs 行——计数/事件环供面板查，slog 行是唯一
 // 跨重启留存的足迹（部署后查排空期拒绝就靠它）。
 func (application *App) noteReject(reason obs.RejectReason, request *http.Request, status int) {
 	event := obs.RejectEvent{
@@ -688,7 +687,7 @@ func (application *App) createCompletion(
 	tokenAcquired := false
 	tokenBlocked := false
 	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
-	//（超时/断连/对端 RST）不产生调试目录与 index 行——它们与鉴权、
+	//（超时/断连/对端 RST）不产生调试记录与 logs 行——它们与鉴权、
 	// 并发、排空拒绝同口径，是唯一痕迹在 http.rejects 里的管线前拒绝。
 	var recorder *debuglog.Recorder
 	startRecorder := func() {
@@ -704,8 +703,8 @@ func (application *App) createCompletion(
 		recorder.SetAbort(func() {
 			cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
 		})
-		// Stripe Request-Id 模式：本地请求 id（即调试目录名）写进响应头，
-		// agent 拿到后可直接查 index.jsonl 或 /admin/debug-logs/{dir}。
+		// Stripe Request-Id 模式：本地调试身份 <dir> 写进响应头，agent
+		// 拿到后可查 logs 表或 /admin/debug-logs/{id}（{id} 是 logs 表主键）。
 		// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
 		if ref := debugRef(recorder); ref != "" {
 			writer.Header().Set("X-Request-Id", ref)
@@ -760,7 +759,7 @@ func (application *App) createCompletion(
 			// 字节超限按 PayloadTooLarge 报 413：下游网关按 4xx 归类为
 			// 客户端可修正错误。不贴 context_length_exceeded——这里量的
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
-			// ≥32MiB 的载荷是真实到达的请求，留调试目录供容量排障。
+			// ≥32MiB 的载荷是真实到达的请求，留调试记录供容量排障。
 			startRecorder()
 			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
@@ -843,7 +842,7 @@ func (application *App) createCompletion(
 	// 模型注册表准入（ccLoad 渠道 ModelEntry 同义，本服务为全局覆盖层）：
 	// 停用按 404 收尾——对客户端的语义是本网关不提供该模型；redirect_model
 	// 改写请求模型名，下游走 adapter 别名解析落到最终上游 uid。
-	// RequestedModel 保持客户端原名，index.jsonl 同时留两段身份。
+	// RequestedModel 保持客户端原名，logs 表同时留两段身份。
 	// 不设 tokenBlocked：请求本身合法，按失败回写令牌统计（ccLoad 同口径）。
 	if application.models != nil {
 		if entry, ok := application.models.Lookup(messages.Model); ok {
@@ -962,7 +961,7 @@ func updateCompletionIdentity(completion *debuglog.Completion, messages llm.Requ
 // 故障模式（notes/archive/2026-09-12-premature-endturn.md）。这是候选
 // 信号而非判定：任务正常收官（末轮 tool_result → 总结文本 → STOP）
 // 形状完全相同，只能靠语义（宣告式 vs 总结式）或会话是否终结来区分，
-// 读 index.jsonl 计数时每个命中都要这样复核。
+// 读 logs 表计数时每个命中都要这样复核。
 func prematureEndTurn(messages llm.RequestMessages, message *llm.AssistantMessage) bool {
 	if message.StopReason != llm.StopReasonStop || len(messages.Messages) == 0 {
 		return false
@@ -1017,11 +1016,7 @@ func hashCredential(credential string) string {
 // debugRef 返回本请求的调试目录名作为跨接口关联引用；
 // 未启用调试日志（nil recorder）或异常路径时为空串。
 func debugRef(recorder *debuglog.Recorder) string {
-	dir := filepath.Base(recorder.DirectoryPath())
-	if dir == "." {
-		return ""
-	}
-	return dir
+	return recorder.Dir()
 }
 
 func httpRequestProjection(request *http.Request, body []byte) map[string]any {
@@ -1052,9 +1047,9 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) int {
 	failure := llm.Classify(err)
 	recorder.WriteError(stage, err)
-	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在请求目录的 error.json。
+	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在该请求调试记录的 error.json。
 	// stage 是捕获点（本函数被哪层错误出口调用），error_stage 是归原点
-	//（index.jsonl 的同名值）——闸门拒绝会在 provider_stream 出口被捕获，
+	//（logs 表的同名列）——闸门拒绝会在 provider_stream 出口被捕获，
 	// 但归原点是 rate_gate；两层都写出来排障时才不会读岔。
 	originStage, _ := recorder.FirstError()
 	if originStage == "" {

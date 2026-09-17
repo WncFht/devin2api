@@ -1145,7 +1145,7 @@
       text-decoration: underline;
     }
 
-    /* 调试目录文件列表与查看器 */
+    /* 调试记录文件列表与查看器 */
     .debug-file-list {
       display: flex;
       flex-direction: column;
