@@ -2,12 +2,14 @@
 """从配额采样 + 请求索引反推 Devin 日/周额度的美元大小。
 
 数据链路：poll.sh 采的 GetUserStatus 快照（整数百分比，含入账延迟）为因变量，
-index.jsonl 里每个付费请求按目录价折算 est$（含 cache_write，按 input 价），
+logs 表导出 JSONL 里每个付费请求按目录价折算 est$（含 cache_write，按 input 价），
 在每个重置窗口内对「累计 est$ vs 已消耗百分点」做最小二乘——斜率的倒数即
 该窗口 1% 对应的美元额。2026-09-13 两窗口拟合见 docs/quota-billing.md（原始记录 notes/archive/2026-09-13-quota-billing-fit.md）。
 
 依赖: uv run --with numpy --with matplotlib scripts/quota/fit.py \
         --status quota-probe.jsonl --index index.jsonl --catalog models.json [--out fit.png]
+--index 的 JSONL 由 logs 表导出：sqlite3 -json <状态目录>/devin-2api.db \
+  "SELECT * FROM logs" | jq -c '.[]' > index.jsonl（复现节见 docs/quota-billing.md）。
 catalog 参数也可以是面板地址，如 http://localhost:3003/admin/model-registry
 （该端点需 -H 'Authorization: Bearer <dashboard.password>'，用 --key 传入）。
 """
@@ -20,7 +22,7 @@ import numpy as np
 
 
 def parse_ts(s):
-    """index.jsonl 的 started_at 是本地时区 ISO 串，转 unix 秒。"""
+    """logs 表行的 started_at 是本地时区 ISO 串，转 unix 秒。"""
     try:
         return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except ValueError:
@@ -49,7 +51,7 @@ def load_catalog(src, key):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--status", required=True, help="poll.sh 产出的配额 JSONL")
-    ap.add_argument("--index", required=True, help="logs/index.jsonl")
+    ap.add_argument("--index", required=True, help="logs 表导出的 JSONL")
     ap.add_argument("--catalog", required=True, help="模型目录 JSON 或 /admin/model-registry URL")
     ap.add_argument("--key", default="", help="面板密码 dashboard.password（catalog 为 URL 时用）")
     ap.add_argument("--out", default="", help="输出 PNG 路径（给了才画图）")

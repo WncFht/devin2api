@@ -645,7 +645,7 @@ smoke_upstream() {
 	if [[ -z "${src}" ]]; then
 		warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启"
 	else
-		warn "token 来源 ${src}——可能已过期；排障看 logs/index.jsonl 与 /web"
+		warn "token 来源 ${src}——可能已过期；排障看 /web 日志页或 sqlite3 查 logs 表"
 	fi
 	return 1
 }
