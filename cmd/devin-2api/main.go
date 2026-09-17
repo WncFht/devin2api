@@ -283,12 +283,12 @@ func main() {
 	if err := settingsStore.ApplyAll(); err != nil {
 		slog.Warn("panel settings replay failed", "error", err)
 	}
-	// 下游令牌仓：auth_tokens.json 落在状态目录根（与 logs/ 平级）。
+	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
 	// input 价，与 ccpanel cellCost 同口径）。建仓先于 SetConfigOps——
 	// reload 闭包要捕获它给 auth.api_key 补种。
-	tokenStore, err := authtoken.New(absoluteStateDir)
+	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		slog.Error("load auth tokens failed", "error", err)
 		os.Exit(1)

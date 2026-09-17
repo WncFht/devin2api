@@ -134,7 +134,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenStore, err := authtoken.New(dir)
+	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenStore, err := authtoken.New(dir)
+			tokenStore, err := authtoken.New(dbStore)
 			if err != nil {
 				t.Fatal(err)
 			}

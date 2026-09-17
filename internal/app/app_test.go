@@ -23,14 +23,26 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/store"
 )
+
+// openTokenDB 开一个临时 sqlite 库给令牌仓用。
+func openTokenDB(t *testing.T) *store.Store {
+	t.Helper()
+	db, _, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
 // newTokenStore 建一个以 plain 为令牌的下游仓并接到 application——
 // /v1 准入的唯一判定源是令牌仓（无凭据旁路），要 401 场景就得仓内
 // 有行。plain 为空串时种的是匿名通道行（无凭据请求按它准入）。
 func newTokenStore(t *testing.T, plain string) *authtoken.Store {
 	t.Helper()
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +407,7 @@ func TestResponsesHandlerHealthIsUnprotected(t *testing.T) {
 // 不校验凭据（开放模式）：无凭据请求直接放行。
 func TestResponsesHandlerOpenModeWhenTokenStoreEmpty(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +448,7 @@ func TestResponsesHandlerAnonymousChannelAdmits(t *testing.T) {
 // 上执行：超过分钟桶上限的请求按 token_limit 429 拒绝。
 func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +482,7 @@ func TestResponsesHandlerTokenRPMLimitReturns429(t *testing.T) {
 // token_limit 429 拒绝，错误信息带窗口名。
 func TestResponsesHandlerTokenCost5hLimitReturns429(t *testing.T) {
 	fake := &fakeAdapter{events: []llm.ResponseEvent{{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "gpt-test", StopReason: llm.StopReasonStop}}}}
-	store, err := authtoken.New(t.TempDir())
+	store, err := authtoken.New(openTokenDB(t))
 	if err != nil {
 		t.Fatal(err)
 	}
