@@ -17,7 +17,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -45,7 +44,8 @@ const genericLaneCooldown = 90 * time.Second
 // Pool 是多账号上游池，实现 adapter.Adapter。
 type Pool struct {
 	// lanes 是当前 lane 集合快照；账号集合热更（ApplyConfigs）整体换
-	// 指针，读侧无锁。不变式：非空。
+	// 指针，读侧无锁。空集是合法态（账号被面板/配置删光）：读侧视图给
+	// 零值，Stream/ListModels 显式报 unavailable 而非取首元素 panic。
 	lanes atomic.Pointer[[]*poolLane]
 }
 
@@ -88,11 +88,9 @@ type LaneState struct {
 var _ adapter.Adapter = (*Pool)(nil)
 
 // NewPool 按配置逐条构建 lane；任一失败时回收已建 lane 整体报错
-// （启动期 fail-fast，不留半初始化池）。configs 至少一条。
+// （启动期 fail-fast，不留半初始化池）。configs 可为空——空池合法，
+// 「先起服务后配号」是面板引导态。
 func NewPool(configs []Config) (*Pool, error) {
-	if len(configs) == 0 {
-		return nil, errors.New("devin pool requires at least one account")
-	}
 	lanes := make([]*poolLane, 0, len(configs))
 	for _, config := range configs {
 		lane, err := newPoolLane(config)
@@ -117,7 +115,7 @@ func newPoolLane(config Config) (*poolLane, error) {
 	return &poolLane{name: config.Name, adapter: laneAdapter}, nil
 }
 
-// snapshot 返回当前 lane 集合；NewPool 之后恒非空。
+// snapshot 返回当前 lane 集合；空池时为空切片。
 func (pool *Pool) snapshot() []*poolLane {
 	if lanes := pool.lanes.Load(); lanes != nil {
 		return *lanes
@@ -127,8 +125,12 @@ func (pool *Pool) snapshot() []*poolLane {
 
 // firstLane 返回配置序首 lane：别名/客户端指纹/闸门参数等全局字段各
 // lane 一致，面板 MVP 也固定绑首号——逐号展示是阶段 2 的事。
+// 空池返回 nil，调用方给各自视图类型的零值。
 func (pool *Pool) firstLane() *poolLane {
-	return pool.snapshot()[0]
+	if lanes := pool.snapshot(); len(lanes) > 0 {
+		return lanes[0]
+	}
+	return nil
 }
 
 // Stream 按亲和键钉选 lane 发起请求，失败按 failoverable 词表换号。
@@ -140,6 +142,9 @@ func (pool *Pool) firstLane() *poolLane {
 // 明细在 NoteAccountAttempt。
 func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
 	lanes := pool.snapshot()
+	if len(lanes) == 0 {
+		return nil, errNoUpstreamAccounts()
+	}
 	recorder := debuglog.FromContext(ctx)
 	if len(lanes) == 1 {
 		lane := lanes[0]
@@ -462,6 +467,9 @@ func failoverable(ctx context.Context, err error) bool {
 // 就是每 lane 各自缓存的；全失败回最后一个错误（与单号语义一致）。
 func (pool *Pool) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	lanes := pool.snapshot()
+	if len(lanes) == 0 {
+		return nil, errNoUpstreamAccounts()
+	}
 	ordered := make([]*poolLane, 0, len(lanes))
 	var unhealthy []*poolLane
 	for _, lane := range lanes {
@@ -493,12 +501,10 @@ func (pool *Pool) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 // adapter 走 ApplyConfig（token 与 TokenSource 都是热换值字段，warm
 // 谱系/assignment/目录缓存与在途流全保住）；新增 lane 先构建再入列；
 // 被删 lane 摘出后异步 Close（只停后台协程，在途流持引用跑完——与
-// endpoint 换绑同一生死模型）。任一构建/应用失败即返回错误，已应用
-// 的 lane 不回滚——与单 lane ApplyConfig 的失败语义一致。
+// endpoint 换绑同一生死模型）。空集合法，等同全部 lane 被删。任一
+// 构建/应用失败即返回错误，已应用的 lane 不回滚——与单 lane
+// ApplyConfig 的失败语义一致。
 func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
-	if len(configs) == 0 {
-		return nil, errors.New("devin pool requires at least one account")
-	}
 	old := pool.snapshot()
 	byName := make(map[string]*poolLane, len(old))
 	for _, lane := range old {
@@ -599,10 +605,14 @@ func (pool *Pool) BeginDrain() {
 // TokenFunc 返回「首 lane 当前凭据」的读取函数：每次求值重解析
 // firstLane——热更摘掉首号或模式切换后，面板 seat/状态类调用
 // 落到当前首 lane 而不是已关闭 lane 的冻结 token。要按号取凭据
-// 用 TokenFuncs。
+// 用 TokenFuncs。空池求值回 ""（面板 seat 调用发空 Bearer 拿 401，
+// 是「号还没配」的引导态）。
 func (pool *Pool) TokenFunc() func() string {
 	return func() string {
-		return pool.firstLane().adapter.TokenFunc()()
+		if lane := pool.firstLane(); lane != nil {
+			return lane.adapter.TokenFunc()()
+		}
+		return ""
 	}
 }
 
@@ -618,14 +628,20 @@ func (pool *Pool) TokenFuncs() map[string]func() string {
 	return funcs
 }
 
-// GateStats 返回首 lane 闸门快照（顶层 gate 段的后兼容形态）。
+// GateStats 返回首 lane 闸门快照（顶层 gate 段的后兼容形态）；空池回零值。
 func (pool *Pool) GateStats() GateStats {
-	return pool.firstLane().adapter.GateStats()
+	if lane := pool.firstLane(); lane != nil {
+		return lane.adapter.GateStats()
+	}
+	return GateStats{}
 }
 
-// WarmStats 返回首 lane 保温快照（顶层 warm 段的后兼容形态）。
+// WarmStats 返回首 lane 保温快照（顶层 warm 段的后兼容形态）；空池回零值。
 func (pool *Pool) WarmStats() WarmStats {
-	return pool.firstLane().adapter.WarmStats()
+	if lane := pool.firstLane(); lane != nil {
+		return lane.adapter.WarmStats()
+	}
+	return WarmStats{}
 }
 
 // AccountGateStats 返回各 lane 的闸门快照（按账号名索引），
@@ -660,21 +676,50 @@ func (pool *Pool) AccountLaneStates() map[string]LaneState {
 	return states
 }
 
-// Aliases 返回模型别名映射：全局字段各 lane 一致，取首 lane。
+// Aliases 返回模型别名映射：全局字段各 lane 一致，取首 lane；空池回 nil。
 func (pool *Pool) Aliases() map[string]string {
-	return pool.firstLane().adapter.Aliases()
+	if lane := pool.firstLane(); lane != nil {
+		return lane.adapter.Aliases()
+	}
+	return nil
 }
 
 // CurrentConfig 返回首 lane 的配置快照：全局字段各 lane 一致；
 // Name/Token/TokenSource 是该 lane 自己的值，调用方
-// 展示用要意识到这点（面板 MVP 绑首号，语义恰好正确）。
+// 展示用要意识到这点（面板 MVP 绑首号，语义恰好正确）。空池回零值
+// Config——消费侧（settings 默认值兜底、/admin/config 视图）把它当
+// 「未配置」基线处理。
 func (pool *Pool) CurrentConfig() Config {
-	return pool.firstLane().adapter.CurrentConfig()
+	if lane := pool.firstLane(); lane != nil {
+		return lane.adapter.CurrentConfig()
+	}
+	return Config{}
 }
 
-// ClearCooldown 清该名 lane 的池侧两档冷却（badUntil 凭据冷却 +
-// unhealthyUntil 短冷却）并立即回候选；保留 lastFailure* 证据，
-// 不动 gate 闩（上游推导的真值，本地无权清）。无活 lane 返 false。
+// errNoUpstreamAccounts 是空池（含「全 lane 被 disabled/墓碑摘出
+// 生效集」的同形态）的统一失败：没有可触达的上游。非 ClientFixable——
+// /v1 侧映射 5xx；每次新建实例是因为 Classify 的派生补齐会原地写字段，
+// 共享实例在并发下是数据竞争。
+func errNoUpstreamAccounts() *llm.Failure {
+	return &llm.Failure{Code: "unavailable", Message: "no upstream accounts configured"}
+}
+
+// ClearCooldown 清该名 lane 的池侧冷却并立即回候选：两档冷却窗
+// （badUntil 凭据冷却 + unhealthyUntil 短冷却）连同 badTokenHash 判死键
+// 一并清掉——语义是人工宣布「已处理，回候选」，token 若仍坏会在下一次
+// unauthenticated 重新进冷却。保留 lastFailure* 证据，不动 gate 闩
+// （上游推导的真值，本地无权清）。无该名活 lane 返 false。
 func (pool *Pool) ClearCooldown(name string) bool {
+	for _, lane := range pool.snapshot() {
+		if lane.name != name {
+			continue
+		}
+		lane.authMu.Lock()
+		lane.badTokenHash = ""
+		lane.badUntil = time.Time{}
+		lane.unhealthyUntil = time.Time{}
+		lane.authMu.Unlock()
+		return true
+	}
 	return false
 }
