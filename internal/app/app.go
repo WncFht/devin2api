@@ -790,6 +790,11 @@ func (application *App) createCompletion(
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
 	}
+	// 显式亲和头恒赢于 body 提取的 SessionKey：头是调用方的意图声明，
+	// 号池会话绑定与 trajectory 谱系都以它为种子。
+	if key := common.SessionKeyFromHeader(request.Header); key != "" {
+		messages.SessionKey = key
+	}
 	completion.Model = messages.Model
 	completion.RequestedModel = messages.Model
 	completion.Stream = options.Stream

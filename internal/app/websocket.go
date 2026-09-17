@@ -665,6 +665,10 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	for _, name := range []string{
 		"Authorization", "X-Api-Key", "X-Session-Id", "User-Agent",
 		"Session-Id", "Session_id", "Thread-Id", "X-Codex-Turn-Metadata",
+		// 会话亲和头链的其余成员：createCompletion 按同一优先级链
+		// 判 SessionKey，不透传则 WS 轮次的号池亲和落空。
+		"X-Claude-Code-Session-Id", "X-Session-Affinity", "X-Conversation-Id",
+		"X-Thread-Id",
 		// clientRequestID（app.go:638）与请求投影都读它，不透传则
 		// WS 轮次的调试记录无法按客户端 ID 反查。
 		"X-Client-Request-Id",
