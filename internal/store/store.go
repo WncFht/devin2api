@@ -33,7 +33,11 @@ type Store struct {
 // CREATE IF NOT EXISTS；是否跑 ImportLegacy 由导入器按源文件
 // 存在性自判，Open 不报告 created。
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=wal_autocheckpoint(500)&_loc=Local", path)
+	// synchronous=NORMAL：WAL 下 commit 不再逐次 fsync（帧留在 OS 页缓存，
+	// 进程崩溃不丢，仅断电/内核崩可能丢尾部事务，不产生损坏）。本库
+	// 装的是可重建的观测与面板状态，用这丁点断电尾部风险换 commit 风暴
+	// 期间的 fsync 开销。
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous(NORMAL)&_pragma=wal_autocheckpoint(500)&_loc=Local", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
