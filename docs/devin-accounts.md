@@ -32,8 +32,8 @@ lane 内自愈（重读凭据 + 重试）也救不回的 `unauthenticated` 会�
 
 ## 观测字段
 
-`index.jsonl` 每行带 `account`（产出终局结果的 lane 名——成功开流、终审拒绝或换号穷尽时的最后一号都算，凡触达 lane 的请求恒有值；单号部署恒为 `default`）与 `account_switches`（被试过又放弃的 lane 数，0 即首号出终局）。同目录 `meta.json` 带 `upstream_account`（同口径）与 `upstream_attempts`（被放弃 lane 的有序尝试：account/elapsed_ms/code/message）——failover 救回的请求没有 error.json，这份尝试表是换号归因的唯一痕迹。多 lane 模式下 `04-devin-response.jsonl` 内插 `account_attempt` 分界行：各 lane 的上游帧续写同一文件，分界行标明一段帧属于哪号。`quota.jsonl` 每号独立成行、带 `account` 字段；`GET /admin/quota` 返回 `accounts` 组按名给各自曲线与耗尽预测，顶层 points/daily/weekly 镜像最新采样（freshest）的账号序列保持后兼容。`GET /admin/runtime-metrics` 的 `accounts` 组按名给每号 `gate` 与 `warm` 快照，顶层 `gate`/`warm` 仍是首 lane 快照。stderr 在换号时打 `devin account lane failed, failing over` 告警行（带 account 与 error）。
+`index.jsonl` 每行带 `account`（产出终局结果的 lane 名——成功开流、终审拒绝或换号穷尽时的最后一号都算，凡触达 lane 的请求恒有值；单号部署恒为 `default`）与 `account_switches`（被试过又放弃的 lane 数，0 即首号出终局）。同目录 `meta.json` 带 `upstream_account`（同口径）与 `upstream_attempts`（被放弃 lane 的有序尝试：account/elapsed_ms/code/message）——failover 救回的请求没有 error.json，这份尝试表是换号归因的唯一痕迹。多 lane 模式下 `04-devin-response.jsonl` 内插 `account_attempt` 分界行：各 lane 的上游帧续写同一文件，分界行标明一段帧属于哪号。`quota.jsonl` 每号独立成行、带 `account` 字段；`GET /admin/quota` 返回 `accounts` 组按名给各自曲线与耗尽预测 + `user` 身份快照（采样顺带取回的 name/email/plan_name，内存态、重启后首个采样点前缺席），顶层 points/daily/weekly 镜像最新采样（freshest）的账号序列保持后兼容。`GET /admin/runtime-metrics` 的 `accounts` 组按名给每号 `gate`、`warm` 与 `lane` 快照——`lane` 是池侧状态：`healthy`（选中判定近似快照）、`auth_cooldown_until`/`unhealthy_until`（两档冷却截止，凭据换新可提前解禁）与 `last_failure_at/code/message`（最近一次换号失败归因）；顶层 `gate`/`warm` 仍是首 lane 快照。stderr 在换号时打 `devin account lane failed, failing over` 告警行（带 account 与 error）。管理面板的 `/web/accounts.html` 页把上述三组数据源汇成逐号视图：全池脉冲条、逐 lane 状态徽章（倒计时语义）、闸门/保温/配额/近 24h 健康格四区。
 
-## 面板边界（MVP）
+## 面板边界
 
-面板自身的 seat 类上游调用固定绑配置序首号（TokenFunc/GateStats/WarmStats/CurrentConfig 同口径）；全部 lane 的凭据源已喂给 recentTokens 脱敏环与配额采样，逐号面板视图是后续工作。
+面板自身的 seat 类上游调用固定绑配置序首号（TokenFunc/GateStats/WarmStats/CurrentConfig 同口径）；全部 lane 的凭据源已喂给 recentTokens 脱敏环与配额采样。逐号观测走 `/web/accounts.html`（只读）：runtime-metrics 的 accounts 组 + quota 的逐号曲线与身份 + matrix 的逐请求归因。

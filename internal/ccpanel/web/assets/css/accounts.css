@@ -1,0 +1,219 @@
+/* 上游账号池页专属样式 */
+
+/* 全池脉冲条：每 lane 一竖条，色即主状态 */
+.accounts-pulse {
+  display: flex;
+  gap: 4px;
+  height: 28px;
+  align-items: stretch;
+}
+
+.accounts-pulse-seg {
+  flex: 1;
+  min-width: 10px;
+  border-radius: 4px;
+  background: var(--color-border, #d1d5db);
+  transition: background 0.3s;
+}
+
+.accounts-pulse-seg--ok { background: var(--success-500, #22c55e); }
+.accounts-pulse-seg--warn { background: var(--warning-500, #f59e0b); }
+.accounts-pulse-seg--bad { background: var(--error-500, #ef4444); }
+.accounts-pulse-seg--idle { background: var(--color-border, #d1d5db); }
+
+.accounts-pulse-empty {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  align-self: center;
+}
+
+/* 账号卡片 */
+.acct-card {
+  padding: var(--space-5, 20px) var(--space-6);
+  margin-bottom: var(--space-5, 20px);
+}
+
+.acct-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.acct-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.acct-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.acct-identity {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.acct-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.acct-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.acct-pill--ok {
+  background: color-mix(in srgb, var(--success-500, #22c55e) 14%, transparent);
+  color: var(--success-700, #15803d);
+}
+
+.acct-pill--warn {
+  background: color-mix(in srgb, var(--warning-500, #f59e0b) 16%, transparent);
+  color: var(--warning-700, #b45309);
+}
+
+.acct-pill--bad {
+  background: color-mix(in srgb, var(--error-500, #ef4444) 14%, transparent);
+  color: var(--error-700, #b91c1c);
+}
+
+.acct-failure {
+  font-size: 12px;
+  color: var(--error-600, #dc2626);
+  margin: 4px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡内四区网格 */
+.acct-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: var(--space-5, 20px) var(--space-6);
+  margin-top: var(--space-4, 16px);
+}
+
+.acct-sec h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 10px;
+}
+
+/* kv 行 */
+.acct-kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+
+.acct-kv {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.acct-kv-k {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.acct-kv-v {
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-yes { color: var(--success-600); }
+.acct-no { color: var(--error-600); }
+
+.acct-none {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+/* 配额条 */
+.acct-quota-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 42px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.acct-quota-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.acct-quota-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--color-border, #e5e7eb);
+  overflow: hidden;
+}
+
+.acct-quota-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s;
+}
+
+.acct-quota-val {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-quota-sub {
+  grid-column: 2 / 4;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-top: -2px;
+}
+
+/* 24 格健康条 */
+.acct-strip {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 3px;
+}
+
+.acct-cell {
+  height: 22px;
+  border-radius: 3px;
+  background: var(--color-border, #e5e7eb);
+}
+
+.acct-cell--ok { background: var(--success-500, #22c55e); }
+.acct-cell--err { background: var(--error-500, #ef4444); }
+.acct-cell--rl { background: var(--warning-400, #fbbf24); }
+
+.acct-strip-foot {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .acct-strip { grid-template-columns: repeat(12, 1fr); }
+  .acct-cell { height: 16px; }
+}
