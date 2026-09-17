@@ -661,7 +661,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:  "debug_quota_interval_minutes",
 			typ:  "int",
-			desc: "配额快照采样间隔分钟（debug.quota_interval_minutes，写 logs/quota.jsonl）；<=0 不采样",
+			desc: "配额快照采样间隔分钟（debug.quota_interval_minutes，写 quota_samples 表）；<=0 不采样",
 			def:  func() string { return strconv.Itoa(int(d0().QuotaInterval / time.Minute)) },
 			live: func() string { return strconv.Itoa(int(deps.QuotaInterval() / time.Minute)) },
 			apply: func(v string) error {

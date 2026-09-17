@@ -146,7 +146,7 @@ var schemaStatements = []string{
 	)`,
 
 	// quota_samples：daily/weekly_remaining 可空 REAL 保留
-	// 「上游没报」与「真到 0」的区分（quotaPoint 的 *float64 语义）。
+	// 「上游没报」与「真到 0」的区分（QuotaSample 的 *float64 语义）。
 	`CREATE TABLE IF NOT EXISTS quota_samples (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		at INTEGER NOT NULL,

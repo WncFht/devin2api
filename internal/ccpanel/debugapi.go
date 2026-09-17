@@ -55,7 +55,7 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/admin/debug-logs/{id}/file/{name}", "description": "读取请求目录内文件（顶层或 attachments/），超 4MB 截断；?raw=1 原样回字节（CSP sandbox + nosniff）"},
 			{"method": "POST", "path": "/admin/active-requests/{id}/abort", "description": "中断进行中请求（取消 ctx）；无活跃请求时 404"},
 			{"method": "GET", "path": "/admin/process-log?offset=", "description": "进程 stderr 日志尾部；offset>0 增量拉取，响应带 next_offset"},
-			{"method": "GET", "path": "/admin/quota", "description": "配额历史快照（logs/quota.jsonl）+ 按燃烧速率外推的耗尽时间"},
+			{"method": "GET", "path": "/admin/quota", "description": "配额历史快照（quota_samples 表）+ 按燃烧速率外推的耗尽时间"},
 			{"method": "GET", "path": "/admin/settings", "description": "运行时设置全表：键、当前值、默认、是否有面板覆盖"},
 			{"method": "GET", "path": "/admin/settings/{key}", "description": "单个运行时设置（含覆盖来源标记）"},
 			{"method": "PUT", "path": "/admin/settings/{key}", "description": "运行时设置覆盖（debug.enabled/保留策略等），body {\"value\": \"...\"}；对 config.yaml 恒赢"},

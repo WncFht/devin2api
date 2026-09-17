@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 const (
@@ -62,9 +62,11 @@ type rateGate struct {
 	maxHold      time.Duration
 	dripInterval time.Duration
 	defaultLatch time.Duration
-	// statePath 非空时冷却闩截止时刻落盘（tmp+rename）：重启后仍在闩内
-	// 的实例不会裸发上游把限流续长——上游限流器把被拒尝试也计入窗口。
-	statePath string
+	// states/stateKey 非空时冷却闩截止时刻持久化到 runtime_state：
+	// 重启后仍在闩内的实例不会裸发上游把限流续长——上游限流器把被拒
+	// 尝试也计入窗口。键名对闸门不透明，由构造方给（gate:<lane>）。
+	states   *store.Store
+	stateKey string
 	// now 是时钟源，测试可替换为可控假钟；窗口位置依赖墙钟，注入后
 	// 配额/死区/闩的用例才能确定落在指定分钟秒位。
 	now func() time.Time
@@ -85,7 +87,7 @@ type rateGate struct {
 const gateEventCap = 64
 
 // 闩迁移事件种类：latched（上游限流上闩/延闩）、released（成功帧提前
-// 解闩）、expired（闩到期自然失效）、restored（重启从 statePath 恢复
+// 解闩）、expired（闩到期自然失效）、restored（重启从持久态恢复
 // 未过期闩）。
 const (
 	gateEventLatched  = "latched"
@@ -140,7 +142,7 @@ func (gate *rateGate) pushEvent(kind string, until time.Time, detail string) {
 }
 
 // expireIfDue 把到期的闩自然失效化：补 expired 事件并清闩——闩到期
-// 不是解闩（没有成功帧证据），但截止已过，内存态与状态文件都该闭环。
+// 不是解闩（没有成功帧证据），但截止已过，内存态与持久行都该闭环。
 // 调用方须持 mu。wait 路径每个请求检查一次，stats 轮询兜底——无流量
 // 时闩到期也能在事件环与快照里及时反映。
 func (gate *rateGate) expireIfDue(now time.Time) {
@@ -153,10 +155,10 @@ func (gate *rateGate) expireIfDue(now time.Time) {
 	gate.clearState()
 }
 
-// gateStateFile 是冷却闩的落盘形态；只持久化截止时刻——滴灌时钟与
-// 窗口计数刻意不存（重启新窗口重新计数是想要的，闩内节奏按
-// dripInterval 重排即可）。
-type gateStateFile struct {
+// gateState 是冷却闩的持久化形态（runtime_state 的值 JSON）；只存
+// 截止时刻——滴灌时钟与窗口计数刻意不存（重启新窗口重新计数是想要的，
+// 闩内节奏按 dripInterval 重排即可）。
+type gateState struct {
 	LimitedUntil time.Time `json:"limited_until"`
 }
 
@@ -212,11 +214,12 @@ type GateConfig struct {
 }
 
 // newRateGate 创建速率闸门；MaxRPM<=0 时只有冷却闩生效，不做窗口限速。
-// statePath 非空时恢复未过期的冷却闩。
-func newRateGate(params GateConfig, statePath string) *rateGate {
+// states+stateKey 非空时从 runtime_state 恢复未过期的冷却闩。
+func newRateGate(params GateConfig, states *store.Store, stateKey string) *rateGate {
 	gate := &rateGate{
-		statePath: statePath,
-		now:       time.Now,
+		states:   states,
+		stateKey: stateKey,
+		now:      time.Now,
 	}
 	gate.setParams(params)
 	gate.restoreState()
@@ -273,50 +276,49 @@ func (gate *rateGate) windowStart(t time.Time) time.Time {
 }
 
 // restoreState 在启动时恢复未过期的冷却闩：滴灌时钟按间隔重排。
-// 文件缺失/损坏/已过期都按无闩处理并顺手清掉过期文件。
+// 行缺失/损坏/已过期都按无闩处理并顺手清掉残留行。
 func (gate *rateGate) restoreState() {
-	if gate.statePath == "" {
+	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
-	data, err := os.ReadFile(gate.statePath)
+	value, ok, err := gate.states.GetState(context.Background(), gate.stateKey)
 	if err != nil {
+		slog.Warn("rate gate state read failed", "error", err)
 		return
 	}
-	var state gateStateFile
-	if err := json.Unmarshal(data, &state); err != nil || !state.LimitedUntil.After(gate.now()) {
-		_ = os.Remove(gate.statePath)
+	if !ok {
+		return
+	}
+	var state gateState
+	if err := json.Unmarshal([]byte(value), &state); err != nil || !state.LimitedUntil.After(gate.now()) {
+		_ = gate.states.DeleteState(context.Background(), gate.stateKey)
 		return
 	}
 	gate.limitedUntil = state.LimitedUntil
 	gate.nextDrip = gate.now().Add(gate.dripInterval)
 	gate.pushEvent(gateEventRestored, state.LimitedUntil, "")
-	slog.Warn("rate gate latch restored from state file", "until", state.LimitedUntil.Format(time.RFC3339))
+	slog.Warn("rate gate latch restored from persisted state", "until", state.LimitedUntil.Format(time.RFC3339))
 }
 
-// persistState 把冷却闩截止时刻原子落盘（tmp+rename）；写失败只记
-// 日志——落盘是防重启续限的保险，不挡请求路径。
+// persistState 把冷却闩截止时刻写入 runtime_state；写失败只记
+// 日志——持久化是防重启续限的保险，不挡请求路径。
 func (gate *rateGate) persistState(until time.Time) {
-	if gate.statePath == "" {
+	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
-	data, _ := json.Marshal(gateStateFile{LimitedUntil: until})
-	tmp := gate.statePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		slog.Warn("rate gate state write failed", "error", err)
-		return
-	}
-	if err := os.Rename(tmp, gate.statePath); err != nil {
-		slog.Warn("rate gate state rename failed", "error", err)
+	data, _ := json.Marshal(gateState{LimitedUntil: until})
+	if err := gate.states.SetState(context.Background(), gate.stateKey, string(data)); err != nil {
+		slog.Warn("rate gate state persist failed", "error", err)
 	}
 }
 
-// clearState 在解闩后移除状态文件；文件不存在不算错误。
+// clearState 在解闩后删除状态行；行不存在不算错误（DeleteState 空操作）。
 func (gate *rateGate) clearState() {
-	if gate.statePath == "" {
+	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
-	if err := os.Remove(gate.statePath); err != nil && !os.IsNotExist(err) {
-		slog.Warn("rate gate state remove failed", "error", err)
+	if err := gate.states.DeleteState(context.Background(), gate.stateKey); err != nil {
+		slog.Warn("rate gate state delete failed", "error", err)
 	}
 }
 
@@ -578,9 +580,9 @@ func (gate *rateGate) noteUpstreamError(err error) {
 			detail = "extended"
 		}
 		gate.pushEvent(gateEventLatched, until, detail)
-		// 落盘须在锁内：解锁后 persist 可能与并发 release 的 clearState
+		// 持久化须在锁内：解锁后 persist 可能与并发 release 的 clearState
 		// 交错——clear 先跑、persist 后写，已解闩的截止时刻会作为
-		// 死文件残留，重启后复活成幽灵闩。
+		// 死行残留，重启后复活成幽灵闩。
 		gate.persistState(until)
 	}
 	gate.mu.Unlock()
@@ -608,7 +610,7 @@ func (gate *rateGate) noteUpstreamSuccess() {
 		gate.limitedUntil = time.Time{}
 		gate.nextDrip = time.Time{}
 		// clear 与上闩方的 persist 同锁序化：锁外执行会让「persist 晚于
-		// clear」交错把已解闩的时刻写回状态文件。
+		// clear」交错把已解闩的时刻写回状态行。
 		gate.clearState()
 	}
 	gate.mu.Unlock()

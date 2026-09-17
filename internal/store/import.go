@@ -400,7 +400,7 @@ func (s *Store) importGateStates(ctx context.Context, logRoot string) error {
 			}
 			return err
 		}
-		if err := s.SetState(ctx, "gate:"+lane, string(data)); err != nil {
+		if err := s.SetState(ctx, GateStateKey(lane), string(data)); err != nil {
 			return err
 		}
 		if err := os.Rename(path, path+".migrated"); err != nil {

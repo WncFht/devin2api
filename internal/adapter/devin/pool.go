@@ -666,7 +666,7 @@ func (pool *Pool) Aliases() map[string]string {
 }
 
 // CurrentConfig 返回首 lane 的配置快照：全局字段各 lane 一致；
-// Name/Token/TokenSource/GateStatePath 是该 lane 自己的值，调用方
+// Name/Token/TokenSource 是该 lane 自己的值，调用方
 // 展示用要意识到这点（面板 MVP 绑首号，语义恰好正确）。
 func (pool *Pool) CurrentConfig() Config {
 	return pool.firstLane().adapter.CurrentConfig()
