@@ -295,13 +295,35 @@
       color: var(--neutral-400);
     }
 
+    /* 顶部工具栏：标签置顶、控件等高，三段分区（时间范围 / 过滤条件 / 行操作） */
     .logs-filter-controls {
-      gap: 10px;
+      gap: 8px 16px;
+      align-items: flex-end;
+    }
+
+    .logs-filter-section {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 8px 12px;
+      min-width: 0;
+    }
+
+    .logs-filter-section--filters {
+      flex: 1 1 auto;
+    }
+
+    .logs-filter-section--actions {
+      flex: 0 0 auto;
+      margin-left: auto;
     }
 
     .logs-filter-group {
-      flex: 1 1 180px;
+      flex: 1 1 140px;
       min-width: 0;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 3px;
     }
 
     .logs-filter-group[hidden] {
@@ -317,17 +339,31 @@
     }
 
     .logs-filter-group.filter-group--model {
-      flex-basis: 216px;
+      flex-basis: 200px;
     }
 
     .logs-filter-group.filter-group--status {
-      flex: 0 1 136px;
+      flex: 0 1 116px;
+    }
+
+    .logs-filter-group .filter-label {
+      margin-right: 0;
     }
 
     .logs-filter-group .filter-input,
     .logs-filter-group .filter-select {
       width: 100%;
       min-width: 0;
+      height: 32px;
+      padding-top: 0;
+      padding-bottom: 0;
+      box-sizing: border-box;
+    }
+
+    .logs-filter-actions .btn {
+      height: 32px;
+      padding: 0 12px;
+      gap: 5px;
     }
 
     .logs-filter-control--range {
@@ -743,6 +779,11 @@
         gap: 6px;
       }
 
+      /* 分区包装只用于桌面分组，移动端展平回两列网格 */
+      .logs-filter-section {
+        display: contents;
+      }
+
       .logs-filter-group {
         display: grid;
         grid-template-columns: 72px minmax(0, 1fr);
@@ -758,6 +799,7 @@
       }
 
       .logs-filter-summary-row {
+        grid-column: 1 / -1;
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 8px;
