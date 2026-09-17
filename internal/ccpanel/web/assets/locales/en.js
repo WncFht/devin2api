@@ -936,9 +936,6 @@ window.I18N_LOCALES['en'] = {
   'logs.tip.reasoningTokens': 'Reasoning tokens',
   'logs.probeModel': 'Probe this model',
   'logs.invalidPage': 'Enter a valid page number (1-{total})',
-  'logs.search': 'Search',
-  'logs.searchPlaceholder': 'dir/model/path/request ID...',
-  'logs.statusClass': 'Status class',
   'logs.result': 'Result',
   'logs.errorStage': 'Error stage',
   'logs.allErrorStages': 'All stages',
@@ -956,7 +953,6 @@ window.I18N_LOCALES['en'] = {
   'logs.mergedTruncated': 'Response stream exceeded the read limit; only leading frames merged — the tail may be missing',
 
   // ---- Logs page: humanized fields and column settings ----
-  'logs.allStatusClasses': 'All status classes',
   'logs.allResults': 'All results',
   'logs.resultCompleted': 'Completed',
   'logs.resultFailed': 'Failed',

@@ -65,7 +65,7 @@
                 <option value="openai-responses">/v1/responses</option>
                 <option value="responses-ws">/v1/responses (WS)</option>
               `, 'filter-control--compact')}`,
-        groupClass
+        joinClasses(groupClass, 'filter-group--api')
       ),
       modelCombobox: buildFilterGroup(
         `${buildFilterLabel('f_model', 'common.model', '模型')}
@@ -87,22 +87,6 @@
           <div id="f_status_dropdown" class="filter-dropdown" role="listbox"></div>
         </div>`,
         joinClasses(groupClass, 'filter-group--status')
-      ),
-      search: buildFilterGroup(
-        `${buildFilterLabel('f_q', 'logs.search', '搜索')}
-        ${buildInput('text', 'f_q', 'logs.searchPlaceholder', 'dir/模型/路径/请求ID...', 'filter-control--wide')}`,
-        groupClass
-      ),
-      statusClass: buildFilterGroup(
-        `${buildFilterLabel('f_status_class', 'logs.statusClass', '状态段')}
-        ${buildSelect('f_status_class', `
-                <option value="" data-i18n="logs.allStatusClasses">全部状态段</option>
-                <option value="2xx">2xx</option>
-                <option value="3xx">3xx</option>
-                <option value="4xx">4xx</option>
-                <option value="5xx">5xx</option>
-              `, 'filter-control--compact')}`,
-        groupClass
       ),
       result: buildFilterGroup(
         `${buildFilterLabel('f_result', 'logs.result', '结果')}
@@ -130,14 +114,11 @@
                 <option value="manual_test" data-i18n="logs.sourceManualTest">手动测试</option>
                 <option value="all" data-i18n="logs.sourceAll">全部日志</option>
               `, 'filter-control--compact')}`,
-        groupClass
+        joinClasses(groupClass, 'filter-group--log-source')
       ),
       hideZeroSuccess,
       filterButton,
-      logsSummary: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
-              <button id="btn_col_settings" type="button" class="btn btn-secondary filter-btn" data-action="toggle-col-menu" data-i18n-title="logs.colSettings" data-i18n-aria-label="logs.colSettings" aria-label="列显隐设置" title="列显隐设置"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/></svg><span data-i18n="logs.colVisibility">列显隐</span></button>
-              <button id="btn_export_csv" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportCsv">导出CSV</button>
-              <button id="btn_export_json" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportJson">导出JSON</button>
+      logsActions: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
               ${clearButtonControl}
               ${filterButtonControl}
             </div></div>`,
@@ -162,12 +143,12 @@
       controlsClass: 'filter-controls logs-filter-controls',
       groupClass: 'logs-filter-group',
       timeRangeGroupClass: 'logs-filter-group--range',
-      timeRangeControlClass: 'logs-filter-control--range',
       authTokenGroupClass: 'logs-filter-group--token',
-      authTokenControlClass: 'logs-filter-control--token',
       actionsClass: 'logs-filter-actions',
-      // 单条 flex-wrap 流：时间范围与各过滤项顺序排布，行操作（logsSummary）靠右收尾
-      items: ['timeRange', 'search', 'api', 'modelCombobox', 'status', 'statusClass', 'result', 'errorStage', 'logSource', 'authToken', 'logsSummary']
+      // 单条 flex 流一行排布：先「哪些请求」（范围/入口/模型/令牌/来源）
+      // 后「结果如何」（状态码/结果/失败阶段），清空+筛选靠右收尾；
+      // 列显隐/导出不参与查询，挪到表格上方工具条（logs.html）。
+      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'logSource', 'status', 'result', 'errorStage', 'logsActions']
     },
     trend: {
       barClass: 'filter-bar mt-2',

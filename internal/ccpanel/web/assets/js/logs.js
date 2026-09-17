@@ -1070,12 +1070,11 @@ function filterActiveRequests(requests) {
   });
 }
 
-// 进行中的请求没有最终状态码/结果/失败阶段，q 子串筛选也可能误伤——这些
-// 维度任一命中时不再把活跃行混进列表；model/api/token 仍由
-// filterActiveRequests 客户端侧过滤。
+// 进行中的请求没有最终状态码/结果/失败阶段——这些维度任一命中时不再把
+// 活跃行混进列表；model/api/token 仍由 filterActiveRequests 客户端侧过滤。
 function shouldSkipActiveRequestsFetch(filters) {
   if (filters.range && filters.range !== 'today') return true;
-  if (filters.status || filters.q || filters.statusClass || filters.result || filters.errorStage) return true;
+  if (filters.status || filters.result || filters.errorStage) return true;
   return filters.logSource !== 'proxy' && filters.logSource !== 'all';
 }
 
@@ -1597,8 +1596,6 @@ function applyLogsFilterValues(filters) {
     api: 'f_api',
     logSource: 'f_log_source',
     authToken: 'f_auth_token',
-    q: 'f_q',
-    statusClass: 'f_status_class',
     result: 'f_result'
   });
 
@@ -1815,7 +1812,6 @@ async function initFilters(restoredFilters, preloaded) {
   if (apiSelect) {
     apiSelect.addEventListener('change', applyFilter);
   }
-  document.getElementById('f_status_class')?.addEventListener('change', applyFilter);
   document.getElementById('f_result')?.addEventListener('change', applyFilter);
   document.getElementById('btn_export_csv')?.addEventListener('click', () => exportLogs('csv'));
   document.getElementById('btn_export_json')?.addEventListener('click', () => exportLogs('json'));
@@ -1845,9 +1841,7 @@ async function initFilters(restoredFilters, preloaded) {
 
   window.bindFilterApplyInputs({
     apply: applyFilter,
-    debounceInputIds: ['f_q'],
-    // f_q 只走 input 防抖：同时挂 Enter 会在键入后 500ms 内重复触发 apply
-    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_status_class', 'f_result']
+    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_result']
   });
 }
 
@@ -1937,11 +1931,9 @@ const LOGS_FILTER_FIELDS = [
     defaultValue: ''
   },
   { key: 'logSource', queryKeys: ['log_source'], requestKey: 'log_source', defaultValue: 'proxy' },
-  // status 是表达式参数（499|4xx|>=400|!2xx 逗号 OR）；status_code 仅作
-  // 旧链接/旧本地存档的恢复入口，请求一律发 status——同给时后端 status 赢。
-  { key: 'status', queryKeys: ['status', 'status_code'], defaultValue: '' },
-  { key: 'q', queryKeys: ['q'], defaultValue: '' },
-  { key: 'statusClass', queryKeys: ['status_class'], defaultValue: '' },
+  // status 是表达式参数（499|4xx|>=400|!2xx 逗号 OR）；status_code/status_class
+  // 仅作旧链接/旧本地存档的恢复入口，请求一律发 status——同给时后端 status 赢。
+  { key: 'status', queryKeys: ['status', 'status_code', 'status_class'], defaultValue: '' },
   { key: 'result', queryKeys: ['result'], defaultValue: '' },
   { key: 'errorStage', queryKeys: ['error_stage'], defaultValue: '' },
   { key: 'authToken', queryKeys: ['auth_token_id'], defaultValue: '' }
@@ -1961,8 +1953,6 @@ function getLogsFilters() {
     range: { id: 'f_hours', defaultValue: 'today', trim: true },
     api: { id: 'f_api', trim: true },
     authToken: { id: 'f_auth_token', trim: true },
-    q: { id: 'f_q', trim: true },
-    statusClass: { id: 'f_status_class', trim: true },
     result: { id: 'f_result', trim: true }
   });
   const hasCustomRange = baseValues.range === 'custom' && currentLogsCustomTimeRange;

@@ -296,14 +296,16 @@
       color: var(--neutral-400);
     }
 
-    /* 顶部工具栏：标签置顶、控件等高，单条 flex-wrap 流，行操作靠右收尾 */
+    /* 顶部工具栏：标签置顶、控件等高，单条 flex 流一行排布；
+       组宽按内容定死（不拉伸填空），行操作靠右收尾 */
     .logs-filter-controls {
-      gap: 8px 16px;
+      gap: 8px 10px;
       align-items: flex-end;
     }
 
     .logs-filter-group {
-      flex: 1 1 140px;
+      flex: 0 0 auto;
+      width: 112px;
       min-width: 0;
       flex-direction: column;
       align-items: stretch;
@@ -315,19 +317,31 @@
     }
 
     .logs-filter-group--range {
-      flex: 0 1 116px;
+      width: 88px;
     }
 
     .logs-filter-group--token {
-      flex: 0 1 134px;
+      width: 108px;
+    }
+
+    .logs-filter-group.filter-group--api {
+      width: 124px;
+    }
+
+    .logs-filter-group.filter-group--log-source {
+      width: 124px;
     }
 
     .logs-filter-group.filter-group--model {
-      flex-basis: 200px;
+      width: 156px;
     }
 
     .logs-filter-group.filter-group--status {
-      flex: 0 1 116px;
+      width: 92px;
+    }
+
+    .logs-filter-group.filter-group--error-stage {
+      width: 108px;
     }
 
     .logs-filter-group .filter-label {
@@ -344,27 +358,16 @@
       box-sizing: border-box;
     }
 
+    .logs-filter-controls .filter-combobox-wrapper {
+      width: 100%;
+      min-width: 0;
+      max-width: none;
+    }
+
     .logs-filter-actions .btn {
       height: 32px;
       padding: 0 12px;
       gap: 5px;
-    }
-
-    .logs-filter-control--range {
-      max-width: 80px;
-    }
-
-    .logs-filter-control--token {
-      max-width: 124px;
-    }
-
-    .logs-filter-controls .filter-control--model {
-      min-width: 160px;
-    }
-
-    .logs-filter-controls .filter-control--status {
-      min-width: 80px;
-      max-width: 90px;
     }
 
     .log-source-badge {
@@ -423,6 +426,22 @@
 
     .logs-filter-actions {
       flex: none;
+    }
+
+    /* 表格工具条：列显隐/导出作用在结果集上，贴表格右上 */
+    .logs-table-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin-bottom: var(--space-2);
+    }
+
+    .logs-table-toolbar .btn {
+      height: 30px;
+      padding: 0 10px;
+      gap: 5px;
+      font-size: var(--text-sm);
     }
 
     .logs-pagination-card {
@@ -778,7 +797,12 @@
         gap: 6px;
       }
 
-      .logs-filter-group {
+      .logs-filter-group,
+      .logs-filter-group.filter-group--api,
+      .logs-filter-group.filter-group--log-source,
+      .logs-filter-group.filter-group--model,
+      .logs-filter-group.filter-group--status,
+      .logs-filter-group.filter-group--error-stage {
         display: grid;
         grid-template-columns: 72px minmax(0, 1fr);
         align-items: center;
@@ -843,7 +867,12 @@
        不改的话 ≤768 的 72px 标签列会继续生效，在两列网格半格里把
        select 压到 ~76px，下拉值整段被裁掉 */
     @media (max-width: 480px) {
-      .logs-filter-group {
+      .logs-filter-group,
+      .logs-filter-group.filter-group--api,
+      .logs-filter-group.filter-group--log-source,
+      .logs-filter-group.filter-group--model,
+      .logs-filter-group.filter-group--status,
+      .logs-filter-group.filter-group--error-stage {
         grid-template-columns: 1fr;
       }
 

@@ -935,9 +935,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.tip.reasoningTokens': '思考/推理Token',
   'logs.probeModel': '探活此模型',
   'logs.invalidPage': '请输入有效的页码 (1-{total})',
-  'logs.search': '搜索',
-  'logs.searchPlaceholder': 'dir/模型/路径/请求ID...',
-  'logs.statusClass': '状态段',
   'logs.result': '结果',
   'logs.errorStage': '失败阶段',
   'logs.allErrorStages': '全部阶段',
@@ -955,7 +952,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.mergedTruncated': '响应流超过读取上限，仅合并了前段帧——后半可能缺失',
 
   // ---- 日志页：字段人性化与列设置 ----
-  'logs.allStatusClasses': '全部状态段',
   'logs.allResults': '全部结果',
   'logs.resultCompleted': '完成',
   'logs.resultFailed': '失败',
