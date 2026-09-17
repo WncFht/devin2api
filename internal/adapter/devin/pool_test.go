@@ -870,6 +870,46 @@ func TestPoolCooldownPersistence(t *testing.T) {
 	}
 }
 
+// 惰性解禁同步落盘：凭据换出（或冷却到期）时 authCooldown 内存清判死
+// 键的同时必须重写 poolcool 行——否则重启把已解禁的冷却复活。重写保留
+// failStreak/lastFailure 证据（它们仍属有效簿记，不随判死键清）。
+func TestPoolCooldownUnbanPersists(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	config := testPoolConfig("x")
+	config.GateStateStore = db
+
+	lane, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	lane.noteFailure(unauthenticatedErr())
+	// 模拟凭据源换上新 token：adapter 的 token 与判死哈希分叉即解禁。
+	lane.adapter.tokenMu.Lock()
+	lane.adapter.token = "tok-rotated"
+	lane.adapter.tokenMu.Unlock()
+	if lane.authCooldown() {
+		t.Fatal("rotated token must lift auth cooldown")
+	}
+	lane.adapter.Close()
+
+	// 重建读回：badUntil 已清但 failStreak/证据仍在——行被重写而非删除。
+	rebuilt, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane rebuild: %v", err)
+	}
+	t.Cleanup(rebuilt.adapter.Close)
+	if rebuilt.authCooldown() {
+		t.Fatal("lifted cooldown must not resurrect after rebuild")
+	}
+	if rebuilt.failStreak != 1 || rebuilt.lastFailureCode != "unauthenticated" {
+		t.Fatalf("rewrite must keep streak/evidence, got streak %d code %q", rebuilt.failStreak, rebuilt.lastFailureCode)
+	}
+}
+
 // 配额降权：weekly 剩余低于阈值置 quotaLow；负阈值关闭恒 false；
 // 已绑定会话不受影响（绑定命中恒居首）。
 func TestPoolNoteQuotaSample(t *testing.T) {

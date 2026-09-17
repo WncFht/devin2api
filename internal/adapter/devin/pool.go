@@ -550,6 +550,10 @@ func (lane *poolLane) authCooldown() bool {
 	if time.Now().After(lane.badUntil) || (token != "" && tokenHash(token) != lane.badTokenHash) {
 		lane.badTokenHash = ""
 		lane.badUntil = time.Time{}
+		// 解禁同步落盘：内存态与落盘态同生死——冷却自然到期或凭据
+		// 换出后若不重写，重启会把已失效的判死键复活。重写而非删除：
+		// failStreak 与 lastFailure 证据仍是有效簿记要留住。
+		lane.persistCooldownLocked()
 		return false
 	}
 	return true
