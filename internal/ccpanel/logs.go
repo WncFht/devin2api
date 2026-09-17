@@ -341,7 +341,7 @@ func (h *Handler) logRowMatch(r *http.Request, kh string) func(debuglog.IndexEnt
 		if upstream != "" && upstream != "all" && upstream != "devin" {
 			return false
 		}
-		if modelLike != "" && !strings.Contains(e.RequestedModel, modelLike) && !strings.Contains(e.Model, modelLike) {
+		if modelLike != "" && !strings.Contains(e.RequestedModel, modelLike) && !strings.Contains(e.Model, modelLike) && !strings.Contains(e.ResponseModel, modelLike) {
 			return false
 		}
 		return true
