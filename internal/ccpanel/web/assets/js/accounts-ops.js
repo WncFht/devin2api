@@ -16,10 +16,27 @@
   let supported = null; // null=未探测，渲染期乐观显示
   let detectPromise = null;
   const absentActs = new Set();
+  const formMounts = new Set(); // 挂过的加号表单容器：detect 落定后重评估（core 只在 run() 挂一次）
   let formSeq = 0;
 
   function reload() {
     if (window.acctOps && typeof window.acctOps.reload === 'function') window.acctOps.reload();
+  }
+
+  function refreshForms() {
+    formMounts.forEach((el) => {
+      if (!el.isConnected) {
+        formMounts.delete(el);
+        return;
+      }
+      mountForm(el);
+    });
+  }
+
+  function setSupported(v) {
+    if (supported === v) return;
+    supported = v;
+    refreshForms();
   }
 
   function absentErr(status) {
@@ -46,9 +63,9 @@
   async function detect() {
     try {
       const res = await fetchWithAuth(BASE);
-      supported = !PROBE_ABSENT.has(res.status);
+      setSupported(!PROBE_ABSENT.has(res.status));
     } catch (_) {
-      supported = false;
+      setSupported(false);
     }
     return supported;
   }
@@ -255,6 +272,7 @@
   // ---- 加号表单：#accounts-add 与空态 #accounts-empty-add 共用一套渲染 ----
   function mountForm(el) {
     if (!el) return;
+    formMounts.add(el);
     ensureDetected();
     if (supported === false) {
       el.innerHTML = '';
@@ -307,7 +325,7 @@
         reload();
       } catch (e2) {
         if (e2.absent) {
-          supported = false;
+          setSupported(false);
           reload();
           return;
         }
