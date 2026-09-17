@@ -40,6 +40,12 @@
   display: none;
 }
 
+/* 组内被裁时右缘渐隐，提示可横滚（JS 按 scrollWidth>clientWidth 挂类） */
+.trend-chart-toolbar .toggle-group.is-scrollable {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+}
+
 .trend-chart-toolbar .toggle-btn {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -50,10 +56,14 @@
   flex: 0 0 auto;
 }
 
-/* 刷新控件与信息片整组靠右 */
+/* 刷新控件与信息片整组靠右；粒度控件同属右组，不再吃 auto margin */
 .trend-chart-toolbar .trend-refresh-control {
   flex: 0 0 auto;
   margin-left: auto;
+}
+
+.trend-chart-toolbar .trend-bucket-control {
+  margin-left: 0;
 }
 
 .trend-chart-toolbar .trend-meta-chip {

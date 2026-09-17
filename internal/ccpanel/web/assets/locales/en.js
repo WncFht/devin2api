@@ -364,8 +364,8 @@ window.I18N_LOCALES['en'] = {
   'trend.loadFailed': 'Load Failed',
   'trend.checkNetwork': 'Please check network connection or retry',
   // Trend chart dynamic text
-  'trend.dataInterval': 'Update interval: {interval} | Data points: {points} | Total requests: {total}',
-  'trend.dataIntervalInit': 'Update interval: --',
+  'trend.dataInterval': '{interval} · {points} pts · {total} req',
+  'trend.dataIntervalInit': 'Interval: --',
   'trend.dataDisplay': '{range} data display',
   'trend.dataDisplayInit': 'Today data display',
   'trend.totalSuccess': 'Total Success',
@@ -388,8 +388,8 @@ window.I18N_LOCALES['en'] = {
   'trend.fetchDataFailed': 'Failed to fetch trend data',
   'trend.loadDataFailed': 'Unable to load trend data',
   'trend.cacheHitRate': 'Cache Hit Rate',
-  'trend.warmStatus': 'Prefix warm: {entries} warming · {pings} pings · {rate} hit',
-  'trend.warmStatusDisabled': 'Prefix warm: disabled',
+  'trend.warmStatus': 'Warm {entries} · {pings} pings · {rate} hit',
+  'trend.warmStatusDisabled': 'Warm: off',
   'trend.typeTps': 'TPS',
   'trend.refreshInterval': 'Auto refresh',
   'trend.refreshOff': 'Off',
@@ -397,6 +397,13 @@ window.I18N_LOCALES['en'] = {
   'trend.refresh30s': '30s',
   'trend.refresh1min': '1min',
   'trend.refresh5min': '5min',
+  'trend.bucketLabel': 'Interval',
+  'trend.bucketAuto': 'Auto',
+  'trend.bucket10m': '10 min',
+  'trend.bucket30m': '30 min',
+  'trend.bucket1h': '1 h',
+  'trend.bucket2h': '2 h',
+  'trend.bucket6h': '6 h',
 
   // ============================================================
   // Logs

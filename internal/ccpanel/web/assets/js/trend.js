@@ -221,7 +221,7 @@
 
         const hours = getTrendRangeHours(currentRange);
         window.currentHours = hours; // 同步到全局变量，供 renderChart 使用
-        const bucketMin = computeBucketMin(hours);
+        const bucketMin = effectiveBucketMin(hours);
 
         const metricsParams = buildTrendRequestParams({
           bucket_min: bucketMin
@@ -263,6 +263,8 @@
             total: debugTotal || t('trend.unknown')
           });
         }
+        // 信息片宽度随数据变化，可能改变切换组是否溢出
+        updateToolbarScrollHint();
 
       } catch (error) {
         console.error('加载趋势数据失败:', error);
@@ -311,11 +313,17 @@
     }
 
     function computeBucketMin(hours) {
-      if (hours <= 1) return 1; // 1分钟
-      if (hours <= 6) return 2; // 2分钟
-      if (hours <= 24) return 5; // 5分钟
-      if (hours <= 72) return 15; // 15分钟
-      return 60; // 1小时
+      // 底层存储格子是 10 分钟一档，后端把更小的 bucket_min 抬到 10——
+      // 自动档在这里就按真实粒度给，免得界面显示的间隔与实际分桶不符
+      if (hours <= 24) return 10;
+      if (hours <= 72) return 15;
+      return 60;
+    }
+
+    // 生效分桶：用户在工具栏选的粒度（分钟）优先，0/未选 = 自动分档
+    function effectiveBucketMin(hours) {
+      const override = Number(localStorage.getItem(TREND_BUCKET_KEY));
+      return override > 0 ? override : computeBucketMin(hours);
     }
 
     function renderTrendLoading() {
@@ -602,7 +610,7 @@
         });
       } else if (trendType === 'rpm') {
         // RPM趋势：每分钟请求数 = (success + error) / bucketMin
-        const bucketMin = window.currentHours ? computeBucketMin(window.currentHours) : 5;
+        const bucketMin = window.currentHours ? effectiveBucketMin(window.currentHours) : 10;
         series.push({
           name: 'RPM',
           type: 'line',
@@ -628,7 +636,7 @@
         });
       } else if (trendType === 'tps') {
         // TPS趋势：四类 token 的每秒速率 = 桶内计数 / (bucketMin*60)，与 tokens 视图同分解
-        const bucketSec = (window.currentHours ? computeBucketMin(window.currentHours) : 5) * 60;
+        const bucketSec = (window.currentHours ? effectiveBucketMin(window.currentHours) : 10) * 60;
         const tpsSeriesDefs = [
           { field: 'input_tokens', name: t('trend.inputTokens'), color: '#3b82f6' },
           { field: 'output_tokens', name: t('trend.outputTokens'), color: '#10b981' },
@@ -871,7 +879,7 @@
           }
         } else if (trendType === 'rpm') {
           // RPM趋势：模型每分钟请求数
-          const bucketMin = window.currentHours ? computeBucketMin(window.currentHours) : 5;
+          const bucketMin = window.currentHours ? effectiveBucketMin(window.currentHours) : 10;
           const rpmData = new Array(dataLen);
           let hasData = false;
 
@@ -903,7 +911,7 @@
           }
         } else if (trendType === 'tps') {
           // TPS趋势：模型每秒 token 速率（输入+输出，与 tokens 视图的模型口径一致）
-          const bucketSec = (window.currentHours ? computeBucketMin(window.currentHours) : 5) * 60;
+          const bucketSec = (window.currentHours ? effectiveBucketMin(window.currentHours) : 10) * 60;
           const tpsData = new Array(dataLen);
           let hasData = false;
 
@@ -1687,6 +1695,28 @@ function shouldShowZoom(points, hours, trendType) {
     const TREND_REFRESH_DEFAULT = 60;
     let trendRefreshTimer = null;
 
+    // 数据粒度手动档：localStorage 存分钟数，0/未存 = 自动分档
+    const TREND_BUCKET_KEY = 'trend.bucketMin';
+    const TREND_BUCKET_OPTIONS = [10, 30, 60, 120, 360];
+
+    function initTrendBucketControl() {
+      const select = document.getElementById('f_bucket_min');
+      if (!select) return;
+      const saved = Number(localStorage.getItem(TREND_BUCKET_KEY));
+      select.value = TREND_BUCKET_OPTIONS.includes(saved) ? String(saved) : '0';
+      select.addEventListener('change', () => {
+        try { localStorage.setItem(TREND_BUCKET_KEY, select.value); } catch (_) {}
+        loadData();
+      });
+    }
+
+    // 切换组被工具栏挤出内滚动时挂渐隐提示；宽度够时无类不遮
+    function updateToolbarScrollHint() {
+      const group = document.querySelector('.trend-chart-toolbar .toggle-group');
+      if (!group) return;
+      group.classList.toggle('is-scrollable', group.scrollWidth > group.clientWidth + 1);
+    }
+
     function currentTrendRefreshSec() {
       try {
         const raw = localStorage.getItem(TREND_REFRESH_KEY);
@@ -1754,10 +1784,12 @@ function shouldShowZoom(points, hours, trendType) {
 
       // 修复：全局注册resize监听器（仅一次，避免内存泄漏）
       window.addEventListener('resize', () => {
+        updateToolbarScrollHint();
         if (window.chartInstance) {
           window.chartInstance.resize();
         }
       });
+      updateToolbarScrollHint();
 
       window.addEventListener('ccload:themechange', () => {
         if (window.chartInstance && window.trendData && window.trendData.length) {
@@ -1767,6 +1799,7 @@ function shouldShowZoom(points, hours, trendType) {
 
       // 定期刷新数据（间隔由工具栏 select 控制，默认 60s）
       initTrendRefreshControl();
+      initTrendBucketControl();
       }
     });
 

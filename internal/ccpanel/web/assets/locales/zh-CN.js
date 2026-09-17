@@ -363,8 +363,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.loadFailed': '加载失败',
   'trend.checkNetwork': '请检查网络连接或重试',
   // 趋势图表动态文本
-  'trend.dataInterval': '数据更新间隔：{interval} | 数据点：{points} | 总请求：{total}',
-  'trend.dataIntervalInit': '数据更新间隔：--',
+  'trend.dataInterval': '间隔 {interval} · {points} 点 · {total} 请求',
+  'trend.dataIntervalInit': '间隔 --',
   'trend.dataDisplay': '{range}数据展示',
   'trend.dataDisplayInit': '本日数据展示',
   'trend.totalSuccess': '总成功请求',
@@ -387,8 +387,8 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.fetchDataFailed': '获取趋势数据失败',
   'trend.loadDataFailed': '无法加载趋势数据',
   'trend.cacheHitRate': '缓存命中率',
-  'trend.warmStatus': '前缀保温：{entries} 条在保温 · ping {pings} 次 · 命中率 {rate}',
-  'trend.warmStatusDisabled': '前缀保温：未开启',
+  'trend.warmStatus': '保温 {entries} · ping {pings} · 命中 {rate}',
+  'trend.warmStatusDisabled': '保温：未开启',
   'trend.typeTps': 'TPS',
   'trend.refreshInterval': '自动刷新',
   'trend.refreshOff': '关闭',
@@ -396,6 +396,13 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.refresh30s': '30秒',
   'trend.refresh1min': '1分钟',
   'trend.refresh5min': '5分钟',
+  'trend.bucketLabel': '数据间隔',
+  'trend.bucketAuto': '自动',
+  'trend.bucket10m': '10 分钟',
+  'trend.bucket30m': '30 分钟',
+  'trend.bucket1h': '1 小时',
+  'trend.bucket2h': '2 小时',
+  'trend.bucket6h': '6 小时',
 
   // ============================================================
   // 日志
