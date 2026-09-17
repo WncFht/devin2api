@@ -143,7 +143,6 @@ window.WebAuth = window.WebAuth || {
     { key: 'models', labelKey: 'nav.models', href: '/web/models.html', icon: iconLayers },
     { key: 'stats', labelKey: 'nav.stats', href: '/web/stats.html', icon: iconBars },
     { key: 'trend', labelKey: 'nav.trend', href: '/web/trend.html', icon: iconTrend },
-    { key: 'quota', labelKey: 'nav.quota', href: '/web/quota.html', icon: iconPercent },
     { key: 'accounts', labelKey: 'nav.accounts', href: '/web/accounts.html', icon: iconUsers },
     { key: 'logs', labelKey: 'nav.logs', href: '/web/logs.html', icon: iconAlert },
     { key: 'settings', labelKey: 'nav.settings', href: '/web/settings.html', icon: iconSettings },
@@ -192,9 +191,6 @@ window.WebAuth = window.WebAuth || {
   }
   function iconLayers() {
     return svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2l9 4.5-9 4.5-9-4.5L12 2z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 11.5l9 4.5 9-4.5"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5l9 4.5 9-4.5"/>`);
-  }
-  function iconPercent() {
-    return svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 5L5 19"/><circle cx="6.5" cy="6.5" r="2.5" stroke-width="2"/><circle cx="17.5" cy="17.5" r="2.5" stroke-width="2"/>`);
   }
   function iconUsers() {
     return svg(`<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>`);
@@ -1069,7 +1065,7 @@ window.WebAuth = window.WebAuth || {
     const execute = async () => {
 	  const session = await window.fetchDataWithAuth('/dashboard/session');
 	  if (session && session.role) localStorage.setItem(window.WebAuth.ROLE_KEY, session.role);
-	  const restrictedPages = new Set(['tokens', 'settings', 'models', 'quota', 'accounts']);
+	  const restrictedPages = new Set(['tokens', 'settings', 'models', 'accounts']);
 	  if (window.isAPITokenRole() && restrictedPages.has(options.topbarKey)) {
 	    window.location.replace('/web/index.html');
 	    return;
