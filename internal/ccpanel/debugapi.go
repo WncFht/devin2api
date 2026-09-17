@@ -370,24 +370,32 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// usageCacheTTL 是 /admin/usage 聚合快照的缓存寿命：面板按轮询
-// 消费，秒级陈旧无感；usageFetch 非空表示有聚合在途（singleflight
-// 的 done channel），关闭即完成信号。
+// usageCacheTTL 是 /admin/usage 聚合快照的新鲜窗口：面板按轮询
+// 消费，过期不阻塞——有旧快照直接发旧值并后台重算（stale-while-
+// revalidate）；usageFetch 非空表示有聚合在途（singleflight 的
+// done channel），关闭即完成信号。
 const usageCacheTTL = 5 * time.Second
 
-// usageSnapshot 返回 TTL 内的 UsageStats 缓存；过期时 singleflight
-// 收敛为单次聚合——并发等待方挂 done channel 而不是各跑一遍全表扫描。
+// usageSnapshot 返回 UsageStats 快照：TTL 内直接命中；过期且有旧值
+// 时先回旧值、由首个过期调用方触发后台刷新；仅在没有任何快照时
+// （首次加载）同步等一趟聚合。
 func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error) {
 	for {
 		h.usageMu.Lock()
-		if !h.usageAt.IsZero() && time.Since(h.usageAt) < usageCacheTTL {
+		fresh := !h.usageAt.IsZero() && time.Since(h.usageAt) < usageCacheTTL
+		if fresh {
 			snap := h.usageSnap
 			h.usageMu.Unlock()
 			return snap, nil
 		}
 		if h.usageFetch != nil {
 			done := h.usageFetch
+			stale := h.usageSnap
+			hasStale := !h.usageAt.IsZero()
 			h.usageMu.Unlock()
+			if hasStale {
+				return stale, nil // 刷新由在途者收尾
+			}
 			select {
 			case <-done:
 				continue
@@ -395,23 +403,33 @@ func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error
 				return store.UsageSnapshot{}, ctx.Err()
 			}
 		}
-		h.usageFetch = make(chan struct{})
+		done := make(chan struct{})
+		h.usageFetch = done
+		stale := h.usageSnap
+		hasStale := !h.usageAt.IsZero()
 		h.usageMu.Unlock()
-
-		// 快照是 handler 级共享缓存：单个调用方断连不应掐死其他
-		// 等待者共用的聚合。
-		snap, err := h.store.UsageStats(context.WithoutCancel(ctx))
-
-		h.usageMu.Lock()
-		if err == nil {
-			h.usageSnap = snap
-			h.usageAt = time.Now()
+		if hasStale {
+			go h.runUsageFetch(done)
+			return stale, nil
 		}
-		close(h.usageFetch)
-		h.usageFetch = nil
-		h.usageMu.Unlock()
-		return snap, err
+		return h.runUsageFetch(done)
 	}
+}
+
+// runUsageFetch 执行一趟 UsageStats 聚合、刷新缓存并关闭 done 通知
+// 等待方。用 Background ctx：快照是 handler 级共享缓存，单个调用方
+// 断连不应掐死共用的计算。
+func (h *Handler) runUsageFetch(done chan struct{}) (store.UsageSnapshot, error) {
+	snap, err := h.store.UsageStats(context.Background())
+	h.usageMu.Lock()
+	if err == nil {
+		h.usageSnap = snap
+		h.usageAt = time.Now()
+	}
+	close(done)
+	h.usageFetch = nil
+	h.usageMu.Unlock()
+	return snap, err
 }
 
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
