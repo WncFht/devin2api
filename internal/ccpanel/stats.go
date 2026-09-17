@@ -5,7 +5,6 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -78,23 +77,8 @@ type statScope struct {
 // 调用方直接回空集。
 func (h *Handler) queryScope(r *http.Request) (scope statScope, excluded bool) {
 	q := r.URL.Query()
-	if id := identityFrom(r); id.Role == "api_token" {
-		scope.kh = id.KeyHash
-		if scope.kh == "" {
-			return scope, true
-		}
-	}
-	if raw := strings.TrimSpace(q.Get("auth_token_id")); raw != "" {
-		tkh := ""
-		if tid, err := strconv.ParseInt(raw, 10, 64); err == nil && h.tokens != nil {
-			if t, ok := h.tokens.Get(tid); ok {
-				tkh = t.KeyHash()
-			}
-		}
-		if tkh == "" || (scope.kh != "" && tkh != scope.kh) {
-			return scope, true
-		}
-		scope.kh = tkh
+	if scope.kh, excluded = h.scopeKeyHash(r); excluded {
+		return scope, true
 	}
 	scope.api = strings.TrimSpace(q.Get("api"))
 	scope.model = strings.TrimSpace(q.Get("model"))

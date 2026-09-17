@@ -180,24 +180,18 @@ func (h *Handler) projectLogEntry(e *store.LogRow, prices map[string]CatalogPric
 	return entry
 }
 
-// logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
-// 该 key_hash 的行；excluded 表示筛选条件不可能命中，直接回空集。
-// 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
-// log_source 合法性校验），行级维度全部下推 LogQuery。
-func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
-	q := r.URL.Query()
-	switch strings.TrimSpace(q.Get("log_source")) {
-	case "", "all", "proxy", "manual_test":
-	default:
-		return "", true
-	}
+// scopeKeyHash 把请求的数据范围收敛成 key_hash：api_token 身份强制只看
+// 自己令牌的行（KeyHash 缺失即排空）；auth_token_id 参数把指定令牌解析
+// 成 key_hash——查无令牌或与 api_token 身份冲突都判 excluded（条件不可能
+// 命中，调用方回空集）。logScope/queryScope 共用这段解析。
+func (h *Handler) scopeKeyHash(r *http.Request) (kh string, excluded bool) {
 	if id := identityFrom(r); id.Role == "api_token" {
 		kh = id.KeyHash
 		if kh == "" {
 			return "", true
 		}
 	}
-	if raw := strings.TrimSpace(q.Get("auth_token_id")); raw != "" {
+	if raw := strings.TrimSpace(r.URL.Query().Get("auth_token_id")); raw != "" {
 		tkh := ""
 		if tid, err := strconv.ParseInt(raw, 10, 64); err == nil && h.tokens != nil {
 			if t, ok := h.tokens.Get(tid); ok {
@@ -210,6 +204,19 @@ func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
 		kh = tkh
 	}
 	return kh, false
+}
+
+// logScope 把日志查询的数据范围折成 (key_hash, excluded)：kh 非空时只放
+// 该 key_hash 的行；excluded 表示筛选条件不可能命中，直接回空集。
+// 范围来源与 queryScope 同源（api_token 身份 + auth_token_id、
+// log_source 合法性校验），行级维度全部下推 LogQuery。
+func (h *Handler) logScope(r *http.Request) (kh string, excluded bool) {
+	switch strings.TrimSpace(r.URL.Query().Get("log_source")) {
+	case "", "all", "proxy", "manual_test":
+	default:
+		return "", true
+	}
+	return h.scopeKeyHash(r)
 }
 
 // logQuery 是 logs/export/matrix 三个列表类端点共用的筛选解析：
