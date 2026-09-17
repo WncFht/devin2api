@@ -73,7 +73,7 @@ type logEntry struct {
 	Duration                 float64           `json:"duration"`
 	IsStreaming              bool              `json:"is_streaming"`
 	UpstreamWebsocket        bool              `json:"upstream_websocket,omitempty"`
-	FirstByteTime            float64           `json:"first_byte_time"`
+	FirstByteTime            float64           `json:"first_byte_time,omitempty"`
 	APIKeyUsed               string            `json:"api_key_used"`
 	APIKeyHash               string            `json:"api_key_hash,omitempty"`
 	AuthTokenID              int64             `json:"auth_token_id"`
