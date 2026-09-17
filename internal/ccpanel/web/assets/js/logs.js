@@ -186,11 +186,7 @@ function saveColVisibility() {
   }
 }
 
-// time 列承载列设置入口（齿轮），隐藏它会关掉唯一入口——固定不可隐藏。
-const LOGS_LOCKED_COL = 'time';
-
 function isColVisible(key) {
-  if (key === LOGS_LOCKED_COL) return true;
   return colVisibility[key] !== false;
 }
 
@@ -215,32 +211,27 @@ function renderColToggleMenu() {
   list.innerHTML = '';
   for (const col of LOG_COLUMNS) {
     const visible = isColVisible(col.key);
-    const locked = col.key === LOGS_LOCKED_COL;
     const item = document.createElement('label');
     item.className = 'logs-col-toggle-item';
     item.dataset.colKey = col.key;
     item.dataset.visible = String(visible);
-    if (locked) {
-      item.dataset.locked = 'true';
-      item.title = i18nText('logs.colSettingsLocked', '该列承载列设置入口，固定显示');
-    }
     item.innerHTML = `<span class="logs-col-toggle-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span>${escapeHtml(i18nText(col.i18n, col.i18n))}</span>`;
-    if (!locked) {
-      item.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const newVisible = !isColVisible(col.key);
-        colVisibility[col.key] = newVisible;
-        item.dataset.visible = String(newVisible);
-        saveColVisibility();
-        applyColVisibility();
-      });
-    }
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const newVisible = !isColVisible(col.key);
+      colVisibility[col.key] = newVisible;
+      item.dataset.visible = String(newVisible);
+      saveColVisibility();
+      applyColVisibility();
+    });
     list.appendChild(item);
   }
 }
 
-function toggleColMenu() {
+// 菜单用 position:fixed 挂在表格外定位，相对触发按钮右对齐弹出；
+// 按钮在工具栏里（不随表格横向滚动），fixed 天然免疫容器裁剪。
+function toggleColMenu(trigger) {
   const menu = document.getElementById('colToggleMenu');
   if (!menu) return;
   const isOpen = !menu.hidden;
@@ -251,13 +242,10 @@ function toggleColMenu() {
   renderColToggleMenu();
   menu.hidden = false;
 
-  const btn = document.querySelector('.logs-col-toggle-btn');
-  if (btn) {
-    const btnRect = btn.getBoundingClientRect();
-    const container = menu.parentElement;
-    const containerRect = container.getBoundingClientRect();
-    menu.style.top = (btnRect.bottom - containerRect.top + 4) + 'px';
-    menu.style.left = (btnRect.left - containerRect.left) + 'px';
+  if (trigger) {
+    const rect = trigger.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.left = Math.max(8, rect.right - menu.offsetWidth) + 'px';
   }
 }
 
@@ -265,7 +253,7 @@ function closeColMenuOnClickOutside(e) {
   const menu = document.getElementById('colToggleMenu');
   if (!menu || menu.hidden) return;
   if (menu.contains(e.target)) return;
-  if (e.target.closest('.logs-col-toggle-btn')) return;
+  if (e.target.closest('[data-action="toggle-col-menu"]')) return;
   menu.hidden = true;
 }
 
@@ -1921,7 +1909,7 @@ function initLogsPageActions() {
         'next-logs-page': () => nextLogsPage(),
         'last-logs-page': () => lastLogsPage(),
         'close-debug-log-modal': () => closeDebugLogModal(),
-        'toggle-col-menu': () => toggleColMenu()
+        'toggle-col-menu': (el) => toggleColMenu(el)
       }
     });
   }

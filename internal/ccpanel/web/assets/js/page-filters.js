@@ -135,6 +135,7 @@
       hideZeroSuccess,
       filterButton,
       logsSummary: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
+              <button id="btn_col_settings" type="button" class="btn btn-secondary filter-btn" data-action="toggle-col-menu" data-i18n-title="logs.colSettings" data-i18n-aria-label="logs.colSettings" aria-label="列显隐设置" title="列显隐设置"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/></svg><span data-i18n="logs.colVisibility">列显隐</span></button>
               <button id="btn_export_csv" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportCsv">导出CSV</button>
               <button id="btn_export_json" type="button" class="btn btn-secondary filter-btn" data-i18n="logs.exportJson">导出JSON</button>
               ${clearButtonControl}
