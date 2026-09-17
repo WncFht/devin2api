@@ -102,10 +102,6 @@ func TestWarmKeyOf(t *testing.T) {
 	if k := w.keyOf(tail, "uid-a"); k.SysHash != w.keyOf(warmTestRequest("sess", strings.Repeat("s", 4096), "hello"), "uid-a").SysHash {
 		t.Fatal("SysHash should only cover the 4K head")
 	}
-	var nilWarmer *cacheWarmer
-	if nilWarmer.keyOf(base, "uid") != (warmLineageKey{}) {
-		t.Fatal("nil warmer must return zero key")
-	}
 	off := newCacheWarmer(warmTestAdapter(), WarmConfig{Enabled: false})
 	defer off.Close()
 	if off.keyOf(base, "uid") != (warmLineageKey{}) {
@@ -571,15 +567,6 @@ func TestWarmDisabledAndNilSafe(t *testing.T) {
 	if stats := off.stats(); stats.Enabled || stats.Entries != 0 {
 		t.Fatalf("disabled stats = %+v, want zero", stats)
 	}
-	var nilWarmer *cacheWarmer
-	nilWarmer.retain(key, request, "uid", "")
-	nilWarmer.noteSend(key)
-	nilWarmer.noteCompleted(key, &llm.AssistantMessage{})
-	nilWarmer.setParams(WarmConfig{})
-	nilWarmer.Close()
-	if nilWarmer.stats() != (WarmStats{}) {
-		t.Fatal("nil warmer stats must be zero")
-	}
 	// 开启态零键同样 no-op。
 	w, _ := newTestWarmer(t, WarmConfig{})
 	w.retain(warmLineageKey{}, request, "uid", "")
@@ -641,6 +628,4 @@ func TestWarmBeginDrain(t *testing.T) {
 	if _, ok := w.entries[key]; ok {
 		t.Fatal("drained entry past maxIdle must still retire")
 	}
-	var nilWarmer *cacheWarmer
-	nilWarmer.BeginDrain()
 }

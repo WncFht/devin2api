@@ -636,33 +636,39 @@ func resolveLocalRef(root any, ref string) (any, bool) {
 	return current, true
 }
 
-// schemaKeywords 是判断「该 map 是不是 schema」的关键字集合；
-// 判定只需要存在性，不要求穷尽 JSON Schema 全部关键字。
-var schemaKeywords = map[string]bool{
-	"type": true, "properties": true, "items": true, "required": true,
-	"additionalProperties": true, "allOf": true, "anyOf": true, "oneOf": true,
-	"not": true, "enum": true, "const": true, "format": true, "pattern": true,
-	"minLength": true, "maxLength": true, "minimum": true, "maximum": true,
-	"exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true,
-	"minItems": true, "maxItems": true, "uniqueItems": true, "contains": true,
-	"minProperties": true, "maxProperties": true, "patternProperties": true,
+// schemaObjectValuedKeywords 是 JSON Schema 语法上值本身可为 map 的
+// 关键字：这些键带 map 值时，「关键字用法」与「属性名恰叫该关键字」
+// 两种解读都成立（{"properties":{…}} 既可读作真 schema 也可读作名为
+// properties 的属性），按真 schema 保守不包裹。type/required/enum/
+// description 等只收标量或数组的关键字不在此列——它们带 map 值必为
+// 属性名（{"type":{"type":"string"}} 是名为 type 的属性而非非法
+// type 声明）。
+var schemaObjectValuedKeywords = map[string]bool{
+	"properties": true, "patternProperties": true,
+	"items": true, "additionalProperties": true, "contains": true,
+	"not": true, "if": true, "then": true, "else": true,
 	"propertyNames": true, "dependentRequired": true, "dependentSchemas": true,
-	"prefixItems": true, "if": true, "then": true, "else": true,
-	"readOnly": true, "writeOnly": true, "deprecated": true,
-	"description": true, "title": true, "default": true, "examples": true,
+	// const/default 收任意字面量，对象默认值与属性重名同样不可区分。
+	"const": true, "default": true,
 }
 
 // isBarePropertyMap 判定对象是否是上游会拒绝的「裸属性 map」：
 // 没有 schema 关键字、没有 $/x- 前缀键，且每个值都是对象（即属性子 schema）。
+// 先判 child 形态再判关键字：map 值说明键是属性名，除非该键是一个
+// 语法上就收 map 值的 schema 关键字（见 schemaObjectValuedKeywords）——
+// 只收标量/数组的关键字带 map 值是属性而非声明。
 func isBarePropertyMap(object map[string]any) bool {
 	if len(object) == 0 {
 		return false
 	}
 	for key, child := range object {
-		if schemaKeywords[key] || strings.HasPrefix(key, "$") || strings.HasPrefix(strings.ToLower(key), "x-") {
+		if strings.HasPrefix(key, "$") || strings.HasPrefix(strings.ToLower(key), "x-") {
 			return false
 		}
 		if _, ok := child.(map[string]any); !ok {
+			return false
+		}
+		if schemaObjectValuedKeywords[key] {
 			return false
 		}
 	}

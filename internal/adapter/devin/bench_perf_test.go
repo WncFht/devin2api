@@ -133,9 +133,10 @@ func BenchmarkRecvDeltaStream(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		receiver := &fakeDevinResponseReceiver{responses: responses}
 		stream := &responseStream{
+			gate:     newRateGate(GateConfig{}, nil, ""),
 			frames:   pumpUpstream(context.Background(), receiver),
 			cancel:   func() {},
-			decoder:  newResponseDecoder("m", nil, nil),
+			decoder:  newResponseDecoder("m", nil, nil, nil),
 			recorder: nil,
 		}
 		for {

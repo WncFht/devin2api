@@ -12,6 +12,7 @@
 package devin
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -152,6 +153,16 @@ func sanitizeContents(content []llm.Content, hits map[string]int) []llm.Content 
 		case llm.ThinkingContent:
 			typed.Thinking = sanitizeUpstreamText(typed.Thinking, false, hits)
 			content[index] = typed
+		case llm.ToolCall:
+			// 写文件类参数内嵌的长文本可含指纹句（如 "You are Claude
+			// Code"）原文上行——ToolResultMessage 文本已被脱敏，这里
+			// 不脱就是不对称漏面。对参数串做同一套文本级替换：指纹是
+			// 明文短语，JSON 串内命中照常改写；替换词均为无需转义的
+			// 普通 ASCII 文案，不破坏参数 JSON 结构。
+			if sanitized := sanitizeUpstreamText(string(typed.Arguments), false, hits); sanitized != string(typed.Arguments) {
+				typed.Arguments = json.RawMessage(sanitized)
+				content[index] = typed
+			}
 		}
 	}
 	return content
@@ -221,6 +232,8 @@ func sanitizeUpstreamText(text string, includePromptOnly bool, hits map[string]i
 		if matches := rule.pattern.FindAllStringIndex(text, -1); len(matches) > 0 {
 			hits[rule.id] += len(matches)
 			text = rule.pattern.ReplaceAllString(text, rule.replacement)
+			// 替换产物可能包含后续规则的触发词，lower 跟随 text 重算。
+			lower = strings.ToLower(text)
 		}
 	}
 	return text

@@ -50,10 +50,14 @@ type webSearchOutcome struct {
 // 传 "03-devin-request" 占主文件位；Flow B 续轮内 chat 重发已占用
 // 主文件与 attemptN 编号空间，必须传 StageDevinSearchStem+seq 的独立
 // 词干，否则每次搜索都覆盖首个 chat 请求、扇出文件与续轮分片互撞。
-func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32, stem string) (webSearchOutcome, error) {
+// warmKey 是所属保温 lineage 的簿记句柄（与 getChatMessageWithRetry
+// 的 noteSend 同口径）；Flow A 无 retained 条目时传入也仅 no-op。
+func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32, stem string, warmKey warmLineageKey) (webSearchOutcome, error) {
 	var outcome webSearchOutcome
 	recorder := debuglog.FromContext(ctx)
 	name, version, os := adapter.CurrentConfig().ClientIdentity()
+	link := adapter.link()
+	link.warmer.kickRequest()
 	domains := allowedDomains
 	if len(domains) == 0 {
 		domains = []string{""}
@@ -76,6 +80,10 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			request.Domain = proto.String(domain)
 		}
 		recorder.NoteUpstreamSend()
+		// 搜索是客户端可归因上行：与 getChatMessageWithRetry 同口径推进
+		// lastTouch——纯托管搜索流量也要让保温簿记看得见，否则条目在
+		// 搜索期间被误判静默。
+		adapter.warm.noteSend(warmKey)
 		// 请求记录文件名由调用方给的词干派生；非 03 主文件的调用在
 		// 04 留归因标记，否则多份搜索响应无法对应到具体请求文件。
 		stage := stem + ".json"
@@ -86,7 +94,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "server_search_call", map[string]any{"stage": stage, "domain": domain})
 		}
 		recordProtoJSON(recorder, stage, request)
-		response, err := adapter.link().api.GetWebSearchResults(ctx, connect.NewRequest(request))
+		response, err := link.api.GetWebSearchResults(ctx, connect.NewRequest(request))
 		if err != nil {
 			adapter.gate.noteUpstreamError(err)
 			stage := debuglog.ErrStageDevinConnect
@@ -190,7 +198,7 @@ func (stream *serverSearchStream) Recv(context.Context) (llm.ResponseEvent, erro
 // 正是 Anthropic 服务端搜索在 /v1/messages 上的原生形态。
 func (adapter *Adapter) runServerSearch(ctx context.Context, request llm.RequestMessages, model string) (llm.ResponseStream, error) {
 	search := request.ServerSearch
-	outcome, err := adapter.runWebSearch(ctx, search.Query, search.AllowedDomains, search.BlockedDomains, serverSearchResultLimit, debuglog.StageDevinRequestStem)
+	outcome, err := adapter.runWebSearch(ctx, search.Query, search.AllowedDomains, search.BlockedDomains, serverSearchResultLimit, debuglog.StageDevinRequestStem, adapter.warm.keyOf(request, model))
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +304,7 @@ func (stream *responseStream) executeServerCall(ctx context.Context, call llm.To
 //
 // 三种去向里结果块都进入 partial，回放侧把它们翻译成 call+result 对上行。
 func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]llm.ResponseEvent) bool {
-	if stream.continueTurn == nil {
+	if stream.search == nil {
 		return false
 	}
 	doneIndex := -1
@@ -348,7 +356,7 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 	// 续轮 wire 上每个 Server 调用都要有配对结果：partial 里的结果块
 	//（含前序各跳已回答的）按内容序收集成 TOOL 消息序列——只带本跳
 	// 结果会把早先已回答的调用裸发上行，触发上游 invalid_argument。
-	resultMessages := make([]llm.ToolResultMessage, 0, len(serverCalls))
+	resultMessages := make([]llm.Message, 0, len(serverCalls))
 	for _, block := range stream.decoder.partial.Content {
 		result, ok := block.(llm.ServerToolResult)
 		if !ok {
@@ -368,11 +376,6 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		return false
 	}
 	*events = tail
-	// 上游按跳分别计 credit_cost：Done 的 Usage 只带最后一跳，前面
-	// 各跳的花费进 costsCarry，收尾时并入最终消息。
-	if costs := stream.decoder.partial.Usage.Costs; costs != nil {
-		stream.costsCarry += costs.CreditCost
-	}
 	// 续轮的 wire 形态：assistant 回显不含结果块（结果走 TOOL 消息），
 	// 解码器种子则带上结果块保住 ContentIndex 连续性。
 	assistant := stream.decoder.partial
@@ -384,7 +387,10 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		wireContent = append(wireContent, block)
 	}
 	assistant.Content = wireContent
-	frames, cancel, decoder, err := stream.continueTurn(assistant, resultMessages, stream.decoder.partial.Content)
+	extra := make([]llm.Message, 0, len(resultMessages)+1)
+	extra = append(extra, assistant)
+	extra = append(extra, resultMessages...)
+	frames, cancel, decoder, err := stream.extend("server_tool continuation", extra, stream.decoder.partial.Content)
 	if err != nil {
 		stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "server_tool_continuation_failed", map[string]any{"error": err.Error()})
 		// 续轮失败时回合照常收尾：客户端拿到了调用与结果，下一轮
@@ -393,6 +399,13 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		return false
 	}
 	stream.hops++
+	// 上游按跳分别计 credit_cost：Done 的 Usage 只带本跳读数，已完成
+	// 续轮跳的累计花费进 costsCarry，收尾时并入最终消息。累加必须在
+	// extend 成功之后——续轮失败时本跳 Done 照常下发，其 CreditCost
+	// 就是终值，提前入账会被 applyCostsCarry 再叠一遍（双计）。
+	if costs := assistant.Usage.Costs; costs != nil {
+		stream.costsCarry += costs.CreditCost
+	}
 	// 换流同 tryReopen：杀旧泵、重置窗口，新解码器已播种旧内容。
 	stream.cancel()
 	stream.frames = frames
@@ -413,7 +426,7 @@ func (stream *responseStream) applyCostsCarry(events []llm.ResponseEvent) {
 		return
 	}
 	for index, event := range events {
-		if event.Type != llm.ResponseEventDone {
+		if event.Type != llm.ResponseEventDone || event.Message == nil {
 			continue
 		}
 		if event.Message.Usage.Costs == nil {

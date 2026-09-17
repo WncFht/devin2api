@@ -28,7 +28,7 @@ func replayFixture(t *testing.T, name string, stopPatterns []string, customTools
 		t.Fatalf("open fixture: %v", err)
 	}
 	defer func() { _ = file.Close() }()
-	decoder := newResponseDecoder("swe-2-max", stopPatterns, customTools)
+	decoder := newResponseDecoder("swe-2-max", stopPatterns, customTools, nil)
 	events := decoder.start()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
