@@ -1,0 +1,77 @@
+name: Nightly
+
+on:
+  # 每日一次：反代最大风险是上游协议漂移，CI 的门禁全是假上游，
+  # 这层用真 token 打真上游补盲区。分钟错峰，不挤整点。
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # 真上游探针：smoke.sh 全真模式（/v1/models 走 GetCliModelConfigs
+  # 真实上游 RPC + SIGTERM 排空）。secrets.DEVIN_E2E_TOKEN 未配置时
+  # 整个 job 跳过——fork 与未配 token 的环境不会因此红。
+  upstream-probe:
+    name: Real upstream probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      # secrets 不能进 job if 条件，用 step output 门控后续步骤。
+      - name: Check token configured
+        id: gate
+        env:
+          DEVIN_E2E_TOKEN: ${{ secrets.DEVIN_E2E_TOKEN }}
+        run: |
+          if [[ -n "$DEVIN_E2E_TOKEN" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::secrets.DEVIN_E2E_TOKEN 未配置，跳过真上游探针"
+          fi
+
+      - name: Write e2e config
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          DEVIN_E2E_TOKEN: ${{ secrets.DEVIN_E2E_TOKEN }}
+        run: |
+          # devin: 段下插入 token 行；转义 & 与 \ 防 sed 替换串元字符。
+          escaped="$(printf '%s' "$DEVIN_E2E_TOKEN" | sed 's/[&\\]/\\&/g')"
+          sed "/^devin:/a\\  token: \"${escaped}\"" config.example.yaml > e2e-config.yaml
+          grep -q 'token:' e2e-config.yaml
+
+      - name: Smoke with real upstream
+        if: steps.gate.outputs.enabled == 'true'
+        run: bash scripts/smoke.sh --config e2e-config.yaml --port 18096
+
+  # 基准遥测：bench.sh 全基准低 count 跑一遍，结果存 artifact 留趋势。
+  # 不做 baseline 门限——benchstat 没有内置回归阈值退出码，先把逐日
+  # 数据留起来，需要时再补比较层。
+  bench:
+    name: Benchmark telemetry
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Run benchmarks
+        run: bash scripts/bench.sh "nightly-$(date +%F)" 5
+
+      - name: Upload bench results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-nightly
+          path: outputs/bench/
+          retention-days: 90

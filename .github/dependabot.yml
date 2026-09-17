@@ -1,0 +1,44 @@
+version: 2
+# 依赖与 action 版本漂移目前全靠手动；dependabot 按周开 PR，
+# govulncheck 管漏洞、它管版本新鲜度，两者互补。
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+
+  # 生成绑定的独立模块（replace 目标），依赖版本与 Taskfile 钉的一致。
+  - package-ecosystem: gomod
+    directory: /outputs/devin-proto-go
+    schedule:
+      interval: weekly
+    groups:
+      gomod-gen:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /scripts/panel-verify
+    schedule:
+      interval: weekly
+    groups:
+      npm-panel:
+        patterns: ["*"]
