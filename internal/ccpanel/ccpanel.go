@@ -82,6 +82,10 @@ type Handler struct {
 	// nil 时停采、日志与配额端点降级为空——与无 debug manager 的
 	// 口径一致。
 	store *store.Store
+	// statsCache 缓存 /admin|/dashboard/stats 的聚合结果：一轮是
+	// 格子扫描 + recentWindow×2 + lastByModel + recentRPM 的查询组，
+	// 面板轮询重放同一查询，命中时跳过全部聚合。
+	statsCache *statsCache
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
 	// history 是进程指标历史环（runtime-metrics/history 端点数据源）：
@@ -179,6 +183,7 @@ func New(d Deps) (*Handler, error) {
 		models:             d.Models,
 		maxConcurrencyFunc: d.MaxConcurrencyFunc,
 		pool:               d.Pool,
+		statsCache:         newStatsCache(),
 		startedAt:          time.Now(),
 	}
 	h.quota = &quotaSampler{h: h}

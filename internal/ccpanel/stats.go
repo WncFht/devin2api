@@ -90,6 +90,10 @@ func (h *Handler) queryScope(r *http.Request) (scope statScope, excluded bool) {
 // {stats:[StatsEntry per model], duration_seconds, rpm_stats, is_today}。
 // success/error/total/499 口径与 ccLoad GetStats SQL 逐条对齐
 // （success=2xx，error=非2xx非499，total=非499）。
+//
+// 整个响应进 statsCache：一轮聚合是格子扫描（一遍喂 per-model/rpm/
+// 健康桶三个累加器）+ recentWindow×2 + lastByModel + GROUP BY
+// recentRPM 的查询组，面板轮询直接回放。
 func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
@@ -100,6 +104,15 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		duration = 1
 	}
 	scope, excluded := h.queryScope(r)
+	var cacheKey string
+	var cacheTTL time.Duration
+	if !excluded {
+		cacheKey, cacheTTL = statsCacheKey(rangeName, since, until, scope, now)
+		if data, ok := h.statsCache.load(cacheKey); ok {
+			respondOK(w, data)
+			return
+		}
+	}
 	// recentBlock 聚合短窗（10s/60s）指标：req 非 499；tps 是生成速率
 	// （Σ输出 ÷ Σ生成时长，同表格速度列口径）；ttfb 沿用格子口径；
 	// cache_pct 同缓存命中列。
@@ -128,17 +141,17 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		return out
 	}
-	respond := func(stats []statsEntry, rpm map[string]any) {
-		respondOK(w, map[string]any{
+	build := func(stats []statsEntry, rpm map[string]any) map[string]any {
+		return map[string]any{
 			"stats":            stats,
 			"duration_seconds": duration,
 			"rpm_stats":        rpm,
 			"is_today":         isToday,
 			"recent":           map[string]any{"s10": recentBlock(10), "s60": recentBlock(60)},
-		})
+		}
 	}
 	if excluded {
-		respond([]statsEntry{}, zeroRPMStats())
+		respondOK(w, build([]statsEntry{}, zeroRPMStats()))
 		return
 	}
 	prices := h.CatalogPrices(ctx)
@@ -260,7 +273,9 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, e)
 	}
-	respond(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model, rpmTotal, rpmPeak))
+	data := build(entries, h.rpmStatsFiltered(ctx, since, until, scope, isToday, scope.model, rpmTotal, rpmPeak))
+	h.statsCache.store(cacheKey, data, cacheTTL)
+	respondOK(w, data)
 }
 
 // healthNumBuckets 是健康时间线的桶数（ccLoad fillHealthTimeline
