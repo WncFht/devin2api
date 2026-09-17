@@ -31,8 +31,6 @@ const (
 	MetaFile = "meta.json"
 	// ErrorFile 记录首个失败点；容量淘汰按它识别失败目录。
 	ErrorFile = "error.json"
-	// IndexFile 是跨请求索引（每完成请求追加一行摘要）。
-	IndexFile = "index.jsonl"
 	// StderrFile 是进程 stderr 日志（slog 行），部署脚本负责重定向写入。
 	StderrFile = "stderr.log"
 	// BindFailureFile 记录最近一次 listen 绑定失败（reuseport 交接争抢等），

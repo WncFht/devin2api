@@ -85,11 +85,11 @@ type Handler struct {
 	quotaUserMu sync.Mutex
 	quotaUsers  map[string]map[string]any
 
-	// debug 是 index.jsonl 与请求目录的读取入口。
+	// debug 是请求目录的读取入口（logs 表行查询走 store）。
 	debug *debuglog.Manager
-	// store 是 SQLite 持久层：配额样本的写入与历史曲线读取都走它。
+	// store 是 SQLite 持久层：日志行查询/聚合与配额样本读写都走它。
 	// 须在 SetQuotaInterval 前注入（采样协程起跑时定生死）；nil 时
-	// 停采、配额历史为空——与无 debug manager 的降级口径一致。
+	// 停采、日志与配额端点降级为空——与无 debug manager 的口径一致。
 	store *store.Store
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
@@ -130,9 +130,6 @@ type Handler struct {
 	startedAt time.Time
 
 	staticEntries sync.Map
-	// ru 是 index.jsonl 的增量聚合立方体：(10分钟槽 × 入口api × 模型)，
-	// 支撑 /dashboard/{summary,metrics,stats} 的任意时间窗查询。
-	ru *rollup
 }
 
 // New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
@@ -156,7 +153,6 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 		metrics:       metrics,
 		debug:         debug,
 		startedAt:     time.Now(),
-		ru:            newRollup(),
 	}
 	h.upstreamPtr.Store(up)
 	return h, nil

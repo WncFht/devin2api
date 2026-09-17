@@ -71,10 +71,10 @@ func benchEndToEnd(b *testing.B, debugEnabled bool, deltaCount, deltaSize int) {
 	slog.SetLogLoggerLevel(slog.LevelError)
 	var manager *debuglog.Manager
 	if debugEnabled {
-		manager = debuglog.NewManager(b.TempDir(), debuglog.RetentionPolicy{})
+		manager = debuglog.NewManager(b.TempDir(), debuglog.RetentionPolicy{}, nil)
 		defer manager.Close()
 	} else {
-		manager = debuglog.NewManager("", debuglog.RetentionPolicy{})
+		manager = debuglog.NewManager("", debuglog.RetentionPolicy{}, nil)
 	}
 	application := New(&benchAdapter{deltaCount: deltaCount, deltaSize: deltaSize}, config.ServerConfig{Listen: ":0", MaxConcurrency: 1024}, manager)
 	server := httptest.NewServer(application.Router())

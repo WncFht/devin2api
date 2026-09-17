@@ -1,5 +1,5 @@
 // 本文件是面向 agent 与运维的面板端点：API 自描述目录、配置自省与热重载、
-// 进程日志增量拉取、请求目录文件读取与 SSE 合并、日志导出、index.jsonl
+// 进程日志增量拉取、请求目录文件读取与 SSE 合并、日志导出、logs 表
 // 用量聚合、健康矩阵紧凑条目。
 package ccpanel
 
@@ -7,19 +7,20 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// requestsFetchCap 是请求列表单次扫描的索引行数上限；
-// 过滤与导出在这批记录内进行，更早历史用 grep 查 index.jsonl 原文件。
+// requestsFetchCap 是导出/矩阵单次查询的行数上限；
+// 更早历史经 /admin/logs 翻页或直接查 logs 表。
 const requestsFetchCap = 2000
 
 // matrixErrorMessageCap 是矩阵条目 error_message 的截断字节数：悬停归因
@@ -39,7 +40,7 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/admin/runtime-metrics", "description": "进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + gate 速率闸门状态 + warm 前缀保温簿记"},
 			{"method": "GET", "path": "/admin/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
 			{"method": "POST", "path": "/admin/config/reload", "description": "重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
-			{"method": "GET", "path": "/admin/usage", "description": "index.jsonl 聚合：今日/窗口累计、model_days 模型×日矩阵、按模型/按 key、错误阶段、10 分钟粒度趋势、p50/p95/p99、目录价估算成本"},
+			{"method": "GET", "path": "/admin/usage", "description": "logs 表聚合：今日/窗口累计、model_days 模型×日矩阵、按模型/按 key、错误阶段、10 分钟粒度趋势、p50/p95/p99、目录价估算成本"},
 			{"method": "GET", "path": "/admin/logs?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=&until=", "description": "最近请求（新在前）；q 子串（含 error_message）或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；since/until 钉时间窗；has_more 提示尾部窗外仍有更早历史，rejects 附管线前拒绝环（401/429 不进索引）"},
 			{"method": "GET", "path": "/admin/logs/matrix?since=", "description": "健康矩阵紧凑条目：只投影分桶与归因所需字段，不分页（扫描上限 2000）；truncated 为真表示 since 窗口覆盖不完整"},
 			{"method": "GET", "path": "/admin/logs/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSON 数组）；触及扫描上限带 X-Truncated: true"},
@@ -49,7 +50,7 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/admin/metrics", "description": "dashboardMetrics 同形：概要计数与速率"},
 			{"method": "GET", "path": "/admin/active-requests", "description": "进行中请求活快照：阶段状态、模型、已下发字节、已写文件、丢弃数"},
 			{"method": "GET", "path": "/admin/active-requests/{id}/debug-log", "description": "进行中请求的调试投影（目录已建即按 debug-logs/{id} 口径投影）"},
-			{"method": "GET", "path": "/admin/debug-logs/{id}", "description": "单请求 meta.json + 文件清单；id 是 started_at 的 epoch 毫秒"},
+			{"method": "GET", "path": "/admin/debug-logs/{id}", "description": "单请求 meta.json + 文件清单；id 是日志行自增 id（迁移前的 started_at 毫秒戳链接仍可解析）"},
 			{"method": "GET", "path": "/admin/debug-logs/{id}/merged", "description": "把 06-http-response.jsonl 的 SSE 帧合并成可读的最终响应（reasoning/content/tools）"},
 			{"method": "POST", "path": "/admin/debug-logs/merged-response", "description": "上传体合并版：body {\"resp_body\"}（前端可 gzip），与 GET merged 共用同一合并器"},
 			{"method": "GET", "path": "/admin/debug-logs/{id}/file/{name}", "description": "读取请求目录内文件（顶层或 attachments/），超 4MB 截断；?raw=1 原样回字节（CSP sandbox + nosniff）"},
@@ -69,14 +70,14 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "PUT", "path": "/admin/model-registry", "description": "写注册条目（启用/禁用/redirect_model）"},
 			{"method": "DELETE", "path": "/admin/model-registry", "description": "删注册条目"},
 			{"method": "GET", "path": "/admin/model-pricing?model=", "description": "单模型目录价投影（found=false 表示无目录价）"},
-			{"method": "POST", "path": "/admin/model-test", "description": "模型连通性探针（结果记 log_source=manual_test 的索引行）"},
+			{"method": "POST", "path": "/admin/model-test", "description": "模型连通性探针（结果记 log_source=manual_test 的日志行）"},
 			{"method": "POST", "path": "/admin/model-chat", "description": "面板内对话式模型测试（同 manual_test 归因）"},
 			{"method": "POST", "path": "/admin/update/check", "description": "检查上游 release 是否有新版本"},
 		},
 		"debug_workflow": []string{
 			"每个 /v1/* 响应带 X-Request-Id 头（=调试目录名）；错误体含 debug_ref 与 stage 字段",
-			"凭 X-Request-Id 到 /admin/logs?q=<dir> 找到 log_id（started_at epoch 毫秒），再调 /admin/debug-logs/{id} 拿 meta 与文件清单，逐个 file/ 读取",
-			"也可直接读磁盘 logs/index.jsonl（每完成请求一行摘要）与 logs/{dir}/（meta.json、01-06 阶段文件、error.json、attachments/）",
+			"凭 X-Request-Id 到 /admin/logs?q=<dir> 找到 log_id（logs 表自增主键），再调 /admin/debug-logs/{id} 拿 meta 与文件清单，逐个 file/ 读取",
+			"请求目录仍在磁盘 logs/{dir}/（meta.json、01-06 阶段文件、error.json、attachments/）；摘要行在状态目录的 devin-2api.db（SQLite logs 表）",
 		},
 	})
 }
@@ -126,14 +127,27 @@ func (h *Handler) adminProcessLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveDebugDir 把 ccLoad 契约的 log_id（started_at epoch 毫秒）解析为
-// 调试目录名；未命中回 ok=false（目录被 retention 清理或 id 伪造）。
-func (h *Handler) resolveDebugDir(r *http.Request) (dir string, ok bool) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil || id <= 0 || h.debug == nil {
-		return "", false
+// resolveDebugDir 把 ccLoad 契约的 log_id 解析为调试目录名与请求时刻
+// （毫秒）：先按 logs 表自增主键查，未命中再按迁移前的 started_at 毫秒戳
+// 兜底（目录名内嵌该时刻）。均未命中回 ok=false（retention 清理或伪造）。
+func (h *Handler) resolveDebugDir(r *http.Request, id int64) (dir string, timeMS int64, ok bool) {
+	if id <= 0 {
+		return "", 0, false
 	}
-	return h.debug.FindDirByStartedAt(id)
+	if h.store != nil {
+		d, ms, found, err := h.store.LogDirByID(r.Context(), id)
+		if err != nil {
+			slog.Warn("ccpanel: log dir lookup failed", "error", err)
+		} else if found {
+			return d, ms, true
+		}
+	}
+	if h.debug != nil {
+		if d, found := h.debug.FindDirByStartedAt(id); found {
+			return d, id, true
+		}
+	}
+	return "", 0, false
 }
 
 // adminDebugLogFile 返回请求目录内单个文件的内容；JSON/JSONL 原文回传，
@@ -142,7 +156,8 @@ func (h *Handler) resolveDebugDir(r *http.Request) (dir string, ok bool) {
 // 含 HTML/SVG，sandbox 让渲染出的文档处于 opaque origin（脚本拿不到
 // 面板会话），nosniff 禁掉嗅探覆盖。读出的字节都过 maskToken 兜底脱敏。
 func (h *Handler) adminDebugLogFile(w http.ResponseWriter, r *http.Request) {
-	dir, ok := h.resolveDebugDir(r)
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	dir, _, ok := h.resolveDebugDir(r, id)
 	if !ok {
 		respondError(w, http.StatusNotFound, "request log not found or already cleaned")
 		return
@@ -185,7 +200,8 @@ func (h *Handler) adminDebugLogFile(w http.ResponseWriter, r *http.Request) {
 // truncated 透传读取截断位：>4MB 的 06 只合并前 4MB，没有它调用方会把
 // 残缺流当成完整响应。
 func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
-	dir, ok := h.resolveDebugDir(r)
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	dir, _, ok := h.resolveDebugDir(r, id)
 	if !ok {
 		respondError(w, http.StatusNotFound, "request log not found or already cleaned")
 		return
@@ -205,27 +221,31 @@ func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminLogsExport 把筛选后的请求摘要导出为 JSON 数组或 CSV；
-// 触及扫描上限时带 X-Truncated: true 头（导出体本身无元数据位）。
-// 筛选口径与列表端点完全一致：requestFilter 索引级 + logRowMatch 行级
-// （api/log_source/model_like/auth_token_id 同样在导出生效）。
+// 命中数超 requestsFetchCap 时带 X-Truncated: true 头（导出体本身
+// 无元数据位）。筛选口径与列表端点完全一致（同一 logQuery 下推）。
 func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil {
+	if h.debug == nil || h.store == nil {
 		respondError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
-	kh, excluded := h.logScope(r)
-	var result debuglog.ListResult
+	lq, excluded := h.logQuery(r)
+	lq.Limit = requestsFetchCap
+	var rows []*store.LogRow
+	var total int64
 	if !excluded {
-		result = h.debug.ListRequests(requestsFetchCap, h.requestFilter(r))
-	}
-	match := h.logRowMatch(r, kh)
-	entries := make([]debuglog.IndexEntry, 0, len(result.Entries))
-	for _, e := range result.Entries {
-		if match(e) {
-			entries = append(entries, e)
+		var err error
+		rows, total, err = h.store.SearchLogs(r.Context(), lq)
+		if err != nil {
+			slog.Warn("ccpanel: logs export query failed", "error", err)
+			respondError(w, http.StatusInternalServerError, "logs query failed")
+			return
 		}
 	}
-	if result.HasMore {
+	entries := make([]debuglog.IndexEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, debuglog.IndexEntryFromRow(row))
+	}
+	if total > int64(len(entries)) {
 		w.Header().Set("X-Truncated", "true")
 	}
 	if r.URL.Query().Get("format") == "csv" {
@@ -300,17 +320,29 @@ type matrixEntry struct {
 }
 
 // adminLogsMatrix 给概览健康矩阵提供紧凑条目：窗口内条目不分页，
-// 扫描上限直接用满 requestsFetchCap——走 /admin/logs?limit= 的列表
+// 上限直接用满 requestsFetchCap——走 /admin/logs?limit= 的列表
 // 口径在高流量下盖不满 30 分钟分桶窗口。
 func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil {
+	if h.debug == nil || h.store == nil {
 		respondOK(w, map[string]any{"entries": []matrixEntry{}, "total": 0, "truncated": false, "disabled": true})
 		return
 	}
-	filter := h.requestFilter(r)
-	result := h.debug.ListRequests(requestsFetchCap, filter)
-	entries := make([]matrixEntry, 0, len(result.Entries))
-	for _, e := range result.Entries {
+	lq, excluded := h.logQuery(r)
+	lq.Limit = requestsFetchCap
+	var rows []*store.LogRow
+	var total int64
+	if !excluded {
+		var err error
+		rows, total, err = h.store.SearchLogs(r.Context(), lq)
+		if err != nil {
+			slog.Warn("ccpanel: logs matrix query failed", "error", err)
+			respondError(w, http.StatusInternalServerError, "logs query failed")
+			return
+		}
+	}
+	entries := make([]matrixEntry, 0, len(rows))
+	for _, row := range rows {
+		e := debuglog.IndexEntryFromRow(row)
 		entries = append(entries, matrixEntry{
 			StartedAt:       e.StartedAt,
 			Model:           e.Model,
@@ -327,30 +359,28 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 			RateLimited:     e.RateLimited,
 		})
 	}
-	// 截断判定不同于列表的 has_more（后者只说文件比尾部窗大）：窗口内
-	// 条目打满扫描上限，或尾部窗最早一行仍晚于 since（尾部边界落在
-	// 请求窗口内部，窗内可能有条目根本没被读到），才算覆盖不完整。
-	truncated := len(result.Entries) >= requestsFetchCap
-	if !truncated && result.HasMore && !filter.Since.IsZero() {
-		if tailStart, err := time.Parse(time.RFC3339Nano, result.IndexTailStart); err == nil {
-			truncated = tailStart.After(filter.Since)
-		}
-	}
+	// 截断判定简化为「命中总数超过返回条数」：SQL 计数精确，不再存在
+	// 尾部窗边界漏读的情形。
 	respondOK(w, map[string]any{
 		"entries":   entries,
-		"total":     len(entries),
-		"truncated": truncated,
+		"total":     total,
+		"truncated": total > int64(len(entries)),
 	})
 }
 
-// adminUsage 返回 index.jsonl 聚合快照，并按模型目录价附估算成本。
+// adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil {
+	if h.debug == nil || h.store == nil {
 		respondOK(w, map[string]any{"disabled": true})
 		return
 	}
-	snap := h.debug.UsageStats()
+	snap, err := h.store.UsageStats(r.Context())
+	if err != nil {
+		slog.Warn("ccpanel: usage stats query failed", "error", err)
+		respondError(w, http.StatusInternalServerError, "usage query failed")
+		return
+	}
 	catalog := h.modelCatalogMap(r.Context())
 	var totalCost float64
 	models := make([]map[string]any, 0, len(snap.Models))

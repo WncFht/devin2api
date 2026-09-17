@@ -135,10 +135,10 @@ func main() {
 		slog.Error("resolve state dir failed", "error", err)
 		os.Exit(1)
 	}
-	// logRoot 是 logs/ 运行期产物（请求 debug 目录、index.jsonl、
-	// stdout/stderr.log 等）的统一归属，独立于配置文件位置——配置是
-	// 用户输入，状态目录是程序输出，按平台规范分家。配额样本与闸门
-	// 闩态已入库（devin-2api.db 落状态根，稍后打开）。
+	// logRoot 是 logs/ 运行期产物（请求 debug 目录、stdout/stderr.log
+	// 等）的统一归属，独立于配置文件位置——配置是用户输入，状态目录是
+	// 程序输出，按平台规范分家。请求摘要行、配额样本与闸门闩态已入库
+	//（devin-2api.db 落状态根，稍后打开）。
 	logRoot := filepath.Join(absoluteStateDir, "logs")
 	if err := os.MkdirAll(logRoot, 0o755); err != nil {
 		slog.Error("create state dir failed", "dir", logRoot, "error", err)
@@ -209,26 +209,21 @@ func main() {
 		MaxTotalMB:    *serviceConfig.Debug.MaxTotalMB,
 		PayloadHours:  *serviceConfig.Debug.PayloadHours,
 		KeepErrorDirs: *serviceConfig.Debug.KeepErrorDirs,
-	})
+	}, dbStore)
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
 	application := app.New(devinPool, serviceConfig.Server, debugManager)
-	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
-	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
-	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
-	// 异步回放：回放数千条会拖慢 listen 之后的首次应答，SeedTrend 有锁。
-	// 50000 只是「尽可能多」的软上限——实际深度受 ListRequests 的
-	// indexTailBytes（4MB 尾部）约束，正常流量下也远超 60 分钟窗口所需。
-	go func() {
-		for _, e := range debugManager.ListRequests(50000, debuglog.RequestFilter{}).Entries {
-			started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
-			if err != nil {
-				continue
-			}
-			application.Metrics().SeedTrend(started.Add(time.Duration(e.DurationMS)*time.Millisecond),
-				e.StatusCode >= 400 || (e.Result != "" && e.Result != "completed"))
+	// 用 logs 表回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
+	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，
+	// 与 Finish 实时路径一致；管线前 Reject 不进表，这部分计数不回放。
+	// 50000 是上限；LogTrendSeeds 本身只取最近 60 分钟完成的行。
+	if seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000); err == nil {
+		for _, seed := range seeds {
+			application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
 		}
-	}()
+	} else {
+		slog.Warn("seed trend buckets failed", "error", err)
+	}
 	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，

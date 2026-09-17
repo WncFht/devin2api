@@ -1,31 +1,32 @@
-// 本文件实现跨请求索引：logs/index.jsonl 每完成一个请求追加一行摘要。
+// 本文件定义跨请求日志行的领域形状与写路径：每完成一个请求向
+// store 的 logs 表插一行摘要（取代旧 index.jsonl 追加）。
 //
-// 有了索引后，定位请求从「遍历目录逐个翻 meta.json」变成一次 grep；
-// 面板也可直接消费它渲染请求列表。
+// 有了索引行后，定位请求从「遍历目录逐个翻 meta.json」变成一次
+// SQL 查询；面板的列表/聚合全部直接读表。
 package debuglog
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
-	"errors"
-	"io"
-	"os"
+	"context"
 	"path/filepath"
 	"time"
 	"unicode/utf8"
 
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// indexFileCap 是 index.jsonl 的体积上限；超限后保留尾部一半重写。
-// 取值与启动回放窗口一致，保证聚合重建永远覆盖全文件。
-// var 而非 const：测试临时缩小它来覆盖截断路径。
-var indexFileCap int64 = usageReplayTailBytes
-
-// IndexEntry 是 index.jsonl 中一行请求的摘要。
+// IndexEntry 是一条请求日志行的面板投影形状——与 logs 表列一一对应，
+// 也是 /admin/logs/matrix 与 export 的 wire 元素。
 // 字段选择面向「grep 定位 + 面板列表」两个用途。
 type IndexEntry struct {
+	// ID 是 logs 表自增行号（面板 log_id 与 last_*_id 的身份）；
+	// 只在读路径回填，不随 JSON 出账——wire 上的 id 字段由投影层命名。
+	ID int64 `json:"-"`
+	// LogSource 是写入时定版的来源（proxy/manual_test）；读路径回填。
+	LogSource string `json:"-"`
+	// UpstreamProtocol 保留过滤维度的统一形状（当前恒 devin）；读路径回填。
+	UpstreamProtocol string `json:"-"`
+
 	Dir        string `json:"dir"`
 	StartedAt  string `json:"started_at"`
 	DurationMS int64  `json:"duration_ms"`
@@ -64,12 +65,12 @@ type IndexEntry struct {
 	// 让调用方能用自己的 ID 反查本次请求。
 	ClientRequestID string `json:"client_request_id,omitempty"`
 	// ErrorStage 是首个失败阶段（http_decode/provider_stream/http_stream 等），
-	// 让 grep 直接定位失败发生在哪一层。只在终结性失败（result!=completed）
+	// 让检索直接定位失败发生在哪一层。只在终结性失败（result!=completed）
 	// 时落盘：中途被重试救回的错误仍留在目录 error.json 与 retry_attempts
 	// 里，进索引会把「发生过失败」与「请求失败」混成一桶。
 	ErrorStage string `json:"error_stage,omitempty"`
 	// ErrorMessage 是首个失败的错误文案（与 error.json 的 message 同源，
-	// 截断至 errorMessageCap 字节）。目录被保留策略淘汰后，索引行仍能
+	// 截断至 errorMessageCap 字节）。目录被保留策略淘汰后，日志行仍能
 	// 回答「为什么败」——此前只剩阶段名，归因必须靠目录在场。
 	ErrorMessage  string `json:"error_message,omitempty"`
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
@@ -91,7 +92,7 @@ type IndexEntry struct {
 	// 明细在同目录 meta.json 的 upstream_attempts。0 表示首号即成。
 	AccountSwitches int `json:"account_switches,omitempty"`
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
-	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
+	// 供检索统计该模型行为的真实频率（见 Completion 同名字段）。
 	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
 	// Repairs 是请求投影为上游 wire 格式时的静默修复动作总数
 	//（重排/降级/剥离/指纹改写），明细在同名 meta.json 字段。
@@ -103,20 +104,22 @@ type IndexEntry struct {
 	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
 }
 
-// errorMessageCap 是 index 行 error_message 的截断字节数：保留首个失败
-// 的可归因文本，又不让超大错误文案把索引行撑变形。
+// errorMessageCap 是日志行 error_message 的截断字节数：保留首个失败
+// 的可归因文本，又不让超大错误文案把行撑变形。
 const errorMessageCap = 300
 
-// appendIndex 在请求完成后把摘要写入 index.jsonl。
-// 每行一次 Flush：索引是排障证据，进程崩溃也不能丢尾巴（Flush 只到
-// 内核页缓存——断电级故障不在担保范围）。
-// 条目序列化在锁外完成；indexMu 只罩住 index.jsonl 自身的 IO 与
-// 快照闸门——索引磁盘停滞不堵目录分配（见 manager.mutex 注释）。
-func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) {
+// insertLog 在请求完成后把摘要行插入 logs 表。
+// store 为 nil（测试或 DB 未接线）时静默跳过：日志行是观测副本，
+// 不该反过来决定请求能否完结——失败只记 ioErrors。
+func (manager *Manager) insertLog(recorder *Recorder, completion *Completion) {
+	dir := filepath.Base(recorder.directory)
+	if manager.store == nil || dir == "" {
+		return
+	}
 	account, accountAttempts := recorder.upstreamAttribution()
-	entry := IndexEntry{
-		Dir:               filepath.Base(recorder.directory),
-		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
+	row := store.LogRow{
+		Dir:               dir,
+		StartedAt:         recorder.startedAt,
 		DurationMS:        time.Since(recorder.startedAt).Milliseconds(),
 		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
 		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
@@ -156,73 +159,105 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		// error 字段只对终结性失败出账：被重试救回的中间错误留在目录
 		// error.json 与 meta.retry_attempts，不污染按失败点检索的口径。
 		if stage, message := recorder.FirstError(); stage != "" {
-			entry.ErrorStage = stage
-			entry.ErrorMessage = truncateRunes(message, errorMessageCap)
+			row.ErrorStage = stage
+			row.ErrorMessage = truncateRunes(message, errorMessageCap)
 		}
 	}
 	if conn := recorder.upstreamConn.Load(); conn != nil {
-		entry.ConnReused = &conn.reused
-		entry.ConnIdleMS = &conn.idleMS
+		row.ConnReused = &conn.reused
+		row.ConnIdleMS = &conn.idleMS
 	}
 	if repairs := recorder.repairs.Load(); repairs != nil {
-		entry.Repairs = repairs.Total()
+		row.Repairs = repairs.Total()
 	}
-	data, err := json.Marshal(entry)
-	if err != nil {
+	if _, err := manager.store.InsertLog(context.Background(), &row); err != nil {
 		manager.ioErrors.Add(1)
-		return
-	}
-	manager.indexMu.Lock()
-	defer manager.indexMu.Unlock()
-	if manager.indexWriter == nil {
-		file, err := os.OpenFile(filepath.Join(manager.root, IndexFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			manager.ioErrors.Add(1)
-			return
-		}
-		manager.indexFile = file
-		manager.indexWriter = bufio.NewWriter(file)
-		if info, statErr := file.Stat(); statErr == nil {
-			manager.indexBytes = info.Size()
-		}
-	}
-	if _, err := manager.indexWriter.Write(data); err != nil {
-		manager.ioErrors.Add(1)
-		return
-	}
-	_ = manager.indexWriter.WriteByte('\n')
-	if err := manager.indexWriter.Flush(); err != nil {
-		manager.ioErrors.Add(1)
-		return
-	}
-	manager.indexBytes += int64(len(data) + 1)
-	// 回放快照落定前完成的请求不单独入账：其索引行已在回放快照内，
-	// 由回放统一计入；落定后的行快照不可见，必须由实时路径累加——
-	// 闸门保证任一行恰入账一次（见 NewManager 的回放协程）。
-	if manager.indexSnapshotted.Load() {
-		manager.usage.add(entry)
-	}
-	if manager.indexBytes > indexFileCap {
-		manager.truncateIndexLocked()
 	}
 }
 
-// truncateIndexLocked 把 index.jsonl 截到尾部一半大小；调用方持有 indexMu。
-// 截断失败只记 ioErrors：写入器重置为惰性重开，索引继续追加不受影响。
-func (manager *Manager) truncateIndexLocked() {
-	if err := manager.indexWriter.Flush(); err != nil {
-		manager.ioErrors.Add(1)
+// IndexEntryFromRow 把 logs 表读回的行投影成 IndexEntry——matrix、
+// export 与测试断言共用的读路径 DTO 转换。
+func IndexEntryFromRow(row *store.LogRow) IndexEntry {
+	return IndexEntry{
+		ID:                row.ID,
+		LogSource:         row.LogSource,
+		UpstreamProtocol:  row.UpstreamProtocol,
+		Dir:               row.Dir,
+		StartedAt:         row.StartedAt.Format(time.RFC3339Nano),
+		DurationMS:        row.DurationMS,
+		RequestReadyMS:    row.RequestReadyMS,
+		UpstreamSentMS:    row.UpstreamSentMS,
+		UpstreamOpenMS:    row.UpstreamOpenMS,
+		FirstUpstreamMS:   row.FirstUpstreamMS,
+		FirstClientMS:     row.FirstClientMS,
+		API:               row.API,
+		Method:            row.Method,
+		Path:              row.Path,
+		StatusCode:        row.StatusCode,
+		Result:            row.Result,
+		RequestedModel:    row.RequestedModel,
+		Model:             row.Model,
+		ResponseModel:     row.ResponseModel,
+		ModelMismatch:     row.ModelMismatch,
+		Stream:            row.Stream,
+		InputTokens:       row.InputTokens,
+		OutputTokens:      row.OutputTokens,
+		CacheReadTokens:   row.CacheReadTokens,
+		CacheWriteTokens:  row.CacheWriteTokens,
+		ReasoningTokens:   row.ReasoningTokens,
+		TotalTokens:       row.TotalTokens,
+		CreditCost:        row.CreditCost,
+		UpstreamRequestID: row.UpstreamRequestID,
+		ClientIP:          row.ClientIP,
+		KeyHash:           row.KeyHash,
+		ClientRequestID:   row.ClientRequestID,
+		ErrorStage:        row.ErrorStage,
+		ErrorMessage:      row.ErrorMessage,
+		DroppedEvents:     row.DroppedEvents,
+		RetryAfterSeconds: row.RetryAfterSeconds,
+		RateLimited:       row.RateLimited,
+		Retries:           row.Retries,
+		Account:           row.Account,
+		AccountSwitches:   row.AccountSwitches,
+		PrematureEndTurn:  row.PrematureEndTurn,
+		Repairs:           row.Repairs,
+		ConnReused:        row.ConnReused,
+		ConnIdleMS:        row.ConnIdleMS,
 	}
-	_ = manager.indexFile.Close()
-	manager.indexWriter = nil
-	manager.indexFile = nil
-	path := filepath.Join(manager.root, IndexFile)
-	kept, err := TruncateToTail(path, indexFileCap/2)
-	if err != nil {
-		manager.ioErrors.Add(1)
-		return
+}
+
+// isRateLimited 判定日志行是否被限流语义终结：HTTP 429（上游真拒或本地
+// 闸门快败），或 200+流内错误事件下发的限流——后者靠 rate_limited
+// 标记认出（recorder 在记录错误时按文案语义置位）。
+// 判定只用行字段（result/status/error_stage/rate_limited）。
+func isRateLimited(e IndexEntry) bool {
+	return e.StatusCode == 429 || e.RateLimited
+}
+
+// ErrorOwner 把一条日志记录按失败责任归因（对齐 sub2api 的 error_owner +
+// is_business_limited 双标记，压缩成单维三值）。面板经 matrix 条目的
+// owner 字段直接消费，JS 不再复刻这份判定。
+//   - "client"：客户端断连/面板中断，或请求体读取与解码阶段的失败——
+//     还没碰到上游，责任在调用方；
+//   - "business_limited"：429（本地闩快败或上游限流）——配额动作不是
+//     服务质量故障，SLA 分母剔除；
+//   - "upstream"：其余失败（上游 5xx/语义错误/transport 断裂/代理自身
+//     编码失败）——SLA 口径里唯一算失分的类别；
+//   - ""：非失败请求。
+func ErrorOwner(e IndexEntry) string {
+	if isRateLimited(e) {
+		return "business_limited"
 	}
-	manager.indexBytes = kept
+	if e.Result == "disconnected" || e.Result == "aborted" {
+		return "client"
+	}
+	if e.StatusCode < 400 && e.Result != "failed" {
+		return ""
+	}
+	if e.ErrorStage == ErrStageHTTPRead || e.ErrorStage == ErrStageHTTPDecode {
+		return "client"
+	}
+	return "upstream"
 }
 
 // reasoningTokens 展开 Usage.Reasoning 指针为整数值。
@@ -259,61 +294,6 @@ func truncateRunes(s string, cap int) string {
 		cut--
 	}
 	return s[:cut]
-}
-
-// ScanIndex 从 offset 起增量扫描 index.jsonl 的完整行，逐条交给 fn。
-// 文件被截断重建（size<offset，见 truncateIndexLocked）时先调 resetFn
-// （可为 nil，调用方在此丢弃旧派生状态），随后从 0 重扫整个文件。
-// 返回下一次调用应传入的偏移。
-//
-// 并发安全建立在写路径的 Flush 粒度上：appendIndex 每条都是
-// 完整行+换行后一次 Flush，读者永远看不到半行；扫描不持锁，
-// 截断恰好落在 stat 与读之间的极小窗口由「只处理到最后一个换行」兜底。
-func (manager *Manager) ScanIndex(offset int64, resetFn func(), fn func(IndexEntry)) (int64, error) {
-	if manager == nil || manager.root == "" {
-		return 0, os.ErrNotExist
-	}
-	path := filepath.Join(manager.root, IndexFile)
-	info, err := os.Stat(path)
-	if err != nil {
-		return offset, err
-	}
-	if info.Size() < offset {
-		if resetFn != nil {
-			resetFn()
-		}
-		offset = 0
-	}
-	if info.Size() == offset {
-		return offset, nil
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return offset, err
-	}
-	defer func() { _ = file.Close() }()
-	data := make([]byte, info.Size()-offset)
-	n, readErr := file.ReadAt(data, offset)
-	data = data[:n]
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return offset, readErr
-	}
-	// 只消费到最后一个换行符；残余尾巴留给下一次扫描。
-	if cut := bytes.LastIndexByte(data, '\n'); cut < 0 {
-		return offset, nil
-	} else {
-		data = data[:cut+1]
-	}
-	for line := range bytes.Lines(data) {
-		if len(line) <= 1 {
-			continue
-		}
-		var e IndexEntry
-		if json.Unmarshal(line, &e) == nil {
-			fn(e)
-		}
-	}
-	return offset + int64(len(data)), nil
 }
 
 // releaseDir 把目录移出活跃集合，允许清理器回收它。

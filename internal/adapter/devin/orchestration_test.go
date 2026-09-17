@@ -436,7 +436,7 @@ func TestOrchestrationRateGateLocalReject(t *testing.T) {
 	}
 
 	// 第二次：带真 Recorder 验证 stage 归因 rate_gate。
-	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
 	t.Cleanup(manager.Close)
 	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/messages"})
 	ctx := debuglog.WithRecorder(context.Background(), recorder)

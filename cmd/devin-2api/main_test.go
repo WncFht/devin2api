@@ -55,7 +55,7 @@ func TestRunReturnsServeError(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := app.New(devinAdapter, config.ServerConfig{},
-		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}))
+		debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil))
 	if err := run(context.Background(), application, &http.Server{}, listener); err == nil {
 		t.Fatal("run() error = nil, want serve error")
 	}
@@ -101,7 +101,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 	runtimeConfigPtr.Store(&runtimeConfigState{cfg: prev, loadedAt: time.Now()})
 
-	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
+	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 	defer manager.Close()
 	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 	if err != nil {
@@ -311,7 +311,7 @@ auth:
 				t.Fatal(err)
 			}
 
-			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
+			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 			defer manager.Close()
 			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
 			if err != nil {

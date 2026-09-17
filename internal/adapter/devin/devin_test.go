@@ -964,7 +964,7 @@ func TestMapStopReason(t *testing.T) {
 // TestRecordProtoJSONRedactsMetadata 的测试动机是确保 Devin 原始请求可诊断但不会写出 token 和设备指纹。
 func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
-	recorder := debuglog.NewManager(root, debuglog.RetentionPolicy{}).Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
+	recorder := debuglog.NewManager(root, debuglog.RetentionPolicy{}, nil).Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/responses"})
 	request := &devinproto.GetChatMessageRequest{
 		Metadata: &devinproto.ExaCodeiumCommonPb_Metadata{ApiKey: proto.String("secret-token"), F: proto.String("fingerprint")},
 		Prompt:   proto.String("hello"),

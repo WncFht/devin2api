@@ -7,10 +7,12 @@
 //     （meta/error/01/02/05）留满整周期——磁盘大头是负载，
 //     留小文件不影响排障入口；
 //   - 容量淘汰时保护最近 N 个失败目录（含 error.json），成功请求先删；
-//   - index.jsonl、quota.jsonl、stderr.log 等顶层文件不属于请求目录。
+//   - stderr.log 等顶层文件不属于请求目录；logs 表行的时间清理见
+//     cleanLogRows（与目录保留是两条独立轴）。
 package debuglog
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -67,9 +69,10 @@ type requestDir struct {
 }
 
 // cleanOnce 执行一轮清理，返回删除的目录数。
-// 顺序：活跃目录跳过 → 剥离超龄负载 → 删超龄目录 → 总量超限从最旧淘汰
-// （受保护的失败目录除外）。
+// 顺序：logs 行按龄删除 → 活跃目录跳过 → 剥离超龄负载 → 删超龄目录 →
+// 总量超限从最旧淘汰（受保护的失败目录除外）。
 func (manager *Manager) cleanOnce() int {
+	manager.cleanLogRows()
 	entries, err := os.ReadDir(manager.root)
 	if err != nil {
 		return 0
@@ -168,6 +171,20 @@ func (manager *Manager) cleanOnce() int {
 		}
 	}
 	return removed
+}
+
+// cleanLogRows 按 LogRowRetentionDays 删除 logs 表的过期行；失败记
+// ioErrors 并告警——行清理是周期任务，一次失败不该静默漂移。
+func (manager *Manager) cleanLogRows() {
+	days := manager.LogRowRetentionDays()
+	if manager.store == nil || days <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+	if _, err := manager.store.DeleteLogsBefore(context.Background(), cutoff); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: clean log rows failed", "error", err)
+	}
 }
 
 // stripPayload 删除目录内的大体积负载文件，保留证据层文件。
