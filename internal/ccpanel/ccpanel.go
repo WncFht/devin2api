@@ -107,7 +107,7 @@ type Handler struct {
 	tokens *authtoken.Store
 	// models 是模型注册表仓；nil 时 /admin/model-registry 返回 503。
 	models *modelreg.Store
-	// settings 是运行时设置键仓（panel-settings.json）；nil 时 /admin/settings
+	// settings 是运行时设置键仓（settings 表）；nil 时 /admin/settings
 	// 返回空表。
 	settings *PanelSettings
 	// probeHandler 是应用根路由（含 /v1 管线），模型探活经它发进程内

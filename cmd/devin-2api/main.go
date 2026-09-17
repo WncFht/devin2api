@@ -248,11 +248,11 @@ func main() {
 	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
-	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对被登记键
+	// 运行时设置键仓：覆盖项落 settings 表；覆盖项对被登记键
 	// 恒赢 config.yaml。构造须在 app/panel 装配与 SetQuotaInterval 之后——
 	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
 	// 先建仓再重放，让面板改的值在启动时就生效。
-	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, ccpanel.SettingsDeps{
+	settingsStore, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 		Debug:       debugManager,
 		DevinConfig: devinPool.CurrentConfig,
 		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
@@ -312,9 +312,9 @@ func main() {
 			return runtimeConfigView(absoluteConfigPath)
 		},
 	})
-	// 模型注册表：models.json 落状态目录根；/v1 准入（停用/重定向）与
+	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
-	modelStore, err := modelreg.New(absoluteStateDir)
+	modelStore, err := modelreg.New(dbStore)
 	if err != nil {
 		slog.Error("load model registry failed", "error", err)
 		os.Exit(1)
@@ -555,7 +555,7 @@ func reloadRuntimeConfig(configPath, logRoot string, devinPool *devin.Pool, appl
 	}
 	// 面板覆盖项恒赢 config.yaml：先把各键的「文件值」默认快照重灌成
 	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
-	// panel-settings.json 里登记的覆盖键压回文件值。
+	// settings 表里登记的覆盖键压回文件值。
 	settings.ResampleDefaults(ccpanel.SettingDefaults{
 		Devin:          devinCfgs[0],
 		MaxConcurrency: cfg.Server.MaxConcurrency,

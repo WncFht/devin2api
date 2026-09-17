@@ -1,14 +1,13 @@
 package ccpanel
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,10 +20,11 @@ import (
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // 本文件实现 /admin/settings 的运行时键仓：值以字符串存取（ccLoad
-// SystemSetting 契约），覆盖项持久化到 state/panel-settings.json。
+// SystemSetting 契约），覆盖项持久化到 settings 表。
 // 只登记存在真实热更新路径的键；启动与 config reload 后重放覆盖——
 // 面板设置对被覆盖键恒赢 config.yaml（ccLoad system_settings 同款语义：
 // DB 持久层压过启动默认）。
@@ -79,10 +79,10 @@ type SettingDefaults struct {
 	Policy         debuglog.RetentionPolicy
 }
 
-// PanelSettings 管理 panel-settings.json 与键注册表。
+// PanelSettings 管理 settings 表与键注册表。
 type PanelSettings struct {
 	mu       sync.Mutex
-	path     string
+	st       *store.Store
 	defs     []settingDef
 	byKey    map[string]*settingDef
 	values   map[string]string // 覆盖值；不设则按 live/def 取生效值
@@ -90,18 +90,12 @@ type PanelSettings struct {
 	defaults atomic.Value      // SettingDefaults；def/reset 只读，atomic 免锁
 }
 
-// settingsFile 是 panel-settings.json 的持久化形状。
-type settingsFile struct {
-	Values  map[string]string `json:"values"`
-	Updated map[string]int64  `json:"updated,omitempty"`
-}
-
-// NewPanelSettings 创建键仓并加载 stateDir/panel-settings.json；deps
+// NewPanelSettings 创建键仓并从 settings 表水合覆盖项；deps
 // 提供全部热更入口（调用方须在 ccPanel/app 装配完成后构造，boot 采样
 // 的默认值反映 config.yaml 生效态）。构造时采样 config 派生状态作默认值。
-func NewPanelSettings(stateDir string, deps SettingsDeps) (*PanelSettings, error) {
+func NewPanelSettings(st *store.Store, deps SettingsDeps) (*PanelSettings, error) {
 	s := &PanelSettings{
-		path:    filepath.Join(stateDir, "panel-settings.json"),
+		st:      st,
 		byKey:   map[string]*settingDef{},
 		values:  map[string]string{},
 		updated: map[string]int64{},
@@ -118,26 +112,14 @@ func NewPanelSettings(stateDir string, deps SettingsDeps) (*PanelSettings, error
 	for i := range s.defs {
 		s.byKey[s.defs[i].key] = &s.defs[i]
 	}
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
+	values, updated, err := st.ListSettings(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	var f settingsFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		_ = os.Rename(s.path, s.path+".corrupt")
-		return s, nil
-	}
-	for k, v := range f.Values {
+	for k, v := range values {
 		if _, ok := s.byKey[k]; ok {
 			s.values[k] = v
-		}
-	}
-	for k, ts := range f.Updated {
-		if _, ok := s.byKey[k]; ok {
-			s.updated[k] = ts
+			s.updated[k] = updated[k]
 		}
 	}
 	return s, nil
@@ -777,8 +759,8 @@ func (s *PanelSettings) Get(key string) (map[string]any, bool) {
 	return s.row(d), true
 }
 
-// set 校验并应用单键（apply 含类型校验），成功后入覆盖表并落盘。
-// 调用方不得持锁。
+// set 校验并应用单键（apply 含类型校验），成功后入库并更新覆盖表。
+// 先写库后改内存：写失败时两侧一致保持旧值。调用方不得持锁。
 func (s *PanelSettings) set(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -789,13 +771,19 @@ func (s *PanelSettings) set(key, value string) error {
 	if err := d.apply(value); err != nil {
 		return err
 	}
+	// updated_at 沿用文件时代的 unix 秒口径（导入器原样保留），
+	// 不同于 store.SetSetting 零值的毫秒默认。
+	ts := time.Now().Unix()
+	if err := s.st.SetSetting(context.Background(), key, value, ts); err != nil {
+		return err
+	}
 	s.values[key] = value
-	s.updated[key] = time.Now().Unix()
-	return s.saveLocked()
+	s.updated[key] = ts
+	return nil
 }
 
-// reset 应用文件默认值后删除覆盖。先应用后删：应用失败时覆盖原样
-// 保留（内存与落盘一致），不会出现「内存已删、文件还在」的半更新态。
+// reset 应用文件默认值后删除覆盖。先应用后删行再改内存：应用失败时
+// 覆盖原样保留，不会出现「内存已删、库里还在」的半更新态。
 func (s *PanelSettings) reset(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -808,22 +796,12 @@ func (s *PanelSettings) reset(key string) error {
 			return err
 		}
 	}
+	if err := s.st.DeleteSetting(context.Background(), key); err != nil {
+		return err
+	}
 	delete(s.values, key)
 	delete(s.updated, key)
-	return s.saveLocked()
-}
-
-// saveLocked 原子落盘；调用方必须持锁。
-func (s *PanelSettings) saveLocked() error {
-	data, err := json.MarshalIndent(settingsFile{Values: s.values, Updated: s.updated}, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return nil
 }
 
 var errSettingNotFound = errors.New("setting not found")
