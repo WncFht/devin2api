@@ -28,7 +28,7 @@ func resolveRange(r *http.Request, now time.Time) (since, until time.Time, range
 		return d.AddDate(0, 0, -offset)
 	}
 	beginMonth := func(t time.Time) time.Time {
-		return time.Date(t.Year(), t.Month(), t.Day(), 1, 0, 0, 0, t.Location())
+		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
 	}
 	switch rangeName {
 	case "custom":
