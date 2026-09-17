@@ -97,16 +97,20 @@ type quotaAccount struct {
 	token string
 }
 
-// quotaAccounts 返回本轮要采样的账号清单：号池经 SetPoolTokenFuncs
-// 登记时逐号采（按名序输出稳定）；未登记回退面板首号凭据源、
-// account 字段留空——与历史上无号池时的行格式一致。
+// quotaAccounts 返回本轮要采样的账号清单，按三种状态分别处置：
+//   - poolTokenFuncs 未接线（nil）：回退面板首号凭据源的单号匿名
+//     采样，account 字段留空——与历史上无号池时的行格式一致；
+//   - 已接线但空池（返回空 map）：返回空清单整轮跳过——再往下走
+//     tokenFunc→firstLane 会裸取下标 panic，且每周期写一条
+//     account="" 的上游 401 失败行污染 default 桶；
+//   - 有号：逐号采，按名序输出稳定。
 func (h *Handler) quotaAccounts() []quotaAccount {
-	funcs := map[string]func() string{}
-	if h.poolTokenFuncs != nil {
-		funcs = h.poolTokenFuncs()
-	}
-	if len(funcs) == 0 {
+	if h.poolTokenFuncs == nil {
 		return []quotaAccount{{token: h.tokenFunc()}}
+	}
+	funcs := h.poolTokenFuncs()
+	if len(funcs) == 0 {
+		return nil
 	}
 	names := make([]string, 0, len(funcs))
 	for name := range funcs {
@@ -124,29 +128,40 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 func (h *Handler) sampleAccountQuota(account, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	user, plan, _, err := h.fetchUserStatusAs(ctx, token)
-	if err != nil {
+	if _, _, err := h.captureAccountQuota(ctx, account, token); err != nil {
 		slog.Warn("quota sample failed", "account", account, "error", err)
-		return
+	}
+}
+
+// captureAccountQuota 是逐号配额采样内核：拉取该号 userStatus、更新
+// quotaUsers 身份投影、把 planStatus 快照写入 quota_samples，返回
+// 投影后的 (user, plan)。定时采样与手动刷新共用——后者把返回值回
+// 显给操作者。plan 为 nil 表示上游 200 但未携带 planStatus：身份
+// 投影照常更新，本轮只是无配额点可写，不算错误。
+func (h *Handler) captureAccountQuota(ctx context.Context, account, token string) (user, plan map[string]any, err error) {
+	rawUser, plan, _, err := h.fetchUserStatusAs(ctx, token)
+	if err != nil {
+		return nil, nil, err
+	}
+	user = map[string]any{
+		"name":             strAny(rawUser["name"]),
+		"email":            strAny(rawUser["email"]),
+		"pro":              rawUser["pro"],
+		"teams_tier":       strAny(rawUser["teams_tier"]),
+		"plan_name":        strAny(plan["plan_name"]),
+		"billing_strategy": strAny(plan["billing_strategy"]),
 	}
 	h.quotaUserMu.Lock()
 	if h.quotaUsers == nil {
 		h.quotaUsers = map[string]map[string]any{}
 	}
-	h.quotaUsers[account] = map[string]any{
-		"name":             strAny(user["name"]),
-		"email":            strAny(user["email"]),
-		"pro":              user["pro"],
-		"teams_tier":       strAny(user["teams_tier"]),
-		"plan_name":        strAny(plan["plan_name"]),
-		"billing_strategy": strAny(plan["billing_strategy"]),
-	}
+	h.quotaUsers[account] = user
 	h.quotaUserMu.Unlock()
 	if plan == nil {
 		// 上游 200 但缺 planStatus：不写点也不报错会让曲线静默断档，
 		// 留一行痕迹说明「拉到了但无配额数据」。
 		slog.Warn("quota sample skipped: userStatus carried no planStatus", "account", account)
-		return
+		return user, nil, nil
 	}
 	point := &store.QuotaSample{
 		At:                time.Now().Unix(),
@@ -176,6 +191,23 @@ func (h *Handler) sampleAccountQuota(account, token string) {
 	if err := h.store.InsertQuotaSample(ctx, point); err != nil {
 		slog.Warn("quota sample persist failed", "account", account, "error", err)
 	}
+	return user, plan, nil
+}
+
+// refreshAccountQuota 即采一次指定账号配额：与定时采样共用
+// captureAccountQuota 内核（拉 userStatus、更新 quotaUsers 投影、
+// 落 quota_samples 行），把 {account, user, plan} 回给
+// /admin/accounts/{name}/quota/refresh 作响应体——plan 直出
+// fetchUserStatusAs 归一化后的 planStatus 子集，与采样落库的字段名
+// 同口径。上游失败返回 error（handler 映 502）；plan 为 nil 表示
+// 上游没报 planStatus。与定时采样同秒撞 (account,at) 唯一索引时
+// INSERT OR IGNORE 静默丢点，不算失败。
+func (h *Handler) refreshAccountQuota(ctx context.Context, account, token string) (map[string]any, error) {
+	user, plan, err := h.captureAccountQuota(ctx, account, token)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"account": account, "user": user, "plan": plan}, nil
 }
 
 // quotaHistoryCap 是单次读取的历史样本数上限；默认 5 分钟间隔下约覆盖
@@ -252,6 +284,8 @@ func (h *Handler) QuotaReport(ctx context.Context) map[string]any {
 	for _, point := range h.readQuotaHistory(ctx) {
 		name := point.Account
 		if name == "" {
+			// logs 逐号聚合同样按 COALESCE(NULLIF(account,''),'default')
+			// 对齐此口径——''/default/真名三群取值两侧折叠一致。
 			name = "default"
 		}
 		byAccount[name] = append(byAccount[name], point)

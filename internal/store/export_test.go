@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // readJSONLines 逐行解析一个 JSONL 文件为通用对象序列。
@@ -278,5 +280,120 @@ func TestExportLegacyPartialFailure(t *testing.T) {
 	}
 	if len(rep.Written) != 4 {
 		t.Fatalf("Written = %v, want 4", rep.Written)
+	}
+}
+
+// TestExportLegacyAccountsYAML upstream_accounts 活行导成可粘回
+// config.yaml devin.accounts 的 yaml 片段：enabled 进 accounts: 列表，
+// disabled 注释化列出（防盲粘回复活），墓碑不导；产出带「手工粘回、
+// 不自动回灌」旁注，且重导入不吃该文件。
+func TestExportLegacyAccountsYAML(t *testing.T) {
+	base := t.TempDir()
+	stateDir := filepath.Join(base, "state")
+	logRoot := filepath.Join(stateDir, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openTemp(t)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	for _, r := range []*AccountRow{
+		{Name: "yanjian", Token: "sess-y", CreatedAt: 1},
+		{Name: "randall", CredentialsFile: "/p/c.toml", Disabled: true, CreatedAt: 2},
+		{Name: "dead", Token: "x", Deleted: true, CreatedAt: 3},
+	} {
+		if err := s.UpsertAccount(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rep, err := s.ExportLegacy(ctx, stateDir, logRoot)
+	if err != nil {
+		t.Fatalf("ExportLegacy: %v", err)
+	}
+	target := filepath.Join(stateDir, "upstream_accounts.yaml")
+	found := false
+	for _, p := range rep.Written {
+		if p == target {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Written = %v, missing %s", rep.Written, target)
+	}
+	var sawPasteNotice bool
+	for _, n := range rep.Notices {
+		if strings.Contains(n, "paste") || strings.Contains(n, "never auto-imported") {
+			sawPasteNotice = true
+		}
+	}
+	if !sawPasteNotice {
+		t.Fatalf("notices = %v, want manual-paste notice", rep.Notices)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, "dead") {
+		t.Fatalf("tombstone leaked into export:\n%s", content)
+	}
+	if !strings.Contains(content, "#   - name: randall") ||
+		!strings.Contains(content, "#     credentials_file: /p/c.toml") {
+		t.Fatalf("disabled randall should be a commented entry:\n%s", content)
+	}
+	var doc struct {
+		Accounts []legacyAccountEntry `yaml:"accounts"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("export is not valid yaml: %v\n%s", err, content)
+	}
+	if len(doc.Accounts) != 1 || doc.Accounts[0].Name != "yanjian" ||
+		doc.Accounts[0].Token != "sess-y" {
+		t.Fatalf("accounts = %+v, want [yanjian]", doc.Accounts)
+	}
+
+	// 回灌豁免：ImportLegacy 不认这个文件——导出目录原样再导入，
+	// 不报错且 upstream_accounts 保持空表。
+	dup := openTemp(t)
+	defer func() { _ = dup.Close() }()
+	if err := dup.ImportLegacy(ctx, stateDir, logRoot); err != nil {
+		t.Fatalf("re-import with yaml present: %v", err)
+	}
+	if n := tableCount(t, dup, "upstream_accounts"); n != 0 {
+		t.Fatalf("upstream_accounts = %d, want 0 (yaml never auto-imported)", n)
+	}
+}
+
+// TestExportAccountsSkipsEmpty 无活行（空表或全墓碑）不产文件、不进 Written。
+func TestExportAccountsSkipsEmpty(t *testing.T) {
+	base := t.TempDir()
+	stateDir := filepath.Join(base, "state")
+	logRoot := filepath.Join(stateDir, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openTemp(t)
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	if err := s.UpsertAccount(ctx, &AccountRow{Name: "dead", Deleted: true, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := s.ExportLegacy(ctx, stateDir, logRoot)
+	if err != nil {
+		t.Fatalf("ExportLegacy: %v", err)
+	}
+	target := filepath.Join(stateDir, "upstream_accounts.yaml")
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("%s exists despite no live rows", target)
+	}
+	for _, p := range rep.Written {
+		if p == target {
+			t.Fatalf("Written contains skipped source %s", p)
+		}
 	}
 }

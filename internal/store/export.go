@@ -1,6 +1,8 @@
 // 本文件是 ImportLegacy 的逆方向：把库内状态写回文件时代布局
 // （logs/index.jsonl、auth_tokens.json、models.json、
 // panel-settings.json、quota.jsonl、gate-state*.json）。
+// upstream_accounts.yaml 是例外：面板账号没有文件时代对应物，导出的是
+// 手工粘回 config.yaml devin.accounts 的片段，ImportLegacy 不回灌。
 //
 // 服务的两类逃生场景：(a) 回滚文件版二进制且要保住 sqlite 窗口期
 // 写入——auth_tokens 的面板令牌变更是唯一真权限损失；(b) DB 损坏
@@ -10,6 +12,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ExportReport 汇总一次 ExportLegacy 的落盘结果。
@@ -40,14 +45,17 @@ type ExportReport struct {
 func (s *Store) ExportLegacy(ctx context.Context, stateDir, logRoot string) (*ExportReport, error) {
 	rep := &ExportReport{}
 	var errs []error
-	// run 执行单文件源：fn 返回实际路径与改道旁注，错误记名汇总。
+	// run 执行单文件源：fn 返回实际路径与改道旁注，错误记名汇总；
+	// actual 为空表示该源无内容可导（空表），不产文件。
 	run := func(name string, fn func(context.Context) (string, string, error)) {
 		actual, notice, err := fn(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("export %s: %w", name, err))
 			return
 		}
-		rep.Written = append(rep.Written, actual)
+		if actual != "" {
+			rep.Written = append(rep.Written, actual)
+		}
 		if notice != "" {
 			rep.Notices = append(rep.Notices, notice)
 		}
@@ -66,6 +74,9 @@ func (s *Store) ExportLegacy(ctx context.Context, stateDir, logRoot string) (*Ex
 	})
 	run("quota", func(ctx context.Context) (string, string, error) {
 		return s.exportQuota(ctx, filepath.Join(logRoot, "quota.jsonl"))
+	})
+	run("upstream_accounts", func(ctx context.Context) (string, string, error) {
+		return s.exportAccounts(ctx, filepath.Join(stateDir, "upstream_accounts.yaml"))
 	})
 	// gate-state 是多文件源（逐 lane 一文件），自收自支。
 	if paths, notices, err := s.exportGateStates(ctx, logRoot); err != nil {
@@ -197,6 +208,85 @@ func (s *Store) exportQuota(ctx context.Context, target string) (string, string,
 		}
 		return rows.Err()
 	})
+}
+
+// legacyAccountEntry 是 upstream_accounts.yaml 里一个账号条目的形状，
+// 字段与 config.DevinAccountConfig 的 yaml 键对齐，可原样粘回。
+type legacyAccountEntry struct {
+	Name            string `yaml:"name"`
+	Token           string `yaml:"token,omitempty"`
+	CredentialsFile string `yaml:"credentials_file,omitempty"`
+}
+
+// 导出文件头：交代用途与「不自动回灌」口径。
+const legacyAccountsHeader = `# devin-2api -export-legacy 产物：upstream_accounts 表的活行（deleted=0）。
+# 用法：把下面 accounts: 段手工粘进 config.yaml 的 devin: 段下（替换或
+# 合并既有 devin.accounts，注意整体缩进）。本文件不会被 ImportLegacy
+# 或启动流程自动回灌。
+`
+
+// legacyAccountsNotice 是文件产出时给操作员的旁注。
+const legacyAccountsNotice = "upstream_accounts.yaml is a config.yaml fragment for devin.accounts; paste it manually — it is never auto-imported"
+
+// exportAccounts 把 upstream_accounts 的活行写成 upstream_accounts.yaml。
+// 面板账号没有文件时代对应物——回滚旧二进制时面板加的号只能靠这个片段
+// 人工恢复；墓碑行不导（其 config 声明仍在操作员手里，死墓碑已被 GC）。
+// disabled 行以注释条目列在文末：config 的 DevinAccountConfig 没有
+// disabled 字段，写成 yaml 键会被 KnownFields 拒收，注释形态既保住凭据
+// 又防止盲粘回把停用号悄悄复活。无活行（空表/全墓碑）不产文件。
+func (s *Store) exportAccounts(ctx context.Context, target string) (string, string, error) {
+	rows, err := s.ListAccounts(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	var enabled, disabled []legacyAccountEntry
+	for _, r := range rows {
+		if r.Deleted {
+			continue
+		}
+		e := legacyAccountEntry{Name: r.Name, Token: r.Token, CredentialsFile: r.CredentialsFile}
+		if r.Disabled {
+			disabled = append(disabled, e)
+		} else {
+			enabled = append(enabled, e)
+		}
+	}
+	if len(enabled) == 0 && len(disabled) == 0 {
+		return "", "", nil
+	}
+	var buf bytes.Buffer
+	buf.WriteString(legacyAccountsHeader)
+	// 活条目走 yaml.Marshal 拿正确转义；disabled 段逐条 marshal 后注释化。
+	data, err := yaml.Marshal(struct {
+		Accounts []legacyAccountEntry `yaml:"accounts"`
+	}{Accounts: enabled})
+	if err != nil {
+		return "", "", err
+	}
+	buf.Write(data)
+	if len(disabled) > 0 {
+		buf.WriteString("\n# 以下账号在面板侧为停用（disabled）态，注释列出以防盲粘回复活；\n" +
+			"# 要恢复请取消注释并并入上面 accounts: 列表。\n")
+		for _, e := range disabled {
+			data, err := yaml.Marshal(&e)
+			if err != nil {
+				return "", "", err
+			}
+			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+			buf.WriteString("#   - " + lines[0] + "\n")
+			for _, l := range lines[1:] {
+				buf.WriteString("#     " + l + "\n")
+			}
+		}
+	}
+	actual, notice, err := writeExportAtomic(target, writeAll(buf.Bytes()))
+	if err != nil {
+		return "", "", err
+	}
+	if notice != "" {
+		return actual, notice + "; " + legacyAccountsNotice, nil
+	}
+	return actual, legacyAccountsNotice, nil
 }
 
 // exportGateStates 把 runtime_state 的 gate:* 键拆回 gate-state*.json：

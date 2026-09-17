@@ -53,22 +53,17 @@ type DevinAccountConfig struct {
 // gate:<name> 与日志字段，限定字母数字连字符下划线。
 var devinAccountNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
-// DefaultAccountName 是隐式单 lane（devin.token 单号形态）的账号名：
-// 日志/索引的 account 归因字段与面板逐账号视图都拿它当身份。
-// accounts 模式禁用作显式账号名——同名会撞上同名的存量 lane，
-// reload 差集把异号同名当「同一 lane 换 token」复用，warm 谱系与
-// assignment 凭据跨号渗漏。
-const DefaultAccountName = "default"
-
 // DevinConfig 保存 Devin Connect 上游调用配置。
 type DevinConfig struct {
 	// BaseURL 是 Devin Connect 服务的基础地址。
 	BaseURL string `yaml:"base_url"`
-	// Token 是 Devin session token；不会写入日志。与 Accounts 互斥——
-	// 单号简写只在没有账号池时生效。
+	// Token 是已删除的单号简写字段的占位空壳：yaml 键保留只为让
+	// Validate 对残留 devin.token 的旧配置产出迁移错误——删掉字段
+	// 会让 KnownFields(true) 把它报成未知字段，迁移指引被 parse 错误
+	// 吞掉。取值永不生效。
 	Token string `yaml:"token"`
-	// Accounts 声明多上游账号池；非空时自动发现链（env/credentials.toml）
-	// 整体关闭，凭据来源只剩各条目自己的 token/credentials_file。
+	// Accounts 声明上游账号池，是唯一的凭据来源；空集即合法空池。
+	// 自动发现链（env/CLI credentials.toml）不进 load 路径。
 	Accounts []DevinAccountConfig `yaml:"accounts"`
 	// Model 是 Devin chat model UID。
 	Model string `yaml:"model"`
@@ -260,22 +255,17 @@ func (config *Config) Validate(configDir string) error {
 	return nil
 }
 
-// resolveAccounts 校验并落实账号池声明：accounts 与 token 互斥；每个账号
-// 必须带合法且唯一的 name、至少一种凭据来源；credentials_file 在加载期
-// 就必须能解出 key（路径笔误不该静默产出一个死 lane）。同一有效 token
-// 或同一 credentials_file 被两个条目引用等于同一账号进池两次——限流
-// 簿记会各自按满额计数、合并超发，按配置错误拒绝。
-// accounts 非空时单号字段与自动发现链整体不生效。
+// resolveAccounts 校验并落实账号池声明：每个账号必须带合法且唯一的
+// name、至少一种凭据来源；credentials_file 在加载期就必须能解出 key
+// （路径笔误不该静默产出一个死 lane）。同一有效 token 或同一
+// credentials_file 被两个条目引用等于同一账号进池两次——限流簿记会
+// 各自按满额计数、合并超发，按配置错误拒绝。
+// devin.token 已删除：残留非空值报迁移错误。空 accounts 即空生效集
+// （合法空池）；自动发现链不进 load 路径，凭据来源只剩各条目自己的
+// token/credentials_file。
 func (devin *DevinConfig) resolveAccounts(configDir string) error {
-	if len(devin.Accounts) == 0 {
-		// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
-		if strings.TrimSpace(devin.Token) == "" {
-			devin.Token = ResolveDevinToken()
-		}
-		return nil
-	}
 	if strings.TrimSpace(devin.Token) != "" {
-		return errors.New("devin.token and devin.accounts are mutually exclusive")
+		return errors.New(`devin.token removed; declare devin.accounts: [{name, token|credentials_file}] (e.g. [{name: main, token: "<session-token>"}])`)
 	}
 	seenNames := make(map[string]bool, len(devin.Accounts))
 	seenTokens := make(map[string]string, len(devin.Accounts))
@@ -285,9 +275,6 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 		account.Name = strings.TrimSpace(account.Name)
 		if !devinAccountNamePattern.MatchString(account.Name) {
 			return fmt.Errorf("devin.accounts[%d]: name must match %s", index, devinAccountNamePattern)
-		}
-		if account.Name == DefaultAccountName {
-			return fmt.Errorf("devin.accounts[%d]: name %q is reserved for the implicit single-account lane", index, account.Name)
 		}
 		if seenNames[account.Name] {
 			return fmt.Errorf("devin.accounts[%d]: duplicate name %q", index, account.Name)
@@ -324,6 +311,19 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 		seenTokens[account.Token] = account.Name
 	}
 	return nil
+}
+
+// ResolveAccounts 对一整份账号集跑整表校验（名正则/重名/凭据至少
+// 其一/重 token/重 credentials_file/文件可解 key），返回锚定好
+// credentials_file、文件型条目 token 已补成文件内容的副本；入参不动。
+// 空集合法（合法空池），"default" 是普通账号名。API 干跑与 reload
+// 整表校验共用同一出口，不留平行校验。
+func ResolveAccounts(accounts []DevinAccountConfig, configDir string) ([]DevinAccountConfig, error) {
+	synthetic := &DevinConfig{Accounts: append([]DevinAccountConfig(nil), accounts...)}
+	if err := synthetic.resolveAccounts(configDir); err != nil {
+		return nil, err
+	}
+	return synthetic.Accounts, nil
 }
 
 // expandHomeDir 展开路径开头的 ~/（Go 不做 shell 式 ~ 展开，配置里
@@ -466,16 +466,17 @@ var devinCredentialsTokenPattern = regexp.MustCompile(`(?m)^\s*windsurf_api_key\
 
 // ResolveDevinToken 从本地 Devin 客户端状态中发现 session token。
 // 依次尝试 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量与 Devin CLI 登录产物
-// credentials.toml（路径见 devinCredentialsPaths，随平台变化）。
-// 找不到返回空串，由调用方决定是否报错。cmd/probe 等工具在 config.yaml
-// 缺失时也走这条链。
+// credentials.toml（路径见 DevinCredentialsPaths，随平台变化）。
+// 找不到返回空串，由调用方决定是否报错。
+// 不进服务 load 路径（账号凭据只认 devin.accounts 声明）——消费方是
+// /admin/accounts/cli-credentials 探针与 cmd/probe 等工具的兜底链。
 func ResolveDevinToken() string {
 	for _, name := range []string{"DEVIN_TOKEN", "WINDSURF_API_KEY"} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			return value
 		}
 	}
-	for _, path := range devinCredentialsPaths() {
+	for _, path := range DevinCredentialsPaths() {
 		if token := TokenFromCredentialsFile(path); token != "" {
 			return token
 		}
@@ -504,13 +505,13 @@ func readCredentialsFile(path string) (string, error) {
 	return "", errors.New("no windsurf_api_key")
 }
 
-// devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
+// DevinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。
 // Linux/macOS 上 CLI 遵循 XDG：数据目录为 $XDG_DATA_HOME，缺省
 // ~/.local/share。Windows 上 CLI 不单发，由 Windsurf 桌面端（即
 // Devin app）内置携带：resources/app/extensions/windsurf/devin/bin/devin.exe，
 // `devin.exe auth login` 写 %APPDATA%\devin\credentials.toml（已实测）；
 // %LOCALAPPDATA% 一并探测作兜底。
-func devinCredentialsPaths() []string {
+func DevinCredentialsPaths() []string {
 	var dirs []string
 	if runtime.GOOS == "windows" {
 		for _, env := range []string{"APPDATA", "LOCALAPPDATA"} {

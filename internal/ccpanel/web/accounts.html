@@ -15,8 +15,11 @@
   <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
   <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/echarts.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/accounts-view.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/accounts-ops.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/accounts.js?v=__VERSION__"></script>
 </head>
 <body class="accounts-page">
@@ -41,6 +44,8 @@
               </div>
             </div>
           </div>
+          <!-- 加号表单挂载点：ops 渲染 .acct-form（端点缺席时留空） -->
+          <div id="accounts-add"></div>
         </section>
 
         <!-- 全池脉冲 + 汇总 -->
@@ -57,8 +62,9 @@
           </div>
         </section>
 
-        <!-- 逐账号卡片 -->
+        <!-- 逐账号卡片；空池时整页空态（view 渲染 .accounts-empty，含 #accounts-empty-add 内嵌表单挂点） -->
         <section class="mb-6">
+          <div id="accounts-empty" hidden></div>
           <div id="accounts-list">
             <div class="glass-card" style="padding: var(--space-6);">
               <div class="loading-state">

@@ -139,7 +139,7 @@ The admin panel at `/web` (login: `dashboard.password`) renders these logs as a 
 3. **Formatted**: `gofmt -l .` produces no output (or `golangci-lint fmt` for gofmt+goimports)
 4. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
 5. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
-6. **No real tokens**: `config.yaml` is gitignored; keep it that way and make sure no real `devin.token` ends up in any committed file (pre-commit runs gitleaks to catch committed secrets)
+6. **No real tokens**: `config.yaml` is gitignored; keep it that way and make sure no real `devin.accounts[].token` ends up in any committed file (pre-commit runs gitleaks to catch committed secrets)
 
 ## Submitting changes
 

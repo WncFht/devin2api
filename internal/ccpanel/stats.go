@@ -61,12 +61,14 @@ type healthPoint struct {
 
 // statScope 是一次统计查询收敛后的过滤值：kh 为限定 key_hash（api_token
 // 身份或 auth_token_id 参数命中时），api/model/modelLike 来自 query——
-// 与 store.LogScope 一一对应，经 logScope() 下推到 SQL。
+// 与 store.LogScope 一一对应，经 logScope() 下推到 SQL。account 是
+// 上游账号 lane 名（读侧折叠口径），P2 逐号统计的支点，v1 无填充方。
 type statScope struct {
 	kh        string
 	api       string
 	model     string
 	modelLike string
+	account   string
 }
 
 // queryScope 把一次统计查询的数据范围折成 statScope。

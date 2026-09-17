@@ -159,8 +159,8 @@ type Recorder struct {
 	// 凭据，requestMeta.KeyHash 为空——拿到令牌后回填，index/meta 才能把
 	// 匿名流量归到该令牌行。非空时优先于 requestMeta.KeyHash。
 	keyHash string
-	// upstreamAccount 是最终服务本请求的上游账号名（号池 lane 身份，
-	// 单号部署恒为 "default"）；号池 failover 时它只记成功那次的归属，
+	// upstreamAccount 是最终服务本请求的上游账号名（号池 lane 名；
+	// 历史行有 ''/'default' 残留）；号池 failover 时它只记成功那次的归属，
 	// 之前的失败尝试落在 accountAttempts。
 	upstreamAccount string
 	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又

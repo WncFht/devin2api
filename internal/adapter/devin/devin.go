@@ -51,8 +51,7 @@ const (
 // Config 保存 Devin adapter 的固定上游配置。
 type Config struct {
 	// Name 是账号名：号池里每条 lane 的身份，进闸门状态键
-	// （gate:<name>）、日志与面板归因字段；单号部署归一为
-	// config.DefaultAccountName。
+	// （gate:<name>）、日志与面板归因字段。
 	Name string
 	// BaseURL 是 Devin Connect 服务的基础地址。
 	BaseURL string
@@ -379,7 +378,7 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		adapter.tokenMu.Lock()
 		adapter.token = next.Token
 		adapter.tokenMu.Unlock()
-		applied = append(applied, "devin.token")
+		applied = append(applied, "devin.accounts."+next.Name+".token")
 	}
 	adapter.gate.setParams(next.Gate)
 	if prev.Gate.MaxRPM != next.Gate.MaxRPM {

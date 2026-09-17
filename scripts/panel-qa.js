@@ -41,7 +41,7 @@ function loadPlaywright() {
 const { chromium } = loadPlaywright();
 const BASE = process.env.PANEL_QA_BASE || 'http://127.0.0.1:3033';
 const OUT = process.env.PANEL_QA_OUT || `/tmp/panel-qa-${Date.now()}`;
-const PAGES = ['index', 'stats', 'trend', 'quota', 'logs', 'models', 'tokens', 'settings'];
+const PAGES = ['index', 'stats', 'trend', 'accounts', 'logs', 'models', 'tokens', 'settings'];
 
 function token() {
   if (process.env.PANEL_QA_TOKEN) return process.env.PANEL_QA_TOKEN;

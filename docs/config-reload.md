@@ -6,14 +6,14 @@
 
 ## 当前分界
 
-热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（token、闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。`auth.api_key` 另有一条播种语义：每次 reload（不止值变化时）若令牌仓内没有对应哈希行，它被补种成普通令牌行——删掉种子行后 reload/重启会重新长出，彻底移除要清空配置值再删行。
+热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。`auth.api_key` 另有一条播种语义：每次 reload（不止值变化时）若令牌仓内没有对应哈希行，它被补种成普通令牌行——删掉种子行后 reload/重启会重新长出，彻底移除要清空配置值再删行。
 冷键只剩 server.listen：Serve 无法换绑端口，同一问题的更难版本（换进程）已由 reuseport 交接部署解决，进程内换监听收益小、排空语义一样绕不过。
 
 | 热应用（applied）                                                                                 | 需重启（requires_restart） |
 | ------------------------------------------------------------------------------------------------- | -------------------------- |
 | devin.model / devin.aliases / devin.client_name / client_version / client_os                      | server.listen              |
 | devin.base_url / devin.proxy / devin.force_http1                                                  |                            |
-| devin.token / devin.accounts                                                                      |                            |
+| devin.accounts（声明基座；与面板行叠加出的生效集驱动 lane 增删改）                                |                            |
 | devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        |                            |
 | devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                            |
 | auth.api_key / dashboard.password                                                                 |                            |
@@ -24,7 +24,7 @@
 端点三件套的热更语义：ApplyConfig 先用新参数构建整个上游调用束（transport + stream/api client + 焐池 warmer），构建失败（如非法 proxy）整单 422、旧配置继续服役；构建成功才换 config 快照并原子换指针。在途调用持旧 link 跑完，旧 transport 只收 idle 池；换 base_url 还会清空 AssignModel 缓存（jwt 绑 cascade_id，旧端点的解析对新上游无效）。面板经 `SetUpstream` 跟随同一端点，面板的展示地址读 `BaseURL()` 同源透出。
 注意 `devin.client_*` 只影响 chat 路径：面板自身的 seat 类上游调用固定用 windsurf 身份，不随这个键变。
 
-`devin.accounts` 按 lane 名做集合 diff：同名 lane 复用旧 adapter 走 ApplyConfig——token 与凭据来源（credentials_file 换路径、字面量 token 改值）都是热换值字段，保温谱系、assignment 与目录缓存、在途流全保住；新名 lane 先构建再入列；被删 lane 摘出后异步 Close，只停后台协程、在途流持引用跑完（与端点换绑同一生死模型）。lane 名序变化时报 `devin.accounts`，同名 lane 的字段差集仍按各 lane 差集并集进 `applied`；单号（隐式 default lane）与号池互转走同一条路径。任一 lane 构建/应用失败整单 422、已应用 lane 不回滚，与单 lane ApplyConfig 的失败语义一致。号池行为口径见 `devin-accounts.md`。
+`devin.accounts` 的 reload 语义建立在生效集上：每次重载先把 config 声明与 `upstream_accounts` 行合并（活行覆盖同名声明、墓碑压住声明、disabled 摘出 lane 集），再对生效 lane 集按名做集合 diff——同名 lane 复用旧 adapter 走 ApplyConfig（token 与凭据来源是热换值字段，保温谱系、assignment 与目录缓存、在途流全保住）；新名 lane 先构建再入列；被删/disabled/墓碑 lane 摘出后异步 Close，只停后台协程、在途流持引用跑完（与端点换绑同一生死模型）。lane 名序变化时报 `devin.accounts`，同名 lane 的字段差集仍按各 lane 差集并集进 `applied`（凭据差集以 `devin.accounts.<name>.token` 名义出现）；空生效集合法（空池）。面板的建/改/删/复活/停启用走同一条「合并 → 校验 → ApplyConfigs」路径（行先落库、重推失败回滚行），reload 成功后顺带 GC config 已撤名的死墓碑。任一 lane 构建/应用失败整单 422、已应用 lane 不回滚，与单 lane ApplyConfig 的失败语义一致。号池行为口径见 `devin-accounts.md`。
 
 ## 面板覆盖恒赢文件
 

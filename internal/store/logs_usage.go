@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -232,14 +233,24 @@ func sampleSummary(samples []int64) (avg, p95 int64) {
 }
 
 // recentSamples 返回某列最近 usageSampleCapacity 条样本（分位数只需要
-// 多重集，与旧蓄水池「最近 N 条入样」同口径）。
-func (s *Store) recentSamples(ctx context.Context, column string, nonNull bool) ([]int64, error) {
+// 多重集，与旧蓄水池「最近 N 条入样」同口径）。account 非空时按读侧
+// 折叠口径过滤单 lane（'default' 命中 ”+'default' 两群）。
+func (s *Store) recentSamples(ctx context.Context, column string, nonNull bool, account string) ([]int64, error) {
 	query := `SELECT ` + column + ` FROM logs`
+	var conds []string
+	var args []any
 	if nonNull {
-		query += ` WHERE ` + column + ` IS NOT NULL`
+		conds = append(conds, column+` IS NOT NULL`)
+	}
+	if account != "" {
+		conds = append(conds, logAccountExpr+` = ?`)
+		args = append(args, account)
+	}
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
-	rows, err := s.ro.QueryContext(ctx, query, usageSampleCapacity)
+	rows, err := s.ro.QueryContext(ctx, query, append(args, usageSampleCapacity)...)
 	if err != nil {
 		return nil, err
 	}
@@ -258,11 +269,11 @@ func (s *Store) recentSamples(ctx context.Context, column string, nonNull bool) 
 // LogLatency 返回全局延迟分位数摘要（duration/ttfb 两行）——
 // /admin/runtime-metrics 轮询只消费这两行。
 func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error) {
-	dur, err := s.recentSamples(ctx, "duration_ms", false)
+	dur, err := s.recentSamples(ctx, "duration_ms", false, "")
 	if err != nil {
 		return nil, err
 	}
-	ttfb, err := s.recentSamples(ctx, "first_upstream_ms", true)
+	ttfb, err := s.recentSamples(ctx, "first_upstream_ms", true, "")
 	if err != nil {
 		return nil, err
 	}
@@ -276,12 +287,15 @@ func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error)
 // 延迟样本走窗口函数取每桶最近 usageMinSampleCap 条（等同旧环形
 // 蓄水池的「留最新 N 个」语义）。范围谓词走 minute_bucket（time/60000
 // 物化列）：time/600000>=S ⟺ minute_bucket>=S*10，idx_logs_minute_*
-// 前缀索引即刻生效。
-func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinPoint, error) {
+// 前缀索引即刻生效。sc 为零值时全量——per-account 10 分钟趋势走
+// 逐号调用（LogScope{Account: lane}），lane 数个位数无压力。
+func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope) ([]UsageMinPoint, error) {
 	minSlot := currentSlot - usageMinBuckets + 1
 	minBucket := minSlot * 10
+	scopeWhere, scopeArgs := sc.where()
 	totalRows, err := s.ro.QueryContext(ctx,
-		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ? GROUP BY slot`, minBucket)
+		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ?`+scopeWhere+` GROUP BY slot`,
+		append([]any{minBucket}, scopeArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -307,8 +321,9 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinP
 			SELECT time/600000 AS slot, duration_ms, first_upstream_ms,
 				ROW_NUMBER() OVER (PARTITION BY time/600000 ORDER BY id DESC) AS rn_dur,
 				ROW_NUMBER() OVER (PARTITION BY time/600000, first_upstream_ms IS NOT NULL ORDER BY id DESC) AS rn_ttfb
-			FROM logs WHERE minute_bucket >= ?
-		) WHERE rn_dur <= ? OR (first_upstream_ms IS NOT NULL AND rn_ttfb <= ?)`, minBucket, usageMinSampleCap, usageMinSampleCap)
+			FROM logs WHERE minute_bucket >= ?`+scopeWhere+`
+		) WHERE rn_dur <= ? OR (first_upstream_ms IS NOT NULL AND rn_ttfb <= ?)`,
+		append(append([]any{minBucket}, scopeArgs...), usageMinSampleCap, usageMinSampleCap)...)
 	if err != nil {
 		return nil, err
 	}
@@ -582,13 +597,13 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	snap.Models = sortDimsByRequests(models)
 	snap.Keys = sortDimsByRequests(keys)
 
-	if snap.Points, err = s.usagePoints(ctx, time.Now().Unix()/600); err != nil {
+	if snap.Points, err = s.usagePoints(ctx, time.Now().Unix()/600, LogScope{}); err != nil {
 		return snap, err
 	}
-	if snap.Duration, err = s.latencyOf(ctx, "duration_ms", false); err != nil {
+	if snap.Duration, err = s.latencyOf(ctx, "duration_ms", false, ""); err != nil {
 		return snap, err
 	}
-	if snap.TTFB, err = s.latencyOf(ctx, "first_upstream_ms", true); err != nil {
+	if snap.TTFB, err = s.latencyOf(ctx, "first_upstream_ms", true, ""); err != nil {
 		return snap, err
 	}
 	if snap.RateLimitEvents, err = s.rateLimitEvents(ctx); err != nil {
@@ -597,9 +612,10 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	return snap, nil
 }
 
-// latencyOf 是 recentSamples + latencyStatsOf 的组合。
-func (s *Store) latencyOf(ctx context.Context, column string, nonNull bool) (LatencyStats, error) {
-	samples, err := s.recentSamples(ctx, column, nonNull)
+// latencyOf 是 recentSamples + latencyStatsOf 的组合；account 非空时
+// 样本限定该 lane（读侧折叠口径同 LogScope.Account）。
+func (s *Store) latencyOf(ctx context.Context, column string, nonNull bool, account string) (LatencyStats, error) {
+	samples, err := s.recentSamples(ctx, column, nonNull, account)
 	if err != nil {
 		return LatencyStats{}, err
 	}
@@ -656,4 +672,78 @@ func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
+}
+
+// AccountAggs 按上游账号 lane 聚合窗口内 logs：totals + avg TTFB + 末次
+// 时刻——P2 /admin/accounts 逐号维度表的支点。” 历史行折叠进
+// 'default' 桶（logAccountExpr），与 LogScope.Account、QuotaReport
+// 的读侧口径一致，不会出现 ”/'default' 幽灵分桶。
+func (s *Store) AccountAggs(ctx context.Context) ([]DimensionAgg, error) {
+	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
+	return s.dimAggs(ctx, logAccountExpr, minBucket)
+}
+
+// AccountUsageToday 是单账号本地日界内的原始计数。
+type AccountUsageToday struct {
+	Requests int64 // 全部完成行（含 499）
+	OK       int64 // 2xx——success_rate 分子
+	Non499   int64 // 非 499（ccLoad total 口径，success_rate 分母）
+	Tokens   int64 // total_tokens 和
+}
+
+// AccountUsageRow 是单账号 usage 块的原始量集合——内部行类型不进
+// wire，供 P2 /admin/accounts 的 usage 字段（{rpm_now, tps_now,
+// ttfb_avg, ttfb_p50, ttfb_p90, cache_rate, today:{requests,
+// success_rate, tokens}}）投影消费。口径全部复用既有读路径：
+//   - Recent：LogRecentWindow 60s 完成窗——rpm_now=Recent.Req（非 499
+//     完成数，同 LogRecentRPM），tps_now=Recent.OutTok*1000/Recent.GenMS
+//     （同 stats recentBlock 速度列），cache_rate=Recent.CrTok/
+//     (Recent.InTok+Recent.CrTok+Recent.CwTok)（同 recentBlock
+//     cache_pct）。
+//   - TTFB：最近 usageSampleCapacity 条非空 first_upstream_ms 样本
+//     （同 LogLatency["ttfb"] 口径）——TTFB.P50/P90 直取，TTFBAvgMS
+//     是同一样本集的均值，与分位同源。
+//   - Today：本地日界内计数——success_rate=Today.OK/Today.Non499。
+type AccountUsageRow struct {
+	Recent    LogRecentAgg
+	Today     AccountUsageToday
+	TTFB      LatencyStats
+	TTFBAvgMS float64
+}
+
+// AccountUsage 返回单账号的 usage 原始量；account 走读侧折叠口径
+// （'default' 命中 ”+'default' 两群）。三个分量各一条 SQL——TTFB
+// 分位须取样本集在 Go 侧排序，无法并进聚合扫描；逐号 N 次调用的
+// 成本随 lane 数线性，个位数无压力。
+func (s *Store) AccountUsage(ctx context.Context, account string) (*AccountUsageRow, error) {
+	row := &AccountUsageRow{}
+	var err error
+	if row.Recent, err = s.LogRecentWindow(ctx, 60, LogScope{Account: account}); err != nil {
+		return nil, err
+	}
+	scopeWhere, scopeArgs := LogScope{Account: account}.where()
+	dayStart, dayEnd := dayBoundsMS(time.Now())
+	if err = s.ro.QueryRowContext(ctx, `SELECT
+		COUNT(*),
+		COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status_code != 499 THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(total_tokens), 0)
+		FROM logs WHERE time >= ? AND time < ?`+scopeWhere,
+		append([]any{dayStart, dayEnd}, scopeArgs...)...).Scan(
+		&row.Today.Requests, &row.Today.OK, &row.Today.Non499, &row.Today.Tokens); err != nil {
+		return nil, err
+	}
+	samples, err := s.recentSamples(ctx, "first_upstream_ms", true, account)
+	if err != nil {
+		return nil, err
+	}
+	row.TTFB = latencyStatsOf(samples)
+	if len(samples) > 0 {
+		var sum int64
+		for _, v := range samples {
+			sum += v
+		}
+		row.TTFBAvgMS = float64(sum) / float64(len(samples))
+	}
+	return row, nil
 }

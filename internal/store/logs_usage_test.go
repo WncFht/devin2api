@@ -232,3 +232,114 @@ func TestUsageMinBucketWraparound(t *testing.T) {
 		t.Fatalf("current bucket = %+v, want requests=1 input=7", current)
 	}
 }
+
+// TestAccountAggsFold 验证按号分组聚合的折叠口径：” 与 'default' 行
+// 合流进 default 桶（对齐 QuotaReport ”→default），不出三群幽灵桶。
+func TestAccountAggsFold(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now()
+	fup := func(v int64) *int64 { return &v }
+	rows := []*LogRow{
+		{Dir: "ag-e0", StartedAt: now, DurationMS: 100, StatusCode: 200, Result: "completed", Account: "", FirstUpstreamMS: fup(10)},
+		{Dir: "ag-e1", StartedAt: now, DurationMS: 300, StatusCode: 200, Result: "completed", Account: "", FirstUpstreamMS: fup(30)},
+		{Dir: "ag-d0", StartedAt: now, DurationMS: 200, StatusCode: 200, Result: "completed", Account: "default", FirstUpstreamMS: fup(20)},
+		{Dir: "ag-yj", StartedAt: now, DurationMS: 500, StatusCode: 200, Result: "completed", Account: "yanjian", FirstUpstreamMS: fup(50)},
+	}
+	for _, r := range rows {
+		if _, err := s.InsertLog(ctx, r); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+
+	aggs, err := s.AccountAggs(ctx)
+	if err != nil {
+		t.Fatalf("AccountAggs: %v", err)
+	}
+	if len(aggs) != 2 {
+		t.Fatalf("dims = %+v, want default+yanjian 两桶", aggs)
+	}
+	byName := map[string]DimensionAgg{}
+	for _, d := range aggs {
+		byName[d.Name] = d
+	}
+	def := byName["default"]
+	if def.Requests != 3 || def.AvgDuration != 200 || def.AvgTTFB != 20 {
+		t.Fatalf("default 桶 = %+v, want requests=3 avgDur=200 avgTTFB=20", def)
+	}
+	yj := byName["yanjian"]
+	if yj.Requests != 1 || yj.AvgDuration != 500 || yj.AvgTTFB != 50 {
+		t.Fatalf("yanjian 桶 = %+v", yj)
+	}
+}
+
+// TestAccountUsage 验证 AccountUsage 的原始量：今日计数（requests/ok/
+// non499/tokens）、60s 完成窗聚合（rpm_now/tps_now/cache_rate 原料）、
+// 首字延迟样本分位与均值；并覆盖 'default' 折叠 ” 历史行。
+func TestAccountUsage(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now()
+	yesterday := now.AddDate(0, 0, -1)
+	fup := func(v int64) *int64 { return &v }
+	rows := []*LogRow{
+		// yanjian：今日 3 行（200/500/499）+ 昨日 1 行（边界守卫）。
+		{Dir: "u-y1", StartedAt: now, DurationMS: 2000, StatusCode: 200, Result: "completed",
+			Account: "yanjian", InputTokens: 30, OutputTokens: 50, CacheReadTokens: 10,
+			TotalTokens: 100, FirstUpstreamMS: fup(100)},
+		{Dir: "u-y2", StartedAt: now, DurationMS: 1000, StatusCode: 500, Result: "failed",
+			Account: "yanjian", OutputTokens: 20, TotalTokens: 60},
+		{Dir: "u-y3", StartedAt: now, DurationMS: 500, StatusCode: 499, Result: "disconnected",
+			Account: "yanjian"},
+		{Dir: "u-y4", StartedAt: yesterday, DurationMS: 100, StatusCode: 200, Result: "completed",
+			Account: "yanjian", TotalTokens: 5},
+		// 别号行——不得漏进 yanjian 的 usage。
+		{Dir: "u-r1", StartedAt: now, DurationMS: 800, StatusCode: 200, Result: "completed",
+			Account: "randall", TotalTokens: 7, FirstUpstreamMS: fup(50)},
+		// '' 与 'default' 两群——折叠后同属 default。
+		{Dir: "u-e1", StartedAt: now, DurationMS: 3000, StatusCode: 200, Result: "completed",
+			Account: "", OutputTokens: 6, TotalTokens: 3, FirstUpstreamMS: fup(10)},
+		{Dir: "u-d1", StartedAt: now, DurationMS: 1000, StatusCode: 200, Result: "completed",
+			Account: "default", OutputTokens: 4, TotalTokens: 2, FirstUpstreamMS: fup(30)},
+	}
+	for _, r := range rows {
+		if _, err := s.InsertLog(ctx, r); err != nil {
+			t.Fatalf("InsertLog %s: %v", r.Dir, err)
+		}
+	}
+
+	row, err := s.AccountUsage(ctx, "yanjian")
+	if err != nil {
+		t.Fatalf("AccountUsage: %v", err)
+	}
+	// 今日：3 完成行（含 499），1 个 2xx，2 个非 499，tokens=160。
+	if row.Today.Requests != 3 || row.Today.OK != 1 || row.Today.Non499 != 2 || row.Today.Tokens != 160 {
+		t.Fatalf("today = %+v", row.Today)
+	}
+	// 近窗：非 499 完成数 2（y1+y2）；GenMS=(2000-100)+1000+500=3400
+	//（499 行也计入生成时长分母，与 LogRecentWindow 口径一致）。
+	if row.Recent.Req != 2 || row.Recent.OutTok != 70 || row.Recent.InTok != 30 ||
+		row.Recent.CrTok != 10 || row.Recent.GenMS != 3400 {
+		t.Fatalf("recent = %+v", row.Recent)
+	}
+	// TTFB 样本：yanjian 只有 y1 的 100ms。
+	if row.TTFB.Samples != 1 || row.TTFB.P50 != 100 || row.TTFB.P90 != 100 || row.TTFBAvgMS != 100 {
+		t.Fatalf("ttfb = %+v avg=%v", row.TTFB, row.TTFBAvgMS)
+	}
+
+	// 'default' 折叠 ''+'default' 两群（e1+d1）。
+	def, err := s.AccountUsage(ctx, "default")
+	if err != nil {
+		t.Fatalf("AccountUsage default: %v", err)
+	}
+	if def.Today.Requests != 2 || def.Today.OK != 2 || def.Today.Tokens != 5 {
+		t.Fatalf("default today = %+v", def.Today)
+	}
+	if def.Recent.Req != 2 || def.Recent.OutTok != 10 || def.Recent.GenMS != 2990+970 {
+		t.Fatalf("default recent = %+v", def.Recent)
+	}
+	// 样本 [10,30]：pick=int(q*(n-1))，p50=p90=sorted[0]=10，均值 20。
+	if def.TTFB.Samples != 2 || def.TTFB.P50 != 10 || def.TTFB.P90 != 10 || def.TTFBAvgMS != 20 {
+		t.Fatalf("default ttfb = %+v avg=%v", def.TTFB, def.TTFBAvgMS)
+	}
+}

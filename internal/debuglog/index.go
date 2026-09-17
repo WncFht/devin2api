@@ -84,8 +84,8 @@ type IndexEntry struct {
 	// 重开）；明细在同目录 meta.json 的 retry_attempts 与 04 的
 	// retry_attempt 分界行。0 表示一次发送完成。
 	Retries int `json:"retries,omitempty"`
-	// Account 是最终服务请求的上游账号名（号池 lane 身份，单号部署
-	// 恒为 "default"）——「哪号在扛」的聚合不必区分部署形态。
+	// Account 是最终服务请求的上游账号名（号池 lane 名）；迁移前
+	// 历史行另有 ''/'default' 残留，读侧按 'default' 折叠归桶。
 	Account string `json:"account,omitempty"`
 	// AccountSwitches 是号池 failover 换号次数（成功前的失败尝试数），
 	// 明细在同目录 meta.json 的 upstream_attempts。0 表示首号即成。

@@ -79,7 +79,9 @@ debug:
   pprof_listen: "127.0.0.1:$PPROF_PORT"
 devin:
   base_url: "http://127.0.0.1:$STUB_PORT"
-  token: "perf-snapshot-dummy"
+  accounts:
+    - name: main
+      token: "perf-snapshot-dummy"
   model: "stub"
   max_rpm: 0
   force_http1: true

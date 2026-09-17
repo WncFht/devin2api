@@ -1,6 +1,6 @@
 // probe 是对 Devin 上游做受控实验的命令行工具。
-// 用法：go run ./cmd/probe <subcommand> [flags]
-// token 从 DEVIN_TOKEN 环境变量读；缺省时按 config.ResolveConfigPath 链（DEVIN2API_CONFIG → ./config.yaml → 平台默认目录）解析 devin.token。
+// 用法：go run ./cmd/probe [-account name] <subcommand> [flags]
+// token 从 DEVIN_TOKEN 环境变量读；缺省时按 config.ResolveConfigPath 链（DEVIN2API_CONFIG → ./config.yaml → 平台默认目录）取 devin.accounts 首号（-account 可点名），再不行走 CLI 凭证发现链。
 package main
 
 import (
@@ -58,13 +58,23 @@ var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServi
 var clientName, clientVersion, clientOS string
 
 func main() {
-	if len(os.Args) < 2 {
+	// 顶层 flag 先于子命令解析：-account 是全局参数（选凭据号），
+	// 子命令 flag 集各自独立。flag 停在第一个非 flag 参数——
+	// 子命令名即分界线，其余参数原样转交子命令。
+	topFlags := flag.NewFlagSet("probe", flag.ContinueOnError)
+	accountName := topFlags.String("account", "", "凭据取 devin.accounts 中该名账号；缺省用首号")
+	if err := topFlags.Parse(os.Args[1:]); err != nil {
 		usage()
 		os.Exit(2)
 	}
+	args := topFlags.Args()
 	// 先校验子命令再解析 token：未知子命令应直接打 usage，
 	// 不能被「无 token」错误抢在前面。
-	run, ok := commands[os.Args[1]]
+	if len(args) == 0 {
+		usage()
+		os.Exit(2)
+	}
+	run, ok := commands[args[0]]
 	if !ok {
 		usage()
 		os.Exit(2)
@@ -73,13 +83,17 @@ func main() {
 	// CLI 凭证文件与默认常量的完整回落链。路径走与服务相同的解析链
 	// （./config.yaml → 平台默认目录）。注意 Load 走全量 Validate
 	// （KnownFields+server.listen 必填）——校验失败的 yaml 被整体丢弃，
-	// 连其中本可用的 devin.token 也不可见；probe 场景下靠回落链兜底。
+	// 连其中本可用的 accounts 凭据也不可见；probe 场景下靠回落链兜底。
 	probeConfigPath, _ := config.ResolveConfigPath("")
 	cfg, _ := config.Load(probeConfigPath)
 	aliases = cfg.Devin.Aliases
-	token := resolveToken(cfg)
+	token := resolveToken(cfg, *accountName)
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or devin.token in config.yaml")
+		if *accountName != "" {
+			fmt.Fprintf(os.Stderr, "no token: devin.accounts has no account %q (or set DEVIN_TOKEN)\n", *accountName)
+		} else {
+			fmt.Fprintln(os.Stderr, "no token: set DEVIN_TOKEN or declare devin.accounts in config.yaml")
+		}
 		os.Exit(1)
 	}
 	clientName, clientVersion, clientOS = (devin.Config{
@@ -108,7 +122,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
-	if err := run(ctx, client, lsClient, token, os.Args[2:]); err != nil {
+	if err := run(ctx, client, lsClient, token, args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "ERR:", err)
 		os.Exit(1)
 	}
@@ -183,16 +197,22 @@ func usage() {
 }
 
 // resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
-// 不改配置），随后是 config.yaml 的 devin.token（Load 内部已含
-// env/CLI 凭证兜底）或账号池首号（accounts 模式 token 经
-// credentials_file 解析后必填）；config.yaml 缺失时直接走 Devin CLI
-// 凭证发现链。probe 是单发工具，逐号探测不在职责内。
-func resolveToken(cfg config.Config) string {
+// 不改配置），随后按 -account 点名或默认首号取 devin.accounts 条目的
+// token（Load 已把 credentials_file 型条目解成文件内容）；点名未中
+// 是硬错误（静默换号会把实验打到错的账号上）；accounts 缺失或文件
+// 不可读时走 Devin CLI 凭证发现链兜底。probe 是单发工具，逐号探测
+// 不在职责内。
+func resolveToken(cfg config.Config, accountName string) string {
 	if token := os.Getenv("DEVIN_TOKEN"); token != "" {
 		return token
 	}
-	if cfg.Devin.Token != "" {
-		return cfg.Devin.Token
+	if accountName != "" {
+		for _, acc := range cfg.Devin.Accounts {
+			if acc.Name == accountName {
+				return acc.Token
+			}
+		}
+		return ""
 	}
 	if len(cfg.Devin.Accounts) > 0 {
 		return cfg.Devin.Accounts[0].Token

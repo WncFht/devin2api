@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -372,7 +373,7 @@ func TestPoolLaneAuthCooldown(t *testing.T) {
 }
 
 // ApplyConfigs 按 lane 名差集：同名复用旧 adapter（token 原地热换），
-// 新增建 lane，被删退出快照；空集合报错。
+// 新增建 lane，被删退出快照；空集合法——等同全部 lane 被删。
 func TestPoolApplyConfigs(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
 	laneA := poolLaneByName(pool, "a")
@@ -384,8 +385,8 @@ func TestPoolApplyConfigs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyConfigs: %v", err)
 	}
-	if !slices.Contains(applied, "devin.token") {
-		t.Fatalf("applied = %v, want devin.token", applied)
+	if !slices.Contains(applied, "devin.accounts.a.token") {
+		t.Fatalf("applied = %v, want devin.accounts.a.token", applied)
 	}
 	if poolLaneByName(pool, "a") != laneA {
 		t.Fatal("lane a must reuse the existing poolLane")
@@ -407,15 +408,23 @@ func TestPoolApplyConfigs(t *testing.T) {
 		t.Fatalf("lane c token = %q, want tok-c", token)
 	}
 
-	if _, err := pool.ApplyConfigs(nil); err == nil {
-		t.Fatal("ApplyConfigs(nil) must fail")
+	applied, err = pool.ApplyConfigs(nil)
+	if err != nil {
+		t.Fatalf("ApplyConfigs(nil): %v", err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("ApplyConfigs(nil) applied = %v, want empty", applied)
+	}
+	if len(pool.snapshot()) != 0 {
+		t.Fatal("ApplyConfigs(nil) must empty the lane set")
 	}
 }
 
-// 建池校验：空集合与任一 lane 构建失败都整体报错。
+// 建池校验：空集合合法（空池）；任一 lane 构建失败整体报错。
 func TestNewPoolValidation(t *testing.T) {
-	if _, err := NewPool(nil); err == nil {
-		t.Fatal("NewPool(nil) must fail")
+	pool := newTestPool(t)
+	if len(pool.snapshot()) != 0 {
+		t.Fatal("NewPool(nil) must produce an empty lane set")
 	}
 	if _, err := NewPool([]Config{{Name: "bad", BaseURL: "http://127.0.0.1:1"}}); err == nil {
 		t.Fatal("NewPool with missing model must fail")
@@ -458,5 +467,92 @@ func TestPoolKeyedViews(t *testing.T) {
 	}
 	if name := pool.CurrentConfig().Name; name != "a" {
 		t.Fatalf("CurrentConfig().Name = %q, want a", name)
+	}
+}
+
+// 空池是合法态（账号被面板删光）：首 lane 系视图全部给零值不 panic；
+// Stream/ListModels 显式报非 ClientFixable 的 unavailable——/v1 拿
+// 5xx，而不是 (nil,nil) 让泵协程 nil deref。
+func TestPoolEmptyPool(t *testing.T) {
+	pool := newTestPool(t)
+
+	if token := pool.TokenFunc()(); token != "" {
+		t.Fatalf("TokenFunc() = %q, want empty on empty pool", token)
+	}
+	if stats := pool.GateStats(); !reflect.DeepEqual(stats, GateStats{}) {
+		t.Fatalf("GateStats = %+v, want zero value", stats)
+	}
+	if stats := pool.WarmStats(); stats != (WarmStats{}) {
+		t.Fatalf("WarmStats = %+v, want zero value", stats)
+	}
+	if aliases := pool.Aliases(); aliases != nil {
+		t.Fatalf("Aliases = %v, want nil", aliases)
+	}
+	if cfg := pool.CurrentConfig(); !reflect.DeepEqual(cfg, Config{}) {
+		t.Fatalf("CurrentConfig = %+v, want zero value", cfg)
+	}
+	if len(pool.TokenFuncs()) != 0 || len(pool.AccountGateStats()) != 0 ||
+		len(pool.AccountWarmStats()) != 0 || len(pool.AccountLaneStates()) != 0 {
+		t.Fatal("keyed views must be empty on empty pool")
+	}
+	if pool.ClearCooldown("a") {
+		t.Fatal("ClearCooldown on empty pool must return false")
+	}
+
+	request := llm.RequestMessages{
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+	}
+	calls := map[string]func() error{
+		"Stream":     func() error { _, err := pool.Stream(context.Background(), request); return err },
+		"ListModels": func() error { _, err := pool.ListModels(context.Background()); return err },
+	}
+	for name, call := range calls {
+		err := call()
+		failure := llm.Classify(err)
+		if failure == nil || failure.Code != "unavailable" || failure.ClientFixable {
+			t.Fatalf("%s error = %v, want non-ClientFixable unavailable failure", name, err)
+		}
+	}
+}
+
+// ClearCooldown 把两档冷却窗与 badTokenHash 判死键一并清掉，lane 立即
+// 回候选（healthy 转真）；lastFailure* 证据保留；无该名 lane 返 false。
+func TestPoolClearCooldown(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+
+	if pool.ClearCooldown("nope") {
+		t.Fatal("ClearCooldown on unknown name must return false")
+	}
+
+	laneA.noteFailure(unauthenticatedErr())
+	laneA.noteFailure(connect.NewError(connect.CodeInternal, errors.New("mid boom")))
+	if laneA.healthy() {
+		t.Fatal("lane must be unhealthy inside cooldown windows")
+	}
+	if !laneA.authCooldown() {
+		t.Fatal("unauthenticated failure must engage auth cooldown")
+	}
+
+	if !pool.ClearCooldown("a") {
+		t.Fatal("ClearCooldown must return true for a live lane")
+	}
+	if !laneA.healthy() || laneA.authCooldown() {
+		t.Fatal("lane must rejoin candidates immediately after ClearCooldown")
+	}
+	state := laneA.state()
+	if state.AuthCooldownUntil != nil || state.UnhealthyUntil != nil {
+		t.Fatalf("cooldown windows must be cleared: %+v", state)
+	}
+	if state.LastFailureCode != "internal" || state.LastFailureAt == nil {
+		t.Fatalf("lastFailure evidence must survive clearing: %+v", state)
+	}
+
+	// 隔壁 lane 的冷却不受影响。
+	laneB := poolLaneByName(pool, "b")
+	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+	pool.ClearCooldown("a")
+	if !laneB.genericCooldown() {
+		t.Fatal("ClearCooldown(a) must not touch lane b's cooldown")
 	}
 }

@@ -5,7 +5,7 @@
 #
 # 用法:
 #   DEVIN_TOKEN_GOOD=<tok> scripts/devin-pool-smoke.sh [--port 3199]
-#   scripts/devin-pool-smoke.sh --config config.yaml   # 从该配置取 devin.token/model/base_url
+#   scripts/devin-pool-smoke.sh --config config.yaml   # 取首个 devin.accounts 凭据/model/base_url
 #
 # 坏号固定为 "devin-session-token$invalid.badtoken.for-smoke"（DEVIN_TOKEN_BAD
 # 可覆盖）。每个会话亲和键经复刻的 rendezvous 打分预知钉选 lane——脚本按
@@ -46,13 +46,22 @@ if [[ -n "$SRC_CONFIG" ]]; then
 		exit 1
 	}
 	[[ -n "$GOOD_TOKEN" ]] || GOOD_TOKEN="$(yaml_scalar token "$SRC_CONFIG")"
+	# accounts 条目可只给 credentials_file：解出 windsurf_api_key 当好号
+	# 凭据（~/ 展开与相对路径锚定 config 目录，与 config.go 口径一致）。
+	if [[ -z "$GOOD_TOKEN" ]]; then
+		creds="$(yaml_scalar credentials_file "$SRC_CONFIG")"
+		creds="${creds/#\~/$HOME}"
+		[[ -n "$creds" && "$creds" != /* ]] && creds="$(cd "$(dirname "$SRC_CONFIG")" && pwd)/$creds"
+		[[ -n "$creds" && -f "$creds" ]] &&
+			GOOD_TOKEN="$(sed -nE 's/^[[:space:]]*windsurf_api_key[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$creds" | head -1)"
+	fi
 	MODEL="$(yaml_scalar model "$SRC_CONFIG")"
 	BASE_URL="$(yaml_scalar base_url "$SRC_CONFIG")"
 fi
 MODEL="${MODEL:-swe-2-max}"
 BASE_URL="${BASE_URL:-https://server.codeium.com}"
 [[ -n "$GOOD_TOKEN" ]] || {
-	echo "缺好号凭据：设 DEVIN_TOKEN_GOOD 或用 --config 指向含 devin.token 的配置" >&2
+	echo "缺好号凭据：设 DEVIN_TOKEN_GOOD 或用 --config 指向含 devin.accounts 条目的配置" >&2
 	exit 1
 }
 command -v jq >/dev/null || {

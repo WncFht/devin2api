@@ -66,8 +66,8 @@ func TestRunReturnsServeError(t *testing.T) {
 func TestRedactConfigSecretsProxyUserinfo(t *testing.T) {
 	fields := map[string]any{
 		"devin": map[string]any{
-			"token": "topsecret",
-			"proxy": "http://alice:hunter2@proxy.local:8080",
+			"proxy":    "http://alice:hunter2@proxy.local:8080",
+			"accounts": []any{map[string]any{"name": "a", "token": "topsecret"}},
 		},
 	}
 	redactConfigSecrets(fields)
@@ -79,19 +79,20 @@ func TestRedactConfigSecretsProxyUserinfo(t *testing.T) {
 	if !strings.Contains(proxy, "proxy.local:8080") {
 		t.Fatalf("proxy host should be preserved: %q", proxy)
 	}
-	if token := devinSection["token"].(string); !strings.HasPrefix(token, "sha256:") {
-		t.Fatalf("token not redacted: %q", token)
+	token := devinSection["accounts"].([]any)[0].(map[string]any)["token"].(string)
+	if !strings.HasPrefix(token, "sha256:") {
+		t.Fatalf("account token not redacted: %q", token)
 	}
 }
 
 // TestReloadRuntimeConfigRejectsEmptyUpstream verifies a live adapter refuses a
 // reload that drops devin.model/base_url — committing empty values would fail
-// every request. token 刻意不在必填集：补凭据的通道正是 reload 端点与
-// unauthenticated 自愈链，空 token 必须能经 reload 提交（待配状态）。
+// every request. accounts 刻意不在必填集：补号的通道正是 /admin/accounts
+// 与本端点，空账号集是合法空池（全部 lane 摘出）而非配置事故。
 func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	valid := "server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n  model: 'm'\n"
+	valid := "server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n  accounts:\n    - {name: a, token: 't'}\n"
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 
 	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 	defer manager.Close()
-	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
+	devinPool, err := devin.NewPool(devinConfigsFrom(prev, prev.Devin.Accounts, configPath, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,30 +141,36 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	}
 
 	// 丢 model 整单拒绝。
-	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  accounts:\n    - {name: a, token: 't'}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
-	// 丢 token 允许热应用并计入 applied。
+	// 丢 accounts 允许热应用：合法空池，lane 名集变化计入 applied。
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
-	if !slices.Contains(report.Applied, "devin.token") {
-		t.Fatalf("devin.token missing from applied: %v", report.Applied)
+	if !slices.Contains(report.Applied, "devin.accounts") {
+		t.Fatalf("devin.accounts missing from applied: %v", report.Applied)
+	}
+	if lanes := devinPool.AccountLaneStates(); len(lanes) != 0 {
+		t.Fatalf("pool lanes = %v, want empty", lanes)
 	}
 
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
+	}
+	if lanes := devinPool.AccountLaneStates(); len(lanes) != 1 {
+		t.Fatalf("pool lanes = %v, want {a}", lanes)
 	}
 }
 
@@ -178,8 +185,9 @@ func TestReloadClassifiesEveryConfigField(t *testing.T) {
   max_concurrency: 64
 devin:
   base_url: 'https://example.com'
-  token: 'tok'
   model: 'm'
+  accounts:
+    - {name: a, token: 'tok'}
   proxy: 'http://127.0.0.1:7890'
   force_http1: false
   aliases: {a: b}
@@ -226,6 +234,11 @@ auth:
 				continue
 			}
 			path := prefix + tag
+			if path == "devin.token" {
+				// devin.token 是迁移错误占位壳：任何非空值在 Load 期
+				// 即拒绝，不存在「合法变异后可热应用」的形态，不进枚举。
+				continue
+			}
 			fieldType := field.Type
 			if fieldType.Kind() == reflect.Pointer {
 				fieldType = fieldType.Elem()
@@ -283,10 +296,9 @@ auth:
 			if override, ok := mutateOverride[lf.path]; ok {
 				node[segments[len(segments)-1]] = override
 			} else if lf.path == "devin.accounts" {
-				// accounts 与 devin.token 互斥：声明账号池必须同时摘掉
-				// 单号字段，变异后的形态才过 validate。
+				// 变异成另一组名集：lane 名序变化单独上报
+				// devin.accounts（增删不进单 lane 字段差集）。
 				node[segments[len(segments)-1]] = []any{map[string]any{"name": "pool-a", "token": "tok2"}}
-				delete(node, "token")
 			} else {
 				switch current.Kind() {
 				case reflect.Bool:
@@ -313,7 +325,7 @@ auth:
 
 			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{}, nil)
 			defer manager.Close()
-			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, nil))
+			devinPool, err := devin.NewPool(devinConfigsFrom(prev, prev.Devin.Accounts, configPath, nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -348,7 +360,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, nil, devinPool, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(configPath, dbStore, devinPool, application, panel, manager, settings, tokenStore)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

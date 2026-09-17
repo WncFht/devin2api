@@ -506,7 +506,7 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 		},
 	}
 	srv := stubServer(t, stub, nil)
-	adapter := stubAdapter(t, srv, Config{Model: "stub-model", Token: "tok", Aliases: map[string]string{"a": "stub-model"}})
+	adapter := stubAdapter(t, srv, Config{Name: "stub", Model: "stub-model", Token: "tok", Aliases: map[string]string{"a": "stub-model"}})
 
 	if adapter.TokenFunc()() != "tok" {
 		t.Fatal("TokenFunc should read current token")
@@ -515,7 +515,7 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 		t.Fatal("Aliases should reflect config")
 	}
 	next := Config{
-		BaseURL: srv.URL, Model: "other-model", Token: "tok2",
+		Name: "stub", BaseURL: srv.URL, Model: "other-model", Token: "tok2",
 		Aliases: map[string]string{"b": "stub-model"},
 		Gate:    GateConfig{MaxRPM: 60},
 	}
@@ -523,7 +523,7 @@ func TestOrchestrationApplyConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyConfig: %v", err)
 	}
-	for _, want := range []string{"devin.model", "devin.token", "devin.aliases", "devin.max_rpm"} {
+	for _, want := range []string{"devin.model", "devin.accounts.stub.token", "devin.aliases", "devin.max_rpm"} {
 		if !slices.Contains(applied, want) {
 			t.Fatalf("applied %v missing %q", applied, want)
 		}

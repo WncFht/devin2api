@@ -32,21 +32,15 @@ debug:
 
 devin:
   base_url: "https://server.codeium.com"
-  # session token；留空则按 DEVIN_TOKEN / WINDSURF_API_KEY 环境变量
-  # → Devin CLI credentials.toml 自动发现（CLI 续期自动跟随，推荐）。
-  # 写死字面量会旁路该链路，token 过期后只能手改本文件；
-  # 本机没有 Devin CLI 时才需要填字面量。
-  token: ""
-  # accounts: 上游账号池（可选）；与上面的 token 互斥——accounts 非空时
-  # token 必须留空，且 env/credentials.toml 自动发现链整体关闭，凭据
-  # 来源只剩各条目自己的 token/credentials_file。
+  # accounts: 上游账号池的声明基座（空集合法——可裸起服务后经面板
+  # /web/accounts.html 加号，凭据行落库成 panel 源）。面板改的 config
+  # 名生成覆盖行（面板值恒赢）、面板删的 config 名成墓碑压住声明。
   # name 是账号在日志、闸门状态与面板里的身份：字母/数字/连字符/
-  # 下划线 1–32 字符、池内唯一，"default" 为保留名（隐式单号 lane 的
-  # 身份，禁用）；每号独立限速闸门（闩状态持久化在 runtime_state 表的
-  # gate:<name> 键）
-  # 与配额采样。token 与 credentials_file 至少给一个；都给时 token 作
-  # 初始凭据、credentials_file（指向 Devin CLI 的 credentials.toml）
-  # 作 unauthenticated 自愈来源——CLI 续期改写它即自动跟随。
+  # 下划线 1–32 字符、池内唯一；每号独立限速闸门（闩状态持久化在
+  # runtime_state 表的 gate:<name> 键）与配额采样。token 与
+  # credentials_file 至少给一个；都给时 token 作初始凭据、
+  # credentials_file（指向 Devin CLI 的 credentials.toml）作
+  # unauthenticated 自愈来源——CLI 续期改写它即自动跟随。
   # credentials_file 支持 ~/ 展开，相对路径锚定本文件所在目录（不是
   # 进程 CWD）。两条目引用同一有效 token 或同一 credentials_file 按
   # 配置错误拒绝。会话按亲和键钉选到号、失败按词表换号，详见
