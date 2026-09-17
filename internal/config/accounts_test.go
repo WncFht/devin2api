@@ -1,6 +1,8 @@
-// 本文件验证 devin.accounts 账号池声明的加载期校验：与 devin.token 互斥、
-// name 合法性与唯一性、凭据来源二选一、credentials.toml 解析与路径锚定、
-// 有效 token 去重。测试一律走真实 Load 入口，文件落 t.TempDir()。
+// 本文件验证 devin.accounts 账号池声明的加载期校验：残留 devin.token
+// 产出迁移错误、name 合法性与唯一性（"default" 是普通名）、凭据来源
+// 二选一、credentials.toml 解析与路径锚定、有效 token 去重；以及
+// ResolveAccounts 的整表校验出口（API 干跑/reload 共用）。Load 测试
+// 一律走真实入口，文件落 t.TempDir()。
 package config
 
 import (
@@ -28,42 +30,69 @@ func loadWithDevin(t *testing.T, dir, devinYAML string) (Config, error) {
 	return Load(filepath.Join(dir, "config.yaml"))
 }
 
-// TestLoadAccountsMutualExclusion 验证 devin.token 与非空 devin.accounts
-// 互斥；纯空白 token 视作未设置，不触发互斥。
-func TestLoadAccountsMutualExclusion(t *testing.T) {
-	_, err := loadWithDevin(t, t.TempDir(),
-		"  token: tok-single\n  accounts:\n    - name: alpha\n      token: tok-a\n")
-	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("Load() error = %v, want mutual exclusion error", err)
-	}
+// TestLoadDevinTokenRemoved 钉住 devin.token 的迁移错误：字段语义已删除，
+// yaml 键保留只为对残留值产出改写指引——只有 token 没有 accounts 的旧
+// 单号配置启动必须报这条错，不能静默变空池；token 与 accounts 同现报
+// 同一条错。纯空白 token 按未设置处理，不触发迁移错误。
+func TestLoadDevinTokenRemoved(t *testing.T) {
+	const want = "devin.token removed; declare devin.accounts"
 
-	if _, err := loadWithDevin(t, t.TempDir(),
-		"  token: '   '\n  accounts:\n    - name: alpha\n      token: tok-a\n"); err != nil {
-		t.Fatalf("Load() error = %v, want whitespace token treated as unset", err)
-	}
+	t.Run("token only", func(t *testing.T) {
+		_, err := loadWithDevin(t, t.TempDir(), "  token: tok-single\n")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Load() error = %v, want migration error containing %q", err, want)
+		}
+	})
+
+	t.Run("token alongside accounts", func(t *testing.T) {
+		_, err := loadWithDevin(t, t.TempDir(),
+			"  token: tok-single\n  accounts:\n    - name: alpha\n      token: tok-a\n")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Load() error = %v, want migration error containing %q", err, want)
+		}
+	})
+
+	t.Run("whitespace token is unset", func(t *testing.T) {
+		if _, err := loadWithDevin(t, t.TempDir(),
+			"  token: '   '\n  accounts:\n    - name: alpha\n      token: tok-a\n"); err != nil {
+			t.Fatalf("Load() error = %v, want whitespace token treated as unset", err)
+		}
+	})
 }
 
-// TestLoadAccountsEmptyList 验证 accounts: [] 与不写 accounts 等价：
-// devin.token 单号路径照常生效，本机自动发现链也不被关闭（此时不断言
-// Token 取值——真实 home 下可能存在 credentials.toml）。
-func TestLoadAccountsEmptyList(t *testing.T) {
-	config, err := loadWithDevin(t, t.TempDir(), "  token: tok-single\n  accounts: []\n")
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if config.Devin.Token != "tok-single" {
-		t.Fatalf("Devin.Token = %q, want tok-single", config.Devin.Token)
-	}
+// TestLoadAccountsEmptySet 验证空账号池合法：accounts: [] 与 accounts 键
+// 缺席都是空生效集；自动发现链已不进 load 路径——即便 DEVIN_TOKEN /
+// WINDSURF_API_KEY 在环境里，加载结果也不带任何凭据。
+func TestLoadAccountsEmptySet(t *testing.T) {
+	t.Setenv("DEVIN_TOKEN", "tok-env")
+	t.Setenv("WINDSURF_API_KEY", "tok-env2")
 
-	t.Setenv("DEVIN_TOKEN", "")
-	t.Setenv("WINDSURF_API_KEY", "")
-	if _, err := loadWithDevin(t, t.TempDir(), "  accounts: []\n"); err != nil {
-		t.Fatalf("Load() error = %v, want success (auto-discovery stays live)", err)
-	}
+	t.Run("explicit empty list", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(), "  accounts: []\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v, want empty pool to be legal", err)
+		}
+		if len(config.Devin.Accounts) != 0 {
+			t.Fatalf("Accounts = %v, want empty", config.Devin.Accounts)
+		}
+		if config.Devin.Token != "" {
+			t.Fatalf("Devin.Token = %q, want empty (discovery removed from load path)", config.Devin.Token)
+		}
+	})
+
+	t.Run("accounts key absent", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(), "  model: swe-2\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v, want empty pool to be legal", err)
+		}
+		if len(config.Devin.Accounts) != 0 || config.Devin.Token != "" {
+			t.Fatalf("Devin = %+v, want no credentials resolved", config.Devin)
+		}
+	})
 }
 
 // TestLoadAccountsNameValidation 钉住账号 name 契约：必填、字符集
-// [A-Za-z0-9_-]{1,32}、"default" 保留给隐式单 lane、池内唯一。
+// [A-Za-z0-9_-]{1,32}、池内唯一；"default" 已解禁为普通账号名。
 func TestLoadAccountsNameValidation(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -75,9 +104,9 @@ func TestLoadAccountsNameValidation(t *testing.T) {
 		{"space in name", "    - name: 'a b'\n      token: tok\n", "name must match"},
 		{"dot in name", "    - name: 'a.b'\n      token: tok\n", "name must match"},
 		{"name over 32 chars", "    - name: '" + strings.Repeat("a", 33) + "'\n      token: tok\n", "name must match"},
-		{"reserved name default", "    - name: default\n      token: tok\n", "reserved"},
 		{"duplicate name", "    - name: alpha\n      token: tok-a\n    - name: alpha\n      token: tok-b\n", `duplicate name "alpha"`},
 		{"valid charset", "    - name: 'alpha-1_B'\n      token: tok\n", ""},
+		{"default is a normal name", "    - name: default\n      token: tok\n", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,6 +251,55 @@ func TestLoadAccountsCredentialsFilePathResolution(t *testing.T) {
 		}
 		if got, want := config.Devin.Accounts[0].CredentialsFile, filepath.Join(dir, "creds.toml"); got != want {
 			t.Fatalf("CredentialsFile = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestResolveAccounts 验证导出的整表校验面：规则与 Load 内嵌同源，
+// 返回的是 trim/锚定/文件 token 回写后的副本，入参不被改动；空集与
+// "default" 名都合法；校验错误原样透传。
+func TestResolveAccounts(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "creds.toml"), "windsurf_api_key = \"tok-file\"\n")
+
+	t.Run("resolves copy without mutating input", func(t *testing.T) {
+		in := []DevinAccountConfig{
+			{Name: "  alpha  ", CredentialsFile: "creds.toml"},
+			{Name: "default", Token: " tok-b "},
+		}
+		got, err := ResolveAccounts(in, dir)
+		if err != nil {
+			t.Fatalf("ResolveAccounts() error = %v", err)
+		}
+		wantFile := filepath.Join(dir, "creds.toml")
+		if got[0].Name != "alpha" || got[0].Token != "tok-file" || got[0].CredentialsFile != wantFile {
+			t.Fatalf("resolved[0] = %+v, want {alpha tok-file %s}", got[0], wantFile)
+		}
+		if got[1].Name != "default" || got[1].Token != "tok-b" {
+			t.Fatalf("resolved[1] = %+v, want {default tok-b} (default unreserved)", got[1])
+		}
+		if in[0].Name != "  alpha  " || in[0].Token != "" || in[0].CredentialsFile != "creds.toml" {
+			t.Fatalf("input mutated: %+v", in[0])
+		}
+		if in[1].Token != " tok-b " {
+			t.Fatalf("input mutated: %+v", in[1])
+		}
+	})
+
+	t.Run("empty set is legal", func(t *testing.T) {
+		got, err := ResolveAccounts(nil, dir)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("ResolveAccounts(nil) = %v, %v; want empty, nil", got, err)
+		}
+	})
+
+	t.Run("validation errors propagate", func(t *testing.T) {
+		_, err := ResolveAccounts([]DevinAccountConfig{
+			{Name: "alpha", Token: "tok-same"},
+			{Name: "beta", Token: "tok-same"},
+		}, dir)
+		if err == nil || !strings.Contains(err.Error(), "token duplicates") {
+			t.Fatalf("ResolveAccounts() error = %v, want duplicate token error", err)
 		}
 	})
 }
