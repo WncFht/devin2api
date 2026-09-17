@@ -36,9 +36,12 @@ func (v *optionalInt64JSON) UnmarshalJSON(data []byte) error {
 // tokenLimitFields 是创建/更新共用的限额字段（美元浮点入、micro 出）。
 type tokenLimitFields struct {
 	CostLimitUSD        *float64 `json:"cost_limit_usd"`
+	Cost5hLimitUSD      *float64 `json:"cost_5h_limit_usd"`
 	CostDailyLimitUSD   *float64 `json:"cost_daily_limit_usd"`
+	CostWeeklyLimitUSD  *float64 `json:"cost_weekly_limit_usd"`
 	CostMonthlyLimitUSD *float64 `json:"cost_monthly_limit_usd"`
 	MaxConcurrency      *int     `json:"max_concurrency"`
+	MaxRPM              *int     `json:"max_rpm"`
 }
 
 // applyTo 把限额写进令牌内部 micro 字段；负值由调用方预检拦掉。
@@ -46,14 +49,23 @@ func (f tokenLimitFields) applyTo(t *authtoken.Token) {
 	if f.CostLimitUSD != nil {
 		t.CostLimitMicroUSD = int64(*f.CostLimitUSD * 1e6)
 	}
+	if f.Cost5hLimitUSD != nil {
+		t.Cost5hLimitMicroUSD = int64(*f.Cost5hLimitUSD * 1e6)
+	}
 	if f.CostDailyLimitUSD != nil {
 		t.DailyLimitMicroUSD = int64(*f.CostDailyLimitUSD * 1e6)
+	}
+	if f.CostWeeklyLimitUSD != nil {
+		t.CostWeeklyLimitMicroUSD = int64(*f.CostWeeklyLimitUSD * 1e6)
 	}
 	if f.CostMonthlyLimitUSD != nil {
 		t.MonthlyLimitMicroUSD = int64(*f.CostMonthlyLimitUSD * 1e6)
 	}
 	if f.MaxConcurrency != nil {
 		t.MaxConcurrency = *f.MaxConcurrency
+	}
+	if f.MaxRPM != nil {
+		t.MaxRPM = *f.MaxRPM
 	}
 }
 
@@ -64,7 +76,9 @@ func (f tokenLimitFields) validateLimits(w http.ResponseWriter) bool {
 		v    *float64
 	}{
 		{"cost_limit_usd", f.CostLimitUSD},
+		{"cost_5h_limit_usd", f.Cost5hLimitUSD},
 		{"cost_daily_limit_usd", f.CostDailyLimitUSD},
+		{"cost_weekly_limit_usd", f.CostWeeklyLimitUSD},
 		{"cost_monthly_limit_usd", f.CostMonthlyLimitUSD},
 	} {
 		if c.v != nil && *c.v < 0 {
@@ -74,6 +88,10 @@ func (f tokenLimitFields) validateLimits(w http.ResponseWriter) bool {
 	}
 	if f.MaxConcurrency != nil && *f.MaxConcurrency < 0 {
 		respondError(w, http.StatusBadRequest, "max_concurrency must be >= 0")
+		return false
+	}
+	if f.MaxRPM != nil && *f.MaxRPM < 0 {
+		respondError(w, http.StatusBadRequest, "max_rpm must be >= 0")
 		return false
 	}
 	return true
@@ -90,6 +108,8 @@ func (h *Handler) tokensUnavailable(w http.ResponseWriter) bool {
 
 // adminCreateAuthToken 实现 POST /admin/auth-tokens：生成令牌并一次性
 // 返回明文；响应字段与 ccLoad HandleCreateAuthToken 逐项对齐。
+// anonymous=true 时种的是匿名通道行（空明文）：响应不含 token 字段——
+// 没有可出示的凭据，未带凭据的 /v1 请求即按该行准入。仓内至多一行。
 func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 	if h.tokensUnavailable(w) {
 		return
@@ -99,6 +119,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt     *int64   `json:"expires_at"`
 		IsActive      *bool    `json:"is_active"`
 		AllowedModels []string `json:"allowed_models"`
+		Anonymous     bool     `json:"anonymous"`
 		tokenLimitFields
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
@@ -106,8 +127,11 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(req.Description) == "" {
-		respondError(w, http.StatusBadRequest, "Key: 'Description' Error:Field validation for 'Description' failed on the 'required' tag")
-		return
+		if !req.Anonymous {
+			respondError(w, http.StatusBadRequest, "Key: 'Description' Error:Field validation for 'Description' failed on the 'required' tag")
+			return
+		}
+		req.Description = "anonymous"
 	}
 	if !req.validateLimits(w) {
 		return
@@ -119,6 +143,20 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		AllowedModels: req.AllowedModels,
 	}
 	req.applyTo(t)
+	if req.Anonymous {
+		row, created, err := h.tokens.Ensure("", t)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if !created {
+			// 匿名行至多一行：已有行时不再新建，按冲突返回现有行 id。
+			respondError(w, http.StatusConflict, "anonymous token already exists: id "+strconv.FormatInt(row.ID, 10))
+			return
+		}
+		respondOK(w, row.API())
+		return
+	}
 	plain, err := h.tokens.Create(t)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -133,6 +171,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		"is_active":       t.IsActive,
 		"allowed_models":  t.AllowedModels,
 		"max_concurrency": t.MaxConcurrency,
+		"max_rpm":         t.MaxRPM,
 	})
 }
 

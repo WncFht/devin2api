@@ -97,7 +97,8 @@ type Handler struct {
 	// 真实请求；nil 时 /admin/model-test 返回 503。
 	probeHandler http.Handler
 	// masterKeyFunc 返回当前生效的 auth.api_key（热重载后为新值），
-	// 探活鉴权与令牌页主密钥卡共用。
+	// 只供模型探活当明文凭据用——/v1 准入全走令牌仓，api_key 对准入
+	// 不再特判。
 	masterKeyFunc func() string
 	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
 	warmStats func() devin.WarmStats
@@ -219,7 +220,7 @@ func (h *Handler) SetProbeHandler(handler http.Handler) {
 	h.probeHandler = handler
 }
 
-// SetMasterKeyFunc 注入 auth.api_key 读取函数。
+// SetMasterKeyFunc 注入 auth.api_key 读取函数（模型探活凭据来源）。
 func (h *Handler) SetMasterKeyFunc(fn func() string) {
 	h.masterKeyFunc = fn
 }

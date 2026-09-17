@@ -129,18 +129,6 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		"tokens":   tokens,
 		"is_today": false,
 	}
-	// 主密钥（config auth.api_key）投影成只读元信息：令牌页把「当前
-	// 哪些凭据能过 /v1」一次说全；key_hash 与 index.jsonl 同口径，
-	// 供按哈希对照日志行。无明文、不可经此 API 改写。
-	if h.masterKeyFunc != nil {
-		mk := map[string]any{"configured": false}
-		if key := strings.TrimSpace(h.masterKeyFunc()); key != "" {
-			hash := authtoken.HashToken(key)
-			mk["configured"] = true
-			mk["key_hash"] = hash[:16]
-		}
-		data["master_key"] = mk
-	}
 	rangeParam := strings.TrimSpace(r.URL.Query().Get("range"))
 	if rangeParam == "" || rangeParam == "all" {
 		respondOK(w, data)
@@ -160,7 +148,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 	// 口径对齐 GetAuthTokenStatsInRange：success/failure 计数非 499，
 	// token/成本求和含 499 行，TTFB/RT 均值含全部状态（stream 取 fbt
 	// 样本、non-stream 取 duration 样本），stream/non_stream 计数非 499。
-	// master key/开放模式的行无对应令牌，自然不落入任何令牌。
+	// 开放模式（空仓）的请求无凭据可关联，自然不落入任何令牌。
 	prices := h.CatalogPrices(r.Context())
 	type tokenAgg struct {
 		t    cellTotals
