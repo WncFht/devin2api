@@ -10,7 +10,7 @@ import (
 )
 
 // TestSearchLogsFilters 验证 LogQuery 各筛选维度的下推语义与
-// total（COUNT(*) OVER()，分页前的精确命中数）。
+// total（独立标量计数，分页前的精确命中数）。
 func TestSearchLogsFilters(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()

@@ -32,16 +32,15 @@ const logColumns = `id, dir, started_at, duration_ms,
 	retries, account, account_switches, premature_end_turn, repairs,
 	conn_reused, conn_idle_ms, log_source, upstream_protocol`
 
-// scanLogRow 按 logColumns 顺序扫一行；extra 接收调用方追加的尾列
-// （如 SearchLogs 的 COUNT(*) OVER()）。布尔与可空列走 NullInt64
+// scanLogRow 按 logColumns 顺序扫一行。布尔与可空列走 NullInt64
 // 中转——database/sql 不支持 int64→bool/**T 的直接反射转换。
-func scanLogRow(rows *sql.Rows, extra ...any) (*LogRow, error) {
+func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	var r LogRow
 	var started string
 	var ready, sent, open, firstUp, firstCli sql.NullInt64
 	var modelMismatch, stream, rateLimited, premature int64
 	var connReused, connIdle sql.NullInt64
-	dests := append([]any{
+	dests := []any{
 		&r.ID, &r.Dir, &started, &r.DurationMS,
 		&ready, &sent, &open, &firstUp, &firstCli,
 		&r.API, &r.Method, &r.Path, &r.StatusCode, &r.Result,
@@ -51,7 +50,7 @@ func scanLogRow(rows *sql.Rows, extra ...any) (*LogRow, error) {
 		&r.ErrorStage, &r.ErrorMessage, &r.DroppedEvents, &r.RetryAfterSeconds, &rateLimited,
 		&r.Retries, &r.Account, &r.AccountSwitches, &premature, &r.Repairs,
 		&connReused, &connIdle, &r.LogSource, &r.UpstreamProtocol,
-	}, extra...)
+	}
 	if err := rows.Scan(dests...); err != nil {
 		return nil, err
 	}
@@ -250,8 +249,11 @@ func statusTermSQL(t string) (string, int, bool) {
 
 // SearchLogs 返回命中行（新在前，id 倒序=旧 index 追加序倒排的忠实
 // 移植——行只在完成时落库，id 序即完成序）与命中总数 total
-// （分页前的完整计数——COUNT(*) OVER() 与旧「窗口内扫到的命中数」不同，
-// 旧口径只是读取窗口内的命中，新口径是 SQL 精确值）。
+// （分页前的完整计数——与旧「窗口内扫到的命中数」不同，旧口径只是
+// 读取窗口内的命中，新口径是 SQL 精确值）。页查询与计数分两条：
+// COUNT(*) OVER() 会把全命中集物化进 temp B-tree（实测 9k 行无过滤
+// 首页 ~45ms），独立标量计数只走索引扫描，页查询靠主键逆序 LIMIT
+// 只读本页行。
 func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, total int64, err error) {
 	where, args := q.where()
 	limit := q.Limit
@@ -260,7 +262,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	}
 	offset := max(q.Offset, 0)
 	sqlRows, err := s.db.QueryContext(ctx,
-		`SELECT `+logColumns+`, COUNT(*) OVER() FROM logs`+where+
+		`SELECT `+logColumns+` FROM logs`+where+
 			` ORDER BY id DESC LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...)
 	if err != nil {
@@ -268,7 +270,7 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	}
 	defer func() { _ = sqlRows.Close() }()
 	for sqlRows.Next() {
-		r, err := scanLogRow(sqlRows, &total)
+		r, err := scanLogRow(sqlRows)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -277,13 +279,9 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	if err := sqlRows.Err(); err != nil {
 		return nil, 0, err
 	}
-	// offset 越过命中尾部时窗口函数没有行可挂，total 留在零值——
-	// 补一次标量计数把真实命中数还给分页器（空结果同样走这里）。
-	if len(rows) == 0 {
-		if err := s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
-			return nil, 0, err
-		}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	return rows, total, nil
 }
