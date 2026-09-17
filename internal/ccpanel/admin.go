@@ -340,9 +340,10 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 	if h.warmStats != nil {
 		data["warm"] = warmStatsView(h.warmStats())
 	}
-	// accounts 组是号池逐账号视图：每号的闸门与保温各自透出——
-	// 顶层 gate/warm 仍是首 lane 快照（前端后兼容），逐号排障看这里。
-	if h.accountGateStats != nil || h.accountWarmStats != nil {
+	// accounts 组是号池逐账号视图：每号的闸门/保温/池侧状态各自
+	// 透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容），逐号
+	// 排障看这里。
+	if h.accountGateStats != nil || h.accountWarmStats != nil || h.accountLaneStates != nil {
 		gates := map[string]devin.GateStats{}
 		if h.accountGateStats != nil {
 			gates = h.accountGateStats()
@@ -351,20 +352,29 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 		if h.accountWarmStats != nil {
 			warms = h.accountWarmStats()
 		}
-		accounts := make(map[string]any, len(gates)+len(warms))
-		for name, gate := range gates {
-			entry := map[string]any{"gate": gate}
-			// warm 只在确有该号簿记时投：两次快照之间 ApplyConfigs
-			// 换过 lane 集合的话，缺席渲染成 enabled:false 会误读。
-			if warm, ok := warms[name]; ok {
-				entry["warm"] = warmStatsView(warm)
+		laneStates := map[string]devin.LaneState{}
+		if h.accountLaneStates != nil {
+			laneStates = h.accountLaneStates()
+		}
+		accounts := make(map[string]any, len(gates)+len(warms)+len(laneStates))
+		entry := func(name string) map[string]any {
+			if e, ok := accounts[name].(map[string]any); ok {
+				return e
 			}
-			accounts[name] = entry
+			e := map[string]any{}
+			accounts[name] = e
+			return e
+		}
+		for name, gate := range gates {
+			entry(name)["gate"] = gate
 		}
 		for name, warm := range warms {
-			if _, ok := accounts[name]; !ok {
-				accounts[name] = map[string]any{"warm": warmStatsView(warm)}
-			}
+			// warm 只在确有该号簿记时投：两次快照之间 ApplyConfigs
+			// 换过 lane 集合的话，缺席渲染成 enabled:false 会误读。
+			entry(name)["warm"] = warmStatsView(warm)
+		}
+		for name, state := range laneStates {
+			entry(name)["lane"] = state
 		}
 		data["accounts"] = accounts
 	}

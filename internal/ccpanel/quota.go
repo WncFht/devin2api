@@ -164,11 +164,24 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 func (h *Handler) sampleAccountQuota(path, account, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	_, plan, _, err := h.fetchUserStatusAs(ctx, token)
+	user, plan, _, err := h.fetchUserStatusAs(ctx, token)
 	if err != nil {
 		slog.Warn("quota sample failed", "account", account, "error", err)
 		return
 	}
+	h.quotaUserMu.Lock()
+	if h.quotaUsers == nil {
+		h.quotaUsers = map[string]map[string]any{}
+	}
+	h.quotaUsers[account] = map[string]any{
+		"name":             strAny(user["name"]),
+		"email":            strAny(user["email"]),
+		"pro":              user["pro"],
+		"teams_tier":       strAny(user["teams_tier"]),
+		"plan_name":        strAny(plan["plan_name"]),
+		"billing_strategy": strAny(plan["billing_strategy"]),
+	}
+	h.quotaUserMu.Unlock()
 	if plan == nil {
 		// 上游 200 但缺 planStatus：不写点也不报错会把 quota.jsonl
 		// 变成静默空文件，留一行痕迹说明「拉到了但无配额数据」。
@@ -319,9 +332,21 @@ func (h *Handler) QuotaReport() map[string]any {
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	h.quotaUserMu.Lock()
+	users := make(map[string]map[string]any, len(h.quotaUsers))
+	for name, u := range h.quotaUsers {
+		users[name] = u
+	}
+	h.quotaUserMu.Unlock()
 	accounts := make(map[string]any, len(names))
 	for _, name := range names {
-		accounts[name] = reportFor(byAccount[name])
+		report := reportFor(byAccount[name])
+		// user 是采样顺带取回的身份快照：只对确有该号记录的 lane
+		// 投影，重启后首个采样点落盘前的缺席交给前端渲染成未知。
+		if u, ok := users[name]; ok {
+			report["user"] = u
+		}
+		accounts[name] = report
 	}
 	out := map[string]any{"accounts": accounts}
 	// 镜像跟随最新鲜的序列而非名序首个：被移出号池的号曲线停更，

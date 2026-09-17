@@ -78,6 +78,11 @@ type Handler struct {
 	quotaMu       sync.Mutex
 	quotaCancel   context.CancelFunc
 	quotaInterval time.Duration
+	// quotaUserMu/quotaUsers 是最近一次逐号配额采样顺带取回的账号
+	// 身份快照（按账号名索引）：只活内存、随采样周期刷新，重启后
+	// 首个采样点落盘前缺席——lane 名是主键，身份只是易读别名。
+	quotaUserMu sync.Mutex
+	quotaUsers  map[string]map[string]any
 
 	// debug 是 index.jsonl 与请求目录的读取入口。
 	debug *debuglog.Manager
@@ -85,10 +90,12 @@ type Handler struct {
 	metrics *obs.Metrics
 	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
 	gateStats func() devin.GateStats
-	// accountGateStats/accountWarmStats 返回逐账号闸门/保温快照
-	// （按账号名索引）；nil 时 runtime-metrics 不投 accounts 组。
-	accountGateStats func() map[string]devin.GateStats
-	accountWarmStats func() map[string]devin.WarmStats
+	// accountGateStats/accountWarmStats/accountLaneStates 返回逐账号
+	// 闸门/保温/池侧状态快照（按账号名索引）；全为 nil 时
+	// runtime-metrics 不投 accounts 组。
+	accountGateStats  func() map[string]devin.GateStats
+	accountWarmStats  func() map[string]devin.WarmStats
+	accountLaneStates func() map[string]devin.LaneState
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
@@ -194,6 +201,12 @@ func (h *Handler) SetAccountGateStats(fn func() map[string]devin.GateStats) {
 // SetAccountWarmStats 注入逐账号保温簿记源（accounts 组按号透出）。
 func (h *Handler) SetAccountWarmStats(fn func() map[string]devin.WarmStats) {
 	h.accountWarmStats = fn
+}
+
+// SetAccountLaneStates 注入逐账号池侧状态源（冷却窗与最近失败归因，
+// accounts 组按号透出）。
+func (h *Handler) SetAccountLaneStates(fn func() map[string]devin.LaneState) {
+	h.accountLaneStates = fn
 }
 
 // SetPoolTokenFuncs 注入号池凭据源读取函数（按账号名索引的 map）：

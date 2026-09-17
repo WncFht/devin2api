@@ -51,7 +51,9 @@ type Pool struct {
 
 // poolLane 是池里的一条账号泳道：adapter 承载该号全部运行时状态，
 // badToken* 是池侧加的凭据失效冷却（lane 内自愈失败后由 noteFailure
-// 标记，authCooldown 惰性解禁），authMu 保护这两个字段。
+// 标记，authCooldown 惰性解禁），lastFailure* 是最近一次换号失败的
+// 归因（冷却期外也保留——冷却只压重试，失败史是排障证据），authMu
+// 保护这四组字段。
 type poolLane struct {
 	name    string
 	adapter *Adapter
@@ -61,7 +63,26 @@ type poolLane struct {
 	badUntil     time.Time
 	// unhealthyUntil 是非凭据类失败的短冷却截止（genericLaneCooldown）；
 	// 与 badToken 冷却不同键：不看 token 换没换，到点自然解封。
-	unhealthyUntil time.Time
+	unhealthyUntil     time.Time
+	lastFailureAt      time.Time
+	lastFailureCode    string
+	lastFailureMessage string
+}
+
+// LaneState 是单条 lane 的池侧状态快照，/admin/runtime-metrics 的
+// accounts.<name>.lane 组透出。Healthy 复刻选中判定的近似值——读
+// 时刻与选中时刻之间状态可翻转，是展示快照而非调度承诺。
+type LaneState struct {
+	Healthy bool `json:"healthy"`
+	// AuthCooldownUntil 是凭据失效冷却截止：TokenSource 换出新凭据会
+	// 提前解禁，所以它是最晚恢复点而非精确点。
+	AuthCooldownUntil *time.Time `json:"auth_cooldown_until,omitempty"`
+	// UnhealthyUntil 是非凭据类失败的短冷却截止，到点自然解封。
+	UnhealthyUntil *time.Time `json:"unhealthy_until,omitempty"`
+	// LastFailure* 是最近一次换号失败的归因。
+	LastFailureAt      *time.Time `json:"last_failure_at,omitempty"`
+	LastFailureCode    string     `json:"last_failure_code,omitempty"`
+	LastFailureMessage string     `json:"last_failure_message,omitempty"`
 }
 
 var _ adapter.Adapter = (*Pool)(nil)
@@ -359,6 +380,12 @@ func (lane *poolLane) noteFailure(err error) {
 	}
 	lane.authMu.Lock()
 	defer lane.authMu.Unlock()
+	lane.lastFailureAt = time.Now()
+	lane.lastFailureCode = failure.Code
+	lane.lastFailureMessage = failure.Message
+	if len(lane.lastFailureMessage) > 300 {
+		lane.lastFailureMessage = lane.lastFailureMessage[:300]
+	}
 	if failure.Code == "unauthenticated" {
 		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
 		if until := time.Now().Add(badTokenCooldown); until.After(lane.badUntil) {
@@ -369,6 +396,31 @@ func (lane *poolLane) noteFailure(err error) {
 	if until := time.Now().Add(genericLaneCooldown); until.After(lane.unhealthyUntil) {
 		lane.unhealthyUntil = until
 	}
+}
+
+// state 读 lane 的池侧状态快照。先跑 healthy()——它内部的
+// authCooldown 会把「凭据已换出」的死标惰性清掉，之后读到的
+// badUntil 才是真实生效的冷却窗。
+func (lane *poolLane) state() LaneState {
+	s := LaneState{Healthy: lane.healthy()}
+	lane.authMu.Lock()
+	defer lane.authMu.Unlock()
+	now := time.Now()
+	if lane.badTokenHash != "" && now.Before(lane.badUntil) {
+		until := lane.badUntil
+		s.AuthCooldownUntil = &until
+	}
+	if now.Before(lane.unhealthyUntil) {
+		until := lane.unhealthyUntil
+		s.UnhealthyUntil = &until
+	}
+	if !lane.lastFailureAt.IsZero() {
+		at := lane.lastFailureAt
+		s.LastFailureAt = &at
+		s.LastFailureCode = lane.lastFailureCode
+		s.LastFailureMessage = lane.lastFailureMessage
+	}
+	return s
 }
 
 // tokenHash 是凭据的冷却判等键：不存原文，哈希足够区分「换没换」。
@@ -595,6 +647,17 @@ func (pool *Pool) AccountWarmStats() map[string]WarmStats {
 		stats[lane.name] = lane.adapter.WarmStats()
 	}
 	return stats
+}
+
+// AccountLaneStates 返回各 lane 的池侧状态快照（按账号名索引），
+// /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
+func (pool *Pool) AccountLaneStates() map[string]LaneState {
+	lanes := pool.snapshot()
+	states := make(map[string]LaneState, len(lanes))
+	for _, lane := range lanes {
+		states[lane.name] = lane.state()
+	}
+	return states
 }
 
 // Aliases 返回模型别名映射：全局字段各 lane 一致，取首 lane。

@@ -228,6 +228,7 @@ func main() {
 	ccPanel.SetWarmStats(devinPool.WarmStats)
 	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
 	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
+	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
 	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
 	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
