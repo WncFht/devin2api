@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// minCPUSampleWindow 是 cpu_percent 的最小采样窗：相邻两次 Snapshot 间隔
+// 过近时 cpu_seconds 差值除以近零的 wall 会炸出离谱百分比。窗口不足时本次
+// 报 0 且不推进采样基准——cpu 差值累积进下一窗口，长期均值不失真。
+const minCPUSampleWindow = time.Millisecond
+
 // process 返回进程级指标快照：内存、GC、goroutine、CPU。
 // cpu_percent 是相邻两次 Snapshot 之间 cpu_seconds/wall_seconds×100，
 // 首次调用返回自启动以来的平均占用（top 式 %CPU，多核可超 100）。
@@ -24,11 +29,11 @@ func (m *Metrics) process() map[string]any {
 		wallDelta = time.Since(m.startedAt).Seconds()
 	}
 	cpuPercent := 0.0
-	if wallDelta > 0 {
+	if wallDelta >= minCPUSampleWindow.Seconds() {
 		cpuPercent = (cpuSeconds - m.lastCPUSeconds) / wallDelta * 100
+		m.lastCPUSeconds = cpuSeconds
+		m.lastCPUAt = time.Now()
 	}
-	m.lastCPUSeconds = cpuSeconds
-	m.lastCPUAt = time.Now()
 	m.procMu.Unlock()
 
 	return map[string]any{
