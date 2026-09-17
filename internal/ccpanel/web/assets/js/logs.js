@@ -130,10 +130,12 @@ let authTokens = []; // 令牌列表
 let logsModelCombobox = null; // 模型筛选组合框
 let logsStatusCombobox = null; // 状态码筛选组合框
 let logsErrorStageCombobox = null; // 失败阶段筛选组合框
+let logsAccountCombobox = null; // 上游账号筛选组合框
 let lastLogsHintData = null; // 最近一次列表响应的 {rejects}，供语言切换重渲
 let lastLogsMetricsData = null; // 最近一次指标条响应（/admin/stats data），供语言切换重渲
 window.availableLogsModels = []; // 可用模型列表
 window.availableLogsStatusCodes = []; // 可用状态码列表
+window.availableLogsAccounts = []; // 可见日志里出现过的上游账号
 let logsExactModelValue = '';
 
 let latestActiveRequests = []; // 缓存 ui.js 最近一次推送的活动请求，供 load() 即时刷新
@@ -1645,6 +1647,11 @@ function applyLogsFilterValues(filters) {
     );
   }
 
+  if (logsAccountCombobox && filters.account !== undefined) {
+    const account = String(filters.account || '').trim();
+    logsAccountCombobox.setValue(account, account || t('logs.allAccounts'));
+  }
+
 }
 
 function getLogSourceFilterElements() {
@@ -1709,6 +1716,8 @@ function mergeLogsFilterOptions(entries) {
   const knownModels = new Set(models);
   const statusCodes = Array.isArray(window.availableLogsStatusCodes) ? window.availableLogsStatusCodes : [];
   const knownStatusCodes = new Set(statusCodes);
+  const accounts = Array.isArray(window.availableLogsAccounts) ? window.availableLogsAccounts : [];
+  const knownAccounts = new Set(accounts);
   let changed = false;
 
   for (const entry of entries) {
@@ -1724,13 +1733,21 @@ function mergeLogsFilterOptions(entries) {
       statusCodes.push(statusCode);
       changed = true;
     }
+    const account = String(entry?.account || '').trim();
+    if (account && !knownAccounts.has(account)) {
+      knownAccounts.add(account);
+      accounts.push(account);
+      changed = true;
+    }
   }
 
   if (!changed) return;
   window.availableLogsModels = models;
   window.availableLogsStatusCodes = statusCodes.sort((a, b) => a - b);
+  window.availableLogsAccounts = accounts.sort();
   if (logsModelCombobox) logsModelCombobox.refresh();
   if (logsStatusCombobox) logsStatusCombobox.refresh();
+  if (logsAccountCombobox) logsAccountCombobox.refresh();
 }
 
 function initLogsModelCombobox(initialValue) {
@@ -1808,6 +1825,27 @@ function initLogsErrorStageCombobox(initialValue) {
   });
 }
 
+function initLogsAccountCombobox(initialValue) {
+  if (typeof window.createSearchableCombobox !== 'function') return;
+  if (!document.getElementById('f_account')) return;
+  logsAccountCombobox = window.createSearchableCombobox({
+    inputId: 'f_account',
+    dropdownId: 'f_account_dropdown',
+    attachMode: true,
+    initialValue: initialValue || '',
+    initialLabel: initialValue || t('logs.allAccounts'),
+    allowCustomInput: true,
+    commitEmptyAsFirst: true,
+    getOptions: () => [
+      { value: '', label: t('logs.allAccounts') },
+      ...(window.availableLogsAccounts || []).map(name => ({ value: name, label: name }))
+    ],
+    onSelect: () => {
+      applyFilter();
+    }
+  });
+}
+
 async function initFilters(restoredFilters, preloaded) {
   const range = restoredFilters.range || 'today';
   const authToken = restoredFilters.authToken || '';
@@ -1835,6 +1873,7 @@ async function initFilters(restoredFilters, preloaded) {
   initLogsModelCombobox(restoredFilters.model || '');
   initLogsStatusCombobox(restoredFilters.status || '');
   initLogsErrorStageCombobox(restoredFilters.errorStage || '');
+  initLogsAccountCombobox(restoredFilters.account || '');
   applyLogsFilterValues(restoredFilters);
   const apiSelect = document.getElementById('f_api');
   if (apiSelect) {
@@ -1869,7 +1908,7 @@ async function initFilters(restoredFilters, preloaded) {
 
   window.bindFilterApplyInputs({
     apply: applyFilter,
-    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_result']
+    enterInputIds: ['f_hours', 'f_api', 'f_auth_token', 'f_log_source', 'f_result', 'f_account']
   });
 }
 
@@ -1964,7 +2003,8 @@ const LOGS_FILTER_FIELDS = [
   { key: 'status', queryKeys: ['status', 'status_code', 'status_class'], defaultValue: '' },
   { key: 'result', queryKeys: ['result'], defaultValue: '' },
   { key: 'errorStage', queryKeys: ['error_stage'], defaultValue: '' },
-  { key: 'authToken', queryKeys: ['auth_token_id'], defaultValue: '' }
+  { key: 'authToken', queryKeys: ['auth_token_id'], defaultValue: '' },
+  { key: 'account', queryKeys: ['account'], defaultValue: '' }
 ];
 
 function getLogsFilters() {
@@ -1977,6 +2017,9 @@ function getLogsFilters() {
   const errorStage = logsErrorStageCombobox
     ? String(logsErrorStageCombobox.getValue() || '').trim()
     : (document.getElementById('f_error_stage')?.value || '').trim();
+  const account = logsAccountCombobox
+    ? String(logsAccountCombobox.getValue() || '').trim()
+    : (document.getElementById('f_account')?.value || '').trim();
   const baseValues = window.readFilterControlValues({
     range: { id: 'f_hours', defaultValue: 'today', trim: true },
     api: { id: 'f_api', trim: true },
@@ -1992,6 +2035,7 @@ function getLogsFilters() {
     model,
     status,
     errorStage,
+    account,
     modelExact: isExactLogsModelFilter(model),
     logSource
   };

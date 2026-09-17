@@ -116,6 +116,14 @@
               `, 'filter-control--compact')}`,
         joinClasses(groupClass, 'filter-group--log-source')
       ),
+      account: buildFilterGroup(
+        `${buildFilterLabel('f_account', 'logs.colAccount', '账号')}
+        <div class="filter-combobox-wrapper filter-control--compact filter-control--account">
+          <input id="f_account" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="f_account_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`,
+        joinClasses(groupClass, 'filter-group--account')
+      ),
       hideZeroSuccess,
       filterButton,
       logsActions: `<div class="logs-filter-summary-row"><div class="${joinClasses('filter-actions', 'filter-actions--page', config.actionsClass)}">
@@ -148,7 +156,7 @@
       // 单条 flex 流一行排布：先「哪些请求」（范围/入口/模型/令牌/来源）
       // 后「结果如何」（状态码/结果/失败阶段），清空+筛选靠右收尾；
       // 列显隐/导出不参与查询，挪到表格上方工具条（logs.html）。
-      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'logSource', 'status', 'result', 'errorStage', 'logsActions']
+      items: ['timeRange', 'api', 'modelCombobox', 'authToken', 'account', 'logSource', 'status', 'result', 'errorStage', 'logsActions']
     },
     trend: {
       barClass: 'filter-bar mt-2',
