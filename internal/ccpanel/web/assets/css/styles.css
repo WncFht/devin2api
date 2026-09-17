@@ -773,7 +773,7 @@ body {
 }
 
 .metric-item {
-  text-align: center;
+  text-align: left;
 }
 
 .metric-value {
@@ -800,7 +800,7 @@ body {
 .token-item {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
 }
 
@@ -2712,6 +2712,8 @@ body {
 .custom-pricing-table th:nth-child(4),
 .custom-pricing-table th:nth-child(5) {
   min-width: 125px;
+  /* 四个价格列表头右对齐，跟随数值列 */
+  text-align: right;
 }
 
 /* 高上下文行的操作列为空，只约束基础价行的删除按钮列。 */
@@ -2720,7 +2722,7 @@ body {
   width: 58px;
   min-width: 58px;
   white-space: nowrap;
-  text-align: center;
+  text-align: right;
 }
 
 /* 同一模型的两行靠近，模型组之间保留双倍间距；横向 padding 保持一致以对齐列。 */
@@ -3942,10 +3944,10 @@ a.model-tag.model-link:hover {
   color: var(--warning-600);
 }
 
-.stats-table .stats-col-timing {
-  text-align: center;
-}
-
+/* 语义对齐：th/td 共用 stats-col-* 类，数值列整体右对齐，表头同向 */
+.stats-table .stats-col-success,
+.stats-table .stats-col-error,
+.stats-table .stats-col-timing,
 .stats-table .stats-col-speed,
 .stats-table .stats-col-rpm,
 .stats-table .stats-col-input,
@@ -3964,7 +3966,6 @@ a.model-tag.model-link:hover {
 }
 
 .stats-table .stats-col-total-label {
-  text-align: center;
   font-size: 15px;
   color: var(--primary-700);
 }
@@ -4183,17 +4184,6 @@ body.trend-page .chart-container {
   min-height: 260px;
 }
 
-body.trend-page .chart-info {
-  flex: 0 0 auto;
-}
-
-/* 标题短词禁折行：CJK min-content 只有单字宽，flex 收缩会把
-   「请求趋势图表」挤成词中换行（末字孤行）。nowrap 让 h3 的
-   min-content 回到整词宽，空间不足时由工具栏自己换行。 */
-.trend-chart-title {
-  white-space: nowrap;
-}
-
 .trend-chart-type-toggle {
   display: inline-flex;
   gap: var(--space-1);
@@ -4244,23 +4234,6 @@ body.trend-page .chart-info {
 
 .error-message {
   font-size: var(--text-sm);
-}
-
-.chart-info {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--neutral-200);
-  font-size: var(--text-sm);
-  color: var(--neutral-700);
-}
-
-.info-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 
 /* ===== 渠道筛选器样式 ===== */
@@ -4804,12 +4777,6 @@ body.web-role-api-token #btn_export_json {
     height: 400px;
   }
 
-  .chart-info {
-    flex-direction: column;
-    gap: var(--space-2);
-    align-items: flex-start;
-  }
-
   .pagination-controls {
     flex-direction: column;
     gap: var(--space-2);
@@ -5184,11 +5151,6 @@ body.web-role-api-token #btn_export_json {
   animation-delay: 0.2s;
 }
 
-/* stats.html page-specific styles */
-.stats-table th {
-  text-align: center;
-}
-
 @media (max-width: 768px) {
   .mobile-card-table-container {
     overflow-x: visible;
@@ -5538,60 +5500,6 @@ body.web-role-api-token #btn_export_json {
   body.trend-page .trend-chart-card {
     flex: 0 0 auto;
   }
-
-  .trend-chart-header {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .trend-chart-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    font-size: var(--text-base);
-    line-height: 1.3;
-  }
-
-  .trend-chart-title svg {
-    flex: 0 0 auto;
-  }
-
-  .trend-chart-toolbar {
-    display: contents;
-  }
-
-  .trend-chart-toolbar .toggle-group {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    width: 100%;
-    max-width: 100%;
-    padding-bottom: 2px;
-    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
-  }
-
-  .trend-chart-toolbar .toggle-btn {
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
-
-  .trend-chart-toolbar .trend-chart-type-toggle {
-    grid-column: 1 / -1;
-    grid-row: 3;
-    justify-self: end;
-  }
-
-  .trend-chart-toolbar .channel-filter-container {
-    grid-column: 2;
-    grid-row: 1;
-    justify-self: end;
-    width: auto;
-  }
-
-  
 
   .trend-chart-toolbar .channel-filter-dropdown {
     left: 0;

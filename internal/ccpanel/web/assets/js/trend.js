@@ -1427,7 +1427,7 @@ function shouldShowZoom(points, hours, trendType) {
     }
 
     function formatInterval(min) {
-      return min >= 60 ? (min/60) + t('trend.hour') : min + t('trend.minute');
+      return min >= 60 ? (min/60) + ' ' + t('trend.hour') : min + ' ' + t('trend.minute');
     }
 
     // 工具函数
@@ -1680,16 +1680,18 @@ function shouldShowZoom(points, hours, trendType) {
       } catch (_) {}
     }
 
-    // 自动刷新：工具栏 select 控制间隔（10s/30s/1min/5min），默认 60s，
+    // 自动刷新：工具栏 select 控制间隔（关闭/10s/30s/1min/5min），默认 60s，
     // 选择存 localStorage，切换即重建定时器；页面隐藏时跳过 tick。
     const TREND_REFRESH_KEY = 'trend.refreshSec';
-    const TREND_REFRESH_OPTIONS = [10, 30, 60, 300];
+    const TREND_REFRESH_OPTIONS = [0, 10, 30, 60, 300];
     const TREND_REFRESH_DEFAULT = 60;
     let trendRefreshTimer = null;
 
     function currentTrendRefreshSec() {
       try {
-        const v = Number(localStorage.getItem(TREND_REFRESH_KEY));
+        const raw = localStorage.getItem(TREND_REFRESH_KEY);
+        if (raw === null) return TREND_REFRESH_DEFAULT;
+        const v = Number(raw);
         if (TREND_REFRESH_OPTIONS.includes(v)) return v;
       } catch (_) {}
       return TREND_REFRESH_DEFAULT;
@@ -1701,6 +1703,7 @@ function shouldShowZoom(points, hours, trendType) {
         trendRefreshTimer = null;
       }
       const sec = currentTrendRefreshSec();
+      if (sec <= 0) return;
       trendRefreshTimer = setInterval(() => {
         if (document.hidden) return;
         loadData(true);
@@ -1850,11 +1853,6 @@ function shouldShowZoom(points, hours, trendType) {
       } else {
         currentTrendCustomTimeRange = null;
       }
-      const label = document.getElementById('data-timerange');
-      if (label) {
-        const rangeLabel = window.getRangeLabel ? getRangeLabel(range) : range;
-        label.textContent = t('trend.dataDisplay', { range: rangeLabel });
-      }
       persistState();
       await loadModels(range);
       loadData();
@@ -1891,12 +1889,6 @@ function shouldShowZoom(points, hours, trendType) {
           : null;
         if (window.currentRange === 'custom' && !currentTrendCustomTimeRange) {
           window.currentRange = 'today';
-        }
-
-        const label = document.getElementById('data-timerange');
-        if (label) {
-          const rangeLabel = window.getRangeLabel ? getRangeLabel(window.currentRange) : window.currentRange;
-          label.textContent = t('trend.dataDisplay', { range: rangeLabel });
         }
 
         // 恢复趋势类型

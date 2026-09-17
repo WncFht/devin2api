@@ -36,19 +36,8 @@
         <!-- 趋势图表 -->
         <section class="mb-8 trend-chart-section">
           <div class="glass-card trend-chart-card">
-            <div class="flex justify-between items-center mb-6 trend-chart-header">
-              <h3 class="text-lg font-semibold trend-chart-title">
-                <svg class="inline-block w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4"/>
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 21l4-4 4 4"/>
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h18"/>
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"/>
-                </svg>
-                <span data-i18n="trend.chartTitle">请求趋势图表</span>
-              </h3>
-              
-              <!-- 控件与图例 -->
-              <div class="flex items-center trend-chart-toolbar gap-space-3 flex-wrap">
+            <!-- 控件与图例：单行排布，窄屏时趋势类型组内部横滚 -->
+            <div class="trend-chart-toolbar mb-6">
                 <!-- 趋势类型切换 -->
                 <div class="toggle-group" id="trend-type-group">
                   <div class="toggle-btn" data-type="count" data-i18n="trend.typeCount">调用次数</div>
@@ -104,17 +93,25 @@
                     </div>
                   </div>
                 </div>
-                <!-- 自动刷新间隔 -->
+                <!-- 自动刷新开关与间隔：0=关闭，选择存 localStorage -->
                 <label class="trend-refresh-control" for="f_refresh_interval">
                   <span class="trend-refresh-label" data-i18n="trend.refreshInterval">自动刷新</span>
                   <select id="f_refresh_interval" class="filter-select trend-refresh-select">
+                    <option value="0" data-i18n="trend.refreshOff">关闭</option>
                     <option value="10" data-i18n="trend.refresh10s">10秒</option>
                     <option value="30" data-i18n="trend.refresh30s">30秒</option>
                     <option value="60" data-i18n="trend.refresh1min">1分钟</option>
                     <option value="300" data-i18n="trend.refresh5min">5分钟</option>
                   </select>
                 </label>
-              </div>
+                <!-- 数据粒度与规模（原图表下方信息行上移） -->
+                <span class="trend-meta-chip" id="bucket-interval" data-i18n="trend.dataIntervalInit">数据更新间隔：--</span>
+                <span class="trend-meta-chip" id="warm-status-item" style="display:none">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                  </svg>
+                  <span id="warm-status"></span>
+                </span>
             </div>
 
             <!-- 图表容器 -->
@@ -134,27 +131,6 @@
               <div id="chart" class="w-full h-full hidden"></div>
             </div>
 
-            <!-- 图表时间范围提示 -->
-            <div class="chart-info">
-              <div class="info-item">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <span id="bucket-interval" data-i18n="trend.dataIntervalInit">数据更新间隔：--</span>
-              </div>
-              <div class="info-item">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                </svg>
-                <span id="data-timerange" data-i18n="trend.dataDisplayInit">本日数据展示</span>
-              </div>
-              <div class="info-item" id="warm-status-item" style="display:none">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                </svg>
-                <span id="warm-status"></span>
-              </div>
-            </div>
           </div>
         </section>
       </div>

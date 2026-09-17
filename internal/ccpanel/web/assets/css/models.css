@@ -121,13 +121,26 @@
     min-width: 1160px;
   }
 
-  /* 数字列右对齐：th 4-7 = 倍率/输入价/缓存价/输出价；
-     三个价格 td 由 models.js 内联 right，倍率格在这里补上 */
+  /* 数字列右对齐：4-7 = 倍率/输入价/缓存价/输出价 */
   .models-table th:nth-child(4),
   .models-table th:nth-child(5),
   .models-table th:nth-child(6),
   .models-table th:nth-child(7),
-  .models-table td:nth-child(4) {
+  .models-table td:nth-child(4),
+  .models-table td:nth-child(5),
+  .models-table td:nth-child(6),
+  .models-table td:nth-child(7) {
+    text-align: right;
+  }
+
+  /* 启用列是开关，居中；操作列右对齐 */
+  .models-table th:nth-child(9),
+  .models-table td:nth-child(9) {
+    text-align: center;
+  }
+
+  .models-table th:nth-child(11),
+  .models-table td:nth-child(11) {
     text-align: right;
   }
 }

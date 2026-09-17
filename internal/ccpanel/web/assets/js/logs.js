@@ -1254,18 +1254,18 @@ function renderActiveRequests(activeRequests) {
             <td class="logs-col-time" data-mobile-label="${logMobileLabels.time}" style="white-space: nowrap;">${formatTime(req.start_time)}</td>
             <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</td>
             <td class="${tokenDescCellClass}" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
-            <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${keyDisplay}</td>
+            <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="white-space: nowrap;">${keyDisplay}</td>
             <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
             <td class="${accountCellClass}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
             <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}">${statusDisplay}</td>
-            <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${durationDisplay} ${streamFlag}</td>
-            <td class="${speedCellClass}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${abortDisplay}</td>
-            <td class="logs-col-input mobile-empty-cell" data-mobile-label="${logMobileLabels.input}" style="text-align: right; white-space: nowrap;"></td>
-            <td class="logs-col-output mobile-empty-cell" data-mobile-label="${logMobileLabels.output}" style="text-align: right; white-space: nowrap;"></td>
-            <td class="logs-col-cache-read mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheRead}" style="text-align: right; white-space: nowrap;"></td>
-            <td class="logs-col-cache-write mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheWrite}" style="text-align: right; white-space: nowrap;"></td>
-            <td class="logs-col-cache-util mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheUtil}" style="text-align: right; white-space: nowrap;"></td>
-            <td class="logs-col-cost mobile-empty-cell" data-mobile-label="${logMobileLabels.cost}" style="text-align: right; white-space: nowrap;"></td>
+            <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="white-space: nowrap;">${durationDisplay} ${streamFlag}</td>
+            <td class="${speedCellClass}" data-mobile-label="${logMobileLabels.speed}" style="white-space: nowrap;">${abortDisplay}</td>
+            <td class="logs-col-input mobile-empty-cell" data-mobile-label="${logMobileLabels.input}" style="white-space: nowrap;"></td>
+            <td class="logs-col-output mobile-empty-cell" data-mobile-label="${logMobileLabels.output}" style="white-space: nowrap;"></td>
+            <td class="logs-col-cache-read mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheRead}" style="white-space: nowrap;"></td>
+            <td class="logs-col-cache-write mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheWrite}" style="white-space: nowrap;"></td>
+            <td class="logs-col-cache-util mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheUtil}" style="white-space: nowrap;"></td>
+            <td class="logs-col-cost mobile-empty-cell" data-mobile-label="${logMobileLabels.cost}" style="white-space: nowrap;"></td>
             <td class="logs-col-message" data-mobile-label="${logMobileLabels.message}">${infoContent}</td>
           `;
       }
@@ -1457,18 +1457,18 @@ function renderLogs(data) {
           <td class="logs-col-time" data-mobile-label="${logMobileLabels.time}" style="white-space: nowrap;">${formatTime(entry.time)}</td>
           <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;">${clientIPDisplay}</td>
           <td class="logs-col-token-desc" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
-          <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="text-align: center; white-space: nowrap;">${apiKeyDisplay}</td>
+          <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="white-space: nowrap;">${apiKeyDisplay}</td>
           <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
           <td class="logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
           <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${statusCode}</span></td>
-          <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="text-align: right; white-space: nowrap;">${responseTimingDisplay}</td>
-          <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="text-align: right; white-space: nowrap;">${speedDisplay}</td>
-          <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="text-align: right; white-space: nowrap;">${inputTokensDisplay}</td>
-          <td class="logs-col-output${outputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.output}" style="text-align: right; white-space: nowrap;">${outputTokensDisplay}</td>
-          <td class="logs-col-cache-read${cacheReadDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheRead}" style="text-align: right; white-space: nowrap;">${cacheReadDisplay}</td>
-          <td class="logs-col-cache-write${cacheCreationDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheWrite}" style="text-align: right; white-space: nowrap;">${cacheCreationDisplay}</td>
-          <td class="logs-col-cache-util${cacheUtilDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheUtil}" style="text-align: right; white-space: nowrap;">${cacheUtilDisplay}</td>
-          <td class="logs-col-cost${costDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cost}"${costTitleAttr} style="text-align: right; white-space: nowrap;">${costDisplay}</td>
+          <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="white-space: nowrap;">${responseTimingDisplay}</td>
+          <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="white-space: nowrap;">${speedDisplay}</td>
+          <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="white-space: nowrap;">${inputTokensDisplay}</td>
+          <td class="logs-col-output${outputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.output}" style="white-space: nowrap;">${outputTokensDisplay}</td>
+          <td class="logs-col-cache-read${cacheReadDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheRead}" style="white-space: nowrap;">${cacheReadDisplay}</td>
+          <td class="logs-col-cache-write${cacheCreationDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheWrite}" style="white-space: nowrap;">${cacheCreationDisplay}</td>
+          <td class="logs-col-cache-util${cacheUtilDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheUtil}" style="white-space: nowrap;">${cacheUtilDisplay}</td>
+          <td class="logs-col-cost${costDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cost}"${costTitleAttr} style="white-space: nowrap;">${costDisplay}</td>
           <td class="logs-col-message${messageContent ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.message}" style="max-width: 300px; word-break: break-word;">${messageContent}</td>
         </tr>`;
   }

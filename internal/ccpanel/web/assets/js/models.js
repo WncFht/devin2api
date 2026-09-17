@@ -448,13 +448,10 @@
 
       const inTd = h('td', null, c ? money(c.price_input) : '—');
       inTd.dataset.mobileLabel = labels.priceIn;
-      inTd.style.textAlign = 'right';
       const cachedTd = h('td', null, c ? money(c.price_cached) : '—');
       cachedTd.dataset.mobileLabel = labels.priceCached;
-      cachedTd.style.textAlign = 'right';
       const outTd = h('td', null, c ? money(c.price_output) : '—');
       outTd.dataset.mobileLabel = labels.priceOut;
-      outTd.style.textAlign = 'right';
 
       const srcTd = h('td');
       srcTd.dataset.mobileLabel = labels.source;

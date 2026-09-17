@@ -239,14 +239,14 @@
         <thead>
           <tr>
             <th>${t('tokens.table.token')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.callCount')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.successRate')}</th>
-            <th class="tokens-table-head-center" title="${t('tokens.table.rpmTitle')}">${t('tokens.table.rpm')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.tokenUsage')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.totalCost')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.concurrency')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.streamAvg')}</th>
-            <th class="tokens-table-head-center">${t('tokens.table.nonStreamAvg')}</th>
+            <th class="tokens-col-calls">${t('tokens.table.callCount')}</th>
+            <th class="tokens-col-success-rate">${t('tokens.table.successRate')}</th>
+            <th class="tokens-col-rpm" title="${t('tokens.table.rpmTitle')}">${t('tokens.table.rpm')}</th>
+            <th class="tokens-col-token-usage">${t('tokens.table.tokenUsage')}</th>
+            <th class="tokens-col-cost">${t('tokens.table.totalCost')}</th>
+            <th class="tokens-col-concurrency">${t('tokens.table.concurrency')}</th>
+            <th class="tokens-col-stream">${t('tokens.table.streamAvg')}</th>
+            <th class="tokens-col-non-stream">${t('tokens.table.nonStreamAvg')}</th>
             <th>${t('tokens.table.lastUsed')}</th>
             <th class="tokens-actions-col">${t('tokens.table.actions')}</th>
           </tr>

@@ -1,4 +1,78 @@
-/* stats/trend 页专属样式：趋势页工具栏刷新控件 */
+/* stats/trend 页专属样式 */
+
+/* ===== 对齐约定：表头跟随列；文本左、数值右 ===== */
+
+/* 右对齐的 sortable 表头给排序箭头让位（箭头绝对定位在右缘） */
+.stats-table th.sortable {
+  padding-right: 22px;
+}
+
+/* 用量观测小表：首列文本左，其余数值列右 */
+#usage-latency-block .modern-table th:nth-child(n+2),
+#usage-latency-block .modern-table td:nth-child(n+2),
+#usage-stages-block .modern-table th:nth-child(n+2),
+#usage-stages-block .modern-table td:nth-child(n+2),
+#usage-ctxfill-block .modern-table th:nth-child(n+2),
+#usage-ctxfill-block .modern-table td:nth-child(n+2) {
+  text-align: right;
+}
+
+/* ===== 趋势页工具栏：单行排布 =====
+   左起：趋势类型切换组（空间不足时组内横滚）→ 图表类型 → 模型筛选；
+   右端：自动刷新 + 数据粒度/保温状态信息片。 */
+.trend-chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.trend-chart-toolbar .toggle-group {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.trend-chart-toolbar .toggle-group::-webkit-scrollbar {
+  display: none;
+}
+
+.trend-chart-toolbar .toggle-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.trend-chart-toolbar .trend-chart-type-toggle,
+.trend-chart-toolbar .channel-filter-container {
+  flex: 0 0 auto;
+}
+
+/* 刷新控件与信息片整组靠右 */
+.trend-chart-toolbar .trend-refresh-control {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.trend-chart-toolbar .trend-meta-chip {
+  flex: 0 0 auto;
+}
+
+.trend-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--neutral-200);
+  border-radius: 999px;
+  background: var(--surface-bg-muted);
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+}
 
 /* 趋势页工具栏：自动刷新间隔 */
 .trend-refresh-control {
@@ -13,21 +87,48 @@
   color: var(--neutral-500);
 }
 
-/* .filter-select 默认 flex:1 会吃满父容器，工具栏里收成自适应宽度 */
+/* .filter-select 默认 flex:1 会吃满父容器，工具栏里收成自适应宽度。
+   searchable-select 增强后可见控件是 wrapper+input（原生 select 被藏成
+   1px），wrapper 的 flex:1/width:100% 也要一并收掉 */
 .trend-refresh-select {
   flex: 0 0 auto;
   width: auto;
-  min-width: 88px;
+  min-width: 76px;
 }
 
-/* 窄屏下 toolbar 是 display:contents（子项直接进 header 网格）：
-   刷新控件与图表类型切换同一行，左对齐 */
+.trend-refresh-control .searchable-select-wrapper {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+.trend-refresh-control .searchable-select-input {
+  width: 6.5em;
+  min-width: 0;
+}
+
+/* 中窄屏：控件总长超一行时自然换行（chip 掉到第二行左侧），
+   不把类型切换组压成一条缝 */
+@media (max-width: 1280px) {
+  .trend-chart-toolbar {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+}
+
+/* 窄屏：一行放不下时类型切换组独占一行横滚，其余控件自然换行 */
 @media (max-width: 768px) {
-  .trend-chart-toolbar .trend-refresh-control {
-    grid-column: 1;
-    grid-row: 3;
-    justify-self: start;
-    align-self: center;
+  .trend-chart-toolbar {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+
+  .trend-chart-toolbar .toggle-group {
+    order: -1;
+    flex: 1 1 100%;
+    max-width: 100%;
+    padding-bottom: 2px;
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
   }
 
   /* 卡片默认可视区两格一行，左右相邻的 label-value 混读

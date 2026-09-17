@@ -391,6 +391,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.warmStatusDisabled': '前缀保温：未开启',
   'trend.typeTps': 'TPS',
   'trend.refreshInterval': '自动刷新',
+  'trend.refreshOff': '关闭',
   'trend.refresh10s': '10秒',
   'trend.refresh30s': '30秒',
   'trend.refresh1min': '1分钟',

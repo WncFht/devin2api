@@ -210,9 +210,26 @@
       color: var(--neutral-600);
     }
 
+    /* 列语义对齐：文本/标识列左对齐，数值列右对齐（表头同向），
+       状态码徽章列居中。th/td 共用 logs-col-* 类，一处规则同时生效 */
     .logs-table th,
     .logs-table td {
       padding: var(--space-2) var(--space-1);
+      text-align: left;
+    }
+
+    .logs-table .logs-col-timing,
+    .logs-table .logs-col-speed,
+    .logs-table .logs-col-input,
+    .logs-table .logs-col-output,
+    .logs-table .logs-col-cache-read,
+    .logs-table .logs-col-cache-write,
+    .logs-table .logs-col-cache-util,
+    .logs-table .logs-col-cost {
+      text-align: right;
+    }
+
+    .logs-table .logs-col-status {
       text-align: center;
     }
 
@@ -899,10 +916,6 @@
       }
     }
 
-    .logs-table th {
-      text-align: center;
-    }
-
     /* 列背景交替（按列斑马纹） */
     .logs-table tbody td:nth-child(odd) {
       background: var(--table-bg);
@@ -933,7 +946,6 @@
       /* IP: xxx.xxx.*.* */
       min-width: 110px;
       max-width: 110px;
-      text-align: center;
     }
 
     .logs-table .logs-col-status {

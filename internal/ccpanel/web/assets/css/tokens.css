@@ -96,9 +96,6 @@
       box-sizing: border-box;
       vertical-align: middle;
     }
-    .tokens-table-head-center {
-      text-align: center !important;
-    }
     .token-table tbody tr:hover {
       background: var(--neutral-50);
     }
@@ -227,7 +224,7 @@
     .tokens-col-concurrency,
     .tokens-col-stream,
     .tokens-col-non-stream {
-      text-align: center;
+      text-align: right;
     }
     .token-limit-hint {
       flex: 0 0 auto;
@@ -255,6 +252,7 @@
       display: block;
     }
     .tokens-col-actions {
+      text-align: right;
       white-space: nowrap;
     }
     .token-row-action-btn {
@@ -416,12 +414,12 @@
     .token-cost {
       display: flex;
       flex-direction: column;
-      align-items: center;
+      align-items: flex-end;
       gap: 2px;
     }
     .token-cost .cost-stack {
-      align-items: center;
-      text-align: center;
+      align-items: flex-end;
+      text-align: right;
       font-size: 15px;
       font-weight: 700;
     }
@@ -439,7 +437,7 @@
       display: grid;
       grid-template-columns: repeat(2, minmax(0, max-content));
       gap: 4px;
-      justify-content: center;
+      justify-content: end;
     }
     .tokens-col-token-usage > .token-usage-metrics {
       grid-template-columns: minmax(0, max-content);
@@ -723,16 +721,20 @@
     }
     .allowed-model-col-actions-head {
       width: 60px;
+      text-align: right;
     }
     .allowed-models-empty-cell {
       padding: 16px;
       text-align: center;
       color: var(--neutral-500);
     }
-    .allowed-model-col-select,
-    .allowed-model-col-actions {
+    .allowed-model-col-select {
       padding: 8px;
       text-align: center;
+    }
+    .allowed-model-col-actions {
+      padding: 8px;
+      text-align: right;
     }
     .allowed-model-col-name {
       padding: 8px;
@@ -865,6 +867,7 @@
     }
     .tokens-actions-col {
       width: 8%;
+      text-align: right;
     }
     @media (max-width: 768px) {
       .token-edit-restriction-filter {
