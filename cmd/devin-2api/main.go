@@ -189,7 +189,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer devinPool.Close()
-	rt := accounts.New(absoluteConfigPath, dbStore, devinPool)
+	rt := accounts.New(absoluteConfigPath, absoluteStateDir, dbStore, devinPool)
 	rt.CommitConfig(serviceConfig)
 	rt.Lock()
 	_, _, err = rt.Apply(context.Background(), serviceConfig, nil)
@@ -252,6 +252,9 @@ func main() {
 	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
 	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
 	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
+	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
+	// 降权簿记（quota_low 阈值判定在 adapter 内）。
+	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)
 	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
 	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)

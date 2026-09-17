@@ -88,7 +88,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := accounts.New(configPath, dbStore, devinPool)
+	rt := accounts.New(configPath, dir, dbStore, devinPool)
 	rt.CommitConfig(prev)
 	if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			rt := accounts.New(configPath, dbStore, devinPool)
+			rt := accounts.New(configPath, dir, dbStore, devinPool)
 			rt.CommitConfig(prev)
 			if _, _, err := rt.Apply(context.Background(), prev, nil); err != nil {
 				t.Fatal(err)

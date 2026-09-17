@@ -113,6 +113,18 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	if rec := h.debug.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat/completions"}); rec != nil {
 		rec.SetUpstreamAccount("yanjian")
 	}
+	// 一条 yanjian 的完成行喂 usage 投影：200/stream/2s 时长/500ms
+	// 首字 → rpm_now=1、tps=50tok/1.5s、ttfb 单样本 500、
+	// cache_rate=200/(100+200+10)、today 全中。
+	fu := int64(500)
+	if _, err := h.store.InsertLog(context.Background(), &store.LogRow{
+		Dir: "d-yj-1", StartedAt: time.Now(), DurationMS: 2000, FirstUpstreamMS: &fu,
+		StatusCode: 200, Result: "completed", Stream: true, Account: "yanjian",
+		InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200, CacheWriteTokens: 10,
+		TotalTokens: 360,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().Unix()
 	for i, remaining := range []float64{90, 80, 70} {
 		if err := h.store.InsertQuotaSample(context.Background(), &store.QuotaSample{
@@ -184,8 +196,27 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	if user["email"] != "a@b.c" {
 		t.Fatalf("yanjian quota.user = %v", quota["user"])
 	}
-	if v, ok := yj["usage"]; !ok || v != nil {
-		t.Fatalf("usage = %v ok=%v, want explicit null", v, ok)
+	// 元数据三键恒出（零值也出键）；usage 是 store 投影——数据行喂出
+	// 真实值，分母为 0 的比率位落 null 而非 0。
+	if yj["priority"].(float64) != 0 || yj["max_rpm"].(float64) != 0 || yj["notes"] != "" {
+		t.Fatalf("yanjian meta = %v %v %v", yj["priority"], yj["max_rpm"], yj["notes"])
+	}
+	usage, _ := yj["usage"].(map[string]any)
+	if usage == nil {
+		t.Fatalf("yanjian usage = %v, want projected object", yj["usage"])
+	}
+	if usage["rpm_now"].(float64) != 1 || usage["tps_now"].(float64) != 50.0*1000/1500 ||
+		usage["ttfb_avg"].(float64) != 500 || usage["ttfb_p50"].(float64) != 500 ||
+		usage["ttfb_p90"].(float64) != 500 {
+		t.Fatalf("yanjian usage = %v", usage)
+	}
+	if d := usage["cache_rate"].(float64); d != 200.0/310 {
+		t.Fatalf("yanjian cache_rate = %v", usage["cache_rate"])
+	}
+	today, _ := usage["today"].(map[string]any)
+	if today["requests"].(float64) != 1 || today["success_rate"].(float64) != 1 ||
+		today["tokens"].(float64) != 360 {
+		t.Fatalf("yanjian usage.today = %v", today)
 	}
 	if yj["created_at"].(float64) != 1758000000000 || yj["updated_at"].(float64) != 1758100000000 {
 		t.Fatalf("yanjian times = %v %v", yj["created_at"], yj["updated_at"])
@@ -216,6 +247,16 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	}
 	if _, ok := rq["user"]; !ok {
 		t.Fatal("randall quota.user missing")
+	}
+	// 无日志行的号 usage 仍是投影对象：计数 0、比率/ttfb 位 null。
+	ru, _ := rd["usage"].(map[string]any)
+	if ru == nil || ru["rpm_now"].(float64) != 0 || ru["tps_now"] != nil ||
+		ru["ttfb_p50"] != nil || ru["cache_rate"] != nil {
+		t.Fatalf("randall usage = %v", rd["usage"])
+	}
+	rt, _ := ru["today"].(map[string]any)
+	if rt["requests"].(float64) != 0 || rt["success_rate"] != nil || rt["tokens"].(float64) != 0 {
+		t.Fatalf("randall usage.today = %v", rt)
 	}
 
 	// panel：config_declared=false、has_override=false；disabled 号无快照。

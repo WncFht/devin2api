@@ -792,6 +792,11 @@ func (application *App) createCompletion(
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
 	}
+	// 显式亲和头恒赢于 body 提取的 SessionKey：头是调用方的意图声明，
+	// 号池会话绑定与 trajectory 谱系都以它为种子。
+	if key := common.SessionKeyFromHeader(request.Header); key != "" {
+		messages.SessionKey = key
+	}
 	completion.Model = messages.Model
 	completion.RequestedModel = messages.Model
 	completion.Stream = options.Stream
@@ -993,6 +998,12 @@ var correlationHeaders = []correlationHeader{
 	{name: "Session_id", forward: true},
 	{name: "Thread-Id", forward: true},
 	{name: "X-Codex-Turn-Metadata", forward: true},
+	// 会话亲和头链成员（SessionKeyFromHeader 的优先级链）：不透传则
+	// WS 轮次的号池亲和落空。X-Client-Request-Id 依链定义刻意不采。
+	{name: "X-Claude-Code-Session-Id", forward: true},
+	{name: "X-Session-Affinity", forward: true},
+	{name: "X-Conversation-Id", forward: true},
+	{name: "X-Thread-Id", forward: true},
 }
 
 // clientRequestID 提取客户端自带的关联 ID，供其事后按自己的 ID 反查日志。

@@ -34,6 +34,9 @@ import (
 type Runtime struct {
 	mu         sync.Mutex
 	configPath string
+	// stateDir 是 credentials_content 粘贴上传的落盘根
+	//（account-credentials/ 子目录），见 Ops 的 Create/Update。
+	stateDir   string
 	db         *store.Store
 	pool       *devin.Pool
 	state      atomic.Pointer[configState]
@@ -50,8 +53,8 @@ type configState struct {
 
 // New 组装账号域持有点。db 允许为 nil（纯 config 视图的离线用法），
 // 但一切经 EffectiveAccounts 的读路径随之不可用——调用方自行保证。
-func New(configPath string, db *store.Store, pool *devin.Pool) *Runtime {
-	return &Runtime{configPath: configPath, db: db, pool: pool}
+func New(configPath, stateDir string, db *store.Store, pool *devin.Pool) *Runtime {
+	return &Runtime{configPath: configPath, stateDir: stateDir, db: db, pool: pool}
 }
 
 // Lock/Unlock 串行化写路径：merge→校验→ApplyConfigs→CommitConfig 是
@@ -211,6 +214,11 @@ func (rt *Runtime) devinConfigs(cfg config.Config, synthesized []config.DevinAcc
 		lane := BaseConfig(cfg)
 		lane.Identity.Name = account.Name
 		lane.Identity.Token = account.Token
+		lane.Priority = account.Priority
+		// 号级 max_rpm 覆盖全局闸门配额；0 继承 devin.max_rpm。
+		if account.MaxRPM > 0 {
+			lane.Gate.MaxRPM = account.MaxRPM
+		}
 		lane.GateStateStore = rt.db
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
@@ -268,6 +276,9 @@ func BaseConfig(cfg config.Config) devin.Config {
 		ClientName:    cfg.Devin.ClientName,
 		ClientVersion: cfg.Devin.ClientVersion,
 		ClientOS:      cfg.Devin.ClientOS,
+		// 会话亲和 TTL 与配额降权阈值是全局字段，经 base 模板铺进各 lane。
+		SessionAffinityTTLSeconds: cfg.Devin.SessionAffinityTTLSeconds,
+		QuotaLowThresholdPercent:  cfg.Devin.QuotaLowThresholdPercent,
 		Gate: devin.GateConfig{
 			MaxRPM:       cfg.Devin.MaxRPM,
 			MaxHold:      time.Duration(cfg.Devin.GateMaxHoldSeconds) * time.Second,
@@ -303,6 +314,7 @@ func laneConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out

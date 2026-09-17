@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -31,22 +32,40 @@ type AccountOps struct {
 	// TokenOf 解析该名生效凭据（行值→config 值→credentials_file
 	// 现读，不经 lane；disabled 可解，tombstoned 不可解）。
 	TokenOf func(ctx context.Context, name string) (string, error)
+	// CredentialOf 解出一次写操作将生效的凭据（create verify 探测用）：
+	// content 直解、file 按 configDir 锚定后读、token 原样——与
+	// Create/Update 的持久化口径一致。nil 时 verify 探测不可用。
+	CredentialOf func(in AccountWrite) (string, error)
 }
 
-// AccountWrite 是建号输入：Token 与 CredentialsFile 至少其一。
+// AccountWrite 是建号输入：Token 与 CredentialsFile 至少其一；
+// CredentialsContent 是 credentials.toml 全文粘贴（ops 落盘成
+// 管理目录下的 <name>.toml 并置 CredentialsFile），与 CredentialsFile
+// 互斥。Verify 为 true 时 handler 先以上游探测验证凭据再建行。
 type AccountWrite struct {
-	Name            string
-	Token           string
-	CredentialsFile string
-	Disabled        bool
+	Name               string
+	Token              string
+	CredentialsFile    string
+	CredentialsContent string
+	Disabled           bool
+	Verify             bool
+	Priority           *int64
+	MaxRPM             *int64
+	Notes              *string
 }
 
 // AccountPatch 是改号输入：指针字段区分缺席与显式空——显式空串是
 // 「清行覆盖」（config 名回落 config 值），不是「不变」。
+// CredentialsFile 与 CredentialsContent 互斥（同现 400）；显式空
+// CredentialsContent 等价于清 credentials_file 覆盖。
 type AccountPatch struct {
-	Token           *string
-	CredentialsFile *string
-	Disabled        *bool
+	Token              *string
+	CredentialsFile    *string
+	CredentialsContent *string
+	Disabled           *bool
+	Priority           *int64
+	MaxRPM             *int64
+	Notes              *string
 }
 
 // accountOpsUnavailable 在操作面未接线时回 503（tokensUnavailable 先例）。
@@ -66,7 +85,8 @@ type accountSnapshots struct {
 	gates      map[string]devin.GateStats
 	warms      map[string]devin.WarmStats
 	inflight   map[string]int
-	quota      map[string]any // QuotaReport 的 accounts 子表
+	quota      map[string]any            // QuotaReport 的 accounts 子表
+	usage      map[string]map[string]any // 逐号 usage 投影，由调用方按名填
 }
 
 func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
@@ -76,6 +96,7 @@ func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
 		warms:      map[string]devin.WarmStats{},
 		inflight:   map[string]int{},
 		quota:      map[string]any{},
+		usage:      map[string]map[string]any{},
 	}
 	if h.accountLaneStates != nil {
 		snap.laneStates = h.accountLaneStates()
@@ -104,7 +125,9 @@ func (h *Handler) accountSnapshots(ctx context.Context) accountSnapshots {
 // 身份字段 + lane/gate/warm 快照 + inflight + quota 摘要 + usage。
 // 写端点回包与 GET 列表共用同一投影，schema 只有这一处来源。
 func (h *Handler) accountView(ctx context.Context, acc *store.ResolvedAccount) map[string]any {
-	return buildAccountView(acc, h.accountSnapshots(ctx))
+	snap := h.accountSnapshots(ctx)
+	snap.usage[acc.Name] = h.accountUsage(ctx, acc.Name)
+	return buildAccountView(acc, snap)
 }
 
 func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[string]any {
@@ -136,12 +159,15 @@ func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[str
 		"disabled":         acc.Disabled,
 		"token_sha":        tokenSHA,
 		"credentials_file": acc.CredentialsFile,
+		"priority":         acc.Priority,
+		"max_rpm":          acc.MaxRPM,
+		"notes":            acc.Notes,
 		"lane":             nil,
 		"gate":             nil,
 		"warm":             nil,
 		"inflight":         snap.inflight[acc.Name],
 		"quota":            quota,
-		"usage":            nil, // P2 聚合位，v1 恒 null
+		"usage":            snap.usage[acc.Name],
 		"created_at":       acc.CreatedAt,
 		"updated_at":       acc.UpdatedAt,
 	}
@@ -159,6 +185,55 @@ func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[str
 	return view
 }
 
+// accountUsage 取单号 usage 原始量并投影；store 未接线或查询失败落
+// null（usage 是观测字段，不挡视图）。'default' 折叠口径在 store 内做。
+func (h *Handler) accountUsage(ctx context.Context, name string) map[string]any {
+	if h.store == nil {
+		return nil
+	}
+	row, err := h.store.AccountUsage(ctx, name)
+	if err != nil {
+		slog.Warn("account usage query failed", "account", name, "err", err)
+		return nil
+	}
+	return accountUsageView(row)
+}
+
+// accountUsageView 把 AccountUsageRow 投影成冻结形状
+// {rpm_now,tps_now,ttfb_avg,ttfb_p50,ttfb_p90,cache_rate,today:{requests,
+// success_rate,tokens}}。ttfb 单位 ms；比率字段分母为 0 落 null（「无
+// 数据」与「真 0」区分，同 lane/gate 空值惯例），计数字段恒出数。
+func accountUsageView(row *store.AccountUsageRow) map[string]any {
+	var tpsNow, ttfbAvg, ttfbP50, ttfbP90, cacheRate, successRate any
+	if row.Recent.GenMS > 0 {
+		tpsNow = float64(row.Recent.OutTok) * 1000 / float64(row.Recent.GenMS)
+	}
+	if row.TTFB.Samples > 0 {
+		ttfbAvg = row.TTFBAvgMS
+		ttfbP50 = row.TTFB.P50
+		ttfbP90 = row.TTFB.P90
+	}
+	if d := row.Recent.InTok + row.Recent.CrTok + row.Recent.CwTok; d > 0 {
+		cacheRate = float64(row.Recent.CrTok) / float64(d)
+	}
+	if row.Today.Non499 > 0 {
+		successRate = float64(row.Today.OK) / float64(row.Today.Non499)
+	}
+	return map[string]any{
+		"rpm_now":    row.Recent.Req,
+		"tps_now":    tpsNow,
+		"ttfb_avg":   ttfbAvg,
+		"ttfb_p50":   ttfbP50,
+		"ttfb_p90":   ttfbP90,
+		"cache_rate": cacheRate,
+		"today": map[string]any{
+			"requests":     row.Today.Requests,
+			"success_rate": successRate,
+			"tokens":       row.Today.Tokens,
+		},
+	}
+}
+
 // adminAccounts 实现 GET /admin/accounts：身份（ops.Effective）+
 // 运行时快照（lane/gate/warm/inflight）+ 配额摘要的聚合视图。
 func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +248,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 	snap := h.accountSnapshots(r.Context())
 	views := make([]map[string]any, 0, len(accounts))
 	for i := range accounts {
+		snap.usage[accounts[i].Name] = h.accountUsage(r.Context(), accounts[i].Name)
 		views = append(views, buildAccountView(&accounts[i], snap))
 	}
 	writeEnvelope(w, http.StatusOK, apiResponse{

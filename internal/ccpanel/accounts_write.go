@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -32,10 +33,15 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name            string `json:"name"`
-		Token           string `json:"token"`
-		CredentialsFile string `json:"credentials_file"`
-		Disabled        bool   `json:"disabled"`
+		Name               string  `json:"name"`
+		Token              string  `json:"token"`
+		CredentialsFile    string  `json:"credentials_file"`
+		CredentialsContent string  `json:"credentials_content"`
+		Disabled           bool    `json:"disabled"`
+		Verify             bool    `json:"verify"`
+		Priority           *int64  `json:"priority"`
+		MaxRPM             *int64  `json:"max_rpm"`
+		Notes              *string `json:"notes"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -44,12 +50,47 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, fmt.Sprintf("invalid account name %q", req.Name))
 		return
 	}
-	resolved, err := h.accountOps.Create(r.Context(), AccountWrite{
-		Name:            req.Name,
-		Token:           req.Token,
-		CredentialsFile: req.CredentialsFile,
-		Disabled:        req.Disabled,
-	})
+	if req.CredentialsFile != "" && req.CredentialsContent != "" {
+		respondError(w, http.StatusBadRequest, "credentials_file and credentials_content are mutually exclusive")
+		return
+	}
+	if req.Priority != nil && *req.Priority < 0 {
+		respondError(w, http.StatusBadRequest, "priority must be >= 0")
+		return
+	}
+	if req.MaxRPM != nil && *req.MaxRPM < 0 {
+		respondError(w, http.StatusBadRequest, "max_rpm must be >= 0")
+		return
+	}
+	in := AccountWrite{
+		Name:               req.Name,
+		Token:              req.Token,
+		CredentialsFile:    req.CredentialsFile,
+		CredentialsContent: req.CredentialsContent,
+		Disabled:           req.Disabled,
+		Verify:             req.Verify,
+		Priority:           req.Priority,
+		MaxRPM:             req.MaxRPM,
+		Notes:              req.Notes,
+	}
+	if req.Verify {
+		// verify 是建行前的凭据探测：解析与持久化同一口径（ops 侧），
+		// 探测走面板上游链——失败 400 不建行。
+		if h.accountOps.CredentialOf == nil {
+			respondError(w, http.StatusBadRequest, "credential verification unavailable")
+			return
+		}
+		token, err := h.accountOps.CredentialOf(in)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if _, _, _, err := h.fetchUserStatusAs(r.Context(), token); err != nil {
+			respondError(w, http.StatusBadRequest, fmt.Sprintf("credential verification failed: %v", err))
+			return
+		}
+	}
+	resolved, err := h.accountOps.Create(r.Context(), in)
 	if err != nil {
 		// 重名（含 config 声明名与墓碑名）是唯一的 409；其余错误——
 		// ResolveAccounts 整表校验文案、缺 base_url/model——原样 400 透传。
@@ -75,21 +116,42 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// 指针字段区分缺席与显式空：显式 "" 是「清行覆盖」（config 名回落
 	// config 值），不是「不变」。
 	var req struct {
-		Token           *string `json:"token"`
-		CredentialsFile *string `json:"credentials_file"`
-		Disabled        *bool   `json:"disabled"`
+		Token              *string `json:"token"`
+		CredentialsFile    *string `json:"credentials_file"`
+		CredentialsContent *string `json:"credentials_content"`
+		Disabled           *bool   `json:"disabled"`
+		Priority           *int64  `json:"priority"`
+		MaxRPM             *int64  `json:"max_rpm"`
+		Notes              *string `json:"notes"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.Token == nil && req.CredentialsFile == nil && req.Disabled == nil {
+	if req.CredentialsFile != nil && req.CredentialsContent != nil {
+		respondError(w, http.StatusBadRequest, "credentials_file and credentials_content are mutually exclusive")
+		return
+	}
+	if req.Priority != nil && *req.Priority < 0 {
+		respondError(w, http.StatusBadRequest, "priority must be >= 0")
+		return
+	}
+	if req.MaxRPM != nil && *req.MaxRPM < 0 {
+		respondError(w, http.StatusBadRequest, "max_rpm must be >= 0")
+		return
+	}
+	if req.Token == nil && req.CredentialsFile == nil && req.CredentialsContent == nil &&
+		req.Disabled == nil && req.Priority == nil && req.MaxRPM == nil && req.Notes == nil {
 		respondError(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
 	resolved, err := h.accountOps.Update(r.Context(), name, AccountPatch{
-		Token:           req.Token,
-		CredentialsFile: req.CredentialsFile,
-		Disabled:        req.Disabled,
+		Token:              req.Token,
+		CredentialsFile:    req.CredentialsFile,
+		CredentialsContent: req.CredentialsContent,
+		Disabled:           req.Disabled,
+		Priority:           req.Priority,
+		MaxRPM:             req.MaxRPM,
+		Notes:              req.Notes,
 	})
 	if err != nil {
 		switch {
@@ -200,4 +262,46 @@ func (h *Handler) adminRefreshAccountQuota(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	respondOK(w, data)
+}
+
+// adminTestAccount 实现 POST /admin/accounts/{name}/test：以生效凭据
+// 探测上游 GetUserStatus 并计时。探测失败是结果不是 HTTP 错误——恒
+// 200：失败 {ok:false,latency_ms,error}，成功 {ok:true,latency_ms,
+// user,plan} 并顺带把配额信号回灌池侧、清该号冷却。名不在生效集/
+// tombstoned/凭据不可解 404（与 quota/refresh 同口径）。
+func (h *Handler) adminTestAccount(w http.ResponseWriter, r *http.Request) {
+	if h.accountOpsUnavailable(w) {
+		return
+	}
+	name, ok := accountNameParam(w, r)
+	if !ok {
+		return
+	}
+	token, err := h.accountOps.TokenOf(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, store.ErrAccountNotFound) {
+			respondError(w, http.StatusNotFound, fmt.Sprintf("account %q not found", name))
+			return
+		}
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	start := time.Now()
+	user, plan, _, err := h.fetchUserStatusAs(r.Context(), token)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		respondOK(w, map[string]any{
+			"ok":         false,
+			"latency_ms": latency,
+			"error":      err.Error(),
+		})
+		return
+	}
+	h.noteAccountQuotaSignal(name, plan)
+	h.accountOps.ClearCooldown(name)
+	resp := map[string]any{"ok": true, "latency_ms": latency, "user": user}
+	if plan != nil {
+		resp["plan"] = plan
+	}
+	respondOK(w, resp)
 }

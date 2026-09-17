@@ -47,6 +47,10 @@ type DevinAccountConfig struct {
 	Name            string `yaml:"name"`
 	Token           string `yaml:"token"`
 	CredentialsFile string `yaml:"credentials_file"`
+	// Priority 是池级排序元数据：值越大越优先被新会话选中，0 为默认档。
+	Priority int `yaml:"priority"`
+	// MaxRPM 覆盖该号自己的分钟窗口配额；0 表示继承 devin.max_rpm 全局值。
+	MaxRPM int `yaml:"max_rpm"`
 }
 
 // devinAccountNamePattern 约束账号名字符集：名字要进闸门状态键
@@ -149,6 +153,13 @@ type DevinConfig struct {
 	// 空列表回退内置默认
 	// {AskUserQuestion, ExitPlanMode, request_user_input}。
 	WarmPrefixUserPacedNames []string `yaml:"warm_prefix_userpaced_names"`
+	// SessionAffinityTTLSeconds 是会话绑定的滑动 TTL 秒数：命中即续期；
+	// <=0 回落默认 3600。全局字段，各 lane 一致。
+	SessionAffinityTTLSeconds int `yaml:"session_affinity_ttl_seconds"`
+	// QuotaLowThresholdPercent 是配额降权阈值：weekly 剩余百分比低于它
+	// 时该 lane 对新会话降档（已绑定会话不受影响）；<=0 回落默认 15，
+	// 负值关闭降权。
+	QuotaLowThresholdPercent int `yaml:"quota_low_threshold_percent"`
 }
 
 // DebugConfig 保存请求级调试日志配置。
@@ -280,6 +291,12 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 			return fmt.Errorf("devin.accounts[%d]: duplicate name %q", index, account.Name)
 		}
 		seenNames[account.Name] = true
+		if account.Priority < 0 {
+			return fmt.Errorf("devin.accounts[%d]: priority must be >= 0", index)
+		}
+		if account.MaxRPM < 0 {
+			return fmt.Errorf("devin.accounts[%d]: max_rpm must be >= 0", index)
+		}
 		account.Token = strings.TrimSpace(account.Token)
 		account.CredentialsFile = strings.TrimSpace(account.CredentialsFile)
 		if account.CredentialsFile != "" {
@@ -499,10 +516,20 @@ func readCredentialsFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
-		return strings.TrimSpace(string(match[1])), nil
+	if token := TokenFromCredentialsContent(data); token != "" {
+		return token, nil
 	}
 	return "", errors.New("no windsurf_api_key")
+}
+
+// TokenFromCredentialsContent 从 credentials.toml 的字节内容解出
+// windsurf_api_key；无该键返回空串。与文件版共用同一解析——面板的
+// credentials_content 粘贴上传在落盘前先过它校验。
+func TokenFromCredentialsContent(data []byte) string {
+	if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
+		return strings.TrimSpace(string(match[1]))
+	}
+	return ""
 }
 
 // DevinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。

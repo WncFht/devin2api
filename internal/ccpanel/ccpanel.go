@@ -98,6 +98,9 @@ type Handler struct {
 	accountGateStats  func() map[string]devin.GateStats
 	accountWarmStats  func() map[string]devin.WarmStats
 	accountLaneStates func() map[string]devin.LaneState
+	// accountQuotaSignal 把一次成功的上游配额探测结果回灌给池侧
+	// （quota 降权信号源，参数是日/周剩余百分比）；nil 时只采样不回灌。
+	accountQuotaSignal func(name string, dailyRemainingPct, weeklyRemainingPct float64)
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
 	// accountOps 挂 /admin/accounts 账号 CRUD 与行操作面；nil 时
@@ -222,6 +225,12 @@ func (h *Handler) SetAccountLaneStates(fn func() map[string]devin.LaneState) {
 	h.accountLaneStates = fn
 }
 
+// SetAccountQuotaSignal 注入配额探测回灌口：每次成功的逐号配额采样
+// 与 test 探测把日/周剩余百分比喂给池侧降权簿记。
+func (h *Handler) SetAccountQuotaSignal(fn func(name string, dailyRemainingPct, weeklyRemainingPct float64)) {
+	h.accountQuotaSignal = fn
+}
+
 // SetPoolTokenFuncs 注入号池凭据源读取函数（按账号名索引的 map）：
 // maskToken 的脱敏环与 quota 逐账号采样共用这份清单。每次求值重取
 // 当前 lane 集合，账号热增删后无需重注册。
@@ -338,11 +347,11 @@ func (h *Handler) routes() []panelRoute {
 		{http.MethodGet, "/admin/runtime-metrics", A(h.adminRuntimeMetrics), "/admin/runtime-metrics",
 			"进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + gate 速率闸门状态 + warm 前缀保温簿记"},
 		{http.MethodGet, "/admin/accounts", A(h.adminAccounts), "/admin/accounts",
-			"号池账号聚合视图：source(config|panel|tombstoned)+credential+disabled+token_sha+lane/gate/warm 快照+inflight+quota 摘要+usage(P2)"},
+			"号池账号聚合视图：source(config|panel|tombstoned)+credential+disabled+token_sha+priority/max_rpm/notes+lane/gate/warm 快照+inflight+quota 摘要+usage{rpm_now,tps_now,ttfb_avg,ttfb_p50,ttfb_p90,cache_rate,today{requests,success_rate,tokens}}"},
 		{http.MethodPost, "/admin/accounts", A(h.adminCreateAccount), "/admin/accounts",
-			"建号 {name, token?|credentials_file?, disabled?}；整表校验失败 400，重名/墓碑名 409"},
+			"建号 {name, token?|credentials_file?|credentials_content?, disabled?, verify?, priority?, max_rpm?, notes?}；verify 先探测凭据失败 400 不建行；file 与 content 互斥；整表校验失败 400，重名/墓碑名 409"},
 		{http.MethodPut, "/admin/accounts/{name}", A(h.adminUpdateAccount), "/admin/accounts/{name}",
-			"改凭据/停启用 {token?,credentials_file?,disabled?} 指针语义；config 名首写自动建覆盖行；tombstoned 409 须先 restore"},
+			"改凭据/停启用/元数据 {token?,credentials_file?,credentials_content?,disabled?,priority?,max_rpm?,notes?} 指针语义；file 与 content 互斥；config 名首写自动建覆盖行；tombstoned 409 须先 restore"},
 		{http.MethodDelete, "/admin/accounts/{name}", A(h.adminDeleteAccount), "/admin/accounts/{name}",
 			"config 名置墓碑（可 restore，覆盖保留复活）；panel 名物理删"},
 		{http.MethodPost, "/admin/accounts/{name}/restore", A(h.adminRestoreAccount), "/admin/accounts/{name}/restore",
@@ -351,6 +360,8 @@ func (h *Handler) routes() []panelRoute {
 			"清池侧两档冷却（auth+unhealthy）立即回候选；不动 gate 闩与 last_failure 证据"},
 		{http.MethodPost, "/admin/accounts/{name}/quota/refresh", A(h.adminRefreshAccountQuota), "/admin/accounts/{name}/quota/refresh",
 			"即采一次该号配额（不经 lane；disabled 可刷 tombstoned 404）；502 上游失败"},
+		{http.MethodPost, "/admin/accounts/{name}/test", A(h.adminTestAccount), "/admin/accounts/{name}/test",
+			"凭据连通性探测：恒 200 {ok,latency_ms,user?,plan?,error?}；成功顺带配额信号回灌+清冷却；名不在生效集/tombstoned/凭据不可解 404"},
 		{http.MethodGet, "/admin/accounts/cli-credentials", A(h.adminCLICredentials), "/admin/accounts/cli-credentials",
 			"Devin CLI 凭证发现链探针 {available,path,parsable,suggested_name}；不回传内容"},
 		{http.MethodGet, "/admin/config", A(h.adminConfigCurrent), "/admin/config",

@@ -14,12 +14,15 @@ package devin
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,19 +30,40 @@ import (
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
-// badTokenCooldown 是凭据失效的池侧冷却时长：lane 内自愈也救不回的
-// unauthenticated 把当前 token 标记这么久；期间若 TokenSource 重读出
+// badTokenCooldown 是凭据失效冷却的退避基档：lane 内自愈也救不回的
+// unauthenticated 把当前 token 标记这么久起步；期间若 TokenSource 重读出
 // 不同凭据会提前解禁（见 poolLane.authCooldown），它只是凭据源永远
 // 不更新时的兜底解封点。
 const badTokenCooldown = 10 * time.Minute
 
-// genericLaneCooldown 是非凭据类失败的短冷却：permission_denied/
+// badTokenCooldownMax 是凭据失效退避的封顶：连败升档最多到这里——
+// 死 token 周期性烧一次真实请求的代价封顶在每小时一次。
+const badTokenCooldownMax = time.Hour
+
+// genericLaneCooldown 是非凭据类失败的退避基档：permission_denied/
 // UpstreamFault/未知错误换号能改变结果但不足以判死凭据——没有这段
 // 冷却，钉选到惯犯 lane 的会话每个请求都先烧一次注定失败的上游
-// 调用再换号；冷却只压到第二档不剔除，到期自然重试。
+// 调用再换号；冷却只压到第三档不剔除，到期自然重试。
 const genericLaneCooldown = 90 * time.Second
+
+// genericLaneCooldownMax 是非凭据类退避的封顶。
+const genericLaneCooldownMax = 30 * time.Minute
+
+// defaultAffinityTTL 是会话绑定的默认滑动 TTL：与 cliproxyapi 的
+// routing.session-affinity-ttl 同量级——远长于单轮对话间隔，短到
+// 账号健康变化能在可接受时间内重洗落点。
+const defaultAffinityTTL = time.Hour
+
+// poolBindingCap 是绑定表容量上限：号池会话以万计前先逐过期再逐最早
+// 到期者——绑定是性能优化不是真值，被逐会话下次请求按普通序重选重绑。
+const poolBindingCap = 4096
+
+// defaultQuotaLowThresholdPercent 是配额降权默认阈值：weekly 剩余
+// 百分比低于它时 lane 对新会话降档。
+const defaultQuotaLowThresholdPercent = 15
 
 // Pool 是多账号上游池，实现 adapter.Adapter。
 type Pool struct {
@@ -47,13 +71,27 @@ type Pool struct {
 	// 指针，读侧无锁。空集是合法态（账号被面板/配置删光）：读侧视图给
 	// 零值，Stream/ListModels 显式报 unavailable 而非取首元素 panic。
 	lanes atomic.Pointer[[]*poolLane]
+	// bindings 是显式会话绑定表：亲和键 → {lane, expiry}。绑定命中恒
+	// 赢于健康分层——会话缓存谱系留在同一 lane 上；绑定 lane 硬故障
+	// （池侧两档冷却）才删绑按普通序重选，gate 闩/桶满不算硬故障
+	// （粘性区：宁等不换，交给 gate 自己仲裁）。滑动 TTL 命中即续期。
+	bindings   map[string]laneBinding
+	bindingsMu sync.Mutex
+}
+
+// laneBinding 是一条会话绑定：lane 是亲和键当前钉住的泳道，expiry
+// 是滑动过期时刻（每次命中按 TTL 续期）。
+type laneBinding struct {
+	lane   *poolLane
+	expiry time.Time
 }
 
 // poolLane 是池里的一条账号泳道：adapter 承载该号全部运行时状态，
 // badToken* 是池侧加的凭据失效冷却（lane 内自愈失败后由 noteFailure
 // 标记，authCooldown 惰性解禁），lastFailure* 是最近一次换号失败的
-// 归因（冷却期外也保留——冷却只压重试，失败史是排障证据），authMu
-// 保护这四组字段。
+// 归因（冷却期外也保留——冷却只压重试，失败史是排障证据），
+// failStreak 是连败计数（退避升档与 LaneState 透出用），authMu
+// 保护这五组字段。
 type poolLane struct {
 	name    string
 	adapter *Adapter
@@ -61,12 +99,23 @@ type poolLane struct {
 	authMu       sync.Mutex
 	badTokenHash string
 	badUntil     time.Time
-	// unhealthyUntil 是非凭据类失败的短冷却截止（genericLaneCooldown）；
-	// 与 badToken 冷却不同键：不看 token 换没换，到点自然解封。
+	// unhealthyUntil 是非凭据类失败的短冷却截止（genericLaneCooldown
+	// 起档按 failStreak 退避）；与 badToken 冷却不同键：不看 token
+	// 换没换，到点自然解封。
 	unhealthyUntil     time.Time
+	failStreak         int
 	lastFailureAt      time.Time
 	lastFailureCode    string
 	lastFailureMessage string
+	// priority 是池级排序元数据（Config.Priority 的运行时投影）：
+	// 同健康档内 desc 排，ApplyConfigs 热更覆盖。
+	priority atomic.Int32
+	// quotaLow 是配额降权标记：weekly 剩余低于阈值时 NoteQuotaSample
+	// 置位，排序把 lane 降入「健康但配额低」档——只影响新会话落点。
+	quotaLow atomic.Bool
+	// states 是冷却持久化句柄（与 gate 同一 runtime_state 表，键
+	// poolcool:<name>）；nil 时冷却只活在内存。
+	states *store.Store
 }
 
 // LaneState 是单条 lane 的池侧状态快照，/admin/runtime-metrics 的
@@ -79,6 +128,10 @@ type LaneState struct {
 	AuthCooldownUntil *time.Time `json:"auth_cooldown_until,omitempty"`
 	// UnhealthyUntil 是非凭据类失败的短冷却截止，到点自然解封。
 	UnhealthyUntil *time.Time `json:"unhealthy_until,omitempty"`
+	// FailStreak 是连败计数：退避升档的依据，前端可直接显示「连败 N 次」。
+	FailStreak int `json:"fail_streak,omitempty"`
+	// BoundSessions 是绑定到本 lane 的活会话数（绑定表未过期条目计数）。
+	BoundSessions int `json:"bound_sessions,omitempty"`
 	// LastFailure* 是最近一次换号失败的归因。
 	LastFailureAt      *time.Time `json:"last_failure_at,omitempty"`
 	LastFailureCode    string     `json:"last_failure_code,omitempty"`
@@ -102,7 +155,7 @@ func NewPool(configs []Config) (*Pool, error) {
 		}
 		lanes = append(lanes, lane)
 	}
-	pool := &Pool{}
+	pool := &Pool{bindings: make(map[string]laneBinding)}
 	pool.lanes.Store(&lanes)
 	return pool, nil
 }
@@ -112,7 +165,10 @@ func newPoolLane(config Config) (*poolLane, error) {
 	if err != nil {
 		return nil, fmt.Errorf("devin account %q: %w", config.Identity.Name, err)
 	}
-	return &poolLane{name: config.Identity.Name, adapter: laneAdapter}, nil
+	lane := &poolLane{name: config.Identity.Name, adapter: laneAdapter, states: config.GateStateStore}
+	lane.priority.Store(int32(config.Priority))
+	lane.restoreCooldown()
+	return lane, nil
 }
 
 // snapshot 返回当前 lane 集合；空池时为空切片。
@@ -135,13 +191,15 @@ func (pool *Pool) firstLane() *poolLane {
 	return nil
 }
 
-// Stream 按亲和键钉选 lane 发起请求，失败按 failoverable 词表换号。
+// Stream 按亲和键选 lane 发起请求，失败按 failoverable 词表换号。
 // 开流级换号发生在本函数内；开流成功后返回 poolStream，由它在 Recv
 // 里处理流内 error 事件的 pre-content 换号（死 token 的 unauthenticated
 // 以首帧到达，lane.Stream 已经返回成功，只能在这一级拦截）。
 // account 归因记「产出终局结果的 lane」：成功开流、终审拒绝、failover
 // 穷尽都算——失败请求同样有「哪号拒的我」的答案。被试过又放弃的 lane
 // 明细在 NoteAccountAttempt。
+// 会话绑定表（见 Pool.bindings）让同一会话恒落同 lane：开流成功即写
+// 绑定，绑定命中恒居候选首位；绑定 lane 硬故障才删绑按普通序重选。
 func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
 	lanes := pool.snapshot()
 	if len(lanes) == 0 {
@@ -154,7 +212,15 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		recorder.SetUpstreamAccount(lane.name)
 		return stream, err
 	}
-	rest := pool.orderedLanes(lanes, SessionAffinityKey(request))
+	affinity := SessionAffinityKey(request)
+	ranked := pool.rankLanes(lanes, affinity)
+	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
+	//（swap 接管时会以新一轮现场覆盖重写）。
+	recorder.NotePoolCandidates(poolCandidateRows(ranked))
+	rest := make([]*poolLane, len(ranked))
+	for i, c := range ranked {
+		rest[i] = c.lane
+	}
 	var lastErr error
 	for len(rest) > 0 {
 		lane := rest[0]
@@ -165,7 +231,10 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		stream, err := lane.adapter.Stream(ctx, request)
 		if err == nil {
 			recorder.SetUpstreamAccount(lane.name)
-			return &poolStream{request: request, recorder: recorder, lane: lane, inner: stream, rest: rest}, nil
+			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
+			// 「上次产出内容的 lane」，胜者接管会话谱系。
+			pool.bind(affinity, lane)
+			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, lane: lane, inner: stream, rest: rest}, nil
 		}
 		lastErr = err
 		recorder.SetUpstreamAccount(lane.name)
@@ -191,6 +260,10 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 type poolStream struct {
 	request  llm.RequestMessages
 	recorder *debuglog.Recorder
+	// pool/affinity 是换号接管写绑定与重登审计所需的回链：
+	// swap 成功即把亲和键改绑到新 lane。
+	pool     *Pool
+	affinity string
 	lane     *poolLane
 	inner    llm.ResponseStream
 	// rest 是尚未尝试的候选 lane（钉选序尾部）；每条只在换号时试一次。
@@ -224,6 +297,11 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 			case event.Type == llm.ResponseEventStart:
 				s.startReleased = true
 			default:
+				if !s.committed {
+					// 首个内容事件才是 lane 可用的真实证据（死 token
+					// lane 开流也"成功"）——成功清账以内容到达为准。
+					s.lane.noteSuccess()
+				}
 				s.committed = true
 			}
 			return event, nil
@@ -268,6 +346,10 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 			s.lane = next
 			s.inner = inner
 			s.recorder.SetUpstreamAccount(next.name)
+			// 换号接管即改绑：会话谱系转到新 lane，后续请求直落这里。
+			s.pool.bind(s.affinity, next)
+			// 重选审计覆盖首轮快照——meta 留下的是最新一轮决策现场。
+			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next)))
 			return true, nil
 		}
 		lastErr = err
@@ -295,54 +377,157 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 	return !failure.ClientFixable
 }
 
-// orderedLanes 给出候选序：rendezvous 分数（sha256(亲和键|lane 名)）
-// 决定档内顺序——同亲和键恒得同序，即钉选；健康档整体排在不健康档
-// 之前。不健康不剔除只排后：判定是近似快照，全不健康时仍回钉选序，
-// 由 lane 闸门自己走 wait/快败（客户端拿 Retry-After，与单号一致）。
-func (pool *Pool) orderedLanes(lanes []*poolLane, affinity string) []*poolLane {
-	type candidate struct {
-		lane    *poolLane
-		score   [32]byte
-		healthy bool
+// poolCandidate 是排序时的一次性评估快照：verdict 是 lane 当时的健康
+// 判定与降级归因，bound 是绑定命中标记，score 是 rendezvous 分数。
+// 快照语义保证审计行（pool_candidates）与排序决策同源——不在排完序后
+// 再评一次，避免两次评估之间的状态翻转让审计与决策对不上。
+type poolCandidate struct {
+	lane     *poolLane
+	score    [32]byte
+	verdict  laneVerdict
+	bound    bool
+	priority int32
+}
+
+// swapRanked 构造换号接管后的审计快照：接管 lane 居首（bound），其余
+// 候选按剩余序附上当时的降级归因。
+func (s *poolStream) swapRanked(taken *poolLane) []poolCandidate {
+	ranked := make([]poolCandidate, 0, len(s.rest)+1)
+	ranked = append(ranked, poolCandidate{lane: taken, verdict: taken.verdict(), bound: true})
+	for _, lane := range s.rest {
+		ranked = append(ranked, poolCandidate{lane: lane, verdict: lane.verdict()})
 	}
-	candidates := make([]candidate, 0, len(lanes))
+	return ranked
+}
+
+// poolCandidateRows 把候选快照投影成审计行：bound lane 的 Reason 记
+// "bound"（它是粘性区语义，gate 忙也居首）；其余 lane 的 Reason 是
+// 降级归因的有序叠加——取全部适用词连写而非首个主因，多因并存时
+// （如冷却+闩）完整保留现场。
+func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
+	rows := make([]debuglog.PoolCandidate, len(ranked))
+	for i, c := range ranked {
+		rows[i] = debuglog.PoolCandidate{
+			Name:    c.lane.name,
+			Healthy: c.verdict.healthy,
+			Bound:   c.bound,
+			Reason:  strings.Join(c.verdict.reasons, ","),
+		}
+		if c.bound {
+			rows[i].Reason = "bound"
+		}
+	}
+	return rows
+}
+
+// rankLanes 给出候选序的完整评估快照，排序键从高到低：
+// bound-hit → 健康档（绿 → 配额低 → 病）→ priority desc → rendezvous
+// 分数升序。三区语义：绑定 lane 恒居首位（gate 闩/桶满不算硬故障——
+// 粘性区「宁等不换」，闩内快败零成本转下一候选、桶满睡到 maxHold）；
+// 配额低 lane 仍在健康档内但降一级，只影响新会话落点；不健康不剔除
+// 只排后：判定是近似快照，全不健康时仍回分数序，由 lane 闸门自己走
+// wait/快败（客户端拿 Retry-After，与单号一致）。
+func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate {
+	bound := pool.boundLane(affinity)
+	candidates := make([]poolCandidate, 0, len(lanes))
 	for _, lane := range lanes {
-		candidates = append(candidates, candidate{
-			lane:    lane,
-			score:   sha256.Sum256([]byte(affinity + "|" + lane.name)),
-			healthy: lane.healthy(),
+		candidates = append(candidates, poolCandidate{
+			lane:     lane,
+			score:    sha256.Sum256([]byte(affinity + "|" + lane.name)),
+			verdict:  lane.verdict(),
+			bound:    lane == bound,
+			priority: lane.priority.Load(),
 		})
 	}
-	slices.SortStableFunc(candidates, func(a, b candidate) int {
-		if a.healthy != b.healthy {
-			if a.healthy {
+	slices.SortStableFunc(candidates, func(a, b poolCandidate) int {
+		if a.bound != b.bound {
+			if a.bound {
 				return -1
 			}
 			return 1
 		}
+		if a.verdict.bucket != b.verdict.bucket {
+			return cmp.Compare(a.verdict.bucket, b.verdict.bucket)
+		}
+		if a.priority != b.priority {
+			return cmp.Compare(b.priority, a.priority)
+		}
 		return bytes.Compare(a.score[:], b.score[:])
 	})
-	ordered := make([]*poolLane, len(candidates))
-	for i, c := range candidates {
+	return candidates
+}
+
+// orderedLanes 是 rankLanes 的 lane 投影，供测试与只关心顺序的调用方使用。
+func (pool *Pool) orderedLanes(lanes []*poolLane, affinity string) []*poolLane {
+	ranked := pool.rankLanes(lanes, affinity)
+	ordered := make([]*poolLane, len(ranked))
+	for i, c := range ranked {
 		ordered[i] = c.lane
 	}
 	return ordered
 }
 
-// healthy 报告 lane 当前是否「立即可发」：闸门未闩、分钟桶可发且未满、
-// 不在凭据失效冷却。三者都是选中前一刻仍可能翻转的近似判定。
-func (lane *poolLane) healthy() bool {
-	if lane.authCooldown() || lane.genericCooldown() {
-		return false
+// laneVerdict 是 lane 一次评估的结论：healthy 是「立即可发」近似判定
+// （无冷却、闸门未闩、分钟桶可发且未满），bucket 是健康档
+// （0=绿 1=配额低 2=病），reasons 是降级归因词表（选号审计的
+// PoolCandidate.Reason 来源），hardDown 是绑定判死词表——只含池侧
+// 两档冷却，gate 状态不算（粘性区只被硬故障打破）。
+type laneVerdict struct {
+	healthy  bool
+	hardDown bool
+	bucket   int
+	reasons  []string
+}
+
+// verdict 对 lane 做一次完整健康评估：降级原因按固定序叠加
+// （auth_cooldown → generic_cooldown → gate_latched → gate_window_full
+// → quota_low），调用方各取所需（排序取 bucket、审计取 reasons、
+// healthy() 取 healthy）。quotaLow 不进 hardDown/病档——它是降权不是
+// 故障，配额低 lane 留在健康档内降一级。
+func (lane *poolLane) verdict() laneVerdict {
+	var v laneVerdict
+	if lane.authCooldown() {
+		v.hardDown = true
+		v.reasons = append(v.reasons, "auth_cooldown")
+	}
+	if lane.genericCooldown() {
+		v.hardDown = true
+		v.reasons = append(v.reasons, "generic_cooldown")
 	}
 	stats := lane.adapter.GateStats()
 	if stats.Latched {
-		return false
+		v.reasons = append(v.reasons, "gate_latched")
 	}
-	if stats.WindowQuota > 0 && (!stats.Sendable || stats.WindowUsed >= stats.WindowQuota) {
-		return false
+	// 桶满与死区同记 gate_window_full：两者都是「窗口侧暂不可发」，
+	// 审计词表不区分死区/满桶。
+	windowBlocked := stats.WindowQuota > 0 && (!stats.Sendable || stats.WindowUsed >= stats.WindowQuota)
+	if windowBlocked {
+		v.reasons = append(v.reasons, "gate_window_full")
 	}
-	return true
+	v.healthy = !v.hardDown && !stats.Latched && !windowBlocked
+	v.bucket = 2
+	if v.healthy {
+		v.bucket = 0
+	}
+	if lane.quotaLow.Load() {
+		v.reasons = append(v.reasons, "quota_low")
+		if v.healthy {
+			v.bucket = 1
+		}
+	}
+	return v
+}
+
+// hardDown 报告 lane 是否池侧硬故障（凭据失效冷却或非凭据冷却中）——
+// 绑定判死词表；gate 闩/桶满不算，那是粘性区该等的整形态。
+func (lane *poolLane) hardDown() bool {
+	return lane.authCooldown() || lane.genericCooldown()
+}
+
+// healthy 报告 lane 当前是否「立即可发」：闸门未闩、分钟桶可发且未满、
+// 不在任一档冷却。三者都是选中前一刻仍可能翻转的近似判定。
+func (lane *poolLane) healthy() bool {
+	return lane.verdict().healthy
 }
 
 // genericCooldown 报告 lane 是否处于非凭据类失败的短冷却窗：到期自动
@@ -367,22 +552,45 @@ func (lane *poolLane) authCooldown() bool {
 	if time.Now().After(lane.badUntil) || (token != "" && tokenHash(token) != lane.badTokenHash) {
 		lane.badTokenHash = ""
 		lane.badUntil = time.Time{}
+		// 解禁同步落盘：内存态与落盘态同生死——冷却自然到期或凭据
+		// 换出后若不重写，重启会把已失效的判死键复活。重写而非删除：
+		// failStreak 与 lastFailure 证据仍是有效簿记要留住。
+		lane.persistCooldownLocked()
 		return false
 	}
 	return true
 }
 
-// noteFailure 在 lane 失败后更新池侧冷却，两档：
-// unauthenticated 走到这里意味着 lane 内自愈（reloadToken+重试）也没
-// 救回这份凭据，按当前 token 哈希记鉴权冷却——token 为空同样标记
-// （tokenHash("") 作冷却键，凭据源补进真 token 哈希即变、自动解禁）。
-// 其余可换号失败记 genericLaneCooldown 短冷却。后到失败只延长不缩短。
+// backoffDuration 算连败退避档：base×2^(streak-1) 封顶 max。
+// streak<1 按首档计（恢复出的 0 值与新失败语义一致）。
+func backoffDuration(base, max time.Duration, streak int) time.Duration {
+	d := base
+	for i := 1; i < streak; i++ {
+		d *= 2
+		if d >= max {
+			return max
+		}
+	}
+	return d
+}
+
+// noteFailure 在 lane 失败后更新池侧冷却簿记，两类豁免先进：
+// Canceled 是请求方行为不是 lane 健康信号（failoverable 已挡主路径，
+// 这里兜 ListModels 等直调路径），连证据都不记；LocalGate 是本地闸门
+// 快败——未触达上游且 gate 自身已是惩罚，双冷却会把忙 lane 判死、害
+// 绑定丢失，只记 lastFailure 证据不进冷却。
+// 两档冷却都走连败退避：unauthenticated 走到这里意味着 lane 内自愈
+// （reloadToken+重试）也没救回这份凭据，按当前 token 哈希记鉴权冷却
+// （token 为空同样标记——tokenHash("") 作冷却键，凭据源补进真 token
+// 哈希即变、自动解禁）；其余可换号失败记 generic 短冷却。
+// 复用窗口规则：新失败到达时旧冷却尚未到期 → streak 不升、只按当前档
+// 延长——同一故障期的并发失败不连升档。后到失败只延长不缩短。
 // 注意窗口：Stream 返回后才读 currentToken——同 lane 并发请求的自愈
-// 恰好在这间隙换上新 token 时会把新 token 误标冷却；最长 10 分钟或
+// 恰好在这间隙换上新 token 时会把新 token 误标冷却；最长一个退避档或
 // 下一次轮换自愈，可接受。
 func (lane *poolLane) noteFailure(err error) {
 	failure := llm.Classify(err)
-	if failure == nil {
+	if failure == nil || failure.Canceled {
 		return
 	}
 	lane.authMu.Lock()
@@ -393,16 +601,223 @@ func (lane *poolLane) noteFailure(err error) {
 	if len(lane.lastFailureMessage) > 300 {
 		lane.lastFailureMessage = lane.lastFailureMessage[:300]
 	}
-	if failure.Code == "unauthenticated" {
-		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
-		if until := time.Now().Add(badTokenCooldown); until.After(lane.badUntil) {
-			lane.badUntil = until
-		}
+	if failure.LocalGate {
+		lane.persistCooldownLocked()
 		return
 	}
-	if until := time.Now().Add(genericLaneCooldown); until.After(lane.unhealthyUntil) {
+	now := time.Now()
+	if failure.Code == "unauthenticated" {
+		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
+		if !now.Before(lane.badUntil) {
+			// 旧窗已过期：这是一次新故障期，连败升档。
+			lane.failStreak++
+		}
+		if until := now.Add(backoffDuration(badTokenCooldown, badTokenCooldownMax, lane.failStreak)); until.After(lane.badUntil) {
+			lane.badUntil = until
+		}
+		lane.persistCooldownLocked()
+		return
+	}
+	if !now.Before(lane.unhealthyUntil) {
+		lane.failStreak++
+	}
+	if until := now.Add(backoffDuration(genericLaneCooldown, genericLaneCooldownMax, lane.failStreak)); until.After(lane.unhealthyUntil) {
 		lane.unhealthyUntil = until
 	}
+	lane.persistCooldownLocked()
+}
+
+// noteSuccess 在 lane 产出内容后清账：连败归零、两档冷却与判死键一并
+// 清掉——真恢复不需要等冷却自然到期。持久行同步删除：成功已证 lane
+// 可用，重启后不该复活一笔已被清掉的旧账。常态路径（本就无账）是纯
+// 内存快路径，不碰状态库。
+func (lane *poolLane) noteSuccess() {
+	lane.authMu.Lock()
+	settled := lane.failStreak > 0 || lane.badTokenHash != "" ||
+		!lane.badUntil.IsZero() || !lane.unhealthyUntil.IsZero()
+	lane.failStreak = 0
+	lane.badTokenHash = ""
+	lane.badUntil = time.Time{}
+	lane.unhealthyUntil = time.Time{}
+	lane.authMu.Unlock()
+	if settled {
+		lane.deleteCooldownState()
+	}
+}
+
+// poolCooldownKey 是池侧冷却在 runtime_state 里的键名约定：poolcool:<name>。
+func poolCooldownKey(lane string) string {
+	return "poolcool:" + lane
+}
+
+// poolCooldownState 是池侧冷却的持久化形态（runtime_state 的值 JSON）：
+// 重启后死 token lane 不该立即再吃一轮真实流量。
+type poolCooldownState struct {
+	BadTokenHash       string `json:"bad_token_hash"`
+	BadUntilMS         int64  `json:"bad_until_ms"`
+	UnhealthyUntilMS   int64  `json:"unhealthy_until_ms"`
+	FailStreak         int    `json:"fail_streak"`
+	LastFailureAtMS    int64  `json:"last_failure_at_ms"`
+	LastFailureCode    string `json:"last_failure_code"`
+	LastFailureMessage string `json:"last_failure_message"`
+}
+
+// persistCooldownLocked 把冷却簿记写进 runtime_state；须在 authMu 下
+// 调用——与 ClearCooldown/noteSuccess 的删除同锁序化，否则「删后写回」
+// 交错会把已清掉的冷却复活成幽灵行。写失败只记日志，不挡请求路径。
+func (lane *poolLane) persistCooldownLocked() {
+	if lane.states == nil {
+		return
+	}
+	data, _ := json.Marshal(poolCooldownState{
+		BadTokenHash:       lane.badTokenHash,
+		BadUntilMS:         unixMilliOrZero(lane.badUntil),
+		UnhealthyUntilMS:   unixMilliOrZero(lane.unhealthyUntil),
+		FailStreak:         lane.failStreak,
+		LastFailureAtMS:    unixMilliOrZero(lane.lastFailureAt),
+		LastFailureCode:    lane.lastFailureCode,
+		LastFailureMessage: lane.lastFailureMessage,
+	})
+	if err := lane.states.SetState(context.Background(), poolCooldownKey(lane.name), string(data)); err != nil {
+		slog.Warn("pool cooldown state persist failed", "account", lane.name, "error", err)
+	}
+}
+
+// deleteCooldownState 删除持久化冷却行；行不存在不算错误。
+func (lane *poolLane) deleteCooldownState() {
+	if lane.states == nil {
+		return
+	}
+	if err := lane.states.DeleteState(context.Background(), poolCooldownKey(lane.name)); err != nil {
+		slog.Warn("pool cooldown state delete failed", "account", lane.name, "error", err)
+	}
+}
+
+// restoreCooldown 在 lane 构建时从 runtime_state 装载冷却簿记：
+// 未过期的冷却原样恢复（过期的由 genericCooldown/authCooldown 的惰性
+// 判定自然失效，badTokenHash 的凭据换出解禁语义不变）；行缺失或损坏
+// 静默按无冷却处理——持久化是防重启续判的保险，不阻塞建 lane。
+func (lane *poolLane) restoreCooldown() {
+	if lane.states == nil {
+		return
+	}
+	value, ok, err := lane.states.GetState(context.Background(), poolCooldownKey(lane.name))
+	if err != nil || !ok {
+		return
+	}
+	var state poolCooldownState
+	if err := json.Unmarshal([]byte(value), &state); err != nil {
+		return
+	}
+	lane.badTokenHash = state.BadTokenHash
+	lane.badUntil = milliTime(state.BadUntilMS)
+	lane.unhealthyUntil = milliTime(state.UnhealthyUntilMS)
+	lane.failStreak = state.FailStreak
+	lane.lastFailureAt = milliTime(state.LastFailureAtMS)
+	lane.lastFailureCode = state.LastFailureCode
+	lane.lastFailureMessage = state.LastFailureMessage
+}
+
+// unixMilliOrZero 把零值时刻落成 0 而不是远古负毫秒——JSON 里 0
+// 与「未设置」同读。
+func unixMilliOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
+// milliTime 是 unixMilliOrZero 的逆读：0 回零值。
+func milliTime(ms int64) time.Time {
+	if ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
+// affinityTTL 读全局会话绑定 TTL（首 lane config——全局字段各 lane
+// 一致）；未配置回落默认 1h。
+func (pool *Pool) affinityTTL() time.Duration {
+	if seconds := pool.CurrentConfig().SessionAffinityTTLSeconds; seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return defaultAffinityTTL
+}
+
+// boundLane 取亲和键的绑定 lane：命中即滑动续期返回；绑定已过期或
+// lane 硬故障（池侧两档冷却——gate 闩/桶满不算）时删绑返回 nil，
+// 调用方按普通序重选。
+func (pool *Pool) boundLane(affinity string) *poolLane {
+	pool.bindingsMu.Lock()
+	defer pool.bindingsMu.Unlock()
+	binding, ok := pool.bindings[affinity]
+	if !ok {
+		return nil
+	}
+	now := time.Now()
+	if now.After(binding.expiry) || binding.lane.hardDown() {
+		delete(pool.bindings, affinity)
+		return nil
+	}
+	binding.expiry = now.Add(pool.affinityTTL())
+	pool.bindings[affinity] = binding
+	return binding.lane
+}
+
+// bind 把亲和键绑到 lane：开流成功与换号接管是仅有的两个写点——
+// 绑定记录的是「上次产出内容的 lane」。容量触顶先扫过期再逐最早
+// 到期者；被逐会话下次请求按普通序重选重绑。
+func (pool *Pool) bind(affinity string, lane *poolLane) {
+	pool.bindingsMu.Lock()
+	defer pool.bindingsMu.Unlock()
+	if _, ok := pool.bindings[affinity]; !ok && len(pool.bindings) >= poolBindingCap {
+		now := time.Now()
+		for key, binding := range pool.bindings {
+			if now.After(binding.expiry) {
+				delete(pool.bindings, key)
+			}
+		}
+		if len(pool.bindings) >= poolBindingCap {
+			var oldestKey string
+			var oldest time.Time
+			for key, binding := range pool.bindings {
+				if oldestKey == "" || binding.expiry.Before(oldest) {
+					oldestKey, oldest = key, binding.expiry
+				}
+			}
+			delete(pool.bindings, oldestKey)
+		}
+	}
+	pool.bindings[affinity] = laneBinding{lane: lane, expiry: time.Now().Add(pool.affinityTTL())}
+}
+
+// unbindLane 清掉一条 lane 的全部绑定：lane 被摘除（ApplyConfigs 差集）
+// 时调用，避免绑定指向已不在快照里的死 lane。
+func (pool *Pool) unbindLane(lane *poolLane) {
+	pool.bindingsMu.Lock()
+	defer pool.bindingsMu.Unlock()
+	for key, binding := range pool.bindings {
+		if binding.lane == lane {
+			delete(pool.bindings, key)
+		}
+	}
+}
+
+// boundSessionCounts 统计各 lane 当前绑定的活会话数（未过期条目计数），
+// 顺手惰性清掉过期行——读路径顺带收账，不靠专职清扫协程。
+func (pool *Pool) boundSessionCounts() map[*poolLane]int {
+	pool.bindingsMu.Lock()
+	defer pool.bindingsMu.Unlock()
+	counts := make(map[*poolLane]int, len(pool.bindings))
+	now := time.Now()
+	for key, binding := range pool.bindings {
+		if now.After(binding.expiry) {
+			delete(pool.bindings, key)
+			continue
+		}
+		counts[binding.lane]++
+	}
+	return counts
 }
 
 // state 读 lane 的池侧状态快照。先跑 healthy()——它内部的
@@ -421,6 +836,7 @@ func (lane *poolLane) state() LaneState {
 		until := lane.unhealthyUntil
 		s.UnhealthyUntil = &until
 	}
+	s.FailStreak = lane.failStreak
 	if !lane.lastFailureAt.IsZero() {
 		at := lane.lastFailureAt
 		s.LastFailureAt = &at
@@ -488,6 +904,7 @@ func (pool *Pool) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	for _, lane := range ordered {
 		models, err := lane.adapter.ListModels(ctx)
 		if err == nil {
+			lane.noteSuccess()
 			return models, nil
 		}
 		lastErr = err
@@ -527,6 +944,9 @@ func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
 			for _, field := range applied {
 				appliedSet[field] = true
 			}
+			// priority 是池级元数据不进 adapter 的 applied 差集——
+			// 复用 lane 原地换值即生效。
+			lane.priority.Store(int32(config.Priority))
 			next = append(next, lane)
 			continue
 		}
@@ -548,6 +968,9 @@ func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
 	for _, lane := range old {
 		if !kept[lane] {
 			go lane.adapter.Close()
+			// 摘除 lane 的会话绑定一并清——绑定指向已不在快照里的
+			// 死 lane 会把会话钉在不再存在的 lane 上。
+			pool.unbindLane(lane)
 		}
 	}
 	applied := make([]string, 0, len(appliedSet))
@@ -669,9 +1092,12 @@ func (pool *Pool) AccountWarmStats() map[string]WarmStats {
 // /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
 func (pool *Pool) AccountLaneStates() map[string]LaneState {
 	lanes := pool.snapshot()
+	boundCounts := pool.boundSessionCounts()
 	states := make(map[string]LaneState, len(lanes))
 	for _, lane := range lanes {
-		states[lane.name] = lane.state()
+		state := lane.state()
+		state.BoundSessions = boundCounts[lane]
+		states[lane.name] = state
 	}
 	return states
 }
@@ -705,9 +1131,10 @@ func errNoUpstreamAccounts() *llm.Failure {
 
 // ClearCooldown 清该名 lane 的池侧冷却并立即回候选：两档冷却窗
 // （badUntil 凭据冷却 + unhealthyUntil 短冷却）连同 badTokenHash 判死键
-// 一并清掉——语义是人工宣布「已处理，回候选」，token 若仍坏会在下一次
-// unauthenticated 重新进冷却。保留 lastFailure* 证据，不动 gate 闩
-// （上游推导的真值，本地无权清）。无该名活 lane 返 false。
+// 与连败计数一并清掉——语义是人工宣布「已处理，回候选」，token 若仍坏
+// 会在下一次 unauthenticated 重新进冷却。持久行同步删除。保留
+// lastFailure* 证据，不动 gate 闩（上游推导的真值，本地无权清）。
+// 无该名活 lane 返 false。
 func (pool *Pool) ClearCooldown(name string) bool {
 	for _, lane := range pool.snapshot() {
 		if lane.name != name {
@@ -717,8 +1144,29 @@ func (pool *Pool) ClearCooldown(name string) bool {
 		lane.badTokenHash = ""
 		lane.badUntil = time.Time{}
 		lane.unhealthyUntil = time.Time{}
+		lane.failStreak = 0
 		lane.authMu.Unlock()
+		lane.deleteCooldownState()
 		return true
 	}
 	return false
+}
+
+// NoteQuotaSample 按配额采样刷新该名 lane 的降权标记：weekly 剩余
+// 百分比低于阈值（QuotaLowThresholdPercent，0→默认 15，负值关闭）
+// 时 quotaLow 置位——排序把 lane 降入「健康但配额低」档，只影响新
+// 会话落点，已绑定会话不受影响（绑定命中恒居首）。无该名 lane 忽略。
+// boot 不补种：下个采样周期生效即可。
+func (pool *Pool) NoteQuotaSample(name string, dailyRemainingPct, weeklyRemainingPct float64) {
+	threshold := pool.CurrentConfig().QuotaLowThresholdPercent
+	if threshold == 0 {
+		threshold = defaultQuotaLowThresholdPercent
+	}
+	low := threshold > 0 && weeklyRemainingPct < float64(threshold)
+	for _, lane := range pool.snapshot() {
+		if lane.name == name {
+			lane.quotaLow.Store(low)
+			return
+		}
+	}
 }

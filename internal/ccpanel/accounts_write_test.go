@@ -131,6 +131,103 @@ func TestCreateAccountErrors(t *testing.T) {
 	}
 }
 
+// TestCreateAccountNewFields 验证建号请求的新字段原样进 ops：
+// credentials_content/priority/max_rpm/notes 直通；verify 缺席时
+// CredentialOf 不被动。
+func TestCreateAccountNewFields(t *testing.T) {
+	var got AccountWrite
+	handler := newWriteOpsHandler(AccountOps{
+		Create: func(_ context.Context, in AccountWrite) (*store.ResolvedAccount, error) {
+			got = in
+			return &store.ResolvedAccount{Name: in.Name, Source: store.AccountSourcePanel}, nil
+		},
+		CredentialOf: func(AccountWrite) (string, error) {
+			t.Fatal("CredentialOf must not run without verify")
+			return "", nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	handler.adminCreateAccount(rec, accountRequest(http.MethodPost, "/admin/accounts", "",
+		`{"name":"a","credentials_content":"windsurf_api_key = \"k\"","priority":5,"max_rpm":30,"notes":"n1"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if got.CredentialsContent == "" || got.Priority == nil || *got.Priority != 5 ||
+		got.MaxRPM == nil || *got.MaxRPM != 30 || got.Notes == nil || *got.Notes != "n1" {
+		t.Fatalf("ops input = %+v", got)
+	}
+}
+
+// TestCreateAccountConflicts 验证管线前校验：credentials_file 与
+// credentials_content 互斥、priority/max_rpm 负值，均 400 不进 ops。
+func TestCreateAccountConflicts(t *testing.T) {
+	called := false
+	handler := newWriteOpsHandler(AccountOps{
+		Create: func(context.Context, AccountWrite) (*store.ResolvedAccount, error) {
+			called = true
+			return nil, nil
+		},
+	})
+	for _, body := range []string{
+		`{"name":"a","credentials_file":"/x.toml","credentials_content":"k=1"}`,
+		`{"name":"a","token":"t","priority":-1}`,
+		`{"name":"a","token":"t","max_rpm":-5}`,
+	} {
+		rec := httptest.NewRecorder()
+		handler.adminCreateAccount(rec, accountRequest(http.MethodPost, "/admin/accounts", "", body))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
+		}
+	}
+	if called {
+		t.Fatal("ops.Create must not run on invalid input")
+	}
+}
+
+// TestCreateAccountVerify 验证 verify 探测的管线前段：CredentialOf
+// 失败原文透传 400 且不进 Create；CredentialOf 未接线同 400。探测
+// 成功段要真实上游，由端到端覆盖。
+func TestCreateAccountVerify(t *testing.T) {
+	createCalled := false
+	handler := newWriteOpsHandler(AccountOps{
+		Create: func(context.Context, AccountWrite) (*store.ResolvedAccount, error) {
+			createCalled = true
+			return nil, nil
+		},
+		CredentialOf: func(AccountWrite) (string, error) {
+			return "", errors.New("credentials_file unreadable")
+		},
+	})
+	rec := httptest.NewRecorder()
+	handler.adminCreateAccount(rec, accountRequest(http.MethodPost, "/admin/accounts", "",
+		`{"name":"a","token":"t","verify":true}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if env := decodeEnvelope(t, rec); env.Error != "credentials_file unreadable" {
+		t.Fatalf("error = %q", env.Error)
+	}
+	if createCalled {
+		t.Fatal("Create must not run after failed verify")
+	}
+
+	handler = newWriteOpsHandler(AccountOps{
+		Create: func(context.Context, AccountWrite) (*store.ResolvedAccount, error) {
+			createCalled = true
+			return nil, nil
+		},
+	})
+	rec = httptest.NewRecorder()
+	handler.adminCreateAccount(rec, accountRequest(http.MethodPost, "/admin/accounts", "",
+		`{"name":"a","token":"t","verify":true}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("nil CredentialOf: status = %d, want 400", rec.Code)
+	}
+	if env := decodeEnvelope(t, rec); env.Error != "credential verification unavailable" {
+		t.Fatalf("error = %q", env.Error)
+	}
+}
+
 // TestCreateAccountBadName 验证非法名在管线前被 400 拦下，不进 ops。
 func TestCreateAccountBadName(t *testing.T) {
 	called := false
@@ -189,6 +286,54 @@ func TestUpdateAccountPatchSemantics(t *testing.T) {
 	}
 	if env := decodeEnvelope(t, rec); env.Error != "nothing to update" {
 		t.Fatalf("error = %q", env.Error)
+	}
+}
+
+// TestUpdateAccountNewFields 验证新指针字段的缺席/显式值语义：
+// credentials_content 显式 "" 是清覆盖、priority=0 是真实覆盖、
+// notes 显式 "" 清注解；file+content 同现与负值在管线前 400。
+func TestUpdateAccountNewFields(t *testing.T) {
+	var got AccountPatch
+	handler := newWriteOpsHandler(AccountOps{
+		Update: func(_ context.Context, _ string, patch AccountPatch) (*store.ResolvedAccount, error) {
+			got = patch
+			return &store.ResolvedAccount{Name: "a", Source: store.AccountSourcePanel}, nil
+		},
+	})
+	rec := httptest.NewRecorder()
+	handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/a", "a",
+		`{"credentials_content":"","priority":0,"max_rpm":60,"notes":""}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if got.CredentialsContent == nil || *got.CredentialsContent != "" {
+		t.Fatalf("patch.CredentialsContent = %v, want pointer to empty string", got.CredentialsContent)
+	}
+	if got.Priority == nil || *got.Priority != 0 || got.MaxRPM == nil || *got.MaxRPM != 60 ||
+		got.Notes == nil || *got.Notes != "" {
+		t.Fatalf("patch = %+v", got)
+	}
+
+	called := false
+	handler = newWriteOpsHandler(AccountOps{
+		Update: func(context.Context, string, AccountPatch) (*store.ResolvedAccount, error) {
+			called = true
+			return nil, nil
+		},
+	})
+	for _, body := range []string{
+		`{"credentials_file":"/x.toml","credentials_content":"k=1"}`,
+		`{"priority":-1}`,
+		`{"max_rpm":-5}`,
+	} {
+		rec = httptest.NewRecorder()
+		handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/a", "a", body))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
+		}
+	}
+	if called {
+		t.Fatal("ops.Update must not run on invalid input")
 	}
 }
 
@@ -371,6 +516,38 @@ func TestRefreshAccountQuotaTokenErrors(t *testing.T) {
 	}
 }
 
+// TestTestAccountTokenErrors 验证连通性探测的凭据解析失败路径：
+// TokenOf 任何失败（名不在生效集/tombstoned/凭据不可解）都归 404。
+// 探测成功段要真实上游，由端到端覆盖。
+func TestTestAccountTokenErrors(t *testing.T) {
+	cases := []struct {
+		name     string
+		opsErr   error
+		wantCode int
+		wantErr  string
+	}{
+		{"not found", fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
+		{"unresolvable", errors.New("credentials_file unreadable"), http.StatusNotFound, "credentials_file unreadable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := newWriteOpsHandler(AccountOps{
+				TokenOf: func(context.Context, string) (string, error) {
+					return "", tc.opsErr
+				},
+			})
+			rec := httptest.NewRecorder()
+			handler.adminTestAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/test", "randall", ""))
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if env := decodeEnvelope(t, rec); env.Error != tc.wantErr {
+				t.Fatalf("error = %q, want %q", env.Error, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestAccountNameParamRejected 验证 {name} path 参数非法时各端点 400，
 // 不进 ops。
 func TestAccountNameParamRejected(t *testing.T) {
@@ -395,6 +572,7 @@ func TestAccountNameParamRejected(t *testing.T) {
 		{http.MethodPost, handler.adminRestoreAccount},
 		{http.MethodPost, handler.adminClearAccountCooldown},
 		{http.MethodPost, handler.adminRefreshAccountQuota},
+		{http.MethodPost, handler.adminTestAccount},
 	}
 	for _, ep := range endpoints {
 		rec := httptest.NewRecorder()
@@ -426,6 +604,7 @@ func TestAccountOpsUnavailable(t *testing.T) {
 		{http.MethodPost, handler.adminRestoreAccount, ""},
 		{http.MethodPost, handler.adminClearAccountCooldown, ""},
 		{http.MethodPost, handler.adminRefreshAccountQuota, ""},
+		{http.MethodPost, handler.adminTestAccount, ""},
 	}
 	for _, ep := range endpoints {
 		rec := httptest.NewRecorder()

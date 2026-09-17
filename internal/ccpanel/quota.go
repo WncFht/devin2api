@@ -205,7 +205,22 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 	if err := h.store.InsertQuotaSample(ctx, point); err != nil {
 		slog.Warn("quota sample persist failed", "account", account, "error", err)
 	}
+	h.noteAccountQuotaSignal(account, plan)
 	return user, plan, nil
+}
+
+// noteAccountQuotaSignal 把一次成功探测的日/周剩余百分比回灌给池侧
+// 降权簿记；两键俱缺时不喂——weekly 缺报按 0 喂会把 lane 误判进降权档。
+func (h *Handler) noteAccountQuotaSignal(account string, plan map[string]any) {
+	if h.accountQuotaSignal == nil || plan == nil {
+		return
+	}
+	daily := planFloat(plan, "daily_quota_remaining")
+	weekly := planFloat(plan, "weekly_quota_remaining")
+	if daily == nil || weekly == nil {
+		return
+	}
+	h.accountQuotaSignal(account, *daily, *weekly)
 }
 
 // refreshAccountQuota 即采一次指定账号配额：与定时采样共用

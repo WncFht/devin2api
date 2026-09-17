@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // testPoolConfig 返回一条指向本机即拒端点的 lane 配置。
@@ -343,13 +345,15 @@ func TestPoolLaneAuthCooldown(t *testing.T) {
 	}
 
 	// 后到失败只延长不缩短：把闩拨远再标一次，截止时间不回退。
+	// 退避档下窗内复发按当前档从 now 重算延长——与旧截止同档时
+	// 允许微幅后延，语义判据是不缩短。
 	lane.authMu.Lock()
 	lane.badUntil = time.Now().Add(2 * badTokenCooldown)
 	far := lane.badUntil
 	lane.authMu.Unlock()
 	lane.noteFailure(unauthenticatedErr())
 	lane.authMu.Lock()
-	if !lane.badUntil.Equal(far) {
+	if lane.badUntil.Before(far) {
 		lane.authMu.Unlock()
 		t.Fatal("later failure shortened the cooldown")
 	}
@@ -556,4 +560,386 @@ func TestPoolClearCooldown(t *testing.T) {
 	if !laneB.genericCooldown() {
 		t.Fatal("ClearCooldown(a) must not touch lane b's cooldown")
 	}
+}
+
+// 会话绑定生命周期：开流成功即写绑定；同亲和键后续请求直连绑定 lane
+// （命中即续期，rendezvous 分数不再主导）；绑定 lane 硬故障（池侧冷却）
+// 删绑按普通序重选；lane 摘除清绑；TTL 过期自然失效。
+func TestPoolSessionBinding(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	upstream := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("ok"), stubStop())
+		},
+	}
+	srv := stubServer(t, upstream, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "a", Token: "tok-a"}, Endpoint: Endpoint{BaseURL: srv.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "b", Token: "tok-b"}, Endpoint: Endpoint{BaseURL: srv.URL}, Model: "stub-model"},
+	)
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+
+	// 钉一个亲和键到 b：反复试直到 rendezvous 把 b 排首位。
+	var request llm.RequestMessages
+	for i := 0; ; i++ {
+		request = llm.RequestMessages{
+			SessionKey: fmt.Sprintf("sess-%d", i),
+			Messages:   []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+		}
+		if pool.orderedLanes(pool.snapshot(), SessionAffinityKey(request))[0] == laneB {
+			break
+		}
+	}
+	affinity := SessionAffinityKey(request)
+	stream, err := pool.Stream(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	stubDrain(t, stream)
+	if got := pool.boundLane(affinity); got != laneB {
+		t.Fatalf("boundLane = %v, want laneB after successful open", got)
+	}
+
+	// 绑定命中恒居首：换一个分数序偏好 a 的请求形状（同 SessionKey → 同
+	// 亲和键），b 仍排第一。
+	if got := pool.orderedLanes(pool.snapshot(), affinity)[0]; got != laneB {
+		t.Fatalf("bound lane must stay first, got %v", got.name)
+	}
+
+	// 绑定 lane 硬故障（generic 冷却也算）→删绑按普通序重选。
+	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+	if got := pool.boundLane(affinity); got != nil {
+		t.Fatalf("hardDown bound lane must unbind, got %v", got.name)
+	}
+	if got := pool.orderedLanes(pool.snapshot(), affinity)[0]; got == laneB {
+		t.Fatal("hardDown lane must not lead candidates")
+	}
+
+	// 冷却结束且 b 重新产出内容 → 换号接管语义下重新绑定。
+	laneB.noteSuccess()
+	stream, err = pool.Stream(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Stream after cooldown: %v", err)
+	}
+	stubDrain(t, stream)
+	if got := pool.boundLane(affinity); got == nil {
+		t.Fatal("successful lane must take the binding")
+	}
+
+	// lane 摘除清绑：b 从生效集退出后绑定不再指向它。
+	pool.bind("other-session", laneA)
+	if _, err := pool.ApplyConfigs([]Config{{Identity: LaneIdentity{Name: "a", Token: "tok-a"}, Endpoint: Endpoint{BaseURL: srv.URL}, Model: "stub-model"}}); err != nil {
+		t.Fatalf("ApplyConfigs: %v", err)
+	}
+	pool.bindingsMu.Lock()
+	for key, binding := range pool.bindings {
+		if binding.lane == laneB {
+			pool.bindingsMu.Unlock()
+			t.Fatalf("binding %q still points to removed lane b", key)
+		}
+	}
+	pool.bindingsMu.Unlock()
+
+	// TTL 过期自然失效：手工把到期时刻拨到过去。
+	pool.bindingsMu.Lock()
+	b := pool.bindings["other-session"]
+	b.expiry = time.Now().Add(-time.Second)
+	pool.bindings["other-session"] = b
+	pool.bindingsMu.Unlock()
+	if got := pool.boundLane("other-session"); got != nil {
+		t.Fatal("expired binding must be released")
+	}
+}
+
+// 粘性区：绑定 lane 因 gate 忙（闩中）也居候选首位——「宁等不换」交给
+// gate 仲裁；闩内快败零成本转下一候选。gate 状态不算 hardDown。
+func TestPoolBoundLaneStickyUnderGateLatch(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
+	laneA := poolLaneByName(pool, "a")
+	affinity := "sticky-session"
+	pool.bind(affinity, laneA)
+
+	// a 的 gate 上闩：healthy() 为假但它仍 non-hardDown。
+	laneA.adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("reset in 1 minute")))
+	if laneA.healthy() {
+		t.Skip("gate latch did not engage; environment-dependent")
+	}
+	if laneA.hardDown() {
+		t.Fatal("gate latch must not count as hardDown")
+	}
+	ranked := pool.rankLanes(pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || !ranked[0].bound {
+		t.Fatalf("latched bound lane must stay first (sticky zone), got %v", ranked[0].lane.name)
+	}
+	// 审计行：bound lane 的 Reason 记 bound。
+	rows := poolCandidateRows(ranked)
+	if rows[0].Reason != "bound" || !rows[0].Bound {
+		t.Fatalf("bound candidate row = %+v, want bound", rows[0])
+	}
+	if rows[0].Healthy {
+		t.Fatal("latched lane must report unhealthy in audit row")
+	}
+}
+
+// 三区排序：健康档 → 配额低档 → 病档；档内 priority desc 再 rendezvous
+// 分数升序。
+func TestPoolRankLanesThreeZones(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	laneC := poolLaneByName(pool, "c")
+
+	// c 配额低、b 病：三区各一条。
+	laneC.quotaLow.Store(true)
+	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+	ranked := pool.rankLanes(pool.snapshot(), "zone-key")
+	if ranked[0].lane != laneA {
+		t.Fatalf("green lane must lead, got %v", ranked[0].lane.name)
+	}
+	if ranked[1].lane != laneC || ranked[1].verdict.bucket != 1 {
+		t.Fatalf("quota-low lane must take the middle zone, got %v bucket %d", ranked[1].lane.name, ranked[1].verdict.bucket)
+	}
+	if ranked[2].lane != laneB {
+		t.Fatalf("sick lane must be last, got %v", ranked[2].lane.name)
+	}
+
+	// 同桶内 priority desc：a/c 健康（c 已清 quotaLow）时高 priority 先。
+	laneC.quotaLow.Store(false)
+	laneA.priority.Store(1)
+	laneC.priority.Store(9)
+	ranked = pool.rankLanes(pool.snapshot(), "zone-key")
+	if ranked[0].lane != laneC {
+		t.Fatalf("higher priority must lead same bucket, got %v", ranked[0].lane.name)
+	}
+	// bound-hit 恒赢 priority：绑 a 后 a 仍居首。
+	pool.bind("zone-key", laneA)
+	ranked = pool.rankLanes(pool.snapshot(), "zone-key")
+	if ranked[0].lane != laneA || !ranked[0].bound {
+		t.Fatalf("bound-hit must beat priority, got %v", ranked[0].lane.name)
+	}
+}
+
+// 连败退避：窗内复发不升档只延长；冷却过期后的新失败升档；成功清账
+// 归零连败与两档冷却。
+func TestPoolFailureBackoff(t *testing.T) {
+	lane, err := newPoolLane(testPoolConfig("x"))
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	t.Cleanup(lane.adapter.Close)
+	internalErr := func() error { return connect.NewError(connect.CodeInternal, errors.New("boom")) }
+
+	lane.noteFailure(internalErr())
+	if lane.failStreak != 1 {
+		t.Fatalf("failStreak = %d, want 1", lane.failStreak)
+	}
+	firstUntil := lane.unhealthyUntil
+	// 窗内复发：streak 不升，截止按当前档从 now 重算（不缩短）。
+	lane.noteFailure(internalErr())
+	if lane.failStreak != 1 {
+		t.Fatalf("in-window failure must not raise streak, got %d", lane.failStreak)
+	}
+	if lane.unhealthyUntil.Before(firstUntil) {
+		t.Fatal("in-window failure must not shorten cooldown")
+	}
+	// 旧窗过期后的新失败：升档 90s→180s。
+	lane.authMu.Lock()
+	lane.unhealthyUntil = time.Now().Add(-time.Second)
+	lane.authMu.Unlock()
+	lane.noteFailure(internalErr())
+	if lane.failStreak != 2 {
+		t.Fatalf("failStreak = %d, want 2", lane.failStreak)
+	}
+	if got := time.Until(lane.unhealthyUntil); got < 150*time.Second || got > 190*time.Second {
+		t.Fatalf("streak-2 cooldown = %v, want ~180s", got)
+	}
+	// 成功清账：归零连败、两档冷却与判死键。
+	lane.noteFailure(unauthenticatedErr())
+	lane.noteSuccess()
+	lane.authMu.Lock()
+	clean := lane.failStreak == 0 && lane.badTokenHash == "" && lane.badUntil.IsZero() && lane.unhealthyUntil.IsZero()
+	lane.authMu.Unlock()
+	if !clean {
+		t.Fatal("noteSuccess must clear streak, cooldowns and bad-token mark")
+	}
+
+	// backoffDuration 阶梯与封顶。
+	if got := backoffDuration(90*time.Second, 30*time.Minute, 3); got != 6*time.Minute {
+		t.Fatalf("generic streak-3 backoff = %v, want 6m", got)
+	}
+	if got := backoffDuration(90*time.Second, 30*time.Minute, 20); got != 30*time.Minute {
+		t.Fatalf("generic backoff must cap at 30m, got %v", got)
+	}
+	if got := backoffDuration(10*time.Minute, time.Hour, 4); got != time.Hour {
+		t.Fatalf("auth streak-4 backoff must cap at 1h, got %v", got)
+	}
+}
+
+// LocalGate 与 Canceled 豁免：gate 快败只记 lastFailure 证据不进冷却
+// （gate 自身已是惩罚）；取消连证据都不记——请求方行为不是 lane 信号。
+func TestPoolNoteFailureExemptions(t *testing.T) {
+	lane, err := newPoolLane(testPoolConfig("x"))
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	t.Cleanup(lane.adapter.Close)
+
+	lane.noteFailure(&llm.Failure{Code: "resource_exhausted", Message: "latched", LocalGate: true})
+	lane.authMu.Lock()
+	evidenced := lane.lastFailureCode == "resource_exhausted" && !lane.lastFailureAt.IsZero()
+	cooled := !lane.unhealthyUntil.IsZero() || !lane.badUntil.IsZero() || lane.failStreak > 0
+	lane.authMu.Unlock()
+	if !evidenced {
+		t.Fatal("LocalGate failure must keep lastFailure evidence")
+	}
+	if cooled {
+		t.Fatal("LocalGate failure must not engage pool cooldown")
+	}
+
+	lane.noteFailure(context.Canceled)
+	lane.authMu.Lock()
+	// 判据是不动既有证据而非清零：LocalGate 记下的 lastFailure* 必须原样
+	// 保留（canceled 早退在证据写入之前）。
+	if lane.lastFailureCode != "resource_exhausted" {
+		lane.authMu.Unlock()
+		t.Fatalf("canceled must not touch failure evidence, code = %q", lane.lastFailureCode)
+	}
+	lane.authMu.Unlock()
+
+	// 首条记录也不能是 canceled：换一个干净 lane 验证。
+	fresh, err := newPoolLane(testPoolConfig("y"))
+	if err != nil {
+		t.Fatalf("newPoolLane fresh: %v", err)
+	}
+	t.Cleanup(fresh.adapter.Close)
+	fresh.noteFailure(context.Canceled)
+	fresh.authMu.Lock()
+	if !fresh.lastFailureAt.IsZero() {
+		fresh.authMu.Unlock()
+		t.Fatal("canceled must not record failure evidence on a clean lane")
+	}
+	fresh.authMu.Unlock()
+}
+
+// 池侧冷却持久化：noteFailure 写 poolcool:<name> 行；lane 重建（模拟
+// 重启）装载恢复未过期冷却与连败；ClearCooldown 删行。
+func TestPoolCooldownPersistence(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	config := testPoolConfig("x")
+	config.GateStateStore = db
+
+	lane, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	lane.noteFailure(unauthenticatedErr())
+	lane.adapter.Close()
+
+	// 重建同名 lane：未过期冷却、连败与 lastFailure 证据一并恢复。
+	rebuilt, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane rebuild: %v", err)
+	}
+	t.Cleanup(rebuilt.adapter.Close)
+	if !rebuilt.authCooldown() {
+		t.Fatal("persisted auth cooldown must survive lane rebuild")
+	}
+	if rebuilt.failStreak != 1 || rebuilt.lastFailureCode != "unauthenticated" {
+		t.Fatalf("persisted state = streak %d code %q", rebuilt.failStreak, rebuilt.lastFailureCode)
+	}
+
+	// ClearCooldown 删行：重建 lane 不再恢复任何冷却。
+	pool := &Pool{bindings: make(map[string]laneBinding)}
+	lanes := []*poolLane{rebuilt}
+	pool.lanes.Store(&lanes)
+	if !pool.ClearCooldown("x") {
+		t.Fatal("ClearCooldown must hit live lane")
+	}
+	reloaded, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane reload: %v", err)
+	}
+	t.Cleanup(reloaded.adapter.Close)
+	if reloaded.authCooldown() || reloaded.failStreak != 0 {
+		t.Fatal("cleared cooldown must not persist")
+	}
+}
+
+// 惰性解禁同步落盘：凭据换出（或冷却到期）时 authCooldown 内存清判死
+// 键的同时必须重写 poolcool 行——否则重启把已解禁的冷却复活。重写保留
+// failStreak/lastFailure 证据（它们仍属有效簿记，不随判死键清）。
+func TestPoolCooldownUnbanPersists(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	config := testPoolConfig("x")
+	config.GateStateStore = db
+
+	lane, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	lane.noteFailure(unauthenticatedErr())
+	// 模拟凭据源换上新 token：adapter 的 token 与判死哈希分叉即解禁。
+	lane.adapter.tokenMu.Lock()
+	lane.adapter.token = "tok-rotated"
+	lane.adapter.tokenMu.Unlock()
+	if lane.authCooldown() {
+		t.Fatal("rotated token must lift auth cooldown")
+	}
+	lane.adapter.Close()
+
+	// 重建读回：badUntil 已清但 failStreak/证据仍在——行被重写而非删除。
+	rebuilt, err := newPoolLane(config)
+	if err != nil {
+		t.Fatalf("newPoolLane rebuild: %v", err)
+	}
+	t.Cleanup(rebuilt.adapter.Close)
+	if rebuilt.authCooldown() {
+		t.Fatal("lifted cooldown must not resurrect after rebuild")
+	}
+	if rebuilt.failStreak != 1 || rebuilt.lastFailureCode != "unauthenticated" {
+		t.Fatalf("rewrite must keep streak/evidence, got streak %d code %q", rebuilt.failStreak, rebuilt.lastFailureCode)
+	}
+}
+
+// 配额降权：weekly 剩余低于阈值置 quotaLow；负阈值关闭恒 false；
+// 已绑定会话不受影响（绑定命中恒居首）。
+func TestPoolNoteQuotaSample(t *testing.T) {
+	pool := newTestPool(t,
+		testPoolConfig("a"),
+		testPoolConfig("b"),
+	)
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+
+	pool.NoteQuotaSample("b", 50, 5)
+	if !laneB.quotaLow.Load() {
+		t.Fatal("weekly below default threshold must mark quotaLow")
+	}
+	pool.NoteQuotaSample("b", 50, 90)
+	if laneB.quotaLow.Load() {
+		t.Fatal("weekly above threshold must clear quotaLow")
+	}
+	pool.NoteQuotaSample("nonexistent", 0, 0) // 无名 lane 静默忽略
+
+	// 负阈值关闭降权。
+	pool2 := newTestPool(t, func() Config {
+		c := testPoolConfig("a")
+		c.QuotaLowThresholdPercent = -1
+		return c
+	}())
+	pool2.NoteQuotaSample("a", 0, 1)
+	if poolLaneByName(pool2, "a").quotaLow.Load() {
+		t.Fatal("negative threshold must disable demotion")
+	}
+	_ = laneA
 }

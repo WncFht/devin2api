@@ -91,7 +91,7 @@ func TestApplyMergesOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := testPool(t)
-	rt := New(configPath, dbStore, pool)
+	rt := New(configPath, dir, dbStore, pool)
 	resolved, _, err := rt.Apply(ctx, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestApplyRejectsInvalidSet(t *testing.T) {
 	dbStore := testAccountStore(t, dir)
 	ctx := context.Background()
 	pool := testPool(t)
-	rt := New(configPath, dbStore, pool)
+	rt := New(configPath, dir, dbStore, pool)
 	if _, _, err := rt.Apply(ctx, cfg, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestApplyEmptySet(t *testing.T) {
 	configPath, cfg := writeTestConfig(t, dir, "server:\n  listen: '127.0.0.1:1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n")
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
-	rt := New(configPath, dbStore, pool)
+	rt := New(configPath, dir, dbStore, pool)
 	resolved, applied, err := rt.Apply(context.Background(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestSnapshot(t *testing.T) {
 	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
 	dbStore := testAccountStore(t, dir)
 	pool := testPool(t)
-	rt := New(configPath, dbStore, pool)
+	rt := New(configPath, dir, dbStore, pool)
 	rt.CommitConfig(cfg)
 
 	got := rt.Snapshot()
@@ -193,7 +193,7 @@ devin:
 `)
 	dbStore := testAccountStore(t, dir)
 	ctx := context.Background()
-	rt := New(configPath, dbStore, testPool(t))
+	rt := New(configPath, dir, dbStore, testPool(t))
 	lanes := rt.devinConfigs(cfg, cfg.Devin.Accounts)
 	if len(lanes) != 2 {
 		t.Fatalf("lanes = %d", len(lanes))
@@ -231,7 +231,7 @@ func TestOpsLifecycle(t *testing.T) {
 	dbStore := testAccountStore(t, dir)
 	ctx := context.Background()
 	pool := testPool(t)
-	rt := New(configPath, dbStore, pool)
+	rt := New(configPath, dir, dbStore, pool)
 	rt.CommitConfig(cfg)
 	if _, _, err := rt.Apply(ctx, cfg, nil); err != nil {
 		t.Fatal(err)
@@ -356,7 +356,7 @@ func TestOpsCredentialsFile(t *testing.T) {
 	configPath, cfg := writeTestConfig(t, credDir, testAccountsYAML)
 	dbStore := testAccountStore(t, dir)
 	ctx := context.Background()
-	rt := New(configPath, dbStore, testPool(t))
+	rt := New(configPath, dir, dbStore, testPool(t))
 	rt.CommitConfig(cfg)
 	ops := rt.Ops(nil)
 
@@ -421,6 +421,66 @@ func TestRedactSecretsProxyUserinfo(t *testing.T) {
 	token := devinSection["accounts"].([]any)[0].(map[string]any)["token"].(string)
 	if !strings.HasPrefix(token, "sha256:") {
 		t.Fatalf("account token not redacted: %q", token)
+	}
+}
+
+// TestAccountOpsCredentialsContent 验证 credentials_content 粘贴上传与 CredentialOf 三源解析。
+func TestAccountOpsCredentialsContent(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
+	dbStore := testAccountStore(t, dir)
+	ctx := context.Background()
+	rt := New(configPath, dir, dbStore, testPool(t))
+	rt.CommitConfig(cfg)
+	ops := rt.Ops(nil)
+
+	content := "windsurf_api_key = \"tok-paste\"\n"
+	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "cc", CredentialsContent: content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(dir, "account-credentials", "cc.toml")
+	if created.CredentialsFile != managed {
+		t.Fatalf("CredentialsFile = %q, want managed %q", created.CredentialsFile, managed)
+	}
+	data, err := os.ReadFile(managed)
+	if err != nil || string(data) != content {
+		t.Fatalf("managed file = %q, %v", data, err)
+	}
+	if info, _ := os.Stat(managed); info.Mode().Perm() != 0o600 {
+		t.Fatalf("managed file mode = %v, want 0600", info.Mode())
+	}
+	if token, err := ops.TokenOf(ctx, "cc"); err != nil || token != "tok-paste" {
+		t.Fatalf("TokenOf(cc) = %q, %v", token, err)
+	}
+	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "bad", CredentialsContent: "no key here"}); err == nil {
+		t.Fatal("create with unresolvable credentials_content should fail")
+	}
+	// Update 路径：换新内容落同一管理位；显式空串清 credentials_file。
+	newContent := "windsurf_api_key = \"tok-paste2\"\n"
+	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &newContent}); err != nil {
+		t.Fatal(err)
+	}
+	if token, _ := ops.TokenOf(ctx, "cc"); token != "tok-paste2" {
+		t.Fatalf("TokenOf(cc) after content update = %q", token)
+	}
+	empty, lit := "", "tok-lit"
+	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &empty, Token: &lit}); err != nil {
+		t.Fatal(err)
+	}
+	if acc := findResolved(mustEffective(t, ops, ctx), "cc"); acc == nil || acc.CredentialsFile != "" {
+		t.Fatalf("cc after empty content = %+v, want credentials_file cleared", acc)
+	}
+
+	// CredentialOf：content 直解、file 锚定、token 兜底、全缺报错。
+	if token, err := ops.CredentialOf(ccpanel.AccountWrite{CredentialsContent: content}); err != nil || token != "tok-paste" {
+		t.Fatalf("CredentialOf(content) = %q, %v", token, err)
+	}
+	if token, err := ops.CredentialOf(ccpanel.AccountWrite{Token: "tok-lit"}); err != nil || token != "tok-lit" {
+		t.Fatalf("CredentialOf(token) = %q, %v", token, err)
+	}
+	if _, err := ops.CredentialOf(ccpanel.AccountWrite{}); err == nil {
+		t.Fatal("CredentialOf(empty) should fail")
 	}
 }
 

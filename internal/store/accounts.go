@@ -14,13 +14,18 @@ import (
 // AccountRow 是 upstream_accounts 表一行的领域形状。token/
 // credentials_file 可空（NULL→""）；deleted=1 是墓碑——压住 config
 // 同名声明，等 config 撤名后由 GC 物理收掉。时间一律 unix 毫秒，
-// 对齐 TokenRow 口径。
+// 对齐 TokenRow 口径。priority/max_rpm 是 *int64——NULL 语义是「无行
+// 覆盖」，merge 时回落 config 值；notes 照 nullAccountField 惯例
+// ""↔NULL。
 type AccountRow struct {
 	Name            string
 	Token           string
 	CredentialsFile string // 写入时已锚定为绝对路径
 	Disabled        bool
 	Deleted         bool
+	Priority        *int64 // 池级排序元数据，nil=无覆盖
+	MaxRPM          *int64 // 该号自己的分钟窗口配额，nil=继承全局
+	Notes           string // 面板侧自由注解，config 无对应字段
 	CreatedAt       int64
 	UpdatedAt       int64
 }
@@ -35,6 +40,9 @@ type ResolvedAccount struct {
 	Token           string // 生效值：行非空用行，否则 config 值
 	CredentialsFile string // 同上逐字段覆盖
 	Disabled        bool   // 恒取行值（config 无该字段）
+	Priority        int    // 行 ?? config ?? 0
+	MaxRPM          int    // 行 ?? config ?? 0（0=继承全局 max_rpm）
+	Notes           string // 仅行值（config 无该字段）
 	Source          string // "config" | "panel" | "tombstoned"
 	ConfigDeclared  bool
 	HasRow          bool // 是否存在 overlay 行（含墓碑）
@@ -66,6 +74,8 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			Name:            decl.Name,
 			Token:           decl.Token,
 			CredentialsFile: decl.CredentialsFile,
+			Priority:        decl.Priority,
+			MaxRPM:          decl.MaxRPM,
 			Source:          AccountSourceConfig,
 			ConfigDeclared:  true,
 		}
@@ -74,6 +84,16 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			acc.Disabled = row.Disabled
 			acc.CreatedAt = row.CreatedAt
 			acc.UpdatedAt = row.UpdatedAt
+			// priority/max_rpm/notes 按「行覆盖恒赢」解析，墓碑行同受：
+			// restore 复活的就是这套行值，视图如实透出。notes 无
+			// config 对应物，行值即注解本体。
+			acc.Notes = row.Notes
+			if row.Priority != nil {
+				acc.Priority = int(*row.Priority)
+			}
+			if row.MaxRPM != nil {
+				acc.MaxRPM = int(*row.MaxRPM)
+			}
 			if row.Deleted {
 				acc.Source = AccountSourceTombstoned
 			} else {
@@ -107,6 +127,9 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			Token:           row.Token,
 			CredentialsFile: row.CredentialsFile,
 			Disabled:        row.Disabled,
+			Priority:        accountInt64Or0(row.Priority),
+			MaxRPM:          accountInt64Or0(row.MaxRPM),
+			Notes:           row.Notes,
 			Source:          AccountSourcePanel,
 			HasRow:          true,
 			CreatedAt:       row.CreatedAt,
@@ -131,9 +154,11 @@ var (
 )
 
 // accountColumnList 是 upstream_accounts 的全部列，INSERT/SELECT 共用
-// 同一份列清单；token/credentials_file 可空，读写两侧做 ""/NULL 互转。
+// 同一份列清单；token/credentials_file/priority/max_rpm/notes 可空，
+// 读写两侧做零值/NULL 互转。
 var accountColumnList = []string{
 	"name", "token", "credentials_file", "disabled", "deleted", "created_at", "updated_at",
+	"priority", "max_rpm", "notes",
 }
 
 var (
@@ -142,7 +167,8 @@ var (
 	accountUpsert = `INSERT INTO upstream_accounts(` + accountColumns + `) VALUES(` +
 		placeholders(len(accountColumnList)) + `) ON CONFLICT(name) DO UPDATE SET
 		token=excluded.token, credentials_file=excluded.credentials_file,
-		disabled=excluded.disabled, deleted=excluded.deleted, updated_at=excluded.updated_at`
+		disabled=excluded.disabled, deleted=excluded.deleted, updated_at=excluded.updated_at,
+		priority=excluded.priority, max_rpm=excluded.max_rpm, notes=excluded.notes`
 )
 
 // nullAccountField 把 "" 落成 NULL：可空列的 NULL 语义是「无行覆盖」，
@@ -154,16 +180,40 @@ func nullAccountField(s string) any {
 	return s
 }
 
+// nullAccountInt64 是 priority/max_rpm 的写侧转换：nil 落 NULL。
+func nullAccountInt64(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+// accountInt64Or0 是读侧反向转换：NULL 回落 0。
+func accountInt64Or0(v *int64) int {
+	if v == nil {
+		return 0
+	}
+	return int(*v)
+}
+
 func scanAccount(row sqlScanner) (*AccountRow, error) {
 	var a AccountRow
-	var token, credentialsFile sql.NullString
+	var token, credentialsFile, notes sql.NullString
+	var priority, maxRPM sql.NullInt64
 	err := row.Scan(&a.Name, &token, &credentialsFile, &a.Disabled, &a.Deleted,
-		&a.CreatedAt, &a.UpdatedAt)
+		&a.CreatedAt, &a.UpdatedAt, &priority, &maxRPM, &notes)
 	if err != nil {
 		return nil, err
 	}
 	a.Token = token.String
 	a.CredentialsFile = credentialsFile.String
+	a.Notes = notes.String
+	if priority.Valid {
+		a.Priority = &priority.Int64
+	}
+	if maxRPM.Valid {
+		a.MaxRPM = &maxRPM.Int64
+	}
 	return &a, nil
 }
 
@@ -201,8 +251,8 @@ func (s *Store) GetAccount(ctx context.Context, name string) (row *AccountRow, o
 
 // UpsertAccount INSERT ... ON CONFLICT(name) DO UPDATE；created_at 只在
 // 首插写（row.CreatedAt 为 0 时取 now），updated_at 恒刷新成 now。整行
-// 覆盖语义——调用方做部分字段补丁时须先读后写；token/credentials_file
-// 传 "" 落 NULL，即清掉行覆盖。
+// 覆盖语义——调用方做部分字段补丁时须先读后写；token/credentials_file/
+// notes 传 "" 落 NULL、priority/max_rpm 传 nil 落 NULL，即清掉行覆盖。
 func (s *Store) UpsertAccount(ctx context.Context, row *AccountRow) error {
 	now := time.Now().UnixMilli()
 	created := row.CreatedAt
@@ -211,7 +261,9 @@ func (s *Store) UpsertAccount(ctx context.Context, row *AccountRow) error {
 	}
 	_, err := s.db.ExecContext(ctx, accountUpsert, row.Name,
 		nullAccountField(row.Token), nullAccountField(row.CredentialsFile),
-		row.Disabled, row.Deleted, created, now)
+		row.Disabled, row.Deleted, created, now,
+		nullAccountInt64(row.Priority), nullAccountInt64(row.MaxRPM),
+		nullAccountField(row.Notes))
 	return err
 }
 

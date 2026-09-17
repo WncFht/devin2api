@@ -30,9 +30,16 @@
   let lastByName = new Map();
   // 首拉完成前不渲染——HTML 自带 loading 占位，避免空名单闪出整页空态。
   let firstLoad = false;
+  // 排序选择器持久偏好：server=服务器序（契约默认）、name/priority/health。
+  const SORT_KEY = 'accounts.sort';
+  let sortMode = 'server';
+  try { sortMode = localStorage.getItem(SORT_KEY) || 'server'; } catch (_) { /* 无痕模式容忍 */ }
+  // ?account=<name> 深链：卡列表只显示该卡 + 高亮，脉/KPI 仍给全池视图。
+  let filterName = new URLSearchParams(location.search).get('account') || '';
 
   const el = (id) => document.getElementById(id);
   const errMsg = (e) => (e && (e.message || String(e))) || '';
+  const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\\]]/g, ''));
 
   window.initPageBootstrap({
     topbarKey: 'accounts',
@@ -44,22 +51,52 @@
         window.acctOps.mountAddForm(addEl);
       }
       const refresh = el('accounts-refresh');
-      if (refresh) refresh.addEventListener('click', loadAll);
+      if (refresh) refresh.addEventListener('click', () => loadAll(true));
+      syncSortSel();
+      const sortSel = el('accounts-sort');
+      if (sortSel) {
+        sortSel.addEventListener('change', () => {
+          sortMode = sortSel.value;
+          try { localStorage.setItem(SORT_KEY, sortMode); } catch (_) { /* 忽略 */ }
+          renderAll();
+        });
+      }
+      const filterChip = el('accounts-filter');
+      if (filterChip) {
+        filterChip.addEventListener('click', (e) => {
+          if (e.target.closest('[data-clear-filter]')) clearFilter();
+        });
+      }
       for (const id of ['accounts-list', 'accounts-add', 'accounts-empty']) {
         const node = el(id);
-        if (node) node.addEventListener('click', onActClick);
+        if (node) {
+          node.addEventListener('click', onActClick);
+          // 徽标/失败行是 span/div（role=button）：Enter/Space 补成 click。
+          node.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const act = e.target.closest('[data-act]');
+            if (!act || act.tagName === 'A' || act.tagName === 'BUTTON') return;
+            e.preventDefault();
+            act.click();
+          });
+        }
       }
       if (window.i18n && typeof window.i18n.onLocaleChange === 'function') {
-        window.i18n.onLocaleChange(renderAll);
+        // locale 换了文案要全量重渲（翻译烘进 html 串），排序选项同刷。
+        window.i18n.onLocaleChange(() => { syncSortSel(); renderAll(true); });
       }
-      loadAll();
+      loadAll(true);
       if (typeof window.createAutoRefresh === 'function') {
-        window.createAutoRefresh({ load: loadAll }).init();
+        // 抽屉打开时跳过本轮：读者正在看懒拉明细，不抢滚动位置。
+        window.createAutoRefresh({
+          load: () => loadAll(),
+          skip: () => !!document.querySelector('.acct-drawer[open]')
+        }).init();
       }
     }
   });
 
-  async function loadAll() {
+  async function loadAll(force) {
     const btn = el('accounts-refresh');
     if (btn) btn.disabled = true;
     const since = new Date(Date.now() - WINDOW_HOURS * 3600e3).toISOString();
@@ -83,7 +120,7 @@
       adminMap = null;
     }
     firstLoad = true;
-    renderAll();
+    renderAll(!!force);
     const stamp = el('accounts-updated-at');
     if (stamp) stamp.textContent = t('accounts.updatedAt', { time: new Date().toLocaleString() });
     if (btn) btn.disabled = false;
@@ -171,6 +208,49 @@
     });
   }
 
+  // 排序选择器：server=服务器序（契约默认），其余三档本地重排不改 adminList。
+  function sortList(list) {
+    if (sortMode === 'server' || list.length < 2) return list;
+    const arr = list.slice();
+    const byName = (x, y) => String(x.name).localeCompare(String(y.name));
+    if (sortMode === 'name') return arr.sort(byName);
+    if (sortMode === 'priority') return arr.sort((x, y) => (Number(y.priority) || 0) - (Number(x.priority) || 0) || byName(x, y));
+    if (sortMode === 'health') {
+      const rank = { bad: 0, warn: 1, ok: 2, idle: 3 };
+      return arr.sort((x, y) => (rank[primaryTone(x)] ?? 4) - (rank[primaryTone(y)] ?? 4) || byName(x, y));
+    }
+    return arr;
+  }
+
+  function syncSortSel() {
+    const sel = el('accounts-sort');
+    if (!sel) return;
+    sel.innerHTML = ['server', 'name', 'priority', 'health']
+      .map((k) => `<option value="${k}">${esc(t('accounts.sort.' + k))}</option>`)
+      .join('');
+    sel.value = sortMode;
+  }
+
+  function clearFilter() {
+    filterName = '';
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete('account');
+      history.replaceState(null, '', url);
+    } catch (_) { /* file:// 等场景容忍 */ }
+    renderAll();
+  }
+
+  function syncFilterChip() {
+    const chip = el('accounts-filter');
+    if (!chip) return;
+    chip.hidden = !filterName;
+    if (filterName) {
+      chip.innerHTML = `<span>${esc(t('accounts.filter.only', { name: filterName }))}</span>` +
+        `<button type="button" class="acct-filter-x" data-clear-filter aria-label="${esc(t('accounts.filter.clear'))}">&times;</button>`;
+    }
+  }
+
   // 逐号 matrix 派生：entries 原样过滤（view 算今日指标/failover 抽屉），
   // cells 是 24×1h 健康桶（优先级 err>rl>ok，同桶 rl+err 按 err 计），
   // failoverCount 是该号条目 account_switches 总和。
@@ -199,9 +279,10 @@
 
   // ---- 渲染 ----
 
-  function renderAll() {
+  function renderAll(force) {
     if (!firstLoad) return;
-    const list = accountList();
+    syncFilterChip();
+    const list = sortList(accountList());
     lastByName = new Map(list.map((a) => [a.name, a]));
     // 空态只在确知池为空时启用：GET 已通时名单即权威（runtime 挂不挂都行）；
     // 过渡期需 runtime 拉到且键集空。runtime 故障走列表区错误块，不能把
@@ -221,7 +302,7 @@
     }
     renderPulse(list);
     renderKpi(list);
-    renderCards(list);
+    renderCards(list, force);
   }
 
   function renderEmpty() {
@@ -294,47 +375,130 @@
     return `<div class="empty-state"><div class="empty-state-title empty-state-title--error">${esc(t('accounts.sectionError'))}</div><div>${esc(msg)}</div></div>`;
   }
 
-  // 卡骨架归 core：view 出块 html（head 是完整卡头含 badges，pills 是裸
-  // 徽章串供复用——骨架不重复放；failure/gate/warm/quota/metrics/health/
-  // curve 依序进格，curve 的 acct-sec--curve 占整宽行故在 acct-grid 内），
-  // ops 出完整 .acct-actions 行。curve 块内含 .acct-curve 挂载点，innerHTML
-  // 落地后逐卡交给 view 起 echarts；重渲前先 disposeCharts。
-  function renderCards(list) {
+  // 卡骨架归 core：每块内容落进固定 data-slot 容器（drawer 槽留给 ops 的
+  // 抽屉，core 的逐块 diff 不碰它——开着的抽屉扛得住自动刷新）。view 出块
+  // html，ops 出 actions 行；curve 块内含 .acct-curve 挂载点由 view 起图。
+  const SLOTS = ['head', 'failure', 'actions', 'gate', 'warm', 'quota', 'metrics', 'health', 'curve'];
+  // cardEl -> 上轮各 slot 的 html 串：逐串比对，只写变了的 slot，骨架不动。
+  const lastBlocks = new WeakMap();
+
+  function cardBlocksOf(a) {
+    const b = window.acctView.cardBlocks(a) || {};
+    return {
+      head: b.head || '',
+      failure: b.failure || '',
+      actions: window.acctOps.actionsBlock(a) || '',
+      gate: b.gate || '',
+      warm: b.warm || '',
+      quota: b.quota || '',
+      metrics: b.metrics || '',
+      health: b.health || '',
+      curve: b.curve || ''
+    };
+  }
+
+  function buildCard(a, blocks) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = `<div class="card acct-card" data-acct="${esc(a.name)}">
+      <div data-slot="head">${blocks.head}</div>
+      <div data-slot="failure">${blocks.failure}</div>
+      <div data-slot="actions">${blocks.actions}</div>
+      <div class="acct-grid">
+        <div data-slot="gate">${blocks.gate}</div>
+        <div data-slot="warm">${blocks.warm}</div>
+        <div data-slot="quota">${blocks.quota}</div>
+        <div data-slot="metrics">${blocks.metrics}</div>
+        <div data-slot="health">${blocks.health}</div>
+        <div class="acct-sec--curve" data-slot="curve">${blocks.curve}</div>
+      </div>
+      <div data-slot="drawer"></div>
+    </div>`;
+    const cardEl = tpl.content.firstElementChild;
+    lastBlocks.set(cardEl, blocks);
+    return cardEl;
+  }
+
+  function initCurve(cardEl, a) {
+    const curve = cardEl.querySelector('.acct-curve');
+    if (curve) window.acctView.curveInit(curve, (a.quota && a.quota.points) || []);
+  }
+
+  // 逐 slot 比对上轮 html：变才 innerHTML，没变整块跳过——pill 倒计时/
+  // 失败 relTime 这类文本变化只重写对应 slot，echarts 容器不再被替换。
+  function syncCard(cardEl, a) {
+    const blocks = cardBlocksOf(a);
+    const prev = lastBlocks.get(cardEl) || {};
+    for (const slot of SLOTS) {
+      if (prev[slot] === blocks[slot]) continue;
+      const slotEl = cardEl.querySelector(`[data-slot="${slot}"]`);
+      if (slotEl) slotEl.innerHTML = blocks[slot];
+    }
+    lastBlocks.set(cardEl, blocks);
+    initCurve(cardEl, a); // curveInit 幂等：points 签名不变即 no-op
+  }
+
+  function spotCards(root) {
+    for (const c of root.children) {
+      c.classList.toggle('acct-card--spot', !!filterName && c.dataset.acct === filterName);
+    }
+  }
+
+  // 自动刷新走 diff（骨架/图表/抽屉不动）；手动刷新 force 全量重建。
+  function renderCards(list, force) {
     const root = el('accounts-list');
     if (!root) return;
     if (!window.acctView || !window.acctOps) {
       root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock('accounts-view.js / accounts-ops.js not loaded')}</div>`;
       return;
     }
-    window.acctView.disposeCharts();
-    if (!list.length) {
-      root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock(errMsg(runtimeErr || quotaErr || matrixErr))}</div>`;
+    const shown = filterName ? list.filter((a) => a.name === filterName) : list;
+    const allCards = root.children.length > 0
+      && Array.from(root.children).every((c) => c.classList.contains('acct-card'));
+    if (force || !shown.length || !allCards) {
+      window.acctView.disposeCharts();
+      if (!shown.length) {
+        const msg = filterName
+          ? t('accounts.filter.missing', { name: filterName })
+          : errMsg(runtimeErr || quotaErr || matrixErr);
+        root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock(msg)}</div>`;
+        return;
+      }
+      root.innerHTML = '';
+      for (const a of shown) {
+        const cardEl = buildCard(a, cardBlocksOf(a));
+        root.appendChild(cardEl);
+        initCurve(cardEl, a);
+      }
+      spotCards(root);
       return;
     }
-    root.innerHTML = list.map((a) => {
-      const b = window.acctView.cardBlocks(a) || {};
-      return `<div class="card acct-card" data-acct="${esc(a.name)}">
-        ${b.head || ''}
-        ${b.failure || ''}
-        ${window.acctOps.actionsBlock(a) || ''}
-        <div class="acct-grid">
-          ${b.gate || ''}${b.warm || ''}${b.quota || ''}${b.metrics || ''}${b.health || ''}${b.curve || ''}
-        </div>
-      </div>`;
-    }).join('');
-    root.querySelectorAll('.acct-card').forEach((cardEl) => {
-      const a = lastByName.get(cardEl.dataset.acct);
-      const curve = a && cardEl.querySelector('.acct-curve');
-      if (curve) window.acctView.curveInit(curve, (a.quota && a.quota.points) || []);
-    });
+    // diff 路径：先摘出名单外旧卡，再按当前序逐卡同步+appendChild 重排
+    // （appendChild 对已挂节点是移动而非重建，DOM 与 chart 都保留）。
+    const wanted = new Set(shown.map((a) => a.name));
+    for (const c of Array.from(root.children)) {
+      if (!wanted.has(c.dataset.acct)) c.remove();
+    }
+    for (const a of shown) {
+      let cardEl = root.querySelector(`.acct-card[data-acct="${cssEsc(a.name)}"]`);
+      if (!cardEl) {
+        cardEl = buildCard(a, cardBlocksOf(a));
+        root.appendChild(cardEl);
+        initCurve(cardEl, a);
+      } else {
+        syncCard(cardEl, a);
+        root.appendChild(cardEl);
+      }
+    }
+    spotCards(root);
   }
 
   // 卡内/表单/空态的 data-act 统一委托 ops.handle；data-acct 命中 lastByName
-  // 时把装配好的 a 一并交过去，ops 不回源。
+  // 时把装配好的 a 一并交过去，ops 不回源。第 4 参给被点元素（抽屉定位卡、
+  // 按钮 spinner 复位都要它）。
   function onActClick(e) {
     const btn = e.target.closest('[data-act]');
     if (!btn || !window.acctOps || typeof window.acctOps.handle !== 'function') return;
     const name = btn.dataset.acct || null;
-    window.acctOps.handle(btn.dataset.act, name, name ? (lastByName.get(name) || null) : null);
+    window.acctOps.handle(btn.dataset.act, name, name ? (lastByName.get(name) || null) : null, btn);
   }
 })();

@@ -52,6 +52,10 @@ type MetaSummary struct {
 	// account 为空，attempts 仍要落（唯一痕迹）。
 	UpstreamAccount  string           `json:"upstream_account,omitempty"`
 	UpstreamAttempts []AccountAttempt `json:"upstream_attempts,omitempty"`
+	// PoolCandidates 是号池开流前的候选序快照（含每 lane 降级原因），
+	// 由 Pool.Stream 排序后经 NotePoolCandidates 登记——回答「这次
+	// 为什么去了这个号」。
+	PoolCandidates []PoolCandidate `json:"pool_candidates,omitempty"`
 	// 连接画像拆开 connect 段：Reused=false 时 sent→open 含完整
 	// TCP+TLS 握手，Reused=true 时该段基本是上游响应头延迟。
 	UpstreamConnIdleMS *int64     `json:"upstream_conn_idle_ms,omitempty"`
@@ -111,6 +115,17 @@ type AccountAttempt struct {
 	Code      string `json:"code,omitempty"`
 	Message   string `json:"message,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+// PoolCandidate 是号池一次选号的候选快照行：Name 是 lane 名，Healthy/
+// Bound 是当时判定位，Reason 是它被降级/跳过的归因词表（bound、
+// auth_cooldown、generic_cooldown、gate_latched、gate_window_full、
+// quota_low；首位被选中者可空）。整张表回答「这次为什么去了这个号」。
+type PoolCandidate struct {
+	Name    string `json:"name"`
+	Healthy bool   `json:"healthy"`
+	Bound   bool   `json:"bound,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // 进行中请求的阶段名（ActiveRequest.State 的取值集）：waiting_upstream

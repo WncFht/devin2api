@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/WncFht/devin2api/internal/store"
 )
 
-// Ops 装配 /admin/accounts 的操作面：六个闭包全部在 rt 锁下跑——
+// Ops 装配 /admin/accounts 的操作面：各闭包全部在 rt 锁下跑——
 // 行写入、Apply 重推与失败回滚是一条多步提交，和 reload 共用同一把
 // 串行化锁才不跟热更交错。写动作同一骨架：预检（存在性/状态/干跑
 // 整表校验）→ 行写入 → Apply → 失败按写前快照回滚行 → 成功回该名
@@ -52,6 +53,25 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				Token:           strings.TrimSpace(in.Token),
 				CredentialsFile: strings.TrimSpace(in.CredentialsFile),
 				Disabled:        in.Disabled,
+				Priority:        in.Priority,
+				MaxRPM:          in.MaxRPM,
+			}
+			if in.Notes != nil {
+				row.Notes = *in.Notes
+			}
+			// credentials_content 是粘贴上传：先证明能解出 token 再落盘
+			// 到状态目录管理位，行存绝对路径。落盘先于干跑——合成校验
+			// 要按 credentials_file 口径重读它；后续步骤失败留下的是
+			// 未被引用的文件，惰性无害。
+			if in.CredentialsContent != "" {
+				if config.TokenFromCredentialsContent([]byte(in.CredentialsContent)) == "" {
+					return nil, errors.New("credentials_content carries no windsurf_api_key")
+				}
+				path, err := writeAccountCredentialsFile(rt.stateDir, in.Name, in.CredentialsContent)
+				if err != nil {
+					return nil, fmt.Errorf("write credentials_content: %w", err)
+				}
+				row.CredentialsFile = path
 			}
 			// 干跑整表校验先于行写入：合成集非法（零凭据/重名/重
 			// token/文件不可解）直接拒绝，库里不留脏行。
@@ -96,7 +116,8 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				*row = *oldRow
 			}
 			// 指针字段区分缺席与显式空：显式 "" 落 NULL 即「清行覆盖」
-			// （config 名回落 config 值），缺席不动旧值。
+			// （config 名回落 config 值），缺席不动旧值。priority/max_rpm
+			// 的 0 是真实覆盖值——指针语义表达不了「清回 NULL」。
 			if patch.Token != nil {
 				row.Token = strings.TrimSpace(*patch.Token)
 			}
@@ -105,6 +126,32 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			if patch.Disabled != nil {
 				row.Disabled = *patch.Disabled
+			}
+			if patch.Priority != nil {
+				row.Priority = patch.Priority
+			}
+			if patch.MaxRPM != nil {
+				row.MaxRPM = patch.MaxRPM
+			}
+			if patch.Notes != nil {
+				row.Notes = *patch.Notes
+			}
+			// credentials_content 同 Create：显式空串清 credentials_file
+			// 覆盖（不落盘），非空先验 token 再写管理位。落盘先于干跑，
+			// 失败残留的孤儿文件惰性无害。
+			if patch.CredentialsContent != nil {
+				if *patch.CredentialsContent == "" {
+					row.CredentialsFile = ""
+				} else {
+					if config.TokenFromCredentialsContent([]byte(*patch.CredentialsContent)) == "" {
+						return nil, errors.New("credentials_content carries no windsurf_api_key")
+					}
+					path, err := writeAccountCredentialsFile(rt.stateDir, name, *patch.CredentialsContent)
+					if err != nil {
+						return nil, fmt.Errorf("write credentials_content: %w", err)
+					}
+					row.CredentialsFile = path
+				}
 			}
 			synthesized, err := config.ResolveAccounts(candidateConfigs(
 				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row))), configDir)
@@ -199,6 +246,31 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			defer rt.mu.Unlock()
 			return ResolveToken(ctx, rt.db, rt.Config().Devin.Accounts, name)
 		},
+		// CredentialOf 解析一次写输入将生效的凭据（verify 探测用）：
+		// content 直解；file 走整表校验的锚定/现读合成（~/ 展开、相对
+		// 锚 configDir），file 优先于 token——与 TokenOf/池侧 lane 的
+		// 「文件是自愈源、字面量是兜底」同口径。纯解析不落盘。
+		CredentialOf: func(in ccpanel.AccountWrite) (string, error) {
+			if in.CredentialsContent != "" {
+				if token := config.TokenFromCredentialsContent([]byte(in.CredentialsContent)); token != "" {
+					return token, nil
+				}
+				return "", errors.New("credentials_content carries no windsurf_api_key")
+			}
+			if in.CredentialsFile != "" {
+				synthesized, err := config.ResolveAccounts([]config.DevinAccountConfig{{
+					Name: in.Name, CredentialsFile: in.CredentialsFile,
+				}}, configDir)
+				if err != nil {
+					return "", err
+				}
+				return synthesized[0].Token, nil
+			}
+			if in.Token != "" {
+				return in.Token, nil
+			}
+			return "", errors.New("one of token/credentials_file/credentials_content is required")
+		},
 	}
 }
 
@@ -213,9 +285,26 @@ func candidateConfigs(resolved []store.ResolvedAccount) []config.DevinAccountCon
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
+			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out
+}
+
+// writeAccountCredentialsFile 把粘贴的 credentials.toml 落进状态目录
+// 的 account-credentials/<name>.toml（0600 凭据件、0700 目录）；
+// name 已过账号名正则，路径无注入面。返回绝对路径供行 CredentialsFile
+// 置位。同名的覆盖写语义顺带给 Update 复用（改内容=改文件）。
+func writeAccountCredentialsFile(stateDir, name, content string) (string, error) {
+	dir := filepath.Join(stateDir, "account-credentials")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name+".toml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // findAccountRow 按名找库行（含墓碑）；无行返回 nil。

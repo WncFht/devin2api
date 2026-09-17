@@ -467,3 +467,236 @@ textarea.acct-form-input {
   border-radius: 0;
   box-shadow: none;
 }
+
+/* 卡头 notes：身份行内随附的备注短文本 */
+.acct-notes {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 证据抽屉入口：异常徽标与失败行可点 */
+.acct-pill[data-act],
+.acct-failure[data-act] {
+  cursor: pointer;
+}
+
+.acct-pill--link:hover {
+  filter: brightness(0.92);
+}
+
+.acct-pill--link:focus-visible,
+.acct-failure--link:focus-visible {
+  outline: 2px solid var(--primary-500);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+.acct-failure--link:hover {
+  text-decoration: underline;
+}
+
+/* 深链高亮：?account=<name> 命中的卡 */
+.acct-card--spot {
+  outline: 2px solid var(--primary-500);
+  outline-offset: 2px;
+}
+
+/* 页头排序选择器与深链筛选 chip */
+.acct-sort {
+  flex: none;
+  width: auto;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.acct-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  color: var(--primary-700);
+  background: color-mix(in srgb, var(--primary-500) 12%, transparent);
+  border-radius: 999px;
+}
+
+.acct-filter-x {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+/* 测试按钮在途态 */
+.acct-action-btn--busy {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+.acct-action-btn--busy::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 5px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.8s linear infinite;
+}
+
+/* 抽屉内部：failover 时间线与证据区共用 */
+.acct-drawer-body {
+  margin-top: var(--space-2);
+}
+
+.acct-drawer-foot {
+  margin-top: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.acct-ev-hint,
+.acct-ev-at {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.acct-ev-events h5 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 12px 0 6px;
+}
+
+.acct-ev-ev {
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.acct-ev-kind {
+  font-weight: 600;
+}
+
+.acct-fo {
+  border-top: 1px dashed var(--color-border);
+  padding-top: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.acct-fo:first-child {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.acct-fo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+
+.acct-fo-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.acct-tl {
+  display: grid;
+  gap: 4px;
+}
+
+.acct-tl-item {
+  font-size: 12px;
+}
+
+.acct-tl-x {
+  color: var(--error-500);
+  margin-right: 6px;
+}
+
+.acct-tl-item--ok .acct-tl-x {
+  color: var(--success-500);
+}
+
+.acct-tl-acct {
+  font-family: var(--font-family-mono);
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.acct-tl-msg {
+  margin-left: 18px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.acct-fo-cands {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.acct-cand {
+  padding: 1px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.acct-cand--sel {
+  border-color: var(--success-500);
+  color: var(--success-700);
+}
+
+.acct-cand--bound {
+  border-color: var(--primary-500);
+}
+
+.acct-cand-why {
+  margin-left: 3px;
+  color: var(--color-text-secondary);
+}
+
+/* 表单：双列行与 checkbox */
+.acct-form-duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.acct-form-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.acct-form-check input {
+  margin: 0;
+  accent-color: var(--primary-500);
+}

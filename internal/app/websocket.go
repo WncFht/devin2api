@@ -670,7 +670,9 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	}
 	innerRequest.Header.Set("Content-Type", "application/json")
 	// innerRequest 不经过 HTTP middleware，鉴权与日志关联所需的头由
-	// correlationHeaders 单源驱动逐个透传——漏一项就静默丢头。
+	// correlationHeaders 单源驱动逐个透传——漏一项就静默丢头。会话亲和
+	// 头链成员也在表内（与 SessionKeyFromHeader 同链），不透传则 WS
+	// 轮次的号池亲和落空。
 	for _, header := range correlationHeaders {
 		if !header.forward {
 			continue

@@ -188,8 +188,11 @@ var schemaStatements = []string{
 		updated_at INTEGER NOT NULL DEFAULT 0
 	)`,
 
-	// upstream_accounts：号池 lane 的持久化账号行（由邻接需求
-	// 消费，DDL 先行建表）。deleted 软删标记保留历史 lane 归因。
+	// upstream_accounts：号池 lane 的持久化账号行。deleted 软删标记
+	// 保留历史 lane 归因；priority/max_rpm/notes 是全可空列——NULL
+	// 语义是「无行覆盖」，读侧回落 config 值或零值。存量库的补齐
+	// 走 ensureAccountColumns 的幂等 ALTER（列加在尾部，两条路径
+	// 的物理列序一致）。
 	`CREATE TABLE IF NOT EXISTS upstream_accounts (
 		name TEXT PRIMARY KEY,
 		token TEXT,
@@ -197,7 +200,10 @@ var schemaStatements = []string{
 		disabled INTEGER NOT NULL DEFAULT 0,
 		deleted INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
-		updated_at INTEGER NOT NULL
+		updated_at INTEGER NOT NULL,
+		priority INTEGER,
+		max_rpm INTEGER,
+		notes TEXT
 	)`,
 
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -206,10 +212,55 @@ var schemaStatements = []string{
 	)`,
 }
 
-// applySchema 顺序执行全部 DDL；幂等，可重复调用。
+// accountColumnMigrations 是 upstream_accounts 在首发建表后追加的可空
+// 列：新库的 CREATE TABLE 已带它们，这里只给存量库幂等补齐。无版本
+// 框架——PRAGMA table_info 探缺席列再 ALTER TABLE ADD COLUMN，重复
+// 执行安全。
+var accountColumnMigrations = []struct {
+	name string
+	ddl  string
+}{
+	{"priority", `ALTER TABLE upstream_accounts ADD COLUMN priority INTEGER`},
+	{"max_rpm", `ALTER TABLE upstream_accounts ADD COLUMN max_rpm INTEGER`},
+	{"notes", `ALTER TABLE upstream_accounts ADD COLUMN notes TEXT`},
+}
+
+// applySchema 顺序执行全部 DDL 再跑列补齐；幂等，可重复调用。
 func applySchema(db *sql.DB) error {
 	for _, stmt := range schemaStatements {
 		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return ensureAccountColumns(db)
+}
+
+// ensureAccountColumns 给存量 upstream_accounts 表补缺席列；
+// 新库列已齐，PRAGMA table_info 一探即退。
+func ensureAccountColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(upstream_accounts)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, m := range accountColumnMigrations {
+		if existing[m.name] {
+			continue
+		}
+		if _, err := db.Exec(m.ddl); err != nil {
 			return err
 		}
 	}
