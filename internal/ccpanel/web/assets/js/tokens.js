@@ -1,7 +1,6 @@
     const t = window.t;
     const API_BASE = '/admin';
     let allTokens = [];
-    let masterKey = null;    // config auth.api_key 的只读投影 {configured, key_hash}
     let isToday = true;      // 是否为本日（本日才显示最近一分钟）
 
     // 当前选中的时间范围(默认为本日)
@@ -198,43 +197,13 @@
 
         const data = await fetchDataWithAuth(url);
         allTokens = (data && data.tokens) || [];
-        masterKey = (data && data.master_key) || null;
         isToday = !!(data && data.is_today);
-        renderMasterKey();
         renderTokens();
       } catch (error) {
-        
+
         console.error('Failed to load tokens:', error);
         window.showNotification(t('tokens.msg.loadFailed') + ': ' + error.message, 'error');
       }
-    }
-
-    // 主密钥卡：把 config auth.api_key 显示成与令牌同级的凭据条目——
-    // 「二选一」不再是隐藏语义，页面上能直接看到它配没配、哈希是多少
-    // （与 index.jsonl 的 key_hash 对照）、以及它走 config 热重载而非本页编辑。
-    function renderMasterKey() {
-      const slot = document.getElementById('master-key-card');
-      if (!slot) return;
-      if (!masterKey) {
-        slot.innerHTML = '';
-        return;
-      }
-      const configured = !!masterKey.configured;
-      // 主密钥与令牌全空 = /v1 开放模式（authenticate 不校验任何凭据），
-      // 这是安全相关状态，必须显式亮出来而不是藏进「二选一」的话术里。
-      const openMode = !configured && allTokens.length === 0;
-      const status = configured
-        ? `<span class="master-key-status is-on">${t('tokens.master.configured')}</span><code class="master-key-hash">key_hash ${escapeHtml(masterKey.key_hash || '')}</code>`
-        : `<span class="master-key-status is-off">${t('tokens.master.notConfigured')}</span>`;
-      slot.innerHTML = `
-        <div class="glass-card master-key-card${openMode ? ' master-key-card--warn' : ''}">
-          <div class="master-key-row">
-            <span class="master-key-badge">${t('tokens.master.badge')}</span>
-            <span class="master-key-title">${t('tokens.master.title')}</span>
-            ${status}
-          </div>
-          <p class="master-key-desc">${openMode ? t('tokens.master.openWarning') : t('tokens.master.desc')}</p>
-        </div>`;
     }
 
     function renderTokens() {
@@ -345,17 +314,20 @@
       const streamCellClass = token.stream_count ? '' : 'mobile-empty-cell';
       const nonStreamCellClass = token.non_stream_count ? '' : 'mobile-empty-cell';
 
-      // 使用模板引擎渲染
-      const maskedToken = token.token.length > 8
-        ? token.token.substring(0, 4) + '****' + token.token.slice(-4)
-        : token.token;
+      // 使用模板引擎渲染；匿名通道行没有可出示的凭据，显示固定占位符
+      const maskedToken = token.anonymous
+        ? t('tokens.anonymousDisplay')
+        : token.token.length > 8
+          ? token.token.substring(0, 4) + '****' + token.token.slice(-4)
+          : token.token;
 
       return TemplateEngine.render('tpl-token-row', {
         id: token.id,
         description: token.description,
-        token: token.token,
+        token: token.anonymous ? '' : token.token,
         maskedToken: maskedToken,
-        statusClass: status.class,
+        statusClass: token.anonymous ? 'anonymous' : status.class,
+        rowClass: token.anonymous ? 'token-card-row--anonymous' : '',
         createdAt: createdAt,
         createdLabel: t('tokens.createdSuffix'),
         expiresAt: expiresAt,
@@ -535,7 +507,7 @@
       return `<span class="metric-value">${limit.toLocaleString()}</span>`;
     }
 
-    function parseMaxConcurrencyInput(rawValue) {
+    function parseNonNegativeIntInput(rawValue, errorKey) {
       const normalized = String(rawValue ?? '').trim();
       if (normalized === '') {
         return { value: 0 };
@@ -543,7 +515,7 @@
 
       const parsed = Number(normalized);
       if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
-        return { error: t('tokens.msg.maxConcurrencyInteger') };
+        return { error: t(errorKey) };
       }
 
       return { value: parsed };
@@ -607,14 +579,23 @@
       const streamCellClass = token.stream_count ? '' : ' mobile-empty-cell';
       const nonStreamCellClass = token.non_stream_count ? '' : ' mobile-empty-cell';
 
-      const maskedToken = token.token.length > 8
-        ? token.token.substring(0, 4) + '****' + token.token.slice(-4)
-        : token.token;
+      const maskedToken = token.anonymous
+        ? t('tokens.anonymousDisplay')
+        : token.token.length > 8
+          ? token.token.substring(0, 4) + '****' + token.token.slice(-4)
+          : token.token;
+      const rowClass = token.anonymous ? ' token-card-row--anonymous' : '';
+      const displayClass = token.anonymous ? 'anonymous' : status.class;
+      // 匿名通道行没有可出示的凭据：复制/试聊按钮整行略去
+      const copyBtnHtml = token.anonymous ? '' :
+        `<button class="btn-copy-token btn btn-secondary token-row-action-btn" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>`;
+      const playBtnHtml = token.anonymous ? '' :
+        `<button class="btn btn-secondary btn-play token-row-action-btn">${t('tokens.action.test')}</button>`;
 
       return `
-        <tr class="mobile-card-row token-card-row" data-token-id="${token.id}">
+        <tr class="mobile-card-row token-card-row${rowClass}" data-token-id="${token.id}">
           <td class="tokens-col-token" data-mobile-label="${t('tokens.table.token')}">
-            <div class="token-row-primary"><span class="token-display token-display-${status.class}">${escapeHtml(maskedToken)}</span></div>
+            <div class="token-row-primary"><span class="token-display token-display-${displayClass}">${escapeHtml(maskedToken)}</span></div>
             <div class="token-row-description">${escapeHtml(token.description)}</div>
             <div class="token-row-meta">${createdAt}${t('tokens.createdSuffix')} · ${expiresAt}</div>
           </td>
@@ -629,8 +610,8 @@
           <td class="tokens-col-last-used" data-mobile-label="${t('tokens.table.lastUsed')}">${lastUsed}</td>
           <td class="tokens-col-actions" data-mobile-label="${t('tokens.table.actions')}">
             <div class="token-row-actions">
-              <button class="btn-copy-token btn btn-secondary token-row-action-btn" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>
-              <button class="btn btn-secondary btn-play token-row-action-btn">${t('tokens.action.test')}</button>
+              ${copyBtnHtml}
+              ${playBtnHtml}
               <button class="btn btn-secondary btn-edit token-row-action-btn">${t('common.edit')}</button>
               <button class="btn btn-danger btn-delete token-row-action-btn">${t('common.delete')}</button>
             </div>
@@ -649,11 +630,16 @@
     function showCreateModal() {
       document.getElementById('tokenDescription').value = '';
       document.getElementById('tokenExpiry').value = 'never';
+      document.getElementById('token5hCostLimitUSD').value = 0;
       document.getElementById('tokenDailyCostLimitUSD').value = 0;
+      document.getElementById('tokenWeeklyCostLimitUSD').value = 0;
       document.getElementById('tokenMonthlyCostLimitUSD').value = 0;
       document.getElementById('tokenCostLimitUSD').value = 0;
       document.getElementById('tokenMaxConcurrency').value = 0;
+      document.getElementById('tokenMaxRPM').value = 0;
+      document.getElementById('tokenAllowedModels').value = '';
       document.getElementById('tokenActive').checked = true;
+      document.getElementById('tokenAnonymous').checked = false;
       document.getElementById('customExpiryContainer').style.display = 'none';
       document.getElementById('createModal').style.display = 'block';
     }
@@ -663,9 +649,11 @@
     }
 
     async function createToken() {
-      
+
+      const anonymous = document.getElementById('tokenAnonymous').checked;
+      // 匿名通道行没有明文可出示，描述缺省成 anonymous 即可
       const description = document.getElementById('tokenDescription').value.trim();
-      if (!description) {
+      if (!anonymous && !description) {
         window.showNotification(t('tokens.msg.enterDescription'), 'error');
         return;
       }
@@ -685,11 +673,14 @@
         }
       }
       const isActive = document.getElementById('tokenActive').checked;
+      const cost5hLimitUSD = parseFloat(document.getElementById('token5hCostLimitUSD').value) || 0;
       const dailyCostLimitUSD = parseFloat(document.getElementById('tokenDailyCostLimitUSD').value) || 0;
+      const weeklyCostLimitUSD = parseFloat(document.getElementById('tokenWeeklyCostLimitUSD').value) || 0;
       const monthlyCostLimitUSD = parseFloat(document.getElementById('tokenMonthlyCostLimitUSD').value) || 0;
       const costLimitUSD = parseFloat(document.getElementById('tokenCostLimitUSD').value) || 0;
-      const maxConcurrencyResult = parseMaxConcurrencyInput(document.getElementById('tokenMaxConcurrency').value);
-      if (dailyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
+      const maxConcurrencyResult = parseNonNegativeIntInput(document.getElementById('tokenMaxConcurrency').value, 'tokens.msg.maxConcurrencyInteger');
+      const maxRPMResult = parseNonNegativeIntInput(document.getElementById('tokenMaxRPM').value, 'tokens.msg.maxRPMInteger');
+      if (cost5hLimitUSD < 0 || dailyCostLimitUSD < 0 || weeklyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
         window.showNotification(t('tokens.msg.costLimitNegative'), 'error');
         return;
       }
@@ -697,7 +688,11 @@
         window.showNotification(maxConcurrencyResult.error, 'error');
         return;
       }
-      const maxConcurrency = maxConcurrencyResult.value;
+      if (maxRPMResult.error) {
+        window.showNotification(maxRPMResult.error, 'error');
+        return;
+      }
+      const allowedModels = parseModelInput(document.getElementById('tokenAllowedModels').value);
       try {
         const data = await fetchDataWithAuth(`${API_BASE}/auth-tokens`, {
           method: 'POST',
@@ -706,20 +701,27 @@
           },
           body: JSON.stringify({
             description,
+            anonymous,
             expires_at: expiresAt,
             is_active: isActive,
+            allowed_models: allowedModels,
+            cost_5h_limit_usd: cost5hLimitUSD,
             cost_daily_limit_usd: dailyCostLimitUSD,
+            cost_weekly_limit_usd: weeklyCostLimitUSD,
             cost_monthly_limit_usd: monthlyCostLimitUSD,
             cost_limit_usd: costLimitUSD,
-            max_concurrency: maxConcurrency
+            max_concurrency: maxConcurrencyResult.value,
+            max_rpm: maxRPMResult.value
           })
         });
 
         closeCreateModal();
-        document.getElementById('newTokenValue').value = data.token;
-        document.getElementById('tokenResultModal').style.display = 'block';
+        if (!anonymous && data.token) {
+          document.getElementById('newTokenValue').value = data.token;
+          document.getElementById('tokenResultModal').style.display = 'block';
+        }
         loadTokens();
-        window.showNotification(t('tokens.msg.createSuccess'), 'success');
+        window.showNotification(t(anonymous ? 'tokens.msg.anonymousCreateSuccess' : 'tokens.msg.createSuccess'), 'success');
       } catch (error) {
         console.error('Failed to create token:', error);
         window.showNotification(t('tokens.msg.createFailed') + ': ' + error.message, 'error');
@@ -748,7 +750,8 @@
       const token = allTokens.find(t => t.id === id);
       if (!token) return;
       document.getElementById('editTokenId').value = id;
-      document.getElementById('editTokenValue').value = token.token || '';
+      // 匿名通道行没有可出示的凭据，令牌位显示占位符而非存储哈希
+      document.getElementById('editTokenValue').value = token.anonymous ? t('tokens.anonymousDisplay') : (token.token || '');
       document.getElementById('editTokenDescription').value = token.description;
       document.getElementById('editTokenActive').checked = token.is_active;
       const expiryTypeInput = document.getElementById('editTokenExpiry');
@@ -764,12 +767,15 @@
       }
       initialEditExpiryState = { type: expiryTypeInput.value, value: customExpiryInput.value };
 
+      fillCostLimitField('edit5hCostLimitUSD', 'edit5hCostUsedDisplay', token.cost_5h_limit_usd, token.cost_5h_used_usd);
       fillCostLimitField('editDailyCostLimitUSD', 'editDailyCostUsedDisplay', token.cost_daily_limit_usd, token.cost_daily_used_usd);
+      fillCostLimitField('editWeeklyCostLimitUSD', 'editWeeklyCostUsedDisplay', token.cost_weekly_limit_usd, token.cost_weekly_used_usd);
       fillCostLimitField('editMonthlyCostLimitUSD', 'editMonthlyCostUsedDisplay', token.cost_monthly_limit_usd, token.cost_monthly_used_usd);
       fillCostLimitField('editCostLimitUSD', 'editCostUsedDisplay', token.cost_limit_usd, token.cost_used_usd);
 
       const maxConcurrencyInput = document.getElementById('editMaxConcurrency');
       maxConcurrencyInput.value = token.max_concurrency || 0;
+      document.getElementById('editMaxRPM').value = token.max_rpm || 0;
 
       // 初始化模型限制状态（2026-01新增）
       editAllowedModels = (token.allowed_models || []).slice();
@@ -802,16 +808,23 @@
       const description = document.getElementById('editTokenDescription').value.trim();
       const isActive = document.getElementById('editTokenActive').checked;
       const expiryType = document.getElementById('editTokenExpiry').value;
+      const cost5hLimitUSD = parseFloat(document.getElementById('edit5hCostLimitUSD').value) || 0;
       const dailyCostLimitUSD = parseFloat(document.getElementById('editDailyCostLimitUSD').value) || 0;
+      const weeklyCostLimitUSD = parseFloat(document.getElementById('editWeeklyCostLimitUSD').value) || 0;
       const monthlyCostLimitUSD = parseFloat(document.getElementById('editMonthlyCostLimitUSD').value) || 0;
       const costLimitUSD = parseFloat(document.getElementById('editCostLimitUSD').value) || 0;
-      const maxConcurrencyResult = parseMaxConcurrencyInput(document.getElementById('editMaxConcurrency').value);
-      if (dailyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
+      const maxConcurrencyResult = parseNonNegativeIntInput(document.getElementById('editMaxConcurrency').value, 'tokens.msg.maxConcurrencyInteger');
+      const maxRPMResult = parseNonNegativeIntInput(document.getElementById('editMaxRPM').value, 'tokens.msg.maxRPMInteger');
+      if (cost5hLimitUSD < 0 || dailyCostLimitUSD < 0 || weeklyCostLimitUSD < 0 || monthlyCostLimitUSD < 0 || costLimitUSD < 0) {
         window.showNotification(t('tokens.msg.costLimitNegative'), 'error');
         return;
       }
       if (maxConcurrencyResult.error) {
         window.showNotification(maxConcurrencyResult.error, 'error');
+        return;
+      }
+      if (maxRPMResult.error) {
+        window.showNotification(maxRPMResult.error, 'error');
         return;
       }
       const maxConcurrency = maxConcurrencyResult.value;
@@ -846,10 +859,13 @@
             is_active: isActive,
             ...expiryUpdate,
             allowed_models: editAllowedModels,  // 2026-01新增：模型限制
+            cost_5h_limit_usd: cost5hLimitUSD,
             cost_daily_limit_usd: dailyCostLimitUSD,
+            cost_weekly_limit_usd: weeklyCostLimitUSD,
             cost_monthly_limit_usd: monthlyCostLimitUSD,
             cost_limit_usd: costLimitUSD,        // 总限额
-            max_concurrency: maxConcurrency      // 2026-04新增：并发上限
+            max_concurrency: maxConcurrency,     // 2026-04新增：并发上限
+            max_rpm: maxRPMResult.value
           })
         });
         closeEditModal();

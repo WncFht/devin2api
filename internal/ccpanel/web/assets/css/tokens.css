@@ -1299,60 +1299,23 @@
       }
     }
 
-    /* 主密钥卡：钉在令牌表上方，标示 config 管理的那把钥匙 */
-    .master-key-card {
-      padding: var(--space-4) var(--space-5);
-      margin-bottom: var(--space-4);
-      border-left: 3px solid var(--primary-500);
+    /* 匿名通道行：没有可出示的凭据，复制/试聊按钮没有意义 */
+    .token-card-row--anonymous .btn-copy-token,
+    .token-card-row--anonymous .btn-play {
+      display: none;
     }
-    .master-key-card--warn {
-      border-left-color: var(--warning-500);
-    }
-    .master-key-row {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .master-key-badge {
-      display: inline-block;
-      padding: 1px 8px;
-      border-radius: 6px;
-      font-size: 11px;
-      font-weight: 600;
-      background: rgba(59, 130, 246, 0.15);
-      color: var(--primary-500);
-      letter-spacing: 0.04em;
-    }
-    .master-key-title {
-      font-weight: 600;
-      color: var(--neutral-900);
-    }
-    .master-key-status {
-      font-size: 12px;
-      padding: 1px 8px;
-      border-radius: 10px;
-    }
-    .master-key-status.is-on {
-      background: var(--success-50);
-      color: var(--success-800);
-    }
-    .master-key-status.is-off {
-      background: rgba(245, 158, 11, 0.15);
-      color: var(--warning-500);
-    }
-    .master-key-hash {
-      font-size: 12px;
+    .token-display-anonymous {
+      font-style: italic;
       color: var(--neutral-700);
-      background: var(--surface-bg-muted);
-      padding: 1px 8px;
-      border-radius: 6px;
     }
-    .master-key-desc {
-      margin: 6px 0 0;
+    /* 空仓 = /v1 开放模式，安全相关状态在空态里显式亮出 */
+    .tokens-empty-open-warning {
+      margin: 4px 0 0;
       font-size: 13px;
-      color: var(--neutral-700);
-    }
-    .master-key-card--warn .master-key-desc {
       color: var(--warning-500);
+    }
+    .token-anonymous-hint {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--neutral-700);
     }
