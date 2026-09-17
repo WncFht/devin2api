@@ -302,8 +302,138 @@ func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
 	h.warmStats = fn
 }
 
-// Register 把面板路由挂到 mux。/web、/login、/logout、/public 为
-// 公开路径（页面自身在浏览器侧做登录门）；/dashboard、/admin 需 Bearer。
+// panelRoute 是路由表的一行：method+pattern 是 chi 挂载键，handler 是含
+// 鉴权包裹的最终形态。docPath/doc 均非空时该端点进 /admin/api 自描述
+// 目录——docPath 可与挂载 pattern 不同（目录里给带 query 提示的展示形）。
+type panelRoute struct {
+	method  string
+	pattern string
+	handler http.HandlerFunc
+	docPath string
+	doc     string
+}
+
+// routes 是面板路由的唯一事实表：Register 按它挂载，/admin/api 目录按它
+// 生成——新增端点只登记一处，挂载集与自描述文档不会漂移。
+// /admin 段按目录展示顺序排（status/accounts/logs 等排障链路在前）；
+// /web、/login、/logout、/public 为公开路径（页面自身在浏览器侧做登录门），
+// /dashboard、/admin 需 Bearer。
+func (h *Handler) routes() []panelRoute {
+	A := h.withAuth
+	W := h.withWebAuth
+	return []panelRoute{
+		{http.MethodGet, "/web/*", h.serveStatic, "", ""},
+		{http.MethodPost, "/login", h.handleLogin, "", ""},
+		{http.MethodPost, "/logout", h.handleLogout, "", ""},
+		{http.MethodGet, "/public/version", h.publicVersion, "", ""},
+		{http.MethodGet, "/public/protocols", h.publicProtocols, "", ""},
+
+		{http.MethodGet, "/dashboard/session", W(h.dashboardSession), "", ""},
+		{http.MethodGet, "/dashboard/summary", W(h.dashboardSummary), "", ""},
+		{http.MethodGet, "/dashboard/metrics", W(h.dashboardMetrics), "", ""},
+		{http.MethodGet, "/dashboard/logs", W(h.dashboardLogs), "", ""},
+		{http.MethodGet, "/dashboard/logs/bootstrap", W(h.dashboardLogsBootstrap), "", ""},
+		{http.MethodGet, "/dashboard/stats", W(h.dashboardStats), "", ""},
+		{http.MethodGet, "/dashboard/stats/filter-options", W(h.dashboardStatsFilterOptions), "", ""},
+		{http.MethodGet, "/dashboard/models", W(h.dashboardModels), "", ""},
+
+		{http.MethodGet, "/admin/status", A(h.adminStatus), "/admin/status",
+			"账户/套餐/容量/渠道/模型状态告警 + devin.aliases 校验（alias_targets_absent 目标缺席 / alias_shadows_catalog 遮蔽真 uid）"},
+		{http.MethodGet, "/admin/models", A(h.dashboardModels), "/admin/models",
+			"模型目录含能力位与价格"},
+		{http.MethodGet, "/admin/runtime-metrics", A(h.adminRuntimeMetrics), "/admin/runtime-metrics",
+			"进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + gate 速率闸门状态 + warm 前缀保温簿记"},
+		{http.MethodGet, "/admin/accounts", A(h.adminAccounts), "/admin/accounts",
+			"号池账号聚合视图：source(config|panel|tombstoned)+credential+disabled+token_sha+lane/gate/warm 快照+inflight+quota 摘要+usage(P2)"},
+		{http.MethodPost, "/admin/accounts", A(h.adminCreateAccount), "/admin/accounts",
+			"建号 {name, token?|credentials_file?, disabled?}；整表校验失败 400，重名/墓碑名 409"},
+		{http.MethodPut, "/admin/accounts/{name}", A(h.adminUpdateAccount), "/admin/accounts/{name}",
+			"改凭据/停启用 {token?,credentials_file?,disabled?} 指针语义；config 名首写自动建覆盖行；tombstoned 409 须先 restore"},
+		{http.MethodDelete, "/admin/accounts/{name}", A(h.adminDeleteAccount), "/admin/accounts/{name}",
+			"config 名置墓碑（可 restore，覆盖保留复活）；panel 名物理删"},
+		{http.MethodPost, "/admin/accounts/{name}/restore", A(h.adminRestoreAccount), "/admin/accounts/{name}/restore",
+			"墓碑还活：deleted=0 重推回池；活号 409"},
+		{http.MethodPost, "/admin/accounts/{name}/clear-cooldown", A(h.adminClearAccountCooldown), "/admin/accounts/{name}/clear-cooldown",
+			"清池侧两档冷却（auth+unhealthy）立即回候选；不动 gate 闩与 last_failure 证据"},
+		{http.MethodPost, "/admin/accounts/{name}/quota/refresh", A(h.adminRefreshAccountQuota), "/admin/accounts/{name}/quota/refresh",
+			"即采一次该号配额（不经 lane；disabled 可刷 tombstoned 404）；502 上游失败"},
+		{http.MethodGet, "/admin/accounts/cli-credentials", A(h.adminCLICredentials), "/admin/accounts/cli-credentials",
+			"Devin CLI 凭证发现链探针 {available,path,parsable,suggested_name}；不回传内容"},
+		{http.MethodGet, "/admin/config", A(h.adminConfigCurrent), "/admin/config",
+			"脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
+		{http.MethodPost, "/admin/config/reload", A(h.adminConfigReload), "/admin/config/reload",
+			"重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
+		{http.MethodGet, "/admin/usage", A(h.adminUsage), "/admin/usage",
+			"logs 表聚合：今日/窗口累计、model_days 模型×日矩阵、按模型/按 key、错误阶段、10 分钟粒度趋势、p50/p95/p99、目录价估算成本"},
+		{http.MethodGet, "/admin/logs", A(h.dashboardLogs), "/admin/logs?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=&until=",
+			"最近请求（新在前）；q 子串（含 error_message）或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；since/until 钉时间窗；has_more 提示尾部窗外仍有更早历史，rejects 附管线前拒绝环（401/429 不进索引）"},
+		{http.MethodGet, "/admin/logs/matrix", A(h.adminLogsMatrix), "/admin/logs/matrix?since=",
+			"健康矩阵紧凑条目：只投影分桶与归因所需字段，不分页（扫描上限 2000）；truncated 为真表示 since 窗口覆盖不完整"},
+		{http.MethodGet, "/admin/logs/export", A(h.adminLogsExport), "/admin/logs/export?format=json|csv&筛选参数同上",
+			"导出筛选后的请求摘要（CSV 或 JSON 数组）；触及扫描上限带 X-Truncated: true"},
+		{http.MethodGet, "/admin/logs/bootstrap", A(h.dashboardLogsBootstrap), "/admin/logs/bootstrap",
+			"日志页筛选初始化：模型清单、状态码观察值等一次拉齐"},
+		{http.MethodGet, "/admin/stats", A(h.dashboardStats), "/admin/stats?range=",
+			"面板统计聚合（rpm_stats/按模型/按令牌用量等，dashboardStats 同形）"},
+		{http.MethodGet, "/admin/stats/filter-options", A(h.dashboardStatsFilterOptions), "/admin/stats/filter-options",
+			"stats 页筛选项候选（模型名等）"},
+		{http.MethodGet, "/admin/metrics", A(h.dashboardMetrics), "/admin/metrics",
+			"dashboardMetrics 同形：概要计数与速率"},
+		{http.MethodGet, "/admin/active-requests", A(h.adminActiveRequests), "/admin/active-requests",
+			"进行中请求活快照：阶段状态、模型、已下发字节、已写文件、丢弃数"},
+		{http.MethodGet, "/admin/active-requests/{id}/debug-log", A(h.adminActiveRequestDebugLog), "/admin/active-requests/{id}/debug-log",
+			"进行中请求的调试投影（目录已建即按 debug-logs/{id} 口径投影）"},
+		{http.MethodGet, "/admin/debug-logs/{id}", A(h.adminDebugLog), "/admin/debug-logs/{id}",
+			"单请求 meta.json + 文件清单；id 是日志行自增 id（迁移前的 started_at 毫秒戳链接仍可解析）"},
+		{http.MethodGet, "/admin/debug-logs/{id}/merged", A(h.adminDebugLogMerged), "/admin/debug-logs/{id}/merged",
+			"把 06-http-response.jsonl 的 SSE 帧合并成可读的最终响应（reasoning/content/tools）"},
+		{http.MethodPost, "/admin/debug-logs/merged-response", A(h.adminMergedResponse), "/admin/debug-logs/merged-response",
+			"上传体合并版：body {\"resp_body\"}（前端可 gzip），与 GET merged 共用同一合并器"},
+		{http.MethodGet, "/admin/debug-logs/{id}/file/*", A(h.adminDebugLogFile), "/admin/debug-logs/{id}/file/{name}",
+			"读取请求目录内文件（顶层或 attachments/），超 4MB 截断；?raw=1 原样回字节（CSP sandbox + nosniff）"},
+		{http.MethodPost, "/admin/active-requests/{id}/abort", A(h.adminAbortActiveRequest), "/admin/active-requests/{id}/abort",
+			"中断进行中请求（取消 ctx）；无活跃请求时 404"},
+		{http.MethodGet, "/admin/process-log", A(h.adminProcessLog), "/admin/process-log?offset=",
+			"进程 stderr 日志尾部；offset>0 增量拉取，响应带 next_offset"},
+		{http.MethodGet, "/admin/quota", A(h.adminQuota), "/admin/quota",
+			"配额历史快照（quota_samples 表）+ 按燃烧速率外推的耗尽时间"},
+		{http.MethodGet, "/admin/settings", A(h.adminListSettings), "/admin/settings",
+			"运行时设置全表：键、当前值、默认、是否有面板覆盖"},
+		{http.MethodGet, "/admin/settings/{key}", A(h.adminGetSetting), "/admin/settings/{key}",
+			"单个运行时设置（含覆盖来源标记）"},
+		{http.MethodPut, "/admin/settings/{key}", A(h.adminUpdateSetting), "/admin/settings/{key}",
+			"运行时设置覆盖（debug.enabled/保留策略等），body {\"value\": \"...\"}；对 config.yaml 恒赢"},
+		{http.MethodPost, "/admin/settings/{key}/reset", A(h.adminResetSetting), "/admin/settings/{key}/reset",
+			"删除该键的面板覆盖，回落 config.yaml/默认值"},
+		{http.MethodPost, "/admin/settings/batch", A(h.adminBatchUpdateSettings), "/admin/settings/batch",
+			"批量设置覆盖，body {\"key\": \"value\", ...}"},
+		{http.MethodGet, "/admin/auth-tokens", A(h.adminListAuthTokens), "/admin/auth-tokens?range=",
+			"下游令牌表 + range 内时间窗聚合统计（覆盖累计字段）；行含 anonymous 标记匿名通道"},
+		{http.MethodPost, "/admin/auth-tokens", A(h.adminCreateAuthToken), "/admin/auth-tokens",
+			"创建下游令牌（并发槽/RPM/5h|日|周|月费用窗口/模型白名单），明文仅此一次返回；anonymous=true 建匿名通道行（无凭据准入，不返回明文）"},
+		{http.MethodPut, "/admin/auth-tokens/{id}", A(h.adminUpdateAuthToken), "/admin/auth-tokens/{id}",
+			"更新令牌（启用/各窗口限额/max_rpm/白名单等）"},
+		{http.MethodDelete, "/admin/auth-tokens/{id}", A(h.adminDeleteAuthToken), "/admin/auth-tokens/{id}",
+			"删除令牌（幂等）"},
+		{http.MethodGet, "/admin/model-registry", A(h.adminModelRegistry), "/admin/model-registry",
+			"模型注册表：启用/停用、redirect_model（别名解析前改写）、覆盖标记；各行 catalog 字段透出目录价"},
+		{http.MethodPut, "/admin/model-registry", A(h.adminPutModel), "/admin/model-registry",
+			"写注册条目（启用/禁用/redirect_model）"},
+		{http.MethodDelete, "/admin/model-registry", A(h.adminDeleteModel), "/admin/model-registry",
+			"删注册条目"},
+		{http.MethodGet, "/admin/model-pricing", A(h.adminModelPricing), "/admin/model-pricing?model=",
+			"单模型目录价投影（found=false 表示无目录价）"},
+		{http.MethodPost, "/admin/model-test", A(h.adminModelTest), "/admin/model-test",
+			"模型连通性探针（结果记 log_source=manual_test 的日志行）"},
+		{http.MethodPost, "/admin/model-chat", A(h.adminModelChat), "/admin/model-chat",
+			"面板内对话式模型测试（同 manual_test 归因）"},
+		{http.MethodPost, "/admin/update/check", A(h.adminUpdateCheck), "/admin/update/check",
+			"检查上游 release 是否有新版本"},
+		{http.MethodGet, "/admin/api", A(h.adminAPIIndex), "", ""},
+	}
+}
+
+// Register 把 routes 表挂到 mux（method→mux 动词映射直译）。
 func (h *Handler) Register(mux interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
 	Post(pattern string, handlerFn http.HandlerFunc)
@@ -311,67 +441,14 @@ func (h *Handler) Register(mux interface {
 	Patch(pattern string, handlerFn http.HandlerFunc)
 	Delete(pattern string, handlerFn http.HandlerFunc)
 }) {
-	mux.Get("/web/*", h.serveStatic)
-	mux.Post("/login", h.handleLogin)
-	mux.Post("/logout", h.handleLogout)
-
-	mux.Get("/public/version", h.publicVersion)
-	mux.Get("/public/protocols", h.publicProtocols)
-
-	mux.Get("/dashboard/session", h.withWebAuth(h.dashboardSession))
-	mux.Get("/dashboard/summary", h.withWebAuth(h.dashboardSummary))
-	mux.Get("/dashboard/metrics", h.withWebAuth(h.dashboardMetrics))
-	mux.Get("/dashboard/logs", h.withWebAuth(h.dashboardLogs))
-	mux.Get("/dashboard/logs/bootstrap", h.withWebAuth(h.dashboardLogsBootstrap))
-	mux.Get("/dashboard/stats", h.withWebAuth(h.dashboardStats))
-	mux.Get("/dashboard/stats/filter-options", h.withWebAuth(h.dashboardStatsFilterOptions))
-	mux.Get("/dashboard/models", h.withWebAuth(h.dashboardModels))
-
-	mux.Get("/admin/active-requests", h.withAuth(h.adminActiveRequests))
-	mux.Get("/admin/active-requests/{id}/debug-log", h.withAuth(h.adminActiveRequestDebugLog))
-	mux.Post("/admin/active-requests/{id}/abort", h.withAuth(h.adminAbortActiveRequest))
-	mux.Get("/admin/logs", h.withAuth(h.dashboardLogs))
-	mux.Get("/admin/logs/bootstrap", h.withAuth(h.dashboardLogsBootstrap))
-	mux.Get("/admin/logs/export", h.withAuth(h.adminLogsExport))
-	mux.Get("/admin/logs/matrix", h.withAuth(h.adminLogsMatrix))
-	mux.Post("/admin/debug-logs/merged-response", h.withAuth(h.adminMergedResponse))
-	mux.Get("/admin/debug-logs/{id}", h.withAuth(h.adminDebugLog))
-	mux.Get("/admin/debug-logs/{id}/file/*", h.withAuth(h.adminDebugLogFile))
-	mux.Get("/admin/debug-logs/{id}/merged", h.withAuth(h.adminDebugLogMerged))
-	mux.Get("/admin/metrics", h.withAuth(h.dashboardMetrics))
-	mux.Get("/admin/stats", h.withAuth(h.dashboardStats))
-	mux.Get("/admin/stats/filter-options", h.withAuth(h.dashboardStatsFilterOptions))
-	mux.Get("/admin/settings", h.withAuth(h.adminListSettings))
-	mux.Get("/admin/settings/{key}", h.withAuth(h.adminGetSetting))
-	mux.Put("/admin/settings/{key}", h.withAuth(h.adminUpdateSetting))
-	mux.Post("/admin/settings/{key}/reset", h.withAuth(h.adminResetSetting))
-	mux.Post("/admin/settings/batch", h.withAuth(h.adminBatchUpdateSettings))
-	mux.Post("/admin/update/check", h.withAuth(h.adminUpdateCheck))
-	mux.Get("/admin/auth-tokens", h.withAuth(h.adminListAuthTokens))
-	mux.Post("/admin/auth-tokens", h.withAuth(h.adminCreateAuthToken))
-	mux.Put("/admin/auth-tokens/{id}", h.withAuth(h.adminUpdateAuthToken))
-	mux.Delete("/admin/auth-tokens/{id}", h.withAuth(h.adminDeleteAuthToken))
-	mux.Get("/admin/models", h.withAuth(h.dashboardModels))
-	mux.Get("/admin/model-registry", h.withAuth(h.adminModelRegistry))
-	mux.Post("/admin/model-test", h.withAuth(h.adminModelTest))
-	mux.Post("/admin/model-chat", h.withAuth(h.adminModelChat))
-	mux.Put("/admin/model-registry", h.withAuth(h.adminPutModel))
-	mux.Delete("/admin/model-registry", h.withAuth(h.adminDeleteModel))
-	mux.Get("/admin/model-pricing", h.withAuth(h.adminModelPricing))
-	mux.Get("/admin/accounts", h.withAuth(h.adminAccounts))
-	mux.Post("/admin/accounts", h.withAuth(h.adminCreateAccount))
-	mux.Get("/admin/accounts/cli-credentials", h.withAuth(h.adminCLICredentials))
-	mux.Put("/admin/accounts/{name}", h.withAuth(h.adminUpdateAccount))
-	mux.Delete("/admin/accounts/{name}", h.withAuth(h.adminDeleteAccount))
-	mux.Post("/admin/accounts/{name}/restore", h.withAuth(h.adminRestoreAccount))
-	mux.Post("/admin/accounts/{name}/clear-cooldown", h.withAuth(h.adminClearAccountCooldown))
-	mux.Post("/admin/accounts/{name}/quota/refresh", h.withAuth(h.adminRefreshAccountQuota))
-	mux.Get("/admin/runtime-metrics", h.withAuth(h.adminRuntimeMetrics))
-	mux.Get("/admin/quota", h.withAuth(h.adminQuota))
-	mux.Get("/admin/status", h.withAuth(h.adminStatus))
-	mux.Get("/admin/api", h.withAuth(h.adminAPIIndex))
-	mux.Get("/admin/config", h.withAuth(h.adminConfigCurrent))
-	mux.Post("/admin/config/reload", h.withAuth(h.adminConfigReload))
-	mux.Get("/admin/process-log", h.withAuth(h.adminProcessLog))
-	mux.Get("/admin/usage", h.withAuth(h.adminUsage))
+	mount := map[string]func(string, http.HandlerFunc){
+		http.MethodGet:    mux.Get,
+		http.MethodPost:   mux.Post,
+		http.MethodPut:    mux.Put,
+		http.MethodPatch:  mux.Patch,
+		http.MethodDelete: mux.Delete,
+	}
+	for _, rt := range h.routes() {
+		mount[rt.method](rt.pattern, rt.handler)
+	}
 }
