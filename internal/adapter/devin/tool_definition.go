@@ -251,7 +251,7 @@ func conditionalRequiredSpec(schema json.RawMessage) (string, []string, bool) {
 			doc, _ = property["title"].(string)
 		}
 		doc = strings.Join(strings.Fields(doc), " ")
-		if !(required[name] || claimsRequired(doc)) {
+		if !required[name] && !claimsRequired(doc) {
 			continue
 		}
 		clause := ""
