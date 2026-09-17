@@ -39,12 +39,37 @@ type ServerConfig struct {
 	MaxConcurrency int `yaml:"max_concurrency"`
 }
 
+// DevinAccountConfig 是上游账号池的一个号：name 是它在日志、闸门状态
+// 文件与面板里的身份；token 给字面量凭据，credentials_file 指向
+// Devin CLI credentials.toml（解析 windsurf_api_key），两者至少给一个；
+// 都给时 token 作初始值、credentials_file 作 unauthenticated 自愈来源。
+type DevinAccountConfig struct {
+	Name            string `yaml:"name"`
+	Token           string `yaml:"token"`
+	CredentialsFile string `yaml:"credentials_file"`
+}
+
+// devinAccountNamePattern 约束账号名字符集：名字要进 gate-state-<name>.json
+// 文件名与日志字段，限定字母数字连字符下划线。
+var devinAccountNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+
+// DefaultAccountName 是隐式单 lane（devin.token 单号形态）的账号名：
+// 日志/索引的 account 归因字段与面板逐账号视图都拿它当身份。
+// accounts 模式禁用作显式账号名——同名会撞上同名的存量 lane，
+// reload 差集把异号同名当「同一 lane 换 token」复用，warm 谱系与
+// assignment 凭据跨号渗漏。
+const DefaultAccountName = "default"
+
 // DevinConfig 保存 Devin Connect 上游调用配置。
 type DevinConfig struct {
 	// BaseURL 是 Devin Connect 服务的基础地址。
 	BaseURL string `yaml:"base_url"`
-	// Token 是 Devin session token；不会写入日志。
+	// Token 是 Devin session token；不会写入日志。与 Accounts 互斥——
+	// 单号简写只在没有账号池时生效。
 	Token string `yaml:"token"`
+	// Accounts 声明多上游账号池；非空时自动发现链（env/credentials.toml）
+	// 整体关闭，凭据来源只剩各条目自己的 token/credentials_file。
+	Accounts []DevinAccountConfig `yaml:"accounts"`
 	// Model 是 Devin chat model UID。
 	Model string `yaml:"model"`
 	// Proxy 是可选的 HTTP/HTTPS/SOCKS5 代理地址；为空时直连或走系统环境变量。
@@ -182,14 +207,16 @@ func Load(path string) (Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
-	if err := config.Validate(); err != nil {
+	if err := config.Validate(filepath.Dir(path)); err != nil {
 		return Config{}, fmt.Errorf("validate config %q: %w", path, err)
 	}
 	return config, nil
 }
 
-// Validate 检查配置中的必填项，并设置默认值。
-func (config *Config) Validate() error {
+// Validate 检查配置中的必填项，并设置默认值。configDir 是配置文件所在
+// 目录：accounts 的相对 credentials_file 以它为锚（launchd 下 CWD=/，
+// 相对路径不能以进程 CWD 解析）。
+func (config *Config) Validate(configDir string) error {
 	if config.Server.Listen == "" {
 		return errors.New("server.listen is required")
 	}
@@ -227,11 +254,87 @@ func (config *Config) Validate() error {
 		return err
 	}
 	config.Devin.Aliases = aliases
-	// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
-	if strings.TrimSpace(config.Devin.Token) == "" {
-		config.Devin.Token = ResolveDevinToken()
+	if err := config.Devin.resolveAccounts(configDir); err != nil {
+		return err
 	}
 	return nil
+}
+
+// resolveAccounts 校验并落实账号池声明：accounts 与 token 互斥；每个账号
+// 必须带合法且唯一的 name、至少一种凭据来源；credentials_file 在加载期
+// 就必须能解出 key（路径笔误不该静默产出一个死 lane）。同一有效 token
+// 或同一 credentials_file 被两个条目引用等于同一账号进池两次——限流
+// 簿记会各自按满额计数、合并超发，按配置错误拒绝。
+// accounts 非空时单号字段与自动发现链整体不生效。
+func (devin *DevinConfig) resolveAccounts(configDir string) error {
+	if len(devin.Accounts) == 0 {
+		// devin.token 为空时按优先级自动发现：环境变量 → Devin CLI 凭证文件。
+		if strings.TrimSpace(devin.Token) == "" {
+			devin.Token = ResolveDevinToken()
+		}
+		return nil
+	}
+	if strings.TrimSpace(devin.Token) != "" {
+		return errors.New("devin.token and devin.accounts are mutually exclusive")
+	}
+	seenNames := make(map[string]bool, len(devin.Accounts))
+	seenTokens := make(map[string]string, len(devin.Accounts))
+	seenFiles := make(map[string]string, len(devin.Accounts))
+	for index := range devin.Accounts {
+		account := &devin.Accounts[index]
+		account.Name = strings.TrimSpace(account.Name)
+		if !devinAccountNamePattern.MatchString(account.Name) {
+			return fmt.Errorf("devin.accounts[%d]: name must match %s", index, devinAccountNamePattern)
+		}
+		if account.Name == DefaultAccountName {
+			return fmt.Errorf("devin.accounts[%d]: name %q is reserved for the implicit single-account lane", index, account.Name)
+		}
+		if seenNames[account.Name] {
+			return fmt.Errorf("devin.accounts[%d]: duplicate name %q", index, account.Name)
+		}
+		seenNames[account.Name] = true
+		account.Token = strings.TrimSpace(account.Token)
+		account.CredentialsFile = strings.TrimSpace(account.CredentialsFile)
+		if account.CredentialsFile != "" {
+			// 锚定到配置文件目录：launchd 下 CWD=/，相对路径按进程
+			// CWD 解析必死；~/ 展开顺手做掉（用户自然写法）。
+			path := expandHomeDir(account.CredentialsFile)
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(configDir, path)
+			}
+			account.CredentialsFile = filepath.Clean(path)
+			if prior, dup := seenFiles[account.CredentialsFile]; dup {
+				return fmt.Errorf("devin.accounts[%d]: credentials_file already used by account %q", index, prior)
+			}
+			seenFiles[account.CredentialsFile] = account.Name
+			resolved, err := readCredentialsFile(account.CredentialsFile)
+			if err != nil {
+				return fmt.Errorf("devin.accounts[%d]: credentials_file %q: %w", index, account.CredentialsFile, err)
+			}
+			if account.Token == "" {
+				account.Token = resolved
+			}
+		}
+		if account.Token == "" {
+			return fmt.Errorf("devin.accounts[%d]: one of token/credentials_file is required", index)
+		}
+		if prior, dup := seenTokens[account.Token]; dup {
+			return fmt.Errorf("devin.accounts[%d]: token duplicates account %q", index, prior)
+		}
+		seenTokens[account.Token] = account.Name
+	}
+	return nil
+}
+
+// expandHomeDir 展开路径开头的 ~/（Go 不做 shell 式 ~ 展开，配置里
+// 写 ~/.local/share/... 是 Devin CLI 凭证文件的自然写法）。
+func expandHomeDir(path string) string {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
 }
 
 // NormalizeAliases 归一化 devin.aliases：键与目标去空白，拒绝空键、
@@ -373,15 +476,32 @@ func ResolveDevinToken() string {
 		}
 	}
 	for _, path := range devinCredentialsPaths() {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
-			return strings.TrimSpace(string(match[1]))
+		if token := TokenFromCredentialsFile(path); token != "" {
+			return token
 		}
 	}
 	return ""
+}
+
+// TokenFromCredentialsFile 从一份 credentials.toml 解出 windsurf_api_key；
+// 文件不可读或无该键返回空串。账号池 TokenSource 与自动发现链共用这一
+// 解析（自愈重读场景下区分错误类型没有额外动作，故吞掉）。
+func TokenFromCredentialsFile(path string) string {
+	token, _ := readCredentialsFile(path)
+	return token
+}
+
+// readCredentialsFile 同 TokenFromCredentialsFile 但保留错误区分：
+// 加载期校验要把「文件不存在/不可读」与「文件在但没该键」分开报错。
+func readCredentialsFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if match := devinCredentialsTokenPattern.FindSubmatch(data); len(match) == 2 {
+		return strings.TrimSpace(string(match[1])), nil
+	}
+	return "", errors.New("no windsurf_api_key")
 }
 
 // devinCredentialsPaths 返回 Devin CLI credentials.toml 的候选位置。

@@ -42,7 +42,13 @@ type Handler struct {
 
 	// tokenFunc 每次求值返回当前上游凭据——adapter 的 unauthenticated
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
+	// 号池下它是首号 lane 的凭据源：seat/状态类上游调用 MVP 绑首号。
 	tokenFunc func() string
+	// poolTokenFuncs 返回号池全部 lane 的凭据源（按账号名索引）：
+	// maskToken 的脱敏环与 quota 逐账号采样都靠它收编各号当前
+	// token——漏遮任一号的凭据都是日志泄露。注函数而非快照：
+	// 热更增删 lane 后读侧每次求值拿到当前集合。nil 视为无池。
+	poolTokenFuncs func() map[string]func() string
 	// upstreamPtr 持有当前生效的上游调用束（connect client、裸 transport
 	// 与归一化 baseURL 固化在同一份 base_url/proxy/force_http1 上）：
 	// endpoint 配置热应用时 SetUpstream 整体重建、原子换指针，
@@ -79,6 +85,10 @@ type Handler struct {
 	metrics *obs.Metrics
 	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
 	gateStats func() devin.GateStats
+	// accountGateStats/accountWarmStats 返回逐账号闸门/保温快照
+	// （按账号名索引）；nil 时 runtime-metrics 不投 accounts 组。
+	accountGateStats func() map[string]devin.GateStats
+	accountWarmStats func() map[string]devin.WarmStats
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
@@ -173,6 +183,24 @@ func (h *Handler) passwordSnapshot() (string, [32]byte) {
 // SetGateStats 注入速率闸门快照源（runtime-metrics 的 gate 组）。
 func (h *Handler) SetGateStats(fn func() devin.GateStats) {
 	h.gateStats = fn
+}
+
+// SetAccountGateStats 注入逐账号闸门快照源（runtime-metrics 的
+// accounts 组按号透出；nil 时该组缺席）。
+func (h *Handler) SetAccountGateStats(fn func() map[string]devin.GateStats) {
+	h.accountGateStats = fn
+}
+
+// SetAccountWarmStats 注入逐账号保温簿记源（accounts 组按号透出）。
+func (h *Handler) SetAccountWarmStats(fn func() map[string]devin.WarmStats) {
+	h.accountWarmStats = fn
+}
+
+// SetPoolTokenFuncs 注入号池凭据源读取函数（按账号名索引的 map）：
+// maskToken 的脱敏环与 quota 逐账号采样共用这份清单。每次求值重取
+// 当前 lane 集合，账号热增删后无需重注册。
+func (h *Handler) SetPoolTokenFuncs(fn func() map[string]func() string) {
+	h.poolTokenFuncs = fn
 }
 
 // SetConfigOps 注入配置自省与热重载操作面（/admin/config*）。

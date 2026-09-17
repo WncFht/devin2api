@@ -148,6 +148,11 @@ type ActiveRequest struct {
 	Retries int `json:"retries,omitempty"`
 	// LastRetryCause 是最近一次重发的触发原因。
 	LastRetryCause string `json:"last_retry_cause,omitempty"`
+	// Account 是已选定服务本请求的上游账号（号池 lane 名）；上游请求
+	// 尚未发出或还在 failover 途中时为空。
+	Account string `json:"account,omitempty"`
+	// AccountSwitches 是至今发生的号池 failover 换号次数（失败尝试数）。
+	AccountSwitches int `json:"account_switches,omitempty"`
 	// StartedAt 是请求进入时间。
 	StartedAt time.Time `json:"started_at"`
 	// ElapsedMS 是快照时刻相对进入时间的毫秒数。

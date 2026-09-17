@@ -184,13 +184,18 @@ func usage() {
 
 // resolveToken 解析上游凭据：DEVIN_TOKEN 环境变量优先（临时换 token
 // 不改配置），随后是 config.yaml 的 devin.token（Load 内部已含
-// env/CLI 凭证兜底）；config.yaml 缺失时直接走 Devin CLI 凭证发现链。
+// env/CLI 凭证兜底）或账号池首号（accounts 模式 token 经
+// credentials_file 解析后必填）；config.yaml 缺失时直接走 Devin CLI
+// 凭证发现链。probe 是单发工具，逐号探测不在职责内。
 func resolveToken(cfg config.Config) string {
 	if token := os.Getenv("DEVIN_TOKEN"); token != "" {
 		return token
 	}
 	if cfg.Devin.Token != "" {
 		return cfg.Devin.Token
+	}
+	if len(cfg.Devin.Accounts) > 0 {
+		return cfg.Devin.Accounts[0].Token
 	}
 	return config.ResolveDevinToken()
 }

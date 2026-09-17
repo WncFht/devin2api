@@ -13,7 +13,7 @@
 | ------------------------------------------------------------------------------------------------- | -------------------------- |
 | devin.model / devin.aliases / devin.client_name / client_version / client_os                      | server.listen              |
 | devin.base_url / devin.proxy / devin.force_http1                                                  |                            |
-| devin.token                                                                                       |                            |
+| devin.token / devin.accounts                                                                      |                            |
 | devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        |                            |
 | devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                            |
 | auth.api_key / dashboard.password                                                                 |                            |
@@ -23,6 +23,8 @@
 
 端点三件套的热更语义：ApplyConfig 先用新参数构建整个上游调用束（transport + stream/api client + 焐池 warmer），构建失败（如非法 proxy）整单 422、旧配置继续服役；构建成功才换 config 快照并原子换指针。在途调用持旧 link 跑完，旧 transport 只收 idle 池；换 base_url 还会清空 AssignModel 缓存（jwt 绑 cascade_id，旧端点的解析对新上游无效）。面板经 `SetUpstream` 跟随同一端点，面板的展示地址读 `BaseURL()` 同源透出。
 注意 `devin.client_*` 只影响 chat 路径：面板自身的 seat 类上游调用固定用 windsurf 身份，不随这个键变。
+
+`devin.accounts` 按 lane 名做集合 diff：同名 lane 复用旧 adapter 走 ApplyConfig——token 与凭据来源（credentials_file 换路径、字面量 token 改值）都是热换值字段，保温谱系、assignment 与目录缓存、在途流全保住；新名 lane 先构建再入列；被删 lane 摘出后异步 Close，只停后台协程、在途流持引用跑完（与端点换绑同一生死模型）。lane 名序变化时报 `devin.accounts`，同名 lane 的字段差集仍按各 lane 差集并集进 `applied`；单号（隐式 default lane）与号池互转走同一条路径。任一 lane 构建/应用失败整单 422、已应用 lane 不回滚，与单 lane ApplyConfig 的失败语义一致。号池行为口径见 `devin-accounts.md`。
 
 ## 面板覆盖恒赢文件
 

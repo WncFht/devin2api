@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
 )
 
@@ -17,14 +18,18 @@ import (
 // 上游，api 取 index.jsonl 入口端点原值，upstream_protocol 留空
 // （上游恒为 devin）。
 type activeRequest struct {
-	ID                  int64   `json:"id"`
-	Model               string  `json:"model"`
-	ClientIP            string  `json:"client_ip"`
-	StartTime           int64   `json:"start_time"`
-	Streaming           bool    `json:"is_streaming"`
-	API                 string  `json:"api,omitempty"`
-	UpstreamProtocol    string  `json:"upstream_protocol,omitempty"`
-	APIKeyUsed          string  `json:"api_key_used,omitempty"`
+	ID               int64  `json:"id"`
+	Model            string `json:"model"`
+	ClientIP         string `json:"client_ip"`
+	StartTime        int64  `json:"start_time"`
+	Streaming        bool   `json:"is_streaming"`
+	API              string `json:"api,omitempty"`
+	UpstreamProtocol string `json:"upstream_protocol,omitempty"`
+	APIKeyUsed       string `json:"api_key_used,omitempty"`
+	// Account 是已选定服务本请求的上游账号（号池 lane 名），
+	// AccountSwitches 是至今的 failover 换号次数；与 index.jsonl 同名同源。
+	Account             string  `json:"account,omitempty"`
+	AccountSwitches     int     `json:"account_switches,omitempty"`
 	TokenID             int64   `json:"token_id,omitempty"`
 	BaseURL             string  `json:"base_url,omitempty"`
 	BytesReceived       int64   `json:"bytes_received,omitempty"`
@@ -68,6 +73,8 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 			Streaming:         ar.Meta.API == "responses-ws",
 			API:               ar.Meta.API,
 			APIKeyUsed:        ar.Meta.KeyHash,
+			Account:           ar.Account,
+			AccountSwitches:   ar.AccountSwitches,
 			BaseURL:           h.BaseURL(),
 			BytesReceived:     ar.ClientBytes,
 			CostMultiplier:    1,
@@ -331,26 +338,61 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// warm 组投前缀保温簿记；hit_rate 由 hits/(hits+misses) 派生，
 	// cr=0 的 ping 不计入 misses（簿记侧口径），故命中率只反映真实命中。
 	if h.warmStats != nil {
-		warm := h.warmStats()
-		pingTotal := warm.PingHits + warm.PingMisses
-		hitRate := 0.0
-		if pingTotal > 0 {
-			hitRate = float64(warm.PingHits) / float64(pingTotal) * 100
+		data["warm"] = warmStatsView(h.warmStats())
+	}
+	// accounts 组是号池逐账号视图：每号的闸门与保温各自透出——
+	// 顶层 gate/warm 仍是首 lane 快照（前端后兼容），逐号排障看这里。
+	if h.accountGateStats != nil || h.accountWarmStats != nil {
+		gates := map[string]devin.GateStats{}
+		if h.accountGateStats != nil {
+			gates = h.accountGateStats()
 		}
-		data["warm"] = map[string]any{
-			"enabled":        warm.Enabled,
-			"entries":        warm.Entries,
-			"promoted":       warm.Promoted,
-			"suspects":       warm.Suspects,
-			"retained_bytes": warm.RetainedBytes,
-			"pings_sent":     warm.PingsSent,
-			"ping_hits":      warm.PingHits,
-			"ping_misses":    warm.PingMisses,
-			"ping_hit_rate":  hitRate,
-			"ping_skips":     warm.PingSkips,
-			"ping_errors":    warm.PingErrors,
-			"retired":        warm.Retired,
+		warms := map[string]devin.WarmStats{}
+		if h.accountWarmStats != nil {
+			warms = h.accountWarmStats()
 		}
+		accounts := make(map[string]any, len(gates)+len(warms))
+		for name, gate := range gates {
+			entry := map[string]any{"gate": gate}
+			// warm 只在确有该号簿记时投：两次快照之间 ApplyConfigs
+			// 换过 lane 集合的话，缺席渲染成 enabled:false 会误读。
+			if warm, ok := warms[name]; ok {
+				entry["warm"] = warmStatsView(warm)
+			}
+			accounts[name] = entry
+		}
+		for name, warm := range warms {
+			if _, ok := accounts[name]; !ok {
+				accounts[name] = map[string]any{"warm": warmStatsView(warm)}
+			}
+		}
+		data["accounts"] = accounts
 	}
 	respondOK(w, data)
+}
+
+// warmStatsView 把一条 lane 的保温簿记投影成 runtime-metrics 的 warm
+// 组形状；hit_rate 由 hits/(hits+misses) 派生，cr=0 的 ping 不计入
+// misses（簿记侧口径），故命中率只反映真实命中。顶层 warm 组与
+// accounts 组内每号的 warm 共用同一投影。
+func warmStatsView(warm devin.WarmStats) map[string]any {
+	pingTotal := warm.PingHits + warm.PingMisses
+	hitRate := 0.0
+	if pingTotal > 0 {
+		hitRate = float64(warm.PingHits) / float64(pingTotal) * 100
+	}
+	return map[string]any{
+		"enabled":        warm.Enabled,
+		"entries":        warm.Entries,
+		"promoted":       warm.Promoted,
+		"suspects":       warm.Suspects,
+		"retained_bytes": warm.RetainedBytes,
+		"pings_sent":     warm.PingsSent,
+		"ping_hits":      warm.PingHits,
+		"ping_misses":    warm.PingMisses,
+		"ping_hit_rate":  hitRate,
+		"ping_skips":     warm.PingSkips,
+		"ping_errors":    warm.PingErrors,
+		"retired":        warm.Retired,
+	}
 }

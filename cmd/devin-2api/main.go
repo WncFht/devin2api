@@ -173,17 +173,19 @@ func main() {
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
 	// 空 token 起不来的话「先起服务后配凭据」没有任何热补入口。
-	// devinAdapter 保留具体类型引用：配置热重载（ApplyConfig）、闸门状态
-	// （GateStats）与别名校验（Aliases）都挂在它上面。
-	devinAdapter, err := devin.New(devinConfigFrom(serviceConfig, absoluteConfigPath, logRoot))
+	// devinPool 保留具体类型引用：配置热重载（ApplyConfigs）、闸门状态
+	// （GateStats）、别名校验（Aliases）与逐账号凭据源（TokenFuncs）
+	// 都挂在它上面；单号部署是 N=1 的退化形态，不走分支。
+	devinPool, err := devin.NewPool(devinConfigsFrom(serviceConfig, absoluteConfigPath, logRoot))
 	if err != nil {
 		slog.Error("create devin adapter failed", "error", err)
 		os.Exit(1)
 	}
-	defer devinAdapter.Close()
+	defer devinPool.Close()
 	// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
-	// 自愈更新 token 后，面板的上游调用自动跟随新值。
-	tokenFunc := devinAdapter.TokenFunc()
+	// 自愈更新 token 后，面板的上游调用自动跟随新值。号池下面板 MVP
+	// 固定绑首号；逐号凭据源另经 SetPoolTokenFuncs 喂给脱敏与配额采样。
+	tokenFunc := devinPool.TokenFunc()
 	// 管理器总是创建：enabled 只控制新请求是否写目录，历史查询、
 	// 用量回放、清理与配额采样不随开关停掉，面板也可运行时热切换。
 	debugManager := debuglog.NewManager(logRoot, debuglog.RetentionPolicy{
@@ -194,7 +196,7 @@ func main() {
 	})
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	defer debugManager.Close()
-	application := app.New(devinAdapter, serviceConfig.Server, debugManager)
+	application := app.New(devinPool, serviceConfig.Server, debugManager)
 	// 用 index.jsonl 回放预热 60 分钟趋势桶：重启后实时流量/健康时间线不从零
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 started_at+duration_ms 归桶，
 	// 与 Finish 实时路径一致；管线前 Reject 不进索引，这部分计数不回放。
@@ -222,9 +224,12 @@ func main() {
 		os.Exit(1)
 	}
 	ccPanel.SetVersion(resolved)
-	ccPanel.SetGateStats(devinAdapter.GateStats)
-	ccPanel.SetWarmStats(devinAdapter.WarmStats)
-	ccPanel.SetAliasesFunc(devinAdapter.Aliases)
+	ccPanel.SetGateStats(devinPool.GateStats)
+	ccPanel.SetWarmStats(devinPool.WarmStats)
+	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
+	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
+	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
+	ccPanel.SetAliasesFunc(devinPool.Aliases)
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
 	// 运行时设置键仓：panel-settings.json 落状态目录根；覆盖项对被登记键
@@ -233,17 +238,17 @@ func main() {
 	// 先建仓再重放，让面板改的值在启动时就生效。
 	settingsStore, err := ccpanel.NewPanelSettings(absoluteStateDir, ccpanel.SettingsDeps{
 		Debug:       debugManager,
-		DevinConfig: devinAdapter.CurrentConfig,
+		DevinConfig: devinPool.CurrentConfig,
 		// 面板写入经 UpdateConfig 在 configMu 内克隆+提交（与 reload 共用
 		// 提交点）；端点三件套变化时面板自身的上游调用束跟随换绑。
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
-			applied, err := devinAdapter.UpdateConfig(mutate)
+			applied, err := devinPool.UpdateConfig(mutate)
 			if err != nil {
 				return err
 			}
 			if slices.Contains(applied, "devin.base_url") || slices.Contains(applied, "devin.proxy") ||
 				slices.Contains(applied, "devin.force_http1") {
-				cur := devinAdapter.CurrentConfig()
+				cur := devinPool.CurrentConfig()
 				return ccPanel.SetUpstream(cur.BaseURL, cur.Proxy, cur.ForceHTTP1)
 			}
 			return nil
@@ -285,7 +290,7 @@ func main() {
 	seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*ccpanel.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinAdapter, application, ccPanel, debugManager, settingsStore, tokenStore)
+			return reloadRuntimeConfig(absoluteConfigPath, logRoot, devinPool, application, ccPanel, debugManager, settingsStore, tokenStore)
 		},
 		Current: func() map[string]any {
 			return runtimeConfigView(absoluteConfigPath)
@@ -325,13 +330,16 @@ func main() {
 	}
 }
 
-// devinConfigFrom 把启动配置映射为 Devin adapter 配置；启动与配置
-// 热重载共用同一映射，保证 ApplyConfig 看到的字段口径与 New 一致。
-// logRoot 决定 gate-state.json 的落点（沿用 logs/ 内的既有位置）。
-func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) devin.Config {
-	return devin.Config{
+// devinConfigsFrom 把启动配置映射为每 lane 一份的 Devin adapter 配置：
+// 端点/指纹/闸门/保温是全局字段各 lane 共享，Name/Token/TokenSource/
+// GateStatePath 按账号各自落地。启动与配置热重载共用同一映射，保证
+// ApplyConfigs 看到的字段口径与 NewPool 一致。
+// logRoot 决定 gate-state 文件的落点：accounts 模式每号一份
+// gate-state-<name>.json，隐式单 lane 沿用 gate-state.json（存量闩
+// 状态连续恢复）。
+func devinConfigsFrom(serviceConfig config.Config, configPath, logRoot string) []devin.Config {
+	base := devin.Config{
 		BaseURL:       serviceConfig.Devin.BaseURL,
-		Token:         serviceConfig.Devin.Token,
 		Model:         serviceConfig.Devin.Model,
 		Proxy:         serviceConfig.Devin.Proxy,
 		ForceHTTP1:    serviceConfig.Devin.ForceHTTP1 != nil && *serviceConfig.Devin.ForceHTTP1,
@@ -347,7 +355,6 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 			WindowOffset: time.Duration(serviceConfig.Devin.GateWindowOffsetSeconds) * time.Second,
 			WindowGuard:  time.Duration(serviceConfig.Devin.GateWindowGuardSeconds) * time.Second,
 		},
-		GateStatePath: filepath.Join(logRoot, "gate-state.json"),
 		Warm: devin.WarmConfig{
 			Enabled:          serviceConfig.Devin.WarmPrefixEnabled,
 			Interval:         time.Duration(serviceConfig.Devin.WarmPrefixIntervalSeconds) * time.Second,
@@ -362,16 +369,69 @@ func devinConfigFrom(serviceConfig config.Config, configPath, logRoot string) de
 			BlockedNames:     serviceConfig.Devin.WarmPrefixBlockedNames,
 			UserPacedNames:   serviceConfig.Devin.WarmPrefixUserPacedNames,
 		},
+	}
+	if len(serviceConfig.Devin.Accounts) == 0 {
+		lane := base
+		lane.Name = config.DefaultAccountName
+		lane.Token = serviceConfig.Devin.Token
+		lane.GateStatePath = filepath.Join(logRoot, "gate-state.json")
 		// Devin CLI 会续期改写 credentials.toml；unauthenticated 时
 		// 重载同一来源链（配置值 → 环境变量 → 凭证文件）拿新凭据。
-		TokenSource: func() string {
+		lane.TokenSource = func() string {
 			reloaded, err := config.Load(configPath)
 			if err != nil {
 				return ""
 			}
 			return reloaded.Devin.Token
-		},
+		}
+		return []devin.Config{lane}
 	}
+	lanes := make([]devin.Config, 0, len(serviceConfig.Devin.Accounts))
+	for _, account := range serviceConfig.Devin.Accounts {
+		lane := base
+		lane.Name = account.Name
+		lane.Token = account.Token
+		lane.GateStatePath = filepath.Join(logRoot, "gate-state-"+account.Name+".json")
+		if account.CredentialsFile != "" {
+			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
+			// 即跟随续期——fht-mba 的 B 号正是这个形态。
+			credentialsFile := account.CredentialsFile
+			lane.TokenSource = func() string {
+				return config.TokenFromCredentialsFile(credentialsFile)
+			}
+		} else {
+			// 字面量 token 账号：重读配置文件按名找回本账号的当前
+			// token——编辑 config.yaml 就是它的自愈来源。
+			name := account.Name
+			lane.TokenSource = func() string {
+				reloaded, err := config.Load(configPath)
+				if err != nil {
+					return ""
+				}
+				for _, acc := range reloaded.Devin.Accounts {
+					if acc.Name == name {
+						return acc.Token
+					}
+				}
+				return ""
+			}
+		}
+		lanes = append(lanes, lane)
+	}
+	return lanes
+}
+
+// accountNames 返回配置声明的 lane 名序（accounts 模式按条目，单号
+// 模式是单元素 default）——reload 报告据此识别账号集合变化。
+func accountNames(devinCfg config.DevinConfig) []string {
+	if len(devinCfg.Accounts) == 0 {
+		return []string{config.DefaultAccountName}
+	}
+	names := make([]string, 0, len(devinCfg.Accounts))
+	for _, account := range devinCfg.Accounts {
+		names = append(names, account.Name)
+	}
+	return names
 }
 
 // seedConfigAPIKey 把 auth.api_key 播种成一条普通令牌行（描述
@@ -400,7 +460,7 @@ func seedConfigAPIKey(tokens *authtoken.Store, apiKey string) {
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
+func reloadRuntimeConfig(configPath, logRoot string, devinPool *devin.Pool, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	cfg, err := config.Load(configPath)
@@ -415,15 +475,19 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
 	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
-	devinCfg := devinConfigFrom(cfg, configPath, logRoot)
-	applied, err := devinAdapter.ApplyConfig(devinCfg)
+	devinCfgs := devinConfigsFrom(cfg, configPath, logRoot)
+	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
+	// 而本函数只能经 panel 端点触达。
+	pcfg := runtimeConfigPtr.Load().cfg
+	applied, err := devinPool.ApplyConfigs(devinCfgs)
 	if err != nil {
 		return nil, err
 	}
 	report.Applied = append(report.Applied, applied...)
-	// prev 必然非空：runtimeConfigPtr 在 panel 装配前已 Store，
-	// 而本函数只能经 panel 端点触达。
-	pcfg := runtimeConfigPtr.Load().cfg
+	// lane 增删不进任何单 lane 的字段差集，按名序比对单独上报。
+	if !slices.Equal(accountNames(pcfg.Devin), accountNames(cfg.Devin)) {
+		report.Applied = append(report.Applied, "devin.accounts")
+	}
 	if pcfg.Devin.BaseURL != cfg.Devin.BaseURL || pcfg.Devin.Proxy != cfg.Devin.Proxy ||
 		*pcfg.Devin.ForceHTTP1 != *cfg.Devin.ForceHTTP1 {
 		// adapter 侧调用束已在 ApplyConfig 内换好（同参数构建成功是前提）；
@@ -477,7 +541,7 @@ func reloadRuntimeConfig(configPath, logRoot string, devinAdapter *devin.Adapter
 	// 本次加载的派生值（def 展示与 reset 回落目标都读它），再重放
 	// panel-settings.json 里登记的覆盖键压回文件值。
 	settings.ResampleDefaults(ccpanel.SettingDefaults{
-		Devin:          devinCfg,
+		Devin:          devinCfgs[0],
 		MaxConcurrency: cfg.Server.MaxConcurrency,
 		QuotaInterval:  time.Duration(*cfg.Debug.QuotaIntervalMinutes) * time.Minute,
 		PprofListen:    cfg.Debug.PprofListen,
@@ -540,6 +604,22 @@ func redactConfigSecrets(fields map[string]any) {
 			if parsed, err := url.Parse(raw); err == nil && parsed.User != nil {
 				parsed.User = nil
 				devin["proxy"] = parsed.String()
+			}
+		}
+		// 账号池逐条脱敏：accounts[].token 与 devin.token 同规则
+		// sha256 前缀——漏遮任一号都是凭据泄露。
+		if accounts, ok := devin["accounts"].([]any); ok {
+			for _, entry := range accounts {
+				account, ok := entry.(map[string]any)
+				if !ok {
+					continue
+				}
+				raw, ok := account["token"].(string)
+				if !ok || raw == "" {
+					continue
+				}
+				sum := sha256.Sum256([]byte(raw))
+				account["token"] = fmt.Sprintf("sha256:%x", sum[:6])
 			}
 		}
 	}

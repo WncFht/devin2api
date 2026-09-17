@@ -49,6 +49,9 @@ const (
 
 // Config 保存 Devin adapter 的固定上游配置。
 type Config struct {
+	// Name 是账号名：号池里每条 lane 的身份，进闸门状态文件名、
+	// 日志与面板归因字段；单号部署归一为 config.DefaultAccountName。
+	Name string
 	// BaseURL 是 Devin Connect 服务的基础地址。
 	BaseURL string
 	// Token 是 Devin session token；不会写入日志。
@@ -230,13 +233,15 @@ func (adapter *Adapter) link() *upstreamLink {
 	return adapter.linkPtr.Load()
 }
 
-// Close 停掉焐池协程等后台资源；进程退出是最兜底的生命周期。
+// Close 停掉焐池协程并收掉 transport 的 idle 连接池（与 finishConfigApply
+// 退役旧 link 同一卫生动作）；进程退出是最兜底的生命周期。
 func (adapter *Adapter) Close() {
 	if adapter.warm != nil {
 		adapter.warm.Close()
 	}
 	if link := adapter.link(); link != nil {
 		link.warmer.Close()
+		link.transport.CloseIdleConnections()
 	}
 }
 

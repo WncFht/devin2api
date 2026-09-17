@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -24,12 +25,20 @@ func remoteIP(r *http.Request) string {
 // maskToken 对回显给面板的日志字节做字面值兜底脱敏：写路径的 secretKey
 // 名单只能覆盖结构化键名，token 若出现在自由文本（请求 body 原文、上游
 // 错误文案）里会漏出，读路径再按最近见过的 token 字面值过一遍——
-// 自愈轮换后旧 token 仍可能躺在旧请求目录里。
+// 自愈轮换后旧 token 仍可能躺在旧请求目录里。号池下脱敏集合收编全部
+// lane 的当前凭据：漏遮任一号的 token 都是泄露。
 func (h *Handler) maskToken(data []byte) []byte {
 	if len(data) == 0 {
 		return data
 	}
-	for _, token := range h.noteToken(h.tokenFunc()) {
+	tokens := make([]string, 0, 2)
+	tokens = append(tokens, h.tokenFunc())
+	if h.poolTokenFuncs != nil {
+		for _, fn := range h.poolTokenFuncs() {
+			tokens = append(tokens, fn())
+		}
+	}
+	for _, token := range h.noteTokens(tokens...) {
 		if token == "" {
 			continue
 		}
@@ -48,16 +57,19 @@ func (h *Handler) maskToken(data []byte) []byte {
 	return data
 }
 
-// noteToken 记录最近见过的上游 token（去重、保留最近 8 个），返回脱敏
-// 要覆盖的字面值集合。
-func (h *Handler) noteToken(token string) []string {
+// noteTokens 记录最近见过的上游 token（去重、保留最近 16 个——号池下
+// 每号各占若干槽），返回脱敏要覆盖的字面值集合。
+func (h *Handler) noteTokens(tokens ...string) []string {
 	h.tokenMu.Lock()
 	defer h.tokenMu.Unlock()
-	if token != "" && (len(h.recentTokens) == 0 || h.recentTokens[0] != token) {
-		h.recentTokens = append([]string{token}, h.recentTokens...)
-		if len(h.recentTokens) > 8 {
-			h.recentTokens = h.recentTokens[:8]
+	for _, token := range tokens {
+		if token == "" || slices.Contains(h.recentTokens, token) {
+			continue
 		}
+		h.recentTokens = append([]string{token}, h.recentTokens...)
+	}
+	if len(h.recentTokens) > 16 {
+		h.recentTokens = h.recentTokens[:16]
 	}
 	return h.recentTokens
 }

@@ -84,6 +84,12 @@ type IndexEntry struct {
 	// 重开）；明细在同目录 meta.json 的 retry_attempts 与 04 的
 	// retry_attempt 分界行。0 表示一次发送完成。
 	Retries int `json:"retries,omitempty"`
+	// Account 是最终服务请求的上游账号名（号池 lane 身份，单号部署
+	// 恒为 "default"）——「哪号在扛」的聚合不必区分部署形态。
+	Account string `json:"account,omitempty"`
+	// AccountSwitches 是号池 failover 换号次数（成功前的失败尝试数），
+	// 明细在同目录 meta.json 的 upstream_attempts。0 表示首号即成。
+	AccountSwitches int `json:"account_switches,omitempty"`
 	// PrematureEndTurn 标记「工具结果之后模型纯文本 end_turn」的可疑收尾，
 	// 供 grep 统计该模型行为的真实频率（见 Completion 同名字段）。
 	PrematureEndTurn bool `json:"premature_end_turn,omitempty"`
@@ -107,6 +113,7 @@ const errorMessageCap = 300
 // 条目序列化在锁外完成；indexMu 只罩住 index.jsonl 自身的 IO 与
 // 快照闸门——索引磁盘停滞不堵目录分配（见 manager.mutex 注释）。
 func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) {
+	account, accountAttempts := recorder.upstreamAttribution()
 	entry := IndexEntry{
 		Dir:               filepath.Base(recorder.directory),
 		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
@@ -141,6 +148,8 @@ func (manager *Manager) appendIndex(recorder *Recorder, completion *Completion) 
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
 		RateLimited:       recorder.rateLimited.Load(),
 		Retries:           len(recorder.retryAttempts()),
+		Account:           account,
+		AccountSwitches:   len(accountAttempts),
 		PrematureEndTurn:  completion.PrematureEndTurn,
 	}
 	if completion.Result != "completed" {

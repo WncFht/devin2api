@@ -102,20 +102,20 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 
 	manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
 	defer manager.Close()
-	devinAdapter, err := devin.New(devin.Config{BaseURL: "https://example.com", Token: "t", Model: "m"})
+	devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	application := app.New(devinAdapter, config.ServerConfig{}, manager)
+	application := app.New(devinPool, config.ServerConfig{}, manager)
 	panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
 	if err != nil {
 		t.Fatal(err)
 	}
 	settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
 		Debug:       manager,
-		DevinConfig: devinAdapter.CurrentConfig,
+		DevinConfig: devinPool.CurrentConfig,
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
-			_, err := devinAdapter.UpdateConfig(mutate)
+			_, err := devinPool.UpdateConfig(mutate)
 			return err
 		},
 		MaxConcurrency:    application.MaxConcurrency,
@@ -137,7 +137,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  token: 't'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -145,7 +145,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -156,7 +156,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 }
@@ -276,6 +276,11 @@ auth:
 			}
 			if override, ok := mutateOverride[lf.path]; ok {
 				node[segments[len(segments)-1]] = override
+			} else if lf.path == "devin.accounts" {
+				// accounts 与 devin.token 互斥：声明账号池必须同时摘掉
+				// 单号字段，变异后的形态才过 validate。
+				node[segments[len(segments)-1]] = []any{map[string]any{"name": "pool-a", "token": "tok2"}}
+				delete(node, "token")
 			} else {
 				switch current.Kind() {
 				case reflect.Bool:
@@ -302,20 +307,20 @@ auth:
 
 			manager := debuglog.NewManager(dir, debuglog.RetentionPolicy{})
 			defer manager.Close()
-			devinAdapter, err := devin.New(devinConfigFrom(prev, configPath, filepath.Join(dir, "logs")))
+			devinPool, err := devin.NewPool(devinConfigsFrom(prev, configPath, filepath.Join(dir, "logs")))
 			if err != nil {
 				t.Fatal(err)
 			}
-			application := app.New(devinAdapter, config.ServerConfig{}, manager)
+			application := app.New(devinPool, config.ServerConfig{}, manager)
 			panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
 			if err != nil {
 				t.Fatal(err)
 			}
 			settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
 				Debug:       manager,
-				DevinConfig: devinAdapter.CurrentConfig,
+				DevinConfig: devinPool.CurrentConfig,
 				UpdateDevin: func(mutate func(*devin.Config) error) error {
-					_, err := devinAdapter.UpdateConfig(mutate)
+					_, err := devinPool.UpdateConfig(mutate)
 					return err
 				},
 				MaxConcurrency:    application.MaxConcurrency,
@@ -332,7 +337,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := reloadRuntimeConfig(configPath, dir, devinAdapter, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(configPath, dir, devinPool, application, panel, manager, settings, tokenStore)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

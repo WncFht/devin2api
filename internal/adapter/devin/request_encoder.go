@@ -7,6 +7,7 @@ package devin
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -191,6 +192,22 @@ func ephemeralCacheOptions() *devinproto.ExaChatPb_PromptCacheOptions {
 // 连续性。无 SessionKey 时退回「系统提示头 4KB + 首条消息文本头 1KB」
 // 内容哈希：同一会话多轮回放前缀不变 → 稳定，不同会话 → 自然分散。
 func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascadeID string) {
+	sum := sha256.Sum256(sessionSeed(request))
+	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
+}
+
+// SessionAffinityKey 返回会话的账号钉选键：与 deriveSessionIDs 同种子，
+// 钉选稳定则 trajectory/cascade 派生、warm 谱系、assignments 三个命名
+// 空间随会话落在同一条 lane 上。
+func SessionAffinityKey(request llm.RequestMessages) string {
+	sum := sha256.Sum256(sessionSeed(request))
+	return hex.EncodeToString(sum[:16])
+}
+
+// sessionSeed 构造会话稳定种子：SessionKey 优先（CC metadata.user_id、
+// Codex prompt_cache_key），空则退回「system 头 4KB + 首条消息文本头
+// 1KB」内容哈希——同会话多轮回放前缀不变故稳定，不同会话自然分散。
+func sessionSeed(request llm.RequestMessages) []byte {
 	// bytes.Buffer 的 Bytes() 零拷贝交给 Sum256；strings.Builder 则需
 	// 先 String() 再 []byte() 多一份全量拷贝。
 	var seed bytes.Buffer
@@ -215,8 +232,7 @@ func deriveSessionIDs(request llm.RequestMessages) (trajectoryID string, cascade
 			break
 		}
 	}
-	sum := sha256.Sum256(seed.Bytes())
-	return uuidFromBytes(sum[:16]), uuidFromBytes(sum[16:32])
+	return seed.Bytes()
 }
 
 // firstMessageText 提取消息的首个文本块，用于会话种子。
@@ -365,7 +381,7 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 		prompt.ToolResultIsError = proto.Bool(message.IsError)
 		return []*devinproto.ExaChatPb_ChatMessagePrompt{prompt}, nil
 	default:
-		return nil, fmt.Errorf("unsupported message type %T", message)
+		return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("unsupported message type %T", message)}
 	}
 }
 

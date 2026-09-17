@@ -238,7 +238,7 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
-	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries\n")
+	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches\n")
 	for _, e := range entries {
 		firstUpstream, firstClient := "", ""
 		if e.FirstUpstreamMS != nil {
@@ -247,12 +247,13 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 		if e.FirstClientMS != nil {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
-		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d\n",
+		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d\n",
 			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
-			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage), e.Retries)
+			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage), e.Retries,
+			csvEscape(e.Account), e.AccountSwitches)
 	}
 }
 
@@ -281,7 +282,11 @@ type matrixEntry struct {
 	// Owner 是失败责任归因（client/business_limited/upstream），由
 	// debuglog.ErrorOwner 统一计算——前端不再按 status/result/stage
 	// 复刻判定，与 usage 聚合的 client_faults/upstream_faults 同口径。
-	Owner           string `json:"owner,omitempty"`
+	Owner string `json:"owner,omitempty"`
+	// Account 是最终服务本请求的上游账号（号池 lane 名），
+	// AccountSwitches 是 failover 换号次数——矩阵按号分桶归因用。
+	Account         string `json:"account,omitempty"`
+	AccountSwitches int    `json:"account_switches,omitempty"`
 	DurationMS      int64  `json:"duration_ms"`
 	FirstUpstreamMS *int64 `json:"first_upstream_ms,omitempty"`
 	RateLimited     bool   `json:"rate_limited,omitempty"`
@@ -307,6 +312,8 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 			Result:          e.Result,
 			ErrorStage:      e.ErrorStage,
 			Owner:           debuglog.ErrorOwner(e),
+			Account:         e.Account,
+			AccountSwitches: e.AccountSwitches,
 			DurationMS:      e.DurationMS,
 			FirstUpstreamMS: e.FirstUpstreamMS,
 			RateLimited:     e.RateLimited,

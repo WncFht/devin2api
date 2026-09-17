@@ -62,24 +62,28 @@ func newLogCostComponent(quantity int64, pricePerMillion float64) logCostCompone
 // api=index.jsonl 的入口端点原值、upstream_protocol 恒 "devin"、
 // cost_multiplier 恒 1；单上游无渠道维（channel_* 字段不投）。
 type logEntry struct {
-	ID                       int64             `json:"id"`
-	Time                     int64             `json:"time"` // unix 秒（ccLoad JSONTime 序列化口径）
-	Model                    string            `json:"model"`
-	ActualModel              string            `json:"actual_model,omitempty"`
-	ResponseModel            string            `json:"response_model,omitempty"`
-	LogSource                string            `json:"log_source,omitempty"`
-	StatusCode               int               `json:"status_code"`
-	Message                  string            `json:"message"`
-	Duration                 float64           `json:"duration"`
-	IsStreaming              bool              `json:"is_streaming"`
-	UpstreamWebsocket        bool              `json:"upstream_websocket,omitempty"`
-	FirstByteTime            float64           `json:"first_byte_time,omitempty"`
-	APIKeyUsed               string            `json:"api_key_used"`
-	APIKeyHash               string            `json:"api_key_hash,omitempty"`
-	AuthTokenID              int64             `json:"auth_token_id"`
-	AuthTokenDescription     string            `json:"auth_token_description"`
-	API                      string            `json:"api,omitempty"`
-	UpstreamProtocol         string            `json:"upstream_protocol,omitempty"`
+	ID                   int64   `json:"id"`
+	Time                 int64   `json:"time"` // unix 秒（ccLoad JSONTime 序列化口径）
+	Model                string  `json:"model"`
+	ActualModel          string  `json:"actual_model,omitempty"`
+	ResponseModel        string  `json:"response_model,omitempty"`
+	LogSource            string  `json:"log_source,omitempty"`
+	StatusCode           int     `json:"status_code"`
+	Message              string  `json:"message"`
+	Duration             float64 `json:"duration"`
+	IsStreaming          bool    `json:"is_streaming"`
+	UpstreamWebsocket    bool    `json:"upstream_websocket,omitempty"`
+	FirstByteTime        float64 `json:"first_byte_time,omitempty"`
+	APIKeyUsed           string  `json:"api_key_used"`
+	APIKeyHash           string  `json:"api_key_hash,omitempty"`
+	AuthTokenID          int64   `json:"auth_token_id"`
+	AuthTokenDescription string  `json:"auth_token_description"`
+	API                  string  `json:"api,omitempty"`
+	UpstreamProtocol     string  `json:"upstream_protocol,omitempty"`
+	// Account 是最终服务本请求的上游账号（号池 lane 名），
+	// AccountSwitches 是 failover 换号次数；与 index.jsonl 同名同源。
+	Account                  string            `json:"account,omitempty"`
+	AccountSwitches          int               `json:"account_switches,omitempty"`
 	ClientIP                 string            `json:"client_ip"`
 	BaseURL                  string            `json:"base_url,omitempty"`
 	InputTokens              int64             `json:"input_tokens"`
@@ -132,6 +136,8 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]Catal
 		APIKeyHash:               e.KeyHash,
 		API:                      e.API,
 		UpstreamProtocol:         "devin",
+		Account:                  e.Account,
+		AccountSwitches:          e.AccountSwitches,
 		ClientIP:                 e.ClientIP,
 		BaseURL:                  h.BaseURL(),
 		InputTokens:              e.InputTokens,
@@ -474,9 +480,11 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	}
 
 	var meta struct {
-		StartedAt  string `json:"started_at"`
-		StatusCode int    `json:"status_code"`
-		Result     string `json:"result"`
+		StartedAt        string            `json:"started_at"`
+		StatusCode       int               `json:"status_code"`
+		Result           string            `json:"result"`
+		UpstreamAccount  string            `json:"upstream_account"`
+		UpstreamAttempts []json.RawMessage `json:"upstream_attempts"`
 	}
 	// Detail 一次拿 meta.json 与文件清单；files 投给前端文件页签
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
@@ -499,6 +507,14 @@ func (h *Handler) debugLogResponse(dir string, logID int64) map[string]any {
 	}
 	resp["translated_resp_status"] = meta.StatusCode
 	resp["translated_resp_headers"] = "{}"
+	// 号池归因投到详情首屏：与 index.jsonl 的 account/account_switches
+	// 同口径（switches=失败尝试条数），免去为看归属再抓 meta.json。
+	if meta.UpstreamAccount != "" {
+		resp["account"] = meta.UpstreamAccount
+	}
+	if switches := len(meta.UpstreamAttempts); switches > 0 {
+		resp["account_switches"] = switches
+	}
 
 	// 01：客户端原始请求 → original_*；缺席时 protocol_transformed 留缺省，
 	// 前端「请求」页签回落到 req_*（上游 wire）而不是空面板。

@@ -237,11 +237,17 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 	return result
 }
 
-// fetchUserStatus 调用官方 seat_management JSON Connect 路径。
+// fetchUserStatus 调用官方 seat_management JSON Connect 路径（面板首号身份）。
 func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map[string]any, err error) {
+	return h.fetchUserStatusAs(ctx, h.tokenFunc())
+}
+
+// fetchUserStatusAs 以指定凭据调用 GetUserStatus：号池的逐账号配额采样
+// 与面板自身的状态查询共用这一条路径，只是凭据来源不同。
+func (h *Handler) fetchUserStatusAs(ctx context.Context, token string) (user, plan, planInfo map[string]any, err error) {
 	bodyObj := map[string]any{
 		"metadata": map[string]any{
-			"api_key":           h.tokenFunc(),
+			"api_key":           token,
 			"extension_name":    clientName,
 			"extension_version": clientVersion,
 			"ide_name":          clientName,
@@ -262,7 +268,7 @@ func (h *Handler) fetchUserStatus(ctx context.Context) (user, plan, planInfo map
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connect-Protocol-Version", "1")
-	req.Header.Set("Authorization", "Bearer "+h.tokenFunc())
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	// 使用不带 Basic 改写的 client，避免 authTransport 覆盖 Bearer；但复用代理 transport。
 	// 与 ResponseHeaderTimeout 对齐，允许上游长时思考/排队。

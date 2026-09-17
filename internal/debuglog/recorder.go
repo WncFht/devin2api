@@ -156,7 +156,7 @@ type Recorder struct {
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
 	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
-	// keyHash、retries；worker 自身状态无锁。
+	// keyHash、retries、upstreamAccount、accountAttempts；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -171,6 +171,14 @@ type Recorder struct {
 	// 凭据，requestMeta.KeyHash 为空——拿到令牌后回填，index/meta 才能把
 	// 匿名流量归到该令牌行。非空时优先于 requestMeta.KeyHash。
 	keyHash string
+	// upstreamAccount 是最终服务本请求的上游账号名（号池 lane 身份，
+	// 单号部署恒为 "default"）；号池 failover 时它只记成功那次的归属，
+	// 之前的失败尝试落在 accountAttempts。
+	upstreamAccount string
+	// accountAttempts 是号池 failover 的有序失败尝试——每个被试过又
+	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
+	// writeMeta/appendIndex 读，与 retries 同一把锁。
+	accountAttempts []accountAttempt
 	// tasks 是待执行写任务的有界队列；满时丢弃而非阻塞调用方。
 	tasks chan writeTask
 	// writerDone 在 worker 排空队列并关闭文件后关闭。
@@ -236,6 +244,18 @@ type Recorder struct {
 type retryAttempt struct {
 	Attempt   int    `json:"attempt"`
 	Cause     string `json:"cause"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+// accountAttempt 是号池内一次失败尝试的记录：account 是被试的 lane，
+// code/message 是它放弃时的分类码与文案（截断至 errorMessageCap）。
+// 注意 error.json 是 first-write-wins：failover 救回的请求目录里仍
+// 留有首个失败 lane 的 error.json——它描述的是「第一次失败」而非
+// 「最终下发给客户端的结果」，终局 lane 看 upstream_account。
+type accountAttempt struct {
+	Account   string `json:"account"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms"`
 }
 
@@ -858,6 +878,48 @@ func (recorder *Recorder) retryAttempts() []retryAttempt {
 	return append([]retryAttempt(nil), recorder.retries...)
 }
 
+// SetUpstreamAccount 记录最终服务本请求的上游账号（号池 lane 名）。
+// 号池在 lane.Stream 成功开流后调用；failover 只留成功归属，
+// 被放弃 lane 的明细走 NoteAccountAttempt。
+func (recorder *Recorder) SetUpstreamAccount(account string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.upstreamAccount = account
+	recorder.mutex.Unlock()
+}
+
+// NoteAccountAttempt 记录号池内一次失败尝试：lane 开流报可换号错误、
+// 或流内 pre-content 终局 error 事件被 poolStream 拦截转投下一候选时
+// 由 pool 调用。错误经 Classify 压成 code+截断文案——这份有序尝试表
+// 是「为什么换号」的归因痕迹（救回的请求仍可能有首失败 lane 的
+// error.json，见 accountAttempt 说明）。
+func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
+	if recorder == nil {
+		return
+	}
+	attempt := accountAttempt{
+		Account:   account,
+		ElapsedMS: time.Since(recorder.startedAt).Milliseconds(),
+	}
+	if failure := llm.Classify(err); failure != nil {
+		attempt.Code = failure.Code
+		attempt.Message = truncateRunes(failure.Message, errorMessageCap)
+	}
+	recorder.mutex.Lock()
+	recorder.accountAttempts = append(recorder.accountAttempts, attempt)
+	recorder.mutex.Unlock()
+}
+
+// upstreamAttribution 返回号池归因快照：最终服务账号与有序失败尝试，
+// 一把锁取齐两者——writeMeta 与 appendIndex 都要这对值。
+func (recorder *Recorder) upstreamAttribution() (string, []accountAttempt) {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return recorder.upstreamAccount, append([]accountAttempt(nil), recorder.accountAttempts...)
+}
+
 // Abort 中断请求：标记 aborted 并调用挂接的取消函数。
 // 无可中断的请求（未挂接或已完结）返回 false。
 func (recorder *Recorder) Abort() bool {
@@ -892,6 +954,8 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		lastRetryCause = recorder.retries[retries-1].Cause
 	}
 	abortable := recorder.abortCancel != nil
+	account := recorder.upstreamAccount
+	accountSwitches := len(recorder.accountAttempts)
 	recorder.mutex.Unlock()
 	firstUpstream := optionalLatency(recorder.firstUpstreamMS.Load())
 	state := "waiting_upstream"
@@ -908,6 +972,8 @@ func (recorder *Recorder) snapshot() ActiveRequest {
 		ResolvedModel:   resolved,
 		Retries:         retries,
 		LastRetryCause:  lastRetryCause,
+		Account:         account,
+		AccountSwitches: accountSwitches,
 		StartedAt:       recorder.startedAt,
 		ElapsedMS:       time.Since(recorder.startedAt).Milliseconds(),
 		State:           state,
@@ -1161,6 +1227,16 @@ func (recorder *Recorder) writeMeta(completion *Completion) {
 	}
 	if retries := recorder.retryAttempts(); len(retries) > 0 {
 		meta["retry_attempts"] = retries
+	}
+	// 号池归因沿用 upstream_* 扁平词表：account 是最终服务 lane，
+	// attempts 是 failover 前的有序失败尝试（含 code 与截断文案）。
+	// 全 lane 失败时 account 为空，attempts 仍要落——它是唯一痕迹。
+	account, attempts := recorder.upstreamAttribution()
+	if account != "" {
+		meta["upstream_account"] = account
+	}
+	if len(attempts) > 0 {
+		meta["upstream_attempts"] = attempts
 	}
 	if completion != nil {
 		finishedAt := time.Now()

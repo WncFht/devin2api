@@ -4,11 +4,13 @@ title = "devin-2api"
 useDefault = true
 
 # 项目自有凭据格式：devin-session-token$<payload>。
-# mock-token 占位符（示例配置、wire dump）放行，真实值在任意文件都拦。
+# mock-token 占位符（示例配置、wire dump）与冒烟脚本的固定无效值
+# （invalid.badtoken.for-smoke，专门用来被判 unauthenticated）放行，
+# 真实值在任意文件都拦。
 [[rules]]
 id = "devin-session-token"
-description = "Devin session token (live value; mock-token placeholder allowed)"
+description = "Devin session token (live value; named placeholders allowed)"
 regex = '''devin-session-token\$[A-Za-z0-9._-]{6,}'''
 [rules.allowlist]
 regexTarget = "secret"
-regexes = ['''devin-session-token\$mock-token''']
+regexes = ['''devin-session-token\$mock-token''', '''devin-session-token\$invalid\.badtoken\.for-smoke''']

@@ -33,6 +33,24 @@ devin:
   # 写死字面量会旁路该链路，token 过期后只能手改本文件；
   # 本机没有 Devin CLI 时才需要填字面量。
   token: ""
+  # accounts: 上游账号池（可选）；与上面的 token 互斥——accounts 非空时
+  # token 必须留空，且 env/credentials.toml 自动发现链整体关闭，凭据
+  # 来源只剩各条目自己的 token/credentials_file。
+  # name 是账号在日志、闸门状态文件与面板里的身份：字母/数字/连字符/
+  # 下划线 1–32 字符、池内唯一，"default" 为保留名（隐式单号 lane 的
+  # 身份，禁用）；每号独立限速闸门（闩状态落盘 gate-state-<name>.json）
+  # 与配额采样。token 与 credentials_file 至少给一个；都给时 token 作
+  # 初始凭据、credentials_file（指向 Devin CLI 的 credentials.toml）
+  # 作 unauthenticated 自愈来源——CLI 续期改写它即自动跟随。
+  # credentials_file 支持 ~/ 展开，相对路径锚定本文件所在目录（不是
+  # 进程 CWD）。两条目引用同一有效 token 或同一 credentials_file 按
+  # 配置错误拒绝。会话按亲和键钉选到号、失败按词表换号，详见
+  # docs/devin-accounts.md。
+  # accounts:
+  #   - name: "main"
+  #     token: "<main 号 session token>"
+  #   - name: "backup"
+  #     credentials_file: "/home/user/.local/share/devin/credentials.toml"
   # model: "swe-2-max"
   model: "glm-5-2"
   # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://

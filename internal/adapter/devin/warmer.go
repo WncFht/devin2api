@@ -28,6 +28,7 @@ type connWarmer struct {
 	kick      chan struct{}
 	stop      chan struct{}
 	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // newConnWarmer 启动后台焐池协程；Close 后协程退出。
@@ -43,8 +44,10 @@ func newConnWarmer(transport *http.Transport, baseURL string) *connWarmer {
 	return w
 }
 
+// Close 停掉焐池协程并等待其退出；可重入——link 退役（finishConfigApply）
+// 与 adapter 收尾可能先后调到同一个 warmer。
 func (w *connWarmer) Close() {
-	close(w.stop)
+	w.closeOnce.Do(func() { close(w.stop) })
 	<-w.done
 }
 

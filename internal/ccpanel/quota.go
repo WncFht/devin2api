@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,9 @@ const quotaFileCap = 4 << 20
 type quotaPoint struct {
 	// At 是采样时刻（unix 秒）。
 	At int64 `json:"at"`
+	// Account 是号池 lane 名：每号配额独立采样独立成行——两号的配额
+	// 曲线分开画是号池的直接收益度量。旧行/单号形态该字段缺席。
+	Account string `json:"account,omitempty"`
 	// DailyRemaining/WeeklyRemaining 是日/周配额剩余百分比（0-100）。
 	// 指针保留「上游没报」与「真到 0」的区分：omitempty 会把 0% 序列化成
 	// 缺席，恰恰在耗尽时刻让前端什么都不显示。
@@ -117,23 +121,63 @@ func (h *Handler) QuotaInterval() time.Duration {
 	return h.quotaInterval
 }
 
-// sampleQuota 拉取一次账户状态并把 plan_status 快照追加到 quota.jsonl。
+// sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照追加到
+// quota.jsonl（每行带 account 字段，两号曲线分开画）。账号间按名序
+// 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。
 func (h *Handler) sampleQuota(path string) {
+	for _, account := range h.quotaAccounts() {
+		h.sampleAccountQuota(path, account.name, account.token)
+	}
+}
+
+// quotaAccount 是配额采样的一个账号视角：name 落 quota.jsonl 的
+// account 字段，token 是该 lane 的当前凭据。
+type quotaAccount struct {
+	name  string
+	token string
+}
+
+// quotaAccounts 返回本轮要采样的账号清单：号池经 SetPoolTokenFuncs
+// 登记时逐号采（按名序输出稳定）；未登记回退面板首号凭据源、
+// account 字段留空——与历史上无号池时的行格式一致。
+func (h *Handler) quotaAccounts() []quotaAccount {
+	funcs := map[string]func() string{}
+	if h.poolTokenFuncs != nil {
+		funcs = h.poolTokenFuncs()
+	}
+	if len(funcs) == 0 {
+		return []quotaAccount{{token: h.tokenFunc()}}
+	}
+	names := make([]string, 0, len(funcs))
+	for name := range funcs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	accounts := make([]quotaAccount, 0, len(names))
+	for _, name := range names {
+		accounts = append(accounts, quotaAccount{name: name, token: funcs[name]()})
+	}
+	return accounts
+}
+
+// sampleAccountQuota 拉取一个账号的状态并追加一行配额快照。
+func (h *Handler) sampleAccountQuota(path, account, token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	_, plan, _, err := h.fetchUserStatus(ctx)
+	_, plan, _, err := h.fetchUserStatusAs(ctx, token)
 	if err != nil {
-		slog.Warn("quota sample failed", "error", err)
+		slog.Warn("quota sample failed", "account", account, "error", err)
 		return
 	}
 	if plan == nil {
 		// 上游 200 但缺 planStatus：不写点也不报错会把 quota.jsonl
 		// 变成静默空文件，留一行痕迹说明「拉到了但无配额数据」。
-		slog.Warn("quota sample skipped: userStatus carried no planStatus")
+		slog.Warn("quota sample skipped: userStatus carried no planStatus", "account", account)
 		return
 	}
 	point := quotaPoint{
 		At:              time.Now().Unix(),
+		Account:         account,
 		DailyRemaining:  planFloat(plan, "daily_quota_remaining"),
 		WeeklyRemaining: planFloat(plan, "weekly_quota_remaining"),
 		DailyResetAt:    int64(floatAny(plan["daily_quota_reset"])),
@@ -250,13 +294,52 @@ func forecast(points []quotaPoint, lookback time.Duration, pick func(quotaPoint)
 }
 
 // QuotaReport 返回配额历史曲线与按最近窗口燃烧速率外推的预测。
+// 号池下每号配额独立：accounts 组按名给各自的曲线与预测，顶层
+// points/daily/weekly 镜像尾点 At 最大（最新鲜）的那条序列作后
+// 兼容视图——单号部署时与升级前输出逐字段一致（历史无 account
+// 字段的行归入 "default" 桶，与隐式单 lane 同名自然合流）。
 func (h *Handler) QuotaReport() map[string]any {
-	points := h.readQuotaHistory()
-	return map[string]any{
-		"points": points,
-		"daily":  forecast(points, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
-		"weekly": forecast(points, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
+	byAccount := map[string][]quotaPoint{}
+	for _, point := range h.readQuotaHistory() {
+		name := point.Account
+		if name == "" {
+			name = "default"
+		}
+		byAccount[name] = append(byAccount[name], point)
 	}
+	reportFor := func(series []quotaPoint) map[string]any {
+		return map[string]any{
+			"points": series,
+			"daily":  forecast(series, 24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.DailyRemaining) }, func(p quotaPoint) int64 { return p.DailyResetAt }),
+			"weekly": forecast(series, 7*24*time.Hour, func(p quotaPoint) float64 { return floatOr0(p.WeeklyRemaining) }, func(p quotaPoint) int64 { return p.WeeklyResetAt }),
+		}
+	}
+	names := make([]string, 0, len(byAccount))
+	for name := range byAccount {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	accounts := make(map[string]any, len(names))
+	for _, name := range names {
+		accounts[name] = reportFor(byAccount[name])
+	}
+	out := map[string]any{"accounts": accounts}
+	// 镜像跟随最新鲜的序列而非名序首个：被移出号池的号曲线停更，
+	// 名序首个可能恰是那条冻住的序列，兼容视图会定格在旧数据上。
+	// 尾点 At 相同取名序靠前者——names 已排序，先到最大值的胜出。
+	freshest, freshestAt := "", int64(-1)
+	for _, name := range names {
+		if at := byAccount[name][len(byAccount[name])-1].At; at > freshestAt {
+			freshest, freshestAt = name, at
+		}
+	}
+	if freshest != "" {
+		mirror := accounts[freshest].(map[string]any)
+		out["points"] = mirror["points"]
+		out["daily"] = mirror["daily"]
+		out["weekly"] = mirror["weekly"]
+	}
+	return out
 }
 
 // floatAny 把 fetchUserStatus 产出的宽松数值统一成 float64。
