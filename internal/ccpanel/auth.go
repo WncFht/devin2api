@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -166,8 +165,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Token    string `json:"token"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request format")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	switch req.Mode {

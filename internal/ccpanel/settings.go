@@ -892,8 +892,7 @@ func (h *Handler) adminUpdateSetting(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value string `json:"value"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if err := h.settings.set(chi.URLParam(r, "key"), req.Value); err != nil {
@@ -935,8 +934,7 @@ func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req map[string]string
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	keys := make([]string, 0, len(req))

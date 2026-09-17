@@ -1,7 +1,6 @@
 package ccpanel
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -38,8 +37,7 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		CredentialsFile string `json:"credentials_file"`
 		Disabled        bool   `json:"disabled"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if !accountNamePattern.MatchString(req.Name) {
@@ -81,8 +79,7 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		CredentialsFile *string `json:"credentials_file"`
 		Disabled        *bool   `json:"disabled"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if req.Token == nil && req.CredentialsFile == nil && req.Disabled == nil {

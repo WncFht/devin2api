@@ -122,8 +122,7 @@ func (h *Handler) adminCreateAuthToken(w http.ResponseWriter, r *http.Request) {
 		Anonymous     bool     `json:"anonymous"`
 		tokenLimitFields
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Description) == "" {
@@ -193,8 +192,7 @@ func (h *Handler) adminUpdateAuthToken(w http.ResponseWriter, r *http.Request) {
 		AllowedModels *[]string         `json:"allowed_models"`
 		tokenLimitFields
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	if !req.validateLimits(w) {

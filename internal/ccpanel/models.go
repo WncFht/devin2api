@@ -116,8 +116,7 @@ func (h *Handler) adminPutModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req modelRegistryPut
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	enabled := true
@@ -330,8 +329,7 @@ func (h *Handler) runModelProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req modelTestRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	model := strings.TrimSpace(req.Model)
@@ -360,8 +358,7 @@ func (h *Handler) adminModelChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req modelChatRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid json body")
+	if !decodeJSON(w, r, &req) {
 		return
 	}
 	model := strings.TrimSpace(req.Model)

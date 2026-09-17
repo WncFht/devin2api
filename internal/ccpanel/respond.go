@@ -36,3 +36,14 @@ func writeEnvelope(w http.ResponseWriter, code int, body apiResponse) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+// decodeJSON 解码写端点的 JSON 请求体（上限 1MB）；失败时已写 400
+// 响应并返回 false。错误文案不参与前端契约（前端只按 success/error
+// 信封展示），全部端点统一为 invalid json body。
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(dst); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid json body")
+		return false
+	}
+	return true
+}
