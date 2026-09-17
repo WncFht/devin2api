@@ -319,10 +319,10 @@ if unimpl "$code"; then
 elif [[ "$code" =~ ^2 ]]; then
 	wait_name t1 present && ok "POST t1 → GET 列出" || bad "POST t1 后 GET 未见 t1"
 	rt="$(curl -sf "${AUTH[@]}" "$BASE/admin/runtime-metrics" 2>/dev/null || true)"
-	if jqr '.accounts|keys[]' "$rt" | grep -qx t1; then
+	if jqr '.data.accounts|keys[]' "$rt" | grep -qx t1; then
 		ok "runtime-metrics accounts.t1 在册"
 	else
-		bad "runtime-metrics 缺 accounts.t1（有: $(jqr '.accounts|keys[]' "$rt" | paste -sd, -)）"
+		bad "runtime-metrics 缺 accounts.t1（有: $(jqr '.data.accounts|keys[]' "$rt" | paste -sd, -)）"
 	fi
 	# 冻结契约：重名（含墓碑名）409、非法名/校验失败 400。
 	code="$(req POST /admin/accounts '{"name":"t1","token":"e2e-fake-token-t1b"}')"
