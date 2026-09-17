@@ -180,7 +180,17 @@
       display: none;
     }
     .token-cost-prefix {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
       color: var(--neutral-500);
+      font-weight: 600;
+      line-height: 1;
+      pointer-events: none;
+    }
+    .token-limit-input-line:has(> .token-cost-prefix) > .form-input {
+      padding-left: 24px;
     }
     .token-limit-control {
       display: flex;
@@ -200,27 +210,17 @@
     }
     .token-limit-input-line {
       display: grid;
-      grid-template-columns: 14px minmax(0, 1fr) max-content;
+      grid-template-columns: minmax(0, 1fr) max-content;
       align-items: center;
       gap: 8px;
       min-width: 0;
       width: 100%;
+      position: relative;
     }
     .token-limit-input-line .field-grow {
       flex: 1 1 auto;
       min-width: 0;
       width: 100%;
-    }
-    .token-limit-prefix-slot {
-      flex: 0 0 14px;
-      width: 14px;
-      color: var(--neutral-500);
-      font-weight: 600;
-      text-align: center;
-      line-height: 1;
-    }
-    .token-limit-prefix-slot--empty {
-      visibility: hidden;
     }
     .token-limit-meta {
       display: flex;
@@ -543,6 +543,24 @@
       width: 90%;
       max-width: none;
     }
+    /* 创建模态字段多、整体超高：同 token-edit-modal 的 flex 列布局，
+       body 内部滚动，header/footer 钉住不被卷走 */
+    #createModal .modal-content {
+      display: flex;
+      flex-direction: column;
+      margin: 12px auto;
+      max-height: calc(100vh - 24px);
+      overflow: hidden;
+    }
+    #createModal .modal-header,
+    #createModal .modal-footer {
+      flex-shrink: 0;
+    }
+    #createModal .modal-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
     .token-edit-modal {
       display: flex;
       flex-direction: column;
@@ -656,18 +674,7 @@
       background: var(--field-bg);
       color: var(--neutral-900);
     }
-    .token-edit-cost-prefix {
-      color: var(--neutral-500);
-    }
-    .token-edit-cost-meta {
-      display: grid;
-      grid-template-columns: 14px minmax(0, 1fr) max-content;
-      align-items: center;
-      gap: 8px;
-      width: 100%;
-    }
     .token-edit-cost-used {
-      grid-column: 2;
       color: var(--neutral-600);
       font-size: 13px;
       min-width: 0;

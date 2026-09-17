@@ -107,7 +107,7 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <span class="token-cost-prefix" aria-hidden="true">$</span>
               <input type="number" id="token5hCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -118,7 +118,7 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <span class="token-cost-prefix" aria-hidden="true">$</span>
               <input type="number" id="tokenDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -129,7 +129,7 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <span class="token-cost-prefix" aria-hidden="true">$</span>
               <input type="number" id="tokenWeeklyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -140,7 +140,7 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <span class="token-cost-prefix" aria-hidden="true">$</span>
               <input type="number" id="tokenMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -151,7 +151,7 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-cost-prefix token-limit-prefix-slot">$</span>
+              <span class="token-cost-prefix" aria-hidden="true">$</span>
               <input type="number" id="tokenCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -162,7 +162,6 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
               <input type="number" id="tokenMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -173,7 +172,6 @@
           <label class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
-              <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
               <input type="number" id="tokenMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
               <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
             </div>
@@ -274,12 +272,11 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <span class="token-cost-prefix" aria-hidden="true">$</span>
                   <input type="number" id="edit5hCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
                 <div class="token-limit-meta token-edit-cost-meta">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <span id="edit5hCostUsedDisplay" class="token-edit-cost-used"></span>
                 </div>
               </div>
@@ -289,12 +286,11 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <span class="token-cost-prefix" aria-hidden="true">$</span>
                   <input type="number" id="editDailyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
                 <div class="token-limit-meta token-edit-cost-meta">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <span id="editDailyCostUsedDisplay" class="token-edit-cost-used"></span>
                 </div>
               </div>
@@ -304,12 +300,11 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <span class="token-cost-prefix" aria-hidden="true">$</span>
                   <input type="number" id="editWeeklyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
                 <div class="token-limit-meta token-edit-cost-meta">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <span id="editWeeklyCostUsedDisplay" class="token-edit-cost-used"></span>
                 </div>
               </div>
@@ -319,12 +314,11 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <span class="token-cost-prefix" aria-hidden="true">$</span>
                   <input type="number" id="editMonthlyCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
                 <div class="token-limit-meta token-edit-cost-meta">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <span id="editMonthlyCostUsedDisplay" class="token-edit-cost-used"></span>
                 </div>
               </div>
@@ -334,12 +328,11 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
-                  <span class="token-edit-cost-prefix token-limit-prefix-slot">$</span>
+                  <span class="token-cost-prefix" aria-hidden="true">$</span>
                   <input type="number" id="editCostLimitUSD" class="form-input field-grow" min="0" step="0.01" data-i18n-placeholder="tokens.costLimitPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
                 <div class="token-limit-meta token-edit-cost-meta">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <span id="editCostUsedDisplay" class="token-edit-cost-used"></span>
                 </div>
               </div>
@@ -349,7 +342,6 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
               <div class="form-row-inline__content token-limit-control">
                 <div class="token-limit-input-line">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <input type="number" id="editMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
@@ -360,7 +352,6 @@
               <label class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
               <div class="form-row-inline__content token-limit-control">
                 <div class="token-limit-input-line">
-                  <span class="token-limit-prefix-slot token-limit-prefix-slot--empty" aria-hidden="true"></span>
                   <input type="number" id="editMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
                   <span class="token-limit-hint token-limit-hint--inline" data-i18n="tokens.zeroUnlimitedHint">0 表示无限制</span>
                 </div>
