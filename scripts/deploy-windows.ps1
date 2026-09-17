@@ -364,7 +364,7 @@ function Test-Upstream([int]$p) {
     else { Warn "服务已运行但 /v1/models 返回 HTTP $(if ($code) { $code } else { '<timeout>' })——上游链路未通过" }
     $src = Get-TokenSource $RuntimeConfig
     if ($src -eq '') { Warn "未配置 token：见 README「提供 Devin token」；空 token 启动的实例配置后须重启" }
-    else { Warn "token 来源 $src——可能已过期；排障看 logs\index.jsonl 与 /web" }
+    else { Warn "token 来源 $src——可能已过期；排障看 /web 日志页或 sqlite3 查 logs 表" }
     return $false
 }
 
