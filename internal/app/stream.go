@@ -27,13 +27,16 @@ var keepaliveInterval = 10 * time.Second
 // 仅用于刷新链路上各段的空闲计时器。
 var sseKeepalive = []byte(": keepalive\n\n")
 
-// streamWriter 是流式响应的唯一写出方；committed 标记首字节是否已把
-// HTTP 状态提交为 200——提交后错误只能以 SSE error 事件下发。
+// streamWriter 是流式响应的唯一写出方。两个提交位回答不同问题：
+// committed 标记是否已尝试过写出——一次写尝试后无论成败连接多半已死，
+// HTTP 状态行不再可改，错误只能走带内事件/错误体；delivered 标记是否有
+// 字节真正写出——断连按它分 499/200：什么都没送达时记 499 才是线上实况。
 type streamWriter struct {
 	writer    http.ResponseWriter
 	flusher   http.Flusher
 	recorder  *debuglog.Recorder
 	committed bool
+	delivered bool
 	// upstreamOpen 标记上游流已建立：保活只在此后武装——建连前的静默期
 	// 写任何字节都会提前提交 200，限流闩/上游 connect 失败便无法再以
 	// 真实状态码（429 等）下发。
@@ -51,6 +54,7 @@ func (out *streamWriter) write(p []byte) error {
 	if _, err := out.writer.Write(p); err != nil {
 		return err
 	}
+	out.delivered = true
 	out.bytes += len(p)
 	out.recorder.AddClientBytes(int64(len(p)))
 	out.flusher.Flush()
@@ -62,6 +66,41 @@ func (out *streamWriter) write(p []byte) error {
 func (out *streamWriter) writeContent(p []byte) error {
 	out.recorder.NoteClientLatency()
 	return out.write(p)
+}
+
+// finishDisconnected 收口客户端断连的统一归因：结果记 disconnected；
+// 状态码按线上实况——已有字节送达记 200（响应行已发出，断连不伪装成
+// 5xx），什么都没送达记 499（nginx 约定的客户端关闭）。err 是调用方
+// 手上的断连证据：ctx 取消原因、与取消竞速到达的上游错误、或写出失败。
+func (out *streamWriter) finishDisconnected(completion *debuglog.Completion, err error) {
+	completion.Result = "disconnected"
+	if out.delivered {
+		completion.StatusCode = http.StatusOK
+	} else {
+		completion.StatusCode = 499
+	}
+	out.recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
+}
+
+// sseEventSink 是写出方的事件级下沉口：实现者（WS 写出方）按编码后的
+// (name, data) 直接收事件，不再经 SSE 文本渲染与回解往返。写出方不
+// 实现它时事件仍走 AppendSSE 文本帧。
+type sseEventSink interface {
+	WriteSSEEvent(name string, data []byte) error
+}
+
+// writeEvent 把一条编码后事件直交 sink，与 write 同等地记提交位与
+// 字节数——对 WS 而言「送达」就是已有事件帧写到连接上。
+func (out *streamWriter) writeEvent(sink sseEventSink, name string, data []byte) error {
+	out.recorder.NoteClientLatency()
+	out.committed = true
+	if err := sink.WriteSSEEvent(name, data); err != nil {
+		return err
+	}
+	out.delivered = true
+	out.bytes += len(data)
+	out.recorder.AddClientBytes(int64(len(data)))
+	return nil
 }
 
 // awaitEvent 等待上游下一个事件；等待期间按 ticker 节奏写保活帧。
@@ -189,15 +228,7 @@ func (application *App) streamCompletion(
 		// 分类记录映成 499，走 writeLoggedError 就把断连
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
 		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
-			completion.Result = "disconnected"
-			// 未提交记 499（客户端关闭）；上游已开口后心跳可能已提交
-			// 200——按线上实况记，断连不伪装成 5xx。
-			if !out.committed {
-				completion.StatusCode = 499
-			} else {
-				completion.StatusCode = http.StatusOK
-			}
-			recorder.WriteError(debuglog.ErrStageClientDisconnected, firstErr)
+			out.finishDisconnected(completion, firstErr)
 			return
 		}
 		firstFailure := llm.Classify(firstErr)
@@ -221,13 +252,7 @@ func (application *App) streamCompletion(
 		// 上游把断连物化成首事件错误时同样按取消归因——泵投递与 ctx
 		// 完成存在竞态（取消可能先落成错误事件再被看见），ctx 是兜底。
 		if streamCtx.Err() != nil {
-			completion.Result = "disconnected"
-			if !out.committed {
-				completion.StatusCode = 499
-			} else {
-				completion.StatusCode = http.StatusOK
-			}
-			recorder.WriteError(debuglog.ErrStageClientDisconnected, context.Cause(streamCtx))
+			out.finishDisconnected(completion, context.Cause(streamCtx))
 			return
 		}
 		failure := llm.FailureOf(firstEvent.Error)
@@ -272,8 +297,7 @@ func (application *App) streamCompletion(
 		switch {
 		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
 			// ctx 取消收口：写出/编码错误与取消同时发生时同样归因断连。
-			completion.Result = "disconnected"
-			recorder.WriteError(debuglog.ErrStageClientDisconnected, streamErr)
+			out.finishDisconnected(completion, streamErr)
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
@@ -299,6 +323,9 @@ func writeProtocolStream(
 	preludeErr error,
 ) (*llm.AssistantMessage, error) {
 	encoder := protocol.NewStreamEncoder(model, options)
+	// WS 写出方按事件下沉：SSEEvent 直交 sink，省掉文本渲染与回解往返；
+	// HTTP 写出方不实现该接口，事件照常并入 SSE 批次。
+	sink, _ := out.writer.(sseEventSink)
 	var latest *llm.AssistantMessage
 	// batch 累计本批次的编码字节：泵 channel 持续供给时多个事件并入同一批，
 	// 一次 Write+Flush；channel 空了立即落盘，空闲路径与逐事件写出等价。
@@ -370,7 +397,13 @@ func writeProtocolStream(
 			return latest, encodeErr
 		}
 		for _, encoded := range encodedEvents {
-			batch = protocol.AppendSSE(batch, encoded.Name, encoded.Data)
+			if sink != nil {
+				if err := out.writeEvent(sink, encoded.Name, encoded.Data); err != nil {
+					return latest, err
+				}
+			} else {
+				batch = protocol.AppendSSE(batch, encoded.Name, encoded.Data)
+			}
 			if encoded.Name == common.SSEDone {
 				recorder.AppendJSONL(debuglog.StageHTTPResponse, encoded.Name, string(encoded.Data))
 			} else {

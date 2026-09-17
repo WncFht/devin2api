@@ -14,6 +14,10 @@ import (
 
 // protocolEncoder 抽象流式与非流式协议编码。
 type protocolEncoder interface {
+	// DecodeRequest 把该协议的请求体解码为中间请求和公共选项。
+	// collectDropped 决定是否收集顶层未消费字段（Dropped 的唯一读者是
+	// debuglog 请求投影）——debug 关时不值得为记账再做一遍全量扫描。
+	DecodeRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error)
 	// NewStreamEncoder 创建与本次 HTTP 请求绑定的流式编码器。
 	NewStreamEncoder(model string, options protocolOptions) streamEncoder
 	// EncodeFinal 把最终助手消息编码为完整的非流式 JSON 响应体。
@@ -41,7 +45,15 @@ type protocolEncoder interface {
 	// AppendSSE 把单个 SSE 事件追加编码到 dst；写方持有 dst 的所有权，
 	// 避免每帧先分配临时切片再整体拷贝进批次缓冲。
 	AppendSSE(dst []byte, name string, data []byte) []byte
+	// NonStreamHeartbeat 返回非流式响应等待上游期间周期性写出的保活
+	// 载荷；nil 表示保持静默、不心跳。
+	NonStreamHeartbeat() []byte
 }
+
+// nonStreamHeartbeatNewline 是 OpenAI 系非流式响应的保活载荷："\n" 是
+// JSON 响应体的合法前导空白，喂 Codex 约 30s 无字节弃连的窗口，
+// 不污染最终文档。
+var nonStreamHeartbeatNewline = []byte("\n")
 
 // httpError 是 app 层归一化后的错误视图：协议层只负责把同一组字段
 // 装进各自的信封。ClientFixable 为真时错误类型统一为
@@ -106,6 +118,30 @@ type protocolOptions struct {
 // responsesProtocol 实现 OpenAI Responses API 协议。
 type responsesProtocol struct{}
 
+func (p responsesProtocol) DecodeRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := responses.DecodeRequest(data, collectDropped)
+	if err != nil {
+		return llm.RequestMessages{}, protocolOptions{}, err
+	}
+	// HTTP 路径无响应存储（store=false 已如实声明），previous_response_id
+	// 意味着客户端只发了增量 input——静默当全量会把上下文丢光，
+	// 显式拒绝比带病执行便宜。WS 会话在规范化时已剥掉该字段做
+	// 本地合并，不会走到这里。
+	if adapted.Options.PreviousResponseID != "" {
+		return llm.RequestMessages{}, protocolOptions{}, &llm.Failure{
+			Code: "invalid_argument",
+			Message: fmt.Sprintf(
+				"previous_response_id %q requires a server-side response store; this proxy always reports store=false — resend the full conversation input without previous_response_id",
+				adapted.Options.PreviousResponseID),
+		}
+	}
+	return adapted.Context, protocolOptions{
+		Stream:       adapted.Options.Stream,
+		IncludeUsage: false,
+		ToolNameMap:  adapted.Options.ToolNameMap,
+	}, nil
+}
+
 func (p responsesProtocol) NewStreamEncoder(model string, options protocolOptions) streamEncoder {
 	return responses.NewStreamEncoder(model, options.ToolNameMap)
 }
@@ -128,8 +164,21 @@ func (p responsesProtocol) AppendSSE(dst []byte, name string, data []byte) []byt
 	return appendNamedSSE(dst, name, data)
 }
 
+func (p responsesProtocol) NonStreamHeartbeat() []byte { return nonStreamHeartbeatNewline }
+
 // chatProtocol 实现 OpenAI Chat Completions 协议。
 type chatProtocol struct{}
+
+func (p chatProtocol) DecodeRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := chat.DecodeRequest(data, collectDropped)
+	if err != nil {
+		return llm.RequestMessages{}, protocolOptions{}, err
+	}
+	return adapted.Context, protocolOptions{
+		Stream:       adapted.Options.Stream,
+		IncludeUsage: adapted.Options.IncludeUsage,
+	}, nil
+}
 
 func (p chatProtocol) NewStreamEncoder(model string, options protocolOptions) streamEncoder {
 	return chat.NewStreamEncoder(model, options.IncludeUsage)
@@ -159,8 +208,21 @@ func (p chatProtocol) AppendSSE(dst []byte, name string, data []byte) []byte {
 	return append(dst, '\n', '\n')
 }
 
+func (p chatProtocol) NonStreamHeartbeat() []byte { return nonStreamHeartbeatNewline }
+
 // anthropicProtocol 实现 Anthropic Messages 协议。
 type anthropicProtocol struct{}
+
+func (p anthropicProtocol) DecodeRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
+	adapted, err := messages.DecodeRequest(data, collectDropped)
+	if err != nil {
+		return llm.RequestMessages{}, protocolOptions{}, err
+	}
+	return adapted.Context, protocolOptions{
+		Stream:       adapted.Options.Stream,
+		IncludeUsage: false,
+	}, nil
+}
 
 func (p anthropicProtocol) NewStreamEncoder(model string, _ protocolOptions) streamEncoder {
 	return messages.NewStreamEncoder(model)
@@ -194,6 +256,12 @@ func (p anthropicProtocol) AppendSSE(dst []byte, name string, data []byte) []byt
 	return appendNamedSSE(dst, name, data)
 }
 
+// Anthropic 非流式在上游思考窗口保持静默：其 SDK 系客户端容忍分钟级
+// 首字等待，而任何提前写出的字节都把状态提交为 200，之后的失败只能以
+// 「200 + 错误体」下发——Claude Code 把它判为 malformed response 并
+// 终止整轮，不可重试。
+func (p anthropicProtocol) NonStreamHeartbeat() []byte { return nil }
+
 // appendNamedSSE 把单条带 event 字段的 SSE 帧追加编码到 dst——
 // fmt.Appendf 每帧要过格式串解析与 reflect 装箱，直拼省掉这层开销。
 func appendNamedSSE(dst []byte, name string, data []byte) []byte {
@@ -202,55 +270,4 @@ func appendNamedSSE(dst []byte, name string, data []byte) []byte {
 	dst = append(dst, "\ndata: "...)
 	dst = append(dst, data...)
 	return append(dst, '\n', '\n')
-}
-
-// decodeRequest 把具体协议的解码结果统一为中间请求和公共选项。
-// collectDropped 决定是否收集顶层未消费字段（Dropped 的唯一读者是
-// debuglog 请求投影）——debug 关时不值得为记账再做一遍全量扫描。
-type decodeRequestFunc func(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error)
-
-func decodeResponsesRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := responses.DecodeRequest(data, collectDropped)
-	if err != nil {
-		return llm.RequestMessages{}, protocolOptions{}, err
-	}
-	// HTTP 路径无响应存储（store=false 已如实声明），previous_response_id
-	// 意味着客户端只发了增量 input——静默当全量会把上下文丢光，
-	// 显式拒绝比带病执行便宜。WS 会话在规范化时已剥掉该字段做
-	// 本地合并，不会走到这里。
-	if adapted.Options.PreviousResponseID != "" {
-		return llm.RequestMessages{}, protocolOptions{}, &llm.Failure{
-			Code: "invalid_argument",
-			Message: fmt.Sprintf(
-				"previous_response_id %q requires a server-side response store; this proxy always reports store=false — resend the full conversation input without previous_response_id",
-				adapted.Options.PreviousResponseID),
-		}
-	}
-	return adapted.Context, protocolOptions{
-		Stream:       adapted.Options.Stream,
-		IncludeUsage: false,
-		ToolNameMap:  adapted.Options.ToolNameMap,
-	}, nil
-}
-
-func decodeChatRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := chat.DecodeRequest(data, collectDropped)
-	if err != nil {
-		return llm.RequestMessages{}, protocolOptions{}, err
-	}
-	return adapted.Context, protocolOptions{
-		Stream:       adapted.Options.Stream,
-		IncludeUsage: adapted.Options.IncludeUsage,
-	}, nil
-}
-
-func decodeAnthropicRequest(data []byte, collectDropped bool) (llm.RequestMessages, protocolOptions, error) {
-	adapted, err := messages.DecodeRequest(data, collectDropped)
-	if err != nil {
-		return llm.RequestMessages{}, protocolOptions{}, err
-	}
-	return adapted.Context, protocolOptions{
-		Stream:       adapted.Options.Stream,
-		IncludeUsage: false,
-	}, nil
 }
