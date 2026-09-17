@@ -72,3 +72,7 @@ __pycache__/
 /scripts/toolalign/results-*.jsonl
 
 /outputs/quota-probe-*.jsonl
+
+# panel-verify 前端验证套件：node 依赖与失败截图可再生
+/scripts/panel-verify/node_modules/
+/scripts/panel-verify/shots/

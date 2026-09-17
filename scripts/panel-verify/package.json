@@ -1,0 +1,10 @@
+{
+  "name": "panel-verify",
+  "private": true,
+  "version": "0.0.0",
+  "description": "ccpanel 前端自包含验证套件：临时实例 + playwright 检查",
+  "type": "commonjs",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

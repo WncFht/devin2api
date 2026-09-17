@@ -92,16 +92,17 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 会话排障与上游调研沉淀下来的手工工具，不进 CI：
 
-| 脚本                              | 干什么                                                                                                                                                                                         |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033，key 自动读 config.yaml），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步 |
-| `index-stream-stats.py`           | join 请求目录与 index.jsonl 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--logs-dir` 默认按平台探测                                              |
-| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                |
-| `drift-corpus-scan.py`            | 扫 logs 语料统计各协议的漂移形状分布（`--logs-dir`）                                                                                                                                           |
-| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                          |
-| `remote-logs.sh`                  | fht-mba 生产实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish                                                                                              |
-| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可 `--host` 走 ssh                                                                                           |
-| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                  |
+| 脚本                              | 干什么                                                                                                                                                                                                               |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033，key 自动读 config.yaml），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步                       |
+| `index-stream-stats.py`           | join 请求目录与 index.jsonl 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--logs-dir` 默认按平台探测                                                                    |
+| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                      |
+| `drift-corpus-scan.py`            | 扫 logs 语料统计各协议的漂移形状分布（`--logs-dir`）                                                                                                                                                                 |
+| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                |
+| `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/` |
+| `remote-logs.sh`                  | fht-mba 生产实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish                                                                                                                    |
+| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可 `--host` 走 ssh                                                                                                                 |
+| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                        |
 
 脏树时拿干净构建验证的配方：`git worktree add $W/wt HEAD && go build -C $W/wt -o $W/devin-2api ./cmd/devin-2api` 出 HEAD 态二进制 → scratch 目录备一份 `config.yaml`（`listen` 换空闲端口、`debug.enabled: true`）→ `-state-dir .` 让 logs 落本地 → `(nohup … &)` 起 → 测完 `git worktree remove --force` 收尾。多人共用工作树时这是不动主树的验证通道。
 
