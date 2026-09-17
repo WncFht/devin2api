@@ -909,7 +909,27 @@
     }
 
     .model-tag.model-redirected {
-      padding-right: 18px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-wrap: wrap;
+      max-width: 100%;
+    }
+
+    .model-tag.model-redirected .model-text {
+      max-width: 120px;
+    }
+
+    .model-redirect-arrow {
+      flex-shrink: 0;
+      color: var(--warning-600);
+      font-weight: 700;
+      font-size: 0.9em;
+      line-height: 1;
+    }
+
+    .model-text--actual {
+      font-weight: 600;
     }
 
     .model-text {
@@ -937,17 +957,6 @@
     .logs-table .logs-col-model>.model-display .model-badges {
       top: 2px;
       right: 4px;
-    }
-
-    /* 重定向角标 - 显示在右上角 */
-    .redirect-badge {
-      background: var(--warning-500);
-      color: white;
-      font-size: 0.65em;
-      padding: 2px 4px;
-      border-radius: 8px;
-      font-weight: 600;
-      line-height: 1;
     }
 
     .thinking-effort-badge {

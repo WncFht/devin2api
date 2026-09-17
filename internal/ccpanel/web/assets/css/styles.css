@@ -4287,18 +4287,6 @@ a.model-tag.model-link:hover {
   border-color: rgba(59, 130, 246, 0.5);
 }
 
-/* 模型重定向角标 */
-.model-tag.model-redirected {
-  position: relative;
-}
-
-.redirect-badge {
-  font-size: 10px;
-  color: var(--primary-400);
-  margin-left: 2px;
-  font-weight: bold;
-}
-
 .pagination-controls {
   display: flex;
   align-items: center;

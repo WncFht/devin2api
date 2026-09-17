@@ -541,8 +541,8 @@ function isPrefixOrSuffixVariant(model, actualModel) {
   return prefixLen > 0 && suffixLen > 0 && prefixLen + suffixLen === short.length;
 }
 
-// 模型列只渲染请求模型一个 tag：重定向落点收进 tag 悬浮提示，WS 传输与
-// 思考等级以角标呈现。
+// 模型列渲染「请求模型」tag；重定向时落点模型直接跟在 ↪ 后可见
+// （原名仍进 tag 悬浮提示），WS 传输与思考等级以角标呈现。
 function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningTokens, upstreamWebsocket) {
   if (!model) {
     return '<span style="color: var(--neutral-500);">-</span>';
@@ -567,21 +567,19 @@ function buildLogModelDisplay(model, actualModel, thinkingEffort, reasoningToken
     titleParts.push(`${t('logs.tip.reasoningTokens')}: ${tokens}`);
   }
   const title = titleParts.length > 0 ? ` title="${titleParts.join('&#10;')}"` : '';
-  // 徽标自带 title：模型 tag 的悬浮提示覆盖不到角标区域，悬停徽标也要能
-  // 直接看到转发落点 / WS 通道说明。
-  const redirectBadge = redirected
-    ? `<sup class="redirect-badge" title="${escapeHtml(i18nText('logs.tip.redirectedTo', '转发至 {model}', { model: actualModel }))}">↪</sup>`
+  const redirectTarget = redirected
+    ? `<span class="model-redirect-arrow" aria-hidden="true">↪</span><span class="model-text model-text--actual">${escapeHtml(actualModel)}</span>`
     : '';
   const wsBadge = upstreamWebsocket === true
     ? `<sup class="log-channel-badge log-channel-websocket-badge" title="${escapeHtml(i18nText('logs.tip.upstreamWebsocket', '上游走 WebSocket 通道'))}">ws</sup>`
     : '';
-  const badgeHtml = redirectBadge || wsBadge || effort || tokens > 0
-    ? `<span class="model-badges">${redirectBadge}${wsBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
+  const badgeHtml = wsBadge || effort || tokens > 0
+    ? `<span class="model-badges">${wsBadge}${buildThinkingEffortBadge(effort, tokens)}</span>`
     : '';
 
   return `<span class="model-display">
       <span class="${classes.join(' ')}"${title}>
-        <span class="model-text">${escapeHtml(model)}</span>
+        <span class="model-text">${escapeHtml(model)}</span>${redirectTarget}
       </span>
       ${badgeHtml}
     </span>`;

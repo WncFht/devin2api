@@ -947,7 +947,6 @@ window.I18N_LOCALES['zh-CN'] = {
   'logs.exportJson': '导出JSON',
   'logs.sourceManualTest': '手动测试',
   'logs.colSettingsLocked': '该列承载列设置入口，固定显示',
-  'logs.tip.redirectedTo': '转发至 {model}',
   'logs.tip.upstreamWebsocket': '上游走 WebSocket 通道',
   'logs.stage.httpRead': '读取请求失败',
   'logs.stage.httpDecode': '请求解码失败',

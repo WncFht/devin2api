@@ -947,7 +947,6 @@ window.I18N_LOCALES['en'] = {
   'logs.exportJson': 'Export JSON',
   'logs.sourceManualTest': 'Manual test',
   'logs.colSettingsLocked': 'This column hosts the column-settings entry and stays visible',
-  'logs.tip.redirectedTo': 'Redirected to {model}',
   'logs.tip.upstreamWebsocket': 'Upstream over WebSocket',
   'logs.stage.httpRead': 'Request read failed',
   'logs.stage.httpDecode': 'Request decode failed',
