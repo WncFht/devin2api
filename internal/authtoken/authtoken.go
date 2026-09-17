@@ -60,11 +60,33 @@ type Token struct {
 	MonthlyLimitMicroUSD int64 `json:"cost_monthly_limit_micro_usd"`
 	MonthlyPeriodStart   int64 `json:"cost_monthly_period_start"`
 
-	AllowedModels  []string `json:"allowed_models,omitempty"`
-	MaxConcurrency int      `json:"max_concurrency"`
+	// 5h/weekly 是锚定滚动窗口（区别于日历日/自然月）：锚点为窗口
+	// 过期后的首次记账时刻，now > anchor+窗口长即过期，过期窗口用量
+	// 读取时视为 0——与日历窗口同为懒惰重置，只是起点由流量决定。
+	Cost5hUsedMicroUSD      int64 `json:"cost_5h_used_micro_usd"`
+	Cost5hLimitMicroUSD     int64 `json:"cost_5h_limit_micro_usd"`
+	Cost5hAnchor            int64 `json:"cost_5h_anchor"`
+	CostWeeklyUsedMicroUSD  int64 `json:"cost_weekly_used_micro_usd"`
+	CostWeeklyLimitMicroUSD int64 `json:"cost_weekly_limit_micro_usd"`
+	CostWeeklyPeriodStart   int64 `json:"cost_weekly_period_start"`
 
-	inflight int64 // 在途并发计数，不序列化
+	AllowedModels []string `json:"allowed_models,omitempty"`
+	// MaxConcurrency 是同时在途请求上限（占槽/还槽）；MaxRPM 是每分钟
+	// 请求数上限（固定分钟桶计数，重启归零不持久化）。0 均为不限制。
+	MaxConcurrency int `json:"max_concurrency"`
+	MaxRPM         int `json:"max_rpm"`
+
+	inflight  int64 // 在途并发计数，不序列化
+	rpmBucket int64 // 当前 RPM 计数的分钟桶（unix 秒/60），不序列化
+	rpmCount  int64 // 当前分钟桶内已计请求数，不序列化
 }
+
+// AnonymousHash 是空明文的存储哈希：Hash 等于它的行即「匿名通道」——
+// 未携带凭据的 /v1 请求按该行准入。明文为空串，没有可出示的令牌值。
+var AnonymousHash = HashToken("")
+
+// IsAnonymous 报告该令牌是不是匿名通道行。
+func (t *Token) IsAnonymous() bool { return t.Hash == AnonymousHash }
 
 // View 是令牌对外的 JSON 形状（ccLoad authTokenJSON 同形）：
 // 内部 micro 字段折算成 *_usd 浮点；PeakRPM/AvgRPM/RecentRPM 是
@@ -95,11 +117,19 @@ type View struct {
 	CostDailyLimitUSD        float64   `json:"cost_daily_limit_usd"`
 	CostMonthlyUsedUSD       float64   `json:"cost_monthly_used_usd"`
 	CostMonthlyLimitUSD      float64   `json:"cost_monthly_limit_usd"`
+	Cost5hUsedUSD            float64   `json:"cost_5h_used_usd"`
+	Cost5hLimitUSD           float64   `json:"cost_5h_limit_usd"`
+	CostWeeklyUsedUSD        float64   `json:"cost_weekly_used_usd"`
+	CostWeeklyLimitUSD       float64   `json:"cost_weekly_limit_usd"`
 	PeakRPM                  float64   `json:"peak_rpm,omitempty"`
 	AvgRPM                   float64   `json:"avg_rpm,omitempty"`
 	RecentRPM                float64   `json:"recent_rpm,omitempty"`
 	AllowedModels            []string  `json:"allowed_models,omitempty"`
 	MaxConcurrency           int       `json:"max_concurrency"`
+	MaxRPM                   int       `json:"max_rpm"`
+	// Anonymous 标记该行是匿名通道（空明文占位行）——面板据此显示
+	// "(anonymous)" 而非掩码哈希，且不展示任何可复制的凭据。
+	Anonymous bool `json:"anonymous,omitempty"`
 }
 
 // API 返回对外视图：micro 窗口折算成 USD，窗口周期不匹配时用量归 0。
@@ -140,9 +170,36 @@ func (t *Token) API() View {
 		CostDailyLimitUSD:        float64(t.DailyLimitMicroUSD) / 1e6,
 		CostMonthlyUsedUSD:       float64(monthlyUsed) / 1e6,
 		CostMonthlyLimitUSD:      float64(t.MonthlyLimitMicroUSD) / 1e6,
+		Cost5hUsedUSD:            float64(anchoredWindowUsed(t.Cost5hUsedMicroUSD, t.Cost5hAnchor, cost5hWindow, now)) / 1e6,
+		Cost5hLimitUSD:           float64(t.Cost5hLimitMicroUSD) / 1e6,
+		CostWeeklyUsedUSD:        float64(anchoredWindowUsed(t.CostWeeklyUsedMicroUSD, t.CostWeeklyPeriodStart, costWeeklyWindow, now)) / 1e6,
+		CostWeeklyLimitUSD:       float64(t.CostWeeklyLimitMicroUSD) / 1e6,
 		AllowedModels:            t.AllowedModels,
 		MaxConcurrency:           t.MaxConcurrency,
+		MaxRPM:                   t.MaxRPM,
+		Anonymous:                t.IsAnonymous(),
 	}
+}
+
+// 锚定滚动窗口（5h/weekly）的窗口长。
+const (
+	cost5hWindow     = 5 * time.Hour
+	costWeeklyWindow = 7 * 24 * time.Hour
+)
+
+// anchoredWindowExpired 报告锚定滚动窗口是否已过期：无锚点（尚未记账）
+// 或 now 超过 anchor+window 即过期。
+func anchoredWindowExpired(anchor int64, window time.Duration, now time.Time) bool {
+	return anchor <= 0 || now.UnixMilli() > anchor+window.Milliseconds()
+}
+
+// anchoredWindowUsed 返回锚定滚动窗口的当前用量：过期窗口按 0 计——
+// 与日历窗口同为懒惰重置。
+func anchoredWindowUsed(used, anchor int64, window time.Duration, now time.Time) int64 {
+	if anchoredWindowExpired(anchor, window, now) {
+		return 0
+	}
+	return used
 }
 
 // KeyHash 返回该令牌在 index.jsonl 里的 key_hash（全哈希前 16 hex）。
@@ -176,18 +233,23 @@ func (t *Token) IsModelAllowed(model string) bool {
 
 // HasCostLimit 报告是否配置了任一费用限额。
 func (t *Token) HasCostLimit() bool {
-	return t.CostLimitMicroUSD > 0 || t.DailyLimitMicroUSD > 0 || t.MonthlyLimitMicroUSD > 0
+	return t.CostLimitMicroUSD > 0 || t.DailyLimitMicroUSD > 0 || t.MonthlyLimitMicroUSD > 0 ||
+		t.Cost5hLimitMicroUSD > 0 || t.CostWeeklyLimitMicroUSD > 0
 }
 
 // ValidateUsageLimits 校验限额字段非负；带费用限额的令牌必须同时设
 // max_concurrency>0——ccLoad 用这条不变量把「预检-记账」窗口期的超额
 // 请求数限制在并发上限内，本服务沿用同一约束。
 func (t *Token) ValidateUsageLimits() error {
-	if t.CostLimitMicroUSD < 0 || t.DailyLimitMicroUSD < 0 || t.MonthlyLimitMicroUSD < 0 {
+	if t.CostLimitMicroUSD < 0 || t.DailyLimitMicroUSD < 0 || t.MonthlyLimitMicroUSD < 0 ||
+		t.Cost5hLimitMicroUSD < 0 || t.CostWeeklyLimitMicroUSD < 0 {
 		return errors.New("cost limits must be >= 0")
 	}
 	if t.MaxConcurrency < 0 {
 		return errors.New("max_concurrency must be >= 0")
+	}
+	if t.MaxRPM < 0 {
+		return errors.New("max_rpm must be >= 0")
 	}
 	if t.HasCostLimit() && t.MaxConcurrency <= 0 {
 		return errors.New("cost-limited auth token requires max_concurrency > 0")
@@ -196,22 +258,25 @@ func (t *Token) ValidateUsageLimits() error {
 }
 
 // CostLimitState 报告当前各窗口的用量/限额与是否超额；window 返回
-// 超额的窗口名（daily|monthly|total），供错误信息区分口径。
+// 超额的窗口名（5h|daily|weekly|monthly|total），供错误信息区分口径。
 func (t *Token) CostLimitState(now time.Time) (used, limit int64, window string, exceeded bool) {
 	dayStart, monthStart := periodStarts(now)
 	for _, c := range []struct {
-		name   string
-		used   int64
-		limit  int64
-		start  int64
-		period int64
+		name    string
+		used    int64
+		limit   int64
+		expired bool
 	}{
-		{"daily", t.DailyUsedMicroUSD, t.DailyLimitMicroUSD, t.DailyPeriodStart, dayStart},
-		{"monthly", t.MonthlyUsedMicroUSD, t.MonthlyLimitMicroUSD, t.MonthlyPeriodStart, monthStart},
-		{"total", t.CostUsedMicroUSD, t.CostLimitMicroUSD, 0, 0},
+		{"5h", t.Cost5hUsedMicroUSD, t.Cost5hLimitMicroUSD,
+			anchoredWindowExpired(t.Cost5hAnchor, cost5hWindow, now)},
+		{"daily", t.DailyUsedMicroUSD, t.DailyLimitMicroUSD, t.DailyPeriodStart != dayStart},
+		{"weekly", t.CostWeeklyUsedMicroUSD, t.CostWeeklyLimitMicroUSD,
+			anchoredWindowExpired(t.CostWeeklyPeriodStart, costWeeklyWindow, now)},
+		{"monthly", t.MonthlyUsedMicroUSD, t.MonthlyLimitMicroUSD, t.MonthlyPeriodStart != monthStart},
+		{"total", t.CostUsedMicroUSD, t.CostLimitMicroUSD, false},
 	} {
 		used := c.used
-		if c.period != 0 && c.start != c.period {
+		if c.expired {
 			used = 0
 		}
 		if c.limit > 0 && used >= c.limit {
@@ -320,11 +385,10 @@ func HashToken(plain string) string {
 }
 
 // Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期。
-// 命中即刷新 LastUsedAt（内存态，随后续落盘固化）。
+// 空明文同路径解析——命中哈希为 sha256("") 的匿名通道行即按该令牌
+// 准入（仓内无此行时照旧 miss）。命中即刷新 LastUsedAt（内存态，
+// 随后续落盘固化）。
 func (s *Store) Resolve(plain string) (*Token, bool) {
-	if plain == "" {
-		return nil, false
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.byHash[HashToken(plain)]
@@ -394,6 +458,29 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 	return plain, s.saveLocked()
 }
 
+// Ensure 按明文播种：哈希已存在时原样返回 (existing, false, nil)，
+// 否则把 t 入库并返回 (t, true, nil)。幂等——调用方不区分「刚建」
+// 与「早就有」。匿名通道用 plain="" 播种。
+func (s *Store) Ensure(plain string, t *Token) (*Token, bool, error) {
+	if err := t.ValidateUsageLimits(); err != nil {
+		return nil, false, err
+	}
+	hash := HashToken(plain)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.byHash[hash]; ok {
+		return existing, false, nil
+	}
+	t.ID = s.nextID
+	s.nextID++
+	t.Hash = hash
+	t.CreatedAt = time.Now()
+	s.byHash[t.Hash] = t
+	s.byID[t.ID] = t
+	s.byKeyHash[t.KeyHash()] = t
+	return t, true, s.saveLocked()
+}
+
 // Update 覆盖写一条令牌（调用方先 Get 再改字段）。
 func (s *Store) Update(t *Token) error {
 	if err := t.ValidateUsageLimits(); err != nil {
@@ -451,6 +538,28 @@ func (s *Store) Release(id int64) {
 	}
 }
 
+// AllowRPM 按令牌 MaxRPM 计数一次请求：固定分钟桶（unix 秒/60）内
+// 已计数达到上限返回 (used, limit, false)。桶随分钟翻页自然归零，
+// 进程重启整体归零（计数不持久化）。令牌被删或 MaxRPM<=0 放行。
+func (s *Store) AllowRPM(id int64) (used, limit int64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, exists := s.byID[id]
+	if !exists || t.MaxRPM <= 0 {
+		return 0, 0, true
+	}
+	bucket := time.Now().Unix() / 60
+	if bucket != t.rpmBucket {
+		t.rpmBucket = bucket
+		t.rpmCount = 0
+	}
+	if t.rpmCount >= int64(t.MaxRPM) {
+		return t.rpmCount, int64(t.MaxRPM), false
+	}
+	t.rpmCount++
+	return t.rpmCount, int64(t.MaxRPM), true
+}
+
 // AddResult 回写一次完成请求的统计与费用窗口，并落盘；落盘失败不阻塞
 // 请求收尾（内存态仍在，下次写带全量）。口径对齐 ccLoad updateTokenStats：
 // 499 整次跳过；token/费用只在 2xx 时累加；TTFB/RT 均值与流式计数对
@@ -495,14 +604,24 @@ func (s *Store) AddResult(id int64, r Result) {
 			t.MonthlyUsedMicroUSD = 0
 		}
 		t.MonthlyUsedMicroUSD += micro
+		if anchoredWindowExpired(t.Cost5hAnchor, cost5hWindow, time.Now()) {
+			t.Cost5hAnchor = now
+			t.Cost5hUsedMicroUSD = 0
+		}
+		t.Cost5hUsedMicroUSD += micro
+		if anchoredWindowExpired(t.CostWeeklyPeriodStart, costWeeklyWindow, time.Now()) {
+			t.CostWeeklyPeriodStart = now
+			t.CostWeeklyUsedMicroUSD = 0
+		}
+		t.CostWeeklyUsedMicroUSD += micro
 	} else {
 		t.FailureCount++
 	}
 	_ = s.saveLocked()
 }
 
-// Empty 报告仓内是否一个令牌都没有；开放模式判定用——未设 master key
-// 且无令牌时 /v1 不校验凭据，一旦配了令牌即转为要求凭据。
+// Empty 报告仓内是否一个令牌都没有；开放模式判定用——仓空时 /v1
+// 不校验凭据，一旦有任一行（含匿名通道）即转为要求凭据。
 func (s *Store) Empty() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
