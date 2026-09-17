@@ -24,15 +24,10 @@ type accountEnvelope struct {
 	Error   string          `json:"error"`
 }
 
-// newAccountsHandler 起一个开放面板 Handler 并挂上给定操作面。
-func newAccountsHandler(t *testing.T, ops AccountOps) *Handler {
-	t.Helper()
-	handler, err := New("", "https://example.com", nil, "", false, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler.SetAccountOps(ops)
-	return handler
+// newWriteOpsHandler 装配写端点的最小 Handler：只挂操作面，不拉
+// store/debug（写路径不读它们）。
+func newWriteOpsHandler(ops AccountOps) *Handler {
+	return &Handler{accountOps: &ops}
 }
 
 // accountRequest 构造带 {name} 路由参数的请求（name 为空串时不挂
@@ -65,7 +60,7 @@ func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) accountEnvelop
 // TestCreateAccount 验证建号成功路径：请求字段原样进 ops，200 回单号视图。
 func TestCreateAccount(t *testing.T) {
 	var got AccountWrite
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		Create: func(_ context.Context, in AccountWrite) (*store.ResolvedAccount, error) {
 			got = in
 			return &store.ResolvedAccount{Name: in.Name, Source: store.AccountSourcePanel}, nil
@@ -118,7 +113,7 @@ func TestCreateAccountErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := newAccountsHandler(t, AccountOps{
+			handler := newWriteOpsHandler(AccountOps{
 				Create: func(context.Context, AccountWrite) (*store.ResolvedAccount, error) {
 					return nil, tc.opsErr
 				},
@@ -139,7 +134,7 @@ func TestCreateAccountErrors(t *testing.T) {
 // TestCreateAccountBadName 验证非法名在管线前被 400 拦下，不进 ops。
 func TestCreateAccountBadName(t *testing.T) {
 	called := false
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		Create: func(context.Context, AccountWrite) (*store.ResolvedAccount, error) {
 			called = true
 			return nil, nil
@@ -165,7 +160,7 @@ func TestCreateAccountBadName(t *testing.T) {
 // 传给 ops，并验证全缺席时 400。
 func TestUpdateAccountPatchSemantics(t *testing.T) {
 	var got AccountPatch
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		Update: func(_ context.Context, name string, patch AccountPatch) (*store.ResolvedAccount, error) {
 			got = patch
 			return &store.ResolvedAccount{Name: name, Source: store.AccountSourceConfig, ConfigDeclared: true}, nil
@@ -212,7 +207,7 @@ func TestUpdateAccountErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := newAccountsHandler(t, AccountOps{
+			handler := newWriteOpsHandler(AccountOps{
 				Update: func(context.Context, string, AccountPatch) (*store.ResolvedAccount, error) {
 					return nil, tc.opsErr
 				},
@@ -246,7 +241,7 @@ func TestDeleteAccount(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := newAccountsHandler(t, AccountOps{
+			handler := newWriteOpsHandler(AccountOps{
 				Delete: func(context.Context, string) (*store.ResolvedAccount, error) {
 					return tc.resolved, tc.opsErr
 				},
@@ -277,7 +272,7 @@ func TestDeleteAccount(t *testing.T) {
 // TestRestoreAccount 验证 restore 的映射：活号无墓可还 409、名不存在 404、
 // 成功回单号视图。
 func TestRestoreAccount(t *testing.T) {
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		Restore: func(_ context.Context, name string) (*store.ResolvedAccount, error) {
 			return &store.ResolvedAccount{Name: name, ConfigDeclared: true, Source: store.AccountSourceConfig}, nil
 		},
@@ -297,7 +292,7 @@ func TestRestoreAccount(t *testing.T) {
 		{fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
 	}
 	for _, tc := range cases {
-		handler := newAccountsHandler(t, AccountOps{
+		handler := newWriteOpsHandler(AccountOps{
 			Restore: func(context.Context, string) (*store.ResolvedAccount, error) {
 				return nil, tc.opsErr
 			},
@@ -315,7 +310,7 @@ func TestRestoreAccount(t *testing.T) {
 
 // TestClearAccountCooldown 验证清冷却：有活 lane 200 cleared、无活 lane 404。
 func TestClearAccountCooldown(t *testing.T) {
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		ClearCooldown: func(string) bool { return true },
 	})
 	rec := httptest.NewRecorder()
@@ -332,7 +327,7 @@ func TestClearAccountCooldown(t *testing.T) {
 		t.Fatalf("data = %v", data)
 	}
 
-	handler = newAccountsHandler(t, AccountOps{
+	handler = newWriteOpsHandler(AccountOps{
 		ClearCooldown: func(string) bool { return false },
 	})
 	rec = httptest.NewRecorder()
@@ -359,7 +354,7 @@ func TestRefreshAccountQuotaTokenErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := newAccountsHandler(t, AccountOps{
+			handler := newWriteOpsHandler(AccountOps{
 				TokenOf: func(context.Context, string) (string, error) {
 					return "", tc.opsErr
 				},
@@ -381,7 +376,7 @@ func TestRefreshAccountQuotaTokenErrors(t *testing.T) {
 func TestAccountNameParamRejected(t *testing.T) {
 	called := false
 	guard := func() { called = true }
-	handler := newAccountsHandler(t, AccountOps{
+	handler := newWriteOpsHandler(AccountOps{
 		Update:  func(context.Context, string, AccountPatch) (*store.ResolvedAccount, error) { guard(); return nil, nil },
 		Delete:  func(context.Context, string) (*store.ResolvedAccount, error) { guard(); return nil, nil },
 		Restore: func(context.Context, string) (*store.ResolvedAccount, error) { guard(); return nil, nil },
@@ -419,10 +414,7 @@ func TestAccountNameParamRejected(t *testing.T) {
 
 // TestAccountOpsUnavailable 验证操作面未接线时六个写端点全部 503。
 func TestAccountOpsUnavailable(t *testing.T) {
-	handler, err := New("", "https://example.com", nil, "", false, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := &Handler{}
 	endpoints := []struct {
 		method  string
 		handler http.HandlerFunc
