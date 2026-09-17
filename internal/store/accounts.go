@@ -115,6 +115,20 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 
 var errAccountsNotImplemented = errors.New("store: upstream_accounts not implemented")
 
+// 账号操作的领域错误（%w 包装携带名字）：ops 层（main）只产语义错误，
+// HTTP 状态码映射归面板 handlers——同一条件在不同端点状态码不同
+// （PUT tombstoned=409 而 quota/refresh tombstoned=404）。
+var (
+	// ErrAccountExists 重名（含 config 声明名与墓碑名——墓碑走 restore）。
+	ErrAccountExists = errors.New("account already exists")
+	// ErrAccountNotFound 名不在生效集（含死墓碑与 quota/refresh 视角的 tombstoned）。
+	ErrAccountNotFound = errors.New("account not found")
+	// ErrAccountTombstoned 写路径撞上墓碑名：先 restore 再改。
+	ErrAccountTombstoned = errors.New("account is tombstoned")
+	// ErrAccountNotTombstoned restore 撞上活号：无墓可还。
+	ErrAccountNotTombstoned = errors.New("account is not tombstoned")
+)
+
 // ListAccounts 返回全部行含墓碑，ORDER BY created_at, name。
 func (s *Store) ListAccounts(ctx context.Context) ([]*AccountRow, error) {
 	return nil, errAccountsNotImplemented
