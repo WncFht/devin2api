@@ -43,11 +43,11 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 
 五字段把端到端延迟切成五段，段名即两字段之差：`decode`（0→ready）、`transform`（ready→sent，含限流闸门排队）、`connect`（sent→open，上游建连）、`upstream_ttft`（open→首事件，上游首字延迟）、`egress`（首事件→首字节，编码 + 写客户端）。
 
-落盘位置：`logs/<dir>/meta.json`（单请求详情）与 `logs/index.jsonl` 的同名可选字段（批量 `jq` 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
+落库位置：`debug_files` 表 `<dir>` 键下的 `meta.json` 行（单请求详情，`/admin/debug-logs/{id}/file/meta.json` 或 `sqlite3` 直查）与 `logs` 表的同名可空列（批量 SQL 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
 
-index.jsonl 做命中率聚合时的口径陷阱：必须过滤 `result=="completed" && input_tokens+cache_read_tokens>0`——rate_gate 快败、客户端断连等 0-token 行与 failed 高度重合，不过滤会被当 miss 污染比率；上游 `cache_creation` 恒 0，判活只看 `cache_read`。流级画像（静默间隔→命中率、miss 归因）用 `scripts/index-stream-stats.py`。
+`logs` 表做命中率聚合时的口径陷阱：必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败、客户端断连等 0-token 行与 failed 高度重合，不过滤会被当 miss 污染比率；上游 `cache_creation` 恒 0，判活只看 `cache_read`。流级画像（静默间隔→命中率、miss 归因）用 `scripts/index-stream-stats.py`（读 `devin-2api.db`）。
 
-`connect` 段另带连接画像：`upstream_conn_reused`/`upstream_conn_idle_ms`（index 侧 `conn_reused`/`conn_idle_ms`）记录成功建流那次发送是否复用了 idle 连接（httptrace `GotConn`）。`connect` 偏高时它是分水岭：`reused=true` 说明大头在上游响应头延迟（上游排队/思考，本地可优化空间小），`reused=false` 则是 TCP+TLS 握手成本（本地保温/复用策略的覆盖问题）。
+`connect` 段另带连接画像：`upstream_conn_reused`/`upstream_conn_idle_ms`（`logs` 表 `conn_reused`/`conn_idle_ms` 列，三态可空）记录成功建流那次发送是否复用了 idle 连接（httptrace `GotConn`）。`connect` 偏高时它是分水岭：`reused=true` 说明大头在上游响应头延迟（上游排队/思考，本地可优化空间小），`reused=false` 则是 TCP+TLS 握手成本（本地保温/复用策略的覆盖问题）。
 
 读法：本机桩（interval=0）下 decode/transform 是主项属正常——桩没有网络与思考延迟，代理自身开销被放大显示；真实上游下 `connect`+`upstream_ttft` 通常占绝对大头，此时分解的价值是确认 egress/transform 没有异常回退。
 

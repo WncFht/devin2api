@@ -2,7 +2,7 @@
 
 > 范围：Devin 上游（`server.codeium.com`）`resource_exhausted: Reached overall message rate limit` 的触发、封禁形态与解封条件。
 >
-> 数据：`logs/index.jsonl` + `logs/stderr.log`（闩事件 = 拒绝时刻 + hint）+ 存活 `error.json` 的完整 hint 轨迹。两个窗口：
+> 数据：`logs` 表（`devin-2api.db`）+ `logs/stderr.log`（闩事件 = 拒绝时刻 + hint）+ 存活 `error.json`（`debug_files` 行）的完整 hint 轨迹。两个窗口：
 >
 > - 旧窗口：2026-09-12 10:24 ~ 09-13 10:44，29164 请求，7 次发作
 > - 新窗口：2026-09-13 18:00 ~ 09-14 09:00，29220 请求，370 次上游可见拒绝，343 次闩事件，66 条完整 hint 轨迹
@@ -116,7 +116,7 @@
 
 > **实现状态（2026-09-14）**：第 1/3/4 条已按本节落地（`rategate.go` 滴灌闩 + `noteUpstreamSuccess` 解闩、`common.RateLimitReset` 桶界对齐、presold 令牌睡醒复检）；第 2 条实现时改取「Retry-After=闩剩余」让客户端睡到恢复时刻而非竞争滴灌槽；第 5 条观测落地为 stderr 日志（闩内拒绝 Info、解闩 Info）而非面板计数；第 6 条不变项保持。闩参数可配：`gate_max_hold_seconds`/`gate_drip_interval_seconds`/`gate_default_latch_seconds`（默认 15/8/60）。
 >
-> **警示：滴灌闩零实战**。0f36ef2 部署（2026-09-14 07:57）之后未再出现任何上游 429——`drip-latching`/`while-latched`/`released`/`restored` 日志路径全部零触发、`logs/gate-state.json` 从未生成。本节声明的闩行为全部是**代码态**：第三~五节的所有闩行为证据均来自二元闩时代，滴灌闩的真实发作表现尚无样本。
+> **警示：滴灌闩零实战**。0f36ef2 部署（2026-09-14 07:57）之后未再出现任何上游 429——`drip-latching`/`while-latched`/`released`/`restored` 日志路径全部零触发、`runtime_state` 表的 `gate:*` 键从未出现。本节声明的闩行为全部是**代码态**：第三~五节的所有闩行为证据均来自二元闩时代，滴灌闩的真实发作表现尚无样本。
 >
 > **已修复：「hint=0 不延期」**。旧实现里 `parseResetHint` 对 `n<=0` 返回 `(0,false)`，使 "reset in 0 seconds" 与无 hint 同路落 `defaultLatch`=60s。现 `Failure.ResetHint` 区分「无声明」与「显式 0」：显式 0 让 `RateLimitReset` 返回 `now`，闩截止即现在（无闩时是即刻过期的闩，有闩时因不延长被忽略），不再套 60s 兜底；"reset in 0 minutes" 按分钟粒度 floor 语义对齐本桶 :59。新窗口 31 条 0-hint 全部在桶界到达，语义正是「新桶已爆、无追加罚」。
 
@@ -141,7 +141,7 @@
 2026-09-14 晚发现面板 `rpm_peak` 超 80（=102），怀疑闸门未生效。核查结论：配置与版本都正常，超 80 是「统计口径 + 令牌桶突发语义」的叠加，不是失效。两个口径必须分开，这是本次排查的关键辨析：
 
 - **面板 `rpm_*` 是客户端请求的完成速率**：计数点在 `Request.Finish`/`Reject`（`internal/obs/metrics.go`），含本地快败与管线前拒绝。claude-cli 并行子代理的到达突发天然超 80，当日 19:14 一分钟到达 128 个请求——到达超 80 不代表上游发送超 80。
-- **上游发送速率要用 `index.jsonl` 还原**：按 `started_at + upstream_sent_ms` 归每分钟（`upstream_sent_ms` 是首次真实发送时刻，重试另计）。实测当日多个分钟超 80：**19:14 发 127、19:17 发 101、17:26 发 94**。
+- **上游发送速率要用 `logs` 表还原**：按 `started_at + upstream_sent_ms` 归每分钟（`upstream_sent_ms` 是首次真实发送时刻，重试另计）。实测当日多个分钟超 80：**19:14 发 127、19:17 发 101、17:26 发 94**。
 - **根因是取值不是 bug**：令牌桶 `capacity = max_rpm = 80`（一整分钟额度，为吸收并行子代理突发而设），任意 60s 窗口上界 = `capacity + refill×60 ≈ 160`。持续速率 80/min 成立，单分钟无硬顶；当日 127/min 未触发上游拒绝是概率运气，不是安全证据（边际态执行是 Loaded dice，见 3.3）。
 
 ### 8.2 候选方案与保证语义

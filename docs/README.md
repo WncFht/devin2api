@@ -36,12 +36,12 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 速查入口
 
-- 客户端报错 → `upstream-debug-playbook.md` 错误速查表 → `logs/<debug_ref>/error.json`
+- 客户端报错 → `upstream-debug-playbook.md` 错误速查表 → 该请求 `error.json`（`/admin/debug-logs/{id}/file/error.json`）
 - 新客户端接入 → `client-setup.md` + playbook「新客户端验证清单」
 - `permission_denied` + content policy → `upstream-policy-fingerprints.md`
 - feature 没生效（工具不调用/内容丢失）→ 指纹文档 + playbook「已验证 wire 契约」
 - 上游 429 频发 → `upstream-rate-limit.md`（模型）+ `rategate.go`（实现）
 - 发版/格式化/CI → `toolchain.md`
-- 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ `logs/<debug_ref>/meta.json` 延迟分解字段
+- 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ 该请求 `meta.json` 延迟分解字段（`/admin/debug-logs/{id}/file/meta.json`）
 - subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/admin/runtime-metrics` 的 warm 段
 - 某号限流/配额异常、请求换号归因 → `devin-accounts.md` + `meta.json` 的 `upstream_attempts` / `/admin/runtime-metrics` 的 accounts 组
