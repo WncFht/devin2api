@@ -70,8 +70,9 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_logs_minute_keyhash_status ON logs(minute_bucket, key_hash, status_code)`,
 
 	// debug payload：键是目录名（dir 仍作 X-Request-Id/debug_ref
-	// 身份），不是 logs.id——飞行中请求尚无 logs 行，413 等管线前
-	// 目录也没有。debug_files 承载一次性小文件（meta.json、
+	// 身份），不是 logs.id——飞行中请求的 payload 先于 Complete 才
+	// 落库的 logs 行存在，进程被杀的请求也可能只剩调试行。
+	// debug_files 承载一次性小文件（meta.json、
 	// error.json、attachments/*），error.json 的 first-write-wins
 	// 靠 INSERT OR IGNORE 表达；debug_chunks 承载流式 JSONL
 	// （04/05/06），每次 flush 批一行，读时 ORDER BY seq 拼接。
