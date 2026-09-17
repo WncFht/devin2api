@@ -41,7 +41,7 @@ const (
 	// RejectInvalidAPIKey 是凭据不匹配的 401。
 	RejectInvalidAPIKey RejectReason = "invalid_api_key"
 	// RejectHTTPRead 是请求体读取失败（超时/断连）：完整请求从未到达，
-	// 与鉴权/并发拒绝同口径——不产生调试目录。
+	// 与鉴权/并发拒绝同口径——不产生调试记录。
 	RejectHTTPRead RejectReason = "http_read"
 )
 
@@ -63,8 +63,8 @@ var rejectLabels = []RejectLabel{
 	{string(RejectHTTPRead), "读体失败"},
 }
 
-// RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试目录
-// 也没有 index.jsonl 行，这条记录是它的全部结构化痕迹。
+// RejectEvent 是一次管线前拒绝的采样：请求未读体即被拒，没有调试记录
+// 也没有 logs 行，这条记录是它的全部结构化痕迹。
 type RejectEvent struct {
 	At        int64  `json:"at"`
 	Reason    string `json:"reason"`
@@ -170,7 +170,7 @@ func (r *Request) Finish(status, responseBodyBytes int, result string) {
 }
 
 // Reject 计入一个在进入处理管线前被拒的请求。reason 分类落到计数与
-// 事件环上——这类请求刻意不产生调试目录与 index 行（未鉴权/过载路径
+// 事件环上——这类请求刻意不产生调试记录与 logs 行（未鉴权/过载路径
 // 不做磁盘写），计数与事件环是它们唯一的结构化足迹。
 func (m *Metrics) Reject(reason RejectReason, ev RejectEvent) {
 	m.rejected.Add(1)
@@ -207,7 +207,7 @@ func (m *Metrics) recordBucketAt(at int64, isError bool) {
 	}
 }
 
-// SeedTrend 用一条历史请求预热趋势桶（数据来自 index.jsonl 启动回放）。
+// SeedTrend 用一条历史请求预热趋势桶（数据来自 logs 表启动回放）。
 // finishedAt 是请求完成时刻（与 Finish 实时归桶同口径：按完成而非开始时刻）；
 // 落在 60 分钟窗口外的条目丢弃。
 func (m *Metrics) SeedTrend(finishedAt time.Time, isError bool) {
@@ -290,7 +290,7 @@ func (m *Metrics) rates() map[string]any {
 	}
 	current := perMinute[now/60]
 	// avg 分母取「进程运行分钟数」与「最早非空桶覆盖分钟数」的较大者：
-	// 前者保证无预热时口径不变（空转时段照样稀释），后者覆盖 index.jsonl
+	// 前者保证无预热时口径不变（空转时段照样稀释），后者覆盖 logs 表
 	// 回放预热场景——窗口数据比进程老，否则 avg 会被放大几十倍。
 	elapsed := int64(time.Since(m.startedAt)/time.Minute) + 1
 	if minAt != 0 && (now-minAt)/60+1 > elapsed {

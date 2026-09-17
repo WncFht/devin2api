@@ -1601,7 +1601,7 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 	return false
 }
 
-// recordUpstreamFailure 把不可重试的上游侧失败记为请求目录的首个失败点：
+// recordUpstreamFailure 把不可重试的上游侧失败记为该请求调试记录的首个失败点：
 // 传输层断裂记 devin_transport——含 connect.Error 包装的 EOF/帧截断/
 // 连接重置，判定见 isTransientConnectError；上游语义错误记 devin_connect。
 // ctx 取消不记——客户端断连由 HTTP 外层记 client_disconnected，不应被

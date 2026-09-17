@@ -372,7 +372,7 @@ func completedOutputFromEvent(payload json.RawMessage) json.RawMessage {
 
 // withDebugRef 把调试目录名编进 response.created 的 response 对象。
 // WS 握手响应在 createCompletion 分配请求 ID 之前就已发出，X-Request-Id
-// 无处可放——客户端只能靠 payload 携带的引用回查日志目录（错误事件
+// 无处可放——客户端只能靠 payload 携带的引用回查调试记录（错误事件
 // 自带 debug_ref，这里只补成功路径的首帧）。
 // fields 是 writeFrame 已解析的顶层字段树：就地改写 response 字段后
 // 重 marshal，未触碰的字段保持原始字节。
@@ -661,12 +661,12 @@ func (application *App) runWSTurn(ctx context.Context, conn *websocket.Conn, upg
 	innerRequest.Header.Set("Content-Type", "application/json")
 	// innerRequest 不经过 HTTP middleware，鉴权与日志关联所需的头逐一手动透传：
 	// createCompletion 的凭据哈希、clientRequestID、UserAgent 都从这里取。
-	// X-Request-Id 不透传——那是升级请求级的关联 ID，每轮各记各的调试目录。
+	// X-Request-Id 不透传——那是升级请求级的关联 ID，每轮各记各的调试记录。
 	for _, name := range []string{
 		"Authorization", "X-Api-Key", "X-Session-Id", "User-Agent",
 		"Session-Id", "Session_id", "Thread-Id", "X-Codex-Turn-Metadata",
 		// clientRequestID（app.go:638）与请求投影都读它，不透传则
-		// WS 轮次的调试目录无法按客户端 ID 反查。
+		// WS 轮次的调试记录无法按客户端 ID 反查。
 		"X-Client-Request-Id",
 	} {
 		if value := upgradeRequest.Header.Get(name); value != "" {
