@@ -44,7 +44,11 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
   .first_byte_time,.next_offset,.expires_at,.client_request_id,.upstream_request_id,
   .request_id,.minute_bucket,.daily_reset_at,.weekly_reset_at,.grace_period_end,
   .cost_5h_anchor,.cost_daily_period_start,.cost_monthly_period_start,
-  .cost_weekly_period_start) else . end);
+  .cost_weekly_period_start,
+  .duration_seconds,.cpu_usage_percent,.cpu_user_seconds,.gc_cpu_percent,
+  .gc_pause_total_ns,.heap_alloc_bytes,.heap_sys_bytes,.max_rss_bytes,
+  .rss_bytes,.uptime_seconds,
+  .log_root,.index_bytes,.db_bytes) else . end);
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
 '
@@ -93,7 +97,7 @@ for ep in "${ENDPOINTS[@]}"; do
 		echo "PASS $ep"
 	else
 		echo "DIFF $ep"
-		diff <(echo "$a" | jq .) <(echo "$b" | jq .) | head -30
+		diff <(echo "$a" | jq .) <(echo "$b" | jq .) | head -30 || true
 		fail=1
 	fi
 done
