@@ -204,7 +204,7 @@
         updateStatsDisplay();
       } else {
         console.error('Failed to load stats:', statsResult.reason);
-        showError('无法加载统计数据');
+        showError(window.t('index.statsLoadFailed'));
       }
 
       if (healthResult.status === 'fulfilled') {

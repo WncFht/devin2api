@@ -88,7 +88,7 @@
             window.location.href = redirect;
           }, 500);
         } else {
-          showError(resp.error || '凭据无效，请重试');
+          showError(resp.error || window.t('login.invalidCredential'));
 
           // 添加输入框摇晃动画
           credentialInput.style.animation = 'none';
@@ -101,7 +101,7 @@
         }
       } catch (error) {
         console.error('Login error:', error);
-        showError('网络连接错误，请检查网络后重试');
+        showError(window.t('login.networkError'));
       } finally {
         setLoading(false);
       }
