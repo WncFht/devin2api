@@ -542,6 +542,8 @@ type LogRecentAgg struct {
 const logRecentEndExpr = `time/1000 + duration_ms/1000`
 
 // LogRecentWindow 聚合最近 seconds 秒内完成的条目（recent 环的 SQL 版）。
+// 完成时刻表达式不可索引，用 time > (cut-3600s) 预筛把扫描圈进
+// idx_logs_time 范围——duration 受排空上限约束（≪3600s），不漏行。
 func (s *Store) LogRecentWindow(ctx context.Context, seconds int64, sc LogScope) (LogRecentAgg, error) {
 	var a LogRecentAgg
 	cut := time.Now().Unix() - seconds
@@ -558,18 +560,18 @@ func (s *Store) LogRecentWindow(ctx context.Context, seconds int64, sc LogScope)
 			THEN duration_ms - first_upstream_ms ELSE duration_ms END), 0),
 		COALESCE(SUM(CASE WHEN stream != 0 AND status_code >= 200 AND status_code < 300 AND first_upstream_ms > 0 THEN first_upstream_ms ELSE 0 END), 0),
 		COALESCE(SUM(CASE WHEN stream != 0 AND status_code >= 200 AND status_code < 300 AND first_upstream_ms > 0 THEN 1 ELSE 0 END), 0)
-		FROM logs WHERE `+logRecentEndExpr+` > ?`+scopeWhere,
-		append([]any{cut}, scopeArgs...)...).Scan(
+		FROM logs WHERE time > ? AND `+logRecentEndExpr+` > ?`+scopeWhere,
+		append([]any{(cut - 3600) * 1000, cut}, scopeArgs...)...).Scan(
 		&a.Req, &a.InTok, &a.OutTok, &a.CrTok, &a.CwTok, &a.DurMS, &a.NDur, &a.GenMS, &a.FirstMS, &a.NFirst)
 	return a, err
 }
 
 // LogRecentRPM 返回最近 60 秒内完成的非 499 请求数；model/kh 非空时
-// 分别按生效模型、key_hash 过滤。
+// 分别按生效模型、key_hash 过滤。time 预筛同 LogRecentWindow。
 func (s *Store) LogRecentRPM(ctx context.Context, model, kh string) (float64, error) {
 	cut := time.Now().Unix() - 60
-	query := `SELECT COUNT(*) FROM logs WHERE status_code != 499 AND ` + logRecentEndExpr + ` > ?`
-	args := []any{cut}
+	query := `SELECT COUNT(*) FROM logs WHERE status_code != 499 AND time > ? AND ` + logRecentEndExpr + ` > ?`
+	args := []any{(cut - 3600) * 1000, cut}
 	if model != "" {
 		query += ` AND ` + logEModelExpr + ` = ?`
 		args = append(args, model)

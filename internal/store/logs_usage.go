@@ -30,6 +30,13 @@ const logOwnerCase = `CASE
 		WHEN error_stage IN ('http_read', 'http_decode') THEN 'client'
 		ELSE 'upstream' END`
 
+// dayBoundsMS 返回 t 所在本地日的毫秒闭开区间界（[起点, 次日起点)），
+// 供 today 谓词替代不可索引的 logDayExpr 等值比较。
+func dayBoundsMS(t time.Time) (int64, int64) {
+	start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	return start.UnixMilli(), start.AddDate(0, 0, 1).UnixMilli()
+}
+
 // logDayExpr 是本地时区日期键：strftime 的 'localtime' 修饰符走连接
 // 配置的 _loc=Local——与旧 Go 侧 started.Local().Format 同一时区源。
 const logDayExpr = `strftime('%Y-%m-%d', time/1000, 'unixepoch', 'localtime')`
@@ -267,11 +274,14 @@ func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error)
 
 // usagePoints 装配 8 天 10 分钟粒度序列：每桶 totals 走 GROUP BY，
 // 延迟样本走窗口函数取每桶最近 usageMinSampleCap 条（等同旧环形
-// 蓄水池的「留最新 N 个」语义）。
+// 蓄水池的「留最新 N 个」语义）。范围谓词走 minute_bucket（time/60000
+// 物化列）：time/600000>=S ⟺ minute_bucket>=S*10，idx_logs_minute_*
+// 前缀索引即刻生效。
 func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinPoint, error) {
 	minSlot := currentSlot - usageMinBuckets + 1
+	minBucket := minSlot * 10
 	totalRows, err := s.db.QueryContext(ctx,
-		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE time/600000 >= ? GROUP BY slot`, minSlot)
+		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ? GROUP BY slot`, minBucket)
 	if err != nil {
 		return nil, err
 	}
@@ -297,8 +307,8 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64) ([]UsageMinP
 			SELECT time/600000 AS slot, duration_ms, first_upstream_ms,
 				ROW_NUMBER() OVER (PARTITION BY time/600000 ORDER BY id DESC) AS rn_dur,
 				ROW_NUMBER() OVER (PARTITION BY time/600000, first_upstream_ms IS NOT NULL ORDER BY id DESC) AS rn_ttfb
-			FROM logs WHERE time/600000 >= ?
-		) WHERE rn_dur <= ? OR (first_upstream_ms IS NOT NULL AND rn_ttfb <= ?)`, minSlot, usageMinSampleCap, usageMinSampleCap)
+			FROM logs WHERE minute_bucket >= ?
+		) WHERE rn_dur <= ? OR (first_upstream_ms IS NOT NULL AND rn_ttfb <= ?)`, minBucket, usageMinSampleCap, usageMinSampleCap)
 	if err != nil {
 		return nil, err
 	}
@@ -445,10 +455,12 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		return snap, err
 	}
 	// 今日单列查询而非从 days 里挑：31 天上限外若有未来日期的行，
-	// today 也不该被挤掉。
+	// today 也不该被挤掉。本地日界在 Go 侧算好打成毫秒界——
+	// strftime(localtime) 谓词不可索引，time 范围可走 idx_logs_time。
+	dayStart, dayEnd := dayBoundsMS(time.Now())
 	if err := scanUsageTotals(s.db.QueryRowContext(ctx,
-		`SELECT `+usageTotalsCols+` FROM logs WHERE `+logDayExpr+` = ?`,
-		time.Now().Local().Format("2006-01-02")), &snap.Today); err != nil {
+		`SELECT `+usageTotalsCols+` FROM logs WHERE time >= ? AND time < ?`,
+		dayStart, dayEnd), &snap.Today); err != nil {
 		return snap, err
 	}
 
@@ -591,12 +603,15 @@ func sortDimsByRequests(in []DimensionAgg) []DimensionAgg {
 // 版按启动时刻精确计数，口径相同但覆盖更完整。
 func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	// 相关子查询里 endExpr 必须带 logs. 限定：裸列名会被内层 l2 遮蔽。
+	// 内层窗口条件整数除法等价改写为 l2.time 的毫秒闭区间
+	// （s/1000 > E-60 ⟺ s >= (E-59)*1000；s/1000 <= E ⟺ s <= E*1000+999），
+	// 从全表 COUNT 变成 idx_logs_time 范围扫。
 	const endExpr = `logs.time/1000 + logs.duration_ms/1000`
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+endExpr+`, `+logEModelExpr+`, error_stage,
 			(SELECT COUNT(*) FROM logs l2
-				WHERE l2.time/1000 > `+endExpr+` - 60
-					AND l2.time/1000 <= `+endExpr+`)
+				WHERE l2.time >= (`+endExpr+` - 59) * 1000
+					AND l2.time <= (`+endExpr+`) * 1000 + 999)
 		FROM logs WHERE status_code = 429 OR rate_limited != 0
 		ORDER BY id DESC LIMIT ?`, rateLimitEventCap)
 	if err != nil {
