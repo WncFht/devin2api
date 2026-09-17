@@ -21,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // TestListenURL verifies listen address descriptions used in the startup log.
@@ -128,7 +129,12 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenStore, err := authtoken.New(dir)
+	dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dbStore.Close() }()
+	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +339,12 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenStore, err := authtoken.New(dir)
+			dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = dbStore.Close() })
+			tokenStore, err := authtoken.New(dbStore)
 			if err != nil {
 				t.Fatal(err)
 			}

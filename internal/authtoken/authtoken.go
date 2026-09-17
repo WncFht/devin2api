@@ -1,5 +1,5 @@
-// Package authtoken 实现下游 API 令牌仓：auth_tokens.json 持久化、
-// /v1 准入用的哈希解析、并发槽与费用限额计数。契约对齐 ccLoad 的
+// Package authtoken 实现下游 API 令牌仓：auth_tokens 表（internal/store）
+// 持久化、/v1 准入用的哈希解析、并发槽与费用限额计数。契约对齐 ccLoad 的
 // AuthToken：JSON 形状逐字段一致，明文令牌只在创建时返回一次，
 // 存库与列表输出均为 SHA-256 全哈希（hex 64）。
 //
@@ -10,17 +10,18 @@
 package authtoken
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // Token 是一条下游访问令牌，序列化形状对齐 ccLoad model.AuthToken。
@@ -315,20 +316,65 @@ type Result struct {
 	CostUSD          float64 // 目录价估算标准成本
 }
 
-// tokenFile 是 auth_tokens.json 的持久化形状；Token 的 micro 字段直接
-// 序列化进文件（精确值），API 输出走 API() 折算。
-type tokenFile struct {
-	NextID int64    `json:"next_id"`
-	Tokens []*Token `json:"tokens"`
+// rowFromToken 把内存态 Token 投影成持久化行；瞬态字段
+// （inflight/rpmBucket/rpmCount）不进列。
+func rowFromToken(t *Token) *store.TokenRow {
+	return &store.TokenRow{
+		ID: t.ID, Token: t.Hash, Description: t.Description,
+		CreatedAt: t.CreatedAt.UnixMilli(),
+		ExpiresAt: t.ExpiresAt, LastUsedAt: t.LastUsedAt, IsActive: t.IsActive,
+		SuccessCount: t.SuccessCount, FailureCount: t.FailureCount,
+		StreamAvgTTFB: t.StreamAvgTTFB, NonStreamAvgRT: t.NonStreamAvgRT,
+		StreamCount: t.StreamCount, NonStreamCount: t.NonStreamCount,
+		PromptTokensTotal: t.PromptTokensTotal, CompletionTokensTotal: t.CompletionTokensTotal,
+		CacheReadTokensTotal: t.CacheReadTokensTotal, CacheCreationTokensTotal: t.CacheCreationTokensTotal,
+		TotalCostUSD: t.TotalCostUSD, EffectiveCostUSD: t.EffectiveCostUSD,
+		CostUsedMicroUSD: t.CostUsedMicroUSD, CostLimitMicroUSD: t.CostLimitMicroUSD,
+		DailyUsedMicroUSD: t.DailyUsedMicroUSD, DailyLimitMicroUSD: t.DailyLimitMicroUSD,
+		DailyPeriodStart:    t.DailyPeriodStart,
+		MonthlyUsedMicroUSD: t.MonthlyUsedMicroUSD, MonthlyLimitMicroUSD: t.MonthlyLimitMicroUSD,
+		MonthlyPeriodStart: t.MonthlyPeriodStart,
+		Cost5hUsedMicroUSD: t.Cost5hUsedMicroUSD, Cost5hLimitMicroUSD: t.Cost5hLimitMicroUSD,
+		Cost5hAnchor:       t.Cost5hAnchor,
+		WeeklyUsedMicroUSD: t.CostWeeklyUsedMicroUSD, WeeklyLimitMicroUSD: t.CostWeeklyLimitMicroUSD,
+		WeeklyPeriodStart: t.CostWeeklyPeriodStart,
+		AllowedModels:     t.AllowedModels,
+		MaxConcurrency:    t.MaxConcurrency, MaxRPM: t.MaxRPM,
+	}
 }
 
-// Store 管理 auth_tokens.json 与内存索引。所有变更写穿透落盘
-// （文件 KB 级，请求完成频率低）；LastUsedAt 只在内存里更新，
-// 随下一次落盘顺带持久化。
+// tokenFromRow 由持久化行重建内存 Token；瞬态字段取零值。
+func tokenFromRow(r *store.TokenRow) *Token {
+	return &Token{
+		ID: r.ID, Hash: r.Token, Description: r.Description,
+		CreatedAt: time.UnixMilli(r.CreatedAt),
+		ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, IsActive: r.IsActive,
+		SuccessCount: r.SuccessCount, FailureCount: r.FailureCount,
+		StreamAvgTTFB: r.StreamAvgTTFB, NonStreamAvgRT: r.NonStreamAvgRT,
+		StreamCount: r.StreamCount, NonStreamCount: r.NonStreamCount,
+		PromptTokensTotal: r.PromptTokensTotal, CompletionTokensTotal: r.CompletionTokensTotal,
+		CacheReadTokensTotal: r.CacheReadTokensTotal, CacheCreationTokensTotal: r.CacheCreationTokensTotal,
+		TotalCostUSD: r.TotalCostUSD, EffectiveCostUSD: r.EffectiveCostUSD,
+		CostUsedMicroUSD: r.CostUsedMicroUSD, CostLimitMicroUSD: r.CostLimitMicroUSD,
+		DailyUsedMicroUSD: r.DailyUsedMicroUSD, DailyLimitMicroUSD: r.DailyLimitMicroUSD,
+		DailyPeriodStart:    r.DailyPeriodStart,
+		MonthlyUsedMicroUSD: r.MonthlyUsedMicroUSD, MonthlyLimitMicroUSD: r.MonthlyLimitMicroUSD,
+		MonthlyPeriodStart: r.MonthlyPeriodStart,
+		Cost5hUsedMicroUSD: r.Cost5hUsedMicroUSD, Cost5hLimitMicroUSD: r.Cost5hLimitMicroUSD,
+		Cost5hAnchor:           r.Cost5hAnchor,
+		CostWeeklyUsedMicroUSD: r.WeeklyUsedMicroUSD, CostWeeklyLimitMicroUSD: r.WeeklyLimitMicroUSD,
+		CostWeeklyPeriodStart: r.WeeklyPeriodStart,
+		AllowedModels:         r.AllowedModels,
+		MaxConcurrency:        r.MaxConcurrency, MaxRPM: r.MaxRPM,
+	}
+}
+
+// Store 管理 auth_tokens 表与内存索引。所有变更写穿透到表（单行
+// upsert/delete，替代整文件重写）；LastUsedAt 只在内存里更新，
+// 随本行下一次写回顺带持久化。
 type Store struct {
 	mu     sync.Mutex
-	path   string
-	nextID int64
+	db     *store.Store
 	byHash map[string]*Token
 	byID   map[int64]*Token
 	// byKeyHash 以 index.jsonl 的 key_hash（16 hex 截断）为键，是
@@ -336,44 +382,24 @@ type Store struct {
 	byKeyHash map[string]*Token
 }
 
-// New 加载 stateDir/auth_tokens.json；文件缺失以空仓起步，损坏时把
-// 原文件改名留档后空仓起步（不静默吞掉坏数据）。
-func New(stateDir string) (*Store, error) {
+// New 从 auth_tokens 表水合全部行建内存索引；旧 auth_tokens.json 的迁移
+// 由 store.ImportLegacy 在建仓前完成，这里不再接触文件。
+func New(st *store.Store) (*Store, error) {
 	s := &Store{
-		path:      filepath.Join(stateDir, "auth_tokens.json"),
-		nextID:    1,
+		db:        st,
 		byHash:    map[string]*Token{},
 		byID:      map[int64]*Token{},
 		byKeyHash: map[string]*Token{},
 	}
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
+	rows, err := st.ListTokens(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	var f tokenFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		_ = os.Rename(s.path, s.path+".corrupt")
-		return s, nil
-	}
-	for _, t := range f.Tokens {
-		if t == nil || t.Hash == "" {
-			continue
-		}
+	for _, r := range rows {
+		t := tokenFromRow(r)
 		s.byHash[t.Hash] = t
 		s.byID[t.ID] = t
 		s.byKeyHash[t.KeyHash()] = t
-	}
-	if f.NextID > 0 {
-		s.nextID = f.NextID
-	} else {
-		for id := range s.byID {
-			if id >= s.nextID {
-				s.nextID = id + 1
-			}
-		}
 	}
 	return s, nil
 }
@@ -387,7 +413,7 @@ func HashToken(plain string) string {
 // Resolve 按明文解析出有效令牌：哈希命中 + 启用 + 未过期。
 // 空明文同路径解析——命中哈希为 sha256("") 的匿名通道行即按该令牌
 // 准入（仓内无此行时照旧 miss）。命中即刷新 LastUsedAt（内存态，
-// 随后续落盘固化）。
+// 随本行后续写回固化）。
 func (s *Store) Resolve(plain string) (*Token, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -436,6 +462,7 @@ func (s *Store) List() []*Token {
 }
 
 // Create 生成 64 字符 hex 明文令牌并入库；明文经返回值给出，只此一次。
+// id 由 auth_tokens 的自增主键分配。
 func (s *Store) Create(t *Token) (plain string, err error) {
 	if err := t.ValidateUsageLimits(); err != nil {
 		return "", err
@@ -448,14 +475,17 @@ func (s *Store) Create(t *Token) (plain string, err error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t.ID = s.nextID
-	s.nextID++
 	t.Hash = HashToken(plain)
 	t.CreatedAt = time.Now()
+	id, err := s.db.InsertToken(context.Background(), rowFromToken(t))
+	if err != nil {
+		return "", err
+	}
+	t.ID = id
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
 	s.byKeyHash[t.KeyHash()] = t
-	return plain, s.saveLocked()
+	return plain, nil
 }
 
 // Ensure 按明文播种：哈希已存在时原样返回 (existing, false, nil)，
@@ -471,14 +501,17 @@ func (s *Store) Ensure(plain string, t *Token) (*Token, bool, error) {
 	if existing, ok := s.byHash[hash]; ok {
 		return existing, false, nil
 	}
-	t.ID = s.nextID
-	s.nextID++
 	t.Hash = hash
 	t.CreatedAt = time.Now()
+	id, err := s.db.InsertToken(context.Background(), rowFromToken(t))
+	if err != nil {
+		return nil, false, err
+	}
+	t.ID = id
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
 	s.byKeyHash[t.KeyHash()] = t
-	return t, true, s.saveLocked()
+	return t, true, nil
 }
 
 // Update 覆盖写一条令牌（调用方先 Get 再改字段）。
@@ -488,15 +521,16 @@ func (s *Store) Update(t *Token) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.byID[t.ID]; !ok {
+	old, ok := s.byID[t.ID]
+	if !ok {
 		return errors.New("token not found")
 	}
-	delete(s.byHash, s.byID[t.ID].Hash)
-	delete(s.byKeyHash, s.byID[t.ID].KeyHash())
+	delete(s.byHash, old.Hash)
+	delete(s.byKeyHash, old.KeyHash())
 	s.byHash[t.Hash] = t
 	s.byID[t.ID] = t
 	s.byKeyHash[t.KeyHash()] = t
-	return s.saveLocked()
+	return s.db.UpsertToken(context.Background(), rowFromToken(t))
 }
 
 // Delete 移除令牌；不存在时按成功处理（幂等删除）。
@@ -510,7 +544,7 @@ func (s *Store) Delete(id int64) error {
 	delete(s.byHash, t.Hash)
 	delete(s.byKeyHash, t.KeyHash())
 	delete(s.byID, id)
-	return s.saveLocked()
+	return s.db.DeleteToken(context.Background(), id)
 }
 
 // Acquire 占用一个令牌并发槽；到顶返回 (active, limit, false)。
@@ -560,8 +594,9 @@ func (s *Store) AllowRPM(id int64) (used, limit int64, ok bool) {
 	return t.rpmCount, int64(t.MaxRPM), true
 }
 
-// AddResult 回写一次完成请求的统计与费用窗口，并落盘；落盘失败不阻塞
-// 请求收尾（内存态仍在，下次写带全量）。口径对齐 ccLoad updateTokenStats：
+// AddResult 回写一次完成请求的统计与费用窗口，并把该行写回表——与文件
+// 时代同为每请求持久化；写库失败不阻塞请求收尾（内存态仍在，行写是
+// 全量快照，下次成功写自动收敛）。口径对齐 ccLoad updateTokenStats：
 // 499 整次跳过；token/费用只在 2xx 时累加；TTFB/RT 均值与流式计数对
 // 全部非 499 行更新（失败流也计入均值样本）。
 func (s *Store) AddResult(id int64, r Result) {
@@ -617,7 +652,9 @@ func (s *Store) AddResult(id int64, r Result) {
 	} else {
 		t.FailureCount++
 	}
-	_ = s.saveLocked()
+	if err := s.db.UpsertToken(context.Background(), rowFromToken(t)); err != nil {
+		slog.Warn("persist token stats failed", "token_id", id, "error", err)
+	}
 }
 
 // Empty 报告仓内是否一个令牌都没有；开放模式判定用——仓空时 /v1
@@ -637,22 +674,4 @@ func (s *Store) CostLimitState(id int64) (used, limit int64, window string, exce
 		return 0, 0, "", false
 	}
 	return t.CostLimitState(time.Now())
-}
-
-// saveLocked 原子落盘（tmp+rename）；调用方必须持锁。
-func (s *Store) saveLocked() error {
-	f := tokenFile{NextID: s.nextID, Tokens: make([]*Token, 0, len(s.byID))}
-	for _, t := range s.byID {
-		f.Tokens = append(f.Tokens, t)
-	}
-	sort.Slice(f.Tokens, func(i, j int) bool { return f.Tokens[i].ID < f.Tokens[j].ID })
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
 }
