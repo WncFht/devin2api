@@ -4672,6 +4672,13 @@ body.trend-page .chart-info {
   flex: 0 0 auto;
 }
 
+/* 标题短词禁折行：CJK min-content 只有单字宽，flex 收缩会把
+   「请求趋势图表」挤成词中换行（末字孤行）。nowrap 让 h3 的
+   min-content 回到整词宽，空间不足时由工具栏自己换行。 */
+.trend-chart-title {
+  white-space: nowrap;
+}
+
 .trend-chart-type-toggle {
   display: inline-flex;
   gap: var(--space-1);
