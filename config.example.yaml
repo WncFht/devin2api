@@ -4,21 +4,25 @@ server:
   max_concurrency: 1024
 
 debug:
-  # 请求级调试日志是本服务的排障基础：logs/ 阶段文件、index.jsonl、
-  # 面板 usage/requests 全部依赖它，关闭则整套排障工作流不可用。
-  # 记录含请求正文，注意隐私与磁盘（上限由 max_total_mb 兜底）。
+  # 请求级调试记录是本服务的排障基础：阶段记录（debug_files/debug_chunks
+  # 表）、logs 表、面板 usage/requests 全部依赖它，关闭则整套排障工作流
+  # 不可用。记录含请求正文，注意隐私与磁盘（上限由 max_total_mb 兜底）。
   enabled: true
-  # 请求日志目录保留天数；<=0 不按时间清理。默认 14。
+  # 调试记录保留天数（按 dir 名内嵌时间整批清理）；<=0 不按时间清理。默认 14。
   # retention_days: 14
-  # logs 目录总量上限（MB），超限从最旧目录开始删；<=0 不限制。默认 1024。
+  # 调试 payload 总量上限（MB），超限按 dir 从最旧开始删；<=0 不限制。默认 1024。
   # max_total_mb: 1024
-  # 大体积阶段文件（03-devin-request/04-devin-response/06-http-response 与
-  # attachments/）的保留小时数；超时剥离负载、保留 meta/error/01/02/05 证据。
-  # <=0 不剥离。默认 24。
+  # 大体积阶段记录（03-devin-request/04-devin-response/06-http-response 与
+  # attachments/ 名下的行）的保留小时数；超时剥离负载、保留
+  # meta/error/01/02/05 证据。<=0 不剥离。默认 24。
   # payload_hours: 24
-  # 容量淘汰时保护的最新失败目录数（含 error.json）；<=0 不保护。默认 32。
+  # 容量淘汰时保护的最新失败请求组数（含 error.json 行的 dir）；<=0 不保护。
+  # 默认 32。
   # keep_error_dirs: 32
-  # 配额快照采样间隔（分钟），写入 logs/quota.jsonl 供燃烧速率预测；<=0 不采样。
+  # logs 摘要行保留天数（独立于 payload 保留；payload 淘汰后行仍可归因）。
+  # <=0 不清理。默认 90。
+  # log_row_retention_days: 90
+  # 配额快照采样间隔（分钟），写入 quota_samples 表供燃烧速率预测；<=0 不采样。
   # 默认 5。
   # quota_interval_minutes: 5
   # pprof/fgprof 剖析端点的独立监听地址；空值不启用（默认）。
@@ -36,9 +40,10 @@ devin:
   # accounts: 上游账号池（可选）；与上面的 token 互斥——accounts 非空时
   # token 必须留空，且 env/credentials.toml 自动发现链整体关闭，凭据
   # 来源只剩各条目自己的 token/credentials_file。
-  # name 是账号在日志、闸门状态文件与面板里的身份：字母/数字/连字符/
+  # name 是账号在日志、闸门状态与面板里的身份：字母/数字/连字符/
   # 下划线 1–32 字符、池内唯一，"default" 为保留名（隐式单号 lane 的
-  # 身份，禁用）；每号独立限速闸门（闩状态落盘 gate-state-<name>.json）
+  # 身份，禁用）；每号独立限速闸门（闩状态持久化在 runtime_state 表的
+  # gate:<name> 键）
   # 与配额采样。token 与 credentials_file 至少给一个；都给时 token 作
   # 初始凭据、credentials_file（指向 Devin CLI 的 credentials.toml）
   # 作 unauthenticated 自愈来源——CLI 续期改写它即自动跟随。
@@ -83,8 +88,8 @@ devin:
   # 桶容量为一分钟额度可容纳突发；<=0 或不填不限速——不建议：上游
   # 限流器按分钟桶计数且把被拒尝试计入，不限速时突发容易触顶。
   # 冷却闩本身始终生效（resource_exhausted 后按其 reset 时刻拦停，
-  # 闩截止时刻落盘 logs/gate-state.json、重启恢复），max_rpm 决定
-  # 的是触闩频率而不是兜底。
+  # 闩截止时刻持久化在 devin-2api.db 的 runtime_state 表、重启恢复），
+  # max_rpm 决定的是触闩频率而不是兜底。
   max_rpm: 80
   # 上游限流冷却闩参数（通常无需调整）：
   # gate_max_hold_seconds: 闩外令牌排队允许的最长等待秒数，超出快速

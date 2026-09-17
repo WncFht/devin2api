@@ -12,7 +12,7 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 2. Claude Code 把 HTTP 400 映射成通用文案 "There's an issue with the selected model (swe-2-max)"；
 3. 主 agent 读到 task-notification 失败 + Agent 工具描述里 "a `model` override is ignored" 一句，输出「模型对子代理不可访问」。
 
-实际请求里 `requested_model` 一直是 `swe-2-max`，模型路由没有任何问题。教训：**客户端层的报错文案不可信，永远先看 `logs/<dir>/error.json` 的 stage 与 message**。
+实际请求里 `requested_model` 一直是 `swe-2-max`，模型路由没有任何问题。教训：**客户端层的报错文案不可信，永远先看该请求 `error.json` 的 stage 与 message**（`/admin/debug-logs/{id}/file/error.json`，或 `sqlite3 devin-2api.db` 查 `debug_files`）。
 
 ## 二、探测方法
 
@@ -119,12 +119,12 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 ### 结论
 
 - **skill/subagent/MCP 三个 feature 面在上游没有独立限制**——子代理请求与主会话同构（system + messages + tools），MCP 工具名是普通函数名，skill 注入是普通文本。唯一的 feature 级拦截面仍是提示词指纹（第三、四节）。
-- 限制集中在**本地 adapter 的协议覆盖度**：无桥接通道的工具类型与非 text/image 内容块被丢弃（记 `Dropped` 落盘，客户端无感知）。排查「某 feature 没生效」时先查 `02-request-messages.json` 与 `03-devin-request.json` 对比输入是否完整到达 wire。
+- 限制集中在**本地 adapter 的协议覆盖度**：无桥接通道的工具类型与非 text/image 内容块被丢弃（记 `Dropped` 落库，客户端无感知）。排查「某 feature 没生效」时先查该请求的 `02-request-messages.json` 与 `03-devin-request.json`（`/admin/debug-logs/{id}/file/{name}` 或 `debug_files` 表）对比输入是否完整到达 wire。
 
 ## 七、维护流程（新症状 → 新规则）
 
-1. 客户端报「模型不可用/无权限」类文案时，先查 `logs/<dir>/error.json`：`provider_stream` + `content policy` 即指纹问题。
-2. 从 `01-http-request.json` 取 `system`/`instructions` 原文，按第二节方法 bisect 到句级；注意先区分「单句触发」「句对触发」「同句共现」三种形态（两两组合测试不可省）。
+1. 客户端报「模型不可用/无权限」类文案时，先查该请求的 `error.json`（`/admin/debug-logs/{id}/file/error.json`）：`provider_stream` + `content policy` 即指纹问题。
+2. 从 `01-http-request.json`（同 dir 的 `debug_files` 行）取 `system`/`instructions` 原文，按第二节方法 bisect 到句级；注意先区分「单句触发」「句对触发」「同句共现」三种形态（两两组合测试不可省）。
 3. 写规则时给 `trigger` 填匹配必然包含的小写子串（写错会让规则静默失效），改写文案必须是实测通过的等义句。
 4. 验证 = 原模板整体回放 200 + 改写句单独回放 200。
 

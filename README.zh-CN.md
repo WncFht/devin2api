@@ -13,10 +13,10 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 - **思考签名跨轮回放**——按各 provider 原生形态保存并回传：Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
 - **忠实的工具调用**——custom/freeform 工具调用（如 `apply_patch`）原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对
 - **上游流韧性**——token 过期自动从凭据来源重读；产出内容前的上游失败（传输断裂、静默卡死、空回复）透明重试；早期失败返回真实 HTTP 错误，而不是已提交 200 后的 SSE error
-- **限流闸门**——上游 `resource_exhausted` 触发本地冷却闩：排队请求短暂等待后快速失败 `429` + `Retry-After`，不再捶打已被限流的上游；闩内按滴灌节奏放探针探测恢复；闩状态落盘 `logs/gate-state.json`，重启后未过期自动恢复。可选 `max_rpm` 令牌桶在触闩前先行整形出站压力
-- **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；请求日志开启时（`debug.enabled`，随仓库示例配置默认开启）每个请求带 `X-Request-Id`/`debug_ref` 直指调试目录
+- **限流闸门**——上游 `resource_exhausted` 触发本地冷却闩：排队请求短暂等待后快速失败 `429` + `Retry-After`，不再捶打已被限流的上游；闩内按滴灌节奏放探针探测恢复；闩状态持久化在 `devin-2api.db`，重启后未过期自动恢复。可选 `max_rpm` 令牌桶在触闩前先行整形出站压力
+- **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；请求日志开启时（`debug.enabled`，随仓库示例配置默认开启）每个请求带 `X-Request-Id`/`debug_ref` 直指其调试记录
 - **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型目录
-- **`/web` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试目录，以及多数字段可热加载的脱敏配置视图
+- **`/web` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试 payload，以及多数字段可热加载的脱敏配置视图
 - **部署简单**——单一静态二进制，[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
 
 ## 快速开始
@@ -100,7 +100,7 @@ curl http://localhost:8080/healthz
 
 ## 用法
 
-> **注意**：`/v1/*` 接口由令牌仓（状态目录下的 `auth_tokens.json`）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据；`config.yaml` 的 `auth.api_key` 只是播种源（启动与 reload 时写成一条普通令牌行）。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。
+> **注意**：`/v1/*` 接口由令牌仓（状态目录 `devin-2api.db` 的 `auth_tokens` 表）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据；`config.yaml` 的 `auth.api_key` 只是播种源（启动与 reload 时写成一条普通令牌行）。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。
 
 接口列表：
 
@@ -173,12 +173,12 @@ curl http://localhost:8080/v1/messages \
 | `devin.gate_default_latch_seconds`               | 上游 `resource_exhausted` 未声明 reset 时刻时的兜底闩时长秒数                                                                                                             | `60`                                                                        |
 | `devin.gate_window_offset_seconds`               | 上游分钟桶界在本地分钟内的估计位置（第几秒）                                                                                                                              | `0`（本地 `:00`；实测桶界在本地 `:59` 附近）                                |
 | `devin.gate_window_guard_seconds`                | 估计桶界两侧的停发死区秒数——死区内请求睡到下一窗口开放                                                                                                                    | `2`                                                                         |
-| `debug.enabled`                                  | 在配置文件同目录的 `logs/` 下写按请求的调试日志                                                                                                                           | `false`                                                                     |
-| `debug.retention_days`                           | 请求日志目录保留天数；`<=0` 不按时间清理                                                                                                                                  | `14`                                                                        |
-| `debug.max_total_mb`                             | `logs/` 总量上限（MB），超限从最旧目录开始删                                                                                                                              | `1024`                                                                      |
-| `debug.payload_hours`                            | 大体积阶段文件（03/04/06 与 attachments/）保留小时数，超时剥离负载保留 meta/error 证据                                                                                    | `24`                                                                        |
-| `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败目录数（含 `error.json`）                                                                                                                         | `32`                                                                        |
-| `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `logs/quota.jsonl`；`<=0` 不采样                                                                                                                       | `5`                                                                         |
+| `debug.enabled`                                  | 按请求记录调试 payload 进 `devin-2api.db`（`debug_files`/`debug_chunks` 表，状态目录）                                                                                    | `false`                                                                     |
+| `debug.retention_days`                           | 按请求调试记录保留天数；`<=0` 不按时间清理                                                                                                                                | `14`                                                                        |
+| `debug.max_total_mb`                             | 调试 payload 总量上限（MB），超限从最旧请求组开始删                                                                                                                       | `1024`                                                                      |
+| `debug.payload_hours`                            | 大体积阶段记录（03/04/06 与 attachments/ 名下）保留小时数，超时剥离负载保留 meta/error 证据                                                                               | `24`                                                                        |
+| `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败请求组数（含 `error.json` 行）                                                                                                                    | `32`                                                                        |
+| `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `quota_samples` 表；`<=0` 不采样                                                                                                                       | `5`                                                                         |
 | `debug.pprof_listen`                             | pprof/fgprof 剖析端点的独立监听地址（如 `127.0.0.1:6060`）；端点无鉴权——只绑回环地址                                                                                      | 空（不启用）                                                                |
 | `dashboard.password`                             | `/web` 管理面板密码；留空免登录                                                                                                                                           | 无                                                                          |
 | `auth.api_key`                                   | 播种进令牌仓的凭据（启动与 reload 时写入一条普通令牌行）；`/v1/*` 准入由令牌仓决定（仓空即开放）。客户端通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递 | 无                                                                          |

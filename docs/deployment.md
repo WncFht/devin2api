@@ -16,7 +16,7 @@
 
 ## 跨平台共同约定
 
-- **logs/ 永远在状态目录下**：请求级 debug 目录、`index.jsonl`、`quota.jsonl`、`gate-state.json` 都在 `<state-dir>/logs/` 下；`stdout.log`/`stderr.log` 是进程输出。仓库里的 `logs/` 只是指向本机状态目录的符号链接（开发便利，非必需）。旧版「单运行目录」布局由部署脚本自动迁移（`migrate_legacy_runtime`）：config/logs 挪到平台目录、删旧二进制，目标已存在时不覆盖。
+- **运行时状态归 SQLite**：`<state-dir>/devin-2api.db`（WAL，伴生 `-wal`/`-shm`）装全部持久化状态——`logs` 请求行、`debug_files`/`debug_chunks` 调试 payload、`auth_tokens`、`model_registry`、`settings`、`quota_samples`、`runtime_state`（闸门闩态等）。`<state-dir>/logs/` 只剩进程输出（`stdout.log`/`stderr.log`）与 `bind-failure.json`（启动早期取证）。仓库里的 `logs/` 只是指向本机状态目录的符号链接（开发便利，非必需）。旧版「单运行目录」布局由部署脚本自动迁移（`migrate_legacy_runtime`）：config/logs 挪到平台目录、删旧二进制，目标已存在时不覆盖。文件时代的 `index.jsonl`/`auth_tokens.json`/`models.json`/`panel-settings.json`/`quota.jsonl`/`gate-state*.json` 由启动导入器搬进库后改名 `<name>.migrated`（回滚 = 旧二进制 + 改回原文件名，见 AGENTS.md「服务排障」节）。
 - **优雅排空是硬要求**：进程实现 `SIGTERM` 优雅退出（`signal.NotifyContext`）——收到信号进入 draining：`/healthz` 继续应答但带 `draining: true`，新的 `/v1/*` 立即 `503 + Retry-After: 1`，在途请求跑完；排空上限 600s，超时强关剩余连接。两个服务定义都给 660s 停止超时覆盖该上限加余量。重启只发 SIGTERM，禁用 `kill -9` 抢时间（Ctrl+C 在 Windows 前台触发同一套排空）。listener 在排空期的行为取决于 `DEVIN2API_REUSEPORT`：未开启时保持打开（新请求拿应用层 503 而非内核拒绝）；开启时立即关闭——reuseport 组内新连接按绑定序（macOS）或哈希（Linux）落到组内其它 socket，旧实例只有让出监听，deploy 预置的交接进程才能接管。排空起点同时 `SetKeepAlivesEnabled(false)`：drain 前已 accept 的 keep-alive 连接关 listener 管不着，会一直被钉在旧实例上整窗吃 503；关掉 keep-alive 后这些连接在下一个响应带 `Connection: close` 收尾，客户端重连即落到接替者——陈旧连接最多吃一次 503。
 - **重叠交接部署（reuseport handoff）**：`deploy.sh`/`deploy-linux.sh` 的重启路径是「先起交接进程 → 重启托管实例 → 等托管新实例拉起 → 退交接进程」。交接进程是同一二进制的临时副本，带 `DEVIN2API_REUSEPORT=1` 绑定同一端口入队；旧实例 drain 起点即关闭 listener 后它接管全部新连接，直到 KeepAlive/Restart 拉起托管新实例后再 SIGTERM 退场。全程零 503、零拒绝，在途请求只受 600s 排空上限约束，也不再需要等空闲窗口。交接进程 pid 记录在 `<状态目录>/.handoff.pid`；部署中断残留时下次部署自动回收。回退路径：在跑的旧实例没有 reuseport env 时交接进程 bind 失败，自动退化经典「等空闲 + 重启」——每个失败分支都不劣于旧部署语义。服务定义变更（plist/unit 重写）走同一套交接：重启动词换成「载入新定义」的那个（macOS `bootout+bootstrap`，Linux `systemctl restart` 随已 daemon-reload 的新 unit 生效），交接桥照样盖住整段排空窗口。注意直接 `launchctl kickstart -k` 不走交接：reuseport 实例 drain 即关 listener，排空期新连接是 refused 而非 503（都失败，但拿不到 Retry-After）。
 - **单实例**：托管器（KeepAlive/Restart=always）会与手动起的实例互抢监听端口，交替时全部在途流被掐。所有实例必须经托管器启停；冒烟验证用空闲端口起临时二进制，验证完立即关闭，不留常驻侧实例。
@@ -28,9 +28,8 @@
 ```
 launchd (gui/<uid> 用户域, 无需 sudo)
   └─ ~/.local/bin/devin-2api -config $RT/config.yaml -state-dir $RT   ($RT = ~/Library/Application Support/devin-2api)
-       ├─ $RT/logs/                          请求级 debug 目录 + index.jsonl
-       ├─ logs/stdout.log                 面板渲染等 fmt 输出
-       └─ logs/stderr.log                 slog 结构化进程日志
+       ├─ $RT/devin-2api.db               SQLite 状态库（logs/debug/auth_tokens/quota 等全部表）
+       └─ $RT/logs/                       stdout.log（面板渲染等 fmt 输出）+ stderr.log（slog 进程日志）+ bind-failure.json
 ```
 
 **与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本是 `$RT` 里那份（live）：deploy-remote 各模式部署前把它刷进 staging 供 `deploy.sh` 预检读取，`install_binary` 只在 live 缺失时从仓库副本恢复、存在且不一致时保留 live 并告警。改配置直接编辑 `$RT/config.yaml` 后 `POST /admin/config/reload` 热应用；仅 `server.listen` 等冷键需 `launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
@@ -165,4 +164,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
-面板是移植自 ccLoad（MIT）的唯一管理面。它带来的状态文件都落在状态目录根：`auth_tokens.json`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`models.json`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`panel-settings.json`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+面板是移植自 ccLoad（MIT）的唯一管理面。它管理的运行时状态都在 `devin-2api.db` 的三张表：`auth_tokens`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`model_registry`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`settings`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。

@@ -28,7 +28,7 @@
 
 ## 面板覆盖恒赢文件
 
-`reloadRuntimeConfig` 的顺序是先按文件值 `SetEnabled`/`SetPolicy` 重置，再重放 `panel-settings.json` 里登记的键（`ApplyAll`）。
+`reloadRuntimeConfig` 的顺序是先按文件值 `SetEnabled`/`SetPolicy` 重置，再重放 `settings` 表（`devin-2api.db`）里登记的键（`ApplyAll`）。
 所以凡是面板 settings 页暴露过的键（debug_log_enabled、log_retention_days、log_max_total_mb、log_payload_hours、log_keep_error_dirs、auto_refresh_interval_seconds），面板值永远压过 config.yaml——文件改了同名字段也不会生效，直到面板侧 reset。
 这个「面板赢」的不变量是给未来加键时的硬约束：新热键若同时进面板设置表，reload 路径必须先文件、后重放，顺序不能反。
 

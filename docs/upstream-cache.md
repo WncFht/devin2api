@@ -63,7 +63,7 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 
 谱系键 warmLineageKey 是「前缀逐字相等」的最小判据：SessionKey、system 头 4KB、工具声明全量、首条消息头 1KB、解析后 wire uid 五维，任一维漂移即换键。条目「晋升」为保温对象需同时满足：第 2 发真追加的成功上行（逐字重发/探针不计，microcompact 类原地改写重置计数）与前缀达 `warm_prefix_min_prefix_tokens`（默认 8192 token；观测过 usage 用实测 input+cache_read，未观测按 retained 字节/4 估）。同 SessionKey 内与新到谱系恰好一维相异的旧条目标 suspect——compaction 换首消息、auto-update 改 system 头、模型漂移这类「旧流从此永久静默」的形态；宽限 2×Interval 无真实上行即退役。
 
-ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱系 verbatim 重发也救不回（实测恢复 ~7%），故退役只认四类证据——客户端可归因上行静默超时、suspect 宽限期满、容量淘汰、自愈后仍语义错误；ping 的 cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身已完成重写兜底）。其二，准入过闸门 `tryAdmit`：闩内一律拒，闩外只在可发区间、配额有余、无排队者时放行——不排队不偷槽，被拒跳过本轮（计 `ping_skips`）；ping 撞 resource_exhausted 照喂冷却闩，它常最先发现上游饱和。其三，错误分类：凭证味失败（unauthenticated/permission_denied）自愈重发一次，仍 ClientFixable（invalid_argument/ContextLength/permission_denied 等）才退役，传输/限流/超时类只跳本轮。ping 是内部流量：直连 streamClient、绕过 app/recorder，不进 index.jsonl、调试目录与面板请求列表。
+ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱系 verbatim 重发也救不回（实测恢复 ~7%），故退役只认四类证据——客户端可归因上行静默超时、suspect 宽限期满、容量淘汰、自愈后仍语义错误；ping 的 cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身已完成重写兜底）。其二，准入过闸门 `tryAdmit`：闩内一律拒，闩外只在可发区间、配额有余、无排队者时放行——不排队不偷槽，被拒跳过本轮（计 `ping_skips`）；ping 撞 resource_exhausted 照喂冷却闩，它常最先发现上游饱和。其三，错误分类：凭证味失败（unauthenticated/permission_denied）自愈重发一次，仍 ClientFixable（invalid_argument/ContextLength/permission_denied 等）才退役，传输/限流/超时类只跳本轮。ping 是内部流量：直连 streamClient、绕过 app/recorder，不进 `logs` 表、调试记录与面板请求列表。
 
 静默分级只决定「最多保多久」——resume 越不可能，烧 ping 越不值：
 
@@ -85,4 +85,4 @@ ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱�
 - 免费档命中非保证：偶发 miss 是上游逐出/冷启动，非代理问题。
 - `permission_denied`（含内容策略拦截）在免费档表现非确定性——同一 prompt 可能先封后放（WindsurfAPI 亦记录此现象）。
 - 多 token 轮换会破坏按账号键控的缓存（粘账号才有意义）；当前单 token 无此问题。
-- 命中率统计口径：`index.jsonl` 聚合时必须过滤 `result=="completed" && input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。
+- 命中率统计口径：`logs` 表聚合时必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。
