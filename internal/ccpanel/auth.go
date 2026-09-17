@@ -274,6 +274,18 @@ func (h *Handler) withWebAuth(next http.HandlerFunc) http.HandlerFunc {
 		// 哈希，不挡这一下，无凭据请求会被当成 api_token 身份放行。
 		if tok := bearerToken(r); tok != "" && h.tokens != nil {
 			if t, ok := h.tokens.Resolve(tok); ok {
+				// 密码优先于令牌身份：播种进仓的 auth.api_key 常被用户
+				// 直接当管理凭据登录（甚至是唯一 secret），面板开放时
+				// 任何凭据也本就该是 admin——这时判成 api_token 只会
+				// 把管理员锁进受限视图。纯哈希比较，不进失败账本。
+				password, passwordHash := h.passwordSnapshot()
+				bearerHash := sha256.Sum256([]byte(tok))
+				if password == "" ||
+					subtle.ConstantTimeCompare(bearerHash[:], passwordHash[:]) == 1 {
+					h.clearLoginFailure(remoteIP(r))
+					next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{Role: "admin"})))
+					return
+				}
 				h.clearLoginFailure(remoteIP(r))
 				next(w, r.WithContext(context.WithValue(r.Context(), identityContextKey{}, webIdentity{
 					Role:    "api_token",

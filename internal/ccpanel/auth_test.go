@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/WncFht/devin2api/internal/authtoken"
 )
 
 // TestLoginFailureSweep 验证失败路径会清扫已失效的爆破条目——纯爆破
@@ -69,5 +71,69 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 	}
 	if _, ok := handler.loginFailures["1.2.3.4"]; ok {
 		t.Fatal("correct Bearer must clear the failure ledger")
+	}
+}
+
+// TestWebAuthPasswordBeatsSeededToken 覆盖播种回归：auth.api_key 被种进
+// 令牌仓后，拿它当 Bearer 的存量面板会话会被 Resolve 命中——若直接判
+// api_token，管理员会被降级到受限导航。密码命中（含开放面板）时必须
+// 仍给 admin；只有「非密码」的真实令牌才进 api_token。
+func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
+	newStore := func(t *testing.T) *authtoken.Store {
+		t.Helper()
+		store, err := authtoken.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	probe := func(h *Handler, bearer string) (int, string) {
+		var role string
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/dashboard/session", nil)
+		request.RemoteAddr = "1.2.3.4:5678"
+		if bearer != "" {
+			request.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		h.withWebAuth(func(w http.ResponseWriter, r *http.Request) {
+			role = identityFrom(r).Role
+			w.WriteHeader(http.StatusOK)
+		})(recorder, request)
+		return recorder.Code, role
+	}
+
+	// 开放面板（password==""）：播种的 api_key 命中 Resolve，但仍应 admin。
+	open, err := New("", "https://example.com", nil, "", false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newStore(t)
+	if _, _, err := store.Ensure("the-api-key", &authtoken.Token{Description: "config: auth.api_key", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	open.SetTokenStore(store)
+	if code, role := probe(open, "the-api-key"); code != http.StatusOK || role != "admin" {
+		t.Fatalf("open panel + seeded key = (%d, %q), want (200, admin)", code, role)
+	}
+
+	// 密码面板 + Bearer 与密码同值（用户拿 api_key 当管理密码用）→ admin。
+	guarded, err := New("the-api-key", "https://example.com", nil, "", false, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store2 := newStore(t)
+	if _, _, err := store2.Ensure("the-api-key", &authtoken.Token{Description: "config: auth.api_key", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store2.Ensure("real-token", &authtoken.Token{Description: "t", IsActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	guarded.SetTokenStore(store2)
+	if code, role := probe(guarded, "the-api-key"); code != http.StatusOK || role != "admin" {
+		t.Fatalf("bearer == panel password = (%d, %q), want (200, admin)", code, role)
+	}
+	// 与密码不同值的真实令牌 → 仍是 api_token 受限身份。
+	if code, role := probe(guarded, "real-token"); code != http.StatusOK || role != "api_token" {
+		t.Fatalf("distinct token = (%d, %q), want (200, api_token)", code, role)
 	}
 }
