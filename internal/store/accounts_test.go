@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -235,5 +238,79 @@ func TestEffectiveAccounts(t *testing.T) {
 	if got[0].Source != AccountSourceTombstoned || got[1].Source != AccountSourceConfig ||
 		got[2].Source != AccountSourcePanel || got[2].Name != "extra" {
 		t.Fatalf("merged = %+v", got)
+	}
+}
+
+// TestAccountMetaColumns 覆盖 priority/max_rpm/notes 的 NULL 语义：
+// nil 落 NULL、读 NULL 回 nil/""；merge 时非空行值赢 config 值、
+// NULL 行回落 config，墓碑行同受行覆盖（restore 复活的就是行值）。
+func TestAccountMetaColumns(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	p7, m30 := int64(7), int64(30)
+	if err := s.UpsertAccount(ctx, &AccountRow{
+		Name: "a", Token: "t", Priority: &p7, MaxRPM: &m30, Notes: "hi", CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertAccount(ctx, &AccountRow{Name: "b", Token: "t", CreatedAt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	row, _, _ := s.GetAccount(ctx, "a")
+	if row.Priority == nil || *row.Priority != 7 || row.MaxRPM == nil || *row.MaxRPM != 30 || row.Notes != "hi" {
+		t.Fatalf("a = %+v", row)
+	}
+	row, _, _ = s.GetAccount(ctx, "b")
+	if row.Priority != nil || row.MaxRPM != nil || row.Notes != "" {
+		t.Fatalf("b = %+v, want NULL meta", row)
+	}
+
+	merged := MergeAccounts([]config.DevinAccountConfig{
+		{Name: "a", Token: "cfg", Priority: 3, MaxRPM: 10},
+		{Name: "c", Token: "cfg", Priority: 3},
+	}, []*AccountRow{
+		{Name: "a", Priority: &p7, Notes: "n", CreatedAt: 1},
+		{Name: "c", MaxRPM: &m30, Deleted: true, CreatedAt: 2},
+	})
+	if merged[0].Priority != 7 || merged[0].MaxRPM != 10 || merged[0].Notes != "n" {
+		t.Fatalf("merged a = %+v", merged[0])
+	}
+	if merged[1].Source != AccountSourceTombstoned || merged[1].Priority != 3 || merged[1].MaxRPM != 30 {
+		t.Fatalf("merged c = %+v", merged[1])
+	}
+}
+
+// TestEnsureAccountColumns 验证存量表（首发形状、无新列）经
+// applySchema 幂等补齐 priority/max_rpm/notes：Open 走 ALTER 路径后
+// 新列可正常读写。
+func TestEnsureAccountColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode=WAL", path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE upstream_accounts (
+		name TEXT PRIMARY KEY, token TEXT, credentials_file TEXT,
+		disabled INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open on legacy schema: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	p := int64(2)
+	if err := s.UpsertAccount(context.Background(), &AccountRow{Name: "a", Priority: &p, Notes: "n", CreatedAt: 1}); err != nil {
+		t.Fatalf("upsert on migrated schema: %v", err)
+	}
+	row, ok, _ := s.GetAccount(context.Background(), "a")
+	if !ok || row.Priority == nil || *row.Priority != 2 || row.Notes != "n" {
+		t.Fatalf("row = %+v ok=%v", row, ok)
 	}
 }
