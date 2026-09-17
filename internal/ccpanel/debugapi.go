@@ -22,6 +22,10 @@ import (
 // 过滤与导出在这批记录内进行，更早历史用 grep 查 index.jsonl 原文件。
 const requestsFetchCap = 2000
 
+// matrixErrorMessageCap 是矩阵条目 error_message 的截断字节数：悬停归因
+// 只要够辨认首因，完整文案在日志行与索引里。
+const matrixErrorMessageCap = 120
+
 // adminAPIIndex 是自描述端点：面向 agent 的面板 API 目录与调试工作流说明，
 // 让初次接触的调用方无需读代码即可发现检索入口与日志布局。
 func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +40,7 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/admin/config", "description": "脱敏后的生效配置视图（token/api_key/password 以 sha256 前缀代替）；stale=true 表示文件在最后一次加载后被修改"},
 			{"method": "POST", "path": "/admin/config/reload", "description": "重读 config.yaml 并热应用；返回 applied/requires_restart 两组字段名；校验失败 422 旧配置继续服役"},
 			{"method": "GET", "path": "/admin/usage", "description": "index.jsonl 聚合：今日/窗口累计、model_days 模型×日矩阵、按模型/按 key、错误阶段、10 分钟粒度趋势、p50/p95/p99、目录价估算成本"},
-			{"method": "GET", "path": "/admin/logs?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=&until=", "description": "最近请求（新在前）；q 子串或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；since/until 钉时间窗；has_more 提示尾部窗外仍有更早历史，rejects 附管线前拒绝环（401/429 不进索引）"},
+			{"method": "GET", "path": "/admin/logs?limit=&offset=&q=&status=&status_class=&result=&model=&error_stage=&since=&until=", "description": "最近请求（新在前）；q 子串（含 error_message）或结构化过滤；status 表达式 499/!200/>=400/4xx 逗号 OR；since/until 钉时间窗；has_more 提示尾部窗外仍有更早历史，rejects 附管线前拒绝环（401/429 不进索引）"},
 			{"method": "GET", "path": "/admin/logs/matrix?since=", "description": "健康矩阵紧凑条目：只投影分桶与归因所需字段，不分页（扫描上限 2000）；truncated 为真表示 since 窗口覆盖不完整"},
 			{"method": "GET", "path": "/admin/logs/export?format=json|csv&筛选参数同上", "description": "导出筛选后的请求摘要（CSV 或 JSON 数组）；触及扫描上限带 X-Truncated: true"},
 			{"method": "GET", "path": "/admin/logs/bootstrap", "description": "日志页筛选初始化：模型清单、状态码观察值等一次拉齐"},
@@ -238,7 +242,7 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
-	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches\n")
+	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches,error_message\n")
 	for _, e := range entries {
 		firstUpstream, firstClient := "", ""
 		if e.FirstUpstreamMS != nil {
@@ -247,13 +251,13 @@ func writeRequestsCSV(w http.ResponseWriter, entries []debuglog.IndexEntry) {
 		if e.FirstClientMS != nil {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
-		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d\n",
+		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d,%s\n",
 			csvEscape(e.Dir), csvEscape(e.StartedAt), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
 			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage), e.Retries,
-			csvEscape(e.Account), e.AccountSwitches)
+			csvEscape(e.Account), e.AccountSwitches, csvEscape(e.ErrorMessage))
 	}
 }
 
@@ -279,6 +283,9 @@ type matrixEntry struct {
 	StatusCode     int    `json:"status_code"`
 	Result         string `json:"result"`
 	ErrorStage     string `json:"error_stage,omitempty"`
+	// ErrorMessage 是首因错误文案的截断版（matrixErrorMessageCap），
+	// 供格子悬停直接展示「为什么败」，不必逐格回查调试目录。
+	ErrorMessage string `json:"error_message,omitempty"`
 	// Owner 是失败责任归因（client/business_limited/upstream），由
 	// debuglog.ErrorOwner 统一计算——前端不再按 status/result/stage
 	// 复刻判定，与 usage 聚合的 client_faults/upstream_faults 同口径。
@@ -311,6 +318,7 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 			StatusCode:      e.StatusCode,
 			Result:          e.Result,
 			ErrorStage:      e.ErrorStage,
+			ErrorMessage:    truncate(e.ErrorMessage, matrixErrorMessageCap),
 			Owner:           debuglog.ErrorOwner(e),
 			Account:         e.Account,
 			AccountSwitches: e.AccountSwitches,

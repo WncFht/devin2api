@@ -62,14 +62,17 @@ func newLogCostComponent(quantity int64, pricePerMillion float64) logCostCompone
 // api=index.jsonl 的入口端点原值、upstream_protocol 恒 "devin"、
 // cost_multiplier 恒 1；单上游无渠道维（channel_* 字段不投）。
 type logEntry struct {
-	ID                   int64   `json:"id"`
-	Time                 int64   `json:"time"` // unix 秒（ccLoad JSONTime 序列化口径）
-	Model                string  `json:"model"`
-	ActualModel          string  `json:"actual_model,omitempty"`
-	ResponseModel        string  `json:"response_model,omitempty"`
-	LogSource            string  `json:"log_source,omitempty"`
-	StatusCode           int     `json:"status_code"`
-	Message              string  `json:"message"`
+	ID            int64  `json:"id"`
+	Time          int64  `json:"time"` // unix 秒（ccLoad JSONTime 序列化口径）
+	Model         string `json:"model"`
+	ActualModel   string `json:"actual_model,omitempty"`
+	ResponseModel string `json:"response_model,omitempty"`
+	LogSource     string `json:"log_source,omitempty"`
+	StatusCode    int    `json:"status_code"`
+	Message       string `json:"message"`
+	// ErrorMessage 是首个失败的完整错误文案（index.jsonl 同源，≤300B）；
+	// message 列只放 result[:error_stage] 短形态，长文案经本字段透出。
+	ErrorMessage         string  `json:"error_message,omitempty"`
 	Duration             float64 `json:"duration"`
 	IsStreaming          bool    `json:"is_streaming"`
 	UpstreamWebsocket    bool    `json:"upstream_websocket,omitempty"`
@@ -129,6 +132,7 @@ func (h *Handler) projectLogEntry(e debuglog.IndexEntry, prices map[string]Catal
 		LogSource:                logSource,
 		StatusCode:               e.StatusCode,
 		Message:                  message,
+		ErrorMessage:             e.ErrorMessage,
 		Duration:                 float64(e.DurationMS) / 1000,
 		IsStreaming:              e.Stream,
 		UpstreamWebsocket:        e.API == "responses-ws",
