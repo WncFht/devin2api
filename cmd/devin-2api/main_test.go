@@ -21,6 +21,7 @@ import (
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // TestListenURL verifies listen address descriptions used in the startup log.
@@ -111,7 +112,12 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+	dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dbStore.Close() }()
+	settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 		Debug:       manager,
 		DevinConfig: devinPool.CurrentConfig,
 		UpdateDevin: func(mutate func(*devin.Config) error) error {
@@ -316,7 +322,12 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			settings, err := ccpanel.NewPanelSettings(dir, ccpanel.SettingsDeps{
+			dbStore, _, err := store.Open(filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = dbStore.Close() }()
+			settings, err := ccpanel.NewPanelSettings(dbStore, ccpanel.SettingsDeps{
 				Debug:       manager,
 				DevinConfig: devinPool.CurrentConfig,
 				UpdateDevin: func(mutate func(*devin.Config) error) error {

@@ -1,4 +1,4 @@
-// Package modelreg 实现全局模型注册表：models.json 持久化 + /v1 准入用的
+// Package modelreg 实现全局模型注册表：model_registry 表持久化 + /v1 准入用的
 // 启用开关与重定向覆盖。等价于 ccLoad 单渠道 ModelEntry{redirect_model,
 // disabled} 的集合——本服务只有一条上游，注册表是全局覆盖层而非渠道属性。
 //
@@ -9,57 +9,41 @@
 package modelreg
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // Entry 是一条注册表覆盖；字段名对齐 ccLoad model.ModelEntry。
 type Entry struct {
-	RedirectModel string `json:"redirect_model,omitempty"`
-	Disabled      bool   `json:"disabled,omitempty"`
+	RedirectModel string
+	Disabled      bool
 }
 
-// registryFile 是 models.json 的持久化形状：按模型名键控的覆盖表。
-type registryFile struct {
-	Models map[string]Entry `json:"models"`
-}
-
-// Store 管理 models.json 与内存覆盖表；变更写穿透落盘（文件 KB 级，
-// 管理操作低频）。加载失败按坏档处理：原文件改名留档后空仓起步。
+// Store 管理 model_registry 表与内存覆盖表；管理操作写穿透入库（低频），
+// /v1 准入路径的 Lookup 纯走内存。
 type Store struct {
 	mu      sync.RWMutex
-	path    string
+	st      *store.Store
 	entries map[string]Entry
 }
 
-// New 加载 stateDir/models.json；文件缺失以空仓起步。
-func New(stateDir string) (*Store, error) {
-	s := &Store{
-		path:    filepath.Join(stateDir, "models.json"),
-		entries: map[string]Entry{},
-	}
-	data, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
-	}
+// New 从 model_registry 表水合内存覆盖表；空表以空仓起步。
+func New(st *store.Store) (*Store, error) {
+	s := &Store{st: st, entries: map[string]Entry{}}
+	models, err := st.ListModels(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	var f registryFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		_ = os.Rename(s.path, s.path+".corrupt")
-		return s, nil
-	}
-	for name, e := range f.Models {
-		if name == "" {
+	for _, m := range models {
+		if m.Model == "" {
 			continue
 		}
-		s.entries[name] = e
+		s.entries[m.Model] = Entry{RedirectModel: m.RedirectModel, Disabled: m.Disabled}
 	}
 	return s, nil
 }
@@ -100,8 +84,9 @@ func (s *Store) Lookup(name string) (Entry, bool) {
 	return Entry{}, false
 }
 
-// Set 覆盖写一条注册项并落盘；项退化为全默认（启用且无重定向）时自动
-// 删除——文件只承载非默认覆盖，PUT 传默认值即等价于重置。
+// Set 覆盖写一条注册项并入库；项退化为全默认（启用且无重定向）时自动
+// 删除——表只承载非默认覆盖，PUT 传默认值即等价于重置。先写库后改
+// 内存：写失败时两侧一致保持旧值。
 func (s *Store) Set(name string, e Entry) error {
 	name, e, err := normalize(name, e)
 	if err != nil {
@@ -110,19 +95,32 @@ func (s *Store) Set(name string, e Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !e.Disabled && e.RedirectModel == "" {
+		if err := s.st.DeleteModel(context.Background(), name); err != nil {
+			return err
+		}
 		delete(s.entries, name)
-	} else {
-		s.entries[name] = e
+		return nil
 	}
-	return s.saveLocked()
+	if err := s.st.SetModel(context.Background(), store.ModelEntry{
+		Model:         name,
+		RedirectModel: e.RedirectModel,
+		Disabled:      e.Disabled,
+	}); err != nil {
+		return err
+	}
+	s.entries[name] = e
+	return nil
 }
 
 // Delete 移除覆盖；不存在时按成功处理（幂等删除）。
 func (s *Store) Delete(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.st.DeleteModel(context.Background(), name); err != nil {
+		return err
+	}
 	delete(s.entries, name)
-	return s.saveLocked()
+	return nil
 }
 
 // Entries 返回全部覆盖项的副本（键为注册时的原始大小写）。
@@ -134,23 +132,6 @@ func (s *Store) Entries() map[string]Entry {
 		out[n] = e
 	}
 	return out
-}
-
-// saveLocked 原子落盘（tmp+rename）；调用方必须持锁。
-func (s *Store) saveLocked() error {
-	f := registryFile{Models: make(map[string]Entry, len(s.entries))}
-	for n, e := range s.entries {
-		f.Models[n] = e
-	}
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
 }
 
 // Names 返回覆盖项的名字表（排序后），供渠道模型清单投影并入注册表名。
