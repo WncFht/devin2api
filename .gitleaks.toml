@@ -14,3 +14,17 @@ regex = '''devin-session-token\$[A-Za-z0-9._-]{6,}'''
 [rules.allowlist]
 regexTarget = "secret"
 regexes = ['''devin-session-token\$mock-token''', '''devin-session-token\$invalid\.badtoken\.for-smoke''']
+
+# 内联机器口令：抓取的会话/请求材料可能把全局 AGENTS.md 这类含口令的
+# 本机文档嵌进来（scripts/toolalign/codex-full-request.json 曾把
+# "sudo 密码 <值>" 带进公开仓，只能事后 scrub，历史仍在）。按上下文
+# 拦截，不写死口令本身；密码与口令之间允许短填充词（"都是"等）。
+[[rules]]
+id = "inline-machine-password"
+description = "Inline sudo/root password in prose (captured material embedding dotfiles)"
+regex = '''(?i)(sudo|root)[\s_-]*(密码|password)[\p{Han}\s:：=~]{0,8}([0-9A-Za-z!@#$%^&*._-]{4,})'''
+secretGroup = 3
+[rules.allowlist]
+# 已知历史泄露（不重写历史，口令走轮换）：赦免该 commit 让 gitleaks git
+# 审计归零，新提交里的同类内容不受 commits 豁免影响仍会被拦。
+commits = ['''5e9f3d6602be9b5b7648d36c2e43e34ef9b01aad''']
