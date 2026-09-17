@@ -205,8 +205,9 @@ func (h *Handler) adminDebugLogFile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminDebugLogMerged 把请求目录内 06-http-response.jsonl 的 SSE 帧合并成
-// 可读的最终响应文本（reasoning/content/tools），原始帧仍可读。
+// adminDebugLogMerged 把请求目录内 06-http-response.jsonl 的记录帧经
+// rebuildClientWire 还原成线上字节流后，合并成可读的最终响应文本
+// （reasoning/content/tools），原始帧仍可读。
 // truncated 透传读取截断位：>4MB 的 06 只合并前 4MB，没有它调用方会把
 // 残缺流当成完整响应。
 func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +222,7 @@ func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "response stream file not found")
 		return
 	}
-	parts := mergeResponseBody(string(h.maskToken(data)))
+	parts := mergeResponseBody(string(rebuildClientWire(h.maskToken(data))))
 	respondOK(w, map[string]any{
 		"reasoning": parts.Reasoning,
 		"content":   parts.Content,
@@ -234,8 +235,10 @@ func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
 // 命中数超 requestsFetchCap 时带 X-Truncated: true 头（导出体本身
 // 无元数据位）。筛选口径与列表端点完全一致（同一 logQuery 下推）。
 func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil || h.store == nil {
-		respondError(w, http.StatusNotFound, "debug log disabled")
+	// 导出只读 logs 表：debug 开关管的是 payload 录制，不该让调试
+	// 关闭时日志导出虚假 404。
+	if h.store == nil {
+		respondError(w, http.StatusNotFound, "log store unavailable")
 		return
 	}
 	lq, excluded := h.logQuery(r)
@@ -333,7 +336,7 @@ type matrixEntry struct {
 // 上限直接用满 requestsFetchCap——走 /admin/logs?limit= 的列表
 // 口径在高流量下盖不满 30 分钟分桶窗口。
 func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil || h.store == nil {
+	if h.store == nil {
 		respondOK(w, map[string]any{"entries": []matrixEntry{}, "total": 0, "truncated": false, "disabled": true})
 		return
 	}
@@ -445,7 +448,7 @@ func (h *Handler) runUsageFetch(done chan struct{}) error {
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
-	if h.debug == nil || h.store == nil {
+	if h.store == nil {
 		respondOK(w, map[string]any{"disabled": true})
 		return
 	}
