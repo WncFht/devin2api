@@ -5,7 +5,6 @@ package ccpanel
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -339,70 +338,6 @@ func (h *Handler) adminLogsMatrix(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// usageCacheTTL 是 /admin/usage 聚合快照的新鲜窗口：面板按轮询
-// 消费，过期不阻塞——有旧快照直接发旧值并后台重算（stale-while-
-// revalidate）；usageFetch 非空表示有聚合在途（singleflight 的
-// done channel），关闭即完成信号。
-const usageCacheTTL = 5 * time.Second
-
-// usageSnapshot 返回 UsageStats 快照：TTL 内直接命中；过期且有旧值
-// 时先回旧值、由首个过期调用方触发后台刷新；仅在没有任何快照时
-// （首次加载）同步等一趟聚合。
-func (h *Handler) usageSnapshot(ctx context.Context) (store.UsageSnapshot, error) {
-	for {
-		h.usageMu.Lock()
-		fresh := !h.usageAt.IsZero() && time.Since(h.usageAt) < usageCacheTTL
-		if fresh {
-			snap := h.usageSnap
-			h.usageMu.Unlock()
-			return snap, nil
-		}
-		if h.usageFetch != nil {
-			done := h.usageFetch
-			stale := h.usageSnap
-			hasStale := !h.usageAt.IsZero()
-			h.usageMu.Unlock()
-			if hasStale {
-				return stale, nil // 刷新由在途者收尾
-			}
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return store.UsageSnapshot{}, ctx.Err()
-			}
-		}
-		done := make(chan struct{})
-		h.usageFetch = done
-		stale := h.usageSnap
-		hasStale := !h.usageAt.IsZero()
-		h.usageMu.Unlock()
-		if hasStale {
-			go func() { _ = h.runUsageFetch(done) }()
-			return stale, nil
-		}
-		if err := h.runUsageFetch(done); err != nil {
-			return store.UsageSnapshot{}, err
-		}
-	}
-}
-
-// runUsageFetch 执行一趟 UsageStats 聚合、刷新缓存并关闭 done 通知
-// 等待方。用 Background ctx：快照是 handler 级共享缓存，单个调用方
-// 断连不应掐死共用的计算。
-func (h *Handler) runUsageFetch(done chan struct{}) error {
-	snap, err := h.store.UsageStats(context.Background())
-	h.usageMu.Lock()
-	if err == nil {
-		h.usageSnap = snap
-		h.usageAt = time.Now()
-	}
-	close(done)
-	h.usageFetch = nil
-	h.usageMu.Unlock()
-	return err
-}
-
 // adminUsage 返回 logs 表聚合快照，并按模型目录价附估算成本。
 // 价格是 catalog 标价（$/1M tokens），est_cost 为参考值而非上游账单。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +345,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, map[string]any{"disabled": true})
 		return
 	}
-	snap, err := h.usageSnapshot(r.Context())
+	snap, err := h.usageCache.Get(r.Context())
 	if err != nil {
 		slog.Warn("ccpanel: usage stats query failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "usage query failed")

@@ -56,37 +56,19 @@ type Handler struct {
 	// 在途调用持旧引用跑完。New 之后恒非 nil。
 	upstreamPtr atomic.Pointer[panelUpstream]
 
-	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存可显著降低上游压力。
-	// 每个缓存各持一把锁——拉取上游发生在写锁内（锁内复查把并发 miss 收敛成
-	// 单次 RPC），共用一把会让一个慢接口（上限 610s）堵住无关缓存的读。
-	cacheTTL     time.Duration
-	modelsMu     sync.RWMutex
-	modelsCache  []map[string]any
-	modelsExpiry time.Time
-	// modelsFetch 非空表示有目录拉取在途（singleflight 的 done channel）；
-	// 由 modelsMu 保护，关闭即完成信号。
-	modelsFetch         chan struct{}
-	providersMu         sync.RWMutex
-	providersCache      []map[string]any
-	providersExpiry     time.Time
-	modelStatusesMu     sync.RWMutex
-	modelStatusesCache  []map[string]any
-	modelStatusesExpiry time.Time
-
-	// usageMu 保护 usageSnap/usageAt/usageFetch：UsageStats 是 logs
-	// 表上十几条聚合查询的快照，面板轮询语义容忍秒级陈旧——短
-	// TTL 缓存把一次页面扇出的并发请求收敛成一趟计算。
-	usageMu    sync.Mutex
-	usageSnap  store.UsageSnapshot
-	usageAt    time.Time
-	usageFetch chan struct{}
-	// statusMu 保护 statusSnap/statusAt/statusFetch：StatusReport 是
-	// 六路上游 RPC 的并行聚合，耗时≈最慢一路 RTT（实测 ~1s）——
-	// quota 页每次加载/轮询各付一趟。结构同上：TTL 快照 + singleflight。
-	statusMu    sync.Mutex
-	statusSnap  map[string]any
-	statusAt    time.Time
-	statusFetch chan struct{}
+	// 面板数据缓存：模型目录、供应商列表、模型状态均不经常变化，缓存
+	// 可显著降低上游压力；usage/status 两页快照同理。统一走 ttlCache——
+	// 每个缓存各持一把锁，拉取永远锁外（旧实现把写锁横在 ≤610s 的 RPC
+	// 上，一个慢接口会堵死同缓存全部读，锁内等待也不吃 ctx）。
+	modelsCache        ttlCache[[]map[string]any]
+	providersCache     ttlCache[[]map[string]any]
+	modelStatusesCache ttlCache[[]map[string]any]
+	// usageCache 是 UsageStats 聚合快照（logs 表十几条聚合查询）：
+	// 面板轮询语义容忍秒级陈旧，SWR 让页面扇出的并发请求只吃一趟计算。
+	usageCache ttlCache[store.UsageSnapshot]
+	// statusCache 是 StatusReport 六路上游 RPC 并行聚合的快照，
+	// 耗时≈最慢一路 RTT（实测 ~1s）——quota 页每次加载/轮询各付一趟。
+	statusCache ttlCache[map[string]any]
 
 	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
 	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
@@ -167,11 +149,23 @@ func New(password, baseURL string, tokenFunc func() string, proxy string, forceH
 		passwordHash:  sha256.Sum256([]byte(password)),
 		tokenFunc:     tokenFunc,
 		loginFailures: make(map[string]*loginFail),
-		cacheTTL:      5 * time.Minute,
 		metrics:       metrics,
 		debug:         debug,
 		startedAt:     time.Now(),
 	}
+	h.modelsCache = newTTLCache(catalogCacheTTL, false, h.fetchModels)
+	h.providersCache = newTTLCache(catalogCacheTTL, false, h.fetchProviders)
+	h.modelStatusesCache = newTTLCache(catalogCacheTTL, false, h.fetchModelStatuses)
+	h.usageCache = newTTLCache(usageCacheTTL, true, func(ctx context.Context) (store.UsageSnapshot, error) {
+		return h.store.UsageStats(ctx)
+	})
+	h.statusCache = newTTLCache(statusCacheTTL, false, func(ctx context.Context) (map[string]any, error) {
+		// 610s 对齐原 adminStatus 语义：WithoutCancel 剥掉请求取消后，
+		// 上游长思考/排队仍由这个上限兜底。
+		fetchCtx, cancel := context.WithTimeout(ctx, 610*time.Second)
+		defer cancel()
+		return h.StatusReport(fetchCtx), nil
+	})
 	h.upstreamPtr.Store(up)
 	return h, nil
 }
