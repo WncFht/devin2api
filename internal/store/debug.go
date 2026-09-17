@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -25,20 +26,22 @@ type DebugFileInfo struct {
 }
 
 // PutDebugFile 写 debug_files 一行（同名覆写）：meta.json 等
-// 可重写文件走这里。
+// 可重写文件走这里。超阈值内容透明压缩（usize=解压前尺寸）。
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
+	stored, usize := encodePayload(content)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-		dir, name, content, time.Now().UnixMilli())
+		`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+		dir, name, stored, usize, time.Now().UnixMilli())
 	return err
 }
 
 // PutDebugFileIfAbsent 只在 (dir,name) 不存在时写入——error.json 的
 // first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
+	stored, usize := encodePayload(content)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-		dir, name, content, time.Now().UnixMilli())
+		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+		dir, name, stored, usize, time.Now().UnixMilli())
 	return err
 }
 
@@ -47,9 +50,10 @@ func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, cont
 // （等价文件时代 mkdir 的 EEXIST），与 PutDebugFileIfAbsent 的差别
 // 只在是否报告本次真正写入。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
+	stored, usize := encodePayload(content)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-		dir, name, content, time.Now().UnixMilli())
+		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+		dir, name, stored, usize, time.Now().UnixMilli())
 	if err != nil {
 		return false, err
 	}
@@ -61,8 +65,8 @@ func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []
 // 查询在无命中行时也返回一行，首个 chunk 得 seq=0。写连接池单连接
 // 串行化下整条语句原子；同事务内连续执行时子查询读到本批已写行，
 // seq 随批次单调递增。
-const appendChunkSQL = `INSERT INTO debug_chunks(dir, name, seq, data)
-	SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?
+const appendChunkSQL = `INSERT INTO debug_chunks(dir, name, seq, data, usize)
+	SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?
 	FROM debug_chunks WHERE dir=? AND name=?`
 
 // DebugChunk 是一次刷写里单个 JSONL 文件的待追加批：data 内可含多行
@@ -90,7 +94,8 @@ func (s *Store) AppendDebugChunks(ctx context.Context, dir string, chunks []Debu
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, c := range chunks {
-		if _, err := tx.ExecContext(ctx, appendChunkSQL, dir, c.Name, c.Data, dir, c.Name); err != nil {
+		stored, usize := encodePayload(c.Data)
+		if _, err := tx.ExecContext(ctx, appendChunkSQL, dir, c.Name, stored, usize, dir, c.Name); err != nil {
 			return err
 		}
 	}
@@ -107,10 +112,34 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	if limit <= 0 {
 		limit = math.MaxInt64
 	}
+	var usize int64
 	err = s.ro.QueryRowContext(ctx,
-		`SELECT SUBSTR(content, 1, ?), LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
-		limit, dir, name).Scan(&data, &total)
+		`SELECT usize, LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+		dir, name).Scan(&usize, &total)
 	if err == nil {
+		if usize == 0 {
+			// 未压缩行维持截断读：SUBSTR 只取前缀，total 即库存尺寸。
+			if err = s.ro.QueryRowContext(ctx,
+				`SELECT SUBSTR(content, 1, ?) FROM debug_files WHERE dir=? AND name=?`,
+				limit, dir, name).Scan(&data); err != nil {
+				return nil, 0, false, err
+			}
+			return data, total, true, nil
+		}
+		// 压缩行不能 SUBSTR 截断（魔数前缀是帧头不是内容）：
+		// 整读解压后 Go 侧截断，total 报解压前尺寸。
+		var stored []byte
+		if err = s.ro.QueryRowContext(ctx,
+			`SELECT content FROM debug_files WHERE dir=? AND name=?`,
+			dir, name).Scan(&stored); err != nil {
+			return nil, 0, false, err
+		}
+		if data, err = decodePayload(stored); err != nil {
+			return nil, 0, false, err
+		}
+		if total = usize; int64(len(data)) > limit {
+			data = data[:limit]
+		}
 		return data, total, true, nil
 	}
 	if err != sql.ErrNoRows {
@@ -119,7 +148,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 
 	var chunks int
 	err = s.ro.QueryRowContext(ctx,
-		`SELECT COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM debug_chunks WHERE dir=? AND name=?`,
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN usize > 0 THEN usize ELSE LENGTH(data) END), 0) FROM debug_chunks WHERE dir=? AND name=?`,
 		dir, name).Scan(&chunks, &total)
 	if err != nil {
 		return nil, 0, false, err
@@ -139,6 +168,9 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 		if err := rows.Scan(&chunk); err != nil {
 			return nil, 0, false, err
 		}
+		if chunk, err = decodePayload(chunk); err != nil {
+			return nil, 0, false, err
+		}
 		if remain := limit - int64(buf.Len()); int64(len(chunk)) > remain {
 			chunk = chunk[:remain]
 		}
@@ -150,8 +182,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 	return buf.Bytes(), total, true, nil
 }
 
-// DebugFileNames 返回目录内全部文件名（两表 UNION DISTINCT，按名排序）——
-// 剥离负载时按 isPayloadName 类谓词筛选的枚举源。
+// DebugFileNames 返回目录内全部文件名（两表 UNION DISTINCT，按名排序）。
 func (s *Store) DebugFileNames(ctx context.Context, dir string) ([]string, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT name FROM debug_files WHERE dir=? UNION SELECT name FROM debug_chunks WHERE dir=? ORDER BY name`,
@@ -177,9 +208,9 @@ func (s *Store) DebugFileNames(ctx context.Context, dir string) ([]string, error
 func (s *Store) DebugFileList(ctx context.Context, dir string) ([]DebugFileInfo, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT name, SUM(sz) FROM (
-			SELECT name, LENGTH(content) AS sz FROM debug_files WHERE dir=?
+			SELECT name, CASE WHEN usize > 0 THEN usize ELSE LENGTH(content) END AS sz FROM debug_files WHERE dir=?
 			UNION ALL
-			SELECT name, LENGTH(data) AS sz FROM debug_chunks WHERE dir=?
+			SELECT name, CASE WHEN usize > 0 THEN usize ELSE LENGTH(data) END AS sz FROM debug_chunks WHERE dir=?
 		) GROUP BY name ORDER BY name`,
 		dir, dir)
 	if err != nil {
@@ -285,6 +316,34 @@ func (s *Store) DebugDirsContaining(ctx context.Context, name string) (map[strin
 	return dirs, rows.Err()
 }
 
+// DebugErrorSignatures 返回「含 error.json 的 dir → (error_stage,
+// error_message)」——keep_error_dirs 按签名限帽的归并源。join 只取
+// logs 表里归因已落的行；无对应 logs 行（413/飞行中/行已先删）的
+// 目录缺席，调用方按各自独立签名处理。
+func (s *Store) DebugErrorSignatures(ctx context.Context) (map[string][2]string, error) {
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT l.dir, l.error_stage, l.error_message FROM logs l
+		JOIN (
+			SELECT dir FROM debug_files WHERE name='error.json'
+			UNION SELECT dir FROM debug_chunks WHERE name='error.json'
+		) e ON e.dir = l.dir
+		WHERE l.error_stage != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	sigs := map[string][2]string{}
+	for rows.Next() {
+		var dir string
+		var sig [2]string
+		if err := rows.Scan(&dir, &sig[0], &sig[1]); err != nil {
+			return nil, err
+		}
+		sigs[dir] = sig
+	}
+	return sigs, rows.Err()
+}
+
 // DeleteDebugDir 删除一个目录在两表中的全部行；两表删除同事务提交。
 func (s *Store) DeleteDebugDir(ctx context.Context, dir string) error {
 	return s.deleteDebugRows(ctx, `dir=?`, dir)
@@ -293,36 +352,41 @@ func (s *Store) DeleteDebugDir(ctx context.Context, dir string) error {
 // DeleteDebugDirsBefore 删除目录名字典序小于 prefix 的全部目录——
 // retention_days 的落点：目录名内嵌 "20060102-150405" 时间戳，
 // dir<cutoff 即「进入时刻早于界限」（同秒 -NN 后缀排在裸名之后，
-// 字典序与时间序一致）。
-func (s *Store) DeleteDebugDirsBefore(ctx context.Context, dirPrefix string) error {
-	return s.deleteDebugRows(ctx, `dir<?`, dirPrefix)
+// 字典序与时间序一致）。exclude 里的目录名豁免（keep_error_dirs
+// 保护集对龄删同样生效）。
+func (s *Store) DeleteDebugDirsBefore(ctx context.Context, dirPrefix string, exclude []string) error {
+	where := `dir<?`
+	args := []any{dirPrefix}
+	if len(exclude) > 0 {
+		where += ` AND dir NOT IN (` + placeholders(len(exclude)) + `)`
+		for _, dir := range exclude {
+			args = append(args, dir)
+		}
+	}
+	return s.deleteDebugRows(ctx, where, args...)
 }
 
-// DeleteDebugPayloadFiles 删除目录内指定名字的全部行（两表）——
-// payload_hours 剥离的落点：调用方按负载名谓词（03 词干前缀、
-// 04/06 精确名、attachments/ 前缀）从 DebugFileNames 筛出清单。
-func (s *Store) DeleteDebugPayloadFiles(ctx context.Context, dir string, names []string) error {
-	if len(names) == 0 {
+// DeleteDebugPayloadsBefore 删除目录名小于 bound 的全部目录中、名字
+// 命中 exact 精确名或 prefixes 前缀（GLOB 词干）的行——payload_hours
+// 剥离的集合化形态：一条 DELETE 替代逐目录枚举+删除的 N+1。
+// bound 由调用方先钳位到活跃集最小名之下（请求在写的目录不剥）。
+func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exact, prefixes []string) error {
+	if len(exact) == 0 && len(prefixes) == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	args := []any{bound}
+	names := make([]string, 0, len(prefixes)+1)
+	if len(exact) > 0 {
+		names = append(names, `name IN (`+placeholders(len(exact))+`)`)
+		for _, name := range exact {
+			args = append(args, name)
+		}
 	}
-	defer func() { _ = tx.Rollback() }()
-	inClause := `dir=? AND name IN (` + placeholders(len(names)) + `)`
-	args := make([]any, 0, len(names)+1)
-	args = append(args, dir)
-	for _, name := range names {
-		args = append(args, name)
+	for _, prefix := range prefixes {
+		names = append(names, `name GLOB ?`)
+		args = append(args, prefix+"*")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM debug_files WHERE `+inClause, args...); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM debug_chunks WHERE `+inClause, args...); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.deleteDebugRows(ctx, `dir<? AND (`+strings.Join(names, ` OR `)+`)`, args...)
 }
 
 // deleteDebugRows 对两表执行同一 WHERE 的删除，单事务提交。

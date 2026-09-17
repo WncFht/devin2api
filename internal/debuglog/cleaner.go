@@ -15,8 +15,8 @@ package debuglog
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -25,21 +25,9 @@ import (
 // 可把每轮的全表聚合摊薄到可忽略。
 const cleanerInterval = 5 * time.Minute
 
-// isPayloadName 判定目录内（按 debug 行键名）的「负载层」成员：体积大、
-// 只在近距排障时需要。超时后被剥离，meta.json/error.json/01/02/05 等
-// 证据继续保留。devinRequestStageStem+"." 前缀同时圈出 03 主文件与全部
-// 重试分片（03-devin-request.attemptN.json）与托管搜索分片——精确名
-// 匹配会漏掉分片，重试请求的大体积请求体将永不剥离。
-func isPayloadName(name string) bool {
-	if strings.HasPrefix(name, devinRequestStageStem+".") || strings.HasPrefix(name, AttachmentsDir+"/") {
-		return true
-	}
-	switch name {
-	case StageDevinResponse, StageHTTPResponse:
-		return true
-	}
-	return false
-}
+// 负载层的成员判定已下推成 DeleteDebugPayloadsBefore 的名字谓词
+//（devinRequestStageStem+"." 前缀圈出 03 主文件与全部重试/搜索分片、
+// 04/06 精确名、attachments/ 前缀）——剥离名单与该谓词同源维护。
 
 // runCleaner 是后台清理协程：按 ticker 周期执行 retention 检查，
 // 收到 stop 信号时退出。Close 通过 cleanerDone 等它结束。
@@ -91,50 +79,57 @@ func (manager *Manager) cleanOnce() int {
 	now := time.Now()
 	removed := 0
 
-	// 负载剥离：逐目录筛出负载名删除。活跃目录整体跳过（请求还在写）。
+	// 负载剥离：一条集合 DELETE 替代逐目录枚举+删除的 N+1（一轮
+	// ~900 目录曾付 1800+ 查询）。bound 钳到活跃集最小名之下，
+	// 等价旧实现的逐目录活跃跳过。
 	if policy.PayloadHours > 0 {
 		payloadBound := now.Add(-time.Duration(policy.PayloadHours) * time.Hour).Format("20060102-150405")
-		for _, dir := range dirs {
-			if _, ok := active[dir]; ok || dir >= payloadBound {
-				continue
-			}
-			names, err := manager.store.DebugFileNames(ctx, dir)
-			if err != nil {
-				manager.ioErrors.Add(1)
-				slog.Warn("debuglog: list dir files failed", "dir", dir, "error", err)
-				continue
-			}
-			var payloads []string
-			for _, name := range names {
-				if isPayloadName(name) {
-					payloads = append(payloads, name)
-				}
-			}
-			if err := manager.store.DeleteDebugPayloadFiles(ctx, dir, payloads); err != nil {
-				manager.ioErrors.Add(1)
-				slog.Warn("debuglog: strip payload failed", "dir", dir, "error", err)
-			}
+		if minActive != "" && minActive < payloadBound {
+			payloadBound = minActive
+		}
+		if err := manager.store.DeleteDebugPayloadsBefore(ctx, payloadBound,
+			[]string{StageDevinResponse, StageHTTPResponse},
+			[]string{devinRequestStageStem + ".", AttachmentsDir + "/"}); err != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: strip payloads failed", "error", err)
+		}
+	}
+
+	// errorDirs 提前取：龄删豁免与容量淘汰共用同一保护集口径。
+	errorDirs := map[string]bool{}
+	if policy.KeepErrorDirs > 0 {
+		if errorDirs, err = manager.store.DebugDirsContaining(ctx, ErrorFile); err != nil {
+			manager.ioErrors.Add(1)
+			slog.Warn("debuglog: list error dirs failed", "error", err)
+			errorDirs = map[string]bool{}
 		}
 	}
 
 	// 按龄删除：界名压到活跃集最小名之下，等价旧实现「跳过活跃目录」。
+	// 受保护的失败目录同样豁免——「最近 N 个失败目录受保护」对龄删
+	// 与容量淘汰同语义，不再只豁免后者。
 	if policy.Days > 0 {
 		bound := now.Add(-time.Duration(policy.Days) * 24 * time.Hour).Format("20060102-150405")
 		if minActive != "" && minActive < bound {
 			bound = minActive
 		}
-		deletables := 0
+		var deletable []string
 		for _, dir := range dirs {
 			if dir < bound {
-				deletables++
+				deletable = append(deletable, dir)
 			}
 		}
-		if deletables > 0 {
-			if err := manager.store.DeleteDebugDirsBefore(ctx, bound); err != nil {
+		protected := manager.protectedErrorDirs(ctx, deletable, errorDirs, policy.KeepErrorDirs)
+		var exclude []string
+		for dir := range protected {
+			exclude = append(exclude, dir)
+		}
+		if len(deletable) > len(exclude) {
+			if err := manager.store.DeleteDebugDirsBefore(ctx, bound, exclude); err != nil {
 				manager.ioErrors.Add(1)
 				slog.Warn("debuglog: delete expired dirs failed", "error", err)
 			} else {
-				removed += deletables
+				removed += len(deletable) - len(exclude)
 			}
 		}
 	}
@@ -152,14 +147,6 @@ func (manager *Manager) cleanOnce() int {
 		slog.Warn("debuglog: measure debug dirs failed", "error", err)
 		return removed
 	}
-	errorDirs := map[string]bool{}
-	if policy.KeepErrorDirs > 0 {
-		if errorDirs, err = manager.store.DebugDirsContaining(ctx, ErrorFile); err != nil {
-			manager.ioErrors.Add(1)
-			slog.Warn("debuglog: list error dirs failed", "error", err)
-			errorDirs = map[string]bool{}
-		}
-	}
 	var totalBytes int64
 	var candidates []string
 	for dir, size := range sizes {
@@ -173,25 +160,13 @@ func (manager *Manager) cleanOnce() int {
 		return removed
 	}
 	sort.Strings(candidates) // 名序即时间序
-	errorCount := 0
-	for _, dir := range candidates {
-		if errorDirs[dir] {
-			errorCount++
-		}
-	}
-	// candidates 按旧到新排序：前 deletableErrors 个失败目录仍可淘汰，
-	// 末尾 KeepErrorDirs 个失败目录豁免。
-	deletableErrors := errorCount - policy.KeepErrorDirs
+	protected := manager.protectedErrorDirs(ctx, candidates, errorDirs, policy.KeepErrorDirs)
 	for _, dir := range candidates {
 		if totalBytes <= maxBytes {
 			break
 		}
-		if errorDirs[dir] {
-			if deletableErrors > 0 {
-				deletableErrors--
-			} else {
-				continue
-			}
+		if protected[dir] {
+			continue
 		}
 		if err := manager.store.DeleteDebugDir(ctx, dir); err != nil {
 			manager.ioErrors.Add(1)
@@ -202,6 +177,51 @@ func (manager *Manager) cleanOnce() int {
 		removed++
 	}
 	return removed
+}
+
+// errorSigLongRun 折叠签名里的长数字串与 hex id（request id/时间戳）：
+// 同一场风暴的消息只差这些尾部实例值，折叠后才共享签名、共享保护名额。
+// 模型名里的短版本号段（"5-3"）不命中——不同模型/不同错误仍是不同签名。
+var errorSigLongRun = regexp.MustCompile(`[0-9a-fA-F]{8,}|[0-9]{4,}`)
+
+// protectedErrorDirs 计算容量淘汰的豁免集：从新到旧挑含 error.json 的
+// 目录，总量 cap 是 keepErrorDirs，且同一错误签名（stage+归一化消息）
+// 最多占 keepErrorDirs/16（至少 4）个名额——一场同签名风暴不再能把
+// 保护窗挤满、把稀有失败的现场顶出去。无 logs 归因行的目录（413/
+// 行已先删）各自独占签名，不参与归并。
+func (manager *Manager) protectedErrorDirs(ctx context.Context, candidates []string, errorDirs map[string]bool, keepErrorDirs int) map[string]bool {
+	protected := map[string]bool{}
+	if keepErrorDirs <= 0 {
+		return protected
+	}
+	sigs, err := manager.store.DebugErrorSignatures(ctx)
+	if err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: list error signatures failed", "error", err)
+		sigs = map[string][2]string{}
+	}
+	perSigCap := keepErrorDirs / 16
+	if perSigCap < 4 {
+		perSigCap = 4
+	}
+	sigCount := map[string]int{}
+	for i := len(candidates) - 1; i >= 0 && len(protected) < keepErrorDirs; i-- {
+		dir := candidates[i]
+		if !errorDirs[dir] {
+			continue
+		}
+		sig, ok := sigs[dir]
+		sigKey := dir // 无归因行的目录按各自独立签名处理
+		if ok {
+			sigKey = sig[0] + "\x00" + errorSigLongRun.ReplaceAllString(sig[1], "#")
+		}
+		if sigCount[sigKey] >= perSigCap {
+			continue
+		}
+		sigCount[sigKey]++
+		protected[dir] = true
+	}
+	return protected
 }
 
 // pruneStorage 在 cleanOnce 各出口统一收尾（defer 触发）：恢复

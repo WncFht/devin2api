@@ -79,6 +79,9 @@ type responseDecoder struct {
 	// driftWarned 表示本流已告警过上游 schema 漂移（unknown 字段），
 	// 同一流逐帧重复刷同一条告警没有新增信息。
 	driftWarned bool
+	// drift 保存首次检出的 unknown 字段现场（scope+字段号）——pump
+	// 侧消费后在 04 里落 schema_drift 标记行；nil 表示未检出/已标记。
+	drift *schemaDrift
 	// stopReasonWarned 表示本流已告警过未知 stop_reason 枚举值。
 	stopReasonWarned bool
 }
@@ -107,9 +110,10 @@ type toolState struct {
 }
 
 // newResponseDecoder 建解码器：stopPatterns 滤掉空串并记最大长度
-// （供截断尾部窗口的扫描界）；customTools 是按 freeform 语义声明的
-// 工具名集合，对应调用按包装格式解包。
-func newResponseDecoder(model string, stopPatterns []string, customTools map[string]bool) *responseDecoder {
+// （供截断尾部窗口的扫描界）；customTools/serverTools 是按 freeform 与
+// 服务端托管语义声明的工具名集合——前者按包装格式解包，后者标
+// call.Server 交给流的续轮机制代执行。
+func newResponseDecoder(model string, stopPatterns []string, customTools, serverTools map[string]bool) *responseDecoder {
 	patterns := make([]string, 0, len(stopPatterns))
 	maxLen := 0
 	for _, pattern := range stopPatterns {
@@ -121,7 +125,7 @@ func newResponseDecoder(model string, stopPatterns []string, customTools map[str
 			maxLen = len(pattern)
 		}
 	}
-	return &responseDecoder{model: model, stopPatterns: patterns, maxPatternLen: maxLen, customTools: customTools}
+	return &responseDecoder{model: model, stopPatterns: patterns, maxPatternLen: maxLen, customTools: customTools, serverTools: serverTools}
 }
 
 // customToolNames 返回请求里按 freeform/custom 语义声明的工具名集合，
@@ -231,10 +235,18 @@ func (decoder *responseDecoder) decode(response *devinproto.GetChatMessageRespon
 	return events
 }
 
+// schemaDrift 是首次检出 unknown 字段的现场：scope 指出漂移发生在帧的
+// 哪一层，fields 是解出的字段号列表——对照上游新 proto 定位新字段。
+type schemaDrift struct {
+	Scope  string
+	Fields []int
+}
+
 // noteSchemaDrift 检查上游帧在我们 proto 定义之外携带的字段：上游 schema
 // 演进的新字段经 proto 解码静默落进 unknown 区，「上游加了字段我们看不见」
 // 只能靠这里暴露。每流至多告警一次；覆盖帧顶层与两个最常见的语义嵌套
 // （usage、tool_call delta）——漂移若发生在这些位置，影响的是计费与调用。
+// 检出时现场存入 decoder.drift，由 pump 侧落成 04 标记行。
 func (decoder *responseDecoder) noteSchemaDrift(response *devinproto.GetChatMessageResponse) {
 	if decoder.driftWarned {
 		return
@@ -248,8 +260,10 @@ func (decoder *responseDecoder) noteSchemaDrift(response *devinproto.GetChatMess
 			return
 		}
 		decoder.driftWarned = true
+		fields := unknownFieldNumbers(unknown)
+		decoder.drift = &schemaDrift{Scope: scope, Fields: fields}
 		slog.Warn("upstream response carried fields outside our proto schema; decode may be drifting",
-			"scope", scope, "fields", unknownFieldNumbers(unknown))
+			"scope", scope, "fields", fields)
 	}
 	warn("frame", response)
 	if usage := response.GetUsage(); usage != nil {
@@ -466,8 +480,7 @@ func (decoder *responseDecoder) decodeText(events []llm.ResponseEvent, delta str
 	// 用 Builder 累加，避免每帧产生越来越大的新字符串。
 	decoder.textBuilder.WriteString(delta)
 	if len(decoder.stopPatterns) == 0 {
-		decoder.textEmitted += len(delta)
-		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventTextDelta, ContentIndex: decoder.textIdx, Delta: delta, Partial: decoder.snapshot()})
+		events = append(events, decoder.emitTextDelta(delta))
 		return events
 	}
 	return decoder.scanTextForStops(events)

@@ -145,12 +145,25 @@ type Adapter struct {
 	// 每请求一次的解析往返。
 	assignmentsMu sync.Mutex
 	assignments   map[string]resolvedAssignment
+	// assignmentsFetch 登记同键的在飞 AssignModel 调用：同会话并发
+	// 请求共享一次解析（模式同 modelsFetch），等待者收 done 后直接
+	// 读 flight 上的共享结果，不各发一次 RPC。
+	assignmentsFetch map[string]*assignFlight
 }
 
 // resolvedAssignment 是 AssignModel 对单个 router uid 的解析结果。
 type resolvedAssignment struct {
 	modelUID string
 	jwt      string
+}
+
+// assignFlight 是一次在飞 AssignModel 调用的共享句柄：done 关闭前
+// result/err 已写定（close 建立 happens-before），同键等待者直接取
+// 共享结果——失败也随结果广播，不产生逐个重试的串行风暴。
+type assignFlight struct {
+	done   chan struct{}
+	result resolvedAssignment
+	err    error
 }
 
 // upstreamLink 是一次「上游端点」的固化产物：stream/api 两个 connect
@@ -238,13 +251,10 @@ func (adapter *Adapter) link() *upstreamLink {
 // Close 停掉焐池协程并收掉 transport 的 idle 连接池（与 finishConfigApply
 // 退役旧 link 同一卫生动作）；进程退出是最兜底的生命周期。
 func (adapter *Adapter) Close() {
-	if adapter.warm != nil {
-		adapter.warm.Close()
-	}
-	if link := adapter.link(); link != nil {
-		link.warmer.Close()
-		link.transport.CloseIdleConnections()
-	}
+	adapter.warm.Close()
+	link := adapter.link()
+	link.warmer.Close()
+	link.transport.CloseIdleConnections()
 }
 
 // BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
@@ -350,13 +360,17 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		old.transport.CloseIdleConnections()
 		// warmer 停表要等进行中的 warmOnce（最坏 ~15s），异步收不堵 reload。
 		go old.warmer.Close()
-		if prev.BaseURL != next.BaseURL {
-			// assignment jwt 绑 cascade_id 且只对签发它的上游有效——
-			// 换端点后旧缓存全部失效，清空在新端点重解析。
-			adapter.assignmentsMu.Lock()
-			clear(adapter.assignments)
-			adapter.assignmentsMu.Unlock()
-		}
+	}
+	if prev.BaseURL != next.BaseURL || prev.Token != next.Token {
+		// assignment jwt 绑 cascade_id 且只认签发它的端点与凭据：换端点
+		// 或换账号后旧缓存若被复用会撞 jwt↔account 校验（permission_denied
+		// 且自愈救不回），清空强制重 assign——清缓存只付一次重解析，
+		// 方向安全。assignmentsFetch 同清：在飞调用的提交以「flight 仍是
+		// 注册项」为前提，清表即让旧端点/旧凭据在飞的解析结果不落缓存。
+		adapter.assignmentsMu.Lock()
+		clear(adapter.assignments)
+		clear(adapter.assignmentsFetch)
+		adapter.assignmentsMu.Unlock()
 	}
 
 	if prev.Model != next.Model {
@@ -597,6 +611,15 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			protoRequest = rebuilt
 			noteRetry("unauthenticated: token reloaded", protoRequest, false)
 			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
+		} else {
+			// 重建失败则放弃重发、原错误照常上报；但「自愈后为何没重试」
+			// 要留痕——error.json 是 first-write-wins 留给上游失败点，
+			// 本地重建失败只在 04 的分界行里找得到（同 reopen 的
+			// retry_failed 惯例）。
+			recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
+				"attempt": attempt,
+				"error":   buildErr.Error(),
+			})
 		}
 	}
 	if err != nil {
@@ -622,12 +645,11 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		return nil, llm.Classify(err)
 	}
 	// 客户端请求成功开流才更新 retained——续试变体（continueEmpty 追加
-	// 的合成 "continue"、continueTurn 的内部编码续轮）客户端下一发不会
+	// 的合成 "continue"、extend 的内部编码续轮/续传）客户端下一发不会
 	// 逐字节复现，存了就是保温死分支。
 	adapter.warm.retain(warmKey, request, model, warmRouter)
 	serverTools := serverToolNames(request.Tools)
-	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
-	decoder.serverTools = serverTools
+	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
 	response := &responseStream{
 		frames:   pumpUpstream(streamCtx, stream),
 		cancel:   cancel,
@@ -681,52 +703,49 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
 		},
 		newDecoder: func() *responseDecoder {
-			rebuilt := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
-			rebuilt.serverTools = serverTools
-			return rebuilt
+			return newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
 		},
+	}
+	// extend 以「原始历史 + 追加消息」重发并返回播种旧内容的新流：
+	// 托管续轮（handleServerCalls）追加 assistant 回显与结果消息；
+	// 截断续传（tryResume）在其后再追加 "continue" 用户消息。续发
+	// 清掉 tool_choice——首发期的指名/强制约束会让上游每跳都强发
+	// 同一调用（实测 named web_search 滚到 hops 封顶）。
+	response.extend = func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		extended := request
+		extended.ToolChoice = nil
+		extended.Messages = append(append([]llm.Message{}, request.Messages...), extra...)
+		nextBinding := binding
+		nextBinding.Token = adapter.currentToken()
+		rebuilt, _, err := buildRequest(extended, cfg, nextBinding)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		noteRetry(cause, rebuilt, false)
+		nextCtx, nextCancel := context.WithCancel(ctx)
+		next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
+		if err != nil {
+			nextCancel()
+			return nil, nil, nil, err
+		}
+		nextDecoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
+		// start 先跑：partial 元数据初始化后再播种旧内容——客户端
+		// 已见过本轮的 start，续发不产第二个（started 已置位，
+		// Recv 里 pendingStart 为空）。
+		nextDecoder.start()
+		nextDecoder.partial.Content = slices.Clone(seed)
+		return pumpUpstream(nextCtx, next), nextCancel, nextDecoder, nil
 	}
 	if len(serverTools) > 0 {
 		// 托管工具声明在场才接管：模型发出 Server 调用时由
-		// handleServerCalls 代执行（search）并续轮（continueTurn）。
+		// handleServerCalls 代执行（search）并续轮（extend）。
 		// 搜索调用的请求记录用 searchN 词干：主文件与 attemptN 编号
 		// 已被 chat 首发/续轮占用（见 runWebSearch 的 stem 说明）。
 		searchSeq := 0
 		response.search = func(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error) {
 			searchSeq++
 			stem := fmt.Sprintf("%s%d", debuglog.StageDevinSearchStem, searchSeq)
-			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem)
-		}
-		response.continueTurn = func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
-			continued := request
-			// 指名/required 的强制只在首发成立：续轮原样带上会让上游每跳
-			// 都强发同一调用（实测 named web_search 滚到 hops 封顶）。
-			continued.ToolChoice = nil
-			continued.Messages = append(append([]llm.Message{}, request.Messages...), assistant)
-			for _, result := range results {
-				continued.Messages = append(continued.Messages, result)
-			}
-			nextBinding := binding
-			nextBinding.Token = adapter.currentToken()
-			rebuilt, _, err := buildRequest(continued, cfg, nextBinding)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			noteRetry("server_tool continuation", rebuilt, false)
-			nextCtx, nextCancel := context.WithCancel(ctx)
-			next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
-			if err != nil {
-				nextCancel()
-				return nil, nil, nil, err
-			}
-			continuedDecoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools))
-			continuedDecoder.serverTools = serverTools
-			// start 先跑：partial 元数据初始化后再播种旧内容——客户端
-			// 已见过本轮的 start，续轮不产第二个（started 已置位，
-			// Recv 里 pendingStart 为空）。
-			continuedDecoder.start()
-			continuedDecoder.partial.Content = slices.Clone(seed)
-			return pumpUpstream(nextCtx, next), nextCancel, continuedDecoder, nil
+			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem, warmKey)
 		}
 	}
 	return response, nil
@@ -957,14 +976,57 @@ func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.Req
 // jwt，结果按 (router uid, cascade id) 缓存。错误分类见
 // docs/upstream-protocol.md 路由节：非 router uid → invalid_argument，
 // 不存在的 router → not_found。
+//
+// 同键并发收敛为单次上游调用（模式同 ListModels 的 modelsFetch）：在飞
+// 调用 detach 自首发者 ctx——结果是键级共享状态，一个客户端断连不该
+// 让全体等待者吃 context.Canceled；等待者吃自己的 ctx 可随时退出。
+// 提交只在 flight 仍是注册项时生效：配置清空（换端点/换凭据）后在飞
+// 解析结果落进缓存就是把陈旧 jwt 借尸还魂。
 func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
 	key := routerUID + "|" + cascadeID
 	adapter.assignmentsMu.Lock()
-	cached, ok := adapter.assignments[key]
-	adapter.assignmentsMu.Unlock()
-	if ok {
+	if cached, ok := adapter.assignments[key]; ok {
+		adapter.assignmentsMu.Unlock()
 		return cached, nil
 	}
+	if flight := adapter.assignmentsFetch[key]; flight != nil {
+		adapter.assignmentsMu.Unlock()
+		select {
+		case <-flight.done:
+			return flight.result, flight.err
+		case <-ctx.Done():
+			return resolvedAssignment{}, ctx.Err()
+		}
+	}
+	if adapter.assignmentsFetch == nil {
+		adapter.assignmentsFetch = make(map[string]*assignFlight)
+	}
+	flight := &assignFlight{done: make(chan struct{})}
+	adapter.assignmentsFetch[key] = flight
+	adapter.assignmentsMu.Unlock()
+
+	result, err := adapter.callAssignModel(context.WithoutCancel(ctx), routerUID, cascadeID)
+
+	adapter.assignmentsMu.Lock()
+	if adapter.assignmentsFetch[key] == flight {
+		delete(adapter.assignmentsFetch, key)
+		if err == nil {
+			// 有界缓存：会话级键随运行时长累积，触顶整体清空让会话重新解析。
+			if len(adapter.assignments) >= 4096 {
+				adapter.assignments = make(map[string]resolvedAssignment)
+			}
+			adapter.assignments[key] = result
+		}
+	}
+	flight.result, flight.err = result, err
+	adapter.assignmentsMu.Unlock()
+	close(flight.done)
+	return result, err
+}
+
+// callAssignModel 执行一次 AssignModel RPC 并整形结果；在飞去重、缓存
+// 提交与失败广播都归 assignModel。
+func (adapter *Adapter) callAssignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
 	name, version, os := adapter.CurrentConfig().ClientIdentity()
 	link := adapter.link()
 	link.warmer.kickRequest()
@@ -985,15 +1047,7 @@ func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID st
 	if resolved == "" || assignment.GetAssignmentJwt() == "" {
 		return resolvedAssignment{}, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("AssignModel(%s) returned empty assignment", routerUID)}
 	}
-	result := resolvedAssignment{modelUID: resolved, jwt: assignment.GetAssignmentJwt()}
-	adapter.assignmentsMu.Lock()
-	// 有界缓存：会话级键随运行时长累积，触顶整体清空让会话重新解析。
-	if len(adapter.assignments) >= 4096 {
-		adapter.assignments = make(map[string]resolvedAssignment)
-	}
-	adapter.assignments[key] = result
-	adapter.assignmentsMu.Unlock()
-	return result, nil
+	return resolvedAssignment{modelUID: resolved, jwt: assignment.GetAssignmentJwt()}, nil
 }
 
 // requestHasImages 判断请求是否含图片块（用户消息与工具结果两类），
@@ -1092,8 +1146,12 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		done := a.modelsFetch
 		a.modelsFetch = nil
 		if err != nil {
-			// 拉取方自身断连不代表上游失败：ctx 取消不上冷却。
-			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			// fetch 的 ctx 经 WithoutCancel detach，调用方取消传不进来
+			//（Canceled 实际不可达，留作兜底判据）；唯一可达的 ctx 错误
+			// 是 api client 自身 610s DeadlineExceeded——那是上游挂起的
+			// 形态，按上游失败进冷却，否则挂起期每个 ensureCatalog
+			// 调用方都吸附陪等 610s。
+			if !errors.Is(err, context.Canceled) {
 				backoff := catalogRetryBackoff
 				if failure := llm.Classify(err); failure.RetryAfterSeconds > 0 {
 					backoff = time.Duration(failure.RetryAfterSeconds) * time.Second
@@ -1350,13 +1408,15 @@ type responseStream struct {
 	// search 是服务端托管搜索的执行入口（runWebSearch）；nil 表示
 	// 本请求没有托管工具声明，handleServerCalls 不会触发。
 	search func(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32) (webSearchOutcome, error)
-	// continueTurn 在纯托管回合执行完搜索后续轮：assistant 是不含
-	// 结果块的 wire 回显，results 是各调用的 TOOL 结果消息，seed
-	// 是含结果块的完整内容（新解码器的 ContentIndex 种子）。nil
-	// 表示本请求无托管工具，流上不会产出 Server 调用。
-	continueTurn func(assistant llm.AssistantMessage, results []llm.ToolResultMessage, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error)
+	// extend 以「历史 + 追加消息」重发请求并返回播种旧内容的新流：
+	// 托管续轮（handleServerCalls）与截断续传（tryResume）共用；
+	// seed 是含结果块的完整内容（新解码器的 ContentIndex 种子）。
+	// nil 只在测试构造的裸流上出现。
+	extend func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error)
 	// hops 是已执行的服务端托管续轮数，封顶见 maxServerSearchHops。
 	hops int
+	// resumeAttempts 是已执行的截断续传次数，封顶见 maxStreamResumes。
+	resumeAttempts int
 	// costsCarry 累计已完成的托管续轮跳的上游 CreditCost：上游按跳
 	// 分别记账，收尾时并入最终 Done 的 Usage（见 applyCostsCarry）。
 	costsCarry int64
@@ -1463,6 +1523,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				if upstreamErr != nil && stream.tryReopen(upstreamErr, false) {
 					continue
 				}
+				resumeCause := upstreamErr
+				if resumeCause == nil {
+					// 干净 EOF 无 stopReason = 静默截断，与传输断裂同级续传。
+					resumeCause = errors.New("devin stream ended without stop reason")
+				}
+				if stream.tryResume(resumeCause) {
+					continue
+				}
 				events := stream.release(stream.decoder.finish(upstreamErr))
 				if upstreamErr == nil && stream.handleServerCalls(ctx, &events) {
 					// 续轮换流前先把本跳尾帧（toolcall_end/托管结果）下发——
@@ -1485,6 +1553,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
 			events := stream.decoder.decode(frame.response)
+			stream.recordSchemaDrift()
 			if len(events) > 0 {
 				stream.producedEvents = true
 				progress.Reset(upstreamNoProgressTimeout)
@@ -1516,6 +1585,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			if stream.tryReopen(stallErr, false) {
 				continue
 			}
+			if stream.tryResume(stallErr) {
+				continue
+			}
 			stream.recordUpstreamFailure(stallErr)
 			stream.queue = stream.release(stream.decoder.finish(stallErr))
 			stream.finished = true
@@ -1527,6 +1599,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.drainFrames()
 			progressErr := fmt.Errorf("devin stream made no progress for %s", upstreamNoProgressTimeout)
 			if stream.tryReopen(progressErr, false) {
+				continue
+			}
+			if stream.tryResume(progressErr) {
 				continue
 			}
 			stream.recordUpstreamFailure(progressErr)
@@ -1586,6 +1661,84 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	return true
 }
 
+// maxStreamResumes 是单条响应允许的截断续传次数：每次续传都把整段
+// 上下文重发再计费一遍，封顶防止对挂死上游反复烧配额。var 供测试
+// 缩短。
+var maxStreamResumes = 2
+
+// tryResume 在「内容已部分下发、上游流被截断」时续传：在飞块物化进
+// partial 后拼成 assistant 回显、追加 "continue" 用户消息整体重发——
+// 上游实测能从半截回合接续生成（含句中截断，probe edge
+// stall-resume-*）。返回 true 表示新流已接管；在飞块的 end 事件
+// 已入队作为接缝先于续流事件下发。
+//
+// 不可续的形态：在飞工具调用（arguments 仍是截断 JSON，回传会被
+// 上游参数校验拒掉，丢弃又让客户端已见的调用与上游历史分叉）、已收
+// stopReason 或被本地停止序列截断的流（语义内容已齐，续传会在
+// 停止标记之后再长出一块内容）。
+func (stream *responseStream) tryResume(cause error) bool {
+	if stream.extend == nil || !stream.producedEvents || stream.decoder.hasStopReason ||
+		stream.decoder.stoppedByPattern || stream.resumeAttempts >= maxStreamResumes ||
+		len(stream.decoder.tools) > 0 {
+		return false
+	}
+	// 物化在飞块并产接缝事件：end 让客户端看到干净块边界，续流
+	// 内容开新块（ContentIndex 由播种接续）。
+	thinkingOpen := stream.decoder.thinkingOpen
+	seam := stream.decoder.endThinking(stream.decoder.endText(nil))
+	partial := stream.decoder.partial
+	wireContent := make([]llm.Content, 0, len(partial.Content))
+	var results []llm.Message
+	for _, block := range partial.Content {
+		if result, isResult := block.(llm.ServerToolResult); isResult {
+			// 托管结果块不进 assistant 回显，按内容序转 TOOL 消息——
+			// 与 handleServerCalls 续轮的 wire 形态同构。
+			results = append(results, llm.ToolResultMessage{
+				ToolCallID: result.ToolCallID, IsError: result.IsError, TimestampMS: time.Now().UnixMilli(),
+				Content: []llm.Content{llm.TextContent{Text: result.Text}},
+			})
+			continue
+		}
+		wireContent = append(wireContent, block)
+	}
+	if thinkingOpen && len(wireContent) > 0 {
+		// 在飞 thinking 块的签名是截断残片，回显剥掉——无签名
+		// thinking 上游实测接受；半截签名可能被验签拒掉。
+		if thinking, ok := wireContent[len(wireContent)-1].(llm.ThinkingContent); ok {
+			thinking.ThinkingSignature = ""
+			thinking.SignatureType = ""
+			wireContent[len(wireContent)-1] = thinking
+		}
+	}
+	assistant := partial
+	assistant.Content = wireContent
+	extra := make([]llm.Message, 0, len(results)+2)
+	extra = append(extra, assistant)
+	extra = append(extra, results...)
+	extra = append(extra, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}})
+	frames, cancel, decoder, err := stream.extend("resume: "+cause.Error(), extra, partial.Content)
+	if err != nil {
+		return false
+	}
+	// 截断流已上报的 credit 并入 costsCarry（与托管续轮同账法）。
+	if costs := partial.Usage.Costs; costs != nil {
+		stream.costsCarry += costs.CreditCost
+	}
+	stream.resumeAttempts++
+	slog.Warn("resuming truncated stream", "attempt", stream.resumeAttempts, "error", cause)
+	// 换流同 tryReopen：杀旧泵、重置窗口，新解码器已播种旧内容。
+	stream.cancel()
+	stream.frames = frames
+	stream.cancel = cancel
+	stream.decoder = decoder
+	stream.started = false
+	stream.finished = false
+	stream.upstreamConfirmed = false
+	stream.progress.Reset(upstreamNoProgressTimeout)
+	stream.queue = seam
+	return true
+}
+
 // emptyEndTurn 判断 finish 产出的事件是否构成「正常 stop 但零内容」：
 // 上游偶发直接以 stopReason 收尾且不带任何 delta。StopSequence 不算——
 // 零内容命中停止序列更可能是预期的截断而非退化轮。
@@ -1594,7 +1747,8 @@ func emptyEndTurn(events []llm.ResponseEvent) bool {
 		if event.Type != llm.ResponseEventDone {
 			continue
 		}
-		return event.Message.StopReason == llm.StopReasonStop &&
+		return event.Message != nil &&
+			event.Message.StopReason == llm.StopReasonStop &&
 			len(event.Message.Content) == 0
 	}
 	return false
@@ -1620,22 +1774,52 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 		stage = debuglog.ErrStageDevinTransport
 	}
 	stream.recorder.WriteError(stage, cause)
+	// 走到这里说明 reopen/resume 都已拒绝：把两侧门禁快照落成 04 标记行，
+	// 「为什么没续」（典型：在飞工具调用）不必靠反推 retries=0。
+	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_declined", map[string]any{
+		"retried":            stream.retried,
+		"produced_events":    stream.producedEvents,
+		"tools_in_flight":    len(stream.decoder.tools),
+		"has_stop_reason":    stream.decoder.hasStopReason,
+		"stopped_by_pattern": stream.decoder.stoppedByPattern,
+		"resume_attempts":    stream.resumeAttempts,
+	})
 }
 
 // drainFrames 把看门狗判死时已缓冲未消费的上游帧补记进原始日志——
-// 「死前最后输出了什么」是判断上游挂死形态的关键证据。
+// 「死前最后输出了什么」是判断上游挂死形态的关键证据。补记的帧未经
+// decode，这里顺手跑一次 schema 漂移检查，让临死帧也能留 drift 标记。
 func (stream *responseStream) drainFrames() {
 	for {
 		select {
 		case frame, ok := <-stream.frames:
 			if !ok || frame.response == nil {
+				stream.recordSchemaDrift()
 				return
 			}
 			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
+			stream.decoder.noteSchemaDrift(frame.response)
 		default:
+			stream.recordSchemaDrift()
 			return
 		}
 	}
+}
+
+// recordSchemaDrift 把解码器首次检出的上游 schema 漂移落成 04 的
+// schema_drift 标记行——stderr 告警会被日志流冲掉，标记行随调试目录
+// 留存且与帧序同档可查。消费即清 decoder.drift：换解码器的重开/续轮
+// 各自最多标一次。
+func (stream *responseStream) recordSchemaDrift() {
+	drift := stream.decoder.drift
+	if drift == nil {
+		return
+	}
+	stream.decoder.drift = nil
+	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "schema_drift", map[string]any{
+		"scope":  drift.Scope,
+		"fields": drift.Fields,
+	})
 }
 
 // release 把 decoder 产出的第一批事件交给调用方：非错误批次前置扣留的
