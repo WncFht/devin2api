@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync/atomic"
 	"time"
@@ -41,11 +42,15 @@ type Store struct {
 // CREATE IF NOT EXISTS；是否跑 ImportLegacy 由导入器按源文件
 // 存在性自判，Open 不报告 created。
 func Open(path string) (*Store, error) {
+	openStart := time.Now()
+	stageStart := openStart
 	// synchronous=NORMAL：WAL 下 commit 不再逐次 fsync（帧留在 OS 页缓存，
 	// 进程崩溃不丢，仅断电/内核崩可能丢尾部事务，不产生损坏）。本库
 	// 装的是可重建的观测与面板状态，用这丁点断电尾部风险换 commit 风暴
-	// 期间的 fsync 开销。
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous(NORMAL)&_pragma=wal_autocheckpoint(500)&_loc=Local", path)
+	// 期间的 fsync 开销。busy_timeout 放到 30s：reuseport 交接期新旧
+	// 双写者并存，5s 曾在分钟级重叠窗内打出成片 SQLITE_BUSY 失败写，
+	// 30s 吸收这类部署期锁等待风暴（单写者设计不变，只改等待耐心）。
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)&_pragma=journal_mode=WAL&_pragma=synchronous(NORMAL)&_pragma=wal_autocheckpoint(500)&_loc=Local", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -58,6 +63,8 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	pingMS := time.Since(stageStart).Milliseconds()
+	stageStart = time.Now()
 	// auto_vacuum 只能在新库（无用户表）建表前开启：VACUUM 对空库
 	// 只是把头部位写进文件，不重写业务数据；旧库不在启动路径做。
 	if err := enableAutoVacuumOnEmpty(db); err != nil {
@@ -68,25 +75,28 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	schemaMS := time.Since(stageStart).Milliseconds()
+	stageStart = time.Now()
 	// 列演进走版本化迁移：幂等建表只管新库全量 DDL，存量库的
 	// ALTER/回填由 runner 按 schema_migrations 登记跳过。
 	if err := applyMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
-	// payload 计数器以权威聚合播种：此后全部写/删路径在各自事务提交
-	// 时增减它，读侧 O(1)。一次性启动全扫替代周期全扫（原 DBBytes
-	// 闸门被 WAL 撑真后每 5min 白跑一轮 GB 级聚合）。四项加数与
-	// DebugDirSizes + DebugBlobBytes 的合计口径逐项对应。
-	var debugBytes int64
-	if err := db.QueryRow(`SELECT
-		(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_files) +
-		(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks) +
-		(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_blobs) +
-		(SELECT COALESCE(SUM(LENGTH(dir)+LENGTH(name)+LENGTH(hash)),0) FROM debug_chunk_refs)`).Scan(&debugBytes); err != nil {
+	migrationsMS := time.Since(stageStart).Milliseconds()
+	stageStart = time.Now()
+	// payload 计数器从 runtime_state 持久化行 O(1) 播种：全部写/删
+	// 路径在各自事务内对该行做净增量，四项加数口径与
+	// DebugDirSizes + DebugBlobBytes 的合计逐项对应。行缺席（升级
+	// 首启、全新库、行被手删）才跑四表权威聚合并落库——替代原每次
+	// 启动的全扫（5.6GB 库实测 ~26s，行数计价与体积无关）。
+	debugBytes, seeded, err := seedDebugPayloadBytes(db)
+	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("seed debug payload bytes: %w", err)
 	}
+	seedMS := time.Since(stageStart).Milliseconds()
+	stageStart = time.Now()
 
 	// 读池在写库建好 schema 之后打开：WAL 下读者拿连接级快照，
 	// 与写者互不阻塞。并发数取面板页一次加载的端点扇出量级。
@@ -102,6 +112,8 @@ func Open(path string) (*Store, error) {
 		_ = ro.Close()
 		ro = db
 	}
+	readpoolMS := time.Since(stageStart).Milliseconds()
+	stageStart = time.Now()
 	st := &Store{db: db, ro: ro, path: path}
 	st.debugBytes.Store(debugBytes)
 	// 水位自愈：任何绕过双写的写入者（无 cells 码的旧二进制、外部
@@ -112,6 +124,18 @@ func Open(path string) (*Store, error) {
 		_ = st.Close()
 		return nil, fmt.Errorf("reconcile log cells: %w", err)
 	}
+	reconcileMS := time.Since(stageStart).Milliseconds()
+	slog.Info("store opened",
+		"path", path,
+		"ping_ms", pingMS,
+		"schema_ms", schemaMS,
+		"migrations_ms", migrationsMS,
+		"seed_ms", seedMS,
+		"seed_persisted", seeded,
+		"readpool_ms", readpoolMS,
+		"reconcile_ms", reconcileMS,
+		"total_ms", time.Since(openStart).Milliseconds(),
+		"debug_payload_bytes", debugBytes)
 	return st, nil
 }
 

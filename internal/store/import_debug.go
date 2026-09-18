@@ -148,6 +148,9 @@ func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, p
 		progressKey, progress, time.Now().UnixMilli()); err != nil {
 		return err
 	}
+	if err := addPayloadBytes(ctx, tx, imported); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

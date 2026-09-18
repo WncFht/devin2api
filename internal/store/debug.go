@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -48,10 +49,14 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 		dir, name, stored, usize, time.Now().UnixMilli()); err != nil {
 		return err
 	}
+	delta := int64(len(stored)) - old
+	if err := addPayloadBytes(ctx, tx, delta); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.debugBytes.Add(int64(len(stored)) - old)
+	s.debugBytes.Add(delta)
 	return nil
 }
 
@@ -59,17 +64,30 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 // first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 		dir, name, stored, usize, time.Now().UnixMilli())
 	if err != nil {
 		return err
 	}
+	var delta int64
 	if n, err := res.RowsAffected(); err != nil {
 		return err
 	} else if n > 0 {
-		s.debugBytes.Add(int64(len(stored)))
+		delta = int64(len(stored))
 	}
+	if err := addPayloadBytes(ctx, tx, delta); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.debugBytes.Add(delta)
 	return nil
 }
 
@@ -79,17 +97,32 @@ func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, cont
 // 只在是否报告本次真正写入。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
 	stored, usize := EncodePayload(content)
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 		dir, name, stored, usize, time.Now().UnixMilli())
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	if err == nil && n > 0 {
-		s.debugBytes.Add(int64(len(stored)))
+	var delta int64
+	if n, err := res.RowsAffected(); err != nil {
+		return false, err
+	} else if n > 0 {
+		delta = int64(len(stored))
+		claimed = true
 	}
-	return n > 0, err
+	if err := addPayloadBytes(ctx, tx, delta); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	s.debugBytes.Add(delta)
+	return claimed, nil
 }
 
 // appendChunkSQL 的 seq 由同一条 INSERT 内的子查询取 MAX(seq)+1——聚合
@@ -311,6 +344,9 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 				return err
 			}
 		}
+	}
+	if err := addPayloadBytes(ctx, tx, delta); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -779,6 +815,10 @@ func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) 
 			}
 			freed += n
 		}
+		if err := addPayloadBytes(ctx, tx, -freed); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
@@ -806,6 +846,55 @@ func deleteReturningBytes(ctx context.Context, tx *sql.Tx, query string, args ..
 	return total, rows.Err()
 }
 
+// debugPayloadBytesKey 是 runtime_state 里持久化 payload 计数器的键名：
+// 与 debugBytes 内存镜像同源（四表库存字节合计），全部写/删路径在各自
+// 事务内对它做净增量，Open 以它 O(1) 播种；行缺席时 Open 权威聚合重建，
+// cleaner 的周期对账兜底残余漂移。
+const debugPayloadBytesKey = "debug_payload_bytes"
+
+// addPayloadBytes 在 tx 内把净库存字节增量写进持久化计数器——与 payload
+// 行变更同事务提交，崩溃不留半账。行缺席时为 no-op：下次 Open 的权威
+// 聚合重建会收进期间的全部净量（升级首启窗内的漏计由周期对账兜底）。
+func addPayloadBytes(ctx context.Context, tx *sql.Tx, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	// TEXT 亲和列把整数结果存成十进制文本，读侧 ParseInt 还原。
+	_, err := tx.ExecContext(ctx,
+		`UPDATE runtime_state SET value = CAST(value AS INTEGER) + ?, updated_at = ? WHERE "key" = ?`,
+		delta, time.Now().UnixMilli(), debugPayloadBytesKey)
+	return err
+}
+
+// seedDebugPayloadBytes 取 payload 计数器的启动值与来源：持久化行存在且
+// 可解析时 O(1) 读回（persisted=true）；行缺席或值损坏时跑四表权威聚合
+// 并以单条 INSERT..SELECT 落库——聚合子查询与写入同一快照，并发提交
+// 不会夹在「算总量」与「登记」之间（交接期双进程同时首启至多各跑一轮）。
+func seedDebugPayloadBytes(db *sql.DB) (total int64, persisted bool, err error) {
+	var raw string
+	err = db.QueryRow(`SELECT value FROM runtime_state WHERE "key"=?`, debugPayloadBytesKey).Scan(&raw)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("read payload bytes counter: %w", err)
+	}
+	if err == nil {
+		if total, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
+			return total, true, nil
+		}
+	}
+	if err := db.QueryRow(`INSERT OR REPLACE INTO runtime_state("key", value, updated_at)
+		SELECT ?, CAST(
+			(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_files) +
+			(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks) +
+			(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_blobs) +
+			(SELECT COALESCE(SUM(LENGTH(dir)+LENGTH(name)+LENGTH(hash)),0) FROM debug_chunk_refs)
+		AS TEXT), ?
+		RETURNING CAST(value AS INTEGER)`,
+		debugPayloadBytesKey, time.Now().UnixMilli()).Scan(&total); err != nil {
+		return 0, false, fmt.Errorf("aggregate payload bytes: %w", err)
+	}
+	return total, false, nil
+}
+
 // DebugPayloadBytes 返回 debug payload 库存字节合计的内存镜像——与
 // DebugDirSizes 各目录值之和同口径（库存字节，压缩行计 gzip 帧长）。
 // 派生态：权威值是表内聚合，cleaner 以周期对账修漂。
@@ -813,10 +902,15 @@ func (s *Store) DebugPayloadBytes() int64 {
 	return s.debugBytes.Load()
 }
 
-// ReconcileDebugPayloadBytes 用权威总量重置内存计数器，返回重置前
-// 读数与权威值之差（正=计数高估，负=低估）——供 cleaner 对账记录漂移。
-func (s *Store) ReconcileDebugPayloadBytes(actual int64) (drift int64) {
-	return s.debugBytes.Swap(actual) - actual
+// ReconcileDebugPayloadBytes 用权威总量重置计数器（持久化行与内存镜像
+// 一起校正），返回重置前内存读数与权威值之差（正=计数高估，负=低估）——
+// 供 cleaner 对账记录漂移。upsert 顺带补回被手删的计数器行；持久化
+// 失败时内存镜像仍被校正，错误如实返回由调用方告警。
+func (s *Store) ReconcileDebugPayloadBytes(ctx context.Context, actual int64) (drift int64, err error) {
+	_, err = s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+		debugPayloadBytesKey, strconv.FormatInt(actual, 10), time.Now().UnixMilli())
+	return s.debugBytes.Swap(actual) - actual, err
 }
 
 // DebugBlobBytes 返回 CAS 共享 blob 的库存字节合计——全局口径的
@@ -869,6 +963,9 @@ func (s *Store) ReapOrphanBlobs(ctx context.Context) error {
 		return err
 	}
 	freed += n
+	if err := addPayloadBytes(ctx, tx, -freed); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}

@@ -193,7 +193,10 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	}
 	storedBytes += blobBytes
 	totalBytes += blobBytes
-	if drift := manager.store.ReconcileDebugPayloadBytes(storedBytes); drift != 0 {
+	if drift, err := manager.store.ReconcileDebugPayloadBytes(ctx, storedBytes); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: persist payload byte counter failed", "error", err)
+	} else if drift != 0 {
 		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes)
 	}
 	if totalBytes <= maxBytes {

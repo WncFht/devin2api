@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -396,9 +397,9 @@ func TestDeleteDebugRowsChunked(t *testing.T) {
 	assertPayloadBytes(t, s)
 }
 
-// assertPayloadBytes 断言内存计数器与权威聚合一致——目录口径
-// DebugDirSizes（files+chunks+refs）加全局口径 DebugBlobBytes。
-// 每个写/删操作后调一次，漏记账或重复记账立刻暴露。
+// assertPayloadBytes 断言内存计数器、runtime_state 持久化行与权威聚合
+// 三者一致——目录口径 DebugDirSizes（files+chunks+refs）加全局口径
+// DebugBlobBytes。每个写/删操作后调一次，漏记账或重复记账立刻暴露。
 func assertPayloadBytes(t *testing.T, s *Store) {
 	t.Helper()
 	sizes, err := s.DebugDirSizes(context.Background())
@@ -416,6 +417,15 @@ func assertPayloadBytes(t *testing.T, s *Store) {
 	want += blobBytes
 	if got := s.DebugPayloadBytes(); got != want {
 		t.Fatalf("payload bytes = %d, want %d (sizes %v, blobs %d)", got, want, sizes, blobBytes)
+	}
+	// 持久化行与内存镜像同事务维护，必须逐笔对齐。
+	var raw string
+	if err := s.db.QueryRow(
+		`SELECT value FROM runtime_state WHERE "key"=?`, debugPayloadBytesKey).Scan(&raw); err != nil {
+		t.Fatalf("read persisted payload bytes: %v", err)
+	}
+	if got, err := strconv.ParseInt(raw, 10, 64); err != nil || got != want {
+		t.Fatalf("persisted payload bytes = %q (%v), want %d", raw, err, want)
 	}
 }
 
@@ -490,7 +500,7 @@ func TestDebugPayloadBytes(t *testing.T) {
 			[]byte("unaccounted"))
 		return err
 	}())
-	drift := s.ReconcileDebugPayloadBytes(func() int64 {
+	drift, err := s.ReconcileDebugPayloadBytes(ctx, func() int64 {
 		sizes, err := s.DebugDirSizes(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -501,6 +511,9 @@ func TestDebugPayloadBytes(t *testing.T) {
 		}
 		return total
 	}())
+	if err != nil {
+		t.Fatalf("ReconcileDebugPayloadBytes: %v", err)
+	}
 	if drift != -11 {
 		t.Fatalf("drift = %d, want -11", drift)
 	}
@@ -529,6 +542,58 @@ func TestDebugPayloadBytesReseed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	assertPayloadBytes(t, s)
+}
+
+// TestDebugPayloadBytesSeedFallback 模拟升级后首启：库里有 payload 但
+// runtime_state 没有计数器行，Open 须走权威聚合重建并重新落行；
+// 值损坏时同样重建。重建后再次启动即回 O(1) 读路径。
+func TestDebugPayloadBytesSeedFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.PutDebugFile(ctx, "d1", "meta.json", []byte("persist")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	want := s.DebugPayloadBytes()
+	// 删掉计数器行——旧二进制写出的库没有它。
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM runtime_state WHERE "key"=?`, debugPayloadBytesKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen after key delete: %v", err)
+	}
+	if got := s.DebugPayloadBytes(); got != want {
+		t.Fatalf("reseeded counter = %d, want %d", got, want)
+	}
+	assertPayloadBytes(t, s)
+	// 值损坏也走重建：写一段非数字文本，重开后应回到权威值。
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE runtime_state SET value='garbage' WHERE "key"=?`, debugPayloadBytesKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen after corrupt value: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if got := s.DebugPayloadBytes(); got != want {
+		t.Fatalf("counter after corrupt reseed = %d, want %d", got, want)
+	}
 	assertPayloadBytes(t, s)
 }
 
