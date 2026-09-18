@@ -3,6 +3,8 @@
 package authtoken
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -276,5 +278,67 @@ func TestResolveAnonymousChannel(t *testing.T) {
 	}
 	if _, ok := store.Resolve(""); ok {
 		t.Fatal("inactive anonymous row resolved")
+	}
+}
+
+// TestSyncWriteEnqueueBound 验证库病态（worker 楔死 + 队列积满）时管理面
+// 写不再无限期持 s.mu 等空位：submitSync 超时放弃入队并向调用方报错。
+func TestSyncWriteEnqueueBound(t *testing.T) {
+	s := newStore(t)
+	defer func(d time.Duration) { syncEnqueueTimeout = d }(syncEnqueueTimeout)
+	syncEnqueueTimeout = 50 * time.Millisecond
+
+	tok, _, err := s.Ensure("k", &Token{Description: "t", IsActive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 楔死 worker：一条 run 无视 ctx 永久阻塞（模拟不响应取消的库调用），
+	// 再把 writes 填满——此后同步写只能等空位。
+	release := make(chan struct{})
+	s.writes <- writeTask{run: func(context.Context) error { <-release; return nil }}
+	for len(s.writes) < cap(s.writes) {
+		s.submitStats(func(context.Context) error { return nil })
+	}
+	defer func() { close(release); s.Close() }()
+
+	start := time.Now()
+	if err := s.Update(tok); err == nil {
+		t.Fatal("Update on saturated queue returned nil error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Update blocked %v, want bounded by syncEnqueueTimeout", elapsed)
+	}
+}
+
+// TestWriteWorkerTaskBound 验证单条落库写的 ctx 上限：run 卡死时 worker
+// 在 writeTaskTimeout 后取消它并继续消费后续写，不永久挂起。
+func TestWriteWorkerTaskBound(t *testing.T) {
+	s := newStore(t)
+	defer func(d time.Duration) { writeTaskTimeout = d }(writeTaskTimeout)
+	writeTaskTimeout = 50 * time.Millisecond
+	defer s.Close()
+
+	s.mu.Lock()
+	done := s.submitSync(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	s.mu.Unlock()
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wedged write err = %v, want DeadlineExceeded", err)
+	}
+
+	// worker 存活：后续写仍被消费。
+	s.mu.Lock()
+	done = s.submitSync(func(context.Context) error { return nil })
+	s.mu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("follow-up write err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not resume after wedged write")
 	}
 }

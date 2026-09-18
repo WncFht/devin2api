@@ -476,13 +476,28 @@ func New(st *store.Store) (*Store, error) {
 	return s, nil
 }
 
+// writeTaskTimeout 是单条落库写的上限。单行 upsert/delete 正常毫秒级；
+// 库病态（磁盘卡死、锁等待风暴越 busy_timeout）时无界 ctx 会把 worker
+// 永久挂在 task.run 上——writes 积满后 submitSync 的持锁发送跟着冻结
+// 准入。30s 对齐 busy_timeout(30000) 的锁等待耐心，超时经 ctx 取消
+// （sqlite3_interrupt）中止卡住的调用，写按失败回报。var 供测试收缩。
+var writeTaskTimeout = 30 * time.Second
+
+// syncEnqueueTimeout 是 submitSync 持 s.mu 等队列空位的上限。发送只在
+// writes 满（1024 条积压）时阻塞——健康 worker 毫秒级腾位，等满 5s
+// 说明库已病态：放弃入队并向调用方报错，准入锁至多被占 5s 而非无限期。
+var syncEnqueueTimeout = 5 * time.Second
+
 // writeWorker 顺序消费 writes 队列直落库；通道关闭后把剩余写排空再退。
 // run 只碰 db（快照在入队时已固化），不回头拿 s.mu——与等待 done 的
-// 提交方无锁互依。
+// 提交方无锁互依。每条写带 writeTaskTimeout 上限：worker 不会被单条
+// 卡住的写永久挂起，Close 的排空等待也随之有界。
 func (s *Store) writeWorker() {
 	defer close(s.writeDone)
 	for task := range s.writes {
-		err := task.run(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), writeTaskTimeout)
+		err := task.run(ctx)
+		cancel()
 		if task.done != nil {
 			task.done <- err
 		} else if err != nil {
@@ -493,13 +508,20 @@ func (s *Store) writeWorker() {
 
 // submitSync 把一条管理面写排进队列并返回完成句柄；调用方持 s.mu
 // 入队（队列序=内存变更序），释锁后才阻塞读 done 等落库结果——
-// 等库不持锁，sqlite 抖动不会冻住准入路径。仓已关闭时返回 nil。
+// 等库不持锁，sqlite 抖动不会冻住准入路径。队列满时等空位至多
+// syncEnqueueTimeout，超时则不入队、done 预填错误返回——无限期
+// 持锁等空位会连带冻结 Resolve/Acquire/AddResult。仓已关闭时返回 nil。
 func (s *Store) submitSync(run func(context.Context) error) chan error {
 	if s.closed {
 		return nil
 	}
 	done := make(chan error, 1)
-	s.writes <- writeTask{run: run, done: done}
+	select {
+	case s.writes <- writeTask{run: run, done: done}:
+	case <-time.After(syncEnqueueTimeout):
+		done <- errors.New("auth token write queue saturated")
+		slog.Warn("token sync write enqueue timed out", "timeout", syncEnqueueTimeout)
+	}
 	return done
 }
 
