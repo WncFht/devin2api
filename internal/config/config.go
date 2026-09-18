@@ -349,11 +349,19 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 			if prior, dup := seenTokens[account.Token]; dup {
 				return fmt.Errorf("devin.accounts[%d]: token duplicates account %q", index, prior)
 			}
+			if prior, dup := seenAPIKeys[account.Token]; dup {
+				return fmt.Errorf("devin.accounts[%d]: token duplicates api_key of account %q", index, prior)
+			}
 			seenTokens[account.Token] = account.Name
 		}
 		if account.APIKey != "" {
 			if prior, dup := seenAPIKeys[account.APIKey]; dup {
 				return fmt.Errorf("devin.accounts[%d]: api_key duplicates account %q", index, prior)
+			}
+			// token 与 api_key 是两种凭据形态但承载同一上游身份：
+			// 同一串跨字段进两条 lane 会被池当两个号、配额翻倍计。
+			if prior, dup := seenTokens[account.APIKey]; dup {
+				return fmt.Errorf("devin.accounts[%d]: api_key duplicates token of account %q", index, prior)
 			}
 			seenAPIKeys[account.APIKey] = account.Name
 		}
