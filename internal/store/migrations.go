@@ -116,8 +116,17 @@ var schemaMigrations = []migration{
 				`ALTER TABLE quota_samples ADD COLUMN overage_balance_micros INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		// lane_attempt_causes 是全新表：幂等建表路径（schema.go）
+		// 已覆盖新库与存量库，这里登记版本如实反映演进史；历史
+		// upstream_attempts 只活在 meta.json 里不可回填，表从
+		// 部署后新写入起累计。
+		version: "0008_lane_attempt_causes",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
-
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已
 // 带入该列（列定义以 schema.go 为准时），而中途建出的库也可能带列
 // 却无迁移登记——只在缺席时补列，两种来源都不撞 duplicate column。

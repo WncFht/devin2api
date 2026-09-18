@@ -95,7 +95,34 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 	if repairs := recorder.repairs.Load(); repairs != nil {
 		row.Repairs = repairs.Total()
 	}
+	// 被放弃尝试同时投影成 lane_attempt_causes 的写方载体：meta.json
+	// 的 upstream_attempts 随目录淘汰，持久「为什么换号」口径只剩
+	// store 展开的聚合账（与 AccountSwitches 同源同计数）。
+	for _, a := range accountAttempts {
+		if row.SwitchCauses == nil {
+			row.SwitchCauses = map[store.SwitchCause]int{}
+		}
+		row.SwitchCauses[store.SwitchCause{Lane: a.Account, Cause: switchCauseKey(a)}]++
+	}
 	return row
+}
+
+// switchCauseKey 把一次被放弃 lane 尝试压成 lane_attempt_causes 的
+// cause 词（词表归本写方定版）：local_gate[:reason] 是本地闸门快败
+// 的幻影换号——零上游发送，Code 同样是 resource_exhausted，真假
+// 限流靠 LocalGate 分；connect code 是真实 failover 发送；nocode
+// 是无 code 的传输断裂类（failoverable 放行 UpstreamFault）。
+func switchCauseKey(a AccountAttempt) string {
+	if a.LocalGate {
+		if a.GateReason != "" {
+			return "local_gate:" + a.GateReason
+		}
+		return "local_gate"
+	}
+	if a.Code != "" {
+		return a.Code
+	}
+	return "nocode"
 }
 
 // NoteReject 把一次管线前拒绝（鉴权 401/并发 429/排空 503/WS 准入/

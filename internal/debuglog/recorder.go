@@ -1630,9 +1630,11 @@ func (recorder *Recorder) SetUpstreamAccount(account string) {
 
 // NoteAccountAttempt 记录号池内一次失败尝试：lane 开流报可换号错误、
 // 或流内 pre-content 终局 error 事件被 poolStream 拦截转投下一候选时
-// 由 pool 调用。错误经 Classify 压成 code+截断文案——这份有序尝试表
-// 是「为什么换号」的归因痕迹（救回的请求仍可能有首失败 lane 的
-// error.json，见 accountAttempt 说明）。
+// 由 pool 调用。错误经 Classify 压成 code+截断文案+闸门归因——这份
+// 有序尝试表是「为什么换号」的归因痕迹（救回的请求仍可能有首失败
+// lane 的 error.json，见 accountAttempt 说明）；LocalGate 区分
+// 幻影换号（本地闸门快败，零上游发送）与真实 failover 发送，持久
+// 聚合口径（lane_attempt_causes 表）也从这里取因。
 func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	if recorder == nil {
 		return
@@ -1644,6 +1646,8 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	if failure := llm.Classify(err); failure != nil {
 		attempt.Code = failure.Code
 		attempt.Message = truncateRunes(failure.Message, errorMessageCap)
+		attempt.LocalGate = failure.LocalGate
+		attempt.GateReason = failure.GateReason
 	}
 	recorder.mutex.Lock()
 	recorder.accountAttempts = append(recorder.accountAttempts, attempt)

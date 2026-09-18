@@ -138,8 +138,8 @@ func (s *Store) IncrementalVacuum(ctx context.Context) error {
 }
 
 // Maintain 执行一轮库级周期养护：logs 行按龄删除（logRowDays<=0 时
-// 跳过）、quota_samples 恢复到行数界、gate_windows 按同一保留期按龄
-// 删除、回收 freelist 页。各项互相独立，单项失败不阻断后续——错误经
+// 跳过）、quota_samples 恢复到行数界、gate_windows 与
+// lane_attempt_causes 按同一保留期按龄删除、回收 freelist 页。各项互相独立，单项失败不阻断后续——错误经
 // errors.Join 汇总返回，调用方记日志即可。原 debuglog.cleanOnce 的
 // 收尾职责上移到这里：养护对象是库不是目录，由 main.go 的 ticker 驱动。
 // gate_windows 与 logs 摘要行共用 logRowDays：两者都是「时间序列
@@ -152,6 +152,9 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 			errs = append(errs, err)
 		}
 		if _, err := s.PruneGateWindows(ctx, cutoff.Unix()); err != nil {
+			errs = append(errs, err)
+		}
+		if _, err := s.PruneLaneAttemptCauses(ctx, cutoff.Local().Format("2006-01-02")); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -96,6 +96,12 @@ type LogRow struct {
 	// 段偏高时靠它区分「握手成本」与「上游响应头延迟」。
 	ConnReused *bool  `json:"conn_reused,omitempty"`
 	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
+
+	// SwitchCauses 是被放弃 lane 尝试的归因聚合（{lane,cause}→次数），
+	// 由写方 debuglog.logRowFor 从 meta.json 同源的 upstream_attempts
+	// 投影而来——它不是列，只作 InsertLog/WriteDebugBatch 展开进
+	// lane_attempt_causes 表的瞬时载体，读侧回填恒为 nil。
+	SwitchCauses map[SwitchCause]int `json:"-"`
 }
 
 // logColumnList 是 logs 表全部列，顺序与 schema.go 的 CREATE TABLE
@@ -187,6 +193,11 @@ func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
 	errCells := map[errCellDim]int64{}
 	addCellContrib(cells, errCells, e, id)
 	if err := upsertCells(ctx, tx, cells, errCells); err != nil {
+		return 0, err
+	}
+	causes := map[laneCauseDim]int64{}
+	addCauseContrib(causes, e)
+	if err := upsertCauseCells(ctx, tx, causes); err != nil {
 		return 0, err
 	}
 	if err := setCellsWatermark(tx, id); err != nil {

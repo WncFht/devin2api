@@ -212,6 +212,11 @@ type UsageSnapshot struct {
 	TTFB        LatencyStats                      `json:"ttfb"`
 	// RateLimitEvents 是最近的上游 429 采样（旧到新），供面板推算限流阈值。
 	RateLimitEvents []RateLimitEvent `json:"rate_limit_events,omitempty"`
+	// AttemptCauses 是被放弃 lane 尝试的 日×lane×cause 聚合
+	//（lane_attempt_causes 表 31 天窗口直读，旧到新）：区分真实
+	// failover 发送（connect code）与本地闸门幻影换号（local_gate:*，
+	// 零上游成本）。表自 0007 迁移起累计，之前的历史不可回填。
+	AttemptCauses []LaneAttemptCause `json:"attempt_causes,omitempty"`
 }
 
 // latencyStatsOf 返回样本的分位数摘要；空样本返回零值。
@@ -633,6 +638,10 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		return snap, err
 	}
 	if snap.RateLimitEvents, err = s.rateLimitEvents(ctx); err != nil {
+		return snap, err
+	}
+	sinceDay := time.Now().AddDate(0, 0, -usageMaxDays).Format("2006-01-02")
+	if snap.AttemptCauses, err = s.LaneAttemptCauses(ctx, sinceDay); err != nil {
 		return snap, err
 	}
 	return snap, nil

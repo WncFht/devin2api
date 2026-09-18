@@ -235,6 +235,7 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 	if len(batch.LogRows) > 0 {
 		cells := map[cellDim]*cellVals{}
 		errCells := map[errCellDim]int64{}
+		causes := map[laneCauseDim]int64{}
 		var maxID int64
 		for _, row := range batch.LogRows {
 			res, err := tx.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...)
@@ -253,12 +254,16 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 				return err
 			}
 			addCellContrib(cells, errCells, row, id)
+			addCauseContrib(causes, row)
 			if id > maxID {
 				maxID = id
 			}
 		}
 		if maxID > 0 {
 			if err := upsertCells(ctx, tx, cells, errCells); err != nil {
+				return err
+			}
+			if err := upsertCauseCells(ctx, tx, causes); err != nil {
 				return err
 			}
 			if err := setCellsWatermark(tx, maxID); err != nil {

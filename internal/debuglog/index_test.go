@@ -5,10 +5,12 @@ package debuglog
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -85,5 +87,40 @@ func TestIndexConnReuseFields(t *testing.T) {
 	}
 	if entry.ConnIdleMS == nil || *entry.ConnIdleMS != 42 {
 		t.Fatalf("ConnIdleMS = %v, want 42", entry.ConnIdleMS)
+	}
+}
+
+// TestIndexSwitchCauses 验证被放弃 lane 尝试经 NoteAccountAttempt→
+// logRowFor→批量事务落进 lane_attempt_causes：local_gate[:reason] 是
+// 本地闸门幻影换号（零上游发送——Code 同样 resource_exhausted 时靠
+// LocalGate 分），connect code 是真实 failover 发送，无 code 的
+// 传输断裂归 nocode。
+func TestIndexSwitchCauses(t *testing.T) {
+	root := t.TempDir()
+	st := openTestStore(t)
+	manager := NewManager(root, RetentionPolicy{}, st)
+	defer manager.Close()
+
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	recorder.NoteAccountAttempt("yanjian", &llm.Failure{
+		Code: "resource_exhausted", LocalGate: true, GateReason: "latch"})
+	recorder.NoteAccountAttempt("yanjian", &llm.Failure{
+		Code: "resource_exhausted", Message: "upstream 429"})
+	recorder.NoteAccountAttempt("randall", errors.New("connection reset by peer"))
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
+
+	day := time.Now().Local().Format("2006-01-02")
+	got, err := st.LaneAttemptCauses(context.Background(), day)
+	if err != nil {
+		t.Fatalf("LaneAttemptCauses: %v", err)
+	}
+	want := []store.LaneAttemptCause{
+		{Date: day, Lane: "randall", Cause: "nocode", N: 1},
+		{Date: day, Lane: "yanjian", Cause: "local_gate:latch", N: 1},
+		{Date: day, Lane: "yanjian", Cause: "resource_exhausted", N: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("causes = %+v, want %+v", got, want)
 	}
 }

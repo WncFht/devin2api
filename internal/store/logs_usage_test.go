@@ -392,3 +392,34 @@ func TestAccountUsage(t *testing.T) {
 		t.Fatalf("default ttfb = %+v avg=%v", def.TTFB, def.TTFBAvgMS)
 	}
 }
+
+// TestUsageAttemptCauses 验证快照的 attempt_causes 段：被放弃 lane
+// 尝试的归因经 SwitchCauses 写路径落 lane_attempt_causes，UsageStats
+// 按 31 天本地日窗口直读投影（跨行同键累加）。
+func TestUsageAttemptCauses(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now()
+	// 钉在本地正午：跨午夜运行不会把日行拆到两个日期键。
+	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
+	todayDay := today.Format("2006-01-02")
+
+	// 两行各带一笔换号归因——attempt_causes 跨行按 (day,lane,cause) 累加。
+	for i := 0; i < 2; i++ {
+		if _, err := s.InsertLog(ctx, &LogRow{
+			Dir: fmt.Sprintf("sr-%d", i), StartedAt: today, Result: "completed",
+			SwitchCauses: map[SwitchCause]int{{Lane: "yanjian", Cause: "local_gate:latch"}: 1},
+		}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	snap, err := s.UsageStats(ctx)
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
+	if len(snap.AttemptCauses) != 1 || snap.AttemptCauses[0].Date != todayDay ||
+		snap.AttemptCauses[0].Lane != "yanjian" || snap.AttemptCauses[0].Cause != "local_gate:latch" ||
+		snap.AttemptCauses[0].N != 2 {
+		t.Fatalf("attempt_causes = %+v, want 今日 yanjian/local_gate:latch n=2", snap.AttemptCauses)
+	}
+}

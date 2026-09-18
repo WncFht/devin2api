@@ -113,14 +113,18 @@ type RetryAttempt struct {
 
 // AccountAttempt 是号池内一次失败尝试的记录：Account 是被试的 lane，
 // Code/Message 是它放弃时的分类码与文案（截断至 errorMessageCap）。
-// 注意 error.json 是 first-write-wins：failover 救回的请求目录里仍
-// 留有首个失败 lane 的 error.json——它描述的是「第一次失败」而非
-// 「最终下发给客户端的结果」，终局 lane 看 upstream_account。
+// LocalGate/GateReason 区分「零上游成本的本地闸门快败」（幻影换号——
+// Code 同样是 resource_exhausted，单看 Code 分不出真假限流）与真实
+// failover 发送。注意 error.json 是 first-write-wins：failover 救回的
+// 请求目录里仍留有首个失败 lane 的 error.json——它描述的是「第一次
+// 失败」而非「最终下发给客户端的结果」，终局 lane 看 upstream_account。
 type AccountAttempt struct {
-	Account   string `json:"account"`
-	Code      string `json:"code,omitempty"`
-	Message   string `json:"message,omitempty"`
-	ElapsedMS int64  `json:"elapsed_ms"`
+	Account    string `json:"account"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message,omitempty"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+	LocalGate  bool   `json:"local_gate,omitempty"`
+	GateReason string `json:"gate_reason,omitempty"`
 }
 
 // PoolCandidate 是号池一次选号的候选快照行：Name 是 lane 名，Healthy/

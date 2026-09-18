@@ -231,6 +231,20 @@ var schemaStatements = []string{
 	// lane 复合索引的第二列借不上纯 window_start 谓词。
 	`CREATE INDEX IF NOT EXISTS idx_gate_windows_ws ON gate_windows(window_start)`,
 
+	// lane_attempt_causes：号池被放弃 lane 尝试的日粒度聚合账
+	// （meta.json 的 upstream_attempts 明细随目录淘汰后，「为什么
+	// 换号」只剩这里的口径）。cause 词表由写方 debuglog 定版：
+	// local_gate[:reason] 本地闸门快败的幻影换号（零上游发送）、
+	// connect code 真实 failover 发送、nocode 无 code 传输断裂。
+	// PK 以 day 打头：读（day>=?）与 prune（day<?）同走前缀范围扫。
+	`CREATE TABLE IF NOT EXISTS lane_attempt_causes (
+		day TEXT NOT NULL,
+		lane TEXT NOT NULL,
+		cause TEXT NOT NULL,
+		n INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, lane, cause)
+	)`,
+
 	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
 	// import_base_done / debug_dirs_imported 是导入进度标记。
 	`CREATE TABLE IF NOT EXISTS runtime_state (
