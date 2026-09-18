@@ -2150,9 +2150,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				"budget_bytes": detachedMaxBufferedBytes,
 			}
 			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", detail)
-			// 后台泵经同一 tee 点触发的截断落在 Complete 之后：镜像照记
-			// 但终态 meta 已定稿不再出账——post-Complete 标记本是无解题，
-			// NoteDetachedEvent 内部对此只是无害的 slice 追加。
+			// 后台泵经同一 tee 点触发的截断落在 Complete 之后：04 标记行
+			// 走 closed 豁免照常落库；meta 镜像照记但终态 meta 已定稿不再
+			// 出账——post-Complete 下它只是无害的 slice 追加。
 			stream.recorder.NoteDetachedEvent("detached_truncated", detail)
 		}
 		return event, nil

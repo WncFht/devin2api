@@ -407,10 +407,10 @@ type Recorder struct {
 	retries []RetryAttempt
 	// detachedEvents 是 04 脱钩标记行（detached/detached_attach/
 	// detached_truncated/detached_cross_lane_miss）的 meta 镜像累积：
-	// 标记行与 bulk 帧同走 AppendJSONL 的分片队列，队列满（enqueueLocked
-	// default 分支）与 Complete 后 closed 都会被丢弃，脱钩生命周期随之
-	// 蒸发——这里按 retries 同口径经 NoteDetachedEvent 追加，metaJSON
-	// 落 meta.detached_events，随完结块出账免疫两种丢法。
+	// 标记行经 enqueueLockedExempt 豁免于 Complete 的 closed 闸，但
+	// 编码段的队列满（default 分支）与预算 shed 仍会丢弃——这里按
+	// retries 同口径经 NoteDetachedEvent 追加，metaJSON 落
+	// meta.detached_events，与豁免 04 行互为冗余的两个持久见证。
 	detachedEvents []DetachedEvent
 	// devinSends 是 03-devin-request 词干已分配的上游发送序号：计数
 	// 挂在请求目录上跨 lane 共享——号池 failover 后新 lane 的首发续占
