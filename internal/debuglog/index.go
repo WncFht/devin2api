@@ -205,13 +205,19 @@ func truncateRunes(s string, cap int) string {
 	return s[:cut]
 }
 
-// releaseDir 把目录移出活跃集合，允许清理器回收它。只在覆盖收尾的
-// 批量事务提交（或无内容可提交）后由 flushAll 调用——提前解除会让
-// 未落库的暂存目录失去活跃保护，被容量淘汰删掉造成丢数据窗口。
-func (manager *Manager) releaseDir(dir string) {
+// releaseDir 把目录移出活跃集合，允许清理器回收它；同时退回本目录
+// 钉住的 delta 基座预算。只在覆盖收尾的批量事务提交（或无内容可提交）
+// 后由 flushAll 调用——提前解除会让未落库的暂存目录失去活跃保护，被
+// 容量淘汰删掉造成丢数据窗口。此刻本目录全部编码任务已随排空哨兵
+// 收尾，deltaBase 不会再有读者。
+func (manager *Manager) releaseDir(recorder *Recorder) {
+	if recorder.deltaBase != nil {
+		manager.deltaBaseBytes.Add(-int64(len(recorder.deltaBase)))
+		recorder.deltaBase = nil
+	}
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
-	delete(manager.activeDirs, dir)
+	delete(manager.activeDirs, recorder.dir)
 }
 
 // drainedClosed 是已关闭通道的单例：Drained 对未知或已释放的目录

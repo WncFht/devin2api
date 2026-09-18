@@ -183,6 +183,12 @@ type Manager struct {
 	droppedTotal atomic.Uint64
 	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
 	ioErrors atomic.Uint64
+	// deltaBaseBytes 是全进程已钉 delta 基座的字节量：每个在飞目录把
+	// 脱敏后 01 明文钉给同目录的 02/03-devin-request* 作 zstd dict，
+	// 超 deltaBaseCapBytes 时新目录放弃钉座（其 delta 候选回退独立
+	// gzip）。该预算与未来 lazy-lite 暂存缓冲的上限是同一账目概念——
+	// 都是「为省存储而暂存的明文」，落地时应合并成一份全局预算。
+	deltaBaseBytes atomic.Int64
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -357,6 +363,11 @@ type Recorder struct {
 	// shard 是本 recorder 的编码分片下标（按目录名哈希，Start 时定版）——
 	// 分片内 FIFO 保证本请求的事件序即入队序。
 	shard int
+	// deltaBase 是本目录的 delta 编码基座：01 任务在编码协程上把脱敏后
+	// 字节钉进来（含尾 \n，与库存 01 行解码结果逐字节一致），02/03*
+	// 任务以它为 zstd dict。同 dir 任务恒由同一分片协程串行执行，字段
+	// 无并发访问；releaseDir 时把字节量退回 deltaBaseBytes 预算。
+	deltaBase []byte
 
 	// 以下字段仅由写 worker 访问，无需加锁：
 	// stagedFiles 按文件名暂存已编码的整文件行；刷写周期与 chunkBufs
@@ -1185,7 +1196,7 @@ func (manager *Manager) flushAll() {
 			delete(manager.dirtyBufs, recorder)
 		}
 		for _, item := range manager.pendingCompletions {
-			manager.releaseDir(item.recorder.dir)
+			manager.releaseDir(item.recorder)
 			if !item.signaled {
 				close(item.recorder.drained)
 			}
@@ -1215,7 +1226,7 @@ func (manager *Manager) flushAll() {
 			delete(manager.dirtyBufs, recorder)
 		}
 		for _, item := range manager.pendingCompletions {
-			manager.releaseDir(item.recorder.dir)
+			manager.releaseDir(item.recorder)
 			if !item.signaled {
 				close(item.recorder.drained)
 			}
@@ -1251,7 +1262,7 @@ func (manager *Manager) flushAll() {
 		delete(manager.dirtyBufs, recorder)
 	}
 	for _, item := range manager.pendingCompletions {
-		manager.releaseDir(item.recorder.dir)
+		manager.releaseDir(item.recorder)
 		if !item.signaled {
 			close(item.recorder.drained)
 		}
@@ -1636,11 +1647,37 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 	recorder.enqueue(func() {
 		var buf bytes.Buffer
 		recorder.writeSanitizedJSONLine(&buf, evalDeferred(value))
-		stored, usize := recorder.encodePayload(buf.Bytes())
+		stored, usize := recorder.encodeStageFile(name, buf.Bytes())
 		recorder.pushInsert(func() {
 			recorder.stageFile(name, stored, usize, false)
 		})
 	})
+}
+
+// deltaBaseCapBytes 是全进程 delta 基座的钉量上限（~256MB）：每个在飞
+// 目录的 01 明文（~400KB 量级）钉给同目录 delta 候选作字典，超限后新
+// 目录不再钉座——其 02/03* 照常落库，只是退回独立 gzip 形态。
+const deltaBaseCapBytes = 256 << 20
+
+// encodeStageFile 按阶段名选入库编码：01 独立 gzip 并把脱敏后字节钉为
+// 本目录 delta 基座；02 与 03-devin-request*（含 attemptN/searchN
+// 分片）以基座为 dict 存 zstd 帧——同一请求的三重投影只留残差。
+// 基座缺席（01 任务被 shed/未写）或残差收益不足时回退独立 gzip，
+// 读侧按魔数自判两种形态。仅编码协程调用（deltaBase 的无锁前提）。
+func (recorder *Recorder) encodeStageFile(name string, data []byte) (stored []byte, usize int64) {
+	switch {
+	case name == StageHTTPRequest:
+		if recorder.manager.deltaBaseBytes.Add(int64(len(data))) <= deltaBaseCapBytes {
+			recorder.deltaBase = data
+		} else {
+			recorder.manager.deltaBaseBytes.Add(-int64(len(data)))
+		}
+	case name == StageRequestMessages || strings.HasPrefix(name, devinRequestStageStem):
+		if recorder.deltaBase != nil {
+			return store.EncodePayloadDelta(data, recorder.deltaBase)
+		}
+	}
+	return recorder.encodePayload(data)
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
