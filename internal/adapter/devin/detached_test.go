@@ -220,6 +220,44 @@ func TestDetachedWatcherPathCoversAbandonedConsumer(t *testing.T) {
 	}
 }
 
+// TestFinishedStreamNotDetachable 钉住死后不登记：handler 返回同样取消
+// 请求 ctx，哨兵在请求终结时必然醒来一次——此时已 finished 的流没有
+// 可续命的泵，「产过内容但未见 stopReason」的失败收尾（midcontent 式
+// 传输截断是其生产形态）若放行会把死流登记进缓存，白占容量与孤儿簿记。
+func TestFinishedStreamNotDetachable(t *testing.T) {
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 99, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+	}}
+	stream := detachedTestStream(registry, "k5", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	// 榨干到 io.EOF：上游 EOF 无 stopReason → decoder.finish 产终态事件，
+	// stream.finished 置位。
+	for {
+		_, err := stream.Recv(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+	}
+	cancel()
+	// 哨兵判定块与 Adapter.Stream 内同源：finished 流不得脱钩。
+	stream.mu.Lock()
+	if !stream.detached {
+		if stream.detachable() {
+			stream.detach(ctx)
+		} else {
+			stream.cancel()
+		}
+	}
+	stream.mu.Unlock()
+	if entry := registry.lookup("k5"); entry != nil {
+		t.Fatal("finished stream must not be admitted to the detached cache")
+	}
+}
+
 // TestDetachedEvictStopsPump 钉住容量淘汰的杀泵路径：evict 掐的是
 // drainCancel（一次性 CancelFunc），后台泵走 ctx.Done 退场并把条目
 // 收成 failed——截断前缀不得误标 completed 重放给同键重试。

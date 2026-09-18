@@ -2063,15 +2063,18 @@ func (stream *responseStream) progressDeadline() time.Duration {
 	return upstreamNoProgressTimeout
 }
 
-// detachable 判定这条流客户端断开后是否值得脱钩续命：四个条件缺一
+// detachable 判定这条流客户端断开后是否值得脱钩续命：五个条件缺一
 // 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
 // 才有；测试裸流恒假）、缓冲未截断（客户端还在场时缓冲就越预算的流
 // 续命也产不出完整重放，直接按不可脱钩杀）、已产出过内容
 // （pre-content 流没有重放价值，且重放键会污染缓存）、语义未收口
-// （已见 stopReason/停止序列的流只剩传输尾帧，续命等不到新内容）。
+// （已见 stopReason/停止序列的流只剩传输尾帧，续命等不到新内容）、
+// 流未终结（finished 的流没有可续命的泵：handler 返回同样取消请求
+// ctx，哨兵必然醒来一次——产过内容但未带 stopReason 的失败收尾如
+// midcontent 式截断，少了这道闸会把死流登记进缓存白占容量）。
 // 已脱钩的流不可再脱钩。
 func (stream *responseStream) detachable() bool {
-	return !stream.detached &&
+	return !stream.detached && !stream.finished &&
 		stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
 		!stream.entry.isTruncated() &&
 		stream.producedEvents && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
