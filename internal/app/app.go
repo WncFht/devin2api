@@ -722,9 +722,14 @@ func (application *App) createCompletion(
 	// recorder 在请求体读成后才创建：连完整请求都没到达的读失败
 	//（超时/断连/对端 RST）不产生调试记录与 logs 行——它们与鉴权、
 	// 并发、排空拒绝同口径，是唯一痕迹在 http.rejects 里的管线前拒绝。
+	// reqMeta/reqStart/recorderStarted 是 claim 失败（recorder==nil）时
+	// 兜底日志行的素材：请求照常执行了，只丢了调试目录。
 	var recorder *debuglog.Recorder
+	var reqMeta debuglog.RequestMeta
+	var reqStart time.Time
+	recorderStarted := false
 	startRecorder := func() {
-		recorder = application.debugManager.Start(debuglog.RequestMeta{
+		reqMeta = debuglog.RequestMeta{
 			Method:          request.Method,
 			Path:            request.URL.Path,
 			API:             api,
@@ -732,7 +737,10 @@ func (application *App) createCompletion(
 			UserAgent:       request.UserAgent(),
 			KeyHash:         requestCredentialHash(request),
 			ClientRequestID: clientRequestID(request),
-		})
+		}
+		reqStart = time.Now()
+		recorderStarted = true
+		recorder = application.debugManager.Start(reqMeta)
 		recorder.SetAbort(cancel)
 		// Stripe Request-Id 模式：本地调试身份 <dir> 写进响应头，agent
 		// 拿到后可查 logs 表或 /admin/debug-logs/{id}（{id} 是 logs 表主键）。
@@ -780,6 +788,13 @@ func (application *App) createCompletion(
 			"upstream_request_id", completion.UpstreamRequestID,
 			"input_tokens", completion.Usage.Input, "output_tokens", completion.Usage.Output,
 			"cache_read_tokens", completion.Usage.CacheRead)
+		if recorder == nil && recorderStarted {
+			// claim 失败兜底：请求照常跑完却没有 logs 行会在全部聚合口径
+			// 里隐形——落 dir 空串行恢复检索/归因面，payload 证据仍缺。
+			// 放在收尾末尾：同步 InsertLog 有 reqStoreOpTimeout 上限，
+			// stall 期不能拖住令牌槽释放与进程日志。
+			application.debugManager.NoteUnclaimedCompletion(reqMeta, completion, reqStart)
+		}
 	}()
 
 	// 图片 base64 会显著放大 JSON；与常见 IDE 多图请求对齐到 32MiB。
@@ -799,7 +814,7 @@ func (application *App) createCompletion(
 			// 是字节不是 token，上游的 ContextTooLong 由归一链另行覆盖。
 			// ≥32MiB 的载荷是真实到达的请求，留调试记录供容量排障。
 			startRecorder()
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageHTTPRead, http.StatusRequestEntityTooLarge, fmt.Errorf("request payload exceeds the %d MiB limit", tooLarge.Limit>>20))
 			return
 		}
 		// 读体失败（超时/截断）按 504 下发而非 400：4xx 在 Claude Code
@@ -823,7 +838,7 @@ func (application *App) createCompletion(
 	// 收集）——Dropped 的唯一读者是 02 投影，recorder 为 nil 时纯烧 CPU。
 	messages, options, err := protocol.DecodeRequest(body, recorder != nil)
 	if err != nil {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
+		writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageHTTPDecode, http.StatusBadRequest, err)
 		return
 	}
 	// 显式亲和头恒赢于 body 提取的 SessionKey：头是调用方的意图声明，
@@ -867,7 +882,7 @@ func (application *App) createCompletion(
 		// HTTP 路径上 middleware 已放行，走到这里失败只可能是令牌在请求
 		// 处理中被删/停用/过期，或 WS 会话建立后状态翻转——按 401 收尾。
 		tokenBlocked = true
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusUnauthorized, errors.New("invalid or expired api token"))
+		writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusUnauthorized, errors.New("invalid or expired api token"))
 		return
 	}
 	// 请求类随令牌解析落定：挂进 reqCtx 供闸门 wait 路径分级准入，
@@ -896,24 +911,24 @@ func (application *App) createCompletion(
 		active, limit, ok := application.tokens.Acquire(authTok.ID)
 		if !ok {
 			tokenBlocked = true
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token concurrency limit exceeded: %d active of %d limit", active, limit))
 			return
 		}
 		tokenAcquired = true
 		if !authTok.IsModelAllowed(messages.Model) {
 			tokenBlocked = true
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusForbidden, fmt.Errorf("model '%s' is not allowed for this token", messages.Model))
 			return
 		}
 		if used, limit, ok := application.tokens.AllowRPM(authTok.ID); !ok {
 			tokenBlocked = true
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token rate limit exceeded: %d of %d requests per minute", used, limit))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("token rate limit exceeded: %d of %d requests per minute", used, limit))
 			return
 		}
 		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
 			tokenBlocked = true
 			windowName := map[string]string{"5h": "5h", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly", "total": "Total"}[window]
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
+			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
 			return
 		}
 	}
@@ -925,7 +940,7 @@ func (application *App) createCompletion(
 	if application.models != nil {
 		if entry, ok := application.models.Lookup(messages.Model); ok {
 			if entry.Disabled {
-				completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageModelDisabled, http.StatusNotFound, fmt.Errorf("model '%s' is disabled", messages.Model))
+				writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageModelDisabled, http.StatusNotFound, fmt.Errorf("model '%s' is disabled", messages.Model))
 				return
 			}
 			if entry.RedirectModel != "" {
@@ -972,7 +987,7 @@ func (application *App) createCompletion(
 			recorder.WriteError(debuglog.ErrStageResponseEvent, err)
 			return
 		}
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageResponseEvent, common.HTTPStatus(failure), err)
+		writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageResponseEvent, common.HTTPStatus(failure), err)
 		return
 	}
 	updateCompletionIdentity(&completion, messages, message)
@@ -980,7 +995,7 @@ func (application *App) createCompletion(
 	// 在注册表改写前采样，流式路径在 streamCompletion 里取同一字段。
 	body, err = protocol.EncodeFinal(message, strings.TrimSpace(completion.RequestedModel), options)
 	if err != nil {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
+		writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageHTTPEncode, http.StatusInternalServerError, err)
 		return
 	}
 	if err := out.writeContent(body); err != nil {
@@ -1146,12 +1161,17 @@ func httpRequestProjection(request *http.Request, body []byte) map[string]any {
 	}
 }
 
-// writeLoggedError 写出错误响应并返回实际下发的状态码——clientFixable
-// 的 ≥500 会压成 400，调用方应记返回值而非入参，否则索引口径「服务端
-// 错误」与客户端口径「请求错误」错配，按状态码归因会误伤。
-func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, stage string, status int, err error) int {
+// writeLoggedError 写出错误响应并把结果记上 completion：status 字段是
+// 实际下发码（clientFixable 的 ≥500 会压成 400），ErrorStage/ErrorMessage
+// 首写抢占——recorder 缺席（claim 失败）时它们是兜底日志行唯一的失败
+// 归因来源。
+func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, protocol protocolEncoder, completion *debuglog.Completion, stage string, status int, err error) {
 	failure := llm.Classify(err)
 	recorder.WriteError(stage, err)
+	if completion.ErrorStage == "" {
+		completion.ErrorStage = stage
+		completion.ErrorMessage = err.Error()
+	}
 	// 进程日志只出白名单信号 + 脱敏摘要；完整原文留在该请求调试记录的 error.json。
 	// stage 是捕获点（本函数被哪层错误出口调用），error_stage 是归原点
 	//（logs 表的同名列）——闸门拒绝会在 provider_stream 出口被捕获，
@@ -1176,6 +1196,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	if clientFixable && status >= 500 {
 		status = http.StatusBadRequest
 	}
+	completion.StatusCode = status
 	writer.Header().Set("Content-Type", "application/json")
 	// 上游限流文案里的 reset hint 是唯一可行动信号——翻成标准
 	// Retry-After 头 + Anthropic 统一限流重置时刻，客户端/网关才能
@@ -1185,6 +1206,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	// Claude Code 对超长的非限流 Retry-After 直接终止整轮。
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
+		completion.RateLimited = true
 		// 闸门拒绝的归因（latch/quota/hold）由生产侧结构携带——
 		// bg 客户端据此区分「桶满睡到下窗」与「闩内睡到解闩」。
 		if failure.GateReason != "" {
@@ -1210,7 +1232,6 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	})
 	_, _ = writer.Write(body)
 	recorder.AppendJSONL(debuglog.StageHTTPResponse, "error", json.RawMessage(body))
-	return status
 }
 
 // noteRetryAfter 把限流记录的 reset 秒数记进请求日志——无论它最终

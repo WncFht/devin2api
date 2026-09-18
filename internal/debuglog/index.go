@@ -8,6 +8,7 @@ package debuglog
 
 import (
 	"log/slog"
+	"time"
 	"unicode/utf8"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -131,7 +132,9 @@ func switchCauseKey(a AccountAttempt) string {
 // rejected，log_source=rejected 把它与服役流量分域——默认列表与全部
 // 聚合口径剔除，只为留存检索（此前拒绝的跨重启痕迹只剩 stderr.log，
 // 无 key/来源维度可查）。同步写而非走全局队列：拒绝发生在 recorder
-// 创建之前，无目录可排；拒绝低频，写库失败只记 ioErrors。
+// 创建之前，无目录可排；拒绝低频，写库失败只记 ioErrors。ctx 用
+// reqStoreOpTimeout 而非 storeOpTimeout——写连接 stall 期间拒绝响应
+// 不能被拖住分钟级。
 func (manager *Manager) NoteReject(meta RequestMeta, status int, reason string) {
 	if manager == nil || manager.store == nil {
 		return
@@ -150,11 +153,68 @@ func (manager *Manager) NoteReject(meta RequestMeta, status int, reason string) 
 		ErrorStage:      ErrStagePrePipeline,
 		ErrorMessage:    truncateRunes(reason, errorMessageCap),
 	}
-	ctx, cancel := storeCtx()
+	ctx, cancel := reqStoreOpCtx()
 	defer cancel()
 	if _, err := manager.store.InsertLog(ctx, &row); err != nil {
 		manager.ioErrors.Add(1)
 		slog.Warn("debuglog: insert rejected log failed", "path", meta.Path, "error", err)
+	}
+}
+
+// NoteUnclaimedCompletion 兜底记录「目录占位失败但请求照常执行」的完成行。
+// claim 失败时 Start 返回 nil，请求全程无 recorder——没有这条兜底该请求
+// 在 logs 表完全隐形：列表、聚合、错误归因、延迟分位与 sends_per_row
+// 分母全部缺席，比丢 payload 更隐蔽。dir 留空有 rejected 行先例（部分
+// 唯一索引放行多行）；log_source 仍记 proxy——行的来源是服役流量而非
+// 准入层，dir 空本身就是「无 payload」的标记，检索该族群用 dir 空串
+// 且 log_source 非 rejected。闸门与 Start 前置条件同构：root 空或
+// enabled 关说明本请求本就不会有目录，不该补行。同步写而非走全局
+// 队列：无目录即无分片可排；写库失败只记 ioErrors。
+func (manager *Manager) NoteUnclaimedCompletion(meta RequestMeta, completion Completion, startedAt time.Time) {
+	if manager == nil || manager.store == nil || manager.root == "" || !manager.enabled.Load() {
+		return
+	}
+	row := store.LogRow{
+		LogSource:         LogSourceProxy,
+		StartedAt:         startedAt,
+		DurationMS:        manager.now().Sub(startedAt).Milliseconds(),
+		API:               meta.API,
+		Method:            meta.Method,
+		Path:              meta.Path,
+		StatusCode:        completion.StatusCode,
+		Result:            completion.Result,
+		RequestedModel:    completion.RequestedModel,
+		Model:             completion.Model,
+		ResponseModel:     completion.ResponseModel,
+		ModelMismatch:     completion.ModelMismatch,
+		Stream:            completion.Stream,
+		InputTokens:       completion.Usage.Input,
+		OutputTokens:      completion.Usage.Output,
+		CacheReadTokens:   completion.Usage.CacheRead,
+		CacheWriteTokens:  completion.Usage.CacheWrite,
+		ReasoningTokens:   reasoningTokens(completion.Usage),
+		TotalTokens:       completion.Usage.TotalTokens,
+		CreditCost:        creditCost(completion.Usage),
+		UpstreamRequestID: completion.UpstreamRequestID,
+		ClientIP:          meta.ClientIP,
+		KeyHash:           meta.KeyHash,
+		ClientRequestID:   meta.ClientRequestID,
+		RateLimited:       completion.RateLimited,
+		PrematureEndTurn:  completion.PrematureEndTurn,
+	}
+	if row.ClientRequestID == ProbeClientRequestID {
+		row.LogSource = LogSourceManualTest
+	}
+	// error 字段口径与 logRowFor 一致：只对终结性失败出账。
+	if completion.Result != "completed" && completion.ErrorStage != "" {
+		row.ErrorStage = completion.ErrorStage
+		row.ErrorMessage = truncateRunes(completion.ErrorMessage, errorMessageCap)
+	}
+	ctx, cancel := reqStoreOpCtx()
+	defer cancel()
+	if _, err := manager.store.InsertLog(ctx, &row); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: insert unclaimed log failed", "path", meta.Path, "error", err)
 	}
 }
 

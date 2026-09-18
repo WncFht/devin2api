@@ -88,11 +88,18 @@ func storeCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), storeOpTimeout)
 }
 
-// claimDirTimeout 是 Start 路径目录占位的上限。claim 失败即本请求无日志，
-// 与写 worker 的异步落库不同：它在请求 goroutine 上同步阻塞，拿分钟级上限
-// 等写连接（容量清理可独占 30-120s+）是纯成本——占位就是一条
-// INSERT OR IGNORE，正常毫秒级；5s 已覆盖合法延迟的多个数量级。
-const claimDirTimeout = 5 * time.Second
+// reqStoreOpTimeout 是请求 goroutine 上同步 store 调用的上限——claim 目录
+// 占位与 rejected/unclaimed 兜底行插入同属。与写 worker 的异步落库不同：
+// 同步调用失败即丢一份观测副本，拿分钟级上限等写连接（容量清理可独占
+// 30-120s+）是把代价放大——单条 INSERT 正常毫秒级，5s 已覆盖合法延迟的
+// 多个数量级。
+const reqStoreOpTimeout = 5 * time.Second
+
+// reqStoreOpCtx 返回带 reqStoreOpTimeout 上限的 ctx，供请求路径的同步
+// store 调用。
+func reqStoreOpCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), reqStoreOpTimeout)
+}
 
 // RetentionPolicy 是请求日志的生命周期策略。
 type RetentionPolicy struct {
@@ -303,6 +310,16 @@ type Completion struct {
 	// startedAt——哨兵之后的编码/写队列排队与批量事务等待量的是
 	// 日志管道积压，不计入请求耗时。调用方不设，Complete 回填。
 	EndedAt time.Time
+	// ErrorStage/ErrorMessage 是首个终结性失败出口的归因（writeLoggedError
+	// 首写抢占）。recorder 存在时同一份归因经 FirstError 落 logs 行、
+	// 本字段不被消费；claim 失败没有 recorder 时它是兜底日志行唯一的
+	// 失败归因来源。不投影进 meta.json。
+	ErrorStage   string
+	ErrorMessage string
+	// RateLimited 镜像 recorder.rateLimited：流内下发限流（HTTP 仍为
+	// 200）时它是兜底日志行还原 isRateLimited 判定的唯一载体；普通
+	// 429 路径状态码已携带同一语义。
+	RateLimited bool
 }
 
 // Recorder 保存单次请求的目录名、开始时间和异步写队列。
@@ -1072,13 +1089,13 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 // claimDir 把目录名在持久层原子占位：插入空 meta.json 行成功=抢到名。
 // store 为 nil（测试/未接线）时无共享状态可撞，直接视为占位成功——
 // 名分配只剩本进程内存集合一重判定。它在请求 goroutine 上同步跑，用
-// claimDirTimeout 而非 storeOpTimeout：占位失败本就等价「本请求无日志」，
+// reqStoreOpTimeout 而非 storeOpTimeout：占位失败本就等价「本请求无日志」，
 // 先停满分钟级上限再放行只是把代价放大。
 func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	if manager.store == nil {
 		return true, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), claimDirTimeout)
+	ctx, cancel := reqStoreOpCtx()
 	defer cancel()
 	return manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
 }

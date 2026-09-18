@@ -324,7 +324,7 @@ func (application *App) streamCompletion(
 	responseBytes *int,
 ) {
 	if _, ok := writer.(http.Flusher); !ok {
-		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPStream, http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
+		writeLoggedError(writer, recorder, protocol, completion, debuglog.ErrStageHTTPStream, http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
 		return
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
@@ -359,7 +359,7 @@ func (application *App) streamCompletion(
 		firstFailure := llm.Classify(firstErr)
 		status := common.HTTPStatus(firstFailure)
 		if !out.committed && (!protocol.StreamErrorEvents() || status != http.StatusTooManyRequests) {
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageProviderStream, status, firstErr)
+			writeLoggedError(writer, recorder, protocol, completion, debuglog.ErrStageProviderStream, status, firstErr)
 			return
 		}
 		// OpenAI 流式面上的限流是唯一转流内事件的 pre-stream 失败：
@@ -402,7 +402,7 @@ func (application *App) streamCompletion(
 				firstEvent,
 			}
 		} else {
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageProviderStream, status, failure)
+			writeLoggedError(writer, recorder, protocol, completion, debuglog.ErrStageProviderStream, status, failure)
 			return
 		}
 	}
@@ -420,6 +420,7 @@ func (application *App) streamCompletion(
 		// 责任归因与 429 采样才不会把这批限流漏成普通失败。
 		if streamFailure.RateLimited {
 			recorder.SetRateLimited()
+			completion.RateLimited = true
 		}
 		switch {
 		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
@@ -430,7 +431,7 @@ func (application *App) streamCompletion(
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。
-			completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPStream, common.HTTPStatus(streamFailure), streamErr)
+			writeLoggedError(writer, recorder, protocol, completion, debuglog.ErrStageHTTPStream, common.HTTPStatus(streamFailure), streamErr)
 		default:
 			recorder.WriteError(debuglog.ErrStageHTTPStream, streamErr)
 		}
