@@ -762,7 +762,11 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		return adapter.runServerSearch(ctx, request, model)
 	}
 	// 目录是 router 判定与能力位校验的依据；懒加载时此处补一次拉取。
+	// 相位耗时记进 meta.models_fetch_ms：闸门指标看不到这段闸门前停滞
+	// （含等待他人在飞拉取的陪等），缓存命中≈0。
+	catalogAt := time.Now()
 	adapter.ensureCatalog(ctx)
+	recorder.NoteModelsFetchMS(time.Since(catalogAt).Milliseconds())
 	// requestedUID 记下路由判定前的 uid：命中 router 时保温条目要用它
 	// 重建 assignment jwt（绑 cascade_id），否则 ping 重放丢绑定。
 	requestedUID := model
@@ -1280,7 +1284,11 @@ func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.Req
 	}
 	// jwt 绑 cascade_id：必须用与本请求 wire 一致的派生值。
 	_, cascadeID := deriveSessionIDs(request)
+	// AssignModel 相位耗时记进 meta.assign_model_ms（含共享 flight 陪等）：
+	// 闸门前停滞在 gate 指标里不可见，只有这里能量化。
+	assignAt := time.Now()
 	assignment, err := adapter.assignModel(ctx, model, cascadeID)
+	debuglog.FromContext(ctx).NoteAssignModelMS(time.Since(assignAt).Milliseconds())
 	if err != nil {
 		return "", "", err
 	}

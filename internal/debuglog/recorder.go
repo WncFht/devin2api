@@ -363,6 +363,11 @@ type Recorder struct {
 	upstreamOpenMS  atomic.Int64
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
+	// assignModelMS/modelsFetchMS 是闸门前两段上游解析相位的墙钟耗时
+	// （ready→sent 段内各一小段，单测看不出共享 flight 上的陪等）；
+	// -1 表示该相位未发生（非 router 无 AssignModel、ServerSearch 无目录）。
+	assignModelMS atomic.Int64
+	modelsFetchMS atomic.Int64
 	// retryAfterSeconds 是上游限流文案里的 reset 秒数 hint；>0 时随
 	// meta.json 与日志行出账，检索/聚合不必再解析错误文案。
 	retryAfterSeconds atomic.Int64
@@ -977,6 +982,8 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.upstreamOpenMS.Store(-1)
 		recorder.firstUpstreamMS.Store(-1)
 		recorder.firstClientMS.Store(-1)
+		recorder.assignModelMS.Store(-1)
+		recorder.modelsFetchMS.Store(-1)
 		manager.activeDirs[name] = recorder
 		manager.mutex.Unlock()
 		claimed, err := manager.claimDir(name)
@@ -1511,6 +1518,24 @@ func (recorder *Recorder) NoteClientLatency() {
 		return
 	}
 	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// NoteAssignModelMS 记录本请求在 AssignModel 调用上花费的墙钟毫秒数；
+// 由路由判定处测量，含共享 flight 的陪等。
+func (recorder *Recorder) NoteAssignModelMS(ms int64) {
+	if recorder == nil {
+		return
+	}
+	recorder.assignModelMS.Store(ms)
+}
+
+// NoteModelsFetchMS 记录本请求在目录确保相位上花费的墙钟毫秒数；
+// 由调用方测量，缓存命中≈0，真实拉取与等待他人在飞拉取都计入。
+func (recorder *Recorder) NoteModelsFetchMS(ms int64) {
+	if recorder == nil {
+		return
+	}
+	recorder.modelsFetchMS.Store(ms)
 }
 
 // SetAbort 挂接请求 ctx 的带因取消函数，使 Abort 能以发起方的归因
@@ -2135,6 +2160,8 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 		RateLimited:       recorder.rateLimited.Load(),
 		Repairs:           recorder.repairs.Load(),
 		RetryAttempts:     recorder.retryAttempts(),
+		AssignModelMS:     optionalLatency(recorder.assignModelMS.Load()),
+		ModelsFetchMS:     optionalLatency(recorder.modelsFetchMS.Load()),
 	}
 	client := MetaClient{
 		IP:        recorder.requestMeta.ClientIP,

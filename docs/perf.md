@@ -43,6 +43,8 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 
 五字段把端到端延迟切成五段，段名即两字段之差：`decode`（0→ready）、`transform`（ready→sent，含限流闸门排队）、`connect`（sent→open，上游建连）、`upstream_ttft`（open→首事件，上游首字延迟）、`egress`（首事件→首字节，编码 + 写客户端）。
 
+`transform` 段内另有两个相位字段（meta.json 专有，未发生即缺席）：`models_fetch_ms` 是目录确保（`ensureCatalog`→`ListModels`）的墙钟毫秒数——真实拉取与等待他人在飞拉取都计入，缓存命中≈0；`assign_model_ms` 是 `AssignModel` 调用的墙钟毫秒数（含共享 flight 陪等），仅 router uid 请求出现。两者量的都是闸门排队之前的上游解析停滞——闸门指标看不到这段，批量停滞只能靠这里直接读出。
+
 落库位置：`debug_files` 表 `<dir>` 键下的 `meta.json` 行（单请求详情，`/admin/debug-logs/{id}/file/meta.json` 或 `sqlite3` 直查）与 `logs` 表的同名可空列（批量 SQL 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
 
 `logs` 表做命中率聚合时的口径陷阱：必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败、客户端断连等 0-token 行与 failed 高度重合，不过滤会被当 miss 污染比率；上游 `cache_creation` 恒 0，判活只看 `cache_read`。流级画像（静默间隔→命中率、miss 归因）用 `scripts/index-stream-stats.py`（读 `devin-2api.db`）。

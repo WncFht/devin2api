@@ -21,20 +21,28 @@ type MetaSummary struct {
 	// AffinityHash 是号池选号的会话亲和键：sessionSeed 的 SHA-256
 	// 前 16 字节十六进制（与 key_hash 同脱敏口径，不可逆）。只在
 	// 池路径（len(lanes)>1）落——回答「哪些请求是同一会话钉选」。
-	AffinityHash string      `json:"affinity_hash,omitempty"`
-	API          string      `json:"api,omitempty"`
-	Client       *MetaClient `json:"client,omitempty"`
+	AffinityHash string `json:"affinity_hash,omitempty"`
+	API          string `json:"api,omitempty"`
+	// AssignModelMS 是本请求在 AssignModel 调用上花费的墙钟毫秒数
+	// （含共享 flight 等待——阻塞在他人首发上同样是闸门前停滞）；未走
+	// router 路径（普通 uid 直发）时不存在，区别于 0ms 的缓存命中。
+	AssignModelMS *int64      `json:"assign_model_ms,omitempty"`
+	Client        *MetaClient `json:"client,omitempty"`
 
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
 
 	DurationMS *int64 `json:"duration_ms,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	// 五段延迟分解：nil 表示该阶段未发生（区别于 0ms 即时发生）。
-	FirstClientMS    *int64  `json:"first_client_ms,omitempty"`
-	FirstUpstreamMS  *int64  `json:"first_upstream_ms,omitempty"`
-	Method           string  `json:"method"`
-	Model            *string `json:"model,omitempty"`
-	ModelMismatch    bool    `json:"model_mismatch,omitempty"`
+	FirstClientMS   *int64  `json:"first_client_ms,omitempty"`
+	FirstUpstreamMS *int64  `json:"first_upstream_ms,omitempty"`
+	Method          string  `json:"method"`
+	Model           *string `json:"model,omitempty"`
+	ModelMismatch   bool    `json:"model_mismatch,omitempty"`
+	// ModelsFetchMS 是本请求在目录确保（ensureCatalog→ListModels）上花费的
+	// 墙钟毫秒数：真实拉取与等待他人在飞拉取都计入，缓存命中≈0——它量的是
+	// 闸门前的目录相位停滞，不是「本请求是否发起了拉取」。
+	ModelsFetchMS    *int64  `json:"models_fetch_ms,omitempty"`
 	Path             string  `json:"path"`
 	PrematureEndTurn bool    `json:"premature_end_turn,omitempty"`
 	Provider         *string `json:"provider,omitempty"`

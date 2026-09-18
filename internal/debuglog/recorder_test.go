@@ -311,6 +311,8 @@ func newBareRecorder(manager *Manager, dir string) *Recorder {
 	recorder.upstreamOpenMS.Store(-1)
 	recorder.firstUpstreamMS.Store(-1)
 	recorder.firstClientMS.Store(-1)
+	recorder.assignModelMS.Store(-1)
+	recorder.modelsFetchMS.Store(-1)
 	return recorder
 }
 
@@ -907,5 +909,38 @@ func TestDeltaStageFallbacks(t *testing.T) {
 	stored, logical = dirSize(full.dir)
 	if stored <= logical/3 {
 		t.Fatalf("stored=%d logical=%d over cap, want stored ≈ logical", stored, logical)
+	}
+}
+
+// TestPregateTimingMetaJSON 钉住闸门前相位计数的 meta.json 口径：未发生
+// 时缺席（-1 哨兵 → nil → omitempty），记录后按原值出账（含 0ms——
+// 缓存命中与「相位未发生」靠 presence 区分）。
+func TestPregateTimingMetaJSON(t *testing.T) {
+	manager := NewManager("", RetentionPolicy{}, nil)
+	recorder := newBareRecorder(manager, "20200101-000000")
+
+	data := recorder.metaJSON(nil)
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := meta["assign_model_ms"]; ok {
+		t.Fatal("assign_model_ms present before recording")
+	}
+	if _, ok := meta["models_fetch_ms"]; ok {
+		t.Fatal("models_fetch_ms present before recording")
+	}
+
+	recorder.NoteAssignModelMS(0)
+	recorder.NoteModelsFetchMS(42150)
+	data = recorder.metaJSON(nil)
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := meta["assign_model_ms"]; !ok || v.(float64) != 0 {
+		t.Fatalf("assign_model_ms = %v ok=%v, want 0", v, ok)
+	}
+	if v, ok := meta["models_fetch_ms"]; !ok || v.(float64) != 42150 {
+		t.Fatalf("models_fetch_ms = %v ok=%v, want 42150", v, ok)
 	}
 }
