@@ -997,7 +997,16 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		// 去取会与对侧同形让位构成 ABBA。答否后按先前算好的 wait 落回
 		// 正常流程——解锁窗口内的状态变化与普通睡眠竞态同价，下一拍
 		// 睡醒自会重估。
-		if wait > gateEarlyRelease {
+		// reserveBlocked 的 wait 只是 gateBgRecheck 重查节奏（≤4s）而
+		// 非期望排队时长——拿它当触发会让探针永不被评估，桶未满的
+		// 预留/爬坡饥饿能每 4s 重查烧满 bgMaxHold，兄弟 lane 空着也
+		// 看不见。该分支触发改用 expectedWaitLocked 口径：room<0 的
+		// 缺口按释放速率折算，与选号侧 expectedWait 同一本账。
+		probeWait := wait
+		if reserveBlocked {
+			probeWait = gate.expectedWaitLocked(class, now, ws, gate.bucketUsed, sendable)
+		}
+		if probeWait > gateEarlyRelease {
 			if yield := adapter.GateYieldFrom(ctx); yield != nil {
 				gate.mu.Unlock()
 				siblingFree := yield()

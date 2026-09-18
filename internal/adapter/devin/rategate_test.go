@@ -1128,6 +1128,85 @@ func TestRateGateYieldPredicateGating(t *testing.T) {
 	}
 }
 
+// reserveBlocked 分支的让位探针：bg 被预留/爬坡挡住时单次睡眠只是
+// gateBgRecheck 重查节奏（≤4s），wait>gateEarlyRelease 永假——不补
+// 评估的话桶未满的饥饿能每 4s 重查烧满 bgMaxHold，兄弟 lane 空着也
+// 看不见。该分支触发改用 expectedWaitLocked 口径：缺口按释放速率
+// 折算成期望排队，谓词答是按 yield 快败，答否/期望排队不超阈值都
+// 回落原短间隔重查语义。
+func TestRateGateYieldReserveBlocked(t *testing.T) {
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	// 预留封死 bg：quota-reserve=3 已被 fg 桶位占穿（used=5 > 3），
+	// 估计器把缺口 -2 按 3/56 释放速率折算成 ~37s 期望排队 > τ。
+	newReserveBlocked := func() *rateGate {
+		gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 1}, nil, "")
+		pinGateClock(gate, 10)
+		gate.mu.Lock()
+		gate.fgRateEMA = 4 // :10 可发区间剩 48s → 预留 ceil(4*48/60)+1 = 5
+		gate.mu.Unlock()
+		for i := 0; i < 5; i++ {
+			if err := gate.wait(context.Background()); err != nil {
+				t.Fatalf("fg wait %d error = %v, want pass", i, err)
+			}
+		}
+		return gate
+	}
+	// 谓词答是：探针被问过并按 reason=yield 快败，Retry-After 按
+	// 底层成因同口径报下一窗口 ~52s。
+	probed := 0
+	gate := newReserveBlocked()
+	ctx := adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	err := gate.wait(ctx)
+	var gateErr *llm.Failure
+	if !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonYield {
+		t.Fatalf("reserve-blocked yield error = %v, want *llm.Failure reason=yield", err)
+	}
+	if probed == 0 {
+		t.Fatal("yield predicate was not consulted on reserveBlocked path")
+	}
+	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 54 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
+	}
+	if got := gate.stats().RejectYield; got != 1 {
+		t.Fatalf("stats().RejectYield = %d, want 1", got)
+	}
+	// 谓词答否：探针照样被问过，但不快败——回落 gateBgRecheck 重查。
+	probed = 0
+	gate = newReserveBlocked()
+	ctx = adapter.WithGateYield(bgCtx, func() bool { probed++; return false })
+	cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := gate.wait(cancelCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("false-predicate wait error = %v, want context.DeadlineExceeded", err)
+	}
+	if probed == 0 {
+		t.Fatal("yield predicate was not consulted on reserveBlocked path")
+	}
+	if got := gate.stats().RejectYield; got != 0 {
+		t.Fatalf("stats().RejectYield = %d, want 0 after false answer", got)
+	}
+	// 期望排队恰在阈值上不触发：爬坡额度退到 1 而 bg 已占 2 槽，
+	// 缺口 -1 按 7/56 折算恰好 8s = τ——不超过 gateEarlyRelease
+	// 连谓词都不问。
+	boundary := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 1}, nil, "")
+	pinGateClock(boundary, 10)
+	boundary.mu.Lock()
+	boundary.bucketStart = boundary.windowStart(boundary.now())
+	boundary.bucketUsed = 2
+	boundary.bucketUsedBg = 2
+	boundary.mu.Unlock()
+	probed = 0
+	ctx = adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	boundCtx, boundCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer boundCancel()
+	if err := boundary.wait(boundCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("boundary wait error = %v, want context.DeadlineExceeded", err)
+	}
+	if probed != 0 {
+		t.Fatalf("predicate consulted %d times at τ boundary, want 0", probed)
+	}
+}
+
 // 让位快败入窗账：关闭窗口的 reject_yield 列如实记出，与 quota/hold
 // 分列（yield 拒绝不再混进 quota 账——归因「为什么换号」靠它区分）。
 func TestRateGateYieldPersistsInWindow(t *testing.T) {
