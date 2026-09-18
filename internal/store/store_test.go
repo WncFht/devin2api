@@ -432,3 +432,21 @@ func TestIncrementalVacuumDrainsFreelist(t *testing.T) {
 		t.Fatalf("freelist not drained: %d pages remain", free)
 	}
 }
+
+// TestMaintainWALCheckpoint 覆盖 Maintain 的 WAL 纪律：先验证驱动支持
+// wal_checkpoint(RESTART)（静止库上 busy=0、三列形状），再跑一轮
+// Maintain 确认全链路无错——阈值门内的 pragma 与这里同源。
+func TestMaintainWALCheckpoint(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	var busy, nLog, nCkpt int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(RESTART)`).Scan(&busy, &nLog, &nCkpt); err != nil {
+		t.Fatalf("wal_checkpoint(RESTART): %v", err)
+	}
+	if busy != 0 {
+		t.Fatalf("checkpoint busy on quiescent db")
+	}
+	if err := s.Maintain(ctx, 30); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+}

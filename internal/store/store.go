@@ -128,6 +128,12 @@ const (
 	vacuumBudget     = 2 * time.Second
 )
 
+// walRestartBytes 是 Maintain 主动 wal_checkpoint(RESTART) 的触发阈值。
+// 正常流量下 wal_autocheckpoint(500) 把 WAL 压在 ~2MB；容量淘汰这类大
+// 事务一轮可写入数百 MB 帧，autocheckpoint 只随新写推进、空闲期不回收，
+// 超过此值说明自动回收追不上，手工收一次把 WAL 截回零帧。
+const walRestartBytes = 256 << 20
+
 // IncrementalVacuum 回收 freelist 页——auto_vacuum=INCREMENTAL 只把
 // 删除页挂进 freelist，不显式跑这步 .db 文件不回缩（db_bytes 会与
 // 实际占用分叉）。按 vacuumChunkPages 小块循环：每次调用间释放写连接，
@@ -179,6 +185,15 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	}
 	if err := s.IncrementalVacuum(ctx); err != nil {
 		errs = append(errs, err)
+	}
+	// WAL 体积纪律放在养护末尾：本轮全部删除/vacuum 的帧一次回写主库。
+	// RESTART 要等读者越过 WAL 末尾（busy_timeout 5s 兜住短暂重叠）；
+	// busy 未清只说明本轮没收干净，WAL 仍超阈下一轮重试，不算错误。
+	if s.WALBytes() > walRestartBytes {
+		var busy, nLog, nCkpt int
+		if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(RESTART)`).Scan(&busy, &nLog, &nCkpt); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

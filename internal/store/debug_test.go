@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -349,6 +350,50 @@ func TestDeleteDebugDir(t *testing.T) {
 	if !slices.Equal(dirs, []string{"d2"}) {
 		t.Fatalf("dirs = %v", dirs)
 	}
+}
+
+// TestDeleteDebugRowsChunked 覆盖分片删除：目录数超过单片上限
+// （deleteChunkDirs）时剥载与整删都必须跨片不重不漏，计数器随各片
+// 提交逐步减量。
+func TestDeleteDebugRowsChunked(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	const n = deleteChunkDirs + 5
+	for i := 0; i < n; i++ {
+		dir := fmt.Sprintf("20260910-%06d", i)
+		must(s.PutDebugFile(ctx, dir, "meta.json", []byte("m")))
+		must(s.PutDebugFile(ctx, dir, "01-http-request.json", []byte("p")))
+		must(s.AppendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("c")))
+	}
+	assertPayloadBytes(t, s)
+	// 剥载跨片：全部目录剥到锚点，01/04 命中删除、meta.json 留下。
+	must(s.StripDebugDirsBefore(ctx, "\xff", []string{"meta.json", "error.json"}, nil))
+	for i := 0; i < n; i++ {
+		names, err := s.DebugFileNames(ctx, fmt.Sprintf("20260910-%06d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(names, []string{"meta.json"}) {
+			t.Fatalf("dir %d after strip = %v", i, names)
+		}
+	}
+	assertPayloadBytes(t, s)
+	// 整删跨片：一个目录都不剩。
+	must(s.DeleteDebugDirsBefore(ctx, "\xff", nil))
+	dirs, err := s.DebugDirs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("remaining = %v", dirs)
+	}
+	assertPayloadBytes(t, s)
 }
 
 // assertPayloadBytes 断言内存计数器与权威聚合一致——目录口径

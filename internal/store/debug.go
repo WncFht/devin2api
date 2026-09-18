@@ -714,33 +714,76 @@ func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exa
 	return s.deleteDebugRows(ctx, `dir<? AND (`+strings.Join(names, ` OR `)+`)`, args...)
 }
 
-// deleteDebugRows 对三张行表执行同一 WHERE 的删除，单事务提交。
-// RETURNING 顺带汇总被删行的库存字节：payload 计数器的减量以事务内
-// 真实删除为准，比删前预聚合少一遍 WHERE 扫描。refs 表与文件行共用
-// WHERE 是 CAS 引用随行的落点——ref 行无独立生命周期。
+// deleteChunkDirs 是单个删除事务覆盖的目录数上界：片内命中行一次删完
+// 提交、让出唯一写连接，claimDir/批量写等请求路径在片间插队。目录界
+// 单调推进、片级提交即进度——中断（错误/重启）后下一轮按原谓词重枚举
+// 自然续删，无需额外簿记。
+const deleteChunkDirs = 200
+
+// deleteDebugRows 对三张行表执行同一 WHERE 的分片删除：先在读池把命中
+// 目录枚举成有序快照，再按 deleteChunkDirs 目录一片逐片在写事务内删除
+// 提交，代替原先三表无界 DELETE 挤占唯一写连接一整轮。删除范围用
+// dir IN 名单精确圈定：期间新建目录名按时间序排在快照末尾之后、且
+// 不在名单内，不会被中途误删。RETURNING 顺带汇总被删行的库存字节：
+// payload 计数器按各片真实提交减量，中途失败时已完成片不回滚、计数
+// 已落账。refs 表与文件行共用 WHERE 是 CAS 引用随行的落点——ref 行
+// 无独立生命周期。
 func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	enumArgs := make([]any, 0, len(args)*3)
+	for i := 0; i < 3; i++ {
+		enumArgs = append(enumArgs, args...)
+	}
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT dir FROM debug_files WHERE `+where+`
+		UNION SELECT dir FROM debug_chunks WHERE `+where+`
+		UNION SELECT dir FROM debug_chunk_refs WHERE `+where+`
+		ORDER BY dir`, enumArgs...)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-	var freed int64
-	for _, del := range []struct{ table, sizeExpr string }{
-		{"debug_files", "LENGTH(content)"},
-		{"debug_chunks", "LENGTH(data)"},
-		{"debug_chunk_refs", "LENGTH(dir)+LENGTH(name)+LENGTH(hash)"},
-	} {
-		n, err := deleteReturningBytes(ctx, tx,
-			`DELETE FROM `+del.table+` WHERE `+where+` RETURNING `+del.sizeExpr, args...)
+	defer func() { _ = rows.Close() }()
+	var dirs []string
+	for rows.Next() {
+		var dir string
+		if err := rows.Scan(&dir); err != nil {
+			return err
+		}
+		dirs = append(dirs, dir)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := 0; i < len(dirs); i += deleteChunkDirs {
+		chunk := dirs[i:min(i+deleteChunkDirs, len(dirs))]
+		delWhere := where + ` AND dir IN (` + placeholders(len(chunk)) + `)`
+		delArgs := make([]any, 0, len(args)+len(chunk))
+		delArgs = append(delArgs, args...)
+		for _, dir := range chunk {
+			delArgs = append(delArgs, dir)
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
-		freed += n
+		var freed int64
+		for _, del := range []struct{ table, sizeExpr string }{
+			{"debug_files", "LENGTH(content)"},
+			{"debug_chunks", "LENGTH(data)"},
+			{"debug_chunk_refs", "LENGTH(dir)+LENGTH(name)+LENGTH(hash)"},
+		} {
+			n, err := deleteReturningBytes(ctx, tx,
+				`DELETE FROM `+del.table+` WHERE `+delWhere+` RETURNING `+del.sizeExpr, delArgs...)
+			if err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			freed += n
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.debugBytes.Add(-freed)
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.debugBytes.Add(-freed)
 	return nil
 }
 
