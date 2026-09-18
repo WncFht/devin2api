@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+# RETIRED 2026-09-18 — 生产实例已迁至 archbox（systemd --user :3033，
+# 部署走 scripts/deploy-linux.sh）。Mac 实例与 ~/.cache/devin-2api-staging
+# 流程不复存在，本脚本仅留档（worktree→staging 部署模型仍可参考）。
+# ═══════════════════════════════════════════════════════════════════════════
 # deploy-remote.sh — 在开发机（archbox）上驱动生产机（Mac）的 scripts/deploy.sh。
 # 用法见 --help。
 #
@@ -19,6 +24,12 @@
 # 直接 deploy.sh 部署了落后/分叉的历史。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" ]]; then
+  echo "deploy-remote.sh is RETIRED (2026-09-18): prod moved to archbox :3033." >&2
+  echo "Use scripts/deploy-linux.sh on archbox. See file header." >&2
+  exit 1
+fi
 
 # 远端路径表达式在远端 shell 内展开——默认值里的 $HOME 必须原样传到对端，
 # 本地不提前展开、不用单引号包死（远端命令里一律放双引号内）。
