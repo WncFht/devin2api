@@ -230,7 +230,8 @@ type UsageSnapshot struct {
 	RateLimitEvents []RateLimitEvent `json:"rate_limit_events,omitempty"`
 	// SendsPerRow 是逐日（旧到新）sends/row 探针：分子闸门放行数、
 	// 分母当日 logs 行——内层 connect 重试漂移的唯一活指标。
-	// gate_windows 全期无行（无号池/闸门恒 quota<=0）时整段省略。
+	// gate_windows 全期无行（闸门整窗未被流量/保温触碰）时整段省略；
+	// quota<=0 的闸门照样记行——不限速放行也计入分子。
 	SendsPerRow []SendsRowDay `json:"sends_per_row,omitempty"`
 	// AttemptCauses 是被放弃 lane 尝试的 日×lane×cause 聚合
 	//（lane_attempt_causes 表 31 天窗口直读，旧到新）：区分真实

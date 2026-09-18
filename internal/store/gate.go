@@ -106,8 +106,8 @@ type GateDaySends struct {
 
 // GateSendsByDay 把闸门放行数按本地日聚合，返回 'YYYY-MM-DD'→分解读数。
 // sinceUnix（unix 秒）按 window_start 下界过滤。跨 lane 合计——sends/row
-// 指标的分母（logs 行数）同样是跨 lane 口径。注意 quota<=0 的闸门不记
-// 窗口行（admitLocked 不跑），该口径下分子随无窗期自然缺记。
+// 指标的分母（logs 行数）同样是跨 lane 口径。quota<=0 的闸门照常记窗行：
+// 不限速放行仍是真实发送，与限流放行走同一本 used_* 账。
 func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]GateDaySends, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT strftime('%Y-%m-%d', window_start, 'unixepoch', 'localtime') AS day,

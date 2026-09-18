@@ -943,7 +943,9 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 			return gateRejection(retryAfter, gateReasonLatch)
 		}
 		if gate.quota <= 0 {
-			gate.noteVerdict(gc, class, now, ws, entered)
+			// 不限速放行仍是一次真实上游发送：照常记桶，窗口行的
+			// used_*/retry_admits 在零配额口径下保持诚实。
+			gate.admitLocked(class, gc, now, ws, entered, retry)
 			gate.mu.Unlock()
 			return nil
 		}
@@ -1162,6 +1164,9 @@ func (gate *rateGate) tryAdmit() bool {
 		return false
 	}
 	if gate.quota <= 0 {
+		// 与 wait 同口径：不限速的 ping 放行也是真实发送，计入 bg 桶账。
+		gate.bucketUsed++
+		gate.bucketUsedBg++
 		return true
 	}
 	if now.Sub(ws) < gate.usable {
