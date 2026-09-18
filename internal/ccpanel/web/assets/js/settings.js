@@ -382,6 +382,7 @@ const runtimeMetricDomains = [
       { key: 'enabled', labelKey: 'settings.runtimeMetrics.metric.warmEnabled', format: 'boolean' },
       { key: 'entries', labelKey: 'settings.runtimeMetrics.metric.warmEntries' },
       { key: 'promoted', labelKey: 'settings.runtimeMetrics.metric.warmPromoted' },
+      { key: 'demoted', labelKey: 'settings.runtimeMetrics.metric.warmDemoted' },
       { key: 'suspects', labelKey: 'settings.runtimeMetrics.metric.warmSuspects' },
       { key: 'retained_bytes', labelKey: 'settings.runtimeMetrics.metric.warmRetainedBytes', format: 'bytes' },
       { key: 'pings_sent', labelKey: 'settings.runtimeMetrics.metric.warmPingsSent' },

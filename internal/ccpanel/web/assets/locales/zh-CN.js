@@ -597,6 +597,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.runtimeMetrics.metric.warmEnabled': '保温开关',
   'settings.runtimeMetrics.metric.warmEntries': '留存血统数',
   'settings.runtimeMetrics.metric.warmPromoted': '保温中血统数',
+  'settings.runtimeMetrics.metric.warmDemoted': '连 miss 降级数',
   'settings.runtimeMetrics.metric.warmSuspects': '疑似被取代数',
   'settings.runtimeMetrics.metric.warmRetainedBytes': '留存请求字节',
   'settings.runtimeMetrics.metric.warmPingsSent': '保温 ping 发送数',

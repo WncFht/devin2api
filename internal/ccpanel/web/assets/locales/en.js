@@ -598,6 +598,7 @@ window.I18N_LOCALES['en'] = {
   'settings.runtimeMetrics.metric.warmEnabled': 'Warming enabled',
   'settings.runtimeMetrics.metric.warmEntries': 'Retained lineages',
   'settings.runtimeMetrics.metric.warmPromoted': 'Actively warmed lineages',
+  'settings.runtimeMetrics.metric.warmDemoted': 'Demoted on miss streak',
   'settings.runtimeMetrics.metric.warmSuspects': 'Suspected superseded',
   'settings.runtimeMetrics.metric.warmRetainedBytes': 'Retained request bytes',
   'settings.runtimeMetrics.metric.warmPingsSent': 'Warm pings sent',

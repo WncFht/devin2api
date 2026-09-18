@@ -423,6 +423,7 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 		"enabled":        warm.Enabled,
 		"entries":        warm.Entries,
 		"promoted":       warm.Promoted,
+		"demoted":        warm.Demoted,
 		"suspects":       warm.Suspects,
 		"retained_bytes": warm.RetainedBytes,
 		"pings_sent":     warm.PingsSent,

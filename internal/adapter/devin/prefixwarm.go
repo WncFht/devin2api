@@ -4,9 +4,11 @@
 // TTFB）。cacheWarmer 按 lineage 键登记 sanitize 后的客户端请求
 // （retained），对静默条目按节拍发 max_tokens=1 的逐字重放 ping 续命。
 // ping 只能续命不能复活——死透条目重放救不回，所以退役只看「客户端
-// 可归因上行静默超时」与「凭证自愈后仍语义错误」；ping 的
+// 可归因上行静默超时」与「凭证自愈后仍语义错误」；单发 ping 的
 // cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身
-// 已完成重写兜底）。设计定稿与实测依据见
+// 已完成重写兜底），但 K 连 miss 说明锚反复丢失——降级停 ping
+// （demote≠retire：条目留表照 maxIdle 退役，retain 真流量重武装）。
+// 设计定稿与实测依据见
 // notes/archive/2026-09-15-claude-subagent-cache-cold-ttl.md。
 package devin
 
@@ -44,6 +46,12 @@ const (
 	// warmBytesPerToken 是 retained 字节到前缀 token 的换算估计
 	//（JSON 体实测 ~4B/tok）——仅在还没有已完成响应 usage 观测时兜底。
 	warmBytesPerToken = 4
+	// warmMissDemoteK 是触发降级的连续 ping miss 数：K=4 按默认 180s
+	// 节拍 ≈12min 连续不沾。单发相位 miss 的自愈窗是 1–2 拍（下一发
+	// hit 即复锚），4 连 miss 需连错 ≥3 个独立窗口——抽签型 miss
+	//（p≈0.5）自然命中 1/16，偶发误伤被 retain 复活兜底；连坐型死
+	// lineage 百发百中，正是要停的负载。
+	warmMissDemoteK = 4
 )
 
 // WarmConfig 是前缀保温参数组；时长<=0、上限<=0、名表空时回落到内置
@@ -180,6 +188,8 @@ type warmEntry struct {
 	tier          warmTier
 	prefixTokens  int       // 最近已完成响应的 input+cache_read 实测；0=未观测
 	suspectAt     time.Time // 非零=被同 session 新一维相异 lineage 标为疑似孤儿
+	missStreak    int       // 连续 ping miss（cache_read=0）数：hit 或 retain 清零
+	demoted       bool      // K 连 miss 降级态：sweep 停发 ping，条目留表，retain 重武装
 	// observedModels 记上游自报的 response_model 集合——路由相位漂移
 	// 的观测面，不进键不参与判定。
 	observedModels map[string]struct{}
@@ -193,11 +203,13 @@ type warmEntry struct {
 // RetiredByCause 把同一总量按死因拆开——churn 构成是调参前的
 // 必读账；PingMissPrefillTokens 按 miss 时的前缀体量估 prefill
 // 成本（miss=全前缀重灌，实测优先 retained/4 兜底）——保温的
-// 座位成本此前只在估算里存在。
+// 座位成本此前只在估算里存在；Demoted 是连 miss 降级停 ping 的
+// 现值（与 Promoted 正交：降级条目仍计保温资格，只是暂停发射）。
 type WarmStats struct {
 	Enabled       bool  `json:"enabled"`
 	Entries       int   `json:"entries"`
 	Promoted      int   `json:"promoted"`
+	Demoted       int   `json:"demoted"`
 	Suspects      int   `json:"suspects"`
 	RetainedBytes int64 `json:"retained_bytes"`
 	PingsSent     int64 `json:"pings_sent"`
@@ -213,8 +225,9 @@ type WarmStats struct {
 
 // WarmRetiredStats 是退役条目的死因分账：Idle=静默超档限、
 // Suspect=孤儿宽限期满、Semantic=前缀形态被上游语义拒绝、
-// Capacity=容量帽挤占、MissDemote=连 miss 降级（D1 降级路径
-// 预留，未启用前恒零）。与 Retired 总量同口径累加。
+// Capacity=容量帽挤占——四桶合计 = Retired 总量。MissDemote 是
+// 连 miss 降级次数（demote≠retire：条目留表停 ping、可经 retain
+// 重武装），不计入 Retired。
 type WarmRetiredStats struct {
 	Idle       int64 `json:"idle"`
 	Suspect    int64 `json:"suspect"`
@@ -352,8 +365,9 @@ func (w *cacheWarmer) noteSend(key warmLineageKey) {
 // sends=1；同键再来按 retained 指纹分三态：逐字重发（探活/重试）
 // 不计 sends——「同 SessionKey+同内容重发」型探针不能靠它晋升；
 // 真追加（消息数增长或体量净增 >=64B）sends++；其余原地改写
-// （microcompact 类前缀失配）sends 归 1 重新计。随后做超任扫描与
-// 容量淘汰。续试变体不入表——调用方只在客户端原形态上调用。
+// （microcompact 类前缀失配）sends 归 1 重新计。真流量到达顺带清
+// 降级标记与 miss 连击——再武装免费。随后做超任扫描与容量淘汰。
+// 续试变体不入表——调用方只在客户端原形态上调用。
 func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wireUID, routerUID string) {
 	if key == (warmLineageKey{}) {
 		return
@@ -391,6 +405,9 @@ func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wi
 	entry.router = routerUID
 	entry.lastTouch = now
 	entry.suspectAt = time.Time{}
+	// 真流量 = lineage 仍值钱：清降级与 miss 连击，免费重武装。
+	entry.demoted = false
+	entry.missStreak = 0
 	entry.nextDue = w.dueAfterLocked(now)
 	w.retainedBytes += size
 	w.markSuspectsLocked(key, now)
@@ -444,6 +461,9 @@ func (w *cacheWarmer) stats() WarmStats {
 		if !entry.suspectAt.IsZero() {
 			stats.Suspects++
 		}
+		if entry.demoted {
+			stats.Demoted++
+		}
 		if w.promotedLocked(entry) {
 			stats.Promoted++
 		}
@@ -466,11 +486,11 @@ func (w *cacheWarmer) run() {
 	}
 }
 
-// sweep 是一轮清扫：先退役（静默超档限/孤儿宽限期满），再对晋升且
-// 到期的条目按锚龄逐条 ping（最旧接触先打，饱和窗的零星准入槽先给
-// 濒死条目）；排空后只退役不收集。ping 在锁外发（单发 ~1s、
-// 超时 60s，持锁会堵全部簿记入口），结果回锁内结账；条目发送期间
-// 被退役/淘汰只结计数器。
+// sweep 是一轮清扫：先退役（静默超档限/孤儿宽限期满），再对晋升、
+// 未降级且到期的条目按锚龄逐条 ping（最旧接触先打，饱和窗的零星
+// 准入槽先给濒死条目）；排空后只退役不收集。ping 在锁外发（单发
+// ~1s、超时 60s，持锁会堵全部簿记入口），结果回锁内结账；条目发送
+// 期间被退役/淘汰只结计数器。
 func (w *cacheWarmer) sweep() {
 	now := w.now()
 	w.mu.Lock()
@@ -484,7 +504,7 @@ func (w *cacheWarmer) sweep() {
 			w.removeLocked(entry, cause)
 			continue
 		}
-		if !w.drained && w.promotedLocked(entry) && !now.Before(entry.nextDue) {
+		if !w.drained && !entry.demoted && w.promotedLocked(entry) && !now.Before(entry.nextDue) {
 			due = append(due, entry)
 		}
 	}
@@ -507,8 +527,10 @@ func (w *cacheWarmer) sweep() {
 // 不越过 fg 预留、bg 计数不越过爬坡额度）——被拒
 // 跳过本轮，不推进 nextDue，下拍再试；拿到许可才真正发送，发送即
 // 消费本轮（成败都推进 nextDue，错误率 bounded 在节拍内）。结果分账：
-// 成功记 hit/miss（cr=0 只观测）；错误先喂闩的错误侧再分类——凭证类
-// 自愈重发一次，仍 ClientFixable 才退役，其余一律跳过本轮。
+// 成功记 hit/miss——hit 清 miss 连击，K 连 miss 置 demoted 停 ping
+// （降级不删条目，retain 真流量重武装）；错误先喂闩的错误侧再
+// 分类——凭证类自愈重发一次，仍 ClientFixable 才退役，其余一律
+// 跳过本轮（不清连击：传输失败对锚存活无证据）。
 func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 	w.mu.Lock()
 	if w.drained || w.entries[entry.key] != entry {
@@ -564,6 +586,25 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 	}
 	if err == nil {
 		entry.lastPingAt = now
+		switch {
+		case cacheRead > 0:
+			entry.missStreak = 0
+		case entry.digest == snap.digest:
+			// digest 判等与下方语义退役同一理由：发送期间 retain
+			// 换过内容时本发 miss 是旧形态的证据，不算到当前条目
+			//（retain 已清过连击，这里跳过后新内容从零重计）。
+			entry.missStreak++
+			if entry.missStreak >= warmMissDemoteK {
+				// K 连 miss = 锚反复丢失（上游 lottery/相位永久
+				// 错位），续打只是每拍白烧一发全前缀 prefill——
+				// 降级停 ping。条目留表照 maxIdle 退役，retain
+				// 真流量重武装；MissDemote 记的是降级次数，条目
+				// 不死故不进 Retired 总量。
+				entry.demoted = true
+				entry.missStreak = 0
+				w.retiredByCause.MissDemote++
+			}
+		}
 	}
 	entry.nextDue = w.dueAfterLocked(now)
 	if err != nil && llm.Classify(err).ClientFixable && entry.digest == snap.digest {
@@ -794,8 +835,8 @@ func (w *cacheWarmer) evictLocked(protect warmLineageKey) {
 }
 
 // warmRetireCause 是条目退役的死因枚举，removeLocked 按它分账进
-// WarmRetiredStats；连 miss 降级（MissDemote）属未来 D1 路径的
-// 预留桶，当前无调用方。
+// WarmRetiredStats 前四桶；MissDemote 不是 removeLocked 死因
+// （降级不删条目），由 pingEntry 在连 miss 达 K 时直接记账。
 type warmRetireCause int
 
 const (

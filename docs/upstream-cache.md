@@ -63,7 +63,7 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 
 谱系键 warmLineageKey 是「前缀逐字相等」的最小判据：SessionKey、system 头 4KB、工具声明全量、首条消息头 1KB、解析后 wire uid 五维，任一维漂移即换键。条目「晋升」为保温对象需同时满足：第 2 发真追加的成功上行（逐字重发/探针不计，microcompact 类原地改写重置计数）与前缀达 `warm_prefix_min_prefix_tokens`（默认 8192 token；观测过 usage 用实测 input+cache_read，未观测按 retained 字节/4 估）。同 SessionKey 内与新到谱系恰好一维相异的旧条目标 suspect——compaction 换首消息、auto-update 改 system 头、模型漂移这类「旧流从此永久静默」的形态；宽限 2×Interval 无真实上行即退役。
 
-ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱系 verbatim 重发也救不回（实测恢复 ~7%），故退役只认四类证据——客户端可归因上行静默超时、suspect 宽限期满、容量淘汰、自愈后仍语义错误；ping 的 cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身已完成重写兜底）。其二，准入过闸门 `tryAdmit`：闩内一律拒，闩外只在可发区间、配额有余、无排队者时放行——不排队不偷槽，被拒跳过本轮（计 `ping_skips`）；ping 撞 resource_exhausted 照喂冷却闩，它常最先发现上游饱和。其三，错误分类：凭证味失败（unauthenticated/permission_denied）自愈重发一次，仍 ClientFixable（invalid_argument/ContextLength/permission_denied 等）才退役，传输/限流/超时类只跳本轮。ping 是内部流量：直连 streamClient、绕过 app/recorder，不进 `logs` 表、调试记录与面板请求列表。
+ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱系 verbatim 重发也救不回（实测恢复 ~7%），故退役只认四类证据——客户端可归因上行静默超时、suspect 宽限期满、容量淘汰、自愈后仍语义错误；单发 ping 的 cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身已完成重写兜底），但 K=4 连 miss（≈12min 不沾）说明锚反复丢失——降级停 ping（demote≠retire：条目留表照 maxIdle 退役，retain 真流量免费重武装；hit 清连击，发送错误不清）。其二，准入过闸门 `tryAdmit`：闩内一律拒，闩外只在可发区间、配额有余、无排队者时放行——不排队不偷槽，被拒跳过本轮（计 `ping_skips`）；ping 撞 resource_exhausted 照喂冷却闩，它常最先发现上游饱和。其三，错误分类：凭证味失败（unauthenticated/permission_denied）自愈重发一次，仍 ClientFixable（invalid_argument/ContextLength/permission_denied 等）才退役，传输/限流/超时类只跳本轮。ping 是内部流量：直连 streamClient、绕过 app/recorder，不进 `logs` 表、调试记录与面板请求列表。
 
 静默分级只决定「最多保多久」——resume 越不可能，烧 ping 越不值：
 
@@ -78,7 +78,7 @@ ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱�
 
 资源与生命周期：谱系数与 retained 字节双帽 `warm_prefix_max_streams`（默认 256）/`warm_prefix_max_retained_mb`（默认 96），触顶先挤 suspect 再按 lastTouch LRU 挤。`retained_bytes` 只计 prompt 内容字段（system+ 消息文本 + 工具声明），不含 JSON 包装，比完整请求体小是正常口径。簿记全在内存，重启即清空——存活流的第一发真实请求自然重暖。排空（BeginDrain）后停发 ping，条目表留作观测，退役与淘汰判定照常。`warm_prefix_*` 全部参数热重载（热键清单见 config-reload.md）；enabled 热关掉即停调度并清空条目表，释放 retained 内存。
 
-观测面：`/admin/runtime-metrics` 的 `warm` 段透出 `enabled`、`entries`（留存谱系）、`promoted`（保温中）、`suspects`、`retained_bytes`、`pings_sent`、`ping_hits`/`ping_misses`、`ping_skips`（闸门拒）、`ping_errors`、`retired`，另派生 `ping_hit_rate`。命中率口径只算 ping 自身、不含真实流量；面板「趋势」页顶部状态条与「设置」页运行指标组有同名展示。开启方式：config.yaml 置 `devin.warm_prefix_enabled: true` 后 POST `/admin/config/reload` 即时生效。
+观测面：`/admin/runtime-metrics` 的 `warm` 段透出 `enabled`、`entries`（留存谱系）、`promoted`（保温中）、`demoted`（连 miss 降级停 ping 现值）、`suspects`、`retained_bytes`、`pings_sent`、`ping_hits`/`ping_misses`、`ping_skips`（闸门拒）、`ping_errors`、`retired`、`retired_by_cause`（idle/suspect/semantic/capacity 四退役桶 + miss_demote 降级累计——降级不删条目故不进 `retired`）、`ping_miss_prefill_tokens`（miss 轮 prefill 成本账），另派生 `ping_hit_rate`。命中率口径只算 ping 自身、不含真实流量；面板「趋势」页顶部状态条与「设置」页运行指标组有同名展示。开启方式：config.yaml 置 `devin.warm_prefix_enabled: true` 后 POST `/admin/config/reload` 即时生效。
 
 ## 已知边界
 

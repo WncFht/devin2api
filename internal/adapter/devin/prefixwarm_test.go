@@ -694,8 +694,9 @@ func TestWarmBeginDrain(t *testing.T) {
 }
 
 // 死因分账：四条退役路径各进各桶——idle 静默超档限、suspect 孤儿
-// 宽限期满、semantic 前缀形态被拒、capacity 容量挤占；分桶合计与
-// retired 总量同口径，miss_demote 预留桶恒零。
+// 宽限期满、semantic 前缀形态被拒、capacity 容量挤占；四桶合计与
+// retired 总量同口径。miss_demote 是降级账（条目不死）不进
+// Retired，本组用例不走 miss 路径恒零。
 func TestWarmRetireCauseBuckets(t *testing.T) {
 	// idle：无 SessionKey 条目静默超 unknown 档限。
 	wIdle, clockIdle := newTestWarmer(t, WarmConfig{UnknownMaxIdle: time.Minute})
@@ -741,17 +742,18 @@ func TestWarmRetireCauseBuckets(t *testing.T) {
 		t.Fatalf("Capacity = %d, want 1", got)
 	}
 
-	// 分桶合计 = retired 总量；miss_demote 预留桶恒零。
+	// 四个退役桶合计 = retired 总量；miss_demote 是降级账不进
+	// Retired（本组用例不走 miss 路径恒零）。
 	for name, stats := range map[string]WarmStats{
 		"idle": wIdle.stats(), "suspect": wSus.stats(),
 		"semantic": wSem.stats(), "capacity": wCap.stats(),
 	} {
 		c := stats.RetiredByCause
-		if sum := c.Idle + c.Suspect + c.Semantic + c.Capacity + c.MissDemote; sum != stats.Retired {
-			t.Fatalf("%s: buckets sum %d != Retired %d", name, sum, stats.Retired)
+		if sum := c.Idle + c.Suspect + c.Semantic + c.Capacity; sum != stats.Retired {
+			t.Fatalf("%s: retire buckets sum %d != Retired %d", name, sum, stats.Retired)
 		}
 		if c.MissDemote != 0 {
-			t.Fatalf("%s: reserved MissDemote = %d, want 0", name, c.MissDemote)
+			t.Fatalf("%s: MissDemote = %d, want 0 (no miss path here)", name, c.MissDemote)
 		}
 	}
 }
@@ -785,5 +787,98 @@ func TestWarmPingMissPrefillTokens(t *testing.T) {
 	w.sweep()
 	if got := w.stats().PingMissPrefillTokens; got != want {
 		t.Fatalf("PingMissPrefillTokens = %d, want unchanged %d after a hit", got, want)
+	}
+}
+
+// 连 miss 降级（D1）：K=4 连 cache_read=0 → demoted 停 ping——降级≠
+// 退役，条目留表照 maxIdle 退役、retired 不涨、miss_demote 累计+1；
+// hit 清连击而发送错误不清；retain 真流量清降级重武装、下一拍恢复
+// ping。
+func TestWarmMissStreakDemote(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	var calls int
+	var cacheRead int64
+	var pingErr error
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		calls++
+		return cacheRead, pingErr
+	}
+	request := warmTestRequest("sess", "sys", "m1")
+	key := seedPromoted(w, request, "uid")
+	beat := func() {
+		clock.t = clock.t.Add(time.Minute + time.Second)
+		w.sweep()
+	}
+	entry := w.entries[key]
+
+	// miss-miss → 发送错误不清连击 → miss 仍累计；hit 才清零。
+	cacheRead, pingErr = 0, nil
+	beat() // miss 1
+	beat() // miss 2
+	pingErr = connect.NewError(connect.CodeUnavailable, errors.New("connection reset"))
+	beat() // 错误轮：连击不清
+	pingErr = nil
+	beat() // miss 3
+	if entry.missStreak != 3 {
+		t.Fatalf("missStreak = %d, want 3 (send error must not reset)", entry.missStreak)
+	}
+	cacheRead = 4096
+	beat() // hit：清零
+	if entry.missStreak != 0 {
+		t.Fatalf("hit must reset missStreak, got %d", entry.missStreak)
+	}
+	// 连 miss 到 K 才降级：第 K-1 发未降、第 K 发降。
+	cacheRead = 0
+	for i := 1; i < warmMissDemoteK; i++ {
+		beat()
+		if entry.demoted {
+			t.Fatalf("demoted after %d consecutive misses, want K=%d", i, warmMissDemoteK)
+		}
+	}
+	beat()
+	if !entry.demoted {
+		t.Fatal("K consecutive misses must demote")
+	}
+	stats := w.stats()
+	if stats.RetiredByCause.MissDemote != 1 || stats.Demoted != 1 {
+		t.Fatalf("stats = %+v, want MissDemote=1 Demoted=1", stats)
+	}
+	if stats.Retired != 0 {
+		t.Fatal("demote must not count toward retired")
+	}
+	// 降级停 ping：到期也不再发。
+	sent := calls
+	beat()
+	if calls != sent {
+		t.Fatal("demoted entry must stop receiving pings")
+	}
+	// retain 真流量重武装：清标记、下一拍恢复 ping。追加须落在当前
+	// retained 上才是真追加（同消息数的小改写会按指纹规则归 sends=1
+	// 失去晋升）。
+	w.retain(key, appendTurn(entry.retained, "again"), "uid", "")
+	if entry.demoted || entry.missStreak != 0 {
+		t.Fatal("retain must clear demoted and missStreak")
+	}
+	if got := w.stats().Demoted; got != 0 {
+		t.Fatalf("Demoted = %d, want 0 after re-arm", got)
+	}
+	beat()
+	if calls != sent+1 {
+		t.Fatalf("calls = %d, re-armed entry must ping on next due", calls)
+	}
+	// 再降级后条目仍照 maxIdle 退役（unknown 档 30min）。
+	for i := 0; i < warmMissDemoteK; i++ {
+		beat()
+	}
+	if !entry.demoted {
+		t.Fatal("re-armed entry must demote again after K misses")
+	}
+	clock.t = clock.t.Add(31 * time.Minute)
+	w.sweep()
+	if _, ok := w.entries[key]; ok {
+		t.Fatal("demoted entry must still retire on maxIdle")
+	}
+	if got := w.stats(); got.Retired != 1 || got.RetiredByCause.Idle != 1 {
+		t.Fatalf("stats = %+v, want idle retirement counted once", got)
 	}
 }
