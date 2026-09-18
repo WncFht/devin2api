@@ -791,3 +791,108 @@ func TestDetachedPumpFinishAccounting(t *testing.T) {
 		t.Fatalf("evicted pump misaccounted: %+v", stats)
 	}
 }
+
+// TestDetachedPeek 钉住跨 lane 探测的三态与只读语义：在场可用/在场不可用/
+// 缺席。usable 与 lookup 同判据，但 peek 不置 attached、不惰性逐出、不计
+// attach_misses——它只给 owner 条目盖 sawCrossLaneRetry 章供孤儿拆分。
+func TestDetachedPeek(t *testing.T) {
+	registry := newDetachedRegistry()
+
+	// 在场可用：running 条目 → (running, usable, ok)；attached 不得置位。
+	live := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("p1", live)
+	state, usable, ok := registry.peek("p1")
+	if !ok || state != detachedRunning || !usable {
+		t.Fatalf("peek running = (%v,%v,%v), want (running,true,true)", state, usable, ok)
+	}
+	live.mu.Lock()
+	if live.attached {
+		t.Fatal("peek must not mark attached — that would hide the orphan from owner-side accounting")
+	}
+	if !live.sawCrossLaneRetry {
+		t.Fatal("peek must set sawCrossLaneRetry for owner-side orphan split")
+	}
+	live.mu.Unlock()
+
+	// 在场不可用：不可重放的 failed → (failed, !usable, ok)；不逐出、
+	// 不计 attach_misses（lookup 的口径只认真实挂接尝试）。
+	broken := &detachedEntry{notify: make(chan struct{})}
+	broken.append(llm.ResponseEvent{Type: llm.ResponseEventError, Error: &llm.AssistantMessage{
+		ErrorMessage: "http2: stream closed", Failure: &llm.Failure{Code: "internal", UpstreamFault: true},
+	}})
+	broken.finish()
+	registry.admit("p2", broken)
+	state, usable, ok = registry.peek("p2")
+	if !ok || state != detachedFailed || usable {
+		t.Fatalf("peek unreplayable = (%v,%v,%v), want (failed,false,true)", state, usable, ok)
+	}
+	if len(registry.entries) != 2 {
+		t.Fatal("peek must not lazily evict — entry removal stays owner-side business")
+	}
+
+	// 过期条目同样在场但不可用，且不被 peek 清掉。
+	stale := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("p3", stale)
+	stale.mu.Lock()
+	stale.expiresAt = time.Now().Add(-time.Second)
+	stale.mu.Unlock()
+	if _, usable, ok = registry.peek("p3"); !ok || usable {
+		t.Fatalf("peek expired = (?, %v, %v), want (false,true)", usable, ok)
+	}
+
+	// 缺席：普通首发。
+	if _, _, ok := registry.peek("p9"); ok {
+		t.Fatal("peek on absent key must miss")
+	}
+	stats := registry.stats()
+	if stats.AttachMisses != 0 || stats.Expired != 0 {
+		t.Fatalf("peek must be counter-free: %+v", stats)
+	}
+}
+
+// TestDetachedCrossLaneMissBookkeeping 钉住探测侧的记账：本 lane 的
+// crossLaneMisses 递增、事件环收 cross_miss（detail 带 owner:state）。
+func TestDetachedCrossLaneMissBookkeeping(t *testing.T) {
+	registry := newDetachedRegistry()
+	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", detachedRunning)
+	registry.noteCrossLaneMiss("abcdef1234567890", "owner-a", detachedCompleted)
+	stats := registry.stats()
+	if stats.CrossLaneMisses != 2 {
+		t.Fatalf("cross_lane_misses = %d, want 2", stats.CrossLaneMisses)
+	}
+	head := stats.Events[0]
+	if head.Kind != detachedEventCrossMiss || head.Detail != "owner-a:completed" || head.Key != "abcdef123456" {
+		t.Fatalf("events head = %+v", head)
+	}
+	if head.Label != "跨号未命中" {
+		t.Fatalf("cross_miss label = %q", head.Label)
+	}
+}
+
+// TestDetachedOrphansCrossLane 钉住孤儿拆分：sawCrossLaneRetry 置位的孤儿
+// 移除时另记 orphans_cross_lane——「来错门」与「没人来」分开归因。
+func TestDetachedOrphansCrossLane(t *testing.T) {
+	registry := newDetachedRegistry()
+
+	// 来错门：peek 盖过章的孤儿。
+	wrongDoor := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("x1", wrongDoor)
+	registry.peek("x1")
+	registry.evictLocked("x1", wrongDoor, detachEvictExpired)
+
+	// 没人来：普通孤儿。
+	nobody := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("x2", nobody)
+	registry.evictLocked("x2", nobody, detachEvictExpired)
+
+	// 挂接过的不算孤儿。
+	attached := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("x3", attached)
+	registry.lookup("x3")
+	registry.evictLocked("x3", attached, detachEvictExpired)
+
+	stats := registry.stats()
+	if stats.Orphans != 2 || stats.OrphansCrossLane != 1 {
+		t.Fatalf("orphans = %d cross = %d, want 2/1", stats.Orphans, stats.OrphansCrossLane)
+	}
+}

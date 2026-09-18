@@ -800,6 +800,31 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		})
 		return &attachStream{entry: entry}, nil
 	}
+	// 本地查无此键时探测兄弟 lane 的登记表（号池经 ctx 挂接；裸 New()
+	// 与单 lane 无 peers 零成本）：同键请求落错 lane 此前在两侧都不留
+	// 痕——本 lane attach_misses 不动、owner 条目只能等移除时记不区分
+	// 原因的孤儿。peek 只读探测命中即记账：本 lane 记 cross_lane_misses
+	// 与事件环，04 留 marker 行与 pool_candidates 的选号现场互证；
+	// owner 条目置 sawCrossLaneRetry 供移除时拆出「来错门」孤儿档。
+	// 多 holder（同键条目同时存在多条 lane）各记一次不吞。
+	if detachKey != "" {
+		for owner, reg := range detachedPeersFrom(ctx) {
+			if reg == adapter.detached {
+				continue
+			}
+			state, usable, ok := reg.peek(detachKey)
+			if !ok {
+				continue
+			}
+			adapter.detached.noteCrossLaneMiss(detachKey, owner, state)
+			recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_cross_lane_miss", map[string]any{
+				"key":         detachKey,
+				"owner_lane":  owner,
+				"owner_state": state.String(),
+				"usable":      usable,
+			})
+		}
+	}
 	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
 	// 目录能力位与最终承担请求的模型无关。
 	adapter.warnIfModelAbsentFromCatalog(model)

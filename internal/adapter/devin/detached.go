@@ -92,6 +92,10 @@ type detachedEntry struct {
 	// attached 记本条目是否兑现过一次挂接（lookup 命中时置位）：
 	// 移除路径据此算孤儿——从未被挂接的条目是纯粹的上游浪费。
 	attached bool
+	// sawCrossLaneRetry 记同键消费者曾到兄弟 lane 敲门（兄弟 lane
+	// lookup 落 nil 后的 peek 探测置位）：移除时把孤儿拆成「没人来」
+	// 与「来错门」两档——后者是选号让位/删绑的归因证据。
+	sawCrossLaneRetry bool
 	// detachIndex 是登记时刻已缓冲的事件数（客户端断连前的前缀）：
 	// len(events)-detachIndex = 脱钩后新产出的事件量，孤儿条目的
 	// 这项和是最接近「token 级浪费」的可用代理（真实 token 数只在
@@ -269,6 +273,8 @@ type detachedRegistry struct {
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
 	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
+	orphansCrossLane  int64 // 孤儿中消费者来过但去了别门的（sawCrossLaneRetry）
+	crossLaneMisses   int64 // 同键请求到本 lane 但条目在兄弟 lane 的探测命中
 	events            [detachedEventCap]DetachedEvent
 	eventHead         int
 	eventSize         int
@@ -279,14 +285,16 @@ type detachedRegistry struct {
 const detachedEventCap = 64
 
 // 生命周期事件种类：admit（登记）、attach（挂接命中）、miss（同键
-// 到场但条目不可用）、evict（移除，detail 记原因）、finish（泵终局，
-// detail 记四档终态）。
+// 到场但条目不可用）、cross_miss（同键请求到场但条目在兄弟 lane，
+// detail 记 <owner>:<state>）、evict（移除，detail 记原因）、
+// finish（泵终局，detail 记四档终态）。
 const (
-	detachedEventAdmit  = "admit"
-	detachedEventAttach = "attach"
-	detachedEventMiss   = "miss"
-	detachedEventEvict  = "evict"
-	detachedEventFinish = "finish"
+	detachedEventAdmit     = "admit"
+	detachedEventAttach    = "attach"
+	detachedEventMiss      = "miss"
+	detachedEventCrossMiss = "cross_miss"
+	detachedEventEvict     = "evict"
+	detachedEventFinish    = "finish"
 )
 
 // 移除原因（evict 事件的 detail）：expired 是 TTL 到点（lookup 惰性
@@ -337,6 +345,8 @@ func detachedEventLabel(kind, detail string) string {
 			return "截断未命中"
 		}
 		return "不可重放"
+	case detachedEventCrossMiss:
+		return "跨号未命中"
 	case detachedEventEvict:
 		switch detail {
 		case detachEvictCapacity:
@@ -373,6 +383,11 @@ type DetachedStats struct {
 	Detaches     int64 `json:"detaches"`
 	Attaches     int64 `json:"attaches"`
 	AttachMisses int64 `json:"attach_misses"`
+	// CrossLaneMisses 是「同键请求到本 lane、条目却在兄弟 lane」的探测
+	// 命中计数——与 attach_misses（条目在场不可用）对称的缺失补全：
+	// 跨 lane 重试此前在两侧都不可见（本 lane miss 不计、owner 只能等
+	// 移除时记不区分原因的孤儿）。
+	CrossLaneMisses int64 `json:"cross_lane_misses"`
 
 	FinishedCompleted int64 `json:"finished_completed"`
 	FinishedFailed    int64 `json:"finished_failed"`
@@ -388,6 +403,10 @@ type DetachedStats struct {
 
 	Orphans         int64 `json:"orphans"`
 	OrphanCompleted int64 `json:"orphan_completed"`
+	// OrphansCrossLane 是孤儿中「消费者确实来过、只是去了别门」的
+	// 子集（sawCrossLaneRetry 置位）——orphans-orphans_cross_lane
+	// 近似「客户端压根没重试」的上界。
+	OrphansCrossLane int64 `json:"orphans_cross_lane"`
 	// OrphanBufferedEvents 是孤儿条目脱钩后新产出的事件量合计——token
 	// 级浪费拿不到（真实 token 只在内存事件载荷里），事件量是最接近
 	// 的量级代理：区分「登记即死的孤儿」与「跑了 20 分钟无人认领」。
@@ -399,6 +418,25 @@ type DetachedStats struct {
 // newDetachedRegistry 创建空缓存。
 func newDetachedRegistry() *detachedRegistry {
 	return &detachedRegistry{entries: make(map[string]*detachedEntry)}
+}
+
+// detachedPeersKey 是兄弟 lane 完成缓存登记表在请求 ctx 里的挂接键
+// （与 gateYield 同型的 ctx 注值传递——不碰 Adapter 构造签名）。
+type detachedPeersKey struct{}
+
+// withDetachedPeers 把全池 {lane 名→完成缓存} 登记表挂进 ctx：号池下
+// adapter.Stream 本地 lookup 落 nil 后据此探测兄弟 lane 是否持有同键
+// 条目（跨 lane 挂接 miss 的观测面）。登记表含本 lane——探测方按
+// reg != adapter.detached 跳过自身。
+func withDetachedPeers(ctx context.Context, peers map[string]*detachedRegistry) context.Context {
+	return context.WithValue(ctx, detachedPeersKey{}, peers)
+}
+
+// detachedPeersFrom 取回 ctx 上的兄弟缓存登记表；未挂接返回 nil——
+// 裸 New() 与单 lane 快捷路径无 peers，探测循环自然零成本。
+func detachedPeersFrom(ctx context.Context) map[string]*detachedRegistry {
+	peers, _ := ctx.Value(detachedPeersKey{}).(map[string]*detachedRegistry)
+	return peers
 }
 
 // lookup 查可挂接条目：running/completed 恒可挂；failed 只在可重放时
@@ -443,6 +481,37 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	registry.attaches++
 	registry.pushEvent(detachedEventAttach, key, state.String())
 	return entry
+}
+
+// peek 是只读的在场探测（跨 lane 挂接 miss 观测用）：条目在场回
+// (state, usable, true)——usable 与 lookup 同判据（未过期 && 未截断 &&
+// (非 failed || 可重放)）。不置 attached（不污染 owner 的孤儿口径）、
+// 不惰性逐出、不计数；唯一写入是 sawCrossLaneRetry 置位——owner 侧移除
+// 时据此把孤儿拆出「来错门」一档。缺席回 (_, _, false)（普通首发）。
+func (registry *detachedRegistry) peek(key string) (state detachedState, usable, ok bool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	entry := registry.entries[key]
+	if entry == nil {
+		return 0, false, false
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	usable = !time.Now().After(entry.expiresAt) && !entry.truncated &&
+		(entry.state != detachedFailed || entry.replayable)
+	entry.sawCrossLaneRetry = true
+	return entry.state, usable, true
+}
+
+// noteCrossLaneMiss 记一次跨 lane 挂接 miss：同键请求落到本 lane 但
+// 条目在 owner lane——选号让位/删绑把本该挂接的消费者送错了门。计数与
+// 事件环记在本 lane（attach_misses 的对称补全），owner 侧痕迹走
+// sawCrossLaneRetry→orphans_cross_lane 口径。
+func (registry *detachedRegistry) noteCrossLaneMiss(key, owner string, state detachedState) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.crossLaneMisses++
+	registry.pushEvent(detachedEventCrossMiss, key, owner+":"+state.String())
 }
 
 // admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶先
@@ -495,7 +564,8 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 // Recv 走 ctx.Done 退场并把条目收成 failed（挂接方拿到一个截断但干净
 // 的终态）。掐的是一次性写入的 CancelFunc 而非直接 cancel 流：本函数
 // 持 registry.mu 不能去拿流锁。全部移除走这一个漏斗：按 cause 记移除
-// 计数，从未挂接的条目同时记孤儿（orphan_completed 是上游浪费口径）。
+// 计数，从未挂接的条目同时记孤儿（orphan_completed 是上游浪费口径；
+// sawCrossLaneRetry 置位的孤儿另记 orphans_cross_lane「来错门」档）。
 func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, cause string) {
 	delete(registry.entries, key)
 	switch cause {
@@ -512,6 +582,7 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	drainCancel := entry.drainCancel
 	running := entry.state == detachedRunning
 	orphan := !entry.attached
+	crossLane := entry.sawCrossLaneRetry
 	completed := entry.state == detachedCompleted
 	bufferedAfterDetach := len(entry.events) - entry.detachIndex
 	entry.mu.Unlock()
@@ -520,6 +591,9 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 		registry.orphanBuffered += int64(bufferedAfterDetach)
 		if completed {
 			registry.orphanCompleted++
+		}
+		if crossLane {
+			registry.orphansCrossLane++
 		}
 	}
 	registry.pushEvent(detachedEventEvict, key, cause)
@@ -591,6 +665,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Detaches = registry.detaches
 	stats.Attaches = registry.attaches
 	stats.AttachMisses = registry.attachMisses
+	stats.CrossLaneMisses = registry.crossLaneMisses
 	stats.FinishedCompleted = registry.finishedCompleted
 	stats.FinishedFailed = registry.finishedFailed
 	stats.FinishedKilled = registry.finishedKilled
@@ -601,6 +676,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Truncated = registry.truncated
 	stats.Orphans = registry.orphans
 	stats.OrphanCompleted = registry.orphanCompleted
+	stats.OrphansCrossLane = registry.orphansCrossLane
 	stats.OrphanBufferedEvents = registry.orphanBuffered
 	for i := 1; i <= registry.eventSize; i++ {
 		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])

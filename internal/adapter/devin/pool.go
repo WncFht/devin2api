@@ -281,6 +281,10 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	}
 	affinity := SessionAffinityKey(request)
 	recorder.SetAffinityHash(affinity)
+	// 跨 lane 挂接探测的 ctx 载荷：各 lane 的完成缓存登记表（含本 lane，
+	// 探测方自跳过）。lookup 落 nil 后 adapter 据此查兄弟 lane 是否持有
+	// 同键条目——换 lane 的重试此前在两侧都静默走新上游。
+	ctx = withDetachedPeers(ctx, pool.detachedPeerRegistries())
 	ranked := pool.rankLanes(ctx, lanes, affinity)
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。
@@ -469,8 +473,11 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		laneStart := time.Now()
 		// 调试记录挂 s.recorder（开流时的请求 ctx）而不是指望 Recv 的
 		// ctx 恰好携带——换号 lane 的 03 分片等证据必须落本请求目录，
-		// 与 swap 自身的 account_attempt 记账同一份句柄。
-		inner, err := next.adapter.Stream(debuglog.WithRecorder(gateYield(ctx, adapter.RequestClass(ctx), s.rest), s.recorder), s.request)
+		// 与 swap 自身的 account_attempt 记账同一份句柄。ctx 注值同理
+		// 必须重注：gateYield 与跨 lane 挂接探测的 peers 登记表都活在
+		// 开流 ctx 上，Recv 的 ctx 是另一个对象。
+		probeCtx := withDetachedPeers(gateYield(ctx, adapter.RequestClass(ctx), s.rest), s.pool.detachedPeerRegistries())
+		inner, err := next.adapter.Stream(debuglog.WithRecorder(probeCtx, s.recorder), s.request)
 		if err == nil {
 			s.lane = next
 			s.laneStart = laneStart
@@ -657,6 +664,18 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 		return bytes.Compare(a.score[:], b.score[:])
 	})
 	return candidates
+}
+
+// detachedPeerRegistries 建 {lane 名→完成缓存} 全量登记表：跨 lane 挂接
+// 探测的 ctx 载荷（withDetachedPeers）。登记表含本 lane——探测方按
+// reg != adapter.detached 跳过自身，省去按调用点剔除的簿记。
+func (pool *Pool) detachedPeerRegistries() map[string]*detachedRegistry {
+	lanes := pool.snapshot()
+	peers := make(map[string]*detachedRegistry, len(lanes))
+	for _, lane := range lanes {
+		peers[lane.name] = lane.adapter.detached
+	}
+	return peers
 }
 
 // gateYield 给一次 lane 尝试装「兄弟 lane 此刻能更快放行吗」的活探针：

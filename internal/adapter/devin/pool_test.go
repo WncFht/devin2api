@@ -1975,3 +1975,125 @@ func TestPoolAssignModelTimeoutFailover(t *testing.T) {
 		t.Fatalf("assignment jwt = %q, want jwt-1", got)
 	}
 }
+
+// TestPoolCrossLaneAttachMiss 钉住跨 lane 挂接 miss 的观测闭环：同键重试
+// 落到兄弟 lane 时本地 lookup 落 nil，经 ctx 登记表探测兄弟缓存——命中
+// 记本 lane 的 cross_lane_misses 与 cross_miss 事件、04 留
+// detached_cross_lane_miss marker，owner 条目盖 sawCrossLaneRetry 供
+// 移除时拆出「来错门」孤儿档。
+func TestPoolCrossLaneAttachMiss(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	release := make(chan struct{})
+	owner := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			if err := stubSend(stream, stubMeta(), stubDelta("partial")); err != nil {
+				return err
+			}
+			// 流不收尾：客户端断开时条目以 running 进缓存，后台泵继续
+			// 等 release（测试收尾放行，handler 得以退场）。
+			<-release
+			return nil
+		},
+	}
+	other := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("fresh"), stubStop())
+		},
+	}
+	srvOwner := stubServer(t, owner, nil)
+	srvOther := stubServer(t, other, nil)
+	t.Cleanup(func() { close(release) })
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "owner", Token: "tok-o"}, Endpoint: Endpoint{BaseURL: srvOwner.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "other", Token: "tok-t"}, Endpoint: Endpoint{BaseURL: srvOther.URL}, Model: "stub-model"},
+	)
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	request := pinnedRequest(pool, "owner")
+
+	// 首发落 owner：产出一个 delta 后客户端断开 → 流脱钩进 owner 的
+	// 完成缓存（detach 在 Recv 的 ctx.Err() 早退路径同步 admit）。
+	ctx1, cancel1 := context.WithCancel(debuglog.WithRecorder(context.Background(),
+		manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})))
+	stream1, err := pool.Stream(ctx1, request)
+	if err != nil {
+		t.Fatalf("Stream 1: %v", err)
+	}
+	for {
+		event, recvErr := stream1.Recv(ctx1)
+		if recvErr != nil {
+			t.Fatalf("first Recv: %v", recvErr)
+		}
+		if event.Type == llm.ResponseEventTextDelta {
+			break
+		}
+	}
+	cancel1()
+	if _, err := stream1.Recv(ctx1); err == nil {
+		t.Fatal("Recv after cancel should return the cancel cause")
+	}
+	ownerReg := poolLaneByName(pool, "owner").adapter.detached
+	ownerReg.mu.Lock()
+	var ownerEntry *detachedEntry
+	for _, entry := range ownerReg.entries {
+		ownerEntry = entry
+	}
+	ownerReg.mu.Unlock()
+	if ownerEntry == nil {
+		t.Fatal("detached stream was not admitted to owner lane registry")
+	}
+
+	// owner 进非凭据冷却判死 → 同键重试的绑定被删、按普通序落到 other。
+	laneOwner := poolLaneByName(pool, "owner")
+	laneOwner.authMu.Lock()
+	laneOwner.unhealthyUntil = time.Now().Add(time.Hour)
+	laneOwner.authMu.Unlock()
+
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx2 := debuglog.WithRecorder(context.Background(), recorder)
+	stream2, err := pool.Stream(ctx2, request)
+	if err != nil {
+		t.Fatalf("Stream 2: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream2)); got != "fresh" {
+		t.Fatalf("deltas = %q, want fresh", got)
+	}
+
+	stats := poolLaneByName(pool, "other").adapter.detached.stats()
+	if stats.CrossLaneMisses != 1 {
+		t.Fatalf("other lane cross_lane_misses = %d, want 1", stats.CrossLaneMisses)
+	}
+	var crossEvent *DetachedEvent
+	for i := range stats.Events {
+		if stats.Events[i].Kind == detachedEventCrossMiss {
+			crossEvent = &stats.Events[i]
+		}
+	}
+	if crossEvent == nil || crossEvent.Detail != "owner:running" {
+		t.Fatalf("cross_miss event = %+v, want detail owner:running", crossEvent)
+	}
+	ownerEntry.mu.Lock()
+	if !ownerEntry.sawCrossLaneRetry {
+		t.Fatal("peek should stamp sawCrossLaneRetry on the owner entry")
+	}
+	ownerEntry.mu.Unlock()
+
+	recorder.Complete(debuglog.Completion{Result: "completed"})
+	<-manager.Drained(recorder.Dir())
+	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04: %v", err)
+	}
+	body := string(frames)
+	if !strings.Contains(body, `"event":"detached_cross_lane_miss"`) || !strings.Contains(body, `"owner_lane":"owner"`) {
+		t.Fatalf("04 missing detached_cross_lane_miss marker: %s", body)
+	}
+}
