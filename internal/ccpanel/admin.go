@@ -115,6 +115,12 @@ func (h *Handler) adminAbortActiveRequest(w http.ResponseWriter, r *http.Request
 	for _, ar := range h.debug.ActiveRequests() {
 		if activeRequestID(ar.Dir) == id {
 			if h.debug.Abort(ar.Dir) {
+				// abort 若落在脱钩登记与请求出 activeDirs 的窗口内，
+				// cancel 对已 WithoutCancel 的后台泵无效——把该目录落册
+				// 的条目清出完成缓存，被掐生成不得留给同键重试重放。
+				if h.detachEvictor != nil {
+					h.detachEvictor(ar.Dir)
+				}
 				respondOK(w, map[string]any{"aborted": true})
 				return
 			}

@@ -271,6 +271,7 @@ type detachedRegistry struct {
 	expired           int64 // 死条目惰性移除：TTL 到期 + 截断尸体经 lookup 逐出（截断发生数单列 truncated）
 	evicted           int64 // 容量淘汰（尸体让位/最老 running/最老终态兜底）
 	replaced          int64 // 同键新条目替换旧残骸
+	aborted           int64 // 面板 abort 按来源目录清场（abort-after-detach 残留窗）
 	truncated         int64 // 缓冲越字节预算被冻结次数——append 截断点记账，与移除路径解耦
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
@@ -305,12 +306,14 @@ const (
 // 逐出与 admit 扫描同口径），capacity 是容量淘汰（尸体让位/最老
 // running/最老终态兜底），replaced 是同键新条目逐出旧残骸，
 // truncated 是截断尸体被惰性逐出——只作事件归因，截断发生数在
-// 缓冲冻结时已由 noteTruncated 记过，移除不再重复入账。
+// 缓冲冻结时已由 noteTruncated 记过，移除不再重复入账；aborted 是
+// 面板 abort 按来源目录清场（abort-after-detach 残留窗收口）。
 const (
 	detachEvictExpired   = "expired"
 	detachEvictCapacity  = "capacity"
 	detachEvictReplaced  = "replaced"
 	detachEvictTruncated = "truncated"
+	detachEvictAborted   = "aborted"
 )
 
 // 泵终局原因（finish 事件的 detail 与 finished_* 计数桶）：completed/
@@ -360,6 +363,8 @@ func detachedEventLabel(kind, detail string) string {
 			return "同键替换"
 		case detachEvictTruncated:
 			return "截断移除"
+		case detachEvictAborted:
+			return "中断移除"
 		}
 		return "过期移除"
 	case detachedEventFinish:
@@ -404,6 +409,9 @@ type DetachedStats struct {
 	Expired  int64 `json:"expired"`
 	Evicted  int64 `json:"evicted"`
 	Replaced int64 `json:"replaced"`
+	// Aborted 是面板 abort 按来源目录清场的移除计数——abort-after-detach
+	// 残留窗的兑现观测面（设计前提是稀有事件，非零即说明窗口真实命中）。
+	Aborted int64 `json:"aborted"`
 	// Truncated 是缓冲被字节预算冻结的次数（append 截断点记账）——
 	// flood/异常上游 drain 进缓存被预算拦下的信号；与移除路径解耦，
 	// 截断尸体无论经哪条路径淘汰都已入账，不会漏记也不会重复计。
@@ -594,9 +602,10 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 // 持 registry.mu 不能去拿流锁。全部移除走这一个漏斗：按 cause 记移除
 // 计数，从未挂接的条目同时记孤儿（orphan_completed 是上游浪费口径；
 // sawCrossLaneRetry 置位的孤儿另记 orphans_cross_lane「来错门」档）。
-// 移除计数只分三桶——capacity 归 evicted、replaced 归 replaced、其余
-// 惰性收集（expired 到期与 truncated 截断尸体）归 expired；truncated
-// 计数在缓冲冻结点 noteTruncated 已记，此处再记会双重入账。
+// 移除计数只分四桶——capacity 归 evicted、replaced 归 replaced、
+// aborted 归 aborted（面板 abort 清场）、其余惰性收集（expired 到期与
+// truncated 截断尸体）归 expired；truncated 计数在缓冲冻结点
+// noteTruncated 已记，此处再记会双重入账。
 func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, cause string) {
 	delete(registry.entries, key)
 	switch cause {
@@ -604,6 +613,8 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 		registry.evicted++
 	case detachEvictReplaced:
 		registry.replaced++
+	case detachEvictAborted:
+		registry.aborted++
 	default:
 		registry.expired++
 	}
@@ -628,6 +639,30 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	registry.pushEvent(detachedEventEvict, key, cause)
 	if running && drainCancel != nil {
 		drainCancel()
+	}
+}
+
+// evictByOriginDir 按来源调试目录清场：摘出全部 originDir 匹配的条目。
+// 收口 abort-after-detach 残留窗——detach 把条目登记落册到请求 Complete
+// 出 activeDirs 之间有 µs 级窗口，窗口内 Abort 置位成功但 cancel(reqCtx)
+// 已无效（客户端断连早已取消该 ctx），后台泵的 drainCtx 又是
+// WithoutCancel 不受影响：不补这一刀，被掐死的生成继续烧上游配额且留在
+// 缓存里供同键重试重放。dir 为空串时直接返回——recorder 缺失的流
+// originDir 也是空串，空匹配会把它们一并清掉。running 条目经
+// evictLocked 掐 drainCancel，泵走 ctx.Done 自行退场。
+func (registry *detachedRegistry) evictByOriginDir(dir string) {
+	if registry == nil || dir == "" {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for key, entry := range registry.entries {
+		entry.mu.Lock()
+		match := entry.originDir == dir
+		entry.mu.Unlock()
+		if match {
+			registry.evictLocked(key, entry, detachEvictAborted)
+		}
 	}
 }
 
@@ -716,6 +751,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Expired = registry.expired
 	stats.Evicted = registry.evicted
 	stats.Replaced = registry.replaced
+	stats.Aborted = registry.aborted
 	stats.Truncated = registry.truncated
 	stats.Orphans = registry.orphans
 	stats.OrphanCompleted = registry.orphanCompleted

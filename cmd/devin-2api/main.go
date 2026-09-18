@@ -286,6 +286,7 @@ func main() {
 	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
 	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
 	ccPanel.SetAccountDetachedStats(devinPool.AccountDetachedStats)
+	ccPanel.SetDetachEvictor(devinPool.EvictDetachedByOriginDir)
 	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
 	// 降权簿记（quota_low 阈值判定在 adapter 内）。
 	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)

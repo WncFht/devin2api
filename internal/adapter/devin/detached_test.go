@@ -819,6 +819,47 @@ func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
 	}
 }
 
+// TestDetachedEvictByOriginDir 钉住面板 abort 的残留窗收口：条目按来源
+// 调试目录逐出并掐后台泵——detach 落册与请求出 activeDirs 之间的窗口内
+// abort 到达时，被掐死的生成不得留在缓存里供同键重试重放；其它目录的
+// 条目不受影响。
+func TestDetachedEvictByOriginDir(t *testing.T) {
+	registry := newDetachedRegistry()
+	drainKilled := make(chan struct{})
+	victim := &detachedEntry{
+		notify:      make(chan struct{}),
+		state:       detachedRunning,
+		originDir:   "dir-victim",
+		drainCancel: func() { close(drainKilled) },
+	}
+	registry.admit("k1", victim)
+	keeper := &detachedEntry{notify: make(chan struct{}), state: detachedCompleted, originDir: "dir-other"}
+	registry.admit("k2", keeper)
+
+	registry.evictByOriginDir("dir-victim")
+
+	if got := registry.lookup("k1"); got != nil {
+		t.Fatal("entry from aborted dir must be evicted")
+	}
+	if got := registry.lookup("k2"); got != keeper {
+		t.Fatal("unrelated entry must survive origin-dir eviction")
+	}
+	select {
+	case <-drainKilled:
+	default:
+		t.Fatal("evicting a running entry must cancel its drain pump")
+	}
+	if stats := registry.stats(); stats.Aborted != 1 {
+		t.Fatalf("aborted evictions = %d, want 1", stats.Aborted)
+	}
+	// 空目录不得误伤 recorder 缺失的条目（originDir 同为空串）。
+	registry.admit("k3", &detachedEntry{notify: make(chan struct{}), state: detachedRunning})
+	registry.evictByOriginDir("")
+	if got := registry.lookup("k3"); got == nil {
+		t.Fatal("empty dir must not evict entries with empty originDir")
+	}
+}
+
 // TestDetachedAdmitCorpseYieldsBeforeRunning 钉住容量淘汰的让位序：
 // 截断/不可重放 failed 尸体先于活泵让位——缓冲已死的条目留场只为给
 // 同键到场记 miss，杀一条还在喂事件的泵给尸体留槽是本末倒置。

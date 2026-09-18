@@ -145,6 +145,9 @@ type Handler struct {
 	// accountDetachedStats 返回逐账号脱钩缓存快照（accounts 组按号
 	// 透出）；nil 时 accounts 内无 detached 键。
 	accountDetachedStats func() map[string]devin.DetachedStats
+	// detachEvictor 按来源调试目录逐出脱钩完成缓存条目：面板 abort 在
+	// Abort 返回 true 后补调，收口 abort-after-detach 残留窗；nil 跳过。
+	detachEvictor func(dir string)
 
 	versionMu sync.RWMutex
 	version   string
@@ -345,6 +348,12 @@ func (h *Handler) SetDetachedStats(fn func() devin.DetachedStats) {
 // 透出——缓存 per-lane，跨 lane 重试恒 miss，attach 率须逐号看）。
 func (h *Handler) SetAccountDetachedStats(fn func() map[string]devin.DetachedStats) {
 	h.accountDetachedStats = fn
+}
+
+// SetDetachEvictor 注入脱钩缓存按来源目录逐出器（active-requests abort
+// 用：Abort 返回 true 后清掉残留窗落册的条目，被掐死的生成不留缓存重放）。
+func (h *Handler) SetDetachEvictor(fn func(dir string)) {
+	h.detachEvictor = fn
 }
 
 // panelRoute 是路由表的一行：method+pattern 是 chi 挂载键，handler 是含

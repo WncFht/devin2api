@@ -1578,6 +1578,15 @@ func (pool *Pool) AccountDetachedStats() map[string]DetachedStats {
 	return stats
 }
 
+// EvictDetachedByOriginDir 逐 lane 按来源调试目录清脱钩条目（面板 abort
+// 补刀）：条目归属 lane 由选号决定、abort 侧不可预知，按
+// AccountDetachedStats 同型 fan-out 全池调用，不匹配 lane 上是空操作。
+func (pool *Pool) EvictDetachedByOriginDir(dir string) {
+	for _, lane := range pool.snapshot() {
+		lane.adapter.EvictDetachedByOriginDir(dir)
+	}
+}
+
 // AccountLaneStates 返回各 lane 的池侧状态快照（按账号名索引），
 // /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
 func (pool *Pool) AccountLaneStates() map[string]LaneState {

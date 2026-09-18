@@ -402,6 +402,14 @@ func (adapter *Adapter) DetachedStats() DetachedStats {
 	return adapter.detached.stats()
 }
 
+// EvictDetachedByOriginDir 按来源调试目录清出脱钩条目：面板 abort 路径
+// 补刀 abort-after-detach 残留窗——detach 落册与请求出 activeDirs 之间
+// 的 µs 窗口内 abort 到达时，cancel 对 WithoutCancel 的后台泵已无效，
+// 被掐死的生成必须移出缓存，否则同键重试会重放尸体。
+func (adapter *Adapter) EvictDetachedByOriginDir(dir string) {
+	adapter.detached.evictByOriginDir(dir)
+}
+
 // ApplyConfig 热应用新配置：读侧每次请求取快照的字段（model、aliases、
 // client_*）与闸门参数/token 直接换值即生效；烤进 transport 的
 // base_url/proxy/force_http1 变化时整体重建上游调用束并原子换指针，
