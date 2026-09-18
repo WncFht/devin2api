@@ -135,6 +135,12 @@ jobs:
       - name: release.sh self-test
         run: bash scripts/release-selftest.sh
 
+      # lib-deploy.sh 交接链路演练：stub 二进制/curl 回放 spawn 死因分诊
+      # 与杀桥前证明——9-18 断流事故（config 校验死误诊为缺 reuseport）
+      # 的防回归。
+      - name: handoff triage self-test
+        run: bash scripts/handoff-triage.test.sh
+
   # 生成物漂移门禁：outputs/devin-proto-go 是提交进 git 的生成代码，
   # 改了 proto 忘跑 task generate 时提交物与源失配。重生成比对钉住。
   codegen-drift:

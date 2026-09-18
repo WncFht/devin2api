@@ -44,12 +44,19 @@ else
 fi
 # 进度输出必须走 stderr：$() 捕获会把 stdout 噪音混进 VERSION 变量。
 check "下载进度写 stderr" bash -c "grep -c '>&2' scripts/lib-deploy.sh | grep -qv '^0$'"
+# spawn 失败必须按死因分诊：EADDRINUSE 才回退，其余一律中止——
+# 9-18 断流事故的根因是 config 校验死被误诊为缺 reuseport。
+check "spawn 失败按返回码分诊" has scripts/lib-deploy.sh 'spawn_rc'
+check "非端口冲突一律中止部署" has scripts/lib-deploy.sh '中止部署'
+check "杀桥前先证接管" has scripts/lib-deploy.sh '先证接管再放桥'
+check "credentials_file 存在性预检" has scripts/lib-deploy.sh 'config_credentials_files'
 
 echo "== deploy.sh（macOS launchd）=="
 check "限定 Darwin" has scripts/deploy.sh 'Darwin'
 check "plist 保活" has scripts/deploy.sh 'KeepAlive'
 check "优雅退出窗口" has scripts/deploy.sh 'ExitTimeOut'
 check "kickstart -k 发 SIGTERM" has scripts/deploy.sh 'kickstart -k'
+check "部署后断言 healthz pid==托管 pid" has scripts/deploy.sh 'wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}"'
 check "禁 kill -9 约定" bash -c "! grep -qF 'kill -9' scripts/deploy.sh"
 
 echo "== deploy-linux.sh（systemd --user）=="
@@ -58,6 +65,9 @@ check "Restart=always" has scripts/deploy-linux.sh 'Restart=always'
 check "优雅停止窗口" has scripts/deploy-linux.sh 'TimeoutStopSec='
 check "systemctl --user" has scripts/deploy-linux.sh 'systemctl --user'
 check "日志落状态目录" has scripts/deploy-linux.sh 'StandardOutput=append:'
+# version 匹配不等于托管实例在服役——healthz 应答者必须是 MainPID 本体。
+check "部署后断言 healthz pid==MainPID" has scripts/deploy-linux.sh 'wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}"'
+check "崩溃循环 NRestarts 告警" has scripts/deploy-linux.sh 'NRestarts'
 
 echo "== deploy-remote.sh（开发机 → 生产机驱动）=="
 check "目标机走 DEVIN2API_HOST" has scripts/deploy-remote.sh 'DEVIN2API_HOST'

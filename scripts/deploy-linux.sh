@@ -204,6 +204,7 @@ fi
 # 不用退回经典重启：在跑实例已开 reuseport 时交接桥能盖住整个排空窗口，
 # 没开时 spawn 失败在 handoff_restart 内部自动退化，语义与原来相同。
 OLD_PID=""
+NRESTARTS_BEFORE="$(systemctl --user show -p NRestarts --value "${UNIT}" 2>/dev/null || echo 0)"
 if [[ "${FRESH_BOOT}" == "1" ]]; then
 	echo "==> service enabled and started"
 else
@@ -220,6 +221,19 @@ RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 660)" || {
 }
 
 NEW_PID="$(systemctl --user show -p MainPID --value "${UNIT}" 2>/dev/null || true)"
+# version 匹配不等于托管实例在服役：交接/野实例与托管实例同二进制，
+# 能答出新版本制造假绿——应答 healthz 的必须是 MainPID 本体。
+if [[ -z "${NEW_PID}" || "${NEW_PID}" == "0" ]] || ! wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}" 60; then
+	echo "healthz 应答者不是托管实例 (MainPID=${NEW_PID:-?})——交接或野实例假绿，部署按失败处理" >&2
+	dump_recent_log
+	exit 1
+fi
+NRESTARTS_AFTER="$(systemctl --user show -p NRestarts --value "${UNIT}" 2>/dev/null || echo 0)"
+# NRestarts 只计 systemd 自动重启（实测 manual restart 不增）——部署窗口内
+# 自增即崩溃循环留痕。
+if [[ "${NRESTARTS_AFTER:-0}" -gt "${NRESTARTS_BEFORE:-0}" ]]; then
+	warn "部署期间托管实例被 systemd 自动重启 $((NRESTARTS_AFTER - NRESTARTS_BEFORE)) 次——疑似崩溃循环，请查 ${STATE_DIR}/logs/stderr.log"
+fi
 echo "==> running: pid=${NEW_PID:-?} version=${RUNNING}"
 
 # user 服务随最后一个会话退出；要未登录也常驻需开 linger（免 root，

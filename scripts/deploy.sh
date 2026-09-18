@@ -240,6 +240,13 @@ RUNNING="$(wait_healthz_version "${HEALTH_URL}" "${VERSION}" 660)" || {
 }
 
 NEW_PID="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null | awk '/^[ \t]*pid = /{print $3}' || true)"
+# version 匹配不等于托管实例在服役：交接/野实例与托管实例同二进制，
+# 能答出新版本制造假绿——应答 healthz 的必须是 launchd 托管 pid 本体。
+if [[ -z "${NEW_PID}" ]] || ! wait_healthz_pid "${HEALTH_URL}" "${NEW_PID}" 60; then
+	echo "healthz 应答者不是 launchd 托管实例 (pid=${NEW_PID:-?})——交接或野实例假绿，部署按失败处理" >&2
+	dump_recent_log
+	exit 1
+fi
 echo "==> running: pid=${NEW_PID:-?} version=${RUNNING}"
 
 # healthz 只证明进程活着；真链路冒烟打 /v1/models 验证上游鉴权。

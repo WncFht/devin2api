@@ -271,6 +271,15 @@ yaml_scalar() {
 	sed -nE "s/^ *$1: *['\"]?([^'\"# ]*)['\"]?.*/\1/p" config.yaml | head -1
 }
 
+# config_credentials_files <file>：列出指定配置文件里全部
+# credentials_file 值（每行一个，去引号）。账号池每条目可各指一个文件，
+# yaml_scalar 只取首个不够用；同款 sed，只覆盖块式 key: value 写法——
+# flow 式漏网条目由交接金丝雀在部署期兜底。
+config_credentials_files() {
+	[[ -f "$1" ]] || return 0
+	sed -nE "s/^ *credentials_file: *['\"]?([^'\"# ]*)['\"]?.*/\1/p" "$1"
+}
+
 # config_listen_port 从 config.yaml 的 server.listen 提取端口（取最后一个
 # 冒号后的数字，兼容 ":3003" 与 "127.0.0.1:8080" 写法）；解析不到返回空。
 config_listen_port() {
@@ -387,6 +396,22 @@ preflight_deploy() {
 	else
 		echo "==> 凭据来源: ${src}" >&2
 	fi
+
+	# 启动期 config.Load 实读每个 credentials_file——文件被外部摘除会让
+	# 新实例死在加载期（9-18 断流 2h55m 根因）。部署强制冷启动，build
+	# 之前先拦死引用。新实例实际加载的是 ${CONFIG_DIR}/config.yaml
+	# （live 权威副本），live 缺失时才会由仓库副本顶上。
+	local cfg_file cred
+	cfg_file="config.yaml"
+	[[ -f "${CONFIG_DIR}/config.yaml" ]] && cfg_file="${CONFIG_DIR}/config.yaml"
+	while IFS= read -r cred; do
+		[[ -n "${cred}" ]] || continue
+		cred="${cred/#~\//${HOME}/}"
+		[[ "${cred}" == /* ]] || cred="$(dirname "${cfg_file}")/${cred}"
+		if [[ ! -f "${cred}" ]]; then
+			die "devin.accounts[].credentials_file 不存在: ${cred}（声明于 ${cfg_file}）——新实例加载 config 必失败，中止部署"
+		fi
+	done < <(config_credentials_files "${cfg_file}")
 
 	# 非回环监听 + 空 api_key = 把配额开放给整个网络（README 明确警告）。
 	if ! listen_is_loopback && [[ -z "$(yaml_scalar api_key)" ]]; then
@@ -514,7 +539,11 @@ retire_stale_transient() {
 # spawn_handoff：起交接进程（同 config、同日志文件、reuseport env）并入队。
 # 就绪判据：进程活着 + stderr.log 出现新的「HTTP server listening」行——
 # bind 成功只是第一关，adapter 装配/索引回放卡住时踢掉旧实例会整段拒绝。
-# stdout 只输出 pid；失败（早夭/超时未就绪）返回 1 并已自行清理。
+# stdout 只输出 pid。返回码即死因分诊：0=就绪；2=bind 撞 EADDRINUSE（旧
+# 实例没开 reuseport，调用方可回退经典重启）；1=其余一切早夭/超时（新
+# 实例当前起不来的实证，调用方必须中止而不是碰旧实例）。分诊依据是
+# startline 之后的新鲜 stderr 段——交接进程与托管实例加载同一份 config，
+# 它死在启动期等于预告托管实例也会死（9-18 断流事故的根因）。
 spawn_handoff() {
 	local logf startline pid
 	logf="${STATE_DIR}/logs/stderr.log"
@@ -532,19 +561,22 @@ spawn_handoff() {
 	) >>"${STATE_DIR}/logs/stdout.log" 2>>"${logf}" &
 	pid=$!
 	printf '%s' "${pid}" >"$(handoff_pidfile)"
+	local _
 	for _ in $(seq 40); do
-		if ! kill -0 "${pid}" 2>/dev/null; then
-			rm -f "$(handoff_pidfile)"
-			return 1
-		fi
+		kill -0 "${pid}" 2>/dev/null || break
 		if tail -n "+$((startline + 1))" "${logf}" 2>/dev/null | grep -q 'msg="HTTP server listening"'; then
 			printf '%s' "${pid}"
 			return 0
 		fi
 		sleep 0.25
 	done
-	kill "${pid}" 2>/dev/null
+	kill "${pid}" 2>/dev/null || true
 	rm -f "$(handoff_pidfile)"
+	if tail -n "+$((startline + 1))" "${logf}" 2>/dev/null | grep -q 'msg="port already in use"'; then
+		return 2
+	fi
+	echo "==> 交接进程死于启动期（非端口冲突）——stderr 新增段摘录：" >&2
+	tail -n "+$((startline + 1))" "${logf}" 2>/dev/null | tr -d '\0' | tail -n 8 | sed 's/^/    /' >&2
 	return 1
 }
 
@@ -585,22 +617,49 @@ wait_managed_pid() {
 	return 1
 }
 
+# wait_managed_listen <baseline> <mpid> <secs>：Darwin 版「托管实例已绑定」
+# 证明——等 stderr.log 在 baseline 行数之后落出新 msg="HTTP server
+# listening" 行且 mpid 仍存活。Darwin reuseport 只派新连接给最先存活
+# socket，交接桥不死托管实例永远接不到 healthz 探测，listening 行是杀桥
+# 前唯一可得的绑定证据；baseline 由调用方在 restart 前截取。
+wait_managed_listen() {
+	local base="$1" mpid="$2" secs="$3" logf _
+	logf="${STATE_DIR}/logs/stderr.log"
+	for _ in $(seq $((secs * 2))); do
+		if tail -n "+$((base + 1))" "${logf}" 2>/dev/null | grep -q 'msg="HTTP server listening"' &&
+			kill -0 "${mpid}" 2>/dev/null; then
+			return 0
+		fi
+		sleep 0.5
+	done
+	return 1
+}
+
 # handoff_restart <old_pid> [restart_fn]：reuseport 重叠交接重启。
 # restart_fn 是「让新托管实例跑起来」的动作：常规是 svc_restart（systemd
 # restart 顺带载入已 daemon-reload 的新 unit 定义），plist 变更时 macOS 侧
-# 传 bootout+bootstrap 的封装。每个失败分支都退化为「同一 restart_fn +
-# 外层等 healthz 版本」的经典路径——失败语义不劣于旧部署。spawn_handoff
-# 失败本身就证明在跑实例没开 reuseport（bind 撞旧 socket），此时交接桥无
-# 从谈起，直接走 restart_fn。
+# 传 bootout+bootstrap 的封装。spawn_handoff 的返回码决定路径：2=旧实例
+# 没开 reuseport，交接桥无从谈起，退化为「等空闲 + restart_fn + 外层等
+# healthz 版本」的经典路径；1=交接进程死于启动期——它是新实例的金丝雀
+# （同 config 同二进制），此时回退重启等于杀掉健康旧实例换一个必死的
+# 新实例（9-18 断流 2h55m 的根因），必须中止部署。
 handoff_restart() {
-	local old_pid="$1" restart_fn="${2:-svc_restart}" tpid mpid _
-	if ! tpid="$(spawn_handoff)"; then
+	local old_pid="$1" restart_fn="${2:-svc_restart}" tpid mpid _ spawn_rc=0
+	tpid="$(spawn_handoff)" || spawn_rc=$?
+	if [[ "${spawn_rc}" == "2" ]]; then
 		echo "==> 交接进程不可用（在跑实例未开 reuseport）——回退经典重启" >&2
 		wait_inflight_idle "${HEALTH_URL}" 30
 		"${restart_fn}"
 		return 0
 	fi
+	[[ "${spawn_rc}" == "0" ]] ||
+		die "交接进程启动失败（上方 stderr 段）——新实例当前起不来，中止部署；旧实例未受影响仍在服役"
 	echo "==> 交接进程就绪 pid=${tpid}；重启托管实例（其 drain 起点即让出监听，在途继续排空）" >&2
+	# Darwin 分支杀桥前靠 stderr 新 listening 行作证，基线必须在 restart 之前
+	# 取——托管实例的首条 listening 可能早于 wait_managed_pid 返回。
+	local listen_base=0
+	[[ -f "${STATE_DIR}/logs/stderr.log" ]] &&
+		listen_base="$(wc -l <"${STATE_DIR}/logs/stderr.log" | tr -d ' ')"
 	# restart 失败不能放任 set -e 把脚本掐死在交接半途——交接进程已
 	# 接管服役，旧实例未被信号触及仍在跑，提示后交给外层 healthz 检查。
 	if ! "${restart_fn}"; then
@@ -616,7 +675,20 @@ handoff_restart() {
 		warn "托管实例未在预期内复活——交接进程 pid=${tpid} 继续服役，pidfile 保留供下次部署回收"
 		return 0
 	fi
-	echo "==> 托管新实例 pid=${mpid} 已绑定；交接进程开始退场" >&2
+	# 先证接管再放桥：MainPID 在 fork 即赋值，不代表到 listening——慢死型
+	# 崩溃循环里此刻杀桥等于亲手制造无绑窗口。Linux reuseport 按四元组
+	# 哈希分流，healthz 探测几秒内必被 mpid 应答；Darwin 新连接只派给
+	# 最先绑定且仍存活的 socket，tpid 不死 mpid 永远接不到探测，只能以
+	# stderr 新 listening 行 + mpid 存活作证。
+	if [[ "$(uname -s)" == "Darwin" ]]; then
+		wait_managed_listen "${listen_base}" "${mpid}" 120
+	else
+		wait_healthz_pid "${HEALTH_URL}" "${mpid}" 120
+	fi || {
+		warn "托管实例 ${mpid} 未证实接管——交接进程 pid=${tpid} 保留服役（降级模式），pidfile 留下次部署回收"
+		return 0
+	}
+	echo "==> 托管新实例 pid=${mpid} 已接管；交接进程开始退场" >&2
 	kill "${tpid}" 2>/dev/null || true
 	if ! wait_healthz_pid "${HEALTH_URL}" "${mpid}" 60; then
 		warn "托管实例未及时接管应答——终态以外层 healthz 版本检查为准"
