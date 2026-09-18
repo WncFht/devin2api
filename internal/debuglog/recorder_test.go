@@ -281,13 +281,15 @@ func TestDroppedCounterOnFullQueue(t *testing.T) {
 // 由测试直接驱动，用来确定性地重放 Complete 哨兵与兜底时序。
 func newBareManager(st *store.Store, queueCap int) *Manager {
 	return &Manager{
-		store:      st,
-		queues:     []chan writeTask{make(chan writeTask, queueCap)},
-		insertQ:    make(chan insertOp, 4),
-		workerStop: make(chan struct{}),
-		workerGone: make(chan struct{}),
-		dirtyBufs:  map[*Recorder]struct{}{},
-		activeDirs: map[string]*Recorder{},
+		store:         st,
+		queues:        []chan writeTask{make(chan writeTask, queueCap)},
+		shardEncoders: []*store.PayloadEncoder{store.NewPayloadEncoder()},
+		writerEncoder: store.NewPayloadEncoder(),
+		insertQ:       make(chan insertOp, 4),
+		workerStop:    make(chan struct{}),
+		workerGone:    make(chan struct{}),
+		dirtyBufs:     map[*Recorder]struct{}{},
+		activeDirs:    map[string]*Recorder{},
 	}
 }
 
