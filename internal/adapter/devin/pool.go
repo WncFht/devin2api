@@ -617,7 +617,9 @@ func backoffDuration(base, max time.Duration, streak int) time.Duration {
 // 两档冷却都走连败退避：unauthenticated 走到这里意味着 lane 内自愈
 // （reloadToken+重试）也没救回这份凭据，按当前 token 哈希记鉴权冷却
 // （token 为空同样标记——tokenHash("") 作冷却键，凭据源补进真 token
-// 哈希即变、自动解禁）；其余可换号失败记 generic 短冷却。
+// 哈希即变、自动解禁）；其余可换号失败记 generic 短冷却——限流类失败
+// 带 "reset in N" 自述时对齐上游复位点（与 gate 闩同一本账），无自述
+// 才用连败退避档。
 // 复用窗口规则：新失败到达时旧冷却尚未到期 → streak 不升、只按当前档
 // 延长——同一故障期的并发失败不连升档。后到失败只延长不缩短。
 // 注意窗口：Stream 返回后才读 currentToken——同 lane 并发请求的自愈
@@ -656,7 +658,17 @@ func (lane *poolLane) noteFailure(err error) {
 	if !now.Before(lane.unhealthyUntil) {
 		lane.failStreak++
 	}
-	if until := now.Add(backoffDuration(genericLaneCooldown, genericLaneCooldownMax, lane.failStreak)); until.After(lane.unhealthyUntil) {
+	until := now.Add(backoffDuration(genericLaneCooldown, genericLaneCooldownMax, lane.failStreak))
+	if failure.RateLimited {
+		// 上游限流自述复位点是最优恢复点估计（分钟 hint 已被
+		// RateLimitReset 对齐 :59 桶界），用它替代固定退避档——
+		// 否则 90s 基档比上游真实复位（实测 18-40s）多压 ~30-60s，
+		// 与 gate 闩同一报文两本账。无 hint 保持退避兜底。
+		if resetAt, ok := failure.RateLimitReset(now); ok {
+			until = resetAt
+		}
+	}
+	if until.After(lane.unhealthyUntil) {
 		lane.unhealthyUntil = until
 	}
 	lane.persistCooldownLocked()

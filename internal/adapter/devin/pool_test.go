@@ -837,6 +837,48 @@ func TestPoolFailureBackoff(t *testing.T) {
 	}
 }
 
+// 上游限流自述 reset 时 generic 冷却对齐 resetAt：上游报文带的
+// "reset in N seconds/minutes" 是最优恢复点估计（分钟 hint 已由
+// RateLimitReset 对齐桶界），固定 90s 退避会多压 ~30-60s；无 hint
+// 或 RateLimited 不成立的失败仍回落连败退避档。
+func TestPoolCooldownAlignsResetHint(t *testing.T) {
+	lane, err := newPoolLane(testPoolConfig("x"))
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	t.Cleanup(lane.adapter.Close)
+
+	lane.noteFailure(connect.NewError(connect.CodeResourceExhausted, errors.New("upstream message rate limited by local gate; reset in 25 seconds")))
+	if got := time.Until(lane.unhealthyUntil); got < 20*time.Second || got > 30*time.Second {
+		t.Fatalf("reset-hint cooldown = %v, want ~25s", got)
+	}
+	if lane.failStreak != 1 {
+		t.Fatalf("reset-aligned failure still counts streak, got %d", lane.failStreak)
+	}
+
+	// 无 hint 的限流回退连败退避档（streak-1 = 90s）。
+	fresh, err := newPoolLane(testPoolConfig("y"))
+	if err != nil {
+		t.Fatalf("newPoolLane fresh: %v", err)
+	}
+	t.Cleanup(fresh.adapter.Close)
+	fresh.noteFailure(connect.NewError(connect.CodeResourceExhausted, errors.New("upstream message rate limited by local gate")))
+	if got := time.Until(fresh.unhealthyUntil); got < 80*time.Second || got > 95*time.Second {
+		t.Fatalf("no-hint cooldown = %v, want ~90s", got)
+	}
+
+	// 显式 "reset in 0 seconds"：桶界已到，冷却截止即现在——不追加封禁。
+	zero, err := newPoolLane(testPoolConfig("z"))
+	if err != nil {
+		t.Fatalf("newPoolLane zero: %v", err)
+	}
+	t.Cleanup(zero.adapter.Close)
+	zero.noteFailure(connect.NewError(connect.CodeResourceExhausted, errors.New("rate limited; reset in 0 seconds")))
+	if zero.genericCooldown() {
+		t.Fatal("reset-in-0 must not leave the lane in cooldown")
+	}
+}
+
 // LocalGate 与 Canceled 豁免：gate 快败只记 lastFailure 证据不进冷却
 // （gate 自身已是惩罚）；取消连证据都不记——请求方行为不是 lane 信号。
 func TestPoolNoteFailureExemptions(t *testing.T) {
