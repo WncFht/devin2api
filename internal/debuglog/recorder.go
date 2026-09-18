@@ -88,6 +88,12 @@ func storeCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), storeOpTimeout)
 }
 
+// claimDirTimeout 是 Start 路径目录占位的上限。claim 失败即本请求无日志，
+// 与写 worker 的异步落库不同：它在请求 goroutine 上同步阻塞，拿分钟级上限
+// 等写连接（容量清理可独占 30-120s+）是纯成本——占位就是一条
+// INSERT OR IGNORE，正常毫秒级；5s 已覆盖合法延迟的多个数量级。
+const claimDirTimeout = 5 * time.Second
+
 // RetentionPolicy 是请求日志的生命周期策略。
 type RetentionPolicy struct {
 	// Days 是请求目录整体保留天数；<=0 不按时间清理。
@@ -1048,12 +1054,14 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 
 // claimDir 把目录名在持久层原子占位：插入空 meta.json 行成功=抢到名。
 // store 为 nil（测试/未接线）时无共享状态可撞，直接视为占位成功——
-// 名分配只剩本进程内存集合一重判定。
+// 名分配只剩本进程内存集合一重判定。它在请求 goroutine 上同步跑，用
+// claimDirTimeout 而非 storeOpTimeout：占位失败本就等价「本请求无日志」，
+// 先停满分钟级上限再放行只是把代价放大。
 func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	if manager.store == nil {
 		return true, nil
 	}
-	ctx, cancel := storeCtx()
+	ctx, cancel := context.WithTimeout(context.Background(), claimDirTimeout)
 	defer cancel()
 	return manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
 }
