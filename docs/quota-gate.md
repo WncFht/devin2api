@@ -18,7 +18,7 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 **闸门拒绝可以对 logs 终结口径 100% 隐形。** 号池下每次闸门快败都可能被 failover 救回：post-deploy 逐窗对账 18 次 `reject_*` 对应 18 条「首 lane error.json + 兄弟 lane 完成」的吸收行，终结性 `rate_gate` 行 0 条——该类拒绝在终结口径完全消失。对账公式：`reject_* ≈ 被 failover 吸收的完成行 + 终结性 rate_gate 行`。评估拒绝量必须走 `gate_windows`，不能走 `logs`。
 
-**`sends_per_row` 不等于 1。** 分子是 `gate_windows` 的 `used_fg+used_bg`——每次放行对应一次真实上游发送，含 `logs` 不可见的同请求内层 connect 重试与保温/drip 探针；分母是当日非 rejected `logs` 行。基线约 1.02（净残差 ~0.3% 对账口径），漂移 = 重试/换号/ping 放大信号。注意 `quota<=0`（不限速）时闸门不记窗行，分子随无窗期缺记；纯探针日 `rows=0` 时 ratio 按定义缺省。
+**`sends_per_row` 不等于 1。** 分子是 `gate_windows` 的 `used_fg+used_bg`——每次放行对应一次真实上游发送，含 `logs` 不可见的同请求内层 connect 重试与保温/drip 探针；分母是当日非 rejected `logs` 行。基线约 1.02（净残差 ~0.3% 对账口径），漂移 = 重试/换号/ping 放大信号。行内 `retry_admits` 是放行中同 lane 续试重发的日合计（reopen/续轮/凭据自愈/瞬时重试），占 sends 份额即重试贡献。注意 `quota<=0`（不限速）时闸门不记窗行，分子随无窗期缺记；纯探针日 `rows=0` 时 ratio 按定义缺省。
 
 **「换号」不等于「发给上游」。** `lane_attempt_causes` 实测首日约 82% 的放弃 lane 尝试成因是 `local_gate:*`——本地闸门快败的幻影换号，该 lane 零上游发送、零上游成本。只有 connect code 行才是真发过包的 failover。
 
@@ -28,15 +28,16 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 每 lane 每个「被观察关闭」的对齐分钟窗口一行——闸门在该窗内被流量/面板/保温触碰过才有关窗行，整窗未触碰的空窗期是缺口而非零行。`(lane, window_start)` 唯一索引；reuseport 交接期新旧两进程并发观察同一窗口时后写者被 `INSERT OR IGNORE` 丢弃。
 
-| 列                                                                    | 含义                                                                               |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `window_start`                                                        | unix 秒，对齐分钟桶界                                                              |
-| `quota`                                                               | 关窗时生效的窗口配额（`<=0` 表示不限速）                                           |
-| `used_fg` / `used_bg`                                                 | 本窗 fg/bg 放行数（bg 含保温 ping 与闩内滴灌探针）                                 |
-| `drip`                                                                | 闩内滴灌探针放行数（`used_*` 的子集，单列供配额归因）                              |
-| `reserve_peak` / `waiters_peak`                                       | 本窗 bg 预留量峰值 / 闸内排队数峰值（fg+bg）                                       |
-| `reject_quota` / `reject_hold` / `reject_bg_reserve` / `reject_latch` | 按成因分列的快败数：桶满、排队预算耗尽（死区等待）、bg 让路（预留/爬坡）、闩内快败 |
-| `fg_rate`                                                             | 关窗折叠后的 fg 准入速率 EMA（条/窗），bg 动态预留的输入                           |
+| 列                                                                    | 含义                                                                                                         |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `window_start`                                                        | unix 秒，对齐分钟桶界                                                                                        |
+| `quota`                                                               | 关窗时生效的窗口配额（`<=0` 表示不限速）                                                                     |
+| `used_fg` / `used_bg`                                                 | 本窗 fg/bg 放行数（bg 含保温 ping 与闩内滴灌探针）                                                           |
+| `drip`                                                                | 闩内滴灌探针放行数（`used_*` 的子集，单列供配额归因）                                                        |
+| `retry_admits`                                                        | 同 lane 续试重发的放行数（`used_*` 的子集——reopen/续轮/凭据自愈/瞬时重试；不含号池 failover 后新 lane 首发） |
+| `reserve_peak` / `waiters_peak`                                       | 本窗 bg 预留量峰值 / 闸内排队数峰值（fg+bg）                                                                 |
+| `reject_quota` / `reject_hold` / `reject_bg_reserve` / `reject_latch` | 按成因分列的快败数：桶满、排队预算耗尽（死区等待）、bg 让路（预留/爬坡）、闩内快败                           |
+| `fg_rate`                                                             | 关窗折叠后的 fg 准入速率 EMA（条/窗），bg 动态预留的输入                                                     |
 
 两个读法要点：`reject_bg_reserve` 名义是快败，实际形态可以是「骑满排队预算再拒」——bg 被预留/爬坡挡住走 `gateBgRecheck` 短睡重查，直到预计等待超剩余预算才拒，实测被吸收行首 lane 停泊 p50=118.7s（紧贴 `bgMaxHold` 默认 120s），每吸收行平均多付 ~130s 首个上游字节。`waiters_peak=0` 而 transform 段长等，是闸前 stall（AssignModel/目录拉取不过闸）的嗅探信号——gate 账本对它完全不可见。
 

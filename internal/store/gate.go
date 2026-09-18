@@ -15,6 +15,7 @@ type GateWindow struct {
 	UsedFg      int    `json:"used_fg"`      // 本窗 fg 放行数
 	UsedBg      int    `json:"used_bg"`      // 本窗 bg 放行数（含保温 ping 与闩内探针）
 	Drip        int    `json:"drip"`         // 本窗闩内滴灌探针放行数（used_* 的子集，单列供配额归因）
+	RetryAdmits int    `json:"retry_admits"` // 本窗同 lane 续试重发的放行数（used_* 的子集——reopen/续轮/凭据自愈/瞬时重试的再发送，不含号池 failover 后新 lane 首发）
 	ReservePeak int    `json:"reserve_peak"` // 本窗 bg 预留量的峰值
 	WaitersPeak int    `json:"waiters_peak"` // 本窗闸内排队数峰值（fg+bg）
 	// 按拒绝成因分列的快败数：quota 桶满、hold 等待超预算（死区等待）、
@@ -33,11 +34,11 @@ type GateWindow struct {
 // 与 quota_samples 的 OR IGNORE 口径一致。
 func (s *Store) InsertGateWindow(ctx context.Context, w *GateWindow) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO gate_windows(
-		lane, window_start, quota, used_fg, used_bg, drip,
+		lane, window_start, quota, used_fg, used_bg, drip, retry_admits,
 		reserve_peak, waiters_peak,
 		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		w.Lane, w.WindowStart, w.Quota, w.UsedFg, w.UsedBg, w.Drip,
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		w.Lane, w.WindowStart, w.Quota, w.UsedFg, w.UsedBg, w.Drip, w.RetryAdmits,
 		w.ReservePeak, w.WaitersPeak,
 		w.RejectQuota, w.RejectHold, w.RejectBgReserve, w.RejectLatch, w.RejectYield, w.FgRate)
 	return err
@@ -50,7 +51,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 	if limit <= 0 {
 		limit = -1
 	}
-	query := `SELECT lane, window_start, quota, used_fg, used_bg, drip,
+	query := `SELECT lane, window_start, quota, used_fg, used_bg, drip, retry_admits,
 		reserve_peak, waiters_peak,
 		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
 		FROM gate_windows WHERE window_start>=?`
@@ -69,7 +70,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 	var out []*GateWindow
 	for rows.Next() {
 		var w GateWindow
-		if err := rows.Scan(&w.Lane, &w.WindowStart, &w.Quota, &w.UsedFg, &w.UsedBg, &w.Drip,
+		if err := rows.Scan(&w.Lane, &w.WindowStart, &w.Quota, &w.UsedFg, &w.UsedBg, &w.Drip, &w.RetryAdmits,
 			&w.ReservePeak, &w.WaitersPeak,
 			&w.RejectQuota, &w.RejectHold, &w.RejectBgReserve, &w.RejectLatch, &w.RejectYield, &w.FgRate); err != nil {
 			return nil, err
@@ -95,25 +96,32 @@ func (s *Store) PruneGateWindows(ctx context.Context, before int64) (int64, erro
 	return res.RowsAffected()
 }
 
-// GateSendsByDay 把 used_fg+used_bg（闸门放行数=真实上游发送数，含内层
-// 重试与保温/drip 探针）按本地日聚合，返回 'YYYY-MM-DD'→发送数。
+// GateDaySends 是单日闸门放行数的分解：Sends 是当日放行总数
+// （used_fg+used_bg——每次放行对应一次真实上游发送，含内层重试与
+// 保温/drip 探针），RetryAdmits 是其中同 lane 续试重发的放行数。
+type GateDaySends struct {
+	Sends       int64
+	RetryAdmits int64
+}
+
+// GateSendsByDay 把闸门放行数按本地日聚合，返回 'YYYY-MM-DD'→分解读数。
 // sinceUnix（unix 秒）按 window_start 下界过滤。跨 lane 合计——sends/row
 // 指标的分母（logs 行数）同样是跨 lane 口径。注意 quota<=0 的闸门不记
 // 窗口行（admitLocked 不跑），该口径下分子随无窗期自然缺记。
-func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]int64, error) {
+func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]GateDaySends, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT strftime('%Y-%m-%d', window_start, 'unixepoch', 'localtime') AS day,
-			COALESCE(SUM(used_fg + used_bg), 0)
+			COALESCE(SUM(used_fg + used_bg), 0), COALESCE(SUM(retry_admits), 0)
 		FROM gate_windows WHERE window_start >= ? GROUP BY day`, sinceUnix)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	out := map[string]int64{}
+	out := map[string]GateDaySends{}
 	for rows.Next() {
 		var day string
-		var sends int64
-		if err := rows.Scan(&day, &sends); err != nil {
+		var sends GateDaySends
+		if err := rows.Scan(&day, &sends.Sends, &sends.RetryAdmits); err != nil {
 			return nil, err
 		}
 		out[day] = sends

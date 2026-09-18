@@ -452,10 +452,10 @@ func TestUsageSendsPerRow(t *testing.T) {
 		t.Fatalf("sends_per_row = %+v, want absent（gate_windows 无行）", snap.SendsPerRow)
 	}
 
-	// 今日 sends=4（跨 lane 合计：3fg+1bg）；昨日 sends=2 但无 logs 行
-	// ——纯探针日进序列、ratio 缺省。
+	// 今日 sends=4（跨 lane 合计：3fg+1bg，其中 retry_admits=1）；昨日
+	// sends=2 但无 logs 行——纯探针日进序列、ratio 缺省。
 	for _, w := range []*GateWindow{
-		{Lane: "yanjian", WindowStart: today.Unix(), UsedFg: 3, UsedBg: 1},
+		{Lane: "yanjian", WindowStart: today.Unix(), UsedFg: 3, UsedBg: 1, RetryAdmits: 1},
 		{Lane: "randall", WindowStart: yesterday.Unix(), UsedFg: 2},
 	} {
 		if err := s.InsertGateWindow(ctx, w); err != nil {
@@ -475,7 +475,7 @@ func TestUsageSendsPerRow(t *testing.T) {
 		t.Fatalf("probe day = %+v, want sends=2 rows=0 ratio=nil", probe)
 	}
 	cur := snap.SendsPerRow[1]
-	if cur.Date != todayDay || cur.Sends != 4 || cur.Rows != 2 || cur.Ratio == nil || *cur.Ratio != 2.0 {
-		t.Fatalf("today = %+v, want sends=4 rows=2 ratio=2.0", cur)
+	if cur.Date != todayDay || cur.Sends != 4 || cur.Rows != 2 || cur.RetryAdmits != 1 || cur.Ratio == nil || *cur.Ratio != 2.0 {
+		t.Fatalf("today = %+v, want sends=4 rows=2 retry_admits=1 ratio=2.0", cur)
 	}
 }

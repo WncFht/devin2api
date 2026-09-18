@@ -284,6 +284,45 @@ func TestRateGatePersistsClosedWindow(t *testing.T) {
 		t.Fatalf("rows after reopen = %d, want still 1", len(rows))
 	}
 }
+
+// 续试重发的放行单列进 retry_admits 窗口账：挂 WithGateRetry 的放行
+// 计入 retry_admits，首发不挂不计——两者都照常占 used 配额（used
+// 与 retry_admits 是总数与子集的关系，不是分列口径）。
+func TestRateGateWindowRetryAdmits(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	clock := pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("first wait error = %v", err)
+	}
+	if err := gate.wait(withGateRetry(context.Background())); err != nil {
+		t.Fatalf("retry wait error = %v", err)
+	}
+	clock.t = clock.t.Add(time.Minute) // 翻页触发关窗落库
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("new-bucket wait error = %v", err)
+	}
+	var rows []*store.GateWindow
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if rows, err = db.ListGateWindows(context.Background(), "default", 0, 0); err != nil {
+			t.Fatalf("ListGateWindows: %v", err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 closed window", len(rows))
+	}
+	if w := rows[0]; w.UsedFg != 2 || w.RetryAdmits != 1 {
+		t.Fatalf("row = %+v, want used_fg=2 retry_admits=1", w)
+	}
+}
 func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	offsetGateClock(gate, 1.9) // 死区尾，距 :02 开放 ~100ms

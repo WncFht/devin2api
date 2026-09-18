@@ -25,6 +25,9 @@ type gateCtxKey struct{}
 // gateYieldKey 是闸门让位谓词在请求 ctx 里的挂接键。
 type gateYieldKey struct{}
 
+// gateRetryKey 是「本次发送是同一请求的续试重发」标记在 ctx 里的挂接键。
+type gateRetryKey struct{}
+
 // GateVerdict 是一次闸门放行的遥测快照：app 层据此写 X-Gate-* 头。
 type GateVerdict struct {
 	// Lane 是实际服务的 lane 名（单 lane/未命名部署为空）。
@@ -77,6 +80,20 @@ func WithGateYield(ctx context.Context, yield func() bool) context.Context {
 func GateYieldFrom(ctx context.Context) func() bool {
 	yield, _ := ctx.Value(gateYieldKey{}).(func() bool)
 	return yield
+}
+
+// WithGateRetry 标记本次发送是同一请求在同 lane 上的续试重发
+// （reopen/续轮/凭据自愈/内层瞬时重试的再发送）：闸门把放行计入窗口
+// retry_admits 账，与首发区分。号池 failover 后新 lane 的首发不挂——
+// 对那条 lane 它不是续试。
+func WithGateRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, gateRetryKey{}, true)
+}
+
+// GateRetryFrom 取回 ctx 上的续试标记；未挂接返回 false。
+func GateRetryFrom(ctx context.Context) bool {
+	retry, _ := ctx.Value(gateRetryKey{}).(bool)
+	return retry
 }
 
 // RequestClass 返回本请求在闸门语义里的类别；未挂接按 fg 处理。

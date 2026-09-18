@@ -139,6 +139,7 @@ type rateGate struct {
 	winRejectLatch     int // 闩内快败
 	winRejectYield     int // 让位快败（兄弟有余量提前放给 failover）
 	winDrip            int // 闩内滴灌探针放行数
+	winRetryAdmits     int // 续试重发放行数（used_* 的子集——同请求 reopen/续轮/瞬时重试的再发送）
 	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
 	winWaitersPeak     int // 本窗排队数峰值（waitersFg+waitersBg）
 	lastWindow         *store.GateWindow
@@ -470,6 +471,7 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 	gate.winRejectLatch = 0
 	gate.winRejectYield = 0
 	gate.winDrip = 0
+	gate.winRetryAdmits = 0
 	gate.winReservePeak = 0
 	gate.winWaitersPeak = 0
 }
@@ -502,6 +504,7 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 		RejectBgReserve: gate.winRejectBgReserve,
 		RejectLatch:     gate.winRejectLatch,
 		RejectYield:     gate.winRejectYield,
+		RetryAdmits:     gate.winRetryAdmits,
 		FgRate:          gate.fgRateEMA,
 	}
 	gate.lastWindow = row
@@ -878,6 +881,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	}
 	class := adapter.RequestClass(ctx)
 	gc := adapter.GateContextFrom(ctx)
+	retry := adapter.GateRetryFrom(ctx)
 	bg := class == adapter.ClassBG
 	sleeping := false // 标记本请求占着一个 waiters 名额
 	// 等待预算约束「累计等待」而非「单次睡眠」：睡醒后要重新抢配额，
@@ -928,7 +932,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 				gate.nextDrip = now.Add(gate.dripInterval)
 				gate.dripCount++
 				gate.winDrip++
-				gate.admitLocked(class, gc, now, ws, entered)
+				gate.admitLocked(class, gc, now, ws, entered, retry)
 				gate.mu.Unlock()
 				return nil
 			}
@@ -958,7 +962,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 			}
 		}
 		if admit {
-			gate.admitLocked(class, gc, now, ws, entered)
+			gate.admitLocked(class, gc, now, ws, entered, retry)
 			gate.mu.Unlock()
 			return nil
 		}
@@ -1092,15 +1096,19 @@ func (gate *rateGate) recordWait(class string, err error, entered time.Time) {
 }
 
 // admitLocked 记账一次闸门放行并回填回执：桶总量与类别分列同增，
-// fg 另计入本窗口 fg 需求样本（fgWindow——fgRateEMA 的输入）。调用方
+// fg 另计入本窗口 fg 需求样本（fgWindow——fgRateEMA 的输入）；retry
+// 标记的续试重发同时计入 winRetryAdmits（used_* 的子集账）。调用方
 // 须持 mu。
-func (gate *rateGate) admitLocked(class string, gc *adapter.GateContext, now, ws, entered time.Time) {
+func (gate *rateGate) admitLocked(class string, gc *adapter.GateContext, now, ws, entered time.Time, retry bool) {
 	gate.bucketUsed++
 	if class == adapter.ClassBG {
 		gate.bucketUsedBg++
 	} else {
 		gate.bucketUsedFg++
 		gate.fgWindow++
+	}
+	if retry {
+		gate.winRetryAdmits++
 	}
 	gate.noteVerdict(gc, class, now, ws, entered)
 }

@@ -245,6 +245,10 @@ type upstreamLink struct {
 
 var _ adapter.Adapter = (*Adapter)(nil)
 
+// withGateRetry 是 adapter.WithGateRetry 的本文件别名：方法内 receiver
+// 名 adapter 遮蔽了包名，经别名取回续试标记的挂接函数。
+var withGateRetry = adapter.WithGateRetry
+
 // New 创建 Devin adapter。
 func New(config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.Endpoint.BaseURL) == "" {
@@ -906,7 +910,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
 				protoRequest = rebuilt
 				noteRetry("unauthenticated: token reloaded", protoRequest, false)
-				opened, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
+				opened, err = adapter.getChatMessageWithRetry(withGateRetry(streamCtx), protoRequest, warmKey)
 			} else {
 				// 重建失败则放弃重发、原错误照常上报；但「自愈后为何没重试」
 				// 要留痕——error.json 是 first-write-wins 留给上游失败点，
@@ -998,7 +1002,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			} else {
 				return nil, nil, cause
 			}
-			retryCtx, retryCancel := context.WithCancel(streamBase)
+			retryCtx, retryCancel := context.WithCancel(withGateRetry(streamBase))
 			retryBinding := binding
 			retryBinding.Token = adapter.currentToken()
 			rebuilt, _, err := buildRequest(retryRequest, cfg, retryBinding)
@@ -1040,7 +1044,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return nil, nil, nil, err
 		}
 		noteRetry(cause, rebuilt, false)
-		nextCtx, nextCancel := context.WithCancel(streamBase)
+		nextCtx, nextCancel := context.WithCancel(withGateRetry(streamBase))
 		next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
 		if err != nil {
 			nextCancel()
@@ -1101,8 +1105,13 @@ func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoReques
 	recorder := debuglog.FromContext(ctx)
 	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
 		// 每次真实发送（含瞬时错误重试）都要过速率闸：被拒尝试
-		// 会推后上游恢复时刻，本地整形是唯一止损点。
-		if err := adapter.gate.wait(ctx); err != nil {
+		// 会推后上游恢复时刻，本地整形是唯一止损点。attempt>0 与
+		// 调用方已挂的 retry 标记同属续试，计入窗口 retry_admits。
+		waitCtx := ctx
+		if attempt > 0 {
+			waitCtx = withGateRetry(ctx)
+		}
+		if err := adapter.gate.wait(waitCtx); err != nil {
 			// 闸门快败在起源点记 rate_gate（WriteError first-write-wins）：
 			// 本函数被首发与 reopen 重试共用，reopen 路径的错误会继续
 			// 冒泡经流层出口——不在此处落 stage 会被盖成 provider_stream，

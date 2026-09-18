@@ -168,6 +168,17 @@ var schemaMigrations = []migration{
 				`ALTER TABLE gate_windows ADD COLUMN reject_yield INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		// gate_windows.retry_admits 是同 lane 续试重发的放行账
+		//（reopen/续轮/凭据自愈/瞬时重试——used_* 的子集）：放行中
+		// 的重试份额由此可测，此前只能整窗回推 logs 残差。存量行
+		// 经 DEFAULT 0 落位——部署前没有续试标记，0 即真实值。
+		version: "0013_gate_windows_retry_admits",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "gate_windows", "retry_admits",
+				`ALTER TABLE gate_windows ADD COLUMN retry_admits INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

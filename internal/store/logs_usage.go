@@ -162,14 +162,17 @@ type UsageDayRow struct {
 // SendsRowDay 是单日 sends/row 探针行：sends 是当日闸门放行数
 // （gate_windows 的 used_fg+used_bg——每次放行对应一次真实上游发送，
 // 含日志不可见的同 protoRequest 内层重试与保温/drip 探针），rows 是
-// 当日非 rejected logs 行数。Ratio 只在 rows>0 时置值——「quota<=0
-// 闸门不记账」（sends=0, rows>0）与「纯探针日无请求」（rows=0）
-// 靠指针把真 0 与未定义分开。
+// 当日非 rejected logs 行数。RetryAdmits 是 sends 中同 lane 续试重发
+// 的放行数（reopen/续轮/凭据自愈/瞬时重试）——放行里的重试份额
+// 直接可读，不必再整窗回推残差。Ratio 只在 rows>0 时置值——
+// 「quota<=0 闸门不记账」（sends=0, rows>0）与「纯探针日无请求」
+// （rows=0）靠指针把真 0 与未定义分开。
 type SendsRowDay struct {
-	Date  string   `json:"date"`
-	Sends int64    `json:"sends"`
-	Rows  int64    `json:"rows"`
-	Ratio *float64 `json:"ratio,omitempty"`
+	Date        string   `json:"date"`
+	Sends       int64    `json:"sends"`
+	Rows        int64    `json:"rows"`
+	RetryAdmits int64    `json:"retry_admits"`
+	Ratio       *float64 `json:"ratio,omitempty"`
 }
 
 // DimensionAgg 是按模型或 key 哈希聚合的行。
@@ -682,7 +685,8 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 		sort.Strings(days)
 		snap.SendsPerRow = make([]SendsRowDay, 0, len(days))
 		for _, day := range days {
-			row := SendsRowDay{Date: day, Sends: sendsByDay[day], Rows: rowsByDay[day]}
+			sends := sendsByDay[day]
+			row := SendsRowDay{Date: day, Sends: sends.Sends, RetryAdmits: sends.RetryAdmits, Rows: rowsByDay[day]}
 			if row.Rows > 0 {
 				r := float64(row.Sends) / float64(row.Rows)
 				row.Ratio = &r

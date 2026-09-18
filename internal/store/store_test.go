@@ -327,7 +327,7 @@ func TestGateWindows(t *testing.T) {
 	ctx := context.Background()
 	if err := s.InsertGateWindow(ctx, &GateWindow{
 		Lane: "default", WindowStart: 1700000000, Quota: 30,
-		UsedFg: 12, UsedBg: 3, Drip: 1, ReservePeak: 9, WaitersPeak: 4,
+		UsedFg: 12, UsedBg: 3, Drip: 1, RetryAdmits: 2, ReservePeak: 9, WaitersPeak: 4,
 		RejectQuota: 2, RejectHold: 1, RejectBgReserve: 1, RejectLatch: 5, FgRate: 11.4,
 	}); err != nil {
 		t.Fatalf("InsertGateWindow: %v", err)
@@ -347,7 +347,7 @@ func TestGateWindows(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("ListGateWindows: %v %v", got, err)
 	}
-	if w := got[0]; w.UsedFg != 12 || w.RejectLatch != 5 || w.ReservePeak != 9 || w.FgRate != 11.4 {
+	if w := got[0]; w.UsedFg != 12 || w.RejectLatch != 5 || w.RetryAdmits != 2 || w.ReservePeak != 9 || w.FgRate != 11.4 {
 		t.Fatalf("row = %+v", w)
 	}
 	// since 过滤 + 全 lane 读取。

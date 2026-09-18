@@ -239,6 +239,7 @@ var schemaStatements = []string{
 		used_fg INTEGER NOT NULL DEFAULT 0,
 		used_bg INTEGER NOT NULL DEFAULT 0,
 		drip INTEGER NOT NULL DEFAULT 0,
+		retry_admits INTEGER NOT NULL DEFAULT 0,
 		reserve_peak INTEGER NOT NULL DEFAULT 0,
 		waiters_peak INTEGER NOT NULL DEFAULT 0,
 		reject_quota INTEGER NOT NULL DEFAULT 0,
