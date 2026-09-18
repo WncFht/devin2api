@@ -666,45 +666,58 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 // 放行——预算与上游开流 deadline 同量级，无保底则健康兄弟永远接不
 // 到管（prod ~80/日 504 死锁）。dead 未发一帧即 error 收尾（懒失败
 // 走流内 swap 查账点），good 在预算耗尽状态下仍被点燃救回请求。
+// 首败类跑两档：resource_exhausted（限流）与 deadline_exceeded——后
+// 者是 prod 现场签名（上游 60s 排队 deadline 烧穿预算），Timeout 类
+// 失败经 failoverableEvent 同样判可换号。
 func TestPoolFailoverGuaranteedSwap(t *testing.T) {
 	old := poolFailoverBudgetFG
 	poolFailoverBudgetFG = time.Nanosecond
 	t.Cleanup(func() { poolFailoverBudgetFG = old })
 
-	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
-	dead := &stubUpstream{
-		catalog: catalog,
-		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
-			return connect.NewError(connect.CodeResourceExhausted, errors.New("dead lane quota"))
-		},
-	}
-	good := &stubUpstream{
-		catalog: catalog,
-		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
-			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
-		},
-	}
-	srvDead := stubServer(t, dead, nil)
-	srvGood := stubServer(t, good, nil)
-	pool := newTestPool(t,
-		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
-		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
-	)
+	for _, tc := range []struct {
+		name string
+		err  *connect.Error
+	}{
+		{"resource_exhausted", connect.NewError(connect.CodeResourceExhausted, errors.New("dead lane quota"))},
+		{"deadline_exceeded", connect.NewError(connect.CodeDeadlineExceeded, errors.New("upstream open deadline"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+			dead := &stubUpstream{
+				catalog: catalog,
+				chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+					return tc.err
+				},
+			}
+			good := &stubUpstream{
+				catalog: catalog,
+				chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+					return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+				},
+			}
+			srvDead := stubServer(t, dead, nil)
+			srvGood := stubServer(t, good, nil)
+			pool := newTestPool(t,
+				Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
+				Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
+			)
 
-	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
-	t.Cleanup(manager.Close)
-	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
-	ctx := debuglog.WithRecorder(context.Background(), recorder)
+			manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
+			t.Cleanup(manager.Close)
+			recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+			ctx := debuglog.WithRecorder(context.Background(), recorder)
 
-	stream, err := pool.Stream(ctx, pinnedRequest(pool, "dead"))
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
-	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
-		t.Fatalf("deltas = %q, want rescued — first swap must be guaranteed despite exhausted budget", got)
-	}
-	if dead.chatCalls.Load() != 1 || good.chatCalls.Load() != 1 {
-		t.Fatalf("chat calls dead=%d good=%d, want 1/1", dead.chatCalls.Load(), good.chatCalls.Load())
+			stream, err := pool.Stream(ctx, pinnedRequest(pool, "dead"))
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+				t.Fatalf("deltas = %q, want rescued — first swap must be guaranteed despite exhausted budget", got)
+			}
+			if dead.chatCalls.Load() != 1 || good.chatCalls.Load() != 1 {
+				t.Fatalf("chat calls dead=%d good=%d, want 1/1", dead.chatCalls.Load(), good.chatCalls.Load())
+			}
+		})
 	}
 }
 
