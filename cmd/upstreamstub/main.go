@@ -7,6 +7,9 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -37,6 +40,8 @@ func main() {
 	deltaBytes := flag.Int("delta-bytes", 32, "stream 场景每帧 delta 字节数")
 	interval := flag.Duration("interval", 0, "stream 场景帧间隔（0 = 连续吐帧）")
 	ttfb := flag.Duration("ttfb", 0, "stream 场景首帧前延迟（模拟上游思考 TTFT）")
+	cacheMode := flag.String("cache-mode", "none",
+		"none|content|trajectory：模拟上游前缀缓存记账并在 usage 帧回 cache_read——content 跨轨迹内容匹配，trajectory 只匹配同 trajectory_id 的既往请求；匹配按 EPHEMERAL 断点边界计")
 	flag.Parse()
 	// 未知 scenario 拼错不能静默落到某个场景——那会让测试对着错误
 	// 行为判结果。启动期直接拒绝。
@@ -49,12 +54,17 @@ func main() {
 	if !validScenarios[*scenario] {
 		log.Fatalf("unknown scenario %q", *scenario)
 	}
+	cache := &prefixCache{mode: *cacheMode}
+	if *cacheMode != "none" && *cacheMode != "content" && *cacheMode != "trajectory" {
+		log.Fatalf("unknown cache-mode %q", *cacheMode)
+	}
 
 	http.HandleFunc("/exa.api_server_pb.ApiServerService/GetChatMessage", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
+		reqBody, _ := io.ReadAll(r.Body)
 		jsonWire := r.Header.Get("Content-Type") == "application/connect+json"
+		usage := cache.observe(reqBody, jsonWire, r.Header.Get("Content-Encoding"))
 		n := requestCount.Add(1)
-		log.Printf("request #%d scenario=%s", n, *scenario)
+		log.Printf("request #%d scenario=%s cache_read=%d input=%d", n, *scenario, usage.GetCacheReadTokens(), usage.GetInputTokens())
 		contentType := "application/connect+proto"
 		if jsonWire {
 			contentType = "application/connect+json"
@@ -79,17 +89,17 @@ func main() {
 			body = append(body, 0x00, 0x00) // 半帧前缀 → ErrUnexpectedEOF
 		case "cleaneof":
 			// 元数据帧后协议中途干净收尾（无尾帧）：静默截断，pre-content 应重发。
-			body = frame(metaFrame(), jsonWire)
+			body = frame(metaFrame(usage), jsonWire)
 		case "cleaneof-content":
 			// 内容帧后干净收尾：已产出内容的静默截断，不可重发。
-			body = join(frame(metaFrame(), jsonWire), frame(deltaText("stub: partial"), jsonWire))
+			body = join(frame(metaFrame(usage), jsonWire), frame(deltaText("stub: partial"), jsonWire))
 		case "bare-end":
 			// 有 EndStream 尾帧但无 stopReason：上游「正常结束但没给理由」，
 			// 复现线上 "Devin stream ended without stop reason"。
-			body = join(frame(metaFrame(), jsonWire), endStream("{}"))
+			body = join(frame(metaFrame(usage), jsonWire), endStream("{}"))
 		case "endstream-error":
 			// 尾帧携带错误：上游经 EndStream 主动报语义错误（限流形态）。
-			body = join(frame(metaFrame(), jsonWire),
+			body = join(frame(metaFrame(usage), jsonWire),
 				endStream(`{"error":{"code":"resource_exhausted","message":"stub: rate limited"}}`))
 		case "preframe-error":
 			// 建流即拒：200 + 仅一条 EndStream 错误尾帧，前面没有任何数据帧——
@@ -114,7 +124,7 @@ func main() {
 			w.Header().Set("Content-Type", contentType)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(join(
-				frame(metaFrame(), jsonWire),
+				frame(metaFrame(usage), jsonWire),
 				frame(deltaText("stub: done"), jsonWire),
 				frame(stopFrame(), jsonWire),
 				endStream("{}")))
@@ -132,7 +142,7 @@ func main() {
 			w.Header().Set("Content-Type", contentType)
 			w.WriteHeader(http.StatusOK)
 			for {
-				_, _ = w.Write(frame(metaFrame(), jsonWire))
+				_, _ = w.Write(frame(metaFrame(usage), jsonWire))
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
@@ -144,7 +154,7 @@ func main() {
 			w.Header().Set("Content-Type", contentType)
 			w.WriteHeader(http.StatusOK)
 			flusher, _ := w.(http.Flusher)
-			_, _ = w.Write(frame(metaFrame(), jsonWire))
+			_, _ = w.Write(frame(metaFrame(usage), jsonWire))
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -170,16 +180,16 @@ func main() {
 			return
 		case "recover":
 			if n <= *recoverAfter {
-				body = append(frame(metaFrame(), jsonWire), 0x00, 0x00)
+				body = append(frame(metaFrame(usage), jsonWire), 0x00, 0x00)
 			} else {
 				body = join(
-					frame(metaFrame(), jsonWire),
+					frame(metaFrame(usage), jsonWire),
 					frame(deltaText("stub: recovered reply"), jsonWire),
 					frame(stopFrame(), jsonWire),
 					endStream("{}"))
 			}
 		default: // precontent：启动期已校验，余下只有它
-			body = append(frame(metaFrame(), jsonWire), 0x00, 0x00)
+			body = append(frame(metaFrame(usage), jsonWire), 0x00, 0x00)
 		}
 		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write(body)
@@ -238,14 +248,17 @@ func marshal(msg *devinproto.GetChatMessageResponse, json bool) ([]byte, error) 
 }
 
 // metaFrame 造流首的元数据响应帧（message_id/request_id/timestamp/usage）。
-func metaFrame() *devinproto.GetChatMessageResponse {
+// usage 为 nil 时只带 ModelUid——cache-mode=none 下桩不编造 token 计数。
+func metaFrame(usage *devinproto.ExaCodeiumCommonPb_ModelUsageStats) *devinproto.GetChatMessageResponse {
+	if usage == nil {
+		usage = &devinproto.ExaCodeiumCommonPb_ModelUsageStats{}
+	}
+	usage.ModelUid = proto.String("swe-2-max")
 	return &devinproto.GetChatMessageResponse{
 		MessageId: proto.String("bot-stub"),
 		RequestId: proto.String("stub-req"),
 		Timestamp: &devinproto.GoogleProtobuf_Timestamp{Seconds: proto.Int64(time.Now().Unix())},
-		Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{
-			ModelUid: proto.String("swe-2-max"),
-		},
+		Usage:     usage,
 	}
 }
 
@@ -268,4 +281,161 @@ func join(frames ...[]byte) []byte {
 		out = append(out, f...)
 	}
 	return out
+}
+
+// ---- 前缀缓存模拟（-cache-mode）----
+//
+// 记账模型：每个 GetChatMessageRequest 拆成「内容单元」序列——单元 0 是
+// system prompt，其后每条 ChatMessagePrompt 一个单元。可复用前缀只算到
+// EPHEMERAL 断点边界（SystemPromptCacheOptions / PromptCacheOptions），
+// 与真实上游「断点声明缓存边界」语义对齐：读侧与写侧都要把该位置标成
+// 断点才算可读条目。命中量取最长共享断点前缀的字节数，折 4 字节≈1 token
+// 报进 usage 帧。message_id 是每请求重生的易变字段（生产重发也换 id 仍
+// 命中），进单元哈希前摘除；trajectory 模式按 trajectory_id 隔离命中域。
+type prefixCache struct {
+	mode string
+	seen []cacheEntry
+}
+
+// cacheEntry 是一条请求的可缓存前缀视图：traj 是隔离域键，keys/lens/marks
+// 三元组按单元序对齐（marks[i] = 第 i 单元结尾是否标了 EPHEMERAL）。
+type cacheEntry struct {
+	traj  string
+	keys  [][sha256.Size]byte
+	lens  []int
+	marks []bool
+}
+
+// observe 登记一条请求并算本次该得的 cache_read/input 计数；
+// mode=none 或请求解不开时返回 nil（usage 帧退回只带 ModelUid 的旧形态）。
+func (c *prefixCache) observe(body []byte, jsonWire bool, contentEncoding string) *devinproto.ExaCodeiumCommonPb_ModelUsageStats {
+	if c.mode == "none" {
+		return nil
+	}
+	req := decodeChatRequest(body, jsonWire, contentEncoding)
+	if req == nil {
+		return nil
+	}
+	entry := extractEntry(req)
+	best := 0
+	for _, prior := range c.seen {
+		if c.mode == "trajectory" && prior.traj != entry.traj {
+			continue
+		}
+		if matched := matchPrefixBytes(prior, entry); matched > best {
+			best = matched
+		}
+	}
+	c.seen = append(c.seen, entry)
+	input := 0
+	for _, l := range entry.lens {
+		input += l
+	}
+	return &devinproto.ExaCodeiumCommonPb_ModelUsageStats{
+		InputTokens:     proto.Uint64(uint64(input / 4)),
+		CacheReadTokens: proto.Uint64(uint64(best / 4)),
+	}
+}
+
+// decodeChatRequest 从请求体还原 GetChatMessageRequest：connect 流式请求
+// 是 envelope 序列（1B flags + 4B 大端长度 + payload），发送压缩按 payload
+// 逐个 gzip 且 flags 置 0x01（0x02 是 trailer）；unary 形态则由
+// Content-Encoding: gzip 标整体压缩。取第一条数据帧。
+func decodeChatRequest(body []byte, jsonWire bool, contentEncoding string) *devinproto.GetChatMessageRequest {
+	if contentEncoding == "gzip" {
+		if zr, err := gzip.NewReader(bytes.NewReader(body)); err == nil {
+			if decoded, err := io.ReadAll(zr); err == nil {
+				body = decoded
+			}
+			_ = zr.Close()
+		}
+		return unmarshalChatReq(body, jsonWire)
+	}
+	for len(body) >= 5 {
+		flags := body[0]
+		n := int(binary.BigEndian.Uint32(body[1:5]))
+		if len(body) < 5+n {
+			break
+		}
+		payload := body[5 : 5+n]
+		body = body[5+n:]
+		if flags&0x02 != 0 {
+			continue
+		}
+		if flags&0x01 != 0 {
+			zr, err := gzip.NewReader(bytes.NewReader(payload))
+			if err != nil {
+				return nil
+			}
+			decoded, err := io.ReadAll(zr)
+			_ = zr.Close()
+			if err != nil {
+				return nil
+			}
+			payload = decoded
+		}
+		return unmarshalChatReq(payload, jsonWire)
+	}
+	return nil
+}
+
+// unmarshalChatReq 按 wire 编码解一帧请求消息；失败只丢本次记账。
+func unmarshalChatReq(payload []byte, jsonWire bool) *devinproto.GetChatMessageRequest {
+	req := &devinproto.GetChatMessageRequest{}
+	var err error
+	if jsonWire {
+		err = protojson.Unmarshal(payload, req)
+	} else {
+		err = proto.Unmarshal(payload, req)
+	}
+	if err != nil {
+		log.Printf("cache-mode: unmarshal request: %v", err)
+		return nil
+	}
+	return req
+}
+
+// extractEntry 把请求投影为内容单元序列：system prompt 作单元 0（断点取
+// SystemPromptCacheOptions），每条消息一个单元（断点取 PromptCacheOptions，
+// MessageId/PromptCacheOptions 不参与哈希——标记与易变 id 都不是内容）。
+func extractEntry(req *devinproto.GetChatMessageRequest) cacheEntry {
+	e := cacheEntry{traj: req.GetTrajectoryReference().GetTrajectoryId()}
+	if prompt := req.GetPrompt(); prompt != "" {
+		e.keys = append(e.keys, sha256.Sum256([]byte(prompt)))
+		e.lens = append(e.lens, len(prompt))
+		e.marks = append(e.marks, req.GetSystemPromptCacheOptions() != nil)
+	}
+	for _, msg := range req.GetChatMessagePrompts() {
+		clone := proto.Clone(msg).(*devinproto.ExaChatPb_ChatMessagePrompt)
+		clone.MessageId = nil
+		clone.PromptCacheOptions = nil
+		raw, _ := proto.Marshal(clone)
+		e.keys = append(e.keys, sha256.Sum256(raw))
+		e.lens = append(e.lens, len(raw))
+		e.marks = append(e.marks, msg.GetPromptCacheOptions() != nil)
+	}
+	return e
+}
+
+// matchPrefixBytes 返回 prior 与 cur 共享的最长「断点闭合」前缀字节量：
+// 逐单元比对到首个分歧得公共前缀，再取其中最大的两侧都标了断点的边界。
+func matchPrefixBytes(prior, cur cacheEntry) int {
+	common := 0
+	for common < len(prior.keys) && common < len(cur.keys) && prior.keys[common] == cur.keys[common] {
+		common++
+	}
+	boundary := -1
+	for i := 0; i < common; i++ {
+		if prior.marks[i] && cur.marks[i] {
+			boundary = i
+		}
+	}
+	if boundary < 0 {
+		return 0
+	}
+	sum := 0
+	for j := 0; j <= boundary; j++ {
+		sum += prior.lens[j]
+	}
+	return sum
 }
