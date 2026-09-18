@@ -3,14 +3,14 @@ module github.com/WncFht/devin2api
 go 1.27.1
 
 require (
-	connectrpc.com/connect v1.20.0
+	connectrpc.com/connect v1.21.0
 	github.com/felixge/fgprof v0.9.5
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/gorilla/websocket v1.5.3
-	github.com/jhump/protoreflect/v2 v2.0.0-beta.1
-	golang.org/x/net v0.57.0
-	golang.org/x/sys v0.47.0
-	google.golang.org/protobuf v1.36.11
+	github.com/jhump/protoreflect/v2 v2.0.0-beta.2
+	golang.org/x/net v0.59.0
+	golang.org/x/sys v0.48.0
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 	local/devinproto v0.0.0
 	modernc.org/sqlite v1.59.0
