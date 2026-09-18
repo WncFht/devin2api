@@ -288,13 +288,15 @@ type Recorder struct {
 	manager *Manager
 	// dir 是本次请求的调试目录名（内嵌进入时刻，不再对应磁盘目录）。
 	dir string
-	// startedAt 是 HTTP 请求进入应用的时间。
+	// startedAt 是 HTTP 请求进入应用的时间；生产路径 Start 后不可变，
+	// 测试经 setStartedAt 回拨，编码协程上的读与它同走 mutex。
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
 	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
 	// keyHash、retries、sequences、upstreamAccount、accountAttempts、
-	// affinityHash、poolCandidates；worker 自身状态无锁。
+	// affinityHash、poolCandidates、startedAt 的测试回拨；worker 自身
+	// 状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -1776,6 +1778,16 @@ func (recorder *Recorder) SetAffinityHash(affinity string) {
 	recorder.mutex.Unlock()
 }
 
+// setStartedAt 回拨请求进入时刻：仅测试用来模拟慢尾请求（errors_only
+// 的 duration 阈值判定需要真实越过阈值的耗时）。生产路径 startedAt 在
+// Start 后不再改写；写入与编码协程上的读（metaJSON、JSONL 打戳）同走
+// mutex 串行化。
+func (recorder *Recorder) setStartedAt(at time.Time) {
+	recorder.mutex.Lock()
+	recorder.startedAt = at
+	recorder.mutex.Unlock()
+}
+
 // NotePoolCandidates 登记号池开流前的候选序快照：Pool.Stream 排完序
 // 调一次，回答「这次为什么去了这个号」——被降级 lane 的 Reason 是
 // 归因词表（见 PoolCandidate）。多次调用后者覆盖前者（换号重选时
@@ -2019,11 +2031,14 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	recorder.mutex.Lock()
 	recorder.sequences[name]++
 	seq := recorder.sequences[name]
+	// 闭包在编码协程上跑，startedAt 在锁内拷出——与 setStartedAt 的
+	// 测试回拨共用一把锁（生产路径字段不可变，拷贝与读原值等价）。
+	startedAt := recorder.startedAt
 	recorder.enqueueLocked(func() {
 		data, err := marshalJSONLRecord(JSONLRecord{
 			Seq:       seq,
 			Time:      at.Format(time.RFC3339Nano),
-			ElapsedMS: at.Sub(recorder.startedAt).Milliseconds(),
+			ElapsedMS: at.Sub(startedAt).Milliseconds(),
 			Event:     event,
 			Data:      recorder.sanitizeJSON(evalDeferred(value)),
 		})
@@ -2206,8 +2221,21 @@ func (recorder *Recorder) appendJSONL(name string, data []byte) {
 // 复刻旧 map 写法的出现条件。纯函数只读 recorder 快照状态，编码协程/
 // 写 worker/收尾兜底三路都可调用；marshal 失败返回 nil。
 func (recorder *Recorder) metaJSON(completion *Completion) []byte {
+	client := MetaClient{
+		IP:        recorder.requestMeta.ClientIP,
+		UserAgent: recorder.requestMeta.UserAgent,
+		KeyHash:   recorder.effectiveKeyHash(),
+		RequestID: recorder.requestMeta.ClientRequestID,
+	}
+	// startedAt 与 requestClass 同锁取：生产路径 startedAt 在 Start 后
+	// 不可变，但测试经 setStartedAt 在 mutex 下回拨——本函数在编码
+	// 协程/写 worker 上跑，读必须与写方共用一把锁。
+	recorder.mutex.Lock()
+	startedAt := recorder.startedAt
+	client.Class = recorder.requestClass
+	recorder.mutex.Unlock()
 	meta := MetaSummary{
-		StartedAt:         recorder.startedAt.Format(time.RFC3339Nano),
+		StartedAt:         startedAt.Format(time.RFC3339Nano),
 		Method:            recorder.requestMeta.Method,
 		Path:              recorder.requestMeta.Path,
 		API:               recorder.requestMeta.API,
@@ -2224,15 +2252,6 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 		AssignModelMS:     optionalLatency(recorder.assignModelMS.Load()),
 		ModelsFetchMS:     optionalLatency(recorder.modelsFetchMS.Load()),
 	}
-	client := MetaClient{
-		IP:        recorder.requestMeta.ClientIP,
-		UserAgent: recorder.requestMeta.UserAgent,
-		KeyHash:   recorder.effectiveKeyHash(),
-		RequestID: recorder.requestMeta.ClientRequestID,
-	}
-	recorder.mutex.Lock()
-	client.Class = recorder.requestClass
-	recorder.mutex.Unlock()
 	if client != (MetaClient{}) {
 		meta.Client = &client
 	}
@@ -2247,7 +2266,7 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	recorder.mutex.Unlock()
 	if completion != nil {
 		finishedAt := time.Now()
-		durationMS := finishedAt.Sub(recorder.startedAt).Milliseconds()
+		durationMS := finishedAt.Sub(startedAt).Milliseconds()
 		meta.DurationMS = &durationMS
 		meta.FinishedAt = finishedAt.Format(time.RFC3339Nano)
 		meta.StatusCode = &completion.StatusCode

@@ -637,7 +637,7 @@ func TestErrorsOnlyKeepsInterestingSuccess(t *testing.T) {
 
 	slow := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	slow.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
-	slow.startedAt = time.Now().Add(-2 * interestingDurationMS * time.Millisecond)
+	slow.setStartedAt(time.Now().Add(-2 * interestingDurationMS * time.Millisecond))
 	slow.Complete(Completion{StatusCode: 200, Result: "completed"})
 	kept(slow, "duration outlier")
 
