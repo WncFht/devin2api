@@ -238,8 +238,11 @@ func (pool *Pool) firstLane() *poolLane {
 }
 
 // poolFailoverBudget* 是一次请求内换号重试的累计预算：首个候选恒试，
-// 第 2+ 次 lane 尝试前查账——lane 内自愈链（reopen/凭据重载/传输重试）
-// 在 pool 视野内是串行烧时，不封顶会把单 lane 预算逐条烧遍（实证
+// 首个换号候选在非硬故障时保底放行——fg 预算 60s ≈ 上游开流 deadline
+// 60-72s，首 lane 挂到 deadline 已烧穿预算，此处查账必然拦截，健康
+// 兄弟 lane 永远接不到管（实证 ~80/日 终局 504 本可救回）；第 2+ 次
+// 换号尝试前查账——lane 内自愈链（reopen/凭据重载/传输重试）在 pool
+// 视野内是串行烧时，不封顶会把单 lane 预算逐条烧遍（实证
 // 111.5s+120s=231.5s 才回 429）。分档与闸门排队预算同量级（fg
 // maxHold ~15s / bg ~120s）。检查只在 lane 间进行，拦不住单 lane
 // 内部的等待。var 而非 const：测试可缩短覆盖拦截路径。
@@ -292,16 +295,23 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		rest[i] = c.lane
 	}
 	var lastErr error
+	tried := 0
 	for len(rest) > 0 {
-		// 换号累计预算：首个候选恒试，第 2+ 次尝试前查账——烧满一条
-		// lane 再败的场景不再串行点燃下一条。拦截留痕，否则「为什么
-		// 没换第二条」只能靠 elapsed 反推。
-		if lastErr != nil && time.Since(entered) > failoverBudget(ctx) {
+		// 换号累计预算：首个候选恒试，首个换号候选（tried==1）在非
+		// 硬故障时保底放行——首 lane 挂到上游开流 deadline 已烧穿预
+		// 算，此处查账必然拦截换号，健康兄弟 lane 永远接不到管。硬故
+		// 障候选不保底：池侧冷却判死的 lane 再点一次只会复烧整条自
+		// 愈链。第 2+ 次换号（tried>1）恢复查账——烧满一条再败的场
+		// 景不再串行点燃第三条。拦截留痕，否则「为什么没换第二条」
+		// 只能靠 elapsed 反推。
+		if lastErr != nil && time.Since(entered) > failoverBudget(ctx) &&
+			(tried != 1 || rest[0].hardDown()) {
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(entered).Milliseconds(), "skipped": rest[0].name})
 			break
 		}
 		lane := rest[0]
 		rest = rest[1:]
+		tried++
 		pin.setLane(lane)
 		// 04 里插账号分界行：各 lane 的上游帧直接续写同一文件，
 		// 没有分界行无法区分一段帧属于哪号。
@@ -313,7 +323,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
 			pool.bind(affinity, lane)
-			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest}, nil
+			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest, failovers: tried - 1}, nil
 		}
 		lastErr = err
 		recorder.SetUpstreamAccount(lane.name)
@@ -354,6 +364,10 @@ type poolStream struct {
 	inner     llm.ResponseStream
 	// rest 是尚未尝试的候选 lane（钉选序尾部）；每条只在换号时试一次。
 	rest []*poolLane
+	// failovers 是本请求已发起的换号尝试数（含 Stream 开流级与 swap
+	// 流内级）：首个换号候选的保底放行每请求只有一次，靠它跨两级
+	// 共享——开流级已换过一次后，流内 swap 的首候选恢复查账。
+	failovers int
 	// startReleased 表示 start 信封已交付给消费方：换号 lane 再产 start
 	// 要吞掉，客户端只能见一个。
 	startReleased bool
@@ -436,16 +450,20 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 	for len(s.rest) > 0 {
 		// 与 Stream 开流级同一份累计预算：swap 只在 pre-content 触发
 		//（committed 后不再换号），s.entered 起算的 elapsed 全是未产出
-		// 内容的烧时——首个候选同样查账，否则 lane a 流内烧穿预算后
-		// 下一 lane 仍被无条件点燃（lastErr 逐次调用归零，只对 2nd+
-		// 检查在 2-lane 池里永不触发）。未试候选时返回 (false, nil)，
-		// 由 Recv 把本 lane 的真实错误事件透传给客户端。
-		if time.Since(s.entered) > failoverBudget(ctx) {
+		// 内容的烧时。首个换号候选（failovers==0，跨开流/流内两级共
+		// 享计数）在非硬故障时保底放行——本 lane 流内烧穿预算后查账
+		// 必然拦截，健康兄弟永远接不到管；硬故障候选不保底，池侧冷
+		// 却判死的 lane 不值得复烧一条自愈链。第 2+ 次换号恢复查账，
+		// 拦住串行点燃第三条。未试候选时返回 (false, nil)，由 Recv
+		// 把本 lane 的真实错误事件透传给客户端。
+		if time.Since(s.entered) > failoverBudget(ctx) &&
+			(s.failovers > 0 || s.rest[0].hardDown()) {
 			s.recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(s.entered).Milliseconds(), "skipped": s.rest[0].name})
 			break
 		}
 		next := s.rest[0]
 		s.rest = s.rest[1:]
+		s.failovers++
 		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})
 		laneStart := time.Now()
 		// 调试记录挂 s.recorder（开流时的请求 ctx）而不是指望 Recv 的

@@ -411,16 +411,18 @@ func TestPoolInStreamNoFailoverAfterContent(t *testing.T) {
 	}
 }
 
-// 换号累计预算：缩到极小后首 lane 快败即烧穿——第二候选不再点燃，
-// 只留一笔失败 attempt（upstream_attempts）与 failover_budget_exhausted
-// 分界行；首候选恒试不受预算约束。上闩全部 lane 让首候选开流即快败
-// （LocalGate 是 eager 失败：conn refused 这类懒失败要走到流内才见）。
+// 换号累计预算：缩到极小后首 lane 快败即烧穿——首个换号候选保底放行
+// （非硬故障时预算不拦第一跳），第三候选才被预算拦截——三 lane 全闩
+// 的收口是两条失败 attempt（upstream_attempts）与
+// failover_budget_exhausted 分界行；首候选恒试不受预算约束。上闩全部
+// lane 让候选开流即快败（LocalGate 是 eager 失败：conn refused 这类
+// 懒失败要走到流内才见）。
 func TestPoolFailoverBudgetCap(t *testing.T) {
 	old := poolFailoverBudgetFG
 	poolFailoverBudgetFG = time.Nanosecond
 	t.Cleanup(func() { poolFailoverBudgetFG = old })
 
-	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
 	for _, lane := range pool.snapshot() {
 		lane.adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("rate limited; reset in 60 seconds")))
 	}
@@ -456,8 +458,18 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 	if err := json.Unmarshal(metaData, &meta); err != nil {
 		t.Fatalf("meta.json decode: %v", err)
 	}
-	if len(meta.UpstreamAttempts) != 1 {
-		t.Fatalf("upstream_attempts = %d, want 1 — budget must stop the second lane", len(meta.UpstreamAttempts))
+	if len(meta.UpstreamAttempts) != 2 {
+		t.Fatalf("upstream_attempts = %d, want 2 — first swap is guaranteed, budget stops the third lane", len(meta.UpstreamAttempts))
+	}
+	attempted := map[string]bool{}
+	for _, attempt := range meta.UpstreamAttempts {
+		attempted[attempt.Account] = true
+	}
+	var skipped string
+	for _, name := range []string{"a", "b", "c"} {
+		if !attempted[name] {
+			skipped = name
+		}
 	}
 	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
@@ -466,15 +478,18 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) {
 		t.Fatal("04 must carry failover_budget_exhausted marker")
 	}
-	if got := strings.Count(string(frames), `"event":"account_attempt"`); got != 1 {
-		t.Fatalf("account_attempt rows = %d, want 1", got)
+	if !strings.Contains(string(frames), `"skipped":"`+skipped+`"`) {
+		t.Fatalf("marker must skip the untried lane %q, 04 = %s", skipped, frames)
+	}
+	if got := strings.Count(string(frames), `"event":"account_attempt"`); got != 2 {
+		t.Fatalf("account_attempt rows = %d, want 2", got)
 	}
 }
 
-// 流内换号受同一份累计预算：swap 只在 pre-content 触发，lane a
-// 未产出内容的烧时计入 s.entered——预算缩到极小后首候选也被拦截，
-// lane a 的真实错误事件透传给客户端，下一 lane 不被点燃，04 留
-// failover_budget_exhausted 分界行。
+// 流内换号受同一份累计预算，且与开流级共享「每请求一次保底」额度：
+// lane a 开流即败时已用掉保底（b 被无条件点燃），b 流内 pre-content
+// 再败时 swap 的下一候选恢复查账——预算缩到极小后 c 被拦截，b 的真实
+// 错误事件透传给客户端，04 留 failover_budget_exhausted 分界行。
 func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 	old := poolFailoverBudgetFG
 	poolFailoverBudgetFG = time.Nanosecond
@@ -484,20 +499,30 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 	dead := &stubUpstream{
 		catalog: catalog,
 		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
-			return connect.NewError(connect.CodeUnauthenticated, errors.New("dead token"))
+			return connect.NewError(connect.CodeResourceExhausted, errors.New("dead lane quota"))
 		},
 	}
-	good := &stubUpstream{
-		catalog: catalog,
-		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
-			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
-		},
+	// in-stream 失败脚本：先发 meta 让开流成功，再以 handler 错误把
+	// pre-content error 事件送进泵——swap 路径（区别于开流级失败）。
+	midFail := func() *stubUpstream {
+		return &stubUpstream{
+			catalog: catalog,
+			chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+				if err := stubSend(stream, stubMeta()); err != nil {
+					return err
+				}
+				return connect.NewError(connect.CodeInternal, errors.New("in-stream boom"))
+			},
+		}
 	}
+	flaky1, flaky2 := midFail(), midFail()
 	srvDead := stubServer(t, dead, nil)
-	srvGood := stubServer(t, good, nil)
+	srvFlaky1 := stubServer(t, flaky1, nil)
+	srvFlaky2 := stubServer(t, flaky2, nil)
 	pool := newTestPool(t,
 		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
-		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "flaky1", Token: "tok-f1"}, Endpoint: Endpoint{BaseURL: srvFlaky1.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "flaky2", Token: "tok-f2"}, Endpoint: Endpoint{BaseURL: srvFlaky2.URL}, Model: "stub-model"},
 	)
 
 	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
@@ -522,10 +547,128 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 		}
 	}
 	if !sawError {
-		t.Fatal("dead lane's error event must reach the client when budget skips the swap")
+		t.Fatal("second lane's error event must reach the client when budget skips the next swap")
 	}
-	if good.chatCalls.Load() != 0 {
-		t.Fatalf("good lane chat calls = %d, want 0 — budget must skip it", good.chatCalls.Load())
+	if dead.chatCalls.Load() != 1 {
+		t.Fatalf("dead lane chat calls = %d, want 1", dead.chatCalls.Load())
+	}
+	// 两条 flaky lane 谁排第二由钉选序定——被保底点燃的是第二候选，
+	// 恰有一条被调用，另一条被预算拦在 swap 外。
+	if got := flaky1.chatCalls.Load() + flaky2.chatCalls.Load(); got != 1 {
+		t.Fatalf("flaky lanes chat calls = %d, want exactly 1 — guaranteed swap consumed by the open-level failover", got)
+	}
+	recorder.Complete(debuglog.Completion{Result: "failed"})
+	<-manager.Drained(recorder.Dir())
+
+	metaData, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "meta.json")
+	if err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+	var meta debuglog.MetaSummary
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	if len(meta.UpstreamAttempts) != 2 {
+		t.Fatalf("upstream_attempts = %d, want 2 (dead open + one flaky in-stream)", len(meta.UpstreamAttempts))
+	}
+
+	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04: %v", err)
+	}
+	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) {
+		t.Fatal("04 must carry failover_budget_exhausted marker")
+	}
+}
+
+// 预算兜底换号：首 lane 烧穿预算后，首个换号候选在非硬故障时保底
+// 放行——预算与上游开流 deadline 同量级，无保底则健康兄弟永远接不
+// 到管（prod ~80/日 504 死锁）。dead 未发一帧即 error 收尾（懒失败
+// 走流内 swap 查账点），good 在预算耗尽状态下仍被点燃救回请求。
+func TestPoolFailoverGuaranteedSwap(t *testing.T) {
+	old := poolFailoverBudgetFG
+	poolFailoverBudgetFG = time.Nanosecond
+	t.Cleanup(func() { poolFailoverBudgetFG = old })
+
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	dead := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return connect.NewError(connect.CodeResourceExhausted, errors.New("dead lane quota"))
+		},
+	}
+	good := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvDead := stubServer(t, dead, nil)
+	srvGood := stubServer(t, good, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
+	)
+
+	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	stream, err := pool.Stream(ctx, pinnedRequest(pool, "dead"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+		t.Fatalf("deltas = %q, want rescued — first swap must be guaranteed despite exhausted budget", got)
+	}
+	if dead.chatCalls.Load() != 1 || good.chatCalls.Load() != 1 {
+		t.Fatalf("chat calls dead=%d good=%d, want 1/1", dead.chatCalls.Load(), good.chatCalls.Load())
+	}
+}
+
+// 保底只给「还值得试」的候选：下一候选处于池侧硬冷却（凭据/通用
+// 两档）时，预算检查照常拦截——点燃判死 lane 只会复烧一条注定失败
+// 的自愈链。cooled 被 noteFailure 判进通用冷却、dead 上闩出 eager
+// 快败后，首 lane 烧穿预算的请求不再换号，真实错误原样返回。
+func TestPoolFailoverBudgetSkipsHardDown(t *testing.T) {
+	old := poolFailoverBudgetFG
+	poolFailoverBudgetFG = time.Nanosecond
+	t.Cleanup(func() { poolFailoverBudgetFG = old })
+
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	cooled := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvCooled := stubServer(t, cooled, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "cooled", Token: "tok-c"}, Endpoint: Endpoint{BaseURL: srvCooled.URL}, Model: "stub-model"},
+	)
+	// dead 上闩让其 gate.wait 即拒（eager 失败走 Stream 循环查账点，
+	// conn refused 这类懒失败会绕到流内 swap 路径——不是本测试目标）。
+	poolLaneByName(pool, "dead").adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("rate limited; reset in 60 seconds")))
+	poolLaneByName(pool, "cooled").noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	_, err = pool.Stream(ctx, pinnedRequest(pool, "dead"))
+	if err == nil {
+		t.Fatal("Stream must fail: only candidate is hardDown and budget is exhausted")
+	}
+	if cooled.chatCalls.Load() != 0 {
+		t.Fatalf("cooled lane chat calls = %d, want 0 — hardDown candidate must not get the free pass", cooled.chatCalls.Load())
 	}
 	recorder.Complete(debuglog.Completion{Result: "failed"})
 	<-manager.Drained(recorder.Dir())
@@ -534,8 +677,9 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile 04: %v", err)
 	}
-	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) {
-		t.Fatal("04 must carry failover_budget_exhausted marker")
+	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) ||
+		!strings.Contains(string(frames), `"skipped":"cooled"`) {
+		t.Fatalf("04 must carry failover_budget_exhausted{skipped:cooled}, 04 = %s", frames)
 	}
 }
 
