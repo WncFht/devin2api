@@ -359,6 +359,11 @@ func (adapter *Adapter) WarmStats() WarmStats {
 	return adapter.warm.stats()
 }
 
+// DetachedStats 返回脱钩完成缓存快照，供 /admin/runtime-metrics 透出。
+func (adapter *Adapter) DetachedStats() DetachedStats {
+	return adapter.detached.stats()
+}
+
 // ApplyConfig 热应用新配置：读侧每次请求取快照的字段（model、aliases、
 // client_*）与闸门参数/token 直接换值即生效；烤进 transport 的
 // base_url/proxy/force_http1 变化时整体重建上游调用束并原子换指针，
@@ -1980,7 +1985,19 @@ func (stream *responseStream) detach(ctx context.Context) {
 					},
 				})
 			}
-			entry.finish()
+			// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
+			// drainCancel 是 registry 淘汰掐泵，EOF 的 completed/failed
+			// 由 finish 尾帧定态，其余错误归 failed。
+			reason := detachFinishFailed
+			switch state := entry.finish(); {
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = detachFinishExpired
+			case errors.Is(err, context.Canceled):
+				reason = detachFinishKilled
+			case errors.Is(err, io.EOF) && state == detachedCompleted:
+				reason = detachFinishCompleted
+			}
+			stream.registry.noteFinish(stream.detachKey, reason)
 			return
 		}
 	}()

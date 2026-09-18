@@ -81,6 +81,9 @@ type detachedEntry struct {
 	// CancelFunc 值调用永远安全——淘汰路径持 registry.mu 不能去拿
 	// 流锁（锁序：stream.mu > registry.mu > entry.mu）。
 	drainCancel context.CancelFunc
+	// attached 记本条目是否兑现过一次挂接（lookup 命中时置位）：
+	// 移除路径据此算孤儿——从未被挂接的条目是纯粹的上游浪费。
+	attached bool
 }
 
 // append 追加一条已产出事件并广播给挂接方。
@@ -94,8 +97,9 @@ func (entry *detachedEntry) append(event llm.ResponseEvent) {
 
 // finish 在后台泵读到流终态时定态：末帧是 error 记 failed（可重放性按
 // 失败分类——上游责任/取消类瞬态失败的同键重试应走新上游而非吃缓存
-// 终态），否则 completed；expiresAt 按态重置。
-func (entry *detachedEntry) finish() {
+// 终态），否则 completed；expiresAt 按态重置。返回定态结果供调用方
+// 归因记账（泵的终局计数按它与 ctx 错误联合分类）。
+func (entry *detachedEntry) finish() detachedState {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if n := len(entry.events); n > 0 && entry.events[n-1].Type == llm.ResponseEventError {
@@ -110,6 +114,7 @@ func (entry *detachedEntry) finish() {
 	}
 	close(entry.notify)
 	entry.notify = make(chan struct{})
+	return entry.state
 }
 
 // poll 供挂接方按下标取下一事件：有则回事件（ok）；缓冲读空且已终态
@@ -140,6 +145,132 @@ func (entry *detachedEntry) len() int {
 type detachedRegistry struct {
 	mu      sync.Mutex
 	entries map[string]*detachedEntry
+	// 计数与事件环全在 mu 下读写：04 标记行只记 detach/attach 两个
+	// 登记时刻，泵终局、移除原因与孤儿浪费没有其它观测面——计数器
+	// 回答「缓存兑现了几次救援、烧了多少无人认领的上游算力」。
+	detaches          int64 // 累计登记（后台泵启动数）
+	attaches          int64 // 累计挂接命中
+	attachMisses      int64 // 同键请求到场但条目不可用（过期/不可重放）
+	finishedCompleted int64 // 泵终局 completed（上游 EOF 干净收尾）
+	finishedFailed    int64 // 泵终局 failed（上游错误尾帧/泵内异常）
+	finishedKilled    int64 // 泵被 registry 淘汰掐死（drainCancel）
+	finishedExpired   int64 // 泵撞 running TTL（drainCtx 到期）
+	expired           int64 // TTL 到期移除（lookup 惰性逐出 + admit 扫描）
+	evicted           int64 // 容量淘汰（最老 running 让位）
+	replaced          int64 // 同键新条目替换旧残骸
+	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
+	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
+	events            [detachedEventCap]DetachedEvent
+	eventHead         int
+	eventSize         int
+}
+
+// detachedEventCap 是缓存事件环容量：脱钩/挂接/终局/移除低频，
+// 64 条足够回看一整天的生命周期轨迹（与 gateEventCap 同档位）。
+const detachedEventCap = 64
+
+// 生命周期事件种类：admit（登记）、attach（挂接命中）、miss（同键
+// 到场但条目不可用）、evict（移除，detail 记原因）、finish（泵终局，
+// detail 记四档终态）。
+const (
+	detachedEventAdmit  = "admit"
+	detachedEventAttach = "attach"
+	detachedEventMiss   = "miss"
+	detachedEventEvict  = "evict"
+	detachedEventFinish = "finish"
+)
+
+// 移除原因（evict 事件的 detail）：expired 是 TTL 到点（lookup 惰性
+// 逐出与 admit 扫描同口径），capacity 是容量淘汰最老 running，
+// replaced 是同键新条目逐出旧残骸。
+const (
+	detachEvictExpired  = "expired"
+	detachEvictCapacity = "capacity"
+	detachEvictReplaced = "replaced"
+)
+
+// 泵终局原因（finish 事件的 detail 与 finished_* 计数桶）：completed/
+// failed 是 finish 的尾帧定态，killed 是 registry 淘汰掐泵
+// （drainCancel），ttl_expired 是 drainCtx 的 running TTL 到期。
+const (
+	detachFinishCompleted = "completed"
+	detachFinishFailed    = "failed"
+	detachFinishKilled    = "killed"
+	detachFinishExpired   = "ttl_expired"
+)
+
+// DetachedEvent 是一次缓存生命周期采样。key 只留语义键前 12 位（与 04
+// 标记行的全量键前缀对照可认，全键只是噪音）；detail 携带各事件自己的
+// 归因——evict 的移除原因、finish 的终态、attach/miss 的条目态。
+// label 是产出时算好的面板显示名，与 GateEvent 同构。
+type DetachedEvent struct {
+	At     time.Time `json:"at"`
+	Kind   string    `json:"kind"`
+	Key    string    `json:"key,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+	Label  string    `json:"label"`
+}
+
+// detachedEventLabel 是生命周期事件的面板显示名。
+func detachedEventLabel(kind, detail string) string {
+	switch kind {
+	case detachedEventAdmit:
+		return "登记"
+	case detachedEventAttach:
+		return "挂接"
+	case detachedEventMiss:
+		if detail == detachEvictExpired {
+			return "过期未命中"
+		}
+		return "不可重放"
+	case detachedEventEvict:
+		switch detail {
+		case detachEvictCapacity:
+			return "容量淘汰"
+		case detachEvictReplaced:
+			return "同键替换"
+		}
+		return "过期移除"
+	case detachedEventFinish:
+		switch detail {
+		case detachFinishCompleted:
+			return "泵完成"
+		case detachFinishKilled:
+			return "淘汰掐泵"
+		case detachFinishExpired:
+			return "泵超时"
+		}
+		return "泵失败"
+	}
+	return kind
+}
+
+// DetachedStats 是完成缓存快照，/admin/runtime-metrics 的 detached 组
+// 透出。orphan_completed 是上游浪费的条目级口径（烧掉的 token 只在
+// 内存缓冲里，盘上不可量——计数器是唯一观测面）。
+type DetachedStats struct {
+	Entries   int `json:"entries"`
+	Running   int `json:"running"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+
+	Detaches     int64 `json:"detaches"`
+	Attaches     int64 `json:"attaches"`
+	AttachMisses int64 `json:"attach_misses"`
+
+	FinishedCompleted int64 `json:"finished_completed"`
+	FinishedFailed    int64 `json:"finished_failed"`
+	FinishedKilled    int64 `json:"finished_killed"`
+	FinishedExpired   int64 `json:"finished_expired"`
+
+	Expired  int64 `json:"expired"`
+	Evicted  int64 `json:"evicted"`
+	Replaced int64 `json:"replaced"`
+
+	Orphans         int64 `json:"orphans"`
+	OrphanCompleted int64 `json:"orphan_completed"`
+
+	Events []DetachedEvent `json:"events,omitempty"` // 新在前
 }
 
 // newDetachedRegistry 创建空缓存。
@@ -148,7 +279,8 @@ func newDetachedRegistry() *detachedRegistry {
 }
 
 // lookup 查可挂接条目：running/completed 恒可挂；failed 只在可重放时
-// 挂（瞬态失败返回 nil 让调用方走新上游）；过期即逐。
+// 挂（瞬态失败返回 nil 让调用方走新上游）；过期即逐。条目缺席是普通
+// 首发不计数；条目在场却不可用记 attach_miss——同键重试确实来过。
 func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	if registry == nil || key == "" {
 		return nil
@@ -162,14 +294,24 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	entry.mu.Lock()
 	expired := time.Now().After(entry.expiresAt)
 	replayable := entry.state != detachedFailed || entry.replayable
+	state := entry.state
+	if !expired && replayable {
+		entry.attached = true
+	}
 	entry.mu.Unlock()
 	if expired {
-		registry.evictLocked(key, entry)
+		registry.attachMisses++
+		registry.pushEvent(detachedEventMiss, key, detachEvictExpired)
+		registry.evictLocked(key, entry, detachEvictExpired)
 		return nil
 	}
 	if !replayable {
+		registry.attachMisses++
+		registry.pushEvent(detachedEventMiss, key, "unreplayable")
 		return nil
 	}
+	registry.attaches++
+	registry.pushEvent(detachedEventAttach, key, state.String())
 	return entry
 }
 
@@ -184,7 +326,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	entry.expiresAt = entry.admittedAt.Add(detachedRunningTTL)
 	entry.mu.Unlock()
 	if old := registry.entries[key]; old != nil {
-		registry.evictLocked(key, old)
+		registry.evictLocked(key, old, detachEvictReplaced)
 	}
 	if len(registry.entries) >= detachedMaxEntries {
 		now := time.Now()
@@ -193,7 +335,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 			expired := now.After(e.expiresAt)
 			e.mu.Unlock()
 			if expired {
-				registry.evictLocked(k, e)
+				registry.evictLocked(k, e, detachEvictExpired)
 			}
 		}
 	}
@@ -210,25 +352,123 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 			}
 		}
 		if oldestKey != "" {
-			registry.evictLocked(oldestKey, registry.entries[oldestKey])
+			registry.evictLocked(oldestKey, registry.entries[oldestKey], detachEvictCapacity)
 		}
 	}
 	registry.entries[key] = entry
+	registry.detaches++
+	registry.pushEvent(detachedEventAdmit, key, "")
 }
 
 // evictLocked 摘出条目：running 条目同时掐后台泵的 drain ctx——泵的
 // Recv 走 ctx.Done 退场并把条目收成 failed（挂接方拿到一个截断但干净
 // 的终态）。掐的是一次性写入的 CancelFunc 而非直接 cancel 流：本函数
-// 持 registry.mu 不能去拿流锁。
-func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry) {
+// 持 registry.mu 不能去拿流锁。全部移除走这一个漏斗：按 cause 记移除
+// 计数，从未挂接的条目同时记孤儿（orphan_completed 是上游浪费口径）。
+func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, cause string) {
 	delete(registry.entries, key)
+	switch cause {
+	case detachEvictCapacity:
+		registry.evicted++
+	case detachEvictReplaced:
+		registry.replaced++
+	default:
+		registry.expired++
+	}
 	entry.mu.Lock()
 	drainCancel := entry.drainCancel
 	running := entry.state == detachedRunning
+	orphan := !entry.attached
+	completed := entry.state == detachedCompleted
 	entry.mu.Unlock()
+	if orphan {
+		registry.orphans++
+		if completed {
+			registry.orphanCompleted++
+		}
+	}
+	registry.pushEvent(detachedEventEvict, key, cause)
 	if running && drainCancel != nil {
 		drainCancel()
 	}
+}
+
+// noteFinish 记一次后台泵终局：被掐死的泵在条目移出后仍会走到这里，
+// 计数按原因四档（detachFinish*）——orphan 口径量「有没有人接」，
+// finish 口径量「泵怎么死的」，两维独立。
+func (registry *detachedRegistry) noteFinish(key, reason string) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	switch reason {
+	case detachFinishCompleted:
+		registry.finishedCompleted++
+	case detachFinishKilled:
+		registry.finishedKilled++
+	case detachFinishExpired:
+		registry.finishedExpired++
+	default:
+		registry.finishedFailed++
+	}
+	registry.pushEvent(detachedEventFinish, key, reason)
+}
+
+// pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
+// 与 04 标记行的全量键前缀对照可认，全键写进快照只是噪音。
+func (registry *detachedRegistry) pushEvent(kind, key, detail string) {
+	if len(key) > 12 {
+		key = key[:12]
+	}
+	registry.events[registry.eventHead] = DetachedEvent{
+		At:     time.Now(),
+		Kind:   kind,
+		Key:    key,
+		Detail: detail,
+		Label:  detachedEventLabel(kind, detail),
+	}
+	registry.eventHead = (registry.eventHead + 1) % detachedEventCap
+	if registry.eventSize < detachedEventCap {
+		registry.eventSize++
+	}
+}
+
+// stats 返回完成缓存快照：在场条目按态分解 + 累计计数 + 事件环
+// （新在前）。每请求一次的轮询成本是 8 条上限的线性扫。
+func (registry *detachedRegistry) stats() DetachedStats {
+	stats := DetachedStats{}
+	if registry == nil {
+		return stats
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	stats.Entries = len(registry.entries)
+	for _, entry := range registry.entries {
+		entry.mu.Lock()
+		switch entry.state {
+		case detachedCompleted:
+			stats.Completed++
+		case detachedFailed:
+			stats.Failed++
+		default:
+			stats.Running++
+		}
+		entry.mu.Unlock()
+	}
+	stats.Detaches = registry.detaches
+	stats.Attaches = registry.attaches
+	stats.AttachMisses = registry.attachMisses
+	stats.FinishedCompleted = registry.finishedCompleted
+	stats.FinishedFailed = registry.finishedFailed
+	stats.FinishedKilled = registry.finishedKilled
+	stats.FinishedExpired = registry.finishedExpired
+	stats.Expired = registry.expired
+	stats.Evicted = registry.evicted
+	stats.Replaced = registry.replaced
+	stats.Orphans = registry.orphans
+	stats.OrphanCompleted = registry.orphanCompleted
+	for i := 1; i <= registry.eventSize; i++ {
+		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])
+	}
+	return stats
 }
 
 // attachStream 是挂接到脱钩条目的只读视图：先重放已缓冲事件，

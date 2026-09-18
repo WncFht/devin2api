@@ -226,7 +226,7 @@ func TestDetachedEvictStopsPump(t *testing.T) {
 		t.Fatal("detached stream was not registered")
 	}
 	// 容量淘汰：掐 drainCtx 让泵退场，release 永不放行（泵被掐死）。
-	registry.evictLocked("k4", entry)
+	registry.evictLocked("k4", entry, detachEvictCapacity)
 	waitEntryState(t, entry, detachedFailed)
 	entry.mu.Lock()
 	last := entry.events[len(entry.events)-1]
@@ -391,5 +391,83 @@ func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
 	}
 	if registry.lookup("done") != completed {
 		t.Fatal("completed entry must not be evicted by running pressure")
+	}
+}
+
+// TestDetachedStatsCounters 钉住缓存簿记：登记/挂接/未命中/移除/孤儿/
+// 泵终局计数在各生命周期动作上恰各记一次——runtime-metrics 的
+// detached 组是泵终局与孤儿浪费的唯一观测面，计数错了无处可对。
+func TestDetachedStatsCounters(t *testing.T) {
+	registry := newDetachedRegistry()
+
+	// running 条目挂接命中：attaches+1 且 attached 置位（之后移除不算孤儿）。
+	hit := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("k1", hit)
+	if registry.lookup("k1") != hit {
+		t.Fatal("running entry should attach")
+	}
+	// 同键再登记：旧条目算 replaced 移除，attached 过不算孤儿。
+	registry.admit("k1", &detachedEntry{notify: make(chan struct{})})
+
+	// 过期条目在场时同键请求到来：attach_miss + expired 移除 + 孤儿。
+	stale := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("k2", stale)
+	stale.mu.Lock()
+	stale.expiresAt = time.Now().Add(-time.Second)
+	stale.mu.Unlock()
+	if registry.lookup("k2") != nil {
+		t.Fatal("expired entry must not attach")
+	}
+
+	// completed 无人挂接过期移除：孤儿且 orphan_completed（纯浪费口径）。
+	done := &detachedEntry{notify: make(chan struct{})}
+	registry.admit("k3", done)
+	done.append(llm.ResponseEvent{Type: llm.ResponseEventDone})
+	done.finish()
+	done.mu.Lock()
+	done.expiresAt = time.Now().Add(-time.Second)
+	done.mu.Unlock()
+	registry.lookup("k3")
+
+	// 不可重放 failed：attach_miss 但不移除（5min TTL 留在场等下一个同键）。
+	broken := &detachedEntry{notify: make(chan struct{})}
+	broken.append(llm.ResponseEvent{Type: llm.ResponseEventError, Error: &llm.AssistantMessage{
+		ErrorMessage: "http2: stream closed", Failure: &llm.Failure{Code: "internal", UpstreamFault: true},
+	}})
+	broken.finish()
+	registry.admit("k4", broken)
+	if registry.lookup("k4") != nil {
+		t.Fatal("unreplayable failed entry must not attach")
+	}
+
+	// 泵终局记账由后台泵调用方负责（detach 的泵 goroutine）——这里
+	// 直记两条覆盖 completed 与 killed 两桶。
+	registry.noteFinish("k1", detachFinishCompleted)
+	registry.noteFinish("k2", detachFinishKilled)
+
+	stats := registry.stats()
+	// 在场：k1 新条目（running）与 k4（failed）；k2/k3 已逐、k1 旧条目已替换。
+	if stats.Entries != 2 || stats.Running != 1 || stats.Failed != 1 || stats.Completed != 0 {
+		t.Fatalf("entry states = %+v", stats)
+	}
+	if stats.Detaches != 5 || stats.Attaches != 1 || stats.AttachMisses != 3 {
+		t.Fatalf("flow counters = %+v", stats)
+	}
+	if stats.Replaced != 1 || stats.Expired != 2 || stats.Evicted != 0 {
+		t.Fatalf("removal counters = %+v", stats)
+	}
+	if stats.Orphans != 2 || stats.OrphanCompleted != 1 {
+		t.Fatalf("orphan counters = %+v", stats)
+	}
+	if stats.FinishedCompleted != 1 || stats.FinishedKilled != 1 || stats.FinishedFailed != 0 {
+		t.Fatalf("finish counters = %+v", stats)
+	}
+	// 事件环新在前：最后一记是 k2 的 finish/ttl 类终局。
+	if len(stats.Events) == 0 {
+		t.Fatal("events ring empty")
+	}
+	head := stats.Events[0]
+	if head.Kind != detachedEventFinish || head.Detail != detachFinishKilled || head.Key != "k2" {
+		t.Fatalf("events head = %+v", head)
 	}
 }

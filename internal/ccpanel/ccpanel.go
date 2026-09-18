@@ -131,6 +131,12 @@ type Handler struct {
 	masterKeyFunc func() string
 	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
 	warmStats func() devin.WarmStats
+	// detachedStats 返回脱钩完成缓存快照（顶层 detached 组，首 lane
+	// 后兼容形态）；nil 时 runtime-metrics 不投 detached 组。
+	detachedStats func() devin.DetachedStats
+	// accountDetachedStats 返回逐账号脱钩缓存快照（accounts 组按号
+	// 透出）；nil 时 accounts 内无 detached 键。
+	accountDetachedStats func() map[string]devin.DetachedStats
 
 	versionMu sync.RWMutex
 	version   string
@@ -324,6 +330,18 @@ func (h *Handler) SetMasterKeyFunc(fn func() string) {
 // SetWarmStats 注入前缀保温簿记读取函数（/admin/runtime-metrics 的 warm 组）。
 func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
 	h.warmStats = fn
+}
+
+// SetDetachedStats 注入脱钩完成缓存快照源（/admin/runtime-metrics 的
+// detached 组，首 lane 后兼容形态）。
+func (h *Handler) SetDetachedStats(fn func() devin.DetachedStats) {
+	h.detachedStats = fn
+}
+
+// SetAccountDetachedStats 注入逐账号脱钩缓存快照源（accounts 组按号
+// 透出——缓存 per-lane，跨 lane 重试恒 miss，attach 率须逐号看）。
+func (h *Handler) SetAccountDetachedStats(fn func() map[string]devin.DetachedStats) {
+	h.accountDetachedStats = fn
 }
 
 // panelRoute 是路由表的一行：method+pattern 是 chi 挂载键，handler 是含

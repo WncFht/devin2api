@@ -263,9 +263,11 @@ func main() {
 	ccPanel.SetVersion(resolved)
 	ccPanel.SetGateStats(devinPool.GateStats)
 	ccPanel.SetWarmStats(devinPool.WarmStats)
+	ccPanel.SetDetachedStats(devinPool.DetachedStats)
 	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
 	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
 	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
+	ccPanel.SetAccountDetachedStats(devinPool.AccountDetachedStats)
 	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
 	// 降权簿记（quota_low 阈值判定在 adapter 内）。
 	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)

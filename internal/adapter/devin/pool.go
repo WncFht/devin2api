@@ -1375,6 +1375,27 @@ func (pool *Pool) AccountWarmStats() map[string]WarmStats {
 	return stats
 }
 
+// DetachedStats 返回首 lane 脱钩完成缓存快照（顶层 detached 段的
+// 后兼容形态）；空池回零值。
+func (pool *Pool) DetachedStats() DetachedStats {
+	if lane := pool.firstLane(); lane != nil {
+		return lane.adapter.DetachedStats()
+	}
+	return DetachedStats{}
+}
+
+// AccountDetachedStats 返回各 lane 的脱钩完成缓存快照（按账号名索引），
+// /admin/runtime-metrics 的 accounts.<name>.detached 组透出——缓存
+// per-lane，跨 lane 重试恒 miss，孤儿/attach 率必须逐号看。
+func (pool *Pool) AccountDetachedStats() map[string]DetachedStats {
+	lanes := pool.snapshot()
+	stats := make(map[string]DetachedStats, len(lanes))
+	for _, lane := range lanes {
+		stats[lane.name] = lane.adapter.DetachedStats()
+	}
+	return stats
+}
+
 // AccountLaneStates 返回各 lane 的池侧状态快照（按账号名索引），
 // /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
 func (pool *Pool) AccountLaneStates() map[string]LaneState {

@@ -355,10 +355,16 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	if h.warmStats != nil {
 		data["warm"] = warmStatsView(h.warmStats())
 	}
-	// accounts 组是号池逐账号视图：每号的闸门/保温/池侧状态各自
-	// 透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容），逐号
-	// 排障看这里。
-	if h.accountGateStats != nil || h.accountWarmStats != nil || h.accountLaneStates != nil {
+	// detached 组投脱钩完成缓存簿记：泵终局（finished_*）、移除原因
+	// 与孤儿浪费（orphans/orphan_completed）在盘上 04 标记行之外
+	// 没有其它观测面；首 lane 快照是后兼容形态。
+	if h.detachedStats != nil {
+		data["detached"] = h.detachedStats()
+	}
+	// accounts 组是号池逐账号视图：每号的闸门/保温/脱钩缓存/池侧
+	// 状态各自透出——顶层 gate/warm/detached 仍是首 lane 快照
+	//（前端后兼容），逐号排障看这里。
+	if h.accountGateStats != nil || h.accountWarmStats != nil || h.accountLaneStates != nil || h.accountDetachedStats != nil {
 		gates := map[string]devin.GateStats{}
 		if h.accountGateStats != nil {
 			gates = h.accountGateStats()
@@ -371,7 +377,11 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		if h.accountLaneStates != nil {
 			laneStates = h.accountLaneStates()
 		}
-		accounts := make(map[string]any, len(gates)+len(warms)+len(laneStates))
+		detacheds := map[string]devin.DetachedStats{}
+		if h.accountDetachedStats != nil {
+			detacheds = h.accountDetachedStats()
+		}
+		accounts := make(map[string]any, len(gates)+len(warms)+len(laneStates)+len(detacheds))
 		entry := func(name string) map[string]any {
 			if e, ok := accounts[name].(map[string]any); ok {
 				return e
@@ -390,6 +400,9 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		for name, state := range laneStates {
 			entry(name)["lane"] = state
+		}
+		for name, detached := range detacheds {
+			entry(name)["detached"] = detached
 		}
 		data["accounts"] = accounts
 	}
