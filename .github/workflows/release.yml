@@ -228,8 +228,8 @@ jobs:
           # ::error:: 都打不出来，v0.14.0 发布即踩此坑）。空输出交给
           # 调用方的显式检查报错。
           digest_of() {
-            local i out
-            for i in 1 2 3 4 5; do
+            local out
+            for _ in 1 2 3 4 5; do
               if out="$(docker buildx imagetools inspect "$1" 2>/dev/null)"; then
                 awk '/^Digest:/{print $2; exit}' <<<"$out"
                 return 0
