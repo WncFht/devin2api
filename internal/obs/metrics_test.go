@@ -107,6 +107,10 @@ func TestProcessMetrics(t *testing.T) {
 	if proc["heap_alloc_bytes"].(uint64) == 0 {
 		t.Fatalf("heap_alloc_bytes = %v", proc["heap_alloc_bytes"])
 	}
+	// 瞬时 RSS 字段必须在快照中（无数据源的平台为 0，不能缺席）。
+	if _, ok := proc["rss_current_bytes"]; !ok {
+		t.Fatalf("process snapshot missing rss_current_bytes: %v", proc)
+	}
 	// 第二次快照应有非负 CPU 百分比（相邻 rusage 差分）。
 	m.Snapshot()
 	proc, _ = m.Snapshot()["process"].(map[string]any)

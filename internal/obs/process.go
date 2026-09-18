@@ -22,6 +22,7 @@ func (m *Metrics) process() map[string]any {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	cpuSeconds, maxRSS := rusageSample()
+	currentRSS := currentRSSBytes()
 
 	m.procMu.Lock()
 	wallDelta := time.Since(m.lastCPUAt).Seconds()
@@ -49,5 +50,8 @@ func (m *Metrics) process() map[string]any {
 		"cpu_seconds":       cpuSeconds,
 		"cpu_percent":       cpuPercent,
 		"max_rss_bytes":     maxRSS,
+		// 瞬时 RSS：随真实占用起伏，区别于只涨不降的 max_rss_bytes 峰值；
+		// 无瞬时数据源的平台（见 process_*.go 的 currentRSSBytes）恒为 0。
+		"rss_current_bytes": currentRSS,
 	}
 }

@@ -32,6 +32,14 @@ func filetime100ns(ft windows.Filetime) int64 {
 	return int64(ft.HighDateTime)<<32 | int64(ft.LowDateTime)
 }
 
+// queryVMCounters 取回本进程的 VM_COUNTERS_EX；峰值与瞬时工作集共用。
+func queryVMCounters() (vmCountersEx, error) {
+	var counters vmCountersEx
+	var retLen uint32
+	err := windows.NtQueryInformationProcess(windows.CurrentProcess(), windows.ProcessVmCounters, unsafe.Pointer(&counters), uint32(unsafe.Sizeof(counters)), &retLen)
+	return counters, err
+}
+
 // rusageSample 返回进程累计 CPU 秒数（kernel+user）与峰值工作集（字节）。
 // Windows 没有 getrusage：CPU 走 GetProcessTimes，峰值 RSS 走
 // NtQueryInformationProcess(ProcessVmCounters)。
@@ -42,10 +50,19 @@ func rusageSample() (cpuSeconds float64, maxRSSBytes int64) {
 		return 0, 0
 	}
 	cpuSeconds = float64(filetime100ns(kernel)+filetime100ns(user)) / 1e7
-	var counters vmCountersEx
-	var retLen uint32
-	if err := windows.NtQueryInformationProcess(handle, windows.ProcessVmCounters, unsafe.Pointer(&counters), uint32(unsafe.Sizeof(counters)), &retLen); err != nil {
+	counters, err := queryVMCounters()
+	if err != nil {
 		return cpuSeconds, 0
 	}
 	return cpuSeconds, int64(counters.peakWorkingSetSize)
+}
+
+// currentRSSBytes 返回瞬时工作集（字节），与峰值同出一源
+// （VM_COUNTERS_EX 的 WorkingSetSize），随真实占用起伏。
+func currentRSSBytes() int64 {
+	counters, err := queryVMCounters()
+	if err != nil {
+		return 0
+	}
+	return int64(counters.workingSetSize)
 }

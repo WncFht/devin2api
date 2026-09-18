@@ -291,14 +291,18 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		"cpu_usage_percent":        getF64(proc, "cpu_percent"),
 		"cpu_user_seconds":         getF64(proc, "cpu_seconds"),
 		"cpu_system_seconds":       0.0,
-		"rss_bytes":                getU64(proc, "max_rss_bytes"),
-		"max_rss_bytes":            getU64(proc, "max_rss_bytes"),
-		"heap_alloc_bytes":         getU64(proc, "heap_alloc_bytes"),
-		"heap_sys_bytes":           getU64(proc, "heap_sys_bytes"),
-		"gc_count":                 getU64(proc, "num_gc"),
-		"gc_pause_total_ns":        uint64(getF64(proc, "gc_pause_total_ms") * 1e6),
-		"gc_cpu_percent":           getF64(proc, "gc_cpu_fraction") * 100,
-		"sse_framing_repairs":      0,
+		// rss_bytes/rss_current_bytes 是瞬时 RSS（linux 取 /proc/self/statm
+		// 常驻页口径），随真实占用起伏；max_rss_bytes 保留 ru_maxrss
+		// 只涨不降的峰值水印。无瞬时数据源的平台两字段为 0。
+		"rss_bytes":           getU64(proc, "rss_current_bytes"),
+		"rss_current_bytes":   getU64(proc, "rss_current_bytes"),
+		"max_rss_bytes":       getU64(proc, "max_rss_bytes"),
+		"heap_alloc_bytes":    getU64(proc, "heap_alloc_bytes"),
+		"heap_sys_bytes":      getU64(proc, "heap_sys_bytes"),
+		"gc_count":            getU64(proc, "num_gc"),
+		"gc_pause_total_ns":   uint64(getF64(proc, "gc_pause_total_ms") * 1e6),
+		"gc_cpu_percent":      getF64(proc, "gc_cpu_fraction") * 100,
+		"sse_framing_repairs": 0,
 	}
 	httpProxy := map[string]any{
 		"active_requests":        getI64(snap, "active_requests"),

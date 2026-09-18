@@ -7,3 +7,8 @@ package obs
 func rusageSample() (cpuSeconds float64, maxRSSBytes int64) {
 	return 0, 0
 }
+
+// currentRSSBytes 在没有 /proc 或等效接口的平台返回 0（无瞬时数据源）。
+func currentRSSBytes() int64 {
+	return 0
+}
