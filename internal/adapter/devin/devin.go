@@ -630,11 +630,16 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 路径（目录校验/构建/闸门/发送）都不发生——重放不消耗上游。
 	detachKey := detachedRequestKey(request, model)
 	if entry := adapter.detached.lookup(detachKey); entry != nil {
+		// 标记字段读取收进 entry.mu：originDir/state 在脱钩登记与
+		// finish 定态时都可能被并发写。
+		entry.mu.Lock()
+		originDir, state, buffered := entry.originDir, entry.state, len(entry.events)
+		entry.mu.Unlock()
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_attach", map[string]any{
 			"key":             detachKey,
-			"origin_dir":      entry.originDir,
-			"state":           entry.state.String(),
-			"buffered_events": entry.len(),
+			"origin_dir":      originDir,
+			"state":           state.String(),
+			"buffered_events": buffered,
 		})
 		return &attachStream{entry: entry}, nil
 	}
@@ -879,6 +884,24 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem, warmKey)
 		}
 	}
+	// 客户端哨兵：streamCtx 从 streamBase 派生不随客户端取消，而消费方
+	//（app 泵在投递点两路就绪随机选）断开后未必再进 Recv——没有哨兵
+	// 那条路径上既无人脱钩也无人杀泵，孤儿泵会阻塞在帧投递上永久泄漏。
+	// 哨兵在断开时刻持 mu 就地把流送进缓存或埋掉；与 Recv 内的同名
+	// 判定同锁串行，先到者赢。
+	go func() {
+		<-ctx.Done()
+		response.mu.Lock()
+		defer response.mu.Unlock()
+		if response.detached {
+			return
+		}
+		if response.detachable() {
+			response.detach(ctx)
+		} else {
+			response.cancel()
+		}
+	}()
 	return response, nil
 }
 
@@ -1527,10 +1550,16 @@ func pumpUpstream(ctx context.Context, upstream devinResponseReceiver) <-chan up
 
 // responseStream 从泵协程读取上游帧并依次返回 decoder 生成的事件。
 type responseStream struct {
+	// mu 串行化全部内部状态访问：单消费者契约之外还有两个潜在并发
+	// 线程——客户端哨兵（断开后消费方未必再进 Recv，由它就地判定
+	// 脱钩/杀泵）与脱钩后的后台泵（原消费方退场前可能与之短暂重叠）。
+	// Recv 全程持锁，哨兵与淘汰路径持锁后才碰流字段。
+	mu sync.Mutex
 	// frames 是泵协程产出的上游帧通道；终止帧 response 为 nil。
 	frames <-chan upstreamFrame
 	// cancel 中止上游流：看门狗判死、客户端 ctx 取消或流正常结束时调用，
-	// 打断泵协程内可能仍阻塞的 Receive。
+	// 打断泵协程内可能仍阻塞的 Receive。swap/tryResume 换流时在 mu 下
+	// 重赋值；锁外调用方经 kill() 拿当前值，裸读写 func 值有撕裂风险。
 	cancel context.CancelFunc
 	// decoder 将一个 Devin protobuf 帧转换为零个或多个中间响应事件。
 	decoder *responseDecoder
@@ -1554,7 +1583,8 @@ type responseStream struct {
 	// queue 保存已经转换、等待调用方读取的中间响应事件。
 	queue []llm.ResponseEvent
 	// producedEvents 表示上游帧已产出过任何事件：一旦为真说明内容已
-	// 开始对外流动，此后失败只能透传，不能整体重发。
+	// 开始对外流动，此后失败只能透传，不能整体重发。哨兵经 mu 读它
+	// 判定脱钩资格。
 	producedEvents bool
 	// upstreamConfirmed 标记上游已产出首个非错误帧：限流闩以此为据
 	// 提前解闩（边际态下拒绝是概率执行，成功帧即窗口已过的证据）。
@@ -1612,7 +1642,8 @@ type responseStream struct {
 	entry     *detachedEntry
 	// detached 标记本流已与客户端解耦、由后台泵续命：无进度看门狗
 	// 退役（耐心是它的全部意义，running TTL 是存活上界），静默
-	// 看门狗仍在岗——零帧意味着连接真死而非算得慢。
+	// 看门狗仍在岗——零帧意味着连接真死而非算得慢。写权限在 mu 下，
+	// 哨兵与消费方谁先到谁脱钩，后到者见此标记直接退场。
 	detached bool
 }
 
@@ -1626,10 +1657,14 @@ type devinResponseReceiver interface {
 	Err() error
 }
 
-// Recv 前进到下一个中间响应事件。单消费者契约：decoder/queue/看门狗
-// 全部是无锁内部状态，只能由消费方 goroutine 独占调用；ctx 取消让等待
+// Recv 前进到下一个中间响应事件。单消费者契约仍成立，但锁内串行是
+// 硬保证：decoder/queue/看门狗全部在 stream.mu 下访问，客户端哨兵
+// （断开后消费方未必再进 Recv，由它就地判定脱钩/杀泵）与脱钩后的
+// 后台泵也经同一把锁进场，三者不会交错读写内部状态。ctx 取消让等待
 // 中的 Recv 返回取消错误，泵协程同时被 stream.cancel 打断。
 func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
 	// 静默计时器挂在流上跨 Recv 复用：每次入等待循环前 Reset 覆盖
 	// 帧间隔。Go 1.23+ 计时器通道无缓冲，Stop/Reset 后不会投递陈旧触发，
 	// 已触发（stall.C 分支）的计时器 Reset 重新武装即可。
@@ -1662,11 +1697,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		if err := ctx.Err(); err != nil {
 			// streamCtx 从 streamBase 派生不随客户端取消：早退路径
 			// 必须显式决定上游泵的去向——已产出内容就脱钩续命进缓存，
-			// 否则杀掉（pre-content 流进缓存没有重放价值）。
-			if stream.detachable() {
-				stream.detach(ctx)
-			} else {
-				stream.cancel()
+			// 否则杀掉（pre-content 流进缓存没有重放价值）。哨兵抢先
+			// 脱钩时本消费方直接退场，cancel 会误杀归后台的泵。
+			if !stream.detached {
+				if stream.detachable() {
+					stream.detach(ctx)
+				} else {
+					stream.cancel()
+				}
 			}
 			return llm.ResponseEvent{}, err
 		}
@@ -1809,6 +1847,11 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.finished = true
 		case <-ctx.Done():
 			stall.Stop()
+			if stream.detached {
+				// 哨兵抢先脱钩：泵已归后台，finish/杀泵都归后台泵的
+				// 退出路径负责，本消费方原样收取消退场。
+				return llm.ResponseEvent{}, context.Cause(ctx)
+			}
 			if stream.detachable() {
 				// 已产出内容的流不随客户端一起死：脱钩进完成缓存由
 				// 后台泵续命，同键重试重放缓冲。取消错误原样返回给
@@ -1886,14 +1929,19 @@ func (stream *responseStream) detachable() bool {
 		stream.producedEvents && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
 }
 
-// detach 把流从客户端生命周期解耦：条目登记进完成缓存，取消两个
+// detach 把流从客户端生命周期解耦：条目登记进完成缓存，停掉两个
 // 看门狗计时器（消费方的 defer 只停它捕获的旧表，互不影响），然后
 // 起后台泵续消费直到终态——缓冲经 tee 持续追加，挂接方按序追帧。
-// 泵的存活上界是 running TTL：超时走 Recv 的 ctx.Done 正常收尾
-// （detached 态不再二次脱钩），产出一个真实 error 事件作终态。
+// 调用方须持 stream.mu（消费方 Recv 与哨兵都满足）；由此串行保证
+// 同一时刻只有一个 Recv 在场，后台泵的第一轮 Recv 会等持锁方退场。
+// 泵的存活上界是 running TTL：到期/被容量淘汰掐 drainCtx 退场时
+// 补一条终局错误——截断前缀若误标 completed 会把半成品当完整响应
+// 重放给同键重试。
 func (stream *responseStream) detach(ctx context.Context) {
 	entry := stream.entry
+	entry.mu.Lock()
 	entry.originDir = stream.recorder.Dir()
+	entry.mu.Unlock()
 	stream.detached = true
 	if stream.stall != nil {
 		stream.stall.Stop()
@@ -1903,21 +1951,48 @@ func (stream *responseStream) detach(ctx context.Context) {
 		stream.progress.Stop()
 		stream.progress = nil
 	}
-	stream.registry.admit(stream.detachKey, entry, stream)
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedRunningTTL)
+	entry.mu.Lock()
+	entry.drainCancel = drainCancel
+	entry.mu.Unlock()
+	stream.registry.admit(stream.detachKey, entry)
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", map[string]any{
 		"key":             stream.detachKey,
 		"buffered_events": entry.len(),
 	})
-	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedRunningTTL)
 	go func() {
 		defer drainCancel()
+		// 退场必收尸：TTL/淘汰走的 ctx.Done 分支不杀泵（detached 态
+		// 直接退场），不补这一刀泵协程会随 streamBase 永久阻塞在
+		// Receive 上。kill 在 mu 下拿当前 cancel，换流后也不会杀错。
+		defer stream.kill()
 		for {
-			if _, err := stream.Recv(drainCtx); err != nil {
-				entry.finish()
-				return
+			_, err := stream.Recv(drainCtx)
+			if err == nil {
+				continue
 			}
+			if !errors.Is(err, io.EOF) {
+				entry.append(llm.ResponseEvent{
+					Type: llm.ResponseEventError,
+					Error: &llm.AssistantMessage{
+						ErrorMessage: "detached pump stopped: " + err.Error(),
+						Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
+					},
+				})
+			}
+			entry.finish()
+			return
 		}
 	}()
+}
+
+// kill 中止上游泵：持 mu 拿当前 cancel 值再调——swap/tryResume 换流时
+// 在 mu 下重赋值该字段，func 值两词，裸读写有撕裂风险。只供锁外
+// 调用方（后台泵退场 defer）；流内持锁路径直接调 stream.cancel()。
+func (stream *responseStream) kill() {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	stream.cancel()
 }
 
 // tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：

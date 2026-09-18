@@ -161,6 +161,85 @@ func TestDetachedStreamKeepsPumping(t *testing.T) {
 	}
 }
 
+// TestDetachedWatcherPathCoversAbandonedConsumer 钉住哨兵语义：消费方
+// 断开后不再进 Recv（app 泵投递点两路就绪随机选中 ctx.Done）时，
+// Adapter.Stream 里持 mu 的哨兵判定块同样能把流送进缓存——否则那条
+// 路径上既无人脱钩也无人杀泵，孤儿泵随 streamBase 永久泄漏。
+func TestDetachedWatcherPathCoversAbandonedConsumer(t *testing.T) {
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "k3", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	// 消费方读到首个事件就弃流，模拟断开落在投递窗口而非 Recv 里。
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	// 哨兵判定块与 Adapter.Stream 内同源：持 mu 就地脱钩或杀泵。
+	stream.mu.Lock()
+	if !stream.detached {
+		if stream.detachable() {
+			stream.detach(ctx)
+		} else {
+			stream.cancel()
+		}
+	}
+	stream.mu.Unlock()
+	entry := registry.lookup("k3")
+	if entry == nil {
+		t.Fatal("sentinel path did not register the detached stream")
+	}
+	close(receiver.release)
+	waitEntryState(t, entry, detachedCompleted)
+	replayed, err := collectAttached(&attachStream{entry: entry})
+	if err != nil {
+		t.Fatalf("attach Recv: %v", err)
+	}
+	if replayed[len(replayed)-1].Type != llm.ResponseEventDone {
+		t.Fatalf("last replayed event = %v, want done", replayed[len(replayed)-1].Type)
+	}
+}
+
+// TestDetachedEvictStopsPump 钉住容量淘汰的杀泵路径：evict 掐的是
+// drainCancel（一次性 CancelFunc），后台泵走 ctx.Done 退场并把条目
+// 收成 failed——截断前缀不得误标 completed 重放给同键重试。
+func TestDetachedEvictStopsPump(t *testing.T) {
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "k4", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("k4")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	// 容量淘汰：掐 drainCtx 让泵退场，release 永不放行（泵被掐死）。
+	registry.evictLocked("k4", entry)
+	waitEntryState(t, entry, detachedFailed)
+	entry.mu.Lock()
+	last := entry.events[len(entry.events)-1]
+	replayable := entry.replayable
+	entry.mu.Unlock()
+	if last.Type != llm.ResponseEventError {
+		t.Fatalf("terminal event = %v, want synthetic error", last.Type)
+	}
+	if replayable {
+		t.Fatal("upstream-fault failed entry must not be replayable")
+	}
+}
+
 // TestDetachedAttachFollowsLive 钉住 running 挂接：挂接方先重放已缓冲
 // 前缀，然后按下标追新事件直到后台泵读到终态。
 func TestDetachedAttachFollowsLive(t *testing.T) {
@@ -258,7 +337,7 @@ func TestDetachedEntryFinishClassifies(t *testing.T) {
 	entry.mu.Unlock()
 
 	registry := newDetachedRegistry()
-	registry.admit("f1", entry, nil)
+	registry.admit("f1", entry)
 	if got := registry.lookup("f1"); got != entry {
 		t.Fatal("client-fixable failed entry should replay")
 	}
@@ -269,7 +348,7 @@ func TestDetachedEntryFinishClassifies(t *testing.T) {
 		ErrorMessage: "http2: stream closed", Failure: &llm.Failure{Code: "internal", UpstreamFault: true},
 	}})
 	broken.finish()
-	registry.admit("f2", broken, nil)
+	registry.admit("f2", broken)
 	if got := registry.lookup("f2"); got != nil {
 		t.Fatal("upstream-fault failed entry must not replay")
 	}
@@ -300,12 +379,12 @@ func TestProgressDeadlineTiers(t *testing.T) {
 func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
 	registry := newDetachedRegistry()
 	completed := &detachedEntry{notify: make(chan struct{}), state: detachedCompleted}
-	registry.admit("done", completed, nil)
+	registry.admit("done", completed)
 	old := &detachedEntry{notify: make(chan struct{}), state: detachedRunning}
-	registry.admit("old", old, nil)
+	registry.admit("old", old)
 	time.Sleep(time.Millisecond)
 	for i := 0; i < detachedMaxEntries-1; i++ {
-		registry.admit(strings.Repeat("x", 4)+string(rune('a'+i)), &detachedEntry{notify: make(chan struct{}), state: detachedRunning}, nil)
+		registry.admit(strings.Repeat("x", 4)+string(rune('a'+i)), &detachedEntry{notify: make(chan struct{}), state: detachedRunning})
 	}
 	if registry.lookup("old") != nil {
 		t.Fatal("oldest running entry should have been evicted")

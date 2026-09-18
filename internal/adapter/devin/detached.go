@@ -76,9 +76,11 @@ type detachedEntry struct {
 	// admittedAt/expiresAt 由 registry.admit 与 finish 按态写定。
 	admittedAt time.Time
 	expiresAt  time.Time
-	// stream 是后台泵持有的上游流句柄：running 态被淘汰时经它 cancel
-	// 杀掉泵（TTL 兜底之外的容量淘汰路径）。
-	stream *responseStream
+	// drainCancel 是后台泵 ctx 的取消柄：running 条目被淘汰时掐它让
+	// 泵自行退场（TTL 兜底之外的容量淘汰路径）。一次性写入的
+	// CancelFunc 值调用永远安全——淘汰路径持 registry.mu 不能去拿
+	// 流锁（锁序：stream.mu > registry.mu > entry.mu）。
+	drainCancel context.CancelFunc
 }
 
 // append 追加一条已产出事件并广播给挂接方。
@@ -174,13 +176,12 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 // admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶先
 // 扫过期项，再逐最老的 running 条目。同键旧条目（前一次同请求脱钩的
 // 残骸）先逐出再登记——两条同键后台泵同跑是纯粹的配额浪费。
-func (registry *detachedRegistry) admit(key string, entry *detachedEntry, stream *responseStream) {
+func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	entry.mu.Lock()
 	entry.admittedAt = time.Now()
 	entry.expiresAt = entry.admittedAt.Add(detachedRunningTTL)
-	entry.stream = stream
 	entry.mu.Unlock()
 	if old := registry.entries[key]; old != nil {
 		registry.evictLocked(key, old)
@@ -215,17 +216,18 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry, stream
 	registry.entries[key] = entry
 }
 
-// evictLocked 摘出条目：running 条目同时 cancel 后台泵——泵的下一次
-// Recv 会看到帧通道关闭，按 EOF 收尾并 finish 条目（挂接方拿到一个
-// 截断但干净的终态）。
+// evictLocked 摘出条目：running 条目同时掐后台泵的 drain ctx——泵的
+// Recv 走 ctx.Done 退场并把条目收成 failed（挂接方拿到一个截断但干净
+// 的终态）。掐的是一次性写入的 CancelFunc 而非直接 cancel 流：本函数
+// 持 registry.mu 不能去拿流锁。
 func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry) {
 	delete(registry.entries, key)
 	entry.mu.Lock()
-	stream := entry.stream
+	drainCancel := entry.drainCancel
 	running := entry.state == detachedRunning
 	entry.mu.Unlock()
-	if running && stream != nil {
-		stream.cancel()
+	if running && drainCancel != nil {
+		drainCancel()
 	}
 }
 

@@ -79,7 +79,7 @@ curl -sN http://localhost:3003/v1/responses \
 
 看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ 无进度期限（只认产出事件帧的内容进度探测，两档：产出前 `upstreamNoProgressTimeout`=10min，产出过内容后 `devin.no_progress_timeout_seconds` 默认 45min——上游在工具调用参数阶段可静默计算 15-25min 只发心跳，pre 档必误杀）。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。内容已下发后的截断走续传而非整体重发：在飞块物化进 assistant 回显、追加 "continue" 用户消息重发（`maxStreamResumes`=2），客户端先收块 end 接缝再续新块；在飞工具调用与已收 stopReason/停止序列截断的流不续，按错误透传。
 
-客户端断连不杀「已产出内容」的上游流：流脱钩登记进进程内完成缓存（键是 02 投影剔除 session_key/dropped 后的语义哈希，model 用解析后 uid；容量 8，TTL running 45min / completed 60min / failed 5min，触顶逐过期再逐最老 running），后台泵续消费并缓冲全部事件。同键重试在 `Stream` 入口命中即重放——completed 秒回全量、running 重放前缀后按下标追帧、failed 仅在失败可重放（非上游责任/取消类）时重放终态、否则当未命中走新上游。脱钩写 `detached` 标记行进原 dir 的 04，挂接写 `detached_attach` 进重试 dir 的 04（带 `origin_dir` 回指）。pre-content 断开不脱钩（没有可重放前缀）；脱钩泵关掉无进度看门狗（耐心是它的意义，running TTL 是存活上界）但保留 stall 看门狗（零帧=连接真死）。注意原 dir 完结后 04/05 不再追写——后台泵后续帧的取证只在条目缓冲里，不在盘上。
+客户端断连不杀「已产出内容」的上游流：流脱钩登记进进程内完成缓存（键是 02 投影剔除 session_key/dropped 后的语义哈希，model 用解析后 uid；容量 8，TTL running 45min / completed 60min / failed 5min，触顶逐过期再逐最老 running），后台泵续消费并缓冲全部事件。同键重试在 `Stream` 入口命中即重放——completed 秒回全量、running 重放前缀后按下标追帧、failed 仅在失败可重放（非上游责任/取消类）时重放终态、否则当未命中走新上游。脱钩写 `detached` 标记行进原 dir 的 04，挂接写 `detached_attach` 进重试 dir 的 04（带 `origin_dir` 回指）。pre-content 断开不脱钩（没有可重放前缀）；脱钩泵关掉无进度看门狗（耐心是它的意义，running TTL 是存活上界）但保留 stall 看门狗（零帧=连接真死）。断开判定有两条腿：消费方 Recv 的 ctx.Done 分支 + `Stream` 起的哨兵协程（app 泵投递点两路就绪随机选，断开后可能不再进 Recv——没哨兵那条路径会漏成「无人杀也无人养」的孤儿泵）；两侧持同一把 stream.mu 就地判定，先到者赢。running 条目被 TTL/容量淘汰掐 drain ctx 退场时补一条终局错误记 failed（截断前缀不误标 completed），正常 EOF 才记 completed。注意原 dir 完结后 04/05 不再追写——后台泵后续帧的取证只在条目缓冲里，不在盘上。
 
 直连同样失败 → 问题在 devin-2api/上游，与 ccload 无关。
 
