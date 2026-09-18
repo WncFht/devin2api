@@ -4,9 +4,11 @@ package devin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -132,10 +134,67 @@ type rateGate struct {
 	events    [gateEventCap]GateEvent
 	eventHead int
 	eventSize int
+	// waits/waitHead/waitSize 是 wait 结局样本环（与 events 同构）：
+	// 每次评估从进闸到结局各记一条——放行/拒绝/取消全录，无幸存者
+	// 口径偏差；waitEvals 是启动以来累计评估数（环满后 Samples 饱和、
+	// Evals 继续走）。stats 聚合出分类等待分位，是 expectedWait
+	// 估计器的实测校准面。
+	waits     [gateWaitCap]gateWaitSample
+	waitHead  int
+	waitSize  int
+	waitEvals int
 }
 
 // gateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
 const gateEventCap = 64
+
+// gateWaitCap 是每 lane 等待样本环容量：80 RPM 配额下约覆盖最近三个
+// 窗口的评估量，足够分位估计又不让面板轮询载荷膨胀。
+const gateWaitCap = 256
+
+// 等待结局词表：admit=放行、reject=闸门拒绝（reason 记 gateReason*）、
+// cancel=ctx 取消（客户端断连/打断）。三态全录——logs 的 transform
+// 段只反映放行幸存者，估计器校准需要全结局样本。
+const (
+	gateWaitAdmit  = "admit"
+	gateWaitReject = "reject"
+	gateWaitCancel = "cancel"
+)
+
+// gateWaitSample 是一次 wait 评估的实测记录：进闸时刻、墙钟等待时长
+// （与 X-Gate-Wait-Ms 同源口径）、请求类与结局。
+type gateWaitSample struct {
+	at      time.Time
+	wait    time.Duration
+	class   string // adapter.ClassFG / ClassBG
+	outcome string // gateWait* 词表
+	reason  string // outcome=reject 时的 gateReason*，其余空
+}
+
+// GateWait 是等待样本环的聚合视图：All 是全样本摘要，Fg/Bg 是它的
+// 分类切片；Since 标出环覆盖期起点，Rejects 按 gateReason* 分账。
+type GateWait struct {
+	Samples int             `json:"samples"`           // 环内样本数（≤ gateWaitCap）
+	Evals   int             `json:"evals"`             // 进程启动以来 wait 评估总数
+	Since   *time.Time      `json:"since,omitempty"`   // 最老样本时刻（环覆盖期起点）
+	Rejects map[string]int  `json:"rejects,omitempty"` // 环内拒绝按 gateReason* 分账
+	All     GateWaitSummary `json:"all"`
+	Fg      GateWaitSummary `json:"fg"`
+	Bg      GateWaitSummary `json:"bg"`
+}
+
+// GateWaitSummary 是一组等待样本的聚合读数：样本数、墙钟等待的
+// 均值/分位/峰值（毫秒），以及拒绝/取消结局计数——后两者揭示
+// 幸存者口径（仅放行）看不见的尾部。
+type GateWaitSummary struct {
+	Count   int   `json:"count"`
+	MeanMs  int64 `json:"mean_ms"`
+	P50Ms   int64 `json:"p50_ms"`
+	P90Ms   int64 `json:"p90_ms"`
+	MaxMs   int64 `json:"max_ms"`
+	Rejects int   `json:"rejects"`
+	Cancels int   `json:"cancels"`
+}
 
 // 闩迁移事件种类：latched（上游限流上闩/延闩）、released（成功帧提前
 // 解闩）、expired（闩到期自然失效）、restored（重启从持久态恢复
@@ -247,6 +306,10 @@ type GateStats struct {
 	// LastWindow 是最近一个被关闭窗口的聚合行（与落库 gate_windows
 	// 同一份快照）；进程内零窗口翻转或持久层未接线时为 nil。
 	LastWindow *store.GateWindow `json:"last_window,omitempty"`
+	// Wait 是最近 gateWaitCap 次 wait 评估的分类聚合：实测等待分位
+	// 是 expectedWait 估计器的校准面；环覆盖全结局（含拒绝与取消），
+	// 补上 transform 段看不见的尾部。进程内尚无评估时为 nil。
+	Wait *GateWait `json:"wait,omitempty"`
 }
 
 // GateLatchRange 是一段闩时段；Start 为 nil 表示开窗事件已滚出事件环
@@ -566,7 +629,68 @@ func (gate *rateGate) stats() GateStats {
 		stats.LimitedUntil = &until
 	}
 	stats.LatchRanges = gate.latchRanges(now)
+	stats.Wait = gate.waitView()
 	return stats
+}
+
+// waitView 把样本环聚合成分类摘要：等待分位按墙钟毫秒计，结局计数
+// 同步分出（拒绝再按 reason 细账）。调用方须持 mu。
+func (gate *rateGate) waitView() *GateWait {
+	if gate.waitSize == 0 {
+		return nil
+	}
+	view := &GateWait{Samples: gate.waitSize, Evals: gate.waitEvals}
+	all := make([]gateWaitSample, 0, gate.waitSize)
+	var fg, bg []gateWaitSample
+	for i := gate.waitSize; i >= 1; i-- {
+		s := gate.waits[(gate.waitHead-i+gateWaitCap)%gateWaitCap]
+		if s.outcome == gateWaitReject {
+			if view.Rejects == nil {
+				view.Rejects = map[string]int{}
+			}
+			view.Rejects[s.reason]++
+		}
+		all = append(all, s)
+		if s.class == adapter.ClassBG {
+			bg = append(bg, s)
+		} else {
+			fg = append(fg, s)
+		}
+	}
+	since := all[0].at // 环按写入序遍历，首元素即最老样本
+	view.Since = &since
+	view.All = summarizeWaits(all)
+	view.Fg = summarizeWaits(fg)
+	view.Bg = summarizeWaits(bg)
+	return view
+}
+
+// summarizeWaits 聚合一组等待样本：分位取最近秩（nearest-rank），
+// 结局计数与样本同窗。
+func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
+	n := len(samples)
+	if n == 0 {
+		return GateWaitSummary{}
+	}
+	waits := make([]time.Duration, n)
+	var sum time.Duration
+	out := GateWaitSummary{Count: n}
+	for i, s := range samples {
+		waits[i] = s.wait
+		sum += s.wait
+		switch s.outcome {
+		case gateWaitReject:
+			out.Rejects++
+		case gateWaitCancel:
+			out.Cancels++
+		}
+	}
+	slices.Sort(waits)
+	out.MeanMs = sum.Milliseconds() / int64(n)
+	out.P50Ms = waits[int(float64(n-1)*0.5)].Milliseconds()
+	out.P90Ms = waits[int(float64(n-1)*0.9)].Milliseconds()
+	out.MaxMs = waits[n-1].Milliseconds()
+	return out
 }
 
 // gateAdmission 是闸门准入面的窄快照：闩态、可发区间与桶位四元供
@@ -731,7 +855,7 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 //     的看到满桶按剩余预算决定再睡或快败——分钟粒度下排序公平性
 //     不值得换复杂度。睡醒后不直接放行，回到循环首重新评估——
 //     睡眠期间闩态可能已变。
-func (gate *rateGate) wait(ctx context.Context) error {
+func (gate *rateGate) wait(ctx context.Context) (err error) {
 	if gate == nil {
 		return nil
 	}
@@ -748,6 +872,9 @@ func (gate *rateGate) wait(ctx context.Context) error {
 	// entered 用真实墙钟：gate.now 在测试里是假钟，而回执的 WaitMS
 	// 是客户端可见的排队耗时。
 	entered := time.Now()
+	// 每次评估的结局记入等待样本环：defer 覆盖全部出口（放行/拒绝/
+	// 取消），测量口径与回执 WaitMS 的 time.Since(entered) 一致。
+	defer func() { gate.recordWait(class, err, entered) }()
 	for {
 		gate.mu.Lock()
 		if sleeping {
@@ -885,6 +1012,33 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// recordWait 把一次 wait 评估的实测结局写进样本环：结局按 err
+// 归类——nil=放行、LocalGate Failure=拒绝（记 reason）、其余
+// =ctx 取消。等待时长取墙钟（与 X-Gate-Wait-Ms 同口径）；假钟
+// 测试里睡的是真 timer，样本时长即真实经过。调用方不得持 mu——
+// wait 各出口先解锁再返回，defer 才到这里取锁。
+func (gate *rateGate) recordWait(class string, err error, entered time.Time) {
+	sample := gateWaitSample{at: entered, wait: time.Since(entered), class: class}
+	var failure *llm.Failure
+	switch {
+	case err == nil:
+		sample.outcome = gateWaitAdmit
+	case errors.As(err, &failure) && failure.LocalGate:
+		sample.outcome = gateWaitReject
+		sample.reason = failure.GateReason
+	default:
+		sample.outcome = gateWaitCancel
+	}
+	gate.mu.Lock()
+	gate.waits[gate.waitHead] = sample
+	gate.waitHead = (gate.waitHead + 1) % gateWaitCap
+	if gate.waitSize < gateWaitCap {
+		gate.waitSize++
+	}
+	gate.waitEvals++
+	gate.mu.Unlock()
 }
 
 // admitLocked 记账一次闸门放行并回填回执：桶总量与类别分列同增，

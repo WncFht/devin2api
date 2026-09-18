@@ -820,6 +820,63 @@ func TestRateGateVerdictReceipt(t *testing.T) {
 	}
 }
 
+// 等待样本环：wait 各结局（放行/拒绝/取消）各记一条实测墙钟等待，
+// stats 聚合出分类分位——expectedWait 估计器的实测校准面。
+func TestRateGateWaitSamples(t *testing.T) {
+	// BgMaxHold 压到 100ms：bg 桶满的 ~60s 预计等待超预算即快败，
+	// 不会真睡（fg maxHold=30s 同理——59.9s 预计等待直接拒）。
+	gate := newRateGate(GateConfig{MaxRPM: 1, BgMaxHold: 100 * time.Millisecond}, nil, "")
+	if gate.stats().Wait != nil {
+		t.Fatal("Wait view should be nil before any evaluation")
+	}
+	offsetGateClock(gate, 1.9) // 死区尾：睡到 :02 开放 ~100ms 真等
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait error = %v, want pass after short sleep", err)
+	}
+	// quota=1 已被睡醒者占掉：第二个请求桶满快败 → reject 样本。
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+		t.Fatalf("bucket-full wait = %v, want *llm.Failure", err)
+	}
+	// bg 同样桶满快败 → bg 分类样本。
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) {
+		t.Fatalf("bg wait = %v, want *llm.Failure", err)
+	}
+	// 已取消 ctx → cancel 样本（loop 首检查即返回）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := gate.wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait = %v, want context.Canceled", err)
+	}
+	view := gate.stats().Wait
+	if view == nil || view.Samples != 4 || view.Evals != 4 {
+		t.Fatalf("wait view = %+v, want 4 samples/4 evals", view)
+	}
+	if view.Since == nil {
+		t.Fatal("Since = nil, want oldest sample timestamp")
+	}
+	fg := view.Fg
+	if fg.Count != 3 || fg.Rejects != 1 || fg.Cancels != 1 {
+		t.Fatalf("fg summary = %+v, want count=3 rejects=1 cancels=1", fg)
+	}
+	// 睡过 ~100ms 的放行样本撑起峰值与均值；中位数落在两个即时样本
+	// 上是 0，属预期形状（快败/取消的墙钟等待本就接近零）。
+	if fg.MaxMs < 50 || fg.MeanMs <= 0 || fg.P50Ms != 0 {
+		t.Fatalf("fg wait quantiles should reflect the ~100ms sleep: %+v", fg)
+	}
+	bg := view.Bg
+	if bg.Count != 1 || bg.Rejects != 1 {
+		t.Fatalf("bg summary = %+v, want count=1 rejects=1", bg)
+	}
+	if view.All.Count != 4 || view.All.Rejects != 2 || view.All.Cancels != 1 {
+		t.Fatalf("all summary = %+v, want count=4 rejects=2 cancels=1", view.All)
+	}
+	if view.Rejects[gateReasonQuota] != 2 {
+		t.Fatalf("reject reasons = %v, want quota:2", view.Rejects)
+	}
+}
+
 // tryAdmit 计入 bg 账：保温 ping 视同最低优先级背景流量，
 // window_used_bg 的观测口径含它。
 func TestRateGateTryAdmitCountsBg(t *testing.T) {
