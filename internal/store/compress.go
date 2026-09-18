@@ -114,9 +114,12 @@ func encodePayload(zw *gzip.Writer, data []byte) (stored []byte, usize int64) {
 
 // EncodePayloadDelta 以 base 为字典把 data 编成 zstd delta 帧（raw
 // content dict，patch-from 语义）：同目录 02/03-devin-request* 相对
-// 01 的差异只剩投影改写的结构部分，残差实测约原文 1.5%（02）与
-// 4.5%（03）。档位取 SpeedFastest（≈ zstd CLI -3）——recon 实测它
-// 是残差/耗时性价比点，更高档的边际收益换不回编码耗时。
+// 01 的差异只剩投影改写的结构部分。档位取 SpeedBetterCompression——
+// SpeedFastest 的 dict 编码器是 32K 槽单探针快表（enc_fast.go
+// fastEncoderDict，tableBits=15），dict 超 ~300KB 碰撞饱和、残差随
+// 字典尺寸单调劣化（生产实测 0.6%@150K → 41.6%@750K dict）；level 3
+// 全尺寸段覆盖且部分场景编码更快。「SpeedFastest ≈ zstd CLI -3」是
+// 错误等价——CLI -3 对应的是 klauspost SpeedBetterCompression。
 // base 为空或残差收益不达阈值时回退 EncodePayload 独立存储——读侧
 // 按魔数自判形态，回退不需要任何标记位。
 func EncodePayloadDelta(data, base []byte) (stored []byte, usize int64) {
@@ -124,7 +127,7 @@ func EncodePayloadDelta(data, base []byte) (stored []byte, usize int64) {
 		return EncodePayload(data)
 	}
 	zw, err := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.SpeedFastest),
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
 		zstd.WithEncoderConcurrency(1),
 		zstd.WithEncoderDictRaw(deltaDictID, base),
 	)
