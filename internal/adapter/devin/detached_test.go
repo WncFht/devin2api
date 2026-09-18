@@ -97,6 +97,22 @@ func waitEntryState(t *testing.T, entry *detachedEntry, want detachedState) {
 	t.Fatalf("entry state = %v, want %v", entry.state, want)
 }
 
+// waitRegistryStat 轮询缓存快照直到谓词命中：泵终局记账发生在
+// finish 之后的独立调用，entry 定态观察不到它。
+func waitRegistryStat(t *testing.T, registry *detachedRegistry, match func(DetachedStats) bool) DetachedStats {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		stats := registry.stats()
+		if match(stats) {
+			return stats
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("stats did not reach target: %+v", registry.stats())
+	return DetachedStats{}
+}
+
 // collectAttached 读干一条挂接流到 io.EOF。
 func collectAttached(stream llm.ResponseStream) ([]llm.ResponseEvent, error) {
 	var events []llm.ResponseEvent
@@ -469,5 +485,58 @@ func TestDetachedStatsCounters(t *testing.T) {
 	head := stats.Events[0]
 	if head.Kind != detachedEventFinish || head.Detail != detachFinishKilled || head.Key != "k2" {
 		t.Fatalf("events head = %+v", head)
+	}
+}
+
+// TestDetachedPumpFinishAccounting 钉住泵终局的归因记账：后台泵 EOF
+// 收口记 finished_completed，被 registry 淘汰掐死记 finished_killed
+// ——两档走真实 detach→泵→finish 路径，与 orphan（有没有人接）正交。
+func TestDetachedPumpFinishAccounting(t *testing.T) {
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "p1", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	close(receiver.release)
+	stats := waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.FinishedCompleted == 1
+	})
+	if stats.FinishedFailed != 0 || stats.FinishedKilled != 0 || stats.FinishedExpired != 0 {
+		t.Fatalf("clean EOF pump misaccounted: %+v", stats)
+	}
+
+	// 淘汰掐死：第二条泵被 evict 掐 drainCancel → finished_killed。
+	receiver2 := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream2 := detachedTestStream(registry, "p2", receiver2)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	drainUntil(t, stream2, ctx2, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel2()
+	if _, err := stream2.Recv(ctx2); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry2 := registry.lookup("p2")
+	if entry2 == nil {
+		t.Fatal("second detached stream was not registered")
+	}
+	registry.evictLocked("p2", entry2, detachEvictCapacity)
+	stats = waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.FinishedKilled == 1
+	})
+	if stats.Evicted != 1 || stats.FinishedCompleted != 1 {
+		t.Fatalf("evicted pump misaccounted: %+v", stats)
 	}
 }
