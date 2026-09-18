@@ -530,17 +530,26 @@ func TestRateGateTryAdmitNilGate(t *testing.T) {
 	}
 }
 
-// ping 占用的是正式请求的配额：tryAdmit 放行后 wait 看到满桶——
-// 两条路径共用 bucketUsed 一本账。
+// ping 与 bg 共用 quota-reserve 上界同一本账：tryAdmit 放行占用的
+// 桶位让随后的 bg 请求更早触顶（reason=quota），fg 不受预留约束
+// 照常进预留槽放行。
 func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
-	pinGateClock(gate, 10)
+	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	pinGateClock(gate, 50) // 爬坡额度 ceil(2*48/56)=2 = quota-reserve：纯预留约束
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	if !gate.tryAdmit() {
 		t.Fatal("tryAdmit = false, want admit")
 	}
+	// quota-reserve=2：ping 已占 1 槽，bg 再进 1 条即触顶。
+	if err := gate.wait(bgCtx); err != nil {
+		t.Fatalf("bg wait error = %v, want pass (one slot left)", err)
+	}
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
-		t.Fatalf("wait after admitted ping error = %v, want *llm.Failure (bucket exhausted by ping)", err)
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bg wait error = %v, want *llm.Failure reason=quota (ping+bg exhausted quota-reserve)", err)
+	}
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("fg wait error = %v, want pass (reserve slots are for fg)", err)
 	}
 }
 
@@ -775,5 +784,53 @@ func TestRateGateTryAdmitCountsBg(t *testing.T) {
 	stats := gate.stats()
 	if stats.WindowUsed != 1 || stats.WindowUsedBg != 1 || stats.WindowUsedFg != 0 {
 		t.Fatalf("window used = %d (fg %d, bg %d), want 1 (0, 1)", stats.WindowUsed, stats.WindowUsedFg, stats.WindowUsedBg)
+	}
+}
+
+// ping 不得占用 fg 预留槽：预留把 ping 的桶位上界压到 quota-reserve，
+// 桶未满但已用数触界时 tryAdmit 拒绝——与 wait 的 bg 准入同一口径；
+// 界内照常放行，fg 不受约束进预留槽。
+func TestRateGateTryAdmitRespectsFgReserve(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 2}, nil, "")
+	pinGateClock(gate, 57) // 窗口尾：爬坡已收敛到 quota-reserve，隔离纯预留约束
+	// reserve = 2（仅 margin，无 EMA/waiters）→ ping 上界 quota-reserve = 6。
+	for i := 0; i < 6; i++ {
+		if !gate.tryAdmit() {
+			t.Fatalf("tryAdmit %d = false, want admit (under quota-reserve)", i)
+		}
+	}
+	// bucketUsed=6=quota-reserve < quota=8：桶未满，预留槽不许 ping 占。
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true at quota-reserve, want false (reserve slots are for fg)")
+	}
+	if gate.bucketUsed != 6 {
+		t.Fatalf("bucketUsed = %d, want 6 (rejected ping must not count)", gate.bucketUsed)
+	}
+	// fg 照常进预留槽：预留只对 bg/ping 生效。
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("fg wait error = %v, want pass (reserve only constrains bg/ping)", err)
+	}
+}
+
+// ping 与 bg 共用爬坡额度：窗口前段额度尚未放出时 ping 同样被挡，
+// 不给同拍到期的多条目齐射穿坡——爬坡限的是 bg 类计数，ping 计在其中。
+func TestRateGateTryAdmitRespectsPaceRamp(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 2}, nil, "")
+	clock := pinGateClock(gate, 10) // 经过 8s：额度 ceil(6*8/56)=1
+	if !gate.tryAdmit() {
+		t.Fatal("tryAdmit = false, want admit (first ramp slot)")
+	}
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true with ramp exhausted, want false")
+	}
+	// :40 经过 38s：额度 ceil(6*38/56)=5——已用 1，再放 4 条到界。
+	clock.t = clock.t.Add(30 * time.Second)
+	for i := 0; i < 4; i++ {
+		if !gate.tryAdmit() {
+			t.Fatalf("tryAdmit %d at :40 = false, want admit (ramp released)", i)
+		}
+	}
+	if gate.tryAdmit() {
+		t.Fatal("tryAdmit = true at :40 ramp bound, want false")
 	}
 }

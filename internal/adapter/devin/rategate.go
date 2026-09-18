@@ -773,11 +773,12 @@ func (gate *rateGate) noteVerdict(gc *adapter.GateContext, class string, now, ws
 
 // tryAdmit 给后台流量（前缀保温 ping）一条不排队、不偷槽的准入路径：
 // 闩内一律拒绝（不占滴灌探针槽——冷却期恰是最不该打上游的时刻）；
-// 闩外仅当当前处于可发区间且本桶配额未满时放行并计入 bg 桶计数。
-// ping 不要求 waiters 为空：bg 常驻排队不该饿死保温（缓存冷掉伤的
-// 是 fg），它占用预留槽的规模被 ping 节拍天然限制在 margin 吸收的
-// 范围内。与 wait 的区别：不睡眠、不预约、不产事件；被拒调用方
-// 跳过本轮即可。
+// 闩外可发区间内按 wait 的 bg 准入同一上界放行并计入 bg 桶计数——
+// 桶位不越过 quota-reserve（fg 预留槽 ping 不占），bg 计数不越过
+// 爬坡释放额度（同拍到期的多条目也不能齐射穿坡）。ping 不要求
+// waiters 为空：bg 常驻排队不该饿死保温（缓存冷掉伤的是 fg），
+// 被挡住时本轮跳过、下拍再试。与 wait 的区别：不睡眠、不预约、
+// 不产事件。
 func (gate *rateGate) tryAdmit() bool {
 	if gate == nil {
 		return true
@@ -795,10 +796,14 @@ func (gate *rateGate) tryAdmit() bool {
 	if gate.quota <= 0 {
 		return true
 	}
-	if now.Sub(ws) < gate.usable && gate.bucketUsed < gate.quota {
-		gate.bucketUsed++
-		gate.bucketUsedBg++
-		return true
+	if now.Sub(ws) < gate.usable {
+		reserve := gate.reserve(now, ws)
+		if gate.bucketUsed+1 <= gate.quota-reserve &&
+			gate.bucketUsedBg+1 <= gate.bgAllowance(now, ws, reserve) {
+			gate.bucketUsed++
+			gate.bucketUsedBg++
+			return true
+		}
 	}
 	return false
 }
