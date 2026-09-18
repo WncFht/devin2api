@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -200,7 +201,8 @@ func TestUsageFaults(t *testing.T) {
 }
 
 // TestUsageMinBucketWraparound 验证 8 天网格的边界：早于保留窗的条目仍
-// 计入窗口 totals，但不落任何 10 分钟桶——当前桶数据不被覆盖。
+// 计入窗口 totals，但不落任何 10 分钟桶——当前桶数据不被覆盖。points
+// 是稀疏序列：只有当前行落桶，len=1 而非完整网格。
 func TestUsageMinBucketWraparound(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
@@ -224,12 +226,59 @@ func TestUsageMinBucketWraparound(t *testing.T) {
 	if snap.Window.Requests != 2 || snap.Window.InputTokens != 10 {
 		t.Fatalf("window = %+v", snap.Window)
 	}
-	if len(snap.Points) != usageMinBuckets {
-		t.Fatalf("points len = %d, want %d", len(snap.Points), usageMinBuckets)
+	if len(snap.Points) != 1 {
+		t.Fatalf("points len = %d, want 1（稀疏序列只有当前桶）", len(snap.Points))
 	}
 	current := snap.Points[len(snap.Points)-1]
-	if current.Requests != 1 || current.InputTokens != 7 {
-		t.Fatalf("current bucket = %+v, want requests=1 input=7", current)
+	if current.At != now.Unix()/600*600 || current.Requests != 1 || current.InputTokens != 7 {
+		t.Fatalf("current bucket = %+v, want at=%d requests=1 input=7", current, now.Unix()/600*600)
+	}
+}
+
+// TestUsagePointsSparse 验证 points 的稀疏编码：零流量桶不进序列，
+// 非零桶在 JSON 里只发非零字段（at 恒在）。消费侧按缺省 0 求和，
+// 合计口径与稠密编码一致。
+func TestUsagePointsSparse(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(10 * time.Minute)
+	// 两个相隔 1 小时的非零桶，中间 5 个零桶不应出现。
+	for i, off := range []time.Duration{0, -time.Hour} {
+		if _, err := s.InsertLog(ctx, &LogRow{
+			Dir: fmt.Sprintf("sp-%d", i), StartedAt: now.Add(off), Result: "completed", InputTokens: int64(10 + i),
+		}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	snap, err := s.UsageStats(ctx)
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
+	if len(snap.Points) != 2 {
+		t.Fatalf("sparse points len = %d, want 2", len(snap.Points))
+	}
+	// 旧到新排序保留；首尾 at 相隔恰好 1 小时。
+	if snap.Points[1].At-snap.Points[0].At != 3600 {
+		t.Fatalf("points at = %d/%d, want 相隔 3600s", snap.Points[0].At, snap.Points[1].At)
+	}
+	raw, err := json.Marshal(snap.Points[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]int64
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["requests"] != 1 || m["input_tokens"] != 10 {
+		t.Fatalf("nonzero fields = %v", m)
+	}
+	for _, k := range []string{"errors", "disconnected", "rate_limited", "output_tokens", "gen_ms"} {
+		if _, ok := m[k]; ok {
+			t.Fatalf("zero field %q should be omitted: %v", k, m)
+		}
+	}
+	if _, ok := m["at"]; !ok {
+		t.Fatal("at must always be emitted")
 	}
 }
 

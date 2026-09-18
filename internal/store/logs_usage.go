@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"sort"
 	"time"
 )
@@ -128,6 +129,29 @@ type UsageMinPoint struct {
 	UsageTotals
 }
 
+// MarshalJSON 稀疏编码单点：只发非零字段。面板 8 天网格的绝大多数桶
+// 只有 requests 与少数字段非零——15 个定长字段全发会让 points 段占到
+// 响应的 82-95%。缺失键在消费侧（stats.js sumUsageTotals 的
+// Number(p[k])||0）按 0 处理，合计口径不变。at 恒发——零值过滤对它
+// 无意义且是切片的唯一谓词键。
+func (p UsageMinPoint) MarshalJSON() ([]byte, error) {
+	type plain UsageMinPoint
+	raw, err := json.Marshal(plain(p))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]int64
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for k, v := range m {
+		if v == 0 && k != "at" {
+			delete(m, k)
+		}
+	}
+	return json.Marshal(m)
+}
+
 // UsageDayRow 是单日聚合。
 type UsageDayRow struct {
 	Date string `json:"date"`
@@ -176,7 +200,7 @@ type UsageSnapshot struct {
 	Today       UsageTotals     `json:"today"`
 	Window      UsageTotals     `json:"window"`
 	Days        []UsageDayRow   `json:"days"`   // 新在前
-	Points      []UsageMinPoint `json:"points"` // 旧到新，10 分钟粒度，含零值桶
+	Points      []UsageMinPoint `json:"points"` // 旧到新，10 分钟粒度，仅非零桶（稀疏）
 	Models      []DimensionAgg  `json:"models"`
 	Keys        []DimensionAgg  `json:"keys"`
 	// ModelDays 是 模型×自然日 的 totals 矩阵，面板的时间范围选择器
@@ -291,13 +315,13 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 		return nil, err
 	}
 
-	points := make([]UsageMinPoint, 0, usageMinBuckets)
+	// 零值桶不发：网格内绝大多数桶无流量，消费侧只做 at 过滤+字段求和，
+	// 略零桶不改口径。GROUP BY 只产出有行的槽，totals 缺席即零桶。
+	points := make([]UsageMinPoint, 0, len(totals))
 	for slot := minSlot; slot <= currentSlot; slot++ {
-		p := UsageMinPoint{At: slot * 600}
 		if t, ok := totals[slot]; ok {
-			p.UsageTotals = t
+			points = append(points, UsageMinPoint{At: slot * 600, UsageTotals: t})
 		}
-		points = append(points, p)
 	}
 	return points, nil
 }
