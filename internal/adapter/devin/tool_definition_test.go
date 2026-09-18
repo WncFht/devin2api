@@ -3,6 +3,7 @@ package devin
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -326,6 +327,94 @@ func TestInjectConditionalRequiredDemotesMarked(t *testing.T) {
 	if len(branch1) != 2 || branch1[0] != "a" || branch1[1] != "b" {
 		t.Fatalf("marked branch = %v", branch1)
 	}
+}
+
+// TestNormalizeSchemaFuseStripsDeepRefs 的测试动机是深度保险丝不能把
+// $ref 放上线：截断子树里残留的本地 ref 是截断痕迹而非客户端语义，
+// 会重新引入上游 invalid_argument（33 跳 ref 链还会经兄弟合并把深
+// ref 反向注回 depth-32 父层）。剥键后兄弟约束必须原样保留。
+func TestNormalizeSchemaFuseStripsDeepRefs(t *testing.T) {
+	// ref 链：d0→…→d32→d33，d32 在 depth33 触发保险丝；修复前它的
+	// $ref 会经 resolved 融合一路注回顶层上 wire。
+	defs := make(map[string]any, 34)
+	for i := 0; i <= 32; i++ {
+		defs[fmt.Sprintf("d%d", i)] = map[string]any{"$ref": fmt.Sprintf("#/$defs/d%d", i+1)}
+	}
+	defs["d33"] = map[string]any{"type": "string"}
+	chained, err := normalizeSchema(mustJSON(t, map[string]any{
+		"$defs": defs,
+		"$ref":  "#/$defs/d0",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(chained), "$ref") {
+		t.Fatalf("ref chain: wire schema still carries $ref: %s", chained)
+	}
+
+	// 结构深嵌：properties 每层耗 2 depth，17+ 层让 $ref 落在保险丝
+	// 截断子树的内部（不是被截节点自身的键，顶层单行 delete 够不到）。
+	nested := map[string]any{"$ref": "#/$defs/x"}
+	for i := 0; i < 20; i++ {
+		nested = map[string]any{"properties": map[string]any{"p": nested}}
+	}
+	deep, err := normalizeSchema(mustJSON(t, map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"p": nested},
+		"$defs":      map[string]any{"x": map[string]any{"type": "string"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(deep), "$ref") {
+		t.Fatalf("deep nesting: wire schema still carries $ref: %s", deep)
+	}
+
+	// 兄弟约束在截断处必须保留：items 链 33 层把带 $ref 的节点正好放到
+	// 保险丝边界上，剥 ref 后 type/minimum 兄弟键照常下发。
+	target := map[string]any{"$ref": "#/$defs/x", "type": "string", "minLength": float64(3)}
+	wrapped := target
+	for i := 0; i < 33; i++ {
+		wrapped = map[string]any{"items": wrapped}
+	}
+	sibling, err := normalizeSchema(mustJSON(t, map[string]any{
+		"type":  "array",
+		"items": wrapped,
+		"$defs": map[string]any{"x": map[string]any{"type": "string"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(sibling)
+	if strings.Contains(text, "$ref") {
+		t.Fatalf("items chain: wire schema still carries $ref: %s", text)
+	}
+	if !strings.Contains(text, `"minLength":3`) {
+		t.Fatalf("sibling constraint lost at fuse cap: %s", text)
+	}
+
+	// const 字面量里的 "$ref" 是业务数据不是引用：正常深度不剥，
+	// 保险丝截断处同样不剥。
+	literal, err := normalizeSchema(mustJSON(t, map[string]any{
+		"type":  "object",
+		"const": map[string]any{"$ref": "#/$defs/x"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(literal), "$ref") {
+		t.Fatalf("const literal $ref was stripped: %s", literal)
+	}
+}
+
+// mustJSON 把测试构造的 map 编成 schema 输入。
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 // TestConvertToolDefinitionSynthesizesAnyOfOnRealFixture 用真实 CC 28

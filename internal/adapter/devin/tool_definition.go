@@ -715,6 +715,10 @@ const maxSchemaRefDepth = 32
 // 嵌套无限膨胀。
 func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth int) any {
 	if depth > maxSchemaRefDepth {
+		// 保险丝截断的子树原样放行会把残留 $ref 带上 wire——截断痕迹
+		// 重新引入本保险丝要防的上游 invalid_argument（兄弟合并还会把
+		// 截断目标的 $ref 反向注回父层）。与解不开/循环引用同语义剥键。
+		stripLocalSchemaRefs(value)
 		return value
 	}
 	switch typed := value.(type) {
@@ -753,6 +757,30 @@ func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth 
 		return typed
 	default:
 		return value
+	}
+}
+
+// stripLocalSchemaRefs 剥掉子树里全部本地 $ref（"#/…"）键：深度保险丝
+// 截断后不再递归展开，残留 ref 是截断痕迹而非客户端语义。isSchemaLiteral
+// 业务字面量（const/enum/default 等）不剥——同名键在字面量里是数据；
+// 非本地 $ref（外部 URL）与正常深度同口径透传。遍历成本以截断子树
+// 自身大小为界，不做引用展开，无膨胀风险。
+func stripLocalSchemaRefs(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(ref, "#") {
+			delete(typed, "$ref")
+		}
+		for key, child := range typed {
+			if isSchemaLiteral(key) {
+				continue
+			}
+			stripLocalSchemaRefs(child)
+		}
+	case []any:
+		for _, item := range typed {
+			stripLocalSchemaRefs(item)
+		}
 	}
 }
 
