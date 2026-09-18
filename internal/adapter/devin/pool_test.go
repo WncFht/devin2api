@@ -1068,7 +1068,7 @@ func TestPoolSessionBinding(t *testing.T) {
 	}
 
 	// 冷却结束且 b 重新产出内容 → 换号接管语义下重新绑定。
-	laneB.noteSuccess(time.Now())
+	laneB.noteSuccess(time.Now().Add(time.Minute))
 	stream, err = pool.Stream(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Stream after cooldown: %v", err)
@@ -1178,7 +1178,7 @@ func TestPoolInflightPin(t *testing.T) {
 	if ranked[0].lane == laneB || ranked[0].pinned {
 		t.Fatalf("hardDown inflight lane must not be pinned, got %v", ranked[0].lane.name)
 	}
-	laneB.noteSuccess(time.Now())
+	laneB.noteSuccess(time.Now().Add(time.Minute))
 
 	// 绑定恒赢于在飞钉选：绑 a 后 a 居首且记 bound。
 	pool.bind(affinity, laneA, "")
