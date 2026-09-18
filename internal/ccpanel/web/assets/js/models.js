@@ -222,7 +222,7 @@
   function multOf(r) {
     const c = r.catalog;
     if (!c) return null;
-    if (c.cost_tier === 'free') return 0;
+    if (c.cost_tier === 'free' && (!c.credit_multiplier || c.credit_multiplier === 0)) return 0;
     if (!c.multiplier_known || !c.credit_multiplier) return 1;
     return Number(c.credit_multiplier);
   }
@@ -237,7 +237,7 @@
       return `<span style="color: var(--color-text-secondary);" title="${escapeHtml(t('models.mult.unknownTip'))}">— / ≈1.0</span>`;
     }
     const n = Number(c.credit_multiplier);
-    return 'x' + (n % 1 ? n.toFixed(1) : String(n));
+    return 'x' + n.toFixed(2).replace(/\.?0+$/, '');
   }
 
   function money(v) {
