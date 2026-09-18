@@ -905,3 +905,46 @@ func TestRateGateExpectedWaitFgCap(t *testing.T) {
 		t.Fatalf("fg expectedWait = %v, want 15s (uncapped queue term)", got)
 	}
 }
+
+// bg 满桶/死区分支补下窗饥饿项：投影下一窗开放的预留（fgRateEMA 满段
+// 外推 + waitersFg + margin）≥quota 时 bg 跨窗无槽，期望等待追加一整
+// 窗——fg 饱和 lane 上 bg 实测排队 ~120s 才被拒，旧估计 ~toNext 低估
+// 约 4 倍；投影未满预留时不追加，fg 视图不受影响。
+func TestRateGateExpectedWaitBgNextWindowStarved(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 80}, nil, "")
+	clock := pinGateClock(gate, 30) // toNext = 32s
+	gate.mu.Lock()
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.bucketUsed = 80
+	gate.fgRateEMA = 80
+	gate.waitersFg = 5
+	gate.mu.Unlock()
+	// 下窗预留 = ceil(80*56/60)+5+4 = 84 → 封顶 80 = quota：bg 饿死。
+	if got := gate.admissionSnapshot(adapter.ClassBG).ExpectedWait; got != 92*time.Second {
+		t.Fatalf("bg expectedWait = %v, want 92s (toNext + starved window)", got)
+	}
+	// fg 同态：队列项照算，不吃饥饿项——32 + 5/80*60 = 35.75s。
+	if got := gate.admissionSnapshot(adapter.ClassFG).ExpectedWait; got != 35750*time.Millisecond {
+		t.Fatalf("fg expectedWait = %v, want 35.75s (no starvation term)", got)
+	}
+	// 死区同分支：桶未满但 sendable=false 时投影同样生效。
+	// :59 toNext=3s → 3 + 60 = 63s。
+	clock.t = clock.t.Add(29 * time.Second)
+	gate.mu.Lock()
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.bucketUsed = 0
+	gate.mu.Unlock()
+	if got := gate.admissionSnapshot(adapter.ClassBG).ExpectedWait; got != 63*time.Second {
+		t.Fatalf("bg dead-zone expectedWait = %v, want 63s", got)
+	}
+	// 投影未满预留不追加：fgRateEMA=10 → 下窗预留 ceil(10*56/60)+5+4=19。
+	clock.t = clock.t.Add(-29 * time.Second)
+	gate.mu.Lock()
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.bucketUsed = 80
+	gate.fgRateEMA = 10
+	gate.mu.Unlock()
+	if got := gate.admissionSnapshot(adapter.ClassBG).ExpectedWait; got != 32*time.Second {
+		t.Fatalf("bg expectedWait = %v, want 32s (toNext only, next window not saturated)", got)
+	}
+}

@@ -445,12 +445,20 @@ func (gate *rateGate) reserve(now time.Time, ws time.Time) int {
 		return 0
 	}
 	usableLeft := max(ws.Add(gate.usable).Sub(now), 0)
-	reserve := int(math.Ceil(gate.fgRateEMA*usableLeft.Seconds()/windowPeriod.Seconds())) + gate.waitersFg + gate.bgMargin
-	reserve = min(reserve, gate.quota)
+	reserve := gate.reserveAt(usableLeft)
 	// 峰值取样放评估点：准入与 stats 的每次评估都算数——「本窗预留
 	// 到过多少」比「关窗那刻是多少」更能反映预留压力。
 	gate.winReservePeak = max(gate.winReservePeak, reserve)
 	return reserve
+}
+
+// reserveAt 按给定的可发区间剩余时长算预留槽数：fg 速率 EMA 外推 +
+// 已在排队的 fg + 固定安全边际，封顶配额。usableLeft 取满段 usable
+// 即投影下一窗口开放时刻的预留——expectedWaitLocked 用它判定 fg
+// 饱和 lane 的下窗 bg 饥饿。调用方须持 mu。
+func (gate *rateGate) reserveAt(usableLeft time.Duration) int {
+	reserve := int(math.Ceil(gate.fgRateEMA*usableLeft.Seconds()/windowPeriod.Seconds())) + gate.waitersFg + gate.bgMargin
+	return min(reserve, gate.quota)
 }
 
 // bgAllowance 是爬坡机制此刻为 bg 释放的放行额度：quota-reserve 按
@@ -601,7 +609,9 @@ func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
 // 睡眠与重查，只回答「现在到放行大概要多久」：
 //   - 闩内 → 闩剩余：快败语义下不会真排，但选号视角它等价「这段时间
 //     不可用」；
-//   - 死区或桶满 → 到下一窗口开放，前队按整窗配额折算追加；
+//   - 死区或桶满 → 到下一窗口开放，前队按整窗配额折算追加；bg 另投影
+//     下一窗开放的预留，满预留（fg 需求持续饱和）时追加一整窗——
+//     跨窗饥饿期睡醒重查也抢不到槽，实测排队到 bgMaxHold 被拒；
 //   - fg 可发且桶有位 → 本请求此刻即放，只把已在排队的前队深度按本窗
 //     剩余额度折算成拥堵代理（睡醒者会与之抢槽），封顶到下窗+一窗——
 //     排空竞态里分母→1 的不封顶队列项会把估计吹到分钟级；
@@ -622,7 +632,14 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 	}
 	toNext := ws.Add(windowPeriod).Sub(now)
 	if !sendable || used >= gate.quota {
-		return toNext + time.Duration(float64(waiters)/float64(gate.quota)*float64(windowPeriod))
+		wait := toNext + time.Duration(float64(waiters)/float64(gate.quota)*float64(windowPeriod))
+		// 下一窗开放即满预留时 bg 整窗无槽：睡醒者与重查都抢不到
+		// 位，只能等到再下一窗竞争——fg 饱和 lane 上 bg 实测等待
+		// ~120s，缺这项的估计（~toNext）低估约 4 倍。
+		if class == adapter.ClassBG && gate.reserveAt(gate.usable) >= gate.quota {
+			wait += windowPeriod
+		}
+		return wait
 	}
 	if class != adapter.ClassBG {
 		return min(
