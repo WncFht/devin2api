@@ -572,11 +572,11 @@ func (s *poolStream) swapRanked(taken *poolLane, class string) []poolCandidate {
 	return ranked
 }
 
-// poolCandidateRows 把候选快照投影成审计行：bound lane 的 Reason 记
-// "bound"（让位时改记降级归因 + "bound_yield"，Bound 字段仍为真）、
+// poolCandidateRows 把候选快照投影成审计行：bound lane 的 Reason 在
+// 降级归因后附 "bound"（让位时改附 "bound_yield"，Bound 字段仍为真）、
 // pinned lane 记 "inflight"（两者都是粘性区语义）；其余 lane 的
 // Reason 是降级归因的有序叠加——取全部适用词连写而非首个主因，多因
-// 并存时（如冷却+闩）完整保留现场。
+// 并存时（如冷却+闩、死区+桶满）完整保留现场。
 func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 	rows := make([]debuglog.PoolCandidate, len(ranked))
 	for i, c := range ranked {
@@ -589,7 +589,7 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 			Reason:  strings.Join(c.verdict.reasons, ","),
 		}
 		if c.bound && !c.yielded {
-			rows[i].Reason = "bound"
+			rows[i].Reason = strings.Join(append(c.verdict.reasons, "bound"), ",")
 		}
 		if c.yielded {
 			rows[i].Reason = strings.Join(append(c.verdict.reasons, "bound_yield"), ",")
@@ -800,8 +800,8 @@ type laneVerdict struct {
 }
 
 // verdict 对 lane 做一次完整健康评估：降级原因按固定序叠加
-// （auth_cooldown → generic_cooldown → gate_latched → gate_window_full
-// → quota_low），调用方各取所需（排序取 bucket、审计取 reasons、
+// （auth_cooldown → generic_cooldown → gate_latched → gate_window_deadzone
+// → gate_window_full → quota_low），调用方各取所需（排序取 bucket、审计取 reasons、
 // healthy() 取 healthy、权重取 expectedWait）。class 决定闸门期望
 // 排队按哪条准入轨估计；healthy()/state() 等只关心健康面的调用方
 // 传 fg（默认视图——健康判定本身与类无关，expectedWait 才分轨）。
@@ -822,12 +822,18 @@ func (lane *poolLane) verdict(class string) laneVerdict {
 	if snap.Latched {
 		v.reasons = append(v.reasons, "gate_latched")
 	}
-	// 桶满与死区同记 gate_window_full：两者都是「窗口侧暂不可发」，
-	// 审计词表不区分死区/满桶。
-	windowBlocked := snap.WindowQuota > 0 && (!snap.Sendable || snap.WindowUsed >= snap.WindowQuota)
-	if windowBlocked {
+	// 死区与桶满分记：死区是窗界两侧的停发段（整形——同池 lane 同相
+	// 判病，不含本 lane 容量信号），桶满是本 lane 配额真耗尽。死区内
+	// 桶仍满时两词并存，审计据此区分整形态停发与真实饱和。
+	windowDeadzone := snap.WindowQuota > 0 && !snap.Sendable
+	windowSaturated := snap.WindowQuota > 0 && snap.WindowUsed >= snap.WindowQuota
+	if windowDeadzone {
+		v.reasons = append(v.reasons, "gate_window_deadzone")
+	}
+	if windowSaturated {
 		v.reasons = append(v.reasons, "gate_window_full")
 	}
+	windowBlocked := windowDeadzone || windowSaturated
 	v.healthy = !v.hardDown && !snap.Latched && !windowBlocked
 	v.bucket = 2
 	if v.healthy {

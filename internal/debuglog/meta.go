@@ -153,8 +153,10 @@ type DetachedEvent map[string]any
 // PoolCandidate 是号池一次选号的候选快照行：Name 是 lane 名，Healthy/
 // Bound/Pinned 是当时判定位（Pinned 是亲和键在飞钉选命中——正式绑定
 // 落地前的并发窗口钉选），Reason 是它被降级/跳过的归因词表（bound、
-// auth_cooldown、generic_cooldown、gate_latched、gate_window_full、
-// quota_low；首位被选中者可空）。整张表回答「这次为什么去了这个号」。
+// bound_yield、auth_cooldown、generic_cooldown、gate_latched、
+// gate_window_deadzone、gate_window_full、quota_low；首位被选中者可空，
+// bound/bound_yield 标记词缀在降级归因之后）。整张表回答「这次为什么
+// 去了这个号」。
 type PoolCandidate struct {
 	Name    string `json:"name"`
 	Healthy bool   `json:"healthy"`

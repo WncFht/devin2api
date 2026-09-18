@@ -593,6 +593,7 @@
     auth_cooldown: 'authCooldown',
     generic_cooldown: 'genericCooldown',
     gate_latched: 'gateLatched',
+    gate_window_deadzone: 'gateWindowDeadzone',
     gate_window_full: 'gateWindowFull',
     quota_low: 'quotaLow'
   };

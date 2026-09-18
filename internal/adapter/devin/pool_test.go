@@ -1327,6 +1327,11 @@ func TestPoolBoundLaneNoYieldWithoutBetterSibling(t *testing.T) {
 	if ranked[0].lane != laneA || ranked[0].yielded {
 		t.Fatalf("bound lane must stay first when no sibling is meaningfully better, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
 	}
+	// 居首 bound 的判病因不掩：Reason 是降级归因 + "bound" 连写。
+	row := poolCandidateRows(ranked)[0]
+	if !row.Bound || !strings.Contains(row.Reason, "gate_latched") || !strings.Contains(row.Reason, "bound") {
+		t.Fatalf("bound row = %+v, want gate_latched + bound reason", row)
+	}
 }
 
 // 让位第二触发面：bound lane 未闩但前队拥堵（绿档深队）显著慢于
@@ -1388,9 +1393,10 @@ func TestPoolBoundLaneDemotesWhenSickSiblingHealthy(t *testing.T) {
 	if boundIdx < 0 || !ranked[boundIdx].yielded {
 		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
 	}
-	// 审计行：Bound 仍为真，Reason 记降级归因 + bound_yield。
+	// 审计行：Bound 仍为真，Reason 记降级归因 + bound_yield；可发区间
+	// 内桶满是真实饱和，不带死区词。
 	row := poolCandidateRows(ranked)[boundIdx]
-	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_full") {
+	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_full") || strings.Contains(row.Reason, "gate_window_deadzone") {
 		t.Fatalf("demoted bound row = %+v, want Bound + gate_window_full/bound_yield reason", row)
 	}
 	if !ranked[0].verdict.healthy {
@@ -1650,8 +1656,8 @@ func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
 		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
 	}
 	row := poolCandidateRows(ranked)[boundIdx]
-	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_full") {
-		t.Fatalf("yielded bound row = %+v, want Bound + gate_window_full/bound_yield reason", row)
+	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_deadzone") || strings.Contains(row.Reason, "gate_window_full") {
+		t.Fatalf("yielded bound row = %+v, want Bound + gate_window_deadzone/bound_yield reason", row)
 	}
 
 	// fg bound 同状态同样让位：死区判病是类无关快照（healthy=false

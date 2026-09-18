@@ -1244,6 +1244,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.reason.authCooldown': '凭据冷却',
   'accounts.reason.genericCooldown': '失败冷却',
   'accounts.reason.gateLatched': '闸门闩锁',
+  'accounts.reason.gateWindowDeadzone': '窗口死区',
   'accounts.reason.gateWindowFull': '窗口满',
   'accounts.reason.quotaLow': '配额低',
   'accounts.sort.label': '排序账号',

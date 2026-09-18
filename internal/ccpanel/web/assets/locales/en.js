@@ -1245,6 +1245,7 @@ window.I18N_LOCALES['en'] = {
   'accounts.reason.authCooldown': 'credential cooldown',
   'accounts.reason.genericCooldown': 'failure cooldown',
   'accounts.reason.gateLatched': 'gate latched',
+  'accounts.reason.gateWindowDeadzone': 'window dead zone',
   'accounts.reason.gateWindowFull': 'window full',
   'accounts.reason.quotaLow': 'quota low',
   'accounts.sort.label': 'Sort accounts',
