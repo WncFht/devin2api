@@ -15,8 +15,9 @@
 //     MIN(time)，多个 min/max 聚合下裸列归属不确定）。
 //   - 覆盖水位线 runtime_state.log_cells_covered_id：所有 id ≤ 水位
 //     的 logs 行都已完成 rollup 记账（非 rejected 已入格、rejected
-//     被有意剔除）。双写路径在同一事务推进水位；唯一绕过双写的
-//     importIndex 由 ImportLegacy 收尾的 ReconcileCells 补记。
+//     被有意剔除）。双写路径在同一事务推进水位；任何绕过双写的
+//     写入（无 cells 码的旧二进制、外部工具、importIndex）由
+//     Open 收尾的 ReconcileCells 补记。
 //   - rejected 行（管线前拒绝）不进 rollup——全部聚合口径本来就
 //     剔除它；log_err_cells 只记 error_stage != ” 的行（错误稀疏，
 //     单列迷你表比给主表加错误维度便宜得多）。
@@ -445,8 +446,9 @@ func upsertCells(ctx context.Context, tx *sql.Tx, cells map[cellDim]*cellVals, e
 }
 
 // ReconcileCells 把水位线之后落库的非 rejected 行补记进 rollup——
-// 唯一绕过双写的写入者是 importIndex（Open 之后跑的旧文件导入），
-// ImportLegacy 收尾调用它闭合缺口；常规调用是 id>水位 的空扫。
+// 绕过双写的写入者有无 cells 码的旧二进制、外部工具与 importIndex：
+// Open 收尾固定调它闭合这类缝隙（9-19 实证 7,634 行险些永隐），
+// ImportLegacy 收尾再补一次导入期写入；常规调用是 id>水位 的空扫。
 func (s *Store) ReconcileCells(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

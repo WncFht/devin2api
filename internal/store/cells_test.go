@@ -315,6 +315,46 @@ func TestReconcileCellsCoversBypass(t *testing.T) {
 	}
 }
 
+// TestOpenReconcilesBypassRows 钉死启动自愈：上个进程留下的未记账
+// 行（旧二进制/外部工具等绕过双写的写入）在下一次 Open 被补记——
+// 否则缝隙会被后续双写推进的水位碾过，对 UNION 读永久隐形。
+func TestOpenReconcilesBypassRows(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	row := cellSeedRows(base)[0]
+	row.Dir = "pre-open-bypass"
+	if _, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(row)...); err != nil {
+		t.Fatalf("bypass insert: %v", err)
+	}
+	path := s.path
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+
+	stored := queryStoredCells(t, s2, ctx)
+	if len(stored) != 1 {
+		t.Fatalf("stored cells = %d, want 1", len(stored))
+	}
+	for _, g := range stored {
+		if g.vals[0] != 1 {
+			t.Fatalf("cell req = %d, want 1", g.vals[0])
+		}
+	}
+	if wm := cellsWatermarkOf(t, s2, ctx); wm != 1 {
+		t.Fatalf("watermark = %d, want 1", wm)
+	}
+	if n := unionCount(t, s2, ctx); n != 1 {
+		t.Fatalf("union req = %d, want 1", n)
+	}
+}
+
 // TestWriteDebugBatchRollup 验证批量日志行的双写：同事务 upsert
 // 格子 + 推进水位；OR IGNORE 跳过的重复行不重复记账。
 func TestWriteDebugBatchRollup(t *testing.T) {

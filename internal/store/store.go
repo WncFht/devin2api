@@ -104,6 +104,14 @@ func Open(path string) (*Store, error) {
 	}
 	st := &Store{db: db, ro: ro, path: path}
 	st.debugBytes.Store(debugBytes)
+	// 水位自愈：任何绕过双写的写入者（无 cells 码的旧二进制、外部
+	// 工具、importIndex）留下的未记账行在每次启动时补记——不做这步，
+	// 缝隙会被后续双写推进的水位碾过，对 UNION 读永久隐形（9-19
+	// prod 实证 7,634 行）。无缺口时退化为 id>水位 的空扫。
+	if err := st.ReconcileCells(context.Background()); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("reconcile log cells: %w", err)
+	}
 	return st, nil
 }
 
