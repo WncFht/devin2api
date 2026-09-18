@@ -148,7 +148,7 @@ func cmdCensus(args []string) error {
 		req.currentDir, resp.currentDir = dir, dir
 		// 首个请求与 attemptN 重试分片都进普查——重试写给上游的 wire
 		// 形态不同（如换 model/追加 continue），漏掉会低估字段覆盖。
-		if requestStages, err := manager.DevinRequestStages(dir); err == nil {
+		if requestStages, err := manager.DevinRequestStages(ctx, dir); err == nil {
 			for _, stage := range requestStages {
 				if raw, _, ok, err := st.DebugFile(ctx, dir, stage, 0); err == nil && ok {
 					var obj map[string]any

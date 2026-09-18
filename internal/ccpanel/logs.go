@@ -12,6 +12,7 @@ package ccpanel
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -403,7 +404,7 @@ func (h *Handler) adminDebugLog(w http.ResponseWriter, r *http.Request) {
 		h.respondDebugLogUnavailable(w)
 		return
 	}
-	resp := h.debugLogResponse(dir, id, timeMS)
+	resp := h.debugLogResponse(r.Context(), dir, id, timeMS)
 	if resp == nil {
 		// 日志行还在但 payload 已被保留策略整体淘汰——回「目录已删」404。
 		h.respondDebugLogUnavailable(w)
@@ -424,7 +425,7 @@ func (h *Handler) adminActiveRequestDebugLog(w http.ResponseWriter, r *http.Requ
 	if h.debug != nil {
 		for _, ar := range h.debug.ActiveRequests() {
 			if activeRequestID(ar.Dir) == id {
-				if resp := h.debugLogResponse(ar.Dir, id, id); resp != nil {
+				if resp := h.debugLogResponse(r.Context(), ar.Dir, id, id); resp != nil {
 					respondOK(w, resp)
 					return
 				}
@@ -491,7 +492,7 @@ func (h *Handler) respondDebugLogUnavailable(w http.ResponseWriter) {
 // 含 attemptN 重试分片），resp_* 来自 04（上游原始帧），translated_*
 // 由 06 的记录帧重建为客户端线上形态。上游请求/响应头 connect client
 // 未录制，如实给 "{}"（区别于 maskedHeaderUnavailable 的「脱敏失败」）。
-func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[string]any {
+func (h *Handler) debugLogResponse(ctx context.Context, dir string, logID, fallbackMS int64) map[string]any {
 	resp := map[string]any{
 		"log_id":       logID,
 		"req_method":   http.MethodPost,
@@ -504,7 +505,7 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	// （含进行中请求的半成品文件）。投影只用三个标量字段，自由文本
 	// 不外流，meta 本体不需要过 maskToken。目录整个不在时投影无意义，
 	// 返回 nil 让调用方回「目录已删」——只剩日志行的请求不能回 200 空壳。
-	detail, err := h.debug.Detail(dir)
+	detail, err := h.debug.Detail(ctx, dir)
 	if err != nil {
 		return nil
 	}
@@ -519,7 +520,7 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	// 名单只管结构化键名，自由文本（body 原文、上游错误文案）里的
 	// token 在这里罩住；自愈轮换后旧 token 仍在 recentTokens 集合内。
 	readStage := func(name string) ([]byte, error) {
-		data, _, _, err := h.debug.ReadFile(dir, name)
+		data, _, _, err := h.debug.ReadFile(ctx, dir, name)
 		return h.maskToken(data), err
 	}
 	if started, err := time.Parse(time.RFC3339Nano, meta.StartedAt); err == nil {
@@ -563,7 +564,7 @@ func (h *Handler) debugLogResponse(dir string, logID, fallbackMS int64) map[stri
 	// 03 + attemptN：上游 wire 请求体。多次重发按序拼接——ccLoad 的
 	// req_body 只记最后一次尝试，我们把每次尝试都留痕（重试排障要对比）。
 	var reqBody bytes.Buffer
-	if names, err := h.debug.DevinRequestStages(dir); err == nil {
+	if names, err := h.debug.DevinRequestStages(ctx, dir); err == nil {
 		for _, name := range names {
 			data, err := readStage(name)
 			if err != nil {

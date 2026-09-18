@@ -56,7 +56,7 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	if len(lines) != 2 || !strings.Contains(lines[0], `"seq":1`) || !strings.Contains(lines[1], `"seq":2`) {
 		t.Fatalf("JSONL sequence = %q", lines)
 	}
-	data, _, _, err := manager.ReadFile(recorder.dir, "attachments/image-001.png")
+	data, _, _, err := manager.ReadFile(context.Background(), recorder.dir, "attachments/image-001.png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,10 +122,10 @@ func TestSameSecondSuffixBeyondPattern(t *testing.T) {
 		recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 		waitDrained(recorder)
 	}
-	if _, err := manager.Detail(dir); err != nil {
+	if _, err := manager.Detail(context.Background(), dir); err != nil {
 		t.Fatalf("Detail(%q): %v", dir, err)
 	}
-	if _, _, _, err := manager.ReadFile(dir, "meta.json"); err != nil {
+	if _, _, _, err := manager.ReadFile(context.Background(), dir, "meta.json"); err != nil {
 		t.Fatalf("ReadFile(%q): %v", dir, err)
 	}
 }
@@ -175,7 +175,7 @@ func TestIOErrorsCountedOncePerKind(t *testing.T) {
 // readTestFile 经读路径取回一个调试文件内容（断言即端点口径）。
 func readTestFile(t *testing.T, manager *Manager, dir, name string) string {
 	t.Helper()
-	data, _, _, err := manager.ReadFile(dir, name)
+	data, _, _, err := manager.ReadFile(context.Background(), dir, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestCleanerRemovesExpiredDirs(t *testing.T) {
 			t.Fatal("expired dir should be deleted")
 		}
 	}
-	if _, err := manager.Detail(active.dir); err != nil {
+	if _, err := manager.Detail(context.Background(), active.dir); err != nil {
 		t.Fatal("active dir must be protected")
 	}
 	active.Complete(Completion{StatusCode: 200, Result: "completed"})
@@ -478,7 +478,7 @@ func TestReaderListDetailAndFiles(t *testing.T) {
 	if len(rows) != 2 || rows[0].Model != "m-b" || rows[1].Model != "m-a" {
 		t.Fatalf("SearchLogs order = %+v", rows)
 	}
-	detail, err := manager.Detail(rows[0].Dir)
+	detail, err := manager.Detail(context.Background(), rows[0].Dir)
 	if err != nil {
 		t.Fatalf("Detail: %v", err)
 	}
@@ -492,7 +492,7 @@ func TestReaderListDetailAndFiles(t *testing.T) {
 	if !strings.Contains(strings.Join(names, ","), "meta.json") || !strings.Contains(strings.Join(names, ","), "03-devin-request.json") {
 		t.Fatalf("files = %v", names)
 	}
-	data, total, truncated, err := manager.ReadFile(rows[0].Dir, "03-devin-request.json")
+	data, total, truncated, err := manager.ReadFile(context.Background(), rows[0].Dir, "03-devin-request.json")
 	if err != nil || truncated || total == 0 || !strings.Contains(string(data), "m-b") {
 		t.Fatalf("ReadFile = %q total=%d truncated=%v err=%v", data, total, truncated, err)
 	}
@@ -506,15 +506,15 @@ func TestReaderRejectsTraversal(t *testing.T) {
 	dir := recorder.dir
 	recorder.Complete(Completion{StatusCode: 200})
 	waitDrained(recorder)
-	if _, err := manager.Detail("../etc"); err == nil {
+	if _, err := manager.Detail(context.Background(), "../etc"); err == nil {
 		t.Fatal("Detail should reject traversal")
 	}
 	for _, bad := range []string{"../meta.json", "meta.json/../x", "/abs", "sub/dir/x.json", "attachments/a/b.bin"} {
-		if _, _, _, err := manager.ReadFile(dir, bad); err == nil {
+		if _, _, _, err := manager.ReadFile(context.Background(), dir, bad); err == nil {
 			t.Fatalf("ReadFile should reject %q", bad)
 		}
 	}
-	if _, _, _, err := manager.ReadFile(dir, "meta.json"); err != nil {
+	if _, _, _, err := manager.ReadFile(context.Background(), dir, "meta.json"); err != nil {
 		t.Fatalf("ReadFile meta.json: %v", err)
 	}
 }
@@ -524,7 +524,7 @@ func TestReaderRejectsTraversal(t *testing.T) {
 func TestDetailMissingPayloadIsNotExist(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, openTestStore(t))
 	defer manager.Close()
-	if _, err := manager.Detail("20200101-000000"); !os.IsNotExist(err) {
+	if _, err := manager.Detail(context.Background(), "20200101-000000"); !os.IsNotExist(err) {
 		t.Fatalf("Detail on absent payload = %v, want ErrNotExist", err)
 	}
 }
@@ -559,7 +559,7 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	clean.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
 	clean.Complete(Completion{StatusCode: 200, Result: "completed"})
 	waitDrained(clean)
-	detail, err := manager.Detail(clean.dir)
+	detail, err := manager.Detail(context.Background(), clean.dir)
 	if err != nil {
 		t.Fatalf("clean dir Detail: %v（meta 锚点应保留）", err)
 	}
@@ -578,10 +578,10 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	failed.WriteError(ErrStageDevinConnect, os.ErrPermission)
 	failed.Complete(Completion{StatusCode: 500, Result: "failed"})
 	waitDrained(failed)
-	if _, err := manager.Detail(failed.dir); err != nil {
+	if _, err := manager.Detail(context.Background(), failed.dir); err != nil {
 		t.Fatalf("failed dir must be kept: %v", err)
 	}
-	if _, _, _, err := manager.ReadFile(failed.dir, ErrorFile); err != nil {
+	if _, _, _, err := manager.ReadFile(context.Background(), failed.dir, ErrorFile); err != nil {
 		t.Fatalf("failed dir error.json: %v", err)
 	}
 
@@ -589,7 +589,7 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	suspicious.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
 	suspicious.Complete(Completion{StatusCode: 200, Result: "completed", PrematureEndTurn: true})
 	waitDrained(suspicious)
-	if _, _, _, err := manager.ReadFile(suspicious.dir, "04-devin-response.jsonl"); err != nil {
+	if _, _, _, err := manager.ReadFile(context.Background(), suspicious.dir, "04-devin-response.jsonl"); err != nil {
 		t.Fatalf("premature_end_turn dir must keep payload: %v", err)
 	}
 }

@@ -170,7 +170,7 @@ func TestRetryAttemptsInIndex(t *testing.T) {
 		t.Fatalf("rows = %+v", rows)
 	}
 	// meta.json 应带明细（attempt 号/原因/相对时刻），面板据此渲染链路。
-	data, _, _, err := manager.ReadFile(dir, MetaFile)
+	data, _, _, err := manager.ReadFile(context.Background(), dir, MetaFile)
 	if err != nil {
 		t.Fatal(err)
 	}

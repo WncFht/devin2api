@@ -51,7 +51,7 @@ func TestIndexErrorFields(t *testing.T) {
 	}
 	// error.json 仍应存在于两个目录：恢复证据不随日志行口径删减。
 	for _, dir := range []string{failEntry.Dir, okEntry.Dir} {
-		if _, _, _, err := manager.ReadFile(dir, ErrorFile); err != nil {
+		if _, _, _, err := manager.ReadFile(context.Background(), dir, ErrorFile); err != nil {
 			t.Fatalf("error.json missing in %s: %v", dir, err)
 		}
 	}

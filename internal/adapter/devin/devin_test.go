@@ -985,14 +985,14 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	recorder.Complete(debuglog.Completion{})
 	<-manager.Drained(recorder.Dir())
 
-	requestLog, _, _, err := manager.ReadFile(recorder.Dir(), "03-devin-request.json")
+	requestLog, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "03-devin-request.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(requestLog), "secret-token") || strings.Contains(string(requestLog), "fingerprint") {
 		t.Fatalf("request log contains credentials: %s", requestLog)
 	}
-	responseLog, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
+	responseLog, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}

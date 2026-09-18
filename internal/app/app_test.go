@@ -195,7 +195,7 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 		t.Fatal("missing X-Request-Id header")
 	}
 	<-manager.Drained(ref)
-	detail, err := manager.Detail(ref)
+	detail, err := manager.Detail(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("Detail(%q): %v", ref, err)
 	}
@@ -240,7 +240,7 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 	<-manager.Drained(response.Header().Get("X-Request-Id"))
-	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
+	meta, _, _, err := manager.ReadFile(context.Background(), response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
 	<-manager.Drained(response.Header().Get("X-Request-Id"))
-	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
+	meta, _, _, err := manager.ReadFile(context.Background(), response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,14 +301,14 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	application.Router().ServeHTTP(response, request)
 	dir := response.Header().Get("X-Request-Id")
 	<-manager.Drained(dir)
-	meta, _, _, err := manager.ReadFile(dir, "meta.json")
+	meta, _, _, err := manager.ReadFile(context.Background(), dir, "meta.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(meta), `"result": "failed"`) {
 		t.Fatalf("meta = %s", meta)
 	}
-	errorLog, _, _, err := manager.ReadFile(dir, "error.json")
+	errorLog, _, _, err := manager.ReadFile(context.Background(), dir, "error.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -777,7 +777,7 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 		t.Fatal("missing X-Request-Id header")
 	}
 	<-manager.Drained(dir)
-	if _, err := manager.Detail(dir); err != nil {
+	if _, err := manager.Detail(context.Background(), dir); err != nil {
 		t.Fatalf("X-Request-Id %q does not map to a debug dir: %v", dir, err)
 	}
 	body := response.Body.String()
@@ -1067,7 +1067,7 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 		t.Fatal("413 response missing X-Request-Id debug ref")
 	}
 	<-manager.Drained(ref)
-	if _, err := manager.Detail(ref); err != nil {
+	if _, err := manager.Detail(context.Background(), ref); err != nil {
 		t.Fatalf("debug dir %s missing: %v", ref, err)
 	}
 	if got := rejectCount(application, obs.RejectHTTPRead); got != 0 {

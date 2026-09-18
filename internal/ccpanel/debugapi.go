@@ -118,7 +118,7 @@ func (h *Handler) resolveDebugDir(r *http.Request, id int64) (dir string, timeMS
 		}
 	}
 	if h.debug != nil {
-		if d, found := h.debug.FindDirByStartedAt(id); found {
+		if d, found := h.debug.FindDirByStartedAt(r.Context(), id); found {
 			return d, id, true
 		}
 	}
@@ -138,7 +138,7 @@ func (h *Handler) adminDebugLogFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := chi.URLParam(r, "*")
-	data, total, truncated, err := h.debug.ReadFile(dir, name)
+	data, total, truncated, err := h.debug.ReadFile(r.Context(), dir, name)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "file not found")
 		return
@@ -182,7 +182,7 @@ func (h *Handler) adminDebugLogMerged(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "request log not found or already cleaned")
 		return
 	}
-	data, _, truncated, err := h.debug.ReadFile(dir, debuglog.StageHTTPResponse)
+	data, _, truncated, err := h.debug.ReadFile(r.Context(), dir, debuglog.StageHTTPResponse)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "response stream file not found")
 		return

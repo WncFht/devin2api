@@ -50,13 +50,13 @@ type RequestDetail struct {
 // dir 必须匹配请求目录命名模式。目录名只在 claim 落库那一刻起算存在；
 // 文件清单为空且不在活跃集（日志行在而 payload 已被淘汰）时回
 // os.ErrNotExist——恢复「目录已删」的 404 语义而不是 200 空数据。
-func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
+func (manager *Manager) Detail(ctx context.Context, dir string) (*RequestDetail, error) {
 	if manager == nil || !requestDirPattern.MatchString(dir) {
 		return nil, os.ErrNotExist
 	}
 	var files []RequestFileInfo
 	if manager.store != nil {
-		list, err := manager.store.DebugFileList(context.Background(), dir)
+		list, err := manager.store.DebugFileList(ctx, dir)
 		if err != nil {
 			return nil, err
 		}
@@ -74,7 +74,7 @@ func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
 	}
 	detail := &RequestDetail{Dir: dir, Files: files}
 	if manager.store != nil {
-		if data, _, ok, err := manager.store.DebugFile(context.Background(), dir, MetaFile, fileReadCap); err == nil && ok && json.Valid(data) {
+		if data, _, ok, err := manager.store.DebugFile(ctx, dir, MetaFile, fileReadCap); err == nil && ok && json.Valid(data) {
 			detail.Meta = json.RawMessage(data)
 			var summary MetaSummary
 			if json.Unmarshal(data, &summary) == nil {
@@ -88,11 +88,11 @@ func (manager *Manager) Detail(dir string) (*RequestDetail, error) {
 // ReadFile 读取请求目录内指定文件；超过 fileReadCap 时返回截断前缀。
 // total 返回文件真实大小，便于调用方提示「已截断」。name 允许顶层文件
 // 或 attachments/ 下一层文件，其余路径一律拒绝。
-func (manager *Manager) ReadFile(dir, name string) (data []byte, total int64, truncated bool, err error) {
+func (manager *Manager) ReadFile(ctx context.Context, dir, name string) (data []byte, total int64, truncated bool, err error) {
 	if manager == nil || manager.store == nil || !requestDirPattern.MatchString(dir) || !validFileRelPath(name) {
 		return nil, 0, false, os.ErrNotExist
 	}
-	data, total, ok, err := manager.store.DebugFile(context.Background(), dir, name, fileReadCap)
+	data, total, ok, err := manager.store.DebugFile(ctx, dir, name, fileReadCap)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -121,11 +121,11 @@ func validFileRelPath(name string) bool {
 // DevinRequestStages 列出请求目录内全部上游 wire 请求文件名——首个请求加
 // attemptN/searchN 分片，按名字字典序返回。census 类消费者与面板的
 // req_body 拼接都经它枚举，重试写进上游的 wire 形态才不会逃出覆盖统计。
-func (manager *Manager) DevinRequestStages(dir string) ([]string, error) {
+func (manager *Manager) DevinRequestStages(ctx context.Context, dir string) ([]string, error) {
 	if manager == nil || manager.store == nil || !requestDirPattern.MatchString(dir) {
 		return nil, os.ErrNotExist
 	}
-	names, err := manager.store.DebugFileNames(context.Background(), dir)
+	names, err := manager.store.DebugFileNames(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func (manager *Manager) ActiveRequests() []ActiveRequest {
 // 供 ccpanel 把日志行 id（started_at 毫秒戳）映射回调试目录。
 // 活跃请求先查内存——claim 行虽即时落库，meta.json 内容要等首个写
 // 任务跑完才有 started_at，毫秒级查询窗口内只能靠 recorder 记的时刻。
-func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
+func (manager *Manager) FindDirByStartedAt(ctx context.Context, ms int64) (string, bool) {
 	if manager == nil {
 		return "", false
 	}
@@ -219,7 +219,6 @@ func (manager *Manager) FindDirByStartedAt(ms int64) (string, bool) {
 	if manager.store == nil {
 		return "", false
 	}
-	ctx := context.Background()
 	dirs, err := manager.store.DebugDirsByPrefix(ctx, time.UnixMilli(ms).Format("20060102-150405"))
 	if err != nil {
 		return "", false
