@@ -7,6 +7,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -102,7 +103,7 @@ var schemaMigrations = []migration{
 			if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM logs`).Scan(&maxID); err != nil {
 				return err
 			}
-			return setCellsWatermark(tx, maxID)
+			return setCellsWatermark(context.Background(), tx, maxID)
 		},
 	},
 	{

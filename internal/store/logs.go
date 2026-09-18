@@ -205,7 +205,7 @@ func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
 	if err := upsertCauseCells(ctx, tx, causes); err != nil {
 		return 0, err
 	}
-	if err := setCellsWatermark(tx, id); err != nil {
+	if err := setCellsWatermark(ctx, tx, id); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit()

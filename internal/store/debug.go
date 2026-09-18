@@ -340,7 +340,7 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			if err := upsertCauseCells(ctx, tx, causes); err != nil {
 				return err
 			}
-			if err := setCellsWatermark(tx, maxID); err != nil {
+			if err := setCellsWatermark(ctx, tx, maxID); err != nil {
 				return err
 			}
 		}

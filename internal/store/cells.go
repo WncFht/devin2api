@@ -147,19 +147,26 @@ var cellsConflict = ` ON CONFLICT(slot, day, api, emodel, key_hash) DO UPDATE SE
 // errCellsConflict 是错误迷你表的 upsert 冲突子句（单计数列累加）。
 const errCellsConflict = ` ON CONFLICT(slot, stage) DO UPDATE SET req = log_err_cells.req + excluded.req`
 
-// cellsInsertSQL 生成「logs → log_cells」的聚合回填语句，where 是追加
-// 在 rejected 谓词后的行范围片段（ReconcileCells 补漏用 "AND id > ?"）。
-// 同一个 GROUP BY 表达式服务迁移回填与运行期补漏——口径只有一份。
-func cellsInsertSQL(where string) string {
+// cellsSelectSQL 生成「logs 行 → 五维格子键」的聚合 SELECT：38 个
+// 指标列的 SUM 表达式、min_time/last_key 两个非可加列全按 cellMetrics
+// 一份登记表派生。where 是追加在 rejected 谓词后的行范围片段。
+// 迁移回填、水位补漏与窗口重算共用同一投影——口径只有一份。
+func cellsSelectSQL(where string) string {
 	exprs := make([]string, 0, len(cellMetrics))
 	for _, m := range cellMetrics {
 		exprs = append(exprs, "SUM("+m.expr+")")
 	}
-	return `INSERT INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames + `, min_time, last_key)
-		SELECT time/600000, ` + logDayExpr + `, api, ` + logEModelExpr + `, key_hash, ` +
+	return `SELECT time/600000, ` + logDayExpr + `, api, ` + logEModelExpr + `, key_hash, ` +
 		strings.Join(exprs, ", ") + `, MIN(time), MAX(printf('%020d', id)||'|'||started_at)
 		FROM logs WHERE log_source != 'rejected' ` + where +
-		` GROUP BY 1, 2, 3, 4, 5` + cellsConflict
+		` GROUP BY 1, 2, 3, 4, 5`
+}
+
+// cellsInsertSQL 生成增量 upsert 形态的回填语句（ReconcileCells 补漏
+// 用 "AND id > ?"）：冲突时累加——适用场景是「该行的贡献尚未入账」。
+func cellsInsertSQL(where string) string {
+	return `INSERT INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames + `, min_time, last_key)
+		` + cellsSelectSQL(where) + cellsConflict
 }
 
 var (
@@ -167,6 +174,21 @@ var (
 	// cellsUpsertSQL 是写路径单行/批量共用的 VALUES 形态 upsert。
 	cellsUpsertSQL = `INSERT INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames +
 		`, min_time, last_key) VALUES(` + placeholders(5+len(cellMetrics)+2) + `)` + cellsConflict
+)
+
+var (
+	// cellsRebuildSQL/errCellsRebuildSQL 是 BackfillCells 的窗口重算
+	// 语句：同一聚合投影但冲突语义是整行 REPLACE——格子被重写成「当前
+	// 源行应产生的值」，重跑收敛到同一结果（增量 upsert 重跑会双计）。
+	// `id <= ?`（水位）把重算域限定在已记账 id 域内：水位外行仍归
+	// 读侧补尾与 ReconcileCells 的增量补记，若一并 REPLACE 进格子
+	// 会被两侧各算一次。
+	cellsRebuildSQL = `INSERT OR REPLACE INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames +
+		`, min_time, last_key) ` + cellsSelectSQL(`AND id <= ? AND time/600000 BETWEEN ? AND ?`)
+	errCellsRebuildSQL = `INSERT OR REPLACE INTO log_err_cells(slot, stage, req)
+		SELECT time/600000, error_stage, COUNT(*) FROM logs
+		WHERE log_source != 'rejected' AND error_stage != '' AND id <= ? AND time/600000 BETWEEN ? AND ?
+		GROUP BY 1, 2`
 )
 
 var (
@@ -180,10 +202,18 @@ var (
 // cellsWatermarkKey 是 rollup 覆盖水位线在 runtime_state 的键。
 const cellsWatermarkKey = "log_cells_covered_id"
 
+// cellDB 是格子记账语句的最小执行面：*sql.Tx（常规写事务）与
+// *sql.Conn（BackfillCells 手工 BEGIN IMMEDIATE 的事务连接）都满足。
+type cellDB interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // cellsWatermark 读当前覆盖水位（缺席按 0——全表未记账）。
-func cellsWatermark(tx *sql.Tx) (int64, error) {
+func cellsWatermark(ctx context.Context, q cellDB) (int64, error) {
 	var v string
-	switch err := tx.QueryRow(`SELECT value FROM runtime_state WHERE "key" = ?`, cellsWatermarkKey).Scan(&v); {
+	switch err := q.QueryRowContext(ctx, `SELECT value FROM runtime_state WHERE "key" = ?`, cellsWatermarkKey).Scan(&v); {
 	case err == sql.ErrNoRows:
 		return 0, nil
 	case err != nil:
@@ -194,8 +224,8 @@ func cellsWatermark(tx *sql.Tx) (int64, error) {
 
 // setCellsWatermark 在事务内推进水位；单写连接串行化下 id 单调，
 // 直接写新值即等价 MAX。
-func setCellsWatermark(tx *sql.Tx, id int64) error {
-	_, err := tx.Exec(`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+func setCellsWatermark(ctx context.Context, q cellDB, id int64) error {
+	_, err := q.ExecContext(ctx, `INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
 		cellsWatermarkKey, strconv.FormatInt(id, 10), time.Now().UnixMilli())
 	return err
 }
@@ -467,7 +497,7 @@ func (s *Store) ReconcileCells(ctx context.Context) error {
 		return err
 	}
 	defer done()
-	wm, err := cellsWatermark(tx)
+	wm, err := cellsWatermark(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -484,13 +514,276 @@ func (s *Store) ReconcileCells(ctx context.Context) error {
 	if maxID < wm {
 		maxID = wm
 	}
-	if err := setCellsWatermark(tx, maxID); err != nil {
+	if err := setCellsWatermark(ctx, tx, maxID); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// cellWhere 把 LogScope 编译成 rollup 列谓词（含前导 " AND "）。
+// ── 水位内缺口的窗口重算 ──────────────────────────────────────────
+//
+// ReconcileCells 只补水位之后的行；「水位已覆盖但格子缺失/残缺」的
+// 历史洞（cells 流水线接管全部写路径之前由旧二进制写下的行，其 id
+// 永远 ≤ 水位）需要另一件工具：按 slot 窗口把格子整行重算重写。
+// REPLACE 语义让重复执行收敛到同一份真值，不产生增量 upsert 的重跑
+// 双计；重算域限定 id ≤ 水位，水位外行留给读侧补尾与补漏记账。
+
+// CellsAuditReport 汇总一个 slot 窗口（闭区间）内「源行 vs 格子」的
+// 对账结果；对账域是 id ≤ Watermark 的非 rejected 行（水位外行归
+// ReconcileCells，见 TailRows）。
+type CellsAuditReport struct {
+	SlotLo, SlotHi  int64 // 审计窗口
+	Watermark       int64 // 对账时刻的覆盖水位
+	Rows            int64 // 窗口内 id≤水位 的非 rejected 源行数
+	Dims            int64 // 源行聚合出的维度数
+	MismatchDims    int64 // src.req != cell.req 的维度数
+	DeficitRows     int64 // 失配维度上 Σ(src-cell)，带符号
+	SurplusDims     int64 // cell.req > src.req 的维度数（REPLACE 会按源真值重写）
+	OrphanCells     int64 // 窗口内有格无源的维度数（源行已被删净的残格）
+	ErrDims         int64 // err 侧 (slot,stage) 源组数
+	ErrMismatchDims int64
+	ErrDeficitRows  int64
+	ErrOrphans      int64
+	TailRows        int64 // 窗口内 id>水位 的行数（不属本对账域）
+}
+
+// CellsBackfillReport 是 BackfillCells 的结算：Pre 为动手前审计，
+// Post 为写入后复测（干跑时与 Pre 相同——Remaining 即 Pre 自身）。
+type CellsBackfillReport struct {
+	Pre     CellsAuditReport
+	Post    CellsAuditReport
+	Applied bool // false=干跑（未写库）
+}
+
+// cellSrcPred 是对账/重算共用的源行域谓词与实参序：水位内 + 窗口内
+// 的非 rejected 行。实参恒为 (wm, lo, hi)。
+const cellSrcPred = `log_source != 'rejected' AND id <= ? AND time/600000 BETWEEN ? AND ?`
+
+// CellsAudit 只读对账一个 slot 窗口的 rollup 覆盖——返回的失配集即
+// BackfillCells 会修复的对象。lo=0/hi=math.MaxInt64 即全表扫。
+// 水位与计数放在同一读事务里取：谓词以水位分域，两个读快照不拼在
+// 同一事务会出「行已记账但水位读旧」的假缺口。
+func (s *Store) CellsAudit(ctx context.Context, slotLo, slotHi int64) (*CellsAuditReport, error) {
+	conn, err := s.ro.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
+		return nil, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
+	wm, err := cellsWatermark(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	return s.cellsAuditTx(ctx, conn, wm, slotLo, slotHi)
+}
+
+// BackfillCells 重算 [slotLo, slotHi] 窗口内全部格子的 rollup——
+// 「水位内无格子」历史洞的修复路径（9-19 prod 实证：cells 化二进制
+// 与旧二进制 reuseport 交接期交叠写库，留下 47 维 / 8,582 行的洞，
+// 行 id 均 ≤ 水位，ReconcileCells 的 id>水位 补漏永远够不着）。
+//
+// apply=false 时只审计不写库（Pre 即缺口报告）。apply=true 时在
+// 一个 BEGIN IMMEDIATE 事务里顺序做：完整性守卫 → 审计 → 两表
+// INSERT OR REPLACE → 复测。守卫与写入同事务共享快照；事务对prod
+// 写者串行（busy_timeout 兜底等待），窗口内新落的行要么先于事务
+// 提交（被重算吃进）要么在其后（双写 upsert 叠在重算格上）——
+// 两种交错都收敛，故不阻塞运行中实例执行。
+//
+// 两道守卫把「源行已被部分删除」的窗口拦在重写前（REPLACE 会把格子
+// 写小、永久毁掉格子里尚存的历史）：
+//   - 完整性：占用 slot 的格底 < 全表 MIN(time) ⇒ 前缀删除已越过该
+//     slot 下缘（retention 的 DELETE FROM logs WHERE time < cutoff
+//     只可能是部分删除的来源）。窗口内任一占用 slot 破缺即整体中止，
+//     不跳过单格——「缺口+部分删除」在对账面上不可分。
+//   - 盈余：某 slot 的 SUM(cell.req) > 存活源行数 ⇒ 出现了非前缀
+//     删除或外部改写，REPLACE 修复前提不成立，中止。
+func (s *Store) BackfillCells(ctx context.Context, slotLo, slotHi int64, apply bool) (*CellsBackfillReport, error) {
+	if slotLo < 0 || slotLo > slotHi {
+		return nil, fmt.Errorf("bad slot range %d:%d", slotLo, slotHi)
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	// BEGIN IMMEDIATE 先取写锁再跑守卫与重算：deferred 事务在 WAL
+	// 下先读后写时，快照与升级之间若被并发写挤入会吃
+	// SQLITE_BUSY_SNAPSHOT 直接失败；IMMEDIATE 借 busy_timeout 排队
+	// 等待，整段操作是一个原子单元。
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return nil, fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// 不用可能已经取消的 ctx：回滚失败会让带 open tx 的连接
+			// 回池污染后续使用者。
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	wm, err := cellsWatermark(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	breached, err := cellsBreachedSlots(ctx, conn, wm, slotLo, slotHi)
+	if err != nil {
+		return nil, err
+	}
+	if len(breached) > 0 {
+		return nil, fmt.Errorf("slots %v not intact (slot floor below MIN(logs.time)——源行已被部分删除，REPLACE 会把格子写小；先人工核对再决定放行)", breached)
+	}
+	surplus, err := cellsSurplusSlots(ctx, conn, wm, slotLo, slotHi)
+	if err != nil {
+		return nil, err
+	}
+	if len(surplus) > 0 {
+		return nil, fmt.Errorf("slots %v have surplus cells (SUM(cell req) > 存活源行——非前缀删除或外部改写痕迹，中止)", surplus)
+	}
+	pre, err := s.cellsAuditTx(ctx, conn, wm, slotLo, slotHi)
+	if err != nil {
+		return nil, err
+	}
+	rep := &CellsBackfillReport{Pre: *pre, Post: *pre}
+	if !apply {
+		return rep, nil
+	}
+	if _, err := conn.ExecContext(ctx, cellsRebuildSQL, wm, slotLo, slotHi); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, errCellsRebuildSQL, wm, slotLo, slotHi); err != nil {
+		return nil, err
+	}
+	post, err := s.cellsAuditTx(ctx, conn, wm, slotLo, slotHi)
+	if err != nil {
+		return nil, err
+	}
+	rep.Post = *post
+	rep.Applied = true
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, err
+	}
+	committed = true
+	return rep, nil
+}
+
+// cellsAuditTx 在连接当前事务快照上跑窗口对账（调用方负责事务）。
+func (s *Store) cellsAuditTx(ctx context.Context, q cellDB, wm, lo, hi int64) (*CellsAuditReport, error) {
+	r := &CellsAuditReport{SlotLo: lo, SlotHi: hi, Watermark: wm}
+	args := func() []any { return []any{wm, lo, hi} }
+	scan := func(query string, dests ...any) error {
+		return q.QueryRowContext(ctx, query, args()...).Scan(dests...)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE log_source != 'rejected' AND id > ? AND time/600000 BETWEEN ? AND ?`,
+		wm, lo, hi).Scan(&r.TailRows); err != nil {
+		return nil, err
+	}
+	if err := scan(`WITH dims AS (
+			SELECT time/600000 AS slot, `+logDayExpr+` AS day, api, `+logEModelExpr+` AS emodel, key_hash, COUNT(*) AS total
+			FROM logs WHERE `+cellSrcPred+` GROUP BY 1,2,3,4,5)
+		SELECT COUNT(*), COALESCE(SUM(d.total),0),
+			COALESCE(SUM(CASE WHEN d.total != COALESCE(c.req,0) THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN d.total != COALESCE(c.req,0) THEN d.total - COALESCE(c.req,0) END),0),
+			COALESCE(SUM(CASE WHEN d.total < COALESCE(c.req,0) THEN 1 ELSE 0 END),0)
+		FROM dims d LEFT JOIN log_cells c
+			ON c.slot=d.slot AND c.day=d.day AND c.api=d.api AND c.emodel=d.emodel AND c.key_hash=d.key_hash`,
+		&r.Dims, &r.Rows, &r.MismatchDims, &r.DeficitRows, &r.SurplusDims); err != nil {
+		return nil, err
+	}
+	// 残格计数：格子还在但维度下已无任何源行（前缀删除越过该 dim
+	// 但 slot 内尚有其他源行时 Layer-1 拦不住，这里如实报告）。
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM log_cells c WHERE c.slot BETWEEN ? AND ? AND NOT EXISTS (
+			SELECT 1 FROM logs l WHERE l.log_source != 'rejected' AND l.id <= ?
+			AND l.time/600000 = c.slot
+			AND strftime('%Y-%m-%d', l.time/1000, 'unixepoch', 'localtime') = c.day
+			AND l.api = c.api
+			AND CASE WHEN l.model != '' THEN l.model ELSE l.requested_model END = c.emodel
+			AND l.key_hash = c.key_hash)`, lo, hi, wm).Scan(&r.OrphanCells); err != nil {
+		return nil, err
+	}
+	if err := scan(`WITH errs AS (
+			SELECT time/600000 AS slot, error_stage AS stage, COUNT(*) AS total
+			FROM logs WHERE `+cellSrcPred+` AND error_stage != '' GROUP BY 1,2)
+		SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN e.total != COALESCE(c.req,0) THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN e.total != COALESCE(c.req,0) THEN e.total - COALESCE(c.req,0) END),0)
+		FROM errs e LEFT JOIN log_err_cells c ON c.slot=e.slot AND c.stage=e.stage`,
+		&r.ErrDims, &r.ErrMismatchDims, &r.ErrDeficitRows); err != nil {
+		return nil, err
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM log_err_cells c WHERE c.slot BETWEEN ? AND ? AND NOT EXISTS (
+			SELECT 1 FROM logs l WHERE l.log_source != 'rejected' AND l.error_stage != '' AND l.id <= ?
+			AND l.time/600000 = c.slot AND l.error_stage = c.stage)`, lo, hi, wm).Scan(&r.ErrOrphans); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// cellsBreachedSlots 列出窗口内「不可证完整」的占用 slot（格底低于
+// 全表最早存活行——前缀删除已吃掉该 slot 的一部分）。返回空集即
+// 窗口内每个占用 slot 的源行都完好。
+func cellsBreachedSlots(ctx context.Context, q cellDB, wm, lo, hi int64) ([]int64, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT DISTINCT time/600000 FROM logs WHERE `+cellSrcPred+`
+		AND time/600000*600000 < (SELECT MIN(time) FROM logs)`, wm, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []int64
+	for rows.Next() {
+		var s int64
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// cellsSurplusSlots 列出窗口内格子计数超过存活源行的 slot（两张
+// rollup 表各查一遍）。盈余意味着格子声称的历史比源行多——REPLACE
+// 会把它写成更小的数，属数据损毁方向，必须中止人工核对。
+func cellsSurplusSlots(ctx context.Context, q cellDB, wm, lo, hi int64) ([]int64, error) {
+	var out []int64
+	for _, query := range []string{
+		`SELECT slot FROM (
+			SELECT c.slot AS slot, SUM(c.req) AS cellreq,
+				(SELECT COUNT(*) FROM logs l WHERE l.time/600000 = c.slot
+					AND l.log_source != 'rejected' AND l.id <= ?) AS srcreq
+			FROM log_cells c WHERE c.slot BETWEEN ? AND ? GROUP BY c.slot)
+		WHERE cellreq > srcreq`,
+		`SELECT slot FROM (
+			SELECT c.slot AS slot, SUM(c.req) AS cellreq,
+				(SELECT COUNT(*) FROM logs l WHERE l.time/600000 = c.slot
+					AND l.log_source != 'rejected' AND l.error_stage != '' AND l.id <= ?) AS srcreq
+			FROM log_err_cells c WHERE c.slot BETWEEN ? AND ? GROUP BY c.slot)
+		WHERE cellreq > srcreq`,
+	} {
+		rows, err := q.QueryContext(ctx, query, wm, lo, hi)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var s int64
+			if err := rows.Scan(&s); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			out = append(out, s)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // 调用方已保证 Account==""（rollup 无 account 维度，该 scope 组合
 // 走原始行回退）；rejected 剔除是表内建语义，不需要谓词。
 func (sc LogScope) cellWhere() (string, []any) {

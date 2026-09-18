@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -383,5 +384,278 @@ func TestWriteDebugBatchRollup(t *testing.T) {
 	}
 	if wm := cellsWatermarkOf(t, s, ctx); wm != maxID {
 		t.Fatalf("watermark %d != MAX(id) %d", wm, maxID)
+	}
+}
+
+// forceCellsWatermark 把覆盖水位人工推到给定 id——测试里用来复刻
+// 「行已声称记账但格子缺失」的历史洞形态（prod 2026-09-19 实证：
+// cells 化二进制迁移回填推满水位后，旧二进制继续写的新行没有双写）。
+func forceCellsWatermark(t *testing.T, s *Store, ctx context.Context, id int64) {
+	t.Helper()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,0)`,
+		cellsWatermarkKey, strconv.FormatInt(id, 10)); err != nil {
+		t.Fatalf("force watermark: %v", err)
+	}
+}
+
+// TestBackfillCellsRepairsGap 复刻水位内缺口：首行走双写（格子在），
+// 其余绕过双写直插后水位被人工推满——全部行 id ≤ 水位但多数格子
+// 缺失。BackfillCells 干跑只出报告；apply 后格子与全量真值逐格相等，
+// 水位不变（重算域本来就在水位内），重跑幂等。
+func TestBackfillCellsRepairsGap(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	rows := cellSeedRows(base)
+
+	rows[0].Dir = "covered-0"
+	if _, err := s.InsertLog(ctx, rows[0]); err != nil {
+		t.Fatalf("InsertLog: %v", err)
+	}
+	var maxID int64
+	for i, r := range rows[1:] {
+		r.Dir = fmt.Sprintf("gap-%02d", i)
+		res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+		if err != nil {
+			t.Fatalf("bypass insert %d: %v", i, err)
+		}
+		if maxID, err = res.LastInsertId(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forceCellsWatermark(t, s, ctx, maxID)
+
+	var lo, hi int64
+	for _, r := range rows {
+		slot := r.StartedAt.UnixMilli() / 600000
+		if lo == 0 || slot < lo {
+			lo = slot
+		}
+		if slot > hi {
+			hi = slot
+		}
+	}
+
+	// 干跑：报告缺口，不写库。
+	dry, err := s.BackfillCells(ctx, lo, hi, false)
+	if err != nil {
+		t.Fatalf("dry backfill: %v", err)
+	}
+	if dry.Applied {
+		t.Fatal("dry run reported applied")
+	}
+	if dry.Pre.Watermark != maxID {
+		t.Fatalf("watermark = %d, want %d", dry.Pre.Watermark, maxID)
+	}
+	if dry.Pre.Rows != 14 || dry.Pre.Dims != 6 || dry.Pre.MismatchDims != 6 || dry.Pre.DeficitRows != 13 {
+		t.Fatalf("pre audit: %+v", dry.Pre)
+	}
+	if dry.Pre.ErrDims != 4 || dry.Pre.ErrMismatchDims != 4 || dry.Pre.ErrDeficitRows != 5 {
+		t.Fatalf("pre err audit: %+v", dry.Pre)
+	}
+	if dry.Pre.SurplusDims != 0 || dry.Pre.OrphanCells != 0 || dry.Pre.TailRows != 0 {
+		t.Fatalf("unexpected surplus/orphan/tail: %+v", dry.Pre)
+	}
+	if stored := queryStoredCells(t, s, ctx); len(stored) != 1 {
+		t.Fatalf("dry run wrote cells: %d", len(stored))
+	}
+
+	// apply：格子与「双写产物」逐格相等（全量真值对比）。
+	rep, err := s.BackfillCells(ctx, lo, hi, true)
+	if err != nil {
+		t.Fatalf("apply backfill: %v", err)
+	}
+	if !rep.Applied {
+		t.Fatal("apply run reported not applied")
+	}
+	if rep.Post.MismatchDims != 0 || rep.Post.DeficitRows != 0 || rep.Post.ErrMismatchDims != 0 || rep.Post.OrphanCells != 0 {
+		t.Fatalf("post audit not clean: %+v", rep.Post)
+	}
+	truth := queryCellTruth(t, s, ctx, "")
+	stored := queryStoredCells(t, s, ctx)
+	if !reflect.DeepEqual(truth, stored) {
+		t.Fatalf("cells diverged:\n truth=%+v\n store=%+v", truth, stored)
+	}
+	if wm := cellsWatermarkOf(t, s, ctx); wm != maxID {
+		t.Fatalf("watermark moved: %d != %d", wm, maxID)
+	}
+	var rawReq int64
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE log_source != 'rejected'`).Scan(&rawReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := unionCount(t, s, ctx); n != rawReq {
+		t.Fatalf("union req %d != raw %d", n, rawReq)
+	}
+
+	// 幂等：重跑同一窗口不再失配，格子不变。
+	rep2, err := s.BackfillCells(ctx, lo, hi, true)
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if rep2.Pre.MismatchDims != 0 || rep2.Pre.DeficitRows != 0 {
+		t.Fatalf("second run still sees deficit: %+v", rep2.Pre)
+	}
+	if stored2 := queryStoredCells(t, s, ctx); !reflect.DeepEqual(stored, stored2) {
+		t.Fatalf("second run changed cells")
+	}
+}
+
+// TestBackfillCellsLeavesTailRows 钉死重算域边界：窗口内 id > 水位
+// 的行属于 ReconcileCells 的职责域，BackfillCells 不得把它们写进
+// 格子（否则补漏 upsert 时会双计）。
+func TestBackfillCellsLeavesTailRows(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	rows := cellSeedRows(base)
+
+	// 第一批绕过双写 + 人工推满水位 = 水位内缺口。
+	var maxID int64
+	for i, r := range rows[:4] {
+		r.Dir = fmt.Sprintf("gap-%d", i)
+		res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if maxID, err = res.LastInsertId(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forceCellsWatermark(t, s, ctx, maxID)
+
+	// 第二批同样绕过双写，但 id 在水位之上（如导入器刚落下的行，
+	// 尚等下一次 ReconcileCells）——与第一批同 slot 同维度。
+	var tailMax int64
+	for i, r := range rows[4:6] {
+		r.Dir = fmt.Sprintf("tail-%d", i)
+		res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tailMax, err = res.LastInsertId(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lo := rows[0].StartedAt.UnixMilli() / 600000
+	hi := rows[5].StartedAt.UnixMilli() / 600000
+	rep, err := s.BackfillCells(ctx, lo, hi, true)
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if rep.Pre.TailRows != 2 {
+		t.Fatalf("tail rows = %d, want 2", rep.Pre.TailRows)
+	}
+	// 格子只含水位内 4 行的贡献；水位外 2 行仍由补尾段覆盖——
+	// UNION 口径在修复前后都不重不漏。
+	wmTruth := queryCellTruth(t, s, ctx, "AND id <= ?", maxID)
+	stored := queryStoredCells(t, s, ctx)
+	if !reflect.DeepEqual(wmTruth, stored) {
+		t.Fatalf("cells include tail rows:\n wmTruth=%+v\n store=%+v", wmTruth, stored)
+	}
+	var rawReq int64
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE log_source != 'rejected'`).Scan(&rawReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := unionCount(t, s, ctx); n != rawReq {
+		t.Fatalf("union req %d != raw %d", n, rawReq)
+	}
+	// 补漏收尾：尾行被增量记进格子，水位推进，UNION 仍一致。
+	if err := s.ReconcileCells(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if wm := cellsWatermarkOf(t, s, ctx); wm != tailMax {
+		t.Fatalf("watermark = %d, want %d", wm, tailMax)
+	}
+	fullTruth := queryCellTruth(t, s, ctx, "")
+	if stored := queryStoredCells(t, s, ctx); !reflect.DeepEqual(fullTruth, stored) {
+		t.Fatalf("cells diverged after reconcile:\n truth=%+v\n store=%+v", fullTruth, stored)
+	}
+	if n := unionCount(t, s, ctx); n != rawReq {
+		t.Fatalf("union req %d != raw %d after reconcile", n, rawReq)
+	}
+}
+
+// TestBackfillCellsAbortsOnBreachedSlot 前缀删除已越过窗口下缘时
+// （占用 slot 格底低于全表最早存活行）必须整体中止——REPLACE 会把
+// 被部分删除的格子写小，毁掉格子里尚存的历史。
+func TestBackfillCellsAbortsOnBreachedSlot(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	// 同 slot 两行：删掉较早的一行使 MIN(time) 越过该 slot 格底——
+	// 这正是 retention 前缀删除扫到窗口中间时的形态。
+	var firstID, maxID int64
+	for i, off := range []time.Duration{0, time.Minute} {
+		r := &LogRow{StartedAt: base.Add(off), DurationMS: 100, Method: "POST", Path: "/v1/messages",
+			StatusCode: 200, Result: "completed", API: "anthropic", Model: "m-a", KeyHash: "kh1",
+			Dir: fmt.Sprintf("b-%d", i)}
+		res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		if i == 0 {
+			firstID = id
+		}
+		maxID = id
+	}
+	forceCellsWatermark(t, s, ctx, maxID)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM logs WHERE id = ?`, firstID); err != nil {
+		t.Fatal(err)
+	}
+
+	slot := base.UnixMilli() / 600000
+	if _, err := s.BackfillCells(ctx, slot, slot, true); err == nil ||
+		!strings.Contains(err.Error(), "not intact") {
+		t.Fatalf("expected intactness abort, got %v", err)
+	}
+	// 干跑同样被拦（守卫先于审计；纯诊断走 CellsAudit）。
+	if _, err := s.BackfillCells(ctx, slot, slot, false); err == nil {
+		t.Fatal("expected dry-run abort too")
+	}
+	if _, err := s.CellsAudit(ctx, slot, slot); err != nil {
+		t.Fatalf("CellsAudit should still report: %v", err)
+	}
+}
+
+// TestBackfillCellsAbortsOnSurplus 格子计数超过存活源行（非前缀删除
+// 或外部改写的痕迹）时中止，不把盈余改写成更小的数。
+func TestBackfillCellsAbortsOnSurplus(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	r := &LogRow{StartedAt: base, DurationMS: 100, Method: "POST", Path: "/v1/messages",
+		StatusCode: 200, Result: "completed", API: "anthropic", Model: "m-a", KeyHash: "kh1", Dir: "s-0"}
+	res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxID, _ := res.LastInsertId()
+	forceCellsWatermark(t, s, ctx, maxID)
+
+	// 手插一个 req=999 的格子制造盈余维度。
+	vals := make([]any, len(cellMetrics))
+	for i := range vals {
+		vals[i] = int64(0)
+	}
+	vals[0] = int64(999)
+	args := append([]any{base.UnixMilli() / 600000, "2026-09-17", "anthropic", "m-a", "kh1"}, vals...)
+	args = append(args, base.UnixMilli(), "00000000000000000001|2026-09-17T10:00:00Z")
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO log_cells(slot, day, api, emodel, key_hash, `+cellMetricNames+`, min_time, last_key)
+		VALUES(`+placeholders(5+len(cellMetrics)+2)+`)`, args...); err != nil {
+		t.Fatalf("bogus cell: %v", err)
+	}
+
+	slot := base.UnixMilli() / 600000
+	if _, err := s.BackfillCells(ctx, slot, slot, true); err == nil ||
+		!strings.Contains(err.Error(), "surplus") {
+		t.Fatalf("expected surplus abort, got %v", err)
 	}
 }

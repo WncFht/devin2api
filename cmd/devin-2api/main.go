@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -87,6 +89,9 @@ func main() {
 	stateDir := flag.String("state-dir", "", "日志与状态文件根目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
 	showVersion := flag.Bool("version", false, "打印构建版本后退出")
 	exportLegacyDir := flag.String("export-legacy", "", "把 <dir>/devin-2api.db 逐表导出为文件时代状态文件（logs/index.jsonl、auth_tokens.json、models.json、panel-settings.json、quota.jsonl、gate-state*.json）后退出；回滚文件版二进制或 DB 取证时用，不起服务")
+	cellsAuditSpec := flag.String("cells-audit", "", "对账 log_cells/log_err_cells 的 rollup 覆盖缺口：'all' 全表扫或 'lo:hi' slot 窗口；只读，打完报告退出不起服务")
+	cellsBackfillSpec := flag.String("cells-backfill", "", "重算修复 log_cells/log_err_cells 的 slot 窗口 'lo:hi'（如 2982899:2982912）；默认干跑只出报告，配 -cells-backfill-apply 才落库。完成后退出不起服务")
+	cellsBackfillApply := flag.Bool("cells-backfill-apply", false, "让 -cells-backfill 真正写库；缺省只读审计")
 	flag.Parse()
 	resolved := resolvedVersion()
 	if *showVersion {
@@ -106,6 +111,14 @@ func main() {
 	if *exportLegacyDir != "" {
 		if err := runExportLegacy(*exportLegacyDir); err != nil {
 			slog.Error("export legacy state failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *cellsAuditSpec != "" || *cellsBackfillSpec != "" {
+		if err := runCellsMaintenance(*cellsAuditSpec, *cellsBackfillSpec, *cellsBackfillApply, *stateDir); err != nil {
+			slog.Error("cells maintenance failed", "error", err)
 			os.Exit(1)
 		}
 		return
@@ -454,6 +467,103 @@ func runExportLegacy(dir string) error {
 			"detail", "debug_files/debug_chunks are not exported; request dirs will not be restored")
 	}
 	return err
+}
+
+// parseCellSlotRange 解析 'lo:hi' / 'lo' /（allowAll 时）'all' 的 slot
+// 窗口参数，返回闭区间。
+func parseCellSlotRange(spec string, allowAll bool) (int64, int64, error) {
+	if spec == "all" && allowAll {
+		return 0, math.MaxInt64, nil
+	}
+	lo, hi, ok := strings.Cut(spec, ":")
+	if !ok {
+		hi = lo
+	}
+	var loV, hiV int64
+	var err error
+	if loV, err = strconv.ParseInt(strings.TrimSpace(lo), 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("bad slot range %q: %w", spec, err)
+	}
+	if hiV, err = strconv.ParseInt(strings.TrimSpace(hi), 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("bad slot range %q: %w", spec, err)
+	}
+	if loV < 0 || loV > hiV {
+		return 0, 0, fmt.Errorf("bad slot range %q: need lo <= hi", spec)
+	}
+	return loV, hiV, nil
+}
+
+// runCellsMaintenance 实现 -cells-audit / -cells-backfill：打开生效状态
+// 目录里的 devin-2api.db 跑一次对账/重算后退出，不起服务。DB 缺席直接
+// 报错（store.Open 会顺手建空库，对一台没跑过实例的机器「修复」空库
+// 比报错更误导）。store.Open 自身带 ReconcileCells——水位外尾巴先在
+// 这里收拢，之后报告的水位即最新口径。
+func runCellsMaintenance(auditSpec, backfillSpec string, apply bool, stateDir string) error {
+	dir, err := config.ResolveStateDir(stateDir)
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	dbPath := filepath.Join(abs, "devin-2api.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("state db %s: %w", dbPath, err)
+	}
+	dbStore, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dbStore.Close() }()
+	ctx := context.Background()
+	if auditSpec != "" {
+		lo, hi, err := parseCellSlotRange(auditSpec, true)
+		if err != nil {
+			return err
+		}
+		rep, err := dbStore.CellsAudit(ctx, lo, hi)
+		if err != nil {
+			return err
+		}
+		logCellsAudit("cells audit", rep)
+	}
+	if backfillSpec != "" {
+		lo, hi, err := parseCellSlotRange(backfillSpec, false)
+		if err != nil {
+			return err
+		}
+		rep, err := dbStore.BackfillCells(ctx, lo, hi, apply)
+		if err != nil {
+			return err
+		}
+		logCellsAudit("cells backfill pre", &rep.Pre)
+		if rep.Applied {
+			logCellsAudit("cells backfill post", &rep.Post)
+			slog.Info("cells backfill applied", "slots", fmt.Sprintf("%d:%d", rep.Pre.SlotLo, rep.Pre.SlotHi))
+		} else {
+			slog.Info("cells backfill dry-run (pass -cells-backfill-apply to write)")
+		}
+	}
+	return nil
+}
+
+// logCellsAudit 把一份对账报告打成一行 slog 摘要。
+func logCellsAudit(op string, r *store.CellsAuditReport) {
+	slog.Info(op,
+		"slots", fmt.Sprintf("%d:%d", r.SlotLo, r.SlotHi),
+		"watermark", r.Watermark,
+		"src_rows", r.Rows,
+		"src_dims", r.Dims,
+		"mismatch_dims", r.MismatchDims,
+		"deficit_rows", r.DeficitRows,
+		"surplus_dims", r.SurplusDims,
+		"orphan_cells", r.OrphanCells,
+		"err_dims", r.ErrDims,
+		"err_mismatch_dims", r.ErrMismatchDims,
+		"err_deficit_rows", r.ErrDeficitRows,
+		"err_orphans", r.ErrOrphans,
+		"tail_rows", r.TailRows)
 }
 
 // poolLaneNames 返回池中现存 lane 名序（排序后）——reload 报告的
