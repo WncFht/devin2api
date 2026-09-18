@@ -635,7 +635,15 @@ func listenURL(listen string) string {
 // 尾部分布远超该值——300s 窗口内仍有真实请求被硬切）。注意这里不用
 // http.Server.Shutdown——它先关 listener 再排空，排空期所有新连接都被内核
 // refused；非交接场景改为 listener 保持开启、/v1/* 由应用层快速 503。
-const drainTimeout = 600 * time.Second
+// var 而非 const：测试缩短它来走 drain 超时的强掐路径。
+var drainTimeout = 600 * time.Second
+
+// drainKillGrace 是 drain 超时强掐后、进程退出前等在途请求跑完收尾簿记
+// 的窗口：server.Close 只关连接不等待 handler 协程，被掐请求的 Complete
+// 哨兵/logs 行/error.json 全在各自 defer 里跑——不等这一拍，进程先行
+// 退出会让掐断请求对 logs 聚合不可见。收尾只需微秒级入队（落库由
+// debugManager.Close 排空保证），窗口只为挂死的 handler 兜底。
+const drainKillGrace = 5 * time.Second
 
 // reusePortEnabled 报告是否启用 SO_REUSEPORT 重叠交接：开启后多个进程可
 // 绑定同一监听地址，deploy 先起桥接进程入队再排空旧实例，做到零停机重启。
@@ -684,7 +692,11 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
 	if err := application.WaitDrain(drainCtx); err != nil {
-		slog.Warn("shutdown: drain timed out, closing remaining connections", "error", err)
+		// 带因取消先于 server.Close：conn 关闭对请求 ctx 的取消是裸
+		// Canceled 无归因，先在 ctx 上钉住 drain 原因再断连接，被掐
+		// 请求的收尾簿记才标得出 drain_timeout。
+		killed := application.KillInflight()
+		slog.Warn("shutdown: drain timed out, killing in-flight requests", "error", err, "killed", killed)
 	}
 	// reuseport 路径上面已直接关过底层 listener：Serve 的 defer 解除
 	// listener 追踪与这里的 Close 存在竞态，落后时对同一 fd 做真实
@@ -692,6 +704,15 @@ func run(ctx context.Context, application *app.App, server *http.Server, listene
 	// 干净的重启概率性留假错误日志。吞掉这一种，其余照常上报。
 	if err := server.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
+	}
+	// server.Close 不等待 handler 协程：被掐请求的收尾簿记（logs 行/
+	// error.json）在各自 defer 里跑，等有界窗口让哨兵入队——落库由
+	// deferred debugManager.Close 排空保证。缺这一步进程先行退出，
+	// 掐断请求对 logs 聚合不可见。
+	killCtx, killCancel := context.WithTimeout(context.Background(), drainKillGrace)
+	defer killCancel()
+	if err := application.WaitDrain(killCtx); err != nil {
+		slog.Warn("shutdown: exiting with in-flight bookkeeping unfinished", "error", err)
 	}
 	return nil
 }

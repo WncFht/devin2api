@@ -218,8 +218,8 @@ func TestAbortActiveRequest(t *testing.T) {
 	if manager.Abort(dir) {
 		t.Fatal("Abort should fail before ctx is attached")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	recorder.SetAbort(cancel)
 
 	active := manager.ActiveRequests()

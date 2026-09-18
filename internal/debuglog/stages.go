@@ -58,6 +58,10 @@ const (
 	ErrStageHTTPEncode = "http_encode"
 	// ErrStageClientDisconnected 是客户端断连/取消终止了请求。
 	ErrStageClientDisconnected = "client_disconnected"
+	// ErrStageDrainTimeout 是排空超时强掐：drainTimeout 到期后进程对在途
+	// 请求做带因取消——与客户端断连同为 ctx 取消但责任在运维侧（部署掐断），
+	// 不归 client_disconnected，聚合时不污染断连口径。
+	ErrStageDrainTimeout = "drain_timeout"
 	// ErrStageDevinConnect 是上游语义拒绝（参数/权限/限流的 Connect 层错误）。
 	ErrStageDevinConnect = "devin_connect"
 	// ErrStageDevinTransport 是上游传输断裂（EOF/帧截断，非语义响应）。

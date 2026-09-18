@@ -292,8 +292,9 @@ type Recorder struct {
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
-	// abortCancel 是请求 ctx 的取消函数，面板 Abort 时调用；nil 表示不可中断。
-	abortCancel context.CancelFunc
+	// abortCancel 是请求 ctx 的带因取消函数，Abort 时以调用方给的归因
+	// 取消；nil 表示不可中断。
+	abortCancel context.CancelCauseFunc
 	// requestedModel 是解码后的客户端请求模型名（面板进行中列表展示用）。
 	requestedModel string
 	// resolvedModel 是别名解析与路由判定后实际发给上游的 uid；
@@ -882,6 +883,10 @@ func (manager *Manager) Stats() map[string]any {
 	return stats
 }
 
+// errPanelAbort 是面板主动中断的归因文案：与原 app 侧内嵌文案逐字一致，
+// 客户端/日志据此区分主动中断与裸断连。
+var errPanelAbort = fmt.Errorf("aborted via panel request abort: %w", context.Canceled)
+
 // Abort 中断指定进行中请求的 ctx；目录不存在或不可中断时返回 false。
 func (manager *Manager) Abort(dir string) bool {
 	if manager == nil || !requestDirPattern.MatchString(dir) {
@@ -893,7 +898,29 @@ func (manager *Manager) Abort(dir string) bool {
 	if recorder == nil {
 		return false
 	}
-	return recorder.Abort()
+	return recorder.Abort(errPanelAbort)
+}
+
+// AbortAll 以同一归因中断全部进行中请求：排空超时强掐路径用——取消
+// 原因沿各请求 ctx 链传到收尾簿记，返回实际中断数。已完结/未挂接的
+// 目录被 Abort 自身跳过。
+func (manager *Manager) AbortAll(cause error) int {
+	if manager == nil {
+		return 0
+	}
+	manager.mutex.Lock()
+	recorders := make([]*Recorder, 0, len(manager.activeDirs))
+	for _, recorder := range manager.activeDirs {
+		recorders = append(recorders, recorder)
+	}
+	manager.mutex.Unlock()
+	killed := 0
+	for _, recorder := range recorders {
+		if recorder.Abort(cause) {
+			killed++
+		}
+	}
+	return killed
 }
 
 // Start 为一个 HTTP 请求分配按进入秒命名的调试目录名。
@@ -1442,9 +1469,9 @@ func (recorder *Recorder) NoteClientLatency() {
 	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
 }
 
-// SetAbort 挂接请求 ctx 的取消函数，使面板 Abort 能真正中断请求。
-// Complete 后自动失效；ctx 为 nil 时忽略。
-func (recorder *Recorder) SetAbort(cancel context.CancelFunc) {
+// SetAbort 挂接请求 ctx 的带因取消函数，使 Abort 能以发起方的归因
+// 中断请求。Complete 后自动失效；ctx 为 nil 时忽略。
+func (recorder *Recorder) SetAbort(cancel context.CancelCauseFunc) {
 	if recorder == nil || cancel == nil {
 		return
 	}
@@ -1656,9 +1683,11 @@ func (recorder *Recorder) upstreamAttribution() (string, []AccountAttempt) {
 	return recorder.upstreamAccount, append([]AccountAttempt(nil), recorder.accountAttempts...)
 }
 
-// Abort 中断请求：标记 aborted 并调用挂接的取消函数。
+// Abort 中断请求：标记 aborted 并以 cause 取消挂接的请求 ctx——取消
+// 原因沿 ctx 链传到收尾归因，不同发起方（面板中断/排空强掐）在
+// error.json 与 logs 行留下各自的归因文案。
 // 无可中断的请求（未挂接或已完结）返回 false。
-func (recorder *Recorder) Abort() bool {
+func (recorder *Recorder) Abort(cause error) bool {
 	if recorder == nil {
 		return false
 	}
@@ -1669,7 +1698,7 @@ func (recorder *Recorder) Abort() bool {
 		return false
 	}
 	recorder.aborted.Store(true)
-	cancel()
+	cancel(cause)
 	return true
 }
 

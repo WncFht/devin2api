@@ -139,6 +139,8 @@ func (out *streamWriter) writeContent(p []byte) error {
 // 状态码按线上实况——已有字节送达记 200（响应行已发出，断连不伪装成
 // 5xx），什么都没送达记 499（nginx 约定的客户端关闭）。err 是调用方
 // 手上的断连证据：ctx 取消原因、与取消竞速到达的上游错误、或写出失败。
+// 取消原因是 drain 强掐（errDrainKill）时归 drain_timeout——进程部署
+// 掐断不污染客户端断连口径。
 func (out *streamWriter) finishDisconnected(completion *debuglog.Completion, err error) {
 	completion.Result = "disconnected"
 	if out.delivered {
@@ -146,7 +148,11 @@ func (out *streamWriter) finishDisconnected(completion *debuglog.Completion, err
 	} else {
 		completion.StatusCode = 499
 	}
-	out.recorder.WriteError(debuglog.ErrStageClientDisconnected, err)
+	stage := debuglog.ErrStageClientDisconnected
+	if errors.Is(err, errDrainKill) {
+		stage = debuglog.ErrStageDrainTimeout
+	}
+	out.recorder.WriteError(stage, err)
 }
 
 // sseEventSink 是写出方的事件级下沉口：实现者（WS 写出方）按编码后的
@@ -378,8 +384,14 @@ func (application *App) streamCompletion(
 		}
 		switch {
 		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
-			// ctx 取消收口：写出/编码错误与取消同时发生时同样归因断连。
-			out.finishDisconnected(completion, streamErr)
+			// ctx 取消收口：与取消竞速到达的写出/编码错误让位给取消原因——
+			// Cause 是权威归因（abort/drain 语义钉在原因链上，写死连接
+			// 物化的 broken pipe 不盖住它）。
+			cause := streamErr
+			if streamCtx.Err() != nil {
+				cause = context.Cause(streamCtx)
+			}
+			out.finishDisconnected(completion, cause)
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。

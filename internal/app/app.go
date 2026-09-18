@@ -530,6 +530,18 @@ func (application *App) WaitDrain(ctx context.Context) error {
 	return application.inflight.Wait(ctx)
 }
 
+// errDrainKill 是排空超时强掐的 ctx 取消原因：收尾归因按它把
+// 「进程强掐」与真实客户端断连（同表现为 ctx 取消）分开。
+var errDrainKill = fmt.Errorf("request killed by drain timeout: %w", context.Canceled)
+
+// KillInflight 以 drain 归因中断全部在途请求：排空超时后先于
+// server.Close 调用——conn 关闭对请求 ctx 的取消是裸 Canceled，先在
+// ctx 上钉住 drain 原因，被掐请求的收尾簿记才标得出 drain_timeout。
+// 返回实际中断数。
+func (application *App) KillInflight() int {
+	return application.debugManager.AbortAll(errDrainKill)
+}
+
 // noteReject 统一记录一次管线前拒绝：分原因计数、事件环、进程日志
 // 与 logs 表留存行同源。这类请求没有调试目录——计数/事件环供面板
 // 直读，logs 行（log_source=rejected，默认视图与聚合剔除）是跨重启
@@ -735,9 +747,7 @@ func (application *App) createCompletion(
 			KeyHash:         requestCredentialHash(request),
 			ClientRequestID: clientRequestID(request),
 		})
-		recorder.SetAbort(func() {
-			cancel(fmt.Errorf("aborted via panel request abort: %w", context.Canceled))
-		})
+		recorder.SetAbort(cancel)
 		// Stripe Request-Id 模式：本地调试身份 <dir> 写进响应头，agent
 		// 拿到后可查 logs 表或 /admin/debug-logs/{id}（{id} 是 logs 表主键）。
 		// 头部在首个字节写出时才提交，因此流式请求与中途错误同样生效。
@@ -943,7 +953,13 @@ func (application *App) createCompletion(
 		failure := llm.Classify(err)
 		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
-			out.finishDisconnected(&completion, err)
+			// 同 streamCompletion 的取消收口：ctx 已取消时 Cause 是权威
+			// 归因，物化错误让位。
+			cause := err
+			if streamCtx.Err() != nil {
+				cause = context.Cause(streamCtx)
+			}
+			out.finishDisconnected(&completion, cause)
 			return
 		}
 		if out.committed {

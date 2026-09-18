@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -11,16 +12,19 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/accounts"
+	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
+	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -357,5 +361,87 @@ auth:
 					lf.path, report.Applied, report.RequiresRestart)
 			}
 		})
+	}
+}
+
+// drainBlockAdapter 的 Stream 挂起直到 ctx 取消——模拟上游长流中的在途
+// 请求，让 drain 超时强掐路径有目标可打。
+type drainBlockAdapter struct{ entered chan struct{} }
+
+func (b *drainBlockAdapter) Stream(ctx context.Context, _ llm.RequestMessages) (llm.ResponseStream, error) {
+	close(b.entered)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *drainBlockAdapter) ListModels(context.Context) ([]adapter.ModelInfo, error) {
+	return nil, nil
+}
+
+// TestDrainTimeoutKillsInflightWithBookkeeping 走真实 SIGTERM-mid-stream
+// 路径：drainTimeout 缩短触发强掐，断言被掐请求落 logs 行
+// （result=aborted、error_stage=drain_timeout）与 error.json——
+// server.Close 不等 handler 协程，缺收尾等待时这些行随进程退出丢失。
+func TestDrainTimeoutKillsInflightWithBookkeeping(t *testing.T) {
+	prev := drainTimeout
+	drainTimeout = 200 * time.Millisecond
+	defer func() { drainTimeout = prev }()
+
+	dir := t.TempDir()
+	dbStore, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dbStore.Close() }()
+	manager := debuglog.NewManager(filepath.Join(dir, "logs"), debuglog.RetentionPolicy{}, dbStore)
+	fake := &drainBlockAdapter{entered: make(chan struct{})}
+	application := app.New(fake, config.ServerConfig{Listen: "127.0.0.1:0"}, manager)
+	server := application.HTTPServer()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- run(ctx, application, server, listener) }()
+
+	// 真实 conn 上的在途流式请求：server.Close 的强掐走完整传输路径。
+	clientDone := make(chan struct{})
+	go func() {
+		defer close(clientDone)
+		resp, err := http.Post("http://"+listener.Addr().String()+"/v1/responses", "application/json",
+			strings.NewReader(`{"model":"gpt-test","stream":true,"input":"hi"}`))
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+	<-fake.entered
+	cancel()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("run() = %v", err)
+	}
+	<-clientDone
+	// 复刻进程退出序：run 返回后 deferred Close 排空写队列，哨兵收尾落库。
+	manager.Close()
+
+	rows, _, err := dbStore.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("logs rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.Result != "aborted" || row.ErrorStage != debuglog.ErrStageDrainTimeout {
+		t.Fatalf("log row = result %q stage %q, want aborted/drain_timeout", row.Result, row.ErrorStage)
+	}
+	data, _, ok, err := dbStore.DebugFile(context.Background(), row.Dir, debuglog.ErrorFile, 1<<20)
+	if err != nil || !ok {
+		t.Fatalf("error.json missing: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(string(data), debuglog.ErrStageDrainTimeout) {
+		t.Fatalf("error.json = %s, want drain_timeout stage", data)
 	}
 }
