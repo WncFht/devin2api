@@ -1226,6 +1226,111 @@ func TestPoolBoundLaneYieldsOnDeepQueue(t *testing.T) {
 	}
 }
 
+// bg 准入轨让位：bound lane 的拥堵全在 bg 侧（fgRateEMA 顶起预留 +
+// 爬坡额度被 bucketUsedBg 吃成赤字 + bg 前队），fg 视图完全空闲——
+// bg bound 会话让位给空闲兄弟，同状态 fg bound 会话不让位（估计器
+// 按本类准入轨分账）。bg 是原事故中 bound 烧 maxHold 的主受害类，
+// reserve/爬坡估计器也是让位判据里最复杂的一条路径。
+func TestPoolBoundLaneYieldsOnBgCongestion(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	affinity := "bg-yield-session"
+	pool.bind(affinity, laneA)
+
+	// 钉在 :10——可发区间前段（usableLeft=48s，已开放 8s）。
+	// reserve=ceil(60*48/60)+0+4=52 → 释放速率 (80-52)/56=0.5/s；
+	// 爬坡额度 ceil(28*8/56)=4 < bucketUsedBg=5 → room=-1 赤字 +2s；
+	// waitersBg=30 → bg 期望 30/0.5+2=62s。
+	gate := laneA.adapter.gate
+	clock := pinGateClock(gate, 10)
+	gate.mu.Lock()
+	gate.quota = 80
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.bucketUsed = 10
+	gate.bucketUsedBg = 5
+	gate.fgRateEMA = 60
+	gate.waitersBg = 30
+	gate.mu.Unlock()
+
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	ranked := pool.rankLanes(bgCtx, pool.snapshot(), affinity)
+	if ranked[0].lane == laneA {
+		t.Fatalf("bg-congested bound lane must yield to the idle sibling, got %v", ranked[0].lane.name)
+	}
+	boundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if boundIdx < 0 || !ranked[boundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
+	}
+	// 无降级归因词时审计行 Reason 只剩 bound_yield 一词。
+	row := poolCandidateRows(ranked)[boundIdx]
+	if !row.Bound || row.Reason != "bound_yield" {
+		t.Fatalf("yielded bound row = %+v, want Bound + bound_yield reason", row)
+	}
+	if !ranked[0].verdict.healthy {
+		t.Fatal("idle sibling must lead as healthy")
+	}
+
+	// 同状态 fg 视图：bg 专轨压力不进 fg 期望排队（waitersFg=0 →
+	// ew=0），fg bound 会话维持粘性居首。
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("fg-bound session must not yield to bg-only congestion, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+
+	// τ 边界：waitersBg=4 → bg 期望 4/0.5+2=10s 恰等 τ，判据是严格
+	// <，不让位。
+	gate.mu.Lock()
+	gate.waitersBg = 4
+	gate.mu.Unlock()
+	ranked = pool.rankLanes(bgCtx, pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("bound lane must stay at the τ boundary (strict <), got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+}
+
+// bg 跨窗饥饿让位：死区内 bound lane 桶未用满，但投影下窗开放即满
+// 预留（fgRateEMA 满段外推 + waitersFg + margin ≥ quota）时 bg 期望
+// 追加一整窗——fg 饱和 lane 上 bg 实测要排到 bgMaxHold 才被拒。同
+// 状态 fg 期望只吃队列项（<τ）不让位：饥饿项是 bg 专有加项。
+func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	affinity := "bg-starved-session"
+	pool.bind(affinity, laneA)
+
+	// 钉在 :59——死区（usable :02~:58），toNext=3s。
+	// 下窗预留 ceil(80*56/60)+5+4=84≥80：bg 跨窗无槽，期望
+	// 3+0+60=63s；fg 同态只算队列项 3+5/80*60=6.75s<τ。
+	gate := laneA.adapter.gate
+	clock := pinGateClock(gate, 59)
+	gate.mu.Lock()
+	gate.quota = 80
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.fgRateEMA = 80
+	gate.waitersFg = 5
+	gate.mu.Unlock()
+
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	ranked := pool.rankLanes(bgCtx, pool.snapshot(), affinity)
+	if ranked[0].lane == laneA {
+		t.Fatalf("starved-window bound lane must yield for bg, got %v", ranked[0].lane.name)
+	}
+	boundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if boundIdx < 0 || !ranked[boundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
+	}
+	row := poolCandidateRows(ranked)[boundIdx]
+	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_full") {
+		t.Fatalf("yielded bound row = %+v, want Bound + gate_window_full/bound_yield reason", row)
+	}
+
+	// fg bound 同状态不让位：饥饿项不压 fg 期望。
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("fg-bound must not yield on the bg starvation term, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+}
+
 // 三区排序：健康档 → 配额低档 → 病档；档内 priority desc 再 rendezvous
 // 分数升序。
 func TestPoolRankLanesThreeZones(t *testing.T) {
