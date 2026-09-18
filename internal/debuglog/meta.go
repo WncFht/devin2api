@@ -38,6 +38,10 @@ type MetaSummary struct {
 	DroppedEvents  uint64          `json:"dropped_events,omitempty"`
 
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+	// EndedAt 是 Complete 入口在请求 goroutine 上打戳的完结时刻；
+	// finished_at − ended_at 即收尾在编码/写队列与批量事务里的
+	// 积压耗时（写侧拥塞的按目录读数）。
+	EndedAt    string `json:"ended_at,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	// 五段延迟分解：nil 表示该阶段未发生（区别于 0ms 即时发生）。
 	FirstClientMS   *int64 `json:"first_client_ms,omitempty"`

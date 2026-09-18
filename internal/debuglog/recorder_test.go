@@ -319,6 +319,7 @@ func TestDroppedCounterOnFullQueue(t *testing.T) {
 func newBareManager(st *store.Store, queueCap int) *Manager {
 	return &Manager{
 		store:         st,
+		now:           time.Now,
 		queues:        []chan writeTask{make(chan writeTask, queueCap)},
 		shardEncoders: []*store.PayloadEncoder{store.NewPayloadEncoder()},
 		writerEncoder: store.NewPayloadEncoder(),
@@ -1112,7 +1113,7 @@ func TestDetachedEventsSurviveQueueDrop(t *testing.T) {
 		t.Fatalf("dropped = %d, want 1（标记行确已被丢）", got)
 	}
 	recorder.NoteDetachedEvent("detached", map[string]any{"key": "k9"})
-	data := recorder.metaJSON(&Completion{StatusCode: 200, Result: "completed"})
+	data := recorder.metaJSON(&Completion{StatusCode: 200, Result: "completed", EndedAt: time.Now()})
 	var meta map[string]any
 	if err := json.Unmarshal(data, &meta); err != nil {
 		t.Fatal(err)

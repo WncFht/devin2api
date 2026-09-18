@@ -296,6 +296,11 @@ type Completion struct {
 	// 模型却返回无工具调用的 end_turn。实测存在模型声称要继续动作
 	// 后直接 EOS 的故障形态；该标记仅用于观测统计，不改变响应。
 	PrematureEndTurn bool
+	// EndedAt 是 Complete 入口在请求 goroutine 上打戳的完结时刻
+	// （与 startedAt 同走 manager.now 时钟域）；duration_ms 由它减
+	// startedAt——哨兵之后的编码/写队列排队与批量事务等待量的是
+	// 日志管道积压，不计入请求耗时。调用方不设，Complete 回填。
+	EndedAt time.Time
 }
 
 // Recorder 保存单次请求的目录名、开始时间和异步写队列。
@@ -1365,7 +1370,7 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 	manager.pendingCompletions = append(manager.pendingCompletions, completionItem{
 		recorder: recorder,
 		logRow:   manager.logRowFor(recorder, &completion),
-		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn && !interestingSuccess(recorder),
+		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn && !interestingSuccess(recorder, completion.EndedAt),
 	})
 	manager.pendingCompletionCount.Store(int64(len(manager.pendingCompletions)))
 	// 收尾项（logRow 结构 + 条目本体）随批次挂写侧持有——必须落库
@@ -1400,15 +1405,18 @@ const (
 //
 // 判定在收尾入列时刻读 recorder 状态：retries/accountAttempts 只由请求
 // goroutine 在 Complete 前追加（哨兵序保证已稳定），延迟字段与日志行
-// 同源同口径。其余干净成功照常剥——本函数只负责把误伤子集挑回来。
-func interestingSuccess(recorder *Recorder) bool {
+// 同源同口径；endedAt 是 Complete 打戳的完结时刻，慢尾判定不把收尾
+// 排队时长误算进请求耗时。其余干净成功照常剥——本函数只负责把误伤
+// 子集挑回来。
+func interestingSuccess(recorder *Recorder, endedAt time.Time) bool {
 	recorder.mutex.Lock()
 	rescued := len(recorder.retries) > 0 || len(recorder.accountAttempts) > 0
+	startedAt := recorder.startedAt
 	recorder.mutex.Unlock()
 	if rescued || recorder.detachedSeen.Load() {
 		return true
 	}
-	if time.Since(recorder.startedAt).Milliseconds() >= interestingDurationMS {
+	if endedAt.Sub(startedAt).Milliseconds() >= interestingDurationMS {
 		return true
 	}
 	return recorder.firstUpstreamMS.Load() >= interestingFirstUpstreamMS
@@ -2233,6 +2241,10 @@ func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
 		return
 	}
+	// 完结时刻在请求 goroutine 上打戳：此后哨兵要走的分片队列、
+	// insertQ 与批量事务等待全部排除在 duration_ms 之外——写侧
+	// 积压读数由 meta.finished_at − ended_at 另见。
+	completion.EndedAt = recorder.manager.now()
 	recorder.mutex.Lock()
 	if recorder.closed {
 		recorder.mutex.Unlock()
@@ -2366,9 +2378,13 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	meta.DetachedEvents = append([]DetachedEvent(nil), recorder.detachedEvents...)
 	recorder.mutex.Unlock()
 	if completion != nil {
+		// duration_ms 量「进入→handler 完结」：ended_at 是 Complete
+		// 入口打戳，finished_at 是本收尾 op 的执行时刻——两者之差即
+		// 本目录在编码/写队列与批量事务里的排队耗时。
 		finishedAt := time.Now()
-		durationMS := finishedAt.Sub(startedAt).Milliseconds()
+		durationMS := completion.EndedAt.Sub(startedAt).Milliseconds()
 		meta.DurationMS = &durationMS
+		meta.EndedAt = completion.EndedAt.Format(time.RFC3339Nano)
 		meta.FinishedAt = finishedAt.Format(time.RFC3339Nano)
 		meta.StatusCode = &completion.StatusCode
 		meta.Result = &completion.Result

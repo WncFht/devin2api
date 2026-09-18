@@ -8,7 +8,6 @@ package debuglog
 
 import (
 	"log/slog"
-	"time"
 	"unicode/utf8"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -28,9 +27,10 @@ const errorMessageCap = 300
 
 // logRowFor 构建完成请求的 logs 摘要行；store 为 nil（测试或 DB 未
 // 接线）或 dir 为空时返回 nil——日志行是观测副本，不反向决定请求
-// 能否完结。在收尾 op 入列时刻调用：duration 等时点字段取完成瞬间
-// 口径，不随批量冲刷的等待漂移。落库由写 worker 合并进批量事务
-// （runWriter → flushAll），失败重试随批次走。
+// 能否完结。duration 取 completion.EndedAt（Complete 在请求 goroutine
+// 入口打戳）减 startedAt：收尾在编码/写队列与批量事务里的等待不计入
+// 请求耗时。落库由写 worker 合并进批量事务（runWriter → flushAll），
+// 失败重试随批次走。
 func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *store.LogRow {
 	if manager.store == nil || recorder.dir == "" {
 		return nil
@@ -39,7 +39,7 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 	row := &store.LogRow{
 		Dir:               recorder.dir,
 		StartedAt:         recorder.startedAt,
-		DurationMS:        time.Since(recorder.startedAt).Milliseconds(),
+		DurationMS:        completion.EndedAt.Sub(recorder.startedAt).Milliseconds(),
 		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
 		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
 		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
