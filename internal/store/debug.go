@@ -634,6 +634,63 @@ func (s *Store) DeleteDebugDirsBefore(ctx context.Context, dirPrefix string, exc
 	return s.deleteDebugRows(ctx, where, args...)
 }
 
+// DebugDirSizesSplit 是 DebugDirSizes 的双口径版：一趟聚合同时返回各
+// 目录的总库存字节与「剥到锚点」可释放的字节（名字不在 anchor 名单
+// 中的行合计）——容量淘汰两相各用一份：第一相按 strippable 预估剥载
+// 释放，第二相按剥后残值圈整删界。refs 行按 name 同源判定（ref 的
+// name 是引用它的 manifest 文件名——manifest 非锚点，ref 随之可剥）。
+func (s *Store) DebugDirSizesSplit(ctx context.Context, anchor []string) (total, strippable map[string]int64, err error) {
+	ph := placeholders(len(anchor))
+	args := make([]any, 0, len(anchor)*3)
+	for i := 0; i < 3; i++ {
+		for _, name := range anchor {
+			args = append(args, name)
+		}
+	}
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT dir, SUM(sz), SUM(CASE WHEN is_anchor=1 THEN 0 ELSE sz END) FROM (
+			SELECT dir, LENGTH(content) AS sz, (name IN (`+ph+`)) AS is_anchor FROM debug_files
+			UNION ALL
+			SELECT dir, LENGTH(data), (name IN (`+ph+`)) FROM debug_chunks
+			UNION ALL
+			SELECT dir, LENGTH(dir)+LENGTH(name)+LENGTH(hash), (name IN (`+ph+`)) FROM debug_chunk_refs
+		) GROUP BY dir`, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	total, strippable = map[string]int64{}, map[string]int64{}
+	for rows.Next() {
+		var dir string
+		var sz, st int64
+		if err := rows.Scan(&dir, &sz, &st); err != nil {
+			return nil, nil, err
+		}
+		total[dir], strippable[dir] = sz, st
+	}
+	return total, strippable, rows.Err()
+}
+
+// StripDebugDirsBefore 把目录名小于 bound、且不在 exclude 名单中的目录
+// 剥到归因锚点：删除名字不在 keep 中的全部行——容量淘汰第一相的集合
+// 形态，files/chunks/refs 三表共用同一 WHERE（ref 的 name 是 manifest
+// 文件名，manifest 非锚点故引用随行死，锚点文件本身没有 CAS 引用）。
+// 语义与 WriteDebugBatch 的 StripDirs 一致（errors_only 剥载同款）。
+func (s *Store) StripDebugDirsBefore(ctx context.Context, bound string, keep, exclude []string) error {
+	where := `dir<? AND name NOT IN (` + placeholders(len(keep)) + `)`
+	args := []any{bound}
+	for _, name := range keep {
+		args = append(args, name)
+	}
+	if len(exclude) > 0 {
+		where += ` AND dir NOT IN (` + placeholders(len(exclude)) + `)`
+		for _, dir := range exclude {
+			args = append(args, dir)
+		}
+	}
+	return s.deleteDebugRows(ctx, where, args...)
+}
+
 // DeleteDebugPayloadsBefore 删除目录名小于 bound 的全部目录中、名字
 // 命中 exact 精确名或 prefixes 前缀（GLOB 词干）的行——payload_hours
 // 剥离的集合化形态：一条 DELETE 替代逐目录枚举+删除的 N+1。

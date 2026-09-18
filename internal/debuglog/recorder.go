@@ -92,7 +92,9 @@ func storeCtx() (context.Context, context.CancelFunc) {
 type RetentionPolicy struct {
 	// Days 是请求目录整体保留天数；<=0 不按时间清理。
 	Days int
-	// MaxTotalMB 是 logs 根目录总量上限（MB），超限从最旧目录开始删；<=0 不按大小清理。
+	// MaxTotalMB 是 logs 根目录总量上限（MB）。超限分两相回收：先把最旧
+	// 目录剥到 meta/error 归因锚点（payload 放掉、排障入口留住），剥载
+	// 仍回不到限内才整目录删除；<=0 不按大小清理。
 	MaxTotalMB int64
 	// PayloadHours 是大体积阶段文件（03/04/06 与 attachments/）的保留小时数；
 	// 超时只剥负载、保留 meta.json/error.json/01/02 等证据文件。<=0 不剥离。

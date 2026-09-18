@@ -160,7 +160,9 @@ func TestCapacityEvictionMatchesPerDirLoop(t *testing.T) {
 				manager.activeDirs[dir] = &Recorder{manager: manager, dir: dir}
 			}
 			expected := referenceCapacityEvict(t, st, manager, sc)
-			removed := manager.cleanOnce()
+			// 场景只写 meta/error 锚点文件：strippable=0，剥载相无载可剥，
+			// 整删相退化为旧语义——等价断言对两相实现仍然成立。
+			removed, _ := manager.cleanOnce()
 			if int64(len(expected)) != int64(removed) {
 				t.Fatalf("removed = %d, want %d (expected deleted %v)", removed, len(expected), expected)
 			}
@@ -183,4 +185,81 @@ func TestCapacityEvictionMatchesPerDirLoop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCapacityEvictionStripsToAnchor 验证两相容量淘汰：超限先剥最旧目录的
+// 非锚点文件（meta/error 留下、目录不死），剥载回不到限内才整目录删除。
+func TestCapacityEvictionStripsToAnchor(t *testing.T) {
+	const mb = 1 << 20
+	ctx := context.Background()
+	rng := rand.New(rand.NewSource(1))
+	write := func(t *testing.T, st *store.Store, dir string, meta, payload int64) {
+		t.Helper()
+		m := make([]byte, meta)
+		rng.Read(m)
+		if err := st.PutDebugFile(ctx, dir, MetaFile, m); err != nil {
+			t.Fatal(err)
+		}
+		if payload > 0 {
+			p := make([]byte, payload)
+			rng.Read(p)
+			if err := st.PutDebugFile(ctx, dir, "01-http-request.json", p); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("strip-sufficient", func(t *testing.T) {
+		st := openTestStore(t)
+		// 3 目录各带 2/2/1MB 非锚点负载，总量 ~5MB 超 3MB 上限 ~2MB：
+		// 剥 d01+d02 的负载即回限内，一个目录都不用整删。
+		write(t, st, "d01", 100, 2*mb)
+		write(t, st, "d02", 100, 2*mb)
+		write(t, st, "d03", 100, 1*mb)
+		manager := NewManager(filepath.Join(t.TempDir(), "logs"),
+			RetentionPolicy{MaxTotalMB: 3}, st)
+		defer manager.Close()
+		removed, stripped := manager.cleanOnce()
+		if removed != 0 || stripped != 2 {
+			t.Fatalf("removed=%d stripped=%d, want 0/2", removed, stripped)
+		}
+		for _, dir := range []string{"d01", "d02", "d03"} {
+			names, err := st.DebugFileNames(ctx, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Strings(names)
+			want := []string{MetaFile}
+			if dir == "d03" { // 剥载界落在 d02，d03 未被触碰
+				want = []string{"01-http-request.json", MetaFile}
+			}
+			if !slices.Equal(names, want) {
+				t.Fatalf("dir %s files = %v, want %v", dir, names, want)
+			}
+		}
+	})
+
+	t.Run("strip-insufficient-then-delete", func(t *testing.T) {
+		st := openTestStore(t)
+		// 锚点本身是大头（meta 1MB）、负载只有 100B：剥完全部目录也只
+		// 释放 ~300B，回不到 1MB 限内——整删相接力，最旧两目录连锚点
+		// 一起死（释放出的仍是剥后残值 ~1MB）。
+		write(t, st, "d01", 1*mb, 100)
+		write(t, st, "d02", 1*mb, 100)
+		write(t, st, "d03", 1*mb, 100)
+		manager := NewManager(filepath.Join(t.TempDir(), "logs"),
+			RetentionPolicy{MaxTotalMB: 1}, st)
+		defer manager.Close()
+		removed, stripped := manager.cleanOnce()
+		if removed != 2 || stripped != 3 {
+			t.Fatalf("removed=%d stripped=%d, want 2/3", removed, stripped)
+		}
+		remaining, err := st.DebugDirs(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(remaining, []string{"d03"}) {
+			t.Fatalf("remaining = %v, want [d03]", remaining)
+		}
+	})
 }

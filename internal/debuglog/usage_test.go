@@ -301,7 +301,7 @@ func TestRetentionAgesByDirName(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if removed := manager.cleanOnce(); removed != 1 {
+	if removed, _ := manager.cleanOnce(); removed != 1 {
 		t.Fatalf("removed = %d, want 1（目录名说它是 2020 年，行新旧不算数）", removed)
 	}
 }

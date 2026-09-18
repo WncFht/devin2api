@@ -226,7 +226,7 @@ func TestCleanerRemovesExpiredDirs(t *testing.T) {
 	}
 	active := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
 
-	if removed := manager.cleanOnce(); removed != 1 {
+	if removed, _ := manager.cleanOnce(); removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
 	dirs, err := st.DebugDirs(ctx)
@@ -346,7 +346,7 @@ func TestCompleteReturnsBeforeDrainCommit(t *testing.T) {
 		t.Fatal("drained closed before commit")
 	default:
 	}
-	if removed := manager.cleanOnce(); removed != 0 {
+	if removed, _ := manager.cleanOnce(); removed != 0 {
 		t.Fatalf("active dir cleaned while completion pending: removed = %d", removed)
 	}
 
@@ -372,7 +372,7 @@ func TestCompleteReturnsBeforeDrainCommit(t *testing.T) {
 	}
 	// 收尾已入列、事务未提交：保护仍在——此刻失去它，未落库的暂存
 	// 会随目录一起被龄删扫走。
-	if removed := manager.cleanOnce(); removed != 0 {
+	if removed, _ := manager.cleanOnce(); removed != 0 {
 		t.Fatalf("uncommitted completion lost protection: removed = %d", removed)
 	}
 
@@ -390,7 +390,7 @@ func TestCompleteReturnsBeforeDrainCommit(t *testing.T) {
 		t.Fatalf("rows = %v, err = %v, want 1 committed row", rows, err)
 	}
 	// 落库后保护解除：同一轮清理判定现在删掉这个超龄目录。
-	if removed := manager.cleanOnce(); removed != 1 {
+	if removed, _ := manager.cleanOnce(); removed != 1 {
 		t.Fatalf("removed = %d, want 1（提交后保护已解除）", removed)
 	}
 }

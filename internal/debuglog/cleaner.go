@@ -7,6 +7,8 @@
 //   - 大体积负载（上游响应/客户端 SSE/附件）先剥离，证据文件
 //     （meta/error/01/02/05）留满整周期——库里的大头是负载，
 //     留小文件不影响排障入口；
+//   - 容量淘汰分两相：超限先把最旧目录剥到 meta/error 归因锚点
+//     （payload 放掉、排障入口保住），剥载仍回不到限内才整目录删除；
 //   - 容量淘汰时保护最近 N 个失败目录（含 error.json），成功请求先删；
 //   - stderr.log 等顶层文件不属于请求目录，留盘不管；logs 表行、
 //     quota_samples 行数与 freelist 回收归 store.Maintain（main.go
@@ -36,6 +38,12 @@ const payloadReconcileInterval = time.Hour
 //（devinRequestStageStem+"." 前缀圈出 03 主文件与全部重试/搜索分片、
 // 04/06 精确名、attachments/ 前缀）——剥离名单与该谓词同源维护。
 
+// capacityAnchorFiles 是容量淘汰剥载相保留的归因锚点：meta.json 记
+// 结果/模型/延迟/token/终局 lane，error.json 记首失败点（keep_error_dirs
+// 的失败目录识别也靠它——锚点在则保护身份在）——合计 ~1KB/dir，
+// 留住即保住排障入口。与 WriteDebugBatch StripDirs 的锚点名单一致。
+var capacityAnchorFiles = []string{MetaFile, ErrorFile}
+
 // runCleaner 是后台清理协程：按 ticker 周期执行 retention 检查，
 // 收到 stop 信号时退出。Close 通过 cleanerDone 等它结束。
 func (manager *Manager) runCleaner() {
@@ -47,27 +55,27 @@ func (manager *Manager) runCleaner() {
 		case <-manager.cleanerStop:
 			return
 		case <-ticker.C:
-			if removed := manager.cleanOnce(); removed > 0 {
-				slog.Debug("debuglog: cleaned old request logs", "removed_dirs", removed)
+			if removed, stripped := manager.cleanOnce(); removed+stripped > 0 {
+				slog.Debug("debuglog: cleaned old request logs", "removed_dirs", removed, "stripped_dirs", stripped)
 			}
 		}
 	}
 }
 
-// cleanOnce 执行一轮清理，返回删除的目录数。
-// 顺序：剥离超龄负载 → 删超龄目录 → 总量超限从最旧淘汰（受保护的
-// 失败目录与活跃目录除外）。
+// cleanOnce 执行一轮清理，返回整删的目录数与剥到锚点的目录数。
+// 顺序：剥离超龄负载 → 删超龄目录 → 总量超限先剥载到锚点、仍超限
+// 再整目录淘汰（受保护的失败目录与活跃目录除外）。
 // 目录名内嵌 "20060102-150405" 时间戳：字典序界即时间界。
-func (manager *Manager) cleanOnce() int {
+func (manager *Manager) cleanOnce() (removed, stripped int) {
 	if manager.store == nil {
-		return 0
+		return 0, 0
 	}
 	ctx := context.Background()
 	dirs, err := manager.store.DebugDirs(ctx)
 	if err != nil {
 		manager.ioErrors.Add(1)
 		slog.Warn("debuglog: list debug dirs failed", "error", err)
-		return 0
+		return 0, 0
 	}
 	manager.mutex.Lock()
 	active := make(map[string]struct{}, len(manager.activeDirs))
@@ -82,7 +90,6 @@ func (manager *Manager) cleanOnce() int {
 
 	policy := manager.Policy()
 	now := time.Now()
-	removed := 0
 
 	// 负载剥离：一条集合 DELETE 替代逐目录枚举+删除的 N+1（一轮
 	// ~900 目录曾付 1800+ 查询）。bound 钳到活跃集最小名之下，
@@ -141,7 +148,7 @@ func (manager *Manager) cleanOnce() int {
 
 	maxBytes := policy.MaxTotalMB << 20
 	if maxBytes <= 0 {
-		return removed
+		return removed, stripped
 	}
 
 	// 容量淘汰：总量超限后从最旧的目录开始回收，直到回到上限内。
@@ -152,13 +159,13 @@ func (manager *Manager) cleanOnce() int {
 	// +WAL 的物理尺寸当 payload 用，WAL 膨胀后闸门恒真、聚合白跑。
 	reconcileDue := now.Sub(manager.lastPayloadReconcile) >= payloadReconcileInterval
 	if manager.store.DebugPayloadBytes() <= maxBytes && !reconcileDue {
-		return removed
+		return removed, stripped
 	}
-	sizes, err := manager.store.DebugDirSizes(ctx)
+	sizes, strippable, err := manager.store.DebugDirSizesSplit(ctx, capacityAnchorFiles)
 	if err != nil {
 		manager.ioErrors.Add(1)
 		slog.Warn("debuglog: measure debug dirs failed", "error", err)
-		return removed
+		return removed, stripped
 	}
 	// 对账：计数器是派生态，聚合出的存量是权威；漂移告警而非静默修
 	// 正——恒非零漂移说明有写/删路径漏了记账。
@@ -182,7 +189,7 @@ func (manager *Manager) cleanOnce() int {
 	if err != nil {
 		manager.ioErrors.Add(1)
 		slog.Warn("debuglog: measure debug blobs failed", "error", err)
-		return removed
+		return removed, stripped
 	}
 	storedBytes += blobBytes
 	totalBytes += blobBytes
@@ -190,43 +197,88 @@ func (manager *Manager) cleanOnce() int {
 		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes)
 	}
 	if totalBytes <= maxBytes {
-		return removed
+		return removed, stripped
 	}
 	sort.Strings(candidates) // 名序即时间序
 	protected := manager.protectedErrorDirs(ctx, candidates, errorDirs, policy.KeepErrorDirs)
-	// 累计尺寸找「要删到哪个界」：freed 盖过 need 时的最后候选即边界，
-	// 与旧实现逐目录删除到回到上限内的语义逐项等价——保护目录跳删不
-	// 计 freed，last 之外的多余目录同样不删。
-	need := totalBytes - maxBytes
-	var freed int64
-	last, evicted := -1, 0
-	for i, dir := range candidates {
-		if freed >= need {
-			break
-		}
-		if protected[dir] {
-			continue
-		}
-		freed += sizes[dir]
-		last, evicted = i, evicted+1
-	}
-	if last < 0 {
-		return removed
-	}
-	// 界取下一候选名（dir<bound 圈出 candidates[:last+1]——字典序界即
-	// 删除范围）；删到候选末尾时没有更大名，"\xff" 越过一切目录名。
-	bound := "\xff"
-	if last+1 < len(candidates) {
-		bound = candidates[last+1]
-	}
 	// exclude = 保护集 ∪ 活跃目录：活跃目录名可能小于界（长流仍在写），
 	// 谓词界圈不出它，只能名单豁免——等价旧实现的「不进 candidates」。
+	// 剥载与整删两相共用同一豁免集。
 	exclude := make([]string, 0, len(protected)+len(active))
 	for dir := range protected {
 		exclude = append(exclude, dir)
 	}
 	for dir := range active {
 		exclude = append(exclude, dir)
+	}
+	need := totalBytes - maxBytes
+
+	// 第一相：剥载到归因锚点。最旧目录先只留 meta/error——meta 记
+	// 结果/模型/延迟/token/终局 lane，error 记首失败点，合计 ~1KB/dir；
+	// 01/02/03/04/05/06/attachments 的 payload 大头全放。容量压力
+	// 几乎全由 payload 构成（实测 01 一项即占持有量 ~59%），剥载
+	// 一己之力回限内时一个目录都不用死。
+	var freedStrip int64
+	stripLast := -1
+	for i, dir := range candidates {
+		if freedStrip >= need {
+			break
+		}
+		if protected[dir] {
+			continue
+		}
+		freedStrip += strippable[dir]
+		stripLast = i
+	}
+	if stripLast < 0 {
+		return removed, stripped
+	}
+	stripBound := "\xff"
+	if stripLast+1 < len(candidates) {
+		stripBound = candidates[stripLast+1]
+	}
+	if err := manager.store.StripDebugDirsBefore(ctx, stripBound, capacityAnchorFiles, exclude); err != nil {
+		// 剥载失败不转整删——同一存储故障下一相多半同样失败，
+		// 等下一轮重试比抢删更稳。
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: strip dirs to anchor failed", "bound", stripBound, "error", err)
+		return removed, stripped
+	}
+	stripped += stripLast + 1 - countProtectedBelow(candidates, protected, stripLast)
+	remaining := totalBytes - freedStrip
+	if remaining <= maxBytes {
+		return removed, stripped
+	}
+
+	// 第二相：剥载仍不够才整目录删除。已剥目录按剥后残值（锚点
+	// ~1KB）计 freed——它们的死几乎不贡献释放，walk 越过它们圈住
+	// 仍带 payload 的目录；释放不出时锚点随目录一起死，与旧实现
+	// 「最旧先死」语义一致。
+	need2 := remaining - maxBytes
+	var freed int64
+	last, evicted := -1, 0
+	for i, dir := range candidates {
+		if freed >= need2 {
+			break
+		}
+		if protected[dir] {
+			continue
+		}
+		size := sizes[dir]
+		if i <= stripLast {
+			size -= strippable[dir]
+		}
+		freed += size
+		last, evicted = i, evicted+1
+	}
+	if last < 0 {
+		return removed, stripped
+	}
+	// 界取下一候选名（dir<bound 圈出 candidates[:last+1]——字典序界即
+	// 删除范围）；删到候选末尾时没有更大名，"\xff" 越过一切目录名。
+	bound := "\xff"
+	if last+1 < len(candidates) {
+		bound = candidates[last+1]
 	}
 	// 一条集合 DELETE 完成整轮淘汰，替代逐目录 autocommit——prod 每轮
 	// ~700 次独立事务曾把唯一写连接占满，insertQ 排空停滞、分片溢出
@@ -237,7 +289,20 @@ func (manager *Manager) cleanOnce() int {
 	} else {
 		removed += evicted
 	}
-	return removed
+	return removed, stripped
+}
+
+// countProtectedBelow 数 candidates[:last+1] 里受保护的目录数——剥载
+// 界内的保护目录不在 StripDebugDirsBefore 的删除范围（exclude 豁免），
+// stripped 计数要扣掉它们。
+func countProtectedBelow(candidates []string, protected map[string]bool, last int) int {
+	n := 0
+	for i := 0; i <= last && i < len(candidates); i++ {
+		if protected[candidates[i]] {
+			n++
+		}
+	}
+	return n
 }
 
 // errorSigLongRun 折叠签名里的长数字串与 hex id（request id/时间戳）：
