@@ -294,6 +294,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	for i, c := range ranked {
 		rest[i] = c.lane
 	}
+	class := adapter.RequestClass(ctx)
 	var lastErr error
 	tried := 0
 	for len(rest) > 0 {
@@ -317,7 +318,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		// 没有分界行无法区分一段帧属于哪号。
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
 		laneStart := time.Now()
-		stream, err := lane.adapter.Stream(ctx, request)
+		stream, err := lane.adapter.Stream(gateYield(ctx, class, rest), request)
 		if err == nil {
 			recorder.SetUpstreamAccount(lane.name)
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
@@ -469,7 +470,7 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		// 调试记录挂 s.recorder（开流时的请求 ctx）而不是指望 Recv 的
 		// ctx 恰好携带——换号 lane 的 03 分片等证据必须落本请求目录，
 		// 与 swap 自身的 account_attempt 记账同一份句柄。
-		inner, err := next.adapter.Stream(debuglog.WithRecorder(ctx, s.recorder), s.request)
+		inner, err := next.adapter.Stream(debuglog.WithRecorder(gateYield(ctx, adapter.RequestClass(ctx), s.rest), s.recorder), s.request)
 		if err == nil {
 			s.lane = next
 			s.laneStart = laneStart
@@ -656,6 +657,27 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 		return bytes.Compare(a.score[:], b.score[:])
 	})
 	return candidates
+}
+
+// gateYield 给一次 lane 尝试装「兄弟 lane 此刻能更快放行吗」的活探针：
+// 闸门预计排队超 gateEarlyRelease 时会问一次，任一剩余候选的
+// expectedWait 落进阈值即让位快败交给 failover。siblings 是本次尝试
+// 之后的候选集（克隆快照）——谓词可能活在泵协程上到 swap 已推进
+// rest，快照语义稳定免锁竞争；略陈旧的候选集只让让位偏积极（换号
+// 目标走实时 rest，不受影响）。空候选集不挂接，闸门走原有排队语义。
+func gateYield(ctx context.Context, class string, siblings []*poolLane) context.Context {
+	if len(siblings) == 0 {
+		return ctx
+	}
+	rest := slices.Clone(siblings)
+	return adapter.WithGateYield(ctx, func() bool {
+		for _, lane := range rest {
+			if lane.verdict(class).expectedWait <= gateEarlyRelease {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // orderedLanes 是 rankLanes 的 lane 投影，供测试与只关心顺序的调用方使用。

@@ -18,11 +18,13 @@ type GateWindow struct {
 	ReservePeak int    `json:"reserve_peak"` // 本窗 bg 预留量的峰值
 	WaitersPeak int    `json:"waiters_peak"` // 本窗闸内排队数峰值（fg+bg）
 	// 按拒绝成因分列的快败数：quota 桶满、hold 等待超预算（死区等待）、
-	// bgReserve bg 让路（预留/爬坡）、latch 闩内快败。
+	// bgReserve bg 让路（预留/爬坡）、latch 闩内快败、yield 兄弟有余量
+	// 提前让给 failover。
 	RejectQuota     int     `json:"reject_quota"`
 	RejectHold      int     `json:"reject_hold"`
 	RejectBgReserve int     `json:"reject_bg_reserve"`
 	RejectLatch     int     `json:"reject_latch"`
+	RejectYield     int     `json:"reject_yield"`
 	FgRate          float64 `json:"fg_rate"` // 关窗折叠后的 fg 准入速率 EMA（条/窗，bg 预留的输入）
 }
 
@@ -33,11 +35,11 @@ func (s *Store) InsertGateWindow(ctx context.Context, w *GateWindow) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO gate_windows(
 		lane, window_start, quota, used_fg, used_bg, drip,
 		reserve_peak, waiters_peak,
-		reject_quota, reject_hold, reject_bg_reserve, reject_latch, fg_rate
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		w.Lane, w.WindowStart, w.Quota, w.UsedFg, w.UsedBg, w.Drip,
 		w.ReservePeak, w.WaitersPeak,
-		w.RejectQuota, w.RejectHold, w.RejectBgReserve, w.RejectLatch, w.FgRate)
+		w.RejectQuota, w.RejectHold, w.RejectBgReserve, w.RejectLatch, w.RejectYield, w.FgRate)
 	return err
 }
 
@@ -50,7 +52,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 	}
 	query := `SELECT lane, window_start, quota, used_fg, used_bg, drip,
 		reserve_peak, waiters_peak,
-		reject_quota, reject_hold, reject_bg_reserve, reject_latch, fg_rate
+		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
 		FROM gate_windows WHERE window_start>=?`
 	args := []any{since}
 	if lane != "" {
@@ -69,7 +71,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 		var w GateWindow
 		if err := rows.Scan(&w.Lane, &w.WindowStart, &w.Quota, &w.UsedFg, &w.UsedBg, &w.Drip,
 			&w.ReservePeak, &w.WaitersPeak,
-			&w.RejectQuota, &w.RejectHold, &w.RejectBgReserve, &w.RejectLatch, &w.FgRate); err != nil {
+			&w.RejectQuota, &w.RejectHold, &w.RejectBgReserve, &w.RejectLatch, &w.RejectYield, &w.FgRate); err != nil {
 			return nil, err
 		}
 		out = append(out, &w)

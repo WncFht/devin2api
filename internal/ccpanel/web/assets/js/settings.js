@@ -308,6 +308,7 @@ const runtimeMetricDomains = [
       { key: 'drip_count', labelKey: 'settings.runtimeMetrics.metric.gateDripCount' },
       { key: 'reject_latched_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectLatched' },
       { key: 'reject_hold_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectHold' },
+      { key: 'reject_yield_count', labelKey: 'settings.runtimeMetrics.metric.gateRejectYield' },
       { key: 'window_next', labelKey: 'settings.runtimeMetrics.metric.gateWindowNext', format: 'isoTime' }
     ],
     renderExtra: renderGateExtra

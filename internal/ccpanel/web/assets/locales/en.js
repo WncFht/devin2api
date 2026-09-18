@@ -633,6 +633,7 @@ window.I18N_LOCALES['en'] = {
   'settings.runtimeMetrics.metric.gateDripCount': 'Drip releases',
   'settings.runtimeMetrics.metric.gateRejectLatched': 'Latched fast-fails',
   'settings.runtimeMetrics.metric.gateRejectHold': 'Queue-timeout fast-fails',
+  'settings.runtimeMetrics.metric.gateRejectYield': 'Yield fast-fails',
   'settings.runtimeMetrics.metric.gateWindowNext': 'Next window opens',
   'settings.runtimeMetrics.metric.debuglogEnabled': 'Enabled',
   'settings.runtimeMetrics.metric.debuglogActiveDirs': 'Active request dirs',

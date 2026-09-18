@@ -158,6 +158,16 @@ var schemaMigrations = []migration{
 				`ALTER TABLE logs ADD COLUMN affinity_hash TEXT NOT NULL DEFAULT ''`)
 		},
 	},
+	{
+		// gate_windows.reject_yield 是让位快败的窗口账：兄弟 lane 有
+		// 余量时闸门提前放给 failover 的拒绝数。存量行经 DEFAULT 0
+		// 落位——部署前没有让位语义，0 即真实值。
+		version: "0012_gate_windows_reject_yield",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "gate_windows", "reject_yield",
+				`ALTER TABLE gate_windows ADD COLUMN reject_yield INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

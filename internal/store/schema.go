@@ -245,6 +245,7 @@ var schemaStatements = []string{
 		reject_hold INTEGER NOT NULL DEFAULT 0,
 		reject_bg_reserve INTEGER NOT NULL DEFAULT 0,
 		reject_latch INTEGER NOT NULL DEFAULT 0,
+		reject_yield INTEGER NOT NULL DEFAULT 0,
 		fg_rate REAL NOT NULL DEFAULT 0
 	)`,
 	// (lane, window_start) 唯一：单 lane 每窗口至多一行；reuseport

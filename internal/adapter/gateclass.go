@@ -22,6 +22,9 @@ const (
 // 不与字符串键空间碰撞）。
 type gateCtxKey struct{}
 
+// gateYieldKey 是闸门让位谓词在请求 ctx 里的挂接键。
+type gateYieldKey struct{}
+
 // GateVerdict 是一次闸门放行的遥测快照：app 层据此写 X-Gate-* 头。
 type GateVerdict struct {
 	// Lane 是实际服务的 lane 名（单 lane/未命名部署为空）。
@@ -59,6 +62,21 @@ func WithGateContext(ctx context.Context, class string) (context.Context, *GateC
 func GateContextFrom(ctx context.Context) *GateContext {
 	gc, _ := ctx.Value(gateCtxKey{}).(*GateContext)
 	return gc
+}
+
+// WithGateYield 把「兄弟 lane 此刻能否更快放行」的活探针挂进 ctx：
+// 号池在每次 lane 尝试前按剩余候选装填，闸门预计排队将超让位阈值时
+// 问一次，答真即提前快败把请求交给 failover。谓词在闸锁外求值——
+// 实现不得依赖调用方持有任何锁（它会去拿兄弟 lane 自己的闸锁）。
+func WithGateYield(ctx context.Context, yield func() bool) context.Context {
+	return context.WithValue(ctx, gateYieldKey{}, yield)
+}
+
+// GateYieldFrom 取回 ctx 上的让位谓词；未挂接返回 nil——单 lane 与
+// 无池部署下闸门按 nil 跳过让位判定。
+func GateYieldFrom(ctx context.Context) func() bool {
+	yield, _ := ctx.Value(gateYieldKey{}).(func() bool)
+	return yield
 }
 
 // RequestClass 返回本请求在闸门语义里的类别；未挂接按 fg 处理。

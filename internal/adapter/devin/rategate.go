@@ -45,6 +45,14 @@ const (
 	// 区间剩余时间衰减、爬坡额度随经过时间线性释放，短间隔重查让
 	// bg 吃到中段让出的槽而不必睡到下一窗口。
 	gateBgRecheck = 4 * time.Second
+	// gateEarlyRelease 是让位阈值：预计单次排队超过它且号池里有兄弟
+	// lane 此刻能更快放行（expectedWait 落进阈值）时，闸门提前快败
+	// 把请求交给 failover——在注定排长队的 lane 上把预算骑满再换号，
+	// 只是把同一结局推迟一个排队预算（实测 bg 被吸收 p50≈119s，换号
+	// 后 ~0.4s 建流）。取值压在 bg 短重查（4s）之上、fg 预算（30s）
+	// 之下：只截「睡到下一窗口」类长阻塞（死区/桶满），不碰预留让路
+	// 的短节奏；兄弟侧阈值同用本值——能比它更快放行才算有余量。
+	gateEarlyRelease = 8 * time.Second
 	// fgRateAlpha 是每窗口 fg 准入数 EMA 的更新系数：0.2 对应
 	// ~3 窗口半衰期，足够跟上交互负载的起落又不被单窗口抖动带走。
 	fgRateAlpha = 0.2
@@ -52,11 +60,14 @@ const (
 
 // 闸门拒绝的 X-Gate-Reason 取值：latch 是冷却闩快败（Retry-After
 // 报闩剩余）；quota 是配额类拒绝（fg 桶满 / bg 预留不足，Retry-After
-// 报下一窗口）；hold 是桶未满但等待将超预算（死区等待是唯一来源）。
+// 报下一窗口）；hold 是桶未满但等待将超预算（死区等待是唯一来源）；
+// yield 是让位快败——预计长排队且兄弟 lane 有余量时提前放行给 failover
+// （Retry-After 按底层阻塞成因同口径报出）。
 const (
 	gateReasonLatch = "latch"
 	gateReasonQuota = "quota"
 	gateReasonHold  = "hold"
+	gateReasonYield = "yield"
 )
 
 // rateGate 整形发往上游的消息流，两层机制各自独立：
@@ -115,6 +126,7 @@ type rateGate struct {
 	rejectLatched   int // 闩内被快败的请求数
 	rejectHold      int // 闩外排队预计超 maxHold 被快败的请求数
 	rejectBgReserve int // bg 因预留/爬坡让路被快败的请求数（礼让强度指标；bg 桶满快败归 rejectHold）
+	rejectYield     int // 兄弟 lane 有余量时提前快败让给 failover 的请求数（让位强度指标）
 	waitersFg       int // 当前睡到下一窗口的 fg 请求数
 	waitersBg       int // 当前睡着的 bg 请求数（预留阻塞重查也进此列）
 	// win* 是本窗口明细账：rollBucket 翻页时快照成 gate_windows 行后
@@ -125,6 +137,7 @@ type rateGate struct {
 	winRejectHold      int // 死区等待超预算快败
 	winRejectBgReserve int // bg 让路快败（预留/爬坡）
 	winRejectLatch     int // 闩内快败
+	winRejectYield     int // 让位快败（兄弟有余量提前放给 failover）
 	winDrip            int // 闩内滴灌探针放行数
 	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
 	winWaitersPeak     int // 本窗排队数峰值（waitersFg+waitersBg）
@@ -291,6 +304,7 @@ type GateStats struct {
 	WaitersFg       int        `json:"waiters_fg"`
 	WaitersBg       int        `json:"waiters_bg"`
 	RejectBgReserve int        `json:"reject_bg_reserve_count"` // bg 因预留/爬坡让路被快败数（礼让强度指标）
+	RejectYield     int        `json:"reject_yield_count"`      // 兄弟 lane 有余量时提前快败让给 failover 数（让位强度指标）
 	// Reserve/FgRate 是预留机制的实时读数：当前预留槽数与 fg 准入
 	// 速率 EMA（条/窗）——bg 被拒/放行的可解释性来源。
 	Reserve int     `json:"reserve"`
@@ -454,6 +468,7 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 	gate.winRejectHold = 0
 	gate.winRejectBgReserve = 0
 	gate.winRejectLatch = 0
+	gate.winRejectYield = 0
 	gate.winDrip = 0
 	gate.winReservePeak = 0
 	gate.winWaitersPeak = 0
@@ -486,6 +501,7 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 		RejectHold:      gate.winRejectHold,
 		RejectBgReserve: gate.winRejectBgReserve,
 		RejectLatch:     gate.winRejectLatch,
+		RejectYield:     gate.winRejectYield,
 		FgRate:          gate.fgRateEMA,
 	}
 	gate.lastWindow = row
@@ -600,6 +616,7 @@ func (gate *rateGate) stats() GateStats {
 		RejectLatched:   gate.rejectLatched,
 		RejectHold:      gate.rejectHold,
 		RejectBgReserve: gate.rejectBgReserve,
+		RejectYield:     gate.rejectYield,
 		WindowQuota:     gate.quota,
 		WindowUsed:      gate.bucketUsed,
 		WindowUsedFg:    gate.bucketUsedFg,
@@ -968,6 +985,31 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		default:
 			wait = ws.Add(windowPeriod).Sub(now)
 		}
+		// 让位快败：预计排队超 gateEarlyRelease 且号池里有兄弟 lane
+		// 此刻能更快放行时，立即按 yield 快败交给 failover——在注定
+		// 排长队的 lane 上把预算骑满再换号，只是把同一结局推迟一个
+		// 排队预算（实测 bg 被吸收 p50≈119s，换号后 ~0.4s 建流）。
+		// 谓词必须在锁外求值：兄弟的准入快照要拿它自己的闸锁，持本锁
+		// 去取会与对侧同形让位构成 ABBA。答否后按先前算好的 wait 落回
+		// 正常流程——解锁窗口内的状态变化与普通睡眠竞态同价，下一拍
+		// 睡醒自会重估。
+		if wait > gateEarlyRelease {
+			if yield := adapter.GateYieldFrom(ctx); yield != nil {
+				gate.mu.Unlock()
+				siblingFree := yield()
+				gate.mu.Lock()
+				if siblingFree {
+					gate.rejectYield++
+					gate.winRejectYield++
+					gate.mu.Unlock()
+					retryAfter := wait
+					if reason == gateReasonQuota {
+						retryAfter = ws.Add(windowPeriod).Sub(now)
+					}
+					return gateRejection(retryAfter, gateReasonYield)
+				}
+			}
+		}
 		if now.Add(wait).After(deadline) {
 			if reserveBlocked {
 				gate.rejectBgReserve++
@@ -997,7 +1039,15 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		gate.winWaitersPeak = max(gate.winWaitersPeak, gate.waitersFg+gate.waitersBg)
 		sleeping = true
 		gate.mu.Unlock()
-		timer := time.NewTimer(wait)
+		// 号池请求的长睡眠按让位阈值封顶：睡醒重估时会重问兄弟侧，
+		// 兄弟 lane 排队中腾出余量也能在一拍内被接住——否则单次
+		// 「睡到下一窗口」会把可换号的等待盲睡到底（fg 桶满盲睡
+		// 可达 ~56s）。无谓词（单 lane/末位候选）保持原睡眠不加重查。
+		timerWait := wait
+		if adapter.GateYieldFrom(ctx) != nil && timerWait > gateEarlyRelease {
+			timerWait = gateEarlyRelease
+		}
+		timer := time.NewTimer(timerWait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

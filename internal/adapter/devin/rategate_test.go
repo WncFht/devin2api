@@ -1005,3 +1005,127 @@ func TestRateGateExpectedWaitBgNextWindowStarved(t *testing.T) {
 		t.Fatalf("bg expectedWait = %v, want 32s (toNext only, next window not saturated)", got)
 	}
 }
+
+// 让位快败：预计单次排队超 gateEarlyRelease 且让位谓词答「兄弟 lane
+// 有余量」时按 reason=yield 立即快败交给 failover——不挂谓词的同形
+// 阻塞（bg 桶满 ~52s < bgMaxHold）原语义是睡到下一窗口，正是被吸收
+// 换号税的来源；快败把同一结局提前一个排队预算。
+func TestRateGateYieldFastFail(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
+	pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("seed wait error = %v, want pass", err)
+	}
+	probed := 0
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	ctx := adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	start := time.Now()
+	err := gate.wait(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("yield wait took %v, want immediate fast-fail", d)
+	}
+	var gateErr *llm.Failure
+	if !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonYield {
+		t.Fatalf("yield wait error = %v, want *llm.Failure reason=yield", err)
+	}
+	if probed == 0 {
+		t.Fatal("yield predicate was not consulted")
+	}
+	// Retry-After 按底层成因同口径：桶满报下一窗口开放剩余 ~52s。
+	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 53 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
+	}
+	if got := gate.stats().RejectYield; got != 1 {
+		t.Fatalf("stats().RejectYield = %d, want 1", got)
+	}
+}
+
+// 让位谓词的门控面：缺席与答否都不落 yield——缺席谓词的 bg 同形
+// 阻塞走原睡眠语义（取消收 context.Canceled）；答否的谓词被问过
+// 但不快败、不计账。预计等待不超 gateEarlyRelease 的短阻塞连谓词
+// 都不问（死区 ~3.5s 属闸内正常节奏，换号不会更快）。
+func TestRateGateYieldPredicateGating(t *testing.T) {
+	fullGate := func() *rateGate {
+		gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
+		pinGateClock(gate, 10)
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("seed wait error = %v, want pass", err)
+		}
+		return gate
+	}
+	bgWait := func(gate *rateGate, ctx context.Context) error {
+		bgCtx, _ := adapter.WithGateContext(ctx, adapter.ClassBG)
+		cancelCtx, cancel := context.WithTimeout(bgCtx, 100*time.Millisecond)
+		defer cancel()
+		return gate.wait(cancelCtx)
+	}
+	// 无谓词：睡到取消。
+	if err := bgWait(fullGate(), context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("no-predicate wait error = %v, want context.DeadlineExceeded", err)
+	}
+	// 谓词答否：问过但不快败。
+	probed := 0
+	gate := fullGate()
+	ctx := adapter.WithGateYield(context.Background(), func() bool { probed++; return false })
+	if err := bgWait(gate, ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("false-predicate wait error = %v, want context.DeadlineExceeded", err)
+	}
+	if probed == 0 {
+		t.Fatal("false predicate was not consulted")
+	}
+	if got := gate.stats().RejectYield; got != 0 {
+		t.Fatalf("stats().RejectYield = %d, want 0 after false answer", got)
+	}
+	// 短阻塞不问谓词：死区头 :58.5 距下一窗口 ~3.5s < gateEarlyRelease。
+	dead := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
+	pinGateClock(dead, 58.5)
+	probed = 0
+	ctx = adapter.WithGateYield(context.Background(), func() bool { probed++; return true })
+	if err := bgWait(dead, ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("short-wait error = %v, want context.DeadlineExceeded", err)
+	}
+	if probed != 0 {
+		t.Fatalf("predicate consulted %d times on sub-threshold wait, want 0", probed)
+	}
+}
+
+// 让位快败入窗账：关闭窗口的 reject_yield 列如实记出，与 quota/hold
+// 分列（yield 拒绝不再混进 quota 账——归因「为什么换号」靠它区分）。
+func TestRateGateYieldPersistsInWindow(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 1}, db, store.GateStateKey("default"))
+	clock := pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("seed wait error = %v, want pass", err)
+	}
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	ctx := adapter.WithGateYield(bgCtx, func() bool { return true })
+	if err := gate.wait(ctx); err == nil {
+		t.Fatal("bucket-full yield wait should be rejected")
+	}
+	clock.t = clock.t.Add(time.Minute)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("new-bucket wait error = %v, want pass", err)
+	}
+	var rows []*store.GateWindow
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if rows, err = db.ListGateWindows(context.Background(), "default", 0, 0); err != nil {
+			t.Fatalf("ListGateWindows: %v", err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 closed window", len(rows))
+	}
+	w := rows[0]
+	if w.RejectYield != 1 || w.RejectQuota != 0 || w.RejectHold != 0 {
+		t.Fatalf("row rejects = yield:%d quota:%d hold:%d, want 1/0/0", w.RejectYield, w.RejectQuota, w.RejectHold)
+	}
+}

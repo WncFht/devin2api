@@ -1669,3 +1669,66 @@ func TestPoolRankLanesTTFBWeight(t *testing.T) {
 		t.Fatalf("half-confidence weight = %v, want 0.5625", got)
 	}
 }
+
+// 让位端到端：绑定 lane 桶满时闸门按 yield 快败把请求交给兄弟
+// lane——绑定让饱和 lane 留在粘性区首位（bucket 病档压不过 bound），
+// 正是被吸收换号税的现场；无让位时 bg 请求会在 a 上睡到下一窗口
+// （~52s < bgMaxHold）再被放行，把同一结局推迟一个排队预算。a 的
+// chat 计数为 0 证明换号发生在本地快败（幻影换号，零上游发送）。
+func TestPoolGateYieldToSibling(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	upA := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("a"), stubStop())
+		},
+	}
+	upB := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvA := stubServer(t, upA, nil)
+	srvB := stubServer(t, upB, nil)
+	cfgA := testPoolConfig("a")
+	cfgA.Endpoint.BaseURL = srvA.URL
+	cfgA.Model = "stub-model"
+	cfgA.Gate = GateConfig{MaxRPM: 1}
+	cfgB := testPoolConfig("b")
+	cfgB.Endpoint.BaseURL = srvB.URL
+	cfgB.Model = "stub-model"
+	pool := newTestPool(t, cfgA, cfgB)
+
+	laneA := poolLaneByName(pool, "a")
+	pinGateClock(laneA.adapter.gate, 10)
+	if err := laneA.adapter.gate.wait(context.Background()); err != nil {
+		t.Fatalf("seed wait error = %v, want pass", err)
+	}
+
+	request := llm.RequestMessages{
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "yield-bound"}}}},
+	}
+	pool.bind(SessionAffinityKey(request), laneA)
+
+	// bg 类请求复刻吸收现场：~52s 预计等待在 bgMaxHold 内，无让位
+	// 谓词即盲睡到底；绑定+谓词下应立即让位给 b。
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	start := time.Now()
+	stream, err := pool.Stream(bgCtx, request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("Stream took %v, want yield fast-fail not absorbed sleep", d)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+		t.Fatalf("deltas = %q, want rescued", got)
+	}
+	if upA.chatCalls.Load() != 0 || upB.chatCalls.Load() != 1 {
+		t.Fatalf("chat calls a=%d b=%d, want 0/1 (phantom switch)", upA.chatCalls.Load(), upB.chatCalls.Load())
+	}
+	if got := laneA.adapter.gate.stats().RejectYield; got != 1 {
+		t.Fatalf("lane a RejectYield = %d, want 1", got)
+	}
+}
