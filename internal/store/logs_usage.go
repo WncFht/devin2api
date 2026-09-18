@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"math"
 	"sort"
 	"time"
 )
@@ -289,13 +290,32 @@ func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error)
 // minute_bucket>=S*10，idx_logs_minute_* 前缀索引即刻生效。sc 为
 // 零值时全量——per-account 10 分钟趋势走逐号调用
 // （LogScope{Account: lane}），lane 数个位数无压力。
+// totals 在 scope 无 account 维时走格子 UNION 补尾（cells.go 读侧
+// 约定）；account 维度在格子里不存在，整条留在原始行。
 func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope) ([]UsageMinPoint, error) {
 	minSlot := currentSlot - usageMinBuckets + 1
 	minBucket := minSlot * 10
 	scopeWhere, scopeArgs := sc.where()
-	totalRows, err := s.ro.QueryContext(ctx,
-		`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ?`+scopeWhere+` GROUP BY slot`,
-		append([]any{minBucket}, scopeArgs...)...)
+	var totalRows *sql.Rows
+	var err error
+	if sc.Account == "" {
+		slotLo := cellSlotLo(minBucket * 60000)
+		tail, tailArgs := cellTailPred(slotLo, math.MaxInt64)
+		cellScope, cellArgs := sc.cellWhere()
+		args := append([]any{slotLo}, cellArgs...)
+		args = append(args, minBucket)
+		args = append(args, tailArgs...)
+		args = append(args, scopeArgs...)
+		totalRows, err = s.ro.QueryContext(ctx,
+			`SELECT slot,`+cellSumList(cellUsageCols)+` FROM (
+				SELECT slot, `+cellUsageCols+` FROM log_cells WHERE slot >= ?`+cellScope+`
+				UNION ALL SELECT time/600000, `+cellRowList(cellUsageCols)+` FROM logs
+				WHERE minute_bucket >= ?`+tail+scopeWhere+`) GROUP BY slot`, args...)
+	} else {
+		totalRows, err = s.ro.QueryContext(ctx,
+			`SELECT time/600000 AS slot,`+usageTotalsCols+` FROM logs WHERE minute_bucket >= ?`+scopeWhere+` GROUP BY slot`,
+			append([]any{minBucket}, scopeArgs...)...)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -326,19 +346,41 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 	return points, nil
 }
 
-// dimAggs 按维度表达式（emodel 或 key_hash）聚合窗口内行：totals +
-// 时长和 + TTFB 样本均值 + 末次 started_at（MAX(id) 所在行的裸列取自
-// 该行——SQLite 保证 bare column 绑定到唯一 min/max 聚合的达成行，
-// 等价于旧按完成序追加的「最后一行覆盖」语义）。
-func (s *Store) dimAggs(ctx context.Context, dimExpr string, minBucket int64) ([]DimensionAgg, error) {
-	rows, err := s.ro.QueryContext(ctx, `
-		SELECT dim,`+usageTotalsCols+`,
-			COALESCE(SUM(duration_ms), 0),
-			SUM(first_upstream_ms IS NOT NULL),
-			COALESCE(SUM(first_upstream_ms), 0),
-			MAX(id), started_at
-		FROM (SELECT `+dimExpr+` AS dim, * FROM logs)
-		WHERE dim != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY dim`, minBucket)
+// dimAggs 按维度聚合窗口内行：totals + 时长和 + TTFB 样本均值 + 末次
+// started_at。cellDim 非空（emodel/key_hash）时走格子 UNION 补尾，
+// last_key 打包串的 MAX 等价于「最大 id 行的 started_at」（cells.go
+// 登记表约定）；cellDim 为空（account 维，格子里没有该列）时退回
+// 原始行——那里 MAX(id) 所在行的 bare column 绑定同一语义。
+func (s *Store) dimAggs(ctx context.Context, cellDim, dimExpr string, minBucket int64) ([]DimensionAgg, error) {
+	var rows *sql.Rows
+	var err error
+	if cellDim != "" {
+		slotLo := cellSlotLo(minBucket * 60000)
+		tail, tailArgs := cellTailPred(slotLo, math.MaxInt64)
+		args := append([]any{slotLo, minBucket}, tailArgs...)
+		rows, err = s.ro.QueryContext(ctx, `
+			SELECT dim,`+cellSumList(cellUsageCols)+`,
+				COALESCE(SUM(sd),0), SUM(nt), COALESCE(SUM(st),0), SUBSTR(MAX(lk),22)
+			FROM (
+				SELECT `+cellDim+` AS dim, `+cellUsageCols+`,
+					sum_dur_all AS sd, n_ttfb AS nt, sum_ttfb AS st, last_key AS lk
+				FROM log_cells WHERE slot >= ? AND `+cellDim+` != ''
+				UNION ALL
+				SELECT `+dimExpr+`, `+cellRowList(cellUsageCols)+`, duration_ms,
+					first_upstream_ms IS NOT NULL, COALESCE(first_upstream_ms,0),
+					printf('%020d', id)||'|'||started_at
+				FROM logs WHERE minute_bucket >= ?`+tail+` AND log_source != 'rejected' AND `+dimExpr+` != ''
+			) GROUP BY dim`, args...)
+	} else {
+		rows, err = s.ro.QueryContext(ctx, `
+			SELECT dim,`+usageTotalsCols+`,
+				COALESCE(SUM(duration_ms), 0),
+				SUM(first_upstream_ms IS NOT NULL),
+				COALESCE(SUM(first_upstream_ms), 0),
+				SUBSTR(MAX(printf('%020d', id)||'|'||started_at),22)
+			FROM (SELECT `+dimExpr+` AS dim, * FROM logs)
+			WHERE dim != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY dim`, minBucket)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -346,10 +388,10 @@ func (s *Store) dimAggs(ctx context.Context, dimExpr string, minBucket int64) ([
 	var out []DimensionAgg
 	for rows.Next() {
 		var d DimensionAgg
-		var sumDur, nTTFB, sumTTFB, maxID int64
+		var sumDur, nTTFB, sumTTFB int64
 		var lastAt string
 		dests := append([]any{&d.Name}, usageTotalsDests(&d.UsageTotals)...)
-		dests = append(dests, &sumDur, &nTTFB, &sumTTFB, &maxID, &lastAt)
+		dests = append(dests, &sumDur, &nTTFB, &sumTTFB, &lastAt)
 		if err := rows.Scan(dests...); err != nil {
 			return nil, err
 		}
@@ -424,10 +466,17 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// 聚合窗口收敛到最近 usageMaxDays 天：旧内存聚合器本来也只覆盖
 	// 索引尾部窗口；无界全表扫会把整个保留期（90 天）的行数线性摊进
 	// 每次面板轮询，minute_bucket 下界把成本钉在窗口体积上。
+	// 整格覆盖段走 log_cells 的格子 SUM，水位外行与窗底不满一格的
+	// 边带行走原始 logs——UNION 两侧是无重无漏的划分（cells.go 读侧约定）。
 	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
+	slotLo := cellSlotLo(minBucket * 60000)
+	tail, tailArgs := cellTailPred(slotLo, math.MaxInt64)
+	winTailArgs := append([]any{minBucket}, tailArgs...)
 	if err := s.ro.QueryRowContext(ctx,
-		`SELECT COUNT(*), MIN(time) FROM logs WHERE minute_bucket >= ? AND log_source != 'rejected'`, minBucket).
-		Scan(&snap.Entries, &minMS); err != nil {
+		`SELECT COALESCE(SUM(c),0), MIN(t) FROM (
+			SELECT req AS c, min_time AS t FROM log_cells WHERE slot >= ?
+			UNION ALL SELECT 1, time FROM logs WHERE minute_bucket >= ?`+tail+` AND log_source != 'rejected')`,
+		append([]any{slotLo}, winTailArgs...)...).Scan(&snap.Entries, &minMS); err != nil {
 		return snap, err
 	}
 	if minMS.Valid {
@@ -437,25 +486,38 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
-		`SELECT `+usageTotalsCols+` FROM logs WHERE minute_bucket >= ? AND log_source != 'rejected'`, minBucket),
-		&snap.Window); err != nil {
+		`SELECT `+cellSumList(cellUsageCols)+` FROM (
+			SELECT `+cellUsageCols+` FROM log_cells WHERE slot >= ?
+			UNION ALL SELECT `+cellRowList(cellUsageCols)+` FROM logs
+			WHERE minute_bucket >= ?`+tail+` AND log_source != 'rejected')`,
+		append([]any{slotLo}, winTailArgs...)...), &snap.Window); err != nil {
 		return snap, err
 	}
 	// 今日单列查询而非从 days 里挑：31 天上限外若有未来日期的行，
 	// today 也不该被挤掉。本地日界在 Go 侧算好打成毫秒界——
 	// strftime(localtime) 谓词不可索引，time 范围可走 idx_logs_time_status。
 	dayStart, dayEnd := dayBoundsMS(time.Now())
+	daySlotLo, daySlotHi := cellSlotLo(dayStart), dayEnd/600000
+	dayTail, dayTailArgs := cellTailPred(daySlotLo, daySlotHi)
+	dayArgs := append([]any{daySlotLo, daySlotHi, dayStart, dayEnd}, dayTailArgs...)
 	if err := scanUsageTotals(s.ro.QueryRowContext(ctx,
-		`SELECT `+usageTotalsCols+` FROM logs WHERE time >= ? AND time < ? AND log_source != 'rejected'`,
-		dayStart, dayEnd), &snap.Today); err != nil {
+		`SELECT `+cellSumList(cellUsageCols)+` FROM (
+			SELECT `+cellUsageCols+` FROM log_cells WHERE slot >= ? AND slot < ?
+			UNION ALL SELECT `+cellRowList(cellUsageCols)+` FROM logs
+			WHERE time >= ? AND time < ?`+dayTail+` AND log_source != 'rejected')`,
+		dayArgs...), &snap.Today); err != nil {
 		return snap, err
 	}
 
 	// 逐日聚合（新在前，上限 usageMaxDays）；kept 记录保留日键，
 	// ModelDays 只投影同日键集合（旧快照语义）。
 	dayRows, err := s.ro.QueryContext(ctx,
-		`SELECT `+logDayExpr+` AS day,`+usageTotalsCols+` FROM logs
-		WHERE minute_bucket >= ? AND log_source != 'rejected' GROUP BY day ORDER BY day DESC LIMIT ?`, minBucket, usageMaxDays)
+		`SELECT day,`+cellSumList(cellUsageCols)+` FROM (
+			SELECT day, `+cellUsageCols+` FROM log_cells WHERE slot >= ?
+			UNION ALL SELECT `+logDayExpr+`, `+cellRowList(cellUsageCols)+` FROM logs
+			WHERE minute_bucket >= ?`+tail+` AND log_source != 'rejected')
+		GROUP BY day ORDER BY day DESC LIMIT ?`,
+		append(append([]any{slotLo}, winTailArgs...), usageMaxDays)...)
 	if err != nil {
 		return snap, err
 	}
@@ -474,9 +536,12 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	mdayRows, err := s.ro.QueryContext(ctx,
-		`SELECT emodel, day,`+usageTotalsCols+` FROM (
-			SELECT `+logEModelExpr+` AS emodel, `+logDayExpr+` AS day, * FROM logs
-		) WHERE emodel != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY emodel, day`, minBucket)
+		`SELECT emodel, day,`+cellSumList(cellUsageCols)+` FROM (
+			SELECT emodel, day, `+cellUsageCols+` FROM log_cells WHERE slot >= ? AND emodel != ''
+			UNION ALL SELECT `+logEModelExpr+`, `+logDayExpr+`, `+cellRowList(cellUsageCols)+` FROM logs
+			WHERE minute_bucket >= ?`+tail+` AND log_source != 'rejected' AND `+logEModelExpr+` != '')
+		GROUP BY emodel, day`,
+		append([]any{slotLo}, winTailArgs...)...)
 	if err != nil {
 		return snap, err
 	}
@@ -506,7 +571,12 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 
 	stageRows, err := s.ro.QueryContext(ctx,
-		`SELECT error_stage, COUNT(*) FROM logs WHERE error_stage != '' AND log_source != 'rejected' AND minute_bucket >= ? GROUP BY error_stage`, minBucket)
+		`SELECT stage, SUM(req) FROM (
+			SELECT stage, req FROM log_err_cells WHERE slot >= ?
+			UNION ALL SELECT error_stage, 1 FROM logs
+			WHERE error_stage != '' AND minute_bucket >= ?`+tail+` AND log_source != 'rejected')
+		GROUP BY stage`,
+		append([]any{slotLo}, winTailArgs...)...)
 	if err != nil {
 		return snap, err
 	}
@@ -526,7 +596,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// 维度行：perModel 带 token 分位数，perKey 没有（旧版 keys 的
 	// inTokSamples 是 nil 不入样）。分位数样本逐模型走索引取数，
 	// 输入清单即 dimAggs 已聚合出的窗口内模型集合。
-	models, err := s.dimAggs(ctx, logEModelExpr, minBucket)
+	models, err := s.dimAggs(ctx, "emodel", logEModelExpr, minBucket)
 	if err != nil {
 		return snap, err
 	}
@@ -546,7 +616,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 			models[i].OutTokP50, models[i].OutTokP95 = st.P50, st.P95
 		}
 	}
-	keys, err := s.dimAggs(ctx, "key_hash", minBucket)
+	keys, err := s.dimAggs(ctx, "key_hash", "key_hash", minBucket)
 	if err != nil {
 		return snap, err
 	}
@@ -639,7 +709,7 @@ func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 // 的读侧口径一致，不会出现 ”/'default' 幽灵分桶。
 func (s *Store) AccountAggs(ctx context.Context) ([]DimensionAgg, error) {
 	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
-	return s.dimAggs(ctx, logAccountExpr, minBucket)
+	return s.dimAggs(ctx, "", logAccountExpr, minBucket)
 }
 
 // AccountUsageToday 是单账号本地日界内的原始计数。

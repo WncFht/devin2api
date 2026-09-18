@@ -608,6 +608,8 @@ func alignDown(v, w int64) int64 { return v - ((v%w + w) % w) }
 // 逐格回调。格子计入条件是它与 [since,until)（unix 秒）有任意重叠——
 // 即 slot+slotSec>since 且 slot<until，翻译成行的 time 范围是
 // [alignUp(since-(slotSec-1)), alignDown(until-1)+slotSec) 毫秒。
+// 槽宽是 600s 整数倍且 scope 无 account 维时走 log_cells UNION 补尾：
+// 窗口两界已按槽宽对齐，整格覆盖无需边带，只有水位外行落原始侧。
 func (s *Store) LogCells(ctx context.Context, slotSec, sinceSec, untilSec int64, sc LogScope, cb func(LogCellKey, LogCellTotals)) error {
 	if untilSec < 1 || slotSec < 1 {
 		return nil
@@ -618,11 +620,28 @@ func (s *Store) LogCells(ctx context.Context, slotSec, sinceSec, untilSec int64,
 		return nil
 	}
 	scopeWhere, scopeArgs := sc.where()
-	query := fmt.Sprintf(`SELECT time/%d*%d AS slot, api, `, slotSec*1000, slotSec) +
-		logEModelExpr + ` AS emodel, key_hash,` +
-		logCellCols + ` FROM logs WHERE time >= ? AND time < ?` + scopeWhere +
-		` GROUP BY slot, api, emodel, key_hash`
-	sqlRows, err := s.ro.QueryContext(ctx, query, append([]any{lo, hi}, scopeArgs...)...)
+	var query string
+	var args []any
+	if sc.Account == "" && slotSec%600 == 0 {
+		factor := slotSec / 600
+		cellScope, cellArgs := sc.cellWhere()
+		query = fmt.Sprintf(`SELECT slot/%d*%d AS qslot, api, emodel, key_hash,`, factor, slotSec) +
+			cellSumList(cellTotalsCols) + ` FROM (
+				SELECT slot, api, emodel, key_hash, ` + cellTotalsCols + `
+				FROM log_cells WHERE slot >= ? AND slot < ?` + cellScope + `
+				UNION ALL
+				SELECT time/600000, api, ` + logEModelExpr + `, key_hash, ` + cellRowList(cellTotalsCols) + `
+				FROM logs WHERE id > ` + cellsWatermarkSQL + ` AND time >= ? AND time < ?` + scopeWhere + `
+			) GROUP BY slot/` + fmt.Sprint(factor) + `, api, emodel, key_hash`
+		args = append(append(append([]any{lo / 600000, hi / 600000}, cellArgs...), lo, hi), scopeArgs...)
+	} else {
+		query = fmt.Sprintf(`SELECT time/%d*%d AS slot, api, `, slotSec*1000, slotSec) +
+			logEModelExpr + ` AS emodel, key_hash,` +
+			logCellCols + ` FROM logs WHERE time >= ? AND time < ?` + scopeWhere +
+			` GROUP BY slot, api, emodel, key_hash`
+		args = append([]any{lo, hi}, scopeArgs...)
+	}
+	sqlRows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}

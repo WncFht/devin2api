@@ -232,9 +232,38 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 		}
 		delta -= freed
 	}
-	for _, row := range batch.LogRows {
-		if _, err := tx.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...); err != nil {
-			return err
+	if len(batch.LogRows) > 0 {
+		cells := map[cellDim]*cellVals{}
+		errCells := map[errCellDim]int64{}
+		var maxID int64
+		for _, row := range batch.LogRows {
+			res, err := tx.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...)
+			if err != nil {
+				return err
+			}
+			// OR IGNORE 跳过的重复行（dir 撞部分唯一索引）不记账——
+			// 首个落库者已在它自己的事务里把贡献记进 rollup。
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
+				continue
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
+			addCellContrib(cells, errCells, row, id)
+			if id > maxID {
+				maxID = id
+			}
+		}
+		if maxID > 0 {
+			if err := upsertCells(ctx, tx, cells, errCells); err != nil {
+				return err
+			}
+			if err := setCellsWatermark(tx, maxID); err != nil {
+				return err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

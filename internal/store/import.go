@@ -167,6 +167,11 @@ func (s *Store) ImportLegacy(ctx context.Context, stateDir, logRoot string) erro
 	if err := s.importGateStates(ctx, logRoot); err != nil {
 		return err
 	}
+	// importIndex 是唯一绕过双写的 logs 写入者：收尾把水位线之后
+	// 落库的行补记进 rollup（无缺口时退化成一次空扫）。
+	if err := s.ReconcileCells(ctx); err != nil {
+		return err
+	}
 	return s.SetState(ctx, "import_base_done", time.Now().UTC().Format(time.RFC3339))
 }
 

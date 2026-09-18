@@ -84,6 +84,27 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// log_cells/log_err_cells 预聚合表：表本身由 applySchema 幂等
+		// 建好，这里一次性回填存量行并把覆盖水位线钉在当前 MAX(id)。
+		// 之后新写入走双写（WriteDebugBatch/InsertLog 同事务），
+		// importIndex 的缺口由 ReconcileCells 闭合——水位线语义是
+		// 「id ≤ 它的非 rejected 行都已记进 rollup」。
+		version: "0006_log_cells",
+		apply: func(tx *sql.Tx) error {
+			if _, err := tx.Exec(cellsGapSQL, 0); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(errCellsGapSQL, 0); err != nil {
+				return err
+			}
+			var maxID int64
+			if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM logs`).Scan(&maxID); err != nil {
+				return err
+			}
+			return setCellsWatermark(tx, maxID)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

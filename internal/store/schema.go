@@ -80,6 +80,14 @@ var schemaStatements = []string{
 	// 索引，InsertLog 为常态行付的写代价≈0。
 	`CREATE INDEX IF NOT EXISTS idx_logs_limited_id ON logs(id) WHERE status_code = 429 OR rate_limited != 0`,
 
+	// log_cells：logs 的 600 秒预聚合 rollup（cells.go 登记表派生
+	// DDL）——重聚合端点按格子 SUM 替代全窗行扫描；rejected 行不
+	// 进表（口径内建剔除）。log_err_cells 是错误阶段的稀疏迷你表
+	//（只记 error_stage != '' 的行），serve error_stages 聚合。
+	// 除主键外不加索引：格子表本身体积小，范围扫已足够。
+	logCellsDDL,
+	logErrCellsDDL,
+
 	// debug payload：键是目录名（dir 仍作 X-Request-Id/debug_ref
 	// 身份），不是 logs.id——飞行中请求的 payload 先于 Complete 才
 	// 落库的 logs 行存在，进程被杀的请求也可能只剩调试行。

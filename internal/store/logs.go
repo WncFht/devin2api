@@ -167,11 +167,30 @@ func logInsertArgs(e *LogRow) []any {
 }
 
 // InsertLog 写入一条请求日志行，返回自增 id。log_source 原样落字段
-// （业务分类归写方 debuglog.logRowFor 与导入器）。
+// （业务分类归写方 debuglog.logRowFor 与导入器）。行插入与 rollup
+// 记账（log_cells 贡献 + 水位推进）同一事务提交。
 func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
-	res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	cells := map[cellDim]*cellVals{}
+	errCells := map[errCellDim]int64{}
+	addCellContrib(cells, errCells, e, id)
+	if err := upsertCells(ctx, tx, cells, errCells); err != nil {
+		return 0, err
+	}
+	if err := setCellsWatermark(tx, id); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
