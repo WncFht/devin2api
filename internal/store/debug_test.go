@@ -351,7 +351,8 @@ func TestDeleteDebugDir(t *testing.T) {
 	}
 }
 
-// assertPayloadBytes 断言内存计数器与 DebugDirSizes 权威聚合一致——
+// assertPayloadBytes 断言内存计数器与权威聚合一致——目录口径
+// DebugDirSizes（files+chunks+refs）加全局口径 DebugBlobBytes。
 // 每个写/删操作后调一次，漏记账或重复记账立刻暴露。
 func assertPayloadBytes(t *testing.T, s *Store) {
 	t.Helper()
@@ -363,8 +364,13 @@ func assertPayloadBytes(t *testing.T, s *Store) {
 	for _, n := range sizes {
 		want += n
 	}
+	blobBytes, err := s.DebugBlobBytes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want += blobBytes
 	if got := s.DebugPayloadBytes(); got != want {
-		t.Fatalf("payload bytes = %d, want %d (sizes %v)", got, want, sizes)
+		t.Fatalf("payload bytes = %d, want %d (sizes %v, blobs %d)", got, want, sizes, blobBytes)
 	}
 }
 
