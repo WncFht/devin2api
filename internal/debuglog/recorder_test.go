@@ -599,6 +599,69 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	}
 }
 
+// TestErrorsOnlyKeepsInterestingSuccess 验证 errors-only 的「有趣成功」
+// 豁免：救回例（retries/account_switches）、脱钩现场（04 标记行）与
+// 慢尾（duration/first_upstream 越阈）命中的干净完成请求保留完整
+// payload；不命中任何旗标的普通干净例仍被剥到 meta 锚点。
+func TestErrorsOnlyKeepsInterestingSuccess(t *testing.T) {
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	manager.SetErrorsOnly(true)
+	defer manager.Close()
+
+	// keep 断言公共部：完结落库后 04 payload 必须仍可读。
+	kept := func(recorder *Recorder, flag string) {
+		t.Helper()
+		waitDrained(recorder)
+		if _, _, _, err := manager.ReadFile(context.Background(), recorder.dir, "04-devin-response.jsonl"); err != nil {
+			t.Fatalf("%s: interesting dir must keep payload: %v", flag, err)
+		}
+	}
+
+	retried := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	retried.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	retried.NoteRetryAttempt(2, "transport")
+	retried.Complete(Completion{StatusCode: 200, Result: "completed"})
+	kept(retried, "retries>0")
+
+	switched := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	switched.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	switched.NoteAccountAttempt("lane-a", os.ErrPermission)
+	switched.Complete(Completion{StatusCode: 200, Result: "completed"})
+	kept(switched, "account_switches>0")
+
+	attached := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	attached.AppendJSONL("04-devin-response.jsonl", "detached_attach", map[string]any{"key": "k", "origin_dir": "x"})
+	attached.Complete(Completion{StatusCode: 200, Result: "completed"})
+	kept(attached, "detached_attach marker")
+
+	slow := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	slow.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	slow.startedAt = time.Now().Add(-2 * interestingDurationMS * time.Millisecond)
+	slow.Complete(Completion{StatusCode: 200, Result: "completed"})
+	kept(slow, "duration outlier")
+
+	slowUpstream := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	slowUpstream.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	slowUpstream.firstUpstreamMS.Store(interestingFirstUpstreamMS + 1)
+	slowUpstream.Complete(Completion{StatusCode: 200, Result: "completed"})
+	kept(slowUpstream, "first_upstream outlier")
+
+	plain := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	plain.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
+	plain.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(plain)
+	detail, err := manager.Detail(context.Background(), plain.dir)
+	if err != nil {
+		t.Fatalf("plain dir Detail: %v（meta 锚点应保留）", err)
+	}
+	for _, f := range detail.Files {
+		if f.Name != MetaFile {
+			t.Fatalf("plain clean dir retains payload file %q, want meta.json only", f.Name)
+		}
+	}
+}
+
 // TestPendingByteBudgetDropsAtCap 验证在飞预算满时编码产物按到达序丢弃：
 // 预留回退不推进 insertQ、dropped 计数、丢弃字节量同步入账。
 func TestPendingByteBudgetDropsAtCap(t *testing.T) {

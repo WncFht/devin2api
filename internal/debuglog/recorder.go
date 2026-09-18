@@ -375,6 +375,11 @@ type Recorder struct {
 	// 流内错误事件下发的限流 HTTP 状态仍是 200，单靠 status_code 认不出——
 	// 责任归因与 429 采样都靠这个显式标记而不是状态码。
 	rateLimited atomic.Bool
+	// detachedSeen 标记本目录的 04 出现过脱钩类标记行（detached/
+	// detached_attach/detached_truncated）：AppendJSONL 入队时刻置位，
+	// errors_only 收尾的「有趣成功」判定读它保住脱钩/挂接现场的完整
+	// payload——这类帧是脱钩机制行为（重试命中、缓冲截断）的唯一取证面。
+	detachedSeen atomic.Bool
 	// retries 记录上游重发（attempt2+）的触发原因与相对时刻，与 04
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，metaJSON/logRowFor 读，走 mutex 同步。
@@ -1291,11 +1296,12 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 	// errors-only 的收敛点：写面随哨兵到齐而静止，干净完成的请求剥掉
 	// 全部 payload 只留 meta/error 锚点——logs 行照常落，目录名仍被
 	// meta 占位（防同秒复用撞 logs.dir UNIQUE）。带 premature_end_turn
-	// 的「可疑成功」保留——它恰是行为异常的取证面。
+	// 的「可疑成功」与 interestingSuccess 命中的「有趣成功」保留——
+	// 前者是行为异常的取证面，后者是救回/脱钩/慢尾的取证面。
 	manager.pendingCompletions = append(manager.pendingCompletions, completionItem{
 		recorder: recorder,
 		logRow:   manager.logRowFor(recorder, &completion),
-		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn,
+		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn && !interestingSuccess(recorder),
 	})
 	manager.pendingCompletionCount.Store(int64(len(manager.pendingCompletions)))
 	// 收尾项（logRow 结构 + 条目本体）随批次挂写侧持有——必须落库
@@ -1307,6 +1313,41 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 	if len(manager.insertQ) == 0 || time.Since(manager.lastFlush) >= completionFlushGap {
 		manager.flushAll()
 	}
+}
+
+// errors_only「有趣成功」判定的延迟阈值，取自 2026-09-19 生产测量
+// （recon-errors-only-roi）：干净完成请求 duration_ms 的 p99 ≈ 207s、
+// first_upstream_ms 的 p99 ≈ 114.6s。取整到略低于实测 p99 的整十秒——
+// 覆盖同一尾部族群且边界好记；阈值是定版启发式，不随流量实时校准。
+const (
+	interestingDurationMS      = 200_000
+	interestingFirstUpstreamMS = 110_000
+)
+
+// interestingSuccess 判定干净完成的请求是否仍具取证价值——errors_only
+// 收尾对它保留完整 payload。旗标覆盖四类「误伤面」：
+//   - 救回例：retries>0（同 lane 续试重发）或 accountAttempts>0（号池
+//     failover 换号）——postmortem 最想看的请求形态，粗暴剥离会把
+//     keep_error_dirs 保护语义里 error.json 目录的七成误伤；
+//   - 脱钩现场：detachedSeen——04 留过 detached/detached_attach/
+//     detached_truncated 标记行，挂接命中与缓冲截断的完整帧是脱钩
+//     机制行为的唯一取证面；
+//   - 慢尾：duration 或 first_upstream 越过上方阈值（≈测量窗 p99）。
+//
+// 判定在收尾入列时刻读 recorder 状态：retries/accountAttempts 只由请求
+// goroutine 在 Complete 前追加（哨兵序保证已稳定），延迟字段与日志行
+// 同源同口径。其余干净成功照常剥——本函数只负责把误伤子集挑回来。
+func interestingSuccess(recorder *Recorder) bool {
+	recorder.mutex.Lock()
+	rescued := len(recorder.retries) > 0 || len(recorder.accountAttempts) > 0
+	recorder.mutex.Unlock()
+	if rescued || recorder.detachedSeen.Load() {
+		return true
+	}
+	if time.Since(recorder.startedAt).Milliseconds() >= interestingDurationMS {
+		return true
+	}
+	return recorder.firstUpstreamMS.Load() >= interestingFirstUpstreamMS
 }
 
 // pendingBatch 汇出本目录当前暂存的整文件行、chunk 行与 CAS 共享对象；
@@ -1958,6 +1999,15 @@ func (recorder *Recorder) encodeStageFile(name string, data []byte) stagedFile {
 func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
+	}
+	// 04 的脱钩类标记行同步打标：事件名即持久化词表（detached 原目录
+	// 脱钩登记、detached_attach 重试目录挂接命中、detached_truncated
+	// 缓冲截断），errors_only 的 interestingSuccess 据此判「有趣」。
+	if name == StageDevinResponse {
+		switch event {
+		case "detached", "detached_attach", "detached_truncated":
+			recorder.detachedSeen.Store(true)
+		}
 	}
 	// 打戳在入队时刻：Time/ElapsedMS 的语义是「事件发生时」，在编码
 	// 协程执行时刻打戳会让队列积压期的行系统性偏大——与 retryAttempt/
