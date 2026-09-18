@@ -475,6 +475,10 @@ func TestDetachedStatsCounters(t *testing.T) {
 	if stats.Orphans != 2 || stats.OrphanCompleted != 1 {
 		t.Fatalf("orphan counters = %+v", stats)
 	}
+	// k3 孤儿脱钩后新产出 1 个事件（Done）；k2 零产出。浪费量级代理=1。
+	if stats.OrphanBufferedEvents != 1 {
+		t.Fatalf("orphan buffered events = %d, want 1", stats.OrphanBufferedEvents)
+	}
 	if stats.FinishedCompleted != 1 || stats.FinishedKilled != 1 || stats.FinishedFailed != 0 {
 		t.Fatalf("finish counters = %+v", stats)
 	}

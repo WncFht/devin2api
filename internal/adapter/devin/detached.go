@@ -84,6 +84,11 @@ type detachedEntry struct {
 	// attached 记本条目是否兑现过一次挂接（lookup 命中时置位）：
 	// 移除路径据此算孤儿——从未被挂接的条目是纯粹的上游浪费。
 	attached bool
+	// detachIndex 是登记时刻已缓冲的事件数（客户端断连前的前缀）：
+	// len(events)-detachIndex = 脱钩后新产出的事件量，孤儿条目的
+	// 这项和是最接近「token 级浪费」的可用代理（真实 token 数只在
+	// 内存事件载荷里，计数层拿不到）。
+	detachIndex int
 }
 
 // append 追加一条已产出事件并广播给挂接方。
@@ -160,6 +165,7 @@ type detachedRegistry struct {
 	replaced          int64 // 同键新条目替换旧残骸
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
+	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
 	events            [detachedEventCap]DetachedEvent
 	eventHead         int
 	eventSize         int
@@ -269,6 +275,10 @@ type DetachedStats struct {
 
 	Orphans         int64 `json:"orphans"`
 	OrphanCompleted int64 `json:"orphan_completed"`
+	// OrphanBufferedEvents 是孤儿条目脱钩后新产出的事件量合计——token
+	// 级浪费拿不到（真实 token 只在内存事件载荷里），事件量是最接近
+	// 的量级代理：区分「登记即死的孤儿」与「跑了 20 分钟无人认领」。
+	OrphanBufferedEvents int64 `json:"orphan_buffered_events"`
 
 	Events []DetachedEvent `json:"events,omitempty"` // 新在前
 }
@@ -324,6 +334,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	entry.mu.Lock()
 	entry.admittedAt = time.Now()
 	entry.expiresAt = entry.admittedAt.Add(detachedRunningTTL)
+	entry.detachIndex = len(entry.events)
 	entry.mu.Unlock()
 	if old := registry.entries[key]; old != nil {
 		registry.evictLocked(key, old, detachEvictReplaced)
@@ -380,9 +391,11 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 	running := entry.state == detachedRunning
 	orphan := !entry.attached
 	completed := entry.state == detachedCompleted
+	bufferedAfterDetach := len(entry.events) - entry.detachIndex
 	entry.mu.Unlock()
 	if orphan {
 		registry.orphans++
+		registry.orphanBuffered += int64(bufferedAfterDetach)
 		if completed {
 			registry.orphanCompleted++
 		}
@@ -465,6 +478,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Replaced = registry.replaced
 	stats.Orphans = registry.orphans
 	stats.OrphanCompleted = registry.orphanCompleted
+	stats.OrphanBufferedEvents = registry.orphanBuffered
 	for i := 1; i <= registry.eventSize; i++ {
 		stats.Events = append(stats.Events, registry.events[(registry.eventHead-i+detachedEventCap)%detachedEventCap])
 	}
