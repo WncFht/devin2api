@@ -765,6 +765,30 @@ func TestPendingByteBudgetRevertsOnWorkerGone(t *testing.T) {
 	}
 }
 
+// TestPendingBytesMaxTracksPeak 验证水位峰值的进程期单调口径：峰值只随
+// 账面真实到达过的水位上移，归还后不回落、未超旧峰不动——pending_bytes
+// 只报瞬时值，逼近 cap 的预警靠 max 口径。
+func TestPendingBytesMaxTracksPeak(t *testing.T) {
+	manager := newBareManager(nil, 4)
+	manager.addInflight(100)
+	manager.addInflight(300) // 账面水位 400 = 峰值
+	manager.addInflight(-150)
+	if got := manager.inflightBytesMax.Load(); got != 400 {
+		t.Fatalf("inflightBytesMax = %d, want 400（峰值不随归还回落）", got)
+	}
+	manager.addInflight(100) // 账面 350，未超旧峰
+	if got := manager.inflightBytesMax.Load(); got != 400 {
+		t.Fatalf("inflightBytesMax = %d, want 400（未超旧峰不动）", got)
+	}
+	manager.addInflight(200) // 账面 550，刷新峰值
+	if got := manager.inflightBytesMax.Load(); got != 550 {
+		t.Fatalf("inflightBytesMax = %d, want 550", got)
+	}
+	if got := manager.Stats()["pending_bytes_max"]; got != int64(550) {
+		t.Fatalf("Stats pending_bytes_max = %v, want 550", got)
+	}
+}
+
 // TestDeltaStageRoundTrip 验证 01 基座钉入与 02/03* delta 落库的端到端
 // 口径：写满一个 dir 后经读路径取回的字节与写入一致，且 02/03 行的库存
 // 尺寸远小于逻辑尺寸（残差而非全量）。
