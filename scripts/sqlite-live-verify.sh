@@ -30,11 +30,22 @@ bad()  { echo "FAIL $1"; fail=1; }
 PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
 AUTH=(-H "Authorization: Bearer $PASSWORD")
 # /v1 探针凭据：令牌仓只存哈希取不回明文——走面板 admin API 铸一条
-# 临时令牌（第 5 段前铸、结尾删）；空仓/含匿名行时无凭据也能过准入，
+# 临时令牌（healthz 确认实例存活后铸，带 15min expires_at 兜底自失效，
+# 进程退出经 trap DELETE 回收）；空仓/含匿名行时无凭据也能过准入，
 # 铸不到就空凭据发，探针按 4xx 口径照样计 PASS。
 API_KEY=""
 VTID=""
 VAUTH=()
+PROBE="sqlite-live-probe"
+
+cleanup() {
+	# 早退兜底：探针注册表项与临时令牌能删就删；实例不在/端点失败都不影响收尾。
+	curl -s -o /dev/null -m 5 -X DELETE "${AUTH[@]}" \
+		"$BASE/admin/model-registry?model=$PROBE" 2>/dev/null || true
+	[[ -n "$VTID" ]] && curl -s -o /dev/null -m 5 -X DELETE "${AUTH[@]}" \
+		"$BASE/admin/auth-tokens/$VTID" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 dbq() { # SQL -> stdout（python3 的 sqlite3 模块，不依赖 sqlite3 CLI）
 	python3 - "$DB" "$1" <<'PY'
@@ -52,6 +63,24 @@ PY
 # --- 1. 健康 ---
 hz="$(curl -sf "$BASE/healthz" || true)"
 [[ -n "$hz" ]] && ok "healthz $(echo "$hz" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["version"],"draining" if d.get("draining") else "live")')" || bad "healthz 无响应"
+
+# 铸 /v1 探针临时令牌（明文一次性出示，仓内只存哈希）：expires_at 15min
+# 兜底——SIGKILL 等 trap 盖不到的死法，令牌到期也自行失效。
+expires_ms=$(( $(date +%s) * 1000 + 900000 ))
+resp="$(curl -sf -m 5 -X POST -H 'Content-Type: application/json' "${AUTH[@]}" \
+	-d "{\"description\":\"sqlite-live-verify: temp\",\"expires_at\":$expires_ms}" \
+	"$BASE/admin/auth-tokens" 2>/dev/null || true)"
+IFS=$'\t' read -r API_KEY VTID <<<"$(printf '%s' "$resp" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    d = d.get("data") or d   # ccLoad 信封 {success,data,...}
+except Exception:
+    d = {}
+print("{}\t{}".format(d.get("token") or "", d.get("id") or ""))' 2>/dev/null || true)"
+if [[ -n "$API_KEY" ]]; then
+	VAUTH=(-H "Authorization: Bearer $API_KEY")
+fi
 
 # --- 2. 迁移落点 ---
 [[ -f "$DB" ]] && ok "devin-2api.db 存在 ($(du -h "$DB" | cut -f1))" || bad "devin-2api.db 缺失"
@@ -109,12 +138,6 @@ else
 fi
 
 # --- 5. 写路径探针 ---
-resp="$(curl -sf -m 5 -X POST -H 'Content-Type: application/json' "${AUTH[@]}" \
-	-d '{"description":"sqlite-live-verify: temp"}' "$BASE/admin/auth-tokens" 2>/dev/null || true)"
-API_KEY="$(printf '%s' "$resp" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')"
-VTID="$(printf '%s' "$resp" | sed -n 's/.*"id" *: *\([0-9]*\).*/\1/p')"
-[[ -n "$API_KEY" ]] && VAUTH=(-H "Authorization: Bearer $API_KEY")
-PROBE="sqlite-live-probe"
 before="$(dbq 'SELECT COUNT(*) FROM logs')"
 curl -sf "${AUTH[@]}" -X PUT -H 'Content-Type: application/json' \
 	-d "{\"model\":\"$PROBE\",\"enabled\":false}" "$BASE/admin/model-registry" >/dev/null || bad "registry PUT 失败"
@@ -132,8 +155,7 @@ fi
 newdir="$(dbq "SELECT dir FROM logs ORDER BY id DESC LIMIT 1")"
 ndf="$(dbq "SELECT COUNT(*) FROM debug_files WHERE dir='$newdir'")"
 [[ "$ndf" =~ ^[0-9]+$ && "$ndf" -gt 0 ]] && ok "调试 payload 落库 debug_files[$newdir]=$ndf 行" || echo "NOTE $newdir 无 debug_files（payload 保留策略剔除属正常）"
-curl -sf "${AUTH[@]}" -X DELETE "$BASE/admin/model-registry?model=$PROBE" >/dev/null || true
-[[ -n "$VTID" ]] && curl -sf "${AUTH[@]}" -X DELETE "$BASE/admin/auth-tokens/$VTID" >/dev/null || true
+# 探针注册表项与临时令牌由 EXIT trap 统一回收——覆盖早退与异常路径。
 
 echo "----"
 [[ "$fail" == 0 ]] && echo "全部通过" || echo "有 FAIL，见上"
