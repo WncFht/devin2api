@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-// cellMetrics 依序登记 log_cells 的 38 个可加指标列：DDL、回填
+// cellMetrics 依序登记 log_cells 的 40 个可加指标列：DDL、回填
 // SELECT 的 SUM(expr)、upsert 的增量 SET 与 Go 侧贡献字段全按此
 // 顺序对齐——登记表即契约，cellsConsistencyTest 钉死 Go 镜像与
 // SQL 表达式的逐行等价。
@@ -82,6 +82,11 @@ var cellMetrics = []struct {
 	{"gen_ms", `CASE WHEN ` + logDecodeCond + ` THEN duration_ms - first_upstream_ms ELSE 0 END`},
 	{"gen_out", `CASE WHEN ` + logDecodeCond + ` THEN output_tokens ELSE 0 END`},
 	{"sum_dur_all", `duration_ms`},
+	// slack = 首字节下发后请求的剩余时长（duration_ms − first_client_ms），
+	// 即死读者写阻塞的暴露窗口；只在 first_client_ms > 0 的行上有定义，
+	// 缺席/零值行贡献 0 且不计 n_slack（沿用 n_ttfb/sum_ttfb 的 n_+sum_ 对）。
+	{"n_slack", `CASE WHEN first_client_ms > 0 THEN 1 ELSE 0 END`},
+	{"sum_slack_ms", `CASE WHEN first_client_ms > 0 THEN MAX(0, duration_ms - first_client_ms) ELSE 0 END`},
 }
 
 // cellMetricNames 是 cellMetrics 的列名清单（INSERT 列序）。
@@ -147,7 +152,7 @@ var cellsConflict = ` ON CONFLICT(slot, day, api, emodel, key_hash) DO UPDATE SE
 // errCellsConflict 是错误迷你表的 upsert 冲突子句（单计数列累加）。
 const errCellsConflict = ` ON CONFLICT(slot, stage) DO UPDATE SET req = log_err_cells.req + excluded.req`
 
-// cellsSelectSQL 生成「logs 行 → 五维格子键」的聚合 SELECT：38 个
+// cellsSelectSQL 生成「logs 行 → 五维格子键」的聚合 SELECT：40 个
 // 指标列的 SUM 表达式、min_time/last_key 两个非可加列全按 cellMetrics
 // 一份登记表派生。where 是追加在 rejected 谓词后的行范围片段。
 // 迁移回填、水位补漏与窗口重算共用同一投影——口径只有一份。
@@ -245,7 +250,7 @@ type errCellDim struct {
 	stage string
 }
 
-// cellVals 是单 cell 的批内累加器：38 个可加列与 cellMetrics 同序
+// cellVals 是单 cell 的批内累加器：40 个可加列与 cellMetrics 同序
 // 对应；minTime/lastKey 跟踪两个非可加列。
 type cellVals struct {
 	req, disc, err, rltd, cfault, ufault int64
@@ -262,6 +267,7 @@ type cellVals struct {
 	nTTFB, sumTTFB                       int64
 	genMS, genOut                        int64
 	sumDurAll                            int64
+	nSlack, sumSlackMS                   int64
 	minTime                              int64
 	lastKey                              string
 }
@@ -283,10 +289,11 @@ func (v *cellVals) args() []any {
 		v.nTTFB, v.sumTTFB,
 		v.genMS, v.genOut,
 		v.sumDurAll,
+		v.nSlack, v.sumSlackMS,
 	}
 }
 
-// logCellVals 计算一条 logs 行的 38 列贡献——逐谓词镜像 cellMetrics
+// logCellVals 计算一条 logs 行的 40 列贡献——逐谓词镜像 cellMetrics
 // 的 SQL 表达式（cellsConsistencyTest 验证两边逐行等价）。
 func logCellVals(e *LogRow) cellVals {
 	var v cellVals
@@ -379,6 +386,12 @@ func logCellVals(e *LogRow) cellVals {
 		v.genOut = e.OutputTokens
 	}
 	v.sumDurAll = e.DurationMS
+	if e.FirstClientMS != nil && *e.FirstClientMS > 0 {
+		v.nSlack = 1
+		if slack := e.DurationMS - *e.FirstClientMS; slack > 0 {
+			v.sumSlackMS = slack
+		}
+	}
 	return v
 }
 
@@ -445,6 +458,8 @@ func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *L
 	acc.genMS += contrib.genMS
 	acc.genOut += contrib.genOut
 	acc.sumDurAll += contrib.sumDurAll
+	acc.nSlack += contrib.nSlack
+	acc.sumSlackMS += contrib.sumSlackMS
 	if ms < acc.minTime {
 		acc.minTime = ms
 	}

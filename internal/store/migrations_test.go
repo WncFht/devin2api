@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,76 @@ func TestMigration0007LegacyDB(t *testing.T) {
 	}
 
 	// 第二次 Open：0007 已登记，幂等不重复 ALTER。
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open (idempotent): %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+}
+
+// TestMigration0015LegacyDB 模拟停在 0014 的存量库：log_cells 按
+// 「登记表去掉 slack 双列」的形状建表（列序与真实 0014 形状一致），
+// schema_migrations 已登记其余全部版本。Open 应补两列、旧格行新列
+// 落 0、登记 0015；再次 Open 幂等不重复 ALTER。
+func TestMigration0015LegacyDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	raw := openRaw(t, path)
+	var names []string
+	for _, m := range cellMetrics {
+		if m.name == "n_slack" || m.name == "sum_slack_ms" {
+			continue
+		}
+		names = append(names, m.name)
+	}
+	if _, err := raw.Exec(`CREATE TABLE log_cells (
+		slot INTEGER NOT NULL, day TEXT NOT NULL, api TEXT NOT NULL,
+		emodel TEXT NOT NULL, key_hash TEXT NOT NULL,
+		` + strings.Join(names, ", ") + `,
+		min_time INTEGER NOT NULL, last_key TEXT NOT NULL,
+		PRIMARY KEY (slot, day, api, emodel, key_hash))`); err != nil {
+		t.Fatal(err)
+	}
+	zeros := strings.TrimSuffix(strings.Repeat("0,", len(names)), ",")
+	if _, err := raw.Exec(`INSERT INTO log_cells(slot,day,api,emodel,key_hash,` +
+		strings.Join(names, ",") + `,min_time,last_key)
+		VALUES(1,'2026-09-19','anthropic','m-a','kh1',` + zeros + `,1,'k')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range schemaMigrations {
+		if m.version == "0015_log_cells_slack" {
+			continue
+		}
+		if _, err := raw.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES(?,?)`,
+			m.version, time.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	var nSlack, sumSlack int64
+	if err := s.ro.QueryRow(`SELECT n_slack, sum_slack_ms FROM log_cells`).Scan(&nSlack, &sumSlack); err != nil {
+		t.Fatalf("read new columns: %v", err)
+	}
+	if nSlack != 0 || sumSlack != 0 {
+		t.Fatalf("legacy cell slack = (%d,%d), want (0,0)", nSlack, sumSlack)
+	}
+	var applied int
+	if err := s.ro.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version='0015_log_cells_slack'`).Scan(&applied); err != nil || applied != 1 {
+		t.Fatalf("0015 registered = %d err=%v", applied, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("second Open (idempotent): %v", err)

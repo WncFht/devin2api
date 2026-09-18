@@ -191,6 +191,26 @@ var schemaMigrations = []migration{
 				`ALTER TABLE gate_windows ADD COLUMN used_bg_ping INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		// log_cells 的 slack 双列是「死读者写阻塞」尾部的可加账：
+		// slack = MAX(0, duration_ms − first_client_ms)，只在首字节
+		// 确已下发（first_client_ms > 0）的行上有定义——缺席/零值行
+		// 贡献 0 且不计 n_slack。存量格经 DEFAULT 0 落位；历史 slack
+		// 可由 logs 源列经 BackfillCells 窗口重算回补（投影同源），
+		// 迁移自身不做全量重算。
+		version: "0015_log_cells_slack",
+		apply: func(tx *sql.Tx) error {
+			for _, col := range []struct{ name, ddl string }{
+				{"n_slack", `ALTER TABLE log_cells ADD COLUMN n_slack INTEGER NOT NULL DEFAULT 0`},
+				{"sum_slack_ms", `ALTER TABLE log_cells ADD COLUMN sum_slack_ms INTEGER NOT NULL DEFAULT 0`},
+			} {
+				if err := addColumnIfAbsent(tx, "log_cells", col.name, col.ddl); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

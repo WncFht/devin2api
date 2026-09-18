@@ -19,20 +19,25 @@ import (
 
 // cellSeedRows 覆盖 cellMetrics 全部谓词分支：完成流式（可 decode）、
 // fbt≥duration、fbt 缺席、499 两态、429、rate_limited 非 429、上游/
-// 客户端责任归因、rejected 剔除、非流式、零时长、decode 速率上限。
+// 客户端责任归因、rejected 剔除、非流式、零时长、decode 速率上限、
+// slack 正贡献/钳零/fc=0 剔除。
 func cellSeedRows(base time.Time) []*LogRow {
 	fbt := int64(1200)
 	small := int64(10)
+	fc := int64(2000)
+	fcGone := int64(100)
+	fcLate := int64(1500)
+	fcZero := int64(0)
 	return []*LogRow{
 		{StartedAt: base, DurationMS: 5000, Method: "POST", Path: "/v1/messages", StatusCode: 200, Result: "completed",
-			Stream: true, FirstUpstreamMS: &fbt, API: "anthropic", Model: "m-a", RequestedModel: "m-a", KeyHash: "kh1",
+			Stream: true, FirstUpstreamMS: &fbt, FirstClientMS: &fc, API: "anthropic", Model: "m-a", RequestedModel: "m-a", KeyHash: "kh1",
 			InputTokens: 10, OutputTokens: 100, CacheReadTokens: 3, CacheWriteTokens: 2, ReasoningTokens: 4, TotalTokens: 119, CreditCost: 7},
 		{StartedAt: base.Add(time.Minute), DurationMS: 1000, Method: "POST", Path: "/v1/messages", StatusCode: 200, Result: "completed",
 			Stream: true, FirstUpstreamMS: &fbt, API: "anthropic", Model: "m-a", KeyHash: "kh1", OutputTokens: 5},
 		{StartedAt: base.Add(2 * time.Minute), DurationMS: 2000, Method: "POST", Path: "/v1/chat", StatusCode: 200, Result: "completed",
 			Stream: true, API: "openai-chat", Model: "m-b", KeyHash: "kh2", OutputTokens: 50},
 		{StartedAt: base.Add(3 * time.Minute), DurationMS: 300, Method: "POST", Path: "/v1/messages", StatusCode: 499, Result: "disconnected",
-			API: "anthropic", Model: "m-a", KeyHash: "kh1", OutputTokens: 3},
+			FirstClientMS: &fcGone, API: "anthropic", Model: "m-a", KeyHash: "kh1", OutputTokens: 3},
 		{StartedAt: base.Add(4 * time.Minute), DurationMS: 400, Method: "POST", Path: "/v1/messages", StatusCode: 499, Result: "aborted",
 			API: "anthropic", Model: "m-a", KeyHash: "kh1"},
 		{StartedAt: base.Add(5 * time.Minute), DurationMS: 20, Method: "POST", Path: "/v1/messages", StatusCode: 429, Result: "failed",
@@ -48,9 +53,9 @@ func cellSeedRows(base time.Time) []*LogRow {
 		{StartedAt: base.Add(10 * time.Minute), DurationMS: 0, Method: "POST", Path: "/v1/messages", StatusCode: 429, Result: "rejected",
 			LogSource: "rejected", API: "anthropic", Model: "m-a", KeyHash: "kh1", ErrorStage: "pre_pipeline"},
 		{StartedAt: base.Add(11 * time.Minute), DurationMS: 900, Method: "POST", Path: "/v1/messages", StatusCode: 200, Result: "completed",
-			API: "anthropic", Model: "m-b", KeyHash: "kh2", OutputTokens: 20, TotalTokens: 20},
+			FirstClientMS: &fcLate, API: "anthropic", Model: "m-b", KeyHash: "kh2", OutputTokens: 20, TotalTokens: 20},
 		{StartedAt: base.Add(12 * time.Minute), DurationMS: 0, Method: "POST", Path: "/v1/messages", StatusCode: 200, Result: "completed",
-			API: "anthropic", KeyHash: "kh1"},
+			FirstClientMS: &fcZero, API: "anthropic", KeyHash: "kh1"},
 		{StartedAt: base.Add(13 * time.Minute), DurationMS: 1100, Method: "POST", Path: "/v1/messages", StatusCode: 200, Result: "completed",
 			Stream: true, FirstUpstreamMS: &small, API: "anthropic", Model: "m-b", KeyHash: "kh2", OutputTokens: 1000},
 		// 与首行同维度：验证同格累加而非按行并集。
@@ -78,7 +83,7 @@ type cellKey struct {
 	keyHash string
 }
 
-// cellGroupTruth 是一格的聚合值：38 个指标列 + min_time + last_key。
+// cellGroupTruth 是一格的聚合值：40 个指标列 + min_time + last_key。
 type cellGroupTruth struct {
 	vals    []int64
 	minTime int64
