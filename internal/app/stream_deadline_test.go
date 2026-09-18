@@ -141,7 +141,8 @@ func smallBufferConnContext(ctx context.Context, conn net.Conn) context.Context 
 // close 发 RST，客户端读 ECONNRESET。若 linger 未生效或未同步 close，
 // graceful close 把 FIN 排在未发队列后——读会撞上读 deadline 拿到
 // i/o timeout（FIN-orphan 的客户端侧形态）。Windows 的栈对 RST 拆除
-// 可能呈现 WSAECONNABORTED（10053）变体，同为连接级终止。
+// 交付真实 WSA errno：WSAECONNRESET（10054）为主，WSAECONNABORTED
+// （10053）是同族变体。
 func expectConnReset(t *testing.T, conn net.Conn) {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -149,8 +150,21 @@ func expectConnReset(t *testing.T, conn net.Conn) {
 	if errors.Is(err, syscall.ECONNRESET) {
 		return
 	}
-	if runtime.GOOS == "windows" && errors.Is(err, syscall.ECONNABORTED) {
-		return
+	if runtime.GOOS == "windows" {
+		// Windows 的 syscall.ECONNRESET/ECONNABORTED 是 ≥1<<29 的虚构
+		// 值（zerrors_windows.go APPLICATION_ERROR 段），与 wsarecv
+		// 实际交付的 WSA errno 永不相等——errors.Is 的 == 比对必假，
+		// 须解包到底层 Errno 按数值比对（net/http http2 的
+		// isClosedConnError 同法）。io.Copy 经 TCPConn.WriteTo 时链形
+		// 是 writeto→read→wsarecv 三层包裹，Unwrap 照常落底。
+		const (
+			wsaECONNABORTED = 10053
+			wsaECONNRESET   = 10054
+		)
+		var errno syscall.Errno
+		if errors.As(err, &errno) && (errno == wsaECONNRESET || errno == wsaECONNABORTED) {
+			return
+		}
 	}
 	t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)
 }
