@@ -1,3 +1,8 @@
+# devin-2api 配置模板。未注释的键是必填项或建议过一眼的最小面；
+# 注释掉的块全是可选调优（默认值已写在注释里，不取消即按默认走），
+# 不需要逐项打开。最小起步甚至可零编辑：devin.accounts 空池合法，
+# 先起服务再在面板 /web/accounts.html 加号，凭据到位即热上线。
+
 server:
   listen: ":8080"
   # 同时处理的 /v1/* 请求数上限；0 或不填表示使用默认值 1024。
@@ -166,7 +171,8 @@ devin:
   # warm_prefix_userpaced_names: [AskUserQuestion, ExitPlanMode, request_user_input]
 
 dashboard:
-  # 管理面板密码；留空则无需登录，直接进入 /web。
+  # 管理面板密码；留空则无需登录，直接进入 /web——server.listen 绑到
+  # 非回环地址（默认 :8080 是全部接口）时建议设置，否则面板对网络开放。
   password: ""
 
 auth:
@@ -174,4 +180,6 @@ auth:
   # 它被写成一条普通令牌（描述 "config: auth.api_key"）——/v1 准入全走
   # 令牌仓，此处不再是旁路。要彻底移除该凭据：清空本值并在面板删掉
   # 对应令牌行。客户端经 Authorization: Bearer <token> 或 X-Api-Key 传递。
+  # 留空 = 令牌仓为空时 /v1 开放访问——server.listen 绑到非回环地址
+  #（默认 :8080 是全部接口）时务必设置，否则上游配额对网络开放。
   api_key: ""

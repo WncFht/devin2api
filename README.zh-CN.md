@@ -27,8 +27,8 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 devin-2api 按 `devin.accounts` 里每条声明一个上游账号向上游鉴权——单号部署就是只写一条的池，空池同样合法：先起服务，事后在面板 `/web/accounts.html` 加号即可，免重启。每条账号给三种凭据来源的至少一种（可叠加）：
 
 - **`api_key`（推荐）**——Devin 平台 durable key（`cog_...`），在 [app.devin.ai](https://app.devin.ai/) → Settings → API keys 手工签发。它本身不带过期语义（签发后一直有效，撤销才失效）：上游回 `unauthenticated` 时 lane 用它现场铸一枚新 session token，只配 `api_key` 的号可以无限自愈、零维护。
-- **`token`**——字面量 Devin 会话 token（`devin-session-token$...`）。直接可用，但 session token 的寿命由服务端管——死后 lane 只能靠其它来源拿到新凭据才能恢复。
-- **`credentials_file`**——指向 Devin CLI 凭证文件（macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`），里面存 CLI 自己登录续期的 session token——重读文件即自动跟随 CLI 续期。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
+- **`token`**——字面量 Devin 会话 token（`devin-session-token$...`）。直接可用，但 session token 的寿命由服务端管——死后 lane 只能靠其它来源拿到新凭据才能恢复。从哪拿：`devin auth login` 之后它就是 `credentials.toml` 里的 `windsurf_api_key` 值（见下），或从 Devin 应用本地状态提取（macOS 命令在下方）。
+- **`credentials_file`**——指向 Devin CLI 凭证文件（macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`），里面存 CLI 自己登录续期的 session token——重读文件即自动跟随 CLI 续期。`devin` CLI 随 [Devin 桌面端](https://devin.ai/download)（即 Windsurf app）内置，位于 `resources/app/extensions/windsurf/devin/bin/` 下——Windows 为 `C:\Program Files\Windsurf\`、Linux `.deb` 包为 `/usr/share/devin-desktop/`——执行 `devin auth login` 完成浏览器登录即生成该文件。
 
 同一账号可叠加来源——例如 `api_key` + `token`：字面 token 先服役，死后由 durable key 铸新 token 顶上。
 
