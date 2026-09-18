@@ -22,18 +22,24 @@ devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.
 
 ## 快速开始
 
-### 1. 提供 Devin token
+### 1. 提供 Devin 凭据
 
-devin-2api 使用 Devin 会话 token（`devin-session-token$...`）向上游鉴权，每个上游账号在 `devin.accounts` 里声明一条——单号部署就是只写一条的池，空池同样合法：先起服务，事后在面板 `/web/accounts.html` 加号即可，免重启。每条账号给 `token`（字面量）与/或 `credentials_file`（指向 Devin CLI 凭证文件——macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`）。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
+devin-2api 按 `devin.accounts` 里每条声明一个上游账号向上游鉴权——单号部署就是只写一条的池，空池同样合法：先起服务，事后在面板 `/web/accounts.html` 加号即可，免重启。每条账号给三种凭据来源的至少一种（可叠加）：
 
-macOS 下也可从 Devin 应用本地状态提取：
+- **`api_key`（推荐）**——Devin 平台 durable key（`cog_...`），在 [app.devin.ai](https://app.devin.ai/) → Settings → API keys 手工签发。它本身不带过期语义（签发后一直有效，撤销才失效）：上游回 `unauthenticated` 时 lane 用它现场铸一枚新 session token，只配 `api_key` 的号可以无限自愈、零维护。
+- **`token`**——字面量 Devin 会话 token（`devin-session-token$...`）。直接可用，但 session token 的寿命由服务端管——死后 lane 只能靠其它来源拿到新凭据才能恢复。
+- **`credentials_file`**——指向 Devin CLI 凭证文件（macOS/Linux 为 `~/.local/share/devin/credentials.toml`；Windows 为 `%APPDATA%\devin\credentials.toml`），里面存 CLI 自己登录续期的 session token——重读文件即自动跟随 CLI 续期。Windows 版 CLI 不单独发行，但随 [Windsurf 桌面端](https://devin.ai/download)（即 Devin app）内置：安装后执行 `& "C:\Program Files\Windsurf\resources\app\extensions\windsurf\devin\bin\devin.exe" auth login` 即生成该文件。
+
+同一账号可叠加来源——例如 `api_key` + `token`：字面 token 先服役，死后由 durable key 铸新 token 顶上。
+
+macOS 下也可从 Devin 应用本地状态提取 session token：
 
 ```bash
 sqlite3 ~/Library/"Application Support"/Devin/User/globalStorage/state.vscdb \
   "SELECT json_extract(value, '$.apiKey') FROM ItemTable WHERE key='windsurfAuthStatus';"
 ```
 
-token 会过期。上游回 `unauthenticated` 时 lane 会重解该号生效凭据（行覆盖 → config 声明 → `credentials_file` 重读）——Devin CLI 续期改写 `credentials.toml` 或面板改号后，代理无需重启即自愈。
+上游回 `unauthenticated` 时 lane 按序重解该号凭据——`credentials_file` 重读（跟随 CLI 续期）→ 行/config 的 token 有变化则换上 → `api_key` 铸新——除裸字面 token 外每种来源都能让代理免重启自愈。
 
 ### 2. 配置
 
@@ -159,7 +165,7 @@ curl http://localhost:8080/v1/messages \
 | `server.listen`                                  | HTTP 监听地址                                                                                                                                                                                                                                                                                | 是                                                                          |
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                                                                                                                                                                                                         | `1024`                                                                      |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                                                                                                                                                                                                       | 必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
-| `devin.accounts`                                 | 上游账号池条目 `{name, token, credentials_file, priority, max_rpm}`——`token`/`credentials_file` 至少给一个；`priority` 排选号序（0 为默认），`max_rpm` 覆盖该号速率上限；空列表是合法空池（账号可在面板 `/web/accounts.html` 在线管理）                                                      | 否——无账号时 `/v1` 返回 `unavailable`                                       |
+| `devin.accounts`                                 | 上游账号池条目 `{name, token, credentials_file, api_key, priority, max_rpm}`——`token`/`credentials_file`/`api_key` 至少给一个；`priority` 排选号序（0 为默认），`max_rpm` 覆盖该号速率上限；空列表是合法空池（账号可在面板 `/web/accounts.html` 在线管理）                                   | 否——无账号时 `/v1` 返回 `unavailable`                                       |
 | `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                                                                                                                                                                                                         | 必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）；匹配顺序：精确 → 大小写不敏感 → `"*"` 兜底；别名列进 `/v1/models` 并带 `alias_of`                                                                                                                                                 | 无                                                                          |
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                                                                                                                                                                                                               | `chisel` / `3000.2.17` / `mac`                                              |

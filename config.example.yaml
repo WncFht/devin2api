@@ -42,13 +42,17 @@ devin:
   # 名生成覆盖行（面板值恒赢）、面板删的 config 名成墓碑压住声明。
   # name 是账号在日志、闸门状态与面板里的身份：字母/数字/连字符/
   # 下划线 1–32 字符、池内唯一；每号独立限速闸门（闩状态持久化在
-  # runtime_state 表的 gate:<name> 键）与配额采样。token 与
-  # credentials_file 至少给一个；都给时 token 作初始凭据、
-  # credentials_file（指向 Devin CLI 的 credentials.toml）作
-  # unauthenticated 自愈来源——CLI 续期改写它即自动跟随。
-  # credentials_file 支持 ~/ 展开，相对路径锚定本文件所在目录（不是
-  # 进程 CWD）。两条目引用同一有效 token 或同一 credentials_file 按
-  # 配置错误拒绝。会话按亲和键钉选到号、失败按词表换号，详见
+  # runtime_state 表的 gate:<name> 键）与配额采样。
+  # 凭据三选一（可叠加）：api_key 是 Devin 平台 durable key（cog_*，
+  # app.devin.ai → Settings → API keys 手工签发，无内嵌寿命、撤销才
+  # 失效）——上游判死时 lane 用它现场铸新 session token，是最省心的
+  # 来源；token 是字面量 session token（devin-session-token$*，寿命由
+  # 服务端管）；credentials_file 指向 Devin CLI 的 credentials.toml
+  # （解析 windsurf_api_key），CLI 续期改写它即自动跟随。同号多来源
+  # 时 token/文件先服役、api_key 兜底铸新。credentials_file 支持 ~/
+  # 展开，相对路径锚定本文件所在目录（不是进程 CWD）。两条目引用
+  # 同一有效 token、同一 credentials_file 或同一 api_key 按配置错误
+  # 拒绝。会话按亲和键钉选到号、失败按词表换号，详见
   # docs/devin-accounts.md。
   # 可选逐号字段：priority 是池级排序元数据（大的优先被新会话选中，
   # 默认 0）；max_rpm 覆盖该号自己的分钟窗口配额（0 = 继承
@@ -56,9 +60,10 @@ devin:
   # 粘贴上传。
   # accounts:
   #   - name: "main"
-  #     token: "<main 号 session token>"
+  #     api_key: "cog_..."        # 推荐：durable key，自动铸 session token
   #     priority: 10
   #   - name: "backup"
+  #     token: "<backup 号 session token>"
   #     credentials_file: "/home/user/.local/share/devin/credentials.toml"
   # session_affinity_ttl_seconds: 3600  # 会话→lane 绑定的滑动 TTL（命中续期）
   # quota_low_threshold_percent: 15     # weekly 配额低于此百分比时该号对新会话降权
