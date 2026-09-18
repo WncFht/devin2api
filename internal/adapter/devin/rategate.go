@@ -480,6 +480,15 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 // ctx 进 SQLite——库卡死时协程泄漏比丢行更糟。
 const gateWindowStoreTimeout = 30 * time.Second
 
+// lockedStateStoreTimeout 是锁内 runtime_state 写的上限：闩/冷却的
+// persist 与 clear 必须留在 mu/authMu 内与对侧操作同锁序化（解锁后
+// 写删交错会把已清除的状态复活成幽灵行），不能像窗口行那样甩进协程；
+// 但 SQLite 单写连接被批量事务占压时无界等待会冻结全部 lane 准入。
+// 5s 远高于正常写耗时，超时按既有写失败路径只记日志丢持久化——内存
+// 态已生效，重启至多丢一份簿记，下次限流/失败自然重建。pool.go 的
+// persistCooldownLocked/deleteCooldownState 共用本上限。
+const lockedStateStoreTimeout = 5 * time.Second
+
 // persistWindow 把刚关闭窗口的明细账快照成行交给持久层。行语义是
 // 「闸门实际观察到关闭的窗口」：翻页只在流量/面板/保温触碰闸门时
 // 发生，整窗未被触碰的空窗期不产生行（缺口=无观测而非零用量）。
@@ -587,7 +596,9 @@ func (gate *rateGate) persistState(until time.Time) {
 		return
 	}
 	data, _ := json.Marshal(gateState{LimitedUntil: until})
-	if err := gate.states.SetState(context.Background(), gate.stateKey, string(data)); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	defer cancel()
+	if err := gate.states.SetState(ctx, gate.stateKey, string(data)); err != nil {
 		slog.Warn("rate gate state persist failed", "error", err)
 	}
 }
@@ -597,7 +608,9 @@ func (gate *rateGate) clearState() {
 	if gate.states == nil || gate.stateKey == "" {
 		return
 	}
-	if err := gate.states.DeleteState(context.Background(), gate.stateKey); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	defer cancel()
+	if err := gate.states.DeleteState(ctx, gate.stateKey); err != nil {
 		slog.Warn("rate gate state delete failed", "error", err)
 	}
 }

@@ -1021,7 +1021,9 @@ func (lane *poolLane) persistCooldownLocked() {
 		LastFailureCode:    lane.lastFailureCode,
 		LastFailureMessage: lane.lastFailureMessage,
 	})
-	if err := lane.states.SetState(context.Background(), poolCooldownKey(lane.name), string(data)); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	defer cancel()
+	if err := lane.states.SetState(ctx, poolCooldownKey(lane.name), string(data)); err != nil {
 		slog.Warn("pool cooldown state persist failed", "account", lane.name, "error", err)
 	}
 }
@@ -1031,7 +1033,9 @@ func (lane *poolLane) deleteCooldownState() {
 	if lane.states == nil {
 		return
 	}
-	if err := lane.states.DeleteState(context.Background(), poolCooldownKey(lane.name)); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	defer cancel()
+	if err := lane.states.DeleteState(ctx, poolCooldownKey(lane.name)); err != nil {
 		slog.Warn("pool cooldown state delete failed", "account", lane.name, "error", err)
 	}
 }
