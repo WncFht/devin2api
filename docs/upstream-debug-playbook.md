@@ -64,21 +64,21 @@ curl -sN http://localhost:3003/v1/responses \
 
 传输断裂类故障（envelope 截断/连接重置）可用 `cmd/upstreamstub` 本地复现：起桩监听后把测试实例 `devin.base_url` 指过去，用 `-scenario` 选故障形态，验证重试链路与 stage 归类：
 
-| 场景                            | 桩行为                                                            | 预期归类                                                                                |
-| ------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `precontent`                    | 元数据帧后半帧前缀截断                                            | transport，pre-content 重发一次                                                         |
-| `midcontent`                    | 内容帧后截断                                                      | transport，已产出内容回显续传（≤2 次）                                                  |
-| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`）                       | 透明自愈，`retries:1`                                                                   |
-| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）                                    | transport；pre-content 重发 / post-content 续传                                         |
-| `bare-end`                      | 有 EndStream 无 stopReason                                        | `provider_stream`，"ended without generated content"                                    |
-| `endstream-error`               | EndStream 携带限流错误                                            | `devin_connect` 语义错误 + 速率闩                                                       |
-| `stream`                        | 正常全流基线（`-deltas`/`-delta-bytes`/`-interval`/`-ttfb` 可调） | 非故障形态：completed，验证正常通路与时延分解                                           |
-| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                                         | transport，pre-content 重发一次                                                         |
-| `stall`                         | 建流后零帧挂死                                                    | 120s 看门狗判死 → pre-content 重发 / post-content 续传 → transport                      |
-| `end-hang`                      | 完整终止序列后 body 不收尾                                        | stopReason 后 15s 尾部宽限到点按正常 EOF 干净收尾                                       |
-| `heartbeat`                     | 周期无事件帧续命                                                  | 零事件帧不喂「无进度」期限 → 兜底判死：pre-content 10min 重发 / post-content 45min 续传 |
+| 场景                            | 桩行为                                                            | 预期归类                                                                                              |
+| ------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `precontent`                    | 元数据帧后半帧前缀截断                                            | transport，pre-content 重发一次                                                                       |
+| `midcontent`                    | 内容帧后截断                                                      | transport，已产出内容回显续传（≤2 次）                                                                |
+| `recover`                       | 前 N 次截断后返回完整流（`-recover-after`）                       | 透明自愈，`retries:1`                                                                                 |
+| `cleaneof` / `cleaneof-content` | 无尾帧干净收尾（截断等价形态）                                    | transport；pre-content 重发 / post-content 续传                                                       |
+| `bare-end`                      | 有 EndStream 无 stopReason                                        | `provider_stream`，"ended without generated content"                                                  |
+| `endstream-error`               | EndStream 携带限流错误                                            | `devin_connect` 语义错误 + 速率闩                                                                     |
+| `stream`                        | 正常全流基线（`-deltas`/`-delta-bytes`/`-interval`/`-ttfb` 可调） | 非故障形态：completed，验证正常通路与时延分解                                                         |
+| `badframe` / `badflags`         | 帧体截断 / 垃圾 flag 字节                                         | transport，pre-content 重发一次                                                                       |
+| `stall`                         | 建流后零帧挂死                                                    | 120s 看门狗判死 → pre-content 重发 / post-content 续传 → transport                                    |
+| `end-hang`                      | 完整终止序列后 body 不收尾                                        | stopReason 后 15s 尾部宽限到点按正常 EOF 干净收尾                                                     |
+| `heartbeat`                     | 周期无事件帧续命                                                  | 零事件帧不喂「无进度」期限 → 兜底判死：pre-content 累计 180s 硬顶内重发一次 / post-content 45min 续传 |
 
-看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ 无进度期限（只认产出事件帧的内容进度探测，两档：产出前 `upstreamNoProgressTimeout`=10min，产出过内容后 `devin.no_progress_timeout_seconds` 默认 45min——上游在工具调用参数阶段可静默计算 15-25min 只发心跳，pre 档必误杀）。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。内容已下发后的截断走续传而非整体重发：在飞块物化进 assistant 回显、追加 "continue" 用户消息重发（`maxStreamResumes`=2），客户端先收块 end 接缝再续新块；在飞工具调用与已收 stopReason/停止序列截断的流不续，按错误透传。
+看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ 无进度期限（只认产出事件帧的内容进度探测，两档：产出前 `devin.pre_event_no_progress_timeout_seconds` 默认 10min，产出过内容后 `devin.no_progress_timeout_seconds` 默认 45min——上游在工具调用参数阶段可静默计算 15-25min 只发心跳，pre 档必误杀）。pre 档之上另有 `upstreamPreEventSilenceCap`=180s 累计静默硬顶：从首条流建立起算、跨 pre-content 重开累计，重开的新流只继承剩余额度——退化上游收单后只发 ack/心跳续命、永不产出事件时（prod 实测 ~150 例/30h，全部以 client_disconnected 收场），死等被兜进客户端 ~300s 耐心之内，到期按传输错误收尾释放 lane。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。内容已下发后的截断走续传而非整体重发：在飞块物化进 assistant 回显、追加 "continue" 用户消息重发（`maxStreamResumes`=2），客户端先收块 end 接缝再续新块；在飞工具调用与已收 stopReason/停止序列截断的流不续，按错误透传。
 
 客户端断连不杀「已产出内容」的上游流：流脱钩登记进进程内完成缓存（键是 02 投影剔除 session_key/dropped 后的语义哈希，model 用解析后 uid；容量 8，TTL running 45min / completed 60min / failed 5min，触顶逐过期再逐最老 running），后台泵续消费并缓冲全部事件。同键重试在 `Stream` 入口命中即重放——completed 秒回全量、running 重放前缀后按下标追帧、failed 仅在失败可重放（非上游责任/取消类）时重放终态、否则当未命中走新上游。脱钩写 `detached` 标记行进原 dir 的 04，挂接写 `detached_attach` 进重试 dir 的 04（带 `origin_dir` 回指）。pre-content 断开不脱钩（没有可重放前缀）；脱钩泵关掉无进度看门狗（耐心是它的意义，running TTL 是存活上界）但保留 stall 看门狗（零帧=连接真死）。断开判定有两条腿：消费方 Recv 的 ctx.Done 分支 + `Stream` 起的哨兵协程（app 泵投递点两路就绪随机选，断开后可能不再进 Recv——没哨兵那条路径会漏成「无人杀也无人养」的孤儿泵）；两侧持同一把 stream.mu 就地判定，先到者赢。running 条目被 TTL/容量淘汰掐 drain ctx 退场时补一条终局错误记 failed（截断前缀不误标 completed），正常 EOF 才记 completed。条目缓冲另有 8MiB 字节预算（合法流实测最大 ~400KiB）：越界即截断——缓冲冻结成「前缀 + 截断错误事件」，原 dir 04 记 `detached_truncated` 标记行；截断条目 lookup 一律未命中并就地逐出（同键重试走新上游），在飞挂接方重放到显式错误而非无声 EOF，后台泵下轮自检停泵不再白耗上游配额。注意原 dir 完结后 04/05 不再追写——后台泵后续帧的取证只在条目缓冲里，不在盘上。
 

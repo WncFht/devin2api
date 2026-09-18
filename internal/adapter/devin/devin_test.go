@@ -1431,6 +1431,103 @@ func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
 	}
 }
 
+// TestResponseStreamPreEventSilenceCapCumulatesAcrossReopen 的测试动机是
+// 钉住 pre-event 累计静默上限的跨重开语义：退化上游收单后只发零事件帧
+// 续命时，整条请求的死等预算被 upstreamPreEventSilenceCap 兜住——重开的
+// 新流只继承剩余额度（首流 stall 判死耗掉的额度不重发），而不是逐次
+// 重开各得一扇 10min 档把死等拖过客户端耐心。
+func TestResponseStreamPreEventSilenceCapCumulatesAcrossReopen(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
+	defer func(d time.Duration) { upstreamPreEventSilenceCap = d }(upstreamPreEventSilenceCap)
+	defer func(d time.Duration) { upstreamNoProgressTimeout = d }(upstreamNoProgressTimeout)
+	upstreamPreEventSilenceCap = 150 * time.Millisecond
+	upstreamNoProgressTimeout = 10 * time.Second
+	upstreamStallTimeout = 40 * time.Millisecond
+	// 重开后新流发心跳帧续命：confirmed 档设得极大，若 stall 误触发
+	// 本测试会等到超时而非误报通过——触发者只能是无进度期限。
+	upstreamConfirmedStallTimeout = 10 * time.Second
+	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
+	defer close(receiver.release)
+	reopened := false
+	stream := &responseStream{
+		frames:      pumpUpstream(context.Background(), receiver),
+		cancel:      func() {},
+		decoder:     newResponseDecoder("model", nil, nil, nil),
+		gate:        newRateGate(GateConfig{}, nil, ""),
+		firstSentAt: time.Now(),
+		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
+			reopened = true
+			// 新流只发零事件活性帧：stall 看门狗被帧到达喂活，
+			// 只剩无进度期限兜底。
+			return pumpUpstream(context.Background(), &heartbeatAfterReceiver{heartbeat: &devinproto.GetChatMessageResponse{
+				Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
+			}}), func() {}, nil
+		},
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil, nil) },
+	}
+	startedAt := time.Now()
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened {
+		t.Fatal("expected one pre-content reopen before the cap")
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil ||
+		!strings.Contains(event.Error.ErrorMessage, "no progress") {
+		t.Fatalf("event = %#v, want no-progress error", event)
+	}
+	// 累计语义：首流 ~40ms stall + 重开流 ~110ms 剩余额度 ≈ 150ms 总额。
+	// 若重开流拿到独立窗口，耗时会奔向 10s 档——上限断言钉住跨流累计。
+	if elapsed := time.Since(startedAt); elapsed < 100*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("cap-bounded stream ended after %s, want ~150ms", elapsed)
+	}
+}
+
+// TestResponseStreamReopenRefusedAfterSilenceCap 的测试动机是钉住上限
+// 耗尽时的收尾形态：首条流撑满累计额度后判死，不再白烧一发重开发送
+// （新流只剩 ~0 预算），按传输错误直接收尾释放 lane。
+func TestResponseStreamReopenRefusedAfterSilenceCap(t *testing.T) {
+	defer func(d time.Duration) { upstreamPreEventSilenceCap = d }(upstreamPreEventSilenceCap)
+	defer func(d time.Duration) { upstreamNoProgressTimeout = d }(upstreamNoProgressTimeout)
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	upstreamPreEventSilenceCap = 60 * time.Millisecond
+	upstreamNoProgressTimeout = 10 * time.Second
+	upstreamStallTimeout = 10 * time.Second
+	receiver := &heartbeatAfterReceiver{heartbeat: &devinproto.GetChatMessageResponse{
+		Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
+	}}
+	reopened := false
+	stream := &responseStream{
+		frames:      pumpUpstream(context.Background(), receiver),
+		cancel:      func() {},
+		decoder:     newResponseDecoder("model", nil, nil, nil),
+		gate:        newRateGate(GateConfig{}, nil, ""),
+		firstSentAt: time.Now(),
+		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
+			reopened = true
+			return nil, nil, cause
+		},
+		newDecoder: func() *responseDecoder { return newResponseDecoder("model", nil, nil, nil) },
+	}
+	startedAt := time.Now()
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened {
+		t.Fatal("reopen must be refused once the silence cap is exhausted")
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil ||
+		!strings.Contains(event.Error.ErrorMessage, "no progress") {
+		t.Fatalf("event = %#v, want no-progress error", event)
+	}
+	if elapsed := time.Since(startedAt); elapsed < 50*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("cap fired after %s, want ~60ms", elapsed)
+	}
+}
+
 // TestResponseStreamResumesAfterStall 的测试动机是钉住 post-commit 截断
 // 续传的对外形态：内容已下发后上游被静默看门狗杀死时不再直接报错，
 // 而是回显已产出内容 + "continue" 重发续传——客户端先收到在飞块的

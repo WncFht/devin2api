@@ -177,6 +177,12 @@ type DevinConfig struct {
 	// 该档必须盖住它（产出前沿用内置 10min 档）；<=0 回落默认 2700。
 	// 全局字段，各 lane 一致。
 	NoProgressTimeoutSeconds int `yaml:"no_progress_timeout_seconds"`
+	// PreEventNoProgressTimeoutSeconds 是「产出首个事件之前」每段等待
+	// 的上游无进度期限秒数（no_progress_timeout_seconds 的 pre 对偶档）；
+	// <=0 回落默认 600。pre-event 累计静默另有内置 180s 硬顶（从首发
+	// 起算、跨重开累计）——本键配得比 180s 大不会突破累计上限。
+	// 全局字段，各 lane 一致。
+	PreEventNoProgressTimeoutSeconds int `yaml:"pre_event_no_progress_timeout_seconds"`
 }
 
 // DebugConfig 保存请求级调试日志配置。

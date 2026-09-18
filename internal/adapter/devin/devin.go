@@ -128,6 +128,12 @@ type Config struct {
 	// 还没产出就死等价值不大）。<=0 回落默认 45min。
 	// 全局字段各 lane 一致。
 	NoProgressTimeout time.Duration
+	// PreEventNoProgressTimeout 是「产出首个事件之前」每段等待的
+	// 无进度期限：与 NoProgressTimeout 对偶，<=0 回落默认 10min。
+	// 注意它只缩不扩——pre-event 累计静默另有
+	// upstreamPreEventSilenceCap 硬顶（从首发起算、跨重开累计），
+	// 配得比 180s 大不会突破累计上限。全局字段各 lane 一致。
+	PreEventNoProgressTimeout time.Duration
 }
 
 // ClientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -583,6 +589,9 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	if prev.NoProgressTimeout != next.NoProgressTimeout {
 		applied = append(applied, "devin.no_progress_timeout_seconds")
 	}
+	if prev.PreEventNoProgressTimeout != next.PreEventNoProgressTimeout {
+		applied = append(applied, "devin.pre_event_no_progress_timeout_seconds")
+	}
 	return applied
 }
 
@@ -967,10 +976,15 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
 	// postProgressTimeout 解析 post-content 无进度档（工具调用参数的
 	// 长静默计算）——cfg <=0 回落默认；Stream 构造的流恒有值，测试
-	// 裸流留零走 progressDeadline 的旧值回落。
+	// 裸流留零走 progressDeadline 的旧值回落。preProgressTimeout 是
+	// 它的 pre 对偶档，同法回落 upstreamNoProgressTimeout。
 	postProgressTimeout := cfg.NoProgressTimeout
 	if postProgressTimeout <= 0 {
 		postProgressTimeout = defaultPostProgressTimeout
+	}
+	preProgressTimeout := cfg.PreEventNoProgressTimeout
+	if preProgressTimeout <= 0 {
+		preProgressTimeout = upstreamNoProgressTimeout
 	}
 	response := &responseStream{
 		frames:              pumpUpstream(streamCtx, stream),
@@ -981,9 +995,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		warm:                adapter.warm,
 		warmKey:             warmKey,
 		postProgressTimeout: postProgressTimeout,
-		detachKey:           detachKey,
-		registry:            adapter.detached,
-		entry:               &detachedEntry{notify: make(chan struct{})},
+		preProgressTimeout:  preProgressTimeout,
+		// 累计静默上限的锚点：流刚建立，距首个上游发送只有建流往返，
+		// pre-event 死等预算从这一刻起跨换流累计。
+		firstSentAt: time.Now(),
+		detachKey:   detachKey,
+		registry:    adapter.detached,
+		entry:       &detachedEntry{notify: make(chan struct{})},
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
@@ -1704,7 +1722,19 @@ var upstreamConfirmedStallTimeout = 90 * time.Second
 // 合法内容帧间隔上限 ~60s，而退化上游可能周期性发零事件帧无限续命
 // （latency 心跳/元数据帧）——10min 是观察值 10 倍余量的兜底。
 // 它只管产出首个事件之前；产出过之后走 progressDeadline 的 post 档。
+// var 而非 const：测试临时缩短它来覆盖超时路径。覆盖旋钮是
+// devin.pre_event_no_progress_timeout_seconds。
 var upstreamNoProgressTimeout = 10 * time.Minute
+
+// upstreamPreEventSilenceCap 是首个可解码事件产出前允许的累计静默
+// 上限：从首条上游流建立起算、跨 pre-content 重开累计，重开的新流只
+// 继承剩余额度而不是重开一扇窗。prod 实测退化形态是上游收单后只发
+// ack/心跳包络续命、永不产出事件——逐次重开的 10min 档会把死等拖到
+// 远超客户端 ~300s 耐心（~150 例/30h 全部以 client_disconnected 收场
+// 且烧满座位）。180s 给合法慢首字留足余量（实测 pre-event 静默上界远
+// 低于它，60s 心跳帧都到不了两拍），到期按传输错误收尾释放 lane。
+// var 供测试缩短。
+var upstreamPreEventSilenceCap = 180 * time.Second
 
 // defaultPostProgressTimeout 是 post-content 无进度档的默认值：上游在
 // 工具调用参数阶段可静默计算 15-25min 只发心跳帧（实测 archbox 案例
@@ -1845,6 +1875,15 @@ type responseStream struct {
 	// 10min 档必误杀这类合法静默。<=0 时 progressDeadline 回落
 	// upstreamNoProgressTimeout（测试构造的裸流语义不变）。
 	postProgressTimeout time.Duration
+	// preProgressTimeout 是「产出首个事件之前」每段等待的无进度档
+	// （postProgressTimeout 的 pre 对偶）：<=0 同样回落
+	// upstreamNoProgressTimeout。
+	preProgressTimeout time.Duration
+	// firstSentAt 是首条上游流建立的时刻锚点：pre-event 累计静默上限
+	// （upstreamPreEventSilenceCap）从它起算且跨换流累计——tryReopen
+	// 重开的新流只继承剩余额度，逐次重开不再各得一扇 10min 死等窗。
+	// 零值（测试构造的裸流）不启用上限。
+	firstSentAt time.Time
 	// detachKey/registry/entry 是完成缓存挂接面：key 是语义请求
 	// 哈希（detachedRequestKey），entry 自建流起经 Recv 返回点 tee
 	// 累积全部下发事件（重试方需要含前缀的完整序列），registry 持
@@ -2048,7 +2087,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// post-content 按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			progressErr := fmt.Errorf("devin stream made no progress for %s", stream.progressDeadline())
+			progressErr := fmt.Errorf("devin stream made no progress for %s", stream.progressBound())
 			if stream.tryReopen(progressErr, false) {
 				continue
 			}
@@ -2132,16 +2171,45 @@ func (stream *responseStream) stallDeadline() time.Duration {
 	return upstreamStallTimeout
 }
 
-// progressDeadline 给无进度看门狗分档：首个事件产出前取
-// upstreamNoProgressTimeout（还没产出就死等价值不大）；产出过之后取
-// postProgressTimeout——上游在工具调用参数阶段可静默计算 15-25min
-// 只发心跳，10min 档必误杀这类合法静默。裸流（postProgressTimeout<=0）
-// 回落 pre 档，保持测试构造的既有语义。
+// progressDeadline 是无进度看门狗本轮的武装时长：分档窗口（见
+// progressWindow）之外，pre-event 档再被累计静默上限截顶——额度从
+// firstSentAt 起算且跨换流累计，换流后新流只继承剩余额度。
+// post-event 与裸流（firstSentAt 零值）不受上限影响。
 func (stream *responseStream) progressDeadline() time.Duration {
+	window := stream.progressWindow()
+	if stream.producedEvents || stream.firstSentAt.IsZero() {
+		return window
+	}
+	if remain := time.Until(stream.firstSentAt.Add(upstreamPreEventSilenceCap)); remain < window {
+		return remain
+	}
+	return window
+}
+
+// progressWindow 给无进度看门狗分档：首个事件产出前取
+// preProgressTimeout（还没产出就死等价值不大）；产出过之后取
+// postProgressTimeout——上游在工具调用参数阶段可静默计算 15-25min
+// 只发心跳，pre 档必误杀这类合法静默。裸流（对应档 <=0）回落
+// upstreamNoProgressTimeout，保持测试构造的既有语义。
+func (stream *responseStream) progressWindow() time.Duration {
 	if stream.producedEvents && stream.postProgressTimeout > 0 {
 		return stream.postProgressTimeout
 	}
+	if !stream.producedEvents && stream.preProgressTimeout > 0 {
+		return stream.preProgressTimeout
+	}
 	return upstreamNoProgressTimeout
+}
+
+// progressBound 给 progressC 触发的错误归因取生效期限：触发点重算
+// progressDeadline 会把已耗尽的累计静默上限残余误报成 ~0——上限已过
+// 时报上限本身，其余回到分档窗口。
+func (stream *responseStream) progressBound() time.Duration {
+	if !stream.producedEvents && !stream.firstSentAt.IsZero() &&
+		!time.Now().Before(stream.firstSentAt.Add(upstreamPreEventSilenceCap)) {
+		return upstreamPreEventSilenceCap
+	}
+	return stream.progressWindow()
 }
 
 // detachable 判定这条流客户端断开后是否值得脱钩续命：六个条件缺一
@@ -2262,6 +2330,12 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	if cause == nil && !continueEmpty {
 		return false
 	}
+	// 累计静默上限已耗尽时重开只剩 ~0s 预算：新流活不过第一次看门狗
+	// 评估，白烧一发上游发送——直接按原失败收尾。
+	if !stream.firstSentAt.IsZero() && !time.Now().Before(stream.firstSentAt.Add(upstreamPreEventSilenceCap)) {
+		return false
+	}
+
 	frames, cancel, err := stream.reopen(cause, continueEmpty)
 	if err != nil {
 		return false
@@ -2289,9 +2363,10 @@ func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.C
 	// 新流的首个非错误帧重新获得解闩资格——上一流的确认不能
 	// 替代这次重试是否真的打穿了限流。
 	stream.upstreamConfirmed = false
-	// 新流的无进度窗口从头计起：旧流的计时器（可能刚触发排空）
-	// 不沿用，消费方对新流重新获得完整的零事件容忍期。脱钩流无
-	// progress 看门狗（nil），跳过武装。
+	// 新流的无进度窗口重新武装：旧流的计时器（可能刚触发排空）
+	// 不沿用。post-event 档换流重获完整窗口；pre-event 档仍被
+	// firstSentAt 的累计静默上限截顶——重开只继承剩余额度，不是
+	// 重置预算。脱钩流无 progress 看门狗（nil），跳过武装。
 	if stream.progress != nil {
 		stream.progress.Reset(stream.progressDeadline())
 	}
