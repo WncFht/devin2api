@@ -1602,7 +1602,9 @@ func TestPoolFailureBackoff(t *testing.T) {
 	}
 	// 成功清账：归零连败、两档冷却与判死键。
 	lane.noteFailure(unauthenticatedErr())
-	lane.noteSuccess(time.Now())
+	// laneStart 必须明显晚于落债钟——Windows 时钟粒度 ~15.6ms 下
+	// 紧跟其后的 time.Now() 可能与 debtSetAt 同 tick，After 判假。
+	lane.noteSuccess(time.Now().Add(time.Minute))
 	lane.authMu.Lock()
 	clean := lane.failStreak == 0 && lane.badTokenHash == "" && lane.badUntil.IsZero() && lane.unhealthyUntil.IsZero()
 	lane.authMu.Unlock()
