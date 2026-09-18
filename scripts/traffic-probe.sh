@@ -19,12 +19,27 @@ MODEL="${GD_PROBE_MODEL:-swe-2-medium}"
 PROBE_MODEL="tp-disabled-x"
 
 PW="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
-AK="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ')"
 AUTH=(-H "Authorization: Bearer $PW")
-VAUTH=(-H "Authorization: Bearer $AK")
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+TMP_TID=""
+cleanup() {
+	# 临时令牌能删就删；实例不在/端点失败都不影响收尾。
+	[[ -n "$TMP_TID" ]] && curl -s -o /dev/null -m 5 -X DELETE "${AUTH[@]}" \
+		"$BASE/admin/auth-tokens/$TMP_TID" 2>/dev/null || true
+	rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+# 下游令牌不入配置：经 /admin/auth-tokens 现铸一条临时令牌供全部 /v1
+# 探针用（明文一次性出示，仓内只存哈希），退出时 DELETE 回收。仓空时
+# 铸造照样成功；铸造失败则整段探针全是 401——视为环境不配直接中止。
+resp="$(curl -sf -m 8 -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+	-d '{"description":"traffic-probe temp"}' "$BASE/admin/auth-tokens" 2>/dev/null || true)"
+AK="$(printf '%s' "$resp" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')"
+TMP_TID="$(printf '%s' "$resp" | sed -n 's/.*"id" *: *\([0-9]*\).*/\1/p')"
+[[ -n "$AK" ]] || { echo "面板铸令牌失败（检查 dashboard.password 与实例版本）" >&2; exit 1; }
+VAUTH=(-H "Authorization: Bearer $AK")
 MANIFEST="$WORK/manifest.tsv"
 : >"$MANIFEST"
 

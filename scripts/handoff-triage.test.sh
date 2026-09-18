@@ -246,8 +246,6 @@ write_cfg() {
 	cat >"$1" <<EOF
 server:
   listen: ':13099'
-auth:
-  api_key: 'k'
 devin:
   accounts:
     - name: a

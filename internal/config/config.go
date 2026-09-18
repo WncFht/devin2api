@@ -16,7 +16,7 @@ import (
 )
 
 // Config 是一次配置加载的快照。运行期变更不走本结构换值——各热应用
-// 路径（adapter.ApplyConfig、app.SetAPIKey、panel.SetPassword 等）直接
+// 路径（adapter.ApplyConfig、panel.SetPassword 等）直接
 // 改各自持有的字段，快照保留给配置自省与 reload 的变更比对。
 type Config struct {
 	// Server 保存 HTTP 服务配置。
@@ -27,7 +27,7 @@ type Config struct {
 	Debug DebugConfig `yaml:"debug"`
 	// Dashboard 保存管理面板配置。
 	Dashboard DashboardConfig `yaml:"dashboard"`
-	// Auth 保存对外 OpenAI 兼容接口的访问控制配置。
+	// Auth 仅留废弃字段占位（旧配置兼容）；下游访问控制全在令牌仓。
 	Auth AuthConfig `yaml:"auth"`
 }
 
@@ -214,9 +214,10 @@ type DashboardConfig struct {
 
 // AuthConfig 保存对外 OpenAI 兼容接口的访问控制配置。
 type AuthConfig struct {
-	// APIKey 是下游令牌的播种源而非准入旁路：启动与 reload 时若仓内
-	// 没有对应哈希行，它被写成一条普通 auth token（描述
-	// "config: auth.api_key"）；留空则不再补种。
+	// APIKey 是已删除的下游令牌播种字段的占位空壳：yaml 键保留只为让
+	// Validate 对残留 auth.api_key 的旧配置产出迁移错误——删掉字段
+	// 会让 KnownFields(true) 把它报成未知字段，迁移指引被 parse 错误
+	// 吞掉。取值永不生效。
 	APIKey string `yaml:"api_key"`
 }
 
@@ -283,6 +284,11 @@ func (config *Config) Validate(configDir string) error {
 	config.Devin.Aliases = aliases
 	if err := config.Devin.resolveAccounts(configDir); err != nil {
 		return err
+	}
+	// auth.api_key 已删除：残留非空值报迁移错误。存量 DB 里播种出的
+	// 令牌行仍是有效凭据——删除字段只是不再允许配置当凭据来源。
+	if strings.TrimSpace(config.Auth.APIKey) != "" {
+		return errors.New(`auth.api_key removed; downstream tokens are managed via the panel (/admin/auth-tokens) — previously seeded token rows remain valid`)
 	}
 	return nil
 }

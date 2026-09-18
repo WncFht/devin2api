@@ -7,7 +7,7 @@
 # 用法: scripts/load-smoke.sh <binary> <state-dir> [config.yaml] [并发N=20] [时长s=60]
 #   state-dir 被整体复制到 mktemp，原目录不动；实例日志留在 mktemp 下，
 #   结束时打印路径（自行 rm -rf 清理）。config 缺省取仓库 config.yaml；
-#   无 auth.api_key 或 devin.model 时跳过 /v1 腿并在输出中注明。
+#   面板铸令牌失败或无 devin.model 时跳过 /v1 腿并在输出中注明。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -73,10 +73,14 @@ for i in $(seq 1 600); do
 	[[ $i == 600 ]] && { echo "实例未起来（120s），日志：" >&2; tail -30 "$ST/boot.log" >&2; exit 1; }
 done
 
-# 凭据/模型从 config 抽取；api_key 首个命中即 auth.api_key。grep 无命中
-# 返回 1，pipefail 下不交 || true 会杀脚本——缺行应落为空串走「跳过 /v1 腿」。
+# 凭据/模型从 config 抽取。grep 无命中返回 1，pipefail 下不交 || true
+# 会杀脚本——缺行应落为空串走「跳过 /v1 腿」。下游令牌不进配置：副本
+# 带来真实闭合仓，/v1 腿凭据改走 /admin/auth-tokens 现铸（明文一次性
+# 出示）；铸造失败落空串 = 跳过 /v1 腿，与旧缺行路径同义。
 PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
-APIKEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
+APIKEY="$(curl -sf -X POST -H "Authorization: Bearer $PASSWORD" -H 'Content-Type: application/json' \
+	-d '{"description":"load-smoke temp"}' "http://127.0.0.1:$PORT/admin/auth-tokens" 2>/dev/null \
+	| sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p' || true)"
 MODEL="$(grep -E '^\s*model:' "$CONFIG" | head -1 | sed -E 's/.*model:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
 
 END_TS=$(( $(date +%s) + DURATION ))
@@ -114,7 +118,7 @@ write_worker() {
 	done
 }
 
-v1_worker() { # 真上游请求让 logs 写路径参与；下游令牌是 auth.api_key 而非面板密码
+v1_worker() { # 真上游请求让 logs 写路径参与；下游令牌是现铸 auth_tokens 行而非面板密码
 	OUT="$ST/results/v1.log"
 	local i
 	for i in 1 2 3 4 5; do
@@ -131,7 +135,7 @@ for i in 1 2; do write_worker "$i" "$([ "$i" = 1 ] && echo true || echo false)" 
 if [ -n "$APIKEY" ] && [ -n "$MODEL" ]; then
 	v1_worker & WPIDS+=("$!")
 else
-	echo "== config 缺 auth.api_key 或 devin.model，跳过 /v1 写腿"
+	echo "== 面板铸令牌失败或 config 缺 devin.model，跳过 /v1 写腿"
 fi
 
 wait "${WPIDS[@]}" 2>/dev/null || true

@@ -93,9 +93,8 @@ trap cleanup EXIT
 RUNID="$(date +%s%N | tail -c 9)"
 API_KEY="smoke-key-$RUNID"
 DASH_PASS="smoke-pass-$RUNID"
+# 临时 state 目录 = 空令牌仓 = 开放准入，$API_KEY 形凭据照常放行。
 cat >"$WORK/config.yaml" <<EOF
-auth:
-  api_key: '$API_KEY'
 dashboard:
   password: '$DASH_PASS'
 debug:

@@ -91,7 +91,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
 ```
 
-首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `auth.api_key`/`dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
+首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/auth-tokens` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
 
 Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 
@@ -104,7 +104,7 @@ curl http://localhost:8080/healthz
 
 ## 用法
 
-> **注意**：`/v1/*` 接口由令牌仓（状态目录 `devin-2api.db` 的 `auth_tokens` 表）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据；`config.yaml` 的 `auth.api_key` 只是播种源（启动与 reload 时写成一条普通令牌行）。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。令牌可带 `class`（`fg` 默认 / `bg` 无人值守批跑），改变速率闸门准入口径——见 `docs/gate-classes.md`。
+> **注意**：`/v1/*` 接口由令牌仓（状态目录 `devin-2api.db` 的 `auth_tokens` 表）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据。令牌只在面板（`/web/auth-tokens`）管理——明文创建时一次性出示，仓内只存哈希，配置里不放数据面凭据。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。令牌可带 `class`（`fg` 默认 / `bg` 无人值守批跑），改变速率闸门准入口径——见 `docs/gate-classes.md`。
 
 接口列表：
 
@@ -124,7 +124,7 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "input": "你好"
   }'
 ```
@@ -135,7 +135,7 @@ curl http://localhost:8080/v1/responses \
 curl -N http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "input": "你好",
     "stream": true
   }'
@@ -148,7 +148,7 @@ curl http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "max_tokens": 256,
     "messages": [{"role": "user", "content": "你好"}]
   }'
@@ -166,7 +166,7 @@ curl http://localhost:8080/v1/messages \
 | `server.max_concurrency`                         | `/v1/*` 并发请求上限                                                                                                                                                                                                                                                                         | `1024`                                                                      |
 | `devin.base_url`                                 | Devin Connect 服务地址                                                                                                                                                                                                                                                                       | 必填（代码无默认值；`config.example.yaml` 用 `https://server.codeium.com`） |
 | `devin.accounts`                                 | 上游账号池条目 `{name, token, credentials_file, api_key, priority, max_rpm}`——`token`/`credentials_file`/`api_key` 至少给一个；`priority` 排选号序（0 为默认），`max_rpm` 覆盖该号速率上限；空列表是合法空池（账号可在面板 `/web/accounts.html` 在线管理）                                   | 否——无账号时 `/v1` 返回 `unavailable`                                       |
-| `devin.model`                                    | Devin chat model UID（如 `glm-5-2`）                                                                                                                                                                                                                                                         | 必填（代码无默认值）                                                        |
+| `devin.model`                                    | Devin chat model UID（如 `swe-2-max`）                                                                                                                                                                                                                                                       | 必填（代码无默认值）                                                        |
 | `devin.aliases`                                  | 客户端模型名 → 上游真实 UID 映射（如 `swe-2: swe-2-max`）；匹配顺序：精确 → 大小写不敏感 → `"*"` 兜底；别名列进 `/v1/models` 并带 `alias_of`                                                                                                                                                 | 无                                                                          |
 | `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                                                                                                                                                                                                               | `chisel` / `3000.2.17` / `mac`                                              |
 | `devin.proxy`                                    | 上游代理地址（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                                                                                                                                                                                                           | 无                                                                          |
@@ -191,7 +191,6 @@ curl http://localhost:8080/v1/messages \
 | `debug.quota_interval_minutes`                   | 配额快照采样间隔 → `quota_samples` 表；`<=0` 不采样                                                                                                                                                                                                                                          | `5`                                                                         |
 | `debug.pprof_listen`                             | pprof/fgprof 剖析端点的独立监听地址（如 `127.0.0.1:6060`）；端点无鉴权——只绑回环地址                                                                                                                                                                                                         | 空（不启用）                                                                |
 | `dashboard.password`                             | `/web` 管理面板密码；留空免登录                                                                                                                                                                                                                                                              | 无                                                                          |
-| `auth.api_key`                                   | 播种进令牌仓的凭据（启动与 reload 时写入一条普通令牌行）；`/v1/*` 准入由令牌仓决定（仓空即开放）。客户端通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递                                                                                                                    | 无                                                                          |
 
 ```yaml
 server:
@@ -202,7 +201,7 @@ devin:
     accounts:
         - name: "main"
           token: "devin-session-token$..."
-    model: "glm-5-2"
+    model: "swe-2-max"
 
 debug:
     enabled: false
@@ -210,9 +209,9 @@ debug:
 dashboard:
     password: "" # /web 登录密码；留空免登录
 
-auth:
-    # 填入强密码以保护 /v1/*；留空则不校验。
-    api_key: ""
+
+# 下游 /v1 令牌只在面板（/web/auth-tokens）管理——配置里不放数据面凭据。
+# 令牌仓为空即 /v1 开放访问。
 ```
 
 注意：

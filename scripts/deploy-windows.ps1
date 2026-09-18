@@ -12,8 +12,9 @@
 #   -Help       显示用法
 #
 # 首装与升级同一条命令：config.yaml 缺失时自动从 config.example.yaml 生成——
-# 写入随机 auth.api_key / dashboard.password，listen 绑 127.0.0.1 自选空闲
-# 端口（避免 Windows 防火墙弹窗与裸暴露），token 提示粘贴或留空走自动发现。
+# 写入随机 dashboard.password，listen 绑 127.0.0.1 自选空闲端口（避免
+# Windows 防火墙弹窗与裸暴露），token 提示粘贴或留空走自动发现。
+# 下游 /v1 令牌不入配置：面板 /web/auth-tokens 创建，仓内只存哈希。
 # 注意：经 SSH 远程执行时，启动的实例会随会话结束被系统回收（job object）
 # ——本脚本面向本机交互会话使用。
 [CmdletBinding()]
@@ -240,7 +241,6 @@ function Ensure-Config {
 
     Note "first install: 从 config.example.yaml 生成 config.yaml"
     Copy-Item $example $RuntimeConfig
-    Set-YamlScalar 'api_key' (New-Secret) $RuntimeConfig
     Set-YamlScalar 'password' (New-Secret) $RuntimeConfig
 
     # 示例 listen :8080 是全网卡绑定——首装改成 127.0.0.1 + 空闲端口，
@@ -288,8 +288,8 @@ function Assert-Preflight {
     else { Note "凭据来源: $src" }
 
     $listen = Get-YamlScalar 'listen' $RuntimeConfig
-    if ($listen -notmatch '^(127\.|localhost:|\[::1\])' -and (Get-YamlScalar 'api_key' $RuntimeConfig) -eq '') {
-        Warn "server.listen 非回环且 auth.api_key 为空——等于把配额开放给网络，请先配置 auth.api_key"
+    if ($listen -notmatch '^(127\.|localhost:|\[::1\])') {
+        Warn "server.listen 非回环——/v1 准入全看令牌仓：空仓或存在匿名通道行时配额对网络开放，请确认面板 /web/auth-tokens 已建非匿名令牌"
     }
 }
 
@@ -357,22 +357,40 @@ function Install-Binary {
 }
 
 # ---------- 冒烟 ----------
+# /v1 准入全看令牌仓：空仓或含匿名通道行时无凭据即过；仓非空时库里只有
+# 哈希、存量明文取不回——经面板 admin API（Bearer 取 config.yaml 的
+# dashboard.password）铸一条临时令牌顶上，用完即删。
 function Test-Upstream([int]$p) {
-    $headers = @{}
-    $key = Get-YamlScalar 'api_key' $RuntimeConfig
-    if ($key) { $headers['X-Api-Key'] = $key }
-    # 首调上游目录可能冷启动慢，超时重试一次再判失败。
     $code = ''
     foreach ($try in 1..2) {
-        try { $code = [int](Invoke-WebRequest -Uri "http://localhost:$p/v1/models" -Headers $headers -TimeoutSec 30 -UseBasicParsing).StatusCode }
+        try { $code = [int](Invoke-WebRequest -Uri "http://localhost:$p/v1/models" -TimeoutSec 30 -UseBasicParsing).StatusCode }
         catch {
             try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { }
         }
         if ($code -ne '') { break }
     }
+    if ($code -eq 401 -or $code -eq 403) {
+        $pw = Get-YamlScalar 'password' $RuntimeConfig
+        $tid = ''
+        try {
+            $mint = Invoke-RestMethod -Uri "http://localhost:$p/admin/auth-tokens" -Method Post `
+                -Headers @{ Authorization = "Bearer $pw" } -ContentType 'application/json' `
+                -Body '{"description":"deploy: smoke"}' -TimeoutSec 10
+            $tid = "$($mint.data.id)"
+            $headers = @{ 'X-Api-Key' = "$($mint.data.token)" }
+            $code = [int](Invoke-WebRequest -Uri "http://localhost:$p/v1/models" -Headers $headers -TimeoutSec 30 -UseBasicParsing).StatusCode
+        }
+        catch {
+            try { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } } catch { }
+        }
+        if ($tid) {
+            try { Invoke-WebRequest -Uri "http://localhost:$p/admin/auth-tokens/$tid" -Method Delete `
+                -Headers @{ Authorization = "Bearer $pw" } -TimeoutSec 10 -UseBasicParsing | Out-Null } catch { }
+        }
+    }
     if ($code -eq 200) { Note "upstream auth verified (GET /v1/models 200)"; return $true }
     if ($code -eq 401 -or $code -eq 403) {
-        Warn "服务已运行但 /v1/models 返回 HTTP $code——客户端 api_key 不匹配或上游 token 无效"
+        Warn "服务已运行但 /v1/models 返回 HTTP $code——下游令牌准入被拒或上游 token 无效"
     }
     else { Warn "服务已运行但 /v1/models 返回 HTTP $(if ($code) { $code } else { '<timeout>' })——上游链路未通过" }
     $src = Get-TokenSource $RuntimeConfig

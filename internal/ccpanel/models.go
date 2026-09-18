@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
+	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 )
@@ -394,23 +397,25 @@ func (h *Handler) adminModelChat(w http.ResponseWriter, r *http.Request) {
 // serveProbeRequest 是探针执行的共用尾段：把已构造好的 /v1 请求发给注入的
 // 进程内根路由，并组装前端消费的结果对象（success/status_code/duration_ms/
 // first_byte_duration_ms/actual_model/response_text/api_response/error/
-// raw_response）。key 解析、60s 超时、panel-probe 留痕、流式首字节计时对
+// raw_response）。凭据解析、60s 超时、panel-probe 留痕、流式首字节计时对
 // 单轮探活与多轮试聊完全一致。
 func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path string, body []byte, model, clientProtocol string, stream bool) {
+	// 凭据三态：仓空（开放模式）任意占位凭据都能过 authenticate；仓非空
+	// 经 probeCredential 取——复用内存里的探针令牌、命中匿名通道行
+	//（anonymous 不出示凭据）、或现场铸一条新令牌。三态都拿不到时
+	// 给配置引导。
 	key := ""
-	if h.masterKeyFunc != nil {
-		key = strings.TrimSpace(h.masterKeyFunc())
-	}
-	// api_key 为空且仓非空时探针没有可出示的明文凭据（仓里只存哈希），
-	// 唯一的出路是匿名通道行——它按无凭据准入，探针连 Authorization
-	// 都不用带。仓全空即开放模式，占位凭据也能过 authenticate。
 	anonymous := false
-	if key == "" && h.tokens != nil && !h.tokens.Empty() {
-		if _, ok := h.tokens.Resolve(""); !ok {
-			respondError(w, http.StatusBadRequest, "auth.api_key is empty and no anonymous channel exists: configure auth.api_key or enable the anonymous channel to run probes")
+	if h.tokens != nil && !h.tokens.Empty() {
+		credential, isAnonymous, err := h.probeCredential()
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		anonymous = true
+		key, anonymous = credential, isAnonymous
+	}
+	if key == "" && !anonymous {
+		key = "panel-probe"
 	}
 	probeCtx, cancel := context.WithTimeout(r.Context(), modelTestTimeout)
 	defer cancel()
@@ -418,9 +423,6 @@ func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path
 	if anonymous {
 		// 无凭据准入：不带 Authorization 才会命中匿名通道行。
 	} else {
-		if key == "" {
-			key = "panel-probe"
-		}
 		probeReq.Header.Set("Authorization", "Bearer "+key)
 	}
 	probeReq.Header.Set("Content-Type", "application/json")
@@ -472,6 +474,51 @@ func (h *Handler) serveProbeRequest(w http.ResponseWriter, r *http.Request, path
 		}
 	}
 	respondOK(w, out)
+}
+
+// probeCredential 决定探活出示的凭据（调用方保证仓非空）：内存里已铸的
+// 探针令牌仍有效时复用；存在匿名通道行时用无凭据准入（anonymous=true
+// 不带 Authorization）；否则现场铸一条 "panel: probe" 令牌并记住明文。
+// 探针行被删/停用后下一次探活自动落到匿名或重铸分支。
+func (h *Handler) probeCredential() (credential string, anonymous bool, err error) {
+	h.probeTokenMu.Lock()
+	defer h.probeTokenMu.Unlock()
+	if h.probeToken != "" {
+		if _, ok := h.tokens.Resolve(h.probeToken); ok {
+			return h.probeToken, false, nil
+		}
+		// 行被删或停用：内存明文作废，转入匿名/重铸分支。
+		h.probeToken = ""
+	}
+	// 匿名通道存在时探活走无凭据准入——零副作用，不留新行。
+	if _, ok := h.tokens.Resolve(""); ok {
+		return "", true, nil
+	}
+	plain, err := h.mintProbeToken()
+	if err != nil {
+		return "", false, fmt.Errorf("no usable credential: mint probe token failed (%v); enable the anonymous channel to run probes", err)
+	}
+	h.probeToken = plain
+	return plain, false, nil
+}
+
+// mintProbeToken 铸一条新的探针令牌并清理陈旧探针行：上一 boot 铸的行
+// 明文已随进程消失，留着是死行。"panel: probe" 描述是清理锚点——管理员
+// 改过描述的行脱离本机制，按普通令牌对待。
+func (h *Handler) mintProbeToken() (string, error) {
+	t := &authtoken.Token{Description: "panel: probe", IsActive: true}
+	plain, err := h.tokens.Create(t)
+	if err != nil {
+		return "", err
+	}
+	for _, old := range h.tokens.List() {
+		if old.ID != t.ID && old.Description == "panel: probe" {
+			if err := h.tokens.Delete(old.ID); err != nil {
+				slog.Warn("delete stale probe token failed", "id", old.ID, "error", err)
+			}
+		}
+	}
+	return plain, nil
 }
 
 // probeProtocolName 把请求里的 client_protocol 归一到三协议名。

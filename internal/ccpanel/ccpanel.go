@@ -125,10 +125,11 @@ type Handler struct {
 	// probeHandler 是应用根路由（含 /v1 管线），模型探活经它发进程内
 	// 真实请求；nil 时 /admin/model-test 返回 503。
 	probeHandler http.Handler
-	// masterKeyFunc 返回当前生效的 auth.api_key（热重载后为新值），
-	// 只供模型探活当明文凭据用——/v1 准入全走令牌仓，api_key 对准入
-	// 不再特判。
-	masterKeyFunc func() string
+	// probeToken 是模型探活的明文凭据：仓非空且没有匿名通道可用时
+	// 由面板自铸一条 "panel: probe" 令牌，明文只留在内存（仓里只有
+	// 哈希）。令牌被删后下一次探活自动重铸。
+	probeTokenMu sync.Mutex
+	probeToken   string
 	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
 	warmStats func() devin.WarmStats
 	// detachedStats 返回脱钩完成缓存快照（顶层 detached 组，首 lane
@@ -320,11 +321,6 @@ func (h *Handler) SetSettingsStore(s *PanelSettings) {
 // 请求完全相同的鉴权/准入/重定向/上游路径。
 func (h *Handler) SetProbeHandler(handler http.Handler) {
 	h.probeHandler = handler
-}
-
-// SetMasterKeyFunc 注入 auth.api_key 读取函数（模型探活凭据来源）。
-func (h *Handler) SetMasterKeyFunc(fn func() string) {
-	h.masterKeyFunc = fn
 }
 
 // SetWarmStats 注入前缀保温簿记读取函数（/admin/runtime-metrics 的 warm 组）。

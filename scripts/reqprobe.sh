@@ -10,9 +10,12 @@
 #
 # 环境变量：
 #   REQPROBE_BASE     实例地址（默认 http://127.0.0.1:3033，可指 tailscale prod）
-#   REQPROBE_KEY      /v1 API key（默认从 ./config.yaml 的 auth.api_key 提取）
-#   REQPROBE_DASH     面板密码（默认从 ./config.yaml 的 dashboard.password 提取；
-#                     admin 端点只认它，缺则只发请求不取证据）
+#   REQPROBE_KEY      /v1 下游令牌明文（缺省 = 不带凭据——令牌仓空仓或含
+#                     匿名通道行时够用；仓闭合且给了 DASH 时自动经
+#                     /admin/auth-tokens 铸一条临时令牌，退出即删）
+#   REQPROBE_DASH     面板密码（默认依次从 ./config.yaml 与 XDG live
+#                     config 的 dashboard.password 提取；admin 端点只认
+#                     它，缺则只发请求不取证据）
 #   REQPROBE_TIMEOUT  curl 秒数（默认 120）
 set -u
 
@@ -25,17 +28,35 @@ TIMEOUT="${REQPROBE_TIMEOUT:-120}"
 
 KEY="${REQPROBE_KEY:-}"
 DASH="${REQPROBE_DASH:-}"
-if [[ -f ./config.yaml ]]; then
-	[[ -z "$KEY" ]] && KEY="$(sed -nE "s/^[[:space:]]*api_key:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" ./config.yaml | head -1)"
-	[[ -z "$DASH" ]] && DASH="$(sed -nE "s/^[[:space:]]*password:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" ./config.yaml | head -1)"
-fi
-AUTH=()
-[[ -n "$KEY" ]] && AUTH=(-H "Authorization: Bearer $KEY")
+for cfg in ./config.yaml "${XDG_CONFIG_HOME:-$HOME/.config}/devin-2api/config.yaml"; do
+	[[ -z "$DASH" && -f "$cfg" ]] || continue
+	DASH="$(sed -nE "s/^[[:space:]]*password:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" "$cfg" | head -1)"
+done
 DAUTH=()
 [[ -n "$DASH" ]] && DAUTH=(-H "Authorization: Bearer $DASH")
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+TEMP_TID=""
+cleanup() {
+	rm -rf "$WORK"
+	[[ -n "$TEMP_TID" ]] && curl -s -o /dev/null -m 5 -X DELETE "${DAUTH[@]}" \
+		"$BASE/admin/auth-tokens/$TEMP_TID" >/dev/null 2>&1
+}
+trap cleanup EXIT
+
+# 令牌仓闭合（非空且无匿名通道行）时无凭据请求吃 401——库里只存哈希、
+# 存量明文取不回，有 DASH 就经面板铸一条临时令牌顶上，退出时 cleanup 删。
+if [[ -z "$KEY" && -n "$DASH" ]]; then
+	probe="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$BASE/v1/models" 2>/dev/null || true)"
+	if [[ "$probe" == "401" || "$probe" == "403" ]]; then
+		resp="$(curl -s -m 5 -X POST -H 'Content-Type: application/json' "${DAUTH[@]}" \
+			-d '{"description":"reqprobe: temp"}' "$BASE/admin/auth-tokens" 2>/dev/null || true)"
+		KEY="$(printf '%s' "$resp" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')"
+		TEMP_TID="$(printf '%s' "$resp" | sed -n 's/.*"id" *: *\([0-9]*\).*/\1/p')"
+	fi
+fi
+AUTH=()
+[[ -n "$KEY" ]] && AUTH=(-H "Authorization: Bearer $KEY")
 
 CODE=$(curl -s -m "$TIMEOUT" -D "$WORK/hdr.txt" -o "$WORK/body.txt" -w '%{http_code}' \
 	-H 'Content-Type: application/json' "${AUTH[@]}" \

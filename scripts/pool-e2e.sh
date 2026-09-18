@@ -156,8 +156,6 @@ debug:
   quota_interval_minutes: 0
 dashboard:
   password: "e2e-pass"
-auth:
-  api_key: "e2e-key"
 EOF
 	} >"$cfg"
 }

@@ -29,8 +29,12 @@ bad()  { echo "FAIL $1"; fail=1; }
 
 PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
 AUTH=(-H "Authorization: Bearer $PASSWORD")
-API_KEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ')"
-VAUTH=(-H "Authorization: Bearer $API_KEY")
+# /v1 探针凭据：令牌仓只存哈希取不回明文——走面板 admin API 铸一条
+# 临时令牌（第 5 段前铸、结尾删）；空仓/含匿名行时无凭据也能过准入，
+# 铸不到就空凭据发，探针按 4xx 口径照样计 PASS。
+API_KEY=""
+VTID=""
+VAUTH=()
 
 dbq() { # SQL -> stdout（python3 的 sqlite3 模块，不依赖 sqlite3 CLI）
 	python3 - "$DB" "$1" <<'PY'
@@ -105,6 +109,11 @@ else
 fi
 
 # --- 5. 写路径探针 ---
+resp="$(curl -sf -m 5 -X POST -H 'Content-Type: application/json' "${AUTH[@]}" \
+	-d '{"description":"sqlite-live-verify: temp"}' "$BASE/admin/auth-tokens" 2>/dev/null || true)"
+API_KEY="$(printf '%s' "$resp" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')"
+VTID="$(printf '%s' "$resp" | sed -n 's/.*"id" *: *\([0-9]*\).*/\1/p')"
+[[ -n "$API_KEY" ]] && VAUTH=(-H "Authorization: Bearer $API_KEY")
 PROBE="sqlite-live-probe"
 before="$(dbq 'SELECT COUNT(*) FROM logs')"
 curl -sf "${AUTH[@]}" -X PUT -H 'Content-Type: application/json' \
@@ -124,6 +133,7 @@ newdir="$(dbq "SELECT dir FROM logs ORDER BY id DESC LIMIT 1")"
 ndf="$(dbq "SELECT COUNT(*) FROM debug_files WHERE dir='$newdir'")"
 [[ "$ndf" =~ ^[0-9]+$ && "$ndf" -gt 0 ]] && ok "调试 payload 落库 debug_files[$newdir]=$ndf 行" || echo "NOTE $newdir 无 debug_files（payload 保留策略剔除属正常）"
 curl -sf "${AUTH[@]}" -X DELETE "$BASE/admin/model-registry?model=$PROBE" >/dev/null || true
+[[ -n "$VTID" ]] && curl -sf "${AUTH[@]}" -X DELETE "$BASE/admin/auth-tokens/$VTID" >/dev/null || true
 
 echo "----"
 [[ "$fail" == 0 ]] && echo "全部通过" || echo "有 FAIL，见上"

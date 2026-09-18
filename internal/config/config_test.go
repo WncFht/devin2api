@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,18 +49,17 @@ func TestLoadDisablesDebugLoggingByDefault(t *testing.T) {
 	}
 }
 
-// TestLoadParsesAuthAPIKey 验证可选的 API Key 可从配置中读取。
+// TestLoadParsesAuthAPIKey 钉住 auth.api_key 的占位空壳语义：yaml 键仍
+// 可解析（否则旧配置被 KnownFields 报成未知字段，迁移指引被吞掉），
+// 非空值在 Validate 阶段产出迁移错误。
 func TestLoadParsesAuthAPIKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("server:\n  listen: ':9090'\nauth:\n  api_key: 'my-secret-key'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.Auth.APIKey != "my-secret-key" {
-		t.Fatalf("Auth.APIKey = %q, want my-secret-key", config.Auth.APIKey)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "auth.api_key removed") {
+		t.Fatalf("Load() error = %v, want auth.api_key migration error", err)
 	}
 }
 

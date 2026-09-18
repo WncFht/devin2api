@@ -250,7 +250,6 @@ func main() {
 			slog.Warn("seed trend buckets failed", "error", err)
 		}
 	}
-	application.SetAPIKey(serviceConfig.Auth.APIKey)
 	application.SetVersion(resolved)
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
 	// 上游相关调用靠 tokenFunc 现取，凭据补进后自动恢复。
@@ -341,8 +340,7 @@ func main() {
 	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
 	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
-	// input 价，与 ccpanel cellCost 同口径）。建仓先于 SetConfigOps——
-	// reload 闭包要捕获它给 auth.api_key 补种。
+	// input 价，与 ccpanel cellCost 同口径）。
 	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		slog.Error("load auth tokens failed", "error", err)
@@ -359,15 +357,9 @@ func main() {
 		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
 	})
 	ccPanel.SetTokenStore(tokenStore)
-	// auth.api_key 不是准入旁路而是播种源：非空时确保仓内有对应普通
-	// 令牌行；reload 路径在 reloadRuntimeConfig 里同样补种。
-	// 交接进程跳过播种——种子行由托管实例的 boot/reload 负责。
-	if !handoff {
-		seedConfigAPIKey(tokenStore, serviceConfig.Auth.APIKey)
-	}
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*ccpanel.ConfigReloadReport, error) {
-			return reloadRuntimeConfig(rt, application, ccPanel, debugManager, settingsStore, tokenStore)
+			return reloadRuntimeConfig(rt, application, ccPanel, debugManager, settingsStore)
 		},
 		Current: func() map[string]any {
 			return rt.View()
@@ -388,10 +380,8 @@ func main() {
 	ccPanel.SetSettingsStore(settingsStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()
-	// 探活走进程内根路由：与外部请求共用鉴权/准入/重定向/上游管线；
-	// 主密钥读运行时值（热重载后跟随新 key）。
+	// 探活走进程内根路由：与外部请求共用鉴权/准入/重定向/上游管线。
 	ccPanel.SetProbeHandler(server.Handler)
-	ccPanel.SetMasterKeyFunc(application.APIKey)
 	slog.Info("HTTP server listening", "addr", listenURL(server.Addr), "version", resolved, "reuseport", reusePortEnabled())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -479,33 +469,12 @@ func poolLaneNames(pool *devin.Pool) []string {
 	return names
 }
 
-// seedConfigAPIKey 把 auth.api_key 播种成一条普通令牌行（描述
-// "config: auth.api_key"）。幂等：哈希已在仓内（含被停用的行）原样
-// 跳过；空值不种。播种失败只告警——种子不该阻断启动/reload。
-func seedConfigAPIKey(tokens *authtoken.Store, apiKey string) {
-	key := strings.TrimSpace(apiKey)
-	if key == "" || tokens == nil {
-		return
-	}
-	_, created, err := tokens.Ensure(key, &authtoken.Token{
-		Description: "config: auth.api_key",
-		IsActive:    true,
-	})
-	if err != nil {
-		slog.Warn("seed auth.api_key token failed", "error", err)
-		return
-	}
-	if created {
-		slog.Info("seeded auth.api_key as auth token")
-	}
-}
-
 // reloadRuntimeConfig 重读配置文件并把可安全换值的字段热应用；校验失败
 // 直接返回错误、旧配置继续服役（validate-then-commit）。只报告值发生
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings, tokens *authtoken.Store) (*ccpanel.ConfigReloadReport, error) {
+func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*ccpanel.ConfigReloadReport, error) {
 	rt.Lock()
 	defer rt.Unlock()
 	cfg, err := config.Load(rt.ConfigPath())
@@ -550,13 +519,6 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 			return nil, err
 		}
 	}
-	if pcfg.Auth.APIKey != cfg.Auth.APIKey {
-		application.SetAPIKey(cfg.Auth.APIKey)
-		report.Applied = append(report.Applied, "auth.api_key")
-	}
-	// 每次 reload 都补种（不只 key 变化时）：种子行被删后下一次
-	// reload/重启重新长出；彻底移除要清空配置值再删行。
-	seedConfigAPIKey(tokens, cfg.Auth.APIKey)
 	if pcfg.Dashboard.Password != cfg.Dashboard.Password {
 		panel.SetPassword(cfg.Dashboard.Password)
 		report.Applied = append(report.Applied, "dashboard.password")

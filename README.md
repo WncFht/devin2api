@@ -91,7 +91,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS: scripts/deploy.sh
 ```
 
-On first run `config.yaml` is generated from `config.example.yaml` with a random `auth.api_key`/`dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); to preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
+On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/auth-tokens`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
 
 On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
 
@@ -104,7 +104,7 @@ curl http://localhost:8080/healthz
 
 ## Usage
 
-> **Note**: `/v1/*` endpoints are gated by the token store (the `auth_tokens` table in `devin-2api.db`, state dir): clients send `Authorization: Bearer <token>` or `X-Api-Key: <token>` matching an active token row. `auth.api_key` in `config.yaml` is only a seed source — it is written in as a normal token row on boot and every config reload. An empty store means open access — only bind beyond loopback if the store gates access, or you are handing out your Devin quota to the network. Tokens carry an optional `class` (`fg` default / `bg` for unattended batch traffic) that changes rate-gate admission — see `docs/gate-classes.md`.
+> **Note**: `/v1/*` endpoints are gated by the token store (the `auth_tokens` table in `devin-2api.db`, state dir): clients send `Authorization: Bearer <token>` or `X-Api-Key: <token>` matching an active token row. Tokens are managed only in the panel (`/web/auth-tokens`) — plaintext is shown once at creation and the store keeps hashes; config carries no data-plane credential. An empty store means open access — only bind beyond loopback if the store gates access, or you are handing out your Devin quota to the network. Tokens carry an optional `class` (`fg` default / `bg` for unattended batch traffic) that changes rate-gate admission — see `docs/gate-classes.md`.
 
 Endpoints:
 
@@ -124,7 +124,7 @@ Non-streaming:
 curl http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "input": "Hello"
   }'
 ```
@@ -135,7 +135,7 @@ Streaming (SSE):
 curl -N http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "input": "Hello",
     "stream": true
   }'
@@ -148,7 +148,7 @@ curl http://localhost:8080/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "glm-5-2",
+    "model": "swe-2-max",
     "max_tokens": 256,
     "messages": [{"role": "user", "content": "Hello"}]
   }'
@@ -166,7 +166,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `server.max_concurrency`                         | Max concurrent `/v1/*` requests                                                                                                                                                                                                                                                                                                                                                                 | `1024`                                                                            |
 | `devin.base_url`                                 | Devin Connect service base URL                                                                                                                                                                                                                                                                                                                                                                  | Yes (no default in code; `config.example.yaml` uses `https://server.codeium.com`) |
 | `devin.accounts`                                 | Upstream account pool entries `{name, token, credentials_file, api_key, priority, max_rpm}` — `token`/`credentials_file`/`api_key` at least one (`api_key` = durable `cog_…` platform key, self-mints session tokens); `priority` orders lane picks (0 = default), `max_rpm` overrides the per-account rate cap; empty list = legal empty pool (manage accounts live from `/web/accounts.html`) | No — `/v1` returns `unavailable` until an account exists                          |
-| `devin.model`                                    | Devin chat model UID (e.g. `glm-5-2`)                                                                                                                                                                                                                                                                                                                                                           | Yes (no default in code)                                                          |
+| `devin.model`                                    | Devin chat model UID (e.g. `swe-2-max`)                                                                                                                                                                                                                                                                                                                                                         | Yes (no default in code)                                                          |
 | `devin.aliases`                                  | Client model name → upstream UID map (`swe-2: swe-2-max`); match order exact → case-insensitive → `"*"` catch-all; aliases appear in `/v1/models` with `alias_of`                                                                                                                                                                                                                               | none                                                                              |
 | `devin.client_name`/`client_version`/`client_os` | Client identity sent in upstream metadata                                                                                                                                                                                                                                                                                                                                                       | `chisel` / `3000.2.17` / `mac`                                                    |
 | `devin.proxy`                                    | Upstream proxy URL (`http(s)://`, `socks5(h)://`); empty = direct / env vars                                                                                                                                                                                                                                                                                                                    | none                                                                              |
@@ -191,7 +191,6 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `debug.quota_interval_minutes`                   | Quota snapshot interval into the `quota_samples` table; `<=0` disables                                                                                                                                                                                                                                                                                                                          | `5`                                                                               |
 | `debug.pprof_listen`                             | Separate listen address for the pprof/fgprof profiling endpoints (e.g. `127.0.0.1:6060`); unauthenticated — loopback only                                                                                                                                                                                                                                                                       | empty (disabled)                                                                  |
 | `dashboard.password`                             | `/web` admin password; empty = no login required                                                                                                                                                                                                                                                                                                                                                | none                                                                              |
-| `auth.api_key`                                   | Seed credential written into the token store on boot/reload; `/v1/*` admission is decided by the store (empty store = open). Clients send `Authorization: Bearer <token>` or `X-Api-Key: <token>`                                                                                                                                                                                               | none                                                                              |
 
 ```yaml
 server:
@@ -202,7 +201,7 @@ devin:
     accounts:
         - name: "main"
           token: "devin-session-token$..."
-    model: "glm-5-2"
+    model: "swe-2-max"
 
 debug:
     enabled: false
@@ -210,9 +209,9 @@ debug:
 dashboard:
     password: "" # /web login; empty = open
 
-auth:
-    # Set to a strong key to protect /v1/*; leave empty to keep endpoints open.
-    api_key: ""
+
+# Downstream /v1 tokens live only in the panel (/web/auth-tokens) — config
+# carries no data-plane credential. An empty token store means open access.
 ```
 
 Notes:

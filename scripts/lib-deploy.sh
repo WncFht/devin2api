@@ -30,9 +30,10 @@ deploy_usage() {
   --help        显示本说明
 
 首装与升级同一条命令：服务未安装时自动生成服务定义并拉起；config.yaml
-缺失时从 config.example.yaml 生成——写入随机 auth.api_key 与
-dashboard.password，终端下提示粘贴 Devin session token（写入
-devin.accounts 首条），否则留空池——面板 /web/accounts.html 再加号。
+缺失时从 config.example.yaml 生成——写入随机 dashboard.password，终端
+下提示粘贴 Devin session token（写入 devin.accounts 首条），否则留空
+池——面板 /web/accounts.html 再加号。下游 /v1 令牌不入配置：面板
+/web/auth-tokens 创建，明文一次性出示，仓内只存哈希。
 覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_BIN_DIR / DEVIN2API_CONFIG_DIR /
 DEVIN2API_STATE_DIR / DEVIN2API_PORT（DEVIN2API_RUNTIME 视作 STATE_DIR 的
 兼容别名）。
@@ -309,11 +310,12 @@ gen_secret() {
 }
 
 # ensure_config：config.yaml 缺失时从 config.example.yaml 生成——写入随机
-# auth.api_key 与 dashboard.password（示例默认 ":8080" 全网卡监听，裸 key
-# 等于把配额和面板开放给 LAN）；终端下提示粘贴 Devin session token，
-# 粘贴了就在 devin: 段首注入 devin.accounts 首条（名 main），否则留
-# 空池——空池合法，面板 /web/accounts.html 随时加号。已有 config.yaml
-# 时不动——用户手写优先。
+# dashboard.password（示例默认 ":8080" 全网卡监听，空面板密码等于把面板
+# 开放给 LAN）；终端下提示粘贴 Devin session token，粘贴了就在 devin:
+# 段首注入 devin.accounts 首条（名 main），否则留空池——空池合法，面板
+# /web/accounts.html 随时加号。下游令牌不再落配置：首装令牌仓为空即
+# /v1 开放准入，非回环监听由 preflight 的令牌仓检查告警。已有
+# config.yaml 时不动——用户手写优先。
 ensure_config() {
 	[[ -f config.yaml ]] && return 0
 	[[ -f config.example.yaml ]] ||
@@ -321,7 +323,6 @@ ensure_config() {
 	echo "==> first install: 从 config.example.yaml 生成 config.yaml" >&2
 	cp config.example.yaml config.yaml
 	chmod 600 config.yaml
-	set_yaml_scalar api_key "$(gen_secret)" config.yaml
 	set_yaml_scalar password "$(gen_secret)" config.yaml
 	local token=""
 	# -r/-w 测的是权限不是控制终端——无 tty 环境下 open /dev/tty 才失败。
@@ -413,9 +414,19 @@ preflight_deploy() {
 		fi
 	done < <(config_credentials_files "${cfg_file}")
 
-	# 非回环监听 + 空 api_key = 把配额开放给整个网络（README 明确警告）。
-	if ! listen_is_loopback && [[ -z "$(yaml_scalar api_key)" ]]; then
-		warn "server.listen 非回环且 auth.api_key 为空——等于把配额开放给网络，请先配置 auth.api_key"
+	# 非回环监听 + 令牌仓实际开放（零行或存在匿名通道行）= 配额对网络全开。
+	# 准入只看 auth_tokens 表（行内存 sha256 全 hex；匿名行 = sha256("")，
+	# 现场算不嵌常量），查不动（无 sqlite3 CLI、库未建、表缺席）一律按
+	# 开放告警——宁可多喊一次，不把裸奔判成安全。
+	if ! listen_is_loopback; then
+		local closed="" anon_hash
+		anon_hash="$(printf '' | sha256sum | cut -d' ' -f1)"
+		if command -v sqlite3 >/dev/null && [[ -f "${STATE_DIR}/devin-2api.db" ]]; then
+			closed="$(sqlite3 -readonly "${STATE_DIR}/devin-2api.db" \
+				"SELECT CASE WHEN COUNT(*)>0 AND SUM(token='${anon_hash}')=0 THEN 1 ELSE 0 END FROM auth_tokens" 2>/dev/null || true)"
+		fi
+		[[ "${closed}" == "1" ]] ||
+			warn "server.listen 非回环且令牌仓未闭合（空仓或存在匿名通道行）——/v1 配额对网络开放，先在面板 /web/auth-tokens 建令牌"
 	fi
 }
 
@@ -706,19 +717,39 @@ handoff_restart() {
 }
 
 # smoke_upstream：部署后打一发 /v1/models——healthz 绿只证明进程活着，
-# token 无效/缺失在这一层才暴露。返回非零表示上游鉴权未通过。
+# 上游 token 无效/缺失在这一层才暴露。/v1 准入全看令牌仓：空仓或含匿名
+# 通道行时无凭据即过；仓非空时库里只有哈希、存量明文取不回——经面板
+# admin API（Bearer 取 live config 的 dashboard.password，实例只读 live）
+# 铸一条临时令牌顶上，用完即删。返回非零表示上游鉴权未通过。
 smoke_upstream() {
-	local key code src
-	key="$(yaml_scalar api_key)"
+	local key="" tid="" code src resp
 	code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' \
-		${key:+-H "X-Api-Key: ${key}"} "http://localhost:${PORT}/v1/models" 2>/dev/null || true)"
+		"http://localhost:${PORT}/v1/models" 2>/dev/null || true)"
+	if [[ "${code}" == "401" || "${code}" == "403" ]]; then
+		local pw cfg_file
+		cfg_file="config.yaml"
+		[[ -f "${CONFIG_DIR}/config.yaml" ]] && cfg_file="${CONFIG_DIR}/config.yaml"
+		pw="$(sed -nE "s/^ *password: *['\"]?([^'\"# ]*)['\"]?.*/\1/p" "${cfg_file}" | head -1)"
+		resp="$(curl -s -m 5 -X POST -H "Authorization: Bearer ${pw}" \
+			-H 'Content-Type: application/json' -d '{"description":"deploy: smoke"}' \
+			"http://localhost:${PORT}/admin/auth-tokens" 2>/dev/null || true)"
+		key="$(printf '%s' "${resp}" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')"
+		tid="$(printf '%s' "${resp}" | sed -n 's/.*"id" *: *\([0-9]*\).*/\1/p')"
+		if [[ -n "${key}" ]]; then
+			code="$(curl -s -o /dev/null -m 20 -w '%{http_code}' \
+				-H "X-Api-Key: ${key}" "http://localhost:${PORT}/v1/models" 2>/dev/null || true)"
+		fi
+		[[ -n "${tid}" ]] &&
+			curl -s -o /dev/null -m 5 -X DELETE -H "Authorization: Bearer ${pw}" \
+				"http://localhost:${PORT}/admin/auth-tokens/${tid}" 2>/dev/null || true
+	fi
 	if [[ "${code}" == "200" ]]; then
 		echo "==> upstream auth verified (GET /v1/models 200)"
 		return 0
 	fi
 	case "${code}" in
 	401 | 403)
-		warn "服务已运行但 /v1/models 返回 HTTP ${code}——客户端 api_key 不匹配或上游 token 无效"
+		warn "服务已运行但 /v1/models 返回 HTTP ${code}——下游令牌准入被拒或上游 token 无效"
 		;;
 	*)
 		warn "服务已运行但 /v1/models 返回 HTTP ${code:-<timeout>}——上游链路未通过"

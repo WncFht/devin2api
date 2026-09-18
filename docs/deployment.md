@@ -12,7 +12,7 @@
 
 二进制的路径解析链（服务定义里全部显式传 flag，链只对裸跑生效）：配置文件 `-config` flag → `DEVIN2API_CONFIG` env → `./config.yaml`（存在才选，仓库开发/Windows 解压即跑）→ 上表平台默认；状态目录 `-state-dir` flag → `DEVIN2API_STATE_DIR` env → 上表平台默认。启动日志 `paths resolved` 一行打出实际生效的两个路径。
 
-三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（新实例加载期必死的一类，9-18 断流根因）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
+三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/auth-tokens 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（新实例加载期必死的一类，9-18 断流根因）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
 ~~另有开发机侧的远程驱动 `scripts/deploy-remote.sh`~~（2026-09-18 退役，仅留档）：免密 SSH 到部署目标（`DEVIN2API_HOST`，原示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
@@ -151,7 +151,7 @@ tail -f logs/stderr.log                     # 进程日志
 
 不做服务化：`devin-2api.exe` 前台启动，Ctrl+C 触发与其它平台相同的优雅排空（SIGTERM 路径）；关窗、`taskkill /F`、`Stop-Process` 都是强杀。部署布局按 Microsoft 惯例拆开：exe 在 `%LOCALAPPDATA%\Programs\devin-2api`，`config.yaml` 在 `%APPDATA%\devin-2api`（roaming），`logs\` 在 `%LOCALAPPDATA%\devin-2api`（machine-local）。不用部署脚本直接跑 zip 里的 exe 也可以——`./config.yaml` 存在即被选中（解析链见上），但状态目录仍回落 `%LOCALAPPDATA%\devin-2api`。release zip 内含 exe + `config.example.yaml` + LICENSE。
 
-`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `auth.api_key`/`dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`（覆盖 exe 安装目录；配置/状态目录由 `DEVIN2API_CONFIG_DIR`/`DEVIN2API_STATE_DIR` env 覆盖）。旧版「exe 同目录放 config/logs」布局由 `Move-LegacyLayout` 自动迁移。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
+`scripts/deploy-windows.ps1` 与 bash 版同语义：`-Release latest` 下载 zip 校验 sha256、缺失时生成 config.yaml（随机 `dashboard.password`、`127.0.0.1`+空闲端口、交互粘贴 token；下游 /v1 令牌不入配置，到面板 /web/auth-tokens 创建）、独立控制台窗口启动、healthz + `/v1/models` 冒烟；`-Check`/`-Uninstall`/`-NoStart`/`-Force`（允许强杀运行中实例，等价关窗）/`-RuntimeDir`（覆盖 exe 安装目录；配置/状态目录由 `DEVIN2API_CONFIG_DIR`/`DEVIN2API_STATE_DIR` env 覆盖）。旧版「exe 同目录放 config/logs」布局由 `Move-LegacyLayout` 自动迁移。经 SSH 远程执行时实例会随会话结束被系统回收——脚本面向本机交互会话。
 
 ## 面板与 agent 访问
 
@@ -166,4 +166,4 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
-面板是移植自 ccLoad（MIT）的唯一管理面。它管理的运行时状态都在 `devin-2api.db` 的三张表：`auth_tokens`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源——`auth.api_key` 只是播种源，启动与 reload 时被写成一条普通令牌行；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`model_registry`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`settings`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+面板是移植自 ccLoad（MIT）的唯一管理面。它管理的运行时状态都在 `devin-2api.db` 的三张表：`auth_tokens`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源，只由面板管理、明文一次性出示；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`model_registry`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`settings`（运行设置覆盖：`debug_log_enabled` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。

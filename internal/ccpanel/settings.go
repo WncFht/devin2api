@@ -269,7 +269,7 @@ func jsonString(v any, empty string) string {
 // buildSettingDefs 注册全部可暴露键。凡有真实热应用通道的 config.yaml
 // 字段都在册：devin.* 经 ApplyConfig 克隆回灌，server.max_concurrency
 // 走 CAS 计数器，debug.* 走 debuglog/配额 ticker/pprof 换绑；冷键
-// （server.listen）与凭据键（devin.token/auth.api_key/dashboard.password）
+// （server.listen）与凭据键（devin.token/dashboard.password）
 // 刻意不登记。
 // auto_refresh_interval_seconds 为前端消费的轮询间隔（纯覆盖表键）。
 func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {

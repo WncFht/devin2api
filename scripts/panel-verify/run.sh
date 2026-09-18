@@ -69,15 +69,14 @@ else
 	fi
 
 	# 最小可启动配置：devin.base_url/model 是 adapter 必填；token 填假值
-	# 避免启动时从本机 Devin CLI 凭据目录发现真实 token。password 非空 +
-	# api_key 与密码不同值，api_token 登录才会解出受限角色（同值算 admin）。
+	# 避免启动时从本机 Devin CLI 凭据目录发现真实 token。下游令牌不进
+	# 配置——实例就绪后经 /admin/auth-tokens 现铸，明文与密码不同值，
+	# api_token 登录才会解出受限角色（同值算 admin）。
 	cat >"$WORK/config.yaml" <<EOF
 server:
   listen: 127.0.0.1:$PORT
 dashboard:
   password: ${ADMIN_PW:-testpw}
-auth:
-  api_key: ${API_TOKEN:-testkey}
 debug:
   enabled: true
 devin:
@@ -104,6 +103,12 @@ EOF
 	[[ "$ready" == "1" ]] || { echo "healthz 15 秒内未就绪" >&2; exit 1; }
 	BASE="http://127.0.0.1:$PORT"
 	echo "instance up on $BASE (work=$WORK)"
+
+	# 现铸下游令牌：明文一次性出示，仓内只存哈希——无法在配置里预置。
+	API_TOKEN="$(curl -sf -X POST -H "Authorization: Bearer ${ADMIN_PW:-testpw}" \
+		-H 'Content-Type: application/json' -d '{"description":"panel-verify"}' \
+		"$BASE/admin/auth-tokens" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).data.token')" \
+		|| { echo "面板铸令牌失败" >&2; exit 1; }
 fi
 
 export PV_BASE="$BASE" PV_ADMIN_PW="${ADMIN_PW:-testpw}" PV_API_TOKEN="${API_TOKEN:-testkey}" PV_SHOTS="$DIR/shots"

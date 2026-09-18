@@ -76,10 +76,11 @@ func TestBearerFailureSharesLoginLedger(t *testing.T) {
 	}
 }
 
-// TestWebAuthPasswordBeatsSeededToken 覆盖播种回归：auth.api_key 被种进
-// 令牌仓后，拿它当 Bearer 的存量面板会话会被 Resolve 命中——若直接判
-// api_token，管理员会被降级到受限导航。密码命中（含开放面板）时必须
-// 仍给 admin；只有「非密码」的真实令牌才进 api_token。
+// TestWebAuthPasswordBeatsSeededToken 覆盖存量播种行的回归：旧版
+// auth.api_key 播种进仓的令牌行（明文常与面板密码同值）当 Bearer 的
+// 存量面板会话会被 Resolve 命中——若直接判 api_token，管理员会被降级
+// 到受限导航。密码命中（含开放面板）时必须仍给 admin；只有「非密码」
+// 的真实令牌才进 api_token。
 func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	newStore := func(t *testing.T) *authtoken.Store {
 		t.Helper()
@@ -109,7 +110,7 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 		return recorder.Code, role
 	}
 
-	// 开放面板（password==""）：播种的 api_key 命中 Resolve，但仍应 admin。
+	// 开放面板（password==""）：存量播种行命中 Resolve，但仍应 admin。
 	open, err := New("", "https://example.com", nil, "", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +124,7 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 		t.Fatalf("open panel + seeded key = (%d, %q), want (200, admin)", code, role)
 	}
 
-	// 密码面板 + Bearer 与密码同值（用户拿 api_key 当管理密码用）→ admin。
+	// 密码面板 + Bearer 与密码同值（旧部署里 api_key 常与管理密码同串）→ admin。
 	guarded, err := New("the-api-key", "https://example.com", nil, "", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)

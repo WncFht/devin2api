@@ -36,7 +36,7 @@ type result struct {
 // 分位数、吞吐与错误分布。
 func main() {
 	url := flag.String("url", "http://localhost:3003/v1/chat/completions", "目标端点")
-	key := flag.String("key", "", "auth.api_key（空 = 不携带凭据）")
+	key := flag.String("key", "", "下游令牌明文（空 = 不携带凭据）")
 	concurrency := flag.Int("c", 8, "并发 worker 数")
 	total := flag.Int("n", 100, "总请求数；与 -duration 互斥，-duration 非零时忽略")
 	duration := flag.Duration("duration", 0, "持续压测时长（如 30s）；非零时忽略 -n")

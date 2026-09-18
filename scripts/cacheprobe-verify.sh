@@ -58,8 +58,6 @@ devin:
   force_http1: true
 dashboard:
   password: ""
-auth:
-  api_key: "probe-key"
 EOF
 
 wait_healthz() {

@@ -150,9 +150,9 @@ func (h *Handler) CheckPanelBearer(r *http.Request) (authed, locked bool) {
 }
 
 // isPanelPassword 判定一份凭据是否即面板密码（面板开放时任何凭据都
-// 按 admin 算）。播种进仓的 auth.api_key 常被用户直接当管理凭据登录
-// （甚至是唯一 secret）：令牌命中 Resolve 后仍要用它把管理员从
-// api_token 受限身份捞回 admin。纯哈希比较，不进失败账本。
+// 按 admin 算）。令牌明文与面板密码同值的行（典型是旧版播种进仓的
+// auth.api_key 与 password 共用一串）命中 Resolve 后仍要用它把管理员
+// 从 api_token 受限身份捞回 admin。纯哈希比较，不进失败账本。
 func (h *Handler) isPanelPassword(cred string) bool {
 	password, passwordHash := h.passwordSnapshot()
 	sum := sha256.Sum256([]byte(cred))
@@ -268,7 +268,7 @@ func (h *Handler) dashboardSession(w http.ResponseWriter, r *http.Request) {
 // 有效下游令牌先经 Resolve 分流，再进密码校验——令牌有效但非面板
 // 密码是角色不足（403，见下），不能落进密码比对的失败账本：否则
 // 持钥人每请求 /admin 一次 +1，5 次后 IP 被误判锁定连 /login 都 429。
-// 令牌即密码（播种进仓的 auth.api_key 当管理凭据用）仍按 admin 放行。
+// 令牌即密码（明文与面板密码同值的令牌行当管理凭据用）仍按 admin 放行。
 // 401 触发前端 fetchWithAuth 跳回 /web/login.html；429 复用爆破锁定语义。
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

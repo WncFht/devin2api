@@ -20,7 +20,6 @@ import (
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/app"
-	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -119,16 +118,12 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenStore, err := authtoken.New(dbStore)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// 丢 model 整单拒绝。
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  accounts:\n    - {name: a, token: 't'}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore); err == nil {
+	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings); err == nil {
 		t.Fatal("reloadRuntimeConfig() error = nil, want non-empty validation error")
 	}
 
@@ -136,7 +131,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("server:\n  listen: ':1'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	report, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore)
+	report, err := reloadRuntimeConfig(rt, application, panel, manager, settings)
 	if err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
@@ -150,7 +145,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore); err != nil {
+	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
 	if lanes := devinPool.AccountLaneStates(); len(lanes) != 1 {
@@ -194,8 +189,6 @@ debug:
   pprof_listen: '127.0.0.1:0'
 dashboard:
   password: 'pw'
-auth:
-  api_key: 'k'
 `
 	// 聚合上报名：retention 四个字段在报告里合并为一条 debug.retention。
 	reported := map[string]string{
@@ -218,9 +211,10 @@ auth:
 				continue
 			}
 			path := prefix + tag
-			if path == "devin.token" {
-				// devin.token 是迁移错误占位壳：任何非空值在 Load 期
-				// 即拒绝，不存在「合法变异后可热应用」的形态，不进枚举。
+			if path == "devin.token" || path == "auth.api_key" {
+				// devin.token 与 auth.api_key 是迁移错误占位壳：任何非空
+				// 值在 Load 期即拒绝，不存在「合法变异后可热应用」的形态，
+				// 不进枚举。
 				continue
 			}
 			fieldType := field.Type
@@ -344,11 +338,7 @@ auth:
 			if err != nil {
 				t.Fatal(err)
 			}
-			tokenStore, err := authtoken.New(dbStore)
-			if err != nil {
-				t.Fatal(err)
-			}
-			report, err := reloadRuntimeConfig(rt, application, panel, manager, settings, tokenStore)
+			report, err := reloadRuntimeConfig(rt, application, panel, manager, settings)
 			if err != nil {
 				t.Fatalf("reloadRuntimeConfig() error = %v", err)
 			}

@@ -6,7 +6,7 @@
 
 ## 当前分界
 
-热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。`auth.api_key` 另有一条播种语义：每次 reload（不止值变化时）若令牌仓内没有对应哈希行，它被补种成普通令牌行——删掉种子行后 reload/重启会重新长出，彻底移除要清空配置值再删行。
+热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（闸门参数、debug 开关与保留策略、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。
 冷键只剩 server.listen：Serve 无法换绑端口，同一问题的更难版本（换进程）已由 reuseport 交接部署解决，进程内换监听收益小、排空语义一样绕不过。
 
 | 热应用（applied）                                                                                          | 需重启（requires_restart） |
@@ -17,7 +17,7 @@
 | devin.max_rpm 及 devin.gate_* 全部闸门参数                                                                 |                            |
 | devin.session_affinity_ttl_seconds / devin.quota_low_threshold_percent / devin.no_progress_timeout_seconds |                            |
 | devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                            |                            |
-| auth.api_key / dashboard.password                                                                          |                            |
+| dashboard.password                                                                                         |                            |
 | debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs）          |                            |
 | debug.quota_interval_minutes / debug.pprof_listen                                                          |                            |
 | server.max_concurrency                                                                                     |                            |

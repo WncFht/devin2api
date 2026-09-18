@@ -73,11 +73,6 @@ type App struct {
 	debugManager *debuglog.Manager
 	// ccPanel 是可选的管理面板（ccLoad 契约）处理器；nil 表示不启用面板。
 	ccPanel PanelRegistrar
-	// apiKey 是 auth.api_key 的运行时值：不再是 /v1 准入旁路——启动与
-	// reload 时它作为种子写成普通令牌行（见 main.seedConfigAPIKey）；
-	// 这里保留运行时值供面板探活当凭据用。apiKeyMu 保护它：reload 热换。
-	apiKeyMu sync.RWMutex
-	apiKey   string
 	// tokens 是下游 auth token 仓（移植面板的多 key 体系），/v1 准入的
 	// 唯一判定源：仓空即开放模式；nil 表示未接线（测试装配），按开放处理。
 	tokens *authtoken.Store
@@ -159,22 +154,6 @@ func (application *App) SetAuthTokens(tokens *authtoken.Store, costFn func(model
 // SetModelRegistry 注入模型注册表；应在 Router 之前调用。
 func (application *App) SetModelRegistry(models *modelreg.Store) {
 	application.models = models
-}
-
-// SetAPIKey 记录 auth.api_key 的运行时值（面板探活凭据用）；应在
-// Router/HTTPServer 之前调用。/v1 准入不读它——凭据准入全走令牌仓。
-func (application *App) SetAPIKey(apiKey string) {
-	application.apiKeyMu.Lock()
-	application.apiKey = apiKey
-	application.apiKeyMu.Unlock()
-}
-
-// APIKey 返回 auth.api_key 的运行时值（配置热重载后为新值）；
-// 移植面板的探活用它读取凭据。
-func (application *App) APIKey() string {
-	application.apiKeyMu.RLock()
-	defer application.apiKeyMu.RUnlock()
-	return application.apiKey
 }
 
 // SetCCPanel 注入管理面板（ccLoad 契约）处理器。

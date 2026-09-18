@@ -1,5 +1,5 @@
 // checks/login.js — UI 登录链路：admin 密码登录拿满 8 项 nav；
-// api_token 登录（auth.api_key 播种行）应得 api_token 角色，
+// api_token 登录（run.sh 经 /admin/auth-tokens 现铸的令牌行）应得 api_token 角色，
 // nav 只剩白名单 4 项，访问受限页被重定向回 index。
 //
 // 受限视图断言只在密码面板成立：开放面板（dashboard.password 为空）下

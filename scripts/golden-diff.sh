@@ -166,6 +166,8 @@ cleanup() {
 trap cleanup EXIT
 
 BASE_DB=""
+# 探针令牌明文：boot() 内按哈希注入两侧令牌仓（先定义，boot 调用时取值）。
+GD_PROBE_KEY="gd-probe-key"
 if [[ "$KEEP_DB" == 1 && -f "$STATE/devin-2api.db" ]]; then
 	# sqlite→sqlite 对账：.backup 拿一次一致性快照供两侧共用——活 WAL
 	# 直 cp 是撕裂副本；两侧各拍一次又会被快照间隙的新写入做成假 DIFF
@@ -191,6 +193,29 @@ boot() { # bin statedir port -> pid
 	# config 不随 state 目录走（部署布局里二者分家），用 4 号参数或仓库 config.yaml；
 	# listen 行整行替换为 127.0.0.1:<port>，冒烟端口不外绑。
 	sed -E "s/^[[:space:]]*listen:.*/  listen: \"127.0.0.1:$port\"/" "$CONFIG" >"$st/config.yaml"
+	# 探针令牌注入：keep-db 走 sqlite INSERT，导入路径走 auth_tokens.json
+	# 追加（字段与 legacy 文件同形）；两侧同料注入 → 行全等。无库无文件
+	# = 空仓开放，凭据照样放行。
+	gd_probe_hash="$(printf '%s' "$GD_PROBE_KEY" | sha256sum | cut -d' ' -f1)"
+	if [[ -f "$st/devin-2api.db" ]]; then
+		sqlite3 "$st/devin-2api.db" \
+			"INSERT OR IGNORE INTO auth_tokens (token,description) VALUES ('$gd_probe_hash','golden-diff probe')" 2>/dev/null || true
+	elif [[ -f "$st/auth_tokens.json" ]]; then
+		python3 - "$st/auth_tokens.json" "$gd_probe_hash" <<'PY'
+import json, sys
+path, tok = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    doc = json.load(f)
+ids = [t.get("id", 0) for t in doc.get("tokens", [])]
+doc.setdefault("tokens", []).append({
+    "id": max(ids, default=0) + 1, "token": tok,
+    "description": "golden-diff probe",
+    "created_at": "2020-01-01T00:00:00Z", "is_active": True})
+doc["next_id"] = max(doc.get("next_id", 0), max(ids, default=0) + 2)
+with open(path, "w") as f:
+    json.dump(doc, f, indent=2)
+PY
+	fi
 	# 关掉启动即采的配额采样：两侧各采一条会造成 forecast 窗口末点漂移，
 	# 对账只验证导入的历史点与同一套 Go 预测代码。
 	sed -i -E 's/^([[:space:]]*quota_interval_minutes:).*/\1 0/' "$st/config.yaml"
@@ -225,9 +250,10 @@ done
 PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
 AUTH=()
 [[ -n "$PASSWORD" ]] && AUTH=(-H "Authorization: Bearer $PASSWORD")
-API_KEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
-VAUTH=()
-[[ -n "$API_KEY" ]] && VAUTH=(-H "Authorization: Bearer $API_KEY")
+# /v1 探针凭据：两侧各注入同一哈希的令牌行（注入点见 boot()），走
+# 真实 Resolve 路径且 logs.key_hash/auth-tokens 对账零漂移——逐侧现
+# 铸会得到不同明文哈希，post-traffic 读端点必出假 DIFF。
+VAUTH=(-H "Authorization: Bearer $GD_PROBE_KEY")
 
 fail=0
 

@@ -15,7 +15,8 @@ debug:
   enabled: true
   # 调试记录保留天数（按 dir 名内嵌时间整批清理）；<=0 不按时间清理。默认 14。
   # retention_days: 14
-  # 调试 payload 总量上限（MB），超限按 dir 从最旧开始删；<=0 不限制。默认 1024。
+  # 调试 payload 总量上限（MB），超限按 dir 从最旧开始删；
+  # <=0 不限制。默认 1024。
   # max_total_mb: 1024
   # 大体积阶段记录（03-devin-request/04-devin-response/06-http-response 与
   # attachments/ 名下的行）的保留小时数；超时剥离负载、保留
@@ -54,11 +55,11 @@ devin:
   # 来源；token 是字面量 session token（devin-session-token$*，寿命由
   # 服务端管）；credentials_file 指向 Devin CLI 的 credentials.toml
   # （解析 windsurf_api_key），CLI 续期改写它即自动跟随。同号多来源
-  # 时 token/文件先服役、api_key 兜底铸新。credentials_file 支持 ~/
-  # 展开，相对路径锚定本文件所在目录（不是进程 CWD）。两条目引用
+  # 时 token/文件先服役、api_key 兜底铸新。credentials_file 支持
+  # ~/ 展开，相对路径锚定本文件所在目录（不是进程 CWD）。两条目引用
   # 同一有效 token、同一 credentials_file 或同一 api_key 按配置错误
-  # 拒绝。会话按亲和键钉选到号、失败按词表换号，详见
-  # docs/devin-accounts.md。
+  # 拒绝。会话按亲和键钉选到号、失败按词表换号，
+  # 详见 docs/devin-accounts.md。
   # 可选逐号字段：priority 是池级排序元数据（大的优先被新会话选中，
   # 默认 0）；max_rpm 覆盖该号自己的分钟窗口配额（0 = 继承
   # devin.max_rpm）。面板还可写 notes 备注与 credentials_content
@@ -71,9 +72,9 @@ devin:
   #     token: "<backup 号 session token>"
   #     credentials_file: "/home/user/.local/share/devin/credentials.toml"
   # session_affinity_ttl_seconds: 3600  # 会话→lane 绑定的滑动 TTL（命中续期）
-  # quota_low_threshold_percent: 15     # weekly 配额低于此百分比时该号对新会话降权
-  # model: "swe-2-max"
-  model: "glm-5-2"
+  # quota_low_threshold_percent: 15     # weekly 配额低于此百分比时对新会话降权
+  # model: "glm-5-2"
+  model: "swe-2-max"
   # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://
   # 留空则直连或走系统环境变量 HTTP_PROXY/HTTPS_PROXY。
   # proxy: "socks5://127.0.0.1:1080"
@@ -168,18 +169,15 @@ devin:
   # warm_prefix_subdone_max_idle_seconds: 600
   # warm_prefix_unknown_max_idle_seconds: 1800
   # warm_prefix_blocked_names: [Agent, Task, Workflow, wait_agent]
-  # warm_prefix_userpaced_names: [AskUserQuestion, ExitPlanMode, request_user_input]
+  # warm_prefix_userpaced_names:
+  #   [AskUserQuestion, ExitPlanMode, request_user_input]
 
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /web——server.listen 绑到
   # 非回环地址（默认 :8080 是全部接口）时建议设置，否则面板对网络开放。
   password: ""
 
-auth:
-  # 下游令牌播种源：启动与每次 reload 时若令牌仓内没有对应哈希行，
-  # 它被写成一条普通令牌（描述 "config: auth.api_key"）——/v1 准入全走
-  # 令牌仓，此处不再是旁路。要彻底移除该凭据：清空本值并在面板删掉
-  # 对应令牌行。客户端经 Authorization: Bearer <token> 或 X-Api-Key 传递。
-  # 留空 = 令牌仓为空时 /v1 开放访问——server.listen 绑到非回环地址
-  #（默认 :8080 是全部接口）时务必设置，否则上游配额对网络开放。
-  api_key: ""
+# 下游令牌（/v1 准入凭据）只在面板管理：/web/auth-tokens 创建，明文
+# 一次性出示，仓内只存哈希。令牌仓为空 = /v1 开放访问——server.listen
+# 绑到非回环地址（默认 :8080 是全部接口）时务必先建令牌再暴露端口。
+# 客户端经 Authorization: Bearer <token> 或 X-Api-Key 传递。

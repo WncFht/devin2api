@@ -145,7 +145,7 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seed := &Token{Description: "config: auth.api_key", IsActive: true}
+	seed := &Token{Description: "seeded token", IsActive: true}
 
 	first, created, err := store.Ensure("seed-key", seed)
 	if err != nil || !created {
@@ -165,7 +165,7 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, created, err := reopened.Ensure("seed-key", &Token{Description: "config: auth.api_key", IsActive: true})
+	third, created, err := reopened.Ensure("seed-key", &Token{Description: "seeded token", IsActive: true})
 	if err != nil || created || third.ID != firstID {
 		t.Fatalf("post-restart Ensure = (id %d, %v, %v), want same row", third.ID, created, err)
 	}
@@ -188,7 +188,7 @@ func TestEnsureIdempotentAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fourth, created, err := reseeded.Ensure("seed-key", &Token{Description: "config: auth.api_key", IsActive: true})
+	fourth, created, err := reseeded.Ensure("seed-key", &Token{Description: "seeded token", IsActive: true})
 	if err != nil || !created {
 		t.Fatalf("re-seed Ensure = (%v, %v), want created", err, created)
 	}

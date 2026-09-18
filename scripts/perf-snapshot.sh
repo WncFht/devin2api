@@ -87,8 +87,6 @@ devin:
   force_http1: true
 dashboard:
   password: ""
-auth:
-  api_key: ""
 EOF
 
 "$WORK/upstreamstub" -listen "127.0.0.1:$STUB_PORT" -scenario stream \
