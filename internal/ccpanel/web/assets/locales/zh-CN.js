@@ -1034,7 +1034,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.desc.devin_client_version': '客户端版本号 metadata.extension_version/ide_version（devin.client_version）；空用内置默认',
   'settings.desc.devin_client_os': '客户端系统 metadata.os（devin.client_os）；空用内置默认',
   'settings.desc.devin_max_rpm': '每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速',
-  'settings.desc.gate_max_hold_seconds': '闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 15',
+  'settings.desc.gate_max_hold_seconds': '闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30',
   'settings.desc.gate_drip_interval_seconds': '冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8',
   'settings.desc.gate_default_latch_seconds': '上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60',
   'settings.desc.gate_window_offset_seconds': '上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0',

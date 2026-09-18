@@ -15,11 +15,11 @@
 
 ## 一、错误指纹：两种 429 必须分开
 
-| 文案                                                                | 来源     | 含义                                                                                                                                                            |
-| ------------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Reached overall message rate limit ... reset in N seconds/minutes` | 上游     | 账号级消息限流，本文对象                                                                                                                                        |
-| `rate limited by local gate ... reset in N seconds`                 | 本地闸门 | 睡到下一可发窗口的预测等待 >15s（`gateMaxHold`）才快败——实测 Retry-After 分布：16s 尖峰（1969 条，预测等待取整）、17~60s 长尾（187 条）、120s 闩剩余簇（29 条） |
-| `failed_precondition: Your daily usage quota has been exhausted`    | 上游     | 配额耗尽，与限流是不同错误，不要混入限流分析                                                                                                                    |
+| 文案                                                                | 来源     | 含义                                                                                                                                                                                               |
+| ------------------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Reached overall message rate limit ... reset in N seconds/minutes` | 上游     | 账号级消息限流，本文对象                                                                                                                                                                           |
+| `rate limited by local gate ... reset in N seconds`                 | 本地闸门 | 睡到下一可发窗口的预测等待超 `gate_max_hold_seconds` 才快败（观测期默认 15s，现默认 30s）——实测 Retry-After 分布：16s 尖峰（1969 条，预测等待取整）、17~60s 长尾（187 条）、120s 闩剩余簇（29 条） |
+| `failed_precondition: Your daily usage quota has been exhausted`    | 上游     | 配额耗尽，与限流是不同错误，不要混入限流分析                                                                                                                                                       |
 
 上游 hint 显示格式：剩余 <60s 报精确秒数，≥60s 报 `floor(分钟)`（"reset in N minutes"）。**整分钟文案是显示取整，真实 deadline 比显示值最多晚 ~59s**——本地闩若按 `now + N×60` 设置会系统性提前放探针。
 
@@ -114,7 +114,7 @@
 
 ## 六、对本地设计的回写（v2，已落地）
 
-> **实现状态（2026-09-14）**：第 1/3/4 条已按本节落地（`rategate.go` 滴灌闩 + `noteUpstreamSuccess` 解闩、`common.RateLimitReset` 桶界对齐、presold 令牌睡醒复检）；第 2 条实现时改取「Retry-After=闩剩余」让客户端睡到恢复时刻而非竞争滴灌槽；第 5 条观测落地为 stderr 日志（闩内拒绝 Info、解闩 Info）而非面板计数；第 6 条不变项保持。闩参数可配：`gate_max_hold_seconds`/`gate_drip_interval_seconds`/`gate_default_latch_seconds`（默认 15/8/60）。
+> **实现状态（2026-09-14）**：第 1/3/4 条已按本节落地（`rategate.go` 滴灌闩 + `noteUpstreamSuccess` 解闩、`common.RateLimitReset` 桶界对齐、presold 令牌睡醒复检）；第 2 条实现时改取「Retry-After=闩剩余」让客户端睡到恢复时刻而非竞争滴灌槽；第 5 条观测落地为 stderr 日志（闩内拒绝 Info、解闩 Info）而非面板计数；第 6 条不变项保持。闩参数可配：`gate_max_hold_seconds`/`gate_drip_interval_seconds`/`gate_default_latch_seconds`（默认 30/8/60）。
 >
 > **警示：滴灌闩零实战**。0f36ef2 部署（2026-09-14 07:57）之后未再出现任何上游 429——`drip-latching`/`while-latched`/`released`/`restored` 日志路径全部零触发、`runtime_state` 表的 `gate:*` 键从未出现。本节声明的闩行为全部是**代码态**：第三~五节的所有闩行为证据均来自二元闩时代，滴灌闩的真实发作表现尚无样本。
 >
@@ -170,7 +170,7 @@ GCRA/漏桶族与令牌桶等价（TAT 形式），任意窗口上界同为 `B +
 
 落地要点：
 
-- `wait` 判定换成「当前桶计数 < quota 且在可发区间」，不满足则睡到下一窗口开放，预计等待超 `gate_max_hold_seconds`（默认 15s）本地快败 429 + Retry-After。
+- `wait` 判定换成「当前桶计数 < quota 且在可发区间」，不满足则睡到下一窗口开放，预计等待超 `gate_max_hold_seconds`（默认 30s）本地快败 429 + Retry-After。
 - 死区代价：每分钟 2×guard=4s 不发送（~7% 时钟占比，吞吐不变——配额仍按整桶计）；落在死区的请求最多多睡 ~4s。
 - 滴灌探针同样只在可发区间放行并计入本桶配额——探针也是真实上游发送，桶界附近的探针可能落进相邻真实桶白送计数。
 - 睡醒不做配额预约：窗口开放时睡醒者与新到者竞争，分钟粒度下排序公平性不值得换复杂度。

@@ -401,7 +401,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		{
 			key:  "gate_max_hold_seconds",
 			typ:  "int",
-			desc: "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 15",
+			desc: "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30",
 			def: func() string {
 				return secondsOf(func(c devin.Config) time.Duration { return devin.NormalizeGateConfig(c.Gate).MaxHold })(d0().Devin)
 			},

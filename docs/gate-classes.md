@@ -59,7 +59,7 @@ bg 客户端拿到 `quota` 型 429 直接睡满 `Retry-After`；成功响应的 
 ## 配置
 
 ```yaml
-gate_bg_max_hold_seconds: 120 # bg waiter 最长闸内排队（fg 仍走 gate_max_hold_seconds，默认 15）
+gate_bg_max_hold_seconds: 120 # bg waiter 最长闸内排队（fg 仍走 gate_max_hold_seconds，默认 30）
 gate_bg_reserve_margin: 4 # reserve 公式中的固定安全边际
 ```
 

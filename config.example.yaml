@@ -19,9 +19,14 @@ debug:
   # 容量淘汰时保护的最新失败请求组数（含 error.json 行的 dir）；<=0 不保护。
   # 默认 32。
   # keep_error_dirs: 32
-  # logs 摘要行保留天数（独立于 payload 保留；payload 淘汰后行仍可归因）。
-  # <=0 不清理。默认 90。
-  # log_row_retention_days: 90
+  # 只保留失败请求的调试 payload：干净完成的请求完结即剥 payload
+  #（meta/error 锚点与 logs 摘要行照常保留），失败与可疑成功留全量——
+  # 大流量部署下调试库体积收敛到故障面。面板键 debug_log_errors_only
+  # 可热改。默认 false。
+  # errors_only: false
+  # logs 摘要行保留天数（独立于 payload 保留；payload 淘汰后行仍可归因）
+  # 由面板设置 log_row_retention_days 管理（settings 表覆盖键，不是本文件
+  # 的键——写进这里会被严格解析拒掉），默认 90、<=0 不清理。
   # 配额快照采样间隔（分钟），写入 quota_samples 表供燃烧速率预测；<=0 不采样。
   # 默认 5。
   # quota_interval_minutes: 5
@@ -94,7 +99,7 @@ devin:
   max_rpm: 80
   # 上游限流冷却闩参数（通常无需调整）：
   # gate_max_hold_seconds: 闩外令牌排队允许的最长等待秒数，超出快速
-  #   失败 429 + Retry-After。默认 15。
+  #   失败 429 + Retry-After。默认 30。
   # gate_drip_interval_seconds: 闩内放行探针的间隔秒数——滴灌节奏
   #   决定限流期间打到上游的速率与解闩探测频率。默认 8。
   # gate_default_latch_seconds: 上游未声明 reset 时刻时的兜底闩时长
@@ -109,7 +114,7 @@ devin:
   #   gate_max_hold_seconds）。默认 120。
   # gate_bg_reserve_margin: bg 准入动态预留公式中的固定安全边际（条）。
   #   默认 4。
-  # gate_max_hold_seconds: 15
+  # gate_max_hold_seconds: 30
   # gate_drip_interval_seconds: 8
   # gate_default_latch_seconds: 60
   # gate_window_offset_seconds: 0
