@@ -88,13 +88,10 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 }
 
 // PruneGateWindows 删除窗口起点早于 before（unix 秒）的行，返回删除数。
-// 与 logs 摘要行共用同一时间保留口径（Maintain 按 logRowDays 喂入）。
+// 与 logs 摘要行共用同一时间保留口径（Maintain 按 logRowDays 喂入）；
+// 分片逐批提交，保留期调小的存量差不独占写连接。
 func (s *Store) PruneGateWindows(ctx context.Context, before int64) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM gate_windows WHERE window_start < ?`, before)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.deleteRowsChunked(ctx, "gate_windows", `window_start < ?`, before)
 }
 
 // GateDaySends 是单日闸门放行数的分解：Sends 是当日放行总数

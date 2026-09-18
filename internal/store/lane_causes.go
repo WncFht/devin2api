@@ -84,11 +84,8 @@ func (s *Store) LaneAttemptCauses(ctx context.Context, sinceDay string) ([]LaneA
 }
 
 // PruneLaneAttemptCauses 删除早于 beforeDay 的行，返回删除数。与 logs
-// 摘要行共用同一保留期（Maintain 同一 cutoff 调用）。
+// 摘要行共用同一保留期（Maintain 同一 cutoff 调用）；分片与其他
+// 保留删除同形。
 func (s *Store) PruneLaneAttemptCauses(ctx context.Context, beforeDay string) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM lane_attempt_causes WHERE day < ?`, beforeDay)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.deleteRowsChunked(ctx, "lane_attempt_causes", `day < ?`, beforeDay)
 }

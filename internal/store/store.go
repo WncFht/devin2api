@@ -99,6 +99,36 @@ func sqlLabel(query string) string {
 	return query
 }
 
+// maintDeleteChunkRows 是保留期删除单片的行数上界：logs 行连带 ~10
+// 个索引项维护，存量差触发点（面板调小 log_row_retention_days、批量
+// 回填）下无界 DELETE 会秒级独占唯一写连接；分片后每片一条独立语句
+// 自带隐式事务提交，片间把连接让回池，排队写者按请求序插队。
+const maintDeleteChunkRows = 5000
+
+// deleteRowsChunked 把「pred 命中的行全删」拆成 rowid 定批的逐片
+// 删除。谓词即游标——已删行不再命中，中途失败或进程重启后下一轮
+// 重跑幂等续删，无需持久化进度；内层 SELECT 走 pred 的既有索引支点，
+// 只物化单片 rowid。供 Maintain 的按龄保留清理使用。
+func (s *Store) deleteRowsChunked(ctx context.Context, table, pred string, args ...any) (int64, error) {
+	query := `DELETE FROM ` + table + ` WHERE rowid IN (SELECT rowid FROM ` + table + ` WHERE ` + pred + ` LIMIT ?)`
+	delArgs := append(args, maintDeleteChunkRows)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, query, delArgs...)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < maintDeleteChunkRows {
+			return total, nil
+		}
+	}
+}
+
 // Open 打开（或创建）path 处的库。schema 幂等，重复打开只做
 // CREATE IF NOT EXISTS；是否跑 ImportLegacy 由导入器按源文件
 // 存在性自判，Open 不报告 created。
