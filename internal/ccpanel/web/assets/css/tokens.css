@@ -1231,8 +1231,33 @@
       font-size: 13px;
       color: var(--warning-500);
     }
-    .token-anonymous-hint {
+    /* 表单字段级说明文字（匿名通道、请求类等共用） */
+    .token-field-hint {
       margin: 4px 0 0;
       font-size: 12px;
       color: var(--neutral-700);
+    }
+    /* 请求类徽章：fg/bg 与 X-Gate-Class、闸门词表同词——fg 信息色、
+       bg 警示色，因为 bg 在闸门里是让位方 */
+    .token-class-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      font-family: var(--font-family-mono);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.4;
+      vertical-align: 1px;
+    }
+    .token-class-badge--fg {
+      background: var(--info-50);
+      border-color: var(--info-200);
+      color: var(--info-700);
+    }
+    .token-class-badge--bg {
+      background: var(--warning-50);
+      border-color: var(--warning-200);
+      color: var(--warning-700);
     }

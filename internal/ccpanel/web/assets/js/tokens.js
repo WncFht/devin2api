@@ -313,6 +313,7 @@
       const costCellClass = token.total_cost_usd > 0 ? '' : 'mobile-empty-cell';
       const streamCellClass = token.stream_count ? '' : 'mobile-empty-cell';
       const nonStreamCellClass = token.non_stream_count ? '' : 'mobile-empty-cell';
+      const classBadgeHtml = buildClassBadgeHtml(token.class);
 
       // 使用模板引擎渲染；匿名通道行没有可出示的凭据，显示固定占位符
       const maskedToken = token.anonymous
@@ -332,6 +333,7 @@
         createdLabel: t('tokens.createdSuffix'),
         expiresAt: expiresAt,
         callsHtml: callsHtml,
+        classBadgeHtml: classBadgeHtml,
         rpmHtml: rpmHtml,
         successRateHtml: successRateHtml,
         tokensHtml: tokensHtml,
@@ -398,6 +400,18 @@
 
       html += '</div>';
       return html;
+    }
+
+    /**
+     * 构建请求类徽章：fg/bg 与 X-Gate-Class、闸门词表同词——
+     * 徽章直接显示 wire 值，语义解释放 title；空值/未知值按 fg 归一
+     * （与服务端 NormalizeClass 同向）。
+     */
+    function buildClassBadgeHtml(cls) {
+      const isBg = cls === 'bg';
+      const value = isBg ? 'bg' : 'fg';
+      const title = isBg ? t('tokens.classBgTitle') : t('tokens.classFgTitle');
+      return `<span class="token-class-badge token-class-badge--${value}" title="${title}">${value}</span>`;
     }
 
     /**
@@ -586,6 +600,7 @@
           : token.token;
       const rowClass = token.anonymous ? ' token-card-row--anonymous' : '';
       const displayClass = token.anonymous ? 'anonymous' : status.class;
+      const classBadgeHtml = buildClassBadgeHtml(token.class);
       // 匿名通道行没有可出示的凭据：复制/试聊按钮整行略去
       const copyBtnHtml = token.anonymous ? '' :
         `<button class="btn-copy-token btn btn-secondary token-row-action-btn" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>`;
@@ -597,7 +612,7 @@
           <td class="tokens-col-token" data-mobile-label="${t('tokens.table.token')}">
             <div class="token-row-primary"><span class="token-display token-display-${displayClass}">${escapeHtml(maskedToken)}</span></div>
             <div class="token-row-description">${escapeHtml(token.description)}</div>
-            <div class="token-row-meta">${createdAt}${t('tokens.createdSuffix')} · ${expiresAt}</div>
+            <div class="token-row-meta">${createdAt}${t('tokens.createdSuffix')} · ${expiresAt}${classBadgeHtml}</div>
           </td>
           <td class="tokens-col-calls" data-mobile-label="${t('tokens.table.callCount')}">${callsHtml}</td>
           <td class="tokens-col-success-rate" data-mobile-label="${t('tokens.table.successRate')}">${successRateHtml}</td>
@@ -638,6 +653,7 @@
       document.getElementById('tokenMaxConcurrency').value = 0;
       document.getElementById('tokenMaxRPM').value = 0;
       document.getElementById('tokenAllowedModels').value = '';
+      document.getElementById('tokenClass').value = 'fg';
       document.getElementById('tokenActive').checked = true;
       document.getElementById('tokenAnonymous').checked = false;
       document.getElementById('customExpiryContainer').style.display = 'none';
@@ -702,6 +718,7 @@
           body: JSON.stringify({
             description,
             anonymous,
+            class: document.getElementById('tokenClass').value,
             expires_at: expiresAt,
             is_active: isActive,
             allowed_models: allowedModels,
@@ -766,6 +783,8 @@
         customExpiryInput.value = TokenExpiry.formatDateTimeLocal(token.expires_at);
       }
       initialEditExpiryState = { type: expiryTypeInput.value, value: customExpiryInput.value };
+      // 请求类与服务端 NormalizeClass 同向：空值/未知值回显 fg
+      document.getElementById('editTokenClass').value = token.class === 'bg' ? 'bg' : 'fg';
 
       fillCostLimitField('edit5hCostLimitUSD', 'edit5hCostUsedDisplay', token.cost_5h_limit_usd, token.cost_5h_used_usd);
       fillCostLimitField('editDailyCostLimitUSD', 'editDailyCostUsedDisplay', token.cost_daily_limit_usd, token.cost_daily_used_usd);
@@ -858,6 +877,7 @@
             description,
             is_active: isActive,
             ...expiryUpdate,
+            class: document.getElementById('editTokenClass').value,
             allowed_models: editAllowedModels,  // 2026-01新增：模型限制
             cost_5h_limit_usd: cost5hLimitUSD,
             cost_daily_limit_usd: dailyCostLimitUSD,

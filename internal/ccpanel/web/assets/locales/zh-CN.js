@@ -160,6 +160,13 @@ window.I18N_LOCALES['zh-CN'] = {
   'tokens.maxRPMLabel': 'RPM 上限',
   'tokens.allowedModelsLabel': '模型限制',
   'tokens.allowedModelsPlaceholder': '逗号分隔，留空表示允许所有模型',
+  // 请求类（fg/bg 闸门准入分类，语义见 docs/gate-classes.md）
+  'tokens.classLabel': '请求类',
+  'tokens.classFgOption': 'fg（前台）',
+  'tokens.classBgOption': 'bg（后台批跑）',
+  'tokens.classHint': 'fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额',
+  'tokens.classFgTitle': '前台请求类——速率闸门按原规则准入',
+  'tokens.classBgTitle': '后台请求类——闸门叠加动态预留与爬坡约束',
   'tokens.enableToken': '启用令牌',
   'tokens.createBtn': '创建',
   // 令牌结果对话框

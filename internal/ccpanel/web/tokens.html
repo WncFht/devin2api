@@ -100,7 +100,16 @@
             <input type="checkbox" id="tokenAnonymous" class="control-checkbox">
             <span data-i18n="tokens.anonymousChannelLabel">匿名通道</span>
           </label>
-          <p class="token-limit-hint token-anonymous-hint" data-i18n="tokens.anonymousChannelHint">开启后不生成令牌明文——未携带凭据的 /v1 请求按此行准入，仓内至多一行</p>
+          <p class="token-field-hint" data-i18n="tokens.anonymousChannelHint">开启后不生成令牌明文——未携带凭据的 /v1 请求按此行准入，仓内至多一行</p>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" data-i18n="tokens.classLabel">请求类</label>
+          <select id="tokenClass" class="form-input">
+            <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
+            <option value="bg" data-i18n="tokens.classBgOption">bg（后台批跑）</option>
+          </select>
+          <p class="token-field-hint" data-i18n="tokens.classHint">fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额</p>
         </div>
 
         <div class="form-group form-row-inline">
@@ -261,6 +270,17 @@
               <div class="form-row-inline token-edit-field token-edit-field--custom-expiry">
                 <label class="form-label form-row-inline__label" data-i18n="tokens.customLabel">自定义</label>
                 <input type="datetime-local" id="editCustomExpiry" class="form-input field-grow">
+              </div>
+            </div>
+
+            <div class="form-group form-row-inline token-edit-field token-edit-field--class">
+              <label class="form-label form-row-inline__label" data-i18n="tokens.classLabel">请求类</label>
+              <div class="form-row-inline__content">
+                <select id="editTokenClass" class="form-input field-grow">
+                  <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
+                  <option value="bg" data-i18n="tokens.classBgOption">bg（后台批跑）</option>
+                </select>
+                <p class="token-field-hint" data-i18n="tokens.classHint">fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额</p>
               </div>
             </div>
           </section>
@@ -499,7 +519,7 @@
       <td class="tokens-col-token" data-mobile-label="{{mobileLabelToken}}">
         <div class="token-row-primary"><span class="token-display token-display-{{statusClass}}">{{maskedToken}}</span></div>
         <div class="token-row-description">{{description}}</div>
-        <div class="token-row-meta">{{createdAt}}{{createdLabel}} · {{expiresAt}}</div>
+        <div class="token-row-meta">{{createdAt}}{{createdLabel}} · {{expiresAt}}{{{classBadgeHtml}}}</div>
       </td>
       <td class="tokens-col-calls" data-mobile-label="{{mobileLabelCalls}}">{{{callsHtml}}}</td>
       <td class="tokens-col-success-rate" data-mobile-label="{{mobileLabelSuccessRate}}">{{{successRateHtml}}}</td>

@@ -161,6 +161,13 @@ window.I18N_LOCALES['en'] = {
   'tokens.maxRPMLabel': 'RPM Limit',
   'tokens.allowedModelsLabel': 'Model restrictions',
   'tokens.allowedModelsPlaceholder': 'comma-separated, empty allows all models',
+  // Request class (fg/bg gate admission — see docs/gate-classes.md)
+  'tokens.classLabel': 'Request class',
+  'tokens.classFgOption': 'fg (foreground)',
+  'tokens.classBgOption': 'bg (background batch)',
+  'tokens.classHint': 'fg traffic uses the gate as-is; bg adds dynamic reserve and pacing, consuming the quota fg leaves unused',
+  'tokens.classFgTitle': 'Foreground class — admitted under the original gate rule',
+  'tokens.classBgTitle': 'Background class — gate adds dynamic reserve and pacing',
   'tokens.enableToken': 'Enable token',
   'tokens.createBtn': 'Create',
   // Token result modal
