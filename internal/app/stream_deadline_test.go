@@ -50,7 +50,27 @@ func dialDeadReader(t *testing.T, addr string, request []byte) net.Conn {
 // 写：写失败必须 ≈预算时刻到达、错误是包进 context.DeadlineExceeded 的
 // i/o timeout，且 conn 被武装 linger 后的 RST 立即拆掉（客户端读到
 // ECONNRESET，而非 FIN 排在发送队列后的「连接假活」）。
+// 256KB 单次写超过两级 bufio（response 2KB + conn.bufw 4KB），阻塞的
+// socket syscall 落在 Write 内——chunkWriter.Write 的同步 rwc.Close
+// 在武装窗口内发 RST。
 func TestStreamWriteDeadlineCutsBlockedWrite(t *testing.T) {
+	assertDeadReaderRST(t, bytes.Repeat([]byte("x"), 256<<10))
+}
+
+// TestStreamWriteDeadlineFlushPathCutsBlockedWrite 覆盖 flush 路径：
+// 1KB 单次写全程留在两级 bufio 里，真正的 socket syscall 只发生在
+// Flush 的 conn.bufw.Flush 内——那里失败 net/http 只记 werr+cancelCtx
+// 不同步关 fd，写路径必须自己在 linger(0) 武装位上 close 才发得出
+// RST。真实 SSE delta 通常 <2KB，这条才是主形态。
+func TestStreamWriteDeadlineFlushPathCutsBlockedWrite(t *testing.T) {
+	assertDeadReaderRST(t, bytes.Repeat([]byte("x"), 1024))
+}
+
+// assertDeadReaderRST 驱动死读客户端断言共用收束：阻塞写 ≈预算时刻报
+// DeadlineExceeded 包裹的 i/o timeout，且 conn 被 RST 强拆（客户端
+// ECONNRESET，而非 FIN 排队后的「连接假活」）。
+func assertDeadReaderRST(t *testing.T, chunk []byte) {
+	t.Helper()
 	old := sseWriteDeadline
 	sseWriteDeadline = 200 * time.Millisecond
 	t.Cleanup(func() { sseWriteDeadline = old })
@@ -62,8 +82,7 @@ func TestStreamWriteDeadlineCutsBlockedWrite(t *testing.T) {
 		// 让 ResponseController 穿透包装层落到 conn 级 SetWriteDeadline。
 		_, gate := adapter.WithGateContext(r.Context(), "fg")
 		wrapped := &gateHeaderWriter{ResponseWriter: w, gate: gate}
-		out := &streamWriter{writer: wrapped, flusher: wrapped, conn: requestConn(r.Context())}
-		chunk := bytes.Repeat([]byte("x"), 256<<10)
+		out := &streamWriter{writer: wrapped, conn: requestConn(r.Context())}
 		var err error
 		for err == nil {
 			err = out.write(chunk)
@@ -94,11 +113,10 @@ func TestStreamWriteDeadlineCutsBlockedWrite(t *testing.T) {
 	if elapsed < sseWriteDeadline || elapsed > 10*sseWriteDeadline {
 		t.Fatalf("blocked write elapsed = %v, want ≈%v", elapsed, sseWriteDeadline)
 	}
-	// 写超时路径靠武装 linger(0) 让 net/http 在 handler 返回后的 conn
-	// close 发 RST 强拆：客户端读到 ECONNRESET。若 linger 未生效，
-	// graceful close 会把 FIN 排在未发队列后——本读会先把积压数据
-	// 读干再拿到干净 EOF（loopback 上 drain 很快，不会吃 deadline），
-	// 两种形态只有 ECONNRESET 能区分。
+	// 写超时路径靠武装 linger(0) 让 close 发 RST 强拆：客户端读到
+	// ECONNRESET。若 linger 未生效或未同步 close，graceful close 把
+	// FIN 排在未发队列后——死读客户端的读只会先撞上自己的读
+	// deadline，拿到的 i/o timeout 同样过不了 ECONNRESET 断言。
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.Copy(io.Discard, conn); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)

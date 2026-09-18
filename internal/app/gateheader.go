@@ -58,10 +58,15 @@ func (w *gateHeaderWriter) Write(b []byte) (int, error) {
 // Flush 透出 http.Flusher：streamCompletion 与非流式心跳的类型断言
 // 经包装层后仍成立。
 func (w *gateHeaderWriter) Flush() {
+	_ = w.FlushError()
+}
+
+// FlushError 透出错误返回版 Flush：ResponseController.Flush 在包装层命中
+// Flusher 便不再走 Unwrap 链，缺它则内层 *http.response.FlushError 的
+// 传输错误（conn.werr）到不了写路径调用方，<4KB 载荷的 socket 失败被吞。
+func (w *gateHeaderWriter) FlushError() error {
 	w.WriteHeader(http.StatusOK)
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 // Unwrap 透出内层 writer：http.ResponseController 沿包装链找 conn 级能力

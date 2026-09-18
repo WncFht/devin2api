@@ -84,15 +84,22 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 // Flush 保住透传路径与压缩路径两侧的流式语义：未来 SSE 端点进面板
 // 子树时不因 middleware 丢失 http.Flusher 能力。
 func (w *gzipResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+// FlushError 透出错误返回版 Flush：与 gateHeaderWriter 同理，
+// ResponseController 在包装层命中 Flusher 便不再走 Unwrap 链，
+// 缺它则内层传输错误到不了调用方。
+func (w *gzipResponseWriter) FlushError() error {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
 	if !w.skip {
-		_ = w.gz.Flush()
+		if err := w.gz.Flush(); err != nil {
+			return err
+		}
 	}
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 // Unwrap 透出内层 writer：与 gateHeaderWriter 同理，ResponseController

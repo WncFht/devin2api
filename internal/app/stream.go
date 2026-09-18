@@ -43,12 +43,11 @@ var sseKeepalive = []byte(": keepalive\n\n")
 // 字节真正写出——断连按它分 499/200：什么都没送达时记 499 才是线上实况。
 type streamWriter struct {
 	writer   http.ResponseWriter
-	flusher  http.Flusher
 	recorder *debuglog.Recorder
 	// conn 是写出所经的网络连接：写前武装 SO_LINGER(0)，让传输级写失败时
-	// net/http 在 chunkWriter.Write 里的同步 close 改发 RST；nil（无
-	// ConnContext 注入的 server、非 TCP conn）时跳过武装，退回 graceful
-	// close。
+	// net/http 在 chunkWriter.Write 里的同步 close 与本层主动 close 都改发
+	// RST；nil（无 ConnContext 注入的 server、非 TCP conn）时跳过武装，
+	// 退回 graceful close。
 	conn      lingerConn
 	committed bool
 	delivered bool
@@ -77,6 +76,7 @@ func connContext(ctx context.Context, conn net.Conn) context.Context {
 // 测试假连接不满足时跳过 RST 武装，退回 graceful close 语义。
 type lingerConn interface {
 	SetLinger(int) error
+	Close() error
 }
 
 // requestConn 从请求 ctx 取回连接；取不到（非 TCP 实现）返回 nil。
@@ -95,7 +95,8 @@ func (out *streamWriter) write(p []byte) error {
 	// SetWriteDeadline，见 websocket.go）；真实 conn 错误会随后由 Write
 	// 原样报出，不在这里另开错误面。若中途 writer 被换成自定义实现，
 	// 该调用静默退化为无 deadline，不影响正确性。
-	_ = http.NewResponseController(out.writer).SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	rc := http.NewResponseController(out.writer)
+	_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
 	// 写前武装 SO_LINGER(0)：写失败时 net/http 在 chunkWriter.Write 内同步
 	// 做 fd 级 graceful close，FIN 会排在数 MB 未发队列后——socket 成为
 	// FIN_WAIT_1 孤儿（内核重传到放弃约 15min，期间发送队列占着内核内存，
@@ -108,7 +109,25 @@ func (out *streamWriter) write(p []byte) error {
 		_ = out.conn.SetLinger(0)
 	}
 	_, err := out.writer.Write(p)
+	if err == nil {
+		out.delivered = true
+		out.bytes += len(p)
+		out.recorder.AddClientBytes(int64(len(p)))
+		// Flush 必须取错误返回版：单次写载荷 <conn.bufw（4KB）时真正的
+		// socket syscall 只发生在 Flush 内，而 http.Flusher.Flush 无返回值，
+		// bufio 层失败会被静默吞掉。RC 沿 Unwrap/FlushError 链取回
+		// *http.response.FlushError 的真实传输错误。
+		err = rc.Flush()
+	}
 	if out.conn != nil {
+		if err != nil {
+			// Flush 路径失败时 net/http 只记 conn.werr + cancelCtx，不同步
+			// 关 fd——handler 返回后的 graceful close 仍把 FIN 排在未发
+			// 队列后，孤儿形态照旧。linger(0) 尚在武装位，这里主动 close
+			// 让 Flush 路径同样发 RST；Write 路径 fd 已被 net/http 同步关过，
+			// 二次 close 无害落空。
+			_ = out.conn.Close()
+		}
 		_ = out.conn.SetLinger(-1)
 	}
 	if err != nil {
@@ -121,10 +140,6 @@ func (out *streamWriter) write(p []byte) error {
 		}
 		return err
 	}
-	out.delivered = true
-	out.bytes += len(p)
-	out.recorder.AddClientBytes(int64(len(p)))
-	out.flusher.Flush()
 	return nil
 }
 
@@ -279,15 +294,14 @@ func (application *App) streamCompletion(
 	completion *debuglog.Completion,
 	responseBytes *int,
 ) {
-	flusher, ok := writer.(http.Flusher)
-	if !ok {
+	if _, ok := writer.(http.Flusher); !ok {
 		completion.StatusCode = writeLoggedError(writer, recorder, protocol, debuglog.ErrStageHTTPStream, http.StatusInternalServerError, errors.New("streaming response writer does not support flushing"))
 		return
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder, heartbeat: sseKeepalive, conn: requestConn(ctx)}
+	out := &streamWriter{writer: writer, recorder: recorder, heartbeat: sseKeepalive, conn: requestConn(ctx)}
 
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

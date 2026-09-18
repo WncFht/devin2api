@@ -952,8 +952,7 @@ func (application *App) createCompletion(
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	out := &streamWriter{writer: writer, recorder: recorder, conn: requestConn(ctx)}
-	if flusher, ok := writer.(http.Flusher); ok {
-		out.flusher = flusher
+	if _, ok := writer.(http.Flusher); ok {
 		// 非流式心跳载荷是协议行为（OpenAI 系 "\n"、Anthropic 静默），
 		// 由协议实现给出——api 标签只做日志归因，不当行为开关。
 		out.heartbeat = protocol.NonStreamHeartbeat()
