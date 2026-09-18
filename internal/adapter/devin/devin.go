@@ -1100,11 +1100,13 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return adapter.runWebSearch(ctx, query, allowedDomains, blockedDomains, limit, stem, warmKey)
 		}
 	}
-	// 客户端哨兵：streamCtx 从 streamBase 派生不随客户端取消，而消费方
-	//（app 泵在投递点两路就绪随机选）断开后未必再进 Recv——没有哨兵
-	// 那条路径上既无人脱钩也无人杀泵，孤儿泵会阻塞在帧投递上永久泄漏。
-	// 哨兵在断开时刻持 mu 就地把流送进缓存或埋掉；与 Recv 内的同名
-	// 判定同锁串行，先到者赢。
+	// 客户端哨兵：streamCtx 从 streamBase 派生不随客户端取消。断连时刻
+	// 的脱钩判定有两个执行者——app 泵退场前的交班 Recv（投递点
+	// ctx.Done 出口先驱动末次 Recv 再退）与本哨兵，同经 mu 串行、
+	// 先到者赢、后到者见 detached 空转。哨兵兜住「泵不再进 Recv」的
+	// 残留形态（如未来不排干 items 就退场的消费方）；泵侧交班才是
+	// 定序保障——泵退出即蕴含判定已定，消费方排干到 close 才放
+	// unwind 进 Complete。
 	go func() {
 		<-ctx.Done()
 		response.mu.Lock()

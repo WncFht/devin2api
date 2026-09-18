@@ -962,8 +962,14 @@ func (application *App) createCompletion(
 		out.heartbeat = protocol.NonStreamHeartbeat()
 	}
 	streamCtx, stopStream := context.WithCancel(ctx)
-	defer stopStream()
 	items := startStreamPump(streamCtx, application.adapter, messages, recorder)
+	// 同 streamCompletion 的交班收口：停泵后把 items 排干到 close
+	// 再放 unwind，Complete 落在泵内脱钩判定之后。
+	defer func() {
+		stopStream()
+		for range items {
+		}
+	}()
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 	message, err := collectPumpedMessage(streamCtx, out, items, ticker)

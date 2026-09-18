@@ -304,6 +304,15 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 				// 两路就绪时随机选：取消瞬间产出的尾帧会被丢掉。
 				// 不在这里补投递——取消归因统一由消费端按 ctx 状态
 				// 收口（writeProtocolStream/collectPumpedMessage）。
+				// 退场前交班：拿已取消的 ctx 再驱动 Recv 直到出错——
+				// ctx 分支在 stream.mu 下完成脱钩/杀泵判定（滞留 queue
+				// 的事件逐弹 tee 进完成缓存，排空后必撞上判定分支），
+				// 泵退出即蕴含「判定已定」，客户端哨兵退为活性兜底。
+				for {
+					if _, err := stream.Recv(ctx); err != nil {
+						break
+					}
+				}
 				return
 			}
 			if err != nil {
@@ -337,8 +346,16 @@ func (application *App) streamCompletion(
 	out := &streamWriter{writer: writer, recorder: recorder, heartbeat: sseKeepalive, conn: requestConn(ctx)}
 
 	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	items := startStreamPump(streamCtx, application.adapter, messages, recorder)
+	// 排干后才放 unwind：cancel 逼泵走 ctx.Done 交班（泵退出即蕴含
+	// 脱钩判定已在 mu 下完成），for range 排到 close 才回本函数——
+	// createCompletion 的 Complete→metaJSON 由此 happens-after 脱钩
+	// 判定，detached_events 镜像不再出现「判定迟到于定稿」的丢失。
+	defer func() {
+		cancel()
+		for range items {
+		}
+	}()
 	ticker := time.NewTicker(keepaliveInterval)
 	defer ticker.Stop()
 
