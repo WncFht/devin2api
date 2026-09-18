@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -219,6 +220,9 @@ func SessionAffinityKey(request llm.RequestMessages) string {
 // Codex prompt_cache_key），空则退回「system 头 4KB + 首条消息文本头
 // 1KB + 客户端模型名 + 工具声明哈希」内容哈希——同会话多轮回放前缀
 // 不变故稳定，不同会话形态自然分散。残余盲区见 deriveSessionIDs。
+// 尾部折叠 llm.IsSeedMarker 选出的客户端声明 marker（cache_control
+// 断点、beta flag）：它们改变上游特性面，同会话键下声明漂移应换
+// lane；规范序（排序去重）保证种子与声明顺序、重复次数无关。
 func sessionSeed(request llm.RequestMessages) []byte {
 	// bytes.Buffer 的 Bytes() 零拷贝交给 Sum256；strings.Builder 则需
 	// 先 String() 再 []byte() 多一份全量拷贝。
@@ -251,7 +255,24 @@ func sessionSeed(request llm.RequestMessages) []byte {
 		seed.WriteByte(0)
 		seed.WriteString(hashTools(request.Tools))
 	}
+	for _, marker := range seedMarkers(request.Dropped) {
+		seed.WriteByte(0)
+		seed.WriteString(marker)
+	}
 	return seed.Bytes()
+}
+
+// seedMarkers 从 Dropped 挑出进会话种子的客户端声明 marker，返回排序
+// 去重后的规范序——同一 marker 集合不因声明顺序或重复产生不同种子。
+func seedMarkers(dropped []string) []string {
+	var markers []string
+	for _, marker := range dropped {
+		if llm.IsSeedMarker(marker) {
+			markers = append(markers, marker)
+		}
+	}
+	slices.Sort(markers)
+	return slices.Compact(markers)
 }
 
 // firstMessageText 提取消息的首个文本块，用于会话种子。

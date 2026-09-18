@@ -1138,6 +1138,42 @@ func TestDeriveSessionIDSDifferAcrossConversations(t *testing.T) {
 	}
 }
 
+// TestSessionAffinityKeyFoldsSeedMarkers 验证 seed-relevant marker 进
+// 会话亲和种子：同 SessionKey 下声明漂移换 lane；marker 集合与声明
+// 顺序、重复次数无关；非 seed marker（逐请求修复痕迹）不进种子。
+func TestSessionAffinityKeyFoldsSeedMarkers(t *testing.T) {
+	makeRequest := func(dropped ...string) llm.RequestMessages {
+		return llm.RequestMessages{
+			SystemPrompt: "system",
+			SessionKey:   "session-1",
+			Dropped:      dropped,
+			Messages:     []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "task"}}}},
+		}
+	}
+	base := SessionAffinityKey(makeRequest())
+	if base == SessionAffinityKey(makeRequest(llm.MarkerCacheControl+"ephemeral")) {
+		t.Fatal("cache_control declaration drift must change affinity")
+	}
+	if base == SessionAffinityKey(makeRequest(llm.MarkerAnthropicBeta+"flag-1")) {
+		t.Fatal("beta flag drift must change affinity")
+	}
+	if SessionAffinityKey(makeRequest(llm.MarkerAnthropicBeta+"a", llm.MarkerCacheControl+"ephemeral", llm.MarkerAnthropicBeta+"b")) !=
+		SessionAffinityKey(makeRequest(llm.MarkerAnthropicBeta+"b", llm.MarkerAnthropicBeta+"a", llm.MarkerCacheControl+"ephemeral")) {
+		t.Fatal("marker ordering must not change the seed")
+	}
+	if base != SessionAffinityKey(makeRequest("unmatched_tool_call_id:x", "empty_message:user")) {
+		t.Fatal("non-seed markers must not change affinity")
+	}
+	keyless := func(dropped ...string) llm.RequestMessages {
+		request := makeRequest(dropped...)
+		request.SessionKey = ""
+		return request
+	}
+	if SessionAffinityKey(keyless()) == SessionAffinityKey(keyless(llm.MarkerCacheControl+"ephemeral")) {
+		t.Fatal("marker drift must change affinity on the content-fallback seed too")
+	}
+}
+
 // TestIsTransientConnectError 验证传输断裂（含 connect.Error 包装形态）
 // 可重试、上游语义拒绝不重试：上游 unavailable 实测是确定性语义错误
 // （router 直连、未开放端点），文案 "try again later" 是固定模板，

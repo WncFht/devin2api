@@ -44,12 +44,14 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 	content := make([]llm.Content, 0, len(parts))
 	for index, part := range parts {
 		var header struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("content[%d]: %s", index, err), Cause: err}
 		}
+		MarkCacheControl(header.CacheControl, dropped)
 		switch header.Type {
 		case "input_text", "output_text", "text":
 			content = append(content, llm.TextContent{Text: header.Text})

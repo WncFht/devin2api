@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // MessageRole 标识一条中间消息在对话中的角色。
@@ -79,6 +80,23 @@ type RequestMessages struct {
 	//（"kind:detail"），供调试日志透出——「解码即过滤」的静默面
 	// 需要可观测。
 	Dropped []string
+}
+
+// 会话亲和种子消费的 marker 前缀（Dropped 子集）：客户端声明的能力/
+// 行为面——cache_control 断点类型与 anthropic-beta flag 改变上游特性，
+// 同会话键下声明漂移应换 lane。发射端（api 解码器、app 头后处理）与
+// 消费端（devin 适配器 sessionSeed）共用这组常量防止字面量漂移；
+// 其余 Dropped marker 是逐请求修复/降级痕迹（field:* 另受 collectDropped
+// 调试门控），进种子会让亲和依赖调试开关或逐轮抖动。
+const (
+	MarkerCacheControl  = "cache_control:"
+	MarkerAnthropicBeta = "anthropic_beta:"
+)
+
+// IsSeedMarker 判定 Dropped marker 是否进会话亲和种子（sessionSeed）。
+func IsSeedMarker(marker string) bool {
+	return strings.HasPrefix(marker, MarkerCacheControl) ||
+		strings.HasPrefix(marker, MarkerAnthropicBeta)
 }
 
 // ServerSearchRequest 是一次服务端托管搜索的完整参数。Query 已从客户端

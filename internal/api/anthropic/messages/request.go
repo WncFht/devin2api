@@ -59,6 +59,9 @@ type Tool struct {
 	// 转发，参数喂给 Flow A 侧请求短路的搜索 RPC。
 	AllowedDomains []string `json:"allowed_domains,omitempty"`
 	BlockedDomains []string `json:"blocked_domains,omitempty"`
+	// CacheControl 只作 marker 记账（断点存在性是客户端能力信号），
+	// 不透传上游。
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
 
 // anthropicRequestFields 是 DecodeRequest 已消费的顶层字段；其余字段
@@ -133,6 +136,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	}
 	droppedTools := make(map[string]bool)
 	for _, tool := range request.Tools {
+		common.MarkCacheControl(tool.CacheControl, &context.Dropped)
 		if !clientExecutedToolType(tool.Type) {
 			// server tool（web_search_*/web_fetch_*/code_execution_* 等）
 			// 由供应商托管执行，上游 Devin 无对应物，转发只会制造废工具。
@@ -288,12 +292,14 @@ func appendSystem(context *llm.RequestMessages, raw json.RawMessage) error {
 	}
 	for _, part := range parts {
 		var block struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		if err := json.Unmarshal(part, &block); err != nil {
 			return err
 		}
+		common.MarkCacheControl(block.CacheControl, &context.Dropped)
 		if block.Type != "text" {
 			context.Dropped = append(context.Dropped, "system_block:"+block.Type)
 			continue
@@ -391,15 +397,17 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 
 	for index, part := range parts {
 		var header struct {
-			Type      string          `json:"type"`
-			Text      string          `json:"text"`
-			ToolUseID string          `json:"tool_use_id"`
-			Content   json.RawMessage `json:"content"`
-			IsError   bool            `json:"is_error"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			ToolUseID    string          `json:"tool_use_id"`
+			Content      json.RawMessage `json:"content"`
+			IsError      bool            `json:"is_error"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
 		}
+		common.MarkCacheControl(header.CacheControl, &context.Dropped)
 		switch header.Type {
 		case "text":
 			currentUserContent = append(currentUserContent, llm.TextContent{Text: header.Text})
@@ -467,20 +475,22 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) (
 	}
 	for index, part := range parts {
 		var header struct {
-			Type      string          `json:"type"`
-			Text      string          `json:"text"`
-			Thinking  string          `json:"thinking"`
-			Signature string          `json:"signature"`
-			Data      string          `json:"data"`
-			ID        string          `json:"id"`
-			Name      string          `json:"name"`
-			Input     json.RawMessage `json:"input"`
-			ToolUseID string          `json:"tool_use_id"`
-			Content   json.RawMessage `json:"content"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			Thinking     string          `json:"thinking"`
+			Signature    string          `json:"signature"`
+			Data         string          `json:"data"`
+			ID           string          `json:"id"`
+			Name         string          `json:"name"`
+			Input        json.RawMessage `json:"input"`
+			ToolUseID    string          `json:"tool_use_id"`
+			Content      json.RawMessage `json:"content"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
 		}
+		common.MarkCacheControl(header.CacheControl, &context.Dropped)
 		switch header.Type {
 		case "text":
 			content = append(content, llm.TextContent{Text: header.Text})
@@ -611,9 +621,10 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 	content := make([]llm.Content, 0, len(parts))
 	for index, part := range parts {
 		var header struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			Resource *struct {
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			CacheControl json.RawMessage `json:"cache_control"`
+			Resource     *struct {
 				URI      string `json:"uri"`
 				MIMEType string `json:"mimeType"`
 				Text     string `json:"text"`
@@ -623,6 +634,7 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 		if err := json.Unmarshal(part, &header); err != nil {
 			return nil, fmt.Errorf("content[%d]: %w", index, err)
 		}
+		common.MarkCacheControl(header.CacheControl, &context.Dropped)
 		switch header.Type {
 		case "text":
 			content = append(content, llm.TextContent{Text: header.Text})

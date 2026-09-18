@@ -193,6 +193,34 @@ func TestDecodeRequestDroppedFields(t *testing.T) {
 	}
 }
 
+// TestDecodeRequestCacheControlMarker 验证 cache_control 断点声明按类型
+// 去重记入 Dropped——system 块、消息 part、工具声明多处同类型只留一条
+// 集合成员 marker。
+func TestDecodeRequestCacheControlMarker(t *testing.T) {
+	data := []byte(`{
+  "model": "claude-test",
+  "system": [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}],
+  "tools": [{"name": "t", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}],
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}},
+    {"type": "text", "text": "tail"}
+  ]}]
+}`)
+	request, err := DecodeRequest(data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, marker := range request.Context.Dropped {
+		if marker == "cache_control:ephemeral" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("cache_control:ephemeral count = %d, want 1 (dropped = %v)", count, request.Context.Dropped)
+	}
+}
+
 // TestDecodeRequestTrailingData 验证顶层 JSON 后的尾随内容报错而非静默忽略。
 func TestDecodeRequestTrailingData(t *testing.T) {
 	data := []byte(`{"model":"claude-test","messages":[{"role":"user","content":"hi"}]} extra`)

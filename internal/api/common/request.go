@@ -5,6 +5,7 @@ package common
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"github.com/WncFht/devin2api/internal/llm"
@@ -22,6 +23,32 @@ func PositiveIntOrDrop(value *int, dropped *[]string, marker string) *int {
 	}
 	*dropped = append(*dropped, marker)
 	return nil
+}
+
+// DropOnce 把 marker 记入 dropped（每请求每值至多一条）：cache_control/
+// anthropic-beta 一类恒发字段逐块逐 flag 记会刷屏 dropped_items，按值
+// 去重后「客户端是否声明了该能力」仍是集合信号。
+func DropOnce(dropped *[]string, marker string) {
+	if !slices.Contains(*dropped, marker) {
+		*dropped = append(*dropped, marker)
+	}
+}
+
+// MarkCacheControl 把块头的 cache_control 断点声明记为 marker：type 取
+// 声明值，非对象/缺 type 归 "unknown"——断点存在本身即客户端能力信号，
+// 类型缺失不掩盖声明事实。
+func MarkCacheControl(raw json.RawMessage, dropped *[]string) {
+	if JSONBlank(raw) {
+		return
+	}
+	var parsed struct {
+		Type string `json:"type"`
+	}
+	cacheType := "unknown"
+	if json.Unmarshal(raw, &parsed) == nil && parsed.Type != "" {
+		cacheType = parsed.Type
+	}
+	DropOnce(dropped, llm.MarkerCacheControl+cacheType)
 }
 
 // SessionKey 选会话缓存键：prompt_cache_key 优先，空则退回 user——
