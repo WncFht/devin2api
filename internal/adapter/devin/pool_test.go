@@ -1355,7 +1355,8 @@ func TestPoolBoundLaneYieldsOnDeepQueue(t *testing.T) {
 	affinity := "queue-yield-session"
 	pool.bind(affinity, laneA, "")
 
-	// 给 a 造 fg 深队：quota 80、waitersFg 100 → fg expectedWait ~75s。
+	// 给 a 造 fg 深队：quota 80、waitersFg 100 → 20 条超额过窗折算，
+	// fg expectedWait = toNext+15s（可发/死区两分支同式），仍 ≫τ。
 	gate := laneA.adapter.gate
 	gate.mu.Lock()
 	gate.quota = 80
@@ -1468,14 +1469,15 @@ func TestPoolBoundLaneYieldSiblingGuard(t *testing.T) {
 		t.Fatalf("dual-sick: bound must keep lead over an equally-full sibling, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
 	}
 
-	// 浅富余不接：a 解闩重闩 ~15s；b 桶清空转健康但前队 15/80*60=
-	// 11.25s——差距不足一个 τ 且 b 落不进让位快败阈值，搬过去只省
-	// ~4s 还要赔一次重绑。
+	// 浅富余不接：a 解闩重闩 ~15s；b 桶清空转健康但前队 86 条——超出
+	// 本窗余量 6 条等翻窗折算，ew=7+6/80*60=11.5s：差距不足一个 τ
+	// 且 b 落不进让位快败阈值（>8s），搬过去只省 ~3.5s 还要赔一次
+	// 重绑。
 	gateA.noteUpstreamSuccess()
 	gateA.noteUpstreamError(rateLimitErr("reset in 15 seconds"))
 	gateB.mu.Lock()
 	gateB.bucketUsed = 0
-	gateB.waitersFg = 15
+	gateB.waitersFg = 86
 	gateB.mu.Unlock()
 	if !laneB.healthy() {
 		t.Fatal("cleared bucket in sendable zone must be healthy")
@@ -1649,7 +1651,7 @@ func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
 
 	// 钉在 :59——死区（usable :02~:58），toNext=3s。
 	// 下窗预留 ceil(80*56/60)+5+4=84≥80：bg 跨窗无槽，期望
-	// 3+0+60=63s；fg 同态只算队列项 3+5/80*60=6.75s<τ。
+	// 3+0+60=63s；fg 前队 5<整窗配额开窗全进，期望只剩 toNext=3s<τ。
 	gate := laneA.adapter.gate
 	clock := pinGateClock(gate, 59)
 	gate.mu.Lock()
@@ -2068,8 +2070,9 @@ func TestLaneWeight(t *testing.T) {
 	}
 }
 
-// 闸门压力权重：a 的 fg 前队压 60 人 → expectedWait=60s → w_a=1/7，
-// 加权 HRW 下 b 居首概率 7/8≈87.5%（200 键断言 >75%，~5σ 余量）。
+// 闸门压力权重：a 的 fg 前队压 68 人 → 超出本窗余量 8 条翻窗折算，
+// expectedWait=52+8=60s → w_a=1/7，加权 HRW 下 b 居首概率 7/8≈87.5%
+// （200 键断言 >75%，~5σ 余量）。
 // 权重按请求类分轨：bg 前队只压 bg 类候选的权重，fg 视图不受影响。
 func TestPoolRankLanesPressureWeight(t *testing.T) {
 	config := func(name string) Config {
@@ -2080,12 +2083,13 @@ func TestPoolRankLanesPressureWeight(t *testing.T) {
 	pool := newTestPool(t, config("a"), config("b"))
 	laneA := poolLaneByName(pool, "a")
 	laneB := poolLaneByName(pool, "b")
-	// 钉在 :10——可发区间中段，expectedWait 只由前队深度折算。
+	// 钉在 :10——可发区间中段（toNext=52s），expectedWait 只由超出
+	// 余量的前队折算。
 	pinGateClock(laneA.adapter.gate, 10)
 	pinGateClock(laneB.adapter.gate, 10)
 
 	laneA.adapter.gate.mu.Lock()
-	laneA.adapter.gate.waitersFg = 60
+	laneA.adapter.gate.waitersFg = 68
 	laneA.adapter.gate.mu.Unlock()
 
 	ctx := context.Background()

@@ -849,17 +849,21 @@ func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
 
 // expectedWaitLocked 估算本类请求此刻进闸的期望排队时长，是 wait 准入
 // 判定的静态估计版——同一本账（reserve/bgAllowance/waiters）但不含
-// 睡眠与重查，只回答「现在到放行大概要多久」：
+// 睡眠与重查，只回答「现在到放行大概要多久」。串行折算只挂在超出可
+// 并行放行余量的前队上：配额按整窗重置、开窗有槽即并行放行，实测
+// waiters≤room 时开窗瞬间全队齐进（~0.2s），整队串行折算会高估
+// ~waiters/quota×60s：
 //   - 闩内 → 闩剩余：快败语义下不会真排，但选号视角它等价「这段时间
 //     不可用」；
-//   - 死区或桶满 → 到下一窗口开放，前队按整窗配额折算追加；bg 另投影
-//     下一窗开放的预留，满预留（fg 需求持续饱和）时追加一整窗——
-//     跨窗饥饿期睡醒重查也抢不到槽，实测排队到 bgMaxHold 被拒；
-//   - fg 可发且桶有位 → 本请求此刻即放，只把已在排队的前队深度按本窗
-//     剩余额度折算成拥堵代理（睡醒者会与之抢槽），封顶到下窗+一窗——
-//     排空竞态里分母→1 的不封顶队列项会把估计吹到分钟级；
-//   - bg 被预留/爬坡挡 → 额度缺口按爬坡释放速率折算，前队同速率折算，
-//     封顶到下窗+一窗（usable 末额度定格，更深的队只能翻窗）。
+//   - 死区或桶满 → 到下一窗口开放；fg 前队只把超出整窗配额的部分按
+//     窗速率折算追加，bg 开窗额度从 ~0 重新爬坡、没有并行齐射，前队
+//     仍整队折算，另投影下一窗开放的预留，满预留（fg 需求持续饱和）
+//     时追加一整窗——跨窗饥饿期睡醒重查也抢不到槽，实测排队到
+//     bgMaxHold 被拒；
+//   - fg 可发且桶有位 → 本窗余量即刻并行放行，只有超出余量的前队
+//     等到翻窗后按整窗配额折算，封顶到下窗+一窗；
+//   - bg 被预留/爬坡挡 → 负余量缺口与超出余量的前队都按爬坡释放速率
+//     折算，封顶到下窗+一窗（usable 末额度定格，更深的队只能翻窗）。
 //
 // 调用方须持 mu。
 func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used int, sendable bool) time.Duration {
@@ -875,7 +879,14 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 	}
 	toNext := ws.Add(windowPeriod).Sub(now)
 	if !sendable || used >= gate.quota {
-		wait := toNext + time.Duration(float64(waiters)/float64(gate.quota)*float64(windowPeriod))
+		// fg 翻窗即整窗配额并行放行——前队只有超出整窗配额的部分才
+		// 按窗速率串行折算；bg 开窗爬坡额度从 ~0 重新释放、没有并行
+		// 齐射，前队仍整队折算。
+		excess := waiters
+		if class != adapter.ClassBG {
+			excess = max(waiters-gate.quota, 0)
+		}
+		wait := toNext + time.Duration(float64(excess)/float64(gate.quota)*float64(windowPeriod))
 		// 下一窗开放即满预留时 bg 整窗无槽：睡醒者与重查都抢不到
 		// 位，只能等到再下一窗竞争——fg 饱和 lane 上 bg 实测等待
 		// ~120s，缺这项的估计（~toNext）低估约 4 倍。
@@ -885,19 +896,23 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 		return wait
 	}
 	if class != adapter.ClassBG {
-		return min(
-			time.Duration(float64(waiters)/float64(max(gate.quota-used, 1))*float64(windowPeriod)),
-			toNext+windowPeriod,
-		)
+		if excess := waiters - (gate.quota - used); excess > 0 {
+			return min(
+				toNext+time.Duration(float64(excess)/float64(gate.quota)*float64(windowPeriod)),
+				toNext+windowPeriod,
+			)
+		}
+		return 0
 	}
 	reserve := gate.reserve(now, ws)
 	room := min(gate.quota-reserve-used, gate.bgAllowance(now, ws, reserve)-gate.bucketUsedBg)
 	rate := float64(max(gate.quota-reserve, 1)) / gate.usable.Seconds()
-	wait := time.Duration(float64(waiters) / rate * float64(time.Second))
-	if room < 0 {
-		wait += time.Duration(float64(-room) / rate * float64(time.Second))
-	}
-	return min(wait, toNext+windowPeriod)
+	// 余量内的前队即刻放行；room<0 时 waiters-room 自动并入缺口，
+	// 与旧「waiters/rate + 缺口/rate」同式。
+	return min(
+		time.Duration(float64(max(waiters-room, 0))/rate*float64(time.Second)),
+		toNext+windowPeriod,
+	)
 }
 
 // latchRanges 按事件时间序还原闩时段：latched/restored 开窗，released
