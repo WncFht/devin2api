@@ -85,6 +85,13 @@ type Handler struct {
 	// 首个采样点落盘前缺席——lane 名是主键，身份只是易读别名。
 	quotaUserMu sync.Mutex
 	quotaUsers  map[string]map[string]any
+	// quotaPendingMu/pendingQuotaSamples 是配额快照落库失败的重放
+	// 缓冲：写失败的点挂账回来，下一次落库（定时采样或手动刷新）
+	// 随新点一并重放；容量封顶 quotaPersistRetryCap，溢出丢最老点
+	// 并告警。(account,at) 唯一索引 + INSERT OR IGNORE 使重放幂等——
+	// 缓冲是写争用期的安全带而非持久队列。
+	quotaPendingMu      sync.Mutex
+	pendingQuotaSamples []*store.QuotaSample
 
 	// debug 是请求目录的读取入口（logs 表行查询走 store）。
 	debug *debuglog.Manager

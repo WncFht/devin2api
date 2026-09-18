@@ -248,6 +248,48 @@ func TestQuotaSampleGraceAndTopUpFields(t *testing.T) {
 	}
 }
 
+// TestQuotaSamplePersistRetry 验证配额点写失败挂进重放缓冲随下次落库
+// 重放：关闭库让每次 INSERT 必败，六次落点各产一笔挂账，缓冲深度
+// quotaPersistRetryCap=4 溢出后丢最老两点——守恒：推入 = 在缓 + 丢弃。
+// 库重开后一次落库把缓冲四点与新点共五行写回，曲线无断档。
+func TestQuotaSamplePersistRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{store: st}
+	_ = st.Close() // 落库必败
+	for i := 0; i < 6; i++ {
+		h.persistQuotaSample(context.Background(),
+			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(float64(90 - i))})
+	}
+	h.quotaPendingMu.Lock()
+	pending := len(h.pendingQuotaSamples)
+	oldest := h.pendingQuotaSamples[0].At
+	h.quotaPendingMu.Unlock()
+	if pending != quotaPersistRetryCap || oldest != 1700000000+2*300 {
+		t.Fatalf("pending = %d oldest at = %d, want %d rows from at=%d",
+			pending, oldest, quotaPersistRetryCap, 1700000000+2*300)
+	}
+
+	st2, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st2.Close() }()
+	h.store = st2
+	h.persistQuotaSample(context.Background(),
+		&store.QuotaSample{At: 1700000000 + 6*300, Account: "randall", DailyRemaining: f64(84)})
+	rows, err := st2.ListQuotaSamples(context.Background(), "randall", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 5 || rows[0].At != 1700000000+2*300 || rows[4].At != 1700000000+6*300 {
+		t.Fatalf("replayed samples = %+v, want 5 rows from at=%d", rows, 1700000000+2*300)
+	}
+}
+
 // TestQuotaAccountsStates 验证采样清单的三态处置：未接线回退单号
 // 匿名采样；已接线但空池整轮跳过（不触碰 tokenFunc——它下面连着
 // firstLane，空池裸取下标会 panic，刻意不装它以放大误用）；有号

@@ -205,11 +205,50 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 		point.TopUpEnabled = boolAny(tu["enabled"])
 		point.TopUpTransactionStatus = strAny(tu["transaction_status"])
 	}
-	if err := h.store.InsertQuotaSample(ctx, point); err != nil {
-		slog.Warn("quota sample persist failed", "account", account, "error", err)
-	}
+	h.persistQuotaSample(ctx, point)
 	h.noteAccountQuotaSignal(account, plan)
 	return user, plan, nil
+}
+
+// quotaPersistRetryCap 是配额快照写失败后的重放缓冲深度：采样默认
+// 5 分钟一轮、每号一行，深度 4 让失败点搭上后两轮采样（双号 ~10 分钟
+// 覆盖批量日志事务/部署交接的写争用波）；更深的缓冲重放的是曲线
+// 价值已衰减的陈旧点，溢出丢最老点并告警。
+const quotaPersistRetryCap = 4
+
+// persistQuotaSample 落一个新配额点并把上轮写失败挂账的点一并重放
+// （取走即清，点集独占移交本调用；首个失败即停手，剩余尾部整段挂回
+// 缓冲等下一轮——争用期里同批后续点大概率同病）。(account,at) 唯一
+// 索引 + INSERT OR IGNORE 使重放幂等：上轮看似失败实则落库的点重放
+// 时静默跳过，不写双份。定时采样与手动刷新共用本路径——刷新也是
+// 争用期内的恢复通道。
+func (h *Handler) persistQuotaSample(ctx context.Context, point *store.QuotaSample) {
+	h.quotaPendingMu.Lock()
+	pending := h.pendingQuotaSamples
+	h.pendingQuotaSamples = nil
+	h.quotaPendingMu.Unlock()
+	rows := append(pending, point)
+	for i, r := range rows {
+		if err := h.store.InsertQuotaSample(ctx, r); err != nil {
+			slog.Warn("quota sample persist failed", "account", r.Account, "error", err)
+			h.stashQuotaSamples(rows[i:])
+			return
+		}
+	}
+}
+
+// stashQuotaSamples 把未落库的配额点挂回重放缓冲；超出深度的最老点
+// 丢弃并告警——缓冲是争用期安全带，永久丢失要留痕迹。
+func (h *Handler) stashQuotaSamples(rows []*store.QuotaSample) {
+	h.quotaPendingMu.Lock()
+	defer h.quotaPendingMu.Unlock()
+	h.pendingQuotaSamples = append(h.pendingQuotaSamples, rows...)
+	for len(h.pendingQuotaSamples) > quotaPersistRetryCap {
+		dropped := h.pendingQuotaSamples[0]
+		h.pendingQuotaSamples = h.pendingQuotaSamples[1:]
+		slog.Warn("quota sample persist buffer full: dropping oldest sample",
+			"account", dropped.Account, "at", dropped.At)
+	}
 }
 
 // noteAccountQuotaSignal 把一次成功探测的日/周剩余百分比回灌给池侧
