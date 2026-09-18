@@ -441,7 +441,8 @@ func (w *cacheWarmer) run() {
 }
 
 // sweep 是一轮清扫：先退役（静默超档限/孤儿宽限期满），再对晋升且
-// 到期的条目逐条 ping；排空后只退役不收集。ping 在锁外发（单发 ~1s、
+// 到期的条目按锚龄逐条 ping（最旧接触先打，饱和窗的零星准入槽先给
+// 濒死条目）；排空后只退役不收集。ping 在锁外发（单发 ~1s、
 // 超时 60s，持锁会堵全部簿记入口），结果回锁内结账；条目发送期间
 // 被退役/淘汰只结计数器。
 func (w *cacheWarmer) sweep() {
@@ -461,6 +462,12 @@ func (w *cacheWarmer) sweep() {
 			due = append(due, entry)
 		}
 	}
+	// 到期条目按锚剩余寿命升序（最后一次上游接触最旧的先打）：
+	// 饱和窗闸门只放零星槽时，稀缺准入先给距死透线（~840s 无接触）
+	// 最近的条目，而不是 map 序撞到哪条算哪条。
+	slices.SortFunc(due, func(a, b *warmEntry) int {
+		return a.anchorContact().Compare(b.anchorContact())
+	})
 	w.mu.Unlock()
 	for _, entry := range due {
 		w.pingEntry(entry)
@@ -678,6 +685,17 @@ func (w *cacheWarmer) retireDueLocked(entry *warmEntry, now time.Time) bool {
 	return !entry.suspectAt.IsZero() &&
 		now.Sub(entry.suspectAt) > 2*w.params.Interval &&
 		!entry.lastTouch.After(entry.suspectAt)
+}
+
+// anchorContact 是上游锚寿命的计时零点：最近一次接触时刻——客户端
+// 可归因上行（lastTouch）与成功 ping（lastPingAt，hit/miss 都完成
+// 一次锚重写）取较新者。距死透线的余量 = ~840s - (now - anchorContact)。
+// 调用方须持 mu。
+func (entry *warmEntry) anchorContact() time.Time {
+	if entry.lastPingAt.After(entry.lastTouch) {
+		return entry.lastPingAt
+	}
+	return entry.lastTouch
 }
 
 // maxIdleLocked 取档位的最大静默时长。调用方须持 mu。

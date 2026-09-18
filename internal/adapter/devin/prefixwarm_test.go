@@ -457,6 +457,69 @@ func TestWarmPingGateSkip(t *testing.T) {
 	}
 }
 
+// 部分放行序：饱和窗闸门每窗只放零星槽时按锚龄发——最旧上游接触
+// （距 ~840s 死透线最近）先拿槽，被拒条目 nextDue 不推进、翻窗再试。
+// MaxRPM=5 配默认 margin=4 → quota-reserve=1，每窗恰放一发 ping。
+func TestWarmPingStaleFirstOrder(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	w.adapter.gate = newRateGate(GateConfig{MaxRPM: 5}, nil, "")
+	gateClock := pinGateClock(w.adapter.gate, 10)
+	var sent int
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		sent++
+		return 1, nil
+	}
+	stale := seedPromoted(w, warmTestRequest("s-stale", "sys", "m-stale"), "uid")
+	mid := seedPromoted(w, warmTestRequest("s-mid", "sys", "m-mid"), "uid")
+	fresh := seedPromoted(w, warmTestRequest("s-fresh", "sys", "m-fresh"), "uid")
+	// 三条都到期、锚龄分档（unknown 档 maxIdle=30min，700s 不退役）。
+	w.entries[stale].lastTouch = clock.t.Add(-700 * time.Second)
+	w.entries[mid].lastTouch = clock.t.Add(-400 * time.Second)
+	w.entries[fresh].lastTouch = clock.t.Add(-200 * time.Second)
+	for _, key := range []warmLineageKey{stale, mid, fresh} {
+		w.entries[key].nextDue = clock.t
+	}
+	w.sweep()
+	if sent != 1 {
+		t.Fatalf("sent = %d, want exactly one ping past the capped gate", sent)
+	}
+	if w.entries[stale].lastPingAt != clock.t {
+		t.Fatal("the single admit slot must go to the stalest entry")
+	}
+	if !w.entries[mid].lastPingAt.IsZero() || !w.entries[fresh].lastPingAt.IsZero() {
+		t.Fatal("denied entries must not be pinged")
+	}
+	if got := w.stats().PingSkips; got != 2 {
+		t.Fatalf("PingSkips = %d, want 2", got)
+	}
+	// 翻窗再放一发：次旧补上——刚打过的 stale 锚已刷新，排到最后。
+	gateClock.t = gateClock.t.Add(time.Minute)
+	clock.t = clock.t.Add(61 * time.Second)
+	w.sweep()
+	if sent != 2 {
+		t.Fatalf("sent = %d, want 2", sent)
+	}
+	if w.entries[mid].lastPingAt != clock.t {
+		t.Fatal("second window slot must go to the mid-stale entry")
+	}
+	if !w.entries[fresh].lastPingAt.IsZero() {
+		t.Fatal("freshest entry must still be waiting")
+	}
+	// 第三窗：最年轻的条目拿到槽——三窗下来顺序 = 锚龄升序。
+	gateClock.t = gateClock.t.Add(time.Minute)
+	clock.t = clock.t.Add(61 * time.Second)
+	w.sweep()
+	if sent != 3 {
+		t.Fatalf("sent = %d, want 3", sent)
+	}
+	if w.entries[fresh].lastPingAt != clock.t {
+		t.Fatal("third window slot must go to the freshest entry")
+	}
+	if got := w.stats().PingSkips; got != 6 {
+		t.Fatalf("PingSkips = %d, want 6", got)
+	}
+}
+
 // ping 错误分账：传输/未分类只跳本轮（PingErrors++，条目在）；
 // 语义错误（ClientFixable）退役；cr=0 已在调度用例覆盖。
 func TestWarmPingErrors(t *testing.T) {
