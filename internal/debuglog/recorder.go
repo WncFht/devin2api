@@ -155,6 +155,10 @@ type Manager struct {
 	// lastFlush 是上次批量事务的发起时刻：completionFlushGap 内到达的
 	// 收尾攒成一批，超时或写队列排空即随当前 op 立即冲刷。
 	lastFlush time.Time
+	// lastPayloadReconcile 是上次用 DebugDirSizes 权威聚合对账 payload
+	// 计数器的时刻；仅 cleaner 协程读写，零值表示从未对账（首个
+	// tick 即对一次）。
+	lastPayloadReconcile time.Time
 	// fallbackMu 串行化写 worker 死后的兜底收尾：workerGone 关闭后多个
 	// Complete 可同时在调用方直跑 queueCompletion/flushAll，此时写侧
 	// 私有状态已无人持有，调用方之间需互斥。写 worker 存活期它从不被取。
@@ -593,12 +597,14 @@ func (manager *Manager) Stats() map[string]any {
 	manager.mutex.Lock()
 	active := len(manager.activeDirs)
 	manager.mutex.Unlock()
-	var logRows, dbBytes int64
+	var logRows, dbBytes, walBytes, payloadBytes int64
 	if manager.store != nil {
 		if n, err := manager.store.LogCount(context.Background()); err == nil {
 			logRows = n
 		}
 		dbBytes = manager.store.DBBytes()
+		walBytes = manager.store.WALBytes()
+		payloadBytes = manager.store.DebugPayloadBytes()
 	}
 	// bind-failure.json 由 main 侧在 listen 绑定失败时写入；缺失/损坏
 	// 都不透出——面板只需知道「最近一次为什么没绑上」，没有就是没发生过。
@@ -613,17 +619,23 @@ func (manager *Manager) Stats() map[string]any {
 	}
 	policy := manager.Policy()
 	stats := map[string]any{
-		"log_root":               manager.root,
-		"enabled":                manager.enabled.Load(),
-		"errors_only":            manager.errorsOnly.Load(),
-		"active_request_dirs":    active,
-		"queued_log_events":      queued,
-		"pending_completions":    manager.pendingCompletionCount.Load(),
-		"queue_capacity":         globalQueueSize + insertQueueSize,
-		"dropped_log_events":     manager.droppedTotal.Load(),
-		"io_errors":              manager.ioErrors.Load(),
-		"log_rows":               logRows,
-		"db_bytes":               dbBytes,
+		"log_root":            manager.root,
+		"enabled":             manager.enabled.Load(),
+		"errors_only":         manager.errorsOnly.Load(),
+		"active_request_dirs": active,
+		"queued_log_events":   queued,
+		"pending_completions": manager.pendingCompletionCount.Load(),
+		"queue_capacity":      globalQueueSize + insertQueueSize,
+		"dropped_log_events":  manager.droppedTotal.Load(),
+		"io_errors":           manager.ioErrors.Load(),
+		"log_rows":            logRows,
+		"db_bytes":            dbBytes,
+		// wal_bytes 单列：db_bytes 与 payload 口径差的主要解释项——
+		// checkpoint 饥饿时 WAL 可远超主库文件，「WAL 顶爆 DBBytes」
+		// 应面板可见而非事后挖掘。payload_bytes 是 debug 两表库存
+		// 字节的内存计数器（容量淘汰的闸门口径）。
+		"wal_bytes":              walBytes,
+		"payload_bytes":          payloadBytes,
 		"log_row_retention_days": policy.LogRowDays,
 		"retention_days":         policy.Days,
 		"max_total_mb":           policy.MaxTotalMB,

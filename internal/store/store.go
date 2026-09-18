@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,6 +30,11 @@ type Store struct {
 	ro *sql.DB
 
 	path string
+	// debugBytes 是 debug_files.content 与 debug_chunks.data 库存字节
+	// 合计的内存镜像（DebugDirSizes 总量同口径）：Open 时聚合播种，
+	// 各写/删方法在事务提交后按真实落库字节增减；cleaner 的容量闸读它
+	// 免每轮全表聚合，周期对账兜底漏记账路径。
+	debugBytes atomic.Int64
 }
 
 // Open 打开（或创建）path 处的库。schema 幂等，重复打开只做
@@ -68,6 +74,16 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
+	// payload 计数器以权威聚合播种：此后全部写/删路径在各自事务提交
+	// 时增减它，读侧 O(1)。一次性启动全扫替代周期全扫（原 DBBytes
+	// 闸门被 WAL 撑真后每 5min 白跑一轮 GB 级聚合）。
+	var debugBytes int64
+	if err := db.QueryRow(`SELECT
+		(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_files) +
+		(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks)`).Scan(&debugBytes); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("seed debug payload bytes: %w", err)
+	}
 
 	// 读池在写库建好 schema 之后打开：WAL 下读者拿连接级快照，
 	// 与写者互不阻塞。并发数取面板页一次加载的端点扇出量级。
@@ -83,7 +99,9 @@ func Open(path string) (*Store, error) {
 		_ = ro.Close()
 		ro = db
 	}
-	return &Store{db: db, ro: ro, path: path}, nil
+	st := &Store{db: db, ro: ro, path: path}
+	st.debugBytes.Store(debugBytes)
+	return st, nil
 }
 
 // vacuumMinPages 以下不值得动： freelist 太小，搬页成本换不回磁盘。
@@ -150,6 +168,16 @@ func (s *Store) DBBytes() int64 {
 		}
 	}
 	return total
+}
+
+// WALBytes 返回 WAL 文件的磁盘占用：db_bytes 与 debug payload 口径差的
+// 主要解释项——checkpoint 饥饿时 WAL 可远超主库文件，单列它让「WAL
+// 顶爆 DBBytes」在面板上可见而不是事后挖掘。
+func (s *Store) WALBytes() int64 {
+	if info, err := os.Stat(s.path + "-wal"); err == nil {
+		return info.Size()
+	}
+	return 0
 }
 
 // Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。读池退化

@@ -29,20 +29,47 @@ type DebugFileInfo struct {
 // 可重写文件走这里。超阈值内容透明压缩（usize=解压前尺寸）。
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// OR REPLACE 的计数增量 = 新行库存尺寸 − 被顶掉的旧行尺寸；旧行
+	// 尺寸同事务先读，写连接串行化保证读到的是真实前驱。
+	var old int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+		dir, name).Scan(&old); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
-	return err
+		dir, name, stored, usize, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.debugBytes.Add(int64(len(stored)) - old)
+	return nil
 }
 
 // PutDebugFileIfAbsent 只在 (dir,name) 不存在时写入——error.json 的
 // first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 		dir, name, stored, usize, time.Now().UnixMilli())
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n > 0 {
+		s.debugBytes.Add(int64(len(stored)))
+	}
+	return nil
 }
 
 // ClaimDebugFile 是带占位语义的 IfAbsent 变体：无行时插入并返回
@@ -58,6 +85,9 @@ func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []
 		return false, err
 	}
 	n, err := res.RowsAffected()
+	if err == nil && n > 0 {
+		s.debugBytes.Add(int64(len(stored)))
+	}
 	return n > 0, err
 }
 
@@ -136,21 +166,44 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// delta 累计本事务对 payload 库存字节的净增量：OR REPLACE 取新旧
+	// 行尺寸差（旧尺寸同事务先读），OR IGNORE 按 RowsAffected 实计，
+	// 删除路径由 RETURNING 直接汇总被删行——计数器只随提交成功的
+	// 真实变更走，回滚不记账。
+	var delta int64
 	for _, f := range batch.Files {
-		verb := "INSERT OR REPLACE"
 		if f.IfAbsent {
-			verb = "INSERT OR IGNORE"
+			res, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+				f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli())
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n > 0 {
+				delta += int64(len(f.Stored))
+			}
+			continue
+		}
+		var old int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+			f.Dir, f.Name).Scan(&old); err != nil && err != sql.ErrNoRows {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			verb+` INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+			`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
 			f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli()); err != nil {
 			return err
 		}
+		delta += int64(len(f.Stored)) - old
 	}
 	for i, r := range batch.Chunks {
 		if _, err := tx.ExecContext(ctx, appendChunkSQL, r.Dir, r.Name, storedChunks[i], chunkUsizes[i], r.Dir, r.Name); err != nil {
 			return err
 		}
+		delta += int64(len(storedChunks[i]))
 	}
 	if len(batch.StripDirs) > 0 {
 		args := make([]any, 0, len(batch.StripDirs))
@@ -158,19 +211,29 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			args = append(args, dir)
 		}
 		where := `dir IN (` + placeholders(len(batch.StripDirs)) + `) AND name NOT IN ('meta.json', 'error.json')`
-		if _, err := tx.ExecContext(ctx, `DELETE FROM debug_files WHERE `+where, args...); err != nil {
+		freed, err := deleteReturningBytes(ctx, tx,
+			`DELETE FROM debug_files WHERE `+where+` RETURNING LENGTH(content)`, args...)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM debug_chunks WHERE `+where, args...); err != nil {
+		delta -= freed
+		freed, err = deleteReturningBytes(ctx, tx,
+			`DELETE FROM debug_chunks WHERE `+where+` RETURNING LENGTH(data)`, args...)
+		if err != nil {
 			return err
 		}
+		delta -= freed
 	}
 	for _, row := range batch.LogRows {
 		if _, err := tx.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.debugBytes.Add(delta)
+	return nil
 }
 
 // DebugFile 读一个文件的内容：先查 debug_files（整文件），miss 则按
@@ -463,17 +526,60 @@ func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exa
 }
 
 // deleteDebugRows 对两表执行同一 WHERE 的删除，单事务提交。
+// RETURNING 顺带汇总被删行的库存字节：payload 计数器的减量以事务内
+// 真实删除为准，比删前预聚合少一遍 WHERE 扫描。
 func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM debug_files WHERE `+where, args...); err != nil {
+	var freed int64
+	for _, del := range []struct{ table, col string }{
+		{"debug_files", "content"}, {"debug_chunks", "data"},
+	} {
+		n, err := deleteReturningBytes(ctx, tx,
+			`DELETE FROM `+del.table+` WHERE `+where+` RETURNING LENGTH(`+del.col+`)`, args...)
+		if err != nil {
+			return err
+		}
+		freed += n
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM debug_chunks WHERE `+where, args...); err != nil {
-		return err
+	s.debugBytes.Add(-freed)
+	return nil
+}
+
+// deleteReturningBytes 执行一条带 RETURNING 长度列的 DELETE 并返回
+// 被删行的库存字节合计。
+func deleteReturningBytes(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
 	}
-	return tx.Commit()
+	defer func() { _ = rows.Close() }()
+	var total int64
+	for rows.Next() {
+		var n int64
+		if err := rows.Scan(&n); err != nil {
+			return 0, err
+		}
+		total += n
+	}
+	return total, rows.Err()
+}
+
+// DebugPayloadBytes 返回 debug payload 库存字节合计的内存镜像——与
+// DebugDirSizes 各目录值之和同口径（库存字节，压缩行计 gzip 帧长）。
+// 派生态：权威值是表内聚合，cleaner 以周期对账修漂。
+func (s *Store) DebugPayloadBytes() int64 {
+	return s.debugBytes.Load()
+}
+
+// ReconcileDebugPayloadBytes 用权威总量重置内存计数器，返回重置前
+// 读数与权威值之差（正=计数高估，负=低估）——供 cleaner 对账记录漂移。
+func (s *Store) ReconcileDebugPayloadBytes(actual int64) (drift int64) {
+	return s.debugBytes.Swap(actual) - actual
 }

@@ -26,6 +26,12 @@ import (
 // 可把每轮的全表聚合摊薄到可忽略。
 const cleanerInterval = 5 * time.Minute
 
+// payloadReconcileInterval 是 payload 计数器的周期对账间隔：计数器按
+// 提交增量维护、设计上零漂移，仍保留低频全量对账兜底漏记账路径——
+// 漂移告警本身比静默修正更有信息量。每小时一轮，成本是每 12 个
+// 清理 tick 多一次聚合扫。
+const payloadReconcileInterval = time.Hour
+
 // 负载层的成员判定已下推成 DeleteDebugPayloadsBefore 的名字谓词
 //（devinRequestStageStem+"." 前缀圈出 03 主文件与全部重试/搜索分片、
 // 04/06 精确名、attachments/ 前缀）——剥离名单与该谓词同源维护。
@@ -140,10 +146,12 @@ func (manager *Manager) cleanOnce() int {
 
 	// 容量淘汰：总量超限后从最旧的目录开始回收，直到回到上限内。
 	// 最近 policy.KeepErrorDirs 个失败目录受保护：失败现场恰恰是日后最想回看的。
-	// DBBytes 是库文件+WAL 的物理尺寸，必不小于 debug payload 合计——
-	// 它没超限时直接跳过 DebugDirSizes 的全表聚合扫（5min 一轮，在 GB
-	// 级库上是一大笔固定开销）。
-	if manager.store.DBBytes() <= maxBytes {
+	// 闸门读 payload 计数器（写/删路径随事务增减的内存镜像，与
+	// DebugDirSizes 总量同口径）：它没超限时跳过全表聚合扫（5min
+	// 一轮，在 GB 级库上是一大笔固定开销）。原 DBBytes 口径把库文件
+	// +WAL 的物理尺寸当 payload 用，WAL 膨胀后闸门恒真、聚合白跑。
+	reconcileDue := now.Sub(manager.lastPayloadReconcile) >= payloadReconcileInterval
+	if manager.store.DebugPayloadBytes() <= maxBytes && !reconcileDue {
 		return removed
 	}
 	sizes, err := manager.store.DebugDirSizes(ctx)
@@ -152,14 +160,21 @@ func (manager *Manager) cleanOnce() int {
 		slog.Warn("debuglog: measure debug dirs failed", "error", err)
 		return removed
 	}
-	var totalBytes int64
+	// 对账：计数器是派生态，聚合出的存量是权威；漂移告警而非静默修
+	// 正——恒非零漂移说明有写/删路径漏了记账。
+	manager.lastPayloadReconcile = now
+	var storedBytes, totalBytes int64
 	var candidates []string
 	for dir, size := range sizes {
+		storedBytes += size
 		if _, ok := active[dir]; ok {
 			continue
 		}
 		totalBytes += size
 		candidates = append(candidates, dir)
+	}
+	if drift := manager.store.ReconcileDebugPayloadBytes(storedBytes); drift != 0 {
+		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes)
 	}
 	if totalBytes <= maxBytes {
 		return removed

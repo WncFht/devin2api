@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -348,4 +349,134 @@ func TestDeleteDebugDir(t *testing.T) {
 	if !slices.Equal(dirs, []string{"d2"}) {
 		t.Fatalf("dirs = %v", dirs)
 	}
+}
+
+// assertPayloadBytes 断言内存计数器与 DebugDirSizes 权威聚合一致——
+// 每个写/删操作后调一次，漏记账或重复记账立刻暴露。
+func assertPayloadBytes(t *testing.T, s *Store) {
+	t.Helper()
+	sizes, err := s.DebugDirSizes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want int64
+	for _, n := range sizes {
+		want += n
+	}
+	if got := s.DebugPayloadBytes(); got != want {
+		t.Fatalf("payload bytes = %d, want %d (sizes %v)", got, want, sizes)
+	}
+}
+
+func TestDebugPayloadBytes(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertPayloadBytes(t, s)
+
+	// 可压缩内容走一条：计数按库存帧长而非逻辑尺寸。
+	big := bytes.Repeat([]byte(`{"k":"value"} `), 512)
+	must(s.PutDebugFile(ctx, "d1", "meta.json", big))
+	assertPayloadBytes(t, s)
+	// OR REPLACE 覆写：增量 = 新帧 − 旧帧。
+	must(s.PutDebugFile(ctx, "d1", "meta.json", []byte("small")))
+	assertPayloadBytes(t, s)
+	// IfAbsent/Claim 的未命中路径不计数。
+	must(s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("e1")))
+	assertPayloadBytes(t, s)
+	must(s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("e2-ignored")))
+	assertPayloadBytes(t, s)
+	if _, err := s.ClaimDebugFile(ctx, "d2", "meta.json", []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	assertPayloadBytes(t, s)
+	if claimed, err := s.ClaimDebugFile(ctx, "d2", "meta.json", []byte("c2-ignored")); err != nil || claimed {
+		t.Fatalf("re-claim = %v,%v", claimed, err)
+	}
+	assertPayloadBytes(t, s)
+	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", big))
+	assertPayloadBytes(t, s)
+
+	// 批量事务混合四类：OR REPLACE、OR IGNORE、chunk、strip、logrow。
+	must(s.WriteDebugBatch(ctx, DebugBatch{
+		Files: []DebugFileRow{
+			{Dir: "d3", Name: "meta.json", Stored: []byte("m3")},
+			{Dir: "d3", Name: "03-devin-request.json", Stored: []byte("payload")},
+			{Dir: "d2", Name: "meta.json", Stored: []byte("c3")},
+			{Dir: "d2", Name: "error.json", Stored: []byte("ign"), IfAbsent: true},
+			{Dir: "d2", Name: "error.json", Stored: []byte("new"), IfAbsent: true},
+		},
+		Chunks:    []DebugChunkRow{{Dir: "d3", Name: "04-devin-response.jsonl", Data: []byte("chunk")}},
+		StripDirs: []string{"d3"},
+		LogRows:   []*LogRow{{Dir: "d3", StartedAt: time.Now(), Result: "completed"}},
+	}))
+	assertPayloadBytes(t, s)
+
+	// 三条删除路径各自减量。
+	must(s.DeleteDebugPayloadsBefore(ctx, "d2",
+		[]string{"04-devin-response.jsonl"}, []string{"03-devin-request."}))
+	assertPayloadBytes(t, s)
+	must(s.DeleteDebugDir(ctx, "d2"))
+	assertPayloadBytes(t, s)
+	must(s.DeleteDebugDirsBefore(ctx, "\xff", nil))
+	assertPayloadBytes(t, s)
+
+	// 磁盘目录导入同样入账。
+	logRoot := filepath.Join(t.TempDir(), "logs")
+	writeDebugDirFixture(t, logRoot)
+	must(s.ImportDebugDirs(ctx, logRoot, "import_debug_progress"))
+	assertPayloadBytes(t, s)
+
+	// 绕开记账路径直插一行制造漂移：对账返回差值并把计数器拉回权威值。
+	must(func() error {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO debug_files(dir, name, content, updated_at) VALUES('drift','x',?,0)`,
+			[]byte("unaccounted"))
+		return err
+	}())
+	drift := s.ReconcileDebugPayloadBytes(func() int64 {
+		sizes, err := s.DebugDirSizes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var total int64
+		for _, n := range sizes {
+			total += n
+		}
+		return total
+	}())
+	if drift != -11 {
+		t.Fatalf("drift = %d, want -11", drift)
+	}
+	assertPayloadBytes(t, s)
+}
+
+func TestDebugPayloadBytesReseed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.PutDebugFile(ctx, "d1", "meta.json", []byte("persist")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 重启后计数器从权威聚合重新播种，不吃旧内存态。
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	assertPayloadBytes(t, s)
 }

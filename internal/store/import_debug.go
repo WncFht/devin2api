@@ -108,6 +108,9 @@ func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, p
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// imported 累计本事务入库的库存字节：裸 INSERT 不压缩，
+	// LENGTH 即写入长度——计数器随提交成功后增量。
+	var imported int64
 	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -121,16 +124,21 @@ func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, p
 		}
 		name := filepath.ToSlash(rel)
 		if strings.HasSuffix(name, ".jsonl") {
-			return importDebugJSONL(ctx, tx, dir, name, path)
+			n, err := importDebugJSONL(ctx, tx, dir, name, path)
+			imported += n
+			return err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx,
+		if _, err = tx.ExecContext(ctx,
 			`INSERT INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-			dir, name, data, info.ModTime().UnixMilli())
-		return err
+			dir, name, data, info.ModTime().UnixMilli()); err != nil {
+			return err
+		}
+		imported += int64(len(data))
+		return nil
 	})
 	if err != nil {
 		return err
@@ -140,16 +148,21 @@ func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, p
 		progressKey, progress, time.Now().UnixMilli()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.debugBytes.Add(imported)
+	return nil
 }
 
 // importDebugJSONL 把一个 .jsonl 文件切成 <=256KB 的行对齐块写入
 // debug_chunks（seq 从 0 递增）；空文件也写一行空 chunk——「文件
-// 存在但为空」在 UNION 名单语义下只能靠行存在性表达。
-func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) error {
+// 存在但为空」在 UNION 名单语义下只能靠行存在性表达。返回写入的
+// 库存字节合计，供调用方在事务提交后计入 payload 计数器。
+func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) (written int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = f.Close() }()
 	reader := bufio.NewReaderSize(f, debugImportChunkSize)
@@ -159,12 +172,15 @@ func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) e
 		if buf.Len() == 0 {
 			return nil
 		}
-		_, err := tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO debug_chunks(dir, name, seq, data) VALUES(?,?,?,?)`,
-			dir, name, seq, buf.Bytes())
+			dir, name, seq, buf.Bytes()); err != nil {
+			return err
+		}
+		written += int64(buf.Len())
 		seq++
 		buf.Reset()
-		return err
+		return nil
 	}
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -173,7 +189,7 @@ func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) e
 			// 自身超 chunkSize 时才经 n=min(...) 硬切。
 			if buf.Len()+len(line) > debugImportChunkSize {
 				if ferr := flush(); ferr != nil {
-					return ferr
+					return written, ferr
 				}
 			}
 			n := min(debugImportChunkSize-buf.Len(), len(line))
@@ -184,14 +200,16 @@ func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) e
 			break
 		}
 		if err != nil {
-			return err
+			return written, err
 		}
 	}
 	if seq == 0 && buf.Len() == 0 {
-		_, err := tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO debug_chunks(dir, name, seq, data) VALUES(?,?,0,?)`,
-			dir, name, []byte{})
-		return err
+			dir, name, []byte{}); err != nil {
+			return written, err
+		}
+		return written, nil
 	}
-	return flush()
+	return written, flush()
 }
