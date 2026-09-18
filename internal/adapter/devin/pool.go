@@ -17,10 +17,12 @@ import (
 	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -64,6 +66,20 @@ const poolBindingCap = 4096
 // defaultQuotaLowThresholdPercent 是配额降权默认阈值：weekly 剩余
 // 百分比低于它时 lane 对新会话降档。
 const defaultQuotaLowThresholdPercent = 15
+
+// ttfbSampleCap 是 TTFB 滚动窗容量（每 lane 保留的最近样本数）：
+// 覆盖够长的相对中位估计窗又不让远古样本常驻。
+const ttfbSampleCap = 200
+
+// ttfbConfidenceSamples 是 TTFB 权重置信度缩放的满信样本量：
+// n/50 线性升信，冷启动与小样本 lane 的权重回中性 1.0——没观测到
+// 慢的 lane 不该被惩罚，没观测到的 lane 也不该白捡便宜。
+const ttfbConfidenceSamples = 50
+
+// gatePressureTau 是闸门压力权重的时间常数：期望排队每过一个 τ
+// 权重折半级衰减（w=1/(1+E/τ)），τ≈10s 让「预留挡几秒」与「排到
+// 下窗」在权重上有数量级区分。
+const gatePressureTau = 10 * time.Second
 
 // Pool 是多账号上游池，实现 adapter.Adapter。
 type Pool struct {
@@ -141,6 +157,11 @@ type poolLane struct {
 	// states 是冷却持久化句柄（与 gate 同一 runtime_state 表，键
 	// poolcool:<name>）；nil 时冷却只活在内存。
 	states *store.Store
+	// ttfb* 是上游侧 TTFB 的滚动样本环（定容，写满覆最旧）与累计
+	// 计数：选号的相对中位权重输入，与冷却簿记分开加锁。
+	ttfbMu   sync.Mutex
+	ttfbRing []time.Duration
+	ttfbHead int
 }
 
 // LaneState 是单条 lane 的池侧状态快照，/admin/runtime-metrics 的
@@ -257,7 +278,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	}
 	affinity := SessionAffinityKey(request)
 	recorder.SetAffinityHash(affinity)
-	ranked := pool.rankLanes(lanes, affinity)
+	ranked := pool.rankLanes(ctx, lanes, affinity)
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。
 	recorder.NotePoolCandidates(poolCandidateRows(ranked))
@@ -285,13 +306,14 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		// 04 里插账号分界行：各 lane 的上游帧直接续写同一文件，
 		// 没有分界行无法区分一段帧属于哪号。
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
+		laneStart := time.Now()
 		stream, err := lane.adapter.Stream(ctx, request)
 		if err == nil {
 			recorder.SetUpstreamAccount(lane.name)
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
 			pool.bind(affinity, lane)
-			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, inner: stream, rest: rest}, nil
+			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest}, nil
 		}
 		lastErr = err
 		recorder.SetUpstreamAccount(lane.name)
@@ -325,7 +347,11 @@ type poolStream struct {
 	// 同一份累计预算（failoverBudget），不是重新起算。
 	entered time.Time
 	lane    *poolLane
-	inner   llm.ResponseStream
+	// laneStart 是当前 lane 的 Stream 调用时刻：TTFB 样本按
+	// time.Since(laneStart) 归属该 lane——含它自己的闸门排队（用户
+	// 成本），不含别条 lane 的 failover 烧时。
+	laneStart time.Time
+	inner     llm.ResponseStream
 	// rest 是尚未尝试的候选 lane（钉选序尾部）；每条只在换号时试一次。
 	rest []*poolLane
 	// startReleased 表示 start 信封已交付给消费方：换号 lane 再产 start
@@ -359,8 +385,10 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 			default:
 				if !s.committed {
 					// 首个内容事件才是 lane 可用的真实证据（死 token
-					// lane 开流也"成功"）——成功清账以内容到达为准。
+					// lane 开流也"成功"）——成功清账以内容到达为准；
+					// 同点采 TTFB 样本喂选号的相对中位权重。
 					s.lane.noteSuccess()
+					s.lane.noteTTFB(time.Since(s.laneStart))
 				}
 				s.committed = true
 			}
@@ -419,15 +447,17 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		next := s.rest[0]
 		s.rest = s.rest[1:]
 		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})
+		laneStart := time.Now()
 		inner, err := next.adapter.Stream(ctx, s.request)
 		if err == nil {
 			s.lane = next
+			s.laneStart = laneStart
 			s.inner = inner
 			s.recorder.SetUpstreamAccount(next.name)
 			// 换号接管即改绑：会话谱系转到新 lane，后续请求直落这里。
 			s.pool.bind(s.affinity, next)
 			// 重选审计覆盖首轮快照——meta 留下的是最新一轮决策现场。
-			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next)))
+			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next, adapter.RequestClass(ctx))))
 			return true, nil
 		}
 		lastErr = err
@@ -457,12 +487,16 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 
 // poolCandidate 是排序时的一次性评估快照：verdict 是 lane 当时的健康
 // 判定与降级归因，bound 是绑定命中标记，pinned 是在飞钉选命中标记，
-// score 是 rendezvous 分数。
+// score 是 rendezvous 分数，weight 是健康权重（压力×相对 TTFB），
+// key 是加权 HRW 键 u^(1/w)（末位排序键，大者居前——同亲和键下各
+// lane 的选中概率 ∝ w）。
 // 快照语义保证审计行（pool_candidates）与排序决策同源——不在排完序后
 // 再评一次，避免两次评估之间的状态翻转让审计与决策对不上。
 type poolCandidate struct {
 	lane     *poolLane
 	score    [32]byte
+	key      float64
+	weight   float64
 	verdict  laneVerdict
 	bound    bool
 	pinned   bool
@@ -471,11 +505,11 @@ type poolCandidate struct {
 
 // swapRanked 构造换号接管后的审计快照：接管 lane 居首（bound），其余
 // 候选按剩余序附上当时的降级归因。
-func (s *poolStream) swapRanked(taken *poolLane) []poolCandidate {
+func (s *poolStream) swapRanked(taken *poolLane, class string) []poolCandidate {
 	ranked := make([]poolCandidate, 0, len(s.rest)+1)
-	ranked = append(ranked, poolCandidate{lane: taken, verdict: taken.verdict(), bound: true})
+	ranked = append(ranked, poolCandidate{lane: taken, verdict: taken.verdict(class), bound: true})
 	for _, lane := range s.rest {
-		ranked = append(ranked, poolCandidate{lane: lane, verdict: lane.verdict()})
+		ranked = append(ranked, poolCandidate{lane: lane, verdict: lane.verdict(class)})
 	}
 	return ranked
 }
@@ -492,6 +526,7 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 			Healthy: c.verdict.healthy,
 			Bound:   c.bound,
 			Pinned:  c.pinned,
+			Weight:  c.weight,
 			Reason:  strings.Join(c.verdict.reasons, ","),
 		}
 		if c.bound {
@@ -510,7 +545,7 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 // 仍在健康档内但降一级，只影响新会话落点；不健康不剔除只排后：判定
 // 是近似快照，全不健康时仍回分数序，由 lane 闸门自己走 wait/快败
 // （客户端拿 Retry-After，与单号一致）。
-func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate {
+func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity string) []poolCandidate {
 	bound := pool.boundLane(affinity)
 	// 绑定恒赢于在飞钉选——绑定是「已产出内容的 lane」的确认记录，
 	// 在飞指派只是未确认的当前尝试；两者天然互斥（有绑定不查在飞表）。
@@ -518,12 +553,30 @@ func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate 
 	if bound == nil {
 		pinned = pool.inflightLane(affinity)
 	}
+	class := adapter.RequestClass(ctx)
+	// TTFB 相对权重需要跨 lane 的最小中位：先全量取样再评候选——
+	// 无样本 lane 回中性 1.0（置信度缩放同样回落），只拉已有观测
+	// 的 lane 之间的相对差。
+	medians := make([]time.Duration, len(lanes))
+	counts := make([]int, len(lanes))
+	minMedian := time.Duration(math.MaxInt64)
+	for i, lane := range lanes {
+		medians[i], counts[i] = lane.ttfbStats()
+		if counts[i] > 0 && medians[i] > 0 && medians[i] < minMedian {
+			minMedian = medians[i]
+		}
+	}
 	candidates := make([]poolCandidate, 0, len(lanes))
-	for _, lane := range lanes {
+	for i, lane := range lanes {
+		v := lane.verdict(class)
+		score := sha256.Sum256([]byte(affinity + "|" + lane.name))
+		weight := laneWeight(v.expectedWait, medians[i], counts[i], minMedian)
 		candidates = append(candidates, poolCandidate{
 			lane:     lane,
-			score:    sha256.Sum256([]byte(affinity + "|" + lane.name)),
-			verdict:  lane.verdict(),
+			score:    score,
+			key:      hrwKey(score, weight),
+			weight:   weight,
+			verdict:  v,
 			bound:    lane == bound,
 			pinned:   lane == pinned,
 			priority: lane.priority.Load(),
@@ -548,14 +601,17 @@ func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate 
 		if a.priority != b.priority {
 			return cmp.Compare(b.priority, a.priority)
 		}
+		if a.key != b.key {
+			return cmp.Compare(b.key, a.key)
+		}
 		return bytes.Compare(a.score[:], b.score[:])
 	})
 	return candidates
 }
 
 // orderedLanes 是 rankLanes 的 lane 投影，供测试与只关心顺序的调用方使用。
-func (pool *Pool) orderedLanes(lanes []*poolLane, affinity string) []*poolLane {
-	ranked := pool.rankLanes(lanes, affinity)
+func (pool *Pool) orderedLanes(ctx context.Context, lanes []*poolLane, affinity string) []*poolLane {
+	ranked := pool.rankLanes(ctx, lanes, affinity)
 	ordered := make([]*poolLane, len(ranked))
 	for i, c := range ranked {
 		ordered[i] = c.lane
@@ -563,24 +619,57 @@ func (pool *Pool) orderedLanes(lanes []*poolLane, affinity string) []*poolLane {
 	return ordered
 }
 
+// laneWeight 算 lane 的选号健康权重 w ∈ (0,1]：
+//   - w_pressure = 1/(1+expectedWait/τ)：本类请求进该 lane 闸门的期望
+//     排队折成的衰减，τ≈10s——「预留挡几秒」与「睡到下一窗口」在权重
+//     上有数量级区分，覆盖换号主因（本地闸门饱和，非 lane 失败）；
+//   - w_ttfb = minMedian/laneMedian：滚动上游侧 TTFB 中位的相对惩罚，
+//     按 n/50 线性置信度缩放——冷启动与小样本 lane 回中性 1.0，没观测
+//     到慢的 lane 不被惩罚、没观测到的 lane 也不白捡便宜。
+//
+// minMedian<=0（全池无样本）时 w_ttfb 恒 1。
+func laneWeight(expectedWait, median time.Duration, n int, minMedian time.Duration) float64 {
+	w := 1.0 / (1.0 + expectedWait.Seconds()/gatePressureTau.Seconds())
+	if minMedian > 0 && median > 0 {
+		raw := float64(minMedian) / float64(median)
+		w *= 1 + (raw-1)*min(1.0, float64(n)/ttfbConfidenceSamples)
+	}
+	return w
+}
+
+// hrwKey 是加权 rendezvous 键：u 取 score 高位投影到 (0,1]（1-均匀值
+// 仍均匀），k=u^(1/w) 降序等价于按 w 加权的 rendezvous 抽取——首位命中
+// 概率 ∝ w。取 1-u 而非 u 是为保旧序：w 相等时 k 降序 = score 字节序
+// 升序，与加权前的钉选序逐位一致（确定性不变量），投影再平才落回
+// score 字节序兜底。
+func hrwKey(score [32]byte, w float64) float64 {
+	u := 1 - float64(binary.BigEndian.Uint64(score[:8])>>11)*(1.0/(1<<53))
+	return math.Pow(u, 1.0/w)
+}
+
 // laneVerdict 是 lane 一次评估的结论：healthy 是「立即可发」近似判定
 // （无冷却、闸门未闩、分钟桶可发且未满），bucket 是健康档
 // （0=绿 1=配额低 2=病），reasons 是降级归因词表（选号审计的
 // PoolCandidate.Reason 来源），hardDown 是绑定判死词表——只含池侧
-// 两档冷却，gate 状态不算（粘性区只被硬故障打破）。
+// 两档冷却，gate 状态不算（粘性区只被硬故障打破）。expectedWait 是
+// 本类请求进该 lane 闸门的期望排队估计（选号压力权重输入）。
 type laneVerdict struct {
-	healthy  bool
-	hardDown bool
-	bucket   int
-	reasons  []string
+	healthy      bool
+	hardDown     bool
+	bucket       int
+	reasons      []string
+	expectedWait time.Duration
 }
 
 // verdict 对 lane 做一次完整健康评估：降级原因按固定序叠加
 // （auth_cooldown → generic_cooldown → gate_latched → gate_window_full
 // → quota_low），调用方各取所需（排序取 bucket、审计取 reasons、
-// healthy() 取 healthy）。quotaLow 不进 hardDown/病档——它是降权不是
-// 故障，配额低 lane 留在健康档内降一级。
-func (lane *poolLane) verdict() laneVerdict {
+// healthy() 取 healthy、权重取 expectedWait）。class 决定闸门期望
+// 排队按哪条准入轨估计；healthy()/state() 等只关心健康面的调用方
+// 传 fg（默认视图——健康判定本身与类无关，expectedWait 才分轨）。
+// quotaLow 不进 hardDown/病档——它是降权不是故障，配额低 lane 留在
+// 健康档内降一级。
+func (lane *poolLane) verdict(class string) laneVerdict {
 	var v laneVerdict
 	if lane.authCooldown() {
 		v.hardDown = true
@@ -590,7 +679,8 @@ func (lane *poolLane) verdict() laneVerdict {
 		v.hardDown = true
 		v.reasons = append(v.reasons, "generic_cooldown")
 	}
-	snap := lane.adapter.gate.admissionSnapshot()
+	snap := lane.adapter.gate.admissionSnapshot(class)
+	v.expectedWait = snap.ExpectedWait
 	if snap.Latched {
 		v.reasons = append(v.reasons, "gate_latched")
 	}
@@ -623,7 +713,34 @@ func (lane *poolLane) hardDown() bool {
 // healthy 报告 lane 当前是否「立即可发」：闸门未闩、分钟桶可发且未满、
 // 不在任一档冷却。三者都是选中前一刻仍可能翻转的近似判定。
 func (lane *poolLane) healthy() bool {
-	return lane.verdict().healthy
+	return lane.verdict(adapter.ClassFG).healthy
+}
+
+// noteTTFB 记录一次上游侧 TTFB 样本（自本 lane 的 Stream 调用到首个
+// 内容事件——含该 lane 自己的闸门排队，那正是用户成本）。样本进定容
+// 环，写满覆最旧。
+func (lane *poolLane) noteTTFB(d time.Duration) {
+	lane.ttfbMu.Lock()
+	if len(lane.ttfbRing) < ttfbSampleCap {
+		lane.ttfbRing = append(lane.ttfbRing, d)
+	} else {
+		lane.ttfbRing[lane.ttfbHead] = d
+		lane.ttfbHead = (lane.ttfbHead + 1) % ttfbSampleCap
+	}
+	lane.ttfbMu.Unlock()
+}
+
+// ttfbStats 返回滚动 TTFB 中位与当前样本量；无样本回 (0,0)。
+func (lane *poolLane) ttfbStats() (median time.Duration, n int) {
+	lane.ttfbMu.Lock()
+	defer lane.ttfbMu.Unlock()
+	n = len(lane.ttfbRing)
+	if n == 0 {
+		return 0, 0
+	}
+	sorted := slices.Clone(lane.ttfbRing)
+	slices.Sort(sorted)
+	return sorted[n/2], n
 }
 
 // genericCooldown 报告 lane 是否处于非凭据类失败的短冷却窗：到期自动

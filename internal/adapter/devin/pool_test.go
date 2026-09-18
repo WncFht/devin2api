@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -23,6 +24,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/store"
@@ -94,7 +96,7 @@ func TestPoolOrderedLanesRendezvous(t *testing.T) {
 	affinity := "session-A"
 	want := scoreOrder(all, affinity)
 	for i := 0; i < 3; i++ {
-		if got := laneNames(pool.orderedLanes(lanes, affinity)); !slices.Equal(got, want) {
+		if got := laneNames(pool.orderedLanes(context.Background(), lanes, affinity)); !slices.Equal(got, want) {
 			t.Fatalf("orderedLanes(%q) = %v, want %v", affinity, got, want)
 		}
 	}
@@ -102,7 +104,7 @@ func TestPoolOrderedLanesRendezvous(t *testing.T) {
 	distinct := map[string]bool{}
 	for i := 0; i < 50; i++ {
 		key := fmt.Sprintf("session-%d", i)
-		got := laneNames(pool.orderedLanes(lanes, key))
+		got := laneNames(pool.orderedLanes(context.Background(), lanes, key))
 		distinct[strings.Join(got, ",")] = true
 		if !slices.Equal(got, scoreOrder(all, key)) {
 			t.Fatalf("orderedLanes(%q) = %v, want rendezvous order %v", key, got, scoreOrder(all, key))
@@ -132,7 +134,7 @@ func TestPoolOrderedLanesHealthTiers(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("session-%d", i)
-		got := laneNames(pool.orderedLanes(lanes, key))
+		got := laneNames(pool.orderedLanes(context.Background(), lanes, key))
 		if len(got) != 3 {
 			t.Fatalf("orderedLanes(%q) = %v, unhealthy lane must be kept, not dropped", key, got)
 		}
@@ -185,7 +187,7 @@ func pinnedRequest(pool *Pool, want string) llm.RequestMessages {
 		request := llm.RequestMessages{
 			Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("pin-%d", i)}}}},
 		}
-		if pool.orderedLanes(pool.snapshot(), SessionAffinityKey(request))[0].name == want {
+		if pool.orderedLanes(context.Background(), pool.snapshot(), SessionAffinityKey(request))[0].name == want {
 			return request
 		}
 	}
@@ -717,7 +719,7 @@ func TestPoolSessionBinding(t *testing.T) {
 			SessionKey: fmt.Sprintf("sess-%d", i),
 			Messages:   []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
 		}
-		if pool.orderedLanes(pool.snapshot(), SessionAffinityKey(request))[0] == laneB {
+		if pool.orderedLanes(context.Background(), pool.snapshot(), SessionAffinityKey(request))[0] == laneB {
 			break
 		}
 	}
@@ -733,7 +735,7 @@ func TestPoolSessionBinding(t *testing.T) {
 
 	// 绑定命中恒居首：换一个分数序偏好 a 的请求形状（同 SessionKey → 同
 	// 亲和键），b 仍排第一。
-	if got := pool.orderedLanes(pool.snapshot(), affinity)[0]; got != laneB {
+	if got := pool.orderedLanes(context.Background(), pool.snapshot(), affinity)[0]; got != laneB {
 		t.Fatalf("bound lane must stay first, got %v", got.name)
 	}
 
@@ -742,7 +744,7 @@ func TestPoolSessionBinding(t *testing.T) {
 	if got := pool.boundLane(affinity); got != nil {
 		t.Fatalf("hardDown bound lane must unbind, got %v", got.name)
 	}
-	if got := pool.orderedLanes(pool.snapshot(), affinity)[0]; got == laneB {
+	if got := pool.orderedLanes(context.Background(), pool.snapshot(), affinity)[0]; got == laneB {
 		t.Fatal("hardDown lane must not lead candidates")
 	}
 
@@ -794,7 +796,7 @@ func TestPoolInflightPin(t *testing.T) {
 
 	pin := pool.inflightAcquire(affinity)
 	pin.setLane(laneB)
-	ranked := pool.rankLanes(lanes, affinity)
+	ranked := pool.rankLanes(context.Background(), lanes, affinity)
 	if ranked[0].lane != laneB || !ranked[0].pinned {
 		t.Fatalf("inflight-pinned lane must lead, got %v pinned=%v", ranked[0].lane.name, ranked[0].pinned)
 	}
@@ -808,7 +810,7 @@ func TestPoolInflightPin(t *testing.T) {
 
 	// 在飞 lane 硬故障 → 钉选失效按普通序重选。
 	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
-	ranked = pool.rankLanes(lanes, affinity)
+	ranked = pool.rankLanes(context.Background(), lanes, affinity)
 	if ranked[0].lane == laneB || ranked[0].pinned {
 		t.Fatalf("hardDown inflight lane must not be pinned, got %v", ranked[0].lane.name)
 	}
@@ -816,7 +818,7 @@ func TestPoolInflightPin(t *testing.T) {
 
 	// 绑定恒赢于在飞钉选：绑 a 后 a 居首且记 bound。
 	pool.bind(affinity, laneA)
-	ranked = pool.rankLanes(lanes, affinity)
+	ranked = pool.rankLanes(context.Background(), lanes, affinity)
 	if ranked[0].lane != laneA || !ranked[0].bound || ranked[0].pinned {
 		t.Fatalf("bound must beat inflight pin, got %v bound=%v pinned=%v", ranked[0].lane.name, ranked[0].bound, ranked[0].pinned)
 	}
@@ -856,7 +858,7 @@ func TestPoolInflightPinStickyUnderGateLatch(t *testing.T) {
 	if laneA.healthy() {
 		t.Skip("gate latch did not engage; environment-dependent")
 	}
-	ranked := pool.rankLanes(pool.snapshot(), affinity)
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
 	if ranked[0].lane != laneA || !ranked[0].pinned {
 		t.Fatalf("latched inflight lane must stay pinned, got %v", ranked[0].lane.name)
 	}
@@ -918,7 +920,7 @@ func TestPoolBoundLaneStickyUnderGateLatch(t *testing.T) {
 	if laneA.hardDown() {
 		t.Fatal("gate latch must not count as hardDown")
 	}
-	ranked := pool.rankLanes(pool.snapshot(), affinity)
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
 	if ranked[0].lane != laneA || !ranked[0].bound {
 		t.Fatalf("latched bound lane must stay first (sticky zone), got %v", ranked[0].lane.name)
 	}
@@ -943,7 +945,7 @@ func TestPoolRankLanesThreeZones(t *testing.T) {
 	// c 配额低、b 病：三区各一条。
 	laneC.quotaLow.Store(true)
 	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
-	ranked := pool.rankLanes(pool.snapshot(), "zone-key")
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), "zone-key")
 	if ranked[0].lane != laneA {
 		t.Fatalf("green lane must lead, got %v", ranked[0].lane.name)
 	}
@@ -958,13 +960,13 @@ func TestPoolRankLanesThreeZones(t *testing.T) {
 	laneC.quotaLow.Store(false)
 	laneA.priority.Store(1)
 	laneC.priority.Store(9)
-	ranked = pool.rankLanes(pool.snapshot(), "zone-key")
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), "zone-key")
 	if ranked[0].lane != laneC {
 		t.Fatalf("higher priority must lead same bucket, got %v", ranked[0].lane.name)
 	}
 	// bound-hit 恒赢 priority：绑 a 后 a 仍居首。
 	pool.bind("zone-key", laneA)
-	ranked = pool.rankLanes(pool.snapshot(), "zone-key")
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), "zone-key")
 	if ranked[0].lane != laneA || !ranked[0].bound {
 		t.Fatalf("bound-hit must beat priority, got %v", ranked[0].lane.name)
 	}
@@ -1233,4 +1235,145 @@ func TestPoolNoteQuotaSample(t *testing.T) {
 		t.Fatal("negative threshold must disable demotion")
 	}
 	_ = laneA
+}
+
+// weightOf 取候选快照里指定 lane 的排序权重；缺席回 -1。
+func weightOf(ranked []poolCandidate, lane *poolLane) float64 {
+	for _, c := range ranked {
+		if c.lane == lane {
+			return c.weight
+		}
+	}
+	return -1
+}
+
+// laneWeight 的双因子语义：τ=10s 的压力折减、minMedian/median 的 TTFB
+// 相对比、n/50 线性置信度；无样本与最快 lane 都回中性 1。
+func TestLaneWeight(t *testing.T) {
+	cases := []struct {
+		name         string
+		expectedWait time.Duration
+		median       time.Duration
+		n            int
+		minMedian    time.Duration
+		want         float64
+	}{
+		{"neutral", 0, 0, 0, 0, 1},
+		{"pressure one tau", 10 * time.Second, 0, 0, 0, 0.5},
+		{"pressure six tau", 60 * time.Second, 0, 0, 0, 1.0 / 7},
+		{"ttfb full confidence", 0, 800 * time.Millisecond, 60, 100 * time.Millisecond, 0.125},
+		{"ttfb half confidence", 0, 800 * time.Millisecond, 25, 100 * time.Millisecond, 0.5625},
+		{"ttfb unsampled stays neutral", 0, 0, 0, 100 * time.Millisecond, 1},
+		{"ttfb fastest lane", 0, 100 * time.Millisecond, 60, 100 * time.Millisecond, 1},
+		{"pressure and ttfb multiply", 10 * time.Second, 800 * time.Millisecond, 60, 100 * time.Millisecond, 0.0625},
+	}
+	for _, tc := range cases {
+		if got := laneWeight(tc.expectedWait, tc.median, tc.n, tc.minMedian); math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("laneWeight(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// 闸门压力权重：a 的 fg 前队压 60 人 → expectedWait=60s → w_a=1/7，
+// 加权 HRW 下 b 居首概率 7/8≈87.5%（200 键断言 >75%，~5σ 余量）。
+// 权重按请求类分轨：bg 前队只压 bg 类候选的权重，fg 视图不受影响。
+func TestPoolRankLanesPressureWeight(t *testing.T) {
+	config := func(name string) Config {
+		c := testPoolConfig(name)
+		c.Gate = GateConfig{MaxRPM: 60}
+		return c
+	}
+	pool := newTestPool(t, config("a"), config("b"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	// 钉在 :10——可发区间中段，expectedWait 只由前队深度折算。
+	pinGateClock(laneA.adapter.gate, 10)
+	pinGateClock(laneB.adapter.gate, 10)
+
+	laneA.adapter.gate.mu.Lock()
+	laneA.adapter.gate.waitersFg = 60
+	laneA.adapter.gate.mu.Unlock()
+
+	ctx := context.Background()
+	probe := pool.rankLanes(ctx, pool.snapshot(), "weight-probe")
+	if got := weightOf(probe, laneA); math.Abs(got-1.0/7) > 1e-9 {
+		t.Fatalf("congested lane weight = %v, want 1/7", got)
+	}
+	if got := weightOf(probe, laneB); got != 1 {
+		t.Fatalf("idle lane weight = %v, want 1", got)
+	}
+	if rows := poolCandidateRows(probe); rows[0].Weight <= 0 || rows[0].Weight > 1 {
+		t.Fatalf("audit row must carry weight in (0,1]: %+v", rows[0])
+	}
+
+	wins := 0
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("weight-key-%d", i)
+		if pool.rankLanes(ctx, pool.snapshot(), key)[0].lane == laneB {
+			wins++
+		}
+	}
+	if wins < 150 {
+		t.Fatalf("weighted HRW must favor idle lane: b won %d/200, want >150", wins)
+	}
+
+	// 类分轨：bg 前队只进 bg 视图的 expectedWait。
+	laneA.adapter.gate.mu.Lock()
+	laneA.adapter.gate.waitersFg = 0
+	laneA.adapter.gate.waitersBg = 60
+	laneA.adapter.gate.mu.Unlock()
+	ctxBg, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	if got := weightOf(pool.rankLanes(ctxBg, pool.snapshot(), "weight-probe"), laneA); got >= 1 {
+		t.Fatalf("bg congestion must lower bg weight, got %v", got)
+	}
+	if got := weightOf(pool.rankLanes(ctx, pool.snapshot(), "weight-probe"), laneA); got != 1 {
+		t.Fatalf("bg congestion must not affect fg weight, got %v", got)
+	}
+}
+
+// TTFB 相对权重：a 中位 800ms、b 中位 100ms → w_a=0.125（满信），
+// b 居首概率 1/1.125≈88.9%。样本不足 50 时权重向中性回缩（半信
+// 0.5625）——没观测够的慢不被全量惩罚。
+func TestPoolRankLanesTTFBWeight(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	for i := 0; i < 60; i++ {
+		laneA.noteTTFB(800 * time.Millisecond)
+		laneB.noteTTFB(100 * time.Millisecond)
+	}
+	ctx := context.Background()
+	lanes := pool.snapshot()
+	probe := pool.rankLanes(ctx, lanes, "ttfb-probe")
+	if got := weightOf(probe, laneA); math.Abs(got-0.125) > 1e-9 {
+		t.Fatalf("slow lane weight = %v, want 0.125", got)
+	}
+	if got := weightOf(probe, laneB); got != 1 {
+		t.Fatalf("fast lane weight = %v, want 1", got)
+	}
+
+	wins := 0
+	for i := 0; i < 200; i++ {
+		key := fmt.Sprintf("ttfb-key-%d", i)
+		if pool.rankLanes(ctx, lanes, key)[0].lane == laneB {
+			wins++
+		}
+	}
+	if wins < 150 {
+		t.Fatalf("weighted HRW must favor fast lane: b won %d/200, want >150", wins)
+	}
+
+	// 置信度回缩：a 只有 25 个样本（<50）→ w_a=1+(0.125-1)*0.5=0.5625。
+	pool2 := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA2 := poolLaneByName(pool2, "a")
+	laneB2 := poolLaneByName(pool2, "b")
+	for i := 0; i < 25; i++ {
+		laneA2.noteTTFB(800 * time.Millisecond)
+	}
+	for i := 0; i < 60; i++ {
+		laneB2.noteTTFB(100 * time.Millisecond)
+	}
+	if got := weightOf(pool2.rankLanes(ctx, pool2.snapshot(), "ttfb-probe"), laneA2); math.Abs(got-0.5625) > 1e-9 {
+		t.Fatalf("half-confidence weight = %v, want 0.5625", got)
+	}
 }

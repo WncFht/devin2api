@@ -133,7 +133,10 @@ type PoolCandidate struct {
 	Healthy bool   `json:"healthy"`
 	Bound   bool   `json:"bound,omitempty"`
 	Pinned  bool   `json:"pinned,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	// Weight 是排序时刻的健康权重（闸门压力×相对 TTFB，加权 HRW
+	// 的 w）——选号分布漂移的事后归因靠它，1 表示中性。
+	Weight float64 `json:"weight,omitempty"`
+	Reason string  `json:"reason,omitempty"`
 }
 
 // 进行中请求的阶段名（ActiveRequest.State 的取值集）：waiting_upstream

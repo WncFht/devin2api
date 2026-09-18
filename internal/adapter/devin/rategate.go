@@ -561,20 +561,23 @@ func (gate *rateGate) stats() GateStats {
 	return stats
 }
 
-// gateAdmission 是闸门准入面的窄快照：只含 lane 健康判定要用的闩态、
-// 可发区间与桶位四元。
+// gateAdmission 是闸门准入面的窄快照：闩态、可发区间与桶位四元供
+// lane 健康判定用，ExpectedWait 是本类请求此刻进闸的期望排队时长
+// 估计（号池选号的压力权重输入）。
 type gateAdmission struct {
-	Latched     bool
-	Sendable    bool
-	WindowQuota int
-	WindowUsed  int
+	Latched      bool
+	Sendable     bool
+	WindowQuota  int
+	WindowUsed   int
+	ExpectedWait time.Duration
 }
 
 // admissionSnapshot 读闸门准入面，读数与 stats 惰性结算后的口径等效但
 // 不产生写：到期未清的陈闩按「now >= limitedUntil」自然读出非闩态，
 // 翻过窗口的旧桶用量不结转——pool.healthy 是每请求热路径，不该为面板
-// 视角付事件环复制与闩时段重放的成本。
-func (gate *rateGate) admissionSnapshot() gateAdmission {
+// 视角付事件环复制与闩时段重放的成本。class 决定 ExpectedWait 按哪条
+// 准入轨（fg 直放 / bg 预留+爬坡）估计。
+func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 	now := gate.now()
@@ -583,12 +586,54 @@ func (gate *rateGate) admissionSnapshot() gateAdmission {
 	if !ws.Equal(gate.bucketStart) {
 		used = 0
 	}
+	sendable := now.Sub(ws) < gate.usable
 	return gateAdmission{
-		Latched:     !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
-		Sendable:    now.Sub(ws) < gate.usable,
-		WindowQuota: gate.quota,
-		WindowUsed:  used,
+		Latched:      !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
+		Sendable:     sendable,
+		WindowQuota:  gate.quota,
+		WindowUsed:   used,
+		ExpectedWait: gate.expectedWaitLocked(class, now, ws, used, sendable),
 	}
+}
+
+// expectedWaitLocked 估算本类请求此刻进闸的期望排队时长，是 wait 准入
+// 判定的静态估计版——同一本账（reserve/bgAllowance/waiters）但不含
+// 睡眠与重查，只回答「现在到放行大概要多久」：
+//   - 闩内 → 闩剩余：快败语义下不会真排，但选号视角它等价「这段时间
+//     不可用」；
+//   - 死区或桶满 → 到下一窗口开放，前队按整窗配额折算追加；
+//   - fg 可发且桶有位 → 本请求此刻即放，只把已在排队的前队深度按本窗
+//     剩余额度折算成拥堵代理（睡醒者会与之抢槽）；
+//   - bg 被预留/爬坡挡 → 额度缺口按爬坡释放速率折算，前队同速率折算，
+//     封顶到下窗+一窗（usable 末额度定格，更深的队只能翻窗）。
+//
+// 调用方须持 mu。
+func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used int, sendable bool) time.Duration {
+	if now.Before(gate.limitedUntil) {
+		return gate.limitedUntil.Sub(now)
+	}
+	if gate.quota <= 0 {
+		return 0
+	}
+	waiters := gate.waitersFg
+	if class == adapter.ClassBG {
+		waiters = gate.waitersBg
+	}
+	toNext := ws.Add(windowPeriod).Sub(now)
+	if !sendable || used >= gate.quota {
+		return toNext + time.Duration(float64(waiters)/float64(gate.quota)*float64(windowPeriod))
+	}
+	if class != adapter.ClassBG {
+		return time.Duration(float64(waiters) / float64(max(gate.quota-used, 1)) * float64(windowPeriod))
+	}
+	reserve := gate.reserve(now, ws)
+	room := min(gate.quota-reserve-used, gate.bgAllowance(now, ws, reserve)-gate.bucketUsedBg)
+	rate := float64(max(gate.quota-reserve, 1)) / gate.usable.Seconds()
+	wait := time.Duration(float64(waiters) / rate * float64(time.Second))
+	if room < 0 {
+		wait += time.Duration(float64(-room) / rate * float64(time.Second))
+	}
+	return min(wait, toNext+windowPeriod)
 }
 
 // latchRanges 按事件时间序还原闩时段：latched/restored 开窗，released
