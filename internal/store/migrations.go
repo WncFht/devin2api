@@ -105,6 +105,17 @@ var schemaMigrations = []migration{
 			return setCellsWatermark(tx, maxID)
 		},
 	},
+	{
+		// quota_samples.overage_balance_micros：上游 planStatus 的
+		// 欠费余额账本（micros，负值=负债），粒度远细于整数百分比，
+		// 是分辨「真零燃烧」与「付费燃烧走 overage 通道」的信号。
+		// 存量行经 DEFAULT 0 落位——proto3 缺席键本就编码 0。
+		version: "0007_quota_samples_overage_micros",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "quota_samples", "overage_balance_micros",
+				`ALTER TABLE quota_samples ADD COLUMN overage_balance_micros INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

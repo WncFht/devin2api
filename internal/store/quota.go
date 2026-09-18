@@ -28,6 +28,7 @@ type QuotaSample struct {
 	WasReducedByOrphanedUsage bool     `json:"was_reduced_by_orphaned_usage,omitempty"`
 	TopUpEnabled              bool     `json:"top_up_enabled,omitempty"`
 	TopUpTransactionStatus    string   `json:"top_up_transaction_status,omitempty"`
+	OverageBalanceMicros      int64    `json:"overage_balance_micros,omitempty"`
 }
 
 // InsertQuotaSample 追加一条配额快照。(account,at) 有唯一索引——
@@ -39,13 +40,13 @@ func (s *Store) InsertQuotaSample(ctx context.Context, q *QuotaSample) error {
 		prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
 		used_prompt_credits, used_flow_credits, used_flex_credits,
 		grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
-		top_up_enabled, top_up_transaction_status
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		top_up_enabled, top_up_transaction_status, overage_balance_micros
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		q.At, q.Account, q.DailyRemaining, q.WeeklyRemaining, q.DailyResetAt, q.WeeklyResetAt,
 		q.PromptCredits, q.FlowCredits, q.FlexCredits, q.ACUConsumed, q.ACULimit,
 		q.UsedPromptCredits, q.UsedFlowCredits, q.UsedFlexCredits,
 		q.GracePeriodStatus, q.GracePeriodEnd, q.WasReducedByOrphanedUsage,
-		q.TopUpEnabled, q.TopUpTransactionStatus)
+		q.TopUpEnabled, q.TopUpTransactionStatus, q.OverageBalanceMicros)
 	return err
 }
 
@@ -60,7 +61,7 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 		prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
 		used_prompt_credits, used_flow_credits, used_flex_credits,
 		grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
-		top_up_enabled, top_up_transaction_status
+		top_up_enabled, top_up_transaction_status, overage_balance_micros
 		FROM quota_samples WHERE at>=?`
 	args := []any{since}
 	if account != "" {
@@ -82,7 +83,7 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 			&q.PromptCredits, &q.FlowCredits, &q.FlexCredits, &q.ACUConsumed, &q.ACULimit,
 			&q.UsedPromptCredits, &q.UsedFlowCredits, &q.UsedFlexCredits,
 			&q.GracePeriodStatus, &q.GracePeriodEnd, &q.WasReducedByOrphanedUsage,
-			&q.TopUpEnabled, &q.TopUpTransactionStatus); err != nil {
+			&q.TopUpEnabled, &q.TopUpTransactionStatus, &q.OverageBalanceMicros); err != nil {
 			return nil, err
 		}
 		out = append(out, &q)

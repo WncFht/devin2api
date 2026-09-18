@@ -192,6 +192,9 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 		UsedPromptCredits: floatAny(plan["used_prompt_credits"]),
 		UsedFlowCredits:   floatAny(plan["used_flow_credits"]),
 		UsedFlexCredits:   floatAny(plan["used_flex_credits"]),
+		// overage_balance_micros 是 micros 粒度的欠费账本（负值=负债），
+		// 比整数百分比细得多——付费燃烧走 overage 通道时百分比不动它动。
+		OverageBalanceMicros: int64(floatAny(plan["overage_balance_micros"])),
 		// plan["grace_period_status"] 已经 fetchUserStatus 的 shortEnum
 		// 缩成尾段；grace_period_end 是归一后的 RFC3339，转回 unix 秒。
 		GracePeriodStatus:         strAny(plan["grace_period_status"]),

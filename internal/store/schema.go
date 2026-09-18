@@ -175,6 +175,8 @@ var schemaStatements = []string{
 
 	// quota_samples：daily/weekly_remaining 可空 REAL 保留
 	// 「上游没报」与「真到 0」的区分（QuotaSample 的 *float64 语义）。
+	// overage_balance_micros 列尾追加（存量库由迁移 0007 幂等补齐，
+	// 两条路径物理列序一致）。
 	`CREATE TABLE IF NOT EXISTS quota_samples (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		at INTEGER NOT NULL,
@@ -195,7 +197,8 @@ var schemaStatements = []string{
 		grace_period_end INTEGER NOT NULL DEFAULT 0,
 		was_reduced_by_orphaned_usage INTEGER NOT NULL DEFAULT 0,
 		top_up_enabled INTEGER NOT NULL DEFAULT 0,
-		top_up_transaction_status TEXT NOT NULL DEFAULT ''
+		top_up_transaction_status TEXT NOT NULL DEFAULT '',
+		overage_balance_micros INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_quota_at ON quota_samples(at)`,
 	// (account, at) 唯一：采样间隔以分钟计天然不撞，约束只为

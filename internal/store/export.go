@@ -184,7 +184,7 @@ func (s *Store) exportQuota(ctx context.Context, target string) (string, string,
 		daily_reset_at, weekly_reset_at, prompt_credits, flow_credits, flex_credits,
 		acu_consumed, acu_limit, used_prompt_credits, used_flow_credits, used_flex_credits,
 		grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
-		top_up_enabled, top_up_transaction_status
+		top_up_enabled, top_up_transaction_status, overage_balance_micros
 		FROM quota_samples ORDER BY at, id`)
 	if err != nil {
 		return "", "", err
@@ -199,7 +199,7 @@ func (s *Store) exportQuota(ctx context.Context, target string) (string, string,
 				&q.PromptCredits, &q.FlowCredits, &q.FlexCredits, &q.ACUConsumed, &q.ACULimit,
 				&q.UsedPromptCredits, &q.UsedFlowCredits, &q.UsedFlexCredits,
 				&q.GracePeriodStatus, &q.GracePeriodEnd, &q.WasReducedByOrphanedUsage,
-				&q.TopUpEnabled, &q.TopUpTransactionStatus); err != nil {
+				&q.TopUpEnabled, &q.TopUpTransactionStatus, &q.OverageBalanceMicros); err != nil {
 				return err
 			}
 			if err := enc.Encode(&q); err != nil {
