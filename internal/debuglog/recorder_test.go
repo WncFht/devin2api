@@ -1007,3 +1007,85 @@ func TestPregateTimingMetaJSON(t *testing.T) {
 		t.Fatalf("models_fetch_ms = %v ok=%v, want 42150", v, ok)
 	}
 }
+
+// TestDetachedEventsMirrorToMeta 钉住脱钩标记的 meta 镜像口径：
+// NoteDetachedEvent 累积的事件随 metaJSON 出账为 detached_events，
+// 条目带 kind/time/elapsed_ms 三戳且 detail 键原样透传——队列满把
+// 04 标记行丢弃时，meta 仍是脱钩生命周期的持久记录。
+func TestDetachedEventsMirrorToMeta(t *testing.T) {
+	manager := NewManager("", RetentionPolicy{}, nil)
+	recorder := newBareRecorder(manager, "20200101-000007")
+
+	data := recorder.metaJSON(nil)
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := meta["detached_events"]; ok {
+		t.Fatal("detached_events present before any NoteDetachedEvent")
+	}
+
+	detail := map[string]any{"key": "k1", "buffered_events": 7}
+	recorder.NoteDetachedEvent("detached", detail)
+	recorder.NoteDetachedEvent("detached_attach", map[string]any{"key": "k1", "origin_dir": "d0", "state": "running", "buffered_events": 7})
+	data = recorder.metaJSON(nil)
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := meta["detached_events"].([]any)
+	if !ok || len(events) != 2 {
+		t.Fatalf("detached_events = %v, want 2 entries", meta["detached_events"])
+	}
+	first, _ := events[0].(map[string]any)
+	second, _ := events[1].(map[string]any)
+	if first["kind"] != "detached" || first["key"] != "k1" || first["buffered_events"] != float64(7) {
+		t.Fatalf("detached_events[0] = %v", first)
+	}
+	if second["kind"] != "detached_attach" || second["origin_dir"] != "d0" {
+		t.Fatalf("detached_events[1] = %v", second)
+	}
+	for i, event := range []map[string]any{first, second} {
+		if _, ok := event["time"]; !ok {
+			t.Fatalf("detached_events[%d] missing time stamp", i)
+		}
+		if _, ok := event["elapsed_ms"]; !ok {
+			t.Fatalf("detached_events[%d] missing elapsed_ms", i)
+		}
+	}
+	// 入参 map 不被改写：调用方把同一张表同时喂给 04 行与本镜像，
+	// 若原地注入 kind/time 会污染 AppendJSONL 的延迟求值产物。
+	if _, ok := detail["kind"]; ok {
+		t.Fatal("NoteDetachedEvent must not mutate the caller's detail map")
+	}
+}
+
+// TestDetachedEventsSurviveQueueDrop 钉住镜像的免疫性：分片队列满把
+// AppendJSONL 的 04 标记行丢弃时，同点的 NoteDetachedEvent 仍随完结
+// meta 出账——这正是本字段的存在理由（生产丢标记事故的直接回归）。
+func TestDetachedEventsSurviveQueueDrop(t *testing.T) {
+	manager := &Manager{
+		queues:     []chan writeTask{make(chan writeTask, 1)},
+		insertQ:    make(chan insertOp, 4),
+		workerGone: make(chan struct{}),
+	}
+	recorder := &Recorder{manager: manager, startedAt: time.Now(), sequences: make(map[string]int)}
+	// 填满分片队列：下一条 AppendJSONL 必走 default 丢弃。
+	recorder.enqueue(func() {})
+	recorder.AppendJSONL(StageDevinResponse, "detached", map[string]any{"key": "k9"})
+	if got := recorder.dropped.Load(); got != 1 {
+		t.Fatalf("dropped = %d, want 1（标记行确已被丢）", got)
+	}
+	recorder.NoteDetachedEvent("detached", map[string]any{"key": "k9"})
+	data := recorder.metaJSON(&Completion{StatusCode: 200, Result: "completed"})
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	events, ok := meta["detached_events"].([]any)
+	if !ok || len(events) != 1 {
+		t.Fatalf("detached_events = %v, want the dropped marker mirrored", meta["detached_events"])
+	}
+	if kind := events[0].(map[string]any)["kind"]; kind != "detached" {
+		t.Fatalf("kind = %v, want detached", kind)
+	}
+}

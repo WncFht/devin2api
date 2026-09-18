@@ -29,7 +29,13 @@ type MetaSummary struct {
 	AssignModelMS *int64      `json:"assign_model_ms,omitempty"`
 	Client        *MetaClient `json:"client,omitempty"`
 
-	DroppedEvents uint64 `json:"dropped_events,omitempty"`
+	// DetachedEvents 是脱钩生命周期事件的持久镜像：04 的 detached/
+	// detached_attach/detached_truncated/detached_cross_lane_miss 标记行
+	// 与 bulk 帧同走 AppendJSONL 的分片队列，队列满与 Complete 后 closed
+	// 两种情形都会被丢弃——脱钩现场随之整段蒸发。这里经 NoteDetachedEvent
+	// 进 meta 累积器随完结块出账，两种丢法都免疫。条目形状见 DetachedEvent。
+	DetachedEvents []DetachedEvent `json:"detached_events,omitempty"`
+	DroppedEvents  uint64          `json:"dropped_events,omitempty"`
 
 	DurationMS *int64 `json:"duration_ms,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
@@ -134,6 +140,15 @@ type AccountAttempt struct {
 	LocalGate  bool   `json:"local_gate,omitempty"`
 	GateReason string `json:"gate_reason,omitempty"`
 }
+
+// DetachedEvent 是 04 脱钩标记行在 meta.json 的镜像条目：kind 即 04
+// 事件词表（detached/detached_attach/detached_truncated/
+// detached_cross_lane_miss），其余键与 04 行 detail 同形（key/
+// origin_dir/state/buffered_events/budget_bytes/owner_lane/owner_state/
+// usable），另补 time/elapsed_ms 两个打戳（与 JSONLRecord 同口径）。
+// 用 map 而非 struct——四种 kind 的字段集互不相同，镜像与 04 行共用
+// 同一张 detail 表才不会各自枚举漂移（这个字段就是为修漂移而生的）。
+type DetachedEvent map[string]any
 
 // PoolCandidate 是号池一次选号的候选快照行：Name 是 lane 名，Healthy/
 // Bound/Pinned 是当时判定位（Pinned 是亲和键在飞钉选命中——正式绑定

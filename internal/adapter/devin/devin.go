@@ -796,12 +796,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		entry.mu.Lock()
 		originDir, state, buffered := entry.originDir, entry.state, len(entry.events)
 		entry.mu.Unlock()
-		recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_attach", map[string]any{
+		detail := map[string]any{
 			"key":             detachKey,
 			"origin_dir":      originDir,
 			"state":           state.String(),
 			"buffered_events": buffered,
-		})
+		}
+		recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_attach", detail)
+		recorder.NoteDetachedEvent("detached_attach", detail)
 		return &attachStream{entry: entry}, nil
 	}
 	// 本地查无此键时探测兄弟 lane 的登记表（号池经 ctx 挂接；裸 New()
@@ -821,12 +823,14 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 				continue
 			}
 			adapter.detached.noteCrossLaneMiss(detachKey, owner, state)
-			recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_cross_lane_miss", map[string]any{
+			detail := map[string]any{
 				"key":         detachKey,
 				"owner_lane":  owner,
 				"owner_state": state.String(),
 				"usable":      usable,
-			})
+			}
+			recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_cross_lane_miss", detail)
+			recorder.NoteDetachedEvent("detached_cross_lane_miss", detail)
 		}
 	}
 	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
@@ -2097,10 +2101,15 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 记 04 标记行给「flood  drain 进缓存」留取证——detached/
 			// detached_attach 之外的第三条脱钩标记。
 			stream.registry.noteTruncated(stream.detachKey)
-			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", map[string]any{
+			detail := map[string]any{
 				"key":          stream.detachKey,
 				"budget_bytes": detachedMaxBufferedBytes,
-			})
+			}
+			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", detail)
+			// 后台泵经同一 tee 点触发的截断落在 Complete 之后：镜像照记
+			// 但终态 meta 已定稿不再出账——post-Complete 标记本是无解题，
+			// NoteDetachedEvent 内部对此只是无害的 slice 追加。
+			stream.recorder.NoteDetachedEvent("detached_truncated", detail)
 		}
 		return event, nil
 	}
@@ -2182,10 +2191,12 @@ func (stream *responseStream) detach(ctx context.Context) {
 	entry.drainCancel = drainCancel
 	entry.mu.Unlock()
 	stream.registry.admit(stream.detachKey, entry)
-	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", map[string]any{
+	detail := map[string]any{
 		"key":             stream.detachKey,
 		"buffered_events": entry.len(),
-	})
+	}
+	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", detail)
+	stream.recorder.NoteDetachedEvent("detached", detail)
 	go func() {
 		defer drainCancel()
 		// 退场必收尸：TTL/淘汰走的 ctx.Done 分支不杀泵（detached 态

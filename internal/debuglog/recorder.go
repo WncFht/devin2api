@@ -386,6 +386,13 @@ type Recorder struct {
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，metaJSON/logRowFor 读，走 mutex 同步。
 	retries []RetryAttempt
+	// detachedEvents 是 04 脱钩标记行（detached/detached_attach/
+	// detached_truncated/detached_cross_lane_miss）的 meta 镜像累积：
+	// 标记行与 bulk 帧同走 AppendJSONL 的分片队列，队列满（enqueueLocked
+	// default 分支）与 Complete 后 closed 都会被丢弃，脱钩生命周期随之
+	// 蒸发——这里按 retries 同口径经 NoteDetachedEvent 追加，metaJSON
+	// 落 meta.detached_events，随完结块出账免疫两种丢法。
+	detachedEvents []DetachedEvent
 	// devinSends 是 03-devin-request 词干已分配的上游发送序号：计数
 	// 挂在请求目录上跨 lane 共享——号池 failover 后新 lane 的首发续占
 	// attemptN 分片而非以基座名覆写（debug_files 同名 REPLACE 会把
@@ -1728,6 +1735,31 @@ func (recorder *Recorder) retryAttempts() []RetryAttempt {
 	return append([]RetryAttempt(nil), recorder.retries...)
 }
 
+// NoteDetachedEvent 把一条脱钩生命周期事件镜像进 meta.json 的
+// detached_events：调用方在同处写 04 的同名标记行，两处记录保持同源
+// ——detail 就是给 04 行的那张字段表（本函数复制后补 kind/time/
+// elapsed_ms 三戳，与 JSONLRecord 的打戳口径一致）。与标记行不同，
+// 本记录走 meta 累积器随完结块出账：队列满或 Complete 后 closed 把
+// 04 行丢弃时，meta 仍留住脱钩/挂接/截断/跨 lane 未命中的发生事实。
+// Complete 后（后台泵路径）的追加仍会累积但不再出账——终态 meta 已
+// 定稿，post-Complete 的脱钩标记本就无处安放（同 retries 口径）。
+func (recorder *Recorder) NoteDetachedEvent(kind string, detail map[string]any) {
+	if recorder == nil {
+		return
+	}
+	at := time.Now()
+	event := make(DetachedEvent, len(detail)+3)
+	for k, v := range detail {
+		event[k] = v
+	}
+	event["kind"] = kind
+	event["time"] = at.Format(time.RFC3339Nano)
+	event["elapsed_ms"] = at.Sub(recorder.startedAt).Milliseconds()
+	recorder.mutex.Lock()
+	recorder.detachedEvents = append(recorder.detachedEvents, event)
+	recorder.mutex.Unlock()
+}
+
 // SetUpstreamAccount 记录最终服务本请求的上游账号（号池 lane 名）。
 // 号池在 lane.Stream 成功开流后调用；failover 只留成功归属，
 // 被放弃 lane 的明细走 NoteAccountAttempt。
@@ -2263,6 +2295,7 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	recorder.mutex.Lock()
 	meta.AffinityHash = recorder.affinityHash
 	meta.PoolCandidates = append([]PoolCandidate(nil), recorder.poolCandidates...)
+	meta.DetachedEvents = append([]DetachedEvent(nil), recorder.detachedEvents...)
 	recorder.mutex.Unlock()
 	if completion != nil {
 		finishedAt := time.Now()

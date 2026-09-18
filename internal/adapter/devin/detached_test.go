@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
+	"github.com/WncFht/devin2api/internal/store"
 )
 
 // pauseReceiver 先按序发 frames、到达 pauseAt 下标时阻塞到 release、
@@ -374,6 +376,66 @@ func TestDetachedAttachFollowsLive(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("attached stream did not finish after upstream EOF")
+	}
+}
+
+// TestDetachedEventMirroredToMeta 钉住 detach() 调用点的 meta 镜像：
+// 消费方 Recv 内脱钩时除写 04 标记行外还须经 NoteDetachedEvent 把同一
+// detail 落进 meta.detached_events——04 标记行在队列压力下可丢，meta
+// 随完结块出账不可丢。
+func TestDetachedEventMirroredToMeta(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "detached.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "mk", receiver)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/messages"})
+	stream.recorder = recorder
+
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("mk")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	close(receiver.release)
+	waitEntryState(t, entry, detachedCompleted)
+
+	recorder.Complete(debuglog.Completion{StatusCode: 499, Result: "disconnected"})
+	<-manager.Drained(recorder.Dir())
+
+	metaData, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "meta.json")
+	if err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+	var meta debuglog.MetaSummary
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	if len(meta.DetachedEvents) != 1 {
+		t.Fatalf("detached_events = %+v, want exactly the detach marker", meta.DetachedEvents)
+	}
+	event := meta.DetachedEvents[0]
+	if event["kind"] != "detached" || event["key"] != "mk" {
+		t.Fatalf("detached_events[0] = %v, want kind=detached key=mk", event)
+	}
+	if _, ok := event["buffered_events"]; !ok {
+		t.Fatalf("detached_events[0] missing buffered_events: %v", event)
 	}
 }
 
