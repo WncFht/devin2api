@@ -589,6 +589,7 @@
 
   const REASON_KEYS = {
     bound: 'bound',
+    bound_yield: 'boundYield',
     auth_cooldown: 'authCooldown',
     generic_cooldown: 'genericCooldown',
     gate_latched: 'gateLatched',

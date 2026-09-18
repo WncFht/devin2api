@@ -1232,6 +1232,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.fo.candidates': '候选序',
   'accounts.reason.selected': '选中',
   'accounts.reason.bound': '会话绑定',
+  'accounts.reason.boundYield': '绑定让位',
   'accounts.reason.authCooldown': '凭据冷却',
   'accounts.reason.genericCooldown': '失败冷却',
   'accounts.reason.gateLatched': '闸门闩锁',

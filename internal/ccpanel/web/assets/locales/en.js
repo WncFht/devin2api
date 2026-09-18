@@ -1233,6 +1233,7 @@ window.I18N_LOCALES['en'] = {
   'accounts.fo.candidates': 'Candidates',
   'accounts.reason.selected': 'selected',
   'accounts.reason.bound': 'bound session',
+  'accounts.reason.boundYield': 'bound yielded',
   'accounts.reason.authCooldown': 'credential cooldown',
   'accounts.reason.genericCooldown': 'failure cooldown',
   'accounts.reason.gateLatched': 'gate latched',
