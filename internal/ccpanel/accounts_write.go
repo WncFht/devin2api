@@ -37,6 +37,7 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		Token              string  `json:"token"`
 		CredentialsFile    string  `json:"credentials_file"`
 		CredentialsContent string  `json:"credentials_content"`
+		APIKey             string  `json:"api_key"`
 		Disabled           bool    `json:"disabled"`
 		Verify             bool    `json:"verify"`
 		Priority           *int64  `json:"priority"`
@@ -67,6 +68,7 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		Token:              req.Token,
 		CredentialsFile:    req.CredentialsFile,
 		CredentialsContent: req.CredentialsContent,
+		APIKey:             req.APIKey,
 		Disabled:           req.Disabled,
 		Verify:             req.Verify,
 		Priority:           req.Priority,
@@ -119,6 +121,7 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		Token              *string `json:"token"`
 		CredentialsFile    *string `json:"credentials_file"`
 		CredentialsContent *string `json:"credentials_content"`
+		APIKey             *string `json:"api_key"`
 		Disabled           *bool   `json:"disabled"`
 		Priority           *int64  `json:"priority"`
 		MaxRPM             *int64  `json:"max_rpm"`
@@ -140,7 +143,7 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Token == nil && req.CredentialsFile == nil && req.CredentialsContent == nil &&
-		req.Disabled == nil && req.Priority == nil && req.MaxRPM == nil && req.Notes == nil {
+		req.APIKey == nil && req.Disabled == nil && req.Priority == nil && req.MaxRPM == nil && req.Notes == nil {
 		respondError(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
@@ -148,6 +151,7 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		Token:              req.Token,
 		CredentialsFile:    req.CredentialsFile,
 		CredentialsContent: req.CredentialsContent,
+		APIKey:             req.APIKey,
 		Disabled:           req.Disabled,
 		Priority:           req.Priority,
 		MaxRPM:             req.MaxRPM,

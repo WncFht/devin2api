@@ -41,12 +41,16 @@ type ServerConfig struct {
 
 // DevinAccountConfig 是上游账号池的一个号：name 是它在日志、闸门状态
 // 文件与面板里的身份；token 给字面量凭据，credentials_file 指向
-// Devin CLI credentials.toml（解析 windsurf_api_key），两者至少给一个；
-// 都给时 token 作初始值、credentials_file 作 unauthenticated 自愈来源。
+// Devin CLI credentials.toml（解析 windsurf_api_key），api_key 给
+// Devin 平台 durable key（app.devin.ai 签发的 cog_*——上游 session token
+// 失效时 lane 用它经 GetSelfDevinSessionToken 现场铸新 token，见
+// adapter 的 mint 路径）。三者至少给一个；并存时 token 是现役凭据、
+// credentials_file/api_key 都是 unauthenticated 自愈来源。
 type DevinAccountConfig struct {
 	Name            string `yaml:"name"`
 	Token           string `yaml:"token"`
 	CredentialsFile string `yaml:"credentials_file"`
+	APIKey          string `yaml:"api_key"`
 	// Priority 是池级排序元数据：值越大越优先被新会话选中，0 为默认档。
 	Priority int `yaml:"priority"`
 	// MaxRPM 覆盖该号自己的分钟窗口配额；0 表示继承 devin.max_rpm 全局值。
@@ -298,6 +302,7 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 	seenNames := make(map[string]bool, len(devin.Accounts))
 	seenTokens := make(map[string]string, len(devin.Accounts))
 	seenFiles := make(map[string]string, len(devin.Accounts))
+	seenAPIKeys := make(map[string]string, len(devin.Accounts))
 	for index := range devin.Accounts {
 		account := &devin.Accounts[index]
 		account.Name = strings.TrimSpace(account.Name)
@@ -316,6 +321,7 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 		}
 		account.Token = strings.TrimSpace(account.Token)
 		account.CredentialsFile = strings.TrimSpace(account.CredentialsFile)
+		account.APIKey = strings.TrimSpace(account.APIKey)
 		if account.CredentialsFile != "" {
 			// 锚定到配置文件目录：launchd 下 CWD=/，相对路径按进程
 			// CWD 解析必死；~/ 展开顺手做掉（用户自然写法）。
@@ -336,13 +342,21 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 				account.Token = resolved
 			}
 		}
-		if account.Token == "" {
-			return fmt.Errorf("devin.accounts[%d]: one of token/credentials_file is required", index)
+		if account.Token == "" && account.APIKey == "" {
+			return fmt.Errorf("devin.accounts[%d]: one of token/credentials_file/api_key is required", index)
 		}
-		if prior, dup := seenTokens[account.Token]; dup {
-			return fmt.Errorf("devin.accounts[%d]: token duplicates account %q", index, prior)
+		if account.Token != "" {
+			if prior, dup := seenTokens[account.Token]; dup {
+				return fmt.Errorf("devin.accounts[%d]: token duplicates account %q", index, prior)
+			}
+			seenTokens[account.Token] = account.Name
 		}
-		seenTokens[account.Token] = account.Name
+		if account.APIKey != "" {
+			if prior, dup := seenAPIKeys[account.APIKey]; dup {
+				return fmt.Errorf("devin.accounts[%d]: api_key duplicates account %q", index, prior)
+			}
+			seenAPIKeys[account.APIKey] = account.Name
+		}
 	}
 	return nil
 }

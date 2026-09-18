@@ -4,8 +4,10 @@
 package devin
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -57,6 +59,11 @@ type LaneIdentity struct {
 	Name string
 	// Token 是 Devin session token；不会写入日志。
 	Token string
+	// APIKey 是 Devin 平台 durable key（app.devin.ai 签发的 cog_*）：
+	// session token 被上游判死且 TokenSource 拿不出新凭据时，lane 用它
+	// 经 GetSelfDevinSessionToken 现场铸一枚新 session token（minted
+	// 槽位），durable key 本身无内嵌寿命——这是「自动不过期」的来源。
+	APIKey string
 	// TokenSource 可选：unauthenticated 时回调重新解析凭据。
 	// Devin CLI 会续期改写 credentials.toml，静态缓存的 token 会静默失效；
 	// 回调应重读同一来源（配置文件或凭证文件），返回空表示无新凭据。
@@ -147,10 +154,13 @@ type Adapter struct {
 	// CurrentConfig 取快照。
 	configMu sync.RWMutex
 	config   Config
-	// token 是当前生效的上游凭据：unauthenticated 自愈会原地更新，
-	// transport 经 tokenFunc 每次请求读取，无需重建 HTTP 客户端。
+	// token 是声明侧上游凭据（config/TokenSource 管）；minted 是
+	// APIKey 现场铸出的 session token——只在内存活（不落盘，重启后
+	// 再铸一次即可），非空时优先于 token 服役。unauthenticated 自愈
+	// 原地更新，transport 经 tokenFunc 每次请求读取，无需重建 client。
 	tokenMu sync.RWMutex
 	token   string
+	minted  string
 	// linkPtr 是绑死 base_url/proxy/force_http1 的上游调用束：endpoint
 	// 热应用时整体重建换指针（见 ApplyConfig），在途调用持旧引用跑完。
 	// 读侧经 link() 取快照；New 之后恒非 nil。
@@ -255,6 +265,16 @@ func New(config Config) (*Adapter, error) {
 		return nil, err
 	}
 	adapter.linkPtr.Store(link)
+	if adapter.token == "" && strings.TrimSpace(config.Identity.APIKey) != "" {
+		// api_key-only lane：声明侧没有可服役凭据，第一发请求必然
+		// unauthenticated——启动即铸一枚 minted，省掉这发献祭请求。
+		// 失败不拦启动：minted 留空，流量进来走 reloadToken 惰性路径。
+		if minted, mintErr := adapter.mintSessionToken(strings.TrimSpace(config.Identity.APIKey)); mintErr == nil {
+			adapter.minted = minted
+		} else {
+			slog.Warn("initial session token mint failed", "lane", config.Identity.Name, "error", mintErr)
+		}
+	}
 	adapter.warm = newCacheWarmer(adapter, config.Warm)
 
 	return adapter, nil
@@ -323,10 +343,14 @@ func (adapter *Adapter) BeginDrain() {
 	adapter.warm.BeginDrain()
 }
 
-// currentToken 返回当前生效的上游凭据。
+// currentToken 返回当前生效的上游凭据：minted（APIKey 铸出的 session
+// token）非空时优先，否则回落声明侧 token。
 func (adapter *Adapter) currentToken() string {
 	adapter.tokenMu.RLock()
 	defer adapter.tokenMu.RUnlock()
+	if adapter.minted != "" {
+		return adapter.minted
+	}
 	return adapter.token
 }
 
@@ -455,8 +479,19 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	if prev.Identity.Token != next.Identity.Token {
 		adapter.tokenMu.Lock()
 		adapter.token = next.Identity.Token
+		// 声明凭据换值即夺回服役位：minted 是按旧声明铸出的，留下会
+		// 让新 token 永不服役。
+		adapter.minted = ""
 		adapter.tokenMu.Unlock()
 		applied = append(applied, "devin.accounts."+next.Identity.Name+".token")
+	}
+	if prev.Identity.APIKey != next.Identity.APIKey {
+		// mint key 换值意味着铸币身份可能换号——旧 key 铸出的 minted
+		// 一并作废，下一次需要时按新 key 重铸。
+		adapter.tokenMu.Lock()
+		adapter.minted = ""
+		adapter.tokenMu.Unlock()
+		applied = append(applied, "devin.accounts."+next.Identity.Name+".api_key")
 	}
 	adapter.gate.setParams(next.Gate)
 	if prev.Gate.MaxRPM != next.Gate.MaxRPM {
@@ -543,28 +578,127 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	return applied
 }
 
-// reloadToken 在 unauthenticated 后从 TokenSource 重读凭据；
-// 拿到非空且不同的新 token 才视为自愈成功。拿不到时记 Warn——
-// 凭据静默失效是排障天敌，进程日志里必须留痕。
+// reloadToken 在 unauthenticated 后尝试换出一份新凭据，两级来源：
+// 声明侧 TokenSource 重读（CLI 续期/配置热改），拿不出新值再回落到
+// APIKey mint（durable key 现场铸 session token）。声明侧给出不同
+// token 时 minted 一并作废——声明值夺回服役位。换出成功返回 true，
+// 调用方据此重试；拿不到时记 Warn——凭据静默失效是排障天敌。
 func (adapter *Adapter) reloadToken() bool {
-	source := adapter.CurrentConfig().Identity.TokenSource
-	if source == nil {
+	cfg := adapter.CurrentConfig()
+	var sourceToken string
+	if source := cfg.Identity.TokenSource; source != nil {
+		sourceToken = strings.TrimSpace(source())
+	}
+	adapter.tokenMu.Lock()
+	if sourceToken != "" && sourceToken != adapter.token {
+		adapter.token = sourceToken
+		adapter.minted = ""
+		adapter.tokenMu.Unlock()
+		slog.Info("reloaded upstream token after unauthenticated error")
+		return true
+	}
+	// 记下换出前的生效凭据快照：mint 在锁外进行，期间另一个并发自愈
+	// 若已换上新凭据，提交时凭快照比对跳过覆盖。
+	stale := adapter.minted
+	if stale == "" {
+		stale = adapter.token
+	}
+	adapter.tokenMu.Unlock()
+
+	apiKey := strings.TrimSpace(cfg.Identity.APIKey)
+	if apiKey == "" {
+		if cfg.Identity.TokenSource == nil {
+			return false
+		}
+		if sourceToken == "" {
+			slog.Warn("upstream unauthenticated but TokenSource returned no token")
+		} else {
+			slog.Warn("upstream unauthenticated and TokenSource returned the same token; credential refresh did not help")
+		}
 		return false
 	}
-	token := strings.TrimSpace(source())
-	if token == "" {
-		slog.Warn("upstream unauthenticated but TokenSource returned no token")
+	minted, err := adapter.mintSessionToken(apiKey)
+	if err != nil {
+		slog.Warn("session token mint via api_key failed", "lane", cfg.Identity.Name, "error", err)
 		return false
 	}
 	adapter.tokenMu.Lock()
 	defer adapter.tokenMu.Unlock()
-	if token == adapter.token {
-		slog.Warn("upstream unauthenticated and TokenSource returned the same token; credential refresh did not help")
-		return false
+	current := adapter.minted
+	if current == "" {
+		current = adapter.token
 	}
-	adapter.token = token
-	slog.Info("reloaded upstream token after unauthenticated error")
+	if current != stale {
+		// 并发自愈已换上新凭据：mint 出的 token 不必再服役，但仍算
+		// 自愈成功——重试直接吃 currentToken 现值。
+		return true
+	}
+	adapter.minted = minted
+	slog.Info("minted new session token via api_key after unauthenticated error", "lane", cfg.Identity.Name)
 	return true
+}
+
+// seatMintTimeout 是 mint 单程调用的预算：它是 lane 自愈的同步段，
+// 超了只会让调用方多吃一次失败，不会比上游响应慢更糟。
+const seatMintTimeout = 30 * time.Second
+
+// mintSessionToken 用 durable api_key 经 SeatManagementService/
+// GetSelfDevinSessionToken 现场铸一枚新 session token。请求形状与
+// Devin Desktop _ensureDevinSessionToken 逆向结论一致：metadata.api_key
+// 与 X-Api-Key 头放同一枚 durable key（body 缺 api_key 会被判
+// invalid_argument）；metadata 身份固定 windsurf——seat 系 RPC 不认
+// lane 的 client_* 指纹（实测低版本号会吃 500）。走 lane 自己的
+// transport，代理设置与 chat 路径同源。
+func (adapter *Adapter) mintSessionToken(apiKey string) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"api_key":           apiKey,
+			"extension_name":    "windsurf",
+			"extension_version": "1.48.2",
+			"ide_name":          "windsurf",
+			"ide_version":       "1.48.2",
+			"locale":            "en",
+			"os":                "windows",
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	base := strings.TrimRight(adapter.CurrentConfig().Endpoint.BaseURL, "/")
+	ctx, cancel := context.WithTimeout(context.Background(), seatMintTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/exa.seat_management_pb.SeatManagementService/GetSelfDevinSessionToken",
+		bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Protocol-Version", "1")
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := (&http.Client{Transport: adapter.link().transport}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GetSelfDevinSessionToken HTTP %d: %s", resp.StatusCode, truncateRunes(string(raw), 300))
+	}
+	var parsed struct {
+		SessionToken string `json:"sessionToken"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", fmt.Errorf("decode GetSelfDevinSessionToken: %w", err)
+	}
+	token := strings.TrimSpace(parsed.SessionToken)
+	if token == "" {
+		return "", errors.New("GetSelfDevinSessionToken: empty sessionToken")
+	}
+	return token, nil
 }
 
 // isUnauthenticated 判断错误是否为上游 unauthenticated（凭据失效）。

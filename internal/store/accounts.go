@@ -21,6 +21,7 @@ type AccountRow struct {
 	Name            string
 	Token           string
 	CredentialsFile string // 写入时已锚定为绝对路径
+	APIKey          string // Devin 平台 durable key（cog_*），mint 自愈来源
 	Disabled        bool
 	Deleted         bool
 	Priority        *int64 // 池级排序元数据，nil=无覆盖
@@ -39,6 +40,7 @@ type ResolvedAccount struct {
 	Name            string
 	Token           string // 生效值：行非空用行，否则 config 值
 	CredentialsFile string // 同上逐字段覆盖
+	APIKey          string // 同上逐字段覆盖（durable mint key）
 	Disabled        bool   // 恒取行值（config 无该字段）
 	Priority        int    // 行 ?? config ?? 0
 	MaxRPM          int    // 行 ?? config ?? 0（0=继承全局 max_rpm）
@@ -74,6 +76,7 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			Name:            decl.Name,
 			Token:           decl.Token,
 			CredentialsFile: decl.CredentialsFile,
+			APIKey:          decl.APIKey,
 			Priority:        decl.Priority,
 			MaxRPM:          decl.MaxRPM,
 			Source:          AccountSourceConfig,
@@ -103,6 +106,9 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 				if row.CredentialsFile != "" {
 					acc.CredentialsFile = row.CredentialsFile
 				}
+				if row.APIKey != "" {
+					acc.APIKey = row.APIKey
+				}
 			}
 		}
 		out = append(out, acc)
@@ -126,6 +132,7 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			Name:            row.Name,
 			Token:           row.Token,
 			CredentialsFile: row.CredentialsFile,
+			APIKey:          row.APIKey,
 			Disabled:        row.Disabled,
 			Priority:        accountInt64Or0(row.Priority),
 			MaxRPM:          accountInt64Or0(row.MaxRPM),
@@ -157,7 +164,7 @@ var (
 // 同一份列清单；token/credentials_file/priority/max_rpm/notes 可空，
 // 读写两侧做零值/NULL 互转。
 var accountColumnList = []string{
-	"name", "token", "credentials_file", "disabled", "deleted", "created_at", "updated_at",
+	"name", "token", "credentials_file", "api_key", "disabled", "deleted", "created_at", "updated_at",
 	"priority", "max_rpm", "notes",
 }
 
@@ -166,7 +173,7 @@ var (
 	// created_at 不进 DO UPDATE——首插值永久保留，updated_at 恒刷成 now。
 	accountUpsert = `INSERT INTO upstream_accounts(` + accountColumns + `) VALUES(` +
 		placeholders(len(accountColumnList)) + `) ON CONFLICT(name) DO UPDATE SET
-		token=excluded.token, credentials_file=excluded.credentials_file,
+		token=excluded.token, credentials_file=excluded.credentials_file, api_key=excluded.api_key,
 		disabled=excluded.disabled, deleted=excluded.deleted, updated_at=excluded.updated_at,
 		priority=excluded.priority, max_rpm=excluded.max_rpm, notes=excluded.notes`
 )
@@ -198,15 +205,16 @@ func accountInt64Or0(v *int64) int {
 
 func scanAccount(row sqlScanner) (*AccountRow, error) {
 	var a AccountRow
-	var token, credentialsFile, notes sql.NullString
+	var token, credentialsFile, apiKey, notes sql.NullString
 	var priority, maxRPM sql.NullInt64
-	err := row.Scan(&a.Name, &token, &credentialsFile, &a.Disabled, &a.Deleted,
+	err := row.Scan(&a.Name, &token, &credentialsFile, &apiKey, &a.Disabled, &a.Deleted,
 		&a.CreatedAt, &a.UpdatedAt, &priority, &maxRPM, &notes)
 	if err != nil {
 		return nil, err
 	}
 	a.Token = token.String
 	a.CredentialsFile = credentialsFile.String
+	a.APIKey = apiKey.String
 	a.Notes = notes.String
 	if priority.Valid {
 		a.Priority = &priority.Int64
@@ -261,7 +269,7 @@ func (s *Store) UpsertAccount(ctx context.Context, row *AccountRow) error {
 	}
 	_, err := s.db.ExecContext(ctx, accountUpsert, row.Name,
 		nullAccountField(row.Token), nullAccountField(row.CredentialsFile),
-		row.Disabled, row.Deleted, created, now,
+		nullAccountField(row.APIKey), row.Disabled, row.Deleted, created, now,
 		nullAccountInt64(row.Priority), nullAccountInt64(row.MaxRPM),
 		nullAccountField(row.Notes))
 	return err

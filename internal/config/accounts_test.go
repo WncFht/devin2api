@@ -125,14 +125,33 @@ func TestLoadAccountsNameValidation(t *testing.T) {
 }
 
 // TestLoadAccountsCredentialSources 验证每个账号至少一种凭据来源：
-// 两者皆缺报错；credentials_file 在加载期就必须解出 windsurf_api_key
+// 三者皆缺报错；credentials_file 在加载期就必须解出 windsurf_api_key
 // （文件缺失与文件在但无键是两种报错）；只给文件时 token 由文件播种；
-// 两者都给时 token 保持字面量、文件留作自愈来源。
+// 两者都给时 token 保持字面量、文件留作自愈来源；只给 api_key 也可成号。
 func TestLoadAccountsCredentialSources(t *testing.T) {
-	t.Run("neither token nor file", func(t *testing.T) {
+	t.Run("neither token nor file nor api_key", func(t *testing.T) {
 		_, err := loadWithDevin(t, t.TempDir(), "  accounts:\n    - name: alpha\n")
-		if err == nil || !strings.Contains(err.Error(), "one of token/credentials_file is required") {
+		if err == nil || !strings.Contains(err.Error(), "one of token/credentials_file/api_key is required") {
 			t.Fatalf("Load() error = %v, want missing-credential error", err)
+		}
+	})
+
+	t.Run("api_key only is a valid credential", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      api_key: cog_abc\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if got := config.Devin.Accounts[0].APIKey; got != "cog_abc" {
+			t.Fatalf("APIKey = %q, want cog_abc", got)
+		}
+	})
+
+	t.Run("duplicate api_key rejected", func(t *testing.T) {
+		_, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      api_key: cog_same\n    - name: beta\n      api_key: cog_same\n")
+		if err == nil || !strings.Contains(err.Error(), `api_key duplicates account "alpha"`) {
+			t.Fatalf("Load() error = %v, want duplicate api_key error", err)
 		}
 	})
 

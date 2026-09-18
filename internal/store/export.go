@@ -216,6 +216,7 @@ type legacyAccountEntry struct {
 	Name            string `yaml:"name"`
 	Token           string `yaml:"token,omitempty"`
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
+	APIKey          string `yaml:"api_key,omitempty"`
 }
 
 // 导出文件头：交代用途与「不自动回灌」口径。
@@ -244,7 +245,7 @@ func (s *Store) exportAccounts(ctx context.Context, target string) (string, stri
 		if r.Deleted {
 			continue
 		}
-		e := legacyAccountEntry{Name: r.Name, Token: r.Token, CredentialsFile: r.CredentialsFile}
+		e := legacyAccountEntry{Name: r.Name, Token: r.Token, CredentialsFile: r.CredentialsFile, APIKey: r.APIKey}
 		if r.Disabled {
 			disabled = append(disabled, e)
 		} else {

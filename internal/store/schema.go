@@ -290,7 +290,8 @@ var schemaStatements = []string{
 		updated_at INTEGER NOT NULL,
 		priority INTEGER,
 		max_rpm INTEGER,
-		notes TEXT
+		notes TEXT,
+		api_key TEXT
 	)`,
 
 	// schema_migrations：版本化迁移登记表，migrations.go 的 runner

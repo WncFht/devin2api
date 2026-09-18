@@ -52,6 +52,7 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				Name:            in.Name,
 				Token:           strings.TrimSpace(in.Token),
 				CredentialsFile: strings.TrimSpace(in.CredentialsFile),
+				APIKey:          strings.TrimSpace(in.APIKey),
 				Disabled:        in.Disabled,
 				Priority:        in.Priority,
 				MaxRPM:          in.MaxRPM,
@@ -123,6 +124,9 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			if patch.CredentialsFile != nil {
 				row.CredentialsFile = strings.TrimSpace(*patch.CredentialsFile)
+			}
+			if patch.APIKey != nil {
+				row.APIKey = strings.TrimSpace(*patch.APIKey)
 			}
 			if patch.Disabled != nil {
 				row.Disabled = *patch.Disabled
@@ -236,6 +240,89 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			return findResolved(resolved, name), nil
 		},
+		// Import 是批量 upsert：单号写路径同一骨架（行写入→Apply 重推→
+		// 失败回滚），但整批共享一次干跑与一次重推——N 个号只付一趟
+		// ApplyConfigs 热应用。每条输入是该名的期望全态：新名建行、
+		// config 名建覆盖行、墓碑名写 deleted=0 即复活。credentials_content
+		// 同 Create 落盘管理位。任一环节失败按「写前快照」逐行回滚。
+		Import: func(ctx context.Context, entries []ccpanel.AccountWrite) ([]store.ResolvedAccount, error) {
+			rt.mu.Lock()
+			defer rt.mu.Unlock()
+			cfg := rt.Config()
+			if strings.TrimSpace(cfg.Devin.BaseURL) == "" || strings.TrimSpace(cfg.Devin.Model) == "" {
+				return nil, errors.New("devin.base_url / devin.model required before importing accounts")
+			}
+			if len(entries) == 0 {
+				return nil, errors.New("no accounts in import payload")
+			}
+			rows, err := rt.db.ListAccounts(ctx)
+			if err != nil {
+				return nil, err
+			}
+			candidate := append([]*store.AccountRow(nil), rows...)
+			var staged []*store.AccountRow
+			for _, in := range entries {
+				row := &store.AccountRow{
+					Name:            in.Name,
+					Token:           strings.TrimSpace(in.Token),
+					CredentialsFile: strings.TrimSpace(in.CredentialsFile),
+					APIKey:          strings.TrimSpace(in.APIKey),
+					Disabled:        in.Disabled,
+					Priority:        in.Priority,
+					MaxRPM:          in.MaxRPM,
+				}
+				if in.Notes != nil {
+					row.Notes = *in.Notes
+				}
+				if old := findAccountRow(rows, in.Name); old != nil {
+					// 首插 created_at 永久保留——覆盖写不重置建号时间。
+					row.CreatedAt = old.CreatedAt
+				}
+				// credentials_content 同 Create：先证明能解出 token 再落盘
+				// 管理位；失败残留的孤儿文件惰性无害。
+				if in.CredentialsContent != "" {
+					if config.TokenFromCredentialsContent([]byte(in.CredentialsContent)) == "" {
+						return nil, fmt.Errorf("account %q: credentials_content carries no windsurf_api_key", in.Name)
+					}
+					path, err := writeAccountCredentialsFile(rt.stateDir, in.Name, in.CredentialsContent)
+					if err != nil {
+						return nil, fmt.Errorf("write credentials_content for %q: %w", in.Name, err)
+					}
+					row.CredentialsFile = path
+				}
+				candidate = replaceAccountRow(candidate, row)
+				staged = append(staged, row)
+			}
+			// 干跑整表校验先于一切落库：合成集非法（零凭据/重名/重
+			// token/文件不可解）整批拒绝，库里不留半批。
+			synthesized, err := config.ResolveAccounts(candidateConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, candidate)), configDir)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range staged {
+				if row.CredentialsFile != "" {
+					row.CredentialsFile = synthesizedAccount(synthesized, row.Name).CredentialsFile
+				}
+				if err := rt.db.UpsertAccount(ctx, row); err != nil {
+					return nil, err
+				}
+			}
+			resolved, err := push(ctx)
+			if err != nil {
+				for _, row := range staged {
+					rollbackAccountRow(ctx, rt.db, row.Name, findAccountRow(rows, row.Name))
+				}
+				return nil, err
+			}
+			var touched []store.ResolvedAccount
+			for _, row := range staged {
+				if acc := findResolved(resolved, row.Name); acc != nil {
+					touched = append(touched, *acc)
+				}
+			}
+			return touched, nil
+		},
 		ClearCooldown: func(name string) bool {
 			rt.mu.Lock()
 			defer rt.mu.Unlock()
@@ -269,7 +356,12 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			if in.Token != "" {
 				return in.Token, nil
 			}
-			return "", errors.New("one of token/credentials_file/credentials_content is required")
+			if in.APIKey != "" {
+				// durable api_key 在 seat 系端点本身即是合法凭据——
+				// verify 探测（GetUserStatus）直接认它。
+				return in.APIKey, nil
+			}
+			return "", errors.New("one of token/credentials_file/credentials_content/api_key is required")
 		},
 	}
 }
@@ -285,7 +377,7 @@ func candidateConfigs(resolved []store.ResolvedAccount) []config.DevinAccountCon
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
-			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
+			APIKey: acc.APIKey, Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out

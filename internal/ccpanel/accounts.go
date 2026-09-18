@@ -27,6 +27,11 @@ type AccountOps struct {
 	Update  func(ctx context.Context, name string, patch AccountPatch) (*store.ResolvedAccount, error)
 	Delete  func(ctx context.Context, name string) (*store.ResolvedAccount, error)
 	Restore func(ctx context.Context, name string) (*store.ResolvedAccount, error)
+	// Import 批量 upsert：每条 AccountWrite 是该名的「期望全态」——
+	// 行级字段按入参整体覆盖（缺席 yaml 键即零值，token/credentials_file/
+	// api_key 传空即清行覆盖、config 名回落 config 值）。整批原子：
+	// 干跑整表校验或任一写入失败即全部回滚，成功返回被触账号的生效视图。
+	Import func(ctx context.Context, entries []AccountWrite) ([]store.ResolvedAccount, error)
 	// ClearCooldown 清该名 lane 的池侧冷却；无活 lane 返 false。
 	ClearCooldown func(name string) bool
 	// TokenOf 解析该名生效凭据（行值→config 值→credentials_file
@@ -38,15 +43,18 @@ type AccountOps struct {
 	CredentialOf func(in AccountWrite) (string, error)
 }
 
-// AccountWrite 是建号输入：Token 与 CredentialsFile 至少其一；
+// AccountWrite 是建号输入：Token/CredentialsFile/APIKey 至少其一；
 // CredentialsContent 是 credentials.toml 全文粘贴（ops 落盘成
 // 管理目录下的 <name>.toml 并置 CredentialsFile），与 CredentialsFile
-// 互斥。Verify 为 true 时 handler 先以上游探测验证凭据再建行。
+// 互斥。APIKey 是 Devin 平台 durable key（cog_*）——lane 用它在上游
+// 判死时现场铸 session token。Verify 为 true 时 handler 先以上游探测
+// 验证凭据再建行。
 type AccountWrite struct {
 	Name               string
 	Token              string
 	CredentialsFile    string
 	CredentialsContent string
+	APIKey             string
 	Disabled           bool
 	Verify             bool
 	Priority           *int64
@@ -62,6 +70,7 @@ type AccountPatch struct {
 	Token              *string
 	CredentialsFile    *string
 	CredentialsContent *string
+	APIKey             *string
 	Disabled           *bool
 	Priority           *int64
 	MaxRPM             *int64
@@ -145,11 +154,18 @@ func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[str
 	credential := "literal"
 	if acc.CredentialsFile != "" {
 		credential = "credentials_file"
+	} else if acc.Token == "" && acc.APIKey != "" {
+		credential = "api_key"
 	}
 	tokenSHA := ""
 	if acc.Token != "" {
 		sum := sha256.Sum256([]byte(acc.Token))
 		tokenSHA = fmt.Sprintf("sha256:%x", sum[:6])
+	}
+	apiKeySHA := ""
+	if acc.APIKey != "" {
+		sum := sha256.Sum256([]byte(acc.APIKey))
+		apiKeySHA = fmt.Sprintf("sha256:%x", sum[:6])
 	}
 	// quota 只取 daily/weekly/user 三键——points 曲线由前端另 join
 	// /admin/quota；号无采样时 daily/weekly 落 null、user 键缺席。
@@ -169,6 +185,7 @@ func buildAccountView(acc *store.ResolvedAccount, snap accountSnapshots) map[str
 		"credential":       credential,
 		"disabled":         acc.Disabled,
 		"token_sha":        tokenSHA,
+		"api_key_sha":      apiKeySHA,
 		"credentials_file": acc.CredentialsFile,
 		"priority":         acc.Priority,
 		"max_rpm":          acc.MaxRPM,

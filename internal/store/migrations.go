@@ -136,6 +136,16 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// upstream_accounts.api_key 是 durable mint key 列（cog_*），
+		// 与 token/credentials_file 并列的第三种凭据来源；可空——NULL
+		// 即「无行覆盖」，读侧回落 config 值（同 0003 列的语义）。
+		version: "0010_upstream_accounts_api_key",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "upstream_accounts", "api_key",
+				`ALTER TABLE upstream_accounts ADD COLUMN api_key TEXT`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

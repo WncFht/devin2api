@@ -188,7 +188,10 @@ func ResolveToken(ctx context.Context, db *store.Store, declared []config.DevinA
 	return credential(acc)
 }
 
-// credential 从一条生效账号解析凭据（ResolveToken 的收尾段）。
+// credential 从一条生效账号解析凭据（ResolveToken 的收尾段）：文件现读
+// → 字面量 → api_key。durable api_key 在 seat 系端点（GetUserStatus/
+// 配额采样）上本身就是合法凭据——api_key-only 账号的探测路径照样成立，
+// lane 侧它另作 mint 来源。
 func credential(acc *store.ResolvedAccount) (string, error) {
 	if acc.CredentialsFile != "" {
 		if token := config.TokenFromCredentialsFile(acc.CredentialsFile); token != "" {
@@ -197,6 +200,9 @@ func credential(acc *store.ResolvedAccount) (string, error) {
 	}
 	if acc.Token != "" {
 		return acc.Token, nil
+	}
+	if acc.APIKey != "" {
+		return acc.APIKey, nil
 	}
 	return "", fmt.Errorf("account %q has no resolvable credential", acc.Name)
 }
@@ -214,6 +220,7 @@ func (rt *Runtime) devinConfigs(cfg config.Config, synthesized []config.DevinAcc
 		lane := BaseConfig(cfg)
 		lane.Identity.Name = account.Name
 		lane.Identity.Token = account.Token
+		lane.Identity.APIKey = account.APIKey
 		lane.Priority = account.Priority
 		// 号级 max_rpm 覆盖全局闸门配额；0 继承 devin.max_rpm。
 		if account.MaxRPM > 0 {
@@ -318,7 +325,7 @@ func laneConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
 		}
 		out = append(out, config.DevinAccountConfig{
 			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
-			Priority: acc.Priority, MaxRPM: acc.MaxRPM,
+			APIKey: acc.APIKey, Priority: acc.Priority, MaxRPM: acc.MaxRPM,
 		})
 	}
 	return out
@@ -382,20 +389,22 @@ func redactSecrets(fields map[string]any) {
 				devin["proxy"] = parsed.String()
 			}
 		}
-		// 账号池逐条脱敏：accounts[].token 与 devin.token 同规则
-		// sha256 前缀——漏遮任一号都是凭据泄露。
+		// 账号池逐条脱敏：accounts[].token/api_key 与 devin.token 同
+		// 规则 sha256 前缀——漏遮任一号都是凭据泄露。
 		if accounts, ok := devin["accounts"].([]any); ok {
 			for _, entry := range accounts {
 				account, ok := entry.(map[string]any)
 				if !ok {
 					continue
 				}
-				raw, ok := account["token"].(string)
-				if !ok || raw == "" {
-					continue
+				for _, key := range []string{"token", "api_key"} {
+					raw, ok := account[key].(string)
+					if !ok || raw == "" {
+						continue
+					}
+					sum := sha256.Sum256([]byte(raw))
+					account[key] = fmt.Sprintf("sha256:%x", sum[:6])
 				}
-				sum := sha256.Sum256([]byte(raw))
-				account["token"] = fmt.Sprintf("sha256:%x", sum[:6])
 			}
 		}
 	}
