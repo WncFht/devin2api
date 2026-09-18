@@ -78,7 +78,8 @@ t_db="$(dbq 'SELECT COUNT(*) FROM auth_tokens')"
 echo "INFO model_registry=$(dbq 'SELECT COUNT(*) FROM model_registry') settings=$(dbq 'SELECT COUNT(*) FROM settings') runtime_state=$(dbq 'SELECT COUNT(*) FROM runtime_state') schema_migrations=$(dbq 'SELECT COUNT(*) FROM schema_migrations')"
 
 # --- 4. 端点抽查 ---
-lc="$(curl -sf "${AUTH[@]}" "$BASE/admin/logs?since=2020-01-01T00:00:00Z&limit=1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",-1))' 2>/dev/null || echo CURL_FAIL)"
+# log_source=all：默认视图剔除 rejected 留存行，与 sqlite COUNT(*) 差一行恒 FAIL
+lc="$(curl -sf "${AUTH[@]}" "$BASE/admin/logs?since=2020-01-01T00:00:00Z&log_source=all&limit=1" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",-1))' 2>/dev/null || echo CURL_FAIL)"
 [[ "$lc" == "$idx_db" ]] && ok "/admin/logs 宽窗 count=$lc == sqlite" || bad "/admin/logs count=$lc vs sqlite $idx_db"
 mx="$(curl -sf "${AUTH[@]}" "$BASE/admin/logs/matrix" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("data") or d.get("entries") or []))' 2>/dev/null || echo 0)"
 [[ "$mx" != "0" ]] && ok "matrix 非空 ($mx 格)" || bad "matrix 空"
@@ -113,7 +114,8 @@ else
 	bad "探针行未入库 $before→$after"
 fi
 newdir="$(dbq "SELECT dir FROM logs ORDER BY id DESC LIMIT 1")"
-[[ -d "$STATE/logs/$newdir" ]] && ok "调试目录落盘 logs/$newdir" || echo "NOTE logs/$newdir 不在盘（D3b 后属正常）"
+ndf="$(dbq "SELECT COUNT(*) FROM debug_files WHERE dir='$newdir'")"
+[[ "$ndf" =~ ^[0-9]+$ && "$ndf" -gt 0 ]] && ok "调试 payload 落库 debug_files[$newdir]=$ndf 行" || echo "NOTE $newdir 无 debug_files（payload 保留策略剔除属正常）"
 curl -sf "${AUTH[@]}" -X DELETE "$BASE/admin/model-registry?model=$PROBE" >/dev/null || true
 
 echo "----"

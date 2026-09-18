@@ -72,6 +72,10 @@ command -v sqlite3 >/dev/null || {
 	echo "需要 sqlite3 导出 logs 表 / 读 runtime_state" >&2
 	exit 1
 }
+command -v python3 >/dev/null || {
+	echo "需要 python3 解 debug_files 的 meta.json（gzip 判帧）" >&2
+	exit 1
+}
 if curl -sf "http://localhost:$PORT/healthz" >/dev/null 2>&1; then
 	echo "端口 :$PORT 已有 devin-2api 在监听，换 --port 或先停掉" >&2
 	exit 1
@@ -79,7 +83,6 @@ fi
 
 WORK="$(mktemp -d)"
 STATE_DIR="$WORK/state"
-LOGS="$STATE_DIR/logs"
 INSTANCE_PID=""
 cleanup() {
 	[[ -n "$INSTANCE_PID" ]] && kill "$INSTANCE_PID" 2>/dev/null || true
@@ -289,14 +292,28 @@ done
 check "第二轮全部 account=good 且无换号" "$round2_ok"
 
 # meta.json 归因：failover 请求留 upstream_account=good + attempts[0]=bad。
+# meta 在 debug_files 表（content 可能 gzip——按魔数判帧），不在 logs/ 目录。
 dir="$(index_field "smoke-r1-${BAD_KEYS[0]}" '.dir')"
 meta_acc="none"
 meta_att="[]"
 first_att="none"
 first_code="none"
-if [[ -n "$dir" && -f "$LOGS/$dir/meta.json" ]]; then
-	meta_acc="$(jq -r '.upstream_account // "none"' "$LOGS/$dir/meta.json")"
-	meta_att="$(jq -c '.upstream_attempts // []' "$LOGS/$dir/meta.json")"
+if [[ -n "$dir" ]]; then
+	python3 - "$STATE_DIR/devin-2api.db" "$dir" "$WORK/meta.json" <<'PY'
+import sqlite3, sys, gzip
+db, d, out = sys.argv[1:4]
+con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+row = con.execute("SELECT content FROM debug_files WHERE dir=? AND name='meta.json'", (d,)).fetchone()
+if row:
+    raw = row[0]
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    open(out, "wb").write(raw)
+PY
+fi
+if [[ -f "$WORK/meta.json" ]]; then
+	meta_acc="$(jq -r '.upstream_account // "none"' "$WORK/meta.json")"
+	meta_att="$(jq -c '.upstream_attempts // []' "$WORK/meta.json")"
 	first_att="$(jq -r '.[0].account // "none"' <<<"$meta_att")"
 	first_code="$(jq -r '.[0].code // "none"' <<<"$meta_att")"
 fi

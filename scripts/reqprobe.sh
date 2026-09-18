@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # reqprobe.sh <label> <endpoint> <json-body-file>
 #
-# 对运行中实例 POST 一个 JSON 请求，按 X-Request-Id 定位调试目录，
-# 打印三段证据摘要：02 投影（dropped/tool_choice/IR 形态）、
+# 对运行中实例 POST 一个 JSON 请求，按 X-Request-Id 定位调试目录（dir），
+# 经 /admin/logs?q=<dir> 解出数字 id 后从 /admin/debug-logs/{id}/file/{name}
+# 拉证据，打印三段摘要：02 投影（dropped/tool_choice/IR 形态）、
 # 03 上游 wire（工具名集合）、响应体（SSE 事件计数或 final JSON 形状）。
 #
 # 与 smoke.sh 互补：smoke 管实例生命周期，reqprobe 管单请求取证。
 #
 # 环境变量：
 #   REQPROBE_BASE     实例地址（默认 http://127.0.0.1:3033，可指 tailscale prod）
-#   REQPROBE_KEY      API key（默认从 ./config.yaml 的 auth.api_key 提取）
-#   REQPROBE_LOGS     调试目录根（默认 ./logs，repo 根的符号链接指向实例 state dir）
+#   REQPROBE_KEY      /v1 API key（默认从 ./config.yaml 的 auth.api_key 提取）
+#   REQPROBE_DASH     面板密码（默认从 ./config.yaml 的 dashboard.password 提取；
+#                     admin 端点只认它，缺则只发请求不取证据）
 #   REQPROBE_TIMEOUT  curl 秒数（默认 120）
 set -u
 
@@ -19,15 +21,18 @@ EP="${2:?missing endpoint, e.g. /v1/messages}"
 BODY="${3:?missing json body file}"
 
 BASE="${REQPROBE_BASE:-http://127.0.0.1:3033}"
-LOGS="${REQPROBE_LOGS:-./logs}"
 TIMEOUT="${REQPROBE_TIMEOUT:-120}"
 
 KEY="${REQPROBE_KEY:-}"
-if [[ -z "$KEY" && -f ./config.yaml ]]; then
-	KEY="$(sed -nE "s/^[[:space:]]*api_key:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" ./config.yaml | head -1)"
+DASH="${REQPROBE_DASH:-}"
+if [[ -f ./config.yaml ]]; then
+	[[ -z "$KEY" ]] && KEY="$(sed -nE "s/^[[:space:]]*api_key:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" ./config.yaml | head -1)"
+	[[ -z "$DASH" ]] && DASH="$(sed -nE "s/^[[:space:]]*password:[[:space:]]*['\"]?([^'\"[:space:]]+)['\"]?.*/\1/p" ./config.yaml | head -1)"
 fi
 AUTH=()
 [[ -n "$KEY" ]] && AUTH=(-H "Authorization: Bearer $KEY")
+DAUTH=()
+[[ -n "$DASH" ]] && DAUTH=(-H "Authorization: Bearer $DASH")
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -36,10 +41,27 @@ CODE=$(curl -s -m "$TIMEOUT" -D "$WORK/hdr.txt" -o "$WORK/body.txt" -w '%{http_c
 	-H 'Content-Type: application/json' "${AUTH[@]}" \
 	"$BASE$EP" --data-binary "@$BODY")
 RID=$(grep -i '^x-request-id:' "$WORK/hdr.txt" | tr -d '\r' | awk '{print $2}')
-DIR="$LOGS/$RID"
 
 echo "=== $LABEL | HTTP $CODE | dir=$RID"
-[[ -d "$DIR" ]] || echo "  (warn) $DIR 不存在——实例可能没开 debug 日志或 LOGS 指错"
+DIR="$WORK/dir"
+ID=""
+if [[ -n "$RID" ]]; then
+	# logs 行走异步写队列，响应返回后落行可能有毫秒级滞后——短轮询兜底。
+	for _ in 1 2 3 4 5; do
+		ID="$(curl -sf -m 15 "${DAUTH[@]}" "$BASE/admin/logs?q=$RID&limit=5" 2>/dev/null \
+			| python3 -c 'import json,sys; d=json.load(sys.stdin).get("data") or []; print(d[0].get("id","") if d else "")' 2>/dev/null)"
+		[[ -n "$ID" ]] && break
+		sleep 0.4
+	done
+fi
+if [[ -n "$ID" ]]; then
+	mkdir -p "$DIR"
+	for f in 02-request-messages.json 03-devin-request.json; do
+		curl -sf -m 15 "${DAUTH[@]}" "$BASE/admin/debug-logs/$ID/file/$f?raw=1" -o "$DIR/$f" 2>/dev/null || true
+	done
+else
+	echo "  (warn) 未解析到 logs.id——实例可能没开 debug、DASH 缺失/错误或 dir 未落行"
+fi
 
 python3 - "$DIR" "$WORK/body.txt" <<'PYEOF'
 import json, sys, os

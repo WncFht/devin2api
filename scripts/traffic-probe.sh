@@ -127,12 +127,17 @@ PYEOF
 sleep 2  # 写路径落库
 
 # --- 逐行字段断言 ---
-python3 - "$DB" "$STATE" "$MANIFEST" <<'PYEOF'
-import sqlite3, sys, json, os
-db, state, manifest = sys.argv[1:4]
+python3 - "$DB" "$MANIFEST" <<'PYEOF'
+import sqlite3, sys, json, gzip
+db, manifest = sys.argv[1:3]
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
 cols = [r[1] for r in con.execute("PRAGMA table_info(logs)")]
+
+def decode(raw):
+    if isinstance(raw, (bytes, bytearray)) and raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return raw
 
 EXPECT = {
  "ok-nonstream-1":  dict(api="openai-chat", status_code=200, result="completed", stream=0, method="POST", path="/v1/chat/completions"),
@@ -178,17 +183,21 @@ for line in open(manifest):
             errs.append("account 空")
     if r.get("result") == "failed" and not r.get("error_stage"):
         errs.append("failed 但 error_stage 空")
-    # meta.json 对照
-    meta_p = os.path.join(state, "logs", dir_, "meta.json")
+    # meta.json 对照（debug_files 表，gzip 魔数判帧）
+    meta_row = con.execute(
+        "SELECT content FROM debug_files WHERE dir=? AND name='meta.json'",
+        (dir_,)).fetchone()
     meta_ok = "no-meta"
-    if os.path.exists(meta_p):
-        m = json.load(open(meta_p))
+    if meta_row:
+        m = json.loads(decode(meta_row[0]))
         meta_ok = f"meta.account={m.get('upstream_account')} status={m.get('status_code')}"
         if m.get("upstream_account") and r.get("account") and m["upstream_account"] != r["account"]:
             errs.append(f"meta.account={m['upstream_account']} != logs.account={r['account']}")
         if m.get("status_code") != r.get("status_code"):
             errs.append(f"meta.status={m['status_code']} != row {r['status_code']}")
-    files = sorted(os.listdir(os.path.join(state, "logs", dir_))) if os.path.isdir(os.path.join(state,"logs",dir_)) else []
+    nfiles = con.execute(
+        "SELECT COUNT(*) FROM (SELECT name FROM debug_files WHERE dir=? "
+        "UNION SELECT name FROM debug_chunks WHERE dir=?)", (dir_, dir_)).fetchone()[0]
     summary = (f"{label}: dir={dir_} http={code} status={r.get('status_code')} "
                f"result={r.get('result')} stage={r.get('error_stage') or '-'} "
                f"api={r.get('api')} model={r.get('model')} acct={r.get('account')} "
@@ -199,7 +208,7 @@ for line in open(manifest):
                f"{r.get('upstream_open_ms')}/{r.get('first_upstream_ms')}/{r.get('first_client_ms')}/{r.get('duration_ms')} "
                f"stream={r.get('stream')} ws={r.get('upstream_websocket')} reused={r.get('conn_reused')} "
                f"idle={r.get('conn_idle_ms')} retries={r.get('retries')} ls={r.get('log_source')} "
-               f"mb={r.get('minute_bucket')} crid={r.get('client_request_id') or '-'} files={len(files)} {meta_ok}")
+               f"mb={r.get('minute_bucket')} crid={r.get('client_request_id') or '-'} files={nfiles} {meta_ok}")
     print(("FAIL " if errs else "OK   ") + summary)
     for e in errs:
         print("      ! " + e)

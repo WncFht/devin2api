@@ -10,7 +10,8 @@
 //   PANEL_QA_TOKEN   dashboard.password（默认从 ./config.yaml 提取）
 //   PANEL_QA_OUT     截图输出目录（默认 /tmp/panel-qa-<ts>/）
 //   PLAYWRIGHT_PATH  playwright 模块路径（默认依次试 playwright →
-//                    playwright-core → npm root -g 下的 playwright）
+//                    playwright-core → panel-verify/node_modules 下的
+//                    playwright → npm root -g 下的 playwright）
 //
 // 面板沿用了 ccload 的 localStorage 三件套做免登录：
 // ccload_token / ccload_token_expiry / ccload_web_role。
@@ -24,6 +25,8 @@ function loadPlaywright() {
     process.env.PLAYWRIGHT_PATH,
     'playwright',
     'playwright-core',
+    // panel-verify 套件自带的 playwright（archbox 上 chromium-1243 已装）
+    path.join(__dirname, 'panel-verify', 'node_modules', 'playwright'),
     // archbox 上 playwright 寄生在 taac2026-cli 的 node_modules 里
     path.join(home, '.local/lib/node_modules/taac2026-cli/node_modules/playwright'),
   ].filter(Boolean);

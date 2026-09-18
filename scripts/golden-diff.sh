@@ -3,17 +3,22 @@
 # 个二进制，对全部 /admin 读取端点做归一化 diff。用于 D2/D3「JSON 契约
 # 不变」的验收。
 #
-# 用法: scripts/golden-diff.sh <old-binary> <new-binary> <state-dir> [config.yaml] [--traffic]
+# 用法: scripts/golden-diff.sh <old-binary> <new-binary> <state-dir> [config.yaml] [--traffic] [--keep-db]
 #   old/new 二进制各自起在空闲端口（config.yaml 的 listen 被临时改写），
 #   state-dir 被复制两份互不污染。输出逐端点 PASS/DIFF 与首个差异摘要。
 #   GD_PORT_BASE 改基准端口（默认 41711，new 侧 +1）——并发跑多份对拍
 #   时各给一段，否则 healthz 会串到别人实例上（已踩过）。
+#   --keep-db  sqlite→sqlite 对账：state 里的 devin-2api.db 用 sqlite3
+#              .backup 拿一致性快照进副本（活 WAL 直接 cp 是撕裂副本），
+#              不还原 .migrated、不删库走迁移路径。假设 state 已完成迁移；
+#              缺省（无 --keep-db）仍走「还原文件 → 新侧重跑导入」的旧路。
+#   GD_SINCE/GD_UNTIL 收窄对账历史窗（RFC3339），默认全开覆盖全部存量行。
 #
 # 三个阶段：
 #   1. reads   —— JSON 端点逐字段对账 + export 的 CSV 逐字节 / JSON 轻归一化
-#   2. debug   —— 从源 index.jsonl 抽样目录（普通/失败/failover），
-#                各侧用自己的 /admin/logs?q=<dir> 解出数字 id，再对
-#                debug-logs detail / file / merged 对账（兼容 D2 后
+#   2. debug   —— 从源 logs 表（无库则 index.jsonl）抽样目录（普通/失败/
+#                failover），各侧用自己的 /admin/logs?q=<dir> 解出数字 id，
+#                再对 debug-logs detail / file / merged 对账（兼容 D2 后
 #                id 语义从 ms 伪造变自增主键的两侧差异）
 #   3. traffic —— --traffic 开启：两侧各打同形确定性请求（注册表停用
 #                模型 → model_disabled 本地拒，零上游成本；加一条 401
@@ -22,19 +27,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OLD_BIN="${1:?usage: golden-diff.sh <old-bin> <new-bin> <state-dir> [config.yaml] [--traffic]}"
+OLD_BIN="${1:?usage: golden-diff.sh <old-bin> <new-bin> <state-dir> [config.yaml] [--traffic] [--keep-db]}"
 NEW_BIN="${2:?}"
 STATE="${3:?}"
 CONFIG="${4:-config.yaml}"
 TRAFFIC=0
-for a in "$@"; do [[ "$a" == "--traffic" ]] && TRAFFIC=1; done
+KEEP_DB=0
+for a in "$@"; do
+	[[ "$a" == "--traffic" ]] && TRAFFIC=1
+	[[ "$a" == "--keep-db" ]] && KEEP_DB=1
+done
 
 # 端点清单：矩阵/列表/聚合/注册表/配额/运行时指标 + 面板设置/生效配置 +
 # dashboard 只读面。上游依赖型（status/model-pricing/model-test/
 # update/check）与进程日志（process-log 各侧 stderr 不同）不进来——
 # 对账只管确定性存储投影。volatile 字段（时间戳、指针、id、uptime、
 # goroutine 类进程态）在 normalize 中剔除——契约对账只关心结构与非瞬态值。
-W="since=2026-09-15T00:00:00Z&until=2026-09-18T00:00:00Z" # 覆盖全量数据的显式历史窗
+GD_SINCE="${GD_SINCE:-2020-01-01T00:00:00Z}"   # 全开下界：覆盖全部存量行
+GD_UNTIL="${GD_UNTIL:-9999-12-31T00:00:00Z}" # 远未来上界：今天永不落窗外
+W="since=$GD_SINCE&until=$GD_UNTIL"           # 覆盖全量数据的显式历史窗
 ENDPOINTS=(
 	"/admin/logs?limit=200"
 	"/admin/logs?limit=50&offset=150"
@@ -68,8 +79,7 @@ ENDPOINTS=(
 	"/admin/logs?account=gd-nonexist&$W&limit=50"
 	"/admin/logs/bootstrap"
 	"/admin/logs/matrix"
-	"/admin/logs/matrix?since=2026-09-15T00:00:00Z"
-	"/admin/logs/matrix?since=2026-09-16T00:00:00Z"
+	"/admin/logs/matrix?since=$GD_SINCE"
 	"/admin/logs/matrix?since=2030-01-01T00:00:00Z"
 	"/admin/usage"
 	"/admin/stats"
@@ -118,15 +128,15 @@ def strip: walk(if type=="object" then del(.id,.time,.at,.created_at,.updated_at
   .survives_until_reset,.remaining,.reset_at,
   .server_time,.now,.generated_at,.mtime,.mod_time,.last_modified,
   .log_id,.stream_avg_ttfb,.non_stream_avg_rt,.last_at,.last_request_at,.qps_current,
-  .avg_qps,.avg_rpm,.peak_qps,.peak_rpm,.rpm,.qps,
+  .avg_qps,.avg_rpm,.peak_qps,.peak_rpm,.rpm,.qps,.pace_allowance,
   .last_request_id,.last_success_id,.last_error_id,
   .log_rows,.log_row_retention_days,
-  .log_root,.index_bytes,.db_bytes) else . end);
+  .log_root,.index_bytes,.db_bytes,.recent) else . end);
 . | strip | if type=="object" then with_entries(if (.value|type)=="object" or
   (.value|type)=="array" then .value|=strip else . end) else . end
   | walk(if type=="number" and (. != floor) then (.*1e9|round)/1e9 else . end)
   | walk(if type=="object" and (.health_timeline|type)=="array"
-      then .health_timeline |= (to_entries | map(.value.ts = .key)) else . end)
+      then .health_timeline |= length else . end)
 '
 
 # 轻归一化：export 的是历史行本体——time/dir/started_at 是必须一致的
@@ -155,15 +165,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+BASE_DB=""
+if [[ "$KEEP_DB" == 1 && -f "$STATE/devin-2api.db" ]]; then
+	# sqlite→sqlite 对账：.backup 拿一次一致性快照供两侧共用——活 WAL
+	# 直 cp 是撕裂副本；两侧各拍一次又会被快照间隙的新写入做成假 DIFF
+	# （活实例在跑时 logs/usage 必漂）。
+	BASE_DB="$WORK/base.db"
+	sqlite3 "file:$STATE/devin-2api.db?mode=ro" ".backup '$BASE_DB'"
+fi
+
 boot() { # bin statedir port -> pid
 	local bin="$1" st="$2" port="$3"
 	mkdir -p "$st"
 	cp -r "$STATE"/. "$st/"
-	# state 源可能已被迁移过（导入器把源文件改名 .migrated）——在副本里
-	# 还原回文件形态，让旧侧有数据可读、新侧自己跑一遍导入；
-	# 不复制活库：活实例的 WAL 在写入中，拷贝是撕裂快照。
-	find "$st" -name '*.migrated' -exec sh -c 'mv "$1" "${1%.migrated}"' _ {} \;
 	rm -f "$st"/devin-2api.db "$st"/devin-2api.db-wal "$st"/devin-2api.db-shm
+	if [[ -n "$BASE_DB" ]]; then
+		# keep-db：两侧喂同一份快照，不还原 .migrated、不重跑导入。
+		cp "$BASE_DB" "$st/devin-2api.db"
+	else
+		# state 源可能已被迁移过（导入器把源文件改名 .migrated）——在副本里
+		# 还原回文件形态，让旧侧有数据可读、新侧自己跑一遍导入；
+		# 不复制活库：活实例的 WAL 在写入中，拷贝是撕裂快照。
+		find "$st" -name '*.migrated' -exec sh -c 'mv "$1" "${1%.migrated}"' _ {} \;
+	fi
 	# config 不随 state 目录走（部署布局里二者分家），用 4 号参数或仓库 config.yaml；
 	# listen 行整行替换为 127.0.0.1:<port>，冒烟端口不外绑。
 	sed -E "s/^[[:space:]]*listen:.*/  listen: \"127.0.0.1:$port\"/" "$CONFIG" >"$st/config.yaml"
@@ -198,10 +222,10 @@ for spec in "OLD:$OLD_BIN:$OLDP" "NEW:$NEW_BIN:$NEWP"; do
 	[[ $ok == 1 ]] || { echo "$tag 实例未起来" >&2; cat "$st/boot.log" >&2; exit 1; }
 done
 
-PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
+PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
 AUTH=()
 [[ -n "$PASSWORD" ]] && AUTH=(-H "Authorization: Bearer $PASSWORD")
-API_KEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ')"
+API_KEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
 VAUTH=()
 [[ -n "$API_KEY" ]] && VAUTH=(-H "Authorization: Bearer $API_KEY")
 
@@ -249,7 +273,7 @@ reads ""
 
 # --- export：CSV 全历史列逐字节对账；JSON 走轻归一化（保 time/dir）。
 # 显式 since/until——无参默认 range=today 只剩当天几行，历史覆盖为零。
-EXP_Q="since=2026-09-15T00:00:00Z&until=2026-09-18T00:00:00Z"
+EXP_Q="$W"
 a="$(fetch "$OLDP" "/admin/logs/export?format=csv&$EXP_Q")"
 b="$(fetch "$NEWP" "/admin/logs/export?format=csv&$EXP_Q")"
 report "/admin/logs/export?format=csv" "$a" "$b"
@@ -260,31 +284,43 @@ report "/admin/logs/export?format=json" "$a" "$b"
 
 # --- debug 对账：目录身份（dir 名）稳定，数字 id 各侧自己解 ---
 # 抽样：最近一条普通 + 最近一条带 error_stage + 最近一条 failover 换号。
-SAMPLE="$(python3 - "$STATE/logs/index.jsonl" <<'PY'
-import json, sys
+# 样本源自动适配：源 state 有 devin-2api.db 走 logs 表（db 时代），
+# 否则读 index.jsonl（含 .migrated——文件时代/迁移对账路径）。
+SAMPLE="$(python3 - "$STATE" <<'PY'
+import json, sys, os, sqlite3
 want = {"any": None, "error": None, "switch": None, "old": None}
-import os
-path = sys.argv[1]
-if not os.path.exists(path) and os.path.exists(path + ".migrated"):
-    path += ".migrated"  # 源已迁移：索引在 .migrated 里
-try:
-    for line in open(path):
-        try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        d = e.get("dir")
-        if not d:
-            continue
-        if want["old"] is None:
-            want["old"] = d
-        want["any"] = d
-        if e.get("error_stage"):
-            want["error"] = d
-        if e.get("account_switches"):
-            want["switch"] = d
-except FileNotFoundError:
-    pass
+state = sys.argv[1]
+db = os.path.join(state, "devin-2api.db")
+rows = []
+if os.path.exists(db):
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    rows = con.execute(
+        "SELECT dir, error_stage, account_switches FROM logs "
+        "WHERE dir!='' ORDER BY id").fetchall()
+else:
+    path = os.path.join(state, "logs", "index.jsonl")
+    if not os.path.exists(path) and os.path.exists(path + ".migrated"):
+        path += ".migrated"  # 源已迁移：索引在 .migrated 里
+    try:
+        for line in open(path):
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            rows.append((e.get("dir"), e.get("error_stage"),
+                         e.get("account_switches")))
+    except FileNotFoundError:
+        pass
+for d, stage, sw in rows:
+    if not d:
+        continue
+    if want["old"] is None:
+        want["old"] = d
+    want["any"] = d
+    if stage:
+        want["error"] = d
+    if sw:
+        want["switch"] = d
 seen = set()
 for k, v in want.items():
     if v and v not in seen:
@@ -294,11 +330,35 @@ PY
 )"
 
 side_id() { # port dir -> 该侧数字 log id；q 在显式历史窗内解析，
-	# 拿不到回落 meta.json 的 started_at ms（FindDirByStartedAt 兜底路径）
+	# 拿不到回落 meta.json 的 started_at ms（FindDirByStartedAt 兜底路径；
+	# meta 按源 state 形态取：logs/<dir>/ 文件或 debug_files 表）
 	local id
-	id="$(fetch "$1" "/admin/logs?q=$2&since=2026-09-15T00:00:00Z&until=2026-09-18T00:00:00Z&limit=5" | jq -r '.data[0].id // empty' 2>/dev/null)"
-	if [[ -z "$id" && -f "$STATE/logs/$2/meta.json" ]]; then
-		id="$(python3 -c 'import json,sys,datetime;print(int(datetime.datetime.fromisoformat(json.load(open(sys.argv[1]))["started_at"].replace("Z","+00:00")).timestamp()*1000))' "$STATE/logs/$2/meta.json" 2>/dev/null)"
+	id="$(fetch "$1" "/admin/logs?q=$2&$W&limit=5" | jq -r '.data[0].id // empty' 2>/dev/null)"
+	if [[ -z "$id" ]]; then
+		id="$(python3 - "$STATE" "$2" <<'PY'
+import json, sys, os, sqlite3, gzip, datetime
+state, d = sys.argv[1], sys.argv[2]
+raw = None
+fp = os.path.join(state, "logs", d, "meta.json")
+if os.path.exists(fp):
+    raw = open(fp, "rb").read()
+else:
+    db = os.path.join(state, "devin-2api.db")
+    if os.path.exists(db):
+        row = sqlite3.connect("file:%s?mode=ro" % db, uri=True).execute(
+            "SELECT content FROM debug_files WHERE dir=? AND name='meta.json'",
+            (d,)).fetchone()
+        raw = row[0] if row else None
+try:
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    ms = int(datetime.datetime.fromisoformat(
+        json.loads(raw)["started_at"].replace("Z", "+00:00")).timestamp() * 1000)
+    print(ms)
+except Exception:
+    pass
+PY
+)"
 	fi
 	echo "$id"
 }
@@ -332,7 +392,7 @@ if [[ -n "$SAMPLE" ]]; then
 		debug_diff "$dir"
 	done <<<"$SAMPLE"
 else
-	echo "SKIP debug/* (index.jsonl 无样本)"
+	echo "SKIP debug/* (logs 表/index.jsonl 均无样本)"
 fi
 
 # --- traffic leg：两侧打同形请求再对账，专测写路径（--traffic 开启） ---

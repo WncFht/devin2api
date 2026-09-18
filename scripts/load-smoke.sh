@@ -73,10 +73,11 @@ for i in $(seq 1 600); do
 	[[ $i == 600 ]] && { echo "实例未起来（120s），日志：" >&2; tail -30 "$ST/boot.log" >&2; exit 1; }
 done
 
-# 凭据/模型从 config 抽取；api_key 首个命中即 auth.api_key。
-PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ')"
-APIKEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ')"
-MODEL="$(grep -E '^\s*model:' "$CONFIG" | head -1 | sed -E 's/.*model:\s*//; s/["'"'"']//g' | tr -d ' ')"
+# 凭据/模型从 config 抽取；api_key 首个命中即 auth.api_key。grep 无命中
+# 返回 1，pipefail 下不交 || true 会杀脚本——缺行应落为空串走「跳过 /v1 腿」。
+PASSWORD="$(grep -E '^\s*password:' "$CONFIG" | head -1 | sed -E 's/.*password:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
+APIKEY="$(grep -E '^\s*api_key:' "$CONFIG" | head -1 | sed -E 's/.*api_key:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
+MODEL="$(grep -E '^\s*model:' "$CONFIG" | head -1 | sed -E 's/.*model:\s*//; s/["'"'"']//g' | tr -d ' ' || true)"
 
 END_TS=$(( $(date +%s) + DURATION ))
 

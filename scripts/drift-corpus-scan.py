@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-"""Scan logs/*/01-http-request.json corpus for protocol-drift shape hit rates.
+"""Scan devin-2api.db debug_files 的 01-http-request.json 语料，统计
+protocol-drift 形状命中率。
 
 Per-request hit counting — a request counts once if it exhibits the shape.
 Counts only structural shapes; never emits message content.
 
-用法: drift-corpus-scan.py [--logs-dir DIR]
-  --logs-dir  默认按平台探测（darwin → ~/Library/Application Support/
-              devin-2api/logs，其他 → ~/.local/state/devin-2api/logs），
-              repo 内跑也可指 ./logs
+用法: drift-corpus-scan.py [--db PATH] [--since YYYYMMDD] [--until YYYYMMDD]
+  --db      默认按平台探测（darwin → ~/Library/Application Support/
+            devin-2api/devin-2api.db，其他 → ~/.local/state/devin-2api/
+            devin-2api.db）；WAL 下只读连接不干扰运行实例
+  --since/--until  dir 名内嵌日期 YYYYMMDD，字典序过滤（默认全开）
+  语料为空时 exit 2——空结果多半是 db 路径指错或 payload 已被保留
+  策略剥离，静默输出空表易误读为「无漂移」。
 """
 import json
-import glob
+import gzip
 import collections
 import os
+import sqlite3
 import sys
 import argparse
 
 
-def default_logs_dir():
+def default_db():
     if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/devin-2api/logs")
-    return os.path.expanduser("~/.local/state/devin-2api/logs")
+        return os.path.expanduser("~/Library/Application Support/devin-2api/devin-2api.db")
+    return os.path.expanduser("~/.local/state/devin-2api/devin-2api.db")
+
+
+def decode(raw):
+    """debug_files.content 按 gzip 魔数判帧（EncodePayload 透明压缩）。"""
+    if isinstance(raw, (bytes, bytearray)) and raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return raw
 
 
 IMAGE_TYPES = {"image", "image_url", "input_image"}
@@ -62,18 +74,30 @@ def classify(path, body):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--logs-dir", default=default_logs_dir())
+    ap.add_argument("--db", default=default_db())
+    ap.add_argument("--since", default="00000000")
+    ap.add_argument("--until", default="99999999")
     args = ap.parse_args()
-    logs = args.logs_dir
+
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % args.db, uri=True)
+    except sqlite3.OperationalError as e:
+        print("drift-corpus-scan: %s（db=%s）" % (e, args.db), file=sys.stderr)
+        sys.exit(2)
 
     proto_totals = collections.Counter()
     P = collections.defaultdict(collections.Counter)
 
-    for d in sorted(glob.glob(logs + "/2026*")):
+    n_scanned = 0
+    for d, content in db.execute(
+            "SELECT dir, content FROM debug_files "
+            "WHERE name='01-http-request.json' AND dir>=? AND dir<? "
+            "ORDER BY dir", (args.since, args.until + "~")):
         try:
-            req = json.load(open(d + "/01-http-request.json"))
+            req = json.loads(decode(content))
         except Exception:
             continue
+        n_scanned += 1
         body = load_body(req)
         proto = classify(req.get("path", ""), body)
         proto_totals[proto] += 1
@@ -156,6 +180,12 @@ def main():
             c["ptc_present"] += 1
             if body["parallel_tool_calls"] is False:
                 c["ptc_false"] += 1
+
+    if n_scanned == 0:
+        print("drift-corpus-scan: 语料为空（db=%s since=%s until=%s）——"
+              "检查 db 路径或 payload 保留策略" %
+              (args.db, args.since, args.until), file=sys.stderr)
+        sys.exit(2)
 
     print("corpus:", dict(proto_totals))
     for p in ("anthropic", "chat", "responses", "unknown"):

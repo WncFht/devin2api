@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""index.jsonl × 请求目录取证：同流静默间隔 → 上游缓存命中率画像。
+"""logs 表 × debug payload 取证：同流静默间隔 → 上游缓存命中率画像。
 
-扫 logs/ 全部请求目录：01 body 派生 sid/psid（CC user_id JSON）、
-sh=sha256(sys[:4K]|firstmsg[:1K]) 流键、sub 标记（system 头部
-cc_is_subagent）；04 重组 deltaToolCalls（name 帧后跟 argumentsJson
-分块）；按 (sid,sh) 聚流，以前一响应的 pending 工具分类 gap
-（agentwait/userq/bookkeep/toolwait/turnend）；输出 gap→hit% 分桶、
-miss 三分支归因（structural-shrink / decay>300s / short-gap）、
-大前缀 warm/cold first_upstream_ms 分位、15min 窗峰值并发流。
+扫 devin-2api.db：debug_files 的 01 body 派生 sid/psid（CC user_id
+JSON）、sh=sha256(sys[:4K]|firstmsg[:1K]) 流键、sub 标记（system 头部
+cc_is_subagent）；debug_chunks 的 04 按 seq 拼接重组 deltaToolCalls
+（name 帧后跟 argumentsJson 分块）；logs 表供索引行。按 (sid,sh) 聚流，
+以前一响应的 pending 工具分类 gap（agentwait/userq/bookkeep/toolwait/
+turnend）；输出 gap→hit% 分桶、miss 三分支归因（structural-shrink /
+decay>300s / short-gap）、大前缀 warm/cold first_upstream_ms 分位、
+15min 窗峰值并发流。
 
-用法: index-stream-stats.py [--logs-dir DIR]
-  --logs-dir  默认按平台探测：darwin → ~/Library/Application Support/
-              devin-2api/logs，其他 → ~/.local/state/devin-2api/logs
+用法: index-stream-stats.py [--db PATH]
+  --db  默认按平台探测：darwin → ~/Library/Application Support/
+        devin-2api/devin-2api.db，其他 → ~/.local/state/devin-2api/
+        devin-2api.db；WAL 下只读连接不干扰运行实例
 
 口径陷阱：命中率只在 result=="completed" && input+cache_read>0 的行上
 有意义——rate_gate 快败/断连的 0-token 行会被误算成 miss 污染统计。
@@ -19,13 +21,20 @@ miss 三分支归因（structural-shrink / decay>300s / short-gap）、
 """
 
 import json, os, hashlib, datetime, collections, statistics, sys, bisect
-import argparse
+import argparse, sqlite3, gzip
 
 
-def default_logs_dir():
+def default_db():
     if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/devin-2api/logs")
-    return os.path.expanduser("~/.local/state/devin-2api/logs")
+        return os.path.expanduser("~/Library/Application Support/devin-2api/devin-2api.db")
+    return os.path.expanduser("~/.local/state/devin-2api/devin-2api.db")
+
+
+def decode(raw):
+    """debug_* 表的 BLOB 按 gzip 魔数判帧（EncodePayload 透明压缩）。"""
+    if isinstance(raw, (bytes, bytearray)) and raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return raw
 
 
 def ts_iso(s):
@@ -34,19 +43,29 @@ def ts_iso(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--logs-dir", default=default_logs_dir())
+    ap.add_argument("--db", default=default_db())
     args = ap.parse_args()
-    base = args.logs_dir
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % args.db, uri=True)
+    except sqlite3.OperationalError as e:
+        print("index-stream-stats: %s（db=%s）" % (e, args.db), file=sys.stderr)
+        sys.exit(2)
+
+    # 04 流式 JSONL 在 debug_chunks 按 seq 分片（逐片 EncodePayload）——
+    # 全量捞出按 dir 拼回单文本（解码成 str），与文件时代读整文件等价。
+    chunks4 = {}
+    for d, blob in db.execute(
+            "SELECT dir, data FROM debug_chunks "
+            "WHERE name='04-devin-response.jsonl' ORDER BY dir, seq"):
+        chunks4[d] = chunks4.get(d, "") + decode(blob).decode("utf-8", "replace")
 
     # ---------- pass 1: per-request profile ----------
     reqs = {}
-    for d in sorted(os.listdir(base)):
-        p = os.path.join(base, d)
-        f1 = os.path.join(p, "01-http-request.json")
-        if not os.path.isdir(p) or not os.path.exists(f1):
-            continue
+    for d, content in db.execute(
+            "SELECT dir, content FROM debug_files "
+            "WHERE name='01-http-request.json'"):
         try:
-            b = json.load(open(f1))["body"]
+            b = json.loads(decode(content))["body"]
         except Exception:
             continue
         uid = b.get("metadata", {}).get("user_id", "")
@@ -88,11 +107,10 @@ def main():
         # tool calls + reassembled args (name frame followed by argumentsJson chunks)
         tools = []
         callargs = {}
-        f4 = os.path.join(p, "04-devin-response.jsonl")
-        if os.path.exists(f4):
+        if d in chunks4:
             try:
                 cur = None
-                for line in open(f4):
+                for line in chunks4[d].splitlines():
                     if '"deltaToolCalls"' not in line:
                         continue
                     for tc in json.loads(line).get("deltaToolCalls", []):
@@ -110,24 +128,22 @@ def main():
                        nmsg=len(msgs), tools=tools, callargs=callargs,
                        markers=markers, model=b.get("model", ""))
 
-    # ---------- index join ----------
+    # ---------- logs 表 join（原 index.jsonl 的继任） ----------
     rows = []
-    for line in open(os.path.join(base, "index.jsonl")):
-        try:
-            r = json.loads(line)
-        except Exception:
-            continue
-        d = r.get("dir", "")
+    for r in db.execute(
+            "SELECT dir, started_at, api, path, input_tokens, cache_read_tokens,"
+            " first_upstream_ms, duration_ms, result FROM logs"):
+        d = r[0]
         if d not in reqs:
             continue
         prof = reqs[d]
-        rows.append(dict(d=d, t=ts_iso(r["started_at"]), api=r.get("api", ""),
-                         path=r.get("path", ""),
-                         inp=r.get("input_tokens", 0) or 0,
-                         cr=r.get("cache_read_tokens", 0) or 0,
-                         fu=r.get("first_upstream_ms", 0) or 0,
-                         dur=r.get("duration_ms", 0) or 0,
-                         result=r.get("result", ""),
+        rows.append(dict(d=d, t=ts_iso(r[1]), api=r[2] or "",
+                         path=r[3] or "",
+                         inp=r[4] or 0,
+                         cr=r[5] or 0,
+                         fu=r[6] or 0,
+                         dur=r[7] or 0,
+                         result=r[8] or "",
                          **{k: prof[k] for k in ("sid", "psid", "uid_ok", "has_uid",
                             "sh", "syshash", "msghash", "sub", "nmsg", "tools",
                             "callargs", "markers")}))
