@@ -103,11 +103,19 @@ devin:
   #   （第几秒）；实测桶界在本地 :59 附近（上游时钟快 ~0.5s）。默认 0。
   # gate_window_guard_seconds: 估计桶界两侧的停发死区秒数，覆盖桶界
   #   估计误差与上游多分片漂移；死区内请求睡到下一窗口开放。默认 2。
+  # 下游令牌可标 class=bg（无人值守批跑）走分级准入：bg 排队预算更长、
+  # 且被一道动态预留约束挡在 fg 保底余量之外——语义见 docs/gate-classes.md。
+  # gate_bg_max_hold_seconds: bg 请求的最长闸内排队秒数（fg 仍走
+  #   gate_max_hold_seconds）。默认 120。
+  # gate_bg_reserve_margin: bg 准入动态预留公式中的固定安全边际（条）。
+  #   默认 4。
   # gate_max_hold_seconds: 15
   # gate_drip_interval_seconds: 8
   # gate_default_latch_seconds: 60
   # gate_window_offset_seconds: 0
   # gate_window_guard_seconds: 2
+  # gate_bg_max_hold_seconds: 120
+  # gate_bg_reserve_margin: 4
   # 前缀保温（prefix-replay warming）：对保留的会话谱系按节拍重放最近
   # 请求体，给上游 prompt cache 续期，压住 subagent 长时间等待结束后
   # 恢复轮次的冷 prefill。默认关闭（灰度开关），其余参数通常无需调整：
