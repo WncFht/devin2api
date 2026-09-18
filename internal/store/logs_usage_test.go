@@ -423,3 +423,59 @@ func TestUsageAttemptCauses(t *testing.T) {
 		t.Fatalf("attempt_causes = %+v, want 今日 yanjian/local_gate:latch n=2", snap.AttemptCauses)
 	}
 }
+
+// TestUsageSendsPerRow 验证快照的 sends_per_row 段：分子是 gate_windows
+// 按本地日聚合的放行数（used_fg+used_bg 跨 lane 合计），分母是当日
+// 非 rejected logs 行——纯探针日（无 logs 行）rows=0 且 ratio 缺省；
+// gate_windows 全期无行时整段缺席（omitempty 语义）。
+func TestUsageSendsPerRow(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now()
+	// 钉在本地正午：跨午夜运行不会把日行/窗行拆到两个日期键。
+	today := time.Date(now.Year(), now.Month(), now.Day(), 12, 0, 0, 0, time.Local)
+	yesterday := today.AddDate(0, 0, -1)
+	todayDay := today.Format("2006-01-02")
+
+	for i := 0; i < 2; i++ {
+		if _, err := s.InsertLog(ctx, &LogRow{
+			Dir: fmt.Sprintf("sr-%d", i), StartedAt: today, Result: "completed",
+		}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	snap, err := s.UsageStats(ctx)
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
+	if len(snap.SendsPerRow) != 0 {
+		t.Fatalf("sends_per_row = %+v, want absent（gate_windows 无行）", snap.SendsPerRow)
+	}
+
+	// 今日 sends=4（跨 lane 合计：3fg+1bg）；昨日 sends=2 但无 logs 行
+	// ——纯探针日进序列、ratio 缺省。
+	for _, w := range []*GateWindow{
+		{Lane: "yanjian", WindowStart: today.Unix(), UsedFg: 3, UsedBg: 1},
+		{Lane: "randall", WindowStart: yesterday.Unix(), UsedFg: 2},
+	} {
+		if err := s.InsertGateWindow(ctx, w); err != nil {
+			t.Fatalf("InsertGateWindow: %v", err)
+		}
+	}
+	snap, err = s.UsageStats(ctx)
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
+	if len(snap.SendsPerRow) != 2 {
+		t.Fatalf("sends_per_row = %+v, want 昨日+今日两行", snap.SendsPerRow)
+	}
+	// 旧到新排序：昨日纯探针日 rows=0、ratio 缺省。
+	probe := snap.SendsPerRow[0]
+	if probe.Date != yesterday.Format("2006-01-02") || probe.Sends != 2 || probe.Rows != 0 || probe.Ratio != nil {
+		t.Fatalf("probe day = %+v, want sends=2 rows=0 ratio=nil", probe)
+	}
+	cur := snap.SendsPerRow[1]
+	if cur.Date != todayDay || cur.Sends != 4 || cur.Rows != 2 || cur.Ratio == nil || *cur.Ratio != 2.0 {
+		t.Fatalf("today = %+v, want sends=4 rows=2 ratio=2.0", cur)
+	}
+}

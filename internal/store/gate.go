@@ -92,3 +92,29 @@ func (s *Store) PruneGateWindows(ctx context.Context, before int64) (int64, erro
 	}
 	return res.RowsAffected()
 }
+
+// GateSendsByDay 把 used_fg+used_bg（闸门放行数=真实上游发送数，含内层
+// 重试与保温/drip 探针）按本地日聚合，返回 'YYYY-MM-DD'→发送数。
+// sinceUnix（unix 秒）按 window_start 下界过滤。跨 lane 合计——sends/row
+// 指标的分母（logs 行数）同样是跨 lane 口径。注意 quota<=0 的闸门不记
+// 窗口行（admitLocked 不跑），该口径下分子随无窗期自然缺记。
+func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]int64, error) {
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT strftime('%Y-%m-%d', window_start, 'unixepoch', 'localtime') AS day,
+			COALESCE(SUM(used_fg + used_bg), 0)
+		FROM gate_windows WHERE window_start >= ? GROUP BY day`, sinceUnix)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int64{}
+	for rows.Next() {
+		var day string
+		var sends int64
+		if err := rows.Scan(&day, &sends); err != nil {
+			return nil, err
+		}
+		out[day] = sends
+	}
+	return out, rows.Err()
+}

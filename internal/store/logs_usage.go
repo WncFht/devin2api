@@ -159,6 +159,19 @@ type UsageDayRow struct {
 	UsageTotals
 }
 
+// SendsRowDay 是单日 sends/row 探针行：sends 是当日闸门放行数
+// （gate_windows 的 used_fg+used_bg——每次放行对应一次真实上游发送，
+// 含日志不可见的同 protoRequest 内层重试与保温/drip 探针），rows 是
+// 当日非 rejected logs 行数。Ratio 只在 rows>0 时置值——「quota<=0
+// 闸门不记账」（sends=0, rows>0）与「纯探针日无请求」（rows=0）
+// 靠指针把真 0 与未定义分开。
+type SendsRowDay struct {
+	Date  string   `json:"date"`
+	Sends int64    `json:"sends"`
+	Rows  int64    `json:"rows"`
+	Ratio *float64 `json:"ratio,omitempty"`
+}
+
 // DimensionAgg 是按模型或 key 哈希聚合的行。
 type DimensionAgg struct {
 	Name string `json:"name"`
@@ -212,6 +225,10 @@ type UsageSnapshot struct {
 	TTFB        LatencyStats                      `json:"ttfb"`
 	// RateLimitEvents 是最近的上游 429 采样（旧到新），供面板推算限流阈值。
 	RateLimitEvents []RateLimitEvent `json:"rate_limit_events,omitempty"`
+	// SendsPerRow 是逐日（旧到新）sends/row 探针：分子闸门放行数、
+	// 分母当日 logs 行——内层 connect 重试漂移的唯一活指标。
+	// gate_windows 全期无行（无号池/闸门恒 quota<=0）时整段省略。
+	SendsPerRow []SendsRowDay `json:"sends_per_row,omitempty"`
 	// AttemptCauses 是被放弃 lane 尝试的 日×lane×cause 聚合
 	//（lane_attempt_causes 表 31 天窗口直读，旧到新）：区分真实
 	// failover 发送（connect code）与本地闸门幻影换号（local_gate:*，
@@ -639,6 +656,39 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	}
 	if snap.RateLimitEvents, err = s.rateLimitEvents(ctx); err != nil {
 		return snap, err
+	}
+
+	// sends/row 与换号归因都钉在本地日粒度：gate_windows 的窗口起点
+	// 带 windowOpen 偏移，更细的桶会被窗口系统性跨界，日界内最多
+	// 首尾两个窗口被切开，分母与 days 天然同键。
+	sendsByDay, err := s.GateSendsByDay(ctx, minBucket*60)
+	if err != nil {
+		return snap, err
+	}
+	if len(sendsByDay) > 0 {
+		rowsByDay := map[string]int64{}
+		for _, d := range snap.Days {
+			rowsByDay[d.Date] = d.Requests
+		}
+		days := make([]string, 0, len(sendsByDay)+len(rowsByDay))
+		for day := range sendsByDay {
+			days = append(days, day)
+		}
+		for day := range rowsByDay {
+			if _, ok := sendsByDay[day]; !ok {
+				days = append(days, day)
+			}
+		}
+		sort.Strings(days)
+		snap.SendsPerRow = make([]SendsRowDay, 0, len(days))
+		for _, day := range days {
+			row := SendsRowDay{Date: day, Sends: sendsByDay[day], Rows: rowsByDay[day]}
+			if row.Rows > 0 {
+				r := float64(row.Sends) / float64(row.Rows)
+				row.Ratio = &r
+			}
+			snap.SendsPerRow = append(snap.SendsPerRow, row)
+		}
 	}
 	sinceDay := time.Now().AddDate(0, 0, -usageMaxDays).Format("2006-01-02")
 	if snap.AttemptCauses, err = s.LaneAttemptCauses(ctx, sinceDay); err != nil {
