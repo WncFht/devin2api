@@ -310,30 +310,53 @@ var traceIDPattern = regexp.MustCompile(`\(trace ID: ([^)\s]+)\)`)
 // rateLimitResetPattern 匹配上游限流文案里的重试窗口。实测两种单位：
 // 剩余不足一分钟时报 "reset in N seconds"，更长时报 "reset in N
 // minute(s)"（floor 取整）。上游不给 Retry-After 头或 RetryInfo
-// detail，这句文案是唯一可行动的 hint。
-var rateLimitResetPattern = regexp.MustCompile(`(?i)reset in (\d+)\s*(seconds?|minutes?)`)
+// detail，这句文案是唯一可行动的 hint。\b 挡掉 "preset in N" 之类
+// 复合词误命中，":?" 容忍冒号变体。
+var rateLimitResetPattern = regexp.MustCompile(`(?i)\breset in:?\s*(\d+)\s*(seconds?|minutes?)`)
+
+// rateLimitDurationPattern 匹配同族上游的另一种自述：Go duration 文本
+// "Resets in: 3h0m0s"（Windsurf/Codeium 系侧录，本仓生产尚未出现）。
+// 捕获段按 duration 语法收紧为「数字+单位」重复——词单位（seconds/
+// minutes）留给上方模式，单位字母缺失或不属 Go 单位集就不算声明。
+var rateLimitDurationPattern = regexp.MustCompile(`(?i)\bresets?\s+in\s*:?\s*((?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h))+)`)
 
 // parseResetHint 从文案解析限流重置声明，返回三态：无 hint（ok=false）、
 // 显式 0（ok=true 且 seconds=0——上游在桶界到达时报 "reset in 0 seconds"，
 // 语义是「新桶已爆、无追加封禁」，重置时刻即现在）、正数等待。
-// 返回字面秒数（分钟按 60 折算）；要拿可行动的等待时长/绝对时刻用
-// RateLimitReset——分钟 hint 是桶界剩余时长的 floor 取整，需向上对齐。
+// 返回字面秒数（分钟按 60 折算，duration 按 ParseDuration 折算——
+// duration 是精确声明，不置 minute 桶界标记）；要拿可行动的等待时长/
+// 绝对时刻用 RateLimitReset——分钟 hint 是桶界剩余时长的 floor 取整，
+// 需向上对齐。
 func parseResetHint(message string) (seconds int, minute bool, ok bool) {
-	match := rateLimitResetPattern.FindStringSubmatch(message)
-	if len(match) != 3 {
-		return 0, false, false
+	if match := rateLimitResetPattern.FindStringSubmatch(message); len(match) == 3 {
+		n, err := strconv.Atoi(match[1])
+		if err != nil {
+			return 0, false, false
+		}
+		// 正则带 (?i)，命中的单位大小写不定——先归一再判，"MINUTES" 直接
+		// 比会落进秒分支，分钟 hint 被当秒解析，等待差 60 倍。
+		if strings.HasPrefix(strings.ToLower(match[2]), "minute") {
+			return n * 60, true, true
+		}
+		return n, false, true
 	}
-	n, err := strconv.Atoi(match[1])
-	if err != nil {
-		return 0, false, false
+	if match := rateLimitDurationPattern.FindStringSubmatch(message); len(match) == 2 {
+		// 捕获语法已收紧到 duration 形状，ParseDuration 失败只剩 int64
+		// 溢出（>292 年的畸值）——与数字解析失败同策：当无声明处理。
+		d, err := time.ParseDuration(strings.ToLower(match[1]))
+		if err != nil {
+			return 0, false, false
+		}
+		return int(d.Seconds()), false, true
 	}
-	// 正则带 (?i)，命中的单位大小写不定——先归一再判，"MINUTES" 直接
-	// 比会落进秒分支，分钟 hint 被当秒解析，等待差 60 倍。
-	if strings.HasPrefix(strings.ToLower(match[2]), "minute") {
-		return n * 60, true, true
-	}
-	return n, false, true
+	return 0, false, false
 }
+
+// rateLimitResetMaxWait 是采纳上游自述复位点的等待上限：hint 文本
+// 无界（"resets in 999h" 合法），照单全收会让 lane 冷却闩封禁以月计。
+// 6h 与同族实现（WindsurfAPI）及 Claude Code 对 unified-reset 头的
+// 采纳上限一致；真实超窗声明到点重探一发即拿到新 hint，自愈。
+const rateLimitResetMaxWait = 6 * time.Hour
 
 // RateLimitReset 把限流重置时刻解析为绝对时刻：生产侧已知的精确秒数
 // 直接 now+N；分钟级 hint 是上游对当前分钟桶剩余时长的 floor 取整
@@ -341,6 +364,8 @@ func parseResetHint(message string) (seconds int, minute bool, ok bool) {
 // 模型向上对齐到下一个 :59 秒桶界——上游时钟约快 1s，实测桶界落在本地
 // :58.5~:59.5。显式 0 秒声明（"reset in 0 seconds"，ResetHint 置位）
 // 返回 now——冷却闩按声明时刻即刻过期，而不是套兜底闩时长。
+// 采纳的等待时长封顶 rateLimitResetMaxWait；RetryAfterSeconds 字段
+// 仍是字面解析值，日志里看得到上游原始声明。
 func (failure *Failure) RateLimitReset(now time.Time) (time.Time, bool) {
 	if failure == nil {
 		return time.Time{}, false
@@ -348,20 +373,33 @@ func (failure *Failure) RateLimitReset(now time.Time) (time.Time, bool) {
 	if failure.RetryAfterSeconds <= 0 && !failure.ResetHint {
 		return time.Time{}, false
 	}
-	if failure.RetryAfterMinute {
+	// 字段保留上游字面值供排障，计算用封顶值——畸值声明（"resets in
+	// 999h"）不会让闩封禁以月计，同时挡 Duration 乘法的 int64 溢出
+	// （>292 年的字面秒换算纳秒绕回负值）。
+	seconds := failure.RetryAfterSeconds
+	if max := int(rateLimitResetMaxWait / time.Second); seconds > max {
+		seconds = max
+	}
+	var reset time.Time
+	switch {
+	case failure.RetryAfterMinute:
 		// now+Nmin 落入的分钟桶的 :59 边界；若该时刻本身已过 :59，
 		// 取下一个分钟的 :59。N=0（"reset in 0 minutes"）对齐到本桶
 		// :59——分钟粒度的 0 是 floor 取整，真实剩余最长 ~59s。
-		target := now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second)
-		reset := target.Truncate(time.Minute).Add(59 * time.Second)
+		target := now.Add(time.Duration(seconds) * time.Second)
+		reset = target.Truncate(time.Minute).Add(59 * time.Second)
 		if !reset.After(target) {
 			reset = reset.Add(time.Minute)
 		}
-		return reset, true
-	}
-	if failure.RetryAfterSeconds <= 0 {
+	case failure.RetryAfterSeconds <= 0:
 		// 显式 0 秒：声明的重置时刻即现在。
-		return now, true
+		reset = now
+	default:
+		reset = now.Add(time.Duration(seconds) * time.Second)
 	}
-	return now.Add(time.Duration(failure.RetryAfterSeconds) * time.Second), true
+	// 分钟桶界对齐最多再推出 ~59s，按上限再兜一次。
+	if max := now.Add(rateLimitResetMaxWait); reset.After(max) {
+		reset = max
+	}
+	return reset, true
 }

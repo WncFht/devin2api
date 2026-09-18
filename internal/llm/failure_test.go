@@ -122,6 +122,46 @@ func TestRetryAfterSeconds(t *testing.T) {
 	if failure := ClassifyText("resource_exhausted: rate limited. Your limit will reset in 2 Minutes."); failure.RetryAfterSeconds != 120 || !failure.RetryAfterMinute {
 		t.Fatalf("case-insensitive minute hint = %ds,minute=%v, want 120s,true", failure.RetryAfterSeconds, failure.RetryAfterMinute)
 	}
+	// 冒号变体与词边界："reset in: 30 seconds" 认声明，"preset in"
+	// 的复合词不算。
+	if seconds := ClassifyText("reset in: 30 seconds").RetryAfterSeconds; seconds != 30 {
+		t.Fatalf("colon variant RetryAfterSeconds = %d, want 30", seconds)
+	}
+	if failure := ClassifyText("preset in 5 seconds"); failure.ResetHint {
+		t.Fatal("mid-word 'preset in' must not count as reset declaration")
+	}
+}
+
+// TestRetryAfterGoDuration 验证同族上游的 Go duration 自述格式
+// "Resets in: 3h0m0s"（Windsurf/Codeium 系侧录）：按 ParseDuration
+// 折成精确秒数，不置分钟桶界标记。
+func TestRetryAfterGoDuration(t *testing.T) {
+	if failure := ClassifyText("resource_exhausted: rate limited. Resets in: 3h0m0s"); failure.RetryAfterSeconds != 10800 || failure.RetryAfterMinute || !failure.ResetHint {
+		t.Fatalf("duration hint = %ds,minute=%v,hint=%v, want 10800,false,true", failure.RetryAfterSeconds, failure.RetryAfterMinute, failure.ResetHint)
+	}
+	if seconds := ClassifyText("resets in 1h30m").RetryAfterSeconds; seconds != 5400 {
+		t.Fatalf("no-colon duration RetryAfterSeconds = %d, want 5400", seconds)
+	}
+	// 单位大小写经归一后解析（"3H0M0S" 的 ParseDuration 原文不收）。
+	if seconds := ClassifyText("Resets In: 3H0M0S").RetryAfterSeconds; seconds != 10800 {
+		t.Fatalf("uppercase duration RetryAfterSeconds = %d, want 10800", seconds)
+	}
+	// 亚秒与显式 0 duration 都落到「重置即现在」语义（秒数截断为 0、
+	// hint 在场），与 "reset in 0 seconds" 同态。
+	if failure := ClassifyText("resets in: 500ms"); failure.RetryAfterSeconds != 0 || !failure.ResetHint {
+		t.Fatal("sub-second duration must collapse to explicit-zero semantics")
+	}
+	if failure := ClassifyText("resets in: 0s"); failure.RetryAfterSeconds != 0 || !failure.ResetHint {
+		t.Fatal("zero duration must report explicit zero with hint")
+	}
+	// 非 duration 形状不误认：单位缺席或超 ParseDuration 值域
+	// （>292 年溢出）都按无声明处理。
+	if failure := ClassifyText("resets in: soon"); failure.ResetHint {
+		t.Fatal("non-duration token must not count as hint")
+	}
+	if failure := ClassifyText("resets in: 99999999999h"); failure.ResetHint {
+		t.Fatal("overflowing duration must fall back to no-hint")
+	}
 }
 
 // TestRateLimitReset 在 rategate_test.go 里有分钟桶界对齐的全量用例，
@@ -134,6 +174,39 @@ func TestRateLimitResetZero(t *testing.T) {
 	now := time.Now()
 	if reset, ok := ClassifyText("reset in 0 seconds").RateLimitReset(now); !ok || !reset.Equal(now) {
 		t.Fatalf("explicit zero reset = %v,%v, want now,true", reset, ok)
+	}
+}
+
+// TestRateLimitResetMaxWait 验证采纳时长的 6h 封顶：字段保留上游字面
+// 值（排障可见原始声明），采纳时刻收敛到 rateLimitResetMaxWait——
+// 超窗声明到点重探即拿新 hint，畸值不再让闩封禁以月计；封顶同时
+// 挡住 Duration 乘法的 int64 溢出。
+func TestRateLimitResetMaxWait(t *testing.T) {
+	now := time.Now()
+	want := now.Add(6 * time.Hour)
+	failure := ClassifyText("resets in: 10h")
+	if failure.RetryAfterSeconds != 36000 {
+		t.Fatalf("literal parse must keep upstream claim: %d, want 36000", failure.RetryAfterSeconds)
+	}
+	if reset, ok := failure.RateLimitReset(now); !ok || !reset.Equal(want) {
+		t.Fatalf("10h duration reset = %v,%v, want %v,true", reset, ok, want)
+	}
+	// 分钟路径同样封顶（字段 30000s 字面，采纳 6h）。
+	failure = ClassifyText("reset in 500 minutes")
+	if !failure.RetryAfterMinute {
+		t.Fatal("minute hint must keep bucket flag")
+	}
+	if reset, ok := failure.RateLimitReset(now); !ok || !reset.Equal(want) {
+		t.Fatalf("500-minute reset = %v,%v, want %v,true", reset, ok, want)
+	}
+	// Duration 溢出的字面秒（>292 年）按上限采纳而非绕回过去。
+	failure = ClassifyText("reset in 99999999999 seconds")
+	if reset, ok := failure.RateLimitReset(now); !ok || !reset.Equal(want) {
+		t.Fatalf("overflowing seconds reset = %v,%v, want %v,true", reset, ok, want)
+	}
+	// 上限内的声明不受影响。
+	if reset, ok := ClassifyText("reset in 30 seconds").RateLimitReset(now); !ok || !reset.Equal(now.Add(30*time.Second)) {
+		t.Fatalf("in-range reset = %v,%v", reset, ok)
 	}
 }
 
