@@ -329,8 +329,9 @@ type Recorder struct {
 	// 据此读到归原点阶段——等 worker 排空再读会把「捕获点」误当
 	//「失败点」。error.json 落盘仍在 worker 内由 errorWritten 去重。
 	firstError atomic.Pointer[errorRecord]
-	// upstreamConn 是成功建流那次发送的连接来源（复用/新建与 idle
-	// 时长）；connect 段延迟靠它拆成「握手成本」与「上游响应头延迟」。
+	// upstreamConn 是首个成功建流那次发送的连接来源（复用/新建与 idle
+	// 时长，first-write-wins）；connect 段延迟靠它拆成「握手成本」与
+	//「上游响应头延迟」。
 	upstreamConn atomic.Pointer[connInfo]
 	// repairs 是请求投影为上游 wire 格式时的静默修复计数，由适配器在
 	// 构建请求后写入；Complete 时随 meta.json 与日志行出账。
@@ -1562,13 +1563,15 @@ func (recorder *Recorder) FirstError() (stage, message string) {
 	return "", ""
 }
 
-// NoteUpstreamConn 记录成功建流所用连接的画像；last-write-wins，
-// 调用点紧跟首个成功的 NoteUpstreamOpen。
+// NoteUpstreamConn 记录首个成功建流所用连接的画像（first-write-wins，
+// 与 NoteUpstreamSend/NoteUpstreamOpen 同口径）：续轮重开、搜索扇出的
+// 后续建流不覆盖——sent→open 段延迟归因的是首个建流，连接画像必须
+// 描述同一次发送，否则复用/新握手被错配到后段的流上。
 func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
 	if recorder == nil {
 		return
 	}
-	recorder.upstreamConn.Store(&connInfo{reused: reused, idleMS: idle.Milliseconds()})
+	recorder.upstreamConn.CompareAndSwap(nil, &connInfo{reused: reused, idleMS: idle.Milliseconds()})
 }
 
 // Complete 停止受理新写任务、投入排空哨兵后即刻返回：哨兵沿本请求的

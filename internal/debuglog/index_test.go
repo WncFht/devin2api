@@ -57,7 +57,9 @@ func TestIndexErrorFields(t *testing.T) {
 	}
 }
 
-// TestIndexConnReuseFields 验证成功建流的连接画像落进日志行。
+// TestIndexConnReuseFields 验证成功建流的连接画像落进日志行；第二次
+// NoteUpstreamConn（续轮重开/搜索扇出的后续建流）不得覆盖首个建流的
+// 画像——sent→open 段延迟归因的是首个建流。
 func TestIndexConnReuseFields(t *testing.T) {
 	root := t.TempDir()
 	st := openTestStore(t)
@@ -66,6 +68,7 @@ func TestIndexConnReuseFields(t *testing.T) {
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	recorder.NoteUpstreamConn(true, 42*time.Millisecond)
+	recorder.NoteUpstreamConn(false, 999*time.Millisecond)
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 	waitDrained(recorder)
 

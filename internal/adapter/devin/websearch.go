@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -94,7 +95,14 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "server_search_call", map[string]any{"stage": stage, "domain": domain})
 		}
 		recordProtoJSON(recorder, stage, request)
-		response, err := link.api.GetWebSearchResults(ctx, connect.NewRequest(request))
+		// httptrace 随 ctx 进 transport：GotConn 报告本次发送拿到的是
+		// 复用连接还是新握手——与 getChatMessageWithRetry 同口径，
+		// Flow A 下搜索就是首个上游调用，连接画像必须照样留证。
+		var conn httptrace.GotConnInfo
+		traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { conn = info },
+		})
+		response, err := link.api.GetWebSearchResults(traceCtx, connect.NewRequest(request))
 		if err != nil {
 			adapter.gate.noteUpstreamError(err)
 			stage := debuglog.ErrStageDevinConnect
@@ -105,6 +113,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			return outcome, llm.Classify(err)
 		}
 		recorder.NoteUpstreamOpen()
+		recorder.NoteUpstreamConn(conn.Reused, conn.IdleTime)
 		recordProtoJSON(recorder, debuglog.StageDevinResponse, response.Msg)
 		for _, item := range response.Msg.GetResults() {
 			itemURL := item.GetUrl()
