@@ -1640,8 +1640,9 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 		return
 	}
 	recorder.enqueue(func() {
-		data := recorder.sanitizeJSON(evalDeferred(value))
-		stored, usize := store.EncodePayload(append(data, '\n'))
+		var buf bytes.Buffer
+		recorder.writeSanitizedJSONLine(&buf, evalDeferred(value))
+		stored, usize := recorder.encodePayload(buf.Bytes())
 		recorder.pushInsert(func() {
 			recorder.stageFile(name, stored, usize, false)
 		})
@@ -1719,7 +1720,8 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		}), "", "  "); err != nil {
 			return
 		}
-		stored, usize := store.EncodePayload(append(data.Bytes(), '\n'))
+		data.WriteByte('\n')
+		stored, usize := recorder.encodePayload(data.Bytes())
 		recorder.pushInsert(func() {
 			// 去重判定留在写 worker：同目录多个 WriteError 任务产出的 op
 			// 按序串行执行，首个到达者胜出——编码途中的丢失由下次调用兜底。
@@ -1920,11 +1922,15 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 			}
 		}
 	}
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
+	// Encoder.SetIndent + Encode 的输出与 MarshalIndent 逐字节一致且
+	// 自带结尾 '\n'——定长 marshal 副本与 append 换行的二次拷贝全省。
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(meta); err != nil {
 		return nil
 	}
-	return append(data, '\n')
+	return buf.Bytes()
 }
 
 // validLogName 校验阶段文件名：禁止目录穿越，且必须带期望扩展名。

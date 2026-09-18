@@ -47,6 +47,45 @@ func (recorder *Recorder) sanitizeJSON(value any) []byte {
 	return fallback
 }
 
+// writeSanitizedJSONLine 把脱敏后的 JSON 连带结尾 '\n' 写进 buf——
+// 与 sanitizeJSON 同一净化口径（输出字节等于 sanitizeJSON 结果 + '\n'），
+// 但编码直写调用方缓冲：json.Marshal 的定长拷贝与 append(data,'\n')
+// 的二次整拷贝都被省掉。非 Marshaler 值走 Encoder.Encode——它输出
+// 自带一个 '\n'，先摘掉再统一补回，净化慢路径同样归一。仅写整文件
+// 行（WriteJSON）使用，JSONL 的 data 段不含行尾换行仍用 sanitizeJSON。
+func (recorder *Recorder) writeSanitizedJSONLine(buf *bytes.Buffer, value any) {
+	start := buf.Len()
+	var err error
+	if marshaler, ok := value.(json.Marshaler); ok {
+		// MarshalJSON 产物原样采用——与 sanitizeJSON 同口径：不替
+		// marshaler 做 compaction，非法输出也按原文走预筛定夺。
+		var data []byte
+		if data, err = marshaler.MarshalJSON(); err == nil {
+			buf.Write(data)
+		}
+	} else if err = json.NewEncoder(buf).Encode(value); err == nil {
+		buf.Truncate(buf.Len() - 1)
+	}
+	if err == nil {
+		data := buf.Bytes()[start:]
+		if !rawNeedsSanitize(data) {
+			buf.WriteByte('\n')
+			return
+		}
+		var generic any
+		if err = json.Unmarshal(data, &generic); err == nil {
+			buf.Truncate(start)
+			if err = json.NewEncoder(buf).Encode(recorder.sanitizeValue(generic, false)); err == nil {
+				return
+			}
+		}
+	}
+	buf.Truncate(start)
+	fallback, _ := json.Marshal(map[string]any{"serialization_error": err.Error()})
+	buf.Write(fallback)
+	buf.WriteByte('\n')
+}
+
 // sanitizeValue 递归脱敏 any 树。metadataScope 标记当前子树是否位于某个
 // "metadata" 键之下——上游 Metadata.f（设备指纹）只在这一作用域内敏感，
 // 全局脱敏会把客户端请求体里同名的 "f" 键一并遮盖。
