@@ -260,6 +260,8 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		switch v := m[k].(type) {
 		case uint64:
 			return v
+		case uint32:
+			return uint64(v)
 		case int64:
 			return uint64(v)
 		case int:
