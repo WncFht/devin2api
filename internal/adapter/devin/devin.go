@@ -1296,6 +1296,14 @@ func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.Req
 	return assignment.modelUID, assignment.jwt, nil
 }
 
+// preGateTimeout 是闸门前同步上游调用（AssignModel 路由解析、模型目录
+// 拉取）的硬顶：这些调用在速率闸门之外跑，上游挂起时没有整形兜底——
+// send-silent 故障实测 flight 等待者陪等近 60s、恢复后 ~1s 齐放。取值
+// 低于 fg maxHold(30s)：超时失败在闸门排队预算内落定，号池下
+// deadline_exceeded 经 failoverable 换 lane 重解析；同键等待者经
+// flight.done 广播共享同一失败，不各陪一条超时。var 供测试缩短。
+var preGateTimeout = 10 * time.Second
+
 // assignModel 调上游 AssignModel 把 router uid 解析为真实模型 + assignment
 // jwt，结果按 (router uid, cascade id) 缓存。错误分类见
 // docs/upstream-protocol.md 路由节：非 router uid → invalid_argument，
@@ -1304,6 +1312,8 @@ func (adapter *Adapter) resolveModelRouting(ctx context.Context, request llm.Req
 // 同键并发收敛为单次上游调用（模式同 ListModels 的 modelsFetch）：在飞
 // 调用 detach 自首发者 ctx——结果是键级共享状态，一个客户端断连不该
 // 让全体等待者吃 context.Canceled；等待者吃自己的 ctx 可随时退出。
+// detach 的在飞调用由 preGateTimeout 兜底，等待者经 done 广播共享
+// 同一超时失败，不必各自设限。
 // 提交只在 flight 仍是注册项时生效：配置清空（换端点/换凭据）后在飞
 // 解析结果落进缓存就是把陈旧 jwt 借尸还魂。
 func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
@@ -1354,6 +1364,8 @@ func (adapter *Adapter) callAssignModel(ctx context.Context, routerUID, cascadeI
 	name, version, os := adapter.CurrentConfig().ClientIdentity()
 	link := adapter.link()
 	link.warmer.kickRequest()
+	ctx, cancel := context.WithTimeout(ctx, preGateTimeout)
+	defer cancel()
 	resp, err := link.api.AssignModel(ctx, connect.NewRequest(&devinproto.AssignModelRequest{
 		Metadata:       upstream.BuildMetadata(adapter.currentToken(), name, version, os, 366),
 		ModelRouterUid: proto.String(routerUID),
@@ -1481,10 +1493,10 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 		a.modelsFetch = nil
 		if err != nil {
 			// fetch 的 ctx 经 WithoutCancel detach，调用方取消传不进来
-			//（Canceled 实际不可达，留作兜底判据）；唯一可达的 ctx 错误
-			// 是 api client 自身 610s DeadlineExceeded——那是上游挂起的
+			//（Canceled 实际不可达，留作兜底判据）；可达的 ctx 错误是
+			// preGateTimeout 的 DeadlineExceeded——那是上游挂起的
 			// 形态，按上游失败进冷却，否则挂起期每个 ensureCatalog
-			// 调用方都吸附陪等 610s。
+			// 调用方都吸附陪等到超时。
 			if !errors.Is(err, context.Canceled) {
 				backoff := catalogRetryBackoff
 				if failure := llm.Classify(err); failure.RetryAfterSeconds > 0 {
@@ -1528,6 +1540,8 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 	// 整体换值，modelsMu 管不到 config——裸读会与热应用竞争。
 	cfg := a.CurrentConfig()
 	name, version, os := cfg.ClientIdentity()
+	ctx, cancel := context.WithTimeout(ctx, preGateTimeout)
+	defer cancel()
 	resp, err := a.link().api.GetCliModelConfigs(ctx, connect.NewRequest(&devinproto.GetCliModelConfigsRequest{
 		Metadata: upstream.BuildMetadata(a.currentToken(), name, version, os, 0),
 	}))

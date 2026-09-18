@@ -41,9 +41,15 @@ type stubUpstream struct {
 	catalog []*devinproto.ExaCodeiumCommonPb_ClientModelConfig
 	// assign 是 AssignModel 的处理函数；nil 时回 unimplemented。
 	assign func(req *devinproto.AssignModelRequest) (*devinproto.AssignModelResponse, error)
+	// assignBlock/catalogBlock 非 nil 时对应 handler 派发脚本前先等它或
+	// ctx 关闭——模拟上游挂起；客户端 ctx 断（preGateTimeout 等）解开等待。
+	assignBlock  chan struct{}
+	catalogBlock chan struct{}
 
-	chatCalls atomic.Int32
-	mu        sync.Mutex
+	chatCalls    atomic.Int32
+	assignCalls  atomic.Int32
+	catalogCalls atomic.Int32
+	mu           sync.Mutex
 	// requests/auths 按调用次序记录 wire 请求与 Authorization 头，
 	// 供断言自愈换 token、continue 追加、router jwt 绑定等编排行为。
 	requests []*devinproto.GetChatMessageRequest
@@ -63,13 +69,30 @@ func (stub *stubUpstream) GetChatMessage(ctx context.Context, req *connect.Reque
 	return stub.chat(call, req.Msg, stream)
 }
 
-// GetCliModelConfigs 返回固定模型目录。
-func (stub *stubUpstream) GetCliModelConfigs(context.Context, *connect.Request[devinproto.GetCliModelConfigsRequest]) (*connect.Response[devinproto.GetCliModelConfigsResponse], error) {
+// GetCliModelConfigs 返回固定模型目录；catalogBlock 非 nil 时先挂起。
+func (stub *stubUpstream) GetCliModelConfigs(ctx context.Context, _ *connect.Request[devinproto.GetCliModelConfigsRequest]) (*connect.Response[devinproto.GetCliModelConfigsResponse], error) {
+	stub.catalogCalls.Add(1)
+	if stub.catalogBlock != nil {
+		select {
+		case <-stub.catalogBlock:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return connect.NewResponse(&devinproto.GetCliModelConfigsResponse{ClientModelConfigs: stub.catalog}), nil
 }
 
-// AssignModel 把 router uid 解析为真实模型；无脚本时按 unimplemented 失败。
+// AssignModel 把 router uid 解析为真实模型；无脚本时按 unimplemented
+// 失败；assignBlock 非 nil 时先挂起。
 func (stub *stubUpstream) AssignModel(ctx context.Context, req *connect.Request[devinproto.AssignModelRequest]) (*connect.Response[devinproto.AssignModelResponse], error) {
+	stub.assignCalls.Add(1)
+	if stub.assignBlock != nil {
+		select {
+		case <-stub.assignBlock:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if stub.assign == nil {
 		return nil, connect.NewError(connect.CodeUnimplemented, errors.New("assign not scripted"))
 	}
@@ -595,5 +618,86 @@ func TestApplyConfigSwitchesEndpoint(t *testing.T) {
 	stubDrain(t, stream)
 	if stub1.chatCalls.Load() != 1 || stub2.chatCalls.Load() != 1 {
 		t.Fatalf("after reload: stub1=%d stub2=%d, want 1/1", stub1.chatCalls.Load(), stub2.chatCalls.Load())
+	}
+}
+
+// TestAssignModelPreGateTimeout 验证闸门前解析的硬顶：AssignModel 挂起时
+// 在飞 flight 与其全部等待者在 preGateTimeout 内拿到同一超时失败（不再
+// 陪跑到 api client 610s），失败形态是 failoverable 的
+// deadline_exceeded——号池下由兄弟 lane 重解析（见
+// TestPoolAssignModelTimeoutFailover）。
+func TestAssignModelPreGateTimeout(t *testing.T) {
+	defer func(d time.Duration) { preGateTimeout = d }(preGateTimeout)
+	preGateTimeout = 100 * time.Millisecond
+	stub := &stubUpstream{assignBlock: make(chan struct{})}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "m", Identity: LaneIdentity{Token: "tok"}})
+
+	// 首发把 flight 打挂在真实 RPC 上，再让同键等待者全部挂上 done。
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.assignModel(context.Background(), "router-x", "cascade-1")
+		ownerDone <- err
+	}()
+	for stub.assignCalls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	const waiters = 6
+	errs := make(chan error, waiters)
+	for i := 0; i < waiters; i++ {
+		go func() {
+			_, err := adapter.assignModel(context.Background(), "router-x", "cascade-1")
+			errs <- err
+		}()
+	}
+	started := time.Now()
+	for i := 0; i < waiters; i++ {
+		select {
+		case err := <-errs:
+			if !llm.Classify(err).Timeout {
+				t.Fatalf("waiter error = %v, want timeout failure", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("flight waiters not released within 5s")
+		}
+	}
+	select {
+	case err := <-ownerDone:
+		if !llm.Classify(err).Timeout {
+			t.Fatalf("owner error = %v, want timeout failure", err)
+		}
+		if !failoverable(context.Background(), err) {
+			t.Fatalf("assign timeout failure must be failoverable: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("flight owner not released within 5s")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("flight took %v, want ≈preGateTimeout", elapsed)
+	}
+	if got := stub.assignCalls.Load(); got != 1 {
+		t.Fatalf("AssignModel calls = %d, want 1 (flight dedup)", got)
+	}
+}
+
+// TestListModelsPreGateTimeout 验证目录拉取同受闸门前硬顶：
+// GetCliModelConfigs 挂起时 ListModels 在 preGateTimeout 内按超时失败进
+// 冷却——窗内后续调用直接吃 modelsErr，不二次打上游。
+func TestListModelsPreGateTimeout(t *testing.T) {
+	defer func(d time.Duration) { preGateTimeout = d }(preGateTimeout)
+	preGateTimeout = 100 * time.Millisecond
+	stub := &stubUpstream{catalogBlock: make(chan struct{})}
+	srv := stubServer(t, stub, nil)
+	adapter := stubAdapter(t, srv, Config{Model: "m", Identity: LaneIdentity{Token: "tok"}})
+
+	_, err := adapter.ListModels(context.Background())
+	if err == nil || !llm.Classify(err).Timeout {
+		t.Fatalf("ListModels error = %v, want timeout failure", err)
+	}
+	if _, err := adapter.ListModels(context.Background()); err == nil {
+		t.Fatal("cooldown window should serve modelsErr")
+	}
+	if got := stub.catalogCalls.Load(); got != 1 {
+		t.Fatalf("GetCliModelConfigs calls = %d, want 1 (cooldown)", got)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	devinproto "local/devinproto"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/WncFht/devin2api/internal/adapter"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -1837,5 +1838,59 @@ func TestPoolGateYieldToSibling(t *testing.T) {
 	}
 	if got := laneA.adapter.gate.stats().RejectYield; got != 1 {
 		t.Fatalf("lane a RejectYield = %d, want 1", got)
+	}
+}
+// AssignModel 挂起的 lane 经 preGateTimeout 判死后 failover：dead lane 的
+// 闸门前解析吃 deadline_exceeded（failoverable 词表内），兄弟 lane 重新
+// 解析救回请求；死 lane 进 generic 冷却——同亲和键的后续请求不再先试它。
+func TestPoolAssignModelTimeoutFailover(t *testing.T) {
+	defer func(d time.Duration) { preGateTimeout = d }(preGateTimeout)
+	preGateTimeout = 100 * time.Millisecond
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("router-x", true)}
+	dead := &stubUpstream{catalog: catalog, assignBlock: make(chan struct{})}
+	good := &stubUpstream{
+		catalog: catalog,
+		assign: func(req *devinproto.AssignModelRequest) (*devinproto.AssignModelResponse, error) {
+			return &devinproto.AssignModelResponse{
+				Assignment: &devinproto.ModelAssignment{
+					ModelUid:      proto.String("resolved-y"),
+					AssignmentJwt: proto.String("jwt-1"),
+				},
+			}, nil
+		},
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvDead := stubServer(t, dead, nil)
+	srvGood := stubServer(t, good, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "router-x"},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "router-x"},
+	)
+
+	request := pinnedRequest(pool, "dead")
+	started := time.Now()
+	stream, err := pool.Stream(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+		t.Fatalf("deltas = %q, want rescued", got)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("failover took %v, want ≈preGateTimeout", elapsed)
+	}
+	if dead.assignCalls.Load() != 1 || good.assignCalls.Load() != 1 {
+		t.Fatalf("assign calls dead=%d good=%d, want 1/1", dead.assignCalls.Load(), good.assignCalls.Load())
+	}
+	if !poolLaneByName(pool, "dead").genericCooldown() {
+		t.Fatal("dead lane should be in generic cooldown after assign timeout")
+	}
+	if got := good.requests[0].GetChatModelUid(); got != "resolved-y" {
+		t.Fatalf("wire model = %q, want resolved-y", got)
+	}
+	if got := good.requests[0].GetModelAssignmentJwt(); got != "jwt-1" {
+		t.Fatalf("assignment jwt = %q, want jwt-1", got)
 	}
 }
