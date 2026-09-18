@@ -71,6 +71,10 @@ type RequestMessages struct {
 	// metadata.user_id），适配器可据此为同一对话派生稳定的上游会话 ID。
 	// 空表示调用方未提供。
 	SessionKey string
+	// CallerKeyHash 是下游凭据的身份哈希（auth_tokens.key_hash 同口径，
+	// 由 app 在令牌准入后回填）：脱钩完成缓存的等价键按它隔离租户——
+	// 同 body 的跨令牌请求不得共享重放。匿名通道为空，天然同桶。
+	CallerKeyHash string
 	// ServerSearch 非空表示本请求已被前端判定为「服务端托管搜索侧请求」
 	//（如 Claude Code 的 WebSearch 专用请求：tools 只含 web_search_* 变体）。
 	// 适配器不走 GetChatMessage 主路径，改为代调上游搜索 RPC 并合成

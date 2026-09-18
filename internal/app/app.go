@@ -904,6 +904,9 @@ func (application *App) createCompletion(
 		// 匿名通道请求不带凭据，recorder 采样不到 key_hash——拿到令牌后
 		// 回填，index/meta/进行中行才把匿名流量归到该行。
 		recorder.SetKeyHash(authTok.KeyHash())
+		// 脱钩完成缓存的等价键按调用方身份隔离：同 body 的跨令牌请求
+		// 不得互相挂接（usage 归属与轨迹隔离都靠它）。
+		messages.CallerKeyHash = authTok.KeyHash()
 		active, limit, ok := application.tokens.Acquire(authTok.ID)
 		if !ok {
 			tokenBlocked = true

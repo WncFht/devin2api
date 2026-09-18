@@ -4,6 +4,7 @@ package devin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -303,24 +304,31 @@ func TestDetachedAttachFollowsLive(t *testing.T) {
 	}
 }
 
-// TestDetachedRequestKeyDeterminism 钉住键的语义等价边界：会话标识不
-// 参与（CC 重试会换 user_id），内容差异参与，模型键面用解析后 uid。
+// TestDetachedRequestKeyDeterminism 钉住键的语义等价边界：会话标识
+// 参与（生产 02 证据：同 body 重试的 session_key 恒定，纳回换跨会话
+// 隔离），调用方身份参与，内容差异参与，模型键面用解析后 uid。
 func TestDetachedRequestKeyDeterminism(t *testing.T) {
 	request := llm.RequestMessages{
 		SystemPrompt: "sys",
 		Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
 		},
-		SessionKey: "session-a",
+		SessionKey:    "session-a",
+		CallerKeyHash: "keyhash-a",
 	}
 	base := detachedRequestKey(request, "resolved-uid")
 	if base == "" {
 		t.Fatal("empty key")
 	}
 	other := request
-	other.SessionKey = "session-b-with-retry-counter"
-	if detachedRequestKey(other, "resolved-uid") != base {
-		t.Fatal("session key must not participate in the semantic key")
+	other.SessionKey = "session-b"
+	if detachedRequestKey(other, "resolved-uid") == base {
+		t.Fatal("session key participates: two sessions must not share a replay")
+	}
+	other = request
+	other.CallerKeyHash = "keyhash-b"
+	if detachedRequestKey(other, "resolved-uid") == base {
+		t.Fatal("caller key hash participates: cross-token requests must not share a replay")
 	}
 	other = request
 	other.Messages = append(other.Messages, llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "more"}}})
@@ -335,6 +343,73 @@ func TestDetachedRequestKeyDeterminism(t *testing.T) {
 	other.TopP = &topP
 	if detachedRequestKey(other, "resolved-uid") == base {
 		t.Fatal("sampling params participate in the key")
+	}
+}
+
+// TestDetachedRequestKeyIgnoresDecodeTimestamps 钉住解码时刻时间戳不进
+// 键的回归：三个解码面都给每条消息打 time.Now()，同 body 的两次解码
+// （两次 HTTP 重试）TimestampMS 不同但键必须相同——否则功能恒 miss。
+func TestDetachedRequestKeyIgnoresDecodeTimestamps(t *testing.T) {
+	build := func(ts int64) llm.RequestMessages {
+		return llm.RequestMessages{
+			SystemPrompt: "sys",
+			Messages: []llm.Message{
+				llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}, TimestampMS: ts},
+				llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}, TimestampMS: ts + 1},
+				llm.ToolResultMessage{ToolCallID: "c1", Content: []llm.Content{llm.TextContent{Text: "out"}}, TimestampMS: ts + 2},
+			},
+		}
+	}
+	if detachedRequestKey(build(1700000000000), "m") != detachedRequestKey(build(1700000099999), "m") {
+		t.Fatal("decode-time timestamps must not participate in the key")
+	}
+}
+
+// TestDetachedRequestKeyMarkersAndToolPassthrough 钉住 wire 语义面进键：
+// seed marker（beta/cache_control 声明）漂移换键、非 marker 的 dropped
+// 项不换键、工具透传位（custom/server/strict/只读位/server_name/归因
+// 名单）漂移换键——同名同 schema 不同透传位走不同 wire 语义。
+func TestDetachedRequestKeyMarkersAndToolPassthrough(t *testing.T) {
+	request := llm.RequestMessages{
+		SystemPrompt: "sys",
+		Messages: []llm.Message{
+			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
+		},
+		Tools: []llm.ToolDefinition{{Name: "exec", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	base := detachedRequestKey(request, "m")
+
+	other := request
+	other.Dropped = []string{"unmatched_tool_call_id:c9", "empty_message:"}
+	if detachedRequestKey(other, "m") != base {
+		t.Fatal("non-marker dropped items must not participate in the key")
+	}
+	other = request
+	other.Dropped = []string{llm.MarkerAnthropicBeta + "interleaved-thinking-2025-05-14"}
+	if detachedRequestKey(other, "m") == base {
+		t.Fatal("seed markers participate in the key")
+	}
+	other = request
+	other.Dropped = []string{llm.MarkerCacheControl + "ephemeral"}
+	if detachedRequestKey(other, "m") == base {
+		t.Fatal("cache_control markers participate in the key")
+	}
+
+	variants := map[string]func(*llm.RequestMessages){
+		"custom":    func(r *llm.RequestMessages) { r.Tools[0].Custom = true },
+		"server":    func(r *llm.RequestMessages) { r.Tools[0].Server = true },
+		"strict":    func(r *llm.RequestMessages) { r.Tools[0].Strict = true },
+		"readonly":  func(r *llm.RequestMessages) { r.Tools[0].ReadOnlyHint = true },
+		"svrname":   func(r *llm.RequestMessages) { r.Tools[0].ServerName = "mcp" },
+		"attribute": func(r *llm.RequestMessages) { r.Tools[0].AttributionFieldNames = []string{"f"} },
+	}
+	for name, mutate := range variants {
+		other := request
+		other.Tools = append([]llm.ToolDefinition(nil), request.Tools...)
+		mutate(&other)
+		if detachedRequestKey(other, "m") == base {
+			t.Fatalf("tool passthrough field %s participates in the key", name)
+		}
 	}
 }
 

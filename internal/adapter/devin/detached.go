@@ -28,11 +28,13 @@ const detachedMaxEntries = 8
 
 // 条目按态的存活窗口（var 供测试缩短）：running 覆盖上游长静默计算的
 // 实测上限（15-25min args 静默 + 续传余量），也是后台泵的存活上界；
-// completed 覆盖客户端退避重试的全部窗口；failed 只留短窗回答「同键
-// 重试吃缓存终态还是走新上游」。
+// completed 按客户端重试窗口收口——缓存无法区分「同键重试」与「同 body
+// 新请求」，定时任务/探针的同 prompt 请求不得吃远超重试窗口的陈旧响应，
+// 15min 是重试链（300s 断连 + 退避多次）的宽松上界；failed 只留短窗
+// 回答「同键重试吃缓存终态还是走新上游」。
 var (
 	detachedRunningTTL   = 45 * time.Minute
-	detachedCompletedTTL = 60 * time.Minute
+	detachedCompletedTTL = 15 * time.Minute
 	detachedFailedTTL    = 5 * time.Minute
 	// detachedMaxBufferedBytes 是单条目的事件缓冲字节预算（var 供测试
 	// 缩小）：生产 04 原始帧逐 dir 求和的 p99 ~100KiB、观测最大 ~400KiB，
@@ -636,15 +638,53 @@ func (s *attachStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 }
 
 // detachedRequestKey 返回请求的语义等价键：哈希输入是 02 投影（与
-// 调试日志同一份规范化中间表示），剔除会话标识与审计位（重试计数/
-// dropped 清单不参与语义等价），model 覆盖为别名/路由解析后的真实
-// uid——同一段提示词换个客户端模型名殊途同归。
+// 调试日志同一份规范化中间表示），做三类修正后落键——
+//  1. 审计位剔除：timestamp_ms 是解码时刻的墙上时钟不进 wire，逐条
+//     消息删除（不剔则同 body 的每次重试重新解码打新时间戳，键恒
+//     miss——decode→key 链路上没有归一点）；dropped_items 是解码降级
+//     痕迹，其中带 wire 语义的 marker 以规范序经 seed_markers 回键。
+//  2. 身份与会话：key_hash 隔离租户——同 body 的跨令牌请求不得共享
+//     重放（usage 归属与上游轨迹隔离都靠它）；session_key 保留——
+//     生产 02 证据表明同 body 重试的 session_key 恒定，纳回零挂接
+//     成本换同租户跨会话隔离。
+//  3. model 覆盖为别名/路由解析后的真实 uid——同一段提示词换个客户
+//     端模型名殊途同归。
+//
+// tools 键面与 prefixwarm.putTool 的 wire 身份清单同集——透传位不同
+// 的同名同 schema 工具走不同 wire 语义（custom 改参数编码、server
+// 触发托管跳），不得共享重放。
 // json.Marshal 对 map 键排序，投影值全是已规范化结构，哈希确定。
+// 注意：键复用了为可观测性设计的调试投影，投影新增的审计位会静默
+// 进键——新增消息字段时须复核本函数口径（fingerprintRequest 同纪律：
+// 不进 wire 的字段不参与等价）。
 func detachedRequestKey(request llm.RequestMessages, model string) string {
 	projection := debuglog.RequestMessagesProjection(request)
-	delete(projection, "session_key")
 	delete(projection, "dropped_items")
 	projection["model"] = model
+	for _, message := range projection["messages"].([]any) {
+		delete(message.(map[string]any), "timestamp_ms")
+	}
+	tools := make([]any, 0, len(request.Tools))
+	for _, tool := range request.Tools {
+		tools = append(tools, map[string]any{
+			"name":                    tool.Name,
+			"description":             tool.Description,
+			"input_schema":            tool.InputSchema,
+			"custom":                  tool.Custom,
+			"server":                  tool.Server,
+			"strict":                  tool.Strict,
+			"read_only_hint":          tool.ReadOnlyHint,
+			"server_name":             tool.ServerName,
+			"attribution_field_names": tool.AttributionFieldNames,
+		})
+	}
+	projection["tools"] = tools
+	if request.CallerKeyHash != "" {
+		projection["key_hash"] = request.CallerKeyHash
+	}
+	if markers := seedMarkers(request.Dropped); len(markers) > 0 {
+		projection["seed_markers"] = markers
+	}
 	// 投影不含的采样参数补进键面：top_p/top_k/seed 不同的同名请求
 	// 语义上不该共享同一份重放。
 	if request.TopP != nil {
