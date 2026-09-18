@@ -368,6 +368,11 @@ type Recorder struct {
 	// 丢失口径，logs 行 dropped_events 列与 meta.json 同名键的来源）；
 	// 写面已拆后的迟到入队不计入——它们走 manager.lateWrites。
 	dropped atomic.Uint64
+	// lateWrites 是本目录被门口拒收的迟到写任务数，与 manager.lateWrites
+	// 在 enqueueLocked 同一拒收点同增——全局计数即各目录分量之和。
+	// meta.json 的 late_writes 键是收尾序列化时刻的快照：meta 落盘后
+	// 仍可能增量的残余只有全局计数能覆盖。
+	lateWrites atomic.Uint64
 	// aborted 标记请求被面板主动中断（区别于客户端自行断连）。
 	aborted atomic.Bool
 	// clientBytes 是已下发给客户端的累计字节数。
@@ -1140,6 +1145,7 @@ func (recorder *Recorder) enqueue(task func()) {
 // 队列序错位）。发送是非阻塞 select，持锁期间不会挂起。
 func (recorder *Recorder) enqueueLocked(task func()) {
 	if recorder.closed || recorder.manager.closing.Load() {
+		recorder.lateWrites.Add(1)
 		recorder.manager.lateWrites.Add(1)
 		return
 	}
@@ -1167,6 +1173,7 @@ func (recorder *Recorder) sendTask(task func()) {
 	select {
 	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
 	case <-recorder.manager.workerGone:
+		recorder.lateWrites.Add(1)
 		recorder.manager.lateWrites.Add(1)
 	default:
 		recorder.dropped.Add(1)
@@ -2332,6 +2339,7 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 		Path:              recorder.requestMeta.Path,
 		API:               recorder.requestMeta.API,
 		DroppedEvents:     recorder.dropped.Load(),
+		LateWrites:        recorder.lateWrites.Load(),
 		RequestReadyMS:    optionalLatency(recorder.requestReadyMS.Load()),
 		UpstreamSentMS:    optionalLatency(recorder.upstreamSentMS.Load()),
 		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),

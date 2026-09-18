@@ -40,11 +40,16 @@ type MetaSummary struct {
 	DurationMS *int64 `json:"duration_ms,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
 	// 五段延迟分解：nil 表示该阶段未发生（区别于 0ms 即时发生）。
-	FirstClientMS   *int64  `json:"first_client_ms,omitempty"`
-	FirstUpstreamMS *int64  `json:"first_upstream_ms,omitempty"`
-	Method          string  `json:"method"`
-	Model           *string `json:"model,omitempty"`
-	ModelMismatch   bool    `json:"model_mismatch,omitempty"`
+	FirstClientMS   *int64 `json:"first_client_ms,omitempty"`
+	FirstUpstreamMS *int64 `json:"first_upstream_ms,omitempty"`
+	// LateWrites 是 meta 序列化时刻本目录已被门口拒收的迟到写任务数
+	//（closed 后未 join 的后台写者、manager 关停中、写 worker 已退）。
+	// 是 finalize 快照：落盘后继续到达的迟到写只进全局 late_writes
+	//（runtime-metrics logs 段），不回写本键。
+	LateWrites    uint64  `json:"late_writes,omitempty"`
+	Method        string  `json:"method"`
+	Model         *string `json:"model,omitempty"`
+	ModelMismatch bool    `json:"model_mismatch,omitempty"`
 	// ModelsFetchMS 是本请求在目录确保（ensureCatalog→ListModels）上花费的
 	// 墙钟毫秒数：真实拉取与等待他人在飞拉取都计入，缓存命中≈0——它量的是
 	// 闸门前的目录相位停滞，不是「本请求是否发起了拉取」。

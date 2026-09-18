@@ -261,6 +261,35 @@ func TestDroppedCounterOnClosedQueue(t *testing.T) {
 	if got := manager.lateWrites.Load(); got != 1 {
 		t.Fatalf("lateWrites = %d, want 1", got)
 	}
+	if got := recorder.lateWrites.Load(); got != 1 {
+		t.Fatalf("recorder.lateWrites = %d, want 1", got)
+	}
+}
+
+// TestLateWritesInMeta 验证收尾 meta 序列化前到达的门口拒收计入
+// meta.json 的 late_writes：关停中（manager.closing）的入队在 closed
+// 置位前被拒，拒收数随完结块出账。
+func TestLateWritesInMeta(t *testing.T) {
+	manager := &Manager{
+		queues:     []chan writeTask{make(chan writeTask, 4)},
+		insertQ:    make(chan insertOp, 4),
+		workerGone: make(chan struct{}),
+	}
+	recorder := &Recorder{manager: manager}
+	manager.closing.Store(true)
+
+	recorder.enqueue(func() {})
+	completion := Completion{StatusCode: 200, Result: "completed"}
+	var meta MetaSummary
+	if err := json.Unmarshal(recorder.metaJSON(&completion), &meta); err != nil {
+		t.Fatalf("metaJSON unmarshal: %v", err)
+	}
+	if meta.LateWrites != 1 {
+		t.Fatalf("meta.late_writes = %d, want 1", meta.LateWrites)
+	}
+	if got := manager.lateWrites.Load(); got != 1 {
+		t.Fatalf("manager.lateWrites = %d, want 1", got)
+	}
 }
 
 // TestDroppedCounterOnFullQueue 验证编码分片队列打满时 enqueue 走
