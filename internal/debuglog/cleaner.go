@@ -166,20 +166,48 @@ func (manager *Manager) cleanOnce() int {
 	}
 	sort.Strings(candidates) // 名序即时间序
 	protected := manager.protectedErrorDirs(ctx, candidates, errorDirs, policy.KeepErrorDirs)
-	for _, dir := range candidates {
-		if totalBytes <= maxBytes {
+	// 累计尺寸找「要删到哪个界」：freed 盖过 need 时的最后候选即边界，
+	// 与旧实现逐目录删除到回到上限内的语义逐项等价——保护目录跳删不
+	// 计 freed，last 之外的多余目录同样不删。
+	need := totalBytes - maxBytes
+	var freed int64
+	last, evicted := -1, 0
+	for i, dir := range candidates {
+		if freed >= need {
 			break
 		}
 		if protected[dir] {
 			continue
 		}
-		if err := manager.store.DeleteDebugDir(ctx, dir); err != nil {
-			manager.ioErrors.Add(1)
-			slog.Warn("debuglog: evict dir failed", "dir", dir, "error", err)
-			continue
-		}
-		totalBytes -= sizes[dir]
-		removed++
+		freed += sizes[dir]
+		last, evicted = i, evicted+1
+	}
+	if last < 0 {
+		return removed
+	}
+	// 界取下一候选名（dir<bound 圈出 candidates[:last+1]——字典序界即
+	// 删除范围）；删到候选末尾时没有更大名，"\xff" 越过一切目录名。
+	bound := "\xff"
+	if last+1 < len(candidates) {
+		bound = candidates[last+1]
+	}
+	// exclude = 保护集 ∪ 活跃目录：活跃目录名可能小于界（长流仍在写），
+	// 谓词界圈不出它，只能名单豁免——等价旧实现的「不进 candidates」。
+	exclude := make([]string, 0, len(protected)+len(active))
+	for dir := range protected {
+		exclude = append(exclude, dir)
+	}
+	for dir := range active {
+		exclude = append(exclude, dir)
+	}
+	// 一条集合 DELETE 完成整轮淘汰，替代逐目录 autocommit——prod 每轮
+	// ~700 次独立事务曾把唯一写连接占满，insertQ 排空停滞、分片溢出
+	// 尾丢，丢弃突发正与淘汰 tick 聚簇。
+	if err := manager.store.DeleteDebugDirsBefore(ctx, bound, exclude); err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: evict dirs failed", "bound", bound, "error", err)
+	} else {
+		removed += evicted
 	}
 	return removed
 }
