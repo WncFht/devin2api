@@ -110,8 +110,8 @@ func (out *streamWriter) write(p []byte) error {
 	// 客户端也看不到流已死），且 fd 已关闭后无法补设 linger。提前武装让
 	// 那次 close 改发 RST：RST 不受对端窗口约束即刻送达，两端 socket 与
 	// 发送队列立即回收。写成功立即撤除——conn 回 keep-alive 池不能带
-	// 武装，否则之后的正常关闭会把尾包截断成 RST；写失败路径上撤除打在
-	// 死 fd 上无害落空（实测返回 use of closed network connection）。
+	// 武装，否则之后的正常关闭会把尾包截断成 RST；写失败路径上保持武装，
+	// 撤除时机见下方 else 分支注释。
 	if out.conn != nil {
 		_ = out.conn.SetLinger(0)
 	}
@@ -134,8 +134,14 @@ func (out *streamWriter) write(p []byte) error {
 			// 让 Flush 路径同样发 RST；Write 路径 fd 已被 net/http 同步关过，
 			// 二次 close 无害落空。
 			_ = out.conn.Close()
+		} else {
+			// 武装撤除只在成功路径做：conn 要回 keep-alive 池。失败路径上
+			// poll.FD.Close 只是把 fd 标记 closing——内核 close(2) 会被延迟到
+			// 在飞读持 ref（net/http 后台 connReader）释放后才执行；此时撤除
+			// 会赶在真正的 close 前把 linger 关掉，RST 退化成排队 FIN 的孤儿
+			// 形态（Darwin 上稳定复现）。武装留在死 fd 上随内核回收即足够。
+			_ = out.conn.SetLinger(-1)
 		}
-		_ = out.conn.SetLinger(-1)
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrDeadlineExceeded) {

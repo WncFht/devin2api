@@ -77,6 +77,11 @@ func assertDeadReaderRST(t *testing.T, chunk []byte) {
 	t.Cleanup(func() { sseWriteDeadline = old })
 
 	writeErr := make(chan error, 1)
+	// lastWriteDur 是失败那次 write 调用的耗时：只有它能反映「阻塞写被
+	// deadline 切断」——此前填充内核缓冲的成功迭代耗时随平台在途容量
+	// 变化（Darwin loopback 客户端窗口不认 SO_RCVBUF=4096，实测在途
+	// ~525KB，1KB 逐写填满是秒级），不能用总耗时断言预算。
+	lastWriteDur := make(chan time.Duration, 1)
 	// 手工建 server 而非 httptest：RST 武装依赖 ConnContext 注入的 conn。
 	srv := &http.Server{ConnContext: smallBufferConnContext, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 与 /v1 真实链路同构地包一层 gateHeaderWriter——顺带验证 Unwrap
@@ -85,9 +90,13 @@ func assertDeadReaderRST(t *testing.T, chunk []byte) {
 		wrapped := &gateHeaderWriter{ResponseWriter: w, gate: gate}
 		out := &streamWriter{writer: wrapped, conn: requestConn(r.Context())}
 		var err error
+		var dur time.Duration
 		for err == nil {
+			t0 := time.Now()
 			err = out.write(chunk)
+			dur = time.Since(t0)
 		}
+		lastWriteDur <- dur
 		writeErr <- err
 	})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -97,22 +106,21 @@ func assertDeadReaderRST(t *testing.T, chunk []byte) {
 	go func() { _ = srv.Serve(ln) }()
 	defer func() { _ = srv.Close() }()
 
-	started := time.Now()
 	conn := dialDeadReader(t, ln.Addr().String(), []byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
 	var writeResult error
 	select {
 	case writeResult = <-writeErr:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("blocked write did not unblock within deadline budget")
 	}
-	elapsed := time.Since(started)
+	blockedDur := <-lastWriteDur
 	var opErr *net.OpError
 	switch {
 	case errors.Is(writeResult, context.DeadlineExceeded) && errors.Is(writeResult, os.ErrDeadlineExceeded):
 		// 预算语义是「单次阻塞写最多挂起这么久」：错误类型已锁定 i/o
 		// timeout，耗时上限确认续约生效、下限确认确实阻塞过而非早夭。
-		if elapsed < sseWriteDeadline || elapsed > 10*sseWriteDeadline {
-			t.Fatalf("blocked write elapsed = %v, want ≈%v", elapsed, sseWriteDeadline)
+		if blockedDur < sseWriteDeadline || blockedDur > 10*sseWriteDeadline {
+			t.Fatalf("blocked write took %v, want ≈%v", blockedDur, sseWriteDeadline)
 		}
 	case runtime.GOOS == "windows" && errors.As(writeResult, &opErr):
 		// Windows loopback 对死读 peer 的发送可能被内核直接快败
@@ -142,7 +150,13 @@ func smallBufferConnContext(ctx context.Context, conn net.Conn) context.Context 
 // graceful close 把 FIN 排在未发队列后——读会撞上读 deadline 拿到
 // i/o timeout（FIN-orphan 的客户端侧形态）。Windows 的栈对 RST 拆除
 // 交付真实 WSA errno：WSAECONNRESET（10054）为主，WSAECONNABORTED
-// （10053）是同族变体。
+// （10053）是同族变体。Darwin 上 RST 拆除不可经客户端观测：内核
+// rst_rlc（RST 合法性校验，net.inet.tcp.rst_rlc_enable 默认开）在死读
+// 客户端收队列满时把服务端发出的合法 RST 直接丢弃——实测 RST 已在
+// lo0 线上发出、客户端 socket 仍挂 ESTABLISHED 至读 deadline。该形态与
+// FIN-orphan 的客户端侧读表现相同（i/o timeout），故 darwin 接受两者：
+// 此断言在 darwin 只保证「客户端看不到正常 EOF/持续数据流」，拆除验证
+// 留给其他平台。
 func expectConnReset(t *testing.T, conn net.Conn) {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -165,6 +179,10 @@ func expectConnReset(t *testing.T, conn net.Conn) {
 		if errors.As(err, &errno) && (errno == wsaECONNRESET || errno == wsaECONNABORTED) {
 			return
 		}
+	}
+	if runtime.GOOS == "darwin" && errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Logf("darwin: RST emitted but dropped by kernel rst_rlc on dead-reader peer: %v", err)
+		return
 	}
 	t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)
 }
