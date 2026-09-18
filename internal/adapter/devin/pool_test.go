@@ -374,6 +374,73 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 	}
 }
 
+// 流内换号受同一份累计预算：swap 只在 pre-content 触发，lane a
+// 未产出内容的烧时计入 s.entered——预算缩到极小后首候选也被拦截，
+// lane a 的真实错误事件透传给客户端，下一 lane 不被点燃，04 留
+// failover_budget_exhausted 分界行。
+func TestPoolSwapFailoverBudgetCap(t *testing.T) {
+	old := poolFailoverBudgetFG
+	poolFailoverBudgetFG = time.Nanosecond
+	t.Cleanup(func() { poolFailoverBudgetFG = old })
+
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	dead := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return connect.NewError(connect.CodeUnauthenticated, errors.New("dead token"))
+		},
+	}
+	good := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvDead := stubServer(t, dead, nil)
+	srvGood := stubServer(t, good, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
+	)
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	stream, err := pool.Stream(ctx, pinnedRequest(pool, "dead"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	events := stubDrain(t, stream)
+	sawError := false
+	for _, event := range events {
+		if event.Type == llm.ResponseEventError {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatal("dead lane's error event must reach the client when budget skips the swap")
+	}
+	if good.chatCalls.Load() != 0 {
+		t.Fatalf("good lane chat calls = %d, want 0 — budget must skip it", good.chatCalls.Load())
+	}
+	recorder.Complete(debuglog.Completion{Result: "failed"})
+
+	frames, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04: %v", err)
+	}
+	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) {
+		t.Fatal("04 must carry failover_budget_exhausted marker")
+	}
+}
+
 // 凭据失效冷却的生命周期：unauthenticated 标死当前 token；TokenSource
 // 换出不同凭据（经 reloadToken 落进 token 槽）惰性解禁；badUntil 过期
 // 同样解禁；后到标记只延长不缩短。

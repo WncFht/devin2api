@@ -347,12 +347,20 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 			return event, nil
 		}
 		s.recorder.NoteAccountAttempt(s.lane.name, failure)
-		// 被吞掉的换号前错误事件也记入 05：pump 只记录 Recv 返回的
-		// 事件，拦截下来的要由这里补登，否则失败 lane 的死因在事件
-		// 流里无迹可查（error.json 是 first-write-wins 已有其一）。
-		s.recorder.RecordResponseEvent(event)
 		opened, lastErr := s.swap(ctx)
+		// 被吞掉的换号前错误事件记入 05：pump 只记录 Recv 返回的事件，
+		// 拦截下来的要由这里补登，否则失败 lane 的死因在事件流里无迹
+		// 可查（error.json 是 first-write-wins 已有其一）。预算拦截
+		// 未试任何候选时事件原样下发、由 pump 记，此处不预登。
+		if opened || lastErr != nil {
+			s.recorder.RecordResponseEvent(event)
+		}
 		if !opened {
+			if lastErr == nil {
+				// 预算拦截未点燃任何候选：本 lane 的真实错误事件照常
+				// 下发，与候选穷尽的透传路径同语义。
+				return event, nil
+			}
 			// 候选全部开流失败：终局错误是最后一次开流错误（与
 			// Stream 路径的 lastErr 语义一致），原 error 事件吞掉。
 			return llm.ResponseEvent{}, lastErr
@@ -367,9 +375,13 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 func (s *poolStream) swap(ctx context.Context) (bool, error) {
 	var lastErr error
 	for len(s.rest) > 0 {
-		// 与 Stream 开流级同一份累计预算：流内换号第 2+ 次尝试前
-		// 查账，烧穿即回最后真实错误而非继续点燃下一 lane。
-		if lastErr != nil && time.Since(s.entered) > failoverBudget(ctx) {
+		// 与 Stream 开流级同一份累计预算：swap 只在 pre-content 触发
+		//（committed 后不再换号），s.entered 起算的 elapsed 全是未产出
+		// 内容的烧时——首个候选同样查账，否则 lane a 流内烧穿预算后
+		// 下一 lane 仍被无条件点燃（lastErr 逐次调用归零，只对 2nd+
+		// 检查在 2-lane 池里永不触发）。未试候选时返回 (false, nil)，
+		// 由 Recv 把本 lane 的真实错误事件透传给客户端。
+		if time.Since(s.entered) > failoverBudget(ctx) {
 			s.recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(s.entered).Milliseconds(), "skipped": s.rest[0].name})
 			break
 		}
