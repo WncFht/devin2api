@@ -300,11 +300,16 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			if err != nil {
 				return nil, err
 			}
-			for _, row := range staged {
+			for i, row := range staged {
 				if row.CredentialsFile != "" {
 					row.CredentialsFile = synthesizedAccount(synthesized, row.Name).CredentialsFile
 				}
 				if err := rt.db.UpsertAccount(ctx, row); err != nil {
+					// 已落库的前序行按写前快照逐行回滚——「整批原子」
+					// 的注释承诺对写入层故障同样成立，不只管重推失败。
+					for _, done := range staged[:i] {
+						rollbackAccountRow(ctx, rt.db, done.Name, findAccountRow(rows, done.Name))
+					}
 					return nil, err
 				}
 			}
