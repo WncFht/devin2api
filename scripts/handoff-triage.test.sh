@@ -113,7 +113,10 @@ fake_restart() { touch "${WORK}/restart_called"; fake_managed_start; }
 
 source scripts/lib-deploy.sh
 
-# 超时压缩：被测分支逻辑不变，把 wait_healthz_pid / wait_managed_listen
+# 超时压缩：被测分支逻辑不变，spawn_handoff 就绪窗口压回 10s（生产值
+# 180s 只为共享库大库慢启动，harness 的 slow 桩 60s 就死，不用等满）。
+export DEVIN2API_HANDOFF_WAIT_ITERS=40
+# 同义压缩：把 wait_healthz_pid / wait_managed_listen
 # 的轮询上限砍到 8s（生产值 120s 只为防呆，harness 不想等）。
 wait_healthz_pid() {
 	local url="$1" want="$2" secs="$3" got _

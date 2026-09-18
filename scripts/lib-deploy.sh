@@ -572,8 +572,11 @@ spawn_handoff() {
 	) >>"${STATE_DIR}/logs/stdout.log" 2>>"${logf}" &
 	pid=$!
 	printf '%s' "${pid}" >"$(handoff_pidfile)"
+	# 就绪窗口默认 3 分钟：共享库上 Open 要先跑 debug payload 计数器
+	# 全量聚合播种（数 GB 读，实测 25s+），大库冷启动远超原 10s；
+	# 早夭仍由 kill -0 立即跳出，窗口长度只影响「活着但慢」的容忍。
 	local _
-	for _ in $(seq 40); do
+	for _ in $(seq "${DEVIN2API_HANDOFF_WAIT_ITERS:-720}"); do
 		kill -0 "${pid}" 2>/dev/null || break
 		if tail -n "+$((startline + 1))" "${logf}" 2>/dev/null | grep -q 'msg="HTTP server listening"'; then
 			printf '%s' "${pid}"
