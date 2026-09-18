@@ -1098,6 +1098,7 @@ func cmdHist(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
 	fs := flag.NewFlagSet("rerun", flag.ContinueOnError)
 	file := fs.String("file", "", "protojson GetChatMessageRequest (logs/*/03-devin-request.json)")
+	dict := fs.String("dict", "", "delta 帧解码字典：同目录 01-http-request.json 的解后明文（writefile() 导出的 03 是 zstd delta 帧时必给；端点 /file/{name} 导出的已解明文不需要）")
 	n := fs.Int("n", 8, "")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1105,6 +1106,20 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 	raw, err := os.ReadFile(*file)
 	if err != nil {
 		return err
+	}
+	var dictBytes []byte
+	if *dict != "" {
+		if dictBytes, err = os.ReadFile(*dict); err != nil {
+			return err
+		}
+		// dict 文件自身也可能是 gzip 库存形态（writefile 直出），
+		// 走同一魔数分派解出明文——delta 帧做字典是嵌套错误，不递归。
+		if dictBytes, err = store.DecodePayloadFile(dictBytes, nil); err != nil {
+			return fmt.Errorf("decode dict %s: %w", *dict, err)
+		}
+	}
+	if raw, err = store.DecodePayloadFile(raw, dictBytes); err != nil {
+		return fmt.Errorf("decode %s: %w", *file, err)
 	}
 	base := &devinproto.GetChatMessageRequest{}
 	if err := protojson.Unmarshal(raw, base); err != nil {
