@@ -838,6 +838,33 @@ func TestWarmPingMissPrefillTokens(t *testing.T) {
 	}
 }
 
+// hit cache_read 账：cr>0 的 hit 轮按上游实报 cache_read_tokens 累计；
+// miss 轮不记账（miss 侧成本走 PingMissPrefillTokens）。
+func TestWarmPingHitCacheReadTokens(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	var miss bool
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		if miss {
+			return 0, nil
+		}
+		return 4096, nil
+	}
+	seedPromoted(w, warmTestRequest("sess", "sys", "m1"), "uid")
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	stats := w.stats()
+	if stats.PingHits != 1 || stats.PingHitCacheReadTokens != 4096 {
+		t.Fatalf("stats = %+v, want 1 hit and 4096 cache_read tokens", stats)
+	}
+	// miss 轮不加账。
+	miss = true
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if got := w.stats().PingHitCacheReadTokens; got != 4096 {
+		t.Fatalf("PingHitCacheReadTokens = %d, want unchanged 4096 after a miss", got)
+	}
+}
+
 // 连 miss 降级（D1）：K=4 连 cache_read=0 → demoted 停 ping——降级≠
 // 退役，条目留表照 maxIdle 退役、retired 不涨、miss_demote 累计+1；
 // hit 清连击而发送错误不清；retain 真流量清降级重武装、下一拍恢复

@@ -203,8 +203,11 @@ type warmEntry struct {
 // RetiredByCause 把同一总量按死因拆开——churn 构成是调参前的
 // 必读账；PingMissPrefillTokens 按 miss 时的前缀体量估 prefill
 // 成本（miss=全前缀重灌，实测优先 retained/4 兜底）——保温的
-// 座位成本此前只在估算里存在；Demoted 是连 miss 降级停 ping 的
-// 现值（与 Promoted 正交：降级条目仍计保温资格，只是暂停发射）。
+// 座位成本此前只在估算里存在；PingHitCacheReadTokens 累计 hit 轮
+// 上游实报的 cache_read_tokens——与 miss prefill 估计配对成 ping
+// 燃烧的完整账（两侧口径不同：hit 是实测，miss 是估计）；Demoted
+// 是连 miss 降级停 ping 的现值（与 Promoted 正交：降级条目仍计
+// 保温资格，只是暂停发射）。
 type WarmStats struct {
 	Enabled       bool  `json:"enabled"`
 	Entries       int   `json:"entries"`
@@ -219,8 +222,9 @@ type WarmStats struct {
 	PingErrors    int64 `json:"ping_errors"`
 	Retired       int64 `json:"retired"`
 
-	RetiredByCause        WarmRetiredStats `json:"retired_by_cause"`
-	PingMissPrefillTokens int64            `json:"ping_miss_prefill_tokens"`
+	RetiredByCause         WarmRetiredStats `json:"retired_by_cause"`
+	PingMissPrefillTokens  int64            `json:"ping_miss_prefill_tokens"`
+	PingHitCacheReadTokens int64            `json:"ping_hit_cache_read_tokens"`
 	// FailoverSuspects 累计因会话换 lane 被标 suspect 的条目数（现值
 	// 在 Suspects 里）。
 	FailoverSuspects int64 `json:"failover_suspects"`
@@ -274,9 +278,11 @@ type cacheWarmer struct {
 	failoverSuspects int64
 	// retiredByCause 与 retired 同口径累加，按 removeLocked 调用方给
 	// 的死因分桶；pingMissPrefillTokens 累计 miss 轮次的前缀体量
-	// 估计（发送定影的 snap 口径）。
-	retiredByCause        WarmRetiredStats
-	pingMissPrefillTokens int64
+	// 估计（发送定影的 snap 口径）；pingHitCacheReadTokens 累计 hit
+	// 轮次上游实报的 cache_read_tokens。
+	retiredByCause         WarmRetiredStats
+	pingMissPrefillTokens  int64
+	pingHitCacheReadTokens int64
 }
 
 // newCacheWarmer 创建并启动保温调度协程：Enabled 与否都起——开关
@@ -474,18 +480,19 @@ func (w *cacheWarmer) stats() WarmStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	stats := WarmStats{
-		Enabled:               w.params.Enabled,
-		Entries:               len(w.entries),
-		RetainedBytes:         w.retainedBytes,
-		PingsSent:             w.pingsSent,
-		PingHits:              w.pingHits,
-		PingMisses:            w.pingMisses,
-		PingSkips:             w.pingSkips,
-		PingErrors:            w.pingErrors,
-		Retired:               w.retired,
-		RetiredByCause:        w.retiredByCause,
-		PingMissPrefillTokens: w.pingMissPrefillTokens,
-		FailoverSuspects:      w.failoverSuspects,
+		Enabled:                w.params.Enabled,
+		Entries:                len(w.entries),
+		RetainedBytes:          w.retainedBytes,
+		PingsSent:              w.pingsSent,
+		PingHits:               w.pingHits,
+		PingMisses:             w.pingMisses,
+		PingSkips:              w.pingSkips,
+		PingErrors:             w.pingErrors,
+		Retired:                w.retired,
+		RetiredByCause:         w.retiredByCause,
+		PingMissPrefillTokens:  w.pingMissPrefillTokens,
+		PingHitCacheReadTokens: w.pingHitCacheReadTokens,
+		FailoverSuspects:       w.failoverSuspects,
 	}
 	for _, entry := range w.entries {
 		if !entry.suspectAt.IsZero() {
@@ -602,6 +609,9 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 		w.pingsSent++
 		if cacheRead > 0 {
 			w.pingHits++
+			// hit 轮上游自报 cache_read_tokens 是实测账（取流内最后
+			// 一个非零帧），与 miss 的 prefill 估计配对成完整燃烧口径。
+			w.pingHitCacheReadTokens += cacheRead
 		} else {
 			w.pingMisses++
 			// miss = 整段前缀重灌：prefill 成本按发送定影的体量
