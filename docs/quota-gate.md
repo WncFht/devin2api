@@ -42,6 +42,8 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 两个读法要点：`reject_bg_reserve` 名义是快败，实际形态可以是「骑满排队预算再拒」——bg 被预留/爬坡挡住走 `gateBgRecheck` 短睡重查，直到预计等待超剩余预算才拒，实测被吸收行首 lane 停泊 p50=118.7s（紧贴 `bgMaxHold` 默认 120s），每吸收行平均多付 ~130s 首个上游字节。`waiters_peak=0` 而 transform 段长等，是闸前 stall（AssignModel/目录拉取不过闸）的嗅探信号——gate 账本对它完全不可见。
 
+写路径是每翻页一次性异步协程（30s 上限，脱离 `gate.mu`）：批内首个 INSERT 失败即停手，未写行挂进每 lane 深度 2 的重放缓冲随下窗翻页重放（同一唯一索引使重放幂等），溢出丢最老行。落库健康账透在 `/admin/runtime-metrics`：`persist_failures` 记失败批次数（与 stderr `gate window persist failed` WARN 一一对应），`persist_dropped` 记缓冲溢出被永久丢弃的行数——顶层 `gate` 段是首 lane 后兼容视图，逐 lane 在 `accounts.<lane>.gate` 下。
+
 保留期与 `logs` 摘要行共用 `debug.log_row_retention_days`（默认 90 天）。
 
 ## gate.wait 样本环：每次评估的结局
