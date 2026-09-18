@@ -108,7 +108,7 @@ func TestAdminAccountsAggregate(t *testing.T) {
 		return map[string]devin.GateStats{"yanjian": {WindowQuota: 60, WindowUsed: 3, Sendable: true}}
 	})
 	h.SetAccountWarmStats(func() map[string]devin.WarmStats {
-		return map[string]devin.WarmStats{"yanjian": {Enabled: true, Entries: 12, PingHits: 3, PingMisses: 1}}
+		return map[string]devin.WarmStats{"yanjian": {Enabled: true, Entries: 12, PingHits: 3, PingMisses: 1, FailoverSuspects: 2}}
 	})
 	if rec := h.debug.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat/completions"}); rec != nil {
 		rec.SetUpstreamAccount("yanjian")
@@ -178,7 +178,7 @@ func TestAdminAccountsAggregate(t *testing.T) {
 		t.Fatalf("yanjian gate = %v", yj["gate"])
 	}
 	warm, _ := yj["warm"].(map[string]any)
-	if warm["entries"].(float64) != 12 || warm["ping_hit_rate"].(float64) != 75 {
+	if warm["entries"].(float64) != 12 || warm["ping_hit_rate"].(float64) != 75 || warm["failover_suspects"].(float64) != 2 {
 		t.Fatalf("yanjian warm = %v", yj["warm"])
 	}
 	if yj["inflight"].(float64) != 1 {

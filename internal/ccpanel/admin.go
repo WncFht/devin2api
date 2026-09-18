@@ -443,5 +443,8 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 		"retired_by_cause":           warm.RetiredByCause,
 		"ping_miss_prefill_tokens":   warm.PingMissPrefillTokens,
 		"ping_hit_cache_read_tokens": warm.PingHitCacheReadTokens,
+		// failover_suspects 是号池换 lane 制造孤儿条目的实绩账（与
+		// retired_by_cause.suspect 的退役账对照看跨 lane 孤儿比重）。
+		"failover_suspects": warm.FailoverSuspects,
 	}
 }
