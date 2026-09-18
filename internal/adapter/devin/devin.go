@@ -1683,6 +1683,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	}
 	if stream.finished {
 		stream.cancel()
+		// progress/startHold 是跨 Recv 复用的看门狗，不能随 Recv 返回
+		// 停表（语义见 progress 字段注释）；finished 后等待循环不再进入，
+		// 窗口语义终结——此处是终局退出点，Stop 回收计时器，否则每条
+		// 完成的流留 ~2 个挂起计时器直到自然触发。
+		stream.progress.Stop()
+		if stream.startHold != nil {
+			stream.startHold.Stop()
+		}
 	}
 	if len(stream.queue) > 0 {
 		event := stream.queue[0]
