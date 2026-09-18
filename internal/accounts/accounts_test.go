@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -449,7 +450,8 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	if err != nil || string(data) != content {
 		t.Fatalf("managed file = %q, %v", data, err)
 	}
-	if info, _ := os.Stat(managed); info.Mode().Perm() != 0o600 {
+	// windows 不表达 POSIX 权限位（报告 0666），0600 断言只在 unix 上有意义。
+	if info, _ := os.Stat(managed); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("managed file mode = %v, want 0600", info.Mode())
 	}
 	if token, err := ops.TokenOf(ctx, "cc"); err != nil || token != "tok-paste" {
