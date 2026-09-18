@@ -53,6 +53,10 @@ const (
 	//（p≈0.5）自然命中 1/16，偶发误伤被 retain 复活兜底；连坐型死
 	// lineage 百发百中，正是要停的负载。
 	warmMissDemoteK = 4
+	// warmEventCap 是 ping 结局事件环容量：180s 默认节拍下 256 条对单
+	// 条目覆盖 ~12.8h，满载多条目齐射也能回看约十个饱和窗口——与
+	// gateWaitCap 同规格的样本环定位。
+	warmEventCap = 256
 )
 
 // WarmConfig 是前缀保温参数组；时长<=0、上限<=0、名表空时回落到内置
@@ -208,7 +212,9 @@ type warmEntry struct {
 // 上游实报的 cache_read_tokens——与 miss prefill 估计配对成 ping
 // 燃烧的完整账（两侧口径不同：hit 是实测，miss 是估计）；Demoted
 // 是连 miss 降级停 ping 的现值（与 Promoted 正交：降级条目仍计
-// 保温资格，只是暂停发射）。
+// 保温资格，只是暂停发射）；Events 是最近 ping 结局环（新在前，
+// 容量 warmEventCap）——计数器只给累计量，环回答「什么时候发生、
+// 为什么」，与 gate.events 同构。
 type WarmStats struct {
 	Enabled       bool  `json:"enabled"`
 	Entries       int   `json:"entries"`
@@ -229,6 +235,9 @@ type WarmStats struct {
 	// FailoverSuspects 累计因会话换 lane 被标 suspect 的条目数（现值
 	// 在 Suspects 里）。
 	FailoverSuspects int64 `json:"failover_suspects"`
+	// Events 是最近 ping 结局环，新在前；lane 身份由透出路径携带
+	//（accounts.<name>.warm），与 GateEvent 不带 lane 同规。
+	Events []WarmEvent `json:"events,omitempty"`
 }
 
 // WarmRetiredStats 是退役条目的死因分账：Idle=静默超档限、
@@ -242,6 +251,32 @@ type WarmRetiredStats struct {
 	Semantic   int64 `json:"semantic"`
 	Capacity   int64 `json:"capacity"`
 	MissDemote int64 `json:"miss_demote"`
+}
+
+// ping 结局事件种类词表，与 PingHits/PingMisses/PingSkips/PingErrors
+// 计数器一一对应：hit/miss 是打完的成功 ping 按 cache_read 分桶，
+// skip 是闸门 tryAdmit 拒掉的轮次（未触达上游），error 是发送出错。
+const (
+	warmEventHit   = "hit"
+	warmEventMiss  = "miss"
+	warmEventSkip  = "skip"
+	warmEventError = "error"
+)
+
+// WarmEvent 是一轮保温 ping 的结局采样：计数器只给累计量，本环回答
+// 「什么时候发生、为什么」——miss 连发的时间分布与 skip 成因此前没有
+// 观测面。Reason 只在 skip/error 上有值：skip 记 tryAdmit 的拒绝成因
+// （latch/deadzone/quota/pace），error 记 llm.Classify 的 code；
+// PrefillTokens 只在 miss 上有值（整段前缀重灌的体量估计，与
+// PingMissPrefillTokens 同口径），CacheReadTokens 只在 hit 上有值
+// （上游实报命中量，与 PingHitCacheReadTokens 同口径）。条目身份不带
+// ——谱系级归因走 missStreak/demoted 簿记，本环只看轮次序列。
+type WarmEvent struct {
+	At              time.Time `json:"at"`
+	Kind            string    `json:"kind"`
+	Reason          string    `json:"reason,omitempty"`
+	PrefillTokens   int       `json:"prefill_tokens,omitempty"`
+	CacheReadTokens int64     `json:"cache_read_tokens,omitempty"`
 }
 
 // cacheWarmer 是前缀保温簿记与调度器：条目表 + 清扫协程。挂 Adapter
@@ -284,6 +319,12 @@ type cacheWarmer struct {
 	retiredByCause         WarmRetiredStats
 	pingMissPrefillTokens  int64
 	pingHitCacheReadTokens int64
+	// events/eventHead/eventSize 是 ping 结局事件环（与 gate.events
+	// 同构）：每轮 ping 一条，hit/miss/skip/error 全录——计数器只有
+	// 累计量，miss 连发的时间分布与 skip 成因靠本环观测。
+	events    [warmEventCap]WarmEvent
+	eventHead int
+	eventSize int
 }
 
 // newCacheWarmer 创建并启动保温调度协程：Enabled 与否都起——开关
@@ -477,7 +518,19 @@ func (w *cacheWarmer) noteCompleted(key warmLineageKey, msg *llm.AssistantMessag
 	entry.tier = entry.classify(msg, w.params)
 }
 
-// stats 返回簿记快照；顺带按当前参数统计 promoted/suspect 现值。
+// pushEvent 追加一条 ping 结局事件；At 在这里打戳（测试假钟随簿记
+// 同源）。调用方须持 mu。
+func (w *cacheWarmer) pushEvent(ev WarmEvent) {
+	ev.At = w.now()
+	w.events[w.eventHead] = ev
+	w.eventHead = (w.eventHead + 1) % warmEventCap
+	if w.eventSize < warmEventCap {
+		w.eventSize++
+	}
+}
+
+// stats 返回簿记快照；顺带按当前参数统计 promoted/suspect 现值，
+// 事件环按新在前序投影（与 GateStats.Events 同一展示序）。
 func (w *cacheWarmer) stats() WarmStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -495,6 +548,9 @@ func (w *cacheWarmer) stats() WarmStats {
 		PingMissPrefillTokens:  w.pingMissPrefillTokens,
 		PingHitCacheReadTokens: w.pingHitCacheReadTokens,
 		FailoverSuspects:       w.failoverSuspects,
+	}
+	for i := 1; i <= w.eventSize; i++ {
+		stats.Events = append(stats.Events, w.events[(w.eventHead-i+warmEventCap)%warmEventCap])
 	}
 	for _, entry := range w.entries {
 		if !entry.suspectAt.IsZero() {
@@ -582,9 +638,10 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 	// 只整体换 RequestMessages 不改旧切片，浅拷贝即可），结账仍认原 entry。
 	snap := *entry
 	w.mu.Unlock()
-	if !w.adapter.gate.tryAdmit() {
+	if admitted, reason := w.adapter.gate.tryAdmit(); !admitted {
 		w.mu.Lock()
 		w.pingSkips++
+		w.pushEvent(WarmEvent{Kind: warmEventSkip, Reason: reason})
 		w.mu.Unlock()
 		return
 	}
@@ -615,14 +672,18 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 			// hit 轮上游自报 cache_read_tokens 是实测账（取流内最后
 			// 一个非零帧），与 miss 的 prefill 估计配对成完整燃烧口径。
 			w.pingHitCacheReadTokens += cacheRead
+			w.pushEvent(WarmEvent{Kind: warmEventHit, CacheReadTokens: cacheRead})
 		} else {
 			w.pingMisses++
 			// miss = 整段前缀重灌：prefill 成本按发送定影的体量
 			// 估，实测优先、retained/4 兜底（与晋升判定同口径）。
-			w.pingMissPrefillTokens += int64(snap.prefixEstimate())
+			prefill := snap.prefixEstimate()
+			w.pingMissPrefillTokens += int64(prefill)
+			w.pushEvent(WarmEvent{Kind: warmEventMiss, PrefillTokens: prefill})
 		}
 	} else {
 		w.pingErrors++
+		w.pushEvent(WarmEvent{Kind: warmEventError, Reason: llm.Classify(err).Code})
 	}
 	if w.entries[entry.key] != entry {
 		return // 发送期间条目已被退役/淘汰，只结计数器

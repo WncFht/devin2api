@@ -425,7 +425,7 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 	if pingTotal > 0 {
 		hitRate = float64(warm.PingHits) / float64(pingTotal) * 100
 	}
-	return map[string]any{
+	view := map[string]any{
 		"enabled":        warm.Enabled,
 		"entries":        warm.Entries,
 		"promoted":       warm.Promoted,
@@ -449,4 +449,10 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 		// retired_by_cause.suspect 的退役账对照看跨 lane 孤儿比重）。
 		"failover_suspects": warm.FailoverSuspects,
 	}
+	// events 是 ping 结局事件环（新在前）——与 gate.events 同构的
+	// omitempty 语义：未打过 ping 时不投该键。
+	if len(warm.Events) > 0 {
+		view["events"] = warm.Events
+	}
+	return view
 }

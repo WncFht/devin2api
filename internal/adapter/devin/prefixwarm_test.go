@@ -682,6 +682,63 @@ func TestWarmPingErrors(t *testing.T) {
 	}
 }
 
+// ping 结局事件环：hit/miss/skip/error 每轮一条、按新在前投影，各带
+// 自己的账——hit 记上游实报 cache_read、miss 记 prefill 估计、skip
+// 记闸门拒绝成因、error 记分类 code；环满挤最旧。
+func TestWarmPingEventRing(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	key := seedPromoted(w, warmTestRequest("sess", "sys", "m1"), "uid")
+	var outcome func() (int64, error)
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		return outcome()
+	}
+	// 发送即消费本轮（nextDue 推进）：拨回当前到期再打下一发。
+	fire := func() {
+		w.entries[key].nextDue = clock.t
+		w.sweep()
+	}
+	outcome = func() (int64, error) { return 4416, nil }
+	fire() // hit
+	outcome = func() (int64, error) { return 0, nil }
+	fire() // miss
+	outcome = func() (int64, error) {
+		return 0, connect.NewError(connect.CodeUnavailable, errors.New("connection reset"))
+	}
+	fire() // error：非凭证味非限流，不触自愈不上闩
+	events := w.stats().Events
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3", len(events))
+	}
+	if events[0].Kind != warmEventError || events[0].Reason != "unavailable" {
+		t.Fatalf("events[0] = %+v, want error/unavailable", events[0])
+	}
+	if events[1].Kind != warmEventMiss || events[1].PrefillTokens <= 0 {
+		t.Fatalf("events[1] = %+v, want miss with prefill_tokens", events[1])
+	}
+	if events[2].Kind != warmEventHit || events[2].CacheReadTokens != 4416 {
+		t.Fatalf("events[2] = %+v, want hit with cache_read_tokens=4416", events[2])
+	}
+	// skip：闩内 tryAdmit 拒 → reason=latch、不发出。
+	pinGateClock(w.adapter.gate, 10)
+	w.adapter.gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
+	fire()
+	events = w.stats().Events
+	if events[0].Kind != warmEventSkip || events[0].Reason != gateReasonLatch {
+		t.Fatalf("events[0] = %+v, want skip/latch", events[0])
+	}
+	// 环满挤最旧：溢出后只留最新 warmEventCap 条。
+	for i := 0; i < warmEventCap; i++ {
+		w.pushEvent(WarmEvent{Kind: warmEventHit})
+	}
+	events = w.stats().Events
+	if len(events) != warmEventCap {
+		t.Fatalf("events = %d, want capped at %d", len(events), warmEventCap)
+	}
+	if events[0].Kind != warmEventHit || events[warmEventCap-1].Kind != warmEventHit {
+		t.Fatal("overflowed ring must contain only the newest events")
+	}
+}
+
 // 语义拒绝退役：invalid_argument（ClientFixable）→ 条目退役计数。
 func TestWarmPingClientFixableRetires(t *testing.T) {
 	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})

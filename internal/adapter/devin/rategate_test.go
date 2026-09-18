@@ -583,11 +583,18 @@ func TestRateGateSetParamsPreservesLatch(t *testing.T) {
 	}
 }
 
+// tryAdmitOK 是 tryAdmit 的 bool 投影：闸门用例只断言放行与否；
+// 拒绝成因（reason）由保温侧 TestWarmPingEventRing 经事件环覆盖。
+func tryAdmitOK(gate *rateGate) bool {
+	admitted, _ := gate.tryAdmit()
+	return admitted
+}
+
 // 闩外可发区间且配额未满、无排队者：ping 放行并计入本桶配额。
 func TestRateGateTryAdmitPass(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = false, want admit in sendable window with free quota")
 	}
 	if gate.bucketUsed != 1 {
@@ -601,8 +608,8 @@ func TestRateGateTryAdmitLatchedRejects(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
-	if gate.tryAdmit() {
-		t.Fatal("tryAdmit = true while latched, want false (no drip-slot stealing)")
+	if admitted, reason := gate.tryAdmit(); admitted || reason != gateReasonLatch {
+		t.Fatalf("tryAdmit = (%v, %q) while latched, want (false, latch)", admitted, reason)
 	}
 	if gate.bucketUsed != 0 {
 		t.Fatalf("bucketUsed = %d, want 0 (rejected ping must not count)", gate.bucketUsed)
@@ -613,8 +620,8 @@ func TestRateGateTryAdmitLatchedRejects(t *testing.T) {
 func TestRateGateTryAdmitDeadZoneRejects(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 59)
-	if gate.tryAdmit() {
-		t.Fatal("tryAdmit = true in dead zone, want false")
+	if admitted, reason := gate.tryAdmit(); admitted || reason != tryAdmitSkipDeadzone {
+		t.Fatalf("tryAdmit = (%v, %q) in dead zone, want (false, deadzone)", admitted, reason)
 	}
 }
 
@@ -625,8 +632,8 @@ func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
 	if err := gate.wait(context.Background()); err != nil {
 		t.Fatalf("wait error = %v, want pass (fills bucket)", err)
 	}
-	if gate.tryAdmit() {
-		t.Fatal("tryAdmit = true with full bucket, want false")
+	if admitted, reason := gate.tryAdmit(); admitted || reason != gateReasonQuota {
+		t.Fatalf("tryAdmit = (%v, %q) with full bucket, want (false, quota)", admitted, reason)
 	}
 }
 
@@ -634,7 +641,7 @@ func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
 func TestRateGateTryAdmitZeroQuota(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 59) // 死区
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = false with quota<=0, want true (no window limit)")
 	}
 }
@@ -642,7 +649,7 @@ func TestRateGateTryAdmitZeroQuota(t *testing.T) {
 // nil 闸门放行：与 wait 的 nil 接收者语义一致。
 func TestRateGateTryAdmitNilGate(t *testing.T) {
 	var gate *rateGate
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit on nil gate = false, want true")
 	}
 }
@@ -654,7 +661,7 @@ func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
 	pinGateClock(gate, 50) // 爬坡额度 ceil(2*48/56)=2 = quota-reserve：纯预留约束
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = false, want admit")
 	}
 	// quota-reserve=2：ping 已占 1 槽，bg 再进 1 条即触顶。
@@ -1009,7 +1016,7 @@ func TestSummarizeWaitsErrQuantiles(t *testing.T) {
 func TestRateGateTryAdmitCountsBg(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 5}, nil, "")
 	pinGateClock(gate, 10)
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = false, want admit")
 	}
 	stats := gate.stats()
@@ -1026,12 +1033,12 @@ func TestRateGateTryAdmitRespectsFgReserve(t *testing.T) {
 	pinGateClock(gate, 57) // 窗口尾：爬坡已收敛到 quota-reserve，隔离纯预留约束
 	// reserve = 2（仅 margin，无 EMA/waiters）→ ping 上界 quota-reserve = 6。
 	for i := 0; i < 6; i++ {
-		if !gate.tryAdmit() {
+		if !tryAdmitOK(gate) {
 			t.Fatalf("tryAdmit %d = false, want admit (under quota-reserve)", i)
 		}
 	}
 	// bucketUsed=6=quota-reserve < quota=8：桶未满，预留槽不许 ping 占。
-	if gate.tryAdmit() {
+	if tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = true at quota-reserve, want false (reserve slots are for fg)")
 	}
 	if gate.bucketUsed != 6 {
@@ -1048,20 +1055,20 @@ func TestRateGateTryAdmitRespectsFgReserve(t *testing.T) {
 func TestRateGateTryAdmitRespectsPaceRamp(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 2}, nil, "")
 	clock := pinGateClock(gate, 10) // 经过 8s：额度 ceil(6*8/56)=1
-	if !gate.tryAdmit() {
+	if !tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = false, want admit (first ramp slot)")
 	}
-	if gate.tryAdmit() {
-		t.Fatal("tryAdmit = true with ramp exhausted, want false")
+	if admitted, reason := gate.tryAdmit(); admitted || reason != tryAdmitSkipPace {
+		t.Fatalf("tryAdmit = (%v, %q) with ramp exhausted, want (false, pace)", admitted, reason)
 	}
 	// :40 经过 38s：额度 ceil(6*38/56)=5——已用 1，再放 4 条到界。
 	clock.t = clock.t.Add(30 * time.Second)
 	for i := 0; i < 4; i++ {
-		if !gate.tryAdmit() {
+		if !tryAdmitOK(gate) {
 			t.Fatalf("tryAdmit %d at :40 = false, want admit (ramp released)", i)
 		}
 	}
-	if gate.tryAdmit() {
+	if tryAdmitOK(gate) {
 		t.Fatal("tryAdmit = true at :40 ramp bound, want false")
 	}
 }

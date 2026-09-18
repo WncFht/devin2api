@@ -70,6 +70,15 @@ const (
 	gateReasonYield = "yield"
 )
 
+// tryAdmit 拒绝的专有成因词（保温 ping 事件环的 skip.reason；latch/
+// quota 与上方 X-Gate-Reason 同词同义直接复用）：deadzone 是落在
+// 窗口尾段死区（lane verdict 的 gate_window_deadzone 同词），pace
+// 是 bg 爬坡额度未释放（pace_allowance 的同源读数）。
+const (
+	tryAdmitSkipDeadzone = "deadzone"
+	tryAdmitSkipPace     = "pace"
+)
+
 // rateGate 整形发往上游的消息流，两层机制各自独立：
 //  1. 对齐分钟窗口：上游限流器按自然分钟桶计数（桶界实测在本地
 //     :59~:00，多分片有漂移），本地把发送对齐到同一套桶——每个窗口
@@ -1246,10 +1255,11 @@ func (gate *rateGate) noteVerdict(gc *adapter.GateContext, class string, now, ws
 // 爬坡释放额度（同拍到期的多条目也不能齐射穿坡）。ping 不要求
 // waiters 为空：bg 常驻排队不该饿死保温（缓存冷掉伤的是 fg），
 // 被挡住时本轮跳过、下拍再试。与 wait 的区别：不睡眠、不预约、
-// 不产事件。
-func (gate *rateGate) tryAdmit() bool {
+// 不产事件。拒绝时 reason 按 tryAdmitSkip* / gateReason* 词表给出
+// 阻塞成因（保温事件环的 skip.reason 直接取用），放行时为空串。
+func (gate *rateGate) tryAdmit() (bool, string) {
 	if gate == nil {
-		return true
+		return true, ""
 	}
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
@@ -1259,24 +1269,27 @@ func (gate *rateGate) tryAdmit() bool {
 	ws := gate.windowStart(now)
 	gate.rollBucket(ws)
 	if now.Before(gate.limitedUntil) {
-		return false
+		return false, gateReasonLatch
 	}
 	if gate.quota <= 0 {
 		// 与 wait 同口径：不限速的 ping 放行也是真实发送，计入 bg 桶账。
 		gate.bucketUsed++
 		gate.bucketUsedBg++
-		return true
+		return true, ""
 	}
-	if now.Sub(ws) < gate.usable {
-		reserve := gate.reserve(now, ws)
-		if gate.bucketUsed+1 <= gate.quota-reserve &&
-			gate.bucketUsedBg+1 <= gate.bgAllowance(now, ws, reserve) {
-			gate.bucketUsed++
-			gate.bucketUsedBg++
-			return true
-		}
+	if now.Sub(ws) >= gate.usable {
+		return false, tryAdmitSkipDeadzone
 	}
-	return false
+	reserve := gate.reserve(now, ws)
+	if gate.bucketUsed+1 > gate.quota-reserve {
+		return false, gateReasonQuota
+	}
+	if gate.bucketUsedBg+1 > gate.bgAllowance(now, ws, reserve) {
+		return false, tryAdmitSkipPace
+	}
+	gate.bucketUsed++
+	gate.bucketUsedBg++
+	return true, ""
 }
 
 // noteUpstreamError 用上游失败刷新冷却闩；只有 resource_exhausted 与

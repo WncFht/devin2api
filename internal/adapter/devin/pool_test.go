@@ -950,7 +950,7 @@ func TestPoolEmptyPool(t *testing.T) {
 	if stats := pool.GateStats(); !reflect.DeepEqual(stats, GateStats{}) {
 		t.Fatalf("GateStats = %+v, want zero value", stats)
 	}
-	if stats := pool.WarmStats(); stats != (WarmStats{}) {
+	if stats := pool.WarmStats(); !reflect.DeepEqual(stats, WarmStats{}) {
 		t.Fatalf("WarmStats = %+v, want zero value", stats)
 	}
 	if aliases := pool.Aliases(); aliases != nil {
