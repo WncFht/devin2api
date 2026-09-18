@@ -113,9 +113,6 @@ const usageSampleCapacity = 4096
 // usageMinBuckets 是细粒度趋势保留的 10 分钟桶数（8 天）。
 const usageMinBuckets = 6 * 24 * 8
 
-// usageMinSampleCap 是单桶内保留的延迟样本上限。
-const usageMinSampleCap = 256
-
 // usageMaxDays 是天聚合输出的天数上限。
 const usageMaxDays = 31
 
@@ -129,9 +126,6 @@ const rateLimitEventCap = 256
 type UsageMinPoint struct {
 	At int64 `json:"at"` // 桶起点 unix 秒
 	UsageTotals
-	DurP95  int64 `json:"duration_p95_ms"`
-	AvgTTFB int64 `json:"avg_ttfb_ms"`
-	TTFBP95 int64 `json:"ttfb_p95_ms"`
 }
 
 // UsageDayRow 是单日聚合。
@@ -217,21 +211,6 @@ func latencyStatsOf(samples []int64) LatencyStats {
 	}
 }
 
-// sampleSummary 返回样本的均值与 p95；空样本返回零值。
-func sampleSummary(samples []int64) (avg, p95 int64) {
-	if len(samples) == 0 {
-		return 0, 0
-	}
-	sorted := make([]int64, len(samples))
-	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	var sum int64
-	for _, v := range sorted {
-		sum += v
-	}
-	return sum / int64(len(sorted)), sorted[int(0.95*float64(len(sorted)-1))]
-}
-
 // recentSamples 返回某列最近 usageSampleCapacity 条样本（分位数只需要
 // 多重集，与旧蓄水池「最近 N 条入样」同口径）。account 非空时按读侧
 // 折叠口径过滤单 lane（'default' 命中 ”+'default' 两群）。
@@ -281,12 +260,11 @@ func (s *Store) LogLatency(ctx context.Context) (map[string]LatencyStats, error)
 	}, nil
 }
 
-// usagePoints 装配 8 天 10 分钟粒度序列：每桶 totals 走 GROUP BY，
-// 延迟样本走窗口函数取每桶最近 usageMinSampleCap 条（等同旧环形
-// 蓄水池的「留最新 N 个」语义）。范围谓词走 minute_bucket（time/60000
-// 物化列）：time/600000>=S ⟺ minute_bucket>=S*10，idx_logs_minute_*
-// 前缀索引即刻生效。sc 为零值时全量——per-account 10 分钟趋势走
-// 逐号调用（LogScope{Account: lane}），lane 数个位数无压力。
+// usagePoints 装配 8 天 10 分钟粒度序列：每桶 totals 走 GROUP BY。
+// 范围谓词走 minute_bucket（time/60000 物化列）：time/600000>=S ⟺
+// minute_bucket>=S*10，idx_logs_minute_* 前缀索引即刻生效。sc 为
+// 零值时全量——per-account 10 分钟趋势走逐号调用
+// （LogScope{Account: lane}），lane 数个位数无压力。
 func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope) ([]UsageMinPoint, error) {
 	minSlot := currentSlot - usageMinBuckets + 1
 	minBucket := minSlot * 10
@@ -313,57 +291,11 @@ func (s *Store) usagePoints(ctx context.Context, currentSlot int64, sc LogScope)
 		return nil, err
 	}
 
-	// 每桶的 dur/ttfb 样本各取最近 cap 条：durs 按 id 倒序前 N；
-	// ttfb 只在非空行里取前 N（旧 pushSample 只入非 nil 值）。两个环
-	// 独立计数，所以取回行后要按各自的 rn 再闸一次。
-	sampleRows, err := s.ro.QueryContext(ctx, `
-		SELECT slot, duration_ms, first_upstream_ms, rn_dur, rn_ttfb FROM (
-			SELECT time/600000 AS slot, duration_ms, first_upstream_ms,
-				ROW_NUMBER() OVER (PARTITION BY time/600000 ORDER BY id DESC) AS rn_dur,
-				ROW_NUMBER() OVER (PARTITION BY time/600000, first_upstream_ms IS NOT NULL ORDER BY id DESC) AS rn_ttfb
-			FROM logs WHERE minute_bucket >= ?`+scopeWhere+`
-		) WHERE rn_dur <= ? OR (first_upstream_ms IS NOT NULL AND rn_ttfb <= ?)`,
-		append(append([]any{minBucket}, scopeArgs...), usageMinSampleCap, usageMinSampleCap)...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = sampleRows.Close() }()
-	type samples struct {
-		durs  []int64
-		ttfbs []int64
-	}
-	perSlot := map[int64]*samples{}
-	for sampleRows.Next() {
-		var slot, dur, rnDur, rnTTFB int64
-		var fup sql.NullInt64
-		if err := sampleRows.Scan(&slot, &dur, &fup, &rnDur, &rnTTFB); err != nil {
-			return nil, err
-		}
-		ss := perSlot[slot]
-		if ss == nil {
-			ss = &samples{}
-			perSlot[slot] = ss
-		}
-		if rnDur <= usageMinSampleCap {
-			ss.durs = append(ss.durs, dur)
-		}
-		if fup.Valid && rnTTFB <= usageMinSampleCap {
-			ss.ttfbs = append(ss.ttfbs, fup.Int64)
-		}
-	}
-	if err := sampleRows.Err(); err != nil {
-		return nil, err
-	}
-
 	points := make([]UsageMinPoint, 0, usageMinBuckets)
 	for slot := minSlot; slot <= currentSlot; slot++ {
 		p := UsageMinPoint{At: slot * 600}
 		if t, ok := totals[slot]; ok {
 			p.UsageTotals = t
-		}
-		if ss := perSlot[slot]; ss != nil {
-			_, p.DurP95 = sampleSummary(ss.durs)
-			p.AvgTTFB, p.TTFBP95 = sampleSummary(ss.ttfbs)
 		}
 		points = append(points, p)
 	}
