@@ -189,7 +189,11 @@ type warmEntry struct {
 // PingsSent 只计打完的 ping；PingHits/Misses 按上游回报 cache_read>0
 // 分桶；PingSkips 是闸门 tryAdmit 拒掉的轮次（未触达上游）；
 // PingErrors 是发送出错的轮次（不当 miss 证据）；Retired 是条目被
-// 移除的累计（静默过期/孤儿宽限期满/语义错误/容量挤）。
+// 移除的累计（静默过期/孤儿宽限期满/语义错误/容量挤），
+// RetiredByCause 把同一总量按死因拆开——churn 构成是调参前的
+// 必读账；PingMissPrefillTokens 按 miss 时的前缀体量估 prefill
+// 成本（miss=全前缀重灌，实测优先 retained/4 兜底）——保温的
+// 座位成本此前只在估算里存在。
 type WarmStats struct {
 	Enabled       bool  `json:"enabled"`
 	Entries       int   `json:"entries"`
@@ -202,6 +206,21 @@ type WarmStats struct {
 	PingSkips     int64 `json:"ping_skips"`
 	PingErrors    int64 `json:"ping_errors"`
 	Retired       int64 `json:"retired"`
+
+	RetiredByCause        WarmRetiredStats `json:"retired_by_cause"`
+	PingMissPrefillTokens int64            `json:"ping_miss_prefill_tokens"`
+}
+
+// WarmRetiredStats 是退役条目的死因分账：Idle=静默超档限、
+// Suspect=孤儿宽限期满、Semantic=前缀形态被上游语义拒绝、
+// Capacity=容量帽挤占、MissDemote=连 miss 降级（D1 降级路径
+// 预留，未启用前恒零）。与 Retired 总量同口径累加。
+type WarmRetiredStats struct {
+	Idle       int64 `json:"idle"`
+	Suspect    int64 `json:"suspect"`
+	Semantic   int64 `json:"semantic"`
+	Capacity   int64 `json:"capacity"`
+	MissDemote int64 `json:"miss_demote"`
 }
 
 // cacheWarmer 是前缀保温簿记与调度器：条目表 + 清扫协程。挂 Adapter
@@ -233,6 +252,11 @@ type cacheWarmer struct {
 	pingSkips     int64
 	pingErrors    int64
 	retired       int64
+	// retiredByCause 与 retired 同口径累加，按 removeLocked 调用方给
+	// 的死因分桶；pingMissPrefillTokens 累计 miss 轮次的前缀体量
+	// 估计（发送定影的 snap 口径）。
+	retiredByCause        WarmRetiredStats
+	pingMissPrefillTokens int64
 }
 
 // newCacheWarmer 创建并启动保温调度协程：Enabled 与否都起——开关
@@ -404,15 +428,17 @@ func (w *cacheWarmer) stats() WarmStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	stats := WarmStats{
-		Enabled:       w.params.Enabled,
-		Entries:       len(w.entries),
-		RetainedBytes: w.retainedBytes,
-		PingsSent:     w.pingsSent,
-		PingHits:      w.pingHits,
-		PingMisses:    w.pingMisses,
-		PingSkips:     w.pingSkips,
-		PingErrors:    w.pingErrors,
-		Retired:       w.retired,
+		Enabled:               w.params.Enabled,
+		Entries:               len(w.entries),
+		RetainedBytes:         w.retainedBytes,
+		PingsSent:             w.pingsSent,
+		PingHits:              w.pingHits,
+		PingMisses:            w.pingMisses,
+		PingSkips:             w.pingSkips,
+		PingErrors:            w.pingErrors,
+		Retired:               w.retired,
+		RetiredByCause:        w.retiredByCause,
+		PingMissPrefillTokens: w.pingMissPrefillTokens,
 	}
 	for _, entry := range w.entries {
 		if !entry.suspectAt.IsZero() {
@@ -454,8 +480,8 @@ func (w *cacheWarmer) sweep() {
 	}
 	var due []*warmEntry
 	for _, entry := range w.entries {
-		if w.retireDueLocked(entry, now) {
-			w.removeLocked(entry)
+		if cause, expired := w.retireDueLocked(entry, now); expired {
+			w.removeLocked(entry, cause)
 			continue
 		}
 		if !w.drained && w.promotedLocked(entry) && !now.Before(entry.nextDue) {
@@ -526,6 +552,9 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 			w.pingHits++
 		} else {
 			w.pingMisses++
+			// miss = 整段前缀重灌：prefill 成本按发送定影的体量
+			// 估，实测优先、retained/4 兜底（与晋升判定同口径）。
+			w.pingMissPrefillTokens += int64(snap.prefixEstimate())
 		}
 	} else {
 		w.pingErrors++
@@ -545,7 +574,7 @@ func (w *cacheWarmer) pingEntry(entry *warmEntry) {
 		// digest 判等挡掉「发送期间同键被 retain 换新内容」的误杀：
 		// retain 原地改写同一条目，指针复查检不出来——本次 ping 打的
 		// 是 snap 旧形态，它的语义拒绝不构成新内容的死刑证据。
-		w.removeLocked(entry)
+		w.removeLocked(entry, warmRetireSemantic)
 	}
 }
 
@@ -674,17 +703,20 @@ func (w *cacheWarmer) markSuspectsLocked(arrived warmLineageKey, now time.Time) 
 	}
 }
 
-// retireDueLocked 判定条目该退役：now-lastTouch 超本档 maxIdle——静默
-// 判定只挂客户端可归因上行，ping 不刷 lastTouch（否则被晋升的流靠
-// ping 自刷永不 idle，maxIdle 形同虚设）；或 suspect 宽限期满
-// （2×Interval）且期间无真实上行。调用方须持 mu。
-func (w *cacheWarmer) retireDueLocked(entry *warmEntry, now time.Time) bool {
+// retireDueLocked 判定条目该退役并给出死因：now-lastTouch 超本档
+// maxIdle——静默判定只挂客户端可归因上行，ping 不刷 lastTouch
+// （否则被晋升的流靠 ping 自刷永不 idle，maxIdle 形同虚设）；或
+// suspect 宽限期满（2×Interval）且期间无真实上行。调用方须持 mu。
+func (w *cacheWarmer) retireDueLocked(entry *warmEntry, now time.Time) (warmRetireCause, bool) {
 	if now.Sub(entry.lastTouch) > w.maxIdleLocked(entry.tier) {
-		return true
+		return warmRetireIdle, true
 	}
-	return !entry.suspectAt.IsZero() &&
+	if !entry.suspectAt.IsZero() &&
 		now.Sub(entry.suspectAt) > 2*w.params.Interval &&
-		!entry.lastTouch.After(entry.suspectAt)
+		!entry.lastTouch.After(entry.suspectAt) {
+		return warmRetireSuspect, true
+	}
+	return 0, false
 }
 
 // anchorContact 是上游锚寿命的计时零点：最近一次接触时刻——客户端
@@ -712,6 +744,16 @@ func (w *cacheWarmer) maxIdleLocked(tier warmTier) time.Duration {
 	}
 }
 
+// prefixEstimate 估该条目前缀 token 体量：最近实测优先（usage 的
+// input+cache_read），未观测按 retained 字节/4 粗估——晋升判定与
+// miss prefill 账共用同一口径。
+func (entry *warmEntry) prefixEstimate() int {
+	if entry.prefixTokens != 0 {
+		return entry.prefixTokens
+	}
+	return int(entry.retainedBytes / warmBytesPerToken)
+}
+
 // promotedLocked 判定条目是否可保温：第 2 发真追加的成功上行才晋升
 // （一次性探针/逐字重发挡在 sends 计数上），且前缀体量达
 // MinPrefixTokens——观测过 usage 用实测 input+cache_read，未观测按
@@ -720,11 +762,7 @@ func (w *cacheWarmer) promotedLocked(entry *warmEntry) bool {
 	if entry.sends < 2 {
 		return false
 	}
-	tokens := entry.prefixTokens
-	if tokens == 0 {
-		tokens = int(entry.retainedBytes / warmBytesPerToken)
-	}
-	return tokens >= w.params.MinPrefixTokens
+	return entry.prefixEstimate() >= w.params.MinPrefixTokens
 }
 
 // evictLocked 把条目表压回容量帽内：先挤 suspect（疑似孤儿），再按
@@ -751,19 +789,41 @@ func (w *cacheWarmer) evictLocked(protect warmLineageKey) {
 		if victim == nil {
 			return // 只剩受保护条目，停止
 		}
-		w.removeLocked(victim)
+		w.removeLocked(victim, warmRetireCapacity)
 	}
 }
 
-// removeLocked 删除条目并结账（retainedBytes 账本与 retired 计数）。
-// 调用方须持 mu。
-func (w *cacheWarmer) removeLocked(entry *warmEntry) {
+// warmRetireCause 是条目退役的死因枚举，removeLocked 按它分账进
+// WarmRetiredStats；连 miss 降级（MissDemote）属未来 D1 路径的
+// 预留桶，当前无调用方。
+type warmRetireCause int
+
+const (
+	warmRetireIdle warmRetireCause = iota
+	warmRetireSuspect
+	warmRetireSemantic
+	warmRetireCapacity
+)
+
+// removeLocked 删除条目并结账（retainedBytes 账本、retired 与
+// retiredByCause 计数）。调用方须持 mu。
+func (w *cacheWarmer) removeLocked(entry *warmEntry, cause warmRetireCause) {
 	if w.entries[entry.key] != entry {
 		return
 	}
 	delete(w.entries, entry.key)
 	w.retainedBytes -= entry.retainedBytes
 	w.retired++
+	switch cause {
+	case warmRetireIdle:
+		w.retiredByCause.Idle++
+	case warmRetireSuspect:
+		w.retiredByCause.Suspect++
+	case warmRetireSemantic:
+		w.retiredByCause.Semantic++
+	case warmRetireCapacity:
+		w.retiredByCause.Capacity++
+	}
 }
 
 // dueAfterLocked 算从 base 起的下一个 ping 到期时刻：Interval 加

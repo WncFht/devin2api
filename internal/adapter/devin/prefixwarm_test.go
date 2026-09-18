@@ -692,3 +692,98 @@ func TestWarmBeginDrain(t *testing.T) {
 		t.Fatal("drained entry past maxIdle must still retire")
 	}
 }
+
+// 死因分账：四条退役路径各进各桶——idle 静默超档限、suspect 孤儿
+// 宽限期满、semantic 前缀形态被拒、capacity 容量挤占；分桶合计与
+// retired 总量同口径，miss_demote 预留桶恒零。
+func TestWarmRetireCauseBuckets(t *testing.T) {
+	// idle：无 SessionKey 条目静默超 unknown 档限。
+	wIdle, clockIdle := newTestWarmer(t, WarmConfig{UnknownMaxIdle: time.Minute})
+	req := warmTestRequest("", "sys", "m1")
+	wIdle.retain(wIdle.keyOf(req, "uid"), req, "uid", "")
+	clockIdle.t = clockIdle.t.Add(time.Minute + time.Second)
+	wIdle.sweep()
+	if got := wIdle.stats().RetiredByCause.Idle; got != 1 {
+		t.Fatalf("Idle = %d, want 1", got)
+	}
+
+	// suspect：同 session 一维相异兄弟到达标 suspect，宽限期满退役。
+	wSus, clockSus := newTestWarmer(t, WarmConfig{Interval: time.Minute})
+	reqA := warmTestRequest("sess", "sys", "msg-a")
+	wSus.retain(wSus.keyOf(reqA, "uid"), reqA, "uid", "")
+	reqB := warmTestRequest("sess", "sys", "msg-b")
+	wSus.retain(wSus.keyOf(reqB, "uid"), reqB, "uid", "")
+	clockSus.t = clockSus.t.Add(2*time.Minute + time.Second)
+	wSus.sweep()
+	if got := wSus.stats().RetiredByCause.Suspect; got != 1 {
+		t.Fatalf("Suspect = %d, want 1", got)
+	}
+
+	// semantic：晋升条目 ping 遭 ClientFixable 拒绝退役。
+	wSem, clockSem := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	wSem.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		return 0, connect.NewError(connect.CodeInvalidArgument, errors.New("bad request shape"))
+	}
+	seedPromoted(wSem, warmTestRequest("sess", "sys", "m1"), "uid")
+	clockSem.t = clockSem.t.Add(time.Minute + time.Second)
+	wSem.sweep()
+	if got := wSem.stats().RetiredByCause.Semantic; got != 1 {
+		t.Fatalf("Semantic = %d, want 1", got)
+	}
+
+	// capacity：MaxStreams=1 下第二条登记挤掉第一条。
+	wCap, _ := newTestWarmer(t, WarmConfig{MaxStreams: 1})
+	reqC := warmTestRequest("s-c", "sys", "m-c")
+	wCap.retain(wCap.keyOf(reqC, "uid"), reqC, "uid", "")
+	reqD := warmTestRequest("s-d", "sys", "m-d")
+	wCap.retain(wCap.keyOf(reqD, "uid"), reqD, "uid", "")
+	if got := wCap.stats().RetiredByCause.Capacity; got != 1 {
+		t.Fatalf("Capacity = %d, want 1", got)
+	}
+
+	// 分桶合计 = retired 总量；miss_demote 预留桶恒零。
+	for name, stats := range map[string]WarmStats{
+		"idle": wIdle.stats(), "suspect": wSus.stats(),
+		"semantic": wSem.stats(), "capacity": wCap.stats(),
+	} {
+		c := stats.RetiredByCause
+		if sum := c.Idle + c.Suspect + c.Semantic + c.Capacity + c.MissDemote; sum != stats.Retired {
+			t.Fatalf("%s: buckets sum %d != Retired %d", name, sum, stats.Retired)
+		}
+		if c.MissDemote != 0 {
+			t.Fatalf("%s: reserved MissDemote = %d, want 0", name, c.MissDemote)
+		}
+	}
+}
+
+// miss prefill 账：cr=0 的 miss 轮按发送定影的前缀体量记账（未观测
+// usage 时 = retainedBytes/4，与晋升同口径）；hit 轮不记账。
+func TestWarmPingMissPrefillTokens(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	var miss bool
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		if miss {
+			return 0, nil
+		}
+		return 4096, nil
+	}
+	key := seedPromoted(w, warmTestRequest("sess", "sys", "m1"), "uid")
+	want := int64(w.entries[key].prefixEstimate())
+	if want <= 0 {
+		t.Fatal("seeded entry must carry a positive prefix estimate")
+	}
+	miss = true
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	stats := w.stats()
+	if stats.PingMisses != 1 || stats.PingMissPrefillTokens != want {
+		t.Fatalf("stats = %+v, want 1 miss and %d prefill tokens", stats, want)
+	}
+	// hit 轮不加账。
+	miss = false
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if got := w.stats().PingMissPrefillTokens; got != want {
+		t.Fatalf("PingMissPrefillTokens = %d, want unchanged %d after a hit", got, want)
+	}
+}

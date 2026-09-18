@@ -432,5 +432,9 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 		"ping_skips":     warm.PingSkips,
 		"ping_errors":    warm.PingErrors,
 		"retired":        warm.Retired,
+		// 死因分账与 miss prefill 账：churn 构成与保温座位成本的
+		// 观测面（miss=全前缀重灌，估算口径见 WarmStats 注释）。
+		"retired_by_cause":         warm.RetiredByCause,
+		"ping_miss_prefill_tokens": warm.PingMissPrefillTokens,
 	}
 }
