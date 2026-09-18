@@ -276,9 +276,11 @@ func BaseConfig(cfg config.Config) devin.Config {
 		ClientName:    cfg.Devin.ClientName,
 		ClientVersion: cfg.Devin.ClientVersion,
 		ClientOS:      cfg.Devin.ClientOS,
-		// 会话亲和 TTL 与配额降权阈值是全局字段，经 base 模板铺进各 lane。
+		// 会话亲和 TTL、配额降权阈值与 post-content 无进度档是全局字段，
+		// 经 base 模板铺进各 lane。
 		SessionAffinityTTLSeconds: cfg.Devin.SessionAffinityTTLSeconds,
 		QuotaLowThresholdPercent:  cfg.Devin.QuotaLowThresholdPercent,
+		NoProgressTimeout:         time.Duration(cfg.Devin.NoProgressTimeoutSeconds) * time.Second,
 		Gate: devin.GateConfig{
 			MaxRPM:          cfg.Devin.MaxRPM,
 			MaxHold:         time.Duration(cfg.Devin.GateMaxHoldSeconds) * time.Second,

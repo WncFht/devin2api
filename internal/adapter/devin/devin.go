@@ -115,6 +115,12 @@ type Config struct {
 	// 它时 lane 对新会话降档（已绑定会话不受影响）；0 回落默认 15，
 	// 负值关闭降权。全局字段各 lane 一致。
 	QuotaLowThresholdPercent int
+	// NoProgressTimeout 是「产出过内容之后」的无进度期限：上游在工具
+	// 调用参数阶段可静默计算 15-25min 只发心跳帧，post-content 档位
+	// 必须盖住它（pre-content 档沿用 upstreamNoProgressTimeout——
+	// 还没产出就死等价值不大）。<=0 回落默认 45min。
+	// 全局字段各 lane 一致。
+	NoProgressTimeout time.Duration
 }
 
 // ClientIdentity 返回请求要携带的客户端身份；空字段回落到与真实
@@ -185,6 +191,11 @@ type Adapter struct {
 	// 请求共享一次解析（模式同 modelsFetch），等待者收 done 后直接
 	// 读 flight 上的共享结果，不各发一次 RPC。
 	assignmentsFetch map[string]*assignFlight
+	// detached 是完成缓存：客户端断开后仍在后台续命的流按语义请求
+	// 键登记，同键重试重放已缓冲事件或挂接追帧（见 detached.go）。
+	// 号池下逐 lane 各持一份——重试经 SessionAffinity 钉回同 lane
+	// 才命中，换 lane 自然未命中走新上游。
+	detached *detachedRegistry
 }
 
 // resolvedAssignment 是 AssignModel 对单个 router uid 的解析结果。
@@ -237,6 +248,7 @@ func New(config Config) (*Adapter, error) {
 		modelsCacheTTL: 5 * time.Minute,
 		gate:           newRateGate(config.Gate, config.GateStateStore, store.GateStateKey(config.Identity.Name)),
 		assignments:    make(map[string]resolvedAssignment),
+		detached:       newDetachedRegistry(),
 	}
 	link, err := newUpstreamLink(config, adapter.currentToken)
 	if err != nil {
@@ -520,6 +532,9 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 	if prev.QuotaLowThresholdPercent != next.QuotaLowThresholdPercent {
 		applied = append(applied, "devin.quota_low_threshold_percent")
 	}
+	if prev.NoProgressTimeout != next.NoProgressTimeout {
+		applied = append(applied, "devin.no_progress_timeout_seconds")
+	}
 	return applied
 }
 
@@ -611,6 +626,18 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 别名与路由判定到此完结：记下发上线 uid，进行中列表即刻
 	// 呈现「请求名 → 实际 uid」，不必等响应身份回填。
 	recorder.SetResolvedModel(model)
+	// 完成缓存查找在一切上游动作之前：同键脱钩条目在场时整段建流
+	// 路径（目录校验/构建/闸门/发送）都不发生——重放不消耗上游。
+	detachKey := detachedRequestKey(request, model)
+	if entry := adapter.detached.lookup(detachKey); entry != nil {
+		recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_attach", map[string]any{
+			"key":             detachKey,
+			"origin_dir":      entry.originDir,
+			"state":           entry.state.String(),
+			"buffered_events": entry.len(),
+		})
+		return &attachStream{entry: entry}, nil
+	}
 	// 能力校验与缺席告警作用在解析后的真实 uid 上——router 条目自己的
 	// 目录能力位与最终承担请求的模型无关。
 	adapter.warnIfModelAbsentFromCatalog(model)
@@ -660,28 +687,54 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		})
 		recordProtoJSON(recorder, debuglog.StageDevinRequestAttempt(attempt), message)
 	}
-	// streamCtx 由 responseStream 持有：看门狗判死或客户端断开时
-	// cancel 是唯一打断泵协程内阻塞 Receive 的手段。
-	streamCtx, cancel := context.WithCancel(ctx)
-	stream, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
-	if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
-		// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
-		// 用新凭据重建请求重试一次。token 未变化时不重试。
-		binding.Token = adapter.currentToken()
-		if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
-			protoRequest = rebuilt
-			noteRetry("unauthenticated: token reloaded", protoRequest, false)
-			stream, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
-		} else {
-			// 重建失败则放弃重发、原错误照常上报；但「自愈后为何没重试」
-			// 要留痕——error.json 是 first-write-wins 留给上游失败点，
-			// 本地重建失败只在 04 的分界行里找得到（同 reopen 的
-			// retry_failed 惯例）。
-			recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
-				"attempt": attempt,
-				"error":   buildErr.Error(),
-			})
+	// streamBase 剥离客户端取消、保留 ctx 值（recorder/请求分类）：
+	// detached 语义要求客户端断开后上游泵继续活着（见 detach），
+	// connect 流的生命周期绑在开流 ctx 上，必须从剥离后的基底派生。
+	streamBase := context.WithoutCancel(ctx)
+	// streamCtx 由 responseStream 持有：看门狗判死、客户端断开或
+	// 后台泵超时时 cancel 是唯一打断泵协程内阻塞 Receive 的手段。
+	streamCtx, cancel := context.WithCancel(streamBase)
+	// 开流放进协程里跑：主 goroutine 在 select 里同时盯客户端 ctx。
+	// 客户端在闸门排队/建连期断开时 streamCtx 不随客户端取消（它从
+	// streamBase 派生），必须主动 cancel 打断在飞 RPC 并等 goroutine
+	// 收尾（闸门槽位随返回释放）——否则这次开流会漏成一条无人消费
+	// 的上游流。
+	type openResult struct {
+		stream *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
+		err    error
+	}
+	openCh := make(chan openResult, 1)
+	go func() {
+		opened, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
+		if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
+			// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
+			// 用新凭据重建请求重试一次。token 未变化时不重试。
+			binding.Token = adapter.currentToken()
+			if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
+				protoRequest = rebuilt
+				noteRetry("unauthenticated: token reloaded", protoRequest, false)
+				opened, err = adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
+			} else {
+				// 重建失败则放弃重发、原错误照常上报；但「自愈后为何没重试」
+				// 要留痕——error.json 是 first-write-wins 留给上游失败点，
+				// 本地重建失败只在 04 的分界行里找得到（同 reopen 的
+				// retry_failed 惯例）。
+				recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
+					"attempt": attempt,
+					"error":   buildErr.Error(),
+				})
+			}
 		}
+		openCh <- openResult{opened, err}
+	}()
+	var stream *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
+	select {
+	case result := <-openCh:
+		stream, err = result.stream, result.err
+	case <-ctx.Done():
+		cancel()
+		<-openCh
+		err = context.Cause(ctx)
 	}
 	if err != nil {
 		// 判父 ctx 而非 streamCtx：cancel() 后 streamCtx 必为 canceled，
@@ -711,14 +764,25 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	adapter.warm.retain(warmKey, request, model, warmRouter)
 	serverTools := serverToolNames(request.Tools)
 	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
+	// postProgressTimeout 解析 post-content 无进度档（工具调用参数的
+	// 长静默计算）——cfg <=0 回落默认；Stream 构造的流恒有值，测试
+	// 裸流留零走 progressDeadline 的旧值回落。
+	postProgressTimeout := cfg.NoProgressTimeout
+	if postProgressTimeout <= 0 {
+		postProgressTimeout = defaultPostProgressTimeout
+	}
 	response := &responseStream{
-		frames:   pumpUpstream(streamCtx, stream),
-		cancel:   cancel,
-		decoder:  decoder,
-		recorder: recorder,
-		gate:     adapter.gate,
-		warm:     adapter.warm,
-		warmKey:  warmKey,
+		frames:              pumpUpstream(streamCtx, stream),
+		cancel:              cancel,
+		decoder:             decoder,
+		recorder:            recorder,
+		gate:                adapter.gate,
+		warm:                adapter.warm,
+		warmKey:             warmKey,
+		postProgressTimeout: postProgressTimeout,
+		detachKey:           detachKey,
+		registry:            adapter.detached,
+		entry:               &detachedEntry{notify: make(chan struct{})},
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
@@ -741,7 +805,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			} else {
 				return nil, nil, cause
 			}
-			retryCtx, retryCancel := context.WithCancel(ctx)
+			retryCtx, retryCancel := context.WithCancel(streamBase)
 			retryBinding := binding
 			retryBinding.Token = adapter.currentToken()
 			rebuilt, _, err := buildRequest(retryRequest, cfg, retryBinding)
@@ -783,7 +847,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 			return nil, nil, nil, err
 		}
 		noteRetry(cause, rebuilt, false)
-		nextCtx, nextCancel := context.WithCancel(ctx)
+		nextCtx, nextCancel := context.WithCancel(streamBase)
 		next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
 		if err != nil {
 			nextCancel()
@@ -1397,7 +1461,14 @@ var upstreamConfirmedStallTimeout = 90 * time.Second
 // latency 活性帧）喂 stall 看门狗，但只有产出事件的帧喂它。上游实测
 // 合法内容帧间隔上限 ~60s，而退化上游可能周期性发零事件帧无限续命
 // （latency 心跳/元数据帧）——10min 是观察值 10 倍余量的兜底。
+// 它只管产出首个事件之前；产出过之后走 progressDeadline 的 post 档。
 var upstreamNoProgressTimeout = 10 * time.Minute
+
+// defaultPostProgressTimeout 是 post-content 无进度档的默认值：上游在
+// 工具调用参数阶段可静默计算 15-25min 只发心跳帧（实测 archbox 案例
+// 17min+ 静默后一次性下 args），pre-content 的 10min 档必误杀。45min
+// 覆盖该形态并留一倍余量；覆盖旋钮是 devin.no_progress_timeout_seconds。
+var defaultPostProgressTimeout = 45 * time.Minute
 
 // upstreamTailGrace 是消费到 stopReason 之后等待流终止帧的宽限。
 // 实测健康流的尾帧（usage/dim/endstream）在 stopReason 后 <1ms 到达；
@@ -1520,6 +1591,23 @@ type responseStream struct {
 	// 「消费方活跃等待期间零事件」，Stop 会让首个内容事件后的
 	// 零事件帧续命逃过看门狗，流无限挂起。
 	progress *time.Timer
+	// postProgressTimeout 是「产出过内容之后」的无进度档：上游在
+	// 工具调用参数阶段可静默计算 15-25min 只发心跳，pre-content 的
+	// 10min 档必误杀这类合法静默。<=0 时 progressDeadline 回落
+	// upstreamNoProgressTimeout（测试构造的裸流语义不变）。
+	postProgressTimeout time.Duration
+	// detachKey/registry/entry 是完成缓存挂接面：key 是语义请求
+	// 哈希（detachedRequestKey），entry 自建流起经 Recv 返回点 tee
+	// 累积全部下发事件（重试方需要含前缀的完整序列），registry 持
+	// 命中判定与条目生命周期。三者由 Adapter.Stream 注入；测试裸流
+	// 留空 → detachable() 恒假 → 客户端断开行为与旧实现一致。
+	detachKey string
+	registry  *detachedRegistry
+	entry     *detachedEntry
+	// detached 标记本流已与客户端解耦、由后台泵续命：无进度看门狗
+	// 退役（耐心是它的全部意义，running TTL 是存活上界），静默
+	// 看门狗仍在岗——零帧意味着连接真死而非算得慢。
+	detached bool
 }
 
 // devinResponseReceiver 描述 responseStream 消费 Devin 服务端流所需的最小能力。
@@ -1549,16 +1637,31 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	defer stall.Stop()
 	// progress 与 stall 同构：计时器跨 Recv 复用，消费方每次进入等待
 	// 前 Reset 续期——窗口只覆盖「活跃等待期间」的零事件时长，消费方
-	// 去忙别的事不计入，也不能随 Recv 返回停表。
-	progress := stream.progress
-	if progress == nil {
-		progress = time.NewTimer(upstreamNoProgressTimeout)
-		stream.progress = progress
-	} else {
-		progress.Reset(upstreamNoProgressTimeout)
+	// 去忙别的事不计入，也不能随 Recv 返回停表。脱钩流不武装它：
+	// 耐心是后台泵的全部意义，存活上界由条目 running TTL 兜住；
+	// progressC 为 nil 时 select 的该分支永不触发。
+	var progress *time.Timer
+	var progressC <-chan time.Time
+	if !stream.detached {
+		progress = stream.progress
+		if progress == nil {
+			progress = time.NewTimer(stream.progressDeadline())
+			stream.progress = progress
+		} else {
+			progress.Reset(stream.progressDeadline())
+		}
+		progressC = progress.C
 	}
 	for len(stream.queue) == 0 && !stream.finished {
 		if err := ctx.Err(); err != nil {
+			// streamCtx 从 streamBase 派生不随客户端取消：早退路径
+			// 必须显式决定上游泵的去向——已产出内容就脱钩续命进缓存，
+			// 否则杀掉（pre-content 流进缓存没有重放价值）。
+			if stream.detachable() {
+				stream.detach(ctx)
+			} else {
+				stream.cancel()
+			}
 			return llm.ResponseEvent{}, err
 		}
 		if !stream.started {
@@ -1645,7 +1748,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.recordSchemaDrift()
 			if len(events) > 0 {
 				stream.producedEvents = true
-				progress.Reset(upstreamNoProgressTimeout)
+				if progress != nil {
+					progress.Reset(stream.progressDeadline())
+				}
 			}
 			stream.queue = stream.release(events)
 		case <-stall.C:
@@ -1680,13 +1785,13 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.recordUpstreamFailure(stallErr)
 			stream.queue = stream.release(stream.decoder.finish(stallErr))
 			stream.finished = true
-		case <-progress.C:
+		case <-progressC:
 			// 有帧流动但长期零内容进度（上游 latency 活性帧不算
 			// 进度）：退化形态兜底——pre-content 可整体重发，
 			// post-content 按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			progressErr := fmt.Errorf("devin stream made no progress for %s", upstreamNoProgressTimeout)
+			progressErr := fmt.Errorf("devin stream made no progress for %s", stream.progressDeadline())
 			if stream.tryReopen(progressErr, false) {
 				continue
 			}
@@ -1698,6 +1803,13 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			stream.finished = true
 		case <-ctx.Done():
 			stall.Stop()
+			if stream.detachable() {
+				// 已产出内容的流不随客户端一起死：脱钩进完成缓存由
+				// 后台泵续命，同键重试重放缓冲。取消错误原样返回给
+				// 消费方（与早退 ctx.Err() 分支同形态）。
+				stream.detach(ctx)
+				return llm.ResponseEvent{}, context.Cause(ctx)
+			}
 			stream.cancel()
 			stream.queue = stream.release(stream.decoder.finish(context.Cause(ctx)))
 			stream.finished = true
@@ -1709,7 +1821,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		// 停表（语义见 progress 字段注释）；finished 后等待循环不再进入，
 		// 窗口语义终结——此处是终局退出点，Stop 回收计时器，否则每条
 		// 完成的流留 ~2 个挂起计时器直到自然触发。
-		stream.progress.Stop()
+		if stream.progress != nil {
+			stream.progress.Stop()
+		}
 		if stream.startHold != nil {
 			stream.startHold.Stop()
 		}
@@ -1717,6 +1831,11 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	if len(stream.queue) > 0 {
 		event := stream.queue[0]
 		stream.queue = stream.queue[1:]
+		// 下发即缓冲：脱钩后重试方需要含前缀的完整事件序列，
+		// tee 在返回点才能覆盖 start 扣留在内的全部对外事件。
+		if stream.entry != nil {
+			stream.entry.append(event)
+		}
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
@@ -1736,6 +1855,63 @@ func (stream *responseStream) stallDeadline() time.Duration {
 		return upstreamConfirmedStallTimeout
 	}
 	return upstreamStallTimeout
+}
+
+// progressDeadline 给无进度看门狗分档：首个事件产出前取
+// upstreamNoProgressTimeout（还没产出就死等价值不大）；产出过之后取
+// postProgressTimeout——上游在工具调用参数阶段可静默计算 15-25min
+// 只发心跳，10min 档必误杀这类合法静默。裸流（postProgressTimeout<=0）
+// 回落 pre 档，保持测试构造的既有语义。
+func (stream *responseStream) progressDeadline() time.Duration {
+	if stream.producedEvents && stream.postProgressTimeout > 0 {
+		return stream.postProgressTimeout
+	}
+	return upstreamNoProgressTimeout
+}
+
+// detachable 判定这条流客户端断开后是否值得脱钩续命：三个条件缺一
+// 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
+// 才有；测试裸流恒假）、已产出过内容（pre-content 流没有重放价值，
+// 且重放键会污染缓存）、语义未收口（已见 stopReason/停止序列的流
+// 只剩传输尾帧，续命等不到新内容）。已脱钩的流不可再脱钩。
+func (stream *responseStream) detachable() bool {
+	return !stream.detached &&
+		stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
+		stream.producedEvents && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
+}
+
+// detach 把流从客户端生命周期解耦：条目登记进完成缓存，取消两个
+// 看门狗计时器（消费方的 defer 只停它捕获的旧表，互不影响），然后
+// 起后台泵续消费直到终态——缓冲经 tee 持续追加，挂接方按序追帧。
+// 泵的存活上界是 running TTL：超时走 Recv 的 ctx.Done 正常收尾
+// （detached 态不再二次脱钩），产出一个真实 error 事件作终态。
+func (stream *responseStream) detach(ctx context.Context) {
+	entry := stream.entry
+	entry.originDir = stream.recorder.Dir()
+	stream.detached = true
+	if stream.stall != nil {
+		stream.stall.Stop()
+		stream.stall = nil
+	}
+	if stream.progress != nil {
+		stream.progress.Stop()
+		stream.progress = nil
+	}
+	stream.registry.admit(stream.detachKey, entry, stream)
+	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", map[string]any{
+		"key":             stream.detachKey,
+		"buffered_events": entry.len(),
+	})
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedRunningTTL)
+	go func() {
+		defer drainCancel()
+		for {
+			if _, err := stream.Recv(drainCtx); err != nil {
+				entry.finish()
+				return
+			}
+		}
+	}()
 }
 
 // tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：
@@ -1778,8 +1954,11 @@ func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.C
 	// 替代这次重试是否真的打穿了限流。
 	stream.upstreamConfirmed = false
 	// 新流的无进度窗口从头计起：旧流的计时器（可能刚触发排空）
-	// 不沿用，消费方对新流重新获得完整的零事件容忍期。
-	stream.progress.Reset(upstreamNoProgressTimeout)
+	// 不沿用，消费方对新流重新获得完整的零事件容忍期。脱钩流无
+	// progress 看门狗（nil），跳过武装。
+	if stream.progress != nil {
+		stream.progress.Reset(stream.progressDeadline())
+	}
 }
 
 // maxStreamResumes 是单条响应允许的截断续传次数：每次续传都把整段
@@ -1855,7 +2034,9 @@ func (stream *responseStream) tryResume(cause error) bool {
 	stream.started = false
 	stream.finished = false
 	stream.upstreamConfirmed = false
-	stream.progress.Reset(upstreamNoProgressTimeout)
+	if stream.progress != nil {
+		stream.progress.Reset(stream.progressDeadline())
+	}
 	stream.queue = seam
 	return true
 }

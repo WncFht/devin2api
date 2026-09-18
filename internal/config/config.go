@@ -168,6 +168,11 @@ type DevinConfig struct {
 	// 时该 lane 对新会话降档（已绑定会话不受影响）；<=0 回落默认 15，
 	// 负值关闭降权。
 	QuotaLowThresholdPercent int `yaml:"quota_low_threshold_percent"`
+	// NoProgressTimeoutSeconds 是「产出过内容之后」的上游无进度期限
+	// 秒数：上游在工具调用参数阶段可静默计算 15-25min 只发心跳帧，
+	// 该档必须盖住它（产出前沿用内置 10min 档）；<=0 回落默认 2700。
+	// 全局字段，各 lane 一致。
+	NoProgressTimeoutSeconds int `yaml:"no_progress_timeout_seconds"`
 }
 
 // DebugConfig 保存请求级调试日志配置。

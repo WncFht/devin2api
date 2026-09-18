@@ -9,18 +9,18 @@
 热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（闸门参数、debug 开关与保留策略、auth.api_key、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。`auth.api_key` 另有一条播种语义：每次 reload（不止值变化时）若令牌仓内没有对应哈希行，它被补种成普通令牌行——删掉种子行后 reload/重启会重新长出，彻底移除要清空配置值再删行。
 冷键只剩 server.listen：Serve 无法换绑端口，同一问题的更难版本（换进程）已由 reuseport 交接部署解决，进程内换监听收益小、排空语义一样绕不过。
 
-| 热应用（applied）                                                                                 | 需重启（requires_restart） |
-| ------------------------------------------------------------------------------------------------- | -------------------------- |
-| devin.model / devin.aliases / devin.client_name / client_version / client_os                      | server.listen              |
-| devin.base_url / devin.proxy / devin.force_http1                                                  |                            |
-| devin.accounts（声明基座；与面板行叠加出的生效集驱动 lane 增删改，含逐号 priority/max_rpm）       |                            |
-| devin.max_rpm 及 devin.gate_* 全部闸门参数                                                        |                            |
-| devin.session_affinity_ttl_seconds / devin.quota_low_threshold_percent                            |                            |
-| devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                   |                            |
-| auth.api_key / dashboard.password                                                                 |                            |
-| debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs） |                            |
-| debug.quota_interval_minutes / debug.pprof_listen                                                 |                            |
-| server.max_concurrency                                                                            |                            |
+| 热应用（applied）                                                                                          | 需重启（requires_restart） |
+| ---------------------------------------------------------------------------------------------------------- | -------------------------- |
+| devin.model / devin.aliases / devin.client_name / client_version / client_os                               | server.listen              |
+| devin.base_url / devin.proxy / devin.force_http1                                                           |                            |
+| devin.accounts（声明基座；与面板行叠加出的生效集驱动 lane 增删改，含逐号 priority/max_rpm）                |                            |
+| devin.max_rpm 及 devin.gate_* 全部闸门参数                                                                 |                            |
+| devin.session_affinity_ttl_seconds / devin.quota_low_threshold_percent / devin.no_progress_timeout_seconds |                            |
+| devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                            |                            |
+| auth.api_key / dashboard.password                                                                          |                            |
+| debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs）          |                            |
+| debug.quota_interval_minutes / debug.pprof_listen                                                          |                            |
+| server.max_concurrency                                                                                     |                            |
 
 端点三件套的热更语义：ApplyConfig 先用新参数构建整个上游调用束（transport + stream/api client + 焐池 warmer），构建失败（如非法 proxy）整单 422、旧配置继续服役；构建成功才换 config 快照并原子换指针。在途调用持旧 link 跑完，旧 transport 只收 idle 池；换 base_url 还会清空 AssignModel 缓存（jwt 绑 cascade_id，旧端点的解析对新上游无效）。面板经 `SetUpstream` 跟随同一端点，面板的展示地址读 `BaseURL()` 同源透出。
 注意 `devin.client_*` 只影响 chat 路径：面板自身的 seat 类上游调用固定用 windsurf 身份，不随这个键变。
