@@ -194,6 +194,10 @@ type Manager struct {
 	// 计数器的时刻；仅 cleaner 协程读写，零值表示从未对账（首个
 	// tick 即对一次）。
 	lastPayloadReconcile time.Time
+	// driftWarnSign/driftWarnStreak 记录对账漂移的连发状态：漂移符号
+	// 与连续越阈轮数。仅 cleaner 协程读写，与 lastPayloadReconcile 同权。
+	driftWarnSign   int
+	driftWarnStreak int
 	// fallbackMu 串行化写 worker 死后的兜底收尾：workerGone 关闭后
 	// Complete 的调用方、关停看守与编码协程上的投递失败分支可同时
 	// 直跑 queueCompletion/flushAll，此时写侧私有状态已无人持有，

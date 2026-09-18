@@ -263,3 +263,46 @@ func TestCapacityEvictionStripsToAnchor(t *testing.T) {
 		}
 	})
 }
+
+// TestNoteDriftWarnGate 验证漂移告警的同号越阈连发闸门：竞态漂移
+// 符号随机、逐轮自纠，单发大额与异号交替都须静默；漏记账的复位后
+// 同向再现特征才放行告警。
+func TestNoteDriftWarnGate(t *testing.T) {
+	const floor = payloadDriftWarnFloor
+	manager := &Manager{}
+	// 单发大额（超出产实测噪声带上界 ~43MB）：竞态按静默处理。
+	if manager.noteDrift(50 * floor) {
+		t.Fatal("first large drift must not warn")
+	}
+	// 同号越阈再现 → 漏记账特征，告警并持续报连发轮数。
+	if !manager.noteDrift(2 * floor) {
+		t.Fatal("second consecutive same-sign drift must warn")
+	}
+	if !manager.noteDrift(3*floor) || manager.driftWarnStreak != 3 {
+		t.Fatalf("third same-sign drift must keep warning, streak=%d", manager.driftWarnStreak)
+	}
+	// 翻号断连：新方向首轮重新计起，不告警。
+	if manager.noteDrift(-2 * floor) {
+		t.Fatal("sign flip must reset the streak")
+	}
+	if !manager.noteDrift(-2 * floor) {
+		t.Fatal("repeated negative drift must warn on second occurrence")
+	}
+	// 翻号断连后新方向首轮重新计起，第二发才告警。
+	if manager.noteDrift(2 * floor) {
+		t.Fatal("first positive drift after negative run must not warn")
+	}
+	if !manager.noteDrift(2 * floor) {
+		t.Fatal("second consecutive positive drift must warn")
+	}
+	// 越阈以下与归零都断连：小额同号不武装连发。
+	if manager.noteDrift(floor - 1); manager.driftWarnStreak != 0 {
+		t.Fatalf("sub-floor drift must reset streak, got %d", manager.driftWarnStreak)
+	}
+	if manager.noteDrift(2 * floor) {
+		t.Fatal("first post-reset drift must not warn")
+	}
+	if manager.noteDrift(0); manager.driftWarnStreak != 0 {
+		t.Fatal("zero drift must reset streak")
+	}
+}

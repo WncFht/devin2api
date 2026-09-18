@@ -34,6 +34,12 @@ const cleanerInterval = 5 * time.Minute
 // 清理 tick 多一次聚合扫。
 const payloadReconcileInterval = time.Hour
 
+// payloadDriftWarnFloor 是漂移告警的量级下限。竞态漂移（对账聚合快照
+// 与计数器 Swap 之间在飞写/删的差额）实测噪声带 −0.7MB…+43MB 随机
+// 游走，任何单轮量级阈值都圈不住它——漏记账的特征不是大额而是复位
+// 后同向再现，故本常量只作连发成员的入场券，告警裁决见 noteDrift。
+const payloadDriftWarnFloor = 1 << 20
+
 // 负载层的成员判定已下推成 DeleteDebugPayloadsBefore 的名字谓词
 //（devinRequestStageStem+"." 前缀圈出 03 主文件与全部重试/搜索分片、
 // 04/06 精确名、attachments/ 前缀）——剥离名单与该谓词同源维护。
@@ -196,8 +202,8 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	if drift, err := manager.store.ReconcileDebugPayloadBytes(ctx, storedBytes); err != nil {
 		manager.ioErrors.Add(1)
 		slog.Warn("debuglog: persist payload byte counter failed", "error", err)
-	} else if drift != 0 {
-		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes)
+	} else if manager.noteDrift(drift) {
+		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes, "streak", manager.driftWarnStreak)
 	}
 	if totalBytes <= maxBytes {
 		return removed, stripped
@@ -293,6 +299,30 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		removed += evicted
 	}
 	return removed, stripped
+}
+
+// noteDrift 记录一轮对账漂移并裁决是否告警。计数器每轮对账被重置回
+// 权威值，告警的唯一价值是发现系统性漏记账——其特征是复位后同向再现。
+// 竞态漂移符号随机、逐轮自纠，故裁决要求同号越阈连发（streak≥2）：
+// 单发大额按竞态静默，翻号或越阈以下即断连。返回 true 时
+// driftWarnStreak 是告警行的连发轮数。仅 cleaner 协程调用。
+func (manager *Manager) noteDrift(drift int64) bool {
+	sign := 0
+	abs := drift
+	if drift > 0 {
+		sign = 1
+	} else if drift < 0 {
+		sign, abs = -1, -drift
+	}
+	if abs < payloadDriftWarnFloor {
+		manager.driftWarnSign, manager.driftWarnStreak = 0, 0
+		return false
+	}
+	if sign != manager.driftWarnSign {
+		manager.driftWarnSign, manager.driftWarnStreak = sign, 0
+	}
+	manager.driftWarnStreak++
+	return manager.driftWarnStreak >= 2
 }
 
 // countProtectedBelow 数 candidates[:last+1] 里受保护的目录数——剥载
