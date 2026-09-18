@@ -845,6 +845,21 @@ func (application *App) createCompletion(
 	if key := common.SessionKeyFromHeader(request.Header); key != "" {
 		messages.SessionKey = key
 	}
+	// anthropic-beta 声明的客户端特性面进 marker：flag 改变上游行为，
+	// 同 SessionKey 下开关漂移应换 lane——marker 进 sessionSeed。多行
+	// 逗号合并后排序发射，marker 集合与声明顺序无关。
+	var betaFlags []string
+	for _, value := range request.Header.Values("anthropic-beta") {
+		for _, flag := range strings.Split(value, ",") {
+			if flag = strings.TrimSpace(flag); flag != "" {
+				betaFlags = append(betaFlags, flag)
+			}
+		}
+	}
+	slices.Sort(betaFlags)
+	for _, flag := range betaFlags {
+		common.DropOnce(&messages.Dropped, llm.MarkerAnthropicBeta+flag)
+	}
 	completion.Model = messages.Model
 	completion.RequestedModel = messages.Model
 	completion.Stream = options.Stream
@@ -1077,6 +1092,9 @@ var correlationHeaders = []correlationHeader{
 	{name: "X-Session-Affinity", forward: true},
 	{name: "X-Conversation-Id", forward: true},
 	{name: "X-Thread-Id", forward: true},
+	// anthropic-beta 是亲和 marker（anthropic_beta:<flag>）的头来源：
+	// 不透传则 WS 轮次的 flag 漂移对 sessionSeed 不可见。
+	{name: "anthropic-beta", forward: true, projection: "anthropic_beta"},
 }
 
 // clientRequestID 提取客户端自带的关联 ID，供其事后按自己的 ID 反查日志。

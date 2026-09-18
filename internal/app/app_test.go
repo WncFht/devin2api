@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -731,6 +732,34 @@ func TestStreamRateLimitAnthropicKeepsHTTPStatus(t *testing.T) {
 	}
 	if response.Header().Get("Retry-After") == "" {
 		t.Fatal("missing Retry-After header on 429")
+	}
+}
+
+// TestAnthropicBetaHeaderEmitsSeedMarker 验证 anthropic-beta 头按 flag
+// 记入 Dropped marker（排序去重的规范集合）——声明的特性面改变上游
+// 行为，marker 进 sessionSeed 影响 lane 亲和。
+func TestAnthropicBetaHeaderEmitsSeedMarker(t *testing.T) {
+	fake := &fakeAdapter{events: []llm.ResponseEvent{
+		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: &llm.AssistantMessage{ResponseID: "resp-1", ResponseModel: "claude-test", StopReason: llm.StopReasonStop}},
+	}}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Add("anthropic-beta", "flag-b, flag-a")
+	request.Header.Add("anthropic-beta", "flag-a")
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	want := []string{"anthropic_beta:flag-a", "anthropic_beta:flag-b"}
+	var got []string
+	for _, marker := range fake.lastRequest.Dropped {
+		if strings.HasPrefix(marker, "anthropic_beta:") {
+			got = append(got, marker)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("beta markers = %v, want %v (dropped = %v)", got, want, fake.lastRequest.Dropped)
 	}
 }
 
