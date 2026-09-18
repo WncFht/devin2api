@@ -323,7 +323,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 			recorder.SetUpstreamAccount(lane.name)
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
-			pool.bind(affinity, lane)
+			pool.bind(affinity, lane, request.SessionKey)
 			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest, failovers: tried - 1}, nil
 		}
 		lastErr = err
@@ -477,7 +477,7 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 			s.inner = inner
 			s.recorder.SetUpstreamAccount(next.name)
 			// 换号接管即改绑：会话谱系转到新 lane，后续请求直落这里。
-			s.pool.bind(s.affinity, next)
+			s.pool.bind(s.affinity, next, s.request.SessionKey)
 			// 重选审计覆盖首轮快照——meta 留下的是最新一轮决策现场。
 			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next, adapter.RequestClass(ctx))))
 			return true, nil
@@ -1062,10 +1062,13 @@ func (pool *Pool) boundLane(affinity string) *poolLane {
 
 // bind 把亲和键绑到 lane：开流成功与换号接管是仅有的两个写点——
 // 绑定记录的是「上次产出内容的 lane」。容量触顶先扫过期再逐最早
-// 到期者；被逐会话下次请求按普通序重选重绑。
-func (pool *Pool) bind(affinity string, lane *poolLane) {
+// 到期者；被逐会话下次请求按普通序重选重绑。落点即谱系归属：会话
+// 流量只会再经过本 lane，其余 lane 上同 SessionKey 的保温条目已成
+// 跨 lane 孤儿，顺手标 suspect 让它们走宽限退役而非骑满 maxIdle
+// 白烧 ping（对稳态重绑是无害复读——别 lane 的同会话条目本来就
+// 只能是陈旧孤儿）。
+func (pool *Pool) bind(affinity string, lane *poolLane, sessionKey string) {
 	pool.bindingsMu.Lock()
-	defer pool.bindingsMu.Unlock()
 	if _, ok := pool.bindings[affinity]; !ok && len(pool.bindings) >= poolBindingCap {
 		now := time.Now()
 		for key, binding := range pool.bindings {
@@ -1085,6 +1088,12 @@ func (pool *Pool) bind(affinity string, lane *poolLane) {
 		}
 	}
 	pool.bindings[affinity] = laneBinding{lane: lane, expiry: time.Now().Add(pool.affinityTTL())}
+	pool.bindingsMu.Unlock()
+	for _, other := range pool.snapshot() {
+		if other != lane {
+			other.adapter.warm.suspectSession(sessionKey)
+		}
+	}
 }
 
 // unbindLane 清掉一条 lane 的全部绑定与在飞指派：lane 被摘除

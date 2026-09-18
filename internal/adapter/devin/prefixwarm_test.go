@@ -212,6 +212,54 @@ func TestWarmSupersession(t *testing.T) {
 	}
 }
 
+// 跨 lane 孤儿标记：会话换 lane 后，滞留本 lane 的全部同 SessionKey
+// 条目都标 suspect（不限换走的那条 lineage）；别的会话不动；已
+// suspect 的不续宽限；无 SessionKey 整批跳过；宽限期满照常退役。
+func TestWarmSuspectSession(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute})
+	reqA := warmTestRequest("sess", "sys", "msg-a")
+	keyA := w.keyOf(reqA, "uid")
+	w.retain(keyA, reqA, "uid", "")
+	reqB := warmTestRequest("sess", "sys", "msg-b")
+	keyB := w.keyOf(reqB, "uid")
+	w.retain(keyB, reqB, "uid", "")
+	// retain B 时 A 已被超任标记——记下它的原 suspectAt 验证不刷新。
+	markedAt := w.entries[keyA].suspectAt
+	if markedAt.IsZero() {
+		t.Fatal("supersession should have pre-marked A suspect")
+	}
+	other := warmTestRequest("other", "sys", "msg-a")
+	keyOther := w.keyOf(other, "uid")
+	w.retain(keyOther, other, "uid", "")
+	clock.t = clock.t.Add(time.Minute)
+	w.suspectSession("sess")
+	if w.entries[keyA].suspectAt != markedAt {
+		t.Fatal("already-suspect entry must keep its original countdown")
+	}
+	if got := w.entries[keyB].suspectAt; got != clock.t {
+		t.Fatalf("session entry should be marked suspect at now, got %v", got)
+	}
+	if !w.entries[keyOther].suspectAt.IsZero() {
+		t.Fatal("different session must not be marked")
+	}
+	if got := w.stats().FailoverSuspects; got != 1 {
+		t.Fatalf("FailoverSuspects = %d, want 1 (only newly-marked counts)", got)
+	}
+	w.suspectSession("")
+	if got := w.stats().FailoverSuspects; got != 1 {
+		t.Fatal("empty session key must be a no-op")
+	}
+	// 宽限期满无上行 → 两条同会话孤儿都退役进 suspect 桶。
+	clock.t = clock.t.Add(2*time.Minute + time.Second)
+	w.sweep()
+	if len(w.entries) != 1 || w.entries[keyOther] == nil {
+		t.Fatal("orphaned session entries should retire after grace")
+	}
+	if got := w.stats().RetiredByCause.Suspect; got != 2 {
+		t.Fatalf("RetiredByCause.Suspect = %d, want 2", got)
+	}
+}
+
 // 档位判定：无 pending → sub 标记者 subDone、其余 userPaced；
 // pending 全为提问类 → userPaced；含任何其他工具 → blocked；
 // 无 SessionKey 恒 unknown。

@@ -194,6 +194,21 @@ func pinnedRequest(pool *Pool, want string) llm.RequestMessages {
 	}
 }
 
+// pinnedSessionRequest 同 pinnedRequest，但请求带 SessionKey——亲和
+// 种子就是会话键本身，逐号枚举到首项命中。
+func pinnedSessionRequest(pool *Pool, want string) llm.RequestMessages {
+	for i := 0; ; i++ {
+		request := llm.RequestMessages{
+			SessionKey: fmt.Sprintf("sess-%d", i),
+			Model:      "stub-model",
+			Messages:   []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+		}
+		if pool.orderedLanes(context.Background(), pool.snapshot(), SessionAffinityKey(request))[0].name == want {
+			return request
+		}
+	}
+}
+
 // poolStream 的流内换号：钉选 lane 的死 token 以流内首帧
 // unauthenticated 败亡（Stream 已返回成功、lane 内自愈换不回同一份
 // token），包装器拦下 error 事件换到下一 lane——客户端只见一份
@@ -261,6 +276,71 @@ func TestPoolInStreamFailover(t *testing.T) {
 	stubDrain(t, stream)
 	if dead.chatCalls.Load() != 1 || good.chatCalls.Load() != 2 {
 		t.Fatalf("after cooldown: dead=%d good=%d, want 1/2", dead.chatCalls.Load(), good.chatCalls.Load())
+	}
+}
+
+// 换号后滞留被弃 lane 的保温条目即跨 lane 孤儿：bind 落点把同
+// SessionKey 的它们标 suspect（走宽限退役而非骑满 maxIdle），胜者
+// lane 自己与别会话的条目不沾。
+func TestPoolFailoverSuspectsAbandonedLaneWarm(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	dead := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return connect.NewError(connect.CodeUnauthenticated, errors.New("dead token"))
+		},
+	}
+	good := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvDead := stubServer(t, dead, nil)
+	srvGood := stubServer(t, good, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model", Warm: WarmConfig{Enabled: true}},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model", Warm: WarmConfig{Enabled: true}},
+	)
+
+	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	request := pinnedSessionRequest(pool, "dead")
+	// 会话曾在 dead lane 留有谱系：一条同会话 lineage + 一条别会话
+	// 条目作对照；换号落 good 后前者该标 suspect，后者不动。
+	deadWarm := poolLaneByName(pool, "dead").adapter.warm
+	stale := warmTestRequest(request.SessionKey, "sys", "stale")
+	staleKey := deadWarm.keyOf(stale, "stub-model")
+	deadWarm.retain(staleKey, stale, "stub-model", "")
+	bystander := warmTestRequest("bystander", "sys", "stale")
+	bystanderKey := deadWarm.keyOf(bystander, "stub-model")
+	deadWarm.retain(bystanderKey, bystander, "stub-model", "")
+
+	stream, err := pool.Stream(ctx, request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	stubDrain(t, stream)
+	if deadWarm.entries[staleKey].suspectAt.IsZero() {
+		t.Fatal("abandoned lane's same-session entry should be marked suspect")
+	}
+	if !deadWarm.entries[bystanderKey].suspectAt.IsZero() {
+		t.Fatal("different session's entry must not be marked")
+	}
+	goodWarm := poolLaneByName(pool, "good").adapter.warm
+	for key, entry := range goodWarm.entries {
+		if !entry.suspectAt.IsZero() {
+			t.Fatalf("winner lane entry %v must stay armed", key)
+		}
+	}
+	// dead lane 的开流已 retain 本请求的 lineage（handler 错误以流内
+	// 首帧到达，开流级是成功）——swap 改绑把它与陈旧条目一起标掉，
+	// 共 2 条同会话孤儿。
+	if got := deadWarm.stats().FailoverSuspects; got != 2 {
+		t.Fatalf("FailoverSuspects = %d, want 2", got)
 	}
 }
 
@@ -999,7 +1079,7 @@ func TestPoolSessionBinding(t *testing.T) {
 	}
 
 	// lane 摘除清绑：b 从生效集退出后绑定不再指向它。
-	pool.bind("other-session", laneA)
+	pool.bind("other-session", laneA, "")
 	if _, err := pool.ApplyConfigs([]Config{{Identity: LaneIdentity{Name: "a", Token: "tok-a"}, Endpoint: Endpoint{BaseURL: srv.URL}, Model: "stub-model"}}); err != nil {
 		t.Fatalf("ApplyConfigs: %v", err)
 	}
@@ -1056,7 +1136,7 @@ func TestPoolInflightPin(t *testing.T) {
 	laneB.noteSuccess()
 
 	// 绑定恒赢于在飞钉选：绑 a 后 a 居首且记 bound。
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 	ranked = pool.rankLanes(context.Background(), lanes, affinity)
 	if ranked[0].lane != laneA || !ranked[0].bound || ranked[0].pinned {
 		t.Fatalf("bound must beat inflight pin, got %v bound=%v pinned=%v", ranked[0].lane.name, ranked[0].bound, ranked[0].pinned)
@@ -1150,7 +1230,7 @@ func TestPoolBoundLaneYieldsUnderGateLatch(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
 	laneA := poolLaneByName(pool, "a")
 	affinity := "yield-session"
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 
 	// a 的 gate 上闩：healthy() 为假但它仍 non-hardDown。
 	laneA.adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("reset in 1 minute")))
@@ -1190,7 +1270,7 @@ func TestPoolBoundLaneNoYieldWithoutBetterSibling(t *testing.T) {
 	laneA := poolLaneByName(pool, "a")
 	laneB := poolLaneByName(pool, "b")
 	affinity := "all-sick-session"
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 
 	err := connect.NewError(connect.CodeResourceExhausted, errors.New("reset in 1 minute"))
 	laneA.adapter.gate.noteUpstreamError(err)
@@ -1210,7 +1290,7 @@ func TestPoolBoundLaneYieldsOnDeepQueue(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
 	laneA := poolLaneByName(pool, "a")
 	affinity := "queue-yield-session"
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 
 	// 给 a 造 fg 深队：quota 80、waitersFg 100 → fg expectedWait ~75s。
 	gate := laneA.adapter.gate
@@ -1363,7 +1443,7 @@ func TestPoolRankLanesThreeZones(t *testing.T) {
 		t.Fatalf("higher priority must lead same bucket, got %v", ranked[0].lane.name)
 	}
 	// bound-hit 恒赢 priority：绑 a 后 a 仍居首。
-	pool.bind("zone-key", laneA)
+	pool.bind("zone-key", laneA, "")
 	ranked = pool.rankLanes(context.Background(), pool.snapshot(), "zone-key")
 	if ranked[0].lane != laneA || !ranked[0].bound {
 		t.Fatalf("bound-hit must beat priority, got %v", ranked[0].lane.name)

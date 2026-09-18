@@ -221,6 +221,9 @@ type WarmStats struct {
 
 	RetiredByCause        WarmRetiredStats `json:"retired_by_cause"`
 	PingMissPrefillTokens int64            `json:"ping_miss_prefill_tokens"`
+	// FailoverSuspects 累计因会话换 lane 被标 suspect 的条目数（现值
+	// 在 Suspects 里）。
+	FailoverSuspects int64 `json:"failover_suspects"`
 }
 
 // WarmRetiredStats 是退役条目的死因分账：Idle=静默超档限、
@@ -265,6 +268,10 @@ type cacheWarmer struct {
 	pingSkips     int64
 	pingErrors    int64
 	retired       int64
+	// failoverSuspects 累计因会话换 lane 被标 suspect 的条目数
+	//（suspectSession 的实绩账——与 RetiredByCause.Suspect 的退役账
+	// 对照能看出跨 lane 孤儿占 suspect 死因的比重）。
+	failoverSuspects int64
 	// retiredByCause 与 retired 同口径累加，按 removeLocked 调用方给
 	// 的死因分桶；pingMissPrefillTokens 累计 miss 轮次的前缀体量
 	// 估计（发送定影的 snap 口径）。
@@ -359,6 +366,28 @@ func (w *cacheWarmer) noteSend(key warmLineageKey) {
 	entry.lastTouch = now
 	entry.suspectAt = time.Time{}
 	entry.nextDue = w.dueAfterLocked(now)
+}
+
+// suspectSession 把本会话滞留本 lane 的全部条目标 suspect：号池把会话
+// 换到别的 lane 后，这些谱系已成跨 lane 孤儿——会话流量不再经过本
+// lane，烧 ping 续的锚谁也用不上，走 2×Interval 宽限退役而非骑满
+// maxIdle。已 suspect 的不重置计时（不续宽限）；会话若换回来，下一发
+// 真实上行（noteSend/retain）照常撤标记。无 SessionKey 时跳过：
+// sessionless 条目无法按会话归属区分，全组误标会把没搬走的旁人提前
+// 杀掉。
+func (w *cacheWarmer) suspectSession(sessionKey string) {
+	if sessionKey == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := w.now()
+	for _, entry := range w.entries {
+		if entry.key.SessionKey == sessionKey && entry.suspectAt.IsZero() {
+			entry.suspectAt = now
+			w.failoverSuspects++
+		}
+	}
 }
 
 // retain 在客户端请求的上游流成功打开后登记/刷新 retained。新建
@@ -456,6 +485,7 @@ func (w *cacheWarmer) stats() WarmStats {
 		Retired:               w.retired,
 		RetiredByCause:        w.retiredByCause,
 		PingMissPrefillTokens: w.pingMissPrefillTokens,
+		FailoverSuspects:      w.failoverSuspects,
 	}
 	for _, entry := range w.entries {
 		if !entry.suspectAt.IsZero() {
