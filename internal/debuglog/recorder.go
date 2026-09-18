@@ -1754,8 +1754,9 @@ func (recorder *Recorder) NoteDetachedEvent(kind string, detail map[string]any) 
 	}
 	event["kind"] = kind
 	event["time"] = at.Format(time.RFC3339Nano)
-	event["elapsed_ms"] = at.Sub(recorder.startedAt).Milliseconds()
 	recorder.mutex.Lock()
+	// startedAt 与 setStartedAt 的测试回拨共用一把锁（同 metaJSON 口径）。
+	event["elapsed_ms"] = at.Sub(recorder.startedAt).Milliseconds()
 	recorder.detachedEvents = append(recorder.detachedEvents, event)
 	recorder.mutex.Unlock()
 }
