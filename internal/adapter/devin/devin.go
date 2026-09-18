@@ -159,6 +159,10 @@ type Adapter struct {
 	// 20s 内 1.1 万次）。窗口内有旧缓存回旧值，否则回 modelsErr。
 	modelsRetryUntil time.Time
 	modelsErr        error
+	// modelsErrWarned 标记本次冷却窗的失败已告警：窗内每个
+	// ensureCatalog 调用方拿到同一 modelsErr，不记会按请求频率
+	// 刷屏；下一次拉取失败提交新冷却时重置（见 ListModels）。
+	modelsErrWarned bool
 	// modelsFetch 非 nil 表示有目录拉取在锁外进行中：等待者 select 该
 	// channel（吃自己的 ctx，断连可中途退出），拉取方提交缓存/冷却
 	// 之后 close 它，被唤醒方重走复查路径拿结果。
@@ -998,6 +1002,15 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 func (adapter *Adapter) ensureCatalog(ctx context.Context) {
 	// 调用方 ctx 已死（客户端断连/进程排空）时的失败是噪声不是信号。
 	if _, err := adapter.ListModels(ctx); err != nil && ctx.Err() == nil {
+		// 冷却窗内每个请求都拿到同一 modelsErr：告警按失败场次去重，
+		// 一场冷却只打一条，否则窗内时长等于按请求频率刷屏。
+		adapter.modelsMu.Lock()
+		if adapter.modelsErrWarned {
+			adapter.modelsMu.Unlock()
+			return
+		}
+		adapter.modelsErrWarned = true
+		adapter.modelsMu.Unlock()
 		slog.Warn("model catalog unavailable; router detection skipped", "error", err)
 	}
 }
@@ -1225,6 +1238,9 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 				}
 				a.modelsRetryUntil = time.Now().Add(backoff)
 				a.modelsErr = err
+				// 新一场失败冷却开启：告警去重标记清零，本场第一条
+				// ensureCatalog 告警仍会落盘（见 modelsErrWarned）。
+				a.modelsErrWarned = false
 			}
 			// 目录刷新失败但有旧缓存时回旧值：catalog 缺席会让面板与
 			// 能力位校验同时失去依据，比数据稍旧危害更大。
