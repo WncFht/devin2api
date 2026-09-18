@@ -144,12 +144,14 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	// 工具声明先于 input 解析：namespace 展平的双向映射既要在响应侧还原
 	// 带点全名，也要在本函数内回写历史 function_call 名与 tool_choice 指名。
 	nameMaps := &toolNameMaps{restore: map[string]string{}, flatten: map[string]string{}}
-	appendToolDefinitions(&context, request.Tools, "", "", nameMaps)
+	droppedTools := make(map[string]bool)
+	appendToolDefinitions(&context, request.Tools, "", "", nameMaps, droppedTools)
 	toolChoice, err := parseResponsesToolChoice(request.ToolChoice, &context, nameMaps)
 	if err != nil {
 		return AdaptedRequest{}, err
 	}
 	context.ToolChoice = toolChoice
+	common.DemoteDroppedToolChoice(&context, droppedTools)
 	if request.ParallelToolCalls != nil && !*request.ParallelToolCalls {
 		context.DisableParallelToolCalls = true
 	}
@@ -211,7 +213,9 @@ func (maps *toolNameMaps) wire(name string) string {
 // web_search* 是托管语义声明——落成带真实 Cascade schema 的 Server 诱饵，
 // 模型发出的调用由代理代调上游 GetWebSearchResults；其余服务端类型
 // （file_search/mcp/tool_search/computer_use_* 等）无桥接通道，记 dropped。
-func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefix, dottedPrefix string, nameMaps *toolNameMaps) {
+// dropped 收集被丢条目的全部可指名形态（展平名与带点全名），供
+// DecodeRequest 尾部的 DemoteDroppedToolChoice 判定「声明过但被丢」。
+func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefix, dottedPrefix string, nameMaps *toolNameMaps, dropped map[string]bool) {
 	// 先整层收集客户端声明名：web_search 诱饵的去重判定要查全表——同名
 	// function/custom 可能排在诱饵声明之后，只回扫已收录项会漏判，
 	// wire 上两个同名声明会被上游拒绝。
@@ -258,9 +262,15 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 			}
 			if namespace == "" || len(tool.Tools) == 0 {
 				context.Dropped = append(context.Dropped, "tool:namespace")
+				// 空壳 namespace 被整体丢弃：tool_choice 指名它本身时
+				// 按「声明过但被丢」降 auto，不吃指名校验的 400。
+				if namespace != "" {
+					dropped[flatPrefix+namespace] = true
+					dropped[dottedPrefix+namespace] = true
+				}
 				continue
 			}
-			appendToolDefinitions(context, tool.Tools, flatPrefix+namespace+"__", dottedPrefix+namespace+".", nameMaps)
+			appendToolDefinitions(context, tool.Tools, flatPrefix+namespace+"__", dottedPrefix+namespace+".", nameMaps, dropped)
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 			// 同名工具已在声明表时不叠加：客户端自实现的 web_search
 			// function 保持客户端语义，不被劫持为托管执行。占位进
@@ -279,6 +289,14 @@ func appendToolDefinitions(context *llm.RequestMessages, tools []Tool, flatPrefi
 			})
 		default:
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
+			// 无桥接通道的服务端类型整条丢弃：tool_choice 用
+			// {type:"function",name:X} 或带点全名指名它时按「声明过
+			// 但被丢」降 auto，不吃指名校验的 400。web_search 撞名
+			// 分支不在此记账——同名 function 幸存，名字仍可满足。
+			if tool.Name != "" {
+				dropped[flatPrefix+tool.Name] = true
+				dropped[dottedPrefix+tool.Name] = true
+			}
 		}
 	}
 }

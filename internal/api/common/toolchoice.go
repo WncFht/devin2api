@@ -94,6 +94,27 @@ func ParseAnthropicToolChoice(raw json.RawMessage) (*llm.ToolChoice, bool, error
 	return choice, object.DisableParallelToolUse || object.DisableParallelToolCalls, nil
 }
 
+// DemoteDroppedToolChoice 把指名了「已声明但被投影丢弃」工具的 tool_choice
+// 降为 auto：名字确实在声明表出现过（不是幻觉/拼错指名），只是类型在上游
+// 没有对应物——降级让模型在幸存工具里自选，比让「指名不存在的工具」400
+// 更接近客户端本意。同名条目幸存时不降（如 web_search 诱饵与同名 function
+// 并存：名字仍可满足）。从未声明过的名字不动，留给指名校验报错。
+// droppedTools 由各面 DecodeRequest 在投影声明时按 wire 名收集；anthropic
+// 面原本把同一判定内联在解码尾，这里统一共用。
+func DemoteDroppedToolChoice(context *llm.RequestMessages, droppedTools map[string]bool) {
+	choice := context.ToolChoice
+	if choice == nil || choice.Mode != llm.ToolChoiceNamed || !droppedTools[choice.ToolName] {
+		return
+	}
+	for _, tool := range context.Tools {
+		if tool.Name == choice.ToolName {
+			return
+		}
+	}
+	context.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
+	context.Dropped = append(context.Dropped, "tool_choice:"+choice.ToolName)
+}
+
 // NormalizeToolArguments 归一回放历史里的工具调用参数体：空串/null 吞成
 // {}（上游只认 JSON 对象）；非 JSON 对象原文（畸形 JSON、标量）标记 custom
 // 走 Custom 通道保真上行——吞成 {} 会让上游看到的调用语义悄悄变空。

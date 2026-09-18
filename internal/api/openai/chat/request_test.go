@@ -231,3 +231,63 @@ func TestDecodeRequestSkipsFieldScan(t *testing.T) {
 		t.Fatalf("collectDropped=false dropped = %v, want empty_message:user", withoutScan.Context.Dropped)
 	}
 }
+
+// TestDecodeRequestDemotesDroppedToolChoice 验证 openai 面与 anthropic 面
+// 同口径：tool_choice 指名「声明过但投影丢弃」的工具（非 function 类型
+// 条目）时降为 auto + 记 tool_choice:<name>，而不是让「指名不存在的
+// 工具」校验 400 掉整单；从未声明的名字保持指名留给下游报错。
+func TestDecodeRequestDemotesDroppedToolChoice(t *testing.T) {
+	tools := `"tools":[
+		{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}},
+		{"type":"web_search","name":"search_web"}
+	]`
+	base := `"model":"gpt-test","messages":[{"role":"user","content":"hi"}]`
+
+	// 声明过但被丢：指名降为 auto。
+	dropped, err := DecodeRequest([]byte(`{`+base+`,`+tools+`,
+		"tool_choice":{"type":"function","function":{"name":"search_web"}}}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped.Context.ToolChoice == nil || dropped.Context.ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Fatalf("dropped-name ToolChoice = %#v, want auto", dropped.Context.ToolChoice)
+	}
+	droppedMarkers := fmt.Sprint(dropped.Context.Dropped)
+	if !strings.Contains(droppedMarkers, "tool_choice:search_web") {
+		t.Fatalf("dropped = %v, want tool_choice:search_web", dropped.Context.Dropped)
+	}
+
+	// 同名指名经旧版 function_call 兜底进来同样降级。
+	legacy, err := DecodeRequest([]byte(`{`+base+`,`+tools+`,
+		"function_call":{"name":"search_web"}}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Context.ToolChoice == nil || legacy.Context.ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Fatalf("legacy function_call ToolChoice = %#v, want auto", legacy.Context.ToolChoice)
+	}
+
+	// 从未声明的名字：保持指名，交给指名校验报错。
+	ghost, err := DecodeRequest([]byte(`{`+base+`,`+tools+`,
+		"tool_choice":{"type":"function","function":{"name":"ghost_tool"}}}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ghost.Context.ToolChoice == nil ||
+		ghost.Context.ToolChoice.Mode != llm.ToolChoiceNamed ||
+		ghost.Context.ToolChoice.ToolName != "ghost_tool" {
+		t.Fatalf("never-declared ToolChoice = %#v, want named ghost_tool", ghost.Context.ToolChoice)
+	}
+
+	// 幸存工具：指名原样通过。
+	survived, err := DecodeRequest([]byte(`{`+base+`,`+tools+`,
+		"tool_choice":{"type":"function","function":{"name":"read_file"}}}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if survived.Context.ToolChoice == nil ||
+		survived.Context.ToolChoice.Mode != llm.ToolChoiceNamed ||
+		survived.Context.ToolChoice.ToolName != "read_file" {
+		t.Fatalf("surviving ToolChoice = %#v, want named read_file", survived.Context.ToolChoice)
+	}
+}

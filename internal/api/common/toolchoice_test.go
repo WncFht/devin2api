@@ -92,3 +92,48 @@ func TestParseAnthropicToolChoice(t *testing.T) {
 		t.Fatal("tool without name should error")
 	}
 }
+
+// TestDemoteDroppedToolChoice 覆盖指名降级判定的三条边界：声明过但被丢
+// → 降 auto + 记 dropped；同名条目幸存 → 指名仍可满足不动；从未声明
+// → 留在指名校验里报错。前两条差一分毫语义就反：surviving 扫描是
+// web_search 诱饵与同名 function 并存场景的保命线。
+func TestDemoteDroppedToolChoice(t *testing.T) {
+	named := &llm.ToolChoice{Mode: llm.ToolChoiceNamed, ToolName: "search"}
+	surviving := []llm.ToolDefinition{{Name: "search"}}
+
+	cases := []struct {
+		name       string
+		choice     *llm.ToolChoice
+		tools      []llm.ToolDefinition
+		dropped    map[string]bool
+		wantMode   llm.ToolChoiceMode
+		wantMarker string
+	}{
+		{"dropped name demotes", named, nil, map[string]bool{"search": true}, llm.ToolChoiceAuto, "tool_choice:search"},
+		{"same-name survivor keeps choice", named, surviving, map[string]bool{"search": true}, llm.ToolChoiceNamed, ""},
+		{"never-declared name stays", named, nil, nil, llm.ToolChoiceNamed, ""},
+		{"nil choice no-op", nil, nil, map[string]bool{"search": true}, "", ""},
+		{"non-named mode no-op", &llm.ToolChoice{Mode: llm.ToolChoiceNone}, nil, map[string]bool{"search": true}, llm.ToolChoiceNone, ""},
+	}
+	for _, c := range cases {
+		context := llm.RequestMessages{ToolChoice: c.choice, Tools: c.tools}
+		DemoteDroppedToolChoice(&context, c.dropped)
+		switch {
+		case context.ToolChoice == nil:
+			if c.wantMode != "" {
+				t.Fatalf("%s: ToolChoice demoted to nil, want mode %q", c.name, c.wantMode)
+			}
+		case context.ToolChoice.Mode != c.wantMode:
+			t.Fatalf("%s: mode = %q, want %q", c.name, context.ToolChoice.Mode, c.wantMode)
+		case c.wantMode == llm.ToolChoiceNamed && context.ToolChoice.ToolName != "search":
+			t.Fatalf("%s: named choice rewrote name to %q", c.name, context.ToolChoice.ToolName)
+		}
+		if c.wantMarker == "" {
+			if len(context.Dropped) != 0 {
+				t.Fatalf("%s: dropped = %v, want none", c.name, context.Dropped)
+			}
+		} else if len(context.Dropped) != 1 || context.Dropped[0] != c.wantMarker {
+			t.Fatalf("%s: dropped = %v, want [%s]", c.name, context.Dropped, c.wantMarker)
+		}
+	}
+}

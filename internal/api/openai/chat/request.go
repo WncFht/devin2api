@@ -68,7 +68,11 @@ type FunctionCall struct {
 
 // Tool 是 OpenAI Chat function 工具定义。
 type Tool struct {
-	Type     string       `json:"type"`
+	Type string `json:"type"`
+	// Name 是非 function 类型条目的扁平名（responses 形态借道 chat
+	// 端点的客户端会发 {"type":"custom","name":…}）；只用于「声明了
+	// 但被丢弃」记账，function 条目的名字仍在 Function.Name。
+	Name     string       `json:"name,omitempty"`
 	Function FunctionTool `json:"function"`
 }
 
@@ -192,9 +196,17 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if err := appendMessages(&context, request.Messages, callIDs, functionIDs); err != nil {
 		return AdaptedRequest{}, err
 	}
+	droppedTools := make(map[string]bool)
 	for _, tool := range request.Tools {
 		if tool.Type != "function" {
 			context.Dropped = append(context.Dropped, "tool:"+tool.Type)
+			// 声明了但被丢的条目记下名字：tool_choice 指名它时按
+			// 「我们自己丢的」降 auto，不该吃指名校验的 400。
+			for _, name := range []string{tool.Name, tool.Function.Name} {
+				if name != "" {
+					droppedTools[name] = true
+				}
+			}
 			continue
 		}
 		schema := tool.Function.Parameters
@@ -219,6 +231,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 			InputSchema: schema,
 		})
 	}
+	common.DemoteDroppedToolChoice(&context, droppedTools)
 	// 相邻 assistant 回合先合并（与 responses/anthropic 两面同走 IR 层
 	// 共享实现）：客户端发连续 assistant 消息时 wire 上的假回合边界会
 	// 抬高提前 EOS 概率。

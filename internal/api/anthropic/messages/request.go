@@ -179,10 +179,7 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	// 之外会被适配器按「指名不存在的工具」打 400，而客户端的本意只是
 	// 「用它声明过的搜索」——auto 保留模型在剩余工具里的选择权。从未
 	// 声明过的名字不降级，留给上游/适配器的指名校验报错。
-	if choice := context.ToolChoice; choice != nil && choice.Mode == llm.ToolChoiceNamed && droppedTools[choice.ToolName] {
-		context.ToolChoice = &llm.ToolChoice{Mode: llm.ToolChoiceAuto}
-		context.Dropped = append(context.Dropped, "tool_choice:"+choice.ToolName)
-	}
+	common.DemoteDroppedToolChoice(&context, droppedTools)
 	// 相邻 assistant 回合先合并（与 chat/responses 两面同走 IR 层共享
 	// 实现）：客户端发连续 assistant 消息时 wire 上的假回合边界会
 	// 抬高提前 EOS 概率。

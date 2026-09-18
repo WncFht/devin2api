@@ -666,3 +666,80 @@ func TestDecodeRequestPositionalToolResults(t *testing.T) {
 		t.Fatalf("positionally-consumable output was demoted: %#v", request.Context.Messages[2])
 	}
 }
+
+// TestDecodeRequestDemotesDroppedToolChoice 验证 responses 面与
+// anthropic 面同口径：tool_choice 指名「声明过但投影丢弃」的工具
+// （无桥接通道的服务端类型、空壳 namespace）时降为 auto + 记
+// tool_choice:<name>；web_search 诱饵被同名 function 挤掉时名字
+// 仍可满足不降；从未声明的名字保持指名留给下游报错。
+func TestDecodeRequestDemotesDroppedToolChoice(t *testing.T) {
+	base := `"model":"gpt-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`
+
+	cases := []struct {
+		name       string
+		tools      string
+		toolChoice string
+		wantMode   llm.ToolChoiceMode
+		wantName   string
+		wantMarker string
+	}{
+		{
+			// file_search 无桥接通道整条丢弃：function 形态指名它降 auto。
+			"dropped server tool",
+			`[{"type":"function","name":"read_file","parameters":{"type":"object"}},{"type":"file_search","name":"fs"}]`,
+			`{"type":"function","function":{"name":"fs"}}`,
+			llm.ToolChoiceAuto, "", "tool_choice:fs",
+		},
+		{
+			// namespace 内的不可桥接子工具：custom 形态指名合名后的
+			// 展平名同样命中 dropped 表。
+			"dropped nested tool",
+			`[{"type":"namespace","name":"ns","tools":[{"type":"file_search","name":"fs"}]}]`,
+			`{"type":"custom","name":"fs","namespace":"ns"}`,
+			llm.ToolChoiceAuto, "", "tool_choice:ns__fs",
+		},
+		{
+			// 空壳 namespace 整体丢弃：指名 namespace 本身降 auto。
+			"dropped empty namespace",
+			`[{"type":"namespace","name":"ns"}]`,
+			`{"type":"namespace","name":"ns"}`,
+			llm.ToolChoiceAuto, "", "tool_choice:ns",
+		},
+		{
+			// web_search 诱饵被客户端同名 function 挤掉：名字经幸存
+			// 条目仍可满足，指名不动。
+			"web_search name survives via client function",
+			`[{"type":"web_search"},{"type":"function","name":"web_search","parameters":{"type":"object"}}]`,
+			`{"type":"function","function":{"name":"web_search"}}`,
+			llm.ToolChoiceNamed, "web_search", "",
+		},
+		{
+			// 从未声明的名字：保持指名，交给指名校验报错。
+			"never-declared name stays",
+			`[{"type":"function","name":"read_file","parameters":{"type":"object"}}]`,
+			`{"type":"function","function":{"name":"ghost_tool"}}`,
+			llm.ToolChoiceNamed, "ghost_tool", "",
+		},
+	}
+	for _, c := range cases {
+		request, err := DecodeRequest([]byte(`{`+base+`,"tools":`+c.tools+`,"tool_choice":`+c.toolChoice+`}`), true)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		choice := request.Context.ToolChoice
+		if choice == nil || choice.Mode != c.wantMode || (c.wantName != "" && choice.ToolName != c.wantName) {
+			t.Fatalf("%s: ToolChoice = %#v, want mode=%q name=%q", c.name, choice, c.wantMode, c.wantName)
+		}
+		markers := fmt.Sprint(request.Context.Dropped)
+		if c.wantMarker != "" && !strings.Contains(markers, c.wantMarker) {
+			t.Fatalf("%s: dropped = %v, want %s", c.name, request.Context.Dropped, c.wantMarker)
+		}
+		if c.wantMarker == "" {
+			for _, marker := range request.Context.Dropped {
+				if strings.HasPrefix(marker, "tool_choice:") {
+					t.Fatalf("%s: unexpected tool_choice marker %q", c.name, marker)
+				}
+			}
+		}
+	}
+}
