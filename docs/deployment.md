@@ -1,5 +1,7 @@
 # 部署（launchd / systemd / 裸进程）
 
+当前生产拓扑（2026-09-18 起）：生产实例在 archbox 本机——systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac（fht-mba `:3003`）生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（fht-mba launchd `com.fanghaotian.devin-2api-forwarder` → `100.121.76.120:3033`；archbox systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。
+
 三平台拓扑——各平台按自己的目录规范分家（二进制 / 配置 / 状态日志三类不再同居一个运行目录）：
 
 | 平台    | 托管方式                                   | 二进制                                              | 配置                                                   | 状态/日志                                                                | 部署命令                     |
@@ -12,7 +14,7 @@
 
 三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `auth.api_key`/`dashboard.password`，tty 下提示粘贴 token）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
-另有开发机侧的远程驱动 `scripts/deploy-remote.sh`：免密 SSH 到部署目标（`DEVIN2API_HOST`，本机示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
+~~另有开发机侧的远程驱动 `scripts/deploy-remote.sh`~~（2026-09-18 退役，仅留档）：免密 SSH 到部署目标（`DEVIN2API_HOST`，原示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
 ## 跨平台共同约定
 
@@ -32,7 +34,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
        └─ $RT/logs/                       stdout.log（面板渲染等 fmt 输出）+ stderr.log（slog 进程日志）+ bind-failure.json
 ```
 
-**与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本是 `$RT` 里那份（live）：deploy-remote 各模式部署前把它刷进 staging 供 `deploy.sh` 预检读取，`install_binary` 只在 live 缺失时从仓库副本恢复、存在且不一致时保留 live 并告警。改配置直接编辑 `$RT/config.yaml` 后 `POST /admin/config/reload` 热应用；仅 `server.listen` 等冷键需 `launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
+**与仓库分离的平台目录**：launchd 拉起的进程对 TCC 保护目录（`~/Desktop`、`~/Documents` 等）的每次 `open()` 都会进入授权判定——未授权时内核挂起 syscall，表现为进程在 dyld/读 config 阶段永久卡死（授权还按 cdhash 记，每次重建二进制即失效）。`~/.local/bin` 与 `~/Library/Application Support` 都不受 TCC 保护：二进制入前者（可直接调用），配置与状态目录沿用后者不变（`os.UserConfigDir` 的 darwin 返回即 Application Support）。`config.yaml` 的权威副本是 `$RT` 里那份（live）：`install_binary` 只在 live 缺失时从仓库副本恢复、存在且不一致时保留 live 并告警（已退役的 deploy-remote 当年还在各模式部署前把它刷进 staging 供 `deploy.sh` 预检读取）。改配置直接编辑 `$RT/config.yaml` 后 `POST /admin/config/reload` 热应用；仅 `server.listen` 等冷键需 `launchctl kickstart -k gui/$(id -u)/com.$USER.devin-2api`。
 
 请求级 debug 日志的生命周期由 `debug.retention_days` / `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs` 自管；launchd 侧无需额外配置。
 

@@ -1,8 +1,8 @@
 # 客户端接入指南
 
-> 本文示例基于作者本机部署：`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3003(api_key)→ Devin 上游`。按自己的部署替换地址与凭据；ccload 的 token/渠道 id 是 ccload 侧的配置，不是本仓库的一部分。
+> 本文示例基于作者本机部署：`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3033(api_key)→ Devin 上游`。按自己的部署替换地址与凭据；ccload 的 token/渠道 id 是 ccload 侧的配置，不是本仓库的一部分。2026-09-18 起生产实例在 archbox 监听 `:3033`；各机 `:3003` 仍由转发 shim 兜住（见 deployment.md 拓扑注），旧写法照样通。
 
-所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3003`、key 换成任一有效下游令牌即可（默认 `config.yaml` 的 `auth.api_key` 已播种成一条普通令牌行）。
+所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3033`、key 换成任一有效下游令牌即可（默认 `config.yaml` 的 `auth.api_key` 已播种成一条普通令牌行）。
 
 ## Claude Code
 
@@ -149,4 +149,4 @@ codex exec -m swe-2-max-ws \
 - **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
 - **排查**:任何问题先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体),再开 devin-2api debug 看 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
 - **base URL 写 `http://[::1]:<port>` 最稳**：服务绑 `*`（IPv6 双栈 socket）时 `::1` 直连本机；`127.0.0.1` 会被 IDE 的 IPv4 端口转发静默 shadow（VS Code Remote-SSH autoForwardPorts 会把 loopback 绑成隧道，特征是 connect 成功但零字节——curl 000 而非 refused），`localhost` 则依赖 resolver 顺序可能先撞 v4 squatter。诊断与处置见 `upstream-debug-playbook.md` 运维坑节。
-- **跨机访问走 tailscale IP，不走 loopback 转发**：作者拓扑里生产实例在 fht-mba，archbox/其它机器经 `http://100.105.212.52:3003` 访问（本机示例，按自己的 tailnet 替换）。archbox 出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。
+- **跨机访问走 tailscale IP，不走 loopback 转发**：2026-09-18 起生产实例在 archbox，其它机器经 `http://100.121.76.120:3033` 访问（本机示例，按自己的 tailnet 替换）。旧地址 `http://100.105.212.52:3003` 由 fht-mba 上的 forwarder shim 继续转发到 archbox，存量配置不急着改。archbox 出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。

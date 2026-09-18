@@ -27,7 +27,7 @@ scripts/devin-pool-smoke.sh --config config.yaml   # 取首个 devin.accounts �
 
 冒烟只覆盖「坏号」这一失败形态；双活号上线后按下面核：
 
-1. 配置两条 `devin.accounts`（A 号字面 token、B 号 `credentials_file`），`deploy-remote.sh` 上线。
+1. 配置两条 `devin.accounts`（A 号字面 token、B 号 `credentials_file`），`deploy-linux.sh` 上线。
 2. 跑一段时间后 `sqlite3 <状态目录>/devin-2api.db "SELECT account, COUNT(*) FROM logs WHERE account!='' GROUP BY account"`——rendezvous 对均匀随机会话键近似均分，分布应大致一半一半。
 3. `quota_samples` 表每账号一条快照行（`account` 列区分），两号配额各自累计。
 4. `/admin/runtime-metrics` 的 `accounts` 段两号各自有 `gate`/`warm` 簿记；`runtime_state` 表按号分 `gate:<name>` 键。

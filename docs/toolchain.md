@@ -47,7 +47,7 @@ push 到 main 与 PR 触发。顶层 `permissions: contents: read`；`concurrenc
 - **actionlint**：workflow 文件自身 lint（钉 v1.7.12，shellcheck 查 run: 块内 bash）。
 - **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练。
 - **codegen-drift**：钉版 protoc + protoc-gen-go/connect-go 重跑生成 → `scripts/check-codegen.sh` 与提交的 `outputs/devin-proto-go` 逐字节比对，proto 源改了忘重新生成时拦下。
-- **darwin-smoke**（macos-latest）：生产宿主平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
+- **darwin-smoke**（macos-latest）：macOS 平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
 - **windows-smoke**（windows-latest）：全量测试 + 启动冒烟（healthz + `/v1/models` 空 token 502）；不验 SIGTERM 排空——Windows 优雅退出走 Ctrl+C/os.Interrupt，git-bash kill 是 TerminateProcess，无从断言。
 - **panel-verify**：`scripts/panel-verify` playwright 套件进 CI（临时实例 + 假上游凭据，不打真上游；firefox 浏览器按 package-lock 缓存）。
 - **lint-markdown**：`npm ci` → `format:check` + `lint:md`。
@@ -85,7 +85,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 ## 6. 部署脚本族 + 资产断言
 
 - `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
-- `scripts/deploy-remote.sh` 是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。
+- ~~`scripts/deploy-remote.sh`~~（2026-09-18 退役留档，运行即 exit 1）曾是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。生产迁 archbox 后部署唯一路径是 `scripts/deploy-linux.sh`。
 - `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。
 
@@ -107,7 +107,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 | `drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                       |
 | `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                |
 | `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/` |
-| `remote-logs.sh`                  | fht-mba 生产实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish                                                                                                                    |
+| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为 fht-mba 生产而写，生产已迁 archbox 本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具          |
 | `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可 `--host` 走 ssh                                                                                                                 |
 | `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                        |
 
@@ -126,8 +126,9 @@ scripts/release.sh                       # dry-run
 scripts/release.sh --publish             # VERSION 回写→等 CI 绿→打 tag
 bash scripts/release-selftest.sh         # 改 release.sh 后必跑
 
-# 部署与排障
-scripts/deploy.sh [--release vX.Y.Z]     # macOS 本机升级
-scripts/deploy-remote.sh [--check|--release vX.Y.Z]  # 从开发机驱动生产机部署
+# 部署与排障（生产 = archbox 本机 :3033）
+scripts/deploy-linux.sh [--release vX.Y.Z|--check]  # 生产部署唯一路径（零停机交接）
+scripts/deploy.sh [--release vX.Y.Z]     # macOS 本机升级（非生产拓扑）
+# scripts/deploy-remote.sh               # 2026-09-18 退役：运行即 exit 1，仅留档
 bash scripts/deploy-assets.test.sh       # 部署资产断言
 ```

@@ -157,22 +157,23 @@
 
 Mac 侧到 GitHub 的直连 SSH（22 与 ssh.github.com:443）被 GFW 注入 RST（对端伪地址 `2001:2::4`）；Mac `~/.ssh/config` 的 github.com 块已配 `ProxyCommand nc -X connect -x 127.0.0.1:7893 %h %p` 走 mihomo 混合端口——依赖 mihomo 在跑且选中节点可用，代理挂时退回 HTTPS origin + gh 凭据（`credential.https://github.com.helper`）。
 
-部署两跳，两机各一个实例：
+生产实例自 2026-09-18 起在 archbox 本机（开发与生产同机，Mac 实例已退役，全量 db 随迁移带过来）：
 
-- 生产实例在 Mac（fht-mba，archbox 经 tailscale 免密 ssh 可达）：从 archbox 用 `scripts/deploy-remote.sh` 一键驱动——默认 worktree 模式把本地工作树（含未提交改动）推到 Mac staging 构建部署；`--ref <ref>`（默认 origin/main）部署已推送状态、`--release <tag|latest>` 装预编译资产、`--check` 并排对比两实例版本。**Mac 端不留仓库 clone**——所有远端操作落 `~/.cache/devin-2api-staging`（tar 自带 .git，可随时重铺）；生产 config 权威副本是 live `~/Library/Application Support/devin-2api/config.yaml`。launchd `com.fanghaotian.devin-2api` :3003。**fht-mba 登录 shell 是 fish**：ad-hoc `ssh fht-mba 'VAR=x; for ...'` 一律语法炸（不认 `=` 赋值、heredoc、单行 for），远端命令统一 `ssh fht-mba bash -s <<'EOF' … EOF` 把脚本喂 stdin（`scripts/remote-logs.sh`、`scripts/repo-survey.sh` 内部就这么做）；另外 Mac 上递归 grep `~/.claude`/`~/.codex` 会超 120s 被挪后台，定点文件列表逐个查。
-- 验证实例在 archbox：`scripts/deploy-linux.sh` 维护的 systemd --user 服务（XDG 布局：二进制 `~/.local/bin`、config `~/.config/devin-2api`、状态与 logs `~/.local/state/devin-2api`），在 linux/amd64 上验行为与排障——两侧 deploy 脚本共享 `scripts/lib-deploy.sh`，语义一致。
+- archbox 生产实例：`scripts/deploy-linux.sh` 维护的 systemd --user 服务 `devin-2api.service`，监听 `:3033`（config 的 `server.listen`）。XDG 布局：二进制 `~/.local/bin/devin-2api`、权威 config `~/.config/devin-2api/config.yaml`、state 与 logs `~/.local/state/devin-2api/`（stderr/stdout.log 由 `devin-2api-logrotate.timer` 轮转）。上游 `server.codeium.com` 走 mihomo `DOMAIN-SUFFIX,codeium.com,DIRECTLY` 直连，不经代理。OOM 防护两层：earlyoom `--avoid` 名单收 `devin-2api`（`/etc/systemd/system/earlyoom.service.d/args.conf`——内存紧张期内核 OOM 曾一日三杀该服务），unit drop-in `oom-protect.conf` 把旧的 `OOMScoreAdjust=+200` 归零（user 服务写不了负值，earlyoom 名单才是真保护）。
+- Mac 实例已退役：launchd 任务已 bootout，plist/旧 db/logs 均已清理，`~/Library/Application Support/devin-2api/` 只剩 `config.yaml` 作回滚种子（回滚 = 仓库 `deploy.sh` 重装 + 客户端指回，不再有可 bootstrap 的现成 plist）。`scripts/deploy-remote.sh`（Mac 目标 worktree→staging 流程）同步退役、仅留档——`~/.cache/devin-2api-staging` 不再使用。Mac 端运维备忘仍有效：**fht-mba 登录 shell 是 fish**，ad-hoc `ssh fht-mba 'VAR=x; for ...'` 一律语法炸，远端命令统一 `ssh fht-mba bash -s <<'EOF' … EOF`；Mac 上递归 grep `~/.claude`/`~/.codex` 超 120s 会被挪后台，定点文件列表逐个查。
+- `:3003` 端点由两台转发 shim 继续兜住（下游零改动）：fht-mba 上 launchd `com.fanghaotian.devin-2api-forwarder`（`~/.local/bin/devin-2api-forwarder.py`）绑 `*:3003` → `100.121.76.120:3033`，loopback/tailnet/LAN 入向全覆盖；archbox 上 systemd --user `devin-2api-compat-3003.service`（`~/.local/bin/tcp-forwarder.py`）绑 `:3003` → `127.0.0.1:3033`，兜本机陈旧配置。两者都不带 SO_REUSEPORT（绝不与真实例共绑），后端拨号重试 90s 扛目标重启；脚本与两端 unit 模板收在 `scripts/compat-forwarder/`。
 
 ## 部署（单实例约定）
 
-本机只维护一个实例：launchd 用户代理 `com.$USER.devin-2api` 监听 :3003（config 的 `server.listen`，作者本机取值），plist 与原理见 docs/deployment.md。
+本机（archbox）只维护一个实例：systemd --user 服务 `devin-2api.service` 监听 :3033（config 的 `server.listen`），unit 与原理见 docs/deployment.md。
 
-- 启停一律经 launchd；部署统一 `scripts/deploy.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/Library/Application Support/devin-2api/` → reuseport 交接进程预接管 → `kickstart -k` → 托管新实例拉起后退交接 → healthz 校验版本）。
-- macOS 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 与 logs/ 在 `~/Library/Application Support/devin-2api/`（TCC 保护目录之外——launchd 子进程对 ~/Desktop 的 open 会被授权判定永久挂起）。仓库 `logs/` 是指向该目录的符号链接，排障路径照旧。stderr/stdout.log 由部署装上的每日轮转管（copytruncate ≥50MB、留 `.1`–`.3.gz`；launchd `com.$USER.devin-2api.logrotate` agent，Linux 对应 `devin-2api-logrotate.timer`）。
-- **不要手动跑 `./devin-2api` 占端口**：KeepAlive 会与手动实例互抢 :3003，交替时全部在途流被掐。
-- 优雅是硬要求：重启只发 SIGTERM（`kickstart -k`，`ExitTimeOut=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy.sh` 的 reuseport 重叠交接才是零停机；直接 `kickstart -k` 时排空期新连接是 refused。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
+- 启停一律经 systemd；部署统一 `scripts/deploy-linux.sh`（构建 → 装入 `~/.local/bin` 并同步 config 到 `~/.config/devin-2api/` → reuseport 交接进程预接管 → `systemctl --user restart` → 托管新实例拉起后退交接 → healthz 校验版本）。
+- Linux 布局：二进制 `~/.local/bin/devin-2api`，config.yaml 在 `~/.config/devin-2api/`、state 与 logs/ 在 `~/.local/state/devin-2api/`（XDG 三目录）。stderr/stdout.log 由 `devin-2api-logrotate.timer` 每日轮转（copytruncate ≥50MB、留 `.1`–`.3.gz`）。macOS 对应布局语义一致（launchd `com.$USER.devin-2api`、config 与 logs 在 `~/Library/Application Support/devin-2api/`）——平台支持仍在（`scripts/deploy.sh`），但 Mac 生产实例已退役。
+- **不要手动跑 `./devin-2api` 占端口**：Restart=always 会与手动实例互抢 :3033，交替时全部在途流被掐。
+- 优雅是硬要求：重启只发 SIGTERM（`TimeoutStopSec=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy-linux.sh` 的 reuseport 重叠交接才是零停机；直接 `systemctl --user restart` 时排空期新连接是 refused（reuseport 实例 drain 即关 listener）。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
 - 冒烟用 `scripts/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
-- 多个会话可能共用同一工作树：`deploy-remote.sh` 的 worktree 模式把工作树整体打包（git 视角：tracked 含脏改 + **未跟踪非忽略文件**也进 tar，即他人未提交 WIP 与本地新脚本原样上生产），脏树部署前先确认树上文件的归属与可编译性。
+- 多个会话可能共用同一工作树：`deploy-linux.sh` 构建的就是工作树现状（tracked 含脏改 + **未跟踪非忽略文件**，即他人未提交 WIP 与本地新脚本原样上生产），脏树部署前先确认树上文件的归属与可编译性。
 - `pkill -f <pattern>` 的模式会匹配发起者自己的 shell 命令行 → 整条 shell 被杀（exit 144，踩过多次）。用自排除正则（`pkill -f 'devin-2api-v[0-9]'`、`pkill -f 'state-dir /tmp/d2api-[0-9]'`——`[0-9]`/`[.]` 字面不匹配模式串自身）或先 `pgrep` 拿 pid 再 `kill -TERM`。
 - 提交/部署命令不要把 `cmd | tail` 接进 `&&` 链：管道洗掉退出码，曾把「nothing to commit」当成可重试错误反复触发部署（25 分钟 20+ 次生产重启）。
 
