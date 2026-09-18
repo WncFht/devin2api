@@ -76,10 +76,13 @@ type Handler struct {
 
 	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
 	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
-	// 记最近一次请求的周期，供设置页回读。
+	// 记最近一次请求的周期，供设置页回读；quotaDrained 是 BeginDrain
+	// 置位的排空闩——置位后 SetQuotaInterval 只记账不再重起协程，
+	// 排空窗口内的 reload/设置写入不能把采样重新武装。
 	quotaMu       sync.Mutex
 	quotaCancel   context.CancelFunc
 	quotaInterval time.Duration
+	quotaDrained  bool
 	// quotaUserMu/quotaUsers 是最近一次逐号配额采样顺带取回的账号
 	// 身份快照（按账号名索引）：只活内存、随采样周期刷新，重启后
 	// 首个采样点落盘前缺席——lane 名是主键，身份只是易读别名。

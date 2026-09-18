@@ -50,7 +50,9 @@ func (h *Handler) statusSnapshot(ctx context.Context) map[string]any {
 
 // SetQuotaInterval 设定后台配额采样周期；interval<=0 或持久层未注入时
 // 停采。可被重复调用（配置 reload 热路径）：cancel 旧协程按新间隔重起，
-// 变更点多采一个点——无害，反而给曲线留了变更标记。
+// 变更点多采一个点——无害，反而给曲线留了变更标记。BeginDrain 置位
+// 排空闩后本函数退化为纯簿记：quotaInterval 照常记录请求值，协程
+// 不再重起。
 // 采样失败只记一行进程日志，不影响面板与请求链路。
 func (h *Handler) SetQuotaInterval(interval time.Duration) {
 	h.quotaMu.Lock()
@@ -62,7 +64,7 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 		h.quotaCancel()
 		h.quotaCancel = nil
 	}
-	if interval <= 0 || h.store == nil {
+	if interval <= 0 || h.store == nil || h.quotaDrained {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -94,10 +96,13 @@ func (h *Handler) QuotaInterval() time.Duration {
 // 停掉配额采样协程——采样每轮对每个 lane 打一次上游并写 quota_samples，
 // 是排空语义「不再制造新上游工作」该收的后台生产者；在途轮次随 ctx
 // 取消收束。只停协程不动 quotaInterval 簿记：进程随即退出，生效值
-// 回读仍应反映配置而非「被排空归零」。幂等。
+// 回读仍应反映配置而非「被排空归零」。幂等。quotaDrained 闩置位后
+// 不可逆：排空窗口内的 config reload 与设置写入仍走 SetQuotaInterval，
+// 闩保证它们只记账、不把已收束的上游生产者重新武装。
 func (h *Handler) BeginDrain() {
 	h.quotaMu.Lock()
 	defer h.quotaMu.Unlock()
+	h.quotaDrained = true
 	if h.quotaCancel != nil {
 		h.quotaCancel()
 		h.quotaCancel = nil

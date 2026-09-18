@@ -323,6 +323,41 @@ func TestQuotaAccountsStates(t *testing.T) {
 	}
 }
 
+// TestSetQuotaIntervalAfterDrain 验证排空闩：BeginDrain 置位后
+// SetQuotaInterval 只更新 quotaInterval 簿记、不再重起采样协程——
+// 排空窗口内的 config reload 与设置写入都经 SetQuotaInterval，闩缺席
+// 时它们会把已收束的上游生产者重新武装。
+func TestSetQuotaIntervalAfterDrain(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	// 空池接线：协程起跑即取账号清单，空清单让它空转待机——不触上游、
+	// 不落样本，quotaCancel 是否非 nil 即「协程是否活着」的判定面。
+	h := &Handler{store: st, poolTokenFuncs: func() map[string]func() string { return nil }}
+
+	h.SetQuotaInterval(time.Minute)
+	h.quotaMu.Lock()
+	armed := h.quotaCancel != nil
+	h.quotaMu.Unlock()
+	if !armed {
+		t.Fatal("sampler not armed after SetQuotaInterval")
+	}
+
+	h.BeginDrain()
+	h.SetQuotaInterval(2 * time.Minute)
+	h.quotaMu.Lock()
+	rearmed := h.quotaCancel != nil
+	h.quotaMu.Unlock()
+	if rearmed {
+		t.Fatal("sampler re-armed after drain")
+	}
+	if got := h.QuotaInterval(); got != 2*time.Minute {
+		t.Fatalf("QuotaInterval = %v, want 2m (bookkeeping still records)", got)
+	}
+}
+
 // newQuotaTestHandler 搭一个指向 httptest 假上游、带真 store 的
 // Handler，供刷新/采样链路测试。
 func newQuotaTestHandler(t *testing.T, srv *httptest.Server) *Handler {
