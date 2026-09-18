@@ -1068,7 +1068,7 @@ func TestPoolSessionBinding(t *testing.T) {
 	}
 
 	// 冷却结束且 b 重新产出内容 → 换号接管语义下重新绑定。
-	laneB.noteSuccess()
+	laneB.noteSuccess(time.Now())
 	stream, err = pool.Stream(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Stream after cooldown: %v", err)
@@ -1178,7 +1178,7 @@ func TestPoolInflightPin(t *testing.T) {
 	if ranked[0].lane == laneB || ranked[0].pinned {
 		t.Fatalf("hardDown inflight lane must not be pinned, got %v", ranked[0].lane.name)
 	}
-	laneB.noteSuccess()
+	laneB.noteSuccess(time.Now())
 
 	// 绑定恒赢于在飞钉选：绑 a 后 a 居首且记 bound。
 	pool.bind(affinity, laneA, "")
@@ -1602,7 +1602,7 @@ func TestPoolFailureBackoff(t *testing.T) {
 	}
 	// 成功清账：归零连败、两档冷却与判死键。
 	lane.noteFailure(unauthenticatedErr())
-	lane.noteSuccess()
+	lane.noteSuccess(time.Now())
 	lane.authMu.Lock()
 	clean := lane.failStreak == 0 && lane.badTokenHash == "" && lane.badUntil.IsZero() && lane.unhealthyUntil.IsZero()
 	lane.authMu.Unlock()
@@ -1708,6 +1708,46 @@ func TestPoolNoteFailureExemptions(t *testing.T) {
 		t.Fatal("canceled must not record failure evidence on a clean lane")
 	}
 	fresh.authMu.Unlock()
+}
+
+// 清账门槛「证据新于债」：laneStart 早于 debtSetAt 的成功是债设立前
+// 已发出的在飞请求——只证明故障前 lane 能发，账目原样保留；债后新
+// 发起的发送成功才算恢复证据，连败、两档冷却与判死键一并清零。
+func TestPoolNoteSuccessRequiresPostDebtSend(t *testing.T) {
+	lane, err := newPoolLane(testPoolConfig("x"))
+	if err != nil {
+		t.Fatalf("newPoolLane: %v", err)
+	}
+	t.Cleanup(lane.adapter.Close)
+
+	lane.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+	lane.noteFailure(unauthenticatedErr())
+
+	// 陈旧臂：债前在飞成功不动账——两档冷却、判死键、连败与落债钟全留。
+	lane.noteSuccess(time.Now().Add(-time.Minute))
+	lane.authMu.Lock()
+	intact := lane.failStreak > 0 && lane.badTokenHash != "" &&
+		!lane.badUntil.IsZero() && !lane.unhealthyUntil.IsZero() && !lane.debtSetAt.IsZero()
+	lane.authMu.Unlock()
+	if !intact {
+		t.Fatal("stale in-flight success must leave lane debt intact")
+	}
+	if !lane.genericCooldown() || !lane.authCooldown() {
+		t.Fatal("stale success must leave both cooldown gates engaged")
+	}
+
+	// 债后臂：新发送成功清账——字段与落债钟归零。
+	lane.noteSuccess(time.Now().Add(time.Minute))
+	lane.authMu.Lock()
+	clean := lane.failStreak == 0 && lane.badTokenHash == "" &&
+		lane.badUntil.IsZero() && lane.unhealthyUntil.IsZero() && lane.debtSetAt.IsZero()
+	lane.authMu.Unlock()
+	if !clean {
+		t.Fatal("post-debt success must clear streak, cooldowns and bad-token mark")
+	}
+	if lane.genericCooldown() {
+		t.Fatal("post-debt success must release generic cooldown")
+	}
 }
 
 // 池侧冷却持久化：noteFailure 写 poolcool:<name> 行；lane 重建（模拟

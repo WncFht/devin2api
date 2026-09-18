@@ -132,7 +132,7 @@ type inflightPin struct {
 // 标记，authCooldown 惰性解禁），lastFailure* 是最近一次换号失败的
 // 归因（冷却期外也保留——冷却只压重试，失败史是排障证据），
 // failStreak 是连败计数（退避升档与 LaneState 透出用），authMu
-// 保护这五组字段。
+// 保护这六组字段。
 type poolLane struct {
 	name    string
 	adapter *Adapter
@@ -143,8 +143,13 @@ type poolLane struct {
 	// unhealthyUntil 是非凭据类失败的短冷却截止（genericLaneCooldown
 	// 起档按 failStreak 退避）；与 badToken 冷却不同键：不看 token
 	// 换没换，到点自然解封。
-	unhealthyUntil     time.Time
-	failStreak         int
+	unhealthyUntil time.Time
+	failStreak     int
+	// debtSetAt 是最近一次落债（noteFailure 写两档冷却）的时刻：
+	// noteSuccess 清账只认债后发起的发送（laneStart 晚于它）——债设立
+	// 前已在飞的请求即便成功，证明的也是故障前 lane 能发而非故障后恢复。
+	// 不持久化：重启后在飞全灭，任何新发送天然晚于旧债，零值即正确。
+	debtSetAt          time.Time
 	lastFailureAt      time.Time
 	lastFailureCode    string
 	lastFailureMessage string
@@ -404,9 +409,10 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 			default:
 				if !s.committed {
 					// 首个内容事件才是 lane 可用的真实证据（死 token
-					// lane 开流也"成功"）——成功清账以内容到达为准；
-					// 同点采 TTFB 样本喂选号的相对中位权重。
-					s.lane.noteSuccess()
+					// lane 开流也"成功"）——成功清账以内容到达为准，
+					// 且只认 laneStart 晚于落债的债后发送；同点采
+					// TTFB 样本喂选号的相对中位权重。
+					s.lane.noteSuccess(s.laneStart)
 					s.lane.noteTTFB(time.Since(s.laneStart))
 				}
 				s.committed = true
@@ -921,6 +927,9 @@ func (lane *poolLane) noteFailure(err error) {
 		return
 	}
 	now := time.Now()
+	// 落债时刻：以下两档分支都会写实债（LocalGate 已在上方早退，
+	// 只记证据不动此钟）。清账门槛以它区分「债后探针」与「在飞陈旧」。
+	lane.debtSetAt = now
 	if failure.Code == "unauthenticated" {
 		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
 		if !now.Before(lane.badUntil) {
@@ -953,17 +962,26 @@ func (lane *poolLane) noteFailure(err error) {
 }
 
 // noteSuccess 在 lane 产出内容后清账：连败归零、两档冷却与判死键一并
-// 清掉——真恢复不需要等冷却自然到期。持久行同步删除：成功已证 lane
-// 可用，重启后不该复活一笔已被清掉的旧账。常态路径（本就无账）是纯
-// 内存快路径，不碰状态库。
-func (lane *poolLane) noteSuccess() {
+// 清掉——真恢复不需要等冷却自然到期。清账门槛是「证据新于债」：
+// laneStart（本尝试选定 lane 的发送时刻）必须晚于最近一次落债时刻
+// debtSetAt；早于它的成功来自债设立前已发出的在飞请求，证明的是故障
+// 前 lane 能发而非故障后恢复，账目原样保留等真探针或自然到期。持久行
+// 同步删除走同一条件：成功已证 lane 可用，重启后不该复活一笔已被清掉
+// 的旧账。常态路径（本就无账，debtSetAt 零值恒过闸）是纯内存快路径，
+// 不碰状态库。
+func (lane *poolLane) noteSuccess(laneStart time.Time) {
 	lane.authMu.Lock()
+	if !laneStart.After(lane.debtSetAt) {
+		lane.authMu.Unlock()
+		return
+	}
 	settled := lane.failStreak > 0 || lane.badTokenHash != "" ||
 		!lane.badUntil.IsZero() || !lane.unhealthyUntil.IsZero()
 	lane.failStreak = 0
 	lane.badTokenHash = ""
 	lane.badUntil = time.Time{}
 	lane.unhealthyUntil = time.Time{}
+	lane.debtSetAt = time.Time{}
 	lane.authMu.Unlock()
 	if settled {
 		lane.deleteCooldownState()
@@ -1301,9 +1319,10 @@ func (pool *Pool) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	ordered = append(ordered, unhealthy...)
 	var lastErr error
 	for _, lane := range ordered {
+		laneStart := time.Now()
 		models, err := lane.adapter.ListModels(ctx)
 		if err == nil {
-			lane.noteSuccess()
+			lane.noteSuccess(laneStart)
 			return models, nil
 		}
 		lastErr = err
@@ -1564,6 +1583,7 @@ func (pool *Pool) ClearCooldown(name string) bool {
 		lane.badUntil = time.Time{}
 		lane.unhealthyUntil = time.Time{}
 		lane.failStreak = 0
+		lane.debtSetAt = time.Time{}
 		lane.authMu.Unlock()
 		lane.deleteCooldownState()
 		return true
