@@ -1983,7 +1983,11 @@ func (p protoJSON) MarshalJSON() ([]byte, error) { return protojson.Marshal(p.me
 // nil 接收者安全。message 在全部调用点都已保证非空。
 func recordProtoJSON(recorder *debuglog.Recorder, name string, message proto.Message) {
 	if strings.HasSuffix(name, ".jsonl") {
-		recorder.AppendValueJSONL(name, protoJSON{message})
+		// JSONL 阶段文件的帧行走 JSONLRecord 信封（event="frame"）：
+		// seq/elapsed_ms 给每帧本地到达序与时标——帧间隔重建不再依赖
+		// 帧内上游 timestamp（~±0.1s 偏移），pre-frame0 截断也能从
+		// 「有帧行/无帧行」直接判读。
+		recorder.AppendJSONL(name, "frame", protoJSON{message})
 		return
 	}
 	recorder.WriteJSON(name, protoJSON{message})

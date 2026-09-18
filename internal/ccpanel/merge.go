@@ -86,8 +86,9 @@ func mergeResponseBody(raw string) mergedResponseParts {
 		}
 	}
 
-	// 04-devin-response.jsonl 这类逐行 JSON 记录：每行一个独立帧，
-	// 簿记行（{seq,time,event,data}）没有 collector 认的键，自然跳过。
+	// 04-devin-response.jsonl 这类逐行 JSON 记录：每行一个独立帧或
+	// 簿记行（{seq,time,event,data} 信封）；帧行 event="frame" 的
+	// protojson 在 data 内，簿记行没有 collector 认的键自然跳过。
 	if strings.Contains(body, "\n") {
 		for line := range strings.Lines(body) {
 			line = strings.TrimSpace(line)
@@ -96,6 +97,9 @@ func mergeResponseBody(raw string) mergedResponseParts {
 			}
 			var frame map[string]any
 			if json.Unmarshal([]byte(line), &frame) == nil {
+				if data, ok := frame["data"].(map[string]any); ok && frame["event"] == "frame" {
+					frame = data
+				}
 				builder.collectPayload(frame)
 			}
 		}

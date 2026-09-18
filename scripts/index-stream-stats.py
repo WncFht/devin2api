@@ -113,7 +113,11 @@ def main():
                 for line in chunks4[d].splitlines():
                     if '"deltaToolCalls"' not in line:
                         continue
-                    for tc in json.loads(line).get("deltaToolCalls", []):
+                    row = json.loads(line)
+                    # 帧行信封 {seq,event:"frame",data:{protojson}}；旧格式裸 protojson
+                    if isinstance(row.get("data"), dict) and row.get("event") == "frame":
+                        row = row["data"]
+                    for tc in row.get("deltaToolCalls", []):
                         if tc.get("name"):
                             tools.append(tc["name"])
                             cur = tc["name"]

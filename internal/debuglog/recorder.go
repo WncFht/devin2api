@@ -1714,20 +1714,6 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	recorder.mutex.Unlock()
 }
 
-// AppendValueJSONL 将一个结构化值直接追加为 JSONL 行，不添加事件信封。
-// value 可为 func() any 延迟求值（语义见 evalDeferred）。
-func (recorder *Recorder) AppendValueJSONL(name string, value any) {
-	if recorder == nil || !validLogName(name, ".jsonl") {
-		return
-	}
-	recorder.enqueue(func() {
-		data := recorder.sanitizeJSON(evalDeferred(value))
-		recorder.pushInsert(func() {
-			recorder.appendJSONL(name, data)
-		})
-	})
-}
-
 // WriteError 写入请求失败的阶段和错误摘要；只保留首个错误。
 // stage/message 在调用时同步抢占（first-write-wins）——调用方紧接着
 // 就能经 FirstError 读到归原点；error.json 落库仍在写 worker 内去重，
