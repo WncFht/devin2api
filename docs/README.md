@@ -18,12 +18,13 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 排障与接入
 
-| 文档                         | 用途                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ |
-| `upstream-debug-playbook.md` | 排障手册：错误速查表、标准排查流程、已验证 wire 契约、新客户端验证清单、运维坑                   |
-| `client-setup.md`            | 各客户端接入配置（CC / pi / kimi-code / Codex，含 Codex WS 链路）与权限模式                      |
-| `harness-verification.md`    | 各 harness 验证矩阵（单轮/多轮/工具/图像/并发/缓存/thinking/压缩）与踩坑记录                     |
-| `pool-e2e.md`                | 号池端到端冒烟：`devin-pool-smoke.sh` 一好一坏双 lane 验证钉选/换号/归因，双真实账号上线核对清单 |
+| 文档                         | 用途                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `upstream-debug-playbook.md` | 排障手册：错误速查表、标准排查流程、已验证 wire 契约、新客户端验证清单、运维坑                                |
+| `client-setup.md`            | 各客户端接入配置（CC / pi / kimi-code / Codex，含 Codex WS 链路）与权限模式                                   |
+| `harness-verification.md`    | 各 harness 验证矩阵（单轮/多轮/工具/图像/并发/缓存/thinking/压缩）与踩坑记录                                  |
+| `pool-e2e.md`                | 号池端到端冒烟：`devin-pool-smoke.sh` 一好一坏双 lane 验证钉选/换号/归因，双真实账号上线核对清单              |
+| `quota-gate.md`              | 闸门/配额/换号/CAS 账本口径：哪张表记什么、单位陷阱（拒绝 vs logs 行、幻影换号、残差档位）与 sqlite3 查询配方 |
 
 ## 部署与工程
 
@@ -43,6 +44,7 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 - `permission_denied` + content policy → `upstream-policy-fingerprints.md`
 - feature 没生效（工具不调用/内容丢失）→ 指纹文档 + playbook「已验证 wire 契约」
 - 上游 429 频发 → `upstream-rate-limit.md`（模型）+ `rategate.go`（实现）
+- 拒绝率/换号率/放大系数怎么算 → `quota-gate.md`（账本口径与单位陷阱）
 - 发版/格式化/CI → `toolchain.md`
 - 延迟异常/吞吐瓶颈 → `perf.md`（剖析工具链）+ 该请求 `meta.json` 延迟分解字段（`/admin/debug-logs/{id}/file/meta.json`）
 - subagent 等待后首轮冷 prefill → `upstream-cache.md`「前缀保温」节 + `/admin/runtime-metrics` 的 warm 段
