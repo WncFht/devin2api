@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/WncFht/devin2api/internal/store"
 )
@@ -24,9 +25,18 @@ type Entry struct {
 	Disabled      bool
 }
 
+// storeOpTimeout 是注册表同步写库的上限，口径同 debuglog 请求路径的
+// reqStoreOpTimeout：单写连接被容量清理类事务独占可达分钟级，无界等待
+// 会把一次可重试的管理操作放大成挂起的 HTTP 处理与 writeMu 队首堵塞。
+const storeOpTimeout = 5 * time.Second
+
 // Store 管理 model_registry 表与内存覆盖表；管理操作写穿透入库（低频），
 // /v1 准入路径的 Lookup 纯走内存。
 type Store struct {
+	// writeMu 串行化 Set/Delete 全程（键决议 → 写库 → 改内存）：写库不持
+	// entries 锁，靠它挡住第二个写者插进键决议与落库之间——否则大小写
+	// 变体会在表与内存里各并存一行。锁序固定 writeMu → mu，读路径不碰它。
+	writeMu sync.Mutex
 	mu      sync.RWMutex
 	st      *store.Store
 	entries map[string]Entry
@@ -83,7 +93,8 @@ func (s *Store) Lookup(name string) (Entry, bool) {
 // 表内键（保留注册时的大小写）。entries 键、SQLite TEXT 等值都是大小写
 // 敏感比较，写路径必须经过它归键——否则 Set("Claude-X") 后
 // Delete("claude-x") 两侧都删不掉，重置静默空转而模型保持停用。
-// 调用方须持锁。
+// 调用方须持 s.mu（读或写）；写路径另须持 writeMu，使归键结果到
+// 落库/改内存之间不被第二个写者作废。
 func (s *Store) foldKey(name string) (string, bool) {
 	if _, ok := s.entries[name]; ok {
 		return name, true
@@ -98,53 +109,69 @@ func (s *Store) foldKey(name string) (string, bool) {
 
 // Set 覆盖写一条注册项并入库；项退化为全默认（启用且无重定向）时自动
 // 删除——表只承载非默认覆盖，PUT 传默认值即等价于重置。先写库后改
-// 内存：写失败时两侧一致保持旧值。
+// 内存：写失败时两侧一致保持旧值。写库在 entries 锁外进行——写连接
+// stall 只拖住本次管理操作，/v1 准入的 Lookup 读锁不被波及。
 func (s *Store) Set(name string, e Entry) error {
 	name, e, err := normalize(name, e)
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
 	// 已存在大小写变体时沿用其键：不然同一模型会并存两行覆盖，
 	// 折叠命中退化成 map 遍历顺序抽签。
 	if key, ok := s.foldKey(name); ok {
 		name = key
 	}
+	s.mu.RUnlock()
+	ctx, cancel := context.WithTimeout(context.Background(), storeOpTimeout)
+	defer cancel()
 	if !e.Disabled && e.RedirectModel == "" {
-		if err := s.st.DeleteModel(context.Background(), name); err != nil {
+		if err := s.st.DeleteModel(ctx, name); err != nil {
 			return err
 		}
+		s.mu.Lock()
 		delete(s.entries, name)
+		s.mu.Unlock()
 		return nil
 	}
-	if err := s.st.SetModel(context.Background(), store.ModelEntry{
+	if err := s.st.SetModel(ctx, store.ModelEntry{
 		Model:         name,
 		RedirectModel: e.RedirectModel,
 		Disabled:      e.Disabled,
 	}); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.entries[name] = e
+	s.mu.Unlock()
 	return nil
 }
 
 // Delete 移除覆盖；不存在时按成功处理（幂等删除）。键口径同 Lookup
 // （见 foldKey）；入名先过 normalize——带首尾空白的名字同样是删不掉的变体。
+// 锁外写库的理由同 Set。
 func (s *Store) Delete(name string) error {
 	name, _, err := normalize(name, Entry{})
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.mu.RLock()
 	if key, ok := s.foldKey(name); ok {
 		name = key
 	}
-	if err := s.st.DeleteModel(context.Background(), name); err != nil {
+	s.mu.RUnlock()
+	ctx, cancel := context.WithTimeout(context.Background(), storeOpTimeout)
+	defer cancel()
+	if err := s.st.DeleteModel(ctx, name); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	delete(s.entries, name)
+	s.mu.Unlock()
 	return nil
 }
 
