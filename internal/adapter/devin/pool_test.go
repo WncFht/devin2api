@@ -1670,11 +1670,11 @@ func TestPoolRankLanesTTFBWeight(t *testing.T) {
 	}
 }
 
-// 让位端到端：绑定 lane 桶满时闸门按 yield 快败把请求交给兄弟
-// lane——绑定让饱和 lane 留在粘性区首位（bucket 病档压不过 bound），
-// 正是被吸收换号税的现场；无让位时 bg 请求会在 a 上睡到下一窗口
-// （~52s < bgMaxHold）再被放行，把同一结局推迟一个排队预算。a 的
-// chat 计数为 0 证明换号发生在本地快败（幻影换号，零上游发送）。
+// 让位端到端：在飞钉选的 lane 桶满时闸门按 yield 快败把请求交给兄弟
+// lane——钉选 lane 恒居候选首位（排序期让位只摘 bound 特权，不碰
+// pinned），正是被吸收换号税的现场；无让位时 bg 请求会在 a 上睡到
+// 下一窗口（~52s < bgMaxHold）再被放行，把同一结局推迟一个排队预算。
+// a 的 chat 计数为 0 证明换号发生在本地快败（幻影换号，零上游发送）。
 func TestPoolGateYieldToSibling(t *testing.T) {
 	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
 	upA := &stubUpstream{
@@ -1707,12 +1707,14 @@ func TestPoolGateYieldToSibling(t *testing.T) {
 	}
 
 	request := llm.RequestMessages{
-		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "yield-bound"}}}},
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "yield-pinned"}}}},
 	}
-	pool.bind(SessionAffinityKey(request), laneA)
+	pin := pool.inflightAcquire(SessionAffinityKey(request))
+	pin.setLane(laneA)
+	defer pin.release()
 
 	// bg 类请求复刻吸收现场：~52s 预计等待在 bgMaxHold 内，无让位
-	// 谓词即盲睡到底；绑定+谓词下应立即让位给 b。
+	// 谓词即盲睡到底；钉选+谓词下应立即让位给 b。
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	start := time.Now()
 	stream, err := pool.Stream(bgCtx, request)
