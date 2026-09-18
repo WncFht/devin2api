@@ -669,16 +669,22 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	repairs.SanitizeHits = sanitizeHits
 	recorder.SetRepairs(repairs)
-	recordProtoJSON(recorder, debuglog.StageDevinRequest, protoRequest)
-	// attempt 计数区分多次发送：自愈重发与 pre-content reopen 都会重建
-	// 请求体，attempt2+ 写独立文件并在 04 里留 retry_attempt 分界行，
-	// 否则 04 的帧无法归因到具体哪次发送。
-	attempt := 1
-	// noteRetry 统一重发记账：attempt 递增、index retries、04 分界行与
+	// 发送序号区分多次发送：自愈重发与 pre-content reopen 都会重建
+	// 请求体，attempt2+ 写独立分片并在 04 里留 retry_attempt 分界行，
+	// 否则 04 的帧无法归因到具体哪次发送。序号由 recorder 分配、跨
+	// lane 共享——号池 failover 后本 lane 的首发续占 attemptN 分片，
+	// 不以基座名覆写上一 lane 的 wire 体。
+	attempt := recorder.NextDevinSendOrdinal()
+	stage := debuglog.StageDevinRequest
+	if attempt > 1 {
+		stage = debuglog.StageDevinRequestAttempt(attempt)
+	}
+	recordProtoJSON(recorder, stage, protoRequest)
+	// noteRetry 统一重发记账：序号分配、index retries、04 分界行与
 	// 03.attemptN 分片在同一点落盘——两处调用方曾各写一套，漂移出
 	// 分界行字段不一致（continue_empty 只有一边写）。
 	noteRetry := func(cause string, message *devinproto.GetChatMessageRequest, continueEmpty bool) {
-		attempt++
+		attempt = recorder.NextDevinSendOrdinal()
 		recorder.NoteRetryAttempt(attempt, cause)
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_attempt", map[string]any{
 			"attempt":        attempt,

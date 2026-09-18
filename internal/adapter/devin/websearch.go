@@ -87,8 +87,16 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 		adapter.warm.noteSend(warmKey)
 		// 请求记录文件名由调用方给的词干派生；非 03 主文件的调用在
 		// 04 留归因标记，否则多份搜索响应无法对应到具体请求文件。
+		// chat 词干的发送序号跨 lane 共享分配（与 Stream 同一计数）：
+		// 号池 failover 后新 lane 的首发续排 attemptN 分片而非覆写
+		// 基座；searchN 词干只属于本 lane 的本次调用，按域序排。
 		stage := stem + ".json"
-		if attempt > 0 {
+		switch {
+		case stem == debuglog.StageDevinRequestStem:
+			if ordinal := recorder.NextDevinSendOrdinal(); ordinal > 1 {
+				stage = fmt.Sprintf("%s.attempt%d.json", stem, ordinal)
+			}
+		case attempt > 0:
 			stage = fmt.Sprintf("%s.attempt%d.json", stem, attempt+1)
 		}
 		if stage != debuglog.StageDevinRequest {

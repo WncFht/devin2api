@@ -448,7 +448,10 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		s.rest = s.rest[1:]
 		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})
 		laneStart := time.Now()
-		inner, err := next.adapter.Stream(ctx, s.request)
+		// 调试记录挂 s.recorder（开流时的请求 ctx）而不是指望 Recv 的
+		// ctx 恰好携带——换号 lane 的 03 分片等证据必须落本请求目录，
+		// 与 swap 自身的 account_attempt 记账同一份句柄。
+		inner, err := next.adapter.Stream(debuglog.WithRecorder(ctx, s.recorder), s.request)
 		if err == nil {
 			s.lane = next
 			s.laneStart = laneStart

@@ -263,6 +263,100 @@ func TestPoolInStreamFailover(t *testing.T) {
 	}
 }
 
+// failover 的 wire 证据：lane a 的首发占 03 基座文件，lane b 接管后
+// 的首发必须续占 attemptN 分片而不是覆写基座——否则 lane a 的 wire
+// 体被同名 REPLACE 顶掉，逐 lane 对账不可行。两个分片的 executionId
+// 逐次 buildRequest 重铸，不同即证明基座仍是 lane a 的原文。
+func TestPoolFailoverKeepsLaneWireBodies(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	dead := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return connect.NewError(connect.CodeUnauthenticated, errors.New("dead token"))
+		},
+	}
+	good := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	srvDead := stubServer(t, dead, nil)
+	srvGood := stubServer(t, good, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "dead", Token: "tok-dead"}, Endpoint: Endpoint{BaseURL: srvDead.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: srvGood.URL}, Model: "stub-model"},
+	)
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	stream, err := pool.Stream(ctx, pinnedRequest(pool, "dead"))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+		t.Fatalf("deltas = %q, want rescued", got)
+	}
+	recorder.Complete(debuglog.Completion{Result: "completed"})
+	<-manager.Drained(recorder.Dir())
+
+	stages, err := manager.DevinRequestStages(context.Background(), recorder.Dir())
+	if err != nil {
+		t.Fatalf("DevinRequestStages: %v", err)
+	}
+	if !slices.Contains(stages, "03-devin-request.json") || !slices.Contains(stages, "03-devin-request.attempt2.json") {
+		t.Fatalf("wire stages = %v, want base + attempt2 (one per lane)", stages)
+	}
+	execID := func(name string) string {
+		data, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), name)
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", name, err)
+		}
+		var body struct {
+			ExecutionID string `json:"executionId"`
+		}
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Fatalf("%s decode: %v", name, err)
+		}
+		return body.ExecutionID
+	}
+	base, shard := execID("03-devin-request.json"), execID("03-devin-request.attempt2.json")
+	if base == "" || shard == "" || base == shard {
+		t.Fatalf("executionId base=%q shard=%q, want distinct non-empty", base, shard)
+	}
+
+	metaData, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "meta.json")
+	if err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+	var meta debuglog.MetaSummary
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	if meta.UpstreamAccount != "good" || len(meta.UpstreamAttempts) != 1 || meta.UpstreamAttempts[0].Account != "dead" {
+		t.Fatalf("account attribution = %q/%+v, want good after one dead attempt", meta.UpstreamAccount, meta.UpstreamAttempts)
+	}
+	if len(meta.RetryAttempts) != 0 {
+		t.Fatalf("retry_attempts = %+v, want empty — failover is not a same-lane resend", meta.RetryAttempts)
+	}
+
+	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04: %v", err)
+	}
+	if got := strings.Count(string(frames), `"event":"account_attempt"`); got != 2 {
+		t.Fatalf("account_attempt rows = %d, want 2 (one per lane)", got)
+	}
+}
+
 // poolStream 的换号边界：lane 已产出内容后才来的终局错误不能换号
 // （客户端已见部分内容），原样透传且不触碰其余候选 lane。
 func TestPoolInStreamNoFailoverAfterContent(t *testing.T) {

@@ -338,6 +338,11 @@ type Recorder struct {
 	// 的 retry_attempt 分界行同源；请求 goroutine 经 NoteRetryAttempt
 	// 追加，metaJSON/logRowFor 读，走 mutex 同步。
 	retries []RetryAttempt
+	// devinSends 是 03-devin-request 词干已分配的上游发送序号：计数
+	// 挂在请求目录上跨 lane 共享——号池 failover 后新 lane 的首发续占
+	// attemptN 分片而非以基座名覆写（debug_files 同名 REPLACE 会把
+	// 上一 lane 的 wire 体顶掉）。
+	devinSends atomic.Int64
 	// sequences 保存每个 JSONL 文件各自的递增序号：序号在入队前的
 	// 临界区分配（record 含 Seq 须在 marshal 前定版），等于入队次序。
 	sequences map[string]int
@@ -1449,6 +1454,17 @@ func (recorder *Recorder) SetRepairs(repairs llm.RequestRepairs) {
 		return
 	}
 	recorder.repairs.Store(&repairs)
+}
+
+// NextDevinSendOrdinal 分配 03-devin-request 词干下一次上游发送的
+// 序号（1 起）：序号 1 落基座文件名，2+ 落 attemptN 分片名。计数按
+// 请求目录共享——号池 failover 后新 lane 的首发延续上一 lane 的
+// 序号，各 lane 的 wire 体各占独立分片不再互覆。
+func (recorder *Recorder) NextDevinSendOrdinal() int {
+	if recorder == nil {
+		return 1
+	}
+	return int(recorder.devinSends.Add(1))
 }
 
 // NoteRetryAttempt 记录一次上游重发及其触发原因；调用方在同处写
