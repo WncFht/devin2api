@@ -792,6 +792,91 @@ body {
   font-family: var(--font-family-mono);
 }
 
+/* ===== 用量概览：复用 channel-card 壳，内层配额条与令牌行 ===== */
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+.usage-quota-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.usage-quota-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.usage-quota-label {
+  width: 3.5em;
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--neutral-500);
+  font-weight: var(--font-medium);
+}
+
+.usage-quota-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-border);
+  overflow: hidden;
+}
+
+.usage-quota-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.usage-quota-val {
+  width: 3em;
+  text-align: right;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  font-family: var(--font-family-mono);
+}
+
+.usage-quota-sub {
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--neutral-500);
+}
+
+.usage-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.usage-key-row + .usage-key-row {
+  border-top: 1px solid var(--surface-border);
+}
+
+.usage-key-name {
+  font-family: var(--font-family-mono);
+  color: var(--neutral-700);
+  font-size: var(--text-sm);
+}
+
+.usage-key-req {
+  font-weight: var(--font-semibold);
+  color: var(--neutral-800);
+  font-size: var(--text-sm);
+}
+
+.usage-key-tok {
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+  font-family: var(--font-family-mono);
+}
+
 .service-health-card {
   padding: var(--space-6);
   overflow: hidden;

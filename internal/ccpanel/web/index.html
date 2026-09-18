@@ -41,6 +41,11 @@
             <!-- 渠道卡片由 index.js 按 tpl-channel-card 模板渲染 -->
           </div>
         </section>
+        <!-- 用量概览：今日聚合 + 高频令牌 + 逐号配额（admin 专属；加载失败保持隐藏） -->
+        <section class="mb-6" id="usage-section" hidden>
+          <div class="usage-grid animate-slide-up animate-delay-2" id="usage-grid"></div>
+        </section>
+
         <!-- 服务健康监测 -->
         <section class="mb-6">
           <div class="card service-health-card animate-slide-up animate-delay-2" aria-labelledby="service-health-title">

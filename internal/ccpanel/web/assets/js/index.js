@@ -209,11 +209,16 @@
       const healthRequest = window.ServiceHealth
         ? window.ServiceHealth.buildRequest(dateRangeQuery, currentRangeHours())
         : null;
-      const [statsResult, healthResult] = await Promise.allSettled([
+      // 用量概览两路聚合只对 admin 身份取数：api_token 只读身份访问
+      // /admin/* 恒 403，跳过而不是打一串必然失败的请求。
+      const adminViewer = !(window.isAPITokenRole && window.isAPITokenRole());
+      const [statsResult, healthResult, usageResult, quotaResult] = await Promise.allSettled([
         fetchDataWithAuth(`/dashboard/summary?${dateRangeQuery}`),
         healthRequest
           ? fetchDataWithAuth(`/dashboard/metrics?${healthRequest.query}`)
-          : Promise.reject(new Error('ServiceHealth unavailable'))
+          : Promise.reject(new Error('ServiceHealth unavailable')),
+        adminViewer ? fetchDataWithAuth('/admin/usage') : Promise.resolve(null),
+        adminViewer ? fetchDataWithAuth('/admin/quota') : Promise.resolve(null)
       ]);
 
       if (generation !== dashboardLoadGeneration) return;
@@ -236,6 +241,13 @@
         console.error('Failed to load service health:', healthResult.reason);
         renderServiceHealthUnavailable();
       }
+
+      if (usageResult.status === 'fulfilled') usagePayload = usageResult.value;
+      if (quotaResult.status === 'fulfilled') quotaPayload = quotaResult.value;
+      if (adminViewer && usageResult.status === 'rejected' && quotaResult.status === 'rejected') {
+        console.error('Failed to load usage cards:', usageResult.reason || quotaResult.reason);
+      }
+      renderUsageCards();
 
       loadingElements.forEach(element => element.classList.remove('animate-pulse'));
       if (grid) grid.setAttribute('aria-busy', 'false');
@@ -298,6 +310,179 @@
       }
     }
 
+    // ===== 用量概览：/admin/usage 与 /admin/quota 聚合快照 =====
+    // 两种 payload 独立保鲜：单边失败时另一边照常渲染，重试交给下一轮
+    // 自动刷新；双双为空或 api_token 身份时整块隐藏。
+    let usagePayload = null;
+    let quotaPayload = null;
+
+    function usageText(key, fallback, params) {
+      return typeof window.i18nText === 'function' ? window.i18nText(key, fallback, params) : fallback;
+    }
+
+    // 配额剩余量分档配色，与 accounts 页 toneFor 同阈值。
+    function usageTone(pct) {
+      return pct > 50 ? 'var(--success-600)' : pct > 20 ? 'var(--warning-600)' : 'var(--error-600)';
+    }
+
+    // forecast 一行燃烧文案；键位复用 accounts.burn.*（语义完全一致）。
+    function quotaBurnLine(f) {
+      if (!f || f.burn_per_hour == null) return '';
+      const rate = Number(f.burn_per_hour);
+      if (!(rate > 0)) return usageText('accounts.burn.refilled', '窗口内有回充或重置，暂不外推');
+      const burn = usageText('accounts.burn.rate', '燃烧 {rate}%/h', { rate: rate.toFixed(2) });
+      if (f.survives_until_reset) return usageText('accounts.burn.survives', '按当前速率可撑到重置') + ' · ' + burn;
+      if (f.exhausted_at) {
+        return usageText('accounts.burn.exhaust', '约 {h}h 后耗尽', { h: Number(f.hours_left || 0).toFixed(1) }) + ' · ' + burn;
+      }
+      return burn;
+    }
+
+    function quotaRowHtml(label, f) {
+      const rem = f && f.remaining != null ? Math.max(0, Math.min(100, Number(f.remaining))) : null;
+      const width = rem === null ? 0 : rem;
+      const tone = rem === null ? 'var(--color-text-secondary)' : usageTone(rem);
+      const val = rem === null ? '--' : `${rem.toFixed(0)}%`;
+      return `<div class="usage-quota-row">
+        <span class="usage-quota-label">${escapeHtml(label)}</span>
+        <div class="usage-quota-track"><div class="usage-quota-fill" style="width:${width}%;background:${tone};"></div></div>
+        <span class="usage-quota-val" style="color:${tone};">${val}</span>
+      </div>`;
+    }
+
+    function laneUsageCardHtml(name, report) {
+      const daily = report && report.daily;
+      const weekly = report && report.weekly;
+      const rem = daily && daily.remaining != null ? Math.max(0, Math.min(100, Number(daily.remaining))) : null;
+      const tone = rem === null ? 'var(--color-text-secondary)' : usageTone(rem);
+      const sub = quotaBurnLine(daily) || quotaBurnLine(weekly);
+      return `<div class="card channel-card">
+        <div class="channel-card-header">
+          <div class="channel-card-title">${escapeHtml(name)}</div>
+          <div class="channel-cost">
+            <span class="cost-label">${escapeHtml(usageText('accounts.f.daily', '日配额'))}</span>
+            <span class="cost-value" style="color:${tone};">${rem === null ? '--' : `${rem.toFixed(0)}%`}</span>
+          </div>
+        </div>
+        <div class="usage-quota-rows">
+          ${quotaRowHtml(usageText('accounts.f.daily', '日配额'), daily)}
+          ${quotaRowHtml(usageText('accounts.f.weekly', '周配额'), weekly)}
+        </div>
+        ${sub ? `<div class="usage-quota-sub">${escapeHtml(sub)}</div>` : ''}
+      </div>`;
+    }
+
+    // 今日 sends/row：sends_per_row 末日行是闸门放行数 ÷ logs 行的探针
+    // （内层 connect 重试的唯一活指标）；date 不是本地今日时视为缺测。
+    function todaySendsRatio(snap) {
+      const spr = Array.isArray(snap.sends_per_row) ? snap.sends_per_row : [];
+      const last = spr.length ? spr[spr.length - 1] : null;
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      if (!last || last.date !== today || last.ratio == null) return '--';
+      return `${Number(last.ratio).toFixed(2)}×`;
+    }
+
+    function todayUsageCardHtml(snap) {
+      const t0 = snap.today;
+      if (!t0) return '';
+      const req = t0.requests || 0;
+      const err = t0.errors || 0;
+      const rate = req > 0 ? (((req - err) / req) * 100).toFixed(1) : '0.0';
+      const rateState = req > 0 ? (req - err) / req : null;
+      const rateTone = rateState === null ? '' : ` data-state="${rateState >= 0.95 ? 'healthy' : rateState >= 0.8 ? 'warning' : 'critical'}"`;
+      const credits = t0.credit_cost || 0;
+      return `<div class="card channel-card">
+        <div class="channel-card-header">
+          <div class="channel-card-title">${escapeHtml(usageText('index.usage.today', '今日用量'))}</div>
+          <div class="channel-cost">
+            <span class="cost-label">${escapeHtml(usageText('index.usage.credits', '计费点数'))}</span>
+            <span class="cost-value">${credits > 0 ? formatNumber(credits) : '--'}</span>
+          </div>
+        </div>
+        <div class="channel-metrics">
+          <div class="metric-item">
+            <div class="metric-value metric-total">${formatNumber(req)}</div>
+            <div class="metric-label">${escapeHtml(usageText('index.metrics.totalRequests', '总请求'))}</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-value metric-success">${formatNumber(req - err)}</div>
+            <div class="metric-label">${escapeHtml(usageText('index.metrics.success', '成功'))}</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-value metric-error">${formatNumber(err)}</div>
+            <div class="metric-label">${escapeHtml(usageText('index.metrics.failed', '失败'))}</div>
+          </div>
+          <div class="metric-item">
+            <div class="metric-value metric-rate"${rateTone}>${rate}%</div>
+            <div class="metric-label">${escapeHtml(usageText('index.metrics.successRate', '成功率'))}</div>
+          </div>
+        </div>
+        <div class="token-stats">
+          <div class="token-item">
+            <span class="token-label">${escapeHtml(usageText('common.input', '输入'))}</span>
+            <span class="token-value">${formatNumber(t0.input_tokens || 0)}</span>
+          </div>
+          <div class="token-item">
+            <span class="token-label">${escapeHtml(usageText('common.output', '输出'))}</span>
+            <span class="token-value">${formatNumber(t0.output_tokens || 0)}</span>
+          </div>
+          <div class="token-item">
+            <span class="token-label">${escapeHtml(usageText('common.cacheRead', '缓存读'))}</span>
+            <span class="token-value">${formatNumber(t0.cache_read_tokens || 0)}</span>
+          </div>
+          <div class="token-item" title="${escapeHtml(usageText('index.usage.sendsPerRowHint', '闸门放行数 ÷ 日志行：内层重试探针'))}">
+            <span class="token-label">${escapeHtml(usageText('index.usage.sendsPerRow', '发送/请求'))}</span>
+            <span class="token-value">${todaySendsRatio(snap)}</span>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function topKeysCardHtml(snap) {
+      const keys = Array.isArray(snap.keys) ? snap.keys.slice(0, 4) : [];
+      if (!keys.length) return '';
+      const rows = keys.map(k => {
+        const full = String(k.name || '');
+        const short = full.length > 12 ? `${full.slice(0, 12)}…` : full || '--';
+        return `<div class="usage-key-row">
+          <span class="usage-key-name" title="${escapeHtml(full)}">${escapeHtml(short)}</span>
+          <span class="usage-key-req">${formatNumber(k.requests || 0)}</span>
+          <span class="usage-key-tok">${formatNumber(k.total_tokens || 0)} tok</span>
+        </div>`;
+      }).join('');
+      return `<div class="card channel-card">
+        <div class="channel-card-header">
+          <div class="channel-card-title">${escapeHtml(usageText('index.usage.topKeys', '高频令牌'))}</div>
+          <div class="channel-cost">
+            <span class="cost-label">${escapeHtml(usageText('index.usage.window', '窗口'))}</span>
+            <span class="cost-value">${formatNumber((snap.days || []).length)}d</span>
+          </div>
+        </div>
+        <div class="usage-key-rows">${rows}</div>
+      </div>`;
+    }
+
+    function renderUsageCards() {
+      const section = document.getElementById('usage-section');
+      const grid = document.getElementById('usage-grid');
+      if (!section || !grid) return;
+      const snap = usagePayload && !usagePayload.disabled ? usagePayload.snapshot : null;
+      const accounts = (quotaPayload && quotaPayload.accounts) || {};
+      const parts = [];
+      if (snap) {
+        parts.push(todayUsageCardHtml(snap), topKeysCardHtml(snap));
+      }
+      Object.keys(accounts).sort().forEach(name => parts.push(laneUsageCardHtml(name, accounts[name])));
+      const html = parts.filter(Boolean).join('');
+      if (!html) {
+        section.hidden = true;
+        return;
+      }
+      grid.innerHTML = html;
+      section.hidden = false;
+    }
+
     // 通知系统统一由 ui.js 提供（showSuccess/showError/showNotification）
 
     // 注销功能（已由 ui.js 的 onLogout 统一处理）
@@ -327,6 +512,7 @@
         window.i18n.onLocaleChange(() => {
           updateStatsDisplay();
           if (serviceHealthModel) renderServiceHealth(serviceHealthModel);
+          renderUsageCards();
         });
       }
 

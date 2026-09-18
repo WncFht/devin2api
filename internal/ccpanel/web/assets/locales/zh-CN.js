@@ -110,6 +110,12 @@ window.I18N_LOCALES['zh-CN'] = {
   'index.health.noData': '{period}暂无请求数据',
   'index.health.summary': '{period}服务成功率 {rate}，成功 {success} 次，失败 {error} 次',
   'index.statsLoadFailed': '无法加载统计数据',
+  'index.usage.today': '今日用量',
+  'index.usage.credits': '计费点数',
+  'index.usage.sendsPerRow': '发送/请求',
+  'index.usage.sendsPerRowHint': '闸门放行数 ÷ 日志行：内层重试探针',
+  'index.usage.topKeys': '高频令牌',
+  'index.usage.window': '窗口',
   'common.selectAll': '全选/取消全选',
   'common.clear': '清空',
 

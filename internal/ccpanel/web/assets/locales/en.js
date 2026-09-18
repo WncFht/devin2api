@@ -110,6 +110,12 @@ window.I18N_LOCALES['en'] = {
   'index.health.noData': 'No request data for {period}',
   'index.health.summary': 'Service success rate for {period}: {rate}; {success} succeeded and {error} failed',
   'index.statsLoadFailed': 'Unable to load statistics',
+  'index.usage.today': 'Today',
+  'index.usage.credits': 'Credits',
+  'index.usage.sendsPerRow': 'Sends/req',
+  'index.usage.sendsPerRowHint': 'Gate admissions ÷ log rows: inner-retry probe',
+  'index.usage.topKeys': 'Top tokens',
+  'index.usage.window': 'Window',
   'common.selectAll': 'Select all/Deselect all',
   'common.clear': 'Clear',
 
