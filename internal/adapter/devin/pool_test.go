@@ -1416,6 +1416,145 @@ func TestPoolBoundLaneDemotesWhenSickSiblingHealthy(t *testing.T) {
 	}
 }
 
+// 让位落点守卫：bound 判病后只把「严格更健康」的兄弟当落点——
+// 同病/同满兄弟账面 expectedWait 在满桶折算下偏乐观（旧谓词 τ 径
+// 会把请求搬上空等窗的 lane，纯搅动且 bind-on-open 把谱系拖向新
+// 饱和 lane 驱动追饱和振荡）；健康但只快一点的兄弟同样不接——
+// 几秒差额赔不回一次重绑。只有健康且真有富余的兄弟才接。
+func TestPoolBoundLaneYieldSiblingGuard(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	affinity := "yield-guard-session"
+	pool.bind(affinity, laneA, "")
+
+	gateA := laneA.adapter.gate
+	gateB := laneB.adapter.gate
+
+	// 同病陷阱：a 闩 ~1min（EW≈60-120s）、b 桶满钉在 :55（EW≈7s）。
+	// 旧谓词 τ 径 7+10<60 会把请求搬上空等窗的满桶 lane；守卫要求
+	// 落点健康，判病兄弟一律出局。
+	gateA.noteUpstreamError(rateLimitErr("reset in 1 minute"))
+	clockB := pinGateClock(gateB, 55)
+	gateB.mu.Lock()
+	gateB.quota = 80
+	gateB.bucketStart = gateB.windowStart(clockB.t)
+	gateB.bucketUsed = 80
+	gateB.mu.Unlock()
+	if laneA.healthy() || laneB.healthy() {
+		t.Skip("sick fixtures did not engage; environment-dependent")
+	}
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("dual-sick: bound must keep lead over an equally-full sibling, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+
+	// 浅富余不接：a 解闩重闩 ~15s；b 桶清空转健康但前队 15/80*60=
+	// 11.25s——差距不足一个 τ 且 b 落不进让位快败阈值，搬过去只省
+	// ~4s 还要赔一次重绑。
+	gateA.noteUpstreamSuccess()
+	gateA.noteUpstreamError(rateLimitErr("reset in 15 seconds"))
+	gateB.mu.Lock()
+	gateB.bucketUsed = 0
+	gateB.waitersFg = 15
+	gateB.mu.Unlock()
+	if !laneB.healthy() {
+		t.Fatal("cleared bucket in sendable zone must be healthy")
+	}
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("shallow-margin sibling must not take the lead, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+
+	// 真富余接管：b 前队清空 EW=0——健康且落进让位快败阈值，让位。
+	gateB.mu.Lock()
+	gateB.waitersFg = 0
+	gateB.mu.Unlock()
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneB {
+		t.Fatalf("sick bound lane must yield to the sibling with real headroom, got %v", ranked[0].lane.name)
+	}
+	boundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if boundIdx < 0 || !ranked[boundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
+	}
+}
+
+// bound 让位的持久账：绑定 lane 判病被健康兄弟挤下首位时，选号降级
+// 记一笔 local_gate:bound_yield 幻影换号（零上游发送——与闸门让位
+// 快败同一簿记口径）——进 meta.upstream_attempts、account_switches
+// 与 lane_attempt_causes，不再只是随 payload 淘汰的
+// pool_candidates.reason。
+func TestPoolBoundYieldLedger(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	upB := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("b"), stubStop())
+		},
+	}
+	srvB := stubServer(t, upB, nil)
+	pool := newTestPool(t,
+		testPoolConfig("a"),
+		Config{Identity: LaneIdentity{Name: "b", Token: "tok-b"}, Endpoint: Endpoint{BaseURL: srvB.URL}, Model: "stub-model"},
+	)
+	laneA := poolLaneByName(pool, "a")
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	request := stubRequest()
+	pool.bind(SessionAffinityKey(request), laneA, "")
+
+	// a 闩死：bound 判病让位，b 直接接管——a 连一次开流都没发生。
+	laneA.adapter.gate.noteUpstreamError(rateLimitErr("reset in 1 minute"))
+	if laneA.healthy() {
+		t.Skip("gate latch did not engage; environment-dependent")
+	}
+	stream, err := pool.Stream(ctx, request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	stubDrain(t, stream)
+	if upB.chatCalls.Load() != 1 {
+		t.Fatalf("yielded request must be served by the healthy sibling, b calls = %d", upB.chatCalls.Load())
+	}
+	recorder.Complete(debuglog.Completion{Result: "completed"})
+	<-manager.Drained(recorder.Dir())
+
+	metaData, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "meta.json")
+	if err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+	var meta debuglog.MetaSummary
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	if len(meta.UpstreamAttempts) != 1 {
+		t.Fatalf("upstream_attempts = %+v, want the single bound_yield phantom", meta.UpstreamAttempts)
+	}
+	attempt := meta.UpstreamAttempts[0]
+	if attempt.Account != "a" || !attempt.LocalGate || attempt.GateReason != "bound_yield" {
+		t.Fatalf("attempt = %+v, want a/local_gate/bound_yield", attempt)
+	}
+	day := time.Now().Local().Format("2006-01-02")
+	causes, err := db.LaneAttemptCauses(context.Background(), day)
+	if err != nil {
+		t.Fatalf("LaneAttemptCauses: %v", err)
+	}
+	want := []store.LaneAttemptCause{{Date: day, Lane: "a", Cause: "local_gate:bound_yield", N: 1}}
+	if !reflect.DeepEqual(causes, want) {
+		t.Fatalf("causes = %+v, want %+v", causes, want)
+	}
+}
+
 // bg 准入轨让位：bound lane 的拥堵全在 bg 侧（fgRateEMA 顶起预留 +
 // 爬坡额度被 bucketUsedBg 吃成赤字 + bg 前队），fg 视图完全空闲——
 // bg bound 会话让位给空闲兄弟，同状态 fg bound 会话不让位（估计器

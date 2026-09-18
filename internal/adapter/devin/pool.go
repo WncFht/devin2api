@@ -262,6 +262,17 @@ func failoverBudget(ctx context.Context) time.Duration {
 	return poolFailoverBudgetFG
 }
 
+// errBoundYield 是选号让位的归因载体：绑定 lane 在 pick 时被严格更
+// 健康的兄弟挤下首位不是一次发送失败——LocalGate 标记零上游发送
+// （幻影换号，与闸门让位快败同一簿记口径），GateReason=bound_yield
+// 经 switchCauseKey 落成 lane_attempt_causes 的 local_gate:bound_yield
+// 词，与排队中让位（local_gate:yield）分账。
+var errBoundYield = &llm.Failure{
+	LocalGate:  true,
+	GateReason: "bound_yield",
+	Message:    "bound lane yielded at pick: a strictly healthier sibling leads",
+}
+
 // Stream 按亲和键选 lane 发起请求，失败按 failoverable 词表换号。
 // 开流级换号发生在本函数内；开流成功后返回 poolStream，由它在 Recv
 // 里处理流内 error 事件的 pre-content 换号（死 token 的 unauthenticated
@@ -294,6 +305,13 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。
 	recorder.NotePoolCandidates(poolCandidateRows(ranked))
+	// bound 让位的持久账：绑定 lane 让位后按普通序仍被兄弟压过（真被
+	// 挤下首位）时记一笔幻影换号——local_gate:bound_yield 随 logs 行
+	// 同事务展开进 lane_attempt_causes 与 account_switches；否则这类
+	// 移动只剩 pool_candidates.reason，随 payload 保留期一起淘汰。
+	if bi := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound && c.yielded }); bi > 0 {
+		recorder.NoteAccountAttempt(ranked[bi].lane.name, errBoundYield)
+	}
 	// 在飞钉选登记：本请求占据亲和键的一个在飞名额，同键并发后继
 	// 按此钉到同一 lane；release 与首个成功开流的 bind 同刻发生——
 	// 钉选接力给正式绑定，不重叠。
@@ -633,14 +651,22 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 			priority: lane.priority.Load(),
 		})
 	}
-	// 绑定让位判定，两条触发径：
-	//   - 快照级：bound 判病（healthy=false——闩中/死区/桶满）而某兄弟
-	//     此刻可发 → 让位。τ 容差抹平的是噪声级排队差，不该把请求按在
-	//     确定发不出的 lane 上；兄弟侧 expectedWait 在近满桶下被前队
-	//     折算吹大，τ 比较恰在这类现场失灵，由健康位兜底；
+	// 绑定让位判定——落点兄弟必须严格更健康才接得住让位（实测两类
+	// 坏让位：搬上同满兄弟零容量增益，bind-on-open 还把谱系拖向新
+	// 饱和 lane 驱动追饱和振荡；搬上同病兄弟吸收 p50≈5.1s 反而比
+	// 留守病 bound 的 ~2.1s 更差——病态 lane 的 expectedWait 在满桶
+	// 折算下系统性偏乐观，「账面更快」是假信号）。判病兄弟一律不接；
+	// 健康兄弟按两条径判定：
+	//   - 快照级：bound 判病（闩中/死区/桶满）时，兄弟期望排队落进
+	//     让位快败阈值（gateEarlyRelease——与 gateYield 探针「兄弟
+	//     此刻能更快放行吗」同一本账）且确实比 bound 快 → 让位。仅
+	//     二进制 healthy 不算富余：1 槽余量加深队也报 healthy；
 	//   - 期望排队级：bound 的 expectedWait 比最优兄弟高出一个 τ →
-	//     让位回本档排序。闩剩余、桶满到下一窗、前队拥堵都已折算进同
-	//     一本账；bound 自身等得短（闩将尽、队将排空）时维持粘性。
+	//     让位回本档排序。闩剩余、桶满到下一窗、前队拥堵都已折算进
+	//     同一本账；bound 自身等得短（闩将尽、队将排空）时维持粘性。
+	// 无合格落点时绑定维持居首：全 lane 同病/同满时让位只是换地方
+	// 排队，留守保住绑定连续性，等窗交给 lane 闸门自己仲裁——排队
+	// 途中 gateYield 活探针仍会接住半途回春的兄弟。
 	// 让位不解绑不动 bound 标记：它若按普通序仍最优照旧赢，换边开流
 	// 成功后 bind 照常把谱系记到胜者 lane。
 	if bi := slices.IndexFunc(candidates, func(c poolCandidate) bool { return c.bound }); bi >= 0 {
@@ -649,7 +675,13 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 			if i == bi {
 				continue
 			}
-			if (!bv.healthy && c.verdict.healthy) || c.verdict.expectedWait+gatePressureTau < bv.expectedWait {
+			sv := c.verdict
+			if !sv.healthy {
+				continue
+			}
+			yield := sv.expectedWait+gatePressureTau < bv.expectedWait ||
+				(!bv.healthy && sv.expectedWait <= gateEarlyRelease && sv.expectedWait < bv.expectedWait)
+			if yield {
 				candidates[bi].yielded = true
 				break
 			}
