@@ -8,6 +8,7 @@ require (
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/jhump/protoreflect/v2 v2.0.0-beta.2
+	github.com/klauspost/compress v1.20.0
 	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12

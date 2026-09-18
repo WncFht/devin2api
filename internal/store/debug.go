@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -275,7 +276,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 			dir, name).Scan(&stored); err != nil {
 			return nil, 0, false, err
 		}
-		if data, err = decodePayload(stored); err != nil {
+		if data, err = s.decodeFilePayload(ctx, dir, stored); err != nil {
 			return nil, 0, false, err
 		}
 		if total = usize; int64(len(data)) > limit {
@@ -321,6 +322,26 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 		return nil, 0, false, err
 	}
 	return buf.Bytes(), total, true, nil
+}
+
+// decodeFilePayload 解压一个 debug_files 行的库存字节：gzip/raw 直通
+// decodePayload；zstd 帧是以本目录 01 文件为字典的 delta 编码——先取
+// 01 行解出明文再作 dict 还原。基座行缺失（手动删行/写侧任务被 shed
+// 而未钉座）时返回显式错误：delta 帧没有字典解出来只能是乱码。
+func (s *Store) decodeFilePayload(ctx context.Context, dir string, stored []byte) ([]byte, error) {
+	if !hasZstdMagic(stored) {
+		return decodePayload(stored)
+	}
+	var base []byte
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT content FROM debug_files WHERE dir=? AND name=?`, dir, deltaBaseFileName).Scan(&base); err != nil {
+		return nil, fmt.Errorf("decode delta payload in %s: fetch base %q: %w", dir, deltaBaseFileName, err)
+	}
+	dict, err := decodePayload(base)
+	if err != nil {
+		return nil, fmt.Errorf("decode delta payload in %s: base %q: %w", dir, deltaBaseFileName, err)
+	}
+	return decodePayloadDelta(stored, dict)
 }
 
 // DebugFileNames 返回目录内全部文件名（两表 UNION DISTINCT，按名排序）。
