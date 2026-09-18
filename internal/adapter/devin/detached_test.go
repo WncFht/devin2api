@@ -15,6 +15,7 @@ import (
 
 	devinproto "local/devinproto"
 
+	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/llm"
 )
 
@@ -255,6 +256,40 @@ func TestFinishedStreamNotDetachable(t *testing.T) {
 	stream.mu.Unlock()
 	if entry := registry.lookup("k5"); entry != nil {
 		t.Fatal("finished stream must not be admitted to the detached cache")
+	}
+}
+
+// TestAbortedStreamNotDetachable 钉住主动中断不登记：面板 abort/排空
+// 强掐与客户端断连走同一 ctx.Done 分支，但脱钩缓存只救断连——被掐死
+// 的生成若准入会继续烧上游至 running TTL，同键重试还会重放尸体。
+// Abort 先置 aborted 位再取消，ctx.Done 可观察时 WasAborted 必真。
+func TestAbortedStreamNotDetachable(t *testing.T) {
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	defer close(receiver.release)
+	stream := detachedTestStream(registry, "k7", receiver)
+	manager := debuglog.NewManager(t.TempDir(), debuglog.RetentionPolicy{}, nil)
+	t.Cleanup(manager.Close)
+	stream.recorder = manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/messages"})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	stream.recorder.SetAbort(cancel)
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	if !stream.recorder.Abort(errors.New("aborted via panel request abort")) {
+		t.Fatal("Abort should succeed on a recorder with an attached cancel")
+	}
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after abort should return the cancel cause")
+	}
+	if stream.detached {
+		t.Fatal("aborted stream must not detach")
+	}
+	if got := registry.lookup("k7"); got != nil {
+		t.Fatal("aborted stream must not be admitted to the cache")
 	}
 }
 

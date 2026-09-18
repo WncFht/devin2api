@@ -1775,6 +1775,17 @@ func (recorder *Recorder) Abort(cause error) bool {
 	return true
 }
 
+// WasAborted 报告请求是否经 Abort 主动中断（面板中断/排空强掐），与
+// 客户端自行断连区分——两者同走 ctx.Done 分支，脱钩完成缓存只救后者：
+// 被掐死的流准入会继续烧上游至 running TTL，同键重试还会重放尸体。
+// Abort 先置 aborted 位再取消，ctx.Done 可观察时本方法必真。
+func (recorder *Recorder) WasAborted() bool {
+	if recorder == nil {
+		return false
+	}
+	return recorder.aborted.Load()
+}
+
 // snapshot 返回进行中请求的活快照：首字节计时、阶段状态、模型与丢弃计数。
 // State 分三档：waiting_upstream（上游未回首事件）→ receiving_upstream
 // （上游在回但未下发客户端内容）→ streaming_client（正在向客户端流出）。
