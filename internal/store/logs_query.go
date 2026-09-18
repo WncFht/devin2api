@@ -34,7 +34,7 @@ const logAccountExpr = `COALESCE(NULLIF(account,''),'default')`
 func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	var r LogRow
 	var started string
-	var ready, sent, open, firstUp, firstCli sql.NullInt64
+	var ready, sent, open, firstUp, firstCli, upDone sql.NullInt64
 	var modelMismatch, stream, rateLimited, premature int64
 	var connReused, connIdle sql.NullInt64
 	dests := make([]any, 0, len(logSelectCols))
@@ -131,6 +131,8 @@ func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 			d = &r.LogSource
 		case "upstream_protocol":
 			d = &r.UpstreamProtocol
+		case "upstream_done_ms":
+			d = &upDone
 		}
 		dests = append(dests, d)
 	}
@@ -151,6 +153,7 @@ func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	r.UpstreamOpenMS = nullInt64Ptr(open)
 	r.FirstUpstreamMS = nullInt64Ptr(firstUp)
 	r.FirstClientMS = nullInt64Ptr(firstCli)
+	r.UpstreamDoneMS = nullInt64Ptr(upDone)
 	if connReused.Valid {
 		b := connReused.Int64 != 0
 		r.ConnReused = &b

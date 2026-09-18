@@ -148,9 +148,12 @@ cat "$OUT/load-sustained.txt" | sed 's/^/  /'
 curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/heap" -o "$OUT/heap.pb.gz"
 curl -sf "http://127.0.0.1:$PPROF_PORT/debug/pprof/goroutine?debug=1" -o "$OUT/goroutine.txt"
 
-# logs 表的延迟分解：ready/sent/open/first_upstream/first_client
-# 五点相减得四段耗时分布，回答「延迟加在链路的哪一段」。logs 表在
-# 临时 -state-dir 的 devin-2api.db；导出 JSONL 后走原聚合。
+# logs 表的延迟分解：ready/sent/open/first_upstream/first_client（+
+# upstream_done）。各点相减得段耗时分布，回答「延迟加在链路的哪一段」。
+# egress 基线按形态分：流式=first_upstream（首事件→首字节），非流式攒
+# 完整条流才一次性写出、以 upstream_done 为基线（流末→首字节）——缺
+# 该列的旧库行退回 first_upstream。logs 表在临时 -state-dir 的
+# devin-2api.db；导出 JSONL 后走原聚合。
 DB="$WORK/state/devin-2api.db"
 if [[ -f "$DB" ]] && command -v python3 >/dev/null; then
 	if ! command -v sqlite3 >/dev/null; then
@@ -172,7 +175,10 @@ for line in open(sys.argv[1]):
     segs["transform"].append(e["upstream_sent_ms"] - e["request_ready_ms"])
     segs["connect"].append(e["upstream_open_ms"] - e["upstream_sent_ms"])
     segs["upstream_ttft"].append(e["first_upstream_ms"] - e["upstream_open_ms"])
-    segs["egress"].append(e["first_client_ms"] - e["first_upstream_ms"])
+    base = e["first_upstream_ms"]
+    if not e.get("stream") and e.get("upstream_done_ms") is not None:
+        base = e["upstream_done_ms"]
+    segs["egress"].append(e["first_client_ms"] - base)
 print(f"{'segment':<16} {'avg':>7} {'p50':>7} {'p90':>7} {'p99':>7}  (ms)")
 for name, vals in segs.items():
     if not vals:

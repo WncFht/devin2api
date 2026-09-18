@@ -186,7 +186,7 @@ for line in open(manifest):
     if r.get("time") and r.get("minute_bucket") is not None and r["minute_bucket"] != r["time"]//60000:
         errs.append(f"minute_bucket={r['minute_bucket']} != time//60000")
     if r.get("result") == "completed":
-        for seg in ("first_upstream_ms","first_client_ms"):
+        for seg in ("first_upstream_ms","first_client_ms","upstream_done_ms"):
             if r.get(seg) is None:
                 errs.append(f"{seg}=NULL")
         if r.get("duration_ms") is not None and r.get("first_upstream_ms") is not None \
@@ -219,8 +219,9 @@ for line in open(manifest):
                f"sw={r.get('account_switches')} tok(in/out/cr/cw/reas/tot)="
                f"{r.get('input_tokens')}/{r.get('output_tokens')}/{r.get('cache_read_tokens')}/"
                f"{r.get('cache_write_tokens')}/{r.get('reasoning_tokens')}/{r.get('total_tokens')} "
-               f"lat(rdy/sent/open/fu/fc/dur)={r.get('request_ready_ms')}/{r.get('upstream_sent_ms')}/"
-               f"{r.get('upstream_open_ms')}/{r.get('first_upstream_ms')}/{r.get('first_client_ms')}/{r.get('duration_ms')} "
+               f"lat(rdy/sent/open/fu/fc/ud/dur)={r.get('request_ready_ms')}/{r.get('upstream_sent_ms')}/"
+               f"{r.get('upstream_open_ms')}/{r.get('first_upstream_ms')}/{r.get('first_client_ms')}/"
+               f"{r.get('upstream_done_ms')}/{r.get('duration_ms')} "
                f"stream={r.get('stream')} ws={r.get('upstream_websocket')} reused={r.get('conn_reused')} "
                f"idle={r.get('conn_idle_ms')} retries={r.get('retries')} ls={r.get('log_source')} "
                f"mb={r.get('minute_bucket')} crid={r.get('client_request_id') or '-'} files={nfiles} {meta_ok}")

@@ -46,6 +46,7 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
 		FirstUpstreamMS:   optionalLatency(recorder.firstUpstreamMS.Load()),
 		FirstClientMS:     optionalLatency(recorder.firstClientMS.Load()),
+		UpstreamDoneMS:    optionalLatency(recorder.upstreamDoneMS.Load()),
 		API:               recorder.requestMeta.API,
 		Method:            recorder.requestMeta.Method,
 		Path:              recorder.requestMeta.Path,

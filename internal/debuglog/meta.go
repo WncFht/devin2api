@@ -43,7 +43,7 @@ type MetaSummary struct {
 	// 积压耗时（写侧拥塞的按目录读数）。
 	EndedAt    string `json:"ended_at,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
-	// 五段延迟分解：nil 表示该阶段未发生（区别于 0ms 即时发生）。
+	// 延迟分解标记：nil 表示该阶段未发生（区别于 0ms 即时发生）。
 	FirstClientMS   *int64 `json:"first_client_ms,omitempty"`
 	FirstUpstreamMS *int64 `json:"first_upstream_ms,omitempty"`
 	// LateWrites 是 meta 序列化时刻本目录已被门口拒收的迟到写任务数
@@ -85,12 +85,16 @@ type MetaSummary struct {
 	PoolCandidates []PoolCandidate `json:"pool_candidates,omitempty"`
 	// 连接画像拆开 connect 段：Reused=false 时 sent→open 含完整
 	// TCP+TLS 握手，Reused=true 时该段基本是上游响应头延迟。
-	UpstreamConnIdleMS *int64     `json:"upstream_conn_idle_ms,omitempty"`
-	UpstreamConnReused *bool      `json:"upstream_conn_reused,omitempty"`
-	UpstreamOpenMS     *int64     `json:"upstream_open_ms,omitempty"`
-	UpstreamRequestID  string     `json:"upstream_request_id,omitempty"`
-	UpstreamSentMS     *int64     `json:"upstream_sent_ms,omitempty"`
-	Usage              *MetaUsage `json:"usage,omitempty"`
+	UpstreamConnIdleMS *int64 `json:"upstream_conn_idle_ms,omitempty"`
+	UpstreamConnReused *bool  `json:"upstream_conn_reused,omitempty"`
+	// UpstreamDoneMS 是泵协程收完上游事件流的时刻（终态 EOF/错误/取消），
+	// 属延迟分解标记：非流式 egress 段以它为基线（first_client −
+	// upstream_done），流从未建立（Stream 失败）则缺席。
+	UpstreamDoneMS    *int64     `json:"upstream_done_ms,omitempty"`
+	UpstreamOpenMS    *int64     `json:"upstream_open_ms,omitempty"`
+	UpstreamRequestID string     `json:"upstream_request_id,omitempty"`
+	UpstreamSentMS    *int64     `json:"upstream_sent_ms,omitempty"`
+	Usage             *MetaUsage `json:"usage,omitempty"`
 }
 
 // MetaClient 是 meta.json 的 client 块（进入期记录的 HTTP 客户端元信息）；

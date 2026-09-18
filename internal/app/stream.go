@@ -276,6 +276,10 @@ func startStreamPump(ctx context.Context, provider adapter.Adapter, messages llm
 			return
 		}
 		items <- pumpItem{connected: true}
+		// 泵收完上游事件流的时刻（终态：EOF/错误/取消）是 egress 分解的
+		// 上游侧终点——非流式攒完整条流才一次性写出，其出口段须相对
+		// 流末量（first_client − upstream_done）而非相对首事件。
+		defer recorder.NoteUpstreamDone()
 		for {
 			event, err := stream.Recv(ctx)
 			if err == nil {

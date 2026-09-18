@@ -82,6 +82,7 @@ type legacyIndexEntry struct {
 	UpstreamOpenMS    *int64 `json:"upstream_open_ms,omitempty"`
 	FirstUpstreamMS   *int64 `json:"first_upstream_ms,omitempty"`
 	FirstClientMS     *int64 `json:"first_client_ms,omitempty"`
+	UpstreamDoneMS    *int64 `json:"upstream_done_ms,omitempty"`
 	API               string `json:"api,omitempty"`
 	Method            string `json:"method"`
 	Path              string `json:"path"`
@@ -211,7 +212,7 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 						e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
 						e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
 						// 文件时代没有谱系概念——affinity_hash 补空串。
-						e.ConnReused, e.ConnIdleMS, "", source); err != nil {
+						e.ConnReused, e.ConnIdleMS, "", source, e.UpstreamDoneMS); err != nil {
 						return err
 					}
 				}

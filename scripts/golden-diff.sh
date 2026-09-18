@@ -152,7 +152,7 @@ def strip: walk(if type=="object" then del(.id,.created_at,.upstream_request_id,
 FILEJQ='
 def inner: walk(if type=="object" then del(.started_at,.finished_at,
   .duration_ms,.request_ready_ms,.upstream_sent_ms,.upstream_open_ms,
-  .first_upstream_ms,.first_client_ms,.upstream_request_id,
+  .first_upstream_ms,.first_client_ms,.upstream_done_ms,.upstream_request_id,
   .client_request_id) else . end);
 .data.text? |= (try (fromjson|inner) catch .)
 '

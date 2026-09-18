@@ -60,7 +60,8 @@ var schemaStatements = []string{
 		conn_idle_ms INTEGER,
 		affinity_hash TEXT NOT NULL DEFAULT '',
 		log_source TEXT NOT NULL DEFAULT 'proxy',
-		upstream_protocol TEXT NOT NULL DEFAULT 'devin'
+		upstream_protocol TEXT NOT NULL DEFAULT 'devin',
+		upstream_done_ms INTEGER
 	)`,
 	// 部分唯一索引：dir='' 的 rejected 留存行没有目录身份，不入
 	// 唯一约束——全列 UNIQUE 会让第二条拒绝行永久撞约束失败。

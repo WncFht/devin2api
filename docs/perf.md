@@ -31,7 +31,7 @@
 
 ## 延迟分解字段
 
-debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数，未到达记 `-1`/缺省）：
+debuglog 给每个请求记录 6 个时间点（相对请求开始的毫秒数，未到达记 `-1`/缺省）：
 
 | meta.json 字段      | 含义                                                                | 埋点位置                         |
 | ------------------- | ------------------------------------------------------------------- | -------------------------------- |
@@ -39,9 +39,10 @@ debuglog 给每个请求记录 5 个时间点（相对请求开始的毫秒数�
 | `upstream_sent_ms`  | 首个真实 `GetChatMessage` RPC 发出（重试首试也更新）                | `getChatMessageWithRetry` 调用前 |
 | `upstream_open_ms`  | 上游流建立成功（响应头/首帧通道就绪）                               | `GetChatMessage` 返回后          |
 | `first_upstream_ms` | 第一个真实上游事件到达（本地合成 Start 不计）                       | 泵协程 `Recv` 后                 |
+| `upstream_done_ms`  | 泵协程收完上游事件流（终态 EOF/错误/取消）；`Stream()` 未建成则缺席 | 泵协程退出时（defer）            |
 | `first_client_ms`   | 第一个协议内容字节写给客户端（SSE 保活注释不计）                    | `streamWriter.writeContent`      |
 
-五字段把端到端延迟切成五段，段名即两字段之差：`decode`（0→ready）、`transform`（ready→sent，含限流闸门排队）、`connect`（sent→open，上游建连）、`upstream_ttft`（open→首事件，上游首字延迟）、`egress`（首事件→首字节，编码 + 写客户端）。
+这些字段把端到端延迟切成段，段名即两字段之差：`decode`（0→ready）、`transform`（ready→sent，含限流闸门排队）、`connect`（sent→open，上游建连）、`upstream_ttft`（open→首事件，上游首字延迟）、`egress`（编码 + 写客户端）。`egress` 的基线按响应形态分：流式是 `first_client − first_upstream`（首事件→首字节）；非流式攒完整条上游流才一次性写出，`first_client − first_upstream` 量到的是剩余上游时长而非出口延迟，须用 `first_client − upstream_done`（流末→首字节）。
 
 `transform` 段内另有两个相位字段（meta.json 专有，未发生即缺席）：`models_fetch_ms` 是目录确保（`ensureCatalog`→`ListModels`）的墙钟毫秒数——真实拉取与等待他人在飞拉取都计入，缓存命中≈0；`assign_model_ms` 是 `AssignModel` 调用的墙钟毫秒数（含共享 flight 陪等），仅 router uid 请求出现。两者量的都是闸门排队之前的上游解析停滞——闸门指标看不到这段，批量停滞只能靠这里直接读出。
 

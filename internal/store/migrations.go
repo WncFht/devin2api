@@ -211,6 +211,18 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// logs.upstream_done_ms 是泵收完上游事件流的时刻标记（同属
+		// 延迟分解可空列）：非流式攒完整条流才一次性写出，egress 段
+		// 须以流末为基线（first_client−upstream_done）——以
+		// first_upstream 为基线量到的是剩余上游时长而非出口延迟。
+		// 存量行经 NULL 落位=「未记录」，与可空语义一致无需回填。
+		version: "0016_logs_upstream_done_ms",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "logs", "upstream_done_ms",
+				`ALTER TABLE logs ADD COLUMN upstream_done_ms INTEGER`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

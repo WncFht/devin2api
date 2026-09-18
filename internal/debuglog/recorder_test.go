@@ -348,6 +348,7 @@ func newBareRecorder(manager *Manager, dir string) *Recorder {
 	recorder.upstreamOpenMS.Store(-1)
 	recorder.firstUpstreamMS.Store(-1)
 	recorder.firstClientMS.Store(-1)
+	recorder.upstreamDoneMS.Store(-1)
 	recorder.assignModelMS.Store(-1)
 	recorder.modelsFetchMS.Store(-1)
 	return recorder

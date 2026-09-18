@@ -236,22 +236,25 @@ func (h *Handler) adminLogsExport(w http.ResponseWriter, r *http.Request) {
 func writeRequestsCSV(w http.ResponseWriter, entries []*store.LogRow) {
 	out := bufio.NewWriter(w)
 	defer func() { _ = out.Flush() }()
-	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches,error_message\n")
+	_, _ = out.WriteString("dir,started_at,method,path,api,model,requested_model,response_model,status,result,duration_ms,first_upstream_ms,first_client_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,total_tokens,stream,key_hash,client_request_id,error_stage,retries,account,account_switches,error_message,upstream_done_ms\n")
 	for _, e := range entries {
-		firstUpstream, firstClient := "", ""
+		firstUpstream, firstClient, upstreamDone := "", "", ""
 		if e.FirstUpstreamMS != nil {
 			firstUpstream = strconv.FormatInt(*e.FirstUpstreamMS, 10)
 		}
 		if e.FirstClientMS != nil {
 			firstClient = strconv.FormatInt(*e.FirstClientMS, 10)
 		}
-		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d,%s\n",
+		if e.UpstreamDoneMS != nil {
+			upstreamDone = strconv.FormatInt(*e.UpstreamDoneMS, 10)
+		}
+		_, _ = fmt.Fprintf(out, "%s,%s,%s,%s,%s,%s,%s,%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%v,%s,%s,%s,%d,%s,%d,%s,%s\n",
 			csvEscape(e.Dir), csvEscape(e.StartedAt.Format(time.RFC3339Nano)), csvEscape(e.Method), csvEscape(e.Path),
 			csvEscape(e.API), csvEscape(e.Model), csvEscape(e.RequestedModel), csvEscape(e.ResponseModel),
 			e.StatusCode, csvEscape(e.Result), e.DurationMS, firstUpstream, firstClient,
 			e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
 			e.Stream, csvEscape(e.KeyHash), csvEscape(e.ClientRequestID), csvEscape(e.ErrorStage), e.Retries,
-			csvEscape(e.Account), e.AccountSwitches, csvEscape(e.ErrorMessage))
+			csvEscape(e.Account), e.AccountSwitches, csvEscape(e.ErrorMessage), upstreamDone)
 	}
 }
 

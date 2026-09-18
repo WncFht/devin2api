@@ -382,6 +382,7 @@ func logRowToLegacyIndexEntry(r *LogRow) *legacyIndexEntry {
 		UpstreamOpenMS:    r.UpstreamOpenMS,
 		FirstUpstreamMS:   r.FirstUpstreamMS,
 		FirstClientMS:     r.FirstClientMS,
+		UpstreamDoneMS:    r.UpstreamDoneMS,
 		API:               r.API,
 		Method:            r.Method,
 		Path:              r.Path,

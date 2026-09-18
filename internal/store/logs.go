@@ -25,14 +25,18 @@ type LogRow struct {
 	StartedAt  time.Time `json:"started_at"`
 	DurationMS int64     `json:"duration_ms"`
 	// 延迟分解字段用指针区分「未发生」（nil，省略）与「即时发生」（0ms）；
-	// int 零值会掩盖这两种语义。五段口径见 debuglog.Recorder 同名字段注释：
+	// int 零值会掩盖这两种语义。分解口径见 debuglog.Recorder 同名字段注释：
 	// ready→sent 本地投影、sent→open 建流往返、open→first_upstream 上游
-	// 思考 TTFT、first_upstream→first_client 代理编码下发。
+	// 思考 TTFT、first_upstream→first_client 代理编码下发。upstream_done_ms
+	// 是泵收完上游事件流的时刻——非流式 egress 段以它为基线（流式仍用
+	// first_upstream）；库列在 DDL 尾部与 ALTER 补齐的物理列序一致，
+	// 字段按语义归在分解块。
 	RequestReadyMS   *int64 `json:"request_ready_ms,omitempty"`
 	UpstreamSentMS   *int64 `json:"upstream_sent_ms,omitempty"`
 	UpstreamOpenMS   *int64 `json:"upstream_open_ms,omitempty"`
 	FirstUpstreamMS  *int64 `json:"first_upstream_ms,omitempty"`
 	FirstClientMS    *int64 `json:"first_client_ms,omitempty"`
+	UpstreamDoneMS   *int64 `json:"upstream_done_ms,omitempty"`
 	API              string `json:"api,omitempty"`
 	Method           string `json:"method"`
 	Path             string `json:"path"`
@@ -126,6 +130,7 @@ var logColumnList = []string{
 	"error_stage", "error_message", "dropped_events", "retry_after_seconds", "rate_limited",
 	"retries", "account", "account_switches", "premature_end_turn", "repairs",
 	"conn_reused", "conn_idle_ms", "affinity_hash", "log_source", "upstream_protocol",
+	"upstream_done_ms",
 }
 
 var (
@@ -173,7 +178,7 @@ func logInsertArgs(e *LogRow) []any {
 		e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
 		e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
 		e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-		e.ConnReused, e.ConnIdleMS, e.AffinityHash, source,
+		e.ConnReused, e.ConnIdleMS, e.AffinityHash, source, e.UpstreamDoneMS,
 	}
 }
 

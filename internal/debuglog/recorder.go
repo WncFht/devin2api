@@ -402,17 +402,22 @@ type Recorder struct {
 	// clientBytes 是已下发给客户端的累计字节数。
 	clientBytes atomic.Int64
 	// requestReadyMS/upstreamSentMS/upstreamOpenMS/firstUpstreamMS/
-	// firstClientMS 是首字延迟分解的五个阶段标记，-1 表示尚未发生：
+	// firstClientMS 是首字延迟分解的阶段标记，-1 表示尚未发生：
 	//   ready→sent  = 本地投影转换（validate/sanitize/routing/buildRequest/闸门排队）
 	//   sent→open   = 上游建流往返（POST + 响应头）
 	//   open→first_upstream = 上游思考 TTFT
-	//   first_upstream→first_client = 代理编码+flush 下发
+	//   first_upstream→first_client = 代理编码+flush 下发（流式口径）
 	// 区分「上游慢」与「网关编码慢」之外，sent 之前的部分即本进程自加延迟。
+	// upstreamDoneMS 是泵协程收完上游事件流的时刻（终态：EOF/错误/取消）：
+	// 非流式攒完整条流才一次性写出，其 egress 段须以它为基线
+	//（first_client−upstream_done）——以 first_upstream 为基线量到的
+	// 是剩余上游时长而非出口延迟；流从未建立（Stream 失败）则缺席。
 	requestReadyMS  atomic.Int64
 	upstreamSentMS  atomic.Int64
 	upstreamOpenMS  atomic.Int64
 	firstUpstreamMS atomic.Int64
 	firstClientMS   atomic.Int64
+	upstreamDoneMS  atomic.Int64
 	// assignModelMS/modelsFetchMS 是闸门前两段上游解析相位的墙钟耗时
 	// （ready→sent 段内各一小段，单测看不出共享 flight 上的陪等）；
 	// -1 表示该相位未发生（非 router 无 AssignModel、ServerSearch 无目录）。
@@ -1048,6 +1053,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 		recorder.upstreamOpenMS.Store(-1)
 		recorder.firstUpstreamMS.Store(-1)
 		recorder.firstClientMS.Store(-1)
+		recorder.upstreamDoneMS.Store(-1)
 		recorder.assignModelMS.Store(-1)
 		recorder.modelsFetchMS.Store(-1)
 		manager.activeDirs[name] = recorder
@@ -1650,6 +1656,17 @@ func (recorder *Recorder) NoteClientLatency() {
 		return
 	}
 	recorder.firstClientMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
+}
+
+// NoteUpstreamDone 记录泵协程收完上游事件流的相对毫秒数（幂等，只记
+// 第一次）。非流式 egress 段的基线：collectPumpedMessage 攒完整条流才
+// 一次性写出，出口延迟要量的是「流末→首字节」而非「首事件→首字节」。
+// 脱钩缓存的挂接重放同样经本打点——重放收完即「上游」收完。
+func (recorder *Recorder) NoteUpstreamDone() {
+	if recorder == nil {
+		return
+	}
+	recorder.upstreamDoneMS.CompareAndSwap(-1, time.Since(recorder.startedAt).Milliseconds())
 }
 
 // NoteAssignModelMS 记录本请求在 AssignModel 调用上花费的墙钟毫秒数；
@@ -2380,6 +2397,7 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 		UpstreamOpenMS:    optionalLatency(recorder.upstreamOpenMS.Load()),
 		FirstUpstreamMS:   optionalLatency(recorder.firstUpstreamMS.Load()),
 		FirstClientMS:     optionalLatency(recorder.firstClientMS.Load()),
+		UpstreamDoneMS:    optionalLatency(recorder.upstreamDoneMS.Load()),
 		RetryAfterSeconds: recorder.retryAfterSeconds.Load(),
 		RateLimited:       recorder.rateLimited.Load(),
 		Repairs:           recorder.repairs.Load(),
