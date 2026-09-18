@@ -1379,11 +1379,19 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 	return models, nil
 }
 
-// upstreamStallTimeout 是相邻两个上游帧之间允许的最长静默；超时即判定
-// 传输层已死（半开连接、上游挂死），按传输错误收尾而不是无限等待。
-// 取值需高于上游首批帧的实测延迟（长思考可达 45s+）。
+// upstreamStallTimeout 是上游首帧确认前允许的最长静默（pre-frame0 档）：
+// 上游收下请求到发出首个确认帧之间没有心跳帧覆盖，排队深度无实测上界，
+// 窗口取保守值；超时即判定传输层已死（半开连接、上游挂死），按传输错误
+// 收尾而不是无限等待。
 // var 而非 const：测试临时缩短它来覆盖超时路径。
 var upstreamStallTimeout = 120 * time.Second
+
+// upstreamConfirmedStallTimeout 是首个上游帧到达后相邻帧之间允许的最长
+// 静默（post-frame0 档）：prod 04 帧时标重建显示上游在 ~60.0s 帧静默
+// 边界发 latency 心跳帧，26536 个健康帧间隔硬顶 60000.84ms——90s 是
+// 心跳周期 + 到达余量，可证零误杀；60s 档与心跳同周期禁用。继续沿用
+// pre-frame0 档只是让 stalled 重试每次多等 ~30s 检测延迟。
+var upstreamConfirmedStallTimeout = 90 * time.Second
 
 // upstreamNoProgressTimeout 是「无内容进度」期限：任意帧（含上游
 // latency 活性帧）喂 stall 看门狗，但只有产出事件的帧喂它。上游实测
@@ -1533,10 +1541,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	// 已触发（stall.C 分支）的计时器 Reset 重新武装即可。
 	stall := stream.stall
 	if stall == nil {
-		stall = time.NewTimer(upstreamStallTimeout)
+		stall = time.NewTimer(stream.stallDeadline())
 		stream.stall = stall
 	} else {
-		stall.Reset(upstreamStallTimeout)
+		stall.Reset(stream.stallDeadline())
 	}
 	defer stall.Stop()
 	// progress 与 stall 同构：计时器跨 Recv 复用，消费方每次进入等待
@@ -1568,14 +1576,12 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			continue
 		}
-		// stopReason 之后只剩尾帧（实测 <1ms 到达），等待窗口从静默
-		// 看门狗缩到尾部宽限：connect-go 排空 body 等传输 EOF 时上游
-		// 不关连接会把正常收尾拖成 stall。
-		stallDeadline := upstreamStallTimeout
-		if stream.decoder.hasStopReason {
-			stallDeadline = upstreamTailGrace
-		}
-		stall.Reset(stallDeadline)
+		// 等待窗口按语义状态分档（stallDeadline）：上游首帧确认前是
+		// 无心跳覆盖段取保守窗；确认后帧间隔被上游 ~60s 心跳封顶可
+		// 收紧；stopReason 之后只剩尾帧（实测 <1ms 到达）再缩到尾部
+		// 宽限——connect-go 排空 body 等传输 EOF 时上游不关连接会把
+		// 正常收尾拖成 stall。
+		stall.Reset(stream.stallDeadline())
 		var startHold <-chan time.Time
 		if stream.startHold != nil {
 			startHold = stream.startHold.C
@@ -1664,7 +1670,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.finished = true
 				continue
 			}
-			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", upstreamStallTimeout)
+			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", stream.stallDeadline())
 			if stream.tryReopen(stallErr, false) {
 				continue
 			}
@@ -1714,6 +1720,22 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
+}
+
+// stallDeadline 按流的语义状态给静默看门狗分档：上游首帧确认前没有
+// 心跳帧覆盖（排队深度无界），取 upstreamStallTimeout 保守窗；首个
+// 非错误帧到达后帧间隔被上游 ~60s 心跳硬顶，收紧到
+// upstreamConfirmedStallTimeout；消费到 stopReason 后只剩传输尾帧，
+// 再缩到 upstreamTailGrace。换流（swap/tryResume）复位
+// upstreamConfirmed，新流重新从无覆盖档计起。
+func (stream *responseStream) stallDeadline() time.Duration {
+	if stream.decoder.hasStopReason {
+		return upstreamTailGrace
+	}
+	if stream.upstreamConfirmed {
+		return upstreamConfirmedStallTimeout
+	}
+	return upstreamStallTimeout
 }
 
 // tryReopen 在「上游已失败但尚未产出任何内容」时整体重发请求一次：

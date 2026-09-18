@@ -999,8 +999,9 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	if !strings.Contains(string(responseLog), `"deltaText":"world"`) {
 		t.Fatalf("response log = %s", responseLog)
 	}
-	if strings.Contains(string(responseLog), `"seq":`) || strings.Contains(string(responseLog), `"data":`) {
-		t.Fatalf("raw protobuf response must not use an event envelope: %s", responseLog)
+	// 帧行统一 JSONLRecord 信封：event="frame"、protojson 收进 data。
+	if !strings.Contains(string(responseLog), `"event":"frame"`) || !strings.Contains(string(responseLog), `"data":{"deltaText":"world"}`) {
+		t.Fatalf("raw protobuf response must ride the frame envelope: %s", responseLog)
 	}
 }
 
@@ -1244,13 +1245,17 @@ func TestResponseStreamStartsBeforeFirstContent(t *testing.T) {
 
 // TestResponseStreamFailsOnUpstreamStall 的测试动机是：上游建立后无限静默
 // （半开连接、上游挂死）时看门狗必须把请求按传输错误收尾，而不是干等
-// 客户端超时或主动断开。
+// 客户端超时或主动断开。零帧流走 pre-frame0 档——confirmed 档故意设得
+// 更短，误用会让判死提前到达，elapsed 下界断言钉住用的是哪一档。
 func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	defer func(timeout time.Duration) { upstreamStallTimeout = timeout }(upstreamStallTimeout)
-	upstreamStallTimeout = 20 * time.Millisecond
+	defer func(timeout time.Duration) { upstreamConfirmedStallTimeout = timeout }(upstreamConfirmedStallTimeout)
+	upstreamStallTimeout = 150 * time.Millisecond
+	upstreamConfirmedStallTimeout = 10 * time.Millisecond
 	receiver := &stalledDevinResponseReceiver{release: make(chan struct{})}
 	defer close(receiver.release)
 	stream := &responseStream{gate: newRateGate(GateConfig{}, nil, ""), frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil)}
+	startedAt := time.Now()
 	event, err := stream.Recv(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1258,8 +1263,42 @@ func TestResponseStreamFailsOnUpstreamStall(t *testing.T) {
 	if event.Type != llm.ResponseEventError || event.Error == nil || !strings.Contains(event.Error.ErrorMessage, "stalled") {
 		t.Fatalf("event = %#v, want upstream stall error", event)
 	}
+	if elapsed := time.Since(startedAt); elapsed < 100*time.Millisecond {
+		t.Fatalf("stall fired after %s, want pre-frame0 bound ~150ms", elapsed)
+	}
 	if _, err := stream.Recv(context.Background()); err != io.EOF {
 		t.Fatalf("after stall Recv err = %v, want io.EOF", err)
+	}
+}
+
+// TestResponseStreamStallWindowShrinksAfterFirstFrame 的测试动机是钉住
+// 静默看门狗的 post-frame0 分档：首个上游帧（含零事件的 latency 活性帧）
+// 到达即进入心跳覆盖段，窗口收紧到 confirmed 档——上游帧间隔实测硬顶
+// ~60s，pre-frame0 保守窗继续套用只是让 stalled 重试白等检测延迟。
+func TestResponseStreamStallWindowShrinksAfterFirstFrame(t *testing.T) {
+	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
+	// pre-frame0 档设得极大：误用即让本测试挂死而非误报通过。
+	upstreamStallTimeout = 10 * time.Second
+	upstreamConfirmedStallTimeout = 30 * time.Millisecond
+	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
+		// 零事件活性帧：确认档位的依据是帧到达（upstreamConfirmed）
+		// 而非事件产出（producedEvents）。
+		{MessageId: proto.String("m"), RequestId: proto.String("r"),
+			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")}},
+	}}
+	defer close(receiver.release)
+	stream := &responseStream{frames: pumpUpstream(context.Background(), receiver), cancel: func() {}, decoder: newResponseDecoder("model", nil, nil, nil), gate: newRateGate(GateConfig{}, nil, "")}
+	startedAt := time.Now()
+	event, err := stream.Recv(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != llm.ResponseEventError || event.Error == nil || !strings.Contains(event.Error.ErrorMessage, "stalled") {
+		t.Fatalf("event = %#v, want upstream stall error", event)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 5*time.Second {
+		t.Fatalf("stall fired after %s, want post-frame0 bound ~30ms", elapsed)
 	}
 }
 
@@ -1362,7 +1401,9 @@ func TestResponseStreamNoProgressWatchdogAfterContent(t *testing.T) {
 // end 接缝（干净块边界），续流内容开新块，全程只有一个 start。
 func TestResponseStreamResumesAfterStall(t *testing.T) {
 	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
 	upstreamStallTimeout = 20 * time.Millisecond
+	upstreamConfirmedStallTimeout = 20 * time.Millisecond
 	ctx := context.Background()
 	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
 		{DeltaText: proto.String("partial ")},
@@ -1447,7 +1488,9 @@ func TestResponseStreamResumesAfterStall(t *testing.T) {
 // 校验拒掉、丢弃又让客户端已见调用与上游历史分叉——只能按错误透传。
 func TestResponseStreamDoesNotResumeInFlightToolCall(t *testing.T) {
 	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
 	upstreamStallTimeout = 20 * time.Millisecond
+	upstreamConfirmedStallTimeout = 20 * time.Millisecond
 	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
 		{DeltaToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{
 			Id: proto.String("c0"), Name: proto.String("shell"), ArgumentsJson: proto.String(`{"cmd":`),
@@ -1487,8 +1530,10 @@ func TestResponseStreamDoesNotResumeInFlightToolCall(t *testing.T) {
 // 滚上游配额——触顶后按 stall 错误透传。
 func TestResponseStreamResumeAttemptsCapped(t *testing.T) {
 	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
 	defer func(n int) { maxStreamResumes = n }(maxStreamResumes)
 	upstreamStallTimeout = 20 * time.Millisecond
+	upstreamConfirmedStallTimeout = 20 * time.Millisecond
 	maxStreamResumes = 1
 	release := make(chan struct{})
 	defer close(release)
@@ -1587,7 +1632,9 @@ func TestResponseStreamResumesSilentEOF(t *testing.T) {
 // 原样保住客户端已见事件与 partial 的一致性。
 func TestResponseStreamResumeStripsPartialThinkingSignature(t *testing.T) {
 	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
+	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
 	upstreamStallTimeout = 20 * time.Millisecond
+	upstreamConfirmedStallTimeout = 20 * time.Millisecond
 	ctx := context.Background()
 	receiver := &hangAfterReceiver{release: make(chan struct{}), responses: []*devinproto.GetChatMessageResponse{
 		{DeltaThinking: proto.String("thinking so far"), DeltaSignature: proto.String("sigfrag")},
