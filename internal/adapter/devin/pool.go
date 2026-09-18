@@ -191,6 +191,23 @@ func (pool *Pool) firstLane() *poolLane {
 	return nil
 }
 
+// poolFailoverBudget* 是一次请求内换号重试的累计预算：首个候选恒试，
+// 第 2+ 次 lane 尝试前查账——lane 内自愈链（reopen/凭据重载/传输重试）
+// 在 pool 视野内是串行烧时，不封顶会把单 lane 预算逐条烧遍（实证
+// 111.5s+120s=231.5s 才回 429）。分档与闸门排队预算同量级（fg
+// maxHold ~15s / bg ~120s）。检查只在 lane 间进行，拦不住单 lane
+// 内部的等待。var 而非 const：测试可缩短覆盖拦截路径。
+var poolFailoverBudgetFG = 60 * time.Second
+var poolFailoverBudgetBG = 150 * time.Second
+
+// failoverBudget 返回本请求类（fg/bg）的换号累计预算。
+func failoverBudget(ctx context.Context) time.Duration {
+	if adapter.RequestClass(ctx) == adapter.ClassBG {
+		return poolFailoverBudgetBG
+	}
+	return poolFailoverBudgetFG
+}
+
 // Stream 按亲和键选 lane 发起请求，失败按 failoverable 词表换号。
 // 开流级换号发生在本函数内；开流成功后返回 poolStream，由它在 Recv
 // 里处理流内 error 事件的 pre-content 换号（死 token 的 unauthenticated
@@ -201,6 +218,7 @@ func (pool *Pool) firstLane() *poolLane {
 // 会话绑定表（见 Pool.bindings）让同一会话恒落同 lane：开流成功即写
 // 绑定，绑定命中恒居候选首位；绑定 lane 硬故障才删绑按普通序重选。
 func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.ResponseStream, error) {
+	entered := time.Now()
 	lanes := pool.snapshot()
 	if len(lanes) == 0 {
 		return nil, errNoUpstreamAccounts()
@@ -224,6 +242,13 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	}
 	var lastErr error
 	for len(rest) > 0 {
+		// 换号累计预算：首个候选恒试，第 2+ 次尝试前查账——烧满一条
+		// lane 再败的场景不再串行点燃下一条。拦截留痕，否则「为什么
+		// 没换第二条」只能靠 elapsed 反推。
+		if lastErr != nil && time.Since(entered) > failoverBudget(ctx) {
+			recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(entered).Milliseconds(), "skipped": rest[0].name})
+			break
+		}
 		lane := rest[0]
 		rest = rest[1:]
 		// 04 里插账号分界行：各 lane 的上游帧直接续写同一文件，
@@ -235,7 +260,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
 			pool.bind(affinity, lane)
-			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, lane: lane, inner: stream, rest: rest}, nil
+			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, inner: stream, rest: rest}, nil
 		}
 		lastErr = err
 		recorder.SetUpstreamAccount(lane.name)
@@ -265,8 +290,11 @@ type poolStream struct {
 	// swap 成功即把亲和键改绑到新 lane。
 	pool     *Pool
 	affinity string
-	lane     *poolLane
-	inner    llm.ResponseStream
+	// entered 是 Pool.Stream 的进入时刻：流内换号与开流级换号共用
+	// 同一份累计预算（failoverBudget），不是重新起算。
+	entered time.Time
+	lane    *poolLane
+	inner   llm.ResponseStream
 	// rest 是尚未尝试的候选 lane（钉选序尾部）；每条只在换号时试一次。
 	rest []*poolLane
 	// startReleased 表示 start 信封已交付给消费方：换号 lane 再产 start
@@ -339,6 +367,12 @@ func (s *poolStream) Recv(ctx context.Context) (llm.ResponseEvent, error) {
 func (s *poolStream) swap(ctx context.Context) (bool, error) {
 	var lastErr error
 	for len(s.rest) > 0 {
+		// 与 Stream 开流级同一份累计预算：流内换号第 2+ 次尝试前
+		// 查账，烧穿即回最后真实错误而非继续点燃下一 lane。
+		if lastErr != nil && time.Since(s.entered) > failoverBudget(ctx) {
+			s.recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(s.entered).Milliseconds(), "skipped": s.rest[0].name})
+			break
+		}
 		next := s.rest[0]
 		s.rest = s.rest[1:]
 		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -311,6 +312,65 @@ func TestPoolInStreamNoFailoverAfterContent(t *testing.T) {
 	}
 	if idle.chatCalls.Load() != 0 {
 		t.Fatalf("idle lane called %d times; post-content failure must not fail over", idle.chatCalls.Load())
+	}
+}
+
+// 换号累计预算：缩到极小后首 lane 快败即烧穿——第二候选不再点燃，
+// 只留一笔失败 attempt（upstream_attempts）与 failover_budget_exhausted
+// 分界行；首候选恒试不受预算约束。上闩全部 lane 让首候选开流即快败
+// （LocalGate 是 eager 失败：conn refused 这类懒失败要走到流内才见）。
+func TestPoolFailoverBudgetCap(t *testing.T) {
+	old := poolFailoverBudgetFG
+	poolFailoverBudgetFG = time.Nanosecond
+	t.Cleanup(func() { poolFailoverBudgetFG = old })
+
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	for _, lane := range pool.snapshot() {
+		lane.adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("rate limited; reset in 60 seconds")))
+	}
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "pool.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat"})
+	ctx := debuglog.WithRecorder(context.Background(), recorder)
+
+	_, err = pool.Stream(ctx, llm.RequestMessages{
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+	})
+	if err == nil {
+		t.Fatal("Stream must fail: every lane latched")
+	}
+	// 预算拦截回的是最后真实失败（首 lane 的闸门拒绝），不是合成错误。
+	if failure := llm.Classify(err); failure == nil || !failure.LocalGate {
+		t.Fatalf("returned error = %v, want the first lane's LocalGate rejection", err)
+	}
+	recorder.Complete(debuglog.Completion{Result: "failed"})
+
+	metaData, _, _, err := manager.ReadFile(recorder.Dir(), "meta.json")
+	if err != nil {
+		t.Fatalf("ReadFile meta.json: %v", err)
+	}
+	var meta debuglog.MetaSummary
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("meta.json decode: %v", err)
+	}
+	if len(meta.UpstreamAttempts) != 1 {
+		t.Fatalf("upstream_attempts = %d, want 1 — budget must stop the second lane", len(meta.UpstreamAttempts))
+	}
+	frames, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04: %v", err)
+	}
+	if !strings.Contains(string(frames), `"event":"failover_budget_exhausted"`) {
+		t.Fatal("04 must carry failover_budget_exhausted marker")
+	}
+	if got := strings.Count(string(frames), `"event":"account_attempt"`); got != 1 {
+		t.Fatalf("account_attempt rows = %d, want 1", got)
 	}
 }
 
