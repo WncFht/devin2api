@@ -657,6 +657,110 @@ func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {
 	}
 }
 
+// TestDetachedAdmitCorpseYieldsBeforeRunning 钉住容量淘汰的让位序：
+// 截断/不可重放 failed 尸体先于活泵让位——缓冲已死的条目留场只为给
+// 同键到场记 miss，杀一条还在喂事件的泵给尸体留槽是本末倒置。
+func TestDetachedAdmitCorpseYieldsBeforeRunning(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 64
+	registry := newDetachedRegistry()
+	// 截断尸体：缓冲冻结、态仍 running（泵未及收尾），靠 truncated 位认尸。
+	truncated := &detachedEntry{notify: make(chan struct{})}
+	truncated.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("a", 128)})
+	registry.admit("corpse-trunc", truncated)
+	// 不可重放 failed 尸体：传输断裂类终态，lookup 只记 miss 不重放。
+	broken := &detachedEntry{notify: make(chan struct{})}
+	broken.append(llm.ResponseEvent{Type: llm.ResponseEventError, Error: &llm.AssistantMessage{
+		ErrorMessage: "http2: stream closed", Failure: &llm.Failure{Code: "internal", UpstreamFault: true},
+	}})
+	broken.finish()
+	registry.admit("corpse-fail", broken)
+	for i := 0; i < detachedMaxEntries-2; i++ {
+		registry.admit(strings.Repeat("r", 4)+string(rune('a'+i)), &detachedEntry{notify: make(chan struct{})})
+	}
+	registry.admit("new", &detachedEntry{notify: make(chan struct{})})
+	// 两具尸体让位：6 running + new = 7 条，活泵一个不动。
+	if len(registry.entries) != detachedMaxEntries-1 {
+		t.Fatalf("entries = %d, want %d", len(registry.entries), detachedMaxEntries-1)
+	}
+	if registry.entries["corpse-trunc"] != nil || registry.entries["corpse-fail"] != nil {
+		t.Fatal("corpses must yield their slots before any running pump dies")
+	}
+	for i := 0; i < detachedMaxEntries-2; i++ {
+		if registry.entries[strings.Repeat("r", 4)+string(rune('a'+i))] == nil {
+			t.Fatalf("running entry %d must survive corpse eviction", i)
+		}
+	}
+	if stats := registry.stats(); stats.Evicted != 2 {
+		t.Fatalf("evicted = %d, want 2 corpse yields", stats.Evicted)
+	}
+}
+
+// TestDetachedAdmitTerminalFallbackClosesSoftCap 钉住全终态兜底：8 槽
+// 全是未过期终态时 admit 逐出最老终态——此前终态永不参与容量淘汰，
+// map 会随 admit 速率×TTL 无界长大（软帽）；兜底把容量关回硬上限。
+func TestDetachedAdmitTerminalFallbackClosesSoftCap(t *testing.T) {
+	registry := newDetachedRegistry()
+	for i := 0; i < detachedMaxEntries; i++ {
+		done := &detachedEntry{notify: make(chan struct{})}
+		done.append(llm.ResponseEvent{Type: llm.ResponseEventDone})
+		done.finish()
+		registry.admit(strings.Repeat("d", 4)+string(rune('a'+i)), done)
+		time.Sleep(time.Millisecond) // admittedAt 是最老终态的排序依据
+	}
+	registry.admit("new", &detachedEntry{notify: make(chan struct{})})
+	if len(registry.entries) != detachedMaxEntries {
+		t.Fatalf("entries = %d, want %d (soft cap must close)", len(registry.entries), detachedMaxEntries)
+	}
+	if registry.entries["dddda"] != nil {
+		t.Fatal("oldest terminal entry should have been evicted by the fallback")
+	}
+	if registry.entries["new"] == nil {
+		t.Fatal("new entry must be admitted")
+	}
+	if stats := registry.stats(); stats.Evicted != 1 {
+		t.Fatalf("evicted = %d, want 1 terminal fallback", stats.Evicted)
+	}
+}
+
+// TestDetachedTruncatedCountsAtFreeze 钉住截断记账点：缓冲越预算冻结
+// 时计数，不等移除路径——截断尸体若经 admit 扫描/到期逐出而非 lookup
+// 惰性逐出，旧口径会把这次截断漏记成 expired；lookup 逐出也不再复计。
+func TestDetachedTruncatedCountsAtFreeze(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 4096
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{DeltaText: proto.String(strings.Repeat("x", 8192))},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "tz", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	close(receiver.release)
+	// 泵 drain 到越界帧即冻结：截断发生点入账，不等任何移除路径。
+	waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.Truncated == 1
+	})
+	if got := registry.lookup("tz"); got != nil {
+		t.Fatal("truncated entry must miss lookup")
+	}
+	stats := registry.stats()
+	if stats.Truncated != 1 {
+		t.Fatalf("truncated = %d, want 1 (freeze counted once at truncation point)", stats.Truncated)
+	}
+	if stats.Expired != 1 {
+		t.Fatalf("expired = %d, want 1 (corpse removal counts as lazy collection)", stats.Expired)
+	}
+}
+
 // TestDetachedStatsCounters 钉住缓存簿记：登记/挂接/未命中/移除/孤儿/
 // 泵终局计数在各生命周期动作上恰各记一次——runtime-metrics 的
 // detached 组是泵终局与孤儿浪费的唯一观测面，计数错了无处可对。

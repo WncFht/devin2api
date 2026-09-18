@@ -2084,8 +2084,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		// tee 在返回点才能覆盖 start 扣留在内的全部对外事件。
 		if stream.entry != nil && stream.entry.append(event) {
 			// 本次追加越过字节预算：缓冲冻结成截断前缀+终止错误。
+			// 截断发生数在冻结点记账（与条目之后的移除路径解耦）；
 			// 记 04 标记行给「flood  drain 进缓存」留取证——detached/
 			// detached_attach 之外的第三条脱钩标记。
+			stream.registry.noteTruncated(stream.detachKey)
 			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", map[string]any{
 				"key":          stream.detachKey,
 				"budget_bytes": detachedMaxBufferedBytes,
@@ -2187,13 +2189,16 @@ func (stream *responseStream) detach(ctx context.Context) {
 				continue
 			}
 			if err != nil && !errors.Is(err, io.EOF) {
-				entry.append(llm.ResponseEvent{
+				if entry.append(llm.ResponseEvent{
 					Type: llm.ResponseEventError,
 					Error: &llm.AssistantMessage{
 						ErrorMessage: "detached pump stopped: " + err.Error(),
 						Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
 					},
-				})
+				}) {
+					// 终局错误的追加自身越预算：同一冻结点记账口径。
+					stream.registry.noteTruncated(stream.detachKey)
+				}
 			}
 			// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
 			// drainCancel 是 registry 淘汰掐泵，EOF 的 completed/failed

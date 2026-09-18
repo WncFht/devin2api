@@ -250,9 +250,11 @@ func (entry *detachedEntry) len() int {
 }
 
 // detachedRegistry 是进程内完成缓存：键是语义请求哈希，值是脱钩条目。
-// 命中即重放/挂接，未命中走正常上游请求。容量触顶先逐过期再逐最老
-// running——完成态条目兑现「重试秒回」的价值更高，且运行态的客户端
-// 多半等不起会先断。
+// 命中即重放/挂接，未命中走正常上游请求。容量触顶的让位序是过期项 →
+// 死尸体（截断/不可重放 failed）→ 最老 running → 最老终态兜底：尸体
+// 缓冲已无重放价值却占槽，活泵不该给它让位；完成态条目兑现「重试秒回」
+// 的价值更高，排在 running 之后只作兜底——缺它则全终态未过期时 map
+// 会随 admit 速率×TTL 无界长大（软帽）。
 type detachedRegistry struct {
 	mu      sync.Mutex
 	entries map[string]*detachedEntry
@@ -266,10 +268,10 @@ type detachedRegistry struct {
 	finishedFailed    int64 // 泵终局 failed（上游错误尾帧/泵内异常）
 	finishedKilled    int64 // 泵被 registry 淘汰掐死（drainCancel）
 	finishedExpired   int64 // 泵撞 running TTL（drainCtx 到期）
-	expired           int64 // TTL 到期移除（lookup 惰性逐出 + admit 扫描）
-	evicted           int64 // 容量淘汰（最老 running 让位）
+	expired           int64 // 死条目惰性移除：TTL 到期 + 截断尸体经 lookup 逐出（截断发生数单列 truncated）
+	evicted           int64 // 容量淘汰（尸体让位/最老 running/最老终态兜底）
 	replaced          int64 // 同键新条目替换旧残骸
-	truncated         int64 // 字节预算截断逐出（lookup 惰性逐出）
+	truncated         int64 // 缓冲越字节预算被冻结次数——append 截断点记账，与移除路径解耦
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
 	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
@@ -287,7 +289,8 @@ const detachedEventCap = 64
 // 生命周期事件种类：admit（登记）、attach（挂接命中）、miss（同键
 // 到场但条目不可用）、cross_miss（同键请求到场但条目在兄弟 lane，
 // detail 记 <owner>:<state>）、evict（移除，detail 记原因）、
-// finish（泵终局，detail 记四档终态）。
+// finish（泵终局，detail 记四档终态）、truncate（缓冲越预算冻结——
+// 04 标记行是尽力而为，事件环给截断留权威痕迹）。
 const (
 	detachedEventAdmit     = "admit"
 	detachedEventAttach    = "attach"
@@ -295,12 +298,14 @@ const (
 	detachedEventCrossMiss = "cross_miss"
 	detachedEventEvict     = "evict"
 	detachedEventFinish    = "finish"
+	detachedEventTruncate  = "truncate"
 )
 
 // 移除原因（evict 事件的 detail）：expired 是 TTL 到点（lookup 惰性
-// 逐出与 admit 扫描同口径），capacity 是容量淘汰最老 running，
-// replaced 是同键新条目逐出旧残骸，truncated 是字节预算截断
-// （lookup 惰性逐出——截断缓冲无重放价值即无存活依据）。
+// 逐出与 admit 扫描同口径），capacity 是容量淘汰（尸体让位/最老
+// running/最老终态兜底），replaced 是同键新条目逐出旧残骸，
+// truncated 是截断尸体被惰性逐出——只作事件归因，截断发生数在
+// 缓冲冻结时已由 noteTruncated 记过，移除不再重复入账。
 const (
 	detachEvictExpired   = "expired"
 	detachEvictCapacity  = "capacity"
@@ -367,6 +372,8 @@ func detachedEventLabel(kind, detail string) string {
 			return "泵超时"
 		}
 		return "泵失败"
+	case detachedEventTruncate:
+		return "缓冲截断"
 	}
 	return kind
 }
@@ -397,8 +404,9 @@ type DetachedStats struct {
 	Expired  int64 `json:"expired"`
 	Evicted  int64 `json:"evicted"`
 	Replaced int64 `json:"replaced"`
-	// Truncated 是字节预算截断的移除计数——flood/异常上游 drain 进
-	// 缓存被预算拦下的信号，与 expired 桶分开才有观测意义。
+	// Truncated 是缓冲被字节预算冻结的次数（append 截断点记账）——
+	// flood/异常上游 drain 进缓存被预算拦下的信号；与移除路径解耦，
+	// 截断尸体无论经哪条路径淘汰都已入账，不会漏记也不会重复计。
 	Truncated int64 `json:"truncated"`
 
 	Orphans         int64 `json:"orphans"`
@@ -514,9 +522,12 @@ func (registry *detachedRegistry) noteCrossLaneMiss(key, owner string, state det
 	registry.pushEvent(detachedEventCrossMiss, key, owner+":"+state.String())
 }
 
-// admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶先
-// 扫过期项，再逐最老的 running 条目。同键旧条目（前一次同请求脱钩的
-// 残骸）先逐出再登记——两条同键后台泵同跑是纯粹的配额浪费。
+// admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶的
+// 让位序：过期项 → 死尸体（截断/不可重放 failed——缓冲已无重放价值，
+// 留场只为给同键到场记 miss，活泵不该给它让位）→ 最老 running →
+// 最老终态兜底（四类穷尽分类保证至少逐出一条，容量是硬上限而非软帽）。
+// 同键旧条目（前一次同请求脱钩的残骸）先逐出再登记——两条同键后台泵
+// 同跑是纯粹的配额浪费。
 func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
@@ -540,19 +551,36 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 		}
 	}
 	if len(registry.entries) >= detachedMaxEntries {
-		var oldestKey string
-		var oldestAt time.Time
 		for k, e := range registry.entries {
 			e.mu.Lock()
-			running := e.state == detachedRunning
-			admitted := e.admittedAt
+			corpse := e.truncated || (e.state == detachedFailed && !e.replayable)
 			e.mu.Unlock()
-			if running && (oldestKey == "" || admitted.Before(oldestAt)) {
-				oldestKey, oldestAt = k, admitted
+			if corpse {
+				registry.evictLocked(k, e, detachEvictCapacity)
 			}
 		}
-		if oldestKey != "" {
-			registry.evictLocked(oldestKey, registry.entries[oldestKey], detachEvictCapacity)
+	}
+	if len(registry.entries) >= detachedMaxEntries {
+		var runKey, termKey string
+		var runAt, termAt time.Time
+		for k, e := range registry.entries {
+			e.mu.Lock()
+			state, admitted := e.state, e.admittedAt
+			e.mu.Unlock()
+			if state == detachedRunning {
+				if runKey == "" || admitted.Before(runAt) {
+					runKey, runAt = k, admitted
+				}
+			} else if termKey == "" || admitted.Before(termAt) {
+				termKey, termAt = k, admitted
+			}
+		}
+		victim := runKey
+		if victim == "" {
+			victim = termKey
+		}
+		if victim != "" {
+			registry.evictLocked(victim, registry.entries[victim], detachEvictCapacity)
 		}
 	}
 	registry.entries[key] = entry
@@ -566,6 +594,9 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 // 持 registry.mu 不能去拿流锁。全部移除走这一个漏斗：按 cause 记移除
 // 计数，从未挂接的条目同时记孤儿（orphan_completed 是上游浪费口径；
 // sawCrossLaneRetry 置位的孤儿另记 orphans_cross_lane「来错门」档）。
+// 移除计数只分三桶——capacity 归 evicted、replaced 归 replaced、其余
+// 惰性收集（expired 到期与 truncated 截断尸体）归 expired；truncated
+// 计数在缓冲冻结点 noteTruncated 已记，此处再记会双重入账。
 func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, cause string) {
 	delete(registry.entries, key)
 	switch cause {
@@ -573,8 +604,6 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 		registry.evicted++
 	case detachEvictReplaced:
 		registry.replaced++
-	case detachEvictTruncated:
-		registry.truncated++
 	default:
 		registry.expired++
 	}
@@ -619,6 +648,20 @@ func (registry *detachedRegistry) noteFinish(key, reason string) {
 		registry.finishedFailed++
 	}
 	registry.pushEvent(detachedEventFinish, key, reason)
+}
+
+// noteTruncated 记一次缓冲截断：append 越字节预算冻结缓冲时由 tee 点
+// 调用——计数挂在截断发生点而非移除路径，截断尸体之后经 lookup 惰性
+// 逐出还是 admit 容量扫描让位都不再重复入账。nil 接收容忍 entry 在场
+// 而缓存未启用的流。
+func (registry *detachedRegistry) noteTruncated(key string) {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.truncated++
+	registry.pushEvent(detachedEventTruncate, key, "")
 }
 
 // pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
