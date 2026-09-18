@@ -285,6 +285,37 @@ func TestRateGatePersistsClosedWindow(t *testing.T) {
 	}
 }
 
+// 窗口行写失败挂进重放缓冲随后续翻页重放：关闭库让每次 INSERT 必败，
+// 三次翻页各产一笔失败账（persist_failures=3），缓冲深度
+// gatePersistRetryCap=2 溢出后丢一笔最老行（persist_dropped=1）——
+// 终局计数与协程落锁时序无关（守恒：推入 = 取走 + 丢弃 + 在缓）。
+func TestRateGateWindowPersistRetry(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	clock := pinGateClock(gate, 10)
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait error = %v", err)
+	}
+	_ = db.Close() // 持久化协程写必败
+	for i := 0; i < 3; i++ {
+		clock.t = clock.t.Add(time.Minute)
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("flip %d wait error = %v", i, err)
+		}
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if stats := gate.stats(); stats.PersistFailures == 3 && stats.PersistDropped == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stats := gate.stats()
+	t.Fatalf("persist counters = failures:%d dropped:%d, want 3/1", stats.PersistFailures, stats.PersistDropped)
+}
+
 // 续试重发的放行单列进 retry_admits 窗口账：挂 WithGateRetry 的放行
 // 计入 retry_admits，首发不挂不计——两者都照常占 used 配额（used
 // 与 retry_admits 是总数与子集的关系，不是分列口径）。

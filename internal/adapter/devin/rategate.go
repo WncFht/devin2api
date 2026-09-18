@@ -143,6 +143,14 @@ type rateGate struct {
 	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
 	winWaitersPeak     int // 本窗排队数峰值（waitersFg+waitersBg）
 	lastWindow         *store.GateWindow
+	// pendingWindows 是窗口行写失败的重放缓冲：持久化协程写失败后把
+	// 未落库的行挂账回来，下一次窗口翻页持久化时随新行一并重放。容量
+	// 封顶 gatePersistRetryCap，溢出丢最老行——缓冲是写争用期的安全带
+	// 而非持久队列，永久丢失由 persistDropped 显式计数；
+	// persistFailures 记写尝试失败次数（与 stderr 告警一一对应）。
+	pendingWindows  []*store.GateWindow
+	persistFailures int
+	persistDropped  int
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
 	events    [gateEventCap]GateEvent
@@ -321,6 +329,12 @@ type GateStats struct {
 	// LastWindow 是最近一个被关闭窗口的聚合行（与落库 gate_windows
 	// 同一份快照）；进程内零窗口翻转或持久层未接线时为 nil。
 	LastWindow *store.GateWindow `json:"last_window,omitempty"`
+	// PersistFailures/PersistDropped 是窗口行落库的健康账：写协程
+	// INSERT 失败的次数（失败行挂回重放缓冲随下一窗口重放）与缓冲
+	// 溢出被永久丢弃的行数。窗口行写走异步协程，没有这两个读数
+	// 写争用期丢行完全不可见。
+	PersistFailures int `json:"persist_failures"`
+	PersistDropped  int `json:"persist_dropped"`
 	// Wait 是最近 gateWaitCap 次 wait 评估的分类聚合：实测等待分位
 	// 是 expectedWait 估计器的校准面；环覆盖全结局（含拒绝与取消），
 	// 补上 transform 段看不见的尾部。进程内尚无评估时为 nil。
@@ -477,7 +491,8 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 }
 
 // gateWindowStoreTimeout 是窗口行持久化的写上限：观测写不能拿无界
-// ctx 进 SQLite——库卡死时协程泄漏比丢行更糟。
+// ctx 进 SQLite——库卡死时协程泄漏比丢行更糟。整批（挂账重放行+新行）
+// 共享一个上限，争用期里重放行不追加新的占用时长。
 const gateWindowStoreTimeout = 30 * time.Second
 
 // lockedStateStoreTimeout 是锁内 runtime_state 写的上限：闩/冷却的
@@ -489,7 +504,15 @@ const gateWindowStoreTimeout = 30 * time.Second
 // persistCooldownLocked/deleteCooldownState 共用本上限。
 const lockedStateStoreTimeout = 5 * time.Second
 
-// persistWindow 把刚关闭窗口的明细账快照成行交给持久层。行语义是
+// gatePersistRetryCap 是窗口行写失败后的重放缓冲深度（每 lane）：
+// 翻页率天然每分钟至多一次，深度 2 让失败行搭上后两次窗口的持久化
+// 协程（~2 分钟覆盖批量日志事务/部署交接的写争用波）；更深的缓冲
+// 重放的是诊断价值已衰减的陈旧行，溢出丢最老行并计 persistDropped。
+const gatePersistRetryCap = 2
+
+// persistWindow 把刚关闭窗口的明细账快照成行交给持久层，并把上轮写
+// 失败挂账的行一并重放（取走即清，行集独占移交协程；(lane,
+// window_start) 唯一索引 + INSERT OR IGNORE 使重放幂等）。行语义是
 // 「闸门实际观察到关闭的窗口」：翻页只在流量/面板/保温触碰闸门时
 // 发生，整窗未被触碰的空窗期不产生行（缺口=无观测而非零用量）。
 // 写走一次性协程脱离 mu：SQLite 单写连接在批量日志事务/真空回收下
@@ -517,13 +540,35 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 		FgRate:          gate.fgRateEMA,
 	}
 	gate.lastWindow = row
+	pending := gate.pendingWindows
+	gate.pendingWindows = nil
+	rows := append(pending, row)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), gateWindowStoreTimeout)
 		defer cancel()
-		if err := gate.states.InsertGateWindow(ctx, row); err != nil {
-			slog.Warn("gate window persist failed", "lane", gate.lane, "error", err)
+		for i, r := range rows {
+			if err := gate.states.InsertGateWindow(ctx, r); err != nil {
+				slog.Warn("gate window persist failed", "lane", gate.lane, "error", err)
+				gate.stashWindows(rows[i:])
+				return
+			}
 		}
 	}()
+}
+
+// stashWindows 把未落库的窗口行挂回重放缓冲：写协程在 mu 外失败后
+// 回调入队，自拿 mu（缓冲只在本方法与 persistWindow 的取走两处触及，
+// 均在 mu 下）。首个失败即停手——争用期里同批后续行大概率同病，剩余
+// 尾部整段挂回等下一窗口重试。超出深度的最老行丢弃并计 persistDropped。
+func (gate *rateGate) stashWindows(rows []*store.GateWindow) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	gate.persistFailures++
+	gate.pendingWindows = append(gate.pendingWindows, rows...)
+	for len(gate.pendingWindows) > gatePersistRetryCap {
+		gate.pendingWindows = gate.pendingWindows[1:]
+		gate.persistDropped++
+	}
 }
 
 // reserve 返回当前 bg 准入必须为预期 fg 需求让出的槽数：fg 速率 EMA
@@ -644,6 +689,8 @@ func (gate *rateGate) stats() GateStats {
 		Reserve:         gate.reserve(now, ws),
 		FgRate:          gate.fgRateEMA,
 		LastWindow:      gate.lastWindow,
+		PersistFailures: gate.persistFailures,
+		PersistDropped:  gate.persistDropped,
 	}
 	if gate.quota > 0 {
 		open := ws
