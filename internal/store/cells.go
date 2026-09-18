@@ -450,6 +450,18 @@ func upsertCells(ctx context.Context, tx *sql.Tx, cells map[cellDim]*cellVals, e
 // Open 收尾固定调它闭合这类缝隙（9-19 实证 7,634 行险些永隐），
 // ImportLegacy 收尾再补一次导入期写入；常规调用是 id>水位 的空扫。
 func (s *Store) ReconcileCells(ctx context.Context) error {
+	// 无未记账行时纯读快退：水位随每行双写推进，缝隙只来自绕过
+	// 双写的写入者，常规启动这里是空扫——但即便是空扫，写事务在
+	// 共享库（交接期与在役实例并发）上也会被在役写流饿死到
+	// SQLITE_BUSY，让本可无锁的路径死在启动期。
+	var uncovered int
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM logs WHERE id > `+cellsWatermarkSQL+`)`).Scan(&uncovered); err != nil {
+		return err
+	}
+	if uncovered == 0 {
+		return nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
