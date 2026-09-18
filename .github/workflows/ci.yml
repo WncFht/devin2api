@@ -307,3 +307,7 @@ jobs:
 
       - name: Lint
         run: npm run lint:md
+
+      # 与 pre-commit 的 yaml-comment-width 同源：注释行 ≤80 显示列（CJK=2）
+      - name: YAML comment width
+        run: python3 scripts/check-yaml-comments.py

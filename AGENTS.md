@@ -112,7 +112,7 @@
 
 ## 格式化工具链
 
-`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
+`*.md` 提交会走 pre-commit：markdownlint-cli2 --fix 原地修规则 → `autocorrect --stdin | prettier` 经 git-format-staged 只写 index（commit 不被格式化阻断，不碰工作区未暂存内容）；`*.go` 走 gofmt（同机制）；`*.yaml`/`*.yml` 走 `scripts/check-yaml-comments.py`（check 类：纯注释行 ≤80 显示列、CJK 按 2 列计；断点取标点/从句边界是人工活，机械重排用 vim `gq`/VS Code Rewrap）。版本以 `package.json` 为准。前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`。markdownlint 原地改写文件时会 fail 一次，重新 `git add` 再提交。
 
 改 Go 代码提交前跑 `golangci-lint run`（规则见 `.golangci.yml`：default:none + 显式启用 bodyclose/errcheck/govet/revive/staticcheck/unused），`golangci-lint fmt` 修 gofmt/goimports；CI golangci job 同配置，本地不过 CI 必挂。全量工具链说明见 `docs/toolchain.md`。
 

@@ -8,24 +8,26 @@
 
 - `*.md`：`markdownlint-cli2 --fix` 原地修可自动修的规则 → `autocorrect --stdin | prettier` 写 index。markdownlint 原地改写文件时会 fail 一次，**重新 `git add` 再提交**即可，不是错误。
 - `*.go`：`gofmt` 走同一机制。
+- `*.yaml`/`*.yml`：`scripts/check-yaml-comments.py` 查纯注释行 ≤80 显示列（CJK 按 2 列计，check 类、失败才拦）。约定是「≤80 显示列 + 断点取标点/从句边界」——宽度机检、断点只能人工；没有任何 formatter 会重排注释文字（prettier 保留原文、js-yaml/PyYAML 丢注释，该约定纯手写维护），机械重排用编辑器 reflow（vim `gq` / VS Code Rewrap）。yaml 结构格式（缩进/引号）不进门——仓内 yaml 以 config.example.yaml 的注释面为主，prettier 重排它的收益不够付全仓 churn。
 - 全补丁：gitleaks 密钥扫描（v8.30.1 上游 hook，自定义规则在 `.gitleaks.toml`——GitHub push protection 只认标准 pattern，`devin-session-token$` 这类自有格式靠它拦）。
 - markdownlint / prettier / autocorrect 的版本锁定在 `package.json`（`npm install` + `npm ci` 在 CI 复现），autocorrect 本机经 `brew install autocorrect` 提供。
 
 ## 2. 本地验证
 
-| 命令                                 | 覆盖                                                         | 说明                                                                                                                                        |
-| ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `golangci-lint run`                  | bodyclose / errcheck / govet / revive / staticcheck / unused | `.golangci.yml` 用 `default: none` + 显式点名，升级 golangci 不会被新增默认 linter 偷袭。revive 的 `exported`（导出符号注释）按仓库约定关闭 |
-| `golangci-lint fmt`                  | gofmt + goimports                                            | goimports 的 `local-prefixes` 是 `github.com/WncFht/devin2api`（**必须是 YAML 数组**，标量写法 `run` 能过但 `config verify` 拒收）          |
-| `go vet ./...`                       | 编译期检查                                                   |                                                                                                                                             |
-| `go test -race ./...`                | 单测 + race                                                  |                                                                                                                                             |
-| `GOOS=windows go build/vet ./...`    | 交叉编译                                                     | 防止引入 unix-only 调用打断其它平台；darwin 同理                                                                                            |
-| `bash scripts/deploy-assets.test.sh` | 部署资产断言                                                 | 见 §6                                                                                                                                       |
-| `bash scripts/release-selftest.sh`   | release.sh 全流程演练                                        | 见 §5，**改 release.sh 后必跑**                                                                                                             |
-| `npm run format:check` / `lint:md`   | markdown 格式/规则                                           | 与 pre-commit 同套版本                                                                                                                      |
-| `actionlint`（若装了）               | workflow 语法                                                | CI 不跑它，本地自查                                                                                                                         |
+| 命令                                     | 覆盖                                                         | 说明                                                                                                                                        |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `golangci-lint run`                      | bodyclose / errcheck / govet / revive / staticcheck / unused | `.golangci.yml` 用 `default: none` + 显式点名，升级 golangci 不会被新增默认 linter 偷袭。revive 的 `exported`（导出符号注释）按仓库约定关闭 |
+| `golangci-lint fmt`                      | gofmt + goimports                                            | goimports 的 `local-prefixes` 是 `github.com/WncFht/devin2api`（**必须是 YAML 数组**，标量写法 `run` 能过但 `config verify` 拒收）          |
+| `go vet ./...`                           | 编译期检查                                                   |                                                                                                                                             |
+| `go test -race ./...`                    | 单测 + race                                                  |                                                                                                                                             |
+| `GOOS=windows go build/vet ./...`        | 交叉编译                                                     | 防止引入 unix-only 调用打断其它平台；darwin 同理                                                                                            |
+| `bash scripts/deploy-assets.test.sh`     | 部署资产断言                                                 | 见 §6                                                                                                                                       |
+| `bash scripts/release-selftest.sh`       | release.sh 全流程演练                                        | 见 §5，**改 release.sh 后必跑**                                                                                                             |
+| `npm run format:check` / `lint:md`       | markdown 格式/规则                                           | 与 pre-commit 同套版本                                                                                                                      |
+| `python3 scripts/check-yaml-comments.py` | yaml 注释宽度（显示列）                                      | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                    |
+| `actionlint`（若装了）                   | workflow 语法                                                | CI 不跑它，本地自查                                                                                                                         |
 
-前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`。Linux 无 brew 时的等价装法（archbox 实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
+前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`（git-format-staged 与 yaml 注释检查共用）。Linux 无 brew 时的等价装法（archbox 实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
 
 写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（smoke/release/perf-snapshot/deploy-remote 全是这个写法，新脚本照抄）。
 

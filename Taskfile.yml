@@ -1,8 +1,11 @@
 # proto 提取与 Go 绑定生成。
 #
 # 两条链路：
-#   task extract BINARY=<上游二进制>  ① 二进制 → outputs/devin-proto/（不可复现，需上游二进制 + 抓包）
-#   task generate                      ② outputs/devin-proto/ → outputs/devin-proto-go/（可复现，产物已提交进 git；仅 proto 变化后需重跑）
+#   task extract BINARY=<上游二进制>
+#       ① 二进制 → outputs/devin-proto/（不可复现，需上游二进制 + 抓包）
+#   task generate
+#       ② outputs/devin-proto/ → outputs/devin-proto-go/（可复现，
+#         产物已提交进 git；仅 proto 变化后需重跑）
 #
 # 依赖：
 #   ① 无（protoextract 是仓库内 Go 工具）
