@@ -99,7 +99,7 @@ func (h *Handler) adminActiveRequests(w http.ResponseWriter, _ *http.Request) {
 	// 本服务无标题生成能力，恒 false。
 	titleEnabled := false
 	writeEnvelope(w, http.StatusOK, apiResponse{
-		Success: true, Data: out, Count: len(out),
+		Success: true, Data: out, Count: intPtr(len(out)),
 		ActiveRequestTitleEnabled: &titleEnabled,
 	})
 }

@@ -273,20 +273,21 @@ func (h *Handler) logQuery(r *http.Request) (store.LogQuery, bool) {
 // rejects 是全局环（含各来源
 // ip/key_hash/ua/path），只对 admin 身份附——api_token 的数据范围
 // 限定在自己令牌的行，全局环会把他人流量痕迹泄漏给持钥人。
-func (h *Handler) respondLogEntries(w http.ResponseWriter, r *http.Request, entries []logEntry, total int, hasMore bool) {
+func (h *Handler) respondLogEntries(w http.ResponseWriter, r *http.Request, entries []logEntry, count *int, hasMore bool) {
 	var rejects any
 	if h.metrics != nil && identityFrom(r).Role == "admin" {
 		rejects = h.metrics.Rejects()
 	}
 	writeEnvelope(w, http.StatusOK, apiResponse{
-		Success: true, Data: entries, Count: total, HasMore: hasMore, Rejects: rejects,
+		Success: true, Data: entries, Count: count, HasMore: hasMore, Rejects: rejects,
 	})
 }
 
 // dashboardLogs 实现 ccLoad 的 /dashboard|/admin/logs（HandleErrors）：
-// data=日志行数组（新在前），count=筛选命中总数（SQL COUNT(*) 精确值）；
-// limit 默认 200、上限 1000。has_more=还有未翻到的命中行，或时间窗下界
-// 之外仍有更早历史。
+// data=日志行数组（新在前），count=筛选命中总数（SQL COUNT(*) 精确值，
+// 仅首页返回——深页翻页时全窗计数 ~0.7-1s/页是纯税，字段缺席走前端
+// 既有降级分支）；limit 默认 200、上限 1000。has_more=还有未翻到的
+// 命中行（深页用 limit+1 探测），或时间窗下界之外仍有更早历史。
 func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -301,7 +302,6 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	lq, excluded := h.logQuery(r)
-	lq.Limit = limit
 	lq.Offset = offset
 	// before_id 是 keyset 翻页游标（传上一页最旧行的 id）：深页
 	// OFFSET 随页深线性退化，id 范围谓词走主键恒定成本。两参数
@@ -309,8 +309,16 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	if beforeID, err := strconv.ParseInt(q.Get("before_id"), 10, 64); err == nil && beforeID > 0 {
 		lq.BeforeID = beforeID
 	}
+	// 首页（无 offset/before_id）才付精确 COUNT(*)；深页多取一行
+	// 判 has_more，与 count 缺席的前端降级语义一致。
+	firstPage := lq.Offset == 0 && lq.BeforeID == 0
+	lq.Limit = limit
+	if !firstPage {
+		lq.Limit = limit + 1
+		lq.SkipCount = true
+	}
 	if h.store == nil || excluded {
-		h.respondLogEntries(w, r, []logEntry{}, 0, false)
+		h.respondLogEntries(w, r, []logEntry{}, nil, false)
 		return
 	}
 	rows, total, err := h.store.SearchLogs(r.Context(), lq)
@@ -319,6 +327,11 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("ccpanel: logs search failed", "error", err)
 		respondError(w, http.StatusInternalServerError, "logs query failed")
 		return
+	}
+	hasMore := false
+	if !firstPage && len(rows) > limit {
+		rows = rows[:limit]
+		hasMore = true
 	}
 	prices := h.CatalogPrices(r.Context())
 	var tokensByHash map[string]*authtoken.Token
@@ -335,13 +348,19 @@ func (h *Handler) dashboardLogs(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		entries = append(entries, h.projectLogEntry(row, prices, tokensByHash))
 	}
-	hasMore := total > int64(offset+len(rows))
+	if firstPage {
+		hasMore = total > int64(len(rows))
+	}
 	if !hasMore {
 		if before, err := h.store.ExistsLogBefore(r.Context(), lq); err == nil {
 			hasMore = before
 		}
 	}
-	h.respondLogEntries(w, r, entries, int(total), hasMore)
+	var count *int
+	if firstPage {
+		count = intPtr(int(total))
+	}
+	h.respondLogEntries(w, r, entries, count, hasMore)
 }
 
 // dashboardLogsBootstrap 实现 /dashboard|/admin/logs/bootstrap

@@ -197,6 +197,10 @@ type LogQuery struct {
 	// Limit<=0 表示不限（LIMIT -1）；Offset<0 按 0。
 	Limit  int
 	Offset int
+	// SkipCount 置位时 SearchLogs 省略 COUNT(*) 返回 total=-1：深页
+	// 翻页不需要精确命中数（列表页有缺省降级路径），生产全窗计数
+	// ~0.7-1s/页是纯税。调用方需自行用 limit+1 探测判 has_more。
+	SkipCount bool
 }
 
 // where 把 LogQuery 编译成 WHERE 片段（含前导 " WHERE "）与参数。
@@ -372,6 +376,9 @@ func (s *Store) SearchLogs(ctx context.Context, q LogQuery) (rows []*LogRow, tot
 	}
 	if err := sqlRows.Err(); err != nil {
 		return nil, 0, err
+	}
+	if q.SkipCount {
+		return rows, -1, nil
 	}
 	if err := s.ro.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {

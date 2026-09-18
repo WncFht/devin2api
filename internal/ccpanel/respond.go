@@ -12,7 +12,9 @@ type apiResponse struct {
 	Success bool   `json:"success"`
 	Data    any    `json:"data"`
 	Error   string `json:"error"`
-	Count   int    `json:"count"`
+	// Count 是筛选命中总数；nil 时字段缺席——深页翻页不付全窗
+	// COUNT(*) 的税，前端按既有缺省降级路径处理页数。
+	Count *int `json:"count,omitempty"`
 	// HasMore 为真表示索引尾部读取窗之外仍有更早历史（count 只是窗内下界）。
 	HasMore bool `json:"has_more,omitempty"`
 	// Rejects 附带管线前拒绝环（401/429 等不进索引的拒绝），形状与
@@ -36,6 +38,8 @@ func writeEnvelope(w http.ResponseWriter, code int, body apiResponse) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+func intPtr(v int) *int { return &v }
 
 // decodeJSON 解码写端点的 JSON 请求体（上限 1MB）；失败时已写 400
 // 响应并返回 false。错误文案不参与前端契约（前端只按 success/error

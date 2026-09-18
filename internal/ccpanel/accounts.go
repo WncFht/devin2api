@@ -265,7 +265,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 	writeEnvelope(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data:    map[string]any{"accounts": views},
-		Count:   len(views),
+		Count:   intPtr(len(views)),
 	})
 }
 
