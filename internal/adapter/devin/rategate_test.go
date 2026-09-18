@@ -1186,7 +1186,7 @@ func TestRateGateYieldFastFail(t *testing.T) {
 	}
 	probed := 0
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	ctx := adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 2500 * time.Millisecond, true })
 	start := time.Now()
 	err := gate.wait(ctx)
 	if d := time.Since(start); d > time.Second {
@@ -1202,6 +1202,14 @@ func TestRateGateYieldFastFail(t *testing.T) {
 	// Retry-After 按底层成因同口径：桶满报下一窗口开放剩余 ~52s。
 	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 53 {
 		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
+	}
+	// 让位探针量随拒绝出账：本侧探针是桶满睡眠折算（~52s>阈值），
+	// 兄弟侧带回谓词报告的期望排队。
+	if gateErr.GateProbeMS < 50000 || gateErr.GateProbeMS > 54000 {
+		t.Fatalf("GateProbeMS = %d, want ~52s probe wait", gateErr.GateProbeMS)
+	}
+	if gateErr.GateSiblingEwMS != 2500 {
+		t.Fatalf("GateSiblingEwMS = %d, want 2500 (predicate report)", gateErr.GateSiblingEwMS)
 	}
 	if got := gate.stats().RejectYield; got != 1 {
 		t.Fatalf("stats().RejectYield = %d, want 1", got)
@@ -1234,7 +1242,7 @@ func TestRateGateYieldPredicateGating(t *testing.T) {
 	// 谓词答否：问过但不快败。
 	probed := 0
 	gate := fullGate()
-	ctx := adapter.WithGateYield(context.Background(), func() bool { probed++; return false })
+	ctx := adapter.WithGateYield(context.Background(), func() (time.Duration, bool) { probed++; return 0, false })
 	if err := bgWait(gate, ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("false-predicate wait error = %v, want context.DeadlineExceeded", err)
 	}
@@ -1248,7 +1256,7 @@ func TestRateGateYieldPredicateGating(t *testing.T) {
 	dead := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	pinGateClock(dead, 58.5)
 	probed = 0
-	ctx = adapter.WithGateYield(context.Background(), func() bool { probed++; return true })
+	ctx = adapter.WithGateYield(context.Background(), func() (time.Duration, bool) { probed++; return 0, true })
 	if err := bgWait(dead, ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("short-wait error = %v, want context.DeadlineExceeded", err)
 	}
@@ -1284,7 +1292,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	// 底层成因同口径报下一窗口 ~52s。
 	probed := 0
 	gate := newReserveBlocked()
-	ctx := adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, true })
 	err := gate.wait(ctx)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonYield {
@@ -1292,6 +1300,11 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	}
 	if probed == 0 {
 		t.Fatal("yield predicate was not consulted on reserveBlocked path")
+	}
+	// reserveBlocked 的探针是 expectedWait 口径（~37s）而非 ≤4s 的重查
+	// 睡眠——探针量落账须带同一口径才审得出让位对错。
+	if gateErr.GateProbeMS <= int64(gateEarlyRelease/time.Millisecond) {
+		t.Fatalf("GateProbeMS = %d, want expectedWait-scale probe > %d", gateErr.GateProbeMS, gateEarlyRelease/time.Millisecond)
 	}
 	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 54 {
 		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
@@ -1302,7 +1315,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	// 谓词答否：探针照样被问过，但不快败——回落 gateBgRecheck 重查。
 	probed = 0
 	gate = newReserveBlocked()
-	ctx = adapter.WithGateYield(bgCtx, func() bool { probed++; return false })
+	ctx = adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, false })
 	cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	if err := gate.wait(cancelCtx); !errors.Is(err, context.DeadlineExceeded) {
@@ -1325,7 +1338,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	boundary.bucketUsedBg = 2
 	boundary.mu.Unlock()
 	probed = 0
-	ctx = adapter.WithGateYield(bgCtx, func() bool { probed++; return true })
+	ctx = adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, true })
 	boundCtx, boundCancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer boundCancel()
 	if err := boundary.wait(boundCtx); !errors.Is(err, context.DeadlineExceeded) {
@@ -1350,7 +1363,7 @@ func TestRateGateYieldPersistsInWindow(t *testing.T) {
 		t.Fatalf("seed wait error = %v, want pass", err)
 	}
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	ctx := adapter.WithGateYield(bgCtx, func() bool { return true })
+	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { return 0, true })
 	if err := gate.wait(ctx); err == nil {
 		t.Fatal("bucket-full yield wait should be rejected")
 	}

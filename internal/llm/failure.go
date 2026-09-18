@@ -52,6 +52,15 @@ type Failure struct {
 	// rate gate 产出），仅 LocalGate 置位时有值；HTTP 层据此写
 	// X-Gate-Reason 响应头。
 	GateReason string
+	// GateProbeMS 是产生本次拒绝的那次闸门评估测得的本侧期望排队
+	// 毫秒数——让位探针的同一量：闩内是闩剩余，排队阻塞是单次睡眠
+	// 折算，bg 预留/爬坡阻塞是 expectedWait 口径；bound_yield 行是
+	// 选号时刻的 expectedWait 快照。仅 LocalGate 置位时有值。
+	GateProbeMS int64
+	// GateSiblingEwMS 是该次评估让位判定咨询到的兄弟 lane 期望排队
+	// 最小值毫秒；0 表示该次评估未咨询兄弟（无谓词挂接、期望排队
+	// 未达让位阈值或非闸门拒绝）。
+	GateSiblingEwMS int64
 
 	// 以下由 Classify 派生填充。
 

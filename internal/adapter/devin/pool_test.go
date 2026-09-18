@@ -1565,6 +1565,11 @@ func TestPoolBoundYieldLedger(t *testing.T) {
 	if attempt.Account != "a" || !attempt.LocalGate || attempt.GateReason != "bound_yield" {
 		t.Fatalf("attempt = %+v, want a/local_gate/bound_yield", attempt)
 	}
+	// 让位审计字段：本侧探针是 bound lane 闩内期望排队（>0），兄弟侧
+	// 是挤下它的 b 的 expectedWait——让位谓词保证 sv.ew < bv.ew。
+	if attempt.GateProbeMS <= 0 || attempt.GateSiblingEwMS >= attempt.GateProbeMS {
+		t.Fatalf("yield audit fields = probe:%d sibling:%d, want bound lane's ew > sibling's", attempt.GateProbeMS, attempt.GateSiblingEwMS)
+	}
 	day := time.Now().Local().Format("2006-01-02")
 	causes, err := db.LaneAttemptCauses(context.Background(), day)
 	if err != nil {

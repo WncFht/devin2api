@@ -1097,7 +1097,11 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 			gate.rejectLatched++
 			gate.winRejectLatch++
 			gate.mu.Unlock()
-			return gateRejection(retryAfter, gateReasonLatch)
+			rej := gateRejection(retryAfter, gateReasonLatch)
+			// 闩内期望排队即闩剩余（expectedWaitLocked 闩分支同值）——
+			// 本侧探针量随拒绝行落账，让位审计能复现当次评估现场。
+			rej.GateProbeMS = retryAfter.Milliseconds()
+			return rej
 		}
 		if gate.quota <= 0 {
 			// 不限速放行仍是一次真实上游发送：照常记桶，窗口行的
@@ -1165,12 +1169,16 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		if reserveBlocked {
 			probeWait = gate.expectedWaitLocked(class, now, ws, gate.bucketUsed, sendable)
 		}
+		// siblingEW 是本次评估让位判定咨询到的兄弟最小期望排队；未咨询
+		//（无谓词或探针未达阈值）保持零值，拒绝行按零值缺席。
+		var siblingEW time.Duration
 		if probeWait > gateEarlyRelease {
 			if yield := adapter.GateYieldFrom(ctx); yield != nil {
 				gate.mu.Unlock()
-				siblingFree := yield()
+				var free bool
+				siblingEW, free = yield()
 				gate.mu.Lock()
-				if siblingFree {
+				if free {
 					gate.rejectYield++
 					gate.winRejectYield++
 					gate.mu.Unlock()
@@ -1178,7 +1186,10 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 					if reason == gateReasonQuota {
 						retryAfter = ws.Add(windowPeriod).Sub(now)
 					}
-					return gateRejection(retryAfter, gateReasonYield)
+					rej := gateRejection(retryAfter, gateReasonYield)
+					rej.GateProbeMS = probeWait.Milliseconds()
+					rej.GateSiblingEwMS = siblingEW.Milliseconds()
+					return rej
 				}
 			}
 		}
@@ -1201,7 +1212,10 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 				retryAfter = ws.Add(windowPeriod).Sub(now)
 			}
 			gate.mu.Unlock()
-			return gateRejection(retryAfter, reason)
+			rej := gateRejection(retryAfter, reason)
+			rej.GateProbeMS = probeWait.Milliseconds()
+			rej.GateSiblingEwMS = siblingEW.Milliseconds()
+			return rej
 		}
 		if bg {
 			gate.waitersBg++

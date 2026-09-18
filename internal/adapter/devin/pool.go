@@ -310,7 +310,12 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	// 同事务展开进 lane_attempt_causes 与 account_switches；否则这类
 	// 移动只剩 pool_candidates.reason，随 payload 保留期一起淘汰。
 	if bi := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound && c.yielded }); bi > 0 {
-		recorder.NoteAccountAttempt(ranked[bi].lane.name, errBoundYield)
+		// 让位探针量随尝试行落账：bound 侧选号时刻的 expectedWait 与
+		// 挤下它的兄弟 ew——与闸门 yield 同一组审计字段。
+		attempt := *errBoundYield
+		attempt.GateProbeMS = ranked[bi].verdict.expectedWait.Milliseconds()
+		attempt.GateSiblingEwMS = ranked[bi].yieldEW.Milliseconds()
+		recorder.NoteAccountAttempt(ranked[bi].lane.name, &attempt)
 	}
 	// 在飞钉选登记：本请求占据亲和键的一个在飞名额，同键并发后继
 	// 按此钉到同一 lane；release 与首个成功开流的 bind 同刻发生——
@@ -540,10 +545,11 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 
 // poolCandidate 是排序时的一次性评估快照：verdict 是 lane 当时的健康
 // 判定与降级归因，bound 是绑定命中标记，yielded 是本轮绑定让位标记
-// （bound 保留审计语义，居首特权被摘掉），pinned 是在飞钉选命中标记，
-// score 是 rendezvous 分数，weight 是健康权重（压力×相对 TTFB），
-// key 是加权 HRW 键 u^(1/w)（末位排序键，大者居前——同亲和键下各
-// lane 的选中概率 ∝ w）。
+// （bound 保留审计语义，居首特权被摘掉），yieldEW 是把 bound 挤下
+// 首位的兄弟的 expectedWait（bound_yield 尝试行的 gate_sibling_ew_ms
+// 来源），pinned 是在飞钉选命中标记，score 是 rendezvous 分数，weight
+// 是健康权重（压力×相对 TTFB），key 是加权 HRW 键 u^(1/w)（末位
+// 排序键，大者居前——同亲和键下各 lane 的选中概率 ∝ w）。
 // 快照语义保证审计行（pool_candidates）与排序决策同源——不在排完序后
 // 再评一次，避免两次评估之间的状态翻转让审计与决策对不上。
 type poolCandidate struct {
@@ -554,6 +560,7 @@ type poolCandidate struct {
 	verdict  laneVerdict
 	bound    bool
 	yielded  bool
+	yieldEW  time.Duration
 	pinned   bool
 	priority int32
 }
@@ -683,6 +690,7 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 				(!bv.healthy && sv.expectedWait <= gateEarlyRelease && sv.expectedWait < bv.expectedWait)
 			if yield {
 				candidates[bi].yielded = true
+				candidates[bi].yieldEW = sv.expectedWait
 				break
 			}
 		}
@@ -728,22 +736,23 @@ func (pool *Pool) detachedPeerRegistries() map[string]*detachedRegistry {
 
 // gateYield 给一次 lane 尝试装「兄弟 lane 此刻能更快放行吗」的活探针：
 // 闸门预计排队超 gateEarlyRelease 时会问一次，任一剩余候选的
-// expectedWait 落进阈值即让位快败交给 failover。siblings 是本次尝试
-// 之后的候选集（克隆快照）——谓词可能活在泵协程上到 swap 已推进
-// rest，快照语义稳定免锁竞争；略陈旧的候选集只让让位偏积极（换号
-// 目标走实时 rest，不受影响）。空候选集不挂接，闸门走原有排队语义。
+// expectedWait 落进阈值即让位快败交给 failover。答数带兄弟侧最小
+// expectedWait——随拒绝记入尝试行（gate_sibling_ew_ms）供逐次让位
+// 审计。siblings 是本次尝试之后的候选集（克隆快照）——谓词可能活在
+// 泵协程上到 swap 已推进 rest，快照语义稳定免锁竞争；略陈旧的候选
+// 集只让让位偏积极（换号目标走实时 rest，不受影响）。空候选集不
+// 挂接，闸门走原有排队语义。
 func gateYield(ctx context.Context, class string, siblings []*poolLane) context.Context {
 	if len(siblings) == 0 {
 		return ctx
 	}
 	rest := slices.Clone(siblings)
-	return adapter.WithGateYield(ctx, func() bool {
+	return adapter.WithGateYield(ctx, func() (time.Duration, bool) {
+		minEW := time.Duration(math.MaxInt64)
 		for _, lane := range rest {
-			if lane.verdict(class).expectedWait <= gateEarlyRelease {
-				return true
-			}
+			minEW = min(minEW, lane.verdict(class).expectedWait)
 		}
-		return false
+		return minEW, minEW <= gateEarlyRelease
 	})
 }
 

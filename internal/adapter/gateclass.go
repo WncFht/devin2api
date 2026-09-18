@@ -8,6 +8,7 @@ package adapter
 import (
 	"context"
 	"sync/atomic"
+	"time"
 )
 
 // 请求类取值：fg 是默认（含未注入 ctx 的请求——存量与匿名流量全部
@@ -69,16 +70,18 @@ func GateContextFrom(ctx context.Context) *GateContext {
 
 // WithGateYield 把「兄弟 lane 此刻能否更快放行」的活探针挂进 ctx：
 // 号池在每次 lane 尝试前按剩余候选装填，闸门预计排队将超让位阈值时
-// 问一次，答真即提前快败把请求交给 failover。谓词在闸锁外求值——
-// 实现不得依赖调用方持有任何锁（它会去拿兄弟 lane 自己的闸锁）。
-func WithGateYield(ctx context.Context, yield func() bool) context.Context {
+// 问一次，答真即提前快败把请求交给 failover。答数带兄弟侧期望排队
+// 最小值 siblingEW——随拒绝记入尝试行供逐次让位审计；free 表示有
+// 兄弟落进让位阈值。谓词在闸锁外求值——实现不得依赖调用方持有任何
+// 锁（它会去拿兄弟 lane 自己的闸锁）。
+func WithGateYield(ctx context.Context, yield func() (siblingEW time.Duration, free bool)) context.Context {
 	return context.WithValue(ctx, gateYieldKey{}, yield)
 }
 
 // GateYieldFrom 取回 ctx 上的让位谓词；未挂接返回 nil——单 lane 与
 // 无池部署下闸门按 nil 跳过让位判定。
-func GateYieldFrom(ctx context.Context) func() bool {
-	yield, _ := ctx.Value(gateYieldKey{}).(func() bool)
+func GateYieldFrom(ctx context.Context) func() (siblingEW time.Duration, free bool) {
+	yield, _ := ctx.Value(gateYieldKey{}).(func() (time.Duration, bool))
 	return yield
 }
 

@@ -138,16 +138,23 @@ type RetryAttempt struct {
 // Code/Message 是它放弃时的分类码与文案（截断至 errorMessageCap）。
 // LocalGate/GateReason 区分「零上游成本的本地闸门快败」（幻影换号——
 // Code 同样是 resource_exhausted，单看 Code 分不出真假限流）与真实
-// failover 发送。注意 error.json 是 first-write-wins：failover 救回的
-// 请求目录里仍留有首个失败 lane 的 error.json——它描述的是「第一次
-// 失败」而非「最终下发给客户端的结果」，终局 lane 看 upstream_account。
+// failover 发送。GateProbeMS/GateSiblingEwMS 是产出本行的那次评估的
+// 让位探针量：本侧期望排队毫秒数（闩剩余/单次睡眠折算/bg 预留口径的
+// expectedWait，bound_yield 行是选号时刻同口径快照）与咨询到的兄弟
+// lane 最小期望排队毫秒数——逐次让位决策的审计面；后者在该次评估未
+// 咨询兄弟（无谓词/未达阈值）或非闸门行时缺席。注意 error.json 是
+// first-write-wins：failover 救回的请求目录里仍留有首个失败 lane 的
+// error.json——它描述的是「第一次失败」而非「最终下发给客户端的
+// 结果」，终局 lane 看 upstream_account。
 type AccountAttempt struct {
-	Account    string `json:"account"`
-	Code       string `json:"code,omitempty"`
-	Message    string `json:"message,omitempty"`
-	ElapsedMS  int64  `json:"elapsed_ms"`
-	LocalGate  bool   `json:"local_gate,omitempty"`
-	GateReason string `json:"gate_reason,omitempty"`
+	Account         string `json:"account"`
+	Code            string `json:"code,omitempty"`
+	Message         string `json:"message,omitempty"`
+	ElapsedMS       int64  `json:"elapsed_ms"`
+	LocalGate       bool   `json:"local_gate,omitempty"`
+	GateReason      string `json:"gate_reason,omitempty"`
+	GateProbeMS     int64  `json:"gate_probe_ms,omitempty"`
+	GateSiblingEwMS int64  `json:"gate_sibling_ew_ms,omitempty"`
 }
 
 // DetachedEvent 是 04 脱钩标记行在 meta.json 的镜像条目：kind 即 04

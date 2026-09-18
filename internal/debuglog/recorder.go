@@ -1842,7 +1842,9 @@ func (recorder *Recorder) SetUpstreamAccount(account string) {
 // 有序尝试表是「为什么换号」的归因痕迹（救回的请求仍可能有首失败
 // lane 的 error.json，见 accountAttempt 说明）；LocalGate 区分
 // 幻影换号（本地闸门快败，零上游发送）与真实 failover 发送，持久
-// 聚合口径（lane_attempt_causes 表）也从这里取因。
+// 聚合口径（lane_attempt_causes 表）也从这里取因。GateProbeMS/
+// GateSiblingEwMS 随行带出当次评估的让位探针量（本侧期望排队与咨询
+// 到的兄弟最小期望排队）——逐次让位决策的审计字段。
 func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	if recorder == nil {
 		return
@@ -1856,6 +1858,8 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 		attempt.Message = truncateRunes(failure.Message, errorMessageCap)
 		attempt.LocalGate = failure.LocalGate
 		attempt.GateReason = failure.GateReason
+		attempt.GateProbeMS = failure.GateProbeMS
+		attempt.GateSiblingEwMS = failure.GateSiblingEwMS
 	}
 	recorder.mutex.Lock()
 	recorder.accountAttempts = append(recorder.accountAttempts, attempt)
