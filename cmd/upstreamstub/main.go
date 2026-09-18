@@ -52,6 +52,7 @@ func main() {
 		_, _ = io.Copy(io.Discard, r.Body)
 		jsonWire := r.Header.Get("Content-Type") == "application/connect+json"
 		n := requestCount.Add(1)
+		log.Printf("request #%d scenario=%s", n, *scenario)
 		contentType := "application/connect+proto"
 		if jsonWire {
 			contentType = "application/connect+json"
@@ -65,7 +66,7 @@ func main() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-			log.Printf("request #%d scenario=stall: headers sent, hanging", n)
+			log.Printf("stall: headers sent, hanging")
 			time.Sleep(5 * time.Minute)
 			return
 		case "midcontent":
@@ -110,7 +111,7 @@ func main() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-			log.Printf("request #%d scenario=end-hang: stream complete, hanging", n)
+			log.Printf("end-hang: stream complete, hanging")
 			time.Sleep(5 * time.Minute)
 			return
 		case "heartbeat":
@@ -172,7 +173,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write(body)
-		log.Printf("request #%d scenario=%s bytes=%d", n, *scenario, len(body))
+		log.Printf("done #%d bytes=%d", n, len(body))
 	})
 	// 其余 RPC（GetCliModelConfigs 等）不实现：直接断开让调用方走目录缺失路径。
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
