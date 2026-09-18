@@ -180,6 +180,10 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
+          # 只取构建产物——不过滤会连 build-push 上传的
+          # *.dockerbuild 记录一起拉，其 blob 在 job 重跑时可能已
+          # 失效，下载重试耗尽直接挂掉整个发布（v0.14.0 rerun 实录）。
+          pattern: devin-2api-*
           path: dist
           merge-multiple: true
 
