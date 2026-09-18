@@ -352,6 +352,55 @@ func TestCASDanglingRefSweep(t *testing.T) {
 	}
 }
 
+// TestCASReaperChunked 验证分片收尸的跨片推进与记账：孤儿体量超过
+// 单片行数上界时逐片删除提交，活行跨片存活，payload 计数器按各片
+// 真实删除减量后与权威聚合一致。
+func TestCASReaperChunked(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	live := putCASFile(t, s, ctx, "live", deltaBaseFileName, casCorpus("L", "L", 12000, 500))
+	// 绕过写路径直插孤儿行制造超界体量：refs 指空目录（文件行缺席
+	// 即悬垂），blobs 无引用且 created_at=0 已过宽限期。
+	if _, err := s.db.ExecContext(ctx,
+		`WITH RECURSIVE c(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+		INSERT INTO debug_chunk_refs(dir,name,hash) SELECT 'gone', 'f'||x, randomblob(16) FROM c`,
+		reapRefChunkRows*2+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`WITH RECURSIVE c(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM c WHERE x < ?)
+		INSERT INTO debug_blobs(hash,content,usize,created_at) SELECT randomblob(16), randomblob(128), 128, 0 FROM c`,
+		reapBlobChunkRows*2+1); err != nil {
+		t.Fatal(err)
+	}
+	// 直插绕过了记账路径，先权威对账把测试数据折进计数器再收尸。
+	sizes, err := s.DebugDirSizes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, n := range sizes {
+		total += n
+	}
+	blobBytes, err := s.DebugBlobBytes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileDebugPayloadBytes(ctx, total+blobBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReapOrphanBlobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := countTable(t, s, ctx, "debug_chunk_refs"); n != int64(len(live)) {
+		t.Fatalf("refs after reap = %d, want live %d", n, len(live))
+	}
+	if n := countTable(t, s, ctx, "debug_blobs"); n != int64(len(live)) {
+		t.Fatalf("blobs after reap = %d, want live %d", n, len(live))
+	}
+	assertPayloadBytes(t, s)
+}
+
 // TestCASManifestParseErrors 验证 manifest 解析的严格性：截断/尾随
 // 字节/尺寸不一致都显式报错——manifest 行破损即文件不可读。
 func TestCASManifestParseErrors(t *testing.T) {

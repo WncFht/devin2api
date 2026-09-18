@@ -214,10 +214,31 @@ const (
 )
 
 // walRestartBytes 是 Maintain 主动 wal_checkpoint(RESTART) 的触发阈值。
-// 正常流量下 wal_autocheckpoint(500) 把 WAL 压在 ~2MB；容量淘汰这类大
-// 事务一轮可写入数百 MB 帧，autocheckpoint 只随新写推进、空闲期不回收，
-// 超过此值说明自动回收追不上，手工收一次把 WAL 截回零帧。
-const walRestartBytes = 256 << 20
+// 正常流量下 wal_autocheckpoint(500) 把 WAL 压在 ~2MB；autocheckpoint 是
+// PASSIVE 语义，读者持快照就把它饿死，WAL 可积到数百 MB。阈值取 64MB：
+// 单次 RESTART 的回拷量以此封顶，配合 walCheckpointBudget 把写连接占用
+// 钳在 claim 预算（5s）之下。
+const walRestartBytes = 64 << 20
+
+// walCheckpointBudget 给 Maintain 单次 checkpoint 尝试的写连接占用封顶。
+// RESTART 要等全部读者越过 WAL 末尾才复位，等待上限本是 busy_timeout
+// 30s——读者饥饿时每次触发都打出数十秒独占。改用短 ctx 把「等不到」变成
+// 「下轮再来」：sqlite3_interrupt 中止 busy 等待与回拷，已拷页幂等无害，
+// WAL 留原状待下轮收。占用界随 WAL 体积缩放（128MB/s 回拷估计）保证
+// 任意大 WAL 一轮内可收——被中断的 checkpoint 不累计进度，固定 2s 会
+// 让 GB 级 WAL 永远收不掉；上限对齐 busy_timeout，超出时 RESTART 自己
+// 也等不住。
+const (
+	walCheckpointBudget    = 2 * time.Second
+	walCheckpointBudgetMax = 30 * time.Second
+)
+
+// walCheckpointTimeout 按 WAL 体积给出本轮 checkpoint 的 ctx 预算：
+// 吞吐估计 128MB/s 覆盖回拷 I/O，下界 2s 兜住短读者排空。
+func walCheckpointTimeout(walBytes int64) time.Duration {
+	scaled := time.Duration(walBytes/(128<<20)) * time.Second
+	return min(max(scaled, walCheckpointBudget), walCheckpointBudgetMax)
+}
 
 // IncrementalVacuum 回收 freelist 页——auto_vacuum=INCREMENTAL 只把
 // 删除页挂进 freelist，不显式跑这步 .db 文件不回缩（db_bytes 会与
@@ -271,14 +292,23 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	if err := s.IncrementalVacuum(ctx); err != nil {
 		errs = append(errs, err)
 	}
-	// WAL 体积纪律放在养护末尾：本轮全部删除/vacuum 的帧一次回写主库。
-	// RESTART 要等读者越过 WAL 末尾（busy_timeout 5s 兜住短暂重叠）；
-	// busy 未清只说明本轮没收干净，WAL 仍超阈下一轮重试，不算错误——
-	// 返回行本就无人消费，走 ExecContext 顺带进入慢占用计时。
-	if s.WALBytes() > walRestartBytes {
-		if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(RESTART)`); err != nil {
-			errs = append(errs, err)
-		}
+	// WAL 体积纪律放在养护末尾，每轮一次 checkpoint 尝试：超阈换
+	// RESTART 强制复位（读者排空等待由 walCheckpointTimeout 封顶，
+	// 超时中断不算没收干净——WAL 仍超阈下一轮重试）；未超阈跑
+	// PASSIVE——不等待读者、能收多少收多少，读间隙顺带复位，兜
+	// autocheckpoint 够不着的空闲尾部与低度饥饿。返回行本就无人
+	// 消费，走 ExecContext 顺带进入慢占用计时。
+	wal := s.WALBytes()
+	ckptCtx, cancel := context.WithTimeout(ctx, walCheckpointTimeout(wal))
+	var err error
+	if wal > walRestartBytes {
+		_, err = s.db.ExecContext(ckptCtx, `PRAGMA wal_checkpoint(RESTART)`)
+	} else {
+		_, err = s.db.ExecContext(ckptCtx, `PRAGMA wal_checkpoint(PASSIVE)`)
+	}
+	cancel()
+	if err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

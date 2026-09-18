@@ -931,46 +931,92 @@ func (s *Store) DebugBlobBytes(ctx context.Context) (int64, error) {
 // 指向失踪 blob）远高于滞后回收代价。
 const blobReapGrace = 10 * time.Minute
 
-// ReapOrphanBlobs 做 CAS 的 mark-sweep 收尸，两个 sweep 同一事务：
-// 先扫悬垂 ref——引用即行的保活前提是「(dir,name) 文件行还是
-// manifest」，文件行已死（回滚期旧二进制删 dir 不知 refs 表的泄漏
-// 路径）或被覆写/剥离成非 manifest（OR IGNORE 重放等）时 ref 已死，
-// 留着只会让 blob 假活。再删过宽限期仍无引用的 blob。写连接单线程
-// 串行化：NOT EXISTS 判定到删除提交之间没有并发写者能插入新引用
-// 撞破它。计数器按真实删除减量。挂在 Maintain 的周期养护里——对象
-// 是表不是目录，节奏与淘汰 tick 同量级即可，共享字节滞后释放。
+// reapRefChunkRows / reapBlobChunkRows 是 mark-sweep 单片事务的行数
+// 上界：ref 行 ~40B，成本在逐行 NOT EXISTS 探测；blob 行含 ~64KB 切块
+// 内容，页改动量主导——两者各取上界让单片占用远低于 claim 预算。
+const (
+	reapRefChunkRows  = 10000
+	reapBlobChunkRows = 256
+)
+
+// ReapOrphanBlobs 做 CAS 的 mark-sweep 收尸，两个 sweep 各自分片
+// （原先同一事务全量删除随 CAS 体量长到秒级，独占唯一写连接饿死
+// claim/写路径）。先扫悬垂 ref——引用即行的保活前提是「(dir,name)
+// 文件行还是 manifest」，文件行已死（回滚期旧二进制删 dir 不知
+// refs 表的泄漏路径）或被覆写/剥离成非 manifest（OR IGNORE 重放
+// 等）时 ref 已死，留着只会让 blob 假活。再删过宽限期仍无引用的
+// blob。每片内谓词复检与删除同事务原子完成，等价原单事务的
+// 「判定到提交无并发写者撞入」；片间中断下轮重枚举续删。挂在
+// Maintain 的周期养护里——对象是表不是目录，节奏与淘汰 tick
+// 同量级即可，共享字节滞后释放。
 func (s *Store) ReapOrphanBlobs(ctx context.Context) error {
-	tx, done, err := s.writeTx(ctx, "ReapOrphanBlobs")
-	if err != nil {
+	danglingRef := `NOT EXISTS (
+		SELECT 1 FROM debug_files
+		WHERE debug_files.dir = debug_chunk_refs.dir AND debug_files.name = debug_chunk_refs.name
+		AND substr(debug_files.content, 1, ?) = ?)`
+	if err := s.reapWhere(ctx, "ReapOrphanBlobs.refs", "debug_chunk_refs", danglingRef,
+		`LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, reapRefChunkRows, len(casMagic), casMagic); err != nil {
 		return err
 	}
-	defer done()
-	var freed int64
-	n, err := deleteReturningBytes(ctx, tx,
-		`DELETE FROM debug_chunk_refs WHERE NOT EXISTS (
-			SELECT 1 FROM debug_files
-			WHERE debug_files.dir = debug_chunk_refs.dir AND debug_files.name = debug_chunk_refs.name
-			AND substr(debug_files.content, 1, ?) = ?
-		) RETURNING LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, len(casMagic), casMagic)
-	if err != nil {
-		return err
-	}
-	freed += n
 	grace := time.Now().Add(-blobReapGrace).UnixMilli()
-	n, err = deleteReturningBytes(ctx, tx,
-		`DELETE FROM debug_blobs WHERE created_at < ? AND NOT EXISTS (
+	return s.reapWhere(ctx, "ReapOrphanBlobs.blobs", "debug_blobs",
+		`created_at < ? AND NOT EXISTS (
 			SELECT 1 FROM debug_chunk_refs WHERE debug_chunk_refs.hash = debug_blobs.hash
-		) RETURNING LENGTH(content)`, grace)
+		)`, `LENGTH(content)`, reapBlobChunkRows, grace)
+}
+
+// reapWhere 分片执行一个 mark-sweep 删除：先在读池把命中谓词的候选
+// rowid 枚举成快照（全表探扫不占写连接），再按 chunkRows 逐片在写
+// 事务内删除——DELETE 带完整谓词复检：枚举快照过期（ref/blob 在枚举
+// 后被重建、rowid 复用指向活行）时当片放生活行，只有仍满足死亡
+// 条件的当前行才被删。片级提交即进度，计数器按各片真实删除减量。
+func (s *Store) reapWhere(ctx context.Context, op, table, pred, sizeExpr string, chunkRows int, args ...any) error {
+	rows, err := s.ro.QueryContext(ctx, `SELECT rowid FROM `+table+` WHERE `+pred, args...)
 	if err != nil {
 		return err
 	}
-	freed += n
-	if err := addPayloadBytes(ctx, tx, -freed); err != nil {
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	_ = rows.Close()
+	for i := 0; i < len(ids); i += chunkRows {
+		chunk := ids[i:min(i+chunkRows, len(ids))]
+		delArgs := make([]any, 0, len(args)+len(chunk))
+		delArgs = append(delArgs, args...)
+		for _, id := range chunk {
+			delArgs = append(delArgs, id)
+		}
+		tx, done, err := s.writeTx(ctx, op)
+		if err != nil {
+			return err
+		}
+		freed, err := deleteReturningBytes(ctx, tx,
+			`DELETE FROM `+table+` WHERE `+pred+` AND rowid IN (`+placeholders(len(chunk))+`) RETURNING `+sizeExpr,
+			delArgs...)
+		if err != nil {
+			done()
+			return err
+		}
+		if err := addPayloadBytes(ctx, tx, -freed); err != nil {
+			done()
+			return err
+		}
+		err = tx.Commit()
+		done()
+		if err != nil {
+			return err
+		}
+		s.debugBytes.Add(-freed)
 	}
-	s.debugBytes.Add(-freed)
 	return nil
 }
