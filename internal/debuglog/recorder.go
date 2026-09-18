@@ -314,7 +314,8 @@ type Recorder struct {
 	// affinityHash、poolCandidates、startedAt 的测试回拨；worker 自身
 	// 状态无锁。
 	mutex sync.Mutex
-	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
+	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃（04
+	// 脱钩类标记行经 enqueueLockedExempt 豁免于本闸，语义见该函数）。
 	closed bool
 	// abortCancel 是请求 ctx 的带因取消函数，Abort 时以调用方给的归因
 	// 取消；nil 表示不可中断。
@@ -1125,7 +1126,9 @@ func shardOf(dir string) int {
 // goroutine、manager 关停中、写 worker 已退）改计 manager.lateWrites：
 // 属设计行为而非丢失，且 closed 置位后 recorder.dropped 已无人再读。
 // 持锁发送：closed 判定与入队在同一把锁内完成，Complete 置位后不可能
-// 再有任务渗进队列（否则它会排在排空哨兵之后，冲掉的缓冲永不再刷）。
+// 再有任务渗进队列（否则它会排在排空哨兵之后，冲刷次序与收尾脱钩）——
+// 唯一豁免是 04 脱钩类标记行（enqueueLockedExempt），它按设计落在
+// 哨兵之后、由下一轮周期 flushAll 收库。
 func (recorder *Recorder) enqueue(task func()) {
 	recorder.mutex.Lock()
 	defer recorder.mutex.Unlock()
@@ -1140,6 +1143,27 @@ func (recorder *Recorder) enqueueLocked(task func()) {
 		recorder.manager.lateWrites.Add(1)
 		return
 	}
+	recorder.sendTask(task)
+}
+
+// enqueueLockedExempt 是 enqueueLocked 的脱钩标记豁免形态：Complete 的
+// closed 闸对它放行——detached 类标记行是脱钩生命周期记账而非普通帧，
+// 消费方 Recv 内的脱钩登记与写出方 Complete 在 ctx.Done 上竞速（后台泵
+// 的 post-Complete 标记必然输家），被 closed 门口拒收会让脱钩现场整段
+// 蒸发。放行后的任务按序落进分片队列——可在排空哨兵之后，暂存缓冲由
+// 写 worker 的周期 flushAll 照收落库（冲刷不看 closed）。其余拒收面
+// （manager 关停、worker 已退、队列满）照原口径。
+func (recorder *Recorder) enqueueLockedExempt(task func()) {
+	if recorder.manager.closing.Load() {
+		recorder.manager.lateWrites.Add(1)
+		return
+	}
+	recorder.sendTask(task)
+}
+
+// sendTask 把任务非阻塞送进本请求的分片队列；队列满按真证据丢失计
+// dropped，worker 已退计 lateWrites。仅持锁路径调用（持锁期间不挂起）。
+func (recorder *Recorder) sendTask(task func()) {
 	select {
 	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
 	case <-recorder.manager.workerGone:
@@ -2069,13 +2093,18 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	if recorder == nil || !validLogName(name, ".jsonl") {
 		return
 	}
-	// 04 的脱钩类标记行同步打标：事件名即持久化词表（detached 原目录
-	// 脱钩登记、detached_attach 重试目录挂接命中、detached_truncated
-	// 缓冲截断），errors_only 的 interestingSuccess 据此判「有趣」。
+	// 04 的脱钩类标记行有两个待遇：detachedSeen（不含跨 lane 探测行）
+	// 给 errors_only 的 interestingSuccess 判「有趣」；detachedMarker
+	// 四种标记入队豁免于 Complete 的 closed 闸——脱钩登记与写出方
+	// Complete 在 ctx.Done 上竞速，被 closed 拒收会让脱钩现场整段蒸发。
+	detachedMarker := false
 	if name == StageDevinResponse {
 		switch event {
 		case "detached", "detached_attach", "detached_truncated":
 			recorder.detachedSeen.Store(true)
+			detachedMarker = true
+		case "detached_cross_lane_miss":
+			detachedMarker = true
 		}
 	}
 	// 打戳在入队时刻：Time/ElapsedMS 的语义是「事件发生时」，在编码
@@ -2091,7 +2120,7 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	// 闭包在编码协程上跑，startedAt 在锁内拷出——与 setStartedAt 的
 	// 测试回拨共用一把锁（生产路径字段不可变，拷贝与读原值等价）。
 	startedAt := recorder.startedAt
-	recorder.enqueueLocked(func() {
+	task := func() {
 		data, err := marshalJSONLRecord(JSONLRecord{
 			Seq:       seq,
 			Time:      at.Format(time.RFC3339Nano),
@@ -2110,7 +2139,12 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 		recorder.pushInsert(n, func() {
 			recorder.appendJSONL(name, data)
 		})
-	})
+	}
+	if detachedMarker {
+		recorder.enqueueLockedExempt(task)
+	} else {
+		recorder.enqueueLocked(task)
+	}
 	recorder.mutex.Unlock()
 }
 

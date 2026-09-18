@@ -1096,3 +1096,51 @@ func TestDetachedEventsSurviveQueueDrop(t *testing.T) {
 		t.Fatalf("kind = %v, want detached", kind)
 	}
 }
+
+// TestDetachedMarkerSurvivesComplete 钉住 04 脱钩标记行的 closed 豁免：
+// 消费方 Recv 内的脱钩登记与写出方 Complete 在 ctx.Done 上竞速，标记
+// 晚于 Complete 入队时必须仍落 debug_chunks——哨兵之后入队的标记任务
+// 由下一轮 flushAll 照收；同刻入队的非标记行仍被 closed 门口拒收。
+// 手工驱动分片/写段重放「标记行排在排空哨兵之后」的竞速输家形态。
+func TestDetachedMarkerSurvivesComplete(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	dir := "20200101-000099"
+	recorder := newBareRecorder(manager, dir)
+	recorder.sequences = map[string]int{}
+	manager.activeDirs[dir] = recorder
+
+	recorder.Complete(Completion{StatusCode: 499, Result: "disconnected"})
+
+	// closed 置位后：脱钩标记经豁免闸进分片队列，普通行照常计入
+	// lateWrites——豁免只覆盖标记词表不外溢。
+	recorder.AppendJSONL(StageDevinResponse, "detached", map[string]any{"key": "k", "buffered_events": 3})
+	recorder.AppendJSONL(StageDevinResponse, "frame", map[string]any{"x": 1})
+	if got := manager.lateWrites.Load(); got != 1 {
+		t.Fatalf("lateWrites = %d, want 1（非标记行仍被 closed 拒收）", got)
+	}
+
+	// 依序驱动编码段：先哨兵（收尾入列）后标记任务。
+	for i := 0; i < 2; i++ {
+		task := <-manager.queues[0]
+		task.run()
+	}
+	// insertQ 序即落库序：哨兵 op 跑 queueCompletion（内部 flushAll 先把
+	// meta/日志行落库），标记 op 的暂存留给下一轮 flushAll。
+	for i := 0; i < 2; i++ {
+		op := <-manager.insertQ
+		op.apply()
+	}
+	manager.flushAll()
+
+	data, _, _, err := manager.ReadFile(context.Background(), dir, StageDevinResponse)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", StageDevinResponse, err)
+	}
+	if !strings.Contains(string(data), `"event":"detached"`) {
+		t.Fatalf("04 = %q, want the post-Complete detached marker row", data)
+	}
+	if strings.Contains(string(data), `"event":"frame"`) {
+		t.Fatalf("04 = %q, non-marker row must not survive closed", data)
+	}
+}
