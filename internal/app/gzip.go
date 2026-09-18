@@ -95,6 +95,10 @@ func (w *gzipResponseWriter) Flush() {
 	}
 }
 
+// Unwrap 透出内层 writer：与 gateHeaderWriter 同理，ResponseController
+// 的链上能力探测（SetWriteDeadline/FlushError/Hijack）靠它穿透包装层。
+func (w *gzipResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // Close 仅在真正压缩时收尾 gzip 流——透传路径不能向连接写 gzip 帧头。
 func (w *gzipResponseWriter) Close() {
 	if w.gz != nil {

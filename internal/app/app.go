@@ -238,6 +238,10 @@ func (application *App) HTTPServer() *http.Server {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    1 << 20,
+		// ConnContext 把本条 conn 放进请求 ctx：SSE 写路径的 RST 强拆
+		// 需要不设 deadline 也能触到 socket（写失败后 fd 已被 net/http
+		// 关闭，事后 hijack 拿不到活连接设 linger，只能写前武装）。
+		ConnContext: connContext,
 	}
 }
 
@@ -922,7 +926,7 @@ func (application *App) createCompletion(
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	out := &streamWriter{writer: writer, recorder: recorder}
+	out := &streamWriter{writer: writer, recorder: recorder, conn: requestConn(ctx)}
 	if flusher, ok := writer.(http.Flusher); ok {
 		out.flusher = flusher
 		// 非流式心跳载荷是协议行为（OpenAI 系 "\n"、Anthropic 静默），

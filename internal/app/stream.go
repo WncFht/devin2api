@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -24,6 +26,13 @@ import (
 // var 而非 const：测试会临时缩短它来验证保活路径。
 var keepaliveInterval = 10 * time.Second
 
+// sseWriteDeadline 是单次 SSE 写出（一次 Write+Flush）的预算：写出前把
+// 底层 conn 的写 deadline 续到该点，死读客户端造成的阻塞写最多挂起这么久。
+// 区别于响应级 writeTimeout（app.go 恒 0）——它是逐写续约而非绝对截止，
+// 整条流的寿命不设上限；与 WS 侧 wsWriteDeadline 同语义。
+// var 而非 const：测试会缩短它来验证超时断连路径。
+var sseWriteDeadline = 60 * time.Second
+
 // sseKeepalive 是 SSE 注释行：协议合法、SSE 客户端解析器忽略，
 // 仅用于刷新链路上各段的空闲计时器。
 var sseKeepalive = []byte(": keepalive\n\n")
@@ -33,9 +42,14 @@ var sseKeepalive = []byte(": keepalive\n\n")
 // HTTP 状态行不再可改，错误只能走带内事件/错误体；delivered 标记是否有
 // 字节真正写出——断连按它分 499/200：什么都没送达时记 499 才是线上实况。
 type streamWriter struct {
-	writer    http.ResponseWriter
-	flusher   http.Flusher
-	recorder  *debuglog.Recorder
+	writer   http.ResponseWriter
+	flusher  http.Flusher
+	recorder *debuglog.Recorder
+	// conn 是写出所经的网络连接：写前武装 SO_LINGER(0)，让传输级写失败时
+	// net/http 在 chunkWriter.Write 里的同步 close 改发 RST；nil（无
+	// ConnContext 注入的 server、非 TCP conn）时跳过武装，退回 graceful
+	// close。
+	conn      lingerConn
 	committed bool
 	delivered bool
 	// upstreamOpen 标记上游流已建立：保活只在此后武装——建连前的静默期
@@ -49,12 +63,62 @@ type streamWriter struct {
 	bytes int
 }
 
+// connContextKey 把本条网络连接挂进请求 ctx：写路径要把 SO_LINGER 武装成
+// RST 强拆，这是 handler 侧不 hijack 就能触到 conn 的唯一通道（由
+// HTTPServer 的 ConnContext 注入）。
+type connContextKey struct{}
+
+// connContext 是 http.Server.ConnContext：把接受下来的 conn 放进请求 ctx。
+func connContext(ctx context.Context, conn net.Conn) context.Context {
+	return context.WithValue(ctx, connContextKey{}, conn)
+}
+
+// lingerConn 是写路径对连接的最低要求——*net.TCPConn 满足；TLS 包装与
+// 测试假连接不满足时跳过 RST 武装，退回 graceful close 语义。
+type lingerConn interface {
+	SetLinger(int) error
+}
+
+// requestConn 从请求 ctx 取回连接；取不到（非 TCP 实现）返回 nil。
+func requestConn(ctx context.Context) lingerConn {
+	conn, _ := ctx.Value(connContextKey{}).(lingerConn)
+	return conn
+}
+
 // write 写一段响应体并立即 flush。committed 在写尝试前置位——一次写
 // 尝试无论成败，响应行都不再可改；delivered 只在 Write 成功后置位，
 // 断连归因按它区分「什么都没上链路」（499）与「响应行已提交」（200）。
 func (out *streamWriter) write(p []byte) error {
 	out.committed = true
-	if _, err := out.writer.Write(p); err != nil {
+	// 单次写出有界：写前把 conn 级写 deadline 续到预算点。续约失败不阻断
+	// 写出——ErrNotSupported 说明写出方自己管写期限（WS 经 gorilla 的
+	// SetWriteDeadline，见 websocket.go）；真实 conn 错误会随后由 Write
+	// 原样报出，不在这里另开错误面。若中途 writer 被换成自定义实现，
+	// 该调用静默退化为无 deadline，不影响正确性。
+	_ = http.NewResponseController(out.writer).SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	// 写前武装 SO_LINGER(0)：写失败时 net/http 在 chunkWriter.Write 内同步
+	// 做 fd 级 graceful close，FIN 会排在数 MB 未发队列后——socket 成为
+	// FIN_WAIT_1 孤儿（内核重传到放弃约 15min，期间发送队列占着内核内存，
+	// 客户端也看不到流已死），且 fd 已关闭后无法补设 linger。提前武装让
+	// 那次 close 改发 RST：RST 不受对端窗口约束即刻送达，两端 socket 与
+	// 发送队列立即回收。写成功立即撤除——conn 回 keep-alive 池不能带
+	// 武装，否则之后的正常关闭会把尾包截断成 RST；写失败路径上撤除打在
+	// 死 fd 上无害落空（实测返回 use of closed network connection）。
+	if out.conn != nil {
+		_ = out.conn.SetLinger(0)
+	}
+	_, err := out.writer.Write(p)
+	if out.conn != nil {
+		_ = out.conn.SetLinger(-1)
+	}
+	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			// 写超时 = 死读客户端：conn 仍活着但不再消费字节，等价于断连。
+			// 包进 context.DeadlineExceeded 让外层三处取消收口统一按
+			// disconnected/499 归因（ctx 此刻并未取消，裸 i/o timeout
+			// 会被错记成 failed/http_stream）；原错误留在 Unwrap 链里取证。
+			return fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+		}
 		return err
 	}
 	out.delivered = true
@@ -217,7 +281,7 @@ func (application *App) streamCompletion(
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
 	writer.Header().Set("Connection", "keep-alive")
-	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder, heartbeat: sseKeepalive}
+	out := &streamWriter{writer: writer, flusher: flusher, recorder: recorder, heartbeat: sseKeepalive, conn: requestConn(ctx)}
 
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

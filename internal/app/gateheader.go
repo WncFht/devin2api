@@ -63,3 +63,8 @@ func (w *gateHeaderWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap 透出内层 writer：http.ResponseController 沿包装链找 conn 级能力
+// （SetWriteDeadline/FlushError/Hijack），缺它则链到 *http.response 断掉，
+// SSE 逐写 deadline 落不下去。
+func (w *gateHeaderWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
