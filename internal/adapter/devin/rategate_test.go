@@ -935,6 +935,36 @@ func TestRateGateWaitSamples(t *testing.T) {
 	if fg.MaxMs < 50 || fg.MeanMs <= 0 || fg.P50Ms != 0 {
 		t.Fatalf("fg wait quantiles should reflect the ~100ms sleep: %+v", fg)
 	}
+	// err 校准集只收带估计的放行样本：fg 只有死区睡醒那一条
+	// （est≈toNext~100ms、realized≈100ms → err≈0）；桶满拒绝的
+	// est≈58s 不进校准集，首拍前取消的无估计。
+	if fg.ErrCount != 1 || fg.ErrP50Ms < -2000 || fg.ErrP50Ms > 500 {
+		t.Fatalf("fg err summary = count %d p50 %dms, want count=1 err≈0", fg.ErrCount, fg.ErrP50Ms)
+	}
+	var admits, rejects, cancels int
+	for i := 0; i < gate.waitSize; i++ {
+		s := gate.waits[(gate.waitHead-1-i+gateWaitCap)%gateWaitCap]
+		switch s.outcome {
+		case gateWaitAdmit:
+			admits++
+			if s.est < 50*time.Millisecond || s.est > 150*time.Millisecond {
+				t.Fatalf("admit sample est = %v, want ~100ms deadzone estimate", s.est)
+			}
+		case gateWaitReject:
+			rejects++
+			if s.est < 50*time.Second {
+				t.Fatalf("reject sample est = %v, want ~58s bucket-full estimate", s.est)
+			}
+		case gateWaitCancel:
+			cancels++
+			if s.est >= 0 {
+				t.Fatalf("cancel sample est = %v, want unset (<0)", s.est)
+			}
+		}
+	}
+	if admits != 1 || rejects != 2 || cancels != 1 {
+		t.Fatalf("ring outcomes = %d admit/%d reject/%d cancel, want 1/2/1", admits, rejects, cancels)
+	}
 	bg := view.Bg
 	if bg.Count != 1 || bg.Rejects != 1 {
 		t.Fatalf("bg summary = %+v, want count=1 rejects=1", bg)
@@ -942,8 +972,35 @@ func TestRateGateWaitSamples(t *testing.T) {
 	if view.All.Count != 4 || view.All.Rejects != 2 || view.All.Cancels != 1 {
 		t.Fatalf("all summary = %+v, want count=4 rejects=2 cancels=1", view.All)
 	}
+	if view.All.ErrCount != 1 || view.Bg.ErrCount != 0 {
+		t.Fatalf("err counts = all:%d bg:%d, want 1/0 (admits only)", view.All.ErrCount, view.Bg.ErrCount)
+	}
 	if view.Rejects[gateReasonQuota] != 2 {
 		t.Fatalf("reject reasons = %v, want quota:2", view.Rejects)
+	}
+}
+
+// err 校准聚合：err = est−realized 只在带估计的放行样本上计；
+// 拒绝/取消结局的实测等待被截断，与估计器预测的「到放行时长」
+// 不同口径，不进校准集。
+func TestSummarizeWaitsErrQuantiles(t *testing.T) {
+	samples := []gateWaitSample{
+		{wait: 60 * time.Second, est: 50 * time.Second, outcome: gateWaitAdmit}, // err −10s（低估侧）
+		{wait: 10 * time.Second, est: 20 * time.Second, outcome: gateWaitAdmit}, // err +10s
+		{wait: 12 * time.Second, est: 32 * time.Second, outcome: gateWaitAdmit}, // err +20s
+		{wait: 11 * time.Second, est: 71 * time.Second, outcome: gateWaitAdmit}, // err +60s
+		{est: 90 * time.Second, outcome: gateWaitReject, reason: gateReasonQuota},
+		{est: -1, outcome: gateWaitCancel},
+	}
+	s := summarizeWaits(samples)
+	// errs = {−10,+10,+20,+60}s → mean +20s；nearest-rank 下 p10=idx0、
+	// p50=idx1、p90=idx2。
+	if s.ErrCount != 4 || s.ErrMeanMs != 20000 ||
+		s.ErrP10Ms != -10000 || s.ErrP50Ms != 10000 || s.ErrP90Ms != 20000 {
+		t.Fatalf("err summary = %+v, want count=4 mean=20s p10=-10s p50=+10s p90=+20s", s)
+	}
+	if s.Count != 6 || s.Rejects != 1 || s.Cancels != 1 {
+		t.Fatalf("summary = %+v, want count=6 rejects=1 cancels=1", s)
 	}
 }
 

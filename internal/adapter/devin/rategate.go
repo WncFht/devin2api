@@ -159,8 +159,8 @@ type rateGate struct {
 	// waits/waitHead/waitSize 是 wait 结局样本环（与 events 同构）：
 	// 每次评估从进闸到结局各记一条——放行/拒绝/取消全录，无幸存者
 	// 口径偏差；waitEvals 是启动以来累计评估数（环满后 Samples 饱和、
-	// Evals 继续走）。stats 聚合出分类等待分位，是 expectedWait
-	// 估计器的实测校准面。
+	// Evals 继续走）。stats 聚合出分类等待分位与 err 分位
+	// （est−wait），是 expectedWait 估计器的实测校准面。
 	waits     [gateWaitCap]gateWaitSample
 	waitHead  int
 	waitSize  int
@@ -184,10 +184,13 @@ const (
 )
 
 // gateWaitSample 是一次 wait 评估的实测记录：进闸时刻、墙钟等待时长
-// （与 X-Gate-Wait-Ms 同源口径）、请求类与结局。
+// （与 X-Gate-Wait-Ms 同源口径）、请求类与结局；est 是首次评估时
+// expectedWaitLocked 的期望排队估计（负值 = 首拍评估前取消、无估计），
+// 与 wait 组成 ew-vs-realized 校准对。
 type gateWaitSample struct {
 	at      time.Time
 	wait    time.Duration
+	est     time.Duration
 	class   string // adapter.ClassFG / ClassBG
 	outcome string // gateWait* 词表
 	reason  string // outcome=reject 时的 gateReason*，其余空
@@ -207,15 +210,24 @@ type GateWait struct {
 
 // GateWaitSummary 是一组等待样本的聚合读数：样本数、墙钟等待的
 // 均值/分位/峰值（毫秒），以及拒绝/取消结局计数——后两者揭示
-// 幸存者口径（仅放行）看不见的尾部。
+// 幸存者口径（仅放行）看不见的尾部。err* 是 ew 校准面：
+// err = est（首次评估的 expectedWaitLocked）− realized（实测等待），
+// 正值 = 估计偏高；只在有估计的放行样本上聚合——拒绝/取消的实测
+// 等待被结局截断，不是估计器预测的「到放行时长」。ErrCount 为零时
+// 各 err 字段缺省。
 type GateWaitSummary struct {
-	Count   int   `json:"count"`
-	MeanMs  int64 `json:"mean_ms"`
-	P50Ms   int64 `json:"p50_ms"`
-	P90Ms   int64 `json:"p90_ms"`
-	MaxMs   int64 `json:"max_ms"`
-	Rejects int   `json:"rejects"`
-	Cancels int   `json:"cancels"`
+	Count     int   `json:"count"`
+	MeanMs    int64 `json:"mean_ms"`
+	P50Ms     int64 `json:"p50_ms"`
+	P90Ms     int64 `json:"p90_ms"`
+	MaxMs     int64 `json:"max_ms"`
+	Rejects   int   `json:"rejects"`
+	Cancels   int   `json:"cancels"`
+	ErrCount  int   `json:"err_count,omitempty"`
+	ErrMeanMs int64 `json:"err_mean_ms,omitempty"`
+	ErrP10Ms  int64 `json:"err_p10_ms,omitempty"`
+	ErrP50Ms  int64 `json:"err_p50_ms,omitempty"`
+	ErrP90Ms  int64 `json:"err_p90_ms,omitempty"`
 }
 
 // 闩迁移事件种类：latched（上游限流上闩/延闩）、released（成功帧提前
@@ -336,8 +348,9 @@ type GateStats struct {
 	PersistFailures int `json:"persist_failures"`
 	PersistDropped  int `json:"persist_dropped"`
 	// Wait 是最近 gateWaitCap 次 wait 评估的分类聚合：实测等待分位
-	// 是 expectedWait 估计器的校准面；环覆盖全结局（含拒绝与取消），
-	// 补上 transform 段看不见的尾部。进程内尚无评估时为 nil。
+	// 与 est−realized 误差分位是 expectedWait 估计器的校准面；环
+	// 覆盖全结局（含拒绝与取消），补上 transform 段看不见的尾部。
+	// 进程内尚无评估时为 nil。
 	Wait *GateWait `json:"wait,omitempty"`
 }
 
@@ -746,14 +759,17 @@ func (gate *rateGate) waitView() *GateWait {
 }
 
 // summarizeWaits 聚合一组等待样本：分位取最近秩（nearest-rank），
-// 结局计数与样本同窗。
+// 结局计数与样本同窗；err* 校准面只收带估计的放行样本（拒绝/取消的
+// 实测等待被结局截断，与 est 预测的「到放行时长」不同口径）。
 func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
 	n := len(samples)
 	if n == 0 {
 		return GateWaitSummary{}
 	}
 	waits := make([]time.Duration, n)
+	errs := make([]int64, 0, n) // est−wait 毫秒
 	var sum time.Duration
+	var errSum int64
 	out := GateWaitSummary{Count: n}
 	for i, s := range samples {
 		waits[i] = s.wait
@@ -763,6 +779,12 @@ func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
 			out.Rejects++
 		case gateWaitCancel:
 			out.Cancels++
+		case gateWaitAdmit:
+			if s.est >= 0 {
+				e := (s.est - s.wait).Milliseconds()
+				errs = append(errs, e)
+				errSum += e
+			}
 		}
 	}
 	slices.Sort(waits)
@@ -770,6 +792,14 @@ func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
 	out.P50Ms = waits[int(float64(n-1)*0.5)].Milliseconds()
 	out.P90Ms = waits[int(float64(n-1)*0.9)].Milliseconds()
 	out.MaxMs = waits[n-1].Milliseconds()
+	if m := len(errs); m > 0 {
+		slices.Sort(errs)
+		out.ErrCount = m
+		out.ErrMeanMs = errSum / int64(m)
+		out.ErrP10Ms = errs[int(float64(m-1)*0.1)]
+		out.ErrP50Ms = errs[int(float64(m-1)*0.5)]
+		out.ErrP90Ms = errs[int(float64(m-1)*0.9)]
+	}
 	return out
 }
 
@@ -953,9 +983,13 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	// entered 用真实墙钟：gate.now 在测试里是假钟，而回执的 WaitMS
 	// 是客户端可见的排队耗时。
 	entered := time.Now()
+	// est 记首次评估的期望排队估计，与实测等待组成 ew-vs-realized
+	// 校准对；负值哨兵 = 首拍评估前取消（样本无估计）。后续循环重估
+	// 不覆盖——校准语义是「进闸时刻的预测 vs 实际经历的排队」。
+	est := time.Duration(-1)
 	// 每次评估的结局记入等待样本环：defer 覆盖全部出口（放行/拒绝/
 	// 取消），测量口径与回执 WaitMS 的 time.Since(entered) 一致。
-	defer func() { gate.recordWait(class, err, entered) }()
+	defer func() { gate.recordWait(class, err, entered, est) }()
 	for {
 		gate.mu.Lock()
 		if sleeping {
@@ -985,6 +1019,9 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		ws := gate.windowStart(now)
 		gate.rollBucket(ws)
 		sendable := now.Sub(ws) < gate.usable
+		if est < 0 {
+			est = gate.expectedWaitLocked(class, now, ws, gate.bucketUsed, sendable)
+		}
 		if now.Before(gate.limitedUntil) {
 			if sendable && !now.Before(gate.nextDrip) {
 				// 探针槽空闲且在可发区间：放行并推进下一个槽。死区内
@@ -1142,10 +1179,11 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 // recordWait 把一次 wait 评估的实测结局写进样本环：结局按 err
 // 归类——nil=放行、LocalGate Failure=拒绝（记 reason）、其余
 // =ctx 取消。等待时长取墙钟（与 X-Gate-Wait-Ms 同口径）；假钟
-// 测试里睡的是真 timer，样本时长即真实经过。调用方不得持 mu——
-// wait 各出口先解锁再返回，defer 才到这里取锁。
-func (gate *rateGate) recordWait(class string, err error, entered time.Time) {
-	sample := gateWaitSample{at: entered, wait: time.Since(entered), class: class}
+// 测试里睡的是真 timer，样本时长即真实经过。est 是首次评估的
+// 期望排队估计（负值 = 未评估）。调用方不得持 mu——wait 各出口
+// 先解锁再返回，defer 才到这里取锁。
+func (gate *rateGate) recordWait(class string, err error, entered time.Time, est time.Duration) {
+	sample := gateWaitSample{at: entered, wait: time.Since(entered), est: est, class: class}
 	var failure *llm.Failure
 	switch {
 	case err == nil:
