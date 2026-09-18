@@ -369,13 +369,15 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	// detached 组投脱钩完成缓存簿记：泵终局（finished_*）、移除原因
 	// 与孤儿浪费（orphans/orphan_completed）在盘上 04 标记行之外
-	// 没有其它观测面；首 lane 快照是后兼容形态。
+	// 没有其它观测面；顶层为全 lane 聚合（计数求和、事件环按时刻
+	// 归并，事件带 lane 字段）。
 	if h.detachedStats != nil {
 		data["detached"] = h.detachedStats()
 	}
 	// accounts 组是号池逐账号视图：每号的闸门/保温/脱钩缓存/池侧
-	// 状态各自透出——顶层 gate/warm/detached 仍是首 lane 快照
-	//（前端后兼容），逐号排障看这里。
+	// 状态各自透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容，
+	// 闩态/分位数不可聚合），detached 已是全 lane 聚合；逐号排障
+	// 看这里。
 	if h.accountGateStats != nil || h.accountWarmStats != nil || h.accountLaneStates != nil || h.accountDetachedStats != nil {
 		gates := map[string]devin.GateStats{}
 		if h.accountGateStats != nil {

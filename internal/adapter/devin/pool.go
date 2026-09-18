@@ -1606,13 +1606,12 @@ func (pool *Pool) AccountWarmStats() map[string]WarmStats {
 	return stats
 }
 
-// DetachedStats 返回首 lane 脱钩完成缓存快照（顶层 detached 段的
-// 后兼容形态）；空池回零值。
+// DetachedStats 返回全 lane 聚合的脱钩完成缓存快照（顶层 detached
+// 段：计数逐 lane 求和、事件环按时刻归并——脱钩簿记全是可加口径，
+// 与 gate/warm 的闩态/分位数不同，没有不可聚合字段）；空池回零值。
+// 逐号视图见 AccountDetachedStats。
 func (pool *Pool) DetachedStats() DetachedStats {
-	if lane := pool.firstLane(); lane != nil {
-		return lane.adapter.DetachedStats()
-	}
-	return DetachedStats{}
+	return mergeDetachedStats(pool.AccountDetachedStats())
 }
 
 // AccountDetachedStats 返回各 lane 的脱钩完成缓存快照（按账号名索引），

@@ -142,8 +142,8 @@ type Handler struct {
 	probeToken   string
 	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
 	warmStats func() devin.WarmStats
-	// detachedStats 返回脱钩完成缓存快照（顶层 detached 组，首 lane
-	// 后兼容形态）；nil 时 runtime-metrics 不投 detached 组。
+	// detachedStats 返回脱钩完成缓存快照（顶层 detached 组，号池下
+	// 为全 lane 聚合）；nil 时 runtime-metrics 不投 detached 组。
 	detachedStats func() devin.DetachedStats
 	// accountDetachedStats 返回逐账号脱钩缓存快照（accounts 组按号
 	// 透出）；nil 时 accounts 内无 detached 键。

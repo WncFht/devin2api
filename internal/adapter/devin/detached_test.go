@@ -1203,3 +1203,57 @@ func TestDetachedOrphansCrossLane(t *testing.T) {
 		t.Fatalf("orphans = %d cross = %d, want 2/1", stats.Orphans, stats.OrphansCrossLane)
 	}
 }
+
+// TestMergeDetachedStats 钉住顶层 detached 段的全 lane 聚合口径：计数
+// 与现值逐 lane 求和、事件环按时刻归并（新在前）并回填 lane——号池下
+// 顶层视图不得再丢非首 lane 的脱钩活动（randall 的脱钩曾在首 lane
+// 快照里完全不可见）。
+func TestMergeDetachedStats(t *testing.T) {
+	now := time.Now()
+	per := map[string]DetachedStats{
+		"a": {
+			Entries: 1, Running: 1, Detaches: 3, Orphans: 1,
+			Events: []DetachedEvent{
+				{At: now.Add(-time.Minute), Kind: detachedEventFinish, Label: "泵完成"},
+				{At: now.Add(-2 * time.Minute), Kind: detachedEventAdmit, Label: "登记", Key: "k1"},
+			},
+		},
+		"b": {
+			Entries: 2, Completed: 1, Failed: 1, Detaches: 5, AttachMisses: 2,
+			Events: []DetachedEvent{
+				{At: now.Add(-30 * time.Second), Kind: detachedEventAttach, Label: "挂接", Key: "k2"},
+			},
+		},
+	}
+	merged := mergeDetachedStats(per)
+	if merged.Entries != 3 || merged.Running != 1 || merged.Completed != 1 || merged.Failed != 1 {
+		t.Fatalf("entry gauges = %+v", merged)
+	}
+	if merged.Detaches != 8 || merged.Orphans != 1 || merged.AttachMisses != 2 {
+		t.Fatalf("counters = %+v", merged)
+	}
+	// 事件新在前、回填 lane；归并不改 per-lane 快照（lane 身份由透出
+	// 路径携带，per-lane 视图本字段留空）。
+	wantLane := []string{"b", "a", "a"}
+	if len(merged.Events) != len(wantLane) {
+		t.Fatalf("events = %d, want %d", len(merged.Events), len(wantLane))
+	}
+	for i, ev := range merged.Events {
+		if ev.Lane != wantLane[i] {
+			t.Fatalf("events[%d].lane = %q, want %q", i, ev.Lane, wantLane[i])
+		}
+	}
+	if per["a"].Events[0].Lane != "" || per["b"].Events[0].Lane != "" {
+		t.Fatal("merge must not write lane back into per-lane events")
+	}
+
+	// 归并环总量同样截到 detachedEventCap。
+	full := make([]DetachedEvent, detachedEventCap)
+	capped := mergeDetachedStats(map[string]DetachedStats{
+		"a": {Events: full},
+		"b": {Events: make([]DetachedEvent, 10)},
+	})
+	if len(capped.Events) != detachedEventCap {
+		t.Fatalf("merged events = %d, want cap %d", len(capped.Events), detachedEventCap)
+	}
+}

@@ -9,12 +9,14 @@
 package devin
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -336,6 +338,10 @@ type DetachedEvent struct {
 	Key    string    `json:"key,omitempty"`
 	Detail string    `json:"detail,omitempty"`
 	Label  string    `json:"label"`
+	// Lane 只在聚合视图（顶层 detached 段归并环）由 mergeDetachedStats
+	// 回填；per-lane 透出（accounts.<name>.detached）的身份由路径携带，
+	// 本字段留空。
+	Lane string `json:"lane,omitempty"`
 }
 
 // detachedEventLabel 是生命周期事件的面板显示名。
@@ -429,6 +435,54 @@ type DetachedStats struct {
 	OrphanBufferedEvents int64 `json:"orphan_buffered_events"`
 
 	Events []DetachedEvent `json:"events,omitempty"` // 新在前
+}
+
+// mergeDetachedStats 把各 lane 的快照聚合为顶层 detached 段：全部计数
+// 与现值字段逐 lane 求和（本结构所有字段口径一致可直接加），事件环
+// 按时刻归并（新在前）截断到 detachedEventCap，并在归并时回填事件
+// 的 Lane——聚合视图不再能靠透出路径携带 lane 身份。
+func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
+	merged := DetachedStats{}
+	for name, s := range per {
+		merged.Entries += s.Entries
+		merged.Running += s.Running
+		merged.Completed += s.Completed
+		merged.Failed += s.Failed
+		merged.Detaches += s.Detaches
+		merged.Attaches += s.Attaches
+		merged.AttachMisses += s.AttachMisses
+		merged.CrossLaneMisses += s.CrossLaneMisses
+		merged.FinishedCompleted += s.FinishedCompleted
+		merged.FinishedFailed += s.FinishedFailed
+		merged.FinishedKilled += s.FinishedKilled
+		merged.FinishedExpired += s.FinishedExpired
+		merged.Expired += s.Expired
+		merged.Evicted += s.Evicted
+		merged.Replaced += s.Replaced
+		merged.Truncated += s.Truncated
+		merged.Orphans += s.Orphans
+		merged.OrphanCompleted += s.OrphanCompleted
+		merged.OrphansCrossLane += s.OrphansCrossLane
+		merged.OrphanBufferedEvents += s.OrphanBufferedEvents
+		for _, ev := range s.Events {
+			ev.Lane = name
+			merged.Events = append(merged.Events, ev)
+		}
+	}
+	// 新在前；同刻事件按 lane/key 定序，map 遍历序不泄漏进透出结果。
+	slices.SortFunc(merged.Events, func(a, b DetachedEvent) int {
+		if c := b.At.Compare(a.At); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Lane, b.Lane); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Key, b.Key)
+	})
+	if len(merged.Events) > detachedEventCap {
+		merged.Events = merged.Events[:detachedEventCap]
+	}
+	return merged
 }
 
 // newDetachedRegistry 创建空缓存。
