@@ -1352,6 +1352,70 @@ func TestPoolBoundLaneYieldsOnDeepQueue(t *testing.T) {
 	}
 }
 
+// 让位第三触发面（快照级）：bound lane 判病（桶满 → healthy=false）
+// 而兄弟可发时按健康位直接让位——此时 bound 的 expectedWait 可以很短
+// （窗将尽），τ=10s 的期望排队比较够不着这个差距；τ 容差管的是噪声级
+// 排队差，不该把请求按在确定发不出的 lane 上。让位不解绑。
+func TestPoolBoundLaneDemotesWhenSickSiblingHealthy(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	affinity := "sick-demote-session"
+	pool.bind(affinity, laneA, "")
+
+	// 全绿基线：绑定居首不让位。
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("healthy bound lane must lead without yield, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+
+	// a 桶满：钉在 :55（可发区间尾段），quota=80、bucketUsed=80 →
+	// windowBlocked；waiters=0 → expectedWait=toNext≈7s，τ 下
+	// 0+10<7 不成立——期望排队径不让位，健康位径让位给 b。
+	gateA := laneA.adapter.gate
+	clockA := pinGateClock(gateA, 55)
+	gateA.mu.Lock()
+	gateA.quota = 80
+	gateA.bucketStart = gateA.windowStart(clockA.t)
+	gateA.bucketUsed = 80
+	gateA.mu.Unlock()
+
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneB {
+		t.Fatalf("window-full bound lane must demote to the healthy sibling, got %v", ranked[0].lane.name)
+	}
+	boundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if boundIdx < 0 || !ranked[boundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
+	}
+	// 审计行：Bound 仍为真，Reason 记降级归因 + bound_yield。
+	row := poolCandidateRows(ranked)[boundIdx]
+	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_window_full") {
+		t.Fatalf("demoted bound row = %+v, want Bound + gate_window_full/bound_yield reason", row)
+	}
+	if !ranked[0].verdict.healthy {
+		t.Fatal("sibling must lead as healthy")
+	}
+	// 让位不解绑：绑定记录仍在，lane 恢复后照常居首。
+	if got := pool.boundLane(affinity); got != laneA {
+		t.Fatalf("sick demote must not unbind, boundLane = %v", got)
+	}
+
+	// 兄弟同病（b 也桶满）→ 无可发落点，绑定恢复居首。
+	gateB := laneB.adapter.gate
+	clockB := pinGateClock(gateB, 55)
+	gateB.mu.Lock()
+	gateB.quota = 80
+	gateB.bucketStart = gateB.windowStart(clockB.t)
+	gateB.bucketUsed = 80
+	gateB.mu.Unlock()
+
+	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("bound lane must keep lead when no sibling is sendable, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+}
+
 // bg 准入轨让位：bound lane 的拥堵全在 bg 侧（fgRateEMA 顶起预留 +
 // 爬坡额度被 bucketUsedBg 吃成赤字 + bg 前队），fg 视图完全空闲——
 // bg bound 会话让位给空闲兄弟，同状态 fg bound 会话不让位（估计器
@@ -1416,8 +1480,9 @@ func TestPoolBoundLaneYieldsOnBgCongestion(t *testing.T) {
 
 // bg 跨窗饥饿让位：死区内 bound lane 桶未用满，但投影下窗开放即满
 // 预留（fgRateEMA 满段外推 + waitersFg + margin ≥ quota）时 bg 期望
-// 追加一整窗——fg 饱和 lane 上 bg 实测要排到 bgMaxHold 才被拒。同
-// 状态 fg 期望只吃队列项（<τ）不让位：饥饿项是 bg 专有加项。
+// 追加一整窗——fg 饱和 lane 上 bg 实测要排到 bgMaxHold 才被拒。fg
+// 视图同样让位，但走的是快照级让位（死区判病是类无关快照），不是
+// 饥饿项泄漏进 fg 期望账——fg 期望仍只吃队列项（<τ）。
 func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
 	laneA := poolLaneByName(pool, "a")
@@ -1450,10 +1515,16 @@ func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
 		t.Fatalf("yielded bound row = %+v, want Bound + gate_window_full/bound_yield reason", row)
 	}
 
-	// fg bound 同状态不让位：饥饿项不压 fg 期望。
+	// fg bound 同状态同样让位：死区判病是类无关快照（healthy=false
+	// 不分 fg/bg），快照级让位对 fg 同样生效——bound 此刻对任何类
+	// 都发不出、兄弟可发，让位不是 bg 饥饿项压进了 fg 期望账。
 	ranked = pool.rankLanes(context.Background(), pool.snapshot(), affinity)
-	if ranked[0].lane != laneA || ranked[0].yielded {
-		t.Fatalf("fg-bound must not yield on the bg starvation term, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	if ranked[0].lane == laneA {
+		t.Fatalf("dead-zone bound lane must demote for fg too, got %v", ranked[0].lane.name)
+	}
+	fgBoundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if fgBoundIdx < 0 || !ranked[fgBoundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark for fg view, ranked=%+v", ranked)
 	}
 }
 

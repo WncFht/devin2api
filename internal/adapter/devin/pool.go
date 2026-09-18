@@ -579,10 +579,11 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 // priority desc → 加权 HRW 键降序 → rendezvous 分数升序兜底。
 // 三区语义：绑定 lane 默认居首（粘性区「宁等不换」——正式绑定是
 // 「上次产出内容的 lane」的确认记录，留原 lane 继续吃 warm/cache
-// 连续性红利），但期望排队比最优兄弟高出一个 τ 时本轮让位回本档
-// 排序：桶满睡到 maxHold（fg ~15s / bg ~120s）再 failover 是实测
-// 最贵的错配，换边损失只是一次绑定的连续性；闩内 bound 同理让位，
-// 省掉一次必败的过闸评估与幻影 attempt 账。让位不解绑不动 bound
+// 连续性红利），但已判病而有可发兄弟、或期望排队比最优兄弟高出
+// 一个 τ 时本轮让位回本档排序：桶满睡到 maxHold（fg ~15s /
+// bg ~120s）再 failover 是实测最贵的错配，换边损失只是一次绑定的
+// 连续性；闩内 bound 同理让位，省掉一次必败的过闸评估与幻影 attempt
+// 账。让位不解绑不动 bound
 // 标记：它若按普通序仍最优照旧赢，换边开流成功后 bind 照常把谱系
 // 记到胜者 lane。在飞钉选 lane 居次位同区语义（同亲和键有在飞请求
 // 时后继钉同一 lane——正式绑定落地前的并发窗口不再各自散选）；
@@ -626,14 +627,23 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 			priority: lane.priority.Load(),
 		})
 	}
-	// 绑定让位判定：bound lane 的期望排队比最优兄弟高出一个 τ 时
-	// 摘掉本轮居首特权。判据只用 expectedWait 一本账——闩剩余、桶满
-	// 到下一窗、前队拥堵都已折算进同一口径；bound 自身等得短（闩将
-	// 尽、队将排空）时维持粘性，让位也不解绑。
+	// 绑定让位判定，两条触发径：
+	//   - 快照级：bound 判病（healthy=false——闩中/死区/桶满）而某兄弟
+	//     此刻可发 → 让位。τ 容差抹平的是噪声级排队差，不该把请求按在
+	//     确定发不出的 lane 上；兄弟侧 expectedWait 在近满桶下被前队
+	//     折算吹大，τ 比较恰在这类现场失灵，由健康位兜底；
+	//   - 期望排队级：bound 的 expectedWait 比最优兄弟高出一个 τ →
+	//     让位回本档排序。闩剩余、桶满到下一窗、前队拥堵都已折算进同
+	//     一本账；bound 自身等得短（闩将尽、队将排空）时维持粘性。
+	// 让位不解绑不动 bound 标记：它若按普通序仍最优照旧赢，换边开流
+	// 成功后 bind 照常把谱系记到胜者 lane。
 	if bi := slices.IndexFunc(candidates, func(c poolCandidate) bool { return c.bound }); bi >= 0 {
-		bw := candidates[bi].verdict.expectedWait
+		bv := candidates[bi].verdict
 		for i, c := range candidates {
-			if i != bi && c.verdict.expectedWait+gatePressureTau < bw {
+			if i == bi {
+				continue
+			}
+			if (!bv.healthy && c.verdict.healthy) || c.verdict.expectedWait+gatePressureTau < bv.expectedWait {
 				candidates[bi].yielded = true
 				break
 			}
