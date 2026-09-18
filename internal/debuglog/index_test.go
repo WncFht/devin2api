@@ -24,10 +24,12 @@ func TestIndexErrorFields(t *testing.T) {
 	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	failed.WriteError(ErrStageRateGate, errors.New(strings.Repeat("rate limited ", 40)))
 	failed.Complete(Completion{StatusCode: 429, Result: "failed"})
+	waitDrained(failed)
 
 	recovered := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	recovered.WriteError(ErrStageDevinTransport, errors.New("mid-flight EOF"))
 	recovered.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recovered)
 
 	// 行序新在前：rows[0] 是被救回的请求，rows[1] 是终结性失败。
 	rows, total, err := st.SearchLogs(context.Background(), store.LogQuery{})
@@ -65,6 +67,7 @@ func TestIndexConnReuseFields(t *testing.T) {
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	recorder.NoteUpstreamConn(true, 42*time.Millisecond)
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
 
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {

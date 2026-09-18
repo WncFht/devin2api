@@ -983,6 +983,7 @@ func TestRecordProtoJSONRedactsMetadata(t *testing.T) {
 	recordProtoJSON(recorder, "03-devin-request.json", request)
 	recordProtoJSON(recorder, "04-devin-response.jsonl", &devinproto.GetChatMessageResponse{DeltaText: proto.String("world")})
 	recorder.Complete(debuglog.Completion{})
+	<-manager.Drained(recorder.Dir())
 
 	requestLog, _, _, err := manager.ReadFile(recorder.Dir(), "03-devin-request.json")
 	if err != nil {

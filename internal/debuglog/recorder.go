@@ -57,7 +57,7 @@ const chunkFlushInterval = 200 * time.Millisecond
 
 // completionFlushGap 是完成收尾的攒批间隙：Complete 的排空哨兵抵达写
 // worker 后不单独提交，距上次冲刷不足该间隙时攒进下次批量事务——
-// 高 rps 下收尾与常规缓冲共用一次 commit，Complete 的等待上限被压到
+// 高 rps 下收尾与常规缓冲共用一次 commit，落库延迟被压到
 // 间隙+事务时长量级；写队列瞬时排空或超时则立即冲刷，不加等待。
 const completionFlushGap = 50 * time.Millisecond
 
@@ -149,8 +149,9 @@ type Manager struct {
 	dirtyBufs map[*Recorder]struct{}
 	// pendingCompletions 是已抵达写 worker、待随下次批量事务提交的
 	// 收尾集合（终态 meta 已暂存进各自 stagedFiles，日志行已按完成
-	// 时刻构建）；事务成功后逐项关闭 recorder.drained 放行 Complete。
-	// 仅写 worker 读写，fallbackMu 兜底路径除外。
+	// 时刻构建）；事务提交（或无内容可提交）后逐项解除目录的清理
+	// 保护并关闭 recorder.drained 放行等待方。仅写 worker 读写，
+	// fallbackMu 兜底路径除外。
 	pendingCompletions []completionItem
 	// lastFlush 是上次批量事务的发起时刻：completionFlushGap 内到达的
 	// 收尾攒成一批，超时或写队列排空即随当前 op 立即冲刷。
@@ -159,9 +160,10 @@ type Manager struct {
 	// 计数器的时刻；仅 cleaner 协程读写，零值表示从未对账（首个
 	// tick 即对一次）。
 	lastPayloadReconcile time.Time
-	// fallbackMu 串行化写 worker 死后的兜底收尾：workerGone 关闭后多个
-	// Complete 可同时在调用方直跑 queueCompletion/flushAll，此时写侧
-	// 私有状态已无人持有，调用方之间需互斥。写 worker 存活期它从不被取。
+	// fallbackMu 串行化写 worker 死后的兜底收尾：workerGone 关闭后
+	// Complete 的调用方、关停看守与编码协程上的投递失败分支可同时
+	// 直跑 queueCompletion/flushAll，此时写侧私有状态已无人持有，
+	// 触发方之间需互斥。写 worker 存活期它从不被取。
 	fallbackMu sync.Mutex
 	// pendingCompletionCount 镜像 pendingCompletions 长度供 Stats 读
 	//（写 worker 私有切片不能跨 goroutine 取 len）。
@@ -278,10 +280,12 @@ type Recorder struct {
 	// poolCandidates 是开流前的候选序快照（含每 lane 降级原因），
 	// 由 Pool.Stream 排序后登记，metaJSON 落 meta.pool_candidates。
 	poolCandidates []PoolCandidate
-	// drained 在覆盖本请求收尾的批量事务提交后由写 worker 关闭：
-	// Complete 的排空哨兵在本请求自己的分片 FIFO 里排在全部已入队
-	// 任务之后，它对应的 op 把收尾挂进 pendingCompletions，事务成功
-	//（或失败放行）即说明前序任务都已随同一事务落库。
+	// drained 在覆盖本请求收尾的批量事务首次 resolve 后由写 worker
+	// 关闭（提交成功，或失败放行——收尾留在 pendingCompletions 继续
+	// 重试但不再让等待方挂着）。Complete 不再等它：哨兵在本请求自己
+	// 的分片 FIFO 里排在全部已入队任务之后，它对应的 op 把收尾挂进
+	// pendingCompletions，drained 关闭即说明前序任务都已随同一事务
+	// 落库（或已失败放行）。需要落库可见性的调用方经 Drained 等它。
 	drained chan struct{}
 	// completionQueued 保证收尾只入列一次：哨兵 op 与 workerGone 兜底
 	// 可能都走到 queueCompletion（哨兵已入列而 Complete 恰选了
@@ -389,8 +393,9 @@ type insertOp struct {
 
 // completionItem 是写 worker 上待随批量事务落库的一份收尾：终态 meta
 // 在入列时已暂存进 stagedFiles，logRow 按完成时刻构建好（时点字段
-// 不随冲刷等待漂移），strip 记录 errors_only 判定。事务提交后关闭
-// recorder.drained 放行 Complete；signaled 防止失败重试时重复关闭。
+// 不随冲刷等待漂移），strip 记录 errors_only 判定。事务提交（或无
+// 内容可提交）后解除目录保护并关闭 recorder.drained 放行等待方；
+// signaled 防止失败重试时重复关闭。
 type completionItem struct {
 	recorder *Recorder
 	logRow   *store.LogRow
@@ -952,7 +957,7 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn,
 	})
 	manager.pendingCompletionCount.Store(int64(len(manager.pendingCompletions)))
-	// 写队列已空说明没有积压：立即冲刷，Complete 不附加攒批等待；
+	// 写队列已空说明没有积压：立即冲刷，落库不附加攒批等待；
 	// 积压中则攒到 completionFlushGap 或下个 flush tick。
 	if len(manager.insertQ) == 0 || time.Since(manager.lastFlush) >= completionFlushGap {
 		manager.flushAll()
@@ -984,9 +989,11 @@ func (recorder *Recorder) pendingBatch() ([]store.DebugFileRow, []store.DebugChu
 // flushAll 把全部脏目录的暂存文件与 JSONL 缓冲、待收尾的剥离与日志行
 // 合成一个跨目录事务提交；仅写 worker（及 fallbackMu 兜底路径）调用。
 // 事务原子：失败时缓冲整体保留、目录留在 dirtyBufs、收尾留在
-// pendingCompletions 下轮重试——但各项的 drained 照常放行，Complete
-// 不为病态 DB 陪葬；因此 logRow/strip 的失败语义从「当场丢弃」变成
-// 「随批次重试」，覆盖力只增不减。
+// pendingCompletions 下轮重试——各项的 drained 照常放行，等待方不为
+// 病态 DB 陪葬；因此 logRow/strip 的失败语义从「当场丢弃」变成
+// 「随批次重试」，覆盖力只增不减。目录的清理保护（releaseDir）只在
+// 收尾随事务落库（或无内容可提交）后解除：未落库的暂存目录失去活跃
+// 保护会被容量淘汰删掉，造成丢数据窗口。
 func (manager *Manager) flushAll() {
 	if len(manager.dirtyBufs) == 0 && len(manager.pendingCompletions) == 0 {
 		return
@@ -1001,6 +1008,7 @@ func (manager *Manager) flushAll() {
 			delete(manager.dirtyBufs, recorder)
 		}
 		for _, item := range manager.pendingCompletions {
+			manager.releaseDir(item.recorder.dir)
 			if !item.signaled {
 				close(item.recorder.drained)
 			}
@@ -1029,6 +1037,7 @@ func (manager *Manager) flushAll() {
 			delete(manager.dirtyBufs, recorder)
 		}
 		for _, item := range manager.pendingCompletions {
+			manager.releaseDir(item.recorder.dir)
 			if !item.signaled {
 				close(item.recorder.drained)
 			}
@@ -1064,6 +1073,7 @@ func (manager *Manager) flushAll() {
 		delete(manager.dirtyBufs, recorder)
 	}
 	for _, item := range manager.pendingCompletions {
+		manager.releaseDir(item.recorder.dir)
 		if !item.signaled {
 			close(item.recorder.drained)
 		}
@@ -1561,8 +1571,13 @@ func (recorder *Recorder) NoteUpstreamConn(reused bool, idle time.Duration) {
 	recorder.upstreamConn.Store(&connInfo{reused: reused, idleMS: idle.Milliseconds()})
 }
 
-// Complete 停止受理新写任务、投入排空哨兵等本请求前序作业全部落库，
-// 然后向 logs 表插入请求行并释放目录的清理保护。
+// Complete 停止受理新写任务、投入排空哨兵后即刻返回：哨兵沿本请求的
+// 分片 FIFO 推进，写 worker 执行到它对应的 op 即「本请求写面已齐」，
+// 收尾挂进 pendingCompletions 随批量事务提交——payload/日志行/
+// errors-only 剥离落库由写侧异步完成，响应路径不再为日志管道的
+// 队列深度与批量 commit 付等待。目录的清理保护（releaseDir）由
+// flushAll 在收尾落库后解除；需要「payload 已可对外读」语义的
+// 调用方（取证导出、测试断言）经 Drained 自行等待。
 // 幂等：二次调用直接返回——否则 meta.json 与日志行会重复落一份。
 func (recorder *Recorder) Complete(completion Completion) {
 	if recorder == nil {
@@ -1583,40 +1598,48 @@ func (recorder *Recorder) Complete(completion Completion) {
 	if recorder.aborted.Load() && completion.Result == "disconnected" {
 		completion.Result = "aborted"
 	}
-	// 排空哨兵走本请求自己的分片：分片 FIFO 保证编码协程跑到它时，本
-	// 请求已入队的任务都已编码并推进 insertQ；哨兵 op 再经 insertQ FIFO
-	// 落在全部前序 op 之后——写 worker 执行到它即「本请求写面已齐」，
-	// 收尾挂进 pendingCompletions 随批量事务提交（不单独付一次
-	// commit），drained 在覆盖它的事务落库（或失败放行）后关闭，
-	// Complete 返回即 payload/日志行/errors-only 剥离已提交。
-	// worker 已退（关停中）时哨兵可能永远送不到/执行不到，走
-	// workerGone 兜底在调用方直跑同一份收尾。
 	manager := recorder.manager
-	drained := false
-	select {
-	case manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: func() {
-		recorder.pushInsert(func() {
-			manager.queueCompletion(recorder, completion)
-		})
-	}}:
-		select {
-		case <-recorder.drained:
-			drained = true
-		case <-manager.workerGone:
-		}
-	case <-manager.workerGone:
-	}
-	if !drained {
-		// 写 worker 已退：哨兵要么没排进队列、要么其 op 被 pushInsert
-		// 的 workerGone 分支丢弃、要么收尾已入列但 Complete 恰选中
-		// workerGone 分支——queueCompletion 的 CAS 让重复入列变空操作。
-		// 多个 Complete 可同时走到这里，fallbackMu 接管写侧状态的独占。
+	// worker 已退（关停收尾）时哨兵/op 都可能送不到：兜底在触发方
+	// 直跑同一份收尾。queueCompletion 的 CAS 让并发触发的重复入列
+	// 变空操作；fallbackMu 接管 worker 死后写侧私有状态的独占。
+	fallback := func() {
 		manager.fallbackMu.Lock()
 		manager.queueCompletion(recorder, completion)
 		manager.flushAll()
 		manager.fallbackMu.Unlock()
 	}
-	manager.releaseDir(recorder.dir)
+	// 排空哨兵走本请求自己的分片：分片 FIFO 保证编码协程跑到它时，本
+	// 请求已入队的任务都已编码并推进 insertQ；哨兵 op 再经 insertQ FIFO
+	// 落在全部前序 op 之后——写 worker 执行到它即收尾入列。op 投递
+	// 失败（worker 已退）也走兜底：收尾的落库保证与普通 payload 的
+	// 尽力而为不同——丢了就没有第二次。
+	sentinel := func() {
+		select {
+		case manager.insertQ <- insertOp{recorder: recorder, apply: func() {
+			manager.queueCompletion(recorder, completion)
+		}}:
+		case <-manager.workerGone:
+			fallback()
+		}
+	}
+	select {
+	case manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: sentinel}:
+		// 关停竞态：workerStop 已闭说明编码协程在排空退出——它末次
+		// 「队列空」判定若先于本次发送，哨兵将搁浅在缓冲里无人执行。
+		// 此时派一个看守等 workerGone 兜底；workerStop 未闭则编码协程
+		// 必然存活、哨兵必被消费（入队即入缓冲，排空循环必扫到），
+		// 正常路径零成本。
+		select {
+		case <-manager.workerStop:
+			go func() {
+				<-manager.workerGone
+				fallback()
+			}()
+		default:
+		}
+	case <-manager.workerGone:
+		fallback()
+	}
 }
 
 // appendJSONL 把一行已序列化记录追加进指定 JSONL 文件的缓冲，并把本

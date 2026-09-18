@@ -205,9 +205,37 @@ func truncateRunes(s string, cap int) string {
 	return s[:cut]
 }
 
-// releaseDir 把目录移出活跃集合，允许清理器回收它。
+// releaseDir 把目录移出活跃集合，允许清理器回收它。只在覆盖收尾的
+// 批量事务提交（或无内容可提交）后由 flushAll 调用——提前解除会让
+// 未落库的暂存目录失去活跃保护，被容量淘汰删掉造成丢数据窗口。
 func (manager *Manager) releaseDir(dir string) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 	delete(manager.activeDirs, dir)
+}
+
+// drainedClosed 是已关闭通道的单例：Drained 对未知或已释放的目录
+// 直接返回它，调用方统一 <- 等待而不必判空。
+var drainedClosed = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
+
+// Drained 返回在 dir 的完成收尾首次落库事务 resolve（提交或失败放行）
+// 后关闭的通道；dir 不在活跃集（从未存在或已释放）时返回已关闭通道。
+// Complete 不再阻塞排空——需要「payload 已可对外读」语义的调用方
+// （取证导出、测试断言）在请求完结后自行 <- 等待；对仍在进行中的
+// 请求调用会阻塞到它完结落库。
+func (manager *Manager) Drained(dir string) <-chan struct{} {
+	if manager == nil {
+		return drainedClosed
+	}
+	manager.mutex.Lock()
+	recorder := manager.activeDirs[dir]
+	manager.mutex.Unlock()
+	if recorder == nil {
+		return drainedClosed
+	}
+	return recorder.drained
 }

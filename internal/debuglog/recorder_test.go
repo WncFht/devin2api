@@ -2,6 +2,7 @@
 package debuglog
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -35,6 +36,7 @@ func TestRecorderWritesRedactedStagesAndAttachments(t *testing.T) {
 	recorder.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"delta_text": "a"})
 	recorder.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"delta_text": "b"})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "model", Provider: "devin", Stream: true})
+	waitDrained(recorder)
 
 	httpLog := readTestFile(t, manager, recorder.dir, "01-http-request.json")
 	if strings.Contains(httpLog, "secret") || strings.Contains(httpLog, image) {
@@ -90,8 +92,9 @@ func TestWriteErrorKeepsFirstCause(t *testing.T) {
 	recorder := manager.Start(RequestMeta{})
 	recorder.WriteError("devin_connect", os.ErrPermission)
 	recorder.WriteError("provider_stream", os.ErrNotExist)
-	// 写任务经队列异步执行，Complete 排空后才能读到行。
+	// 写任务经队列异步执行，等排空后才能读到行。
 	recorder.Complete(Completion{StatusCode: 500, Result: "failed"})
+	waitDrained(recorder)
 	log := readTestFile(t, manager, recorder.dir, "error.json")
 	if !strings.Contains(log, "devin_connect") || strings.Contains(log, "provider_stream") {
 		t.Fatalf("error log = %s", log)
@@ -117,6 +120,7 @@ func TestSameSecondSuffixBeyondPattern(t *testing.T) {
 	}
 	for _, recorder := range recorders {
 		recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+		waitDrained(recorder)
 	}
 	if _, err := manager.Detail(dir); err != nil {
 		t.Fatalf("Detail(%q): %v", dir, err)
@@ -137,6 +141,7 @@ func TestSanitizeEscapedAndHyphenatedKeys(t *testing.T) {
 	recorder.WriteJSON("01-http-request.json", json.RawMessage(escapedKey))
 	recorder.WriteJSON("03-devin-request.json", json.RawMessage(`{"api-key":"secret","set-cookie":"secret","keep":"ok"}`))
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
 	for _, name := range []string{"01-http-request.json", "03-devin-request.json"} {
 		log := readTestFile(t, manager, recorder.dir, name)
 		if strings.Contains(log, "secret") {
@@ -161,6 +166,7 @@ func TestIOErrorsCountedOncePerKind(t *testing.T) {
 	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": 2})
 	recorder.AppendJSONL("04-devin-response.jsonl", "e", map[string]any{"x": 1})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
 	if got := manager.Stats()["io_errors"]; got != uint64(1) {
 		t.Fatalf("io_errors = %v, want 1（batch 一笔）", got)
 	}
@@ -176,6 +182,12 @@ func readTestFile(t *testing.T, manager *Manager, dir, name string) string {
 	return string(data)
 }
 
+// waitDrained 等请求的完成收尾首次落库事务 resolve——Complete 已改为
+// 异步排空，断言落库内容前须先等它（等价改动前 Complete 返回的保证）。
+func waitDrained(recorder *Recorder) {
+	<-recorder.drained
+}
+
 // TestIndexWrittenOnComplete 验证每完成一个请求向 logs 表落一行可定位摘要。
 func TestIndexWrittenOnComplete(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
@@ -184,6 +196,7 @@ func TestIndexWrittenOnComplete(t *testing.T) {
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", ClientIP: "127.0.0.1", KeyHash: "abcd1234"})
 	recorder.NoteUpstreamLatency()
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "swe-2-max", RequestedModel: "swe-2", ResponseModel: "swe-2-max", Stream: true, UpstreamRequestID: "req-1"})
+	waitDrained(recorder)
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
 		t.Fatalf("SearchLogs: %v", err)
@@ -228,6 +241,7 @@ func TestCleanerRemovesExpiredDirs(t *testing.T) {
 		t.Fatal("active dir must be protected")
 	}
 	active.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(active)
 }
 
 // TestDroppedCounterOnClosedQueue 验证 Complete 之后的写入被丢弃并计数。
@@ -263,6 +277,188 @@ func TestDroppedCounterOnFullQueue(t *testing.T) {
 	}
 }
 
+// newBareManager 手搭一个不起编码/写协程的 manager：队列与 worker 通道
+// 由测试直接驱动，用来确定性地重放 Complete 哨兵与兜底时序。
+func newBareManager(st *store.Store, queueCap int) *Manager {
+	return &Manager{
+		store:      st,
+		queues:     []chan writeTask{make(chan writeTask, queueCap)},
+		insertQ:    make(chan insertOp, 4),
+		workerStop: make(chan struct{}),
+		workerGone: make(chan struct{}),
+		dirtyBufs:  map[*Recorder]struct{}{},
+		activeDirs: map[string]*Recorder{},
+	}
+}
+
+// newBareRecorder 手搭挂在 manager 上的 recorder：writer 私有字段
+// （stagedFiles/chunkBufs/ioErrSeen）初始化成写 worker 拿到的形状。
+func newBareRecorder(manager *Manager, dir string) *Recorder {
+	recorder := &Recorder{
+		manager:     manager,
+		dir:         dir,
+		startedAt:   time.Now(),
+		drained:     make(chan struct{}),
+		stagedFiles: map[string]stagedFile{},
+		chunkBufs:   map[string]*bytes.Buffer{},
+		ioErrSeen:   map[string]struct{}{},
+	}
+	recorder.requestReadyMS.Store(-1)
+	recorder.upstreamSentMS.Store(-1)
+	recorder.upstreamOpenMS.Store(-1)
+	recorder.firstUpstreamMS.Store(-1)
+	recorder.firstClientMS.Store(-1)
+	return recorder
+}
+
+// TestCompleteReturnsBeforeDrainCommit 钉死 C1 的两条时序保证：哨兵滞留
+// 在分片队列时 Complete 已返回（不等落库），且目录的清理保护横跨「收尾
+// 已入列 pendingCompletions、事务未提交」的整段窗口——releaseDir 只在
+// 批量事务落库后发生，提前解除会让未落库目录被龄删/淘汰扫走。
+func TestCompleteReturnsBeforeDrainCommit(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	manager.policy = RetentionPolicy{Days: 1}
+
+	// 目录名内嵌 2020 年时间戳：Days:1 下它一旦失去活跃保护必被龄删——
+	// 保护存续与否可以用 cleanOnce 直接裁决。先种一行 meta 让目录在
+	// 清理器视野里存在。
+	ctx := context.Background()
+	dir := "20200101-000000"
+	if err := st.PutDebugFile(ctx, dir, MetaFile, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	recorder := newBareRecorder(manager, dir)
+	manager.activeDirs[dir] = recorder
+
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+
+	// Complete 返回时哨兵还躺在分片队列缓冲里：收尾未入列、无内容
+	// 落库、保护未解除——队列积压时 Complete 不等 commit。
+	if len(manager.pendingCompletions) != 0 {
+		t.Fatal("completion queued before sentinel ran")
+	}
+	select {
+	case <-recorder.drained:
+		t.Fatal("drained closed before commit")
+	default:
+	}
+	if removed := manager.cleanOnce(); removed != 0 {
+		t.Fatalf("active dir cleaned while completion pending: removed = %d", removed)
+	}
+
+	// 手动驱动编码→写段：哨兵 op 入 insertQ；垫一个 filler 并把
+	// lastFlush 拨成新鲜值，按住 queueCompletion 的自动冲刷，让
+	// 「收尾已入列未提交」的中间态可被断言。
+	task := <-manager.queues[0]
+	task.run()
+	manager.lastFlush = time.Now()
+	manager.insertQ <- insertOp{recorder: recorder, apply: func() {}}
+	op := <-manager.insertQ
+	op.apply()
+	if len(manager.pendingCompletions) != 1 {
+		t.Fatalf("pendingCompletions = %d, want 1", len(manager.pendingCompletions))
+	}
+	select {
+	case <-recorder.drained:
+		t.Fatal("drained closed before commit")
+	default:
+	}
+	if rows, _, err := st.SearchLogs(ctx, store.LogQuery{}); err != nil || len(rows) != 0 {
+		t.Fatalf("log row committed before flush: rows = %v, err = %v", rows, err)
+	}
+	// 收尾已入列、事务未提交：保护仍在——此刻失去它，未落库的暂存
+	// 会随目录一起被龄删扫走。
+	if removed := manager.cleanOnce(); removed != 0 {
+		t.Fatalf("uncommitted completion lost protection: removed = %d", removed)
+	}
+
+	manager.flushAll()
+	select {
+	case <-recorder.drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drained not closed after commit")
+	}
+	if _, ok := manager.activeDirs[dir]; ok {
+		t.Fatal("dir still active after commit")
+	}
+	rows, _, err := st.SearchLogs(ctx, store.LogQuery{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %v, err = %v, want 1 committed row", rows, err)
+	}
+	// 落库后保护解除：同一轮清理判定现在删掉这个超龄目录。
+	if removed := manager.cleanOnce(); removed != 1 {
+		t.Fatalf("removed = %d, want 1（提交后保护已解除）", removed)
+	}
+}
+
+// TestCompleteFallbackAfterWriterGone 验证 worker 已退时 Complete 走
+// 调用方兜底：分片队列送不进去（无缓冲、无消费者）即由 fallbackMu
+// 直跑收尾与冲刷，Complete 返回时落库已完成。
+func TestCompleteFallbackAfterWriterGone(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 0) // 无缓冲分片队列：发送必阻塞
+	close(manager.workerGone)
+	dir := "20990101-000000"
+	recorder := newBareRecorder(manager, dir)
+	manager.activeDirs[dir] = recorder
+
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+
+	select {
+	case <-recorder.drained:
+	default:
+		t.Fatal("fallback did not commit completion synchronously")
+	}
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %v, err = %v, want 1", rows, err)
+	}
+	if _, ok := manager.activeDirs[dir]; ok {
+		t.Fatal("dir still active after fallback commit")
+	}
+}
+
+// TestCompleteSentinelWatcherOnShutdown 复放关停竞态：workerStop 已闭、
+// 编码协程已退（workerGone 未闭）时哨兵能送进分片缓冲但永无人消费——
+// Complete 派的看守必须在 workerGone 关闭后用兜底把收尾落库。
+func TestCompleteSentinelWatcherOnShutdown(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 1)
+	close(manager.workerStop) // 关停进行中：编码协程排空后退出
+	dir := "20990101-000001"
+	recorder := newBareRecorder(manager, dir)
+	manager.activeDirs[dir] = recorder
+
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+
+	// 哨兵滞留在分片缓冲（workerStop 已闭 → Complete 派了看守等
+	// workerGone）；看守未醒前收尾不得入列。
+	time.Sleep(20 * time.Millisecond)
+	if len(manager.pendingCompletions) != 0 {
+		t.Fatal("completion queued before workerGone")
+	}
+	select {
+	case <-recorder.drained:
+		t.Fatal("drained closed before workerGone")
+	default:
+	}
+
+	close(manager.workerGone)
+	select {
+	case <-recorder.drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher fallback did not commit after workerGone")
+	}
+	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows = %v, err = %v, want 1", rows, err)
+	}
+	if _, ok := manager.activeDirs[dir]; ok {
+		t.Fatal("dir still active after watcher commit")
+	}
+}
+
 // TestReaderListDetailAndFiles 验证日志行倒读、单请求详情与文件读取接口。
 func TestReaderListDetailAndFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "logs")
@@ -273,6 +469,7 @@ func TestReaderListDetailAndFiles(t *testing.T) {
 		recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 		recorder.WriteJSON("03-devin-request.json", map[string]any{"model": model})
 		recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: model})
+		waitDrained(recorder)
 	}
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
@@ -308,6 +505,7 @@ func TestReaderRejectsTraversal(t *testing.T) {
 	recorder := manager.Start(RequestMeta{})
 	dir := recorder.dir
 	recorder.Complete(Completion{StatusCode: 200})
+	waitDrained(recorder)
 	if _, err := manager.Detail("../etc"); err == nil {
 		t.Fatal("Detail should reject traversal")
 	}
@@ -341,6 +539,7 @@ func TestActiveRequestsSnapshot(t *testing.T) {
 		t.Fatalf("ActiveRequests = %+v", active)
 	}
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
 	if got := manager.ActiveRequests(); len(got) != 0 {
 		t.Fatalf("ActiveRequests after Complete = %+v", got)
 	}
@@ -359,6 +558,7 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	clean.WriteJSON("01-http-request.json", map[string]any{"x": 1})
 	clean.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
 	clean.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(clean)
 	detail, err := manager.Detail(clean.dir)
 	if err != nil {
 		t.Fatalf("clean dir Detail: %v（meta 锚点应保留）", err)
@@ -377,6 +577,7 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	failed.WriteError(ErrStageDevinConnect, os.ErrPermission)
 	failed.Complete(Completion{StatusCode: 500, Result: "failed"})
+	waitDrained(failed)
 	if _, err := manager.Detail(failed.dir); err != nil {
 		t.Fatalf("failed dir must be kept: %v", err)
 	}
@@ -387,6 +588,7 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	suspicious := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
 	suspicious.AppendJSONL("04-devin-response.jsonl", "message", map[string]any{"d": 1})
 	suspicious.Complete(Completion{StatusCode: 200, Result: "completed", PrematureEndTurn: true})
+	waitDrained(suspicious)
 	if _, _, _, err := manager.ReadFile(suspicious.dir, "04-devin-response.jsonl"); err != nil {
 		t.Fatalf("premature_end_turn dir must keep payload: %v", err)
 	}

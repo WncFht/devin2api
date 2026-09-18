@@ -40,9 +40,11 @@ func TestUsageStatsFromLogRows(t *testing.T) {
 		StatusCode: 200, Result: "completed", Model: "swe-2-max", RequestedModel: "swe-2",
 		Usage: usageFixture(100, 50, 40, 30, &reasoning, 187),
 	})
+	waitDrained(recorder)
 	failed := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic", KeyHash: "k1"})
 	failed.WriteError("provider_stream", os.ErrNotExist)
 	failed.Complete(Completion{StatusCode: 500, Result: "failed", Model: "swe-2-max", Usage: usageFixture(10, 0, 0, 0, nil, 10)})
+	waitDrained(failed)
 
 	snap, err := st.UsageStats(context.Background())
 	if err != nil {
@@ -87,6 +89,7 @@ func TestUsagePersistedAcrossManagers(t *testing.T) {
 	first := NewManager(root, RetentionPolicy{}, st)
 	recorder := first.Start(RequestMeta{Method: "POST", Path: "/v1/chat/completions", API: "openai-chat"})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(1000, 200, 0, 0, nil, 1200)})
+	waitDrained(recorder)
 	first.Close()
 
 	second := NewManager(root, RetentionPolicy{}, st)
@@ -104,6 +107,7 @@ func TestUsagePersistedAcrossManagers(t *testing.T) {
 	// 新请求继续累加，不重复计数。
 	recorder2 := second.Start(RequestMeta{Method: "POST", Path: "/v1/messages", API: "anthropic"})
 	recorder2.Complete(Completion{StatusCode: 200, Result: "completed", Model: "glm-5-2", Usage: usageFixture(5, 5, 0, 0, nil, 10)})
+	waitDrained(recorder2)
 	snap, err = st.UsageStats(context.Background())
 	if err != nil {
 		t.Fatalf("UsageStats: %v", err)
@@ -156,6 +160,7 @@ func TestRetryAttemptsInIndex(t *testing.T) {
 	recorder.NoteRetryAttempt(2, "unauthenticated: token reloaded")
 	recorder.NoteRetryAttempt(3, "transport: EOF")
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed", Model: "m-x"})
+	waitDrained(recorder)
 
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
@@ -228,6 +233,7 @@ func TestAbortActiveRequest(t *testing.T) {
 		t.Fatal("ctx not cancelled by Abort")
 	}
 	recorder.Complete(Completion{StatusCode: 200, Result: "disconnected"})
+	waitDrained(recorder)
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{Result: "aborted"})
 	if err != nil {
 		t.Fatalf("SearchLogs: %v", err)

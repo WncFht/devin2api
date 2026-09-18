@@ -194,6 +194,7 @@ func TestResponsesHandlerWritesStageLogs(t *testing.T) {
 	if ref == "" {
 		t.Fatal("missing X-Request-Id header")
 	}
+	<-manager.Drained(ref)
 	detail, err := manager.Detail(ref)
 	if err != nil {
 		t.Fatalf("Detail(%q): %v", ref, err)
@@ -238,6 +239,7 @@ func TestPrematureEndTurnFlagged(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
+	<-manager.Drained(response.Header().Get("X-Request-Id"))
 	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
@@ -274,6 +276,7 @@ func TestPrematureEndTurnNotFlaggedForUserInput(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 	}
+	<-manager.Drained(response.Header().Get("X-Request-Id"))
 	meta, _, _, err := manager.ReadFile(response.Header().Get("X-Request-Id"), "meta.json")
 	if err != nil {
 		t.Fatal(err)
@@ -297,6 +300,7 @@ func TestResponsesHandlerMarksStreamError(t *testing.T) {
 	response := httptest.NewRecorder()
 	application.Router().ServeHTTP(response, request)
 	dir := response.Header().Get("X-Request-Id")
+	<-manager.Drained(dir)
 	meta, _, _, err := manager.ReadFile(dir, "meta.json")
 	if err != nil {
 		t.Fatal(err)
@@ -772,6 +776,7 @@ func TestRequestIDHeaderAndDebugRef(t *testing.T) {
 	if dir == "" {
 		t.Fatal("missing X-Request-Id header")
 	}
+	<-manager.Drained(dir)
 	if _, err := manager.Detail(dir); err != nil {
 		t.Fatalf("X-Request-Id %q does not map to a debug dir: %v", dir, err)
 	}
@@ -1061,6 +1066,7 @@ func TestRequestTooLargeKeepsDebugDir(t *testing.T) {
 	if ref == "" {
 		t.Fatal("413 response missing X-Request-Id debug ref")
 	}
+	<-manager.Drained(ref)
 	if _, err := manager.Detail(ref); err != nil {
 		t.Fatalf("debug dir %s missing: %v", ref, err)
 	}
@@ -1081,14 +1087,16 @@ func TestClientDisconnectRecords499(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses",
 		strings.NewReader(`{"model":"gpt-test","input":"hi"}`)).WithContext(ctx)
+	response := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		application.Router().ServeHTTP(httptest.NewRecorder(), request)
+		application.Router().ServeHTTP(response, request)
 		close(done)
 	}()
 	<-fake.entered
 	cancel()
 	<-done
+	<-manager.Drained(response.Header().Get("X-Request-Id"))
 
 	rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 	if err != nil {
