@@ -150,6 +150,22 @@ func (out *streamWriter) writeContent(p []byte) error {
 	return out.write(p)
 }
 
+// disconnectCause 归并断连归因：ctx 已取消时 context.Cause 是权威原因
+// （abort/drain 语义钉在原因链上），但与取消竞速到达的写出/读取物化
+// 错误带着传输细节（i/o timeout、broken pipe、RST）——复合包裹让
+// errors.Is 同时穿透两侧、error.json 的 message 留全证据；surfaced 与
+// cause 同文（取消本身物化出的同词错误）时只留 cause，避免自重复。
+func disconnectCause(ctx context.Context, surfaced error) error {
+	if ctx.Err() == nil {
+		return surfaced
+	}
+	cause := context.Cause(ctx)
+	if surfaced == nil || surfaced.Error() == cause.Error() {
+		return cause
+	}
+	return fmt.Errorf("%w; stream error: %w", cause, surfaced)
+}
+
 // finishDisconnected 收口客户端断连的统一归因：结果记 disconnected；
 // 状态码按线上实况——已有字节送达记 200（响应行已发出，断连不伪装成
 // 5xx），什么都没送达记 499（nginx 约定的客户端关闭）。err 是调用方
@@ -323,12 +339,8 @@ func (application *App) streamCompletion(
 		// 记成了 failed（对照 app.go 非流式路径的 client_disconnected 分支）。
 		if errors.Is(firstErr, context.Canceled) || errors.Is(firstErr, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			// ctx 已取消时 Cause 是权威归因（abort 原因/取消语义），
-			// firstErr 可能只是 channel 关闭物化出的裸 EOF。
-			cause := firstErr
-			if streamCtx.Err() != nil {
-				cause = context.Cause(streamCtx)
-			}
-			out.finishDisconnected(completion, cause)
+			// firstErr 可能只是 channel 关闭物化出的裸 EOF——复合保留其原文。
+			out.finishDisconnected(completion, disconnectCause(streamCtx, firstErr))
 			return
 		}
 		firstFailure := llm.Classify(firstErr)
@@ -399,13 +411,9 @@ func (application *App) streamCompletion(
 		switch {
 		case errors.Is(streamErr, context.Canceled), errors.Is(streamErr, context.DeadlineExceeded), streamCtx.Err() != nil:
 			// ctx 取消收口：与取消竞速到达的写出/编码错误让位给取消原因——
-			// Cause 是权威归因（abort/drain 语义钉在原因链上，写死连接
-			// 物化的 broken pipe 不盖住它）。
-			cause := streamErr
-			if streamCtx.Err() != nil {
-				cause = context.Cause(streamCtx)
-			}
-			out.finishDisconnected(completion, cause)
+			// Cause 是权威归因（abort/drain 语义钉在原因链上），写死连接
+			// 物化的 broken pipe 等细节由复合包裹留在 message 里取证。
+			out.finishDisconnected(completion, disconnectCause(streamCtx, streamErr))
 		case !out.committed:
 			// 首字节前的失败（如编码器错误）：响应行还没提交成 200，
 			// 按真实状态码下发，不能让客户端拿到「200 + 空流」。

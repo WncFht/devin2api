@@ -221,3 +221,52 @@ func TestStreamCompletionDeadReaderRecordsDisconnected(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestDisconnectCause 验证断连归因的复合包裹：ctx 已取消时 context.Cause
+// 是权威原因（errors.Is 必须穿透到 errDrainKill 保住 drain_timeout 归因），
+// 同时竞速到达的物化错误（i/o timeout 等传输细节）留在 message 与
+// Unwrap 链里取证；同文错误自重复时只留 cause。
+func TestDisconnectCause(t *testing.T) {
+	writeErr := fmt.Errorf("%w: %w", context.DeadlineExceeded, &net.OpError{Op: "write", Err: os.ErrDeadlineExceeded})
+
+	t.Run("ctx live keeps surfaced", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if got := disconnectCause(ctx, writeErr); got != writeErr {
+			t.Fatalf("got %v, want surfaced unchanged", got)
+		}
+	})
+
+	t.Run("cancelled composes cause and surfaced", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errDrainKill)
+		got := disconnectCause(ctx, writeErr)
+		if !errors.Is(got, errDrainKill) {
+			t.Fatalf("errors.Is(errDrainKill) = false on %v — drain_timeout attribution lost", got)
+		}
+		if !errors.Is(got, os.ErrDeadlineExceeded) {
+			t.Fatalf("errors.Is(os.ErrDeadlineExceeded) = false on %v — write detail lost", got)
+		}
+		for _, want := range []string{"drain timeout", "i/o timeout"} {
+			if !strings.Contains(got.Error(), want) {
+				t.Fatalf("message %q missing %q", got.Error(), want)
+			}
+		}
+	})
+
+	t.Run("same-text surfaced deduped", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := disconnectCause(ctx, context.Canceled); got != context.Cause(ctx) {
+			t.Fatalf("got %q, want bare cause (no self-dup)", got.Error())
+		}
+	})
+
+	t.Run("nil surfaced returns cause", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errDrainKill)
+		if got := disconnectCause(ctx, nil); !errors.Is(got, errDrainKill) {
+			t.Fatalf("got %v, want errDrainKill", got)
+		}
+	})
+}

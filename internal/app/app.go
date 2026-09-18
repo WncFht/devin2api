@@ -971,12 +971,8 @@ func (application *App) createCompletion(
 		noteRetryAfter(recorder, failure)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || streamCtx.Err() != nil {
 			// 同 streamCompletion 的取消收口：ctx 已取消时 Cause 是权威
-			// 归因，物化错误让位。
-			cause := err
-			if streamCtx.Err() != nil {
-				cause = context.Cause(streamCtx)
-			}
-			out.finishDisconnected(&completion, cause)
+			// 归因，物化错误由复合包裹留在 message 里取证。
+			out.finishDisconnected(&completion, disconnectCause(streamCtx, err))
 			return
 		}
 		if out.committed {
