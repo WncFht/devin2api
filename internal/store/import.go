@@ -210,7 +210,8 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 						e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
 						e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
 						e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-						e.ConnReused, e.ConnIdleMS, source); err != nil {
+						// 文件时代没有谱系概念——affinity_hash 补空串。
+						e.ConnReused, e.ConnIdleMS, "", source); err != nil {
 						return err
 					}
 				}

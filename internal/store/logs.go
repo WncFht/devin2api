@@ -96,6 +96,11 @@ type LogRow struct {
 	// 段偏高时靠它区分「握手成本」与「上游响应头延迟」。
 	ConnReused *bool  `json:"conn_reused,omitempty"`
 	ConnIdleMS *int64 `json:"conn_idle_ms,omitempty"`
+	// AffinityHash 是号池选号的会话谱系亲和键（SessionAffinityKey 的
+	// SHA-256，不可逆），与 meta.json 的 affinity_hash 同源——谱系
+	// 分析（绑定谱系/warm 救援/failover 同族）的 GROUP BY 维。非号池
+	// 路径与管线前拒绝留空串；读侧回填库内原值。
+	AffinityHash string `json:"affinity_hash,omitempty"`
 
 	// SwitchCauses 是被放弃 lane 尝试的归因聚合（{lane,cause}→次数），
 	// 由写方 debuglog.logRowFor 从 meta.json 同源的 upstream_attempts
@@ -120,7 +125,7 @@ var logColumnList = []string{
 	"credit_cost", "upstream_request_id", "client_ip", "key_hash", "client_request_id",
 	"error_stage", "error_message", "dropped_events", "retry_after_seconds", "rate_limited",
 	"retries", "account", "account_switches", "premature_end_turn", "repairs",
-	"conn_reused", "conn_idle_ms", "log_source", "upstream_protocol",
+	"conn_reused", "conn_idle_ms", "affinity_hash", "log_source", "upstream_protocol",
 }
 
 var (
@@ -168,7 +173,7 @@ func logInsertArgs(e *LogRow) []any {
 		e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
 		e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
 		e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-		e.ConnReused, e.ConnIdleMS, source,
+		e.ConnReused, e.ConnIdleMS, e.AffinityHash, source,
 	}
 }
 

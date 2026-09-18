@@ -125,6 +125,8 @@ func scanLogRow(rows *sql.Rows) (*LogRow, error) {
 			d = &connReused
 		case "conn_idle_ms":
 			d = &connIdle
+		case "affinity_hash":
+			d = &r.AffinityHash
 		case "log_source":
 			d = &r.LogSource
 		case "upstream_protocol":

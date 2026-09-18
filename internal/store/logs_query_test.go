@@ -182,3 +182,24 @@ func TestSearchLogsBeforeID(t *testing.T) {
 		t.Fatalf("before_id+result = %v err=%v, want 空", rows, err)
 	}
 }
+
+// TestAffinityHashRoundTrip 钉住 logs.affinity_hash 的写读回路：号池
+// 谱系亲和键随摘要行落库（迁移 0011），读侧原值回填——谱系分析的
+// GROUP BY 维。空串行照读不误（非号池/拒绝路径的默认口径）。
+func TestAffinityHashRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	if _, err := s.InsertLog(ctx, &LogRow{
+		Dir: "aff-1", StartedAt: time.Now(), StatusCode: 200,
+		Result: "completed", AffinityHash: "abc123",
+	}); err != nil {
+		t.Fatalf("InsertLog: %v", err)
+	}
+	rows, _, err := s.SearchLogs(ctx, LogQuery{})
+	if err != nil {
+		t.Fatalf("SearchLogs: %v", err)
+	}
+	if len(rows) != 1 || rows[0].AffinityHash != "abc123" {
+		t.Fatalf("AffinityHash round-trip = %+v, want [abc123]", rows)
+	}
+}

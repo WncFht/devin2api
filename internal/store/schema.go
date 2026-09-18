@@ -58,6 +58,7 @@ var schemaStatements = []string{
 		repairs INTEGER NOT NULL DEFAULT 0,
 		conn_reused INTEGER,
 		conn_idle_ms INTEGER,
+		affinity_hash TEXT NOT NULL DEFAULT '',
 		log_source TEXT NOT NULL DEFAULT 'proxy',
 		upstream_protocol TEXT NOT NULL DEFAULT 'devin'
 	)`,

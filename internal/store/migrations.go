@@ -146,6 +146,18 @@ var schemaMigrations = []migration{
 				`ALTER TABLE upstream_accounts ADD COLUMN api_key TEXT`)
 		},
 	},
+	{
+		// logs.affinity_hash 把号池选号的会话谱系亲和键落到摘要行——
+		// 与 meta.json 的 affinity_hash 同源（SessionAffinityKey 的
+		// SHA-256，不可逆）。此前谱系分析（绑定谱系/warm 救援/failover
+		// 同族）只能逐 dir 解码 meta.json，落列后 GROUP BY 一行可查。
+		// 管线前拒绝与非号池路径留空串，与 key_hash 同口径。
+		version: "0011_logs_affinity_hash",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "logs", "affinity_hash",
+				`ALTER TABLE logs ADD COLUMN affinity_hash TEXT NOT NULL DEFAULT ''`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

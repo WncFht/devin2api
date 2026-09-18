@@ -76,6 +76,7 @@ func (manager *Manager) logRowFor(recorder *Recorder, completion *Completion) *s
 		Account:           account,
 		AccountSwitches:   len(accountAttempts),
 		PrematureEndTurn:  completion.PrematureEndTurn,
+		AffinityHash:      recorder.affinityHash,
 	}
 	if row.ClientRequestID == ProbeClientRequestID {
 		row.LogSource = LogSourceManualTest
