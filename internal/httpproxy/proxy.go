@@ -79,7 +79,10 @@ func defaultTransport(forceHTTP1 bool) *http.Transport {
 	// 提高连接池上限，减少“太多人同时使用”时的连接创建/回收压力。
 	transport.MaxIdleConns = 2000
 	transport.MaxIdleConnsPerHost = 200
-	transport.IdleConnTimeout = 120 * time.Second
+	// 上游对空闲连接的斩杀线实测 ~75s（conn_idle>75s 无存活样本）：
+	// 保留窗比上游长会让连接池复用已被对端掐死的连接
+	//（server closed idle connection 竞态），收到 70s 让我方先收割。
+	transport.IdleConnTimeout = 70 * time.Second
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	// 仅限制等待响应头的时间，SSE 流本身不会被此超时打断；
 	// 支持上游长时思考/排队，设置为 600 秒。
