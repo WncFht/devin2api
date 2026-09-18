@@ -1,0 +1,12 @@
+[Unit]
+Description=devin-2api compat shim :3003 -> 127.0.0.1:3033 (post-migration)
+After=devin-2api.service
+
+[Service]
+ExecStart=%h/.local/bin/tcp-forwarder.py
+Environment=BIND_PORT=3003 TARGET_HOST=127.0.0.1 TARGET_PORT=3033 DIAL_RETRY_S=90
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
