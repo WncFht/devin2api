@@ -37,6 +37,13 @@ var sseWriteDeadline = 60 * time.Second
 // 仅用于刷新链路上各段的空闲计时器。
 var sseKeepalive = []byte(": keepalive\n\n")
 
+// streamBatchFlushBytes 是 SSE 编码批次的落盘上限：供给持续快于消费时
+// 只按「channel 暂时空了」触发 flush 会让批次无限增长——编码在 -race/
+// 慢机上可以比瞬时产出的泵慢，批堆积 GB 级内存且客户端永远收不到字节
+// （写 deadline 也因此无从触发）。到上限无条件落盘，把饥饿形态拉回
+// 正常的「写阻塞 → deadline」路径。
+const streamBatchFlushBytes = 256 << 10
+
 // streamWriter 是流式响应的唯一写出方。两个提交位回答不同问题：
 // committed 标记是否已尝试过写出——一次写尝试后无论成败连接多半已死，
 // HTTP 状态行不再可改，错误只能走带内事件/错误体；delivered 标记是否有
@@ -466,8 +473,15 @@ func writeProtocolStream(
 				err = preludeErr
 			}
 		} else if len(batch) > 0 {
-			// 上批未落盘说明上游供给不断：非阻塞再取一帧并入同批；
-			// channel 暂时空了才 flush，突发流量摊薄 syscall。
+			// 上批未落盘说明上游供给不断：批次到上限无条件落盘，
+			// 否则非阻塞再取一帧并入同批；channel 暂时空了也 flush，
+			// 突发流量摊薄 syscall。
+			if len(batch) >= streamBatchFlushBytes {
+				if wErr := flush(); wErr != nil {
+					return latest, wErr
+				}
+				continue
+			}
 			select {
 			case item, ok := <-items:
 				if !ok {
