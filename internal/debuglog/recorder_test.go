@@ -245,14 +245,21 @@ func TestCleanerRemovesExpiredDirs(t *testing.T) {
 	waitDrained(active)
 }
 
-// TestDroppedCounterOnClosedQueue 验证 Complete 之后的写入被丢弃并计数。
+// TestDroppedCounterOnClosedQueue 验证 Complete 之后的迟到写入计
+// lateWrites，不进真丢弃口径（recorder.dropped 与 droppedTotal）。
 func TestDroppedCounterOnClosedQueue(t *testing.T) {
 	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil)
 	recorder := manager.Start(RequestMeta{})
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 	recorder.WriteJSON("late.json", map[string]any{"x": 1})
-	if recorder.dropped.Load() != 1 {
-		t.Fatalf("dropped = %d, want 1", recorder.dropped.Load())
+	if got := recorder.dropped.Load(); got != 0 {
+		t.Fatalf("dropped = %d, want 0", got)
+	}
+	if got := manager.droppedTotal.Load(); got != 0 {
+		t.Fatalf("droppedTotal = %d, want 0", got)
+	}
+	if got := manager.lateWrites.Load(); got != 1 {
+		t.Fatalf("lateWrites = %d, want 1", got)
 	}
 }
 

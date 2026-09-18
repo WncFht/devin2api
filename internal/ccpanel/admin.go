@@ -325,12 +325,14 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 			"backlog_entries":            stats["queued_log_events"],
 			"queue_capacity_entries":     stats["queue_capacity"],
 			"dropped_entries":            stats["dropped_log_events"],
+			"late_writes":                stats["late_writes"],
 			"persistence_failed_entries": stats["io_errors"],
 			"pending_bytes":              stats["pending_bytes"],
 			"pending_bytes_cap":          stats["pending_bytes_cap"],
 		}
 		// debuglog 组是全量自观测（含 last_bind_failure 监听争夺取证、
-		// 保留策略回显）；logs 组只是 ccLoad 契约的四键投影。
+		// 保留策略回显）；logs 组是 ccLoad 契约四键 + 写侧在飞水位与
+		// late_writes 迟到写计数的投影。
 		data["debuglog"] = stats
 	}
 	// rates/trend 是 Snapshot 原生键（RPM/QPS、60 分钟 10s 桶）；

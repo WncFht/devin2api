@@ -196,8 +196,14 @@ type Manager struct {
 	// pendingCompletionCount 镜像 pendingCompletions 长度供 Stats 读
 	//（写 worker 私有切片不能跨 goroutine 取 len）。
 	pendingCompletionCount atomic.Int64
-	// droppedTotal 汇总各请求被丢弃的写任务数，供 Stats 暴露。
+	// droppedTotal 汇总各请求被丢弃的写任务数——只载真证据丢失口径
+	//（队列满、在飞预算 shed、已受理后写不出），供 Stats 暴露。
 	droppedTotal atomic.Uint64
+	// lateWrites 汇总「写面已拆」后被门口拒收的写任务数：recorder 已
+	// Complete（脱钩泵等未 join 的后台写者照常来投）、manager 关停中、
+	// 写 worker 已退。属设计行为而非证据丢失，与 droppedTotal 分账防止
+	// 脱钩泵噪声淹没真丢弃的告警信号。
+	lateWrites atomic.Uint64
 	// ioErrors 汇总日志行与阶段文件的写失败数——日志管道自身故障不静默。
 	ioErrors atomic.Uint64
 	// deltaBaseBytes 是全进程已钉 delta 基座的字节量：每个在飞目录把
@@ -347,7 +353,9 @@ type Recorder struct {
 	// workerGone 分支）；重复入列会向 logs 写重复行（dir 唯一约束
 	// 还会把整批拖进失败重试）。
 	completionQueued atomic.Bool
-	// dropped 是本次请求被丢弃的写任务数。
+	// dropped 是本次请求因队列满/预算 shed 被丢弃的写任务数（真证据
+	// 丢失口径，logs 行 dropped_events 列与 meta.json 同名键的来源）；
+	// 写面已拆后的迟到入队不计入——它们走 manager.lateWrites。
 	dropped atomic.Uint64
 	// aborted 标记请求被面板主动中断（区别于客户端自行断连）。
 	aborted atomic.Bool
@@ -880,6 +888,10 @@ func (manager *Manager) Stats() map[string]any {
 		"pending_completions": manager.pendingCompletionCount.Load(),
 		"queue_capacity":      globalQueueSize + insertQueueSize,
 		"dropped_log_events":  manager.droppedTotal.Load(),
+		// late_writes 是写面已拆后的迟到入队数（Complete 后未 join 的泵、
+		// 关停中、写 worker 已退的门口拒收）——设计行为而非证据丢失，
+		// 与 dropped_log_events 分账防噪声淹没真丢弃告警。
+		"late_writes": manager.lateWrites.Load(),
 		// pending_bytes 是写侧在飞 payload 的实时水位（预留+暂存合计）；
 		// 稳态只有摄入速率×flush 窗（百 KB 级），持续高位=写事务病态期
 		// 暂存积压的直接读数。pending_bytes_cap 是它的硬顶，pending_bytes_
@@ -1094,11 +1106,12 @@ func shardOf(dir string) int {
 	return int(h % uint32(encoderShards))
 }
 
-// enqueue 把一个编码任务排进本请求的分片队列；队列满、已关闭或关停中
-// 则丢弃并计数。丢弃计数的归属恰在 closed 置位那刻切分：此前进
-// recorder.dropped，由 Complete 收尾时一并折进 droppedTotal；此后直接
-// 折进 droppedTotal——迟到入队（如未 join 的泵 goroutine）的丢弃不能
-// 落进无人再读的字段。
+// enqueue 把一个编码任务排进本请求的分片队列；队列满则丢弃并按真证据
+// 丢失计数（recorder.dropped，Complete 时折进 droppedTotal——per-dir
+// dropped_events 列与全局 dropped_log_events 同口径，都只载队列满/
+// 预算 shed 的真丢弃）。写面已拆的迟到入队（Complete 后未 join 的泵
+// goroutine、manager 关停中、写 worker 已退）改计 manager.lateWrites：
+// 属设计行为而非丢失，且 closed 置位后 recorder.dropped 已无人再读。
 // 持锁发送：closed 判定与入队在同一把锁内完成，Complete 置位后不可能
 // 再有任务渗进队列（否则它会排在排空哨兵之后，冲掉的缓冲永不再刷）。
 func (recorder *Recorder) enqueue(task func()) {
@@ -1112,15 +1125,13 @@ func (recorder *Recorder) enqueue(task func()) {
 // 队列序错位）。发送是非阻塞 select，持锁期间不会挂起。
 func (recorder *Recorder) enqueueLocked(task func()) {
 	if recorder.closed || recorder.manager.closing.Load() {
-		recorder.dropped.Add(1)
-		recorder.manager.droppedTotal.Add(1)
+		recorder.manager.lateWrites.Add(1)
 		return
 	}
 	select {
 	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
 	case <-recorder.manager.workerGone:
-		recorder.dropped.Add(1)
-		recorder.manager.droppedTotal.Add(1)
+		recorder.manager.lateWrites.Add(1)
 	default:
 		recorder.dropped.Add(1)
 	}
@@ -1162,10 +1173,11 @@ func (manager *Manager) chargeStageFile(name string, n int64) bool {
 	return manager.chargePayload(n, 0)
 }
 
-// noteEncodeDrop 在编码协程上计一次编码产物丢弃（计数归属与
-// enqueueLocked 同口径切换）：closed 前挂 recorder.dropped 随 Complete
-// 折算，closed 后（Complete 已折完）直挂 droppedTotal；n 字节同时
-// 计入 droppedPayloadBytes 让丢弃体积可量化。
+// noteEncodeDrop 在编码协程上计一次编码产物丢弃——预算 shed 的是已受理
+// 任务，真证据丢失口径不随写面拆除变成 lateWrites（与 enqueueLocked 的
+// 门口拒收分账点不同）：closed 前挂 recorder.dropped 随 Complete 折算，
+// closed 后（Complete 已折完）直挂 droppedTotal；n 字节同时计入
+// droppedPayloadBytes 让丢弃体积可量化。
 func (recorder *Recorder) noteEncodeDrop(n int64) {
 	recorder.manager.droppedPayloadBytes.Add(uint64(n))
 	recorder.mutex.Lock()
@@ -2175,9 +2187,10 @@ func (recorder *Recorder) Complete(completion Completion) {
 	}
 	recorder.closed = true
 	recorder.abortCancel = nil
-	// 折算必须在锁内完成：迟到的入队在 closed 置位后走 enqueue 的
-	// closed 分支自折 droppedTotal；拖出锁外会把窗口内的迟到丢弃
-	// 既算进 dropped.Load() 又算进对方的自折——双计。
+	// 折算必须在锁内完成：dropped 的累加与 closed 置位持同一把锁，
+	// 锁内一次折算保证「置位前队列满丢弃全进 droppedTotal、置位后
+	// 迟到入队只自计 lateWrites、不再碰 dropped」的切分不被窗口期
+	// 打乱。
 	recorder.manager.droppedTotal.Add(recorder.dropped.Load())
 	recorder.mutex.Unlock()
 	if recorder.aborted.Load() && completion.Result == "disconnected" {
