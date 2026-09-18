@@ -350,6 +350,7 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 		t.Fatalf("returned error = %v, want the first lane's LocalGate rejection", err)
 	}
 	recorder.Complete(debuglog.Completion{Result: "failed"})
+	<-manager.Drained(recorder.Dir())
 
 	metaData, _, _, err := manager.ReadFile(recorder.Dir(), "meta.json")
 	if err != nil {
@@ -431,6 +432,7 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 		t.Fatalf("good lane chat calls = %d, want 0 — budget must skip it", good.chatCalls.Load())
 	}
 	recorder.Complete(debuglog.Completion{Result: "failed"})
+	<-manager.Drained(recorder.Dir())
 
 	frames, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
