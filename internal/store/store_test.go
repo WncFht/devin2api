@@ -322,6 +322,47 @@ func TestPruneQuotaSamples(t *testing.T) {
 	}
 }
 
+func TestGateWindows(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	if err := s.InsertGateWindow(ctx, &GateWindow{
+		Lane: "default", WindowStart: 1700000000, Quota: 30,
+		UsedFg: 12, UsedBg: 3, Drip: 1, ReservePeak: 9, WaitersPeak: 4,
+		RejectQuota: 2, RejectHold: 1, RejectBgReserve: 1, RejectLatch: 5, FgRate: 11.4,
+	}); err != nil {
+		t.Fatalf("InsertGateWindow: %v", err)
+	}
+	// 同 (lane,window_start) 撞车静默丢后写者（OR IGNORE），不报错。
+	if err := s.InsertGateWindow(ctx, &GateWindow{
+		Lane: "default", WindowStart: 1700000000, UsedFg: 99,
+	}); err != nil {
+		t.Fatalf("InsertGateWindow dup: %v", err)
+	}
+	if err := s.InsertGateWindow(ctx, &GateWindow{
+		Lane: "randall", WindowStart: 1700000060, Quota: 30, UsedBg: 7,
+	}); err != nil {
+		t.Fatalf("InsertGateWindow 2: %v", err)
+	}
+	got, err := s.ListGateWindows(ctx, "default", 0, 0)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ListGateWindows: %v %v", got, err)
+	}
+	if w := got[0]; w.UsedFg != 12 || w.RejectLatch != 5 || w.ReservePeak != 9 || w.FgRate != 11.4 {
+		t.Fatalf("row = %+v", w)
+	}
+	// since 过滤 + 全 lane 读取。
+	if got, err = s.ListGateWindows(ctx, "", 1700000060, 0); err != nil || len(got) != 1 || got[0].Lane != "randall" {
+		t.Fatalf("since filter: %v %v", got, err)
+	}
+	// 保留期裁剪：早于 before 的行删除。
+	if n, err := s.PruneGateWindows(ctx, 1700000060); err != nil || n != 1 {
+		t.Fatalf("PruneGateWindows = %d,%v want 1,nil", n, err)
+	}
+	if got, _ := s.ListGateWindows(ctx, "", 0, 0); len(got) != 1 || got[0].Lane != "randall" {
+		t.Fatalf("after prune: %v", got)
+	}
+}
+
 func TestModelRegistry(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()

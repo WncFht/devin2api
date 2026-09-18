@@ -138,15 +138,20 @@ func (s *Store) IncrementalVacuum(ctx context.Context) error {
 }
 
 // Maintain 执行一轮库级周期养护：logs 行按龄删除（logRowDays<=0 时
-// 跳过）、quota_samples 恢复到行数界、回收 freelist 页。三项互相
-// 独立，单项失败不阻断后续——错误经 errors.Join 汇总返回，调用方
-// 记日志即可。原 debuglog.cleanOnce 的收尾职责上移到这里：养护对象
-// 是库不是目录，由 main.go 的 ticker 驱动。
+// 跳过）、quota_samples 恢复到行数界、gate_windows 按同一保留期按龄
+// 删除、回收 freelist 页。各项互相独立，单项失败不阻断后续——错误经
+// errors.Join 汇总返回，调用方记日志即可。原 debuglog.cleanOnce 的
+// 收尾职责上移到这里：养护对象是库不是目录，由 main.go 的 ticker 驱动。
+// gate_windows 与 logs 摘要行共用 logRowDays：两者都是「时间序列
+// 明细行」的检索面，保留期同口径不单设旋钮。
 func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	var errs []error
 	if logRowDays > 0 {
-		cutoff := time.Now().Add(-time.Duration(logRowDays) * 24 * time.Hour).UnixMilli()
-		if _, err := s.DeleteLogsBefore(ctx, cutoff); err != nil {
+		cutoff := time.Now().Add(-time.Duration(logRowDays) * 24 * time.Hour)
+		if _, err := s.DeleteLogsBefore(ctx, cutoff.UnixMilli()); err != nil {
+			errs = append(errs, err)
+		}
+		if _, err := s.PruneGateWindows(ctx, cutoff.Unix()); err != nil {
 			errs = append(errs, err)
 		}
 	}

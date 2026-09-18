@@ -115,6 +115,18 @@ type rateGate struct {
 	rejectBgReserve int // bg 因预留/爬坡让路被快败的请求数（礼让强度指标；bg 桶满快败归 rejectHold）
 	waitersFg       int // 当前睡到下一窗口的 fg 请求数
 	waitersBg       int // 当前睡着的 bg 请求数（预留阻塞重查也进此列）
+	// win* 是本窗口明细账：rollBucket 翻页时快照成 gate_windows 行后
+	// 清零，把窗口用量/拒绝成因从「事后回推 logs」变成直查。上面的
+	// 累计计数器口径不动（面板兼容），win* 按 client 看到的 reason
+	// 细分——桶满快败归 winRejectQuota 而不是笼统的 rejectHold。
+	winRejectQuota     int // 桶满快败（fg/bg 同列）
+	winRejectHold      int // 死区等待超预算快败
+	winRejectBgReserve int // bg 让路快败（预留/爬坡）
+	winRejectLatch     int // 闩内快败
+	winDrip            int // 闩内滴灌探针放行数
+	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
+	winWaitersPeak     int // 本窗排队数峰值（waitersFg+waitersBg）
+	lastWindow         *store.GateWindow
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
 	// 闩了多久、怎么解的」——概览趋势图的闩时段底色与系统页事件表同源。
 	events    [gateEventCap]GateEvent
@@ -232,6 +244,9 @@ type GateStats struct {
 	// stats() 与事件环同锁算出——前端趋势图直接铺 markArea，不再在
 	// JS 里重放状态机。
 	LatchRanges []GateLatchRange `json:"latch_ranges,omitempty"`
+	// LastWindow 是最近一个被关闭窗口的聚合行（与落库 gate_windows
+	// 同一份快照）；进程内零窗口翻转或持久层未接线时为 nil。
+	LastWindow *store.GateWindow `json:"last_window,omitempty"`
 }
 
 // GateLatchRange 是一段闩时段；Start 为 nil 表示开窗事件已滚出事件环
@@ -345,9 +360,10 @@ func (gate *rateGate) windowStart(t time.Time) time.Time {
 }
 
 // rollBucket 把计数桶对齐到 ws 所属窗口：跨边界时把刚结束窗口的 fg
-// 准入数折叠进 fgRateEMA（α=fgRateAlpha），并清零三本用量账——过期
-// 桶的用量不结转。每多跳过一个空窗 EMA 再衰减一档：无流量时段估计
-// 值按半衰期回落而非冻结在最后一次观测。调用方须持 mu。
+// 准入数折叠进 fgRateEMA（α=fgRateAlpha）、明细账快照成 gate_windows
+// 行，并清零用量账——过期桶的用量不结转。每多跳过一个空窗 EMA 再衰减
+// 一档：无流量时段估计值按半衰期回落而非冻结在最后一次观测。
+// 调用方须持 mu。
 func (gate *rateGate) rollBucket(ws time.Time) {
 	if ws.Equal(gate.bucketStart) {
 		return
@@ -363,11 +379,60 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 	for i := 0; i < skipped; i++ {
 		gate.fgRateEMA *= 1 - fgRateAlpha
 	}
+	if !gate.bucketStart.IsZero() {
+		gate.persistWindow(gate.bucketStart)
+	}
 	gate.bucketStart = ws
 	gate.fgWindow = 0
 	gate.bucketUsed = 0
 	gate.bucketUsedFg = 0
 	gate.bucketUsedBg = 0
+	gate.winRejectQuota = 0
+	gate.winRejectHold = 0
+	gate.winRejectBgReserve = 0
+	gate.winRejectLatch = 0
+	gate.winDrip = 0
+	gate.winReservePeak = 0
+	gate.winWaitersPeak = 0
+}
+
+// gateWindowStoreTimeout 是窗口行持久化的写上限：观测写不能拿无界
+// ctx 进 SQLite——库卡死时协程泄漏比丢行更糟。
+const gateWindowStoreTimeout = 30 * time.Second
+
+// persistWindow 把刚关闭窗口的明细账快照成行交给持久层。行语义是
+// 「闸门实际观察到关闭的窗口」：翻页只在流量/面板/保温触碰闸门时
+// 发生，整窗未被触碰的空窗期不产生行（缺口=无观测而非零用量）。
+// 写走一次性协程脱离 mu：SQLite 单写连接在批量日志事务/真空回收下
+// 可被占压到秒级，持锁同步写会把全部准入堵在 busy_timeout 上；翻页
+// 率天然有界（每 lane 每窗口至多一次），协程不会堆积。调用方须持 mu。
+func (gate *rateGate) persistWindow(ws time.Time) {
+	if gate.states == nil {
+		return
+	}
+	row := &store.GateWindow{
+		Lane:            gate.lane,
+		WindowStart:     ws.Unix(),
+		Quota:           gate.quota,
+		UsedFg:          gate.bucketUsedFg,
+		UsedBg:          gate.bucketUsedBg,
+		Drip:            gate.winDrip,
+		ReservePeak:     gate.winReservePeak,
+		WaitersPeak:     gate.winWaitersPeak,
+		RejectQuota:     gate.winRejectQuota,
+		RejectHold:      gate.winRejectHold,
+		RejectBgReserve: gate.winRejectBgReserve,
+		RejectLatch:     gate.winRejectLatch,
+		FgRate:          gate.fgRateEMA,
+	}
+	gate.lastWindow = row
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), gateWindowStoreTimeout)
+		defer cancel()
+		if err := gate.states.InsertGateWindow(ctx, row); err != nil {
+			slog.Warn("gate window persist failed", "lane", gate.lane, "error", err)
+		}
+	}()
 }
 
 // reserve 返回当前 bg 准入必须为预期 fg 需求让出的槽数：fg 速率 EMA
@@ -381,7 +446,11 @@ func (gate *rateGate) reserve(now time.Time, ws time.Time) int {
 	}
 	usableLeft := max(ws.Add(gate.usable).Sub(now), 0)
 	reserve := int(math.Ceil(gate.fgRateEMA*usableLeft.Seconds()/windowPeriod.Seconds())) + gate.waitersFg + gate.bgMargin
-	return min(reserve, gate.quota)
+	reserve = min(reserve, gate.quota)
+	// 峰值取样放评估点：准入与 stats 的每次评估都算数——「本窗预留
+	// 到过多少」比「关窗那刻是多少」更能反映预留压力。
+	gate.winReservePeak = max(gate.winReservePeak, reserve)
+	return reserve
 }
 
 // bgAllowance 是爬坡机制此刻为 bg 释放的放行额度：quota-reserve 按
@@ -470,6 +539,7 @@ func (gate *rateGate) stats() GateStats {
 		WaitersBg:       gate.waitersBg,
 		Reserve:         gate.reserve(now, ws),
 		FgRate:          gate.fgRateEMA,
+		LastWindow:      gate.lastWindow,
 	}
 	if gate.quota > 0 {
 		open := ws
@@ -647,12 +717,14 @@ func (gate *rateGate) wait(ctx context.Context) error {
 				// 不放探针——桶界附近的探针可能落进相邻真实桶白送计数。
 				gate.nextDrip = now.Add(gate.dripInterval)
 				gate.dripCount++
+				gate.winDrip++
 				gate.admitLocked(class, gc, now, ws, entered)
 				gate.mu.Unlock()
 				return nil
 			}
 			retryAfter := gate.limitedUntil.Sub(now)
 			gate.rejectLatched++
+			gate.winRejectLatch++
 			gate.mu.Unlock()
 			return gateRejection(retryAfter, gateReasonLatch)
 		}
@@ -706,8 +778,16 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		if now.Add(wait).After(deadline) {
 			if reserveBlocked {
 				gate.rejectBgReserve++
+				gate.winRejectBgReserve++
 			} else {
 				gate.rejectHold++
+				// 窗口账按客户端看到的 reason 细分：桶满快败归
+				// quota，死区等超预算归 hold——与 X-Gate-Reason 同源。
+				if reason == gateReasonQuota {
+					gate.winRejectQuota++
+				} else {
+					gate.winRejectHold++
+				}
 			}
 			retryAfter := wait
 			if reason == gateReasonQuota {
@@ -721,6 +801,7 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		} else {
 			gate.waitersFg++
 		}
+		gate.winWaitersPeak = max(gate.winWaitersPeak, gate.waitersFg+gate.waitersBg)
 		sleeping = true
 		gate.mu.Unlock()
 		timer := time.NewTimer(wait)

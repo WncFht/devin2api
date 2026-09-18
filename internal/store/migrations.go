@@ -76,6 +76,14 @@ var schemaMigrations = []migration{
 			return err
 		},
 	},
+	{
+		// gate_windows 是全新表：幂等建表路径（schema.go）已覆盖新库
+		// 与存量库，这里登记版本让 schema_migrations 如实反映演进史。
+		version: "0005_gate_windows",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

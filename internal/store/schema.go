@@ -194,6 +194,32 @@ var schemaStatements = []string{
 	// 导入重跑（commit 后 rename 失败等断点续传场景）去重兜底。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_acct_at ON quota_samples(account, at)`,
 
+	// gate_windows：速率闸门按对齐分钟窗口聚合的明细账，每 lane 每个
+	// 被观察关闭的窗口一行（闸门在该窗口内被流量/面板/保温触碰过才有
+	// 行，整窗未触碰的空窗期是缺口而非零行）。列含义见 GateWindow。
+	`CREATE TABLE IF NOT EXISTS gate_windows (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		lane TEXT NOT NULL DEFAULT '',
+		window_start INTEGER NOT NULL,
+		quota INTEGER NOT NULL DEFAULT 0,
+		used_fg INTEGER NOT NULL DEFAULT 0,
+		used_bg INTEGER NOT NULL DEFAULT 0,
+		drip INTEGER NOT NULL DEFAULT 0,
+		reserve_peak INTEGER NOT NULL DEFAULT 0,
+		waiters_peak INTEGER NOT NULL DEFAULT 0,
+		reject_quota INTEGER NOT NULL DEFAULT 0,
+		reject_hold INTEGER NOT NULL DEFAULT 0,
+		reject_bg_reserve INTEGER NOT NULL DEFAULT 0,
+		reject_latch INTEGER NOT NULL DEFAULT 0,
+		fg_rate REAL NOT NULL DEFAULT 0
+	)`,
+	// (lane, window_start) 唯一：单 lane 每窗口至多一行；reuseport
+	// 交接期新旧两进程并发观察同一窗口时后写者被 OR IGNORE 丢弃。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_gate_windows_lane_ws ON gate_windows(lane, window_start)`,
+	// 保留期清理（PruneGateWindows 按 window_start 范围删）的支点；
+	// lane 复合索引的第二列借不上纯 window_start 谓词。
+	`CREATE INDEX IF NOT EXISTS idx_gate_windows_ws ON gate_windows(window_start)`,
+
 	// runtime_state：键值小状态。gate:<lane> 存冷却闩 JSON；
 	// import_base_done / debug_dirs_imported 是导入进度标记。
 	`CREATE TABLE IF NOT EXISTS runtime_state (

@@ -235,8 +235,55 @@ func TestRateGateWindowRollover(t *testing.T) {
 	}
 }
 
-// 死区内请求睡到下一窗口开放再放行，而不是立即快败——
-// 等待在 maxHold 内就值得睡。
+// 窗口翻页把刚关闭窗口的明细账落进 gate_windows：用量/配额/拒绝成因
+// 分列可直查，不再靠 logs.time+upstream_sent_ms 回推窗口消耗。
+func TestRateGatePersistsClosedWindow(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 1}, db, store.GateStateKey("default"))
+	clock := pinGateClock(gate, 10)
+	windowStart := clock.t.Truncate(time.Minute).Add(2 * time.Second) // 默认可发区间 :02
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("wait error = %v", err)
+	}
+	// 桶满快败计入关闭窗口的 reject_quota 账。
+	if err := gate.wait(context.Background()); err == nil {
+		t.Fatal("second wait should be rejected (quota exhausted)")
+	}
+	clock.t = clock.t.Add(time.Minute) // 下一桶同秒位
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("new-bucket wait error = %v", err)
+	}
+	// 落库走一次性协程脱离 mu：轮询到行出现。
+	var rows []*store.GateWindow
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if rows, err = db.ListGateWindows(context.Background(), "default", 0, 0); err != nil {
+			t.Fatalf("ListGateWindows: %v", err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 closed window", len(rows))
+	}
+	w := rows[0]
+	if w.Lane != "default" || w.WindowStart != windowStart.Unix() || w.Quota != 1 ||
+		w.UsedFg != 1 || w.UsedBg != 0 || w.RejectQuota != 1 || w.RejectLatch != 0 {
+		t.Fatalf("row = %+v", w)
+	}
+	if last := gate.stats().LastWindow; last == nil || last.WindowStart != windowStart.Unix() {
+		t.Fatalf("stats().LastWindow = %+v", last)
+	}
+	// 新窗口未关闭前不再出第二行。
+	if rows, _ = db.ListGateWindows(context.Background(), "", 0, 0); len(rows) != 1 {
+		t.Fatalf("rows after reopen = %d, want still 1", len(rows))
+	}
+}
 func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	offsetGateClock(gate, 1.9) // 死区尾，距 :02 开放 ~100ms
