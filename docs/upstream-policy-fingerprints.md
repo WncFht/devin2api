@@ -119,7 +119,7 @@ Claude Code 派生子代理时整批失败，模型自己总结出「subagent �
 ### 结论
 
 - **skill/subagent/MCP 三个 feature 面在上游没有独立限制**——子代理请求与主会话同构（system + messages + tools），MCP 工具名是普通函数名，skill 注入是普通文本。唯一的 feature 级拦截面仍是提示词指纹（第三、四节）。
-- 限制集中在**本地 adapter 的协议覆盖度**：无桥接通道的工具类型与非 text/image 内容块被丢弃（记 `Dropped` 落库，客户端无感知）。排查「某 feature 没生效」时先查该请求的 `02-request-messages.json` 与 `03-devin-request.json`（`/admin/debug-logs/{id}/file/{name}` 或 `debug_files` 表）对比输入是否完整到达 wire。
+- 限制集中在**本地 adapter 的协议覆盖度**：无桥接通道的工具类型与非 text/image 内容块被丢弃（记 `Dropped` 落库，客户端无感知）。排查「某 feature 没生效」时先查该请求的 `02-request-messages.json` 与 `03-devin-request.json`（经 `/admin/debug-logs/{id}/file/{name}` 端点——02/03 在 `debug_files` 表里可为 zstd delta 帧，裸读 content 拿到的是未解码字节）对比输入是否完整到达 wire。
 
 ## 七、维护流程（新症状 → 新规则）
 
