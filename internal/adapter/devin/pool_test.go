@@ -1316,7 +1316,7 @@ func TestPoolBoundLaneYieldsOnBgCongestion(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
 	laneA := poolLaneByName(pool, "a")
 	affinity := "bg-yield-session"
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 
 	// 钉在 :10——可发区间前段（usableLeft=48s，已开放 8s）。
 	// reserve=ceil(60*48/60)+0+4=52 → 释放速率 (80-52)/56=0.5/s；
@@ -1377,7 +1377,7 @@ func TestPoolBoundLaneYieldsOnBgStarvedWindow(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
 	laneA := poolLaneByName(pool, "a")
 	affinity := "bg-starved-session"
-	pool.bind(affinity, laneA)
+	pool.bind(affinity, laneA, "")
 
 	// 钉在 :59——死区（usable :02~:58），toNext=3s。
 	// 下窗预留 ceil(80*56/60)+5+4=84≥80：bg 跨窗无槽，期望
@@ -1920,6 +1920,7 @@ func TestPoolGateYieldToSibling(t *testing.T) {
 		t.Fatalf("lane a RejectYield = %d, want 1", got)
 	}
 }
+
 // AssignModel 挂起的 lane 经 preGateTimeout 判死后 failover：dead lane 的
 // 闸门前解析吃 deadline_exceeded（failoverable 词表内），兄弟 lane 重新
 // 解析救回请求；死 lane 进 generic 冷却——同亲和键的后续请求不再先试它。
