@@ -698,7 +698,9 @@ func (adapter *Adapter) mintSessionToken(apiKey string) (string, error) {
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GetSelfDevinSessionToken HTTP %d: %s", resp.StatusCode, truncateRunes(string(raw), 300))
+		// 错误体可能回显请求字段——入日志前先擦掉 durable key。
+		detail := strings.ReplaceAll(string(raw), apiKey, "[redacted]")
+		return "", fmt.Errorf("GetSelfDevinSessionToken HTTP %d: %s", resp.StatusCode, truncateRunes(detail, 300))
 	}
 	var parsed struct {
 		SessionToken string `json:"sessionToken"`
