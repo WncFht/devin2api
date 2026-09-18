@@ -157,16 +157,82 @@ func sanitizeContents(content []llm.Content, hits map[string]int) []llm.Content 
 		case llm.ToolCall:
 			// 写文件类参数内嵌的长文本可含指纹句（如 "You are Claude
 			// Code"）原文上行——ToolResultMessage 文本已被脱敏，这里
-			// 不脱就是不对称漏面。对参数串做同一套文本级替换：指纹是
-			// 明文短语，JSON 串内命中照常改写；替换词均为无需转义的
-			// 普通 ASCII 文案，不破坏参数 JSON 结构。
-			if sanitized := sanitizeUpstreamText(string(typed.Arguments), false, hits); sanitized != string(typed.Arguments) {
+			// 不脱就是不对称漏面。
+			raw := string(typed.Arguments)
+			sanitized := raw
+			if typed.Custom {
+				// freeform 参数体不是 JSON，无结构可破坏，按纯文本改写。
+				sanitized = sanitizeUpstreamText(raw, false, hits)
+			} else {
+				sanitized = sanitizeToolArguments(raw, hits)
+			}
+			if sanitized != raw {
 				typed.Arguments = json.RawMessage(sanitized)
 				content[index] = typed
 			}
 		}
 	}
 	return content
+}
+
+// sanitizeToolArguments 改写 JSON 参数体内的指纹文案：逐字符串叶子值
+// 跑同一套规则后由编码器重新转义。文本级改写会把替换词里的裸 " 写进
+// JSON 串值造出非法 argumentsJson（cc-colon-toolcall 替换词即含引号），
+// 叶子级改写既保住脱敏又保住结构。原样返回的三条出口：trigger 预筛
+// 未命中（免解码）、解码失败（非对象参数体不归这层管）、无叶子被改
+// （免重编码漂移——marshal 会归并键序与空白，能不动就不动）。
+func sanitizeToolArguments(raw string, hits map[string]int) string {
+	if sanitizeCandidateRules(raw, sanitizePairMessages) == 0 {
+		return raw
+	}
+	var root any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	// UseNumber 保数字字面量原文——float64 换算丢精度会悄悄改掉参数。
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil {
+		return raw
+	}
+	if !sanitizeJSONLeaves(&root, hits) {
+		return raw
+	}
+	var out strings.Builder
+	encoder := json.NewEncoder(&out)
+	// 与输入侧同形：<>& 不转 \u00xx，避免无谓的字节漂移。
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(root); err != nil {
+		return raw
+	}
+	return strings.TrimRight(out.String(), "\n")
+}
+
+// sanitizeJSONLeaves 就地改写 JSON 值树里的字符串叶子，返回是否有叶子
+// 被改写。键名/数字/布尔/null 不动——指纹文案只可能活在字符串值里。
+func sanitizeJSONLeaves(value *any, hits map[string]int) bool {
+	switch typed := (*value).(type) {
+	case string:
+		if sanitized := sanitizeUpstreamText(typed, false, hits); sanitized != typed {
+			*value = sanitized
+			return true
+		}
+	case []any:
+		changed := false
+		for index := range typed {
+			if sanitizeJSONLeaves(&typed[index], hits) {
+				changed = true
+			}
+		}
+		return changed
+	case map[string]any:
+		changed := false
+		for key, child := range typed {
+			if sanitizeJSONLeaves(&child, hits) {
+				typed[key] = child
+				changed = true
+			}
+		}
+		return changed
+	}
+	return false
 }
 
 // sanitizeFold 是 ASCII 大小写折叠表（A-Z → a-z，其余原样）。trigger
