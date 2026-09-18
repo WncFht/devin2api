@@ -77,6 +77,14 @@ type Pool struct {
 	// （粘性区：宁等不换，交给 gate 自己仲裁）。滑动 TTL 命中即续期。
 	bindings   map[string]laneBinding
 	bindingsMu sync.Mutex
+	// inflight 是亲和键的在飞请求指派表：请求在选号循环里逐次登记
+	// 当前 lane（pin.setLane），Stream 返回时归还计数。正式绑定要等
+	// 前驱开流成功才写——在此之前的同键并发后继按这张表钉到同一
+	// lane，不再各自按当时的健康快照散选（prod 实测换 lane 事件
+	// 91.5% 是这个窗口的竞态）。纯内存无 TTL：生命周期跟随在飞
+	// 请求本身。
+	inflight   map[string]*inflightEntry
+	inflightMu sync.Mutex
 }
 
 // laneBinding 是一条会话绑定：lane 是亲和键当前钉住的泳道，expiry
@@ -84,6 +92,23 @@ type Pool struct {
 type laneBinding struct {
 	lane   *poolLane
 	expiry time.Time
+}
+
+// inflightEntry 是同一亲和键的在飞请求集合的当前指派：lane 取最近
+// 一次活动指派（前驱 failover 改派时随走——并发同键请求跟随最新
+// 指派，与 bind 的 last-writer-wins 同口径），count 是活着的在飞
+// 请求数，归零删条目。
+type inflightEntry struct {
+	lane  *poolLane
+	count int
+}
+
+// inflightPin 是一次在飞请求的钉选句柄：Stream 选号落定后 acquire，
+// 每次 lane 尝试前 setLane 登记当前指派（failover 改派即记录——前驱
+// 的缓存谱系实际落在哪，后继就往哪钉），返回时 release 归还计数。
+type inflightPin struct {
+	pool     *Pool
+	affinity string
 }
 
 // poolLane 是池里的一条账号泳道：adapter 承载该号全部运行时状态，
@@ -155,7 +180,7 @@ func NewPool(configs []Config) (*Pool, error) {
 		}
 		lanes = append(lanes, lane)
 	}
-	pool := &Pool{bindings: make(map[string]laneBinding)}
+	pool := &Pool{bindings: make(map[string]laneBinding), inflight: make(map[string]*inflightEntry)}
 	pool.lanes.Store(&lanes)
 	return pool, nil
 }
@@ -236,6 +261,11 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。
 	recorder.NotePoolCandidates(poolCandidateRows(ranked))
+	// 在飞钉选登记：本请求占据亲和键的一个在飞名额，同键并发后继
+	// 按此钉到同一 lane；release 与首个成功开流的 bind 同刻发生——
+	// 钉选接力给正式绑定，不重叠。
+	pin := pool.inflightAcquire(affinity)
+	defer pin.release()
 	rest := make([]*poolLane, len(ranked))
 	for i, c := range ranked {
 		rest[i] = c.lane
@@ -251,6 +281,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		}
 		lane := rest[0]
 		rest = rest[1:]
+		pin.setLane(lane)
 		// 04 里插账号分界行：各 lane 的上游帧直接续写同一文件，
 		// 没有分界行无法区分一段帧属于哪号。
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
@@ -425,7 +456,8 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 }
 
 // poolCandidate 是排序时的一次性评估快照：verdict 是 lane 当时的健康
-// 判定与降级归因，bound 是绑定命中标记，score 是 rendezvous 分数。
+// 判定与降级归因，bound 是绑定命中标记，pinned 是在飞钉选命中标记，
+// score 是 rendezvous 分数。
 // 快照语义保证审计行（pool_candidates）与排序决策同源——不在排完序后
 // 再评一次，避免两次评估之间的状态翻转让审计与决策对不上。
 type poolCandidate struct {
@@ -433,6 +465,7 @@ type poolCandidate struct {
 	score    [32]byte
 	verdict  laneVerdict
 	bound    bool
+	pinned   bool
 	priority int32
 }
 
@@ -448,9 +481,9 @@ func (s *poolStream) swapRanked(taken *poolLane) []poolCandidate {
 }
 
 // poolCandidateRows 把候选快照投影成审计行：bound lane 的 Reason 记
-// "bound"（它是粘性区语义，gate 忙也居首）；其余 lane 的 Reason 是
-// 降级归因的有序叠加——取全部适用词连写而非首个主因，多因并存时
-// （如冷却+闩）完整保留现场。
+// "bound"、pinned lane 记 "inflight"（两者都是粘性区语义，gate 忙也
+// 居首）；其余 lane 的 Reason 是降级归因的有序叠加——取全部适用词
+// 连写而非首个主因，多因并存时（如冷却+闩）完整保留现场。
 func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 	rows := make([]debuglog.PoolCandidate, len(ranked))
 	for i, c := range ranked {
@@ -458,6 +491,7 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 			Name:    c.lane.name,
 			Healthy: c.verdict.healthy,
 			Bound:   c.bound,
+			Pinned:  c.pinned,
 			Reason:  strings.Join(c.verdict.reasons, ","),
 		}
 		if c.bound {
@@ -468,14 +502,22 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 }
 
 // rankLanes 给出候选序的完整评估快照，排序键从高到低：
-// bound-hit → 健康档（绿 → 配额低 → 病）→ priority desc → rendezvous
-// 分数升序。三区语义：绑定 lane 恒居首位（gate 闩/桶满不算硬故障——
-// 粘性区「宁等不换」，闩内快败零成本转下一候选、桶满睡到 maxHold）；
-// 配额低 lane 仍在健康档内但降一级，只影响新会话落点；不健康不剔除
-// 只排后：判定是近似快照，全不健康时仍回分数序，由 lane 闸门自己走
-// wait/快败（客户端拿 Retry-After，与单号一致）。
+// bound-hit → 在飞钉选 → 健康档（绿 → 配额低 → 病）→ priority desc →
+// rendezvous 分数升序。三区语义：绑定 lane 恒居首位（gate 闩/桶满不算
+// 硬故障——粘性区「宁等不换」，闩内快败零成本转下一候选、桶满睡到
+// maxHold）；在飞钉选 lane 居次位同区语义（同亲和键有在飞请求时后继
+// 钉同一 lane——正式绑定落地前的并发窗口不再各自散选）；配额低 lane
+// 仍在健康档内但降一级，只影响新会话落点；不健康不剔除只排后：判定
+// 是近似快照，全不健康时仍回分数序，由 lane 闸门自己走 wait/快败
+// （客户端拿 Retry-After，与单号一致）。
 func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate {
 	bound := pool.boundLane(affinity)
+	// 绑定恒赢于在飞钉选——绑定是「已产出内容的 lane」的确认记录，
+	// 在飞指派只是未确认的当前尝试；两者天然互斥（有绑定不查在飞表）。
+	var pinned *poolLane
+	if bound == nil {
+		pinned = pool.inflightLane(affinity)
+	}
 	candidates := make([]poolCandidate, 0, len(lanes))
 	for _, lane := range lanes {
 		candidates = append(candidates, poolCandidate{
@@ -483,12 +525,19 @@ func (pool *Pool) rankLanes(lanes []*poolLane, affinity string) []poolCandidate 
 			score:    sha256.Sum256([]byte(affinity + "|" + lane.name)),
 			verdict:  lane.verdict(),
 			bound:    lane == bound,
+			pinned:   lane == pinned,
 			priority: lane.priority.Load(),
 		})
 	}
 	slices.SortStableFunc(candidates, func(a, b poolCandidate) int {
 		if a.bound != b.bound {
 			if a.bound {
+				return -1
+			}
+			return 1
+		}
+		if a.pinned != b.pinned {
+			if a.pinned {
 				return -1
 			}
 			return 1
@@ -850,16 +899,75 @@ func (pool *Pool) bind(affinity string, lane *poolLane) {
 	pool.bindings[affinity] = laneBinding{lane: lane, expiry: time.Now().Add(pool.affinityTTL())}
 }
 
-// unbindLane 清掉一条 lane 的全部绑定：lane 被摘除（ApplyConfigs 差集）
-// 时调用，避免绑定指向已不在快照里的死 lane。
+// unbindLane 清掉一条 lane 的全部绑定与在飞指派：lane 被摘除
+// （ApplyConfigs 差集）时调用，避免绑定/钉选指向已不在快照里的死
+// lane。在飞条目删掉后持 pin 的请求照旧释放（release 对缺失条目
+// 空操作），其 setLane 不再重建——摘除的 lane 不该再吸新流量。
 func (pool *Pool) unbindLane(lane *poolLane) {
 	pool.bindingsMu.Lock()
-	defer pool.bindingsMu.Unlock()
 	for key, binding := range pool.bindings {
 		if binding.lane == lane {
 			delete(pool.bindings, key)
 		}
 	}
+	pool.bindingsMu.Unlock()
+	pool.inflightMu.Lock()
+	for key, entry := range pool.inflight {
+		if entry.lane == lane {
+			delete(pool.inflight, key)
+		}
+	}
+	pool.inflightMu.Unlock()
+}
+
+// inflightLane 返回亲和键的在飞钉选 lane；无条目或 lane 已硬故障
+// （池侧两档冷却）按无钉选处理——持条目的在飞请求正走在 failover
+// 或终局路径上，会自行改派/释放，读侧只不引用它。
+func (pool *Pool) inflightLane(affinity string) *poolLane {
+	pool.inflightMu.Lock()
+	defer pool.inflightMu.Unlock()
+	entry := pool.inflight[affinity]
+	if entry == nil || entry.lane == nil || entry.lane.hardDown() {
+		return nil
+	}
+	return entry.lane
+}
+
+// inflightAcquire 为一次在飞请求登记钉选名额：同键首个请求建条目，
+// 后来者只加计数——并发同键请求共享条目，lane 随最新指派走。
+func (pool *Pool) inflightAcquire(affinity string) *inflightPin {
+	pool.inflightMu.Lock()
+	entry := pool.inflight[affinity]
+	if entry == nil {
+		entry = &inflightEntry{}
+		pool.inflight[affinity] = entry
+	}
+	entry.count++
+	pool.inflightMu.Unlock()
+	return &inflightPin{pool: pool, affinity: affinity}
+}
+
+// setLane 更新本请求所在 lane：选号循环每次尝试前调用，failover
+// 改派即改记——在飞钉选跟踪的是「前驱此刻在哪条 lane」。
+func (pin *inflightPin) setLane(lane *poolLane) {
+	pin.pool.inflightMu.Lock()
+	if entry := pin.pool.inflight[pin.affinity]; entry != nil {
+		entry.lane = lane
+	}
+	pin.pool.inflightMu.Unlock()
+}
+
+// release 归还在飞计数：归零删条目，同键后继回到分数序/绑定语义。
+// 条目可能已被 unbindLane 摘掉——缺失时空操作。
+func (pin *inflightPin) release() {
+	pin.pool.inflightMu.Lock()
+	if entry := pin.pool.inflight[pin.affinity]; entry != nil {
+		entry.count--
+		if entry.count <= 0 {
+			delete(pin.pool.inflight, pin.affinity)
+		}
+	}
+	pin.pool.inflightMu.Unlock()
 }
 
 // boundSessionCounts 统计各 lane 当前绑定的活会话数（未过期条目计数），

@@ -782,6 +782,126 @@ func TestPoolSessionBinding(t *testing.T) {
 	}
 }
 
+// 在飞钉选：同亲和键有在飞请求时后继钉同一 lane——正式绑定落地前的
+// 并发窗口不再各自按当时的健康快照散选。钉选 lane 硬故障（池侧冷却）
+// 即失效按普通序重选；绑定命中恒赢于在飞钉选。
+func TestPoolInflightPin(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
+	lanes := pool.snapshot()
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	affinity := "inflight-session"
+
+	pin := pool.inflightAcquire(affinity)
+	pin.setLane(laneB)
+	ranked := pool.rankLanes(lanes, affinity)
+	if ranked[0].lane != laneB || !ranked[0].pinned {
+		t.Fatalf("inflight-pinned lane must lead, got %v pinned=%v", ranked[0].lane.name, ranked[0].pinned)
+	}
+	if ranked[0].bound {
+		t.Fatal("inflight pin must not mark as bound")
+	}
+	rows := poolCandidateRows(ranked)
+	if !rows[0].Pinned {
+		t.Fatalf("audit row must carry pinned flag: %+v", rows[0])
+	}
+
+	// 在飞 lane 硬故障 → 钉选失效按普通序重选。
+	laneB.noteFailure(connect.NewError(connect.CodeInternal, errors.New("boom")))
+	ranked = pool.rankLanes(lanes, affinity)
+	if ranked[0].lane == laneB || ranked[0].pinned {
+		t.Fatalf("hardDown inflight lane must not be pinned, got %v", ranked[0].lane.name)
+	}
+	laneB.noteSuccess()
+
+	// 绑定恒赢于在飞钉选：绑 a 后 a 居首且记 bound。
+	pool.bind(affinity, laneA)
+	ranked = pool.rankLanes(lanes, affinity)
+	if ranked[0].lane != laneA || !ranked[0].bound || ranked[0].pinned {
+		t.Fatalf("bound must beat inflight pin, got %v bound=%v pinned=%v", ranked[0].lane.name, ranked[0].bound, ranked[0].pinned)
+	}
+
+	// failover 改派：在飞条目跟随最新指派 lane。
+	pin.setLane(poolLaneByName(pool, "c"))
+	if got := pool.inflightLane(affinity); got != poolLaneByName(pool, "c") {
+		t.Fatalf("inflightLane after move = %v, want c", got.name)
+	}
+
+	// 释放归零删条目：同键后继回到绑定/分数序语义。
+	pin2 := pool.inflightAcquire(affinity)
+	pin.release()
+	if pool.inflightLane(affinity) == nil {
+		t.Fatal("second pin must keep the entry alive")
+	}
+	pin2.release()
+	pool.inflightMu.Lock()
+	_, exists := pool.inflight[affinity]
+	pool.inflightMu.Unlock()
+	if exists {
+		t.Fatal("inflight entry must be removed at zero refcount")
+	}
+}
+
+// 在飞钉选的粘性区同语义：在飞 lane 因 gate 忙（闩中）也仍钉住——
+// 「宁等不换」与绑定一致，交给 gate 仲裁。
+func TestPoolInflightPinStickyUnderGateLatch(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	affinity := "inflight-sticky"
+	pin := pool.inflightAcquire(affinity)
+	pin.setLane(laneA)
+	t.Cleanup(pin.release)
+
+	laneA.adapter.gate.noteUpstreamError(connect.NewError(connect.CodeResourceExhausted, errors.New("reset in 1 minute")))
+	if laneA.healthy() {
+		t.Skip("gate latch did not engage; environment-dependent")
+	}
+	ranked := pool.rankLanes(pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || !ranked[0].pinned {
+		t.Fatalf("latched inflight lane must stay pinned, got %v", ranked[0].lane.name)
+	}
+}
+
+// 在飞钉选端到端：pre-seed 在飞指派到 b，rendezvous 分数偏好 a 的
+// 后继请求仍落 b——钉选压过分数序（这正是并发窗口竞态的修复点：
+// 前驱还没开流，后继已经按在飞指派同 lane 走）。
+func TestPoolInflightPinDirectsStream(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	upA := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("a"), stubStop())
+		},
+	}
+	upB := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("b"), stubStop())
+		},
+	}
+	srvA := stubServer(t, upA, nil)
+	srvB := stubServer(t, upB, nil)
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "a", Token: "tok-a"}, Endpoint: Endpoint{BaseURL: srvA.URL}, Model: "stub-model"},
+		Config{Identity: LaneIdentity{Name: "b", Token: "tok-b"}, Endpoint: Endpoint{BaseURL: srvB.URL}, Model: "stub-model"},
+	)
+	laneB := poolLaneByName(pool, "b")
+
+	request := pinnedRequest(pool, "a")
+	pin := pool.inflightAcquire(SessionAffinityKey(request))
+	pin.setLane(laneB)
+	defer pin.release()
+
+	stream, err := pool.Stream(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	stubDrain(t, stream)
+	if upA.chatCalls.Load() != 0 || upB.chatCalls.Load() != 1 {
+		t.Fatalf("inflight pin must direct to b: a=%d b=%d", upA.chatCalls.Load(), upB.chatCalls.Load())
+	}
+}
+
 // 粘性区：绑定 lane 因 gate 忙（闩中）也居候选首位——「宁等不换」交给
 // gate 仲裁；闩内快败零成本转下一候选。gate 状态不算 hardDown。
 func TestPoolBoundLaneStickyUnderGateLatch(t *testing.T) {
