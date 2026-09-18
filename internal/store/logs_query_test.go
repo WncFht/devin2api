@@ -203,3 +203,68 @@ func TestAffinityHashRoundTrip(t *testing.T) {
 		t.Fatalf("AffinityHash round-trip = %+v, want [abc123]", rows)
 	}
 }
+
+// TestDeleteLogsBeforeBatched 验证 logs 按龄删除的分片循环与水位钳制：
+// 超一片（deleteLogsBatch）的存量分批删净；绕过双写的水位外老行本轮
+// 豁免——其聚合贡献未入 cells 账本，删了会无声消失，ReconcileCells
+// 覆盖后下轮再删。
+func TestDeleteLogsBeforeBatched(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	old := time.Now().Add(-100 * 24 * time.Hour)
+	cutoff := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
+
+	// 直接 SQL 批量插超一片的老行再 ReconcileCells 记账——与写入期
+	// 双写推进水位同效，行数逼出多片循环。
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	for i := 0; i < deleteLogsBatch+7; i++ {
+		if _, err := tx.ExecContext(ctx, logsInsertSQL, logInsertArgs(&LogRow{
+			Dir: fmt.Sprintf("bulk-%d", i), StartedAt: old,
+			StatusCode: 200, Result: "completed",
+		})...); err != nil {
+			t.Fatalf("bulk insert %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit bulk: %v", err)
+	}
+	if err := s.ReconcileCells(ctx); err != nil {
+		t.Fatalf("ReconcileCells: %v", err)
+	}
+	// 保留期内的行不删。
+	if _, err := s.InsertLog(ctx, &LogRow{
+		Dir: "fresh", StartedAt: time.Now(), StatusCode: 200, Result: "completed",
+	}); err != nil {
+		t.Fatalf("InsertLog fresh: %v", err)
+	}
+	got, err := s.DeleteLogsBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteLogsBefore: %v", err)
+	}
+	if want := int64(deleteLogsBatch + 7); got != want {
+		t.Fatalf("deleted = %d, want %d", got, want)
+	}
+	if n, err := s.LogCount(ctx); err != nil || n != 1 {
+		t.Fatalf("remaining = %d err=%v, want 1（fresh 行）", n, err)
+	}
+
+	// 水位外老行豁免：bypass 插入的 id > 水位，本轮不删；
+	// ReconcileCells 覆盖后可删。
+	if _, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(&LogRow{
+		Dir: "bypass-old", StartedAt: old, StatusCode: 200, Result: "completed",
+	})...); err != nil {
+		t.Fatalf("bypass insert: %v", err)
+	}
+	if got, err := s.DeleteLogsBefore(ctx, cutoff); err != nil || got != 0 {
+		t.Fatalf("pre-reconcile deleted = %d err=%v, want 0（水位外豁免）", got, err)
+	}
+	if err := s.ReconcileCells(ctx); err != nil {
+		t.Fatalf("ReconcileCells: %v", err)
+	}
+	if got, err := s.DeleteLogsBefore(ctx, cutoff); err != nil || got != 1 {
+		t.Fatalf("post-reconcile deleted = %d err=%v, want 1", got, err)
+	}
+}

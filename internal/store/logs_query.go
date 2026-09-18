@@ -414,14 +414,47 @@ func (s *Store) ExistsLogBefore(ctx context.Context, q LogQuery) (bool, error) {
 	return n != 0, err
 }
 
+// deleteLogsBatch 是 DeleteLogsBefore 单片删除的行数上界：logs 是
+// 无界增长表，每行删除连带约十个索引项维护，无界单事务在保留期调小
+// 或批量回填触发存量清理时会独占唯一写连接数秒。片级提交让请求路径
+// 写者在片间插队。
+const deleteLogsBatch = 5000
+
 // DeleteLogsBefore 删除 time 早于 ms 的行（logs 表的时间保留清理），
-// 返回删除行数。
+// 返回删除行数。按 deleteLogsBatch 分片循环：每片一条 IN 子查询圈定
+// 最旧 id 段的小事务，中断后下一轮按原谓词续删。删除域钳在 rollup
+// 水位内（id ≤ log_cells_covered_id）：水位内行已记账，删除后其贡献
+// 留在 cells 账本；水位外行只属于绕过双写的写入者留下的缝隙，留给
+// 覆盖（后续任意插入推进水位、或 Open 的 ReconcileCells）后下轮再删，
+// 避免其聚合贡献无声消失。
 func (s *Store) DeleteLogsBefore(ctx context.Context, ms int64) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM logs WHERE time < ?`, ms)
-	if err != nil {
-		return 0, err
+	var total int64
+	for {
+		tx, done, err := s.writeTx(ctx, "DeleteLogsBefore")
+		if err != nil {
+			return total, err
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM logs WHERE id IN (
+				SELECT id FROM logs WHERE time < ? AND id <= `+cellsWatermarkSQL+`
+				ORDER BY id LIMIT ?)`, ms, deleteLogsBatch)
+		if err != nil {
+			done()
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err == nil {
+			err = tx.Commit()
+		}
+		done()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < deleteLogsBatch {
+			return total, nil
+		}
 	}
-	return res.RowsAffected()
 }
 
 // LogDirByID 按自增 id 反查调试目录名与请求时刻（毫秒）。
