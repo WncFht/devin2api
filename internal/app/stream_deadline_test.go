@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -77,7 +78,7 @@ func assertDeadReaderRST(t *testing.T, chunk []byte) {
 
 	writeErr := make(chan error, 1)
 	// 手工建 server 而非 httptest：RST 武装依赖 ConnContext 注入的 conn。
-	srv := &http.Server{ConnContext: connContext, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{ConnContext: smallBufferConnContext, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 与 /v1 真实链路同构地包一层 gateHeaderWriter——顺带验证 Unwrap
 		// 让 ResponseController 穿透包装层落到 conn 级 SetWriteDeadline。
 		_, gate := adapter.WithGateContext(r.Context(), "fg")
@@ -105,22 +106,53 @@ func assertDeadReaderRST(t *testing.T, chunk []byte) {
 		t.Fatal("blocked write did not unblock within deadline budget")
 	}
 	elapsed := time.Since(started)
-	if !errors.Is(writeResult, context.DeadlineExceeded) || !errors.Is(writeResult, os.ErrDeadlineExceeded) {
+	var opErr *net.OpError
+	switch {
+	case errors.Is(writeResult, context.DeadlineExceeded) && errors.Is(writeResult, os.ErrDeadlineExceeded):
+		// 预算语义是「单次阻塞写最多挂起这么久」：错误类型已锁定 i/o
+		// timeout，耗时上限确认续约生效、下限确认确实阻塞过而非早夭。
+		if elapsed < sseWriteDeadline || elapsed > 10*sseWriteDeadline {
+			t.Fatalf("blocked write elapsed = %v, want ≈%v", elapsed, sseWriteDeadline)
+		}
+	case runtime.GOOS == "windows" && errors.As(writeResult, &opErr):
+		// Windows loopback 对死读 peer 的发送可能被内核直接快败
+		// （WSAENOBUFS/WSAECONNABORTED 族），写根本进不了阻塞等待，
+		// 逐写 deadline 无从触发——OS 自己切断了写。传输层错误同样
+		// 证明「写不会挂死」，conn 拆除仍由下方客户端读断言钉住。
+		t.Logf("windows: dead-peer write failed fast without reaching deadline: %v", writeResult)
+	default:
 		t.Fatalf("write err = %v, want i/o timeout wrapped as DeadlineExceeded", writeResult)
 	}
-	// 预算语义是「单次阻塞写最多挂起这么久」：错误类型已锁定 i/o
-	// timeout，耗时上限确认续约生效、下限确认确实阻塞过而非早夭。
-	if elapsed < sseWriteDeadline || elapsed > 10*sseWriteDeadline {
-		t.Fatalf("blocked write elapsed = %v, want ≈%v", elapsed, sseWriteDeadline)
+	expectConnReset(t, conn)
+}
+
+// smallBufferConnContext 在 connContext 注入前收窄服务端发送缓冲：写阻塞
+// 发生在在途字节填满（客户端窗口 + 服务端 SO_SNDBUF）之后，各平台
+// SO_SNDBUF 默认差异大（Linux loopback 自动调到 MB 级），收窄后一两次
+// 写出即进入阻塞，deadline 触发时机不依赖平台缓冲水位。
+func smallBufferConnContext(ctx context.Context, conn net.Conn) context.Context {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetWriteBuffer(4096)
 	}
-	// 写超时路径靠武装 linger(0) 让 close 发 RST 强拆：客户端读到
-	// ECONNRESET。若 linger 未生效或未同步 close，graceful close 把
-	// FIN 排在未发队列后——死读客户端的读只会先撞上自己的读
-	// deadline，拿到的 i/o timeout 同样过不了 ECONNRESET 断言。
+	return connContext(ctx, conn)
+}
+
+// expectConnReset 断言死读客户端观察到 conn 已被拆除：linger(0) 武装的
+// close 发 RST，客户端读 ECONNRESET。若 linger 未生效或未同步 close，
+// graceful close 把 FIN 排在未发队列后——读会撞上读 deadline 拿到
+// i/o timeout（FIN-orphan 的客户端侧形态）。Windows 的栈对 RST 拆除
+// 可能呈现 WSAECONNABORTED（10053）变体，同为连接级终止。
+func expectConnReset(t *testing.T, conn net.Conn) {
+	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := io.Copy(io.Discard, conn); !errors.Is(err, syscall.ECONNRESET) {
-		t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)
+	_, err := io.Copy(io.Discard, conn)
+	if errors.Is(err, syscall.ECONNRESET) {
+		return
 	}
+	if runtime.GOOS == "windows" && errors.Is(err, syscall.ECONNABORTED) {
+		return
+	}
+	t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)
 }
 
 // endlessDeltaAdapter 产出无限 text_delta 事件流：泵持续供给让写出方在
@@ -176,8 +208,10 @@ func TestStreamCompletionDeadReaderRecordsDisconnected(t *testing.T) {
 		config.ServerConfig{Listen: ":0"}, manager)
 
 	// 走 application.HTTPServer()（带 ConnContext）+ 手工 listener，
-	// 与生产 server 的构造完全一致。
+	// 与生产 server 的构造完全一致。ConnContext 在 Serve 前换成收窄
+	// 发送缓冲版：写阻塞时机不依赖平台 SO_SNDBUF 水位。
 	srv := application.HTTPServer()
+	srv.ConnContext = smallBufferConnContext
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -189,17 +223,12 @@ func TestStreamCompletionDeadReaderRecordsDisconnected(t *testing.T) {
 	request := []byte(fmt.Sprintf("POST /v1/responses HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
 	conn := dialDeadReader(t, ln.Addr().String(), request)
 
-	// conn 被服务端 RST 强拆（写超时 → linger(0) 武装 → handler 返回后
-	// net/http close 发 RST）即端到端证据：挂起流被逐写 deadline 拆掉，
-	// 泵/槽位随之释放。客户端读到 ECONNRESET；若 linger 未生效，
-	// graceful close 会先把积压数据 drain 完再给干净 EOF，同样通不过
-	// 本断言（RST 与 FIN 的区分见上个用例）。
-	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-	if _, err := io.Copy(io.Discard, conn); !errors.Is(err, syscall.ECONNRESET) {
-		t.Fatalf("client read err = %v, want ECONNRESET (RST teardown)", err)
-	}
-
-	expire := time.Now().Add(5 * time.Second)
+	// 在 logs 行落账前客户端一个字节都不读：一旦 recv 打开接收窗口，
+	// 服务端写就不再阻塞、写 deadline 永不触发——旧的「先 io.Copy 再
+	// 等行」顺序下，测试成败取决于泵产速与客户端 drain 速的竞速，
+	// -race/慢 CI 上消费端追平生产端时写永不阻塞（实测 i/o timeout
+	// 取代 ECONNRESET，请求挂到客户端读 deadline 才死）。
+	expire := time.Now().Add(15 * time.Second)
 	for {
 		rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{})
 		if err != nil {
@@ -213,13 +242,18 @@ func TestStreamCompletionDeadReaderRecordsDisconnected(t *testing.T) {
 			if row.StatusCode != http.StatusOK && row.StatusCode != 499 {
 				t.Fatalf("status = %d, want 200 or 499 (delivered follows kernel buffer fill)", row.StatusCode)
 			}
-			return
+			break
 		}
 		if time.Now().After(expire) {
 			t.Fatalf("log row not written; rows = %v", rows)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+
+	// logs 行只在 handler 退出后落账：行已出现即证明阻塞写被逐写
+	// deadline 掐死、conn 已在 linger(0) 武装位上 close——客户端读
+	// ECONNRESET（RST 强拆），而非 FIN-orphan 的悬挂/超时形态。
+	expectConnReset(t, conn)
 }
 
 // TestDisconnectCause 验证断连归因的复合包裹：ctx 已取消时 context.Cause
