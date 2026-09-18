@@ -402,9 +402,12 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 // assistantSource 是助手消息在 Devin wire 上的来源枚举（上游命名为 SYSTEM，值 2）。
 var assistantSource = devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
 
-// pairToolCallsWithResults 把「连续调用消息 + 连续结果消息」的分组序列
-// 重排为 call_i, result_i, call_j, result_j 的交错序列。
-// 已配对的交错序列保持不变；找不到匹配结果的调用原样保留位置。
+// pairToolCallsWithResults 把「调用与结果被其它 prompt 隔开」的序列
+// 重排为 call_i, result_i 紧邻的配对序列。配对只认 toolCallId：隔着
+// 用户插话/旁路消息的 result 前移到其 call 之后——上游要求 call→result
+// 紧邻配对，滞留的 result 原样放行即 invalid_argument。每个调用消费
+// 一个同 id 的最早未配对结果（重复 call-id 按调用序与结果序位置绑定）。
+// 找不到配对的孤儿 result 与其余 prompt 保持原相对位置，不丢消息。
 // 第二个返回值是位置发生变化的 prompt 数（已交错的历史为 0）。
 func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt) ([]*devinproto.ExaChatPb_ChatMessagePrompt, int) {
 	toolSource := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
@@ -414,49 +417,46 @@ func pairToolCallsWithResults(prompts []*devinproto.ExaChatPb_ChatMessagePrompt)
 	isResultPrompt := func(p *devinproto.ExaChatPb_ChatMessagePrompt) bool {
 		return p.GetSource() == toolSource
 	}
-	var out []*devinproto.ExaChatPb_ChatMessagePrompt
-	for i := 0; i < len(prompts); {
-		if !isCallPrompt(prompts[i]) {
-			out = append(out, prompts[i])
-			i++
+	// byID 按到达序排队每个 call id 的全部结果。
+	byID := make(map[string][]*devinproto.ExaChatPb_ChatMessagePrompt)
+	for _, prompt := range prompts {
+		if isResultPrompt(prompt) {
+			id := prompt.GetToolCallId()
+			byID[id] = append(byID[id], prompt)
+		}
+	}
+	// 配对在发射前一次性算好：按调用序给每个 call 分一个同 id 的最早
+	// 未配对结果。assigned 记 call prompt 应紧跟的结果集，paired 记已
+	// 分配出去的 result——result 先于其 call 出现时也归该 call 所有，
+	// 原位置跳过、随 call 发出，wire 上是紧邻配对而非滞留孤儿。
+	assigned := make(map[*devinproto.ExaChatPb_ChatMessagePrompt][]*devinproto.ExaChatPb_ChatMessagePrompt)
+	paired := make(map[*devinproto.ExaChatPb_ChatMessagePrompt]struct{})
+	for _, prompt := range prompts {
+		if !isCallPrompt(prompt) {
 			continue
 		}
-		var calls []*devinproto.ExaChatPb_ChatMessagePrompt
-		for i < len(prompts) && isCallPrompt(prompts[i]) {
-			calls = append(calls, prompts[i])
-			i++
-		}
-		byID := make(map[string][]*devinproto.ExaChatPb_ChatMessagePrompt)
-		j := i
-		for j < len(prompts) && isResultPrompt(prompts[j]) {
-			id := prompts[j].GetToolCallId()
-			byID[id] = append(byID[id], prompts[j])
-			j++
-		}
-		// consumed 记已配对的 result 指针而非 id：同 id 多份结果按到达
-		// 顺序消费（重复 call-id 实测被上游容忍但按位置绑定），单值
-		// byID 会让先到的结果被后到的覆盖丢失。
-		consumed := make(map[*devinproto.ExaChatPb_ChatMessagePrompt]struct{}, len(calls))
-		for _, callPrompt := range calls {
-			out = append(out, callPrompt)
-			for _, call := range callPrompt.GetToolCalls() {
-				id := call.GetId()
-				queue := byID[id]
-				if len(queue) == 0 {
-					continue
-				}
-				out = append(out, queue[0])
-				consumed[queue[0]] = struct{}{}
-				byID[id] = queue[1:]
+		for _, call := range prompt.GetToolCalls() {
+			id := call.GetId()
+			queue := byID[id]
+			if len(queue) == 0 {
+				continue
 			}
+			assigned[prompt] = append(assigned[prompt], queue[0])
+			paired[queue[0]] = struct{}{}
+			byID[id] = queue[1:]
 		}
-		// 未能配对的孤立结果按原序保留，不丢消息。
-		for k := i; k < j; k++ {
-			if _, ok := consumed[prompts[k]]; !ok {
-				out = append(out, prompts[k])
+	}
+	out := make([]*devinproto.ExaChatPb_ChatMessagePrompt, 0, len(prompts))
+	for _, prompt := range prompts {
+		if isResultPrompt(prompt) {
+			// 配对结果随自己的 call 前向发出，原位置跳过；孤儿原地保留。
+			if _, ok := paired[prompt]; !ok {
+				out = append(out, prompt)
 			}
+			continue
 		}
-		i = j
+		out = append(out, prompt)
+		out = append(out, assigned[prompt]...)
 	}
 	return out, countMovedPrompts(prompts, out)
 }

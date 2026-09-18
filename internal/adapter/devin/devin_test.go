@@ -2093,6 +2093,72 @@ func TestPairToolCallsWithResultsKeepsDuplicateResults(t *testing.T) {
 	}
 }
 
+// TestPairToolCallsWithResultsPairsAcrossInterveningPrompts 钉 G2：结果与
+// 其 call 之间隔着用户插话（wire 形如 USER→SYSTEM(toolCalls)→USER→TOOL）
+// 时按 toolCallId 前移配对——旧实现只在 call 紧邻段内配对，滞留的 TOOL
+// prompt 原样上行即 invalid_argument。
+func TestPairToolCallsWithResultsPairsAcrossInterveningPrompts(t *testing.T) {
+	assistant := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
+	user := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER
+	tool := devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL
+	call := func(id string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{
+			Source:    assistant.Enum(),
+			ToolCalls: []*devinproto.ExaCodeiumCommonPb_ChatToolCall{{Id: proto.String(id), Name: proto.String("x")}},
+		}
+	}
+	result := func(id, text string) *devinproto.ExaChatPb_ChatMessagePrompt {
+		return &devinproto.ExaChatPb_ChatMessagePrompt{Source: tool.Enum(), ToolCallId: proto.String(id), Prompt: proto.String(text)}
+	}
+	interrupt := &devinproto.ExaChatPb_ChatMessagePrompt{Source: user.Enum(), Prompt: proto.String("hold on")}
+
+	// 单 call 被一条 user 插话与结果隔开：结果前移紧跟 call，插话原序后移。
+	t.Run("single", func(t *testing.T) {
+		callA, resultA := call("a"), result("a", "rA")
+		out, moved := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callA, interrupt, resultA})
+		want := []*devinproto.ExaChatPb_ChatMessagePrompt{callA, resultA, interrupt}
+		if len(out) != len(want) {
+			t.Fatalf("paired prompts = %d, want %d", len(out), len(want))
+		}
+		for index := range want {
+			if out[index] != want[index] {
+				t.Fatalf("out[%d] = %#v, want callA,resultA,interrupt order", index, out)
+			}
+		}
+		if moved == 0 {
+			t.Fatal("moved = 0, want reordered count > 0")
+		}
+	})
+
+	// 两 call 夹一条插话、结果成组在尾：rA 前移归 callA，rB 原位本已紧邻 callB。
+	t.Run("grouped", func(t *testing.T) {
+		callA, callB := call("a"), call("b")
+		resultA, resultB := result("a", "rA"), result("b", "rB")
+		out, _ := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{callA, interrupt, callB, resultA, resultB})
+		want := []*devinproto.ExaChatPb_ChatMessagePrompt{callA, resultA, interrupt, callB, resultB}
+		if len(out) != len(want) {
+			t.Fatalf("paired prompts = %d, want %d", len(out), len(want))
+		}
+		for index := range want {
+			if out[index] != want[index] {
+				t.Fatalf("out[%d] = %#v, want callA,resultA,interrupt,callB,resultB", index, out)
+			}
+		}
+	})
+
+	// 无 call 认领的孤儿 result 与插话一起原位保留，不丢消息。
+	t.Run("orphan", func(t *testing.T) {
+		callA, orphan := call("a"), result("ghost", "r?")
+		out, _ := pairToolCallsWithResults([]*devinproto.ExaChatPb_ChatMessagePrompt{orphan, callA, interrupt})
+		want := []*devinproto.ExaChatPb_ChatMessagePrompt{orphan, callA, interrupt}
+		for index := range want {
+			if out[index] != want[index] {
+				t.Fatalf("out[%d] = %#v, want orphan,callA,interrupt", index, out)
+			}
+		}
+	})
+}
+
 // TestResponseStreamReopensBeforeContent 验证首内容帧前的瞬时传输错误
 // 触发一次整体重发：客户端不可见任何事件，重发无可见副作用。
 func TestResponseStreamReopensBeforeContent(t *testing.T) {
