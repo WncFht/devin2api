@@ -260,6 +260,92 @@ func TestWarmSuspectSession(t *testing.T) {
 	}
 }
 
+// suspect 停 ping 与首标定格：被标 suspect 的晋升条目到期不再收集
+// （宽限是纯退役计时，ping 续的锚大概率无人用）；后续一维相异兄弟
+// 到达不刷新 suspectAt（compaction 连发不续宽限），条目按首标时刻
+// 满 2×Interval 退役。
+func TestWarmSuspectStopsPing(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	var calls int
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		calls++
+		return 4096, nil
+	}
+	reqA := warmTestRequest("sess", "sys", "msg-a")
+	keyA := seedPromoted(w, reqA, "uid")
+	// 基线：未 suspect 的到期晋升条目正常打。
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 baseline ping", calls)
+	}
+	// 一维相异兄弟到达 → A 标 suspect；到期不再打（B sends=1 未晋升）。
+	reqB := warmTestRequest("sess", "sys", "msg-b")
+	keyB := w.keyOf(reqB, "uid")
+	w.retain(keyB, reqB, "uid", "")
+	markedAt := w.entries[keyA].suspectAt
+	if markedAt.IsZero() {
+		t.Fatal("sibling arrival must mark A suspect")
+	}
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if calls != 1 {
+		t.Fatal("suspect entry must not be pinged during grace")
+	}
+	// 第二个一维相异兄弟到达不续宽限：suspectAt 保持首标时刻。
+	reqC := warmTestRequest("sess", "sys", "msg-c")
+	w.retain(w.keyOf(reqC, "uid"), reqC, "uid", "")
+	if got := w.entries[keyA].suspectAt; got != markedAt {
+		t.Fatalf("re-mark must not renew grace: suspectAt = %v, want %v", got, markedAt)
+	}
+	// 宽限从首标起算：距首标 2×Interval+1s 即退役；B 被 C 首标仅
+	// 61s 未到限仍存活。
+	clock.t = clock.t.Add(time.Minute)
+	w.sweep()
+	if _, ok := w.entries[keyA]; ok {
+		t.Fatal("suspect must retire at original grace expiry")
+	}
+	if _, ok := w.entries[keyB]; !ok {
+		t.Fatal("freshly-marked sibling must still be inside its own grace")
+	}
+	if got := w.stats().RetiredByCause.Suspect; got != 1 {
+		t.Fatalf("RetiredByCause.Suspect = %d, want 1", got)
+	}
+}
+
+// suspect 撤销复活：retain 真流量清 suspect 并重排 nextDue——flap 回
+// 本 lineage 的流下一拍恢复 ping。
+func TestWarmSuspectRearm(t *testing.T) {
+	w, clock := newTestWarmer(t, WarmConfig{Interval: time.Minute, MinPrefixTokens: 1})
+	var calls int
+	w.sendPing = func(context.Context, *devinproto.GetChatMessageRequest) (int64, error) {
+		calls++
+		return 4096, nil
+	}
+	reqA := warmTestRequest("sess", "sys", "msg-a")
+	keyA := seedPromoted(w, reqA, "uid")
+	reqB := warmTestRequest("sess", "sys", "msg-b")
+	w.retain(w.keyOf(reqB, "uid"), reqB, "uid", "")
+	if w.entries[keyA].suspectAt.IsZero() {
+		t.Fatal("sibling arrival must mark A suspect")
+	}
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if calls != 0 {
+		t.Fatal("suspect must not be pinged")
+	}
+	// 真流量 flap 回本 lineage：retain 撤标记、重排到期，下一拍恢复 ping。
+	w.retain(keyA, appendTurn(w.entries[keyA].retained, "back"), "uid", "")
+	if !w.entries[keyA].suspectAt.IsZero() {
+		t.Fatal("retain must clear suspect")
+	}
+	clock.t = clock.t.Add(time.Minute + time.Second)
+	w.sweep()
+	if calls != 1 {
+		t.Fatalf("calls = %d, want re-armed entry pinged", calls)
+	}
+}
+
 // 档位判定：无 pending → sub 标记者 subDone、其余 userPaced；
 // pending 全为提问类 → userPaced；含任何其他工具 → blocked；
 // 无 SessionKey 恒 unknown。

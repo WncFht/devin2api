@@ -8,7 +8,8 @@
 // cache_read=0 永不作退役证据（相位 miss≠冷 miss，miss 请求本身
 // 已完成重写兜底），但 K 连 miss 说明锚反复丢失——降级停 ping
 // （demote≠retire：条目留表照 maxIdle 退役，retain 真流量重武装）。
-// 设计定稿与实测依据见
+// suspect（超任/换 lane 孤儿）同样停 ping——宽限（2×Interval）纯作
+// 退役计时，首标定格不续期。设计定稿与实测依据见
 // notes/archive/2026-09-15-claude-subagent-cache-cold-ttl.md。
 package devin
 
@@ -187,7 +188,7 @@ type warmEntry struct {
 	nextDue       time.Time // 下一次 ping 到期时刻
 	tier          warmTier
 	prefixTokens  int       // 最近已完成响应的 input+cache_read 实测；0=未观测
-	suspectAt     time.Time // 非零=被同 session 新一维相异 lineage 标为疑似孤儿
+	suspectAt     time.Time // 非零=疑似孤儿：停 ping，首标定格作退役宽限计时（不续期），真流量撤销
 	missStreak    int       // 连续 ping miss（cache_read=0）数：hit 或 retain 清零
 	demoted       bool      // K 连 miss 降级态：sweep 停发 ping，条目留表，retain 重武装
 	// observedModels 记上游自报的 response_model 集合——路由相位漂移
@@ -376,9 +377,10 @@ func (w *cacheWarmer) noteSend(key warmLineageKey) {
 
 // suspectSession 把本会话滞留本 lane 的全部条目标 suspect：号池把会话
 // 换到别的 lane 后，这些谱系已成跨 lane 孤儿——会话流量不再经过本
-// lane，烧 ping 续的锚谁也用不上，走 2×Interval 宽限退役而非骑满
-// maxIdle。已 suspect 的不重置计时（不续宽限）；会话若换回来，下一发
-// 真实上行（noteSend/retain）照常撤标记。无 SessionKey 时跳过：
+// lane，烧 ping 续的锚谁也用不上，标记即停 ping、走 2×Interval 宽限
+// 退役而非骑满 maxIdle。已 suspect 的不重置计时（不续宽限）；会话若
+// 换回来，下一发真实上行（noteSend/retain）照常撤标记。无 SessionKey
+// 时跳过：
 // sessionless 条目无法按会话归属区分，全组误标会把没搬走的旁人提前
 // 杀掉。
 func (w *cacheWarmer) suspectSession(sessionKey string) {
@@ -524,10 +526,11 @@ func (w *cacheWarmer) run() {
 }
 
 // sweep 是一轮清扫：先退役（静默超档限/孤儿宽限期满），再对晋升、
-// 未降级且到期的条目按锚龄逐条 ping（最旧接触先打，饱和窗的零星
-// 准入槽先给濒死条目）；排空后只退役不收集。ping 在锁外发（单发
-// ~1s、超时 60s，持锁会堵全部簿记入口），结果回锁内结账；条目发送
-// 期间被退役/淘汰只结计数器。
+// 未降级、非 suspect 且到期的条目按锚龄逐条 ping（最旧接触先打，
+// 饱和窗的零星准入槽先给濒死条目）；排空后只退役不收集。suspect
+// 不收集——它只剩退役宽限，锚续上也大概率无人用，ping 纯属白烧。
+// ping 在锁外发（单发 ~1s、超时 60s，持锁会堵全部簿记入口），结果
+// 回锁内结账；条目发送期间被退役/淘汰只结计数器。
 func (w *cacheWarmer) sweep() {
 	now := w.now()
 	w.mu.Lock()
@@ -541,7 +544,7 @@ func (w *cacheWarmer) sweep() {
 			w.removeLocked(entry, cause)
 			continue
 		}
-		if !w.drained && !entry.demoted && w.promotedLocked(entry) && !now.Before(entry.nextDue) {
+		if !w.drained && !entry.demoted && entry.suspectAt.IsZero() && w.promotedLocked(entry) && !now.Before(entry.nextDue) {
 			due = append(due, entry)
 		}
 	}
@@ -758,8 +761,11 @@ func (entry *warmEntry) classify(msg *llm.AssistantMessage, params WarmConfig) w
 // markSuspectsLocked 把同 SessionKey 内与新到 lineage 恰好一维相异的
 // 旧条目标 suspect：一维相异 = compaction/clear 换首消息、auto-update
 // 改 system 头、模型漂移这类「旧流从此永久静默」的形态；两维以上相异
-// 是异型兄弟/新话题不标。宽限期内真实上行（noteSend/retain）撤标记。
-// 调用方须持 mu。
+// 是异型兄弟/新话题不标。suspect 即停 ping（sweep 不收集）——锚续上
+// 也大概率无人用；宽限（2×Interval）是纯退役计时，首标定格不续期
+// （与 suspectSession 同规）：compaction 连发的会话若逐次续期，死
+// lineage 会无限滞留白占内存。宽限期内真实上行（noteSend/retain）
+// 撤标记。调用方须持 mu。
 func (w *cacheWarmer) markSuspectsLocked(arrived warmLineageKey, now time.Time) {
 	for key, entry := range w.entries {
 		if key == arrived || key.SessionKey != arrived.SessionKey {
@@ -778,7 +784,7 @@ func (w *cacheWarmer) markSuspectsLocked(arrived warmLineageKey, now time.Time) 
 		if key.Model != arrived.Model {
 			diff++
 		}
-		if diff == 1 {
+		if diff == 1 && entry.suspectAt.IsZero() {
 			entry.suspectAt = now
 		}
 	}
