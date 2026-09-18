@@ -2039,7 +2039,12 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.upstreamConfirmed = true
 				stream.gate.noteUpstreamSuccess()
 			}
-			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
+			// 脱钩后盘上不再追写：帧已由 Recv 返回点 tee 进完成缓存供
+			// 重放，此时原 dir 多已 Complete，04 续写只会被 closed 门口
+			// 拒收计进 late_writes/dropped 噪声。
+			if !stream.detached {
+				recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
+			}
 			events := stream.decoder.decode(frame.response)
 			stream.recordSchemaDrift()
 			if len(events) > 0 {
@@ -2510,7 +2515,10 @@ func (stream *responseStream) drainFrames() {
 				stream.recordSchemaDrift()
 				return
 			}
-			recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
+			// 与 Recv 主路径同闸：脱钩流的临死帧同样不追写盘上。
+			if !stream.detached {
+				recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
+			}
 			stream.decoder.noteSchemaDrift(frame.response)
 		default:
 			stream.recordSchemaDrift()

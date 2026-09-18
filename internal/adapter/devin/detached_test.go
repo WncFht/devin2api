@@ -439,6 +439,71 @@ func TestDetachedEventMirroredToMeta(t *testing.T) {
 	}
 }
 
+// TestDetachedPumpStopsFrameWrites 钉住脱钩泵不再写 04 帧：脱钩后盘上
+// 不再追写，后台泵 drain 的帧只进完成缓存缓冲——原 dir 此时多已
+// Complete，续写只会被 closed 门口拒收计进 late_writes/dropped 噪声。
+func TestDetachedPumpStopsFrameWrites(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "detached.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	manager := debuglog.NewManager(filepath.Join(t.TempDir(), "logs"), debuglog.RetentionPolicy{}, db)
+	t.Cleanup(manager.Close)
+
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{DeltaText: proto.String(" there")},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "k4", receiver)
+	recorder := manager.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/messages"})
+	stream.recorder = recorder
+
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("k4")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	close(receiver.release)
+	waitEntryState(t, entry, detachedCompleted)
+
+	recorder.Complete(debuglog.Completion{StatusCode: 499, Result: "disconnected"})
+	<-manager.Drained(recorder.Dir())
+
+	data, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
+	if err != nil {
+		t.Fatalf("ReadFile 04-devin-response.jsonl: %v", err)
+	}
+	var events []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var row struct {
+			Event string `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("04 row decode: %v", err)
+		}
+		events = append(events, row.Event)
+	}
+	want := []string{"frame", "detached"}
+	if len(events) != len(want) {
+		t.Fatalf("04 events = %v, want %v — post-detach pump frames must not reach the log", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("04 events = %v, want %v", events, want)
+		}
+	}
+}
+
 // TestDetachedRequestKeyDeterminism 钉住键的语义等价边界：会话标识
 // 参与（生产 02 证据：同 body 重试的 session_key 恒定，纳回换跨会话
 // 隔离），调用方身份参与，内容差异参与，模型键面用解析后 uid。
