@@ -14,6 +14,7 @@ type GateWindow struct {
 	Quota       int    `json:"quota"`        // 关窗时生效的窗口配额（<=0 表示不限速）
 	UsedFg      int    `json:"used_fg"`      // 本窗 fg 放行数
 	UsedBg      int    `json:"used_bg"`      // 本窗 bg 放行数（含保温 ping 与闩内探针）
+	UsedBgPing  int    `json:"used_bg_ping"` // 本窗经 tryAdmit 的保温 ping 放行数（used_bg 的子集——used_bg-本列=真实 bg 需求）
 	Drip        int    `json:"drip"`         // 本窗闩内滴灌探针放行数（used_* 的子集，单列供配额归因）
 	RetryAdmits int    `json:"retry_admits"` // 本窗同 lane 续试重发的放行数（used_* 的子集——reopen/续轮/凭据自愈/瞬时重试的再发送，不含号池 failover 后新 lane 首发）
 	ReservePeak int    `json:"reserve_peak"` // 本窗 bg 预留量的峰值
@@ -34,11 +35,11 @@ type GateWindow struct {
 // 与 quota_samples 的 OR IGNORE 口径一致。
 func (s *Store) InsertGateWindow(ctx context.Context, w *GateWindow) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO gate_windows(
-		lane, window_start, quota, used_fg, used_bg, drip, retry_admits,
+		lane, window_start, quota, used_fg, used_bg, used_bg_ping, drip, retry_admits,
 		reserve_peak, waiters_peak,
 		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		w.Lane, w.WindowStart, w.Quota, w.UsedFg, w.UsedBg, w.Drip, w.RetryAdmits,
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		w.Lane, w.WindowStart, w.Quota, w.UsedFg, w.UsedBg, w.UsedBgPing, w.Drip, w.RetryAdmits,
 		w.ReservePeak, w.WaitersPeak,
 		w.RejectQuota, w.RejectHold, w.RejectBgReserve, w.RejectLatch, w.RejectYield, w.FgRate)
 	return err
@@ -51,7 +52,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 	if limit <= 0 {
 		limit = -1
 	}
-	query := `SELECT lane, window_start, quota, used_fg, used_bg, drip, retry_admits,
+	query := `SELECT lane, window_start, quota, used_fg, used_bg, used_bg_ping, drip, retry_admits,
 		reserve_peak, waiters_peak,
 		reject_quota, reject_hold, reject_bg_reserve, reject_latch, reject_yield, fg_rate
 		FROM gate_windows WHERE window_start>=?`
@@ -70,7 +71,7 @@ func (s *Store) ListGateWindows(ctx context.Context, lane string, since int64, l
 	var out []*GateWindow
 	for rows.Next() {
 		var w GateWindow
-		if err := rows.Scan(&w.Lane, &w.WindowStart, &w.Quota, &w.UsedFg, &w.UsedBg, &w.Drip, &w.RetryAdmits,
+		if err := rows.Scan(&w.Lane, &w.WindowStart, &w.Quota, &w.UsedFg, &w.UsedBg, &w.UsedBgPing, &w.Drip, &w.RetryAdmits,
 			&w.ReservePeak, &w.WaitersPeak,
 			&w.RejectQuota, &w.RejectHold, &w.RejectBgReserve, &w.RejectLatch, &w.RejectYield, &w.FgRate); err != nil {
 			return nil, err

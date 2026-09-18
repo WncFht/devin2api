@@ -180,6 +180,17 @@ var schemaMigrations = []migration{
 				`ALTER TABLE gate_windows ADD COLUMN retry_admits INTEGER NOT NULL DEFAULT 0`)
 		},
 	},
+	{
+		// gate_windows.used_bg_ping 是保温 ping 的放行账（used_bg 的
+		// 子集）：used_bg 把真实 bg 需求与保温 ping 混计，本分列后
+		// used_bg-used_bg_ping 即真实需求。存量行经 DEFAULT 0 落位
+		// ——历史行的 ping 份额只活在 used_bg 合计里，不可回补。
+		version: "0014_gate_windows_used_bg_ping",
+		apply: func(tx *sql.Tx) error {
+			return addColumnIfAbsent(tx, "gate_windows", "used_bg_ping",
+				`ALTER TABLE gate_windows ADD COLUMN used_bg_ping INTEGER NOT NULL DEFAULT 0`)
+		},
+	},
 }
 
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已

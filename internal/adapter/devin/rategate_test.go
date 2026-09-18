@@ -1376,3 +1376,93 @@ func TestRateGateYieldPersistsInWindow(t *testing.T) {
 		t.Fatalf("row rejects = yield:%d quota:%d hold:%d, want 1/0/0", w.RejectYield, w.RejectQuota, w.RejectHold)
 	}
 }
+
+// 保温 ping 的放行单列进 used_bg_ping 窗口账：tryAdmit 是 ping 的唯一
+// 入口，其放行既是 used_bg 的子集也是 ping 需求账——used_bg 减去
+// used_bg_ping 即真实 bg 需求；实时读数 window_used_bg_ping 同口径。
+func TestRateGateWindowUsedBgPing(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	clock := pinGateClock(gate, 57) // 窗口尾：爬坡已收敛到 quota-reserve，纯预留约束下 ping/bg 都有槽
+	for i := 0; i < 2; i++ {
+		if ok, _ := gate.tryAdmit(); !ok {
+			t.Fatalf("tryAdmit %d = false, want admit", i)
+		}
+	}
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	if err := gate.wait(bgCtx); err != nil {
+		t.Fatalf("bg wait error = %v, want pass", err)
+	}
+	if stats := gate.stats(); stats.WindowUsedBg != 3 || stats.WindowUsedBgPing != 2 {
+		t.Fatalf("live split = used_bg:%d ping:%d, want 3/2", stats.WindowUsedBg, stats.WindowUsedBgPing)
+	}
+	clock.t = clock.t.Add(time.Minute) // 翻页触发关窗落库
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("new-bucket wait error = %v", err)
+	}
+	var rows []*store.GateWindow
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if rows, err = db.ListGateWindows(context.Background(), "default", 0, 0); err != nil {
+			t.Fatalf("ListGateWindows: %v", err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1 closed window", len(rows))
+	}
+	if w := rows[0]; w.UsedBg != 3 || w.UsedBgPing != 2 {
+		t.Fatalf("row = used_bg:%d ping:%d, want 3/2 (real bg demand = 1)", w.UsedBg, w.UsedBgPing)
+	}
+}
+
+// 分类累计账（wait.totals）：进程期 evals/waits/wait_total_ms 单调
+// 累计——waits 只记真排过队的评估（占过 waiters 名额），睡中被取消
+// 同样算排过；即时放行与快败不占名额不计。快照差分即任意区间的
+// 分类等待率与平均等待，不受样本环覆盖期限制。
+func TestRateGateWaitTotals(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 1, BgMaxHold: 100 * time.Millisecond}, nil, "")
+	offsetGateClock(gate, 1.9) // 死区尾：睡到 :02 开放 ~100ms
+	// fg 死区短睡后放行：占过 waiters 名额 → waits 记账。
+	if err := gate.wait(context.Background()); err != nil {
+		t.Fatalf("dead-zone wait error = %v, want pass after short sleep", err)
+	}
+	// fg 桶满快败（预计 ~58s > maxHold 30s）：不排队 → waits 不记。
+	var gateErr *llm.Failure
+	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+		t.Fatalf("bucket-full wait = %v, want *llm.Failure", err)
+	}
+	// bg 桶满快败（预计 ~58s > bgMaxHold 100ms）：同口径不记 waits。
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) {
+		t.Fatalf("bg wait = %v, want *llm.Failure", err)
+	}
+	totals := gate.stats().Wait.Totals
+	if totals.Fg.Evals != 2 || totals.Fg.Waits != 1 {
+		t.Fatalf("fg totals = %+v, want evals=2 waits=1", totals.Fg)
+	}
+	if totals.Fg.WaitTotalMs < 40 || totals.Fg.WaitTotalMs > 2000 {
+		t.Fatalf("fg wait_total_ms = %d, want ~100ms (one real sleep)", totals.Fg.WaitTotalMs)
+	}
+	if totals.Bg.Evals != 1 || totals.Bg.Waits != 0 {
+		t.Fatalf("bg totals = %+v, want evals=1 waits=0 (fast reject never queued)", totals.Bg)
+	}
+	// 睡到一半被取消同样算「排过」：bg 在默认预算下死区可睡，
+	// 50ms 取消 → waits 记账、结局 cancel。
+	fresh := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
+	offsetGateClock(fresh, 58.5) // 死区头：睡到下一窗口 ~3.5s < bgMaxHold
+	ctx, cancel := context.WithCancel(bgCtx)
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if err := fresh.wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait = %v, want context.Canceled", err)
+	}
+	if got := fresh.stats().Wait.Totals.Bg; got.Evals != 1 || got.Waits != 1 {
+		t.Fatalf("fresh bg totals = %+v, want evals=1 waits=1 (cancel-during-sleep counted)", got)
+	}
+}

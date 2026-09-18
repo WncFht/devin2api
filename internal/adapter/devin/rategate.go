@@ -149,6 +149,7 @@ type rateGate struct {
 	winRejectYield     int // 让位快败（兄弟有余量提前放给 failover）
 	winDrip            int // 闩内滴灌探针放行数
 	winRetryAdmits     int // 续试重发放行数（used_* 的子集——同请求 reopen/续轮/瞬时重试的再发送）
+	winUsedBgPing      int // 保温 ping 放行数（used_bg 的子集——used_bg 减本列即真实 bg 需求）
 	winReservePeak     int // 本窗 bg 预留量峰值（reserve 每次评估取样）
 	winWaitersPeak     int // 本窗排队数峰值（waitersFg+waitersBg）
 	lastWindow         *store.GateWindow
@@ -174,6 +175,12 @@ type rateGate struct {
 	waitHead  int
 	waitSize  int
 	waitEvals int
+	// waitTotal* 是进程期累计的分类等待账（与样本环并行：环是近窗，
+	// 账是全期单调计数）——快照差分即任意区间的分类等待率
+	// （waits/evals）与平均等待（wait_total_ms/waits），不受环容量
+	// 覆盖期限制。
+	waitTotalFg GateWaitTotal
+	waitTotalBg GateWaitTotal
 }
 
 // gateEventCap 是闩事件环容量；闩迁移低频，64 条足够回看一整天。
@@ -215,6 +222,26 @@ type GateWait struct {
 	All     GateWaitSummary `json:"all"`
 	Fg      GateWaitSummary `json:"fg"`
 	Bg      GateWaitSummary `json:"bg"`
+	// Totals 是进程期单调累计的分类等待账（fg/bg 各一份）。
+	Totals GateWaitTotals `json:"totals"`
+}
+
+// GateWaitTotals 是 fg/bg 两类的进程期累计等待账。
+type GateWaitTotals struct {
+	Fg GateWaitTotal `json:"fg"`
+	Bg GateWaitTotal `json:"bg"`
+}
+
+// GateWaitTotal 是一类请求的进程期闸门等待累计账：Evals 评估总数、
+// Waits 实际占过 waiters 名额的评估数（真排过队——闩内/配额/让位
+// 快败与即时放行都不计）、WaitTotalMs 实测墙钟等待累计毫秒（与
+// X-Gate-Wait-Ms 同口径）。与样本环并行：环覆盖最近 gateWaitCap
+// 条评估，本账单调累计——两次快照差分即任意区间的分类等待率与
+// 平均等待，不受环覆盖期限制。
+type GateWaitTotal struct {
+	Evals       int   `json:"evals"`
+	Waits       int   `json:"waits"`
+	WaitTotalMs int64 `json:"wait_total_ms"`
 }
 
 // GateWaitSummary 是一组等待样本的聚合读数：样本数、墙钟等待的
@@ -317,24 +344,25 @@ type gateState struct {
 
 // GateStats 是闸门状态快照，面板 /admin/runtime-metrics 的 gate 段透出。
 type GateStats struct {
-	Latched         bool       `json:"latched"`
-	LimitedUntil    *time.Time `json:"limited_until,omitempty"`
-	LatchCount      int        `json:"latch_count"`
-	DripCount       int        `json:"drip_count"`
-	RejectLatched   int        `json:"reject_latched_count"`
-	RejectHold      int        `json:"reject_hold_count"`
-	WindowQuota     int        `json:"window_quota"`          // 每桶配额（= max_rpm）；0 表示不限速
-	WindowUsed      int        `json:"window_used"`           // 当前桶已放行数（= used_fg + used_bg + 未分类）
-	WindowUsedFg    int        `json:"window_used_fg"`        // 本桶 fg 放行数
-	WindowUsedBg    int        `json:"window_used_bg"`        // 本桶 bg 放行数（含保温 ping）
-	WindowOpen      *time.Time `json:"window_open,omitempty"` // 当前桶的可发窗口起点
-	WindowNext      *time.Time `json:"window_next,omitempty"` // 下一桶可发窗口开放时刻
-	Sendable        bool       `json:"sendable"`              // 当前是否处于可发区间（非死区）
-	Waiters         int        `json:"waiters"`               // fg+bg 排队总数
-	WaitersFg       int        `json:"waiters_fg"`
-	WaitersBg       int        `json:"waiters_bg"`
-	RejectBgReserve int        `json:"reject_bg_reserve_count"` // bg 因预留/爬坡让路被快败数（礼让强度指标）
-	RejectYield     int        `json:"reject_yield_count"`      // 兄弟 lane 有余量时提前快败让给 failover 数（让位强度指标）
+	Latched          bool       `json:"latched"`
+	LimitedUntil     *time.Time `json:"limited_until,omitempty"`
+	LatchCount       int        `json:"latch_count"`
+	DripCount        int        `json:"drip_count"`
+	RejectLatched    int        `json:"reject_latched_count"`
+	RejectHold       int        `json:"reject_hold_count"`
+	WindowQuota      int        `json:"window_quota"`          // 每桶配额（= max_rpm）；0 表示不限速
+	WindowUsed       int        `json:"window_used"`           // 当前桶已放行数（= used_fg + used_bg + 未分类）
+	WindowUsedFg     int        `json:"window_used_fg"`        // 本桶 fg 放行数
+	WindowUsedBg     int        `json:"window_used_bg"`        // 本桶 bg 放行数（含保温 ping）
+	WindowUsedBgPing int        `json:"window_used_bg_ping"`   // 本桶放行中经 tryAdmit 的保温 ping 数（window_used_bg 的子集）
+	WindowOpen       *time.Time `json:"window_open,omitempty"` // 当前桶的可发窗口起点
+	WindowNext       *time.Time `json:"window_next,omitempty"` // 下一桶可发窗口开放时刻
+	Sendable         bool       `json:"sendable"`              // 当前是否处于可发区间（非死区）
+	Waiters          int        `json:"waiters"`               // fg+bg 排队总数
+	WaitersFg        int        `json:"waiters_fg"`
+	WaitersBg        int        `json:"waiters_bg"`
+	RejectBgReserve  int        `json:"reject_bg_reserve_count"` // bg 因预留/爬坡让路被快败数（礼让强度指标）
+	RejectYield      int        `json:"reject_yield_count"`      // 兄弟 lane 有余量时提前快败让给 failover 数（让位强度指标）
 	// Reserve/FgRate 是预留机制的实时读数：当前预留槽数与 fg 准入
 	// 速率 EMA（条/窗）——bg 被拒/放行的可解释性来源。
 	Reserve int     `json:"reserve"`
@@ -508,6 +536,7 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 	gate.winRejectYield = 0
 	gate.winDrip = 0
 	gate.winRetryAdmits = 0
+	gate.winUsedBgPing = 0
 	gate.winReservePeak = 0
 	gate.winWaitersPeak = 0
 }
@@ -550,6 +579,7 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 		Quota:           gate.quota,
 		UsedFg:          gate.bucketUsedFg,
 		UsedBg:          gate.bucketUsedBg,
+		UsedBgPing:      gate.winUsedBgPing,
 		Drip:            gate.winDrip,
 		ReservePeak:     gate.winReservePeak,
 		WaitersPeak:     gate.winWaitersPeak,
@@ -693,26 +723,27 @@ func (gate *rateGate) stats() GateStats {
 	ws := gate.windowStart(now)
 	gate.rollBucket(ws)
 	stats := GateStats{
-		Latched:         !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
-		LatchCount:      gate.latchCount,
-		DripCount:       gate.dripCount,
-		RejectLatched:   gate.rejectLatched,
-		RejectHold:      gate.rejectHold,
-		RejectBgReserve: gate.rejectBgReserve,
-		RejectYield:     gate.rejectYield,
-		WindowQuota:     gate.quota,
-		WindowUsed:      gate.bucketUsed,
-		WindowUsedFg:    gate.bucketUsedFg,
-		WindowUsedBg:    gate.bucketUsedBg,
-		Sendable:        now.Sub(ws) < gate.usable,
-		Waiters:         gate.waitersFg + gate.waitersBg,
-		WaitersFg:       gate.waitersFg,
-		WaitersBg:       gate.waitersBg,
-		Reserve:         gate.reserve(now, ws),
-		FgRate:          gate.fgRateEMA,
-		LastWindow:      gate.lastWindow,
-		PersistFailures: gate.persistFailures,
-		PersistDropped:  gate.persistDropped,
+		Latched:          !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
+		LatchCount:       gate.latchCount,
+		DripCount:        gate.dripCount,
+		RejectLatched:    gate.rejectLatched,
+		RejectHold:       gate.rejectHold,
+		RejectBgReserve:  gate.rejectBgReserve,
+		RejectYield:      gate.rejectYield,
+		WindowQuota:      gate.quota,
+		WindowUsed:       gate.bucketUsed,
+		WindowUsedFg:     gate.bucketUsedFg,
+		WindowUsedBg:     gate.bucketUsedBg,
+		WindowUsedBgPing: gate.winUsedBgPing,
+		Sendable:         now.Sub(ws) < gate.usable,
+		Waiters:          gate.waitersFg + gate.waitersBg,
+		WaitersFg:        gate.waitersFg,
+		WaitersBg:        gate.waitersBg,
+		Reserve:          gate.reserve(now, ws),
+		FgRate:           gate.fgRateEMA,
+		LastWindow:       gate.lastWindow,
+		PersistFailures:  gate.persistFailures,
+		PersistDropped:   gate.persistDropped,
 	}
 	if gate.quota > 0 {
 		open := ws
@@ -764,6 +795,8 @@ func (gate *rateGate) waitView() *GateWait {
 	view.All = summarizeWaits(all)
 	view.Fg = summarizeWaits(fg)
 	view.Bg = summarizeWaits(bg)
+	view.Totals.Fg = gate.waitTotalFg
+	view.Totals.Bg = gate.waitTotalBg
 	return view
 }
 
@@ -998,6 +1031,9 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	retry := adapter.GateRetryFrom(ctx)
 	bg := class == adapter.ClassBG
 	sleeping := false // 标记本请求占着一个 waiters 名额
+	// blocked 标记本请求是否曾占过 waiters 名额（真排过队）——wait
+	// 累计账的 waits 口径；闩内/配额/让位快败与即时放行都不算「排过」。
+	blocked := false
 	// 等待预算约束「累计等待」而非「单次睡眠」：睡醒后要重新抢配额，
 	// maxHold 超过一个窗口周期时逐睡校验会放行多轮睡眠，累计等待
 	// 膨胀到 ~maxHold+60s——预算从进入起算，预计等待超出剩余额度
@@ -1013,7 +1049,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	est := time.Duration(-1)
 	// 每次评估的结局记入等待样本环：defer 覆盖全部出口（放行/拒绝/
 	// 取消），测量口径与回执 WaitMS 的 time.Since(entered) 一致。
-	defer func() { gate.recordWait(class, err, entered, est) }()
+	defer func() { gate.recordWait(class, err, entered, est, blocked) }()
 	for {
 		gate.mu.Lock()
 		if sleeping {
@@ -1174,6 +1210,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		}
 		gate.winWaitersPeak = max(gate.winWaitersPeak, gate.waitersFg+gate.waitersBg)
 		sleeping = true
+		blocked = true
 		gate.mu.Unlock()
 		// 号池请求的长睡眠按让位阈值封顶：睡醒重估时会重问兄弟侧，
 		// 兄弟 lane 排队中腾出余量也能在一拍内被接住——否则单次
@@ -1200,13 +1237,14 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 	}
 }
 
-// recordWait 把一次 wait 评估的实测结局写进样本环：结局按 err
-// 归类——nil=放行、LocalGate Failure=拒绝（记 reason）、其余
-// =ctx 取消。等待时长取墙钟（与 X-Gate-Wait-Ms 同口径）；假钟
-// 测试里睡的是真 timer，样本时长即真实经过。est 是首次评估的
-// 期望排队估计（负值 = 未评估）。调用方不得持 mu——wait 各出口
-// 先解锁再返回，defer 才到这里取锁。
-func (gate *rateGate) recordWait(class string, err error, entered time.Time, est time.Duration) {
+// recordWait 把一次 wait 评估的实测结局写进样本环并推进进程期分类
+// 累计账：结局按 err 归类——nil=放行、LocalGate Failure=拒绝
+// （记 reason）、其余=ctx 取消。等待时长取墙钟（与 X-Gate-Wait-Ms
+// 同口径）；假钟测试里睡的是真 timer，样本时长即真实经过。est 是
+// 首次评估的期望排队估计（负值 = 未评估）；blocked 是本次评估是否
+// 曾占 waiters 名额，决定累计账的 waits 列是否记账。调用方不得持
+// mu——wait 各出口先解锁再返回，defer 才到这里取锁。
+func (gate *rateGate) recordWait(class string, err error, entered time.Time, est time.Duration, blocked bool) {
 	sample := gateWaitSample{at: entered, wait: time.Since(entered), est: est, class: class}
 	var failure *llm.Failure
 	switch {
@@ -1225,6 +1263,15 @@ func (gate *rateGate) recordWait(class string, err error, entered time.Time, est
 		gate.waitSize++
 	}
 	gate.waitEvals++
+	total := &gate.waitTotalFg
+	if class == adapter.ClassBG {
+		total = &gate.waitTotalBg
+	}
+	total.Evals++
+	if blocked {
+		total.Waits++
+	}
+	total.WaitTotalMs += sample.wait.Milliseconds()
 	gate.mu.Unlock()
 }
 
@@ -1272,6 +1319,9 @@ func (gate *rateGate) noteVerdict(gc *adapter.GateContext, class string, now, ws
 // 被挡住时本轮跳过、下拍再试。与 wait 的区别：不睡眠、不预约、
 // 不产事件。拒绝时 reason 按 tryAdmitSkip* / gateReason* 词表给出
 // 阻塞成因（保温事件环的 skip.reason 直接取用），放行时为空串。
+// 放行同时记 winUsedBgPing——本路径当前唯一调用方是保温
+// sweep（pingEntry），放行即 ping；若接入非 ping 来源须先另立
+// 口径拆分，used_bg_ping 列的语义依赖这条不变式。
 func (gate *rateGate) tryAdmit() (bool, string) {
 	if gate == nil {
 		return true, ""
@@ -1290,6 +1340,7 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 		// 与 wait 同口径：不限速的 ping 放行也是真实发送，计入 bg 桶账。
 		gate.bucketUsed++
 		gate.bucketUsedBg++
+		gate.winUsedBgPing++
 		return true, ""
 	}
 	if now.Sub(ws) >= gate.usable {
@@ -1304,6 +1355,7 @@ func (gate *rateGate) tryAdmit() (bool, string) {
 	}
 	gate.bucketUsed++
 	gate.bucketUsedBg++
+	gate.winUsedBgPing++
 	return true, ""
 }
 
