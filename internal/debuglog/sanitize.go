@@ -317,9 +317,16 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 	reference := attachmentReference{File: name, MIMEType: mimeType, Size: len(data), SHA256: hash}
 	recorder.attachmentByHash[hash] = reference
 	// 附件 op 先于引用它的父文件 op 推进 insertQ（同一编码协程顺序
-	// 推送），读侧不会在文件引用就绪时找不到附件行。
+	// 推送），读侧不会在文件引用就绪时找不到附件行。预算满丢弃后
+	// 父文件内的引用指向缺失行——与 workerGone 丢失同形态，读侧按
+	// 「证据在压力下被裁」理解。
 	stored, usize := recorder.encodePayload(data)
-	recorder.pushInsert(func() {
+	n := int64(len(stored))
+	if !recorder.manager.chargePayload(n, 0) {
+		recorder.noteEncodeDrop(n)
+		return reference
+	}
+	recorder.pushInsert(n, func() {
 		recorder.stageFile(name, stored, usize, false)
 	})
 	return reference

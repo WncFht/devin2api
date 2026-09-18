@@ -597,6 +597,174 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	}
 }
 
+// TestPendingByteBudgetDropsAtCap 验证在飞预算满时编码产物按到达序丢弃：
+// 预留回退不推进 insertQ、dropped 计数、丢弃字节量同步入账。
+func TestPendingByteBudgetDropsAtCap(t *testing.T) {
+	manager := newBareManager(nil, 4)
+	recorder := newBareRecorder(manager, "20990101-000005")
+	manager.activeDirs[recorder.dir] = recorder
+	manager.inflightBytes.Store(pendingPayloadCapBytes)
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": "payload"})
+	task := <-manager.queues[0]
+	task.run()
+	if got := manager.inflightBytes.Load(); got != pendingPayloadCapBytes {
+		t.Fatalf("inflightBytes = %d, want cap（预留已回退）", got)
+	}
+	if got := recorder.dropped.Load(); got != 1 {
+		t.Fatalf("dropped = %d, want 1", got)
+	}
+	select {
+	case <-manager.insertQ:
+		t.Fatal("op pushed despite cap")
+	default:
+	}
+	if got := manager.droppedPayloadBytes.Load(); got == 0 {
+		t.Fatal("droppedPayloadBytes = 0, want >0")
+	}
+}
+
+// TestPendingByteBudgetMandatoryBypass 验证锚点文件（error.json/终态
+// meta/logRow）在预算满时照常入账暂存——归因锚点必须落库，超顶也收；
+// 且随事务提交按同一归还路径归零。
+func TestPendingByteBudgetMandatoryBypass(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	dir := "20990101-000006"
+	recorder := newBareRecorder(manager, dir)
+	manager.activeDirs[dir] = recorder
+	manager.inflightBytes.Store(pendingPayloadCapBytes)
+	recorder.WriteError("devin_connect", os.ErrPermission)
+	task := <-manager.queues[0]
+	task.run()
+	op := <-manager.insertQ
+	manager.runOp(op)
+	if got := manager.inflightBytes.Load(); got <= pendingPayloadCapBytes {
+		t.Fatalf("inflightBytes = %d, want > cap（锚点不过闸仍入账）", got)
+	}
+	recorder.Complete(Completion{StatusCode: 500, Result: "failed"})
+	task = <-manager.queues[0]
+	task.run()
+	op = <-manager.insertQ
+	manager.runOp(op) // queueCompletion → insertQ 空 → flushAll 提交
+	// 提交成功后真实暂存账归零——种下的伪水位 cap 原样留下。
+	if got := manager.inflightBytes.Load(); got != pendingPayloadCapBytes {
+		t.Fatalf("inflightBytes = %d after commit, want seeded cap only", got)
+	}
+	if _, _, _, err := manager.ReadFile(context.Background(), dir, ErrorFile); err != nil {
+		t.Fatalf("error.json not committed: %v", err)
+	}
+}
+
+// TestPendingByteBudgetLifecycle 验证在飞字节账全生命周期归零：编码期
+// 预留→op 落地转记 stagedBytes（同名覆盖只计净增量）→flush 提交归还；
+// 收尾（meta/logRow）照常入账，提交完成后账面回到零。
+func TestPendingByteBudgetLifecycle(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 8)
+	dir := "20990101-000007"
+	recorder := newBareRecorder(manager, dir)
+	recorder.sequences = map[string]int{}
+	manager.activeDirs[dir] = recorder
+	drain := func() {
+		for {
+			select {
+			case task := <-manager.queues[0]:
+				task.run()
+				continue
+			default:
+			}
+			select {
+			case op := <-manager.insertQ:
+				manager.runOp(op)
+			default:
+				return
+			}
+		}
+	}
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": "payload-a"})
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": "payload-b"})
+	recorder.AppendJSONL("04-devin-response.jsonl", "e", map[string]any{"d": 1})
+	drain()
+	// op 落地后账面 = 暂存面实际持有：预留已结清，覆盖只留净增量。
+	if got, staged := manager.inflightBytes.Load(), recorder.stagedBytes; got != staged || staged <= 0 {
+		t.Fatalf("inflightBytes=%d stagedBytes=%d, want equal >0", got, staged)
+	}
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	drain()
+	select {
+	case <-recorder.drained:
+	default:
+		t.Fatal("drained not closed after commit")
+	}
+	if got := manager.inflightBytes.Load(); got != 0 {
+		t.Fatalf("inflightBytes = %d after commit, want 0", got)
+	}
+	if got := recorder.stagedBytes; got != 0 {
+		t.Fatalf("stagedBytes = %d after commit, want 0", got)
+	}
+	if rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{}); err != nil || len(rows) != 1 {
+		t.Fatalf("log rows = %v err=%v, want 1 committed row", rows, err)
+	}
+}
+
+// TestPendingByteBudgetFailureRetains 验证写事务失败时暂存账不释放——
+// 字节确实仍被持有（暂存保留下轮重试），水位如实反映积压；这正是预算
+// 要 bound 住的病态增长面。
+func TestPendingByteBudgetFailureRetains(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	dir := "20990101-000008"
+	recorder := newBareRecorder(manager, dir)
+	manager.activeDirs[dir] = recorder
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": "payload"})
+	task := <-manager.queues[0]
+	task.run()
+	op := <-manager.insertQ
+	manager.runOp(op)
+	held := recorder.stagedBytes
+	if held <= 0 {
+		t.Fatalf("stagedBytes = %d, want >0", held)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager.flushAll()
+	if got := manager.inflightBytes.Load(); got != held {
+		t.Fatalf("inflightBytes = %d after failed flush, want %d（字节仍持有）", got, held)
+	}
+	if got := recorder.stagedBytes; got != held {
+		t.Fatalf("stagedBytes = %d after failed flush, want %d", got, held)
+	}
+	if len(recorder.stagedFiles) == 0 {
+		t.Fatal("stagedFiles dropped after failed flush")
+	}
+	if _, ok := manager.dirtyBufs[recorder]; !ok {
+		t.Fatal("recorder removed from dirtyBufs after failed flush")
+	}
+}
+
+// TestPendingByteBudgetRevertsOnWorkerGone 验证 op 在 pushInsert 遇
+// workerGone 时当场退还 charge——字节未送达写侧即不再占账面。
+// insertQ 填满让 select 只剩 workerGone 分支可走（双就绪时 select 随机）。
+func TestPendingByteBudgetRevertsOnWorkerGone(t *testing.T) {
+	manager := newBareManager(nil, 4)
+	recorder := newBareRecorder(manager, "20990101-000010")
+	manager.activeDirs[recorder.dir] = recorder
+	recorder.WriteJSON("03-devin-request.json", map[string]any{"x": "payload"})
+	for i := 0; i < cap(manager.insertQ); i++ {
+		manager.insertQ <- insertOp{recorder: recorder, apply: func() {}}
+	}
+	close(manager.workerGone)
+	task := <-manager.queues[0]
+	task.run()
+	if got := manager.inflightBytes.Load(); got != 0 {
+		t.Fatalf("inflightBytes = %d after workerGone drop, want 0", got)
+	}
+	if got := manager.droppedTotal.Load(); got != 1 {
+		t.Fatalf("droppedTotal = %d, want 1", got)
+	}
+}
+
 // TestDeltaStageRoundTrip 验证 01 基座钉入与 02/03* delta 落库的端到端
 // 口径：写满一个 dir 后经读路径取回的字节与写入一致，且 02/03 行的库存
 // 尺寸远小于逻辑尺寸（残差而非全量）。

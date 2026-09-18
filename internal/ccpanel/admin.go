@@ -320,6 +320,8 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 			"queue_capacity_entries":     stats["queue_capacity"],
 			"dropped_entries":            stats["dropped_log_events"],
 			"persistence_failed_entries": stats["io_errors"],
+			"pending_bytes":              stats["pending_bytes"],
+			"pending_bytes_cap":          stats["pending_bytes_cap"],
 		}
 		// debuglog 组是全量自观测（含 last_bind_failure 监听争夺取证、
 		// 保留策略回显）；logs 组只是 ccLoad 契约的四键投影。

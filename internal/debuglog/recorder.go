@@ -52,6 +52,21 @@ const globalQueueSize = 65536
 // 请求整段流被丢弃（每请求数百条）；16384 覆盖 ~860ms 峰值摄入。
 const insertQueueSize = 16384
 
+// pendingPayloadCapBytes 是全部编码产物（stagedFiles/chunkBufs/收尾项）
+// 的在飞字节预算：计数界（65536 任务 + 16384 op）对载荷方差失真——
+// 事件间尺寸差两个数量级（04 行 ~400B 对 01 ~400KB），深度×单事件
+// 最大载荷的上界既虚高又不可预测。取与 deltaBaseCapBytes 同量级：
+// 约等于故障期 2-3 分钟原始摄入的缓冲量，两账合计最坏 ~512MB 观测
+// 自有堆。两级 shed 若落地，protected 名单（01/02/03/error）改走
+// 「cap + 小 reserve 顶」而非硬闸——chargePayload 的 headroom 形参
+// 即挂接点；不落地则全员同闸，语义即现状。
+const pendingPayloadCapBytes = 256 << 20
+
+// completionChargeBytes 是一份 pendingCompletions 收尾项的估值记账：
+// logRow 结构体 + completionItem 本体合计 KB 级——收尾必须落库故不
+// 过闸，1024 dir × KB 级的超顶代价可忽略。
+const completionChargeBytes = 1024
+
 // chunkFlushInterval 是 JSONL 缓冲合批提交周期：窗口内各文件缓冲合并为
 // 一个事务一次 commit，把高频流式期的逐行 fsync 压到每秒数次；窗口长度
 // 同时是进行中请求的已提交前缀对面板可见的延迟上限。
@@ -186,9 +201,23 @@ type Manager struct {
 	// deltaBaseBytes 是全进程已钉 delta 基座的字节量：每个在飞目录把
 	// 脱敏后 01 明文钉给同目录的 02/03-devin-request* 作 zstd dict，
 	// 超 deltaBaseCapBytes 时新目录放弃钉座（其 delta 候选回退独立
-	// gzip）。该预算与未来 lazy-lite 暂存缓冲的上限是同一账目概念——
-	// 都是「为省存储而暂存的明文」，落地时应合并成一份全局预算。
+	// gzip）。该预算与 inflightBytes 是同一账目概念——都是「为观测
+	// 而暂存的字节」，两者仍分管各自的钉留动机。
 	deltaBaseBytes atomic.Int64
+	// inflightBytes 是写侧在飞 payload 的全局字节账：编码产物在
+	// pushInsert 前挂上预留（chargePayload/chargeStageFile），op 落地
+	// 时转记进 recorder.stagedBytes、flushAll 提交后归还。正常稳态
+	// 占用只有摄入速率×flush 窗（百 KB 级），预算的全部价值在 DB
+	// 病态期——写事务持续失败时 stagedFiles/chunkBufs/
+	// pendingCompletions 只增不减（prod WAL 17.7GB 事故形态），无界
+	// 增长直奔 OOM；超 pendingPayloadCapBytes 即按到达序丢弃编码产物
+	//（与队列满丢弃同语义），把「静默 OOM」换成「可计数、有上限的
+	// 证据丢弃」。meta/error/logRow 收尾锚点不过闸（必须落库，KB 级
+	// 超顶可忽略）但仍入账。
+	inflightBytes atomic.Int64
+	// droppedPayloadBytes 汇总被在飞预算丢弃的编码产物字节量，
+	// 供 Stats 量化「丢了多少证据体积」。
+	droppedPayloadBytes atomic.Uint64
 }
 
 // RequestMeta 是创建请求日志时已经确定的 HTTP 元信息。
@@ -382,6 +411,10 @@ type Recorder struct {
 	// 缓冲合并为一个事务提交为 debug_chunks 行（追加行代替整文件重写，
 	// 已提交前缀对面板实时可见，见 chunkFlushInterval）。
 	chunkBufs map[string]*bytes.Buffer
+	// stagedBytes 是本目录暂存面（stagedFiles/chunkBufs/pendingCompletion
+	// 收尾项）实际持有的字节量——写事务失败重试期间字节仍被持有，
+	// flushAll 提交（或整体丢弃）后归零并从 inflightBytes 归还。
+	stagedBytes int64
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
@@ -414,8 +447,12 @@ type writeTask struct {
 // insertOp 是编码完成、待写 worker 落库的一次作业：apply 只在写 worker
 // 上串行执行，承担 µs 级暂存（stageFile/appendJSONL）或 Complete 的
 // 收尾入列。DB 写全部收敛到写 worker 后，store 写连接在结构上无竞争。
+// charge 是编码期挂上 inflightBytes 的预留字节：apply 落地时暂存部分
+// 转记 stagedBytes，runOp 统一结清 charge——apply 内跳过暂存（去重）
+// 或 panic 都随结清归还，账目不留泄漏路径。
 type insertOp struct {
 	recorder *Recorder
+	charge   int64
 	apply    func()
 }
 
@@ -817,9 +854,16 @@ func (manager *Manager) Stats() map[string]any {
 		"pending_completions": manager.pendingCompletionCount.Load(),
 		"queue_capacity":      globalQueueSize + insertQueueSize,
 		"dropped_log_events":  manager.droppedTotal.Load(),
-		"io_errors":           manager.ioErrors.Load(),
-		"log_rows":            logRows,
-		"db_bytes":            dbBytes,
+		// pending_bytes 是写侧在飞 payload 的实时水位（预留+暂存合计）；
+		// 稳态只有摄入速率×flush 窗（百 KB 级），持续高位=写事务病态期
+		// 暂存积压的直接读数。pending_bytes_cap 是它的硬顶。dropped_
+		// payload_bytes 累计被预算丢弃的产物体积。
+		"pending_bytes":         manager.inflightBytes.Load(),
+		"pending_bytes_cap":     int64(pendingPayloadCapBytes),
+		"dropped_payload_bytes": manager.droppedPayloadBytes.Load(),
+		"io_errors":             manager.ioErrors.Load(),
+		"log_rows":              logRows,
+		"db_bytes":              dbBytes,
 		// wal_bytes 单列：db_bytes 与 payload 口径差的主要解释项——
 		// checkpoint 饥饿时 WAL 可远超主库文件，「WAL 顶爆 DBBytes」
 		// 应面板可见而非事后挖掘。payload_bytes 是 debug 两表库存
@@ -907,7 +951,12 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			recorder.enqueue(func() {
 				if data := recorder.metaJSON(nil); data != nil {
 					stored, usize := recorder.encodePayload(data)
-					recorder.pushInsert(func() {
+					n := int64(len(stored))
+					if !manager.chargeStageFile(MetaFile, n) {
+						recorder.noteEncodeDrop(n)
+						return
+					}
+					recorder.pushInsert(n, func() {
 						recorder.stageFile(MetaFile, stored, usize, false)
 					})
 				}
@@ -1021,13 +1070,53 @@ func (recorder *Recorder) enqueueLocked(task func()) {
 	}
 }
 
-// pushInsert 把编码完成的作业交给写 worker；在编码协程上调用。写 worker
-// 存活期间阻塞送达——insertQ 满即把背压传回分片队列，由入队端按丢弃
-// 语义降级；worker 已退（关停收尾）则丢弃计数，编码协程不得陪葬。
-func (recorder *Recorder) pushInsert(apply func()) {
+// chargePayload 把 n 字节挂进在飞账（add-or-revert，deltaBaseBytes 同
+// 款语义）：水位超 cap+headroom 即回退返回 false，调用方按丢弃语义
+// 降级。headroom 是两级 shed 的挂接点——protected 阶段传小顶额获得
+// 「cap+顶」豁免而非硬闸；当前全员同闸传 0。
+func (manager *Manager) chargePayload(n, headroom int64) bool {
+	if manager.inflightBytes.Add(n) <= pendingPayloadCapBytes+headroom {
+		return true
+	}
+	manager.inflightBytes.Add(-n)
+	return false
+}
+
+// chargeStageFile 按阶段文件名的证据级分类记账：meta/error 是目录定位
+// 与失败归因锚点，必须落库故不过闸恒收（KB 级，超顶代价可忽略）；
+// 其余阶段走在飞预算闸。名单变化只改本函数，调用点无感。
+func (manager *Manager) chargeStageFile(name string, n int64) bool {
+	if name == MetaFile || name == ErrorFile {
+		manager.inflightBytes.Add(n)
+		return true
+	}
+	return manager.chargePayload(n, 0)
+}
+
+// noteEncodeDrop 在编码协程上计一次编码产物丢弃（计数归属与
+// enqueueLocked 同口径切换）：closed 前挂 recorder.dropped 随 Complete
+// 折算，closed 后（Complete 已折完）直挂 droppedTotal；n 字节同时
+// 计入 droppedPayloadBytes 让丢弃体积可量化。
+func (recorder *Recorder) noteEncodeDrop(n int64) {
+	recorder.manager.droppedPayloadBytes.Add(uint64(n))
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	recorder.dropped.Add(1)
+	if recorder.closed {
+		recorder.manager.droppedTotal.Add(1)
+	}
+}
+
+// pushInsert 把编码完成的作业交给写 worker；在编码协程上调用。charge
+// 是该 op 在 inflightBytes 上的预留（0 表示写侧自产自收尾，无预留）。
+// 写 worker 存活期间阻塞送达——insertQ 满即把背压传回分片队列，由入队
+// 端按丢弃语义降级；worker 已退（关停收尾）则退还 charge 并丢弃计数，
+// 编码协程不得陪葬。
+func (recorder *Recorder) pushInsert(charge int64, apply func()) {
 	select {
-	case recorder.manager.insertQ <- insertOp{recorder: recorder, apply: apply}:
+	case recorder.manager.insertQ <- insertOp{recorder: recorder, charge: charge, apply: apply}:
 	case <-recorder.manager.workerGone:
+		recorder.manager.inflightBytes.Add(-charge)
 		recorder.manager.droppedTotal.Add(1)
 	}
 }
@@ -1116,8 +1205,12 @@ func (manager *Manager) runTask(task writeTask) {
 }
 
 // runOp 在写 worker 上执行一个落库 op，panic 兜底口径同 runTask。
+// op.charge 的在飞预留随 defer 结清：已暂存字节由 stage*/appendJSONL
+// 转记在 recorder.stagedBytes 随提交归还，未暂存（去重跳过/panic）
+// 的部分随结清退回——两种结局都不留账面泄漏。
 func (manager *Manager) runOp(op insertOp) {
 	defer func() {
+		manager.inflightBytes.Add(-op.charge)
 		if recovered := recover(); recovered != nil {
 			manager.ioErrors.Add(1)
 			slog.Warn("debuglog: insert op panicked", "dir", op.recorder.dir, "panic", recovered)
@@ -1150,6 +1243,10 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 		strip:    manager.errorsOnly.Load() && completion.Result == "completed" && !completion.PrematureEndTurn,
 	})
 	manager.pendingCompletionCount.Store(int64(len(manager.pendingCompletions)))
+	// 收尾项（logRow 结构 + 条目本体）随批次挂写侧持有——必须落库
+	// 不过闸，按 completionChargeBytes 估值入账随事务提交归还。
+	recorder.stagedBytes += completionChargeBytes
+	manager.inflightBytes.Add(completionChargeBytes)
 	// 写队列已空说明没有积压：立即冲刷，落库不附加攒批等待；
 	// 积压中则攒到 completionFlushGap 或下个 flush tick。
 	if len(manager.insertQ) == 0 || time.Since(manager.lastFlush) >= completionFlushGap {
@@ -1194,6 +1291,7 @@ func (manager *Manager) flushAll() {
 	st := manager.store
 	if st == nil {
 		for recorder := range manager.dirtyBufs {
+			manager.releaseStaged(recorder)
 			for name := range recorder.chunkBufs {
 				delete(recorder.chunkBufs, name)
 			}
@@ -1228,6 +1326,7 @@ func (manager *Manager) flushAll() {
 	manager.lastFlush = time.Now()
 	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
 		for recorder := range manager.dirtyBufs {
+			manager.releaseStaged(recorder)
 			delete(manager.dirtyBufs, recorder)
 		}
 		for _, item := range manager.pendingCompletions {
@@ -1260,6 +1359,7 @@ func (manager *Manager) flushAll() {
 		// 成功后放行同类告警：ioErrSeen 的一次性去重不该把恢复后的
 		// 再次故障永久静默。
 		delete(recorder.ioErrSeen, "batch")
+		manager.releaseStaged(recorder)
 		clear(recorder.stagedFiles)
 		for _, buf := range recorder.chunkBufs {
 			buf.Reset()
@@ -1640,13 +1740,28 @@ type stagedFile struct {
 	ifAbsent bool
 }
 
+// releaseStaged 归还 recorder 暂存账面的全部在飞字节：暂存内容随事务
+// 落库（或整体丢弃）后不再由本进程持有。仅写 worker（及 fallbackMu
+// 兜底路径）调用；stagedBytes 是写侧私有账本，无锁。
+func (manager *Manager) releaseStaged(recorder *Recorder) {
+	manager.inflightBytes.Add(-recorder.stagedBytes)
+	recorder.stagedBytes = 0
+}
+
 // stageFile 把已编码的整文件行按名暂存并标记本目录脏；仅写 worker
 // 调用。同窗口同名后写覆盖（等价 OR REPLACE 语义）；两边都是
-// ifAbsent 时保留先到者（first-write-wins）。
+// ifAbsent 时保留先到者（first-write-wins）——被拒收的 op 的预留账
+// 由 runOp 统一结清，这里不动。
 func (recorder *Recorder) stageFile(name string, stored []byte, usize int64, ifAbsent bool) {
 	if old, ok := recorder.stagedFiles[name]; ok && old.ifAbsent && ifAbsent {
 		return
 	}
+	// 净增量入账：同名覆盖时被替换的旧字节不再持有。op 自身的 charge
+	// 由 runOp 结清，这里记的是暂存面实际持有的字节——两笔账在 op
+	// 生命周期内是「预留→持有」的交接而非重复计数。
+	delta := int64(len(stored) - len(recorder.stagedFiles[name].stored))
+	recorder.stagedBytes += delta
+	recorder.manager.inflightBytes.Add(delta)
 	recorder.stagedFiles[name] = stagedFile{stored: stored, usize: usize, ifAbsent: ifAbsent}
 	recorder.manager.dirtyBufs[recorder] = struct{}{}
 }
@@ -1664,7 +1779,12 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 		var buf bytes.Buffer
 		recorder.writeSanitizedJSONLine(&buf, evalDeferred(value))
 		stored, usize := recorder.encodeStageFile(name, buf.Bytes())
-		recorder.pushInsert(func() {
+		n := int64(len(stored))
+		if !recorder.manager.chargeStageFile(name, n) {
+			recorder.noteEncodeDrop(n)
+			return
+		}
+		recorder.pushInsert(n, func() {
 			recorder.stageFile(name, stored, usize, false)
 		})
 	})
@@ -1723,7 +1843,12 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 		if err != nil {
 			return
 		}
-		recorder.pushInsert(func() {
+		n := int64(len(data) + 1)
+		if !recorder.manager.chargePayload(n, 0) {
+			recorder.noteEncodeDrop(n)
+			return
+		}
+		recorder.pushInsert(n, func() {
 			recorder.appendJSONL(name, data)
 		})
 	})
@@ -1755,7 +1880,12 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 		}
 		data.WriteByte('\n')
 		stored, usize := recorder.encodePayload(data.Bytes())
-		recorder.pushInsert(func() {
+		n := int64(len(stored))
+		if !recorder.manager.chargeStageFile(ErrorFile, n) {
+			recorder.noteEncodeDrop(n)
+			return
+		}
+		recorder.pushInsert(n, func() {
 			// 去重判定留在写 worker：同目录多个 WriteError 任务产出的 op
 			// 按序串行执行，首个到达者胜出——编码途中的丢失由下次调用兜底。
 			if recorder.errorWritten {
@@ -1874,6 +2004,12 @@ func (recorder *Recorder) appendJSONL(name string, data []byte) {
 	}
 	buf.Write(data)
 	buf.WriteByte('\n')
+	// 与 op 的 charge（len(data)+1）同口径入账——预留账由 runOp 结清，
+	// 这里记暂存面实际持有（含行尾 \n）。commit 后 buf.Reset 保留的
+	// 底层数组是二阶残余，按 len 近似忽略（随 recorder 释放归还）。
+	n := int64(len(data) + 1)
+	recorder.stagedBytes += n
+	recorder.manager.inflightBytes.Add(n)
 	recorder.manager.dirtyBufs[recorder] = struct{}{}
 }
 
