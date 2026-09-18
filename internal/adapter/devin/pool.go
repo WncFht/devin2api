@@ -350,7 +350,8 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		// 没有分界行无法区分一段帧属于哪号。
 		recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": lane.name})
 		laneStart := time.Now()
-		stream, err := lane.adapter.Stream(gateYield(ctx, class, rest), request)
+		probe := newGateYieldProbe(class, rest)
+		stream, err := lane.adapter.Stream(probe.attach(ctx), request)
 		if err == nil {
 			recorder.SetUpstreamAccount(lane.name)
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
@@ -365,6 +366,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		}
 		recorder.NoteAccountAttempt(lane.name, err)
 		lane.noteFailure(err)
+		rest = preferSibling(rest, probe.target.Load(), recorder)
 		slog.Warn("devin account lane failed, failing over", "account", lane.name, "error", err)
 	}
 	return nil, lastErr
@@ -505,7 +507,8 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		// 与 swap 自身的 account_attempt 记账同一份句柄。ctx 注值同理
 		// 必须重注：gateYield 与跨 lane 挂接探测的 peers 登记表都活在
 		// 开流 ctx 上，Recv 的 ctx 是另一个对象。
-		probeCtx := withDetachedPeers(gateYield(ctx, adapter.RequestClass(ctx), s.rest), s.pool.detachedPeerRegistries())
+		probe := newGateYieldProbe(adapter.RequestClass(ctx), s.rest)
+		probeCtx := withDetachedPeers(probe.attach(ctx), s.pool.detachedPeerRegistries())
 		inner, err := next.adapter.Stream(debuglog.WithRecorder(probeCtx, s.recorder), s.request)
 		if err == nil {
 			s.lane = next
@@ -525,6 +528,7 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		}
 		s.recorder.NoteAccountAttempt(next.name, err)
 		next.noteFailure(err)
+		s.rest = preferSibling(s.rest, probe.target.Load(), s.recorder)
 		slog.Warn("devin account lane failed to open during in-stream failover", "account", next.name, "error", err)
 	}
 	return false, lastErr
@@ -734,26 +738,71 @@ func (pool *Pool) detachedPeerRegistries() map[string]*detachedRegistry {
 	return peers
 }
 
-// gateYield 给一次 lane 尝试装「兄弟 lane 此刻能更快放行吗」的活探针：
-// 闸门预计排队超 gateEarlyRelease 时会问一次，任一剩余候选的
-// expectedWait 落进阈值即让位快败交给 failover。答数带兄弟侧最小
-// expectedWait——随拒绝记入尝试行（gate_sibling_ew_ms）供逐次让位
-// 审计。siblings 是本次尝试之后的候选集（克隆快照）——谓词可能活在
-// 泵协程上到 swap 已推进 rest，快照语义稳定免锁竞争；略陈旧的候选
-// 集只让让位偏积极（换号目标走实时 rest，不受影响）。空候选集不
-// 挂接，闸门走原有排队语义。
-func gateYield(ctx context.Context, class string, siblings []*poolLane) context.Context {
-	if len(siblings) == 0 {
+// gateYieldProbe 是一次 lane 尝试的「兄弟 lane 此刻能更快放行吗」
+// 活探针：闸门预计排队超 gateEarlyRelease 时在锁外调用 eval，任一
+// 剩余候选的 expectedWait 落进阈值即让位快败交给 failover。答真时
+// eval 顺手把当时的 argmin 兄弟记入 target——>2 lane 时探针达标的
+// 那条不一定是 rest[0]，failover 据此把落点提为首选（preferSibling），
+// 省掉盲落首位再多烧一次入闸评估的自我纠正。rest 是克隆快照——谓词
+// 可能活在泵协程上到 swap 已推进 rest，快照语义稳定免锁竞争；略陈旧
+// 的候选集只让让位偏积极（换号目标若已不在 rest，preferSibling 原序
+// 不动）。空候选集 attach 不挂接，闸门走原有排队语义。
+type gateYieldProbe struct {
+	class string
+	rest  []*poolLane
+	// target 是最近一次答真时算出的最优兄弟：只在 eval 答出 free 的
+	// 当次写入——答真后闸门立即让位快败，所以 target 非空即本次尝试
+	// 的死因是让位，failover 可安全按它重排。泵协程上的迟到 eval
+	// 与 failover 侧的读并发交错，走原子指针。
+	target atomic.Pointer[poolLane]
+}
+
+func newGateYieldProbe(class string, siblings []*poolLane) *gateYieldProbe {
+	return &gateYieldProbe{class: class, rest: slices.Clone(siblings)}
+}
+
+// attach 把探针挂进 ctx；空候选集不挂接。
+func (p *gateYieldProbe) attach(ctx context.Context) context.Context {
+	if len(p.rest) == 0 {
 		return ctx
 	}
-	rest := slices.Clone(siblings)
-	return adapter.WithGateYield(ctx, func() (time.Duration, bool) {
-		minEW := time.Duration(math.MaxInt64)
-		for _, lane := range rest {
-			minEW = min(minEW, lane.verdict(class).expectedWait)
+	return adapter.WithGateYield(ctx, p.eval)
+}
+
+// eval 求兄弟侧期望排队最小值（谓词本体——锁外求值，不得依赖调用方
+// 持锁）；落进让位阈值时把 argmin 兄弟记入 target 作 failover 首选。
+func (p *gateYieldProbe) eval() (time.Duration, bool) {
+	minEW := time.Duration(math.MaxInt64)
+	var best *poolLane
+	for _, lane := range p.rest {
+		if ew := lane.verdict(p.class).expectedWait; ew < minEW {
+			minEW, best = ew, lane
 		}
-		return minEW, minEW <= gateEarlyRelease
-	})
+	}
+	free := minEW <= gateEarlyRelease
+	if free {
+		p.target.Store(best)
+	}
+	return minEW, free
+}
+
+// preferSibling 把让位探针命中的兄弟提为换号首选：target 为 nil、
+// 已不在剩余候选或已在首位时原序不动。移动发生时留一行落点依据，
+// 否则「为什么跳过 rest[0]」只能靠当时各 lane 的 ew 反推。
+func preferSibling(rest []*poolLane, target *poolLane, recorder *debuglog.Recorder) []*poolLane {
+	if target == nil {
+		return rest
+	}
+	i := slices.Index(rest, target)
+	if i <= 0 {
+		return rest
+	}
+	recorder.AppendJSONL(debuglog.StageDevinResponse, "yield_failover_target", map[string]any{"lane": target.name})
+	reordered := make([]*poolLane, 0, len(rest))
+	reordered = append(reordered, target)
+	reordered = append(reordered, rest[:i]...)
+	reordered = append(reordered, rest[i+1:]...)
+	return reordered
 }
 
 // orderedLanes 是 rankLanes 的 lane 投影，供测试与只关心顺序的调用方使用。

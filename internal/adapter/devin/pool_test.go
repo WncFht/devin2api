@@ -777,6 +777,73 @@ func TestPoolFailoverBudgetSkipsHardDown(t *testing.T) {
 	}
 }
 
+// >2 lane 的让位落点：首 lane 让位快败时探针已答出「哪条兄弟在阈值内」，
+// failover 应直落该兄弟而非盲取 rest[0]——否则 rest[0] 深队时要再烧一次
+// 入闸评估才自我纠正。a 桶满（让位方）、b 健康但前队深到期望排队 ~92s
+// （rest[0]，让位语义下的假余量：能放行≠探针达标）、c 空闲：在飞指派钉
+// a 居首（钉选无视健康档）+ priority 压序把候选钉成 [a,b,c]，探针答 c
+// 是达标兄弟，换号必须越过 b 落 c。
+func TestPoolYieldFailoverPrefersProbedSibling(t *testing.T) {
+	catalog := []*devinproto.ExaCodeiumCommonPb_ClientModelConfig{stubModelEntry("stub-model", false)}
+	stubA := &stubUpstream{catalog: catalog}
+	stubB := &stubUpstream{catalog: catalog}
+	stubC := &stubUpstream{
+		catalog: catalog,
+		chat: func(call int, req *devinproto.GetChatMessageRequest, stream *connect.ServerStream[devinproto.GetChatMessageResponse]) error {
+			return stubSend(stream, stubMeta(), stubDelta("rescued"), stubStop())
+		},
+	}
+	pool := newTestPool(t,
+		Config{Identity: LaneIdentity{Name: "a", Token: "tok-a"}, Endpoint: Endpoint{BaseURL: stubServer(t, stubA, nil).URL}, Model: "stub-model", Gate: GateConfig{MaxRPM: 1}, Priority: 30},
+		Config{Identity: LaneIdentity{Name: "b", Token: "tok-b"}, Endpoint: Endpoint{BaseURL: stubServer(t, stubB, nil).URL}, Model: "stub-model", Gate: GateConfig{MaxRPM: 10}, Priority: 20},
+		Config{Identity: LaneIdentity{Name: "c", Token: "tok-c"}, Endpoint: Endpoint{BaseURL: stubServer(t, stubC, nil).URL}, Model: "stub-model", Priority: 10},
+	)
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+
+	// 冻结 a/b 的闸门时钟到窗中段（toNext≈32s，相位无关）：a 桶满使
+	// 探针口径排队必然超让位阈值；b 前队深到期望排队 ~92s（fg 超余量
+	// 前队按窗速率折算）——b 闸门本身仍能放行，但让位语义下它不是
+	// 「此刻能更快放行」的兄弟。
+	fixed := time.Now().Truncate(time.Minute).Add(30 * time.Second)
+	laneA.adapter.gate.now = func() time.Time { return fixed }
+	laneB.adapter.gate.now = func() time.Time { return fixed }
+	laneA.adapter.gate.mu.Lock()
+	laneA.adapter.gate.bucketStart = laneA.adapter.gate.windowStart(fixed)
+	laneA.adapter.gate.bucketUsed = 1
+	laneA.adapter.gate.mu.Unlock()
+	laneB.adapter.gate.mu.Lock()
+	laneB.adapter.gate.waitersFg = 20
+	laneB.adapter.gate.mu.Unlock()
+
+	request := llm.RequestMessages{
+		Model:    "stub-model",
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+	}
+	// 钉选压 a 居首：a 桶满已跌进病档，正常序轮不到它；在飞指派排在
+	// 健康档之前，把候选序钉成 [a,b,c]。
+	pin := pool.inflightAcquire(SessionAffinityKey(request))
+	pin.setLane(laneA)
+	defer pin.release()
+
+	stream, err := pool.Stream(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := stubDeltas(t, stubDrain(t, stream)); got != "rescued" {
+		t.Fatalf("deltas = %q, want rescued", got)
+	}
+	if got := laneA.adapter.gate.stats().RejectYield; got != 1 {
+		t.Fatalf("a RejectYield = %d, want 1 — saturated first lane must yield to failover", got)
+	}
+	if got := stubA.chatCalls.Load() + stubB.chatCalls.Load(); got != 0 {
+		t.Fatalf("a+b upstream calls = %d, want 0 — failover must skip straight to the probed-free sibling", got)
+	}
+	if got := stubC.chatCalls.Load(); got != 1 {
+		t.Fatalf("c upstream calls = %d, want 1 — failover must land on the probed-free sibling", got)
+	}
+}
+
 // 凭据失效冷却的生命周期：unauthenticated 标死当前 token；TokenSource
 // 换出不同凭据（经 reloadToken 落进 token 槽）惰性解禁；badUntil 过期
 // 同样解禁；后到标记只延长不缩短。
