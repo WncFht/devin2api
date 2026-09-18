@@ -22,10 +22,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/store"
@@ -427,6 +429,160 @@ type JSONLRecord struct {
 	//（sanitizeJSON），RawMessage 让信封 marshal 只付一次 compaction
 	// 扫描而不是重走反射编码。
 	Data json.RawMessage `json:"data"`
+}
+
+// marshalJSONLRecord 把 JSONLRecord 手写拼装成一行 JSON——与
+// json.Marshal(record) 逐字节一致（字段序 seq,time,elapsed_ms,event,data；
+// event 空按 omitempty 省略；Data 按 RawMessage 口径 compaction+HTML
+// 转义，空为 null、非法即报错），但不为每行信封付一次反射编码与
+// 多次中间分配。流式期每请求数百行的热路径走这里。
+func marshalJSONLRecord(record JSONLRecord) ([]byte, error) {
+	var buf bytes.Buffer
+	// 信封本体约 80 字节+时间串与事件名原文——Grow 让全部拼装一次
+	// 分配内完成（escapes 超界时按 buffer 常规倍增兜底）。
+	buf.Grow(len(record.Data) + len(record.Event) + len(record.Time) + 96)
+	var num [20]byte
+	buf.WriteString(`{"seq":`)
+	buf.Write(strconv.AppendInt(num[:0], int64(record.Seq), 10))
+	buf.WriteString(`,"time":`)
+	writeJSONString(&buf, record.Time)
+	buf.WriteString(`,"elapsed_ms":`)
+	buf.Write(strconv.AppendInt(num[:0], record.ElapsedMS, 10))
+	if record.Event != "" {
+		buf.WriteString(`,"event":`)
+		writeJSONString(&buf, record.Event)
+	}
+	buf.WriteString(`,"data":`)
+	if record.Data == nil {
+		// 同 json.Marshal 对 nil RawMessage 的输出：null（空非 nil
+		// 切片在 marshal 路径是 error，交给 Compact 同口径报错）。
+		buf.WriteString("null")
+	} else {
+		start := buf.Len()
+		if err := json.Compact(&buf, record.Data); err != nil {
+			// json.Compact 与 marshal 对 RawMessage 的校验/compaction
+			// 同口径，非法 JSON 在 marshal 路径同样整行失败。
+			return nil, err
+		}
+		escapeCompactedJSON(&buf, start)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// jsonHex 是 JSON \u00xx 转义的十六进制数字表（writeJSONString 与
+// escapeCompactedJSON 共用）。
+const jsonHex = "0123456789abcdef"
+
+// escapeCompactedJSON 给 buf[start:] 里刚 Compact 完的 JSON 补 marshal
+// 同款转义：marshal 对 RawMessage 在 verbatim 拷贝时按 EscapeForHTML|
+// EscapeForJS 转义 < > & 与 U+2028/2029 字面字节，而有效 JSON 里这些字节
+// 只可能出现在字符串内（已转义形态不含字面字节、控制字符不可能原样
+// 出现），净段整段补转即逐字节一致；无效 UTF-8 两路同样原样透传。
+// 净段不含这些字节时零分配直接返回。
+func escapeCompactedJSON(buf *bytes.Buffer, start int) {
+	data := buf.Bytes()[start:]
+	needs := false
+	for i := 0; i < len(data); i++ {
+		if data[i] == '<' || data[i] == '>' || data[i] == '&' ||
+			(data[i] == 0xe2 && i+2 < len(data) && data[i+1] == 0x80 &&
+				(data[i+2] == 0xa8 || data[i+2] == 0xa9)) {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return
+	}
+	src := append([]byte(nil), data...)
+	buf.Truncate(start)
+	for i := 0; i < len(src); i++ {
+		b := src[i]
+		if b == '<' || b == '>' || b == '&' {
+			buf.WriteString(`\u00`)
+			buf.WriteByte(jsonHex[b>>4])
+			buf.WriteByte(jsonHex[b&0x0f])
+			continue
+		}
+		if b == 0xe2 && i+2 < len(src) && src[i+1] == 0x80 &&
+			(src[i+2] == 0xa8 || src[i+2] == 0xa9) {
+			buf.WriteString(`\u202`)
+			buf.WriteByte('8' + src[i+2] - 0xa8)
+			i += 2
+			continue
+		}
+		buf.WriteByte(b)
+	}
+}
+
+// writeJSONString 把 s 按 encoding/json 的字符串编码规则写入 buf——
+// 控制字符短转义（\b\f\n\r\t）、<>& 的 \u00xx HTML 转义、U+2028/2029
+// 特例与非法 UTF-8 写 U+FFFD 本体，与 Marshal 输出逐字节一致。
+func writeJSONString(buf *bytes.Buffer, s string) {
+	buf.WriteByte('"')
+	start := 0
+	for i := 0; i < len(s); {
+		if b := s[i]; b < utf8.RuneSelf {
+			// escapeASCII 口径：0x00-0x1f 与 " \ & < > 需转义，其余
+			// ASCII（含 0x7f）原样。
+			if b >= 0x20 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&' {
+				i++
+				continue
+			}
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			switch b {
+			case '"', '\\':
+				buf.WriteByte('\\')
+				buf.WriteByte(b)
+			case '\b':
+				buf.WriteString(`\b`)
+			case '\f':
+				buf.WriteString(`\f`)
+			case '\n':
+				buf.WriteString(`\n`)
+			case '\r':
+				buf.WriteString(`\r`)
+			case '\t':
+				buf.WriteString(`\t`)
+			default:
+				// <>& 与其余控制字符同走 \u00xx。
+				buf.WriteString(`\u00`)
+				buf.WriteByte(jsonHex[b>>4])
+				buf.WriteByte(jsonHex[b&0x0f])
+			}
+			i++
+			start = i
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			// 非法 UTF-8 写替换字符本体（jsonwire AppendQuote 口径）。
+			buf.WriteString("\ufffd")
+			i++
+			start = i
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			if start < i {
+				buf.WriteString(s[start:i])
+			}
+			buf.WriteString(`\u202`)
+			buf.WriteByte(byte('8' + r - '\u2028'))
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	if start < len(s) {
+		buf.WriteString(s[start:])
+	}
+	buf.WriteByte('"')
 }
 
 // contextKey 是 request context 中 recorder 的私有键类型。
@@ -1509,14 +1665,13 @@ func (recorder *Recorder) AppendJSONL(name, event string, value any) {
 	recorder.sequences[name]++
 	seq := recorder.sequences[name]
 	recorder.enqueueLocked(func() {
-		record := JSONLRecord{
+		data, err := marshalJSONLRecord(JSONLRecord{
 			Seq:       seq,
 			Time:      at.Format(time.RFC3339Nano),
 			ElapsedMS: at.Sub(recorder.startedAt).Milliseconds(),
 			Event:     event,
 			Data:      recorder.sanitizeJSON(evalDeferred(value)),
-		}
-		data, err := json.Marshal(record)
+		})
 		if err != nil {
 			return
 		}
