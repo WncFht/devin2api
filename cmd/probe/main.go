@@ -41,19 +41,24 @@ var marshal = protojson.MarshalOptions{EmitUnpopulated: false, UseEnumNumbers: f
 // 第二个客户端参数是 LanguageServerService（GetSystemPromptAndTools /
 // GetMcpServerStates / GetAllSkills 所在服务），只有 registry 使用。
 var commands = map[string]func(context.Context, devinprotoconnect.ApiServerServiceClient, devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, string, []string) error{
-	"configs":   cmdConfigs,
-	"status":    cmdStatus,
-	"assign":    cmdAssign,
-	"chat":      cmdChat,
-	"replay":    cmdReplay,
-	"hist":      cmdHist,
-	"rerun":     cmdRerun,
-	"bigctx":    cmdBigctx,
-	"misc":      cmdMisc,
-	"edge":      cmdEdge,
-	"websearch": cmdWebsearch,
-	"registry":  cmdRegistry,
+	"configs":    cmdConfigs,
+	"status":     cmdStatus,
+	"assign":     cmdAssign,
+	"chat":       cmdChat,
+	"replay":     cmdReplay,
+	"hist":       cmdHist,
+	"rerun":      cmdRerun,
+	"bigctx":     cmdBigctx,
+	"misc":       cmdMisc,
+	"edge":       cmdEdge,
+	"websearch":  cmdWebsearch,
+	"registry":   cmdRegistry,
+	"cacheprobe": cmdCacheprobe,
 }
+
+// tokenOptional 标记允许无上游凭据运行的子命令：cacheprobe 的 proxy
+// 模式只打实例 /v1 端点，token 在 mode=upstream 时才由子命令自查。
+var tokenOptional = map[string]bool{"cacheprobe": true}
 
 // 客户端身份三元组在 main 里从 config 的 devin.client_* 解析一次
 // （缺省回落到与真实 Devin CLI 抓包一致的默认值），probe 流量与
@@ -68,6 +73,7 @@ func main() {
 	topFlags := flag.NewFlagSet("probe", flag.ContinueOnError)
 	accountName := topFlags.String("account", "", "凭据取 devin.accounts 中该名账号；缺省用首号")
 	stateDir := topFlags.String("state-dir", "", "读 devin-2api.db 账号覆盖行的状态目录；缺省按 $DEVIN2API_STATE_DIR → 平台默认目录解析")
+	baseURLFlag := topFlags.String("base-url", "", "覆盖上游基地址（指 upstreamstub 等本地桩时省得改 config.yaml）")
 	if err := topFlags.Parse(os.Args[1:]); err != nil {
 		usage()
 		os.Exit(2)
@@ -93,7 +99,7 @@ func main() {
 	cfg, _ := config.Load(probeConfigPath)
 	aliases = cfg.Devin.Aliases
 	token := resolveToken(cfg, probeStore(*stateDir), *accountName)
-	if token == "" {
+	if token == "" && !tokenOptional[args[0]] {
 		if *accountName != "" {
 			fmt.Fprintf(os.Stderr, "no token: devin.accounts has no account %q (or set DEVIN_TOKEN)\n", *accountName)
 		} else {
@@ -107,6 +113,9 @@ func main() {
 		ClientOS:      cfg.Devin.ClientOS,
 	}).ClientIdentity()
 	baseURL := cfg.Devin.BaseURL
+	if *baseURLFlag != "" {
+		baseURL = *baseURLFlag
+	}
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -160,7 +169,11 @@ func usage() {
     -prompt text              user prompt text for prompt-driven cases (e.g. user-image-prompt)
   registry [flags]            GetSystemPromptAndTools + GetMcpServerStates + GetAllSkills
     -planner-type name        conversational|conversational_v2 (default: both unset and conversational)
-    -skip-mcp-skills          skip GetMcpServerStates/GetAllSkills calls`)
+    -skip-mcp-skills          skip GetMcpServerStates/GetAllSkills calls
+  cacheprobe [flags]          A→B→C prefix-cache gate: does trajectory_id gate upstream cache?
+    -mode proxy|upstream      proxy: drive a devin-2api /v1 endpoint (needs -proxy-url);
+                              upstream: direct GetChatMessage with explicit trajectory ids
+    -legs A,R,B,C             leg set (A=seed R=resend B=fresh-traj same-content C=warm-traj new-suffix D=cold msgB)`)
 }
 
 // probeStore 打开状态库读面板写过的账号覆盖行：先 os.Stat 挡——
