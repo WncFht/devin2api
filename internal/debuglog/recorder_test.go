@@ -4,6 +4,7 @@ package debuglog
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -593,5 +594,126 @@ func TestErrorsOnlyDropsCleanDirs(t *testing.T) {
 	waitDrained(suspicious)
 	if _, _, _, err := manager.ReadFile(context.Background(), suspicious.dir, "04-devin-response.jsonl"); err != nil {
 		t.Fatalf("premature_end_turn dir must keep payload: %v", err)
+	}
+}
+
+// TestDeltaStageRoundTrip 验证 01 基座钉入与 02/03* delta 落库的端到端
+// 口径：写满一个 dir 后经读路径取回的字节与写入一致，且 02/03 行的库存
+// 尺寸远小于逻辑尺寸（残差而非全量）。
+func TestDeltaStageRoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	// 载荷内嵌一段不可压缩的随机串：gzip 与无字典 zstd 都缩不动它，
+	// 只有字典匹配的 delta 能把它摊没——库存尺寸因此能区分两种形态。
+	seg := make([]byte, 48<<10)
+	if _, err := rand.Read(seg); err != nil {
+		t.Fatal(err)
+	}
+	shared := base64.StdEncoding.EncodeToString(seg)
+	recorder.WriteJSON(StageHTTPRequest, map[string]any{"method": "POST", "body": shared})
+	recorder.WriteJSON(StageRequestMessages, map[string]any{"model": "m", "messages": shared})
+	recorder.WriteJSON(StageDevinRequest, map[string]any{"prompts": shared})
+	recorder.WriteJSON(StageDevinRequestAttempt(2), map[string]any{"prompts": shared})
+	recorder.WriteJSON(StageDevinSearchStem+"1.json", map[string]any{"query": shared})
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
+
+	// 读回逐字节一致（含 01 自身的独立 gzip 形态与全部 03* 分片）。
+	for _, name := range []string{StageHTTPRequest, StageRequestMessages, StageDevinRequest, StageDevinRequestAttempt(2), StageDevinSearchStem + "1.json"} {
+		got := readTestFile(t, manager, recorder.dir, name)
+		var decoded map[string]string
+		if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		found := false
+		for _, v := range decoded {
+			if v == shared {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s read-back lost the shared segment", name)
+		}
+	}
+	// 库存口径：随机段不可压缩 → 若 02/03* 走了独立 gzip，dir 库存总量
+	// 应≈逻辑总量；delta 命中字典则只剩残差。
+	files, err := st.DebugFileList(context.Background(), recorder.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logical int64
+	for _, f := range files {
+		logical += f.Size
+	}
+	sizes, err := st.DebugDirSizes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := sizes[recorder.dir]
+	if stored >= logical/3 {
+		t.Fatalf("stored=%d logical=%d, want stored << logical（delta 残差）", stored, logical)
+	}
+	// 基座预算随 releaseDir 归零——不留账面泄漏。
+	if got := manager.deltaBaseBytes.Load(); got != 0 {
+		t.Fatalf("deltaBaseBytes = %d after release, want 0", got)
+	}
+}
+
+// TestDeltaStageFallbacks 覆盖基座缺席/超限的降级口径：01 缺席时 02/03
+// 落独立 gzip 照常读出；预算占满时钉座被拒，同样回退独立存储。
+func TestDeltaStageFallbacks(t *testing.T) {
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	seg := make([]byte, 48<<10)
+	if _, err := rand.Read(seg); err != nil {
+		t.Fatal(err)
+	}
+	shared := base64.StdEncoding.EncodeToString(seg)
+	dirSize := func(dir string) (stored, logical int64) {
+		t.Helper()
+		files, err := st.DebugFileList(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			logical += f.Size
+		}
+		sizes, err := st.DebugDirSizes(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sizes[dir], logical
+	}
+
+	// 无 01 的目录：02/03 照常落库读出；独立 gzip 对随机段缩不动，
+	// 库存应≈逻辑量（与 delta 目录的近零残差形成对照）。
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+	recorder.WriteJSON(StageRequestMessages, map[string]any{"messages": shared})
+	recorder.WriteJSON(StageDevinRequest, map[string]any{"prompts": shared})
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
+	if got := readTestFile(t, manager, recorder.dir, StageRequestMessages); !strings.Contains(got, shared) {
+		t.Fatal("02 without base lost content")
+	}
+	stored, logical := dirSize(recorder.dir)
+	if stored <= logical/3 {
+		t.Fatalf("stored=%d logical=%d, want stored ≈ logical（独立 gzip 缩不动随机段）", stored, logical)
+	}
+
+	// 预算占满的目录：钉座被拒，02/03 同样回退独立存储且读如常。
+	manager.deltaBaseBytes.Store(deltaBaseCapBytes)
+	defer manager.deltaBaseBytes.Store(0)
+	full := manager.Start(RequestMeta{Method: "POST", Path: "/x"})
+	full.WriteJSON(StageHTTPRequest, map[string]any{"body": shared})
+	full.WriteJSON(StageRequestMessages, map[string]any{"messages": shared})
+	full.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(full)
+	if got := readTestFile(t, manager, full.dir, StageRequestMessages); !strings.Contains(got, shared) {
+		t.Fatal("02 over cap lost content")
+	}
+	stored, logical = dirSize(full.dir)
+	if stored <= logical/3 {
+		t.Fatalf("stored=%d logical=%d over cap, want stored ≈ logical", stored, logical)
 	}
 }

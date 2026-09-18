@@ -480,3 +480,106 @@ func TestDebugPayloadBytesReseed(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	assertPayloadBytes(t, s)
 }
+
+// putDeltaFile 把一段内容按 delta 编码直接落成 debug_files 行——测试
+// 绕过 debuglog 写路径，借 WriteDebugBatch 的预编码文件行入库。
+func putDeltaFile(t *testing.T, s *Store, ctx context.Context, dir, name string, data, base []byte) {
+	t.Helper()
+	stored, usize := EncodePayloadDelta(data, base)
+	if err := s.WriteDebugBatch(ctx, DebugBatch{Files: []DebugFileRow{{Dir: dir, Name: name, Stored: stored, Usize: usize}}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDeltaPayloadRoundTrip 验证 01 基座 + zstd delta 的库存语义：
+// 02/03* 存帧后读出与原文逐字节一致，attemptN/searchN 分片同名不同序
+// 号也走同一字典。
+func TestDeltaPayloadRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	// 模拟同 dir 三重投影：01 是客户端原文（含系统提示+历史），02/03
+	// 与 01 共享大部分叶子串。
+	base := bytes.Repeat([]byte(`{"role":"user","content":[{"type":"text","text":"shared-prefix-block"}]}`), 256)
+	if err := s.PutDebugFile(ctx, "d1", deltaBaseFileName, base); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"02-request-messages.json", "03-devin-request.json", "03-devin-request.attempt2.json", "03-devin-request.search1.json"} {
+		want := append(bytes.Repeat([]byte(`{"role":"user","content":[{"type":"text","text":"shared-prefix-block"}]}`), 200), []byte(name)...)
+		putDeltaFile(t, s, ctx, "d1", name, want, base)
+		data, total, ok, err := s.DebugFile(ctx, "d1", name, 0)
+		if err != nil || !ok || !bytes.Equal(data, want) || total != int64(len(want)) {
+			t.Fatalf("%s: read = %d,%d,%v,%v", name, len(data), total, ok, err)
+		}
+		// 库存形态必须是 zstd 帧且远小于原文（残差），usize 记逻辑尺寸。
+		var magic []byte
+		var usize, stored int64
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT SUBSTR(content,1,4), usize, LENGTH(content) FROM debug_files WHERE dir='d1' AND name=?`, name).Scan(&magic, &usize, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(magic, zstdMagic) {
+			t.Fatalf("%s: magic = %x, want zstd frame", name, magic)
+		}
+		if usize != int64(len(want)) || stored >= usize/4 {
+			t.Fatalf("%s: usize=%d stored=%d, want stored << usize", name, usize, stored)
+		}
+	}
+}
+
+// TestDeltaPayloadMissingBase 验证基座缺席两端的定版口径：写侧无
+// 字典回退独立 gzip（读如常）；读侧撞到 delta 帧而目录无 01 行时
+// 返回显式错误而不是乱码。
+func TestDeltaPayloadMissingBase(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte(`{"k":"v"} `), 512)
+	// 写侧：字典为空 → 回退 EncodePayload（gzip），读不需要字典。
+	putDeltaFile(t, s, ctx, "d1", "02-request-messages.json", payload, nil)
+	data, _, ok, err := s.DebugFile(ctx, "d1", "02-request-messages.json", 0)
+	if err != nil || !ok || !bytes.Equal(data, payload) {
+		t.Fatalf("fallback read = %d,%v,%v", len(data), ok, err)
+	}
+	// 读侧：delta 帧在而 01 行缺席（手动删行/shed 丢任务）→ 显式错误。
+	putDeltaFile(t, s, ctx, "d2", "02-request-messages.json", payload, payload)
+	if _, _, _, err = s.DebugFile(ctx, "d2", "02-request-messages.json", 0); err == nil {
+		t.Fatal("delta read without base returned no error")
+	}
+	// 基座本身是 delta 帧（手植的畸形行）→ 同样显式错误而非递归。
+	stored, usize := EncodePayloadDelta(payload, payload)
+	if err := s.WriteDebugBatch(ctx, DebugBatch{Files: []DebugFileRow{
+		{Dir: "d3", Name: deltaBaseFileName, Stored: stored, Usize: usize},
+		{Dir: "d3", Name: "02-request-messages.json", Stored: stored, Usize: usize},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err = s.DebugFile(ctx, "d3", "02-request-messages.json", 0); err == nil {
+		t.Fatal("delta read with delta-encoded base returned no error")
+	}
+}
+
+// TestDecodePayloadFileMagic 覆盖导出文件的魔数分派：raw 透传、
+// gzip 解压、zstd delta 按字典解（无字典显式错误）。
+func TestDecodePayloadFileMagic(t *testing.T) {
+	raw := []byte(`{"k":1}`)
+	if got, err := DecodePayloadFile(raw, nil); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("raw = %v,%v", got, err)
+	}
+	big := bytes.Repeat([]byte(`{"k":"v"} `), 512)
+	gz, usize := EncodePayload(big)
+	if usize == 0 {
+		t.Fatal("fixture did not compress")
+	}
+	if got, err := DecodePayloadFile(gz, nil); err != nil || !bytes.Equal(got, big) {
+		t.Fatalf("gzip = %d,%v", len(got), err)
+	}
+	delta, usize := EncodePayloadDelta(big, big)
+	if usize == 0 || !bytes.Equal(delta[:4], zstdMagic) {
+		t.Fatal("fixture did not delta-encode")
+	}
+	if _, err := DecodePayloadFile(delta, nil); err == nil {
+		t.Fatal("delta without dict returned no error")
+	}
+	if got, err := DecodePayloadFile(delta, big); err != nil || !bytes.Equal(got, big) {
+		t.Fatalf("delta = %d,%v", len(got), err)
+	}
+}
