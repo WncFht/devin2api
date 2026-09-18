@@ -236,7 +236,7 @@ type Recorder struct {
 	requestMeta RequestMeta
 	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
 	// keyHash、retries、sequences、upstreamAccount、accountAttempts、
-	// poolCandidates；worker 自身状态无锁。
+	// affinityHash、poolCandidates；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃。
 	closed bool
@@ -265,6 +265,12 @@ type Recorder struct {
 	// 放弃的 lane 各记一笔；请求 goroutine 经 NoteAccountAttempt 追加，
 	// metaJSON/logRowFor 读，与 retries 同一把锁。
 	accountAttempts []AccountAttempt
+	// affinityHash 是号池选号用的会话亲和键（SessionAffinityKey 的
+	// 截断 SHA-256，与 key_hash 同脱敏口径）；Pool.Stream 排序前经
+	// SetAffinityHash 回填，metaJSON 落 meta.affinity_hash——把
+	// 「同一会话」与 upstream_attempts/pool_candidates 的换号痕迹
+	// 关联起来，会话级钉选/迁移分析不必回 03 重算种子。
+	affinityHash string
 	// poolCandidates 是开流前的候选序快照（含每 lane 降级原因），
 	// 由 Pool.Stream 排序后登记，metaJSON 落 meta.pool_candidates。
 	poolCandidates []PoolCandidate
@@ -1290,6 +1296,18 @@ func (recorder *Recorder) NoteAccountAttempt(account string, err error) {
 	recorder.mutex.Unlock()
 }
 
+// SetAffinityHash 回填号池选号用的会话亲和键：Pool.Stream 算出
+// SessionAffinityKey 后登记一次，metaJSON 落 meta.affinity_hash。
+// 值本身已是截断哈希（32 位 hex），落盘无新增暴露面。
+func (recorder *Recorder) SetAffinityHash(affinity string) {
+	if recorder == nil {
+		return
+	}
+	recorder.mutex.Lock()
+	recorder.affinityHash = affinity
+	recorder.mutex.Unlock()
+}
+
 // NotePoolCandidates 登记号池开流前的候选序快照：Pool.Stream 排完序
 // 调一次，回答「这次为什么去了这个号」——被降级 lane 的 Reason 是
 // 归因词表（见 PoolCandidate）。多次调用后者覆盖前者（换号重选时
@@ -1644,6 +1662,7 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	}
 	meta.UpstreamAccount, meta.UpstreamAttempts = recorder.upstreamAttribution()
 	recorder.mutex.Lock()
+	meta.AffinityHash = recorder.affinityHash
 	meta.PoolCandidates = append([]PoolCandidate(nil), recorder.poolCandidates...)
 	recorder.mutex.Unlock()
 	if completion != nil {

@@ -213,6 +213,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		return stream, err
 	}
 	affinity := SessionAffinityKey(request)
+	recorder.SetAffinityHash(affinity)
 	ranked := pool.rankLanes(lanes, affinity)
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。

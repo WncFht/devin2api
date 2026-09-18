@@ -18,8 +18,12 @@ import (
 // DurationMS 六个字段在完结时无条件出账（含零值）——指针区分
 // 「完结写了零值」与「创建期不写」，omitempty 会把两者混同。
 type MetaSummary struct {
-	API    string      `json:"api,omitempty"`
-	Client *MetaClient `json:"client,omitempty"`
+	// AffinityHash 是号池选号的会话亲和键：sessionSeed 的 SHA-256
+	// 前 16 字节十六进制（与 key_hash 同脱敏口径，不可逆）。只在
+	// 池路径（len(lanes)>1）落——回答「哪些请求是同一会话钉选」。
+	AffinityHash string      `json:"affinity_hash,omitempty"`
+	API          string      `json:"api,omitempty"`
+	Client       *MetaClient `json:"client,omitempty"`
 
 	DroppedEvents uint64 `json:"dropped_events,omitempty"`
 
