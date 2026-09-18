@@ -90,6 +90,20 @@ func (h *Handler) QuotaInterval() time.Duration {
 	return h.quotaInterval
 }
 
+// BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
+// 停掉配额采样协程——采样每轮对每个 lane 打一次上游并写 quota_samples，
+// 是排空语义「不再制造新上游工作」该收的后台生产者；在途轮次随 ctx
+// 取消收束。只停协程不动 quotaInterval 簿记：进程随即退出，生效值
+// 回读仍应反映配置而非「被排空归零」。幂等。
+func (h *Handler) BeginDrain() {
+	h.quotaMu.Lock()
+	defer h.quotaMu.Unlock()
+	if h.quotaCancel != nil {
+		h.quotaCancel()
+		h.quotaCancel = nil
+	}
+}
+
 // sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照写入
 // quota_samples（每行带 account 字段，两号曲线分开画）。账号间按名序
 // 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。ctx 是采样

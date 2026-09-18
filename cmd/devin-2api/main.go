@@ -237,6 +237,12 @@ func main() {
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	debugManager.SetErrorsOnly(serviceConfig.Debug.ErrorsOnly)
 	defer debugManager.Close()
+	// 交接进程不跑目录清理：cleanOnce 是共享库上的多语句重事务，
+	// 与托管实例并发清理只会争抢同一写连接互相打断（与下方导入
+	// 跳过同一判据）。
+	if handoff {
+		debugManager.StopCleaner()
+	}
 	// 遗留磁盘请求目录的后台导入：逐目录事务搬进 debug 两表后删目录，
 	// 断点记在 runtime_state，崩溃重启续传。异步跑——大目录导入不该
 	// 拖住就绪；导入途中同秒新目录的 claim 由 DB 占位与 takenNames 兜底。
@@ -409,21 +415,30 @@ func main() {
 	// 回收）：养护对象是库不是调试目录，由这里驱动而非 debuglog
 	// cleaner——后者随 debug.enabled/root 关停，保洁不该跟着停。
 	// 节奏沿用原 cleaner 的 5 分钟；LogRowDays 每拍现读 Policy()，
-	// 面板热改即时生效。
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := dbStore.Maintain(context.Background(), debugManager.Policy().LogRowDays); err != nil {
-					slog.Warn("store maintain failed", "error", err)
+	// 面板热改即时生效。交接进程不跑：与托管实例并发做同一份养护
+	// 只会重复写库、在共享库上互相打断。
+	if !handoff {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// SIGTERM 与 tick 同就绪时 select 随机选——已取消
+					// 就不再发起新一轮（Maintain 是共享库上的多语句
+					// 重活，排空窗内只会白抢写连接）。
+					if ctx.Err() != nil {
+						return
+					}
+					if err := dbStore.Maintain(context.Background(), debugManager.Policy().LogRowDays); err != nil {
+						slog.Warn("store maintain failed", "error", err)
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
 	signal.Ignore(syscall.SIGHUP)
 	if err := run(ctx, application, server, listener); err != nil {

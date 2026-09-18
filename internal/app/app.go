@@ -494,14 +494,21 @@ func (tracker *drainTracker) Wait(ctx context.Context) error {
 // BeginDrain 进入排空态：新请求快速 503，在途请求继续跑完。
 // listener 保持开启由调用方控制——http.Server.Shutdown 会先关 listener 再
 // 等在途连接，排空期整段变成 connection refused；这里改为排空结束才 Close。
-// 适配器实现可选 BeginDrain 接口时同步通知：devin 保温调度是后台上游生产者，
-// 排空语义是「不再制造新上游工作」，不只「不再接收新下游请求」——进程排空
-// 可能持续数分钟，ping 若照发会把冷掉的缓存又焐热，白烧上游配额。
+// 排空同时收束全部后台生产者与库级 housekeeping：适配器与面板实现可选
+// BeginDrain 接口时同步通知（保温 ping、配额采样是后台上游生产者，排空
+// 语义是「不再制造新上游工作」，不只「不再接收新下游请求」——进程排空
+// 可能持续数分钟，ping 若照发会把冷掉的缓存又焐热，白烧上游配额）；
+// debuglog cleaner 的 cleanOnce 是共享库上的多语句重事务，与在途簿记
+// 及 deploy 交接对侧进程的写流争抢同一写连接，在此一并挂起。
 func (application *App) BeginDrain() {
 	application.draining.Store(true)
 	if drainer, ok := application.adapter.(interface{ BeginDrain() }); ok {
 		drainer.BeginDrain()
 	}
+	if drainer, ok := application.ccPanel.(interface{ BeginDrain() }); ok {
+		drainer.BeginDrain()
+	}
+	application.debugManager.StopCleaner()
 }
 
 // WaitDrain 阻塞到在途并发槽清空或 ctx 超时；超时返回错误，调用方负责强制 Close。

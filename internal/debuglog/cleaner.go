@@ -68,6 +68,31 @@ func (manager *Manager) runCleaner() {
 	}
 }
 
+// StopCleaner 停止后台清理协程的后续 tick，幂等。调用点是排空起点
+// （app.BeginDrain）与 Close：cleanOnce 是 GB 级库上的多语句重事务
+// （4.9GB 库实测单 pass 45-90s），排空窗内它与在途簿记及 deploy
+// 交接对侧进程的写流争抢唯一写连接，是重叠期 SQLITE_BUSY 波的
+// 结构性来源。已起跑的 pass 在 cleanOnce 相位边界经 cleanerStopped
+// 收束——不打断进行中的单条语句，也不等待它结束。
+func (manager *Manager) StopCleaner() {
+	if manager == nil || manager.cleanerStop == nil {
+		return
+	}
+	manager.cleanerStopOnce.Do(func() { close(manager.cleanerStop) })
+}
+
+// cleanerStopped 非阻塞探停止信号，供 cleanOnce 在相位边界收束：
+// 每相都是独立重语句，让当前语句跑完、后续相位不再发起即可把在途
+// pass 截短到语句粒度。cleanerStop 为 nil（禁用管理器）时恒 false。
+func (manager *Manager) cleanerStopped() bool {
+	select {
+	case <-manager.cleanerStop:
+		return true
+	default:
+		return false
+	}
+}
+
 // cleanOnce 执行一轮清理，返回整删的目录数与剥到锚点的目录数。
 // 顺序：剥离超龄负载 → 删超龄目录 → 总量超限先剥载到锚点、仍超限
 // 再整目录淘汰（受保护的失败目录与活跃目录除外）。
@@ -113,6 +138,12 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		}
 	}
 
+	// 排空挂起在相位边界生效：StopCleaner 后让已起跑的语句跑完、
+	// 后续相位不再发起，在途 pass 截短到语句粒度。
+	if manager.cleanerStopped() {
+		return removed, stripped
+	}
+
 	// errorDirs 提前取：龄删豁免与容量淘汰共用同一保护集口径。
 	errorDirs := map[string]bool{}
 	if policy.KeepErrorDirs > 0 {
@@ -150,6 +181,10 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 				removed += len(deletable) - len(exclude)
 			}
 		}
+	}
+
+	if manager.cleanerStopped() {
+		return removed, stripped
 	}
 
 	maxBytes := policy.MaxTotalMB << 20
@@ -256,6 +291,10 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	stripped += stripLast + 1 - countProtectedBelow(candidates, protected, stripLast)
 	remaining := totalBytes - freedStrip
 	if remaining <= maxBytes {
+		return removed, stripped
+	}
+
+	if manager.cleanerStopped() {
 		return removed, stripped
 	}
 

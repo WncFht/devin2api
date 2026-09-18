@@ -148,9 +148,11 @@ type Manager struct {
 	logRowRetentionDays atomic.Int64
 	// store 是 logs 表的持久层；nil 时日志行静默跳过（测试/未接线）。
 	store *store.Store
-	// cleanerStop/cleanerDone 控制后台清理协程生命周期。
-	cleanerStop chan struct{}
-	cleanerDone chan struct{}
+	// cleanerStop/cleanerDone 控制后台清理协程生命周期；cleanerStopOnce
+	// 幂等化停止信号——StopCleaner（排空起点挂起）与 Close 都可触发。
+	cleanerStop     chan struct{}
+	cleanerDone     chan struct{}
+	cleanerStopOnce sync.Once
 	// queues 是按目录名哈希分片的编码任务队列（长 encoderShards），
 	// insertQ 是编码产物汇给写 worker 的队列；workerStop/workerGone 是
 	// 关停协议——Close 关 workerStop，编码协程排空各自分片后退，写
@@ -808,7 +810,7 @@ func (manager *Manager) Close() {
 		manager.closing.Store(true)
 		close(manager.workerStop)
 		<-manager.workerGone
-		close(manager.cleanerStop)
+		manager.StopCleaner()
 		<-manager.cleanerDone
 	}
 }
