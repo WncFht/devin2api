@@ -140,6 +140,15 @@ type Manager struct {
 	// 已无人续收会死锁）。
 	encWG        sync.WaitGroup
 	encodersDone chan struct{}
+	// shardEncoders 按分片下标持有各编码协程的专属 payload 编码器：
+	// 槽位由 runEncoder 启动时自写，任务闭包只在本协程上执行（同 dir
+	// 恒同分片），免锁复用 flate 内部表——sync.Pool 会被 GC 清空，
+	// 专属实例把表重建摊成一次性成本。
+	shardEncoders []*store.PayloadEncoder
+	// writerEncoder 是写 worker 的专属 payload 编码器（runWriter 启动时
+	// 自写）：flushAll 的 chunk 编码与 queueCompletion 的 meta 编码在它
+	// 上面跑；fallbackMu 兜底路径在 workerGone 后串行触碰，不构成并发。
+	writerEncoder *store.PayloadEncoder
 	// closing 置位（Close 开始）后 enqueue 直接丢弃——关停期入队方
 	// 立即降级，不向正在排空的队列再压任务。
 	closing atomic.Bool
@@ -446,18 +455,19 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 		policy.LogRowDays = DefaultLogRowRetentionDays
 	}
 	manager := &Manager{
-		root:         root,
-		now:          time.Now,
-		activeDirs:   make(map[string]*Recorder),
-		takenNames:   make(map[string]struct{}),
-		policy:       policy,
-		store:        st,
-		queues:       make([]chan writeTask, encoderShards),
-		insertQ:      make(chan insertOp, insertQueueSize),
-		workerStop:   make(chan struct{}),
-		workerGone:   make(chan struct{}),
-		encodersDone: make(chan struct{}),
-		dirtyBufs:    make(map[*Recorder]struct{}),
+		root:          root,
+		now:           time.Now,
+		activeDirs:    make(map[string]*Recorder),
+		takenNames:    make(map[string]struct{}),
+		policy:        policy,
+		store:         st,
+		queues:        make([]chan writeTask, encoderShards),
+		shardEncoders: make([]*store.PayloadEncoder, encoderShards),
+		insertQ:       make(chan insertOp, insertQueueSize),
+		workerStop:    make(chan struct{}),
+		workerGone:    make(chan struct{}),
+		encodersDone:  make(chan struct{}),
+		dirtyBufs:     make(map[*Recorder]struct{}),
 	}
 	shardCap := max(2048, globalQueueSize/encoderShards)
 	for i := range manager.queues {
@@ -722,7 +732,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 			// worker 合批提交，claim 的空行占位已先保证目录名不被撞走。
 			recorder.enqueue(func() {
 				if data := recorder.metaJSON(nil); data != nil {
-					stored, usize := store.EncodePayload(data)
+					stored, usize := recorder.encodePayload(data)
 					recorder.pushInsert(func() {
 						recorder.stageFile(MetaFile, stored, usize, false)
 					})
@@ -848,11 +858,23 @@ func (recorder *Recorder) pushInsert(apply func()) {
 	}
 }
 
+// encodePayload 用本请求分片协程的专属编码器压缩 payload。仅可在编码
+// 任务闭包内调用——任务恒在本分片协程串行执行，shardEncoders[shard]
+// 槽位由 runEncoder 启动时写入，天然免锁。写 worker 侧（flushAll/
+// queueCompletion）走 manager.writerEncoder，零散调用方用
+// store.EncodePayload 共享池。
+func (recorder *Recorder) encodePayload(data []byte) (stored []byte, usize int64) {
+	return recorder.manager.shardEncoders[recorder.shard].Encode(data)
+}
+
 // runEncoder 是一个分片的编码协程：串行消费分片队列——同 recorder 的
 // 任务在本协程上保序执行，sanitize/marshal/压缩等 CPU 密集段随分片数
 // 摊到多核。收到关停信号后排空本分片残余任务再退出。
 func (manager *Manager) runEncoder(shard int) {
 	defer manager.encWG.Done()
+	// 本分片协程的专属 payload 编码器：槽位自写自用（任务闭包经
+	// recorder.encodePayload 取得），同协程程序序即同步保证。
+	manager.shardEncoders[shard] = store.NewPayloadEncoder()
 	queue := manager.queues[shard]
 	for {
 		select {
@@ -881,6 +903,10 @@ func (manager *Manager) runWriter() {
 	// workerGone 走 defer：worker 以任何路径退出都必须关闭它，
 	// Complete 的哨兵等待与迟到入队都在拿它兜底。
 	defer close(manager.workerGone)
+	// 本协程的专属 payload 编码器：flushAll 的 chunk 编码与
+	// queueCompletion 的 meta 编码复用它；fallbackMu 兜底路径在
+	// workerGone 关闭后才触碰，与写 worker 天然不同时。
+	manager.writerEncoder = store.NewPayloadEncoder()
 	flushTick := time.NewTicker(chunkFlushInterval)
 	defer flushTick.Stop()
 	for {
@@ -944,7 +970,7 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 		return
 	}
 	if data := recorder.metaJSON(&completion); data != nil {
-		stored, usize := store.EncodePayload(data)
+		stored, usize := manager.writerEncoder.Encode(data)
 		recorder.stageFile(MetaFile, stored, usize, false)
 	}
 	manager.dirtyBufs[recorder] = struct{}{}
@@ -1019,6 +1045,7 @@ func (manager *Manager) flushAll() {
 		return
 	}
 	var batch store.DebugBatch
+	batch.Encoder = manager.writerEncoder
 	for recorder := range manager.dirtyBufs {
 		files, rows := recorder.pendingBatch()
 		batch.Files = append(batch.Files, files...)

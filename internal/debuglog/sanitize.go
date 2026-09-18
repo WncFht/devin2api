@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"mime"
 	"strings"
-
-	"github.com/WncFht/devin2api/internal/store"
 )
 
 // sanitizeJSON 把待写值序列化为脱敏后的 JSON 字节：先拿到原始 JSON
@@ -281,7 +279,7 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 	recorder.attachmentByHash[hash] = reference
 	// 附件 op 先于引用它的父文件 op 推进 insertQ（同一编码协程顺序
 	// 推送），读侧不会在文件引用就绪时找不到附件行。
-	stored, usize := store.EncodePayload(data)
+	stored, usize := recorder.encodePayload(data)
 	recorder.pushInsert(func() {
 		recorder.stageFile(name, stored, usize, false)
 	})

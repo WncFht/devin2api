@@ -29,23 +29,51 @@ var payloadGzipPool = sync.Pool{
 	},
 }
 
+// PayloadEncoder 是单持有者复用的 payload 编码器：内部 gzip.Writer
+// 跨调用 Reset 续用 flate 窗口与哈希表——sync.Pool 会被 GC 清空，
+// 长驻协程（编码分片/写 worker）各自持有一份后，表重建摊成一次性
+// 成本。非并发安全：持有者必须保证串行调用。
+type PayloadEncoder struct {
+	zw *gzip.Writer
+}
+
+// NewPayloadEncoder 返回一个可长期持有的编码器，压缩档与
+// EncodePayload 同为 BestSpeed。
+func NewPayloadEncoder() *PayloadEncoder {
+	zw, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return &PayloadEncoder{zw: zw}
+}
+
+// Encode 与 EncodePayload 同语义，只是复用持有者的 gzip.Writer。
+func (e *PayloadEncoder) Encode(data []byte) (stored []byte, usize int64) {
+	return encodePayload(e.zw, data)
+}
+
 // EncodePayload 返回入库字节与 usize：能压出 ≥10% 收益的内容存
 // 压缩形态（usize=解压前尺寸），否则原样（usize=0）。BestSpeed
 // 对 JSON 文本已有一个量级压缩率，更高档换 CPU 不值。
 // 导出供 debuglog 在请求 goroutine 上预编码——压缩是写路径 CPU 大头，
 // 摊到调用方后写 worker 只剩落库。
 func EncodePayload(data []byte) (stored []byte, usize int64) {
+	zw := payloadGzipPool.Get().(*gzip.Writer)
+	stored, usize = encodePayload(zw, data)
+	payloadGzipPool.Put(zw)
+	return stored, usize
+}
+
+// encodePayload 是 EncodePayload/PayloadEncoder.Encode 的共用实现：
+// zw 由调用方供给并复用；返回前 Reset(io.Discard) 断开对输出缓冲的
+// 引用，调用方无需再 detach。
+func encodePayload(zw *gzip.Writer, data []byte) (stored []byte, usize int64) {
 	if len(data) < compressMinBytes {
 		return data, 0
 	}
 	var buf bytes.Buffer
 	buf.Grow(len(data) / 4)
-	zw := payloadGzipPool.Get().(*gzip.Writer)
 	zw.Reset(&buf)
 	_, werr := zw.Write(data)
 	cerr := zw.Close()
 	zw.Reset(io.Discard)
-	payloadGzipPool.Put(zw)
 	if werr != nil || cerr != nil {
 		return data, 0
 	}

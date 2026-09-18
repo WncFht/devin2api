@@ -142,6 +142,9 @@ type DebugBatch struct {
 	Chunks    []DebugChunkRow
 	StripDirs []string
 	LogRows   []*LogRow
+	// Encoder 非空时 chunk 的 gzip 编码用它（调用方持有的复用编码器，
+	// 如写 worker 的专属实例——调用串行化由调用方保证）；空走共享池。
+	Encoder *PayloadEncoder
 }
 
 // WriteDebugBatch 把一个 DebugBatch 合并进一个事务——写 worker 的周期
@@ -159,7 +162,11 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 	storedChunks := make([][]byte, len(batch.Chunks))
 	chunkUsizes := make([]int64, len(batch.Chunks))
 	for i, r := range batch.Chunks {
-		storedChunks[i], chunkUsizes[i] = EncodePayload(r.Data)
+		if batch.Encoder != nil {
+			storedChunks[i], chunkUsizes[i] = batch.Encoder.Encode(r.Data)
+		} else {
+			storedChunks[i], chunkUsizes[i] = EncodePayload(r.Data)
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
