@@ -70,7 +70,7 @@ func TestConvertToolDefinitionStripsAnnotationsButKeepsSchema(t *testing.T) {
 				"required":["description","title"],
 				"additionalProperties":false
 			}`),
-	})
+	}, &llm.RequestRepairs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,15 +341,19 @@ func TestNormalizeSchemaFuseStripsDeepRefs(t *testing.T) {
 		defs[fmt.Sprintf("d%d", i)] = map[string]any{"$ref": fmt.Sprintf("#/$defs/d%d", i+1)}
 	}
 	defs["d33"] = map[string]any{"type": "string"}
+	dropped := 0
 	chained, err := normalizeSchema(mustJSON(t, map[string]any{
 		"$defs": defs,
 		"$ref":  "#/$defs/d0",
-	}))
+	}), &dropped)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(chained), "$ref") {
 		t.Fatalf("ref chain: wire schema still carries $ref: %s", chained)
+	}
+	if dropped != 1 {
+		t.Fatalf("ref chain: dropped = %d, want 1 (the fused d32 ref)", dropped)
 	}
 
 	// 结构深嵌：properties 每层耗 2 depth，17+ 层让 $ref 落在保险丝
@@ -358,16 +362,20 @@ func TestNormalizeSchemaFuseStripsDeepRefs(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		nested = map[string]any{"properties": map[string]any{"p": nested}}
 	}
+	dropped = 0
 	deep, err := normalizeSchema(mustJSON(t, map[string]any{
 		"type":       "object",
 		"properties": map[string]any{"p": nested},
 		"$defs":      map[string]any{"x": map[string]any{"type": "string"}},
-	}))
+	}), &dropped)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(deep), "$ref") {
 		t.Fatalf("deep nesting: wire schema still carries $ref: %s", deep)
+	}
+	if dropped != 1 {
+		t.Fatalf("deep nesting: dropped = %d, want 1", dropped)
 	}
 
 	// 兄弟约束在截断处必须保留：items 链 33 层把带 $ref 的节点正好放到
@@ -377,11 +385,12 @@ func TestNormalizeSchemaFuseStripsDeepRefs(t *testing.T) {
 	for i := 0; i < 33; i++ {
 		wrapped = map[string]any{"items": wrapped}
 	}
+	dropped = 0
 	sibling, err := normalizeSchema(mustJSON(t, map[string]any{
 		"type":  "array",
 		"items": wrapped,
 		"$defs": map[string]any{"x": map[string]any{"type": "string"}},
-	}))
+	}), &dropped)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,18 +401,53 @@ func TestNormalizeSchemaFuseStripsDeepRefs(t *testing.T) {
 	if !strings.Contains(text, `"minLength":3`) {
 		t.Fatalf("sibling constraint lost at fuse cap: %s", text)
 	}
+	if dropped != 1 {
+		t.Fatalf("items chain: dropped = %d, want 1", dropped)
+	}
 
 	// const 字面量里的 "$ref" 是业务数据不是引用：正常深度不剥，
 	// 保险丝截断处同样不剥。
+	dropped = 0
 	literal, err := normalizeSchema(mustJSON(t, map[string]any{
 		"type":  "object",
 		"const": map[string]any{"$ref": "#/$defs/x"},
-	}))
+	}), &dropped)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(literal), "$ref") {
 		t.Fatalf("const literal $ref was stripped: %s", literal)
+	}
+	if dropped != 0 {
+		t.Fatalf("const literal: dropped = %d, want 0", dropped)
+	}
+}
+
+// TestConvertToolDefinitionCountsDroppedRefsAcrossCache 的测试动机是
+// repairs 记账不能被缓存吃掉：同一 schema 首见（miss）与后续命中
+// （hit）发生同样的 $ref 剥除，两次都必须计入 SchemaRefDropped——
+// 缓存条目存剥除数正是为了命中时记账不失真。
+func TestConvertToolDefinitionCountsDroppedRefsAcrossCache(t *testing.T) {
+	tool := llm.ToolDefinition{
+		Name: "circular_ref_probe",
+		InputSchema: json.RawMessage(`{
+			"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}},
+			"$ref":"#/$defs/a"
+		}`),
+	}
+	var first, second llm.RequestRepairs
+	if _, err := convertToolDefinition(tool, &first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := convertToolDefinition(tool, &second); err != nil {
+		t.Fatal(err)
+	}
+	// a↔b 循环：b 的 $ref→a 撞上 resolving 集合剥掉，恰好一次。
+	if first.SchemaRefDropped != 1 {
+		t.Fatalf("first (cache miss) SchemaRefDropped = %d, want 1", first.SchemaRefDropped)
+	}
+	if second.SchemaRefDropped != first.SchemaRefDropped {
+		t.Fatalf("second (cache hit) SchemaRefDropped = %d, want replayed %d", second.SchemaRefDropped, first.SchemaRefDropped)
 	}
 }
 
@@ -437,7 +481,7 @@ func TestConvertToolDefinitionSynthesizesAnyOfOnRealFixture(t *testing.T) {
 	}
 	sawScheduleWakeup := false
 	for _, item := range fixture.Tools {
-		converted, err := convertToolDefinition(llm.ToolDefinition{Name: item.Name, InputSchema: item.InputSchema})
+		converted, err := convertToolDefinition(llm.ToolDefinition{Name: item.Name, InputSchema: item.InputSchema}, &llm.RequestRepairs{})
 		if err != nil {
 			t.Fatalf("%s: %v", item.Name, err)
 		}

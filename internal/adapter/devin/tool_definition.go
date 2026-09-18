@@ -542,11 +542,19 @@ func escapeXMLText(value string) string {
 // toolDefinitionCache 以 (name, schema) 缓存 convertToolDefinition 的产物：
 // 同一客户端的工具集逐请求原样重发，strip+normalize 双程是纯重复劳动。
 // 命中返回同一 proto 指针——调用方只 marshal 不修改，共享安全。
+// droppedRefs 随条目缓存该 schema 归一化时剥掉的本地 $ref 数，命中时
+// 照样计入本请求 repairs——缓存命中不等于没有发生过语义漂移。
 // 条目数超上限时整体清空重建，避免无界增长。
 var toolDefinitionCache = struct {
 	sync.Mutex
-	items map[string]*devinproto.ExaChatPb_ChatToolDefinition
-}{items: make(map[string]*devinproto.ExaChatPb_ChatToolDefinition)}
+	items map[string]cachedToolDefinition
+}{items: make(map[string]cachedToolDefinition)}
+
+// cachedToolDefinition 是缓存条目：wire 产物加投影副作用计数。
+type cachedToolDefinition struct {
+	definition  *devinproto.ExaChatPb_ChatToolDefinition
+	droppedRefs int
+}
 
 // convertToolDefinition 保留工具身份和 JSON Schema 约束，仅移除自然语言注释。
 // 工具名的字符集校验在 llm.ToolDefinition.Validate 入口完成（上游实测只
@@ -566,26 +574,29 @@ var toolDefinitionCache = struct {
 // 字段喂养的是同一条上游工具认知通道；把真描述转投 system prompt 是在
 // 保留语义信息的同时避开该通道的指纹/分类面。属指纹对抗遗留决策：上游
 // 从未被实证拒绝真描述，若要恢复真描述应先跑探针验证再改这里。
-func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
+func convertToolDefinition(tool llm.ToolDefinition, repairs *llm.RequestRepairs) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
 	// 缓存键覆盖全部影响 wire 形态的字段：透传位不同的同名同 schema
 	// 工具不能共享条目。
 	cacheKey := tool.Name + "\x00" + string(tool.InputSchema) + "\x00" +
 		strconv.FormatBool(tool.Strict) + "\x00" + strconv.FormatBool(tool.ReadOnlyHint) + "\x00" +
 		tool.ServerName + "\x00" + strings.Join(tool.AttributionFieldNames, "\x01")
 	toolDefinitionCache.Lock()
-	cached := toolDefinitionCache.items[cacheKey]
+	cached, hit := toolDefinitionCache.items[cacheKey]
 	toolDefinitionCache.Unlock()
-	if cached != nil {
-		return cached, nil
+	if hit {
+		repairs.SchemaRefDropped += cached.droppedRefs
+		return cached.definition, nil
 	}
 	schema, err := stripSchemaAnnotations(tool.InputSchema)
 	if err != nil {
 		return nil, fmt.Errorf("sanitize Devin tool %q schema: %w", tool.Name, err)
 	}
-	schema, err = normalizeSchema(schema)
+	droppedRefs := 0
+	schema, err = normalizeSchema(schema, &droppedRefs)
 	if err != nil {
 		return nil, fmt.Errorf("normalize Devin tool %q schema: %w", tool.Name, err)
 	}
+	repairs.SchemaRefDropped += droppedRefs
 	// prose 统一 unless 子句命中时合成 anyOf 条件必填：strip 已把字段描述
 	// 剥掉，检测必须跑在原始 schema 上，合成产物写进剥离后的 wire schema。
 	if condField, marked, ok := conditionalRequiredSpec(tool.InputSchema); ok {
@@ -615,7 +626,7 @@ func convertToolDefinition(tool llm.ToolDefinition) (*devinproto.ExaChatPb_ChatT
 	if len(toolDefinitionCache.items) >= 512 {
 		clear(toolDefinitionCache.items)
 	}
-	toolDefinitionCache.items[cacheKey] = converted
+	toolDefinitionCache.items[cacheKey] = cachedToolDefinition{definition: converted, droppedRefs: droppedRefs}
 	toolDefinitionCache.Unlock()
 	return converted, nil
 }
@@ -690,12 +701,14 @@ func isNaturalLanguageAnnotation(key string) bool {
 //
 // 循环或解不开的引用丢掉 $ref 键、保留同层其余约束（等价 any），比整请求
 // 打回上游拿模糊 invalid_argument 更可排障。其余形态上游全容忍，不做改写。
-func normalizeSchema(schema json.RawMessage) (json.RawMessage, error) {
+// dropped 累计本次剥掉的 $ref 键数（含深度保险丝截断剥除），随缓存条目
+// 存进 toolDefinitionCache 供 repairs 对账。
+func normalizeSchema(schema json.RawMessage, dropped *int) (json.RawMessage, error) {
 	var value any
 	if err := json.Unmarshal(schema, &value); err != nil {
 		return nil, err
 	}
-	normalized := normalizeSchemaValue(value, value, map[string]bool{}, 0)
+	normalized := normalizeSchemaValue(value, value, map[string]bool{}, 0, dropped)
 	if object, ok := normalized.(map[string]any); ok {
 		delete(object, "$defs")
 		delete(object, "definitions")
@@ -712,26 +725,26 @@ const maxSchemaRefDepth = 32
 
 // normalizeSchemaValue 递归展开 $ref 并归一 schema 结构：root 是
 // 解析引用用的根文档，resolving 检测循环引用，depth 封顶防止病态
-// 嵌套无限膨胀。
-func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth int) any {
+// 嵌套无限膨胀。dropped 累计全部剥除的本地 $ref 键数。
+func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth int, dropped *int) any {
 	if depth > maxSchemaRefDepth {
 		// 保险丝截断的子树原样放行会把残留 $ref 带上 wire——截断痕迹
 		// 重新引入本保险丝要防的上游 invalid_argument（兄弟合并还会把
 		// 截断目标的 $ref 反向注回父层）。与解不开/循环引用同语义剥键。
-		stripLocalSchemaRefs(value)
+		stripLocalSchemaRefs(value, dropped)
 		return value
 	}
 	switch typed := value.(type) {
 	case []any:
 		for index, item := range typed {
-			typed[index] = normalizeSchemaValue(item, root, resolving, depth+1)
+			typed[index] = normalizeSchemaValue(item, root, resolving, depth+1, dropped)
 		}
 		return typed
 	case map[string]any:
 		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(ref, "#") {
 			if target, found := resolveLocalRef(root, ref); found && !resolving[ref] {
 				resolving[ref] = true
-				resolved := normalizeSchemaValue(target, root, resolving, depth+1)
+				resolved := normalizeSchemaValue(target, root, resolving, depth+1, dropped)
 				delete(resolving, ref)
 				delete(typed, "$ref")
 				// $ref 与兄弟键并存时合并：兄弟键覆盖被引用方的同名字段。
@@ -743,8 +756,10 @@ func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth 
 					}
 				}
 			} else {
-				// 外部 URL、解不开的路径或循环引用：丢 $ref 保其余键。
+				// 本地引用解不开或构成循环：丢 $ref 保其余键。非 "#" 前缀
+				// 的 $ref 被上面守卫挡在分支外，原样透传上 wire。
 				delete(typed, "$ref")
+				*dropped++
 			}
 		}
 		for key, child := range typed {
@@ -752,7 +767,7 @@ func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth 
 			if isSchemaLiteral(key) {
 				continue
 			}
-			typed[key] = normalizeSchemaValue(child, root, resolving, depth+1)
+			typed[key] = normalizeSchemaValue(child, root, resolving, depth+1, dropped)
 		}
 		return typed
 	default:
@@ -761,25 +776,26 @@ func normalizeSchemaValue(value any, root any, resolving map[string]bool, depth 
 }
 
 // stripLocalSchemaRefs 剥掉子树里全部本地 $ref（"#/…"）键：深度保险丝
-// 截断后不再递归展开，残留 ref 是截断痕迹而非客户端语义。isSchemaLiteral
-// 业务字面量（const/enum/default 等）不剥——同名键在字面量里是数据；
-// 非本地 $ref（外部 URL）与正常深度同口径透传。遍历成本以截断子树
-// 自身大小为界，不做引用展开，无膨胀风险。
-func stripLocalSchemaRefs(value any) {
+// 截断后不再递归展开，残留 ref 是截断痕迹而非客户端语义。dropped 累计
+// 剥除数。isSchemaLiteral 业务字面量（const/enum/default 等）不剥——
+// 同名键在字面量里是数据；非本地 $ref（外部 URL）与正常深度同口径透传。
+// 遍历成本以截断子树自身大小为界，不做引用展开，无膨胀风险。
+func stripLocalSchemaRefs(value any, dropped *int) {
 	switch typed := value.(type) {
 	case map[string]any:
 		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(ref, "#") {
 			delete(typed, "$ref")
+			*dropped++
 		}
 		for key, child := range typed {
 			if isSchemaLiteral(key) {
 				continue
 			}
-			stripLocalSchemaRefs(child)
+			stripLocalSchemaRefs(child, dropped)
 		}
 	case []any:
 		for _, item := range typed {
-			stripLocalSchemaRefs(item)
+			stripLocalSchemaRefs(item, dropped)
 		}
 	}
 }

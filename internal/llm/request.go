@@ -109,13 +109,17 @@ type RequestRepairs struct {
 	DroppedDuplicateTools int `json:"dropped_duplicate_tools,omitempty"`
 	// SanitizeHits 是上游内容策略指纹改写按规则 id 的命中计数。
 	SanitizeHits map[string]int `json:"sanitize_hits,omitempty"`
+	// SchemaRefDropped 是工具 schema 归一化剥掉的本地 $ref 键数
+	// （解不开/循环引用与深度保险丝截断——上游对 $ref 确定性拒绝，
+	// 剥键保兄弟约束是语义漂移，必须可对账）。
+	SchemaRefDropped int `json:"schema_ref_dropped,omitempty"`
 }
 
 // Total 返回全部修复动作的合计次数，供日志索引汇总成单字段。
 func (repairs RequestRepairs) Total() int {
 	total := repairs.ReorderedPrompts +
 		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages +
-		repairs.DroppedDuplicateTools
+		repairs.DroppedDuplicateTools + repairs.SchemaRefDropped
 	for _, hits := range repairs.SanitizeHits {
 		total += hits
 	}

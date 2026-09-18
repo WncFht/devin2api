@@ -164,7 +164,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	result.ChatMessagePrompts, repairs.ReorderedPrompts = pairToolCallsWithResults(result.ChatMessagePrompts)
 	if !noTools {
 		for _, tool := range request.Tools {
-			converted, err := convertToolDefinition(tool)
+			converted, err := convertToolDefinition(tool, &repairs)
 			if err != nil {
 				return nil, repairs, err
 			}

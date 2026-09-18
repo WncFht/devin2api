@@ -70,7 +70,7 @@ func BenchmarkConvertTool(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := convertToolDefinition(tool); err != nil {
+		if _, err := convertToolDefinition(tool, &llm.RequestRepairs{}); err != nil {
 			b.Fatal(err)
 		}
 	}
