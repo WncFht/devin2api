@@ -1150,6 +1150,8 @@
         },
         legend: {
           data: series.map(s => s.name),
+          // 回灌图例开关状态；多余的键（其他视图/旧语言名）无害
+          selected: loadLegendState(),
           top: 10,
           left: 16,
           right: 48, // 右上角留给导出按钮
@@ -1286,6 +1288,7 @@
       window._trendChartPainted = true;
       window._trendSeriesDefs = series; // 点击钻取时回查 drillModel
       bindTrendDrill(window.chartInstance);
+      bindTrendLegendState(window.chartInstance);
     }
 
     function applyTrendChartType(series, chartType) {
@@ -1801,6 +1804,37 @@
           window.visibleModels = new Set(visibleArray);
         }
       } catch (_) {}
+    }
+
+    // 图例开关状态持久化：ECharts legend 点击只在实例内生效，而 setOption
+    // (notMerge) 每次重绘都把 selected 重置——自动刷新/切图/刷新页面都会把
+    // 点掉的线弹回来。这里把 selected map 落 localStorage，渲染时回灌。
+    const TREND_LEGEND_KEY = 'trend.legendSelected';
+
+    function loadLegendState() {
+      try {
+        const saved = localStorage.getItem(TREND_LEGEND_KEY);
+        return saved ? JSON.parse(saved) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function persistLegendState(selected) {
+      try {
+        // legendselectchanged 只携带当前视图内的序列名，必须合并而非覆盖——
+        // 否则在 tokens 视图点一次图例会丢掉 count 视图藏的 "X 成功/失败"
+        const merged = { ...(loadLegendState() || {}), ...selected };
+        localStorage.setItem(TREND_LEGEND_KEY, JSON.stringify(merged));
+      } catch (_) {}
+    }
+
+    function bindTrendLegendState(chart) {
+      if (chart._trendLegendBound) return;
+      chart._trendLegendBound = true;
+      chart.on('legendselectchanged', (params) => {
+        persistLegendState(params.selected || {});
+      });
     }
 
     // 自动刷新：工具栏 select 控制间隔（关闭/10s/30s/1min/5min），默认 60s，
