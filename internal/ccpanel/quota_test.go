@@ -82,6 +82,95 @@ func TestForecastTooFewPoints(t *testing.T) {
 	}
 }
 
+// TestQuotaReportStaleSeries 验证冻结序列不再喂 forecast：尾点龄期
+// 超过 max(3×采样周期, 1h) 的序列（移出号池的号、历史空串→default
+// 遗留桶）打 stale 标记、daily/weekly 落空但曲线保留；同报告内的
+// 活跃序列不受影响，顶层镜像跟随最新鲜的活跃序列。
+func TestQuotaReportStaleSeries(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	h := &Handler{store: st}
+	h.quotaInterval = 5 * time.Minute // bound = max(15min, 1h) = 1h
+	ctx := context.Background()
+	now := time.Now().Unix()
+	// 僵尸桶：尾点停在两天前（无 account 的历史行在报告侧折叠进
+	// default——与线上 1,483 行 ''+'default' 遗留同形态）。
+	for i, rem := range []float64{95, 93, 91} {
+		point := &store.QuotaSample{At: now - 2*86400 + int64(i*300), DailyRemaining: f64(rem), DailyResetAt: now - 86400}
+		if err := st.InsertQuotaSample(ctx, point); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 活跃 lane：尾点就是现在。
+	for i, rem := range []float64{80, 70, 60} {
+		point := &store.QuotaSample{At: now - int64(2-i)*3600, Account: "randall", DailyRemaining: f64(rem), DailyResetAt: now + 100000}
+		if err := st.InsertQuotaSample(ctx, point); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report := h.QuotaReport(ctx)
+	accounts, ok := report["accounts"].(map[string]any)
+	if !ok {
+		t.Fatalf("accounts = %T", report["accounts"])
+	}
+	zombie, ok := accounts["default"].(map[string]any)
+	if !ok {
+		t.Fatalf("default report = %T", accounts["default"])
+	}
+	if zombie["stale"] != true {
+		t.Fatalf("stale = %v, want true", zombie["stale"])
+	}
+	if zombie["daily"] != nil || zombie["weekly"] != nil {
+		t.Fatalf("stale series forecast = %v/%v, want nil", zombie["daily"], zombie["weekly"])
+	}
+	if pts, ok := zombie["points"].([]*store.QuotaSample); !ok || len(pts) != 3 {
+		t.Fatalf("points = %v, want 3 samples kept", zombie["points"])
+	}
+	live, ok := accounts["randall"].(map[string]any)
+	if !ok {
+		t.Fatalf("randall report = %T", accounts["randall"])
+	}
+	if live["stale"] != false {
+		t.Fatalf("stale = %v, want false", live["stale"])
+	}
+	if live["daily"] == nil {
+		t.Fatal("live series lost its daily forecast")
+	}
+	// 顶层镜像跟随最新鲜序列（randall），冻结桶不污染镜像。
+	if report["daily"] == nil {
+		t.Fatal("mirror daily = nil, want live series forecast")
+	}
+}
+
+// TestQuotaSeriesStaleBound 验证冻结判定的 bound 形态：采样周期未设
+// （<=0，停采态）时按一小时下限；周期拉大后 bound 随 3×周期放大。
+func TestQuotaSeriesStaleBound(t *testing.T) {
+	h := &Handler{}
+	now := time.Now().Unix()
+	aged := func(ageSeconds int64) []*store.QuotaSample {
+		return []*store.QuotaSample{
+			{At: now - ageSeconds - 300},
+			{At: now - ageSeconds},
+		}
+	}
+	if got := h.quotaSeriesReport("x", aged(50*60)); got["stale"] != false {
+		t.Fatalf("50min-old tail stale = %v, want false", got["stale"])
+	}
+	if got := h.quotaSeriesReport("x", aged(70*60)); got["stale"] != true {
+		t.Fatalf("70min-old tail stale = %v, want true", got["stale"])
+	}
+	h.quotaInterval = 2 * time.Hour // bound = max(6h, 1h) = 6h
+	if got := h.quotaSeriesReport("x", aged(5*3600)); got["stale"] != false {
+		t.Fatalf("5h-old tail stale = %v, want false (scaled bound)", got["stale"])
+	}
+	if got := h.quotaSeriesReport("x", aged(7*3600)); got["stale"] != true {
+		t.Fatalf("7h-old tail stale = %v, want true (scaled bound)", got["stale"])
+	}
+}
+
 // TestQuotaStoreRoundTrip 验证采样入库与历史读取的往返，含
 // 「上游没报」字段的 NULL↔nil 保持。
 func TestQuotaStoreRoundTrip(t *testing.T) {

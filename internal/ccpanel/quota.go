@@ -324,7 +324,8 @@ func forecast(points []*store.QuotaSample, lookback time.Duration, pick func(*st
 }
 
 // QuotaReport 返回配额历史曲线与按最近窗口燃烧速率外推的预测。
-// 号池下每号配额独立：accounts 组按名给各自的曲线与预测，顶层
+// 号池下每号配额独立：accounts 组按名给各自的曲线与预测（冻结序列
+// 只留曲线与 stale 标记，见 quotaSeriesReport），顶层
 // points/daily/weekly 镜像尾点 At 最大（最新鲜）的那条序列作后
 // 兼容视图——单号部署时与升级前输出逐字段一致（历史无 account
 // 字段的行归入 "default" 桶，与隐式单 lane 同名自然合流）。
@@ -367,15 +368,34 @@ func (h *Handler) QuotaReport(ctx context.Context) map[string]any {
 	return out
 }
 
+// quotaSeriesStaleFloor 是冻结序列判定的龄期下限：尾点距今超过
+// max(3×采样周期, quotaSeriesStaleFloor) 的序列视为冻结。
+const quotaSeriesStaleFloor = time.Hour
+
 // quotaSeriesReport 用一条样本序列构建单号报告：points 曲线 + 日/周
 // forecast，并并入该号的身份快照（采样顺带取回；只对确有记录的 lane
 // 投影，重启后首个采样点落盘前的缺席交给前端渲染成未知）。单号视图
 // （accounts 写端点回包）也走它，免去为一条序列扫全表。
+// 冻结序列（尾点过旧：lane 被移出号池、采样停摆、历史空串行归入
+// default 的遗留桶）不喂 forecast——它的外推锚在死尾点上，耗尽
+// 时刻会落进过去；只留曲线并打 stale 标记，消费方据此判读。bound
+// 随采样周期缩放、下限一小时：进程重启或短暂停采造成的缺口不误判，
+// 单号部署下持续写入的 account 空串（→default）活跃序列不受影响。
 func (h *Handler) quotaSeriesReport(name string, series []*store.QuotaSample) map[string]any {
+	staleAfter := quotaSeriesStaleFloor
+	if scaled := 3 * h.QuotaInterval(); scaled > staleAfter {
+		staleAfter = scaled
+	}
+	stale := time.Now().Unix()-series[len(series)-1].At > int64(staleAfter.Seconds())
 	report := map[string]any{
 		"points": series,
-		"daily":  forecast(series, 24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.DailyRemaining) }, func(p *store.QuotaSample) int64 { return p.DailyResetAt }),
-		"weekly": forecast(series, 7*24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.WeeklyRemaining) }, func(p *store.QuotaSample) int64 { return p.WeeklyResetAt }),
+		"stale":  stale,
+		"daily":  nil,
+		"weekly": nil,
+	}
+	if !stale {
+		report["daily"] = forecast(series, 24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.DailyRemaining) }, func(p *store.QuotaSample) int64 { return p.DailyResetAt })
+		report["weekly"] = forecast(series, 7*24*time.Hour, func(p *store.QuotaSample) float64 { return remainingOrNaN(p.WeeklyRemaining) }, func(p *store.QuotaSample) int64 { return p.WeeklyResetAt })
 	}
 	h.quotaUserMu.Lock()
 	if u, ok := h.quotaUsers[name]; ok {
