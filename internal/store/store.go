@@ -30,8 +30,8 @@ type Store struct {
 	ro *sql.DB
 
 	path string
-	// debugBytes 是 debug_files.content 与 debug_chunks.data 库存字节
-	// 合计的内存镜像（DebugDirSizes 总量同口径）：Open 时聚合播种，
+	// debugBytes 是 debug payload 四张表库存字节合计的内存镜像
+	// （DebugDirSizes + DebugBlobBytes 总量同口径）：Open 时聚合播种，
 	// 各写/删方法在事务提交后按真实落库字节增减；cleaner 的容量闸读它
 	// 免每轮全表聚合，周期对账兜底漏记账路径。
 	debugBytes atomic.Int64
@@ -76,11 +76,14 @@ func Open(path string) (*Store, error) {
 	}
 	// payload 计数器以权威聚合播种：此后全部写/删路径在各自事务提交
 	// 时增减它，读侧 O(1)。一次性启动全扫替代周期全扫（原 DBBytes
-	// 闸门被 WAL 撑真后每 5min 白跑一轮 GB 级聚合）。
+	// 闸门被 WAL 撑真后每 5min 白跑一轮 GB 级聚合）。四项加数与
+	// DebugDirSizes + DebugBlobBytes 的合计口径逐项对应。
 	var debugBytes int64
 	if err := db.QueryRow(`SELECT
 		(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_files) +
-		(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks)`).Scan(&debugBytes); err != nil {
+		(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks) +
+		(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_blobs) +
+		(SELECT COALESCE(SUM(LENGTH(dir)+LENGTH(name)+LENGTH(hash)),0) FROM debug_chunk_refs)`).Scan(&debugBytes); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("seed debug payload bytes: %w", err)
 	}
@@ -159,6 +162,11 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 		}
 	}
 	if _, err := s.PruneQuotaSamples(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	// CAS 的 mark-sweep 放养护而不放淘汰路径：对象是表不是目录，
+	// 且必须先于 vacuum 跑，孤儿页才能进 freelist 被当轮回收。
+	if err := s.ReapOrphanBlobs(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	if err := s.IncrementalVacuum(ctx); err != nil {

@@ -117,6 +117,28 @@ var schemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_debug_files_name ON debug_files(name)`,
 	`CREATE INDEX IF NOT EXISTS idx_debug_chunks_name ON debug_chunks(name)`,
 
+	// CAS 共享层（cas.go）：debug_blobs 装跨目录共享的内容切块
+	// （hash=明文 sha256 截 16B，content 是 EncodePayload 编码的块
+	// 明文，created_at 供 reaper 的插入宽限）；debug_chunk_refs 记
+	// 「哪个文件行引用了哪些 blob」——引用即行，随删除漏斗与文件行
+	// 同一 WHERE 同生死，是 mark-sweep GC 的事实源。ref 不记序号：
+	// 块序由 manifest 位置表承载，refs 只回答「是否被引用」。
+	`CREATE TABLE IF NOT EXISTS debug_blobs (
+		hash BLOB NOT NULL PRIMARY KEY,
+		content BLOB NOT NULL,
+		usize INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL DEFAULT 0
+	)`,
+	`CREATE TABLE IF NOT EXISTS debug_chunk_refs (
+		dir TEXT NOT NULL,
+		name TEXT NOT NULL,
+		hash BLOB NOT NULL,
+		PRIMARY KEY (dir, name, hash)
+	)`,
+	// hash 反查索引：reaper 的 NOT EXISTS 反连接与「哪些文件引用
+	// 此 blob」的归因查询走它；PK 最左是 dir，hash 谓词借不上。
+	`CREATE INDEX IF NOT EXISTS idx_debug_chunk_refs_hash ON debug_chunk_refs(hash)`,
+
 	// auth_tokens：列镜像 authtoken.Token 持久字段；inflight/
 	// rpmBucket/rpmCount 是瞬态字段不进库。token 存 sha256 全 hex，
 	// 明文不落库。

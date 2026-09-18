@@ -126,7 +126,18 @@ var schemaMigrations = []migration{
 			return nil
 		},
 	},
+	{
+		// debug_blobs/debug_chunk_refs 是 CAS 新表：幂等建表路径
+		// （schema.go）覆盖新库与存量库，登记版本让演进史如实反映
+		//（同 0005_gate_windows 先例）。存量 01 行不回填——旧行保持
+		// 原编码可读，随保留期自然淘汰，不回写历史。
+		version: "0009_debug_cas_tables",
+		apply: func(_ *sql.Tx) error {
+			return nil
+		},
+	},
 }
+
 // addColumnIfAbsent 在目标列缺席时执行 ALTER。新库的 CREATE 可能已
 // 带入该列（列定义以 schema.go 为准时），而中途建出的库也可能带列
 // 却无迁移登记——只在缺席时补列，两种来源都不撞 duplicate column。

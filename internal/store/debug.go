@@ -133,14 +133,18 @@ type DebugFileRow struct {
 }
 
 // DebugBatch 是一次跨目录合并事务的全部内容：整文件行、chunk 行、
-// StripDirs 列出「剥 payload」的目录（errors_only 收尾——除 meta.json/
-// error.json 锚点外行全删：meta 留下作目录锚点，X-Request-Id 仍可解析、
-// 占位防同秒目录名复用撞 logs.dir UNIQUE）、LogRows 是完成请求的
-// logs 摘要行。四类写入同一事务提交：完成请求不再为 payload 冲刷、
-// 剥离与日志行各付一次 commit。
+// CAS 共享对象（Blobs/Refs——manifest 文件行引用的切块与其 ref 行，
+// 与文件行同事务落库无孤儿窗口）、StripDirs 列出「剥 payload」的
+// 目录（errors_only 收尾——除 meta.json/error.json 锚点外行全删：
+// meta 留下作目录锚点，X-Request-Id 仍可解析、占位防同秒目录名复用
+// 撞 logs.dir UNIQUE）、LogRows 是完成请求的 logs 摘要行。几类写入
+// 同一事务提交：完成请求不再为 payload 冲刷、剥离与日志行各付一次
+// commit。
 type DebugBatch struct {
 	Files     []DebugFileRow
 	Chunks    []DebugChunkRow
+	Blobs     []DebugBlobRow
+	Refs      []DebugRefRow
 	StripDirs []string
 	LogRows   []*LogRow
 	// Encoder 非空时 chunk 的 gzip 编码用它（调用方持有的复用编码器，
@@ -155,7 +159,7 @@ type DebugBatch struct {
 // 暂存的 payload 行一并清除，meta/error 锚点不在删除谓词内。任一失败
 // 整体回滚。
 func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
-	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
+	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.Blobs) == 0 && len(batch.Refs) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
 		return nil
 	}
 	// chunk 的 gzip 编码在事务外完成：EncodePayload 是纯 CPU 工作，留在
@@ -213,6 +217,35 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 		}
 		delta += int64(len(storedChunks[i]))
 	}
+	// CAS 共享对象与引用它们的文件行同事务：OR IGNORE 让跨目录/跨批
+	// 重复的块自然去重，记账只随真实插入走——manifest+refs+blob 要么
+	// 整体落库要么整体回滚，结构上无孤儿窗口。
+	for _, b := range batch.Blobs {
+		res, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO debug_blobs(hash, content, usize, created_at) VALUES(?,?,?,?)`,
+			b.Hash, b.Stored, b.Usize, time.Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n > 0 {
+			delta += int64(len(b.Stored))
+		}
+	}
+	for _, r := range batch.Refs {
+		res, err := tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO debug_chunk_refs(dir, name, hash) VALUES(?,?,?)`,
+			r.Dir, r.Name, r.Hash)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n > 0 {
+			delta += refRowBytes(r.Dir, r.Name)
+		}
+	}
 	if len(batch.StripDirs) > 0 {
 		args := make([]any, 0, len(batch.StripDirs))
 		for _, dir := range batch.StripDirs {
@@ -227,6 +260,14 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 		delta -= freed
 		freed, err = deleteReturningBytes(ctx, tx,
 			`DELETE FROM debug_chunks WHERE `+where+` RETURNING LENGTH(data)`, args...)
+		if err != nil {
+			return err
+		}
+		delta -= freed
+		// 引用随行死：剥离删除文件行的同一 WHERE 原样套到 refs 表
+		// （meta/error 没有 CAS 引用，谓词天然不伤锚点）。
+		freed, err = deleteReturningBytes(ctx, tx,
+			`DELETE FROM debug_chunk_refs WHERE `+where+` RETURNING LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, args...)
 		if err != nil {
 			return err
 		}
@@ -310,7 +351,7 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 			dir, name).Scan(&stored); err != nil {
 			return nil, 0, false, err
 		}
-		if data, err = s.decodeFilePayload(ctx, dir, stored); err != nil {
+		if data, err = s.decodeFilePayload(ctx, dir, stored, limit); err != nil {
 			return nil, 0, false, err
 		}
 		if total = usize; int64(len(data)) > limit {
@@ -359,23 +400,48 @@ func (s *Store) DebugFile(ctx context.Context, dir, name string, maxBytes int64)
 }
 
 // decodeFilePayload 解压一个 debug_files 行的库存字节：gzip/raw 直通
-// decodePayload；zstd 帧是以本目录 01 文件为字典的 delta 编码——先取
-// 01 行解出明文再作 dict 还原。基座行缺失（手动删行/写侧任务被 shed
-// 而未钉座）时返回显式错误：delta 帧没有字典解出来只能是乱码。
-func (s *Store) decodeFilePayload(ctx context.Context, dir string, stored []byte) ([]byte, error) {
+// decodePayload；CAS manifest 走 refs→blobs 重组（limit 只取前缀所需
+// 的块）；zstd 帧是以本目录 01 文件为字典的 delta 编码——先取 01 行
+// 解出明文再作 dict 还原。基座行缺失（手动删行/写侧任务被 shed 而未
+// 钉座）时返回显式错误：delta 帧没有字典解出来只能是乱码。
+func (s *Store) decodeFilePayload(ctx context.Context, dir string, stored []byte, limit int64) ([]byte, error) {
+	if hasCASManifestMagic(stored) {
+		return s.decodeCASManifest(ctx, dir, stored, limit)
+	}
 	if !hasZstdMagic(stored) {
 		return decodePayload(stored)
 	}
+	dict, err := s.decodeFileDict(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	return decodePayloadDelta(stored, dict)
+}
+
+// decodeFileDict 取本目录 01 行的解后明文作 delta 字典：01 自身可能是
+// CAS manifest（二期起的新形态），递归一层经 manifest 重组；gzip/raw
+// 直通。基座行缺失或基座本身是 delta 帧（一期畸形行——delta 当字典是
+// 嵌套错误）都返回显式错误。
+func (s *Store) decodeFileDict(ctx context.Context, dir string) ([]byte, error) {
 	var base []byte
 	if err := s.ro.QueryRowContext(ctx,
 		`SELECT content FROM debug_files WHERE dir=? AND name=?`, dir, deltaBaseFileName).Scan(&base); err != nil {
 		return nil, fmt.Errorf("decode delta payload in %s: fetch base %q: %w", dir, deltaBaseFileName, err)
 	}
-	dict, err := decodePayload(base)
+	var dict []byte
+	var err error
+	switch {
+	case hasCASManifestMagic(base):
+		dict, err = s.decodeCASManifest(ctx, dir, base, math.MaxInt64)
+	case hasZstdMagic(base):
+		err = errDeltaNeedsBase
+	default:
+		dict, err = decodePayload(base)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("decode delta payload in %s: base %q: %w", dir, deltaBaseFileName, err)
 	}
-	return decodePayloadDelta(stored, dict)
+	return dict, nil
 }
 
 // DebugFileNames 返回目录内全部文件名（两表 UNION DISTINCT，按名排序）。
@@ -469,13 +535,17 @@ func (s *Store) DebugDirsByPrefix(ctx context.Context, prefix string) ([]string,
 
 // DebugDirSizes 返回各目录内容字节数合计，供 max_total_mb 容量淘汰。
 // 按库存尺寸计（压缩行的 content/data 是 gzip 帧长）——淘汰的目标是
-// 磁盘占用，usize 的逻辑尺寸在这里不适用。
+// 磁盘占用，usize 的逻辑尺寸在这里不适用。refs 行按 dir 归属计入
+// （ref 随文件行同生死，尺寸口径与删除 RETURNING 表达式同源）；
+// 共享 blob 字节不属于任何目录，全局口径走 DebugBlobBytes。
 func (s *Store) DebugDirSizes(ctx context.Context) (map[string]int64, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT dir, SUM(sz) FROM (
 			SELECT dir, LENGTH(content) AS sz FROM debug_files
 			UNION ALL
 			SELECT dir, LENGTH(data) AS sz FROM debug_chunks
+			UNION ALL
+			SELECT dir, LENGTH(dir)+LENGTH(name)+LENGTH(hash) AS sz FROM debug_chunk_refs
 		) GROUP BY dir`)
 	if err != nil {
 		return nil, err
@@ -587,9 +657,10 @@ func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exa
 	return s.deleteDebugRows(ctx, `dir<? AND (`+strings.Join(names, ` OR `)+`)`, args...)
 }
 
-// deleteDebugRows 对两表执行同一 WHERE 的删除，单事务提交。
+// deleteDebugRows 对三张行表执行同一 WHERE 的删除，单事务提交。
 // RETURNING 顺带汇总被删行的库存字节：payload 计数器的减量以事务内
-// 真实删除为准，比删前预聚合少一遍 WHERE 扫描。
+// 真实删除为准，比删前预聚合少一遍 WHERE 扫描。refs 表与文件行共用
+// WHERE 是 CAS 引用随行的落点——ref 行无独立生命周期。
 func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -597,11 +668,13 @@ func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) 
 	}
 	defer func() { _ = tx.Rollback() }()
 	var freed int64
-	for _, del := range []struct{ table, col string }{
-		{"debug_files", "content"}, {"debug_chunks", "data"},
+	for _, del := range []struct{ table, sizeExpr string }{
+		{"debug_files", "LENGTH(content)"},
+		{"debug_chunks", "LENGTH(data)"},
+		{"debug_chunk_refs", "LENGTH(dir)+LENGTH(name)+LENGTH(hash)"},
 	} {
 		n, err := deleteReturningBytes(ctx, tx,
-			`DELETE FROM `+del.table+` WHERE `+where+` RETURNING LENGTH(`+del.col+`)`, args...)
+			`DELETE FROM `+del.table+` WHERE `+where+` RETURNING `+del.sizeExpr, args...)
 		if err != nil {
 			return err
 		}
@@ -644,4 +717,61 @@ func (s *Store) DebugPayloadBytes() int64 {
 // 读数与权威值之差（正=计数高估，负=低估）——供 cleaner 对账记录漂移。
 func (s *Store) ReconcileDebugPayloadBytes(actual int64) (drift int64) {
 	return s.debugBytes.Swap(actual) - actual
+}
+
+// DebugBlobBytes 返回 CAS 共享 blob 的库存字节合计——全局口径的
+// 另一部分（目录口径见 DebugDirSizes）：blob 被 refs 跨目录共享，
+// 不属于任何单一目录，淘汰闸门与计数器对账按 Σdir+blob 读总账。
+func (s *Store) DebugBlobBytes(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.ro.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_blobs`).Scan(&n)
+	return n, err
+}
+
+// blobReapGrace 是 blob 插入到可被 mark-sweep 收尸的宽限期：blob 与
+// 引用它的 ref 行当前同批事务落库本没有孤儿窗口，宽限是为「先写
+// blob、ref 后继批次再补」的演进留的保险——被误杀代价（manifest
+// 指向失踪 blob）远高于滞后回收代价。
+const blobReapGrace = 10 * time.Minute
+
+// ReapOrphanBlobs 做 CAS 的 mark-sweep 收尸，两个 sweep 同一事务：
+// 先扫悬垂 ref——引用即行的保活前提是「(dir,name) 文件行还是
+// manifest」，文件行已死（回滚期旧二进制删 dir 不知 refs 表的泄漏
+// 路径）或被覆写/剥离成非 manifest（OR IGNORE 重放等）时 ref 已死，
+// 留着只会让 blob 假活。再删过宽限期仍无引用的 blob。写连接单线程
+// 串行化：NOT EXISTS 判定到删除提交之间没有并发写者能插入新引用
+// 撞破它。计数器按真实删除减量。挂在 Maintain 的周期养护里——对象
+// 是表不是目录，节奏与淘汰 tick 同量级即可，共享字节滞后释放。
+func (s *Store) ReapOrphanBlobs(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var freed int64
+	n, err := deleteReturningBytes(ctx, tx,
+		`DELETE FROM debug_chunk_refs WHERE NOT EXISTS (
+			SELECT 1 FROM debug_files
+			WHERE debug_files.dir = debug_chunk_refs.dir AND debug_files.name = debug_chunk_refs.name
+			AND substr(debug_files.content, 1, ?) = ?
+		) RETURNING LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, len(casMagic), casMagic)
+	if err != nil {
+		return err
+	}
+	freed += n
+	grace := time.Now().Add(-blobReapGrace).UnixMilli()
+	n, err = deleteReturningBytes(ctx, tx,
+		`DELETE FROM debug_blobs WHERE created_at < ? AND NOT EXISTS (
+			SELECT 1 FROM debug_chunk_refs WHERE debug_chunk_refs.hash = debug_blobs.hash
+		) RETURNING LENGTH(content)`, grace)
+	if err != nil {
+		return err
+	}
+	freed += n
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.debugBytes.Add(-freed)
+	return nil
 }

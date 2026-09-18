@@ -3,10 +3,11 @@
 // 不需要回填。usize 列记解压前字节数（0=未压缩），清单与截断读的
 // total 口径保持逻辑尺寸，容量淘汰仍按库存尺寸计磁盘占用。
 //
-// 三种库存形态：gzip（独立压缩）、zstd delta 帧（以同目录 01 明文为
+// 四种库存形态：gzip（独立压缩）、zstd delta 帧（以同目录 01 明文为
 // raw dict 的 patch-from 编码——02/03-devin-request* 与 01 是同一请求
-// 的三重投影，字节级冗余让它们只存残差）、raw（小体/压不出收益的）。
-// 读侧对 zstd 帧必须取回字典才能解码，见 DebugFile 的基座取用。
+// 的三重投影，字节级冗余让它们只存残差）、raw（小体/压不出收益的）、
+// CAS manifest（01 的内容寻址指针行，见 cas.go）。读侧对 zstd 帧必须
+// 取回字典才能解码，见 DebugFile 的基座取用。
 package store
 
 import (
@@ -30,10 +31,15 @@ var gzipMagic = []byte{0x1f, 0x8b}
 // 在本库只由 EncodePayloadDelta 产出，帧头嵌 deltaDictID 指向字典。
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
-// deltaDictID 是 delta 帧内嵌的字典 id：编码侧用它注册 raw dict，
-// 解码侧用同 id 注册同一份 01 明文。值任意非零，固定常量免去在
-// 帧外再传字典描述。
-const deltaDictID = 1
+// deltaDictID 是二期写出的 delta 帧内嵌字典 id：编码侧用它注册
+// raw dict。二期起 01 行可能是 CAS manifest——回滚到一期二进制时
+// 旧解码链会把 manifest 字节当字典；帧引用 id=2 而旧解码器只注册
+// id=1，zstd 显式报 dictionary mismatch 而不是吐乱码。
+const deltaDictID = 2
+
+// deltaDictIDLegacy 是一期帧的字典 id：解码侧把同一份 01 明文按两个
+// id 注册，新旧帧都能解。
+const deltaDictIDLegacy = 1
 
 // deltaBaseFileName 是 delta 基座在目录内的文件名：写侧把它的脱敏
 // 后字节当 dict，读侧按它取回字典。与 debuglog.StageHTTPRequest 同一
@@ -155,9 +161,12 @@ func decodePayload(data []byte) ([]byte, error) {
 }
 
 // decodePayloadDelta 用字典解 zstd delta 帧；dict 是同目录 01 的脱敏
-// 后明文（与写侧 EncodePayloadDelta 的 base 逐字节同源）。
+// 后明文（与写侧 EncodePayloadDelta 的 base 逐字节同源）。同一份明文
+// 按新旧两个字典 id 注册：一期帧引用 id=1、二期帧引用 id=2，都能解。
 func decodePayloadDelta(data, dict []byte) ([]byte, error) {
-	zr, err := zstd.NewReader(nil, zstd.WithDecoderDictRaw(deltaDictID, dict))
+	zr, err := zstd.NewReader(nil,
+		zstd.WithDecoderDictRaw(deltaDictID, dict),
+		zstd.WithDecoderDictRaw(deltaDictIDLegacy, dict))
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +180,18 @@ func hasZstdMagic(data []byte) bool {
 	return len(data) >= 4 && bytes.Equal(data[:4], zstdMagic)
 }
 
+// errManifestNeedsStore 是 manifest 走到进程外解码口的显式失败：
+// 重组要查 debug_blobs 表，离线解码器拿不到——端点导出才是正路。
+var errManifestNeedsStore = fmt.Errorf("payload is a CAS manifest: chunks live in debug_blobs, export via /file/{name} endpoint instead")
+
 // DecodePayloadFile 是导出文件（writefile() 直出/端点下载）的魔数
 // 分派解码：gzip 帧解压、raw 透传、zstd delta 帧用 dict 解（dict 取
 // 同目录 01 的解后明文）。供进程外消费方（cmd/probe 等）复用与读
 // 路径同一套判帧口径；delta 帧缺 dict 时返回显式错误。
 func DecodePayloadFile(data, dict []byte) ([]byte, error) {
+	if hasCASManifestMagic(data) {
+		return nil, errManifestNeedsStore
+	}
 	if hasZstdMagic(data) {
 		if len(dict) == 0 {
 			return nil, errDeltaNeedsBase
