@@ -1103,6 +1103,51 @@ func TestPoolSessionBinding(t *testing.T) {
 	}
 }
 
+// 判死 lane 的迟报写绑整段跳过：lane 冷却判死→旧绑已删→兄弟 lane 已
+// 接管会话，此刻死 lane 上判死前发出的在飞开流才返回成功——若照旧写
+// 绑会把会话钉回死 lane（boundLane 删绑再重绑、来回拍翅），兄弟 lane
+// 的同会话保温条目还会被误标 suspect。绑定保持指向 good、保温条目不脏。
+func TestPoolBindSkipsHardDownLane(t *testing.T) {
+	pool := newTestPool(t,
+		testPoolConfig("dead"),
+		Config{Identity: LaneIdentity{Name: "good", Token: "tok-good"}, Endpoint: Endpoint{BaseURL: "http://127.0.0.1:1"}, Model: "m", Warm: WarmConfig{Enabled: true}},
+	)
+	laneDead := poolLaneByName(pool, "dead")
+	laneGood := poolLaneByName(pool, "good")
+
+	// 兄弟 lane 保温表留一条同会话条目作探针：迟报 bind 若执行 suspect
+	// 循环会把它标掉。
+	sessionKey := "sess-flap"
+	warm := laneGood.adapter.warm
+	request := warmTestRequest(sessionKey, "sys", "stale")
+	key := warm.keyOf(request, "m")
+	warm.retain(key, request, "m", "")
+
+	// 兄弟接管后的稳态：会话已绑到 good。
+	affinity := "session-flap"
+	pool.bind(affinity, laneGood, sessionKey)
+
+	// 死 lane 进凭据冷却（hardDown），随后迟到的开流成功回报调 bind。
+	laneDead.noteFailure(unauthenticatedErr())
+	if !laneDead.hardDown() {
+		t.Fatal("dead lane must be hardDown after unauthenticated failure")
+	}
+	pool.bind(affinity, laneDead, sessionKey)
+
+	pool.bindingsMu.Lock()
+	binding, ok := pool.bindings[affinity]
+	pool.bindingsMu.Unlock()
+	if !ok || binding.lane != laneGood {
+		t.Fatalf("straggler bind must not overwrite healthy binding, got %+v", binding)
+	}
+	if !warm.entries[key].suspectAt.IsZero() {
+		t.Fatal("straggler bind must not mark sibling lane's warm entry suspect")
+	}
+	if got := warm.stats().FailoverSuspects; got != 0 {
+		t.Fatalf("FailoverSuspects = %d, want 0", got)
+	}
+}
+
 // 在飞钉选：同亲和键有在飞请求时后继钉同一 lane——正式绑定落地前的
 // 并发窗口不再各自按当时的健康快照散选。钉选 lane 硬故障（池侧冷却）
 // 即失效按普通序重选；绑定命中恒赢于在飞钉选。

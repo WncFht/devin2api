@@ -1080,13 +1080,19 @@ func (pool *Pool) boundLane(affinity string) *poolLane {
 }
 
 // bind 把亲和键绑到 lane：开流成功与换号接管是仅有的两个写点——
-// 绑定记录的是「上次产出内容的 lane」。容量触顶先扫过期再逐最早
-// 到期者；被逐会话下次请求按普通序重选重绑。落点即谱系归属：会话
-// 流量只会再经过本 lane，其余 lane 上同 SessionKey 的保温条目已成
-// 跨 lane 孤儿，顺手标 suspect 让它们走宽限退役而非骑满 maxIdle
-// 白烧 ping（对稳态重绑是无害复读——别 lane 的同会话条目本来就
-// 只能是陈旧孤儿）。
+// 绑定记录的是「上次产出内容的 lane」。lane 已硬故障（两档冷却）
+// 时整段跳过：那是判死前已选中它的在飞开流迟报，写绑会把会话钉回
+// 死 lane，下个请求 boundLane 删绑再重绑、来回拍翅；suspect 标脏
+// 同样免——死 lane 的迟报不该动兄弟 lane 的保温条目，会话下次请求
+// 按普通序重绑。容量触顶先扫过期再逐最早到期者；被逐会话下次请求
+// 按普通序重选重绑。落点即谱系归属：会话流量只会再经过本 lane，
+// 其余 lane 上同 SessionKey 的保温条目已成跨 lane 孤儿，顺手标
+// suspect 让它们走宽限退役而非骑满 maxIdle 白烧 ping（对稳态重绑
+// 是无害复读——别 lane 的同会话条目本来就只能是陈旧孤儿）。
 func (pool *Pool) bind(affinity string, lane *poolLane, sessionKey string) {
+	if lane.hardDown() {
+		return
+	}
 	pool.bindingsMu.Lock()
 	if _, ok := pool.bindings[affinity]; !ok && len(pool.bindings) >= poolBindingCap {
 		now := time.Now()
