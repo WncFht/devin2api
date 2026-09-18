@@ -998,12 +998,13 @@ func TestPoolInflightPinDirectsStream(t *testing.T) {
 	}
 }
 
-// 粘性区：绑定 lane 因 gate 忙（闩中）也居候选首位——「宁等不换」交给
-// gate 仲裁；闩内快败零成本转下一候选。gate 状态不算 hardDown。
-func TestPoolBoundLaneStickyUnderGateLatch(t *testing.T) {
+// 粘性区 + 泄压阀：绑定 lane 闩中（expectedWait=闩剩余 ~60s，兄弟
+// lane 绿）时本轮让位——bound 标记仍记审计但居首特权摘除，最优兄弟
+// 领先。gate 状态不算 hardDown，绑定本身不删。
+func TestPoolBoundLaneYieldsUnderGateLatch(t *testing.T) {
 	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"), testPoolConfig("c"))
 	laneA := poolLaneByName(pool, "a")
-	affinity := "sticky-session"
+	affinity := "yield-session"
 	pool.bind(affinity, laneA)
 
 	// a 的 gate 上闩：healthy() 为假但它仍 non-hardDown。
@@ -1015,16 +1016,69 @@ func TestPoolBoundLaneStickyUnderGateLatch(t *testing.T) {
 		t.Fatal("gate latch must not count as hardDown")
 	}
 	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
-	if ranked[0].lane != laneA || !ranked[0].bound {
-		t.Fatalf("latched bound lane must stay first (sticky zone), got %v", ranked[0].lane.name)
+	if ranked[0].lane == laneA {
+		t.Fatalf("latched bound lane must yield to a healthy sibling, got %v", ranked[0].lane.name)
 	}
-	// 审计行：bound lane 的 Reason 记 bound。
+	boundIdx := slices.IndexFunc(ranked, func(c poolCandidate) bool { return c.bound })
+	if boundIdx < 0 || !ranked[boundIdx].yielded {
+		t.Fatalf("bound candidate must carry yielded mark, ranked=%+v", ranked)
+	}
+	// 审计行：Bound 仍为真，Reason 记降级归因 + bound_yield。
 	rows := poolCandidateRows(ranked)
-	if rows[0].Reason != "bound" || !rows[0].Bound {
-		t.Fatalf("bound candidate row = %+v, want bound", rows[0])
+	row := rows[boundIdx]
+	if !row.Bound || !strings.Contains(row.Reason, "bound_yield") || !strings.Contains(row.Reason, "gate_latched") {
+		t.Fatalf("yielded bound row = %+v, want Bound + gate_latched/bound_yield reason", row)
 	}
-	if rows[0].Healthy {
+	if row.Healthy {
 		t.Fatal("latched lane must report unhealthy in audit row")
+	}
+	// 领先候选必须是健康兄弟。
+	if !ranked[0].verdict.healthy {
+		t.Fatalf("leader %v must be a healthy sibling", ranked[0].lane.name)
+	}
+}
+
+// 让位的 τ 边沿：全 lane 同病（闩剩余相近）时无「最优兄弟」，绑定
+// 维持居首——粘性只在确有更优落点时放开。
+func TestPoolBoundLaneNoYieldWithoutBetterSibling(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	laneB := poolLaneByName(pool, "b")
+	affinity := "all-sick-session"
+	pool.bind(affinity, laneA)
+
+	err := connect.NewError(connect.CodeResourceExhausted, errors.New("reset in 1 minute"))
+	laneA.adapter.gate.noteUpstreamError(err)
+	laneB.adapter.gate.noteUpstreamError(err)
+	if laneA.healthy() || laneB.healthy() {
+		t.Skip("gate latch did not engage; environment-dependent")
+	}
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane != laneA || ranked[0].yielded {
+		t.Fatalf("bound lane must stay first when no sibling is meaningfully better, got %v yielded=%v", ranked[0].lane.name, ranked[0].yielded)
+	}
+}
+
+// 让位第二触发面：bound lane 未闩但前队拥堵（绿档深队）显著慢于
+// 空闲兄弟——非对称饱和下 bound 烧 maxHold 的主场景。
+func TestPoolBoundLaneYieldsOnDeepQueue(t *testing.T) {
+	pool := newTestPool(t, testPoolConfig("a"), testPoolConfig("b"))
+	laneA := poolLaneByName(pool, "a")
+	affinity := "queue-yield-session"
+	pool.bind(affinity, laneA)
+
+	// 给 a 造 fg 深队：quota 80、waitersFg 100 → fg expectedWait ~75s。
+	gate := laneA.adapter.gate
+	gate.mu.Lock()
+	gate.quota = 80
+	gate.waitersFg = 100
+	gate.mu.Unlock()
+	ranked := pool.rankLanes(context.Background(), pool.snapshot(), affinity)
+	if ranked[0].lane == laneA {
+		t.Fatalf("deep-queue bound lane must yield to the idle sibling, got %v", ranked[0].lane.name)
+	}
+	if !ranked[0].verdict.healthy {
+		t.Fatal("idle sibling must lead as healthy")
 	}
 }
 

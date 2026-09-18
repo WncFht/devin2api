@@ -489,7 +489,8 @@ func failoverableEvent(ctx context.Context, failure *llm.Failure) bool {
 }
 
 // poolCandidate 是排序时的一次性评估快照：verdict 是 lane 当时的健康
-// 判定与降级归因，bound 是绑定命中标记，pinned 是在飞钉选命中标记，
+// 判定与降级归因，bound 是绑定命中标记，yielded 是本轮绑定让位标记
+// （bound 保留审计语义，居首特权被摘掉），pinned 是在飞钉选命中标记，
 // score 是 rendezvous 分数，weight 是健康权重（压力×相对 TTFB），
 // key 是加权 HRW 键 u^(1/w)（末位排序键，大者居前——同亲和键下各
 // lane 的选中概率 ∝ w）。
@@ -502,9 +503,13 @@ type poolCandidate struct {
 	weight   float64
 	verdict  laneVerdict
 	bound    bool
+	yielded  bool
 	pinned   bool
 	priority int32
 }
+
+// boundLead 报告候选本轮是否享有绑定居首特权：绑定命中且未让位。
+func (c poolCandidate) boundLead() bool { return c.bound && !c.yielded }
 
 // swapRanked 构造换号接管后的审计快照：接管 lane 居首（bound），其余
 // 候选按剩余序附上当时的降级归因。
@@ -518,9 +523,10 @@ func (s *poolStream) swapRanked(taken *poolLane, class string) []poolCandidate {
 }
 
 // poolCandidateRows 把候选快照投影成审计行：bound lane 的 Reason 记
-// "bound"、pinned lane 记 "inflight"（两者都是粘性区语义，gate 忙也
-// 居首）；其余 lane 的 Reason 是降级归因的有序叠加——取全部适用词
-// 连写而非首个主因，多因并存时（如冷却+闩）完整保留现场。
+// "bound"（让位时改记降级归因 + "bound_yield"，Bound 字段仍为真）、
+// pinned lane 记 "inflight"（两者都是粘性区语义）；其余 lane 的
+// Reason 是降级归因的有序叠加——取全部适用词连写而非首个主因，多因
+// 并存时（如冷却+闩）完整保留现场。
 func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 	rows := make([]debuglog.PoolCandidate, len(ranked))
 	for i, c := range ranked {
@@ -532,22 +538,31 @@ func poolCandidateRows(ranked []poolCandidate) []debuglog.PoolCandidate {
 			Weight:  c.weight,
 			Reason:  strings.Join(c.verdict.reasons, ","),
 		}
-		if c.bound {
+		if c.bound && !c.yielded {
 			rows[i].Reason = "bound"
+		}
+		if c.yielded {
+			rows[i].Reason = strings.Join(append(c.verdict.reasons, "bound_yield"), ",")
 		}
 	}
 	return rows
 }
 
 // rankLanes 给出候选序的完整评估快照，排序键从高到低：
-// bound-hit → 在飞钉选 → 健康档（绿 → 配额低 → 病）→ priority desc →
-// rendezvous 分数升序。三区语义：绑定 lane 恒居首位（gate 闩/桶满不算
-// 硬故障——粘性区「宁等不换」，闩内快败零成本转下一候选、桶满睡到
-// maxHold）；在飞钉选 lane 居次位同区语义（同亲和键有在飞请求时后继
-// 钉同一 lane——正式绑定落地前的并发窗口不再各自散选）；配额低 lane
-// 仍在健康档内但降一级，只影响新会话落点；不健康不剔除只排后：判定
-// 是近似快照，全不健康时仍回分数序，由 lane 闸门自己走 wait/快败
-// （客户端拿 Retry-After，与单号一致）。
+// bound-hit（未让位）→ 在飞钉选 → 健康档（绿 → 配额低 → 病）→
+// priority desc → 加权 HRW 键降序 → rendezvous 分数升序兜底。
+// 三区语义：绑定 lane 默认居首（粘性区「宁等不换」——正式绑定是
+// 「上次产出内容的 lane」的确认记录，留原 lane 继续吃 warm/cache
+// 连续性红利），但期望排队比最优兄弟高出一个 τ 时本轮让位回本档
+// 排序：桶满睡到 maxHold（fg ~15s / bg ~120s）再 failover 是实测
+// 最贵的错配，换边损失只是一次绑定的连续性；闩内 bound 同理让位，
+// 省掉一次必败的过闸评估与幻影 attempt 账。让位不解绑不动 bound
+// 标记：它若按普通序仍最优照旧赢，换边开流成功后 bind 照常把谱系
+// 记到胜者 lane。在飞钉选 lane 居次位同区语义（同亲和键有在飞请求
+// 时后继钉同一 lane——正式绑定落地前的并发窗口不再各自散选）；
+// 配额低 lane 仍在健康档内但降一级，只影响新会话落点；不健康不剔除
+// 只排后：判定是近似快照，全不健康时仍回分数序，由 lane 闸门自己走
+// wait/快败（客户端拿 Retry-After，与单号一致）。
 func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity string) []poolCandidate {
 	bound := pool.boundLane(affinity)
 	// 绑定恒赢于在飞钉选——绑定是「已产出内容的 lane」的确认记录，
@@ -585,9 +600,22 @@ func (pool *Pool) rankLanes(ctx context.Context, lanes []*poolLane, affinity str
 			priority: lane.priority.Load(),
 		})
 	}
+	// 绑定让位判定：bound lane 的期望排队比最优兄弟高出一个 τ 时
+	// 摘掉本轮居首特权。判据只用 expectedWait 一本账——闩剩余、桶满
+	// 到下一窗、前队拥堵都已折算进同一口径；bound 自身等得短（闩将
+	// 尽、队将排空）时维持粘性，让位也不解绑。
+	if bi := slices.IndexFunc(candidates, func(c poolCandidate) bool { return c.bound }); bi >= 0 {
+		bw := candidates[bi].verdict.expectedWait
+		for i, c := range candidates {
+			if i != bi && c.verdict.expectedWait+gatePressureTau < bw {
+				candidates[bi].yielded = true
+				break
+			}
+		}
+	}
 	slices.SortStableFunc(candidates, func(a, b poolCandidate) int {
-		if a.bound != b.bound {
-			if a.bound {
+		if a.boundLead() != b.boundLead() {
+			if a.boundLead() {
 				return -1
 			}
 			return 1
