@@ -544,13 +544,20 @@ func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
 	}
 }
 
-// bg 准入让出预留槽：quota-margin 个槽内 bg 与 fg 同权放行，越过
-// quota-reserve 后 bg 快败（reason=quota、Retry-After 报下一窗口、
-// 记 rejectBgReserve），fg 不受预留约束照常放行到满桶。
+// bg 准入让出预留槽：fg 吃掉配额后 bucketUsed+1 越过 quota-reserve 的
+// bg 快败（reason=quota、Retry-After 报下一窗口、记 rejectBgReserve），
+// fg 不受预留约束照常放行。quota 取 8 让 :30 的爬坡额度（4）盖过本例
+// 要的 2 个 bg 槽，隔离出纯预留阻塞。
 func TestRateGateBgReserveBlocks(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 3, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
-	pinGateClock(gate, 10)
+	gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	pinGateClock(gate, 30)
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	// fg 先占 5 槽：预留 1 → bg 总额度 quota-reserve=7，只剩 2 槽。
+	for i := 0; i < 5; i++ {
+		if err := gate.wait(context.Background()); err != nil {
+			t.Fatalf("fg wait %d error = %v, want pass", i, err)
+		}
+	}
 	for i := 0; i < 2; i++ {
 		if err := gate.wait(bgCtx); err != nil {
 			t.Fatalf("bg wait %d error = %v, want pass (within quota-reserve)", i, err)
@@ -564,9 +571,9 @@ func TestRateGateBgReserveBlocks(t *testing.T) {
 	if gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("GateReason = %q, want quota", gateErr.GateReason)
 	}
-	// :10 预留阻塞 → 下一窗口 :02+60 开放，retryAfter ≈ 52s。
-	if gateErr.RetryAfterSeconds < 50 || gateErr.RetryAfterSeconds > 53 {
-		t.Fatalf("RetryAfterSeconds = %d, want ~52s (next window)", gateErr.RetryAfterSeconds)
+	// :30 预留阻塞 → 下一窗口 :02+60 开放，retryAfter ≈ 32s。
+	if gateErr.RetryAfterSeconds < 30 || gateErr.RetryAfterSeconds > 34 {
+		t.Fatalf("RetryAfterSeconds = %d, want ~32s (next window)", gateErr.RetryAfterSeconds)
 	}
 	// fg 仍放行到满桶：预留只对 bg 生效。
 	if err := gate.wait(context.Background()); err != nil {
@@ -576,11 +583,53 @@ func TestRateGateBgReserveBlocks(t *testing.T) {
 	if stats.RejectBgReserve != 1 {
 		t.Fatalf("RejectBgReserve = %d, want 1", stats.RejectBgReserve)
 	}
-	if stats.WindowUsed != 3 || stats.WindowUsedFg != 1 || stats.WindowUsedBg != 2 {
-		t.Fatalf("window used = %d (fg %d, bg %d), want 3 (1, 2)", stats.WindowUsed, stats.WindowUsedFg, stats.WindowUsedBg)
+	if stats.WindowUsed != 8 || stats.WindowUsedFg != 6 || stats.WindowUsedBg != 2 {
+		t.Fatalf("window used = %d (fg %d, bg %d), want 8 (6, 2)", stats.WindowUsed, stats.WindowUsedFg, stats.WindowUsedBg)
 	}
 	if stats.Reserve != 1 {
 		t.Fatalf("Reserve = %d, want 1 (margin only, no EMA/waiters)", stats.Reserve)
+	}
+}
+
+// bg 爬坡：放行额度按可发区间经过时间线性释放——窗口前段 bg 只能吃
+// 到斜坡放出的几条槽（fg 看到的桶是半空的），额度随经过时间增长，
+// 窗口末尾恰好收敛到 quota-reserve，总吞吐不变。
+func TestRateGateBgRampPaces(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 8, BgReserveMargin: 1, BgMaxHold: 2 * time.Second}, nil, "")
+	clock := pinGateClock(gate, 10)
+	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
+	// :10 经过 8s：额度 ceil(7*8/56)=1——第二个 bg 被爬坡挡住快败。
+	if err := gate.wait(bgCtx); err != nil {
+		t.Fatalf("bg wait error = %v, want pass (first ramp slot)", err)
+	}
+	var gateErr *llm.Failure
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bg wait at :10 error = %v, want *llm.Failure reason=quota (ramp blocked)", err)
+	}
+	// :40 经过 38s：额度 ceil(7*38/56)=5——再补 4 条到 usedBg=5。
+	clock.t = clock.t.Add(30 * time.Second)
+	for i := 0; i < 4; i++ {
+		if err := gate.wait(bgCtx); err != nil {
+			t.Fatalf("bg wait %d at :40 error = %v, want pass", i, err)
+		}
+	}
+	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("bg wait at :40 error = %v, want *llm.Failure reason=quota (ramp blocked)", err)
+	}
+	// :57 经过 55s：额度 ceil(7*55/56)=7=quota-reserve——爬坡收敛，
+	// bg 吃满预留让出的全部槽。
+	clock.t = clock.t.Add(17 * time.Second)
+	for i := 0; i < 2; i++ {
+		if err := gate.wait(bgCtx); err != nil {
+			t.Fatalf("bg wait %d at :57 error = %v, want pass (ramp converged)", i, err)
+		}
+	}
+	stats := gate.stats()
+	if stats.WindowUsedBg != 7 || stats.WindowUsed != 7 {
+		t.Fatalf("window used = %d (bg %d), want 7 (7)", stats.WindowUsed, stats.WindowUsedBg)
+	}
+	if stats.PaceAllowance != 7 {
+		t.Fatalf("PaceAllowance = %d, want 7 (quota-reserve at window tail)", stats.PaceAllowance)
 	}
 }
 

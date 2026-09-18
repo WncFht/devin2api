@@ -19,8 +19,9 @@ import (
 const (
 	// gateDefaultMaxHold 是闸门内允许的最长排队等待：预计睡到下一窗口
 	// 超过它时请求在本地快速失败并带 Retry-After——客户端/下游网关
-	// 按声明时刻退避，比占着并发槽空等更符合冷却语义。
-	gateDefaultMaxHold = 15 * time.Second
+	// 按声明时刻退避，比占着并发槽空等更符合冷却语义。半个窗口的长度
+	// 让 fg 突发洪峰宁可闸内排队跨过死区也不把 429 甩给客户端重试。
+	gateDefaultMaxHold = 30 * time.Second
 	// gateDefaultBgMaxHold 是 bg 类请求的排队预算：无人值守负载等得
 	// 起，给到两个窗口的长度让批跑宁可排队也不快败空转。
 	gateDefaultBgMaxHold = 120 * time.Second
@@ -38,9 +39,9 @@ const (
 	// gateDefaultBgMargin 是 bg 预留公式中的固定安全边际：吸收 fg
 	// 速率 EMA 的滞后与小并发突发。
 	gateDefaultBgMargin = 4
-	// gateBgRecheck 是 bg 被预留挡住时的睡醒重查间隔：预留随可发
-	// 区间剩余时间衰减，短间隔重查让 bg 吃到中段让出的槽而不必
-	// 睡到下一窗口。
+	// gateBgRecheck 是 bg 被预留/爬坡挡住时的睡醒重查间隔：预留随可发
+	// 区间剩余时间衰减、爬坡额度随经过时间线性释放，短间隔重查让
+	// bg 吃到中段让出的槽而不必睡到下一窗口。
 	gateBgRecheck = 4 * time.Second
 	// fgRateAlpha 是每窗口 fg 准入数 EMA 的更新系数：0.2 对应
 	// ~3 窗口半衰期，足够跟上交互负载的起落又不被单窗口抖动带走。
@@ -111,7 +112,7 @@ type rateGate struct {
 	dripCount       int
 	rejectLatched   int // 闩内被快败的请求数
 	rejectHold      int // 闩外排队预计超 maxHold 被快败的请求数
-	rejectBgReserve int // bg 因预留不足被快败的请求数（礼让强度指标；bg 桶满快败归 rejectHold）
+	rejectBgReserve int // bg 因预留/爬坡让路被快败的请求数（礼让强度指标；bg 桶满快败归 rejectHold）
 	waitersFg       int // 当前睡到下一窗口的 fg 请求数
 	waitersBg       int // 当前睡着的 bg 请求数（预留阻塞重查也进此列）
 	// 闩迁移事件环：计数器只说发生过几次上闩，事件环回答「什么时候闩的、
@@ -218,12 +219,15 @@ type GateStats struct {
 	Waiters         int        `json:"waiters"`               // fg+bg 排队总数
 	WaitersFg       int        `json:"waiters_fg"`
 	WaitersBg       int        `json:"waiters_bg"`
-	RejectBgReserve int        `json:"reject_bg_reserve_count"` // bg 因预留不足被快败数（礼让强度指标）
+	RejectBgReserve int        `json:"reject_bg_reserve_count"` // bg 因预留/爬坡让路被快败数（礼让强度指标）
 	// Reserve/FgRate 是预留机制的实时读数：当前预留槽数与 fg 准入
 	// 速率 EMA（条/窗）——bg 被拒/放行的可解释性来源。
-	Reserve int         `json:"reserve"`
-	FgRate  float64     `json:"fg_rate"`
-	Events  []GateEvent `json:"events,omitempty"` // 新在前
+	Reserve int     `json:"reserve"`
+	FgRate  float64 `json:"fg_rate"`
+	// PaceAllowance 是爬坡机制的实时读数：此刻 bg 放行额度上限
+	// （quota-reserve 按经过时间线性释放）；死区或零配额时为 0。
+	PaceAllowance int         `json:"pace_allowance"`
+	Events        []GateEvent `json:"events,omitempty"` // 新在前
 	// LatchRanges 是从闩事件环还原的闩时段（[start,end] 对），由
 	// stats() 与事件环同锁算出——前端趋势图直接铺 markArea，不再在
 	// JS 里重放状态机。
@@ -380,6 +384,18 @@ func (gate *rateGate) reserve(now time.Time, ws time.Time) int {
 	return min(reserve, gate.quota)
 }
 
+// bgAllowance 是爬坡机制此刻为 bg 释放的放行额度：quota-reserve 按
+// 可发区间经过时间线性放出——ceil 让首槽在窗口开放后立即可用、末尾
+// 恰好收敛到 quota-reserve，既压住窗口开放瞬间的齐射又不损失吞吐。
+// 只在 sendable 时被调用（死区内不评估）。调用方须持 mu。
+func (gate *rateGate) bgAllowance(now, ws time.Time, reserve int) int {
+	rampCap := gate.quota - reserve
+	if rampCap <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(rampCap) * now.Sub(ws).Seconds() / gate.usable.Seconds()))
+}
+
 // restoreState 在启动时恢复未过期的冷却闩：滴灌时钟按间隔重排。
 // 行缺失/损坏/已过期都按无闩处理并顺手清掉残留行。
 func (gate *rateGate) restoreState() {
@@ -460,6 +476,9 @@ func (gate *rateGate) stats() GateStats {
 		next := ws.Add(windowPeriod)
 		stats.WindowOpen = &open
 		stats.WindowNext = &next
+		if stats.Sendable {
+			stats.PaceAllowance = gate.bgAllowance(now, ws, stats.Reserve)
+		}
 	}
 	for i := 1; i <= gate.eventSize; i++ {
 		stats.Events = append(stats.Events, gate.events[(gate.eventHead-i+gateEventCap)%gateEventCap])
@@ -566,9 +585,11 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 //   - 闩外 fg：可发区间内配额未满立即放行；配额耗尽或在死区内睡到
 //     下一窗口开放，预计等待超出剩余预算（累计上限 maxHold）同样
 //     返回闸门拒绝；
-//   - 闩外 bg：在 fg 规则上叠加动态预留——bucketUsed+1 必须不越过
-//     quota-reserve（reserve 见同文件，随可发区间衰减）。被预留挡住
-//     时不睡整窗，按 gateBgRecheck 短间隔重查吃中段让出的槽；桶满/
+//   - 闩外 bg：在 fg 规则上叠加动态预留与爬坡——bucketUsed+1 必须
+//     不越过 quota-reserve（reserve 见同文件，随可发区间衰减），
+//     且 bucketUsedBg+1 不越过爬坡额度（quota-reserve 按经过时间
+//     线性释放），压住窗口开放瞬间的齐射。被预留或爬坡挡住时不睡
+//     整窗，按 gateBgRecheck 短间隔重查吃中段让出/释放的槽；桶满/
 //     死区与 fg 同形睡到下一窗口。排队预算用 bgMaxHold。
 //   - 睡眠不做配额预约：窗口开放时睡醒者与新到者一起竞争，抢不到
 //     的看到满桶按剩余预算决定再睡或快败——分钟粒度下排序公平性
@@ -644,7 +665,15 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		if bg && admit {
 			// 预留检查只在桶未满时才有意义：桶满时 bg 与 fg 同走
 			// 睡下一窗口的分支，不需要 reserve 读数。
-			admit = gate.bucketUsed+1 <= gate.quota-gate.reserve(now, ws)
+			reserve := gate.reserve(now, ws)
+			admit = gate.bucketUsed+1 <= gate.quota-reserve
+			if admit {
+				// 爬坡约束：bg 放行额度按可发区间经过时间线性释放，
+				// 压住窗口开放瞬间的齐射——fg 在窗口前段到达看到的
+				// 是半空的桶。被爬坡挡住与预留阻塞走同一条短间隔
+				// 重查路径，桶尾吞吐不变。
+				admit = gate.bucketUsedBg+1 <= gate.bgAllowance(now, ws, reserve)
+			}
 		}
 		if admit {
 			gate.admitLocked(class, gc, now, ws, entered)
@@ -654,8 +683,9 @@ func (gate *rateGate) wait(ctx context.Context) error {
 		// 不可放行：按阻塞成因选睡眠时长与快败归因。
 		//   - 桶满：睡到下一窗口；快败按 quota 类（Retry-After 报下窗）。
 		//   - 死区：睡到下一窗口开放；快败按 hold 类。
-		//   - bg 预留阻塞（sendable 且桶未满）：只睡 gateBgRecheck——
-		//     预留随可发区间衰减，中段让出的槽即时可吃；快败仍按
+		//   - bg 让路阻塞（sendable 且桶未满：预留不足或爬坡额度还没
+		//     释放到它）：只睡 gateBgRecheck——预留随可发区间衰减、
+		//     爬坡随经过时间释放，中段让出的槽即时可吃；快败仍按
 		//     quota 类、Retry-After 报下一窗口（客户端按窗口节奏
 		//     重试，不该按本地重查节奏轮询）。
 		var wait time.Duration

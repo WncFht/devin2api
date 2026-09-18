@@ -16,7 +16,12 @@
 
 fg：`sendable && bucketUsed < quota`——与未分级时完全一致。
 
-bg：在 fg 规则上叠加动态预留约束——`bucketUsed + 1 <= quota − reserve`，其中
+bg：在 fg 规则上叠加两层约束——
+
+- 动态预留：`bucketUsed + 1 <= quota − reserve`，最后 reserve 个槽对 bg 数学上不可达。
+- 窗口内爬坡：`bucketUsedBg + 1 <= ceil((quota − reserve) × 已过秒数 / 可发区间秒数)`——bg 放行额度从窗口开放起按经过时间线性放出（首槽开放后立即可用，末尾恰好收敛到 quota − reserve），压住 :02 齐射，fg 在窗口前段到达看到的是半空的桶；bg 吞吐不变，只是被摊匀到整个可发区间。
+
+其中
 
 ```
 reserve = fg_rate × 可发区间剩余秒数 + waiters_fg + margin
@@ -28,7 +33,7 @@ reserve = fg_rate × 可发区间剩余秒数 + waiters_fg + margin
 
 动态预留同时给出两条性质。保证性：最后 `reserve` 个槽对 bg 数学上不可达，fg 任何时刻到达都有保底余量，且窗口开放瞬间 `reserve ≥ waiters_fg + margin`，睡过一桶的 fg waiter 人人有槽——类别保证靠容量预留实现，不靠唤醒顺序（本闸门的等待本就不是有序队列，睡醒者与新到者同刻竞争）。工作保守：`t_left → 0` 时 `reserve → waiters_fg + margin`，fg 没来的预测需求自动归零，bg 在桶尾吃掉剩余槽，配额不死在静态余量里。
 
-bg 被预留挡住（桶未满、非死区）时不睡到下一窗口，而是按短间隔（4s）睡醒重查——预留随时间衰减，中段让出的槽 bg 能及时吃到。bg 因桶满/死区被拒与 fg 同形（睡到下一窗口）；排队预算用 `gate_bg_max_hold_seconds`（默认 120，fg 仍 15）——无人值守负载等得起。bg 快败时 `Retry-After` 给到下一窗口开放秒数，闩内被拒照旧给闩剩余。
+bg 被预留或爬坡挡住（桶未满、非死区）时不睡到下一窗口，而是按短间隔（4s）睡醒重查——预留随时间衰减、爬坡额度随经过时间释放，中段让出的槽 bg 能及时吃到。bg 因桶满/死区被拒与 fg 同形（睡到下一窗口）；排队预算用 `gate_bg_max_hold_seconds`（默认 120，fg 仍 `gate_max_hold_seconds`，默认 30）——无人值守负载等得起。bg 快败时 `Retry-After` 给到下一窗口开放秒数，闩内被拒照旧给闩剩余。
 
 前缀保温 ping（`tryAdmit`）视同可 dip 入预留的最低优先级流量：准入条件为 `sendable && bucketUsed < quota`，不再要求 `waiters == 0`——bg 常驻排队不该饿死保温（缓存冷的是 fg），ping 占用预留槽的规模被 ping 节拍（默认 180s/谱系）天然限制在 margin 吸收范围内。
 
@@ -49,7 +54,7 @@ bg 客户端拿到 `quota` 型 429 直接睡满 `Retry-After`；成功响应的 
 
 ## 观测
 
-`GateStats`（`/admin/accounts` 的 `gate` 段、`/admin/runtime-metrics` 的 `gate`/`accounts` 段）新增：`window_used_fg`/`window_used_bg`（桶用量按类分列，验证 bg 未吃 fg 预留）、`waiters_fg`/`waiters_bg`（`waiters` 仍为两者之和）、`reject_bg_reserve_count`（因预留不足拒掉的 bg 数，礼让强度直接指标）、`reserve`/`fg_rate`（当前预留量与 fg 速率估计，预留行为的可解释性来源）。
+`GateStats`（`/admin/accounts` 的 `gate` 段、`/admin/runtime-metrics` 的 `gate`/`accounts` 段）新增：`window_used_fg`/`window_used_bg`（桶用量按类分列，验证 bg 未吃 fg 预留）、`waiters_fg`/`waiters_bg`（`waiters` 仍为两者之和）、`reject_bg_reserve_count`（因预留/爬坡让路被拒掉的 bg 数，礼让强度直接指标）、`reserve`/`fg_rate`（当前预留量与 fg 速率估计，预留行为的可解释性来源）、`pace_allowance`（爬坡此刻为 bg 释放的额度上限，死区/零配额为 0）。
 
 ## 配置
 
