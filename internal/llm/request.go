@@ -104,6 +104,9 @@ type RequestRepairs struct {
 	DroppedEmptyAssistant int `json:"dropped_empty_assistant,omitempty"`
 	// OmittedHistoryImages 是被改写为文本占位的历史图片数（上游只收当前轮图片）。
 	OmittedHistoryImages int `json:"omitted_history_images,omitempty"`
+	// DroppedDuplicateTools 是按名去重时被丢弃的重复工具声明数
+	//（上游 tools[] 重名直接 invalid_argument）。
+	DroppedDuplicateTools int `json:"dropped_duplicate_tools,omitempty"`
 	// SanitizeHits 是上游内容策略指纹改写按规则 id 的命中计数。
 	SanitizeHits map[string]int `json:"sanitize_hits,omitempty"`
 }
@@ -111,7 +114,8 @@ type RequestRepairs struct {
 // Total 返回全部修复动作的合计次数，供日志索引汇总成单字段。
 func (repairs RequestRepairs) Total() int {
 	total := repairs.ReorderedPrompts +
-		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages
+		repairs.DroppedEmptyAssistant + repairs.OmittedHistoryImages +
+		repairs.DroppedDuplicateTools
 	for _, hits := range repairs.SanitizeHits {
 		total += hits
 	}

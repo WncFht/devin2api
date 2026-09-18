@@ -2049,6 +2049,40 @@ func TestBuildRequestRejectsNamedToolChoiceOutsideTools(t *testing.T) {
 	}
 }
 
+// TestBuildRequestDropsDuplicateToolNames 钉 G5：客户端重复注册同名工具时
+// wire 只保留首个声明（上游对 tools[] 重名直接 invalid_argument），重复数
+// 计入 repairs。调用方的 Tools 切片不得被原位改写——Stream 后续还要按原名
+// 表查 custom/server 工具。
+func TestBuildRequestDropsDuplicateToolNames(t *testing.T) {
+	tools := []llm.ToolDefinition{
+		{Name: "read_file", Description: "first", InputSchema: json.RawMessage(`{"type":"object"}`), ReadOnlyHint: true},
+		{Name: "write_file", Description: "other", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "read_file", Description: "second", InputSchema: json.RawMessage(`{"type":"object"}`)},
+	}
+	request := llm.RequestMessages{
+		Messages: []llm.Message{llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hi"}}}},
+		Tools:    tools,
+	}
+	converted, repairs, err := buildRequest(request, Config{}, callBinding{Token: "t", Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireTools := converted.GetTools()
+	if len(wireTools) != 2 || repairs.DroppedDuplicateTools != 1 {
+		t.Fatalf("wire tools = %d, dropped = %d, want 2/1", len(wireTools), repairs.DroppedDuplicateTools)
+	}
+	if wireTools[0].GetName() != "read_file" || wireTools[1].GetName() != "write_file" {
+		t.Fatalf("wire tools = %#v", wireTools)
+	}
+	// 首个出现胜出：ReadOnlyHint 只在 first 声明上置位。
+	if !wireTools[0].GetReadOnlyHint() {
+		t.Fatal("kept read_file is not the first declaration")
+	}
+	if len(tools) != 3 || tools[2].Description != "second" {
+		t.Fatal("caller Tools slice mutated")
+	}
+}
+
 // TestPairToolCallsWithResultsConsumesDuplicateID 验证重复 call-id 按位置
 // 绑定：同 id 的第二个调用不再复用同一份结果（上游实测容忍重复 id）。
 func TestPairToolCallsWithResultsConsumesDuplicateID(t *testing.T) {

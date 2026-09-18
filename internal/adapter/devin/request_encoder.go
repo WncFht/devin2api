@@ -37,6 +37,11 @@ type callBinding struct {
 // binding。返回 repairs 记录转换中的静默修复计数，随请求日志落盘。
 func buildRequest(request llm.RequestMessages, config Config, binding callBinding) (*devinproto.GetChatMessageRequest, llm.RequestRepairs, error) {
 	var repairs llm.RequestRepairs
+	// tools[] 同名声明上游直接 invalid_argument：客户端重复注册同名
+	// 工具（如内置+自定义同名）时去重保首个，整个投影面（描述注入/
+	// 指名校验/wire 声明）看去重后的视图。值语义 request 只换本地
+	// 切片头，调用方的 Tools 底数组不被改写。
+	request.Tools, repairs.DroppedDuplicateTools = dedupToolNames(request.Tools)
 	// 上游轨迹标识按会话复用：同一会话的连续请求共享稳定 trajectory/cascade
 	// ID。实测（2026-09-16 保温实验）：同内容换 SessionKey 派生 ID 后
 	// cache_read=0，ID 参与缓存键或路由——稳定派生是命中前提。
@@ -401,6 +406,26 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 
 // assistantSource 是助手消息在 Devin wire 上的来源枚举（上游命名为 SYSTEM，值 2）。
 var assistantSource = devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM
+
+// dedupToolNames 按 wire 可见名去重工具声明，保留首个出现——重名声明上游
+// 直接 invalid_argument，且首个声明决定模型看到的描述/schema。返回值是新
+// 切片（不做原位压实，调用方的 Tools 底数组另有他用），第二个返回值是
+// 丢弃的重复声明数。
+func dedupToolNames(tools []llm.ToolDefinition) ([]llm.ToolDefinition, int) {
+	seen := make(map[string]struct{}, len(tools))
+	kept := make([]llm.ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		if _, ok := seen[tool.Name]; ok {
+			continue
+		}
+		seen[tool.Name] = struct{}{}
+		kept = append(kept, tool)
+	}
+	if len(kept) == len(tools) {
+		return tools, 0
+	}
+	return kept, len(tools) - len(kept)
+}
 
 // pairToolCallsWithResults 把「调用与结果被其它 prompt 隔开」的序列
 // 重排为 call_i, result_i 紧邻的配对序列。配对只认 toolCallId：隔着
