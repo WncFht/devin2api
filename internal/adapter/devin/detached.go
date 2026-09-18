@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -33,6 +34,11 @@ var (
 	detachedRunningTTL   = 45 * time.Minute
 	detachedCompletedTTL = 60 * time.Minute
 	detachedFailedTTL    = 5 * time.Minute
+	// detachedMaxBufferedBytes 是单条目的事件缓冲字节预算（var 供测试
+	// 缩小）：生产 04 原始帧逐 dir 求和的 p99 ~100KiB、观测最大 ~400KiB，
+	// 8MiB 对合法流留 ~20x 余量，同时把「flood 上游全速 drain 进缓存」
+	// 的实测 ~133MB/条目钉死在预算内——最坏驻留 8 条目 x 8MiB x lane 数。
+	detachedMaxBufferedBytes = 8 << 20
 )
 
 // detachedState 是条目生命周期：running 后台泵仍在喂；completed/failed
@@ -89,15 +95,109 @@ type detachedEntry struct {
 	// 这项和是最接近「token 级浪费」的可用代理（真实 token 数只在
 	// 内存事件载荷里，计数层拿不到）。
 	detachIndex int
+	// bufferedBytes/truncated 是字节预算簿记：append 按 detachedEventBytes
+	// 估值累计，越 detachedMaxBufferedBytes 置 truncated 并在尾部补一条
+	// 截断错误事件后冻结缓冲。截断缓冲前缀残缺、永远产不出完整重放：
+	// lookup 对它一律回未命中（同键重试走新上游），在飞挂接方重放到
+	// 这条显式错误而非无声 EOF——截断响应不得以 completed 形态下发。
+	bufferedBytes int
+	truncated     bool
 }
 
-// append 追加一条已产出事件并广播给挂接方。
-func (entry *detachedEntry) append(event llm.ResponseEvent) {
+// append 追加一条已产出事件并广播给挂接方；返回 true 表示本次追加越过
+// 字节预算、缓冲就此截断（调用方记 04 标记行与停泵用）。截断后追加是
+// 空操作——冻结保证截断错误事件恒为末帧。
+func (entry *detachedEntry) append(event llm.ResponseEvent) bool {
 	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.truncated {
+		return false
+	}
 	entry.events = append(entry.events, event)
+	entry.bufferedBytes += detachedEventBytes(event)
+	if entry.bufferedBytes <= detachedMaxBufferedBytes {
+		close(entry.notify)
+		entry.notify = make(chan struct{})
+		return false
+	}
+	entry.truncated = true
+	entry.events = append(entry.events, detachedTruncatedEvent(entry.bufferedBytes))
 	close(entry.notify)
 	entry.notify = make(chan struct{})
-	entry.mu.Unlock()
+	return true
+}
+
+// isTruncated 报告缓冲是否已因字节预算截断。
+func (entry *detachedEntry) isTruncated() bool {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	return entry.truncated
+}
+
+// detachedTruncatedEvent 合成缓冲截断的终止事件：UpstreamFault 让
+// finish 把它收成不可重放的 failed（语义上「不要吃这条缓存终态」），
+// 在飞挂接方把它当一次显式流失败下发，客户端重试自然走向新上游。
+func detachedTruncatedEvent(bufferedBytes int) llm.ResponseEvent {
+	return llm.ResponseEvent{
+		Type:   llm.ResponseEventError,
+		Reason: llm.StopReasonError,
+		Error: &llm.AssistantMessage{
+			ErrorMessage: fmt.Sprintf("detached buffer truncated: %d bytes exceeded %d byte budget", bufferedBytes, detachedMaxBufferedBytes),
+			Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
+		},
+	}
+}
+
+// detachedEventBytes 估计单条事件在缓冲里的驻留字节：显性载荷取
+// Delta/Content 与终态对象（ToolCall/ServerResult/Message/Error）的
+// 字符串面值，另加每事件固定开销摊事件体与 Partial 快照的切片克隆。
+// Partial 不深计——快照只克隆切片头，块字符串与既发事件共享底层字节，
+// 深计会把同一份正文按事件数重复入账（真实驻留是线性而非平方）；
+// 终态 Message 与既发块同样共享字节，面值计入属保守上偏，可接受。
+func detachedEventBytes(event llm.ResponseEvent) int {
+	size := 192 + len(event.Delta) + len(event.Content) + len(event.ToolCallID) + len(event.ToolName)
+	if event.ToolCall != nil {
+		size += len(event.ToolCall.ID) + len(event.ToolCall.Name) + len(event.ToolCall.Arguments)
+	}
+	if event.ServerResult != nil {
+		size += detachedServerResultBytes(event.ServerResult)
+	}
+	for _, message := range []*llm.AssistantMessage{event.Message, event.Error} {
+		if message == nil {
+			continue
+		}
+		size += len(message.ErrorMessage) + len(message.DebugRef)
+		for _, block := range message.Content {
+			size += detachedContentBytes(block)
+		}
+	}
+	return size
+}
+
+// detachedContentBytes 估计单个内容块的驻留字节。
+func detachedContentBytes(block llm.Content) int {
+	switch content := block.(type) {
+	case llm.TextContent:
+		return len(content.Text)
+	case llm.ThinkingContent:
+		return len(content.Thinking) + len(content.ThinkingSignature)
+	case llm.ImageContent:
+		return len(content.Data)
+	case llm.ToolCall:
+		return len(content.ID) + len(content.Name) + len(content.Arguments)
+	case llm.ServerToolResult:
+		return detachedServerResultBytes(&content)
+	}
+	return 0
+}
+
+// detachedServerResultBytes 估计托管工具结果的驻留字节。
+func detachedServerResultBytes(result *llm.ServerToolResult) int {
+	size := len(result.ToolCallID) + len(result.ToolName) + len(result.Text) + len(result.ErrorCode)
+	for _, hit := range result.Results {
+		size += len(hit.Title) + len(hit.URL) + len(hit.Summary)
+	}
+	return size
 }
 
 // finish 在后台泵读到流终态时定态：末帧是 error 记 failed（可重放性按
@@ -163,6 +263,7 @@ type detachedRegistry struct {
 	expired           int64 // TTL 到期移除（lookup 惰性逐出 + admit 扫描）
 	evicted           int64 // 容量淘汰（最老 running 让位）
 	replaced          int64 // 同键新条目替换旧残骸
+	truncated         int64 // 字节预算截断逐出（lookup 惰性逐出）
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
 	orphanBuffered    int64 // 孤儿条目脱钩后新产出的事件量合计（浪费量级代理）
@@ -188,11 +289,13 @@ const (
 
 // 移除原因（evict 事件的 detail）：expired 是 TTL 到点（lookup 惰性
 // 逐出与 admit 扫描同口径），capacity 是容量淘汰最老 running，
-// replaced 是同键新条目逐出旧残骸。
+// replaced 是同键新条目逐出旧残骸，truncated 是字节预算截断
+// （lookup 惰性逐出——截断缓冲无重放价值即无存活依据）。
 const (
-	detachEvictExpired  = "expired"
-	detachEvictCapacity = "capacity"
-	detachEvictReplaced = "replaced"
+	detachEvictExpired   = "expired"
+	detachEvictCapacity  = "capacity"
+	detachEvictReplaced  = "replaced"
+	detachEvictTruncated = "truncated"
 )
 
 // 泵终局原因（finish 事件的 detail 与 finished_* 计数桶）：completed/
@@ -228,6 +331,9 @@ func detachedEventLabel(kind, detail string) string {
 		if detail == detachEvictExpired {
 			return "过期未命中"
 		}
+		if detail == detachEvictTruncated {
+			return "截断未命中"
+		}
 		return "不可重放"
 	case detachedEventEvict:
 		switch detail {
@@ -235,6 +341,8 @@ func detachedEventLabel(kind, detail string) string {
 			return "容量淘汰"
 		case detachEvictReplaced:
 			return "同键替换"
+		case detachEvictTruncated:
+			return "截断移除"
 		}
 		return "过期移除"
 	case detachedEventFinish:
@@ -272,6 +380,9 @@ type DetachedStats struct {
 	Expired  int64 `json:"expired"`
 	Evicted  int64 `json:"evicted"`
 	Replaced int64 `json:"replaced"`
+	// Truncated 是字节预算截断的移除计数——flood/异常上游 drain 进
+	// 缓存被预算拦下的信号，与 expired 桶分开才有观测意义。
+	Truncated int64 `json:"truncated"`
 
 	Orphans         int64 `json:"orphans"`
 	OrphanCompleted int64 `json:"orphan_completed"`
@@ -289,8 +400,10 @@ func newDetachedRegistry() *detachedRegistry {
 }
 
 // lookup 查可挂接条目：running/completed 恒可挂；failed 只在可重放时
-// 挂（瞬态失败返回 nil 让调用方走新上游）；过期即逐。条目缺席是普通
-// 首发不计数；条目在场却不可用记 attach_miss——同键重试确实来过。
+// 挂（瞬态失败返回 nil 让调用方走新上游）；过期与截断即逐——截断缓冲
+// 产不出完整重放，同键重试直接走新上游，同时把槽位与缓冲提前释放。
+// 条目缺席是普通首发不计数；条目在场却不可用记 attach_miss——同键
+// 重试确实来过。
 func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	if registry == nil || key == "" {
 		return nil
@@ -304,15 +417,20 @@ func (registry *detachedRegistry) lookup(key string) *detachedEntry {
 	entry.mu.Lock()
 	expired := time.Now().After(entry.expiresAt)
 	replayable := entry.state != detachedFailed || entry.replayable
+	truncated := entry.truncated
 	state := entry.state
-	if !expired && replayable {
+	if !expired && !truncated && replayable {
 		entry.attached = true
 	}
 	entry.mu.Unlock()
-	if expired {
+	if expired || truncated {
+		cause := detachEvictExpired
+		if !expired {
+			cause = detachEvictTruncated
+		}
 		registry.attachMisses++
-		registry.pushEvent(detachedEventMiss, key, detachEvictExpired)
-		registry.evictLocked(key, entry, detachEvictExpired)
+		registry.pushEvent(detachedEventMiss, key, cause)
+		registry.evictLocked(key, entry, cause)
 		return nil
 	}
 	if !replayable {
@@ -383,6 +501,8 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 		registry.evicted++
 	case detachEvictReplaced:
 		registry.replaced++
+	case detachEvictTruncated:
+		registry.truncated++
 	default:
 		registry.expired++
 	}
@@ -476,6 +596,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Expired = registry.expired
 	stats.Evicted = registry.evicted
 	stats.Replaced = registry.replaced
+	stats.Truncated = registry.truncated
 	stats.Orphans = registry.orphans
 	stats.OrphanCompleted = registry.orphanCompleted
 	stats.OrphanBufferedEvents = registry.orphanBuffered

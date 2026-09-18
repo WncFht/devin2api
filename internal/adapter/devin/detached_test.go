@@ -390,6 +390,140 @@ func TestProgressDeadlineTiers(t *testing.T) {
 	}
 }
 
+// TestDetachedEntryTruncatesAtByteBudget 钉住字节预算语义：越界追加把
+// 缓冲冻结成「前缀 + 截断错误」，之后的追加是空操作——截断错误恒为
+// 末帧，finish 据此收成不可重放的 failed。
+func TestDetachedEntryTruncatesAtByteBudget(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 1024
+	entry := &detachedEntry{notify: make(chan struct{})}
+	if entry.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("a", 600)}) {
+		t.Fatal("append under budget must not report truncation")
+	}
+	if !entry.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("b", 600)}) {
+		t.Fatal("append crossing the budget should report truncation")
+	}
+	if entry.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: "late"}) {
+		t.Fatal("frozen buffer must not report truncation again")
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if len(entry.events) != 3 {
+		t.Fatalf("events = %d, want 2 prefix + 1 truncation marker", len(entry.events))
+	}
+	last := entry.events[len(entry.events)-1]
+	if last.Type != llm.ResponseEventError {
+		t.Fatalf("terminal event = %v, want truncation error", last.Type)
+	}
+	if failure := llm.FailureOf(last.Error); failure == nil || !failure.UpstreamFault {
+		t.Fatal("truncation marker must classify as upstream fault so finish marks it non-replayable")
+	}
+}
+
+// TestDetachedTruncatedLookupMisses 钉住截断条目的挂接语义：lookup
+// 一律回未命中并就地逐出——截断缓冲产不出完整重放，同键重试走新上游，
+// 槽位与缓冲随淘汰提前释放。
+func TestDetachedTruncatedLookupMisses(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 64
+	registry := newDetachedRegistry()
+	entry := &detachedEntry{notify: make(chan struct{})}
+	entry.append(llm.ResponseEvent{Type: llm.ResponseEventTextDelta, Delta: strings.Repeat("a", 128)})
+	registry.admit("t1", entry)
+	if got := registry.lookup("t1"); got != nil {
+		t.Fatal("truncated entry must miss lookup")
+	}
+	if len(registry.entries) != 0 {
+		t.Fatal("truncated entry should be evicted on lookup")
+	}
+}
+
+// TestDetachedTruncationStopsPump 钉住 flood 截断的全链路：脱钩后上游
+// 灌入超预算增量，append 冻结缓冲，后台泵下轮自检截断立即停泵——不再
+// 为死缓冲白耗上游配额；条目收成不可重放的 failed，在飞挂接方重放到
+// 显式错误而非无声 EOF。
+func TestDetachedTruncationStopsPump(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 4096
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 1, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{DeltaText: proto.String(strings.Repeat("x", 8192))},
+		{StopReason: devinproto.ExaCodeiumCommonPb_StopReason_ExaCodeiumCommonPb_StopReason_STOP_REASON_STOP_PATTERN.Enum()},
+	}}
+	stream := detachedTestStream(registry, "k9", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("k9")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	close(receiver.release)
+	waitEntryState(t, entry, detachedFailed)
+	entry.mu.Lock()
+	replayable := entry.replayable
+	last := entry.events[len(entry.events)-1]
+	entry.mu.Unlock()
+	if last.Type != llm.ResponseEventError {
+		t.Fatalf("terminal event = %v, want truncation error", last.Type)
+	}
+	if replayable {
+		t.Fatal("truncated entry must finish non-replayable")
+	}
+	if got := registry.lookup("k9"); got != nil {
+		t.Fatal("truncated entry must miss lookup")
+	}
+	replayed, err := collectAttached(&attachStream{entry: entry})
+	if err != nil {
+		t.Fatalf("attach Recv: %v", err)
+	}
+	if replayed[len(replayed)-1].Type != llm.ResponseEventError {
+		t.Fatalf("last replayed event = %v, want truncation error", replayed[len(replayed)-1].Type)
+	}
+}
+
+// TestDetachedPreTruncatedStreamNotDetachable 钉住客户端在场期截断的
+// 流：缓冲在客户端断开前就越预算（下游慢消费 + 上游 flood）时，
+// 断开按不可脱钩杀流——死缓冲登记进缓存也只是占位垃圾。
+func TestDetachedPreTruncatedStreamNotDetachable(t *testing.T) {
+	defer func(budget int) { detachedMaxBufferedBytes = budget }(detachedMaxBufferedBytes)
+	detachedMaxBufferedBytes = 4096
+	registry := newDetachedRegistry()
+	receiver := &pauseReceiver{pauseAt: 2, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+		{DeltaText: proto.String(strings.Repeat("x", 8192))},
+	}}
+	defer close(receiver.release)
+	stream := detachedTestStream(registry, "k8", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	var deltas int
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		if e.Type == llm.ResponseEventTextDelta {
+			deltas++
+		}
+		return deltas == 2
+	})
+	if !stream.entry.isTruncated() {
+		t.Fatal("buffer should be truncated after the oversized delta")
+	}
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	if got := registry.lookup("k8"); got != nil {
+		t.Fatal("pre-truncated stream must not be admitted to the cache")
+	}
+	if len(registry.entries) != 0 {
+		t.Fatal("registry must stay empty for a killed pre-truncated stream")
+	}
+}
+
 // TestDetachedRegistryEvictsOldestRunning 钉住容量淘汰序：触顶先逐过期
 // 再逐最老 running，completed 条目不被 running 挤掉。
 func TestDetachedRegistryEvictsOldestRunning(t *testing.T) {

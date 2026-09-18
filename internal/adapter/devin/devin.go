@@ -1887,8 +1887,14 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		stream.queue = stream.queue[1:]
 		// 下发即缓冲：脱钩后重试方需要含前缀的完整事件序列，
 		// tee 在返回点才能覆盖 start 扣留在内的全部对外事件。
-		if stream.entry != nil {
-			stream.entry.append(event)
+		if stream.entry != nil && stream.entry.append(event) {
+			// 本次追加越过字节预算：缓冲冻结成截断前缀+终止错误。
+			// 记 04 标记行给「flood  drain 进缓存」留取证——detached/
+			// detached_attach 之外的第三条脱钩标记。
+			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", map[string]any{
+				"key":          stream.detachKey,
+				"budget_bytes": detachedMaxBufferedBytes,
+			})
 		}
 		return event, nil
 	}
@@ -1923,14 +1929,17 @@ func (stream *responseStream) progressDeadline() time.Duration {
 	return upstreamNoProgressTimeout
 }
 
-// detachable 判定这条流客户端断开后是否值得脱钩续命：三个条件缺一
+// detachable 判定这条流客户端断开后是否值得脱钩续命：四个条件缺一
 // 不可——缓存挂接面注入（registry/detachKey/entry 非空，Adapter.Stream
-// 才有；测试裸流恒假）、已产出过内容（pre-content 流没有重放价值，
-// 且重放键会污染缓存）、语义未收口（已见 stopReason/停止序列的流
-// 只剩传输尾帧，续命等不到新内容）。已脱钩的流不可再脱钩。
+// 才有；测试裸流恒假）、缓冲未截断（客户端还在场时缓冲就越预算的流
+// 续命也产不出完整重放，直接按不可脱钩杀）、已产出过内容
+// （pre-content 流没有重放价值，且重放键会污染缓存）、语义未收口
+// （已见 stopReason/停止序列的流只剩传输尾帧，续命等不到新内容）。
+// 已脱钩的流不可再脱钩。
 func (stream *responseStream) detachable() bool {
 	return !stream.detached &&
 		stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
+		!stream.entry.isTruncated() &&
 		stream.producedEvents && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
 }
 
@@ -1973,10 +1982,13 @@ func (stream *responseStream) detach(ctx context.Context) {
 		defer stream.kill()
 		for {
 			_, err := stream.Recv(drainCtx)
-			if err == nil {
+			// 缓冲越预算截断时同步停泵：重放价值归零，继续 drain 是
+			// 纯配额浪费——末帧已是截断错误，finish 收成不可重放的
+			// failed。isTruncated 走 entry.mu，与 append 同一临界区。
+			if err == nil && !entry.isTruncated() {
 				continue
 			}
-			if !errors.Is(err, io.EOF) {
+			if err != nil && !errors.Is(err, io.EOF) {
 				entry.append(llm.ResponseEvent{
 					Type: llm.ResponseEventError,
 					Error: &llm.AssistantMessage{
