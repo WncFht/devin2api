@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -84,6 +85,75 @@ func TestManagerAllocatesCollisionSuffix(t *testing.T) {
 	}
 	if !strings.HasSuffix(second.dir, "-02") {
 		t.Fatalf("second directory = %q, want -02 suffix", second.dir)
+	}
+}
+
+// TestClaimDirRetriesAfterTransientLock 验证写锁被外部连接瞬时独占时目录
+// 占位退避重试仍抢到名——reuseport 交接期对端写者持锁正是 BEGIN IMMEDIATE
+// 的形态。首个 reqStoreOpTimeout 窗口被 sqlite busy 等待耗尽后 claim 返回
+// deadline，锁释放后的重试落库成功；没有重试时该请求只能走 dirless 兜底行。
+func TestClaimDirRetriesAfterTransientLock(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	defer manager.Close()
+
+	// 外部连接 BEGIN IMMEDIATE 持写锁比 reqStoreOpTimeout 略长：首试的
+	// busy 等待被 5s ctx 掐断，退避重试在锁释放后落库。
+	holder, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(30000)")
+	if err != nil {
+		t.Fatalf("sql.Open holder: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	conn, err := holder.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	go func() {
+		time.Sleep(reqStoreOpTimeout + 600*time.Millisecond)
+		_, _ = conn.ExecContext(context.Background(), "COMMIT")
+	}()
+
+	started := time.Now()
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	elapsed := time.Since(started)
+	if recorder == nil {
+		t.Fatal("Start() = nil under transient write-lock hold; want retried claim to succeed")
+	}
+	if elapsed < reqStoreOpTimeout {
+		t.Fatalf("Start() returned in %s — claim did not burn a full first-attempt window", elapsed)
+	}
+	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
+	waitDrained(recorder)
+	if _, _, _, err := manager.ReadFile(context.Background(), recorder.dir, MetaFile); err != nil {
+		t.Fatalf("meta.json missing in retried dir %s: %v", recorder.dir, err)
+	}
+}
+
+// TestClaimDirNoRetryOnPermanentError 验证非 deadline 错误不付退避重试的
+// 代价：关库后 BeginTx 即刻返回「sql: database is closed」，不是停滞签名，
+// Start 应立即放弃——若走重试路径至少会付出一个 claimRetryBackoff 的睡眠。
+func TestClaimDirNoRetryOnPermanentError(t *testing.T) {
+	st := openTestStore(t)
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, st)
+	defer manager.Close()
+	_ = st.Close()
+
+	started := time.Now()
+	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
+	if recorder != nil {
+		t.Fatal("Start() on closed store = non-nil, want nil")
+	}
+	if elapsed := time.Since(started); elapsed >= claimRetryBackoff {
+		t.Fatalf("Start() took %s on permanent error — retry backoff should not run", elapsed)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -94,6 +95,16 @@ func storeCtx() (context.Context, context.CancelFunc) {
 // 30-120s+）是把代价放大——单条 INSERT 正常毫秒级，5s 已覆盖合法延迟的
 // 多个数量级。
 const reqStoreOpTimeout = 5 * time.Second
+
+// claimRetryBackoff 是目录占位重试前的退避窗：写连接被瞬时独占（checkpoint、
+// 容量分片删除、交接期对端写者）时立刻重打只是回队尾重排，让出几百毫秒
+// 提高第二次撞上空闲窗口的概率。
+const claimRetryBackoff = 300 * time.Millisecond
+
+// claimBudget 是目录占位整条路径的硬上限：首试（≤reqStoreOpTimeout）+ 退避
+// + 重试共享这份预算——重试只为吸收秒级写连接停滞，请求 goroutine 上的同步
+// 开销钳在 ~10s 内。
+const claimBudget = 10 * time.Second
 
 // reqStoreOpCtx 返回带 reqStoreOpTimeout 上限的 ctx，供请求路径的同步
 // store 调用。
@@ -1097,11 +1108,26 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 // 名分配只剩本进程内存集合一重判定。它在请求 goroutine 上同步跑，用
 // reqStoreOpTimeout 而非 storeOpTimeout：占位失败本就等价「本请求无日志」，
 // 先停满分钟级上限再放行只是把代价放大。
+//
+// deadline 失败是唯一写连接被瞬时占住的签名（BeginTx 池内排队或 sqlite
+// busy 等待被 ctx interrupt），同名 INSERT OR IGNORE 幂等，退避后用剩余
+// 预算重试一次；首试 Commit 真已落库的尾部竞态只会让重试读到
+// claimed=false，按既有撞名路径换名，不会写坏。非 deadline 错误（盘满、
+// 关库、显式 interrupt）不是停滞签名，重试无意义，照旧放弃——两次都失败
+// 后走既有 ioErrors+dirless 兜底行路径。
 func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	if manager.store == nil {
 		return true, nil
 	}
+	budget := time.Now().Add(claimBudget)
 	ctx, cancel := reqStoreOpCtx()
+	claimed, err = manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return claimed, err
+	}
+	time.Sleep(claimRetryBackoff)
+	ctx, cancel = context.WithDeadline(context.Background(), budget)
 	defer cancel()
 	return manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
 }
