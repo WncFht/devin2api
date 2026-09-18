@@ -881,3 +881,27 @@ func TestRateGateTryAdmitRespectsPaceRamp(t *testing.T) {
 		t.Fatal("tryAdmit = true at :40 ramp bound, want false")
 	}
 }
+
+// fg 可发分支的拥堵代理与 bg 同形封顶：排空竞态里睡醒者逐个重评估、
+// waiters 账还没减完时，waiters>0 可与 used→quota⁻ 共存，分母→1 的
+// 不封顶队列项把期望等待吹到分钟级——封顶到下窗+一窗（bg 分支口径）。
+func TestRateGateExpectedWaitFgCap(t *testing.T) {
+	gate := newRateGate(GateConfig{MaxRPM: 80}, nil, "")
+	clock := pinGateClock(gate, 10) // toNext = 52s，封顶 52+60=112s
+	gate.mu.Lock()
+	gate.bucketStart = gate.windowStart(clock.t)
+	gate.bucketUsed = 79
+	gate.waitersFg = 20
+	gate.mu.Unlock()
+	// 不封顶值 20/max(80-79,1)*60s = 1200s → 截到 112s。
+	if got := gate.admissionSnapshot(adapter.ClassFG).ExpectedWait; got != 112*time.Second {
+		t.Fatalf("fg expectedWait = %v, want 112s (capped at toNext+window)", got)
+	}
+	// 分母正常时线性项原样：20/80*60s = 15s < 封顶。
+	gate.mu.Lock()
+	gate.bucketUsed = 0
+	gate.mu.Unlock()
+	if got := gate.admissionSnapshot(adapter.ClassFG).ExpectedWait; got != 15*time.Second {
+		t.Fatalf("fg expectedWait = %v, want 15s (uncapped queue term)", got)
+	}
+}

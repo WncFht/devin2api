@@ -603,7 +603,8 @@ func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
 //     不可用」；
 //   - 死区或桶满 → 到下一窗口开放，前队按整窗配额折算追加；
 //   - fg 可发且桶有位 → 本请求此刻即放，只把已在排队的前队深度按本窗
-//     剩余额度折算成拥堵代理（睡醒者会与之抢槽）；
+//     剩余额度折算成拥堵代理（睡醒者会与之抢槽），封顶到下窗+一窗——
+//     排空竞态里分母→1 的不封顶队列项会把估计吹到分钟级；
 //   - bg 被预留/爬坡挡 → 额度缺口按爬坡释放速率折算，前队同速率折算，
 //     封顶到下窗+一窗（usable 末额度定格，更深的队只能翻窗）。
 //
@@ -624,7 +625,10 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 		return toNext + time.Duration(float64(waiters)/float64(gate.quota)*float64(windowPeriod))
 	}
 	if class != adapter.ClassBG {
-		return time.Duration(float64(waiters) / float64(max(gate.quota-used, 1)) * float64(windowPeriod))
+		return min(
+			time.Duration(float64(waiters)/float64(max(gate.quota-used, 1))*float64(windowPeriod)),
+			toNext+windowPeriod,
+		)
 	}
 	reserve := gate.reserve(now, ws)
 	room := min(gate.quota-reserve-used, gate.bgAllowance(now, ws, reserve)-gate.bucketUsedBg)
