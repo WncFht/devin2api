@@ -219,8 +219,19 @@ jobs:
           set -euo pipefail
           GHCR="ghcr.io/${GITHUB_REPOSITORY,,}"
           VERSION="${{ steps.meta.outputs.version }}"
+          # 注册表有写后读延迟，inspect 偶发非零退出——重试且永不传播
+          # 失败（否则 pipefail + $( ) 赋值会让脚本 255 静默死掉，连
+          # ::error:: 都打不出来，v0.14.0 发布即踩此坑）。空输出交给
+          # 调用方的显式检查报错。
           digest_of() {
-            docker buildx imagetools inspect "$1" 2>/dev/null | awk '/^Digest:/{print $2; exit}'
+            local i out
+            for i in 1 2 3 4 5; do
+              if out="$(docker buildx imagetools inspect "$1" 2>/dev/null)"; then
+                awk '/^Digest:/{print $2; exit}' <<<"$out"
+                return 0
+              fi
+              sleep 5
+            done
           }
           base="$(digest_of "$GHCR:$VERSION")"
           [[ -n "$base" ]] || { echo "::error::读不到 $GHCR:$VERSION 的 manifest digest"; exit 1; }
