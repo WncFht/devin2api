@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -29,8 +30,9 @@ var requestCount atomic.Int64
 func main() {
 	listen := flag.String("listen", "127.0.0.1:48090", "监听地址")
 	scenario := flag.String("scenario", "precontent",
-		"precontent|midcontent|recover|cleaneof|cleaneof-content|bare-end|endstream-error|badframe|badflags|end-hang|heartbeat|stall|stream")
+		"precontent|midcontent|recover|cleaneof|cleaneof-content|bare-end|endstream-error|preframe-error|badframe|badflags|end-hang|heartbeat|stall|stream")
 	recoverAfter := flag.Int64("recover-after", 1, "recover 场景下前 N 次请求截断，之后返回完整流")
+	resetIn := flag.Int("reset-in", 30, "preframe-error 场景限流文案的 reset 秒数（<0 = 不带 hint，走 defaultLatch）")
 	deltas := flag.Int("deltas", 200, "stream 场景的 delta 帧数")
 	deltaBytes := flag.Int("delta-bytes", 32, "stream 场景每帧 delta 字节数")
 	interval := flag.Duration("interval", 0, "stream 场景帧间隔（0 = 连续吐帧）")
@@ -42,7 +44,7 @@ func main() {
 		"precontent": true, "midcontent": true, "recover": true, "cleaneof": true,
 		"cleaneof-content": true, "bare-end": true, "endstream-error": true,
 		"badframe": true, "badflags": true, "end-hang": true, "heartbeat": true,
-		"stall": true, "stream": true,
+		"stall": true, "stream": true, "preframe-error": true,
 	}
 	if !validScenarios[*scenario] {
 		log.Fatalf("unknown scenario %q", *scenario)
@@ -89,6 +91,14 @@ func main() {
 			// 尾帧携带错误：上游经 EndStream 主动报语义错误（限流形态）。
 			body = join(frame(metaFrame(), jsonWire),
 				endStream(`{"error":{"code":"resource_exhausted","message":"stub: rate limited"}}`))
+		case "preframe-error":
+			// 建流即拒：200 + 仅一条 EndStream 错误尾帧，前面没有任何数据帧——
+			// 真实上游的语义拒绝形态（不在 HTTP 层给限流信号，见
+			// docs/upstream-rate-limit.md）。无任何数据帧意味客户端侧
+			// noteUpstreamSuccess 不触发，noteUpstreamError 直接上闩/延闩，
+			// 覆盖 drip 探针的 extended 路径；reset-in 文案让 RateLimitReset
+			// 对齐路径可达（<0 时不带 hint，回落 defaultLatch）。
+			body = endStream(rateLimitErrorJSON(*resetIn))
 		case "badframe":
 			// 垃圾字节充当 envelope：unmarshal/帧级解析失败路径。
 			body = []byte{0xff, 0xff, 0xff, 0xff, 0xff}
@@ -207,6 +217,16 @@ func endStream(payload string) []byte {
 	out[0] = 0x02
 	binary.BigEndian.PutUint32(out[1:5], uint32(len(payload)))
 	return append(out, payload...)
+}
+
+// rateLimitErrorJSON 造 preframe-error 场景的 EndStream 尾帧体，文案对齐
+// 真实上游限流指纹（无 RetryInfo detail，hint 只在文案）。resetIn<0 时
+// 省略 reset 声明。
+func rateLimitErrorJSON(resetIn int) string {
+	if resetIn < 0 {
+		return `{"error":{"code":"resource_exhausted","message":"Reached overall message rate limit. Please try again later."}}`
+	}
+	return fmt.Sprintf(`{"error":{"code":"resource_exhausted","message":"Reached overall message rate limit. Please try again later. Your limit will reset in %d seconds."}}`, resetIn)
 }
 
 // marshal 按客户端请求的 wire 编码（connect+proto 或 connect+json）序列化响应。
