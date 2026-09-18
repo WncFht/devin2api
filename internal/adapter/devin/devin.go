@@ -161,6 +161,10 @@ type Adapter struct {
 	tokenMu sync.RWMutex
 	token   string
 	minted  string
+	// mintMu 串行化 reloadToken 的铸币段：凭据死亡时 N 个并发
+	// unauthenticated 只会付一发 GetSelfDevinSessionToken——排队者
+	// 进锁后先按快照比对，生效凭据已被先行自愈换掉就直接复用。
+	mintMu sync.Mutex
 	// linkPtr 是绑死 base_url/proxy/force_http1 的上游调用束：endpoint
 	// 热应用时整体重建换指针（见 ApplyConfig），在途调用持旧引用跑完。
 	// 读侧经 link() 取快照；New 之后恒非 nil。
@@ -616,6 +620,14 @@ func (adapter *Adapter) reloadToken() bool {
 			slog.Warn("upstream unauthenticated and TokenSource returned the same token; credential refresh did not help")
 		}
 		return false
+	}
+	// 铸币段进 mintMu 串行：等锁期间另一路自愈（声明侧重读或先到的
+	// mint）可能已换上新凭据——现值不同于快照即视同步成功，重试吃
+	// currentToken 现值，不再各付一发铸币 RPC。
+	adapter.mintMu.Lock()
+	defer adapter.mintMu.Unlock()
+	if adapter.currentToken() != stale {
+		return true
 	}
 	minted, err := adapter.mintSessionToken(apiKey)
 	if err != nil {
