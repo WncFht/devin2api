@@ -352,7 +352,7 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 	recorder.Complete(debuglog.Completion{Result: "failed"})
 	<-manager.Drained(recorder.Dir())
 
-	metaData, _, _, err := manager.ReadFile(recorder.Dir(), "meta.json")
+	metaData, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "meta.json")
 	if err != nil {
 		t.Fatalf("ReadFile meta.json: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestPoolFailoverBudgetCap(t *testing.T) {
 	if len(meta.UpstreamAttempts) != 1 {
 		t.Fatalf("upstream_attempts = %d, want 1 — budget must stop the second lane", len(meta.UpstreamAttempts))
 	}
-	frames, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
+	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
 		t.Fatalf("ReadFile 04: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestPoolSwapFailoverBudgetCap(t *testing.T) {
 	recorder.Complete(debuglog.Completion{Result: "failed"})
 	<-manager.Drained(recorder.Dir())
 
-	frames, _, _, err := manager.ReadFile(recorder.Dir(), "04-devin-response.jsonl")
+	frames, _, _, err := manager.ReadFile(context.Background(), recorder.Dir(), "04-devin-response.jsonl")
 	if err != nil {
 		t.Fatalf("ReadFile 04: %v", err)
 	}
