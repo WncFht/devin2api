@@ -418,11 +418,11 @@ func (s *Store) importGateStates(ctx context.Context, logRoot string) error {
 // 「该源已处理，无需再理」。标记是只写不读的一次性留痕——重跑判定
 // 靠源文件存在性而非标记，崩溃重试由数据行幂等兜底。
 func (s *Store) withSourceTx(ctx context.Context, name string, fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "import:"+name)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	if err := fn(tx); err != nil {
 		return err
 	}

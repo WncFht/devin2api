@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,7 +28,7 @@ type Store struct {
 	// db 是写池：MaxOpenConns=1，串行化全部写（含 tx）与必要的
 	// 写后读（import 流程）。ro 是读池：只跑 SELECT——靠约定维持，
 	// query_only pragma 兜底把误写变成显式错误而非静默写竞争。
-	db *sql.DB
+	db wconn
 	ro *sql.DB
 
 	path string
@@ -36,6 +37,66 @@ type Store struct {
 	// 各写/删方法在事务提交后按真实落库字节增减；cleaner 的容量闸读它
 	// 免每轮全表聚合，周期对账兜底漏记账路径。
 	debugBytes atomic.Int64
+}
+
+// slowWriteWarn 是写连接独占时长的告警线：远低于写调用方的
+// storeOpTimeout(2min) 死线，高于常规批量写的正常量级。单连接写池
+// 下一个 op 超时独占会让全部排队写者等待——recorder 侧的
+// pending_bytes/late_writes 只能看到排队深度，看不到占用者是谁。
+const slowWriteWarn = 2 * time.Second
+
+// wconn 包装写池 *sql.DB：单发语句的计时起点取「拿到连接之后」——
+// Conn(ctx) 的排队等待不计入，只剩连接上的真实执行时长，慢告警指名
+// 的是真正的占用者而不是被堵住的排队者。
+type wconn struct{ *sql.DB }
+
+// ExecContext 语义同 *sql.DB.ExecContext，执行超 slowWriteWarn 记 WARN。
+func (w wconn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	conn, err := w.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+	start := time.Now()
+	res, err := conn.ExecContext(ctx, query, args...)
+	warnSlowWrite(sqlLabel(query), start)
+	return res, err
+}
+
+// writeTx 开写事务并返回收尾回调（Rollback+慢占用告警），调用方 defer
+// 它替代裸的 Rollback defer：Begin 成功到 Commit/Rollback 的全程独占
+// 唯一写连接，含语句间的本地工作（payload 编码、目录遍历等）。
+func (s *Store) writeTx(ctx context.Context, op string) (*sql.Tx, func(), error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	start := time.Now()
+	return tx, func() {
+		// 已提交的 Rollback 是免锁 no-op；失败路径的回滚耗时也计入占用窗。
+		_ = tx.Rollback()
+		warnSlowWrite(op, start)
+	}, nil
+}
+
+// warnSlowWrite 在占用超阈值时按 op 名记一条 WARN。
+func warnSlowWrite(op string, start time.Time) {
+	if d := time.Since(start); d >= slowWriteWarn {
+		slog.Warn("slow write-conn hold", "op", op, "duration_ms", d.Milliseconds())
+	}
+}
+
+// sqlLabel 取 SQL 首行前缀作 op 名：单发 exec 没有具名入口，语句的
+// 动词+表名前缀已足以指认占用者。
+func sqlLabel(query string) string {
+	if i := strings.IndexByte(query, '\n'); i >= 0 {
+		query = query[:i]
+	}
+	query = strings.TrimSpace(query)
+	if len(query) > 64 {
+		query = query[:64]
+	}
+	return query
 }
 
 // Open 打开（或创建）path 处的库。schema 幂等，重复打开只做
@@ -114,7 +175,7 @@ func Open(path string) (*Store, error) {
 	}
 	readpoolMS := time.Since(stageStart).Milliseconds()
 	stageStart = time.Now()
-	st := &Store{db: db, ro: ro, path: path}
+	st := &Store{db: wconn{db}, ro: ro, path: path}
 	st.debugBytes.Store(debugBytes)
 	// 水位自愈：任何绕过双写的写入者（无 cells 码的旧二进制、外部
 	// 工具、importIndex）留下的未记账行在每次启动时补记——不做这步，
@@ -212,10 +273,10 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	}
 	// WAL 体积纪律放在养护末尾：本轮全部删除/vacuum 的帧一次回写主库。
 	// RESTART 要等读者越过 WAL 末尾（busy_timeout 5s 兜住短暂重叠）；
-	// busy 未清只说明本轮没收干净，WAL 仍超阈下一轮重试，不算错误。
+	// busy 未清只说明本轮没收干净，WAL 仍超阈下一轮重试，不算错误——
+	// 返回行本就无人消费，走 ExecContext 顺带进入慢占用计时。
 	if s.WALBytes() > walRestartBytes {
-		var busy, nLog, nCkpt int
-		if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(RESTART)`).Scan(&busy, &nLog, &nCkpt); err != nil {
+		if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(RESTART)`); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -246,7 +307,7 @@ func (s *Store) WALBytes() int64 {
 // Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。读池退化
 // 复用写池时 ro==db，避免重复 Close。
 func (s *Store) Close() error {
-	if s.ro != s.db {
+	if s.ro != s.db.DB {
 		_ = s.ro.Close()
 	}
 	return s.db.Close()

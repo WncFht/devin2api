@@ -31,11 +31,11 @@ type DebugFileInfo struct {
 // 可重写文件走这里。超阈值内容透明压缩（usize=解压前尺寸）。
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "PutDebugFile")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	// OR REPLACE 的计数增量 = 新行库存尺寸 − 被顶掉的旧行尺寸；旧行
 	// 尺寸同事务先读，写连接串行化保证读到的是真实前驱。
 	var old int64
@@ -206,11 +206,11 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			storedChunks[i], chunkUsizes[i] = EncodePayload(r.Data)
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "WriteDebugBatch")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	// delta 累计本事务对 payload 库存字节的净增量：OR REPLACE 取新旧
 	// 行尺寸差（旧尺寸同事务先读），OR IGNORE 按 RowsAffected 实计，
 	// 删除路径由 RETURNING 直接汇总被删行——计数器只随提交成功的
@@ -650,7 +650,7 @@ func (s *Store) DebugErrorSignatures(ctx context.Context) (map[string][2]string,
 
 // DeleteDebugDir 删除一个目录在两表中的全部行；两表删除同事务提交。
 func (s *Store) DeleteDebugDir(ctx context.Context, dir string) error {
-	return s.deleteDebugRows(ctx, `dir=?`, dir)
+	return s.deleteDebugRows(ctx, "DeleteDebugDir", `dir=?`, dir)
 }
 
 // DeleteDebugDirsBefore 删除目录名字典序小于 prefix 的全部目录——
@@ -667,7 +667,7 @@ func (s *Store) DeleteDebugDirsBefore(ctx context.Context, dirPrefix string, exc
 			args = append(args, dir)
 		}
 	}
-	return s.deleteDebugRows(ctx, where, args...)
+	return s.deleteDebugRows(ctx, "DeleteDebugDirsBefore", where, args...)
 }
 
 // DebugDirSizesSplit 是 DebugDirSizes 的双口径版：一趟聚合同时返回各
@@ -724,7 +724,7 @@ func (s *Store) StripDebugDirsBefore(ctx context.Context, bound string, keep, ex
 			args = append(args, dir)
 		}
 	}
-	return s.deleteDebugRows(ctx, where, args...)
+	return s.deleteDebugRows(ctx, "StripDebugDirsBefore", where, args...)
 }
 
 // DeleteDebugPayloadsBefore 删除目录名小于 bound 的全部目录中、名字
@@ -747,7 +747,7 @@ func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exa
 		names = append(names, `name GLOB ?`)
 		args = append(args, prefix+"*")
 	}
-	return s.deleteDebugRows(ctx, `dir<? AND (`+strings.Join(names, ` OR `)+`)`, args...)
+	return s.deleteDebugRows(ctx, "DeleteDebugPayloadsBefore", `dir<? AND (`+strings.Join(names, ` OR `)+`)`, args...)
 }
 
 // deleteChunkDirs 是单个删除事务覆盖的目录数上界：片内命中行一次删完
@@ -764,7 +764,7 @@ const deleteChunkDirs = 200
 // payload 计数器按各片真实提交减量，中途失败时已完成片不回滚、计数
 // 已落账。refs 表与文件行共用 WHERE 是 CAS 引用随行的落点——ref 行
 // 无独立生命周期。
-func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) error {
+func (s *Store) deleteDebugRows(ctx context.Context, op, where string, args ...any) error {
 	enumArgs := make([]any, 0, len(args)*3)
 	for i := 0; i < 3; i++ {
 		enumArgs = append(enumArgs, args...)
@@ -797,7 +797,7 @@ func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) 
 		for _, dir := range chunk {
 			delArgs = append(delArgs, dir)
 		}
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, done, err := s.writeTx(ctx, op)
 		if err != nil {
 			return err
 		}
@@ -810,16 +810,18 @@ func (s *Store) deleteDebugRows(ctx context.Context, where string, args ...any) 
 			n, err := deleteReturningBytes(ctx, tx,
 				`DELETE FROM `+del.table+` WHERE `+delWhere+` RETURNING `+del.sizeExpr, delArgs...)
 			if err != nil {
-				_ = tx.Rollback()
+				done()
 				return err
 			}
 			freed += n
 		}
 		if err := addPayloadBytes(ctx, tx, -freed); err != nil {
-			_ = tx.Rollback()
+			done()
 			return err
 		}
-		if err := tx.Commit(); err != nil {
+		err = tx.Commit()
+		done()
+		if err != nil {
 			return err
 		}
 		s.debugBytes.Add(-freed)
@@ -938,11 +940,11 @@ const blobReapGrace = 10 * time.Minute
 // 撞破它。计数器按真实删除减量。挂在 Maintain 的周期养护里——对象
 // 是表不是目录，节奏与淘汰 tick 同量级即可，共享字节滞后释放。
 func (s *Store) ReapOrphanBlobs(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "ReapOrphanBlobs")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	var freed int64
 	n, err := deleteReturningBytes(ctx, tx,
 		`DELETE FROM debug_chunk_refs WHERE NOT EXISTS (

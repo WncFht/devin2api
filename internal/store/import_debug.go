@@ -103,11 +103,11 @@ func (s *Store) debugDirExists(ctx context.Context, dir string) (bool, error) {
 // 行进 debug_chunks。用裸 INSERT 而非 REPLACE：dir 已确认不在库，
 // 撞键说明与在线写入同名碰撞，宁可报错重跑也不静默覆盖活数据。
 func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, progress string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "importDebugDir:"+dir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	// imported 累计本事务入库的库存字节：裸 INSERT 不压缩，
 	// LENGTH 即写入长度——计数器随提交成功后增量。
 	var imported int64

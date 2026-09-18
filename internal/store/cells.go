@@ -462,11 +462,11 @@ func (s *Store) ReconcileCells(ctx context.Context) error {
 	if uncovered == 0 {
 		return nil
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "ReconcileCells")
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	wm, err := cellsWatermark(tx)
 	if err != nil {
 		return err

@@ -181,11 +181,11 @@ func logInsertArgs(e *LogRow) []any {
 // （业务分类归写方 debuglog.logRowFor 与导入器）。行插入与 rollup
 // 记账（log_cells 贡献 + 水位推进）同一事务提交。
 func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, done, err := s.writeTx(ctx, "InsertLog")
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer done()
 	res, err := tx.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
 	if err != nil {
 		return 0, err
