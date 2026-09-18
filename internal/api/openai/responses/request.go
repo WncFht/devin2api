@@ -531,6 +531,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 	case "function_call":
 		var item struct {
 			CallID    string `json:"call_id"`
+			ID        string `json:"id"`
 			Name      string `json:"name"`
 			Namespace string `json:"namespace"`
 			Arguments string `json:"arguments"`
@@ -538,9 +539,15 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
+		// 外来历史项可能只带 OpenAI spec 的 item id 不带 call_id，
+		// 与输出侧四变体宽容同口径回退。
+		callID := item.CallID
+		if callID == "" {
+			callID = item.ID
+		}
 		arguments, custom := common.NormalizeToolArguments(json.RawMessage(item.Arguments))
 		content := append(consumePendingThinking(pending),
-			llm.ToolCall{ID: item.CallID, Name: wireToolName(item.Name, item.Namespace, nameMaps), Arguments: arguments, Custom: custom})
+			llm.ToolCall{ID: callID, Name: wireToolName(item.Name, item.Namespace, nameMaps), Arguments: arguments, Custom: custom})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
 			Content:     content,
 			StopReason:  llm.StopReasonToolUse,
@@ -552,6 +559,7 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		// 走 Custom 通道原样上行到 invalid_json_str。
 		var item struct {
 			CallID    string `json:"call_id"`
+			ID        string `json:"id"`
 			Name      string `json:"name"`
 			Namespace string `json:"namespace"`
 			Input     string `json:"input"`
@@ -559,8 +567,12 @@ func appendInputItem(context *llm.RequestMessages, raw json.RawMessage, pending 
 		if err := json.Unmarshal(raw, &item); err != nil {
 			return err
 		}
+		callID := item.CallID
+		if callID == "" {
+			callID = item.ID
+		}
 		content := append(consumePendingThinking(pending),
-			llm.ToolCall{ID: item.CallID, Name: wireToolName(item.Name, item.Namespace, nameMaps), Arguments: json.RawMessage(item.Input), Custom: true})
+			llm.ToolCall{ID: callID, Name: wireToolName(item.Name, item.Namespace, nameMaps), Arguments: json.RawMessage(item.Input), Custom: true})
 		context.Messages = append(context.Messages, llm.AssistantMessage{
 			Content:     content,
 			StopReason:  llm.StopReasonToolUse,
