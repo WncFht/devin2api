@@ -173,6 +173,19 @@ func (manager *Manager) cleanOnce() int {
 		totalBytes += size
 		candidates = append(candidates, dir)
 	}
+	// CAS 共享 blob 不属于任何目录（refs 已按目录摊进 sizes），但占
+	// 全局库存——对账与淘汰闸都把它加在目录合计之上，与 debugBytes
+	// 计数器的四表口径对齐。目录先死、blob 由 mark-sweep 滞后收尸，
+	// 闸读到的 blob 字节含已删目录的暂留份额，need 因此略偏高估——
+	// 淘汰偏保守方向，收敛后口径精确。
+	blobBytes, err := manager.store.DebugBlobBytes(ctx)
+	if err != nil {
+		manager.ioErrors.Add(1)
+		slog.Warn("debuglog: measure debug blobs failed", "error", err)
+		return removed
+	}
+	storedBytes += blobBytes
+	totalBytes += blobBytes
 	if drift := manager.store.ReconcileDebugPayloadBytes(storedBytes); drift != 0 {
 		slog.Warn("debuglog: payload byte counter drifted", "drift", drift, "stored_bytes", storedBytes)
 	}

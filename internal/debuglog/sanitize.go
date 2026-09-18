@@ -327,7 +327,7 @@ func (recorder *Recorder) writeAttachment(data []byte, mimeType string) attachme
 		return reference
 	}
 	recorder.pushInsert(n, func() {
-		recorder.stageFile(name, stored, usize, false)
+		recorder.stageFile(name, stagedFile{stored: stored, usize: usize})
 	})
 	return reference
 }

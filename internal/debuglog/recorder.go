@@ -984,7 +984,7 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 						return
 					}
 					recorder.pushInsert(n, func() {
-						recorder.stageFile(MetaFile, stored, usize, false)
+						recorder.stageFile(MetaFile, stagedFile{stored: stored, usize: usize})
 					})
 				}
 			})
@@ -1257,7 +1257,7 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 	}
 	if data := recorder.metaJSON(&completion); data != nil {
 		stored, usize := manager.writerEncoder.Encode(data)
-		recorder.stageFile(MetaFile, stored, usize, false)
+		recorder.stageFile(MetaFile, stagedFile{stored: stored, usize: usize})
 	}
 	manager.dirtyBufs[recorder] = struct{}{}
 	// errors-only 的收敛点：写面随哨兵到齐而静止，干净完成的请求剥掉
@@ -1281,26 +1281,32 @@ func (manager *Manager) queueCompletion(recorder *Recorder, completion Completio
 	}
 }
 
-// pendingBatch 汇出本目录当前暂存的整文件行与 chunk 行；仅写 worker
-// 调用（stagedFiles/chunkBufs 是它的私有状态）。
-func (recorder *Recorder) pendingBatch() ([]store.DebugFileRow, []store.DebugChunkRow) {
-	var files []store.DebugFileRow
+// pendingBatch 汇出本目录当前暂存的整文件行、chunk 行与 CAS 共享对象；
+// 仅写 worker 调用（stagedFiles/chunkBufs 是它的私有状态）。manifest
+// 行把切块集与「本文件引用它们」的 ref 行一并交批——同事务落库是
+// 「无孤儿窗口」的结构保证；chunks 在 EncodeCASManifest 内已按 hash
+// 去重，本目录的 ref 集天然唯一。
+func (recorder *Recorder) pendingBatch() store.DebugBatch {
+	var batch store.DebugBatch
 	for name, staged := range recorder.stagedFiles {
-		files = append(files, store.DebugFileRow{
+		batch.Files = append(batch.Files, store.DebugFileRow{
 			Dir:      recorder.dir,
 			Name:     name,
 			Stored:   staged.stored,
 			Usize:    staged.usize,
 			IfAbsent: staged.ifAbsent,
 		})
-	}
-	var rows []store.DebugChunkRow
-	for name, buf := range recorder.chunkBufs {
-		if buf.Len() > 0 {
-			rows = append(rows, store.DebugChunkRow{Dir: recorder.dir, Name: name, Data: buf.Bytes()})
+		for _, c := range staged.chunks {
+			batch.Blobs = append(batch.Blobs, store.DebugBlobRow(c))
+			batch.Refs = append(batch.Refs, store.DebugRefRow{Dir: recorder.dir, Name: name, Hash: c.Hash})
 		}
 	}
-	return files, rows
+	for name, buf := range recorder.chunkBufs {
+		if buf.Len() > 0 {
+			batch.Chunks = append(batch.Chunks, store.DebugChunkRow{Dir: recorder.dir, Name: name, Data: buf.Bytes()})
+		}
+	}
+	return batch
 }
 
 // flushAll 把全部脏目录的暂存文件与 JSONL 缓冲、待收尾的剥离与日志行
@@ -1338,9 +1344,26 @@ func (manager *Manager) flushAll() {
 	var batch store.DebugBatch
 	batch.Encoder = manager.writerEncoder
 	for recorder := range manager.dirtyBufs {
-		files, rows := recorder.pendingBatch()
-		batch.Files = append(batch.Files, files...)
-		batch.Chunks = append(batch.Chunks, rows...)
+		sub := recorder.pendingBatch()
+		batch.Files = append(batch.Files, sub.Files...)
+		batch.Chunks = append(batch.Chunks, sub.Chunks...)
+		batch.Blobs = append(batch.Blobs, sub.Blobs...)
+		batch.Refs = append(batch.Refs, sub.Refs...)
+	}
+	// 同窗口多目录引到同一块时批内去重（跨目录共享恰是 CAS 的主场景，
+	// 重复 hash 常现）：OR IGNORE 本就兜住正确性，这里只为写连接省掉
+	// 重复的 PK 探测与无用行锁。
+	if len(batch.Blobs) > 1 {
+		seen := make(map[string]struct{}, len(batch.Blobs))
+		kept := batch.Blobs[:0]
+		for _, b := range batch.Blobs {
+			if _, dup := seen[string(b.Hash)]; dup {
+				continue
+			}
+			seen[string(b.Hash)] = struct{}{}
+			kept = append(kept, b)
+		}
+		batch.Blobs = kept
 	}
 	for _, item := range manager.pendingCompletions {
 		if item.strip {
@@ -1351,7 +1374,7 @@ func (manager *Manager) flushAll() {
 		}
 	}
 	manager.lastFlush = time.Now()
-	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
+	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.Blobs) == 0 && len(batch.Refs) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
 		for recorder := range manager.dirtyBufs {
 			manager.releaseStaged(recorder)
 			delete(manager.dirtyBufs, recorder)
@@ -1767,10 +1790,24 @@ func evalDeferred(value any) any {
 
 // stagedFile 是待刷写的一行整文件：stored 为调用方已编码的入库字节，
 // ifAbsent 对应 INSERT OR IGNORE（error.json 的 first-write-wins）。
+// chunks 非空表示 stored 是 CAS manifest——这些切块随文件行同批进
+// DebugBatch 的 Blobs/Refs 同事务落库，与 manifest 行无孤儿窗口。
 type stagedFile struct {
 	stored   []byte
 	usize    int64
 	ifAbsent bool
+	chunks   []store.CASChunk
+}
+
+// bytes 是本暂存行实际持有的字节量（manifest 行连它带来的切块一起
+// 计）——stagedBytes 入账与同名覆盖的净增量都按它算，与落库后
+// debugBytes 记的「manifest 尺寸 + 块入库尺寸」口径一致。
+func (f stagedFile) bytes() int64 {
+	n := int64(len(f.stored))
+	for _, c := range f.chunks {
+		n += int64(len(c.Stored) + len(c.Hash))
+	}
+	return n
 }
 
 // releaseStaged 归还 recorder 暂存账面的全部在飞字节：暂存内容随事务
@@ -1785,17 +1822,17 @@ func (manager *Manager) releaseStaged(recorder *Recorder) {
 // 调用。同窗口同名后写覆盖（等价 OR REPLACE 语义）；两边都是
 // ifAbsent 时保留先到者（first-write-wins）——被拒收的 op 的预留账
 // 由 runOp 统一结清，这里不动。
-func (recorder *Recorder) stageFile(name string, stored []byte, usize int64, ifAbsent bool) {
-	if old, ok := recorder.stagedFiles[name]; ok && old.ifAbsent && ifAbsent {
+func (recorder *Recorder) stageFile(name string, f stagedFile) {
+	if old, ok := recorder.stagedFiles[name]; ok && old.ifAbsent && f.ifAbsent {
 		return
 	}
-	// 净增量入账：同名覆盖时被替换的旧字节不再持有。op 自身的 charge
-	// 由 runOp 结清，这里记的是暂存面实际持有的字节——两笔账在 op
-	// 生命周期内是「预留→持有」的交接而非重复计数。
-	delta := int64(len(stored) - len(recorder.stagedFiles[name].stored))
+	// 净增量入账：同名覆盖时被替换的旧字节（连它的切块一起）不再持有。
+	// op 自身的 charge 由 runOp 结清，这里记的是暂存面实际持有的字节
+	// ——两笔账在 op 生命周期内是「预留→持有」的交接而非重复计数。
+	delta := f.bytes() - recorder.stagedFiles[name].bytes()
 	recorder.stagedBytes += delta
 	recorder.manager.inflightBytes.Add(delta)
-	recorder.stagedFiles[name] = stagedFile{stored: stored, usize: usize, ifAbsent: ifAbsent}
+	recorder.stagedFiles[name] = f
 	recorder.manager.dirtyBufs[recorder] = struct{}{}
 }
 
@@ -1811,14 +1848,14 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 	recorder.enqueue(func() {
 		var buf bytes.Buffer
 		recorder.writeSanitizedJSONLine(&buf, evalDeferred(value))
-		stored, usize := recorder.encodeStageFile(name, buf.Bytes())
-		n := int64(len(stored))
+		f := recorder.encodeStageFile(name, buf.Bytes())
+		n := f.bytes()
 		if !recorder.manager.chargeStageFile(name, n) {
 			recorder.noteEncodeDrop(n)
 			return
 		}
 		recorder.pushInsert(n, func() {
-			recorder.stageFile(name, stored, usize, false)
+			recorder.stageFile(name, f)
 		})
 	})
 }
@@ -1828,12 +1865,14 @@ func (recorder *Recorder) WriteJSON(name string, value any) {
 // 目录不再钉座——其 02/03* 照常落库，只是退回独立 gzip 形态。
 const deltaBaseCapBytes = 256 << 20
 
-// encodeStageFile 按阶段名选入库编码：01 独立 gzip 并把脱敏后字节钉为
-// 本目录 delta 基座；02 与 03-devin-request*（含 attemptN/searchN
-// 分片）以基座为 dict 存 zstd 帧——同一请求的三重投影只留残差。
-// 基座缺席（01 任务被 shed/未写）或残差收益不足时回退独立 gzip，
-// 读侧按魔数自判两种形态。仅编码协程调用（deltaBase 的无锁前提）。
-func (recorder *Recorder) encodeStageFile(name string, data []byte) (stored []byte, usize int64) {
+// encodeStageFile 按阶段名选入库编码：01 钉脱敏后字节为本目录 delta
+// 基座并走 CAS 切块（跨目录重复前缀按内容寻址共享，切不出 ≥2 块时
+// EncodeCASManifest 回退独立编码）；02 与 03-devin-request*（含
+// attemptN/searchN 分片）以基座为 dict 存 zstd 帧——同一请求的三重
+// 投影只留残差。基座缺席（01 任务被 shed/未写）或残差收益不足时
+// 回退独立 gzip，读侧按魔数自判三种形态。仅编码协程调用（deltaBase
+// 的无锁前提）；返回的 stagedFile 把 CAS 切块随身带给写侧。
+func (recorder *Recorder) encodeStageFile(name string, data []byte) stagedFile {
 	switch {
 	case name == StageHTTPRequest:
 		if recorder.manager.deltaBaseBytes.Add(int64(len(data))) <= deltaBaseCapBytes {
@@ -1841,12 +1880,20 @@ func (recorder *Recorder) encodeStageFile(name string, data []byte) (stored []by
 		} else {
 			recorder.manager.deltaBaseBytes.Add(-int64(len(data)))
 		}
+		// CAS 编码复用本协程的 PayloadEncoder（切块与文件行同 gzip
+		// 口径）——01 也是唯一 CAS 化阶段名。
+		if manifest, usize, chunks, ok := store.EncodeCASManifest(
+			recorder.manager.shardEncoders[recorder.shard], data); ok {
+			return stagedFile{stored: manifest, usize: usize, chunks: chunks}
+		}
 	case name == StageRequestMessages || strings.HasPrefix(name, devinRequestStageStem):
 		if recorder.deltaBase != nil {
-			return store.EncodePayloadDelta(data, recorder.deltaBase)
+			stored, usize := store.EncodePayloadDelta(data, recorder.deltaBase)
+			return stagedFile{stored: stored, usize: usize}
 		}
 	}
-	return recorder.encodePayload(data)
+	stored, usize := recorder.encodePayload(data)
+	return stagedFile{stored: stored, usize: usize}
 }
 
 // AppendJSONL 将一个有序事件追加到指定 JSONL 文件。
@@ -1925,7 +1972,7 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 				return
 			}
 			recorder.errorWritten = true
-			recorder.stageFile(ErrorFile, stored, usize, true)
+			recorder.stageFile(ErrorFile, stagedFile{stored: stored, usize: usize, ifAbsent: true})
 		})
 	})
 }
