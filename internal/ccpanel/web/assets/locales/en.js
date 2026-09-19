@@ -776,6 +776,30 @@ window.I18N_LOCALES['en'] = {
   'settings.update.toastFailed': 'Update failed',
   'settings.update.toastNew': 'New version available: {to}',
   'settings.update.toastLatest': 'Already on the latest version',
+
+  'settings.password.title': 'Panel Password',
+  'settings.password.description': 'Once set, a database override supersedes the config.yaml dashboard.password; the file value stays as emergency fallback. Clearing the override reverts to the file value.',
+  'settings.password.placeholder': 'New password',
+  'settings.password.save': 'Set Password',
+  'settings.password.clear': 'Clear Override',
+  'settings.password.empty': 'Enter a new password',
+  'settings.password.saved': 'Password updated; current session continued with the new password',
+  'settings.password.cleared': 'Database override cleared',
+  'settings.password.sourcePrefix': 'Source: {source}',
+  'settings.password.sourceDb': 'database override',
+  'settings.password.sourceFile': 'config file',
+  'settings.password.sourceOpen': 'unset (open access)',
+
+  'settings.provenance.title': 'Overrides',
+  'settings.provenance.pwDb': 'database override',
+  'settings.provenance.pwFile': 'config file',
+  'settings.provenance.pwOpen': 'unset',
+  'settings.provenance.srcConfig': 'declared in file',
+  'settings.provenance.srcPanel': 'added via panel',
+  'settings.provenance.srcTombstoned': 'deleted (tombstoned)',
+  'settings.provenance.overridden': 'overridden',
+  'settings.provenance.disabled': 'disabled',
+
   // Group names
   'settings.nav.stream-timeout': 'Stream Timeout',
   'settings.nav.non-stream-timeout': 'Non-stream Timeout',
@@ -788,6 +812,7 @@ window.I18N_LOCALES['en'] = {
   'settings.nav.identity': 'Client Identity',
   'settings.nav.gate': 'Rate Gate',
   'settings.nav.warm': 'Prefix Warming',
+  'settings.nav.pool': 'Pool Scheduling',
 
   'settings.group.streamTimeout': 'Stream Request Timeout',
   'settings.group.nonStreamTimeout': 'Non-stream Request Timeout',
@@ -800,6 +825,7 @@ window.I18N_LOCALES['en'] = {
   'settings.group.identity': 'Client Identity',
   'settings.group.gate': 'Rate Gate',
   'settings.group.warm': 'Prefix Warming',
+  'settings.group.pool': 'Pool Scheduling & Stream Timeouts',
 
   // Setting descriptions (mapped to backend keys)
   'settings.desc.log_retention_days': 'Log retention days (-1 = permanent, 1-365 days)',
@@ -1081,6 +1107,10 @@ window.I18N_LOCALES['en'] = {
   'settings.desc.max_concurrency': 'Max concurrent /v1/* requests (server.max_concurrency); must be >= 1',
   'settings.desc.debug_quota_interval_minutes': 'Quota snapshot sampling interval in minutes (debug.quota_interval_minutes, writes the quota_samples table); <=0 disables sampling',
   'settings.desc.debug_pprof_listen': 'Dedicated listen address for pprof/fgprof endpoints (debug.pprof_listen, e.g. 127.0.0.1:6060); empty disables — endpoints are unauthenticated, bind loopback only',
+  'settings.desc.devin_session_affinity_ttl_seconds': 'Sliding TTL seconds for session→account binding (devin.session_affinity_ttl_seconds); renewed on hit, <=0 defaults to 3600',
+  'settings.desc.devin_quota_low_threshold_percent': 'Weekly remaining quota percent below which a lane is demoted for new sessions (devin.quota_low_threshold_percent); <=0 defaults to 15, negative disables demotion',
+  'settings.desc.devin_no_progress_timeout_seconds': 'Upstream no-progress deadline in seconds after content has been produced (devin.no_progress_timeout_seconds); must cover the 15-25min silent tool-arg phase, <=0 defaults to 2700',
+  'settings.desc.devin_pre_event_no_progress_timeout_seconds': 'Per-segment no-progress deadline in seconds before the first event (devin.pre_event_no_progress_timeout_seconds); <=0 defaults to 600, cumulative pre-event silence has a separate hard cap',
 
   'nav.accounts': 'Accounts',
   'accounts.title': 'Upstream Accounts',

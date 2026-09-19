@@ -58,13 +58,18 @@ func (h *Handler) adminAPIIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminConfigCurrent 返回脱敏后的生效配置视图（文件键名与 config.yaml
-// 一致，token/api_key/password 以 sha256 前缀代替明文）。实现见 main 装配。
+// 一致，token/api_key/password 以 sha256 前缀代替明文），并附 provenance
+// 段：settings 覆盖/账号 overlay/密码来源的三层合并投影。实现见 main 装配。
 func (h *Handler) adminConfigCurrent(w http.ResponseWriter, r *http.Request) {
 	if h.configOps == nil || h.configOps.Current == nil {
 		respondError(w, http.StatusNotFound, "config view unavailable")
 		return
 	}
-	respondOK(w, h.configOps.Current())
+	view := h.configOps.Current()
+	if h.configOps.Provenance != nil {
+		view["provenance"] = h.configOps.Provenance(r.Context())
+	}
+	respondOK(w, view)
 }
 
 // adminConfigReload 重读配置文件并热应用；校验失败 422 且旧配置继续服役。

@@ -775,6 +775,30 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.update.toastFailed': '更新失败',
   'settings.update.toastNew': '发现新版本 {to}',
   'settings.update.toastLatest': '已是最新版本',
+
+  'settings.password.title': '面板密码',
+  'settings.password.description': '设置后以数据库覆盖压过 config.yaml 的 dashboard.password 生效，文件值留作应急找回；清除覆盖即回落文件值。',
+  'settings.password.placeholder': '新密码',
+  'settings.password.save': '设置密码',
+  'settings.password.clear': '清除覆盖',
+  'settings.password.empty': '请输入新密码',
+  'settings.password.saved': '密码已更新，当前会话已用新密码续上',
+  'settings.password.cleared': '已清除数据库覆盖',
+  'settings.password.sourcePrefix': '生效来源：{source}',
+  'settings.password.sourceDb': '数据库覆盖',
+  'settings.password.sourceFile': '配置文件',
+  'settings.password.sourceOpen': '未设置（开放访问）',
+
+  'settings.provenance.title': '覆盖层',
+  'settings.provenance.pwDb': '数据库覆盖值',
+  'settings.provenance.pwFile': '配置文件值',
+  'settings.provenance.pwOpen': '未设置',
+  'settings.provenance.srcConfig': '文件声明',
+  'settings.provenance.srcPanel': '面板新增',
+  'settings.provenance.srcTombstoned': '已删除（墓碑）',
+  'settings.provenance.overridden': '被覆盖',
+  'settings.provenance.disabled': '已停用',
+
   // 分组名称
   'settings.nav.stream-timeout': '流式超时',
   'settings.nav.non-stream-timeout': '非流式超时',
@@ -787,6 +811,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.nav.identity': '客户端身份',
   'settings.nav.gate': '速率闸门',
   'settings.nav.warm': '前缀保温',
+  'settings.nav.pool': '号池调度',
 
   'settings.group.streamTimeout': '流式请求超时',
   'settings.group.nonStreamTimeout': '非流式请求超时',
@@ -799,6 +824,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.group.identity': '客户端身份',
   'settings.group.gate': '速率闸门',
   'settings.group.warm': '前缀保温',
+  'settings.group.pool': '号池调度与流超时',
 
   // 设置项描述（与后端 key 对应）
   'settings.desc.log_retention_days': '日志保留天数(-1永久保留,1-365天)',
@@ -1080,6 +1106,10 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.desc.max_concurrency': '同时处理的 /v1/* 请求数上限（server.max_concurrency）；必须 >=1',
   'settings.desc.debug_quota_interval_minutes': '配额快照采样间隔分钟（debug.quota_interval_minutes，写 quota_samples 表）；<=0 不采样',
   'settings.desc.debug_pprof_listen': 'pprof/fgprof 剖析端点独立监听地址（debug.pprof_listen，如 127.0.0.1:6060）；空不启用，端点无鉴权只应绑回环',
+  'settings.desc.devin_session_affinity_ttl_seconds': '会话→账号绑定的滑动 TTL 秒数（devin.session_affinity_ttl_seconds）；命中即续期，<=0 默认 3600',
+  'settings.desc.devin_quota_low_threshold_percent': 'weekly 剩余配额低于此百分比时新会话降档（devin.quota_low_threshold_percent）；<=0 默认 15，负值关闭降权',
+  'settings.desc.devin_no_progress_timeout_seconds': '产出过内容后的上游无进度期限秒数（devin.no_progress_timeout_seconds）；须盖住工具参数 15-25min 静默，<=0 默认 2700',
+  'settings.desc.devin_pre_event_no_progress_timeout_seconds': '产出首个事件前每段无进度期限秒数（devin.pre_event_no_progress_timeout_seconds）；<=0 默认 600，pre-event 累计另有硬顶不突破',
 
   'nav.accounts': '上游账号',
   'accounts.title': '上游账号',

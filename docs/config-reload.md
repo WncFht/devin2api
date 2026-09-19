@@ -33,6 +33,8 @@
 所以凡是面板 settings 页登记过的键（全量注册表在 `internal/ccpanel/settings.go` 的 `buildSettingDefs`：debug_log__、log__ 保留策略、devin._/gate\__/warm_* 各热键、max_concurrency、auto_refresh_interval_seconds 等），面板值永远压过 config.yaml——文件改了同名字段也不会生效，直到面板侧 reset。
 这个「面板赢」的不变量是给未来加键时的硬约束：新热键若同时进面板设置表，reload 路径必须先文件、后重放，顺序不能反。
 
+`dashboard.password` 是同语义的单键覆盖层，落点是 `runtime_state["dashboard.password_hash"]`（sha256 hex，不落明文）而非 settings 表：`PUT /admin/dashboard/password` 写入后压过文件值服役——严格覆盖语义，文件密码不参与认证，轮换才踢得动旧 Bearer；body 空串清覆盖回落文件值，文件层只作应急找回。覆盖存在时 reload 改文件里的 `dashboard.password` 不夺回服役位（SetPassword 只刷回落层）；应急通道是外部 `sqlite3` 删/改该行后经任意一次认证未命中即被重读，无需重启。`GET /admin/config` 的 `provenance` 段把三层合并（文件→`upstream_accounts` 行→settings 表/密码覆盖行）摊平成来源标注：`dashboard_password`（db/file/open）、`accounts`（名→来源 + `overridden` 字段表）、`settings`（键→yaml 路径→文件值→生效值）。
+
 ## 以后加新热键的步骤
 
 1. 确认字段的运行时持有者可变：快照读取（如 adapter.config）加一对字段比较即可；烤进 transport/ticker/listener 的字段参考既有先例改造持有者——端点三件套是「重建调用束 + 原子换指针」（devin.go 的 upstreamLink、ccpanel 的 panelUpstream），ticker 是「cancel 重起」（SetQuotaInterval），listener 不做（见下）。

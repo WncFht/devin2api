@@ -66,6 +66,24 @@
           </div>
         </section>
 
+        <!-- 面板密码：dashboard.password 的 DB 覆盖层 -->
+        <section class="card mb-6" id="password-card">
+          <div class="settings-card-header">
+            <h3 class="section-title" data-i18n="settings.password.title">面板密码</h3>
+            <span id="password-source-badge" class="runtime-transcript-status"></span>
+          </div>
+          <p class="runtime-metrics-section-description" data-i18n="settings.password.description">
+            设置后以 DB 覆盖压过 config.yaml 生效，文件值留作应急找回；清除覆盖即回落文件值。
+          </p>
+          <div id="password-error" class="custom-rules-error" role="alert" hidden></div>
+          <div class="settings-save-actions">
+            <input type="password" id="password-input" class="form-input settings-password-input" autocomplete="new-password"
+              data-i18n-placeholder="settings.password.placeholder" placeholder="新密码">
+            <button id="password-save-btn" type="button" class="btn btn-primary" data-i18n="settings.password.save">设置密码</button>
+            <button id="password-clear-btn" type="button" class="btn btn-secondary" data-i18n="settings.password.clear" hidden>清除覆盖</button>
+          </div>
+        </section>
+
         <section id="settings-group-nav-section" class="mt-2 mb-2 settings-group-nav-section" hidden>
           <div class="time-range-container settings-group-nav-container">
             <div id="settings-group-nav" class="time-range-selector seg settings-group-nav">
@@ -115,6 +133,7 @@
           <div id="effective-config-banner" class="custom-rules-error" role="alert" hidden></div>
           <div id="effective-config-degraded" class="custom-rules-error" role="alert" hidden></div>
           <div id="effective-config-meta" class="quota-kv-grid"></div>
+          <div id="effective-config-provenance" class="effective-config-provenance"></div>
           <pre id="effective-config-json" class="upstream-pre effective-config-json"></pre>
           <div class="settings-save-actions">
             <button id="effective-config-refresh-btn" type="button" class="btn btn-secondary" data-i18n="settings.effectiveConfig.refresh">刷新视图</button>

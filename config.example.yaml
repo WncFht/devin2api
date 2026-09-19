@@ -183,6 +183,9 @@ devin:
 dashboard:
   # 管理面板密码；留空则无需登录，直接进入 /web——server.listen 绑到
   # 非回环地址（默认 :8080 是全部接口）时建议设置，否则面板对网络开放。
+  # 面板设置页可再设一个 DB 覆盖密码压过此值服役（严格覆盖，本值只做
+  # 应急找回层；忘密码时 sqlite3 删 runtime_state 的 dashboard.password_hash
+  # 行即回落此值，无需重启）。
   password: ""
 
 # 下游令牌（/v1 准入凭据）只在面板管理：/web/tokens.html 创建，明文

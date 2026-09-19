@@ -366,6 +366,37 @@
   max-height: 360px;
 }
 
+.effective-config-provenance {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.effective-config-provenance:empty {
+  display: none;
+}
+
+.effective-config-provenance .prov-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.effective-config-provenance .prov-row {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.effective-config-provenance .prov-fields {
+  color: var(--text-secondary, #888);
+}
+
+.settings-password-input {
+  max-width: 280px;
+}
+
 .runtime-metrics-footer-actions {
   display: flex;
   gap: 8px;

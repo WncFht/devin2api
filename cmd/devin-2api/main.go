@@ -437,6 +437,32 @@ func main() {
 		Current: func() map[string]any {
 			return rt.View()
 		},
+		// provenance 把三层合并摊平给面板读：settings 覆盖行（键→yaml
+		// 路径→文件值→生效值）、账号 overlay（名→来源→被顶掉的字段）、
+		// 面板密码来源（db 覆盖 / file / open）。账号段缺席语义=读库失败，
+		// 其余两段照常回——provenance 是观测面，不因一路缺腿整体 500。
+		Provenance: func(ctx context.Context) map[string]any {
+			p := map[string]any{
+				"settings":           settingsStore.OverrideProvenance(),
+				"dashboard_password": ccPanel.PasswordSource(),
+			}
+			resolved, err := dbStore.EffectiveAccounts(ctx, rt.Config().Devin.Accounts)
+			if err != nil {
+				slog.Warn("provenance: resolve accounts failed", "error", err)
+				return p
+			}
+			rows := make([]map[string]any, 0, len(resolved))
+			for _, a := range resolved {
+				rows = append(rows, map[string]any{
+					"name":       a.Name,
+					"source":     a.Source,
+					"overridden": a.Overridden,
+					"disabled":   a.Disabled,
+				})
+			}
+			p["accounts"] = rows
+			return p
+		},
 	})
 	// /admin/accounts 操作面：行写入+重推+回滚的编排在 ops 闭包内
 	// 完成，面板 handler 只做请求解码与 sentinel→状态码映射。

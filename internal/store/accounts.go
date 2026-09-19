@@ -46,10 +46,15 @@ type ResolvedAccount struct {
 	MaxRPM          int    // 行 ?? config ?? 0（0=继承全局 max_rpm）
 	Notes           string // 仅行值（config 无该字段）
 	Source          string // "config" | "panel" | "tombstoned"
-	ConfigDeclared  bool
-	HasRow          bool // 是否存在 overlay 行（含墓碑）
-	CreatedAt       int64
-	UpdatedAt       int64
+	// Overridden 列出被覆盖行顶掉的 config 字段名（token/credentials_file/
+	// api_key/priority/max_rpm）——merge 点唯一知道哪侧赢了，provenance
+	// 投影据它把「文件声明→行覆盖」渲染出来；config 无对应物的行字段
+	// （disabled/notes）不算覆盖。
+	Overridden     []string
+	ConfigDeclared bool
+	HasRow         bool // 是否存在 overlay 行（含墓碑）
+	CreatedAt      int64
+	UpdatedAt      int64
 }
 
 // 账号来源标记，按 source 语义进 JSON 契约。
@@ -102,12 +107,21 @@ func MergeAccounts(declared []config.DevinAccountConfig, rows []*AccountRow) []R
 			} else {
 				if row.Token != "" {
 					acc.Token = row.Token
+					acc.Overridden = append(acc.Overridden, "token")
 				}
 				if row.CredentialsFile != "" {
 					acc.CredentialsFile = row.CredentialsFile
+					acc.Overridden = append(acc.Overridden, "credentials_file")
 				}
 				if row.APIKey != "" {
 					acc.APIKey = row.APIKey
+					acc.Overridden = append(acc.Overridden, "api_key")
+				}
+				if row.Priority != nil {
+					acc.Overridden = append(acc.Overridden, "priority")
+				}
+				if row.MaxRPM != nil {
+					acc.Overridden = append(acc.Overridden, "max_rpm")
 				}
 			}
 		}

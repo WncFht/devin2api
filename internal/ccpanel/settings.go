@@ -34,7 +34,10 @@ import (
 // 必须有）；apply 把新值热应用进子系统，nil 表示纯面板侧键——值只进
 // 覆盖表，由前端读取生效（如 auto_refresh_interval_seconds）。
 type settingDef struct {
-	key   string
+	key string
+	// path 是该键在 config.yaml 里的点分路径（reload applied 名单同词）；
+	// 空表示 settings 表专属键，无文件字段可对拍（auto_refresh 等）。
+	path  string
 	typ   string // value_type: bool|int|float|string|json
 	desc  string // i18n settings.desc.<key> 缺失时的兜底描述
 	def   func() string
@@ -280,6 +283,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		// ---- 上游端点与模型 ----
 		{
 			key:  "devin_base_url",
+			path: "devin.base_url",
 			typ:  "string",
 			desc: "上游 Devin Connect 基础地址（devin.base_url）；换端点会重建上游连接束并清空 AssignModel 缓存",
 			def:  func() string { return d0().Devin.Endpoint.BaseURL },
@@ -290,6 +294,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_proxy",
+			path: "devin.proxy",
 			typ:  "string",
 			desc: "上游代理地址（devin.proxy，http/https/socks5，可带 userinfo）；空为直连或走系统环境变量",
 			def:  func() string { return d0().Devin.Endpoint.Proxy },
@@ -300,6 +305,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_force_http1",
+			path: "devin.force_http1",
 			typ:  "bool",
 			desc: "强制 HTTP/1.1 每请求独立连接（devin.force_http1）；关闭走 HTTP/2 单连接多路复用",
 			def:  func() string { return strconv.FormatBool(d0().Devin.Endpoint.ForceHTTP1) },
@@ -315,6 +321,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_model",
+			path: "devin.model",
 			typ:  "string",
 			desc: "上游 chat model UID（devin.model）；请求未指定模型时的兜底目标",
 			def:  func() string { return d0().Devin.Model },
@@ -325,6 +332,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_aliases",
+			path: "devin.aliases",
 			typ:  "json",
 			desc: "模型别名映射（devin.aliases），JSON 对象 {\"客户端模型名\":\"上游UID\"}；空/{} 为无别名",
 			def:  func() string { return jsonString(d0().Devin.Aliases, "{}") },
@@ -350,6 +358,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		// ---- 客户端身份（上游 metadata） ----
 		{
 			key:  "devin_client_name",
+			path: "devin.client_name",
 			typ:  "string",
 			desc: "发给上游的客户端名 metadata.extension_name/ide_name（devin.client_name）；空用内置默认",
 			def: func() string {
@@ -363,6 +372,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_client_version",
+			path: "devin.client_version",
 			typ:  "string",
 			desc: "客户端版本号 metadata.extension_version/ide_version（devin.client_version）；空用内置默认",
 			def: func() string {
@@ -376,6 +386,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "devin_client_os",
+			path: "devin.client_os",
 			typ:  "string",
 			desc: "客户端系统 metadata.os（devin.client_os）；空用内置默认",
 			def: func() string {
@@ -390,6 +401,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		// ---- 速率闸门 ----
 		{
 			key:  "devin_max_rpm",
+			path: "devin.max_rpm",
 			typ:  "int",
 			desc: "每个对齐分钟窗口发往上游的消息配额（devin.max_rpm，条/分钟）；<=0 不做窗口限速",
 			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).MaxRPM) },
@@ -400,6 +412,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_max_hold_seconds",
+			path: "devin.gate_max_hold_seconds",
 			typ:  "int",
 			desc: "闩外排队最长等待秒数，超时快速失败 429+Retry-After（devin.gate_max_hold_seconds）；<=0 默认 30",
 			def: func() string {
@@ -410,6 +423,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_drip_interval_seconds",
+			path: "devin.gate_drip_interval_seconds",
 			typ:  "int",
 			desc: "冷却闩内放行探针的间隔秒数（devin.gate_drip_interval_seconds）；<=0 默认 8",
 			def: func() string {
@@ -420,6 +434,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_default_latch_seconds",
+			path: "devin.gate_default_latch_seconds",
 			typ:  "int",
 			desc: "上游限流未带 reset hint 时的兜底闩秒数（devin.gate_default_latch_seconds）；<=0 默认 60",
 			def: func() string {
@@ -430,6 +445,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_window_offset_seconds",
+			path: "devin.gate_window_offset_seconds",
 			typ:  "int",
 			desc: "上游分钟桶界在本地分钟内的估计位置（devin.gate_window_offset_seconds，第几秒）；负值按 mod 60 折算（-1=:59），默认 0",
 			def: func() string {
@@ -440,6 +456,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_window_guard_seconds",
+			path: "devin.gate_window_guard_seconds",
 			typ:  "int",
 			desc: "桶界两侧停发死区秒数（devin.gate_window_guard_seconds）；<=0 或 >=30 默认 2",
 			def: func() string {
@@ -450,6 +467,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_bg_max_hold_seconds",
+			path: "devin.gate_bg_max_hold_seconds",
 			typ:  "int",
 			desc: "bg 类请求闸内排队预算秒数（devin.gate_bg_max_hold_seconds，fg 走 gate_max_hold_seconds）；<=0 默认 120",
 			def: func() string {
@@ -460,6 +478,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "gate_bg_reserve_margin",
+			path: "devin.gate_bg_reserve_margin",
 			typ:  "int",
 			desc: "bg 准入预留公式的固定安全边际条数（devin.gate_bg_reserve_margin）；<=0 默认 4",
 			def:  func() string { return strconv.Itoa(devin.NormalizeGateConfig(d0().Devin.Gate).BgReserveMargin) },
@@ -471,6 +490,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		// ---- 前缀保温 ----
 		{
 			key:  "warm_prefix_enabled",
+			path: "devin.warm_prefix_enabled",
 			typ:  "bool",
 			desc: "前缀保温总开关（devin.warm_prefix_enabled）：静默会话按节拍重放请求体给上游 prompt cache 续期",
 			def:  func() string { return strconv.FormatBool(devin.NormalizeWarmConfig(d0().Devin.Warm).Enabled) },
@@ -486,6 +506,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_interval_seconds",
+			path: "devin.warm_prefix_interval_seconds",
 			typ:  "int",
 			desc: "每条保温谱系的 ping 节拍秒数（devin.warm_prefix_interval_seconds，须明显低于上游 ~780s TTL）；<=0 默认 180",
 			def: func() string {
@@ -496,6 +517,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_jitter_ratio",
+			path: "devin.warm_prefix_jitter_ratio",
 			typ:  "float",
 			desc: "ping 节拍抖动幅度 ±比例（devin.warm_prefix_jitter_ratio，防同刻齐射打满分钟桶）；取值 (0,1)，<=0 默认 0.15",
 			def: func() string {
@@ -520,6 +542,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "warm_prefix_max_streams",
+			path:  "devin.warm_prefix_max_streams",
 			typ:   "int",
 			desc:  "同时保温的谱系数上限（devin.warm_prefix_max_streams）；<=0 默认 256",
 			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxStreams) },
@@ -528,6 +551,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_max_retained_mb",
+			path: "devin.warm_prefix_max_retained_mb",
 			typ:  "int",
 			desc: "保留请求体内存总量上限 MB（devin.warm_prefix_max_retained_mb，超限按 LRU 驱逐）；<=0 默认 96",
 			def:  func() string { return strconv.FormatInt(devin.NormalizeWarmConfig(d0().Devin.Warm).MaxRetainedMB, 10) },
@@ -545,6 +569,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "warm_prefix_min_prefix_tokens",
+			path:  "devin.warm_prefix_min_prefix_tokens",
 			typ:   "int",
 			desc:  "谱系可保温的最低前缀 token 数（devin.warm_prefix_min_prefix_tokens，低于此冷启动够便宜不烧 RPM）；<=0 默认 8192",
 			def:   func() string { return strconv.Itoa(devin.NormalizeWarmConfig(d0().Devin.Warm).MinPrefixTokens) },
@@ -553,6 +578,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_blocked_max_idle_seconds",
+			path: "devin.warm_prefix_blocked_max_idle_seconds",
 			typ:  "int",
 			desc: "含阻塞型 pending 工具调用的谱系最长保温静默秒数（devin.warm_prefix_blocked_max_idle_seconds）；<=0 默认 14400",
 			def: func() string {
@@ -563,6 +589,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_userpaced_max_idle_seconds",
+			path: "devin.warm_prefix_userpaced_max_idle_seconds",
 			typ:  "int",
 			desc: "无 pending 或仅用户节奏 pending 的谱系最长静默秒数（devin.warm_prefix_userpaced_max_idle_seconds）；<=0 默认 2700",
 			def: func() string {
@@ -573,6 +600,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_subdone_max_idle_seconds",
+			path: "devin.warm_prefix_subdone_max_idle_seconds",
 			typ:  "int",
 			desc: "已完成 subagent 谱系最长保温静默秒数（devin.warm_prefix_subdone_max_idle_seconds）；<=0 默认 600",
 			def: func() string {
@@ -583,6 +611,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "warm_prefix_unknown_max_idle_seconds",
+			path: "devin.warm_prefix_unknown_max_idle_seconds",
 			typ:  "int",
 			desc: "无法分类流的最长保温静默秒数兜底（devin.warm_prefix_unknown_max_idle_seconds）；<=0 默认 1800",
 			def: func() string {
@@ -593,6 +622,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "warm_prefix_blocked_names",
+			path:  "devin.warm_prefix_blocked_names",
 			typ:   "json",
 			desc:  "判为阻塞型的 pending 工具名表（devin.warm_prefix_blocked_names），JSON 数组；空数组用内置默认",
 			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).BlockedNames, "[]") },
@@ -601,15 +631,62 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "warm_prefix_userpaced_names",
+			path:  "devin.warm_prefix_userpaced_names",
 			typ:   "json",
 			desc:  "判为用户节奏型的 pending 工具名表（devin.warm_prefix_userpaced_names），JSON 数组；空数组用内置默认",
 			def:   func() string { return jsonString(devin.NormalizeWarmConfig(d0().Devin.Warm).UserPacedNames, "[]") },
 			live:  devinLive(deps, func(c devin.Config) string { return jsonString(devin.NormalizeWarmConfig(c.Warm).UserPacedNames, "[]") }),
 			apply: devinField(deps, mutateNames(func(c *devin.Config) *[]string { return &c.Warm.UserPacedNames })),
 		},
+		// ---- 号池调度与流超时 ----
+		{
+			key:  "devin_session_affinity_ttl_seconds",
+			path: "devin.session_affinity_ttl_seconds",
+			typ:  "int",
+			desc: "会话→账号绑定的滑动 TTL 秒数（devin.session_affinity_ttl_seconds）；命中即续期，<=0 默认 3600",
+			def:  func() string { return strconv.Itoa(d0().Devin.SessionAffinityTTLSeconds) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.SessionAffinityTTLSeconds) }),
+			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
+				return &c.SessionAffinityTTLSeconds
+			})),
+		},
+		{
+			key:  "devin_quota_low_threshold_percent",
+			path: "devin.quota_low_threshold_percent",
+			typ:  "int",
+			desc: "weekly 剩余配额低于此百分比时新会话降档（devin.quota_low_threshold_percent）；<=0 默认 15，负值关闭降权",
+			def:  func() string { return strconv.Itoa(d0().Devin.QuotaLowThresholdPercent) },
+			live: devinLive(deps, func(c devin.Config) string { return strconv.Itoa(c.QuotaLowThresholdPercent) }),
+			apply: devinField(deps, mutateInt(func(c *devin.Config) *int {
+				return &c.QuotaLowThresholdPercent
+			})),
+		},
+		{
+			key:  "devin_no_progress_timeout_seconds",
+			path: "devin.no_progress_timeout_seconds",
+			typ:  "int",
+			desc: "产出过内容后的上游无进度期限秒数（devin.no_progress_timeout_seconds）；须盖住工具参数 15-25min 静默，<=0 默认 2700",
+			def: func() string {
+				return secondsOf(func(c devin.Config) time.Duration { return c.NoProgressTimeout })(d0().Devin)
+			},
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.NoProgressTimeout })),
+			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.NoProgressTimeout })),
+		},
+		{
+			key:  "devin_pre_event_no_progress_timeout_seconds",
+			path: "devin.pre_event_no_progress_timeout_seconds",
+			typ:  "int",
+			desc: "产出首个事件前每段无进度期限秒数（devin.pre_event_no_progress_timeout_seconds）；<=0 默认 600，pre-event 累计另有硬顶不突破",
+			def: func() string {
+				return secondsOf(func(c devin.Config) time.Duration { return c.PreEventNoProgressTimeout })(d0().Devin)
+			},
+			live:  devinLive(deps, secondsOf(func(c devin.Config) time.Duration { return c.PreEventNoProgressTimeout })),
+			apply: devinField(deps, mutateSeconds(func(c *devin.Config) *time.Duration { return &c.PreEventNoProgressTimeout })),
+		},
 		// ---- 服务与日志 ----
 		{
 			key:  "max_concurrency",
+			path: "server.max_concurrency",
 			typ:  "int",
 			desc: "同时处理的 /v1/* 请求数上限（server.max_concurrency）；必须 >=1",
 			def:  func() string { return strconv.Itoa(d0().MaxConcurrency) },
@@ -625,6 +702,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "debug_log_enabled",
+			path: "debug.enabled",
 			typ:  "bool",
 			desc: "启用请求日志（记录上游请求/响应原始数据）",
 			def:  func() string { return strconv.FormatBool(d0().DebugEnabled) },
@@ -640,6 +718,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "debug_log_errors_only",
+			path: "debug.errors_only",
 			typ:  "bool",
 			desc: "只保留失败请求的调试记录(干净完成的请求完结即删payload,logs摘要行仍保留)",
 			def:  func() string { return strconv.FormatBool(d0().DebugErrorsOnly) },
@@ -655,6 +734,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "log_retention_days",
+			path:  "debug.retention_days",
 			typ:   "int",
 			desc:  "日志保留天数(-1永久保留,1-365天)",
 			def:   func() string { return strconv.Itoa(d0().Policy.Days) },
@@ -663,6 +743,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "log_max_total_mb",
+			path:  "debug.max_total_mb",
 			typ:   "int",
 			desc:  "日志总容量上限(MB,<=0不限制,超限从最旧请求记录开始清理)",
 			def:   func() string { return strconv.FormatInt(d0().Policy.MaxTotalMB, 10) },
@@ -671,6 +752,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "log_payload_hours",
+			path:  "debug.payload_hours",
 			typ:   "int",
 			desc:  "大体积阶段记录保留小时数(超时剥离03/04/06与附件,保留meta/error等证据,<=0不剥离)",
 			def:   func() string { return strconv.Itoa(d0().Policy.PayloadHours) },
@@ -679,6 +761,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:   "log_keep_error_dirs",
+			path:  "debug.keep_error_dirs",
 			typ:   "int",
 			desc:  "容量淘汰时受保护的最新失败请求记录数(<=0不保护)",
 			def:   func() string { return strconv.Itoa(d0().Policy.KeepErrorDirs) },
@@ -695,6 +778,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "debug_quota_interval_minutes",
+			path: "debug.quota_interval_minutes",
 			typ:  "int",
 			desc: "配额快照采样间隔分钟（debug.quota_interval_minutes，写 quota_samples 表）；<=0 不采样",
 			def:  func() string { return strconv.Itoa(int(d0().QuotaInterval / time.Minute)) },
@@ -713,6 +797,7 @@ func (s *PanelSettings) buildSettingDefs(deps SettingsDeps) []settingDef {
 		},
 		{
 			key:  "debug_pprof_listen",
+			path: "debug.pprof_listen",
 			typ:  "string",
 			desc: "pprof/fgprof 剖析端点独立监听地址（debug.pprof_listen，如 127.0.0.1:6060）；空不启用，端点无鉴权只应绑回环",
 			def:  func() string { return d0().PprofListen },
@@ -813,6 +898,48 @@ func (s *PanelSettings) List() []map[string]any {
 		out = append(out, s.row(&s.defs[i]))
 	}
 	return out
+}
+
+// OverrideProvenance 返回在册覆盖项的来源投影（/admin/config 的
+// provenance.settings）：每行给 键→yaml 路径→文件值→生效值，让
+// 「settings 表压过 config.yaml」这层合并可直接读出来。path 为空的
+// settings 表专属键没有文件字段可对拍，不列入。proxy userinfo 与
+// 凭据同口径脱敏——override 值本身可能带 user:pass@。
+func (s *PanelSettings) OverrideProvenance() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []map[string]any
+	for i := range s.defs {
+		d := &s.defs[i]
+		v, ok := s.values[d.key]
+		if !ok || d.path == "" {
+			continue
+		}
+		file := d.def()
+		if d.key == "devin_proxy" {
+			file = redactURLUserinfo(file)
+			v = redactURLUserinfo(v)
+		}
+		out = append(out, map[string]any{
+			"key":        d.key,
+			"path":       d.path,
+			"file":       file,
+			"effective":  v,
+			"updated_at": s.updated[d.key],
+		})
+	}
+	return out
+}
+
+// redactURLUserinfo 剔除 URL 里的 user:pass@ 段（devin.proxy 覆盖值与
+// redactSecrets 同口径——面板展示不暴露代理凭据）。
+func redactURLUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = nil
+	return u.String()
 }
 
 // Get 返回单键的 wire 行；未知键返回 false。
@@ -969,7 +1096,8 @@ func (h *Handler) adminResetSetting(w http.ResponseWriter, r *http.Request) {
 // adminBatchUpdateSettings 实现 POST /admin/settings/batch：body 是
 // {key: value} 平铺表。未知键先整单拒绝；逐项按注册顺序应用，值非法
 // 或应用失败即停——已生效的前项不回滚（apply 含子系统副作用，无法
-// 预检）。当前调用方只发单键，原子性由单键天然满足。
+// 预检），但错误响应带 applied 回执，调用方拿得到部分生效的边界。
+// 当前调用方只发单键，原子性由单键天然满足。
 func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if h.settings == nil {
 		respondError(w, http.StatusServiceUnavailable, "settings unavailable")
@@ -991,11 +1119,15 @@ func (h *Handler) adminBatchUpdateSettings(w http.ResponseWriter, r *http.Reques
 	}
 	h.settings.mu.Unlock()
 	sort.Strings(keys)
+	applied := make([]string, 0, len(keys))
 	for _, k := range keys {
 		if err := h.settings.set(k, req[k]); err != nil {
-			respondError(w, http.StatusBadRequest, fmt.Sprintf("%s: %s", k, err.Error()))
+			writeEnvelope(w, http.StatusBadRequest, apiResponse{Success: false,
+				Error: fmt.Sprintf("%s: %s", k, err.Error()),
+				Data:  map[string]any{"applied": applied}})
 			return
 		}
+		applied = append(applied, k)
 	}
 	respondOK(w, map[string]any{"message": fmt.Sprintf("%d settings updated", len(keys))})
 }

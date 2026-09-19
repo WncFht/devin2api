@@ -11,7 +11,10 @@ package ccpanel
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,12 +31,23 @@ import (
 
 // Handler 提供面板的全部路由与后端服务。
 type Handler struct {
-	// authMu 保护 password/passwordHash：配置 reload 会运行时换值。
-	authMu   sync.RWMutex
-	password string
-	// passwordHash 是面板密码的 SHA-256：比较走定长哈希，既不向
-	// ConstantTimeCompare 泄漏长度，也与 apiKeyMiddleware 的口径一致。
+	// authMu 保护密码相关字段：配置 reload 与面板内轮换都会运行时换值。
+	authMu sync.RWMutex
+	// filePassword 是 config.yaml 的 dashboard.password 原值（启动与
+	// reload 写入）：它是应急回落层——DB 覆盖存在时不服役。
+	filePassword string
+	// dbPasswordHash/dbPasswordSet 是 runtime_state["dashboard.password_hash"]
+	// 的内存镜像：面板内轮换的落点，存在即压过文件值（overlay 语义，
+	// 不是双凭据——轮换才能把人踢出去）。
+	dbPasswordHash [32]byte
+	dbPasswordSet  bool
+	// passwordHash 是生效哈希：dbPasswordSet 取覆盖，否则
+	// sha256(filePassword)。比较走定长哈希，既不向 ConstantTimeCompare
+	// 泄漏长度，也与 apiKeyMiddleware 的口径一致。
 	passwordHash [32]byte
+	// passwordSet 是「面板是否有密码」的生效判定——DB 覆盖下文件
+	// 可能为空但面板仍有密码，旧的 password=="" 判据不够用。
+	passwordSet bool
 	// loginMu 保护 loginFailures：按客户端 IP 记录连续登录失败与锁定期——
 	// 面板是唯一持密码的端点，爆破代价要抬高。
 	loginMu       sync.RWMutex
@@ -130,6 +144,10 @@ type Handler struct {
 	staticEntries sync.Map
 }
 
+// dashboardPasswordHashKey 是面板密码覆盖行在 runtime_state 的键：
+// 值是 sha256 的 hex——仓内不落明文凭据（与 auth_tokens 同口径）。
+const dashboardPasswordHashKey = "dashboard.password_hash"
+
 // Deps 是 New 的装配入口：依赖一次给全，调用方不再背「哪个 Set* 先
 // 调」的顺序知识（旧接口里 store 必须先于 SetQuotaInterval 注入，否则
 // 采样协程按起跑时的 nil 句柄定生死）。各项缺席语义在字段注释标注。
@@ -175,8 +193,9 @@ func New(d Deps) (*Handler, error) {
 		return nil, err
 	}
 	h := &Handler{
-		password:           d.Password,
+		filePassword:       d.Password,
 		passwordHash:       sha256.Sum256([]byte(d.Password)),
+		passwordSet:        d.Password != "",
 		tokenFunc:          tokenFunc,
 		loginFailures:      make(map[string]*loginFail),
 		metrics:            d.Metrics,
@@ -204,6 +223,7 @@ func New(d Deps) (*Handler, error) {
 		return h.StatusReport(fetchCtx), nil
 	})
 	h.upstreamPtr.Store(up)
+	h.refreshPasswordOverride()
 	return h, nil
 }
 
@@ -221,20 +241,80 @@ func (h *Handler) Version() string {
 	return h.version
 }
 
-// SetPassword 运行时更换面板密码（配置 reload 热路径）。换密码的运维
-// 语义是踢人——前端拿旧 Bearer 立即 401。
+// SetPassword 更新文件侧密码并重算生效凭据（配置 reload 热路径）：
+// DB 覆盖存在时新文件值只做回落层，不夺回服役位。换密码的运维语义
+// 是踢人——前端拿旧 Bearer 立即 401。
 func (h *Handler) SetPassword(password string) {
 	h.authMu.Lock()
-	h.password = password
-	h.passwordHash = sha256.Sum256([]byte(password))
+	h.filePassword = password
+	h.resolvePasswordLocked()
 	h.authMu.Unlock()
 }
 
-// passwordSnapshot 返回密码与哈希的一致性快照。
-func (h *Handler) passwordSnapshot() (string, [32]byte) {
+// resolvePasswordLocked 按 overlay 语义重算生效凭据：DB 覆盖行存在
+// 即压过文件值，无行回落 sha256(filePassword)。调用方须持 authMu。
+func (h *Handler) resolvePasswordLocked() {
+	if h.dbPasswordSet {
+		h.passwordHash = h.dbPasswordHash
+		h.passwordSet = true
+		return
+	}
+	h.passwordHash = sha256.Sum256([]byte(h.filePassword))
+	h.passwordSet = h.filePassword != ""
+}
+
+// refreshPasswordOverride 重读 runtime_state["dashboard.password_hash"]
+// 刷新内存镜像。boot 与认证未命中时各调一次：后者让「sqlite3 删行/改行」
+// 成为不重启的应急恢复通道（面板自身写行时内存已同步，成功路径不付
+// 这趟 IO）。读失败/行非法一律保留现状——宁可按旧态服役也不让一次
+// IO 抖动把管理员锁在门外。
+func (h *Handler) refreshPasswordOverride() {
+	if h.store == nil {
+		return
+	}
+	raw, ok, err := h.store.GetState(context.Background(), dashboardPasswordHashKey)
+	if err != nil {
+		slog.Warn("ccpanel: read dashboard.password_hash failed, keeping current password state", "error", err)
+		return
+	}
+	h.authMu.Lock()
+	defer h.authMu.Unlock()
+	if !ok {
+		h.dbPasswordSet = false
+		h.dbPasswordHash = [32]byte{}
+		h.resolvePasswordLocked()
+		return
+	}
+	sum, derr := hex.DecodeString(strings.TrimSpace(raw))
+	if derr != nil || len(sum) != sha256.Size {
+		slog.Warn("ccpanel: dashboard.password_hash malformed, keeping current password state")
+		return
+	}
+	copy(h.dbPasswordHash[:], sum)
+	h.dbPasswordSet = true
+	h.resolvePasswordLocked()
+}
+
+// PasswordSource 返回生效密码来源：db=runtime_state 覆盖、file=config.yaml、
+// open=两层皆空（开放面板）。provenance 投影用。
+func (h *Handler) PasswordSource() string {
 	h.authMu.RLock()
 	defer h.authMu.RUnlock()
-	return h.password, h.passwordHash
+	switch {
+	case h.dbPasswordSet:
+		return "db"
+	case h.filePassword != "":
+		return "file"
+	default:
+		return "open"
+	}
+}
+
+// passwordSnapshot 返回「是否有密码」与生效哈希的一致性快照。
+func (h *Handler) passwordSnapshot() (bool, [32]byte) {
+	h.authMu.RLock()
+	defer h.authMu.RUnlock()
+	return h.passwordSet, h.passwordHash
 }
 
 // PoolDeps 是面板对号池的全部依赖：Snapshot 一次取齐 gate/warm/
@@ -440,6 +520,8 @@ func (h *Handler) routes() []panelRoute {
 			"删除该键的面板覆盖，回落 config.yaml/默认值"},
 		{http.MethodPost, "/admin/settings/batch", A(h.adminBatchUpdateSettings), "/admin/settings/batch",
 			"批量设置覆盖，body {\"key\": \"value\", ...}"},
+		{http.MethodPut, "/admin/dashboard/password", A(h.adminUpdateDashboardPassword), "/admin/dashboard/password",
+			"面板密码轮换（dashboard.password 的 DB 覆盖层）：body {\"password\"} 非空→sha256 入 runtime_state 压过文件值并回 token 续会话；空→清覆盖回落文件值（应急找回层）"},
 		{http.MethodGet, "/admin/auth-tokens", A(h.adminListAuthTokens), "/admin/auth-tokens?range=",
 			"下游令牌表 + range 内时间窗聚合统计（覆盖累计字段）；行含 anonymous 标记匿名通道"},
 		{http.MethodPost, "/admin/auth-tokens", A(h.adminCreateAuthToken), "/admin/auth-tokens",

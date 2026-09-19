@@ -431,6 +431,18 @@ function bindSettingsPageActions() {
     configReloadBtn.dataset.bound = '1';
   }
 
+  const passwordSaveBtn = document.getElementById('password-save-btn');
+  if (passwordSaveBtn && !passwordSaveBtn.dataset.bound) {
+    passwordSaveBtn.addEventListener('click', saveDashboardPassword);
+    passwordSaveBtn.dataset.bound = '1';
+  }
+
+  const passwordClearBtn = document.getElementById('password-clear-btn');
+  if (passwordClearBtn && !passwordClearBtn.dataset.bound) {
+    passwordClearBtn.addEventListener('click', clearDashboardPassword);
+    passwordClearBtn.dataset.bound = '1';
+  }
+
   const refreshBtn = document.getElementById('refresh-runtime-metrics-btn');
   if (refreshBtn && !refreshBtn.dataset.bound) {
     refreshBtn.addEventListener('click', loadRuntimeMetrics);
@@ -1323,6 +1335,138 @@ function renderEffectiveConfig() {
     ? JSON.stringify(data.config, null, 2)
     : String(data.error || t('settings.effectiveConfig.notLoaded'));
   setHighlightedCodeContent('effective-config-json', view, 'json');
+
+  renderConfigProvenance(data.provenance);
+  renderPasswordCard();
+}
+
+// 覆盖层投影：把三层合并摊平成可读行——面板密码来源（db/file/open）、
+// 账号 overlay（名→来源→被顶掉的字段）、settings 覆盖（路径→文件值
+// →生效值）。全部缺席时整块留白。
+function renderConfigProvenance(prov) {
+  const el = document.getElementById('effective-config-provenance');
+  if (!el) return;
+  if (!prov || typeof prov !== 'object') {
+    el.innerHTML = '';
+    return;
+  }
+  const lines = [];
+  const pwKey = {
+    db: 'settings.provenance.pwDb',
+    file: 'settings.provenance.pwFile',
+    open: 'settings.provenance.pwOpen'
+  }[prov.dashboard_password];
+  if (pwKey) {
+    lines.push(`<div class="prov-row"><code class="kpi-key">dashboard.password</code> ← ${escapeHtml(t(pwKey))}</div>`);
+  }
+  const accounts = Array.isArray(prov.accounts) ? prov.accounts : [];
+  for (const a of accounts) {
+    if (!a || !a.name) continue;
+    const srcKey = {
+      config: 'settings.provenance.srcConfig',
+      panel: 'settings.provenance.srcPanel',
+      tombstoned: 'settings.provenance.srcTombstoned'
+    }[a.source] || 'settings.provenance.srcConfig';
+    const overridden = Array.isArray(a.overridden) && a.overridden.length
+      ? ` <span class="prov-fields">(${escapeHtml(t('settings.provenance.overridden'))}: ${escapeHtml(a.overridden.join(', '))})</span>`
+      : '';
+    const disabled = a.disabled ? ` <span class="prov-fields">(${escapeHtml(t('settings.provenance.disabled'))})</span>` : '';
+    lines.push(`<div class="prov-row"><code class="kpi-key">${escapeHtml(String(a.name))}</code> ${escapeHtml(t(srcKey))}${overridden}${disabled}</div>`);
+  }
+  const settings = Array.isArray(prov.settings) ? prov.settings : [];
+  for (const s of settings) {
+    if (!s || !s.key) continue;
+    lines.push(`<div class="prov-row"><code class="kpi-key">${escapeHtml(String(s.path || s.key))}</code> ${escapeHtml(String(s.file ?? ''))} → <strong>${escapeHtml(String(s.effective ?? ''))}</strong> <span class="prov-fields">(${escapeHtml(String(s.key))})</span></div>`);
+  }
+  el.innerHTML = lines.length
+    ? `<div class="prov-title">${escapeHtml(t('settings.provenance.title'))}</div>${lines.join('')}`
+    : '';
+}
+
+// ===== 面板密码 =====
+// dashboard.password 的 DB 覆盖层：来源徽标读 /admin/config 的
+// provenance.dashboard_password（随生效配置同帧拉取）；set 回执带
+// token=新密码，就地续上 Bearer 会话免于重登。
+
+function renderPasswordCard() {
+  const prov = effectiveConfigData && effectiveConfigData.provenance;
+  const source = prov && prov.dashboard_password ? String(prov.dashboard_password) : '';
+  const badge = document.getElementById('password-source-badge');
+  const clearBtn = document.getElementById('password-clear-btn');
+  if (badge) {
+    const key = {
+      db: 'settings.password.sourceDb',
+      file: 'settings.password.sourceFile',
+      open: 'settings.password.sourceOpen'
+    }[source];
+    badge.textContent = key ? t('settings.password.sourcePrefix', { source: t(key) }) : '';
+  }
+  if (clearBtn) clearBtn.hidden = source !== 'db';
+}
+
+async function saveDashboardPassword() {
+  const input = document.getElementById('password-input');
+  const errEl = document.getElementById('password-error');
+  const pw = input ? input.value.trim() : '';
+  if (errEl) errEl.hidden = true;
+  if (!pw) {
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = t('settings.password.empty');
+    }
+    return;
+  }
+  const btn = document.getElementById('password-save-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const resp = await fetchDataWithAuth('/admin/dashboard/password', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    });
+    // 就地续会话：token=新密码（与 /login 回执同语义），写回当前
+    // 持有 token 的存储层。
+    if (resp && resp.token) {
+      for (const storage of [localStorage, sessionStorage]) {
+        if (storage.getItem(WebAuth.TOKEN_KEY)) storage.setItem(WebAuth.TOKEN_KEY, resp.token);
+      }
+    }
+    if (input) input.value = '';
+    showSuccess(t('settings.password.saved'));
+    await loadEffectiveConfig();
+  } catch (err) {
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = err.message;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function clearDashboardPassword() {
+  const errEl = document.getElementById('password-error');
+  if (errEl) errEl.hidden = true;
+  const btn = document.getElementById('password-clear-btn');
+  if (btn) btn.disabled = true;
+  try {
+    await fetchDataWithAuth('/admin/dashboard/password', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: '' })
+    });
+    showSuccess(t('settings.password.cleared'));
+    // 文件有密码时当前 Bearer 即刻失效——loadEffectiveConfig 的 401
+    // 会走标准登出跳转，正是「回落文件值」的应有后果。
+    await loadEffectiveConfig();
+  } catch (err) {
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = err.message;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function reloadEffectiveConfig() {
@@ -1366,6 +1510,9 @@ function getSettingGroupInfo(key) {
     // 余下的 devin_* 才归上游端点组。
     { id: 'gate', nameKey: 'settings.group.gate', order: 22, fb: '速率闸门', match: () => k === 'devin_max_rpm' || k.startsWith('gate_') },
     { id: 'warm', nameKey: 'settings.group.warm', order: 23, fb: '前缀保温', match: () => k.startsWith('warm_prefix_') },
+    // 号池调度与流超时须在 upstream 之前：四个键都以 devin_ 开头，
+    // 不先排掉会被并进上游端点组。
+    { id: 'pool', nameKey: 'settings.group.pool', order: 24, fb: '号池调度', match: () => k.startsWith('devin_session_') || k.startsWith('devin_quota_') || k.includes('no_progress_timeout') },
     { id: 'identity', nameKey: 'settings.group.identity', order: 15, fb: '客户端身份', match: () => k.startsWith('devin_client_') },
     { id: 'upstream', nameKey: 'settings.group.upstream', order: 10, fb: '上游端点', match: () => k.startsWith('devin_') },
 
@@ -1411,6 +1558,10 @@ function getSettingOrder(key) {
     warm_prefix_unknown_max_idle_seconds: 59,
     warm_prefix_blocked_names: 60,
     warm_prefix_userpaced_names: 61,
+    devin_session_affinity_ttl_seconds: 70,
+    devin_quota_low_threshold_percent: 71,
+    devin_no_progress_timeout_seconds: 72,
+    devin_pre_event_no_progress_timeout_seconds: 73,
     upstream_first_byte_timeout: 100,
     stream_timeout: 101,
     non_stream_timeout: 102,

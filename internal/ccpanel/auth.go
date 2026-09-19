@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -121,11 +122,28 @@ func (h *Handler) clearLoginFailure(ip string) {
 	}
 }
 
+// passwordMatches 比对明文与当前生效哈希；生效面开放（两层皆无密码）
+// 时恒真。
+func (h *Handler) passwordMatches(provided string) bool {
+	hasPassword, passwordHash := h.passwordSnapshot()
+	if !hasPassword {
+		return true
+	}
+	sum := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1
+}
+
 // checkPasswordCredential 校验单份密码凭据（Bearer 头或登录表单的明文），
 // 成功清该 IP 的失败账本，失败计入账本并报告是否已进入锁定期。
-func (h *Handler) checkPasswordCredential(provided string, passwordHash [32]byte, ip string) (ok, locked bool) {
-	sum := sha256.Sum256([]byte(provided))
-	if subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1 {
+// 未命中先同步一次 DB 覆盖镜像再比——「sqlite3 删行/改行」是不重启的
+// 应急恢复通道；这趟 GetState 只落在失败尝试上，正常校验不付 IO。
+func (h *Handler) checkPasswordCredential(provided string, ip string) (ok, locked bool) {
+	if h.passwordMatches(provided) {
+		h.clearLoginFailure(ip)
+		return true, false
+	}
+	h.refreshPasswordOverride()
+	if h.passwordMatches(provided) {
 		h.clearLoginFailure(ip)
 		return true, false
 	}
@@ -138,15 +156,15 @@ func (h *Handler) checkPasswordCredential(provided string, passwordHash [32]byte
 // 同一 IP 账本，只守 login 端点等于把全速穷举通道留给 Bearer；
 // authed 为真时 locked 无意义。
 func (h *Handler) CheckPanelBearer(r *http.Request) (authed, locked bool) {
-	password, passwordHash := h.passwordSnapshot()
-	if password == "" {
+	hasPassword, _ := h.passwordSnapshot()
+	if !hasPassword {
 		return true, false
 	}
 	auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		return false, false
 	}
-	return h.checkPasswordCredential(auth, passwordHash, remoteIP(r))
+	return h.checkPasswordCredential(auth, remoteIP(r))
 }
 
 // isPanelPassword 判定一份凭据是否即面板密码（面板开放时任何凭据都
@@ -154,18 +172,18 @@ func (h *Handler) CheckPanelBearer(r *http.Request) (authed, locked bool) {
 // auth.api_key 与 password 共用一串）命中 Resolve 后仍要用它把管理员
 // 从 api_token 受限身份捞回 admin。纯哈希比较，不进失败账本。
 func (h *Handler) isPanelPassword(cred string) bool {
-	password, passwordHash := h.passwordSnapshot()
+	hasPassword, passwordHash := h.passwordSnapshot()
 	sum := sha256.Sum256([]byte(cred))
-	return password == "" || subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1
+	return !hasPassword || subtle.ConstantTimeCompare(sum[:], passwordHash[:]) == 1
 }
 
 // CheckPanelPassword 校验登录表单提交的明文密码（/login admin 模式用）。
 func (h *Handler) CheckPanelPassword(pw string, r *http.Request) (ok, locked bool) {
-	password, passwordHash := h.passwordSnapshot()
-	if password == "" {
+	hasPassword, _ := h.passwordSnapshot()
+	if !hasPassword {
 		return true, false
 	}
-	return h.checkPasswordCredential(pw, passwordHash, remoteIP(r))
+	return h.checkPasswordCredential(pw, remoteIP(r))
 }
 
 // handleLogin 实现 ccLoad 契约的 POST /login：body {mode,password|token}。
@@ -228,6 +246,51 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // handleLogout 无服务端会话可清，回个成功让前端清本地 token 即可。
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, map[string]any{"message": "已登出"})
+}
+
+// adminUpdateDashboardPassword 实现 PUT /admin/dashboard/password：
+// body {"password"}——非空把 sha256 写进 runtime_state 覆盖行（overlay
+// 语义：压过 config.yaml 值服役，文件值保留作应急回落）；空则删行
+// 回落文件值。先持久化再换内存镜像，失败不出分裂态。
+// 回执 set 时带 token=新密码：登录接口本来就回 token=密码本身，前端
+// 直接续上 Bearer 会话免于重登；clear 不回 token——文件密码是应急
+// 找回层，不该发给刚被换下的会话。
+func (h *Handler) adminUpdateDashboardPassword(w http.ResponseWriter, r *http.Request) {
+	if h.store == nil {
+		respondError(w, http.StatusServiceUnavailable, "store unavailable")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	pw := strings.TrimSpace(req.Password)
+	if pw == "" {
+		if err := h.store.DeleteState(r.Context(), dashboardPasswordHashKey); err != nil {
+			respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		h.authMu.Lock()
+		h.dbPasswordSet = false
+		h.dbPasswordHash = [32]byte{}
+		h.resolvePasswordLocked()
+		h.authMu.Unlock()
+		respondOK(w, map[string]any{"source": h.PasswordSource()})
+		return
+	}
+	sum := sha256.Sum256([]byte(pw))
+	if err := h.store.SetState(r.Context(), dashboardPasswordHashKey, hex.EncodeToString(sum[:])); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.authMu.Lock()
+	h.dbPasswordHash = sum
+	h.dbPasswordSet = true
+	h.resolvePasswordLocked()
+	h.authMu.Unlock()
+	respondOK(w, map[string]any{"source": "db", "token": pw})
 }
 
 // dashboardSession 实现 GET /dashboard/session：按身份回角色形状——
