@@ -184,6 +184,10 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 
 	perModel := health.finalize()
 
+	var recentByModel map[string]float64
+	if isToday {
+		recentByModel = h.recentRPMByModel(ctx, scope.kh)
+	}
 	entries := make([]statsEntry, 0, len(models))
 	for _, m := range models {
 		a := aggs[m]
@@ -228,7 +232,7 @@ func (h *Handler) dashboardStats(w http.ResponseWriter, r *http.Request) {
 			e.AvgRPM = &v
 		}
 		if isToday {
-			if v := h.recentRPM(ctx, m, scope.kh); v > 0 {
+			if v := recentByModel[m]; v > 0 {
 				e.RecentRPM = &v
 				if e.PeakRPM == nil || *e.PeakRPM < v {
 					e.PeakRPM = &v

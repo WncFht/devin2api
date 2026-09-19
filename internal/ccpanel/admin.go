@@ -199,6 +199,10 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	data["rpm_stats"] = h.rpmStatsFiltered(r.Context(), since, until, statScope{}, isToday, "", rpmTotal, rpmPeak)
+	var recentByKH map[string]float64
+	if isToday {
+		recentByKH = h.recentRPMByKeyHash(r.Context())
+	}
 	for i, t := range list {
 		ov := &tokens[i]
 		a := byKH[t.KeyHash()]
@@ -227,7 +231,7 @@ func (h *Handler) adminListAuthTokens(w http.ResponseWriter, r *http.Request) {
 		ov.AvgRPM = float64(ov.SuccessCount+ov.FailureCount) * 60 / duration
 		ov.RecentRPM = 0
 		if isToday {
-			ov.RecentRPM = h.recentRPM(r.Context(), "", t.KeyHash())
+			ov.RecentRPM = recentByKH[t.KeyHash()]
 			if ov.PeakRPM < ov.RecentRPM {
 				ov.PeakRPM = ov.RecentRPM
 			}

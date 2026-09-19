@@ -71,6 +71,32 @@ func (h *Handler) recentRPM(ctx context.Context, model, kh string) float64 {
 	return v
 }
 
+// recentRPMByModel 一次 GROUP BY 扫描取全部生效模型的最近 60s
+// RPM；kh 非空时只看该令牌——替代逐模型 recentRPM 的 N+1。
+func (h *Handler) recentRPMByModel(ctx context.Context, kh string) map[string]float64 {
+	if h.store == nil {
+		return nil
+	}
+	m, err := h.store.LogRecentRPMByModel(ctx, kh)
+	if err != nil {
+		slog.Warn("ccpanel: recent rpm by model query failed", "error", err)
+	}
+	return m
+}
+
+// recentRPMByKeyHash 一次 GROUP BY 扫描取全部令牌的最近 60s
+// RPM——替代逐令牌 recentRPM 的 N+1。
+func (h *Handler) recentRPMByKeyHash(ctx context.Context) map[string]float64 {
+	if h.store == nil {
+		return nil
+	}
+	m, err := h.store.LogRecentRPMByKeyHash(ctx)
+	if err != nil {
+		slog.Warn("ccpanel: recent rpm by key hash query failed", "error", err)
+	}
+	return m
+}
+
 // lastByModel 返回各生效模型的最近快照；kh 非空时只看该令牌的行。
 func (h *Handler) lastByModel(ctx context.Context, kh string) map[string]store.LogModelLast {
 	if h.store == nil {
