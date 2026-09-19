@@ -1,67 +1,67 @@
-# Investigation Session Setup
+# 排查会话搭建
 
-Tools and techniques for **temporary deep-dive performance investigation** — not everyday monitoring. These are things you enable for hours or days while debugging a specific issue, then disable.
+用于**临时深挖性能问题**的工具与技术——不是日常监控。这些东西在排查某个具体问题时开几小时或几天，用完就关。
 
-## Table of Contents
+## 目录
 
-- [Setting Up a Session](#setting-up-a-session)
-- [Prometheus Go Runtime Collector](#prometheus-go-runtime-collector)
-    - [Key Series](#key-series)
-- [PromQL Deep-Dive Queries](#promql-deep-dive-queries)
-    - [GC pressure](#gc-pressure)
-    - [Memory leak detection](#memory-leak-detection)
-    - [Goroutine leak detection](#goroutine-leak-detection)
-    - [CPU saturation](#cpu-saturation)
-    - [Post-deploy regression detection](#post-deploy-regression-detection)
-    - [Example alerting rules](#example-alerting-rules)
-- [Host-Level Correlation](#host-level-correlation)
-- [Cost Warnings](#cost-warnings)
+- [搭建排查会话](#搭建排查会话)
+- [Prometheus Go Runtime 收集器](#prometheus-go-runtime-收集器)
+    - [关键 series](#关键-series)
+- [PromQL 深查查询](#promql-深查查询)
+    - [GC 压力](#gc-压力)
+    - [内存泄漏检测](#内存泄漏检测)
+    - [Goroutine 泄漏检测](#goroutine-泄漏检测)
+    - [CPU 饱和](#cpu-饱和)
+    - [部署后回归检测](#部署后回归检测)
+    - [告警规则示例](#告警规则示例)
+- [主机级关联](#主机级关联)
+- [成本警示](#成本警示)
 
-## Setting Up a Session
+## 搭建排查会话
 
-Before diving into profiles, set up the environment to collect high-resolution data:
+钻进 profile 之前，先把环境搭好以采集高分辨率数据：
 
-1. **Reduce Prometheus scrape interval** to <=10s on the target instance (normally 15-30s). More data points during a short investigation window reveal patterns that 30s intervals miss. Revert after investigation.
+1. **把 Prometheus 抓取间隔**在目标实例上降到 <=10s（正常是 15-30s）。排查窗口短，更多数据点能揭示 30s 间隔漏掉的模式。排查完改回去。
 
-2. **Enable pprof** via environment variable — no recompile needed:
+2. **启用 pprof**——用环境变量，不用重新编译：
 
     ```bash
     kubectl set env deployment/my-service PPROF_ENABLED=true
     kubectl rollout restart deployment/my-service
     ```
 
-3. **Enable continuous profiling** on the target instance only — not fleet-wide. Pyroscope/Parca on a single instance is manageable; on 50 replicas it overwhelms the backend.
+3. **启用持续 profiling**——只在目标实例上开，不要全舰队开。单实例跑 Pyroscope/Parca 可控；50 个副本会压垮后端。
 
     ```bash
     kubectl set env deployment/my-service PYROSCOPE_ENABLED=true
     kubectl rollout restart deployment/my-service
     ```
 
-4. **Enable debug logging** via env var if needed — but only on the target instance. Debug logging has significant throughput impact:
+4. **需要时开 debug 日志**——走环境变量，但只在目标实例上开。debug 日志对吞吐有显著影响：
 
     ```bash
     kubectl set env deployment/my-service LOG_LEVEL=debug
     kubectl rollout restart deployment/my-service
     ```
 
-**Key principle:** all costly debug features (pprof HTTP, continuous profiling, debug log level, trace collection) SHOULD be configurable via environment variables. This allows instant toggle without recompile. Design your application to support this from day one.
+**关键原则：** 所有有成本的 debug 特性（pprof HTTP、持续 profiling、debug 日志级别、trace 采集）都应该能用环境变量配置。这样才能不重新编译即时开关。从第一天起就按这个要求设计应用。
 
-## Prometheus Go Runtime Collector
+## Prometheus Go Runtime 收集器
 
-The `prometheus/client_golang` library automatically registers collectors that expose Go runtime metrics. These are invaluable during investigation sessions — they provide a time-series view of memory, GC, goroutines, and CPU that complements point-in-time profiles.
+`prometheus/client_golang` 库自动注册暴露 Go runtime 指标的收集器。排查会话期间它们价值很大——提供内存、GC、goroutine、CPU 的时间序列视图，补足单点 profile 的不足。
 
-When using `prometheus/client_golang`, refer to the library's official documentation to verify collector setup and available options.
+使用 `prometheus/client_golang` 时，查阅库的官方文档核实收集器配置与可用选项。
 
-### Key Series
+### 关键 series
 
-→ See [prometheus-go-metrics.md](./prometheus-go-metrics.md) for the **exhaustive reference** of all Go runtime metrics (verified from official sources). **Note:** runtime/metrics list varies by Go version — use `metrics.All()` at runtime for your specific Go version.
+→ 全部 Go runtime 指标的**完整参考**（已从官方来源核实）见 [prometheus-go-metrics.md](./prometheus-go-metrics.md)。**注意：** runtime/metrics 清单随 Go 版本变化——运行时用 `metrics.All()` 查你所用版本的清单。
 
-**Performance note:** `go_memstats_*` metrics internally call `runtime.ReadMemStats()`, which triggers a short stop-the-world pause. In Go 1.17+, the runtime/metrics collector (`collectors.NewGoCollector()`) uses `runtime/metrics` instead, which is cheaper. Prefer the modern collector in high-throughput services:
+**性能注意：** `go_memstats_*` 指标内部调 `runtime.ReadMemStats()`，会触发一次短暂的 stop-the-world 暂停。Go 1.17+ 中 runtime/metrics 收集器（`collectors.NewGoCollector()`）改用 `runtime/metrics`，开销更低。高吞吐服务优先用新式收集器：
 
 ```go
 import "github.com/prometheus/client_golang/prometheus/collectors"
 
-// Use runtime/metrics-based collector (lower overhead)
+// 用基于 runtime/metrics 的收集器（开销更低）
 reg := prometheus.NewRegistry()
 reg.MustRegister(collectors.NewGoCollector(
     collectors.WithGoCollectorRuntimeMetrics(collectors.MetricsAll),
@@ -69,65 +69,65 @@ reg.MustRegister(collectors.NewGoCollector(
 reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 ```
 
-## PromQL Deep-Dive Queries
+## PromQL 深查查询
 
-Use these during investigation sessions with the reduced scrape interval. Each query includes what to look for and what the result means.
+排查会话期间配合收紧的抓取间隔使用这些查询。每条都写明看什么、结果意味着什么。
 
-### GC pressure
+### GC 压力
 
-| PromQL                                                                          | What to look for                                                                         |
-| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `rate(go_gc_duration_seconds_count[5m])`                                        | GC cycles/s. >2/s sustained = excessive allocation rate. Reduce allocations per request. |
-| `rate(go_gc_duration_seconds_sum[5m]) / rate(go_gc_duration_seconds_count[5m])` | Average GC pause. Increasing trend = heap growing or too many pointers to scan.          |
-| `go_gc_duration_seconds{quantile="1"}`                                          | Worst-case GC pause. Spikes here cause tail latency (P99).                               |
+| PromQL                                                                          | 看什么                                                 |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `rate(go_gc_duration_seconds_count[5m])`                                        | GC 次数/秒。持续 >2/s = 分配速率过高。减少每请求分配。 |
+| `rate(go_gc_duration_seconds_sum[5m]) / rate(go_gc_duration_seconds_count[5m])` | 平均 GC 暂停。趋势上升 = 堆在涨，或要扫描的指针太多。  |
+| `go_gc_duration_seconds{quantile="1"}`                                          | 最坏 GC 暂停。这里的尖刺造成尾延迟（P99）。            |
 
-### Memory leak detection
+### 内存泄漏检测
 
-| PromQL                                                  | What to look for                                                                                        |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `go_memstats_alloc_bytes`                               | Should be roughly stable under constant load. Continuous increase = memory leak.                        |
-| `rate(go_memstats_alloc_bytes_total[5m])`               | Allocation rate (bytes/s). Compare before/after deploy — significant increase = new allocation pattern. |
-| `process_resident_memory_bytes - go_memstats_sys_bytes` | Gap = non-Go memory (cgo, mmap). Growing gap = non-Go leak.                                             |
+| PromQL                                                  | 看什么                                                     |
+| ------------------------------------------------------- | ---------------------------------------------------------- |
+| `go_memstats_alloc_bytes`                               | 恒定负载下应大致平稳。持续上涨 = 内存泄漏。                |
+| `rate(go_memstats_alloc_bytes_total[5m])`               | 分配速率（字节/秒）。对比部署前后——显著上升 = 新分配模式。 |
+| `process_resident_memory_bytes - go_memstats_sys_bytes` | 差值 = 非 Go 内存（cgo、mmap）。差值变大 = 非 Go 泄漏。    |
 
-### Goroutine leak detection
+### Goroutine 泄漏检测
 
-| PromQL                     | What to look for                                                     |
-| -------------------------- | -------------------------------------------------------------------- |
-| `go_goroutines`            | Should correlate with load. Growing independently of traffic = leak. |
-| `delta(go_goroutines[1h])` | Net goroutine change over 1h. Positive without load increase = leak. |
+| PromQL                     | 看什么                                  |
+| -------------------------- | --------------------------------------- |
+| `go_goroutines`            | 应与负载相关。脱离流量独立上涨 = 泄漏。 |
+| `delta(go_goroutines[1h])` | 1 小时净增。负载没涨却为正 = 泄漏。     |
 
-### CPU saturation
+### CPU 饱和
 
-| PromQL                                               | What to look for                                       |
-| ---------------------------------------------------- | ------------------------------------------------------ |
-| `rate(process_cpu_seconds_total[5m])`                | CPU cores consumed. Compare to GOMAXPROCS.             |
-| `rate(process_cpu_seconds_total[5m]) / <GOMAXPROCS>` | CPU utilization ratio. >0.8 sustained = CPU-saturated. |
+| PromQL                                               | 看什么                                |
+| ---------------------------------------------------- | ------------------------------------- |
+| `rate(process_cpu_seconds_total[5m])`                | 消耗的 CPU 核数。与 GOMAXPROCS 对比。 |
+| `rate(process_cpu_seconds_total[5m]) / <GOMAXPROCS>` | CPU 利用率。持续 >0.8 = CPU 饱和。    |
 
-### Post-deploy regression detection
+### 部署后回归检测
 
-| PromQL                                                                     | What to look for                                                                              |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `rate(go_memstats_alloc_bytes_total[5m])`                                  | Compare before/after deploy window. Significant increase = new allocation pattern introduced. |
-| `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))` | P99 latency increase after deploy = performance regression. Requires app-level histogram.     |
+| PromQL                                                                     | 看什么                                                 |
+| -------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `rate(go_memstats_alloc_bytes_total[5m])`                                  | 对比部署前后窗口。显著上升 = 引入了新分配模式。        |
+| `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))` | 部署后 P99 延迟上升 = 性能回归。需要应用层 histogram。 |
 
-### Example alerting rules
+### 告警规则示例
 
 ```yaml
-# GC taking too much time
+# GC 耗时过高
 - alert: HighGCPauseTime
   expr: rate(go_gc_duration_seconds_sum[5m]) / rate(go_gc_duration_seconds_count[5m]) > 0.01
   for: 10m
   annotations:
       summary: "Average GC pause >10ms — reduce allocations or tune GOGC"
 
-# Goroutine leak
+# Goroutine 泄漏
 - alert: GoroutineLeak
   expr: go_goroutines > 10000
   for: 5m
   annotations:
       summary: "Goroutine count >10K — check for leaked goroutines"
 
-# Memory approaching container limit
+# 内存逼近容器限额
 - alert: MemoryNearLimit
   expr: predict_linear(process_resident_memory_bytes[1h], 3600) > <container_limit_bytes>
   for: 15m
@@ -135,21 +135,21 @@ Use these during investigation sessions with the reduced scrape interval. Each q
       summary: "RSS projected to exceed container limit within 1h"
 ```
 
-Adjust thresholds to your application — a data pipeline has different baselines than an API server.
+阈值按你的应用调——数据管道与 API 服务的基线不一样。
 
-## Host-Level Correlation
+## 主机级关联
 
-Go runtime metrics alone don't show the full picture. Host-level metrics reveal whether the problem is in your application or the infrastructure.
+光有 Go runtime 指标看不到全貌。主机级指标揭示问题在你的应用里还是在基础设施里。
 
-- **`node_exporter`** — host CPU, memory, disk I/O, network. Correlate with Go app metrics: high `node_cpu_seconds_total` with low `process_cpu_seconds_total` = noisy neighbor, not your app.
-- **`process-exporter`** — per-process metrics on Linux. Useful when multiple Go services share a host.
+- **`node_exporter`**——主机 CPU、内存、磁盘 I/O、网络。与 Go 应用指标关联：`node_cpu_seconds_total` 高而 `process_cpu_seconds_total` 低 = noisy neighbor，不是你的应用。
+- **`process-exporter`**——Linux 上按进程的指标。多个 Go 服务共享一台主机时有用。
 
-## Cost Warnings
+## 成本警示
 
-**Profiles and traces are expensive to collect.** Keep them short-term and localized:
+**Profile 与 trace 的采集是有成本的。** 保持短期、局部：
 
-- **pprof CPU profiling** — CPU-intensive during the capture window. Don't run 30s profiles back-to-back in production. Space them out.
-- **Pyroscope continuous profiling** — ~2-5% CPU overhead **per instance, always-on**. At scale (hundreds of instances), this adds up in compute cost and backend storage. Enable on a subset of instances or on-demand via environment variable. → See `samber/cc-skills-golang@golang-observability` skill for Pyroscope setup.
-- **Execution traces** — generate large files quickly (MB/s). Capture 5-10s max. Longer traces are unwieldy and slow to analyze.
-- **Debug log level** — significant throughput impact due to allocation and I/O overhead. Never leave on permanently.
-- **All costly features** SHOULD be toggleable via environment variables for instant on/off without recompile. Design for this from day one.
+- **pprof CPU profiling**——采集窗口内 CPU 密集。生产上别连着跑 30s profile。错开跑。
+- **Pyroscope 持续 profiling**——**每实例常驻**约 2-5% CPU 开销。规模大了（几百实例）算力成本与后端存储会累积。在部分实例上开，或用环境变量按需开。Pyroscope 配置 → 见 `samber/cc-skills-golang@golang-observability` skill。
+- **执行 trace**——很快产生大文件（MB/s）。最多采 5-10s。更长的 trace 难处理、分析慢。
+- **Debug 日志级别**——分配与 I/O 开销带来显著吞吐影响。绝不长期开着。
+- **所有有成本的特性**都应该能用环境变量开关，不重新编译即时切换。从第一天起按此设计。

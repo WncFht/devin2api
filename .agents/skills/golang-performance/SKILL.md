@@ -1,105 +1,105 @@
 ---
 name: golang-performance
-description: "Golang performance optimization patterns and methodology - if X bottleneck, then apply Y. Covers allocation reduction, CPU efficiency, memory layout, GC tuning, pooling, caching, and hot-path optimization. Use when profiling or benchmarks have identified a bottleneck and you need the right optimization pattern to fix it. Also use when performing performance code review to suggest improvements or benchmarks that could help identify quick performance gains. Not for measurement methodology (→ See `samber/cc-skills-golang@golang-benchmark` skill) or debugging workflow (→ See `samber/cc-skills-golang@golang-troubleshooting` skill)."
+description: "Go 性能优化模式与方法论——瓶颈是 X 就应用 Y。覆盖减少分配、CPU 效率、内存布局、GC 调优、对象池、缓存与热路径优化。当 profiling 或基准测试已定位瓶颈、需要正确的优化模式来修复时使用；做性能代码评审、提出改进建议、或评估哪些基准测试能快速发现性能收益时也可使用。不用于测量方法论（→ 见 `samber/cc-skills-golang@golang-benchmark` skill）或调试工作流（→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill）。'if X bottleneck then apply Y' 'allocation reduction' 'GC tuning' 'hot-path optimization' 'performance code review'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Agent WebFetch Bash(benchstat:*) Bash(fieldalignment:*) Bash(staticcheck:*) Bash(curl:*) Bash(fgprof:*) Bash(perf:*) WebSearch AskUserQuestion EnterWorktree ExitWorktree
 ---
 
 # Golang Performance
 
-**Persona:** You are a Go performance engineer. You never optimize without profiling first — measure, hypothesize, change one thing, re-measure.
+**人设：**你是一名 Go 性能工程师。没有 profiling 绝不优化——先测量、提出假设、一次只改一处、再测量。
 
-**Thinking mode:** Reason as thoroughly as possible for performance optimization — shallow analysis misidentifies bottlenecks and deep reasoning ensures the right optimization is applied to the right problem. On Claude Code, use `ultrathink` to trigger extended thinking explicitly.
+**思考模式：**对性能优化做尽可能深入的推理——浅层分析会误判瓶颈，深入推理才能保证把正确的优化用在正确的问题上。在 Claude Code 上，用 `ultrathink` 显式触发扩展思考。
 
-**Orchestration mode:** Fan out the three sub-agents described in Review mode (architecture) (allocation and memory layout, I/O and concurrency, algorithmic complexity and caching) for a broad architectural performance review. A single hot-path review stays sequential; fan-out only pays off at package/service scope. On Claude Code, use `ultracode` to opt into multi-agent orchestration explicitly.
+**编排模式：**把评审模式（架构）里描述的三个 sub-agent（分配与内存布局、I/O 与并发、算法复杂度与缓存）发散出去，做一轮全面的架构级性能评审。单条热路径的评审保持顺序执行；只有到包/服务粒度，发散才划算。在 Claude Code 上，用 `ultracode` 显式启用多代理编排。
 
-**Modes:**
+**模式：**
 
-- **Review mode (architecture)** — broad scan of a package or service for structural anti-patterns (missing connection pools, unbounded goroutines, wrong data structures). Use up to 3 parallel sub-agents split by concern: (1) allocation and memory layout, (2) I/O and concurrency, (3) algorithmic complexity and caching.
-- **Review mode (hot path)** — focused analysis of a single function or tight loop identified by the caller. Work sequentially; one sub-agent is sufficient.
-- **Optimize mode** — a bottleneck has been identified by profiling. Follow the iterative cycle (define metric → baseline → diagnose → improve → compare) sequentially — one change at a time is the discipline.
+- **评审模式（架构）**——对一个包或服务做结构性反模式广扫（缺连接池、goroutine 无界、数据结构选错）。最多用 3 个并行 sub-agent 按关注点拆分：(1) 分配与内存布局，(2) I/O 与并发，(3) 算法复杂度与缓存。
+- **评审模式（热路径）**——针对调用方指认的单个函数或紧凑循环做聚焦分析。顺序执行，一个 sub-agent 足够。
+- **优化模式**——profiling 已定位瓶颈。按迭代循环（定义指标 → 基线 → 诊断 → 改进 → 对比）顺序执行——一次只改一处是纪律。
 
-**Dependencies:**
+**依赖：**
 
-- benchstat: `go install golang.org/x/perf/cmd/benchstat@latest`
+- benchstat：`go install golang.org/x/perf/cmd/benchstat@latest`
 
-# Go Performance Optimization
+# Go 性能优化
 
-## Core Philosophy
+## 核心理念
 
-1. **Profile before optimizing** — intuition about bottlenecks is wrong ~80% of the time. Use pprof to find actual hot spots (→ See `samber/cc-skills-golang@golang-troubleshooting` skill)
-2. **Allocation reduction yields the biggest ROI** — Go's GC is fast but not free. Reducing allocations per request often matters more than micro-optimizing CPU
-3. **Document optimizations** — add code comments explaining why a pattern is faster, with benchmark numbers when available. Future readers need context to avoid reverting an "unnecessary" optimization
+1. **先 profiling 再优化**——对瓶颈位置的直觉约 80% 是错的。用 pprof 找真正的热点（→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill）
+2. **减少分配回报最大**——Go 的 GC 快但不是免费。减少每请求分配常常比微调 CPU 更值得
+3. **优化要写文档**——加注释说明为什么这个模式更快，有基准数据就附上数字。后来的读者需要这些上下文，才不会把「没必要」的优化回滚掉
 
-## Rule Out External Bottlenecks First
+## 先排除外部瓶颈
 
-Before optimizing Go code, verify the bottleneck is in your process — if 90% of latency is a slow DB query or API call, reducing allocations won't help.
+优化 Go 代码之前，先确认瓶颈在你的进程里——如果 90% 的延迟来自一条慢 DB 查询或 API 调用，减少分配无济于事。
 
-**Diagnose:** 1- `fgprof` — captures on-CPU and off-CPU (I/O wait) time; if off-CPU dominates, the bottleneck is external 2- `go tool pprof` (goroutine profile) — many goroutines blocked in `net.(*conn).Read` or `database/sql` = external wait 3- Distributed tracing (OpenTelemetry) — span breakdown shows which upstream is slow
+**诊断：**1- `fgprof`——同时捕获 on-CPU 与 off-CPU（I/O 等待）时间；off-CPU 占主导说明瓶颈在外部 2- `go tool pprof`（goroutine profile）——大量 goroutine 阻塞在 `net.(*conn).Read` 或 `database/sql` 就是外部等待 3- 分布式追踪（OpenTelemetry）——span 分解能看出哪个上游慢
 
-**When external:** optimize that component instead — query tuning, caching, connection pools, circuit breakers (→ See `samber/cc-skills-golang@golang-database` skill, [Caching Patterns](references/caching.md)).
+**确认是外部瓶颈时：**去优化那个组件——查询调优、缓存、连接池、熔断器（→ 见 `samber/cc-skills-golang@golang-database` skill、[缓存模式](references/caching.md)）。
 
-## Iterative Optimization Methodology
+## 迭代优化方法论
 
-### The cycle: Define Goals → Benchmark → Diagnose → Improve → Benchmark
+### 循环：定义目标 → 基准测试 → 诊断 → 改进 → 基准测试
 
-1. **Define your metric** — latency, throughput, memory, or CPU? Without a target, optimizations are random
-2. **Write an atomic benchmark** — isolate one function per benchmark to avoid result contamination (→ See `samber/cc-skills-golang@golang-benchmark` skill)
-3. **Measure baseline** — `go test -bench=BenchmarkMyFunc -benchmem -count=6 ./pkg/... | tee /tmp/report-1.txt`
-4. **Diagnose** — use the **Diagnose** lines in each deep-dive section to pick the right tool
-5. **Improve** — apply ONE optimization at a time with an explanatory comment
-6. **Compare** — `benchstat /tmp/report-1.txt /tmp/report-2.txt` to confirm statistical significance
-7. **Commit** — paste the benchstat output in the commit body so reviewers and future readers see the exact improvement; follow the `perf(scope): summary` commit type
-8. **Repeat** — increment report number, tackle next bottleneck
+1. **定义指标**——延迟、吞吐、内存还是 CPU？没有目标的优化是乱枪打鸟
+2. **写原子化基准测试**——每个基准测试只隔离一个函数，避免结果互相污染（→ 见 `samber/cc-skills-golang@golang-benchmark` skill）
+3. **测基线**——`go test -bench=BenchmarkMyFunc -benchmem -count=6 ./pkg/... | tee /tmp/report-1.txt`
+4. **诊断**——用各深入章节的 **诊断** 行选工具
+5. **改进**——一次只应用一个优化，并加注释说明
+6. **对比**——`benchstat /tmp/report-1.txt /tmp/report-2.txt` 确认统计显著性
+7. **提交**——把 benchstat 输出贴进 commit body，让 reviewer 和后来的读者看到确切改进；commit 类型用 `perf(scope): summary`
+8. **重复**——报告编号递增，处理下一个瓶颈
 
-Refer to library documentation for known patterns before inventing custom solutions. Keep all `/tmp/report-*.txt` files as an audit trail.
+动手造方案前先查库文档里的已知模式。保留所有 `/tmp/report-*.txt` 文件作为审计轨迹。
 
-When multiple candidate optimizations compete for the same bottleneck, implement each in an isolated worktree via a separate sub-agent — then → See `samber/cc-skills-golang@golang-benchmark` skill for comparing the variants and its serial-measurement caveat (concurrent benchmark runs on shared CPU contaminate results, even when the implementations themselves were built in parallel).
+当多个候选优化方案竞争同一个瓶颈时，把每个方案放进独立 worktree、由各自的 sub-agent 实现——然后 → 见 `samber/cc-skills-golang@golang-benchmark` skill 对比各变体，并注意其串行测量警告（共享 CPU 上并发跑基准测试会污染结果，即使实现本身是并行构建的）。
 
-## Decision Tree: Where Is Time Spent?
+## 决策树：时间花在哪？
 
-| Bottleneck              | Signal (from pprof)                   | Action                                                                 |
-| ----------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
-| Too many allocations    | `alloc_objects` high in heap profile  | [Memory optimization](references/memory.md)                            |
-| CPU-bound hot loop      | function dominates CPU profile        | [CPU optimization](references/cpu.md)                                  |
-| GC pauses / OOM         | high GC%, container limits            | [Runtime tuning](references/runtime.md)                                |
-| Network / I/O latency   | goroutines blocked on I/O             | [I/O & networking](references/io-networking.md)                        |
-| Repeated expensive work | same computation/fetch multiple times | [Caching patterns](references/caching.md)                              |
-| Wrong algorithm         | O(n²) where O(n) exists               | [Algorithmic complexity](references/caching.md#algorithmic-complexity) |
-| Lock contention         | mutex/block profile hot               | → See `samber/cc-skills-golang@golang-concurrency` skill               |
-| Slow queries            | DB time dominates traces              | → See `samber/cc-skills-golang@golang-database` skill                  |
+| 瓶颈             | 信号（来自 pprof）                 | 动作                                                    |
+| ---------------- | ---------------------------------- | ------------------------------------------------------- |
+| 分配过多         | heap profile 中 `alloc_objects` 高 | [内存优化](references/memory.md)                        |
+| CPU 受限的热循环 | 某函数主导 CPU profile             | [CPU 优化](references/cpu.md)                           |
+| GC 停顿 / OOM    | GC% 高、容器限额                   | [Runtime 调优](references/runtime.md)                   |
+| 网络 / I/O 延迟  | goroutine 阻塞在 I/O 上            | [I/O 与网络](references/io-networking.md)               |
+| 重复的昂贵工作   | 同一计算/拉取执行多次              | [缓存模式](references/caching.md)                       |
+| 算法选错         | 存在 O(n) 却用了 O(n²)             | [算法复杂度](references/caching.md#算法复杂度)          |
+| 锁竞争           | mutex/block profile 热             | → 见 `samber/cc-skills-golang@golang-concurrency` skill |
+| 慢查询           | trace 中 DB 时间占主导             | → 见 `samber/cc-skills-golang@golang-database` skill    |
 
-## Common Mistakes
+## 常见错误
 
-| Mistake                                 | Fix                                                                                          |
-| --------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Optimizing without profiling            | Profile with pprof first — intuition is wrong ~80% of the time                               |
-| Default `http.Client` without Transport | `MaxIdleConnsPerHost` defaults to 2; set to match your concurrency level                     |
-| Logging in hot loops                    | Log calls prevent inlining and allocate even when the level is disabled. Use `slog.LogAttrs` |
-| `panic`/`recover` as control flow       | panic allocates a stack trace and unwinds the stack; use error returns                       |
-| `unsafe` without benchmark proof        | Only justified when profiling shows >10% improvement in a verified hot path                  |
-| No GC tuning in containers              | Set `GOMEMLIMIT` to 80-90% of container memory to prevent OOM kills                          |
-| `reflect.DeepEqual` in production       | 50-200x slower than typed comparison; use `slices.Equal`, `maps.Equal`, `bytes.Equal`        |
+| 错误                              | 修法                                                                     |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| 没 profiling 就优化               | 先用 pprof——直觉约 80% 是错的                                            |
+| 默认 `http.Client` 不配 Transport | `MaxIdleConnsPerHost` 默认只有 2；按并发量设置                           |
+| 热循环里打日志                    | 日志调用阻碍内联，级别关闭也照样分配。用 `slog.LogAttrs`                 |
+| 拿 `panic`/`recover` 当控制流     | panic 要分配栈追踪并展开栈；用 error 返回                                |
+| 没有基准证据就上 `unsafe`         | 仅当 profiling 显示已验证热路径有 >10% 提升时才值得                      |
+| 容器里不调 GC                     | 把 `GOMEMLIMIT` 设为容器内存的 80-90%，防 OOM kill                       |
+| 生产代码用 `reflect.DeepEqual`    | 比类型化比较慢 50-200 倍；用 `slices.Equal`、`maps.Equal`、`bytes.Equal` |
 
-## Deep Dives
+## 深入专题
 
-- [Memory Optimization](references/memory.md) — allocation patterns, backing array leaks, sync.Pool, struct alignment
-- [CPU Optimization](references/cpu.md) — inlining, cache locality, false sharing, ILP, reflection avoidance
-- [I/O & Networking](references/io-networking.md) — HTTP transport config, streaming, JSON performance, cgo, batch operations
-- [Runtime Tuning](references/runtime.md) — GOGC, GOMEMLIMIT, GC diagnostics, GOMAXPROCS, PGO
-- [Caching Patterns](references/caching.md) — algorithmic complexity, compiled patterns, singleflight, work avoidance
-- [Production Observability](references/observability.md) — Prometheus metrics, PromQL queries, continuous profiling, alerting rules
+- [内存优化](references/memory.md)——分配模式、底层数组泄漏、sync.Pool、结构体对齐
+- [CPU 优化](references/cpu.md)——内联、缓存局部性、伪共享、ILP、避免反射
+- [I/O 与网络](references/io-networking.md)——HTTP transport 配置、流式处理、JSON 性能、cgo、批量操作
+- [Runtime 调优](references/runtime.md)——GOGC、GOMEMLIMIT、GC 诊断、GOMAXPROCS、PGO
+- [缓存模式](references/caching.md)——算法复杂度、预编译模式、singleflight、避免无谓工作
+- [生产可观测性](references/observability.md)——Prometheus 指标、PromQL 查询、持续性能分析、告警规则
 
-## CI Regression Detection
+## CI 回归检测
 
-Automate benchmark comparison in CI to catch regressions before they reach production. → See `samber/cc-skills-golang@golang-benchmark` skill for `benchdiff` and `cob` setup.
+在 CI 里自动化基准测试对比，在回归进入生产前抓住它。`benchdiff` 与 `cob` 的配置 → 见 `samber/cc-skills-golang@golang-benchmark` skill。
 
-## Cross-References
+## 交叉引用
 
-- → See `samber/cc-skills-golang@golang-benchmark` skill for benchmarking methodology, `benchstat`, and `b.Loop()` (Go 1.24+)
-- → See `samber/cc-skills-golang@golang-troubleshooting` skill for pprof workflow, escape analysis diagnostics, and performance debugging
-- → See `samber/cc-skills-golang@golang-data-structures` skill for slice/map preallocation and `strings.Builder`
-- → See `samber/cc-skills-golang@golang-concurrency` skill for worker pools, `sync.Pool` API, goroutine lifecycle, and lock contention
-- → See `samber/cc-skills-golang@golang-safety` skill for defer in loops, slice backing array aliasing
-- → See `samber/cc-skills-golang@golang-database` skill for connection pool tuning and batch processing
-- → See `samber/cc-skills-golang@golang-observability` skill for continuous profiling in production
+- → 见 `samber/cc-skills-golang@golang-benchmark` skill：基准测试方法论、`benchstat` 与 `b.Loop()`（Go 1.24+）
+- → 见 `samber/cc-skills-golang@golang-troubleshooting` skill：pprof 工作流、逃逸分析诊断与性能调试
+- → 见 `samber/cc-skills-golang@golang-data-structures` skill：切片/map 预分配与 `strings.Builder`
+- → 见 `samber/cc-skills-golang@golang-concurrency` skill：worker pool、`sync.Pool` API、goroutine 生命周期与锁竞争
+- → 见 `samber/cc-skills-golang@golang-safety` skill：循环中的 defer、切片底层数组别名
+- → 见 `samber/cc-skills-golang@golang-database` skill：连接池调优与批处理
+- → 见 `samber/cc-skills-golang@golang-observability` skill：生产环境持续性能分析

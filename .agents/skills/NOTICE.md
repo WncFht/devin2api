@@ -10,3 +10,5 @@ Skills in the following directories are vendored from upstream repositories; see
 | `fix-it-never-work-around-it`, `observability-first-debugging`                           | [NTCoding/claude-skillz](https://github.com/NTCoding/claude-skillz)                   | No license declared upstream                                      |
 | `writing-user-docs`                                                                      | [callstackincubator/agent-skills](https://github.com/callstackincubator/agent-skills) | MIT, Copyright (c) 2026 Callstack Incubator                       |
 | `docs-guard`                                                                             | [amElnagdy/guard-skills](https://github.com/amElnagdy/guard-skills)                   | MIT, Copyright (c) 2026 Ahmed Nagdy                               |
+
+全部 vendored skill 入库后均经中文化改写（正文、frontmatter description、references、evals 文本），内容与上游英文版有差异。

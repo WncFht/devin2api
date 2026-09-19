@@ -2,2132 +2,2189 @@
   {
     "id": 1,
     "name": "b-loop-vs-range-bn",
-    "description": "Tests whether the model uses b.Loop() (Go 1.24+) instead of the legacy for range b.N pattern",
-    "prompt": "Write a Go benchmark for a function `ComputeHash(data []byte) [32]byte` that uses SHA-256. The project uses Go 1.24. Include setup code that loads a 1MB test fixture.",
-    "trap": "Without the skill, the model defaults to `for i := 0; i < b.N; i++` or `for range b.N`, where setup may need manual b.ResetTimer() and unused results may need a sink to prevent dead code elimination",
+    "description": "测试模型是否使用 b.Loop()（Go 1.24+）而不是旧的 for range b.N 模式",
+    "prompt": "为一个使用 SHA-256 的函数 `ComputeHash(data []byte) [32]byte` 写一个 Go 基准测试。项目使用 Go 1.24。包含加载 1MB 测试 fixture 的 setup 代码。",
+    "trap": "没有 skill 时，模型默认用 `for i := 0; i < b.N; i++` 或 `for range b.N`，此时 setup 可能需要手动 b.ResetTimer()，未使用的结果可能还需要 sink 变量防止死代码消除",
     "assertions": [
-      { "id": "1.1", "text": "Uses b.Loop() as the benchmark loop construct" },
+      {
+        "id": "1.1",
+        "text": "使用 b.Loop() 作为基准测试循环结构"
+      },
       {
         "id": "1.2",
-        "text": "Setup code (loading fixture) is placed BEFORE the b.Loop() call, not inside it"
+        "text": "setup 代码（加载 fixture）放在 b.Loop() 调用之前，而不是循环内"
       },
       {
         "id": "1.3",
-        "text": "Does NOT use b.ResetTimer() since b.Loop() automatically excludes setup"
+        "text": "不使用 b.ResetTimer()，因为 b.Loop() 自动排除 setup"
       },
       {
         "id": "1.4",
-        "text": "Does NOT use a package-level sink variable to prevent dead code elimination"
+        "text": "不使用包级 sink 变量来防止死代码消除"
       },
       {
         "id": "1.5",
-        "text": "Does NOT use `for i := 0; i < b.N; i++` or `for range b.N`"
+        "text": "不使用 `for i := 0; i < b.N; i++` 或 `for range b.N`"
       }
     ]
   },
   {
     "id": 2,
     "name": "dead-code-elimination-awareness",
-    "description": "Tests whether the model understands that b.Loop() prevents compiler dead code elimination",
-    "prompt": "I have this benchmark that seems unrealistically fast — the results show 0.3 ns/op for a function that parses a 10KB JSON document. What's wrong?\n\n```go\nfunc BenchmarkParseJSON(b *testing.B) {\n    data := loadFixture(\"large.json\")\n    for i := 0; i < b.N; i++ {\n        ParseJSON(data)\n    }\n}\n```\nThe project uses Go 1.24.",
-    "trap": "Without the skill, the model may suggest adding b.ResetTimer() or increasing benchtime, missing the core issue of dead code elimination",
+    "description": "测试模型是否理解 b.Loop() 能防止编译器死代码消除",
+    "prompt": "我有这样一个基准测试，快得不真实——解析一个 10KB JSON 文档的函数结果显示 0.3 ns/op。哪里出了问题？\n\n```go\nfunc BenchmarkParseJSON(b *testing.B) {\n    data := loadFixture(\"large.json\")\n    for i := 0; i < b.N; i++ {\n        ParseJSON(data)\n    }\n}\n```\n项目使用 Go 1.24。",
+    "trap": "没有 skill 时，模型可能建议加 b.ResetTimer() 或增加 benchtime，漏掉死代码消除这个核心问题",
     "assertions": [
       {
         "id": "2.1",
-        "text": "Identifies dead code elimination as the cause — the compiler optimizes away the ParseJSON call because its result is unused"
+        "text": "指出死代码消除是原因——ParseJSON 的结果没被使用，编译器把调用优化掉了"
       },
       {
         "id": "2.2",
-        "text": "Recommends migrating to b.Loop() as the primary fix since it prevents DCE automatically"
+        "text": "建议迁移到 b.Loop() 作为主要修复手段，因为它能自动防止 DCE"
       },
       {
         "id": "2.3",
-        "text": "If mentioning the legacy workaround, describes using a package-level sink variable (not a local one)"
+        "text": "如果提到旧的 workaround，应描述使用包级 sink 变量（而非局部变量）"
       },
       {
         "id": "2.4",
-        "text": "Explains that b.Loop() also automatically excludes the setup code from timing"
+        "text": "解释 b.Loop() 还会自动把 setup 代码排除在计时之外"
       }
     ]
   },
   {
     "id": 3,
     "name": "count-flag-statistical-significance",
-    "description": "Tests whether the model recommends -count=10 for statistical significance rather than single runs",
-    "prompt": "I want to compare the performance of two JSON serialization approaches. How should I run the benchmarks to get reliable comparison data?",
-    "trap": "Without the skill, the model may suggest a single `go test -bench=.` run per version without -count, making benchstat comparison impossible",
+    "description": "测试模型是否推荐 -count=10 来获得统计显著性，而不是只跑一次",
+    "prompt": "我想比较两种 JSON 序列化方案的性能。应该怎么跑基准测试才能得到可靠的对比数据？",
+    "trap": "没有 skill 时，模型可能建议每个版本只跑一次 `go test -bench=.` 而不加 -count，导致无法用 benchstat 对比",
     "assertions": [
       {
         "id": "3.1",
-        "text": "Recommends -count=10 (or higher) for statistical significance"
+        "text": "推荐 -count=10（或更高）以获得统计显著性"
       },
       {
         "id": "3.2",
-        "text": "Recommends using benchstat to compare the two runs"
+        "text": "推荐用 benchstat 对比两组结果"
       },
       {
         "id": "3.3",
-        "text": "Recommends -benchmem to track allocation metrics"
+        "text": "推荐加 -benchmem 跟踪分配指标"
       },
       {
         "id": "3.4",
-        "text": "Recommends saving output to files (e.g., via tee) for later benchstat comparison"
+        "text": "建议把输出保存到文件（比如用 tee），供后续 benchstat 对比"
       },
       {
         "id": "3.5",
-        "text": "Uses -run='^$' to skip unit tests during benchmark runs"
+        "text": "使用 -run='^$' 在跑基准测试时跳过单元测试"
       }
     ]
   },
   {
     "id": 4,
     "name": "benchstat-output-interpretation",
-    "description": "Tests understanding of benchstat output format including p-value, tilde symbol, and confidence intervals",
-    "prompt": "I ran benchstat and got this output. What does it mean? Should I merge my optimization?\n\n```\n          │   old.txt   │              new.txt               │\n          │   sec/op    │   sec/op     vs base               │\nParse-16    4.592µ ± 8%   4.481µ ± 7%  ~ (p=0.089 n=10)\n```",
-    "trap": "Without the skill, the model may interpret the lower number as an improvement and recommend merging",
+    "description": "测试对 benchstat 输出格式的理解，包括 p 值、~ 符号和置信区间",
+    "prompt": "我跑了 benchstat 得到这个输出。什么意思？我应该合并这个优化吗？\n\n```\n          │   old.txt   │              new.txt               │\n          │   sec/op    │   sec/op     vs base               │\nParse-16    4.592µ ± 8%   4.481µ ± 7%  ~ (p=0.089 n=10)\n```",
+    "trap": "没有 skill 时，模型可能把更小的数字当成改进并建议合并",
     "assertions": [
       {
         "id": "4.1",
-        "text": "Explains that the ~ symbol means no statistically significant difference was detected"
+        "text": "解释 ~ 符号表示未检测到统计显著差异"
       },
       {
         "id": "4.2",
-        "text": "States that p=0.089 is above the 0.05 significance threshold"
+        "text": "指出 p=0.089 高于 0.05 显著性阈值"
       },
       {
         "id": "4.3",
-        "text": "Notes that the wide confidence intervals (±8%, ±7%) overlap, making the result untrustworthy"
+        "text": "指出很宽的置信区间（±8%、±7%）相互重叠，结果不可信"
       },
       {
         "id": "4.4",
-        "text": "Advises NOT to claim improvement based on this result"
+        "text": "建议不要基于这个结果宣称有改进"
       },
       {
         "id": "4.5",
-        "text": "Suggests increasing -count to 20+ or reducing noise sources as next steps"
+        "text": "建议下一步把 -count 提到 20+ 或减少噪声来源"
       }
     ]
   },
   {
     "id": 5,
     "name": "p-hacking-awareness",
-    "description": "Tests whether the model warns against rerunning benchmarks until significance appears",
-    "prompt": "My benchstat comparison keeps showing `~` (no significant difference). Can I just rerun the benchmarks a few more times and pick the run that shows significance?",
-    "trap": "Without the skill, the model may naively agree or suggest cherry-picking favorable runs",
+    "description": "测试模型是否会警告不要反复重跑基准测试直到出现显著性",
+    "prompt": "我的 benchstat 对比一直显示 `~`（无显著差异）。我能不能多跑几次基准测试，挑出现显著性的那次？",
+    "trap": "没有 skill 时，模型可能天真地同意，或建议挑有利的运行结果",
     "assertions": [
       {
         "id": "5.1",
-        "text": "Explicitly warns against 'retry until significant' as selection bias / p-hacking"
+        "text": "明确警告「重试到显著为止」属于选择性偏差 / p-hacking"
       },
       {
         "id": "5.2",
-        "text": "Explains that rerunning until ~ disappears introduces bias"
+        "text": "解释反复重跑直到 ~ 消失会引入偏差"
       },
       {
         "id": "5.3",
-        "text": "Recommends increasing -count ONCE and accepting the result"
+        "text": "建议只把 -count 提高一次并接受结果"
       },
       {
         "id": "5.4",
-        "text": "Mentions that at alpha=0.05, ~5% of benchmarks will randomly show significance (false positives)"
+        "text": "提到在 alpha=0.05 时，约 5% 的基准测试会随机显示显著性（假阳性）"
       },
       {
         "id": "5.5",
-        "text": "Suggests the change may genuinely have no measurable effect"
+        "text": "指出这个改动可能确实没有可测量的效果"
       }
     ]
   },
   {
     "id": 6,
     "name": "interleaving-benchmark-runs",
-    "description": "Tests knowledge of interleaving old/new benchmark runs to reduce systematic bias",
-    "prompt": "I'm comparing performance before and after an optimization. I ran all 10 baseline iterations first, then all 10 optimized iterations. My colleague says this approach is flawed. Why?",
-    "trap": "Without the skill, the model may not know about systematic bias from sequential runs or may not suggest pre-compilation with go test -c",
+    "description": "测试是否知道交错运行新旧基准测试以减少系统性偏差",
+    "prompt": "我在对比优化前后的性能。我先跑完 10 次基线，再跑 10 次优化后的。同事说这个方法有问题。为什么？",
+    "trap": "没有 skill 时，模型可能不知道顺序运行带来的系统性偏差，也可能不会建议用 go test -c 预编译",
     "assertions": [
       {
         "id": "6.1",
-        "text": "Identifies systematic bias: thermal throttling, background processes, CPU frequency scaling can differ between the first batch and second batch"
+        "text": "指出系统性偏差：热节流、后台进程、CPU 频率缩放在两批运行之间可能不同"
       },
       {
         "id": "6.2",
-        "text": "Recommends interleaving runs (alternating old/new) to reduce this bias"
+        "text": "建议交错运行（新旧交替）以减少这种偏差"
       },
       {
         "id": "6.3",
-        "text": "Recommends pre-compiling both versions with `go test -c` to avoid measuring compilation time"
+        "text": "建议用 `go test -c` 预编译两个版本，避免把编译时间计入测量"
       },
       {
         "id": "6.4",
-        "text": "Shows running the pre-compiled test binaries directly (e.g., ./old.test -test.bench=...)"
+        "text": "展示直接运行预编译的测试二进制（如 ./old.test -test.bench=...）"
       },
       {
         "id": "6.5",
-        "text": "Explains that without pre-compilation, each go test -bench invocation includes compilation overhead that varies"
+        "text": "解释不预编译时，每次 go test -bench 调用都包含波动的编译开销"
       }
     ]
   },
   {
     "id": 7,
     "name": "alloc-objects-vs-inuse-space",
-    "description": "Tests understanding of when to use alloc_objects vs inuse_space heap profile types",
-    "prompt": "My Go service has high GC CPU overhead (30% of CPU in runtime.mallocgc according to pprof). I captured a heap profile. Should I look at alloc_objects, alloc_space, or inuse_space?",
-    "trap": "Without the skill, the model may suggest inuse_space (which shows live objects, not allocation rate) or alloc_space (which shows bytes, not count)",
+    "description": "测试对何时使用 alloc_objects 与 inuse_space 堆 profile 类型的理解",
+    "prompt": "我的 Go 服务 GC 的 CPU 开销很高（pprof 显示 30% CPU 在 runtime.mallocgc）。我抓了一份堆 profile。应该看 alloc_objects、alloc_space 还是 inuse_space？",
+    "trap": "没有 skill 时，模型可能建议 inuse_space（显示存活对象而非分配速率）或 alloc_space（显示字节数而非次数）",
     "assertions": [
       {
         "id": "7.1",
-        "text": "Recommends alloc_objects as the primary choice for GC pressure / high allocation rate"
+        "text": "推荐 alloc_objects 作为排查 GC 压力 / 高分配速率的首选"
       },
       {
         "id": "7.2",
-        "text": "Explains that alloc_objects counts allocation events and helps find high-frequency object churn driving GC work"
+        "text": "解释 alloc_objects 统计分配事件次数，能找出驱动 GC 工作的高频对象更替"
       },
       {
         "id": "7.3",
-        "text": "Explains that inuse_space shows currently live objects and is for leak detection, not GC churn"
+        "text": "解释 inuse_space 显示当前存活对象，用于泄漏检测而非 GC churn"
       },
       {
         "id": "7.4",
-        "text": "Distinguishes alloc_space (total bytes allocated) as useful for reducing peak memory, not GC frequency"
+        "text": "区分 alloc_space（总分配字节数）适用于降低峰值内存，而非 GC 频率"
       },
       {
         "id": "7.5",
-        "text": "Mentions that runtime.mallocgc dominating CPU profile indicates allocation rate is the bottleneck, not computation"
+        "text": "提到 runtime.mallocgc 占 CPU profile 主导说明瓶颈是分配速率而非计算"
       }
     ]
   },
   {
     "id": 8,
     "name": "pprof-flat-vs-cum",
-    "description": "Tests understanding of flat vs cumulative time in pprof and when to use top -cum",
-    "prompt": "I ran `go tool pprof cpu.prof` and the top command shows runtime.mallocgc, runtime.memmove, and runtime.scanobject as the top functions. These are all runtime functions I can't modify. How do I find which of MY functions is causing this?",
-    "trap": "Without the skill, the model may suggest trying to optimize runtime functions or be unsure how to trace back to application code",
+    "description": "测试对 pprof 中 flat 与 cumulative 时间的理解，以及何时用 top -cum",
+    "prompt": "我跑了 `go tool pprof cpu.prof`，top 命令显示最靠前的是 runtime.mallocgc、runtime.memmove 和 runtime.scanobject。这些都是我改不了的 runtime 函数。怎么找到是我哪个函数导致的？",
+    "trap": "没有 skill 时，模型可能建议优化 runtime 函数，或不知道如何回溯到应用代码",
     "assertions": [
       {
         "id": "8.1",
-        "text": "Recommends using `top -cum` to find application functions with high cumulative time"
+        "text": "建议用 `top -cum` 找累计时间高的应用函数"
       },
       {
         "id": "8.2",
-        "text": "Explains that runtime functions appearing in top (flat) are symptoms, not causes — they're called by application code"
+        "text": "解释 top（flat）里出现的 runtime 函数是症状而非原因——它们是被应用代码调用的"
       },
       {
         "id": "8.3",
-        "text": "Explains the difference: flat = time in the function itself, cum = time in the function + everything it calls"
+        "text": "解释区别：flat = 函数自身消耗的时间，cum = 函数自身 + 它调用的一切的时间"
       },
       {
         "id": "8.4",
-        "text": "Suggests using `list` or `peek` to drill into the application functions that delegate to these runtime calls"
+        "text": "建议用 `list` 或 `peek` 深入查看委托给这些 runtime 调用的应用函数"
       },
       {
         "id": "8.5",
-        "text": "Explains the 'flat low + cum high' pattern: the function is a coordinator calling expensive things"
+        "text": "解释「flat 低 + cum 高」模式：该函数是调用昂贵操作的协调者"
       }
     ]
   },
   {
     "id": 9,
     "name": "escape-analysis-interpretation",
-    "description": "Tests ability to use and interpret escape analysis output",
-    "prompt": "My benchmark shows unexpected heap allocations for a function that only uses local variables. How can I find out why Go is allocating on the heap instead of the stack?",
-    "trap": "Without the skill, the model may suggest generic profiling without mentioning the specific compiler flag for escape analysis",
+    "description": "测试使用和解读逃逸分析输出的能力",
+    "prompt": "我的基准测试显示一个只用局部变量的函数出现了意外的堆分配。怎么查 Go 为什么分配在堆上而不是栈上？",
+    "trap": "没有 skill 时，模型可能建议泛泛的 profiling，而不提逃逸分析对应的编译器 flag",
     "assertions": [
       {
         "id": "9.1",
-        "text": "Recommends `go build -gcflags=\"-m\"` to show escape decisions"
+        "text": "推荐 `go build -gcflags=\"-m\"` 查看逃逸决策"
       },
       {
         "id": "9.2",
-        "text": "Mentions `-m -m` (double -m) for verbose output showing the escape chain / reason"
+        "text": "提到 `-m -m`（双 -m）输出更详细的信息，显示逃逸链 / 原因"
       },
       {
         "id": "9.3",
-        "text": "Lists common escape causes like returning pointer to local, interface boxing, closure captures"
+        "text": "列举常见逃逸原因，如返回局部变量指针、interface 装箱、闭包捕获"
       },
       {
         "id": "9.4",
-        "text": "Notes that this analysis is free (compile-time, no runtime overhead)"
+        "text": "指出这个分析是免费的（编译期进行，无运行时开销）"
       },
       {
         "id": "9.5",
-        "text": "Advises to only investigate escapes in hot functions identified by pprof, not all functions"
+        "text": "建议只调查 pprof 找出的热函数中的逃逸，而不是所有函数"
       }
     ]
   },
   {
     "id": 10,
     "name": "inlining-budget-and-blockers",
-    "description": "Tests knowledge of Go's inlining cost budget and common blockers",
-    "prompt": "I have a small helper function in a hot path that I want the Go compiler to inline. How do I check if it's being inlined, and what might prevent it?",
-    "trap": "Without the skill, the model may not know the specific budget number (80) or all the blockers like defer, recover, go statements",
+    "description": "测试对 Go 内联成本预算和常见阻碍因素的了解",
+    "prompt": "我有一个热路径上的小 helper 函数，想让 Go 编译器内联它。怎么检查它有没有被内联，什么会阻止内联？",
+    "trap": "没有 skill 时，模型可能不知道具体预算数字（80）或全部阻碍因素，如 defer、recover、go 语句",
     "assertions": [
       {
         "id": "10.1",
-        "text": "Recommends `go build -gcflags=\"-m\"` and grepping for 'can inline' or 'cannot inline'"
+        "text": "推荐 `go build -gcflags=\"-m\"` 并 grep 'can inline' 或 'cannot inline'"
       },
       {
         "id": "10.2",
-        "text": "Mentions the inline cost budget of 80 (as of Go 1.22+)"
+        "text": "提到内联成本预算是 80（Go 1.22+）"
       },
-      { "id": "10.3", "text": "Lists defer as an inlining blocker" },
-      { "id": "10.4", "text": "Lists recover() as an inlining blocker" },
+      {
+        "id": "10.3",
+        "text": "列出 defer 会阻碍内联"
+      },
+      {
+        "id": "10.4",
+        "text": "列出 recover() 会阻碍内联"
+      },
       {
         "id": "10.5",
-        "text": "Mentions that splitting large functions into smaller ones can help the hot inner function inline"
+        "text": "提到把大函数拆小有助于热点内层函数被内联"
       }
     ]
   },
   {
     "id": 11,
     "name": "trace-vs-pprof-selection",
-    "description": "Tests judgment on when to use execution trace vs pprof",
-    "prompt": "My Go HTTP service has high P99 latency (500ms) but pprof CPU profile shows only 15% CPU utilization. The top functions in the CPU profile are all fast. Where is the time going?",
-    "trap": "Without the skill, the model may suggest more CPU profiling or generic optimization, missing that this is a scheduling/blocking problem requiring the execution tracer",
+    "description": "测试对何时用 execution trace 与 pprof 的判断",
+    "prompt": "我的 Go HTTP 服务 P99 延迟很高（500ms），但 pprof CPU profile 只显示 15% CPU 利用率。CPU profile 里靠前的函数都很快。时间花在哪了？",
+    "trap": "没有 skill 时，模型可能建议做更多 CPU profiling 或泛泛优化，漏掉这是调度/阻塞问题、需要 execution tracer",
     "assertions": [
       {
         "id": "11.1",
-        "text": "Identifies this as a case where pprof is insufficient — low CPU with high latency means goroutines are waiting, not working"
+        "text": "识别出这是 pprof 不够用的场景——CPU 低但延迟高说明 goroutine 在等待而非工作"
       },
       {
         "id": "11.2",
-        "text": "Recommends `go tool trace` (execution tracer) to see scheduling delays and blocking"
+        "text": "推荐 `go tool trace`（execution tracer）查看调度延迟和阻塞"
       },
       {
         "id": "11.3",
-        "text": "Explains that pprof only shows on-CPU time; trace shows off-CPU waiting states"
+        "text": "解释 pprof 只显示 on-CPU 时间；trace 显示 off-CPU 等待状态"
       },
       {
         "id": "11.4",
-        "text": "Suggests looking at goroutine states: yellow/orange (runnable but waiting for P) or red/pink (blocked on I/O, channel, mutex)"
+        "text": "建议查看 goroutine 状态：黄/橙色（runnable 但在等 P）或红/粉色（阻塞在 I/O、channel、mutex）"
       },
       {
         "id": "11.5",
-        "text": "Mentions the -pprof=sync or -pprof=net flag to extract blocking profiles from trace data"
+        "text": "提到用 -pprof=sync 或 -pprof=net flag 从 trace 数据提取阻塞 profile"
       }
     ]
   },
   {
     "id": 12,
     "name": "benchstat-unit-normalization",
-    "description": "Tests understanding of benchstat's automatic unit normalization",
-    "prompt": "I'm confused by benchstat output. My benchmark reports `ns/op` but benchstat shows `sec/op` with a µ prefix. Is this an error?",
-    "trap": "Without the skill, the model may think there's a bug or unit mismatch",
+    "description": "测试对 benchstat 自动单位归一化的理解",
+    "prompt": "我看不懂 benchstat 的输出。我的基准测试报的是 `ns/op`，但 benchstat 显示带 µ 前缀的 `sec/op`。是出错了吗？",
+    "trap": "没有 skill 时，模型可能以为是 bug 或单位不匹配",
     "assertions": [
       {
         "id": "12.1",
-        "text": "Explains that benchstat automatically normalizes units for display"
+        "text": "解释 benchstat 会自动归一化单位用于显示"
       },
       {
         "id": "12.2",
-        "text": "States that ns/op is displayed as sec/op with µ (micro) prefix to avoid nonsensical 'µns/op'"
+        "text": "说明 ns/op 显示为带 µ（微）前缀的 sec/op，避免出现说不通的 'µns/op'"
       },
       {
         "id": "12.3",
-        "text": "Mentions that MB/s is similarly normalized to B/s with K, M, G prefixes"
+        "text": "提到 MB/s 类似地归一化为带 K、M、G 前缀的 B/s"
       },
       {
         "id": "12.4",
-        "text": "Confirms this is expected behavior, not an error"
+        "text": "确认这是预期行为，不是错误"
       }
     ]
   },
   {
     "id": 13,
     "name": "benchstat-filter-syntax",
-    "description": "Tests knowledge of benchstat's filter expression syntax for selecting specific benchmarks",
-    "prompt": "I have benchmark output with many sub-benchmarks like BenchmarkParse/format=json, BenchmarkParse/format=gob, BenchmarkEncode/size=1k, etc. I only want to compare the json format benchmarks. How do I filter benchstat output?",
-    "trap": "Without the skill, the model may suggest grepping the output file instead of using benchstat's built-in filter syntax",
+    "description": "测试对 benchstat 筛选表达式语法的了解",
+    "prompt": "我的基准测试输出里有很多子基准测试，如 BenchmarkParse/format=json、BenchmarkParse/format=gob、BenchmarkEncode/size=1k 等。我只想比较 json 格式的基准测试。怎么过滤 benchstat 输出？",
+    "trap": "没有 skill 时，模型可能建议 grep 输出文件，而不是用 benchstat 内置的过滤语法",
     "assertions": [
       {
         "id": "13.1",
-        "text": "Uses benchstat's -filter flag rather than pre-processing with grep"
+        "text": "使用 benchstat 的 -filter flag，而不是先用 grep 预处理"
       },
       {
         "id": "13.2",
-        "text": "Shows the correct filter syntax: -filter '/format:json' or similar key:value pattern"
+        "text": "展示正确的过滤语法：-filter '/format:json' 或类似的 key:value 模式"
       },
       {
         "id": "13.3",
-        "text": "Mentions regex support in filters (e.g., .name:/Parse/)"
+        "text": "提到过滤中支持正则（如 .name:/Parse/）"
       },
       {
         "id": "13.4",
-        "text": "Mentions logical operators (AND, OR, negation with -) in filter expressions"
+        "text": "提到过滤表达式中的逻辑运算符（AND、OR、用 - 取反）"
       }
     ]
   },
   {
     "id": 14,
     "name": "benchstat-projection-col-flag",
-    "description": "Tests knowledge of benchstat's -col flag for comparing sub-benchmark parameters",
-    "prompt": "I have a single benchmark file with results for BenchmarkEncode/format=json and BenchmarkEncode/format=gob. I want to compare json vs gob performance side by side in benchstat. How?",
-    "trap": "Without the skill, the model may suggest splitting into two files and comparing, or not know about the -col flag",
+    "description": "测试对 benchstat -col flag 用于对比子基准测试参数的了解",
+    "prompt": "我有一个基准测试文件，包含 BenchmarkEncode/format=json 和 BenchmarkEncode/format=gob 的结果。我想在 benchstat 里并排比较 json 和 gob 的性能。怎么做？",
+    "trap": "没有 skill 时，模型可能建议拆成两个文件再比较，或不知道 -col flag",
     "assertions": [
       {
         "id": "14.1",
-        "text": "Uses the -col /format flag to create columns from sub-benchmark parameter values"
+        "text": "使用 -col /format flag 把子基准测试参数值变成列"
       },
       {
         "id": "14.2",
-        "text": "Shows the correct command: benchstat -col /format bench.txt"
+        "text": "展示正确命令：benchstat -col /format bench.txt"
       },
       {
         "id": "14.3",
-        "text": "Mentions -row .name to simplify row names by stripping sub-benchmark config"
+        "text": "提到用 -row .name 去掉子基准测试配置，简化行名"
       },
       {
         "id": "14.4",
-        "text": "Mentions the @() sort modifier for controlling column order (e.g., /format@(gob json))"
+        "text": "提到 @() 排序修饰符控制列顺序（如 /format@(gob json)）"
       }
     ]
   },
   {
     "id": 15,
     "name": "benchstat-assume-exact",
-    "description": "Tests knowledge of benchstat's assume=exact unit metadata for non-varying metrics",
-    "prompt": "I want to track binary size across commits using benchstat. The size doesn't vary between runs (it's deterministic). But benchstat complains about insufficient samples when I use -count=1. How do I handle deterministic metrics?",
-    "trap": "Without the skill, the model may suggest using -count=10 anyway (wasteful for deterministic metrics) or abandoning benchstat",
+    "description": "测试对 benchstat 的 assume=exact 单位元数据（用于无波动指标）的了解",
+    "prompt": "我想用 benchstat 跨 commit 跟踪二进制体积。体积在多次运行间不变（是确定性的）。但我用 -count=1 时 benchstat 抱怨样本不足。怎么处理确定性指标？",
+    "trap": "没有 skill 时，模型可能建议照用 -count=10（对确定性指标是浪费）或放弃 benchstat",
     "assertions": [
       {
         "id": "15.1",
-        "text": "Recommends the assume=exact unit metadata annotation"
+        "text": "推荐 assume=exact 单位元数据注解"
       },
       {
         "id": "15.2",
-        "text": "Shows the syntax: Unit <metric> assume=exact in benchmark output"
+        "text": "展示语法：在基准测试输出中写 Unit <metric> assume=exact"
       },
       {
         "id": "15.3",
-        "text": "Explains that assume=exact disables non-parametric statistics"
+        "text": "解释 assume=exact 会禁用非参数统计"
       },
       {
         "id": "15.4",
-        "text": "Notes that benchstat will warn if values vary when assume=exact is set"
+        "text": "指出设置 assume=exact 后值若有波动 benchstat 会警告"
       },
       {
         "id": "15.5",
-        "text": "States that single measurement (no -count needed) works with assume=exact"
+        "text": "说明单次测量（不需要 -count）配合 assume=exact 即可用"
       }
     ]
   },
   {
     "id": 16,
     "name": "ci-regression-tool-selection",
-    "description": "Tests judgment on which CI regression detection tool to use",
-    "prompt": "I want to add automated benchmark regression detection to my CI pipeline. I need something that:\n1. Compares PR performance against the base branch\n2. Uses statistical analysis (not just single-run comparison)\n3. Integrates with our GitHub Actions workflow\n\nWhat tool should I use?",
-    "trap": "Without the skill, the model may suggest writing a custom script or using only raw benchstat without knowing about benchdiff",
+    "description": "测试对选用哪个 CI 回归检测工具的判断",
+    "prompt": "我想在 CI 流水线里加自动化的基准测试回归检测。需要满足：\n1. 对比 PR 与 base 分支的性能\n2. 使用统计分析（不只是单次运行对比）\n3. 能集成进我们的 GitHub Actions 工作流\n\n该用什么工具？",
+    "trap": "没有 skill 时，模型可能建议写自定义脚本或只用裸 benchstat，不知道 benchdiff",
     "assertions": [
       {
         "id": "16.1",
-        "text": "Recommends benchdiff as the primary tool for PR-to-base comparison with statistical rigor"
+        "text": "推荐 benchdiff 作为 PR 对 base 对比的首选工具，统计上更严谨"
       },
       {
         "id": "16.2",
-        "text": "Explains that benchdiff uses benchstat internally for statistical analysis"
+        "text": "解释 benchdiff 内部用 benchstat 做统计分析"
       },
       {
         "id": "16.3",
-        "text": "Mentions cob as a simpler alternative but notes it uses single-run comparison without benchstat-style statistics"
+        "text": "提到 cob 是更简单的替代，但它是单次运行对比、没有 benchstat 式统计"
       },
       {
         "id": "16.4",
-        "text": "Mentions gobenchdata for long-term trend tracking and visualization"
+        "text": "提到 gobenchdata 用于长期趋势跟踪和可视化"
       },
       {
         "id": "16.5",
-        "text": "Explains the tradeoff: benchdiff=high rigor, cob=quick+simple, gobenchdata=trends+dashboard"
+        "text": "解释取舍：benchdiff=严谨、cob=快速简单、gobenchdata=趋势+仪表盘"
       }
     ]
   },
   {
     "id": 17,
     "name": "cob-data-loss-warning",
-    "description": "Tests awareness of cob's destructive behavior with uncommitted changes",
-    "prompt": "I want to use `cob` for quick benchmark regression checking in my local development workflow. Any caveats?",
-    "trap": "Without the skill, the model may recommend cob for local use without the critical safety warning",
+    "description": "测试是否意识到 cob 对未提交改动的破坏性行为",
+    "prompt": "我想在本地开发流程里用 `cob` 做快速的基准测试回归检查。有什么注意事项？",
+    "trap": "没有 skill 时，模型可能推荐本地用 cob 而不给出关键的安全警告",
     "assertions": [
       {
         "id": "17.1",
-        "text": "Warns that cob uses `git reset` internally which can cause data loss with uncommitted changes"
+        "text": "警告 cob 内部使用 `git reset`，有未提交改动时可能丢数据"
       },
       {
         "id": "17.2",
-        "text": "Recommends committing all work before running cob"
+        "text": "建议跑 cob 前先提交所有工作"
       },
       {
         "id": "17.3",
-        "text": "Suggests running cob only in CI pipelines, not locally"
+        "text": "建议只在 CI 流水线里跑 cob，不在本地跑"
       },
       {
         "id": "17.4",
-        "text": "Notes that cob compares single runs without benchstat-style statistics, making it susceptible to noise"
+        "text": "指出 cob 是单次运行对比、没有 benchstat 式统计，容易受噪声影响"
       },
       {
         "id": "17.5",
-        "text": "Mentions [skip cob] commit message convention to bypass checks"
+        "text": "提到用 [skip cob] 提交信息约定跳过检查"
       }
     ]
   },
   {
     "id": 18,
     "name": "noisy-neighbor-mitigation",
-    "description": "Tests knowledge of why CI benchmarks are noisy and mitigation strategies",
-    "prompt": "Our CI benchmark results fluctuate wildly — sometimes showing 15% regression, sometimes 10% improvement, for the same code. We're using GitHub-hosted runners. How do we fix this?",
-    "trap": "Without the skill, the model may suggest tightening thresholds (which causes more false positives) or simply retrying",
+    "description": "测试对 CI 基准测试噪声成因和缓解策略的了解",
+    "prompt": "我们的 CI 基准测试结果波动剧烈——同一份代码有时显示 15% 回归，有时显示 10% 改进。用的是 GitHub 托管的 runner。怎么解决？",
+    "trap": "没有 skill 时，模型可能建议收紧阈值（会造成更多假阳性）或直接重试",
     "assertions": [
       {
         "id": "18.1",
-        "text": "Explains that shared CI runners have 5-10% variance due to noisy neighbors"
+        "text": "解释共享 CI runner 因 noisy neighbor 有 5-10% 的波动"
       },
       {
         "id": "18.2",
-        "text": "Recommends running both base and head benchmarks in the same CI job for relative comparison"
+        "text": "建议在同一个 CI job 里跑 base 和 head 的基准测试做相对对比"
       },
       {
         "id": "18.3",
-        "text": "Recommends using -count=10+ with benchstat to filter noise statistically"
+        "text": "建议用 -count=10+ 配合 benchstat 从统计上过滤噪声"
       },
       {
         "id": "18.4",
-        "text": "Suggests conservative thresholds (20%+) on shared runners rather than tight thresholds"
+        "text": "建议在共享 runner 上用保守阈值（20%+）而不是紧阈值"
       },
       {
         "id": "18.5",
-        "text": "Warns against 'retry until pass' as selection bias"
+        "text": "警告「重试到通过为止」属于选择性偏差"
       },
       {
         "id": "18.6",
-        "text": "Mentions dedicated/self-hosted runners as the definitive solution for critical benchmarks"
+        "text": "提到专用/自托管 runner 是关键基准测试的根本解决方案"
       }
     ]
   },
   {
     "id": 19,
     "name": "self-hosted-runner-tuning",
-    "description": "Tests knowledge of system-level tuning for reproducible benchmarks on self-hosted runners",
-    "prompt": "We have a dedicated self-hosted CI runner for benchmark tests. What system-level settings should we configure to minimize benchmark variance?",
-    "trap": "Without the skill, the model may only suggest generic OS tuning without knowing the specific settings for benchmark stability",
+    "description": "测试对自托管 runner 上让基准测试可复现的系统级调优的了解",
+    "prompt": "我们有一台专门跑基准测试的自托管 CI runner。应该配置哪些系统级设置来最小化基准测试波动？",
+    "trap": "没有 skill 时，模型可能只建议泛泛的 OS 调优，不知道基准测试稳定性所需的具体设置",
     "assertions": [
       {
         "id": "19.1",
-        "text": "Recommends disabling CPU frequency scaling by setting the 'performance' governor"
+        "text": "建议把 CPU governor 设为 'performance' 关掉频率缩放"
       },
       {
         "id": "19.2",
-        "text": "Recommends disabling Turbo Boost (Intel no_turbo or AMD boost)"
+        "text": "建议禁用 Turbo Boost（Intel no_turbo 或 AMD 对应项）"
       },
       {
         "id": "19.3",
-        "text": "Recommends pinning benchmarks to specific CPU cores using taskset"
+        "text": "建议用 taskset 把基准测试绑到指定 CPU 核"
       },
       {
         "id": "19.4",
-        "text": "Recommends disabling SMT/Hyper-Threading to avoid execution unit sharing"
+        "text": "建议关掉 SMT/超线程，避免执行单元共享"
       },
       {
         "id": "19.5",
-        "text": "Warns that these settings should ONLY be applied to dedicated runners, never developer machines"
+        "text": "警告这些设置只能用于专用 runner，绝不能用在开发机上"
       }
     ]
   },
   {
     "id": 20,
     "name": "taskset-core-pinning-rationale",
-    "description": "Tests understanding of WHY core pinning helps benchmarks",
-    "prompt": "Why does pinning a Go benchmark to specific CPU cores with taskset help reduce variance? What's the underlying mechanism?",
-    "trap": "Without the skill, the model may give a vague answer about CPU contention without explaining the cache thrashing mechanism",
+    "description": "测试对绑核为什么能帮助基准测试的理解",
+    "prompt": "为什么用 taskset 把 Go 基准测试绑到指定 CPU 核能降低波动？底层机制是什么？",
+    "trap": "没有 skill 时，模型可能给出关于 CPU 竞争的含糊回答，解释不了缓存抖动机制",
     "assertions": [
       {
         "id": "20.1",
-        "text": "Explains that without pinning, the OS migrates the process across cores"
+        "text": "解释不绑核时 OS 会把进程在不同核之间迁移"
       },
       {
         "id": "20.2",
-        "text": "Explains that L1/L2 caches are per-core, so migration causes cache thrashing"
+        "text": "解释 L1/L2 缓存是每核独享的，迁移会导致缓存抖动"
       },
       {
         "id": "20.3",
-        "text": "Recommends leaving cores 0-1 for OS and other processes, using cores 2+ for benchmarks"
+        "text": "建议把核 0-1 留给 OS 和其他进程，基准测试用核 2+"
       },
       {
         "id": "20.4",
-        "text": "Shows the taskset command syntax (e.g., taskset -c 2,3 go test ...)"
+        "text": "展示 taskset 命令语法（如 taskset -c 2,3 go test ...）"
       }
     ]
   },
   {
     "id": 21,
     "name": "b-report-metric-custom",
-    "description": "Tests knowledge of b.ReportMetric and b.Elapsed for custom benchmark metrics",
-    "prompt": "I want my Go benchmark to report throughput in bytes/second in addition to the standard ns/op. How do I add custom metrics to benchmark output?",
-    "trap": "Without the skill, the model may suggest manual calculation and fmt.Printf instead of the built-in b.ReportMetric",
+    "description": "测试对 b.ReportMetric 和 b.Elapsed 自定义基准测试指标的了解",
+    "prompt": "我想让 Go 基准测试在标准 ns/op 之外再报告 bytes/second 的吞吐。怎么往基准测试输出里加自定义指标？",
+    "trap": "没有 skill 时，模型可能建议手动计算加 fmt.Printf，而不是用内置的 b.ReportMetric",
     "assertions": [
-      { "id": "21.1", "text": "Uses b.ReportMetric() to add custom metrics" },
+      {
+        "id": "21.1",
+        "text": "使用 b.ReportMetric() 添加自定义指标"
+      },
       {
         "id": "21.2",
-        "text": "Uses b.Elapsed() to get the total benchmark duration"
+        "text": "使用 b.Elapsed() 获取基准测试总时长"
       },
       {
         "id": "21.3",
-        "text": "Shows the correct pattern: b.ReportMetric(float64(bytes)/b.Elapsed().Seconds(), \"bytes/s\")"
+        "text": "展示正确写法：b.ReportMetric(float64(bytes)/b.Elapsed().Seconds(), \"bytes/s\")"
       },
       {
         "id": "21.4",
-        "text": "The custom metric integrates with standard benchmark output format (not separate print statements)"
+        "text": "自定义指标融入标准基准测试输出格式（而非单独 print）"
       }
     ]
   },
   {
     "id": 22,
     "name": "alloc-space-cumulative-trap-for-leak",
-    "description": "Tests that alloc_space is cumulative (includes freed objects) and therefore wrong for leak detection",
-    "prompt": "My Go service's memory keeps growing. I captured a heap profile with:\n\ngo tool pprof -alloc_space http://localhost:6060/debug/pprof/heap\n\nThe top functions show my database layer allocating hundreds of MBs. But when I check the actual process RSS, most of that memory has already been freed. Am I reading this profile correctly?",
-    "trap": "Without the skill, the model validates the use of alloc_space for leak detection, missing that alloc_space is cumulative since program start and includes objects already freed by GC — inuse_space is the correct choice for leak detection",
+    "description": "测试是否知道 alloc_space 是累计值（包含已释放对象），因此不适合做泄漏检测",
+    "prompt": "我的 Go 服务内存一直涨。我用下面的命令抓了一份堆 profile：\n\ngo tool pprof -alloc_space http://localhost:6060/debug/pprof/heap\n\n排在前面的是数据库层分配了几百 MB。但我看进程实际 RSS 时，大部分内存已经释放了。我这份 profile 读对了吗？",
+    "trap": "没有 skill 时，模型会认可用 alloc_space 做泄漏检测，漏掉 alloc_space 自程序启动起累计、包含已被 GC 释放的对象——inuse_space 才是泄漏检测的正确选择",
     "assertions": [
       {
         "id": "22.1",
-        "text": "Explains that alloc_space is cumulative since program start — it counts ALL allocations including those already freed by GC"
+        "text": "解释 alloc_space 自程序启动起累计——统计所有分配，包括已被 GC 释放的"
       },
       {
         "id": "22.2",
-        "text": "Identifies that alloc_space is the wrong profile type for leak detection because freed memory still appears"
+        "text": "指出 alloc_space 不适合泄漏检测，因为已释放的内存仍显示在里面"
       },
       {
         "id": "22.3",
-        "text": "Recommends inuse_space instead — it shows only currently live heap objects, making leaked objects visible"
+        "text": "推荐改用 inuse_space——只显示当前存活的堆对象，让泄漏对象可见"
       },
       {
         "id": "22.4",
-        "text": "Explains the correct leak detection workflow: take two inuse_space snapshots separated by time and compare with pprof -base"
+        "text": "解释正确的泄漏检测流程：间隔一段时间取两份 inuse_space 快照，用 pprof -base 对比"
       },
       {
         "id": "22.5",
-        "text": "Mentions common leak causes: unbounded caches, maps that never shrink, goroutine leaks holding references"
+        "text": "提到常见泄漏原因：无界缓存、只增不减的 map、持有引用的 goroutine 泄漏"
       }
     ]
   },
   {
     "id": 23,
     "name": "mutex-block-profile-enablement",
-    "description": "Tests awareness that mutex and block profiles must be explicitly enabled",
-    "prompt": "I want to profile mutex contention in my Go service. I fetched the mutex profile from /debug/pprof/mutex but it's empty. What's wrong?",
-    "trap": "Without the skill, the model may suggest the endpoint is broken or suggest different debugging approaches",
+    "description": "测试是否意识到 mutex 和 block profile 需要显式开启",
+    "prompt": "我想分析 Go 服务里的 mutex 竞争。我从 /debug/pprof/mutex 抓了 mutex profile，但里面是空的。怎么回事？",
+    "trap": "没有 skill 时，模型可能以为端点坏了，或建议换别的调试方法",
     "assertions": [
       {
         "id": "23.1",
-        "text": "Identifies that mutex profiling is disabled by default and must be explicitly enabled"
+        "text": "指出 mutex profiling 默认关闭，必须显式开启"
       },
       {
         "id": "23.2",
-        "text": "Shows runtime.SetMutexProfileFraction() as the enablement call"
+        "text": "展示用 runtime.SetMutexProfileFraction() 开启"
       },
       {
         "id": "23.3",
-        "text": "Explains the fraction parameter (e.g., 5 means 1 out of 5 events recorded)"
+        "text": "解释 fraction 参数（比如 5 表示每 5 个事件记录 1 个）"
       },
       {
         "id": "23.4",
-        "text": "Recommends disabling after investigation (SetMutexProfileFraction(0)) to eliminate overhead"
+        "text": "建议排查结束后关掉（SetMutexProfileFraction(0)）消除开销"
       },
       {
         "id": "23.5",
-        "text": "Mentions runtime.SetBlockProfileRate() for the related block profile"
+        "text": "提到相关的 block profile 用 runtime.SetBlockProfileRate()"
       }
     ]
   },
   {
     "id": 24,
     "name": "trace-custom-annotations",
-    "description": "Tests knowledge of runtime/trace custom annotations (tasks, regions, logs)",
-    "prompt": "I'm using go tool trace to analyze my HTTP handler but the trace timeline only shows generic goroutine activity. How can I add application-level context to see which request phases (validation, database query, serialization) are taking time?",
-    "trap": "Without the skill, the model may suggest using log statements or pprof labels instead of trace-specific annotations",
+    "description": "测试对 runtime/trace 自定义注解（task、region、log）的了解",
+    "prompt": "我在用 go tool trace 分析 HTTP handler，但 trace 时间线只显示泛泛的 goroutine 活动。怎么加应用层上下文，看出请求的各阶段（校验、数据库查询、序列化）分别花了多少时间？",
+    "trap": "没有 skill 时，模型可能建议用日志语句或 pprof label，而不是 trace 专用注解",
     "assertions": [
       {
         "id": "24.1",
-        "text": "Recommends trace.NewTask for logical operations that may span goroutines"
+        "text": "推荐用 trace.NewTask 标记可能跨 goroutine 的逻辑操作"
       },
       {
         "id": "24.2",
-        "text": "Recommends trace.WithRegion for phases within a task or goroutine"
+        "text": "推荐用 trace.WithRegion 标记 task 或 goroutine 内的阶段"
       },
       {
         "id": "24.3",
-        "text": "Mentions trace.Log for point-in-time markers in the trace"
+        "text": "提到用 trace.Log 在 trace 里打时间点标记"
       },
       {
         "id": "24.4",
-        "text": "Shows correct usage with context propagation (ctx parameter)"
+        "text": "展示带 context 传播的正确用法（ctx 参数）"
       },
       {
         "id": "24.5",
-        "text": "Notes that annotations add negligible overhead when tracing is disabled"
+        "text": "指出 tracing 未开启时注解的开销可忽略"
       }
     ]
   },
   {
     "id": 25,
     "name": "trace-gc-phase-interpretation",
-    "description": "Tests ability to interpret GC phases in execution traces",
-    "prompt": "I'm looking at an execution trace and I see large blocks of time where my goroutines show as 'GC assist' (blue). What does this mean and how do I fix it?",
-    "trap": "Without the skill, the model may not explain the proportional allocation tax mechanism or the specific remediation",
+    "description": "测试解读 execution trace 中 GC 阶段的能力",
+    "prompt": "我在看一份 execution trace，发现有大块时间我的 goroutine 显示为 'GC assist'（蓝色）。这是什么意思，怎么修？",
+    "trap": "没有 skill 时，模型可能解释不了按分配比例征税的机制，也给不出具体修复方法",
     "assertions": [
       {
         "id": "25.1",
-        "text": "Explains that GC mark assist means goroutines are being drafted by the GC to help scan the heap"
+        "text": "解释 GC mark assist 意味着 goroutine 被 GC 征用来帮忙扫描堆"
       },
       {
         "id": "25.2",
-        "text": "Explains that the runtime forces goroutines to assist in proportion to their allocation rate — heavy allocators get taxed more"
+        "text": "解释 runtime 按 goroutine 的分配速率成比例地强制其 assist——分配越多税越重"
       },
       {
         "id": "25.3",
-        "text": "Identifies this as a symptom of too many allocations, not a GC configuration problem"
+        "text": "指出这是分配过多的症状，不是 GC 配置问题"
       },
       {
         "id": "25.4",
-        "text": "Recommends reducing allocation rate (the root cause) rather than tuning GOGC"
+        "text": "建议降低分配速率（根因），而不是调 GOGC"
       },
       {
         "id": "25.5",
-        "text": "Distinguishes mark assist from STW (stop-the-world) phases which affect all goroutines equally"
+        "text": "区分 mark assist 与 STW（stop-the-world）阶段——后者平等影响所有 goroutine"
       }
     ]
   },
   {
     "id": 26,
     "name": "trace-pprof-extraction",
-    "description": "Tests knowledge of extracting pprof profiles from trace data",
-    "prompt": "I have an execution trace file from a production service. I want to find which functions are responsible for the most network blocking time. Can I use the trace for this?",
-    "trap": "Without the skill, the model may suggest capturing a separate pprof profile instead of extracting from the trace",
+    "description": "测试对从 trace 数据提取 pprof profile 的了解",
+    "prompt": "我有一份生产服务的 execution trace 文件。我想找出哪些函数占了最多的网络阻塞时间。能用这份 trace 吗？",
+    "trap": "没有 skill 时，模型可能建议另外抓一份 pprof profile，而不是从 trace 里提取",
     "assertions": [
       {
         "id": "26.1",
-        "text": "Uses `go tool trace -pprof=net trace.out > net.prof` to extract a network blocking profile"
+        "text": "使用 `go tool trace -pprof=net trace.out > net.prof` 提取网络阻塞 profile"
       },
       {
         "id": "26.2",
-        "text": "Then uses go tool pprof on the extracted profile for analysis (top, list, etc.)"
+        "text": "然后对提取出的 profile 用 go tool pprof 分析（top、list 等）"
       },
       {
         "id": "26.3",
-        "text": "Mentions other extractable profile types: sync, syscall, sched"
+        "text": "提到其他可提取的 profile 类型：sync、syscall、sched"
       },
       {
         "id": "26.4",
-        "text": "Explains this bridges trace data (nanosecond events) with pprof analysis (statistical aggregation)"
+        "text": "解释这把 trace 数据（纳秒级事件）与 pprof 分析（统计聚合）联系起来"
       }
     ]
   },
   {
     "id": 27,
     "name": "fieldalignment-no-autofix",
-    "description": "Tests that the model uses fieldalignment without the -fix flag",
-    "prompt": "I suspect some of my Go structs have suboptimal field ordering causing padding waste. How do I check?",
-    "trap": "Without the skill, the model may suggest using fieldalignment with -fix flag or structlayout without the diagnostic-first approach",
+    "description": "测试模型是否用 fieldalignment 且不带 -fix flag",
+    "prompt": "我怀疑一些 Go 结构体字段顺序不佳造成 padding 浪费。怎么检查？",
+    "trap": "没有 skill 时，模型可能建议带 -fix flag 用 fieldalignment，或用 structlayout 而没有先诊断的思路",
     "assertions": [
       {
         "id": "27.1",
-        "text": "Recommends running `fieldalignment ./...` to detect padding waste"
+        "text": "推荐运行 `fieldalignment ./...` 检测 padding 浪费"
       },
       {
         "id": "27.2",
-        "text": "Does NOT use the -fix flag — the skill explicitly says to let the agent apply changes manually"
+        "text": "不使用 -fix flag——skill 明确要求由 agent 手动改"
       },
       {
         "id": "27.3",
-        "text": "Mentions using unsafe.Sizeof/Alignof/Offsetof to inspect struct layout before and after"
+        "text": "提到用 unsafe.Sizeof/Alignof/Offsetof 对比修改前后的结构体布局"
       },
       {
         "id": "27.4",
-        "text": "Treats this as a diagnostic step, not an automatic fix"
+        "text": "把这一步当作诊断，而不是自动修复"
       }
     ]
   },
   {
     "id": 28,
     "name": "godebug-gctrace-output-interpretation",
-    "description": "Tests ability to read and interpret a GODEBUG=gctrace=1 output line",
-    "prompt": "I ran my Go service with GODEBUG=gctrace=1 and see lines like:\n\ngc 14 @5.234s 2%: 0.13+1.4+0.21 ms clock, 0.53+0.43/1.1/0+0.85 ms cpu, 24->27->13 MB, 24 MB goal, 0 MB stacks, 0 MB globals, 4 P\n\nWhat does each field mean? Is this GC behavior healthy?",
-    "trap": "Without the skill, the model knows GODEBUG=gctrace exists but cannot interpret the specific output format fields — it guesses or gives vague descriptions",
+    "description": "测试读懂并解释 GODEBUG=gctrace=1 输出行的能力",
+    "prompt": "我用 GODEBUG=gctrace=1 跑 Go 服务，看到这样的行：\n\ngc 14 @5.234s 2%: 0.13+1.4+0.21 ms clock, 0.53+0.43/1.1/0+0.85 ms cpu, 24->27->13 MB, 24 MB goal, 0 MB stacks, 0 MB globals, 4 P\n\n每个字段是什么意思？这个 GC 行为健康吗？",
+    "trap": "没有 skill 时，模型知道 GODEBUG=gctrace 的存在，但解读不了具体的输出格式字段——靠猜或给出含糊描述",
     "assertions": [
-      { "id": "28.1", "text": "Identifies 'gc 14' as the GC cycle number" },
+      {
+        "id": "28.1",
+        "text": "指出 'gc 14' 是 GC 周期序号"
+      },
       {
         "id": "28.2",
-        "text": "Identifies '@5.234s 2%' as time since program start and CPU percentage spent in GC"
+        "text": "指出 '@5.234s 2%' 是程序启动以来的时间和 GC 占用的 CPU 百分比"
       },
       {
         "id": "28.3",
-        "text": "Identifies '24->27->13 MB' as heap size before GC, heap size at GC trigger, and live heap after GC"
+        "text": "指出 '24->27->13 MB' 是 GC 前堆大小、GC 触发时堆大小、GC 后存活堆大小"
       },
       {
         "id": "28.4",
-        "text": "Identifies '24 MB goal' as the target heap size for the next GC cycle based on the GC pacing algorithm"
+        "text": "指出 '24 MB goal' 是 GC 调步算法给出的下一周期目标堆大小"
       },
       {
         "id": "28.5",
-        "text": "Assesses health: 2% CPU in GC is acceptable (generally <5% is fine); 13MB live vs 24MB goal means 46% overhead headroom"
+        "text": "评估健康状况：GC 占 2% CPU 可接受（一般 <5% 没问题）；存活 13MB 对目标 24MB 意味着 46% 的开销余量"
       }
     ]
   },
   {
     "id": 29,
     "name": "runtime-scanobject-cpu-diagnosis",
-    "description": "Tests interpretation of runtime.scanobject appearing high in CPU profile",
-    "prompt": "My CPU profile shows `runtime.scanobject` consuming 25% of CPU time. What does this mean and how do I reduce it?",
-    "trap": "Without the skill, the model may not recognize this as a GC pointer scanning issue or may suggest wrong remediation",
+    "description": "测试对 CPU profile 中 runtime.scanobject 占比高的解读",
+    "prompt": "我的 CPU profile 显示 `runtime.scanobject` 占了 25% 的 CPU 时间。这意味着什么，怎么降下来？",
+    "trap": "没有 skill 时，模型可能认不出这是 GC 指针扫描问题，或给出错误的修复方向",
     "assertions": [
       {
         "id": "29.1",
-        "text": "Identifies runtime.scanobject as GC pointer scanning — the GC is tracing pointers in the heap"
+        "text": "指出 runtime.scanobject 是 GC 指针扫描——GC 在追踪堆里的指针"
       },
       {
         "id": "29.2",
-        "text": "Explains that the heap contains many pointers that the GC must trace"
+        "text": "解释堆里有大量指针需要 GC 追踪"
       },
       {
         "id": "29.3",
-        "text": "Recommends reducing pointer density: value types instead of pointers in slices/maps"
+        "text": "建议降低指针密度：slice/map 里用值类型而非指针"
       },
       {
         "id": "29.4",
-        "text": "Suggests flattening nested structures or using [N]byte arrays instead of strings in hot structs"
+        "text": "建议拍平嵌套结构，或在热结构体里用 [N]byte 数组代替 string"
       },
       {
         "id": "29.5",
-        "text": "References the golang-performance skill for optimization patterns"
+        "text": "提到参考 golang-performance skill 里的优化模式"
       }
     ]
   },
   {
     "id": 30,
     "name": "top-cum-for-application-callsites",
-    "description": "Tests that top -cum is the correct command to find application code when runtime symbols dominate flat profile",
-    "prompt": "I ran `go tool pprof cpu.prof` and typed `top`. The output is dominated by runtime functions:\n\n1. runtime.memmove  18%\n2. runtime.mallocgc  14%\n3. runtime.gcWriteBarrier  9%\n\nNone of my application code appears in the top 10. My CPU overhead is high. What pprof command should I run next?",
-    "trap": "Without the skill, the model suggests using `web` for the graph view, `list` on a runtime function, or other commands — missing that `top -cum` reveals the application callers who are responsible",
+    "description": "测试当 runtime 符号占满 flat profile 时，top -cum 是找到应用代码的正确命令",
+    "prompt": "我跑了 `go tool pprof cpu.prof` 输入 `top`。输出被 runtime 函数占满：\n\n1. runtime.memmove  18%\n2. runtime.mallocgc  14%\n3. runtime.gcWriteBarrier  9%\n\n前 10 名没有我的应用代码。CPU 开销很高。下一步该跑什么 pprof 命令？",
+    "trap": "没有 skill 时，模型建议用 `web` 看图、对 runtime 函数用 `list`，或其他命令——漏掉 `top -cum` 才能暴露真正的应用层调用方",
     "assertions": [
       {
         "id": "30.1",
-        "text": "Recommends running `top -cum` (cumulative mode) as the immediate next command"
+        "text": "建议紧接着跑 `top -cum`（cumulative 模式）"
       },
       {
         "id": "30.2",
-        "text": "Explains that flat time shows where CPU is spent directly; cumulative time shows which application functions called into the expensive runtime functions"
+        "text": "解释 flat 时间显示 CPU 直接花在哪；cumulative 时间显示哪些应用函数调用了昂贵的 runtime 函数"
       },
       {
         "id": "30.3",
-        "text": "Explains that runtime.memmove, mallocgc, gcWriteBarrier are symptoms — the application code that triggers them will have high cumulative time"
+        "text": "解释 runtime.memmove、mallocgc、gcWriteBarrier 是症状——触发它们的应用代码会有很高的 cumulative 时间"
       },
       {
         "id": "30.4",
-        "text": "Suggests using `list FunctionName` on the top cumulative callers to see the exact lines triggering the expensive runtime calls"
+        "text": "建议对累计时间靠前的调用方用 `list FunctionName`，看触发昂贵 runtime 调用的具体代码行"
       },
       {
         "id": "30.5",
-        "text": "Does NOT suggest trying to optimize the runtime functions directly"
+        "text": "不建议直接优化 runtime 函数"
       }
     ]
   },
   {
     "id": 31,
     "name": "fgprof-off-cpu-profiling",
-    "description": "Tests knowledge of fgprof for capturing off-CPU time that pprof misses",
-    "prompt": "My Go service has high latency but the CPU profile barely shows any CPU usage. Standard pprof doesn't reveal where time is spent. What tool captures both on-CPU and off-CPU time in a single profile?",
-    "trap": "Without the skill, the model may suggest only the execution tracer or not know about fgprof",
+    "description": "测试对 fgprof 捕获 pprof 漏掉的 off-CPU 时间的了解",
+    "prompt": "我的 Go 服务延迟很高，但 CPU profile 几乎看不到 CPU 使用。标准 pprof 看不出时间花在哪。什么工具能在一份 profile 里同时捕获 on-CPU 和 off-CPU 时间？",
+    "trap": "没有 skill 时，模型可能只建议 execution tracer，或不知道 fgprof",
     "assertions": [
       {
         "id": "31.1",
-        "text": "Recommends fgprof (github.com/felixge/fgprof) for full goroutine profiling"
+        "text": "推荐 fgprof（github.com/felixge/fgprof）做完整的 goroutine profiling"
       },
       {
         "id": "31.2",
-        "text": "Explains that fgprof captures both on-CPU and off-CPU (I/O wait) time in a single profile"
+        "text": "解释 fgprof 在一份 profile 里同时捕获 on-CPU 和 off-CPU（I/O 等待）时间"
       },
       {
         "id": "31.3",
-        "text": "Explains that standard pprof CPU profiles only show on-CPU time, missing I/O waits"
+        "text": "解释标准 pprof CPU profile 只显示 on-CPU 时间，漏掉 I/O 等待"
       },
       {
         "id": "31.4",
-        "text": "Describes the use case: pprof shows low CPU% but latency is high"
+        "text": "描述适用场景：pprof 显示 CPU 占比低但延迟高"
       }
     ]
   },
   {
     "id": 32,
     "name": "flight-recorder-go125",
-    "description": "Tests knowledge of the Go 1.25 flight recorder for retroactive trace capture",
-    "prompt": "My Go service occasionally experiences timeout spikes but I can't reproduce them. By the time I notice and start tracing, the problem is gone. Is there a way to capture trace data retroactively for these intermittent issues?",
-    "trap": "Without the skill, the model may suggest continuous tracing (too expensive) or instrumented logging",
+    "description": "测试对 Go 1.25 flight recorder 回溯式 trace 捕获的了解",
+    "prompt": "我的 Go 服务偶尔出现超时尖峰但无法复现。等我发现并开始 tracing 时问题已经消失。有没有办法回溯式地为这些间歇问题抓 trace 数据？",
+    "trap": "没有 skill 时，模型可能建议持续 tracing（太贵）或加日志",
     "assertions": [
       {
         "id": "32.1",
-        "text": "Recommends the Go 1.25 flight recorder (trace.NewFlightRecorder)"
+        "text": "推荐 Go 1.25 的 flight recorder（trace.NewFlightRecorder）"
       },
       {
         "id": "32.2",
-        "text": "Explains it keeps a circular buffer of recent trace data in memory"
+        "text": "解释它在内存里维护最近 trace 数据的环形缓冲"
       },
       {
         "id": "32.3",
-        "text": "Shows snapshotting with WriteTo when the anomaly is detected"
+        "text": "展示检测到异常时用 WriteTo 打快照"
       },
       {
         "id": "32.4",
-        "text": "Mentions the MinAge and MaxBytes configuration parameters"
+        "text": "提到 MinAge 和 MaxBytes 配置参数"
       },
       {
         "id": "32.5",
-        "text": "Shows a trigger pattern (e.g., slow request detection with time.Since threshold)"
+        "text": "展示触发模式（如用 time.Since 阈值检测慢请求）"
       },
       {
         "id": "32.6",
-        "text": "Notes the constraint: at most one flight recorder active at a time"
+        "text": "指出限制：同一时间最多只能有一个活跃的 flight recorder"
       }
     ]
   },
   {
     "id": 33,
     "name": "flight-recorder-sync-once-pattern",
-    "description": "Tests the sync.Once pattern for flight recorder snapshots",
-    "prompt": "I'm setting up a flight recorder in my Go service. I want to snapshot it when a slow request is detected, but multiple goroutines might detect slow requests simultaneously. How do I prevent multiple overlapping snapshots?",
-    "trap": "Without the skill, the model may use a mutex or channel instead of the idiomatic sync.Once pattern",
+    "description": "测试 flight recorder 快照的 sync.Once 模式",
+    "prompt": "我在 Go 服务里配置 flight recorder。我想在检测到慢请求时打快照，但多个 goroutine 可能同时检测到慢请求。怎么防止多个快照重叠？",
+    "trap": "没有 skill 时，模型可能用 mutex 或 channel，而不是惯用的 sync.Once 模式",
     "assertions": [
       {
         "id": "33.1",
-        "text": "Uses sync.Once to ensure only one snapshot is taken"
+        "text": "使用 sync.Once 保证只打一次快照"
       },
       {
         "id": "33.2",
-        "text": "Calls fr.WriteTo inside the sync.Once.Do function"
+        "text": "在 sync.Once.Do 函数里调用 fr.WriteTo"
       },
       {
         "id": "33.3",
-        "text": "Notes that only one goroutine may call WriteTo at a time"
+        "text": "指出同一时间只能有一个 goroutine 调 WriteTo"
       },
       {
         "id": "33.4",
-        "text": "Shows calling the snapshot in a separate goroutine (go captureSnapshot)"
+        "text": "展示在单独 goroutine 里调快照（go captureSnapshot）"
       },
-      { "id": "33.5", "text": "Shows fr.Stop() after WriteTo completes" }
+      {
+        "id": "33.5",
+        "text": "展示 WriteTo 完成后调 fr.Stop()"
+      }
     ]
   },
   {
     "id": 34,
     "name": "flight-recorder-sizing",
-    "description": "Tests understanding of flight recorder buffer sizing",
-    "prompt": "I'm configuring a flight recorder for my Go service. My typical investigation window when a timeout occurs is about 5 seconds. How should I size the MinAge and MaxBytes parameters?",
-    "trap": "Without the skill, the model may guess arbitrary values without the 2x rule or data rate context",
+    "description": "测试对 flight recorder 缓冲区大小的理解",
+    "prompt": "我在给 Go 服务配 flight recorder。超时发生时我典型的排查窗口约 5 秒。MinAge 和 MaxBytes 参数该怎么定？",
+    "trap": "没有 skill 时，模型可能乱猜数值，不知道 2 倍法则和数据速率背景",
     "assertions": [
       {
         "id": "34.1",
-        "text": "Sets MinAge to ~2x the problem window (10 seconds for a 5-second investigation window)"
+        "text": "把 MinAge 设为问题窗口的约 2 倍（5 秒排查窗口对应 10 秒）"
       },
       {
         "id": "34.2",
-        "text": "Mentions that busy services generate ~1-10 MB/s of trace data"
+        "text": "提到繁忙服务每秒产生约 1-10 MB trace 数据"
       },
       {
         "id": "34.3",
-        "text": "Recommends starting MaxBytes at 1-5 MiB and adjusting"
+        "text": "建议 MaxBytes 从 1-5 MiB 起步再调整"
       },
       {
         "id": "34.4",
-        "text": "Explains that MaxBytes takes precedence over MinAge — when buffer fills, older data is discarded"
+        "text": "解释 MaxBytes 优先于 MinAge——缓冲满了就丢弃更老的数据"
       }
     ]
   },
   {
     "id": 35,
     "name": "trace-timeline-color-coding",
-    "description": "Tests ability to interpret execution trace timeline colors",
-    "prompt": "I opened an execution trace in the web UI. I see lots of yellow/orange gaps before green segments on my goroutine lanes, and some red bands spanning all processor lanes. What does this indicate?",
-    "trap": "Without the skill, the model may not know the specific color coding of the trace viewer",
+    "description": "测试解读 execution trace 时间线颜色的能力",
+    "prompt": "我在 web UI 打开一份 execution trace。goroutine 泳道上绿色段之前有大量黄/橙色空隙，还有横跨所有处理器泳道的红色条带。这说明什么？",
+    "trap": "没有 skill 时，模型可能不知道 trace 查看器的具体颜色编码",
     "assertions": [
       {
         "id": "35.1",
-        "text": "Identifies yellow/orange as runnable state — goroutines ready to run but waiting for a processor"
+        "text": "指出黄/橙色是 runnable 状态——goroutine 就绪但在等处理器"
       },
       {
         "id": "35.2",
-        "text": "Identifies red bands across all P lanes as GC stop-the-world pauses"
+        "text": "指出横跨所有 P 泳道的红色条带是 GC stop-the-world 暂停"
       },
       {
         "id": "35.3",
-        "text": "Diagnoses the yellow gaps as CPU saturation — too many runnable goroutines competing for processors"
+        "text": "把黄色空隙诊断为 CPU 饱和——太多 runnable goroutine 抢处理器"
       },
       {
         "id": "35.4",
-        "text": "Identifies green as actively executing/running state"
+        "text": "指出绿色是正在执行/running 状态"
       },
       {
         "id": "35.5",
-        "text": "Suggests examining goroutine count vs GOMAXPROCS to verify CPU saturation"
+        "text": "建议对照 goroutine 数与 GOMAXPROCS 验证 CPU 饱和"
       }
     ]
   },
   {
     "id": 36,
     "name": "pprof-labels-tagfocus-multitenant",
-    "description": "Tests knowledge of pprof.Do() custom labels and tagfocus for isolating a specific request type in a mixed-workload profile",
-    "prompt": "My Go service handles both API requests and batch jobs in the same process. CPU profiles mix both workloads together so I can't tell if API or batch is causing GC pressure. How can I profile only the API request code path?",
-    "trap": "Without the skill, the model suggests running a separate dedicated process for each workload, or using separate profiles — missing pprof.Do() labels with -tagfocus filtering which solves this in a single profile",
+    "description": "测试对 pprof.Do() 自定义 label 和 tagfocus 的了解——用于在混合负载 profile 中隔离特定请求类型",
+    "prompt": "我的 Go 服务在同一进程里既处理 API 请求又跑批处理任务。CPU profile 把两种负载混在一起，分不清是 API 还是批处理造成 GC 压力。怎么只 profile API 请求的代码路径？",
+    "trap": "没有 skill 时，模型建议每种负载跑独立进程或用独立 profile——漏掉 pprof.Do() label 加 -tagfocus 过滤能在一份 profile 里解决",
     "assertions": [
       {
         "id": "36.1",
-        "text": "Recommends using pprof.Do() with pprof.Labels() to tag goroutines with a request_type label"
+        "text": "推荐用 pprof.Do() 加 pprof.Labels() 给 goroutine 打上 request_type 标签"
       },
       {
         "id": "36.2",
-        "text": "Shows the pattern: pprof.Do(ctx, pprof.Labels(\"request_type\", \"api\"), func(ctx context.Context) { ... })"
+        "text": "展示写法：pprof.Do(ctx, pprof.Labels(\"request_type\", \"api\"), func(ctx context.Context) { ... })"
       },
       {
         "id": "36.3",
-        "text": "Shows using -tagfocus=request_type=api when analyzing the profile to filter to only API samples"
+        "text": "展示分析 profile 时用 -tagfocus=request_type=api 只筛 API 样本"
       },
       {
         "id": "36.4",
-        "text": "Explains that labels are inherited by the goroutine's profile samples — no need for separate processes"
+        "text": "解释 label 会被 goroutine 的 profile 样本继承——不需要独立进程"
       },
       {
         "id": "36.5",
-        "text": "Mentions the tags command in pprof interactive mode to see all label keys and their value distributions"
+        "text": "提到 pprof 交互模式里的 tags 命令可查看所有标签键及其值分布"
       }
     ]
   },
   {
     "id": 37,
     "name": "pprof-focus-ignore-difference",
-    "description": "Tests understanding of the difference between pprof's focus, ignore, show, and hide filters",
-    "prompt": "In pprof, what's the difference between `focus`, `ignore`, `show`, and `hide`? When would I use each one?",
-    "trap": "Without the skill, the model may confuse the cost accounting behavior of these filters",
+    "description": "测试对 pprof 的 focus、ignore、show、hide 过滤器区别的理解",
+    "prompt": "pprof 里 `focus`、`ignore`、`show`、`hide` 有什么区别？分别什么时候用？",
+    "trap": "没有 skill 时，模型可能搞混这些过滤器的成本归算行为",
     "assertions": [
       {
         "id": "37.1",
-        "text": "Explains that focus keeps only paths containing a matching function — everything else dropped"
+        "text": "解释 focus 只保留包含匹配函数的路径——其余全部丢弃"
       },
       {
         "id": "37.2",
-        "text": "Explains that ignore removes matching functions entirely, attributing their costs to callers"
+        "text": "解释 ignore 完全移除匹配函数，把它们的成本归给调用方"
       },
       {
         "id": "37.3",
-        "text": "Explains that show is like focus but only affects display, not cost accounting"
+        "text": "解释 show 类似 focus，但只影响显示，不改成本归算"
       },
       {
         "id": "37.4",
-        "text": "Explains that hide is like ignore but only hides from display, not cost accounting"
+        "text": "解释 hide 类似 ignore，但只从显示中隐藏，不改成本归算"
       },
-      { "id": "37.5", "text": "Mentions `reset` to clear all filters" }
+      {
+        "id": "37.5",
+        "text": "提到用 `reset` 清除所有过滤器"
+      }
     ]
   },
   {
     "id": 38,
     "name": "pprof-tags-and-labels",
-    "description": "Tests knowledge of pprof custom labels via pprof.Do() for multi-tenant profiling",
-    "prompt": "I want to break down my CPU profile by request type (API vs batch). How can I add custom labels to pprof samples so I can filter and group by request type?",
-    "trap": "Without the skill, the model may suggest separate profiles per request type instead of using pprof labels",
+    "description": "测试对通过 pprof.Do() 自定义 label 做多租户 profiling 的了解",
+    "prompt": "我想按请求类型（API vs 批处理）拆分 CPU profile。怎么给 pprof 样本加自定义 label，以便按请求类型过滤和分组？",
+    "trap": "没有 skill 时，模型可能建议按请求类型分别抓 profile，而不是用 pprof label",
     "assertions": [
       {
         "id": "38.1",
-        "text": "Uses pprof.Labels() and pprof.Do() to add custom labels to profiled code"
+        "text": "使用 pprof.Labels() 和 pprof.Do() 给被 profile 的代码加自定义 label"
       },
       {
         "id": "38.2",
-        "text": "Shows the correct pattern: pprof.Do(ctx, pprof.Labels(\"key\", \"value\"), func(ctx context.Context) {...})"
+        "text": "展示正确写法：pprof.Do(ctx, pprof.Labels(\"key\", \"value\"), func(ctx context.Context) {...})"
       },
       {
         "id": "38.3",
-        "text": "Shows using tagfocus to filter by label (e.g., -tagfocus=request_type=api)"
+        "text": "展示用 tagfocus 按 label 过滤（如 -tagfocus=request_type=api）"
       },
       {
         "id": "38.4",
-        "text": "Shows using tagroot to group by label (e.g., -tagroot=request_type)"
+        "text": "展示用 tagroot 按 label 分组（如 -tagroot=request_type）"
       },
       {
         "id": "38.5",
-        "text": "Mentions the tags command to see all tag keys and distributions"
+        "text": "提到 tags 命令可查看所有 tag 键及其分布"
       }
     ]
   },
   {
     "id": 39,
     "name": "pprof-sample-index-switching",
-    "description": "Tests knowledge of switching between metric types in a heap profile without reloading",
-    "prompt": "I opened a heap profile in pprof interactive mode and I'm looking at alloc_objects. Now I want to also see inuse_space. Do I need to exit and reopen with different flags?",
-    "trap": "Without the skill, the model may suggest exiting and reopening with a different flag",
+    "description": "测试对不重新加载就在堆 profile 的指标类型间切换的了解",
+    "prompt": "我在 pprof 交互模式打开了一份堆 profile，正在看 alloc_objects。现在想再看 inuse_space。需要退出换 flag 重开吗？",
+    "trap": "没有 skill 时，模型可能建议退出换 flag 重开",
     "assertions": [
       {
         "id": "39.1",
-        "text": "Uses sample_index command to switch metrics without reloading"
+        "text": "使用 sample_index 命令不重新加载就切换指标"
       },
       {
         "id": "39.2",
-        "text": "Shows the correct syntax: sample_index=inuse_space"
+        "text": "展示正确语法：sample_index=inuse_space"
       },
       {
         "id": "39.3",
-        "text": "Lists available indices: alloc_objects, alloc_space, inuse_objects, inuse_space"
+        "text": "列出可用 index：alloc_objects、alloc_space、inuse_objects、inuse_space"
       },
       {
         "id": "39.4",
-        "text": "Explains that heap profiles contain multiple metrics and you can switch between them interactively"
+        "text": "解释堆 profile 包含多个指标，可以交互地在它们之间切换"
       }
     ]
   },
   {
     "id": 40,
     "name": "pprof-granularity-lines",
-    "description": "Tests knowledge of pprof granularity control for multi-hot-spot functions",
-    "prompt": "I used `list` on a function and it shows two expensive lines, but the `top` output only shows the function name once with aggregated cost. How can I see per-line costs in the top output?",
-    "trap": "Without the skill, the model may only suggest using list for per-line analysis",
+    "description": "测试对 pprof 粒度控制在多热点函数上的了解",
+    "prompt": "我对一个函数用了 `list`，显示有两行很贵的代码，但 `top` 输出里函数名只出现一次、成本是聚合的。怎么在 top 输出里看逐行成本？",
+    "trap": "没有 skill 时，模型可能只建议用 list 做逐行分析",
     "assertions": [
       {
         "id": "40.1",
-        "text": "Uses granularity=lines to group by exact source line in top output"
+        "text": "使用 granularity=lines 在 top 输出里按源码行分组"
       },
       {
         "id": "40.2",
-        "text": "Mentions other granularity levels: functions (default), filefunctions, files, addresses"
+        "text": "提到其他粒度级别：functions（默认）、filefunctions、files、addresses"
       },
       {
         "id": "40.3",
-        "text": "Shows the command: either `granularity=lines` in interactive mode or `-granularity=lines` as flag"
+        "text": "展示命令：交互模式用 `granularity=lines` 或命令行 flag `-granularity=lines`"
       }
     ]
   },
   {
     "id": 41,
     "name": "ssa-dump-investigation",
-    "description": "Tests knowledge of SSA dump for understanding compiler optimization passes",
-    "prompt": "I want to understand exactly what optimizations the Go compiler applies to a specific function. I need more detail than escape analysis or inlining flags provide. Is there a way to see the compiler's intermediate representation?",
-    "trap": "Without the skill, the model may not know about the GOSSAFUNC environment variable",
+    "description": "测试对用 SSA dump 理解编译器优化 pass 的了解",
+    "prompt": "我想弄清楚 Go 编译器对某个具体函数做了哪些优化。逃逸分析或内联 flag 给的信息不够细。有没有办法看编译器的中间表示？",
+    "trap": "没有 skill 时，模型可能不知道 GOSSAFUNC 环境变量",
     "assertions": [
       {
         "id": "41.1",
-        "text": "Uses GOSSAFUNC=FunctionName go build to generate SSA dump"
+        "text": "使用 GOSSAFUNC=FunctionName go build 生成 SSA dump"
       },
       {
         "id": "41.2",
-        "text": "Mentions that it creates ssa.html which can be opened in a browser"
+        "text": "提到它会生成可以在浏览器打开的 ssa.html"
       },
       {
         "id": "41.3",
-        "text": "Describes the optimization passes visible: source, AST, start SSA, optimization, lower, regalloc, genssa"
+        "text": "描述可见的优化 pass：source、AST、start SSA、optimization、lower、regalloc、genssa"
       },
       {
         "id": "41.4",
-        "text": "Mentions what to look for: remaining bounds checks, dead code elimination, constant folding, register spills"
+        "text": "提到要观察的点：残留的边界检查、死代码消除、常量折叠、寄存器溢出"
       },
       {
         "id": "41.5",
-        "text": "Mentions clicking on values to highlight them across passes"
+        "text": "提到点击某个值可以在各 pass 间高亮它"
       }
     ]
   },
   {
     "id": 42,
     "name": "noinlines-inlined-function-attribution",
-    "description": "Tests that noinlines aggregates inlined function costs to the outer non-inlined caller",
-    "prompt": "My pprof call graph is cluttered. A single hot function has been inlined into 6 different callers, so its cost is split across 6 separate nodes in the graph. I want to see the aggregated cost in one place. What pprof option should I use?",
-    "trap": "Without the skill, the model suggests using show/hide filters or focus (which change display but not cost aggregation) or ignoring inlined nodes — missing the noinlines option which correctly attributes inlined function costs to their first out-of-line caller",
+    "description": "测试 noinlines 把被内联函数的成本聚合到外层未内联调用方",
+    "prompt": "我的 pprof 调用图很乱。一个热函数被内联进 6 个不同调用方，它的成本被拆到图里 6 个独立节点上。我想在一个地方看到聚合成本。该用哪个 pprof 选项？",
+    "trap": "没有 skill 时，模型建议用 show/hide 过滤或 focus（只改显示不改成本聚合），或忽略内联节点——漏掉能正确把内联函数成本归到首个非内联调用方的 noinlines 选项",
     "assertions": [
       {
         "id": "42.1",
-        "text": "Recommends the noinlines option (or -noinlines flag)"
+        "text": "推荐 noinlines 选项（或 -noinlines flag）"
       },
       {
         "id": "42.2",
-        "text": "Explains that noinlines attributes inlined function costs to their first out-of-line caller — the inlined nodes are collapsed"
+        "text": "解释 noinlines 把内联函数的成本归到首个非内联调用方——内联节点被折叠"
       },
       {
         "id": "42.3",
-        "text": "Shows correct usage: noinlines in interactive mode or -noinlines as CLI flag"
+        "text": "展示正确用法：交互模式输 noinlines 或命令行 flag -noinlines"
       },
       {
         "id": "42.4",
-        "text": "Distinguishes noinlines from hide/ignore: hide/ignore only affect display without changing cost attribution"
+        "text": "区分 noinlines 与 hide/ignore：hide/ignore 只影响显示，不改成本归属"
       }
     ]
   },
   {
     "id": 43,
     "name": "receiver-choice-inlining-and-escape-tradeoffs",
-    "description": "Tests knowledge that receiver choice can affect copying, aliasing, escape analysis, and inlining, but must be verified",
-    "prompt": "I'm designing a fluent API for a small config builder in a performance-sensitive path. Should I use value receivers or pointer receivers for the method chain? Consider both correctness and compiler optimization.",
-    "trap": "Without the skill, the model defaults to pointer receivers for method chains without considering inlining implications",
+    "description": "测试是否知道 receiver 选择会影响拷贝、别名、逃逸分析和内联，但必须实测验证",
+    "prompt": "我在给性能敏感路径上的一个小 config builder 设计流式 API。方法链该用值 receiver 还是指针 receiver？请同时考虑正确性和编译器优化。",
+    "trap": "没有 skill 时，模型默认给方法链用指针 receiver，不考虑对内联的影响",
     "assertions": [
       {
         "id": "43.1",
-        "text": "Mentions that receiver choice can affect copying, aliasing, escape analysis, and inlining"
+        "text": "提到 receiver 选择会影响拷贝、别名、逃逸分析和内联"
       },
       {
         "id": "43.2",
-        "text": "Does NOT claim that pointer receivers categorically block inlining or that value receivers guarantee full inlining"
+        "text": "不断言指针 receiver 一定阻碍内联，也不断言值 receiver 保证完全内联"
       },
       {
         "id": "43.3",
-        "text": "Recommends checking with -gcflags=\"-m -m\" to verify inlining and escape behavior"
+        "text": "建议用 -gcflags=\"-m -m\" 验证内联和逃逸行为"
       },
       {
         "id": "43.4",
-        "text": "Considers both the performance trade-off and the struct size (value receivers copy the struct)"
+        "text": "同时考虑性能取舍和结构体大小（值 receiver 会拷贝整个结构体）"
       }
     ]
   },
   {
     "id": 44,
     "name": "prometheus-go-metrics-vs-runtime-metrics",
-    "description": "Tests understanding that runtime/metrics are NOT the same as Prometheus metrics",
-    "prompt": "I want to monitor Go runtime metrics in my Prometheus dashboard. Can I just use Go's runtime/metrics package directly in my PromQL queries?",
-    "trap": "Without the skill, the model may conflate runtime/metrics keys with Prometheus metric names",
+    "description": "测试对 runtime/metrics 与 Prometheus 指标不是一回事的理解",
+    "prompt": "我想在 Prometheus 面板里监控 Go runtime 指标。能直接在 PromQL 查询里用 Go 的 runtime/metrics 包吗？",
+    "trap": "没有 skill 时，模型可能把 runtime/metrics 的键名与 Prometheus 指标名混为一谈",
     "assertions": [
       {
         "id": "44.1",
-        "text": "Clarifies that runtime/metrics are Go internal data structures, not Prometheus metrics"
+        "text": "澄清 runtime/metrics 是 Go 内部数据结构，不是 Prometheus 指标"
       },
       {
         "id": "44.2",
-        "text": "Explains that prometheus/client_golang selectively converts some runtime/metrics into Prometheus format"
+        "text": "解释 prometheus/client_golang 有选择地把部分 runtime/metrics 转成 Prometheus 格式"
       },
       {
         "id": "44.3",
-        "text": "Lists the actual Prometheus metric names (e.g., go_memstats_alloc_bytes, go_goroutines)"
+        "text": "列出实际的 Prometheus 指标名（如 go_memstats_alloc_bytes、go_goroutines）"
       },
       {
         "id": "44.4",
-        "text": "Mentions that by default only traditional go_memstats_* and go_gc_* are exposed"
+        "text": "提到默认只暴露传统的 go_memstats_* 和 go_gc_*"
       }
     ]
   },
   {
     "id": 45,
     "name": "go-memstats-stw-overhead",
-    "description": "Tests awareness of ReadMemStats causing stop-the-world pauses",
-    "prompt": "I'm using prometheus/client_golang to expose Go runtime metrics. My high-throughput service occasionally shows brief latency spikes correlated with Prometheus scrape intervals. Could the metrics collection itself be causing this?",
-    "trap": "Without the skill, the model may not connect metrics collection to STW pauses",
+    "description": "测试是否意识到 ReadMemStats 会造成 stop-the-world 暂停",
+    "prompt": "我在用 prometheus/client_golang 暴露 Go runtime 指标。我的高吞吐服务偶尔出现与 Prometheus 抓取间隔相关的短暂延迟尖峰。会不会是指标采集本身造成的？",
+    "trap": "没有 skill 时，模型可能不把指标采集与 STW 暂停联系起来",
     "assertions": [
       {
         "id": "45.1",
-        "text": "Identifies that go_memstats_* metrics internally call runtime.ReadMemStats() which triggers a short stop-the-world pause"
+        "text": "指出 go_memstats_* 指标内部调用 runtime.ReadMemStats()，会触发短暂的 stop-the-world 暂停"
       },
       {
         "id": "45.2",
-        "text": "Recommends the Go 1.17+ runtime/metrics-based collector as lower overhead alternative"
+        "text": "推荐基于 Go 1.17+ runtime/metrics 的采集器作为更低开销的替代"
       },
       {
         "id": "45.3",
-        "text": "Shows the code to register the modern collector: collectors.NewGoCollector(collectors.WithGoCollectorRuntimeMetrics(collectors.MetricsAll)) or specific runtime metric rules"
+        "text": "展示注册新版采集器的代码：collectors.NewGoCollector(collectors.WithGoCollectorRuntimeMetrics(collectors.MetricsAll)) 或具体的 runtime 指标规则"
       },
       {
         "id": "45.4",
-        "text": "Recommends using a custom prometheus.NewRegistry() rather than the default one"
+        "text": "建议用自定义 prometheus.NewRegistry() 而不是默认 registry"
       }
     ]
   },
   {
     "id": 46,
     "name": "promql-gc-pressure-queries",
-    "description": "Tests knowledge of specific PromQL queries for GC pressure investigation",
-    "prompt": "I suspect my Go service has excessive GC pressure. What Prometheus queries should I use to confirm this and find the root cause?",
-    "trap": "Without the skill, the model may suggest generic monitoring queries without the specific GC-related PromQL",
+    "description": "测试对排查 GC 压力的具体 PromQL 查询的了解",
+    "prompt": "我怀疑我的 Go 服务 GC 压力过大。该用哪些 Prometheus 查询来确认并找根因？",
+    "trap": "没有 skill 时，模型可能给泛泛的监控查询，没有 GC 相关的具体 PromQL",
     "assertions": [
       {
         "id": "46.1",
-        "text": "Uses rate(go_gc_duration_seconds_count[5m]) for GC frequency (cycles per second)"
+        "text": "用 rate(go_gc_duration_seconds_count[5m]) 看 GC 频率（每秒周期数）"
       },
       {
         "id": "46.2",
-        "text": "States that >2 GC cycles/s sustained indicates excessive allocation rate"
+        "text": "说明持续每秒 >2 次 GC 周期说明分配速率过高"
       },
       {
         "id": "46.3",
-        "text": "Uses go_gc_duration_seconds{quantile=\"1\"} for worst-case GC pause"
+        "text": "用 go_gc_duration_seconds{quantile=\"1\"} 看最坏情况 GC 暂停"
       },
       {
         "id": "46.4",
-        "text": "Uses rate(go_memstats_alloc_bytes_total[5m]) for allocation rate comparison before/after deploy"
+        "text": "用 rate(go_memstats_alloc_bytes_total[5m]) 对比部署前后的分配速率"
       },
       {
         "id": "46.5",
-        "text": "Recommends correlating with P99 latency to confirm GC pauses cause tail latency"
+        "text": "建议与 P99 延迟关联，确认 GC 暂停导致尾延迟"
       }
     ]
   },
   {
     "id": 47,
     "name": "promql-goroutine-leak-detection",
-    "description": "Tests specific PromQL patterns for detecting goroutine leaks",
-    "prompt": "How do I detect goroutine leaks in my production Go service using Prometheus metrics?",
-    "trap": "Without the skill, the model may suggest only looking at the absolute go_goroutines count without the delta pattern",
+    "description": "测试检测 goroutine 泄漏的具体 PromQL 模式",
+    "prompt": "怎么用 Prometheus 指标检测生产 Go 服务的 goroutine 泄漏？",
+    "trap": "没有 skill 时，模型可能只建议看 go_goroutines 绝对值，不知道 delta 模式",
     "assertions": [
-      { "id": "47.1", "text": "Uses go_goroutines gauge for current count" },
+      {
+        "id": "47.1",
+        "text": "用 go_goroutines gauge 看当前数量"
+      },
       {
         "id": "47.2",
-        "text": "Uses delta(go_goroutines[1h]) for net goroutine change — positive without load increase indicates leak"
+        "text": "用 delta(go_goroutines[1h]) 看 goroutine 净变化——负载没涨却为正说明泄漏"
       },
       {
         "id": "47.3",
-        "text": "Notes that goroutine count should correlate with load — independent growth is a leak signal"
+        "text": "指出 goroutine 数应与负载相关——脱离负载增长就是泄漏信号"
       },
       {
         "id": "47.4",
-        "text": "Suggests an alerting rule with threshold (e.g., go_goroutines > 10000)"
+        "text": "建议配带阈值的告警规则（如 go_goroutines > 10000）"
       }
     ]
   },
   {
     "id": 48,
     "name": "investigation-session-setup",
-    "description": "Tests the structured approach to production performance investigation sessions",
-    "prompt": "I need to do a deep-dive performance investigation on one instance of my Go service in production. What should I set up before I start collecting profiles?",
-    "trap": "Without the skill, the model may jump straight to pprof without the investigation session preparation",
+    "description": "测试生产性能排查会话的结构化准备方法",
+    "prompt": "我要对生产环境的一个 Go 服务实例做深入性能排查。开始抓 profile 前应该做什么准备？",
+    "trap": "没有 skill 时，模型可能直接上 pprof，不做排查会话的准备",
     "assertions": [
       {
         "id": "48.1",
-        "text": "Recommends reducing Prometheus scrape interval to <=10s on the target instance"
+        "text": "建议把目标实例的 Prometheus 抓取间隔缩到 <=10s"
       },
       {
         "id": "48.2",
-        "text": "Recommends enabling pprof via environment variable without recompile"
+        "text": "建议通过环境变量开启 pprof，不用重新编译"
       },
       {
         "id": "48.3",
-        "text": "Recommends enabling continuous profiling on only the target instance, not fleet-wide"
+        "text": "建议只在目标实例开持续 profiling，不全集群开"
       },
       {
         "id": "48.4",
-        "text": "Emphasizes reverting all changes after investigation"
+        "text": "强调排查结束后还原所有改动"
       },
       {
         "id": "48.5",
-        "text": "Mentions the key design principle: all debug features should be toggleable via environment variables"
+        "text": "提到关键设计原则：所有调试功能都应能通过环境变量开关"
       }
     ]
   },
   {
     "id": 49,
     "name": "cost-warnings-trace-duration",
-    "description": "Tests awareness of the cost and practical limits of execution traces",
-    "prompt": "I want to capture a 5-minute execution trace of my Go service to analyze a periodic issue that happens every 2-3 minutes. Is this feasible?",
-    "trap": "Without the skill, the model may agree to a 5-minute trace without warning about data volume",
+    "description": "测试对 execution trace 的成本和实际限制的认识",
+    "prompt": "我想给 Go 服务抓一段 5 分钟的 execution trace，分析一个每 2-3 分钟出现一次的周期性问题。可行吗？",
+    "trap": "没有 skill 时，模型可能直接同意抓 5 分钟 trace，不警告数据量问题",
     "assertions": [
       {
         "id": "49.1",
-        "text": "Warns that traces generate data at MB/s — a 5-minute trace would be enormous (potentially GBs)"
+        "text": "警告 trace 以 MB/s 的速度产生数据——5 分钟的 trace 会非常大（可能上 GB）"
       },
       {
         "id": "49.2",
-        "text": "Recommends keeping traces to 5-10 seconds maximum"
+        "text": "建议 trace 最多控制在 5-10 秒"
       },
       {
         "id": "49.3",
-        "text": "Warns that large traces are slow to parse and may need 1GB+ RAM to open"
+        "text": "警告大 trace 解析慢，打开可能需要 1GB+ 内存"
       },
       {
         "id": "49.4",
-        "text": "Suggests using the flight recorder (Go 1.25+) as an alternative for intermittent issues"
+        "text": "建议间歇问题改用 flight recorder（Go 1.25+）"
       },
       {
         "id": "49.5",
-        "text": "Notes that the browser UI struggles with traces >100MB"
+        "text": "指出浏览器 UI 对 >100MB 的 trace 很吃力"
       }
     ]
   },
   {
     "id": 50,
     "name": "benchstat-three-version-comparison",
-    "description": "Tests knowledge of comparing more than two versions with benchstat",
-    "prompt": "I have benchmark results from three different versions of my code (v1, v2, v3). I want to compare all three in a single benchstat output. How?",
-    "trap": "Without the skill, the model may suggest running benchstat twice for pairwise comparisons",
+    "description": "测试对用 benchstat 对比两个以上版本的了解",
+    "prompt": "我有三个版本代码（v1、v2、v3）的基准测试结果。想在一份 benchstat 输出里对比三者。怎么做？",
+    "trap": "没有 skill 时，模型可能建议跑两次 benchstat 两两对比",
     "assertions": [
       {
         "id": "50.1",
-        "text": "Shows labeling inputs: benchstat v1=v1.txt v2=v2.txt v3=v3.txt"
+        "text": "展示给输入打标签：benchstat v1=v1.txt v2=v2.txt v3=v3.txt"
       },
       {
         "id": "50.2",
-        "text": "Explains that the first input is always the base for comparison"
+        "text": "解释第一个输入永远是对比的 base"
       },
       {
         "id": "50.3",
-        "text": "States that v2 vs v1 and v3 vs v1 comparisons are shown (both relative to first input)"
+        "text": "说明会显示 v2 vs v1 和 v3 vs v1 的对比（都相对第一个输入）"
       }
     ]
   },
   {
     "id": 51,
     "name": "host-level-correlation",
-    "description": "Tests awareness of correlating Go metrics with host-level metrics",
-    "prompt": "My Go service shows high process_cpu_seconds_total but the CPU profile looks normal. Could the problem be outside my application?",
-    "trap": "Without the skill, the model may only investigate within the Go application",
+    "description": "测试是否意识到要把 Go 指标与主机层指标关联",
+    "prompt": "我的 Go 服务 process_cpu_seconds_total 很高，但 CPU profile 看起来正常。问题会不会在应用之外？",
+    "trap": "没有 skill 时，模型可能只在 Go 应用内部排查",
     "assertions": [
       {
         "id": "51.1",
-        "text": "Recommends checking node_exporter metrics for host-level CPU, memory, disk I/O"
+        "text": "建议查 node_exporter 指标看主机层 CPU、内存、磁盘 I/O"
       },
       {
         "id": "51.2",
-        "text": "Explains the noisy neighbor pattern: high node_cpu with low process_cpu = external contention"
+        "text": "解释 noisy neighbor 模式：node_cpu 高而 process_cpu 低 = 外部争抢"
       },
       {
         "id": "51.3",
-        "text": "Mentions process-exporter for per-process metrics when multiple services share a host"
+        "text": "提到多服务共享主机时用 process-exporter 看每进程指标"
       },
       {
         "id": "51.4",
-        "text": "Suggests correlating Go app metrics with infrastructure metrics to determine if the problem is in the app or the environment"
+        "text": "建议关联 Go 应用指标与基础设施指标，判断问题在应用还是环境"
       }
     ]
   },
   {
     "id": 52,
     "name": "pprof-diff-base-vs-base",
-    "description": "Tests understanding of -base vs -diff_base flags in pprof for comparison",
-    "prompt": "I want to compare two CPU profiles — one before and one after my optimization. What's the difference between `pprof -base` and `pprof -diff_base`?",
-    "trap": "Without the skill, the model may not know both flags exist or may confuse their semantics",
+    "description": "测试对 pprof 对比时 -base 与 -diff_base flag 区别的理解",
+    "prompt": "我想对比两份 CPU profile——优化前后各一份。`pprof -base` 和 `pprof -diff_base` 有什么区别？",
+    "trap": "没有 skill 时，模型可能不知道两个 flag 都存在，或混淆它们的语义",
     "assertions": [
       {
         "id": "52.1",
-        "text": "Explains that -base subtracts base from source — all values become deltas"
+        "text": "解释 -base 是从源 profile 减去 base——所有值变成差值"
       },
       {
         "id": "52.2",
-        "text": "Explains that -diff_base shows percentages relative to the base profile"
+        "text": "解释 -diff_base 显示相对 base profile 的百分比"
       },
       {
         "id": "52.3",
-        "text": "Mentions -normalize flag for making ratios comparable when capture durations differ"
+        "text": "提到采集时长不同时用 -normalize flag 让比值可比"
       },
       {
         "id": "52.4",
-        "text": "Shows how to generate a diff SVG for visual comparison"
+        "text": "展示如何生成 diff SVG 做可视化对比"
       }
     ]
   },
   {
     "id": 53,
     "name": "gobenchdata-github-action-setup",
-    "description": "Tests knowledge of setting up gobenchdata for long-term trend tracking",
-    "prompt": "I want to track benchmark performance trends over time with an interactive web dashboard. I'm using GitHub Actions. What's the best approach?",
-    "trap": "Without the skill, the model may suggest building a custom dashboard or only using benchstat",
+    "description": "测试对用 gobenchdata 做长期趋势跟踪的搭建方法的了解",
+    "prompt": "我想用可交互的 web 仪表盘长期跟踪基准测试性能趋势。我用的是 GitHub Actions。最佳方案是什么？",
+    "trap": "没有 skill 时，模型可能建议自建仪表盘或只用 benchstat",
     "assertions": [
       {
         "id": "53.1",
-        "text": "Recommends gobenchdata for trend tracking and visualization"
+        "text": "推荐 gobenchdata 做趋势跟踪和可视化"
       },
       {
         "id": "53.2",
-        "text": "Shows the GitHub Action configuration with bobheadxi/gobenchdata@v1"
+        "text": "展示 GitHub Action 配置，使用 bobheadxi/gobenchdata@v1"
       },
       {
         "id": "53.3",
-        "text": "Mentions publishing to gh-pages for the dashboard"
+        "text": "提到把仪表盘发布到 gh-pages"
       },
       {
         "id": "53.4",
-        "text": "Shows the regression checks config (.gobenchdata-checks.yml) with thresholds"
+        "text": "展示带阈值的回归检查配置（.gobenchdata-checks.yml）"
       },
-      { "id": "53.5", "text": "Mentions PRUNE_COUNT to limit stored history" }
+      {
+        "id": "53.5",
+        "text": "提到用 PRUNE_COUNT 限制保存的历史量"
+      }
     ]
   },
   {
     "id": 54,
     "name": "benchstat-single-file-summary",
-    "description": "Tests knowledge of using benchstat with a single file for variance analysis",
-    "prompt": "I haven't made any code changes yet. I just want to check if my benchmarks are stable (low variance) before I start optimizing. Can benchstat help?",
-    "trap": "Without the skill, the model may say benchstat requires two files for comparison",
+    "description": "测试对单文件 benchstat 做波动分析的了解",
+    "prompt": "我还没改任何代码。只想在开始优化前确认基准测试稳不稳定（波动小）。benchstat 能帮上忙吗？",
+    "trap": "没有 skill 时，模型可能说 benchstat 要两个文件才能对比",
     "assertions": [
       {
         "id": "54.1",
-        "text": "Shows running benchstat with a single file: benchstat bench.txt"
+        "text": "展示单文件跑 benchstat：benchstat bench.txt"
       },
       {
         "id": "54.2",
-        "text": "Explains it shows median and confidence interval for each benchmark"
+        "text": "解释它会显示每个基准测试的中位数和置信区间"
       },
       {
         "id": "54.3",
-        "text": "Recommends using this to check measurement stability before making changes"
+        "text": "建议改动前先用它检查测量稳定性"
       },
       {
         "id": "54.4",
-        "text": "Notes that high variance (± >5%) indicates noisy benchmarks needing more runs or better isolation"
+        "text": "指出波动大（± >5%）说明基准测试噪声大，需要更多运行次数或更好隔离"
       }
     ]
   },
   {
     "id": 55,
     "name": "count-minimum-by-scenario",
-    "description": "Tests knowledge of appropriate -count values for different scenarios",
-    "prompt": "How many benchmark iterations (-count) should I use? I've seen recommendations ranging from 1 to 30.",
-    "trap": "Without the skill, the model may give a single number without context-dependent guidance",
+    "description": "测试对不同场景合适 -count 值的了解",
+    "prompt": "基准测试迭代次数（-count）该用多少？我见过从 1 到 30 的各种建议。",
+    "trap": "没有 skill 时，模型可能只给一个数字，不给分场景的指导",
     "assertions": [
-      { "id": "55.1", "text": "Recommends 6 minimum for quick local checks" },
+      {
+        "id": "55.1",
+        "text": "建议本地快速检查至少 6"
+      },
       {
         "id": "55.2",
-        "text": "Recommends 10 for standard pre-merge comparisons"
+        "text": "建议合并前的标准对比用 10"
       },
       {
         "id": "55.3",
-        "text": "Recommends 20-30 for detecting small changes (<5%)"
+        "text": "建议检测小变化（<5%）用 20-30"
       },
-      { "id": "55.4", "text": "Recommends 20+ for noisy CI environments" },
+      {
+        "id": "55.4",
+        "text": "建议噪声大的 CI 环境用 20+"
+      },
       {
         "id": "55.5",
-        "text": "Explicitly warns against -count=1 as providing no variance information"
+        "text": "明确警告 -count=1 提供不了任何波动信息"
       }
     ]
   },
   {
     "id": 56,
     "name": "closure-capturing-pointer-escape",
-    "description": "Tests understanding of a subtle escape: a closure capturing a loop variable forces the variable to escape to the heap even when no interface boxing occurs",
-    "prompt": "I have a benchmark and escape analysis shows these local integer variables escaping to the heap:\n\n```go\nfor i := 0; i < 10; i++ {\n    val := computeValue(i)\n    go func() {\n        results[i] = val\n    }()\n}\n```\n\nWhy do `i` and `val` escape to the heap? There are no interface conversions here.",
-    "trap": "Without the skill, the model explains interface boxing (which isn't happening here) or vaguely mentions 'closures cause escapes' without explaining the specific mechanism: the goroutine may outlive the enclosing function, so any variable the closure captures must be heap-allocated to remain accessible",
+    "description": "测试对一种隐蔽逃逸的理解：闭包捕获循环变量会迫使变量逃逸到堆上，即使没有 interface 装箱",
+    "prompt": "我有一个基准测试，逃逸分析显示这些局部整数变量逃逸到了堆上：\n\n```go\nfor i := 0; i < 10; i++ {\n    val := computeValue(i)\n    go func() {\n        results[i] = val\n    }()\n}\n```\n\n为什么 `i` 和 `val` 会逃逸到堆上？这里没有 interface 转换。",
+    "trap": "没有 skill 时，模型会解释 interface 装箱（这里并没有发生），或含糊地说「闭包导致逃逸」而讲不清具体机制：goroutine 可能比外层函数活得久，所以闭包捕获的任何变量都必须分配在堆上才能保持可访问",
     "assertions": [
       {
         "id": "56.1",
-        "text": "Explains that the goroutine launched with `go func()` may outlive the enclosing function"
+        "text": "解释 `go func()` 启动的 goroutine 可能比外层函数活得久"
       },
       {
         "id": "56.2",
-        "text": "Explains that any variable captured by a closure that escapes (e.g., via goroutine launch or return) must be heap-allocated to remain accessible after the outer function returns"
+        "text": "解释逃逸闭包（如通过 goroutine 启动或返回）捕获的任何变量都必须分配在堆上，外层函数返回后才仍可访问"
       },
       {
         "id": "56.3",
-        "text": "Identifies the specific escape cause: `go func()` body references `val` and `i`, so both variables escape via closure capture"
+        "text": "指出具体逃逸原因：`go func()` 函数体引用了 `val` 和 `i`，两个变量经闭包捕获而逃逸"
       },
       {
         "id": "56.4",
-        "text": "Distinguishes this from interface boxing — this escape is purely lifetime-based, not type-conversion based"
+        "text": "区分这与 interface 装箱——这种逃逸纯粹是生命周期问题，不是类型转换问题"
       },
       {
         "id": "56.5",
-        "text": "Suggests passing variables as arguments to the goroutine function to break the closure capture and avoid escape"
+        "text": "建议把变量作为参数传给 goroutine 函数，断开闭包捕获以避免逃逸"
       }
     ]
   },
   {
     "id": 57,
     "name": "trace-scheduling-latency-diagnosis",
-    "description": "Tests ability to diagnose scheduling latency from trace data",
-    "prompt": "My execution trace shows many goroutines spending significant time in the 'runnable' (yellow) state before becoming 'running' (green). What does this mean and how do I fix it?",
-    "trap": "Without the skill, the model may not connect runnable-to-running delay with CPU saturation",
+    "description": "测试从 trace 数据诊断调度延迟的能力",
+    "prompt": "我的 execution trace 显示很多 goroutine 在变成 'running'（绿色）之前在 'runnable'（黄色）状态花了大量时间。这意味着什么，怎么修？",
+    "trap": "没有 skill 时，模型可能不把 runnable 到 running 的延迟与 CPU 饱和联系起来",
     "assertions": [
       {
         "id": "57.1",
-        "text": "Identifies this as high scheduling latency — goroutines ready to run but waiting for a processor"
+        "text": "识别为高调度延迟——goroutine 已就绪但在等处理器"
       },
       {
         "id": "57.2",
-        "text": "Diagnoses the cause: too many goroutines competing for GOMAXPROCS processors (CPU saturation)"
+        "text": "诊断原因：太多 goroutine 抢 GOMAXPROCS 个处理器（CPU 饱和）"
       },
       {
         "id": "57.3",
-        "text": "Suggests extracting the scheduling latency profile: go tool trace -pprof=sched trace.out"
+        "text": "建议提取调度延迟 profile：go tool trace -pprof=sched trace.out"
       },
       {
         "id": "57.4",
-        "text": "Recommends checking for uneven distribution across Ps (work imbalance)"
+        "text": "建议检查各 P 之间分布是否不均（工作不均衡）"
       },
       {
         "id": "57.5",
-        "text": "Lists other potential causes: OS scheduling interference, goroutines pinned by cgo or long syscalls"
+        "text": "列出其他可能原因：OS 调度干扰、goroutine 被 cgo 或长系统调用钉住"
       }
     ]
   },
   {
     "id": 58,
     "name": "benchmark-output-format-parsing",
-    "description": "Tests understanding of the benchmark output format",
-    "prompt": "I see this benchmark output: `BenchmarkEncode/size=64-8  5000000  230.5 ns/op  128 B/op  2 allocs/op`. What does each part mean?",
-    "trap": "Without the skill, the model may not explain the -8 suffix correctly",
+    "description": "测试对基准测试输出格式的理解",
+    "prompt": "我看到这条基准测试输出：`BenchmarkEncode/size=64-8  5000000  230.5 ns/op  128 B/op  2 allocs/op`。每部分是什么意思？",
+    "trap": "没有 skill 时，模型可能解释不对 -8 后缀",
     "assertions": [
-      { "id": "58.1", "text": "Explains that -8 is the GOMAXPROCS suffix" },
+      {
+        "id": "58.1",
+        "text": "解释 -8 是 GOMAXPROCS 后缀"
+      },
       {
         "id": "58.2",
-        "text": "Explains that 5000000 is the number of iterations (b.N)"
+        "text": "解释 5000000 是迭代次数（b.N）"
       },
-      { "id": "58.3", "text": "Explains that ns/op is time per operation" },
+      {
+        "id": "58.3",
+        "text": "解释 ns/op 是每次操作耗时"
+      },
       {
         "id": "58.4",
-        "text": "Explains that B/op is bytes allocated per operation"
+        "text": "解释 B/op 是每次操作分配的字节数"
       },
       {
         "id": "58.5",
-        "text": "Explains that allocs/op is heap allocation count per operation"
+        "text": "解释 allocs/op 是每次操作的堆分配次数"
       }
     ]
   },
   {
     "id": 59,
     "name": "pprof-show-from-framework-noise",
-    "description": "Tests knowledge of show_from to trim framework noise in profiles",
-    "prompt": "My pprof output is cluttered with HTTP framework routing functions (net/http.(*ServeMux).ServeHTTP, etc.) that appear above every handler. How do I remove this noise and start the analysis from my handler code?",
-    "trap": "Without the skill, the model may suggest using ignore (which changes cost accounting) instead of show_from",
+    "description": "测试对用 show_from 裁掉 profile 中框架噪声的了解",
+    "prompt": "我的 pprof 输出被 HTTP 框架的路由函数（net/http.(*ServeMux).ServeHTTP 等）塞满，它们出现在每个 handler 之上。怎么去掉这些噪声，从 handler 代码开始分析？",
+    "trap": "没有 skill 时，模型可能建议用 ignore（会改变成本归算）而不是 show_from",
     "assertions": [
       {
         "id": "59.1",
-        "text": "Uses show_from=regex to trim all frames above the first matching function"
+        "text": "用 show_from=regex 裁掉首个匹配函数以上的所有帧"
       },
       {
         "id": "59.2",
-        "text": "Shows the correct pattern: show_from=handler.Handle or similar"
+        "text": "展示正确写法：show_from=handler.Handle 或类似"
       },
       {
         "id": "59.3",
-        "text": "Explains that show_from hides all callers above the match point"
+        "text": "解释 show_from 隐藏匹配点之上的所有调用方"
       },
       {
         "id": "59.4",
-        "text": "Differentiates from ignore which removes functions and re-attributes their costs"
+        "text": "与 ignore 区分：ignore 移除函数并重新归算其成本"
       }
     ]
   },
   {
     "id": 60,
     "name": "optional-prometheus-metrics-enablement",
-    "description": "Tests knowledge of how to enable optional Go runtime Prometheus metrics",
-    "prompt": "I want to expose Go scheduler metrics (goroutine scheduling latency) and CPU class breakdowns in Prometheus. The default go_memstats_* metrics don't include these. How do I enable them?",
-    "trap": "Without the skill, the model may not know about the opt-in collector configuration",
+    "description": "测试对如何开启可选 Go runtime Prometheus 指标的了解",
+    "prompt": "我想在 Prometheus 里暴露 Go 调度器指标（goroutine 调度延迟）和 CPU class 细分。默认的 go_memstats_* 指标没有这些。怎么开？",
+    "trap": "没有 skill 时，模型可能不知道可选采集器的配置方式",
     "assertions": [
       {
         "id": "60.1",
-        "text": "Shows creating a custom registry with collectors.NewGoCollector"
+        "text": "展示用 collectors.NewGoCollector 创建自定义 registry"
       },
       {
         "id": "60.2",
-        "text": "Uses collectors.WithGoCollectorRuntimeMetrics option"
+        "text": "使用 collectors.WithGoCollectorRuntimeMetrics 选项"
       },
       {
         "id": "60.3",
-        "text": "Mentions collectors.MetricsAll or specific GoRuntimeMetricsRule values"
+        "text": "提到 collectors.MetricsAll 或具体的 GoRuntimeMetricsRule 值"
       },
-      { "id": "60.4", "text": "Notes this requires Go 1.17+" },
+      {
+        "id": "60.4",
+        "text": "指出需要 Go 1.17+"
+      },
       {
         "id": "60.5",
-        "text": "Lists scheduler metrics like go_sched_latencies_seconds and CPU class metrics like go_cpu_classes_*"
+        "text": "列出调度器指标如 go_sched_latencies_seconds，CPU class 指标如 go_cpu_classes_*"
       }
     ]
   },
   {
     "id": 61,
     "name": "benchdiff-usage-patterns",
-    "description": "Tests practical usage of benchdiff for PR comparisons",
-    "prompt": "I want to quickly compare the benchmark performance of my current changes against the main branch. I don't want to manually check out branches and run benchmarks separately. What tool can automate this?",
-    "trap": "Without the skill, the model may suggest a manual checkout-and-compare workflow",
+    "description": "测试 benchdiff 在 PR 对比中的实际用法",
+    "prompt": "我想快速对比当前改动相对 main 分支的基准测试性能。不想手动切分支分别跑。什么工具能自动化？",
+    "trap": "没有 skill 时，模型可能建议手动切分支再对比的流程",
     "assertions": [
       {
         "id": "61.1",
-        "text": "Recommends benchdiff for automatic branch comparison"
+        "text": "推荐 benchdiff 自动做分支对比"
       },
       {
         "id": "61.2",
-        "text": "Shows the basic command: benchdiff -base-ref main -- -benchmem -count=10"
+        "text": "展示基本命令：benchdiff -base-ref main -- -benchmem -count=10"
       },
       {
         "id": "61.3",
-        "text": "Explains that benchdiff caches results for non-worktree refs so re-runs are fast"
+        "text": "解释 benchdiff 缓存非 worktree ref 的结果，重跑很快"
       },
       {
         "id": "61.4",
-        "text": "Mentions benchdiff -clear-cache for stale cache situations"
+        "text": "提到缓存过期时用 benchdiff -clear-cache"
       },
       {
         "id": "61.5",
-        "text": "Notes that benchdiff prevents macOS sleep during benchmarks"
+        "text": "指出 benchdiff 在基准测试期间阻止 macOS 睡眠"
       }
     ]
   },
   {
     "id": 62,
     "name": "pprof-noinlines-attribution",
-    "description": "Tests knowledge of the noinlines option for simplifying inlined function chains",
-    "prompt": "My pprof call graph shows many tiny inlined functions creating confusing chains. The real cost is in the outer function but it's split across multiple inline nodes. How do I simplify this?",
-    "trap": "Without the skill, the model may suggest using show/hide which don't properly aggregate inlined costs",
+    "description": "测试对 noinlines 选项简化内联函数链的了解",
+    "prompt": "我的 pprof 调用图里很多小的被内联函数形成混乱的链。真实成本在外层函数，但被拆到多个内联节点上。怎么简化？",
+    "trap": "没有 skill 时，模型可能建议 show/hide，它们无法正确聚合内联成本",
     "assertions": [
-      { "id": "62.1", "text": "Uses the noinlines option or -noinlines flag" },
+      {
+        "id": "62.1",
+        "text": "使用 noinlines 选项或 -noinlines flag"
+      },
       {
         "id": "62.2",
-        "text": "Explains that noinlines attributes inlined functions to their first out-of-line caller"
+        "text": "解释 noinlines 把内联函数归到其首个非内联调用方"
       },
       {
         "id": "62.3",
-        "text": "Shows correct usage: either `noinlines` in interactive mode or `-noinlines` as CLI flag"
+        "text": "展示正确用法：交互模式输 `noinlines` 或命令行 flag `-noinlines`"
       }
     ]
   },
   {
     "id": 63,
     "name": "sub-benchmarks-table-driven",
-    "description": "Tests proper structure for table-driven sub-benchmarks with b.Run",
-    "prompt": "I want to benchmark my Encode function with different input sizes (64, 256, 4096 bytes) in a single benchmark function. The project uses Go 1.24.",
-    "trap": "Without the skill, the model may write separate benchmark functions or use b.N loop inside b.Run without b.Loop()",
+    "description": "测试用 b.Run 写表驱动子基准测试的正确结构",
+    "prompt": "我想在一个基准测试函数里用不同输入大小（64、256、4096 字节）测 Encode 函数。项目使用 Go 1.24。",
+    "trap": "没有 skill 时，模型可能写多个独立基准测试函数，或在 b.Run 里用 b.N 循环而不用 b.Loop()",
     "assertions": [
       {
         "id": "63.1",
-        "text": "Uses b.Run() with descriptive sub-benchmark names (e.g., size=64)"
+        "text": "使用 b.Run() 并起描述性的子基准测试名（如 size=64）"
       },
       {
         "id": "63.2",
-        "text": "Uses b.Loop() (not range b.N) inside each sub-benchmark since Go 1.24"
+        "text": "Go 1.24 起在每个子基准测试里用 b.Loop()（而非 range b.N）"
       },
       {
         "id": "63.3",
-        "text": "Places setup code (like make([]byte, size)) before the b.Loop() call"
+        "text": "把 setup 代码（如 make([]byte, size)）放在 b.Loop() 调用之前"
       },
       {
         "id": "63.4",
-        "text": "Uses a loop or range over sizes with fmt.Sprintf for names"
+        "text": "用循环或 range 遍历 sizes，用 fmt.Sprintf 起名"
       },
       {
         "id": "63.5",
-        "text": "Output will look like BenchmarkEncode/size=64, BenchmarkEncode/size=256, etc."
+        "text": "输出形如 BenchmarkEncode/size=64、BenchmarkEncode/size=256 等"
       }
     ]
   },
   {
     "id": 64,
     "name": "benchstat-row-col-projection",
-    "description": "Tests knowledge of -row flag to control what appears as rows vs the default grouping",
-    "prompt": "I ran benchmarks for two packages (parser and encoder) with two sub-benchmark parameters each (format=json and format=gob). benchstat mixes everything into one table. I want separate tables per package, with format as columns. What benchstat flags should I use?",
-    "trap": "Without the skill, the model suggests splitting into separate files and running benchstat separately, missing the -table pkg and -col /format flags that combine to produce the desired layout",
+    "description": "测试对 -row flag 控制行维度与默认分组的了解",
+    "prompt": "我跑了两个包（parser 和 encoder）的基准测试，各带两个子基准测试参数（format=json 和 format=gob）。benchstat 把所有东西混在一张表里。我想按包分表，format 作列。该用哪些 benchstat flag？",
+    "trap": "没有 skill 时，模型建议拆成单独文件分别跑 benchstat，漏掉 -table pkg 与 -col /format 组合就能得到想要的布局",
     "assertions": [
       {
         "id": "64.1",
-        "text": "Uses -table pkg to produce a separate table per package"
+        "text": "使用 -table pkg 按包各出一张表"
       },
       {
         "id": "64.2",
-        "text": "Uses -col /format to make format values (json, gob) the column headers"
+        "text": "使用 -col /format 把 format 值（json、gob）变成列头"
       },
       {
         "id": "64.3",
-        "text": "Shows the combined command: benchstat -table pkg -col /format bench.txt"
+        "text": "展示组合命令：benchstat -table pkg -col /format bench.txt"
       },
       {
         "id": "64.4",
-        "text": "Explains that -table controls the grouping dimension and -col controls column layout"
+        "text": "解释 -table 控制分组维度，-col 控制列布局"
       }
     ]
   },
   {
     "id": 65,
     "name": "trace-short-lived-goroutines",
-    "description": "Tests ability to identify goroutine creation overhead in traces",
-    "prompt": "My execution trace shows thousands of very short-lived goroutines being created and destroyed rapidly. Is this a problem?",
-    "trap": "Without the skill, the model may say goroutines are cheap and this is fine",
+    "description": "测试在 trace 中识别 goroutine 创建开销的能力",
+    "prompt": "我的 execution trace 显示几千个短生命周期 goroutine 被快速创建销毁。这有问题吗？",
+    "trap": "没有 skill 时，模型可能说 goroutine 很便宜、没问题",
     "assertions": [
       {
         "id": "65.1",
-        "text": "Identifies high overhead from goroutine creation and scheduling for very short-lived goroutines"
+        "text": "指出极短生命周期 goroutine 的创建和调度开销很高"
       },
       {
         "id": "65.2",
-        "text": "Recommends batching work or using worker pools to reduce creation overhead"
+        "text": "建议批量处理或用 worker 池降低创建开销"
       },
       {
         "id": "65.3",
-        "text": "Mentions checking for goroutines created in loops without bounds as a potential leak pattern"
+        "text": "提到检查循环里无上限创建 goroutine，这是潜在泄漏模式"
       },
       {
         "id": "65.4",
-        "text": "Notes that goroutines created but never finishing indicates a leak"
+        "text": "指出 goroutine 创建后永不结束就是泄漏"
       }
     ]
   },
   {
     "id": 66,
     "name": "benchmark-side-effects-corrupt-results",
-    "description": "Tests awareness that benchmarks with shared mutable state produce non-reproducible and misleading results",
-    "prompt": "I wrote this benchmark to measure LRU cache insertions:\n\n```go\nvar globalCache = NewLRUCache(1000)\n\nfunc BenchmarkCacheInsert(b *testing.B) {\n    for b.Loop() {\n        globalCache.Set(randomKey(), randomValue())\n    }\n}\n```\n\nThe first run shows 45 ns/op. The second run shows 180 ns/op. Why do results vary so much between runs?",
-    "trap": "Without the skill, the model suggests adding b.ResetTimer() or increasing benchtime — missing that shared mutable global state across runs causes the cache to be in different fill states, making each b.N iteration operate on a different cache state (empty, half-full, full with evictions)",
+    "description": "测试是否意识到带共享可变状态的基准测试会产生不可复现且有误导性的结果",
+    "prompt": "我写了这个基准测试测 LRU 缓存插入：\n\n```go\nvar globalCache = NewLRUCache(1000)\n\nfunc BenchmarkCacheInsert(b *testing.B) {\n    for b.Loop() {\n        globalCache.Set(randomKey(), randomValue())\n    }\n}\n```\n\n第一次跑 45 ns/op，第二次跑 180 ns/op。为什么两次结果差这么多？",
+    "trap": "没有 skill 时，模型建议加 b.ResetTimer() 或增加 benchtime——漏掉跨运行共享的可变全局状态让缓存处于不同填充水平，每个 b.N 迭代操作的缓存状态都不同（空、半满、满到开始淘汰）",
     "assertions": [
       {
         "id": "66.1",
-        "text": "Identifies that globalCache is mutable shared state — its fill level changes across b.N iterations and across separate runs"
+        "text": "指出 globalCache 是可变共享状态——它的填充水平随 b.N 迭代和多次运行而变化"
       },
       {
         "id": "66.2",
-        "text": "Explains that early iterations insert into empty slots (fast), while later iterations trigger evictions (slow) — the benchmark measures a mix of two different operations"
+        "text": "解释早期迭代插进空槽（快），后期迭代触发淘汰（慢）——基准测试测的是两种不同操作的混合"
       },
       {
         "id": "66.3",
-        "text": "Recommends using b.StopTimer()/b.StartTimer() or b.ResetTimer() with setup per batch, OR pre-filling/resetting the cache state to a known baseline before the benchmark loop"
+        "text": "建议用 b.StopTimer()/b.StartTimer() 或 b.ResetTimer() 配合按批 setup，或在基准循环前把缓存预填/重置到已知基线"
       },
       {
         "id": "66.4",
-        "text": "Notes that mutable global state in benchmarks produces results that vary by execution order — isolated state inside b.Run sub-benchmarks or per-benchmark setup is the correct pattern"
+        "text": "指出基准测试里的可变全局状态会让结果随执行顺序变化——正确模式是在 b.Run 子基准测试内隔离状态或按基准测试做 setup"
       }
     ]
   },
   {
     "id": 67,
     "name": "async-work-allocation-measurement-scope",
-    "description": "Tests that benchmark allocation counts cover allocations during the measured window, including other goroutines, but async work can escape measurement if synchronization is wrong",
-    "prompt": "I have a benchmark that spawns a goroutine inside the loop to do async work:\n\n```go\nfunc BenchmarkProcess(b *testing.B) {\n    b.ReportAllocs()\n    for b.Loop() {\n        ch := make(chan Result, 1)\n        go worker(ch)  // worker allocates internally\n        <-ch\n    }\n}\n```\n\nThe benchmark reports 1 alloc/op (just the channel). But profiling shows the worker goroutine allocates heavily. Why doesn't ReportAllocs see those?",
-    "trap": "Without the skill, the model may incorrectly claim ReportAllocs only tracks the benchmark goroutine. Allocation counts are global deltas while the timer is running; discrepancies usually mean async work occurred outside the measured window, synchronization is wrong, or the profile covers a different scope.",
+    "description": "测试基准测试的分配计数覆盖测量窗口内的分配（含其他 goroutine），但同步不对时异步工作会逃出测量",
+    "prompt": "我有一个基准测试在循环里起 goroutine 做异步工作：\n\n```go\nfunc BenchmarkProcess(b *testing.B) {\n    b.ReportAllocs()\n    for b.Loop() {\n        ch := make(chan Result, 1)\n        go worker(ch)  // worker allocates internally\n        <-ch\n    }\n}\n```\n\n基准测试报 1 alloc/op（只有 channel）。但 profiling 显示 worker goroutine 分配很多。为什么 ReportAllocs 看不到？",
+    "trap": "没有 skill 时，模型可能错误地声称 ReportAllocs 只跟踪基准测试 goroutine。分配计数是计时器运行期间的全局差值；不一致通常意味着异步工作发生在测量窗口外、同步方式不对，或 profile 覆盖的范围不同。",
     "assertions": [
       {
         "id": "67.1",
-        "text": "Explains that ReportAllocs/-benchmem use allocation deltas while the benchmark timer is running, not per-goroutine attribution"
+        "text": "解释 ReportAllocs/-benchmem 统计的是基准计时器运行期间的分配差值，不是按 goroutine 归属"
       },
       {
         "id": "67.2",
-        "text": "Checks whether the worker goroutine is fully synchronized inside the b.Loop measured window"
+        "text": "检查 worker goroutine 是否完全同步在 b.Loop 测量窗口内"
       },
       {
         "id": "67.3",
-        "text": "Recommends using a heap profile (-memprofile) to inspect allocation sites across goroutines"
+        "text": "建议用堆 profile（-memprofile）跨 goroutine 检查分配点"
       },
       {
         "id": "67.4",
-        "text": "Notes that profile-vs-benchmark discrepancies can come from async work outside timing or a different measurement scope"
+        "text": "指出 profile 与基准测试不一致可能来自计时窗口外的异步工作或不同的测量范围"
       }
     ]
   },
   {
     "id": 68,
     "name": "pprof-goroutine-debug-levels",
-    "description": "Tests knowledge of the different debug levels for goroutine dumps",
-    "prompt": "I want to get a human-readable dump of all goroutine stacks from my running Go service via HTTP, without using go tool pprof. How?",
-    "trap": "Without the skill, the model may only suggest the binary profile format",
+    "description": "测试对 goroutine dump 不同 debug 级别的了解",
+    "prompt": "我想通过 HTTP 从运行中的 Go 服务拿一份人类可读的 goroutine 栈 dump，不用 go tool pprof。怎么做？",
+    "trap": "没有 skill 时，模型可能只建议二进制 profile 格式",
     "assertions": [
       {
         "id": "68.1",
-        "text": "Uses curl with ?debug=1 for human-readable goroutine dump"
+        "text": "用 curl 加 ?debug=1 拿人类可读的 goroutine dump"
       },
       {
         "id": "68.2",
-        "text": "Mentions ?debug=2 for full stack traces with creation site and labels"
+        "text": "提到 ?debug=2 拿带创建点和标签的完整栈"
       },
       {
         "id": "68.3",
-        "text": "Shows the URL: http://localhost:6060/debug/pprof/goroutine?debug=1 or ?debug=2"
+        "text": "展示 URL：http://localhost:6060/debug/pprof/goroutine?debug=1 或 ?debug=2"
       },
       {
         "id": "68.4",
-        "text": "Notes that no go tool pprof is needed for debug mode dumps"
+        "text": "指出 debug 模式的 dump 不需要 go tool pprof"
       }
     ]
   },
   {
     "id": 69,
     "name": "ci-threshold-calibration",
-    "description": "Tests knowledge of appropriate regression thresholds for different CI environments",
-    "prompt": "I'm setting up benchmark regression detection in CI. What threshold should I set for failing PRs on performance regression?",
-    "trap": "Without the skill, the model may suggest a tight threshold (5%) without considering the CI environment",
+    "description": "测试对不同 CI 环境合适回归阈值的了解",
+    "prompt": "我在 CI 里搭基准测试回归检测。性能回归判 PR 失败的阈值该设多少？",
+    "trap": "没有 skill 时，模型可能不考虑 CI 环境就建议紧阈值（5%）",
     "assertions": [
       {
         "id": "69.1",
-        "text": "Recommends 20%+ threshold on shared/GitHub-hosted runners"
+        "text": "建议共享/GitHub 托管 runner 上用 20%+ 阈值"
       },
       {
         "id": "69.2",
-        "text": "Recommends 10% on dedicated self-hosted runners"
+        "text": "建议专用自托管 runner 上用 10%"
       },
       {
         "id": "69.3",
-        "text": "Explains that tight thresholds on noisy environments produce false positives that erode trust"
+        "text": "解释噪声大的环境里紧阈值会产生假阳性、侵蚀信任"
       },
       {
         "id": "69.4",
-        "text": "Mentions that GitHub-hosted runners show ~2-3% coefficient of variation in best case"
+        "text": "提到 GitHub 托管 runner 最好情况下也有约 2-3% 变异系数"
       },
       {
         "id": "69.5",
-        "text": "States that <1% false positive rate requires 7%+ performance gate"
+        "text": "说明 <1% 假阳性率需要 7%+ 的性能门槛"
       }
     ]
   },
   {
     "id": 70,
     "name": "cpu-profile-requires-binary-for-symbolization",
-    "description": "Tests knowledge that a CPU profile file captured from a benchmark contains no symbols — the original test binary is required for symbolization",
-    "prompt": "I ran `go test -bench=BenchmarkParse -cpuprofile=cpu.prof ./pkg/parser` on our CI server, then downloaded cpu.prof to my laptop to analyze. When I run `go tool pprof cpu.prof` I see only hex addresses instead of function names. What's missing?",
-    "trap": "Without the skill, the model may suggest rebuilding pprof or using -symbolize=remote — missing that the pprof file is unsymbolized and requires the original compiled test binary (parser.test) to resolve addresses to function names",
+    "description": "测试是否知道基准测试抓的 CPU profile 文件不含符号——需要原测试二进制做符号化",
+    "prompt": "我在 CI 服务器上跑了 `go test -bench=BenchmarkParse -cpuprofile=cpu.prof ./pkg/parser`，然后把 cpu.prof 下载到笔记本分析。跑 `go tool pprof cpu.prof` 只看到十六进制地址而不是函数名。缺了什么？",
+    "trap": "没有 skill 时，模型可能建议重新构建 pprof 或用 -symbolize=remote——漏掉这份 pprof 文件未符号化，需要原编译出的测试二进制（parser.test）把地址解析成函数名",
     "assertions": [
       {
         "id": "70.1",
-        "text": "Explains that cpu.prof contains memory addresses, not function names — it requires the compiled test binary for symbolization"
+        "text": "解释 cpu.prof 里是内存地址不是函数名——需要编译出的测试二进制做符号化"
       },
       {
         "id": "70.2",
-        "text": "States that go test -bench also produces a test binary (e.g., parser.test) alongside the profile"
+        "text": "说明 go test -bench 在生成 profile 的同时也会产生测试二进制（如 parser.test）"
       },
       {
         "id": "70.3",
-        "text": "Shows the correct command: go tool pprof parser.test cpu.prof (pass the binary as the first argument)"
+        "text": "展示正确命令：go tool pprof parser.test cpu.prof（二进制作第一个参数）"
       },
       {
         "id": "70.4",
-        "text": "Recommends downloading both the .prof file AND the corresponding test binary from CI for remote analysis"
+        "text": "建议从 CI 同时下载 .prof 文件和对应测试二进制用于远程分析"
       }
     ]
   },
   {
     "id": 71,
     "name": "benchstat-ignore-dimension-warning",
-    "description": "Tests knowledge of the -ignore flag for suppressing benchstat dimension warnings",
-    "prompt": "benchstat gives me a warning: 'benchmarks vary in /gomaxprocs'. How do I suppress this?",
-    "trap": "Without the skill, the model may suggest filtering the output or restructuring benchmarks",
+    "description": "测试对 -ignore flag 消除 benchstat 维度警告的了解",
+    "prompt": "benchstat 给我一个警告：'benchmarks vary in /gomaxprocs'。怎么消掉？",
+    "trap": "没有 skill 时，模型可能建议过滤输出或重构基准测试",
     "assertions": [
       {
         "id": "71.1",
-        "text": "Uses -ignore /gomaxprocs to suppress the warning"
+        "text": "用 -ignore /gomaxprocs 消除警告"
       },
       {
         "id": "71.2",
-        "text": "Explains that -ignore omits keys from grouping"
+        "text": "解释 -ignore 把键从分组中剔除"
       },
       {
         "id": "71.3",
-        "text": "Alternatively suggests -row .name to simplify row grouping"
+        "text": "或者建议 -row .name 简化行分组"
       },
       {
         "id": "71.4",
-        "text": "Mentions that -col /gomaxprocs could be used to compare across GOMAXPROCS values instead"
+        "text": "提到也可以改用 -col /gomaxprocs 跨 GOMAXPROCS 值对比"
       }
     ]
   },
   {
     "id": 72,
     "name": "gcflags-all-vs-single-package-scope",
-    "description": "Tests understanding of -gcflags=\"all=-m\" vs -gcflags=\"-m\" and when the wider scope matters",
-    "prompt": "I'm investigating unexpected heap allocations in my Go service. I ran `go build -gcflags=\"-m\" ./...` and the escape analysis output only shows my own packages. But I suspect a third-party library function is causing my structs to escape when passed to it. How do I see escape decisions for dependencies too?",
-    "trap": "Without the skill, the model only knows -gcflags=\"-m\" which applies to packages named on the command line, not their dependencies — missing the all= prefix that applies flags to all transitively compiled packages including vendor/module dependencies",
+    "description": "测试对 -gcflags=\"all=-m\" 与 -gcflags=\"-m\" 区别及何时需要更大范围的理解",
+    "prompt": "我在排查 Go 服务里意外的堆分配。我跑了 `go build -gcflags=\"-m\" ./...`，逃逸分析输出只显示我自己的包。但我怀疑是某个第三方库函数让我的结构体在传参时逃逸。怎么连依赖的逃逸决策也看到？",
+    "trap": "没有 skill 时，模型只知道 -gcflags=\"-m\"，它只作用于命令行上列出的包、不含依赖——漏掉 all= 前缀能把 flag 应用到所有被传递编译的包，包括 vendor/module 依赖",
     "assertions": [
       {
         "id": "72.1",
-        "text": "Explains that -gcflags=\"-m\" only applies escape analysis to packages explicitly listed on the command line, not their dependencies"
+        "text": "解释 -gcflags=\"-m\" 只对命令行显式列出的包做逃逸分析，不含依赖"
       },
       {
         "id": "72.2",
-        "text": "Shows go build -gcflags=\"all=-m\" ./... to apply escape analysis to ALL compiled packages including dependencies"
+        "text": "展示 go build -gcflags=\"all=-m\" ./... 对包括依赖在内的所有被编译包做逃逸分析"
       },
       {
         "id": "72.3",
-        "text": "Warns that all=-m produces very verbose output — recommends piping through grep to filter for the specific package or function of interest"
+        "text": "警告 all=-m 输出非常啰嗦——建议管道接 grep 筛出关心的包或函数"
       },
       {
         "id": "72.4",
-        "text": "Notes this is especially useful for diagnosing parameter escapes caused by passing values to functions in external packages that the compiler cannot analyze inline"
+        "text": "指出这对诊断把值传给编译器无法内联分析的外部包函数所造成的参数逃逸特别有用"
       }
     ]
   },
   {
     "id": 73,
     "name": "runtime-readmemstats-vs-runtime-metrics",
-    "description": "Tests knowledge of the programmatic APIs for runtime statistics",
-    "prompt": "I want to read GC statistics programmatically in my Go application for a custom dashboard. What APIs are available and which should I prefer?",
-    "trap": "Without the skill, the model may recommend ReadMemStats without noting its overhead or the modern alternative",
+    "description": "测试对 runtime 统计信息的编程 API 的了解",
+    "prompt": "我想在 Go 应用里编程读 GC 统计，做自定义面板。有哪些 API 可用，应该首选哪个？",
+    "trap": "没有 skill 时，模型可能推荐 ReadMemStats 而不提它的开销或更现代的替代",
     "assertions": [
       {
         "id": "73.1",
-        "text": "Mentions runtime.ReadMemStats for heap size, NumGC, pause durations"
+        "text": "提到用 runtime.ReadMemStats 看堆大小、NumGC、暂停时长"
       },
       {
         "id": "73.2",
-        "text": "Mentions debug.ReadGCStats for GC-specific statistics"
+        "text": "提到用 debug.ReadGCStats 看 GC 专项统计"
       },
       {
         "id": "73.3",
-        "text": "Recommends runtime/metrics (Go 1.16+) as the preferred modern API"
+        "text": "推荐 runtime/metrics（Go 1.16+）作为首选的现代 API"
       },
       {
         "id": "73.4",
-        "text": "Explains that runtime/metrics has lower overhead and is safe for concurrent reads"
+        "text": "解释 runtime/metrics 开销更低且并发读安全"
       },
       {
         "id": "73.5",
-        "text": "Notes that ReadMemStats is more expensive due to internal locking"
+        "text": "指出 ReadMemStats 因内部加锁更昂贵"
       }
     ]
   },
   {
     "id": 74,
     "name": "pprof-callgrind-export",
-    "description": "Tests knowledge of exporting pprof data to external visualization tools",
-    "prompt": "I want to analyze a Go pprof profile in KCachegrind for more advanced visualization. How do I export the data?",
-    "trap": "Without the skill, the model may not know about the callgrind export format",
+    "description": "测试对把 pprof 数据导出到外部可视化工具的了解",
+    "prompt": "我想在 KCachegrind 里分析 Go pprof profile 获得更高级的可视化。怎么导出数据？",
+    "trap": "没有 skill 时，模型可能不知道 callgrind 导出格式",
     "assertions": [
       {
         "id": "74.1",
-        "text": "Uses the callgrind command or -callgrind flag to export"
+        "text": "用 callgrind 命令或 -callgrind flag 导出"
       },
       {
         "id": "74.2",
-        "text": "Shows the command: go tool pprof -callgrind cpu.prof > cpu.callgrind"
+        "text": "展示命令：go tool pprof -callgrind cpu.prof > cpu.callgrind"
       },
       {
         "id": "74.3",
-        "text": "Mentions KCachegrind or QCachegrind as visualization tools"
+        "text": "提到 KCachegrind 或 QCachegrind 作为可视化工具"
       },
       {
         "id": "74.4",
-        "text": "Notes the proto command for saving in protobuf format as an alternative"
+        "text": "提到可用 proto 命令保存为 protobuf 格式作替代"
       }
     ]
   },
   {
     "id": 75,
     "name": "expvar-lightweight-monitoring",
-    "description": "Tests knowledge of expvar as a lightweight alternative to Prometheus for runtime metrics",
-    "prompt": "I want a lightweight way to expose Go runtime variables as JSON for monitoring without adding a full Prometheus dependency. What does the stdlib offer?",
-    "trap": "Without the skill, the model may suggest writing a custom handler or only mention pprof",
+    "description": "测试对 expvar 作为 Prometheus 轻量替代暴露 runtime 指标的了解",
+    "prompt": "我想要一个轻量方式把 Go runtime 变量以 JSON 暴露出来做监控，不想引入完整 Prometheus 依赖。标准库有什么？",
+    "trap": "没有 skill 时，模型可能建议自己写 handler，或只提 pprof",
     "assertions": [
-      { "id": "75.1", "text": "Recommends expvar package from the stdlib" },
+      {
+        "id": "75.1",
+        "text": "推荐标准库的 expvar 包"
+      },
       {
         "id": "75.2",
-        "text": "Shows that import _ \"expvar\" auto-registers at /debug/vars"
+        "text": "展示 import _ \"expvar\" 会自动注册 /debug/vars"
       },
-      { "id": "75.3", "text": "Notes it serves JSON format" },
+      {
+        "id": "75.3",
+        "text": "指出它以 JSON 格式提供数据"
+      },
       {
         "id": "75.4",
-        "text": "Mentions integration with Netdata, Telegraf, or custom dashboards"
+        "text": "提到可与 Netdata、Telegraf 或自定义面板集成"
       }
     ]
   },
   {
     "id": 76,
     "name": "benchstat-table-flag-per-package",
-    "description": "Tests knowledge of the -table flag for grouping benchstat output by package",
-    "prompt": "I ran benchmarks across multiple packages and the benchstat output mixes them all together. How do I get separate comparison tables per package?",
-    "trap": "Without the skill, the model may suggest running benchstat separately per package",
+    "description": "测试对 -table flag 按包分组 benchstat 输出的了解",
+    "prompt": "我跨多个包跑了基准测试，benchstat 输出把它们混在一起了。怎么按包出独立的对比表？",
+    "trap": "没有 skill 时，模型可能建议按包分别跑 benchstat",
     "assertions": [
       {
         "id": "76.1",
-        "text": "Uses -table pkg flag to create one table per package"
+        "text": "用 -table pkg flag 每包出一张表"
       },
       {
         "id": "76.2",
-        "text": "Shows the command: benchstat -table pkg old.txt new.txt"
+        "text": "展示命令：benchstat -table pkg old.txt new.txt"
       },
       {
         "id": "76.3",
-        "text": "Explains that the default -table value is .config which groups by goos/goarch/pkg/cpu"
+        "text": "解释 -table 默认值是 .config，按 goos/goarch/pkg/cpu 分组"
       }
     ]
   },
   {
     "id": 77,
     "name": "pprof-symbolization-remote",
-    "description": "Tests knowledge of pprof symbolization modes for remote profiling",
-    "prompt": "I captured a pprof profile from a production server but the function names show as hex addresses instead of readable names. How do I fix this?",
-    "trap": "Without the skill, the model may not know about the symbolization modes",
+    "description": "测试对远程 profiling 的 pprof 符号化模式的了解",
+    "prompt": "我从生产服务器抓了一份 pprof profile，但函数名显示为十六进制地址而不是可读名字。怎么修？",
+    "trap": "没有 skill 时，模型可能不知道符号化模式",
     "assertions": [
       {
         "id": "77.1",
-        "text": "Explains pprof symbolization modes: local, remote, none"
+        "text": "解释 pprof 符号化模式：local、remote、none"
       },
-      { "id": "77.2", "text": "Shows -symbolize=local to use local binaries" },
+      {
+        "id": "77.2",
+        "text": "展示 -symbolize=local 使用本地二进制"
+      },
       {
         "id": "77.3",
-        "text": "Mentions PPROF_BINARY_PATH environment variable for setting binary search paths"
+        "text": "提到用 PPROF_BINARY_PATH 环境变量设置二进制搜索路径"
       },
       {
         "id": "77.4",
-        "text": "Shows -symbolize=remote to contact the running service for symbol information"
+        "text": "展示 -symbolize=remote 向运行中的服务获取符号信息"
       }
     ]
   },
   {
     "id": 78,
     "name": "trace-concurrent-with-flight-recorder",
-    "description": "Tests understanding that trace.Start and FlightRecorder can run concurrently",
-    "prompt": "I have a flight recorder running in my service. If I also call trace.Start() to capture a short trace for debugging, will they conflict?",
-    "trap": "Without the skill, the model may assume they can't coexist",
+    "description": "测试对 trace.Start 与 FlightRecorder 可以并发运行的理解",
+    "prompt": "我的服务里跑着 flight recorder。如果我再调 trace.Start() 抓一段短 trace 调试，会冲突吗？",
+    "trap": "没有 skill 时，模型可能以为两者不能共存",
     "assertions": [
       {
         "id": "78.1",
-        "text": "States that a flight recorder can run concurrently with trace.Start"
+        "text": "说明 flight recorder 可以与 trace.Start 并发运行"
       },
       {
         "id": "78.2",
-        "text": "Notes the constraint that at most one flight recorder may be active at a time"
+        "text": "指出限制：同一时间最多一个活跃 flight recorder"
       },
       {
         "id": "78.3",
-        "text": "Clarifies that both can be active simultaneously without conflict"
+        "text": "澄清两者可以同时活跃，不冲突"
       }
     ]
   },
   {
     "id": 79,
     "name": "pyroscope-overhead-warning",
-    "description": "Tests awareness of continuous profiling overhead at scale",
-    "prompt": "Our SRE team wants to enable Pyroscope continuous profiling on all 200 production instances. Any concerns?",
-    "trap": "Without the skill, the model may approve fleet-wide enablement without the cost warning",
+    "description": "测试对大规模持续 profiling 开销的认识",
+    "prompt": "我们 SRE 团队想在全部 200 个生产实例上开 Pyroscope 持续 profiling。有什么顾虑？",
+    "trap": "没有 skill 时，模型可能同意全集群开启而不给成本警告",
     "assertions": [
       {
         "id": "79.1",
-        "text": "Warns about ~2-5% CPU overhead per instance for continuous profiling"
+        "text": "警告持续 profiling 每实例约 2-5% CPU 开销"
       },
       {
         "id": "79.2",
-        "text": "Notes that at 200 instances, the aggregate compute cost and backend storage cost is significant"
+        "text": "指出 200 个实例时，总计算成本和后端存储成本很可观"
       },
       {
         "id": "79.3",
-        "text": "Recommends enabling on a subset of instances or on-demand via environment variable"
+        "text": "建议只在部分实例开，或通过环境变量按需开启"
       },
       {
         "id": "79.4",
-        "text": "Emphasizes the investigation session approach: enable on target instances only, not fleet-wide"
+        "text": "强调排查会话方式：只在目标实例开，不全集群开"
       }
     ]
   },
   {
     "id": 80,
     "name": "non-go-memory-leak-detection",
-    "description": "Tests the PromQL pattern for detecting non-Go memory leaks (cgo, mmap)",
-    "prompt": "My Go service's RSS keeps growing but go_memstats_alloc_bytes appears stable. The leak doesn't seem to be in Go heap memory. How do I diagnose this?",
-    "trap": "Without the skill, the model may only investigate Go heap, missing cgo/mmap leaks",
+    "description": "测试检测非 Go 内存泄漏（cgo、mmap）的 PromQL 模式",
+    "prompt": "我的 Go 服务 RSS 一直涨，但 go_memstats_alloc_bytes 看起来稳定。泄漏似乎不在 Go 堆内存。怎么诊断？",
+    "trap": "没有 skill 时，模型可能只查 Go 堆，漏掉 cgo/mmap 泄漏",
     "assertions": [
       {
         "id": "80.1",
-        "text": "Uses the PromQL pattern: process_resident_memory_bytes - go_memstats_sys_bytes"
+        "text": "用 PromQL 模式：process_resident_memory_bytes - go_memstats_sys_bytes"
       },
       {
         "id": "80.2",
-        "text": "Explains that the gap represents non-Go memory (cgo, mmap, etc.)"
+        "text": "解释这个差值代表非 Go 内存（cgo、mmap 等）"
       },
-      { "id": "80.3", "text": "A growing gap indicates a non-Go memory leak" },
+      {
+        "id": "80.3",
+        "text": "差值持续增长说明非 Go 内存泄漏"
+      },
       {
         "id": "80.4",
-        "text": "Suggests investigating cgo calls or memory-mapped files as potential sources"
+        "text": "建议排查 cgo 调用或内存映射文件作为潜在来源"
       }
     ]
   },
   {
     "id": 81,
     "name": "parallel-variant-serial-measurement",
-    "description": "Tests whether the model isolates parallel optimization variants in separate worktrees but still measures each variant's benchmark serially, rather than running the benchmarks themselves concurrently",
-    "prompt": "I have three competing ideas for speeding up a hot function: replacing a map with a slice, adding a sync.Pool, and rewriting the loop to cut allocations. I want to try all three at once to save time — set up one sub-agent per idea so their edits don't collide, then benchmark all three together so I can quickly pick a winner.",
-    "trap": "Without the skill, the model takes 'all at once' and 'quickly' literally on both axes: it isolates the three implementations in separate worktrees (correct) but also launches the three benchmark runs concurrently to save time (incorrect) — missing that concurrent benchmarks share the same CPU and the noisy-neighbor effect contaminates ns/op, reintroducing the exact variance -count and benchstat exist to eliminate",
+    "description": "测试模型是否把并行优化变体隔离在各自 worktree，但仍串行测量每个变体的基准测试，而不是并发跑基准测试本身",
+    "prompt": "我有三个给热函数提速的竞争方案：把 map 换成 slice、加 sync.Pool、重写循环减少分配。想三个同时试省时间——每个方案配一个 sub-agent 让改动互不冲突，然后三个一起跑基准测试好快速选出胜者。",
+    "trap": "没有 skill 时，模型把「同时」和「快速」在两个维度上都照字面执行：把三个实现隔离在各自 worktree（正确），但也并发跑三个基准测试来省时间（错误）——漏掉并发基准测试共享同一 CPU，noisy neighbor 效应会污染 ns/op，重新引入 -count 和 benchstat 本来要消除的波动",
     "assertions": [
       {
         "id": "81.1",
-        "text": "Recommends implementing each of the three variants in its own isolated worktree (EnterWorktree) so their code edits never collide"
+        "text": "建议把三个变体分别在隔离的 worktree（EnterWorktree）里实现，代码改动互不冲突"
       },
       {
         "id": "81.2",
-        "text": "Explicitly warns against running the three variants' benchmarks concurrently / at the same time"
+        "text": "明确警告不要并发/同时跑三个变体的基准测试"
       },
       {
         "id": "81.3",
-        "text": "Explains that concurrent benchmark runs share the CPU — the noisy-neighbor effect contaminates ns/op measurements"
+        "text": "解释并发跑基准测试共享 CPU——noisy neighbor 效应污染 ns/op 测量"
       },
       {
         "id": "81.4",
-        "text": "Recommends running each variant's benchmark serially, one at a time"
+        "text": "建议每个变体的基准测试串行跑，一次一个"
       },
       {
         "id": "81.5",
-        "text": "Recommends comparing each variant's benchstat output against the same baseline report"
+        "text": "建议把每个变体的 benchstat 输出都与同一份基线报告对比"
       },
       {
         "id": "81.6",
-        "text": "Recommends removing (ExitWorktree) the losing variants' worktrees once the winner is chosen"
+        "text": "建议选出胜者后删掉（ExitWorktree）落败变体的 worktree"
       }
     ]
   }

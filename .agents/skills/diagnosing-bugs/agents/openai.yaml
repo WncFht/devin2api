@@ -1,3 +1,3 @@
 interface:
-  display_name: "Diagnosing Bugs"
-  short_description: "Diagnose hard bugs and regressions"
+  display_name: "诊断 Bug"
+  short_description: "诊断疑难 bug 与回归"

@@ -1,46 +1,46 @@
-# Performance Troubleshooting
+# 性能排障
 
 ## CPU Profiling
 
-Use pprof CPU profile to capture a 30s sample (see [pprof.md](./pprof.md) for commands), then inspect with `top`, `web`, or `list funcName`.
+用 pprof CPU profile 采 30s 样本（命令见 [pprof.md](./pprof.md)），然后用 `top`、`web` 或 `list funcName` 查看。
 
-**Common CPU hogs:**
+**常见 CPU 大户：**
 
-1. JSON marshal/unmarshal in hot path — preallocate buffers, use faster libraries
-2. Reflection in critical path
-3. Unnecessary allocations — use sync.Pool
-4. O(n^2) hidden in nested loops
-5. Too many syscalls — batch operations
+1. 热路径上的 JSON marshal/unmarshal——预分配 buffer、换更快的库
+2. 关键路径上的反射
+3. 不必要的分配——用 sync.Pool
+4. 藏在嵌套循环里的 O(n^2)
+5. 过多 syscall——批量操作
 
-## Memory Profiling
+## 内存 Profiling
 
-Use pprof heap profile (see [pprof.md](./pprof.md)). Compare heap snapshots over time with `go tool pprof -base heap1.prof heap2.prof` to find growth. Use escape analysis (see [diagnostic-tools.md](./diagnostic-tools.md)) to find unexpected heap allocations in hot paths.
+用 pprof heap profile（见 [pprof.md](./pprof.md)）。用 `go tool pprof -base heap1.prof heap2.prof` 对比不同时间的堆快照找增长。用逃逸分析（见 [diagnostic-tools.md](./diagnostic-tools.md)）找热路径上非预期的堆分配。
 
-**Common memory leaks:**
+**常见内存泄漏：**
 
-1. Unbounded cache without eviction
-2. Growing slices in loops (forgetting to reset)
-3. Global maps never cleared
-4. String concatenation in loops (use `strings.Builder`)
-5. Large structs passed by value
+1. 没有淘汰的无界缓存
+2. 循环里增长的 slice（忘了重置）
+3. 永不清空的全局 map
+4. 循环里拼字符串（用 `strings.Builder`）
+5. 按值传大结构体
 
-## Lock Contention
+## 锁竞争
 
-**Symptoms:** CPU high but throughput low, latency increases with load, multiple cores don't help.
+**症状：**CPU 高但吞吐低、延迟随负载上升、多核没有帮助。
 
-**Enable profiling in code:**
+**在代码里启用 profiling：**
 
 ```go
 runtime.SetMutexProfileFraction(1)
 runtime.SetBlockProfileRate(1)
 ```
 
-Then use pprof mutex and block profiles (see [pprof.md](./pprof.md)).
+然后用 pprof mutex 和 block profile（见 [pprof.md](./pprof.md)）。
 
-**Solutions:**
+**解法：**
 
-1. Reduce critical section — hold lock for minimal time
-2. Sharding — multiple locks for different data
-3. `sync.Map` — for read-heavy workloads
-4. `atomic` — for simple counters
-5. `RWMutex` — when reads >> writes
+1. 缩小临界区——持锁时间最短化
+2. 分片——不同数据用不同的锁
+3. `sync.Map`——读多写少的负载
+4. `atomic`——简单计数器
+5. `RWMutex`——读远多于写时

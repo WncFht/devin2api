@@ -1,24 +1,24 @@
-# Sync Primitives Deep Dive
+# Sync 原语深入
 
-## Table of Contents
+## 目录
 
 - [sync.Mutex](#syncmutex)
-    - [Embedding Convention](#embedding-convention)
+    - [内嵌约定](#内嵌约定)
 - [sync.RWMutex](#syncrwmutex)
 - [sync/atomic](#syncatomic)
 - [sync.Map](#syncmap)
 - [sync.Pool](#syncpool)
 - [sync.Once](#synconce)
 - [sync.WaitGroup](#syncwaitgroup)
-    - [Go 1.25+: `wg.Go`](#go-125-wggo)
-    - [Go <1.25 fallback](#go-125-fallback)
+    - [Go 1.25+: `wg.Go`](#go-125wggo)
+    - [Go <1.25 回退](#go-125-回退)
 - [golang.org/x/sync/singleflight](#golangorgxsyncsingleflight)
 - [golang.org/x/sync/errgroup](#golangorgxsyncerrgroup)
-    - [Bounded Concurrency with SetLimit](#bounded-concurrency-with-setlimit)
+    - [用 SetLimit 做有界并发](#用-setlimit-做有界并发)
 
 ## sync.Mutex
 
-Protects shared state with exclusive access. MUST hold the lock for the shortest time possible — NEVER hold a mutex across I/O, network calls, or channel operations.
+以独占访问保护共享状态。持锁时间必须尽可能短——绝不跨 I/O、网络调用或 channel 操作持有 mutex。
 
 ```go
 type SafeCache struct {
@@ -40,20 +40,20 @@ func (c *SafeCache) Set(key, value string) {
 }
 ```
 
-### Embedding Convention
+### 内嵌约定
 
-Embed the mutex as an unexported field, placed directly above the fields it protects:
+把 mutex 作为非导出字段内嵌，直接放在它保护的字段上方：
 
 ```go
 type Registry struct {
-    mu      sync.Mutex // protects entries
+    mu      sync.Mutex // 保护 entries
     entries map[string]Entry
 }
 ```
 
 ## sync.RWMutex
 
-SHOULD be used when reads greatly outnumber writes. Multiple goroutines can hold `RLock` simultaneously; `Lock` is exclusive.
+读远多于写时应使用。多个 goroutine 可同时持有 `RLock`；`Lock` 是独占的。
 
 ```go
 type Config struct {
@@ -74,14 +74,14 @@ func (c *Config) Set(key, value string) {
 }
 ```
 
-**Pitfall**: Do not upgrade RLock to Lock — this deadlocks. Release RLock first, then acquire Lock.
+**陷阱**：不要把 RLock 升级成 Lock——这会死锁。先放 RLock，再取 Lock。
 
 ## sync/atomic
 
-Lock-free operations for simple values. SHOULD be preferred over Mutex for simple counter operations. Faster than mutex for low-contention counters and flags.
+简单值的无锁操作。简单计数器操作应优先于 Mutex。低竞争的计数器与标志位上比 mutex 更快。
 
 ```go
-// ✓ Good — atomic for a simple counter
+// ✓ 好——简单计数器用 atomic
 var requestCount atomic.Int64
 
 func handleRequest() {
@@ -94,7 +94,7 @@ func getCount() int64 {
 ```
 
 ```go
-// ✓ Good — atomic.Bool for a shutdown flag
+// ✓ 好——关停标志用 atomic.Bool
 var shuttingDown atomic.Bool
 
 func shutdown() {
@@ -106,11 +106,11 @@ func isRunning() bool {
 }
 ```
 
-Go 1.19+ provides typed atomics (`atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]`) — prefer these over raw `atomic.AddInt64`/`atomic.LoadInt64`.
+Go 1.19+ 提供类型化 atomic（`atomic.Int64`、`atomic.Bool`、`atomic.Pointer[T]`）——优先用它们，不用裸 `atomic.AddInt64`/`atomic.LoadInt64`。
 
 ## sync.Map
 
-SHOULD only be used for write-once/read-many patterns. Optimized for two common patterns: (1) keys are written once and read many times, (2) multiple goroutines read/write disjoint key sets. For other patterns, a plain `map` + `sync.RWMutex` is faster.
+只该用于写一次读多次的场景。为两种常见场景优化：(1) key 写一次读多次；(2) 多个 goroutine 读写不相交的 key 集合。其它场景下普通 `map` + `sync.RWMutex` 更快。
 
 ```go
 var cache sync.Map
@@ -132,11 +132,11 @@ func GetOrSet(key string, compute func() any) any {
 }
 ```
 
-**When NOT to use `sync.Map`**: when you need to iterate, get the length, or when writes are frequent and keys overlap heavily. Use `sync.RWMutex` + `map` instead.
+**何时不用 `sync.Map`**：需要遍历、取长度，或写频繁且 key 大量重叠时。改用 `sync.RWMutex` + `map`。
 
 ## sync.Pool
 
-Reuse temporary objects to reduce GC pressure. MUST NOT store pointers to stack-allocated objects. Objects in the pool may be reclaimed at any GC cycle — do not store persistent state.
+复用临时对象降低 GC 压力。不得存放指向栈分配对象的指针。池里的对象在任何 GC 周期都可能被回收——不要存持久状态。
 
 ```go
 var bufPool = sync.Pool{
@@ -153,20 +153,20 @@ func process(data []byte) string {
     }()
 
     buf.Write(data)
-    // ... transform ...
+    // ... 变换 ...
     return buf.String()
 }
 ```
 
-**Rules**:
+**规则**：
 
-- Always `Reset()` before `Put()` — returning dirty objects causes bugs
-- Do not assume an object from `Get()` is zeroed — the `New` func only runs if the pool is empty
-- Best for short-lived, frequently allocated objects (buffers, encoders, temporary structs)
+- `Put()` 前永远 `Reset()`——还回脏对象会出 bug
+- 别假设 `Get()` 拿到的是零值对象——`New` 只在池空时才跑
+- 最适合短命、频繁分配的对象（buffer、编码器、临时 struct）
 
 ## sync.Once
 
-MUST be used for one-time initialization. Execute exactly once, regardless of how many goroutines call it concurrently. Thread-safe by design.
+一次性初始化必须用它。无论多少 goroutine 并发调用，都只执行一次。设计上即线程安全。
 
 ```go
 type DBClient struct {
@@ -195,7 +195,7 @@ func (c *DBClient) Close() error {
 }
 ```
 
-Go 1.21+ also provides `sync.OnceFunc`, `sync.OnceValue`, and `sync.OnceValues` for simpler use cases:
+Go 1.21+ 还提供 `sync.OnceFunc`、`sync.OnceValue`、`sync.OnceValues`，覆盖更简单的场景：
 
 ```go
 var loadConfig = sync.OnceValue(func() *Config {
@@ -206,24 +206,24 @@ var loadConfig = sync.OnceValue(func() *Config {
     return cfg
 })
 
-// Usage: cfg := loadConfig()
+// 用法：cfg := loadConfig()
 ```
 
 ## sync.WaitGroup
 
-Use `sync.WaitGroup` when you only need to wait for a set of goroutines to finish.
+只需要等一组 goroutine 结束时用 `sync.WaitGroup`。
 
-### Go 1.25+: `wg.Go`
+### Go 1.25+:`wg.Go`
 
-`WaitGroup.Go` starts a goroutine, adds it to the group, and removes it from the group when the function returns.
+`WaitGroup.Go` 启动一个 goroutine，把它加入组，函数返回时把它移出组。
 
 ```go
 func processAll(items []Item) {
     var wg sync.WaitGroup
 
     for _, item := range items {
-        // Go 1.22+ loop variables are per-iteration when the module has `go 1.22+`.
-        // Do not add `item := item` solely for closure capture in modern modules.
+        // 模块声明 `go 1.22+` 时，循环变量按迭代独立。
+        // 现代模块里不要专为闭包捕获加 `item := item`。
         wg.Go(func() {
             process(item)
         })
@@ -233,39 +233,39 @@ func processAll(items []Item) {
 }
 ```
 
-Rules:
+规则：
 
-- `WaitGroup.Go` is Go 1.25+, not Go 1.24.
-- The function passed to `wg.Go` must not panic.
-- `WaitGroup` does not propagate errors and does not cancel siblings.
-- For first-error-wins, cancellation, concurrency limits, or returned values, use `golang.org/x/sync/errgroup`.
+- `WaitGroup.Go` 是 Go 1.25+，不是 Go 1.24。
+- 传给 `wg.Go` 的函数不许 panic。
+- `WaitGroup` 不传播错误，也不取消兄弟任务。
+- 要首错即返、取消、并发上限或返回值，用 `golang.org/x/sync/errgroup`。
 
-**Benefits of `wg.Go()`**:
+**`wg.Go()` 的好处**：
 
-- No manual `Add`/`Done` bookkeeping
-- Lower risk of `Add`/`Wait` ordering bugs
-- Cleaner API for simple fire-and-wait work
+- 不用手动记 `Add`/`Done` 账
+- `Add`/`Wait` 顺序错误的风险更低
+- 简单发后等待任务的 API 更干净
 
-**When to use**: Go 1.25+ projects for simple goroutines that must all finish, do not return errors, do not need cancellation, and must not panic. Use `errgroup` when work returns errors, needs cancellation, limits, or first-error behavior.
+**何时用**：Go 1.25+ 项目里必须全部跑完、不返回错误、不需要取消、不会 panic 的简单 goroutine。任务返回错误、需要取消、限并发或首错行为时用 `errgroup`。
 
-### Go <1.25 fallback
+### Go <1.25 回退
 
 ```go
 func processAll(ctx context.Context, items []Item) {
     var wg sync.WaitGroup
     for _, item := range items {
-        wg.Add(1) // Add BEFORE go
+        wg.Add(1) // Add 在 go 之前
         go func(item Item) {
             defer wg.Done()
             process(ctx, item)
         }(item)
     }
-    wg.Wait() // blocks until all goroutines finish
+    wg.Wait() // 阻塞到全部 goroutine 结束
 }
 ```
 
 ```go
-// ✗ Bad — Add inside the goroutine (race: Wait may return before Add runs)
+// ✗ 坏——Add 写在 goroutine 里（竞争：Wait 可能在 Add 执行前返回）
 go func() {
     wg.Add(1)
     defer wg.Done()
@@ -275,14 +275,14 @@ go func() {
 
 ## golang.org/x/sync/singleflight
 
-Deduplicates concurrent calls for the same key. When multiple goroutines request the same resource simultaneously, only one executes; the rest wait and share the result.
+对同一 key 的并发调用去重。多个 goroutine 同时请求同一资源时只有一个执行，其余等待并共享结果。
 
 ```go
 var group singleflight.Group
 
 func GetUser(ctx context.Context, id string) (*User, error) {
     v, err, _ := group.Do(id, func() (any, error) {
-        // Only one goroutine executes this for a given id
+        // 对给定 id 只有一个 goroutine 执行这里
         return db.QueryUser(ctx, id)
     })
     if err != nil {
@@ -292,15 +292,15 @@ func GetUser(ctx context.Context, id string) (*User, error) {
 }
 ```
 
-**Use cases**: cache stampede prevention, deduplicating expensive lookups (DB, API), rate-limited external service calls.
+**用途**：防缓存击穿、昂贵查询去重（DB、API）、限流的外部服务调用。
 
 ## golang.org/x/sync/errgroup
 
-Goroutine group with error propagation. Returns the first error from any goroutine. With `WithContext`, cancels remaining goroutines on first error.
+带错误传播的 goroutine 组。返回任意 goroutine 的第一个错误。配 `WithContext` 时，首个错误取消其余 goroutine。
 
 ```go
 func fetchAll(ctx context.Context, urls []string) ([]Response, error) {
-    g, ctx := errgroup.WithContext(ctx) // cancel siblings on first error
+    g, ctx := errgroup.WithContext(ctx) // 首错时取消兄弟任务
     results := make([]Response, len(urls))
 
     for i, url := range urls {
@@ -309,7 +309,7 @@ func fetchAll(ctx context.Context, urls []string) ([]Response, error) {
             if err != nil {
                 return fmt.Errorf("fetching %s: %w", url, err)
             }
-            results[i] = resp // safe: each goroutine writes to its own index
+            results[i] = resp // 安全：每个 goroutine 只写自己的下标
             return nil
         })
     }
@@ -321,13 +321,13 @@ func fetchAll(ctx context.Context, urls []string) ([]Response, error) {
 }
 ```
 
-### Bounded Concurrency with SetLimit
+### 用 SetLimit 做有界并发
 
-SHOULD use `SetLimit` to bound concurrency and avoid unbounded goroutine spawning.
+应该用 `SetLimit` 限制并发，避免无界起 goroutine。
 
 ```go
 g, ctx := errgroup.WithContext(ctx)
-g.SetLimit(10) // at most 10 goroutines run concurrently
+g.SetLimit(10) // 最多 10 个 goroutine 并发运行
 
 for _, task := range tasks {
     g.Go(func() error {
@@ -337,6 +337,6 @@ for _, task := range tasks {
 return g.Wait()
 ```
 
-This replaces hand-rolled worker pools for most use cases.
+多数场景下它取代手写 worker pool。
 
-→ See `samber/cc-skills-golang@golang-concurrency` skill for high-level patterns and decision trees.
+→ 高层模式与决策树见 `samber/cc-skills-golang@golang-concurrency` skill。

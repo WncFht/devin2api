@@ -1,27 +1,27 @@
-# Pipelines and Worker Pools
+# 流水线与 Worker Pool
 
-## Table of Contents
+## 目录
 
-- [Pipeline Pattern](#pipeline-pattern)
+- [流水线模式](#流水线模式)
 - [Fan-Out / Fan-In](#fan-out--fan-in)
-- [Worker Pool with errgroup](#worker-pool-with-errgroup)
-- [Bounded Concurrency with Semaphore](#bounded-concurrency-with-semaphore)
-- [Pipeline Alternatives](#pipeline-alternatives)
-    - [Go 1.23+ Iterators (range-over-func)](#go-123-iterators-range-over-func)
+- [用 errgroup 做 Worker Pool](#用-errgroup-做-worker-pool)
+- [用信号量做有界并发](#用信号量做有界并发)
+- [流水线替代方案](#流水线替代方案)
+    - [Go 1.23+ 迭代器（range-over-func）](#go-123-迭代器range-over-func)
     - [samber/ro](#samberro)
-- [Goroutine Leak Detection](#goroutine-leak-detection)
-- [Common Pipeline Mistakes](#common-pipeline-mistakes)
+- [Goroutine 泄漏检测](#goroutine-泄漏检测)
+- [流水线常见错误](#流水线常见错误)
 
-## Pipeline Pattern
+## 流水线模式
 
-A pipeline is a series of stages connected by channels, where each stage is a goroutine (or group of goroutines) that:
+流水线是用 channel 串起来的一串阶段，每个阶段是一个（或一组）goroutine，它：
 
-1. Receives values from an upstream channel
-2. Processes each value
-3. Sends results to a downstream channel
+1. 从上游 channel 接收值
+2. 处理每个值
+3. 把结果发到下游 channel
 
 ```go
-// Stage 1: Generate integers
+// 阶段 1：生成整数
 func generate(ctx context.Context, nums ...int) <-chan int {
     out := make(chan int)
     go func() {
@@ -37,7 +37,7 @@ func generate(ctx context.Context, nums ...int) <-chan int {
     return out
 }
 
-// Stage 2: Square each integer
+// 阶段 2：对每个整数求平方
 func square(ctx context.Context, in <-chan int) <-chan int {
     out := make(chan int)
     go func() {
@@ -53,7 +53,7 @@ func square(ctx context.Context, in <-chan int) <-chan int {
     return out
 }
 
-// Usage
+// 用法
 func main() {
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
@@ -67,19 +67,19 @@ func main() {
 }
 ```
 
-**Key rules for pipelines**:
+**流水线的关键规则**：
 
-- Pipeline stages MUST accept and respect context cancellation — every stage must select on `ctx.Done()` to avoid goroutine leaks on early cancellation
-- The producer (first stage) closes its output channel; each subsequent stage closes its own output
-- NEVER create unbounded goroutines in pipeline stages
-- Use unbuffered channels unless you have measured throughput needs
+- 流水线阶段必须接受并响应 context 取消——每个阶段都要 select `ctx.Done()`，否则提前取消时 goroutine 泄漏
+- 生产方（第一个阶段）关闭自己的输出 channel；后续每个阶段关闭自己的输出
+- 绝不在流水线阶段里无界起 goroutine
+- 除非有实测吞吐需求，否则用无缓冲 channel
 
 ## Fan-Out / Fan-In
 
-**Fan-out**: multiple goroutines read from the same channel to parallelize CPU-bound work. **Fan-in**: multiple channels are merged into a single output channel.
+**Fan-out**：多个 goroutine 读同一个 channel，把 CPU 密集工作并行化。**Fan-in**：多个 channel 合并成一个输出 channel。
 
 ```go
-// Fan-out: N workers reading from the same input channel
+// Fan-out：N 个 worker 读同一个输入 channel
 func fanOut(ctx context.Context, in <-chan Task, workers int) <-chan Result {
     out := make(chan Result)
     var wg sync.WaitGroup
@@ -115,7 +115,7 @@ func fanOut(ctx context.Context, in <-chan Task, workers int) <-chan Result {
 ```
 
 ```go
-// Fan-in: merge multiple channels into one
+// Fan-in：把多个 channel 合并成一个
 func fanIn(ctx context.Context, channels ...<-chan Result) <-chan Result {
     out := make(chan Result)
     var wg sync.WaitGroup
@@ -142,14 +142,14 @@ func fanIn(ctx context.Context, channels ...<-chan Result) <-chan Result {
 }
 ```
 
-## Worker Pool with errgroup
+## 用 errgroup 做 Worker Pool
 
-Fan-out workers SHOULD use `errgroup.SetLimit` for bounded concurrency. For most use cases, `errgroup.SetLimit` replaces hand-rolled worker pools:
+fan-out worker 应该用 `errgroup.SetLimit` 做有界并发。多数场景下，`errgroup.SetLimit` 取代手写 worker pool：
 
 ```go
 func processAll(ctx context.Context, tasks []Task) error {
     g, ctx := errgroup.WithContext(ctx)
-    g.SetLimit(10) // max 10 concurrent workers
+    g.SetLimit(10) // 最多 10 个并发 worker
 
     for _, task := range tasks {
         g.Go(func() error {
@@ -160,27 +160,27 @@ func processAll(ctx context.Context, tasks []Task) error {
 }
 ```
 
-Use a hand-rolled worker pool only when you need:
+只在需要以下能力时才手写 worker pool：
 
-- Per-worker state (connections, buffers)
-- Custom backpressure or priority scheduling
-- Graceful draining with in-flight task completion
+- 每 worker 的状态（连接、缓冲）
+- 自定义背压或优先级调度
+- 优雅排空、在途任务跑完再退
 
-## Bounded Concurrency with Semaphore
+## 用信号量做有界并发
 
-When you need fine-grained concurrency control without errgroup:
+不用 errgroup 但需要细粒度并发控制时：
 
 ```go
 func processAll(ctx context.Context, items []Item) error {
-    sem := make(chan struct{}, 10) // semaphore of 10
+    sem := make(chan struct{}, 10) // 容量 10 的信号量
     var wg sync.WaitGroup
 
     for _, item := range items {
         wg.Add(1)
-        sem <- struct{}{} // acquire
+        sem <- struct{}{} // 获取
         go func(item Item) {
             defer wg.Done()
-            defer func() { <-sem }() // release
+            defer func() { <-sem }() // 释放
             process(ctx, item)
         }(item)
     }
@@ -189,13 +189,13 @@ func processAll(ctx context.Context, items []Item) error {
 }
 ```
 
-Prefer `errgroup.SetLimit` over this pattern when error propagation is needed.
+需要错误传播时优先 `errgroup.SetLimit`，不用这个模式。
 
-## Pipeline Alternatives
+## 流水线替代方案
 
-### Go 1.23+ Iterators (range-over-func)
+### Go 1.23+ 迭代器（range-over-func）
 
-For in-process data transformations that do not need concurrency, iterators avoid the overhead of goroutines and channels:
+不需要并发的进程内数据变换，用迭代器可以避开 goroutine 与 channel 的开销：
 
 ```go
 func Filter[T any](seq iter.Seq[T], pred func(T) bool) iter.Seq[T] {
@@ -221,26 +221,26 @@ func Map[T, U any](seq iter.Seq[T], f func(T) U) iter.Seq[U] {
 }
 ```
 
-Use iterators when:
+何时用迭代器：
 
-- Processing is CPU-bound and does not benefit from parallelism
-- You want lazy evaluation without goroutine overhead
-- The data source is already sequential (slice, database cursor)
+- 处理是 CPU 密集、并行无收益
+- 想要惰性求值但不想要 goroutine 开销
+- 数据源本身就是顺序的（slice、数据库游标）
 
-Use goroutine+channel pipelines when:
+何时用 goroutine+channel 流水线：
 
-- Stages involve I/O (network, disk) that benefits from concurrency
-- You need true parallelism across CPU cores
-- Stages have different throughput characteristics
+- 阶段涉及 I/O（网络、磁盘），并发有收益
+- 需要跨 CPU 核的真并行
+- 各阶段吞吐特征不同
 
 ### samber/ro
 
-`samber/ro` provides a fluent, type-safe pipeline API for read-only collections:
+`samber/ro` 为只读集合提供流式、类型安全的流水线 API：
 
 ```go
 import "github.com/samber/ro"
 
-emails, _ := ro.Collect( // ignore error
+emails, _ := ro.Collect( // 忽略错误
     ro.Pipe(
         ro.FromSlice(users),
         ro.Filter(func(u User) bool { return u.Active }),
@@ -250,11 +250,11 @@ emails, _ := ro.Collect( // ignore error
 
 ```
 
-Use `samber/ro` for sequential data transformations that benefit from a fluent API. It might also support parallel processing if needed.
+顺序数据变换且受益于流式 API 时用 `samber/ro`。需要时它也支持并行处理。
 
-## Goroutine Leak Detection
+## Goroutine 泄漏检测
 
-Goroutine leaks SHOULD be detected with goleak in tests. Use `go.uber.org/goleak` in `TestMain` to catch leaked goroutines across all tests:
+goroutine 泄漏应该在测试里用 goleak 检测。在 `TestMain` 中用 `go.uber.org/goleak` 抓跨全部测试的泄漏 goroutine：
 
 ```go
 func TestMain(m *testing.M) {
@@ -262,14 +262,14 @@ func TestMain(m *testing.M) {
 }
 ```
 
-## Common Pipeline Mistakes
+## 流水线常见错误
 
-| Mistake                                | Fix                                            |
-| -------------------------------------- | ---------------------------------------------- |
-| Missing `ctx.Done()` in pipeline stage | Always select on context to allow cancellation |
-| Not closing output channel             | Producer must `defer close(out)`               |
-| Unbounded goroutine spawning           | Use `errgroup.SetLimit` or a semaphore         |
-| Sending mutable data through channel   | Send copies or immutable values                |
-| Blocking send without select           | Wrap channel sends in select with `ctx.Done()` |
+| 错误                      | 修法                                         |
+| ------------------------- | -------------------------------------------- |
+| 流水线阶段缺 `ctx.Done()` | 永远在 select 里带上 context 以便取消        |
+| 不关闭输出 channel        | 生产方必须 `defer close(out)`                |
+| 无界 goroutine 启动       | 用 `errgroup.SetLimit` 或信号量              |
+| 经 channel 发送可变数据   | 发送副本或不可变值                           |
+| 不带 select 的阻塞发送    | channel 发送包在带 `ctx.Done()` 的 select 里 |
 
-→ See `samber/cc-skills-golang@golang-concurrency` skill for sync primitives and channel patterns.
+→ sync 原语与 channel 模式见 `samber/cc-skills-golang@golang-concurrency` skill。

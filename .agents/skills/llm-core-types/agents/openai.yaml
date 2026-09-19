@@ -1,4 +1,4 @@
 interface:
-  display_name: "LLM Core Types"
-  short_description: "Preserve the provider-neutral LLM core model"
+  display_name: "LLM 核心类型"
+  short_description: "维护供应商中立的 LLM 核心模型"
   default_prompt: "Use $llm-core-types when changing the provider-neutral LLM request and response model."

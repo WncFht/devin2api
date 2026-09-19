@@ -2,356 +2,365 @@
   {
     "id": 1,
     "name": "time-after-in-select-loop",
-    "description": "Tests whether the model avoids time.After inside a select loop and uses time.NewTimer with Reset instead",
-    "prompt": "I have a Go worker that reads from a channel and needs a 5-second inactivity timeout. If nothing arrives for 5 seconds, it should log and continue waiting. Write the select loop.",
-    "trap": "Without the skill, the model uses time.After(5*time.Second) inside the for/select loop, creating repeated timer allocations/churn instead of reusing a timer",
+    "description": "测试模型是否避免在 select 循环内使用 time.After，改用 time.NewTimer 加 Reset",
+    "prompt": "我有一个 Go worker 从 channel 读取，需要 5 秒无活动超时。如果 5 秒内没有消息到达，它应该打日志并继续等待。写出这个 select 循环。",
+    "trap": "没有 skill 时，模型会在 for/select 循环里用 time.After(5*time.Second)，造成重复的 timer 分配和抖动，而不是复用一个 timer",
     "assertions": [
-      { "id": "1.1", "text": "Does NOT use time.After inside the loop body" },
+      {
+        "id": "1.1",
+        "text": "循环体内不使用 time.After"
+      },
       {
         "id": "1.2",
-        "text": "Creates time.NewTimer (or time.NewTicker) outside the loop"
+        "text": "在循环外创建 time.NewTimer（或 time.NewTicker）"
       },
       {
         "id": "1.3",
-        "text": "Calls timer.Reset() after handling a message or timeout"
+        "text": "处理完消息或超时后调用 timer.Reset()"
       },
       {
         "id": "1.4",
-        "text": "Calls timer.Stop() (or defers it) to clean up the timer"
+        "text": "调用 timer.Stop()（或 defer）来清理 timer"
       },
       {
         "id": "1.5",
-        "text": "For Go 1.23+, does not use the old stale-drain pattern; for Go <1.23 compatibility, drains before Reset when Stop reports a possible pending value"
+        "text": "Go 1.23+ 不使用旧的 stale-drain 模式；需要兼容 Go <1.23 时，在 Stop 报告可能有滞留值时先 drain 再 Reset"
       }
     ]
   },
   {
     "id": 2,
     "name": "channel-closing-ownership",
-    "description": "Tests whether the model follows the rule that only the sender closes a channel, not the receiver",
-    "prompt": "I have a producer goroutine that sends items to a channel and a consumer goroutine that reads from it. The consumer knows when it has received enough items and wants to signal completion. How should I close the channel to stop the producer?",
-    "trap": "Without the skill, the model closes the channel from the consumer side, which panics if the producer writes after close",
+    "description": "测试模型是否遵守「只有发送方关闭 channel，接收方不关闭」的规则",
+    "prompt": "我有一个生产者 goroutine 往 channel 发送元素，一个消费者 goroutine 从中读取。消费者知道自己何时收够了元素，想发出完成信号。我应该怎么关闭 channel 来停掉生产者？",
+    "trap": "没有 skill 时，模型会从消费者一侧关闭 channel，生产者在 close 之后写入就会 panic",
     "assertions": [
       {
         "id": "2.1",
-        "text": "Does NOT close the channel from the consumer/receiver side"
+        "text": "不从消费者/接收方一侧关闭 channel"
       },
       {
         "id": "2.2",
-        "text": "Uses a separate signaling mechanism (done channel, context cancellation, or similar) for the consumer to tell the producer to stop"
+        "text": "使用独立的信号机制（done channel、context 取消或类似方式）让消费者通知生产者停止"
       },
       {
         "id": "2.3",
-        "text": "The producer is the one that closes the data channel (or it is closed by the channel creator/sender)"
+        "text": "由生产者关闭数据 channel（或由 channel 的创建者/发送方关闭）"
       },
       {
         "id": "2.4",
-        "text": "Explains the panic risk of closing a channel from the receiver side"
+        "text": "解释从接收方一侧关闭 channel 的 panic 风险"
       },
       {
         "id": "2.5",
-        "text": "The producer selects on the stop signal alongside its send operation"
+        "text": "生产者在发送操作的同时 select 停止信号"
       }
     ]
   },
   {
     "id": 3,
     "name": "waitgroup-add-placement",
-    "description": "wg.Add before go statement; wg.Add(len(urls)) is preferred over per-goroutine Add(1) when count is known",
-    "prompt": "Review this Go code and identify all WaitGroup issues:\n\n```go\nfunc ProcessURLs(urls []string) []Result {\n    var wg sync.WaitGroup\n    results := make([]Result, len(urls))\n\n    for i, url := range urls {\n        go func(i int, url string) {\n            wg.Add(1)\n            defer wg.Done()\n            results[i] = fetch(url)\n        }(i, url)\n    }\n\n    wg.Wait()\n    return results\n}\n```\n\nFix all issues. Also, is there a more efficient way to add to the WaitGroup when the number of goroutines is known upfront?",
-    "trap": "The most obvious bug (wg.Add inside goroutine) is well-known. The model should also catch the second issue: wg.Add(len(urls)) before the loop is more efficient than N separate wg.Add(1) calls (single atomic update vs N atomic updates). The model likely fixes the placement but may not suggest the batch Add optimization.",
+    "description": "wg.Add 放在 go 语句之前；数量已知时 wg.Add(len(urls)) 优于每个 goroutine 各 Add(1)",
+    "prompt": "检查这段 Go 代码，找出所有 WaitGroup 问题：\n\n```go\nfunc ProcessURLs(urls []string) []Result {\n    var wg sync.WaitGroup\n    results := make([]Result, len(urls))\n\n    for i, url := range urls {\n        go func(i int, url string) {\n            wg.Add(1)\n            defer wg.Done()\n            results[i] = fetch(url)\n        }(i, url)\n    }\n\n    wg.Wait()\n    return results\n}\n```\n\n修复所有问题。另外，当 goroutine 数量预先已知时，有没有更高效的方式给 WaitGroup 计数？",
+    "trap": "最明显的 bug（goroutine 里调 wg.Add）众所周知。模型还应抓到第二个问题：循环前一次 wg.Add(len(urls)) 比循环里 N 次 wg.Add(1) 更高效（一次原子更新对 N 次原子更新）。模型多半会修位置，但可能不会建议批量 Add 这个优化。",
     "assertions": [
       {
         "id": "3.1",
-        "text": "Moves wg.Add(1) BEFORE the go statement — wg.Add inside the goroutine races with wg.Wait(), which can return before all goroutines have registered"
+        "text": "把 wg.Add(1) 移到 go 语句之前——goroutine 里的 wg.Add 与 wg.Wait() 竞争，Wait 可能在所有 goroutine 注册完之前就返回"
       },
       {
         "id": "3.2",
-        "text": "Suggests using wg.Add(len(urls)) before the loop as a more efficient alternative — a single atomic operation instead of N separate wg.Add(1) calls in the loop"
+        "text": "建议循环前用 wg.Add(len(urls)) 作为更高效的替代——一次原子操作代替循环里 N 次 wg.Add(1)"
       },
-      { "id": "3.3", "text": "Keeps defer wg.Done() inside the goroutine" },
+      {
+        "id": "3.3",
+        "text": "goroutine 内保留 defer wg.Done()"
+      },
       {
         "id": "3.4",
-        "text": "Notes the race condition: wg.Wait() could return before some goroutines have called wg.Add(1), causing ProcessURLs to return with goroutines still running"
+        "text": "指出这个竞争条件：wg.Wait() 可能在部分 goroutine 调用 wg.Add(1) 之前返回，导致 ProcessURLs 返回时 goroutine 仍在运行"
       }
     ]
   },
   {
     "id": 4,
     "name": "channel-direction-in-signatures",
-    "description": "Tests whether the model specifies channel direction (send-only, receive-only) in function signatures",
-    "prompt": "Write a Go pipeline with two functions: one that generates integers from a slice and sends them to a channel, and one that reads integers from a channel, doubles them, and sends to an output channel. Wire them together in main.",
-    "trap": "Without the skill, the model uses bidirectional chan int in function parameters instead of chan<- and <-chan",
+    "description": "测试模型是否在函数签名中标注 channel 方向（只发送、只接收）",
+    "prompt": "写一个 Go 流水线，含两个函数：一个从切片生成整数并发往 channel，另一个从 channel 读整数、翻倍后发往输出 channel。在 main 里把它们接起来。",
+    "trap": "没有 skill 时，模型在函数参数里用双向 chan int，而不是 chan<- 和 <-chan",
     "assertions": [
       {
         "id": "4.1",
-        "text": "The generator function returns <-chan int (receive-only for callers)"
+        "text": "生成函数返回 <-chan int（对调用方只读）"
       },
       {
         "id": "4.2",
-        "text": "The doubler function accepts <-chan int as input parameter"
+        "text": "翻倍函数的输入参数是 <-chan int"
       },
       {
         "id": "4.3",
-        "text": "The doubler function returns <-chan int (receive-only for callers)"
+        "text": "翻倍函数返回 <-chan int（对调用方只读）"
       },
       {
         "id": "4.4",
-        "text": "Internally, channels are created as bidirectional but exposed as directional through return types"
+        "text": "channel 内部按双向创建，但通过返回类型对外暴露为定向"
       },
       {
         "id": "4.5",
-        "text": "The producer (generator) closes its output channel with defer close(out)"
+        "text": "生产者（生成函数）用 defer close(out) 关闭其输出 channel"
       }
     ]
   },
   {
     "id": 5,
     "name": "unbuffered-channel-default",
-    "description": "Tests whether the model defaults to unbuffered channels and requires justification for buffered ones",
-    "prompt": "I need a channel to pass tasks from a dispatcher to a pool of workers in Go. Should I buffer it? If so, how large?",
-    "trap": "Without the skill, the model suggests an arbitrary large buffer (e.g., 100 or 1000) without justification or discussion of backpressure",
+    "description": "测试模型是否默认使用无缓冲 channel，并要求为有缓冲给出理由",
+    "prompt": "我需要一个 channel 把任务从分发器传给 Go 的 worker 池。应该加缓冲吗？如果要，多大？",
+    "trap": "没有 skill 时，模型会随手建议一个大缓冲（比如 100 或 1000），不给理由也不讨论背压",
     "assertions": [
       {
         "id": "5.1",
-        "text": "Recommends starting with unbuffered (or very small buffer like 0 or 1) as the default"
+        "text": "建议默认从无缓冲（或 0、1 这种极小缓冲）开始"
       },
       {
         "id": "5.2",
-        "text": "Explains that large buffers mask backpressure problems"
+        "text": "解释大缓冲会掩盖背压问题"
       },
       {
         "id": "5.3",
-        "text": "States that buffer size should be based on measured need, not arbitrary choice"
+        "text": "说明缓冲大小应基于实测需求，而不是随意指定"
       },
       {
         "id": "5.4",
-        "text": "Does NOT suggest a large arbitrary buffer (e.g., 100, 1000) without explaining the tradeoffs"
+        "text": "不在不解释取舍的情况下建议随意的大缓冲（比如 100、1000）"
       },
       {
         "id": "5.5",
-        "text": "Mentions that buffered channels hide the problem of slow consumers"
+        "text": "提到有缓冲 channel 会掩盖消费者慢的问题"
       }
     ]
   },
   {
     "id": 6,
     "name": "send-copies-not-pointers",
-    "description": "Tests whether the model sends copies (not pointers) through channels to avoid shared memory",
-    "prompt": "I have a producer goroutine that creates Task structs and sends them to a channel for worker goroutines to process. The Task struct has fields like ID, Payload, and Status. Write the producer and consumer code.",
-    "trap": "Without the skill, the model sends *Task pointers through the channel, creating invisible shared memory that defeats the purpose of channels",
+    "description": "测试模型是否通过 channel 发送副本（而非指针）以避免共享内存",
+    "prompt": "我有一个生产者 goroutine 创建 Task 结构体并发往 channel 给 worker goroutine 处理。Task 结构体有 ID、Payload、Status 等字段。写出生产者和消费者代码。",
+    "trap": "没有 skill 时，模型会通过 channel 发送 *Task 指针，造成看不见的共享内存，违背 channel 的初衷",
     "assertions": [
       {
         "id": "6.1",
-        "text": "Sends Task values (not *Task pointers) through the channel, OR explicitly documents why pointers are safe in this case"
+        "text": "通过 channel 发送 Task 值（而非 *Task 指针），或者明确说明此处用指针为什么安全"
       },
       {
         "id": "6.2",
-        "text": "The channel type is chan Task (value type) rather than chan *Task"
+        "text": "channel 类型是 chan Task（值类型）而非 chan *Task"
       },
       {
         "id": "6.3",
-        "text": "Does not mutate the Task struct after sending it on the channel (or sends a copy)"
+        "text": "发往 channel 后不再修改 Task 结构体（或发送的是副本）"
       },
       {
         "id": "6.4",
-        "text": "If pointers are used, explicitly acknowledges the shared-memory risk and explains the mitigation"
+        "text": "如果用了指针，明确指出共享内存风险并说明缓解措施"
       }
     ]
   },
   {
     "id": 7,
     "name": "errgroup-vs-waitgroup-decision",
-    "description": "Tests whether the model chooses errgroup over WaitGroup when error handling is needed, and uses SetLimit for bounded concurrency",
-    "prompt": "Write a Go function that fetches data from 50 URLs concurrently. At most 10 should run at once. If any fetch fails, stop all remaining work and return the error.",
-    "trap": "Without the skill, the model builds a hand-rolled worker pool with WaitGroup + semaphore channel, missing errgroup.SetLimit which handles this natively",
+    "description": "测试模型在需要错误处理时是否选择 errgroup 而非 WaitGroup，并用 SetLimit 做有界并发",
+    "prompt": "写一个 Go 函数并发抓取 50 个 URL 的数据。最多同时跑 10 个。任何一个抓取失败就停掉所有剩余工作并返回错误。",
+    "trap": "没有 skill 时，模型会用 WaitGroup + 信号量 channel 手搓 worker 池，错过原生支持这个场景的 errgroup.SetLimit",
     "assertions": [
       {
         "id": "7.1",
-        "text": "Uses errgroup (golang.org/x/sync/errgroup) instead of sync.WaitGroup for error propagation"
+        "text": "用 errgroup（golang.org/x/sync/errgroup）而非 sync.WaitGroup 传播错误"
       },
       {
         "id": "7.2",
-        "text": "Uses errgroup.WithContext to cancel siblings on first error"
+        "text": "用 errgroup.WithContext 在首个错误时取消其他兄弟任务"
       },
       {
         "id": "7.3",
-        "text": "Uses g.SetLimit(10) for bounded concurrency instead of a hand-rolled semaphore"
+        "text": "用 g.SetLimit(10) 做有界并发，而不是手搓信号量"
       },
       {
         "id": "7.4",
-        "text": "Does NOT build a manual worker pool with channels and WaitGroup when errgroup suffices"
+        "text": "errgroup 够用时不用 channel 和 WaitGroup 手搓 worker 池"
       },
       {
         "id": "7.5",
-        "text": "Each goroutine checks ctx.Done() or uses the context from errgroup.WithContext"
+        "text": "每个 goroutine 检查 ctx.Done() 或使用 errgroup.WithContext 给的 context"
       }
     ]
   },
   {
     "id": 8,
     "name": "ctx-done-in-select",
-    "description": "Tests whether every select statement includes a ctx.Done() case to prevent goroutine leaks",
-    "prompt": "Write a Go function that reads from an input channel, transforms each item, and writes to an output channel. It should run as a goroutine.",
-    "trap": "Without the skill, the model writes a select with only channel operations but no ctx.Done() case, causing goroutine leaks on cancellation",
+    "description": "测试模型是否在每个 select 语句里都带 ctx.Done() 分支以防止 goroutine 泄漏",
+    "prompt": "写一个 Go 函数：从输入 channel 读、逐项转换、写入输出 channel。它要以 goroutine 方式运行。",
+    "trap": "没有 skill 时，模型写的 select 只有 channel 操作、没有 ctx.Done() 分支，取消时 goroutine 泄漏",
     "assertions": [
       {
         "id": "8.1",
-        "text": "The function accepts a context.Context parameter"
+        "text": "函数接收 context.Context 参数"
       },
       {
         "id": "8.2",
-        "text": "Every select statement includes a case <-ctx.Done(): return branch"
+        "text": "每个 select 语句都有 case <-ctx.Done(): return 分支"
       },
       {
         "id": "8.3",
-        "text": "Both the read from input channel AND the write to output channel are wrapped in select with ctx.Done()"
+        "text": "从输入 channel 读和向输出 channel 写都包在带 ctx.Done() 的 select 里"
       },
       {
         "id": "8.4",
-        "text": "The goroutine exits cleanly when context is cancelled"
+        "text": "context 取消时 goroutine 干净退出"
       },
       {
         "id": "8.5",
-        "text": "The output channel is closed when the goroutine exits (defer close)"
+        "text": "goroutine 退出时关闭输出 channel（defer close）"
       }
     ]
   },
   {
     "id": 9,
     "name": "sync-map-vs-rwmutex-decision",
-    "description": "Tests whether the model correctly chooses between sync.Map and RWMutex+map based on access patterns",
-    "prompt": "I need a concurrent cache in Go. Keys are strings, values are structs. The cache will have frequent writes from many goroutines updating the same keys, and reads happen about as often as writes. Which synchronization approach should I use?",
-    "trap": "Without the skill, the model recommends sync.Map because it sounds like 'concurrent map', but sync.Map is slower for write-heavy overlapping-key patterns",
+    "description": "测试模型是否能根据访问模式在 sync.Map 与 RWMutex+map 之间做出正确选择",
+    "prompt": "我需要一个 Go 并发缓存。键是字符串，值是结构体。很多 goroutine 会频繁写入相同的键，读写频率差不多。该用哪种同步方案？",
+    "trap": "没有 skill 时，模型会因为 sync.Map 听起来像「并发 map」而推荐它，但 sync.Map 在写多且键重叠的模式下更慢",
     "assertions": [
       {
         "id": "9.1",
-        "text": "Recommends sync.RWMutex + plain map over sync.Map for this write-heavy, overlapping-key pattern"
+        "text": "对这种写多、键重叠的模式推荐 sync.RWMutex + 普通 map 而非 sync.Map"
       },
       {
         "id": "9.2",
-        "text": "Explains that sync.Map is optimized for write-once/read-many or disjoint key sets"
+        "text": "解释 sync.Map 为写一次读多次或不相交键集优化"
       },
       {
         "id": "9.3",
-        "text": "Explains that for frequent writes with overlapping keys, RWMutex+map is faster"
+        "text": "解释键重叠的频繁写入场景 RWMutex+map 更快"
       },
       {
         "id": "9.4",
-        "text": "Does NOT unconditionally recommend sync.Map for any concurrent map scenario"
+        "text": "不对任何并发 map 场景都无条件推荐 sync.Map"
       },
       {
         "id": "9.5",
-        "text": "Mentions that concurrent map read/write without synchronization causes a hard crash (not just a data race)"
+        "text": "提到不同步的并发 map 读写会直接崩溃（不只是数据竞争）"
       }
     ]
   },
   {
     "id": 10,
     "name": "sync-pool-reset-before-put",
-    "description": "Tests whether the model resets objects before returning them to sync.Pool",
-    "prompt": "Write a Go function that uses sync.Pool to reuse bytes.Buffer objects for encoding JSON responses in an HTTP handler. Show the pool setup and the handler.",
-    "trap": "Without the skill, the model returns the buffer to the pool without calling Reset(), leading to dirty objects and data corruption",
+    "description": "测试模型是否在把对象归还 sync.Pool 前先重置",
+    "prompt": "写一个 Go 函数：在 HTTP handler 里用 sync.Pool 复用 bytes.Buffer 来编码 JSON 响应。展示池的初始化和 handler。",
+    "trap": "没有 skill 时，模型不调 Reset() 就把 buffer 放回池里，导致脏对象和数据损坏",
     "assertions": [
       {
         "id": "10.1",
-        "text": "Calls buf.Reset() BEFORE bufPool.Put(buf), not after Get()"
+        "text": "在 bufPool.Put(buf) 之前调 buf.Reset()，而不是 Get() 之后"
       },
       {
         "id": "10.2",
-        "text": "Uses defer to ensure the buffer is returned to the pool even on error"
+        "text": "用 defer 保证出错时 buffer 也归还池中"
       },
       {
         "id": "10.3",
-        "text": "Does not assume the object from Get() is clean/zeroed"
+        "text": "不假设 Get() 拿到的对象是干净的/已清零"
       },
-      { "id": "10.4", "text": "The pool's New function creates a new buffer" },
+      {
+        "id": "10.4",
+        "text": "池的 New 函数创建新 buffer"
+      },
       {
         "id": "10.5",
-        "text": "Does not store persistent state in pooled objects"
+        "text": "不在池化对象里存持久状态"
       }
     ]
   },
   {
     "id": 11,
     "name": "goroutine-panic-recovery",
-    "description": "Tests whether the model adds panic recovery at goroutine boundaries in production code",
-    "prompt": "Write a Go HTTP server that spawns a background goroutine per request to do async processing (e.g., sending a notification email). The main handler returns 202 Accepted immediately.",
-    "trap": "Without the skill, the model spawns go func() without recover(), so a panic in the background goroutine crashes the entire server process",
+    "description": "测试模型是否在生产代码的 goroutine 边界加 panic 恢复",
+    "prompt": "写一个 Go HTTP 服务器：每个请求起一个后台 goroutine 做异步处理（比如发通知邮件）。主 handler 立即返回 202 Accepted。",
+    "trap": "没有 skill 时，模型直接 go func() 不加 recover()，后台 goroutine 里 panic 会让整个服务器进程崩溃",
     "assertions": [
       {
         "id": "11.1",
-        "text": "Adds defer func() { recover() }() or equivalent panic recovery inside the goroutine"
+        "text": "在 goroutine 内加 defer func() { recover() }() 或等价的 panic 恢复"
       },
       {
         "id": "11.2",
-        "text": "Logs or handles the recovered panic (not just silently swallowed)"
+        "text": "记录或处理 recover 到的 panic（不是默默吞掉）"
       },
       {
         "id": "11.3",
-        "text": "The goroutine has a shutdown mechanism (context, done channel, or similar)"
+        "text": "goroutine 有关闭机制（context、done channel 或类似）"
       },
       {
         "id": "11.4",
-        "text": "Mentions that a panic in a goroutine crashes the entire process"
+        "text": "提到 goroutine 里的 panic 会让整个进程崩溃"
       }
     ]
   },
   {
     "id": 12,
     "name": "singleflight-cache-stampede",
-    "description": "Tests whether the model uses singleflight to deduplicate concurrent requests for the same resource",
-    "prompt": "My Go service has an expensive database query for user profiles. Under load, hundreds of goroutines request the same user profile simultaneously, causing a thundering herd on the database. How should I solve this?",
-    "trap": "Without the skill, the model suggests only traditional caching (TTL-based) or a mutex, missing singleflight which deduplicates in-flight requests",
+    "description": "测试模型是否用 singleflight 去重同一资源的并发请求",
+    "prompt": "我的 Go 服务有个昂贵的用户资料数据库查询。负载下几百个 goroutine 同时请求同一个用户资料，对数据库造成惊群。怎么解决？",
+    "trap": "没有 skill 时，模型只建议传统缓存（TTL）或互斥锁，错过能对在途请求去重的 singleflight",
     "assertions": [
       {
         "id": "12.1",
-        "text": "Recommends golang.org/x/sync/singleflight as the primary solution"
+        "text": "推荐 golang.org/x/sync/singleflight 作为首选方案"
       },
       {
         "id": "12.2",
-        "text": "Shows usage of group.Do(key, func) where key identifies the deduplicated resource"
+        "text": "展示 group.Do(key, func) 用法，key 标识被去重的资源"
       },
       {
         "id": "12.3",
-        "text": "Explains that only one goroutine executes the function; others wait and share the result"
+        "text": "解释只有一个 goroutine 执行函数，其余等待并共享结果"
       },
       {
         "id": "12.4",
-        "text": "May combine singleflight with a cache layer for TTL-based caching, but singleflight is the deduplication mechanism"
+        "text": "可以把 singleflight 与 TTL 缓存层结合，但 singleflight 是去重机制本身"
       },
       {
         "id": "12.5",
-        "text": "Does NOT suggest only a plain mutex or only a TTL cache as the solution to thundering herd"
+        "text": "不只建议普通互斥锁或只建议 TTL 缓存来解惊群"
       }
     ]
   },
   {
     "id": 13,
     "name": "iterator-vs-goroutine-pipeline",
-    "description": "Tests whether the model uses Go 1.23+ iterators for sequential CPU-bound transforms instead of goroutine+channel pipelines",
-    "prompt": "I have a Go 1.23+ project. I need to filter a slice of users to find active ones, then extract their email addresses. The slice is in-memory and processing is pure CPU. Should I use a goroutine pipeline with channels?",
-    "trap": "Without the skill, the model builds a goroutine+channel pipeline for a purely sequential, CPU-bound in-memory transformation where iterators are more appropriate",
+    "description": "测试模型对顺序 CPU 密集型转换是否用 Go 1.23+ 迭代器而非 goroutine+channel 流水线",
+    "prompt": "我有一个 Go 1.23+ 项目。要过滤用户切片找出活跃用户，再提取他们的邮箱。切片在内存里，处理是纯 CPU。该用 goroutine 加 channel 流水线吗？",
+    "trap": "没有 skill 时，模型会为这个纯顺序、CPU 密集、内存内转换搭 goroutine+channel 流水线，而这场景迭代器更合适",
     "assertions": [
       {
         "id": "13.1",
-        "text": "Recommends against goroutine+channel pipeline for this purely sequential, in-memory transform"
+        "text": "对这个纯顺序、内存内转换不建议 goroutine+channel 流水线"
       },
       {
         "id": "13.2",
-        "text": "Suggests Go 1.23+ iterators (iter.Seq) or simple slice operations instead"
+        "text": "建议改用 Go 1.23+ 迭代器（iter.Seq）或简单切片操作"
       },
       {
         "id": "13.3",
-        "text": "Explains that goroutine+channel pipelines add overhead without benefit for sequential CPU-bound work"
+        "text": "解释对顺序 CPU 密集工作，goroutine+channel 流水线只增开销没有收益"
       },
       {
         "id": "13.4",
-        "text": "Mentions that goroutine pipelines are appropriate when stages involve I/O or need true parallelism"
+        "text": "提到各阶段涉及 I/O 或需要真并行时 goroutine 流水线才合适"
       },
       {
         "id": "13.5",
-        "text": "Does NOT build a multi-goroutine pipeline for this use case"
+        "text": "这个用例不搭多 goroutine 流水线"
       }
     ]
   }

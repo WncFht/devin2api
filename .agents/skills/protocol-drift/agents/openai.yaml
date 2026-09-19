@@ -1,4 +1,4 @@
 interface:
-  display_name: "Protocol Drift"
-  short_description: "Detect upstream protocol drift and field-coverage gaps"
+  display_name: "协议漂移"
+  short_description: "探测上游协议漂移与字段覆盖缺口"
   default_prompt: "Use $protocol-drift when checking whether the upstream Devin protocol changed or whether the adapter under-populates requests."

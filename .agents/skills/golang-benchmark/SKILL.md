@@ -1,60 +1,60 @@
 ---
 name: golang-benchmark
-description: "Golang benchmarking, profiling, and performance measurement. Use when writing, running, or comparing Go benchmarks, profiling hot paths with pprof, interpreting CPU/memory/trace profiles, analyzing results with benchstat, setting up CI benchmark regression detection, or investigating production performance with Prometheus runtime metrics. Also use when the developer needs deep analysis on a specific performance indicator - this skill provides the measurement methodology, while `samber/cc-skills-golang@golang-performance` provides the optimization patterns."
+description: "Golang 基准测试、profiling 与性能度量。当编写、运行或比较 Go 基准测试，用 pprof 分析热点路径，解读 CPU/内存/trace profile，用 benchstat 分析结果，搭建 CI 基准回归检测，或用 Prometheus runtime 指标排查生产性能时使用。当开发者需要对某个性能指标做深入分析时也使用——本 skill 提供测量方法论，优化模式由 `samber/cc-skills-golang@golang-performance` 提供。'golang benchmark' 'go benchmarking' 'benchstat' 'benchmark regression' 'cpu profile' 'memory profile'"
 user-invocable: true
 allowed-tools: Read Edit Write Glob Grep Bash(go:*) Bash(golangci-lint:*) Bash(git:*) Agent WebFetch Bash(benchstat:*) Bash(benchdiff:*) Bash(cob:*) Bash(gobenchdata:*) Bash(curl:*) mcp__context7__resolve-library-id mcp__context7__query-docs WebSearch AskUserQuestion EnterWorktree ExitWorktree
 ---
 
 # Golang Benchmark
 
-**Persona:** You are a Go performance measurement engineer. You never draw conclusions from a single benchmark run — statistical rigor and controlled conditions are prerequisites before any optimization decision.
+**角色设定：** 你是一名 Go 性能度量工程师。绝不凭单次基准测试运行下结论——统计严谨性与受控条件是任何优化决策的前提。
 
-**Thinking mode:** Reason as thoroughly as possible for benchmark analysis, profile interpretation, and performance comparison tasks — deep reasoning prevents misinterpreting profiling data and ensures statistically sound conclusions. On Claude Code, use `ultrathink` to trigger extended thinking explicitly.
+**思考模式：** 对基准测试分析、profile 解读与性能对比任务尽可能深入地推理——深度推理能防止误读 profiling 数据，保证结论在统计上站得住。在 Claude Code 上，用 `ultrathink` 显式触发扩展思考。
 
-**Dependencies:**
+**依赖：**
 
 - benchstat: `go install golang.org/x/perf/cmd/benchstat@latest`
 
-# Go Benchmarking & Performance Measurement
+# Go 基准测试与性能度量
 
-Performance improvement does not exist without measures — if you can measure it, you can improve it.
+没有度量就没有性能改进——能度量，才能改进。
 
-This skill covers the full measurement workflow: write a benchmark, run it, profile the result, compare before/after with statistical rigor, and track regressions in CI. For optimization patterns to apply after measurement, → See `samber/cc-skills-golang@golang-performance` skill. For pprof setup on running services, → See `samber/cc-skills-golang@golang-troubleshooting` skill.
+本 skill 覆盖完整度量工作流：写基准测试、跑基准测试、对结果做 profile、以统计严谨性做前后对比、在 CI 中跟踪回归。测量之后要应用的优化模式，→ 见 `samber/cc-skills-golang@golang-performance` skill。在运行中服务上配置 pprof，→ 见 `samber/cc-skills-golang@golang-troubleshooting` skill。
 
-## Writing Benchmarks
+## 编写基准测试
 
-### File and Ordering Conventions
+### 文件与排序约定
 
-Benchmark functions live in a `_bench_test.go` file named after the source file under benchmark, not after the individual function — `parser.go` -> `parser_bench_test.go`, containing `BenchmarkParse`, `BenchmarkEncode`, etc., not a separate `benchmarkparse_test.go` per function.
+基准测试函数放在以被测源文件命名的 `_bench_test.go` 文件中，而不是以单个函数命名——`parser.go` -> `parser_bench_test.go`，内含 `BenchmarkParse`、`BenchmarkEncode` 等，而不是每个函数一个 `benchmarkparse_test.go`。
 
-- Keeping benchmarks in their own file (instead of mixed into `parser_test.go`) keeps `go test -bench=. ./pkg/parser` output free of unrelated `Test*` noise.
-- It separates fixtures sized for measurement (large inputs, long-lived setup) from those sized for correctness — the two rarely share the same shape.
-- The file still follows Go's one-test-file-per-source-file convention (→ See `samber/cc-skills-golang@golang-testing` skill), just with the `_bench` suffix marking its narrower purpose.
+- 把基准测试放在独立文件（而不是混进 `parser_test.go`）能让 `go test -bench=. ./pkg/parser` 的输出不夹杂无关的 `Test*` 噪声。
+- 它把为度量设计的 fixture（大输入、长生命周期 setup）与为正确性设计的 fixture 分开——两者很少共用同一种形态。
+- 该文件仍遵循 Go 的「一个源文件对应一个测试文件」约定（→ 见 `samber/cc-skills-golang@golang-testing` skill），只是用 `_bench` 后缀标明其更窄的用途。
 
-Order `Benchmark*` functions inside `parser_bench_test.go` to mirror the order of the functions/methods they measure in `parser.go` — a reader comparing the two files top to bottom should find `BenchmarkParse` at the same relative position as `Parse`.
+`parser_bench_test.go` 内的 `Benchmark*` 函数顺序应与 `parser.go` 中被测函数/方法的顺序一致——读者自上而下对照两个文件时，`BenchmarkParse` 应处在与 `Parse` 相同的相对位置。
 
-### `b.Loop()` (Go 1.24+) — preferred
+### `b.Loop()`（Go 1.24+）——首选
 
-For Go 1.24+, prefer `b.Loop()` for new benchmarks. It times only the loop body and keeps function arguments/results alive, which reduces dead-code-elimination mistakes.
+Go 1.24+ 的新基准测试优先用 `b.Loop()`。它只对循环体计时，并保持函数参数与结果存活，从而减少 dead-code-elimination 类错误。
 
 ```go
 func BenchmarkParse(b *testing.B) {
-    data := loadFixture("large.json") // setup — excluded from timing
+    data := loadFixture("large.json") // setup——不计入计时
     for b.Loop() {
-        Parse(data)  // compiler cannot eliminate this call
+        Parse(data)  // 编译器无法消除这个调用
     }
 }
 ```
 
-Legacy `b.N` loops still compile and are fine to keep when preserving existing benchmarks or supporting Go <1.24. They are easier to get wrong: setup may need `b.ResetTimer()`, and results may need a sink if the compiler can eliminate the work. Go 1.26 fixed an earlier `b.Loop()` inlining limitation — benchmarks on 1.24–1.25 already benefit from `b.Loop()` but may miss inlining optimizations that 1.26 delivers.
+旧的 `b.N` 循环依然能编译，保留现有基准测试或支持 Go <1.24 时继续用没问题。但它更容易写错：setup 可能需要 `b.ResetTimer()`，结果可能需要 sink 防止编译器把计算消除掉。Go 1.26 修复了早前 `b.Loop()` 的内联限制——1.24–1.25 上的基准测试已能从 `b.Loop()` 受益，但可能错过 1.26 带来的内联优化。
 
-Go 1.27's size-specialized allocator changes allocation-heavy benchmark baselines (faster sub-80-byte allocations, larger binaries) independent of any code change. Treat a `benchstat` comparison that straddles the Go 1.26→1.27 toolchain boundary as measuring the toolchain, not the code — rerun the "before" benchmark on the same toolchain as "after" before trusting the delta.
+Go 1.27 的按尺寸特化分配器改变了分配密集型基准测试的基线（80 字节以下分配更快，二进制更大），与任何代码变更无关。跨 Go 1.26→1.27 工具链边界的 `benchstat` 对比应视为在测量工具链而非代码——先把「before」基准在同一工具链上重跑，再相信这个 delta。
 
-### Memory tracking
+### 内存跟踪
 
 ```go
 func BenchmarkAlloc(b *testing.B) {
-    b.ReportAllocs() // or run with -benchmem flag
+    b.ReportAllocs() // 或者用 -benchmem flag 运行
     var sink []byte
     for b.Loop() {
         sink = make([]byte, 1024)
@@ -63,13 +63,13 @@ func BenchmarkAlloc(b *testing.B) {
 }
 ```
 
-`b.ReportMetric()` adds custom metrics (e.g., throughput):
+`b.ReportMetric()` 添加自定义指标（例如吞吐率）：
 
 ```go
-b.ReportMetric(float64(totalBytes)/b.Elapsed().Seconds(), "bytes/s") // b.Elapsed() is only valid inside b.Loop()
+b.ReportMetric(float64(totalBytes)/b.Elapsed().Seconds(), "bytes/s") // b.Elapsed() 只在 b.Loop() 内有效
 ```
 
-### Sub-benchmarks and table-driven
+### 子基准测试与表驱动
 
 ```go
 func BenchmarkEncode(b *testing.B) {
@@ -84,38 +84,38 @@ func BenchmarkEncode(b *testing.B) {
 }
 ```
 
-## Running Benchmarks
+## 运行基准测试
 
 ```bash
 go test -bench=BenchmarkEncode -benchmem -count=10 ./pkg/... | tee bench.txt
 ```
 
-| Flag                   | Purpose                                   |
-| ---------------------- | ----------------------------------------- |
-| `-bench=.`             | Run all benchmarks (regexp filter)        |
-| `-benchmem`            | Report allocations (B/op, allocs/op)      |
-| `-count=10`            | Run 10 times for statistical significance |
-| `-benchtime=3s`        | Minimum time per benchmark (default 1s)   |
-| `-cpu=1,2,4`           | Run with different GOMAXPROCS values      |
-| `-cpuprofile=cpu.prof` | Write CPU profile                         |
-| `-memprofile=mem.prof` | Write memory profile                      |
-| `-trace=trace.out`     | Write execution trace                     |
+| Flag                   | 用途                              |
+| ---------------------- | --------------------------------- |
+| `-bench=.`             | 运行全部基准测试（正则过滤）      |
+| `-benchmem`            | 报告分配（B/op、allocs/op）       |
+| `-count=10`            | 运行 10 次以获得统计显著性        |
+| `-benchtime=3s`        | 每个基准测试的最短时长（默认 1s） |
+| `-cpu=1,2,4`           | 用不同 GOMAXPROCS 值运行          |
+| `-cpuprofile=cpu.prof` | 写出 CPU profile                  |
+| `-memprofile=mem.prof` | 写出内存 profile                  |
+| `-trace=trace.out`     | 写出执行 trace                    |
 
-**Output format:** `BenchmarkEncode/size=64-8  5000000  230.5 ns/op  128 B/op  2 allocs/op` — the `-8` suffix is GOMAXPROCS, `ns/op` is time per operation, `B/op` is bytes allocated per op, `allocs/op` is heap allocation count per op.
+**输出格式：** `BenchmarkEncode/size=64-8  5000000  230.5 ns/op  128 B/op  2 allocs/op`——`-8` 后缀是 GOMAXPROCS，`ns/op` 是每次操作耗时，`B/op` 是每次操作分配字节数，`allocs/op` 是每次操作的堆分配次数。
 
-## Comparing Optimization Variants in Parallel
+## 并行比较多个优化变体
 
-When several competing optimization hypotheses exist for the same bottleneck, implement each variant in its own isolated worktree via a separate sub-agent, so their code changes never collide in the shared working tree.
+同一瓶颈存在多个候选优化假设时，把每个变体放在独立 worktree 中由独立 sub-agent 实现，让它们的代码改动不在共享工作树里相互碰撞。
 
-**Run the benchmarks serially, not concurrently.** Concurrent benchmark runs share the same CPU — the noisy-neighbor effect contaminates `ns/op` and reintroduces the exact statistical noise `-count` and `benchstat` exist to eliminate. Implementing in parallel is safe (isolated worktrees, no file contention); measuring in parallel is not (shared hardware, real contention). Run each variant's benchmark one at a time, back in the main tree or sequentially per worktree.
+**基准测试要串行跑，不要并发跑。** 并发跑基准测试共享同一 CPU——noisy-neighbor 效应会污染 `ns/op`，把 `-count` 和 `benchstat` 本来要消除的统计噪声重新引入。并行实现是安全的（隔离 worktree，无文件争用）；并行测量不安全（共享硬件，真实争用）。每个变体的基准测试一次只跑一个，回主树跑或按 worktree 依次跑。
 
-Compare every variant's `benchstat` output against the **same** baseline report, keep the winner, and remove the worktrees for the rest.
+把每个变体的 `benchstat` 输出与**同一份**基线报告对比，留下胜者，删掉其余 worktree。
 
-## Documenting Results in Commits
+## 在提交中记录结果
 
-Paste benchstat output in the commit body when the change has a measurable performance impact. This documents _why_ an optimization was made, prevents future readers from reverting it, and lets reviewers verify the claim without re-running benchmarks.
+当变更带来可度量的性能影响时，把 benchstat 输出贴进 commit body。这记录了优化_为什么_做，防止后来的读者把它回退掉，也让评审者不用重跑基准测试就能验证这个说法。
 
-Commit format:
+提交格式：
 
 ```
 perf(parser): reduce Parse allocations 50% with sync.Pool
@@ -136,55 +136,55 @@ Parse-32   1.024Ki ± 0%  0.512Ki ± 0%  -50.00% (p=0.000 n=10)
 Parse-32   12.00 ± 0%   6.000 ± 0%  -50.00% (p=0.000 n=10)
 ```
 
-**Rules:**
+**规则：**
 
-- Only include benchmarks directly affected by the change — strip unrelated rows
-- Never paste results with `~` (no statistical significance) — the improvement cannot be claimed
-- Include the hardware context line (`goos/goarch/cpu`) so results are reproducible
-- Use `perf(scope):` commit type for performance-only changes
+- 只放直接受影响的基准测试——删掉无关行
+- 绝不贴带 `~` 的结果（无统计显著性）——改进不能成立
+- 带上硬件上下文行（`goos/goarch/cpu`）让结果可复现
+- 纯性能变更使用 `perf(scope):` 提交类型
 
-## Profiling from Benchmarks
+## 从基准测试生成 profile
 
-Generate profiles directly from benchmark runs — no HTTP server needed:
+直接从基准测试运行生成 profile——不需要 HTTP 服务：
 
 ```bash
 # CPU profile
 go test -bench=BenchmarkParse -cpuprofile=cpu.prof ./pkg/parser
 go tool pprof cpu.prof
 
-# Memory profile (alloc_objects shows GC churn, inuse_space shows leaks)
+# 内存 profile（alloc_objects 看 GC 搅动，inuse_space 看泄漏）
 go test -bench=BenchmarkParse -memprofile=mem.prof ./pkg/parser
 go tool pprof -alloc_objects mem.prof
 
-# Execution trace
+# 执行 trace
 go test -bench=BenchmarkParse -trace=trace.out ./pkg/parser
 go tool trace trace.out
 ```
 
-For full pprof CLI reference (all commands, non-interactive mode, profile interpretation), see [pprof Reference](./references/pprof.md). For execution trace interpretation, see [Trace Reference](./references/trace.md). For statistical comparison, see [benchstat Reference](./references/benchstat.md).
+完整 pprof CLI 参考（全部命令、非交互模式、profile 解读）见 [pprof 参考](./references/pprof.md)。执行 trace 解读见 [Trace 参考](./references/trace.md)。统计对比见 [benchstat 参考](./references/benchstat.md)。
 
-## Reference Files
+## 参考文件
 
-- **[pprof Reference](./references/pprof.md)** — Interactive and non-interactive analysis of CPU, memory, and goroutine profiles. Full CLI commands, profile types (CPU vs alloc*objects vs inuse_space), web UI navigation, and interpretation patterns. Use this to dive deep into \_where* time and memory are being spent in your code.
+- **[pprof 参考](./references/pprof.md)**——CPU、内存与 goroutine profile 的交互式与非交互式分析。完整 CLI 命令、profile 类型（CPU vs alloc_objects vs inuse_space）、web UI 导航与解读模式。用它深入挖掘代码中时间与内存花在_哪里_。
 
-- **[benchstat Reference](./references/benchstat.md)** — Statistical comparison of benchmark runs with rigorous confidence intervals and p-value tests. Covers output reading, filtering old benchmarks, interleaving results for visual clarity, and regression detection. Use this when you need to prove a change made a meaningful performance difference, not just a lucky run.
+- **[benchstat 参考](./references/benchstat.md)**——带严格置信区间与 p 值检验的基准测试结果统计对比。涵盖输出读法、过滤旧基准、交错运行以获得直观效果、回归检测。需要证明变更带来真实性能差异而非走运的一次运行时用它。
 
-- **[Trace Reference](./references/trace.md)** — Execution tracer for understanding _when_ and _why_ code runs. Visualizes goroutine scheduling, garbage collection phases, network blocking, and custom span annotations. Use this when pprof (which shows _where_ CPU goes) isn't enough — you need to see the timeline of what happened.
+- **[Trace 参考](./references/trace.md)**——执行追踪器，用于理解代码_何时_以及_为什么_运行。可视化 goroutine 调度、垃圾回收阶段、网络阻塞与自定义 span 标注。当 pprof（展示 CPU 去了_哪里_）不够用时用它——你需要看到事情发生的时间线。
 
-- **[Diagnostic Tools](./references/tools.md)** — Quick reference for ancillary tools: fieldalignment (struct padding waste), GODEBUG (runtime logging flags), fgprof (frame graph profiles), race detector (concurrency bugs), and others. Use this when you have a specific symptom and need a focused diagnostic — don't reach for pprof if a simpler tool already answers your question.
+- **[诊断工具](./references/tools.md)**——辅助工具速查：fieldalignment（结构体填充浪费）、GODEBUG（runtime 日志 flag）、fgprof（frame graph profile）、竞态检测器（并发 bug）等。有特定症状需要针对性诊断时用它——如果一个更简单的工具已能回答你的问题，就别动用 pprof。
 
-- **[Compiler Analysis](./references/compiler-analysis.md)** — Low-level compiler optimization insights: escape analysis (when values move to the heap), inlining decisions (which function calls are eliminated), SSA dump (intermediate representation), and assembly output. Use this when benchmarks show allocations you didn't expect, or when you want to verify the compiler did what you intended.
+- **[编译器分析](./references/compiler-analysis.md)**——底层编译器优化洞察：escape analysis（值何时搬到堆上）、内联决策（哪些函数调用被消除）、SSA dump（中间表示）与汇编输出。当基准测试出现意料之外的分配，或想验证编译器是否如你所愿时用它。
 
-- **[CI Regression Detection](./references/ci-regression.md)** — Automated performance regression gating in CI pipelines. Covers three tools (benchdiff for quick PR comparisons, cob for strict threshold-based gating, gobenchdata for long-term trend dashboards), noisy neighbor mitigation strategies (why cloud CI benchmarks vary 5-10% even on quiet machines), and self-hosted runner tuning to make benchmarks reproducible. Use this when you want to ensure pull requests don't silently slow down your codebase — detecting regressions early prevents shipping performance debt.
+- **[CI 回归检测](./references/ci-regression.md)**——CI 流水线中的自动化性能回归门禁。涵盖三个工具（benchdiff 做快速 PR 对比、cob 做严格阈值门禁、gobenchdata 做长期趋势面板）、noisy neighbor 缓解策略（为什么云 CI 基准测试即使在空闲机器上也有 5-10% 波动），以及让基准测试可复现的 self-hosted runner 调优。想确保 pull request 不悄悄拖慢代码库时用它——尽早发现回归能避免把性能债带上线。
 
-- **[Investigation Session](./references/investigation-session.md)** — Production performance troubleshooting workflow combining Prometheus runtime metrics (heap size, GC frequency, goroutine counts), PromQL queries to correlate metrics with code changes, runtime configuration flags (GODEBUG env vars to enable GC logging), and cost warnings (when you're hitting performance tax). Use this when production benchmarks look good but real traffic behaves differently.
+- **[排查会话](./references/investigation-session.md)**——生产性能排障工作流，组合 Prometheus runtime 指标（堆大小、GC 频率、goroutine 数）、把指标与代码变更关联起来的 PromQL 查询、runtime 配置 flag（GODEBUG 环境变量开启 GC 日志），以及成本警示（何时在吃性能税）。当基准测试很好看但真实流量表现不一样时用它。
 
-- **[Prometheus Go Metrics Reference](./references/prometheus-go-metrics.md)** — Complete listing of Go runtime metrics actually exposed as Prometheus metrics by `prometheus/client_golang`. Covers 30 default metrics, 40+ optional metrics (Go 1.17+), process metrics, and common PromQL queries. Distinguishes between `runtime/metrics` (Go internal data) and Prometheus metrics (what you scrape from `/metrics`). Use this when setting up monitoring dashboards or writing PromQL queries for production alerts.
+- **[Prometheus Go 指标参考](./references/prometheus-go-metrics.md)**——`prometheus/client_golang` 实际暴露为 Prometheus 指标的 Go runtime 指标完整清单。涵盖 30 个默认指标、40+ 可选指标（Go 1.17+）、进程指标与常用 PromQL 查询。区分 `runtime/metrics`（Go 内部数据）与 Prometheus 指标（你从 `/metrics` 抓到的）。搭监控面板或为生产告警写 PromQL 时用它。
 
-## Cross-References
+## 交叉引用
 
-- → See `samber/cc-skills-golang@golang-performance` skill for optimization patterns to apply after measuring ("if X bottleneck, apply Y")
-- → See `samber/cc-skills-golang@golang-troubleshooting` skill for pprof setup on running services (enable, secure, capture), Delve debugger, GODEBUG flags, root cause methodology
-- → See `samber/cc-skills-golang@golang-observability` skill for everyday always-on monitoring, continuous profiling (Pyroscope), distributed tracing (OpenTelemetry)
-- → See `samber/cc-skills-golang@golang-testing` skill for general testing practices
-- → See `samber/cc-skills@promql-cli` skill for querying Prometheus runtime metrics in production to validate benchmark findings
+- → 测量之后要应用的优化模式（「X 瓶颈就用 Y」）见 `samber/cc-skills-golang@golang-performance` skill
+- → 运行中服务上的 pprof 配置（启用、加固、采集）、Delve 调试器、GODEBUG flag、根因方法论见 `samber/cc-skills-golang@golang-troubleshooting` skill
+- → 日常常驻监控、持续 profiling（Pyroscope）、分布式追踪（OpenTelemetry）见 `samber/cc-skills-golang@golang-observability` skill
+- → 通用测试实践见 `samber/cc-skills-golang@golang-testing` skill
+- → 在生产环境查询 Prometheus runtime 指标以验证基准测试结论，见 `samber/cc-skills@promql-cli` skill

@@ -1,154 +1,154 @@
-# General Debugging Methodology
+# 通用调试方法论
 
-For any bug, follow this systematic process:
+任何 bug 都按这套系统化流程走：
 
-## Table of Contents
+## 目录
 
-- [Step 1: Understand Expected vs Actual](#step-1-understand-expected-vs-actual)
-- [Step 2: Get the Full Error](#step-2-get-the-full-error)
-- [Step 3: Isolate the Problem](#step-3-isolate-the-problem)
-- [Step 4: Check External Dependencies](#step-4-check-external-dependencies)
-- [Step 5: Check Observability Tools](#step-5-check-observability-tools)
-- [Step 6: Compare with Working Code](#step-6-compare-with-working-code)
-- [Step 7: Form a Hypothesis and Test It](#step-7-form-a-hypothesis-and-test-it)
-- [Step 8: Trace to Root Cause](#step-8-trace-to-root-cause)
-- [Step 9: Fix and Verify](#step-9-fix-and-verify)
-- [Step 10: Defense-in-Depth](#step-10-defense-in-depth)
-- [When You're Stuck: Escalation Protocol](#when-youre-stuck-escalation-protocol)
+- [第 1 步：弄清预期与实际的差异](#第-1-步弄清预期与实际的差异)
+- [第 2 步：拿到完整错误](#第-2-步拿到完整错误)
+- [第 3 步：隔离问题](#第-3-步隔离问题)
+- [第 4 步：检查外部依赖](#第-4-步检查外部依赖)
+- [第 5 步：检查可观测性工具](#第-5-步检查可观测性工具)
+- [第 6 步：与能工作的代码对比](#第-6-步与能工作的代码对比)
+- [第 7 步：提出假设并检验](#第-7-步提出假设并检验)
+- [第 8 步：追到根因](#第-8-步追到根因)
+- [第 9 步：修复并验证](#第-9-步修复并验证)
+- [第 10 步：纵深防御](#第-10-步纵深防御)
+- [卡住时：升级协议](#卡住时升级协议)
 
-## Step 1: Understand Expected vs Actual
+## 第 1 步：弄清预期与实际的差异
 
-Before touching code, articulate clearly:
+动代码之前先说清楚：
 
-- What **should** happen?
-- What **actually** happens?
-- What **changed** recently?
+- **应该**发生什么？
+- **实际**发生了什么？
+- 最近**改了**什么？
 
 ```bash
-# What changed recently?
+# 最近改了什么？
 git log --oneline -20
 git diff HEAD~5
 
-# Binary search for the breaking commit
+# 二分查找引入 bug 的提交
 git bisect start
-git bisect bad          # current commit is broken
-git bisect good abc123  # this commit was working
-# git bisect will walk you to the breaking commit
+git bisect bad          # 当前提交是坏的
+git bisect good abc123  # 这个提交是好的
+# git bisect 会带你走到引入 bug 的提交
 ```
 
-## Step 2: Get the Full Error
+## 第 2 步：拿到完整错误
 
 ```bash
-# Full build errors
+# 完整构建错误
 go build ./... 2>&1
 
-# Verbose test output
+# 详细测试输出
 go test ./... -v 2>&1
 
-# Static analysis
+# 静态分析
 go vet ./...
 
-# Run linters — see the golang-lint skill for configuration
+# 跑 linter——配置见 golang-lint skill
 golangci-lint run ./...
 ```
 
-Run `golangci-lint` early in your debugging workflow. It catches unchecked errors, suspicious constructs, and many other issues that are easy to miss by reading code. See the `samber/cc-skills-golang@golang-lint` skill for configuration and usage.
+在调试工作流早期就跑 `golangci-lint`。它能抓出未检查的错误、可疑构造和许多读代码容易漏掉的问题。配置与用法见 `samber/cc-skills-golang@golang-lint` skill。
 
-## Step 3: Isolate the Problem
+## 第 3 步：隔离问题
 
-Narrow the scope before investigating deeper:
+深入之前先收窄范围：
 
 ```bash
-# Does a single test fail?
+# 单个测试失败吗？
 go test -run TestSpecificName -v ./pkg/...
 
-# Does it fail without cache?
+# 不用缓存还失败吗？
 go test -count=1 -run TestSpecificName ./pkg/...
 
-# Is it a specific package?
+# 是特定包的问题吗？
 go build ./pkg/suspect/...
 
-# Is it flaky? Run multiple times
+# 不稳定吗？多跑几次
 go test -count=10 -run TestSuspect ./pkg/...
 ```
 
-Write more tests if you suspect missing test cases or need to test something in different conditions.
+怀疑缺测试用例或需要在不同条件下验证时，多写测试。
 
-## Step 4: Check External Dependencies
+## 第 4 步：检查外部依赖
 
-Sometimes the bug is not in your code. Before diving deeper, verify that external components behave as expected:
+有时 bug 不在你的代码里。深入之前先验证外部组件行为符合预期：
 
 ```bash
-# Reproduce an API call outside your app
+# 在应用之外复现一次 API 调用
 curl -v -X POST https://api.example.com/endpoint \
   -H "Content-Type: application/json" \
   -d '{"key": "value"}'
 
-# Check database content directly
+# 直接查数据库内容
 psql -h localhost -U myuser -d mydb -c "SELECT * FROM orders WHERE id = 123"
-# Or: mysql, mongosh, redis-cli, etc.
-# Or use a database MCP server to query interactively
+# 或：mysql、mongosh、redis-cli 等
+# 或用数据库 MCP server 交互查询
 
-# Test connectivity and DNS resolution
+# 测连通性与 DNS 解析
 dig api.example.com
 nc -zv api.example.com 443
 
-# Check if an external service is responding at all
+# 外部服务到底有没有响应
 curl -o /dev/null -s -w "HTTP %{http_code} in %{time_total}s\n" https://api.example.com/health
 
-# Inspect message queue state
+# 检查消息队列状态
 rabbitmqctl list_queues
-# Or: kafka-console-consumer, redis-cli LLEN, etc.
+# 或：kafka-console-consumer、redis-cli LLEN 等
 
-# Check certificate validity
+# 查证书有效期
 openssl s_client -connect api.example.com:443 -brief
 
-# Verify environment variables and config
+# 核对环境变量与配置
 env | grep DATABASE
 env | grep API_KEY
 ```
 
-**Common external causes:**
+**常见外部原因：**
 
-- API contract changed (new required field, different response shape, deprecated endpoint)
-- Database schema drift (missing column, changed type, new constraint, migration not applied)
-- Expired or rotated credentials, tokens, or certificates
-- DNS resolution failure or stale DNS cache
-- Rate limiting or quota exhaustion
-- External service degraded (slow responses, partial failures, 5xx errors)
-- Message queue full, consumer lag, or rebalancing
-- Different behavior between environments (staging vs production config, feature flags)
-- Clock skew affecting JWT validation, cache TTLs, or scheduled jobs
-- TLS/mTLS misconfiguration or CA bundle mismatch
-- Network policy or firewall rule change blocking traffic
-- Proxy or load balancer misconfiguration (wrong backend, sticky sessions, health check)
-- Disk full or read-only filesystem
-- File permissions changed
-- OOM killer terminated a dependency (database, cache, sidecar)
-- Docker/K8s: wrong image tag, missing env var, resource limits, liveness probe misconfigured
-- Third-party SDK or library upgrade with breaking behavioral change
-- Locale, timezone, or encoding mismatch between systems
-- Connection pool exhaustion (database, HTTP, gRPC)
-- Upstream returning cached/stale data
-- Network issue. Webhook or callback URL changed or unreachable
+- API 契约变了（新的必填字段、响应结构变了、endpoint 被废弃）
+- 数据库 schema 漂移（缺列、类型变了、新约束、migration 没执行）
+- 凭据、token 或证书过期/轮换了
+- DNS 解析失败或 DNS 缓存过期
+- 限流或配额耗尽
+- 外部服务降级（响应慢、部分失败、5xx）
+- 消息队列满了、消费滞后或正在 rebalance
+- 环境间行为不同（staging vs production 配置、feature flag）
+- 时钟偏移影响 JWT 校验、缓存 TTL 或定时任务
+- TLS/mTLS 配置错误或 CA bundle 不匹配
+- 网络策略或防火墙规则变更挡住了流量
+- 代理或负载均衡配置错误（后端指错、sticky session、健康检查）
+- 磁盘满或文件系统只读
+- 文件权限变了
+- OOM killer 杀了某个依赖（数据库、缓存、sidecar）
+- Docker/K8s：镜像 tag 错了、缺环境变量、资源限额、liveness probe 配置错误
+- 第三方 SDK 或库升级带来行为层面的破坏性变更
+- 系统间 locale、时区或编码不一致
+- 连接池耗尽（数据库、HTTP、gRPC）
+- 上游返回了缓存/陈旧数据
+- 网络问题。Webhook 或回调 URL 变了或不可达
 
-## Step 5: Check Observability Tools
+## 第 5 步：检查可观测性工具
 
-Production debugging MUST start with observability data. The project may already use observability tools that have the answer — look for imports or dependencies like `prometheus`, `opentelemetry`, `datadog`, `sentry`, `elastic/apm` in the codebase. Even if you don't see them in code, the developer may have them deployed separately.
+生产排障必须从可观测性数据开始。项目可能已经在用能直接给出答案的可观测性工具——在代码库里找 `prometheus`、`opentelemetry`、`datadog`、`sentry`、`elastic/apm` 这类 import 或依赖。即使代码里看不到，开发者也可能单独部署了。
 
-If the information is missing, **ask the user** what monitoring and observability tools they use. Common stacks:
+如果信息缺失，**问用户**他们在用什么监控和可观测性工具。常见栈：
 
-- **Prometheus + Grafana** — Dashboards may show error rate spikes, latency changes, resource saturation. Query examples:
+- **Prometheus + Grafana**——面板上可能已经有错误率尖峰、延迟变化、资源饱和。查询示例：
 
     ```promql
-    rate(http_requests_total{status=~"5.."}[5m])           # error rate
-    histogram_quantile(0.99, rate(http_duration_seconds_bucket[5m]))  # p99 latency
-    go_goroutines                                           # goroutine count over time
-    go_memstats_alloc_bytes                                 # heap allocations
-    rate(go_gc_duration_seconds_sum[5m])                    # GC pressure
+    rate(http_requests_total{status=~"5.."}[5m])           # 错误率
+    histogram_quantile(0.99, rate(http_duration_seconds_bucket[5m]))  # p99 延迟
+    go_goroutines                                           # 随时间变化的 goroutine 数
+    go_memstats_alloc_bytes                                 # 堆分配
+    rate(go_gc_duration_seconds_sum[5m])                    # GC 压力
     ```
 
-- **Datadog** — APM traces, error tracking, and infrastructure metrics are available. Query examples:
+- **Datadog**——有 APM trace、错误跟踪与基础设施指标。查询示例：
 
     ```
     avg:trace.http.request.duration{service:myapp} by {resource_name}
@@ -156,95 +156,95 @@ If the information is missing, **ask the user** what monitoring and observabilit
     avg:runtime.go.num_goroutine{service:myapp}
     ```
 
-- **Sentry** — Captured exceptions, breadcrumbs, and error grouping are available. Sentry often captures the full stack trace and context of the first occurrence.
-- **ELK (Elasticsearch + Logstash + Kibana)** — Structured logs can be searched for error patterns:
+- **Sentry**——有捕获到的异常、breadcrumb 与错误分组。Sentry 通常能抓到首次出现时的完整堆栈与上下文。
+- **ELK（Elasticsearch + Logstash + Kibana）**——结构化日志可以按错误模式检索：
 
     ```
     level:error AND service:myapp AND @timestamp:[now-1h TO now]
     ```
 
-- **OpenTelemetry / Jaeger / Zipkin** — Distributed traces show latency breakdowns across services, failed spans, and propagation issues.
+- **OpenTelemetry / Jaeger / Zipkin**——分布式 trace 展示跨服务的延迟分解、失败的 span 与传播问题。
 
-If the user has an MCP server for any of these tools (Datadog MCP, Grafana MCP, etc.), interactive queries may be available through it.
+如果用户有这些工具的 MCP server（Datadog MCP、Grafana MCP 等），也许可以通过它做交互式查询。
 
-## Step 6: Compare with Working Code
+## 第 6 步：与能工作的代码对比
 
-Before forming a hypothesis, find similar code that **works**:
+形成假设之前，先找到**能工作**的相似代码：
 
-- Search the codebase for analogous functionality that doesn't have the bug
-- Read the working reference implementation **completely** — don't skim
-- List **every difference** between the working code and the broken code
-- Check: are the dependencies the same? The config? The initialization order? The error handling?
+- 在代码库里搜功能类似但没有这个 bug 的实现
+- **完整**读能工作的参考实现——别扫一眼就过
+- 列出能工作的代码与坏代码之间的**每处差异**
+- 查：依赖一样吗？配置一样吗？初始化顺序一样吗？错误处理一样吗？
 
-Often the bug becomes obvious when you see what the working version does differently.
+看到能工作的版本做法哪里不同时，bug 往往就变得明显了。
 
-## Step 7: Form a Hypothesis and Test It
+## 第 7 步：提出假设并检验
 
-- Form a **single, specific** hypothesis with clear reasoning
-- Add targeted logging or a focused test
-- Change **one thing**, observe, confirm or reject
-- If the hypothesis was wrong, **revert the change** — don't stack fixes on top of failed attempts
+- 提出**单一、具体**、推理清晰的假设
+- 加针对性的日志或聚焦的测试
+- 改**一处**，观察，确认或推翻
+- 假设错了就**回退这次改动**——不要把新修复叠在失败的尝试上
 
-## Step 8: Trace to Root Cause
+## 第 8 步：追到根因
 
-When the symptom appears deep in the call stack, don't fix where the error surfaces. Trace backward:
+症状出现在调用栈深处时，不要在错误暴露的地方修。往回追：
 
-1. **Find the immediate cause** — what line panics or returns the wrong value?
-2. **Ask "what called this?"** — trace one level up the call chain
-3. **Keep tracing** — repeat until you find where the invalid data **originated**, not where it was **consumed**
-4. **Fix at the source** — the fix belongs where the bad value was created, not where it caused a crash
+1. **找直接原因**——哪一行 panic 或返回了错误值？
+2. **问「谁调的它」**——沿调用链往上追一层
+3. **继续追**——重复，直到找到非法数据**产生**的地方，而不是它被**消费**的地方
+4. **在源头修**——修复属于坏值被造出来的地方，不是它引发崩溃的地方
 
 ```go
-// Example: panic in handler — but the bug is in the constructor
-// ✗ Bad — fixing at the symptom
+// 例子：handler 里 panic——但 bug 在构造函数
+// ✗ 坏——在症状处修
 func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
-    if s.db == nil {  // nil check masks the real bug
+    if s.db == nil {  // nil 检查掩盖了真正的 bug
         http.Error(w, "db unavailable", 500)
         return
     }
     // ...
 }
 
-// ✓ Good — fixing at the source
+// ✓ 好——在源头修
 func NewServer(db *sql.DB) *Server {
     if db == nil {
-        panic("NewServer: db must not be nil")  // fail fast at construction
+        panic("NewServer: db must not be nil")  // 构造时快速失败
     }
     return &Server{db: db}
 }
 ```
 
-When you can't trace manually, add temporary instrumentation:
+手动追不动时，加临时插桩：
 
 ```go
-// Log the full call chain before the dangerous operation
+// 在危险操作前打完整调用链
 func suspectFunction(val string) {
     fmt.Fprintf(os.Stderr, "DEBUG suspectFunction: val=%q\n%s\n", val, debug.Stack())
     // ...
 }
 ```
 
-## Step 9: Fix and Verify
+## 第 9 步：修复并验证
 
-- Fix the root cause, not the symptom
-- The failing test from step 1 should now pass
-- Run the full test suite to check for regressions
+- 修根因，不修症状
+- 第 1 步写的失败测试现在应该通过
+- 跑全量测试查回归
 
-## Step 10: Defense-in-Depth
+## 第 10 步：纵深防御
 
-After fixing a bug, ask: "How do I make this bug structurally impossible?" A single fix at one layer can be bypassed by different code paths or future refactoring. Add validation at multiple layers:
+修完一个 bug 后问一句：「怎么让这个 bug 在结构上不可能再发生？」单层的单点修复可能被别的代码路径或未来的重构绕过。在多层加校验：
 
-1. **Entry point** — reject invalid input at public API boundaries (`New*` constructors, exported functions)
-2. **Business logic** — assert preconditions inside internal functions that receive the data
-3. **Runtime guards** — use build tags or env checks to catch dangerous operations in tests (e.g., refuse writes outside temp dirs)
-4. **Observability** — add structured logging or metrics so the same class of bug is instantly visible if it recurs
+1. **入口**——在公开 API 边界拒绝非法输入（`New*` 构造函数、导出函数）
+2. **业务逻辑**——在接收数据的内部函数里断言前置条件
+3. **运行时护栏**——用 build tag 或环境检查在测试里抓危险操作（比如拒绝写临时目录之外的路径）
+4. **可观测性**——加结构化日志或指标，让同类 bug 复发时立刻可见
 
-Not every fix needs all four layers — use judgment. But when a bug could cause data loss, corruption, or security issues, multi-layer defense is worth the cost.
+不是每个修复都需要全部四层——自己判断。但 bug 可能造成数据丢失、损坏或安全问题时，多层防御值得这个成本。
 
-## When You're Stuck: Escalation Protocol
+## 卡住时：升级协议
 
-If your fix doesn't work:
+修不好时：
 
-- **< 3 failed attempts:** Return to Step 1. You misidentified the root cause. Gather more evidence.
-- **>= 3 failed attempts:** Stop fixing. The problem is likely architectural, not a simple bug. Step back and question your assumptions about how the system works. Ask: "Is the design fundamentally sound, or am I patching a broken abstraction?"
-- **Each fix reveals a new problem:** You're chasing symptoms, not the root cause. See the Red Flags section in [SKILL.md](./SKILL.md).
+- **失败 < 3 次：**回到第 1 步。你认错了根因。收集更多证据。
+- **失败 >= 3 次：**停止修复。问题多半是架构性的，不是简单 bug。退后一步，质疑你对系统工作方式的假设。问：「设计本身是健全的，还是我在给一个坏抽象打补丁？」
+- **每修一处冒一个新问题：**你在追症状，不是根因。见 [SKILL.md](./SKILL.md) 的危险信号一节。

@@ -1,6 +1,6 @@
-# Concurrency Patterns
+# 并发模式
 
-## Goroutine Lifecycle Management
+## Goroutine 生命周期管理
 
 ```go
 package main
@@ -12,7 +12,7 @@ import (
     "time"
 )
 
-// Worker pool with bounded concurrency
+// 并发数有界的 worker pool
 type WorkerPool struct {
     workers int
     tasks   chan func()
@@ -22,7 +22,7 @@ type WorkerPool struct {
 func NewWorkerPool(workers int) *WorkerPool {
     wp := &WorkerPool{
         workers: workers,
-        tasks:   make(chan func(), workers*2), // Buffered channel
+        tasks:   make(chan func(), workers*2), // 带缓冲 channel
     }
     wp.start()
     return wp
@@ -50,10 +50,10 @@ func (wp *WorkerPool) Shutdown() {
 }
 ```
 
-## Channel Patterns
+## Channel 模式
 
 ```go
-// Generator pattern
+// generator 模式
 func generateNumbers(ctx context.Context, max int) <-chan int {
     out := make(chan int)
     go func() {
@@ -69,7 +69,7 @@ func generateNumbers(ctx context.Context, max int) <-chan int {
     return out
 }
 
-// Fan-out, fan-in pattern
+// fan-out/fan-in 模式
 func fanOut(ctx context.Context, input <-chan int, workers int) []<-chan int {
     channels := make([]<-chan int, workers)
     for i := 0; i < workers; i++ {
@@ -120,16 +120,16 @@ func fanIn(ctx context.Context, channels ...<-chan int) <-chan int {
 }
 ```
 
-## Select Statement Patterns
+## Select 语句模式
 
 ```go
-// Timeout pattern
+// 超时模式
 func fetchWithTimeout(ctx context.Context, url string) (string, error) {
     result := make(chan string, 1)
     errCh := make(chan error, 1)
 
     go func() {
-        // Simulate network call
+        // 模拟网络调用
         time.Sleep(100 * time.Millisecond)
         result <- "data from " + url
     }()
@@ -146,7 +146,7 @@ func fetchWithTimeout(ctx context.Context, url string) (string, error) {
     }
 }
 
-// Done channel pattern for graceful shutdown
+// 用于优雅关闭的 done channel 模式
 type Server struct {
     done chan struct{}
 }
@@ -174,12 +174,12 @@ func (s *Server) Run(ctx context.Context) {
 }
 ```
 
-## Sync Primitives
+## Sync 原语
 
 ```go
 import "sync"
 
-// Mutex for protecting shared state
+// 保护共享状态的 mutex
 type Counter struct {
     mu    sync.Mutex
     count int
@@ -197,7 +197,7 @@ func (c *Counter) Value() int {
     return c.count
 }
 
-// RWMutex for read-heavy workloads
+// 读多负载用 RWMutex
 type Cache struct {
     mu    sync.RWMutex
     items map[string]string
@@ -216,7 +216,7 @@ func (c *Cache) Set(key, value string) {
     c.items[key] = value
 }
 
-// sync.Once for initialization
+// 初始化用 sync.Once
 type Service struct {
     once   sync.Once
     config *Config
@@ -224,18 +224,18 @@ type Service struct {
 
 func (s *Service) getConfig() *Config {
     s.once.Do(func() {
-        s.config = loadConfig() // Only called once
+        s.config = loadConfig() // 只会被调用一次
     })
     return s.config
 }
 ```
 
-## Rate Limiting and Backpressure
+## 限流与背压
 
 ```go
 import "golang.org/x/time/rate"
 
-// Token bucket rate limiter
+// 令牌桶限流器
 type RateLimiter struct {
     limiter *rate.Limiter
 }
@@ -250,11 +250,11 @@ func (rl *RateLimiter) Process(ctx context.Context, item string) error {
     if err := rl.limiter.Wait(ctx); err != nil {
         return err
     }
-    // Process item
+    // 处理 item
     return nil
 }
 
-// Semaphore pattern for limiting concurrency
+// 限制并发数的 semaphore 模式
 type Semaphore struct {
     slots chan struct{}
 }
@@ -280,12 +280,12 @@ func (s *Semaphore) Do(fn func()) {
 }
 ```
 
-## Pipeline Pattern
+## Pipeline 模式
 
 ```go
-// Stage-based processing pipeline
+// 分阶段的处理 pipeline
 func pipeline(ctx context.Context, input <-chan int) <-chan int {
-    // Stage 1: Square numbers
+    // 阶段 1：平方
     stage1 := make(chan int)
     go func() {
         defer close(stage1)
@@ -298,7 +298,7 @@ func pipeline(ctx context.Context, input <-chan int) <-chan int {
         }
     }()
 
-    // Stage 2: Filter even numbers
+    // 阶段 2：过滤偶数
     stage2 := make(chan int)
     go func() {
         defer close(stage2)
@@ -317,13 +317,13 @@ func pipeline(ctx context.Context, input <-chan int) <-chan int {
 }
 ```
 
-## Quick Reference
+## 速查表
 
-| Pattern        | Use Case            | Key Points                      |
-| -------------- | ------------------- | ------------------------------- |
-| Worker Pool    | Bounded concurrency | Limit goroutines, reuse workers |
-| Fan-out/Fan-in | Parallel processing | Distribute work, merge results  |
-| Pipeline       | Stream processing   | Chain transformations           |
-| Rate Limiter   | API throttling      | Control request rate            |
-| Semaphore      | Resource limits     | Cap concurrent operations       |
-| Done Channel   | Graceful shutdown   | Signal completion               |
+| 模式           | 适用场景 | 要点                             |
+| -------------- | -------- | -------------------------------- |
+| Worker Pool    | 有界并发 | 限制 goroutine 数量，复用 worker |
+| Fan-out/Fan-in | 并行处理 | 分发任务，合并结果               |
+| Pipeline       | 流式处理 | 串接变换                         |
+| Rate Limiter   | API 节流 | 控制请求速率                     |
+| Semaphore      | 资源上限 | 给并发操作上封顶                 |
+| Done Channel   | 优雅关闭 | 发出完成信号                     |

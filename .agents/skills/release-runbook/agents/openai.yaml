@@ -1,4 +1,4 @@
 interface:
-  display_name: "Release Runbook"
-  short_description: "Cut and verify a devin-2api release via release.sh"
+  display_name: "发布 Runbook"
+  short_description: "通过 release.sh 执行并核验 devin-2api 发布"
   default_prompt: "Use $release-runbook when cutting a release, verifying a published release, or repairing a broken tag/release body."

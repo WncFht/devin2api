@@ -2,887 +2,1709 @@
   {
     "id": 1,
     "name": "profile-before-optimizing",
-    "description": "Tests whether the model insists on profiling before applying optimizations, rather than jumping straight to code changes",
-    "prompt": "Our Go HTTP API is slow. Average response time is 800ms. Here's the handler:\n\n```go\npackage api\n\nimport (\n    \"encoding/json\"\n    \"net/http\"\n    \"strings\"\n)\n\ntype Response struct {\n    Items []Item `json:\"items\"`\n}\n\ntype Item struct {\n    ID   int    `json:\"id\"`\n    Name string `json:\"name\"`\n    Tags string `json:\"tags\"`\n}\n\nfunc HandleList(w http.ResponseWriter, r *http.Request) {\n    items := fetchFromDB(r.Context())\n    for i := range items {\n        items[i].Tags = strings.ToUpper(items[i].Tags)\n    }\n    json.NewEncoder(w).Encode(Response{Items: items})\n}\n```\n\nOptimize this code to reduce the 800ms response time.",
-    "trap": "The 800ms latency is almost certainly from fetchFromDB (external bottleneck), not from strings.ToUpper or JSON encoding. Without the skill, the model will micro-optimize the Go code (use strings.Builder, preallocate, etc.) instead of pointing out that profiling is needed first and the bottleneck is likely external.",
+    "description": "测试模型是否坚持先 profiling 再做优化，而不是直接跳到改代码",
+    "prompt": "我们的 Go HTTP API 很慢。平均响应时间 800ms。handler 如下：\n\n```go\npackage api\n\nimport (\n    \"encoding/json\"\n    \"net/http\"\n    \"strings\"\n)\n\ntype Response struct {\n    Items []Item `json:\"items\"`\n}\n\ntype Item struct {\n    ID   int    `json:\"id\"`\n    Name string `json:\"name\"`\n    Tags string `json:\"tags\"`\n}\n\nfunc HandleList(w http.ResponseWriter, r *http.Request) {\n    items := fetchFromDB(r.Context())\n    for i := range items {\n        items[i].Tags = strings.ToUpper(items[i].Tags)\n    }\n    json.NewEncoder(w).Encode(Response{Items: items})\n}\n```\n\n优化这段代码把 800ms 响应时间降下来。",
+    "trap": "800ms 延迟几乎可以肯定来自 fetchFromDB（外部瓶颈），而不是 strings.ToUpper 或 JSON 编码。没有 skill 时，模型会微优化 Go 代码（用 strings.Builder、预分配等），而不指出需要先 profiling、瓶颈很可能在外部。",
     "assertions": [
-      {"id": "1.1", "text": "Recommends profiling (pprof, fgprof, or tracing) before making code changes"},
-      {"id": "1.2", "text": "Identifies fetchFromDB as the likely bottleneck (external I/O, not Go code)"},
-      {"id": "1.3", "text": "Mentions that intuition about bottlenecks is often wrong (~80% of the time)"},
-      {"id": "1.4", "text": "Does NOT primarily focus on micro-optimizing strings.ToUpper or JSON encoding"},
-      {"id": "1.5", "text": "Suggests investigating the database query (query tuning, caching, connection pool)"}
+      {
+        "id": "1.1",
+        "text": "建议在改代码前先 profiling（pprof、fgprof 或 tracing）"
+      },
+      {
+        "id": "1.2",
+        "text": "指出 fetchFromDB 是疑似瓶颈（外部 I/O，不是 Go 代码）"
+      },
+      {
+        "id": "1.3",
+        "text": "提到对瓶颈位置的直觉经常出错（约 80% 的情况）"
+      },
+      {
+        "id": "1.4",
+        "text": "不主要聚焦微优化 strings.ToUpper 或 JSON 编码"
+      },
+      {
+        "id": "1.5",
+        "text": "建议排查数据库查询（查询调优、缓存、连接池）"
+      }
     ]
   },
   {
     "id": 2,
     "name": "fgprof-off-cpu-bottleneck",
-    "description": "Tests whether the model recommends fgprof for off-CPU bottlenecks instead of only standard CPU profiling",
-    "prompt": "Our Go service has high latency (p99 = 2s) but CPU usage is only 5%. Standard pprof CPU profile shows almost nothing — the hot functions consume negligible CPU time. What profiling approach should we use to find the bottleneck?",
-    "trap": "Standard CPU profiling only captures on-CPU time. When CPU usage is low but latency is high, the bottleneck is off-CPU (I/O wait, network, blocked goroutines). The skill specifically recommends fgprof for this. Without the skill, the model may suggest heap profiles, goroutine dumps, or other approaches that miss the key tool.",
+    "description": "测试模型对 off-CPU 瓶颈是否推荐 fgprof，而不只是标准 CPU profiling",
+    "prompt": "我们的 Go 服务延迟高（p99 = 2s）但 CPU 占用只有 5%。标准 pprof CPU profile 几乎什么都看不到——热点函数消耗的 CPU 时间可以忽略。该用什么 profiling 手段找瓶颈？",
+    "trap": "标准 CPU profiling 只采集 on-CPU 时间。CPU 低但延迟高时瓶颈在 off-CPU（I/O 等待、网络、goroutine 阻塞）。skill 明确推荐这种场景用 fgprof。没有 skill 时，模型可能建议堆 profile、goroutine 转储或其他手段，漏掉这个关键工具。",
     "assertions": [
-      {"id": "2.1", "text": "Recommends fgprof as the primary tool for capturing off-CPU wait time"},
-      {"id": "2.2", "text": "Explains that standard pprof CPU profile only captures on-CPU time, which is why it shows nothing"},
-      {"id": "2.3", "text": "Suggests the bottleneck is likely I/O wait (network, database, filesystem)"},
-      {"id": "2.4", "text": "Mentions goroutine profile as a complementary diagnostic (blocked goroutines in net.Read or database/sql)"},
-      {"id": "2.5", "text": "Suggests distributed tracing (OpenTelemetry) for identifying slow upstream services"}
+      {
+        "id": "2.1",
+        "text": "推荐 fgprof 作为采集 off-CPU 等待时间的首选工具"
+      },
+      {
+        "id": "2.2",
+        "text": "解释标准 pprof CPU profile 只采集 on-CPU 时间，所以什么都看不到"
+      },
+      {
+        "id": "2.3",
+        "text": "指出瓶颈很可能是 I/O 等待（网络、数据库、文件系统）"
+      },
+      {
+        "id": "2.4",
+        "text": "提到 goroutine profile 作为补充诊断（goroutine 阻塞在 net.Read 或 database/sql）"
+      },
+      {
+        "id": "2.5",
+        "text": "建议用分布式 tracing（OpenTelemetry）定位慢的上游服务"
+      }
     ]
   },
   {
     "id": 3,
     "name": "iterative-benchmark-methodology",
-    "description": "Tests whether the model follows the iterative benchmark methodology (one change at a time, benchstat comparison)",
-    "prompt": "I profiled my Go service and found that the ProcessRecords function is the bottleneck. It allocates heavily and has slow JSON parsing. I want to optimize it. Here's the function:\n\n```go\nfunc ProcessRecords(data []byte) ([]Record, error) {\n    var records []Record\n    if err := json.Unmarshal(data, &records); err != nil {\n        return nil, err\n    }\n    var results []Record\n    for _, r := range records {\n        if r.IsValid() {\n            r.Name = strings.ToUpper(r.Name)\n            results = append(results, r)\n        }\n    }\n    return results, nil\n}\n```\n\nHow should I approach optimizing this?",
-    "trap": "Without the skill, the model will apply all optimizations at once. The skill teaches an iterative approach: write benchmark first, measure baseline with -count=6, apply ONE change at a time, compare with benchstat, then repeat.",
+    "description": "测试模型是否遵循迭代式基准测试方法论（一次一处改动、benchstat 对比）",
+    "prompt": "我 profile 了我的 Go 服务，发现 ProcessRecords 函数是瓶颈。它分配量大且 JSON 解析慢。我想优化它。函数如下：\n\n```go\nfunc ProcessRecords(data []byte) ([]Record, error) {\n    var records []Record\n    if err := json.Unmarshal(data, &records); err != nil {\n        return nil, err\n    }\n    var results []Record\n    for _, r := range records {\n        if r.IsValid() {\n            r.Name = strings.ToUpper(r.Name)\n            results = append(results, r)\n        }\n    }\n    return results, nil\n}\n```\n\n该怎么着手优化？",
+    "trap": "没有 skill 时，模型会一次应用所有优化。skill 教的是迭代方法：先写基准测试、用 -count=6 测基线、一次只改一处、用 benchstat 对比、然后重复。",
     "assertions": [
-      {"id": "3.1", "text": "Recommends writing an atomic benchmark for ProcessRecords first"},
-      {"id": "3.2", "text": "Recommends measuring a baseline with -benchmem and -count=6 (or similar count for statistical significance)"},
-      {"id": "3.3", "text": "Recommends applying ONE optimization at a time, not all at once"},
-      {"id": "3.4", "text": "Recommends using benchstat to compare before/after with statistical significance"},
-      {"id": "3.5", "text": "Suggests keeping report files as an audit trail (e.g., /tmp/report-1.txt, /tmp/report-2.txt)"}
+      {
+        "id": "3.1",
+        "text": "建议先为 ProcessRecords 写一个原子基准测试"
+      },
+      {
+        "id": "3.2",
+        "text": "建议用 -benchmem 和 -count=6（或类似保证统计显著性的次数）测基线"
+      },
+      {
+        "id": "3.3",
+        "text": "建议一次只应用一个优化，不要全上"
+      },
+      {
+        "id": "3.4",
+        "text": "建议用 benchstat 做前后对比并给出统计显著性"
+      },
+      {
+        "id": "3.5",
+        "text": "建议保留报告文件作为审计轨迹（如 /tmp/report-1.txt、/tmp/report-2.txt）"
+      }
     ]
   },
   {
     "id": 4,
     "name": "slice-reuse-append-zero",
-    "description": "Tests knowledge of the append(s[:0], ...) pattern for reusing slice backing arrays",
-    "prompt": "In our hot-path Go request handler, we have a buffer that's reset each iteration. Profiling shows this function has high alloc_objects. How can we reduce allocations?\n\n```go\nfunc processRequests(requests []Request) {\n    for _, req := range requests {\n        mode := []Tag{req.PrimaryTag}\n        // ... use mode ...\n        _ = mode\n    }\n}\n```",
-    "trap": "The natural approach is to declare mode outside the loop or use sync.Pool. The skill teaches the specific pattern append(mode[:0], item) to reuse the backing array with zero allocations. This is a non-obvious Go idiom.",
+    "description": "测试 append(s[:0], ...) 复用切片底层数组的写法",
+    "prompt": "在我们的热路径 Go 请求 handler 里，有个 buffer 每轮迭代都重置。profiling 显示这个函数 alloc_objects 很高。怎么减少分配？\n\n```go\nfunc processRequests(requests []Request) {\n    for _, req := range requests {\n        mode := []Tag{req.PrimaryTag}\n        // ... use mode ...\n        _ = mode\n    }\n}\n```",
+    "trap": "自然做法是把 mode 声明挪到循环外或用 sync.Pool。skill 教的是 append(mode[:0], item) 这个特定写法，复用底层数组做到零分配。这是个不显然的 Go 惯用法。",
     "assertions": [
-      {"id": "4.1", "text": "Suggests using append(mode[:0], item) to reuse the backing array"},
-      {"id": "4.2", "text": "Explains that reslicing to zero length retains the backing array, avoiding allocation"},
-      {"id": "4.3", "text": "Moves the mode variable declaration outside the loop to enable reuse"},
-      {"id": "4.4", "text": "Does NOT suggest sync.Pool as the primary solution for this simple case"}
+      {
+        "id": "4.1",
+        "text": "建议用 append(mode[:0], item) 复用底层数组"
+      },
+      {
+        "id": "4.2",
+        "text": "解释重切片到零长度保留底层数组从而避免分配"
+      },
+      {
+        "id": "4.3",
+        "text": "把 mode 变量声明挪到循环外以支持复用"
+      },
+      {
+        "id": "4.4",
+        "text": "对这种简单场景不把 sync.Pool 当主要方案"
+      }
     ]
   },
   {
     "id": 5,
     "name": "direct-indexing-vs-append",
-    "description": "Tests whether the model prefers direct indexing over append when output size equals input size",
-    "prompt": "Optimize this Go transformation function. Profiling shows it's called 100K times/sec with input slices of ~1000 elements.\n\n```go\nfunc Transform(input []Data) []Result {\n    result := make([]Result, 0, len(input))\n    for i := range input {\n        result = append(result, convert(input[i]))\n    }\n    return result\n}\n```\n\nThe output always has exactly the same number of elements as the input.",
-    "trap": "The code already preallocates capacity. Without the skill, the model may not realize that make([]T, len) with direct assignment is faster than make([]T, 0, cap) with append, because direct assignment avoids per-element bounds checking and length increment.",
+    "description": "测试输出与输入等长时模型是否偏好直接下标赋值而非 append",
+    "prompt": "优化这个 Go 转换函数。profiling 显示它每秒被调用 10 万次，输入切片约 1000 个元素。\n\n```go\nfunc Transform(input []Data) []Result {\n    result := make([]Result, 0, len(input))\n    for i := range input {\n        result = append(result, convert(input[i]))\n    }\n    return result\n}\n```\n\n输出元素数恒等于输入。",
+    "trap": "代码已经预分配了容量。没有 skill 时，模型可能没意识到 make([]T, len) 加直接赋值比 make([]T, 0, cap) 加 append 更快，因为直接赋值省掉了逐元素的边界检查和长度递增。",
     "assertions": [
-      {"id": "5.1", "text": "Suggests using make([]Result, len(input)) with direct assignment result[i] = convert(...)"},
-      {"id": "5.2", "text": "Explains that direct assignment avoids per-element append overhead (bounds check, length increment)"},
-      {"id": "5.3", "text": "Notes that append is better when the result might be smaller (filtering)"}
+      {
+        "id": "5.1",
+        "text": "建议用 make([]Result, len(input)) 加直接赋值 result[i] = convert(...)"
+      },
+      {
+        "id": "5.2",
+        "text": "解释直接赋值省掉了逐元素的 append 开销（边界检查、长度递增）"
+      },
+      {
+        "id": "5.3",
+        "text": "指出结果可能更小时（过滤场景）append 更合适"
+      }
     ]
   },
   {
     "id": 6,
     "name": "map-range-double-lookup",
-    "description": "Tests whether the model avoids double map lookups when writing new map iteration code",
-    "prompt": "Write a Go function that counts how many values in a map satisfy a threshold. The map is large (1M entries) and the function is called frequently.\n\n```go\nfunc CountAbove(scores map[string]int, threshold int) int {\n    // TODO: implement\n}\n```\n\nWrite the most efficient implementation.",
-    "trap": "The natural/idiomatic instinct when writing map iteration code is to use 'for k := range m { if m[k] > threshold { count++ } }' because it looks clean. This does 2 lookups per iteration. The skill teaches 'for k, v := range m { if v > threshold { count++ } }' for a single lookup. The model will likely write the double-lookup version without the skill prompting it to use the k, v form.",
+    "description": "测试模型写新 map 遍历代码时是否避免双重查找",
+    "prompt": "写一个 Go 函数统计 map 中超过阈值的值个数。map 很大（100 万条），函数调用频繁。\n\n```go\nfunc CountAbove(scores map[string]int, threshold int) int {\n    // TODO: implement\n}\n```\n\n写出最高效的实现。",
+    "trap": "写 map 遍历时自然的直觉是 'for k := range m { if m[k] > threshold { count++ } }'，因为看起来干净。这每次迭代做 2 次查找。skill 教 'for k, v := range m { if v > threshold { count++ } }' 单次查找。没有 skill 提示时模型多半会写双重查找版本。",
     "assertions": [
-      {"id": "6.1", "text": "Uses 'for k, v := range scores' (capturing the value in range) rather than 'for k := range scores { scores[k] }'"},
-      {"id": "6.2", "text": "Does NOT perform a second lookup into the map inside the loop body (i.e., does not use scores[k] inside the loop)"}
+      {
+        "id": "6.1",
+        "text": "用 'for k, v := range scores'（在 range 里取值）而非 'for k := range scores { scores[k] }'"
+      },
+      {
+        "id": "6.2",
+        "text": "循环体内不对 map 做第二次查找（即不在循环里用 scores[k]）"
+      }
     ]
   },
   {
     "id": 7,
     "name": "sentinel-errors-hot-path",
-    "description": "Tests whether the model avoids fmt.Errorf for static errors in allocation-sensitive hot paths when writing new error-returning code",
-    "prompt": "Write a Go function that parses a configuration value. It must return descriptive errors and will be called thousands of times per second during request processing.\n\n```go\n// parseTimeout parses a timeout string like \"30s\", \"5m\".\n// Returns error if empty, if the unit is unrecognized, or if the value is negative.\nfunc parseTimeout(s string) (time.Duration, error) {\n    // TODO: implement\n}\n```\n\nImplement this function.",
-    "trap": "The natural way to write descriptive errors is to use fmt.Errorf for all cases: fmt.Errorf(\"empty timeout\"), fmt.Errorf(\"unrecognized unit %q\", unit), fmt.Errorf(\"negative timeout: %v\", d). The skill teaches that static, predictable errors (like 'empty timeout') should be preallocated sentinels at package level (errors.New) to avoid allocation on every call. Only errors needing dynamic values should use fmt.Errorf. Without the skill the model writes fmt.Errorf for every error case.",
+    "description": "测试模型在分配敏感热路径写新的返回 error 代码时，是否对静态错误避免用 fmt.Errorf",
+    "prompt": "写一个 Go 函数解析配置值。必须返回描述性错误，且请求处理期间每秒被调用数千次。\n\n```go\n// parseTimeout parses a timeout string like \"30s\", \"5m\".\n// Returns error if empty, if the unit is unrecognized, or if the value is negative.\nfunc parseTimeout(s string) (time.Duration, error) {\n    // TODO: implement\n}\n```\n\n实现这个函数。",
+    "trap": "写描述性错误的自然方式是全用 fmt.Errorf：fmt.Errorf(\"empty timeout\")、fmt.Errorf(\"unrecognized unit %q\", unit)、fmt.Errorf(\"negative timeout: %v\", d)。skill 教的是静态可预测的错误（如 'empty timeout'）应在包级用 errors.New 预分配，避免每次调用都分配。只有需要动态值的错误才用 fmt.Errorf。没有 skill 时模型会给每个错误分支都写 fmt.Errorf。",
     "assertions": [
-      {"id": "7.1", "text": "Uses errors.New at package level for the static 'empty string' error case (no dynamic content)"},
-      {"id": "7.2", "text": "Uses fmt.Errorf (or errors.New with dynamic content) for error cases that need to embed runtime values like the unrecognized unit"},
-      {"id": "7.3", "text": "Does NOT use fmt.Errorf for error messages that contain no dynamic values"},
-      {"id": "7.4", "text": "Explains that fmt.Errorf allocates on every call while package-level errors.New allocates once"}
+      {
+        "id": "7.1",
+        "text": "对静态的「空字符串」错误（无动态内容）在包级用 errors.New"
+      },
+      {
+        "id": "7.2",
+        "text": "对需要嵌入运行时值的错误（如无法识别的单位）用 fmt.Errorf（或带动态内容的 errors.New）"
+      },
+      {
+        "id": "7.3",
+        "text": "不含动态值的错误信息不用 fmt.Errorf"
+      },
+      {
+        "id": "7.4",
+        "text": "解释 fmt.Errorf 每次调用都分配，而包级 errors.New 只分配一次"
+      }
     ]
   },
   {
     "id": 8,
     "name": "interface-boxing-hot-path",
-    "description": "Tests knowledge of interface boxing allocation cost and the fix using generics or typed parameters",
-    "prompt": "Our Go analytics pipeline processes events at high throughput. Profiling shows unexpectedly high allocation rates in this function:\n\n```go\nfunc SumValues(values []any) float64 {\n    var total float64\n    for _, v := range values {\n        switch n := v.(type) {\n        case int:\n            total += float64(n)\n        case float64:\n            total += n\n        }\n    }\n    return total\n}\n```\n\nCallers always pass either all ints or all float64s. How can we reduce allocations?",
-    "trap": "Passing concrete types through any/interface{} forces heap allocation for boxing. The skill teaches using typed parameters or generics. Without it, the model may focus on the type switch optimization rather than the fundamental boxing problem.",
+    "description": "测试接口装箱的分配成本知识及用泛型或类型化参数修复",
+    "prompt": "我们的 Go 分析管道高吞吐处理事件。profiling 显示这个函数分配率异常高：\n\n```go\nfunc SumValues(values []any) float64 {\n    var total float64\n    for _, v := range values {\n        switch n := v.(type) {\n        case int:\n            total += float64(n)\n        case float64:\n            total += n\n        }\n    }\n    return total\n}\n```\n\n调用方总是传全 int 或全 float64。怎么减少分配？",
+    "trap": "把具体类型过 any/interface{} 传入会强制装箱堆分配。skill 教用类型化参数或泛型。没有它，模型可能只盯着 type switch 优化而不解决装箱这个根本问题。",
     "assertions": [
-      {"id": "8.1", "text": "Identifies interface boxing (any parameter) as the source of allocations"},
-      {"id": "8.2", "text": "Suggests typed functions (e.g., SumInts([]int)) or generics (func Sum[T ~int|~float64]([]T)) to eliminate boxing"},
-      {"id": "8.3", "text": "Explains that each concrete value passed through any requires a heap allocation for boxing"},
-      {"id": "8.4", "text": "Does NOT focus only on the type switch as the optimization target"}
+      {
+        "id": "8.1",
+        "text": "指出接口装箱（any 参数）是分配来源"
+      },
+      {
+        "id": "8.2",
+        "text": "建议用类型化函数（如 SumInts([]int)）或泛型（func Sum[T ~int|~float64]([]T)）消除装箱"
+      },
+      {
+        "id": "8.3",
+        "text": "解释每个经 any 传入的具体值都需要一次堆分配做装箱"
+      },
+      {
+        "id": "8.4",
+        "text": "不只把 type switch 当优化目标"
+      }
     ]
   },
   {
     "id": 9,
     "name": "backing-array-leak-slice",
-    "description": "Tests whether the model avoids backing array retention when writing a function that stores subslices long-term",
-    "prompt": "Write a Go function that caches the first 16 bytes of each incoming network packet for later audit logging. Packets are large (up to 64KB) and are pooled via sync.Pool — they get reused after the call returns.\n\n```go\nvar auditLog [][]byte\n\nfunc recordPacketPrefix(pkt []byte) {\n    // TODO: store first 16 bytes of pkt in auditLog\n}\n```\n\nImplement this function.",
-    "trap": "The obvious, idiomatic implementation is 'auditLog = append(auditLog, pkt[:16])' — a simple reslice. This looks correct but retains the entire 64KB backing array per entry because the subslice shares the original buffer. Since packets come from a sync.Pool and are reused, the retained backing arrays also prevent correct pool behavior. The fix is to copy: 'prefix := make([]byte, 16); copy(prefix, pkt[:16]); auditLog = append(auditLog, prefix)'. Without the skill the model writes the reslice version.",
+    "description": "测试模型写长期存子切片的函数时是否避免底层数组滞留",
+    "prompt": "写一个 Go 函数缓存每个入站网络包的前 16 字节，供事后审计日志用。包很大（最大 64KB），经 sync.Pool 池化——调用返回后会被复用。\n\n```go\nvar auditLog [][]byte\n\nfunc recordPacketPrefix(pkt []byte) {\n    // TODO: store first 16 bytes of pkt in auditLog\n}\n```\n\n实现这个函数。",
+    "trap": "显而易见、符合直觉的实现是 'auditLog = append(auditLog, pkt[:16])'——一次简单重切片。看着对，但每条都滞留整个 64KB 底层数组，因为子切片共享原 buffer。而且包来自 sync.Pool 会被复用，滞留的底层数组还会破坏池的正常行为。修法是拷贝：'prefix := make([]byte, 16); copy(prefix, pkt[:16]); auditLog = append(auditLog, prefix)'。没有 skill 时模型会写重切片版本。",
     "assertions": [
-      {"id": "9.1", "text": "Does NOT use pkt[:16] directly as the stored value (reslice retains the entire backing array)"},
-      {"id": "9.2", "text": "Creates an independent copy using make([]byte, 16) + copy, or equivalent"},
-      {"id": "9.3", "text": "Explains that storing a reslice retains the entire original backing array, preventing GC"},
-      {"id": "9.4", "text": "Notes the interaction with sync.Pool: retained backing arrays prevent buffer reuse or cause data corruption"}
+      {
+        "id": "9.1",
+        "text": "不直接把 pkt[:16] 当存储值（重切片会滞留整个底层数组）"
+      },
+      {
+        "id": "9.2",
+        "text": "用 make([]byte, 16) + copy 或等价方式创建独立副本"
+      },
+      {
+        "id": "9.3",
+        "text": "解释存重切片会滞留整个原始底层数组，妨碍 GC"
+      },
+      {
+        "id": "9.4",
+        "text": "指出与 sync.Pool 的相互影响：滞留的底层数组妨碍 buffer 复用或造成数据错乱"
+      }
     ]
   },
   {
     "id": 10,
     "name": "substring-memory-leak",
-    "description": "Tests knowledge of the strings.Clone pattern for substring memory leaks",
-    "prompt": "Our Go log processing service extracts request IDs from log lines. Memory keeps growing even though we only store short strings. Go 1.20+ project.\n\n```go\nvar requestIDs = make(map[string]time.Time)\n\nfunc ProcessLogLine(line string) {\n    // line is typically 500-2000 bytes\n    id := line[12:48] // extract 36-char UUID\n    requestIDs[id] = time.Now()\n}\n```",
-    "trap": "Substrings share the backing array of the original string. Each 36-char id retains the full 500-2000 byte log line. The skill teaches strings.Clone (Go 1.20+) as the fix. Without it, the model may not know about strings.Clone or may suggest string([]byte(s)) which is also correct but less idiomatic.",
+    "description": "测试子串内存泄漏的 strings.Clone 修法知识",
+    "prompt": "我们的 Go 日志处理服务从日志行提取请求 ID。只存短字符串但内存一直涨。Go 1.20+ 项目。\n\n```go\nvar requestIDs = make(map[string]time.Time)\n\nfunc ProcessLogLine(line string) {\n    // line is typically 500-2000 bytes\n    id := line[12:48] // extract 36-char UUID\n    requestIDs[id] = time.Now()\n}\n```",
+    "trap": "子串共享原字符串的底层数组。每个 36 字符的 id 都滞留整行 500-2000 字节的日志。skill 教用 strings.Clone（Go 1.20+）修。没有它，模型可能不知道 strings.Clone，或建议 string([]byte(s))——也对但不够 idiomatic。",
     "assertions": [
-      {"id": "10.1", "text": "Identifies that substrings share the backing array of the original string"},
-      {"id": "10.2", "text": "Suggests strings.Clone(line[12:48]) to create an independent copy"},
-      {"id": "10.3", "text": "Explains that each 36-char ID retains the entire 500-2000 byte log line in memory"}
+      {
+        "id": "10.1",
+        "text": "指出子串共享原字符串的底层数组"
+      },
+      {
+        "id": "10.2",
+        "text": "建议用 strings.Clone(line[12:48]) 创建独立副本"
+      },
+      {
+        "id": "10.3",
+        "text": "解释每个 36 字符的 ID 都在内存里滞留整行 500-2000 字节的日志"
+      }
     ]
   },
   {
     "id": 11,
     "name": "map-never-shrinks",
-    "description": "Tests whether the model avoids using a long-lived map for a high-churn cache without addressing bucket retention",
-    "prompt": "Design a Go in-memory rate-limiter that tracks per-IP request counts. Counts reset every minute. At peak there are 500K active IPs, but off-peak only ~200 IPs are active.\n\n```go\ntype RateLimiter struct {\n    mu     sync.Mutex\n    counts map[string]int\n}\n\nfunc NewRateLimiter() *RateLimiter {\n    return &RateLimiter{counts: make(map[string]int)}\n}\n\nfunc (r *RateLimiter) reset() {\n    r.mu.Lock()\n    defer r.mu.Unlock()\n    // TODO: implement the per-minute reset\n}\n```\n\nImplement the reset method.",
-    "trap": "The natural, obvious implementation is to range over the map and delete each key: 'for k := range r.counts { delete(r.counts, k) }'. This looks correct and idiomatic but leaves all 500K bucket slots allocated — the map retains its peak allocation forever. The skill teaches that maps never release bucket memory; the fix is to replace the map entirely: 'r.counts = make(map[string]int)'. Without the skill the model writes the delete-loop version.",
+    "description": "测试模型为高churn缓存用长寿命 map 时是否处理桶滞留问题",
+    "prompt": "设计一个 Go 内存限流器，跟踪每个 IP 的请求数。计数每分钟重置。峰值有 50 万个活跃 IP，低谷只有约 200 个。\n\n```go\ntype RateLimiter struct {\n    mu     sync.Mutex\n    counts map[string]int\n}\n\nfunc NewRateLimiter() *RateLimiter {\n    return &RateLimiter{counts: make(map[string]int)}\n}\n\nfunc (r *RateLimiter) reset() {\n    r.mu.Lock()\n    defer r.mu.Unlock()\n    // TODO: implement the per-minute reset\n}\n```\n\n实现 reset 方法。",
+    "trap": "自然、直观的实现是遍历 map 逐个删键：'for k := range r.counts { delete(r.counts, k) }'。看着正确且 idiomatic，但 50 万个桶槽位全部留着——map 永远保持峰值分配。skill 教的是 map 从不释放桶内存；修法是整个换新 map：'r.counts = make(map[string]int)'。没有 skill 时模型会写 delete 循环版本。",
     "assertions": [
-      {"id": "11.1", "text": "Replaces the map with a fresh allocation (r.counts = make(map[string]int)) rather than deleting keys in a loop"},
-      {"id": "11.2", "text": "Does NOT use 'for k := range r.counts { delete(r.counts, k) }' as the reset strategy"},
-      {"id": "11.3", "text": "Explains that Go maps never release bucket memory when keys are deleted, so delete-loop retains peak allocation"},
-      {"id": "11.4", "text": "Notes that reassigning to a new map allows the old bucket array to be GC'd"}
+      {
+        "id": "11.1",
+        "text": "换新 map（r.counts = make(map[string]int)）而不是循环删键"
+      },
+      {
+        "id": "11.2",
+        "text": "不用 'for k := range r.counts { delete(r.counts, k) }' 当重置策略"
+      },
+      {
+        "id": "11.3",
+        "text": "解释 Go map 删键时从不释放桶内存，delete 循环会滞留峰值分配"
+      },
+      {
+        "id": "11.4",
+        "text": "指出重新赋值新 map 能让旧桶数组被 GC"
+      }
     ]
   },
   {
     "id": 12,
     "name": "sync-pool-rules",
-    "description": "Tests proper sync.Pool usage: reset before Put, return copies not pooled buffers, size limits",
-    "prompt": "Review this sync.Pool usage in our Go HTTP handler for correctness:\n\n```go\nvar bufPool = sync.Pool{\n    New: func() any { return make([]byte, 0, 64*1024) },\n}\n\nfunc HandleRequest(w http.ResponseWriter, r *http.Request) {\n    buf := bufPool.Get().([]byte)\n    // ... fill buf with response data ...\n    buf = append(buf[:0], responseData...)\n    w.Write(buf)\n    bufPool.Put(buf)\n}\n\nfunc HandleLargeUpload(w http.ResponseWriter, r *http.Request) {\n    buf := bufPool.Get().([]byte)\n    data, _ := io.ReadAll(r.Body) // could be 100MB+\n    buf = append(buf[:0], data...)\n    processData(buf)\n    bufPool.Put(buf)\n}\n```\n\nIdentify all issues with this pool usage.",
-    "trap": "Multiple issues: (1) HandleRequest returns the pooled buffer directly via w.Write — the caller (net/http) may retain it after Put, (2) HandleLargeUpload puts enormous buffers (100MB+) back into the pool — don't pool objects >32KB, (3) the pool stores []byte values not pointers, which causes an allocation on Get. The skill covers all these rules.",
+    "description": "测试正确的 sync.Pool 用法：Put 前重置、返回副本而非池内 buffer、尺寸上限",
+    "prompt": "评审我们 Go HTTP handler 里这段 sync.Pool 用法的正确性：\n\n```go\nvar bufPool = sync.Pool{\n    New: func() any { return make([]byte, 0, 64*1024) },\n}\n\nfunc HandleRequest(w http.ResponseWriter, r *http.Request) {\n    buf := bufPool.Get().([]byte)\n    // ... fill buf with response data ...\n    buf = append(buf[:0], responseData...)\n    w.Write(buf)\n    bufPool.Put(buf)\n}\n\nfunc HandleLargeUpload(w http.ResponseWriter, r *http.Request) {\n    buf := bufPool.Get().([]byte)\n    data, _ := io.ReadAll(r.Body) // could be 100MB+\n    buf = append(buf[:0], data...)\n    processData(buf)\n    bufPool.Put(buf)\n}\n```\n\n找出这个池用法的所有问题。",
+    "trap": "多个问题：(1) HandleRequest 经 w.Write 直接把池内 buffer 交出去——调用方（net/http）可能在 Put 之后仍持有它；(2) HandleLargeUpload 把巨大 buffer（100MB+）放回池中——超过 32KB 的对象不该入池；(3) 池里存的是 []byte 值而非指针，Get 时会产生一次分配。这些规则 skill 全覆盖。",
     "assertions": [
-      {"id": "12.1", "text": "Identifies that HandleLargeUpload puts oversized buffers (100MB+) back into the pool"},
-      {"id": "12.2", "text": "Mentions the 32KB guideline — don't pool objects larger than ~32KB"},
-      {"id": "12.3", "text": "Identifies that w.Write(buf) may retain the buffer after bufPool.Put(buf) in the same function"},
-      {"id": "12.4", "text": "Suggests pooling pointers (*[]byte) instead of values to avoid allocation on Get"},
-      {"id": "12.5", "text": "Recommends resetting/clearing state before Put to avoid retaining large object graphs"}
+      {
+        "id": "12.1",
+        "text": "指出 HandleLargeUpload 把超大 buffer（100MB+）放回了池中"
+      },
+      {
+        "id": "12.2",
+        "text": "提到 32KB 准则——大于约 32KB 的对象不该入池"
+      },
+      {
+        "id": "12.3",
+        "text": "指出同一函数里 w.Write(buf) 可能在 bufPool.Put(buf) 之后仍持有该 buffer"
+      },
+      {
+        "id": "12.4",
+        "text": "建议池化指针（*[]byte）而非值，避免 Get 时分配"
+      },
+      {
+        "id": "12.5",
+        "text": "建议 Put 前重置/清理状态，避免滞留大对象图"
+      }
     ]
   },
   {
     "id": 13,
     "name": "struct-field-alignment",
-    "description": "Tests knowledge of struct field ordering for optimal memory layout",
-    "prompt": "Our Go service creates millions of these structs. Memory profiling shows they consume more space than expected. Can we reduce memory usage?\n\n```go\ntype Event struct {\n    Active    bool\n    Timestamp int64\n    Priority  bool\n    UserID    int32\n    Processed bool\n    Score     float64\n}\n```\n\nHow large is this struct and can we make it smaller?",
-    "trap": "The struct has poor field alignment. bool (1 byte) followed by int64 (8 bytes) adds 7 bytes of padding. The skill teaches reordering fields largest-to-smallest and using fieldalignment tool. Without it, the model may not compute the correct size or suggest the optimal reordering.",
+    "description": "测试结构体字段排序以获得最优内存布局的知识",
+    "prompt": "我们的 Go 服务要创建几百万个这种结构体。内存 profiling 显示它们比预期更占空间。能省内存吗？\n\n```go\ntype Event struct {\n    Active    bool\n    Timestamp int64\n    Priority  bool\n    UserID    int32\n    Processed bool\n    Score     float64\n}\n```\n\n这个结构体多大，能改小吗？",
+    "trap": "这个结构体字段对齐很差。bool（1 字节）后面跟 int64（8 字节）会补 7 字节 padding。skill 教按从大到小重排字段并用 fieldalignment 工具。没有它，模型可能算不对尺寸或给不出最优重排。",
     "assertions": [
-      {"id": "13.1", "text": "Identifies that the struct has wasted padding bytes due to alignment"},
-      {"id": "13.2", "text": "Suggests reordering fields from largest to smallest (int64/float64 first, then int32, then bools)"},
-      {"id": "13.3", "text": "Provides a reordered struct that is smaller than the original"},
-      {"id": "13.4", "text": "Mentions the fieldalignment tool for automated detection"},
-      {"id": "13.5", "text": "States alignment requirements (bool=1, int32=4, int64/float64=8)"}
+      {
+        "id": "13.1",
+        "text": "指出结构体因对齐浪费了 padding 字节"
+      },
+      {
+        "id": "13.2",
+        "text": "建议按从大到小重排字段（int64/float64 在前，然后 int32，然后 bool）"
+      },
+      {
+        "id": "13.3",
+        "text": "给出比原结构体更小的重排版本"
+      },
+      {
+        "id": "13.4",
+        "text": "提到 fieldalignment 工具做自动检测"
+      },
+      {
+        "id": "13.5",
+        "text": "说明对齐要求（bool=1、int32=4、int64/float64=8）"
+      }
     ]
   },
   {
     "id": 14,
     "name": "zero-size-field-end-of-struct",
-    "description": "Tests knowledge that struct{} at end of struct adds word-sized padding",
-    "prompt": "We're optimizing memory in our Go event system. This struct is allocated millions of times:\n\n```go\ntype Entry struct {\n    Value int64\n    Flag  struct{}\n}\n```\n\nWe expected it to be 8 bytes (just the int64) since struct{} is zero-size. But unsafe.Sizeof reports 16 bytes. Why?",
-    "trap": "When the last field has zero size (struct{}), the compiler adds word-sized padding (8 bytes on 64-bit) to prevent a pointer to that field from overlapping the next memory block. The fix is to move struct{} to the beginning. This is a very obscure Go internals detail.",
+    "description": "测试「struct{} 在结构体末尾会补一个字长 padding」的知识",
+    "prompt": "我们在优化 Go 事件系统的内存。这个结构体被分配几百万次：\n\n```go\ntype Entry struct {\n    Value int64\n    Flag  struct{}\n}\n```\n\n我们以为它是 8 字节（就一个 int64），因为 struct{} 是零尺寸。但 unsafe.Sizeof 报 16 字节。为什么？",
+    "trap": "最后一个字段是零尺寸（struct{}）时，编译器会补一个字长的 padding（64 位上 8 字节），防止指向该字段的指针越界踩到下一块内存。修法是把 struct{} 挪到开头。这是非常冷门的 Go  internals 细节。",
     "assertions": [
-      {"id": "14.1", "text": "Explains that a zero-size field at the end of a struct causes word-sized padding"},
-      {"id": "14.2", "text": "Explains the reason: preventing a pointer to the zero-size field from overlapping the next memory block"},
-      {"id": "14.3", "text": "Suggests moving struct{} to the beginning of the struct to eliminate the padding"},
-      {"id": "14.4", "text": "Shows the fix: type Entry struct { Flag struct{}; Value int64 } which is 8 bytes"}
+      {
+        "id": "14.1",
+        "text": "解释零尺寸字段在结构体末尾会导致字长 padding"
+      },
+      {
+        "id": "14.2",
+        "text": "解释原因：防止指向零尺寸字段的指针与下一块内存重叠"
+      },
+      {
+        "id": "14.3",
+        "text": "建议把 struct{} 挪到结构体开头消除 padding"
+      },
+      {
+        "id": "14.4",
+        "text": "展示修法：type Entry struct { Flag struct{}; Value int64 }，它是 8 字节"
+      }
     ]
   },
   {
     "id": 15,
     "name": "map-pointer-vs-value-tradeoff",
-    "description": "Tests knowledge of map[K]*V vs map[K]V tradeoff for large frequently-updated structs",
-    "prompt": "Our Go game server updates player scores frequently. This pattern is inefficient:\n\n```go\ntype Player struct {\n    Name      string\n    Score     int\n    Level     int\n    Inventory [256]byte\n    Stats     [64]float64\n}\n\nvar players = make(map[string]Player)\n\nfunc UpdateScore(id string, delta int) {\n    p := players[id]\n    p.Score += delta\n    players[id] = p // full copy\n}\n```\n\nHow can we optimize the update pattern?",
-    "trap": "Map values are not addressable — you can't do players[id].Score += delta. The copy-modify-reassign pattern copies the entire large struct. Using map[string]*Player allows direct modification. But the skill also teaches the tradeoff: pointer maps add GC pressure from separate heap allocations. Without it, the model may suggest pointers without mentioning the tradeoff.",
+    "description": "测试大而频繁更新的结构体在 map[K]*V 与 map[K]V 之间的取舍知识",
+    "prompt": "我们的 Go 游戏服务器频繁更新玩家分数。这个模式很低效：\n\n```go\ntype Player struct {\n    Name      string\n    Score     int\n    Level     int\n    Inventory [256]byte\n    Stats     [64]float64\n}\n\nvar players = make(map[string]Player)\n\nfunc UpdateScore(id string, delta int) {\n    p := players[id]\n    p.Score += delta\n    players[id] = p // full copy\n}\n```\n\n怎么优化这个更新模式？",
+    "trap": "map 的值不可寻址——没法直接 players[id].Score += delta。拷贝-修改-回写模式每次都拷整个大结构体。用 map[string]*Player 可以直接改。但 skill 还教了取舍：指针 map 因分散的堆分配增加 GC 压力。没有它，模型可能只给指针方案不提取舍。",
     "assertions": [
-      {"id": "15.1", "text": "Suggests using map[string]*Player to allow direct field modification"},
-      {"id": "15.2", "text": "Explains that map values are not addressable (can't modify in place)"},
-      {"id": "15.3", "text": "Shows players[id].Score += delta with pointer map"},
-      {"id": "15.4", "text": "Mentions the tradeoff: pointer maps add GC pressure from separate heap allocations"},
-      {"id": "15.5", "text": "Notes that for small, mostly-read structs, map[K]V (value) is better"}
+      {
+        "id": "15.1",
+        "text": "建议用 map[string]*Player 允许直接修改字段"
+      },
+      {
+        "id": "15.2",
+        "text": "解释 map 的值不可寻址（不能原地修改）"
+      },
+      {
+        "id": "15.3",
+        "text": "展示指针 map 下 players[id].Score += delta"
+      },
+      {
+        "id": "15.4",
+        "text": "提到取舍：指针 map 因独立堆分配增加 GC 压力"
+      },
+      {
+        "id": "15.5",
+        "text": "指出小而以读为主的结构体用 map[K]V（值）更好"
+      }
     ]
   },
   {
     "id": 16,
     "name": "inlining-log-in-hot-path",
-    "description": "Tests knowledge that log calls prevent function inlining",
-    "prompt": "This Go helper function is called millions of times per second in a tight loop. The CPU profile shows it takes much more time than expected for such a simple function.\n\n```go\nfunc clamp(val, minVal, maxVal int) int {\n    if val < minVal {\n        log.Printf(\"clamped %d below minimum %d\", val, minVal)\n        return minVal\n    }\n    if val > maxVal {\n        log.Printf(\"clamped %d above maximum %d\", val, maxVal)\n        return maxVal\n    }\n    return val\n}\n```\n\nWhy is this function slow and how do we fix it?",
-    "trap": "The log.Printf calls prevent the compiler from inlining the function. In a tight loop called millions of times, function call overhead is significant. The skill specifically warns about logging in hot loops preventing inlining. Without it, the model may focus on the log formatting cost rather than the inlining prevention.",
+    "description": "测试「log 调用阻止函数内联」的知识",
+    "prompt": "这个 Go 辅助函数在紧循环里每秒被调用几百万次。CPU profile 显示这么简单一个函数花的时间远超预期。\n\n```go\nfunc clamp(val, minVal, maxVal int) int {\n    if val < minVal {\n        log.Printf(\"clamped %d below minimum %d\", val, minVal)\n        return minVal\n    }\n    if val > maxVal {\n        log.Printf(\"clamped %d above maximum %d\", val, maxVal)\n        return maxVal\n    }\n    return val\n}\n```\n\n这个函数为什么慢，怎么修？",
+    "trap": "log.Printf 调用阻止编译器内联这个函数。每秒几百万次的紧循环里函数调用开销很可观。skill 明确警告热循环里的日志会阻止内联。没有它，模型可能只盯着日志格式化开销而想不到内联受阻。",
     "assertions": [
-      {"id": "16.1", "text": "Identifies that log calls prevent the function from being inlined by the compiler"},
-      {"id": "16.2", "text": "Suggests removing log calls from the hot-path function or moving them outside"},
-      {"id": "16.3", "text": "Mentions using go build -gcflags=\"-m\" to verify inlining decisions"},
-      {"id": "16.4", "text": "Explains that function call overhead matters when called millions of times in a tight loop"}
+      {
+        "id": "16.1",
+        "text": "指出 log 调用阻止编译器内联该函数"
+      },
+      {
+        "id": "16.2",
+        "text": "建议把 log 调用移出热路径函数或挪到外面"
+      },
+      {
+        "id": "16.3",
+        "text": "提到用 go build -gcflags=\"-m\" 验证内联决策"
+      },
+      {
+        "id": "16.4",
+        "text": "解释每秒几百万次调用的紧循环里函数调用开销很关键"
+      }
     ]
   },
   {
     "id": 17,
     "name": "value-receiver-inlining",
-    "description": "Tests knowledge that value receivers enable inlining for fluent method chains",
-    "prompt": "We have a Go config builder used in a hot path. Profiling shows the fluent chain is slower than expected:\n\n```go\ntype Config struct {\n    timeout  time.Duration\n    retries  int\n    verbose  bool\n}\n\nfunc (c *Config) WithTimeout(d time.Duration) *Config {\n    c.timeout = d\n    return c\n}\n\nfunc (c *Config) WithRetries(n int) *Config {\n    c.retries = n\n    return c\n}\n\nfunc (c *Config) WithVerbose(v bool) *Config {\n    c.verbose = v\n    return c\n}\n```\n\nThis is called as: `cfg := (&Config{}).WithTimeout(5*time.Second).WithRetries(3).WithVerbose(true)`\n\nHow can we make the fluent chain faster?",
-    "trap": "Pointer receivers add indirection that blocks inlining of fluent method chains. Value receivers allow the compiler to fully inline the chain. The skill quantifies this as -80% time. Without the skill, the model may suggest unrelated optimizations.",
+    "description": "测试「值接收者让链式调用可内联」的知识",
+    "prompt": "我们有个热路径用的 Go config builder。profiling 显示链式调用比预期慢：\n\n```go\ntype Config struct {\n    timeout  time.Duration\n    retries  int\n    verbose  bool\n}\n\nfunc (c *Config) WithTimeout(d time.Duration) *Config {\n    c.timeout = d\n    return c\n}\n\nfunc (c *Config) WithRetries(n int) *Config {\n    c.retries = n\n    return c\n}\n\nfunc (c *Config) WithVerbose(v bool) *Config {\n    c.verbose = v\n    return c\n}\n```\n\n调用方式：`cfg := (&Config{}).WithTimeout(5*time.Second).WithRetries(3).WithVerbose(true)`\n\n怎么让链式调用更快？",
+    "trap": "指针接收者的间接寻址阻止链式方法内联。值接收者让编译器能把整条链完全内联。skill 量化为 -80% 时间。没有 skill，模型可能给出不相关的优化建议。",
     "assertions": [
-      {"id": "17.1", "text": "Suggests changing to value receivers instead of pointer receivers"},
-      {"id": "17.2", "text": "Explains that value receivers allow the compiler to inline the fluent chain"},
-      {"id": "17.3", "text": "Explains that pointer receivers add indirection that blocks inlining"},
-      {"id": "17.4", "text": "Shows the value receiver signature: func (c Config) WithTimeout(d time.Duration) Config"}
+      {
+        "id": "17.1",
+        "text": "建议把指针接收者改成值接收者"
+      },
+      {
+        "id": "17.2",
+        "text": "解释值接收者让编译器能内联整条链"
+      },
+      {
+        "id": "17.3",
+        "text": "解释指针接收者的间接寻址阻止内联"
+      },
+      {
+        "id": "17.4",
+        "text": "展示值接收者签名：func (c Config) WithTimeout(d time.Duration) Config"
+      }
     ]
   },
   {
     "id": 18,
     "name": "cache-locality-matrix-traversal",
-    "description": "Tests knowledge of row-major vs column-major traversal and cache effects",
-    "prompt": "This Go matrix computation is unexpectedly slow. The matrix is 4096x4096 float64. CPU profile shows the loop itself (not the computation) is the bottleneck.\n\n```go\nfunc ColumnSum(matrix [4096][4096]float64) [4096]float64 {\n    var sums [4096]float64\n    for col := 0; col < 4096; col++ {\n        for row := 0; row < 4096; row++ {\n            sums[col] += matrix[row][col]\n        }\n    }\n    return sums\n}\n```\n\nWhy is this slow and how do we fix it?",
-    "trap": "Column-first traversal on row-major storage causes cache misses on every access. The fix is to swap loop order. The skill quantifies the difference as 10-50x from cache effects alone. Without it, the model may suggest parallelism or SIMD rather than the simple loop reorder.",
+    "description": "测试行主序与列主序遍历及缓存效应的知识",
+    "prompt": "这个 Go 矩阵计算慢得出奇。矩阵是 4096x4096 的 float64。CPU profile 显示瓶颈是循环本身（不是计算）。\n\n```go\nfunc ColumnSum(matrix [4096][4096]float64) [4096]float64 {\n    var sums [4096]float64\n    for col := 0; col < 4096; col++ {\n        for row := 0; row < 4096; row++ {\n            sums[col] += matrix[row][col]\n        }\n    }\n    return sums\n}\n```\n\n为什么慢，怎么修？",
+    "trap": "在行主序存储上按列优先遍历，每次访问都缓存未命中。修法是交换循环顺序。skill 量化差距为仅缓存效应就差 10-50 倍。没有它，模型可能建议并行或 SIMD，而不是简单的循环重排。",
     "assertions": [
-      {"id": "18.1", "text": "Identifies the column-first traversal as the cause (cache misses)"},
-      {"id": "18.2", "text": "Explains that Go stores 2D arrays in row-major order"},
-      {"id": "18.3", "text": "Suggests swapping loop order to row-first (outer loop over rows)"},
-      {"id": "18.4", "text": "Mentions the performance difference from cache effects (10-50x or similar magnitude)"},
-      {"id": "18.5", "text": "Does NOT primarily suggest parallelism or SIMD as the first fix"}
+      {
+        "id": "18.1",
+        "text": "指出列优先遍历是元凶（缓存未命中）"
+      },
+      {
+        "id": "18.2",
+        "text": "解释 Go 的二维数组按行主序存储"
+      },
+      {
+        "id": "18.3",
+        "text": "建议交换循环顺序改为行优先（外层循环走行）"
+      },
+      {
+        "id": "18.4",
+        "text": "提到缓存效应带来的性能差距（10-50 倍或相近量级）"
+      },
+      {
+        "id": "18.5",
+        "text": "不把并行或 SIMD 当首选修法"
+      }
     ]
   },
   {
     "id": 19,
     "name": "contiguous-2d-allocation",
-    "description": "Tests whether the model uses contiguous allocation when writing new 2D matrix code for a performance-critical context",
-    "prompt": "Write a Go function that creates an NxM grid of float64 values initialized to zero, for use in a finite-element simulation that iterates row by row over the grid millions of times per second.\n\n```go\nfunc NewGrid(rows, cols int) [][]float64 {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "The standard idiomatic Go way to create a 2D slice is the row-by-row allocation loop: make([][]float64, rows) followed by make([]float64, cols) per row. Every Go tutorial and example uses this pattern. However for performance-critical numeric code the skill teaches a single contiguous allocation (make([]float64, rows*cols)) sliced into row views, which has far better cache locality. Without the skill the model writes the idiomatic per-row allocation.",
+    "description": "测试模型在性能敏感场景写新二维矩阵代码时是否用连续分配",
+    "prompt": "写一个 Go 函数创建初始化为零的 NxM float64 网格，用于有限元仿真——每秒逐行遍历网格几百万次。\n\n```go\nfunc NewGrid(rows, cols int) [][]float64 {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "创建二维切片的标准 idiomatic 写法是逐行分配循环：先 make([][]float64, rows) 再每行 make([]float64, cols)。所有 Go 教程和例子都这么写。但性能敏感的数值代码里 skill 教单次连续分配（make([]float64, rows*cols)）再切成行视图，缓存局部性好得多。没有 skill 时模型会写 idiomatic 的逐行分配。",
     "assertions": [
-      {"id": "19.1", "text": "Allocates a single contiguous backing slice: make([]float64, rows*cols)"},
-      {"id": "19.2", "text": "Slices it into row views: data[i*cols : (i+1)*cols]"},
-      {"id": "19.3", "text": "Does NOT allocate each row independently with a separate make([]float64, cols) call"},
-      {"id": "19.4", "text": "Explains that contiguous allocation improves cache locality for row-sequential access"}
+      {
+        "id": "19.1",
+        "text": "分配单个连续底层切片：make([]float64, rows*cols)"
+      },
+      {
+        "id": "19.2",
+        "text": "把它切成行视图：data[i*cols : (i+1)*cols]"
+      },
+      {
+        "id": "19.3",
+        "text": "不对每行单独 make([]float64, cols)"
+      },
+      {
+        "id": "19.4",
+        "text": "解释连续分配改善按行顺序访问的缓存局部性"
+      }
     ]
   },
   {
     "id": 20,
     "name": "soa-vs-aos",
-    "description": "Tests knowledge of Struct of Arrays vs Array of Structs for single-field iteration",
-    "prompt": "Our Go physics simulation iterates over millions of particles but only reads the X coordinate for collision detection in the first pass:\n\n```go\ntype Particle struct {\n    X, Y, Z    float64\n    VX, VY, VZ float64\n    Mass       float64\n    Radius     float64\n}\n\nvar particles []Particle // millions of elements\n\nfunc FindCollisionCandidates() []int {\n    var candidates []int\n    for i := range particles {\n        if particles[i].X > threshold {\n            candidates = append(candidates, i)\n        }\n    }\n    return candidates\n}\n```\n\nCPU profile shows this loop is slow. We only need the X field in this pass. How can we speed it up?",
-    "trap": "Loading each 64-byte Particle to read only X (8 bytes) wastes 87.5% of cache space. The skill teaches SoA (Struct of Arrays) where all X values are contiguous for 100% cache utilization. Without it, the model may suggest parallelism or preallocation rather than the data layout change.",
+    "description": "测试单字段遍历时 Struct of Arrays 对 Array of Structs 的知识",
+    "prompt": "我们的 Go 物理模拟遍历几百万个粒子，但第一遍碰撞检测只读 X 坐标：\n\n```go\ntype Particle struct {\n    X, Y, Z    float64\n    VX, VY, VZ float64\n    Mass       float64\n    Radius     float64\n}\n\nvar particles []Particle // millions of elements\n\nfunc FindCollisionCandidates() []int {\n    var candidates []int\n    for i := range particles {\n        if particles[i].X > threshold {\n            candidates = append(candidates, i)\n        }\n    }\n    return candidates\n}\n```\n\nCPU profile 显示这个循环慢。这一遍只需要 X 字段。怎么提速？",
+    "trap": "加载每个 64 字节的 Particle 只为读 8 字节的 X，浪费了 87.5% 的缓存空间。skill 教 SoA（Struct of Arrays）布局让所有 X 值连续存放，缓存利用率 100%。没有它，模型可能建议并行或预分配，而不是改数据布局。",
     "assertions": [
-      {"id": "20.1", "text": "Identifies that loading entire Particle structs wastes cache space when only X is needed"},
-      {"id": "20.2", "text": "Suggests Struct of Arrays (SoA) layout with separate slices for X, Y, Z, etc."},
-      {"id": "20.3", "text": "Explains cache utilization improvement (contiguous X values vs scattered across structs)"},
-      {"id": "20.4", "text": "Notes that AoS is fine when accessing all fields together or for small structs"}
+      {
+        "id": "20.1",
+        "text": "指出只需要 X 时加载整个 Particle 结构体浪费缓存空间"
+      },
+      {
+        "id": "20.2",
+        "text": "建议 Struct of Arrays（SoA）布局，X、Y、Z 等各用独立切片"
+      },
+      {
+        "id": "20.3",
+        "text": "解释缓存利用率的改善（连续的 X 值对散落在结构体里）"
+      },
+      {
+        "id": "20.4",
+        "text": "指出所有字段一起访问或结构体很小时 AoS 没问题"
+      }
     ]
   },
   {
     "id": 21,
     "name": "false-sharing-concurrent-counters",
-    "description": "Tests knowledge of false sharing and cache-line padding",
-    "prompt": "Our Go service has per-goroutine counters that are updated concurrently. Adding more goroutines makes it SLOWER, not faster. Profiling shows atomic operations on counters consuming unexpectedly high CPU.\n\n```go\ntype Metrics struct {\n    RequestCount int64\n    ErrorCount   int64\n    BytesRead    int64\n    BytesWritten int64\n}\n\nvar metrics Metrics\n\n// Each goroutine increments different counters concurrently\nfunc recordRequest(bytes int64) {\n    atomic.AddInt64(&metrics.RequestCount, 1)\n    atomic.AddInt64(&metrics.BytesRead, bytes)\n}\n\nfunc recordError(bytes int64) {\n    atomic.AddInt64(&metrics.ErrorCount, 1)\n    atomic.AddInt64(&metrics.BytesWritten, bytes)\n}\n```\n\nWhy does adding goroutines make it slower?",
-    "trap": "All four int64 fields fit within a single 64-byte cache line. When different goroutines update different fields, each write invalidates the other core's cache line (false sharing). The fix is cache-line padding. Without the skill, the model may suggest mutexes or sharding rather than identifying false sharing.",
+    "description": "测试伪共享与缓存行填充的知识",
+    "prompt": "我们的 Go 服务有并发更新的 per-goroutine 计数器。加 goroutine 反而更慢。profiling 显示计数器上的 atomic 操作消耗的 CPU 异常高。\n\n```go\ntype Metrics struct {\n    RequestCount int64\n    ErrorCount   int64\n    BytesRead    int64\n    BytesWritten int64\n}\n\nvar metrics Metrics\n\n// Each goroutine increments different counters concurrently\nfunc recordRequest(bytes int64) {\n    atomic.AddInt64(&metrics.RequestCount, 1)\n    atomic.AddInt64(&metrics.BytesRead, bytes)\n}\n\nfunc recordError(bytes int64) {\n    atomic.AddInt64(&metrics.ErrorCount, 1)\n    atomic.AddInt64(&metrics.BytesWritten, bytes)\n}\n```\n\n为什么加 goroutine 会更慢？",
+    "trap": "四个 int64 字段挤在同一条 64 字节缓存行里。不同 goroutine 更新不同字段时，每次写都会让其他核的缓存行失效（伪共享）。修法是缓存行填充。没有 skill，模型可能建议互斥锁或分片，而不是识别出伪共享。",
     "assertions": [
-      {"id": "21.1", "text": "Identifies false sharing as the cause (fields share the same cache line)"},
-      {"id": "21.2", "text": "Explains that writes to one field invalidate the cache line for other cores"},
-      {"id": "21.3", "text": "Suggests cache-line padding (56-byte [56]byte array between fields) to separate cache lines"},
-      {"id": "21.4", "text": "Mentions the 64-byte cache line size"},
-      {"id": "21.5", "text": "Notes this should only be applied when profiling confirms contention"}
+      {
+        "id": "21.1",
+        "text": "指出伪共享是元凶（字段共享同一条缓存行）"
+      },
+      {
+        "id": "21.2",
+        "text": "解释写一个字段会让其他核的缓存行失效"
+      },
+      {
+        "id": "21.3",
+        "text": "建议缓存行填充（字段间塞 56 字节的 [56]byte 数组）隔开缓存行"
+      },
+      {
+        "id": "21.4",
+        "text": "提到 64 字节缓存行尺寸"
+      },
+      {
+        "id": "21.5",
+        "text": "指出只在 profiling 确认存在争用时才该这么做"
+      }
     ]
   },
   {
     "id": 22,
     "name": "ilp-multi-accumulator",
-    "description": "Tests knowledge of instruction-level parallelism with multiple accumulators",
-    "prompt": "This Go function sums a large float64 slice (10M elements). Profiling shows it's CPU-bound with the loop body consuming most of the time. The computation is simple addition — how can we speed it up without parallelizing across goroutines?\n\n```go\nfunc Sum(data []float64) float64 {\n    var total float64\n    for _, v := range data {\n        total += v\n    }\n    return total\n}\n```",
-    "trap": "The single accumulator creates a dependency chain — each addition waits for the previous one. The skill teaches using 4 independent accumulators to exploit CPU instruction-level parallelism (2-4x improvement). Without it, the model may suggest SIMD or goroutine-based parallelism rather than the simpler multi-accumulator approach.",
+    "description": "测试多累加器利用指令级并行的知识",
+    "prompt": "这个 Go 函数求一个 1000 万元素 float64 切片的和。profiling 显示是 CPU 密集，循环体占大部分时间。就是简单加法——不用 goroutine 并行的话怎么提速？\n\n```go\nfunc Sum(data []float64) float64 {\n    var total float64\n    for _, v := range data {\n        total += v\n    }\n    return total\n}\n```",
+    "trap": "单累加器形成依赖链——每次加法都等前一次。skill 教用 4 个独立累加器利用 CPU 指令级并行（提升 2-4 倍）。没有它，模型可能建议 SIMD 或 goroutine 并行，而不是更简单的多累加器方案。",
     "assertions": [
-      {"id": "22.1", "text": "Identifies the sequential dependency chain as the bottleneck (each addition waits for the previous)"},
-      {"id": "22.2", "text": "Suggests using multiple accumulators (e.g., 4) for instruction-level parallelism"},
-      {"id": "22.3", "text": "Shows code with 4 independent accumulators summing every 4th element"},
-      {"id": "22.4", "text": "Handles the remainder elements (when len(data) is not divisible by 4)"},
-      {"id": "22.5", "text": "Mentions expected 2-4x improvement from ILP"}
+      {
+        "id": "22.1",
+        "text": "指出顺序依赖链是瓶颈（每次加法都等前一次）"
+      },
+      {
+        "id": "22.2",
+        "text": "建议用多个累加器（如 4 个）做指令级并行"
+      },
+      {
+        "id": "22.3",
+        "text": "展示用 4 个独立累加器各加每第 4 个元素的代码"
+      },
+      {
+        "id": "22.4",
+        "text": "处理剩余元素（len(data) 不能被 4 整除时）"
+      },
+      {
+        "id": "22.5",
+        "text": "提到 ILP 预期带来 2-4 倍提升"
+      }
     ]
   },
   {
     "id": 23,
     "name": "index-based-tree-cache-locality",
-    "description": "Tests whether the model uses index-based node storage when implementing a high-performance tree from scratch",
-    "prompt": "Implement a Go binary search tree for a high-throughput in-memory lookup service. The tree will hold ~1M integer keys and be traversed millions of times per second. Write the node and tree type definitions and the Insert method.\n\n```go\n// TODO: define types and implement Insert\n```",
-    "trap": "Every Go tutorial, textbook, and LeetCode solution defines a binary tree with pointer-based nodes: 'type Node struct { Value int; Left, Right *Node }'. This is the universal default. However the skill teaches that pointer-based trees scatter each node across the heap causing random cache misses on every traversal. For high-throughput lookup the correct approach is index-based nodes stored in a contiguous slice: 'type Node struct { Value, Left, Right int }' inside a Tree struct with a Nodes []Node backing array. Without the skill the model writes the pointer-based version.",
+    "description": "测试模型从零实现高性能树时是否用基于索引的节点存储",
+    "prompt": "实现一个 Go 二叉搜索树，用于高吞吐内存查询服务。树里有约 100 万个整数键，每秒被遍历几百万次。写出节点和树的类型定义以及 Insert 方法。\n\n```go\n// TODO: define types and implement Insert\n```",
+    "trap": "所有 Go 教程、教科书和 LeetCode 题解都用指针节点定义二叉树：'type Node struct { Value int; Left, Right *Node }'。这是普世默认。但 skill 教的是指针树把每个节点散落在堆上，每次遍历都随机缓存未命中。高吞吐查询的正确做法是基于索引的节点存在连续切片里：'type Node struct { Value, Left, Right int }'，Tree 结构体里放一个 Nodes []Node 底层数组。没有 skill 时模型会写指针版本。",
     "assertions": [
-      {"id": "23.1", "text": "Stores nodes in a contiguous slice (e.g., Nodes []Node field on the tree struct)"},
-      {"id": "23.2", "text": "Uses integer indices (not pointers) for left/right child references"},
-      {"id": "23.3", "text": "Does NOT define nodes with *Node pointer fields as the primary implementation"},
-      {"id": "23.4", "text": "Explains that index-based nodes stay in contiguous memory, reducing cache misses compared to scattered heap pointers"}
+      {
+        "id": "23.1",
+        "text": "节点存在连续切片里（如树结构体上的 Nodes []Node 字段）"
+      },
+      {
+        "id": "23.2",
+        "text": "左右子引用用整数索引（不是指针）"
+      },
+      {
+        "id": "23.3",
+        "text": "不以 *Node 指针字段定义节点作为主要实现"
+      },
+      {
+        "id": "23.4",
+        "text": "解释基于索引的节点留在连续内存，比散落堆指针更少缓存未命中"
+      }
     ]
   },
   {
     "id": 24,
     "name": "tight-loop-scheduler-starvation",
-    "description": "Tests knowledge of tight CPU loops starving the Go scheduler",
-    "prompt": "Our Go service has a CPU-intensive computation goroutine that runs for several seconds. Other goroutines (HTTP handlers) become unresponsive during the computation, even though GOMAXPROCS is set to 4.\n\n```go\nfunc heavyCompute(data []float64) float64 {\n    var result float64\n    for i := 0; i < len(data); i++ {\n        result = result*0.99 + data[i]*0.01\n    }\n    return result\n}\n```\n\nThe data slice has 100M elements. Why are other goroutines starved?",
-    "trap": "A tight CPU loop with fully inlined operations may not yield to the scheduler, despite Go 1.14+ async preemption. The skill teaches using non-inlined function calls as preemption points, or //go:noinline. Without it, the model may suggest runtime.Gosched() (which works but isn't the recommended approach) or parallelism.",
+    "description": "测试紧凑 CPU 循环饿死 Go 调度器的知识",
+    "prompt": "我们的 Go 服务有个 CPU 密集计算 goroutine 要跑好几秒。计算期间其他 goroutine（HTTP handler）失去响应，尽管 GOMAXPROCS 设了 4。\n\n```go\nfunc heavyCompute(data []float64) float64 {\n    var result float64\n    for i := 0; i < len(data); i++ {\n        result = result*0.99 + data[i]*0.01\n    }\n    return result\n}\n```\n\ndata 切片有 1 亿个元素。为什么其他 goroutine 被饿死？",
+    "trap": "全是内联操作的紧凑 CPU 循环可能不让出调度器，尽管 Go 1.14+ 有异步抢占。skill 教用不内联的函数调用做抢占点，或 //go:noinline。没有它，模型可能建议 runtime.Gosched()（能用但不是推荐做法）或并行。",
     "assertions": [
-      {"id": "24.1", "text": "Explains that tight CPU loops with inlined operations can delay scheduler preemption"},
-      {"id": "24.2", "text": "Suggests breaking the work into batches processed by a non-inlined function call"},
-      {"id": "24.3", "text": "Mentions //go:noinline as an option to force preemption points"},
-      {"id": "24.4", "text": "Explains the tradeoff: //go:noinline adds function call overhead but ensures scheduler fairness"},
-      {"id": "24.5", "text": "Mentions that Go 1.14+ has async preemption but tight loops with inlined ops can still cause issues"}
+      {
+        "id": "24.1",
+        "text": "解释全内联操作的紧凑 CPU 循环会推迟调度器抢占"
+      },
+      {
+        "id": "24.2",
+        "text": "建议把工作切成批次，由不内联的函数调用处理"
+      },
+      {
+        "id": "24.3",
+        "text": "提到 //go:noinline 作为强制抢占点的选项"
+      },
+      {
+        "id": "24.4",
+        "text": "解释取舍：//go:noinline 增加函数调用开销但保证调度公平"
+      },
+      {
+        "id": "24.5",
+        "text": "提到 Go 1.14+ 有异步抢占，但全内联操作的紧凑循环仍可能出问题"
+      }
     ]
   },
   {
     "id": 25,
     "name": "reflect-deepequal-performance",
-    "description": "Tests knowledge of reflect.DeepEqual being 50-200x slower than typed comparisons",
-    "prompt": "Review this Go function for performance. It compares two configuration objects for equality in a hot path (called on every request):\n\n```go\nfunc ConfigChanged(old, new Config) bool {\n    return !reflect.DeepEqual(old, new)\n}\n\ntype Config struct {\n    Hosts    []string\n    Settings map[string]string\n    Timeout  int\n    Debug    bool\n}\n```",
-    "trap": "reflect.DeepEqual is 50-200x slower than typed comparison. The skill specifically calls this out as a common mistake and recommends slices.Equal, maps.Equal for the structured fields. Without it, the model may say it's fine or suggest a less specific alternative.",
+    "description": "测试 reflect.DeepEqual 比类型化比较慢 50-200 倍的知识",
+    "prompt": "评审这个 Go 函数的性能。它在热路径（每个请求都调）比较两个配置对象是否相等：\n\n```go\nfunc ConfigChanged(old, new Config) bool {\n    return !reflect.DeepEqual(old, new)\n}\n\ntype Config struct {\n    Hosts    []string\n    Settings map[string]string\n    Timeout  int\n    Debug    bool\n}\n```",
+    "trap": "reflect.DeepEqual 比类型化比较慢 50-200 倍。skill 明确把它列为常见错误，并推荐对结构化字段用 slices.Equal、maps.Equal。没有它，模型可能说没问题或给一个不够具体的替代。",
     "assertions": [
-      {"id": "25.1", "text": "Identifies reflect.DeepEqual as 50-200x slower than typed comparison"},
-      {"id": "25.2", "text": "Suggests using slices.Equal for the Hosts field"},
-      {"id": "25.3", "text": "Suggests using maps.Equal for the Settings field"},
-      {"id": "25.4", "text": "Provides a hand-written typed comparison function"}
+      {
+        "id": "25.1",
+        "text": "指出 reflect.DeepEqual 比类型化比较慢 50-200 倍"
+      },
+      {
+        "id": "25.2",
+        "text": "建议 Hosts 字段用 slices.Equal"
+      },
+      {
+        "id": "25.3",
+        "text": "建议 Settings 字段用 maps.Equal"
+      },
+      {
+        "id": "25.4",
+        "text": "给出手写的类型化比较函数"
+      }
     ]
   },
   {
     "id": 26,
     "name": "type-switch-vs-repeated-assertions",
-    "description": "Tests whether the model uses a type switch (not repeated assertions) when writing new interface dispatch code for a hot path",
-    "prompt": "Write a Go function that formats any scalar value as a string for a high-throughput metrics labeling system. It must handle string, int, int64, float64, and bool. Called ~500K times/sec.\n\n```go\nfunc FormatLabel(v any) string {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "The natural way many Go developers write multi-type dispatch is a chain of if-assertions: 'if s, ok := v.(string); ok { return s }' etc. — it looks clear and matches the pattern from many examples. A type switch 'switch v := v.(type) { case string: ... }' dispatches in a single evaluation of the interface type and is the correct pattern for hot paths. Without the skill the model may write the if-chain of repeated assertions, evaluating the interface type multiple times.",
+    "description": "测试模型为热路径写新接口分派代码时是否用 type switch（而非重复断言）",
+    "prompt": "写一个 Go 函数把任意标量值格式化为字符串，用于高吞吐指标打标系统。必须处理 string、int、int64、float64 和 bool。每秒调用约 50 万次。\n\n```go\nfunc FormatLabel(v any) string {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "很多 Go 开发者写多类型分派的本能是一串 if 断言：'if s, ok := v.(string); ok { return s }' 之类——看着清晰也符合大量例子的模式。type switch 'switch v := v.(type) { case string: ... }' 只求值一次接口类型就完成分派，是热路径的正确写法。没有 skill 时模型可能写 if 链重复断言，多次求值接口类型。",
     "assertions": [
-      {"id": "26.1", "text": "Uses a type switch (switch v := v.(type)) rather than a chain of individual if-assertions"},
-      {"id": "26.2", "text": "Does NOT use repeated v.(T) comma-ok assertions in separate if-blocks"},
-      {"id": "26.3", "text": "Handles all required types: string, int (or int64), float64, and bool in the switch cases"}
+      {
+        "id": "26.1",
+        "text": "用 type switch（switch v := v.(type)）而非一串独立 if 断言"
+      },
+      {
+        "id": "26.2",
+        "text": "不在分开的 if 块里重复写 v.(T) comma-ok 断言"
+      },
+      {
+        "id": "26.3",
+        "text": "在 switch 分支里处理全部要求的类型：string、int（或 int64）、float64、bool"
+      }
     ]
   },
   {
     "id": 27,
     "name": "http-transport-maxidleconnsperhost",
-    "description": "Tests knowledge that default http.Client MaxIdleConnsPerHost is only 2",
-    "prompt": "Our Go microservice calls an upstream API with high concurrency (200 goroutines making requests simultaneously). Under load, we see many TCP connections being created and destroyed. Why doesn't connection pooling work?\n\n```go\nvar client = &http.Client{\n    Timeout: 30 * time.Second,\n}\n\nfunc CallAPI(ctx context.Context, id string) ([]byte, error) {\n    resp, err := client.Get(fmt.Sprintf(\"https://api.example.com/v1/items/%s\", id))\n    if err != nil {\n        return nil, err\n    }\n    defer resp.Body.Close()\n    return io.ReadAll(resp.Body)\n}\n```",
-    "trap": "The default http.Transport has MaxIdleConnsPerHost=2. With 200 concurrent goroutines, 198 connections are created and destroyed for each request. The skill specifically calls this out as a common mistake. Without it, the model may suggest connection pool libraries instead of tuning the built-in transport.",
+    "description": "测试「默认 http.Client 的 MaxIdleConnsPerHost 只有 2」的知识",
+    "prompt": "我们的 Go 微服务高并发调上游 API（200 个 goroutine 同时发请求）。负载下看到大量 TCP 连接建了拆、拆了建。为什么连接池没起作用？\n\n```go\nvar client = &http.Client{\n    Timeout: 30 * time.Second,\n}\n\nfunc CallAPI(ctx context.Context, id string) ([]byte, error) {\n    resp, err := client.Get(fmt.Sprintf(\"https://api.example.com/v1/items/%s\", id))\n    if err != nil {\n        return nil, err\n    }\n    defer resp.Body.Close()\n    return io.ReadAll(resp.Body)\n}\n```",
+    "trap": "默认 http.Transport 的 MaxIdleConnsPerHost=2。200 个并发 goroutine 意味着每个请求有 198 个连接建了即拆。skill 明确把它列为常见错误。没有它，模型可能建议上连接池库，而不是调内建 transport。",
     "assertions": [
-      {"id": "27.1", "text": "Identifies MaxIdleConnsPerHost defaulting to 2 as the root cause"},
-      {"id": "27.2", "text": "Suggests configuring http.Transport with higher MaxIdleConnsPerHost (e.g., 20-100)"},
-      {"id": "27.3", "text": "Shows complete Transport configuration with MaxIdleConns, MaxIdleConnsPerHost, and MaxConnsPerHost"},
-      {"id": "27.4", "text": "Mentions draining resp.Body for connection reuse (io.Copy to io.Discard)"},
-      {"id": "27.5", "text": "Does NOT suggest using a third-party connection pool library as the primary solution"}
+      {
+        "id": "27.1",
+        "text": "指出 MaxIdleConnsPerHost 默认为 2 是根因"
+      },
+      {
+        "id": "27.2",
+        "text": "建议配置 http.Transport 调大 MaxIdleConnsPerHost（如 20-100）"
+      },
+      {
+        "id": "27.3",
+        "text": "展示完整 Transport 配置：MaxIdleConns、MaxIdleConnsPerHost、MaxConnsPerHost"
+      },
+      {
+        "id": "27.4",
+        "text": "提到为复用连接要排空 resp.Body（io.Copy 到 io.Discard）"
+      },
+      {
+        "id": "27.5",
+        "text": "不把第三方连接池库当主要方案"
+      }
     ]
   },
   {
     "id": 28,
     "name": "response-body-drain",
-    "description": "Tests whether the model drains the response body when writing a new HTTP health-check function",
-    "prompt": "Write a Go function that polls a list of service endpoints and returns which ones are healthy (HTTP 200). It will run every 5 seconds against ~50 endpoints with a shared http.Client.\n\n```go\nfunc CheckHealthy(client *http.Client, urls []string) []string {\n    // TODO: return URLs that respond with 200\n}\n```\n\nImplement this function.",
-    "trap": "The natural implementation closes the body with 'defer resp.Body.Close()' and reads the status code — which looks correct and complete. Most developers do not know that the transport only returns the connection to the pool after the body is fully consumed. Without draining via 'io.Copy(io.Discard, resp.Body)', each health check creates a new TCP connection and the 50-endpoint poll exhausts the connection pool. Without the skill the model writes the close-only version.",
+    "description": "测试模型写新 HTTP 健康检查函数时是否排空响应体",
+    "prompt": "写一个 Go 函数轮询一组服务端点，返回哪些健康（HTTP 200）。每 5 秒对约 50 个端点跑一次，共享一个 http.Client。\n\n```go\nfunc CheckHealthy(client *http.Client, urls []string) []string {\n    // TODO: return URLs that respond with 200\n}\n```\n\n实现这个函数。",
+    "trap": "自然的实现是 'defer resp.Body.Close()' 关 body 再读状态码——看着正确且完整。大多数开发者不知道 transport 要等 body 全部读完才把连接还给池。不用 'io.Copy(io.Discard, resp.Body)' 排空的话，每次健康检查都新建 TCP 连接，50 个端点的轮询会耗尽连接池。没有 skill 时模型会写只关不读的版本。",
     "assertions": [
-      {"id": "28.1", "text": "Drains the response body using io.Copy(io.Discard, resp.Body) or io.ReadAll before closing"},
-      {"id": "28.2", "text": "Does NOT only call resp.Body.Close() without first reading/draining the body"},
-      {"id": "28.3", "text": "Explains that connections are only returned to the pool after the body is fully consumed"}
+      {
+        "id": "28.1",
+        "text": "关闭前用 io.Copy(io.Discard, resp.Body) 或 io.ReadAll 排空响应体"
+      },
+      {
+        "id": "28.2",
+        "text": "不只调 resp.Body.Close() 而不先读空/排空 body"
+      },
+      {
+        "id": "28.3",
+        "text": "解释连接要等 body 全部读完才还给池"
+      }
     ]
   },
   {
     "id": 29,
     "name": "streaming-vs-readall",
-    "description": "Tests knowledge of streaming vs buffering for large payloads",
-    "prompt": "Our Go service proxies file downloads. Under load with large files (1-5GB), the service runs out of memory and gets OOM killed.\n\n```go\nfunc ProxyDownload(w http.ResponseWriter, r *http.Request) {\n    resp, err := http.Get(upstreamURL + r.URL.Path)\n    if err != nil {\n        http.Error(w, \"upstream error\", 502)\n        return\n    }\n    defer resp.Body.Close()\n\n    data, err := io.ReadAll(resp.Body)\n    if err != nil {\n        http.Error(w, \"read error\", 500)\n        return\n    }\n\n    w.Header().Set(\"Content-Type\", resp.Header.Get(\"Content-Type\"))\n    w.Write(data)\n}\n```",
-    "trap": "io.ReadAll loads the entire response into memory. For a 5GB file, that's a 5GB allocation. The fix is io.Copy which streams with a 32KB buffer. The skill specifically warns about io.ReadAll for large payloads.",
+    "description": "测试大载荷流式传输对缓冲的知识",
+    "prompt": "我们的 Go 服务做文件下载代理。大文件（1-5GB）负载下服务内存耗尽被 OOM kill。\n\n```go\nfunc ProxyDownload(w http.ResponseWriter, r *http.Request) {\n    resp, err := http.Get(upstreamURL + r.URL.Path)\n    if err != nil {\n        http.Error(w, \"upstream error\", 502)\n        return\n    }\n    defer resp.Body.Close()\n\n    data, err := io.ReadAll(resp.Body)\n    if err != nil {\n        http.Error(w, \"read error\", 500)\n        return\n    }\n\n    w.Header().Set(\"Content-Type\", resp.Header.Get(\"Content-Type\"))\n    w.Write(data)\n}\n```",
+    "trap": "io.ReadAll 把整个响应装进内存。5GB 文件就是 5GB 分配。修法是 io.Copy 用 32KB 缓冲区流式转发。skill 明确警告 io.ReadAll 用于大载荷的问题。",
     "assertions": [
-      {"id": "29.1", "text": "Identifies io.ReadAll as the cause of OOM (loads entire file into memory)"},
-      {"id": "29.2", "text": "Suggests using io.Copy(w, resp.Body) to stream with constant memory"},
-      {"id": "29.3", "text": "Mentions the 32KB internal buffer of io.Copy"},
-      {"id": "29.4", "text": "Notes that io.ReadAll is fine for small, bounded payloads (< 1MB)"}
+      {
+        "id": "29.1",
+        "text": "指出 io.ReadAll 是 OOM 元凶（把整个文件装进内存）"
+      },
+      {
+        "id": "29.2",
+        "text": "建议用 io.Copy(w, resp.Body) 以常量内存流式转发"
+      },
+      {
+        "id": "29.3",
+        "text": "提到 io.Copy 内部 32KB 缓冲区"
+      },
+      {
+        "id": "29.4",
+        "text": "指出 io.ReadAll 对有界小载荷（< 1MB）没问题"
+      }
     ]
   },
   {
     "id": 30,
     "name": "json-streaming-decoder",
-    "description": "Tests knowledge of json.NewDecoder for streaming large JSON payloads",
-    "prompt": "Our Go API receives large JSON arrays (10K-100K items). Memory spikes during unmarshaling cause GC pressure.\n\n```go\nfunc HandleBulkImport(w http.ResponseWriter, r *http.Request) {\n    data, _ := io.ReadAll(r.Body)\n    var items []Item\n    if err := json.Unmarshal(data, &items); err != nil {\n        http.Error(w, err.Error(), 400)\n        return\n    }\n    for _, item := range items {\n        processItem(item)\n    }\n}\n```\n\nHow can we reduce memory usage while processing the same JSON input?",
-    "trap": "json.Unmarshal buffers the entire body. json.NewDecoder streams tokens. The skill teaches the decoder.More() + decoder.Decode() pattern for processing one item at a time. Without it, the model may suggest chunking or pagination rather than streaming JSON.",
+    "description": "测试 json.NewDecoder 流式处理大 JSON 载荷的知识",
+    "prompt": "我们的 Go API 收大 JSON 数组（1 万-10 万条）。反序列化期间内存尖峰造成 GC 压力。\n\n```go\nfunc HandleBulkImport(w http.ResponseWriter, r *http.Request) {\n    data, _ := io.ReadAll(r.Body)\n    var items []Item\n    if err := json.Unmarshal(data, &items); err != nil {\n        http.Error(w, err.Error(), 400)\n        return\n    }\n    for _, item := range items {\n        processItem(item)\n    }\n}\n```\n\n怎么在同样 JSON 输入下降低内存占用？",
+    "trap": "json.Unmarshal 缓冲整个 body。json.NewDecoder 流式吐 token。skill 教 decoder.More() + decoder.Decode() 模式一次处理一条。没有它，模型可能建议分块或分页，而不是流式 JSON。",
     "assertions": [
-      {"id": "30.1", "text": "Suggests using json.NewDecoder with r.Body directly (no io.ReadAll)"},
-      {"id": "30.2", "text": "Shows the dec.More() + dec.Decode(&item) streaming pattern"},
-      {"id": "30.3", "text": "Explains that this processes one item at a time with O(1) memory per item"}
+      {
+        "id": "30.1",
+        "text": "建议直接用 json.NewDecoder 读 r.Body（不要 io.ReadAll）"
+      },
+      {
+        "id": "30.2",
+        "text": "展示 dec.More() + dec.Decode(&item) 流式模式"
+      },
+      {
+        "id": "30.3",
+        "text": "解释这样一次处理一条，每条 O(1) 内存"
+      }
     ]
   },
   {
     "id": 31,
     "name": "cgo-overhead-tight-loop",
-    "description": "Tests knowledge of cgo call overhead (~50-100ns per crossing) and batching strategy",
-    "prompt": "Our Go numerical library calls a C function for each element. Profiling shows the cgo calls dominate execution time even though the C function itself is simple.\n\n```go\n/*\n#include <math.h>\n*/\nimport \"C\"\n\nfunc TransformAll(values []float64) {\n    for i, v := range values {\n        values[i] = float64(C.sqrt(C.double(v)))\n    }\n}\n```\n\nHow can we optimize this?",
-    "trap": "Each cgo call costs ~50-100ns due to stack switching. For math.Sqrt, the pure Go stdlib is equally fast and inlineable. For unavoidable C code, batch the call. The skill teaches both approaches. Without it, the model may not know the cgo overhead magnitude or suggest batching.",
+    "description": "测试 cgo 调用开销（每次跨界约 50-100ns）与批量化策略的知识",
+    "prompt": "我们的 Go 数值库对每个元素都调一次 C 函数。profiling 显示 cgo 调用占了大头，尽管 C 函数本身很简单。\n\n```go\n/*\n#include <math.h>\n*/\nimport \"C\"\n\nfunc TransformAll(values []float64) {\n    for i, v := range values {\n        values[i] = float64(C.sqrt(C.double(v)))\n    }\n}\n```\n\n怎么优化？",
+    "trap": "每次 cgo 调用因栈切换花约 50-100ns。对 math.Sqrt 来说纯 Go 标准库一样快且可内联。绕不开的 C 代码就把调用批量化。skill 两条路都教。没有它，模型可能不知道 cgo 开销的量级或想不到批量化。",
     "assertions": [
-      {"id": "31.1", "text": "Identifies cgo overhead (~50-100ns per call) as the bottleneck in the tight loop"},
-      {"id": "31.2", "text": "Suggests using math.Sqrt (pure Go, inlineable) instead of C.sqrt"},
-      {"id": "31.3", "text": "For unavoidable C code, suggests batching: pass the entire array to C in one call"},
-      {"id": "31.4", "text": "Mentions that goroutine is pinned to OS thread during cgo calls"}
+      {
+        "id": "31.1",
+        "text": "指出紧循环里 cgo 开销（每次调用约 50-100ns）是瓶颈"
+      },
+      {
+        "id": "31.2",
+        "text": "建议用 math.Sqrt（纯 Go、可内联）替代 C.sqrt"
+      },
+      {
+        "id": "31.3",
+        "text": "绕不开的 C 代码建议批量化：一次调用把整个数组传给 C"
+      },
+      {
+        "id": "31.4",
+        "text": "提到 cgo 调用期间 goroutine 被钉在 OS 线程上"
+      }
     ]
   },
   {
     "id": 32,
     "name": "gogc-gomemlimit-container",
-    "description": "Tests knowledge of GOMEMLIMIT for containerized applications",
-    "prompt": "Our Go service runs in a Kubernetes pod with 512MB memory limit. It periodically gets OOM killed even though heap usage appears to be only 200MB when checked via runtime.MemStats.Alloc.\n\nHow should we configure the Go runtime for this container?",
-    "trap": "The service needs GOMEMLIMIT set to ~80-90% of container memory (400-450MiB). Without it, the GC doesn't know about the container limit and may let the heap grow too large. The skill specifically calls this out as a common mistake ('No GC tuning in containers'). Without it, the model may suggest GOGC tuning alone.",
+    "description": "测试容器化应用 GOMEMLIMIT 的知识",
+    "prompt": "我们的 Go 服务跑在 512MB 内存限制的 Kubernetes pod 里。周期性被 OOM kill，尽管 runtime.MemStats.Alloc 看到的堆占用只有 200MB。\n\n这个容器该怎么配 Go runtime？",
+    "trap": "服务需要把 GOMEMLIMIT 设成容器内存的约 80-90%（400-450MiB）。不设的话 GC 不知道容器上限，可能放任堆长得太大。skill 明确把它列为常见错误（「容器里不调 GC」）。没有它，模型可能只建议调 GOGC。",
     "assertions": [
-      {"id": "32.1", "text": "Recommends setting GOMEMLIMIT to 80-90% of the container memory limit (400-450MiB)"},
-      {"id": "32.2", "text": "Explains that the GC needs GOMEMLIMIT to know about the container's memory ceiling"},
-      {"id": "32.3", "text": "Shows the GOMEMLIMIT=450MiB environment variable or debug.SetMemoryLimit equivalent"},
-      {"id": "32.4", "text": "Explains the gap between Alloc and container limit (goroutine stacks, OS buffers, non-heap memory)"},
-      {"id": "32.5", "text": "Does NOT recommend the ballast pattern (obsolete since Go 1.19)"}
+      {
+        "id": "32.1",
+        "text": "建议把 GOMEMLIMIT 设为容器内存限制的 80-90%（400-450MiB）"
+      },
+      {
+        "id": "32.2",
+        "text": "解释 GC 需要 GOMEMLIMIT 才知道容器的内存天花板"
+      },
+      {
+        "id": "32.3",
+        "text": "展示 GOMEMLIMIT=450MiB 环境变量或等价的 debug.SetMemoryLimit"
+      },
+      {
+        "id": "32.4",
+        "text": "解释 Alloc 与容器限制之间的差值（goroutine 栈、OS 缓冲、非堆内存）"
+      },
+      {
+        "id": "32.5",
+        "text": "不推荐 ballast 模式（Go 1.19 起已过时）"
+      }
     ]
   },
   {
     "id": 33,
     "name": "ballast-pattern-obsolete",
-    "description": "Tests whether the model avoids the ballast pattern and uses GOMEMLIMIT when configuring GC for a new service",
-    "prompt": "We're deploying a new Go 1.22 service in a Kubernetes pod with 2GB memory limit. The service is allocation-heavy during bursts and we want to reduce GC frequency to avoid latency spikes. A senior engineer suggested allocating a large byte array at startup to inflate the live heap. How should we configure the runtime?\n\n```go\nfunc main() {\n    // TODO: configure GC behavior\n    startServer()\n}\n```",
-    "trap": "The suggestion to 'allocate a large byte array at startup' is a direct hint toward the ballast pattern, which was the standard advice before Go 1.19. A model without the skill may implement it as suggested: 'var ballast = make([]byte, 1<<30)'. The skill explicitly teaches that the ballast pattern is obsolete since Go 1.19 — GOMEMLIMIT is strictly better because it achieves the same reduction in GC frequency without wasting physical memory. Without the skill the model follows the senior engineer's suggestion and implements the ballast.",
+    "description": "测试模型为新服务配 GC 时是否避开 ballast 模式改用 GOMEMLIMIT",
+    "prompt": "我们在往 2GB 内存限制的 Kubernetes pod 里部署新的 Go 1.22 服务。服务在突发期分配量大，想降低 GC 频率避免延迟毛刺。一位资深工程师建议启动时分配一个大 byte 数组抬高存活堆。runtime 该怎么配？\n\n```go\nfunc main() {\n    // TODO: configure GC behavior\n    startServer()\n}\n```",
+    "trap": "「启动时分配一个大 byte 数组」直接指向 ballast 模式——Go 1.19 之前的标准建议。没有 skill 的模型可能照建议实现：'var ballast = make([]byte, 1<<30)'。skill 明确教 ballast 模式自 Go 1.19 起已过时——GOMEMLIMIT 全面更好，因为它达到同样的降 GC 频率效果而不浪费物理内存。没有 skill 时模型会听从资深工程师的建议实现 ballast。",
     "assertions": [
-      {"id": "33.1", "text": "Does NOT implement the ballast pattern (large byte array allocation at startup)"},
-      {"id": "33.2", "text": "Recommends setting GOMEMLIMIT (e.g., GOMEMLIMIT=1800MiB or debug.SetMemoryLimit)"},
-      {"id": "33.3", "text": "Explains that the ballast pattern is obsolete since Go 1.19"},
-      {"id": "33.4", "text": "Explains that GOMEMLIMIT provides the same GC-frequency benefit without wasting physical memory"}
+      {
+        "id": "33.1",
+        "text": "不实现 ballast 模式（启动时分配大 byte 数组）"
+      },
+      {
+        "id": "33.2",
+        "text": "建议设置 GOMEMLIMIT（如 GOMEMLIMIT=1800MiB 或 debug.SetMemoryLimit）"
+      },
+      {
+        "id": "33.3",
+        "text": "解释 ballast 模式自 Go 1.19 起已过时"
+      },
+      {
+        "id": "33.4",
+        "text": "解释 GOMEMLIMIT 达到同样的降 GC 频率效果而不浪费物理内存"
+      }
     ]
   },
   {
     "id": 34,
     "name": "gomaxprocs-container-go125",
-    "description": "Tests knowledge of Go 1.25+ container-aware GOMAXPROCS vs automaxprocs",
-    "prompt": "Our Go service runs in a container with 2 CPU cores on a 64-core host. We're on Go 1.25. A colleague suggested adding `go.uber.org/automaxprocs`. Is that necessary?\n\n```go\nimport _ \"go.uber.org/automaxprocs\"\n\nfunc main() {\n    startServer()\n}\n```",
-    "trap": "Go 1.25+ automatically detects container CPU limits (cgroup v1/v2). automaxprocs is unnecessary. For Go 1.24 and earlier, it IS needed. The skill makes this version-dependent distinction clear.",
+    "description": "测试 Go 1.25+ 容器感知 GOMAXPROCS 对 automaxprocs 的知识",
+    "prompt": "我们的 Go 服务跑在 64 核宿主机上 2 核 CPU 的容器里。用的是 Go 1.25。有同事建议加 `go.uber.org/automaxprocs`。有必要吗？\n\n```go\nimport _ \"go.uber.org/automaxprocs\"\n\nfunc main() {\n    startServer()\n}\n```",
+    "trap": "Go 1.25+ 自动探测容器 CPU 限制（cgroup v1/v2）。automaxprocs 没必要。Go 1.24 及更早版本才需要。skill 把这个版本依赖的区别讲得很清楚。",
     "assertions": [
-      {"id": "34.1", "text": "States that Go 1.25+ automatically detects container CPU limits"},
-      {"id": "34.2", "text": "Recommends removing the automaxprocs dependency"},
-      {"id": "34.3", "text": "Mentions that automaxprocs IS needed for Go 1.24 and earlier"},
-      {"id": "34.4", "text": "Mentions cgroup CPU quota detection as the mechanism"}
+      {
+        "id": "34.1",
+        "text": "说明 Go 1.25+ 自动探测容器 CPU 限制"
+      },
+      {
+        "id": "34.2",
+        "text": "建议移除 automaxprocs 依赖"
+      },
+      {
+        "id": "34.3",
+        "text": "提到 automaxprocs 对 Go 1.24 及更早版本仍有必要"
+      },
+      {
+        "id": "34.4",
+        "text": "提到 cgroup CPU quota 探测这个机制"
+      }
     ]
   },
   {
     "id": 35,
     "name": "pgo-workflow",
-    "description": "Tests knowledge of Profile-Guided Optimization workflow and expected gains",
-    "prompt": "We want to improve our Go service's performance with minimal code changes. The service is interface-heavy with many small methods. We're on Go 1.22. What low-effort optimization can we apply?",
-    "trap": "PGO (Profile-Guided Optimization) gives 2-7% improvement with minimal effort: collect production profile, save as default.pgo, rebuild. The skill specifically describes when PGO helps most (interface calls, hot inlining). Without it, the model may suggest code-level optimizations rather than the build-level PGO approach.",
+    "description": "测试 Profile-Guided Optimization 工作流与预期收益的知识",
+    "prompt": "我们想用最少代码改动提升 Go 服务性能。服务接口密集、小方法多。用的是 Go 1.22。有什么低投入的优化可做？",
+    "trap": "PGO（Profile-Guided Optimization）用极少投入换 2-7% 提升：采集生产 profile、存成 default.pgo、重新构建。skill 专门讲了 PGO 收益最大的场景（接口调用、热点内联）。没有它，模型可能建议代码级优化，而不是构建级的 PGO 路线。",
     "assertions": [
-      {"id": "35.1", "text": "Recommends Profile-Guided Optimization (PGO)"},
-      {"id": "35.2", "text": "Describes the workflow: collect production CPU profile, save as default.pgo, rebuild"},
-      {"id": "35.3", "text": "Mentions expected improvement of 2-7%"},
-      {"id": "35.4", "text": "Explains PGO benefits: more aggressive inlining and devirtualization of interface calls"},
-      {"id": "35.5", "text": "Notes that profiles should be refreshed after significant code changes"}
+      {
+        "id": "35.1",
+        "text": "推荐 Profile-Guided Optimization（PGO）"
+      },
+      {
+        "id": "35.2",
+        "text": "描述工作流：采集生产 CPU profile、存成 default.pgo、重新构建"
+      },
+      {
+        "id": "35.3",
+        "text": "提到预期提升 2-7%"
+      },
+      {
+        "id": "35.4",
+        "text": "解释 PGO 收益：更激进的内联与接口调用的去虚拟化"
+      },
+      {
+        "id": "35.5",
+        "text": "指出大改代码后应重新采集 profile"
+      }
     ]
   },
   {
     "id": 36,
     "name": "slog-logattrs-hot-path",
-    "description": "Tests knowledge of slog.LogAttrs for zero-allocation logging when level is disabled",
-    "prompt": "Profiling shows our Go service's Debug logging allocates memory even though Debug level is disabled in production. We're using slog.\n\n```go\nfunc processItem(ctx context.Context, item Item) {\n    slog.Debug(\"processing item\",\n        \"id\", item.ID,\n        \"name\", item.Name,\n        \"data\", item.Data, // item.Data is a large struct\n    )\n    // ... actual processing ...\n}\n```\n\nWhy does disabled logging still allocate, and how do we fix it?",
-    "trap": "Even with slog, arguments are evaluated before the level check. The 'data' field is boxed into any, allocating. The skill teaches slog.LogAttrs with typed attributes (slog.Int, slog.String) for zero allocations when the level is disabled. Without it, the model may suggest level checks or not know about LogAttrs.",
+    "description": "测试 slog.LogAttrs 在级别关闭时零分配日志的知识",
+    "prompt": "profiling 显示我们的 Go 服务 Debug 日志在生产环境 Debug 级别已关闭的情况下仍在分配内存。我们用的 slog。\n\n```go\nfunc processItem(ctx context.Context, item Item) {\n    slog.Debug(\"processing item\",\n        \"id\", item.ID,\n        \"name\", item.Name,\n        \"data\", item.Data, // item.Data is a large struct\n    )\n    // ... actual processing ...\n}\n```\n\n为什么关闭的日志还在分配，怎么修？",
+    "trap": "即使 slog，参数也在级别检查之前求值。'data' 字段被装箱进 any，产生分配。skill 教用 slog.LogAttrs 加类型化属性（slog.Int、slog.String）在级别关闭时零分配。没有它，模型可能建议加级别检查或不知道 LogAttrs。",
     "assertions": [
-      {"id": "36.1", "text": "Explains that log arguments are evaluated/boxed before the level check"},
-      {"id": "36.2", "text": "Recommends slog.LogAttrs for zero allocations when level is disabled"},
-      {"id": "36.3", "text": "Shows typed attributes: slog.Int(\"id\", item.ID), slog.String(\"name\", item.Name)"},
-      {"id": "36.4", "text": "Notes that slog.Any can still allocate even with slog, so typed attributes are preferred"}
+      {
+        "id": "36.1",
+        "text": "解释日志参数在级别检查之前就已求值/装箱"
+      },
+      {
+        "id": "36.2",
+        "text": "推荐 slog.LogAttrs 在级别关闭时零分配"
+      },
+      {
+        "id": "36.3",
+        "text": "展示类型化属性：slog.Int(\"id\", item.ID)、slog.String(\"name\", item.Name)"
+      },
+      {
+        "id": "36.4",
+        "text": "指出 slog.Any 仍可能分配，所以优先用类型化属性"
+      }
     ]
   },
   {
     "id": 37,
     "name": "regexp-compile-per-call",
-    "description": "Tests knowledge of compiled pattern caching vs per-call compilation",
-    "prompt": "Profiling shows our Go validation function has high CPU usage from regexp:\n\n```go\nfunc ValidateEmail(email string) bool {\n    re := regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$`)\n    return re.MatchString(email)\n}\n\nfunc ValidatePhone(phone string) bool {\n    re := regexp.MustCompile(`^\\+?[1-9]\\d{1,14}$`)\n    return re.MatchString(phone)\n}\n```\n\nBoth functions are called thousands of times per second.",
-    "trap": "regexp.Compile/MustCompile parses the pattern into a state machine (~5,700ns) on every call. The match itself is ~450ns. The skill quantifies the 10-12x waste. Fix: compile at package level. Without the skill, the model may suggest simpler regex or string operations instead of caching.",
+    "description": "测试编译后正则缓存对每次调用现编译的知识",
+    "prompt": "profiling 显示我们的 Go 校验函数 regexp 占用大量 CPU：\n\n```go\nfunc ValidateEmail(email string) bool {\n    re := regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$`)\n    return re.MatchString(email)\n}\n\nfunc ValidatePhone(phone string) bool {\n    re := regexp.MustCompile(`^\\+?[1-9]\\d{1,14}$`)\n    return re.MatchString(phone)\n}\n```\n\n两个函数每秒都被调用数千次。",
+    "trap": "regexp.Compile/MustCompile 每次调用都把模式解析成状态机（约 5,700ns）。匹配本身只约 450ns。skill 量化了 10-12 倍浪费。修法：包级编译。没有 skill，模型可能建议简化正则或换字符串操作，而不是缓存。",
     "assertions": [
-      {"id": "37.1", "text": "Identifies that regexp compilation happens on every call (~5,700ns per compile)"},
-      {"id": "37.2", "text": "Suggests moving regexp.MustCompile to package-level variables"},
-      {"id": "37.3", "text": "Notes that compiled regexps are safe for concurrent use"},
-      {"id": "37.4", "text": "Quantifies the waste (10-12x overhead from recompilation vs match-only)"}
+      {
+        "id": "37.1",
+        "text": "指出正则每次调用都在编译（每次编译约 5,700ns）"
+      },
+      {
+        "id": "37.2",
+        "text": "建议把 regexp.MustCompile 挪到包级变量"
+      },
+      {
+        "id": "37.3",
+        "text": "指出编译后的 regexp 可并发安全使用"
+      },
+      {
+        "id": "37.4",
+        "text": "量化浪费（重编译对比只匹配有 10-12 倍开销）"
+      }
     ]
   },
   {
     "id": 38,
     "name": "singleflight-cache-stampede",
-    "description": "Tests whether the model uses singleflight (not a mutex) when writing a new cache-with-fetch function serving high concurrency",
-    "prompt": "Write a Go function that fetches and caches country metadata (name, currency, timezone). The cache has a 10-minute TTL. The service handles 2000 req/s with ~50 unique countries. Implement GetCountry.\n\n```go\nvar cache sync.Map\n\nfunc GetCountry(code string) (Country, error) {\n    // TODO: check cache, fetch from API if missing, store result\n}\n\nfunc fetchFromAPI(code string) (Country, error) { /* external call, ~200ms */ }\n```",
-    "trap": "The natural implementation is a simple cache-aside: load from cache, on miss fetch from API, store result. This is what every cache tutorial shows. Under 2000 req/s with 200ms fetch latency, a cache miss for any country causes 400 concurrent goroutines to all call fetchFromAPI for the same key simultaneously — a cache stampede. The fix requires singleflight.Group so only one goroutine fetches per key while others wait and share the result. A mutex would serialize all countries, not just the same one. Without the skill the model writes the naive cache-aside without stampede protection.",
+    "description": "测试模型写新的高并发缓存+回源函数时是否用 singleflight（而非互斥锁）",
+    "prompt": "写一个 Go 函数拉取并缓存国家元数据（名称、货币、时区）。缓存 TTL 10 分钟。服务处理 2000 req/s，约 50 个不同国家。实现 GetCountry。\n\n```go\nvar cache sync.Map\n\nfunc GetCountry(code string) (Country, error) {\n    // TODO: check cache, fetch from API if missing, store result\n}\n\nfunc fetchFromAPI(code string) (Country, error) { /* external call, ~200ms */ }\n```",
+    "trap": "自然的实现是简单 cache-aside：读缓存、未命中调 API、存结果——所有缓存教程都这么教。2000 req/s 配 200ms 回源延迟下，任何一个国家缓存未命中都会有约 400 个并发 goroutine 同时为同一个键调 fetchFromAPI——缓存惊群。修法要用 singleflight.Group，让每个键只有一个 goroutine 回源，其余等待并共享结果。互斥锁会把所有国家串行化而不只是同一个。没有 skill 时模型会写没有防惊群的朴素 cache-aside。",
     "assertions": [
-      {"id": "38.1", "text": "Uses singleflight.Group (golang.org/x/sync/singleflight) to deduplicate concurrent fetches for the same key"},
-      {"id": "38.2", "text": "Does NOT use a global mutex that would serialize requests for different country codes"},
-      {"id": "38.3", "text": "Shows the sf.Do(code, func) pattern so concurrent requests for the same key share one fetch"},
-      {"id": "38.4", "text": "Explains that without singleflight, a cache miss causes all concurrent waiters to call the API simultaneously"}
+      {
+        "id": "38.1",
+        "text": "用 singleflight.Group（golang.org/x/sync/singleflight）去重同一键的并发回源"
+      },
+      {
+        "id": "38.2",
+        "text": "不用会把不同国家码请求也串行化的全局互斥锁"
+      },
+      {
+        "id": "38.3",
+        "text": "展示 sf.Do(code, func) 模式，让同一键的并发请求共享一次回源"
+      },
+      {
+        "id": "38.4",
+        "text": "解释没有 singleflight 时缓存未命中会让所有并发等待者同时调 API"
+      }
     ]
   },
   {
     "id": 39,
     "name": "algorithmic-complexity-slice-contains-loop",
-    "description": "Tests knowledge of algorithmic complexity traps (O(n*m) from slices.Contains in a loop)",
-    "prompt": "This Go function checks which requested IDs are valid. It's slow when both lists are large (10K items each).\n\n```go\nfunc FilterValid(requested []string, valid []string) []string {\n    var result []string\n    for _, id := range requested {\n        if slices.Contains(valid, id) {\n            result = append(result, id)\n        }\n    }\n    return result\n}\n```\n\nOptimize for large inputs.",
-    "trap": "slices.Contains in a loop creates O(n*m) complexity. The skill teaches building a map[T]struct{} first for O(n+m). Without it, the model may suggest sorting + binary search (O(n log n)) rather than the optimal map approach.",
+    "description": "测试算法复杂度陷阱知识（循环里 slices.Contains 造成 O(n*m)）",
+    "prompt": "这个 Go 函数检查请求的 ID 哪些有效。两个列表都大时（各 1 万条）很慢。\n\n```go\nfunc FilterValid(requested []string, valid []string) []string {\n    var result []string\n    for _, id := range requested {\n        if slices.Contains(valid, id) {\n            result = append(result, id)\n        }\n    }\n    return result\n}\n```\n\n为大输入优化。",
+    "trap": "循环里 slices.Contains 造成 O(n*m) 复杂度。skill 教先建 map[T]struct{} 做到 O(n+m)。没有它，模型可能建议排序+二分（O(n log n)）而不是最优的 map 方案。",
     "assertions": [
-      {"id": "39.1", "text": "Identifies O(n*m) complexity from slices.Contains inside a loop"},
-      {"id": "39.2", "text": "Suggests building a map[string]struct{} from the valid slice first"},
-      {"id": "39.3", "text": "Shows the O(n+m) solution with map lookup"},
-      {"id": "39.4", "text": "Uses struct{} (0 bytes) for the map value type, not bool"}
+      {
+        "id": "39.1",
+        "text": "指出循环里 slices.Contains 造成 O(n*m) 复杂度"
+      },
+      {
+        "id": "39.2",
+        "text": "建议先把 valid 切片建成 map[string]struct{}"
+      },
+      {
+        "id": "39.3",
+        "text": "展示用 map 查找的 O(n+m) 方案"
+      },
+      {
+        "id": "39.4",
+        "text": "map 值类型用 struct{}（0 字节）而非 bool"
+      }
     ]
   },
   {
     "id": 40,
     "name": "early-return-full-scan",
-    "description": "Tests whether the model uses early return when writing a new existence-check loop over a large collection",
-    "prompt": "Write a Go function that checks whether any order in a large list has been flagged for fraud review. Orders are checked on every API request; the slice typically holds 50,000+ entries.\n\n```go\ntype Order struct {\n    ID         string\n    FraudScore float64\n    // ...\n}\n\nfunc HasFraudulentOrder(orders []Order, threshold float64) bool {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "When asked to write a boolean existence check, many developers reach for the accumulator pattern: 'found := false; for _, o := range orders { if o.FraudScore > threshold { found = true } }; return found'. This always scans all 50K entries even when the very first entry matches. The correct approach returns immediately on the first match. Without the skill explicitly teaching early-return as a performance pattern, the model may write the full-scan accumulator version, especially since it is a common pattern in introductory Go code.",
+    "description": "测试模型对大集合写新的存在性检查循环时是否用提前返回",
+    "prompt": "写一个 Go 函数检查一个大订单列表里是否有被标记欺诈复审的订单。每个 API 请求都查；切片通常有 5 万条以上。\n\n```go\ntype Order struct {\n    ID         string\n    FraudScore float64\n    // ...\n}\n\nfunc HasFraudulentOrder(orders []Order, threshold float64) bool {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "被要求写布尔存在性检查时，很多开发者会用累加器模式：'found := false; for _, o := range orders { if o.FraudScore > threshold { found = true } }; return found'。即使第一条就命中也照样扫完全部 5 万条。正确做法是首个命中立即返回。没有 skill 明确把提前返回当性能模式来教时，模型可能写全扫描累加器版本，尤其它在入门 Go 代码里很常见。",
     "assertions": [
-      {"id": "40.1", "text": "Returns true immediately upon finding the first matching order (early return inside the loop)"},
-      {"id": "40.2", "text": "Does NOT use an accumulator variable (found := false) that defers the return until after the full loop"},
-      {"id": "40.3", "text": "Returns false after the loop without having scanned entries unnecessarily past the first match"}
+      {
+        "id": "40.1",
+        "text": "找到首个命中订单立即返回 true（循环内提前返回）"
+      },
+      {
+        "id": "40.2",
+        "text": "不用累加器变量（found := false）把返回推迟到整个循环跑完"
+      },
+      {
+        "id": "40.3",
+        "text": "循环结束后返回 false，命中后不做多余扫描"
+      }
     ]
   },
   {
     "id": 41,
     "name": "iterator-chain-vs-direct-loop",
-    "description": "Tests whether the model avoids iterator chains and writes a direct loop for a hot-path find-first operation",
-    "prompt": "Write a Go function for a hot path (~1M calls/sec) that finds the first active user with a given role from a slice. Use whatever approach you think is most appropriate.\n\n```go\ntype User struct {\n    ID     string\n    Role   string\n    Active bool\n}\n\nfunc FindFirstActiveWithRole(users []User, role string) (User, bool) {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "Modern Go code with samber/lo or standard library functional helpers makes it tempting to write: 'return lo.First(lo.Filter(users, func(u User) bool { return u.Active && u.Role == role }))'. This is idiomatic, concise, and readable — and it is what many developers reach for. However Filter processes ALL elements before First picks one, and each closure call has function-call overhead. In a hot path the direct loop is significantly faster: it short-circuits on first match and has no closure overhead. Without the skill the model may use the iterator-chain style since it looks clean and modern.",
+    "description": "测试模型对热路径找首个操作是否避开迭代器链、写直接循环",
+    "prompt": "写一个热路径（每秒约 100 万次调用）的 Go 函数：从切片里找第一个具有指定角色的活跃用户。用你认为最合适的写法。\n\n```go\ntype User struct {\n    ID     string\n    Role   string\n    Active bool\n}\n\nfunc FindFirstActiveWithRole(users []User, role string) (User, bool) {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "有 samber/lo 或标准库函数式工具的现代 Go 代码很容易写出：'return lo.First(lo.Filter(users, func(u User) bool { return u.Active && u.Role == role }))'。它 idiomatic、简洁、可读——也是很多开发者的第一反应。但 Filter 会处理全部元素才轮到 First 挑一个，且每次闭包调用都有函数调用开销。热路径上直接循环快得多：首个命中即短路、零闭包开销。没有 skill 时模型可能用迭代器链风格，因为它看着干净现代。",
     "assertions": [
-      {"id": "41.1", "text": "Uses a direct for-loop with an early return/break rather than chained Filter+First (or equivalent iterator helpers)"},
-      {"id": "41.2", "text": "Does NOT call a Filter-style function that processes all elements before returning the first match"},
-      {"id": "41.3", "text": "Returns immediately upon finding the first matching user (short-circuit)"},
-      {"id": "41.4", "text": "Explains that iterator chains process all elements and add closure overhead, while a direct loop short-circuits"}
+      {
+        "id": "41.1",
+        "text": "用带提前 return/break 的直接 for 循环，而非 Filter+First 链（或等价迭代器工具）"
+      },
+      {
+        "id": "41.2",
+        "text": "不调用 Filter 类会先处理全部元素再取首个命中的函数"
+      },
+      {
+        "id": "41.3",
+        "text": "找到首个匹配用户立即返回（短路）"
+      },
+      {
+        "id": "41.4",
+        "text": "解释迭代器链处理全部元素且有闭包开销，直接循环能短路"
+      }
     ]
   },
   {
     "id": 42,
     "name": "indirect-function-calls-closure",
-    "description": "Tests knowledge that closure indirection prevents inlining in generic wrappers",
-    "prompt": "We profiled our Go utility library and found this wrapper function is slower than expected:\n\n```go\nfunc DereferenceAll[T any](ptrs []*T) []T {\n    return Map(ptrs, func(p *T) T { return *p })\n}\n\nfunc Map[T, R any](items []T, fn func(T) R) []R {\n    result := make([]R, len(items))\n    for i := range items {\n        result[i] = fn(items[i])\n    }\n    return result\n}\n```\n\nHow can we make DereferenceAll faster?",
-    "trap": "The closure passed to Map prevents inlining at the call site. The skill teaches replacing indirect function calls (Map + closure) with direct loops for 13-17% improvement. Without it, the model may not know that the closure indirection is the bottleneck.",
+    "description": "测试「闭包间接调用阻止泛型包装器内联」的知识",
+    "prompt": "我们 profile 了 Go 工具库，发现这个包装函数比预期慢：\n\n```go\nfunc DereferenceAll[T any](ptrs []*T) []T {\n    return Map(ptrs, func(p *T) T { return *p })\n}\n\nfunc Map[T, R any](items []T, fn func(T) R) []R {\n    result := make([]R, len(items))\n    for i := range items {\n        result[i] = fn(items[i])\n    }\n    return result\n}\n```\n\n怎么让 DereferenceAll 更快？",
+    "trap": "传给 Map 的闭包阻止调用点内联。skill 教把间接函数调用（Map + 闭包）换成直接循环，提升 13-17%。没有它，模型可能不知道闭包间接调用是瓶颈。",
     "assertions": [
-      {"id": "42.1", "text": "Suggests replacing the Map+closure pattern with a direct loop"},
-      {"id": "42.2", "text": "Explains that the closure/function call indirection prevents inlining"},
-      {"id": "42.3", "text": "Shows the direct loop: result[i] = *ptrs[i]"},
-      {"id": "42.4", "text": "Mentions the expected improvement range (13-17% or similar)"}
+      {
+        "id": "42.1",
+        "text": "建议把 Map+闭包模式换成直接循环"
+      },
+      {
+        "id": "42.2",
+        "text": "解释闭包/函数调用的间接层阻止内联"
+      },
+      {
+        "id": "42.3",
+        "text": "展示直接循环：result[i] = *ptrs[i]"
+      },
+      {
+        "id": "42.4",
+        "text": "提到预期提升幅度（13-17% 或相近）"
+      }
     ]
   },
   {
     "id": 43,
     "name": "http-server-no-timeouts",
-    "description": "Tests whether the model sets timeouts when writing a new HTTP server from scratch",
-    "prompt": "Write the main function for a Go HTTP API server that listens on port 8080 and serves two routes: POST /ingest and GET /health.\n\n```go\nfunc main() {\n    // TODO: set up and start the HTTP server\n}\n```\n\nImplement this.",
-    "trap": "The idiomatic, minimal Go HTTP server that every tutorial shows is: 'http.HandleFunc(...); http.ListenAndServe(\":8080\", nil)'. This is the first result for 'Go http server example' and what most developers write by default. It uses the zero-value DefaultServeMux with no timeouts — a slow or malicious client can hold connections open indefinitely, exhausting file descriptors. The correct approach creates an explicit http.Server{} with ReadTimeout, WriteTimeout, and IdleTimeout. Without the skill the model writes the default ListenAndServe shortcut.",
+    "description": "测试模型从零写新 HTTP 服务器时是否设置超时",
+    "prompt": "写一个 Go HTTP API 服务器的 main 函数：监听 8080 端口，服务两条路由 POST /ingest 和 GET /health。\n\n```go\nfunc main() {\n    // TODO: set up and start the HTTP server\n}\n```\n\n实现它。",
+    "trap": "所有教程都教的最简 idiomatic Go HTTP 服务器是：'http.HandleFunc(...); http.ListenAndServe(\":8080\", nil)'。这是「Go http server example」的第一个结果，也是大多数开发者的默认写法。它用零值 DefaultServeMux、没有任何超时——慢或恶意的客户端可以无限占住连接，耗尽文件描述符。正确做法是显式建 http.Server{} 并设 ReadTimeout、WriteTimeout、IdleTimeout。没有 skill 时模型会写默认的 ListenAndServe 快捷方式。",
     "assertions": [
-      {"id": "43.1", "text": "Creates an explicit http.Server struct rather than calling http.ListenAndServe directly"},
-      {"id": "43.2", "text": "Sets ReadTimeout on the server"},
-      {"id": "43.3", "text": "Sets WriteTimeout on the server"},
-      {"id": "43.4", "text": "Sets IdleTimeout on the server"}
+      {
+        "id": "43.1",
+        "text": "显式创建 http.Server 结构体，而不是直接调 http.ListenAndServe"
+      },
+      {
+        "id": "43.2",
+        "text": "在 server 上设 ReadTimeout"
+      },
+      {
+        "id": "43.3",
+        "text": "在 server 上设 WriteTimeout"
+      },
+      {
+        "id": "43.4",
+        "text": "在 server 上设 IdleTimeout"
+      }
     ]
   },
   {
     "id": 44,
     "name": "http-keepalive-crawler",
-    "description": "Tests knowledge of disabling keep-alive for crawlers hitting many hosts",
-    "prompt": "Our Go web crawler scrapes 100,000 different domains. After running for a while, it runs out of file descriptors. The crawler uses an http.Client with tuned Transport:\n\n```go\nvar crawlerClient = &http.Client{\n    Timeout: 10 * time.Second,\n    Transport: &http.Transport{\n        MaxIdleConns:        1000,\n        MaxIdleConnsPerHost: 10,\n        IdleConnTimeout:     90 * time.Second,\n    },\n}\n```\n\nWhy does it exhaust file descriptors?",
-    "trap": "For crawlers hitting many different hosts, idle connections accumulate because MaxIdleConns caps total idle connections but each host has up to 10 idle. With 100K hosts, connections pile up. The skill teaches DisableKeepAlives: true for this use case. Without it, the model may suggest lowering MaxIdleConnsPerHost instead of disabling keep-alive entirely.",
+    "description": "测试打大量不同主机的爬虫应关闭 keep-alive 的知识",
+    "prompt": "我们的 Go 爬虫抓 10 万个不同域名。跑一段时间后文件描述符耗尽。爬虫用调过 Transport 的 http.Client：\n\n```go\nvar crawlerClient = &http.Client{\n    Timeout: 10 * time.Second,\n    Transport: &http.Transport{\n        MaxIdleConns:        1000,\n        MaxIdleConnsPerHost: 10,\n        IdleConnTimeout:     90 * time.Second,\n    },\n}\n```\n\n为什么会耗尽文件描述符？",
+    "trap": "对打大量不同主机的爬虫，空闲连接会堆积：MaxIdleConns 限制总空闲数，但每个主机最多留 10 个空闲连接。10 万个主机连接就堆起来了。skill 教这种场景用 DisableKeepAlives: true。没有它，模型可能建议调小 MaxIdleConnsPerHost，而不是干脆关掉 keep-alive。",
     "assertions": [
-      {"id": "44.1", "text": "Identifies that idle connections accumulate across many different hosts"},
-      {"id": "44.2", "text": "Suggests DisableKeepAlives: true for the crawler client"},
-      {"id": "44.3", "text": "Explains that keep-alive is counterproductive when crawling many unique hosts"}
+      {
+        "id": "44.1",
+        "text": "指出空闲连接在大量不同主机间堆积"
+      },
+      {
+        "id": "44.2",
+        "text": "建议爬虫客户端设 DisableKeepAlives: true"
+      },
+      {
+        "id": "44.3",
+        "text": "解释爬大量不同主机时 keep-alive 适得其反"
+      }
     ]
   },
   {
     "id": 45,
     "name": "buffered-io-syscall-reduction",
-    "description": "Tests whether the model uses buffered I/O when writing a new file-writing function that emits many small records",
-    "prompt": "Write a Go function that appends audit log entries to an open file. Each entry is a short string (~100 bytes). The function is called in a tight loop and may write thousands of entries per second.\n\n```go\nfunc WriteAuditEntries(f *os.File, entries []string) error {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "The natural implementation uses f.WriteString(entry) or fmt.Fprintln(f, entry) directly on the *os.File in a loop — that is what every beginner and intermediate Go example does. Each such call issues a separate syscall, which at thousands of entries per second is extremely expensive. The skill teaches wrapping with bufio.NewWriter(f) to batch writes into larger chunks and call Flush() at the end. Without the skill the model writes the direct unbuffered version.",
+    "description": "测试模型写新的高频小记录文件写入函数时是否用缓冲 I/O",
+    "prompt": "写一个 Go 函数往已打开的文件追加审计日志条目。每条是短字符串（约 100 字节）。函数在紧循环里被调，每秒可能写数千条。\n\n```go\nfunc WriteAuditEntries(f *os.File, entries []string) error {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "自然的实现是在循环里直接对 *os.File 调 f.WriteString(entry) 或 fmt.Fprintln(f, entry)——初中级 Go 例子都这么写。每次调用都是一次独立 syscall，每秒数千条时极其昂贵。skill 教用 bufio.NewWriter(f) 包一层把写攒成大批次，最后调 Flush()。没有 skill 时模型会写无缓冲直接写版本。",
     "assertions": [
-      {"id": "45.1", "text": "Wraps the file with bufio.NewWriter (or bufio.NewWriterSize) before writing"},
-      {"id": "45.2", "text": "Writes entries through the buffered writer, not directly to the *os.File"},
-      {"id": "45.3", "text": "Calls w.Flush() after all entries are written"},
-      {"id": "45.4", "text": "Does NOT write each entry directly to f with f.WriteString or fmt.Fprintln(f, ...) in a loop without buffering"}
+      {
+        "id": "45.1",
+        "text": "写之前先用 bufio.NewWriter（或 bufio.NewWriterSize）包装文件"
+      },
+      {
+        "id": "45.2",
+        "text": "条目经缓冲 writer 写入，而不是直接写 *os.File"
+      },
+      {
+        "id": "45.3",
+        "text": "全部条目写完后调 w.Flush()"
+      },
+      {
+        "id": "45.4",
+        "text": "不在循环里不加缓冲地用 f.WriteString 或 fmt.Fprintln(f, ...) 逐条直写"
+      }
     ]
   },
   {
     "id": 46,
     "name": "concurrent-pipeline-when-not-to-use",
-    "description": "Tests knowledge of when concurrent pipelines are NOT beneficial",
-    "prompt": "Our Go data pipeline has 3 stages. We want to make it faster by running stages concurrently:\n\n1. Stage A: Compress data (CPU-bound)\n2. Stage B: Encrypt data (CPU-bound)\n3. Stage C: Calculate checksum (CPU-bound)\n\nAll stages are CPU-bound. Should we run them concurrently in goroutines with channels between stages?",
-    "trap": "When all stages compete for the same resource (CPU), concurrency adds context-switching overhead with no resource utilization gain. The skill explicitly says 'If A and B both compete for CPU, concurrency causes context-switching overhead with no resource utilization gain.' Without it, the model may recommend the concurrent pipeline pattern.",
+    "description": "测试并发流水线不适用场景的知识",
+    "prompt": "我们的 Go 数据管道有 3 个阶段。想让它跑快点，把阶段并发起来：\n\n1. 阶段 A：压缩数据（CPU 密集）\n2. 阶段 B：加密数据（CPU 密集）\n3. 阶段 C：算校验和（CPU 密集）\n\n三个阶段全是 CPU 密集。该用 goroutine 加 channel 把它们并发起来吗？",
+    "trap": "所有阶段争抢同一资源（CPU）时，并发只增加上下文切换开销，没有资源利用率收益。skill 明确说「A 和 B 都争 CPU 时，并发带来上下文切换开销而无资源利用率收益」。没有它，模型可能推荐并发流水线模式。",
     "assertions": [
-      {"id": "46.1", "text": "Recommends AGAINST concurrent pipelines for this case"},
-      {"id": "46.2", "text": "Explains that all three stages compete for the same resource (CPU)"},
-      {"id": "46.3", "text": "Notes that concurrency only helps when stages saturate DIFFERENT resources"},
-      {"id": "46.4", "text": "Mentions context-switching overhead as a cost of unnecessary concurrency"},
-      {"id": "46.5", "text": "Suggests sequential processing or batching as a simpler alternative"}
+      {
+        "id": "46.1",
+        "text": "对这个场景建议不要上并发流水线"
+      },
+      {
+        "id": "46.2",
+        "text": "解释三个阶段争抢同一资源（CPU）"
+      },
+      {
+        "id": "46.3",
+        "text": "指出只有各阶段吃满不同资源时并发才有收益"
+      },
+      {
+        "id": "46.4",
+        "text": "提到上下文切换开销是不必要并发的代价"
+      },
+      {
+        "id": "46.5",
+        "text": "建议顺序处理或批处理作为更简单的替代"
+      }
     ]
   },
   {
     "id": 47,
     "name": "batch-db-inserts",
-    "description": "Tests whether the model uses batch inserts (not row-by-row) when writing a new bulk ingestion function",
-    "prompt": "Write a Go function that persists a slice of sensor readings to a PostgreSQL database. The function is called every second with ~1000 readings.\n\n```go\ntype Reading struct {\n    SensorID  string\n    Value     float64\n    Timestamp time.Time\n}\n\nfunc SaveReadings(db *sql.DB, readings []Reading) error {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "The natural implementation iterates over readings and calls db.Exec(INSERT ...) once per reading — that is what every Go+SQL tutorial shows and what most developers write first. At 1000 readings/second that means 1000 round-trips/second: 1000 query parses, 1000 network round-trips, 1000 transaction commits. The skill teaches batching: a single multi-row INSERT or the COPY protocol in one round-trip. Without the skill the model writes the per-row loop with a single INSERT per call.",
+    "description": "测试模型写新批量入库函数时是否用批量插入（而非逐行）",
+    "prompt": "写一个 Go 函数把传感器读数切片存进 PostgreSQL。函数每秒被调一次，每次约 1000 条读数。\n\n```go\ntype Reading struct {\n    SensorID  string\n    Value     float64\n    Timestamp time.Time\n}\n\nfunc SaveReadings(db *sql.DB, readings []Reading) error {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "自然的实现是遍历读数，每条调一次 db.Exec(INSERT ...)——所有 Go+SQL 教程都这么教，也是大多数开发者的第一反应。每秒 1000 条读数意味着每秒 1000 次往返：1000 次查询解析、1000 次网络往返、1000 次事务提交。skill 教批量化：单条多行 INSERT 或 COPY 协议一次往返。没有 skill 时模型会写逐行循环、每次调用一条 INSERT。",
     "assertions": [
-      {"id": "47.1", "text": "Does NOT call db.Exec with a single-row INSERT inside a for-loop over all readings"},
-      {"id": "47.2", "text": "Uses a batching strategy: multi-row VALUES clause, COPY protocol, or chunked batch inserts"},
-      {"id": "47.3", "text": "Reduces the number of database round-trips to O(1) or O(n/batchSize) rather than O(n)"},
-      {"id": "47.4", "text": "Wraps the batch operation in a transaction"},
-      {"id": "47.5", "text": "Explains that per-row inserts cause one round-trip per record, which is the primary bottleneck at 1000 records/second"}
+      {
+        "id": "47.1",
+        "text": "不在 for 循环里对所有读数逐行调 db.Exec 单行 INSERT"
+      },
+      {
+        "id": "47.2",
+        "text": "用批量化策略：多行 VALUES 子句、COPY 协议或分块批量插入"
+      },
+      {
+        "id": "47.3",
+        "text": "把数据库往返次数降到 O(1) 或 O(n/batchSize) 而非 O(n)"
+      },
+      {
+        "id": "47.4",
+        "text": "把批量操作包在事务里"
+      },
+      {
+        "id": "47.5",
+        "text": "解释逐行插入是每条一次往返，这是每秒 1000 条时的主要瓶颈"
+      }
     ]
   },
   {
     "id": 48,
     "name": "panic-recover-control-flow",
-    "description": "Tests knowledge that panic/recover should not be used for control flow",
-    "prompt": "Review this Go parsing function for performance:\n\n```go\nfunc SafeParse(s string) (result int, err error) {\n    defer func() {\n        if r := recover(); r != nil {\n            err = fmt.Errorf(\"parse failed: %v\", r)\n        }\n    }()\n    return strconv.Atoi(s)\n}\n```\n\nThis is called 100K times per second with a mix of valid and invalid inputs.",
-    "trap": "strconv.Atoi returns an error, not a panic. The defer/recover is unnecessary overhead: panic allocates a stack trace and unwinds the stack. The skill specifically warns against panic/recover as control flow. Without it, the model may accept the pattern as defensive programming.",
+    "description": "测试「panic/recover 不该当控制流用」的知识",
+    "prompt": "评审这个 Go 解析函数的性能：\n\n```go\nfunc SafeParse(s string) (result int, err error) {\n    defer func() {\n        if r := recover(); r != nil {\n            err = fmt.Errorf(\"parse failed: %v\", r)\n        }\n    }()\n    return strconv.Atoi(s)\n}\n```\n\n它每秒被调 10 万次，输入合法与非法混杂。",
+    "trap": "strconv.Atoi 返回 error 而不是 panic。defer/recover 是多余开销：panic 要分配栈轨迹并展开栈。skill 明确警告别把 panic/recover 当控制流。没有它，模型可能把它当成防御性编程接受下来。",
     "assertions": [
-      {"id": "48.1", "text": "Identifies that panic/recover is unnecessary since strconv.Atoi returns errors"},
-      {"id": "48.2", "text": "Explains that panic allocates a stack trace and unwinds the stack (10-100x overhead)"},
-      {"id": "48.3", "text": "Suggests using simple error checking: v, err := strconv.Atoi(s)"},
-      {"id": "48.4", "text": "States that panic/recover should only be used for truly unrecoverable situations"}
+      {
+        "id": "48.1",
+        "text": "指出 strconv.Atoi 返回 error，panic/recover 没有必要"
+      },
+      {
+        "id": "48.2",
+        "text": "解释 panic 要分配栈轨迹并展开栈（10-100 倍开销）"
+      },
+      {
+        "id": "48.3",
+        "text": "建议用简单错误检查：v, err := strconv.Atoi(s)"
+      },
+      {
+        "id": "48.4",
+        "text": "说明 panic/recover 只该用于真正不可恢复的场景"
+      }
     ]
   },
   {
     "id": 49,
     "name": "monotonic-time-since",
-    "description": "Tests whether the model uses time.Since (monotonic clock) rather than wall-clock subtraction when writing a new duration measurement",
-    "prompt": "Write a Go middleware that records the latency of each HTTP request in milliseconds and logs it. The service runs in a cloud environment where NTP adjustments happen occasionally.\n\n```go\nfunc LatencyMiddleware(next http.Handler) http.Handler {\n    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n        // TODO: measure and log request latency\n        next.ServeHTTP(w, r)\n    })\n}\n```\n\nImplement this middleware.",
-    "trap": "A common pattern for measuring time in Go that looks correct but is subtly fragile is: 'start := time.Now().UTC(); ...; elapsed := time.Now().UTC().Sub(start)'. Calling .UTC() strips the monotonic clock reading, leaving only the wall clock. An NTP adjustment during the request would then produce incorrect (or negative) latency measurements. The skill teaches that time.Since(start) uses the monotonic clock and is immune to wall-clock adjustments. Without the skill the model may call .UTC() or .Unix() on the start time, discarding the monotonic component.",
+    "description": "测试模型写新的耗时测量代码时是否用 time.Since（单调时钟）而非墙上时钟相减",
+    "prompt": "写一个 Go 中间件，以毫秒记录每个 HTTP 请求的延迟并打日志。服务跑在云环境，NTP 偶发校时。\n\n```go\nfunc LatencyMiddleware(next http.Handler) http.Handler {\n    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n        // TODO: measure and log request latency\n        next.ServeHTTP(w, r)\n    })\n}\n```\n\n实现这个中间件。",
+    "trap": "Go 里测时间有个看着对但埋了坑的常用写法：'start := time.Now().UTC(); ...; elapsed := time.Now().UTC().Sub(start)'。调 .UTC() 会剥掉单调时钟读数，只剩墙上时钟。请求期间一次 NTP 校时就会算出错误（甚至负数）延迟。skill 教 time.Since(start) 用单调时钟，不受墙上时钟调整影响。没有 skill 时模型可能对起始时间调 .UTC() 或 .Unix()，丢掉单调分量。",
     "assertions": [
-      {"id": "49.1", "text": "Captures start time with time.Now() without stripping the monotonic component (no .UTC(), .Unix(), or .Round() on the start time)"},
-      {"id": "49.2", "text": "Computes elapsed time using time.Since(start) or end.Sub(start) where both times come from time.Now()"},
-      {"id": "49.3", "text": "Does NOT call .UTC() or .UnixNano() on the start time before computing the elapsed duration (which would strip the monotonic clock)"},
-      {"id": "49.4", "text": "Explains that time.Since uses the monotonic clock, making it immune to NTP or wall-clock adjustments"}
+      {
+        "id": "49.1",
+        "text": "用 time.Now() 取起始时间且不剥单调分量（不对起始时间调 .UTC()、.Unix() 或 .Round()）"
+      },
+      {
+        "id": "49.2",
+        "text": "用 time.Since(start) 或 end.Sub(start) 算耗时，且两个时间都来自 time.Now()"
+      },
+      {
+        "id": "49.3",
+        "text": "算耗时前不对起始时间调 .UTC() 或 .UnixNano()（那会剥掉单调时钟）"
+      },
+      {
+        "id": "49.4",
+        "text": "解释 time.Since 用单调时钟，不受 NTP 或墙上时钟调整影响"
+      }
     ]
   },
   {
     "id": 50,
     "name": "prometheus-gc-pressure-queries",
-    "description": "Tests knowledge of specific PromQL queries for GC pressure monitoring",
-    "prompt": "Our Go service in production has occasional latency spikes. We suspect GC pauses. We have Prometheus monitoring with default Go metrics. What PromQL queries should we use to diagnose GC pressure?",
-    "trap": "The skill provides specific PromQL queries for GC diagnosis. Without it, the model may suggest generic approaches or incorrect metric names. The key queries are rate(go_gc_duration_seconds_count[5m]) for frequency and the worst-case pause quantile.",
+    "description": "测试 GC 压力监控的具体 PromQL 查询知识",
+    "prompt": "我们的 Go 生产服务有偶发延迟毛刺。怀疑是 GC 停顿。我们有带默认 Go 指标的 Prometheus 监控。该用哪些 PromQL 查询诊断 GC 压力？",
+    "trap": "skill 给了具体的 GC 诊断 PromQL。没有它，模型可能给泛泛的建议或错误的指标名。关键查询是 rate(go_gc_duration_seconds_count[5m]) 看频率，以及最坏停顿分位数。",
     "assertions": [
-      {"id": "50.1", "text": "Provides rate(go_gc_duration_seconds_count[5m]) for GC frequency"},
-      {"id": "50.2", "text": "Provides go_gc_duration_seconds{quantile=\"1\"} for worst-case GC pause"},
-      {"id": "50.3", "text": "Mentions >2 cycles/s sustained as a signal of excessive allocation rate"},
-      {"id": "50.4", "text": "Suggests rate(go_memstats_alloc_bytes_total[5m]) for allocation rate monitoring"}
+      {
+        "id": "50.1",
+        "text": "给出 rate(go_gc_duration_seconds_count[5m]) 查 GC 频率"
+      },
+      {
+        "id": "50.2",
+        "text": "给出 go_gc_duration_seconds{quantile=\"1\"} 查最坏 GC 停顿"
+      },
+      {
+        "id": "50.3",
+        "text": "提到持续 >2 次/秒是分配率过高的信号"
+      },
+      {
+        "id": "50.4",
+        "text": "建议用 rate(go_memstats_alloc_bytes_total[5m]) 监控分配速率"
+      }
     ]
   },
   {
     "id": 51,
     "name": "goroutine-leak-prometheus",
-    "description": "Tests knowledge of PromQL for detecting goroutine leaks",
-    "prompt": "We suspect our Go service has a goroutine leak in production. The service gets slower over time and eventually needs to be restarted. What Prometheus queries can confirm a goroutine leak?",
-    "trap": "The skill provides specific goroutine leak PromQL queries. go_goroutines should correlate with load; growing independently of traffic indicates a leak. delta(go_goroutines[1h]) shows net change.",
+    "description": "测试检测 goroutine 泄漏的 PromQL 知识",
+    "prompt": "我们怀疑 Go 生产服务有 goroutine 泄漏。服务随时间变慢，最后不得不重启。哪些 Prometheus 查询能确认 goroutine 泄漏？",
+    "trap": "skill 给了具体的 goroutine 泄漏 PromQL。go_goroutines 应与负载相关；脱离流量独立增长说明泄漏。delta(go_goroutines[1h]) 看净变化。",
     "assertions": [
-      {"id": "51.1", "text": "Provides go_goroutines metric for goroutine count monitoring"},
-      {"id": "51.2", "text": "Suggests delta(go_goroutines[1h]) for detecting net goroutine increase over time"},
-      {"id": "51.3", "text": "Notes that goroutine count should correlate with load — growing independently means leak"}
+      {
+        "id": "51.1",
+        "text": "给出 go_goroutines 指标监控 goroutine 数量"
+      },
+      {
+        "id": "51.2",
+        "text": "建议用 delta(go_goroutines[1h]) 检测 goroutine 净增长"
+      },
+      {
+        "id": "51.3",
+        "text": "指出 goroutine 数应与负载相关——独立增长意味着泄漏"
+      }
     ]
   },
   {
     "id": 52,
     "name": "continuous-profiling-tools",
-    "description": "Tests knowledge of continuous profiling tools and their tradeoffs",
-    "prompt": "We want to detect performance regressions across deployments in production. Our Go service runs on Kubernetes. We need historical profiling data to compare flamegraphs between versions. What tools should we evaluate?",
-    "trap": "The skill lists specific continuous profiling tools with overhead and best-for guidance: Grafana Pyroscope (push/pull, 2-5%), Parca (eBPF, <1%), Datadog, GCP Profiler. Without it, the model may only suggest pprof endpoints without mentioning continuous profiling platforms.",
+    "description": "测试持续 profiling 工具及其取舍的知识",
+    "prompt": "我们想在生产环境检测跨部署的性能回归。Go 服务跑在 Kubernetes 上。需要历史 profiling 数据来对比各版本火焰图。该评估哪些工具？",
+    "trap": "skill 列出具体的持续 profiling 工具及开销与适用场景：Grafana Pyroscope（push/pull，2-5%）、Parca（eBPF，<1%）、Datadog、GCP Profiler。没有它，模型可能只提 pprof 端点而不提持续 profiling 平台。",
     "assertions": [
-      {"id": "52.1", "text": "Recommends Grafana Pyroscope, Parca, or similar continuous profiling platform"},
-      {"id": "52.2", "text": "Mentions overhead estimates (1-5% range)"},
-      {"id": "52.3", "text": "Describes push vs pull collection modes"},
-      {"id": "52.4", "text": "Mentions historical flamegraph comparison as a key feature"},
-      {"id": "52.5", "text": "Suggests feeding profiles into PGO for build optimization"}
+      {
+        "id": "52.1",
+        "text": "推荐 Grafana Pyroscope、Parca 或类似的持续 profiling 平台"
+      },
+      {
+        "id": "52.2",
+        "text": "提到开销量级（1-5% 区间）"
+      },
+      {
+        "id": "52.3",
+        "text": "描述 push 与 pull 两种采集模式"
+      },
+      {
+        "id": "52.4",
+        "text": "提到历史火焰图对比这个关键特性"
+      },
+      {
+        "id": "52.5",
+        "text": "建议把 profile 喂给 PGO 做构建优化"
+      }
     ]
   },
   {
     "id": 53,
     "name": "gogc-high-vs-low-tradeoff",
-    "description": "Tests whether the model avoids recommending GOGC=200 for a latency-sensitive service when tuning GC",
-    "prompt": "A colleague reviewed our Go API service (p99 latency target: 5ms, running in a pod with 4GB memory limit) and recommended setting GOGC=200 to reduce GC overhead. The service currently uses ~800MB heap. Should we follow this advice?\n\nThe service currently runs with the default GOGC=100.",
-    "trap": "GOGC=200 doubles the heap growth allowed before the next GC cycle. For a throughput-oriented batch processor this is correct advice. But for a latency-sensitive API it is the wrong direction: larger heap means GC pauses take longer when they do occur, which hurts p99 latency. The skill explicitly teaches GOGC=50 for latency-sensitive services (more frequent but shorter pauses) and GOGC=200 for throughput-oriented batch processors. Without the skill the model may blindly agree with the suggestion since 'reducing GC overhead' sounds universally good.",
+    "description": "测试模型给延迟敏感服务调 GC 时是否避免推荐 GOGC=200",
+    "prompt": "一位同事评审了我们的 Go API 服务（p99 延迟目标 5ms，跑在 4GB 内存限制的 pod 里），建议设 GOGC=200 降低 GC 开销。服务当前堆用量约 800MB。该听这个建议吗？\n\n服务当前用默认 GOGC=100。",
+    "trap": "GOGC=200 让堆在下一次 GC 前允许翻倍增长。对吞吐导向的批处理器这建议没错。但对延迟敏感的 API 方向就反了：堆越大，GC 发生时停顿越久，伤害 p99 延迟。skill 明确教延迟敏感服务用 GOGC=50（更频繁但更短的停顿），吞吐导向批处理器才用 GOGC=200。没有 skill 时模型可能盲从建议，因为「降低 GC 开销」听着 universal 正确。",
     "assertions": [
-      {"id": "53.1", "text": "Recommends AGAINST GOGC=200 for this latency-sensitive API"},
-      {"id": "53.2", "text": "Explains that higher GOGC allows a larger heap, which means longer GC pauses when they occur — hurting p99 latency"},
-      {"id": "53.3", "text": "Suggests GOGC=50 (or lower than default) for latency-sensitive services: more frequent but shorter pauses"},
-      {"id": "53.4", "text": "Notes that GOGC=200 is appropriate for throughput-oriented batch processors, not latency-sensitive APIs"}
+      {
+        "id": "53.1",
+        "text": "对这个延迟敏感的 API 建议不要上 GOGC=200"
+      },
+      {
+        "id": "53.2",
+        "text": "解释更高的 GOGC 允许更大的堆，GC 发生时停顿更久——伤害 p99 延迟"
+      },
+      {
+        "id": "53.3",
+        "text": "建议延迟敏感服务用 GOGC=50（或低于默认值）：更频繁但更短的停顿"
+      },
+      {
+        "id": "53.4",
+        "text": "指出 GOGC=200 适合吞吐导向的批处理器，不适合延迟敏感 API"
+      }
     ]
   },
   {
     "id": 54,
     "name": "godebug-gctrace",
-    "description": "Tests knowledge of GODEBUG=gctrace=1 output interpretation",
-    "prompt": "We ran our Go service with GODEBUG=gctrace=1 and got this output:\n\n```\ngc 142 @23.456s 12%: 0.015+89+1.2 ms clock, 0.3+72/150+24 ms cpu, 180->340->200 MB, 400 MB goal, 8 P\n```\n\nInterpret this GC trace line. What does it tell us about the service's health?",
-    "trap": "The skill provides a field-by-field breakdown of gctrace output. The 12% CPU, 89ms pause, and 180->340->200 MB heap growth are concerning. Without the skill, the model may not correctly parse all fields or identify the implications.",
+    "description": "测试 GODEBUG=gctrace=1 输出解读的知识",
+    "prompt": "我们用 GODEBUG=gctrace=1 跑 Go 服务，得到这行输出：\n\n```\ngc 142 @23.456s 12%: 0.015+89+1.2 ms clock, 0.3+72/150+24 ms cpu, 180->340->200 MB, 400 MB goal, 8 P\n```\n\n解读这行 GC trace。它告诉我们服务的健康状况如何？",
+    "trap": "skill 给了 gctrace 输出逐字段拆解。12% CPU、89ms 停顿、180->340->200 MB 的堆增长都令人担忧。没有 skill，模型可能不能正确解析所有字段或看不出含义。",
     "assertions": [
-      {"id": "54.1", "text": "Correctly identifies gc 142 as the 142nd GC cycle"},
-      {"id": "54.2", "text": "Identifies 12% as total CPU time spent in GC (which is high)"},
-      {"id": "54.3", "text": "Interprets 180->340->200 MB as heap before, peak during, and after collection"},
-      {"id": "54.4", "text": "Identifies 400 MB goal as the target heap size based on GOGC/GOMEMLIMIT"},
-      {"id": "54.5", "text": "Notes that 12% GC CPU is concerning and suggests reducing allocation rate or tuning GOGC"}
+      {
+        "id": "54.1",
+        "text": "正确认出 gc 142 是第 142 次 GC 周期"
+      },
+      {
+        "id": "54.2",
+        "text": "认出 12% 是 GC 消耗的总 CPU 占比（偏高）"
+      },
+      {
+        "id": "54.3",
+        "text": "把 180->340->200 MB 解读为 GC 前堆、GC 期间峰值、GC 后堆"
+      },
+      {
+        "id": "54.4",
+        "text": "认出 400 MB goal 是基于 GOGC/GOMEMLIMIT 的目标堆大小"
+      },
+      {
+        "id": "54.5",
+        "text": "指出 12% GC CPU 堪忧，建议降低分配速率或调 GOGC"
+      }
     ]
   },
   {
     "id": 55,
     "name": "unsafe-without-benchmark-proof",
-    "description": "Tests that the model warns against premature unsafe usage",
-    "prompt": "A colleague proposed using unsafe.Pointer to avoid string-to-byte-slice copy in our Go HTTP handler:\n\n```go\nfunc unsafeStringToBytes(s string) []byte {\n    return unsafe.Slice(unsafe.StringData(s), len(s))\n}\n\nfunc HandleRequest(w http.ResponseWriter, r *http.Request) {\n    body := unsafeStringToBytes(requestBody)\n    w.Write(body)\n}\n```\n\nIs this a good optimization? The handler processes about 100 requests per second.",
-    "trap": "The skill states unsafe is 'Only justified when profiling shows >10% improvement in a verified hot path.' At 100 req/s, this is not a hot path and the copy cost is negligible. Without the skill, the model may accept the optimization or only warn about safety without the benchmark threshold.",
+    "description": "测试模型对未经证实的 unsafe 用法发出警告",
+    "prompt": "一位同事提议在我们的 Go HTTP handler 里用 unsafe.Pointer 省掉 string 到 byte 切片的拷贝：\n\n```go\nfunc unsafeStringToBytes(s string) []byte {\n    return unsafe.Slice(unsafe.StringData(s), len(s))\n}\n\nfunc HandleRequest(w http.ResponseWriter, r *http.Request) {\n    body := unsafeStringToBytes(requestBody)\n    w.Write(body)\n}\n```\n\n这是好优化吗？handler 每秒处理约 100 个请求。",
+    "trap": "skill 写明 unsafe 「只在 profiling 证明已验证热路径上有 >10% 提升时才 justified」。100 req/s 不算热路径，拷贝成本可忽略。没有 skill，模型可能接受这个优化，或只警告安全性而拿不出基准阈值。",
     "assertions": [
-      {"id": "55.1", "text": "Recommends against using unsafe here"},
-      {"id": "55.2", "text": "Notes that 100 req/s is not a hot path where this optimization is justified"},
-      {"id": "55.3", "text": "States that unsafe requires benchmark proof showing >10% improvement"},
-      {"id": "55.4", "text": "Mentions safety risks of unsafe (mutating string backing store, GC interaction)"}
+      {
+        "id": "55.1",
+        "text": "建议此处不要用 unsafe"
+      },
+      {
+        "id": "55.2",
+        "text": "指出 100 req/s 算不上值得这个优化的热路径"
+      },
+      {
+        "id": "55.3",
+        "text": "说明 unsafe 需要基准测试证明 >10% 提升才合理"
+      },
+      {
+        "id": "55.4",
+        "text": "提到 unsafe 的安全风险（改到 string 底层存储、与 GC 交互）"
+      }
     ]
   },
   {
     "id": 56,
     "name": "precomputed-lookup-table",
-    "description": "Tests knowledge of precomputed lookup tables for pure functions with small input space",
-    "prompt": "Optimize this Go hex encoding function that's called billions of times in our data pipeline:\n\n```go\nfunc byteToHex(b byte) (byte, byte) {\n    high := b >> 4\n    low := b & 0x0f\n    var h, l byte\n    if high < 10 {\n        h = '0' + high\n    } else {\n        h = 'a' + high - 10\n    }\n    if low < 10 {\n        l = '0' + low\n    } else {\n        l = 'a' + low - 10\n    }\n    return h, l\n}\n```",
-    "trap": "The function is pure with a 16-element input space per nibble. The skill teaches precomputed lookup tables for this exact pattern. Two array lookups are faster than conditional branches. Without the skill, the model may suggest bitwise tricks rather than the lookup table approach.",
+    "description": "测试小输入空间纯函数的预计算查找表知识",
+    "prompt": "优化这个在我们数据管道里被调用数十亿次的 Go hex 编码函数：\n\n```go\nfunc byteToHex(b byte) (byte, byte) {\n    high := b >> 4\n    low := b & 0x0f\n    var h, l byte\n    if high < 10 {\n        h = '0' + high\n    } else {\n        h = 'a' + high - 10\n    }\n    if low < 10 {\n        l = '0' + low\n    } else {\n        l = 'a' + low - 10\n    }\n    return h, l\n}\n```",
+    "trap": "函数是纯函数，每个半字节输入空间只有 16 个值。skill 教对这种模式用预计算查找表。两次数组查找比条件分支快。没有 skill，模型可能建议位运算技巧而不是查找表。",
     "assertions": [
-      {"id": "56.1", "text": "Suggests a precomputed lookup table (e.g., var hexDigit = [16]byte{...})"},
-      {"id": "56.2", "text": "Shows the table lookup: hexDigit[b>>4], hexDigit[b&0x0f]"},
-      {"id": "56.3", "text": "Explains that the lookup table fits in L1 cache and is faster than branching"}
+      {
+        "id": "56.1",
+        "text": "建议预计算查找表（如 var hexDigit = [16]byte{...}）"
+      },
+      {
+        "id": "56.2",
+        "text": "展示查表：hexDigit[b>>4]、hexDigit[b&0x0f]"
+      },
+      {
+        "id": "56.3",
+        "text": "解释查找表放得下 L1 缓存，比分支快"
+      }
     ]
   },
   {
     "id": 57,
     "name": "json-performance-alternatives",
-    "description": "Tests knowledge of JSON performance alternatives beyond encoding/json",
-    "prompt": "Our Go API server spends 40% of CPU time in encoding/json according to pprof. We serialize thousands of Response structs per second. What options do we have to speed up JSON encoding?\n\n```go\ntype Response struct {\n    ID        int       `json:\"id\"`\n    Name      string    `json:\"name\"`\n    Values    []float64 `json:\"values\"`\n    Metadata  map[string]string `json:\"metadata\"`\n    CreatedAt time.Time `json:\"created_at\"`\n}\n```",
-    "trap": "The skill lists specific alternatives: custom MarshalJSON methods, code-gen libraries (easyjson, ffjson), drop-in replacements (goccy/go-json, json-iterator, bytedance/sonic), and treats encoding/json/v2 as an explicit GOEXPERIMENT=jsonv2 choice rather than a default production recommendation. Without it, the model may only suggest one approach.",
+    "description": "测试 encoding/json 之外的 JSON 性能替代方案知识",
+    "prompt": "pprof 显示我们的 Go API 服务器 40% CPU 花在 encoding/json。每秒序列化几千个 Response 结构体。有哪些加速 JSON 编码的选项？\n\n```go\ntype Response struct {\n    ID        int       `json:\"id\"`\n    Name      string    `json:\"name\"`\n    Values    []float64 `json:\"values\"`\n    Metadata  map[string]string `json:\"metadata\"`\n    CreatedAt time.Time `json:\"created_at\"`\n}\n```",
+    "trap": "skill 列出具体替代方案：自定义 MarshalJSON 方法、代码生成库（easyjson、ffjson）、直接替换库（goccy/go-json、json-iterator、bytedance/sonic），并把 encoding/json/v2 定位为需显式开启 GOEXPERIMENT=jsonv2 的选择而非默认生产推荐。没有它，模型可能只给一种思路。",
     "assertions": [
-      {"id": "57.1", "text": "Mentions custom MarshalJSON/UnmarshalJSON methods as an option"},
-      {"id": "57.2", "text": "Mentions code-generation libraries (easyjson, ffjson)"},
-      {"id": "57.3", "text": "Mentions drop-in replacement libraries (goccy/go-json, json-iterator, or bytedance/sonic)"},
-      {"id": "57.4", "text": "Explains that encoding/json uses reflection which causes CPU and allocation overhead"},
-      {"id": "57.5", "text": "Quantifies expected improvement (2-5x or similar)"}
+      {
+        "id": "57.1",
+        "text": "提到自定义 MarshalJSON/UnmarshalJSON 方法这个选项"
+      },
+      {
+        "id": "57.2",
+        "text": "提到代码生成库（easyjson、ffjson）"
+      },
+      {
+        "id": "57.3",
+        "text": "提到直接替换库（goccy/go-json、json-iterator 或 bytedance/sonic）"
+      },
+      {
+        "id": "57.4",
+        "text": "解释 encoding/json 用反射造成 CPU 与分配开销"
+      },
+      {
+        "id": "57.5",
+        "text": "量化预期提升（2-5 倍或相近）"
+      }
     ]
   },
   {
     "id": 58,
     "name": "channel-batch-processing",
-    "description": "Tests knowledge of batch processing from channels with timeout flush",
-    "prompt": "Our Go service receives events from a channel and needs to batch them for bulk database insert. Events arrive at varying rates. We need to flush either when the batch is full (1000 items) OR after a timeout (100ms), whichever comes first.\n\nDesign the batch processor function.",
-    "trap": "The skill shows the exact pattern: select on channel + ticker, with batch accumulation, flush on size threshold or timer. The key detail is reusing batch via batch[:0] and handling the channel close. Without the skill, the model may miss the ticker-based timeout or the clean shutdown.",
+    "description": "测试 channel 批量处理加超时 flush 的知识",
+    "prompt": "我们的 Go 服务从 channel 收事件，要攒批做数据库批量插入。事件到达速率不均匀。需要在批满（1000 条）或超时（100ms）时 flush，先到先触发。\n\n设计这个批量处理函数。",
+    "trap": "skill 给出确切模式：select 同时监听 channel 与 ticker，累积批次，按大小阈值或定时器 flush。关键细节是用 batch[:0] 复用批切片并处理 channel 关闭。没有 skill，模型可能漏掉 ticker 超时或干净关闭。",
     "assertions": [
-      {"id": "58.1", "text": "Uses select with both channel receive and ticker/timer for timeout"},
-      {"id": "58.2", "text": "Flushes on batch size threshold"},
-      {"id": "58.3", "text": "Flushes on timeout (ticker)"},
-      {"id": "58.4", "text": "Handles channel close (flushes remaining items)"},
-      {"id": "58.5", "text": "Reuses the batch slice (batch[:0] or similar) to reduce allocations"}
+      {
+        "id": "58.1",
+        "text": "用 select 同时处理 channel 接收和 ticker/timer 超时"
+      },
+      {
+        "id": "58.2",
+        "text": "批大小到阈值时 flush"
+      },
+      {
+        "id": "58.3",
+        "text": "超时（ticker）时 flush"
+      },
+      {
+        "id": "58.4",
+        "text": "处理 channel 关闭（flush 剩余条目）"
+      },
+      {
+        "id": "58.5",
+        "text": "复用批切片（batch[:0] 或类似）减少分配"
+      }
     ]
   },
   {
     "id": 59,
     "name": "allocation-reduction-vs-gc-tuning",
-    "description": "Tests knowledge that reducing allocations is better than tuning GOGC",
-    "prompt": "Our Go service has high GC overhead (8% CPU). Should we increase GOGC to reduce GC frequency, or is there a better approach?",
-    "trap": "The skill explicitly states: 'Reducing allocations helps more than tuning GOGC — it addresses the root cause instead of managing the symptom.' Without it, the model may recommend GOGC tuning as the primary solution.",
+    "description": "测试「减少分配优于调 GOGC」的知识",
+    "prompt": "我们的 Go 服务 GC 开销高（8% CPU）。该调大 GOGC 降低 GC 频率，还是有更好的办法？",
+    "trap": "skill 明确说：「减少分配比调 GOGC 更有用——它治根因而非管症状」。没有它，模型可能把 GOGC 调参当主要方案。",
     "assertions": [
-      {"id": "59.1", "text": "Recommends reducing allocations as the primary approach over GOGC tuning"},
-      {"id": "59.2", "text": "Explains that GOGC tuning manages the symptom while allocation reduction addresses the root cause"},
-      {"id": "59.3", "text": "Suggests specific allocation reduction strategies (value types, sync.Pool, preallocation, avoid interface boxing)"},
-      {"id": "59.4", "text": "Acknowledges GOGC tuning as a secondary measure after allocation reduction"}
+      {
+        "id": "59.1",
+        "text": "推荐减少分配作为首选路线，优于 GOGC 调参"
+      },
+      {
+        "id": "59.2",
+        "text": "解释 GOGC 调参管的是症状，减少分配治的是根因"
+      },
+      {
+        "id": "59.3",
+        "text": "给出具体的减分配策略（值类型、sync.Pool、预分配、避免接口装箱）"
+      },
+      {
+        "id": "59.4",
+        "text": "承认 GOGC 调参是减分配之后的次级手段"
+      }
     ]
   },
   {
     "id": 60,
     "name": "gctrace-key-fields",
-    "description": "Tests knowledge of what to monitor in GC traces (frequency, pause times, CPU%)",
-    "prompt": "We're monitoring our Go service with GODEBUG=gctrace=1. What specific patterns in the output should alarm us?",
-    "trap": "The skill lists three key signals: GC frequency (too often = too many allocations), pause times (high = large heap or many pointers), CPU% (high = tune GOGC or reduce allocations). Without it, the model may give generic advice.",
+    "description": "测试 GC trace 该盯什么（频率、停顿、CPU%）的知识",
+    "prompt": "我们在用 GODEBUG=gctrace=1 监控 Go 服务。输出里哪些具体模式该引起警觉？",
+    "trap": "skill 列了三个关键信号：GC 频率（太频繁 = 分配太多）、停顿时间（高 = 堆大或指针多）、CPU%（高 = 调 GOGC 或减分配）。没有它，模型可能只给泛泛建议。",
     "assertions": [
-      {"id": "60.1", "text": "Mentions high GC frequency as a signal of too many allocations"},
-      {"id": "60.2", "text": "Mentions high pause times as a signal of large heap or many pointers"},
-      {"id": "60.3", "text": "Mentions high GC CPU% (>5%) as concerning"},
-      {"id": "60.4", "text": "Provides the GODEBUG=gctrace=1 command or assumes it's already running"}
+      {
+        "id": "60.1",
+        "text": "提到 GC 频率高是分配过多的信号"
+      },
+      {
+        "id": "60.2",
+        "text": "提到停顿时间高是堆大或指针多的信号"
+      },
+      {
+        "id": "60.3",
+        "text": "提到 GC CPU% 高（>5%）堪忧"
+      },
+      {
+        "id": "60.4",
+        "text": "给出 GODEBUG=gctrace=1 命令或假设已在跑"
+      }
     ]
   },
   {
     "id": 61,
     "name": "non-go-memory-leak-detection",
-    "description": "Tests knowledge of detecting non-Go memory leaks via Prometheus",
-    "prompt": "Our Go service uses cgo to call a C image processing library. process_resident_memory_bytes keeps growing but go_memstats_alloc_bytes is stable. What PromQL query helps diagnose this?",
-    "trap": "The skill provides the specific PromQL: process_resident_memory_bytes - go_memstats_sys_bytes. A growing gap indicates non-Go memory (cgo, mmap). Without it, the model may suggest Go heap tools that won't find the C memory leak.",
+    "description": "测试用 Prometheus 检测非 Go 内存泄漏的知识",
+    "prompt": "我们的 Go 服务用 cgo 调一个 C 图像处理库。process_resident_memory_bytes 一直涨但 go_memstats_alloc_bytes 平稳。什么 PromQL 查询有助于诊断？",
+    "trap": "skill 给出具体 PromQL：process_resident_memory_bytes - go_memstats_sys_bytes。差值增大说明非 Go 内存（cgo、mmap）在涨。没有它，模型可能建议 Go 堆工具，那找不到 C 内存泄漏。",
     "assertions": [
-      {"id": "61.1", "text": "Suggests process_resident_memory_bytes - go_memstats_sys_bytes to isolate non-Go memory"},
-      {"id": "61.2", "text": "Identifies this as a likely C/cgo memory leak (not a Go leak)"},
-      {"id": "61.3", "text": "Explains that growing gap between RSS and Go sys bytes indicates non-Go memory growth"},
-      {"id": "61.4", "text": "Suggests C-level memory profiling tools (valgrind, AddressSanitizer) for further diagnosis"}
+      {
+        "id": "61.1",
+        "text": "建议用 process_resident_memory_bytes - go_memstats_sys_bytes 隔离非 Go 内存"
+      },
+      {
+        "id": "61.2",
+        "text": "指出这很可能是 C/cgo 内存泄漏（不是 Go 泄漏）"
+      },
+      {
+        "id": "61.3",
+        "text": "解释 RSS 与 Go sys bytes 差值增大说明非 Go 内存在涨"
+      },
+      {
+        "id": "61.4",
+        "text": "建议用 C 层内存 profiling 工具（valgrind、AddressSanitizer）进一步诊断"
+      }
     ]
   },
   {
     "id": 62,
     "name": "cpu-saturation-prometheus",
-    "description": "Tests knowledge of detecting CPU saturation via Prometheus",
-    "prompt": "How do we detect if our Go service is CPU-saturated in production using Prometheus metrics?",
-    "trap": "The skill provides specific PromQL: rate(process_cpu_seconds_total[5m]) / GOMAXPROCS. A ratio >0.8 sustained means CPU-saturated. Without the skill, the model may suggest system-level metrics rather than Go-specific ones.",
+    "description": "测试用 Prometheus 检测 CPU 饱和的知识",
+    "prompt": "怎么用 Prometheus 指标检测我们的 Go 服务生产上是否 CPU 饱和？",
+    "trap": "skill 给出具体 PromQL：rate(process_cpu_seconds_total[5m]) / GOMAXPROCS。比值持续 >0.8 意味着 CPU 饱和。没有它，模型可能建议系统级指标而非 Go 专属指标。",
     "assertions": [
-      {"id": "62.1", "text": "Provides rate(process_cpu_seconds_total[5m]) for CPU cores consumed"},
-      {"id": "62.2", "text": "Divides by GOMAXPROCS to get utilization ratio"},
-      {"id": "62.3", "text": "States that >0.8 sustained indicates CPU saturation"}
+      {
+        "id": "62.1",
+        "text": "给出 rate(process_cpu_seconds_total[5m]) 查消耗的 CPU 核数"
+      },
+      {
+        "id": "62.2",
+        "text": "除以 GOMAXPROCS 得利用率比值"
+      },
+      {
+        "id": "62.3",
+        "text": "说明持续 >0.8 表示 CPU 饱和"
+      }
     ]
   },
   {
     "id": 63,
     "name": "document-optimizations",
-    "description": "Tests whether the model recommends documenting optimizations with comments",
-    "prompt": "I optimized a Go function from using reflect.DeepEqual to a hand-written comparison, and from column-first to row-first matrix traversal. Should I add comments explaining why?",
-    "trap": "The skill's core philosophy #3 states: 'Document optimizations — add code comments explaining why a pattern is faster, with benchmark numbers when available. Future readers need context to avoid reverting an unnecessary optimization.' Without it, the model may skip this guidance.",
+    "description": "测试模型是否建议给优化写注释文档",
+    "prompt": "我把一个 Go 函数从 reflect.DeepEqual 优化成手写比较，又把矩阵遍历从列优先改成行优先。该加注释解释为什么吗？",
+    "trap": "skill 核心哲学 #3 写明：「给优化写文档——加代码注释解释为什么这个模式更快，有基准数字就附上。后来的读者需要上下文才不会把莫名其妙的优化回滚掉。」没有它，模型可能跳过这条建议。",
     "assertions": [
-      {"id": "63.1", "text": "Strongly recommends adding comments explaining WHY the optimization was made"},
-      {"id": "63.2", "text": "Suggests including benchmark numbers in the comments"},
-      {"id": "63.3", "text": "Explains that future readers may revert optimizations they don't understand"}
+      {
+        "id": "63.1",
+        "text": "强烈建议加注释解释做这个优化的原因"
+      },
+      {
+        "id": "63.2",
+        "text": "建议注释里带基准数字"
+      },
+      {
+        "id": "63.3",
+        "text": "解释后来的读者可能会回滚他们看不懂的优化"
+      }
     ]
   },
   {
     "id": 64,
     "name": "lru-cache-freelru",
-    "description": "Tests knowledge of high-performance LRU cache alternatives",
-    "prompt": "We need a bounded LRU cache in Go for our hot path. We considered using container/list from the standard library. Is that the best option for performance?",
-    "trap": "The skill mentions that container/list has poor cache locality (each node is a separate heap allocation). It recommends elastic/go-freelru (37x faster, contiguous memory) or hashicorp/golang-lru. Without it, the model may recommend container/list as sufficient.",
+    "description": "测试高性能 LRU 缓存替代方案的知识",
+    "prompt": "我们需要给热路径加一个有界 LRU 缓存（Go）。考虑过标准库的 container/list。它是性能最好的选择吗？",
+    "trap": "skill 提到 container/list 缓存局部性差（每个节点一次独立堆分配）。它推荐 elastic/go-freelru（快 37 倍、连续内存）或 hashicorp/golang-lru。没有它，模型可能说 container/list 够用。",
     "assertions": [
-      {"id": "64.1", "text": "Notes that container/list has poor cache locality (separate heap allocation per node)"},
-      {"id": "64.2", "text": "Recommends elastic/go-freelru or hashicorp/golang-lru as alternatives"},
-      {"id": "64.3", "text": "Mentions the performance advantage of contiguous memory layouts for LRU"}
+      {
+        "id": "64.1",
+        "text": "指出 container/list 缓存局部性差（每节点独立堆分配）"
+      },
+      {
+        "id": "64.2",
+        "text": "推荐 elastic/go-freelru 或 hashicorp/golang-lru 作为替代"
+      },
+      {
+        "id": "64.3",
+        "text": "提到连续内存布局对 LRU 的性能优势"
+      }
     ]
   },
   {
     "id": 65,
     "name": "simd-when-not-worth",
-    "description": "Tests whether the model avoids recommending SIMD when the real bottleneck is allocations, not CPU arithmetic",
-    "prompt": "Our Go image thumbnail service resizes JPEG images. pprof shows:\n- 55% of CPU time in runtime.mallocgc and runtime.gcBgMarkWorker\n- 20% in image/jpeg.Decode\n- 15% in image.(*NRGBA).At (per-pixel reads using the image.Image interface)\n- 10% other\n\nA performance consultant recommended implementing SIMD pixel-processing routines to speed up the resize operation. Should we pursue SIMD as our first optimization?",
-    "trap": "55% of CPU time is in GC — the bottleneck is heap allocations, not arithmetic throughput. SIMD accelerates CPU-bound numeric operations; it has zero effect on allocation rate or GC pauses. Additionally, the 15% in image.Image interface calls is an interface boxing / reflection overhead issue, not a SIMD opportunity. The skill explicitly states 'If your bottleneck is allocations or I/O, SIMD won't help.' Without the skill the model may agree with the consultant since image processing 'sounds like' a SIMD use case.",
+    "description": "测试模型在瓶颈是分配而非 CPU 运算时是否避免推荐 SIMD",
+    "prompt": "我们的 Go 缩略图服务缩放 JPEG 图片。pprof 显示：\n- 55% CPU 在 runtime.mallocgc 和 runtime.gcBgMarkWorker\n- 20% 在 image/jpeg.Decode\n- 15% 在 image.(*NRGBA).At（经 image.Image 接口逐像素读）\n- 10% 其他\n\n一位性能顾问建议实现 SIMD 像素处理例程加速缩放。该把 SIMD 当首个优化吗？",
+    "trap": "55% CPU 在 GC——瓶颈是堆分配，不是算数吞吐。SIMD 加速的是 CPU 密集数值运算，对分配率和 GC 停顿毫无作用。另外 15% 的 image.Image 接口调用是接口装箱/反射开销问题，也不是 SIMD 的机会。skill 明确说「瓶颈在分配或 I/O 时 SIMD 帮不上忙」。没有 skill，模型可能赞同顾问，因为图像处理「听起来像」SIMD 的用武之地。",
     "assertions": [
-      {"id": "65.1", "text": "Recommends against SIMD as the first optimization"},
-      {"id": "65.2", "text": "Identifies the primary bottleneck as heap allocations and GC (55% of CPU in mallocgc/GC)"},
-      {"id": "65.3", "text": "States that SIMD only helps CPU-bound numeric inner loops, not allocation or GC overhead"},
-      {"id": "65.4", "text": "Suggests reducing allocations (e.g., reusing pixel buffers, avoiding per-pixel interface calls) as the correct first step"}
+      {
+        "id": "65.1",
+        "text": "建议不把 SIMD 当首个优化"
+      },
+      {
+        "id": "65.2",
+        "text": "指出主要瓶颈是堆分配与 GC（55% CPU 在 mallocgc/GC）"
+      },
+      {
+        "id": "65.3",
+        "text": "说明 SIMD 只帮 CPU 密集数值内循环，帮不了分配或 GC 开销"
+      },
+      {
+        "id": "65.4",
+        "text": "建议减分配（如复用像素缓冲、避免逐像素接口调用）作为正确的第一步"
+      }
     ]
   },
   {
     "id": 66,
     "name": "set-map-struct-zero-size",
-    "description": "Tests whether the model uses struct{} (not bool) for set map values when writing a new deduplication function",
-    "prompt": "Write a Go function that deduplicates a large slice of string event IDs. The slice may contain up to 5 million entries. Return a new slice with duplicates removed, preserving order.\n\n```go\nfunc Deduplicate(ids []string) []string {\n    // TODO\n}\n```\n\nImplement this function.",
-    "trap": "The natural instinct when building a 'seen' set in Go is to use map[string]bool, since bool reads naturally: 'if seen[id] { ... }'. This is what most Go developers write and what most deduplication examples show. The skill specifically teaches using map[string]struct{} instead: struct{} occupies 0 bytes vs bool at 1 byte per entry, saving ~5MB for 5M entries. Without the skill the model writes map[string]bool.",
+    "description": "测试模型写新去重函数时 set map 值是否用 struct{}（而非 bool）",
+    "prompt": "写一个 Go 函数给大型字符串事件 ID 切片去重。切片最多 500 万条。返回去重后保持原序的新切片。\n\n```go\nfunc Deduplicate(ids []string) []string {\n    // TODO\n}\n```\n\n实现这个函数。",
+    "trap": "在 Go 里建「seen」集合的本能是 map[string]bool，因为 bool 读着自然：'if seen[id] { ... }'。大多数 Go 开发者这么写，大多数去重例子也这么教。skill 专门教改用 map[string]struct{}：struct{} 占 0 字节对 bool 的 1 字节，500 万条省约 5MB。没有 skill 时模型会写 map[string]bool。",
     "assertions": [
-      {"id": "66.1", "text": "Uses map[string]struct{} (not map[string]bool) as the seen-set type"},
-      {"id": "66.2", "text": "Does NOT use map[string]bool for the membership tracking map"},
-      {"id": "66.3", "text": "Explains that struct{} occupies 0 bytes vs bool at 1 byte, saving memory at large scale"}
+      {
+        "id": "66.1",
+        "text": "seen 集合类型用 map[string]struct{}（不是 map[string]bool）"
+      },
+      {
+        "id": "66.2",
+        "text": "成员追踪 map 不用 map[string]bool"
+      },
+      {
+        "id": "66.3",
+        "text": "解释 struct{} 占 0 字节对 bool 的 1 字节，大规模下省内存"
+      }
     ]
   },
   {
     "id": 67,
     "name": "regression-detection-prometheus",
-    "description": "Tests knowledge of PromQL queries for deployment regression detection",
-    "prompt": "We just deployed a new version of our Go service. How can we use Prometheus to detect if this deployment introduced a performance regression?",
-    "trap": "The skill provides specific regression detection PromQL: rate(go_memstats_alloc_bytes_total[5m]) for allocation rate comparison and histogram_quantile(0.99, ...) for p99 latency. Without it, the model may suggest generic monitoring.",
+    "description": "测试部署回归检测的 PromQL 查询知识",
+    "prompt": "我们刚部署了 Go 服务的新版本。怎么用 Prometheus 检测这次部署是否引入了性能回归？",
+    "trap": "skill 给出具体的回归检测 PromQL：rate(go_memstats_alloc_bytes_total[5m]) 对比分配速率，histogram_quantile(0.99, ...) 看 p99 延迟。没有它，模型可能建议泛泛的监控。",
     "assertions": [
-      {"id": "67.1", "text": "Suggests comparing rate(go_memstats_alloc_bytes_total[5m]) before and after deploy"},
-      {"id": "67.2", "text": "Suggests monitoring p99 latency histogram_quantile for increase after deploy"},
-      {"id": "67.3", "text": "Mentions comparing metrics between old and new deployment versions"}
+      {
+        "id": "67.1",
+        "text": "建议对比部署前后 rate(go_memstats_alloc_bytes_total[5m])"
+      },
+      {
+        "id": "67.2",
+        "text": "建议监控 p99 延迟 histogram_quantile 是否上涨"
+      },
+      {
+        "id": "67.3",
+        "text": "提到对比新旧部署版本间的指标"
+      }
     ]
   },
   {
     "id": 68,
     "name": "statsviz-development-profiling",
-    "description": "Tests knowledge of real-time development visualization tools",
-    "prompt": "I'm developing a Go service locally and want to see real-time GC behavior, heap usage, and goroutine count in a browser dashboard without setting up Prometheus/Grafana. What tool can I use?",
-    "trap": "The skill specifically mentions statsviz (github.com/arl/statsviz) for real-time browser dashboard during local development. Without it, the model may suggest full monitoring stacks or pprof web UI which doesn't provide real-time visualization.",
+    "description": "测试实时开发可视化工具的知识",
+    "prompt": "我在本地开发一个 Go 服务，想在浏览器仪表盘里实时看 GC 行为、堆用量和 goroutine 数，不想搭 Prometheus/Grafana。有什么工具可用？",
+    "trap": "skill 专门提到 statsviz（github.com/arl/statsviz）用于本地开发期实时浏览器仪表盘。没有它，模型可能建议整套监控栈或 pprof web UI——后者不提供实时可视化。",
     "assertions": [
-      {"id": "68.1", "text": "Recommends statsviz (github.com/arl/statsviz) for real-time browser visualization"},
-      {"id": "68.2", "text": "Mentions the /debug/statsviz endpoint or statsviz.Register pattern"},
-      {"id": "68.3", "text": "Notes that it shows heap, GC pauses, goroutines, and scheduler in real-time"}
+      {
+        "id": "68.1",
+        "text": "推荐 statsviz（github.com/arl/statsviz）做实时浏览器可视化"
+      },
+      {
+        "id": "68.2",
+        "text": "提到 /debug/statsviz 端点或 statsviz.Register 模式"
+      },
+      {
+        "id": "68.3",
+        "text": "指出它能实时显示堆、GC 停顿、goroutine 和调度器"
+      }
     ]
   }
 ]

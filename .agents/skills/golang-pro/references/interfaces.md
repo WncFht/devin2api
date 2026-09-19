@@ -1,9 +1,9 @@
-# Interface Design and Composition
+# Interface 设计与组合
 
-## Small, Focused Interfaces
+## 小而专注的 interface
 
 ```go
-// Single-method interfaces (idiomatic Go)
+// 单方法 interface（idiomatic Go）
 type Reader interface {
     Read(p []byte) (n int, err error)
 }
@@ -16,7 +16,7 @@ type Closer interface {
     Close() error
 }
 
-// Interface composition
+// interface 组合
 type ReadCloser interface {
     Reader
     Closer
@@ -34,46 +34,46 @@ type ReadWriteCloser interface {
 }
 ```
 
-## Accept Interfaces, Return Structs
+## 收 interface，返回 struct
 
 ```go
 package storage
 
 import "io"
 
-// Storage is the concrete type (struct)
+// Storage 是具体类型（struct）
 type Storage struct {
     baseDir string
 }
 
-// NewStorage returns a concrete type
+// NewStorage 返回具体类型
 func NewStorage(baseDir string) *Storage {
     return &Storage{baseDir: baseDir}
 }
 
-// SaveFile accepts an interface for flexibility
+// SaveFile 接收 interface 以获得灵活性
 func (s *Storage) SaveFile(filename string, data io.Reader) error {
-    // Implementation can work with any Reader
-    // (file, network, buffer, etc.)
+    // 实现可以处理任何 Reader
+    //（文件、网络、buffer 等）
     return nil
 }
 
-// Usage allows dependency injection
+// 用法上支持依赖注入
 type Uploader interface {
     SaveFile(filename string, data io.Reader) error
 }
 
 type Service struct {
-    uploader Uploader // Accept interface
+    uploader Uploader // 收 interface
 }
 
-// NewService accepts interface for testing flexibility
+// NewService 收 interface，方便测试
 func NewService(uploader Uploader) *Service {
     return &Service{uploader: uploader}
 }
 ```
 
-## io.Reader and io.Writer Patterns
+## io.Reader 与 io.Writer 模式
 
 ```go
 import (
@@ -81,24 +81,24 @@ import (
     "strings"
 )
 
-// Chain readers with io.MultiReader
+// 用 io.MultiReader 串接 reader
 func combineReaders() io.Reader {
     r1 := strings.NewReader("Hello ")
     r2 := strings.NewReader("World")
     return io.MultiReader(r1, r2)
 }
 
-// Tee reader for duplicating reads
+// 用 tee reader 复制读取流
 func duplicateRead(r io.Reader, w io.Writer) io.Reader {
-    return io.TeeReader(r, w) // Writes to w while reading from r
+    return io.TeeReader(r, w) // 从 r 读的同时写入 w
 }
 
-// Limit reader to prevent reading too much
+// 限制 reader 防止读超量
 func limitedRead(r io.Reader, n int64) io.Reader {
     return io.LimitReader(r, n)
 }
 
-// Custom Reader implementation
+// 自定义 Reader 实现
 type UppercaseReader struct {
     src io.Reader
 }
@@ -113,7 +113,7 @@ func (u *UppercaseReader) Read(p []byte) (n int, err error) {
     return n, err
 }
 
-// Custom Writer implementation
+// 自定义 Writer 实现
 type CountingWriter struct {
     w     io.Writer
     count int64
@@ -130,12 +130,12 @@ func (cw *CountingWriter) BytesWritten() int64 {
 }
 ```
 
-## Embedding for Composition
+## 用内嵌做组合
 
 ```go
 import "sync"
 
-// Embed to extend behavior
+// 内嵌以扩展行为
 type SafeCounter struct {
     mu sync.Mutex
     m  map[string]int
@@ -147,7 +147,7 @@ func (sc *SafeCounter) Inc(key string) {
     sc.m[key]++
 }
 
-// Embed interface to add default behavior
+// 内嵌 interface 以提供默认行为
 type Logger interface {
     Log(msg string)
 }
@@ -157,25 +157,25 @@ type NoOpLogger struct{}
 func (NoOpLogger) Log(msg string) {}
 
 type Service struct {
-    Logger // Embedded interface (default implementation can be provided)
+    Logger // 内嵌 interface（可提供默认实现）
 }
 
 func NewService(logger Logger) *Service {
     if logger == nil {
-        logger = NoOpLogger{} // Provide default
+        logger = NoOpLogger{} // 提供默认值
     }
     return &Service{Logger: logger}
 }
 
-// Now Service.Log() is available
+// 现在 Service.Log() 可用
 ```
 
-## Interface Satisfaction Verification
+## interface 实现校验
 
 ```go
 import "io"
 
-// Compile-time interface verification
+// 编译期 interface 校验
 var _ io.Reader = (*MyReader)(nil)
 var _ io.Writer = (*MyWriter)(nil)
 var _ io.Closer = (*MyCloser)(nil)
@@ -199,7 +199,7 @@ func (m *MyCloser) Close() error {
 }
 ```
 
-## Functional Options Pattern
+## functional options 模式
 
 ```go
 package server
@@ -214,7 +214,7 @@ type Server struct {
     enableLogger bool
 }
 
-// Option is a functional option for configuring Server
+// Option 是配置 Server 的 functional option
 type Option func(*Server)
 
 func WithHost(host string) Option {
@@ -247,9 +247,9 @@ func WithLogger(enabled bool) Option {
     }
 }
 
-// NewServer creates a server with functional options
+// NewServer 用 functional options 创建 server
 func NewServer(opts ...Option) *Server {
-    // Defaults
+    // 默认值
     s := &Server{
         host:     "localhost",
         port:     8080,
@@ -257,7 +257,7 @@ func NewServer(opts ...Option) *Server {
         maxConns: 100,
     }
 
-    // Apply options
+    // 应用选项
     for _, opt := range opts {
         opt(s)
     }
@@ -265,7 +265,7 @@ func NewServer(opts ...Option) *Server {
     return s
 }
 
-// Usage:
+// 用法：
 // server := NewServer(
 //     WithHost("0.0.0.0"),
 //     WithPort(9000),
@@ -274,10 +274,10 @@ func NewServer(opts ...Option) *Server {
 // )
 ```
 
-## Interface Segregation
+## interface 隔离
 
 ```go
-// Bad: Fat interface
+// 反例：臃肿 interface
 type BadRepository interface {
     Create(item Item) error
     Read(id string) (Item, error)
@@ -288,7 +288,7 @@ type BadRepository interface {
     Count() (int, error)
 }
 
-// Good: Segregated interfaces
+// 正例：隔离的 interface
 type Creator interface {
     Create(item Item) error
 }
@@ -309,7 +309,7 @@ type Lister interface {
     List() ([]Item, error)
 }
 
-// Compose only what you need
+// 只组合需要的部分
 type ReadWriter interface {
     Reader
     Creator
@@ -324,20 +324,20 @@ type FullRepository interface {
 }
 ```
 
-## Type Assertions and Type Switches
+## 类型断言与 type switch
 
 ```go
 import "fmt"
 
-// Safe type assertion
+// 安全的类型断言
 func processValue(v interface{}) {
-    // Two-value assertion (safe)
+    // 双值断言（安全）
     if str, ok := v.(string); ok {
         fmt.Println("String:", str)
         return
     }
 
-    // Type switch
+    // type switch
     switch val := v.(type) {
     case int:
         fmt.Println("Int:", val)
@@ -350,7 +350,7 @@ func processValue(v interface{}) {
     }
 }
 
-// Check for optional interface methods
+// 检查可选 interface 方法
 type Flusher interface {
     Flush() error
 }
@@ -360,7 +360,7 @@ func writeAndFlush(w io.Writer, data []byte) error {
         return err
     }
 
-    // Check if Writer also implements Flusher
+    // 检查 Writer 是否也实现了 Flusher
     if flusher, ok := w.(Flusher); ok {
         return flusher.Flush()
     }
@@ -369,14 +369,14 @@ func writeAndFlush(w io.Writer, data []byte) error {
 }
 ```
 
-## Dependency Injection via Interfaces
+## 经 interface 做依赖注入
 
 ```go
 package app
 
 import "context"
 
-// Define interfaces for dependencies
+// 为依赖定义 interface
 type UserRepository interface {
     GetUser(ctx context.Context, id string) (*User, error)
     SaveUser(ctx context.Context, user *User) error
@@ -386,7 +386,7 @@ type EmailSender interface {
     SendEmail(ctx context.Context, to, subject, body string) error
 }
 
-// Service depends on interfaces
+// Service 依赖 interface
 type UserService struct {
     repo   UserRepository
     mailer EmailSender
@@ -407,7 +407,7 @@ func (s *UserService) RegisterUser(ctx context.Context, email string) error {
     return s.mailer.SendEmail(ctx, email, "Welcome", "Thanks for registering!")
 }
 
-// Easy to mock in tests
+// 测试里好 mock
 type MockUserRepository struct{}
 
 func (m *MockUserRepository) GetUser(ctx context.Context, id string) (*User, error) {
@@ -419,14 +419,14 @@ func (m *MockUserRepository) SaveUser(ctx context.Context, user *User) error {
 }
 ```
 
-## Quick Reference
+## 速查表
 
-| Pattern            | Use Case       | Key Principle                       |
-| ------------------ | -------------- | ----------------------------------- |
-| Small interfaces   | Flexibility    | Single-method interfaces            |
-| Accept interfaces  | Testability    | Depend on abstractions              |
-| Return structs     | Clarity        | Concrete return types               |
-| io.Reader/Writer   | I/O operations | Standard library integration        |
-| Embedding          | Composition    | Extend behavior without inheritance |
-| Functional options | Configuration  | Flexible constructors               |
-| Type assertions    | Runtime checks | Safe downcasting                    |
+| 模式               | 适用场景   | 核心原则             |
+| ------------------ | ---------- | -------------------- |
+| 小 interface       | 灵活性     | 单方法 interface     |
+| 收 interface       | 可测试性   | 依赖抽象             |
+| 返回 struct        | 清晰       | 具体返回类型         |
+| io.Reader/Writer   | I/O 操作   | 标准库集成           |
+| 内嵌               | 组合       | 不用继承也能扩展行为 |
+| functional options | 配置       | 灵活的构造函数       |
+| 类型断言           | 运行时检查 | 安全的向下转型       |

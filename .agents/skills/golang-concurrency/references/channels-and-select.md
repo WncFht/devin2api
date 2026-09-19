@@ -1,30 +1,30 @@
-# Channels and Select Patterns
+# Channel 与 Select 模式
 
-## Table of Contents
+## 目录
 
-- [Goroutine Lifecycle](#goroutine-lifecycle)
-    - [Panic Recovery at Goroutine Boundaries](#panic-recovery-at-goroutine-boundaries)
-- [Channel Direction](#channel-direction)
-- [Channel Closing](#channel-closing)
-- [Buffer Size](#buffer-size)
-- [Select for Non-Blocking Communication](#select-for-non-blocking-communication)
-- [Avoid Repeated `time.After` in Hot Loops](#avoid-repeated-timeafter-in-hot-loops)
+- [Goroutine 生命周期](#goroutine-生命周期)
+    - [Goroutine 边界的 Panic 恢复](#goroutine-边界的-panic-恢复)
+- [Channel 方向](#channel-方向)
+- [Channel 关闭](#channel-关闭)
+- [缓冲大小](#缓冲大小)
+- [用 Select 做非阻塞通信](#用-select-做非阻塞通信)
+- [热循环里避免反复 `time.After`](#热循环里避免反复-timeafter)
 
-## Goroutine Lifecycle
+## Goroutine 生命周期
 
-NEVER start a goroutine without knowing how it stops. Every goroutine MUST answer: **how will it stop?**
+绝不在不知道它怎么停的情况下启动 goroutine。每个 goroutine 都必须回答：**它怎么停？**
 
 ```go
-// ✗ Bad — fire-and-forget, no way to stop or wait
+// ✗ 坏——发后不管，无法停止也无法等待
 func startWorker() {
     go func() {
         for {
-            doWork() // runs forever, leaks on shutdown
+            doWork() // 永远跑下去，关停时泄漏
         }
     }()
 }
 
-// ✓ Good — goroutine respects context cancellation, caller can wait
+// ✓ 好——goroutine 响应 context 取消，调用方能等它
 func startWorker(ctx context.Context) *sync.WaitGroup {
     var wg sync.WaitGroup
     wg.Add(1)
@@ -43,9 +43,9 @@ func startWorker(ctx context.Context) *sync.WaitGroup {
 }
 ```
 
-### Panic Recovery at Goroutine Boundaries
+### Goroutine 边界的 Panic 恢复
 
-A panic in a goroutine crashes the entire process. Always recover at goroutine boundaries in production code:
+goroutine 里的 panic 会拖垮整个进程。生产代码永远在 goroutine 边界做 recover：
 
 ```go
 go func() {
@@ -58,29 +58,29 @@ go func() {
 }()
 ```
 
-## Channel Direction
+## Channel 方向
 
-Specify direction in function signatures to prevent misuse at compile time:
+在函数签名里指明方向，让误用在编译期被挡住：
 
 ```go
-// ✗ Bad — caller could accidentally close or send on a receive-only channel
+// ✗ 坏——调用方可能意外关闭只该接收的 channel，或往里发送
 func consume(ch chan int) { ... }
 
-// ✓ Good — compiler enforces correct usage
-func produce(ch chan<- int) { ... } // send-only
-func consume(ch <-chan int) { ... } // receive-only
+// ✓ 好——编译器强制正确用法
+func produce(ch chan<- int) { ... } // 只发
+func consume(ch <-chan int) { ... } // 只收
 ```
 
-## Channel Closing
+## Channel 关闭
 
-Channels MUST be closed by the sender (producer), NEVER by the receiver — it causes a panic if the sender writes after close.
+channel 必须由发送方（生产方）关闭，绝不许接收方关——发送方在 close 后写入会 panic。
 
 ```go
-// ✓ Good — producer closes when done
+// ✓ 好——生产方做完后关闭
 func generate(ctx context.Context) <-chan int {
     ch := make(chan int)
     go func() {
-        defer close(ch) // sender closes
+        defer close(ch) // 发送方关闭
         for i := 0; ; i++ {
             select {
             case ch <- i:
@@ -93,29 +93,29 @@ func generate(ctx context.Context) <-chan int {
 }
 ```
 
-## Buffer Size
+## 缓冲大小
 
-| Size           | When to use                                                                                                |
-| -------------- | ---------------------------------------------------------------------------------------------------------- |
-| 0 (unbuffered) | Default. Synchronizes sender and receiver — use when you need handoff guarantees                           |
-| 1              | Signal channels (`done := make(chan struct{}, 1)`), or when sender must not block on a single pending item |
-| N > 1          | Only with measured justification — document why N was chosen and what happens when the buffer fills        |
+| 大小        | 何时用                                                                               |
+| ----------- | ------------------------------------------------------------------------------------ |
+| 0（无缓冲） | 默认。同步发送方与接收方——需要交接保证时用                                           |
+| 1           | 信号 channel（`done := make(chan struct{}, 1)`），或发送方不能因一条待发数据而阻塞时 |
+| N > 1       | 只在有实测依据时——注释里写清为什么选 N、缓冲填满会怎样                               |
 
 ```go
-// ✓ Good — unbuffered for synchronous handoff
+// ✓ 好——无缓冲用于同步交接
 ch := make(chan Result)
 
-// ✓ Good — buffered 1 for signal
+// ✓ 好——缓冲 1 用于信号
 done := make(chan struct{}, 1)
 
-// ✗ Suspicious — arbitrary large buffer hides backpressure problems
-// Give explanation in comments.
-ch := make(chan Task, 1000) // why 1000? what if it fills?
+// ✗ 可疑——随便给的大缓冲掩盖背压问题
+// 注释里给出解释。
+ch := make(chan Task, 1000) // 为什么 1000？填满了怎么办？
 ```
 
-## Select for Non-Blocking Communication
+## 用 Select 做非阻塞通信
 
-Use `select` to multiplex channel operations and always include `ctx.Done()` to prevent goroutine leaks:
+用 `select` 复用 channel 操作，并永远带上 `ctx.Done()` 防 goroutine 泄漏：
 
 ```go
 func process(ctx context.Context, in <-chan Task, out chan<- Result) {
@@ -125,7 +125,7 @@ func process(ctx context.Context, in <-chan Task, out chan<- Result) {
             return
         case task, ok := <-in:
             if !ok {
-                return // channel closed
+                return // channel 已关闭
             }
             result := handle(ctx, task)
             select {
@@ -138,20 +138,20 @@ func process(ctx context.Context, in <-chan Task, out chan<- Result) {
 }
 ```
 
-## Avoid Repeated `time.After` in Hot Loops
+## 热循环里避免反复 `time.After`
 
 ```go
-// ✗ Bad — creates a new timer on every iteration
+// ✗ 坏——每次迭代都新建 timer
 for {
     select {
     case msg := <-ch:
         handle(msg)
-    case <-time.After(5 * time.Second): // repeated allocation/churn
+    case <-time.After(5 * time.Second): // 反复分配/抖动
         handleTimeout()
     }
 }
 
-// ✓ Good (Go 1.23+) — reuse the timer
+// ✓ 好（Go 1.23+）——复用 timer
 timer := time.NewTimer(5 * time.Second)
 defer timer.Stop()
 for {
@@ -167,4 +167,4 @@ for {
 }
 ```
 
-For Go <1.23, if `timer.Stop()` returns false, drain a possible stale value before `Reset`. In Go 1.23+, receiving from `timer.C` after `Stop` returns is guaranteed to block rather than receive a stale value.
+Go <1.23 时，若 `timer.Stop()` 返回 false，`Reset` 前先排空可能残留的旧值。Go 1.23+ 起，`Stop` 返回后再从 `timer.C` 接收保证是阻塞，而不会收到陈旧值。

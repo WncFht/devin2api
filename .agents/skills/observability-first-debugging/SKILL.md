@@ -1,66 +1,66 @@
 ---
 name: observability-first-debugging
-description: "Systematic debugging methodology that eliminates guessing and speculation. Add instrumentation to gather specific data that fully explains the problem. Evidence before hypothesis. Observation before solution. Triggers on: debugging, error investigation, 'why is this failing', unexpected behavior, test failures, non-zero exit codes, stack traces."
+description: 消除猜测与臆断的系统化调试方法论。加插桩收集能完整解释问题的具体数据。证据先于假设，观察先于方案。触发：'debugging' 'error investigation' 'why is this failing' 'unexpected behavior' 'test failures' 'non-zero exit codes' 'stack traces'。
 version: 1.0.0
 ---
 
 # Observability-First Debugging
 
-Stop guessing. Add observability. Understand what's actually happening.
+别猜。加可观测性。搞清楚实际在发生什么。
 
-## Core Principle
+## 核心原则
 
-**Measure before you act.** When something isn't working, the solution is almost never to guess and try random fixes. The solution is to add instrumentation that produces the specific information needed to fully explain the issue.
+**先测量，再动手。**东西不好使时，解法几乎从来不是猜了再瞎试。解法是加插桩，产出能完整解释问题的那份具体信息。
 
-## The Problem
+## 问题
 
-Agents (and developers) fall into a guess-and-check trap:
+Agent（和开发者）会掉进「猜了再试」的陷阱：
 
-- Try something → doesn't work
-- Guess what might fix it → doesn't work
-- Try another random thing → doesn't work
-- User gets frusrtrated as the flailing continues
+- 试一下 → 不好使
+- 猜一个修法 → 不好使
+- 再瞎试一个 → 不好使
+- 用户看着持续扑空开始烦躁
 
-**Why this happens:** Insufficient data. You don't know what's actually happening, so you're shooting in the dark.
+**为什么会这样：**数据不足。你不知道实际在发生什么，就是在黑着打枪。
 
-## The Solution
+## 解法
 
-**Make the invisible visible.** Add logging, print statements, assertions, or debugging output that shows you:
+**让看不见的变得看得见。**加日志、print、断言或调试输出，让你看到：
 
-- What values variables actually contain
-- Which code paths are executing
-- What external systems are returning
-- Where expectations diverge from reality
+- 变量实际装的值
+- 实际在跑的代码路径
+- 外部系统实际返回的东西
+- 期望在哪里与现实分岔
 
-## Debugging Protocol
+## 调试规程
 
-### 1. Reproduce & Document Symptoms
+### 1. 复现并记录症状
 
-**What exactly is failing?**
+**到底是什么在失败？**
 
-- Exact error message (copy-paste, don't paraphrase)
-- Expected behavior vs actual behavior
-- Minimal reproduction steps
+- 确切错误信息（复制粘贴，别转述）
+- 期望行为 vs 实际行为
+- 最小复现步骤
 
-**Don't:**
+**不要：**
 
-- Guess at what the error "probably means"
-- Assume you know the cause from the symptom
+- 猜错误「大概是什么意思」
+- 从症状直接断定原因
 
-### 2. Add Observability FIRST
+### 2. 先加可观测性
 
-**Before forming hypotheses, instrument the system:**
+**在形成任何假设之前，先给系统插桩：**
 
-Add logging/print statements to show:
+加日志/print 展示：
 
-- Input values at function entry
-- Intermediate computation results
-- Return values
-- Conditional branch taken
-- External API responses
-- State changes
+- 函数入口的输入值
+- 中间计算结果
+- 返回值
+- 走了哪个条件分支
+- 外部 API 响应
+- 状态变化
 
-**Example:**
+**示例：**
 
 ```python
 def process_request(data):
@@ -79,113 +79,113 @@ def process_request(data):
         return None
 ```
 
-**The goal:** Produce output that definitively shows what's happening at each step.
+**目标：**产出能明确展示每一步在干什么的输出。
 
-### 3. Run & Observe
+### 3. 跑并观察
 
-Execute with instrumentation active. Capture the output.
+带着插桩执行。抓输出。
 
-**Look for:**
+**找：**
 
-- Values that don't match expectations
-- Code paths not executing when they should
-- Errors occurring earlier than the visible symptom
-- Null/undefined where data should exist
+- 与期望不符的值
+- 该跑没跑的代码路径
+- 比可见症状更早发生的错误
+- 该有数据的地方出现 null/undefined
 
-### 4. Form Evidence-Based Hypothesis
+### 4. 形成有证据的假设
 
-**Now that you have data:**
+**现在你有数据了：**
 
-- What does the evidence show?
-- Where does reality diverge from expectation?
-- What is the earliest point where things go wrong?
+- 证据显示了什么？
+- 现实在哪里与期望分岔？
+- 事情开始出错最早的点在哪？
 
-**Your hypothesis must:**
+**你的假设必须：**
 
-- Be based on observed data (not speculation)
-- Explain all symptoms
-- Be testable
+- 基于观察到的数据（不是臆断）
+- 能解释全部症状
+- 可检验
 
-### 5. Test Hypothesis
+### 5. 检验假设
 
-Add targeted instrumentation or experiments:
+加定点插桩或做实验：
 
-- If you think variable X is wrong, print it at every mutation point
-- If you think function Y isn't being called, add entry/exit logging
-- If you think the data structure is malformed, print its shape
+- 觉得变量 X 不对，就在每个赋值点打印它
+- 觉得函数 Y 没被调，就加入口/出口日志
+- 觉得数据结构畸形，就打印它的形状
 
-### 6. Iterate
+### 6. 迭代
 
-If hypothesis is wrong, the instrumentation will show why. Add more observability and repeat.
+假设错了，插桩会告诉你为什么。加更多可观测性，重复。
 
-## Anti-Patterns to Eliminate
+## 要消灭的反模式
 
-### ❌ Speculation Without Data
+### ❌ 无数据臆断
 
-"Maybe it's a race condition"
-"It might be a caching issue"
-"Could be the API timeout"
+「可能是竞态」
+「可能是缓存问题」
+「可能是 API 超时」
 
-**Fix:** Add logging that would confirm or deny each theory.
+**修：**加能证实或证伪每个理论的日志。
 
-### ❌ Random Changes
+### ❌ 随机改动
 
-Changing code hoping it fixes things without understanding why it broke.
+改代码指望能修好，却不理解为什么会坏。
 
-**Fix:** First understand the bug via observability, then fix the root cause.
+**修：**先通过可观测性理解 bug，再修根因。
 
-### ❌ Trying Multiple Things At Once
+### ❌ 一次试好几样
 
-Making 3 changes simultaneously so you don't know which fixed it (or if it's actually fixed).
+同时改 3 处，于是不知道是哪处修好的（甚至不知道是否真修好了）。
 
-**Fix:** One change at a time. Verify each with instrumentation.
+**修：**一次改一处。每处都用插桩验证。
 
-### ❌ Assuming Code Does What It Says
+### ❌ 以为代码言行一致
 
-"This function should return user data" → doesn't mean it actually does.
+「这个函数应该返回用户数据」≠ 它真的返回。
 
-**Fix:** Print what it actually returns. Verify assumptions.
+**修：**打印它实际返回的东西。验证你的假设。
 
-## Observability Techniques by Context
+## 按场景分的可观测性手段
 
-### Command-Line Tools
+### 命令行工具
 
 ```bash
-set -x  # Print each command before executing
-command -v foo  # Check if command exists
-echo "Value: $VAR"  # Print variable values
+set -x  # 执行前打印每条命令
+command -v foo  # 检查命令是否存在
+echo "Value: $VAR"  # 打印变量值
 ```
 
-### Code Debugging
+### 代码调试
 
-- Print statements at key decision points
-- Assertions for invariants
-- Log function entry/exit
-- Dump data structures
-- Stack traces at error points
+- 在关键决策点 print
+- 给不变量加断言
+- 记录函数入口/出口
+- 转储数据结构
+- 在出错点打栈追踪
 
-### API/Network Issues
+### API/网络问题
 
-- Print full request (URL, headers, body)
-- Print full response (status, headers, body)
-- Print timeout values
-- Log retry attempts
+- 打印完整请求（URL、headers、body）
+- 打印完整响应（status、headers、body）
+- 打印超时值
+- 记录重试尝试
 
-### File Operations
+### 文件操作
 
-- Print file paths being accessed
-- Check file existence before operations
-- Print file contents after reading
-- Verify write success
+- 打印正在访问的文件路径
+- 操作前检查文件存在性
+- 读后打印文件内容
+- 验证写入成功
 
-### Environment Issues
+### 环境问题
 
-- Print environment variables
-- Print working directory
-- Print PATH and other config
-- Print version info for tools
+- 打印环境变量
+- 打印工作目录
+- 打印 PATH 与其他配置
+- 打印工具版本信息
 
-## Decision Tree
+## 决策树
 
 ```
 Problem occurs
@@ -205,18 +205,18 @@ Do you know why it's doing the wrong thing?
 Fix the bug
 ```
 
-## Examples
+## 示例
 
-### Example 1: Test Failure
+### 示例 1：测试失败
 
-**Symptom:** Test fails with "Expected 3, got undefined"
+**症状：**测试报 "Expected 3, got undefined"
 
-**❌ Speculation:**
-"Maybe the mock isn't working"
-"Could be async timing issue"
-[tries random fixes]
+**❌ 臆断：**
+「可能 mock 没生效」
+「可能是异步时序问题」
+[瞎试各种修法]
 
-**✅ Observability-First:**
+**✅ 可观测性优先：**
 
 ```javascript
 test("calculates total", () => {
@@ -231,20 +231,20 @@ test("calculates total", () => {
 });
 ```
 
-**Output shows:** `Result: undefined`
+**输出显示：** `Result: undefined`
 
-**Evidence-based action:** Check what `calculateTotal` actually returns. Add logging inside that function to see where it fails to compute/return.
+**循证行动：**查 `calculateTotal` 实际返回什么。在函数内部加日志，看它在哪里没算出来/没返回。
 
-### Example 2: API Call Not Working
+### 示例 2：API 调用不好使
 
-**Symptom:** API returns 400 error
+**症状：**API 返回 400
 
-**❌ Speculation:**
-"Maybe the endpoint changed"
-"Could be auth token expired"
-[tries different endpoints randomly]
+**❌ 臆断：**
+「可能 endpoint 变了」
+「可能 auth token 过期了」
+[随机试不同 endpoint]
 
-**✅ Observability-First:**
+**✅ 可观测性优先：**
 
 ```python
 url = f"{BASE_URL}/api/users"
@@ -261,19 +261,19 @@ print(f"[DEBUG] Status: {response.status_code}")
 print(f"[DEBUG] Response: {response.text}")
 ```
 
-**Output shows:** `Response: {"error": "email field is required"}`
+**输出显示：** `Response: {"error": "email field is required"}`
 
-**Evidence-based action:** The payload construction is wrong. Check where `email` variable is set.
+**循证行动：**payload 构造错了。查 `email` 变量在哪里赋值。
 
-### Example 3: File Not Found
+### 示例 3：文件找不到
 
-**Symptom:** `FileNotFoundError: foo.txt`
+**症状：**`FileNotFoundError: foo.txt`
 
-**❌ Speculation:**
-"Maybe the path is wrong"
-[tries different path variations randomly]
+**❌ 臆断：**
+「可能路径写错了」
+[随机试各种路径变体]
 
-**✅ Observability-First:**
+**✅ 可观测性优先：**
 
 ```python
 import os
@@ -289,34 +289,34 @@ if not os.path.exists(file_path):
     print(f"[DEBUG] Absolute path would be: {abs_path}")
 ```
 
-**Output shows:** Current directory is `/app/src`, file is in `/app/data`
+**输出显示：**当前目录是 `/app/src`，文件在 `/app/data`
 
-**Evidence-based action:** Use correct path `../data/foo.txt` or fix working directory.
+**循证行动：**用正确路径 `../data/foo.txt`，或修工作目录。
 
-## Integration with User Feedback
+## 与用户反馈的配合
 
-When user says you're going down the wrong path:
+用户说你走错路时：
 
-1. **Stop immediately**
-2. **Ask what they're observing** that led them to that conclusion
-3. **Add instrumentation** to verify their insight
-4. **Observe output** and adjust approach
+1. **立刻停**
+2. **问他们观察到了什么**才下此结论
+3. **加插桩**验证他们的洞见
+4. **看输出**，调整方向
 
-User knows their system. When they suggest simple/obvious solutions, they're usually right. Don't overthink it.
+用户懂自己的系统。他们提出简单/显然的解法时，通常是对的。别想太多。
 
-## Remember
+## 记住
 
-- Debugging is a science, not guesswork
-- Evidence before hypothesis
-- Observation before solution
-- Simple instrumentation > complex theories
-- Listen to user clues
+- 调试是科学，不是猜谜
+- 证据先于假设
+- 观察先于方案
+- 简单插桩 > 复杂理论
+- 听用户给的线索
 
-**The goal:** Produce specific data that fully explains the issue, then the fix becomes obvious.
+**目标：**产出能完整解释问题的具体数据，然后修法不证自明。
 
 ---
 
-Sources:
+资料来源：
 
 - [A systematic approach to debugging](https://ntietz.com/blog/how-i-debug-2023/)
 - [Observability-based Debugging Mindset](https://mohitkarekar.com/posts/2024/observability-debugging/)

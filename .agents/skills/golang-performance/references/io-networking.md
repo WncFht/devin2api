@@ -1,46 +1,46 @@
-# I/O & Networking Optimization
+# I/O 与网络优化
 
-Network and I/O bottlenecks show up as goroutines blocked on syscalls or waiting for responses. The key levers are connection reuse, proper timeouts, and streaming instead of buffering.
+网络和 I/O 瓶颈表现为 goroutine 阻塞在系统调用上或等响应。关键杠杆是连接复用、合理的超时、以及用流式代替缓冲。
 
-## Table of Contents
+## 目录
 
-- [HTTP Transport Configuration](#http-transport-configuration)
-    - [Connection pooling](#connection-pooling)
-    - [Timeouts](#timeouts)
-    - [Drain response body for connection reuse](#drain-response-body-for-connection-reuse)
-- [Streaming vs Buffering](#streaming-vs-buffering)
-    - [Avoid io.ReadAll for large payloads](#avoid-ioreadall-for-large-payloads)
-    - [Streaming JSON](#streaming-json)
-- [JSON Performance](#json-performance)
-- [Cgo Overhead](#cgo-overhead)
-- [Buffered I/O](#buffered-io)
-- [Concurrent Multi-Stage Pipelines](#concurrent-multi-stage-pipelines)
-    - [The unusual scenario](#the-unusual-scenario)
-    - [When to use this (and when NOT to)](#when-to-use-this-and-when-not-to)
-- [Batch Operations](#batch-operations)
-    - [Database: batch inserts over row-by-row](#database-batch-inserts-over-row-by-row)
-    - [HTTP: batch API calls](#http-batch-api-calls)
-    - [Channel: batch processing from a stream](#channel-batch-processing-from-a-stream)
+- [HTTP Transport 配置](#http-transport-配置)
+    - [连接池](#连接池)
+    - [超时](#超时)
+    - [排空响应体以复用连接](#排空响应体以复用连接)
+- [流式与缓冲](#流式与缓冲)
+    - [大载荷避免 io.ReadAll](#大载荷避免-ioreadall)
+    - [流式 JSON](#流式-json)
+- [JSON 性能](#json-性能)
+- [Cgo 开销](#cgo-开销)
+- [缓冲 I/O](#缓冲-io)
+- [并发多阶段流水线](#并发多阶段流水线)
+    - [特殊场景](#特殊场景)
+    - [何时使用（以及何时不用）](#何时使用以及何时不用)
+- [批量操作](#批量操作)
+    - [数据库：批量插入代替逐行](#数据库批量插入代替逐行)
+    - [HTTP：批量 API 调用](#http批量-api-调用)
+    - [Channel：流的批量处理](#channel流的批量处理)
 
-## HTTP Transport Configuration
+## HTTP Transport 配置
 
-**Diagnose:** 1- `go tool pprof` (goroutine + block profile) — look for goroutines blocked on `net/http.(*Transport).dialConn` or `net/http.(*persistConn).readLoop`; many goroutines waiting here means connection pool exhaustion 2- `fgprof` — captures both on-CPU and off-CPU wait time; look for HTTP calls dominating wall-clock time even when CPU profile shows them as cheap 3- `go tool trace` — visualize goroutine lifecycles; look for long gaps where goroutines wait for network I/O instead of processing 4- Prometheus `go_goroutines` — monitor goroutine count in production; steadily rising under stable load suggests connection or goroutine leaks from misconfigured HTTP clients
+**诊断：**1- `go tool pprof`（goroutine + block profile）——找阻塞在 `net/http.(*Transport).dialConn` 或 `net/http.(*persistConn).readLoop` 上的 goroutine；大量 goroutine 等在这里说明连接池耗尽 2- `fgprof`——同时捕获 on-CPU 与 off-CPU 等待时间；CPU profile 里显得便宜的 HTTP 调用若主导墙钟时间就要注意 3- `go tool trace`——可视化 goroutine 生命周期；找 goroutine 等网络 I/O 而非处理的长空隙 4- Prometheus `go_goroutines`——监控生产中 goroutine 数；负载稳定却持续上升，提示 HTTP client 配置错误导致连接或 goroutine 泄漏
 
-### Connection pooling
+### 连接池
 
-The default `http.Transport` has conservative pool settings — `MaxIdleConnsPerHost` defaults to 2. Under high concurrency, requests queue waiting for connections instead of running in parallel:
+默认 `http.Transport` 的池配置保守——`MaxIdleConnsPerHost` 默认 2。高并发下请求排队等连接而不是并行执行：
 
 ```go
-// Bad — default transport, only 2 idle connections per host
+// 差——默认 transport，每 host 只有 2 条空闲连接
 client := &http.Client{}
 
-// Good — tuned for high-concurrency service-to-service calls
+// 好——为高并发服务间调用调优
 var apiClient = &http.Client{
     Timeout: 30 * time.Second,
     Transport: &http.Transport{
-        MaxIdleConns:          100,             // total idle connections across all hosts
-        MaxIdleConnsPerHost:   20,              // per-host idle connections (default is 2!)
-        MaxConnsPerHost:       50,              // cap total connections per host (0 = unlimited)
+        MaxIdleConns:          100,             // 所有 host 的空闲连接总数
+        MaxIdleConnsPerHost:   20,              // 每 host 空闲连接（默认是 2！）
+        MaxConnsPerHost:       50,              // 每 host 总连接上限（0 = 不限）
         IdleConnTimeout:       90 * time.Second,
         TLSHandshakeTimeout:  5 * time.Second,
         ResponseHeaderTimeout: 10 * time.Second,
@@ -48,7 +48,7 @@ var apiClient = &http.Client{
 }
 ```
 
-For web crawlers hitting many different hosts, disable keep-alive to avoid accumulating idle connections:
+打许多不同 host 的爬虫，关掉 keep-alive 避免堆积空闲连接：
 
 ```go
 crawlerClient := &http.Client{
@@ -56,12 +56,12 @@ crawlerClient := &http.Client{
 }
 ```
 
-### Timeouts
+### 超时
 
-The zero-value `http.Client` and `http.Server` have NO timeouts. A slow or malicious peer holds connections open indefinitely, exhausting file descriptors and memory:
+零值 `http.Client` 和 `http.Server` 没有任何超时。慢或对端恶意的 peer 会无限期占住连接，耗尽文件描述符和内存：
 
 ```go
-// Server — always set timeouts to prevent Slowloris attacks
+// 服务端——永远设置超时，防 Slowloris 攻击
 server := &http.Server{
     Addr:         ":8080",
     Handler:      handler,
@@ -71,113 +71,113 @@ server := &http.Server{
 }
 ```
 
-### Drain response body for connection reuse
+### 排空响应体以复用连接
 
-Connections are only returned to the pool when the body is fully read. Even if you don't need the body, drain it:
+响应体被完整读完后连接才会归还池。即使不需要 body，也要排空：
 
 ```go
 resp, err := client.Get(url)
 if err != nil { return err }
 defer resp.Body.Close()
-_, _ = io.Copy(io.Discard, resp.Body) // drain to enable connection reuse
+_, _ = io.Copy(io.Discard, resp.Body) // 排空以复用连接
 ```
 
-## Streaming vs Buffering
+## 流式与缓冲
 
-**Diagnose:** 1- `go tool pprof -inuse_space` — look for large single allocations (MB-sized) from `io.ReadAll`, `bytes.Buffer.Grow`, or `json.Unmarshal`; these indicate buffering entire payloads instead of streaming
+**诊断：**1- `go tool pprof -inuse_space`——找 `io.ReadAll`、`bytes.Buffer.Grow` 或 `json.Unmarshal` 产生的大块单次分配（MB 级）；它们说明在缓冲整个载荷而不是流式处理
 
-### Avoid io.ReadAll for large payloads
+### 大载荷避免 io.ReadAll
 
-`io.ReadAll` loads the entire stream into memory. For large files or HTTP responses, this causes massive memory spikes:
+`io.ReadAll` 把整个流装进内存。大文件或 HTTP 响应会造成巨大的内存尖峰：
 
 ```go
-// Bad — 2GB file = 2GB allocation
+// 差——2GB 文件 = 2GB 分配
 data, _ := io.ReadAll(f)
 
-// Good — process line by line, O(1) memory
+// 好——逐行处理，O(1) 内存
 scanner := bufio.NewScanner(f)
 for scanner.Scan() { processLine(scanner.Bytes()) }
 
-// Good — stream between reader and writer (32KB internal buffer)
+// 好——reader 与 writer 之间流式传输（内部 32KB 缓冲）
 io.Copy(w, resp.Body)
 ```
 
-`io.ReadAll` is fine for small, bounded payloads (< 1MB) where the size is known.
+小而已知边界的载荷（< 1MB）用 `io.ReadAll` 没问题。
 
-### Streaming JSON
+### 流式 JSON
 
-Use `json.NewDecoder` for large JSON payloads instead of `json.Unmarshal` (which buffers the entire body):
+大 JSON 载荷用 `json.NewDecoder` 代替 `json.Unmarshal`（后者缓冲整个 body）：
 
 ```go
 dec := json.NewDecoder(r)
 for dec.More() {
     var item Item
     if err := dec.Decode(&item); err != nil { return err }
-    process(item) // one item at a time
+    process(item) // 一次处理一条
 }
 ```
 
-## JSON Performance
+## JSON 性能
 
-**Diagnose:** 1- `go tool pprof` (CPU profile) — look for `encoding/json.(*Decoder).Decode`, `reflect.Value.*`, or `encoding/json.Marshal` consuming significant CPU; these indicate reflection-based JSON is the bottleneck 2- `go test -bench -benchmem` — measure ns/op and allocs/op for marshal/unmarshal; expect high alloc counts from reflection; code-gen alternatives should show 2-5x fewer allocs
+**诊断：**1- `go tool pprof`（CPU profile）——找 `encoding/json.(*Decoder).Decode`、`reflect.Value.*` 或 `encoding/json.Marshal` 消耗大量 CPU；它们说明基于反射的 JSON 是瓶颈 2- `go test -bench -benchmem`——测 marshal/unmarshal 的 ns/op 与 allocs/op；反射带来高分配数是预期；代码生成方案应少 2-5 倍分配
 
-The standard `encoding/json` package uses reflection to inspect struct fields at runtime. For high-throughput services, this creates significant CPU and allocation overhead.
+标准库 `encoding/json` 在运行时用反射检查结构体字段。高吞吐服务里这带来明显的 CPU 与分配开销。
 
-**Options for faster JSON:**
+**更快的 JSON 选项：**
 
-- **Custom `MarshalJSON`/`UnmarshalJSON`** — hand-written methods for hot-path types eliminate reflection
-- **Code-generation libraries** — `easyjson`, `ffjson` generate marshal/unmarshal methods at build time, no reflection at runtime
-- **Drop-in replacements** — `github.com/goccy/go-json`, `github.com/json-iterator/go`, `github.com/bytedance/sonic` offer 2-5x better performance
-- **`encoding/json/v2`** (default JSON implementation since Go 1.27; introduced experimental behind `GOEXPERIMENT=jsonv2` in Go 1.25) — migrate deliberately: it is stricter than v1 (rejects duplicate object keys and invalid UTF-8), so re-run tests against real payloads before relying on it in a hot path
+- **自定义 `MarshalJSON`/`UnmarshalJSON`**——给热路径类型手写方法，消除反射
+- **代码生成库**——`easyjson`、`ffjson` 在构建期生成 marshal/unmarshal 方法，运行时零反射
+- **直接替换**——`github.com/goccy/go-json`、`github.com/json-iterator/go`、`github.com/bytedance/sonic` 性能好 2-5 倍
+- **`encoding/json/v2`**（Go 1.27 起为默认 JSON 实现；Go 1.25 以 `GOEXPERIMENT=jsonv2` 实验引入）——迁移要审慎：它比 v1 严格（拒绝重复对象键与非法 UTF-8），上热路径前先用真实载荷重跑测试
 
-When using third-party JSON libraries, refer to the library's official documentation for up-to-date API signatures.
+用第三方 JSON 库时，API 签名以该库官方文档为准。
 
-## Cgo Overhead
+## Cgo 开销
 
-**Diagnose:** 1- `go tool pprof` (CPU profile + threadcreate profile) — look for `runtime.cgocall` or `runtime.asmcgocall` consuming CPU; high threadcreate count means cgo calls are pinning goroutines to OS threads 2- `go test -bench` — benchmark the cgo call loop vs a pure Go equivalent; expect ~50-100ns overhead per cgo crossing
+**诊断：**1- `go tool pprof`（CPU profile + threadcreate profile）——找 `runtime.cgocall` 或 `runtime.asmcgocall` 消耗 CPU；threadcreate 数高说明 cgo 调用把 goroutine 钉在 OS 线程上 2- `go test -bench`——对比 cgo 调用循环与纯 Go 等价物的基准；预期每次 cgo 跨界约 50-100ns 开销
 
-Each Go-to-C call via cgo costs ~50-100ns due to stack switching, signal mask manipulation, and scheduler coordination:
+每次经 cgo 从 Go 进 C 花约 50-100ns，代价来自栈切换、信号掩码操作与调度器协调：
 
 ```go
-// Bad — cgo overhead per element dominates for tight loops
+// 差——紧凑循环里逐元素吃 cgo 开销
 for i, v := range values {
-    values[i] = float64(C.sqrt(C.double(v))) // ~100ns overhead PER CALL
+    values[i] = float64(C.sqrt(C.double(v))) // 每次调用约 100ns 开销
 }
 
-// Good — use pure Go stdlib (math.Sqrt is as fast as C and inlineable)
+// 好——用纯 Go 标准库（math.Sqrt 与 C 一样快且可内联）
 for i, v := range values { values[i] = math.Sqrt(v) }
 
-// Good — batch when C code is unavoidable
-C.batch_sqrt((*C.double)(&values[0]), C.int(len(values))) // amortize overhead
+// 好——C 代码不可避免时走批量
+C.batch_sqrt((*C.double)(&values[0]), C.int(len(values))) // 摊薄开销
 ```
 
-Additional cgo costs: goroutine is pinned to an OS thread, C code cannot be preempted (may delay GC), and function inlining is blocked at the boundary.
+cgo 的额外代价：goroutine 被钉在 OS 线程上、C 代码不可被抢占（可能拖延 GC）、边界处无法内联。
 
-## Buffered I/O
+## 缓冲 I/O
 
-**Diagnose:** 1- `go test -bench` — benchmark buffered vs unbuffered I/O; expect 3-10x improvement from reducing syscall count 2- `go tool trace` — look for frequent short syscalls (`pread`, `pwrite`) in rapid succession; many tiny I/O operations indicate unbuffered access
+**诊断：**1- `go test -bench`——对比缓冲与无缓冲 I/O 的基准；减少系统调用次数预期带来 3-10 倍提升 2- `go tool trace`——找密集连续的短系统调用（`pread`、`pwrite`）；大量碎小 I/O 操作说明是无缓冲访问
 
-Unbuffered file reads/writes issue a syscall per operation. `bufio.Reader` and `bufio.Writer` batch small operations, reducing syscalls by 10x or more:
+无缓冲的文件读写每个操作一次系统调用。`bufio.Reader` 与 `bufio.Writer` 把小操作攒批，系统调用减少 10 倍以上：
 
 ```go
-// Bad — syscall per line
+// 差——每行一次系统调用
 for _, line := range lines { f.WriteString(line + "\n") }
 
-// Good — buffered, batches writes into larger chunks
+// 好——带缓冲，把写攒成更大的块
 w := bufio.NewWriter(f)
 for _, line := range lines { w.WriteString(line + "\n") }
 w.Flush()
 ```
 
-## Concurrent Multi-Stage Pipelines
+## 并发多阶段流水线
 
-**Diagnose:** 1- `go tool trace` — visualize resource utilization across stages; look for sequential idle gaps where CPU, disk, or network sit unused while another resource is busy 2- `go tool pprof` (CPU + goroutine profile) — confirm each stage saturates a _different_ resource; if multiple stages compete for the same resource (e.g., both CPU-bound), concurrency won't help
+**诊断：**1- `go tool trace`——可视化各阶段的资源利用；找顺序执行中 CPU、磁盘或网络闲置而另一资源忙碌的空隙 2- `go tool pprof`（CPU + goroutine profile）——确认每个阶段饱和的是不同资源；多个阶段争同一资源（如都是 CPU 受限）时，并发没有帮助
 
-In rare scenarios where each pipeline stage saturates a _different_ resource (CPU, disk I/O, network), running stages concurrently instead of sequentially can improve throughput — even with batching between stages.
+少见的场景里，流水线每个阶段饱和不同资源（CPU、磁盘 I/O、网络），把阶段并发而非顺序执行能提高吞吐——即使阶段间有攒批。
 
-### The unusual scenario
+### 特殊场景
 
-Imagine processing records: Stage A compresses (CPU-bound), Stage B writes to disk (I/O-bound), Stage C uploads to network (network-bound). Sequential execution wastes resources:
+想象处理记录：阶段 A 做压缩（CPU 受限），阶段 B 写磁盘（I/O 受限），阶段 C 上传网络（网络受限）。顺序执行浪费资源：
 
 ```
 Time:    0       10      20      30      40      50
@@ -186,7 +186,7 @@ Disk:    ..........|BBBBBBBBBB|..........|..........|
 Network: ..........|..........|CCCCCCCCCC|..........|
 ```
 
-Concurrent stages let resources work in parallel:
+阶段并发让各资源并行工作：
 
 ```
 Time:    0       10      20      30      40      50
@@ -195,81 +195,81 @@ Disk:    ..........|BBBBBBBBBB|BB........|
 Network: ..........|..........|CCCCCCCCCC|CC........|
 ```
 
-**Code pattern:**
+**代码模式：**
 
 ```go
-// Each stage runs in its own goroutine, bounded by channel buffers
-compressedCh := make(chan []byte, 100)    // A → B buffer
-uploadedCh := make(chan bool, 100)        // B → C buffer
+// 每个阶段跑在自己的 goroutine，channel 缓冲定界
+compressedCh := make(chan []byte, 100)    // A → B 缓冲
+uploadedCh := make(chan bool, 100)        // B → C 缓冲
 
-// Stage A: CPU-bound compression
+// 阶段 A：CPU 受限压缩
 go func() {
     for record := range inputCh {
-        compressed := compress(record)    // saturates CPU
+        compressed := compress(record)    // 吃满 CPU
         compressedCh <- compressed
     }
     close(compressedCh)
 }()
 
-// Stage B: I/O-bound disk writes
+// 阶段 B：I/O 受限写盘
 go func() {
     for compressed := range compressedCh {
-        diskFile.Write(compressed)        // saturates disk I/O
+        diskFile.Write(compressed)        // 吃满磁盘 I/O
         uploadedCh <- true
     }
     close(uploadedCh)
 }()
 
-// Stage C: network-bound uploads
+// 阶段 C：网络受限上传
 go func() {
     for <-uploadedCh {
-        client.Post(uploadURL, ...)       // saturates network
+        client.Post(uploadURL, ...)       // 吃满网络
     }
 }()
 ```
 
-With batching per stage, total throughput = min(A_throughput, B_throughput, C_throughput). Without concurrency, throughput = sequential sum of stages. **Concurrent stages only help when bottlenecks don't overlap.**
+每阶段攒批时，总吞吐 = min(A_throughput, B_throughput, C_throughput)。不并发时，吞吐 = 各阶段顺序相加。**只有瓶颈不重叠时并发阶段才有帮助。**
 
-### When to use this (and when NOT to)
+### 何时使用（以及何时不用）
 
-**Use concurrent pipelines only when ALL of these are true:**
+**只在以下全部成立时才用并发流水线：**
 
-1. **Resource saturation is predictable and non-overlapping** — You measured that A saturates one resource (e.g., CPU = 95%), B saturates another (disk I/O = 90%), C saturates a third (network = 85%). Overlapping saturation means concurrency adds no benefit.
-2. **Bottleneck shifts don't hurt latency** — Processing order doesn't matter, or records can flow out-of-order through stages.
-3. **Buffering overhead is acceptable** — Inter-stage channels consume memory. For large records, channel buffers can overflow system limits.
-4. **You've benchmarked the alternative** — Profile both sequential and concurrent versions. Sequential + batching often wins because it is simpler and avoids context-switching overhead.
+1. **资源饱和可预测且不重叠**——你实测过 A 饱和一种资源（如 CPU = 95%）、B 饱和另一种（磁盘 I/O = 90%）、C 饱和第三种（网络 = 85%）。饱和重叠意味着并发无收益。
+2. **瓶颈转移不伤延迟**——处理顺序无所谓，或记录可以乱序流过各阶段。
+3. **缓冲开销可接受**——阶段间 channel 占内存。大记录下 channel 缓冲可能顶破系统限制。
+4. **已对比过替代方案的基准**——顺序版与并发版都 profile。顺序 + 攒批常常更好，因为更简单、没有上下文切换开销。
 
-**Avoid concurrent pipelines if:**
+**以下情况避免并发流水线：**
 
-- **Records must be ordered** — Concurrent processing may reorder records; if downstream expects order, you need synchronization that kills the speedup.
-- **Resources overlap** — If A and B both compete for CPU (e.g., both compress), concurrency causes context-switching overhead with no resource utilization gain.
-- **Latency matters more than throughput** — A single record now travels through 3 stages in parallel, increasing per-record latency.
-- **Memory is tight** — Each stage's channel buffer is a memory budget; deeply buffered channels can exhaust available RAM.
+- **记录必须保序**——并发处理可能重排记录；下游要求顺序时，所需的同步会抹掉加速收益。
+- **资源重叠**——A 和 B 都争 CPU（如都做压缩）时，并发只带来上下文切换开销，没有资源利用收益。
+- **延迟比吞吐重要**——单条记录现在并行穿过 3 个阶段，单条延迟反而上升。
+- **内存紧张**——每个阶段的 channel 缓冲都是内存预算；深缓冲 channel 能耗尽可用 RAM。
 
-→ See `samber/cc-skills-golang@golang-concurrency` skill for detailed channel patterns and when to use worker pools instead.
+→ 见 `samber/cc-skills-golang@golang-concurrency` skill：channel 模式细节与何时该用 worker pool。
 
-## Batch Operations
+## 批量操作
 
-**Diagnose:** 1- `go test -bench` — benchmark single-item vs batched operations; expect N-fold improvement in throughput when amortizing per-operation overhead (syscalls, round-trips) 2- `go tool trace` — look for repeated short network/disk operations with idle gaps between them; these gaps represent wasted round-trip time that batching eliminates
+**诊断：**1- `go test -bench`——对比单条与批量操作的基准；摊薄每操作开销（系统调用、往返）后吞吐预期有 N 倍提升 2- `go tool trace`——找反复出现、之间有空隙的短网络/磁盘操作；这些空隙就是攒批能消掉的浪费往返时间
 
-Batching amortizes per-operation overhead (syscalls, network round-trips, transaction costs) across many items. The pattern applies everywhere: I/O, database, network, and even in-memory processing.
+攒批把每操作开销（系统调用、网络往返、事务成本）摊到多条数据上。这个模式到处适用：I/O、数据库、网络、甚至内存处理。
 
-### Database: batch inserts over row-by-row
+### 数据库：批量插入代替逐行
 
-Inserting 1,000 rows one at a time means 1,000 round-trips, 1,000 query parses, and 1,000 transaction commits. A single batch insert does it in one round-trip:
+逐行插 1,000 行意味着 1,000 次往返、1,000 次查询解析、1,000 次事务提交。一次批量插入一个往返搞定：
 
 ```go
-// Bad — 1,000 round-trips, ~500ms
+// 差——1,000 次往返，约 500ms
 for _, user := range users {
     db.Exec("INSERT INTO users (name, email) VALUES ($1, $2)", user.Name, user.Email)
 }
 
-// Good — 1 round-trip with multi-row VALUES, ~5ms
+// 好——多行 VALUES 一次往返，约 5ms
 const batchSize = 1000
 for i := 0; i < len(users); i += batchSize {
     end := min(i+batchSize, len(users))
     batch := users[i:end]
-    // Build multi-row INSERT or use COPY protocol
+    // 构造多行 INSERT 或用 COPY 协议
     tx, _ := db.Begin()
     stmt, _ := tx.Prepare(pq.CopyIn("users", "name", "email"))
     for _, u := range batch { stmt.Exec(u.Name, u.Email) }
@@ -278,32 +278,32 @@ for i := 0; i < len(users); i += batchSize {
 }
 ```
 
-→ See `samber/cc-skills-golang@golang-database` skill for detailed batch patterns and connection pool configuration.
+→ 见 `samber/cc-skills-golang@golang-database` skill：批处理模式与连接池配置细节。
 
-### HTTP: batch API calls
+### HTTP：批量 API 调用
 
-Instead of N individual HTTP requests, send one request with N items when the API supports it:
+API 支持时，一次请求带 N 条数据，代替 N 次单独请求：
 
 ```go
-// Bad — 100 HTTP round-trips
+// 差——100 次 HTTP 往返
 for _, id := range ids {
     resp, _ := client.Get(fmt.Sprintf("/api/users/%s", id))
     // ...
 }
 
-// Good — 1 HTTP request with all IDs
+// 好——一次 HTTP 请求带上全部 ID
 resp, _ := client.Post("/api/users/batch", "application/json",
     bytes.NewReader(marshalIDs(ids)))
 ```
 
-### Channel: batch processing from a stream
+### Channel：流的批量处理
 
-Accumulate items from a channel and process in bulk to reduce per-item overhead:
+从 channel 攒数据再批量处理，摊薄单条开销：
 
 ```go
 func batchProcessor(in <-chan Item, batchSize int) {
     batch := make([]Item, 0, batchSize)
-    ticker := time.NewTicker(100 * time.Millisecond) // flush on timeout too
+    ticker := time.NewTicker(100 * time.Millisecond) // 超时也冲刷
     defer ticker.Stop()
     for {
         select {

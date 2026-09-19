@@ -1,108 +1,108 @@
-# Diagnostic Tools
+# 诊断工具
 
-## Table of Contents
+## 目录
 
-- [Runtime Diagnostics (GODEBUG)](#runtime-diagnostics-godebug)
-    - [Go documentation command](#go-documentation-command)
-    - [GC Tracing](#gc-tracing)
-    - [Scheduler Tracing](#scheduler-tracing)
+- [Runtime 诊断（GODEBUG）](#runtime-诊断godebug)
+    - [Go 文档命令](#go-文档命令)
+    - [GC 追踪](#gc-追踪)
+    - [调度器追踪](#调度器追踪)
     - [GOTRACEBACK](#gotraceback)
-- [Delve Debugger](#delve-debugger)
-    - [Installation](#installation)
-    - [Basic Usage](#basic-usage)
-    - [Common Commands](#common-commands)
-    - [IDE Integration](#ide-integration)
-- [Advanced Analysis](#advanced-analysis)
+- [Delve 调试器](#delve-调试器)
+    - [安装](#安装)
+    - [基本用法](#基本用法)
+    - [常用命令](#常用命令)
+    - [IDE 集成](#ide-集成)
+- [高级分析](#高级分析)
 
-## Runtime Diagnostics (GODEBUG)
+## Runtime 诊断（GODEBUG）
 
-### Go documentation command
+### Go 文档命令
 
-Use `go doc`, not `go tool doc`. Go 1.26 removed the old `cmd/doc` / `go tool doc` path. Go 1.27 added `package@version` lookups (`go doc golang.org/x/tools/cmd/stringer@v0.30.0`) and an `-ex` flag that lists executable examples.
+用 `go doc`，不要用 `go tool doc`。Go 1.26 移除了旧的 `cmd/doc` / `go tool doc` 路径。Go 1.27 加了 `package@version` 查询（`go doc golang.org/x/tools/cmd/stringer@v0.30.0`）和列出可执行示例的 `-ex` flag。
 
-### GC Tracing
+### GC 追踪
 
 ```bash
 GODEBUG=gctrace=1 ./app
 ```
 
-**Output:**
+**输出：**
 
 ```
 gc 123 @45.67s 4%: 0.8+10+0.3 ms clock, 6+5/10/0 ms cpu, 512->300->150 MB
 ```
 
-| Field            | Meaning                                         |
-| ---------------- | ----------------------------------------------- |
-| 4%               | GC CPU overhead (if >10%, over-allocating)      |
-| 512->300->150 MB | Heap at GC start -> heap at GC end -> live heap |
-| Large pause      | Allocation storm                                |
+| 字段             | 含义                                 |
+| ---------------- | ------------------------------------ |
+| 4%               | GC CPU 开销（>10% 说明分配过多）     |
+| 512->300->150 MB | GC 开始时堆 -> GC 结束时堆 -> 存活堆 |
+| 大停顿           | 分配风暴                             |
 
-### Scheduler Tracing
+### 调度器追踪
 
 ```bash
 GODEBUG=schedtrace=1000,scheddetail=1 ./app
 ```
 
-| Signal               | Meaning                            |
-| -------------------- | ---------------------------------- |
-| runqueue high        | CPU saturation, goroutines waiting |
-| idleprocs=0          | Fully busy, at capacity            |
-| spinningthreads      | Lock contention                    |
-| threads > gomaxprocs | Blocking syscalls                  |
+| 信号                 | 含义                       |
+| -------------------- | -------------------------- |
+| runqueue 高          | CPU 饱和，goroutine 在排队 |
+| idleprocs=0          | 满载，到容量上限           |
+| spinningthreads      | 锁竞争                     |
+| threads > gomaxprocs | 阻塞型 syscall             |
 
 ### GOTRACEBACK
 
-Get full stack traces on panic:
+panic 时拿完整堆栈：
 
 ```bash
 GOTRACEBACK=all ./app
 ```
 
-| Level    | Shows                                 |
-| -------- | ------------------------------------- |
-| `none`   | No stack traces                       |
-| `single` | Current goroutine only (default)      |
-| `all`    | All goroutines (useful for deadlocks) |
-| `system` | All goroutines + runtime frames       |
+| 级别     | 显示                         |
+| -------- | ---------------------------- |
+| `none`   | 无堆栈                       |
+| `single` | 仅当前 goroutine（默认）     |
+| `all`    | 所有 goroutine（查死锁有用） |
+| `system` | 所有 goroutine + runtime 帧  |
 
 ---
 
-## Delve Debugger
+## Delve 调试器
 
-### Installation
+### 安装
 
 ```bash
 go install github.com/go-delve/delve/cmd/dlv@latest
 ```
 
-### Basic Usage
+### 基本用法
 
 ```bash
-dlv debug ./cmd/myapp          # debug a program
-dlv test ./mypackage           # debug a test
-dlv attach 12345               # attach to running process
-dlv exec ./myapp -- --flag=v   # execute binary with args
+dlv debug ./cmd/myapp          # 调试程序
+dlv test ./mypackage           # 调试测试
+dlv attach 12345               # attach 到运行中的进程
+dlv exec ./myapp -- --flag=v   # 带参数执行二进制
 ```
 
-### Common Commands
+### 常用命令
 
 ```
-break main.main      # set breakpoint
-break file.go:42     # break at line
-continue             # continue execution
-next                 # step over (n)
-step                 # step into (s)
-stepout              # step out
-print variable       # print variable
-locals               # print all locals
-args                 # print function arguments
-goroutines           # list all goroutines
-goroutine 5          # switch to goroutine 5
-stack                # show stack trace
+break main.main      # 设断点
+break file.go:42     # 在某行断
+continue             # 继续执行
+next                 # 单步跳过（n）
+step                 # 单步进入（s）
+stepout              # 步出
+print variable       # 打印变量
+locals               # 打印所有局部变量
+args                 # 打印函数参数
+goroutines           # 列出所有 goroutine
+goroutine 5          # 切到 goroutine 5
+stack                # 显示堆栈
 ```
 
-### IDE Integration
+### IDE 集成
 
 **VS Code:**
 
@@ -123,10 +123,10 @@ stack                # show stack trace
 }
 ```
 
-**GoLand:** Run -> Edit Configurations -> Go Build. Click gutter to set breakpoints. Use Debugger tab.
+**GoLand：**Run -> Edit Configurations -> Go Build。点行号槽设断点。用 Debugger 标签页。
 
 ---
 
-## Advanced Analysis
+## 高级分析
 
-→ See `samber/cc-skills-golang@golang-benchmark` skill (compiler-analysis.md) for detailed guides on escape analysis interpretation, assembly inspection, and compiler diagnostics (SSA dump, inlining decisions). See also trace.md for execution tracer analysis.
+→ 逃逸分析解读、汇编检查与编译器诊断（SSA dump、内联决策）的详细指南见 `samber/cc-skills-golang@golang-benchmark` skill（compiler-analysis.md）。执行 tracer 分析另见 trace.md。

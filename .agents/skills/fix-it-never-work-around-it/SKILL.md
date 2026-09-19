@@ -1,40 +1,40 @@
 ---
 name: fix-it-never-work-around-it
-description: "Stops execution and fixes root cause when commands, builds, scripts, or tools fail unexpectedly. Triggers on workaround language: 'directly', 'instead', 'alternatively', 'skip', 'fall back', 'work around', 'isn't working', 'broken', 'manually'. Activates on any unexpected non-zero exit code or process failure."
+description: 命令、构建、脚本或工具意外失败时，停下执行并修根因。由绕路措辞触发：'directly' 'instead' 'alternatively' 'skip' 'fall back' 'work around' 'isn't working' 'broken' 'manually'。任何意外非零退出码或进程失败都激活。
 version: 1.0.0
 ---
 
 # Fix It, Never Work Around It
 
-## Critical Rules
+## 铁律
 
-🚨 **Rule 1: Follow the prescribed process exactly.** If a step in the process fails, fix the root cause. Never skip, replace, or approximate the step. If you don't fix it, the problem recurs and all subsequent work is compromised. This does not apply to expected failures like TDD red phase — a failing test is the process working correctly.
+🚨 **规则 1：严格按既定流程走。**流程中某一步失败，修根因。永不跳过、替换、近似这一步。不修，问题就会复发，后续所有工作都被污染。预期内的失败不适用此条，比如 TDD 红阶段——测试失败正是流程在正常工作。
 
-Example: The code review subagent failed. ❌ "I'll review my own code and push." ✅ Fix why the subagent failed.
+例：代码评审 subagent 挂了。❌「那我自己 review 然后 push。」✅ 去修 subagent 为什么挂。
 
-🚨 **Rule 2: Follow instructions exactly.** If a tool or command doesn't produce the expected result and there is no obvious alternative that produces the exact same result, stop immediately. Fix the root cause or ask for help. Never fabricate, approximate, or substitute.
+🚨 **规则 2：严格按指令走。**工具或命令没产出预期结果、且不存在产出完全相同结果的显然替代时，立刻停。修根因或求助。永不编造、近似、顶替。
 
-Example: API authentication failed. ❌ "I'll define some likely values instead." ✅ Fix the authentication or ask the user.
+例：API 认证失败。❌「那我编几个像真的值顶上。」✅ 修认证或问用户。
 
-## Workaround Detection
+## 绕路探测
 
-If you catch yourself using any of these phrases, you are about to workaround. STOP.
+发现自己在用下面这些措辞，你就是在绕路。停。
 
-| Workaround Signal                           | What You're Actually Doing  |
-| ------------------------------------------- | --------------------------- |
-| "Let me check via X **directly**"           | Bypassing the broken tool   |
-| "X **is broken**, let me use Y **instead**" | Abandoning the fix          |
-| "Let me try a **different approach**"       | Avoiding the actual problem |
-| "I'll **work around** this by..."           | Literally saying it         |
-| "**Alternatively**, we can..."              | Proposing a bypass          |
-| "Since X **isn't working**, let me..."      | Giving up on fixing X       |
-| "Let me just **manually**..."               | Bypassing automation        |
-| "I'll **skip** this step and..."            | Ignoring the failure        |
-| "Let me **fall back** to..."                | Retreating from the fix     |
+| 绕路信号                      | 你实际在做的事 |
+| ----------------------------- | -------------- |
+| 「让我**直接**通过 X 看」     | 绕过坏掉的工具 |
+| 「X **坏了**，**改用** Y」    | 放弃修复       |
+| 「换个**别的办法**试试」      | 躲开真正的问题 |
+| 「我**绕一下**这个……」        | 字面意义的绕路 |
+| 「**或者**，我们可以……」      | 提议旁路       |
+| 「既然 X **不好使**，那就……」 | 放弃修 X       |
+| 「我**手动**……一下」          | 绕过自动化     |
+| 「这步**跳了**，然后……」      | 无视失败       |
+| 「**退回**到……」              | 从修复撤退     |
 
-## Anti-patterns
+## 反模式
 
-### ❌ The Helpful Bypass
+### ❌ 热心旁路
 
 ```
 ⏺ Bash(npm run build)
@@ -44,9 +44,9 @@ If you catch yourself using any of these phrases, you are about to workaround. S
   source files directly to understand the code structure.
 ```
 
-The build is broken. Reading source files "directly" doesn't fix the build.
+构建是坏的。「直接」去读源文件并没有修好构建。
 
-### ❌ The Tool Swap
+### ❌ 换工具
 
 ```
 ⏺ Bash(nx show projects)
@@ -56,18 +56,18 @@ The build is broken. Reading source files "directly" doesn't fix the build.
   via gh directly and read the PRD.
 ```
 
-The NX project graph is broken. Using `gh` doesn't fix the project graph. Every NX command will fail until this is fixed.
+NX project graph 是坏的。用 `gh` 并没有修好 project graph。修好之前每条 NX 命令都会挂。
 
-## Mandatory Checklist
+## 强制检查单
 
-When a command or process fails unexpectedly:
+命令或进程意外失败时：
 
-1. [ ] Verify you have STOPPED your current task
-2. [ ] Verify you are investigating the ROOT CAUSE of the failure
-3. [ ] Verify your proposed fix makes the ORIGINAL command/process work
-4. [ ] Verify you are NOT using a different tool/source/approach to bypass
-5. [ ] Verify the original command succeeds after your fix
+1. [ ] 确认你已**停下**当前任务
+2. [ ] 确认你在查失败的**根因**
+3. [ ] 确认你提的修复能让**原**命令/进程工作
+4. [ ] 确认你**没有**用别的工具/来源/办法旁路
+5. [ ] 确认修复后原命令能跑通
 
-Do not resume your previous task until all checks pass.
+全部勾选之前，不许回到先前的任务。
 
-🚨 **REMEMBER: Following the process and following instructions is MORE important than achieving a result by any means necessary. Consistency and reliability are crucial. Do not improvise, do not try to be helpful when the process cannot be followed.**
+🚨 **记住：遵守流程、遵守指令比不择手段拿到结果更重要。一致性与可靠性是关键。不要即兴发挥；流程走不下去时，不要靠「帮忙」蒙混。**

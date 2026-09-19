@@ -1,41 +1,41 @@
-# Project Structure and Module Management
+# 项目结构与 module 管理
 
-## Standard Project Layout
+## 标准项目布局
 
 ```
 myproject/
-├── cmd/                    # Main applications
+├── cmd/                    # 主应用
 │   ├── server/
-│   │   └── main.go        # Entry point for server
+│   │   └── main.go        # server 入口
 │   └── cli/
-│       └── main.go        # Entry point for CLI tool
-├── internal/              # Private application code
-│   ├── api/              # API handlers
-│   ├── service/          # Business logic
-│   └── repository/       # Data access layer
-├── pkg/                   # Public library code
-│   └── models/           # Shared models
-├── api/                   # API definitions
-│   ├── openapi.yaml      # OpenAPI spec
-│   └── proto/            # Protocol buffers
-├── web/                   # Web assets
+│       └── main.go        # CLI 工具入口
+├── internal/              # 私有应用代码
+│   ├── api/              # API handler
+│   ├── service/          # 业务逻辑
+│   └── repository/       # 数据访问层
+├── pkg/                   # 公开库代码
+│   └── models/           # 共享 model
+├── api/                   # API 定义
+│   ├── openapi.yaml      # OpenAPI 规格
+│   └── proto/            # Protocol Buffers
+├── web/                   # Web 资源
 │   ├── static/
 │   └── templates/
-├── scripts/               # Build and install scripts
-├── configs/              # Configuration files
-├── deployments/          # Docker, K8s configs
-├── test/                 # Additional test data
-├── docs/                 # Documentation
-├── go.mod               # Module definition
-├── go.sum               # Dependency checksums
-├── Makefile             # Build automation
+├── scripts/               # 构建与安装脚本
+├── configs/              # 配置文件
+├── deployments/          # Docker、K8s 配置
+├── test/                 # 额外测试数据
+├── docs/                 # 文档
+├── go.mod               # module 定义
+├── go.sum               # 依赖校验和
+├── Makefile             # 构建自动化
 └── README.md
 ```
 
-## go.mod Basics
+## go.mod 基础
 
 ```go
-// Initialize module
+// 初始化 module
 // go mod init github.com/user/project
 
 module github.com/user/myproject
@@ -49,87 +49,87 @@ require (
 )
 
 require (
-    // Indirect dependencies (automatically managed)
+    // 间接依赖（自动管理）
     github.com/bytedance/sonic v1.9.1 // indirect
     github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
 )
 
-// Replace directive for local development
+// 本地开发用 replace 指令
 replace github.com/user/mylib => ../mylib
 
-// Retract directive to mark bad versions
-retract v1.0.1 // Contains critical bug
+// 用 retract 指令标记问题版本
+retract v1.0.1 // 含严重 bug
 ```
 
-## Module Commands
+## module 命令
 
 ```bash
-# Initialize module
+# 初始化 module
 go mod init github.com/user/project
 
-# Add missing dependencies
+# 补全缺失依赖
 go mod tidy
 
-# Download dependencies
+# 下载依赖
 go mod download
 
-# Verify dependencies
+# 校验依赖
 go mod verify
 
-# Show module graph
+# 显示 module 依赖图
 go mod graph
 
-# Show why package is needed
+# 显示为何需要该包
 go mod why github.com/user/package
 
-# Vendor dependencies (copy to vendor/)
+# vendor 依赖（复制到 vendor/）
 go mod vendor
 
-# Update dependency
+# 更新依赖
 go get -u github.com/user/package
 
-# Update to specific version
+# 更新到指定版本
 go get github.com/user/package@v1.2.3
 
-# Update all dependencies
+# 更新全部依赖
 go get -u ./...
 
-# Remove unused dependencies
+# 移除未使用的依赖
 go mod tidy
 ```
 
-## Internal Packages
+## internal 包
 
 ```go
-// internal/ packages can only be imported by code in the parent tree
+// internal/ 包只能被父目录树内的代码 import
 
 myproject/
 ├── internal/
-│   ├── auth/           # Can only be imported by myproject
+│   ├── auth/           # 只能被 myproject import
 │   │   └── jwt.go
 │   └── database/
 │       └── postgres.go
 └── pkg/
-    └── models/         # Can be imported by anyone
+    └── models/         # 可被任何人 import
         └── user.go
 
-// This works (same project):
+// 这样可以（同一项目）：
 import "github.com/user/myproject/internal/auth"
 
-// This fails (different project):
-import "github.com/other/project/internal/auth" // Error!
+// 这样不行（不同项目）：
+import "github.com/other/project/internal/auth" // 报错！
 
-// Internal subdirectories
+// internal 子目录
 myproject/
 └── api/
-    └── internal/       # Can only be imported by code in api/
+    └── internal/       # 只能被 api/ 内代码 import
         └── helpers.go
 ```
 
-## Package Organization
+## 包组织
 
 ```go
-// user/user.go - Domain package
+// user/user.go——领域包
 package user
 
 import (
@@ -137,14 +137,14 @@ import (
     "time"
 )
 
-// User represents a user entity
+// User 表示用户实体
 type User struct {
     ID        string
     Email     string
     CreatedAt time.Time
 }
 
-// Repository defines data access interface
+// Repository 定义数据访问 interface
 type Repository interface {
     Create(ctx context.Context, user *User) error
     GetByID(ctx context.Context, id string) (*User, error)
@@ -152,12 +152,12 @@ type Repository interface {
     Delete(ctx context.Context, id string) error
 }
 
-// Service handles business logic
+// Service 处理业务逻辑
 type Service struct {
     repo Repository
 }
 
-// NewService creates a new user service
+// NewService 创建新的 user service
 func NewService(repo Repository) *Service {
     return &Service{repo: repo}
 }
@@ -172,11 +172,11 @@ func (s *Service) RegisterUser(ctx context.Context, email string) (*User, error)
 }
 ```
 
-## Multi-Module Repository (Monorepo)
+## 多 module 仓库（monorepo）
 
 ```
 monorepo/
-├── go.work              # Workspace file
+├── go.work              # workspace 文件
 ├── services/
 │   ├── api/
 │   │   ├── go.mod
@@ -198,13 +198,13 @@ use (
     ./shared/models
 )
 
-// Commands:
+// 命令：
 // go work init ./services/api ./services/worker
 // go work use ./shared/models
 // go work sync
 ```
 
-## Build Tags and Constraints
+## build tag 与构建约束
 
 ```go
 // +build integration
@@ -215,95 +215,95 @@ package myapp
 import "testing"
 
 func TestIntegration(t *testing.T) {
-    // Integration test code
+    // 集成测试代码
 }
 
-// Build: go test -tags=integration
+// 构建：go test -tags=integration
 
-// File-level build constraints (Go 1.17+)
+// 文件级构建约束（Go 1.17+）
 //go:build linux && amd64
 
 package myapp
 
-// Multiple constraints
+// 多个约束
 //go:build linux || darwin
 //go:build amd64
 
-// Negation
+// 取反
 //go:build !windows
 
-// Common tags:
+// 常用 tag：
 // linux, darwin, windows, freebsd
 // amd64, arm64, 386, arm
 // cgo, !cgo
 ```
 
-## Makefile Example
+## Makefile 示例
 
 ```makefile
 # Makefile
 .PHONY: build test lint clean run
 
-# Variables
+# 变量
 BINARY_NAME=myapp
 BUILD_DIR=bin
 GO=go
 GOFLAGS=-v
 
-# Build the application
+# 构建应用
 build:
 	$(GO) build $(GOFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/server
 
-# Run tests
+# 跑测试
 test:
 	$(GO) test -v -race -coverprofile=coverage.out ./...
 
-# Run tests with coverage report
+# 跑测试并生成覆盖率报告
 test-coverage: test
 	$(GO) tool cover -html=coverage.out
 
-# Run linters
+# 跑 linter
 lint:
 	golangci-lint run ./...
 
-# Format code
+# 格式化代码
 fmt:
 	$(GO) fmt ./...
 	goimports -w .
 
-# Run the application
+# 运行应用
 run:
 	$(GO) run ./cmd/server
 
-# Clean build artifacts
+# 清理构建产物
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -f coverage.out
 
-# Install dependencies
+# 安装依赖
 deps:
 	$(GO) mod download
 	$(GO) mod tidy
 
-# Build for multiple platforms
+# 多平台构建
 build-all:
 	GOOS=linux GOARCH=amd64 $(GO) build -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/server
 	GOOS=darwin GOARCH=amd64 $(GO) build -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/server
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/server
 
-# Run with race detector
+# 带 race detector 运行
 run-race:
 	$(GO) run -race ./cmd/server
 
-# Generate code
+# 生成代码
 generate:
 	$(GO) generate ./...
 
-# Docker build
+# Docker 构建
 docker-build:
 	docker build -t $(BINARY_NAME):latest .
 
-# Help
+# 帮助
 help:
 	@echo "Available targets:"
 	@echo "  build         - Build the application"
@@ -316,35 +316,35 @@ help:
 	@echo "  deps          - Install dependencies"
 ```
 
-## Dockerfile Multi-Stage Build
+## Dockerfile 多阶段构建
 
 ```dockerfile
-# Build stage
+# 构建阶段
 FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
-# Copy go mod files
+# 复制 go mod 文件
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
+# 复制源码
 COPY . .
 
-# Build binary
+# 构建二进制
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/server
 
-# Final stage
+# 最终阶段
 FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
-# Copy binary from builder
+# 从 builder 复制二进制
 COPY --from=builder /app/server .
 
-# Copy config files if needed
+# 需要时复制配置文件
 COPY --from=builder /app/configs ./configs
 
 EXPOSE 8080
@@ -352,7 +352,7 @@ EXPOSE 8080
 CMD ["./server"]
 ```
 
-## Version Information
+## 版本信息
 
 ```go
 // version/version.go
@@ -361,13 +361,13 @@ package version
 import "runtime"
 
 var (
-    // Set via ldflags during build
+    // 构建时经 ldflags 注入
     Version   = "dev"
     GitCommit = "none"
     BuildTime = "unknown"
 )
 
-// Info returns version information
+// Info 返回版本信息
 func Info() map[string]string {
     return map[string]string{
         "version":    Version,
@@ -379,13 +379,13 @@ func Info() map[string]string {
     }
 }
 
-// Build with version info:
+// 带版本信息构建：
 // go build -ldflags "-X github.com/user/project/version.Version=1.0.0 \
 //   -X github.com/user/project/version.GitCommit=$(git rev-parse HEAD) \
 //   -X github.com/user/project/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-## Go Generate
+## go generate
 
 ```go
 // models/user.go
@@ -398,7 +398,7 @@ type UserRepository interface {
     SaveUser(user *User) error
 }
 
-// tools.go - Track tool dependencies
+// tools.go——跟踪工具依赖
 //go:build tools
 
 package tools
@@ -408,14 +408,14 @@ import (
     _ "golang.org/x/tools/cmd/stringer"
 )
 
-// Install tools:
+// 安装工具：
 // go install github.com/golang/mock/mockgen@latest
 
-// Run generate:
+// 运行生成：
 // go generate ./...
 ```
 
-## Configuration Management
+## 配置管理
 
 ```go
 // config/config.go
@@ -453,7 +453,7 @@ type RedisConfig struct {
     DB       int    `envconfig:"REDIS_DB" default:"0"`
 }
 
-// Load loads configuration from environment
+// Load 从环境变量加载配置
 func Load() (*Config, error) {
     var cfg Config
     if err := envconfig.Process("", &cfg); err != nil {
@@ -463,15 +463,15 @@ func Load() (*Config, error) {
 }
 ```
 
-## Quick Reference
+## 速查表
 
-| Command                      | Description             |
-| ---------------------------- | ----------------------- |
-| `go mod init`                | Initialize module       |
-| `go mod tidy`                | Add/remove dependencies |
-| `go mod download`            | Download dependencies   |
-| `go get package@version`     | Add/update dependency   |
-| `go build -ldflags "-X ..."` | Set version info        |
-| `go generate ./...`          | Run code generation     |
-| `GOOS=linux go build`        | Cross-compile           |
-| `go work init`               | Initialize workspace    |
+| 命令                         | 说明             |
+| ---------------------------- | ---------------- |
+| `go mod init`                | 初始化 module    |
+| `go mod tidy`                | 增删依赖         |
+| `go mod download`            | 下载依赖         |
+| `go get package@version`     | 添加/更新依赖    |
+| `go build -ldflags "-X ..."` | 注入版本信息     |
+| `go generate ./...`          | 跑代码生成       |
+| `GOOS=linux go build`        | 交叉编译         |
+| `go work init`               | 初始化 workspace |

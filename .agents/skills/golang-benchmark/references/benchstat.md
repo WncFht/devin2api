@@ -1,97 +1,97 @@
-# benchstat Reference
+# benchstat 参考
 
-`benchstat` computes statistical summaries and A/B comparisons of Go benchmark results. A single benchmark run tells you nothing about variance — `benchstat` tells you whether the difference between two runs is real or noise.
+`benchstat` 对 Go 基准测试结果做统计摘要与 A/B 对比。单次基准测试运行说明不了任何方差信息——`benchstat` 告诉你两次运行之间的差异是真实的还是噪声。
 
-## Table of Contents
+## 目录
 
-- [Installation](#installation)
-- [Usage](#usage)
-- [Basic Workflow](#basic-workflow)
-    - [Step 0: Write benchmarks](#step-0-write-benchmarks)
-    - [Step 1: Measure baseline](#step-1-measure-baseline)
-    - [Step 2: Make your change](#step-2-make-your-change)
-    - [Step 3: Measure again](#step-3-measure-again)
-    - [Step 4: Compare](#step-4-compare)
-- [Reading the Output](#reading-the-output)
-    - [Unit normalization](#unit-normalization)
-    - [When the `~` symbol appears](#when-the--symbol-appears)
-- [Flags Reference](#flags-reference)
-    - [Projection flags](#projection-flags)
-    - [Filter flag](#filter-flag)
-    - [Input labeling](#input-labeling)
-- [Filter Expression Syntax](#filter-expression-syntax)
-    - [Matching operators](#matching-operators)
-    - [Logical operators](#logical-operators)
-    - [Filter key types](#filter-key-types)
-    - [Filter examples](#filter-examples)
-- [Projection Examples](#projection-examples)
-    - [Default: before/after file comparison](#default-beforeafter-file-comparison)
-    - [Compare sub-benchmark parameters within a single file](#compare-sub-benchmark-parameters-within-a-single-file)
-    - [Simplify rows to base name only](#simplify-rows-to-base-name-only)
-    - [Control column order](#control-column-order)
-    - [Group by GOMAXPROCS](#group-by-gomaxprocs)
-    - [Separate tables per package](#separate-tables-per-package)
-    - [Ignore a dimension](#ignore-a-dimension)
-    - [Compare three versions](#compare-three-versions)
-    - [Cross-dimensional comparison](#cross-dimensional-comparison)
-- [Unit Metadata](#unit-metadata)
+- [安装](#安装)
+- [用法](#用法)
+- [基本工作流](#基本工作流)
+    - [第 0 步：写基准测试](#第-0-步写基准测试)
+    - [第 1 步：测量基线](#第-1-步测量基线)
+    - [第 2 步：做你的变更](#第-2-步做你的变更)
+    - [第 3 步：再次测量](#第-3-步再次测量)
+    - [第 4 步：对比](#第-4-步对比)
+- [读懂输出](#读懂输出)
+    - [单位归一化](#单位归一化)
+    - [`~` 符号何时出现](#-符号何时出现)
+- [Flag 参考](#flag-参考)
+    - [投影 flag](#投影-flag)
+    - [过滤 flag](#过滤-flag)
+    - [输入打标](#输入打标)
+- [过滤表达式语法](#过滤表达式语法)
+    - [匹配运算符](#匹配运算符)
+    - [逻辑运算符](#逻辑运算符)
+    - [过滤键类型](#过滤键类型)
+    - [过滤示例](#过滤示例)
+- [投影示例](#投影示例)
+    - [默认：前后文件对比](#默认前后文件对比)
+    - [单文件内对比子基准参数](#单文件内对比子基准参数)
+    - [行只保留基准名](#行只保留基准名)
+    - [控制列顺序](#控制列顺序)
+    - [按 GOMAXPROCS 分组](#按-gomaxprocs-分组)
+    - [按包分表](#按包分表)
+    - [忽略一个维度](#忽略一个维度)
+    - [对比三个版本](#对比三个版本)
+    - [跨维度对比](#跨维度对比)
+- [单元元数据](#单元元数据)
     - [`assume=exact`](#assumeexact)
-    - [`assume=nothing` (default)](#assumenothing-default)
-- [Interleaving Runs](#interleaving-runs)
-- [How Many Runs?](#how-many-runs)
-- [Single-File Summary](#single-file-summary)
-- [Common Pitfalls](#common-pitfalls)
-- [benchstat in CI](#benchstat-in-ci)
+    - [`assume=nothing`（默认）](#assumenothing默认)
+- [交错运行](#交错运行)
+- [要跑多少次](#要跑多少次)
+- [单文件摘要](#单文件摘要)
+- [常见坑](#常见坑)
+- [CI 中的 benchstat](#ci-中的-benchstat)
 
-## Installation
+## 安装
 
 ```bash
 go install golang.org/x/perf/cmd/benchstat@latest
 ```
 
-## Usage
+## 用法
 
 ```bash
 benchstat [flags] inputs...
 ```
 
-Each input is a file containing `go test -bench` output. Optionally label inputs with `label=path` syntax.
+每个输入是一个包含 `go test -bench` 输出的文件。可选地用 `label=path` 语法给输入打标。
 
-## Basic Workflow
+## 基本工作流
 
-### Step 0: Write benchmarks
+### 第 0 步：写基准测试
 
-Use the standard Go benchmark function signature in `*_test.go`:
+在 `*_test.go` 中使用标准 Go 基准测试函数签名：
 
-### Step 1: Measure baseline
+### 第 1 步：测量基线
 
-Run benchmarks with `-count=10` or more. Each run produces one data point — you need at least 10 to compute a meaningful confidence interval:
+用 `-count=10` 或更多跑基准测试。每次运行产生一个数据点——至少要 10 个才能算出有意义置信区间：
 
 ```bash
 go test -run='^$' -bench=BenchmarkParse -benchmem -count=10 ./pkg/parser | tee old.txt
 ```
 
-`-run='^$'` skips unit tests so only benchmarks run — avoids wasting time on tests during measurement sessions.
+`-run='^$'` 跳过单元测试，只跑基准测试——测量会话期间不浪费跑测试的时间。
 
-### Step 2: Make your change
+### 第 2 步：做你的变更
 
-Edit the code you want to optimize.
+编辑你要优化的代码。
 
-### Step 3: Measure again
+### 第 3 步：再次测量
 
-Same command, same flags, same machine, same load conditions:
+同一条命令、同一批 flag、同一台机器、同样的负载条件：
 
 ```bash
 go test -run='^$' -bench=BenchmarkParse -benchmem -count=10 ./pkg/parser | tee new.txt
 ```
 
-### Step 4: Compare
+### 第 4 步：对比
 
 ```bash
 benchstat old.txt new.txt
 ```
 
-Output:
+输出：
 
 ```
 goos: linux
@@ -111,269 +111,269 @@ Parse-32    1.024Ki ± 0%   0.512Ki ± 0%  -50.00% (p=0.000 n=10)
 Parse-32    12.00 ± 0%   6.000 ± 0%  -50.00% (p=0.000 n=10)
 ```
 
-## Reading the Output
+## 读懂输出
 
-| Element                       | Meaning                                                                          | What to look for                                                                                                          |
-| ----------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **median** (e.g., `4.592µ`)   | Central value across runs — more robust than mean because outliers don't skew it | The reference number for this benchmark                                                                                   |
-| **± N%** (e.g., `± 2%`)       | Half-width of the 95% confidence interval as a percentage of the median          | Low (≤2%) = stable measurement. High (>5%) = noisy — investigate noise sources before trusting results                    |
-| **vs base** (e.g., `-33.78%`) | Percentage change from the first input (base) to subsequent inputs               | Negative = faster/smaller. Positive = slower/larger                                                                       |
-| **p=N** (e.g., `p=0.000`)     | p-value from Mann-Whitney U-test (non-parametric)                                | <0.05 = statistically significant. ≥0.05 = difference could be noise                                                      |
-| **n=N** (e.g., `n=10`)        | Number of samples used in the comparison                                         | Should usually match your `-count`; if it does not, check that each input file contains the same benchmark rows and units |
-| **`~`**                       | No statistically significant difference detected                                 | Do NOT claim improvement — the change might be zero                                                                       |
-| **geomean** row               | Geometric mean of changes across all benchmarks in the table                     | Overall proportional change; useful when comparing many benchmarks at once                                                |
+| 元素                        | 含义                                                   | 看什么                                                                           |
+| --------------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| **median**（如 `4.592µ`）   | 多次运行的中位值——比均值更稳健，因为离群值不会把它带偏 | 该基准测试的参考数值                                                             |
+| **± N%**（如 `± 2%`）       | 95% 置信区间的半宽，占中位数的百分比                   | 低（≤2%）= 测量稳定。高（>5%）= 噪声大——先排查噪声源再信任结果                   |
+| **vs base**（如 `-33.78%`） | 从第一个输入（base）到后续输入的百分比变化             | 负数 = 更快/更小。正数 = 更慢/更大                                               |
+| **p=N**（如 `p=0.000`）     | Mann-Whitney U 检验（非参数）的 p 值                   | <0.05 = 统计显著。≥0.05 = 差异可能只是噪声                                       |
+| **n=N**（如 `n=10`）        | 参与对比的样本数                                       | 通常应与你的 `-count` 一致；不一致时检查每个输入文件是否含相同的基准测试行与单位 |
+| **`~`**                     | 未检测到统计显著差异                                   | 不要宣称改进——变化可能为零                                                       |
+| **geomean** 行              | 表中全部基准测试变化的几何平均                         | 整体比例变化；一次对比大量基准测试时有用                                         |
 
-### Unit normalization
+### 单位归一化
 
-benchstat automatically normalizes units for display:
+benchstat 自动归一化显示单位：
 
-- `ns/op` → displayed as `sec/op` (with µ, m prefixes) to avoid nonsensical `µns/op`
-- `MB/s` → displayed as `B/s` (with K, M, G prefixes)
+- `ns/op` → 显示为 `sec/op`（带 µ、m 前缀），避免出现莫名其妙的 `µns/op`
+- `MB/s` → 显示为 `B/s`（带 K、M、G 前缀）
 
-### When the `~` symbol appears
+### `~` 符号何时出现
 
 ```
 Parse-32    4.592µ ± 8%   4.481µ ± 7%  ~ (p=0.089 n=10)
 ```
 
-This means benchstat cannot distinguish the difference from random noise. The wide confidence intervals (±8%, ±7%) overlap. Do not claim improvement. Options:
+这表示 benchstat 无法把该差异与随机噪声区分开。两个宽置信区间（±8%、±7%）互相重叠。不要宣称改进。可选项：
 
-- Increase `-count` to 20+ (narrower CI may reveal a real difference)
-- Reduce noise sources (close applications, plug in power, use dedicated machine)
-- Accept that the change has no measurable effect on this benchmark
+- 把 `-count` 提到 20+（更窄的 CI 可能显出真实差异）
+- 减少噪声源（关掉无关应用、接上电源、用专用机器）
+- 接受该变更对这个基准测试没有可度量影响
 
-## Flags Reference
+## Flag 参考
 
-### Projection flags
+### 投影 flag
 
-These flags control how benchmark results are grouped into tables, rows, and columns.
+这些 flag 控制基准测试结果如何分组为表、行、列。
 
-| Flag           | Default     | Purpose                                                         |
-| -------------- | ----------- | --------------------------------------------------------------- |
-| `-table KEYS`  | `.config`   | Group results into separate tables by these keys                |
-| `-row KEYS`    | `.fullname` | Group results into table rows by these keys                     |
-| `-col KEYS`    | `.file`     | Compare across columns with different values of these keys      |
-| `-ignore KEYS` | (none)      | Omit keys from grouping — suppresses "benchmarks vary" warnings |
+| Flag           | 默认值      | 用途                                          |
+| -------------- | ----------- | --------------------------------------------- |
+| `-table KEYS`  | `.config`   | 按这些键把结果分组为多个表                    |
+| `-row KEYS`    | `.fullname` | 按这些键把结果分组为表内行                    |
+| `-col KEYS`    | `.file`     | 按这些键的不同值分列对比                      |
+| `-ignore KEYS` | （无）      | 分组时忽略这些键——压制 "benchmarks vary" 警告 |
 
-**Available keys:**
+**可用的键：**
 
-| Key           | Meaning                                                                           | Example value                              |
-| ------------- | --------------------------------------------------------------------------------- | ------------------------------------------ |
-| `.name`       | Base benchmark name (without sub-benchmark config)                                | `Parse` from `BenchmarkParse/size=4k-16`   |
-| `.fullname`   | Full name including sub-benchmark configuration                                   | `Parse/size=4k-16`                         |
-| `.file`       | Input file name or custom label                                                   | `old.txt` or `baseline`                    |
-| `.config`     | All file-level configuration keys combined                                        | `goos/goarch/pkg/cpu`                      |
-| `.unit`       | Metric unit name                                                                  | `sec/op`, `B/op`, `allocs/op`              |
-| `/{name-key}` | Per-benchmark sub-name key                                                        | `/size` extracts `4k` from `Parse/size=4k` |
-| `/gomaxprocs` | GOMAXPROCS value — recognizes both `/gomaxprocs=N` and the `-N` suffix convention | `16` from `Parse-16`                       |
-| `goos`        | Operating system (from benchmark output header)                                   | `linux`, `darwin`                          |
-| `goarch`      | Architecture (from benchmark output header)                                       | `amd64`, `arm64`                           |
-| `pkg`         | Package path (from benchmark output header)                                       | `myapp/pkg/parser`                         |
-| `cpu`         | CPU model (from benchmark output header)                                          | `AMD Ryzen 9 5950X`                        |
+| 键            | 含义                                                         | 示例值                                   |
+| ------------- | ------------------------------------------------------------ | ---------------------------------------- |
+| `.name`       | 基准测试名本体（不含子基准配置）                             | `BenchmarkParse/size=4k-16` 中的 `Parse` |
+| `.fullname`   | 含子基准配置的完整名                                         | `Parse/size=4k-16`                       |
+| `.file`       | 输入文件名或自定义标签                                       | `old.txt` 或 `baseline`                  |
+| `.config`     | 全部文件级配置键的组合                                       | `goos/goarch/pkg/cpu`                    |
+| `.unit`       | 指标单位名                                                   | `sec/op`、`B/op`、`allocs/op`            |
+| `/{name-key}` | 每个基准的子名键                                             | `/size` 从 `Parse/size=4k` 提取 `4k`     |
+| `/gomaxprocs` | GOMAXPROCS 值——同时识别 `/gomaxprocs=N` 与 `-N` 后缀两种写法 | `Parse-16` 中的 `16`                     |
+| `goos`        | 操作系统（取自基准输出头）                                   | `linux`、`darwin`                        |
+| `goarch`      | 架构（取自基准输出头）                                       | `amd64`、`arm64`                         |
+| `pkg`         | 包路径（取自基准输出头）                                     | `myapp/pkg/parser`                       |
+| `cpu`         | CPU 型号（取自基准输出头）                                   | `AMD Ryzen 9 5950X`                      |
 
-**Sort order modifiers** — append to any key:
+**排序修饰符**——追加到任意键上：
 
-| Modifier           | Meaning                                                  | Example              |
-| ------------------ | -------------------------------------------------------- | -------------------- |
-| `@alpha`           | Alphabetic sort                                          | `/format@alpha`      |
-| `@num`             | Numeric sort (understands prefixes: 2k, 1Mi)             | `/size@num`          |
-| `@(val1 val2 ...)` | Fixed order + filter (only listed values, in this order) | `/format@(gob json)` |
+| 修饰符             | 含义                                        | 示例                 |
+| ------------------ | ------------------------------------------- | -------------------- |
+| `@alpha`           | 按字母排序                                  | `/format@alpha`      |
+| `@num`             | 按数值排序（理解前缀：2k、1Mi）             | `/size@num`          |
+| `@(val1 val2 ...)` | 固定顺序 + 过滤（只保留列出的值，按此顺序） | `/format@(gob json)` |
 
-### Filter flag
+### 过滤 flag
 
-| Flag           | Purpose                                                              |
-| -------------- | -------------------------------------------------------------------- |
-| `-filter EXPR` | Filter which benchmarks are processed before grouping and comparison |
+| Flag           | 用途                                     |
+| -------------- | ---------------------------------------- |
+| `-filter EXPR` | 在分组与对比之前过滤哪些基准测试参与处理 |
 
-See [Filter Expression Syntax](#filter-expression-syntax) below for full details.
+完整细节见下文[过滤表达式语法](#过滤表达式语法)。
 
-### Input labeling
+### 输入打标
 
-Not a flag but a syntax feature — label input files for clearer column headers:
+不是 flag 而是语法特性——给输入文件打标让列头更清晰：
 
 ```bash
-# Default: file names become column headers
+# 默认：文件名成为列头
 benchstat old.txt new.txt
 
-# Custom labels
+# 自定义标签
 benchstat baseline=old.txt optimized=new.txt
 
-# Multiple versions
+# 多个版本
 benchstat v1=v1.txt v2=v2.txt v3=v3.txt
 ```
 
-The first input is always the **base** for comparison. All subsequent inputs are compared against it.
+第一个输入始终是对比的 **base**。所有后续输入都与它对比。
 
-## Filter Expression Syntax
+## 过滤表达式语法
 
-Filters select which benchmarks to include before grouping and comparison. The syntax is:
+过滤器在分组与对比之前选择哪些基准测试参与。语法如下：
 
-### Matching operators
+### 匹配运算符
 
-| Pattern              | Meaning                                                      | Example                      |
-| -------------------- | ------------------------------------------------------------ | ---------------------------- |
-| `key:value`          | Exact match                                                  | `goos:linux`                 |
-| `key:"value"`        | Exact match with quoted value (allows spaces, special chars) | `pkg:"github.com/user/repo"` |
-| `key:/regexp/`       | Regular expression match (Go regexp syntax)                  | `.name:/Parse\|Encode/`      |
-| `key:(val1 OR val2)` | Match any of the listed values                               | `goos:(linux OR darwin)`     |
-| `*`                  | Match everything (all benchmarks)                            | `*`                          |
+| 模式                 | 含义                                     | 示例                         |
+| -------------------- | ---------------------------------------- | ---------------------------- |
+| `key:value`          | 精确匹配                                 | `goos:linux`                 |
+| `key:"value"`        | 带引号值的精确匹配（允许空格与特殊字符） | `pkg:"github.com/user/repo"` |
+| `key:/regexp/`       | 正则匹配（Go regexp 语法）               | `.name:/Parse\|Encode/`      |
+| `key:(val1 OR val2)` | 匹配列出的任意值                         | `goos:(linux OR darwin)`     |
+| `*`                  | 匹配一切（全部基准测试）                 | `*`                          |
 
-### Logical operators
+### 逻辑运算符
 
-| Operator  | Meaning                          | Example                                       |
-| --------- | -------------------------------- | --------------------------------------------- |
-| `x y`     | AND — both must match (implicit) | `goos:linux goarch:amd64`                     |
-| `x AND y` | AND — explicit form              | `goos:linux AND goarch:amd64`                 |
-| `x OR y`  | OR — either must match           | `goos:linux OR goos:darwin`                   |
-| `-x`      | NOT — must not match             | `-goos:windows`                               |
-| `(...)`   | Grouping / subexpression         | `(goos:linux OR goos:darwin) -pkg:/internal/` |
+| 运算符    | 含义                        | 示例                                          |
+| --------- | --------------------------- | --------------------------------------------- |
+| `x y`     | AND——两者都必须匹配（隐式） | `goos:linux goarch:amd64`                     |
+| `x AND y` | AND——显式形式               | `goos:linux AND goarch:amd64`                 |
+| `x OR y`  | OR——任一匹配即可            | `goos:linux OR goos:darwin`                   |
+| `-x`      | NOT——不得匹配               | `-goos:windows`                               |
+| `(...)`   | 分组 / 子表达式             | `(goos:linux OR goos:darwin) -pkg:/internal/` |
 
-### Filter key types
+### 过滤键类型
 
-| Key           | What it matches                     | Example                      |
-| ------------- | ----------------------------------- | ---------------------------- |
-| `.name`       | Base benchmark name                 | `.name:Parse`                |
-| `.fullname`   | Full name with sub-benchmark config | `.fullname:/Parse\/size=4k/` |
-| `/{name-key}` | Sub-benchmark parameter             | `/size:4k`                   |
-| `/gomaxprocs` | GOMAXPROCS value                    | `/gomaxprocs:16`             |
-| `.file`       | Input file label                    | `.file:old.txt`              |
-| `.unit`       | Metric unit                         | `.unit:sec/op`               |
-| `goos`        | OS from header                      | `goos:linux`                 |
-| `goarch`      | Architecture from header            | `goarch:amd64`               |
-| `pkg`         | Package from header                 | `pkg:/parser/`               |
+| 键            | 匹配什么             | 示例                         |
+| ------------- | -------------------- | ---------------------------- |
+| `.name`       | 基准测试名本体       | `.name:Parse`                |
+| `.fullname`   | 含子基准配置的完整名 | `.fullname:/Parse\/size=4k/` |
+| `/{name-key}` | 子基准参数           | `/size:4k`                   |
+| `/gomaxprocs` | GOMAXPROCS 值        | `/gomaxprocs:16`             |
+| `.file`       | 输入文件标签         | `.file:old.txt`              |
+| `.unit`       | 指标单位             | `.unit:sec/op`               |
+| `goos`        | 输出头中的 OS        | `goos:linux`                 |
+| `goarch`      | 输出头中的架构       | `goarch:amd64`               |
+| `pkg`         | 输出头中的包         | `pkg:/parser/`               |
 
-### Filter examples
+### 过滤示例
 
 ```bash
-# Only Parse benchmarks
+# 只保留 Parse 基准测试
 benchstat -filter '.name:Parse' old.txt new.txt
 
-# Only benchmarks with size=4096 sub-parameter
+# 只保留 size=4096 子参数的基准测试
 benchstat -filter '/size:4096' old.txt new.txt
 
-# Exclude Parallel benchmarks
+# 排除 Parallel 基准测试
 benchstat -filter '-.name:/Parallel/' old.txt new.txt
 
-# Linux amd64 only
+# 只要 linux amd64
 benchstat -filter 'goos:linux goarch:amd64' old.txt new.txt
 
-# Multiple benchmark names
+# 多个基准测试名
 benchstat -filter '.name:(Parse OR Encode OR Decode)' old.txt new.txt
 
-# Complex: Linux or Darwin, not internal packages, only sec/op metric
+# 复合：linux 或 darwin，排除 internal 包，只看 sec/op 指标
 benchstat -filter '(goos:linux OR goos:darwin) -pkg:/internal/ .unit:sec/op' old.txt new.txt
 
-# Regex: all benchmarks starting with Bench
+# 正则：所有以 Bench 开头的基准测试
 benchstat -filter '.name:/^Bench/' old.txt new.txt
 ```
 
-## Projection Examples
+## 投影示例
 
-### Default: before/after file comparison
+### 默认：前后文件对比
 
 ```bash
 benchstat old.txt new.txt
-# Equivalent to:
+# 等价于：
 benchstat -table .config -row .fullname -col .file old.txt new.txt
 ```
 
-Creates one row per benchmark, one column per file.
+每个基准测试一行，每个文件一列。
 
-### Compare sub-benchmark parameters within a single file
+### 单文件内对比子基准参数
 
-When a single benchmark file contains multiple sub-benchmarks (e.g., `BenchmarkEncode/format=json` and `BenchmarkEncode/format=gob`):
+当单个基准文件含多个子基准（例如 `BenchmarkEncode/format=json` 与 `BenchmarkEncode/format=gob`）：
 
 ```bash
 benchstat -col /format bench.txt
 ```
 
-Creates columns for each value of `/format`, comparing them against each other.
+为 `/format` 的每个取值生成一列，让它们互相对比。
 
-### Simplify rows to base name only
+### 行只保留基准名
 
 ```bash
 benchstat -col /format -row .name bench.txt
 ```
 
-Strips sub-benchmark configuration from row names, making the table more compact.
+把子基准配置从行名里剥掉，表格更紧凑。
 
-### Control column order
+### 控制列顺序
 
 ```bash
-# Force gob first, then json (instead of alphabetical)
+# 强制 gob 在前、json 在后（而非按字母序）
 benchstat -col '/format@(gob json)' bench.txt
 ```
 
-### Group by GOMAXPROCS
+### 按 GOMAXPROCS 分组
 
 ```bash
 benchstat -col /gomaxprocs bench.txt
 ```
 
-Compares performance across different GOMAXPROCS values within the same file.
+在同一文件内对比不同 GOMAXPROCS 值下的性能。
 
-### Separate tables per package
+### 按包分表
 
 ```bash
 benchstat -table pkg old.txt new.txt
 ```
 
-Creates one table per package — useful when comparing benchmarks across multiple packages.
+每个包一张表——跨多个包对比基准测试时有用。
 
-### Ignore a dimension
+### 忽略一个维度
 
 ```bash
-# Suppress "benchmarks vary in /gomaxprocs" warning
+# 压制 "benchmarks vary in /gomaxprocs" 警告
 benchstat -row .name -ignore /gomaxprocs bench.txt
 ```
 
-### Compare three versions
+### 对比三个版本
 
 ```bash
 benchstat v1=v1.txt v2=v2.txt v3=v3.txt
 ```
 
-Shows v2 vs v1 and v3 vs v1 (first input is always the base).
+显示 v2 vs v1 与 v3 vs v1（第一个输入始终是 base）。
 
-### Cross-dimensional comparison
+### 跨维度对比
 
 ```bash
-# Rows = benchmark name, columns = OS, separate tables per architecture
+# 行 = 基准测试名，列 = OS，按架构分表
 benchstat -row .name -col goos -table goarch results.txt
 ```
 
-## Unit Metadata
+## 单元元数据
 
 ### `assume=exact`
 
-For metrics that should not vary between runs (e.g., binary size, generated code size):
+用于运行之间不应有变化的指标（例如二进制大小、生成代码大小）：
 
 ```
 BenchmarkSize 1 42 custom-bytes/op
 Unit custom-bytes/op assume=exact
 ```
 
-With `assume=exact`:
+`assume=exact` 时：
 
-- Non-parametric statistics are disabled
-- benchstat warns if measured values vary
-- Shows comparisons even with a single before/after measurement (no `-count` needed)
+- 非参数统计被禁用
+- 测量值若有变化 benchstat 会告警
+- 单次前后测量也能显示对比（不需要 `-count`）
 
-### `assume=nothing` (default)
+### `assume=nothing`（默认）
 
-Standard behavior — uses non-parametric statistics (median + Mann-Whitney U-test). Requires multiple samples.
+标准行为——使用非参数统计（中位数 + Mann-Whitney U 检验）。需要多个样本。
 
-## Interleaving Runs
+## 交错运行
 
-Sequential runs (all old, then all new) are vulnerable to **systematic bias** — thermal throttling builds up over time, background processes come and go, CPU frequency scaling adapts. Interleaving reduces this:
+顺序运行（先跑完所有 old，再跑所有 new）容易受**系统性偏差**影响——热节流随时间积累、后台进程来来去去、CPU 频率调节在自适应。交错运行能降低这种偏差：
 
 ```bash
-# Pre-compile both versions to avoid measuring compilation time
+# 预编译两个版本，避免把编译时间测进去
 go test -c -o old.test ./pkg/parser
-# ... make your change ...
+# ... 做你的变更 ...
 go test -c -o new.test ./pkg/parser
 
-# Interleave runs — alternating reduces systematic bias
+# 交错运行——交替降低系统性偏差
 for i in $(seq 1 10); do
     ./old.test -test.bench=BenchmarkParse -test.benchmem >> old.txt
     ./new.test -test.bench=BenchmarkParse -test.benchmem >> new.txt
@@ -382,49 +382,49 @@ done
 benchstat old.txt new.txt
 ```
 
-Pre-compiling with `go test -c` is critical — without it, each `go test -bench` invocation includes compilation time, which varies and contaminates results.
+用 `go test -c` 预编译是关键——不预编译的话，每次 `go test -bench` 调用都含编译时间，这部分时间有波动，会污染结果。
 
-## How Many Runs?
+## 要跑多少次
 
-| Scenario                      | Minimum `-count` | Why                                                                       |
-| ----------------------------- | ---------------- | ------------------------------------------------------------------------- |
-| Quick local check             | 6                | Enough for a rough confidence interval; fast feedback loop                |
-| Pre-merge comparison          | 10               | Standard for detecting moderate (>5%) changes with confidence             |
-| Detecting small changes (<5%) | 20-30            | More samples narrow the CI; needed when signal is small relative to noise |
-| Noisy CI environment          | 20+              | Shared CI runners have higher variance; more runs compensate              |
+| 场景              | 最低 `-count` | 原因                                    |
+| ----------------- | ------------- | --------------------------------------- |
+| 本地快速验证      | 6             | 够算出粗略置信区间；反馈快              |
+| 合并前对比        | 10            | 检测中等（>5%）变化的标准配置           |
+| 检测小变化（<5%） | 20-30         | 更多样本收窄 CI；信号相对噪声偏小时必需 |
+| 噪声大的 CI 环境  | 20+           | 共享 CI runner 方差更大；更多运行弥补   |
 
-**Never "retry until significant"** — rerunning benchmarks until `~` goes away introduces selection bias (p-hacking). If 10 runs show `~`, the change is probably not meaningful. Increase run count **once** and accept the result.
+**绝不「重试到显著为止」**——反复重跑基准测试直到 `~` 消失会引入选择偏差（p-hacking）。10 次运行显示 `~`，说明变化多半没有意义。**一次性**提高运行次数，然后接受结果。
 
-At α=0.05, expect ~5% of benchmarks to randomly report significance with no real change (false positives). This is normal — don't chase them.
+α=0.05 时，预期约 5% 的基准测试会在无真实变化的情况下随机报出显著（假阳性）。这很正常——别去追它们。
 
-## Single-File Summary
+## 单文件摘要
 
-Analyze variance of a single run without comparison:
+不做对比，只分析单次运行的方差：
 
 ```bash
 benchstat bench.txt
 ```
 
-Shows median and confidence interval for each benchmark. Use to:
+显示每个基准测试的中位数与置信区间。用途：
 
-- Check measurement stability before making code changes
-- Identify noisy benchmarks that need more runs or better isolation
-- Get a quick summary of current performance
+- 改代码前先检查测量稳定性
+- 找出需要更多运行或更好隔离的噪声基准测试
+- 快速摘要当前性能
 
-## Common Pitfalls
+## 常见坑
 
-| Pitfall                             | Why it's wrong                                                                  | Fix                                                         |
-| ----------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `-count=1`                          | Single run has no variance information; benchstat can't compute confidence      | Always use `-count=6` minimum, prefer `-count=10`           |
-| Running on a laptop on battery      | CPU throttles to save power; variance explodes                                  | Plug in, disable power saving, or use a desktop/server      |
-| Running with browser/IDE open       | Background processes steal CPU cycles; adds noise                               | Close unnecessary applications, or accept wider CIs         |
-| Rerunning until `~` disappears      | Selection bias (p-hacking) — you're cherry-picking runs that showed improvement | Run once with high `-count`, accept the result              |
-| Comparing across machines           | Different CPUs, memory, OS = incomparable baselines                             | Same machine, same conditions, both runs                    |
-| Not interleaving                    | Systematic bias from thermal throttling, background load drift                  | Pre-compile both versions with `go test -c`, alternate runs |
-| Measuring compilation time          | `go test -bench` compiles first; startup overhead varies                        | Pre-compile with `go test -c`, run the binary directly      |
-| Ignoring wide CI (± >5%)            | Results look significant but variance is too high to be trustworthy             | Fix the noise first, then compare; or increase `-count`     |
-| Comparing different `-count` values | Unequal sample sizes bias the comparison                                        | Use the same `-count` for all inputs                        |
+| 坑                   | 为什么错                                            | 修法                                     |
+| -------------------- | --------------------------------------------------- | ---------------------------------------- |
+| `-count=1`           | 单次运行没有方差信息；benchstat 算不出置信度        | 至少 `-count=6`，优先 `-count=10`        |
+| 笔记本用电池跑       | CPU 为省电降频；方差爆炸                            | 接电源、关省电模式，或用台式机/服务器    |
+| 开着浏览器/IDE 跑    | 后台进程偷 CPU 周期；引入噪声                       | 关掉不必要的应用，或接受更宽的 CI        |
+| 重跑到 `~` 消失      | 选择偏差（p-hacking）——你在挑那些碰巧显示改进的运行 | 用高 `-count` 跑一次，接受结果           |
+| 跨机器对比           | 不同 CPU、内存、OS = 基线不可比                     | 同一台机器、同样条件跑两次               |
+| 不交错运行           | 热节流、后台负载漂移带来系统性偏差                  | 用 `go test -c` 预编译两个版本，交替运行 |
+| 把编译时间测进去     | `go test -bench` 先编译；启动开销有波动             | 用 `go test -c` 预编译，直接跑二进制     |
+| 无视宽 CI（± >5%）   | 结果看似显著但方差太大不可信                        | 先治噪声再对比；或加大 `-count`          |
+| 对比不同 `-count` 值 | 样本量不均让对比有偏                                | 所有输入用同一个 `-count`                |
 
-## benchstat in CI
+## CI 中的 benchstat
 
-See [CI Regression Detection](./ci-regression.md) for integrating benchstat comparisons into CI pipelines with benchdiff, cob, and gobenchdata.
+把 benchstat 对比集成进 CI 流水线（benchdiff、cob、gobenchdata），见 [CI 回归检测](./ci-regression.md)。

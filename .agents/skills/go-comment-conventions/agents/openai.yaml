@@ -1,4 +1,4 @@
 interface:
-  display_name: "Go Comment Conventions"
-  short_description: "Enforce concise Chinese Go documentation"
+  display_name: "Go 注释规范"
+  short_description: "强制简洁的中文 Go 文档注释"
   default_prompt: "Use $go-comment-conventions when adding or reviewing Go comments in this project."

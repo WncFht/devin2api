@@ -1,121 +1,121 @@
-# Common Go Bugs
+# 常见 Go bug
 
-→ See `samber/cc-skills-golang@golang-safety` skill for in-depth nil, slice, and map safety patterns.
+→ 深入的 nil、slice、map 安全模式见 `samber/cc-skills-golang@golang-safety` skill。
 
-## Table of Contents
+## 目录
 
-- [Nil Pointer Dereference](#nil-pointer-dereference)
-- [Interface Nil Gotcha](#interface-nil-gotcha)
-- [Variable Shadowing with `:=`](#variable-shadowing-with-)
-- [Slice and Map Gotchas](#slice-and-map-gotchas)
-- [Defer Gotchas](#defer-gotchas)
-- [Error Handling Pitfalls](#error-handling-pitfalls)
-- [Context Misuse](#context-misuse)
-- [Concurrent Map Read/Write (Fatal)](#concurrent-map-readwrite-fatal)
-- [Copying sync Types](#copying-sync-types)
-- [WaitGroup.Add Inside Goroutine](#waitgroupadd-inside-goroutine)
-- [Missing Return After HTTP Error Response](#missing-return-after-http-error-response)
-- [JSON Pitfalls](#json-pitfalls)
-    - [Numbers into `interface{}` become `float64`](#numbers-into-interface-become-float64)
-    - [Unexported fields silently ignored](#unexported-fields-silently-ignored)
-- [`strings.Trim` vs `strings.TrimPrefix`](#stringstrim-vs-stringstrimprefix)
-- [String Length and Indexing](#string-length-and-indexing)
-- [`break` in `select`/`switch` Inside `for` Loop](#break-in-selectswitch-inside-for-loop)
-- [Enum Zero Value with `iota`](#enum-zero-value-with-iota)
-- [`recover()` Only Works in the Same Goroutine](#recover-only-works-in-the-same-goroutine)
-- [`os.Exit` Skips Deferred Functions](#osexit-skips-deferred-functions)
-- [`time.Time` Comparison: `==` vs `.Equal()`](#timetime-comparison--vs-equal)
-- [`sql.Rows` Must Be Closed](#sqlrows-must-be-closed)
-- [Writing to a Closed Channel Panics](#writing-to-a-closed-channel-panics)
-- [Closed Channel in `select` Causes Busy Loop](#closed-channel-in-select-causes-busy-loop)
-- [`select` with `default` Can Spin CPU](#select-with-default-can-spin-cpu)
-- [Integer Conversion Silently Truncates](#integer-conversion-silently-truncates)
-- [`filepath.Join` Does Not Prevent Path Traversal](#filepathjoin-does-not-prevent-path-traversal)
-- [Pointer Receiver Interface Satisfaction](#pointer-receiver-interface-satisfaction)
-- [`regexp.MustCompile` in Hot Path](#regexpmustcompile-in-hot-path)
-- [`init()` Ordering Is Fragile](#init-ordering-is-fragile)
-- [Map Iteration Order Is Random](#map-iteration-order-is-random)
-- [`fallthrough` in `switch` Executes Unconditionally](#fallthrough-in-switch-executes-unconditionally)
+- [nil 指针解引用](#nil-指针解引用)
+- [接口 nil 陷阱](#接口-nil-陷阱)
+- [`:=` 造成的变量遮蔽](#-造成的变量遮蔽)
+- [Slice 与 Map 陷阱](#slice-与-map-陷阱)
+- [Defer 陷阱](#defer-陷阱)
+- [错误处理陷阱](#错误处理陷阱)
+- [Context 误用](#context-误用)
+- [并发 Map 读写（致命）](#并发-map-读写致命)
+- [拷贝 sync 类型](#拷贝-sync-类型)
+- [在 goroutine 内调 WaitGroup.Add](#在-goroutine-内调-waitgroupadd)
+- [HTTP 错误响应后缺 return](#http-错误响应后缺-return)
+- [JSON 陷阱](#json-陷阱)
+    - [数字进 `interface{}` 变成 `float64`](#数字进-interface-变成-float64)
+    - [未导出字段被静默忽略](#未导出字段被静默忽略)
+- [`strings.Trim` 与 `strings.TrimPrefix`](#stringstrim-与-stringstrimprefix)
+- [字符串长度与索引](#字符串长度与索引)
+- [`for` 循环内 `select`/`switch` 里的 `break`](#for-循环内-selectswitch-里的-break)
+- [`iota` 枚举的零值问题](#iota-枚举的零值问题)
+- [`recover()` 只在同一 goroutine 生效](#recover-只在同一-goroutine-生效)
+- [`os.Exit` 跳过 defer 函数](#osexit-跳过-defer-函数)
+- [`time.Time` 比较：`==` vs `.Equal()`](#timetime-比较-vs-equal)
+- [`sql.Rows` 必须关闭](#sqlrows-必须关闭)
+- [向已关闭 channel 写入会 panic](#向已关闭-channel-写入会-panic)
+- [`select` 里已关闭 channel 造成忙循环](#select-里已关闭-channel-造成忙循环)
+- [带 `default` 的 `select` 会空转 CPU](#带-default-的-select-会空转-cpu)
+- [整数转换静默截断](#整数转换静默截断)
+- [`filepath.Join` 防不住路径穿越](#filepathjoin-防不住路径穿越)
+- [指针接收者的接口满足](#指针接收者的接口满足)
+- [热路径上的 `regexp.MustCompile`](#热路径上的-regexpmustcompile)
+- [`init()` 顺序很脆弱](#init-顺序很脆弱)
+- [map 迭代顺序是随机的](#map-迭代顺序是随机的)
+- [`switch` 里 `fallthrough` 无条件执行](#switch-里-fallthrough-无条件执行)
 
-## Nil Pointer Dereference
+## nil 指针解引用
 
-Pointers from external sources MUST be checked before dereferencing.
+来自外部的指针解引用前必须检查。
 
-The most common Go panic. The stack trace tells you the exact line.
+最常见的 Go panic。堆栈会告诉你确切的行号。
 
 ```go
-// 1. Uninitialized struct field
+// 1. 未初始化的结构体字段
 type Server struct {
-    logger *log.Logger  // nil if not set in constructor
+    logger *log.Logger  // 构造函数没设就是 nil
 }
 
-// 2. Unchecked error return — if err != nil, val may be nil/zero
+// 2. 未检查的 error 返回——err != nil 时 val 可能是 nil/零值
 val, err := doSomething()
-val.Method()  // panic if doSomething returned nil val with an error
+val.Method()  // doSomething 返回了带 error 的 nil val 就 panic
 
-// 3. Map lookup returns zero value
+// 3. map 查找返回零值
 m := map[string]*Config{}
-cfg := m["missing"]  // cfg is nil
+cfg := m["missing"]  // cfg 是 nil
 cfg.Timeout  // panic
 
-// 4. Type assertion without comma-ok
+// 4. 不带 comma-ok 的类型断言
 var i interface{} = "hello"
 n := i.(int)        // panic
-n, ok := i.(int)    // ok == false, no panic
+n, ok := i.(int)    // ok == false，不 panic
 ```
 
-## Interface Nil Gotcha
+## 接口 nil 陷阱
 
-NEVER compare an interface to nil when it may contain a typed nil pointer.
+接口可能装着 typed nil 指针时，永远不要拿它跟 nil 比。
 
-A typed nil pointer inside an interface is **not** a nil interface:
+接口里的 typed nil 指针**不是** nil 接口：
 
 ```go
 type MyError struct{ msg string }
 func (e *MyError) Error() string { return e.msg }
 
 func doWork() error {
-    var err *MyError  // typed nil pointer
-    return err        // returns non-nil interface containing nil pointer!
+    var err *MyError  // typed nil 指针
+    return err        // 返回的是装着 nil 指针的非 nil 接口！
 }
 
 func main() {
     if err := doWork(); err != nil {
-        // This EXECUTES — the interface is non-nil
-        fmt.Println(err)  // panic: nil pointer in Error()
+        // 这里会执行——接口非 nil
+        fmt.Println(err)  // panic：Error() 里 nil 指针
     }
 }
 
-// FIX: return nil explicitly, not a typed nil variable
+// 修：显式返回 nil，别返回 typed nil 变量
 func doWork() error {
     return nil
 }
 ```
 
-## Variable Shadowing with `:=`
+## `:=` 造成的变量遮蔽
 
-The `:=` short declaration creates a new variable in the inner scope instead of assigning to the outer one. Especially dangerous when shadowing `err`, because error handling silently breaks.
+`:=` 短声明在内层作用域创建了新变量，而不是给外层变量赋值。遮蔽 `err` 时尤其危险，因为错误处理会静默失效。
 
 ```go
-// BAD
+// 坏
 func doWork() error {
     var err error
     if condition {
-        result, err := someFunc() // BUG: new err variable, doesn't set outer one
+        result, err := someFunc() // BUG：新 err 变量，没赋值给外层
         if err != nil {
             return err
         }
         process(result)
     }
-    return err // always nil — inner err was a different variable
+    return err // 永远 nil——内层 err 是另一个变量
 }
 
-// GOOD
+// 好
 func doWork() error {
     var err error
     if condition {
         var result ResultType
-        result, err = someFunc() // assigns to outer err
+        result, err = someFunc() // 赋值给外层 err
         if err != nil {
             return err
         }
@@ -125,65 +125,65 @@ func doWork() error {
 }
 ```
 
-**Detect:** run the `golang.org/x/tools/go/analysis/passes/shadow` analyzer through your lint setup. The old shadow flag is not part of standard `go vet`.
+**检测：**在 lint 配置里跑 `golang.org/x/tools/go/analysis/passes/shadow` 分析器。旧的 shadow flag 不在标准 `go vet` 里。
 
-## Slice and Map Gotchas
+## Slice 与 Map 陷阱
 
 ```go
-// 1. Nil map write panics
+// 1. 写 nil map 会 panic
 var m map[string]int
-m["key"] = 1  // panic: assignment to entry in nil map
-// FIX: m := make(map[string]int)
-// Note: nil map reads are fine — they return zero value
+m["key"] = 1  // panic：assignment to entry in nil map
+// 修：m := make(map[string]int)
+// 注意：读 nil map 没问题——返回零值
 
-// 2. Append may share underlying array
+// 2. append 可能共享底层数组
 a := []int{1, 2, 3}
 b := a[:2]
-b = append(b, 99)  // overwrites a[2]!
-// FIX: full slice expression — b := a[:2:2] to limit capacity
+b = append(b, 99)  // 覆盖了 a[2]！
+// 修：全切片表达式——b := a[:2:2] 限制容量
 
-// 3. Range variable capture in goroutine (Go < 1.22)
+// 3. goroutine 捕获 range 变量（Go < 1.22）
 for _, v := range items {
     go func() {
-        process(v)  // v is shared, will likely be last element
+        process(v)  // v 是共享的，很可能拿到最后一个元素
     }()
 }
-// FIX: pass as argument
+// 修：当参数传进去
 for _, v := range items {
     go func(v Item) { process(v) }(v)
 }
-// In Go 1.22+, loop variables are per-iteration (no fix needed)
+// Go 1.22+ 循环变量是每次迭代独立的（不用修）
 ```
 
-## Defer Gotchas
+## Defer 陷阱
 
 ```go
-// 1. Arguments evaluated immediately
+// 1. 参数立即求值
 x := 1
-defer fmt.Println(x)  // prints 1, not 2
+defer fmt.Println(x)  // 打 1，不是 2
 x = 2
 
-// 2. Defer in loop — doesn't run until function returns
+// 2. 循环里 defer——函数返回前不执行
 for _, f := range files {
     file, _ := os.Open(f)
-    defer file.Close()  // all Close() calls pile up until return
+    defer file.Close()  // 所有 Close() 堆到返回时才跑
 }
-// FIX: wrap in closure
+// 修：包进闭包
 for _, f := range files {
     func() {
         file, _ := os.Open(f)
         defer file.Close()
-        // use file
+        // 用 file
     }()
 }
 
-// 3. Named return + defer interaction
+// 3. 具名返回值 + defer 交互
 func readFile() (err error) {
     f, err := os.Open("file.txt")
     if err != nil { return }
     defer func() {
         if closeErr := f.Close(); err == nil {
-            err = closeErr  // modifies named return
+            err = closeErr  // 改具名返回值
         }
     }()
     // ...
@@ -191,63 +191,63 @@ func readFile() (err error) {
 }
 ```
 
-## Error Handling Pitfalls
+## 错误处理陷阱
 
-**Silent error swallowing** is the single most common source of "mysterious" bugs:
+**静默吞错误**是「灵异」bug 最常见的单一来源：
 
 ```go
-// BAD — silent failure
+// 坏——静默失败
 result, _ := doSomething()
 json.Unmarshal(data, &config)
 http.ListenAndServe(":8080", nil)
 
-// GOOD — handle or propagate
+// 好——处理或向上传
 result, err := doSomething()
 if err != nil {
     return fmt.Errorf("doSomething: %w", err)
 }
 ```
 
-**Find ignored errors:**
+**找被忽略的错误：**
 
 ```bash
 go vet ./...
 
-# More thorough
+# 更彻底
 go get -tool github.com/kisielk/errcheck@latest
 go tool errcheck ./...
 ```
 
-**Error wrapping — use `%w`, not `%v`:**
+**错误包装——用 `%w`，不用 `%v`：**
 
 ```go
-return fmt.Errorf("reading config from %s: %v", path, err)  // BAD — loses error chain
-return fmt.Errorf("reading config from %s: %w", path, err)  // GOOD — preserves Is/As
+return fmt.Errorf("reading config from %s: %v", path, err)  // 坏——丢了错误链
+return fmt.Errorf("reading config from %s: %w", path, err)  // 好——保留 Is/As
 
-// Check for specific errors — use errors.Is, not ==
-if err == sql.ErrNoRows { ... }            // BAD — breaks if wrapped
-if errors.Is(err, sql.ErrNoRows) { ... }   // GOOD — traverses chain
+// 查特定错误——用 errors.Is，不用 ==
+if err == sql.ErrNoRows { ... }            // 坏——被包装就失效
+if errors.Is(err, sql.ErrNoRows) { ... }   // 好——沿链查找
 
-// Extract typed errors
+// 提取具体类型的错误
 var pathErr *os.PathError
 if errors.As(err, &pathErr) { ... }
 ```
 
-## Context Misuse
+## Context 误用
 
 ```go
-// 1. Forgetting to cancel — leaks goroutines
+// 1. 忘了 cancel——泄漏 goroutine
 ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-// Missing: defer cancel()
+// 缺：defer cancel()
 
-// 2. Using background context when you should propagate
-go doWork(context.Background())  // BAD — can't cancel from parent
-go doWork(ctx)                   // GOOD — respects parent cancellation
+// 2. 该传递时用了 background context
+go doWork(context.Background())  // 坏——父级取消不了
+go doWork(ctx)                   // 好——尊重父级取消
 
-// 3. Not checking context error
+// 3. 不查 context 错误
 err := doWork(ctx)
 if err != nil {
-    // Distinguish timeout from other errors
+    // 区分超时和其他错误
     if ctx.Err() == context.DeadlineExceeded {
         log.Printf("operation timed out")
     } else if ctx.Err() == context.Canceled {
@@ -257,60 +257,60 @@ if err != nil {
     }
 }
 
-// 4. Background work outliving request context
+// 4. 后台任务活过了请求 context
 func handler(w http.ResponseWriter, r *http.Request) {
-    // BAD — background work uses request context that cancels when client disconnects
+    // 坏——后台任务用请求 context，客户端断连就被取消
     go processAsync(r.Context(), data)
 
-    // GOOD — derive a new context for background work (Go 1.21+)
+    // 好——为后台任务派生新 context（Go 1.21+）
     bgCtx := context.WithoutCancel(r.Context())
     go processAsync(bgCtx, data)
 }
 ```
 
-## Concurrent Map Read/Write (Fatal)
+## 并发 Map 读写（致命）
 
-Maps MUST NOT be accessed concurrently without synchronization.
+不同步就并发访问 map 是禁止的。
 
-Unlike most Go runtime errors, a concurrent map read/write is a **fatal error** — it **cannot be caught with `recover()`** and crashes the entire process. Hard to catch in tests because it depends on timing.
+跟大多数 Go runtime 错误不同，并发 map 读写是 **fatal error**——`recover()` **抓不住**，整个进程直接崩。测试里难抓，因为它看时序。
 
 ```go
-// BAD — fatal: concurrent map read and map write
+// 坏——fatal：concurrent map read and map write
 m := make(map[string]int)
-go func() { m["key"] = 1 }()  // concurrent write
-go func() { _ = m["key"] }()  // concurrent read — fatal!
+go func() { m["key"] = 1 }()  // 并发写
+go func() { _ = m["key"] }()  // 并发读——致命！
 
-// GOOD — protect with mutex
+// 好——mutex 保护
 var mu sync.RWMutex
 m := make(map[string]int)
 go func() { mu.Lock(); m["key"] = 1; mu.Unlock() }()
 go func() { mu.RLock(); _ = m["key"]; mu.RUnlock() }()
 
-// Or use sync.Map for read-heavy workloads with stable key sets
+// 读多写少且键集稳定的场景也可以用 sync.Map
 ```
 
-**Detect:** `go test -race ./...` — always run in CI.
+**检测：**`go test -race ./...`——CI 里永远跑。
 
-## Copying sync Types
+## 拷贝 sync 类型
 
-Sync types MUST NEVER be copied — use pointer receivers and pass by pointer.
+sync 类型永远不许拷贝——用指针接收者、按指针传。
 
-All `sync` types (`Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond`, `Map`, `Pool`) must not be copied. Copying them via value receivers, function arguments, or struct assignment silently breaks synchronization.
+所有 `sync` 类型（`Mutex`、`RWMutex`、`WaitGroup`、`Once`、`Cond`、`Map`、`Pool`）都不能拷贝。通过值接收者、函数参数或结构体赋值拷贝它们，会静默破坏同步。
 
 ```go
-// BAD — value receiver copies the Mutex
+// 坏——值接收者拷贝了 Mutex
 type Counter struct {
     mu    sync.Mutex
     count int
 }
 
-func (c Counter) Increment() { // BUG: copies mutex on every call
+func (c Counter) Increment() { // BUG：每次调用都拷贝 mutex
     c.mu.Lock()
     c.count++
     c.mu.Unlock()
 }
 
-// GOOD — pointer receiver
+// 好——指针接收者
 func (c *Counter) Increment() {
     c.mu.Lock()
     defer c.mu.Unlock()
@@ -318,28 +318,28 @@ func (c *Counter) Increment() {
 }
 ```
 
-**Detect:** `go vet` detects mutex copies. Apply to all sync types.
+**检测：**`go vet` 能查出 mutex 拷贝。对所有 sync 类型都适用。
 
-## WaitGroup.Add Inside Goroutine
+## 在 goroutine 内调 WaitGroup.Add
 
-If `wg.Add(1)` is called inside the goroutine instead of before it, `wg.Wait()` may return before all goroutines start — a race condition that passes tests most of the time but fails intermittently.
+`wg.Add(1)` 在 goroutine 里面调而不是在启动之前调，`wg.Wait()` 可能在所有 goroutine 启动前就返回——一种大多数时候能过测试、偶尔才翻车的竞态。
 
 ```go
-// BAD
+// 坏
 var wg sync.WaitGroup
 for i := 0; i < n; i++ {
     go func() {
-        wg.Add(1) // BUG: may run after wg.Wait() returns
+        wg.Add(1) // BUG：可能在 wg.Wait() 返回后才跑
         defer wg.Done()
         doWork()
     }()
 }
 wg.Wait()
 
-// GOOD
+// 好
 var wg sync.WaitGroup
 for i := 0; i < n; i++ {
-    wg.Add(1) // called BEFORE launching the goroutine
+    wg.Add(1) // 在启动 goroutine 之前调
     go func() {
         defer wg.Done()
         doWork()
@@ -348,21 +348,21 @@ for i := 0; i < n; i++ {
 wg.Wait()
 ```
 
-## Missing Return After HTTP Error Response
+## HTTP 错误响应后缺 return
 
-After writing an error with `http.Error()`, execution continues. This can cause double writes, corrupted responses, or executing logic that should have been skipped.
+`http.Error()` 写出错误后执行会继续。可能导致重复写响应、响应损坏，或者执行了本该跳过的逻辑。
 
 ```go
-// BAD
+// 坏
 func handler(w http.ResponseWriter, r *http.Request) {
     if !authorized(r) {
         http.Error(w, "Forbidden", http.StatusForbidden)
-        // BUG: missing return — handler keeps executing
+        // BUG：缺 return——handler 继续往下跑
     }
     doSensitiveAction(r)
 }
 
-// GOOD
+// 好
 func handler(w http.ResponseWriter, r *http.Request) {
     if !authorized(r) {
         http.Error(w, "Forbidden", http.StatusForbidden)
@@ -372,24 +372,24 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-## JSON Pitfalls
+## JSON 陷阱
 
-### Numbers into `interface{}` become `float64`
+### 数字进 `interface{}` 变成 `float64`
 
-When unmarshaling into `map[string]interface{}` or `interface{}`, all JSON numbers become `float64`. Type-asserting to `int` panics. Large integers (> 2^53) silently lose precision.
+反序列化进 `map[string]interface{}` 或 `interface{}` 时，所有 JSON 数字都变成 `float64`。断言成 `int` 会 panic。大整数（> 2^53）静默丢精度。
 
 ```go
-// BAD
+// 坏
 var result map[string]interface{}
 json.Unmarshal([]byte(`{"id": 1234567890123456789}`), &result)
-id := result["id"].(int) // PANIC: it's float64, not int
+id := result["id"].(int) // PANIC：是 float64，不是 int
 
-// GOOD — use typed struct (preferred)
+// 好——用有类型的结构体（首选）
 type Response struct {
     ID int64 `json:"id"`
 }
 
-// GOOD — use json.Number when you must use interface{}
+// 好——必须用 interface{} 时用 json.Number
 dec := json.NewDecoder(bytes.NewReader(data))
 dec.UseNumber()
 var result map[string]interface{}
@@ -397,136 +397,136 @@ dec.Decode(&result)
 id, _ := result["id"].(json.Number).Int64()
 ```
 
-### Unexported fields silently ignored
+### 未导出字段被静默忽略
 
-Fields starting with lowercase are invisible to `encoding/json`. Marshal produces empty output, unmarshal skips them — no error in either case.
+小写开头的字段对 `encoding/json` 不可见。Marshal 产出空输出，Unmarshal 跳过它们——两种情况都不报错。
 
 ```go
-// BAD
+// 坏
 type User struct {
-    name  string `json:"name"`  // unexported — silently ignored!
-    email string `json:"email"` // unexported — silently ignored!
+    name  string `json:"name"`  // 未导出——被静默忽略！
+    email string `json:"email"` // 未导出——被静默忽略！
 }
 u := User{name: "Alice", email: "alice@example.com"}
-data, _ := json.Marshal(u) // data is "{}" — no error
+data, _ := json.Marshal(u) // data 是 "{}"——不报错
 
-// GOOD
+// 好
 type User struct {
     Name  string `json:"name"`
     Email string `json:"email"`
 }
 ```
 
-**Detect:** `go vet` warns when unexported fields have JSON struct tags.
+**检测：**`go vet` 会对带 JSON struct tag 的未导出字段告警。
 
-## `strings.Trim` vs `strings.TrimPrefix`
+## `strings.Trim` 与 `strings.TrimPrefix`
 
-`strings.Trim` treats its second argument as a **set of characters** to strip from both ends, not as a substring. This over-trims unexpectedly.
+`strings.Trim` 把第二个参数当**字符集合**从两端剥离，不是当子串。会发生意外的过度裁剪。
 
 ```go
-// BAD
+// 坏
 s := strings.Trim("application/json", "application/")
-// Result: "js" — stripped all chars in set {a,p,l,i,c,t,o,n,/} from both ends!
+// 结果："js"——把集合 {a,p,l,i,c,t,o,n,/} 里的字符从两端全剥了！
 
-// GOOD
+// 好
 s := strings.TrimPrefix("application/json", "application/")
-// Result: "json"
+// 结果："json"
 ```
 
-Use `strings.TrimPrefix`/`strings.TrimSuffix` to remove substrings. Only use `strings.Trim` when you intend to strip a set of characters.
+去子串用 `strings.TrimPrefix`/`strings.TrimSuffix`。只有真的想剥字符集合时才用 `strings.Trim`。
 
-## String Length and Indexing
+## 字符串长度与索引
 
-`len()` on strings returns bytes, not characters. Indexing returns a byte. For multi-byte UTF-8 characters, this gives wrong counts and corrupts data when slicing.
+`len()` 对字符串返回字节数，不是字符数。索引返回的是字节。对多字节 UTF-8 字符，这会给出错误的计数，切片时还会损坏数据。
 
 ```go
 s := "Hello, 世界"
-fmt.Println(len(s))    // 13 (bytes), not 9 (characters)
-fmt.Println(s[:8])     // "Hello, \xe4" — corrupted! cuts a multi-byte rune
+fmt.Println(len(s))    // 13（字节），不是 9（字符）
+fmt.Println(s[:8])     // "Hello, \xe4"——坏了！切开了一个多字节 rune
 
-// FIX: use utf8.RuneCountInString for character count
+// 修：字符数用 utf8.RuneCountInString
 fmt.Println(utf8.RuneCountInString(s)) // 9
 
-// FIX: convert to []rune for character-based slicing
+// 修：按字符切片先转 []rune
 runes := []rune(s)
 fmt.Println(string(runes[:8])) // "Hello, 世"
 
-// FIX: use for-range to iterate over characters (runes), not bytes
-for _, r := range s { ... } // iterates runes
+// 修：for-range 按字符（rune）迭代，不按字节
+for _, r := range s { ... } // 迭代的是 rune
 ```
 
-## `break` in `select`/`switch` Inside `for` Loop
+## `for` 循环内 `select`/`switch` 里的 `break`
 
-A bare `break` inside a `select` or `switch` that is inside a `for` loop only exits the `select`/`switch`, not the loop.
+`for` 循环里的 `select` 或 `switch` 中，裸 `break` 只跳出 `select`/`switch`，不跳出循环。
 
 ```go
-// BAD
+// 坏
 for {
     select {
     case msg := <-ch:
         if msg == "quit" {
-            break // BUG: only breaks the select, loop continues forever
+            break // BUG：只跳出 select，循环永远继续
         }
         process(msg)
     }
 }
 
-// GOOD — use labeled break
+// 好——用带标签的 break
 loop:
 for {
     select {
     case msg := <-ch:
         if msg == "quit" {
-            break loop // breaks the for loop
+            break loop // 跳出 for 循环
         }
         process(msg)
     }
 }
 ```
 
-## Enum Zero Value with `iota`
+## `iota` 枚举的零值问题
 
-When `iota` starts at 0, the zero value of the type (from uninitialized variables, zero-value struct fields, or missing JSON fields) is indistinguishable from the first constant.
+`iota` 从 0 开始时，类型的零值（未初始化变量、零值结构体字段、缺失的 JSON 字段）跟第一个常量无法区分。
 
 ```go
-// BAD
+// 坏
 type Status int
 const (
-    Active   Status = iota // 0 — same as zero value!
+    Active   Status = iota // 0——跟零值相同！
     Inactive               // 1
 )
 type User struct {
-    Status Status // zero value is Active — but was it intentional?
+    Status Status // 零值是 Active——但这是有意的吗？
 }
 
-// GOOD — reserve 0 for "unknown"
+// 好——把 0 留给「未知」
 type Status int
 const (
-    StatusUnknown  Status = iota // 0 — explicit unset sentinel
+    StatusUnknown  Status = iota // 0——显式的未设置哨兵
     StatusActive                 // 1
     StatusInactive               // 2
 )
 ```
 
-## `recover()` Only Works in the Same Goroutine
+## `recover()` 只在同一 goroutine 生效
 
-`recover()` can only catch panics in the goroutine where it's deferred. A panic in a child goroutine will crash the entire program — no parent goroutine can catch it.
+`recover()` 只能接住它被 defer 的那个 goroutine 里的 panic。子 goroutine 里的 panic 会搞崩整个程序——父 goroutine 接不住。
 
 ```go
-// BAD — recover() in main cannot catch panic in child goroutine
+// 坏——main 里的 recover() 接不住子 goroutine 的 panic
 func main() {
     defer func() {
         if r := recover(); r != nil {
-            fmt.Println("recovered:", r) // NEVER REACHED
+            fmt.Println("recovered:", r) // 永远到不了
         }
     }()
     go func() {
-        panic("crash!") // crashes the whole program
+        panic("crash!") // 搞崩整个程序
     }()
     time.Sleep(time.Second)
 }
 
-// GOOD — each goroutine must recover its own panics
+// 好——每个 goroutine 自己 recover
 func main() {
     go func() {
         defer func() {
@@ -534,33 +534,33 @@ func main() {
                 log.Printf("goroutine recovered: %v", r)
             }
         }()
-        panic("crash!") // recovered within this goroutine
+        panic("crash!") // 在这个 goroutine 内被接住
     }()
     time.Sleep(time.Second)
 }
 ```
 
-## `os.Exit` Skips Deferred Functions
+## `os.Exit` 跳过 defer 函数
 
-`os.Exit` terminates the process immediately. No deferred functions run — cleanup, flush, and close operations are skipped. `log.Fatal` calls `os.Exit(1)` internally and has the same problem.
+`os.Exit` 立即终止进程。所有 defer 都不执行——清理、flush、close 全被跳过。`log.Fatal` 内部调 `os.Exit(1)`，有同样的问题。
 
 ```go
-// BAD — deferred cleanup never runs
+// 坏——defer 的清理永远不跑
 func main() {
     f, _ := os.Create("data.tmp")
-    defer f.Close()       // NEVER RUNS
-    defer os.Remove(f.Name()) // NEVER RUNS
+    defer f.Close()       // 永不执行
+    defer os.Remove(f.Name()) // 永不执行
 
     if err := process(); err != nil {
-        log.Fatal(err) // calls os.Exit(1) — skips all defers!
+        log.Fatal(err) // 调 os.Exit(1)——跳过全部 defer！
     }
 }
 
-// GOOD — return from main instead, or restructure so defers run
+// 好——从 main 返回，或者重构让 defer 先跑完
 func main() {
     if err := run(); err != nil {
         fmt.Fprintf(os.Stderr, "error: %v\n", err)
-        os.Exit(1) // defers in run() already ran when it returned
+        os.Exit(1) // run() 返回时它的 defer 已经跑完了
     }
 }
 
@@ -571,66 +571,66 @@ func run() error {
 }
 ```
 
-## `time.Time` Comparison: `==` vs `.Equal()`
+## `time.Time` 比较：`==` vs `.Equal()`
 
-`time.Time` includes a monotonic clock reading. Two `time.Time` values representing the same instant may not be `==` if one has a monotonic component and the other doesn't (e.g., one from `time.Now()`, the other deserialized from JSON/database).
+`time.Time` 带一个单调时钟读数。两个表示同一时刻的 `time.Time` 如果一个带单调分量另一个不带，`==` 可能不成立（比如一个来自 `time.Now()`，另一个从 JSON/数据库反序列化来）。
 
 ```go
-// BAD — may fail even for the same instant
+// 坏——同一时刻也可能不等
 t1 := time.Now()
 data, _ := t1.MarshalJSON()
 var t2 time.Time
 t2.UnmarshalJSON(data)
-fmt.Println(t1 == t2) // false! t1 has monotonic, t2 doesn't
+fmt.Println(t1 == t2) // false！t1 带单调读数，t2 不带
 
-// GOOD — .Equal() ignores monotonic clock
+// 好——.Equal() 忽略单调时钟
 fmt.Println(t1.Equal(t2)) // true
 
-// Also: strip monotonic explicitly when storing/comparing
-t1 = t1.Round(0) // strips monotonic reading
+// 另外：存储/比较前显式剥掉单调读数
+t1 = t1.Round(0) // 剥掉单调读数
 ```
 
-## `sql.Rows` Must Be Closed
+## `sql.Rows` 必须关闭
 
-`sql.Rows` MUST call `rows.Close()` — always defer it immediately after the query.
+`sql.Rows` 必须调 `rows.Close()`——永远在查询后立即 defer。
 
-Forgetting to close `sql.Rows` leaks database connections. The connection is held until `Rows` is garbage collected, but under load the connection pool exhausts first.
+忘了关 `sql.Rows` 会泄漏数据库连接。连接一直被占着直到 `Rows` 被 GC，但负载下连接池先耗尽。
 
 ```go
-// BAD — connection leak if rows aren't closed
+// 坏——rows 不关就泄漏连接
 rows, err := db.Query("SELECT id FROM users")
 if err != nil { return err }
 for rows.Next() {
     // ...
 }
-// rows never closed — connection leak!
+// rows 从没关——连接泄漏！
 
-// GOOD — always defer Close
+// 好——永远 defer Close
 rows, err := db.Query("SELECT id FROM users")
 if err != nil { return err }
 defer rows.Close()
 for rows.Next() {
     // ...
 }
-if err := rows.Err(); err != nil { // don't forget to check rows.Err()
+if err := rows.Err(); err != nil { // 别忘了查 rows.Err()
     return err
 }
 ```
 
-Also: use `db.QueryRow()` for single-row queries and `db.Exec()` for non-SELECT statements (INSERT, UPDATE, DELETE). Using `db.Query()` for non-SELECT leaks connections because the returned `Rows` is never iterated/closed.
+另外：单行查询用 `db.QueryRow()`，非 SELECT 语句（INSERT、UPDATE、DELETE）用 `db.Exec()`。非 SELECT 用 `db.Query()` 会泄漏连接，因为返回的 `Rows` 没人迭代/关闭。
 
-## Writing to a Closed Channel Panics
+## 向已关闭 channel 写入会 panic
 
-Sending to a closed channel panics. Reading from a closed channel returns the zero value immediately (with `ok == false`).
+向已关闭 channel 发送会 panic。从已关闭 channel 读取立即返回零值（`ok == false`）。
 
 ```go
-// BAD — panic: send on closed channel
+// 坏——panic：send on closed channel
 ch := make(chan int, 1)
 close(ch)
-ch <- 1 // panic!
+ch <- 1 // panic！
 
-// GOOD — only the sender should close, never the receiver
-// Use a done channel or context to signal completion
+// 好——只有发送方关闭，接收方永远不关
+// 用 done channel 或 context 通知完成
 func producer(ch chan<- int, done <-chan struct{}) {
     defer close(ch)
     for i := 0; ; i++ {
@@ -643,29 +643,29 @@ func producer(ch chan<- int, done <-chan struct{}) {
 }
 ```
 
-**Rule of thumb:** Only the sender closes the channel. If multiple senders, use a `sync.Once` or coordinate with a `sync.WaitGroup`.
+**经验法则：**只有发送方关 channel。多个发送方时用 `sync.Once` 或 `sync.WaitGroup` 协调。
 
-## Closed Channel in `select` Causes Busy Loop
+## `select` 里已关闭 channel 造成忙循环
 
-A closed channel is always ready to receive (returns zero value). In a `select`, this causes the case to fire continuously — a CPU-burning busy loop.
+已关闭 channel 永远可读（返回零值）。在 `select` 里这会让这个 case 不停触发——烧 CPU 的忙循环。
 
 ```go
-// BAD — after ch is closed, this loops at 100% CPU
+// 坏——ch 关闭后这段以 100% CPU 空转
 for {
     select {
-    case v := <-ch: // fires continuously after ch closes
-        process(v)   // processes zero values forever
+    case v := <-ch: // ch 关闭后不停触发
+        process(v)   // 永远在处理零值
     case <-done:
         return
     }
 }
 
-// GOOD — nil the channel after it closes
+// 好——channel 关闭后置 nil
 for {
     select {
     case v, ok := <-ch:
         if !ok {
-            ch = nil // nil channel blocks forever in select — disables this case
+            ch = nil // nil channel 在 select 里永远阻塞——禁用这个 case
             continue
         }
         process(v)
@@ -675,22 +675,22 @@ for {
 }
 ```
 
-## `select` with `default` Can Spin CPU
+## 带 `default` 的 `select` 会空转 CPU
 
-A `select` with a `default` case never blocks. Inside a `for` loop, this creates a busy-wait spin loop that burns CPU.
+带 `default` 的 `select` 永不阻塞。在 `for` 循环里就形成烧 CPU 的忙等。
 
 ```go
-// BAD — spins at 100% CPU waiting for a message
+// 坏——等消息时以 100% CPU 空转
 for {
     select {
     case msg := <-ch:
         process(msg)
     default:
-        // runs immediately when ch has nothing — tight loop!
+        // ch 没东西时立即执行——死循环！
     }
 }
 
-// GOOD — remove default to block until a message arrives
+// 好——去掉 default，阻塞到消息到达
 for {
     select {
     case msg := <-ch:
@@ -700,32 +700,32 @@ for {
     }
 }
 
-// GOOD — if you need non-blocking check, add a small sleep or ticker
+// 好——确实需要非阻塞检查时，加个小 sleep 或 ticker
 for {
     select {
     case msg := <-ch:
         process(msg)
     default:
-        time.Sleep(10 * time.Millisecond) // yield CPU
+        time.Sleep(10 * time.Millisecond) // 让出 CPU
     }
 }
 ```
 
-## Integer Conversion Silently Truncates
+## 整数转换静默截断
 
-Go integer conversions don't check for overflow — they silently truncate. This is especially dangerous when converting from user input or external data.
+Go 整数转换不查溢出——静默截断。转换用户输入或外部数据时尤其危险。
 
 ```go
-// BAD — silent truncation
+// 坏——静默截断
 var big int64 = 256
 small := int8(big)
-fmt.Println(small) // 0 — silently overflowed!
+fmt.Println(small) // 0——静默溢出了！
 
 var n int64 = math.MaxInt64
 n32 := int32(n)
-fmt.Println(n32) // -1 — silently wrapped!
+fmt.Println(n32) // -1——静默回绕了！
 
-// GOOD — check bounds before converting
+// 好——转换前查边界
 func safeIntToInt32(n int64) (int32, error) {
     if n < math.MinInt32 || n > math.MaxInt32 {
         return 0, fmt.Errorf("value %d overflows int32", n)
@@ -734,18 +734,18 @@ func safeIntToInt32(n int64) (int32, error) {
 }
 ```
 
-## `filepath.Join` Does Not Prevent Path Traversal
+## `filepath.Join` 防不住路径穿越
 
-`filepath.Join` cleans the path (resolves `..`) but doesn't prevent escaping the base directory. User-supplied paths can traverse outside the intended root.
+`filepath.Join` 会清理路径（解析 `..`），但不阻止逃出基准目录。用户提供的路径可以穿越到预期根目录之外。
 
 ```go
-// BAD — user can escape the base directory
+// 坏——用户可以逃出基准目录
 base := "/srv/files"
 userInput := "../../etc/passwd"
 path := filepath.Join(base, userInput)
-// path = "/etc/passwd" — escaped!
+// path = "/etc/passwd"——逃出去了！
 
-// GOOD (Go 1.24+) — confine access to the base directory
+// 好（Go 1.24+）——把访问关在基准目录里
 root, err := os.OpenRoot("/srv/files")
 if err != nil {
     return err
@@ -758,7 +758,7 @@ if err != nil {
 defer file.Close()
 ```
 
-For Go <1.24, use a lexical fallback only when `os.Root` is unavailable:
+Go <1.24 在没有 `os.Root` 时用纯词法兜底：
 
 ```go
 func safePath(base, userInput string) (string, error) {
@@ -779,9 +779,9 @@ func safePath(base, userInput string) (string, error) {
 }
 ```
 
-## Pointer Receiver Interface Satisfaction
+## 指针接收者的接口满足
 
-A value of type `T` cannot satisfy an interface that requires methods with `*T` receivers. But `*T` satisfies interfaces requiring either `T` or `*T` methods.
+`T` 类型的值满足不了要求 `*T` 接收者方法的接口。但 `*T` 能满足要求 `T` 或 `*T` 方法的接口。
 
 ```go
 type Sizer interface {
@@ -789,30 +789,30 @@ type Sizer interface {
 }
 
 type File struct{ size int }
-func (f *File) Size() int { return f.size } // pointer receiver
+func (f *File) Size() int { return f.size } // 指针接收者
 
 var s Sizer
-s = File{}   // COMPILE ERROR: File does not implement Sizer (*File does)
-s = &File{}  // OK — *File has the Size method
+s = File{}   // 编译错误：File 没实现 Sizer（*File 实现了）
+s = &File{}  // OK——*File 有 Size 方法
 
-// This is because the compiler can't always take the address of a value
-// (e.g., map values, return values). Pointer receiver = pointer required.
+// 原因是编译器不是总能对值取地址
+//（比如 map 的值、返回值）。指针接收者 = 必须用指针。
 ```
 
-## `regexp.MustCompile` in Hot Path
+## 热路径上的 `regexp.MustCompile`
 
-Long-lived regexp MUST be compiled once at package level — not inside functions called repeatedly. Short-lived regexp used once (e.g., in a CLI or test) are acceptable inline.
+长寿命的正则必须在包级编译一次——不能在反复调用的函数里编译。只用一次的短寿命正则（比如 CLI 或测试里）内联可以接受。
 
-`regexp.MustCompile` compiles a regex every call. In a hot path (loop, HTTP handler), this is expensive and wasteful.
+`regexp.MustCompile` 每次调用都编译一遍正则。在热路径（循环、HTTP handler）里又贵又浪费。
 
 ```go
-// BAD — recompiles regex on every call
+// 坏——每次调用都重新编译
 func isEmail(s string) bool {
     re := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
     return re.MatchString(s)
 }
 
-// GOOD — compile once at package level
+// 好——包级编译一次
 var emailRe = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
 func isEmail(s string) bool {
@@ -820,20 +820,20 @@ func isEmail(s string) bool {
 }
 ```
 
-## `init()` Ordering Is Fragile
+## `init()` 顺序很脆弱
 
-`init()` functions run in source file order within a package, and in dependency order across packages. But relying on this order creates brittle, hard-to-debug initialization sequences. Multiple `init()` in the same file run top-to-bottom, but across files it's alphabetical by filename — adding a file can change the order.
+`init()` 函数在包内按源文件顺序跑、跨包按依赖顺序跑。但依赖这个顺序会造出脆弱、难调试的初始化序列。同一文件里多个 `init()` 自上而下跑，但跨文件是按文件名字母序——加个文件就可能改变顺序。
 
 ```go
-// BAD — init() depends on another init() having run first
+// 坏——init() 依赖另一个 init() 先跑完
 var db *sql.DB
 
 func init() {
-    // Assumes config init() already ran — fragile!
+    // 假设 config 的 init() 已经跑过——脆弱！
     db, _ = sql.Open("postgres", config.DatabaseURL)
 }
 
-// GOOD — use explicit initialization
+// 好——显式初始化
 func main() {
     cfg := loadConfig()
     db := setupDatabase(cfg)
@@ -841,20 +841,20 @@ func main() {
 }
 ```
 
-Prefer explicit initialization in `main()` over `init()`. Use `init()` only for truly self-contained setup (registering drivers, codecs).
+优先在 `main()` 里显式初始化，少用 `init()`。`init()` 只留给真正自包含的装配（注册 driver、codec）。
 
-## Map Iteration Order Is Random
+## map 迭代顺序是随机的
 
-Go deliberately randomizes map iteration order. Code that assumes a specific order will produce inconsistent results.
+Go 故意随机化 map 迭代顺序。假设特定顺序的代码会产出不一致的结果。
 
 ```go
-// BAD — output order is random every run
+// 坏——每次跑输出顺序都是随机的
 m := map[string]int{"a": 1, "b": 2, "c": 3}
 for k, v := range m {
-    fmt.Printf("%s=%d ", k, v) // different order each time!
+    fmt.Printf("%s=%d ", k, v) // 每次顺序都不同！
 }
 
-// GOOD — sort keys when order matters
+// 好——要顺序就排序键
 keys := make([]string, 0, len(m))
 for k := range m {
     keys = append(keys, k)
@@ -865,14 +865,14 @@ for _, k := range keys {
 }
 ```
 
-This is especially dangerous in tests (non-deterministic output comparison), serialization (non-deterministic JSON/output), and logging (confusing diffs).
+这在测试（输出比较不确定）、序列化（JSON/输出不确定）和日志（diff 混乱）里尤其危险。
 
-## `fallthrough` in `switch` Executes Unconditionally
+## `switch` 里 `fallthrough` 无条件执行
 
-Unlike C, Go's `switch` cases don't fall through by default. But when you explicitly use `fallthrough`, it executes the **next case body unconditionally** — it does not check the next case's condition.
+跟 C 不同，Go 的 `switch` case 默认不穿透。但显式写 `fallthrough` 时，它**无条件执行下一个 case 体**——不看下一个 case 的条件。
 
 ```go
-// Surprising: fallthrough doesn't check the next condition
+// 意外点：fallthrough 不检查下一个条件
 switch x := 5; {
 case x > 10:
     fmt.Println(">10")
@@ -881,11 +881,11 @@ case x > 0:
     fmt.Println(">0")
     fallthrough
 case x < 0:
-    fmt.Println("<0") // EXECUTES even though 5 is not < 0!
+    fmt.Println("<0") // 执行了，尽管 5 并不 < 0！
 }
-// Output: >0, <0
+// 输出：>0, <0
 
-// fallthrough is rarely needed. Prefer listing multiple values:
+// fallthrough 很少真的需要。多值列出来更好：
 switch status {
 case "active", "enabled":
     enable()

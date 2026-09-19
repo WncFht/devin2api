@@ -1,141 +1,141 @@
-# CI Benchmark Regression Detection
+# CI 基准回归检测
 
-> **Run these tools in CI only, not on local machines.** Local benchmark results are noisy due to background processes, thermal throttling, and inconsistent CPU frequency — regressions detected locally are unreliable and waste developer time. Even shared CI runners can produce significant variance (5-10%); use statistical methods like `benchstat` with multiple iterations and relative comparisons to filter noise, or invest in dedicated benchmark runners for critical paths.
+> **这些工具只在 CI 里跑，别在本地机器上跑。** 本地基准测试结果噪声大——后台进程、热节流、CPU 频率不一致——本地测出的回归不可靠，只会浪费开发者时间。即使共享 CI runner 也会有显著波动（5-10%）；用 `benchstat` 这类统计方法配合多次迭代与相对对比来滤掉噪声，或为关键路径投资专用基准 runner。
 
-## Table of Contents
+## 目录
 
 - [benchdiff](#benchdiff)
 - [cob](#cob)
 - [gobenchdata](#gobenchdata)
-    - [CLI commands](#cli-commands)
-    - [GitHub Action setup](#github-action-setup)
-    - [Regression gating on PRs](#regression-gating-on-prs)
-    - [Dashboard configuration](#dashboard-configuration)
-- [Tool Selection Guide](#tool-selection-guide)
-- [Noisy Neighbor Mitigation](#noisy-neighbor-mitigation)
-    - [Why CI benchmarks are noisy](#why-ci-benchmarks-are-noisy)
-    - [Strategies](#strategies)
-- [System Tuning for Self-Hosted Runners](#system-tuning-for-self-hosted-runners)
-    - [Disable CPU frequency scaling](#disable-cpu-frequency-scaling)
-    - [Disable Turbo Boost](#disable-turbo-boost)
-    - [Pin benchmarks to specific CPU cores](#pin-benchmarks-to-specific-cpu-cores)
-    - [Disable SMT (Hyper-Threading)](#disable-smt-hyper-threading)
-    - [Combined CI setup script](#combined-ci-setup-script)
+    - [CLI 命令](#cli-命令)
+    - [GitHub Action 配置](#github-action-配置)
+    - [PR 上的回归门禁](#pr-上的回归门禁)
+    - [面板配置](#面板配置)
+- [工具选型指南](#工具选型指南)
+- [Noisy Neighbor 缓解](#noisy-neighbor-缓解)
+    - [为什么 CI 基准测试噪声大](#为什么-ci-基准测试噪声大)
+    - [策略](#策略)
+- [Self-Hosted Runner 系统调优](#self-hosted-runner-系统调优)
+    - [禁用 CPU 频率调节](#禁用-cpu-频率调节)
+    - [禁用 Turbo Boost](#禁用-turbo-boost)
+    - [把基准测试绑到指定 CPU 核](#把基准测试绑到指定-cpu-核)
+    - [禁用 SMT（Hyper-Threading）](#禁用-smthyper-threading)
+    - [CI 组合设置脚本](#ci-组合设置脚本)
 
 ## benchdiff
 
-Runs Go benchmarks on two git refs and uses `benchstat` to display deltas. Caches results for non-worktree refs so re-runs are fast. Prevents macOS sleep during benchmarks.
+在两个 git ref 上跑 Go 基准测试，用 `benchstat` 显示 delta。对非 worktree 的 ref 会缓存结果，重跑很快。基准测试期间阻止 macOS 睡眠。
 
 ```bash
 go install filippo.io/mostly-harmless/benchdiff@latest
 ```
 
 ```bash
-# Compare current worktree against HEAD (default)
+# 当前 worktree 对比 HEAD（默认）
 benchdiff -- -benchmem
 
-# Compare two specific refs
+# 对比两个指定 ref
 benchdiff -base-ref main -head-ref feature-branch
 
-# Compare against a specific commit or tag
+# 对比某个 commit 或 tag
 benchdiff -base-ref v1.2.0
 
-# Pass extra flags to go test — everything after -- goes to go test
+# 给 go test 传额外 flag——-- 之后的内容全部传给 go test
 benchdiff -- -benchmem -count=10 -benchtime=3s
 
-# Filter to specific benchmarks
+# 过滤到指定基准测试
 benchdiff -- -benchmem -count=10 -bench=BenchmarkParse
 
-# Target a specific package
+# 指定某个包
 benchdiff -- -benchmem -count=10 ./pkg/parser/...
 
-# Clear cached results (useful after rebasing or when cache is stale)
+# 清缓存（rebase 之后或缓存过期时用）
 benchdiff -clear-cache
 
-# Combine: compare main with 10 iterations, filtered to critical benchmarks
+# 组合：对比 main，10 次迭代，只跑关键基准测试
 benchdiff -base-ref main -- -benchmem -count=10 -bench='BenchmarkParse|BenchmarkEncode'
 ```
 
-Best for: quick PR-to-base comparisons in git-based workflows. Leverages `benchstat` for statistical rigor and caches non-worktree refs so re-runs only re-measure the worktree.
+适用场景：git 工作流中快速的 PR-vs-base 对比。借助 `benchstat` 获得统计严谨性，非 worktree 的 ref 有缓存，重跑只需重测 worktree。
 
 ## cob
 
-Compares benchmarks between HEAD and HEAD~1, failing the CI job if performance degrades beyond a configurable threshold (default 20%).
+对比 HEAD 与 HEAD~1 之间的基准测试，性能退化超过可配置阈值（默认 20%）就让 CI job 失败。
 
 ```bash
 go install github.com/knqyf263/cob@latest
 ```
 
 ```bash
-# Run with default 20% threshold — compares HEAD vs HEAD~1
+# 默认 20% 阈值——对比 HEAD vs HEAD~1
 cob
 
-# Stricter threshold for critical paths (10% regression = failure)
+# 关键路径用更严阈值（10% 退化即失败）
 cob -threshold 10
 
-# Compare against a specific base commit
+# 对比指定 base commit
 cob -base main
 
-# Only report regressions (ignore improvements)
+# 只报告退化（忽略改进）
 cob -only-degression
 
-# Choose which metrics to compare (default: ns/op,B/op)
+# 选择对比哪些指标（默认：ns/op,B/op）
 cob -compare "ns/op,B/op,allocs/op"
 
-# Custom go test arguments
+# 自定义 go test 参数
 cob -bench-args "test -run '^$' -bench BenchmarkParse -benchmem ./pkg/parser/..."
 
-# Increase benchmark duration for more stable results
+# 加长基准时长换取更稳结果
 cob -bench-args "test -run '^$' -bench . -benchmem -benchtime=3s ./..."
 
-# Skip cob for a specific commit: include [skip cob] in commit message
+# 某个 commit 跳过 cob：commit message 里包含 [skip cob]
 ```
 
-**Caution:** `cob` uses `git reset` internally, which can cause data loss if uncommitted changes exist — always commit your work before running.
+**注意：** `cob` 内部使用 `git reset`，有未提交变更时可能丢数据——运行前先提交。
 
-- For safety, run only in CI pipelines, not locally.
-- `cob` requires all benchmarks to pass; it skips CI gating if any benchmark fails.
-- `cob` compares single runs without `benchstat`-style statistics, making it more susceptible to noise than `benchdiff`.
+- 为安全起见只在 CI 流水线里跑，别在本地跑。
+- `cob` 要求全部基准测试通过；任何一个失败它就跳过 CI 门禁。
+- `cob` 只对比单次运行、没有 `benchstat` 式统计，比 `benchdiff` 更容易受噪声影响。
 
-Best for: simple post-commit regression gating in CI where statistical rigor is less critical than fast feedback.
+适用场景：提交后快速回归门禁，统计严谨性让位于反馈速度的 CI 场景。
 
 ## gobenchdata
 
-GitHub Action + CLI that collects benchmark results, publishes to gh-pages as JSON, and visualizes with an interactive web dashboard. Shows performance trends over time.
+GitHub Action + CLI：收集基准测试结果，以 JSON 发布到 gh-pages，用交互式 web 面板可视化。展示性能随时间的趋势。
 
 ```bash
 go install go.bobheadxi.dev/gobenchdata@latest
 ```
 
-### CLI commands
+### CLI 命令
 
 ```bash
-# Parse go test -bench output to JSON
+# 把 go test -bench 输出解析成 JSON
 go test -bench=. -benchmem -count=5 ./... | gobenchdata --json bench.json
 
-# Parse from a file
+# 从文件解析
 gobenchdata --json bench.json < bench.txt
 
-# Add a tag to the benchmark run (e.g., git commit)
+# 给这次基准运行打 tag（比如 git commit）
 gobenchdata --json bench.json --tag "$(git rev-parse --short HEAD)" < bench.txt
 
-# Evaluate regression checks against a checks config
+# 按 checks 配置评估回归检查
 gobenchdata checks eval bench.txt --checks-config .gobenchdata-checks.yml
 
-# Generate the web dashboard app (static Vue.js site)
+# 生成 web 面板应用（静态 Vue.js 站点）
 gobenchdata web generate ./dashboard-app
 
-# Serve the dashboard locally for preview
+# 本地起服务预览面板
 gobenchdata web serve ./dashboard-app
 
-# Merge multiple benchmark JSON files
+# 合并多个基准 JSON 文件
 gobenchdata merge old-bench.json new-bench.json > combined.json
 
-# Prune old entries (keep last 30 runs)
+# 裁剪旧条目（保留最近 30 次运行）
 gobenchdata prune --count 30 bench.json
 ```
 
-### GitHub Action setup
+### GitHub Action 配置
 
 ```yaml
 # .github/workflows/benchmark.yml
@@ -162,7 +162,7 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### Regression gating on PRs
+### PR 上的回归门禁
 
 ```yaml
 - name: Check for regressions
@@ -177,21 +177,21 @@ checks:
       benchmarks: [".*"]
       thresholds:
           - metric: NsPerOp
-            max: 1.2 # fail if >20% slower
+            max: 1.2 # 慢超 20% 即失败
           - metric: AllocedBytesPerOp
-            max: 1.3 # fail if >30% more allocations
+            max: 1.3 # 分配多超 30% 即失败
     - name: "Critical path stability"
       package: ./pkg/parser
       benchmarks: ["BenchmarkParse.*"]
       thresholds:
           - metric: NsPerOp
-            max: 1.1 # stricter: fail if >10% slower
+            max: 1.1 # 更严：慢超 10% 即失败
 ```
 
-### Dashboard configuration
+### 面板配置
 
 ```yaml
-# gobenchdata-web.yml — configure the Vue.js dashboard
+# gobenchdata-web.yml——配置 Vue.js 面板
 title: "My Project Benchmarks"
 description: "Performance tracking dashboard"
 chartGroups:
@@ -209,59 +209,59 @@ chartGroups:
             metrics: [NsPerOp, MBPerS]
 ```
 
-Best for: long-term trend tracking and visualization; complements benchdiff/cob for immediate gating.
+适用场景：长期趋势跟踪与可视化；与 benchdiff/cob 的即时门禁互补。
 
-## Tool Selection Guide
+## 工具选型指南
 
-| Tool                | Statistical rigor            | Dashboard                | Best for                          |
-| ------------------- | ---------------------------- | ------------------------ | --------------------------------- |
-| **benchdiff**       | High (uses benchstat)        | No                       | Local dev + CI PR comparisons     |
-| **cob**             | Low (single comparison)      | No                       | Quick CI gate, simple setup       |
-| **gobenchdata**     | Medium (configurable checks) | Yes (Vue.js on gh-pages) | Long-term trend tracking          |
-| **benchstat** (raw) | High                         | No (CSV export)          | Maximum control, custom workflows |
+| 工具                | 统计严谨性         | 面板                     | 适用场景                 |
+| ------------------- | ------------------ | ------------------------ | ------------------------ |
+| **benchdiff**       | 高（用 benchstat） | 无                       | 本地开发 + CI PR 对比    |
+| **cob**             | 低（单次对比）     | 无                       | 快速 CI 门禁，配置简单   |
+| **gobenchdata**     | 中（可配置检查）   | 有（gh-pages 上 Vue.js） | 长期趋势跟踪             |
+| **benchstat**（裸） | 高                 | 无（CSV 导出）           | 最大控制度，自定义工作流 |
 
-## Noisy Neighbor Mitigation
+## Noisy Neighbor 缓解
 
-Cloud CI environments share hardware with other jobs. Expect 5-10% variance even on quiet machines.
+云 CI 环境与其他 job 共享硬件。即使在安静的机器上也要有 5-10% 波动的心理预期。
 
-### Why CI benchmarks are noisy
+### 为什么 CI 基准测试噪声大
 
-- **Shared CPU/memory** — other CI jobs compete for resources
-- **Thermal throttling** — sustained load reduces clock speed
-- **Different hardware across runs** — CI runners may have different specs
-- **Kernel scheduling** — context switches add unpredictable latency
-- **Disk I/O contention** — shared storage affects I/O-bound benchmarks
+- **共享 CPU/内存**——其他 CI job 在争资源
+- **热节流**——持续负载降低时钟频率
+- **每次运行硬件不同**——CI runner 规格可能不一样
+- **内核调度**——上下文切换引入不可预测的延迟
+- **磁盘 I/O 争用**——共享存储影响 I/O 密集型基准测试
 
-### Strategies
+### 策略
 
-**Statistical rigor** — run with `-count=10` or more and compare with `benchstat`. A single run is meaningless. benchstat's p-value test filters out noise-induced false positives.
+**统计严谨**——用 `-count=10` 或更多跑，用 `benchstat` 对比。单次运行没有意义。benchstat 的 p 值检验能滤掉噪声引起的假阳性。
 
-**Relative comparison in same job** — run both base and head benchmarks in the same CI job on the same machine, rather than comparing against historical absolute values. This cancels out machine-to-machine variation. Tools like `benchdiff` do this automatically by checking out both git refs.
+**同一 job 内相对对比**——base 与 head 的基准测试在同一个 CI job、同一台机器上跑，而不是与历史绝对值对比。这样能消掉机器与机器之间的差异。`benchdiff` 这类工具通过 checkout 两个 git ref 自动做到这一点。
 
-**Dedicated benchmark runners** — for critical path benchmarks, use self-hosted CI runners with no other workloads. This eliminates noisy neighbors entirely but costs more infrastructure.
+**专用基准 runner**——关键路径基准测试用不跑其他负载的 self-hosted CI runner。彻底消除 noisy neighbor，但基础设施成本更高。
 
-**Conservative thresholds** — set regression thresholds higher on shared CI (20%+) than on dedicated runners (10%). Tight thresholds on noisy environments produce false positives that erode trust. GitHub-hosted runners show ~2-3% coefficient of variation in the best case; to guarantee <1% false positive rate, you need a 7%+ performance gate.
+**保守阈值**——共享 CI 上的回归阈值（20%+）要比专用 runner（10%）更宽。噪声环境里收紧阈值会制造假阳性，侵蚀信任。GitHub 托管 runner 最好情况下变异系数约 2-3%；要保证 <1% 假阳性率，需要 7%+ 的性能门禁。
 
-**Never "retry until pass"** — rerunning benchmarks until they pass introduces selection bias. If a benchmark is flaky, fix the noise source (more iterations, dedicated runner, wider threshold) rather than retrying.
+**绝不「重试到通过为止」**——反复重跑基准测试直到通过会引入选择偏差。基准测试不稳定时，去修噪声源（更多迭代、专用 runner、更宽阈值）而不是重试。
 
-## System Tuning for Self-Hosted Runners
+## Self-Hosted Runner 系统调优
 
-> **WARNING: These commands modify kernel and CPU settings. Apply them ONLY on dedicated CI runners, NEVER on developer machines or shared servers.**
+> **警告：这些命令修改内核与 CPU 设置。只用在专用 CI runner 上，绝不用在开发者机器或共享服务器上。**
 
-When you control the CI hardware, these settings dramatically reduce benchmark variance by eliminating the main sources of non-determinism.
+当你能控制 CI 硬件时，这些设置通过消除主要的非确定性来源，大幅降低基准测试方差。
 
-### Disable CPU frequency scaling
+### 禁用 CPU 频率调节
 
-Variable CPU frequency makes benchmark times meaningless — the same code runs at different speeds depending on load and thermals:
+CPU 频率可变让基准测试时长失去意义——同一份代码随负载与温度不同跑出不同速度：
 
 ```bash
-# Set all CPUs to "performance" governor (fixed maximum frequency)
+# 把全部 CPU 设为 "performance" 调度器（固定最高频率）
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 ```
 
-### Disable Turbo Boost
+### 禁用 Turbo Boost
 
-Turbo Boost temporarily increases clock speed but throttles under sustained load, creating variance between the start and end of a benchmark run:
+Turbo Boost 临时拉高时钟频率，但在持续负载下会节流，在基准测试运行的开头与结尾之间制造方差：
 
 ```bash
 # Intel
@@ -271,32 +271,32 @@ echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
 echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
 ```
 
-### Pin benchmarks to specific CPU cores
+### 把基准测试绑到指定 CPU 核
 
-Prevents the OS from migrating the benchmark process across cores, which causes cache thrashing (L1/L2 caches are per-core):
+防止 OS 在核之间迁移基准测试进程——迁移会导致缓存抖动（L1/L2 缓存是每核私有的）：
 
 ```bash
-# Pin to cores 2 and 3 (leave cores 0-1 for OS and other processes)
+# 绑到核 2、3（核 0-1 留给 OS 与其他进程）
 taskset -c 2,3 go test -bench=. -count=10 ./...
 ```
 
-### Disable SMT (Hyper-Threading)
+### 禁用 SMT（Hyper-Threading）
 
-SMT shares execution units between logical cores on the same physical core, causing unpredictable contention:
+SMT 让同一物理核上的两个逻辑核共享执行单元，造成不可预测的争用：
 
 ```bash
-# Disable SMT system-wide
+# 全系统禁用 SMT
 echo off | sudo tee /sys/devices/system/cpu/smt/control
 
-# Or disable individual sibling cores (check /sys/devices/system/cpu/cpu*/topology/thread_siblings_list)
-echo 0 | sudo tee /sys/devices/system/cpu/cpu1/online  # if cpu0 and cpu1 are siblings
+# 或禁用单个兄弟核（查 /sys/devices/system/cpu/cpu*/topology/thread_siblings_list）
+echo 0 | sudo tee /sys/devices/system/cpu/cpu1/online  # cpu0 与 cpu1 是兄弟核时
 ```
 
-### Combined CI setup script
+### CI 组合设置脚本
 
 ```bash
 #!/bin/bash
-# benchmark-setup.sh — run on self-hosted CI runner before benchmarks
+# benchmark-setup.sh——在 self-hosted CI runner 上跑基准测试前执行
 set -euo pipefail
 
 echo "=== Configuring CPU for stable benchmarks ==="

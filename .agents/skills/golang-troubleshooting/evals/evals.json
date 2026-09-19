@@ -2,520 +2,1078 @@
   {
     "id": 1,
     "name": "reproduce-before-fix-failing-test-first",
-    "description": "Tests Golden Rule #2: model must write a failing test before proposing any fix, not jump to code changes",
-    "prompt": "My Go HTTP handler returns 500 for some requests but I can't figure out which ones. The handler parses a JSON body with `json.NewDecoder(r.Body).Decode(&req)` and then calls `processOrder(req)`. Some users report getting 500 errors. Can you fix this?",
-    "trap": "Model jumps directly to adding nil checks or error handling in the handler code without first writing a test that reproduces the failure",
+    "description": "测试黄金法则 #2：模型必须先写一个失败的测试再提修复方案，而不是直接改代码",
+    "prompt": "我的 Go HTTP handler 对某些请求返回 500，但我搞不清是哪些。handler 用 `json.NewDecoder(r.Body).Decode(&req)` 解析 JSON body，然后调 `processOrder(req)`。有用户报告收到 500 错误。能帮我修吗？",
+    "trap": "模型直接在 handler 代码里加 nil 检查或错误处理，而不先写一个复现失败的测试",
     "assertions": [
-      {"id": "1.1", "text": "Writes a failing test (or proposes writing one) BEFORE suggesting any code fix"},
-      {"id": "1.2", "text": "Test covers multiple input variations to identify which inputs trigger the 500"},
-      {"id": "1.3", "text": "Does NOT propose a fix without first understanding/reproducing the root cause"},
-      {"id": "1.4", "text": "Asks clarifying questions about the error (logs, request bodies, frequency) or proposes to gather evidence"},
-      {"id": "1.5", "text": "Mentions running the test to confirm it reproduces the issue before fixing"}
+      {
+        "id": "1.1",
+        "text": "在提出任何代码修复之前先写一个失败的测试（或提议写一个）"
+      },
+      {
+        "id": "1.2",
+        "text": "测试覆盖多种输入变体以找出哪些输入触发 500"
+      },
+      {
+        "id": "1.3",
+        "text": "不在未理解/复现根因的情况下提出修复"
+      },
+      {
+        "id": "1.4",
+        "text": "就错误追问细节（日志、请求体、频率）或提议收集证据"
+      },
+      {
+        "id": "1.5",
+        "text": "提到先跑测试确认能复现问题再修复"
+      }
     ]
   },
   {
     "id": 2,
     "name": "one-hypothesis-at-a-time",
-    "description": "Tests Golden Rule #4: change one thing and measure, not multiple simultaneous changes",
-    "prompt": "My Go web service is slow and sometimes returns errors. I think it might be the database queries, or maybe the JSON marshaling, or possibly goroutine contention. Can you fix all three at once to save time? Add connection pooling, switch to a faster JSON library, and add mutexes around shared state.",
-    "trap": "Model applies all three fixes simultaneously as requested, violating the one-hypothesis-at-a-time rule",
+    "description": "测试黄金法则 #4：一次只改一处并度量，不做多处同时修改",
+    "prompt": "我的 Go web 服务很慢，有时还返回错误。我猜可能是数据库查询、可能是 JSON 序列化、也可能是 goroutine 争用。能一次把三个都修了省点时间吗？加连接池、换更快的 JSON 库、给共享状态加互斥锁。",
+    "trap": "模型按要求同时应用三个修复，违反一次一个假设的规则",
     "assertions": [
-      {"id": "2.1", "text": "Refuses or strongly advises against making all three changes simultaneously"},
-      {"id": "2.2", "text": "Recommends measuring/profiling first to identify which problem is actually causing the symptoms"},
-      {"id": "2.3", "text": "Suggests testing one hypothesis at a time with measurement between changes"},
-      {"id": "2.4", "text": "Mentions pprof, benchmarks, or race detector as diagnostic tools to identify the real bottleneck"},
-      {"id": "2.5", "text": "Explains why multiple simultaneous changes are harmful (can't tell what worked, may introduce new bugs)"}
+      {
+        "id": "2.1",
+        "text": "拒绝或强烈反对同时做这三处改动"
+      },
+      {
+        "id": "2.2",
+        "text": "建议先度量/profile 找出真正导致症状的问题"
+      },
+      {
+        "id": "2.3",
+        "text": "建议一次验证一个假设，改动之间做度量"
+      },
+      {
+        "id": "2.4",
+        "text": "提到 pprof、基准测试或竞态检测器作为定位真实瓶颈的诊断工具"
+      },
+      {
+        "id": "2.5",
+        "text": "解释同时多处改动为什么有害（无法判断哪个起了作用，还可能引入新 bug）"
+      }
     ]
   },
   {
     "id": 3,
     "name": "root-cause-not-symptom-fix",
-    "description": "Tests Golden Rule #5 and Step 8: fix at the source where bad data originates, not where the panic occurs",
-    "prompt": "My Go HTTP server panics with `nil pointer dereference` in the handler when accessing `s.db.Query(...)`. I added a nil check `if s.db == nil { return }` but now the handler silently returns empty responses. How do I fix this properly?",
-    "trap": "Model suggests improving the nil check (better error message, logging) rather than tracing to the root cause — why is s.db nil in the first place",
+    "description": "测试黄金法则 #5 与第 8 步：在坏数据的源头修，而不是在 panic 发生处修",
+    "prompt": "我的 Go HTTP 服务器在 handler 里访问 `s.db.Query(...)` 时 panic 报 `nil pointer dereference`。我加了 nil 检查 `if s.db == nil { return }`，但现在 handler 静默返回空响应。怎么正确修复？",
+    "trap": "模型建议改进 nil 检查（更好的错误信息、加日志），而不是回溯到根因——s.db 一开始为什么是 nil",
     "assertions": [
-      {"id": "3.1", "text": "Identifies that the nil check in the handler is a symptom fix, not the root cause"},
-      {"id": "3.2", "text": "Traces backward to the constructor/initialization code to find why db is nil"},
-      {"id": "3.3", "text": "Suggests validating db != nil in the constructor (e.g., NewServer) and failing fast there"},
-      {"id": "3.4", "text": "Does NOT suggest improving the nil check in the handler as the primary fix"},
-      {"id": "3.5", "text": "Explains that fixing at the symptom location masks the real bug"}
+      {
+        "id": "3.1",
+        "text": "指出 handler 里的 nil 检查是治标的症状修复，不是根因"
+      },
+      {
+        "id": "3.2",
+        "text": "回溯到构造函数/初始化代码，找出 db 为什么是 nil"
+      },
+      {
+        "id": "3.3",
+        "text": "建议在构造函数（如 NewServer）里校验 db != nil 并在那里快速失败"
+      },
+      {
+        "id": "3.4",
+        "text": "不把改进 handler 里的 nil 检查当作主要修复"
+      },
+      {
+        "id": "3.5",
+        "text": "解释在症状位置修复会掩盖真正的 bug"
+      }
     ]
   },
   {
     "id": 4,
     "name": "interface-nil-gotcha",
-    "description": "Tests the interface nil gotcha from common-go-bugs: typed nil in interface is not nil",
-    "prompt": "I have this Go code and the error branch always executes even though no error occurred. Debug this:\n\n```go\ntype ValidationError struct{ Field string }\nfunc (e *ValidationError) Error() string { return e.Field + \" invalid\" }\n\nfunc validate(s string) error {\n    var verr *ValidationError\n    if s == \"\" {\n        verr = &ValidationError{Field: \"name\"}\n    }\n    return verr\n}\n\nfunc main() {\n    if err := validate(\"hello\"); err != nil {\n        fmt.Println(\"error:\", err) // This always prints!\n    }\n}\n```",
-    "trap": "Model suggests adding a nil check on verr before returning, or restructuring the if/else, without explaining the interface nil gotcha",
+    "description": "测试 common-go-bugs 里的接口 nil 陷阱：接口里的带类型 nil 不等于 nil",
+    "prompt": "我这段 Go 代码即使没有错误发生，error 分支也总是执行。帮我调试：\n\n```go\ntype ValidationError struct{ Field string }\nfunc (e *ValidationError) Error() string { return e.Field + \" invalid\" }\n\nfunc validate(s string) error {\n    var verr *ValidationError\n    if s == \"\" {\n        verr = &ValidationError{Field: \"name\"}\n    }\n    return verr\n}\n\nfunc main() {\n    if err := validate(\"hello\"); err != nil {\n        fmt.Println(\"error:\", err) // This always prints!\n    }\n}\n```",
+    "trap": "模型建议 return 前对 verr 加 nil 检查或重构 if/else，而不解释接口 nil 陷阱",
     "assertions": [
-      {"id": "4.1", "text": "Identifies the interface nil gotcha: a typed nil *ValidationError wrapped in an error interface is NOT a nil interface"},
-      {"id": "4.2", "text": "Explains that the interface has a non-nil type descriptor even when the pointer value is nil"},
-      {"id": "4.3", "text": "Recommends returning nil explicitly (return nil) instead of returning the typed nil variable"},
-      {"id": "4.4", "text": "Does NOT suggest adding an if verr == nil check before return as the primary fix — the correct fix is to return nil explicitly when there's no error"},
-      {"id": "4.5", "text": "Shows or describes the correct fix: check verr != nil before return, and return nil in the else branch"}
+      {
+        "id": "4.1",
+        "text": "指出接口 nil 陷阱：包在 error 接口里的带类型 nil *ValidationError 不是 nil 接口"
+      },
+      {
+        "id": "4.2",
+        "text": "解释指针值为 nil 时接口的类型描述符仍非 nil"
+      },
+      {
+        "id": "4.3",
+        "text": "建议显式 return nil 而不是返回带类型的 nil 变量"
+      },
+      {
+        "id": "4.4",
+        "text": "不把 return 前加 if verr == nil 检查当主要修复——正确做法是没有错误时显式 return nil"
+      },
+      {
+        "id": "4.5",
+        "text": "展示或描述正确修法：return 前检查 verr != nil，else 分支 return nil"
+      }
     ]
   },
   {
     "id": 5,
     "name": "variable-shadowing-err",
-    "description": "Tests the variable shadowing with := from common-go-bugs: inner err shadows outer err",
-    "prompt": "My Go function always returns nil error even when someFunc() fails. I verified that someFunc() does return errors in certain cases. What's wrong?\n\n```go\nfunc processData() error {\n    var err error\n    if needsProcessing {\n        result, err := someFunc()\n        if err != nil {\n            return err\n        }\n        use(result)\n    }\n    return err\n}\n```",
-    "trap": "Model focuses on the early return path working correctly and misses that the outer err is always nil because := created a new variable",
+    "description": "测试 common-go-bugs 里 := 的变量遮蔽：内层 err 遮蔽外层 err",
+    "prompt": "我的 Go 函数即使 someFunc() 失败也总是返回 nil error。我验证了 someFunc() 在某些情况下确实返回错误。哪里错了？\n\n```go\nfunc processData() error {\n    var err error\n    if needsProcessing {\n        result, err := someFunc()\n        if err != nil {\n            return err\n        }\n        use(result)\n    }\n    return err\n}\n```",
+    "trap": "模型盯着正常的提前返回路径，没发现 := 创建了新变量导致外层 err 永远是 nil",
     "assertions": [
-      {"id": "5.1", "text": "Identifies that := inside the if block creates a NEW err variable that shadows the outer one"},
-      {"id": "5.2", "text": "Explains that the outer err remains nil because the inner := never assigned to it"},
-      {"id": "5.3", "text": "Recommends using = (assignment) instead of := to assign to the outer err variable"},
-      {"id": "5.4", "text": "Shows the fix: declare result separately (var result ResultType) and use result, err = someFunc()"},
-      {"id": "5.5", "text": "Mentions the golang.org/x/tools shadow analyzer as a detection tool, without relying on the obsolete go vet shadow flag"}
+      {
+        "id": "5.1",
+        "text": "指出 if 块里的 := 创建了遮蔽外层的新 err 变量"
+      },
+      {
+        "id": "5.2",
+        "text": "解释外层 err 保持 nil，因为内层 := 从未给它赋值"
+      },
+      {
+        "id": "5.3",
+        "text": "建议用 =（赋值）而非 := 来给外层 err 变量赋值"
+      },
+      {
+        "id": "5.4",
+        "text": "展示修法：单独声明 result（var result ResultType），然后用 result, err = someFunc()"
+      },
+      {
+        "id": "5.5",
+        "text": "提到 golang.org/x/tools 的 shadow analyzer 作为检测工具，不依赖已废弃的 go vet shadow 标志"
+      }
     ]
   },
   {
     "id": 6,
     "name": "defer-in-loop-resource-leak",
-    "description": "Tests the defer-in-loop gotcha from common-go-bugs: deferred calls pile up until function returns",
-    "prompt": "My Go program runs out of file descriptors when processing a large directory of files. Here's the code:\n\n```go\nfunc processFiles(paths []string) error {\n    for _, p := range paths {\n        f, err := os.Open(p)\n        if err != nil {\n            return err\n        }\n        defer f.Close()\n        data, err := io.ReadAll(f)\n        if err != nil {\n            return err\n        }\n        process(data)\n    }\n    return nil\n}\n```\nIt works for small directories but crashes with 'too many open files' for large ones.",
-    "trap": "Model suggests increasing the file descriptor limit (ulimit) instead of fixing the defer-in-loop bug",
+    "description": "测试 common-go-bugs 的循环内 defer 陷阱：defer 调用一直堆积到函数返回",
+    "prompt": "我的 Go 程序处理大目录时文件描述符耗尽。代码如下：\n\n```go\nfunc processFiles(paths []string) error {\n    for _, p := range paths {\n        f, err := os.Open(p)\n        if err != nil {\n            return err\n        }\n        defer f.Close()\n        data, err := io.ReadAll(f)\n        if err != nil {\n            return err\n        }\n        process(data)\n    }\n    return nil\n}\n```\n小目录没问题，大目录报 'too many open files' 崩溃。",
+    "trap": "模型建议调大文件描述符上限（ulimit），而不是修循环内 defer 的 bug",
     "assertions": [
-      {"id": "6.1", "text": "Identifies that defer f.Close() inside a for loop keeps all files open until the function returns"},
-      {"id": "6.2", "text": "Recommends wrapping the loop body in an anonymous function (closure) so defer runs each iteration"},
-      {"id": "6.3", "text": "Does NOT suggest increasing ulimit or file descriptor limits as the primary solution"},
-      {"id": "6.4", "text": "Shows the correct pattern with func() { f, err := os.Open(...); defer f.Close(); ... }()"},
-      {"id": "6.5", "text": "Alternatively suggests extracting the loop body into a named function"}
+      {
+        "id": "6.1",
+        "text": "指出 for 循环里的 defer f.Close() 会让所有文件一直打开到函数返回"
+      },
+      {
+        "id": "6.2",
+        "text": "建议把循环体包进匿名函数（闭包）让 defer 每轮都执行"
+      },
+      {
+        "id": "6.3",
+        "text": "不把调大 ulimit 或文件描述符上限当主要方案"
+      },
+      {
+        "id": "6.4",
+        "text": "展示正确模式 func() { f, err := os.Open(...); defer f.Close(); ... }()"
+      },
+      {
+        "id": "6.5",
+        "text": "或者建议把循环体抽成具名函数"
+      }
     ]
   },
   {
     "id": 7,
     "name": "break-in-select-inside-for-loop",
-    "description": "Tests the break-in-select gotcha: bare break only exits select, not the enclosing for loop",
-    "prompt": "My Go program's message consumer loop never terminates. When I send 'quit' on the channel, the loop keeps running. What's wrong?\n\n```go\nfor {\n    select {\n    case msg := <-ch:\n        if msg == \"quit\" {\n            log.Println(\"shutting down\")\n            break\n        }\n        handleMessage(msg)\n    case <-ctx.Done():\n        break\n    }\n}\n```",
-    "trap": "Model suggests the channel isn't receiving 'quit' or there's a timing issue, rather than identifying the break-in-select gotcha",
+    "description": "测试 select 内 break 陷阱：裸 break 只跳出 select，跳不出外层 for 循环",
+    "prompt": "我的 Go 程序消息消费循环永不终止。我往 channel 发 'quit'，循环照样跑。哪里错了？\n\n```go\nfor {\n    select {\n    case msg := <-ch:\n        if msg == \"quit\" {\n            log.Println(\"shutting down\")\n            break\n        }\n        handleMessage(msg)\n    case <-ctx.Done():\n        break\n    }\n}\n```",
+    "trap": "模型猜 channel 没收到 'quit' 或是时序问题，而没识别出 select 内 break 陷阱",
     "assertions": [
-      {"id": "7.1", "text": "Identifies that break inside a select only exits the select statement, not the for loop"},
-      {"id": "7.2", "text": "Recommends using a labeled break (e.g., break loop) with a label on the for statement"},
-      {"id": "7.3", "text": "Shows the correct pattern with a label like 'loop:' on the for statement and 'break loop' inside select"},
-      {"id": "7.4", "text": "Also fixes the ctx.Done() case which has the same break issue"},
-      {"id": "7.5", "text": "Alternatively mentions return as a solution if the function should exit entirely"}
+      {
+        "id": "7.1",
+        "text": "指出 select 里的 break 只跳出 select 语句，跳不出 for 循环"
+      },
+      {
+        "id": "7.2",
+        "text": "建议使用带标签的 break（如 break loop），标签打在 for 语句上"
+      },
+      {
+        "id": "7.3",
+        "text": "展示正确模式：for 语句上打 'loop:' 标签，select 里用 'break loop'"
+      },
+      {
+        "id": "7.4",
+        "text": "同时修复有同样 break 问题的 ctx.Done() 分支"
+      },
+      {
+        "id": "7.5",
+        "text": "如果函数该整体退出，也可提到用 return 解决"
+      }
     ]
   },
   {
     "id": 8,
     "name": "concurrent-map-fatal-not-panic",
-    "description": "Tests knowledge that concurrent map access is a fatal error that cannot be recovered, unlike most panics",
-    "prompt": "My Go web server occasionally crashes despite having a recover() middleware that catches panics. The error message says 'concurrent map read and map write'. I thought recover() catches all panics — why isn't it working? How should I protect against this?",
-    "trap": "Model suggests the recover middleware is misconfigured or needs to be higher in the middleware chain, rather than explaining that concurrent map access is fatal and unrecoverable",
+    "description": "测试是否知道并发 map 访问是 fatal error，recover 拦不住，不同于普通 panic",
+    "prompt": "我的 Go web 服务器偶尔崩溃，虽然有 recover() 中间件抓 panic。错误信息是 'concurrent map read and map write'。我以为 recover() 能抓所有 panic——为什么没用？该怎么防？",
+    "trap": "模型猜 recover 中间件配错了或该挪到中间件链更高处，而不解释并发 map 访问是致命且不可恢复的",
     "assertions": [
-      {"id": "8.1", "text": "Explains that concurrent map read/write is a FATAL error that cannot be caught by recover()"},
-      {"id": "8.2", "text": "Distinguishes this from regular panics — the Go runtime kills the process immediately"},
-      {"id": "8.3", "text": "Recommends protecting the map with sync.RWMutex or using sync.Map"},
-      {"id": "8.4", "text": "Recommends using go test -race to find the race condition"},
-      {"id": "8.5", "text": "Does NOT suggest fixing the recover middleware as the solution"}
+      {
+        "id": "8.1",
+        "text": "解释并发 map 读写是 FATAL 错误，recover() 抓不到"
+      },
+      {
+        "id": "8.2",
+        "text": "区分它和普通 panic——Go runtime 直接杀进程"
+      },
+      {
+        "id": "8.3",
+        "text": "建议用 sync.RWMutex 保护 map 或用 sync.Map"
+      },
+      {
+        "id": "8.4",
+        "text": "建议用 go test -race 找竞争条件"
+      },
+      {
+        "id": "8.5",
+        "text": "不把修 recover 中间件当解决方案"
+      }
     ]
   },
   {
     "id": 9,
     "name": "waitgroup-add-inside-goroutine",
-    "description": "Tests the WaitGroup.Add placement gotcha: Add inside goroutine races with Wait",
-    "prompt": "My Go test passes most of the time but occasionally fails with 'expected 10 results, got 7' (or some other number less than 10). The code launches goroutines to process items in parallel:\n\n```go\nvar wg sync.WaitGroup\nresults := make([]int, 0, 10)\nvar mu sync.Mutex\nfor i := 0; i < 10; i++ {\n    go func(n int) {\n        wg.Add(1)\n        defer wg.Done()\n        val := process(n)\n        mu.Lock()\n        results = append(results, val)\n        mu.Unlock()\n    }(i)\n}\nwg.Wait()\n```",
-    "trap": "Model focuses on the mutex/slice synchronization and misses that wg.Add(1) is inside the goroutine, racing with wg.Wait()",
+    "description": "测试 WaitGroup.Add 位置陷阱：goroutine 里的 Add 与 Wait 竞争",
+    "prompt": "我的 Go 测试大多时候通过，偶尔失败报 'expected 10 results, got 7'（或其他小于 10 的数字）。代码起 goroutine 并行处理元素：\n\n```go\nvar wg sync.WaitGroup\nresults := make([]int, 0, 10)\nvar mu sync.Mutex\nfor i := 0; i < 10; i++ {\n    go func(n int) {\n        wg.Add(1)\n        defer wg.Done()\n        val := process(n)\n        mu.Lock()\n        results = append(results, val)\n        mu.Unlock()\n    }(i)\n}\nwg.Wait()\n```",
+    "trap": "模型盯着 mutex/切片同步，没发现 wg.Add(1) 在 goroutine 里面，与 wg.Wait() 竞争",
     "assertions": [
-      {"id": "9.1", "text": "Identifies that wg.Add(1) is called inside the goroutine instead of before it"},
-      {"id": "9.2", "text": "Explains that wg.Wait() may return before all goroutines have called wg.Add(1)"},
-      {"id": "9.3", "text": "Recommends moving wg.Add(1) before the go func() call"},
-      {"id": "9.4", "text": "Notes this is a race condition that passes most of the time but fails intermittently"},
-      {"id": "9.5", "text": "Does NOT focus primarily on the mutex/slice synchronization as the root cause"}
+      {
+        "id": "9.1",
+        "text": "指出 wg.Add(1) 在 goroutine 里调用而不是在它之前"
+      },
+      {
+        "id": "9.2",
+        "text": "解释 wg.Wait() 可能在所有 goroutine 调 wg.Add(1) 之前就返回"
+      },
+      {
+        "id": "9.3",
+        "text": "建议把 wg.Add(1) 移到 go func() 调用之前"
+      },
+      {
+        "id": "9.4",
+        "text": "指出这是竞争条件，大多时候能过但会间歇失败"
+      },
+      {
+        "id": "9.5",
+        "text": "不把 mutex/切片同步当主要根因"
+      }
     ]
   },
   {
     "id": 10,
     "name": "missing-return-after-http-error",
-    "description": "Tests the missing return after http.Error() bug from common-go-bugs",
-    "prompt": "My Go API endpoint has a security vulnerability — unauthorized users can sometimes access protected resources. The handler checks authorization and sends a 403 Forbidden response, but the protected action still executes. Here's the code:\n\n```go\nfunc handleDelete(w http.ResponseWriter, r *http.Request) {\n    if !isAuthorized(r) {\n        http.Error(w, \"Forbidden\", http.StatusForbidden)\n    }\n    if err := deleteResource(r.Context(), r.URL.Query().Get(\"id\")); err != nil {\n        http.Error(w, err.Error(), 500)\n    }\n    w.WriteHeader(http.StatusNoContent)\n}\n```",
-    "trap": "Model suggests the isAuthorized function is buggy rather than noticing the missing return after http.Error()",
+    "description": "测试 common-go-bugs 里 http.Error() 后漏 return 的 bug",
+    "prompt": "我的 Go API 端点有安全漏洞——未授权用户有时能访问受保护资源。handler 检查授权并返回 403 Forbidden，但受保护操作还是执行了。代码如下：\n\n```go\nfunc handleDelete(w http.ResponseWriter, r *http.Request) {\n    if !isAuthorized(r) {\n        http.Error(w, \"Forbidden\", http.StatusForbidden)\n    }\n    if err := deleteResource(r.Context(), r.URL.Query().Get(\"id\")); err != nil {\n        http.Error(w, err.Error(), 500)\n    }\n    w.WriteHeader(http.StatusNoContent)\n}\n```",
+    "trap": "模型怀疑 isAuthorized 函数有 bug，而没注意 http.Error() 后漏了 return",
     "assertions": [
-      {"id": "10.1", "text": "Identifies the missing return statement after http.Error(w, 'Forbidden', http.StatusForbidden)"},
-      {"id": "10.2", "text": "Explains that http.Error() does NOT stop handler execution — it only writes to the ResponseWriter"},
-      {"id": "10.3", "text": "Adds return statements after each http.Error() call"},
-      {"id": "10.4", "text": "Does NOT primarily blame the isAuthorized function"},
-      {"id": "10.5", "text": "Mentions this is a common Go bug pattern and a security concern"}
+      {
+        "id": "10.1",
+        "text": "指出 http.Error(w, 'Forbidden', http.StatusForbidden) 后漏了 return 语句"
+      },
+      {
+        "id": "10.2",
+        "text": "解释 http.Error() 不会中止 handler 执行——它只是写 ResponseWriter"
+      },
+      {
+        "id": "10.3",
+        "text": "在每个 http.Error() 调用后加 return 语句"
+      },
+      {
+        "id": "10.4",
+        "text": "不主要怪罪 isAuthorized 函数"
+      },
+      {
+        "id": "10.5",
+        "text": "提到这是常见 Go bug 模式且涉及安全问题"
+      }
     ]
   },
   {
     "id": 11,
     "name": "json-numbers-float64-interface",
-    "description": "Tests JSON unmarshaling gotcha: numbers into interface{} become float64, not int",
-    "prompt": "My Go code panics when processing JSON API responses. The JSON looks like `{\"user_id\": 1234567890123456789}`. I unmarshal into `map[string]interface{}` and then type-assert the user_id to int64:\n\n```go\nvar result map[string]interface{}\njson.Unmarshal(data, &result)\nuserID := result[\"user_id\"].(int64)\n```\nWhy does this panic?",
-    "trap": "Model suggests the JSON is malformed or the field name doesn't match, rather than explaining the float64 type gotcha",
+    "description": "测试 JSON 反序列化陷阱：数字进 interface{} 变 float64 而非 int",
+    "prompt": "我的 Go 代码处理 JSON API 响应时 panic。JSON 长这样 `{\"user_id\": 1234567890123456789}`。我反序列化进 `map[string]interface{}` 然后把 user_id 类型断言成 int64：\n\n```go\nvar result map[string]interface{}\njson.Unmarshal(data, &result)\nuserID := result[\"user_id\"].(int64)\n```\n为什么 panic？",
+    "trap": "模型猜 JSON 格式不对或字段名不匹配，而不解释 float64 类型陷阱",
     "assertions": [
-      {"id": "11.1", "text": "Explains that JSON numbers unmarshaled into interface{} become float64, not int or int64"},
-      {"id": "11.2", "text": "Notes that large integers (> 2^53) silently lose precision when stored as float64"},
-      {"id": "11.3", "text": "Recommends using a typed struct with int64 field as the preferred solution"},
-      {"id": "11.4", "text": "Alternatively mentions json.NewDecoder with UseNumber() and json.Number for when interface{} is required"},
-      {"id": "11.5", "text": "Explains the type assertion panics because the actual type is float64, not int64"}
+      {
+        "id": "11.1",
+        "text": "解释 JSON 数字反序列化进 interface{} 变 float64，不是 int 或 int64"
+      },
+      {
+        "id": "11.2",
+        "text": "指出大整数（> 2^53）存成 float64 会静默丢精度"
+      },
+      {
+        "id": "11.3",
+        "text": "推荐用带 int64 字段的类型化结构体作为首选方案"
+      },
+      {
+        "id": "11.4",
+        "text": "必须用 interface{} 时也可提到 json.NewDecoder 加 UseNumber() 和 json.Number"
+      },
+      {
+        "id": "11.5",
+        "text": "解释类型断言 panic 是因为实际类型是 float64 而非 int64"
+      }
     ]
   },
   {
     "id": 12,
     "name": "strings-trim-vs-trimprefix",
-    "description": "Tests the strings.Trim character-set gotcha from common-go-bugs",
-    "prompt": "My Go function strips the 'application/' prefix from MIME types but gives wrong results for some types. `strings.Trim(\"application/json\", \"application/\")` returns 'js' instead of 'json'. Is this a Go bug?",
-    "trap": "Model suggests it's a Go bug or suggests a regex-based workaround instead of explaining Trim treats the second argument as a character set",
+    "description": "测试 common-go-bugs 的 strings.Trim 字符集陷阱",
+    "prompt": "我的 Go 函数给 MIME 类型剥 'application/' 前缀，但某些类型结果不对。`strings.Trim(\"application/json\", \"application/\")` 返回 'js' 而不是 'json'。这是 Go 的 bug 吗？",
+    "trap": "模型说是 Go 的 bug 或建议用正则绕，而不解释 Trim 把第二个参数当字符集",
     "assertions": [
-      {"id": "12.1", "text": "Explains that strings.Trim treats its second argument as a SET of characters to strip, not as a substring"},
-      {"id": "12.2", "text": "Shows why 'json' becomes 'js' — the characters j, o, n are in the set {a,p,l,i,c,t,o,n,/}"},
-      {"id": "12.3", "text": "Recommends strings.TrimPrefix for removing a substring prefix"},
-      {"id": "12.4", "text": "Mentions strings.TrimSuffix for removing suffixes"},
-      {"id": "12.5", "text": "Confirms this is NOT a Go bug — it's working as documented"}
+      {
+        "id": "12.1",
+        "text": "解释 strings.Trim 把第二个参数当待剥除的字符集合，而不是子串"
+      },
+      {
+        "id": "12.2",
+        "text": "说明 'json' 为什么变 'js'——j、o、n 都在集合 {a,p,l,i,c,t,o,n,/} 里"
+      },
+      {
+        "id": "12.3",
+        "text": "推荐用 strings.TrimPrefix 去子串前缀"
+      },
+      {
+        "id": "12.4",
+        "text": "提到 strings.TrimSuffix 去后缀"
+      },
+      {
+        "id": "12.5",
+        "text": "确认这不是 Go 的 bug——行为与文档一致"
+      }
     ]
   },
   {
     "id": 13,
     "name": "closed-channel-busy-loop-in-select",
-    "description": "Tests the closed channel in select causing busy loop from common-go-bugs",
-    "prompt": "After running for a few hours, my Go worker's CPU usage jumps to 100% even when there's no work. The worker reads from a channel in a select. Sometimes the upstream producer closes the channel when it's done. Here's the worker:\n\n```go\nfunc worker(ch <-chan Job, done <-chan struct{}) {\n    for {\n        select {\n        case job := <-ch:\n            process(job)\n        case <-done:\n            return\n        }\n    }\n}\n```",
-    "trap": "Model suggests adding a time.Sleep in a default case or reducing GOMAXPROCS, rather than identifying that a closed channel fires continuously in select",
+    "description": "测试 common-go-bugs 里已关闭 channel 在 select 中造成忙循环",
+    "prompt": "跑了几小时后，我的 Go worker CPU 占用飙到 100%，即使没有活干。worker 在 select 里从 channel 读。上游生产者干完有时会关闭 channel。worker 代码：\n\n```go\nfunc worker(ch <-chan Job, done <-chan struct{}) {\n    for {\n        select {\n        case job := <-ch:\n            process(job)\n        case <-done:\n            return\n        }\n    }\n}\n```",
+    "trap": "模型建议在 default 分支加 time.Sleep 或调小 GOMAXPROCS，而没识别出已关闭 channel 在 select 里持续触发",
     "assertions": [
-      {"id": "13.1", "text": "Identifies that a closed channel always returns immediately (zero value) in a select case"},
-      {"id": "13.2", "text": "Explains this causes the select case to fire continuously — a busy loop burning CPU"},
-      {"id": "13.3", "text": "Recommends using the comma-ok idiom (job, ok := <-ch) and nil-ing the channel when closed (ch = nil)"},
-      {"id": "13.4", "text": "Explains that a nil channel blocks forever in select, effectively disabling that case"},
-      {"id": "13.5", "text": "Does NOT suggest adding a default case with time.Sleep as the fix"}
+      {
+        "id": "13.1",
+        "text": "指出已关闭 channel 在 select 分支里总是立即返回（零值）"
+      },
+      {
+        "id": "13.2",
+        "text": "解释这导致该 select 分支持续触发——烧 CPU 的忙循环"
+      },
+      {
+        "id": "13.3",
+        "text": "建议用 comma-ok 惯用法（job, ok := <-ch），关闭后把 channel 置 nil（ch = nil）"
+      },
+      {
+        "id": "13.4",
+        "text": "解释 nil channel 在 select 里永远阻塞，等于禁掉那个分支"
+      },
+      {
+        "id": "13.5",
+        "text": "不把加 default 分支配 time.Sleep 当修复方案"
+      }
     ]
   },
   {
     "id": 14,
     "name": "select-default-spin-loop",
-    "description": "Tests the select-with-default busy-wait pattern from common-go-bugs",
-    "prompt": "I need non-blocking channel reads in my Go message processor. I have a for loop with a select that checks a channel and a default case. The code works but uses 100% CPU even when idle. How do I fix this without blocking?\n\n```go\nfor {\n    select {\n    case msg := <-incoming:\n        handleMsg(msg)\n    default:\n        // check other conditions\n        if shouldStop() {\n            return\n        }\n    }\n}\n```",
-    "trap": "Model keeps the default case and just adds more logic to it, rather than restructuring to remove the busy-wait",
+    "description": "测试 common-go-bugs 的 select+default 忙等模式",
+    "prompt": "我的 Go 消息处理器需要非阻塞 channel 读。我有个 for 循环带 select 检查 channel 和一个 default 分支。代码能跑但空闲时也占 100% CPU。怎么修又不阻塞？\n\n```go\nfor {\n    select {\n    case msg := <-incoming:\n        handleMsg(msg)\n    default:\n        // check other conditions\n        if shouldStop() {\n            return\n        }\n    }\n}\n```",
+    "trap": "模型保留 default 分支只往里加逻辑，而不重构掉这个忙等",
     "assertions": [
-      {"id": "14.1", "text": "Identifies that select with default inside a for loop is a busy-wait spin loop"},
-      {"id": "14.2", "text": "Explains that default runs immediately when no channel is ready, creating a tight loop"},
-      {"id": "14.3", "text": "Recommends removing the default case and using a second channel or context for the stop signal"},
-      {"id": "14.4", "text": "Alternatively suggests adding a time.Sleep or ticker in the default to yield CPU if non-blocking is truly required"},
-      {"id": "14.5", "text": "Shows a solution using a ctx.Done() or stop channel in a second select case"}
+      {
+        "id": "14.1",
+        "text": "指出 for 循环里 select 带 default 是忙等自旋循环"
+      },
+      {
+        "id": "14.2",
+        "text": "解释没有 channel 就绪时 default 立即执行，形成紧凑空转"
+      },
+      {
+        "id": "14.3",
+        "text": "建议去掉 default 分支，用第二个 channel 或 context 传停止信号"
+      },
+      {
+        "id": "14.4",
+        "text": "非阻塞确实必要时，也可建议在 default 里加 time.Sleep 或 ticker 让出 CPU"
+      },
+      {
+        "id": "14.5",
+        "text": "展示用第二个 select 分支接 ctx.Done() 或停止 channel 的方案"
+      }
     ]
   },
   {
     "id": 15,
     "name": "enum-zero-value-iota-ambiguity",
-    "description": "Tests the iota zero value ambiguity from common-go-bugs",
-    "prompt": "I have a Go enum for user roles using iota. Some users are getting Admin privileges by default when they register, even though I didn't set their role. The zero value of Role seems to be Admin. How should I fix this?\n\n```go\ntype Role int\nconst (\n    Admin   Role = iota  // 0\n    Editor               // 1\n    Viewer               // 2\n)\n\ntype User struct {\n    Name string\n    Role Role\n}\n```",
-    "trap": "Model suggests setting new users' Role field to Viewer explicitly in the constructor, rather than fixing the enum design",
+    "description": "测试 common-go-bugs 的 iota 零值歧义",
+    "prompt": "我有个用 iota 的 Go 用户角色枚举。有些用户注册时没设角色却默认拿到 Admin 权限。Role 的零值似乎是 Admin。该怎么修？\n\n```go\ntype Role int\nconst (\n    Admin   Role = iota  // 0\n    Editor               // 1\n    Viewer               // 2\n)\n\ntype User struct {\n    Name string\n    Role Role\n}\n```",
+    "trap": "模型建议在构造函数里显式把新用户 Role 设成 Viewer，而不修枚举设计本身",
     "assertions": [
-      {"id": "15.1", "text": "Identifies that iota starting at 0 makes the zero value (default for uninitialized fields) equal to Admin"},
-      {"id": "15.2", "text": "Recommends reserving 0 for an Unknown/Unspecified sentinel value"},
-      {"id": "15.3", "text": "Shows the pattern: RoleUnknown Role = iota, then Admin, Editor, Viewer"},
-      {"id": "15.4", "text": "Explains this applies to any enum — zero value should be the 'unset' state, not a valid value"},
-      {"id": "15.5", "text": "Does NOT primarily suggest fixing it in the constructor or registration logic"}
+      {
+        "id": "15.1",
+        "text": "指出 iota 从 0 开始让零值（未初始化字段的默认值）等于 Admin"
+      },
+      {
+        "id": "15.2",
+        "text": "建议把 0 保留给 Unknown/Unspecified 哨兵值"
+      },
+      {
+        "id": "15.3",
+        "text": "展示模式：RoleUnknown Role = iota，然后才是 Admin、Editor、Viewer"
+      },
+      {
+        "id": "15.4",
+        "text": "解释这对任何枚举都适用——零值应是「未设置」状态而不是有效值"
+      },
+      {
+        "id": "15.5",
+        "text": "不主要建议在构造函数或注册逻辑里修"
+      }
     ]
   },
   {
     "id": 16,
     "name": "recover-only-same-goroutine",
-    "description": "Tests the recover() goroutine boundary from common-go-bugs",
-    "prompt": "My Go server has a panic recovery middleware but child goroutines still crash the entire process. I have:\n\n```go\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    defer func() {\n        if r := recover(); r != nil {\n            http.Error(w, \"Internal Error\", 500)\n        }\n    }()\n    go processAsync(r.Context(), extractData(r))\n    w.WriteHeader(http.StatusAccepted)\n}\n```\nWhen processAsync panics, the whole server crashes instead of just returning 500.",
-    "trap": "Model suggests wrapping the recover middleware differently or using a global recover, not understanding that recover only works within the same goroutine",
+    "description": "测试 common-go-bugs 的 recover() goroutine 边界",
+    "prompt": "我的 Go 服务器有 panic 恢复中间件，但子 goroutine 还是让整个进程崩。代码：\n\n```go\nfunc handler(w http.ResponseWriter, r *http.Request) {\n    defer func() {\n        if r := recover(); r != nil {\n            http.Error(w, \"Internal Error\", 500)\n        }\n    }()\n    go processAsync(r.Context(), extractData(r))\n    w.WriteHeader(http.StatusAccepted)\n}\n```\nprocessAsync panic 时整个服务器崩了，而不是只返回 500。",
+    "trap": "模型建议换种方式包 recover 中间件或用全局 recover，不明白 recover 只在同一 goroutine 内有效",
     "assertions": [
-      {"id": "16.1", "text": "Explains that recover() can ONLY catch panics in the same goroutine where it is deferred"},
-      {"id": "16.2", "text": "States that a panic in a child goroutine will crash the entire program regardless of parent recovery"},
-      {"id": "16.3", "text": "Recommends adding defer/recover inside the child goroutine (processAsync or its wrapper)"},
-      {"id": "16.4", "text": "Shows the pattern: go func() { defer func() { if r := recover()... }(); processAsync(...) }()"},
-      {"id": "16.5", "text": "Does NOT suggest reconfiguring the parent middleware as the solution"}
+      {
+        "id": "16.1",
+        "text": "解释 recover() 只能抓它被 defer 的那个 goroutine 里的 panic"
+      },
+      {
+        "id": "16.2",
+        "text": "说明子 goroutine 的 panic 会让整个程序崩溃，父级怎么 recover 都没用"
+      },
+      {
+        "id": "16.3",
+        "text": "建议在子 goroutine 内（processAsync 或其包装）加 defer/recover"
+      },
+      {
+        "id": "16.4",
+        "text": "展示模式：go func() { defer func() { if r := recover()... }(); processAsync(...) }()"
+      },
+      {
+        "id": "16.5",
+        "text": "不把重配父级中间件当解决方案"
+      }
     ]
   },
   {
     "id": 17,
     "name": "os-exit-skips-defers",
-    "description": "Tests os.Exit / log.Fatal skipping deferred functions from common-go-bugs",
-    "prompt": "My Go CLI tool creates temp files and defers their cleanup, but sometimes temp files are left behind. The code structure is:\n\n```go\nfunc main() {\n    tmpFile, _ := os.CreateTemp(\"\", \"data-*\")\n    defer os.Remove(tmpFile.Name())\n    defer tmpFile.Close()\n\n    if err := processData(tmpFile); err != nil {\n        log.Fatalf(\"processing failed: %v\", err)\n    }\n    // ... use results\n}\n```",
-    "trap": "Model suggests the error path doesn't clean up properly but misses that log.Fatal calls os.Exit which skips ALL deferred functions",
+    "description": "测试 common-go-bugs 的 os.Exit / log.Fatal 跳过 defer",
+    "prompt": "我的 Go CLI 工具创建临时文件并 defer 清理，但有时临时文件残留。代码结构：\n\n```go\nfunc main() {\n    tmpFile, _ := os.CreateTemp(\"\", \"data-*\")\n    defer os.Remove(tmpFile.Name())\n    defer tmpFile.Close()\n\n    if err := processData(tmpFile); err != nil {\n        log.Fatalf(\"processing failed: %v\", err)\n    }\n    // ... use results\n}\n```",
+    "trap": "模型猜到错误路径没清理干净，但没发现 log.Fatal 会调 os.Exit 跳过所有 defer",
     "assertions": [
-      {"id": "17.1", "text": "Identifies that log.Fatal (or log.Fatalf) calls os.Exit(1) internally"},
-      {"id": "17.2", "text": "Explains that os.Exit skips all deferred functions — cleanup never runs"},
-      {"id": "17.3", "text": "Recommends restructuring to avoid log.Fatal — use a run() function pattern or return errors"},
-      {"id": "17.4", "text": "Shows the pattern: move logic into a run() error function, call os.Exit in main only after run returns"},
-      {"id": "17.5", "text": "Does NOT suggest explicitly calling os.Remove before log.Fatal as the primary fix"}
+      {
+        "id": "17.1",
+        "text": "指出 log.Fatal（或 log.Fatalf）内部调 os.Exit(1)"
+      },
+      {
+        "id": "17.2",
+        "text": "解释 os.Exit 跳过所有 defer——清理代码永远跑不到"
+      },
+      {
+        "id": "17.3",
+        "text": "建议重构避开 log.Fatal——用 run() 函数模式或返回 error"
+      },
+      {
+        "id": "17.4",
+        "text": "展示模式：逻辑挪进 run() error 函数，main 里只在 run 返回后调 os.Exit"
+      },
+      {
+        "id": "17.5",
+        "text": "不把在 log.Fatal 前显式调 os.Remove 当主要修复"
+      }
     ]
   },
   {
     "id": 18,
     "name": "time-equal-not-double-equals",
-    "description": "Tests the time.Time == vs .Equal() gotcha from common-go-bugs",
-    "prompt": "My Go test comparing time values fails intermittently. I store a time.Time in the database and read it back, then compare with ==. The test passes when I use a fixed time but fails when I use time.Now():\n\n```go\nt1 := time.Now()\nsaveToDatabase(t1)\nt2 := loadFromDatabase()\nassert.True(t, t1 == t2) // fails!\n```\nThe times represent the same instant. Why does == fail?",
-    "trap": "Model suggests the database truncates nanoseconds or timezone differences, not the monotonic clock component",
+    "description": "测试 common-go-bugs 的 time.Time == 对 .Equal() 陷阱",
+    "prompt": "我的 Go 测试比较时间值时间歇失败。我把 time.Time 存进数据库再读回来，用 == 比较。用固定时间测试能过，用 time.Now() 就挂：\n\n```go\nt1 := time.Now()\nsaveToDatabase(t1)\nt2 := loadFromDatabase()\nassert.True(t, t1 == t2) // fails!\n```\n两个时间代表同一时刻。为什么 == 会失败？",
+    "trap": "模型猜数据库截断纳秒或时区差异，没想到单调时钟分量",
     "assertions": [
-      {"id": "18.1", "text": "Identifies that time.Now() includes a monotonic clock reading that database serialization strips"},
-      {"id": "18.2", "text": "Explains that == compares all fields including the monotonic component, so it can fail for equal instants"},
-      {"id": "18.3", "text": "Recommends using .Equal() which ignores the monotonic clock"},
-      {"id": "18.4", "text": "Alternatively mentions t.Round(0) to strip the monotonic reading before comparison or storage"},
-      {"id": "18.5", "text": "Does NOT primarily blame database precision or timezone differences"}
+      {
+        "id": "18.1",
+        "text": "指出 time.Now() 带单调时钟读数，数据库序列化会把它剥掉"
+      },
+      {
+        "id": "18.2",
+        "text": "解释 == 比较所有字段含单调分量，同一时刻也可能不等"
+      },
+      {
+        "id": "18.3",
+        "text": "推荐用 .Equal()，它忽略单调时钟"
+      },
+      {
+        "id": "18.4",
+        "text": "也可提到 t.Round(0) 在比较或存储前剥掉单调读数"
+      },
+      {
+        "id": "18.5",
+        "text": "不主要怪数据库精度或时区差异"
+      }
     ]
   },
   {
     "id": 19,
     "name": "sql-rows-must-be-closed",
-    "description": "Tests the sql.Rows close requirement and connection leak from common-go-bugs",
-    "prompt": "My Go service starts failing with 'too many connections' after running for a few hours under load. Database queries start timing out. The code:\n\n```go\nfunc getActiveUsers(db *sql.DB) ([]User, error) {\n    rows, err := db.Query(\"SELECT id, name FROM users WHERE active = true\")\n    if err != nil {\n        return nil, err\n    }\n    var users []User\n    for rows.Next() {\n        var u User\n        rows.Scan(&u.ID, &u.Name)\n        users = append(users, u)\n    }\n    return users, nil\n}\n```",
-    "trap": "Model suggests increasing the connection pool size or adding connection timeout, rather than finding the missing rows.Close()",
+    "description": "测试 common-go-bugs 的 sql.Rows 必须关闭与连接泄漏",
+    "prompt": "我的 Go 服务负载下跑几小时后开始报 'too many connections'。数据库查询开始超时。代码：\n\n```go\nfunc getActiveUsers(db *sql.DB) ([]User, error) {\n    rows, err := db.Query(\"SELECT id, name FROM users WHERE active = true\")\n    if err != nil {\n        return nil, err\n    }\n    var users []User\n    for rows.Next() {\n        var u User\n        rows.Scan(&u.ID, &u.Name)\n        users = append(users, u)\n    }\n    return users, nil\n}\n```",
+    "trap": "模型建议调大连接池或加连接超时，而没发现漏了 rows.Close()",
     "assertions": [
-      {"id": "19.1", "text": "Identifies the missing defer rows.Close() after the error check"},
-      {"id": "19.2", "text": "Explains that unclosed sql.Rows holds the database connection until garbage collection"},
-      {"id": "19.3", "text": "Adds defer rows.Close() immediately after the err check"},
-      {"id": "19.4", "text": "Also notes the missing rows.Err() check after the loop"},
-      {"id": "19.5", "text": "Does NOT primarily suggest increasing connection pool size"}
+      {
+        "id": "19.1",
+        "text": "指出错误检查后漏了 defer rows.Close()"
+      },
+      {
+        "id": "19.2",
+        "text": "解释未关闭的 sql.Rows 一直占着数据库连接直到被 GC"
+      },
+      {
+        "id": "19.3",
+        "text": "在 err 检查后立刻加 defer rows.Close()"
+      },
+      {
+        "id": "19.4",
+        "text": "还指出循环后漏了 rows.Err() 检查"
+      },
+      {
+        "id": "19.5",
+        "text": "不主要建议调大连接池"
+      }
     ]
   },
   {
     "id": 20,
     "name": "copying-sync-types-value-receiver",
-    "description": "Tests the sync type copying bug from common-go-bugs",
-    "prompt": "My Go concurrent counter gives wrong results. Multiple goroutines call Increment() but the final count is always 0 or some small number, never the expected total. The race detector doesn't fire. What's wrong?\n\n```go\ntype Counter struct {\n    mu    sync.Mutex\n    count int\n}\n\nfunc (c Counter) Increment() {\n    c.mu.Lock()\n    c.count++\n    c.mu.Unlock()\n}\n\nfunc (c Counter) Count() int {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    return c.count\n}\n```",
-    "trap": "Model suggests the mutex isn't working or suggests using atomic instead, without identifying the value receiver as the root cause",
+    "description": "测试 common-go-bugs 的 sync 类型拷贝 bug",
+    "prompt": "我的 Go 并发计数器结果不对。多个 goroutine 调 Increment() 但最终计数总是 0 或很小的数，永远到不了预期总数。竞态检测器也没报警。哪里错了？\n\n```go\ntype Counter struct {\n    mu    sync.Mutex\n    count int\n}\n\nfunc (c Counter) Increment() {\n    c.mu.Lock()\n    c.count++\n    c.mu.Unlock()\n}\n\nfunc (c Counter) Count() int {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    return c.count\n}\n```",
+    "trap": "模型猜互斥锁没起作用或建议换 atomic，没认出值接收者才是根因",
     "assertions": [
-      {"id": "20.1", "text": "Identifies that value receivers (c Counter) copy the entire struct including the Mutex on every call"},
-      {"id": "20.2", "text": "Explains that each call operates on a copy — increments are lost and the mutex is duplicated"},
-      {"id": "20.3", "text": "Recommends changing to pointer receivers (c *Counter)"},
-      {"id": "20.4", "text": "Notes that go vet can detect copied sync types"},
-      {"id": "20.5", "text": "Explains this applies to ALL sync types (Mutex, RWMutex, WaitGroup, Once, etc.)"}
+      {
+        "id": "20.1",
+        "text": "指出值接收者（c Counter）每次调用都拷贝整个结构体包括 Mutex"
+      },
+      {
+        "id": "20.2",
+        "text": "解释每次调用都作用在副本上——自增丢失、mutex 被复制"
+      },
+      {
+        "id": "20.3",
+        "text": "建议改成指针接收者（c *Counter）"
+      },
+      {
+        "id": "20.4",
+        "text": "提到 go vet 能检测被拷贝的 sync 类型"
+      },
+      {
+        "id": "20.5",
+        "text": "解释这对所有 sync 类型都适用（Mutex、RWMutex、WaitGroup、Once 等）"
+      }
     ]
   },
   {
     "id": 21,
     "name": "pprof-production-security",
-    "description": "Tests the pprof security requirement: never expose unauthenticated in production",
-    "prompt": "I need to add CPU and memory profiling to my Go production web service. I'll just add `import _ \"net/http/pprof\"` and expose it on the main HTTP port. What's the simplest way to set this up?",
-    "trap": "Model provides the simple blank-import pattern without security warnings, exposing pprof publicly",
+    "description": "测试 pprof 安全要求：生产环境绝不能不认证就暴露",
+    "prompt": "我需要给我的 Go 生产 web 服务加 CPU 和内存 profiling。我就加个 `import _ \"net/http/pprof\"` 暴露在主 HTTP 端口上。最简单的搭法是什么？",
+    "trap": "模型直接给空白导入的简单模式不带安全警告，把 pprof 公开暴露",
     "assertions": [
-      {"id": "21.1", "text": "Warns that pprof endpoints MUST be protected — never exposed publicly without authentication"},
-      {"id": "21.2", "text": "Recommends basic auth or similar authentication on pprof endpoints"},
-      {"id": "21.3", "text": "Suggests running pprof on a separate port (not the main HTTP port) or localhost only"},
-      {"id": "21.4", "text": "Recommends toggling pprof via an environment variable (e.g., PPROF_ENABLED)"},
-      {"id": "21.5", "text": "Explains the risk: pprof leaks goroutine stacks, memory contents, and can be used for DoS"}
+      {
+        "id": "21.1",
+        "text": "警告 pprof 端点必须加保护——绝不能不认证就公开暴露"
+      },
+      {
+        "id": "21.2",
+        "text": "建议在 pprof 端点上加 basic auth 或类似认证"
+      },
+      {
+        "id": "21.3",
+        "text": "建议 pprof 跑在独立端口（非主 HTTP 端口）或只绑 localhost"
+      },
+      {
+        "id": "21.4",
+        "text": "建议用环境变量（如 PPROF_ENABLED）开关 pprof"
+      },
+      {
+        "id": "21.5",
+        "text": "解释风险：pprof 会泄漏 goroutine 栈、内存内容，还能被用来 DoS"
+      }
     ]
   },
   {
     "id": 22,
     "name": "godebug-gc-tracing-interpretation",
-    "description": "Tests GODEBUG gctrace interpretation from diagnostic-tools reference",
-    "prompt": "My Go service is experiencing periodic latency spikes. I enabled GC tracing with GODEBUG=gctrace=1 and see this output:\n```\ngc 456 @120.5s 18%: 2.1+45+1.2 ms clock, 16+12/45/8 ms cpu, 1024->900->500 MB\n```\nWhat does this tell me and is there a problem?",
-    "trap": "Model focuses only on the heap sizes and misses the 18% GC CPU overhead as the key signal",
+    "description": "测试 diagnostic-tools 参考里的 GODEBUG gctrace 解读",
+    "prompt": "我的 Go 服务有周期性延迟毛刺。我用 GODEBUG=gctrace=1 开了 GC 追踪，看到这种输出：\n```\ngc 456 @120.5s 18%: 2.1+45+1.2 ms clock, 16+12/45/8 ms cpu, 1024->900->500 MB\n```\n这说明了什么，有没有问题？",
+    "trap": "模型只盯着堆大小，漏掉 18% 的 GC CPU 开销这个关键信号",
     "assertions": [
-      {"id": "22.1", "text": "Identifies that 18% GC CPU overhead is significantly high (threshold is >10%)"},
-      {"id": "22.2", "text": "Explains the heap size breakdown as heap at GC start, heap at GC end, and live heap"},
-      {"id": "22.3", "text": "Identifies the large pause times (45ms) as a likely cause of the latency spikes"},
-      {"id": "22.4", "text": "Suggests the application is over-allocating and recommends investigating allocation patterns"},
-      {"id": "22.5", "text": "Recommends using pprof heap/alloc profiling to find hot allocation sites"}
+      {
+        "id": "22.1",
+        "text": "指出 18% 的 GC CPU 开销显著偏高（阈值是 >10%）"
+      },
+      {
+        "id": "22.2",
+        "text": "解释堆大小三段含义：GC 开始时堆、GC 结束时堆、存活堆"
+      },
+      {
+        "id": "22.3",
+        "text": "指出大停顿时间（45ms）很可能是延迟毛刺的来源"
+      },
+      {
+        "id": "22.4",
+        "text": "指出应用分配过度，建议排查分配模式"
+      },
+      {
+        "id": "22.5",
+        "text": "建议用 pprof heap/alloc profiling 找分配热点"
+      }
     ]
   },
   {
     "id": 23,
     "name": "research-codebase-not-just-diff",
-    "description": "Tests Golden Rule #6: trace callers and check upstream validation before flagging a bug",
-    "prompt": "During code review, I found this Go function. It looks like it has a bug — it doesn't validate that `id` is positive before using it as a slice index:\n\n```go\nfunc getItem(items []Item, id int) Item {\n    return items[id]\n}\n```\nShould I flag this as a bug?",
-    "trap": "Model immediately flags it as a bug and suggests adding bounds checking, without considering that callers might already validate",
+    "description": "测试黄金法则 #6：标记 bug 前先追溯调用方、检查上游校验",
+    "prompt": "代码评审时我发现这个 Go 函数。看起来有 bug——它拿 `id` 当切片下标用之前没校验 `id` 为正：\n\n```go\nfunc getItem(items []Item, id int) Item {\n    return items[id]\n}\n```\n我该把它标成 bug 吗？",
+    "trap": "模型立刻标成 bug 并建议加边界检查，不考虑调用方可能已经校验过",
     "assertions": [
-      {"id": "23.1", "text": "Recommends checking the callers first before flagging the bug"},
-      {"id": "23.2", "text": "Suggests using Grep or similar to find all call sites of getItem"},
-      {"id": "23.3", "text": "Notes that upstream code may validate the id (e.g., parsing from uint, bounds checking, positive-only input)"},
-      {"id": "23.4", "text": "Advises that if callers validate, the severity is reduced but may still warrant a defensive check"},
-      {"id": "23.5", "text": "Mentions adding an inline comment documenting the assumption if upstream guarantees exist"}
+      {
+        "id": "23.1",
+        "text": "建议标 bug 前先查调用方"
+      },
+      {
+        "id": "23.2",
+        "text": "建议用 Grep 或类似工具找出 getItem 的全部调用点"
+      },
+      {
+        "id": "23.3",
+        "text": "指出上游代码可能已校验 id（比如从 uint 解析、边界检查、只收正数输入）"
+      },
+      {
+        "id": "23.4",
+        "text": "说明调用方已校验时严重性降低，但仍可能值得加防御性检查"
+      },
+      {
+        "id": "23.5",
+        "text": "提到上游有保证时加行内注释记录该假设"
+      }
     ]
   },
   {
     "id": 24,
     "name": "flaky-test-diagnosis-methodology",
-    "description": "Tests flaky test debugging methodology from testing-debug reference",
-    "prompt": "One of our Go tests fails about 1 in 20 runs in CI but I can never reproduce it locally. The test creates a temp file, writes data, reads it back, and compares. How do I debug this?",
-    "trap": "Model suggests adding retry logic or skipping the test in CI, rather than systematic flaky test diagnosis",
+    "description": "测试 testing-debug 参考里的 flaky 测试调试方法论",
+    "prompt": "我们有个 Go 测试在 CI 里大约 20 次挂 1 次，但本地永远复现不了。测试创建临时文件、写数据、读回来、做比较。怎么调试？",
+    "trap": "模型建议加重试逻辑或在 CI 里跳过该测试，不做系统性的 flaky 测试诊断",
     "assertions": [
-      {"id": "24.1", "text": "Recommends running with -count=100 to reproduce locally"},
-      {"id": "24.2", "text": "Suggests using -shuffle=on to check for test order dependence"},
-      {"id": "24.3", "text": "Mentions running with -race to check for data races"},
-      {"id": "24.4", "text": "Suggests using t.TempDir() instead of shared temp directories to avoid file system pollution"},
-      {"id": "24.5", "text": "Considers shared mutable state between tests as a potential cause"},
-      {"id": "24.6", "text": "Does NOT suggest retry logic or skipping the test as a solution"}
+      {
+        "id": "24.1",
+        "text": "建议用 -count=100 在本地复现"
+      },
+      {
+        "id": "24.2",
+        "text": "建议用 -shuffle=on 检查测试顺序依赖"
+      },
+      {
+        "id": "24.3",
+        "text": "提到用 -race 跑检查数据竞争"
+      },
+      {
+        "id": "24.4",
+        "text": "建议用 t.TempDir() 替代共享临时目录避免文件系统污染"
+      },
+      {
+        "id": "24.5",
+        "text": "考虑测试间共享可变状态这个潜在原因"
+      },
+      {
+        "id": "24.6",
+        "text": "不把重试逻辑或跳过测试当解决方案"
+      }
     ]
   },
   {
     "id": 25,
     "name": "defense-in-depth-after-fix",
-    "description": "Tests Step 10 of methodology: multi-layer defense after fixing a bug",
-    "prompt": "I fixed a bug where user-submitted file paths could traverse outside the upload directory using ../. The fix adds filepath.Clean and a strings.HasPrefix check. Is this fix complete?",
-    "trap": "Model says the fix looks good without recognizing that Clean+HasPrefix is not robust confinement and without considering defense-in-depth — os.Root, safer lexical fallback, logging, and test coverage",
+    "description": "测试方法论第 10 步：修完 bug 后做多层防御",
+    "prompt": "我修了个 bug：用户提交的文件路径能用 ../ 跳出上传目录。修复加了 filepath.Clean 和 strings.HasPrefix 检查。这个修复完整了吗？",
+    "trap": "模型说修复看起来不错，没意识到 Clean+HasPrefix 不是可靠的边界限定，也没想到纵深防御——os.Root、更安全的词法兜底、日志与测试覆盖",
     "assertions": [
-      {"id": "25.1", "text": "States that filepath.Clean plus strings.HasPrefix is not robust confinement"},
-      {"id": "25.2", "text": "Recommends adding a test that specifically verifies the path traversal is blocked"},
-      {"id": "25.3", "text": "Suggests adding logging or metrics to detect future traversal attempts (observability)"},
-      {"id": "25.4", "text": "Considers multiple validation layers — not just one check"},
-      {"id": "25.5", "text": "Recommends os.Root for Go 1.24+ or a filepath.IsLocal/filepath.Rel fallback for older targets"}
+      {
+        "id": "25.1",
+        "text": "指出 filepath.Clean 加 strings.HasPrefix 不是可靠的边界限定"
+      },
+      {
+        "id": "25.2",
+        "text": "建议加一个专门验证路径穿越被拦截的测试"
+      },
+      {
+        "id": "25.3",
+        "text": "建议加日志或指标来发现未来的穿越尝试（可观测性）"
+      },
+      {
+        "id": "25.4",
+        "text": "考虑多层校验——而不是只有一道检查"
+      },
+      {
+        "id": "25.5",
+        "text": "Go 1.24+ 推荐 os.Root，旧版本用 filepath.IsLocal/filepath.Rel 兜底"
+      }
     ]
   },
   {
     "id": 26,
     "name": "escalation-protocol-three-failed-attempts",
-    "description": "Tests the escalation protocol: after 3 failed fix attempts, step back and question architecture",
-    "prompt": "I've tried fixing this Go data processing bug 4 times now. Each fix reveals a new problem — first the data was truncated, then the order was wrong, then duplicates appeared, now there's a memory leak. The code processes events from a Kafka topic and aggregates them in a map. What should I try next?",
-    "trap": "Model suggests a 5th specific fix (more memory management, deduplication logic, etc.) instead of stepping back to question the architecture",
+    "description": "测试升级协议：修复失败 3 次后退一步质疑架构",
+    "prompt": "这个 Go 数据处理 bug 我已经修 4 次了。每次修完都冒出新问题——先是数据被截断、然后顺序错了、然后出现重复、现在是内存泄漏。代码从 Kafka topic 读事件聚合成 map。接下来该试什么？",
+    "trap": "模型建议第 5 个具体修复（更多内存管理、去重逻辑等），而不是退一步质疑架构",
     "assertions": [
-      {"id": "26.1", "text": "Recognizes the pattern of cascading failures as a red flag — each fix reveals a new problem"},
-      {"id": "26.2", "text": "Recommends stepping back to question the overall design/architecture rather than trying another fix"},
-      {"id": "26.3", "text": "Suggests re-reading the code from scratch with fresh eyes"},
-      {"id": "26.4", "text": "Considers whether the current abstraction is fundamentally sound"},
-      {"id": "26.5", "text": "Does NOT immediately suggest a 5th specific patch to the existing code"}
+      {
+        "id": "26.1",
+        "text": "识别出级联失败模式是危险信号——每次修复都冒出新问题"
+      },
+      {
+        "id": "26.2",
+        "text": "建议退一步质疑整体设计/架构，而不是再试一个修复"
+      },
+      {
+        "id": "26.3",
+        "text": "建议用新鲜眼光从头重读代码"
+      },
+      {
+        "id": "26.4",
+        "text": "考虑当前抽象是否从根本上成立"
+      },
+      {
+        "id": "26.5",
+        "text": "不立刻建议在现有代码上打第 5 个补丁"
+      }
     ]
   },
   {
     "id": 27,
     "name": "git-bisect-for-regression",
-    "description": "Tests the methodology step 1: using git bisect to find breaking commit for regressions",
-    "prompt": "A feature that was working last week is now broken in our Go service. I'm not sure which commit broke it. There have been about 50 commits since it last worked. How should I find what changed?",
-    "trap": "Model suggests reading through all 50 commit diffs manually or running tests on HEAD",
+    "description": "测试方法论第 1 步：用 git bisect 找引入回归的提交",
+    "prompt": "我们 Go 服务上周还好好的功能现在坏了。不确定是哪个提交弄坏的。自上次正常以来大约有 50 个提交。该怎么找出改了什么？",
+    "trap": "模型建议手动读完 50 个提交 diff 或在 HEAD 上跑测试",
     "assertions": [
-      {"id": "27.1", "text": "Recommends git bisect to binary-search for the breaking commit"},
-      {"id": "27.2", "text": "Shows the git bisect start / git bisect bad / git bisect good workflow"},
-      {"id": "27.3", "text": "Mentions that bisect can be automated with a test command (git bisect run go test -run TestBroken ./...)"},
-      {"id": "27.4", "text": "Notes this narrows 50 commits to ~6 steps (log2(50))"},
-      {"id": "27.5", "text": "Does NOT suggest manually reading all 50 commit diffs"}
+      {
+        "id": "27.1",
+        "text": "推荐用 git bisect 二分查找引入问题的提交"
+      },
+      {
+        "id": "27.2",
+        "text": "展示 git bisect start / git bisect bad / git bisect good 流程"
+      },
+      {
+        "id": "27.3",
+        "text": "提到 bisect 可以用测试命令自动化（git bisect run go test -run TestBroken ./...）"
+      },
+      {
+        "id": "27.4",
+        "text": "指出这把 50 个提交缩到约 6 步（log2(50)）"
+      },
+      {
+        "id": "27.5",
+        "text": "不建议手动读完全部 50 个提交 diff"
+      }
     ]
   },
   {
     "id": 28,
     "name": "check-external-dependencies-first",
-    "description": "Tests Step 4 of methodology: verify external components before assuming code bug",
-    "prompt": "My Go service started returning 'connection refused' errors for API calls to a third-party payment service. This worked fine yesterday. Nothing in our code changed (I checked git log). Where should I look?",
-    "trap": "Model starts investigating Go HTTP client code or TLS configuration instead of checking the external service first",
+    "description": "测试方法论第 4 步：先验证外部组件再假设代码有 bug",
+    "prompt": "我的 Go 服务调第三方支付服务开始报 'connection refused'。昨天还好好的。我们代码没动过（我查了 git log）。该从哪里查？",
+    "trap": "模型上来就查 Go HTTP client 代码或 TLS 配置，而不先查外部服务",
     "assertions": [
-      {"id": "28.1", "text": "Suggests checking the external payment service health/status first (curl, health endpoint)"},
-      {"id": "28.2", "text": "Recommends checking DNS resolution (dig or nslookup)"},
-      {"id": "28.3", "text": "Suggests checking network connectivity (nc, telnet, or similar to the port)"},
-      {"id": "28.4", "text": "Considers environment-specific causes: expired credentials, DNS changes, firewall rules, certificate rotation"},
-      {"id": "28.5", "text": "Does NOT start by investigating Go code since nothing changed in the codebase"}
+      {
+        "id": "28.1",
+        "text": "建议先查外部支付服务的健康/状态（curl、健康端点）"
+      },
+      {
+        "id": "28.2",
+        "text": "建议检查 DNS 解析（dig 或 nslookup）"
+      },
+      {
+        "id": "28.3",
+        "text": "建议检查网络连通性（nc、telnet 或类似方式探端口）"
+      },
+      {
+        "id": "28.4",
+        "text": "考虑环境相关原因：凭据过期、DNS 变更、防火墙规则、证书轮换"
+      },
+      {
+        "id": "28.5",
+        "text": "代码库没动过，不从 Go 代码查起"
+      }
     ]
   },
   {
     "id": 29,
     "name": "observability-tools-before-code-dive",
-    "description": "Tests Step 5 of methodology: check observability data before diving into code",
-    "prompt": "Our Go microservice started returning 500 errors about 2 hours ago. I want to start reading the code to find the bug. Where should I start looking in the codebase?",
-    "trap": "Model jumps straight into reading handler code or error paths instead of suggesting checking observability tools first",
+    "description": "测试方法论第 5 步：扎进代码前先查可观测性数据",
+    "prompt": "我们的 Go 微服务大约 2 小时前开始返回 500 错误。我想开始读代码找 bug。该从代码库哪里看起？",
+    "trap": "模型直接扎进 handler 代码或错误路径，而不建议先查可观测性工具",
     "assertions": [
-      {"id": "29.1", "text": "Recommends checking monitoring/observability tools BEFORE diving into code"},
-      {"id": "29.2", "text": "Asks what monitoring tools are available (Prometheus, Datadog, Sentry, ELK, etc.)"},
-      {"id": "29.3", "text": "Suggests checking error rate metrics, latency dashboards, or log aggregation"},
-      {"id": "29.4", "text": "Mentions specific things to look for: what changed 2 hours ago (deploy, config change, traffic spike)"},
-      {"id": "29.5", "text": "Does NOT immediately start reading source code files"}
+      {
+        "id": "29.1",
+        "text": "建议扎进代码前先查监控/可观测性工具"
+      },
+      {
+        "id": "29.2",
+        "text": "问有哪些监控工具可用（Prometheus、Datadog、Sentry、ELK 等）"
+      },
+      {
+        "id": "29.3",
+        "text": "建议查错误率指标、延迟看板或日志聚合"
+      },
+      {
+        "id": "29.4",
+        "text": "提到要找的具体线索：2 小时前发生了什么变化（部署、配置变更、流量突增）"
+      },
+      {
+        "id": "29.5",
+        "text": "不立刻开始读源代码文件"
+      }
     ]
   },
   {
     "id": 30,
     "name": "integer-conversion-silent-truncation",
-    "description": "Tests integer conversion truncation from common-go-bugs",
-    "prompt": "My Go code converts user-provided int64 values to int32 for a legacy protocol. It works for most values but produces wrong results for large numbers. The conversion is `int32(bigValue)`. Is there a Go function to convert safely?",
-    "trap": "Model suggests casting with a simple function or using math.MinInt32/MaxInt32 incorrectly",
+    "description": "测试 common-go-bugs 的整数转换截断",
+    "prompt": "我的 Go 代码要把用户提供的 int64 值转成 int32 给遗留协议用。大多数值没问题，但大数字结果不对。转换是 `int32(bigValue)`。Go 有安全转换的函数吗？",
+    "trap": "模型建议用某个简单函数做转换或错用 math.MinInt32/MaxInt32",
     "assertions": [
-      {"id": "30.1", "text": "Explains that Go integer conversions silently truncate without any error or warning"},
-      {"id": "30.2", "text": "Shows bounds checking before conversion: compare against math.MinInt32 and math.MaxInt32"},
-      {"id": "30.3", "text": "Returns an error when the value overflows instead of silently truncating"},
-      {"id": "30.4", "text": "Notes there is no built-in safe conversion function — you must check bounds manually"},
-      {"id": "30.5", "text": "Mentions this is especially dangerous for external/user-provided data"}
+      {
+        "id": "30.1",
+        "text": "解释 Go 整数转换会静默截断，没有任何错误或警告"
+      },
+      {
+        "id": "30.2",
+        "text": "展示转换前做边界检查：与 math.MinInt32 和 math.MaxInt32 比较"
+      },
+      {
+        "id": "30.3",
+        "text": "值溢出时返回 error 而不是静默截断"
+      },
+      {
+        "id": "30.4",
+        "text": "指出没有内建的安全转换函数——必须手动查边界"
+      },
+      {
+        "id": "30.5",
+        "text": "提到对外部/用户提供的数据这尤其危险"
+      }
     ]
   },
   {
     "id": 31,
     "name": "init-ordering-fragile",
-    "description": "Tests the init() ordering fragility from common-go-bugs",
-    "prompt": "My Go program panics during startup with a nil pointer. I have an init() function that opens a database connection using a config value from another init() in a different file. It works in development but fails in CI. Could the init order be different?",
-    "trap": "Model suggests ensuring the config init file is imported first or adding a side-effect import, rather than recommending explicit initialization",
+    "description": "测试 common-go-bugs 的 init() 顺序脆弱性",
+    "prompt": "我的 Go 程序启动时 nil 指针 panic。我有个 init() 函数用另一个文件里 init() 产出的配置值开数据库连接。开发环境能跑，CI 里挂。init 顺序会不一样吗？",
+    "trap": "模型建议保证 config 的 init 文件先被导入或加副作用导入，而不建议显式初始化",
     "assertions": [
-      {"id": "31.1", "text": "Confirms that init() ordering across files depends on filename alphabetical order and can change when files are added"},
-      {"id": "31.2", "text": "Explains this makes init() dependencies fragile and hard to debug"},
-      {"id": "31.3", "text": "Recommends replacing init() with explicit initialization in main()"},
-      {"id": "31.4", "text": "Shows the pattern: cfg := loadConfig(); db := setupDatabase(cfg); startServer(db)"},
-      {"id": "31.5", "text": "States init() should only be used for truly self-contained setup (registering drivers, codecs)"}
+      {
+        "id": "31.1",
+        "text": "确认跨文件 init() 顺序取决于文件名字母序，加文件就可能变"
+      },
+      {
+        "id": "31.2",
+        "text": "解释这让 init() 依赖很脆弱且难调试"
+      },
+      {
+        "id": "31.3",
+        "text": "建议用 main() 里的显式初始化替换 init()"
+      },
+      {
+        "id": "31.4",
+        "text": "展示模式：cfg := loadConfig(); db := setupDatabase(cfg); startServer(db)"
+      },
+      {
+        "id": "31.5",
+        "text": "说明 init() 只该用于真正自包含的初始化（注册驱动、编解码器）"
+      }
     ]
   },
   {
     "id": 32,
     "name": "goroutine-leak-detection-methodology",
-    "description": "Tests goroutine leak diagnosis from concurrency-debug reference",
-    "prompt": "My Go service's memory usage grows slowly over days. CPU is normal. There's no obvious memory leak in heap profiling. What else could cause the slow growth?",
-    "trap": "Model focuses only on heap analysis and misses goroutine leaks as a major cause of slow memory growth",
+    "description": "测试 concurrency-debug 参考里的 goroutine 泄漏诊断",
+    "prompt": "我的 Go 服务内存几天内缓慢增长。CPU 正常。堆 profile 里没有明显内存泄漏。还有什么会导致这种慢增长？",
+    "trap": "模型只盯堆分析，漏掉 goroutine 泄漏这个缓慢内存增长的主因",
     "assertions": [
-      {"id": "32.1", "text": "Suggests checking goroutine count (runtime.NumGoroutine or pprof goroutine profile)"},
-      {"id": "32.2", "text": "Explains that goroutine leaks cause slow memory growth without appearing in heap profiles"},
-      {"id": "32.3", "text": "Recommends using the pprof goroutine endpoint with ?debug=2 for human-readable stack dumps"},
-      {"id": "32.4", "text": "Lists common causes: unclosed channels, missing context cancellation, forgotten response body close"},
-      {"id": "32.5", "text": "Suggests goleak for detection in tests"}
+      {
+        "id": "32.1",
+        "text": "建议查 goroutine 数量（runtime.NumGoroutine 或 pprof goroutine profile）"
+      },
+      {
+        "id": "32.2",
+        "text": "解释 goroutine 泄漏导致内存慢增长且不出现在堆 profile 里"
+      },
+      {
+        "id": "32.3",
+        "text": "建议用 pprof goroutine 端点加 ?debug=2 拿可读的栈转储"
+      },
+      {
+        "id": "32.4",
+        "text": "列举常见原因：channel 未关闭、缺 context 取消、忘关 response body"
+      },
+      {
+        "id": "32.5",
+        "text": "建议测试里用 goleak 检测"
+      }
     ]
   },
   {
     "id": 33,
     "name": "production-capture-before-restart",
-    "description": "Tests the production debugging checklist: capture profiles BEFORE restarting",
-    "prompt": "Our Go production service is consuming 4GB of memory and responding slowly. We need to fix this urgently. Should I restart the service first to restore normal operation?",
-    "trap": "Model agrees to restart first to restore service, losing all diagnostic information",
+    "description": "测试生产调试清单：重启前先抓 profile",
+    "prompt": "我们的 Go 生产服务占了 4GB 内存、响应变慢。需要紧急处理。我该先重启服务恢复正常吗？",
+    "trap": "模型同意先重启恢复服务，丢掉所有诊断信息",
     "assertions": [
-      {"id": "33.1", "text": "Recommends capturing profiles (heap, goroutine, CPU) BEFORE restarting"},
-      {"id": "33.2", "text": "Explains that restarting destroys the evidence needed to diagnose the root cause"},
-      {"id": "33.3", "text": "Lists specific profiles to capture: heap, goroutine dump (?debug=2), CPU (30s), mutex"},
-      {"id": "33.4", "text": "Also suggests capturing system metrics (file descriptors, socket state, process info)"},
-      {"id": "33.5", "text": "Only after capturing all evidence should the service be restarted if needed"}
+      {
+        "id": "33.1",
+        "text": "建议重启前先抓 profile（堆、goroutine、CPU）"
+      },
+      {
+        "id": "33.2",
+        "text": "解释重启会销毁诊断根因所需的证据"
+      },
+      {
+        "id": "33.3",
+        "text": "列出要抓的具体 profile：堆、goroutine 转储（?debug=2）、CPU（30 秒）、mutex"
+      },
+      {
+        "id": "33.4",
+        "text": "还建议抓系统指标（文件描述符、socket 状态、进程信息）"
+      },
+      {
+        "id": "33.5",
+        "text": "抓完所有证据后，需要时再重启服务"
+      }
     ]
   },
   {
     "id": 34,
     "name": "lock-contention-diagnosis",
-    "description": "Tests lock contention diagnosis from performance-debug reference",
-    "prompt": "My Go web server shows high CPU usage but low throughput. Adding more cores doesn't help — performance stays flat. The profiler shows most time in runtime.semacquire. What's going on?",
-    "trap": "Model suggests the workload is CPU-bound and recommends algorithmic optimization, rather than identifying lock contention",
+    "description": "测试 performance-debug 参考里的锁竞争诊断",
+    "prompt": "我的 Go web 服务器 CPU 高但吞吐低。加核也没用——性能不动。profiler 显示大部分时间花在 runtime.semacquire。怎么回事？",
+    "trap": "模型判断为 CPU 密集负载并建议算法优化，而不识别锁竞争",
     "assertions": [
-      {"id": "34.1", "text": "Identifies runtime.semacquire as a signal of lock contention, not CPU computation"},
-      {"id": "34.2", "text": "Recommends enabling mutex profiling with runtime.SetMutexProfileFraction(1)"},
-      {"id": "34.3", "text": "Recommends enabling block profiling with runtime.SetBlockProfileRate(1)"},
-      {"id": "34.4", "text": "Suggests using pprof mutex and block profiles to find the contended locks"},
-      {"id": "34.5", "text": "Lists solutions: reduce critical section, sharding, RWMutex, atomic operations"}
+      {
+        "id": "34.1",
+        "text": "识别 runtime.semacquire 是锁竞争信号，不是 CPU 计算"
+      },
+      {
+        "id": "34.2",
+        "text": "建议用 runtime.SetMutexProfileFraction(1) 开 mutex profiling"
+      },
+      {
+        "id": "34.3",
+        "text": "建议用 runtime.SetBlockProfileRate(1) 开 block profiling"
+      },
+      {
+        "id": "34.4",
+        "text": "建议用 pprof 的 mutex 和 block profile 找竞争热点锁"
+      },
+      {
+        "id": "34.5",
+        "text": "列出解法：缩小临界区、分片、RWMutex、atomic 操作"
+      }
     ]
   },
   {
     "id": 35,
     "name": "race-detector-not-reasoning",
-    "description": "Tests Golden Rule #3: never reason about concurrency — use the race detector",
-    "prompt": "I'm reviewing Go code that has goroutines sharing a struct. I don't see any obvious race conditions — the goroutines seem to access different fields. Is this safe?\n\n```go\ntype Stats struct {\n    RequestCount int64\n    ErrorCount   int64\n    LastUpdated  time.Time\n}\n\nfunc (s *Stats) RecordRequest() {\n    s.RequestCount++\n}\n\nfunc (s *Stats) RecordError() {\n    s.ErrorCount++\n}\n```",
-    "trap": "Model reasons through the code and concludes it looks safe because different goroutines access different fields",
+    "description": "测试黄金法则 #3：并发安全不靠推理——用竞态检测器",
+    "prompt": "我在评审一段 Go 代码，多个 goroutine 共享一个结构体。没看到明显竞争——goroutine 访问的好像是不同字段。这样安全吗？\n\n```go\ntype Stats struct {\n    RequestCount int64\n    ErrorCount   int64\n    LastUpdated  time.Time\n}\n\nfunc (s *Stats) RecordRequest() {\n    s.RequestCount++\n}\n\nfunc (s *Stats) RecordError() {\n    s.ErrorCount++\n}\n```",
+    "trap": "模型推理一番后得出「看起来安全」的结论，因为不同 goroutine 访问不同字段",
     "assertions": [
-      {"id": "35.1", "text": "Does NOT conclude safety based on code reasoning alone"},
-      {"id": "35.2", "text": "Recommends running go test -race to verify — never trust visual inspection for concurrency"},
-      {"id": "35.3", "text": "Identifies that ++ is not atomic — RequestCount++ and ErrorCount++ are read-modify-write operations"},
-      {"id": "35.4", "text": "Recommends using atomic.Int64 or sync.Mutex to protect the fields"},
-      {"id": "35.5", "text": "Notes that even different fields on the same struct can race if accessed from different goroutines without synchronization"}
+      {
+        "id": "35.1",
+        "text": "不只凭读代码推理就下安全结论"
+      },
+      {
+        "id": "35.2",
+        "text": "建议跑 go test -race 验证——并发问题永远不信肉眼检查"
+      },
+      {
+        "id": "35.3",
+        "text": "指出 ++ 不是原子的——RequestCount++ 和 ErrorCount++ 都是读-改-写操作"
+      },
+      {
+        "id": "35.4",
+        "text": "建议用 atomic.Int64 或 sync.Mutex 保护这些字段"
+      },
+      {
+        "id": "35.5",
+        "text": "指出同一结构体的不同字段在无同步时被不同 goroutine 访问也可能竞争"
+      }
     ]
   },
   {
     "id": 36,
     "name": "filepath-join-path-traversal",
-    "description": "Tests the filepath.Join path traversal from common-go-bugs",
-    "prompt": "I'm building a Go file server. I use filepath.Join to safely combine the base directory with the user-requested path. Is this implementation secure?\n\n```go\nfunc serveFile(w http.ResponseWriter, r *http.Request) {\n    path := filepath.Join(\"/srv/files\", r.URL.Path)\n    http.ServeFile(w, r, path)\n}\n```",
-    "trap": "Model says filepath.Join handles path cleaning and the code is safe",
+    "description": "测试 common-go-bugs 的 filepath.Join 路径穿越",
+    "prompt": "我在写一个 Go 文件服务器。我用 filepath.Join 把基础目录和用户请求的路径安全地拼起来。这个实现安全吗？\n\n```go\nfunc serveFile(w http.ResponseWriter, r *http.Request) {\n    path := filepath.Join(\"/srv/files\", r.URL.Path)\n    http.ServeFile(w, r, path)\n}\n```",
+    "trap": "模型认为 filepath.Join 会做路径清理所以代码安全",
     "assertions": [
-      {"id": "36.1", "text": "Identifies that filepath.Join does NOT prevent path traversal"},
-      {"id": "36.2", "text": "Shows that input like '../../etc/passwd' resolves to '/etc/passwd' after Join"},
-      {"id": "36.3", "text": "Recommends os.Root for Go 1.24+ user-controlled filesystem access"},
-      {"id": "36.4", "text": "For older Go targets, shows a fallback using filepath.IsLocal plus filepath.Rel with separator-aware checks"},
-      {"id": "36.5", "text": "Does NOT present filepath.Clean plus strings.HasPrefix as a complete traversal defense"}
+      {
+        "id": "36.1",
+        "text": "指出 filepath.Join 不能防路径穿越"
+      },
+      {
+        "id": "36.2",
+        "text": "展示 '../../etc/passwd' 这类输入经 Join 后解析成 '/etc/passwd'"
+      },
+      {
+        "id": "36.3",
+        "text": "Go 1.24+ 用户可控的文件系统访问推荐 os.Root"
+      },
+      {
+        "id": "36.4",
+        "text": "旧版 Go 目标展示用 filepath.IsLocal 加 filepath.Rel 加分隔符感知检查的兜底"
+      },
+      {
+        "id": "36.5",
+        "text": "不把 filepath.Clean 加 strings.HasPrefix 当成完整的穿越防御"
+      }
     ]
   },
   {
     "id": 37,
     "name": "time-after-in-loop-allocation-churn",
-    "description": "Tests the repeated time.After in loop allocation-churn pattern from code-review-flags and concurrency-debug",
-    "prompt": "My Go worker processes messages from a channel with a timeout. Memory usage grows over time even though messages are processed correctly. Here's the code:\n\n```go\nfor {\n    select {\n    case msg := <-incoming:\n        process(msg)\n    case <-time.After(30 * time.Second):\n        log.Println(\"idle timeout\")\n        return\n    }\n}\n```",
-    "trap": "Model suggests the message processing is leaking memory, without identifying repeated time.After allocation churn and reset semantics as the likely issue",
+    "description": "测试 code-review-flags 与 concurrency-debug 里循环内重复 time.After 的分配抖动模式",
+    "prompt": "我的 Go worker 带超时从 channel 处理消息。内存随时间增长，虽然消息处理都正确。代码：\n\n```go\nfor {\n    select {\n    case msg := <-incoming:\n        process(msg)\n    case <-time.After(30 * time.Second):\n        log.Println(\"idle timeout\")\n        return\n    }\n}\n```",
+    "trap": "模型怀疑消息处理在泄漏内存，没识别出重复 time.After 的分配抖动与重置语义这个可能问题",
     "assertions": [
-      {"id": "37.1", "text": "Identifies that time.After creates a new timer on every loop iteration"},
-      {"id": "37.2", "text": "Explains this causes allocation churn and was a leak-like pattern on older Go versions before Go 1.23 timer GC improvements"},
-      {"id": "37.3", "text": "Recommends using time.NewTimer with Reset() or time.NewTicker instead"},
-      {"id": "37.4", "text": "Shows the correct pattern with a reusable timer and defer timer.Stop()"},
-      {"id": "37.5", "text": "Does NOT suggest heap profiling as the first diagnostic step for this known pattern"}
+      {
+        "id": "37.1",
+        "text": "指出 time.After 每次循环迭代都新建 timer"
+      },
+      {
+        "id": "37.2",
+        "text": "解释这造成分配抖动，在 Go 1.23 timer GC 改进前的旧版本上是类泄漏模式"
+      },
+      {
+        "id": "37.3",
+        "text": "建议改用 time.NewTimer 加 Reset() 或 time.NewTicker"
+      },
+      {
+        "id": "37.4",
+        "text": "展示正确模式：可复用 timer 加 defer timer.Stop()"
+      },
+      {
+        "id": "37.5",
+        "text": "对这个已知模式不把堆 profiling 当首选诊断步骤"
+      }
     ]
   }
 ]

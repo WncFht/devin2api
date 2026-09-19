@@ -1,81 +1,81 @@
-# Execution Trace Reference
+# 执行 Trace 参考
 
-`go tool trace` shows what pprof cannot: **scheduling delays**, GC stop-the-world phases, goroutine state transitions, and why goroutines are **not** running. pprof samples what's on-CPU; trace records every state transition at nanosecond precision.
+`go tool trace` 显示 pprof 看不到的东西：**调度延迟**、GC stop-the-world 阶段、goroutine 状态转换，以及 goroutine 为什么**没**在跑。pprof 采样谁在 CPU 上；trace 以纳秒精度记录每一次状态转换。
 
-Use the execution tracer when:
+什么时候用执行追踪器：
 
-- pprof shows low CPU% but latency is high (goroutines waiting, not working)
-- You suspect GC pauses are causing tail latency spikes
-- You need to understand goroutine scheduling and contention
-- You want to see the wall-clock timeline of concurrent operations
+- pprof 显示 CPU% 低但延迟高（goroutine 在等，没在干活）
+- 怀疑 GC 暂停造成尾延迟尖刺
+- 需要理解 goroutine 调度与争用
+- 想看并发操作的墙钟时间线
 
-## Table of Contents
+## 目录
 
-- [Generating Traces](#generating-traces)
-    - [From benchmarks](#from-benchmarks)
-    - [From running service](#from-running-service)
-    - [From tests](#from-tests)
-    - [From code (programmatic)](#from-code-programmatic)
-- [Full Command Reference](#full-command-reference)
-    - [Opening traces](#opening-traces)
-    - [Extracting pprof profiles from traces](#extracting-pprof-profiles-from-traces)
-    - [Full capture-to-analysis workflows](#full-capture-to-analysis-workflows)
-    - [`go tool trace` flags summary](#go-tool-trace-flags-summary)
-    - [HTTP endpoints served by the web UI](#http-endpoints-served-by-the-web-ui)
+- [生成 trace](#生成-trace)
+    - [从基准测试](#从基准测试)
+    - [从运行中服务](#从运行中服务)
+    - [从测试](#从测试)
+    - [从代码（编程方式）](#从代码编程方式)
+- [完整命令参考](#完整命令参考)
+    - [打开 trace](#打开-trace)
+    - [从 trace 提取 pprof profile](#从-trace-提取-pprof-profile)
+    - [完整采集到分析工作流](#完整采集到分析工作流)
+    - [`go tool trace` flag 汇总](#go-tool-trace-flag-汇总)
+    - [web UI 提供的 HTTP 端点](#web-ui-提供的-http-端点)
 - [Web UI](#web-ui)
-    - [Main views](#main-views)
-    - [Navigating the trace viewer](#navigating-the-trace-viewer)
-    - [Reading the timeline](#reading-the-timeline)
-- [What to Look For](#what-to-look-for)
-    - [Goroutine states](#goroutine-states)
-    - [GC phases](#gc-phases)
-    - [Scheduling latency](#scheduling-latency)
-    - [Network/sync blocking](#networksync-blocking)
-    - [Goroutine creation and destruction](#goroutine-creation-and-destruction)
-- [Custom Annotations](#custom-annotations)
-    - [Tasks](#tasks)
-    - [Regions](#regions)
-    - [Log messages](#log-messages)
-    - [When to use annotations](#when-to-use-annotations)
+    - [主视图](#主视图)
+    - [操作 trace 查看器](#操作-trace-查看器)
+    - [读时间线](#读时间线)
+- [看什么](#看什么)
+    - [Goroutine 状态](#goroutine-状态)
+    - [GC 阶段](#gc-阶段)
+    - [调度延迟](#调度延迟)
+    - [网络/同步阻塞](#网络同步阻塞)
+    - [Goroutine 创建与销毁](#goroutine-创建与销毁)
+- [自定义标注](#自定义标注)
+    - [任务](#任务)
+    - [区域](#区域)
+    - [日志消息](#日志消息)
+    - [何时用标注](#何时用标注)
 - [Flight Recorder (Go 1.25+)](#flight-recorder-go-125)
-    - [Setup](#setup)
-    - [Snapshot on error](#snapshot-on-error)
-    - [Trigger patterns](#trigger-patterns)
-    - [Analyzing a snapshot](#analyzing-a-snapshot)
-    - [Constraints](#constraints)
-    - [When to use flight recorder vs regular tracing](#when-to-use-flight-recorder-vs-regular-tracing)
-- [Overhead and Practical Limits](#overhead-and-practical-limits)
-- [Trace vs pprof: When to Use Which](#trace-vs-pprof-when-to-use-which)
+    - [配置](#配置)
+    - [出错时快照](#出错时快照)
+    - [触发模式](#触发模式)
+    - [分析快照](#分析快照)
+    - [限制](#限制)
+    - [flight recorder 与常规 trace 怎么选](#flight-recorder-与常规-trace-怎么选)
+- [开销与实际限制](#开销与实际限制)
+- [trace 与 pprof 怎么选](#trace-与-pprof-怎么选)
 
-## Generating Traces
+## 生成 trace
 
-### From benchmarks
+### 从基准测试
 
 ```bash
 go test -bench=BenchmarkParse -trace=trace.out ./pkg/parser
 go tool trace trace.out
 ```
 
-### From running service
+### 从运行中服务
 
-Requires `import _ "net/http/pprof"`:
+需要 `import _ "net/http/pprof"`：
 
 ```bash
-# Capture 5 seconds of trace data (adjust duration as needed)
+# 采集 5 秒 trace 数据（按需调时长）
 curl -o trace.out http://localhost:6060/debug/pprof/trace?seconds=5
 go tool trace trace.out
 ```
 
-**Warning:** traces generate data at MB/s. Keep captures short — 5-10 seconds is typical. Longer traces are unwieldy, slow to parse, and may consume significant memory when opened.
+**警告：** trace 以 MB/s 的速度产生数据。采集要短——典型是 5-10 秒。更长的 trace 难处理、解析慢，打开时还可能吃很多内存。
 
-### From tests
+### 从测试
 
 ```bash
 go test -trace=trace.out ./pkg/parser
 go tool trace trace.out
 ```
 
-### From code (programmatic)
+### 从代码（编程方式）
 
 ```go
 import "runtime/trace"
@@ -85,12 +85,12 @@ trace.Start(f)
 defer trace.Stop()
 ```
 
-Or capture a region of interest:
+或只采集感兴趣的一段：
 
 ```go
 import "runtime/trace"
 
-// Start tracing only when needed
+// 只在需要时开始 trace
 f, _ := os.Create("trace.out")
 trace.Start(f)
 
@@ -100,44 +100,44 @@ trace.Stop()
 f.Close()
 ```
 
-## Full Command Reference
+## 完整命令参考
 
-### Opening traces
+### 打开 trace
 
 ```bash
-# Open trace in web browser (default — starts HTTP server, opens browser)
+# 在浏览器打开 trace（默认——起 HTTP 服务并开浏览器）
 go tool trace trace.out
 
-# Open on a specific port
+# 指定端口打开
 go tool trace -http=:8080 trace.out
 
-# Open on a specific host:port (e.g., for remote access)
+# 指定 host:port 打开（比如要远程访问）
 go tool trace -http=0.0.0.0:8080 trace.out
 ```
 
-### Extracting pprof profiles from traces
+### 从 trace 提取 pprof profile
 
-`go tool trace` can convert trace data into pprof-compatible profiles. This bridges the two tools — you capture with the tracer (nanosecond events) and analyze with pprof (statistical aggregation with `top`, `list`, `peek`):
+`go tool trace` 能把 trace 数据转成 pprof 兼容的 profile。这把两个工具接起来——你用追踪器采集（纳秒级事件），用 pprof 分析（`top`、`list`、`peek` 的统计聚合）：
 
 ```bash
-# Network blocking profile — where goroutines wait on network I/O
+# 网络阻塞 profile——goroutine 在哪里等网络 I/O
 go tool trace -pprof=net trace.out > net.prof
 go tool pprof -top net.prof
 
-# Synchronization blocking profile — mutexes, channels, wait groups
+# 同步阻塞 profile——mutex、channel、wait group
 go tool trace -pprof=sync trace.out > sync.prof
 go tool pprof -top sync.prof
 
-# Syscall blocking profile — system calls that block goroutines
+# syscall 阻塞 profile——阻塞 goroutine 的系统调用
 go tool trace -pprof=syscall trace.out > syscall.prof
 go tool pprof -top syscall.prof
 
-# Scheduler latency profile — time between becoming runnable and actually running
+# 调度延迟 profile——从可运行到真正运行之间的时间
 go tool trace -pprof=sched trace.out > sched.prof
 go tool pprof -top sched.prof
 ```
 
-You can chain with any pprof command — e.g., annotated source for a blocking function:
+可以接任意 pprof 命令——例如某个阻塞函数的标注源码：
 
 ```bash
 go tool trace -pprof=sync trace.out > sync.prof
@@ -145,161 +145,161 @@ go tool pprof -list=handleRequest sync.prof
 go tool pprof -svg sync.prof > sync-blocking.svg
 ```
 
-### Full capture-to-analysis workflows
+### 完整采集到分析工作流
 
 ```bash
-# Workflow 1: benchmark trace — capture, view, extract blocking profile
+# 工作流 1：基准测试 trace——采集、查看、提取阻塞 profile
 go test -bench=BenchmarkParse -trace=trace.out ./pkg/parser
-go tool trace trace.out                                         # visual timeline
-go tool trace -pprof=sync trace.out > sync.prof                 # extract sync blocking
-go tool pprof -top -cum sync.prof                               # find worst sync blockers
-go tool pprof -list=processOrder sync.prof                      # annotated source
+go tool trace trace.out                                         # 可视化时间线
+go tool trace -pprof=sync trace.out > sync.prof                 # 提取同步阻塞
+go tool pprof -top -cum sync.prof                               # 找最严重的同步阻塞者
+go tool pprof -list=processOrder sync.prof                      # 标注源码
 
-# Workflow 2: production trace — capture from running service, analyze scheduling
+# 工作流 2：生产 trace——从运行中服务采集，分析调度
 curl -o trace.out http://localhost:6060/debug/pprof/trace?seconds=5
-go tool trace trace.out                                         # visual timeline
-go tool trace -pprof=sched trace.out > sched.prof               # extract scheduling latency
-go tool pprof -top sched.prof                                   # goroutines with worst scheduling delay
-go tool pprof -svg sched.prof > sched.svg                       # graph of scheduling bottlenecks
+go tool trace trace.out                                         # 可视化时间线
+go tool trace -pprof=sched trace.out > sched.prof               # 提取调度延迟
+go tool pprof -top sched.prof                                   # 调度延迟最严重的 goroutine
+go tool pprof -svg sched.prof > sched.svg                       # 调度瓶颈图
 
-# Workflow 3: test trace — capture during test run
+# 工作流 3：测试 trace——测试运行期间采集
 go test -trace=trace.out -run=TestSlowIntegration ./pkg/api
-go tool trace trace.out                                         # visual timeline
-go tool trace -pprof=net trace.out > net.prof                   # extract network blocking
-go tool pprof -top net.prof                                     # find network wait sites
+go tool trace trace.out                                         # 可视化时间线
+go tool trace -pprof=net trace.out > net.prof                   # 提取网络阻塞
+go tool pprof -top net.prof                                     # 找网络等待点
 ```
 
-### `go tool trace` flags summary
+### `go tool trace` flag 汇总
 
-| Flag          | Example                                         | Purpose                                                                    |
-| ------------- | ----------------------------------------------- | -------------------------------------------------------------------------- |
-| (none)        | `go tool trace trace.out`                       | Open trace in web browser (default)                                        |
-| `-http=:PORT` | `go tool trace -http=:9090 trace.out`           | Set HTTP server address for the web UI                                     |
-| `-pprof=TYPE` | `go tool trace -pprof=net trace.out > net.prof` | Extract pprof profile from trace. Types: `net`, `sync`, `syscall`, `sched` |
+| Flag          | 示例                                            | 用途                                                                 |
+| ------------- | ----------------------------------------------- | -------------------------------------------------------------------- |
+| （无）        | `go tool trace trace.out`                       | 在浏览器打开 trace（默认）                                           |
+| `-http=:PORT` | `go tool trace -http=:9090 trace.out`           | 设置 web UI 的 HTTP 服务地址                                         |
+| `-pprof=TYPE` | `go tool trace -pprof=net trace.out > net.prof` | 从 trace 提取 pprof profile。类型：`net`、`sync`、`syscall`、`sched` |
 
-### HTTP endpoints served by the web UI
+### web UI 提供的 HTTP 端点
 
-When `go tool trace trace.out` starts its HTTP server, it exposes these pages:
+`go tool trace trace.out` 启动 HTTP 服务后暴露这些页面：
 
-| Endpoint          | What it shows                                                                          |
-| ----------------- | -------------------------------------------------------------------------------------- |
-| `/`               | Index page with links to all views                                                     |
-| `/trace`          | Interactive timeline viewer (Chrome trace viewer) — the main visualization             |
-| `/goroutines`     | Goroutine analysis — summary table of all goroutine types, counts, and execution stats |
-| `/goroutine/<id>` | Detailed view of a specific goroutine — its full lifecycle timeline                    |
+| 端点              | 显示什么                                                      |
+| ----------------- | ------------------------------------------------------------- |
+| `/`               | 索引页，链到全部视图                                          |
+| `/trace`          | 交互式时间线查看器（Chrome trace viewer）——主可视化           |
+| `/goroutines`     | Goroutine 分析——全部 goroutine 类型的汇总表，含数量与执行统计 |
+| `/goroutine/<id>` | 单个 goroutine 的详细视图——完整生命周期时间线                 |
 
-From `/goroutines`, click on a goroutine type to see all instances and their execution statistics (total time, scheduled time, blocked time). Click an individual goroutine to see its timeline.
+在 `/goroutines` 里点击某个 goroutine 类型看全部实例及其执行统计（总时间、被调度时间、阻塞时间）。点击单个 goroutine 看它的时间线。
 
 ## Web UI
 
-### Main views
+### 主视图
 
-The web UI (opened by `go tool trace trace.out`) shows a timeline where each horizontal lane represents a processor (P), goroutine, or system event:
+web UI（`go tool trace trace.out` 打开）显示一条时间线，每条水平泳道代表一个处理器（P）、一个 goroutine 或一类系统事件：
 
-- **Trace viewer** (`/trace`) — interactive timeline with:
-    - **P lanes** — one per logical processor (GOMAXPROCS), showing which goroutine runs on each P at each moment
-    - **Goroutine lanes** — each goroutine's lifecycle: created → runnable → running → waiting → running → …
-    - **GC events** — mark phases, sweep, STW pauses shown as colored bands across all P lanes
-    - **System events** — syscalls, network I/O, timer events
-    - **User annotations** — tasks, regions, and log messages from `runtime/trace` API
+- **Trace 查看器**（`/trace`）——交互式时间线，含：
+    - **P 泳道**——每个逻辑处理器（GOMAXPROCS）一条，显示每个时刻哪个 goroutine 在哪个 P 上跑
+    - **Goroutine 泳道**——每个 goroutine 的生命周期：创建 → 可运行 → 运行 → 等待 → 运行 → …
+    - **GC 事件**——mark 阶段、sweep、STW 暂停以横跨全部 P 泳道的色带显示
+    - **系统事件**——syscall、网络 I/O、定时器事件
+    - **用户标注**——来自 `runtime/trace` API 的任务、区域与日志消息
 
-- **Goroutine analysis** (`/goroutines`) — summary table:
-    - Groups goroutines by creation stack trace (type)
-    - Shows count, total execution time, total scheduling wait, total blocking time
-    - Click a type to see individual goroutine statistics
-    - Click an individual goroutine to see its timeline
+- **Goroutine 分析**（`/goroutines`）——汇总表：
+    - 按创建栈踪迹（类型）给 goroutine 分组
+    - 显示数量、总执行时间、总调度等待、总阻塞时间
+    - 点类型看单个 goroutine 统计
+    - 点单个 goroutine 看它的时间线
 
-### Navigating the trace viewer
+### 操作 trace 查看器
 
-The trace viewer uses the Chrome tracing UI (also used by Chrome DevTools):
+trace 查看器用的是 Chrome tracing UI（Chrome DevTools 同款）：
 
-| Key/Action        | Effect                                                             |
-| ----------------- | ------------------------------------------------------------------ |
-| `W` / scroll up   | Zoom in (time axis)                                                |
-| `S` / scroll down | Zoom out (time axis)                                               |
-| `A`               | Pan left                                                           |
-| `D`               | Pan right                                                          |
-| Click on event    | Show details panel at bottom — goroutine ID, duration, stack trace |
-| `Shift+click`     | Select a time range — highlights all events in that window         |
-| `M`               | Mark current selection                                             |
-| `/`               | Search for events by name                                          |
-| `?`               | Show keyboard shortcuts                                            |
+| 键/操作       | 效果                                         |
+| ------------- | -------------------------------------------- |
+| `W` / 上滚    | 放大（时间轴）                               |
+| `S` / 下滚    | 缩小（时间轴）                               |
+| `A`           | 左移                                         |
+| `D`           | 右移                                         |
+| 点击事件      | 底部显示详情面板——goroutine ID、时长、栈踪迹 |
+| `Shift+click` | 选中时间区间——高亮窗口内全部事件             |
+| `M`           | 标记当前选中                                 |
+| `/`           | 按名字搜索事件                               |
+| `?`           | 显示键盘快捷键                               |
 
-### Reading the timeline
+### 读时间线
 
-**Color coding:**
+**颜色编码：**
 
-- **Green bars** on P lanes = goroutine actively executing
-- **Blue bars** = syscall (goroutine pinned to OS thread)
-- **Orange/yellow marks** = scheduling events (goroutine becoming runnable)
-- **Red bands** across all P lanes = GC stop-the-world pause
-- **Light blue bands** = GC concurrent mark phase
-- **Purple** = user-defined regions (from `trace.WithRegion`)
+- P 泳道上的**绿色块** = goroutine 正在执行
+- **蓝色块** = syscall（goroutine 钉在 OS 线程上）
+- **橙/黄色标记** = 调度事件（goroutine 变为可运行）
+- 横跨全部 P 泳道的**红色带** = GC stop-the-world 暂停
+- **浅蓝带** = GC 并发 mark 阶段
+- **紫色** = 用户自定义区域（来自 `trace.WithRegion`）
 
-**Gaps in P lanes** = the processor was idle (no runnable goroutines, or goroutines blocked). Many idle gaps with pending runnable goroutines suggests scheduling contention.
+**P 泳道上的空隙** = 该处理器空闲（没有可运行 goroutine，或 goroutine 都阻塞了）。空隙多同时还有可运行 goroutine 积压，说明存在调度争用。
 
-## What to Look For
+## 看什么
 
-### Goroutine states
+### Goroutine 状态
 
-The trace timeline color-codes goroutine states:
+trace 时间线用颜色标出 goroutine 状态：
 
-| Color             | State     | Meaning                                       | What it indicates                                                             |
-| ----------------- | --------- | --------------------------------------------- | ----------------------------------------------------------------------------- |
-| **Green**         | Running   | Actively executing on a P                     | Normal — doing useful work                                                    |
-| **Yellow/Orange** | Runnable  | Ready to run but waiting for a P              | CPU-saturated — too many runnable goroutines competing for too few processors |
-| **Red/Pink**      | Waiting   | Blocked on I/O, channel, mutex, sleep, select | I/O-bound or contention — investigate what it's waiting on                    |
-| **Blue**          | GC assist | Drafted by GC to help mark/sweep              | GC pressure — too many allocations forcing goroutines to help the collector   |
+| 颜色      | 状态      | 含义                                         | 说明什么                                        |
+| --------- | --------- | -------------------------------------------- | ----------------------------------------------- |
+| **绿**    | Running   | 正在 P 上执行                                | 正常——在做有用的功                              |
+| **黄/橙** | Runnable  | 就绪但在等 P                                 | CPU 饱和——可运行 goroutine 太多，抢太少的处理器 |
+| **红/粉** | Waiting   | 阻塞在 I/O、channel、mutex、sleep、select 上 | I/O 密集或争用——查它在等什么                    |
+| **蓝**    | GC assist | 被 GC 征用去帮忙 mark/sweep                  | GC 压力——分配太多迫使 goroutine 帮回收器干活    |
 
-### GC phases
+### GC 阶段
 
-GC events appear as colored bands across all P lanes:
+GC 事件以横跨全部 P 泳道的色带显示：
 
-- **Mark assist** — goroutines drafted to help GC scan the heap. Visible as gaps in application goroutine execution. The runtime forces goroutines to assist with GC work in proportion to their allocation rate — heavy allocators get taxed more.
-- **STW (stop-the-world)** — brief phases where all goroutines are stopped (mark setup, mark termination). These cause latency spikes visible as vertical bands across all lanes.
-- **Sweep** — concurrent sweep of unreachable objects. Usually low overhead but can accumulate if the heap is large.
+- **Mark assist**——goroutine 被征用帮 GC 扫堆。表现为应用 goroutine 执行中的空隙。runtime 按 goroutine 的分配速率比例强制它们协助 GC——分配大户被征税更多。
+- **STW（stop-the-world）**——所有 goroutine 停下的短暂阶段（mark setup、mark termination）。它们造成延迟尖刺，在时间线上显示为横跨全部泳道的竖带。
+- **Sweep**——并发清扫不可达对象。通常开销低，但堆大时会累积。
 
-**Diagnosing GC issues from traces:**
+**从 trace 诊断 GC 问题：**
 
-- Frequent GC cycles with long mark assist = too many allocations (reduce allocation rate)
-- Long STW phases = too many pointers for the GC to scan (reduce pointer density)
-- GC cycles clustering after specific operations = those operations allocate heavily
+- GC 周期频繁且 mark assist 长 = 分配太多（降分配速率）
+- STW 阶段长 = 要扫的指针太多（降指针密度）
+- GC 周期聚集在特定操作之后 = 那些操作分配量大
 
-### Scheduling latency
+### 调度延迟
 
-Time between a goroutine becoming **runnable** and actually **running**. High scheduling latency means:
+goroutine 从**可运行**到真正**运行**之间的时间。调度延迟高意味着：
 
-- Too many goroutines competing for GOMAXPROCS processors
-- OS scheduling interference (noisy neighbors, CPU throttling)
-- Goroutines pinned to busy threads by cgo or long syscalls
+- 太多 goroutine 抢 GOMAXPROCS 个处理器
+- OS 调度干扰（noisy neighbor、CPU 节流）
+- goroutine 被 cgo 或长 syscall 钉在忙碌线程上
 
-**What to look for:**
+**看什么：**
 
-- Yellow (runnable) gaps before green (running) segments — the longer the yellow gap, the higher the scheduling latency
-- Many goroutines in runnable state simultaneously — indicates CPU saturation
-- Uneven distribution across Ps — one P overloaded while others are idle suggests work imbalance
+- 绿色（运行）段之前的黄色（可运行）空隙——黄隙越长，调度延迟越高
+- 大量 goroutine 同时处于可运行态——说明 CPU 饱和
+- P 之间分布不均——一个 P 过载其他空闲，说明工作不均衡
 
-### Network/sync blocking
+### 网络/同步阻塞
 
-- **Long red/pink periods** on a goroutine = it's blocked waiting. Click the block event to see what it's waiting on (channel receive, mutex lock, network read, etc.)
-- **Many goroutines blocked on the same channel or mutex** = serialization bottleneck. All work funnels through one point.
-- **Goroutines blocked on network I/O** = external dependency latency. The Go code can't do anything faster — the bottleneck is upstream. Use `-pprof=net` to generate a pprof profile of network wait locations.
+- goroutine 上**长段红/粉** = 它在阻塞等待。点阻塞事件看它在等什么（channel 接收、mutex 加锁、网络读等）
+- **大量 goroutine 阻塞在同一 channel 或 mutex** = 串行化瓶颈。所有工作汇过一个点。
+- **goroutine 阻塞在网络 I/O** = 外部依赖延迟。Go 代码没法更快——瓶颈在上游。用 `-pprof=net` 生成网络等待点的 pprof profile。
 
-### Goroutine creation and destruction
+### Goroutine 创建与销毁
 
-The trace shows goroutine lifecycle events. Look for:
+trace 显示 goroutine 生命周期事件。找：
 
-- **Goroutines created in a loop without bound** = potential goroutine leak
-- **Goroutines that are created but never finish** = leak — they accumulate over time
-- **Very short-lived goroutines created repeatedly** = high overhead from goroutine creation/scheduling (consider batching or worker pools)
+- **无界循环里创建 goroutine** = 潜在 goroutine 泄漏
+- **创建了但永不结束的 goroutine** = 泄漏——随时间累积
+- **反复创建的超短命 goroutine** = goroutine 创建/调度开销高（考虑批处理或 worker pool）
 
-## Custom Annotations
+## 自定义标注
 
-Add application-level context to traces so you can correlate runtime events with business operations.
+给 trace 加应用层上下文，把 runtime 事件与业务操作关联起来。
 
-### Tasks
+### 任务
 
-A task represents a logical operation that may span multiple goroutines:
+任务代表一个可能跨多个 goroutine 的逻辑操作：
 
 ```go
 import "runtime/trace"
@@ -308,7 +308,7 @@ func processOrder(ctx context.Context, order Order) error {
     ctx, task := trace.NewTask(ctx, "processOrder")
     defer task.End()
 
-    // All trace events in this context are grouped under the task
+    // 这个 ctx 下的全部 trace 事件都归到该任务
     validate(ctx, order)
     charge(ctx, order)
     fulfill(ctx, order)
@@ -316,16 +316,16 @@ func processOrder(ctx context.Context, order Order) error {
 }
 ```
 
-Tasks appear as named groups in the trace timeline. You can filter the trace view to show only events belonging to a specific task.
+任务在 trace 时间线上显示为具名分组。可以过滤 trace 视图只显示属于某个任务的事件。
 
-### Regions
+### 区域
 
-A region represents a phase within a task or goroutine:
+区域代表任务或 goroutine 内的一个阶段：
 
 ```go
 func validate(ctx context.Context, order Order) {
     trace.WithRegion(ctx, "validateAddress", func() {
-        // this block is annotated as a region
+        // 这一块被标注为区域
         validateAddress(order.Address)
     })
 
@@ -335,53 +335,53 @@ func validate(ctx context.Context, order Order) {
 }
 ```
 
-Regions appear as labeled spans on the goroutine's timeline, making it easy to see which phase of processing takes the most wall-clock time.
+区域在 goroutine 时间线上显示为带标签的 span，一眼看出处理的哪个阶段占了最多墙钟时间。
 
-### Log messages
+### 日志消息
 
-Add point-in-time log messages to the trace:
+给 trace 加点状日志消息：
 
 ```go
 trace.Log(ctx, "orderID", order.ID)
 trace.Log(ctx, "status", "payment_verified")
 ```
 
-Logs appear as markers on the timeline — useful for correlating trace events with specific data.
+日志在时间线上显示为标记——把 trace 事件与具体数据关联起来时有用。
 
-### When to use annotations
+### 何时用标注
 
-- **Always** in server request handlers — wrap each request in a task
-- **Performance-critical paths** — add regions to phases you want to measure wall-clock time for
-- **Debugging intermittent latency** — add logs at key decision points to see what happened in the slow trace
+- **始终**在 server 请求处理器里用——每个请求包一个任务
+- **性能关键路径**——给想测墙钟时间的阶段加区域
+- **排查间歇性延迟**——在关键决策点加日志，看慢的那次 trace 里发生了什么
 
-Annotations add negligible overhead when tracing is disabled (they check a flag and return immediately).
+trace 未开启时标注开销可忽略（查个标志位就返回）。
 
 ## Flight Recorder (Go 1.25+)
 
-The flight recorder solves a fundamental problem with execution traces in long-running services: when a problem occurs (timeout, failed health check), it's already too late to call `trace.Start()`. The flight recorder keeps a circular buffer of recent trace data in memory, and you snapshot it to disk when something goes wrong — like an airplane's black box.
+flight recorder 解决了长运行服务中执行 trace 的根本难题：问题发生时（超时、健康检查失败），再调 `trace.Start()` 已经晚了。flight recorder 在内存里维护一个最近 trace 数据的环形缓冲，出事时把它快照到磁盘——就像飞机的黑匣子。
 
-### Setup
+### 配置
 
 ```go
 import "runtime/trace"
 
 fr := trace.NewFlightRecorder(trace.FlightRecorderConfig{
-    MinAge:   10 * time.Second, // keep at least 10s of data
-    MaxBytes: 5 << 20,          // cap at 5 MiB to limit memory usage
+    MinAge:   10 * time.Second, // 至少保留 10s 数据
+    MaxBytes: 5 << 20,          // 上限 5 MiB，控制内存占用
 })
 if err := fr.Start(); err != nil {
     return err
 }
 ```
 
-**Sizing guidance:**
+**尺寸建议：**
 
-- **MinAge** — set to ~2x your problem window. For 5-second timeout debugging, use 10 seconds. The runtime may retain more data than MinAge if MaxBytes allows.
-- **MaxBytes** — busy services generate ~1-10 MB/s of trace data. Start with 1-5 MiB and adjust. MaxBytes takes precedence over MinAge — when the buffer fills, older data is discarded regardless of age.
+- **MinAge**——设为问题窗口的约 2 倍。排查 5 秒超时就用 10 秒。MaxBytes 允许时 runtime 保留的数据可能多于 MinAge。
+- **MaxBytes**——繁忙服务每秒产生约 1-10 MB trace 数据。从 1-5 MiB 起步再调。MaxBytes 优先于 MinAge——缓冲一满，旧数据不论年龄都被丢弃。
 
-### Snapshot on error
+### 出错时快照
 
-Capture the trace buffer when something unexpected happens. Use `sync.Once` to prevent multiple snapshots overwriting each other:
+发生意外时把 trace 缓冲抓下来。用 `sync.Once` 防止多个快照互相覆盖：
 
 ```go
 var snapshotOnce sync.Once
@@ -405,25 +405,25 @@ func captureSnapshot(fr *trace.FlightRecorder) {
 }
 ```
 
-### Trigger patterns
+### 触发模式
 
 ```go
-// Pattern 1: slow request detection
+// 模式 1：慢请求检测
 http.HandleFunc("/api/order", func(w http.ResponseWriter, r *http.Request) {
     start := time.Now()
-    // ... handler logic ...
+    // ... 处理器逻辑 ...
 
     if fr.Enabled() && time.Since(start) > 100*time.Millisecond {
         go captureSnapshot(fr)
     }
 })
 
-// Pattern 2: health check failure
+// 模式 2：健康检查失败
 if !healthCheck() && fr.Enabled() {
     go captureSnapshot(fr)
 }
 
-// Pattern 3: HTTP endpoint for on-demand capture
+// 模式 3：HTTP 端点按需抓取
 http.HandleFunc("/debug/flightrecorder", func(w http.ResponseWriter, r *http.Request) {
     if !fr.Enabled() {
         http.Error(w, "flight recorder not active", http.StatusServiceUnavailable)
@@ -435,52 +435,52 @@ http.HandleFunc("/debug/flightrecorder", func(w http.ResponseWriter, r *http.Req
 })
 ```
 
-### Analyzing a snapshot
+### 分析快照
 
 ```bash
 go tool trace snapshot.trace
 ```
 
-The snapshot contains the same data as a regular trace — use all the same analysis techniques (timeline viewer, goroutine analysis, pprof extraction). The flight recorder's flow events are particularly useful for diagnosing lock contention and goroutine stalls that caused the anomaly.
+快照与常规 trace 数据相同——所有分析技术都适用（时间线查看器、goroutine 分析、pprof 提取）。flight recorder 的 flow 事件对诊断造成异常的锁争用与 goroutine 停滞尤其有用。
 
-### Constraints
+### 限制
 
-- **At most one flight recorder** may be active at a time (this restriction may be relaxed in future Go versions)
-- A flight recorder **can run concurrently** with `trace.Start` — both can be active simultaneously
-- Only one goroutine may call `WriteTo` at a time — the `sync.Once` pattern handles this naturally
-- `Stop()` blocks until any concurrent `WriteTo` completes
+- **最多一个 flight recorder** 同时激活（未来 Go 版本可能放宽）
+- flight recorder **可以与 `trace.Start` 并发运行**——两者可同时激活
+- 同一时刻只有一个 goroutine 能调 `WriteTo`——`sync.Once` 模式天然处理这点
+- `Stop()` 会阻塞到并发的 `WriteTo` 完成
 
-### When to use flight recorder vs regular tracing
+### flight recorder 与常规 trace 怎么选
 
-| Scenario                                  | Tool                                                       | Why                                                                              |
-| ----------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Investigating a known slow operation      | `go test -trace` or `trace.Start`/`Stop`                   | You know when to start and stop                                                  |
-| Intermittent latency spikes in production | Flight recorder                                            | You don't know when the spike will happen — the buffer captures it retroactively |
-| Post-mortem after a timeout or crash      | Flight recorder                                            | The problem already happened; regular tracing would miss it                      |
-| Continuous performance monitoring         | `samber/cc-skills-golang@golang-observability` (Pyroscope) | Flight recorder is for one-shot diagnosis, not continuous collection             |
+| 场景                   | 工具                                                        | 为什么                                     |
+| ---------------------- | ----------------------------------------------------------- | ------------------------------------------ |
+| 排查已知的慢操作       | `go test -trace` 或 `trace.Start`/`Stop`                    | 你知道何时开始何时结束                     |
+| 生产中的间歇延迟尖刺   | Flight recorder                                             | 不知道尖刺何时来——缓冲区事后回溯捕捉       |
+| 超时或崩溃后的事后分析 | Flight recorder                                             | 问题已经发生；常规 trace 会错过            |
+| 持续性能监控           | `samber/cc-skills-golang@golang-observability`（Pyroscope） | Flight recorder 是一次性诊断，不是持续采集 |
 
-## Overhead and Practical Limits
+## 开销与实际限制
 
-| Concern                 | Guidance                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------- |
-| **Runtime overhead**    | ~1-2% CPU during capture; negligible when not capturing                            |
-| **Data volume**         | Traces generate MB/s of data. A 10-second trace of a busy service can be 50-100MB  |
-| **Capture duration**    | 5-10 seconds is typical. Longer traces are slow to open and hard to navigate       |
-| **Memory to view**      | `go tool trace` loads the entire trace into memory. Large traces may need 1GB+ RAM |
-| **Browser performance** | The web UI can struggle with traces >100MB. Use short captures.                    |
-| **Production use**      | Safe for short captures on a single instance. Do not capture continuously.         |
+| 顾虑             | 指导                                                               |
+| ---------------- | ------------------------------------------------------------------ |
+| **运行时开销**   | 采集期间约 1-2% CPU；不采集时忽略不计                              |
+| **数据量**       | trace 以 MB/s 产生数据。繁忙服务 10 秒 trace 可达 50-100MB         |
+| **采集时长**     | 典型 5-10 秒。更长的 trace 打开慢、难浏览                          |
+| **查看所需内存** | `go tool trace` 把整个 trace 读进内存。大 trace 可能需要 1GB+ 内存 |
+| **浏览器性能**   | web UI 对 >100MB 的 trace 会吃力。采集保持短                       |
+| **生产使用**     | 单实例短时采集是安全的。不要持续采集                               |
 
-## Trace vs pprof: When to Use Which
+## trace 与 pprof 怎么选
 
-| Question                                      | Tool                             | Why                                                         |
-| --------------------------------------------- | -------------------------------- | ----------------------------------------------------------- |
-| Where does CPU time go?                       | pprof CPU profile                | Statistical sampling, low overhead, good for aggregate view |
-| Why is latency high but CPU low?              | go tool trace                    | Shows goroutine waiting states — I/O, channels, mutexes     |
-| Where do allocations happen?                  | pprof heap profile               | Per-function allocation counts and sizes                    |
-| Why are GC pauses long?                       | go tool trace                    | Shows STW phases, mark assist, GC timeline                  |
-| Is there lock contention?                     | pprof mutex/block + trace        | pprof quantifies it; trace shows the timeline               |
-| Are goroutines leaking?                       | pprof goroutine + trace          | pprof shows the stack; trace shows creation/lifecycle       |
-| Which goroutines compete for CPU?             | go tool trace                    | Shows runnable vs running states across all Ps              |
-| What's the wall-clock breakdown of a request? | go tool trace (with annotations) | Timeline view with tasks and regions                        |
+| 问题                           | 工具                      | 为什么                                     |
+| ------------------------------ | ------------------------- | ------------------------------------------ |
+| CPU 时间花在哪？               | pprof CPU profile         | 统计采样、低开销、适合聚合视图             |
+| 为什么延迟高但 CPU 低？        | go tool trace             | 显示 goroutine 等待态——I/O、channel、mutex |
+| 分配发生在哪？                 | pprof 堆 profile          | 按函数的分配次数与大小                     |
+| 为什么 GC 暂停长？             | go tool trace             | 显示 STW 阶段、mark assist、GC 时间线      |
+| 有锁争用吗？                   | pprof mutex/block + trace | pprof 量化；trace 显示时间线               |
+| goroutine 在泄漏吗？           | pprof goroutine + trace   | pprof 显示栈；trace 显示创建/生命周期      |
+| 哪些 goroutine 在抢 CPU？      | go tool trace             | 显示全部 P 上的可运行 vs 运行状态          |
+| 一个请求的墙钟时间怎么分布的？ | go tool trace（配标注）   | 带任务与区域的时间线视图                   |
 
-When in doubt, start with pprof (lower overhead, simpler output). Use trace when pprof doesn't explain the latency or when you need the wall-clock timeline view.
+拿不准时先用 pprof（开销更低、输出更简单）。pprof 解释不了延迟、或需要墙钟时间线视图时再用 trace。
