@@ -61,37 +61,24 @@
   background: var(--table-bg);
 }
 
-.inline-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.inline-table thead {
+/* .allowed-models-table 以 .modern-table 为基座，这里只补内联密度与
+   容器内 sticky thead（thead 底色要盖住滚过的行） */
+.allowed-models-table thead {
   position: sticky;
   top: 0;
   z-index: var(--z-raised);
-  background: var(--surface-bg-muted);
 }
 
-.inline-table th {
+.allowed-models-table th {
   padding: 6px 10px;
-  text-align: left;
-  font-weight: 600;
   font-size: var(--text-13);
-  background-color: var(--surface-bg-muted);
   color: var(--neutral-900);
+  background-color: var(--surface-bg-muted);
   border-bottom: 2px solid var(--surface-border-strong);
 }
 
-.inline-table td {
+.allowed-models-table td {
   padding: 4px 8px;
-  color: var(--neutral-800);
-  background: var(--table-bg);
-  border-bottom: 1px solid var(--surface-border);
-}
-
-.inline-table tbody tr:hover {
-  background: var(--table-row-hover);
 }
 
 @media (max-width: 768px) {
@@ -162,1261 +149,1145 @@
   }
 }
 
+:root {
+  --token-active-bg: var(--success-50);
+  --token-active-fg: var(--success-800);
+  --token-active-border: var(--success-300);
+  --token-inactive-bg: var(--surface-bg-muted);
+  --token-inactive-fg: var(--neutral-600);
+  --token-inactive-border: var(--neutral-300);
+  --token-expired-bg: var(--error-50);
+  --token-expired-fg: var(--error-800);
+  --token-expired-border: var(--error-300);
+  --token-import-preview-bg: var(--success-50);
+  --token-import-preview-fg: var(--success-700);
+  --token-import-preview-border: var(--success-200);
+}
+html[data-resolved-theme="dark"] {
+  --token-active-bg: color-mix(in srgb, var(--success-500) 14%, transparent);
+  --token-active-fg: var(--neutral-900);
+  --token-active-border: rgba(52, 211, 153, 0.45);
+  --token-inactive-bg: var(--surface-bg-muted);
+  --token-inactive-fg: var(--neutral-600);
+  --token-inactive-border: var(--surface-border-strong);
+  --token-expired-bg: color-mix(in srgb, var(--error-500) 16%, transparent);
+  --token-expired-fg: var(--neutral-900);
+  --token-expired-border: rgba(248, 113, 113, 0.48);
+  --token-import-preview-bg: color-mix(in srgb, var(--success-500) 14%, transparent);
+  --token-import-preview-fg: var(--neutral-900);
+  --token-import-preview-border: rgba(52, 211, 153, 0.45);
+}
 
-    :root {
-      --token-active-bg: var(--success-50);
-      --token-active-fg: var(--success-800);
-      --token-active-border: var(--success-300);
-      --token-inactive-bg: var(--surface-bg-muted);
-      --token-inactive-fg: var(--neutral-600);
-      --token-inactive-border: var(--neutral-300);
-      --token-expired-bg: var(--error-50);
-      --token-expired-fg: var(--error-800);
-      --token-expired-border: var(--error-300);
-      --token-import-preview-bg: var(--success-50);
-      --token-import-preview-fg: var(--success-700);
-      --token-import-preview-border: var(--success-200);
-    }
-    html[data-resolved-theme="dark"] {
-      --token-active-bg: color-mix(in srgb, var(--success-500) 14%, transparent);
-      --token-active-fg: var(--neutral-900);
-      --token-active-border: rgba(52, 211, 153, 0.45);
-      --token-inactive-bg: var(--surface-bg-muted);
-      --token-inactive-fg: var(--neutral-600);
-      --token-inactive-border: var(--surface-border-strong);
-      --token-expired-bg: color-mix(in srgb, var(--error-500) 16%, transparent);
-      --token-expired-fg: var(--neutral-900);
-      --token-expired-border: rgba(248, 113, 113, 0.48);
-      --token-import-preview-bg: color-mix(in srgb, var(--success-500) 14%, transparent);
-      --token-import-preview-fg: var(--neutral-900);
-      --token-import-preview-border: rgba(52, 211, 153, 0.45);
-    }
-    .token-custom-expiry {
-      display: none;
-    }
-    .token-table {
-      width: 100%;
-      background: var(--table-bg);
-      border-radius: var(--radius-lg);
-      overflow: hidden;
-      overflow-x: auto;
-      box-shadow: var(--shadow-base);
-    }
-    .token-table table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .tokens-table {
-      table-layout: fixed;
-      width: 100%;
-    }
-    .tokens-colgroup-token {
-      width: 24%;
-    }
-    .tokens-colgroup-calls {
-      width: 6%;
-    }
-    .tokens-colgroup-success-rate {
-      width: 5%;
-    }
-    .tokens-colgroup-rpm {
-      width: 8%;
-    }
-    .tokens-colgroup-token-usage {
-      width: 12%;
-    }
-    .tokens-colgroup-cost {
-      width: 8%;
-    }
-    .tokens-colgroup-concurrency {
-      width: 6%;
-    }
-    .tokens-colgroup-stream {
-      width: 7%;
-    }
-    .tokens-colgroup-non-stream {
-      width: 7%;
-    }
-    .tokens-colgroup-last-used {
-      width: 8%;
-    }
-    .tokens-colgroup-actions {
-      width: 9%;
-    }
-    .token-table thead {
-      background: var(--neutral-100);
-    }
-    .token-table th {
-      padding: 12px 10px;
-      text-align: left;
-      font-size: var(--text-13);
-      font-weight: 600;
-      color: var(--neutral-700);
-      border-bottom: 1px solid var(--neutral-200);
-    }
-    .token-table td {
-      padding: 12px 10px;
-      border-bottom: 1px solid var(--neutral-100);
-      font-size: var(--text-sm);
-      box-sizing: border-box;
-      vertical-align: middle;
-    }
-    .token-table tbody tr:hover {
-      background: var(--neutral-50);
-    }
-    .token-table tbody tr:last-child td {
-      border-bottom: none;
-    }
-    .tokens-hero-card {
-      padding: var(--space-6);
-    }
-    .tokens-hero-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      flex-wrap: wrap;
-    }
-    .tokens-page-subtitle {
-      margin: 0;
-    }
-    .tokens-create-btn {
-      padding: 8px 16px;
-    }
-    .tokens-empty-state {
-      display: none;
-      padding: 60px 20px;
-      text-align: center;
-    }
-    .tokens-empty-icon {
-      margin-bottom: 16px;
-      color: var(--primary-500);
-    }
-    .tokens-empty-title {
-      margin-bottom: 8px;
-      color: var(--neutral-900);
-      font-weight: 600;
-    }
-    .tokens-empty-desc {
-      margin-bottom: 24px;
-      color: var(--neutral-700);
-      font-size: var(--text-base);
-    }
-    .token-custom-expiry {
-      display: none;
-    }
-    .token-cost-prefix {
-      position: absolute;
-      left: 10px;
-      top: 50%;
-      transform: translateY(-50%);
-      color: var(--neutral-500);
-      font-weight: 600;
-      line-height: 1;
-      pointer-events: none;
-    }
-    .token-limit-input-line:has(> .token-cost-prefix) > .form-input {
-      padding-left: 24px;
-    }
-    .token-limit-control {
-      display: flex;
-      flex-direction: column;
-      flex: 1 1 auto;
-      gap: 5px;
-      min-width: 0;
-      width: 100%;
-    }
-    .form-row-inline:has(> .token-limit-control) {
-      align-items: flex-start;
-    }
-    .form-row-inline:has(> .token-limit-control) > .form-row-inline__label {
-      display: flex;
-      align-items: center;
-      min-height: 36px;
-    }
-    .token-limit-input-line {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) max-content;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      width: 100%;
-      position: relative;
-    }
-    .token-limit-input-line .field-grow {
-      flex: 1 1 auto;
-      min-width: 0;
-      width: 100%;
-    }
-    .token-limit-meta {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px 12px;
-      min-width: 0;
-      flex-wrap: wrap;
-    }
-    .token-active-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-    }
-    .token-row-actions {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-      flex-wrap: nowrap;
-    }
-    .token-row-description {
-      font-weight: 500;
-      margin-top: 7px;
-      color: var(--neutral-800);
-      overflow-wrap: anywhere;
-      word-break: break-word;
-    }
-    .token-row-meta {
-      margin-top: 4px;
-      color: var(--neutral-500);
-      font-size: var(--text-xs);
-    }
-    .tokens-col-calls,
-    .tokens-col-success-rate,
-    .tokens-col-rpm,
-    .tokens-col-token-usage,
-    .tokens-col-cost,
-    .tokens-col-concurrency,
-    .tokens-col-stream,
-    .tokens-col-non-stream {
-      text-align: right;
-    }
-    .token-limit-hint {
-      flex: 0 0 auto;
-      color: var(--neutral-500);
-      font-size: var(--text-xs);
-      font-weight: 600;
-      line-height: 1.3;
-      white-space: nowrap;
-    }
-    .token-limit-hint--inline {
-      flex: 0 0 auto;
-    }
-    .tokens-col-last-used {
-      color: var(--neutral-600);
-    }
-    .token-last-used {
-      display: inline-flex;
-      flex-direction: column;
-      gap: 2px;
-      line-height: 1.35;
-      white-space: nowrap;
-    }
-    .token-last-used-date,
-    .token-last-used-time {
-      display: block;
-    }
-    .tokens-col-actions {
-      text-align: right;
-      white-space: nowrap;
-    }
-    .token-row-action-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 28px;
-      padding: 0;
-      line-height: 0;
-      white-space: nowrap;
-      flex: 0 0 auto;
-    }
-    .token-row-action-btn.btn-danger {
-      color: var(--error-600);
-    }
-    .token-row-action-btn.btn-danger:hover {
-      color: var(--error-700);
-      border-color: var(--error-400);
-      background: var(--error-50);
-    }
-    .token-display {
-      font-family: var(--font-family-mono);
-      background: var(--surface-bg-muted);
-      color: var(--neutral-900);
-      border: 1px solid var(--surface-border);
-      padding: 4px 8px;
-      border-radius: var(--radius-xs);
-      font-size: var(--text-13);
-      display: inline-block;
-    }
-    /* Token状态颜色 */
-    .token-display-active {
-      background: var(--token-active-bg);
-      color: var(--token-active-fg);
-      border: 1px solid var(--token-active-border);
-    }
-    .token-display-inactive {
-      background: var(--token-inactive-bg);
-      color: var(--token-inactive-fg);
-      border: 1px solid var(--token-inactive-border);
-    }
-    .token-display-expired {
-      background: var(--token-expired-bg);
-      color: var(--token-expired-fg);
-      border: 1px solid var(--token-expired-border);
-    }
-    .token-result-warning {
-      margin-bottom: 16px;
-      padding: 16px;
-      background: var(--warning-50);
-      border: 1px solid var(--warning-200);
-      border-radius: var(--radius-base);
-    }
-    .token-result-warning-title {
-      margin-bottom: 8px;
-      color: var(--warning-700);
-      font-weight: 600;
-    }
-    .token-result-warning-desc {
-      color: var(--warning-800);
-      font-size: var(--text-sm);
-    }
-    .token-result-value-wrap {
-      position: relative;
-    }
-    .token-result-value {
-      height: 80px;
-      resize: none;
-      font-family: var(--font-family-mono);
-      font-size: var(--text-13);
-    }
-    .token-result-copy-btn {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      padding: 4px 12px;
-      font-size: var(--text-13);
-    }
-    .stats-badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: var(--radius-xs);
-      font-size: var(--text-xs);
-      font-weight: 600;
-      background: var(--neutral-100);
-      color: var(--neutral-700);
-    }
-    .success-rate-high {
-      background: var(--success-100);
-      color: var(--success-700);
-    }
-    .success-rate-medium {
-      background: var(--warning-100);
-      color: var(--warning-700);
-    }
-    .success-rate-low {
-      background: var(--error-100);
-      color: var(--error-700);
-    }
-    .metric-value {
-      font-weight: 600;
-    }
-    .token-value-muted {
-      color: var(--neutral-500);
-      font-size: var(--text-13);
-    }
-    .token-call-stats {
-      display: inline-flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 4px;
-      flex-wrap: wrap;
-    }
-    .token-call-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 0;
-      border-radius: 0;
-      background: transparent;
-    }
-    .token-call-badge--success {
-      color: var(--success-700);
-    }
-    .token-call-badge--failure {
-      color: var(--error-700);
-    }
-    .token-call-icon {
-      font-size: var(--text-sm);
-      font-weight: 700;
-      line-height: 1;
-    }
-    .token-call-icon--success {
-      color: var(--success-600);
-    }
-    .token-call-icon--failure {
-      color: var(--error-600);
-    }
-    .token-rpm {
-      font-weight: 500;
-      white-space: nowrap;
-    }
-    .token-rpm--low {
-      color: var(--success-600);
-    }
-    .token-rpm--medium {
-      color: var(--warning-600);
-    }
-    .token-rpm--high {
-      color: var(--error-600);
-    }
-    .token-cost {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 2px;
-    }
-    .token-cost .cost-stack {
-      align-items: flex-end;
-      text-align: right;
-      font-size: var(--text-base);
-      font-weight: 700;
-    }
-    .tokens-table .metric-value {
-      margin-bottom: 0;
-      font-size: var(--text-base);
-      line-height: 1.2;
-      white-space: nowrap;
-    }
-    .tokens-col-stream .metric-value,
-    .tokens-col-non-stream .metric-value {
-      font-size: var(--text-lg);
-    }
-    .token-usage-metrics {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, max-content));
-      gap: 4px;
-      justify-content: end;
-    }
-    .tokens-col-token-usage > .token-usage-metrics {
-      grid-template-columns: minmax(0, max-content);
-    }
-    .token-usage-item {
-      display: inline-flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-      min-width: 0;
-      padding: 0;
-      border-radius: 0;
-      font-size: var(--text-xs);
-      font-weight: 600;
-      white-space: nowrap;
-      background: transparent;
-    }
-    .token-usage-label {
-      color: inherit;
-    }
-    .token-usage-value {
-      color: var(--neutral-900);
-      font-variant-numeric: tabular-nums;
-      font-feature-settings: "tnum";
-    }
-    .token-usage-item--input {
-      color: var(--primary-700);
-    }
-    .token-usage-item--output {
-      color: var(--info-700);
-    }
-    .token-usage-item--cache-read {
-      color: var(--success-700);
-    }
-    .token-usage-item--cache-create {
-      color: var(--warning-700);
-    }
-    /* 模态基础层归 styles.css（.modal + .modal.show 居中 flex）；
-       这里只留 tokens 页的内容层规格：分段 padding、顶锚 5% 边距 */
-    .modal-content {
-      background-color: var(--surface-bg-strong);
-      color: var(--neutral-900);
-      margin: 5% auto;
-      padding: 0;
-      width: 100%;
-      border-radius: var(--radius-lg);
-      max-width: 600px;
-      max-height: calc(100vh - 24px);
-      overflow-y: auto;
-      box-shadow: var(--shadow-xl);
-      animation: slideUp 0.3s;
-    }
-    .modal-content--wide {
-      width: 90%;
-      max-width: none;
-    }
-    /* 创建模态字段多、整体超高：同 token-edit-modal 的 flex 列布局，
-       body 内部滚动，header/footer 钉住不被卷走 */
-    #createModal .modal-content {
-      display: flex;
-      flex-direction: column;
-      margin: 12px auto;
-      max-height: calc(100vh - 24px);
-      overflow: hidden;
-    }
-    #createModal .modal-header,
-    #createModal .modal-footer {
-      flex-shrink: 0;
-    }
-    #createModal .modal-body {
-      flex: 1 1 auto;
-      min-height: 0;
-      overflow-y: auto;
-    }
-    .token-edit-modal {
-      display: flex;
-      flex-direction: column;
-      min-height: min(680px, calc(100vh - 32px));
-      max-height: calc(100vh - 32px);
-      margin: 16px auto;
-      overflow: hidden;
-    }
-    .token-edit-modal .modal-header,
-    .token-edit-modal .modal-footer {
-      flex-shrink: 0;
-    }
-    .token-edit-body {
-      padding-top: 12px;
-      padding-bottom: 12px;
-      display: flex;
-      flex: 1 1 auto;
-      flex-direction: column;
-      gap: 12px;
-      min-height: 0;
-      overflow: hidden;
-    }
-    .token-edit-layout {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      align-items: stretch;
-      gap: 12px;
-      min-height: 0;
-    }
-    .token-edit-sidebar {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      min-width: 0;
-      min-height: 0;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-    }
-    .token-edit-main {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      align-items: stretch;
-      gap: 12px;
-      min-width: 0;
-      min-height: 0;
-    }
-    .token-edit-section {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      padding: 14px 16px;
-      border: 1px solid var(--neutral-200);
-      border-radius: var(--radius-md);
-      background: var(--surface-bg-muted);
-    }
-    .token-edit-section--basic,
-    .token-edit-section--quota {
-      gap: 6px;
-    }
-    .token-edit-section--basic .form-group,
-    .token-edit-section--quota .form-group {
-      margin-bottom: 0;
-    }
-    .token-edit-section--models {
-      flex: 1 1 auto;
-      min-height: 0;
-      min-width: 0;
-      background: var(--surface-bg);
-    }
-    .token-edit-section-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 8px 12px;
-      flex-wrap: wrap;
-      margin-bottom: 8px;
-    }
-    .token-edit-section-title {
-      margin: 0;
-      color: var(--neutral-600);
-      font-size: var(--text-13);
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-    .token-edit-custom-expiry {
-      display: none;
-      margin-bottom: 0;
-    }
-    .token-edit-field {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .token-edit-field .form-label {
-      margin-bottom: 0;
-      flex: 0 0 60px;
-      min-width: 60px;
-      white-space: nowrap;
-    }
-    .token-edit-field .form-row-inline__content,
-    .token-edit-field .field-grow {
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    .token-edit-token-value {
-      font-family: var(--font-family-mono);
-      font-size: var(--text-13);
-    }
-    .token-edit-token-value[readonly] {
-      background: var(--field-bg);
-      color: var(--neutral-900);
-    }
-    .token-edit-cost-used {
-      color: var(--neutral-600);
-      font-size: var(--text-13);
-      min-width: 0;
-      white-space: nowrap;
-    }
-    .token-edit-cost-used:empty {
-      display: none;
-    }
-    .token-edit-active-label {
-      margin: 0;
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-    }
-    .token-edit-active-row {
-      margin-bottom: 0;
-    }
-    .token-edit-models-section {
-      min-height: 0;
-    }
-    .token-edit-restriction-filter {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--neutral-600);
-      font-size: var(--text-xs);
-      font-weight: 500;
-      white-space: nowrap;
-    }
-    .token-edit-restriction-filter-input {
-      width: 150px;
-      min-width: 120px;
-      height: auto;
-      padding: 5px 8px;
-      font-size: var(--text-xs);
-    }
-    .token-edit-models-header {
-      margin-bottom: 8px;
-    }
-    .token-edit-models-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      flex-wrap: wrap;
-    }
-    .token-edit-models-meta {
-      color: var(--neutral-500);
-      font-size: var(--text-xs);
-      white-space: nowrap;
-    }
-    .token-edit-models-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-      min-width: 0;
-    }
-    .token-edit-models-btn {
-      padding: 5px 10px;
-      font-size: var(--text-xs);
-    }
-    .token-edit-models-btn--batch:disabled {
-      opacity: 0.5;
-    }
-    .token-edit-models-actions .btn {
-      white-space: nowrap;
-    }
-    .token-edit-models-table {
-      flex: 1 1 auto;
-      min-height: 0;
-      max-height: none;
-      overflow-y: auto;
-      overscroll-behavior: contain;
-      border: 1px solid var(--neutral-200);
-      border-radius: var(--radius-sm);
-    }
-    .allowed-models-table-head {
-      background: var(--neutral-100);
-    }
-    .allowed-model-col-select-head,
-    .allowed-model-col-name-head,
-    .allowed-model-col-actions-head {
-      padding: 8px;
-    }
-    .allowed-model-col-select-head {
-      width: 40px;
-      text-align: center;
-    }
-    .allowed-model-col-name-head {
-      text-align: left;
-    }
-    .allowed-model-col-actions-head {
-      width: 60px;
-      text-align: right;
-    }
-    .allowed-models-empty-cell {
-      padding: 16px;
-      text-align: center;
-      color: var(--neutral-500);
-    }
-    .allowed-model-col-select {
-      padding: 8px;
-      text-align: center;
-    }
-    .allowed-model-col-actions {
-      padding: 8px;
-      text-align: right;
-    }
-    .allowed-model-col-name {
-      padding: 8px;
-      font-family: var(--font-family-mono);
-      font-size: var(--text-13);
-    }
-    .allowed-model-remove-btn {
-      padding: 2px 8px;
-      font-size: var(--text-xs);
-    }
-    .modal-header {
-      padding: 20px 24px;
-      border-bottom: 1px solid var(--neutral-200);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .modal-body {
-      padding: 24px;
-    }
-    .modal-footer {
-      padding: 16px 24px;
-      border-top: 1px solid var(--neutral-200);
-      display: flex;
-      justify-content: flex-end;
-      gap: 12px;
-    }
-    #selectAllContainer {
-      display: none;
-      padding: 8px 12px;
-      border: 1px solid var(--neutral-200);
-      border-bottom: none;
-      border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-      background: var(--surface-bg-muted);
-    }
-    .model-select-all-label {
-      display: flex;
-      align-items: center;
-      cursor: pointer;
-      font-size: var(--text-13);
-    }
-    .model-select-all-checkbox {
-      margin-right: 8px;
-    }
-    #visibleModelsCount {
-      margin-left: 8px;
-      color: var(--neutral-500);
-    }
-    .model-select-summary {
-      margin-top: 8px;
-      color: var(--neutral-500);
-      font-size: var(--text-xs);
-    }
-    #availableModelsContainer.available-models-container--standalone {
-      border-radius: var(--radius-sm);
-    }
-    #availableModelsContainer.available-models-container--stacked {
-      border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-    }
-    .available-models-empty {
-      padding: 24px;
-      text-align: center;
-      color: var(--neutral-500);
-    }
-    .model-option-item {
-      display: flex;
-      align-items: center;
-      padding: 8px 12px;
-      cursor: pointer;
-      border-bottom: 1px solid var(--neutral-100);
-    }
-    .model-option-checkbox {
-      margin-right: 8px;
-    }
-    .model-option-label {
-      font-family: var(--font-family-mono);
-      font-size: var(--text-13);
-    }
-    .model-option-item:hover {
-      background: var(--surface-hover);
-    }
-    .token-model-import-body {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .model-import-group {
-      margin-bottom: 0;
-    }
-    .model-import-label {
-      margin-bottom: 8px;
-    }
-    .model-import-hint {
-      color: var(--neutral-500);
-      font-size: var(--text-13);
-      font-weight: 400;
-    }
-    .model-import-textarea {
-      min-height: 160px;
-      resize: vertical;
-      font-family: var(--font-family-mono);
-      font-size: var(--text-13);
-    }
-    .token-model-import-tip {
-      margin-bottom: 0;
-      padding: 10px 12px;
-      color: var(--neutral-700);
-      font-size: var(--text-xs);
-      background: var(--info-50);
-      border: 1px solid var(--info-200);
-      border-radius: var(--radius-sm);
-    }
-    .token-model-import-code {
-      padding: 2px 4px;
-      background: rgba(0, 0, 0, 0.05);
-      border-radius: var(--radius-2xs);
-    }
-    .token-model-import-preview {
-      display: none;
-      padding: 10px 12px;
-      color: var(--token-import-preview-fg);
-      font-size: var(--text-13);
-      background: var(--token-import-preview-bg);
-      border: 1px solid var(--token-import-preview-border);
-      border-radius: var(--radius-sm);
-    }
-    @keyframes slideUp {
-      from { transform: translateY(50px); opacity: 0; }
-      to { transform: translateY(0); opacity: 1; }
-    }
-    .tokens-actions-col {
-      width: 8%;
-      text-align: right;
-    }
-    @media (max-width: 768px) {
-      .token-edit-restriction-filter {
-        flex: 1 1 100%;
-        width: 100%;
-      }
-      .token-edit-restriction-filter-input {
-        flex: 1 1 auto;
-        width: auto;
-        min-width: 0;
-      }
-      .token-table {
-        overflow: visible;
-        background: transparent;
-        box-shadow: none;
-        border-radius: 0;
-      }
-      .tokens-table {
-        min-width: 0;
-        table-layout: auto;
-      }
-      .tokens-table colgroup {
-        display: none;
-      }
-      .tokens-table tbody {
-        width: 100%;
-      }
-      .tokens-hero-bar {
-        align-items: stretch;
-      }
-      .tokens-create-btn {
-        width: 100%;
-      }
-      .tokens-table tbody .token-card-row {
-        grid-template-columns: minmax(0, 1fr);
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .tokens-table tbody .token-card-row > td {
-        grid-column: 1 / -1;
-      }
-      .tokens-table .tokens-col-token,
-      .tokens-table .tokens-col-token-usage,
-      .tokens-table .tokens-col-last-used,
-      .tokens-table .tokens-col-actions {
-        grid-column: 1 / -1;
-      }
-      .tokens-table .tokens-col-token {
-        order: 1;
-      }
-      .tokens-table .tokens-col-calls {
-        order: 10;
-      }
-      .tokens-table .tokens-col-success-rate {
-        order: 11;
-      }
-      .tokens-table .tokens-col-rpm {
-        order: 12;
-      }
-      .tokens-table .tokens-col-token-usage {
-        order: 20;
-      }
-      .tokens-table .tokens-col-cost {
-        order: 21;
-      }
-      .tokens-table .tokens-col-concurrency {
-        order: 22;
-      }
-      .tokens-table .tokens-col-stream {
-        order: 23;
-      }
-      .tokens-table .tokens-col-non-stream {
-        order: 24;
-      }
-      .tokens-table .tokens-col-last-used {
-        order: 25;
-      }
-      .tokens-table .tokens-col-actions {
-        order: 30;
-      }
-      .tokens-table .tokens-col-token {
-        display: grid !important;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: center;
-        gap: 8px 12px;
-      }
-      .tokens-table .tokens-col-token::before {
-        grid-column: 1;
-        grid-row: 1;
-        width: auto !important;
-        margin-bottom: 0 !important;
-        flex: 0 0 auto;
-        white-space: nowrap;
-      }
-      .tokens-table .tokens-col-token .token-row-primary {
-        grid-column: 2;
-        grid-row: 1;
-        min-width: 0;
-        max-width: 100%;
-        overflow-x: auto;
-      }
-      .tokens-table .tokens-col-token .token-row-description,
-      .tokens-table .tokens-col-token .token-row-meta {
-        grid-column: 1 / -1;
-        margin-top: 0 !important;
-        min-width: 0;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
-      .tokens-table .tokens-col-calls,
-      .tokens-table .tokens-col-success-rate,
-      .tokens-table .tokens-col-rpm,
-      .tokens-table .tokens-col-token-usage,
-      .tokens-table .tokens-col-cost,
-      .tokens-table .tokens-col-concurrency,
-      .tokens-table .tokens-col-stream,
-      .tokens-table .tokens-col-non-stream,
-      .tokens-table .tokens-col-last-used {
-        display: flex !important;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-      .tokens-table .tokens-col-calls::before,
-      .tokens-table .tokens-col-success-rate::before,
-      .tokens-table .tokens-col-rpm::before,
-      .tokens-table .tokens-col-token-usage::before,
-      .tokens-table .tokens-col-cost::before,
-      .tokens-table .tokens-col-concurrency::before,
-      .tokens-table .tokens-col-stream::before,
-      .tokens-table .tokens-col-non-stream::before,
-      .tokens-table .tokens-col-last-used::before {
-        width: auto !important;
-        margin-bottom: 0 !important;
-        flex: 0 0 auto;
-        white-space: nowrap;
-      }
-      .tokens-table .tokens-col-calls > div,
-      .tokens-table .tokens-col-cost > div {
-        align-items: flex-end !important;
-        text-align: right;
-      }
-      .tokens-table .tokens-col-token-usage > .token-usage-metrics {
-        justify-content: flex-end;
-        grid-template-columns: repeat(2, minmax(0, max-content));
-      }
-      .tokens-table .tokens-col-token-usage > .token-usage-metrics .token-usage-item {
-        justify-content: space-between;
-        flex-wrap: nowrap;
-      }
-      .tokens-table .token-row-actions {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        max-width: 100%;
-      }
-      .tokens-table .tokens-col-actions .btn {
-        margin-right: 0 !important;
-        flex: 0 0 auto;
-      }
-      .tokens-table .tokens-col-token .token-display {
-        max-width: 100%;
-        overflow-x: auto;
-        white-space: nowrap;
-        word-break: normal;
-      }
-      .token-row-actions {
-        justify-content: center;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        max-width: 100%;
-      }
-      .token-row-actions::-webkit-scrollbar {
-        display: none;
-      }
-      .allowed-models-table tbody .mobile-inline-row {
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 8px 12px;
-      }
-      .allowed-models-table tbody .mobile-inline-row .allowed-model-col-select,
-      .allowed-models-table tbody .mobile-inline-row .allowed-model-col-name,
-      .allowed-models-table tbody .mobile-inline-row .allowed-model-col-actions {
-        grid-column: auto;
-      }
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-select {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name {
-        grid-column: auto;
-        display: flex;
-        align-items: center;
-        min-width: 0;
-        white-space: nowrap;
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-width: none;
-      }
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name::-webkit-scrollbar {
-        display: none;
-      }
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-actions {
-        grid-column: auto;
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-      }
-      .allowed-models-table .mobile-inline-row .allowed-model-col-actions {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        padding-top: 0;
-        border-top: none;
-        text-align: right !important;
-      }
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name::before,
-      .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-actions::before {
-        content: none;
-        display: none;
-      }
-      .modal {
-        padding: 12px;
-        overflow-y: auto;
-      }
-      .modal-content {
-        width: min(720px, calc(100vw - 24px));
-        max-width: none;
-        max-height: calc(100vh - 24px);
-        overflow-y: auto;
-        margin: 0 auto;
-      }
-      .modal-content--wide {
-        width: min(720px, calc(100vw - 24px));
-      }
-      #editModal .token-edit-modal {
-        min-height: auto;
-        max-height: calc(100vh - 24px);
-        overflow: hidden;
-        font-size: var(--text-sm);
-        line-height: 1.45;
-      }
-      #editModal .token-edit-modal .modal-title {
-        font-size: var(--text-lg);
-        line-height: 1.3;
-      }
-      #editModal .token-edit-modal .form-input {
-        font-size: var(--text-sm);
-      }
-      #editModal .token-edit-modal .token-edit-section-title {
-        font-size: var(--text-xs);
-      }
-      #editModal .token-edit-modal .token-edit-field .form-label,
-      #editModal .token-edit-modal .token-edit-active-label,
-      #editModal .token-edit-modal .token-limit-hint,
-      #editModal .token-edit-modal .token-edit-cost-used {
-        font-size: var(--text-13);
-      }
-      .token-edit-body {
-        gap: 12px;
-        min-height: 0;
-        overflow-y: auto;
-        overflow-x: hidden;
-      }
-      .token-edit-layout {
-        display: flex;
-        flex-direction: column;
-      }
-      .token-edit-sidebar,
-      .token-edit-main {
-        flex: 0 0 auto;
-        min-height: auto;
-      }
-      .token-edit-main {
-        display: flex;
-        flex-direction: column;
-      }
-      .token-edit-section--models {
-        flex: 0 0 auto;
-        min-height: auto;
-      }
-      .token-edit-models-table {
-        flex: none;
-        max-height: none;
-        height: auto;
-        overflow: visible;
-      }
-      .token-edit-field {
-        flex-direction: row;
-        align-items: center;
-        gap: 8px;
-      }
-      .token-edit-field .form-label {
-        flex: 0 0 60px;
-        min-width: 60px;
-        white-space: nowrap;
-      }
-      .token-edit-field .form-row-inline__content,
-      .token-edit-field .field-grow {
-        width: auto;
-      }
-      .token-edit-field .form-label,
-      .token-edit-active-row label,
-      .token-edit-models-title {
-        margin-bottom: 0;
-      }
-      .token-edit-models-actions {
-        display: flex;
-        align-items: center;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        scrollbar-width: none;
-      }
-      .token-edit-models-actions::-webkit-scrollbar {
-        display: none;
-      }
-      .token-limit-input-line .field-grow {
-        min-width: 120px;
-        width: 100%;
-      }
-      .token-edit-models-header {
-        align-items: flex-start;
-      }
-      .token-edit-models-actions {
-        width: 100%;
-        gap: 8px;
-      }
-      .token-edit-models-actions .btn {
-        flex: 0 0 auto;
-      }
-      .modal-header,
-      .modal-body,
-      .modal-footer {
-        padding-left: 16px;
-        padding-right: 16px;
-      }
-      .modal-footer {
-        flex-wrap: wrap;
-      }
-      .modal-footer .btn {
-        flex: 1 1 140px;
-      }
-    }
+/* 令牌主表：.table-container + .modern-table 基座之上只留布局与密度——
+   11 列定宽表（colgroup 给宽），单元格比默认 modern-table 更密 */
+.tokens-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.tokens-table th {
+  padding: 12px 10px;
+  font-size: var(--text-13);
+  color: var(--neutral-700);
+}
+.tokens-table td {
+  padding: 12px 10px;
+  vertical-align: middle;
+}
+.tokens-colgroup-token {
+  width: 24%;
+}
+.tokens-colgroup-calls {
+  width: 6%;
+}
+.tokens-colgroup-success-rate {
+  width: 5%;
+}
+.tokens-colgroup-rpm {
+  width: 8%;
+}
+.tokens-colgroup-token-usage {
+  width: 12%;
+}
+.tokens-colgroup-cost {
+  width: 8%;
+}
+.tokens-colgroup-concurrency {
+  width: 6%;
+}
+.tokens-colgroup-stream {
+  width: 7%;
+}
+.tokens-colgroup-non-stream {
+  width: 7%;
+}
+.tokens-colgroup-last-used {
+  width: 8%;
+}
+.tokens-colgroup-actions {
+  width: 9%;
+}
+.tokens-hero-card {
+  padding: var(--space-6);
+}
+.tokens-hero-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.tokens-page-subtitle {
+  margin: 0;
+}
+.tokens-create-btn {
+  padding: 8px 16px;
+}
+.tokens-empty-state {
+  display: none;
+  padding: 60px 20px;
+  text-align: center;
+}
+.tokens-empty-icon {
+  margin-bottom: 16px;
+  color: var(--primary-500);
+}
+.tokens-empty-title {
+  margin-bottom: 8px;
+  color: var(--neutral-900);
+  font-weight: 600;
+}
+.tokens-empty-desc {
+  margin-bottom: 24px;
+  color: var(--neutral-700);
+  font-size: var(--text-base);
+}
+.token-custom-expiry {
+  display: none;
+}
+.token-cost-prefix {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--neutral-500);
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+.token-limit-input-line:has(> .token-cost-prefix) > .form-input {
+  padding-left: 24px;
+}
+.token-limit-control {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+}
+.form-row-inline:has(> .token-limit-control) {
+  align-items: flex-start;
+}
+.form-row-inline:has(> .token-limit-control) > .form-row-inline__label {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+}
+.token-limit-input-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  position: relative;
+}
+.token-limit-input-line .field-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+.token-limit-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.token-active-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.token-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.token-row-description {
+  font-weight: 500;
+  margin-top: 7px;
+  color: var(--neutral-800);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.token-row-meta {
+  margin-top: 4px;
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+}
+.tokens-col-calls,
+.tokens-col-success-rate,
+.tokens-col-rpm,
+.tokens-col-token-usage,
+.tokens-col-cost,
+.tokens-col-concurrency,
+.tokens-col-stream,
+.tokens-col-non-stream {
+  text-align: right;
+}
+.token-limit-hint {
+  flex: 0 0 auto;
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.token-limit-hint--inline {
+  flex: 0 0 auto;
+}
+.tokens-col-last-used {
+  color: var(--neutral-600);
+}
+.token-last-used {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.token-last-used-date,
+.token-last-used-time {
+  display: block;
+}
+.tokens-col-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.token-row-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  line-height: 0;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.token-row-action-btn.btn-danger {
+  color: var(--error-600);
+}
+.token-row-action-btn.btn-danger:hover {
+  color: var(--error-700);
+  border-color: var(--error-400);
+  background: var(--error-50);
+}
+.token-display {
+  font-family: var(--font-family-mono);
+  background: var(--surface-bg-muted);
+  color: var(--neutral-900);
+  border: 1px solid var(--surface-border);
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-13);
+  display: inline-block;
+}
+/* Token状态颜色 */
+.token-display-active {
+  background: var(--token-active-bg);
+  color: var(--token-active-fg);
+  border: 1px solid var(--token-active-border);
+}
+.token-display-inactive {
+  background: var(--token-inactive-bg);
+  color: var(--token-inactive-fg);
+  border: 1px solid var(--token-inactive-border);
+}
+.token-display-expired {
+  background: var(--token-expired-bg);
+  color: var(--token-expired-fg);
+  border: 1px solid var(--token-expired-border);
+}
+.token-result-warning {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--warning-50);
+  border: 1px solid var(--warning-200);
+  border-radius: var(--radius-base);
+}
+.token-result-warning-title {
+  margin-bottom: 8px;
+  color: var(--warning-700);
+  font-weight: 600;
+}
+.token-result-warning-desc {
+  color: var(--warning-800);
+  font-size: var(--text-sm);
+}
+.token-result-value-wrap {
+  position: relative;
+}
+.token-result-value {
+  height: 80px;
+  resize: none;
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
+}
+.token-result-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 12px;
+  font-size: var(--text-13);
+}
+.stats-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  background: var(--neutral-100);
+  color: var(--neutral-700);
+}
+.metric-value {
+  font-weight: 600;
+}
+.token-value-muted {
+  color: var(--neutral-500);
+  font-size: var(--text-13);
+}
+.token-call-stats {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.token-call-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.token-call-badge--success {
+  color: var(--success-700);
+}
+.token-call-badge--failure {
+  color: var(--error-700);
+}
+.token-call-icon {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1;
+}
+.token-call-icon--success {
+  color: var(--success-600);
+}
+.token-call-icon--failure {
+  color: var(--error-600);
+}
+/* RPM 是负载指标不是健康度，不上 tone 色（负载高≠异常） */
+.token-rpm {
+  font-weight: 500;
+  white-space: nowrap;
+}
+.token-cost {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.token-cost .cost-stack {
+  align-items: flex-end;
+  text-align: right;
+  font-size: var(--text-base);
+  font-weight: 700;
+}
+.tokens-table .metric-value {
+  margin-bottom: 0;
+  font-size: var(--text-base);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.tokens-col-stream .metric-value,
+.tokens-col-non-stream .metric-value {
+  font-size: var(--text-lg);
+}
+.token-usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, max-content));
+  gap: 4px;
+  justify-content: end;
+}
+.tokens-col-token-usage > .token-usage-metrics {
+  grid-template-columns: minmax(0, max-content);
+}
+.token-usage-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border-radius: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  background: transparent;
+}
+.token-usage-label {
+  color: inherit;
+}
+.token-usage-value {
+  color: var(--neutral-900);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+.token-usage-item--input {
+  color: var(--primary-700);
+}
+.token-usage-item--output {
+  color: var(--info-700);
+}
+.token-usage-item--cache-read {
+  color: var(--success-700);
+}
+.token-usage-item--cache-create {
+  color: var(--warning-700);
+}
+/* 模态壳（.modal-content/header/body/footer 分段 padding、入场动画、
+   flex 列布局）全部归 styles.css 全局；这里只留 tokens 页独有修饰 */
+.modal-content--wide {
+  width: 90%;
+  max-width: none;
+}
+.token-edit-modal {
+  min-height: min(680px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
+}
+.token-edit-body {
+  padding-top: 12px;
+  padding-bottom: 12px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+.token-edit-layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 12px;
+  min-height: 0;
+}
+.token-edit-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.token-edit-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+.token-edit-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--neutral-200);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg-muted);
+}
+/* 分区内部节奏由 section gap 管，form-group 底距归零避免双重间距 */
+.token-edit-section .form-group {
+  margin-bottom: 0;
+}
+/* 配额字段宿主只是 JS 冲压点（stampTokenQuotaFields）：display:contents
+   让行直接吃 section 的 gap 节奏，不在中间层堆叠 */
+#tokenQuotaFields,
+#editQuotaFields {
+  display: contents;
+}
+.token-edit-section--basic,
+.token-edit-section--quota {
+  gap: 6px;
+}
+.token-edit-section--models {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  background: var(--surface-bg);
+}
+.token-edit-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.token-edit-section-title {
+  margin: 0;
+  color: var(--neutral-600);
+  font-size: var(--text-13);
+  font-weight: 700;
+}
+.token-edit-custom-expiry {
+  display: none;
+  margin-bottom: 0;
+}
+.token-edit-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.token-edit-field .form-label {
+  margin-bottom: 0;
+  flex: 0 0 60px;
+  min-width: 60px;
+  white-space: nowrap;
+}
+.token-edit-field .form-row-inline__content,
+.token-edit-field .field-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.token-edit-token-value {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
+}
+.token-edit-token-value[readonly] {
+  background: var(--field-bg);
+  color: var(--neutral-900);
+}
+.token-edit-cost-used {
+  color: var(--neutral-600);
+  font-size: var(--text-13);
+  min-width: 0;
+  white-space: nowrap;
+}
+.token-edit-cost-used:empty {
+  display: none;
+}
+.token-edit-active-label {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.token-edit-active-row {
+  margin-bottom: 0;
+}
+.token-edit-models-section {
+  min-height: 0;
+}
+.token-edit-restriction-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--neutral-600);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.token-edit-restriction-filter-input {
+  width: 150px;
+  min-width: 120px;
+  height: auto;
+  padding: 5px 8px;
+  font-size: var(--text-xs);
+}
+.token-edit-models-header {
+  margin-bottom: 8px;
+}
+.token-edit-models-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.token-edit-models-meta {
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.token-edit-models-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.token-edit-models-btn {
+  padding: 5px 10px;
+  font-size: var(--text-xs);
+}
+.token-edit-models-btn--batch:disabled {
+  opacity: 0.5;
+}
+.token-edit-models-actions .btn {
+  white-space: nowrap;
+}
+.token-edit-models-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--neutral-200);
+  border-radius: var(--radius-sm);
+}
+.allowed-models-table-head {
+  background: var(--neutral-100);
+}
+.allowed-model-col-select-head {
+  width: 40px;
+  text-align: center;
+}
+.allowed-model-col-name-head {
+  text-align: left;
+}
+.allowed-model-col-actions-head {
+  width: 60px;
+  text-align: right;
+}
+.allowed-models-empty-cell {
+  text-align: center;
+  color: var(--neutral-500);
+}
+.allowed-model-col-select {
+  text-align: center;
+}
+.allowed-model-col-actions {
+  text-align: right;
+}
+.allowed-model-col-name {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
+}
+.allowed-model-remove-btn {
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+}
+#selectAllContainer {
+  display: none;
+  padding: 8px 12px;
+  border: 1px solid var(--neutral-200);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--surface-bg-muted);
+}
+.model-select-all-label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: var(--text-13);
+}
+.model-select-all-checkbox {
+  margin-right: 8px;
+}
+#visibleModelsCount {
+  margin-left: 8px;
+  color: var(--neutral-500);
+}
+.model-select-summary {
+  margin-top: 8px;
+  color: var(--neutral-500);
+  font-size: var(--text-xs);
+}
+#availableModelsContainer.available-models-container--standalone {
+  border-radius: var(--radius-sm);
+}
+#availableModelsContainer.available-models-container--stacked {
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+.available-models-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--neutral-500);
+}
+.model-option-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--neutral-100);
+}
+.model-option-checkbox {
+  margin-right: 8px;
+}
+.model-option-label {
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
+}
+.model-option-item:hover {
+  background: var(--surface-hover);
+}
+.token-model-import-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.model-import-group {
+  margin-bottom: 0;
+}
+.model-import-label {
+  margin-bottom: 8px;
+}
+.model-import-hint {
+  color: var(--neutral-500);
+  font-size: var(--text-13);
+  font-weight: 400;
+}
+.model-import-textarea {
+  min-height: 160px;
+  resize: vertical;
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
+}
+.token-model-import-tip {
+  margin-bottom: 0;
+  padding: 10px 12px;
+  color: var(--neutral-700);
+  font-size: var(--text-xs);
+  background: var(--info-50);
+  border: 1px solid var(--info-200);
+  border-radius: var(--radius-sm);
+}
+.token-model-import-code {
+  padding: 2px 4px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: var(--radius-2xs);
+}
+.token-model-import-preview {
+  display: none;
+  padding: 10px 12px;
+  color: var(--token-import-preview-fg);
+  font-size: var(--text-13);
+  background: var(--token-import-preview-bg);
+  border: 1px solid var(--token-import-preview-border);
+  border-radius: var(--radius-sm);
+}
+.tokens-actions-col {
+  width: 8%;
+  text-align: right;
+}
+@media (max-width: 768px) {
+  .token-edit-restriction-filter {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+  .token-edit-restriction-filter-input {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+  /* 移动端卡片布局接管后，容器铬（边/底/滚动）全部摘掉 */
+  .token-table {
+    overflow: visible;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+  }
+  .tokens-table {
+    min-width: 0;
+    table-layout: auto;
+  }
+  .tokens-table colgroup {
+    display: none;
+  }
+  .tokens-table tbody {
+    width: 100%;
+  }
+  .tokens-hero-bar {
+    align-items: stretch;
+  }
+  .tokens-create-btn {
+    width: 100%;
+  }
+  .tokens-table tbody .token-card-row {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .tokens-table tbody .token-card-row > td {
+    grid-column: 1 / -1;
+  }
+  .tokens-table .tokens-col-token,
+  .tokens-table .tokens-col-token-usage,
+  .tokens-table .tokens-col-last-used,
+  .tokens-table .tokens-col-actions {
+    grid-column: 1 / -1;
+  }
+  .tokens-table .tokens-col-token {
+    order: 1;
+  }
+  .tokens-table .tokens-col-calls {
+    order: 10;
+  }
+  .tokens-table .tokens-col-success-rate {
+    order: 11;
+  }
+  .tokens-table .tokens-col-rpm {
+    order: 12;
+  }
+  .tokens-table .tokens-col-token-usage {
+    order: 20;
+  }
+  .tokens-table .tokens-col-cost {
+    order: 21;
+  }
+  .tokens-table .tokens-col-concurrency {
+    order: 22;
+  }
+  .tokens-table .tokens-col-stream {
+    order: 23;
+  }
+  .tokens-table .tokens-col-non-stream {
+    order: 24;
+  }
+  .tokens-table .tokens-col-last-used {
+    order: 25;
+  }
+  .tokens-table .tokens-col-actions {
+    order: 30;
+  }
+  .tokens-table .tokens-col-token {
+    display: grid !important;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px 12px;
+  }
+  .tokens-table .tokens-col-token::before {
+    grid-column: 1;
+    grid-row: 1;
+    width: auto !important;
+    margin-bottom: 0 !important;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .tokens-table .tokens-col-token .token-row-primary {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .tokens-table .tokens-col-token .token-row-description,
+  .tokens-table .tokens-col-token .token-row-meta {
+    grid-column: 1 / -1;
+    margin-top: 0 !important;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .tokens-table .tokens-col-calls,
+  .tokens-table .tokens-col-success-rate,
+  .tokens-table .tokens-col-rpm,
+  .tokens-table .tokens-col-token-usage,
+  .tokens-table .tokens-col-cost,
+  .tokens-table .tokens-col-concurrency,
+  .tokens-table .tokens-col-stream,
+  .tokens-table .tokens-col-non-stream,
+  .tokens-table .tokens-col-last-used {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .tokens-table .tokens-col-calls::before,
+  .tokens-table .tokens-col-success-rate::before,
+  .tokens-table .tokens-col-rpm::before,
+  .tokens-table .tokens-col-token-usage::before,
+  .tokens-table .tokens-col-cost::before,
+  .tokens-table .tokens-col-concurrency::before,
+  .tokens-table .tokens-col-stream::before,
+  .tokens-table .tokens-col-non-stream::before,
+  .tokens-table .tokens-col-last-used::before {
+    width: auto !important;
+    margin-bottom: 0 !important;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .tokens-table .tokens-col-calls > div,
+  .tokens-table .tokens-col-cost > div {
+    align-items: flex-end !important;
+    text-align: right;
+  }
+  .tokens-table .tokens-col-token-usage > .token-usage-metrics {
+    justify-content: flex-end;
+    grid-template-columns: repeat(2, minmax(0, max-content));
+  }
+  .tokens-table .tokens-col-token-usage > .token-usage-metrics .token-usage-item {
+    justify-content: space-between;
+    flex-wrap: nowrap;
+  }
+  .tokens-table .token-row-actions {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .tokens-table .tokens-col-actions .btn {
+    margin-right: 0 !important;
+    flex: 0 0 auto;
+  }
+  .tokens-table .tokens-col-token .token-display {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+    word-break: normal;
+  }
+  .token-row-actions {
+    justify-content: center;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .token-row-actions::-webkit-scrollbar {
+    display: none;
+  }
+  .allowed-models-table tbody .mobile-inline-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px 12px;
+  }
+  .allowed-models-table tbody .mobile-inline-row .allowed-model-col-select,
+  .allowed-models-table tbody .mobile-inline-row .allowed-model-col-name,
+  .allowed-models-table tbody .mobile-inline-row .allowed-model-col-actions {
+    grid-column: auto;
+  }
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name {
+    grid-column: auto;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    white-space: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name::-webkit-scrollbar {
+    display: none;
+  }
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-actions {
+    grid-column: auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .allowed-models-table .mobile-inline-row .allowed-model-col-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-top: 0;
+    border-top: none;
+    text-align: right !important;
+  }
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-name::before,
+  .allowed-models-table tbody .mobile-inline-row td.allowed-model-col-actions::before {
+    content: none;
+    display: none;
+  }
+  /* 窄屏 modal 接近全宽（全局默认 70% 在手机上太窄） */
+  .modal-content {
+    width: min(720px, calc(100vw - 24px));
+    max-width: none;
+    max-height: calc(100vh - 24px);
+  }
+  .modal-content--wide {
+    width: min(720px, calc(100vw - 24px));
+  }
+  #editModal .token-edit-modal {
+    min-height: auto;
+    max-height: calc(100vh - 24px);
+    overflow: hidden;
+    font-size: var(--text-sm);
+    line-height: 1.45;
+  }
+  #editModal .token-edit-modal .modal-title {
+    font-size: var(--text-lg);
+    line-height: 1.3;
+  }
+  #editModal .token-edit-modal .form-input {
+    font-size: var(--text-sm);
+  }
+  #editModal .token-edit-modal .token-edit-section-title {
+    font-size: var(--text-xs);
+  }
+  #editModal .token-edit-modal .token-edit-field .form-label,
+  #editModal .token-edit-modal .token-edit-active-label,
+  #editModal .token-edit-modal .token-limit-hint,
+  #editModal .token-edit-modal .token-edit-cost-used {
+    font-size: var(--text-13);
+  }
+  .token-edit-body {
+    gap: 12px;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .token-edit-layout {
+    display: flex;
+    flex-direction: column;
+  }
+  .token-edit-sidebar,
+  .token-edit-main {
+    flex: 0 0 auto;
+    min-height: auto;
+  }
+  .token-edit-main {
+    display: flex;
+    flex-direction: column;
+  }
+  .token-edit-section--models {
+    flex: 0 0 auto;
+    min-height: auto;
+  }
+  .token-edit-models-table {
+    flex: none;
+    max-height: none;
+    height: auto;
+    overflow: visible;
+  }
+  .token-edit-field {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .token-edit-field .form-label {
+    flex: 0 0 60px;
+    min-width: 60px;
+    white-space: nowrap;
+  }
+  .token-edit-field .form-row-inline__content,
+  .token-edit-field .field-grow {
+    width: auto;
+  }
+  .token-edit-field .form-label,
+  .token-edit-active-row label,
+  .token-edit-models-title {
+    margin-bottom: 0;
+  }
+  .token-edit-models-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .token-edit-models-actions::-webkit-scrollbar {
+    display: none;
+  }
+  .token-limit-input-line .field-grow {
+    min-width: 120px;
+    width: 100%;
+  }
+  .token-edit-models-header {
+    align-items: flex-start;
+  }
+  .token-edit-models-actions {
+    width: 100%;
+    gap: 8px;
+  }
+  .token-edit-models-actions .btn {
+    flex: 0 0 auto;
+  }
+  .modal-header,
+  .modal-body,
+  .modal-footer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .modal-footer {
+    flex-wrap: wrap;
+  }
+  .modal-footer .btn {
+    flex: 1 1 140px;
+  }
+}
 
-    /* 匿名通道行：没有可出示的凭据，复制/试聊按钮没有意义 */
-    .token-card-row--anonymous .btn-copy-token,
-    .token-card-row--anonymous .btn-play {
-      display: none;
-    }
-    .token-display-anonymous {
-      font-style: italic;
-      color: var(--neutral-700);
-    }
-    /* 空仓 = /v1 开放模式，安全相关状态在空态里显式亮出 */
-    .tokens-empty-open-warning {
-      margin: 4px 0 0;
-      font-size: var(--text-13);
-      color: var(--warning-500);
-    }
-    /* 表单字段级说明文字（匿名通道、请求类等共用） */
-    .token-field-hint {
-      margin: 4px 0 0;
-      font-size: var(--text-xs);
-      color: var(--neutral-700);
-    }
-    /* 请求类徽章：fg/bg 与 X-Gate-Class、闸门词表同词——fg 信息色、
-       bg 警示色，因为 bg 在闸门里是让位方 */
-    .token-class-badge {
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border-radius: var(--radius-xs);
-      border: 1px solid transparent;
-      font-family: var(--font-family-mono);
-      font-size: var(--text-2xs);
-      font-weight: 600;
-      line-height: 1.4;
-      vertical-align: 1px;
-    }
-    .token-class-badge--fg {
-      background: var(--info-50);
-      border-color: var(--info-200);
-      color: var(--info-700);
-    }
-    .token-class-badge--bg {
-      background: var(--warning-50);
-      border-color: var(--warning-200);
-      color: var(--warning-700);
-    }
+/* 匿名通道行：没有可出示的凭据，复制/试聊按钮没有意义 */
+.token-card-row--anonymous .btn-copy-token,
+.token-card-row--anonymous .btn-play {
+  display: none;
+}
+.token-display-anonymous {
+  font-style: italic;
+  color: var(--neutral-700);
+}
+/* 空仓 = /v1 开放模式，安全相关状态在空态里显式亮出 */
+.tokens-empty-open-warning {
+  margin: 4px 0 0;
+  font-size: var(--text-13);
+  color: var(--warning-500);
+}
+/* 表单字段级说明文字（匿名通道、请求类等共用） */
+.token-field-hint {
+  margin: 4px 0 0;
+  font-size: var(--text-xs);
+  color: var(--neutral-700);
+}
+/* 请求类徽章：fg/bg 与 X-Gate-Class、闸门词表同词——fg 信息色、
+   bg 警示色，因为 bg 在闸门里是让位方 */
+.token-class-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  font-family: var(--font-family-mono);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 1.4;
+  vertical-align: 1px;
+}
+.token-class-badge--fg {
+  background: var(--info-50);
+  border-color: var(--info-200);
+  color: var(--info-700);
+}
+.token-class-badge--bg {
+  background: var(--warning-50);
+  border-color: var(--warning-200);
+  color: var(--warning-700);
+}

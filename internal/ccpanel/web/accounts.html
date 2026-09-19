@@ -12,19 +12,18 @@
   <script src="/web/assets/js/theme-init.js?v=__VERSION__"></script>
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/accounts.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/echarts.min.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/lazy-echarts.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/accounts-view.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/accounts-ops.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/accounts.js?v=__VERSION__"></script>
@@ -61,7 +60,7 @@
             <h3 class="section-title mb-4" data-i18n="accounts.poolTitle">号池概览</h3>
             <div id="accounts-pulse" class="accounts-pulse" role="img" aria-label="pool health"></div>
             <div class="kpi-grid accounts-kpi-grid" id="accounts-kpi-grid">
-              <div class="loading-state accounts-grid-full">
+              <div class="state-block--compact accounts-grid-full">
                 <div class="loading-spinner loading-spinner--block"></div>
                 <span data-i18n="accounts.loading">正在加载账号数据...</span>
               </div>
@@ -74,7 +73,7 @@
           <div id="accounts-empty" hidden></div>
           <div id="accounts-list">
             <div class="card accounts-section-card">
-              <div class="loading-state">
+              <div class="state-block--compact">
                 <div class="loading-spinner loading-spinner--block"></div>
                 <span data-i18n="accounts.loading">正在加载账号数据...</span>
               </div>

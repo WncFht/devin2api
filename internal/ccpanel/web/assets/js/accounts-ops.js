@@ -9,8 +9,8 @@
 (function () {
   'use strict';
   const t = window.t;
-  const esc = window.escapeHtml;
-  const num = window.formatNumber || ((v) => String(v));
+  const esc = window.esc;
+  const num = window.formatNumber;
   const BASE = '/admin/accounts';
   const PROBE_ABSENT = new Set([404, 405, 501, 503]); // GET 名单无域 404，可安全当缺席
   const ACT_ABSENT = new Set([405, 501, 503]);        // 变更路径的 404 是域错误，不算缺席
@@ -154,13 +154,13 @@
               <label class="acct-form-radio"><input type="radio" name="acct-edit-kind" value="token"> <span data-m="tokenLabel"></span></label>
               <label class="acct-form-radio"><input type="radio" name="acct-edit-kind" value="credFile"> <span data-m="credLabel"></span></label>
             </div>
-            <div class="acct-form-row"><input class="acct-form-input" data-e="token" spellcheck="false" autocomplete="off"></div>
-            <div class="acct-form-row"><input class="acct-form-input" data-e="credFile" spellcheck="false" autocomplete="off" hidden></div>
+            <div class="acct-form-row"><input class="form-input acct-form-mono" data-e="token" spellcheck="false" autocomplete="off"></div>
+            <div class="acct-form-row"><input class="form-input acct-form-mono" data-e="credFile" spellcheck="false" autocomplete="off" hidden></div>
             <div class="acct-form-row acct-form-duo">
-              <input class="acct-form-input" data-e="priority" type="number" min="0" step="1" spellcheck="false" autocomplete="off">
-              <input class="acct-form-input" data-e="maxRpm" type="number" min="0" step="1" spellcheck="false" autocomplete="off">
+              <input class="form-input acct-form-mono" data-e="priority" type="number" min="0" step="1" spellcheck="false" autocomplete="off">
+              <input class="form-input acct-form-mono" data-e="maxRpm" type="number" min="0" step="1" spellcheck="false" autocomplete="off">
             </div>
-            <div class="acct-form-row"><input class="acct-form-input" data-e="notes" spellcheck="false" autocomplete="off"></div>
+            <div class="acct-form-row"><input class="form-input acct-form-mono" data-e="notes" spellcheck="false" autocomplete="off"></div>
             <div class="acct-form-err" data-m="err" hidden></div>
           </form>
         </div>
@@ -299,19 +299,19 @@
     el.innerHTML = `
       <form class="acct-form" data-add>
         <div class="acct-form-row">
-          <input class="acct-form-input" data-f="name" placeholder="${esc(t('accounts.add.name'))}" aria-label="${esc(t('accounts.add.name'))}" required maxlength="32" pattern="[A-Za-z0-9_-]{1,32}" spellcheck="false" autocomplete="off">
+          <input class="form-input acct-form-mono" data-f="name" placeholder="${esc(t('accounts.add.name'))}" aria-label="${esc(t('accounts.add.name'))}" required maxlength="32" pattern="[A-Za-z0-9_-]{1,32}" spellcheck="false" autocomplete="off">
         </div>
         <div class="acct-form-row">
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="token" checked> ${esc(t('accounts.add.token'))}</label>
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="credFile"> ${esc(t('accounts.add.credFile'))}</label>
           <label class="acct-form-radio"><input type="radio" name="acct-kind-${uid}" value="credContent"> ${esc(t('accounts.add.credContent'))}</label>
         </div>
-        <div class="acct-form-row"><input class="acct-form-input" data-f="token" placeholder="${esc(t('accounts.add.token'))}" aria-label="${esc(t('accounts.add.token'))}" required spellcheck="false" autocomplete="off"></div>
-        <div class="acct-form-row"><input class="acct-form-input" data-f="credFile" placeholder="${esc(t('accounts.add.credFile'))}" aria-label="${esc(t('accounts.add.credFile'))}" hidden spellcheck="false" autocomplete="off"></div>
-        <div class="acct-form-row"><textarea class="acct-form-input" data-f="credContent" placeholder="${esc(t('accounts.add.credContentHint'))}" aria-label="${esc(t('accounts.add.credContent'))}" hidden spellcheck="false" autocomplete="off"></textarea></div>
+        <div class="acct-form-row"><input class="form-input acct-form-mono" data-f="token" placeholder="${esc(t('accounts.add.token'))}" aria-label="${esc(t('accounts.add.token'))}" required spellcheck="false" autocomplete="off"></div>
+        <div class="acct-form-row"><input class="form-input acct-form-mono" data-f="credFile" placeholder="${esc(t('accounts.add.credFile'))}" aria-label="${esc(t('accounts.add.credFile'))}" hidden spellcheck="false" autocomplete="off"></div>
+        <div class="acct-form-row"><textarea class="form-input acct-form-mono" data-f="credContent" placeholder="${esc(t('accounts.add.credContentHint'))}" aria-label="${esc(t('accounts.add.credContent'))}" hidden spellcheck="false" autocomplete="off"></textarea></div>
         <div class="acct-form-row acct-form-duo">
-          <input class="acct-form-input" data-f="priority" type="number" min="0" step="1" placeholder="${esc(t('accounts.f.priority'))}" aria-label="${esc(t('accounts.f.priority'))}" spellcheck="false" autocomplete="off">
-          <input class="acct-form-input" data-f="notes" placeholder="${esc(t('accounts.f.notes'))}" aria-label="${esc(t('accounts.f.notes'))}" spellcheck="false" autocomplete="off">
+          <input class="form-input acct-form-mono" data-f="priority" type="number" min="0" step="1" placeholder="${esc(t('accounts.f.priority'))}" aria-label="${esc(t('accounts.f.priority'))}" spellcheck="false" autocomplete="off">
+          <input class="form-input acct-form-mono" data-f="notes" placeholder="${esc(t('accounts.f.notes'))}" aria-label="${esc(t('accounts.f.notes'))}" spellcheck="false" autocomplete="off">
         </div>
         <div class="acct-form-row">
           <label class="acct-form-check"><input type="checkbox" data-f="verify"> ${esc(t('accounts.add.verify'))}</label>

@@ -5,8 +5,8 @@
 // helpers 自 quota.js 移植（quota 页删并本页），i18n 键全部走 accounts.*。
 (function () {
   const t = window.t;
-  const esc = window.escapeHtml;
-  const num = window.formatNumber || ((v) => String(v));
+  const esc = window.esc;
+  const num = window.formatNumber;
 
   // ---- 格式化 helpers（quota.js 移植，键改指 accounts.*）----
 
@@ -426,7 +426,14 @@
   // 幂等同步：同签名直接返回（自动刷新不闪），签名变才 setOption 更新数据；
   // 元素已脱离 DOM 的僵尸实例顺带回收（diff 重渲会换掉 .acct-curve 元素）。
   function curveInit(el, points) {
-    if (!el || !window.echarts) return;
+    if (!el) return;
+    // echarts 懒加载：库未就位先拉再重入；拉取失败下轮自动刷新自然重试
+    if (!window.echarts) {
+      if (typeof window.ensureECharts === 'function') {
+        window.ensureECharts().then(() => curveInit(el, points), () => {});
+      }
+      return;
+    }
     for (const [node, it] of charts) {
       if (!node.isConnected) { it.chart.dispose(); charts.delete(node); }
     }
@@ -467,10 +474,10 @@
   // ---- 空池整页态 ----
 
   function emptyStateHTML() {
-    return `<div class="accounts-empty">
+    return `<div class="accounts-empty state-block">
       <div class="accounts-empty-icon"><svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg></div>
-      <div class="accounts-empty-title">${esc(t('accounts.empty.title'))}</div>
-      <div class="accounts-empty-hint">${esc(t('accounts.empty.hint'))}</div>
+      <div class="accounts-empty-title state-title">${esc(t('accounts.empty.title'))}</div>
+      <div class="accounts-empty-hint state-desc">${esc(t('accounts.empty.hint'))}</div>
       <div class="accounts-empty-form"><div id="accounts-empty-add"></div></div>
       <div id="accounts-cli-import"></div>
     </div>`;

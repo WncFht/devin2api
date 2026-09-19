@@ -9,8 +9,8 @@
 // 整页空态由 view/ops 挂加号表单与 CLI 导入。
 (function () {
   const t = window.t;
-  const esc = window.escapeHtml;
-  const num = window.formatNumber || ((v) => String(v));
+  const esc = window.esc;
+  const num = window.formatNumber;
   const WINDOW_HOURS = 24;
 
   let runtime = null;
@@ -381,7 +381,7 @@
   }
 
   function errBlock(msg) {
-    return `<div class="empty-state"><div class="empty-state-title empty-state-title--error">${esc(t('accounts.sectionError'))}</div><div>${esc(msg)}</div></div>`;
+    return `<div class="state-block"><div class="state-title state-title--error">${esc(t('accounts.sectionError'))}</div><div class="state-desc">${esc(msg)}</div></div>`;
   }
 
   // 卡骨架归 core：每块内容落进固定 data-slot 容器（drawer 槽留给 ops 的

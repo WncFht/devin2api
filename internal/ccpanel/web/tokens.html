@@ -13,8 +13,6 @@
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/tokens.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/chat.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
@@ -22,6 +20,7 @@
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
@@ -59,18 +58,18 @@
 
         <section>
           <!-- 令牌表格 -->
-          <div id="tokens-container" class="token-table mobile-card-table-container"></div>
+          <div id="tokens-container" class="table-container token-table mobile-card-table-container"></div>
 
           <!-- 空状态：仓空 = /v1 开放模式，必须显式亮出来 -->
-          <div id="empty-state" class="card tokens-empty-state">
+          <div id="empty-state" class="card tokens-empty-state state-block">
             <div class="tokens-empty-icon">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
                 <circle cx="8.5" cy="12" r="4.5" stroke="currentColor" stroke-width="1.8"/>
                 <path d="M12.8 12H21V14.6H19.2V16.4H17.4V14.6H15.6V13H12.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </div>
-            <h3 class="tokens-empty-title" data-i18n="tokens.emptyTitle">暂无API令牌</h3>
-            <p class="tokens-empty-desc" data-i18n="tokens.emptyDesc">点击"创建令牌"按钮,生成第一个API访问令牌</p>
+            <h3 class="tokens-empty-title state-title" data-i18n="tokens.emptyTitle">暂无API令牌</h3>
+            <p class="tokens-empty-desc state-desc" data-i18n="tokens.emptyDesc">点击"创建令牌"按钮,生成第一个API访问令牌</p>
             <p class="tokens-empty-open-warning" data-i18n="tokens.emptyOpenWarning">令牌仓为空——/v1 当前不校验任何凭据（开放模式），谁拿到地址谁就能用</p>
             <button type="button" data-action="show-create-modal" class="btn btn-primary" data-i18n="tokens.createTokenBtn">创建令牌</button>
           </div>
@@ -87,51 +86,63 @@
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-create-modal">&times;</button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label for="tokenDescription" class="form-label" data-i18n="tokens.descriptionLabel">描述 *</label>
-          <input type="text" id="tokenDescription" class="form-input" data-i18n-placeholder="tokens.descriptionPlaceholder" placeholder="请输入令牌用途描述" required>
-        </div>
+        <section class="token-edit-section">
+          <h3 class="token-edit-section-title" data-i18n="tokens.editSectionBasic">基础信息</h3>
 
-        <div class="form-group">
-          <label for="tokenExpiry" class="form-label" data-i18n="tokens.expiryLabel">过期时间</label>
-          <select id="tokenExpiry" class="form-input" data-expiry-select data-change-action="toggle-custom-expiry"></select>
-        </div>
+          <div class="form-group">
+            <label for="tokenDescription" class="form-label" data-i18n="tokens.descriptionLabel">描述 *</label>
+            <input type="text" id="tokenDescription" class="form-input" data-i18n-placeholder="tokens.descriptionPlaceholder" placeholder="请输入令牌用途描述" required>
+          </div>
 
-        <div id="customExpiryContainer" class="form-group token-custom-expiry">
-          <label for="customExpiry" class="form-label" data-i18n="tokens.customExpiryLabel">自定义过期时间</label>
-          <input type="datetime-local" id="customExpiry" class="form-input">
-        </div>
+          <div class="form-group">
+            <label for="tokenExpiry" class="form-label" data-i18n="tokens.expiryLabel">过期时间</label>
+            <select id="tokenExpiry" class="form-input" data-expiry-select data-change-action="toggle-custom-expiry"></select>
+          </div>
 
-        <div class="form-group">
-          <label class="token-active-label">
-            <input type="checkbox" id="tokenAnonymous" class="control-checkbox">
-            <span data-i18n="tokens.anonymousChannelLabel">匿名通道</span>
-          </label>
-          <p class="token-field-hint" data-i18n="tokens.anonymousChannelHint">开启后不生成令牌明文——未携带凭据的 /v1 请求按此行准入，仓内至多一行</p>
-        </div>
+          <div id="customExpiryContainer" class="form-group token-custom-expiry">
+            <label for="customExpiry" class="form-label" data-i18n="tokens.customExpiryLabel">自定义过期时间</label>
+            <input type="datetime-local" id="customExpiry" class="form-input">
+          </div>
 
-        <div class="form-group">
-          <label for="tokenClass" class="form-label" data-i18n="tokens.classLabel">请求类</label>
-          <select id="tokenClass" class="form-input">
-            <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
-            <option value="bg" data-i18n="tokens.classBgOption">bg（后台批跑）</option>
-          </select>
-          <p class="token-field-hint" data-i18n="tokens.classHint">fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额</p>
-        </div>
+          <div class="form-group">
+            <label class="token-active-label">
+              <input type="checkbox" id="tokenAnonymous" class="control-checkbox">
+              <span data-i18n="tokens.anonymousChannelLabel">匿名通道</span>
+            </label>
+            <p class="token-field-hint" data-i18n="tokens.anonymousChannelHint">开启后不生成令牌明文——未携带凭据的 /v1 请求按此行准入，仓内至多一行</p>
+          </div>
+        </section>
 
-        <div id="tokenQuotaFields"></div>
+        <section class="token-edit-section">
+          <h3 class="token-edit-section-title" data-i18n="tokens.createSectionQuota">配额与限制</h3>
 
-        <div class="form-group">
-          <label for="tokenAllowedModels" class="form-label" data-i18n="tokens.allowedModelsLabel">模型限制</label>
-          <input type="text" id="tokenAllowedModels" class="form-input" data-i18n-placeholder="tokens.allowedModelsPlaceholder" placeholder="逗号分隔，留空表示允许所有模型">
-        </div>
+          <div class="form-group">
+            <label for="tokenClass" class="form-label" data-i18n="tokens.classLabel">请求类</label>
+            <select id="tokenClass" class="form-input">
+              <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
+              <option value="bg" data-i18n="tokens.classBgOption">bg（后台批跑）</option>
+            </select>
+            <p class="token-field-hint" data-i18n="tokens.classHint">fg 交互流量按闸门原规则准入；bg 批跑叠加动态预留与爬坡，吃 fg 剩余配额</p>
+          </div>
 
-        <div class="form-group">
-          <label class="token-active-label">
-            <input type="checkbox" id="tokenActive" checked class="control-checkbox">
-            <span data-i18n="tokens.enableToken">启用令牌</span>
-          </label>
-        </div>
+          <div id="tokenQuotaFields"></div>
+        </section>
+
+        <section class="token-edit-section">
+          <h3 class="token-edit-section-title" data-i18n="tokens.createSectionModels">模型与启用</h3>
+
+          <div class="form-group">
+            <label for="tokenAllowedModels" class="form-label" data-i18n="tokens.allowedModelsLabel">模型限制</label>
+            <input type="text" id="tokenAllowedModels" class="form-input" data-i18n-placeholder="tokens.allowedModelsPlaceholder" placeholder="逗号分隔，留空表示允许所有模型">
+          </div>
+
+          <div class="form-group">
+            <label class="token-active-label">
+              <input type="checkbox" id="tokenActive" checked class="control-checkbox">
+              <span data-i18n="tokens.enableToken">启用令牌</span>
+            </label>
+          </div>
+        </section>
       </div>
       <div class="modal-footer">
         <button type="button" data-action="close-create-modal" class="btn btn-secondary" data-i18n="common.cancel">取消</button>
@@ -260,14 +271,14 @@
               </div>
             </div>
             <div class="inline-table-container mobile-inline-table-container token-edit-models-table">
-              <table class="inline-table mobile-inline-table allowed-models-table">
+              <table class="modern-table mobile-inline-table allowed-models-table">
                 <thead>
                   <tr class="allowed-models-table-head">
-                    <th scope="col" scope="col" class="allowed-model-col-select-head">
+                    <th scope="col" class="allowed-model-col-select-head">
                       <input type="checkbox" id="selectAllAllowedModels" data-change-action="toggle-select-all-allowed-models">
                     </th>
-                    <th scope="col" scope="col" class="allowed-model-col-name-head" data-i18n="tokens.modelName">模型名称</th>
-                    <th scope="col" scope="col" class="allowed-model-col-actions-head"></th>
+                    <th scope="col" class="allowed-model-col-name-head" data-i18n="tokens.modelName">模型名称</th>
+                    <th scope="col" class="allowed-model-col-actions-head"></th>
                   </tr>
                 </thead>
                 <tbody id="allowedModelsTableBody">

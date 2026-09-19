@@ -1,4 +1,6 @@
     const t = window.t;
+    const esc = window.esc;
+    const rateTone = window.rateTone;
     const API_BASE = '/admin';
     let allTokens = [];
     let isToday = true;      // 是否为本日（本日才显示最近一分钟）
@@ -237,7 +239,7 @@
 
       // 构建表格结构
       const table = document.createElement('table');
-      table.className = 'mobile-card-table tokens-table';
+      table.className = 'mobile-card-table modern-table tokens-table';
       
       table.innerHTML = `
         <colgroup>
@@ -443,30 +445,19 @@
       const avgText = formatRpm(avgRPM);
       const recentText = isToday ? formatRpm(recentRPM)  : '—';
 
-      let rpmClass = 'token-rpm token-rpm--high';
-      if (peakRPM < 10) rpmClass = 'token-rpm token-rpm--low';
-      else if (peakRPM < 100) rpmClass = 'token-rpm token-rpm--medium';
-
-      return `<span class="${rpmClass}">${peakText}/${avgText}/${recentText}</span>`;
+      // RPM 是负载指标，高≠异常，不上健康色
+      return `<span class="token-rpm">${peakText}/${avgText}/${recentText}</span>`;
     }
 
     /**
-     * RPM 颜色：低流量绿色，中等橙色，高流量红色
-     */
-    /**
-     * 构建成功率HTML
+     * 构建成功率HTML（色调阈值统一走 rateTone）
      */
     function buildSuccessRateHtml(successRate, totalCount) {
       if (totalCount === 0) {
         return '<span class="token-value-muted">—</span>';
       }
 
-      let className = 'stats-badge';
-      if (successRate >= 95) className += ' success-rate-high';
-      else if (successRate >= 80) className += ' success-rate-medium';
-      else className += ' success-rate-low';
-
-      return `<span class="${className}">${successRate}%</span>`;
+      return `<span class="pill pill-${rateTone(successRate)}">${successRate}%</span>`;
     }
 
     /**
@@ -871,7 +862,7 @@
               ${selectedAllowedModelIndices.has(index) ? 'checked' : ''}
             >
           </td>
-          <td class="allowed-model-col-name" data-mobile-label="${mobileLabelModelName}">${escapeHtml(model)}</td>
+          <td class="allowed-model-col-name" data-mobile-label="${mobileLabelModelName}">${esc(model)}</td>
           <td class="allowed-model-col-actions" data-mobile-label="${mobileLabelActions}">
             <button type="button" class="allowed-model-remove-btn btn btn-secondary btn-sm" data-action="remove-allowed-model" data-index="${index}">${t('common.delete')}</button>
           </td>
@@ -1051,10 +1042,10 @@
       }
 
       container.innerHTML = models.map(model => `
-        <label class="model-option-item" data-model="${escapeHtml(model)}">
-          <input type="checkbox" class="model-option-checkbox" data-model="${escapeHtml(model)}"
+        <label class="model-option-item" data-model="${esc(model)}">
+          <input type="checkbox" class="model-option-checkbox" data-model="${esc(model)}"
             ${selectedModelsForAdd.has(model) ? 'checked' : ''}>
-          <span class="model-option-label">${escapeHtml(model)}</span>
+          <span class="model-option-label">${esc(model)}</span>
         </label>
       `).join('');
 
