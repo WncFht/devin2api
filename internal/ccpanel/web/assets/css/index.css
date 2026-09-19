@@ -125,7 +125,7 @@
 }
 
 .token-label {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--neutral-500);
   font-weight: var(--font-medium);
 }
@@ -168,14 +168,14 @@
 .usage-quota-track {
   flex: 1;
   height: 6px;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   background: var(--surface-border);
   overflow: hidden;
 }
 
 .usage-quota-fill {
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   transition: width 0.4s ease;
 }
 
@@ -308,7 +308,7 @@
 .service-health-cell {
   aspect-ratio: 1;
   min-width: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   transition: transform 120ms ease-out, filter 120ms ease-out;
 }
 
@@ -330,12 +330,12 @@
 .service-health-cell:hover {
   filter: brightness(1.08) saturate(1.12);
   transform: scale(1.24);
-  z-index: 2;
+  z-index: var(--z-raised);
 }
 
 .service-health-tooltip {
   position: absolute;
-  z-index: 10;
+  z-index: var(--z-tooltip);
   padding: 0.55rem 0.75rem;
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-lg);
@@ -426,7 +426,7 @@
 .service-health-swatch {
   width: 0.65rem;
   height: 0.65rem;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   flex: 0 0 auto;
 }
 
@@ -437,7 +437,7 @@
   text-align: center;
 }
 
-@media (max-width: 48rem) {
+@media (max-width: 768px) {
 .service-health-grid {
     grid-template-columns: repeat(48, minmax(0, 1fr));
     gap: 2px;
@@ -447,7 +447,7 @@
   }
 }
 
-@media (max-width: 25rem) {
+@media (max-width: 480px) {
 .service-health-card {
     padding: var(--space-4);
   }

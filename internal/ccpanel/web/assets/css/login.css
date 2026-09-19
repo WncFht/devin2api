@@ -296,7 +296,7 @@
   }
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1200px) {
 .login-page {
     flex-direction: column;
     gap: var(--space-8);

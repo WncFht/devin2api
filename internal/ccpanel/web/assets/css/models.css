@@ -8,7 +8,7 @@
   height: 24px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   cursor: pointer;
   transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
@@ -24,7 +24,7 @@
   left: 2px;
   width: 18px;
   height: 18px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: #ffffff;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
   transition: transform 0.18s ease;
@@ -51,9 +51,9 @@
   margin-top: 12px;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
 .custom-rules-footer .btn {
-      font-size: 0.82rem;
+      font-size: var(--text-13);
       padding: 6px 14px;
   }
 }
@@ -135,10 +135,10 @@
 .tag-chip {
   padding: 4px 13px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--neutral-100);
   color: var(--color-text-secondary);
-  font-size: 12.5px;
+  font-size: var(--text-13);
   font-weight: 400;
   line-height: 1.5;
   cursor: pointer;
@@ -165,8 +165,8 @@
   display: inline-block;
   margin: 0 4px 2px 0;
   padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-2xs);
   font-weight: 500;
   line-height: 1.6;
   letter-spacing: 0.02em;
@@ -214,7 +214,7 @@
   gap: 6px;
   margin: -4px -8px;
   padding: 4px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-base);
 }
 
 .resolved-cell:hover {
@@ -234,7 +234,7 @@
   height: 24px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -263,7 +263,7 @@
   width: 100%;
   padding: 7px 10px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-base);
   background: transparent;
   font: inherit;
   text-align: left;
@@ -280,12 +280,12 @@
 
 .redirect-item-name {
   font-family: var(--font-family-mono);
-  font-size: 13px;
+  font-size: var(--text-13);
   overflow-wrap: anywhere;
 }
 
 .redirect-item-label {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
 }
 
@@ -312,7 +312,7 @@
 
 .model-sub {
   font-family: monospace;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
 }
@@ -328,8 +328,8 @@
   display: inline-block;
   padding: 1px 8px;
   margin-right: 6px;
-  border-radius: 6px;
-  font-size: 11px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
   font-weight: 500;
   background: var(--src-bg);
   color: var(--src-fg);

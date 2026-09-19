@@ -47,7 +47,7 @@
 .accounts-pulse-seg {
   flex: 1;
   min-width: 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--color-border);
   transition: background 0.3s;
 }
@@ -59,7 +59,7 @@
 
 .accounts-pulse-empty {
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   align-self: center;
 }
 
@@ -88,13 +88,13 @@
 
 .acct-name {
   font-family: var(--font-family-mono);
-  font-size: 16px;
+  font-size: var(--text-base);
   font-weight: 700;
 }
 
 .acct-identity {
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 .acct-badges {
@@ -105,10 +105,10 @@
 }
 
 .acct-pill {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   font-weight: 600;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   white-space: nowrap;
 }
 
@@ -128,7 +128,7 @@
 }
 
 .acct-failure {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--error-600);
   margin: 4px 0 0;
   overflow: hidden;
@@ -145,7 +145,7 @@
 }
 
 .acct-sec h4 {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--color-text-secondary);
   text-transform: uppercase;
@@ -167,12 +167,12 @@
 }
 
 .acct-kv-k {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
 }
 
 .acct-kv-v {
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
@@ -182,7 +182,7 @@
 
 .acct-none {
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 /* 配额条 */
@@ -195,26 +195,26 @@
 }
 
 .acct-quota-label {
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--color-text-secondary);
 }
 
 .acct-quota-track {
   height: 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--color-border);
   overflow: hidden;
 }
 
 .acct-quota-fill {
   height: 100%;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: currentColor;
   transition: width 0.4s;
 }
 
 .acct-quota-val {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -243,7 +243,7 @@
 
 .acct-quota-sub {
   grid-column: 2 / 4;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
   margin-top: -2px;
 }
@@ -257,7 +257,7 @@
 
 .acct-cell {
   height: 22px;
-  border-radius: 3px;
+  border-radius: var(--radius-2xs);
   background: var(--color-border);
 }
 
@@ -267,11 +267,11 @@
 
 .acct-strip-foot {
   margin-top: 8px;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .acct-strip { grid-template-columns: repeat(12, 1fr); }
   .acct-cell { height: 16px; }
 }
@@ -364,7 +364,7 @@
 .acct-drawer summary:focus-visible {
   outline: 2px solid transparent;
   border-radius: var(--radius-sm);
-  box-shadow: 0 0 0 2px var(--primary-500);
+  box-shadow: var(--shadow-focus-strong);
 }
 
 .acct-drawer[open] summary {
@@ -408,7 +408,7 @@
 .acct-form-input:focus {
   outline: 2px solid transparent;
   border-color: var(--primary-500);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  box-shadow: var(--shadow-focus);
   background: var(--field-bg-focus);
 }
 
@@ -437,7 +437,7 @@ textarea.acct-form-input {
 
 .acct-form-radio input:focus-visible {
   outline: 2px solid transparent;
-  box-shadow: 0 0 0 2px var(--primary-500);
+  box-shadow: var(--shadow-focus-strong);
 }
 
 .acct-form-err {
@@ -493,7 +493,7 @@ textarea.acct-form-input {
 /* 卡头 notes：身份行内随附的备注短文本 */
 .acct-notes {
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -544,14 +544,14 @@ textarea.acct-form-input {
   font-size: var(--text-xs);
   color: var(--primary-700);
   background: color-mix(in srgb, var(--primary-500) 12%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
 }
 
 .acct-filter-x {
   border: none;
   background: transparent;
   color: inherit;
-  font-size: 13px;
+  font-size: var(--text-13);
   line-height: 1;
   cursor: pointer;
   padding: 0 2px;
@@ -591,12 +591,12 @@ textarea.acct-form-input {
 
 .acct-ev-hint,
 .acct-ev-at {
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
 }
 
 .acct-ev-events h5 {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--color-text-secondary);
   text-transform: uppercase;
@@ -605,7 +605,7 @@ textarea.acct-form-input {
 }
 
 .acct-ev-ev {
-  font-size: 12px;
+  font-size: var(--text-xs);
   padding: 2px 0;
 }
 
@@ -630,7 +630,7 @@ textarea.acct-form-input {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--color-text-secondary);
   margin-bottom: 6px;
 }
@@ -647,7 +647,7 @@ textarea.acct-form-input {
 }
 
 .acct-tl-item {
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 .acct-tl-x {
@@ -667,7 +667,7 @@ textarea.acct-form-input {
 
 .acct-tl-msg {
   margin-left: 18px;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
 }
@@ -678,14 +678,14 @@ textarea.acct-form-input {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--text-2xs);
   color: var(--color-text-secondary);
 }
 
 .acct-cand {
   padding: 1px 7px;
   border: 1px solid var(--color-border);
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   white-space: nowrap;
 }
 

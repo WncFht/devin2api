@@ -16,16 +16,16 @@
 .modal-description {
   margin: 0;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .settings-input {
   padding: 6px 10px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-secondary);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: var(--text-13);
   max-width: 100%;
 }
 
@@ -74,10 +74,10 @@
 
 .settings-input {
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-secondary);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: var(--text-13);
 }
 
 .setting-data-row--dirty {
@@ -147,14 +147,14 @@
 .runtime-metrics-section-header h3 {
   margin: 0;
   color: var(--color-text);
-  font-size: 14px;
+  font-size: var(--text-sm);
   font-weight: 700;
 }
 
 .runtime-metrics-section-description {
   margin: -2px 0 12px;
   color: var(--color-text-secondary);
-  font-size: 11px;
+  font-size: var(--text-2xs);
   line-height: 1.5;
 }
 
@@ -172,7 +172,7 @@
 .runtime-transcript-details code {
   color: var(--color-text-secondary);
   font-family: var(--font-family-mono);
-  font-size: 10px;
+  font-size: var(--text-2xs);
   overflow-wrap: anywhere;
 }
 
@@ -192,12 +192,12 @@
   display: block;
   margin-bottom: 2px;
   color: var(--color-text-secondary);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 .quota-kv-v {
   color: var(--color-text);
-  font-size: 13.5px;
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
@@ -206,7 +206,7 @@
   padding: 15px;
   background: rgba(59, 130, 246, 0.06);
   border: 1px solid rgba(59, 130, 246, 0.22);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
 }
 
 .runtime-transcript-summary {
@@ -225,15 +225,15 @@
 
 .runtime-transcript-summary span {
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: var(--text-13);
   font-weight: 700;
 }
 
 .runtime-transcript-status {
   flex: 0 0 auto;
   padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-2xs);
   font-weight: 700;
 }
 
@@ -272,7 +272,7 @@
 
 .runtime-transcript-details b {
   color: var(--color-text-secondary);
-  font-size: 11px;
+  font-size: var(--text-2xs);
   font-weight: 600;
 }
 
@@ -283,7 +283,7 @@
   gap: 10px;
   min-height: 220px;
   color: var(--color-text-secondary);
-  font-size: 14px;
+  font-size: var(--text-sm);
 }
 
 .runtime-metrics-message--error {
@@ -293,7 +293,7 @@
   text-align: center;
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
 }
 
 .runtime-metrics-modal-footer {
@@ -308,7 +308,7 @@
 
 .runtime-metrics-updated-at {
   color: var(--color-text-secondary);
-  font-size: 11px;
+  font-size: var(--text-2xs);
 }
 
 .process-log-toolbar {
@@ -331,7 +331,7 @@
   align-items: center;
   gap: 6px;
   color: var(--color-text-secondary);
-  font-size: 0.86rem;
+  font-size: var(--text-sm);
 }
 
 .process-log-toolbar-actions {
@@ -542,7 +542,7 @@
     display: block;
     padding: 12px 14px !important;
     border: 1px solid var(--neutral-200);
-    border-radius: 14px;
+    border-radius: var(--radius-xl);
     background: var(--neutral-100) !important;
   }
 }
@@ -551,9 +551,9 @@
   background: var(--error-50, #fef2f2);
   color: var(--error-700, #b91c1c);
   border: 1px solid var(--error-200, #fecaca);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 8px 12px;
-  font-size: 0.82rem;
+  font-size: var(--text-13);
   line-height: 1.55;
   margin-bottom: 10px;
 }
@@ -567,7 +567,7 @@
 .settings-input--json {
   width: min(420px, 100%);
   font-family: var(--font-family-mono);
-  font-size: 12px;
+  font-size: var(--text-xs);
   line-height: 1.5;
   resize: vertical;
   white-space: pre;

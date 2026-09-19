@@ -38,7 +38,7 @@
 .scroll-pane {
   overflow-y: auto;
   border: 1px solid var(--neutral-200);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .scroll-pane--sm {
@@ -57,7 +57,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--surface-border);
-  border-radius: 8px;
+  border-radius: var(--radius-base);
   background: var(--table-bg);
 }
 
@@ -69,7 +69,7 @@
 .inline-table thead {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-raised);
   background: var(--surface-bg-muted);
 }
 
@@ -77,7 +77,7 @@
   padding: 6px 10px;
   text-align: left;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--text-13);
   background-color: var(--surface-bg-muted);
   color: var(--neutral-900);
   border-bottom: 2px solid var(--surface-border-strong);
@@ -122,9 +122,9 @@
     margin-bottom: 12px;
     padding: 14px;
     border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 16px;
+    border-radius: var(--radius-xl);
     background: var(--surface-bg-strong);
-    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--shadow-card);
     position: relative;
   }
 .mobile-inline-table tbody tr:not(.mobile-inline-row) {
@@ -152,7 +152,7 @@
     width: 100%;
     margin-bottom: 6px;
     color: var(--neutral-500);
-    font-size: 12px;
+    font-size: var(--text-xs);
     font-weight: 700;
     letter-spacing: 0.02em;
   }
@@ -197,7 +197,7 @@
     .token-table {
       width: 100%;
       background: var(--table-bg);
-      border-radius: 12px;
+      border-radius: var(--radius-lg);
       overflow: hidden;
       overflow-x: auto;
       box-shadow: var(--shadow-base);
@@ -249,7 +249,7 @@
     .token-table th {
       padding: 12px 10px;
       text-align: left;
-      font-size: 13px;
+      font-size: var(--text-13);
       font-weight: 600;
       color: var(--neutral-700);
       border-bottom: 1px solid var(--neutral-200);
@@ -257,7 +257,7 @@
     .token-table td {
       padding: 12px 10px;
       border-bottom: 1px solid var(--neutral-100);
-      font-size: 14px;
+      font-size: var(--text-sm);
       box-sizing: border-box;
       vertical-align: middle;
     }
@@ -300,7 +300,7 @@
     .tokens-empty-desc {
       margin-bottom: 24px;
       color: var(--neutral-700);
-      font-size: 15px;
+      font-size: var(--text-base);
     }
     .token-custom-expiry {
       display: none;
@@ -379,7 +379,7 @@
     .token-row-meta {
       margin-top: 4px;
       color: var(--neutral-500);
-      font-size: 12px;
+      font-size: var(--text-xs);
     }
     .tokens-col-calls,
     .tokens-col-success-rate,
@@ -394,7 +394,7 @@
     .token-limit-hint {
       flex: 0 0 auto;
       color: var(--neutral-500);
-      font-size: 12px;
+      font-size: var(--text-xs);
       font-weight: 600;
       line-height: 1.3;
       white-space: nowrap;
@@ -445,8 +445,8 @@
       color: var(--neutral-900);
       border: 1px solid var(--surface-border);
       padding: 4px 8px;
-      border-radius: 4px;
-      font-size: 13px;
+      border-radius: var(--radius-xs);
+      font-size: var(--text-13);
       display: inline-block;
     }
     /* Token状态颜色 */
@@ -470,7 +470,7 @@
       padding: 16px;
       background: var(--warning-50);
       border: 1px solid var(--warning-200);
-      border-radius: 8px;
+      border-radius: var(--radius-base);
     }
     .token-result-warning-title {
       margin-bottom: 8px;
@@ -479,7 +479,7 @@
     }
     .token-result-warning-desc {
       color: var(--warning-800);
-      font-size: 14px;
+      font-size: var(--text-sm);
     }
     .token-result-value-wrap {
       position: relative;
@@ -488,20 +488,20 @@
       height: 80px;
       resize: none;
       font-family: var(--font-family-mono);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .token-result-copy-btn {
       position: absolute;
       top: 8px;
       right: 8px;
       padding: 4px 12px;
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .stats-badge {
       display: inline-block;
       padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 12px;
+      border-radius: var(--radius-xs);
+      font-size: var(--text-xs);
       font-weight: 600;
       background: var(--neutral-100);
       color: var(--neutral-700);
@@ -523,13 +523,13 @@
       color: var(--neutral-900);
     }
     .metric-label {
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--neutral-600);
       margin-top: 2px;
     }
     .token-value-muted {
       color: var(--neutral-500);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .token-call-stats {
       display: inline-flex;
@@ -553,7 +553,7 @@
       color: var(--error-700);
     }
     .token-call-icon {
-      font-size: 14px;
+      font-size: var(--text-sm);
       font-weight: 700;
       line-height: 1;
     }
@@ -585,18 +585,18 @@
     .token-cost .cost-stack {
       align-items: flex-end;
       text-align: right;
-      font-size: 15px;
+      font-size: var(--text-base);
       font-weight: 700;
     }
     .tokens-table .metric-value {
       margin-bottom: 0;
-      font-size: 15px;
+      font-size: var(--text-base);
       line-height: 1.2;
       white-space: nowrap;
     }
     .tokens-col-stream .metric-value,
     .tokens-col-non-stream .metric-value {
-      font-size: 18px;
+      font-size: var(--text-lg);
     }
     .token-usage-metrics {
       display: grid;
@@ -615,7 +615,7 @@
       min-width: 0;
       padding: 0;
       border-radius: 0;
-      font-size: 12px;
+      font-size: var(--text-xs);
       font-weight: 600;
       white-space: nowrap;
       background: transparent;
@@ -648,7 +648,7 @@
       margin: 5% auto;
       padding: 0;
       width: 100%;
-      border-radius: 12px;
+      border-radius: var(--radius-lg);
       max-width: 600px;
       max-height: calc(100vh - 24px);
       overflow-y: auto;
@@ -729,7 +729,7 @@
       gap: 12px;
       padding: 14px 16px;
       border: 1px solid var(--neutral-200);
-      border-radius: 10px;
+      border-radius: var(--radius-md);
       background: var(--surface-bg-muted);
     }
     .token-edit-section--basic,
@@ -757,7 +757,7 @@
     .token-edit-section-title {
       margin: 0;
       color: var(--neutral-600);
-      font-size: 13px;
+      font-size: var(--text-13);
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
@@ -784,7 +784,7 @@
     }
     .token-edit-token-value {
       font-family: var(--font-family-mono);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .token-edit-token-value[readonly] {
       background: var(--field-bg);
@@ -792,7 +792,7 @@
     }
     .token-edit-cost-used {
       color: var(--neutral-600);
-      font-size: 13px;
+      font-size: var(--text-13);
       min-width: 0;
       white-space: nowrap;
     }
@@ -817,7 +817,7 @@
       align-items: center;
       gap: 6px;
       color: var(--neutral-600);
-      font-size: 12px;
+      font-size: var(--text-xs);
       font-weight: 500;
       white-space: nowrap;
     }
@@ -826,7 +826,7 @@
       min-width: 120px;
       height: auto;
       padding: 5px 8px;
-      font-size: 12px;
+      font-size: var(--text-xs);
     }
     .token-edit-models-header {
       margin-bottom: 8px;
@@ -840,7 +840,7 @@
     }
     .token-edit-models-meta {
       color: var(--neutral-500);
-      font-size: 12px;
+      font-size: var(--text-xs);
       white-space: nowrap;
     }
     .token-edit-models-actions {
@@ -852,7 +852,7 @@
     }
     .token-edit-models-btn {
       padding: 5px 10px;
-      font-size: 12px;
+      font-size: var(--text-xs);
     }
     .token-edit-models-btn--batch:disabled {
       opacity: 0.5;
@@ -867,7 +867,7 @@
       overflow-y: auto;
       overscroll-behavior: contain;
       border: 1px solid var(--neutral-200);
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
     }
     .allowed-models-table-head {
       background: var(--neutral-100);
@@ -904,11 +904,11 @@
     .allowed-model-col-name {
       padding: 8px;
       font-family: var(--font-family-mono);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .allowed-model-remove-btn {
       padding: 2px 8px;
-      font-size: 12px;
+      font-size: var(--text-xs);
     }
     .modal-header {
       padding: 20px 24px;
@@ -932,14 +932,14 @@
       padding: 8px 12px;
       border: 1px solid var(--neutral-200);
       border-bottom: none;
-      border-radius: 6px 6px 0 0;
+      border-radius: var(--radius-sm) var(--radius-sm) 0 0;
       background: var(--surface-bg-muted);
     }
     .model-select-all-label {
       display: flex;
       align-items: center;
       cursor: pointer;
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .model-select-all-checkbox {
       margin-right: 8px;
@@ -951,13 +951,13 @@
     .model-select-summary {
       margin-top: 8px;
       color: var(--neutral-500);
-      font-size: 12px;
+      font-size: var(--text-xs);
     }
     #availableModelsContainer.available-models-container--standalone {
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
     }
     #availableModelsContainer.available-models-container--stacked {
-      border-radius: 0 0 6px 6px;
+      border-radius: 0 0 var(--radius-sm) var(--radius-sm);
     }
     .available-models-empty {
       padding: 24px;
@@ -976,7 +976,7 @@
     }
     .model-option-label {
       font-family: var(--font-family-mono);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .model-option-item:hover {
       background: var(--surface-hover);
@@ -994,37 +994,37 @@
     }
     .model-import-hint {
       color: var(--neutral-500);
-      font-size: 13px;
+      font-size: var(--text-13);
       font-weight: 400;
     }
     .model-import-textarea {
       min-height: 160px;
       resize: vertical;
       font-family: var(--font-family-mono);
-      font-size: 13px;
+      font-size: var(--text-13);
     }
     .token-model-import-tip {
       margin-bottom: 0;
       padding: 10px 12px;
       color: var(--neutral-700);
-      font-size: 12px;
+      font-size: var(--text-xs);
       background: var(--info-50);
       border: 1px solid var(--info-200);
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
     }
     .token-model-import-code {
       padding: 2px 4px;
       background: rgba(0, 0, 0, 0.05);
-      border-radius: 3px;
+      border-radius: var(--radius-2xs);
     }
     .token-model-import-preview {
       display: none;
       padding: 10px 12px;
       color: var(--token-import-preview-fg);
-      font-size: 13px;
+      font-size: var(--text-13);
       background: var(--token-import-preview-bg);
       border: 1px solid var(--token-import-preview-border);
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
     }
     @keyframes slideUp {
       from { transform: translateY(50px); opacity: 0; }
@@ -1276,24 +1276,24 @@
         min-height: auto;
         max-height: calc(100vh - 24px);
         overflow: hidden;
-        font-size: 14px;
+        font-size: var(--text-sm);
         line-height: 1.45;
       }
       #editModal .token-edit-modal .modal-title {
-        font-size: 18px;
+        font-size: var(--text-lg);
         line-height: 1.3;
       }
       #editModal .token-edit-modal .form-input {
-        font-size: 14px;
+        font-size: var(--text-sm);
       }
       #editModal .token-edit-modal .token-edit-section-title {
-        font-size: 12px;
+        font-size: var(--text-xs);
       }
       #editModal .token-edit-modal .token-edit-field .form-label,
       #editModal .token-edit-modal .token-edit-active-label,
       #editModal .token-edit-modal .token-limit-hint,
       #editModal .token-edit-modal .token-edit-cost-used {
-        font-size: 13px;
+        font-size: var(--text-13);
       }
       .token-edit-body {
         gap: 12px;
@@ -1393,13 +1393,13 @@
     /* 空仓 = /v1 开放模式，安全相关状态在空态里显式亮出 */
     .tokens-empty-open-warning {
       margin: 4px 0 0;
-      font-size: 13px;
+      font-size: var(--text-13);
       color: var(--warning-500);
     }
     /* 表单字段级说明文字（匿名通道、请求类等共用） */
     .token-field-hint {
       margin: 4px 0 0;
-      font-size: 12px;
+      font-size: var(--text-xs);
       color: var(--neutral-700);
     }
     /* 请求类徽章：fg/bg 与 X-Gate-Class、闸门词表同词——fg 信息色、
@@ -1408,10 +1408,10 @@
       display: inline-block;
       margin-left: 6px;
       padding: 1px 6px;
-      border-radius: 4px;
+      border-radius: var(--radius-xs);
       border: 1px solid transparent;
       font-family: var(--font-family-mono);
-      font-size: 11px;
+      font-size: var(--text-2xs);
       font-weight: 600;
       line-height: 1.4;
       vertical-align: 1px;
