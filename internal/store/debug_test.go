@@ -413,6 +413,83 @@ func TestDeleteDebugRowsChunked(t *testing.T) {
 	assertPayloadBytes(t, s)
 }
 
+// TestSplitDeleteChunks 覆盖切片的双界：目录数界与字节界任一先到即
+// 切片——字节肥厚的目录序列必须切出比纯目录界更多的片；单目录自身
+// 越字节界时独占一片（目录是不可拆分的原子单位）；切片不丢不重、
+// 保持名序。
+func TestSplitDeleteChunks(t *testing.T) {
+	mk := func(n int, size int64) []dirSize {
+		dirs := make([]dirSize, n)
+		for i := range dirs {
+			dirs[i] = dirSize{dir: fmt.Sprintf("20260910-%06d", i), size: size}
+		}
+		return dirs
+	}
+	flatten := func(chunks [][]string) []string {
+		var out []string
+		for _, c := range chunks {
+			out = append(out, c...)
+		}
+		return out
+	}
+
+	// 字节界主导：201 个 1MiB 目录——目录界只切 2 片，字节界按
+	// 32MiB/片切出 7 片（32×6+9），且不重不漏保序。
+	dirs := mk(deleteChunkDirs+1, 1<<20)
+	chunks := splitDeleteChunks(dirs)
+	if len(chunks) != 7 {
+		t.Fatalf("byte-fat sequence = %d chunks, want 7 (count bound alone gives 2)", len(chunks))
+	}
+	if len(chunks[0]) != 32 {
+		t.Fatalf("first chunk = %d dirs, want 32 (32MiB / 1MiB)", len(chunks[0]))
+	}
+	var flat []string
+	for _, d := range dirs {
+		flat = append(flat, d.dir)
+	}
+	if !slices.Equal(flatten(chunks), flat) {
+		t.Fatal("chunks lost, duplicated, or reordered dirs")
+	}
+	// 每片字节合计不超界（单目录越界豁免之外）。
+	sz := map[string]int64{}
+	for _, d := range dirs {
+		sz[d.dir] = d.size
+	}
+	for i, c := range chunks {
+		var sum int64
+		for _, dir := range c {
+			sum += sz[dir]
+		}
+		if sum > deleteChunkBytes {
+			t.Fatalf("chunk %d bytes = %d, over cap %d", i, sum, deleteChunkBytes)
+		}
+	}
+
+	// 目录数界主导：小尺寸目录超 200 仍按数切片。
+	chunks = splitDeleteChunks(mk(deleteChunkDirs+5, 1))
+	if len(chunks) != 2 || len(chunks[0]) != deleteChunkDirs || len(chunks[1]) != 5 {
+		t.Fatalf("count-bound split = %d chunks", len(chunks))
+	}
+
+	// 单目录越字节界：不与邻居同片、也不被拆开，独占一片。
+	chunks = splitDeleteChunks([]dirSize{
+		{dir: "a", size: 1},
+		{dir: "huge", size: deleteChunkBytes + 1},
+		{dir: "b", size: 1},
+	})
+	if len(chunks) != 3 ||
+		!slices.Equal(chunks[0], []string{"a"}) ||
+		!slices.Equal(chunks[1], []string{"huge"}) ||
+		!slices.Equal(chunks[2], []string{"b"}) {
+		t.Fatalf("oversize dir split = %v", chunks)
+	}
+
+	// 空枚举不产生任何片。
+	if chunks := splitDeleteChunks(nil); len(chunks) != 0 {
+		t.Fatalf("empty = %v", chunks)
+	}
+}
+
 // assertPayloadBytes 断言内存计数器、runtime_state 持久化行与权威聚合
 // 三者一致——目录口径 DebugDirSizes（files+chunks+refs）加全局口径
 // DebugBlobBytes。每个写/删操作后调一次，漏记账或重复记账立刻暴露。

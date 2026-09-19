@@ -757,41 +757,82 @@ func (s *Store) DeleteDebugPayloadsBefore(ctx context.Context, bound string, exa
 // 自然续删，无需额外簿记。
 const deleteChunkDirs = 200
 
+// deleteChunkBytes 是单个删除事务覆盖的命中字节上界：目录界对 payload
+// 密度无感——实测典型片 ~19MB 占写连接 1-3s，但 200 个附件肥厚目录
+// 同片可达 ~500MB、占连接 10-30s。32MiB 约是典型片的 1.7×，按实测
+// 删除速率 ~6-19MB/s 折合 2-5s 占用，最劣档仍是个位数秒——与请求
+// 路径能容忍的写连接排队窗口同量级；64MiB 在最劣速率下会摸到 ~10s。
+const deleteChunkBytes = 32 << 20
+
+// dirSize 是删除枚举的一行：目录名与 WHERE 命中行的库存字节合计
+// （与删除 RETURNING 的尺寸表达式同口径）。它度量的是本谓词将删出的
+// 体量——剥载谓词下天然只计可剥部分，比目录总账更准。
+type dirSize struct {
+	dir  string
+	size int64
+}
+
+// splitDeleteChunks 把按名序枚举的目录序列切成删除片：目录数与命中
+// 字节任一上界先到即切片，写连接单次占用被双界钳住。目录是原子单位
+// ——单片至少装一个目录；单目录自身越字节界时独占一片，行不拆片
+// （同目录的删除必须在一个事务内原子完成）。
+func splitDeleteChunks(dirs []dirSize) [][]string {
+	var chunks [][]string
+	var cur []string
+	var curBytes int64
+	for _, d := range dirs {
+		if len(cur) > 0 && (len(cur) >= deleteChunkDirs || curBytes+d.size > deleteChunkBytes) {
+			chunks = append(chunks, cur)
+			cur, curBytes = nil, 0
+		}
+		cur = append(cur, d.dir)
+		curBytes += d.size
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
+}
+
 // deleteDebugRows 对三张行表执行同一 WHERE 的分片删除：先在读池把命中
-// 目录枚举成有序快照，再按 deleteChunkDirs 目录一片逐片在写事务内删除
-// 提交，代替原先三表无界 DELETE 挤占唯一写连接一整轮。删除范围用
-// dir IN 名单精确圈定：期间新建目录名按时间序排在快照末尾之后、且
-// 不在名单内，不会被中途误删。RETURNING 顺带汇总被删行的库存字节：
-// payload 计数器按各片真实提交减量，中途失败时已完成片不回滚、计数
-// 已落账。refs 表与文件行共用 WHERE 是 CAS 引用随行的落点——ref 行
-// 无独立生命周期。
+// 目录连同各自的命中字节枚举成有序快照（UNION ALL + GROUP BY，同一趟
+// 三表扫描既给名单也给字节账），再按 splitDeleteChunks 的双界切片逐片
+// 在写事务内删除提交，代替原先三表无界 DELETE 挤占唯一写连接一整轮。
+// 删除范围用 dir IN 名单精确圈定：期间新建目录名按时间序排在快照末尾
+// 之后、且不在名单内，不会被中途误删；字节账同样取自该快照，枚举后
+// 追加的写只会让当片略肥、不失正确性。RETURNING 顺带汇总被删行的库存
+// 字节：payload 计数器按各片真实提交减量，中途失败时已完成片不回滚、
+// 计数已落账。refs 表与文件行共用 WHERE 是 CAS 引用随行的落点——ref
+// 行无独立生命周期。
 func (s *Store) deleteDebugRows(ctx context.Context, op, where string, args ...any) error {
 	enumArgs := make([]any, 0, len(args)*3)
 	for i := 0; i < 3; i++ {
 		enumArgs = append(enumArgs, args...)
 	}
 	rows, err := s.ro.QueryContext(ctx,
-		`SELECT dir FROM debug_files WHERE `+where+`
-		UNION SELECT dir FROM debug_chunks WHERE `+where+`
-		UNION SELECT dir FROM debug_chunk_refs WHERE `+where+`
-		ORDER BY dir`, enumArgs...)
+		`SELECT dir, SUM(sz) FROM (
+			SELECT dir, LENGTH(content) AS sz FROM debug_files WHERE `+where+`
+			UNION ALL
+			SELECT dir, LENGTH(data) FROM debug_chunks WHERE `+where+`
+			UNION ALL
+			SELECT dir, LENGTH(dir)+LENGTH(name)+LENGTH(hash) FROM debug_chunk_refs WHERE `+where+`
+		) GROUP BY dir ORDER BY dir`, enumArgs...)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
-	var dirs []string
+	var dirs []dirSize
 	for rows.Next() {
-		var dir string
-		if err := rows.Scan(&dir); err != nil {
+		var d dirSize
+		if err := rows.Scan(&d.dir, &d.size); err != nil {
 			return err
 		}
-		dirs = append(dirs, dir)
+		dirs = append(dirs, d)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for i := 0; i < len(dirs); i += deleteChunkDirs {
-		chunk := dirs[i:min(i+deleteChunkDirs, len(dirs))]
+	for _, chunk := range splitDeleteChunks(dirs) {
 		delWhere := where + ` AND dir IN (` + placeholders(len(chunk)) + `)`
 		delArgs := make([]any, 0, len(args)+len(chunk))
 		delArgs = append(delArgs, args...)
