@@ -157,12 +157,16 @@ func TestLoadAccountsCredentialSources(t *testing.T) {
 	// 文件缺席/无键不再拒载：LoadError 留证据、账号降级，进程继续
 	// 加载——09-18 credentials.toml 被删→1922 次重启循环就是死在这里。
 	t.Run("missing credentials file degrades", func(t *testing.T) {
-		config, err := loadWithDevin(t, t.TempDir(), "  accounts:\n    - name: alpha\n      credentials_file: 'missing.toml'\n")
+		dir := t.TempDir()
+		config, err := loadWithDevin(t, dir, "  accounts:\n    - name: alpha\n      credentials_file: 'missing.toml'\n")
 		if err != nil {
 			t.Fatalf("Load() error = %v, want degraded load, not failure", err)
 		}
+		// LoadError 内嵌 OS 原文（Windows 是 "The system cannot find the
+		// file specified"）——同路径重放一次取本机文案作断言基准。
+		_, missErr := os.ReadFile(filepath.Join(dir, "missing.toml"))
 		acc := config.Devin.Accounts[0]
-		if acc.LoadError == "" || !strings.Contains(acc.LoadError, "no such file") {
+		if acc.LoadError == "" || missErr == nil || !strings.Contains(acc.LoadError, missErr.Error()) {
 			t.Fatalf("LoadError = %q, want file-miss evidence", acc.LoadError)
 		}
 		if !acc.Degraded() {
