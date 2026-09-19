@@ -1485,7 +1485,7 @@ func (pool *Pool) ApplyConfigs(configs []Config) ([]string, error) {
 	pool.lanes.Store(&next)
 	for _, lane := range old {
 		if !kept[lane] {
-			go lane.adapter.Close()
+			closeAsync("lane:"+lane.name, lane.adapter.Close)
 			// 摘除 lane 的会话绑定一并清——绑定指向已不在快照里的
 			// 死 lane 会把会话钉在不再存在的 lane 上。
 			pool.unbindLane(lane)

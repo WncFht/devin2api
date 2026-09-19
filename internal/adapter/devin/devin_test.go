@@ -375,6 +375,7 @@ func TestValidateImagesForModelRejectsGLM(t *testing.T) {
 		}}},
 	}
 	a := &Adapter{}
+	a.bindFlightLocks()
 	err := a.validateImagesForModel(request, "glm-5-2")
 	if err == nil {
 		t.Fatal("expected error for glm-5-2 + image")
@@ -404,6 +405,7 @@ func TestValidateImagesUsesCatalog(t *testing.T) {
 		{ID: "glm-9-vision", SupportsImages: true},
 		{ID: "swe-3-text", SupportsImages: false},
 	}}
+	a.bindFlightLocks()
 	// 目录声明支持图片时，即使名字像无视觉模型也放行。
 	if err := a.validateImagesForModel(request, "glm-9-vision"); err != nil {
 		t.Fatalf("catalog vision model should pass: %v", err)
@@ -2441,6 +2443,7 @@ func TestResponseStreamDoesNotReopenAfterContent(t *testing.T) {
 // 不同的新凭据才更新；同 token 或空值视为自愈失败。
 func TestReloadToken(t *testing.T) {
 	adapter := &Adapter{token: "old"}
+	adapter.bindFlightLocks()
 	adapter.config.Identity.TokenSource = func() string { return "old" }
 	if adapter.reloadToken() {
 		t.Fatal("same token must not count as reload")
@@ -2674,6 +2677,7 @@ func (stub *stubModelConfigsClient) GetCliModelConfigs(ctx context.Context, _ *c
 func TestListModelsSingleflight(t *testing.T) {
 	stub := &stubModelConfigsClient{release: make(chan struct{})}
 	a := &Adapter{modelsCacheTTL: time.Minute}
+	a.bindFlightLocks()
 	a.linkPtr.Store(&upstreamLink{api: stub})
 	const waiters = 8
 	var wg sync.WaitGroup
@@ -2711,6 +2715,7 @@ func TestListModelsSingleflight(t *testing.T) {
 func TestListModelsWaiterCancel(t *testing.T) {
 	stub := &stubModelConfigsClient{release: make(chan struct{})}
 	a := &Adapter{modelsCacheTTL: time.Minute}
+	a.bindFlightLocks()
 	a.linkPtr.Store(&upstreamLink{api: stub})
 	fetcherDone := make(chan error, 1)
 	go func() {

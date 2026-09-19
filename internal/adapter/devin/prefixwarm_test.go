@@ -17,11 +17,13 @@ import (
 // warmTestAdapter 是最小 Adapter：簿记只用到 gate/token/assignments/
 // config；streamClient 不会被触达（测试注入假 sendPing）。
 func warmTestAdapter() *Adapter {
-	return &Adapter{
+	a := &Adapter{
 		token:       "test-token",
 		gate:        newRateGate(GateConfig{}, nil, ""),
 		assignments: make(map[string]resolvedAssignment),
 	}
+	a.bindFlightLocks()
+	return a
 }
 
 // newTestWarmer 起一只钉死时钟与抖动的保温器；调度协程照跑（30s 真

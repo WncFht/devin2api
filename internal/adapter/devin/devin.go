@@ -260,6 +260,10 @@ func New(config Config) (*Adapter, error) {
 		assignments:    make(map[string]resolvedAssignment),
 		detached:       newDetachedRegistry(config.GateStateStore, config.Identity.Name),
 	}
+	// flightCache 与宿主键级缓存同锁域：绑定在 mutex 声明旁的构造点
+	// 一次性配对，run/reset 不再逐次传锁；字面量构造的 Adapter（测试）
+	// 同样须调 bindFlightLocks，否则 run 拿到 nil 锁。
+	adapter.bindFlightLocks()
 	link, err := newUpstreamLink(config, adapter.currentToken)
 	if err != nil {
 		return nil, err
@@ -282,6 +286,14 @@ func New(config Config) (*Adapter, error) {
 	adapter.detached.seed()
 
 	return adapter, nil
+}
+
+// bindFlightLocks 把 flightCache 的锁域接到宿主 mutex 上：登记表与
+// assignments/models 缓存同属一个锁域（hit/commit 读写的就是宿主状态），
+// 锁在构造点一次性配对——字面量构造的 Adapter（测试绕开 New）同样须调。
+func (adapter *Adapter) bindFlightLocks() {
+	adapter.catalogFlights.mu = &adapter.modelsMu
+	adapter.assignFlights.mu = &adapter.assignmentsMu
 }
 
 // newUpstreamLink 按端点参数构建上游调用束：transport 经 tokenFunc 每次
@@ -463,6 +475,23 @@ func (adapter *Adapter) commitConfigLocked(next Config) (prev Config, newLink *u
 	return prev, newLink, nil
 }
 
+// closeAsyncWatchdog 是异步 Close 的看门狗预算：被关对象要等内部在途
+// 收尾（warmOnce 最坏 ~15s ctx），超时未归即按卡死告警——fire-and-forget
+// 协程泄漏本身不可见，告警是它留下的唯一痕迹。
+const closeAsyncWatchdog = 30 * time.Second
+
+// closeAsync 异步跑 close 并挂看门狗：reload/摘 lane 路径不堵在 Close
+// 的内部等待上，卡死也不静默。
+func closeAsync(what string, close func()) {
+	go func() {
+		t := time.AfterFunc(closeAsyncWatchdog, func() {
+			slog.Warn("devin: async close exceeded watchdog", "what", what)
+		})
+		close()
+		t.Stop()
+	}()
+}
+
 // finishConfigApply 是解锁后的后提交段：新调用束原子换指针并回收旧
 // transport、回写 token/闸门/保温参数、按 prev→next 差集算 applied。
 func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLink) (applied []string) {
@@ -471,7 +500,7 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		// 旧 transport 的 idle 池收掉；在途流持旧 client 引用跑完。
 		old.transport.CloseIdleConnections()
 		// warmer 停表要等进行中的 warmOnce（最坏 ~15s），异步收不堵 reload。
-		go old.warmer.Close()
+		closeAsync("warmer:"+next.Identity.Name, old.warmer.Close)
 	}
 	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL || prev.Identity.Token != next.Identity.Token ||
 		prev.Identity.APIKey != next.Identity.APIKey {
@@ -1343,7 +1372,7 @@ var preGateTimeout = 10 * time.Second
 // 解析结果落进缓存就是把陈旧 jwt 借尸还魂。
 func (adapter *Adapter) assignModel(ctx context.Context, routerUID, cascadeID string) (resolvedAssignment, error) {
 	key := routerUID + "|" + cascadeID
-	return adapter.assignFlights.run(ctx, key, &adapter.assignmentsMu,
+	return adapter.assignFlights.run(ctx, key,
 		func() (resolvedAssignment, error, bool) {
 			cached, ok := adapter.assignments[key]
 			return cached, nil, ok
@@ -1509,7 +1538,7 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 	}
 	a.modelsMu.RUnlock()
 
-	return a.catalogFlights.run(ctx, catalogFlightKey, &a.modelsMu,
+	return a.catalogFlights.run(ctx, catalogFlightKey,
 		func() ([]adapter.ModelInfo, error, bool) {
 			if a.models != nil && time.Now().Before(a.modelsExpiry) {
 				return a.models, nil, true
