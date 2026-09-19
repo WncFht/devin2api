@@ -2447,8 +2447,13 @@ func TestPoolCrossLaneAttachMiss(t *testing.T) {
 		}
 	}
 	cancel1()
-	if _, err := stream1.Recv(ctx1); err == nil {
-		t.Fatal("Recv after cancel should return the cancel cause")
+	// 取消与在途事件竞速：泵已入队的事件会先于取消观察被交付，
+	// 慢 runner 上第一次 Recv 可能拿到合法事件而非取消错误——
+	// 排空到首次出错为止，断言的是「取消最终会传达到 Recv」。
+	for {
+		if _, err := stream1.Recv(ctx1); err != nil {
+			break
+		}
 	}
 	ownerReg := poolLaneByName(pool, "owner").adapter.detached
 	// admit 可能由断连哨兵 goroutine 完成——Recv 拿到取消错误不代表
