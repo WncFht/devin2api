@@ -109,9 +109,9 @@
 
         <!-- 底部分页控制 -->
         <section class="mb-2">
-          <div class="card logs-pagination-card">
+          <div class="card pagination-card">
             <div class="flex justify-center items-center">
-              <div class="pagination-controls logs-pagination-controls">
+              <div class="pagination-controls">
                 <button id="logs_first2" class="btn btn-secondary btn-sm" type="button" data-action="first-logs-page">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 17l-5-5 5-5"/>
@@ -125,20 +125,20 @@
                   </svg>
                   <span data-i18n="common.prevPage">上一页</span>
                 </button>
-                <span class="pagination-info logs-pagination-info">
-                  <span data-i18n="logs.pagePrefix">第</span> <span id="logs_current_page2">1</span> <span data-i18n="logs.pageMid">页，共</span> <span id="logs_total_pages2">1</span> <span data-i18n="logs.pageSuffix">页</span>
-                  <span class="logs-pagination-separator">|</span>
-                  <span data-i18n="logs.jumpTo">跳转到</span>
+                <span class="pagination-info">
+                  <span data-i18n="pagination.pagePrefix">第</span> <span id="logs_current_page2" class="pagination-page-num">1</span> <span data-i18n="pagination.pageMid">页，共</span> <span id="logs_total_pages2" class="pagination-page-num">1</span> <span data-i18n="pagination.pageSuffix">页</span>
+                  <span class="pagination-separator">|</span>
+                  <span data-i18n="pagination.jumpTo">跳转到</span>
                   <input
                     type="number"
                     id="logs_jump_page"
-                    class="logs-jump-input"
+                    class="pagination-jump-input"
                     min="1"
                     max="1"
-                    data-i18n-placeholder="logs.pagePlaceholder"
+                    data-i18n-placeholder="pagination.pagePlaceholder"
                     placeholder="页码"
                   />
-                  <span data-i18n="logs.pageUnit">页</span>
+                  <span data-i18n="pagination.pageUnit">页</span>
                 </span>
                 <button id="logs_next2" class="btn btn-secondary btn-sm" type="button" data-action="next-logs-page">
                   <span data-i18n="common.nextPage">下一页</span>

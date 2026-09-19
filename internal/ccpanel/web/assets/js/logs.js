@@ -1514,7 +1514,7 @@ function jumpToPage() {
     jumpPageInput.value = ''; // 清空无效输入
     if (window.showError) {
       try {
-        window.showError(t('logs.invalidPage', { total: totalLogsPages }));
+        window.showError(t('pagination.invalidPage', { total: totalLogsPages }));
       } catch (_) { }
     }
     return;

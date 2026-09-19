@@ -110,7 +110,7 @@
         const target = parseInt(input.value, 10);
         input.value = '';
         if (!Number.isFinite(target) || target < 1 || target > totalPages) {
-          if (window.showError) window.showError(t('logs.invalidPage', { total: totalPages }));
+          if (window.showError) window.showError(t('pagination.invalidPage', { total: totalPages }));
           return;
         }
         if (target !== currentPage) {

@@ -2734,27 +2734,34 @@ body.web-role-api-token #btn_export_json {
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
-.logs-pagination-card .pagination-controls {
-  justify-content: center;
+.pagination-card {
+  padding: var(--space-2);
 }
 
-.logs-pagination-card .logs-pagination-controls {
+/* 单页结果时整条分页都是禁用态噪音；页面把跳转输入框的 max
+   同步成总页数，max=1 即只有一页，整卡隐藏（含尚未加载时） */
+.pagination-card:has(.pagination-jump-input[max="1"]) {
+  display: none;
+}
+
+.pagination-card .pagination-controls {
+  justify-content: center;
   gap: var(--space-1);
   flex-wrap: wrap;
 }
 
-.logs-pagination-card .logs-pagination-controls .btn-sm {
+.pagination-card .pagination-controls .btn-sm {
   padding: 2px;
   gap: 4px;
   font-size: var(--text-sm);
 }
 
-.logs-pagination-card .logs-pagination-controls svg {
+.pagination-card .pagination-controls svg {
   width: 14px;
   height: 14px;
 }
 
-.logs-pagination-card .logs-pagination-info {
+.pagination-card .pagination-info {
   margin: 0 var(--space-2);
   display: inline-flex;
   align-items: center;
@@ -2767,12 +2774,20 @@ body.web-role-api-token #btn_export_json {
   font-variant-numeric: tabular-nums;
 }
 
-.logs-pagination-card .logs-pagination-separator {
+.pagination-card .pagination-info .pagination-page-num {
+  display: inline-block;
+  min-width: 3ch;
+  text-align: center;
+  font-weight: var(--font-semibold);
+  color: var(--neutral-900);
+}
+
+.pagination-card .pagination-separator {
   margin-left: var(--space-1);
   color: var(--neutral-400);
 }
 
-.logs-pagination-card .logs-jump-input {
+.pagination-card .pagination-jump-input {
   width: 84px;
   padding: 4px 8px;
   border: 1px solid var(--neutral-300);
@@ -2785,14 +2800,14 @@ body.web-role-api-token #btn_export_json {
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 
-.logs-pagination-card .logs-jump-input:focus {
+.pagination-card .pagination-jump-input:focus {
   outline: 2px solid transparent;
   border-color: var(--primary-500);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
   background: var(--field-bg-focus);
 }
 
-.logs-pagination-card .logs-jump-input::placeholder {
+.pagination-card .pagination-jump-input::placeholder {
   color: var(--neutral-400);
 }
 
@@ -2858,19 +2873,22 @@ body.web-role-api-token #btn_export_json {
       padding: var(--space-4) !important;
   }
 /* 移动端分页控件样式 */
-.logs-pagination-card .pagination-controls {
+.pagination-card .pagination-controls {
       flex-direction: row;
       flex-wrap: wrap;
       justify-content: center;
       gap: 6px;
   }
-.logs-pagination-card .logs-pagination-info {
+.pagination-card .pagination-info {
       width: 100%;
       margin: 0;
       order: 3;
       justify-content: center;
   }
-.logs-pagination-card .logs-pagination-separator {
+.pagination-card .pagination-separator {
       display: none;
+  }
+.pagination-card .pagination-jump-input {
+      width: 72px;
   }
 }

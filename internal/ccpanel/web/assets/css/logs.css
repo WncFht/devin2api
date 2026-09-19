@@ -940,74 +940,6 @@ html[data-resolved-theme="dark"] .chat-message {
       }
     }
 
-    .logs-pagination-controls {
-      gap: var(--space-1);
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-
-    .logs-pagination-controls .btn-sm {
-      padding: 2px;
-      gap: 4px;
-      font-size: var(--text-sm);
-    }
-
-    .logs-pagination-controls svg {
-      width: 14px;
-      height: 14px;
-    }
-
-    .logs-pagination-info {
-      margin: 0 var(--space-2);
-      display: flex;
-      align-items: center;
-      gap: var(--space-1);
-      flex-wrap: wrap;
-      justify-content: center;
-      font-size: var(--text-sm);
-      font-weight: var(--font-normal);
-      color: var(--neutral-700);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .logs-pagination-info #logs_current_page2,
-    .logs-pagination-info #logs_total_pages2 {
-      display: inline-block;
-      min-width: 3ch;
-      text-align: center;
-      font-weight: var(--font-semibold);
-      color: var(--neutral-900);
-    }
-
-    .logs-pagination-separator {
-      margin-left: var(--space-1);
-      color: var(--neutral-400);
-    }
-
-    .logs-jump-input {
-      width: 84px;
-      padding: 4px 8px;
-      border: 1px solid var(--neutral-300);
-      border-radius: 4px;
-      text-align: center;
-      font-size: var(--text-sm);
-      color: var(--neutral-900);
-      background: var(--field-bg);
-      -webkit-text-fill-color: var(--neutral-900);
-      transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-    }
-
-    .logs-jump-input:focus {
-      outline: 2px solid transparent;
-      border-color: var(--primary-500);
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-      background: var(--field-bg-focus);
-    }
-
-    .logs-jump-input::placeholder {
-      color: var(--neutral-400);
-    }
-
     /* 顶部工具栏：标签置顶、控件等高，单条 flex 流一行排布；
        组宽按内容定死（不拉伸填空），行操作靠右收尾 */
     .logs-filter-controls {
@@ -1172,16 +1104,6 @@ html[data-resolved-theme="dark"] .chat-message {
       padding: 0 10px;
       gap: 5px;
       font-size: var(--text-sm);
-    }
-
-    .logs-pagination-card {
-      padding: var(--space-2);
-    }
-
-    /* 单页结果时整条分页都是禁用态噪音；logs.js 把跳转输入框的 max
-       同步成总页数，max=1 即只有一页，整卡隐藏（含尚未加载时） */
-    .logs-pagination-card:has(#logs_jump_page[max="1"]) {
-      display: none;
     }
 
     .debug-log-status {
@@ -1572,29 +1494,6 @@ html[data-resolved-theme="dark"] .chat-message {
       .logs-filter-summary-row .logs-filter-actions .btn {
         width: auto;
         padding: 8px 12px;
-      }
-
-      .logs-pagination-controls {
-        flex-direction: row;
-        gap: 6px;
-      }
-
-      .logs-pagination-controls .btn-sm {
-        padding: 2px;
-      }
-
-      .logs-pagination-info {
-        width: 100%;
-        margin: 0;
-        order: 3;
-      }
-
-      .logs-pagination-separator {
-        display: none;
-      }
-
-      .logs-jump-input {
-        width: 72px;
       }
     }
 
