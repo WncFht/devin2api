@@ -10,9 +10,18 @@ package app
 
 import (
 	"compress/gzip"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 )
+
+// gzipWriterPool 复用面板响应的 gzip.Writer：flate 窗口与哈希表是
+// 压缩路径的分配大头（store.payloadGzipPool 同构）。归还前
+// Reset(io.Discard) 断开对响应 writer 的引用。
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
 
 // gzipPanelMiddleware 压缩面板端点响应；压缩与否逐请求按路径与
 // 响应头判定。
@@ -63,7 +72,8 @@ func (w *gzipResponseWriter) WriteHeader(code int) {
 			code == http.StatusNotModified ||
 			(code >= http.StatusMultipleChoices && code < http.StatusBadRequest)
 		if !w.skip {
-			w.gz = gzip.NewWriter(w.ResponseWriter)
+			w.gz = gzipWriterPool.Get().(*gzip.Writer)
+			w.gz.Reset(w.ResponseWriter)
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Del("Content-Length")
 		}
@@ -107,8 +117,13 @@ func (w *gzipResponseWriter) FlushError() error {
 func (w *gzipResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // Close 仅在真正压缩时收尾 gzip 流——透传路径不能向连接写 gzip 帧头。
+// Close 先把残帧刷进响应再 Reset 脱钩归还：顺序反了残帧会写进
+// io.Discard 丢尾。
 func (w *gzipResponseWriter) Close() {
 	if w.gz != nil {
 		_ = w.gz.Close()
+		w.gz.Reset(io.Discard)
+		gzipWriterPool.Put(w.gz)
+		w.gz = nil
 	}
 }
