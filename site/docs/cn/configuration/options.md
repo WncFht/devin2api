@@ -1,0 +1,37 @@
+# 配置项
+
+`config.yaml` 全部支持的键，按文件分组排列。「无」表示可省略。
+
+| 字段                                             | 说明                                                                                                                            | 必填 / 默认                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `server.listen`                                  | HTTP 监听地址                                                                                                                   | 必填                                                          |
+| `server.max_concurrency`                         | 同时处理的 `/v1/*` 请求数上限                                                                                                   | `1024`                                                        |
+| `devin.base_url`                                 | Devin Connect 服务 base URL                                                                                                     | 必填（`config.example.yaml` 用 `https://server.codeium.com`） |
+| `devin.accounts`                                 | 上游账号池条目 `{name, token, credentials_file, api_key, priority, max_rpm}`——每条至少一个凭据源；空列表 = 合法空池             | 否——无账号时 `/v1` 返回 `unavailable`                         |
+| `devin.model`                                    | Devin chat 模型 UID（如 `swe-2-max`）                                                                                           | 必填                                                          |
+| `devin.aliases`                                  | 客户端模型名 → 上游 UID 映射（`swe-2: swe-2-max`）；匹配序：精确 → 折叠小写 → `"*"` 兜底；别名带 `alias_of` 出现在 `/v1/models` | 无                                                            |
+| `devin.client_name`/`client_version`/`client_os` | 发给上游 metadata 的客户端身份                                                                                                  | `chisel` / `3000.2.17` / `mac`                                |
+| `devin.proxy`                                    | 上游代理 URL（`http(s)://`、`socks5(h)://`）；留空直连或走环境变量                                                              | 无                                                            |
+| `devin.force_http1`                              | 每请求独立 TCP 连接（避开 HTTP/2 流复用串行化）                                                                                 | `true`                                                        |
+| `devin.max_rpm`                                  | 发上游消息速率上限（条/分钟，令牌桶）；`<=0` 不限——冷却闩两种情况下都生效                                                       | `0`（不限；`config.example.yaml` 配 `80`）                    |
+| `devin.gate_max_hold_seconds`                    | 闩外排队等发送窗口的最长秒数，超出快败 `429` + `Retry-After`                                                                    | `30`                                                          |
+| `devin.gate_drip_interval_seconds`               | 闩内放行探针间隔——决定限流期间打到上游的速率与解闩探测频率                                                                      | `8`                                                           |
+| `devin.gate_default_latch_seconds`               | 上游 `resource_exhausted` 未声明 reset 时刻时的兜底闩时长                                                                       | `60`                                                          |
+| `devin.gate_window_offset_seconds`               | 上游分钟桶界在本地分钟内的估计位置（第几秒）                                                                                    | `0`                                                           |
+| `devin.gate_window_guard_seconds`                | 估计桶界两侧的停发死区秒数——死区内请求睡到下一窗口                                                                              | `2`                                                           |
+| `devin.gate_bg_max_hold_seconds`                 | `bg` 类令牌在闸内的排队预算秒数（fg 仍走 `gate_max_hold_seconds`）                                                              | `120`                                                         |
+| `devin.gate_bg_reserve_margin`                   | bg 准入动态预留公式的固定安全边际（条）——最后几个窗口槽位对 bg 不可达，fg 保底                                                  | `4`                                                           |
+| `devin.warm_prefix_*`                            | 前缀保温族——按节拍重放保留的会话前缀，给上游 prompt cache 续期；键清单在 `config.example.yaml`                                  | `warm_prefix_enabled: false`                                  |
+| `devin.session_affinity_ttl_seconds`             | 会话→lane 绑定的滑动 TTL（命中续期）                                                                                            | `3600`                                                        |
+| `devin.quota_low_threshold_percent`              | 周配额低于此百分比时 lane 对新会话降权（已绑定会话不受影响）                                                                    | `15`                                                          |
+| `devin.no_progress_timeout_seconds`              | 产出内容后的上游无进度看门狗——上游可静默 15–25 分钟只发心跳地算工具参数，此项必须明显大于该区间                                 | `2700`                                                        |
+| `devin.pre_event_no_progress_timeout_seconds`    | 首个可解码事件前的无进度看门狗；pre-event 累计静默另有 180s 内置硬顶（首发起算、跨重开累计）——配大也突破不了                    | `600`                                                         |
+| `debug.enabled`                                  | 逐请求调试 payload 落状态目录的 `devin-2api.db`                                                                                 | `false`（`config.example.yaml` 配 `true`）                    |
+| `debug.retention_days`                           | 调试记录保留天数；`<=0` 不按时间清理                                                                                            | `14`                                                          |
+| `debug.max_total_mb`                             | 调试 payload 总量上限（MB），超限从最旧请求组开始淘汰                                                                           | `1024`                                                        |
+| `debug.payload_hours`                            | 大体积阶段记录的保留小时数，超时剥离、保留 meta/error 证据                                                                      | `24`                                                          |
+| `debug.keep_error_dirs`                          | 容量淘汰时保护的最新失败请求组数（含 `error.json` 行的 dir）                                                                    | `32`                                                          |
+| `debug.errors_only`                              | 只保留失败或可疑请求的调试 payload——干净完成的完结即剥；面板键 `debug_log_errors_only` 可热改                                   | `false`                                                       |
+| `debug.quota_interval_minutes`                   | 配额快照采样间隔，写 `quota_samples` 表；`<=0` 不采样                                                                           | `5`                                                           |
+| `debug.pprof_listen`                             | pprof/fgprof 剖析端点的独立监听地址（如 `127.0.0.1:6060`）；无鉴权——只绑回环                                                    | 空（不启用）                                                  |
+| `dashboard.password`                             | `/web` 管理密码；留空 = 无需登录                                                                                                | 无                                                            |
