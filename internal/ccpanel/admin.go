@@ -310,6 +310,10 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		"gc_pause_total_ns":   uint64(getF64(proc, "gc_pause_total_ms") * 1e6),
 		"gc_cpu_percent":      getF64(proc, "gc_cpu_fraction") * 100,
 		"sse_framing_repairs": 0,
+		// 监听归属看门狗（reuseport 静默并组的运行期兜底）：当轮外部持有
+		// 进程数与最近一次非零扫描时刻；未开 reuseport 的平台/部署恒为 0。
+		"foreign_listen_holders":           getI64(snap, "foreign_listen_holders"),
+		"foreign_listen_holders_last_seen": getI64(snap, "foreign_listen_holders_last_seen"),
 	}
 	httpProxy := map[string]any{
 		"active_requests":        getI64(snap, "active_requests"),

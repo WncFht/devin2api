@@ -39,6 +39,21 @@ func TestMetricsLifecycle(t *testing.T) {
 	}
 }
 
+func TestForeignListenHolders(t *testing.T) {
+	m := NewMetrics()
+	snap := m.Snapshot()
+	if snap["foreign_listen_holders"].(int64) != 0 || snap["foreign_listen_holders_last_seen"].(int64) != 0 {
+		t.Fatalf("fresh snapshot = %v", snap)
+	}
+	m.NoteForeignListenHolders(2)
+	m.NoteForeignListenHolders(0)
+	snap = m.Snapshot()
+	// gauge 随当轮归零，last_seen 保留「曾经见过」的口径。
+	if snap["foreign_listen_holders"].(int64) != 0 || snap["foreign_listen_holders_last_seen"].(int64) == 0 {
+		t.Fatalf("snapshot = %v", snap)
+	}
+}
+
 func TestDiagnosticBoundsAndRedacts(t *testing.T) {
 	err := errors.New(`upstream failed: authorization="Bearer sk-live-secret-token" status=503`)
 	got := Diagnostic(err)

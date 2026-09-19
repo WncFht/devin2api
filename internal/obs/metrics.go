@@ -104,6 +104,10 @@ type Metrics struct {
 	procMu         sync.Mutex
 	lastCPUSeconds float64
 	lastCPUAt      time.Time
+	// 监听归属看门狗（main 的 watchListenOwnership）每拍写入：
+	// 最近一次扫描发现的外部持有进程数，与最近一次非零扫描的 unix 秒。
+	foreignListenHolders  atomic.Int64
+	foreignListenLastSeen atomic.Int64
 }
 
 // NewMetrics 创建以启动时刻为起点的指标集合。
@@ -220,6 +224,15 @@ func (m *Metrics) SeedTrend(finishedAt time.Time, isError bool) {
 	m.recordBucketAt(at, isError)
 }
 
+// NoteForeignListenHolders 记录一轮监听归属扫描发现的外部持有进程数；
+// 非零时刷新 last_seen——「当前有野进程占位」与「曾经见过」两个口径分开。
+func (m *Metrics) NoteForeignListenHolders(n int) {
+	m.foreignListenHolders.Store(int64(n))
+	if n > 0 {
+		m.foreignListenLastSeen.Store(time.Now().Unix())
+	}
+}
+
 // Snapshot 返回全部计数的即时快照，供 JSON 序列化给面板或 /statsz。
 func (m *Metrics) Snapshot() map[string]any {
 	return map[string]any{
@@ -238,6 +251,10 @@ func (m *Metrics) Snapshot() map[string]any {
 		"rates":                  m.rates(),
 		"process":                m.process(),
 		"rejects":                m.Rejects(),
+		// 监听归属看门狗：未开 reuseport（或未跑看门狗）时恒为 0——
+		// 没有扫描数据源不伪造「安全」，0 只表示「最近一轮没发现」。
+		"foreign_listen_holders":           m.foreignListenHolders.Load(),
+		"foreign_listen_holders_last_seen": m.foreignListenLastSeen.Load(),
 	}
 }
 

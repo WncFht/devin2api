@@ -466,6 +466,14 @@ func main() {
 			}
 		}()
 	}
+	// 监听归属看门狗：reuseport 并组是静默的（同 euid 即可入组，不撞
+	// EADDRINUSE），野进程进组后唯一的既有信号是人工 ss census——本循环
+	// 把它变成进程内周期核对。只在 reuseport 开启时跑：未开时内核保证
+	// 独占绑定，扫描恒无发现。交接进程不跑：它转瞬即逝，核归属是托管
+	// 实例的职责；交接窗内老/新实例与桥接互见，env 判据互认不误警。
+	if !handoff && reusePortEnabled() {
+		go watchListenOwnership(ctx, listener.Addr().(*net.TCPAddr).Port, application.Metrics())
+	}
 	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
 	signal.Ignore(syscall.SIGHUP)
 	if err := run(ctx, application, server, listener); err != nil {
