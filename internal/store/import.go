@@ -176,56 +176,93 @@ func (s *Store) ImportLegacy(ctx context.Context, stateDir, logRoot string) erro
 	return s.SetState(ctx, "import_base_done", time.Now().UTC().Format(time.RFC3339))
 }
 
+// importIndexChunkRows 是 importIndex 单事务的提交行数界：迁移跑在
+// Open 路径（交接窗内与在役实例并存），整文件单事务把唯一写连接按
+// 行数线性独占（数十万行实测数秒级）——分片提交在片间把连接让回，
+// 在役写者按到达序插队。中断重跑靠 dir 唯一索引幂等续导，已提交
+// 分片不丢。
+const importIndexChunkRows = 2000
+
 // importIndex 把 index.jsonl 逐行转成 logs 行；损坏行（截断尾部）
 // 跳过，与文件时代 ScanIndex 的容忍语义一致。用 ReadBytes 行循环而
 // 非 bufio.Scanner——Scanner 的行上限会把超长行变成整体中止
 // （ImportLegacy 报错 → 文件不改名 → 重启再炸），坏行跳过语义
 // 只在逐行容忍下成立。
 func (s *Store) importIndex(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "index", func(tx *sql.Tx) error {
-		f, err := os.Open(path)
-		if err != nil {
-			return skipMissing(err)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 缺席的源与 withSourceTx 同语义：标记该源已处理。
+			return s.withSourceTx(ctx, "index", func(*sql.Tx) error { return nil })
 		}
-		defer func() { _ = f.Close() }()
-		reader := bufio.NewReaderSize(f, 64*1024)
-		for {
-			line, err := reader.ReadBytes('\n')
-			var e legacyIndexEntry
-			if len(line) > 0 && json.Unmarshal(line, &e) == nil {
-				if started, perr := time.Parse(time.RFC3339Nano, e.StartedAt); perr == nil {
-					source := "proxy"
-					if e.ClientRequestID == probeClientRequestID {
-						source = "manual_test"
-					}
-					ms := started.UnixMilli()
-					// ON CONFLICT(dir)：dir 部分唯一索引把「标记丢失后的重跑」
-					// 变成幂等空操作，不会卡死导入；WHERE 子句须与索引的
-					// 部分谓词一致，SQLite 才认这个冲突目标。
-					if _, err := tx.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) WHERE dir != '' DO NOTHING`,
-						e.Dir, ms, ms/60000, started.Format(time.RFC3339Nano), e.DurationMS,
-						e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
-						e.API, e.Method, e.Path, e.StatusCode, e.Result,
-						e.RequestedModel, e.Model, e.ResponseModel, e.ModelMismatch, e.Stream,
-						e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
-						e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
-						e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
-						e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
-						// 文件时代没有谱系概念——affinity_hash 补空串。
-						e.ConnReused, e.ConnIdleMS, "", source, e.UpstreamDoneMS); err != nil {
-						return err
-					}
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	reader := bufio.NewReaderSize(f, 64*1024)
+	tx, done, err := s.writeTx(ctx, "import:index")
+	if err != nil {
+		return err
+	}
+	// 分片重开后 done 指向最新一片：闭包延迟求值保证错误路径回滚的是
+	// 当前事务，已提交片的 Rollback 调用是免锁 no-op；重开失败把 done
+	// 清成 nil，故判空调用。
+	defer func() {
+		if done != nil {
+			done()
+		}
+	}()
+	pending := 0
+	for {
+		line, err := reader.ReadBytes('\n')
+		var e legacyIndexEntry
+		if len(line) > 0 && json.Unmarshal(line, &e) == nil {
+			if started, perr := time.Parse(time.RFC3339Nano, e.StartedAt); perr == nil {
+				source := "proxy"
+				if e.ClientRequestID == probeClientRequestID {
+					source = "manual_test"
 				}
+				ms := started.UnixMilli()
+				// ON CONFLICT(dir)：dir 部分唯一索引把「标记丢失后的重跑」
+				// 变成幂等空操作，不会卡死导入；WHERE 子句须与索引的
+				// 部分谓词一致，SQLite 才认这个冲突目标。
+				if _, err := tx.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) WHERE dir != '' DO NOTHING`,
+					e.Dir, ms, ms/60000, started.Format(time.RFC3339Nano), e.DurationMS,
+					e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
+					e.API, e.Method, e.Path, e.StatusCode, e.Result,
+					e.RequestedModel, e.Model, e.ResponseModel, e.ModelMismatch, e.Stream,
+					e.InputTokens, e.OutputTokens, e.CacheReadTokens, e.CacheWriteTokens, e.ReasoningTokens, e.TotalTokens,
+					e.CreditCost, e.UpstreamRequestID, e.ClientIP, e.KeyHash, e.ClientRequestID,
+					e.ErrorStage, e.ErrorMessage, e.DroppedEvents, e.RetryAfterSeconds, e.RateLimited,
+					e.Retries, e.Account, e.AccountSwitches, e.PrematureEndTurn, e.Repairs,
+					// 文件时代没有谱系概念——affinity_hash 补空串。
+					e.ConnReused, e.ConnIdleMS, "", source, e.UpstreamDoneMS); err != nil {
+					return err
+				}
+				pending++
 			}
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if pending >= importIndexChunkRows {
+			if err := tx.Commit(); err != nil {
 				return err
 			}
+			done()
+			if tx, done, err = s.writeTx(ctx, "import:index"); err != nil {
+				return err
+			}
+			pending = 0
 		}
-		return nil
-	})
+	}
+	// 完成标记与末片同事务提交——标记缺席等于未导入完，重跑幂等续导。
+	if err := markImported(ctx, tx, "index"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // importTokens 按 token 列去重合并：同 token 已在库就用库里的 id

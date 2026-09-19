@@ -38,11 +38,7 @@ func (s *Store) InsertDetachedEvent(ctx context.Context, e DetachedEvent) error 
 // PruneDetachedEvents 删除早于 before（unix 毫秒）的行，返回删除数。
 // 与 logs 摘要行共用同一保留期（Maintain 同一 cutoff 调用）。
 func (s *Store) PruneDetachedEvents(ctx context.Context, before int64) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM detached_events WHERE at < ?`, before)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.deleteRowsChunked(ctx, "detached_events", `at < ?`, before)
 }
 
 // DetachedBlob 是 detached_blobs 的一行：一条 completed 脱钩条目的
@@ -103,9 +99,5 @@ const detachedBlobRetention = time.Hour
 // 返回删除数。表的唯一消费者是开机播种（窗口=条目 completed TTL）；
 // before 取略大于 TTL 的保留界即可——过期行只供死后取证，不留长史。
 func (s *Store) PruneDetachedBlobs(ctx context.Context, before int64) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM detached_blobs WHERE finished_at < ?`, before)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	return s.deleteRowsChunked(ctx, "detached_blobs", `finished_at < ?`, before)
 }
