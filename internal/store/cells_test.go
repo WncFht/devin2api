@@ -392,6 +392,117 @@ func TestWriteDebugBatchRollup(t *testing.T) {
 	}
 }
 
+// TestReconcileCellsChunked 用缩小的片宽逼出多片循环：单跑一次
+// chunk 验证「聚合+水位推进」的片级原子性与部分位置，随后跑完剩余
+// 断言终态与单遍补记完全等价（全量真值即单遍产物）。
+func TestReconcileCellsChunked(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	rows := cellSeedRows(base)
+
+	// 首行走双写建立水位；其余 14 行绕过双写留缝（含一行
+	// rejected——它占 id 不进格，但水位照样覆盖）。
+	rows[0].Dir = "covered-0"
+	if _, err := s.InsertLog(ctx, rows[0]); err != nil {
+		t.Fatalf("InsertLog: %v", err)
+	}
+	var maxID int64
+	for i, r := range rows[1:] {
+		r.Dir = fmt.Sprintf("gap-%02d", i)
+		res, err := s.db.ExecContext(ctx, logsInsertSQL, logInsertArgs(r)...)
+		if err != nil {
+			t.Fatalf("bypass insert %d: %v", i, err)
+		}
+		if maxID, err = res.LastInsertId(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 手动一片：水位 1 → 第 4 个未记账 id（=5），仅该片 4 行入格。
+	done, err := s.reconcileCellsChunk(ctx, maxID, 4)
+	if err != nil {
+		t.Fatalf("chunk: %v", err)
+	}
+	if done {
+		t.Fatal("first chunk reported done with 10 rows remaining")
+	}
+	if wm := cellsWatermarkOf(t, s, ctx); wm != 5 {
+		t.Fatalf("watermark after chunk = %d, want 5", wm)
+	}
+	var reqSum int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(req),0) FROM log_cells`).Scan(&reqSum); err != nil {
+		t.Fatal(err)
+	}
+	if reqSum != 5 {
+		t.Fatalf("booked req after chunk = %d, want 5（首行双写+片内4行）", reqSum)
+	}
+
+	// 跑完剩余（4 行/片 ⇒ 4,4,2 三片）：格子逐格等真值，水位到缝顶。
+	if err := s.reconcileCells(ctx, 4); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if wm := cellsWatermarkOf(t, s, ctx); wm != maxID {
+		t.Fatalf("watermark = %d, want %d", wm, maxID)
+	}
+	truth := queryCellTruth(t, s, ctx, "")
+	if stored := queryStoredCells(t, s, ctx); !reflect.DeepEqual(truth, stored) {
+		t.Fatalf("cells diverged:\n truth=%+v\n store=%+v", truth, stored)
+	}
+	var errStored, errTruth int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(req),0) FROM log_err_cells`).Scan(&errStored); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE log_source != 'rejected' AND error_stage != ''`).Scan(&errTruth); err != nil {
+		t.Fatal(err)
+	}
+	if errStored != errTruth {
+		t.Fatalf("err cells req = %d, want %d", errStored, errTruth)
+	}
+	var rawReq int64
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM logs WHERE log_source != 'rejected'`).Scan(&rawReq); err != nil {
+		t.Fatal(err)
+	}
+	if n := unionCount(t, s, ctx); n != rawReq {
+		t.Fatalf("union req %d != raw %d", n, rawReq)
+	}
+
+	// 幂等：缝已闭合，再跑是空扫快退，格子不变。
+	stored := queryStoredCells(t, s, ctx)
+	if err := s.reconcileCells(ctx, 4); err != nil {
+		t.Fatalf("re-reconcile: %v", err)
+	}
+	if stored2 := queryStoredCells(t, s, ctx); !reflect.DeepEqual(stored, stored2) {
+		t.Fatal("re-run changed cells")
+	}
+}
+
+// TestCellsWatermarkNeverRegresses 钉死水位的单调性：交接期并发
+// 双写可能在本方读水位之后提交更高值，迟到写若直接覆盖会把已记账
+// 行回退成「未记账」——下次补漏对它们双计。upsert 冲突取 MAX 保证
+// 水位只进不退。
+func TestCellsWatermarkNeverRegresses(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+
+	// 模拟对侧已把水位推到 100；本方双写插入的行只得 id=1，
+	// setCellsWatermark(1) 不得把水位盖回 1。
+	forceCellsWatermark(t, s, ctx, 100)
+	row := cellSeedRows(base)[0]
+	row.Dir = "late-dual"
+	if _, err := s.InsertLog(ctx, row); err != nil {
+		t.Fatalf("InsertLog: %v", err)
+	}
+	if wm := cellsWatermarkOf(t, s, ctx); wm != 100 {
+		t.Fatalf("watermark regressed to %d, want 100", wm)
+	}
+}
+
 // forceCellsWatermark 把覆盖水位人工推到给定 id——测试里用来复刻
 // 「行已声称记账但格子缺失」的历史洞形态（prod 2026-09-19 实证：
 // cells 化二进制迁移回填推满水位后，旧二进制继续写的新行没有双写）。

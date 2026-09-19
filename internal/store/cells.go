@@ -167,15 +167,16 @@ func cellsSelectSQL(where string) string {
 		` GROUP BY 1, 2, 3, 4, 5`
 }
 
-// cellsInsertSQL 生成增量 upsert 形态的回填语句（ReconcileCells 补漏
-// 用 "AND id > ?"）：冲突时累加——适用场景是「该行的贡献尚未入账」。
+// cellsInsertSQL 生成增量 upsert 形态的回填语句：冲突时累加——适用
+// 场景是「该行的贡献尚未入账」。ReconcileCells 补漏按 id 区间
+// （"AND id > ? AND id <= ?"）分片调用。
 func cellsInsertSQL(where string) string {
 	return `INSERT INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames + `, min_time, last_key)
 		` + cellsSelectSQL(where) + cellsConflict
 }
 
 var (
-	cellsGapSQL = cellsInsertSQL("AND id > ?")
+	cellsGapSQL = cellsInsertSQL("AND id > ? AND id <= ?")
 	// cellsUpsertSQL 是写路径单行/批量共用的 VALUES 形态 upsert。
 	cellsUpsertSQL = `INSERT INTO log_cells(slot, day, api, emodel, key_hash, ` + cellMetricNames +
 		`, min_time, last_key) VALUES(` + placeholders(5+len(cellMetrics)+2) + `)` + cellsConflict
@@ -199,7 +200,7 @@ var (
 var (
 	errCellsGapSQL = `INSERT INTO log_err_cells(slot, stage, req)
 		SELECT time/600000, error_stage, COUNT(*) FROM logs
-		WHERE log_source != 'rejected' AND error_stage != '' AND id > ?
+		WHERE log_source != 'rejected' AND error_stage != '' AND id > ? AND id <= ?
 		GROUP BY 1, 2` + errCellsConflict
 	errCellsUpsertSQL = `INSERT INTO log_err_cells(slot, stage, req) VALUES(?,?,?)` + errCellsConflict
 )
@@ -227,10 +228,15 @@ func cellsWatermark(ctx context.Context, q cellDB) (int64, error) {
 	return strconv.ParseInt(v, 10, 64)
 }
 
-// setCellsWatermark 在事务内推进水位；单写连接串行化下 id 单调，
-// 直接写新值即等价 MAX。
+// setCellsWatermark 在事务内推进水位。id 单调下写新值即等价 MAX，
+// 但 reuseport 交接期新旧两写者并发，本方读水位到提交之间对侧可能
+// 已推进更高值——冲突取 MAX 防迟到提交把水位回写变小（水位回退
+// 会让已记账行被下次补漏重新聚合，双计贡献）。
 func setCellsWatermark(ctx context.Context, q cellDB, id int64) error {
-	_, err := q.ExecContext(ctx, `INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+	_, err := q.ExecContext(ctx, `INSERT INTO runtime_state("key", value, updated_at) VALUES(?,?,?)
+		ON CONFLICT("key") DO UPDATE SET
+			value = CAST(MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT),
+			updated_at = excluded.updated_at`,
 		cellsWatermarkKey, strconv.FormatInt(id, 10), time.Now().UnixMilli())
 	return err
 }
@@ -490,49 +496,101 @@ func upsertCells(ctx context.Context, tx *sql.Tx, cells map[cellDim]*cellVals, e
 	return nil
 }
 
+// reconcileGapRows 是 ReconcileCells 单片事务补记的行数上界：缝隙
+// 补记是 logs 范围扫 + 聚合 upsert，无界单事务（prod 实证 7,634 行
+// 缝隙）会在启动期数十秒独占唯一写连接——reuseport 交接期恰好还有
+// 一个共享库的在役实例，它的写流会被饿死。片级提交让排队写者在片间
+// 插队；水位随每片推进，崩溃留下正确的部分位置（id ≤ 水位 ⇒ 已记账
+// 的恒真式不被破坏）。
+const reconcileGapRows = 5000
+
 // ReconcileCells 把水位线之后落库的非 rejected 行补记进 rollup——
 // 绕过双写的写入者有无 cells 码的旧二进制、外部工具与 importIndex：
 // Open 收尾固定调它闭合这类缝隙（9-19 实证 7,634 行险些永隐），
 // ImportLegacy 收尾再补一次导入期写入；常规调用是 id>水位 的空扫。
 func (s *Store) ReconcileCells(ctx context.Context) error {
-	// 无未记账行时纯读快退：水位随每行双写推进，缝隙只来自绕过
-	// 双写的写入者，常规启动这里是空扫——但即便是空扫，写事务在
-	// 共享库（交接期与在役实例并发）上也会被在役写流饿死到
+	return s.reconcileCells(ctx, reconcileGapRows)
+}
+
+// reconcileCells 按 chunk 行分片补记（chunk 是测试缝：小片逼多轮
+// 循环以验证分片终态与单遍等价）。
+func (s *Store) reconcileCells(ctx context.Context, chunk int64) error {
+	// 「最大未记账 id」一个 ro 读兼任两职：空缝快退判据与全程上界。
+	// 无未记账行时纯读返回，不开写事务——水位随每行双写推进，缝隙只
+	// 来自绕过双写的写入者，常规启动这里是空扫；但即便是空扫，写事务
+	// 在共享库（交接期与在役实例并发）上也会被在役写流饿死到
 	// SQLITE_BUSY，让本可无锁的路径死在启动期。
-	var uncovered int
+	//
+	// 上界取扫描时刻的快照而非逐片重读：循环期间新落的行归其写者的
+	// 双写记账（绕过双写者留下的由下次 Open 补记，期间有 UNION 补尾
+	// 段兜底不重不漏）——追移动靶会让交接重叠期的补记变成无界占用。
+	var bound int64
 	if err := s.ro.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM logs WHERE id > `+cellsWatermarkSQL+`)`).Scan(&uncovered); err != nil {
+		`SELECT COALESCE(MAX(id),0) FROM logs WHERE id > `+cellsWatermarkSQL).Scan(&bound); err != nil {
 		return err
 	}
-	if uncovered == 0 {
+	if bound == 0 {
 		return nil
 	}
+	for {
+		done, err := s.reconcileCellsChunk(ctx, bound, chunk)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// reconcileCellsChunk 补记一片：水位之上按 id 序取至多 chunk 行聚合
+// upsert，水位在同一事务推进到该片最大 id——每片原子提交，中途失败
+// 或进程重启后下一轮从已推进的水位续跑。返回 false 表示缝隙尚有余量。
+func (s *Store) reconcileCellsChunk(ctx context.Context, bound, chunk int64) (bool, error) {
 	tx, done, err := s.writeTx(ctx, "ReconcileCells")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer done()
 	wm, err := cellsWatermark(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, cellsGapSQL, wm); err != nil {
-		return err
+	// 片上界 = 水位之上第 chunk 个存量 id（DeleteLogsBefore 同款内层
+	// SELECT 定批）。水位在每片事务内重读：并发双写若在片间推进了它，
+	// 本片从最新位置续起，不重扫已记账区间；对侧新行的 id 恒大于
+	// bound（AUTOINCREMENT 不复用），永不进本方聚合域。
+	var hi int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(id),0) FROM (
+			SELECT id FROM logs WHERE id > ? AND id <= ? ORDER BY id LIMIT ?)`,
+		wm, bound, chunk).Scan(&hi); err != nil {
+		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, errCellsGapSQL, wm); err != nil {
-		return err
+	if hi == 0 {
+		// (wm, bound] 已无存量行：缝隙闭合（行被并发删除，或水位
+		// 已被并发写者推过 bound）。水位仍落后 bound 时补齐——与
+		// 单遍版 wm=MAX(id) 终态一致，区间空洞不再重扫。
+		if wm < bound {
+			if err := setCellsWatermark(ctx, tx, bound); err != nil {
+				return false, err
+			}
+		}
+		return true, tx.Commit()
 	}
-	var maxID int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM logs`).Scan(&maxID); err != nil {
-		return err
+	if _, err := tx.ExecContext(ctx, cellsGapSQL, wm, hi); err != nil {
+		return false, err
 	}
-	if maxID < wm {
-		maxID = wm
+	if _, err := tx.ExecContext(ctx, errCellsGapSQL, wm, hi); err != nil {
+		return false, err
 	}
-	if err := setCellsWatermark(ctx, tx, maxID); err != nil {
-		return err
+	if err := setCellsWatermark(ctx, tx, hi); err != nil {
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return hi == bound, nil
 }
 
 // ── 水位内缺口的窗口重算 ──────────────────────────────────────────

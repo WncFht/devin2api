@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -93,10 +94,10 @@ var schemaMigrations = []migration{
 		// 「id ≤ 它的非 rejected 行都已记进 rollup」。
 		version: "0006_log_cells",
 		apply: func(tx *sql.Tx) error {
-			if _, err := tx.Exec(cellsGapSQL, 0); err != nil {
+			if _, err := tx.Exec(cellsGapSQL, 0, int64(math.MaxInt64)); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(errCellsGapSQL, 0); err != nil {
+			if _, err := tx.Exec(errCellsGapSQL, 0, int64(math.MaxInt64)); err != nil {
 				return err
 			}
 			var maxID int64
