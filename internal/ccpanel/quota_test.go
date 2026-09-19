@@ -263,7 +263,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	h := &Handler{store: st}
 	_ = st.Close() // 落库必败
 	for i := 0; i < 6; i++ {
-		h.persistQuotaSample(
+		_ = h.persistQuotaSample(
 			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(float64(90 - i))})
 	}
 	h.quotaPendingMu.Lock()
@@ -286,7 +286,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	}
 	defer func() { _ = st2.Close() }()
 	h.store = st2
-	h.persistQuotaSample(
+	_ = h.persistQuotaSample(
 		&store.QuotaSample{At: 1700000000 + 6*300, Account: "randall", DailyRemaining: f64(84)})
 	rows, err := st2.ListQuotaSamples(context.Background(), "randall", 0, 0)
 	if err != nil {
@@ -350,7 +350,7 @@ func TestQuotaPersistOwnsBudget(t *testing.T) {
 	// persist 若仍共享调用方预算必死于 deadline。
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
-	if _, _, err := h.captureAccountQuota(ctx, "randall", "tok-r"); err != nil {
+	if _, _, _, err := h.captureAccountQuota(ctx, "randall", "tok-r"); err != nil {
 		t.Fatalf("captureAccountQuota: %v", err)
 	}
 	<-committed
@@ -564,5 +564,175 @@ func TestRefreshAccountQuotaUpstreamError(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("samples = %+v, want none", rows)
+	}
+}
+
+// TestQuotaSamplerHeartbeat 验证定时采样轮的逐 lane 心跳账：两号池下
+// 一号成功、一号 fetch 失败，计数落位与代码路径一一对应——
+// rounds_started 记起跑、fetch_ok/persist_ok 分阶段推进、
+// failed_fetch 记失败并留 last_error；协程级 rounds_started 与
+// last_round_*_at 同步推进。手动刷新走同一内核但不记 lane 账，
+// 保住「调度器活没活」的判读纯度。
+func TestQuotaSamplerHeartbeat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") == "Bearer tok-y" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"userStatus":{"name":"R","planStatus":{"dailyQuotaRemainingPercent":90}}}`))
+	}))
+	defer srv.Close()
+	h := newQuotaTestHandler(t, srv)
+	h.poolTokenFuncs = func() map[string]func() string {
+		return map[string]func() string{
+			"randall": func() string { return "tok-r" },
+			"yanjian": func() string { return "tok-y" },
+		}
+	}
+	before := time.Now().Unix()
+	h.sampleQuota(context.Background())
+
+	stats := h.quotaPersistStats()
+	if stats["rounds_started"] != int64(1) || stats["rounds_aborted"] != int64(0) {
+		t.Fatalf("round counters = %+v", stats)
+	}
+	if stats["last_round_started_at"].(int64) < before ||
+		stats["last_round_finished_at"].(int64) < stats["last_round_started_at"].(int64) {
+		t.Fatalf("round timestamps = %+v", stats)
+	}
+	lanes, ok := stats["lanes"].(map[string]any)
+	if !ok || len(lanes) != 2 {
+		t.Fatalf("lanes = %+v", stats["lanes"])
+	}
+	r := lanes["randall"].(map[string]any)
+	if r["rounds_started"] != int64(1) || r["rounds_fetch_ok"] != int64(1) ||
+		r["rounds_persist_ok"] != int64(1) || r["rounds_failed"] != int64(0) {
+		t.Fatalf("randall lane = %+v", r)
+	}
+	if _, ok := r["last_error"]; ok {
+		t.Fatalf("randall last_error present on success: %+v", r)
+	}
+	y := lanes["yanjian"].(map[string]any)
+	if y["rounds_started"] != int64(1) || y["rounds_fetch_ok"] != int64(0) ||
+		y["rounds_persist_ok"] != int64(0) || y["rounds_failed"] != int64(1) {
+		t.Fatalf("yanjian lane = %+v", y)
+	}
+	if y["last_error"] == nil || y["last_error"] == "" {
+		t.Fatalf("yanjian last_error = %v, want fetch error text", y["last_error"])
+	}
+	failures := y["failures"].(map[string]any)
+	if failures["fetch"] != int64(1) || failures["no_plan"] != int64(0) || failures["persist"] != int64(0) {
+		t.Fatalf("yanjian failures = %+v", failures)
+	}
+	if y["last_started_at"].(int64) < before ||
+		y["last_finished_at"].(int64) < y["last_started_at"].(int64) {
+		t.Fatalf("yanjian timestamps = %+v", y)
+	}
+
+	// 手动刷新共用 capture 内核但不记 lane 账——混入会把「调度器死了
+	// 但刷新还在写」误读成采样轮在推进。
+	if _, err := h.refreshAccountQuota(context.Background(), "randall", "tok-r"); err != nil {
+		t.Fatal(err)
+	}
+	r2 := h.quotaPersistStats()["lanes"].(map[string]any)["randall"].(map[string]any)
+	if r2["rounds_started"] != int64(1) || r2["rounds_persist_ok"] != int64(1) {
+		t.Fatalf("manual refresh polluted lane stats: %+v", r2)
+	}
+}
+
+// TestQuotaSamplerHeartbeatNoPlan 验证「拉到但缺 planStatus」的分桶：
+// fetch_ok 照涨（拉取确实成功）、failed_no_plan 记无点可写并留
+// last_error——匿名 fallback 单号的 account="" 折叠成 default 桶，
+// 与 QuotaReport 的 ”/default 口径一致。
+func TestQuotaSamplerHeartbeatNoPlan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"userStatus":{"name":"Solo","email":"s@x.com"}}`))
+	}))
+	defer srv.Close()
+	h := newQuotaTestHandler(t, srv)
+	h.tokenFunc = func() string { return "tok-solo" }
+
+	h.sampleQuota(context.Background())
+
+	lanes := h.quotaPersistStats()["lanes"].(map[string]any)
+	d, ok := lanes["default"].(map[string]any)
+	if !ok {
+		t.Fatalf("default lane = %+v, want '' folded to default", lanes)
+	}
+	if d["rounds_started"] != int64(1) || d["rounds_fetch_ok"] != int64(1) ||
+		d["rounds_persist_ok"] != int64(0) || d["rounds_failed"] != int64(1) {
+		t.Fatalf("default lane = %+v", d)
+	}
+	failures := d["failures"].(map[string]any)
+	if failures["no_plan"] != int64(1) {
+		t.Fatalf("failures = %+v", failures)
+	}
+	if d["last_error"] != "userStatus carried no planStatus" {
+		t.Fatalf("last_error = %v", d["last_error"])
+	}
+}
+
+// TestQuotaSamplerHeartbeatPersistFail 验证落库失败的归因：fetch_ok
+// 涨了但 persist_ok 不动、failed_persist 记批停错误文本——正是
+// 「started 推进而 persist_ok 不动」三类形态里可归因的那一支
+// （有 WARN 的写失败），点挂进重放缓冲待下轮救回。
+func TestQuotaSamplerHeartbeatPersistFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"userStatus":{"name":"R","planStatus":{"dailyQuotaRemainingPercent":90}}}`))
+	}))
+	defer srv.Close()
+	h := newQuotaTestHandler(t, srv)
+	_ = h.store.Close() // 落库必败
+
+	h.sampleAccountQuota(context.Background(), "randall", "tok-r")
+
+	stats := h.quotaPersistStats()
+	if stats["pending_samples"] != 1 {
+		t.Fatalf("pending_samples = %v, want point stashed for replay", stats["pending_samples"])
+	}
+	r := stats["lanes"].(map[string]any)["randall"].(map[string]any)
+	if r["rounds_started"] != int64(1) || r["rounds_fetch_ok"] != int64(1) ||
+		r["rounds_persist_ok"] != int64(0) || r["rounds_failed"] != int64(1) {
+		t.Fatalf("randall lane = %+v", r)
+	}
+	failures := r["failures"].(map[string]any)
+	if failures["persist"] != int64(1) || failures["fetch"] != int64(0) {
+		t.Fatalf("failures = %+v", failures)
+	}
+	if r["last_error"] == nil || r["last_error"] == "" {
+		t.Fatalf("last_error = %v, want persist error text", r["last_error"])
+	}
+}
+
+// TestQuotaSamplerRoundAbort 验证轮次被 ctx 中途截断的记账：
+// rounds_started 照计（协程确实起跑），rounds_aborted 记截断，
+// lane 账一行都没有——与「ticker 没触发」（last_round_started_at
+// 冻结）区分开。
+func TestQuotaSamplerRoundAbort(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"userStatus":{"name":"R","planStatus":{}}}`))
+	}))
+	defer srv.Close()
+	h := newQuotaTestHandler(t, srv)
+	h.poolTokenFuncs = func() map[string]func() string {
+		return map[string]func() string{
+			"randall": func() string { return "tok-r" },
+			"yanjian": func() string { return "tok-y" },
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.sampleQuota(ctx)
+
+	stats := h.quotaPersistStats()
+	if stats["rounds_started"] != int64(1) || stats["rounds_aborted"] != int64(1) {
+		t.Fatalf("round counters = %+v", stats)
+	}
+	if lanes := stats["lanes"].(map[string]any); len(lanes) != 0 {
+		t.Fatalf("lanes = %+v, want none — round aborted before first lane", lanes)
 	}
 }

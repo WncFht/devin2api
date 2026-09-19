@@ -379,8 +379,9 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		data["detached"] = h.detachedStats()
 	}
 	// quota 组投配额样本落库健康账（写失败/缓冲丢弃/重放救回与缓冲
-	// 当前深度）——采样写失败此前只有 stderr WARN，写争用期丢点在
-	// 这里才可见。
+	// 当前深度）与采样轮心跳（协程级 rounds_* 计数/时刻 + 逐 lane
+	// 阶段账 lanes）——写失败与静默空洞此前只有 stderr WARN 甚至
+	// 毫无痕迹，丢点与调度器死活在这里才可见。
 	data["quota"] = h.quotaPersistStats()
 	// store 组投开库台账：opens_recent 里出现第二个 pid/build 即有别处
 	// 进程附着同一状态库（reuseport 交接残留曾静默持锁三天、stderr 零

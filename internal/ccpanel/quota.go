@@ -127,13 +127,20 @@ func (h *Handler) BeginDrain() {
 // quota_samples（每行带 account 字段，两号曲线分开画）。账号间按名序
 // 逐个采——间隔默认 5 分钟，串行两次上游调用无并发必要。ctx 是采样
 // 协程的生命周期：SetQuotaInterval 停采/重起会打断在途轮次。
+// 每轮首尾各记一次协程级心跳：ticker 还在不在触发、轮次是否被 ctx
+// 中断，投 runtime-metrics 的 quota 组——静默空洞期调度器死活靠它
+// 与逐 lane 账互证。
 func (h *Handler) sampleQuota(ctx context.Context) {
+	h.noteQuotaRoundStart()
+	aborted := false
 	for _, account := range h.quotaAccounts() {
 		if ctx.Err() != nil {
-			return
+			aborted = true
+			break
 		}
 		h.sampleAccountQuota(ctx, account.name, account.token)
 	}
+	h.noteQuotaRoundFinish(aborted)
 }
 
 // quotaAccount 是配额采样的一个账号视角：name 落 quota_samples 的
@@ -173,10 +180,15 @@ func (h *Handler) quotaAccounts() []quotaAccount {
 // sampleAccountQuota 拉取一个账号的状态并写入一行配额快照；ctx 挂在
 // 采样协程生命周期上，单号上限 120s——只约束上游拉取与投影，落库
 // 在 persistQuotaSample 里自带独立预算，不分享这段余额。
+// 首尾各记一次逐 lane 心跳：轮次走到 fetch/persist 哪一步、最近一次
+// 错误文本，供静默空洞期判别「调度器没跑」与「跑了没写」。
 func (h *Handler) sampleAccountQuota(ctx context.Context, account, token string) {
+	h.noteLaneRoundStart(account)
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	if _, _, err := h.captureAccountQuota(ctx, account, token); err != nil {
+	_, plan, persistErr, err := h.captureAccountQuota(ctx, account, token)
+	h.noteLaneRoundFinish(account, plan, persistErr, err)
+	if err != nil {
 		slog.Warn("quota sample failed", "account", account, "error", err)
 	}
 }
@@ -185,11 +197,13 @@ func (h *Handler) sampleAccountQuota(ctx context.Context, account, token string)
 // quotaUsers 身份投影、把 planStatus 快照写入 quota_samples，返回
 // 投影后的 (user, plan)。定时采样与手动刷新共用——后者把返回值回
 // 显给操作者。plan 为 nil 表示上游 200 但未携带 planStatus：身份
-// 投影照常更新，本轮只是无配额点可写，不算错误。
-func (h *Handler) captureAccountQuota(ctx context.Context, account, token string) (user, plan map[string]any, err error) {
+// 投影照常更新，本轮只是无配额点可写，不算错误。persistErr 汇报
+// 本号新点的落库结局（nil=落库或本轮无点可写）；采样侧按它记
+// persist 阶段账，刷新侧忽略——点写失败已挂重放缓冲，不算刷新错误。
+func (h *Handler) captureAccountQuota(ctx context.Context, account, token string) (user, plan map[string]any, persistErr, err error) {
 	rawUser, plan, _, err := h.fetchUserStatusAs(ctx, token)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	user = map[string]any{
 		"name":             strAny(rawUser["name"]),
@@ -209,7 +223,7 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 		// 上游 200 但缺 planStatus：不写点也不报错会让曲线静默断档，
 		// 留一行痕迹说明「拉到了但无配额数据」。
 		slog.Warn("quota sample skipped: userStatus carried no planStatus", "account", account)
-		return user, nil, nil
+		return user, nil, nil, nil
 	}
 	point := &store.QuotaSample{
 		At:                time.Now().Unix(),
@@ -239,9 +253,9 @@ func (h *Handler) captureAccountQuota(ctx context.Context, account, token string
 		point.TopUpEnabled = boolAny(tu["enabled"])
 		point.TopUpTransactionStatus = strAny(tu["transaction_status"])
 	}
-	h.persistQuotaSample(point)
+	persistErr = h.persistQuotaSample(point)
 	h.noteAccountQuotaSignal(account, plan)
-	return user, plan, nil
+	return user, plan, persistErr, nil
 }
 
 // quotaPersistRetryCap 是配额快照写失败后的重放缓冲深度：采样默认
@@ -267,7 +281,10 @@ const quotaPersistBudget = 15 * time.Second
 // 争用期内的恢复通道。写库不继承调用方 ctx：采样侧的 120s 可能已被
 // 慢 fetch 耗尽，refresh 侧的 request ctx 可能随操作者断连取消，
 // 已取回的数据点不该为这些生命周期陪葬。
-func (h *Handler) persistQuotaSample(point *store.QuotaSample) {
+// 返回停批的那条写错误；nil 表示新点已落库（含 OR IGNORE 幂等命中）。
+// 败在挂账重放行时新点未尝试即挂回——返回值同样是那行错误，采样侧
+// 据它记 failed_persist 与 last_error。
+func (h *Handler) persistQuotaSample(point *store.QuotaSample) error {
 	h.quotaPendingMu.Lock()
 	pending := h.pendingQuotaSamples
 	h.pendingQuotaSamples = nil
@@ -280,10 +297,11 @@ func (h *Handler) persistQuotaSample(point *store.QuotaSample) {
 			slog.Warn("quota sample persist failed", "account", r.Account, "error", err)
 			h.noteQuotaReplayed(min(i, len(pending)))
 			h.stashQuotaSamples(rows[i:])
-			return
+			return err
 		}
 	}
 	h.noteQuotaReplayed(len(pending))
+	return nil
 }
 
 // stashQuotaSamples 把未落库的配额点挂回重放缓冲；超出深度的最老点
@@ -317,20 +335,142 @@ func (h *Handler) noteQuotaReplayed(n int) {
 	h.quotaPendingMu.Unlock()
 }
 
-// quotaPersistStats 返回配额样本落库健康账快照，投 runtime-metrics 的
-// quota 组。计数口径与 gate 组 persist_* 对齐：persist_failures 按写
-// 尝试计（首个失败即停手、剩余整段挂回——一批至多记一次失败），
-// persist_dropped/persist_replayed 按点计；pending_samples 是重放
-// 缓冲当前深度，回答「此刻还有没有未落库的欠账」。
+// quotaLaneStats 是单 lane 的定时采样轮心跳簿记（quotaSamplerMu 内）：
+// 每轮各阶段计数 + 最近起止时刻与错误文本。只记定时采样路径——手动
+// 刷新共用 capture 内核但不记这里，保住「调度器活没活、这轮走到哪
+// 步」的判读纯度。lastStartedAt>lastFinishedAt 即在飞轮或楔死轮。
+type quotaLaneStats struct {
+	roundsStarted   int64  // 轮次起跑（sampleAccountQuota 入口）
+	roundsFetchOK   int64  // userStatus 拉取成功（含无 planStatus 轮）
+	roundsPersistOK int64  // 本号新点落库（含 OR IGNORE 幂等命中）
+	failedFetch     int64  // 拉取失败（对应 WARN quota sample failed）
+	failedNoPlan    int64  // 拉到但缺 planStatus（WARN ...skipped）
+	failedPersist   int64  // 落库批停于写错误（WARN ...persist failed）
+	lastStartedAt   int64  // 最近一轮起跑时刻（unix 秒）
+	lastFinishedAt  int64  // 最近一轮收束时刻（unix 秒）
+	lastError       string // 最近一次失败文本；跨成功保留，恢复后仍可溯源
+}
+
+// noteQuotaRoundStart/noteQuotaRoundFinish 记一轮定时采样的协程级
+// 心跳：rounds_started 每次 sampleQuota 调用都计（含空号池轮），
+// rounds_aborted 只计被 ctx 中途截断的轮——停采/重起/排空取消在途
+// 轮次是它唯一的成因，据此与「ticker 干脆不触发」（last_round_
+// started_at 冻结）区分开。
+func (h *Handler) noteQuotaRoundStart() {
+	h.quotaSamplerMu.Lock()
+	h.quotaRoundsStarted++
+	h.quotaLastRoundStartedAt = time.Now().Unix()
+	h.quotaSamplerMu.Unlock()
+}
+
+func (h *Handler) noteQuotaRoundFinish(aborted bool) {
+	h.quotaSamplerMu.Lock()
+	if aborted {
+		h.quotaRoundsAborted++
+	}
+	h.quotaLastRoundFinishedAt = time.Now().Unix()
+	h.quotaSamplerMu.Unlock()
+}
+
+// noteLaneRoundStart/noteLaneRoundFinish 记单 lane 轮次的阶段账，
+// 配合协程级心跳把静默空洞归因到三类形态：「调度器没起跑」（各
+// lane lastStartedAt 同刻冻结）、「fetch 与 persist 之间丢了」
+// （fetch_ok 涨而 persist_ok/failed_persist 都不动）、「WARN 写了
+// 但 stderr 丢了」（failed_* 涨而无对应日志行）。
+func (h *Handler) noteLaneRoundStart(account string) {
+	h.quotaSamplerMu.Lock()
+	defer h.quotaSamplerMu.Unlock()
+	st := h.quotaLaneStatsLocked(account)
+	st.roundsStarted++
+	st.lastStartedAt = time.Now().Unix()
+}
+
+func (h *Handler) noteLaneRoundFinish(account string, plan map[string]any, persistErr, err error) {
+	h.quotaSamplerMu.Lock()
+	defer h.quotaSamplerMu.Unlock()
+	st := h.quotaLaneStatsLocked(account)
+	st.lastFinishedAt = time.Now().Unix()
+	switch {
+	case err != nil:
+		st.failedFetch++
+		st.lastError = err.Error()
+	case plan == nil:
+		st.roundsFetchOK++
+		st.failedNoPlan++
+		st.lastError = "userStatus carried no planStatus"
+	case persistErr != nil:
+		st.roundsFetchOK++
+		st.failedPersist++
+		st.lastError = persistErr.Error()
+	default:
+		st.roundsFetchOK++
+		st.roundsPersistOK++
+	}
+}
+
+// quotaLaneStatsLocked 取该号的逐 lane 账簿，缺则建（quotaSamplerMu
+// 内调用）；匿名空串按 ”/default 折叠归名，与 QuotaReport 同口径。
+func (h *Handler) quotaLaneStatsLocked(account string) *quotaLaneStats {
+	if h.quotaLanes == nil {
+		h.quotaLanes = map[string]*quotaLaneStats{}
+	}
+	name := account
+	if name == "" {
+		name = "default"
+	}
+	st, ok := h.quotaLanes[name]
+	if !ok {
+		st = &quotaLaneStats{}
+		h.quotaLanes[name] = st
+	}
+	return st
+}
+
+// quotaPersistStats 返回配额样本落库健康账与采样轮心跳快照，投
+// runtime-metrics 的 quota 组。计数口径与 gate 组 persist_* 对齐：
+// persist_failures 按写尝试计（首个失败即停手、剩余整段挂回——一批
+// 至多记一次失败），persist_dropped/persist_replayed 按点计；
+// pending_samples 是重放缓冲当前深度，回答「此刻还有没有未落库的
+// 欠账」。rounds_*/last_round_*_at 是协程级心跳，lanes 是逐 lane
+// 阶段账（rounds_failed=三类失败合计，failures 分原因）——静默
+// 空洞期判别调度器死活与各 lane 止步阶段的唯一面。
 func (h *Handler) quotaPersistStats() map[string]any {
 	h.quotaPendingMu.Lock()
-	defer h.quotaPendingMu.Unlock()
-	return map[string]any{
+	out := map[string]any{
 		"persist_failures": h.quotaPersistFailures,
 		"persist_dropped":  h.quotaPersistDropped,
 		"persist_replayed": h.quotaPersistReplayed,
 		"pending_samples":  len(h.pendingQuotaSamples),
 	}
+	h.quotaPendingMu.Unlock()
+	h.quotaSamplerMu.Lock()
+	out["rounds_started"] = h.quotaRoundsStarted
+	out["rounds_aborted"] = h.quotaRoundsAborted
+	out["last_round_started_at"] = h.quotaLastRoundStartedAt
+	out["last_round_finished_at"] = h.quotaLastRoundFinishedAt
+	lanes := make(map[string]any, len(h.quotaLanes))
+	for name, st := range h.quotaLanes {
+		lane := map[string]any{
+			"rounds_started":    st.roundsStarted,
+			"rounds_fetch_ok":   st.roundsFetchOK,
+			"rounds_persist_ok": st.roundsPersistOK,
+			"rounds_failed":     st.failedFetch + st.failedNoPlan + st.failedPersist,
+			"failures": map[string]any{
+				"fetch":   st.failedFetch,
+				"no_plan": st.failedNoPlan,
+				"persist": st.failedPersist,
+			},
+			"last_started_at":  st.lastStartedAt,
+			"last_finished_at": st.lastFinishedAt,
+		}
+		if st.lastError != "" {
+			lane["last_error"] = st.lastError
+		}
+		lanes[name] = lane
+	}
+	h.quotaSamplerMu.Unlock()
+	out["lanes"] = lanes
+	return out
 }
 
 // noteAccountQuotaSignal 把一次成功探测的日/周剩余百分比回灌给池侧
@@ -356,7 +496,7 @@ func (h *Handler) noteAccountQuotaSignal(account string, plan map[string]any) {
 // 上游没报 planStatus。与定时采样同秒撞 (account,at) 唯一索引时
 // INSERT OR IGNORE 静默丢点，不算失败。
 func (h *Handler) refreshAccountQuota(ctx context.Context, account, token string) (map[string]any, error) {
-	user, plan, err := h.captureAccountQuota(ctx, account, token)
+	user, plan, _, err := h.captureAccountQuota(ctx, account, token)
 	if err != nil {
 		return nil, err
 	}

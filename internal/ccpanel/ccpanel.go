@@ -101,6 +101,17 @@ type Handler struct {
 	quotaPersistFailures int
 	quotaPersistDropped  int
 	quotaPersistReplayed int
+	// quotaSamplerMu 管采样轮心跳簿记：quotaRounds*/quotaLastRound*At
+	// 是协程级（每次 sampleQuota 调用记一轮）计数与时刻，quotaLanes
+	// 是逐 lane 的阶段账。全内存、进程生命周期——quota_samples 静默
+	// 空洞（进程活着、零 WARN、行断档）的归因面：调度器冻结/阶段
+	// 丢失/stderr 丢行三类形态靠这组账互证区分。
+	quotaSamplerMu           sync.Mutex
+	quotaRoundsStarted       int64
+	quotaRoundsAborted       int64
+	quotaLastRoundStartedAt  int64
+	quotaLastRoundFinishedAt int64
+	quotaLanes               map[string]*quotaLaneStats
 
 	// debug 是请求目录的读取入口（logs 表行查询走 store）。
 	debug *debuglog.Manager
