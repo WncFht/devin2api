@@ -21,6 +21,12 @@ const (
 	// statusCacheTTL 是 /admin/status 聚合快照的缓存寿命：面板按页面
 	// 加载与轮询消费，秒级陈旧无感。
 	statusCacheTTL = 30 * time.Second
+	// swrRefreshTimeout 是 swr 后台刷新的超时上界：刷新脱离调用方
+	// ctx，不给上限的 fetch 一旦卡死会让 inflight 永不清除——后续
+	// Get 永远回旧快照且不再触发重拉。上界把永漏降级为「本次刷新
+	// 失败、下一趟 Get 重试」；取值压过 sqlite busy_timeout（30s），
+	// 正常慢查询仍由 fetch 自己的超时先报。
+	swrRefreshTimeout = 60 * time.Second
 )
 
 // ttlCache 是「TTL 快照 + singleflight」缓存。swr=false 时过期调用方
@@ -77,7 +83,11 @@ func (c *ttlCache[T]) Get(ctx context.Context) (T, error) {
 		snap := c.snap
 		c.mu.Unlock()
 		if c.swr && hasSnap {
-			go func() { _ = c.run(context.Background(), done) }()
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), swrRefreshTimeout)
+				defer cancel()
+				_ = c.run(ctx, done)
+			}()
 			return snap, nil
 		}
 		// WithoutCancel：调用方断连不掐死共享拉取，fetch 自带的
