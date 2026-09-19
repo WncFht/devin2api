@@ -1332,8 +1332,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         return `<tr>
           <td><a class="model-link" href="/web/logs.html?error_stage=${encodeURIComponent(stage)}">${escapeHtml(stage)}</a></td>
           <td>${formatNumber(n)}</td>
-          <td><div style="display:flex;align-items:center;gap:8px;">
-            <div class="runtime-transcript-progress" style="flex:1;min-width:64px;">
+          <td><div class="stats-progress-cell">
+            <div class="runtime-transcript-progress">
               <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--exceeded" style="width:${pct.toFixed(1)}%"></span>
             </div>
             <span class="stats-value-dynamic">${pct.toFixed(1)}%</span>
@@ -1362,8 +1362,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         const tone = pct < 50 ? 'normal' : pct < 80 ? 'warning' : 'exceeded';
         return `<tr>
           <td>${escapeHtml(m.name || usageT('stats.unknownModel', '未知模型'))}</td>
-          <td><div style="display:flex;align-items:center;gap:8px;">
-            <div class="runtime-transcript-progress" style="flex:1;min-width:64px;">
+          <td><div class="stats-progress-cell">
+            <div class="runtime-transcript-progress">
               <span class="runtime-transcript-progress-bar runtime-transcript-progress-bar--${tone}" style="width:${Math.min(100, pct).toFixed(1)}%"></span>
             </div>
             <span class="stats-value-dynamic">${pct.toFixed(0)}%</span>

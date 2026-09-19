@@ -102,6 +102,18 @@
   background: var(--error-500);
 }
 
+/* 错误阶段/上下文填充表格：行内进度条 + 数值 */
+.stats-progress-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stats-progress-cell .runtime-transcript-progress {
+  flex: 1;
+  min-width: 64px;
+}
+
 a.model-tag.model-link {
   text-decoration: none;
   cursor: pointer;
