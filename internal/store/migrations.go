@@ -253,7 +253,7 @@ var schemaMigrations = []migration{
 		// 与存量库，这里登记版本如实反映演进史（同 0017 先例）。历史
 		// 开库事件本就无迹可考，表从部署后新打开起累计。
 		version: "0018_store_opens",
-		apply: func(_ *sql.Tx) error {
+		apply: func(context.Context, dbtx) error {
 			return nil
 		},
 	},
