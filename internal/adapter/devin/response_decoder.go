@@ -324,12 +324,22 @@ func (decoder *responseDecoder) finish(upstreamErr error) []llm.ResponseEvent {
 		// 流在应用层被截断；此处合成 Stop 会把截断伪装成 end_turn，
 		// 下游 agent 会把半完成的任务当作完成（实测复现：Codex 在宣告
 		// 继续调用工具后直接 task_complete）。astra/sol 家族例外——
-		// 它们以 phase=final_answer 帧声明答案完整、不发 stopReason，
-		// final_answer 即上游自己的完成标记，按 Stop 收口。
-		if !decoder.sawFinalAnswer {
+		// 它们不发 stopReason：文本轮以 phase=final_answer 帧声明答案
+		// 完整；工具调用轮连 phase 都没有（实测 deltaToolCalls → usage →
+		// responseDimensionGroups → 干净 EOF），靠参数流自检完整性。
+		// final_answer 是上游自己的完成声明（与 stopReason 同权），在场
+		// 时按它收口：有工具调用落 ToolUse、纯文本落 Stop——其存在与否
+		// 不再追问参数自检结果，参数体照常走 complete 的修偏。
+		switch {
+		case decoder.sawFinalAnswer && len(decoder.tools) > 0:
+			reason = llm.StopReasonToolUse
+		case decoder.sawFinalAnswer:
+			reason = llm.StopReasonStop
+		case decoder.toolCallsComplete():
+			reason = llm.StopReasonToolUse
+		default:
 			return decoder.fail(errors.New("devin stream ended without stop reason"))
 		}
-		reason = llm.StopReasonStop
 	}
 	if reason == llm.StopReasonError {
 		if decoder.providerRefusal {
@@ -738,6 +748,32 @@ func (decoder *responseDecoder) findTool(delta *devinproto.ExaCodeiumCommonPb_Ch
 		return nil
 	}
 	return last
+}
+
+// toolCallsComplete 判定缺停止标记的干净 EOF 下工具调用是否已完整交付：
+// 参数流是累计文本，截断几乎必然落在非法 JSON 半途——native/托管/包装
+// 调用的累计参数必须能整解析为 JSON 对象（空参数按无参调用计全，
+// complete 本就把空参数落成 {}）；freeform 通道（invalid_json_str/
+// is_custom_tool_call，custom 声明经 wrapped 走 JSON 校验分支）参数
+// 是原文无形态可校验，非空即计全——其截断无法在带内识别，代价是
+// 客户端拿到缺尾原文而非一次假完成。
+func (decoder *responseDecoder) toolCallsComplete() bool {
+	if len(decoder.tools) == 0 {
+		return false
+	}
+	for _, state := range decoder.tools {
+		args := state.arguments.String()
+		if state.call.Custom && !state.wrapped {
+			if args == "" {
+				return false
+			}
+			continue
+		}
+		if args != "" && !llm.IsJSONObject(json.RawMessage(args)) {
+			return false
+		}
+	}
+	return true
 }
 
 // complete 产出正常收尾事件序列：先置 StopReason，再逐个收尾
