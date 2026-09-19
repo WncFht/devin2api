@@ -63,15 +63,7 @@ func EncodeResponse(message *llm.AssistantMessage, model string) ([]byte, error)
 	if message == nil {
 		return nil, errors.New("response message is nil")
 	}
-	if model == "" {
-		model = message.ResponseModel
-	}
-	if model == "" {
-		model = message.Model
-	}
-	if model == "" {
-		model = "devin"
-	}
+	model = common.EchoModel(model, message, "devin")
 	messageObj := messageToChat(message)
 	response := map[string]any{
 		"id":      randid.Prefixed("chatcmpl-"),

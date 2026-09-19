@@ -93,15 +93,7 @@ func EncodeResponse(message *llm.AssistantMessage, model string, toolNameMap map
 	if err != nil {
 		return nil, err
 	}
-	if model == "" {
-		model = message.ResponseModel
-	}
-	if model == "" {
-		model = message.Model
-	}
-	if model == "" {
-		model = "devin"
-	}
+	model = common.EchoModel(model, message, "devin")
 	responseID := message.ResponseID
 	if !strings.HasPrefix(responseID, "resp_") {
 		responseID = randid.Prefixed("resp_")
