@@ -70,6 +70,13 @@ const stateQueueDrainBudget = 5 * time.Second
 // 即清的旧冷却。
 func (s *Store) QueueState(key, value string, del bool) {
 	select {
+	case <-s.stateQueueDone:
+		// 消费协程已退：写入注定无人消费，记 drop 而不是静默落进死队列。
+		s.stateQueueDrops.Add(1)
+		return
+	default:
+	}
+	select {
 	case s.stateQueue <- stateWrite{key: key, value: value, del: del}:
 	default:
 		s.stateQueueDrops.Add(1)

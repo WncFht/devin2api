@@ -717,3 +717,30 @@ func TestIsBusyClassifiesDriverLockError(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseStopsStateQueueWorker 钉住关停契约：Close 停 runtime_state
+// 写协程后返回、stateQueueDone 闭合；关停后的 QueueState 写入计 drop
+// 而非静默落进死队列。
+func TestCloseStopsStateQueueWorker(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.QueueState("gate:test", "1", false)
+	closed := make(chan struct{})
+	go func() { _ = s.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close did not return — state queue worker wedged")
+	}
+	select {
+	case <-s.stateQueueDone:
+	default:
+		t.Fatal("stateQueueDone still open after Close")
+	}
+	s.QueueState("gate:test", "2", false)
+	if got := s.StateQueueDrops(); got != 1 {
+		t.Fatalf("StateQueueDrops = %d, want 1 (post-close write must count as drop)", got)
+	}
+}
