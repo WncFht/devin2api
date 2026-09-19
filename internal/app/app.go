@@ -295,7 +295,9 @@ func modelEntry(m adapter.ModelInfo) map[string]any {
 // listModels 返回 OpenAI 兼容的 GET /v1/models 列表。
 func (application *App) listModels(writer http.ResponseWriter, request *http.Request) {
 	models, err := application.adapter.ListModels(request.Context())
-	if err != nil {
+	// ErrStaleCatalog 兜底：models 是可用的过期快照，照常下发——陈旧目录
+	// 比 5xx 空列表危害小，刷新失败已由 adapter 落痕。
+	if err != nil && !errors.Is(err, adapter.ErrStaleCatalog) {
 		writeUpstreamCatalogError(writer, err)
 		return
 	}
@@ -316,7 +318,7 @@ func (application *App) getModel(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	models, err := application.adapter.ListModels(request.Context())
-	if err != nil {
+	if err != nil && !errors.Is(err, adapter.ErrStaleCatalog) {
 		writeUpstreamCatalogError(writer, err)
 		return
 	}
@@ -941,7 +943,19 @@ func (application *App) createCompletion(
 		}
 		if used, limit, window, exceeded := application.tokens.CostLimitState(authTok.ID); exceeded {
 			tokenBlocked = true
-			windowName := map[string]string{"5h": "5h", "daily": "Daily", "weekly": "Weekly", "monthly": "Monthly", "total": "Total"}[window]
+			// 窗口词表以 CostLimitState 为准；词表外的新窗口名原样透出，
+			// 不静默渲染成空串。
+			windowName := window
+			switch window {
+			case "daily":
+				windowName = "Daily"
+			case "weekly":
+				windowName = "Weekly"
+			case "monthly":
+				windowName = "Monthly"
+			case "total":
+				windowName = "Total"
+			}
 			writeLoggedError(writer, recorder, protocol, &completion, debuglog.ErrStageTokenLimit, http.StatusTooManyRequests, fmt.Errorf("%s cost limit exceeded: $%.2f used of $%.2f limit", windowName, float64(used)/1e6, float64(limit)/1e6))
 			return
 		}

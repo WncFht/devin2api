@@ -5,9 +5,17 @@ package adapter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/WncFht/devin2api/internal/llm"
 )
+
+// ErrStaleCatalog 是 ListModels 的陈旧兜底哨兵：目录刷新失败但旧缓存
+// 尚在时，实现返回 (非空 models, 包裹本哨兵的 error)——models 是可用的
+// 过期快照，error 让「本次刷新其实失败了」不被 nil 吞掉。按 err!=nil
+// 即拒绝服务的调用方会把可用陈旧目录误当全损，必须 errors.Is 放行；
+// 号池这类要记 lane 失败证据的调用方靠它区分「真没拉到」与「兜底成功」。
+var ErrStaleCatalog = errors.New("adapter: serving stale model catalog")
 
 // ModelInfo 是对外暴露的模型目录条目（OpenAI /v1/models 形状）。
 type ModelInfo struct {
@@ -43,6 +51,8 @@ type ModelInfo struct {
 type Adapter interface {
 	// Stream 开始一次或多次助手响应的流式生成。
 	Stream(context.Context, llm.RequestMessages) (llm.ResponseStream, error)
-	// ListModels 返回当前账号可用的模型目录；失败时返回错误。
+	// ListModels 返回当前账号可用的模型目录；失败时返回错误。刷新失败
+	// 但旧缓存尚在时可返回非空 models 加 errors.Is(ErrStaleCatalog) 的
+	// 错误——调用方应照旧下发 models，同时能拿到本次刷新失败的信号。
 	ListModels(context.Context) ([]ModelInfo, error)
 }
