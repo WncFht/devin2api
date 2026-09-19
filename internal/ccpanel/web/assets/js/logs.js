@@ -125,6 +125,11 @@ let currentLogsPage = 1;
 let logsPageSize = 100;
 let totalLogsPages = 1;
 let totalLogs = 0;
+// keyset 游标：页号 → 取该页用的 before_id（上一页最旧行 id）；null=该页按 offset 取。
+// 顺序翻页时由 nextLogsPage 播种；跳页/筛选变化时整表重置。
+let logsPageCursors = { 1: null };
+let logsPageLastId = null; // 当前页最旧行 id，是下一页的 before_id
+let logsHasMore = false;   // 响应顶层 has_more：窗外仍有更早历史（count 缺席的深页判尾页用）
 let currentLogsCustomTimeRange = null;
 let authTokens = []; // 令牌列表
 let logsModelCombobox = null; // 模型筛选组合框
@@ -142,7 +147,14 @@ let latestActiveRequests = []; // 缓存 ui.js 最近一次推送的活动请求
 let lastActiveRequestStates = null; // Map<id, fingerprint>：上次活跃请求状态，用于检测请求结束/上游重试
 let logsLoadInFlight = false;
 let logsLoadPending = false;
-// logsLoadScheduled 已被 _scheduleLoadTimer 取代
+
+function resetLogsPagination() {
+  currentLogsPage = 1;
+  totalLogsPages = 1;
+  logsPageCursors = { 1: null };
+  logsPageLastId = null;
+  logsHasMore = false;
+}
 
 // === 列显隐 ===
 const LOGS_COL_STORAGE_KEY = 'ccload_logs_columns';
@@ -758,25 +770,24 @@ async function load(skipLoading = false) {
     if (!response.success) throw new Error(response.error || i18nText('logs.loadFailed', '无法加载请求日志'));
 
     const data = response.data || [];
+    logsHasMore = response.has_more === true;
+    logsPageLastId = (Array.isArray(data) && data.length)
+      ? Number(data[data.length - 1].id) || null
+      : null;
     // 提示条（管线前拒绝事件环）与列表渲染同源更新。
     updateLogsListHint(response);
 
     // 把日志中出现的模型/状态码合并进筛选下拉（无需刷新页面）
     mergeLogsFilterOptions(data);
 
-    // 精确计算总页数（基于后端返回的count字段）
+    // 总页数：count 只在首页返回精确值；深页用 has_more 判尾页
     if (typeof response.count === 'number') {
       totalLogs = response.count;
       totalLogsPages = Math.ceil(totalLogs / logsPageSize) || 1;
-    } else if (Array.isArray(data)) {
-      // 降级方案：后端未返回count时使用旧逻辑
-      if (data.length === logsPageSize) {
-        totalLogsPages = Math.max(currentLogsPage + 1, totalLogsPages);
-      } else if (data.length < logsPageSize && currentLogsPage === 1) {
-        totalLogsPages = 1;
-      } else if (data.length < logsPageSize) {
-        totalLogsPages = currentLogsPage;
-      }
+    } else if (logsHasMore) {
+      totalLogsPages = Math.max(currentLogsPage + 1, totalLogsPages);
+    } else {
+      totalLogsPages = currentLogsPage;
     }
 
     updatePagination();
@@ -811,8 +822,9 @@ async function load(skipLoading = false) {
   } finally {
     logsLoadInFlight = false;
     if (logsLoadPending) {
+      // 在途期间攒下的加载意图立即排空（skipLoading 保行不闪），不再过 debounce
       logsLoadPending = false;
-      scheduleLoad();
+      load(true);
     }
   }
 }
@@ -1522,6 +1534,7 @@ function prevLogsPage() {
 
 function nextLogsPage() {
   if (currentLogsPage < totalLogsPages) {
+    if (logsPageLastId) logsPageCursors[currentLogsPage + 1] = logsPageLastId;
     currentLogsPage++;
     load();
   }
@@ -1529,6 +1542,7 @@ function nextLogsPage() {
 
 function lastLogsPage() {
   if (currentLogsPage < totalLogsPages) {
+    delete logsPageCursors[totalLogsPages]; // 跳页按 offset 语义，不用陈旧锚点
     currentLogsPage = totalLogsPages;
     load();
   }
@@ -1551,8 +1565,9 @@ function jumpToPage() {
     return;
   }
 
-  // 跳转到目标页
+  // 跳转到目标页（按 offset 语义，不用陈旧锚点）
   if (targetPage !== currentLogsPage) {
+    delete logsPageCursors[targetPage];
     currentLogsPage = targetPage;
     load();
   }
@@ -1562,8 +1577,7 @@ function jumpToPage() {
 }
 
 function applyFilter() {
-  currentLogsPage = 1;
-  totalLogsPages = 1;
+  resetLogsPagination();
 
   window.persistFilterState({
     key: LOGS_FILTER_KEY,
@@ -1597,8 +1611,7 @@ async function resetLogsFilters() {
   const defaults = getDefaultLogsFilters();
 
   currentLogsCustomTimeRange = null;
-  currentLogsPage = 1;
-  totalLogsPages = 1;
+  resetLogsPagination();
   rememberExactLogsFilters({
     ...defaults,
     modelExact: false
@@ -1864,7 +1877,6 @@ async function initFilters(restoredFilters, preloaded) {
         currentLogsCustomTimeRange = null;
       }
       currentLogsPage = 1;
-      totalLogsPages = 1;
       await loadLogsFilterOptions(nextRange);
       applyFilter();
     }
@@ -1892,7 +1904,7 @@ async function initFilters(restoredFilters, preloaded) {
           key: LOGS_FILTER_KEY,
           getValues: getLogsFilters
         });
-        currentLogsPage = 1;
+        resetLogsPagination();
         load();
       },
       ...(preloaded ? { preloadedTokens: preloaded.authTokens } : {})
@@ -2042,13 +2054,18 @@ function getLogsFilters() {
 }
 
 function buildLogsRequestParams() {
-  const params = window.FilterQuery.buildRequestParams(getLogsFilters(), LOGS_FILTER_FIELDS, {
-    baseParams: {
-      limit: logsPageSize.toString(),
-      offset: ((currentLogsPage - 1) * logsPageSize).toString()
-    }
-  });
-  appendLogsTimeRangeParams(params, getLogsFilters());
+  const filters = getLogsFilters();
+  // 顺序翻页命中有播种的 keyset 游标 → before_id 恒定成本；其余路径（跳页/
+  // 首页/筛选后）走 offset。两参数后端取交，前端只发其一。
+  const cursor = logsPageCursors[currentLogsPage];
+  const baseParams = { limit: logsPageSize.toString() };
+  if (cursor) {
+    baseParams.before_id = String(cursor);
+  } else {
+    baseParams.offset = ((currentLogsPage - 1) * logsPageSize).toString();
+  }
+  const params = window.FilterQuery.buildRequestParams(filters, LOGS_FILTER_FIELDS, { baseParams });
+  appendLogsTimeRangeParams(params, filters);
   return params;
 }
 
@@ -2227,7 +2244,7 @@ window.addEventListener('pageshow', async function (event) {
       syncLogSourceVisibility();
 
       // 重新加载数据
-      currentLogsPage = 1;
+      resetLogsPagination();
       load();
     }
   }
