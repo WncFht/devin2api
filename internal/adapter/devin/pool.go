@@ -1548,6 +1548,68 @@ func (pool *Pool) FlushPendingWindows(ctx context.Context) {
 	wg.Wait()
 }
 
+// LaneSnapshot 是单条 lane 的遥测快照：闸门/保温/脱钩完成缓存/池侧
+// 状态在同一次遍历中收齐，与 /admin/runtime-metrics 的 accounts.<name>
+// 各组一一对应。
+type LaneSnapshot struct {
+	Gate     GateStats     `json:"gate"`
+	Warm     WarmStats     `json:"warm"`
+	Detached DetachedStats `json:"detached"`
+	State    LaneState     `json:"lane"`
+}
+
+// PoolSnapshot 是号池遥测的一次性快照：消费方此前要各调一个扇出方法、
+// 每遍各过一遍锁，拼出的是互不一致的时间切面；Snapshot 一次遍历收齐
+// 全部 lane 的读数——Gate/Warm 是首 lane 的后兼容顶层视图，Detached
+// 是全 lane 聚合（计数求和、事件环按时刻归并），Accounts 按 lane 名
+// 索引逐号视图。Aliases/Config 是各 lane 一致的全局字段（取首 lane；
+// Config.Identity 仍是首 lane 自己的值）。TokenFuncs 是按号索引的活
+// 凭据读取口——脱敏环与配额采样要按需重读，给的是句柄不是冻结值。
+type PoolSnapshot struct {
+	Gate       GateStats                `json:"gate"`
+	Warm       WarmStats                `json:"warm"`
+	Detached   DetachedStats            `json:"detached"`
+	Accounts   map[string]LaneSnapshot  `json:"accounts"`
+	Aliases    map[string]string        `json:"aliases"`
+	Config     Config                   `json:"config"`
+	TokenFuncs map[string]func() string `json:"-"`
+}
+
+// Snapshot 一次遍历收齐全池遥测：逐 lane 的闸门/保温/脱钩/池侧状态
+// （绑定会话计数走单次 boundSessionCounts 统算）、首 lane 的顶层后
+// 兼容段、全 lane 聚合的脱钩段，以及别名与配置视图。空池时各段回
+// 零值，Accounts/TokenFuncs 为空 map。
+func (pool *Pool) Snapshot() PoolSnapshot {
+	lanes := pool.snapshot()
+	boundCounts := pool.boundSessionCounts()
+	snap := PoolSnapshot{
+		Accounts:   make(map[string]LaneSnapshot, len(lanes)),
+		TokenFuncs: make(map[string]func() string, len(lanes)),
+	}
+	perLane := make(map[string]DetachedStats, len(lanes))
+	for _, lane := range lanes {
+		ls := LaneSnapshot{
+			Gate:     lane.adapter.GateStats(),
+			Warm:     lane.adapter.WarmStats(),
+			Detached: lane.adapter.DetachedStats(),
+			State:    lane.state(),
+		}
+		ls.State.BoundSessions = boundCounts[lane]
+		snap.Accounts[lane.name] = ls
+		perLane[lane.name] = ls.Detached
+		snap.TokenFuncs[lane.name] = lane.adapter.TokenFunc()
+	}
+	snap.Detached = mergeDetachedStats(perLane)
+	if lane := pool.firstLane(); lane != nil {
+		ls := snap.Accounts[lane.name]
+		snap.Gate = ls.Gate
+		snap.Warm = ls.Warm
+		snap.Aliases = lane.adapter.Aliases()
+		snap.Config = lane.adapter.CurrentConfig()
+	}
+	return snap
+}
+
 // TokenFunc 返回「首 lane 当前凭据」的读取函数：每次求值重解析
 // firstLane——热更摘掉首号或模式切换后，面板 seat/状态类调用
 // 落到当前首 lane 而不是已关闭 lane 的冻结 token。要按号取凭据
@@ -1576,37 +1638,31 @@ func (pool *Pool) TokenFuncs() map[string]func() string {
 
 // GateStats 返回首 lane 闸门快照（顶层 gate 段的后兼容形态）；空池回零值。
 func (pool *Pool) GateStats() GateStats {
-	if lane := pool.firstLane(); lane != nil {
-		return lane.adapter.GateStats()
-	}
-	return GateStats{}
+	return pool.Snapshot().Gate
 }
 
 // WarmStats 返回首 lane 保温快照（顶层 warm 段的后兼容形态）；空池回零值。
 func (pool *Pool) WarmStats() WarmStats {
-	if lane := pool.firstLane(); lane != nil {
-		return lane.adapter.WarmStats()
-	}
-	return WarmStats{}
+	return pool.Snapshot().Warm
 }
 
 // AccountGateStats 返回各 lane 的闸门快照（按账号名索引），
 // /admin/runtime-metrics 的 accounts 段透出。
 func (pool *Pool) AccountGateStats() map[string]GateStats {
-	lanes := pool.snapshot()
-	stats := make(map[string]GateStats, len(lanes))
-	for _, lane := range lanes {
-		stats[lane.name] = lane.adapter.GateStats()
+	accounts := pool.Snapshot().Accounts
+	stats := make(map[string]GateStats, len(accounts))
+	for name, ls := range accounts {
+		stats[name] = ls.Gate
 	}
 	return stats
 }
 
 // AccountWarmStats 返回各 lane 的保温快照（按账号名索引）。
 func (pool *Pool) AccountWarmStats() map[string]WarmStats {
-	lanes := pool.snapshot()
-	stats := make(map[string]WarmStats, len(lanes))
-	for _, lane := range lanes {
-		stats[lane.name] = lane.adapter.WarmStats()
+	accounts := pool.Snapshot().Accounts
+	stats := make(map[string]WarmStats, len(accounts))
+	for name, ls := range accounts {
+		stats[name] = ls.Warm
 	}
 	return stats
 }
@@ -1616,17 +1672,17 @@ func (pool *Pool) AccountWarmStats() map[string]WarmStats {
 // 与 gate/warm 的闩态/分位数不同，没有不可聚合字段）；空池回零值。
 // 逐号视图见 AccountDetachedStats。
 func (pool *Pool) DetachedStats() DetachedStats {
-	return mergeDetachedStats(pool.AccountDetachedStats())
+	return pool.Snapshot().Detached
 }
 
 // AccountDetachedStats 返回各 lane 的脱钩完成缓存快照（按账号名索引），
 // /admin/runtime-metrics 的 accounts.<name>.detached 组透出——缓存
 // per-lane，跨 lane 重试恒 miss，孤儿/attach 率必须逐号看。
 func (pool *Pool) AccountDetachedStats() map[string]DetachedStats {
-	lanes := pool.snapshot()
-	stats := make(map[string]DetachedStats, len(lanes))
-	for _, lane := range lanes {
-		stats[lane.name] = lane.adapter.DetachedStats()
+	accounts := pool.Snapshot().Accounts
+	stats := make(map[string]DetachedStats, len(accounts))
+	for name, ls := range accounts {
+		stats[name] = ls.Detached
 	}
 	return stats
 }
@@ -1643,13 +1699,10 @@ func (pool *Pool) EvictDetachedByOriginDir(dir string) {
 // AccountLaneStates 返回各 lane 的池侧状态快照（按账号名索引），
 // /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
 func (pool *Pool) AccountLaneStates() map[string]LaneState {
-	lanes := pool.snapshot()
-	boundCounts := pool.boundSessionCounts()
-	states := make(map[string]LaneState, len(lanes))
-	for _, lane := range lanes {
-		state := lane.state()
-		state.BoundSessions = boundCounts[lane]
-		states[lane.name] = state
+	accounts := pool.Snapshot().Accounts
+	states := make(map[string]LaneState, len(accounts))
+	for name, ls := range accounts {
+		states[name] = ls.State
 	}
 	return states
 }
