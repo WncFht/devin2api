@@ -1570,24 +1570,21 @@ function settingDisabledAttributes(setting) {
   return setting.editable === false ? 'disabled' : '';
 }
 
-// 初始化事件委托（替代 inline onclick）
+// 委托挂在 tbody（renderSettings 可重入，boundKey 去重）；input 的 change
+// 统一走 data-change-action="mark-setting"，重置按钮走 data-action。
 function initSettingsEventDelegation() {
   const tbody = document.getElementById('settings-tbody');
-  if (!tbody || tbody.dataset.delegated) return;
-  tbody.dataset.delegated = 'true';
-
-  // 重置按钮点击
-  tbody.addEventListener('click', (e) => {
-    const resetBtn = e.target.closest('.setting-reset-btn');
-    if (resetBtn) {
-      resetSetting(resetBtn.dataset.key);
+  if (!tbody) return;
+  window.initDelegatedActions({
+    root: tbody,
+    boundElement: tbody,
+    boundKey: 'settingsActionsBound',
+    click: {
+      'reset-setting': (el) => resetSetting(el.dataset.key)
+    },
+    change: {
+      'mark-setting': (input) => markChanged(input)
     }
-  });
-
-  // 输入变更
-  tbody.addEventListener('change', (e) => {
-    const input = e.target.closest('input, select, textarea');
-    if (input) markChanged(input);
   });
 }
 
@@ -1598,7 +1595,7 @@ function renderInput(setting) {
   const numericAttributes = numericInputAttributes(setting);
 
   if (byteSettingKeys.has(setting.key)) {
-    return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+    return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" data-change-action="mark-setting" ${numericAttributes} ${disabledAttributes}>`;
   }
 
   switch (setting.value_type) {
@@ -1607,21 +1604,21 @@ function renderInput(setting) {
       return `
         <div class="settings-bool-group">
           <label class="settings-bool-option">
-            <input type="radio" name="${safeKey}" value="true" ${isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.enable">${t('common.enable')}</span>
+            <input type="radio" name="${safeKey}" value="true" data-change-action="mark-setting" ${isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.enable">${t('common.enable')}</span>
           </label>
           <label class="settings-bool-option">
-            <input type="radio" name="${safeKey}" value="false" ${!isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.disable">${t('common.disable')}</span>
+            <input type="radio" name="${safeKey}" value="false" data-change-action="mark-setting" ${!isTrue ? 'checked' : ''} ${disabledAttributes}> <span data-i18n="common.disable">${t('common.disable')}</span>
           </label>
         </div>`;
     case 'int':
     case 'duration':
-      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" data-change-action="mark-setting" ${numericAttributes} ${disabledAttributes}>`;
     case 'float':
-      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" ${numericAttributes} ${disabledAttributes}>`;
+      return `<input type="number" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--number" data-change-action="mark-setting" ${numericAttributes} ${disabledAttributes}>`;
     case 'json':
-      return `<textarea id="${safeKey}" class="settings-input settings-input--json" rows="3" spellcheck="false" ${disabledAttributes}>${safeValue}</textarea>`;
+      return `<textarea id="${safeKey}" class="settings-input settings-input--json" rows="3" spellcheck="false" data-change-action="mark-setting" ${disabledAttributes}>${safeValue}</textarea>`;
     default:
-      return `<input type="text" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--text" ${disabledAttributes}>`;
+      return `<input type="text" id="${safeKey}" value="${safeValue}" class="settings-input settings-input--text" data-change-action="mark-setting" ${disabledAttributes}>`;
   }
 }
 
