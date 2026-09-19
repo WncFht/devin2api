@@ -424,6 +424,25 @@
     }
   }
 
+  // 页面筛选组合框的统一形态：attach 到 page-filters 渲染的 {inputId}_dropdown，
+  // 允许自由输入、空提交取首项（allLabel）。输入元素缺席（布局未渲染该字段）
+  // 返回 null。opts.initialLabel 缺省取 initialValue || allLabel。
+  function initFilterCombobox(opts) {
+    if (typeof window.createSearchableCombobox !== 'function') return null;
+    if (!document.getElementById(opts.inputId)) return null;
+    return window.createSearchableCombobox({
+      inputId: opts.inputId,
+      dropdownId: opts.inputId + '_dropdown',
+      attachMode: true,
+      allowCustomInput: true,
+      commitEmptyAsFirst: true,
+      initialValue: opts.initialValue || '',
+      initialLabel: opts.initialLabel !== undefined ? opts.initialLabel : (opts.initialValue || opts.allLabel),
+      getOptions: () => [{ value: '', label: opts.allLabel }, ...opts.getOptions()],
+      onSelect: opts.onSelect
+    });
+  }
+
   window.bindFilterApplyInputs = bindFilterApplyInputs;
   window.initDelegatedActions = initDelegatedActions;
   window.initPageBootstrap = initPageBootstrap;
@@ -436,5 +455,6 @@
   window.loadAuthTokensIntoSelect = loadAuthTokensIntoSelect;
   window.initTimeRangeSelector = initTimeRangeSelector;
   window.bindTimeRangeSelector = bindTimeRangeSelector;
+  window.initFilterCombobox = initFilterCombobox;
 
 })();

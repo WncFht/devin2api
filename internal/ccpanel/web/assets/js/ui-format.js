@@ -196,6 +196,14 @@
     return 'var(--error-600)';
   }
 
+  // RPM 数值文本（1000+ 缩写 K、1+ 一位小数、其余两位）；<0.01 的兜底展示由调用方定
+
+  function formatRpmValue(rpm) {
+    if (rpm >= 1000) return (rpm / 1000).toFixed(1) + 'K';
+    if (rpm >= 1) return rpm.toFixed(1);
+    return rpm.toFixed(2);
+  }
+
   /**
    * HTML转义（防XSS）
    * @param {string} str - 需要转义的字符串
@@ -232,6 +240,7 @@
   window.getDurationTimingColor = getDurationTimingColor;
   window.formatNumber = formatNumber;
   window.getRpmColor = getRpmColor;
+  window.formatRpmValue = formatRpmValue;
   window.escapeHtml = escapeHtml;
   window.toggleResponse = toggleResponse;
 

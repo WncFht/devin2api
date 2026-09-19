@@ -111,6 +111,44 @@
     return `range=${encodeURIComponent(rangeKey || 'today')}`;
   }
 
+  // 与后端 resolveRange 同口径（周一为一周起点、非法 custom 回落 today），
+  // 返回 [since, until) unix 秒；customRange 为 {startMs,endMs} 毫秒。
+  // 页面侧需要本地切片窗口时共用（stats 用量观测），发查询参数走 buildDateRangeQuery。
+  function resolveRangeSecs(rangeKey, customRange, nowMs) {
+    const now = nowMs || Date.now();
+    const dayMs = 86400000;
+    const beginDay = (ms) => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
+    const beginWeek = (ms) => { const s = beginDay(ms); return s - ((new Date(s).getDay() + 6) % 7) * dayMs; };
+    const beginMonth = (ms) => monthStart(new Date(ms)).getTime();
+    const today = () => [beginDay(now) / 1000, now / 1000];
+    switch (rangeKey || 'today') {
+      case 'yesterday': {
+        const s = beginDay(now - dayMs);
+        return [s / 1000, (s + dayMs) / 1000];
+      }
+      case 'day_before_yesterday': {
+        const s = beginDay(now - 2 * dayMs);
+        return [s / 1000, (s + dayMs) / 1000];
+      }
+      case 'this_week': return [beginWeek(now) / 1000, now / 1000];
+      case 'last_week': {
+        const s = beginWeek(now - 7 * dayMs);
+        return [s / 1000, (s + 7 * dayMs) / 1000];
+      }
+      case 'this_month': return [beginMonth(now) / 1000, now / 1000];
+      case 'last_month': {
+        const d = new Date(now);
+        return [addMonths(d, -1).getTime() / 1000, beginMonth(now) / 1000];
+      }
+      case 'custom': {
+        const s = Number(customRange && customRange.startMs);
+        const u = Number(customRange && customRange.endMs);
+        return (s > 0 && u > s) ? [s / 1000, Math.min(u, now) / 1000] : today();
+      }
+      default: return today();
+    }
+  }
+
   function pad2(value) {
     return String(value).padStart(2, '0');
   }
@@ -538,6 +576,7 @@
   window.getDateRangePresets = getDateRangePresets;
   window.renderDateRangeButtons = renderDateRangeButtons;
   window.buildDateRangeQuery = buildDateRangeQuery;
+  window.resolveRangeSecs = resolveRangeSecs;
   window.openCustomDateRangePicker = openCustomDateRangePicker;
 
 })(window);
