@@ -164,7 +164,7 @@ parse_deploy_args "$@"
 # devin-2api 进程（手动 ./devin-2api、遗忘的冒烟实例）——它们会抢端口、
 # 分流请求，且不受 SIGTERM 优雅退出保护。交接进程有 pidfile 登记，属
 # 豁免项；有残留则就地回收。
-LAUNCHD_PID="$(svc_pid)"
+LAUNCHD_PID="$(svc_pid || true)"
 STALE_TPID="$(cat "$(handoff_pidfile)" 2>/dev/null || true)"
 warn_strays "${LAUNCHD_PID:-0}" ${STALE_TPID:+"${STALE_TPID}"}
 retire_stale_transient
