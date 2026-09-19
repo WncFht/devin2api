@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
-	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/store"
 )
@@ -243,13 +242,13 @@ func TestOpsLifecycle(t *testing.T) {
 	ops := rt.Ops(nil)
 
 	// 建号：撞 config 名 → ErrAccountExists；零凭据 → 校验错。
-	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "alpha", Token: "x"}); !errors.Is(err, store.ErrAccountExists) {
+	if _, err := ops.Create(ctx, AccountWrite{Name: "alpha", Token: "x"}); !errors.Is(err, store.ErrAccountExists) {
 		t.Fatalf("create config name err = %v, want ErrAccountExists", err)
 	}
-	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "gamma"}); err == nil {
+	if _, err := ops.Create(ctx, AccountWrite{Name: "gamma"}); err == nil {
 		t.Fatal("create without credential should fail validation")
 	}
-	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "gamma", Token: "tok-gamma"})
+	created, err := ops.Create(ctx, AccountWrite{Name: "gamma", Token: "tok-gamma"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,20 +258,20 @@ func TestOpsLifecycle(t *testing.T) {
 	if _, ok := pool.AccountLaneStates()["gamma"]; !ok {
 		t.Fatal("gamma lane missing after create")
 	}
-	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "gamma", Token: "y"}); !errors.Is(err, store.ErrAccountExists) {
+	if _, err := ops.Create(ctx, AccountWrite{Name: "gamma", Token: "y"}); !errors.Is(err, store.ErrAccountExists) {
 		t.Fatalf("create live row err = %v, want ErrAccountExists", err)
 	}
 
 	// 改号：撞 token 的干跑失败要回滚行——行保持写前值，lane 不死。
 	badToken := "tok-alpha"
-	if _, err := ops.Update(ctx, "gamma", ccpanel.AccountPatch{Token: &badToken}); err == nil {
+	if _, err := ops.Update(ctx, "gamma", AccountPatch{Token: &badToken}); err == nil {
 		t.Fatal("update to duplicate token should fail")
 	}
 	if row, ok, _ := dbStore.GetAccount(ctx, "gamma"); !ok || row.Token != "tok-gamma" {
 		t.Fatalf("row after failed update = %+v ok=%v, want rolled back", row, ok)
 	}
 	newToken := "tok-gamma2"
-	updated, err := ops.Update(ctx, "gamma", ccpanel.AccountPatch{Token: &newToken})
+	updated, err := ops.Update(ctx, "gamma", AccountPatch{Token: &newToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +280,7 @@ func TestOpsLifecycle(t *testing.T) {
 	}
 	// config 名的 Update 建行覆盖：disabled=true 摘 lane。
 	off := true
-	disabled, err := ops.Update(ctx, "beta", ccpanel.AccountPatch{Disabled: &off})
+	disabled, err := ops.Update(ctx, "beta", AccountPatch{Disabled: &off})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +290,7 @@ func TestOpsLifecycle(t *testing.T) {
 	if _, ok := pool.AccountLaneStates()["beta"]; ok {
 		t.Fatal("beta lane should be gone while disabled")
 	}
-	if _, err := ops.Update(ctx, "nosuch", ccpanel.AccountPatch{Disabled: &off}); !errors.Is(err, store.ErrAccountNotFound) {
+	if _, err := ops.Update(ctx, "nosuch", AccountPatch{Disabled: &off}); !errors.Is(err, store.ErrAccountNotFound) {
 		t.Fatalf("update missing err = %v", err)
 	}
 
@@ -309,7 +308,7 @@ func TestOpsLifecycle(t *testing.T) {
 	if _, err := ops.Delete(ctx, "beta"); !errors.Is(err, store.ErrAccountNotFound) {
 		t.Fatalf("re-delete tombstoned err = %v", err)
 	}
-	if _, err := ops.Update(ctx, "beta", ccpanel.AccountPatch{Disabled: &off}); !errors.Is(err, store.ErrAccountTombstoned) {
+	if _, err := ops.Update(ctx, "beta", AccountPatch{Disabled: &off}); !errors.Is(err, store.ErrAccountTombstoned) {
 		t.Fatalf("update tombstoned err = %v", err)
 	}
 	restored, err := ops.Restore(ctx, "beta")
@@ -364,7 +363,7 @@ func TestOpsCredentialsFile(t *testing.T) {
 	rt.CommitConfig(cfg)
 	ops := rt.Ops(nil)
 
-	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "cf", CredentialsFile: "creds.toml"})
+	created, err := ops.Create(ctx, AccountWrite{Name: "cf", CredentialsFile: "creds.toml"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +438,7 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	ops := rt.Ops(nil)
 
 	content := "windsurf_api_key = \"tok-paste\"\n"
-	created, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "cc", CredentialsContent: content})
+	created, err := ops.Create(ctx, AccountWrite{Name: "cc", CredentialsContent: content})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,19 +457,19 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	if token, err := ops.TokenOf(ctx, "cc"); err != nil || token != "tok-paste" {
 		t.Fatalf("TokenOf(cc) = %q, %v", token, err)
 	}
-	if _, err := ops.Create(ctx, ccpanel.AccountWrite{Name: "bad", CredentialsContent: "no key here"}); err == nil {
+	if _, err := ops.Create(ctx, AccountWrite{Name: "bad", CredentialsContent: "no key here"}); err == nil {
 		t.Fatal("create with unresolvable credentials_content should fail")
 	}
 	// Update 路径：换新内容落同一管理位；显式空串清 credentials_file。
 	newContent := "windsurf_api_key = \"tok-paste2\"\n"
-	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &newContent}); err != nil {
+	if _, err := ops.Update(ctx, "cc", AccountPatch{CredentialsContent: &newContent}); err != nil {
 		t.Fatal(err)
 	}
 	if token, _ := ops.TokenOf(ctx, "cc"); token != "tok-paste2" {
 		t.Fatalf("TokenOf(cc) after content update = %q", token)
 	}
 	empty, lit := "", "tok-lit"
-	if _, err := ops.Update(ctx, "cc", ccpanel.AccountPatch{CredentialsContent: &empty, Token: &lit}); err != nil {
+	if _, err := ops.Update(ctx, "cc", AccountPatch{CredentialsContent: &empty, Token: &lit}); err != nil {
 		t.Fatal(err)
 	}
 	if acc := findResolved(mustEffective(t, ops, ctx), "cc"); acc == nil || acc.CredentialsFile != "" {
@@ -478,13 +477,13 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	}
 
 	// CredentialOf：content 直解、file 锚定、token 兜底、全缺报错。
-	if token, err := ops.CredentialOf(ccpanel.AccountWrite{CredentialsContent: content}); err != nil || token != "tok-paste" {
+	if token, err := ops.CredentialOf(AccountWrite{CredentialsContent: content}); err != nil || token != "tok-paste" {
 		t.Fatalf("CredentialOf(content) = %q, %v", token, err)
 	}
-	if token, err := ops.CredentialOf(ccpanel.AccountWrite{Token: "tok-lit"}); err != nil || token != "tok-lit" {
+	if token, err := ops.CredentialOf(AccountWrite{Token: "tok-lit"}); err != nil || token != "tok-lit" {
 		t.Fatalf("CredentialOf(token) = %q, %v", token, err)
 	}
-	if _, err := ops.CredentialOf(ccpanel.AccountWrite{}); err == nil {
+	if _, err := ops.CredentialOf(AccountWrite{}); err == nil {
 		t.Fatal("CredentialOf(empty) should fail")
 	}
 }
@@ -516,7 +515,7 @@ func TestCommitCachedConfigView(t *testing.T) {
 }
 
 // mustEffective 取 ops.Effective 结果，出错即 fail。
-func mustEffective(t *testing.T, ops ccpanel.AccountOps, ctx context.Context) []store.ResolvedAccount {
+func mustEffective(t *testing.T, ops AccountOps, ctx context.Context) []store.ResolvedAccount {
 	t.Helper()
 	resolved, err := ops.Effective(ctx)
 	if err != nil {
@@ -652,7 +651,7 @@ func TestOpsCredentialOfRejectsMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	ops := rt.Ops(nil)
-	if _, err := ops.CredentialOf(ccpanel.AccountWrite{Name: "ghost", CredentialsFile: "missing.toml"}); err == nil {
+	if _, err := ops.CredentialOf(AccountWrite{Name: "ghost", CredentialsFile: "missing.toml"}); err == nil {
 		t.Fatal("CredentialOf(missing file) must return error, not empty token")
 	}
 }

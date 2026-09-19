@@ -408,7 +408,7 @@ func main() {
 	})
 	ccPanel.SetTokenStore(tokenStore)
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
-		Reload: func() (*ccpanel.ConfigReloadReport, error) {
+		Reload: func() (*accounts.ReloadReport, error) {
 			return reloadRuntimeConfig(rt, application, ccPanel, debugManager, settingsStore)
 		},
 		Current: func() map[string]any {
@@ -417,7 +417,7 @@ func main() {
 	})
 	// /admin/accounts 操作面：行写入+重推+回滚的编排在 ops 闭包内
 	// 完成，面板 handler 只做请求解码与 sentinel→状态码映射。
-	ccPanel.SetAccountOps(rt.Ops(settingsStore))
+	ccPanel.SetAccountOps(rt.Ops(settingsStore.ApplyAll))
 	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
 	// 移植面板的注册表页共用同一仓。
 	modelStore, err := modelreg.New(dbStore)
@@ -638,7 +638,7 @@ func poolLaneNames(pool *devin.Pool) []string {
 // 变化的字段——unchanged 的字段不在 applied/requires_restart 里出现。
 // 仅剩监听参数 server.listen 进 requires_restart（Serve 无法换绑端口）；
 // transport 固化的端点三件套走调用束原子换指针热生效。
-func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*ccpanel.ConfigReloadReport, error) {
+func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpanel.Handler, debugManager *debuglog.Manager, settings *ccpanel.PanelSettings) (*accounts.ReloadReport, error) {
 	rt.Lock()
 	defer rt.Unlock()
 	cfg, err := config.Load(rt.ConfigPath())
@@ -652,7 +652,7 @@ func reloadRuntimeConfig(rt *accounts.Runtime, application *app.App, panel *ccpa
 	if strings.TrimSpace(cfg.Devin.Model) == "" || strings.TrimSpace(cfg.Devin.BaseURL) == "" {
 		return nil, errors.New("devin.model and devin.base_url must be non-empty")
 	}
-	report := &ccpanel.ConfigReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
+	report := &accounts.ReloadReport{At: time.Now().Format(time.RFC3339), Applied: []string{}}
 	// prev 必然非空：rt.CommitConfig 在 panel 装配前已提交，
 	// 而本函数只能经 panel 端点触达。
 	pcfg := rt.Config()

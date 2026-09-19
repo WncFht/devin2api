@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/authtoken"
 	"github.com/WncFht/devin2api/internal/debuglog"
@@ -148,7 +149,7 @@ type Handler struct {
 	configOps *ConfigOps
 	// accountOps 挂 /admin/accounts 账号 CRUD 与行操作面；nil 时
 	// 该族端点 503。
-	accountOps *AccountOps
+	accountOps *accounts.AccountOps
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
 	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
 	maxConcurrencyFunc func() int
@@ -318,7 +319,7 @@ func (h *Handler) SetConfigOps(ops ConfigOps) {
 
 // SetAccountOps 注入 /admin/accounts 账号操作面（读写跨 store 行、
 // config 声明集与 devinPool 热应用协调，实现由装配层提供）。
-func (h *Handler) SetAccountOps(ops AccountOps) {
+func (h *Handler) SetAccountOps(ops accounts.AccountOps) {
 	h.accountOps = &ops
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -139,7 +140,7 @@ func (h *Handler) adminImportAccounts(w http.ResponseWriter, r *http.Request) {
 	// 逐条快检：名正则/批内重名/file 与 content 互斥/配额下界——错误
 	// 带条目序号，整批拒绝（ops 侧还会再过一遍整表干跑校验）。
 	seen := make(map[string]bool, len(entries))
-	ins := make([]AccountWrite, 0, len(entries))
+	ins := make([]accounts.AccountWrite, 0, len(entries))
 	for i, e := range entries {
 		name := strings.TrimSpace(e.Name)
 		if !accountNamePattern.MatchString(name) {
@@ -167,7 +168,7 @@ func (h *Handler) adminImportAccounts(w http.ResponseWriter, r *http.Request) {
 		if e.Notes != "" {
 			notes = &e.Notes
 		}
-		ins = append(ins, AccountWrite{
+		ins = append(ins, accounts.AccountWrite{
 			Name:               name,
 			Token:              e.Token,
 			CredentialsFile:    e.CredentialsFile,

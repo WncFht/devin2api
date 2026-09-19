@@ -10,29 +10,92 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/store"
 )
+
+// AccountOps 是 /admin/accounts 的操作面：账号集合的读写要跨 store
+// 行、config 声明集、devinPool 热应用与 settings 覆盖重放协调，
+// 实现由装配层（main）提供，面板只持有接口（ConfigOps 先例）。
+// 聚合视图组装留在面板——lane/gate/warm/quota/usage 全是面板已有
+// 快照源，ops 只给身份与动作。
+type AccountOps struct {
+	// Effective 返回当前生效集（config 声明 ∪ 活行 − 墓碑）。
+	Effective func(ctx context.Context) ([]store.ResolvedAccount, error)
+	// Create/Update/Delete/Restore 各自动作内部已完成「行写入 +
+	// ApplyConfigs 重推 + 回滚」，返回重推后的单号生效视图。
+	Create  func(ctx context.Context, in AccountWrite) (*store.ResolvedAccount, error)
+	Update  func(ctx context.Context, name string, patch AccountPatch) (*store.ResolvedAccount, error)
+	Delete  func(ctx context.Context, name string) (*store.ResolvedAccount, error)
+	Restore func(ctx context.Context, name string) (*store.ResolvedAccount, error)
+	// Import 批量 upsert：每条 AccountWrite 是该名的「期望全态」——
+	// 行级字段按入参整体覆盖（缺席 yaml 键即零值，token/credentials_file/
+	// api_key 传空即清行覆盖、config 名回落 config 值）。整批原子：
+	// 干跑整表校验或任一写入失败即全部回滚，成功返回被触账号的生效视图。
+	Import func(ctx context.Context, entries []AccountWrite) ([]store.ResolvedAccount, error)
+	// ClearCooldown 清该名 lane 的池侧冷却；无活 lane 返 false。
+	ClearCooldown func(name string) bool
+	// TokenOf 解析该名生效凭据（行值→config 值→credentials_file
+	// 现读，不经 lane；disabled 可解，tombstoned 不可解）。
+	TokenOf func(ctx context.Context, name string) (string, error)
+	// CredentialOf 解出一次写操作将生效的凭据（create verify 探测用）：
+	// content 直解、file 按 configDir 锚定后读、token 原样——与
+	// Create/Update 的持久化口径一致。nil 时 verify 探测不可用。
+	CredentialOf func(in AccountWrite) (string, error)
+}
+
+// AccountWrite 是建号输入：Token/CredentialsFile/APIKey 至少其一；
+// CredentialsContent 是 credentials.toml 全文粘贴（ops 落盘成
+// 管理目录下的 <name>.toml 并置 CredentialsFile），与 CredentialsFile
+// 互斥。APIKey 是 Devin 平台 durable key（cog_*）——lane 用它在上游
+// 判死时现场铸 session token。Verify 为 true 时 handler 先以上游探测
+// 验证凭据再建行。
+type AccountWrite struct {
+	Name               string
+	Token              string
+	CredentialsFile    string
+	CredentialsContent string
+	APIKey             string
+	Disabled           bool
+	Verify             bool
+	Priority           *int64
+	MaxRPM             *int64
+	Notes              *string
+}
+
+// AccountPatch 是改号输入：指针字段区分缺席与显式空——显式空串是
+// 「清行覆盖」（config 名回落 config 值），不是「不变」。
+// CredentialsFile 与 CredentialsContent 互斥（同现 400）；显式空
+// CredentialsContent 等价于清 credentials_file 覆盖。
+type AccountPatch struct {
+	Token              *string
+	CredentialsFile    *string
+	CredentialsContent *string
+	APIKey             *string
+	Disabled           *bool
+	Priority           *int64
+	MaxRPM             *int64
+	Notes              *string
+}
 
 // Ops 装配 /admin/accounts 的操作面：各闭包全部在 rt 锁下跑——
 // 行写入、Apply 重推与失败回滚是一条多步提交，和 reload 共用同一把
 // 串行化锁才不跟热更交错。写动作同一骨架：预检（存在性/状态/干跑
 // 整表校验）→ 行写入 → Apply → 失败按写前快照回滚行 → 成功回该名
-// 生效视图。
-func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
+// 生效视图。replaySettings 非空时在重推后回调（面板覆盖重放）。
+func (rt *Runtime) Ops(replaySettings func() error) AccountOps {
 	configDir := filepath.Dir(rt.configPath)
 	push := func(ctx context.Context) ([]store.ResolvedAccount, error) {
-		resolved, _, err := rt.Apply(ctx, rt.Config(), settings)
+		resolved, _, err := rt.Apply(ctx, rt.Config(), replaySettings)
 		return resolved, err
 	}
-	return ccpanel.AccountOps{
+	return AccountOps{
 		Effective: func(ctx context.Context) ([]store.ResolvedAccount, error) {
 			rt.mu.Lock()
 			defer rt.mu.Unlock()
 			return rt.db.EffectiveAccounts(ctx, rt.Config().Devin.Accounts)
 		},
-		Create: func(ctx context.Context, in ccpanel.AccountWrite) (*store.ResolvedAccount, error) {
+		Create: func(ctx context.Context, in AccountWrite) (*store.ResolvedAccount, error) {
 			rt.mu.Lock()
 			defer rt.mu.Unlock()
 			cfg := rt.Config()
@@ -102,7 +165,7 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			return findResolved(resolved, in.Name), nil
 		},
-		Update: func(ctx context.Context, name string, patch ccpanel.AccountPatch) (*store.ResolvedAccount, error) {
+		Update: func(ctx context.Context, name string, patch AccountPatch) (*store.ResolvedAccount, error) {
 			rt.mu.Lock()
 			defer rt.mu.Unlock()
 			cfg := rt.Config()
@@ -254,7 +317,7 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 		// ApplyConfigs 热应用。每条输入是该名的期望全态：新名建行、
 		// config 名建覆盖行、墓碑名写 deleted=0 即复活。credentials_content
 		// 同 Create 落盘管理位。任一环节失败按「写前快照」逐行回滚。
-		Import: func(ctx context.Context, entries []ccpanel.AccountWrite) ([]store.ResolvedAccount, error) {
+		Import: func(ctx context.Context, entries []AccountWrite) ([]store.ResolvedAccount, error) {
 			rt.mu.Lock()
 			defer rt.mu.Unlock()
 			cfg := rt.Config()
@@ -354,7 +417,7 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 		// content 直解；file 走整表校验的锚定/现读合成（~/ 展开、相对
 		// 锚 configDir），file 优先于 token——与 TokenOf/池侧 lane 的
 		// 「文件是自愈源、字面量是兜底」同口径。纯解析不落盘。
-		CredentialOf: func(in ccpanel.AccountWrite) (string, error) {
+		CredentialOf: func(in AccountWrite) (string, error) {
 			if in.CredentialsContent != "" {
 				if token := config.TokenFromCredentialsContent([]byte(in.CredentialsContent)); token != "" {
 					return token, nil

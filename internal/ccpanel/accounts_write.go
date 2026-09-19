@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -63,7 +64,7 @@ func (h *Handler) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "max_rpm must be >= 0")
 		return
 	}
-	in := AccountWrite{
+	in := accounts.AccountWrite{
 		Name:               req.Name,
 		Token:              req.Token,
 		CredentialsFile:    req.CredentialsFile,
@@ -147,7 +148,7 @@ func (h *Handler) adminUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
-	resolved, err := h.accountOps.Update(r.Context(), name, AccountPatch{
+	resolved, err := h.accountOps.Update(r.Context(), name, accounts.AccountPatch{
 		Token:              req.Token,
 		CredentialsFile:    req.CredentialsFile,
 		CredentialsContent: req.CredentialsContent,

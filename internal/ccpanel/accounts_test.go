@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/accounts"
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/store"
@@ -56,7 +57,7 @@ func decodeAccounts(t *testing.T, recorder *httptest.ResponseRecorder, wantStatu
 
 // newAccountsHandler 装配聚合视图的最小 Handler：fake ops 供身份集，
 // 真实 debuglog.Manager + store 覆盖 inflight 分桶与 quota 子集。
-func newAccountsHandler(t *testing.T, accounts []store.ResolvedAccount) (*Handler, func()) {
+func newAccountsHandler(t *testing.T, accs []store.ResolvedAccount) (*Handler, func()) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -66,9 +67,9 @@ func newAccountsHandler(t *testing.T, accounts []store.ResolvedAccount) (*Handle
 	h := &Handler{
 		store: st,
 		debug: mgr,
-		accountOps: &AccountOps{
+		accountOps: &accounts.AccountOps{
 			Effective: func(context.Context) ([]store.ResolvedAccount, error) {
-				return accounts, nil
+				return accs, nil
 			},
 		},
 	}

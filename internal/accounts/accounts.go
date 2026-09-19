@@ -21,7 +21,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
-	"github.com/WncFht/devin2api/internal/ccpanel"
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/store"
 )
@@ -40,7 +39,7 @@ type Runtime struct {
 	db         *store.Store
 	pool       *devin.Pool
 	state      atomic.Pointer[configState]
-	lastReload atomic.Pointer[ccpanel.ConfigReloadReport]
+	lastReload atomic.Pointer[ReloadReport]
 	// degraded 是最近一次 Apply 里 credentials_file 解不出的账号集
 	// （含生效集 DB 行来源，不止 config 声明）：写者持 rt 锁、读者是
 	// View 等无锁读路径，故走 atomic。
@@ -102,8 +101,16 @@ func (rt *Runtime) CommitCachedConfig(cfg config.Config, cachedAt time.Time) {
 	rt.state.Store(&configState{cfg: cfg, loadedAt: time.Now(), fileMtime: fileMtime(rt.configPath), servedFromCache: cachedAt})
 }
 
+// ReloadReport 是一次热重载的结果：applied 是已生效的变更字段，
+// requiresRestart 是改了但要重启才生效的字段（listen/transport 固化项）。
+type ReloadReport struct {
+	At              string   `json:"at"`
+	Applied         []string `json:"applied"`
+	RequiresRestart []string `json:"requires_restart,omitempty"`
+}
+
 // StoreReport 记录最近一次 reload 报告，View 透出。
-func (rt *Runtime) StoreReport(report *ccpanel.ConfigReloadReport) {
+func (rt *Runtime) StoreReport(report *ReloadReport) {
 	rt.lastReload.Store(report)
 }
 
@@ -111,11 +118,11 @@ func (rt *Runtime) StoreReport(report *ccpanel.ConfigReloadReport) {
 // 须持 rt 锁）：DB 行与 config 声明 merge 出生效集 → 剔除墓碑与停用
 // → 整表干跑校验（校验失败即拒载、旧配置继续服役）→ 逐 lane 映射 →
 // ApplyConfigs 名键差集热换（同名 lane 走 ApplyConfig 保 warm 谱系/
-// assignments/在途流，新增建 lane，摘下异步 Close）→ settings 非空
-// 时重放面板覆盖（必须在 ApplyConfigs 之后，新建 lane 才吃得到
-// devin_model 等覆盖）→ 收死墓碑。空生效集合法：空集即全部 lane 被
-// 摘出。返回生效视图与 ApplyConfigs 的字段差集。
-func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, settings *ccpanel.PanelSettings) ([]store.ResolvedAccount, []string, error) {
+// assignments/在途流，新增建 lane，摘下异步 Close）→ replaySettings
+// 非空时回调重放面板覆盖（必须在 ApplyConfigs 之后，新建 lane 才吃得
+// 到 devin_model 等覆盖）→ 收死墓碑。空生效集合法：空集即全部 lane
+// 被摘出。返回生效视图与 ApplyConfigs 的字段差集。
+func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, replaySettings func() error) ([]store.ResolvedAccount, []string, error) {
 	resolved, err := rt.db.EffectiveAccounts(ctx, cfg.Devin.Accounts)
 	if err != nil {
 		return nil, nil, err
@@ -147,8 +154,8 @@ func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, settings *ccpan
 		rt.pool.MarkDegraded(account.Name, account.LoadError)
 	}
 	rt.degraded.Store(&degraded)
-	if settings != nil {
-		if err := settings.ApplyAll(); err != nil {
+	if replaySettings != nil {
+		if err := replaySettings(); err != nil {
 			slog.Warn("panel settings replay failed", "error", err)
 		}
 	}
