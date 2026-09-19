@@ -23,20 +23,28 @@
   <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/marked.min.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/purify.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/markdown-renderer.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/merged-response-client.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/model-test-modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/logs.js?v=__VERSION__"></script>
-  <script src="/web/assets/js/marked.min.js?v=__VERSION__"></script>
-  <script src="/web/assets/js/purify.min.js?v=__VERSION__"></script>
 </head>
 <body>
   <div class="app-container">
     <!-- 主内容区域 -->
     <main class="main-content">
       <div class="content-area">
+        <h1 class="visually-hidden" data-i18n="nav.logs">日志</h1>
         <div data-page-filters="logs"></div>
 
   
@@ -87,7 +95,7 @@
                 </thead>
                 <tbody id="tbody">
                   <tr>
-                    <td colspan="15" class="loading-state">
+                    <td colspan="16" class="loading-state">
                       <div class="loading-spinner loading-spinner--block"></div>
                       <span data-i18n="logs.loading">正在加载日志...</span>
                     </td>
@@ -166,14 +174,14 @@
   </template>
 
   <!-- Debug Log 模态框 -->
-  <div id="debugLogModal" class="modal">
+  <div id="debugLogModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="debugLogTitle">
     <div class="modal-content upstream-detail-modal-content">
       <div class="modal-header">
-        <h2 class="modal-title">
+        <h2 class="modal-title" id="debugLogTitle">
           <span data-i18n="logs.debugLogTitle">Debug Log</span>
           <span id="debugLogStatus" class="debug-log-status" hidden></span>
         </h2>
-        <button type="button" class="close-btn" data-action="close-debug-log-modal">&times;</button>
+        <button type="button" class="close-btn" data-action="close-debug-log-modal" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
       </div>
       <div id="debugLogLoading" style="text-align: center; padding: 2rem; display: none;">
         <span data-i18n="logs.loading">加载中...</span>

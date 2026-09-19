@@ -732,6 +732,22 @@ func TestRateGateLatchRanges(t *testing.T) {
 	}
 }
 
+// waitStateRow 轮询 runtime_state 行到达目标存在性：闩态写走
+// QueueState 异步管道，入队到落库有亚毫秒窗口。
+func waitStateRow(t *testing.T, st *store.Store, key string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, ok, err := st.GetState(context.Background(), key)
+		if err == nil && ok == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, ok, err := st.GetState(context.Background(), key)
+	t.Fatalf("state row %q presence = %v (err=%v), want %v", key, ok, err, want)
+}
+
 // 冷却闩持久化与恢复：上闩写 runtime_state 行，新实例（模拟重启）恢复
 // 未过期的闩，防止重启后裸发把上游限流续长；解闩删行，过期行被忽略
 // 并清除。
@@ -743,9 +759,7 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	gate := newRateGate(GateConfig{MaxRPM: 60}, st, "gate:test")
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 8 minutes."))
-	if _, ok, err := st.GetState(context.Background(), "gate:test"); err != nil || !ok {
-		t.Fatalf("state not persisted: ok=%v err=%v", ok, err)
-	}
+	waitStateRow(t, st, "gate:test", true)
 
 	restarted := newRateGate(GateConfig{MaxRPM: 60}, st, "gate:test")
 	stats := restarted.stats()
@@ -757,9 +771,7 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 	}
 
 	restarted.noteUpstreamSuccess()
-	if _, ok, err := st.GetState(context.Background(), "gate:test"); err != nil || ok {
-		t.Fatalf("release should remove state row, ok=%v err=%v", ok, err)
-	}
+	waitStateRow(t, st, "gate:test", false)
 	if restarted.stats().Latched {
 		t.Fatal("release should unlatch")
 	}
@@ -1221,10 +1233,10 @@ func TestSummarizeWaitsErrQuantiles(t *testing.T) {
 		{est: -1, outcome: gateWaitCancel},
 	}
 	s := summarizeWaits(samples)
-	// errs = {−10,+10,+20,+60}s → mean +20s；nearest-rank 下 p10=idx0、
-	// p50=idx1、p90=idx2。
+	// errs = {−10,+10,+20,+60}s → mean +20s；nearest-rank（⌈q·n⌉−1）下
+	// p10=idx0、p50=idx1、p90=idx3。
 	if s.ErrCount != 4 || s.ErrMeanMs != 20000 ||
-		s.ErrP10Ms != -10000 || s.ErrP50Ms != 10000 || s.ErrP90Ms != 20000 {
+		s.ErrP10Ms != -10000 || s.ErrP50Ms != 10000 || s.ErrP90Ms != 60000 {
 		t.Fatalf("err summary = %+v, want count=4 mean=20s p10=-10s p50=+10s p90=+20s", s)
 	}
 	if s.Count != 6 || s.Rejects != 1 || s.Cancels != 1 {

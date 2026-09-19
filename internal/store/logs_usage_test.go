@@ -301,7 +301,7 @@ func TestAccountAggsFold(t *testing.T) {
 		}
 	}
 
-	aggs, err := s.AccountAggs(ctx)
+	aggs, err := s.accountAggs(ctx)
 	if err != nil {
 		t.Fatalf("AccountAggs: %v", err)
 	}

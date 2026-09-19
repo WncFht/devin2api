@@ -669,6 +669,11 @@ func TestMaintainWALCheckpoint(t *testing.T) {
 func TestIsBusyClassifiesDriverLockError(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
+	// 异步播种持写连接入库时 holder 的 BEGIN IMMEDIATE 会抢先吃
+	// BUSY——先等播种退出，holder 的锁位才确定归它。
+	if s.seedDone != nil {
+		<-s.seedDone
+	}
 	// 归零写连接 busy handler 让锁竞争立即返回 BUSY（否则要等满 30s
 	// busy_timeout）；MaxOpenConns=1 保证 pragma 落在唯一写连接上。
 	if _, err := s.db.ExecContext(ctx, `PRAGMA busy_timeout(0)`); err != nil {

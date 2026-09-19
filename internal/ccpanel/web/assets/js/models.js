@@ -107,7 +107,7 @@
         }
       });
       document.getElementById('addModelModal').addEventListener('click', (e) => {
-        if (e.target.id === 'addModelModal' || e.target.closest('[data-action="close-add-modal"]')) closeAddModal();
+        if (e.target.closest('[data-action="close-add-modal"]')) closeAddModal();
         if (e.target.closest('[data-action="confirm-add-model"]')) addModel();
       });
       document.getElementById('redirect-search').addEventListener('input', renderRedirectList);
@@ -121,14 +121,8 @@
         if (item) applyRedirect(item.dataset.model);
       });
       document.getElementById('redirectModal').addEventListener('click', (e) => {
-        if (e.target.id === 'redirectModal' || e.target.closest('[data-action="close-redirect-modal"]')) closeRedirectModal();
+        if (e.target.closest('[data-action="close-redirect-modal"]')) closeRedirectModal();
         if (e.target.closest('[data-action="clear-redirect"]')) applyRedirect('');
-      });
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          closeAddModal();
-          closeRedirectModal();
-        }
       });
       const savedSort = localStorage.getItem('models.sort');
       if (savedSort && [...document.getElementById('f-sort').options].some((o) => o.value === savedSort)) {
@@ -546,7 +540,9 @@
     } else if (btn.dataset.action === 'reset') {
       removeOverride(row.model);
     } else if (btn.dataset.action === 'delete') {
-      if (window.confirm(t('models.confirmDelete', { model: row.model }))) removeOverride(row.model);
+      Modal.confirm(t('models.confirmDelete', { model: row.model }), { danger: true }).then((ok) => {
+        if (ok) removeOverride(row.model);
+      });
     } else if (btn.dataset.action === 'test') {
       // 探活模态共享自 logs 页：模型锁定本行，协议默认 anthropic。
       window.openModelTestModal({ model: row.model, clientProtocol: 'anthropic' });
@@ -560,16 +556,11 @@
   function openAddModal() {
     document.getElementById('new-model-name').value = '';
     document.getElementById('new-model-target').value = '';
-    const modal = document.getElementById('addModelModal');
-    modal.classList.add('show');
-    modal.setAttribute('aria-hidden', 'false');
-    setTimeout(() => document.getElementById('new-model-name').focus(), 50);
+    Modal.open(document.getElementById('addModelModal'), { focus: '#new-model-name' });
   }
 
   function closeAddModal() {
-    const modal = document.getElementById('addModelModal');
-    modal.classList.remove('show');
-    modal.setAttribute('aria-hidden', 'true');
+    Modal.close(document.getElementById('addModelModal'));
   }
 
   // ---- 重定向目标选择弹窗：搜索过滤全部已知模型名，点选即存 ----
@@ -582,17 +573,13 @@
     search.value = row.redirect_model || '';
     // resolved 偏离但 redirect_model 为空 → config 别名在生效，提示这层区别
     document.getElementById('redirect-alias-note').hidden = !(isRedirected(row) && !row.redirect_model);
-    const modal = document.getElementById('redirectModal');
-    modal.classList.add('show');
-    modal.setAttribute('aria-hidden', 'false');
+    Modal.open(document.getElementById('redirectModal'), { focus: '#redirect-search' });
     renderRedirectList();
-    setTimeout(() => { search.focus(); search.select(); }, 50);
+    search.select();
   }
 
   function closeRedirectModal() {
-    const modal = document.getElementById('redirectModal');
-    modal.classList.remove('show');
-    modal.setAttribute('aria-hidden', 'true');
+    Modal.close(document.getElementById('redirectModal'));
     redirectRow = null;
   }
 

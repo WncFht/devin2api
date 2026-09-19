@@ -158,21 +158,35 @@ type UsageMinPoint struct {
 // Number(p[k])||0）按 0 处理，合计口径不变。at 恒发——零值过滤对它
 // 无意义且是切片的唯一谓词键。
 func (p UsageMinPoint) MarshalJSON() ([]byte, error) {
-	type plain UsageMinPoint
-	raw, err := json.Marshal(plain(p))
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]int64
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	for k, v := range m {
-		if v == 0 && k != "at" {
-			delete(m, k)
-		}
-	}
-	return json.Marshal(m)
+	return json.Marshal(usageMinPointWire{
+		At: p.At, Requests: p.Requests, Errors: p.Errors, Disconnected: p.Disconnected,
+		RateLimited: p.RateLimited, ClientFaults: p.ClientFaults, UpstreamFaults: p.UpstreamFaults,
+		InputTokens: p.InputTokens, OutputTokens: p.OutputTokens, CacheRead: p.CacheRead,
+		CacheWrite: p.CacheWrite, Reasoning: p.Reasoning, TotalTokens: p.TotalTokens,
+		CreditCost: p.CreditCost, GenMS: p.GenMS, GenOut: p.GenOut,
+	})
+}
+
+// usageMinPointWire 是 UsageMinPoint 的稀疏线格式影子：omitempty 逐出
+// 零值字段，单趟 marshal 取代「marshal→map→删零→再 marshal」的三趟
+// 往返。字段集与 UsageTotals 的 JSON 键一一对应，加字段两边同步改。
+type usageMinPointWire struct {
+	At             int64 `json:"at"`
+	Requests       int64 `json:"requests,omitempty"`
+	Errors         int64 `json:"errors,omitempty"`
+	Disconnected   int64 `json:"disconnected,omitempty"`
+	RateLimited    int64 `json:"rate_limited,omitempty"`
+	ClientFaults   int64 `json:"client_faults,omitempty"`
+	UpstreamFaults int64 `json:"upstream_faults,omitempty"`
+	InputTokens    int64 `json:"input_tokens,omitempty"`
+	OutputTokens   int64 `json:"output_tokens,omitempty"`
+	CacheRead      int64 `json:"cache_read_tokens,omitempty"`
+	CacheWrite     int64 `json:"cache_write_tokens,omitempty"`
+	Reasoning      int64 `json:"reasoning_tokens,omitempty"`
+	TotalTokens    int64 `json:"total_tokens,omitempty"`
+	CreditCost     int64 `json:"credit_cost,omitempty"`
+	GenMS          int64 `json:"gen_ms,omitempty"`
+	GenOut         int64 `json:"gen_tokens,omitempty"`
 }
 
 // UsageDayRow 是单日聚合。
@@ -803,11 +817,11 @@ func (s *Store) rateLimitEvents(ctx context.Context) ([]RateLimitEvent, error) {
 	return out, nil
 }
 
-// AccountAggs 按上游账号 lane 聚合窗口内 logs：totals + avg TTFB + 末次
-// 时刻——P2 /admin/accounts 逐号维度表的支点。” 历史行折叠进
-// 'default' 桶（logAccountExpr），与 LogScope.Account、QuotaReport
-// 的读侧口径一致，不会出现 ”/'default' 幽灵分桶。
-func (s *Store) AccountAggs(ctx context.Context) ([]DimensionAgg, error) {
+// accountAggs 按上游账号 lane 聚合窗口内 logs：totals + avg TTFB + 末次
+// 时刻。” 历史行折叠进 'default' 桶（logAccountExpr），与
+// LogScope.Account、QuotaReport 的读侧口径一致，不会出现 ”/'default'
+// 幽灵分桶。仅同包测试消费——公共 API 面不背专用聚合。
+func (s *Store) accountAggs(ctx context.Context) ([]DimensionAgg, error) {
 	minBucket := time.Now().AddDate(0, 0, -usageMaxDays).UnixMilli() / 60000
 	return s.dimAggs(ctx, "", logAccountExpr, minBucket)
 }

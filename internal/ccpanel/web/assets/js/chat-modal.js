@@ -82,7 +82,7 @@
       } else if (action === 'clear') {
         state.messages = [];
         renderMessages();
-      } else if (action === 'close' || e.target === modal) {
+      } else if (action === 'close') {
         closeModal();
       }
     });
@@ -91,9 +91,6 @@
         e.preventDefault();
         send();
       }
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && modal.classList.contains('show')) closeModal();
     });
     if (window.i18n && typeof window.i18n.translatePage === 'function') {
       window.i18n.translatePage();
@@ -105,10 +102,7 @@
   }
 
   function closeModal() {
-    el(IDS.modal).classList.remove('show');
-    el(IDS.modal).setAttribute('aria-hidden', 'true');
-    state = null;
-    pending = false;
+    window.Modal.close(el(IDS.modal));
   }
 
   // openChatModal({mode:'admin'|'token', model?, clientProtocol?})
@@ -133,9 +127,10 @@
     renderMessages();
     if (tokenMode) fillModelList();
 
-    el(IDS.modal).classList.add('show');
-    el(IDS.modal).setAttribute('aria-hidden', 'false');
-    el(IDS.input).focus();
+    window.Modal.open(el(IDS.modal), {
+      focus: '#' + IDS.input,
+      onClose: () => { state = null; pending = false; }
+    });
   }
 
   // 候选模型名取注册表全量（datalist 只做提示，仍可自由输入目录外名字）。

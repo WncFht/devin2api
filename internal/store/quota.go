@@ -102,14 +102,10 @@ func (s *Store) ListQuotaSamples(ctx context.Context, account string, since int6
 const quotaSampleKeep = 20000
 
 // PruneQuotaSamples 把 quota_samples 截到最新 quotaSampleKeep 行
-// （同秒并列按 id 取新者，帽是精确界）。返回删除行数。
+// （同秒并列按 id 取新者，帽是精确界）。返回删除行数。保留集谓词
+// 对分片删除稳定：被删的都是集外旧行，帽内成员资格不随分片漂移。
 func (s *Store) PruneQuotaSamples(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM quota_samples WHERE id NOT IN (
-			SELECT id FROM quota_samples ORDER BY at DESC, id DESC LIMIT ?)`,
+	return s.deleteRowsChunked(ctx, "quota_samples",
+		`id NOT IN (SELECT id FROM quota_samples ORDER BY at DESC, id DESC LIMIT ?)`,
 		quotaSampleKeep)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
 }

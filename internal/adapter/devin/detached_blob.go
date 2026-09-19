@@ -436,6 +436,12 @@ func (registry *detachedRegistry) seed() {
 		slog.Warn("detached blob seed load failed; starting with empty cache", "lane", registry.lane, "error", err)
 		return
 	}
+	// 只灌最新的 detachedMaxEntries 条：缓存容量帽在 admit 侧有让位序，
+	// 播种全灌会让内存驻留越帽；行按 finished_at 升序返回，截尾留新。
+	if len(blobs) > detachedMaxEntries {
+		slog.Info("detached seed rows exceed cache capacity; keeping newest", "lane", registry.lane, "rows", len(blobs), "cap", detachedMaxEntries)
+		blobs = blobs[len(blobs)-detachedMaxEntries:]
+	}
 	now := time.Now()
 	for _, blob := range blobs {
 		expiresAt := blob.FinishedAt.Add(detachedCompletedTTL)

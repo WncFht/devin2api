@@ -86,7 +86,7 @@ func TestAppendDebugChunkOrdering(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	for _, part := range []string{"line1\n", "line2\n", "line3\n"} {
-		if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte(part)); err != nil {
+		if err := s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte(part)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -114,7 +114,7 @@ func TestAppendDebugChunkOrdering(t *testing.T) {
 		t.Fatalf("concat = %q,%d,%v,%v", data, total, ok, err)
 	}
 	// 不同 (dir,name) 的 seq 空间独立。
-	if err := s.AppendDebugChunk(ctx, "d1", "06-http-response.jsonl", []byte("x\n")); err != nil {
+	if err := s.appendDebugChunk(ctx, "d1", "06-http-response.jsonl", []byte("x\n")); err != nil {
 		t.Fatal(err)
 	}
 	var seq int
@@ -139,7 +139,7 @@ func TestDebugFileTruncation(t *testing.T) {
 	}
 	// chunk 路径：上限落在第二块中间。
 	for _, part := range []string{"aaaa", "bbbb", "cccc"} {
-		if err := s.AppendDebugChunk(ctx, "d1", "05-response-events.jsonl", []byte(part)); err != nil {
+		if err := s.appendDebugChunk(ctx, "d1", "05-response-events.jsonl", []byte(part)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -180,7 +180,7 @@ func TestDebugFileCompression(t *testing.T) {
 		t.Fatalf("compressed trunc = %q,%d,%v", data, total, err)
 	}
 	// chunk 路径同一语义。
-	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", payload); err != nil {
+	if err := s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", payload); err != nil {
 		t.Fatal(err)
 	}
 	data, total, ok, err = s.DebugFile(ctx, "d1", "04-devin-response.jsonl", 0)
@@ -229,9 +229,9 @@ func TestDebugFileNamesAndDirs(t *testing.T) {
 	}
 	must(s.PutDebugFile(ctx, "d1", "meta.json", []byte("m")))
 	must(s.PutDebugFile(ctx, "d1", "attachments/image-001.png", []byte("png")))
-	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("ab")))
+	must(s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("ab")))
 	must(s.PutDebugFile(ctx, "d2", "error.json", []byte("e")))
-	must(s.AppendDebugChunk(ctx, "d2", "04-devin-response.jsonl", []byte("x")))
+	must(s.appendDebugChunk(ctx, "d2", "04-devin-response.jsonl", []byte("x")))
 
 	names, err := s.DebugFileNames(ctx, "d1")
 	if err != nil {
@@ -287,9 +287,9 @@ func TestDeleteDebugPayloadsBefore(t *testing.T) {
 	for _, name := range []string{"meta.json", "03-devin-request.json", "03-devin-request.attempt2.json", "attachments/image-001.png"} {
 		must(s.PutDebugFile(ctx, "d1", name, []byte("x")))
 	}
-	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("a")))
-	must(s.AppendDebugChunk(ctx, "d1", "06-http-response.jsonl", []byte("b")))
-	must(s.AppendDebugChunk(ctx, "d1", "05-response-events.jsonl", []byte("c")))
+	must(s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("a")))
+	must(s.appendDebugChunk(ctx, "d1", "06-http-response.jsonl", []byte("b")))
+	must(s.appendDebugChunk(ctx, "d1", "05-response-events.jsonl", []byte("c")))
 	must(s.PutDebugFile(ctx, "d2", "03-devin-request.json", []byte("y")))
 
 	// 剥离 bound 之下目录的 03*/04/06/attachments，证据文件留下；
@@ -327,7 +327,7 @@ func TestDeleteDebugDirsBefore(t *testing.T) {
 	// 同秒后缀 -01 排在裸名之后：界限 "20260910-120000" 删旧留新。
 	for _, dir := range []string{"20260909-235959", "20260910-115959-02", "20260910-120000-01"} {
 		must(s.PutDebugFile(ctx, dir, "meta.json", []byte("x")))
-		must(s.AppendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("y")))
+		must(s.appendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("y")))
 	}
 	// exclude 豁免 keep_error_dirs 保护集内的过期目录。
 	must(s.DeleteDebugDirsBefore(ctx, "20260910-120000", []string{"20260909-235959"}))
@@ -358,7 +358,7 @@ func TestDeleteDebugDir(t *testing.T) {
 		}
 	}
 	must(s.PutDebugFile(ctx, "d1", "meta.json", []byte("x")))
-	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("y")))
+	must(s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("y")))
 	must(s.PutDebugFile(ctx, "d2", "meta.json", []byte("z")))
 	must(s.DeleteDebugDir(ctx, "d1"))
 	dirs, err := s.DebugDirs(ctx)
@@ -387,7 +387,7 @@ func TestDeleteDebugRowsChunked(t *testing.T) {
 		dir := fmt.Sprintf("20260910-%06d", i)
 		must(s.PutDebugFile(ctx, dir, "meta.json", []byte("m")))
 		must(s.PutDebugFile(ctx, dir, "01-http-request.json", []byte("p")))
-		must(s.AppendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("c")))
+		must(s.appendDebugChunk(ctx, dir, "04-devin-response.jsonl", []byte("c")))
 	}
 	assertPayloadBytes(t, s)
 	// 剥载跨片：全部目录剥到锚点，01/04 命中删除、meta.json 留下。
@@ -542,9 +542,13 @@ func TestDebugPayloadBytes(t *testing.T) {
 	must(s.PutDebugFile(ctx, "d1", "meta.json", []byte("small")))
 	assertPayloadBytes(t, s)
 	// IfAbsent/Claim 的未命中路径不计数。
-	must(s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("e1")))
+	if _, err := s.ClaimDebugFile(ctx, "d1", "error.json", []byte("e1")); err != nil {
+		t.Fatal(err)
+	}
 	assertPayloadBytes(t, s)
-	must(s.PutDebugFileIfAbsent(ctx, "d1", "error.json", []byte("e2-ignored")))
+	if _, err := s.ClaimDebugFile(ctx, "d1", "error.json", []byte("e2-ignored")); err != nil {
+		t.Fatal(err)
+	}
 	assertPayloadBytes(t, s)
 	if _, err := s.ClaimDebugFile(ctx, "d2", "meta.json", []byte("c")); err != nil {
 		t.Fatal(err)
@@ -554,7 +558,7 @@ func TestDebugPayloadBytes(t *testing.T) {
 		t.Fatalf("re-claim = %v,%v", claimed, err)
 	}
 	assertPayloadBytes(t, s)
-	must(s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", big))
+	must(s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", big))
 	assertPayloadBytes(t, s)
 
 	// 批量事务混合四类：OR REPLACE、OR IGNORE、chunk、strip、logrow。
@@ -624,7 +628,7 @@ func TestDebugPayloadBytesReseed(t *testing.T) {
 	if err := s.PutDebugFile(ctx, "d1", "meta.json", []byte("persist")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
+	if err := s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
 		t.Fatal(err)
 	}
 	waitPayloadSeed(t, s)
@@ -654,7 +658,7 @@ func TestDebugPayloadBytesSeedFallback(t *testing.T) {
 	if err := s.PutDebugFile(ctx, "d1", "meta.json", []byte("persist")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
+	if err := s.appendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
 		t.Fatal(err)
 	}
 	waitPayloadSeed(t, s)

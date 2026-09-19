@@ -195,9 +195,6 @@ type warmEntry struct {
 	suspectAt     time.Time // 非零=疑似孤儿：停 ping，首标定格作退役宽限计时（不续期），真流量撤销
 	missStreak    int       // 连续 ping miss（cache_read=0）数：hit 或 retain 清零
 	demoted       bool      // K 连 miss 降级态：sweep 停发 ping，条目留表，retain 重武装
-	// observedModels 记上游自报的 response_model 集合——路由相位漂移
-	// 的观测面，不进键不参与判定。
-	observedModels map[string]struct{}
 }
 
 // WarmStats 是保温簿记快照，/admin/runtime-metrics 的 warm 组透出。
@@ -504,12 +501,6 @@ func (w *cacheWarmer) noteCompleted(key warmLineageKey, msg *llm.AssistantMessag
 	entry := w.entries[key]
 	if entry == nil {
 		return
-	}
-	if msg.ResponseModel != "" {
-		if entry.observedModels == nil {
-			entry.observedModels = make(map[string]struct{})
-		}
-		entry.observedModels[msg.ResponseModel] = struct{}{}
 	}
 	if observed := msg.Usage.Input + msg.Usage.CacheRead; observed > 0 {
 		entry.prefixTokens = int(observed)

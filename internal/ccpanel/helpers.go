@@ -43,19 +43,29 @@ func (h *Handler) maskToken(data []byte) []byte {
 		if token == "" {
 			continue
 		}
-		// token 含 " 或 \ 时在 JSON 文本（meta.json 的字符串值）里以
+		// token 含 JSON 转义字符时在 JSON 文本（meta.json 的字符串值）里以
 		// 转义形态出现，只换原始字节会静默漏遮——先替换 json.Marshal
 		// 产出的转义形态再替换原始形态：顺序不能反，以 \ 结尾的 token
 		// 原始形态是转义形态的前缀，先吃原始形态会留下孤立反斜杠，
-		// 既漏遮又破坏 JSON 转义。
-		if escaped, err := json.Marshal(token); err == nil {
-			if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) {
-				data = bytes.ReplaceAll(data, esc, []byte("<redacted>"))
+		// 既漏遮又破坏 JSON 转义。不含转义字符的 token 两形态恒等，
+		// 跳过 marshal 与第二次扫描。
+		if strings.IndexFunc(token, jsonEscapable) >= 0 {
+			if escaped, err := json.Marshal(token); err == nil {
+				if esc := escaped[1 : len(escaped)-1]; !bytes.Equal(esc, []byte(token)) {
+					data = bytes.ReplaceAll(data, esc, []byte("<redacted>"))
+				}
 			}
 		}
 		data = bytes.ReplaceAll(data, []byte(token), []byte("<redacted>"))
 	}
 	return data
+}
+
+// jsonEscapable 报告 rune 是否会被 json.Marshal 默认（HTML 安全）转义——
+// 与 encoding/json 的 escape 表一致，maskToken 据此决定是否要算转义形态。
+func jsonEscapable(r rune) bool {
+	return r < 0x20 || r == '"' || r == '\\' || r == '<' || r == '>' || r == '&' ||
+		r == '\u2028' || r == '\u2029'
 }
 
 // maskTokenSet 把本批新见过的 token 记入 recentTokens 环（去重、保留

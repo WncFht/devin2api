@@ -1,3 +1,903 @@
+/* ===== 以下来自 styles.css：stats 页专属规则 ===== */
+
+.view-toggle-group {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--surface-bg);
+  padding: 2px;
+  border-radius: 10px;
+  border: 1px solid var(--surface-border);
+}
+
+.view-toggle-btn {
+  padding: 7px 14px;
+  border-radius: 7px;
+  color: var(--neutral-700);
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  border: none;
+  background: transparent;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+.view-toggle-btn:hover {
+  color: var(--neutral-900);
+  background: var(--surface-hover);
+}
+
+.view-toggle-btn.active {
+  background: var(--surface-bg-strong);
+  color: var(--primary-600);
+  font-weight: 650;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+@media (max-width: 768px) {
+.view-toggle-group {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+.view-toggle-group::-webkit-scrollbar {
+    display: none;
+  }
+.filter-controls > .stats-filter-summary-row {
+    grid-column: 1 / -1;
+  }
+}
+
+/* 统计页表格：减少列间距（更紧凑，避免横向溢出） */
+
+.stats-table th {
+  padding: var(--space-3) var(--space-3);
+}
+
+.stats-table td {
+  padding: var(--space-2) var(--space-3);
+}
+
+/* 统计页筛选栏：各组按内容自然宽度排列，不等比拉伸 */
+
+.stats-filter-controls .filter-group {
+  flex: 0 1 auto;
+}
+
+.stats-filter-controls .filter-combobox-wrapper {
+  min-width: 120px;
+}
+
+/* 统计页”详细统计数据”卡片：禁用 hover 位移，避免鼠标悬停导致整体”晃动” */
+
+.stats-detail-card:hover {
+  transform: none;
+}
+
+.stats-filter-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.stats-filter-summary-row .stats-filter-actions {
+  flex: none;
+}
+
+.stats-filter-summary-row .stats-filter-actions .btn {
+  white-space: nowrap;
+}
+
+.runtime-transcript-progress-bar--exceeded {
+  background: var(--error-500);
+}
+
+a.model-tag.model-link {
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+a.model-tag.model-link:hover {
+  background: rgba(59, 130, 246, 0.35);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+/* ===== 统计页面专用样式 ===== */
+
+/* stats-view-init-chart 只在 JS 接管前生效：内联脚本加类预显图表视图；
+   !important 用于压过 #stats-chart-view 标记上的 display:none；
+   switchView 首次运行时移除该类，之后显隐由内联 display 控制 */
+
+.stats-view-init-chart #stats-table-view {
+  display: none !important;
+}
+
+.stats-view-init-chart #stats-chart-view {
+  display: block !important;
+}
+
+.stats-detail-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stats-detail-heading-main {
+  display: flex;
+  align-items: center;
+}
+
+.stats-detail-sort-hint {
+  color: var(--neutral-600);
+  font-weight: var(--font-normal);
+  margin-left: var(--space-2);
+}
+
+.stats-header-accent--success {
+  color: var(--success-400);
+}
+
+.stats-header-accent--error {
+  color: var(--error-400);
+}
+
+.stats-header-accent--cache-read {
+  color: var(--success-600);
+}
+
+.stats-header-accent--cache-create {
+  color: var(--primary-600);
+}
+
+.stats-header-accent--cost {
+  color: var(--warning-600);
+}
+
+/* 语义对齐：th/td 共用 stats-col-* 类，数值列整体右对齐，表头同向 */
+
+.stats-table .stats-col-success,
+.stats-table .stats-col-error,
+.stats-table .stats-col-timing,
+.stats-table .stats-col-speed,
+.stats-table .stats-col-rpm,
+.stats-table .stats-col-input,
+.stats-table .stats-col-output,
+.stats-table .stats-col-cache-read,
+.stats-table .stats-col-cache-create,
+.stats-table .stats-col-cache-util,
+.stats-table .stats-col-cost {
+  text-align: right;
+}
+
+.stats-table .stats-total-row {
+  background-color: var(--surface-bg-muted);
+  font-weight: var(--font-bold);
+  border-top: 2px solid var(--surface-border-strong);
+}
+
+.stats-table .stats-col-total-label {
+  font-size: 15px;
+  color: var(--primary-700);
+}
+
+.stats-value-muted {
+  color: var(--neutral-500);
+}
+
+.stats-value-success {
+  color: var(--success-600);
+}
+
+.stats-value-primary {
+  color: var(--primary-600);
+}
+
+.stats-model-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-right: 42px;
+}
+
+.stats-model-cell .model-tag {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.stats-value-dynamic {
+  color: var(--stats-accent, currentColor);
+}
+
+.stats-timing-separator {
+  color: var(--neutral-400);
+}
+
+.success-count {
+  color: var(--success-400);
+  font-weight: var(--font-semibold);
+}
+
+.error-count {
+  color: var(--error-400);
+  font-weight: var(--font-semibold);
+}
+
+.stats-success-inline,
+.stats-rpm-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.stats-success-separator,
+.stats-rpm-separator {
+  color: var(--neutral-400);
+  font-weight: var(--font-medium);
+}
+
+.stats-rpm-value {
+  color: var(--stats-rpm-color, inherit);
+  font-weight: 500;
+}
+
+.health-rate {
+  color: var(--health-rate-color, var(--neutral-700));
+}
+
+/* ===== 排序功能样式 ===== */
+
+.sortable {
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  transition: background-color 0.2s ease;
+}
+
+.sortable:hover {
+  background: var(--surface-hover) !important;
+}
+
+.sort-indicator {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: var(--neutral-400);
+  opacity: 0;
+  transition: all 0.2s ease;
+}
+
+.sortable:hover .sort-indicator {
+  opacity: 0.5;
+}
+
+.sortable.sorted .sort-indicator {
+  opacity: 1;
+  color: var(--primary-500);
+}
+
+.sortable.sorted:hover .sort-indicator {
+  opacity: 1;
+}
+
+.sort-indicator::after {
+  content: '⇅';
+}
+
+.sortable[data-sort-order="asc"] .sort-indicator::after {
+  content: '↑';
+}
+
+.sortable[data-sort-order="desc"] .sort-indicator::after {
+  content: '↓';
+}
+
+.inline-block {
+  display: inline-block;
+}
+
+.mr-2 {
+  margin-right: var(--space-2);
+}
+
+@media (max-width: 768px) {
+.stats-table .stats-col-model,
+.stats-table .stats-col-total-label {
+    grid-column: 1 / -1;
+  }
+.stats-table .stats-col-success {
+    order: 10;
+  }
+.stats-table .stats-col-error {
+    order: 11;
+  }
+.stats-table .stats-col-timing {
+    order: 12;
+  }
+.stats-table .stats-col-speed {
+    order: 13;
+    grid-column: 1 / -1;
+  }
+.stats-table .stats-col-rpm {
+    order: 14;
+  }
+.stats-table .stats-col-input {
+    order: 20;
+  }
+.stats-table .stats-col-output {
+    order: 21;
+  }
+.stats-table .stats-col-cache-read {
+    order: 22;
+  }
+.stats-table .stats-col-cache-create {
+    order: 23;
+  }
+.stats-table .stats-col-cache-util {
+    order: 24;
+  }
+.stats-table .stats-col-cost {
+    order: 25;
+  }
+.stats-table .stats-total-row {
+    background: var(--surface-bg-muted);
+  }
+.stats-table .stats-col-total-label {
+    order: 1;
+    text-align: left !important;
+  }
+.stats-filter-summary-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+  }
+.stats-filter-summary-row .stats-filter-group--checkbox {
+    min-width: 0;
+  }
+.stats-filter-summary-row .stats-filter-actions {
+    margin-left: 0;
+    justify-self: end;
+  }
+.stats-filter-summary-row .stats-filter-actions .btn {
+    width: auto;
+    padding: 8px 12px;
+  }
+.stats-detail-heading {
+    align-items: stretch !important;
+    flex-direction: column;
+    gap: 10px;
+  }
+.stats-detail-heading-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+.stats-detail-sort-hint {
+    margin-left: 0 !important;
+  }
+.stats-detail-heading .view-toggle-group {
+    align-self: flex-start;
+  }
+.stats-table .stats-col-model {
+    display: flex !important;
+    align-items: center;
+    gap: 8px 12px;
+  }
+.stats-table .stats-col-model::before {
+    width: auto !important;
+    margin-bottom: 0 !important;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+.stats-table .stats-col-model .model-tag {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+.stats-table .stats-model-cell {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+.stats-table .stats-col-success,
+.stats-table .stats-col-error,
+.stats-table .stats-col-timing,
+.stats-table .stats-col-speed,
+.stats-table .stats-col-rpm,
+.stats-table .stats-col-input,
+.stats-table .stats-col-output,
+.stats-table .stats-col-cache-read,
+.stats-table .stats-col-cache-create,
+.stats-table .stats-col-cache-util,
+.stats-table .stats-col-cost {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    text-align: right !important;
+  }
+.stats-table .stats-col-cost .cost-stack {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 4px;
+    white-space: nowrap;
+    line-height: 1;
+  }
+.stats-table .stats-col-success::before,
+.stats-table .stats-col-error::before,
+.stats-table .stats-col-timing::before,
+.stats-table .stats-col-speed::before,
+.stats-table .stats-col-rpm::before,
+.stats-table .stats-col-input::before,
+.stats-table .stats-col-output::before,
+.stats-table .stats-col-cache-read::before,
+.stats-table .stats-col-cache-create::before,
+.stats-table .stats-col-cache-util::before,
+.stats-table .stats-col-cost::before {
+    width: auto !important;
+    margin-bottom: 0 !important;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+.stats-table .health-indicator {
+    max-width: 100%;
+    overflow: hidden;
+  }
+.stats-table .health-track {
+    width: min(100%, 335px);
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+.stats-table .health-rate {
+    display: none;
+  }
+}
+
+/* view-toggle 差异只剩：按钮带图标需要内距，图标尺寸固定 */
+
+.view-toggle-btn {
+  gap: 6px;
+}
+
+.view-toggle-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+  padding: 8px 0;
+}
+
+@media (max-width: 768px) {
+.charts-grid {
+      grid-template-columns: 1fr;
+  }
+}
+
+.chart-card {
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--neutral-200);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.chart-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--neutral-700);
+  margin: 0 0 12px 0;
+  text-align: center;
+}
+
+.pie-chart-container {
+  width: 100%;
+  height: 280px;
+}
+
+.health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.health-track {
+  display: grid;
+  grid-template-columns: repeat(48, 6px);
+  gap: 1px;
+  width: 335px;
+  min-width: 335px;
+  max-width: 335px;
+  flex: 0 0 335px;
+}
+
+.health-block {
+  width: 100%;
+  height: 12px;
+  border-radius: 1px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+}
+
+.health-block:hover {
+  transform: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+}
+
+.health-block.healthy {
+  background: var(--success-500);
+}
+
+.health-block.warning {
+  background: var(--warning-500);
+}
+
+.health-block.critical {
+  background: var(--error-500);
+}
+
+.health-block.rate-limited {
+  background: var(--warning-400);
+}
+
+.health-block.unknown {
+  background: var(--neutral-300);
+}
+
+.health-rate {
+  margin-left: 0;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 以下来自 styles.css：trend 页专属规则 ===== */
+
+/* 切换按钮组（趋势页复用） - Apple UI 风格 (可用性优先) */
+
+/* 分段控件：toggle-group / time-range-selector / view-toggle-group 同一控件语言 */
+
+.toggle-group {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--surface-bg);
+  padding: 2px;
+  border-radius: 10px;
+  border: 1px solid var(--surface-border);
+}
+
+.toggle-btn {
+  padding: 7px 14px;
+  border-radius: 7px;
+  color: var(--neutral-700);
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  border: none;
+  background: transparent;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  white-space: nowrap;
+}
+
+.toggle-btn:hover {
+  color: var(--neutral-900);
+  background: var(--surface-hover);
+}
+
+.toggle-btn.active {
+  background: var(--surface-bg-strong);
+  color: var(--primary-600);
+  font-weight: 650;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+@media (max-width: 768px) {
+.toggle-group {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+.toggle-group::-webkit-scrollbar {
+    display: none;
+  }
+.channel-filter-container {
+    width: 100%;
+  }
+.channel-filter-dropdown {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+/* ===== 趋势页面样式 ===== */
+
+.chart-container {
+  position: relative;
+  width: 100%;
+  height: 500px;
+  background: var(--surface-bg-strong);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--surface-border);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* 趋势页：全高自适应布局（让图表吃掉剩余高度） */
+
+body.trend-page .main-content {
+  height: 100vh;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+body.trend-page .content-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  width: 100%;
+}
+
+body.trend-page .trend-chart-section {
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 0 !important;
+  display: flex;
+  flex-direction: column;
+}
+
+body.trend-page .trend-chart-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.trend-page .chart-container {
+  height: auto;
+  flex: 1;
+  min-height: 260px;
+}
+
+.trend-chart-type-toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.trend-chart-type-btn {
+  min-height: 32px;
+  transition-property: color, background-color, border-color, box-shadow;
+}
+
+.trend-chart-type-btn.active {
+  color: var(--primary-600);
+  border-color: var(--primary-500);
+  background: color-mix(in srgb, var(--primary-500) 12%, transparent);
+  box-shadow: none;
+}
+
+.chart-loading,
+.chart-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--neutral-700);
+  text-align: center;
+}
+
+.chart-error {
+  color: var(--neutral-600);
+}
+
+.error-title {
+  color: var(--error-400);
+  font-weight: var(--font-medium);
+  margin: var(--space-2) 0 var(--space-1) 0;
+}
+
+.error-message {
+  font-size: var(--text-sm);
+}
+
+/* ===== 渠道筛选器样式 ===== */
+
+.channel-filter-container {
+  position: relative;
+  display: inline-block;
+}
+
+.channel-filter-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  min-width: 250px;
+  max-width: 350px;
+  background: var(--surface-bg-strong);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  z-index: 1000;
+  margin-top: 4px;
+}
+
+.filter-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--neutral-200);
+  font-weight: var(--font-medium);
+  color: var(--neutral-800);
+}
+
+.filter-action {
+  background: none;
+  border: none;
+  color: var(--primary-600);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.2s;
+}
+
+.filter-action:hover {
+  background-color: var(--primary-50);
+}
+
+.filter-content {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.channel-filter-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.channel-filter-item:hover {
+  background-color: var(--surface-hover);
+}
+
+.channel-checkbox {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--neutral-300);
+  border-radius: 3px;
+  background: var(--field-bg);
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s;
+}
+
+.channel-checkbox.checked {
+  background: var(--primary-500);
+  border-color: var(--primary-500);
+}
+
+.channel-checkbox.checked::after {
+  content: '✓';
+  position: absolute;
+  color: white;
+  font-size: 12px;
+  font-weight: bold;
+  top: -1px;
+  left: 2px;
+}
+
+.channel-color-indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--surface-border);
+}
+
+.channel-name {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--neutral-700);
+}
+
+@media (max-width: 768px) {
+.chart-container {
+    height: 400px;
+  }
+}
+
+@media (max-width: 480px) {
+.chart-container {
+    height: 320px;
+  }
+}
+
+.w-full {
+  width: 100%;
+}
+
+.h-full {
+  height: 100%;
+}
+
+@media (max-width: 768px) {
+body.trend-page .main-content {
+    height: auto;
+  }
+body.trend-page .trend-chart-section,
+body.trend-page .trend-chart-card {
+    flex: 0 0 auto;
+  }
+.trend-chart-toolbar .channel-filter-dropdown {
+    left: 0;
+    right: auto;
+    width: min(100%, 360px);
+    max-width: 100%;
+  }
+body.trend-page .chart-container {
+    height: clamp(320px, 54vh, 420px);
+    min-height: 320px;
+    flex: 0 0 auto;
+  }
+}
+
+.trend-filter-controls .filter-group {
+  flex: 0 1 auto;
+}
+
+.trend-filter-controls > .filter-actions--page {
+  margin-left: auto;
+}
+
+
 /* stats/trend 页专属样式 */
 
 /* ===== 对齐约定：表头跟随列；文本左、数值右 ===== */

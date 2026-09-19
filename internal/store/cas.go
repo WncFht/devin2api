@@ -164,6 +164,11 @@ func parseCASManifest(manifest []byte) (usize int64, entries []casEntry, err err
 		return 0, nil, fmt.Errorf("CAS manifest: bad chunk count varint")
 	}
 	body = body[n:]
+	// count 先按剩余体长界住再分配：每条目至少 hash+1B varint，虚报
+	// 的 count（行损坏）不该换来一次巨型预分配。
+	if count > uint64(len(body))/(casHashBytes+1) {
+		return 0, nil, fmt.Errorf("CAS manifest: chunk count %d exceeds body %d bytes", count, len(body))
+	}
 	entries = make([]casEntry, 0, count)
 	for i := uint64(0); i < count; i++ {
 		if len(body) < casHashBytes {

@@ -44,7 +44,7 @@ func bumpMarker(path string, fill func(*forensicMarker)) {
 	marker.Count++
 	fill(&marker)
 	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
+		_ = config.WriteFileAtomic(path, raw, 0o644)
 	}
 }
 
@@ -67,7 +67,7 @@ func warnIfRecovered(path, msg string, attrs func(*forensicMarker) []any) {
 	slog.Warn(msg, attrs(&marker)...)
 	marker.RecoveredAt = time.Now().UTC().Format(time.RFC3339)
 	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
+		_ = config.WriteFileAtomic(path, raw, 0o644)
 	}
 }
 

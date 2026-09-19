@@ -18,14 +18,10 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"time"
-
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // migration 是一条版本化演进：version 进 schema_migrations 作幂等键，
@@ -298,13 +294,6 @@ func addColumnIfAbsent(ctx context.Context, q dbtx, table, column, ddl string) e
 	return err
 }
 
-// isSQLiteBusy 判 busy 族错误：主码 &0xff == SQLITE_BUSY 把
-// BUSY_SNAPSHOT/BUSY_TIMEOUT 等扩展码一并收入。
-func isSQLiteBusy(err error) bool {
-	var se *sqlite.Error
-	return errors.As(err, &se) && se.Code()&0xff == sqlite3.SQLITE_BUSY
-}
-
 // applyMigrations 按序执行全部未应用的迁移，每条在自己的 BEGIN
 // IMMEDIATE 事务里应用并登记版本。须在 applySchema 之后调用
 // （schema_migrations 表本身由幂等建表保证存在）。
@@ -347,7 +336,7 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 			if err == nil {
 				break
 			}
-			if !isSQLiteBusy(err) || time.Now().After(lockDeadline) {
+			if !IsBusy(err) || time.Now().After(lockDeadline) {
 				return fmt.Errorf("migration %s: %w", m.version, err)
 			}
 			slog.Warn("migration lock wait exceeded busy_timeout, retrying",

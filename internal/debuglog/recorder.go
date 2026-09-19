@@ -183,9 +183,13 @@ type Manager struct {
 	workerGone chan struct{}
 	// encWG 计在役编码协程，encodersDone 在它们全部退出后关闭——关停时
 	// 写 worker 必须先等编码侧排空（否则任务转成 op 的途中 insertQ
-	// 已无人续收会死锁）。
+	// 已无人续收会死锁）。encoderDone 按分片在各自编码协程退出时关闭：
+	// sendTask 拿它做投递前的死消费者判定——分片先退与 encodersDone/
+	// workerGone 关闭之间有一段 drain 窗口，期间队列虽可写但已无人
+	// 消费，只有分片级信号能界住。
 	encWG        sync.WaitGroup
 	encodersDone chan struct{}
+	encoderDone  []chan struct{}
 	// shardEncoders 按分片下标持有各编码协程的专属 payload 编码器：
 	// 构造期填齐，任务闭包只在本协程上执行（同 dir 恒同分片），免锁
 	// 复用 flate 内部表——sync.Pool 会被 GC 清空，专属实例把表重建
@@ -511,6 +515,9 @@ type Recorder struct {
 	// 任务以它为 zstd dict。同 dir 任务恒由同一分片协程串行执行，字段
 	// 无并发访问；releaseDir 时把字节量退回 deltaBaseBytes 预算。
 	deltaBase []byte
+	// deltaEnc 是钉住基座后懒建的复用 delta 编码器：02/03* 逐文件的
+	// dict 哈希表构建只付一次；releaseDir 与基座同生死。
+	deltaEnc *store.PayloadDeltaEncoder
 
 	// 以下字段仅由写 worker 访问，无需加锁：
 	// stagedFiles 按文件名暂存已编码的整文件行；刷写周期与 chunkBufs
@@ -791,12 +798,14 @@ func NewManager(root string, policy RetentionPolicy, st *store.Store) *Manager {
 		workerStop:    make(chan struct{}),
 		workerGone:    make(chan struct{}),
 		encodersDone:  make(chan struct{}),
+		encoderDone:   make([]chan struct{}, encoderShards),
 		dirtyBufs:     make(map[*Recorder]struct{}),
 	}
 	shardCap := max(2048, globalQueueSize/encoderShards)
 	for i := range manager.queues {
 		manager.queues[i] = make(chan writeTask, shardCap)
 		manager.shardEncoders[i] = store.NewPayloadEncoder()
+		manager.encoderDone[i] = make(chan struct{})
 	}
 	manager.enabled.Store(true)
 	if root == "" {
@@ -1267,15 +1276,29 @@ func (recorder *Recorder) enqueueLockedExempt(task func()) {
 }
 
 // sendTask 把任务非阻塞送进本请求的分片队列；队列满按真证据丢失计
-// dropped，worker 已退计 lateWrites。仅持锁路径调用（持锁期间不挂起）。
+// dropped，本分片编码协程已退计 lateWrites。仅持锁路径调用（持锁期间
+// 不挂起）。编码协程已退时分片队列仍是可写的死队列——select 在
+// 「死队列可写」与 done 信号双就绪时随机投递，会把任务计成已受理却
+// 永不执行；顺序先查 encoderDone 挡掉这条静默丢失路径（残余的
+// check-then-act 缝隙只有纳秒级）。豁免任务（enqueueLockedExempt）在
+// closed 后仍可走到丢弃分支——recorder.dropped 已随 Complete 折算完
+// 不再有人读，与 noteEncodeDrop 同口径把这类迟到丢弃直挂
+// manager.droppedTotal。
 func (recorder *Recorder) sendTask(task func()) {
 	select {
-	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
-	case <-recorder.manager.workerGone:
+	case <-recorder.manager.encoderDone[recorder.shard]:
 		recorder.lateWrites.Add(1)
 		recorder.manager.lateWrites.Add(1)
+		return
+	default:
+	}
+	select {
+	case recorder.manager.queues[recorder.shard] <- writeTask{recorder: recorder, run: task}:
 	default:
 		recorder.dropped.Add(1)
+		if recorder.closed {
+			recorder.manager.droppedTotal.Add(1)
+		}
 	}
 }
 
@@ -1334,8 +1357,17 @@ func (recorder *Recorder) noteEncodeDrop(n int64) {
 // 是该 op 在 inflightBytes 上的预留（0 表示写侧自产自收尾，无预留）。
 // 写 worker 存活期间阻塞送达——insertQ 满即把背压传回分片队列，由入队
 // 端按丢弃语义降级；worker 已退（关停收尾）则退还 charge 并丢弃计数，
-// 编码协程不得陪葬。
+// 编码协程不得陪葬。workerGone 先顺序查一遍再进阻塞 select：信号已闭
+// 时 insertQ 仍是可写的死队列，双就绪的随机投递会把 op 计成已送达却
+// 永不执行。
 func (recorder *Recorder) pushInsert(charge int64, apply func()) {
+	select {
+	case <-recorder.manager.workerGone:
+		recorder.manager.addInflight(-charge)
+		recorder.manager.droppedTotal.Add(1)
+		return
+	default:
+	}
 	select {
 	case recorder.manager.insertQ <- insertOp{recorder: recorder, charge: charge, apply: apply}:
 	case <-recorder.manager.workerGone:
@@ -1357,6 +1389,7 @@ func (recorder *Recorder) encodePayload(data []byte) (stored []byte, usize int64
 // 摊到多核。收到关停信号后排空本分片残余任务再退出。
 func (manager *Manager) runEncoder(shard int) {
 	defer manager.encWG.Done()
+	defer close(manager.encoderDone[shard])
 	queue := manager.queues[shard]
 	for {
 		select {
@@ -2322,8 +2355,13 @@ func (recorder *Recorder) encodeStageFile(name string, data []byte) stagedFile {
 		}
 	case name == StageRequestMessages || strings.HasPrefix(name, devinRequestStageStem):
 		if recorder.deltaBase != nil {
-			stored, usize := store.EncodePayloadDelta(data, recorder.deltaBase)
-			return stagedFile{stored: stored, usize: usize}
+			if recorder.deltaEnc == nil {
+				recorder.deltaEnc = store.NewPayloadDeltaEncoder(recorder.deltaBase)
+			}
+			if recorder.deltaEnc != nil {
+				stored, usize := recorder.deltaEnc.Encode(data)
+				return stagedFile{stored: stored, usize: usize}
+			}
 		}
 	}
 	stored, usize := recorder.encodePayload(data)
@@ -2401,7 +2439,12 @@ func (recorder *Recorder) WriteError(stage string, err error) {
 	}
 	recorder.firstError.CompareAndSwap(nil, &errorRecord{stage: stage, message: err.Error()})
 	// elapsed_ms 记录错误发生时刻，在入队时打戳（同 AppendJSONL 口径）。
-	elapsedMS := time.Since(recorder.startedAt).Milliseconds()
+	// startedAt 经锁拷出——setStartedAt 测试回拨在同一把锁下写字段
+	// （生产路径不可变，-race 下测试并发场景读原值会被检出）。
+	recorder.mutex.Lock()
+	startedAt := recorder.startedAt
+	recorder.mutex.Unlock()
+	elapsedMS := time.Since(startedAt).Milliseconds()
 	recorder.enqueue(func() {
 		// 落库内容取同步抢占的胜出版本：与 index error_stage/
 		// error_message 逐字节一致，不随任务入队顺序漂移。

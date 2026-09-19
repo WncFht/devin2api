@@ -1633,6 +1633,8 @@ func TestDetachedLedgerWrite(t *testing.T) {
 	}
 	registry.noteFinish(key, detachFinishCompleted, entry)
 	registry.evictLocked(key, entry, detachEvictExpired)
+	// 台账写是异步泵，close 排空后才保证行已落库。
+	registry.close()
 
 	sqlDB, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=query_only(1)&_pragma=busy_timeout(5000)")
 	if err != nil {

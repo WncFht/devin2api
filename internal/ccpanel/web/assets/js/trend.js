@@ -233,6 +233,9 @@
         }
 
         window.trendData = metrics.payload.data || [];
+        // 后端桶时间字段有 ts/Ts 两种大小写——入库即归一到 ts，
+        // 渲染路径不再逐点回退
+        window.trendData.forEach(p => { if (p.ts == null) p.ts = p.Ts; });
 
         // 构建模型数据缓存（一次遍历，供后续 hasModelData 使用）
         buildModelDataCache(window.trendData);
@@ -344,6 +347,108 @@
       document.getElementById('chart').classList.add('hidden');
     }
 
+    const positiveOrNull = (v) => (v != null && v > 0) ? v : null;
+
+    // 趋势视图规格表：每种 trendType 声明总量线（totals）与模型线（models）
+    // 的取值口径，renderChart 统一展开成 ECharts series——新增视图只加表项，
+    // 不再复制整段 series 模板。
+    // totals.value(point, bucketSec)：point 是聚合桶；模型线 value(m, bucketSec)
+    // 的 m 是桶内该模型子对象（缺失时按 zeroFill 给 0，否则给 null）。
+    const TREND_SERIES_SPECS = {
+      count: {
+        totals: [
+          { nameKey: 'trend.totalSuccess', color: '#10b981', area: 0.22, value: (p) => p.success || 0 },
+          { nameKey: 'trend.totalFailed', color: '#ef4444', area: 0.12, value: (p) => p.error || 0 }
+        ],
+        models: [
+          { nameKey: 'trend.modelSuccess', lineType: 'solid', zeroFill: true, value: (m) => m.success || 0 },
+          { nameKey: 'trend.modelFailed', lineType: 'dashed', zeroFill: true, value: (m) => m.error || 0 }
+        ]
+      },
+      first_byte: {
+        totals: [
+          { nameKey: 'trend.avgFirstByteTime', color: '#0ea5e9', area: 0.18, value: (p) => positiveOrNull(p.avg_first_byte_time_seconds) }
+        ],
+        models: [{ value: (m) => positiveOrNull(m.avg_first_byte_time_seconds) }]
+      },
+      duration: {
+        totals: [
+          { nameKey: 'trend.avgDuration', color: '#a855f7', area: 0.16, value: (p) => positiveOrNull(p.avg_duration_seconds) }
+        ],
+        models: [{ value: (m) => positiveOrNull(m.avg_duration_seconds) }]
+      },
+      tokens: {
+        totals: [
+          { nameKey: 'trend.inputTokens', color: '#3b82f6', value: (p) => p.input_tokens || 0 },
+          { nameKey: 'trend.outputTokens', color: '#10b981', value: (p) => p.output_tokens || 0 },
+          { nameKey: 'trend.cacheRead', color: '#f97316', value: (p) => p.cache_read_tokens || 0 },
+          { nameKey: 'trend.cacheCreate', color: '#a855f7', value: (p) => p.cache_creation_tokens || 0 }
+        ],
+        models: [{ value: (m) => positiveOrNull((m.input_tokens || 0) + (m.output_tokens || 0)) }]
+      },
+      cost: {
+        totals: [
+          { nameKey: 'trend.totalCost', color: '#f97316', area: 0.16, value: (p) => p.total_cost || 0 }
+        ],
+        models: [{ value: (m) => positiveOrNull(m.total_cost) }]
+      },
+      rpm: {
+        totals: [
+          { name: 'RPM', color: '#3b82f6', area: 0.16, value: (p, bs) => {
+            const total = (p.success || 0) + (p.error || 0);
+            return total > 0 ? total * 60 / bs : 0;
+          } }
+        ],
+        models: [{ value: (m, bs) => {
+          const total = (m.success || 0) + (m.error || 0);
+          return total > 0 ? total * 60 / bs : null;
+        } }]
+      },
+      tps: {
+        totals: [
+          { nameKey: 'trend.inputTokens', color: '#3b82f6', value: (p, bs) => (Number(p.input_tokens) || 0) / bs },
+          { nameKey: 'trend.outputTokens', color: '#10b981', value: (p, bs) => (Number(p.output_tokens) || 0) / bs },
+          { nameKey: 'trend.cacheRead', color: '#f97316', value: (p, bs) => (Number(p.cache_read_tokens) || 0) / bs },
+          { nameKey: 'trend.cacheCreate', color: '#a855f7', value: (p, bs) => (Number(p.cache_creation_tokens) || 0) / bs }
+        ],
+        models: [{ value: (m, bs) => {
+          const total = (m.input_tokens || 0) + (m.output_tokens || 0);
+          return total > 0 ? total / bs : null;
+        } }]
+      },
+      cache_hit: {
+        totals: [
+          { nameKey: 'trend.cacheHitRate', color: '#f97316', area: 0.18, value: (p) => {
+            const hit = p.cache_read_tokens || 0;
+            const total = hit + (p.input_tokens || 0);
+            return total > 0 ? (hit / total) * 100 : null;
+          } }
+        ],
+        models: [{ value: (m) => {
+          const hit = m.cache_read_tokens || 0;
+          const total = hit + (m.input_tokens || 0);
+          return total > 0 ? (hit / total) * 100 : null;
+        } }]
+      },
+      error_rate: {
+        totals: [
+          { nameKey: 'trend.errorRate', color: '#ef4444', area: 0.16, value: (p) => {
+            const total = (p.success || 0) + (p.error || 0);
+            return total > 0 ? ((p.error || 0) / total) * 100 : null;
+          } }
+        ],
+        models: [{ value: (m) => {
+          const total = (m.success || 0) + (m.error || 0);
+          return total > 0 ? ((m.error || 0) / total) * 100 : null;
+        } }]
+      }
+    };
+
+    function hexRgba(hex, alpha) {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha.toFixed(2)})`;
+    }
+
     function renderChart() {
       if (!window.trendData || !window.trendData.length) {
         renderTrendError();
@@ -371,7 +476,7 @@
       const bucketMs = (window.currentBucketSec || 600) * 1000;
       const tsMs = new Array(dataLen);
       for (let i = 0; i < dataLen; i++) {
-        tsMs[i] = new Date(trendData[i].ts || trendData[i].Ts).getTime();
+        tsMs[i] = new Date(trendData[i].ts).getTime();
       }
 
       const noRequestRanges = computeNoRequestRanges(trendData);
@@ -410,253 +515,13 @@
       }
       window._trendDataEnd = tsMs.length ? tsMs[dataLen - 1] + bucketMs : 0;
 
-      // 根据趋势类型准备不同的总体数据
-      if (trendType === 'count') {
-        // 调用次数趋势：添加总体成功/失败线
-        series.push({
-          name: t('trend.totalSuccess'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#10b981'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#10b981',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(16, 185, 129, 0.22)' },
-              { offset: 1, color: 'rgba(16, 185, 129, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => [tsMs[i], point.success || 0])
-        });
-
-        series.push({
-          name: t('trend.totalFailed'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#ef4444'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#ef4444',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(239, 68, 68, 0.12)' },
-              { offset: 1, color: 'rgba(239, 68, 68, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => [tsMs[i], point.error || 0])
-        });
-      } else if (trendType === 'first_byte') {
-	        // 首字响应时间趋势：添加总体平均首字响应时间线
-	        series.push({
-	          name: t('trend.avgFirstByteTime'),
-	          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#0ea5e9'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#0ea5e9',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(14, 165, 233, 0.18)' },
-              { offset: 1, color: 'rgba(14, 165, 233, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => {
-            const fbt = point.avg_first_byte_time_seconds;
-            return [tsMs[i], (fbt != null && fbt > 0) ? fbt : null]; // 秒
-          })
-        });
-      } else if (trendType === 'duration') {
-        // 总耗时趋势：添加总体平均总耗时线
-        series.push({
-          name: t('trend.avgDuration'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#a855f7'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#a855f7',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(168, 85, 247, 0.16)' },
-              { offset: 1, color: 'rgba(168, 85, 247, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => {
-            const dur = point.avg_duration_seconds;
-            return [tsMs[i], (dur != null && dur > 0) ? dur : null]; // 秒
-          })
-        });
-      } else if (trendType === 'tokens') {
-        // Token用量趋势：添加输入、输出、缓存读、缓存建四条线
-        series.push({
-          name: t('trend.inputTokens'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: { color: '#3b82f6' },
-          lineStyle: { width: 2, color: '#3b82f6', cap: 'round', join: 'round' },
-          data: window.trendData.map((point, i) => [tsMs[i], point.input_tokens || 0])
-        });
-        series.push({
-          name: t('trend.outputTokens'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: { color: '#10b981' },
-          lineStyle: { width: 2, color: '#10b981', cap: 'round', join: 'round' },
-          data: window.trendData.map((point, i) => [tsMs[i], point.output_tokens || 0])
-        });
-        series.push({
-          name: t('trend.cacheRead'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: { color: '#f97316' },
-          lineStyle: { width: 2, color: '#f97316', cap: 'round', join: 'round' },
-          data: window.trendData.map((point, i) => [tsMs[i], point.cache_read_tokens || 0])
-        });
-        series.push({
-          name: t('trend.cacheCreate'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: { color: '#a855f7' },
-          lineStyle: { width: 2, color: '#a855f7', cap: 'round', join: 'round' },
-          data: window.trendData.map((point, i) => [tsMs[i], point.cache_creation_tokens || 0])
-        });
-      } else if (trendType === 'cost') {
-        // 费用消耗趋势：添加总体费用线
-        series.push({
-          name: t('trend.totalCost'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#f97316'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#f97316',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(249, 115, 22, 0.16)' },
-              { offset: 1, color: 'rgba(249, 115, 22, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => [tsMs[i], point.total_cost || 0])
-        });
-      } else if (trendType === 'rpm') {
-        // RPM趋势：每分钟请求数 = (success + error) * 60 / bucketSec
-        const bucketSec = window.currentBucketSec || 600;
-        series.push({
-          name: 'RPM',
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: { color: '#3b82f6' },
-          lineStyle: { width: 2, color: '#3b82f6', cap: 'round', join: 'round' },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(59, 130, 246, 0.16)' },
-              { offset: 1, color: 'rgba(59, 130, 246, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => {
-            const total = (point.success || 0) + (point.error || 0);
-            return [tsMs[i], total > 0 ? total * 60 / bucketSec : 0];
-          })
-        });
-      } else if (trendType === 'tps') {
-        // TPS趋势：四类 token 的每秒速率 = 桶内计数 / bucketSec，与 tokens 视图同分解
-        const bucketSec = window.currentBucketSec || 600;
-        const tpsSeriesDefs = [
-          { field: 'input_tokens', name: t('trend.inputTokens'), color: '#3b82f6' },
-          { field: 'output_tokens', name: t('trend.outputTokens'), color: '#10b981' },
-          { field: 'cache_read_tokens', name: t('trend.cacheRead'), color: '#f97316' },
-          { field: 'cache_creation_tokens', name: t('trend.cacheCreate'), color: '#a855f7' }
-        ];
-        tpsSeriesDefs.forEach(def => {
-          series.push({
-            name: def.name,
+      // 按规格表展开总量线
+      const spec = TREND_SERIES_SPECS[trendType];
+      const bucketSec = window.currentBucketSec || 600;
+      if (spec) {
+        spec.totals.forEach(def => {
+          const item = {
+            name: def.nameKey ? t(def.nameKey) : def.name,
             type: 'line',
             smooth: 0.25,
             symbol: 'circle',
@@ -667,158 +532,46 @@
             emphasis: { focus: 'series', showSymbol: true },
             itemStyle: { color: def.color },
             lineStyle: { width: 2, color: def.color, cap: 'round', join: 'round' },
-            data: window.trendData.map((point, i) => [tsMs[i], (Number(point[def.field]) || 0) / bucketSec])
-          });
-        });
-      } else if (trendType === 'cache_hit') {
-        // 缓存命中趋势：cache_read / (cache_read + input)——input 口径不含 cache_read
-        series.push({
-          name: t('trend.cacheHitRate'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#f97316'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#f97316',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(249, 115, 22, 0.18)' },
-              { offset: 1, color: 'rgba(249, 115, 22, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => {
-            const hit = point.cache_read_tokens || 0;
-            const total = hit + (point.input_tokens || 0);
-            return [tsMs[i], total > 0 ? (hit / total) * 100 : null];
-          })
-        });
-      } else if (trendType === 'error_rate') {
-        // 错误率趋势：error/(success+error)——低流量期的失败尖峰在次数视图里被压扁，
-        // 归一化后才看得见；空桶为 null 不画点
-        series.push({
-          name: t('trend.errorRate'),
-          type: 'line',
-          smooth: 0.25,
-          symbol: 'circle',
-          symbolSize: 4,
-          showSymbol: false,
-          sampling: 'lttb',
-          connectNulls: false,
-          emphasis: { focus: 'series', showSymbol: true },
-          itemStyle: {
-            color: '#ef4444'
-          },
-          lineStyle: {
-            width: 2,
-            color: '#ef4444',
-            cap: 'round',
-            join: 'round'
-          },
-          areaStyle: {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(239, 68, 68, 0.16)' },
-              { offset: 1, color: 'rgba(239, 68, 68, 0.00)' }
-            ])
-          },
-          data: window.trendData.map((point, i) => {
-            const total = (point.success || 0) + (point.error || 0);
-            return [tsMs[i], total > 0 ? ((point.error || 0) / total) * 100 : null];
-          })
+            data: trendData.map((point, i) => [tsMs[i], def.value(point, bucketSec)])
+          };
+          if (def.area) {
+            item.areaStyle = {
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: hexRgba(def.color, def.area) },
+                { offset: 1, color: hexRgba(def.color, 0) }
+              ])
+            };
+          }
+          series.push(item);
         });
       }
 
-      // 为每个可见模型添加对应趋势线
-      // 优化：使用 for 循环替代 forEach，预分配数组
+      // 为每个可见模型添加对应趋势线（同一张规格表的模型口径）
       const visibleModelsArray = Array.from(window.visibleModels);
-      const visibleCount = visibleModelsArray.length;
 
-      for (let ci = 0; ci < visibleCount; ci++) {
-        const modelName = visibleModelsArray[ci];
-        const color = modelColors[modelName];
+      if (spec) {
+        for (let ci = 0; ci < visibleModelsArray.length; ci++) {
+          const modelName = visibleModelsArray[ci];
+          const color = modelColors[modelName];
 
-        if (trendType === 'count') {
-          // 调用次数趋势：模型成功/失败线
-          // 优化：单次遍历同时提取 success 和 error 数据
-          const successData = new Array(dataLen);
-          const errorData = new Array(dataLen);
-          let successTotal = 0;
-          let errorTotal = 0;
+          spec.models.forEach(def => {
+            const data = new Array(dataLen);
+            let hasData = false;
+            let total = 0;
 
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const success = modelData ? (modelData.success || 0) : 0;
-            const error = modelData ? (modelData.error || 0) : 0;
-            successData[i] = [tsMs[i], success];
-            errorData[i] = [tsMs[i], error];
-            successTotal += success;
-            errorTotal += error;
-          }
-
-          // 成功线
-          if (successTotal > 0) {
-            series.push({
-              name: t('trend.modelSuccess', { model: modelName }),
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, type: 'solid', cap: 'round', join: 'round' },
-              data: successData
-            });
-          }
-
-          // 失败线
-          if (errorTotal > 0) {
-            series.push({
-              name: t('trend.modelFailed', { model: modelName }),
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, type: 'dashed', cap: 'round', join: 'round' },
-              data: errorData
-            });
-          }
-        } else if (trendType === 'first_byte') {
-          // 首字响应时间趋势：模型平均首字响应时间线
-          const fbtData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const fbt = modelData ? modelData.avg_first_byte_time_seconds : null;
-            if (fbt != null && fbt > 0) {
-              fbtData[i] = [tsMs[i], fbt];
-              hasData = true;
-            } else {
-              fbtData[i] = [tsMs[i], null];
+            for (let i = 0; i < dataLen; i++) {
+              const models = trendData[i].models;
+              const modelData = models ? models[modelName] : null;
+              const v = modelData ? def.value(modelData, bucketSec) : (def.zeroFill ? 0 : null);
+              data[i] = [tsMs[i], v];
+              if (def.zeroFill) total += v;
+              else if (v != null) hasData = true;
             }
-          }
 
-          if (hasData) {
+            if (def.zeroFill ? total <= 0 : !hasData) return;
+
             series.push({
-              name: modelName,
+              name: def.nameKey ? t(def.nameKey, { model: modelName }) : modelName,
               drillModel: modelName,
               type: 'line',
               smooth: 0.25,
@@ -827,239 +580,16 @@
               connectNulls: false,
               emphasis: { focus: 'series' },
               itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: fbtData
+              lineStyle: {
+                width: 1.5, color: color, cap: 'round', join: 'round',
+                ...(def.lineType ? { type: def.lineType } : {})
+              },
+              data: data
             });
-          }
-        } else if (trendType === 'duration') {
-          // 总耗时趋势：模型平均总耗时线
-          const durData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const dur = modelData ? modelData.avg_duration_seconds : null;
-            if (dur != null && dur > 0) {
-              durData[i] = [tsMs[i], dur];
-              hasData = true;
-            } else {
-              durData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: durData
-            });
-          }
-        } else if (trendType === 'tokens') {
-          // Token用量趋势：模型Token线（输入+输出合计）
-          const tokenData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
-            if (total > 0) {
-              tokenData[i] = [tsMs[i], total];
-              hasData = true;
-            } else {
-              tokenData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: tokenData
-            });
-          }
-        } else if (trendType === 'cost') {
-          // 费用消耗趋势：模型费用线
-          const costData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const cost = modelData ? modelData.total_cost : null;
-            if (cost != null && cost > 0) {
-              costData[i] = [tsMs[i], cost];
-              hasData = true;
-            } else {
-              costData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: costData
-            });
-          }
-        } else if (trendType === 'rpm') {
-          // RPM趋势：模型每分钟请求数
-          const bucketSec = window.currentBucketSec || 600;
-          const rpmData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
-            if (total > 0) {
-              rpmData[i] = [tsMs[i], total * 60 / bucketSec];
-              hasData = true;
-            } else {
-              rpmData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: rpmData
-            });
-          }
-        } else if (trendType === 'tps') {
-          // TPS趋势：模型每秒 token 速率（输入+输出，与 tokens 视图的模型口径一致）
-          const bucketSec = window.currentBucketSec || 600;
-          const tpsData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const total = modelData ? ((modelData.input_tokens || 0) + (modelData.output_tokens || 0)) : 0;
-            if (total > 0) {
-              tpsData[i] = [tsMs[i], total / bucketSec];
-              hasData = true;
-            } else {
-              tpsData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: tpsData
-            });
-          }
-        } else if (trendType === 'cache_hit') {
-          // 缓存命中趋势：模型缓存命中率（与聚合线同式）
-          const hitData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const hit = modelData ? (modelData.cache_read_tokens || 0) : 0;
-            const total = modelData ? hit + (modelData.input_tokens || 0) : 0;
-            if (total > 0) {
-              hitData[i] = [tsMs[i], (hit / total) * 100];
-              hasData = true;
-            } else {
-              hitData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: hitData
-            });
-          }
-        } else if (trendType === 'error_rate') {
-          // 错误率趋势：模型失败率（与聚合线同式）
-          const errRateData = new Array(dataLen);
-          let hasData = false;
-
-          for (let i = 0; i < dataLen; i++) {
-            const models = trendData[i].models;
-            const modelData = models ? models[modelName] : null;
-            const total = modelData ? ((modelData.success || 0) + (modelData.error || 0)) : 0;
-            if (total > 0) {
-              errRateData[i] = [tsMs[i], ((modelData.error || 0) / total) * 100];
-              hasData = true;
-            } else {
-              errRateData[i] = [tsMs[i], null];
-            }
-          }
-
-          if (hasData) {
-            series.push({
-              name: modelName,
-              drillModel: modelName,
-              type: 'line',
-              smooth: 0.25,
-              symbol: 'none',
-              sampling: 'lttb',
-              connectNulls: false,
-              emphasis: { focus: 'series' },
-              itemStyle: { color: color },
-              lineStyle: { width: 1.5, color: color, cap: 'round', join: 'round' },
-              data: errRateData
-            });
-          }
+          });
         }
       }
+
 
       // 首字响应/总耗时：加参考线（P50/P90）和极值标记，便于读趋势/看尖峰
       if (trendType === 'first_byte' || trendType === 'duration') {
@@ -1140,7 +670,7 @@
               html += `
                 <div style="display: flex; align-items: center; gap: 8px; margin: 4px 0;">
                   <span style="display: inline-block; width: 10px; height: 10px; background: ${color}; border-radius: 50%;"></span>
-                  <span>${param.seriesName}: ${formatTrendValue(window.currentTrendType, value)}</span>
+                  <span>${escapeHtml(param.seriesName)}: ${formatTrendValue(window.currentTrendType, value)}</span>
                 </div>
               `;
             });
@@ -1331,6 +861,14 @@
     function updateTrendChartTypeButtons() {
       document.querySelectorAll('.trend-chart-type-btn').forEach(button => {
         const active = button.dataset.chartType === window.currentTrendChartType;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
+    function updateTrendTypeButtons() {
+      document.querySelectorAll('#trend-type-group .toggle-btn').forEach(button => {
+        const active = (button.getAttribute('data-type') || 'first_byte') === window.currentTrendType;
         button.classList.toggle('active', active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
       });
@@ -1564,14 +1102,12 @@
     // ===== 模型序列数据缓存（避免重复遍历 trendData）=====
     // 缓存结构: { modelName: { success, error, hasData } }
     window._modelDataCache = null;
-    window._modelDataCacheVersion = 0;
 
     // 构建模型数据缓存：一次遍历 trendData，统计所有模型
     function buildModelDataCache(trendData) {
       const cache = {};
       if (!trendData || !trendData.length) {
         window._modelDataCache = cache;
-        window._modelDataCacheVersion++;
         return cache;
       }
 
@@ -1600,7 +1136,6 @@
       }
 
       window._modelDataCache = cache;
-      window._modelDataCacheVersion++;
       return cache;
     }
 
@@ -1617,24 +1152,46 @@
 
     // 生成模型序列颜色（避免与总体趋势线颜色冲突）
     // 总体趋势线保留颜色: #10b981(绿), #ef4444(红), #0ea5e9(天蓝), #a855f7(紫), #f97316(橙)
+    // 暗色主题整体提亮一档：同序号保持同色系，模型↔颜色对应关系跨主题不漂移
+    const MODEL_COLORS_LIGHT = [
+      '#3b82f6', // 蓝色
+      '#06b6d4', // 青色
+      '#14b8a6', // 绿松色
+      '#84cc16', // 黄绿色
+      '#eab308', // 黄色
+      '#fb923c', // 浅橙色
+      '#ec4899', // 粉色
+      '#6366f1', // 靛蓝色
+      '#8b5cf6', // 淡紫色
+      '#22c55e', // 亮绿色
+      '#f43f5e', // 玫红色
+      '#0891b2', // 深青色
+      '#65a30d', // 橄榄绿
+      '#ca8a04', // 金黄色
+      '#dc2626'  // 深红色
+    ];
+    const MODEL_COLORS_DARK = [
+      '#60a5fa', // 蓝
+      '#22d3ee', // 青
+      '#2dd4bf', // 绿松
+      '#a3e635', // 黄绿
+      '#facc15', // 黄
+      '#fdba74', // 浅橙
+      '#f472b6', // 粉
+      '#818cf8', // 靛蓝
+      '#a78bfa', // 淡紫
+      '#4ade80', // 亮绿
+      '#fb7185', // 玫红
+      '#06b6d4', // 深青→青
+      '#84cc16', // 橄榄→黄绿
+      '#eab308', // 金黄→黄
+      '#ef4444'  // 深红→红
+    ];
+
     function generateModelColors(models) {
-      const colors = [
-        '#3b82f6', // 蓝色
-        '#06b6d4', // 青色
-        '#14b8a6', // 绿松色
-        '#84cc16', // 黄绿色
-        '#eab308', // 黄色
-        '#fb923c', // 浅橙色
-        '#ec4899', // 粉色
-        '#6366f1', // 靛蓝色
-        '#8b5cf6', // 淡紫色
-        '#22c55e', // 亮绿色
-        '#f43f5e', // 玫红色
-        '#0891b2', // 深青色
-        '#65a30d', // 橄榄绿
-        '#ca8a04', // 金黄色
-        '#dc2626'  // 深红色
-      ];
+      const colors = document.documentElement.dataset.resolvedTheme === 'dark'
+        ? MODEL_COLORS_DARK
+        : MODEL_COLORS_LIGHT;
 
       const modelColors = {};
       const modelArray = Array.from(models);
@@ -1943,6 +1500,7 @@
 
       window.addEventListener('ccload:themechange', () => {
         if (window.chartInstance && window.trendData && window.trendData.length) {
+          updateModelFilter();
           renderChart();
         }
       });
@@ -1967,10 +1525,8 @@
       trendTypeGroup.addEventListener('click', (e) => {
         const t = e.target.closest('.toggle-btn');
         if (!t) return;
-        trendTypeGroup.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
-        t.classList.add('active');
-        const trendType = t.getAttribute('data-type') || 'first_byte';
-        window.currentTrendType = trendType;
+        window.currentTrendType = t.getAttribute('data-type') || 'first_byte';
+        updateTrendTypeButtons();
         persistState();
         renderChart();
       });
@@ -2107,13 +1663,7 @@
       });
 
       // 应用趋势类型UI
-      const trendTypeGroup = document.getElementById('trend-type-group');
-      if (trendTypeGroup) {
-        trendTypeGroup.querySelectorAll('.toggle-btn').forEach(btn => {
-          const type = btn.getAttribute('data-type') || 'first_byte';
-          btn.classList.toggle('active', type === window.currentTrendType);
-        });
-      }
+      updateTrendTypeButtons();
     }
 
     window.i18n?.onLocaleChange?.(() => {

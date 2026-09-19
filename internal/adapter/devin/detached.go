@@ -290,6 +290,7 @@ type detachedRegistry struct {
 	evicted           int64 // 容量淘汰（尸体让位/最老 running/最老终态兜底）
 	replaced          int64 // 同键新条目替换旧残骸
 	aborted           int64 // 面板 abort 按来源目录清场（abort-after-detach 残留窗）
+	closed            int64 // 登记表关停整体清场（进程退出路径——非零即关停发生）
 	truncated         int64 // 缓冲越字节预算被冻结次数——append 截断点记账，与移除路径解耦
 	orphans           int64 // 移除时从未挂接（全部态）——「脱钩但无消费者」
 	orphanCompleted   int64 // 其中 completed：上游算完无人接，最纯的浪费
@@ -302,8 +303,8 @@ type detachedRegistry struct {
 	// 是这类「零足迹」现场的兜底取证层。ledger 为 nil 时只走内存环。
 	ledger *store.Store
 	lane   string
-	// ledgerDrops 记台账写失败数（争用超时/库不可用）——台账存在的目的
-	// 就是兜住争用期的丢痕迹，它自己丢了多少必须有数。
+	// ledgerDrops 记台账写丢失数（队满拒收/写失败/关停后到队）——台账
+	// 存在的目的就是兜住争用期的丢痕迹，它自己丢了多少必须有数。
 	ledgerDrops int64
 	// seeded 记开机播种灌回的 completed 条目数；blobDrops 记种子层的
 	// 自身丢失（编码失败/写库失败/坏行解码失败）——持久层的兑现率与
@@ -311,11 +312,33 @@ type detachedRegistry struct {
 	seeded    int64
 	blobDrops int64
 	events    eventRing[DetachedEvent]
+	// closing 由 close() 置位（mu 下）：登记表进入关停态，admit 拒收新
+	// 条目、pushEvent 不再入队台账（直接记 drop）。draining 只拒新准入
+	// 不掐在册泵；closing 是真清场。
+	closing bool
+	// ledgerQueue 三件套是 detached_events 的异步写管道：pushEvent 在
+	// mu 内入队（FIFO 序=环序——原来 mu 内直写 sqlite 就是买这个序，
+	// 代价是全部生命周期路径背着写连接的争用延迟），runLedgerPump 单
+	// 写者消费，close() 关停后排队存量排空退出。管道永不关闭——关停
+	// 信号走独立的 stop 通道，迟到入队只占缓冲不 panic。
+	ledgerQueue chan store.DetachedEvent
+	ledgerStop  chan struct{}
+	ledgerDone  chan struct{}
 }
 
 // detachedEventCap 是缓存事件环容量：脱钩/挂接/终局/移除低频，
 // 64 条足够回看一整天的生命周期轨迹（与 gateEventCap 同档位）。
 const detachedEventCap = 64
+
+// detachedLedgerQueueCap 是台账写管道深度：每条目一生数条事件、
+// 上限 8 条目，256 队深远超真实突发；真溢出说明写面已整体卡死，
+// 丢行（记 ledgerDrops）比反压生命周期路径正确。
+// detachedLedgerDrainBudget 是 close() 排空台账存量的总预算——常态
+// 近空，预算只兜「库已卡死」场景，写注定失败时关库不被整队重放拖住。
+const (
+	detachedLedgerQueueCap    = 256
+	detachedLedgerDrainBudget = 5 * time.Second
+)
 
 // 生命周期事件种类：admit（登记）、attach（挂接命中）、miss（同键
 // 到场但条目不可用）、cross_miss（同键请求到场但条目在兄弟 lane，
@@ -340,13 +363,15 @@ const (
 // running/最老终态兜底），replaced 是同键新条目逐出旧残骸，
 // truncated 是截断尸体被惰性逐出——只作事件归因，截断发生数在
 // 缓冲冻结时已由 noteTruncated 记过，移除不再重复入账；aborted 是
-// 面板 abort 按来源目录清场（abort-after-detach 残留窗收口）。
+// 面板 abort 按来源目录清场（abort-after-detach 残留窗收口），
+// closed 是登记表关停时的整体清场（进程退出路径）。
 const (
 	detachEvictExpired   = "expired"
 	detachEvictCapacity  = "capacity"
 	detachEvictReplaced  = "replaced"
 	detachEvictTruncated = "truncated"
 	detachEvictAborted   = "aborted"
+	detachEvictClosed    = "closed"
 )
 
 // 泵终局原因（finish 事件的 detail 与 finished_* 计数桶）：completed/
@@ -451,6 +476,9 @@ type DetachedStats struct {
 	// Aborted 是面板 abort 按来源目录清场的移除计数——abort-after-detach
 	// 残留窗的兑现观测面（设计前提是稀有事件，非零即说明窗口真实命中）。
 	Aborted int64 `json:"aborted"`
+	// Closed 是登记表关停整体清场的移除计数——进程退出路径的兑现观测面，
+	// 非零即关停清场发生过（与 aborted 并列的稀有事件口径）。
+	Closed int64 `json:"closed"`
 	// Truncated 是缓冲被字节预算冻结的次数（append 截断点记账）——
 	// flood/异常上游 drain 进缓存被预算拦下的信号；与移除路径解耦，
 	// 截断尸体无论经哪条路径淘汰都已入账，不会漏记也不会重复计。
@@ -503,6 +531,7 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 		merged.Evicted += s.Evicted
 		merged.Replaced += s.Replaced
 		merged.Aborted += s.Aborted
+		merged.Closed += s.Closed
 		merged.Truncated += s.Truncated
 		merged.Orphans += s.Orphans
 		merged.OrphanCompleted += s.OrphanCompleted
@@ -532,15 +561,27 @@ func mergeDetachedStats(per map[string]DetachedStats) DetachedStats {
 	return merged
 }
 
-// newDetachedRegistry 创建空缓存。ledger 非空时生命周期事件同步落
-// detached_events 台账（每事件一行）；lane 名作为台账的归属维写入。
+// newDetachedRegistry 创建空缓存。ledger 非空时生命周期事件经异步写
+// 管道落 detached_events 台账（每事件一行）；lane 名作为台账的归属维
+// 写入。台账泵随登记表创建——不随 ledger 判空惰性起：close() 的关停
+// 约定依赖泵恒在场（nil 三件套自然空转）。
 func newDetachedRegistry(ledger *store.Store, lane string) *detachedRegistry {
-	return &detachedRegistry{
-		entries: make(map[string]*detachedEntry),
-		ledger:  ledger,
-		lane:    lane,
-		events:  newEventRing[DetachedEvent](detachedEventCap),
+	registry := &detachedRegistry{
+		entries:    make(map[string]*detachedEntry),
+		ledger:     ledger,
+		lane:       lane,
+		events:     newEventRing[DetachedEvent](detachedEventCap),
+		ledgerStop: make(chan struct{}),
+		ledgerDone: make(chan struct{}),
 	}
+	if ledger != nil {
+		registry.ledgerQueue = make(chan store.DetachedEvent, detachedLedgerQueueCap)
+		go registry.runLedgerPump()
+	} else {
+		// 无台账时 done 立即闭合：close() 的等待语义不变（空转返回）。
+		close(registry.ledgerDone)
+	}
+	return registry
 }
 
 // detachedPeersKey 是兄弟 lane 完成缓存登记表在请求 ctx 里的挂接键
@@ -645,15 +686,20 @@ func (registry *detachedRegistry) noteCrossLaneMiss(key, owner, originDir string
 // 挂接与 census 立即可见，drainCancel 先于落册就位，「已登记但不可杀」
 // 的窗口不存在。detached CAS（唯一认领位）由调用方在流上兑入，claim
 // 只管「字段 → 落册」这一段。parent 是客户端请求 ctx——泵的 drain
-// 生命周期脱离客户端取消，WithTimeout 单独挂 running TTL。
-func (registry *detachedRegistry) claim(key string, entry *detachedEntry, originDir string, parent context.Context) (context.Context, context.CancelFunc) {
-	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(parent), detachedRunningTTL)
+// 生命周期脱离客户端取消，WithTimeout 单独挂 running TTL。登记表已关停
+// 时 admitted=false：drain ctx 就地回收，调用方放弃起泵，条目随 GC
+// 蒸发——否则泵会脱离登记表管控空烧。
+func (registry *detachedRegistry) claim(key string, entry *detachedEntry, originDir string, parent context.Context) (drainCtx context.Context, drainCancel context.CancelFunc, admitted bool) {
+	drainCtx, drainCancel = context.WithTimeout(context.WithoutCancel(parent), detachedRunningTTL)
 	entry.mu.Lock()
 	entry.originDir = originDir
 	entry.drainCancel = drainCancel
 	entry.mu.Unlock()
-	registry.admit(key, entry)
-	return drainCtx, drainCancel
+	if !registry.admit(key, entry) {
+		drainCancel()
+		return nil, nil, false
+	}
+	return drainCtx, drainCancel, true
 }
 
 // admit 把条目按 key 登记进缓存并接管其后台泵的生命周期。容量触顶的
@@ -661,10 +707,14 @@ func (registry *detachedRegistry) claim(key string, entry *detachedEntry, origin
 // 留场只为给同键到场记 miss，活泵不该给它让位）→ 最老 running →
 // 最老终态兜底（四类穷尽分类保证至少逐出一条，容量是硬上限而非软帽）。
 // 同键旧条目（前一次同请求脱钩的残骸）先逐出再登记——两条同键后台泵
-// 同跑是纯粹的配额浪费。
-func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
+// 同跑是纯粹的配额浪费。返回 false 表示登记表已关停（close 置位），
+// 调用方须放弃起泵并回收 drain ctx——否则泵会脱离登记表管控空烧。
+func (registry *detachedRegistry) admit(key string, entry *detachedEntry) bool {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.closing {
+		return false
+	}
 	entry.mu.Lock()
 	entry.admittedAt = time.Now()
 	entry.expiresAt = entry.admittedAt.Add(detachedRunningTTL)
@@ -721,6 +771,7 @@ func (registry *detachedRegistry) admit(key string, entry *detachedEntry) {
 	registry.entries[key] = entry
 	registry.detaches++
 	registry.pushEvent(detachedEventAdmit, key, originDir, "")
+	return true
 }
 
 // evictLocked 摘出条目：running 条目同时掐后台泵的 drain ctx——泵的
@@ -742,6 +793,8 @@ func (registry *detachedRegistry) evictLocked(key string, entry *detachedEntry, 
 		registry.replaced++
 	case detachEvictAborted:
 		registry.aborted++
+	case detachEvictClosed:
+		registry.closed++
 	default:
 		registry.expired++
 	}
@@ -855,10 +908,11 @@ func (registry *detachedRegistry) noteBlobDrop() {
 
 // pushEvent 追加一条生命周期事件；调用方须持 mu。key 截前 12 位——
 // 与 04 标记行的全量键前缀对照可认，全键写进快照只是噪音。
-// ledger 非空时同一事件同步落 detached_events 台账行（全量 key）：
-// 在 mu 内写库保证台账序与环序一致，写上限取 lockedStateStoreTimeout
-// ——争用期超时按写失败记账（ledgerDrops）不阻塞生命周期流程；台账
-// 是内存环之下的持久层，不是替代。
+// ledger 非空时同一事件入队 detached_events 台账写管道（全量 key）：
+// 入队在 mu 内做，FIFO 序天然与环序一致——原来 mu 内直写 sqlite 就是
+// 买这个序，代价是 admit/evict/finish 等全生命周期路径都背着写连接的
+// 争用延迟。队满按写失败记 ledgerDrops；台账是内存环之下的持久层，
+// 不是替代。
 func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string) {
 	at := time.Now()
 	registry.events.push(DetachedEvent{
@@ -871,15 +925,84 @@ func (registry *detachedRegistry) pushEvent(kind, key, originDir, detail string)
 	if registry.ledger == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
-	err := registry.ledger.InsertDetachedEvent(ctx, store.DetachedEvent{
-		At: at, Lane: registry.lane, Key: key, OriginDir: originDir, Kind: kind, Detail: detail,
-	})
-	cancel()
-	if err != nil {
+	if registry.closing {
 		registry.ledgerDrops++
-		slog.Warn("detached event ledger write failed", "lane", registry.lane, "kind", kind, "key", detachedRingKey(key), "error", err)
+		return
 	}
+	select {
+	case registry.ledgerQueue <- store.DetachedEvent{
+		At: at, Lane: registry.lane, Key: key, OriginDir: originDir, Kind: kind, Detail: detail,
+	}:
+	default:
+		registry.ledgerDrops++
+		slog.Warn("detached event ledger write dropped: queue full", "lane", registry.lane, "kind", kind, "key", detachedRingKey(key))
+	}
+}
+
+// runLedgerPump 是 detached_events 台账的单写者：FIFO 逐行落库直到
+// 关停信号，随后排空存量退出——排空带总预算，库卡死时 close() 不被
+// 整队重放拖住。
+func (registry *detachedRegistry) runLedgerPump() {
+	defer close(registry.ledgerDone)
+	for {
+		select {
+		case e := <-registry.ledgerQueue:
+			registry.writeLedgerRow(e)
+		case <-registry.ledgerStop:
+			deadline := time.Now().Add(detachedLedgerDrainBudget)
+			for {
+				select {
+				case e := <-registry.ledgerQueue:
+					registry.writeLedgerRow(e)
+				default:
+					return
+				}
+				if time.Now().After(deadline) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeLedgerRow 落单行台账；失败记 ledgerDrops（与队满拒收同口径）。
+func (registry *detachedRegistry) writeLedgerRow(e store.DetachedEvent) {
+	ctx, cancel := context.WithTimeout(context.Background(), lockedStateStoreTimeout)
+	err := registry.ledger.InsertDetachedEvent(ctx, e)
+	cancel()
+	if err == nil {
+		return
+	}
+	registry.mu.Lock()
+	registry.ledgerDrops++
+	registry.mu.Unlock()
+	slog.Warn("detached event ledger write failed", "lane", e.Lane, "kind", e.Kind, "key", detachedRingKey(e.Key), "error", err)
+}
+
+// close 关停登记表：摘出全部在场条目（running 泵被 drainCancel 掐死，
+// 泵走 ctx.Done 退场、终局经 noteFinish 照常记账）、置 closing 拒收
+// 新登记与台账入队，随后停台账泵并排空存量写。Adapter 关闭路径调用——
+// 与 BeginDrain 的差别：draining 只拒新准入不掐在册泵，close 是真清场。
+// 台账管道永不关闭——closing 置位后 pushEvent 直接记 drop，迟到入队
+// 不可能发生，管道自然无 send-on-closed 风险。
+func (registry *detachedRegistry) close() {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	if registry.closing {
+		// 重入防护：ledgerStop 只能关一次（Adapter.Close 与号池删 lane
+		// 的异步 Close 撞在同一登记表上时第二次到此直接退场）。
+		registry.mu.Unlock()
+		return
+	}
+	for key, entry := range registry.entries {
+		registry.evictLocked(key, entry, detachEvictClosed)
+	}
+	registry.closing = true
+	registry.mu.Unlock()
+	close(registry.ledgerStop)
+	<-registry.ledgerDone
 }
 
 // detachedRingKey 给事件环的 key 截前 12 位。
@@ -937,6 +1060,7 @@ func (registry *detachedRegistry) stats() DetachedStats {
 	stats.Evicted = registry.evicted
 	stats.Replaced = registry.replaced
 	stats.Aborted = registry.aborted
+	stats.Closed = registry.closed
 	stats.Truncated = registry.truncated
 	stats.Orphans = registry.orphans
 	stats.OrphanCompleted = registry.orphanCompleted
@@ -1042,7 +1166,10 @@ func (stream *responseStream) admitDetached(ctx context.Context) {
 		return
 	}
 	entry := stream.entry
-	drainCtx, drainCancel := stream.registry.claim(stream.detachKey, entry, stream.recorder.Dir(), ctx)
+	drainCtx, drainCancel, admitted := stream.registry.claim(stream.detachKey, entry, stream.recorder.Dir(), ctx)
+	if !admitted {
+		return
+	}
 	detail := map[string]any{
 		"key":             stream.detachKey,
 		"buffered_events": entry.len(),

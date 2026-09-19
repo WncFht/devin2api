@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -54,6 +55,17 @@ type Store struct {
 	// 等在飞查询结束，不先取消会把关库拖成聚合时长（GB 级库秒级以上）。
 	seedDone   chan struct{}
 	seedCancel context.CancelFunc
+
+	// stateQueue 三件套是 runtime_state 的异步写管道：闸门闩与号池
+	// 冷却这类持锁调用方只入队（FIFO 承接它们的锁序——写/删交错在
+	// 消费者侧天然保序），SQLite I/O 随之挪出互斥区。drops 计队满
+	// 拒收与写失败的合计。stopOnce 幂等化关停信号——Close 与
+	// sql.DB.Close 同约定允许重复调用。
+	stateQueue         chan stateWrite
+	stateQueueStop     chan struct{}
+	stateQueueDone     chan struct{}
+	stateQueueStopOnce sync.Once
+	stateQueueDrops    atomic.Int64
 }
 
 // slowWriteWarn 是写连接独占时长的告警线：远低于写调用方的
@@ -348,6 +360,13 @@ func Open(path string) (*Store, error) {
 	st := &Store{db: wconn{db}, ro: ro, path: path, pageSize: pageSize}
 	st.debugBytes.Store(debugBytes)
 	st.walLiveBytes.Store(-1)
+	// runtime_state 异步写管道随库开启：闸门闩与号池冷却的持锁调用
+	// 方自此只入队，写序由 FIFO 承接；必须在任何 Close 路径之前挂好，
+	// Open 中途失败的 _ = st.Close() 也走同一停止约定。
+	st.stateQueue = make(chan stateWrite, stateQueueCap)
+	st.stateQueueStop = make(chan struct{})
+	st.stateQueueDone = make(chan struct{})
+	go st.runStateQueue()
 	// 水位自愈：任何绕过双写的写入者（无 cells 码的旧二进制、外部
 	// 工具、importIndex）留下的未记账行在每次启动时补记——不做这步，
 	// 缝隙会被后续双写推进的水位碾过，对 UNION 读永久隐形（9-19
@@ -544,6 +563,13 @@ func (s *Store) WALBytes() int64 {
 // 它的 ro 快照聚合在 GB 级库上是秒级在飞查询，直接 Close 会被池等待
 // 拖住；取消后经 ctx 中止，等待退出口径把「协程写已关闭池」噪声消掉。
 func (s *Store) Close() error {
+	// 先停 runtime_state 写协程并排空存量：反序会让在飞队列写撞上
+	// 已关的写连接，存量只能整批丢弃。stopOnce 幂等化——stateQueueDone
+	// 已闭后读它即返回，二次 Close 不会 panic。
+	if s.stateQueueStop != nil {
+		s.stateQueueStopOnce.Do(func() { close(s.stateQueueStop) })
+		<-s.stateQueueDone
+	}
 	if s.seedCancel != nil {
 		s.seedCancel()
 		select {

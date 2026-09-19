@@ -71,6 +71,32 @@ func (h *Handler) recentRPM(ctx context.Context, model, kh string) float64 {
 	return v
 }
 
+// recentRPMByModel 一次 GROUP BY 扫描取全部生效模型的最近 60s
+// RPM；kh 非空时只看该令牌——替代逐模型 recentRPM 的 N+1。
+func (h *Handler) recentRPMByModel(ctx context.Context, kh string) map[string]float64 {
+	if h.store == nil {
+		return nil
+	}
+	m, err := h.store.LogRecentRPMByModel(ctx, kh)
+	if err != nil {
+		slog.Warn("ccpanel: recent rpm by model query failed", "error", err)
+	}
+	return m
+}
+
+// recentRPMByKeyHash 一次 GROUP BY 扫描取全部令牌的最近 60s
+// RPM——替代逐令牌 recentRPM 的 N+1。
+func (h *Handler) recentRPMByKeyHash(ctx context.Context) map[string]float64 {
+	if h.store == nil {
+		return nil
+	}
+	m, err := h.store.LogRecentRPMByKeyHash(ctx)
+	if err != nil {
+		slog.Warn("ccpanel: recent rpm by key hash query failed", "error", err)
+	}
+	return m
+}
+
 // lastByModel 返回各生效模型的最近快照；kh 非空时只看该令牌的行。
 func (h *Handler) lastByModel(ctx context.Context, kh string) map[string]store.LogModelLast {
 	if h.store == nil {
@@ -98,12 +124,13 @@ func (h *Handler) modelSet(ctx context.Context, kh string) []string {
 	return models
 }
 
-// statusCodeSet 返回出现过的状态码集合（排序）。
-func (h *Handler) statusCodeSet(ctx context.Context) []int {
+// statusCodeSet 返回出现过的状态码集合（排序）；kh 非空时只看该
+// 令牌的行——api_token 身份的筛选面板与 models 维同口径。
+func (h *Handler) statusCodeSet(ctx context.Context, kh string) []int {
 	if h.store == nil {
 		return []int{}
 	}
-	codes, err := h.store.LogStatusCodes(ctx)
+	codes, err := h.store.LogStatusCodes(ctx, kh)
 	if err != nil {
 		slog.Warn("ccpanel: status codes query failed", "error", err)
 		return []int{}

@@ -135,15 +135,14 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if collectDropped {
 		context.Dropped = append(context.Dropped, common.UnconsumedFields(data, chatRequestFields)...)
 	}
-	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；选中的指针
-	// 非正时静默丢弃会让调用方以为上限已生效——记 Dropped 透出。
-	maxTokensValue := request.MaxCompletionTokens
-	droppedMaxTokens := "field:max_completion_tokens"
-	if maxTokensValue == nil {
-		maxTokensValue = request.MaxTokens
-		droppedMaxTokens = "field:max_tokens"
+	// max_completion_tokens 优先于 max_tokens（OpenAI 语义）；首选指针在
+	// 场但非正被丢弃时继续查次选——只丢首选值会把同时给出的合法
+	// max_tokens 一并吞掉。非正值静默丢弃会让调用方以为上限已生效，
+	// 记 Dropped 透出。
+	context.MaxTokens = common.PositiveIntOrDrop(request.MaxCompletionTokens, &context.Dropped, "field:max_completion_tokens")
+	if context.MaxTokens == nil {
+		context.MaxTokens = common.PositiveIntOrDrop(request.MaxTokens, &context.Dropped, "field:max_tokens")
 	}
-	context.MaxTokens = common.PositiveIntOrDrop(maxTokensValue, &context.Dropped, droppedMaxTokens)
 	context.Temperature = request.Temperature
 	context.TopP = request.TopP
 	context.TopK = common.PositiveIntOrDrop(request.TopK, &context.Dropped, "field:top_k")
@@ -195,6 +194,11 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	functionIDs := make(map[string]string)
 	if err := appendMessages(&context, request.Messages, callIDs, functionIDs); err != nil {
 		return AdaptedRequest{}, err
+	}
+	// messages 非空但解完全落在 system/tool_calls 之外（纯 system 单等）
+	// 时 Messages 为空——空对话打到上游才失败，本地尽早拒绝更可读。
+	if len(context.Messages) == 0 {
+		return AdaptedRequest{}, errors.New("chat request produced no conversation messages")
 	}
 	droppedTools := make(map[string]bool)
 	for _, tool := range request.Tools {
@@ -266,7 +270,7 @@ func appendMessages(context *llm.RequestMessages, messages []Message, callIDs ma
 func appendMessage(context *llm.RequestMessages, message Message, callIDs map[string]struct{}, functionIDs map[string]string) error {
 	switch message.Role {
 	case "system", "developer":
-		content, err := common.DecodeContent(message.Content, &context.Dropped)
+		content, err := decodeBlankableContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -305,7 +309,7 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 	case "tool":
 		// tool_call_id 缺失或对不上前置调用的结果先按原样进 IR；
 		// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
-		content, err := common.DecodeContent(message.Content, &context.Dropped)
+		content, err := decodeBlankableContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -318,7 +322,7 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 		// 旧版工具结果：没有 call id，凭 name 对回对应 function_call
 		// 的合成 id；对不上说明历史里没有该调用，造孤儿 id 交给
 		// DemoteOrphanToolResults 降级成文本而不是 400 整单。
-		content, err := common.DecodeContent(message.Content, &context.Dropped)
+		content, err := decodeBlankableContent(context, message.Content)
 		if err != nil {
 			return err
 		}
@@ -341,14 +345,20 @@ func appendMessage(context *llm.RequestMessages, message Message, callIDs map[st
 	return nil
 }
 
+// decodeBlankableContent 解码允许缺席的 content：缺席/null 归一为空
+// 文本块（与 user 面同口径），其余走 DecodeContent 正常解码。
+func decodeBlankableContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
+	if common.JSONBlank(raw) {
+		return []llm.Content{llm.TextContent{Text: ""}}, nil
+	}
+	return common.DecodeContent(raw, &context.Dropped)
+}
+
 // decodeUserContent 解码 user 消息内容；空/null 归一为空文本块。
 // content 在场但解不出内容块（空数组/全部 part 不识）时同样落成
 // 空文本占位保住轮次，并记 empty_message:user——与 anthropic 面同口径。
 func decodeUserContent(context *llm.RequestMessages, raw json.RawMessage) ([]llm.Content, error) {
-	if common.JSONBlank(raw) {
-		return []llm.Content{llm.TextContent{Text: ""}}, nil
-	}
-	content, err := common.DecodeContent(raw, &context.Dropped)
+	content, err := decodeBlankableContent(context, raw)
 	if err != nil {
 		return nil, err
 	}

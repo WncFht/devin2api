@@ -58,36 +58,10 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 	return nil
 }
 
-// PutDebugFileIfAbsent 只在 (dir,name) 不存在时写入——error.json 的
-// first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
-func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
-	stored, usize := EncodePayload(content)
-	var delta int64
-	err := writeTx(ctx, s.db.DB, "PutDebugFileIfAbsent", func(ctx context.Context, q dbtx) error {
-		res, err := q.ExecContext(ctx,
-			`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-			dir, name, stored, usize, time.Now().UnixMilli())
-		if err != nil {
-			return err
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n > 0 {
-			delta = int64(len(stored))
-		}
-		return addPayloadBytes(ctx, q, delta)
-	})
-	if err != nil {
-		return err
-	}
-	s.debugBytes.Add(delta)
-	return nil
-}
-
 // ClaimDebugFile 是带占位语义的 IfAbsent 变体：无行时插入并返回
 // true，已有行则原样保留并返回 false——目录分配把它当原子占位用
-// （等价文件时代 mkdir 的 EEXIST），与 PutDebugFileIfAbsent 的差别
-// 只在是否报告本次真正写入。
+// （等价文件时代 mkdir 的 EEXIST），也是 error.json 的
+// first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
 	stored, usize := EncodePayload(content)
 	var delta int64
@@ -130,8 +104,9 @@ type DebugChunkRow struct {
 	Data []byte
 }
 
-// AppendDebugChunk 追加一行到 debug_chunks（AppendDebugChunks 的单条形态）。
-func (s *Store) AppendDebugChunk(ctx context.Context, dir, name string, data []byte) error {
+// appendDebugChunk 追加一行到 debug_chunks（AppendDebugChunks 的单条形态，
+// 仅同包测试用——单行便捷壳不进公共 API 面）。
+func (s *Store) appendDebugChunk(ctx context.Context, dir, name string, data []byte) error {
 	return s.AppendDebugChunks(ctx, []DebugChunkRow{{Dir: dir, Name: name, Data: data}})
 }
 

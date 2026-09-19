@@ -5,21 +5,10 @@ const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 let originalSettings = {}; // 保存原始值用于比较
 let settingDefinitions = new Map();
 let runtimeMetricsLoading = false;
-let runtimeMetricsPreviousFocus = null;
 let runtimeMetricsRefreshTimer = null;
 const RUNTIME_METRICS_REFRESH_MS = 3000;
-let multimodalFallbackPreviousFocus = null;
-let multimodalFallbackDraft = [];
-let multimodalFallbackModelOptions = null;
-let customPricingPreviousFocus = null;
-let customPricingDraft = [];
-let customPricingModelFilter = '';
-// 系统分层定价模型的 ID 集合（在草稿内的任何位置都不允许保存）。
-// 只存 ID 而非 DOM 状态，重渲染后依然有效。
-const customPricingTieredModels = new Set();
 
 let effectiveConfigData = null;
-let processLogPreviousFocus = null;
 let processLogPollTimer = null;
 let processLogOffset = 0;
 let processLogBuffer = '';
@@ -31,27 +20,6 @@ const PROCESS_LOG_REFRESH_MS = 5000;
 const PROCESS_LOG_BUFFER_CAP = 256 * 1024;
 // 级别过滤保留无 level= 的行（堆栈续行、手写输出等），不静默吞内容。
 const PROCESS_LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
-
-const modelMultimodalFallbackSettingKey = 'model_multimodal_fallback';
-const modelCustomPricingSettingKey = 'model_custom_pricing';
-const maxMultimodalFallbackMappings = 64;
-const maxCustomPricingBytes = 1024 * 1024;
-const maxCustomPricingModels = 512;
-const customPricingBasicFields = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price'];
-const customPricingHighContextFields = ['input_price_high', 'output_price_high', 'cache_read_price_high', 'cache_write_price_high'];
-// 后端契约只接受显式列出的字段；系统价格里仅供内部使用的字段（分层表、
-// 缓存读计入分档、图像费率）在预填时必须剔除，否则保存会被拒绝。
-const customPricingContractFields = new Set([
-  ...customPricingBasicFields, ...customPricingHighContextFields
-]);
-
-function projectCustomPricingDefaults(pricing) {
-  const projected = {};
-  for (const field of customPricingContractFields) {
-    if (pricing && Object.prototype.hasOwnProperty.call(pricing, field)) projected[field] = pricing[field];
-  }
-  return projected;
-}
 
 const advancedSettingKeys = new Set([
   'auto_refresh_interval_seconds',
@@ -131,10 +99,6 @@ function numericInputAttributes(setting) {
 
 function validateSettingInput(setting, value) {
   const normalizedValue = String(value ?? '');
-  if (setting.key === modelCustomPricingSettingKey) {
-    return validateCustomPricingInput(normalizedValue);
-  }
-
   if (setting.value_type === 'json') {
     const trimmed = normalizedValue.trim();
     if (trimmed === '') return '';
@@ -188,39 +152,6 @@ function validateSettingInput(setting, value) {
     if (setting.key !== 'responses_ws_max_transcript_bytes' && bytes < 1) {
       return t('settings.validation.oneByteMinimum');
     }
-  }
-  return '';
-}
-
-function validateCustomPricingInput(value) {
-  if (new TextEncoder().encode(value).length > maxCustomPricingBytes) {
-    return t('settings.validation.customPricingTooLarge');
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(value);
-  } catch (_) {
-    return t('settings.validation.customPricingJSON');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return t('settings.validation.customPricingObject');
-  }
-  const ids = new Set();
-  const validID = /^[a-z0-9][a-z0-9._:/-]*$/;
-  const allowedFields = new Set([...customPricingContractFields]);
-  const finiteNonNegative = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
-  const checkObjectFields = (object, fields) => Object.keys(object).every((key) => fields.has(key));
-  const checkPrices = (object) => Object.values(object).every(finiteNonNegative);
-  for (const [rawID, object] of Object.entries(parsed)) {
-    const id = rawID.trim().toLowerCase();
-    if (!validID.test(id) || /\s/.test(id) || ids.has(id)) return t('settings.validation.customPricingModelID');
-    ids.add(id);
-    if (ids.size > maxCustomPricingModels || !object || typeof object !== 'object' || Array.isArray(object)) {
-      return ids.size > maxCustomPricingModels
-        ? t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels })
-        : t('settings.validation.customPricingObject');
-    }
-    if (!checkObjectFields(object, allowedFields) || !checkPrices(object)) return t('settings.validation.customPricingFields');
   }
   return '';
 }
@@ -500,18 +431,6 @@ function bindSettingsPageActions() {
     configReloadBtn.dataset.bound = '1';
   }
 
-  const multimodalFallbackBtn = document.getElementById('model-multimodal-fallback-btn');
-  if (multimodalFallbackBtn && !multimodalFallbackBtn.dataset.bound) {
-    multimodalFallbackBtn.addEventListener('click', (event) => openMultimodalFallbackModal(event.currentTarget));
-    multimodalFallbackBtn.dataset.bound = '1';
-  }
-
-  const customPricingBtn = document.getElementById('model-custom-pricing-btn');
-  if (customPricingBtn && !customPricingBtn.dataset.bound) {
-    customPricingBtn.addEventListener('click', (event) => openCustomPricingModal(event.currentTarget));
-    customPricingBtn.dataset.bound = '1';
-  }
-
   const refreshBtn = document.getElementById('refresh-runtime-metrics-btn');
   if (refreshBtn && !refreshBtn.dataset.bound) {
     refreshBtn.addEventListener('click', loadRuntimeMetrics);
@@ -524,695 +443,21 @@ function bindSettingsPageActions() {
     btn.dataset.bound = '1';
   });
 
-  const modal = document.getElementById('runtimeMetricsModal');
-  if (modal && !modal.dataset.bound) {
-    modal.addEventListener('click', (event) => {
-      if (event.target === modal) closeRuntimeMetricsModal();
-    });
-    modal.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeRuntimeMetricsModal();
-    });
-    modal.dataset.bound = '1';
-  }
-
-  bindMultimodalFallbackModal();
-  bindCustomPricingModal();
   bindProcessLogModal();
-}
-
-function trapModalFocus(modal, event) {
-  const focusable = Array.from(modal.querySelectorAll(
-    'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-  )).filter((element) => !element.hidden && element.offsetParent !== null);
-  if (focusable.length === 0) return;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
-}
-
-// ===== 多模态回退模型映射编辑器 =====
-// 草稿三段式：打开时从 hidden input 解析进 DOM，编辑只改对话框 DOM，
-// 取消即丢弃；应用时才收集 DOM 写回 hidden input。
-
-function parseMultimodalFallback(value) {
-  try {
-    const parsed = JSON.parse(String(value || '{}'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    return Object.entries(parsed).map(([from, to]) => ({ from, to: String(to ?? '') }));
-  } catch (_) {
-    return [];
-  }
-}
-
-function multimodalFallbackCount(value) {
-  return parseMultimodalFallback(value).length;
-}
-
-function updateMultimodalFallbackSummary(value) {
-  const summary = document.getElementById('model-multimodal-fallback-summary');
-  if (!summary) return;
-  summary.textContent = t('settings.multimodalFallback.ruleCount', {
-    count: multimodalFallbackCount(value)
-  });
-}
-
-// 与后端 RoutingModelName 近似：剥掉尾部思考后缀（如 (max)）并统一小写，
-// 仅用于编辑器的重复/自映射提示，权威校验在后端。
-function normalizeModelKey(value) {
-  return String(value || '').trim().toLowerCase().replace(/\s*\([^()]*\)\s*$/, '');
-}
-
-function multimodalFallbackOptionSources() {
-  if (Array.isArray(multimodalFallbackModelOptions)) return multimodalFallbackModelOptions;
-  // 加载失败时至少保留当前草稿里出现的模型，已配值不至于从下拉里消失。
-  const seen = new Set();
-  for (const row of multimodalFallbackDraft) {
-    for (const name of [row.from, row.to]) {
-      if (name) seen.add(name);
-    }
-  }
-  return Array.from(seen).sort();
-}
-
-function multimodalFallbackOptionsHtml(selected) {
-  const options = multimodalFallbackOptionSources();
-  if (selected && !options.includes(selected)) options.unshift(selected);
-  return options.map((name) => (
-    `<option value="${escapeHtml(name)}"${name === selected ? ' selected' : ''}>${escapeHtml(name)}</option>`
-  )).join('');
-}
-
-function renderMultimodalFallbackRow(pair) {
-  return `
-    <div class="multimodal-fallback-row">
-      <select class="form-input multimodal-fallback-select" data-field="from" aria-label="${escapeHtml(t('settings.multimodalFallback.fromModel'))}">
-        ${multimodalFallbackOptionsHtml(pair.from)}
-      </select>
-      <span class="multimodal-fallback-arrow" aria-hidden="true">&rarr;</span>
-      <select class="form-input multimodal-fallback-select" data-field="to" aria-label="${escapeHtml(t('settings.multimodalFallback.fallbackModel'))}">
-        ${multimodalFallbackOptionsHtml(pair.to)}
-      </select>
-      <button type="button" class="btn-icon multimodal-fallback-remove-btn" data-action="remove-multimodal-fallback-row"
-        aria-label="${escapeHtml(t('settings.multimodalFallback.removeRow'))}">&times;</button>
-    </div>`;
-}
-
-function renderMultimodalFallbackDraft() {
-  const container = document.getElementById('multimodalFallbackRows');
-  const empty = document.getElementById('multimodalFallbackEmpty');
-  if (!container) return;
-  container.innerHTML = multimodalFallbackDraft.map(renderMultimodalFallbackRow).join('');
-  if (empty) empty.hidden = multimodalFallbackDraft.length > 0;
-}
-
-async function loadMultimodalFallbackModelOptions() {
-  if (multimodalFallbackModelOptions !== null) return;
-  try {
-    const data = await fetchDataWithAuth('/admin/models');
-    multimodalFallbackModelOptions = Array.isArray(data?.models) ? data.models : [];
-  } catch (err) {
-    console.error('加载模型候选失败:', err);
-    multimodalFallbackModelOptions = [];
-  }
-}
-
-function showMultimodalFallbackError(message) {
-  const error = document.getElementById('multimodalFallbackError');
-  if (!error) return;
-  error.textContent = message || '';
-  error.hidden = !message;
-}
-
-async function openMultimodalFallbackModal(trigger) {
-  const modal = document.getElementById('multimodalFallbackModal');
-  const input = document.getElementById(modelMultimodalFallbackSettingKey);
-  if (!modal || !input) return;
-
-  multimodalFallbackPreviousFocus = trigger || document.activeElement;
-  multimodalFallbackDraft = parseMultimodalFallback(input.value);
-  showMultimodalFallbackError(null);
-  await loadMultimodalFallbackModelOptions();
-  renderMultimodalFallbackDraft();
-  document.querySelector('.app-container')?.setAttribute('inert', '');
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
-}
-
-function closeMultimodalFallbackModal() {
-  const modal = document.getElementById('multimodalFallbackModal');
-  if (!modal) return;
-
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  document.querySelector('.app-container')?.removeAttribute('inert');
-  if (multimodalFallbackPreviousFocus?.isConnected) multimodalFallbackPreviousFocus.focus();
-  multimodalFallbackPreviousFocus = null;
-  multimodalFallbackDraft = [];
-}
-
-function addMultimodalFallbackRow() {
-  // 现有行的选择值由 DOM 持有；追加后会全量重绘，先把用户编辑同步回草稿，
-  // 否则重绘会用打开弹窗时的旧值覆盖现有行。
-  const container = document.getElementById('multimodalFallbackRows');
-  if (container) multimodalFallbackDraft = collectMultimodalFallbackDraft();
-  if (multimodalFallbackDraft.length >= maxMultimodalFallbackMappings) {
-    showMultimodalFallbackError(t('settings.multimodalFallback.errorLimit', { max: maxMultimodalFallbackMappings }));
-    return;
-  }
-  multimodalFallbackDraft.push({ from: '', to: '' });
-  renderMultimodalFallbackDraft();
-}
-
-function removeMultimodalFallbackRow(row) {
-  const container = document.getElementById('multimodalFallbackRows');
-  if (container) multimodalFallbackDraft = collectMultimodalFallbackDraft();
-  const index = Array.from(row.parentNode?.children || []).indexOf(row);
-  if (index >= 0) multimodalFallbackDraft.splice(index, 1);
-  row.remove();
-  const empty = document.getElementById('multimodalFallbackEmpty');
-  if (empty) empty.hidden = multimodalFallbackDraft.length > 0;
-}
-
-// 收集对话框 DOM 中的映射。select 值由 searchable-select 增强层同步回原生
-// select（dispatchSelectionEvents），DOM 就是当前草稿的真源。
-function collectMultimodalFallbackDraft() {
-  const rows = [];
-  const container = document.getElementById('multimodalFallbackRows');
-  if (container) {
-    container.querySelectorAll('.multimodal-fallback-row').forEach((row) => {
-      rows.push({
-        from: String(row.querySelector('select[data-field="from"]')?.value || '').trim(),
-        to: String(row.querySelector('select[data-field="to"]')?.value || '').trim()
-      });
-    });
-  }
-  return rows;
-}
-
-function validateMultimodalFallbackRows(rows) {
-  if (rows.length > maxMultimodalFallbackMappings) {
-    return t('settings.multimodalFallback.errorLimit', { max: maxMultimodalFallbackMappings });
-  }
-  const seen = new Set();
-  for (const row of rows) {
-    if (!row.from || !row.to) return t('settings.multimodalFallback.errorBlank');
-    const fromKey = normalizeModelKey(row.from);
-    const toKey = normalizeModelKey(row.to);
-    if (fromKey === toKey) return t('settings.multimodalFallback.errorSelf', { model: row.from });
-    if (seen.has(fromKey)) return t('settings.multimodalFallback.errorDuplicate', { model: row.from });
-    seen.add(fromKey);
-  }
-  return null;
-}
-
-async function applyMultimodalFallback() {
-  const rows = collectMultimodalFallbackDraft();
-  const error = validateMultimodalFallbackRows(rows);
-  if (error) {
-    showMultimodalFallbackError(error);
-    return;
-  }
-  const mapping = {};
-  for (const row of rows) mapping[row.from] = row.to;
-
-  const value = JSON.stringify(mapping);
-  if (value === originalSettings[modelMultimodalFallbackSettingKey]) {
-    closeMultimodalFallbackModal();
-    return;
-  }
-
-  const modal = document.getElementById('multimodalFallbackModal');
-  const applyButton = modal?.querySelector('[data-action="apply-multimodal-fallback"]');
-  if (applyButton?.disabled) return;
-  if (applyButton) {
-    applyButton.disabled = true;
-    applyButton.setAttribute('aria-busy', 'true');
-  }
-  showMultimodalFallbackError(null);
-
-  try {
-    const result = await fetchDataWithAuth('/admin/settings/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [modelMultimodalFallbackSettingKey]: value })
-    });
-    syncSettingState(modelMultimodalFallbackSettingKey, value);
-    closeMultimodalFallbackModal();
-    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
-  } catch (err) {
-    console.error('保存多模态回退映射异常:', err);
-    showMultimodalFallbackError(t('settings.msg.saveFailed') + ': ' + err.message);
-  } finally {
-    if (applyButton) {
-      applyButton.disabled = false;
-      applyButton.removeAttribute('aria-busy');
-    }
-  }
-}
-
-function bindMultimodalFallbackModal() {
-  const modal = document.getElementById('multimodalFallbackModal');
-  if (!modal || modal.dataset.bound) return;
-
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      closeMultimodalFallbackModal();
-      return;
-    }
-    const button = event.target.closest('[data-action]');
-    if (!button) return;
-    switch (button.dataset.action) {
-      case 'close-multimodal-fallback':
-        closeMultimodalFallbackModal();
-        break;
-      case 'apply-multimodal-fallback':
-        applyMultimodalFallback();
-        break;
-      case 'add-multimodal-fallback-row':
-        addMultimodalFallbackRow();
-        break;
-      case 'remove-multimodal-fallback-row':
-        removeMultimodalFallbackRow(button.closest('.multimodal-fallback-row'));
-        break;
-    }
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeMultimodalFallbackModal();
-      return;
-    }
-    if (event.key === 'Tab') trapModalFocus(modal, event);
-  });
-  modal.dataset.bound = '1';
-}
-
-// ===== 自定义模型价格编辑器 =====
-// 价格设置在这里以结构化表格编辑，提交时仍复用 model_custom_pricing 设置接口。
-
-const customPricingFieldLabelKeys = {
-  input_price: 'settings.customPricing.inputPrice',
-  output_price: 'settings.customPricing.outputPrice',
-  cache_read_price: 'settings.customPricing.cacheReadPrice',
-  cache_write_price: 'settings.customPricing.cacheWritePrice',
-  cache_write_price_high: 'settings.customPricing.cacheWritePriceHigh',
-  cache_read_price_high: 'settings.customPricing.cacheReadPriceHigh',
-  input_price_high: 'settings.customPricing.inputPriceHigh',
-  output_price_high: 'settings.customPricing.outputPriceHigh'
-};
-
-function parseCustomPricing(value) {
-  try {
-    const parsed = JSON.parse(String(value || '{}'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    return Object.entries(parsed).map(([model, pricing]) => ({
-      model,
-      pricing: pricing && typeof pricing === 'object' && !Array.isArray(pricing) ? pricing : {}
-    }));
-  } catch (_) {
-    return [];
-  }
-}
-
-function updateCustomPricingSummary(value) {
-  const summary = document.getElementById('model-custom-pricing-summary');
-  if (!summary) return;
-  summary.textContent = t('settings.customPricing.modelCount', {
-    count: parseCustomPricing(value).length
-  });
-}
-
-function customPricingDisplayNumber(value) {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
-  return String(value);
-}
-
-function customPricingNumberControl(field, value) {
-  const label = escapeHtml(t(customPricingFieldLabelKeys[field] || field));
-  return `<input type="number" class="form-input custom-pricing-number" data-cp-field="${field}"
-    min="0" step="any" inputmode="decimal"
-    value="${escapeHtml(customPricingDisplayNumber(value))}"
-    aria-label="${label}" title="${label}">`;
-}
-
-function renderCustomPricingModel(entry, modelIndex) {
-  const pricing = entry.pricing || {};
-  const highContextDescription = escapeHtml(t('settings.customPricing.highContextDescription'));
-
-  // 高上下文四项与基础四价同列同序，标签由表头承担。
-  // 关键：输入框必须落在真正的 <td> 里，列宽由表格列算法统一决定。
-  // 用 grid/flex 容器会算出与列宽无关的宽度，两行输入框永远对不齐。
-  const highContextCells = customPricingHighContextFields
-    .map((field) => `<td>${customPricingNumberControl(field, pricing[field])}</td>`)
-    .join('');
-
-  return `
-    <tr class="custom-pricing-model-row" data-model-index="${modelIndex}">
-      <td>
-        <div class="custom-pricing-model-cell">
-          <input type="text" class="form-input custom-pricing-model-id-input" data-cp-field="model_id" value="${escapeHtml(entry.model || '')}" spellcheck="false" required aria-label="${escapeHtml(t('settings.customPricing.modelId'))}" title="${escapeHtml(t('settings.customPricing.modelId'))}">
-          <span class="custom-pricing-model-status" data-cp-status role="status" hidden></span>
-        </div>
-      </td>
-      <td>${customPricingNumberControl('input_price', pricing.input_price)}</td>
-      <td>${customPricingNumberControl('output_price', pricing.output_price)}</td>
-      <td>${customPricingNumberControl('cache_read_price', pricing.cache_read_price)}</td>
-      <td>${customPricingNumberControl('cache_write_price', pricing.cache_write_price)}</td>
-      <td><button type="button" class="btn-icon" data-action="remove-custom-pricing-model" data-model-index="${modelIndex}" aria-label="${escapeHtml(t('settings.customPricing.removeModel'))}">&times;</button></td>
-    </tr>
-    <tr class="custom-pricing-high-row" data-model-index="${modelIndex}">
-      <td>
-        <span class="custom-pricing-high-label" title="${highContextDescription}">${escapeHtml(t('settings.customPricing.highContextPricing'))}</span>
-      </td>
-      ${highContextCells}
-      <td></td>
-    </tr>`;
-}
-
-function readCustomPricingNumber(input) {
-  const value = String(input?.value ?? '').trim();
-  if (value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : NaN;
-}
-
-// 一个模型占两行：基础价行 + 高上下文值行。
-// 两行靠 data-model-index 配对，不再靠 nextElementSibling 猜位置——
-// 行数或顺序一变，猜测就会静默错位（漏读价格、删错行）。
-function customPricingHighRow(modelRow) {
-  const index = modelRow?.dataset.modelIndex;
-  if (index === undefined) return null;
-  for (let row = modelRow.nextElementSibling; row; row = row.nextElementSibling) {
-    // 本组两行相邻且 index 相同；遇到下个模型的行说明本组已结束。
-    if (row.dataset.modelIndex !== index) break;
-    if (row.classList.contains('custom-pricing-high-row')) return row;
-  }
-  return null;
-}
-
-function collectCustomPricingEntries() {
-  const entries = [];
-  document.querySelectorAll('#customPricingRows .custom-pricing-model-row').forEach((row) => {
-    const high = customPricingHighRow(row);
-    const pricing = {};
-    for (const field of customPricingBasicFields) {
-      const value = readCustomPricingNumber(row.querySelector(`[data-cp-field="${field}"]`));
-      if (value !== null) pricing[field] = value;
-    }
-    if (high) {
-      for (const field of customPricingHighContextFields) {
-        const value = readCustomPricingNumber(high.querySelector(`[data-cp-field="${field}"]`));
-        if (value !== null) pricing[field] = value;
-      }
-    }
-    entries.push({
-      model: String(row.querySelector('[data-cp-field="model_id"]')?.value || '').trim(),
-      pricing
-    });
-  });
-  return entries;
-}
-
-function validateCustomPricingEntries(entries) {
-  if (entries.length > maxCustomPricingModels) {
-    return t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels });
-  }
-  const seen = new Set();
-  const validID = /^[a-z0-9][a-z0-9._:/-]*$/;
-  for (const entry of entries) {
-    const id = entry.model.toLowerCase();
-    if (!validID.test(id) || /\s/.test(id)) return t('settings.validation.customPricingModelID');
-    if (seen.has(id)) return t('settings.validation.customPricingModelID');
-    if (customPricingTieredModels.has(id)) return t('settings.validation.customPricingTiered', { model: entry.model });
-    seen.add(id);
-  }
-  const payload = {};
-  for (const entry of entries) payload[entry.model] = entry.pricing;
-  return validateCustomPricingInput(JSON.stringify(payload));
-}
-
-function customPricingEntriesToJSON(entries) {
-  const payload = {};
-  for (const entry of entries) payload[entry.model] = entry.pricing;
-  return JSON.stringify(payload);
-}
-
-function canonicalizeCustomPricing(value) {
-  if (Array.isArray(value)) return value.map(canonicalizeCustomPricing);
-  if (value && typeof value === 'object') {
-    return Object.keys(value).sort().reduce((result, key) => {
-      result[key] = canonicalizeCustomPricing(value[key]);
-      return result;
-    }, {});
-  }
-  return value;
-}
-
-function customPricingEquivalent(first, second) {
-  const toMap = (value) => parseCustomPricing(value).reduce((result, entry) => {
-    result[entry.model.trim().toLowerCase()] = canonicalizeCustomPricing(entry.pricing);
-    return result;
-  }, {});
-  return JSON.stringify(canonicalizeCustomPricing(toMap(first))) === JSON.stringify(canonicalizeCustomPricing(toMap(second)));
-}
-
-function renderCustomPricingDraft() {
-  const rows = document.getElementById('customPricingRows');
-  const empty = document.getElementById('customPricingEmpty');
-  if (!rows) return;
-  rows.innerHTML = customPricingDraft.map(renderCustomPricingModel).join('');
-  if (empty) empty.hidden = customPricingDraft.length > 0;
-  applyCustomPricingFilter();
-}
-
-function applyCustomPricingFilter() {
-  const search = document.getElementById('customPricingSearch');
-  if (search) customPricingModelFilter = String(search.value || '').trim().toLowerCase();
-  document.querySelectorAll('#customPricingRows .custom-pricing-model-row').forEach((row) => {
-    const model = String(row.querySelector('[data-cp-field="model_id"]')?.value || '').toLowerCase();
-    const hidden = customPricingModelFilter !== '' && !model.includes(customPricingModelFilter);
-    const high = customPricingHighRow(row);
-    row.hidden = hidden;
-    if (high) high.hidden = hidden;
-  });
-}
-
-function setCustomPricingModelStatus(row, message, state = '') {
-  const status = row?.querySelector('[data-cp-status]');
-  if (!status) return;
-  status.textContent = message || '';
-  status.hidden = !message;
-  status.dataset.state = state;
-}
-
-async function loadCustomPricingDefaults(input) {
-  const row = input?.closest('.custom-pricing-model-row');
-  const modelID = String(input?.value || '').trim().toLowerCase();
-  if (!row || !modelID || row.dataset.defaultModelId === modelID) return;
-
-  const modelIndex = Number(row.dataset.modelIndex);
-  const entries = collectCustomPricingEntries();
-  const entry = entries[modelIndex];
-  if (!entry) return;
-  row.dataset.defaultModelId = modelID;
-
-  // 已有值时不自动改写，避免覆盖用户正在编辑的配置。
-  if (Object.keys(entry.pricing || {}).length > 0) return;
-
-  setCustomPricingModelStatus(row, t('settings.customPricing.loadingDefaults'), 'loading');
-  try {
-    const result = await fetchDataWithAuth(`/admin/model-pricing?model=${encodeURIComponent(modelID)}`);
-    if (!row.isConnected || String(row.querySelector('[data-cp-field="model_id"]')?.value || '').trim().toLowerCase() !== modelID) return;
-    if (!result?.found || !result.pricing || typeof result.pricing !== 'object') {
-      setCustomPricingModelStatus(row, t('settings.customPricing.defaultNotFound'), 'empty');
-      return;
-    }
-    const latestEntries = collectCustomPricingEntries();
-    if (latestEntries[modelIndex] && Object.keys(latestEntries[modelIndex].pricing || {}).length > 0) {
-      setCustomPricingModelStatus(row, '', '');
-      return;
-    }
-
-    // 系统分层定价（Qwen 全系价格只存在分层表里）无法用自定义价格完整表达，
-    // 预填会丢掉中间档导致静默少计费，这里拒绝预填并保留系统价格。
-    const systemTiers = result.pricing.token_pricing_tiers;
-    if (Array.isArray(systemTiers) && systemTiers.length > 0) {
-      customPricingTieredModels.add(modelID);
-      setCustomPricingModelStatus(row, t('settings.customPricing.tieredNotOverridable'), 'empty');
-      return;
-    }
-
-    latestEntries[modelIndex].pricing = projectCustomPricingDefaults(result.pricing);
-    customPricingDraft = latestEntries;
-    renderCustomPricingDraft();
-    const renderedRow = document.querySelector(`#customPricingRows .custom-pricing-model-row[data-model-index="${modelIndex}"]`);
-    setCustomPricingModelStatus(renderedRow, t('settings.customPricing.defaultLoaded'), 'success');
-    renderedRow?.querySelector('[data-cp-field="model_id"]')?.focus();
-  } catch (err) {
-    console.warn('加载系统模型价格失败:', err);
-    if (row.isConnected) setCustomPricingModelStatus(row, t('settings.customPricing.defaultLoadFailed'), 'error');
-  }
-}
-
-function showCustomPricingError(message) {
-  const error = document.getElementById('customPricingError');
-  if (!error) return;
-  error.textContent = message || '';
-  error.hidden = !message;
-}
-
-function openCustomPricingModal(trigger) {
-  const modal = document.getElementById('customPricingModal');
-  const input = document.getElementById(modelCustomPricingSettingKey);
-  if (!modal || !input) return;
-  customPricingPreviousFocus = trigger || document.activeElement;
-  customPricingDraft = parseCustomPricing(input.value);
-  customPricingModelFilter = '';
-  customPricingTieredModels.clear();
-  const search = document.getElementById('customPricingSearch');
-  if (search) search.value = '';
-  showCustomPricingError(null);
-  renderCustomPricingDraft();
-  document.querySelector('.app-container')?.setAttribute('inert', '');
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
-}
-
-function closeCustomPricingModal() {
-  const modal = document.getElementById('customPricingModal');
-  if (!modal) return;
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  document.querySelector('.app-container')?.removeAttribute('inert');
-  if (customPricingPreviousFocus?.isConnected) customPricingPreviousFocus.focus();
-  customPricingPreviousFocus = null;
-  customPricingDraft = [];
-}
-
-function addCustomPricingModel() {
-  const search = document.getElementById('customPricingSearch');
-  if (search && search.value) {
-    search.value = '';
-    customPricingModelFilter = '';
-  }
-  customPricingDraft = collectCustomPricingEntries();
-  if (customPricingDraft.length >= maxCustomPricingModels) {
-    showCustomPricingError(t('settings.validation.customPricingModelLimit', { max: maxCustomPricingModels }));
-    return;
-  }
-  customPricingDraft.push({ model: '', pricing: {} });
-  renderCustomPricingDraft();
-  const modelRows = document.querySelectorAll('#customPricingRows .custom-pricing-model-row');
-  modelRows[modelRows.length - 1]?.querySelector('[data-cp-field="model_id"]')?.focus();
-}
-
-function removeCustomPricingModel(button) {
-  const row = button?.closest('.custom-pricing-model-row');
-  if (!row) return;
-  const high = customPricingHighRow(row);
-  row.remove();
-  high?.remove();
-  customPricingDraft = collectCustomPricingEntries();
-  renderCustomPricingDraft();
-}
-
-async function applyCustomPricing() {
-  const entries = collectCustomPricingEntries();
-  const validationError = validateCustomPricingEntries(entries);
-  if (validationError) {
-    showCustomPricingError(validationError);
-    return;
-  }
-  const value = customPricingEntriesToJSON(entries);
-  const current = document.getElementById(modelCustomPricingSettingKey)?.value || '{}';
-  if (customPricingEquivalent(current, value)) {
-    closeCustomPricingModal();
-    return;
-  }
-
-  const modal = document.getElementById('customPricingModal');
-  const applyButton = modal?.querySelector('[data-action="apply-custom-pricing"]');
-  if (applyButton?.disabled) return;
-  if (applyButton) {
-    applyButton.disabled = true;
-    applyButton.setAttribute('aria-busy', 'true');
-  }
-  showCustomPricingError(null);
-  try {
-    const result = await fetchDataWithAuth('/admin/settings/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [modelCustomPricingSettingKey]: value })
-    });
-    syncSettingState(modelCustomPricingSettingKey, value);
-    closeCustomPricingModal();
-    showSuccess(result?.message || t('settings.msg.savedCount', { count: 1 }));
-  } catch (err) {
-    console.error('保存自定义模型价格异常:', err);
-    showCustomPricingError(t('settings.msg.saveFailed') + ': ' + err.message);
-  } finally {
-    if (applyButton) {
-      applyButton.disabled = false;
-      applyButton.removeAttribute('aria-busy');
-    }
-  }
-}
-
-function bindCustomPricingModal() {
-  const modal = document.getElementById('customPricingModal');
-  if (!modal || modal.dataset.bound) return;
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      closeCustomPricingModal();
-      return;
-    }
-    const button = event.target.closest('[data-action]');
-    if (!button) return;
-    switch (button.dataset.action) {
-      case 'close-custom-pricing': closeCustomPricingModal(); break;
-      case 'apply-custom-pricing': applyCustomPricing(); break;
-      case 'add-custom-pricing-model': addCustomPricingModel(); break;
-      case 'remove-custom-pricing-model': removeCustomPricingModel(button); break;
-    }
-  });
-  modal.addEventListener('input', (event) => {
-    if (event.target.id === 'customPricingSearch' || event.target.matches('[data-cp-field="model_id"]')) applyCustomPricingFilter();
-  });
-  modal.addEventListener('focusout', (event) => {
-    if (event.target.matches('[data-cp-field="model_id"]')) loadCustomPricingDefaults(event.target);
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && event.target.matches('[data-cp-field="model_id"]')) {
-      event.preventDefault();
-      loadCustomPricingDefaults(event.target);
-      return;
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeCustomPricingModal();
-      return;
-    }
-    if (event.key === 'Tab') trapModalFocus(modal, event);
-  });
-  modal.dataset.bound = '1';
 }
 
 function openRuntimeMetricsModal() {
   const modal = document.getElementById('runtimeMetricsModal');
   if (!modal) return;
 
-  runtimeMetricsPreviousFocus = document.activeElement;
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
+  Modal.open(modal, {
+    onClose: () => {
+      if (runtimeMetricsRefreshTimer !== null) {
+        clearInterval(runtimeMetricsRefreshTimer);
+        runtimeMetricsRefreshTimer = null;
+      }
+    },
+  });
   loadRuntimeMetrics();
   if (runtimeMetricsRefreshTimer === null) {
     runtimeMetricsRefreshTimer = setInterval(() => loadRuntimeMetrics({ silent: true }), RUNTIME_METRICS_REFRESH_MS);
@@ -1220,17 +465,7 @@ function openRuntimeMetricsModal() {
 }
 
 function closeRuntimeMetricsModal() {
-  const modal = document.getElementById('runtimeMetricsModal');
-  if (!modal) return;
-
-  if (runtimeMetricsRefreshTimer !== null) {
-    clearInterval(runtimeMetricsRefreshTimer);
-    runtimeMetricsRefreshTimer = null;
-  }
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  if (runtimeMetricsPreviousFocus?.isConnected) runtimeMetricsPreviousFocus.focus();
-  runtimeMetricsPreviousFocus = null;
+  Modal.close(document.getElementById('runtimeMetricsModal'));
 }
 
 function normalizeRuntimeMetric(value) {
@@ -1827,32 +1062,20 @@ function openProcessLogModal() {
   const modal = document.getElementById('processLogModal');
   if (!modal) return;
 
-  processLogPreviousFocus = document.activeElement;
   processLogOffset = 0;
   processLogBuffer = '';
   processLogPaused = false;
   updateProcessLogPauseButton();
   const follow = document.getElementById('process-log-follow');
   processLogFollow = follow ? follow.checked : true;
-  document.querySelector('.app-container')?.setAttribute('inert', '');
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
+  Modal.open(modal, { onClose: stopProcessLogPolling });
   loadProcessLogDebugState();
   loadProcessLog(0);
   startProcessLogPolling();
 }
 
 function closeProcessLogModal() {
-  const modal = document.getElementById('processLogModal');
-  if (!modal) return;
-
-  stopProcessLogPolling();
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  document.querySelector('.app-container')?.removeAttribute('inert');
-  if (processLogPreviousFocus?.isConnected) processLogPreviousFocus.focus();
-  processLogPreviousFocus = null;
+  Modal.close(document.getElementById('processLogModal'));
 }
 
 function startProcessLogPolling() {
@@ -1946,20 +1169,8 @@ function bindProcessLogModal() {
   if (!modal || modal.dataset.bound) return;
 
   modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      closeProcessLogModal();
-      return;
-    }
     const button = event.target.closest('[data-action]');
     if (button?.dataset.action === 'close-process-log') closeProcessLogModal();
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeProcessLogModal();
-      return;
-    }
-    if (event.key === 'Tab') trapModalFocus(modal, event);
   });
 
   const pauseBtn = document.getElementById('process-log-pause-btn');
@@ -2159,7 +1370,6 @@ function getSettingGroupInfo(key) {
     { id: 'stream-timeout', nameKey: 'settings.group.streamTimeout', order: 20, match: () => k === 'stream_timeout' || k.endsWith('_first_byte_timeout') },
     { id: 'non-stream-timeout', nameKey: 'settings.group.nonStreamTimeout', order: 21, match: () => k === 'non_stream_timeout' || k.endsWith('_non_stream_timeout') },
     { id: 'limits', nameKey: 'settings.group.limits', order: 26, match: () => k === 'max_concurrency' || k.endsWith('_body_bytes') || k === 'http_read_timeout_seconds' },
-    { id: 'billing', nameKey: 'settings.group.billing', order: 35, match: () => k === modelCustomPricingSettingKey },
     { id: 'log', nameKey: 'settings.group.log', order: 50, match: () => k.startsWith('log_') || k.startsWith('debug_') },
     { id: 'access', nameKey: 'settings.group.access', order: 60, match: () => k.includes('auth_') },
   ];
@@ -2219,15 +1429,10 @@ function getSettingOrder(key) {
     log_payload_hours: 303,
     log_keep_error_dirs: 304,
     debug_quota_interval_minutes: 305,
-    debug_pprof_listen: 306,
-    model_custom_pricing: 710
+    debug_pprof_listen: 306
   };
   const normalizedKey = String(key || '').toLowerCase();
   return orders[normalizedKey] ?? 1000;
-}
-
-function isModalSettingKey(key) {
-  return key === modelMultimodalFallbackSettingKey || key === modelCustomPricingSettingKey;
 }
 
 function groupSettings(settings) {
@@ -2285,9 +1490,7 @@ function renderGroupNav(groups) {
 }
 
 function refreshSettingsTranslations() {
-  const groups = groupSettings(Array.from(settingDefinitions.values()))
-    .map((group) => ({ ...group, settings: group.settings.filter((setting) => !isModalSettingKey(setting.key)) }))
-    .filter((group) => group.settings.length > 0);
+  const groups = groupSettings(Array.from(settingDefinitions.values()));
   for (const group of groups) {
     const button = document.querySelector(`#settings-group-nav [data-group="${group.id}"]`);
     if (button) {
@@ -2306,8 +1509,6 @@ function refreshSettingsTranslations() {
     row.querySelector('.setting-col-value').dataset.mobileLabel = t('settings.currentValue');
     row.querySelector('.setting-col-actions').dataset.mobileLabel = t('common.actions');
   }
-  updateMultimodalFallbackSummary(document.getElementById(modelMultimodalFallbackSettingKey)?.value || '');
-  updateCustomPricingSummary(document.getElementById(modelCustomPricingSettingKey)?.value || '');
   if (effectiveConfigData) renderEffectiveConfig();
   updateProcessLogPauseButton();
 }
@@ -2335,21 +1536,9 @@ function renderSettings(settings) {
   for (const s of settings) {
     const displayValue = settingValueForDisplay(s.key, s.value);
     originalSettings[s.key] = displayValue;
-    if (!isModalSettingKey(s.key)) continue;
-    const target = document.getElementById(s.key);
-    if (target) target.value = displayValue;
-    const buttonID = s.key === modelMultimodalFallbackSettingKey
-      ? 'model-multimodal-fallback-btn'
-      : 'model-custom-pricing-btn';
-    const button = document.getElementById(buttonID);
-    if (button) button.disabled = s.editable === false;
-    if (s.key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(displayValue);
-    else updateCustomPricingSummary(displayValue);
   }
 
-  const groups = groupSettings(settings)
-    .map((group) => ({ ...group, settings: group.settings.filter((setting) => !isModalSettingKey(setting.key)) }))
-    .filter((group) => group.settings.length > 0);
+  const groups = groupSettings(settings);
   renderGroupNav(groups);
 
   for (const g of groups) {
@@ -2439,7 +1628,6 @@ function renderInput(setting) {
 function markChanged(input) {
   input.removeAttribute?.('aria-invalid');
   const row = input.closest('tr');
-  if (!row) return; // 常驻控制区（如多模态回退 hidden input）没有表格行可高亮
   let key, currentValue;
 
   if (input.type === 'radio') {
@@ -2505,8 +1693,6 @@ function setSettingControlValue(key, value) {
     control.input.value = normalizedValue;
   }
 
-  if (key === modelMultimodalFallbackSettingKey) updateMultimodalFallbackSummary(normalizedValue);
-  if (key === modelCustomPricingSettingKey) updateCustomPricingSummary(normalizedValue);
   return control;
 }
 
@@ -2547,7 +1733,7 @@ async function saveAllSettings() {
     return;
   }
 
-  if (!confirm(t('settings.msg.confirmSave'))) return;
+  if (!(await Modal.confirm(t('settings.msg.confirmSave')))) return;
 
   // 使用批量更新接口（单次请求，事务保护）
   try {
