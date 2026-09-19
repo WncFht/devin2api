@@ -98,7 +98,13 @@ func main() {
 	probeConfigPath, _ := config.ResolveConfigPath("")
 	cfg, _ := config.Load(probeConfigPath)
 	aliases = cfg.Devin.Aliases
-	token := resolveToken(cfg, probeStore(*stateDir), *accountName)
+	// 库句柄活到进程退出前一刻：WAL 模式的 Open 可能写过 -wal，
+	// 正常 Close 才 checkpoint 回收，直接退出把清理留给下一个读者。
+	db := probeStore(*stateDir)
+	if db != nil {
+		defer func() { _ = db.Close() }()
+	}
+	token := resolveToken(cfg, db, *accountName)
 	if token == "" && !tokenOptional[args[0]] {
 		if *accountName != "" {
 			fmt.Fprintf(os.Stderr, "no token: devin.accounts has no account %q (or set DEVIN_TOKEN)\n", *accountName)
@@ -816,7 +822,7 @@ func tinyPNG() string {
 // protojson，dumpDir 非空时每帧另存 NN.json。
 func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, req *devinproto.GetChatMessageRequest, showFrames bool, dumpDir string) error {
 	reqJSON, _ := marshal.Marshal(req)
-	fmt.Println("== request:", string(reqJSON)[:min(len(reqJSON), 2000)])
+	fmt.Println("== request:", trunc(string(reqJSON), 2000))
 	stream, err := client.GetChatMessage(ctx, connect.NewRequest(req))
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
@@ -878,7 +884,7 @@ func runStream(ctx context.Context, client devinprotoconnect.ApiServerServiceCli
 	fmt.Println("== usage:", j(usageSeen))
 	fmt.Println("== stopReason:", stopReason)
 	if thinking.Len() > 0 {
-		fmt.Println("== thinking:", thinking.String()[:min(thinking.Len(), 300)])
+		fmt.Println("== thinking:", trunc(thinking.String(), 300))
 	}
 	fmt.Println("== text:", text.String())
 	for _, c := range calls {
@@ -1172,8 +1178,8 @@ func cmdRerun(ctx context.Context, client devinprotoconnect.ApiServerServiceClie
 			continue
 		}
 		tail := text.String()
-		if len(tail) > 90 {
-			tail = tail[len(tail)-90:]
+		if runes := []rune(tail); len(runes) > 90 {
+			tail = string(runes[len(runes)-90:])
 		}
 		fmt.Printf("run %d: stop=%s calls=%d tail=%q\n", run, stop, calls, tail)
 	}
@@ -1642,10 +1648,11 @@ func nonEmpty(s string) *string {
 	return proto.String(s)
 }
 
-// trunc 把字符串截到前 n 字节。
+// trunc 把字符串截到前 n 个 rune——打印预览按字节下刀会在 UTF-8
+// 序列中间切断，终端上留乱码尾巴。
 func trunc(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if runes := []rune(s); len(runes) > n {
+		return string(runes[:n])
 	}
 	return s
 }
@@ -1655,7 +1662,7 @@ func trunc(s string, n int) string {
 // cmdWebsearch 调 GetWebSearchResults，探测 query/limit/domain/mode
 // 与第三方 provider+model 组合字段。
 func cmdWebsearch(ctx context.Context, client devinprotoconnect.ApiServerServiceClient, _ devinprotoconnect.ExaLanguageServerPb_LanguageServerServiceClient, token string, args []string) error {
-	fs := flag.NewFlagSet("websearch", flag.ExitOnError)
+	fs := flag.NewFlagSet("websearch", flag.ContinueOnError)
 	query := fs.String("query", "", "search query (required)")
 	limit := fs.Uint("limit", 5, "max results")
 	domain := fs.String("domain", "", "restrict to domain")

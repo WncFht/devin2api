@@ -101,6 +101,9 @@ func (dialer *dnsFallbackDialer) dial(ctx context.Context, network, address stri
 		if conn, dialErr := dialer.dialFirstIP(ctx, network, port, ips); dialErr == nil {
 			return conn, nil
 		}
+		// lookupFresh 已把这组答案写进缓存——cached() 只会原样返回
+		// 同一批死 IP，复拨是纯延迟，直接交还原错误。
+		return nil, err
 	}
 	if ips := dialer.cached(host); len(ips) > 0 {
 		if conn, dialErr := dialer.dialFirstIP(ctx, network, port, ips); dialErr == nil {
