@@ -501,10 +501,18 @@ func (s *Store) LogModels(ctx context.Context, kh string) ([]string, error) {
 	return out, sqlRows.Err()
 }
 
-// LogStatusCodes 返回出现过的状态码集合（升序，不含 0 占位）。
-func (s *Store) LogStatusCodes(ctx context.Context) ([]int, error) {
+// LogStatusCodes 返回出现过的状态码集合（升序，不含 0 占位）；
+// keyHash 非空时只看该令牌的行——api_token 身份的过滤面板与别处
+// 的 key_hash 收敛同口径。
+func (s *Store) LogStatusCodes(ctx context.Context, keyHash string) ([]int, error) {
+	var args []any
+	where := ` WHERE status_code != 0`
+	if keyHash != "" {
+		where += ` AND key_hash = ?`
+		args = append(args, keyHash)
+	}
 	sqlRows, err := s.ro.QueryContext(ctx,
-		`SELECT DISTINCT status_code FROM logs WHERE status_code != 0 ORDER BY status_code`)
+		`SELECT DISTINCT status_code FROM logs`+where+` ORDER BY status_code`, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -386,7 +386,7 @@ func (h *Handler) dashboardLogsBootstrap(w http.ResponseWriter, r *http.Request)
 	respondOK(w, map[string]any{
 		"auth_tokens":  tokens,
 		"models":       h.modelSet(r.Context(), identityFrom(r).KeyHash),
-		"status_codes": h.statusCodeSet(r.Context()),
+		"status_codes": h.statusCodeSet(r.Context(), identityFrom(r).KeyHash),
 	})
 }
 

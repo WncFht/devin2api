@@ -98,12 +98,13 @@ func (h *Handler) modelSet(ctx context.Context, kh string) []string {
 	return models
 }
 
-// statusCodeSet 返回出现过的状态码集合（排序）。
-func (h *Handler) statusCodeSet(ctx context.Context) []int {
+// statusCodeSet 返回出现过的状态码集合（排序）；kh 非空时只看该
+// 令牌的行——api_token 身份的筛选面板与 models 维同口径。
+func (h *Handler) statusCodeSet(ctx context.Context, kh string) []int {
 	if h.store == nil {
 		return []int{}
 	}
-	codes, err := h.store.LogStatusCodes(ctx)
+	codes, err := h.store.LogStatusCodes(ctx, kh)
 	if err != nil {
 		slog.Warn("ccpanel: status codes query failed", "error", err)
 		return []int{}
