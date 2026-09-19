@@ -80,6 +80,10 @@
   font-size: 13px;
 }
 
+.setting-data-row--dirty {
+  background: rgba(59, 130, 246, 0.08);
+}
+
 .settings-save-actions {
   display: flex;
   align-items: center;
@@ -156,6 +160,12 @@
 
 .runtime-transcript-card + .runtime-metrics-subsection {
   margin-top: 18px;
+}
+
+.settings-sparkline {
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px;
 }
 
 .runtime-metric-key,

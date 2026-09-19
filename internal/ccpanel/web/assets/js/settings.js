@@ -793,18 +793,18 @@ function renderTrendChart(trend, payload) {
       const x0 = Math.max(0, ((Math.max(start, t0) - t0) / (t1 - t0)) * width);
       const x1 = Math.min(width, ((Math.min(end, t1) - t0) / (t1 - t0)) * width);
       if (x1 <= x0) return '';
-      return `<rect x="${x0.toFixed(1)}" y="0" width="${(x1 - x0).toFixed(1)}" height="${height}" style="fill:var(--warning-500, #f59e0b); opacity:0.18"></rect>`;
+      return `<rect x="${x0.toFixed(1)}" y="0" width="${(x1 - x0).toFixed(1)}" height="${height}" fill="var(--warning-500, #f59e0b)" opacity="0.18"></rect>`;
     }).join('');
   }
 
   return `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img"
+    <svg viewBox="0 0 ${width} ${height}" height="${height}" preserveAspectRatio="none" role="img"
       aria-label="${escapeHtml(t('settings.runtimeMetrics.group.trend'))}"
-      style="display:block; width:100%; height:${height}px; margin:4px 0 8px">
+      class="settings-sparkline">
       ${latchRects}
-      <path d="${areaPath}" style="fill:var(--primary-500, #3b82f6); opacity:0.18"></path>
-      <path d="${requestPath}" style="fill:none; stroke:var(--primary-500, #3b82f6); stroke-width:1.5" vector-effect="non-scaling-stroke"></path>
-      <path d="${errorPath}" style="fill:none; stroke:var(--error-500, #ef4444); stroke-width:1.5" vector-effect="non-scaling-stroke"></path>
+      <path d="${areaPath}" fill="var(--primary-500, #3b82f6)" opacity="0.18"></path>
+      <path d="${requestPath}" fill="none" stroke="var(--primary-500, #3b82f6)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
+      <path d="${errorPath}" fill="none" stroke="var(--error-500, #ef4444)" stroke-width="1.5" vector-effect="non-scaling-stroke"></path>
     </svg>
     <p class="runtime-metrics-note">${escapeHtml(t('settings.runtimeMetrics.trendSummary', {
       requests: formatRuntimeInteger(totalRequests),
@@ -1636,11 +1636,7 @@ function markChanged(input) {
     currentValue = input.value;
   }
 
-  if (currentValue !== originalSettings[key]) {
-    row.style.background = 'rgba(59, 130, 246, 0.08)';
-  } else {
-    row.style.background = '';
-  }
+  row.classList.toggle('setting-data-row--dirty', currentValue !== originalSettings[key]);
 }
 
 function setSettingInvalid(key, invalid) {
@@ -1699,7 +1695,7 @@ function syncSettingState(key, value) {
 
   originalSettings[key] = normalizedValue;
   if (control?.row) {
-    control.row.style.background = '';
+    control.row.classList.remove('setting-data-row--dirty');
   }
 }
 
