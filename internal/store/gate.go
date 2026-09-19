@@ -94,35 +94,52 @@ func (s *Store) PruneGateWindows(ctx context.Context, before int64) (int64, erro
 	return s.deleteRowsChunked(ctx, "gate_windows", `window_start < ?`, before)
 }
 
-// GateDaySends 是单日闸门放行数的分解：Sends 是当日放行总数
-// （used_fg+used_bg——每次放行对应一次真实上游发送，含内层重试与
-// 保温/drip 探针），RetryAdmits 是其中同 lane 续试重发的放行数。
+// GateDaySends 是单日闸门放行数的分解：Sends 是当日放行的真实请求数
+// （used_fg+used_bg−used_bg_ping——每次放行对应一次真实上游发送，含
+// 内层重试与闩内滴灌探针；保温 ping 走 adapter 内部路径不产生 logs
+// 行，留在分子里会垫高 sends/row 的「每请求一发」基线），RetryAdmits
+// 是其中同 lane 续试重发的放行数，Slots 是当日落库的 (lane,window_start)
+// 行数——(lane,window_start) 有唯一索引，COUNT(*) 即去重 lane-slot 数，
+// 是覆盖率的实有侧。
 type GateDaySends struct {
 	Sends       int64
 	RetryAdmits int64
+	Slots       int64
 }
 
-// GateSendsByDay 把闸门放行数按本地日聚合，返回 'YYYY-MM-DD'→分解读数。
+// GateSendsByDay 把闸门放行数按本地日聚合，返回 'YYYY-MM-DD'→分解读数
+// 与窗口内出现过的 lane 数。sends/row 的覆盖率期望 = lanes × 当日已流逝
+// 分钟数——lane 数取整个查询窗的全集而非逐日：某 lane 整日零行时逐日
+// 口径会把它从期望值里抹掉，而整日静默恰恰是要被覆盖率暴露的缺口。
 // sinceUnix（unix 秒）按 window_start 下界过滤。跨 lane 合计——sends/row
 // 指标的分母（logs 行数）同样是跨 lane 口径。quota<=0 的闸门照常记窗行：
 // 不限速放行仍是真实发送，与限流放行走同一本 used_* 账。
-func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]GateDaySends, error) {
+func (s *Store) GateSendsByDay(ctx context.Context, sinceUnix int64) (map[string]GateDaySends, int, error) {
 	rows, err := s.ro.QueryContext(ctx,
 		`SELECT strftime('%Y-%m-%d', window_start, 'unixepoch', 'localtime') AS day,
-			COALESCE(SUM(used_fg + used_bg), 0), COALESCE(SUM(retry_admits), 0)
+			COALESCE(SUM(used_fg + used_bg - used_bg_ping), 0), COALESCE(SUM(retry_admits), 0), COUNT(*)
 		FROM gate_windows WHERE window_start >= ? GROUP BY day`, sinceUnix)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = rows.Close() }()
 	out := map[string]GateDaySends{}
 	for rows.Next() {
 		var day string
 		var sends GateDaySends
-		if err := rows.Scan(&day, &sends.Sends, &sends.RetryAdmits); err != nil {
-			return nil, err
+		if err := rows.Scan(&day, &sends.Sends, &sends.RetryAdmits, &sends.Slots); err != nil {
+			return nil, 0, err
 		}
 		out[day] = sends
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	var lanes int
+	if err := s.ro.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT lane) FROM gate_windows WHERE window_start >= ?`,
+		sinceUnix).Scan(&lanes); err != nil {
+		return nil, 0, err
+	}
+	return out, lanes, nil
 }

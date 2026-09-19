@@ -40,6 +40,28 @@ func dayBoundsMS(t time.Time) (int64, int64) {
 	return start.UnixMilli(), start.AddDate(0, 0, 1).UnixMilli()
 }
 
+// gateExpectedSlots 返回某日应落库的 lane-slot 数 = lanes × 当日已流逝
+// 分钟数。已流逝按整分下界取：window_start 早于 now 所在分钟起点的
+// 窗口都已关闭、才可能被翻页落库，进行中的当前分钟不计入期望；日长
+// 取 AddDate 日界的真实分钟数（夏令时日非恒 1440）。部署截断日、进程
+// 停机段、未装表日都不折减期望——coverage 如实回答「分子覆盖分母
+// 日界的多大比例」，低覆盖正是这些日低比值的解释而非口径缺陷。
+// 未来日与解析失败的日期键返回 0，coverage 按未定义省略。
+func gateExpectedSlots(day string, now time.Time, lanes int) int64 {
+	dayStart, err := time.ParseInLocation("2006-01-02", day, time.Local)
+	if err != nil {
+		return 0
+	}
+	minutes := int64(now.Truncate(time.Minute).Sub(dayStart).Minutes())
+	if dayLen := int64(dayStart.AddDate(0, 0, 1).Sub(dayStart).Minutes()); minutes > dayLen {
+		minutes = dayLen
+	}
+	if minutes <= 0 || lanes <= 0 {
+		return 0
+	}
+	return minutes * int64(lanes)
+}
+
 // logDayExpr 是本地时区日期键：strftime 的 'localtime' 修饰符走连接
 // 配置的 _loc=Local——与旧 Go 侧 started.Local().Format 同一时区源。
 const logDayExpr = `strftime('%Y-%m-%d', time/1000, 'unixepoch', 'localtime')`
@@ -160,19 +182,26 @@ type UsageDayRow struct {
 }
 
 // SendsRowDay 是单日 sends/row 探针行：sends 是当日闸门放行数
-// （gate_windows 的 used_fg+used_bg——每次放行对应一次真实上游发送，
-// 含日志不可见的同 protoRequest 内层重试与保温/drip 探针），rows 是
-// 当日非 rejected logs 行数。RetryAdmits 是 sends 中同 lane 续试重发
-// 的放行数（reopen/续轮/凭据自愈/瞬时重试）——放行里的重试份额
-// 直接可读，不必再整窗回推残差。Ratio 只在 rows>0 时置值——
-// 「quota<=0 闸门不记账」（sends=0, rows>0）与「纯探针日无请求」
-// （rows=0）靠指针把真 0 与未定义分开。
+// （gate_windows 的 used_fg+used_bg−used_bg_ping——每次放行对应一次
+// 真实上游发送，含日志不可见的同 protoRequest 内层重试与闩内滴灌
+// 探针；保温 ping 不产生 logs 行，留在分子里会垫高「每请求一发」
+// 的期望基线），rows 是当日非 rejected logs 行数。RetryAdmits 是
+// sends 中同 lane 续试重发的放行数（reopen/续轮/凭据自愈/瞬时重试）
+// ——放行里的重试份额直接可读，不必再整窗回推残差。Coverage 是当日
+// 实有 lane-slot ÷ 预期 lane-slot（预期 = 窗内 lane 数 × 当日已流逝
+// 分钟数，见 gateExpectedSlots）：分子对分母日界的覆盖比例——部署
+// 截断日、未装表日、丢窗日的低比值据此读成低覆盖而非低倍率；丢窗
+// 与零触碰空窗不可分辨，差额一律记 SendsMissing 不插值。Ratio 只在
+// rows>0 时置值——「quota<=0 闸门不记账」（sends=0, rows>0）与
+// 「纯探针日无请求」（rows=0）靠指针把真 0 与未定义分开。
 type SendsRowDay struct {
-	Date        string   `json:"date"`
-	Sends       int64    `json:"sends"`
-	Rows        int64    `json:"rows"`
-	RetryAdmits int64    `json:"retry_admits"`
-	Ratio       *float64 `json:"ratio,omitempty"`
+	Date         string   `json:"date"`
+	Sends        int64    `json:"sends"`
+	Rows         int64    `json:"rows"`
+	RetryAdmits  int64    `json:"retry_admits"`
+	Coverage     *float64 `json:"coverage,omitempty"`
+	SendsMissing int64    `json:"sends_missing,omitempty"`
+	Ratio        *float64 `json:"ratio,omitempty"`
 }
 
 // DimensionAgg 是按模型或 key 哈希聚合的行。
@@ -228,8 +257,9 @@ type UsageSnapshot struct {
 	TTFB        LatencyStats                      `json:"ttfb"`
 	// RateLimitEvents 是最近的上游 429 采样（旧到新），供面板推算限流阈值。
 	RateLimitEvents []RateLimitEvent `json:"rate_limit_events,omitempty"`
-	// SendsPerRow 是逐日（旧到新）sends/row 探针：分子闸门放行数、
-	// 分母当日 logs 行——内层 connect 重试漂移的唯一活指标。
+	// SendsPerRow 是逐日（旧到新）sends/row 探针：分子闸门放行数
+	// （已剔保温 ping）、分母当日 logs 行——内层 connect 重试漂移的
+	// 唯一活指标；coverage/sends_missing 标注分子对分母日界的覆盖。
 	// gate_windows 全期无行（闸门整窗未被流量/保温触碰）时整段省略；
 	// quota<=0 的闸门照样记行——不限速放行也计入分子。
 	SendsPerRow []SendsRowDay `json:"sends_per_row,omitempty"`
@@ -665,7 +695,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 	// sends/row 与换号归因都钉在本地日粒度：gate_windows 的窗口起点
 	// 带 windowOpen 偏移，更细的桶会被窗口系统性跨界，日界内最多
 	// 首尾两个窗口被切开，分母与 days 天然同键。
-	sendsByDay, err := s.GateSendsByDay(ctx, minBucket*60)
+	sendsByDay, gateLanes, err := s.GateSendsByDay(ctx, minBucket*60)
 	if err != nil {
 		return snap, err
 	}
@@ -684,6 +714,7 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 			}
 		}
 		sort.Strings(days)
+		now := time.Now()
 		snap.SendsPerRow = make([]SendsRowDay, 0, len(days))
 		for _, day := range days {
 			sends := sendsByDay[day]
@@ -691,6 +722,11 @@ func (s *Store) UsageStats(ctx context.Context) (UsageSnapshot, error) {
 			if row.Rows > 0 {
 				r := float64(row.Sends) / float64(row.Rows)
 				row.Ratio = &r
+			}
+			if exp := gateExpectedSlots(day, now, gateLanes); exp > 0 {
+				c := float64(sends.Slots) / float64(exp)
+				row.Coverage = &c
+				row.SendsMissing = exp - sends.Slots
 			}
 			snap.SendsPerRow = append(snap.SendsPerRow, row)
 		}

@@ -479,3 +479,110 @@ func TestUsageSendsPerRow(t *testing.T) {
 		t.Fatalf("today = %+v, want sends=4 rows=2 retry_admits=1 ratio=2.0", cur)
 	}
 }
+
+// TestUsageSendsCoverage 验证 sends_per_row 的 coverage/sends_missing：
+// coverage = 当日实有 lane-slot ÷ lanes × 当日已流逝分钟数（过去日 =
+// 整日长）。未装表日（只有 logs 行）coverage=0 标识「零发送」是结构
+// 伪影，部署截断式半覆盖日 coverage<1，全量日 coverage=1；缺窗不插值，
+// 差额落 sends_missing。分子剔保温 ping：used_bg_ping 不计入 sends。
+func TestUsageSendsCoverage(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	yesterday := today.AddDate(0, 0, -1)
+	twoDaysAgo := today.AddDate(0, 0, -2)
+	threeDaysAgo := today.AddDate(0, 0, -3)
+
+	// 递归 CTE 一条 INSERT 铺连续分钟窗行：从 dayStart 起每分钟一条。
+	fill := func(lane string, dayStart time.Time, minutes int) {
+		if _, err := s.db.ExecContext(ctx,
+			`WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i < ?)
+			INSERT OR IGNORE INTO gate_windows (lane, window_start, used_fg)
+			SELECT ?, ? + i*60, 1 FROM c`, minutes-1, lane, dayStart.Unix()); err != nil {
+			t.Fatalf("fill gate_windows %s: %v", lane, err)
+		}
+	}
+	// 两 lane 前日全满（coverage=1）；昨日 a 全满 + b 前半日
+	//（real=2160 ÷ expected=2880 → coverage=0.75，missing=720）。
+	fill("a", twoDaysAgo, 1440)
+	fill("b", twoDaysAgo, 1440)
+	fill("a", yesterday, 1440)
+	fill("b", yesterday, 720)
+	// 今日 ping 行：used_bg=10 含 6 保温 ping——sends=2+(10-6)=6。
+	if err := s.InsertGateWindow(ctx, &GateWindow{
+		Lane: "a", WindowStart: today.Unix(),
+		UsedFg: 2, UsedBg: 10, UsedBgPing: 6,
+	}); err != nil {
+		t.Fatalf("InsertGateWindow: %v", err)
+	}
+	// 未装表日：三天前只有 logs 行；今日一行使今日进 union。
+	for _, r := range []*LogRow{
+		{Dir: "pre", StartedAt: threeDaysAgo, Result: "completed"},
+		{Dir: "cur", StartedAt: now, Result: "completed"},
+	} {
+		if _, err := s.InsertLog(ctx, r); err != nil {
+			t.Fatalf("InsertLog %s: %v", r.Dir, err)
+		}
+	}
+
+	snap, err := s.UsageStats(ctx)
+	if err != nil {
+		t.Fatalf("UsageStats: %v", err)
+	}
+	if len(snap.SendsPerRow) != 4 {
+		t.Fatalf("sends_per_row = %+v, want 四日", snap.SendsPerRow)
+	}
+	pre := snap.SendsPerRow[0]
+	if pre.Date != threeDaysAgo.Format("2006-01-02") || pre.Sends != 0 ||
+		pre.Coverage == nil || *pre.Coverage != 0 || pre.SendsMissing != 2880 {
+		t.Fatalf("pre-table day = %+v, want sends=0 coverage=0 missing=2880", pre)
+	}
+	full := snap.SendsPerRow[1]
+	if full.Date != twoDaysAgo.Format("2006-01-02") || full.Sends != 2880 ||
+		full.Coverage == nil || *full.Coverage != 1.0 || full.SendsMissing != 0 {
+		t.Fatalf("full day = %+v, want sends=2880 coverage=1 missing=0", full)
+	}
+	part := snap.SendsPerRow[2]
+	if part.Date != yesterday.Format("2006-01-02") || part.Sends != 2160 ||
+		part.Coverage == nil || *part.Coverage != 0.75 || part.SendsMissing != 720 {
+		t.Fatalf("partial day = %+v, want sends=2160 coverage=0.75 missing=720", part)
+	}
+	cur := snap.SendsPerRow[3]
+	if cur.Date != today.Format("2006-01-02") || cur.Sends != 6 {
+		t.Fatalf("today = %+v, want sends=6（ping 剔出分子）", cur)
+	}
+	// 今日期望 = lanes × 已流逝分钟——与实现同公式重算，只在校验与
+	// 调用落在同一分钟内才精确比对（跨分钟边界重跑断言无意义）。
+	if exp := int64(now.Truncate(time.Minute).Sub(today).Minutes()) * 2; exp > 0 &&
+		time.Now().Unix()/60 == now.Unix()/60 {
+		if cur.Coverage == nil || *cur.Coverage != 1.0/float64(exp) || cur.SendsMissing != exp-1 {
+			t.Fatalf("today coverage = %+v, want coverage=1/%d missing=%d", cur, exp, exp-1)
+		}
+	}
+}
+
+// TestGateExpectedSlots 钉住覆盖率期望的日界口径：当日已流逝分钟 =
+// now 整分下界 − 日界起点（14:30:45 → 870）；过去日按整日长（1440），
+// 期望随 lane 数线性；未来日、坏日期键与零 lane 返回 0（coverage
+// 未定义省略）。
+func TestGateExpectedSlots(t *testing.T) {
+	now := time.Date(2026, 9, 19, 14, 30, 45, 0, time.Local)
+	if got := gateExpectedSlots(now.Format("2006-01-02"), now, 2); got != 870*2 {
+		t.Fatalf("today = %d, want %d", got, 870*2)
+	}
+	if got := gateExpectedSlots(now.AddDate(0, 0, -1).Format("2006-01-02"), now, 2); got != 1440*2 {
+		t.Fatalf("yesterday = %d, want %d", got, 1440*2)
+	}
+	if got := gateExpectedSlots("2026-09-18", now, 1); got != 1440 {
+		t.Fatalf("single lane = %d, want 1440", got)
+	}
+	for _, day := range []string{"2999-01-01", "not-a-day"} {
+		if got := gateExpectedSlots(day, now, 2); got != 0 {
+			t.Fatalf("%q = %d, want 0", day, got)
+		}
+	}
+	if got := gateExpectedSlots("2026-09-18", now, 0); got != 0 {
+		t.Fatalf("zero lanes = %d, want 0", got)
+	}
+}

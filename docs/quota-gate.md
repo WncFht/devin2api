@@ -18,7 +18,7 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 **闸门拒绝可以对 logs 终结口径 100% 隐形。** 号池下每次闸门快败都可能被 failover 救回：post-deploy 逐窗对账 18 次 `reject_*` 对应 18 条「首 lane error.json + 兄弟 lane 完成」的吸收行，终结性 `rate_gate` 行 0 条——该类拒绝在终结口径完全消失。对账公式：`reject_* ≈ 被 failover 吸收的完成行 + 终结性 rate_gate 行`。评估拒绝量必须走 `gate_windows`，不能走 `logs`。
 
-**`sends_per_row` 不等于 1。** 分子是 `gate_windows` 的 `used_fg+used_bg`——每次放行对应一次真实上游发送，含 `logs` 不可见的同请求内层 connect 重试与保温/drip 探针；分母是当日非 rejected `logs` 行。基线约 1.02（净残差 ~0.3% 对账口径），漂移 = 重试/换号/ping 放大信号。行内 `retry_admits` 是放行中同 lane 续试重发的日合计（reopen/续轮/凭据自愈/瞬时重试），占 sends 份额即重试贡献。注意 `quota<=0`（不限速）时闸门不记窗行，分子随无窗期缺记；纯探针日 `rows=0` 时 ratio 按定义缺省。
+**`sends_per_row` 不等于 1。** 分子是 `gate_windows` 的 `used_fg+used_bg−used_bg_ping`——每次放行对应一次真实上游发送，含 `logs` 不可见的同请求内层 connect 重试与闩内 drip 探针；保温 ping 走 adapter 内部路径不产生 logs 行，留在分子里会把「每请求一发」的基线垫高 ~5-6%（实测 ~289 ping/h），故单列剔除——注意迁移 0014 前的历史行 `used_bg_ping` 恒 0 无法回补，那些日的分子仍含 ping。分母是当日非 rejected `logs` 行。基线约 1.0，漂移 = 重试/换号放大信号。行内 `retry_admits` 是放行中同 lane 续试重发的日合计（reopen/续轮/凭据自愈/瞬时重试），占 sends 份额即重试贡献；`coverage` 是当日实有 `(lane,window_start)` 槽 ÷ 预期槽数（`lanes × 当日已流逝分钟数`——过去日整日长、今日按已流逝计），`sends_missing` 是预期−实有缺额：部署截断日、未装表日、丢窗日的低比值据此读成低覆盖而非低倍率，丢窗与零触碰空窗不可分辨故只记缺额不插值。注意 `quota<=0`（不限速）时闸门不记窗行，分子随无窗期缺记；纯探针日 `rows=0` 时 ratio 按定义缺省。
 
 **「换号」不等于「发给上游」。** `lane_attempt_causes` 实测首日约 82% 的放弃 lane 尝试成因是 `local_gate:*`——本地闸门快败的幻影换号，该 lane 零上游发送、零上游成本。只有 connect code 行才是真发过包的 failover。
 
@@ -64,7 +64,7 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 ## 派生口径
 
-`/admin/usage` 快照里两个非 `logs` 源段（本地日粒度）：`sends_per_row` 是逐日 `gate_windows` 放行数 ÷ 当日 `logs` 行，是内层 connect 重试漂移的唯一活指标（`gate_windows` 全期无行——无号池或闸门恒 `quota<=0`——时整段省略）；`attempt_causes` 即上节表的 31 天直读。两段都随快照计算，进程重启不丢口径。
+`/admin/usage` 快照里两个非 `logs` 源段（本地日粒度）：`sends_per_row` 是逐日 `gate_windows` 放行数（已剔保温 ping）÷ 当日 `logs` 行，是内层 connect 重试漂移的唯一活指标，行内 `coverage`/`sends_missing` 标注分子对分母日界的覆盖（`gate_windows` 全期无行——无号池或闸门恒 `quota<=0`——时整段省略）；`attempt_causes` 即上节表的 31 天直读。两段都随快照计算，进程重启不丢口径。
 
 ## CAS 存储账（debug_blobs / debug_chunk_refs）
 
@@ -82,9 +82,13 @@ FROM gate_windows
 WHERE reject_quota+reject_hold+reject_bg_reserve+reject_latch > 0
 ORDER BY window_start DESC LIMIT 20;
 
--- 逐日 sends_per_row：分子 gate_windows 放行数
-SELECT date(window_start,'unixepoch','localtime') d, SUM(used_fg+used_bg) sends
+-- 逐日 sends_per_row：分子 gate_windows 放行数（剔保温 ping）
+SELECT date(window_start,'unixepoch','localtime') d, SUM(used_fg+used_bg-used_bg_ping) sends
 FROM gate_windows GROUP BY d ORDER BY d DESC;
+-- 覆盖率实有侧：lane-slot 数 ÷ (lane 数 × 当日已流逝分钟数)
+SELECT date(window_start,'unixepoch','localtime') d, COUNT(*) slots
+FROM gate_windows GROUP BY d ORDER BY d DESC;
+SELECT COUNT(DISTINCT lane) FROM gate_windows;
 -- 分母：当日非 rejected logs 行
 SELECT date(started_at) d, COUNT(*) rows
 FROM logs WHERE log_source IS NOT 'rejected' GROUP BY d ORDER BY d DESC;
@@ -122,7 +126,7 @@ FROM debug_files WHERE name GLOB '0[23]*' AND usize>0 GROUP BY name;
 
 以下数字来自生产实测（2026-09-18 观测窗），用于校准「什么样的值算正常」，不是恒定承诺：
 
-- `sends_per_row` 基线 ~1.02；显著上漂 = 内层重试/幻影换号/ping 放大。
+- `sends_per_row` 基线 ~1.0（剔 ping 口径；迁移 0014 前的日行分子仍含 ping 系统性偏高 ~5-6%）；显著上漂 = 内层重试/幻影换号放大；日 coverage 明显 <1 = 分子覆盖缺口（部署截断/丢窗），读比值前先校覆盖。
 - 闸门评估 : logs 行 ≈ 14 : 1。
 - `local_gate:*` 幻影换号占放弃尝试 ~82%（部署首日）。
 - 非对称饱和（`used≥72` & 兄弟 `≤55`）占 lane-分钟 ~17%；其中饱和 lane 流量 ~88% 是 bound 绑定强制，bound 请求人均多付 ~8.6s（8.8s vs 兄弟侧 0.24s）。
