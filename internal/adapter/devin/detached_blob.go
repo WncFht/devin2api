@@ -20,6 +20,7 @@
 package devin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -197,7 +198,7 @@ func (enc *blobEncoder) event(event llm.ResponseEvent) (blobEvent, error) {
 func (enc *blobEncoder) partial(message *llm.AssistantMessage) (*blobMessage, error) {
 	idx := make([]int, len(message.Content))
 	for i, block := range message.Content {
-		if i < len(enc.prevIdx) && i < len(enc.prevContent) && reflect.DeepEqual(enc.prevContent[i], block) {
+		if i < len(enc.prevIdx) && i < len(enc.prevContent) && sameContentBlock(enc.prevContent[i], block) {
 			idx[i] = enc.prevIdx[i]
 			continue
 		}
@@ -214,6 +215,39 @@ func (enc *blobEncoder) partial(message *llm.AssistantMessage) (*blobMessage, er
 	}
 	out.Content = idx
 	return out, nil
+}
+
+// sameContentBlock 判定相邻事件同位块值未变：逐流事件的热路径是
+// text/thinking 增量，字段全标量的块型直接 ==（编译期字段比较，比
+// DeepEqual 的反射派发快一两个量级）；带切片的 ToolCall 逐字段比
+// 加 bytes.Equal，含嵌套 Content 的 ServerToolResult 等罕见块型落回
+// DeepEqual——它们不在增量流的高频形态里。
+func sameContentBlock(prev, block llm.Content) bool {
+	switch typed := prev.(type) {
+	case llm.TextContent:
+		other, ok := block.(llm.TextContent)
+		return ok && typed == other
+	case llm.ThinkingContent:
+		other, ok := block.(llm.ThinkingContent)
+		return ok && typed == other
+	case llm.ImageContent:
+		other, ok := block.(llm.ImageContent)
+		return ok && typed == other
+	case llm.DocumentContent:
+		other, ok := block.(llm.DocumentContent)
+		return ok && typed == other
+	case llm.VideoContent:
+		other, ok := block.(llm.VideoContent)
+		return ok && typed == other
+	case llm.ToolCall:
+		other, ok := block.(llm.ToolCall)
+		return ok && typed.ID == other.ID && typed.Name == other.Name &&
+			typed.Custom == other.Custom && typed.Server == other.Server &&
+			typed.Signature == other.Signature && typed.SignatureType == other.SignatureType &&
+			bytes.Equal(typed.Arguments, other.Arguments)
+	default:
+		return reflect.DeepEqual(prev, block)
+	}
 }
 
 // message 编码一次性终态消息：标量基板加 Content 逐块进表——终态
