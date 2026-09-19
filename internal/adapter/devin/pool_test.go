@@ -2451,12 +2451,20 @@ func TestPoolCrossLaneAttachMiss(t *testing.T) {
 		t.Fatal("Recv after cancel should return the cancel cause")
 	}
 	ownerReg := poolLaneByName(pool, "owner").adapter.detached
-	ownerReg.mu.Lock()
+	// admit 可能由断连哨兵 goroutine 完成——Recv 拿到取消错误不代表
+	// 登记已落册，慢 runner 上检查会抢在哨兵前，须轮询等条目出现。
 	var ownerEntry *detachedEntry
-	for _, entry := range ownerReg.entries {
-		ownerEntry = entry
+	admitDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(admitDeadline) && ownerEntry == nil {
+		ownerReg.mu.Lock()
+		for _, entry := range ownerReg.entries {
+			ownerEntry = entry
+		}
+		ownerReg.mu.Unlock()
+		if ownerEntry == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
-	ownerReg.mu.Unlock()
 	if ownerEntry == nil {
 		t.Fatal("detached stream was not admitted to owner lane registry")
 	}
