@@ -19,6 +19,15 @@
     return `<input type="${type}" id="${id}" class="${joinClasses('filter-input', extraClass)}" data-i18n-placeholder="${placeholderKey}" placeholder="${placeholder}">`;
   }
 
+  // combobox 骨架 = input + 附着 dropdown（createSearchableCombobox attachMode 约定：
+  // 输入 id 与下拉 id 以 _dropdown 后缀配对），四处候选字段同形不同 id/宽度类。
+  function buildCombobox(id, controlClass = '') {
+    return `<div class="${joinClasses('filter-combobox-wrapper', controlClass)}">
+          <input id="${id}" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
+          <div id="${id}_dropdown" class="filter-dropdown" role="listbox"></div>
+        </div>`;
+  }
+
   function buildSharedFields(config) {
     const groupClass = config.groupClass || '';
     const checkboxGroupClass = config.checkboxGroupClass || groupClass;
@@ -69,10 +78,7 @@
       ),
       modelCombobox: buildFilterGroup(
         `${buildFilterLabel('f_model', 'common.model', '模型')}
-        <div class="filter-combobox-wrapper filter-control--wide filter-control--model">
-          <input id="f_model" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_model_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
+        ${buildCombobox('f_model', 'filter-control--wide filter-control--model')}`,
         joinClasses(groupClass, 'filter-group--model')
       ),
       authToken: buildFilterGroup(
@@ -82,10 +88,7 @@
       ),
       status: buildFilterGroup(
         `${buildFilterLabel('f_status', 'logs.statusCode', '状态码')}
-        <div class="filter-combobox-wrapper filter-control--narrow filter-control--status">
-          <input id="f_status" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_status_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
+        ${buildCombobox('f_status', 'filter-control--narrow filter-control--status')}`,
         joinClasses(groupClass, 'filter-group--status')
       ),
       result: buildFilterGroup(
@@ -101,10 +104,7 @@
       ),
       errorStage: buildFilterGroup(
         `${buildFilterLabel('f_error_stage', 'logs.errorStage', '失败阶段')}
-        <div class="filter-combobox-wrapper filter-control--compact filter-control--error-stage">
-          <input id="f_error_stage" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_error_stage_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
+        ${buildCombobox('f_error_stage', 'filter-control--compact filter-control--error-stage')}`,
         joinClasses(groupClass, 'filter-group--error-stage')
       ),
       logSource: buildFilterGroup(
@@ -118,10 +118,7 @@
       ),
       account: buildFilterGroup(
         `${buildFilterLabel('f_account', 'logs.colAccount', '账号')}
-        <div class="filter-combobox-wrapper filter-control--compact filter-control--account">
-          <input id="f_account" class="filter-select filter-combobox" type="text" autocomplete="off" spellcheck="false" />
-          <div id="f_account_dropdown" class="filter-dropdown" role="listbox"></div>
-        </div>`,
+        ${buildCombobox('f_account', 'filter-control--compact filter-control--account')}`,
         joinClasses(groupClass, 'filter-group--account')
       ),
       hideZeroSuccess,
