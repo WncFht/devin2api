@@ -227,7 +227,7 @@
       return badge('0 (FREE)', '#34d399');
     }
     if (!c.multiplier_known || c.credit_multiplier === 0) {
-      return `<span style="color: var(--color-text-secondary);" title="${escapeHtml(t('models.mult.unknownTip'))}">— / ≈1.0</span>`;
+      return `<span class="text-muted" title="${escapeHtml(t('models.mult.unknownTip'))}">— / ≈1.0</span>`;
     }
     const n = Number(c.credit_multiplier);
     return 'x' + n.toFixed(2).replace(/\.?0+$/, '');
@@ -338,8 +338,9 @@
 
   function sourceBadge(source) {
     const [bg, fg] = SOURCE_COLORS[source] || SOURCE_COLORS.traffic;
-    const b = h('span', null, t('models.src.' + source));
-    b.style.cssText = `display:inline-block;padding:1px 8px;margin-right:6px;border-radius:6px;font-size:11px;font-weight:500;background:${bg};color:${fg};`;
+    const b = h('span', 'model-src-badge', t('models.src.' + source));
+    b.style.setProperty('--src-bg', bg);
+    b.style.setProperty('--src-fg', fg);
     return b;
   }
 
@@ -386,32 +387,26 @@
       const c = r.catalog;
       const tr = document.createElement('tr');
       tr.className = 'mobile-card-row';
-      if (!r.enabled) tr.style.opacity = '0.55';
+      if (!r.enabled) tr.classList.add('model-row--disabled');
 
       const nameTd = h('td');
       nameTd.dataset.mobileLabel = labels.model;
       const label = (c && c.label) || r.model;
-      const strong = h('div');
-      strong.style.overflowWrap = 'anywhere';
+      const strong = h('div', 'model-name');
       const strongText = h('strong', null, label);
       strong.appendChild(strongText);
       nameTd.appendChild(strong);
       if (label !== r.model) {
-        const sub = h('div', null, r.model);
-        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);overflow-wrap:anywhere;';
-        nameTd.appendChild(sub);
+        nameTd.appendChild(h('div', 'model-sub', r.model));
       }
       if (r.has_override) {
-        const dot = h('span', null, '●');
-        dot.style.cssText = 'color:#fbbf24;font-size:9px;margin-left:6px;vertical-align:middle;';
+        const dot = h('span', 'model-override-dot', '●');
         dot.title = t('models.filter.override');
         strong.appendChild(dot);
       }
       // 目录外名字（别名/注册表/流量来源）在名称下补一行等宽小字 uid。
       if (!c) {
-        const sub = h('div', null, r.model);
-        sub.style.cssText = 'font-family:monospace;font-size:11px;color:var(--color-text-secondary);overflow-wrap:anywhere;';
-        nameTd.appendChild(sub);
+        nameTd.appendChild(h('div', 'model-sub', r.model));
       }
 
       const providerTd = h('td');
@@ -423,12 +418,10 @@
           c.pricing_type && c.pricing_type !== 'STATIC_CREDIT' ? c.pricing_type : ''
         ].filter(Boolean).join(' · ');
         if (apiSub) {
-          const sub = h('div', null, apiSub);
-          sub.style.cssText = 'font-size:11px;color:var(--color-text-secondary);font-family:monospace;';
-          providerTd.appendChild(sub);
+          providerTd.appendChild(h('div', 'model-sub', apiSub));
         }
       } else {
-        providerTd.appendChild(h('span', null, '—')).style.color = 'var(--color-text-secondary)';
+        providerTd.appendChild(h('span', 'text-muted', '—'));
       }
 
       const tagsTd = h('td');
@@ -468,7 +461,7 @@
       if (r.resolved && r.resolved !== r.model) {
         resolvedWrap.appendChild(h('span', 'model-tag', r.resolved));
       } else {
-        resolvedWrap.appendChild(h('span', null, '—')).style.color = 'var(--color-text-secondary)';
+        resolvedWrap.appendChild(h('span', 'text-muted', '—'));
       }
       const editBtn = h('button', 'redirect-edit-btn');
       editBtn.type = 'button';
@@ -479,22 +472,18 @@
       resolvedWrap.appendChild(editBtn);
       resolvedTd.appendChild(resolvedWrap);
 
-      const actionsTd = h('td');
+      const actionsTd = h('td', 'model-actions');
       actionsTd.dataset.mobileLabel = labels.actions;
-      actionsTd.style.whiteSpace = 'nowrap';
       const test = h('button', 'btn btn-secondary', t('models.action.test'));
       test.type = 'button';
       test.dataset.action = 'test-model';
       test.dataset.model = r.model;
-      test.style.padding = '4px 10px';
       test.title = t('models.action.test');
       actionsTd.appendChild(test);
       const chat = h('button', 'btn btn-secondary', t('models.action.chat'));
       chat.type = 'button';
       chat.dataset.action = 'chat-model';
       chat.dataset.model = r.model;
-      chat.style.padding = '4px 10px';
-      chat.style.marginLeft = '6px';
       chat.title = t('models.action.chat');
       actionsTd.appendChild(chat);
       if (r.has_override) {
@@ -505,8 +494,6 @@
         reset.type = 'button';
         reset.dataset.action = registryOnly ? 'delete-model-override' : 'reset-model-override';
         reset.dataset.model = r.model;
-        reset.style.padding = '4px 10px';
-        reset.style.marginLeft = '6px';
         actionsTd.appendChild(reset);
       }
 
