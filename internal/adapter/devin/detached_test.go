@@ -1100,6 +1100,68 @@ func TestDetachedPumpFinishAccounting(t *testing.T) {
 	}
 }
 
+// TestDetachedPumpTTLExpires 钉住 running TTL 的泵终局：脱钩后上游只剩
+// 心跳活性帧（永不收口）时，后台泵由 drainCtx 的 detachedRunningTTL 到期
+// 打断——末帧补综合错误把条目收成不可重放 failed（截断前缀不得以
+// completed 形态重放给同键重试），expiresAt 改写为 failed 档终态 TTL，
+// 终局归因 ttl_expired。心跳帧持续喂活 stall 看门狗（90s 确认档）且零
+// 事件产出，~120ms 的 TTL 是唯一能在测试时限内到期的存活上界——触发者
+// 只能是 running TTL，四档终局记账至此全覆盖。
+func TestDetachedPumpTTLExpires(t *testing.T) {
+	defer func(d time.Duration) { detachedRunningTTL = d }(detachedRunningTTL)
+	detachedRunningTTL = 120 * time.Millisecond
+	registry := newDetachedRegistry(nil, "")
+	receiver := &heartbeatAfterReceiver{
+		responses: []*devinproto.GetChatMessageResponse{{DeltaText: proto.String("hi")}},
+		heartbeat: &devinproto.GetChatMessageResponse{
+			Usage: &devinproto.ExaCodeiumCommonPb_ModelUsageStats{ModelUid: proto.String("m")},
+		},
+	}
+	stream := detachedTestStream(registry, "t1", receiver)
+	ctx, cancel := context.WithCancel(context.Background())
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	cancel()
+	if _, err := stream.Recv(ctx); err == nil {
+		t.Fatal("Recv after client cancel should return the cancel cause")
+	}
+	entry := registry.lookup("t1")
+	if entry == nil {
+		t.Fatal("detached stream was not registered")
+	}
+	waitEntryState(t, entry, detachedFailed)
+	entry.mu.Lock()
+	last := entry.events[len(entry.events)-1]
+	replayable := entry.replayable
+	expiresAt := entry.expiresAt
+	entry.mu.Unlock()
+	// DeadlineExceeded 字样区分 TTL 到期与淘汰掐泵（context.Canceled）：
+	// 两条路径都补同一形态的综合尾帧，错误文本是唯一的归因差异。
+	if last.Type != llm.ResponseEventError || last.Error == nil ||
+		!strings.Contains(last.Error.ErrorMessage, "detached pump stopped: context deadline exceeded") {
+		t.Fatalf("terminal event = %#v, want pump-stopped deadline error", last)
+	}
+	if replayable {
+		t.Fatal("ttl-expired entry must not be replayable")
+	}
+	// 终态窗口已从 running 档改写为 failed 档：TTL 到期不是移除信号，
+	// 尸体留场给同键重试回答「吃缓存终态还是走新上游」。
+	if until := time.Until(expiresAt); until <= detachedRunningTTL || until > detachedFailedTTL {
+		t.Fatalf("expiresAt = %s from now, want the failed TTL window (running, %s]", until, detachedFailedTTL)
+	}
+	stats := waitRegistryStat(t, registry, func(s DetachedStats) bool {
+		return s.FinishedExpired == 1
+	})
+	if stats.FinishedCompleted != 0 || stats.FinishedKilled != 0 || stats.FinishedFailed != 0 {
+		t.Fatalf("ttl-expired pump misaccounted: %+v", stats)
+	}
+	head := stats.Events[0]
+	if head.Kind != detachedEventFinish || head.Detail != detachFinishExpired || head.Key != "t1" {
+		t.Fatalf("events head = %+v, want finish/ttl_expired on t1", head)
+	}
+}
+
 // TestDetachedPeek 钉住跨 lane 探测的三态与只读语义：在场可用/在场不可用/
 // 缺席。usable 与 lookup 同判据，但 peek 不置 attached、不惰性逐出、不计
 // attach_misses——它只给 owner 条目盖 sawCrossLaneRetry 章供孤儿拆分。
