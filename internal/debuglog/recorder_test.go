@@ -1528,3 +1528,28 @@ func TestClaimStallErrorClassifiesSignatures(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseStopsBackgroundWorkers 钉住关停协议：Close 返回后 worker/
+// encoder/cleaner 三路 done 全部闭合——任何一路协程不退出会让 Close
+// 挂死，回归在这里是具名断言失败而非整包超时。
+func TestCloseStopsBackgroundWorkers(t *testing.T) {
+	manager := NewManager(filepath.Join(t.TempDir(), "logs"), RetentionPolicy{}, nil)
+	closed := make(chan struct{})
+	go func() { manager.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close did not return — background worker wedged")
+	}
+	for name, ch := range map[string]chan struct{}{
+		"workerGone":   manager.workerGone,
+		"encodersDone": manager.encodersDone,
+		"cleanerDone":  manager.cleanerDone,
+	} {
+		select {
+		case <-ch:
+		default:
+			t.Fatalf("%s still open after Close", name)
+		}
+	}
+}

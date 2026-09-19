@@ -369,3 +369,27 @@ func TestDetachedSeedSkipsCorrupt(t *testing.T) {
 		t.Fatalf("stats = seeded %d blob_drops %d, want 0/1", stats.Seeded, stats.BlobDrops)
 	}
 }
+
+// TestRegistryCloseStopsLedgerPump 钉住台账泵的关停契约：close 返回后
+// ledgerDone 闭合——泵不退出会让 close 挂死，回归在这里是具名断言
+// 失败而非整包超时。
+func TestRegistryCloseStopsLedgerPump(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "detached.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	registry := newDetachedRegistry(db, "lane-a")
+	closed := make(chan struct{})
+	go func() { registry.close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("registry.close did not return — ledger pump wedged")
+	}
+	select {
+	case <-registry.ledgerDone:
+	default:
+		t.Fatal("ledgerDone still open after close")
+	}
+}

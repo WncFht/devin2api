@@ -342,3 +342,22 @@ func TestWriteWorkerTaskBound(t *testing.T) {
 		t.Fatal("worker did not resume after wedged write")
 	}
 }
+
+// TestCloseStopsWriteWorker 钉住关停契约：Close 排空队列后返回，
+// writeDone 闭合——写协程不退出会让 Close 挂死，回归在这里是具名
+// 断言失败而非整包超时。
+func TestCloseStopsWriteWorker(t *testing.T) {
+	s := newStore(t)
+	closed := make(chan struct{})
+	go func() { s.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close did not return — write worker wedged")
+	}
+	select {
+	case <-s.writeDone:
+	default:
+		t.Fatal("writeDone still open after Close")
+	}
+}
