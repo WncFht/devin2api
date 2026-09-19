@@ -50,6 +50,8 @@ go run ./cmd/protoextract <new-upstream-binary> outputs/devin-proto-new
 go run ./cmd/protocensus diff outputs/devin-proto/descriptors.pb outputs/devin-proto-new/descriptors.pb
 ```
 
+新版上游二进制（Go 系，含可提取描述符）的获取链：`https://devin.ai/download` 页按钮 → `https://windsurf.com/api/windsurf/download-redirect?build=<platform>&isNext=false` 307 到 `windsurf-stable.codeiumdata.com/<platform>/<channel>/<commit>/Devin-<platform>-<ver>.<ext>`；`linux-x64` 是 tar.gz，语言服务器在包内 `Devin/resources/app/extensions/windsurf/bin/language_server_linux_x64`。注意 GitHub `Exafunction/codeium` 的公开 language-server release 明显落后于 Devin 桌面版内嵌构建（枚举表更短），不是合格的提取源；`devin` CLI 是 Rust 编译，无 Go 描述符。
+
 `diff` 按类型、字段（号 + 类型+label）、枚举值和 RPC 方法报告 `added`/`removed`/`changed`。复查 diff 之后才能把新集合提升进 `outputs/devin-proto/`；然后 `task generate` 并重跑 `task census`。
 
 读 diff 的注意点：
