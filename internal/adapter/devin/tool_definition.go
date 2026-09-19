@@ -2,12 +2,12 @@
 package devin
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -71,15 +71,16 @@ type cachedToolSection struct {
 
 // withToolDescriptions 把非空工具说明追加到 Devin system prompt，供模型理解
 // 原生工具用途。注入段只依赖 tools（systemPrompt 是尾部拼接，不参与段内
-// 决策），整条段按工具集内容哈希进 toolSectionCache——无 SessionKey 的
-// 请求在 sessionSeed 里已付过一遍 hashTools，这里复算仍远低于重解析。
+// 决策），整条段按工具集内容哈希进 toolSectionCache——toolsHash 由调用方
+// 供给（buildRequest 对同一去重后工具集已算过一遍），免得每请求对全部
+// schema 重复序列化取哈希。
 // full 档超软顶先降 compact（prose 逐条截断）、再降 skinny（纯名清单）；
 // skinny 仍过硬顶返回错误。
-func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (string, error) {
+func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition, toolsHash string) (string, error) {
 	if len(tools) == 0 {
 		return systemPrompt, nil
 	}
-	key := hashTools(tools)
+	key := toolsHash
 	toolSectionCache.Lock()
 	cached, hit := toolSectionCache.items[key]
 	toolSectionCache.Unlock()
@@ -598,13 +599,25 @@ func escapeXMLText(value string) string {
 // 条目数超上限时整体清空重建，避免无界增长。
 var toolDefinitionCache = struct {
 	sync.Mutex
-	items map[string]cachedToolDefinition
-}{items: make(map[string]cachedToolDefinition)}
+	items map[toolDefKey]cachedToolDefinition
+}{items: make(map[toolDefKey]cachedToolDefinition)}
 
 // cachedToolDefinition 是缓存条目：wire 产物加投影副作用计数。
 type cachedToolDefinition struct {
 	definition  *devinproto.ExaChatPb_ChatToolDefinition
 	droppedRefs int
+}
+
+// toolDefKey 是 toolDefinitionCache 的键：schema 取 sha256 定长指纹
+// 而非原文拼串——原 string(InputSchema) 键每工具每请求拷一份全量
+// schema（CC 28 工具 ~140KB/req），map 哈希还要再扫一遍这些字节。
+type toolDefKey struct {
+	name       string
+	schemaSum  [32]byte
+	strict     bool
+	readOnly   bool
+	serverName string
+	attribKey  string
 }
 
 // convertToolDefinition 保留工具身份和 JSON Schema 约束，仅移除自然语言注释。
@@ -628,9 +641,16 @@ type cachedToolDefinition struct {
 func convertToolDefinition(tool llm.ToolDefinition, repairs *llm.RequestRepairs) (*devinproto.ExaChatPb_ChatToolDefinition, error) {
 	// 缓存键覆盖全部影响 wire 形态的字段：透传位不同的同名同 schema
 	// 工具不能共享条目。
-	cacheKey := tool.Name + "\x00" + string(tool.InputSchema) + "\x00" +
-		strconv.FormatBool(tool.Strict) + "\x00" + strconv.FormatBool(tool.ReadOnlyHint) + "\x00" +
-		tool.ServerName + "\x00" + strings.Join(tool.AttributionFieldNames, "\x01")
+	cacheKey := toolDefKey{
+		name:       tool.Name,
+		schemaSum:  sha256.Sum256(tool.InputSchema),
+		strict:     tool.Strict,
+		readOnly:   tool.ReadOnlyHint,
+		serverName: tool.ServerName,
+	}
+	if len(tool.AttributionFieldNames) > 0 {
+		cacheKey.attribKey = strings.Join(tool.AttributionFieldNames, "\x01")
+	}
 	toolDefinitionCache.Lock()
 	cached, hit := toolDefinitionCache.items[cacheKey]
 	toolDefinitionCache.Unlock()

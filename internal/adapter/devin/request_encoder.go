@@ -48,7 +48,8 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	// cache_read=0，ID 参与缓存键或路由——稳定派生是命中前提。
 	// 三个派生量共用一份种子哈希：trajectory/cascade/亲和键同种子是
 	// 契约（SessionAffinityKey 注释），seed 构造要走 tools 哈希，只算一遍。
-	sessionSum := sha256.Sum256(sessionSeed(request))
+	toolsHash := hashTools(request.Tools)
+	sessionSum := sha256.Sum256(sessionSeedWithToolsHash(request, toolsHash))
 	trajectoryID, cascadeID := uuidFromBytes(sessionSum[:16]), uuidFromBytes(sessionSum[16:32])
 	executionID := randid.UUID()
 	name, version, os := config.ClientIdentity()
@@ -58,7 +59,7 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 	noTools := request.ToolChoice != nil && request.ToolChoice.Mode == llm.ToolChoiceNone
 	systemPrompt := request.SystemPrompt
 	if !noTools {
-		injected, err := withToolDescriptions(systemPrompt, request.Tools)
+		injected, err := withToolDescriptions(systemPrompt, request.Tools, toolsHash)
 		if err != nil {
 			return nil, repairs, err
 		}
@@ -232,6 +233,14 @@ func SessionAffinityKey(request llm.RequestMessages) string {
 // 断点、beta flag）：它们改变上游特性面，同会话键下声明漂移应换
 // lane；规范序（排序去重）保证种子与声明顺序、重复次数无关。
 func sessionSeed(request llm.RequestMessages) []byte {
+	return sessionSeedWithToolsHash(request, "")
+}
+
+// sessionSeedWithToolsHash 是 sessionSeed 的预算版：toolsHash 传
+// hashTools(request.Tools) 的现成结果（buildRequest 的注入段缓存键已
+// 算过同一遍），空串表示未预算、需要时现算——空工具集的合法哈希本就
+// 是空串，两种「空」殊途同归。
+func sessionSeedWithToolsHash(request llm.RequestMessages, toolsHash string) []byte {
 	// bytes.Buffer 的 Bytes() 零拷贝交给 Sum256；strings.Builder 则需
 	// 先 String() 再 []byte() 多一份全量拷贝。
 	var seed bytes.Buffer
@@ -261,7 +270,10 @@ func sessionSeed(request llm.RequestMessages) []byte {
 		seed.WriteByte(0)
 		seed.WriteString(request.Model)
 		seed.WriteByte(0)
-		seed.WriteString(hashTools(request.Tools))
+		if toolsHash == "" {
+			toolsHash = hashTools(request.Tools)
+		}
+		seed.WriteString(toolsHash)
 	}
 	for _, marker := range seedMarkers(request.Dropped) {
 		seed.WriteByte(0)

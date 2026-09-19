@@ -13,12 +13,13 @@ import (
 
 // TestWithToolDescriptionsNumbersProseAndPreservesCode 的测试动机是避免连续能力声明触发上游策略误判，同时保持代码示例完整。
 func TestWithToolDescriptionsNumbersProseAndPreservesCode(t *testing.T) {
-	prompt, err := withToolDescriptions("", []llm.ToolDefinition{{
+	tools := []llm.ToolDefinition{{
 		Name: "read&inspect",
 		Description: `Read the contents of a file. Supports text files and images (jpg, png).
 
 ` + "```json\n" + `{"path":"a&b.txt"}` + "\n```",
-	}})
+	}}
+	prompt, err := withToolDescriptions("", tools, hashTools(tools))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,10 +184,11 @@ func TestRenderToolSectionDigestSurvivesCompact(t *testing.T) {
 // TestWithToolDescriptionsFieldOnlyToolGetsEntry 的测试动机是无顶层
 // 描述但有字段文档的工具（部分 MCP 工具形态）也要产出条目。
 func TestWithToolDescriptionsFieldOnlyToolGetsEntry(t *testing.T) {
-	prompt, err := withToolDescriptions("", []llm.ToolDefinition{{
+	tools := []llm.ToolDefinition{{
 		Name:        "field_only",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"string","description":"the x field"}}}`),
-	}})
+	}}
+	prompt, err := withToolDescriptions("", tools, hashTools(tools))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +220,7 @@ func TestWithToolDescriptionsRealSetStaysFull(t *testing.T) {
 	for _, item := range fixture.Tools {
 		tools = append(tools, llm.ToolDefinition{Name: item.Name, Description: item.Description, InputSchema: item.InputSchema})
 	}
-	prompt, err := withToolDescriptions("sys", tools)
+	prompt, err := withToolDescriptions("sys", tools, hashTools(tools))
 	if err != nil {
 		t.Fatal(err)
 	}
