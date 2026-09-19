@@ -13,10 +13,8 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"math/rand"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"slices"
 	"sort"
 	"strings"
@@ -251,10 +249,6 @@ type upstreamLink struct {
 }
 
 var _ adapter.Adapter = (*Adapter)(nil)
-
-// withGateRetry 是 adapter.WithGateRetry 的本文件别名：方法内 receiver
-// 名 adapter 遮蔽了包名，经别名取回续试标记的挂接函数。
-var withGateRetry = adapter.WithGateRetry
 
 // New 创建 Devin adapter。
 func New(config Config) (*Adapter, error) {
@@ -791,7 +785,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		model = cfg.Model
 	}
 	model = ResolveModelAlias(cfg.Aliases, model)
-	recorder := debuglog.FromContext(ctx)
+	// env 把 ctx 走私值（闸门回执/让位探针/peers 登记表/记录器）捕成
+	// 显式结构：之后的发送面一律经 attemptRunner 按 env 字段取用。
+	env := attemptEnvFrom(ctx)
+	recorder := env.recorder
 	if request.ServerSearch != nil {
 		// 服务端托管搜索侧请求（CC WebSearch）：不经 GetChatMessage，
 		// 模型路由/图片校验与本次请求无关，同步执行搜索后返回预成形
@@ -848,7 +845,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// owner 条目置 sawCrossLaneRetry 供移除时拆出「来错门」孤儿档。
 	// 多 holder（同键条目同时存在多条 lane）各记一次不吞。
 	if detachKey != "" {
-		for owner, reg := range detachedPeersFrom(ctx) {
+		for owner, reg := range env.peers {
 			if reg == adapter.detached {
 				continue
 			}
@@ -891,6 +888,12 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	if assignmentJWT != "" {
 		warmRouter = requestedUID
 	}
+	// runner 持有本次开流的全部发送输入：首发的分片/序号记账与各处
+	// 续试重发（自愈/重开/续轮/续传）都走它，不再各抄骨架。
+	runner := &attemptRunner{
+		adapter: adapter, env: env, request: request, cfg: cfg,
+		binding: binding, warmKey: warmKey,
+	}
 	protoRequest, repairs, err := buildRequest(request, cfg, binding)
 	if err != nil {
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
@@ -898,30 +901,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	repairs.SanitizeHits = sanitizeHits
 	recorder.SetRepairs(repairs)
-	// 发送序号区分多次发送：自愈重发与 pre-content reopen 都会重建
-	// 请求体，attempt2+ 写独立分片并在 04 里留 retry_attempt 分界行，
-	// 否则 04 的帧无法归因到具体哪次发送。序号由 recorder 分配、跨
-	// lane 共享——号池 failover 后本 lane 的首发续占 attemptN 分片，
-	// 不以基座名覆写上一 lane 的 wire 体。
-	attempt := recorder.NextDevinSendOrdinal()
-	stage := debuglog.StageDevinRequest
-	if attempt > 1 {
-		stage = debuglog.StageDevinRequestAttempt(attempt)
-	}
-	recordProtoJSON(recorder, stage, protoRequest)
-	// noteRetry 统一重发记账：序号分配、index retries、04 分界行与
-	// 03.attemptN 分片在同一点落盘——两处调用方曾各写一套，漂移出
-	// 分界行字段不一致（continue_empty 只有一边写）。
-	noteRetry := func(cause string, message *devinproto.GetChatMessageRequest, continueEmpty bool) {
-		attempt = recorder.NextDevinSendOrdinal()
-		recorder.NoteRetryAttempt(attempt, cause)
-		recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_attempt", map[string]any{
-			"attempt":        attempt,
-			"cause":          cause,
-			"continue_empty": continueEmpty,
-		})
-		recordProtoJSON(recorder, debuglog.StageDevinRequestAttempt(attempt), message)
-	}
+	runner.noteSend(protoRequest)
 	// streamBase 剥离客户端取消、保留 ctx 值（recorder/请求分类）：
 	// detached 语义要求客户端断开后上游泵继续活着（见 detach），
 	// connect 流的生命周期绑在开流 ctx 上，必须从剥离后的基底派生。
@@ -940,24 +920,17 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	openCh := make(chan openResult, 1)
 	go func() {
-		opened, err := adapter.getChatMessageWithRetry(streamCtx, protoRequest, warmKey)
+		opened, err := runner.send(streamCtx, protoRequest, false)
 		if err != nil && isUnauthenticated(err) && adapter.reloadToken() {
 			// 凭据自愈：CLI 会续期改写 credentials.toml，重读 token 后
 			// 用新凭据重建请求重试一次。token 未变化时不重试。
-			binding.Token = adapter.currentToken()
-			if rebuilt, _, buildErr := buildRequest(request, cfg, binding); buildErr == nil {
-				protoRequest = rebuilt
-				noteRetry("unauthenticated: token reloaded", protoRequest, false)
-				opened, err = adapter.getChatMessageWithRetry(withGateRetry(streamCtx), protoRequest, warmKey)
-			} else {
-				// 重建失败则放弃重发、原错误照常上报；但「自愈后为何没重试」
-				// 要留痕——error.json 是 first-write-wins 留给上游失败点，
-				// 本地重建失败只在 04 的分界行里找得到（同 reopen 的
-				// retry_failed 惯例）。
-				recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
-					"attempt": attempt,
-					"error":   buildErr.Error(),
-				})
+			if resent, resendErr := runner.resend(streamCtx, "unauthenticated: token reloaded", nil, false); resendErr == nil {
+				opened, err = resent, nil
+			} else if !errors.Is(resendErr, errAttemptBuild) {
+				// 重发打出去又败的错误顶替原 unauthenticated 上报；
+				// 重建失败（errAttemptBuild，retry_failed 已留痕）
+				// 保留原始失败。
+				err = resendErr
 			}
 		}
 		openCh <- openResult{opened, err}
@@ -1031,42 +1004,31 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
 		reopen: func(cause error, continueEmpty bool) (<-chan upstreamFrame, context.CancelFunc, error) {
-			retryRequest := request
 			var causeText string
-			if continueEmpty {
+			var mutate func(*llm.RequestMessages)
+			switch {
+			case continueEmpty:
 				// 空 end_turn（有 stopReason 零内容，上游实测存在的退化形态）：
 				// 追加 "continue" 用户消息重发一次，让模型在同一上下文续说。
-				retryRequest.Messages = append(append([]llm.Message{}, request.Messages...),
-					llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}})
+				mutate = func(request *llm.RequestMessages) {
+					request.Messages = append(append([]llm.Message{}, request.Messages...),
+						llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "continue"}}})
+				}
 				causeText = "empty end_turn: continue"
 				slog.Warn("reopening stream: upstream ended with empty content")
-			} else if isTransientConnectError(cause) {
+			case isTransientConnectError(cause):
 				causeText = "transport: " + cause.Error()
 				slog.Warn("reopening stream: transport error before first content", "error", cause)
-			} else if isUnauthenticated(cause) && adapter.reloadToken() {
+			case isUnauthenticated(cause) && adapter.reloadToken():
 				causeText = "unauthenticated: token reloaded"
 				slog.Info("reopening stream: token reloaded after unauthenticated")
-			} else {
+			default:
 				return nil, nil, cause
 			}
-			retryCtx, retryCancel := context.WithCancel(withGateRetry(streamBase))
-			retryBinding := binding
-			retryBinding.Token = adapter.currentToken()
-			rebuilt, _, err := buildRequest(retryRequest, cfg, retryBinding)
-			var reopened *connect.ServerStreamForClient[devinproto.GetChatMessageResponse]
-			if err == nil {
-				noteRetry(causeText, rebuilt, continueEmpty)
-				reopened, err = adapter.getChatMessageWithRetry(retryCtx, rebuilt, warmKey)
-			}
+			retryCtx, retryCancel := context.WithCancel(streamBase)
+			reopened, err := runner.resend(retryCtx, causeText, mutate, continueEmpty)
 			if err != nil {
 				retryCancel()
-				// 重发自身撞到的错误也要留痕：error.json 是
-				// first-write-wins 只记原始失败点，「重发又撞上
-				// 什么」只在这一行找得到。
-				recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_failed", map[string]any{
-					"attempt": attempt,
-					"error":   err.Error(),
-				})
 				return nil, nil, err
 			}
 			return pumpUpstream(retryCtx, reopened), retryCancel, nil
@@ -1081,18 +1043,11 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	// 清掉 tool_choice——首发期的指名/强制约束会让上游每跳都强发
 	// 同一调用（实测 named web_search 滚到 hops 封顶）。
 	response.extend = func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
-		extended := request
-		extended.ToolChoice = nil
-		extended.Messages = append(append([]llm.Message{}, request.Messages...), extra...)
-		nextBinding := binding
-		nextBinding.Token = adapter.currentToken()
-		rebuilt, _, err := buildRequest(extended, cfg, nextBinding)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		noteRetry(cause, rebuilt, false)
-		nextCtx, nextCancel := context.WithCancel(withGateRetry(streamBase))
-		next, err := adapter.getChatMessageWithRetry(nextCtx, rebuilt, warmKey)
+		nextCtx, nextCancel := context.WithCancel(streamBase)
+		next, err := runner.resend(nextCtx, cause, func(request *llm.RequestMessages) {
+			request.ToolChoice = nil
+			request.Messages = append(append([]llm.Message{}, request.Messages...), extra...)
+		}, false)
 		if err != nil {
 			nextCancel()
 			return nil, nil, nil, err
@@ -1154,73 +1109,6 @@ func (stream *responseStream) watchClientCtx(ctx context.Context) {
 	} else {
 		stream.cancel()
 	}
-}
-
-// maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
-const maxConnectAttempts = 3
-
-// getChatMessageWithRetry 在流建立前重试瞬时传输错误（EOF/连接重置/超时）。
-// 只对建立阶段重试：流一旦建立，错误通过事件流上报，不再重发请求。
-func (adapter *Adapter) getChatMessageWithRetry(ctx context.Context, protoRequest *devinproto.GetChatMessageRequest, warmKey warmLineageKey) (*connect.ServerStreamForClient[devinproto.GetChatMessageResponse], error) {
-	var lastErr error
-	link := adapter.link()
-	link.warmer.kickRequest()
-	// sent/open 埋点幂等（CAS -1）：重试时 sent 留在首次发送、open 记首个
-	// 成功的建流，sent→open 的差值如实包含退避重试耗时。
-	recorder := debuglog.FromContext(ctx)
-	for attempt := 0; attempt < maxConnectAttempts; attempt++ {
-		// 每次真实发送（含瞬时错误重试）都要过速率闸：被拒尝试
-		// 会推后上游恢复时刻，本地整形是唯一止损点。attempt>0 与
-		// 调用方已挂的 retry 标记同属续试，计入窗口 retry_admits。
-		waitCtx := ctx
-		if attempt > 0 {
-			waitCtx = withGateRetry(ctx)
-		}
-		if err := adapter.gate.wait(waitCtx); err != nil {
-			// 闸门快败在起源点记 rate_gate（WriteError first-write-wins）：
-			// 本函数被首发与 reopen 重试共用，reopen 路径的错误会继续
-			// 冒泡经流层出口——不在此处落 stage 会被盖成 provider_stream，
-			// 本地限流被误归上游责任。
-			var failure *llm.Failure
-			if errors.As(err, &failure) && failure.LocalGate {
-				recorder.WriteError(debuglog.ErrStageRateGate, err)
-			}
-			return nil, err
-		}
-		if attempt > 0 {
-			// ±25% 抖动：上游瞬时拥塞时固定节拍的重试会相互叠加。
-			base := time.Duration(attempt) * 400 * time.Millisecond
-			backoff := time.Duration(float64(base) * (0.75 + 0.5*rand.Float64()))
-			select {
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
-			case <-time.After(backoff):
-			}
-		}
-		recorder.NoteUpstreamSend()
-		// 保温簿记的 lastTouch 只看客户端可归因上行：每次真实发送
-		//（含瞬时重试）都刷新——ping 不走本函数，记独立的 lastPingAt。
-		adapter.warm.noteSend(warmKey)
-		// httptrace 随 ctx 进 transport：GotConn 报告本次发送拿到的是
-		// 复用连接还是新握手——connect 段偏慢时据此区分「dial+TLS 成本」
-		// 与「上游响应头延迟」两类成因。
-		var conn httptrace.GotConnInfo
-		traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-			GotConn: func(info httptrace.GotConnInfo) { conn = info },
-		})
-		stream, err := link.stream.GetChatMessage(traceCtx, connect.NewRequest(protoRequest))
-		if err == nil {
-			recorder.NoteUpstreamOpen()
-			recorder.NoteUpstreamConn(conn.Reused, conn.IdleTime)
-			return stream, nil
-		}
-		lastErr = err
-		if !isTransientConnectError(err) {
-			break
-		}
-	}
-	adapter.gate.noteUpstreamError(lastErr)
-	return nil, lastErr
 }
 
 // isTransientConnectError 判断错误是否为传输层断裂（可重试、记

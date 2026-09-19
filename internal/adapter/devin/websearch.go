@@ -51,11 +51,12 @@ type webSearchOutcome struct {
 // 传 "03-devin-request" 占主文件位；Flow B 续轮内 chat 重发已占用
 // 主文件与 attemptN 编号空间，必须传 StageDevinSearchStem+seq 的独立
 // 词干，否则每次搜索都覆盖首个 chat 请求、扇出文件与续轮分片互撞。
-// warmKey 是所属保温 lineage 的簿记句柄（与 getChatMessageWithRetry
+// warmKey 是所属保温 lineage 的簿记句柄（与 attemptRunner.send
 // 的 noteSend 同口径）；Flow A 无 retained 条目时传入也仅 no-op。
 func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedDomains, blockedDomains []string, limit uint32, stem string, warmKey warmLineageKey) (webSearchOutcome, error) {
 	var outcome webSearchOutcome
-	recorder := debuglog.FromContext(ctx)
+	env := attemptEnvFrom(ctx)
+	recorder := env.recorder
 	name, version, os := adapter.CurrentConfig().ClientIdentity()
 	link := adapter.link()
 	link.warmer.kickRequest()
@@ -65,7 +66,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 	}
 	seen := make(map[string]bool)
 	for attempt, domain := range domains {
-		if err := adapter.gate.wait(ctx); err != nil {
+		if err := adapter.gate.wait(ctx, env, false); err != nil {
 			var failure *llm.Failure
 			if errors.As(err, &failure) && failure.LocalGate {
 				recorder.WriteError(debuglog.ErrStageRateGate, err)
@@ -81,7 +82,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 			request.Domain = proto.String(domain)
 		}
 		recorder.NoteUpstreamSend()
-		// 搜索是客户端可归因上行：与 getChatMessageWithRetry 同口径推进
+		// 搜索是客户端可归因上行：与 attemptRunner.send 同口径推进
 		// lastTouch——纯托管搜索流量也要让保温簿记看得见，否则条目在
 		// 搜索期间被误判静默。
 		adapter.warm.noteSend(warmKey)
@@ -104,7 +105,7 @@ func (adapter *Adapter) runWebSearch(ctx context.Context, query string, allowedD
 		}
 		recordProtoJSON(recorder, stage, request)
 		// httptrace 随 ctx 进 transport：GotConn 报告本次发送拿到的是
-		// 复用连接还是新握手——与 getChatMessageWithRetry 同口径，
+		// 复用连接还是新握手——与 attemptRunner.send 同口径，
 		// Flow A 下搜索就是首个上游调用，连接画像必须照样留证。
 		var conn httptrace.GotConnInfo
 		traceCtx := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{

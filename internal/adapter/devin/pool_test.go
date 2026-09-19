@@ -2280,7 +2280,7 @@ func TestPoolGateYieldToSibling(t *testing.T) {
 
 	laneA := poolLaneByName(pool, "a")
 	pinGateClock(laneA.adapter.gate, 10)
-	if err := laneA.adapter.gate.wait(context.Background()); err != nil {
+	if err := laneA.adapter.gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("seed wait error = %v, want pass", err)
 	}
 

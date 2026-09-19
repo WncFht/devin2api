@@ -750,7 +750,7 @@ func (w *cacheWarmer) sendOnce(ctx context.Context, entry *warmEntry) (int64, er
 // 响应流 drain 到 EOF——不提前 cancel：上游 cache touch 记在建流还是
 // 读完未知，读满是保守选择（mt=1 一帧即完）。cacheRead 取流内最后
 // 一个非零 cache_read_tokens（上游按帧上报，后者更全）。不走
-// getChatMessageWithRetry：ping 过的是 tryAdmit 而非 wait、不做瞬时
+// attemptRunner.send：ping 过的是 tryAdmit 而非 wait、不做瞬时
 // 重试、不进 recorder/index——内部流量豁免。
 func (adapter *Adapter) sendWarmPing(ctx context.Context, req *devinproto.GetChatMessageRequest) (int64, error) {
 	link := adapter.link()

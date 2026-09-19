@@ -255,8 +255,8 @@ var poolFailoverBudgetFG = 60 * time.Second
 var poolFailoverBudgetBG = 150 * time.Second
 
 // failoverBudget 返回本请求类（fg/bg）的换号累计预算。
-func failoverBudget(ctx context.Context) time.Duration {
-	if adapter.RequestClass(ctx) == adapter.ClassBG {
+func failoverBudget(class string) time.Duration {
+	if class == adapter.ClassBG {
 		return poolFailoverBudgetBG
 	}
 	return poolFailoverBudgetFG
@@ -301,6 +301,9 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	// 探测方自跳过）。lookup 落 nil 后 adapter 据此查兄弟 lane 是否持有
 	// 同键条目——换 lane 的重试此前在两侧都静默走新上游。
 	ctx = withDetachedPeers(ctx, pool.detachedPeerRegistries())
+	// env 捕下本请求的发送环境值：swap 换 lane 开在 Recv 的 ctx 上时
+	// 经 env.attach 单点重挂，不再维护手工重注清单。
+	env := attemptEnvFrom(ctx)
 	ranked := pool.rankLanes(ctx, lanes, affinity)
 	// 选号审计：排序落定即登记候选序快照，回答「这次为什么去了这个号」
 	//（swap 接管时会以新一轮现场覆盖重写）。
@@ -326,7 +329,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 	for i, c := range ranked {
 		rest[i] = c.lane
 	}
-	class := adapter.RequestClass(ctx)
+	class := env.class()
 	var lastErr error
 	tried := 0
 	for len(rest) > 0 {
@@ -337,7 +340,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 		// 愈链。第 2+ 次换号（tried>1）恢复查账——烧满一条再败的场
 		// 景不再串行点燃第三条。拦截留痕，否则「为什么没换第二条」
 		// 只能靠 elapsed 反推。
-		if lastErr != nil && time.Since(entered) > failoverBudget(ctx) &&
+		if lastErr != nil && time.Since(entered) > failoverBudget(env.class()) &&
 			(tried != 1 || rest[0].hardDown()) {
 			recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(entered).Milliseconds(), "skipped": rest[0].name})
 			break
@@ -357,7 +360,7 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 			// 开流成功即写绑定：无论它是否是命中那条——绑定记录的是
 			// 「上次产出内容的 lane」，胜者接管会话谱系。
 			pool.bind(affinity, lane, request.SessionKey)
-			return &poolStream{request: request, recorder: recorder, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest, failovers: tried - 1}, nil
+			return &poolStream{request: request, recorder: recorder, env: env, pool: pool, affinity: affinity, entered: entered, lane: lane, laneStart: laneStart, inner: stream, rest: rest, failovers: tried - 1}, nil
 		}
 		lastErr = err
 		recorder.SetUpstreamAccount(lane.name)
@@ -384,6 +387,9 @@ func (pool *Pool) Stream(ctx context.Context, request llm.RequestMessages) (llm.
 type poolStream struct {
 	request  llm.RequestMessages
 	recorder *debuglog.Recorder
+	// env 是 Pool.Stream 入口捕下的发送环境值：swap 换 lane 开在
+	// Recv 的 ctx 上时经它重挂本包内部的挂接值（见 attach）。
+	env attemptEnv
 	// pool/affinity 是换号接管写绑定与重登审计所需的回链：
 	// swap 成功即把亲和键改绑到新 lane。
 	pool     *Pool
@@ -492,7 +498,7 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		// 却判死的 lane 不值得复烧一条自愈链。第 2+ 次换号恢复查账，
 		// 拦住串行点燃第三条。未试候选时返回 (false, nil)，由 Recv
 		// 把本 lane 的真实错误事件透传给客户端。
-		if time.Since(s.entered) > failoverBudget(ctx) &&
+		if time.Since(s.entered) > failoverBudget(s.env.class()) &&
 			(s.failovers > 0 || s.rest[0].hardDown()) {
 			s.recorder.AppendJSONL(debuglog.StageDevinResponse, "failover_budget_exhausted", map[string]any{"elapsed_ms": time.Since(s.entered).Milliseconds(), "skipped": s.rest[0].name})
 			break
@@ -502,14 +508,14 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 		s.failovers++
 		s.recorder.AppendJSONL(debuglog.StageDevinResponse, "account_attempt", map[string]any{"account": next.name})
 		laneStart := time.Now()
-		// 调试记录挂 s.recorder（开流时的请求 ctx）而不是指望 Recv 的
-		// ctx 恰好携带——换号 lane 的 03 分片等证据必须落本请求目录，
-		// 与 swap 自身的 account_attempt 记账同一份句柄。ctx 注值同理
-		// 必须重注：gateYield 与跨 lane 挂接探测的 peers 登记表都活在
-		// 开流 ctx 上，Recv 的 ctx 是另一个对象。
-		probe := newGateYieldProbe(adapter.RequestClass(ctx), s.rest)
-		probeCtx := withDetachedPeers(probe.attach(ctx), s.pool.detachedPeerRegistries())
-		inner, err := next.adapter.Stream(debuglog.WithRecorder(probeCtx, s.recorder), s.request)
+		// Recv 的 ctx 与开流 ctx 是两个对象：本包挂进开流 ctx 的值
+		//（peers 登记表、调试记录器）不会自动跟过来——env.attach 是
+		// 唯一重挂点；peers 取换号时刻的最新 lane 集（lane 可热变），
+		// 新 lane 的让位探针由 probe.attach 逐 lane 装填。
+		env := s.env
+		env.peers = s.pool.detachedPeerRegistries()
+		probe := newGateYieldProbe(env.class(), s.rest)
+		inner, err := next.adapter.Stream(probe.attach(env.attach(ctx)), s.request)
 		if err == nil {
 			s.lane = next
 			s.laneStart = laneStart
@@ -518,7 +524,7 @@ func (s *poolStream) swap(ctx context.Context) (bool, error) {
 			// 换号接管即改绑：会话谱系转到新 lane，后续请求直落这里。
 			s.pool.bind(s.affinity, next, s.request.SessionKey)
 			// 重选审计覆盖首轮快照——meta 留下的是最新一轮决策现场。
-			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next, adapter.RequestClass(ctx))))
+			s.recorder.NotePoolCandidates(poolCandidateRows(s.swapRanked(next, env.class())))
 			return true, nil
 		}
 		lastErr = err

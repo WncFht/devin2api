@@ -53,7 +53,7 @@ func offsetGateClock(gate *rateGate, sec float64) {
 func TestRateGateLatchRejectsUntilReset(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Please try again later. Your limit will reset in 8 minutes. (trace ID: x)"))
-	err := gate.wait(context.Background())
+	err := gate.wait(context.Background(), attemptEnv{}, false)
 	var failure *llm.Failure
 	if !errors.As(err, &failure) || !failure.LocalGate {
 		t.Fatalf("wait error = %v, want local-gate *llm.Failure", err)
@@ -73,7 +73,7 @@ func TestRateGateLatchFastFails(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
 	start := time.Now()
-	err := gate.wait(context.Background())
+	err := gate.wait(context.Background(), attemptEnv{}, false)
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("wait held %v during latch, want instant fast-fail", elapsed)
 	}
@@ -91,19 +91,19 @@ func TestRateGateDripReleasesProbes(t *testing.T) {
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	// 第一个槽在上闩后 dripInterval 才开放，先到请求快败。
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("first wait error = %v, want local-gate *llm.Failure (slot not open yet)", err)
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("drip-slot wait error = %v, want probe release", err)
 	}
 	// 槽已被取走，紧随其后的请求回到快败。
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("post-probe wait error = %v, want *llm.Failure", err)
 	}
 	clock.t = clock.t.Add(60 * time.Millisecond)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("next drip-slot wait error = %v, want probe release", err)
 	}
 }
@@ -116,11 +116,11 @@ func TestRateGateDripRespectsDeadZone(t *testing.T) {
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 60 seconds."))
 	clock.t = clock.t.Add(48 * time.Second) // :58，闩内且进死区，槽已开
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("dead-zone wait error = %v, want *llm.Failure (no drip in dead zone)", err)
 	}
 	clock.t = clock.t.Add(5 * time.Second) // :03 下一分钟，回可发区间
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("sendable wait error = %v, want probe release", err)
 	}
 }
@@ -132,11 +132,11 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 30 seconds."))
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("latched wait error = %v, want *llm.Failure", err)
 	}
 	gate.noteUpstreamSuccess()
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("post-success wait error = %v, want released", err)
 	}
 }
@@ -145,12 +145,12 @@ func TestRateGateUnlatchesOnUpstreamSuccess(t *testing.T) {
 func TestRateGateLatchSelective(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	gate.noteUpstreamError(connect.NewError(connect.CodeInvalidArgument, errors.New("bad request")))
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v, want nil (no latch)", err)
 	}
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 10 minutes."))
 	gate.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 1 seconds."))
-	err := gate.wait(context.Background())
+	err := gate.wait(context.Background(), attemptEnv{}, false)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) || gateErr.RetryAfterSeconds < 590 {
 		t.Fatalf("wait error = %v, want latch ~600s (max wins)", err)
@@ -176,7 +176,7 @@ func TestRateGateZeroSecondHint(t *testing.T) {
 	fresh := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(fresh, 10)
 	fresh.noteUpstreamError(rateLimitErr("Reached overall message rate limit. Your limit will reset in 0 seconds."))
-	if err := fresh.wait(context.Background()); err != nil {
+	if err := fresh.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait after unlatched 0-hint = %v, want pass (latch expired at arrival)", err)
 	}
 	if fresh.stats().Latched {
@@ -194,7 +194,7 @@ func TestRateGateIgnoresTransportMasquerade(t *testing.T) {
 	if gate.stats().Latched || gate.stats().LatchCount != 0 {
 		t.Fatal("transport-masqueraded resource_exhausted must not latch")
 	}
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait after masqueraded error = %v, want pass", err)
 	}
 }
@@ -253,11 +253,11 @@ func TestRateGateWindowQuotaReject(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 2}, nil, "")
 	pinGateClock(gate, 10)
 	for i := 0; i < 2; i++ {
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("wait %d error = %v, want immediate pass", i, err)
 		}
 	}
-	err := gate.wait(context.Background())
+	err := gate.wait(context.Background(), attemptEnv{}, false)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) {
 		t.Fatalf("excess wait error = %v, want *llm.Failure", err)
@@ -272,14 +272,14 @@ func TestRateGateWindowQuotaReject(t *testing.T) {
 func TestRateGateWindowRollover(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	clock := pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("first wait error = %v, want pass", err)
 	}
-	if err := gate.wait(context.Background()); err == nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err == nil {
 		t.Fatal("second wait should be rejected (quota exhausted)")
 	}
 	clock.t = clock.t.Add(time.Minute) // 下一桶同秒位
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("new-bucket wait error = %v, want pass after rollover", err)
 	}
 }
@@ -295,15 +295,15 @@ func TestRateGatePersistsClosedWindow(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, db, store.GateStateKey("default"))
 	clock := pinGateClock(gate, 10)
 	windowStart := clock.t.Truncate(time.Minute).Add(2 * time.Second) // 默认可发区间 :02
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v", err)
 	}
 	// 桶满快败计入关闭窗口的 reject_quota 账。
-	if err := gate.wait(context.Background()); err == nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err == nil {
 		t.Fatal("second wait should be rejected (quota exhausted)")
 	}
 	clock.t = clock.t.Add(time.Minute) // 下一桶同秒位
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("new-bucket wait error = %v", err)
 	}
 	// 落库走一次性协程脱离 mu：轮询到行出现。
@@ -346,13 +346,13 @@ func TestRateGateWindowPersistRetry(t *testing.T) {
 	}
 	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
 	clock := pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v", err)
 	}
 	_ = db.Close() // 持久化协程写必败
 	for i := 0; i < 5; i++ {
 		clock.t = clock.t.Add(time.Minute)
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("flip %d wait error = %v", i, err)
 		}
 	}
@@ -380,7 +380,7 @@ func TestRateGateWindowPersistRetry(t *testing.T) {
 	gate.states = db2
 	gate.mu.Unlock()
 	clock.t = clock.t.Add(time.Minute)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("recovery wait error = %v", err)
 	}
 	var rows []*store.GateWindow
@@ -406,13 +406,13 @@ func TestRateGateWindowPersistDrop(t *testing.T) {
 	}
 	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
 	clock := pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v", err)
 	}
 	_ = db.Close()
 	for i := 0; i < gatePersistRetryCap+1; i++ {
 		clock.t = clock.t.Add(time.Minute)
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("flip %d wait error = %v", i, err)
 		}
 	}
@@ -538,7 +538,7 @@ func TestRateGateStatsPendingWindows(t *testing.T) {
 	}
 }
 
-// 续试重发的放行单列进 retry_admits 窗口账：挂 WithGateRetry 的放行
+// 续试重发的放行单列进 retry_admits 窗口账：retry=true 的放行
 // 计入 retry_admits，首发不挂不计——两者都照常占 used 配额（used
 // 与 retry_admits 是总数与子集的关系，不是分列口径）。
 func TestRateGateWindowRetryAdmits(t *testing.T) {
@@ -549,14 +549,14 @@ func TestRateGateWindowRetryAdmits(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
 	clock := pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("first wait error = %v", err)
 	}
-	if err := gate.wait(withGateRetry(context.Background())); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, true); err != nil {
 		t.Fatalf("retry wait error = %v", err)
 	}
 	clock.t = clock.t.Add(time.Minute) // 翻页触发关窗落库
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("new-bucket wait error = %v", err)
 	}
 	var rows []*store.GateWindow
@@ -580,7 +580,7 @@ func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	offsetGateClock(gate, 1.9) // 死区尾，距 :02 开放 ~100ms
 	start := time.Now()
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v, want pass after short sleep", err)
 	}
 	if d := time.Since(start); d < 50*time.Millisecond || d > 2*time.Second {
@@ -592,7 +592,7 @@ func TestRateGateDeadZoneSleepsToNextWindow(t *testing.T) {
 func TestRateGateDeadZoneFastFails(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
 	pinGateClock(gate, 58.5) // 死区头，下一窗口 ~3.5s > maxHold
-	err := gate.wait(context.Background())
+	err := gate.wait(context.Background(), attemptEnv{}, false)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) {
 		t.Fatalf("wait error = %v, want *llm.Failure", err)
@@ -607,7 +607,7 @@ func TestRateGateZeroQuotaUnlimited(t *testing.T) {
 	gate := newRateGate(GateConfig{}, nil, "")
 	pinGateClock(gate, 59) // 死区
 	for i := 0; i < 3; i++ {
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("wait %d error = %v, want pass (no window limit)", i, err)
 		}
 	}
@@ -619,7 +619,7 @@ func TestRateGateWaitCancelRefunds(t *testing.T) {
 	offsetGateClock(gate, 58.2) // 死区，睡到 :02 约 3.8s < maxHold
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
-	if err := gate.wait(ctx); !errors.Is(err, context.Canceled) {
+	if err := gate.wait(ctx, attemptEnvFrom(ctx), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("wait error = %v, want context.Canceled", err)
 	}
 	if waiters := gate.stats().Waiters; waiters != 0 {
@@ -752,7 +752,7 @@ func TestRateGateLatchPersistRestore(t *testing.T) {
 	if !stats.Latched || stats.LimitedUntil == nil {
 		t.Fatalf("restarted gate should restore latch, stats = %+v", stats)
 	}
-	if err := restarted.wait(context.Background()); err == nil {
+	if err := restarted.wait(context.Background(), attemptEnv{}, false); err == nil {
 		t.Fatal("restored latch should keep rejecting")
 	}
 
@@ -851,7 +851,7 @@ func TestRateGateTryAdmitDeadZoneRejects(t *testing.T) {
 func TestRateGateTryAdmitBucketFullRejects(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v, want pass (fills bucket)", err)
 	}
 	if admitted, reason := gate.tryAdmit(); admitted || reason != gateReasonQuota {
@@ -887,14 +887,14 @@ func TestRateGateTryAdmitConsumesSharedQuota(t *testing.T) {
 		t.Fatal("tryAdmit = false, want admit")
 	}
 	// quota-reserve=2：ping 已占 1 槽，bg 再进 1 条即触顶。
-	if err := gate.wait(bgCtx); err != nil {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 		t.Fatalf("bg wait error = %v, want pass (one slot left)", err)
 	}
 	var gateErr *llm.Failure
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bg wait error = %v, want *llm.Failure reason=quota (ping+bg exhausted quota-reserve)", err)
 	}
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("fg wait error = %v, want pass (reserve slots are for fg)", err)
 	}
 }
@@ -909,16 +909,16 @@ func TestRateGateBgReserveBlocks(t *testing.T) {
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	// fg 先占 5 槽：预留 1 → bg 总额度 quota-reserve=7，只剩 2 槽。
 	for i := 0; i < 5; i++ {
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("fg wait %d error = %v, want pass", i, err)
 		}
 	}
 	for i := 0; i < 2; i++ {
-		if err := gate.wait(bgCtx); err != nil {
+		if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 			t.Fatalf("bg wait %d error = %v, want pass (within quota-reserve)", i, err)
 		}
 	}
-	err := gate.wait(bgCtx)
+	err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) {
 		t.Fatalf("bg wait error = %v, want *llm.Failure (reserve blocked)", err)
@@ -931,7 +931,7 @@ func TestRateGateBgReserveBlocks(t *testing.T) {
 		t.Fatalf("RetryAfterSeconds = %d, want ~32s (next window)", gateErr.RetryAfterSeconds)
 	}
 	// fg 仍放行到满桶：预留只对 bg 生效。
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("fg wait error = %v, want pass (reserve only constrains bg)", err)
 	}
 	stats := gate.stats()
@@ -954,28 +954,28 @@ func TestRateGateBgRampPaces(t *testing.T) {
 	clock := pinGateClock(gate, 10)
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	// :10 经过 8s：额度 ceil(7*8/56)=1——第二个 bg 被爬坡挡住快败。
-	if err := gate.wait(bgCtx); err != nil {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 		t.Fatalf("bg wait error = %v, want pass (first ramp slot)", err)
 	}
 	var gateErr *llm.Failure
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bg wait at :10 error = %v, want *llm.Failure reason=quota (ramp blocked)", err)
 	}
 	// :40 经过 38s：额度 ceil(7*38/56)=5——再补 4 条到 usedBg=5。
 	clock.t = clock.t.Add(30 * time.Second)
 	for i := 0; i < 4; i++ {
-		if err := gate.wait(bgCtx); err != nil {
+		if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 			t.Fatalf("bg wait %d at :40 error = %v, want pass", i, err)
 		}
 	}
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bg wait at :40 error = %v, want *llm.Failure reason=quota (ramp blocked)", err)
 	}
 	// :57 经过 55s：额度 ceil(7*55/56)=7=quota-reserve——爬坡收敛，
 	// bg 吃满预留让出的全部槽。
 	clock.t = clock.t.Add(17 * time.Second)
 	for i := 0; i < 2; i++ {
-		if err := gate.wait(bgCtx); err != nil {
+		if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 			t.Fatalf("bg wait %d at :57 error = %v, want pass (ramp converged)", i, err)
 		}
 	}
@@ -999,13 +999,13 @@ func TestRateGateBgReserveDecaysToTailFill(t *testing.T) {
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	// :10 预留 = 2+1=3=quota：bg 被封零快败。
 	var gateErr *llm.Failure
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bg wait at window head error = %v, want *llm.Failure reason=quota", err)
 	}
 	// :57 可发区间剩 ~1s：外推项 ceil(2*1/60)=1，预留降到 2，
 	// bg 拿到 quota-reserve=1 个尾槽。
 	clock.t = clock.t.Add(47 * time.Second)
-	if err := gate.wait(bgCtx); err != nil {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 		t.Fatalf("bg wait at window tail error = %v, want pass (reserve decayed)", err)
 	}
 	stats := gate.stats()
@@ -1028,10 +1028,10 @@ func TestRateGateBgReserveCountsFgWaiters(t *testing.T) {
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	// reserve = 0(EMA) + 2(waiters) + 1(margin) = 3 = quota：bg 封零。
 	var gateErr *llm.Failure
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bg wait error = %v, want *llm.Failure reason=quota", err)
 	}
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("fg wait error = %v, want pass", err)
 	}
 }
@@ -1043,11 +1043,11 @@ func TestRateGateFgRateEMAFoldsAtRoll(t *testing.T) {
 	clock := pinGateClock(gate, 10)
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	for i := 0; i < 2; i++ {
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("fg wait %d error = %v, want pass", i, err)
 		}
 	}
-	if err := gate.wait(bgCtx); err != nil {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 		t.Fatalf("bg wait error = %v, want pass", err)
 	}
 	// 翻页：fgWindow=2 折叠进 EMA（bg 不计入 fg 需求样本）。
@@ -1071,22 +1071,22 @@ func TestRateGateRejectionReasons(t *testing.T) {
 	pinGateClock(gate, 10)
 	gate.noteUpstreamError(rateLimitErr("rate limited. Your limit will reset in 30 seconds."))
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
 		t.Fatalf("latched wait error = %v, want *llm.Failure reason=latch", err)
 	}
 	// fg 死区超预算：reason=quota（死区等待与桶满同归预算类拒绝）。
 	fresh := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
 	pinGateClock(fresh, 58.5)
-	if err := fresh.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := fresh.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("dead-zone wait error = %v, want *llm.Failure reason=quota", err)
 	}
 	// fg 桶满：reason=quota。
 	full := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
 	pinGateClock(full, 10)
-	if err := full.wait(context.Background()); err != nil {
+	if err := full.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("fg wait error = %v, want pass", err)
 	}
-	if err := full.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+	if err := full.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
 		t.Fatalf("bucket-full wait error = %v, want *llm.Failure reason=quota", err)
 	}
 }
@@ -1097,7 +1097,7 @@ func TestRateGateVerdictReceipt(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 6, BgReserveMargin: 1}, nil, "gate:yanjian")
 	pinGateClock(gate, 10)
 	ctx, gc := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	if err := gate.wait(ctx); err != nil {
+	if err := gate.wait(ctx, attemptEnvFrom(ctx), false); err != nil {
 		t.Fatalf("bg wait error = %v, want pass", err)
 	}
 	v := gc.Verdict()
@@ -1114,7 +1114,7 @@ func TestRateGateVerdictReceipt(t *testing.T) {
 	if v.WindowResetSec < 50 || v.WindowResetSec > 53 {
 		t.Fatalf("WindowResetSec = %d, want ~52", v.WindowResetSec)
 	}
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("bare-ctx wait error = %v, want pass", err)
 	}
 }
@@ -1129,23 +1129,23 @@ func TestRateGateWaitSamples(t *testing.T) {
 		t.Fatal("Wait view should be nil before any evaluation")
 	}
 	offsetGateClock(gate, 1.9) // 死区尾：睡到 :02 开放 ~100ms 真等
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("wait error = %v, want pass after short sleep", err)
 	}
 	// quota=1 已被睡醒者占掉：第二个请求桶满快败 → reject 样本。
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("bucket-full wait = %v, want *llm.Failure", err)
 	}
 	// bg 同样桶满快败 → bg 分类样本。
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) {
 		t.Fatalf("bg wait = %v, want *llm.Failure", err)
 	}
 	// 已取消 ctx → cancel 样本（loop 首检查即返回）。
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := gate.wait(ctx); !errors.Is(err, context.Canceled) {
+	if err := gate.wait(ctx, attemptEnvFrom(ctx), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled wait = %v, want context.Canceled", err)
 	}
 	view := gate.stats().Wait
@@ -1267,7 +1267,7 @@ func TestRateGateTryAdmitRespectsFgReserve(t *testing.T) {
 		t.Fatalf("bucketUsed = %d, want 6 (rejected ping must not count)", gate.bucketUsed)
 	}
 	// fg 照常进预留槽：预留只对 bg/ping 生效。
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("fg wait error = %v, want pass (reserve only constrains bg/ping)", err)
 	}
 }
@@ -1403,14 +1403,14 @@ func TestRateGateExpectedWaitBgNextWindowStarved(t *testing.T) {
 func TestRateGateYieldFastFail(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 	pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("seed wait error = %v, want pass", err)
 	}
 	probed := 0
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 2500 * time.Millisecond, true })
 	start := time.Now()
-	err := gate.wait(ctx)
+	err := gate.wait(ctx, attemptEnvFrom(ctx), false)
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("yield wait took %v, want immediate fast-fail", d)
 	}
@@ -1446,7 +1446,7 @@ func TestRateGateYieldPredicateGating(t *testing.T) {
 	fullGate := func() *rateGate {
 		gate := newRateGate(GateConfig{MaxRPM: 1}, nil, "")
 		pinGateClock(gate, 10)
-		if err := gate.wait(context.Background()); err != nil {
+		if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 			t.Fatalf("seed wait error = %v, want pass", err)
 		}
 		return gate
@@ -1455,7 +1455,7 @@ func TestRateGateYieldPredicateGating(t *testing.T) {
 		bgCtx, _ := adapter.WithGateContext(ctx, adapter.ClassBG)
 		cancelCtx, cancel := context.WithTimeout(bgCtx, 100*time.Millisecond)
 		defer cancel()
-		return gate.wait(cancelCtx)
+		return gate.wait(cancelCtx, attemptEnvFrom(cancelCtx), false)
 	}
 	// 无谓词：睡到取消。
 	if err := bgWait(fullGate(), context.Background()); !errors.Is(err, context.DeadlineExceeded) {
@@ -1504,7 +1504,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 		gate.fgRateEMA = 4 // :10 可发区间剩 48s → 预留 ceil(4*48/60)+1 = 5
 		gate.mu.Unlock()
 		for i := 0; i < 5; i++ {
-			if err := gate.wait(context.Background()); err != nil {
+			if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 				t.Fatalf("fg wait %d error = %v, want pass", i, err)
 			}
 		}
@@ -1515,7 +1515,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	probed := 0
 	gate := newReserveBlocked()
 	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, true })
-	err := gate.wait(ctx)
+	err := gate.wait(ctx, attemptEnvFrom(ctx), false)
 	var gateErr *llm.Failure
 	if !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonYield {
 		t.Fatalf("reserve-blocked yield error = %v, want *llm.Failure reason=yield", err)
@@ -1540,7 +1540,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	ctx = adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, false })
 	cancelCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	if err := gate.wait(cancelCtx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := gate.wait(cancelCtx, attemptEnvFrom(cancelCtx), false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("false-predicate wait error = %v, want context.DeadlineExceeded", err)
 	}
 	if probed == 0 {
@@ -1563,7 +1563,7 @@ func TestRateGateYieldReserveBlocked(t *testing.T) {
 	ctx = adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { probed++; return 0, true })
 	boundCtx, boundCancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer boundCancel()
-	if err := boundary.wait(boundCtx); !errors.Is(err, context.DeadlineExceeded) {
+	if err := boundary.wait(boundCtx, attemptEnvFrom(boundCtx), false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("boundary wait error = %v, want context.DeadlineExceeded", err)
 	}
 	if probed != 0 {
@@ -1581,16 +1581,16 @@ func TestRateGateYieldPersistsInWindow(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	gate := newRateGate(GateConfig{MaxRPM: 1}, db, store.GateStateKey("default"))
 	clock := pinGateClock(gate, 10)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("seed wait error = %v, want pass", err)
 	}
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	ctx := adapter.WithGateYield(bgCtx, func() (time.Duration, bool) { return 0, true })
-	if err := gate.wait(ctx); err == nil {
+	if err := gate.wait(ctx, attemptEnvFrom(ctx), false); err == nil {
 		t.Fatal("bucket-full yield wait should be rejected")
 	}
 	clock.t = clock.t.Add(time.Minute)
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("new-bucket wait error = %v, want pass", err)
 	}
 	var rows []*store.GateWindow
@@ -1629,14 +1629,14 @@ func TestRateGateWindowUsedBgPing(t *testing.T) {
 		}
 	}
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	if err := gate.wait(bgCtx); err != nil {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); err != nil {
 		t.Fatalf("bg wait error = %v, want pass", err)
 	}
 	if stats := gate.stats(); stats.WindowUsedBg != 3 || stats.WindowUsedBgPing != 2 {
 		t.Fatalf("live split = used_bg:%d ping:%d, want 3/2", stats.WindowUsedBg, stats.WindowUsedBgPing)
 	}
 	clock.t = clock.t.Add(time.Minute) // 翻页触发关窗落库
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("new-bucket wait error = %v", err)
 	}
 	var rows []*store.GateWindow
@@ -1665,17 +1665,17 @@ func TestRateGateWaitTotals(t *testing.T) {
 	gate := newRateGate(GateConfig{MaxRPM: 1, BgMaxHold: 100 * time.Millisecond}, nil, "")
 	offsetGateClock(gate, 1.9) // 死区尾：睡到 :02 开放 ~100ms
 	// fg 死区短睡后放行：占过 waiters 名额 → waits 记账。
-	if err := gate.wait(context.Background()); err != nil {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); err != nil {
 		t.Fatalf("dead-zone wait error = %v, want pass after short sleep", err)
 	}
 	// fg 桶满快败（预计 ~58s > maxHold 30s）：不排队 → waits 不记。
 	var gateErr *llm.Failure
-	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) {
+	if err := gate.wait(context.Background(), attemptEnv{}, false); !errors.As(err, &gateErr) {
 		t.Fatalf("bucket-full wait = %v, want *llm.Failure", err)
 	}
 	// bg 桶满快败（预计 ~58s > bgMaxHold 100ms）：同口径不记 waits。
 	bgCtx, _ := adapter.WithGateContext(context.Background(), adapter.ClassBG)
-	if err := gate.wait(bgCtx); !errors.As(err, &gateErr) {
+	if err := gate.wait(bgCtx, attemptEnvFrom(bgCtx), false); !errors.As(err, &gateErr) {
 		t.Fatalf("bg wait = %v, want *llm.Failure", err)
 	}
 	totals := gate.stats().Wait.Totals
@@ -1694,7 +1694,7 @@ func TestRateGateWaitTotals(t *testing.T) {
 	offsetGateClock(fresh, 58.5) // 死区头：睡到下一窗口 ~3.5s < bgMaxHold
 	ctx, cancel := context.WithCancel(bgCtx)
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
-	if err := fresh.wait(ctx); !errors.Is(err, context.Canceled) {
+	if err := fresh.wait(ctx, attemptEnvFrom(ctx), false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled wait = %v, want context.Canceled", err)
 	}
 	if got := fresh.stats().Wait.Totals.Bg; got.Evals != 1 || got.Waits != 1 {

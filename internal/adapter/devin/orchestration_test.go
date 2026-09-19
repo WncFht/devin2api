@@ -1,6 +1,6 @@
 // 编排层 in-process 上游测试：用 httptest + 生成的 Connect handler 把真
 // Adapter.Stream() 打到本地桩上，覆盖现有 receiver-fake 测试够不到的
-// New/getChatMessageWithRetry/ensureCatalog/resolveModelRouting 链路与
+// New/attemptRunner.send/ensureCatalog/resolveModelRouting 链路与
 // 真实 HTTP 帧往返。与 cmd/upstreamstub 的区别：那里是外部进程打真实
 // 部署，这里是 per-test 进程内桩，断言能落到「第 N 次调用的 wire 请求」。
 package devin

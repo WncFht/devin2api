@@ -1121,13 +1121,17 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 //     的看到满桶按剩余预算决定再睡或快败——分钟粒度下排序公平性
 //     不值得换复杂度。睡醒后不直接放行，回到循环首重新评估——
 //     睡眠期间闩态可能已变。
-func (gate *rateGate) wait(ctx context.Context) (err error) {
+//
+// env 携带本请求的闸门输入（回执/请求类/让位探针）——原先靠 ctx
+// 走私，号池换 lane 时开流 ctx 与 Recv ctx 是两个对象，挂接值靠
+// 手工重注（attemptEnv.attach 是唯一重挂点）；retry 标记本 wait 是
+// 同一请求在同 lane 上的续试重发，计入窗口 retry_admits。
+func (gate *rateGate) wait(ctx context.Context, env attemptEnv, retry bool) (err error) {
 	if gate == nil {
 		return nil
 	}
-	class := adapter.RequestClass(ctx)
-	gc := adapter.GateContextFrom(ctx)
-	retry := adapter.GateRetryFrom(ctx)
+	class := env.class()
+	gc := env.gc
 	bg := class == adapter.ClassBG
 	sleeping := false // 标记本请求占着一个 waiters 名额
 	// blocked 标记本请求是否曾占过 waiters 名额（真排过队）——wait
@@ -1259,7 +1263,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		//（无谓词或探针未达阈值）保持零值，拒绝行按零值缺席。
 		var siblingEW time.Duration
 		if probeWait > gateEarlyRelease {
-			if yield := adapter.GateYieldFrom(ctx); yield != nil {
+			if yield := env.yield; yield != nil {
 				gate.mu.Unlock()
 				var free bool
 				siblingEW, free = yield()
@@ -1303,7 +1307,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 		// 「睡到下一窗口」会把可换号的等待盲睡到底（fg 桶满盲睡
 		// 可达 ~56s）。无谓词（单 lane/末位候选）保持原睡眠不加重查。
 		timerWait := wait
-		if adapter.GateYieldFrom(ctx) != nil && timerWait > gateEarlyRelease {
+		if env.yield != nil && timerWait > gateEarlyRelease {
 			timerWait = gateEarlyRelease
 		}
 		timer := time.NewTimer(timerWait)
