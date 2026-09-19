@@ -84,14 +84,15 @@ func (h *Handler) adminConfigReload(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminProcessLog 返回进程 stderr 日志尾部（slog 行），支持 ?offset=
-// 增量拉取；响应带 next_offset 供下一轮续读。
+// 增量拉取；响应带 next_offset 供下一轮续读，rotated 为真表示游标越过
+// copytruncate 截断点、本轮与上轮之间存在不可达的日志断档。
 func (h *Handler) adminProcessLog(w http.ResponseWriter, r *http.Request) {
 	if h.debug == nil {
 		respondError(w, http.StatusNotFound, "debug log disabled")
 		return
 	}
 	offset, _ := strconv.ParseInt(r.URL.Query().Get("offset"), 10, 64)
-	data, next, err := h.debug.ReadProcessLog(offset)
+	data, next, rotated, err := h.debug.ReadProcessLog(offset)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "process log unavailable")
 		return
@@ -99,6 +100,7 @@ func (h *Handler) adminProcessLog(w http.ResponseWriter, r *http.Request) {
 	respondOK(w, map[string]any{
 		"text":        string(h.maskToken(data)),
 		"next_offset": next,
+		"rotated":     rotated,
 	})
 }
 

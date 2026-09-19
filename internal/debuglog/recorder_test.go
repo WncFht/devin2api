@@ -342,9 +342,10 @@ func TestDroppedCounterOnClosedQueue(t *testing.T) {
 // 置位前被拒，拒收数随完结块出账。
 func TestLateWritesInMeta(t *testing.T) {
 	manager := &Manager{
-		queues:     []chan writeTask{make(chan writeTask, 4)},
-		insertQ:    make(chan insertOp, 4),
-		workerGone: make(chan struct{}),
+		queues:      []chan writeTask{make(chan writeTask, 4)},
+		encoderDone: []chan struct{}{make(chan struct{})},
+		insertQ:     make(chan insertOp, 4),
+		workerGone:  make(chan struct{}),
 	}
 	recorder := &Recorder{manager: manager}
 	manager.closing.Store(true)
@@ -368,9 +369,10 @@ func TestLateWritesInMeta(t *testing.T) {
 // 填满后下一个任务必掉。
 func TestDroppedCounterOnFullQueue(t *testing.T) {
 	manager := &Manager{
-		queues:     []chan writeTask{make(chan writeTask, 4)},
-		insertQ:    make(chan insertOp, 4),
-		workerGone: make(chan struct{}),
+		queues:      []chan writeTask{make(chan writeTask, 4)},
+		encoderDone: []chan struct{}{make(chan struct{})},
+		insertQ:     make(chan insertOp, 4),
+		workerGone:  make(chan struct{}),
 	}
 	recorder := &Recorder{manager: manager}
 	for i := 0; i < 4; i++ {
@@ -392,6 +394,7 @@ func newBareManager(st *store.Store, queueCap int) *Manager {
 		store:         st,
 		now:           time.Now,
 		queues:        []chan writeTask{make(chan writeTask, queueCap)},
+		encoderDone:   []chan struct{}{make(chan struct{})},
 		shardEncoders: []*store.PayloadEncoder{store.NewPayloadEncoder()},
 		writerEncoder: store.NewPayloadEncoder(),
 		insertQ:       make(chan insertOp, 4),
@@ -1173,9 +1176,10 @@ func TestDetachedEventsMirrorToMeta(t *testing.T) {
 // meta 出账——这正是本字段的存在理由（生产丢标记事故的直接回归）。
 func TestDetachedEventsSurviveQueueDrop(t *testing.T) {
 	manager := &Manager{
-		queues:     []chan writeTask{make(chan writeTask, 1)},
-		insertQ:    make(chan insertOp, 4),
-		workerGone: make(chan struct{}),
+		queues:      []chan writeTask{make(chan writeTask, 1)},
+		encoderDone: []chan struct{}{make(chan struct{})},
+		insertQ:     make(chan insertOp, 4),
+		workerGone:  make(chan struct{}),
 	}
 	recorder := &Recorder{manager: manager, startedAt: time.Now(), sequences: make(map[string]int)}
 	// 填满分片队列：下一条 AppendJSONL 必走 default 丢弃。

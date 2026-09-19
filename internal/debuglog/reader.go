@@ -247,16 +247,19 @@ func (manager *Manager) FindDirByStartedAt(ctx context.Context, ms int64) (strin
 const processLogTailBytes = 256 << 10
 
 // ReadProcessLog 返回进程日志（stderr.log）尾部内容与下一次增量拉取的偏移。
-// offset>0 时从该偏移继续读（CLIProxyAPI GetLogs 的 cursor 模式简化版——
-// 本服务日志不 rotate，偏移量天然单调有效）。
-func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, err error) {
+// offset>0 时从该偏移继续读（CLIProxyAPI GetLogs 的 cursor 模式简化版）。
+// stderr.log 由 devin-2api-logrotate.timer 每日 copytruncate（同 inode
+// 缩容）——offset>size 说明游标越过截断点，上次轮询到截断之间的行已
+// 不可达：按尾部模式回当前内容并把 rotated 置真，让调用方向客户端暴露
+// 断档而不是静默续读。
+func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, rotated bool, err error) {
 	if manager == nil || manager.root == "" {
-		return nil, 0, os.ErrNotExist
+		return nil, 0, false, os.ErrNotExist
 	}
 	path := filepath.Join(manager.root, StderrFile)
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	size := info.Size()
 	if offset > 0 && offset <= size {
@@ -268,20 +271,22 @@ func (manager *Manager) ReadProcessLog(offset int64) (data []byte, next int64, e
 		data = make([]byte, size-start)
 		file, openErr := os.Open(path)
 		if openErr != nil {
-			return nil, 0, openErr
+			return nil, 0, false, openErr
 		}
 		defer func() { _ = file.Close() }()
 		if _, err = file.ReadAt(data, start); err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
-		return data, size, nil
+		return data, size, false, nil
 	}
-	// 全量尾部模式：读最后 processLogTailBytes。
+	// 全量尾部模式：读最后 processLogTailBytes。offset>size 即游标越过
+	// copytruncate 点（offset<=0 是首轮拉取，不算断档）。
+	rotated = offset > size
 	data, err = TailRead(path, processLogTailBytes)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	return data, size, nil
+	return data, size, rotated, nil
 }
 
 // TailRead 读取文件末尾至多 max 字节；文件小于 max 时读全文。
