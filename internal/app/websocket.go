@@ -23,6 +23,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/WncFht/devin2api/internal/llm"
 	"github.com/WncFht/devin2api/internal/obs"
 	"github.com/WncFht/devin2api/internal/randid"
 )
@@ -409,10 +410,10 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 	// 不如让客户端立刻换路。
 	if application.draining.Load() {
 		application.noteReject(obs.RejectDraining, request, http.StatusServiceUnavailable)
-		writeRejectError(writer, rejectBody{
+		writeRejectError(writer, request, rejectBody{
 			status:     http.StatusServiceUnavailable,
 			message:    "server is draining for restart; retry the request",
-			errType:    "server_error",
+			failure:    &llm.Failure{Code: "unavailable"},
 			code:       "server_draining",
 			retryAfter: true,
 		})
@@ -424,10 +425,10 @@ func (application *App) responsesWebSocket(writer http.ResponseWriter, request *
 		defer func() { <-application.wsConns }()
 	default:
 		application.noteReject(obs.RejectWSConnectionLimit, request, http.StatusTooManyRequests)
-		writeRejectError(writer, rejectBody{
+		writeRejectError(writer, request, rejectBody{
 			status:  http.StatusTooManyRequests,
 			message: "websocket connection limit reached; close an existing connection or retry later",
-			errType: "rate_limit_error",
+			failure: &llm.Failure{Code: "resource_exhausted", RateLimited: true},
 			code:    "responses_websocket_connection_limit_exceeded",
 		})
 		return

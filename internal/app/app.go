@@ -176,6 +176,39 @@ func (application *App) SetVersion(version string) {
 	application.version = version
 }
 
+// v1Route 登记一条 /v1 协议路由：pattern+method → api 归因标签与协议
+// 编码器。路由注册、管线前拒绝的信封形状、rejectAPI 归因共用本表——
+// 加第四条协议路由在此登记一行。gated=false 的行不进并发槽闸门组
+// （WS 升级连接是长生命周期，槽由 WS 循环按轮次获取）。
+type v1Route struct {
+	method   string
+	pattern  string
+	api      string
+	protocol protocolEncoder
+	gated    bool
+}
+
+// v1Routes 是 /v1 协议路由表；WS 行只供查表（注册走 ws 组字面挂载）。
+var v1Routes = []v1Route{
+	{method: http.MethodGet, pattern: "/v1/responses", api: "responses-ws", protocol: responsesProtocol{}},
+	{method: http.MethodPost, pattern: "/v1/responses", api: "openai-responses", protocol: responsesProtocol{}, gated: true},
+	{method: http.MethodPost, pattern: "/v1/chat/completions", api: "openai-chat", protocol: chatProtocol{}, gated: true},
+	{method: http.MethodPost, pattern: "/v1/messages", api: "anthropic", protocol: anthropicProtocol{}, gated: true},
+}
+
+// v1RouteFor 按已匹配的路由 pattern+method 查协议路由：chi 在跑
+// middleware 链之前已把 RoutePattern 填进 ctx，管线前拒绝因此拿得到
+// 协议身份。非协议路由（/v1/models、未匹配路径）返回 nil。
+func v1RouteFor(request *http.Request) *v1Route {
+	pattern := chi.RouteContext(request.Context()).RoutePattern()
+	for i := range v1Routes {
+		if v1Routes[i].pattern == pattern && v1Routes[i].method == request.Method {
+			return &v1Routes[i]
+		}
+	}
+	return nil
+}
+
 // Router 返回应用的 chi HTTP 路由。
 func (application *App) Router() http.Handler {
 	router := chi.NewRouter()
@@ -202,11 +235,17 @@ func (application *App) Router() http.Handler {
 		protected.Get("/v1/models/{model}", application.getModel)
 		// chi 不允许在同一 mux 上先注册路由再 Use——并发闸门单独开一组，
 		// 组内 Use 先于路由注册，组外的 models/WS 不受它约束。
+		// 协议路由由 v1Routes 表驱动注册：信封/归因/注册同源。
 		protected.Group(func(gated chi.Router) {
 			gated.Use(application.concurrencyMiddleware)
-			gated.Post("/v1/responses", application.createResponses)
-			gated.Post("/v1/chat/completions", application.createChatCompletions)
-			gated.Post("/v1/messages", application.createMessages)
+			for _, route := range v1Routes {
+				if !route.gated {
+					continue
+				}
+				gated.Method(route.method, route.pattern, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					application.createCompletion(writer, request, route.api, route.protocol)
+				}))
+			}
 		})
 	})
 	if application.ccPanel != nil {
@@ -426,29 +465,49 @@ func writeJSONError(writer http.ResponseWriter, status int, message string, errT
 	})
 }
 
-// rejectBody 描述一次管线前拒绝要下发的错误体。retryAfter 控制
-// Retry-After: 1——并发溢出(429)是「本地过载」不是服务端故障，
+// rejectBody 描述一次管线前拒绝要下发的错误体：信封与 error.type
+// 随路由协议走（/v1/messages 走 Anthropic 形态，其余 OpenAI），类型名
+// 经 common.*ErrorType 同一份映射；code 非 nil 时覆盖 ErrorCode 推导
+// 的 client 侧 code（bespoke 子码，如 server_draining）。retryAfter
+// 控制 Retry-After: 1——并发溢出(429)是「本地过载」不是服务端故障，
 // 503 会让下游网关误判渠道故障并冷却；排空(503)则要求下游立即
 // 换路重试，Refused 连接与挂在半路的流都换成一个可行动的错误。
 type rejectBody struct {
 	status     int
 	message    string
-	errType    string
+	failure    *llm.Failure
 	code       any
 	retryAfter bool
 }
 
-// writeRejectError 统一管线前拒绝的错误响应——四个写方只差
-// status/type/code/Retry-After。
-func writeRejectError(writer http.ResponseWriter, body rejectBody) {
+// writeRejectError 统一管线前拒绝的错误响应：Anthropic 客户端拿到
+// 可解析的 {"type":"error",...} 信封而不是 OpenAI 方言。stage 统一
+// "pre_pipeline"，与 logs 行 error_stage 同词。
+func writeRejectError(writer http.ResponseWriter, request *http.Request, body rejectBody) {
+	anthropic := false
+	if route := v1RouteFor(request); route != nil {
+		_, anthropic = route.protocol.(anthropicProtocol)
+	}
+	errorType := common.OpenAIErrorType(body.failure)
+	if anthropic {
+		errorType = common.AnthropicErrorType(body.failure)
+	}
+	payload := common.BuildErrorPayload(body.message, body.failure, errorType, "", !anthropic)
+	if body.code != nil {
+		payload["code"] = body.code
+	}
+	payload["stage"] = "pre_pipeline"
+	envelope := map[string]any{"error": payload}
+	if anthropic {
+		envelope = map[string]any{"type": "error", "error": payload}
+	}
+	data, _ := json.Marshal(envelope)
 	writer.Header().Set("Content-Type", "application/json")
 	if body.retryAfter {
 		writer.Header().Set("Retry-After", "1")
 	}
 	writer.WriteHeader(body.status)
-	_ = json.NewEncoder(writer).Encode(map[string]any{
-		"error": map[string]any{"message": body.message, "type": body.errType, "code": body.code, "param": nil},
-	})
+	_, _ = writer.Write(data)
 }
 
 // drainTracker 计数在途并发槽并给排空等待方一个完成信号。
@@ -563,20 +622,11 @@ func (application *App) noteReject(reason obs.RejectReason, request *http.Reques
 		"client_ip", event.IP, "key_hash", event.KeyHash, "ua", event.UserAgent)
 }
 
-// rejectAPI 给管线前拒绝行推导入口协议：拒绝发生在路由分派之后、
-// createCompletion 之前，api 列只能按方法+路径映射，与 Router 里的
-// 注册表同一份对应关系；/v1/models 等元数据路由无协议身份，留空。
+// rejectAPI 给管线前拒绝行取入口协议的归因标签：与路由注册共用
+// v1Routes 表；/v1/models 等元数据路由无协议身份，留空。
 func rejectAPI(request *http.Request) string {
-	switch request.URL.Path {
-	case "/v1/messages":
-		return "anthropic"
-	case "/v1/chat/completions":
-		return "openai-chat"
-	case "/v1/responses":
-		if request.Method == http.MethodGet {
-			return "responses-ws"
-		}
-		return "openai-responses"
+	if route := v1RouteFor(request); route != nil {
+		return route.api
 	}
 	return ""
 }
@@ -616,19 +666,18 @@ func (application *App) concurrencyMiddleware(next http.Handler) http.Handler {
 		if reason != "" {
 			application.noteReject(reason, request, status)
 			if reason == obs.RejectDraining {
-				writeRejectError(writer, rejectBody{
+				writeRejectError(writer, request, rejectBody{
 					status:     http.StatusServiceUnavailable,
 					message:    "server is draining for restart; retry the request",
-					errType:    "server_error",
+					failure:    &llm.Failure{Code: "unavailable"},
 					code:       "server_draining",
 					retryAfter: true,
 				})
 			} else {
-				writeRejectError(writer, rejectBody{
+				writeRejectError(writer, request, rejectBody{
 					status:     http.StatusTooManyRequests,
 					message:    "server is busy, please try again later",
-					errType:    "rate_limit_error",
-					code:       "rate_limit_exceeded",
+					failure:    &llm.Failure{Code: "resource_exhausted", RateLimited: true},
 					retryAfter: true,
 				})
 			}
@@ -691,35 +740,23 @@ func (application *App) apiKeyMiddleware(next http.Handler) http.Handler {
 		if _, ok := application.authenticate(provided); !ok {
 			if provided == "" {
 				application.noteReject(obs.RejectMissingAPIKey, request, http.StatusUnauthorized)
-				writeRejectError(writer, rejectBody{
+				writeRejectError(writer, request, rejectBody{
 					status:  http.StatusUnauthorized,
 					message: "Missing API key",
-					errType: "unauthenticated",
+					failure: &llm.Failure{Code: "unauthenticated"},
 				})
 			} else {
 				application.noteReject(obs.RejectInvalidAPIKey, request, http.StatusUnauthorized)
-				writeRejectError(writer, rejectBody{
+				writeRejectError(writer, request, rejectBody{
 					status:  http.StatusUnauthorized,
 					message: "Invalid API key",
-					errType: "unauthenticated",
+					failure: &llm.Failure{Code: "unauthenticated"},
 				})
 			}
 			return
 		}
 		next.ServeHTTP(writer, request)
 	})
-}
-
-func (application *App) createResponses(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "openai-responses", responsesProtocol{})
-}
-
-func (application *App) createChatCompletions(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "openai-chat", chatProtocol{})
-}
-
-func (application *App) createMessages(writer http.ResponseWriter, request *http.Request) {
-	application.createCompletion(writer, request, "anthropic", anthropicProtocol{})
 }
 
 // createCompletion 是三个 HTTP 入口与 WS 轮次的共用管线。api 只是日志

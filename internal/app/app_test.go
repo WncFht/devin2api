@@ -331,7 +331,7 @@ func TestResponsesHandlerRejectsMissingAPIKey(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), `"type":"unauthenticated"`) {
+	if !strings.Contains(response.Body.String(), `"type":"authentication_error"`) {
 		t.Fatalf("body = %s", response.Body.String())
 	}
 }

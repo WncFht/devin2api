@@ -64,6 +64,35 @@ func TestMessagesHandlerReturnsJSON(t *testing.T) {
 	}
 }
 
+// TestMessagesHandlerRejectsWithAnthropicEnvelope 验证 /v1/messages 的
+// 管线前拒绝发 Anthropic {"type":"error","error":{...}} 信封——OpenAI
+// 方言的 {"error":{...}} 体 Claude Code 解析不出 error 字段。
+func TestMessagesHandlerRejectsWithAnthropicEnvelope(t *testing.T) {
+	fake := &fakeAdapter{}
+	application := New(fake, config.ServerConfig{Listen: ":0"}, nil)
+	application.SetAuthTokens(newTokenStore(t, "secret-key"), nil)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-test","messages":[{"role":"user","content":"hi"}],"max_tokens":256}`))
+	response := httptest.NewRecorder()
+	application.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", response.Code)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("body is not parseable JSON: %s", response.Body.String())
+	}
+	if parsed["type"] != "error" {
+		t.Fatalf("envelope type = %v, want error: %s", parsed["type"], response.Body.String())
+	}
+	errObj, ok := parsed["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error object: %s", response.Body.String())
+	}
+	if errObj["type"] != "authentication_error" {
+		t.Fatalf("error.type = %v, want authentication_error", errObj["type"])
+	}
+}
+
 // TestMessagesHandlerStreamError 验证 Anthropic 流式中途错误返回 event: error 且不发 message_stop。
 func TestMessagesHandlerStreamError(t *testing.T) {
 	text := &llm.AssistantMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}, StopReason: llm.StopReasonPending}
