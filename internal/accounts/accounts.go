@@ -91,6 +91,8 @@ func (rt *Runtime) Config() config.Config {
 
 // CommitConfig 提交一次成功加载的配置快照（boot 首推与 reload 提交
 // 共用）：fileMtime 现取，stale 判定据此成立。
+// cfg 按引用共享：内部 map/slice 随快照一起发布给所有 Config() 读者，
+// 提交后调用方不得再改其中内容——要改先深拷或重新加载。
 func (rt *Runtime) CommitConfig(cfg config.Config) {
 	rt.state.Store(&configState{cfg: cfg, loadedAt: time.Now(), fileMtime: fileMtime(rt.configPath)})
 }
