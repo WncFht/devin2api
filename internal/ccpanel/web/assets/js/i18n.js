@@ -127,8 +127,10 @@
       // 回退到中文
       text = (window.I18N_LOCALES['zh-CN'] || {})[key];
       if (text === undefined) {
-        // 生产环境不打印警告，避免日志污染
-        if (typeof console !== 'undefined' && console.warn) {
+        // 生产环境不打印警告，避免日志污染；仅本机开发时提示缺键
+        const isDevHost = typeof location !== 'undefined' &&
+          (location.hostname === 'localhost' || location.hostname === '127.0.0.1');
+        if (isDevHost && typeof console !== 'undefined' && console.warn) {
           console.warn('[i18n] Missing key:', key);
         }
         return key;

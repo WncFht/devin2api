@@ -48,14 +48,14 @@
   flex: 1;
   min-width: 10px;
   border-radius: 4px;
-  background: var(--color-border, #d1d5db);
+  background: var(--color-border);
   transition: background 0.3s;
 }
 
-.accounts-pulse-seg--ok { background: var(--success-500, #22c55e); }
-.accounts-pulse-seg--warn { background: var(--warning-500, #f59e0b); }
-.accounts-pulse-seg--bad { background: var(--error-500, #ef4444); }
-.accounts-pulse-seg--idle { background: var(--color-border, #d1d5db); }
+.accounts-pulse-seg--ok { background: var(--success-500); }
+.accounts-pulse-seg--warn { background: var(--warning-500); }
+.accounts-pulse-seg--bad { background: var(--error-500); }
+.accounts-pulse-seg--idle { background: var(--color-border); }
 
 .accounts-pulse-empty {
   color: var(--color-text-secondary);
@@ -113,23 +113,23 @@
 }
 
 .acct-pill--ok {
-  background: color-mix(in srgb, var(--success-500, #22c55e) 14%, transparent);
-  color: var(--success-700, #15803d);
+  background: color-mix(in srgb, var(--success-500) 14%, transparent);
+  color: var(--success-700);
 }
 
 .acct-pill--warn {
-  background: color-mix(in srgb, var(--warning-500, #f59e0b) 16%, transparent);
-  color: var(--warning-700, #b45309);
+  background: color-mix(in srgb, var(--warning-500) 16%, transparent);
+  color: var(--warning-700);
 }
 
 .acct-pill--bad {
-  background: color-mix(in srgb, var(--error-500, #ef4444) 14%, transparent);
-  color: var(--error-700, #b91c1c);
+  background: color-mix(in srgb, var(--error-500) 14%, transparent);
+  color: var(--error-700);
 }
 
 .acct-failure {
   font-size: 12px;
-  color: var(--error-600, #dc2626);
+  color: var(--error-600);
   margin: 4px 0 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -202,7 +202,7 @@
 .acct-quota-track {
   height: 8px;
   border-radius: 4px;
-  background: var(--color-border, #e5e7eb);
+  background: var(--color-border);
   overflow: hidden;
 }
 
@@ -236,12 +236,12 @@
 .acct-cell {
   height: 22px;
   border-radius: 3px;
-  background: var(--color-border, #e5e7eb);
+  background: var(--color-border);
 }
 
-.acct-cell--ok { background: var(--success-500, #22c55e); }
-.acct-cell--err { background: var(--error-500, #ef4444); }
-.acct-cell--rl { background: var(--warning-400, #fbbf24); }
+.acct-cell--ok { background: var(--success-500); }
+.acct-cell--err { background: var(--error-500); }
+.acct-cell--rl { background: var(--warning-400); }
 
 .acct-strip-foot {
   margin-top: 8px;

@@ -2394,16 +2394,20 @@ window.WebAuth = window.WebAuth || {
     }
   }
 
+  // 重绑同组按钮时摘除旧 handler 的登记表（元素级，随 DOM 回收）
+  const timeRangeClickHandlers = new WeakMap();
+
   /**
    * 初始化时间范围按钮选择器
    * @param {function(string)} onRangeChange - 范围变更回调，参数为 range 值
+   * @param {ParentNode} [scope] - 限定按钮查找范围；缺省为整文档（旧行为）。
+   *   页面有多个 pill 组时必须传容器，否则后绑定者劫持全部组。
    */
-  function initTimeRangeSelector(onRangeChange) {
-    const buttons = document.querySelectorAll('.time-range-btn');
+  function initTimeRangeSelector(onRangeChange, scope = document) {
+    const buttons = scope.querySelectorAll('.time-range-btn');
     buttons.forEach(btn => {
-      if (typeof btn.__timeRangeClickHandler === 'function') {
-        btn.removeEventListener('click', btn.__timeRangeClickHandler);
-      }
+      const prev = timeRangeClickHandlers.get(btn);
+      if (prev) btn.removeEventListener('click', prev);
 
       const handleClick = function () {
         const result = onRangeChange(this.dataset.range, this);
@@ -2413,7 +2417,7 @@ window.WebAuth = window.WebAuth || {
         this.classList.add('active');
       };
 
-      btn.__timeRangeClickHandler = handleClick;
+      timeRangeClickHandlers.set(btn, handleClick);
       btn.addEventListener('click', handleClick);
     });
   }
@@ -2432,6 +2436,7 @@ window.WebAuth = window.WebAuth || {
     };
 
     const bind = () => {
+      const scope = document.getElementById(containerId) || document;
       initTimeRangeSelector((range, button) => {
         if (range === 'custom' && typeof window.openCustomDateRangePicker === 'function') {
           window.openCustomDateRangePicker({
@@ -2440,7 +2445,7 @@ window.WebAuth = window.WebAuth || {
             onConfirm: (confirmedRange) => {
               currentValue = 'custom';
               currentCustomRange = confirmedRange;
-              document.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+              scope.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
               if (button) button.classList.add('active');
               if (button && confirmedRange.label) button.title = confirmedRange.label;
               if (typeof onChange === 'function') onChange('custom', confirmedRange);
@@ -2451,7 +2456,7 @@ window.WebAuth = window.WebAuth || {
 
         currentValue = range;
         if (typeof onChange === 'function') onChange(range);
-      });
+      }, scope);
     };
 
     render();
