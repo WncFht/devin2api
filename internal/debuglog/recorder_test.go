@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1243,6 +1244,163 @@ func TestDetachedMarkerSurvivesComplete(t *testing.T) {
 	}
 	if strings.Contains(string(data), `"event":"frame"`) {
 		t.Fatalf("04 = %q, non-marker row must not survive closed", data)
+	}
+}
+
+// TestFlushSplitsBatchAtDirBoundary 验证追平冲刷按目录界分包：批内目录
+// 体积合计越过 writeBatchBoundBytes 时拆成多个事务提交——每个目录的
+// files/chunks/refs 完整落在同一事务（目录是读者一致性的最小单位，
+// 跨事务拆开会被读成撕裂半成品）。缩小界值让三目录批确定性分包，
+// debugBatchWrite 换壳观察各次提交的目录归属。
+func TestFlushSplitsBatchAtDirBoundary(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	oldBound, oldWrite := writeBatchBoundBytes, debugBatchWrite
+	writeBatchBoundBytes = 11 << 10
+	defer func() { writeBatchBoundBytes, debugBatchWrite = oldBound, oldWrite }()
+
+	dirs := []string{"20990101-000201", "20990101-000202", "20990101-000203"}
+	recorders := make([]*Recorder, len(dirs))
+	for i, dir := range dirs {
+		recorder := newBareRecorder(manager, dir)
+		manager.activeDirs[dir] = recorder
+		recorder.stageFile("01-http-request.json", stagedFile{stored: make([]byte, 5000), usize: 5000})
+		recorders[i] = recorder
+	}
+
+	var batchDirs []map[string]bool
+	debugBatchWrite = func(s *store.Store, ctx context.Context, b store.DebugBatch) error {
+		seen := map[string]bool{}
+		for _, f := range b.Files {
+			seen[f.Dir] = true
+		}
+		for _, c := range b.Chunks {
+			seen[c.Dir] = true
+		}
+		for _, r := range b.Refs {
+			seen[r.Dir] = true
+		}
+		for _, d := range b.StripDirs {
+			seen[d] = true
+		}
+		for _, l := range b.LogRows {
+			if l != nil {
+				seen[l.Dir] = true
+			}
+		}
+		batchDirs = append(batchDirs, seen)
+		return s.WriteDebugBatch(ctx, b)
+	}
+	manager.flushAll()
+
+	// 5000B×3、界 11264B：{d1,d2} 一事务、{d3} 一事务——拆分前的单事务
+	// 口径只有一次提交。
+	if len(batchDirs) != 2 {
+		t.Fatalf("WriteDebugBatch calls = %d, want 2（按目录界分包）", len(batchDirs))
+	}
+	landed := map[string]int{}
+	for _, seen := range batchDirs {
+		for dir := range seen {
+			landed[dir]++
+		}
+	}
+	for i, dir := range dirs {
+		if landed[dir] != 1 {
+			t.Fatalf("dir %s 落在 %d 个事务里（目录不可撕裂）", dir, landed[dir])
+		}
+		if _, _, ok, err := st.DebugFile(context.Background(), dir, "01-http-request.json", 0); err != nil || !ok {
+			t.Fatalf("dir %s file not committed: ok=%v err=%v", dir, ok, err)
+		}
+		if _, dirty := manager.dirtyBufs[recorders[i]]; dirty {
+			t.Fatalf("dir %s still dirty after commit", dir)
+		}
+	}
+}
+
+// TestFlushPartialCommitRetainsRemainder 钉死分包失败语义：首个分组事务
+// 落库、第二组失败时，已提交前缀的目录照常释放（暂存归还、行可读），
+// 失败组的暂存与收尾原样留下随下轮重试——drained 照常放行、清理保护
+// 不解、幂等重放不产生重复行。注入第二组失败确定性复放该形态。
+func TestFlushPartialCommitRetainsRemainder(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	oldBound, oldWrite := writeBatchBoundBytes, debugBatchWrite
+	writeBatchBoundBytes = 8 << 10
+	defer func() { writeBatchBoundBytes, debugBatchWrite = oldBound, oldWrite }()
+
+	r1 := newBareRecorder(manager, "20990101-000301")
+	r2 := newBareRecorder(manager, "20990101-000302")
+	manager.activeDirs[r1.dir] = r1
+	manager.activeDirs[r2.dir] = r2
+	r1.stageFile("01-http-request.json", stagedFile{stored: make([]byte, 5000), usize: 5000})
+	r1.appendJSONL("04-devin-response.jsonl", []byte(`{"seq":1}`))
+	r2.stageFile("01-http-request.json", stagedFile{stored: make([]byte, 5000), usize: 5000})
+	// r2 挂一份完成收尾——insertQ 占位 + lastFlush 拨新按住
+	// queueCompletion 的自动冲刷，先攒出「收尾在列未提交」的中间态。
+	manager.insertQ <- insertOp{recorder: r2, apply: func() {}}
+	manager.lastFlush = time.Now()
+	manager.queueCompletion(r2, Completion{StatusCode: 200, Result: "completed"})
+
+	calls := 0
+	debugBatchWrite = func(s *store.Store, ctx context.Context, b store.DebugBatch) error {
+		calls++
+		if calls == 2 {
+			return errors.New("injected batch failure")
+		}
+		return s.WriteDebugBatch(ctx, b)
+	}
+	manager.flushAll()
+	// 按 dir 名序 d1 在前：d1(~5KB) 一事务、d2(~6KB 文件+meta+收尾)
+	// 一事务，第二组被注入失败。
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if _, _, ok, err := st.DebugFile(context.Background(), r1.dir, "01-http-request.json", 0); err != nil || !ok {
+		t.Fatalf("committed prefix dir lost: ok=%v err=%v", ok, err)
+	}
+	if _, dirty := manager.dirtyBufs[r1]; dirty || r1.stagedBytes != 0 {
+		t.Fatalf("committed dir still held: dirty=%v stagedBytes=%d", dirty, r1.stagedBytes)
+	}
+	if _, _, ok, err := st.DebugFile(context.Background(), r2.dir, "01-http-request.json", 0); err != nil || ok {
+		t.Fatalf("failed dir prematurely visible: ok=%v err=%v", ok, err)
+	}
+	if _, dirty := manager.dirtyBufs[r2]; !dirty {
+		t.Fatal("failed dir dropped from dirtyBufs")
+	}
+	if r2.stagedBytes == 0 {
+		t.Fatal("failed dir stagedBytes released despite failed tx")
+	}
+	if len(manager.pendingCompletions) != 1 {
+		t.Fatalf("pendingCompletions = %d, want 1（失败组收尾留下重试）", len(manager.pendingCompletions))
+	}
+	select {
+	case <-r2.drained:
+	default:
+		t.Fatal("failed completion drained not released")
+	}
+	if got := manager.ioErrors.Load(); got != 1 {
+		t.Fatalf("ioErrors = %d, want 1", got)
+	}
+
+	// 恢复后重试：d2 暂存与收尾补齐落库；d1 已释放不再重放——04 chunk
+	// 若被重复追加会是两行，这里断言仍是一行（幂等无前缀重复）。
+	debugBatchWrite = oldWrite
+	manager.flushAll()
+	data, _, ok, err := st.DebugFile(context.Background(), r1.dir, "04-devin-response.jsonl", 0)
+	if err != nil || !ok || strings.Count(strings.TrimSpace(string(data)), "\n") != 0 {
+		t.Fatalf("d1 04 lines after retry = %q ok=%v err=%v, want 单行不重复", data, ok, err)
+	}
+	if _, _, ok, err := st.DebugFile(context.Background(), r2.dir, "01-http-request.json", 0); err != nil || !ok {
+		t.Fatalf("retried dir not committed: ok=%v err=%v", ok, err)
+	}
+	if len(manager.pendingCompletions) != 0 {
+		t.Fatalf("pendingCompletions = %d after retry, want 0", len(manager.pendingCompletions))
+	}
+	if _, ok := manager.activeDirs[r2.dir]; ok {
+		t.Fatal("retried dir still active after committed completion")
+	}
+	if rows, _, err := st.SearchLogs(context.Background(), store.LogQuery{}); err != nil || len(rows) != 1 {
+		t.Fatalf("log rows = %v err=%v, want 1（d2 收尾行）", rows, err)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -523,6 +524,11 @@ type Recorder struct {
 	// 收尾项）实际持有的字节量——写事务失败重试期间字节仍被持有，
 	// flushAll 提交（或整体丢弃）后归零并从 inflightBytes 归还。
 	stagedBytes int64
+	// persistedBytes 是本目录已落库存量字节的估计：每次批量事务提交后累加
+	// 当时的 stagedBytes——errors_only 收尾的 strip DELETE 触碰的就是这
+	// 部分页，flushAll 分包时按它把 strip 计入事务体积。估算方向偏高：
+	// 覆写差与压缩差都计成新增，不回扣。
+	persistedBytes int64
 	// errorWritten 保证 error.json 只保留首个错误（最先失败点最有诊断价值）。
 	errorWritten bool
 	// ioErrSeen 按类别去重本目录已上报的写失败，见 noteIOErr。
@@ -1538,14 +1544,53 @@ func (recorder *Recorder) pendingBatch() store.DebugBatch {
 	return batch
 }
 
+// flushUnit 是冲刷分包的原子单位：一个目录当批的全部暂存行（files/
+// chunks/blobs/refs）连同它的收尾（strip/logRow）必须同一事务落库——
+// 目录是读者一致性的最小边界，跨事务拆开会被面板读成撕裂的半成品；
+// CAS 的 manifest+blob+ref 无孤儿窗口同样靠同批同事务。
+type flushUnit struct {
+	recorder *Recorder
+	batch    store.DebugBatch
+	// bytes 是本单元事务体积的估算口径：暂存面实际持有量（stagedBytes，
+	// 与 inflight 账同源——文件行计库存编码后尺寸、chunk 缓冲计原文，
+	// 偏向高估）；带 strip 时另加 persistedBytes——DELETE 触碰的是目录
+	// 已落库存量的页，不计进去会让 errors_only 的大目录剥载绕过下界。
+	bytes int64
+	// rows 是本单元落库行数（files+chunks+blobs+refs+stripDirs+logRows），
+	// 语句数本身也是事务占用成本，作字节闸的副闸。
+	rows int
+	// item 是本目录的待落收尾；nil 表示该目录只有暂存 payload。
+	item *completionItem
+}
+
+// writeBatchBoundBytes 是单个落库事务的体积上界：整批一个 tx 在写连接
+// 停滞后的追平冲刷里能造出数千行、数百 MB 的巨型事务，独占唯一写连接
+// 数十秒——再造它跟随的停滞类。32MB 对 5GB 级库是亚秒级占用；按目录
+// 为原子单位打包，单目录超界时独占一事务（目录不可再分的残余）。
+// var 形态让测试能缩小界值、确定性地复放分包。
+var writeBatchBoundBytes int64 = 32 << 20
+
+// writeBatchBoundRows 是单事务落库行数副闸：字节闸对 KB 级 chunk 行
+// 有效，但 ref 类小行（~40B）能在字节界内堆出数十万条语句——按
+// 「32MB 全装 2KB 行」取界，正常混合负载远碰不到。
+var writeBatchBoundRows = 16384
+
+// debugBatchWrite 是 flushAll 提交一个分组事务的调用点：方法表达式
+// 形式的包级变量——测试替换它以观察分组边界（计数/注入失败），
+// 生产值即 (*store.Store).WriteDebugBatch 本体。
+var debugBatchWrite = (*store.Store).WriteDebugBatch
+
 // flushAll 把全部脏目录的暂存文件与 JSONL 缓冲、待收尾的剥离与日志行
-// 合成一个跨目录事务提交；仅写 worker（及 fallbackMu 兜底路径）调用。
-// 事务原子：失败时缓冲整体保留、目录留在 dirtyBufs、收尾留在
-// pendingCompletions 下轮重试——各项的 drained 照常放行，等待方不为
-// 病态 DB 陪葬；因此 logRow/strip 的失败语义从「当场丢弃」变成
-// 「随批次重试」，覆盖力只增不减。目录的清理保护（releaseDir）只在
-// 收尾随事务落库（或无内容可提交）后解除：未落库的暂存目录失去活跃
-// 保护会被容量淘汰删掉，造成丢数据窗口。
+// 按目录界打包成若干事务依次提交；仅写 worker（及 fallbackMu 兜底
+// 路径）调用。分包以目录为原子单位，逐组累加体积至 writeBatchBoundBytes
+// （或行数至 writeBatchBoundRows）即切新事务——写连接停滞后的追平冲刷
+// 不再合并成单个巨型事务独占连接。组级原子：已提交组的目录释放暂存、
+// 收尾解除清理保护并放行 drained；首个失败组与其后未尝试组原样留下
+// 随下轮重试——各项的 drained 照常放行，等待方不为病态 DB 陪葬；因此
+// logRow/strip 的失败语义从「当场丢弃」变成「随批次重试」，覆盖力只
+// 增不减。目录的清理保护（releaseDir）只在其收尾随事务落库（或无
+// 内容可提交）后解除：未落库的暂存目录失去活跃保护会被容量淘汰删掉，
+// 造成丢数据窗口。
 func (manager *Manager) flushAll() {
 	if len(manager.dirtyBufs) == 0 && len(manager.pendingCompletions) == 0 {
 		return
@@ -1570,89 +1615,138 @@ func (manager *Manager) flushAll() {
 		manager.pendingCompletionCount.Store(0)
 		return
 	}
-	var batch store.DebugBatch
-	batch.Encoder = manager.writerEncoder
+	// 汇出各目录的冲刷单元：收尾（strip/logRow）挂进本目录的单元——
+	// strip 与同批暂存行必须同事务（WriteDebugBatch 内删除排在插入
+	// 之后），logRow 与目录收尾同命运才不算「行落了 payload 没影」。
+	itemsByRecorder := make(map[*Recorder]*completionItem, len(manager.pendingCompletions))
+	for index := range manager.pendingCompletions {
+		item := &manager.pendingCompletions[index]
+		itemsByRecorder[item.recorder] = item
+	}
+	units := make([]*flushUnit, 0, len(manager.dirtyBufs)+len(itemsByRecorder))
 	for recorder := range manager.dirtyBufs {
-		sub := recorder.pendingBatch()
-		batch.Files = append(batch.Files, sub.Files...)
-		batch.Chunks = append(batch.Chunks, sub.Chunks...)
-		batch.Blobs = append(batch.Blobs, sub.Blobs...)
-		batch.Refs = append(batch.Refs, sub.Refs...)
+		units = append(units, &flushUnit{
+			recorder: recorder,
+			batch:    recorder.pendingBatch(),
+			item:     itemsByRecorder[recorder],
+		})
+		delete(itemsByRecorder, recorder)
 	}
-	// 同窗口多目录引到同一块时批内去重（跨目录共享恰是 CAS 的主场景，
-	// 重复 hash 常现）：OR IGNORE 本就兜住正确性，这里只为写连接省掉
-	// 重复的 PK 探测与无用行锁。
-	if len(batch.Blobs) > 1 {
-		seen := make(map[string]struct{}, len(batch.Blobs))
-		kept := batch.Blobs[:0]
-		for _, b := range batch.Blobs {
-			if _, dup := seen[string(b.Hash)]; dup {
-				continue
+	// 收尾在列而目录不在脏集的残余：按不变量不可达（queueCompletion
+	// 恒先标脏），仍让 strip/logRow 随单元落库而非静默滞留。
+	for _, item := range itemsByRecorder {
+		units = append(units, &flushUnit{recorder: item.recorder, item: item})
+	}
+	for _, unit := range units {
+		if unit.item != nil {
+			if unit.item.strip {
+				unit.batch.StripDirs = append(unit.batch.StripDirs, unit.recorder.dir)
+				unit.bytes += unit.recorder.persistedBytes
 			}
-			seen[string(b.Hash)] = struct{}{}
-			kept = append(kept, b)
+			if unit.item.logRow != nil {
+				unit.batch.LogRows = append(unit.batch.LogRows, unit.item.logRow)
+			}
 		}
-		batch.Blobs = kept
+		unit.bytes += unit.recorder.stagedBytes
+		unit.rows = len(unit.batch.Files) + len(unit.batch.Chunks) + len(unit.batch.Blobs) +
+			len(unit.batch.Refs) + len(unit.batch.StripDirs) + len(unit.batch.LogRows)
 	}
-	for _, item := range manager.pendingCompletions {
-		if item.strip {
-			batch.StripDirs = append(batch.StripDirs, item.recorder.dir)
+	// 按目录名字典序打包：名内嵌时间戳即到达序，最旧滞留先落库。
+	sort.Slice(units, func(i, j int) bool { return units[i].recorder.dir < units[j].recorder.dir })
+	groups := [][]*flushUnit{{}}
+	var groupBytes int64
+	var groupRows int
+	for _, unit := range units {
+		if len(groups[len(groups)-1]) > 0 &&
+			(groupBytes+unit.bytes > writeBatchBoundBytes || groupRows+unit.rows > writeBatchBoundRows) {
+			groups = append(groups, nil)
+			groupBytes, groupRows = 0, 0
 		}
-		if item.logRow != nil {
-			batch.LogRows = append(batch.LogRows, item.logRow)
-		}
+		groups[len(groups)-1] = append(groups[len(groups)-1], unit)
+		groupBytes += unit.bytes
+		groupRows += unit.rows
 	}
 	manager.lastFlush = time.Now()
-	if len(batch.Files) == 0 && len(batch.Chunks) == 0 && len(batch.Blobs) == 0 && len(batch.Refs) == 0 && len(batch.StripDirs) == 0 && len(batch.LogRows) == 0 {
-		for recorder := range manager.dirtyBufs {
-			manager.releaseStaged(recorder)
-			delete(manager.dirtyBufs, recorder)
-		}
-		for _, item := range manager.pendingCompletions {
-			manager.releaseDir(item.recorder)
-			if !item.signaled {
-				close(item.recorder.drained)
-			}
-		}
-		manager.pendingCompletions = nil
-		manager.pendingCompletionCount.Store(0)
-		return
-	}
 	ctx, cancel := storeCtx()
-	err := st.WriteDebugBatch(ctx, batch)
-	cancel()
-	if err != nil {
-		for recorder := range manager.dirtyBufs {
-			recorder.noteIOErr("batch", err)
+	defer cancel()
+	committed := make(map[*completionItem]struct{}, len(manager.pendingCompletions))
+	failGroup := len(groups)
+	var failErr error
+	for groupIndex, group := range groups {
+		var batch store.DebugBatch
+		batch.Encoder = manager.writerEncoder
+		for _, unit := range group {
+			batch.Files = append(batch.Files, unit.batch.Files...)
+			batch.Chunks = append(batch.Chunks, unit.batch.Chunks...)
+			batch.Blobs = append(batch.Blobs, unit.batch.Blobs...)
+			batch.Refs = append(batch.Refs, unit.batch.Refs...)
+			batch.StripDirs = append(batch.StripDirs, unit.batch.StripDirs...)
+			batch.LogRows = append(batch.LogRows, unit.batch.LogRows...)
 		}
-		for index := range manager.pendingCompletions {
-			item := &manager.pendingCompletions[index]
-			if !item.signaled {
-				close(item.recorder.drained)
-				item.signaled = true
+		// 同组内多目录引到同一块时批内去重（跨目录共享恰是 CAS 的主
+		// 场景，重复 hash 常现）：OR IGNORE 本就兜住正确性——跨组重复
+		// 只是多一次 PK 探测——这里为写连接省掉重复的探测与无用行锁。
+		if len(batch.Blobs) > 1 {
+			seen := make(map[string]struct{}, len(batch.Blobs))
+			kept := batch.Blobs[:0]
+			for _, b := range batch.Blobs {
+				if _, dup := seen[string(b.Hash)]; dup {
+					continue
+				}
+				seen[string(b.Hash)] = struct{}{}
+				kept = append(kept, b)
+			}
+			batch.Blobs = kept
+		}
+		var err error
+		if len(batch.Files)+len(batch.Chunks)+len(batch.Blobs)+len(batch.Refs)+len(batch.StripDirs)+len(batch.LogRows) > 0 {
+			err = debugBatchWrite(st, ctx, batch)
+		}
+		if err != nil {
+			failGroup, failErr = groupIndex, err
+			break
+		}
+		for _, unit := range group {
+			recorder := unit.recorder
+			// 成功后放行同类告警：ioErrSeen 的一次性去重不该把恢复后的
+			// 再次故障永久静默。
+			delete(recorder.ioErrSeen, "batch")
+			recorder.persistedBytes += recorder.stagedBytes
+			manager.releaseStaged(recorder)
+			clear(recorder.stagedFiles)
+			for _, buf := range recorder.chunkBufs {
+				buf.Reset()
+			}
+			delete(manager.dirtyBufs, recorder)
+			if unit.item != nil {
+				committed[unit.item] = struct{}{}
+				manager.releaseDir(unit.item.recorder)
+				if !unit.item.signaled {
+					close(unit.item.recorder.drained)
+				}
 			}
 		}
-		return
 	}
-	for recorder := range manager.dirtyBufs {
-		// 成功后放行同类告警：ioErrSeen 的一次性去重不该把恢复后的
-		// 再次故障永久静默。
-		delete(recorder.ioErrSeen, "batch")
-		manager.releaseStaged(recorder)
-		clear(recorder.stagedFiles)
-		for _, buf := range recorder.chunkBufs {
-			buf.Reset()
-		}
-		delete(manager.dirtyBufs, recorder)
-	}
-	for _, item := range manager.pendingCompletions {
-		manager.releaseDir(item.recorder)
-		if !item.signaled {
-			close(item.recorder.drained)
+	// 失败组与其后未尝试组：暂存与收尾原样留下随下轮重试——字节确实
+	// 仍被持有故账面不归还；drained 照常放行，等待方不为病态 DB 陪葬。
+	for _, group := range groups[failGroup:] {
+		for _, unit := range group {
+			unit.recorder.noteIOErr("batch", failErr)
+			if unit.item != nil && !unit.item.signaled {
+				close(unit.item.recorder.drained)
+				unit.item.signaled = true
+			}
 		}
 	}
-	manager.pendingCompletions = nil
-	manager.pendingCompletionCount.Store(0)
+	rest := make([]completionItem, 0, len(manager.pendingCompletions)-len(committed))
+	for index := range manager.pendingCompletions {
+		item := &manager.pendingCompletions[index]
+		if _, ok := committed[item]; !ok {
+			rest = append(rest, *item)
+		}
+	}
+	manager.pendingCompletions = rest
+	manager.pendingCompletionCount.Store(int64(len(rest)))
 }
 
 // noteIOErr 把本目录一次写失败计入 manager.ioErrors 并告警；同一类别
