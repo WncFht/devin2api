@@ -30,6 +30,7 @@ import (
 	"github.com/WncFht/devin2api/internal/config"
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
+	"github.com/WncFht/devin2api/internal/selfupdate"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -205,6 +206,13 @@ func main() {
 			os.Exit(1)
 		}
 	})
+	// 自更新的 boot 收尾：上一次面板自更新若在途，本实例按自身版本结算
+	// update:status（==目标版记 done 让编排进程退场，==源版记 interrupted
+	// failed）。仅限托管实例——编排进程自身版本就是 to，跑这里会在换名
+	// 前误报 done；deploy 交接进程同理跳过。
+	role.duty("finalize update status", func() {
+		selfupdate.BootFinalize(context.Background(), dbStore, resolved)
+	})
 
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
@@ -341,6 +349,14 @@ func main() {
 		os.Exit(1)
 	}
 	ccPanel.SetVersion(resolved)
+	// 自更新服务端点（/admin/update*）：Service 只持有路径/版本/库句柄，
+	// 编排进程拉起、换名与重启推进全在 internal/selfupdate 内闭环。
+	updateSvc, err := selfupdate.New(dbStore, resolved, absoluteConfigPath, absoluteStateDir)
+	if err != nil {
+		slog.Error("init self-update service failed", "error", err)
+		os.Exit(1)
+	}
+	ccPanel.SetUpdateOps(updateSvc)
 	// 进程指标历史环：30s 一拍采进内存环，/admin/runtime-metrics/history
 	// 的数据源。纯进程内读取——不打上游、不写库，与配额采样不同，
 	// 交接进程同样起跑（重叠窗内它自己的历史也是有效观测）。
@@ -441,6 +457,13 @@ func main() {
 		stop()
 	}()
 	defer stop()
+	// 自更新编排进程：DEVIN2API_SELF_UPDATE 标记的实例在完成服务装配后
+	// 接管更新推进（换名→重启托管 unit→等新实例报到→自我 SIGTERM）。
+	// 不走 role.spawn——编排身份本身是 handoff，role 门禁会把它跳过；
+	// 普通实例无此 env，EnvDeps 立即判否。
+	if deps, ok := selfupdate.EnvDeps(dbStore); ok {
+		go deps.Drive()
+	}
 	// 库级周期养护（logs 行按龄删除、quota_samples 行数界、freelist
 	// 回收）：养护对象是库不是调试目录，由这里驱动而非 debuglog
 	// cleaner——后者随 debug.enabled/root 关停，保洁不该跟着停。

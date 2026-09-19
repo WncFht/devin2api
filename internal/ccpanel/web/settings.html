@@ -27,12 +27,45 @@
   <script defer src="/web/assets/js/ui-codeview.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/settings.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/update.js?v=__VERSION__"></script>
 </head>
 <body>
   <div class="app-container">
     <main id="main" class="main-content">
       <div class="content-area">
         <h1 class="visually-hidden" data-i18n="nav.settings">设置</h1>
+
+        <!-- 版本更新：面板内零停机自更新（下载校验 release → 编排进程 REUSEPORT 交接重启） -->
+        <section class="card mb-6" id="update-card">
+          <div class="settings-card-header">
+            <h3 class="section-title" data-i18n="settings.update.title">版本更新</h3>
+            <span id="update-phase-badge" class="runtime-transcript-status" hidden></span>
+          </div>
+          <p class="runtime-metrics-section-description" data-i18n="settings.update.description">
+            下载并校验 GitHub release 后，由独立编排进程做原子换名并经 REUSEPORT 零停机重启托管实例；进度跨重启持久，更新中可安全关闭页面。
+          </p>
+          <div id="update-error" class="custom-rules-error" role="alert" hidden></div>
+          <div class="quota-kv-grid">
+            <div class="quota-kv">
+              <span class="quota-kv-k" data-i18n="settings.update.current">当前版本</span>
+              <span class="quota-kv-v" id="update-current">—</span>
+            </div>
+            <div class="quota-kv">
+              <span class="quota-kv-k" data-i18n="settings.update.latest">最新版本</span>
+              <span class="quota-kv-v" id="update-latest">—</span>
+            </div>
+            <div class="quota-kv" id="update-progress-cell" hidden>
+              <span class="quota-kv-k" data-i18n="settings.update.progress">更新进度</span>
+              <span class="quota-kv-v" id="update-progress">—</span>
+            </div>
+          </div>
+          <div class="settings-save-actions">
+            <button id="update-check-btn" type="button" class="btn btn-secondary" data-i18n="settings.update.check">检查更新</button>
+            <button id="update-rollback-btn" type="button" class="btn btn-secondary" data-i18n="settings.update.rollback" hidden>回滚到上一版本</button>
+            <button id="update-start-btn" type="button" class="btn btn-primary" data-i18n="settings.update.start">立即更新</button>
+          </div>
+        </section>
+
         <section id="settings-group-nav-section" class="mt-2 mb-2 settings-group-nav-section" hidden>
           <div class="time-range-container settings-group-nav-container">
             <div id="settings-group-nav" class="time-range-selector seg settings-group-nav">

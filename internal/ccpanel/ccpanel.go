@@ -22,6 +22,7 @@ import (
 	"github.com/WncFht/devin2api/internal/debuglog"
 	"github.com/WncFht/devin2api/internal/modelreg"
 	"github.com/WncFht/devin2api/internal/obs"
+	"github.com/WncFht/devin2api/internal/selfupdate"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -119,6 +120,8 @@ type Handler struct {
 	// 哈希）。令牌被删后下一次探活自动重铸。
 	probeTokenMu sync.Mutex
 	probeToken   string
+	// updateOps 是自更新服务（/admin/update*）；nil 时该族端点 501。
+	updateOps *selfupdate.Service
 
 	versionMu sync.RWMutex
 	version   string
@@ -457,8 +460,14 @@ func (h *Handler) routes() []panelRoute {
 			"模型连通性探针（结果记 log_source=manual_test 的日志行）"},
 		{http.MethodPost, "/admin/model-chat", A(h.adminModelChat), "/admin/model-chat",
 			"面板内对话式模型测试（同 manual_test 归因）"},
-		{http.MethodPost, "/admin/update/check", A(h.adminUpdateCheck), "/admin/update/check",
-			"检查上游 release 是否有新版本"},
+		{http.MethodPost, "/admin/update/check", A(h.adminUpdateCheck), "/admin/update/check?force=1",
+			"解析 GitHub 最新 release tag 对比当前版本（20min 进程内缓存，?force=1 绕过）"},
+		{http.MethodGet, "/admin/update/status", A(h.adminUpdateStatus), "/admin/update/status",
+			"自更新状态：supported/unit/current/rollback_available + 在途记录 {phase,from,to,error,since,pid}（重启窗口内旧/编排/新实例应答同一 db 记录）"},
+		{http.MethodPost, "/admin/update", A(h.adminUpdateStart), "/admin/update",
+			"零停机自更新：body {\"tag\"} 可省取最新 release；202 后台推进（下载→sha256 校验→编排进程换名+接管+重启），轮询 /admin/update/status；在途 409、非托管/Windows 501"},
+		{http.MethodPost, "/admin/update/rollback", A(h.adminUpdateRollback), "/admin/update/rollback",
+			"用 <bindir>/devin-2api.backup 做对称换回（免下载，.backup 换成被替换版）；缺席 404、在途 409"},
 		{http.MethodGet, "/admin/api", A(h.adminAPIIndex), "", ""},
 	}
 }
