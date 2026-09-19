@@ -20,7 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Store 包装读写两个 *sql.DB，对外只暴露领域方法。
@@ -103,6 +104,20 @@ func sqlLabel(query string) string {
 		query = query[:64]
 	}
 	return query
+}
+
+// IsBusy 报告 err 是否为 SQLite 的「数据库文件被锁」失败（原始
+// SQLITE_BUSY）。busy_timeout 只兜住连接级等待耐心：跨进程写者（reuseport
+// 交接期持锁排空的前任进程、侧开 store 的工具）持锁超 30s 时驱动原样抛
+// *sqlite.Error；tx.Commit 经 driver.Tx 接口拿不到 ctx（驱动内跑
+// context.Background()），其唯一上界正是 busy_timeout，故请求级 5s ctx
+// 之下 BUSY 仍可达——生产 9-19 实证 +5~36s 的「database is locked」簇。
+// 驱动建连即开 extended result codes，Code() 低 8 位才是主码——
+// BUSY_SNAPSHOT/RECOVERY/TIMEOUT 同属「此刻拿不到文件锁」，对整调用
+// 重试（新事务）均可救，故按主码判。
+func IsBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 // maintDeleteChunkRows 是保留期删除单片的行数上界：logs 行连带 ~10

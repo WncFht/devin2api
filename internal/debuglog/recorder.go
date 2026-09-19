@@ -1121,12 +1121,11 @@ func (manager *Manager) Start(meta RequestMeta) *Recorder {
 // reqStoreOpTimeout 而非 storeOpTimeout：占位失败本就等价「本请求无日志」，
 // 先停满分钟级上限再放行只是把代价放大。
 //
-// deadline 失败是唯一写连接被瞬时占住的签名（BeginTx 池内排队或 sqlite
-// busy 等待被 ctx interrupt），同名 INSERT OR IGNORE 幂等，退避后用剩余
-// 预算重试一次；首试 Commit 真已落库的尾部竞态只会让重试读到
-// claimed=false，按既有撞名路径换名，不会写坏。非 deadline 错误（盘满、
-// 关库、显式 interrupt）不是停滞签名，重试无意义，照旧放弃——两次都失败
-// 后走既有 ioErrors+dirless 兜底行路径。
+// claimStallError 命中的停滞签名是唯一值得重试的失败形态：同名
+// INSERT OR IGNORE 幂等，退避后用剩余预算重试一次；首试 Commit 真已落库
+// 的尾部竞态只会让重试读到 claimed=false，按既有撞名路径换名，不会写坏。
+// 非停滞错误（盘满、关库、显式 interrupt）重试无意义，照旧放弃——两次
+// 都失败后走既有 ioErrors+dirless 兜底行路径。
 func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	if manager.store == nil {
 		return true, nil
@@ -1135,13 +1134,29 @@ func (manager *Manager) claimDir(name string) (claimed bool, err error) {
 	ctx, cancel := reqStoreOpCtx()
 	claimed, err = manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
 	cancel()
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if !claimStallError(err) {
 		return claimed, err
 	}
 	time.Sleep(claimRetryBackoff)
 	ctx, cancel = context.WithDeadline(context.Background(), budget)
 	defer cancel()
 	return manager.store.ClaimDebugFile(ctx, name, MetaFile, []byte{})
+}
+
+// claimStallError 判定 claim 失败是否为「写连接被外部占住」的停滞签名——
+// 只有这类失败退避几百毫秒后可能救回。两种形状同源同义：
+//   - context.DeadlineExceeded：本进程连接池排队、或语句级 busy 等待被
+//     请求级 5s ctx 经 sqlite3_interrupt 截断（驱动翻译成 ctx.Err）；
+//   - store.IsBusy（原始 SQLITE_BUSY）：busy_timeout(30s) 耗尽仍未拿到
+//     文件锁。语句级等待在 5s ctx 下总会先变 deadline，但 tx.Commit 经
+//     driver.Tx 接口拿不到 ctx（驱动内跑 context.Background()），其唯一
+//     上界正是连接级 busy_timeout——reuseport 交接期前任进程持锁超 30s
+//     时 COMMIT 直接抛 *sqlite.Error（生产 9-19 实证 +5~36s 的
+//     「database is locked」簇），任何跨进程写者都是同款形状。
+//
+// context.Canceled 不命中：主动取消不是停滞，不该付退避代价。
+func claimStallError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || store.IsBusy(err)
 }
 
 // Dir 返回本请求的调试目录名（即 X-Request-Id/debug_ref）；

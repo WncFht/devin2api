@@ -1314,3 +1314,55 @@ func TestDetachedEventRefreshesMetaAfterComplete(t *testing.T) {
 		t.Fatalf("final meta lost earlier refresh events: %s", final)
 	}
 }
+
+// TestClaimStallErrorClassifiesSignatures 验证 claim 停滞签名分类：真实
+// SQLITE_BUSY（裸连接对制造——*sqlite.Error 字段私有无法手造）与
+// DeadlineExceeded 命中重试；Canceled、永久错误与 nil 不命中，不付退避
+// 代价。BUSY 经本分类器进与 deadline 同一条退避重试路径（重试机制本身
+// 由 TestClaimDirRetriesAfterTransientLock 覆盖）。
+func TestClaimStallErrorClassifiesSignatures(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "busy.db")
+	holder, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open holder: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE t(x)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `COMMIT`) }()
+	// 竞争者裸连接不装 busy handler：撞上 holder 的文件锁立即返回
+	// 真实 *sqlite.Error{SQLITE_BUSY}。
+	contender, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open contender: %v", err)
+	}
+	defer func() { _ = contender.Close() }()
+	_, busyErr := contender.ExecContext(ctx, `INSERT INTO t VALUES(1)`)
+	if busyErr == nil {
+		t.Fatal("contended insert = nil error, want SQLITE_BUSY")
+	}
+	if !store.IsBusy(busyErr) {
+		t.Fatalf("fixture error %v is not BUSY — test vacuous", busyErr)
+	}
+	if !claimStallError(busyErr) {
+		t.Fatal("raw SQLITE_BUSY must be a stall signature")
+	}
+	if !claimStallError(context.DeadlineExceeded) {
+		t.Fatal("DeadlineExceeded must be a stall signature")
+	}
+	for _, other := range []error{nil, context.Canceled, os.ErrPermission} {
+		if claimStallError(other) {
+			t.Fatalf("claimStallError(%v) = true, want false", other)
+		}
+	}
+}

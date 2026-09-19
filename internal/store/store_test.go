@@ -3,11 +3,16 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func openTemp(t *testing.T) *Store {
@@ -448,5 +453,57 @@ func TestMaintainWALCheckpoint(t *testing.T) {
 	}
 	if err := s.Maintain(ctx, 30); err != nil {
 		t.Fatalf("Maintain: %v", err)
+	}
+}
+
+// TestIsBusyClassifiesDriverLockError 用真实跨连接写锁制造原始
+// SQLITE_BUSY：写连接 busy_timeout 归零后由外部持有者占住文件锁，
+// ClaimDebugFile 的 INSERT 立即抛 *sqlite.Error。断言 IsBusy 经
+// errors.As 认出该驱动错误（database/sql 层不包装——若未来被包装，
+// 这里一并锁死对 unwrap 链的依赖）、按主码匹配，且 %w 包裹后仍命中。
+func TestIsBusyClassifiesDriverLockError(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	// 归零写连接 busy handler 让锁竞争立即返回 BUSY（否则要等满 30s
+	// busy_timeout）；MaxOpenConns=1 保证 pragma 落在唯一写连接上。
+	if _, err := s.db.ExecContext(ctx, `PRAGMA busy_timeout(0)`); err != nil {
+		t.Fatalf("busy_timeout(0): %v", err)
+	}
+	holder, err := sql.Open("sqlite", "file:"+s.path)
+	if err != nil {
+		t.Fatalf("sql.Open holder: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	conn, err := holder.Conn(ctx)
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `COMMIT`) }()
+
+	_, err = s.ClaimDebugFile(ctx, "d1", "meta.json", nil)
+	if err == nil {
+		t.Fatal("ClaimDebugFile under foreign write lock = nil error, want BUSY")
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		t.Fatalf("claim error type = %T — driver error no longer reaches us as *sqlite.Error", err)
+	}
+	if sqliteErr.Code()&0xff != sqlite3.SQLITE_BUSY {
+		t.Fatalf("code = %d, want primary SQLITE_BUSY", sqliteErr.Code())
+	}
+	if !IsBusy(err) {
+		t.Fatalf("IsBusy(%v) = false", err)
+	}
+	if !IsBusy(fmt.Errorf("claim: %w", err)) {
+		t.Fatal("wrapped BUSY should still classify")
+	}
+	for _, other := range []error{nil, context.DeadlineExceeded, context.Canceled, os.ErrPermission} {
+		if IsBusy(other) {
+			t.Fatalf("IsBusy(%v) = true, want false", other)
+		}
 	}
 }
