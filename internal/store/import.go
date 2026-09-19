@@ -234,7 +234,7 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 // autoincrement——分阶段落地期间旧仓重建文件的 id 空间与库不一致，
 // 文件 id 只是参考。
 func (s *Store) importTokens(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "auth_tokens", func(tx *sql.Tx) error {
+	return s.withSourceTxImmediate(ctx, "auth_tokens", func(q dbtx) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return skipMissing(err)
@@ -275,21 +275,21 @@ func (s *Store) importTokens(ctx context.Context, path string) error {
 				MaxConcurrency:    t.MaxConcurrency, MaxRPM: t.MaxRPM,
 			}
 			var existingID int64
-			err = tx.QueryRowContext(ctx,
+			err = q.QueryRowContext(ctx,
 				`SELECT id FROM auth_tokens WHERE token=?`, t.Hash).Scan(&existingID)
 			switch err {
 			case nil:
 				row.ID = existingID
-				_, err = tx.ExecContext(ctx, tokenInsertAll, tokenArgs(row, string(allowed))...)
+				_, err = q.ExecContext(ctx, tokenInsertAll, tokenArgs(row, string(allowed))...)
 			case sql.ErrNoRows:
 				var taken int64
-				switch e := tx.QueryRowContext(ctx,
+				switch e := q.QueryRowContext(ctx,
 					`SELECT 1 FROM auth_tokens WHERE id=?`, t.ID).Scan(&taken); e {
 				case nil:
 					// 文件 id 被库里别的 token 占用：交给 autoincrement。
-					_, err = tx.ExecContext(ctx, tokenInsertAuto, tokenArgs(row, string(allowed))[1:]...)
+					_, err = q.ExecContext(ctx, tokenInsertAuto, tokenArgs(row, string(allowed))[1:]...)
 				case sql.ErrNoRows:
-					_, err = tx.ExecContext(ctx, tokenInsertAll, tokenArgs(row, string(allowed))...)
+					_, err = q.ExecContext(ctx, tokenInsertAll, tokenArgs(row, string(allowed))...)
 				default:
 					err = e
 				}
@@ -427,12 +427,33 @@ func (s *Store) withSourceTx(ctx context.Context, name string, fn func(tx *sql.T
 	if err := fn(tx); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
-		"imported:"+name, time.Now().UTC().Format(time.RFC3339), time.Now().UnixMilli()); err != nil {
+	if err := markImported(ctx, tx, name); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// withSourceTxImmediate 是 withSourceTx 的 BEGIN IMMEDIATE 变体：源体在
+// 事务内先读库再写时（importTokens 按 token 探行决定覆盖还是插入），
+// deferred 的读快照与写锁升级之间被并发写挤入即 SQLITE_BUSY_SNAPSHOT。
+// 导入跑在 Open 路径（交接窗内，在役实例并发写），IMMEDIATE 借
+// busy_timeout 排队等锁，机制上消掉 SNAPSHOT 类。
+func (s *Store) withSourceTxImmediate(ctx context.Context, name string, fn func(q dbtx) error) error {
+	return immediateTx(ctx, s.db.DB, "import:"+name, func(ctx context.Context, q dbtx) error {
+		if err := fn(q); err != nil {
+			return err
+		}
+		return markImported(ctx, q, name)
+	})
+}
+
+// markImported 在源事务内写 imported:<name> 完成标记（语义见
+// withSourceTx）。
+func markImported(ctx context.Context, q dbtx, name string) error {
+	_, err := q.ExecContext(ctx,
+		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+		"imported:"+name, time.Now().UTC().Format(time.RFC3339), time.Now().UnixMilli())
+	return err
 }
 
 // skipMissing 把「源文件不存在」归一成 nil——缺席的源无需导入。

@@ -538,51 +538,55 @@ func (s *Store) reconcileCells(ctx context.Context, chunk int64) error {
 // reconcileCellsChunk 补记一片：水位之上按 id 序取至多 chunk 行聚合
 // upsert，水位在同一事务推进到该片最大 id——每片原子提交，中途失败
 // 或进程重启后下一轮从已推进的水位续跑。返回 false 表示缝隙尚有余量。
+// 片内先读水位再聚合写入：deferred 下读快照与写锁升级之间被并发写挤入
+// 即 SQLITE_BUSY_SNAPSHOT——本函数在 Open 收尾（交接窗内）与 ImportLegacy
+// 收尾点火，IMMEDIATE 借 busy_timeout 排队等锁（同 applyMigrations）。
 func (s *Store) reconcileCellsChunk(ctx context.Context, bound, chunk int64) (bool, error) {
-	tx, done, err := s.writeTx(ctx, "ReconcileCells")
-	if err != nil {
-		return false, err
-	}
-	defer done()
-	wm, err := cellsWatermark(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	// 片上界 = 水位之上第 chunk 个存量 id（DeleteLogsBefore 同款内层
-	// SELECT 定批）。水位在每片事务内重读：并发双写若在片间推进了它，
-	// 本片从最新位置续起，不重扫已记账区间；对侧新行的 id 恒大于
-	// bound（AUTOINCREMENT 不复用），永不进本方聚合域。
-	var hi int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(id),0) FROM (
-			SELECT id FROM logs WHERE id > ? AND id <= ? ORDER BY id LIMIT ?)`,
-		wm, bound, chunk).Scan(&hi); err != nil {
-		return false, err
-	}
-	if hi == 0 {
-		// (wm, bound] 已无存量行：缝隙闭合（行被并发删除，或水位
-		// 已被并发写者推过 bound）。水位仍落后 bound 时补齐——与
-		// 单遍版 wm=MAX(id) 终态一致，区间空洞不再重扫。
-		if wm < bound {
-			if err := setCellsWatermark(ctx, tx, bound); err != nil {
-				return false, err
-			}
+	var drained bool
+	err := immediateTx(ctx, s.db.DB, "ReconcileCells", func(ctx context.Context, q dbtx) error {
+		wm, err := cellsWatermark(ctx, q)
+		if err != nil {
+			return err
 		}
-		return true, tx.Commit()
-	}
-	if _, err := tx.ExecContext(ctx, cellsGapSQL, wm, hi); err != nil {
+		// 片上界 = 水位之上第 chunk 个存量 id（DeleteLogsBefore 同款内层
+		// SELECT 定批）。水位在每片事务内重读：并发双写若在片间推进了它，
+		// 本片从最新位置续起，不重扫已记账区间；对侧新行的 id 恒大于
+		// bound（AUTOINCREMENT 不复用），永不进本方聚合域。
+		var hi int64
+		if err := q.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(id),0) FROM (
+				SELECT id FROM logs WHERE id > ? AND id <= ? ORDER BY id LIMIT ?)`,
+			wm, bound, chunk).Scan(&hi); err != nil {
+			return err
+		}
+		if hi == 0 {
+			// (wm, bound] 已无存量行：缝隙闭合（行被并发删除，或水位
+			// 已被并发写者推过 bound）。水位仍落后 bound 时补齐——与
+			// 单遍版 wm=MAX(id) 终态一致，区间空洞不再重扫。
+			if wm < bound {
+				if err := setCellsWatermark(ctx, q, bound); err != nil {
+					return err
+				}
+			}
+			drained = true
+			return nil
+		}
+		if _, err := q.ExecContext(ctx, cellsGapSQL, wm, hi); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, errCellsGapSQL, wm, hi); err != nil {
+			return err
+		}
+		if err := setCellsWatermark(ctx, q, hi); err != nil {
+			return err
+		}
+		drained = hi == bound
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, errCellsGapSQL, wm, hi); err != nil {
-		return false, err
-	}
-	if err := setCellsWatermark(ctx, tx, hi); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return hi == bound, nil
+	return drained, nil
 }
 
 // ── 水位内缺口的窗口重算 ──────────────────────────────────────────

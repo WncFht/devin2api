@@ -32,29 +32,27 @@ type DebugFileInfo struct {
 // 可重写文件走这里。超阈值内容透明压缩（usize=解压前尺寸）。
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	tx, done, err := s.writeTx(ctx, "PutDebugFile")
-	if err != nil {
-		return err
-	}
-	defer done()
 	// OR REPLACE 的计数增量 = 新行库存尺寸 − 被顶掉的旧行尺寸；旧行
-	// 尺寸同事务先读，写连接串行化保证读到的是真实前驱。
-	var old int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
-		dir, name).Scan(&old); err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	delta := int64(len(stored)) - old
-	if err := addPayloadBytes(ctx, tx, delta); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+	// 尺寸同事务先读，写连接串行化保证读到的是真实前驱。先读后写在
+	// deferred 下有 BUSY_SNAPSHOT 裸露面（升级写锁撞上过期快照），
+	// BEGIN IMMEDIATE 先取写锁再读——与 WriteDebugBatch 同形。
+	var delta int64
+	err := immediateTx(ctx, s.db.DB, "PutDebugFile", func(ctx context.Context, q dbtx) error {
+		var old int64
+		if err := q.QueryRowContext(ctx,
+			`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+			dir, name).Scan(&old); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+			dir, name, stored, usize, time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		delta = int64(len(stored)) - old
+		return addPayloadBytes(ctx, q, delta)
+	})
+	if err != nil {
 		return err
 	}
 	s.debugBytes.Add(delta)
