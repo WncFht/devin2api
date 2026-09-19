@@ -1,14 +1,13 @@
 // accounts 页纯渲染层（契约见 notes/pool-accounts-contract.md）：
-// window.acctView 产出逐号卡各区块的 html 串并持有 echarts 实例表。
+// window.acctView 产出行单元格与展开托盘的 html 串并持有 echarts 实例表。
 // 不 fetch、不读写全局状态；输入一律按不可信处理——null/缺键对应块
-// 返回 ''，任何字段异常都不许抛（pcore 在 innerHTML 拼装链上调用）。
-// helpers 自 quota.js 移植（quota 页删并本页），i18n 键全部走 accounts.*。
+// 返回 ''，任何字段异常都不许抛（core 在 innerHTML 拼装链上调用）。
 (function () {
   const t = window.t;
   const esc = window.esc;
   const num = window.formatNumber;
 
-  // ---- 格式化 helpers（quota.js 移植，键改指 accounts.*）----
+  // ---- 格式化 helpers ----
 
   function text(v) {
     if (v === null || v === undefined || v === '') return null;
@@ -79,12 +78,6 @@
     return burn;
   }
 
-  function microUSD(v) {
-    const n = Number(v);
-    if (!Number.isFinite(n) || n === 0) return null;
-    return window.formatCost(n / 1e6);
-  }
-
   function boolBadge(v) {
     return v
       ? `<span class="acct-yes">${esc(t('accounts.yes'))}</span>`
@@ -128,6 +121,8 @@
 
   // 主徽章按优先级取头一个活跃异常；disabled/tombstoned 灰调最高优先
   // （非活 lane，其余状态位都是噪声，直接短路）。次 pill（排队/死区）并列。
+  // has_override = config 声明的号带活覆盖行——「面板改过」注记徽标，
+  // 与状态无关恒在末位（disabled 常由覆盖行造成，早退分支同样带上）。
   function pillList(a) {
     if (!a) return [];
     const now = Date.now();
@@ -135,28 +130,24 @@
     const gate = a.gate || {};
     const out = [];
     const future = (iso) => iso && Date.parse(iso) > now;
-    // 异常 pill 带 act='evidence'——点击开「为什么病了」证据抽屉（ops）。
-    const sick = { act: 'evidence' };
-    // has_override = config 声明的号带活覆盖行——「面板改过」注记徽标，
-    // 与状态无关恒在末位（disabled 常由覆盖行造成，早退分支同样带上）。
     const overridePill = a.has_override === true ? [{ tone: 'idle', text: t('accounts.src.override') }] : [];
     if (a.source === 'tombstoned') return [{ tone: 'idle', text: t('accounts.st.tombstoned') }, ...overridePill];
     if (a.disabled) return [{ tone: 'idle', text: t('accounts.st.disabled') }, ...overridePill];
     if (future(lane.auth_cooldown_until)) {
-      out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }), ...sick });
+      out.push({ tone: 'bad', text: t('accounts.st.credential', { left: countdown(lane.auth_cooldown_until) }) });
     }
     if (gate.latched) {
-      out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched'), ...sick });
+      out.push({ tone: 'bad', text: gate.limited_until ? t('accounts.st.latchedUntil', { left: countdown(gate.limited_until) }) : t('accounts.st.latched') });
     }
     const q = a.quota || {};
     const exhausted = (q.daily && q.daily.remaining <= 0) || (q.weekly && q.weekly.remaining <= 0);
-    if (exhausted) out.push({ tone: 'bad', text: t('accounts.st.exhausted'), ...sick });
+    if (exhausted) out.push({ tone: 'bad', text: t('accounts.st.exhausted') });
     if (future(lane.unhealthy_until)) {
-      out.push({ tone: 'warn', text: t('accounts.st.cooldown', { left: countdown(lane.unhealthy_until) }), ...sick });
+      out.push({ tone: 'warn', text: t('accounts.st.cooldown', { left: countdown(lane.unhealthy_until) }) });
     }
     if (!out.length) {
       if (!a.lane && !a.gate) out.push({ tone: 'idle', text: t('accounts.noData') });
-      else if (lane.healthy === false) out.push({ tone: 'warn', text: t('accounts.st.unready'), ...sick });
+      else if (lane.healthy === false) out.push({ tone: 'warn', text: t('accounts.st.unready') });
       else out.push({ tone: 'ok', text: t('accounts.st.ok') });
     }
     if (gate.waiters > 0) out.push({ tone: 'warn', text: t('accounts.pill.waiters', { n: gate.waiters }) });
@@ -166,48 +157,126 @@
     return out.concat(overridePill);
   }
 
-  // ---- 卡区块 ----
+  function pillsHTML(a, cap) {
+    const pills = pillList(a).slice(0, cap || 3);
+    return pills.map((p) =>
+      `<span class="acct-pill acct-pill--${p.tone}">${esc(p.text)}</span>`).join('');
+  }
 
-  function headBlock(a) {
+  // ---- 行单元格 ----
+
+  function cellAccount(a) {
     const u = (a.quota && a.quota.user) || {};
     const idParts = [u.email || u.name, u.plan_name].filter(Boolean);
-    const identity = idParts.length ? `<span class="acct-identity">${esc(idParts.join(' · '))}</span>` : '';
-    // tombstoned 不额外标来源——pillList 已出灰调墓碑徽章，不重复。
+    const identity = idParts.length ? `<div class="acct-id">${esc(idParts.join(' · '))}</div>` : '';
     const src = (a.source === 'config' || a.source === 'panel')
-      ? `<span class="acct-pill acct-pill--idle">${esc(t('accounts.src.' + a.source))}</span>`
+      ? `<span class="acct-tag">${esc(t('accounts.src.' + a.source))}</span>`
       : '';
-    // priority 非零时显式徽标（0 是缺省不吵）；notes 有则随行显示。
     const pri = Number(a.priority) > 0
-      ? `<span class="acct-pill acct-pill--idle" title="${esc(t('accounts.f.priority'))}">P${Number(a.priority)}</span>`
+      ? `<span class="acct-tag" title="${esc(t('accounts.f.priority'))}">P${Number(a.priority)}</span>`
       : '';
     const notes = a.notes
       ? `<span class="acct-notes" title="${esc(String(a.notes))}">${esc(String(a.notes))}</span>`
       : '';
-    return `<div class="acct-card-head">
-      <div class="acct-card-title"><span class="acct-name">${esc(a.name || '')}</span>${identity}${src}${pri}${notes}</div>
-      <div class="acct-badges">${pillsBlock(a)}</div>
+    return `<div class="acct-cell-name">
+      <div class="acct-name-line"><span class="acct-name">${esc(a.name || '')}</span>${src}${pri}</div>
+      ${identity}${notes}
     </div>`;
   }
 
-  function pillsBlock(a) {
-    const name = (a && a.name) || '';
-    return pillList(a).map((p) => {
-      const act = p.act ? ` data-act="${esc(p.act)}" data-acct="${esc(name)}" role="button" tabindex="0"` : '';
-      return `<span class="acct-pill acct-pill--${p.tone}${p.act ? ' acct-pill--link' : ''}"${act}>${esc(p.text)}</span>`;
-    }).join('');
-  }
-
-  function failureBlock(a) {
+  // 状态格 = 状态 pills（倒计时已烘进文案）+ 最近失败一行（24h 内才显示）。
+  // 「为什么病了+何时恢复」一格收口，点开行进托盘看证据。
+  function cellStatus(a) {
+    const pills = pillsHTML(a, 3);
     const lane = a.lane || {};
-    if (!lane.last_failure_at) return '';
-    const code = lane.last_failure_code || t('accounts.st.unknownError');
-    const msg = lane.last_failure_message ? ` — ${lane.last_failure_message}` : '';
-    return `<div class="acct-failure acct-failure--link" data-act="evidence" data-acct="${esc(a.name || '')}" role="button" tabindex="0" title="${esc(code + msg)}">
-      ${esc(t('accounts.lastFailure'))}: ${esc(code)} · ${esc(relTime(lane.last_failure_at))}
+    const fail = lane.last_failure_at && (Date.now() - Date.parse(lane.last_failure_at) < 24 * 3600e3)
+      ? `<div class="acct-fail-line" title="${esc((lane.last_failure_code || '') + (lane.last_failure_message ? ' — ' + lane.last_failure_message : ''))}">${esc(relTime(lane.last_failure_at))} · ${esc(lane.last_failure_code || t('accounts.st.unknownError'))}</div>`
+      : '';
+    return `<div class="acct-cell-status"><div class="acct-badges">${pills}</div>${fail}</div>`;
+  }
+
+  function miniBar(label, f) {
+    if (!f || f.remaining === null || f.remaining === undefined) return '';
+    const pct = Math.max(0, Math.min(100, Number(f.remaining)));
+    return `<div class="acct-mini-quota" title="${esc(label)} ${pct.toFixed(0)}%${f.reset_at ? ' · ' + esc(t('accounts.f.resetIn', { left: untilText(f.reset_at) || t('accounts.now') })) : ''}">
+      <span class="acct-mini-label">${esc(label)}</span>
+      <span class="acct-mini-track"><span class="acct-mini-fill tone-bg-${toneFor(pct)}" style="width:${pct}%;"></span></span>
+      <span class="acct-mini-val tone-${toneFor(pct)}">${pct.toFixed(0)}%</span>
     </div>`;
   }
 
-  function gateBlock(a) {
+  // 配额格：日/周双迷你条 + 一行余量语义（最近重置或燃烧外推）；
+  // 冻结序列（stale）显式标出——采样停更是「该号拉取在失败」的信号。
+  function cellQuota(a) {
+    const q = a.quota;
+    if (!q || (!q.daily && !q.weekly)) return `<span class="acct-none">${esc(t('accounts.noQuota'))}</span>`;
+    const bars = miniBar(t('accounts.f.daily'), q.daily) + miniBar(t('accounts.f.weekly'), q.weekly);
+    const sub = q.stale
+      ? `<div class="acct-quota-sub acct-quota-sub--stale">${esc(t('accounts.stale'))}</div>`
+      : (burnText(q.daily) || burnText(q.weekly)
+        ? `<div class="acct-quota-sub">${esc(burnText(q.daily) || burnText(q.weekly))}</div>`
+        : '');
+    return `<div class="acct-cell-quota">${bars}${sub}</div>`;
+  }
+
+  function cellToday(a) {
+    const u = a.usage;
+    if (!u || !u.today || u.today.requests === undefined || u.today.requests === null) {
+      return `<span class="acct-none">—</span>`;
+    }
+    const td = u.today;
+    const rate = td.success_rate !== undefined && td.success_rate !== null
+      ? `<span class="tone-${td.success_rate >= 0.99 ? 'healthy' : td.success_rate >= 0.9 ? 'warning' : 'critical'}">${(td.success_rate * 100).toFixed(1)}%</span>`
+      : '';
+    const tokens = td.tokens ? `<div class="acct-today-sub">${num(td.tokens)} tok</div>` : '';
+    return `<div class="acct-cell-today"><div>${esc(t('accounts.today.req', { n: num(td.requests) }))} · ${rate}</div>${tokens}</div>`;
+  }
+
+  // 桶着色按份额而非有即染：err 是上游责任失败（owner 归因，客户端断连
+  // 已剔），高流量下每格都有个位数基线故障，≥5% 才算 lane 真的出问题；
+  // rl 零基线，一次限流即染青。
+  function cellTone(c) {
+    const tot = (c.ok || 0) + (c.err || 0) + (c.rl || 0);
+    if (!tot) return 'idle';
+    if ((c.err || 0) / tot >= 0.05) return 'err';
+    if (c.rl) return 'rl';
+    return 'ok';
+  }
+
+  // 48×30min 健康条：桶内 失败>限流>成功；限流染青与真错误分色。
+  function cellHealth(a) {
+    const cells = a.matrix && a.matrix.cells;
+    if (!Array.isArray(cells) || !cells.length) return `<span class="acct-none">—</span>`;
+    const strip = cells.map((c) => {
+      const at = new Date(c.at);
+      const label = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const tip = `${label} · ${t('accounts.tip.ok', { n: c.ok || 0 })} ${t('accounts.tip.err', { n: c.err || 0 })} ${t('accounts.tip.rl', { n: c.rl || 0 })}${c.sw ? ' ' + t('accounts.tip.sw', { n: c.sw }) : ''}`;
+      return `<div class="acct-cell acct-cell--${cellTone(c)}" title="${esc(tip)}"></div>`;
+    }).join('');
+    const total = cells.reduce((s, c) => s + (c.ok || 0) + (c.err || 0) + (c.rl || 0), 0);
+    const foot = total ? t('accounts.recentFoot', { n: total }) : t('accounts.noRecent');
+    return `<div class="acct-cell-health"><div class="acct-strip">${strip}</div><div class="acct-strip-foot">${esc(foot)}</div></div>`;
+  }
+
+  function cellPerf(a) {
+    const u = a.usage || {};
+    const lane = a.lane || {};
+    const bits = [];
+    if (lane.inflight !== undefined && lane.inflight !== null) {
+      bits.push(`<div>${esc(t('accounts.m.inflight'))} ${num(lane.inflight)}</div>`);
+    }
+    const ttfb = [u.ttfb_p50, u.ttfb_p90].filter((v) => Number.isFinite(Number(v)));
+    if (ttfb.length) bits.push(`<div>TTFB ${ttfb.map((v) => Math.round(Number(v)) + 'ms').join('/')}</div>`);
+    if (u.tps_now !== undefined && u.tps_now !== null && Number.isFinite(Number(u.tps_now))) {
+      bits.push(`<div>TPS ${fmtN(u.tps_now)}</div>`);
+    }
+    if (!bits.length) return `<span class="acct-none">—</span>`;
+    return `<div class="acct-cell-perf">${bits.join('')}</div>`;
+  }
+
+  // ---- 展开托盘：深度证据层（观测密度不丢，默认面降噪） ----
+
+  function gateDetail(a) {
     const g = a.gate;
     if (!g) return '';
     const win = g.window_quota > 0
@@ -225,11 +294,10 @@
     return sec('accounts.sec.gate', inner);
   }
 
-  function warmBlock(a) {
+  function warmDetail(a) {
     const w = a.warm;
     if (!w) return '';
     if (w.enabled === false) return sec('accounts.sec.warm', `<div class="acct-none">${esc(t('accounts.warmOff'))}</div>`);
-    // hits+misses=0 时 hit_rate 是除零兜底的 0——渲染成「—」不误导。
     const pingTotal = (w.ping_hits || 0) + (w.ping_misses || 0);
     const rate = pingTotal > 0 ? w.ping_hit_rate : null;
     const inner = `<div class="acct-kv-grid">` + [
@@ -243,25 +311,24 @@
     return sec('accounts.sec.warm', inner);
   }
 
-  function quotaBar(label, f) {
-    if (!f || f.remaining === null || f.remaining === undefined) return '';
-    const pct = Math.max(0, Math.min(100, Number(f.remaining)));
-    const sub = [
-      f.reset_at ? t('accounts.f.resetIn', { left: untilText(f.reset_at) || t('accounts.now') }) : null,
-      burnText(f)
-    ].filter(Boolean).join(' · ');
-    return `<div class="acct-quota-row">
-      <span class="acct-quota-label">${esc(label)}</span>
-      <div class="acct-quota-track"><div class="acct-quota-fill tone-${toneFor(pct)}" style="width:${pct}%;"></div></div>
-      <span class="acct-quota-val tone-${toneFor(pct)}">${pct.toFixed(0)}%</span>
-      ${sub ? `<div class="acct-quota-sub">${esc(sub)}</div>` : ''}
-    </div>`;
-  }
-
-  function quotaBlock(a) {
+  // 配额明细：credits/grace/topup 网格 + 日周完整条（托盘内给全量）。
+  function quotaDetail(a) {
     const q = a.quota;
     if (!q) return '';
-    const bars = quotaBar(t('accounts.f.daily'), q.daily) + quotaBar(t('accounts.f.weekly'), q.weekly);
+    const bar = (label, f) => {
+      if (!f || f.remaining === null || f.remaining === undefined) return '';
+      const pct = Math.max(0, Math.min(100, Number(f.remaining)));
+      const sub = [
+        f.reset_at ? t('accounts.f.resetIn', { left: untilText(f.reset_at) || t('accounts.now') }) : null,
+        burnText(f)
+      ].filter(Boolean).join(' · ');
+      return `<div class="acct-quota-row">
+        <span class="acct-quota-label">${esc(label)}</span>
+        <div class="acct-quota-track"><div class="acct-quota-fill tone-${toneFor(pct)}" style="width:${pct}%;"></div></div>
+        <span class="acct-quota-val tone-${toneFor(pct)}">${pct.toFixed(0)}%</span>
+        ${sub ? `<div class="acct-quota-sub">${esc(sub)}</div>` : ''}
+      </div>`;
+    };
     const pts = Array.isArray(q.points) ? q.points : [];
     const last = pts.length ? pts[pts.length - 1] : null;
     const u = q.user || {};
@@ -279,95 +346,130 @@
       kv(t('accounts.f.topUpEnabled'), !last || last.top_up_enabled === undefined ? null : boolBadge(last.top_up_enabled)),
       kv(t('accounts.f.topUpStatus'), escN(last && text(last.top_up_transaction_status)))
     ]);
-    const inner = bars + grid;
+    const inner = bar(t('accounts.f.daily'), q.daily) + bar(t('accounts.f.weekly'), q.weekly) + grid;
     return inner ? sec('accounts.sec.quota', inner) : '';
   }
 
-  function metricsBlock(a) {
+  function usageDetail(a) {
     const items = [];
-    const lane = a.lane || {};
-    if (lane.inflight !== undefined && lane.inflight !== null) {
-      items.push(kv(t('accounts.m.inflight'), esc(num(lane.inflight))));
-    }
     const u = a.usage;
-    if (u) {
-      const td = u.today || {};
-      if (td.requests !== undefined && td.requests !== null) {
-        items.push(kv(t('accounts.m.requests'), esc(num(td.requests) + (td.tokens ? ' · ' + num(td.tokens) + ' tok' : ''))));
-      }
-      if (td.success_rate !== undefined && td.success_rate !== null) {
-        items.push(kv(t('accounts.m.successRate'), esc(Number(td.success_rate * 100).toFixed(1) + '%')));
-      }
-      const ttfb = [['avg', u.ttfb_avg], ['p50', u.ttfb_p50], ['p90', u.ttfb_p90]]
-        .filter(([, v]) => Number.isFinite(Number(v)))
-        .map(([k, v]) => `${k} ${Math.round(Number(v))}ms`)
-        .join(' · ');
-      if (ttfb) items.push(kv(t('accounts.m.ttfb'), esc(ttfb)));
-      if (u.cache_rate !== undefined && u.cache_rate !== null) {
-        items.push(kv(t('accounts.m.cacheRate'), esc(Number(u.cache_rate * 100).toFixed(0) + '%')));
-      }
-      if (u.rpm_now !== undefined && u.rpm_now !== null) items.push(kv(t('accounts.m.rpm'), esc(fmtN(u.rpm_now))));
-      if (u.tps_now !== undefined && u.tps_now !== null) items.push(kv(t('accounts.m.tps'), esc(fmtN(u.tps_now))));
+    if (!u) return '';
+    const td = u.today || {};
+    if (td.requests !== undefined && td.requests !== null) {
+      items.push(kv(t('accounts.m.requests'), esc(num(td.requests) + (td.tokens ? ' · ' + num(td.tokens) + ' tok' : ''))));
     }
+    if (td.success_rate !== undefined && td.success_rate !== null) {
+      items.push(kv(t('accounts.m.successRate'), esc(Number(td.success_rate * 100).toFixed(1) + '%')));
+    }
+    const ttfb = [['avg', u.ttfb_avg], ['p50', u.ttfb_p50], ['p90', u.ttfb_p90]]
+      .filter(([, v]) => Number.isFinite(Number(v)))
+      .map(([k, v]) => `${k} ${Math.round(Number(v))}ms`)
+      .join(' · ');
+    if (ttfb) items.push(kv(t('accounts.m.ttfb'), esc(ttfb)));
+    if (u.cache_rate !== undefined && u.cache_rate !== null) {
+      items.push(kv(t('accounts.m.cacheRate'), esc(Number(u.cache_rate * 100).toFixed(0) + '%')));
+    }
+    if (u.rpm_now !== undefined && u.rpm_now !== null) items.push(kv(t('accounts.m.rpm'), esc(fmtN(u.rpm_now))));
+    if (u.tps_now !== undefined && u.tps_now !== null) items.push(kv(t('accounts.m.tps'), esc(fmtN(u.tps_now))));
     const grid = kvGrid(items);
     return grid ? sec('accounts.sec.metrics', grid) : '';
   }
 
-  function cellTone(c) {
-    if (c.err) return 'err';
-    if (c.rl) return 'rl';
-    if (c.ok) return 'ok';
-    return 'idle';
+  // 证据块（同步，不发请求）：lane 健康/连败/绑定 + 最近失败 + 两档冷却 +
+  // gate 闩与事件环 + 最近配额采样。recover 按钮由 ops 层追加（带端点探测）。
+  function evidenceBody(a) {
+    const lane = a.lane || {};
+    const gate = a.gate || {};
+    const now = Date.now();
+    const future = (iso) => iso && Date.parse(iso) > now;
+    const row = (label, val) => (val
+      ? `<div class="acct-kv"><span class="acct-kv-k">${esc(label)}</span><span class="acct-kv-v">${val}</span></div>` : '');
+    const secs = [];
+    const laneBits = [
+      !a.lane ? `<span class="acct-none">${esc(t('accounts.noData'))}</span>`
+        : lane.healthy === false
+          ? `<span class="acct-no">${esc(t('accounts.st.unready'))}</span>`
+          : `<span class="acct-yes">${esc(t('accounts.st.ok'))}</span>`,
+      lane.fail_streak ? esc(t('accounts.ev.failStreak', { n: lane.fail_streak })) : '',
+      lane.bound_sessions ? esc(t('accounts.ev.bound', { n: lane.bound_sessions })) : '',
+      lane.inflight !== undefined && lane.inflight !== null ? esc(`${t('accounts.m.inflight')} ${num(lane.inflight)}`) : ''
+    ].filter(Boolean).join(' · ');
+    secs.push(row(t('accounts.ev.lane'), laneBits));
+    if (lane.last_failure_at) {
+      const code = lane.last_failure_code || t('accounts.st.unknownError');
+      const msg = lane.last_failure_message ? ` — ${esc(lane.last_failure_message)}` : '';
+      secs.push(row(t('accounts.ev.failure'), `${esc(relTime(lane.last_failure_at))} · ${esc(code)}${msg}`));
+    }
+    const cds = [];
+    if (future(lane.auth_cooldown_until)) cds.push(`${esc(t('accounts.ev.credCooldown'))} ${esc(countdown(lane.auth_cooldown_until))}`);
+    if (future(lane.unhealthy_until)) cds.push(`${esc(t('accounts.ev.failCooldown'))} ${esc(countdown(lane.unhealthy_until))}`);
+    if (cds.length) secs.push(row(t('accounts.ev.cooldowns'), cds.join(' · ')));
+    if (gate.latched) {
+      const s = gate.limited_until ? Math.max(0, Math.round((Date.parse(gate.limited_until) - now) / 1000)) : 0;
+      secs.push(row(t('accounts.ev.latch'), esc(s ? t('accounts.ev.latchLeft', { s }) : t('accounts.st.latched'))));
+    }
+    const pts = (a.quota && Array.isArray(a.quota.points)) ? a.quota.points : [];
+    const last = pts.length ? pts[pts.length - 1] : null;
+    if (last && (last.daily_remaining !== undefined || last.weekly_remaining !== undefined)) {
+      const pct = (v) => (v === null || v === undefined ? '—' : `${Number(v).toFixed(0)}%`);
+      secs.push(row(t('accounts.ev.quota'),
+        esc(`${t('accounts.f.daily')} ${pct(last.daily_remaining)} · ${t('accounts.f.weekly')} ${pct(last.weekly_remaining)}`)
+        + (last.at ? ` <span class="acct-ev-at">${esc(new Date(last.at * 1000).toLocaleTimeString())}</span>` : '')));
+    }
+    const evSec = `<div class="acct-ev-events"><h5>${esc(t('accounts.ev.events'))}</h5>${gateEventsHTML(a)}</div>`;
+    return `<div class="acct-kv-grid">${secs.join('')}</div>${evSec}`;
   }
 
-  // 24×1h 健康条：桶内 失败>限流>成功。cells 由 pcore 从 matrix entries 归并。
-  function healthBlock(a) {
-    const cells = a.matrix && a.matrix.cells;
-    if (!Array.isArray(cells) || !cells.length) return '';
-    const strip = cells.map((c) => {
-      const at = new Date(c.at);
-      const label = isNaN(at) ? '' : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const tip = `${label} · ${t('accounts.tip.ok', { n: c.ok || 0 })} ${t('accounts.tip.err', { n: c.err || 0 })} ${t('accounts.tip.rl', { n: c.rl || 0 })}${c.sw ? ' ' + t('accounts.tip.sw', { n: c.sw }) : ''}`;
-      return `<div class="acct-cell acct-cell--${cellTone(c)}" title="${esc(tip)}"></div>`;
-    }).join('');
-    const total = cells.reduce((s, c) => s + (c.ok || 0) + (c.err || 0) + (c.rl || 0), 0);
-    const sw = cells.reduce((s, c) => s + (c.sw || 0), 0);
-    const foot = total
-      ? t('accounts.recentFoot', { n: total }) + (sw ? ' · ' + t('accounts.tip.sw', { n: sw }) : '')
-      : t('accounts.noRecent');
-    return sec('accounts.sec.recent', `<div class="acct-strip">${strip}</div><div class="acct-strip-foot">${esc(foot)}</div>`);
+  // 闩事件环填进托盘 events 槽（core 调用——gate.events 在 a 上，同步渲染）。
+  function gateEventsHTML(a) {
+    const gate = a.gate || {};
+    const events = Array.isArray(gate.events) ? gate.events.slice(0, 8) : [];
+    if (!events.length) return `<div class="acct-none">${esc(t('accounts.ev.noEvents'))}</div>`;
+    const now = Date.now();
+    const relText = relTime;
+    const leftText = countdown;
+    const kindText = (ev) => {
+      const key = ev.kind === 'latched' && ev.detail === 'extended' ? 'extended' : ev.kind;
+      const known = { latched: 1, extended: 1, released: 1, expired: 1, restored: 1 };
+      return known[key] ? t('accounts.gate.ev.' + key) : (ev.label || ev.kind || '');
+    };
+    return events.map((ev) => `<div class="acct-ev-ev"><span class="acct-ev-kind">${esc(kindText(ev))}</span> ${esc(relText(ev.at))}${ev.until && Date.parse(ev.until) > now ? ` · ${esc(leftText(ev.until))}` : ''}</div>`).join('');
   }
 
-  // 曲线区整宽行：只产容器，echarts 由 pcore 在 mount 后调 curveInit 填。
-  function curveBlock(a) {
-    const q = a.quota;
-    if (!q) return '';
-    const pts = Array.isArray(q.points) ? q.points : [];
+  // 托盘骨架：证据 + 闸门 + 保温 + 配额明细 + 用量 + failover 懒拉槽 + 曲线。
+  // failover 容器留给 ops.fillFailover 异步填；曲线由 core mount 后 curveInit。
+  function trayBlock(a) {
+    const sections = [
+      sec('accounts.drawer.evidence', evidenceBody(a), 'acct-sec--evidence'),
+      gateDetail(a),
+      warmDetail(a),
+      quotaDetail(a),
+      usageDetail(a),
+      `<section class="acct-sec acct-sec--failover"><h4>${esc(t('accounts.drawer.failover'))}</h4><div class="acct-fo-slot" data-tray="failover"><div class="acct-none">${esc(t('accounts.drawer.loading'))}</div></div></section>`
+    ].filter(Boolean).join('');
+    const pts = a.quota && Array.isArray(a.quota.points) ? a.quota.points : [];
     const plottable = pts.some((p) => p && (p.daily_remaining !== undefined || p.weekly_remaining !== undefined));
-    const inner = plottable
-      ? `<div class="acct-curve" data-acct="${esc(a.name || '')}"></div>`
-      : `<div class="acct-none">${esc(t('accounts.curveEmpty'))}</div><div class="acct-strip-foot">${esc(t('accounts.curveEmptyHint'))}</div>`;
-    return sec('accounts.curveTitle', inner, 'acct-sec--curve');
+    const curve = plottable
+      ? `<section class="acct-sec acct-sec--curve"><h4>${esc(t('accounts.curveTitle'))}</h4><div class="acct-curve" data-acct="${esc(a.name || '')}"></div></section>`
+      : '';
+    return `<div class="acct-tray-grid">${sections}</div>${curve}`;
   }
 
-  function cardBlocks(a) {
+  function rowCells(a) {
     const safe = (fn) => {
       try { return fn(a || {}) || ''; } catch { return ''; }
     };
     return {
-      head: safe(headBlock),
-      pills: safe(pillsBlock),
-      failure: safe(failureBlock),
-      gate: safe(gateBlock),
-      warm: safe(warmBlock),
-      quota: safe(quotaBlock),
-      metrics: safe(metricsBlock),
-      health: safe(healthBlock),
-      curve: safe(curveBlock)
+      account: safe(cellAccount),
+      status: safe(cellStatus),
+      quota: safe(cellQuota),
+      today: safe(cellToday),
+      health: safe(cellHealth),
+      perf: safe(cellPerf)
     };
   }
 
-  // ---- echarts 实例表（元素 → {chart, points}）----
+  // ---- echarts 实例表（元素 → {chart, points, sig}）----
 
   const charts = new Map();
 
@@ -427,7 +529,6 @@
   // 元素已脱离 DOM 的僵尸实例顺带回收（diff 重渲会换掉 .acct-curve 元素）。
   function curveInit(el, points) {
     if (!el) return;
-    // echarts 懒加载：库未就位先拉再重入；拉取失败下轮自动刷新自然重试
     if (!window.echarts) {
       if (typeof window.ensureECharts === 'function') {
         window.ensureECharts().then(() => curveInit(el, points), () => {});
@@ -483,6 +584,16 @@
     </div>`;
   }
 
-  // relTime/countdown 同时被 ops 层证据抽屉复用（loads 顺序 view→ops→core）
-  window.acctView = { cardBlocks, pillList, curveInit, disposeCharts, emptyStateHTML, relTime, countdown };
+  // relTime/countdown 同时被 ops 层 failover 明细复用（loads 顺序 view→ops→core）
+  window.acctView = {
+    rowCells,
+    trayBlock,
+    gateEventsHTML,
+    pillList,
+    curveInit,
+    disposeCharts,
+    emptyStateHTML,
+    relTime,
+    countdown
+  };
 })();

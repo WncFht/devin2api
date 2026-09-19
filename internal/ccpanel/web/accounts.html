@@ -42,6 +42,8 @@
               </div>
               <div class="accounts-head-actions">
                 <span id="accounts-filter" class="acct-filter" hidden></span>
+                <!-- 加号钮挂载点：ops 渲染「+ 添加账号」btn 开 modal（端点缺席时留空） -->
+                <span id="accounts-add"></span>
                 <select id="accounts-sort" class="filter-select acct-sort" data-i18n-aria-label="accounts.sort.label" aria-label="sort"></select>
                 <span id="accounts-updated-at"></span>
                 <button type="button" class="btn btn-secondary btn-sm" id="accounts-refresh">
@@ -50,8 +52,6 @@
               </div>
             </div>
           </div>
-          <!-- 加号表单挂载点：ops 渲染 .acct-form（端点缺席时留空） -->
-          <div id="accounts-add"></div>
         </header>
 
         <!-- 全池脉冲 + 汇总 -->
@@ -68,7 +68,7 @@
           </div>
         </section>
 
-        <!-- 逐账号卡片；空池时整页空态（view 渲染 .accounts-empty，含 #accounts-empty-add 内嵌表单挂点） -->
+        <!-- 账号表格（core 渲 .acct-table-wrap）；空池时整页空态（view 渲 .accounts-empty，含 #accounts-empty-add 内嵌表单挂点） -->
         <section class="mb-6">
           <div id="accounts-empty" hidden></div>
           <div id="accounts-list">
@@ -83,6 +83,9 @@
       </div>
     </main>
   </div>
+
+  <!-- 勾选浮出批量条（fixed 底中，core 按 selected.size 显隐） -->
+  <div id="accounts-batch" class="acct-batch" hidden></div>
 
 </body>
 </html>

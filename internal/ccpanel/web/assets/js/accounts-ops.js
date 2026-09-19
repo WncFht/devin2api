@@ -1,7 +1,9 @@
-// 账号页操作层（pool 重构）：操作按钮列、改凭据 modal、加号表单、CLI 凭据导入。
-// 经 window.acctOps 供 accounts.js 调用——core 负责点击委托，loadAll 的
-// fetchAdminAccounts 顺手把 GET 探测结果经 acctOps.reportGetProbe 喂过来；
-// reload 由 core 注入（acctOps.reload = loadAll）。
+// 账号页操作层（表格重构）：行尾 测试钮 + ⋯ kebab 菜单、改凭据 modal、
+// 加号 modal 表单、空态内嵌表单、CLI 凭据导入、托盘装饰（recover 钮 +
+// failover 懒拉）、批量动作循环。
+// 经 window.acctOps 供 accounts.js 调用——core 负责点击委托与行展开，
+// loadAll 的 fetchAdminAccounts 顺手把 GET 探测结果经 acctOps.reportGetProbe
+// 喂过来；reload 由 core 注入（acctOps.reload = loadAll）。
 // 端点缺席口径（冻结契约）：GET 探测 404/405/501/503/网络错 = 整组缺席 →
 // 全部变更按钮隐藏。变更请求的 404 是域错误（无名/无活 lane/死墓碑），
 // 只弹 error 文案；仅 405/501/503 才按「该动作端点缺席」隐藏对应按钮。
@@ -17,7 +19,9 @@
 
   let supported = null; // null=未探测，渲染期乐观显示
   const absentActs = new Set();
-  const formMounts = new Set(); // 挂过的加号表单容器：探测落定后重评估（core 只在 run() 挂一次）
+  // 挂载点登记表：el → 'button'（页首 +添加账号 钮）| 'form'（空态内嵌/modal 宿主），
+  // 探测落定后按各自形态重渲。
+  const formMounts = new Map();
   let formSeq = 0;
 
   function reload() {
@@ -25,12 +29,12 @@
   }
 
   function refreshForms() {
-    formMounts.forEach((el) => {
+    formMounts.forEach((kind, el) => {
       if (!el.isConnected) {
         formMounts.delete(el);
         return;
       }
-      mountForm(el);
+      if (kind === 'button') mountAddButton(el); else mountForm(el);
     });
   }
 
@@ -71,39 +75,103 @@
     return `/web/logs.html?account=${encodeURIComponent(name)}`;
   }
 
+  // ---- 行尾操作格：主钮 测试 + ⋯ kebab ----
+
   function actionsBlock(a) {
     if (!a || !a.name) return '';
     const name = a.name;
-    const btns = [];
-    const link = (act, text) =>
-      `<a class="acct-action-btn" data-act="${act}" data-acct="${esc(name)}" href="${logsHref(name)}">${esc(text)}</a>`;
-    const btn = (act, key, danger) => absentActs.has(act) ? '' :
-      `<button type="button" class="acct-action-btn${danger ? ' acct-action-btn--danger' : ''}" data-act="${act}" data-acct="${esc(name)}">${esc(t(key))}</button>`;
-    btns.push(link('view-logs', t('accounts.act.viewLogs')));
-    // failover 徽标走 logs/debug-logs 端点，与 /admin/accounts 可用性无关——
-    // supported 探测失败时也照常渲染（抽屉内容懒拉，失败在行内报错）。
-    const failover = a.matrix && a.matrix.failoverCount;
-    if (a.source !== 'tombstoned' && failover > 0) {
-      btns.push(`<button type="button" class="acct-action-btn" data-act="failover" data-acct="${esc(name)}">${esc(t('accounts.drawer.failover'))} · ${failover}</button>`);
+    const parts = [];
+    if (supported !== false && a.source !== 'tombstoned' && !absentActs.has('test')) {
+      parts.push(`<button type="button" class="acct-action-btn" data-act="test" data-acct="${esc(name)}">${esc(t('accounts.act.test'))}</button>`);
     }
-    if (supported !== false) {
-      if (a.source === 'tombstoned') {
-        // 墓碑卡动作面只剩 restore（+上面恒有的 view-logs）
-        btns.push(btn('restore', 'accounts.act.restore'));
-      } else {
-        btns.push(btn('test', 'accounts.act.test'));
-        btns.push(btn('edit', 'accounts.act.edit'));
-        btns.push(btn('duplicate', 'accounts.act.duplicate'));
-        btns.push(btn(a.disabled ? 'enable' : 'disable',
-          a.disabled ? 'accounts.act.enable' : 'accounts.act.disable'));
-        if (a.lane) {
-          if (cooldownActive(a.lane)) btns.push(btn('clear-cooldown', 'accounts.act.clearCooldown'));
-          btns.push(btn('refresh-quota', 'accounts.act.refreshQuota'));
-        }
-        btns.push(btn('delete', 'accounts.act.delete', true));
-      }
+    parts.push(`<button type="button" class="acct-action-btn acct-kebab" data-act="kebab" data-acct="${esc(name)}" aria-haspopup="menu" aria-label="${esc(t('accounts.act.more'))}">⋯</button>`);
+    return `<div class="acct-actions">${parts.join('')}</div>`;
+  }
+
+  // kebab 项按号态出：view-logs 恒在（走 logs 端点，与账号端点组可用性无关）；
+  // 其余变更项受 supported 探测与 absentActs 逐键裁剪。
+  function kebabItems(a) {
+    const items = [{ act: 'view-logs', key: 'accounts.act.viewLogs' }];
+    if (supported === false) return items;
+    const add = (act, key, danger) => {
+      if (!absentActs.has(act)) items.push({ act, key, danger });
+    };
+    if (a.source === 'tombstoned') {
+      add('restore', 'accounts.act.restore');
+      return items;
     }
-    return `<div class="acct-actions">${btns.join('')}</div>`;
+    add('edit', 'accounts.act.edit');
+    add('duplicate', 'accounts.act.duplicate');
+    add(a.disabled ? 'enable' : 'disable',
+      a.disabled ? 'accounts.act.enable' : 'accounts.act.disable');
+    if (a.lane) {
+      if (cooldownActive(a.lane)) add('clear-cooldown', 'accounts.act.clearCooldown');
+      add('refresh-quota', 'accounts.act.refreshQuota');
+    }
+    add('delete', 'accounts.act.delete', true);
+    return items;
+  }
+
+  // body 级共享菜单：fixed 定位贴 ⋯ 钮，外点/Esc/滚动/resize 即关。
+  // 菜单项点击不走 core 委托（菜单在行外），自己的监听器转调 handle。
+  let kebabEl = null;
+  let kebabA = null;
+
+  function closeKebab() {
+    if (!kebabEl) return;
+    kebabEl.remove();
+    kebabEl = null;
+    kebabA = null;
+    document.removeEventListener('click', onKebabDoc, true);
+    document.removeEventListener('keydown', onKebabKey, true);
+    window.removeEventListener('resize', closeKebab);
+    window.removeEventListener('scroll', onKebabScroll, true);
+  }
+
+  function onKebabDoc(e) {
+    if (kebabEl && !kebabEl.contains(e.target)) closeKebab();
+  }
+
+  function onKebabKey(e) {
+    if (e.key === 'Escape') closeKebab();
+  }
+
+  function onKebabScroll() {
+    closeKebab();
+  }
+
+  function openKebab(srcEl, a) {
+    if (!srcEl || !a || !a.name) return;
+    if (kebabEl) closeKebab();
+    const items = kebabItems(a);
+    if (!items.length) return;
+    const menu = document.createElement('div');
+    menu.className = 'acct-menu';
+    menu.setAttribute('role', 'menu');
+    menu.innerHTML = items.map((it) =>
+      `<button type="button" role="menuitem" class="acct-menu-item${it.danger ? ' acct-menu-item--danger' : ''}" data-act="${it.act}">${esc(t(it.key))}</button>`).join('');
+    document.body.appendChild(menu);
+    const r = srcEl.getBoundingClientRect();
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    menu.style.left = `${Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8))}px`;
+    menu.style.top = r.bottom + 4 + mh > window.innerHeight - 8
+      ? `${Math.max(8, r.top - mh - 4)}px`
+      : `${r.bottom + 4}px`;
+    kebabEl = menu;
+    kebabA = a;
+    menu.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-act]');
+      if (!item || !kebabA) return;
+      const ctx = kebabA;
+      closeKebab();
+      handle(item.dataset.act, ctx.name, ctx, item);
+    });
+    // capture 阶段已过本次点击的传播路径，现在挂 capture 监听不会自关。
+    document.addEventListener('click', onKebabDoc, true);
+    document.addEventListener('keydown', onKebabKey, true);
+    window.addEventListener('resize', closeKebab);
+    window.addEventListener('scroll', onKebabScroll, true);
   }
 
   async function runMutation(act, url, method, body) {
@@ -122,6 +190,36 @@
       }
       window.showNotification(e.message, 'error');
     }
+  }
+
+  // 批量动作：无批量后端，逐号顺序循环单号端点（顺序是刻意的——
+  // refresh-quota 之类会打上游，不并发施压）。汇总报 ok/total + 逐条错。
+  async function batchRun(act, names) {
+    const spec = {
+      enable: { method: 'PUT', path: '', body: { disabled: false } },
+      disable: { method: 'PUT', path: '', body: { disabled: true } },
+      'clear-cooldown': { method: 'POST', path: '/clear-cooldown' },
+      'refresh-quota': { method: 'POST', path: '/quota/refresh' },
+      delete: { method: 'DELETE', path: '' },
+    }[act];
+    if (!spec || !names || !names.length) return;
+    let ok = 0;
+    const errs = [];
+    for (const n of names) {
+      try {
+        await apiCall(`${BASE}/${encodeURIComponent(n)}${spec.path}`, {
+          method: spec.method,
+          ...(spec.body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec.body) } : {}),
+        });
+        ok++;
+      } catch (e) {
+        if (e.absent) absentActs.add(act); else errs.push(`${n}: ${e.message}`);
+      }
+    }
+    const summary = t('accounts.batch.done', { ok, total: names.length });
+    window.showNotification(errs.length ? `${summary} · ${errs.slice(0, 3).join(' · ')}` : summary,
+      errs.length ? 'error' : 'success');
+    reload();
   }
 
   function confirmDelete(a) {
@@ -287,10 +385,13 @@
     }
   }
 
-  // ---- 加号表单：#accounts-add 与空态 #accounts-empty-add 共用一套渲染 ----
+  // ---- 加号表单：modal 宿主与空态内嵌共用 mountForm 渲染 ----
+  // 页首 #accounts-add 是「+ 添加账号」钮（mountAddButton），点开 addModal；
+  // 空态 #accounts-empty-add 保留内嵌表单。两处的 form.acct-form[data-add]
+  // 同构，visibleAddForm 优先取当前可见者（CLI 导入/duplicate 预填落点）。
   function mountForm(el) {
     if (!el) return;
-    formMounts.add(el);
+    formMounts.set(el, 'form');
     if (supported === false) {
       el.innerHTML = '';
       return;
@@ -354,6 +455,7 @@
             ...(notes ? { notes } : {}),
           }),
         });
+        closeAddModal();
         window.showNotification(t('accounts.add.success'), 'success');
         form.reset();
         reload();
@@ -370,10 +472,62 @@
     });
   }
 
+  function mountAddButton(el) {
+    if (!el) return;
+    formMounts.set(el, 'button');
+    el.innerHTML = supported === false ? '' :
+      `<button type="button" class="btn btn-primary" data-act="add-open">${esc(t('accounts.add.open'))}</button>`;
+  }
+
+  // 加号 modal：表单宿主每次 open 重挂（i18n/探测态跟随最新），
+  // 提交成功统一 closeAddModal（对空态内嵌表单是无害 no-op）。
+  let addModal = null;
+
+  function buildAddModal() {
+    const el = document.createElement('div');
+    el.id = 'acct-add-modal';
+    el.className = 'modal';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = `
+      <div class="modal-content modal-content--sm">
+        <div class="modal-header">
+          <h2 class="modal-title">${esc(t('accounts.add.title'))}</h2>
+          <button type="button" class="close-btn" data-m="close" aria-label="${esc(t('common.close'))}">&times;</button>
+        </div>
+        <div class="modal-body"><div data-m="formhost"></div></div>
+      </div>`;
+    document.body.appendChild(el);
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('[data-m="close"]')) closeAddModal();
+    });
+    return el;
+  }
+
+  function openAddModal() {
+    const el = addModal || (addModal = buildAddModal());
+    mountForm(el.querySelector('[data-m="formhost"]'));
+    window.Modal.open(el, { focus: '[data-f="name"]' });
+  }
+
+  function closeAddModal() {
+    if (!addModal) return;
+    window.Modal.close(addModal);
+  }
+
   // ---- CLI 凭据导入与复制预填：共用「找可见加号表单 + 切凭据档」两招 ----
+  // 无可见表单时（空态未挂/modal 未开）开 modal 再取——调用方拿不到表单即放弃。
   function visibleAddForm() {
     const forms = Array.from(document.querySelectorAll('form.acct-form[data-add]'));
-    return forms.find((f) => f.checkVisibility()) || forms[0] || null;
+    return forms.find((f) => f.checkVisibility()) || null;
+  }
+
+  function ensureAddForm() {
+    const f = visibleAddForm();
+    if (f) return f;
+    openAddModal();
+    return visibleAddForm();
   }
 
   function setAddKind(form, kind) {
@@ -385,7 +539,7 @@
   }
 
   function prefillCredFile(path, suggestedName) {
-    const form = visibleAddForm();
+    const form = ensureAddForm();
     if (!form) return;
     setAddKind(form, 'credFile');
     form.querySelector('[data-f="credFile"]').value = path;
@@ -397,7 +551,7 @@
   // duplicate：开加号表单预填除凭据值外的字段——token 永不上 wire 无从预填，
   // credentials_file 路径可带；名取 <name>-copy（撞名由服务端 409 收口）。
   function duplicateAccount(a) {
-    const form = visibleAddForm();
+    const form = ensureAddForm();
     if (!form) return;
     const kind = a.credential === 'credentials_file' && a.credentials_file ? 'credFile' : 'token';
     setAddKind(form, kind);
@@ -429,101 +583,37 @@
     el.appendChild(importBtn);
   }
 
-  // ---- 抽屉壳：failover 明细与「为什么病了」证据共用 ----
-  // 挂在卡的 [data-slot=drawer] 槽里；core 逐块 diff 不碰此槽，开着的抽屉
-  // 扛得住自动刷新（auto-refresh 另有 .acct-drawer[open] 跳本轮兜底）。
-  // 相对时刻文案复用 view 层（accounts-view.js 先于本文件加载）。
-  const relText = window.acctView.relTime;
-  const leftText = window.acctView.countdown;
+  // ---- 托盘装饰：core 展开行后把 view.trayBlock 的静态壳交来补动态件——
+  // 证据节尾 recover 钮（端点探测口径）+ failover 槽懒拉。托盘在行的下一行
+  // 容器里，core 逐块 diff 不碰展开体，扛得住自动刷新。
+
+  function decorateTray(container, a) {
+    if (!container || !a) return;
+    const evSec = container.querySelector('.acct-sec--evidence');
+    if (evSec && supported !== false && a.source !== 'tombstoned'
+        && !(absentActs.has('clear-cooldown') && absentActs.has('refresh-quota'))) {
+      evSec.insertAdjacentHTML('beforeend', `<div class="acct-drawer-foot">
+        <button type="button" class="acct-action-btn" data-act="recover" data-acct="${esc(a.name)}">${esc(t('accounts.act.recover'))}</button>
+        <span class="acct-ev-hint">${esc(t('accounts.ev.hint'))}</span>
+      </div>`);
+    }
+    const slot = container.querySelector('[data-tray="failover"]');
+    if (slot) fillFailover(slot, a);
+  }
 
   function secLeft(iso) {
     return Math.max(0, Math.round((Date.parse(iso) - Date.now()) / 1000));
   }
 
-  // 闩事件 kind+detail → i18n 文案；未知 kind 用服务端产出 label 兜底。
-  function gateEventText(ev) {
-    const key = ev.kind === 'latched' && ev.detail === 'extended' ? 'extended' : ev.kind;
-    const known = { latched: 1, extended: 1, released: 1, expired: 1, restored: 1 };
-    return known[key] ? t('accounts.gate.ev.' + key) : (ev.label || ev.kind || '');
-  }
-
-  function openDrawer(srcEl, kind, a) {
-    const card = srcEl && srcEl.closest('.acct-card');
-    const slot = card && card.querySelector('[data-slot="drawer"]');
-    if (!slot || !a || !a.name) return;
-    const titleKey = kind === 'failover' ? 'accounts.drawer.failover' : 'accounts.drawer.evidence';
-    slot.innerHTML = `<details class="acct-drawer" open>
-      <summary>${esc(t(titleKey))} · ${esc(a.name)}</summary>
-      <div class="acct-drawer-body">${kind === 'failover'
-        ? `<div class="acct-none">${esc(t('accounts.drawer.loading'))}</div>`
-        : evidenceHTML(a)}</div>
-    </details>`;
-    if (kind === 'failover') fillFailover(slot.querySelector('.acct-drawer-body'), a);
-  }
-
-  // 证据抽屉：lane.last_failure_* + 两档冷却 + fail_streak/bound_sessions +
-  // gate 闩与 events 环 + 最近配额采样，全部现有快照源合成，不发请求。
-  // 「恢复」= 清池侧冷却 + 立即刷配额；闩是上游真值只读展示，不提供清闩。
-  function evidenceHTML(a) {
-    const lane = a.lane || {};
-    const gate = a.gate || {};
-    const now = Date.now();
-    const future = (iso) => iso && Date.parse(iso) > now;
-    const row = (label, val) => (val
-      ? `<div class="acct-kv"><span class="acct-kv-k">${esc(label)}</span><span class="acct-kv-v">${val}</span></div>` : '');
-    const secs = [];
-    // 无 lane（disabled/tombstoned 或非 lane 集成员）不假装健康——显式 noData。
-    const laneBits = [
-      !a.lane ? `<span class="acct-none">${esc(t('accounts.noData'))}</span>`
-        : lane.healthy === false
-          ? `<span class="acct-no">${esc(t('accounts.st.unready'))}</span>`
-          : `<span class="acct-yes">${esc(t('accounts.st.ok'))}</span>`,
-      lane.fail_streak ? esc(t('accounts.ev.failStreak', { n: lane.fail_streak })) : '',
-      lane.bound_sessions ? esc(t('accounts.ev.bound', { n: lane.bound_sessions })) : '',
-      lane.inflight !== undefined && lane.inflight !== null ? esc(`${t('accounts.m.inflight')} ${num(lane.inflight)}`) : ''
-    ].filter(Boolean).join(' · ');
-    secs.push(row(t('accounts.ev.lane'), laneBits));
-    if (lane.last_failure_at) {
-      const code = lane.last_failure_code || t('accounts.st.unknownError');
-      const msg = lane.last_failure_message ? ` — ${esc(lane.last_failure_message)}` : '';
-      secs.push(row(t('accounts.ev.failure'), `${esc(relText(lane.last_failure_at))} · ${esc(code)}${msg}`));
-    }
-    const cds = [];
-    if (future(lane.auth_cooldown_until)) cds.push(`${esc(t('accounts.ev.credCooldown'))} ${esc(leftText(lane.auth_cooldown_until))}`);
-    if (future(lane.unhealthy_until)) cds.push(`${esc(t('accounts.ev.failCooldown'))} ${esc(leftText(lane.unhealthy_until))}`);
-    if (cds.length) secs.push(row(t('accounts.ev.cooldowns'), cds.join(' · ')));
-    if (gate.latched) {
-      secs.push(row(t('accounts.ev.latch'), esc(gate.limited_until
-        ? t('accounts.ev.latchLeft', { s: secLeft(gate.limited_until) })
-        : t('accounts.st.latched'))));
-    }
-    const pts = (a.quota && Array.isArray(a.quota.points)) ? a.quota.points : [];
-    const last = pts.length ? pts[pts.length - 1] : null;
-    if (last && (last.daily_remaining !== undefined || last.weekly_remaining !== undefined)) {
-      const pct = (v) => (v === null || v === undefined ? '—' : `${Number(v).toFixed(0)}%`);
-      secs.push(row(t('accounts.ev.quota'),
-        esc(`${t('accounts.f.daily')} ${pct(last.daily_remaining)} · ${t('accounts.f.weekly')} ${pct(last.weekly_remaining)}`)
-        + (last.at ? ` <span class="acct-ev-at">${esc(new Date(last.at * 1000).toLocaleTimeString())}</span>` : '')));
-    }
-    const events = Array.isArray(gate.events) ? gate.events.slice(0, 8) : [];
-    const evRows = events.map((ev) => `<div class="acct-ev-ev"><span class="acct-ev-kind">${esc(gateEventText(ev))}</span> ${esc(relText(ev.at))}${ev.until && Date.parse(ev.until) > now ? ` · ${esc(leftText(ev.until))}` : ''}</div>`).join('');
-    const evSec = `<div class="acct-ev-events"><h5>${esc(t('accounts.ev.events'))}</h5>${evRows || `<div class="acct-none">${esc(t('accounts.ev.noEvents'))}</div>`}</div>`;
-    const body = (secs.length > 1 || evRows)
-      ? `<div class="acct-kv-grid">${secs.join('')}</div>${evSec}`
-      : `<div class="acct-none">${esc(t('accounts.ev.none'))}</div>`;
-    const canRecover = supported !== false
-      && !(absentActs.has('clear-cooldown') && absentActs.has('refresh-quota'));
-    const foot = canRecover ? `<div class="acct-drawer-foot">
-      <button type="button" class="acct-action-btn" data-act="recover" data-acct="${esc(a.name)}">${esc(t('accounts.act.recover'))}</button>
-      <span class="acct-ev-hint">${esc(t('accounts.ev.hint'))}</span>
-    </div>` : '';
-    return body + foot;
-  }
-
-  // failover 抽屉：logs?account=<name> 取 account_switches>0 的近 5 行，
+  // failover 明细：logs?account=<name> 取 account_switches>0 的近 5 行，
   // 逐行懒拉 meta.json 取 upstream_attempts（被放弃 lane 的有序明细）与
-  // pool_candidates（候选序与降级原因）画时间线。
+  // pool_candidates（候选序与降级原因）画时间线。matrix 已计 0 次时
+  // 短路出空态，省一次请求。
   async function fillFailover(body, a) {
+    if (a.matrix && a.matrix.failoverCount === 0) {
+      body.innerHTML = `<div class="acct-none">${esc(t('accounts.fo.empty'))}</div>`;
+      return;
+    }
     const since = encodeURIComponent(new Date(Date.now() - 24 * 3600e3).toISOString());
     let rows;
     try {
@@ -584,7 +674,7 @@
 
   // ---- 测试：POST {name}/test 恒 200 回 {ok,latency_ms,user?,plan?,error?}，
   // 失败是结果不是 HTTP 错（404 才是域错误）。成功时服务端已顺带清冷却+
-  // 记配额信号，reload 让卡片跟上。
+  // 记配额信号，reload 让行跟上。
   async function testAccount(url, btn) {
     if (btn) {
       btn.disabled = true;
@@ -647,12 +737,14 @@
     a = a || { name };
     const url = `${BASE}/${encodeURIComponent(name)}`;
     switch (act) {
+      case 'add-open':
+        openAddModal();
+        return;
+      case 'kebab':
+        if (a && a.name) openKebab(srcEl, a);
+        return;
       case 'view-logs':
         window.location.href = logsHref(name);
-        return;
-      case 'failover':
-      case 'evidence':
-        openDrawer(srcEl, act, a);
         return;
       case 'test':
         testAccount(url, srcEl);
@@ -691,8 +783,10 @@
     actionsBlock,
     handle,
     reportGetProbe,
-    mountAddForm: mountForm,
+    mountAddForm: mountAddButton,
     mountEmptyAdd: mountForm,
     maybeCliImport,
+    decorateTray,
+    batchRun,
   };
 })();
