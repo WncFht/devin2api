@@ -514,567 +514,208 @@
 
 
 
-  // ---- 活动请求指示器（favicon 角标 + 标题闪烁）----
 
+
+  // ---- 活动请求指示器（favicon 角标 + 标题闪烁）----
   // 全站唯一轮询源：拉取完整 payload 后自己消费 count，同时推送 data 给订阅者（如 logs.js）
 
   const ACTIVE_POLL_MS = 2000;
-
-  let _activeTimer = null;
-
-  let _faviconBase = null;       // 预加载的 favicon 底图 Image
-
-  let _origFaviconLinks = null;  // 页面初始 favicon 集合快照（用于完整恢复）
-
-  let _lastBadgeCount = -1;      // 去重：仅数量变化时重绘 favicon
-
-  const _activeDataListeners = [];  // 订阅者回调列表
-
-  let _lastActiveData = null;       // 最近一次推送的数据（新订阅者立即获得，规避时序竞争）
-
   const ACTIVE_TITLE_FLASH_MS = 900;
 
-  let _activeTitleBase = '';
+  let activeTimer = null;
+  let faviconBaseImg = null;
+  let origFavicons = null;
+  let lastBadgeCount = -1;
+  let faviconPulseOn = false;
+  let activeCount = 0;
+  const activeDataListeners = [];
+  let lastActiveData = null;
+  let titleBase = '';
+  let titleFlashTimer = null;
+  let titleFlashVisible = false;
+  let titleFlashEnabled = false;
 
-  let _activeTitleTimer = null;
-
-  let _activeTitleVisible = false;
-
-  let _activeTitleCount = 0;
-
-  let _activeTitleEnabled = false;
-
-  let _faviconPulseOn = false;
-
-
-
-  function activeCountLabel(count) {
-
-    return count > 999 ? '999+' : String(count);
-
-  }
-
-
-
-  function faviconBadgeLabel(count) {
-
-    return count > 9 ? '9+' : String(count);
-
-  }
-
-
-
-  function listFaviconLinks() {
-
-    if (typeof document.querySelectorAll === 'function') {
-
-      return Array.from(document.querySelectorAll('link[rel~="icon"]'));
-
+  function snapshotFavicons() {
+    if (origFavicons) return;
+    origFavicons = Array.from(document.querySelectorAll('link[rel~="icon"]'))
+      .filter((link) => link.dataset.dynamicFavicon !== '1')
+      .map((link) => ({
+        rel: link.getAttribute('rel') || 'icon',
+        href: link.getAttribute('href') || '',
+        type: link.getAttribute('type') || '',
+        sizes: link.getAttribute('sizes') || ''
+      }));
+    if (!origFavicons.length) {
+      origFavicons = [{ rel: 'icon', href: '/web/favicon.svg', type: 'image/svg+xml', sizes: '' }];
     }
-
-    const link = typeof document.querySelector === 'function'
-
-      ? document.querySelector('link[rel~="icon"]')
-
-      : null;
-
-    return link ? [link] : [];
-
   }
 
-
-
-  function snapshotFaviconLink(link) {
-
-    const href = (link && (link.getAttribute('href') || link.href)) || '';
-
-    const rel = (link && (link.getAttribute('rel') || link.rel)) || 'icon';
-
-    const type = link ? (link.getAttribute('type') || link.type || '') : '';
-
-    const sizes = link ? (link.getAttribute('sizes') || link.sizes || '') : '';
-
-    return { rel, href, type, sizes };
-
+  function applyFavicons(descriptors, dynamic) {
+    document.querySelectorAll('link[rel~="icon"]').forEach((link) => link.remove());
+    descriptors.forEach((d) => {
+      const link = document.createElement('link');
+      link.rel = d.rel;
+      if (d.type) link.type = d.type;
+      if (d.sizes) link.sizes = d.sizes;
+      link.href = d.href;
+      if (dynamic) link.dataset.dynamicFavicon = '1';
+      document.head.appendChild(link);
+    });
   }
 
-
-
-  function rememberOriginalFavicons() {
-
-    if (_origFaviconLinks !== null) return;
-
-    const links = listFaviconLinks().filter((link) => link.getAttribute('data-dynamic-favicon') !== '1');
-
-    _origFaviconLinks = links.map(snapshotFaviconLink);
-
-    if (_origFaviconLinks.length === 0) {
-
-      _origFaviconLinks = [{ rel: 'icon', href: '/web/favicon.svg', type: 'image/svg+xml', sizes: '' }];
-
-    }
-
-  }
-
-
-
-  function removeFaviconLinks(links) {
-
-    for (const link of links) {
-
-      if (!link) continue;
-
-      if (typeof link.remove === 'function') {
-
-        link.remove();
-
-        continue;
-
-      }
-
-      if (link.parentNode && typeof link.parentNode.removeChild === 'function') {
-
-        link.parentNode.removeChild(link);
-
-      }
-
-    }
-
-  }
-
-
-
-  function createFaviconLink(descriptor, dynamic = false) {
-
-    const link = document.createElement('link');
-
-    link.rel = descriptor.rel || 'icon';
-
-    if (dynamic) link.setAttribute('data-dynamic-favicon', '1');
-
-    if (descriptor.type) link.setAttribute('type', descriptor.type);
-
-    else link.removeAttribute('type');
-
-    if (descriptor.sizes) link.setAttribute('sizes', descriptor.sizes);
-
-    else link.removeAttribute('sizes');
-
-    link.href = descriptor.href;
-
-    document.head.appendChild(link);
-
-    return link;
-
-  }
-
-
-
-  function replaceFaviconSet(descriptors, dynamic = false) {
-
-    const existing = listFaviconLinks();
-
-    removeFaviconLinks(existing);
-
-    for (const descriptor of descriptors) {
-
-      createFaviconLink(descriptor, dynamic);
-
-    }
-
-  }
-
-
-
-  function replaceDynamicFavicon(href, type) {
-
-    rememberOriginalFavicons();
-
-    replaceFaviconSet([
-
-      { rel: 'shortcut icon', href, type, sizes: '' },
-
-      { rel: 'icon', href, type, sizes: '' }
-
-    ], true);
-
-  }
-
-
-
-  // 预加载 favicon 底图（首次异步，之后同步回调）
-
-  function ensureFaviconBase(cb) {
-
-    if (_faviconBase) { cb(); return; }
-
-    const img = new Image();
-
-    img.onload = () => { _faviconBase = img; cb(); };
-
-    img.onerror = () => { _faviconBase = null; };
-
-    img.src = '/web/favicon.svg';
-
-  }
-
-
-
-  // 在 favicon 右上角画呼吸色点 + 数字角标
-
-  function drawFaviconBadge(count, pulseOn = false) {
-
-    if (!_faviconBase) return;
-
-    const S = 64, cx = 50, cy = 14; // 小角标：不遮挡 CC 字母
-
-    const r = pulseOn ? 13 : 11;
-
-    const halo = pulseOn ? 18 : 15;
-
+  // 底图右上画呼吸色点 + 计数角标（1~9 单字符 / 9+ 双字符两档字号）
+  function drawFaviconBadge(count, pulse) {
+    if (!faviconBaseImg) return;
     const canvas = document.createElement('canvas');
-
-    canvas.width = S; canvas.height = S;
-
+    canvas.width = 64;
+    canvas.height = 64;
     const ctx = canvas.getContext('2d');
-
     if (!ctx) return;
-
-    ctx.clearRect(0, 0, S, S);
-
-    ctx.drawImage(_faviconBase, 0, 0, S, S);
-
-
-
-    const text = faviconBadgeLabel(count);
-
-    ctx.beginPath(); ctx.arc(cx, cy, halo, 0, Math.PI * 2);
-
-    ctx.fillStyle = pulseOn ? 'rgba(249, 115, 22, 0.28)' : 'rgba(249, 115, 22, 0.12)';
-
+    ctx.drawImage(faviconBaseImg, 0, 0, 64, 64);
+    const cx = 50, cy = 14, r = pulse ? 13 : 11;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+    ctx.fillStyle = pulse ? 'rgba(249,115,22,0.28)' : 'rgba(249,115,22,0.12)';
     ctx.fill();
-
-
-
-    // 外描边：先画白圆再画橙圆，保留完整橙区给文字（避免居中描边吃掉内部空间）
-
-    ctx.beginPath(); ctx.arc(cx, cy, r + 2, 0, Math.PI * 2);
-
-    ctx.fillStyle = '#ffffff'; ctx.fill();
-
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-
-    ctx.fillStyle = pulseOn ? '#fb923c' : '#f97316'; ctx.fill();
-
-
-
-    // 字号按位数两档自适应（1~9 单字符 / 9+ 双字符）
-
-    const fs = text.length >= 2 ? 14 : 18;
-
+    ctx.beginPath();
+    ctx.arc(cx, cy, r + 2, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
-
-    ctx.font = `bold ${fs}px ui-sans-serif, system-ui, -apple-system, sans-serif`;
-
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = pulse ? '#fb923c' : '#f97316';
+    ctx.fill();
+    const label = count > 9 ? '9+' : String(count);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `bold ${label.length >= 2 ? 14 : 18}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textAlign = 'center';
-
     ctx.textBaseline = 'middle';
-
-    ctx.fillText(text, cx, cy + 1);
-
-
-
+    ctx.fillText(label, cx, cy + 1);
     try {
-
-      replaceDynamicFavicon(canvas.toDataURL('image/png'), 'image/png');
-
+      applyFavicons([
+        { rel: 'shortcut icon', href: canvas.toDataURL('image/png'), type: 'image/png', sizes: '' },
+        { rel: 'icon', href: canvas.toDataURL('image/png'), type: 'image/png', sizes: '' }
+      ], true);
     } catch (_) { /* 编码失败：保持原 favicon */ }
-
   }
 
-
-
-  function restoreFavicon() {
-
-    rememberOriginalFavicons();
-
-    replaceFaviconSet(_origFaviconLinks || [
-
-      { rel: 'icon', href: '/web/favicon.svg', type: 'image/svg+xml', sizes: '' }
-
-    ], false);
-
-  }
-
-
-
-  function redrawActiveFavicon() {
-
-    if (_activeTitleCount > 0) {
-
-      ensureFaviconBase(() => drawFaviconBadge(_activeTitleCount, _faviconPulseOn));
-
+  function refreshActiveFavicon() {
+    if (activeCount <= 0) {
+      applyFavicons(origFavicons);
+      return;
     }
-
+    if (!faviconBaseImg) {
+      const img = new Image();
+      img.onload = () => { faviconBaseImg = img; drawFaviconBadge(activeCount, faviconPulseOn); };
+      img.src = '/web/favicon.svg';
+      return;
+    }
+    drawFaviconBadge(activeCount, faviconPulseOn);
   }
 
-
-
-  function activeTitleLabel(count) {
-
-    const label = activeCountLabel(count);
-
-    const fallback = `请求中[${label}]-`;
-
+  function activeTitleLabel() {
+    const label = activeCount > 999 ? '999+' : String(activeCount);
     if (typeof t === 'function') {
-
       const translated = t('nav.activeRequestsTitle', { count: label });
-
-      return translated && translated !== 'nav.activeRequestsTitle' ? translated : fallback;
-
+      if (translated && translated !== 'nav.activeRequestsTitle') return translated;
     }
-
-    return fallback;
-
+    return `请求中[${label}]-`;
   }
 
-
-
-  function activeTitleText() {
-
-    return `${activeTitleLabel(_activeTitleCount)}${_activeTitleBase}`;
-
+  function stopTitleFlash() {
+    if (titleFlashTimer !== null) {
+      clearInterval(titleFlashTimer);
+      titleFlashTimer = null;
+    }
+    titleFlashVisible = false;
+    if (titleBase) document.title = titleBase;
   }
-
-
-
-  function showActiveTitle() {
-
-    document.title = activeTitleText();
-
-    _activeTitleVisible = true;
-
-  }
-
-
-
-  function restoreActiveTitle() {
-
-    if (_activeTitleTimer !== null) {
-
-      clearInterval(_activeTitleTimer);
-
-      _activeTitleTimer = null;
-
-    }
-
-    _activeTitleVisible = false;
-
-    if (_activeTitleBase) document.title = _activeTitleBase;
-
-  }
-
-
-
-  function updateActiveTitle(count, enabled) {
-
-    if (_activeTitleTimer === null) {
-
-      _activeTitleBase = document.title || _activeTitleBase || '';
-
-    }
-
-    _activeTitleCount = count;
-
-    _activeTitleEnabled = enabled === true;
-
-
-
-    if (count <= 0) {
-
-      restoreActiveTitle();
-
-      return;
-
-    }
-
-    if (!_activeTitleEnabled && _activeTitleVisible) {
-
-      document.title = _activeTitleBase;
-
-      _activeTitleVisible = false;
-
-    }
-
-
-
-    if (_activeTitleTimer === null) {
-
-      if (_activeTitleEnabled) showActiveTitle();
-
-      _activeTitleTimer = setInterval(() => {
-
-        _faviconPulseOn = !_faviconPulseOn;
-
-        redrawActiveFavicon();
-
-        if (!_activeTitleEnabled) return;
-
-        if (_activeTitleVisible) {
-
-          document.title = _activeTitleBase;
-
-          _activeTitleVisible = false;
-
-          return;
-
-        }
-
-        showActiveTitle();
-
-      }, ACTIVE_TITLE_FLASH_MS);
-
-      return;
-
-    }
-
-
-
-    if (_activeTitleEnabled && _activeTitleVisible) showActiveTitle();
-
-  }
-
-
 
   function updateActiveIndicator(count, titleEnabled) {
+    if (titleFlashTimer === null) {
+      titleBase = document.title || titleBase || '';
+    }
+    activeCount = count;
+    titleFlashEnabled = titleEnabled === true;
 
-    _activeTitleCount = count;
-
-    // 标签页 favicon 角标（仅在数量变化时重绘，省 toDataURL 开销）
-
-    if (count !== _lastBadgeCount) {
-
-      _lastBadgeCount = count;
-
-      if (count > 0) {
-
-        _faviconPulseOn = false;
-
-        redrawActiveFavicon();
-
-      } else {
-
-        _faviconPulseOn = false;
-
-        restoreFavicon();
-
-      }
-
+    // favicon 角标仅在数量变化时重绘，省 toDataURL 开销
+    if (count !== lastBadgeCount) {
+      lastBadgeCount = count;
+      snapshotFavicons();
+      faviconPulseOn = false;
+      refreshActiveFavicon();
     }
 
-    updateActiveTitle(count, titleEnabled);
-
+    if (count <= 0) {
+      stopTitleFlash();
+      return;
+    }
+    if (titleFlashTimer === null) {
+      if (titleFlashEnabled) {
+        document.title = activeTitleLabel() + titleBase;
+        titleFlashVisible = true;
+      }
+      titleFlashTimer = setInterval(() => {
+        faviconPulseOn = !faviconPulseOn;
+        if (faviconBaseImg) drawFaviconBadge(activeCount, faviconPulseOn);
+        if (!titleFlashEnabled) return;
+        document.title = titleFlashVisible ? titleBase : activeTitleLabel() + titleBase;
+        titleFlashVisible = !titleFlashVisible;
+      }, ACTIVE_TITLE_FLASH_MS);
+      return;
+    }
+    if (!titleFlashEnabled && titleFlashVisible) {
+      document.title = titleBase;
+      titleFlashVisible = false;
+    }
+    if (titleFlashEnabled && titleFlashVisible) {
+      document.title = activeTitleLabel() + titleBase;
+    }
   }
-
-
 
   async function pollActiveRequests() {
-
     try {
-
       const payload = await fetchAPIWithAuth('/admin/active-requests');
-
       const count = typeof payload.count === 'number' ? payload.count : 0;
-
       updateActiveIndicator(count, payload.active_request_title_enabled === true);
-
-      // 推送完整数据给订阅者
-
       const data = (payload.success && Array.isArray(payload.data)) ? payload.data : [];
-
-      _lastActiveData = data;
-
-      for (const cb of _activeDataListeners) {
-
+      lastActiveData = data;
+      for (const cb of activeDataListeners) {
         try { cb(data, count); } catch (_) { /* 订阅者异常不影响主逻辑 */ }
-
       }
-
     } catch (_) { /* 静默：未登录或网络异常不打断页面 */ }
-
   }
-
-
 
   function startActiveRequestsPolling() {
-
-    if (_activeTimer) return;
-
+    if (activeTimer) return;
     pollActiveRequests();
-
-    _activeTimer = setInterval(() => {
-
-      if (document.hidden) return;
-
-      pollActiveRequests();
-
+    activeTimer = setInterval(() => {
+      if (!document.hidden) pollActiveRequests();
     }, ACTIVE_POLL_MS);
-
-    document.addEventListener('visibilitychange', _onActiveVisibilityChange);
-
+    document.addEventListener('visibilitychange', onActiveVisibilityChange);
   }
-
-
 
   function stopActiveRequestsPolling() {
-
-    if (_activeTimer) {
-
-      clearInterval(_activeTimer);
-
-      _activeTimer = null;
-
+    if (activeTimer) {
+      clearInterval(activeTimer);
+      activeTimer = null;
     }
-
   }
 
-
-
-  function _onActiveVisibilityChange() {
-
-    if (document.hidden) {
-
-      stopActiveRequestsPolling();
-
-    } else {
-
-      startActiveRequestsPolling();
-
-    }
-
+  function onActiveVisibilityChange() {
+    if (document.hidden) stopActiveRequestsPolling();
+    else startActiveRequestsPolling();
   }
 
-
-
-  // 供其他页面模块（如 logs.js）订阅活动请求数据，避免重复轮询
-
+  // 供其他页面模块（如 logs.js）订阅活动请求数据，避免重复轮询；
+  // 已有最近数据则立即回调，规避新订阅者干等一个周期的时序竞争
   function onActiveRequestsData(callback) {
-
     if (typeof callback !== 'function') return;
-
-    _activeDataListeners.push(callback);
-
-    // 已有最近数据则立即回调，避免新订阅者等到下个轮询周期
-
-    if (_lastActiveData !== null) {
-
-      try { callback(_lastActiveData); } catch (_) { /* 订阅者异常不影响主逻辑 */ }
-
+    activeDataListeners.push(callback);
+    if (lastActiveData !== null) {
+      try { callback(lastActiveData); } catch (_) { /* 订阅者异常不影响主逻辑 */ }
     }
-
   }
-
-
 
   function buildTopbar(active) {
 
@@ -1214,6 +855,8 @@
 
       'aria-expanded': 'false',
 
+      'aria-haspopup': 'menu',
+
       onclick: (event) => {
 
         event.stopPropagation();
@@ -1225,6 +868,26 @@
         closeThemeSwitchers(switcher);
 
         setThemeSwitcherOpen(switcher, nextOpen);
+
+        if (nextOpen) focusThemeOption(switcher);
+
+      },
+
+      onkeydown: (event) => {
+
+        if (event.key !== 'ArrowDown' && event.key !== 'Enter') return;
+
+        const switcher = event.currentTarget.closest('.theme-switcher');
+
+        if (switcher.classList.contains('open')) return;
+
+        event.preventDefault();
+
+        closeThemeSwitchers(switcher);
+
+        setThemeSwitcherOpen(switcher, true);
+
+        focusThemeOption(switcher);
 
       }
 
@@ -1256,15 +919,77 @@
 
         setThemeSwitcherOpen(event.currentTarget.closest('.theme-switcher'), false);
 
+        trigger.focus();
+
       }
 
     }, [icon(), h('span', { 'data-i18n': labelKey }, t(labelKey))])));
+
+    // 菜单键盘导航：方向键循环、Esc 关并回焦 trigger、Tab 关
+
+    menu.addEventListener('keydown', (event) => {
+
+      const options = Array.from(menu.querySelectorAll('.theme-option'));
+
+      const idx = options.indexOf(document.activeElement);
+
+      if (event.key === 'Escape') {
+
+        event.preventDefault();
+
+        setThemeSwitcherOpen(switcher, false);
+
+        trigger.focus();
+
+        return;
+
+      }
+
+      if (event.key === 'Tab') {
+
+        setThemeSwitcherOpen(switcher, false);
+
+        return;
+
+      }
+
+      let next = -1;
+
+      if (event.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % options.length;
+
+      else if (event.key === 'ArrowUp') next = idx <= 0 ? options.length - 1 : idx - 1;
+
+      else if (event.key === 'Home') next = 0;
+
+      else if (event.key === 'End') next = options.length - 1;
+
+      if (next >= 0) {
+
+        event.preventDefault();
+
+        options[next] && options[next].focus();
+
+      }
+
+    });
 
     const switcher = h('div', { class: 'theme-switcher' }, [trigger, menu]);
 
     refreshThemeSwitcher(switcher);
 
     return switcher;
+
+  }
+
+  function focusThemeOption(switcher) {
+
+    const menu = switcher && switcher.querySelector('.theme-menu');
+
+    if (!menu) return;
+
+    const target = menu.querySelector('.theme-option[aria-pressed="true"]') || menu.querySelector('.theme-option');
+
+    if (target) target.focus();
 
   }
 
@@ -1383,143 +1108,5 @@
   window.getChartTheme = getChartTheme;
 
 
-
-  // 通知系统（全局复用，DRY）
-
-  function ensureNotifyHost() {
-
-    let host = document.getElementById('notify-host');
-
-    if (!host) {
-
-      host = document.createElement('div');
-
-      host.id = 'notify-host';
-
-      host.style.cssText = `position: fixed; top: var(--space-6); right: var(--space-6); display: flex; flex-direction: column; gap: var(--space-2); z-index: 9999; pointer-events: none;`;
-
-      document.body.appendChild(host);
-
-    }
-
-    return host;
-
-  }
-
-
-
-  window.ensureNotifyHost = ensureNotifyHost;
-
-
-
-  window.showNotification = function (message, type = 'info') {
-
-    const el = document.createElement('div');
-
-    el.className = `notification notification-${type}`;
-
-    el.style.cssText = `
-
-      background: var(--surface-bg-strong);
-
-      backdrop-filter: blur(16px);
-
-      border: 1px solid var(--surface-border);
-
-      border-radius: var(--radius-lg);
-
-      padding: var(--space-4) var(--space-6);
-
-      color: var(--neutral-900);
-
-      font-weight: var(--font-medium);
-
-      opacity: 0;
-
-      transform: translateX(20px);
-
-      transition: all var(--duration-normal) var(--timing-function);
-
-      max-width: 360px;
-
-      box-shadow: 0 10px 25px rgba(0,0,0,0.12);
-
-      overflow: hidden;
-
-      overflow-wrap: anywhere;
-
-      white-space: pre-wrap;
-
-      isolation: isolate;
-
-      pointer-events: auto;
-
-    `;
-
-    if (type === 'success') {
-
-      el.style.background = 'var(--notification-success-bg)';
-
-      el.style.color = 'var(--notification-success-fg)';
-
-      el.style.borderColor = 'var(--notification-success-border)';
-
-      el.style.boxShadow = '0 6px 28px rgba(16,185,129,0.18)';
-
-    } else if (type === 'error') {
-
-      el.style.background = 'var(--notification-error-bg)';
-
-      el.style.color = 'var(--notification-error-fg)';
-
-      el.style.borderColor = 'var(--notification-error-border)';
-
-      el.style.boxShadow = '0 6px 28px rgba(239,68,68,0.18)';
-
-    } else if (type === 'warning') {
-
-      el.style.background = 'var(--notification-warning-bg)';
-
-      el.style.color = 'var(--notification-warning-fg)';
-
-      el.style.borderColor = 'var(--notification-warning-border)';
-
-      el.style.boxShadow = '0 6px 28px rgba(245,158,11,0.18)';
-
-    } else if (type === 'info') {
-
-      el.style.background = 'var(--notification-info-bg)';
-
-      el.style.color = 'var(--notification-info-fg)';
-
-      el.style.borderColor = 'var(--notification-info-border)';
-
-    }
-
-    el.textContent = message;
-
-    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
-
-    const host = ensureNotifyHost();
-
-    host.appendChild(el);
-
-    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'translateX(0)'; });
-
-    setTimeout(() => {
-
-      el.style.opacity = '0'; el.style.transform = 'translateX(20px)';
-
-      setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 320);
-
-    }, 3600);
-
-  }
-
-  window.showSuccess = (msg) => window.showNotification(msg, 'success');
-
-  window.showError = (msg) => window.showNotification(msg, 'error');
-
-  window.showWarning = (msg) => window.showNotification(msg, 'warning');
 
 })();

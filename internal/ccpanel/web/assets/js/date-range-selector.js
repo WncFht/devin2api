@@ -80,7 +80,7 @@
     const activeValue = options.activeValue || 'today';
 
     container.innerHTML = presets.map((preset) => `
-      <button type="button" class="time-range-btn${preset.value === activeValue ? ' active' : ''}" data-range="${preset.value}">${text(preset.i18nKey, preset.fallback)}</button>
+      <button type="button" class="seg-btn${preset.value === activeValue ? ' active' : ''}" data-range="${preset.value}">${text(preset.i18nKey, preset.fallback)}</button>
     `).join('');
   }
 

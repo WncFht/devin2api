@@ -118,6 +118,7 @@ window.I18N_LOCALES['en'] = {
   'index.usage.sendsPerRowHint': 'Gate admissions ÷ log rows: inner-retry probe',
   'index.usage.topKeys': 'Top tokens',
   'index.usage.window': 'Window',
+  'index.channelEmpty': 'No requests',
   'common.selectAll': 'Select all/Deselect all',
   'common.clear': 'Clear',
 
@@ -283,6 +284,7 @@ window.I18N_LOCALES['en'] = {
   'stats.containsTextPlaceholder': 'Contains text...',
   'stats.detailTitle': 'Detailed Statistics',
   'stats.sortByName': 'Sorted by model name',
+  'stats.viewToggle': 'View',
   'stats.viewTable': 'Table',
   'stats.viewChart': 'Chart',
   'stats.avgFirstByte': 'TTFT/Latency(s)',
@@ -518,6 +520,7 @@ window.I18N_LOCALES['en'] = {
   'settings.configItem': 'Configuration',
   'settings.currentValue': 'Current Value',
   'settings.saveAll': 'Save All Changes',
+  'settings.table.title': 'Panel Settings',
   'settings.resetToDefault': 'Reset to default',
   'settings.runtimeMetrics.button': 'View Runtime Status',
   'settings.runtimeMetrics.title': 'Process Runtime Status',
@@ -838,6 +841,7 @@ window.I18N_LOCALES['en'] = {
   'models.pageTitle': 'Model Registry',
   'models.pageSubtitle': 'Enable switch and redirect for public model names; redirect resolves before the alias chain',
   'models.summary': '{total} total · {enabled} enabled · {disabled} disabled · {redirected} redirected',
+  'models.filter.statusLabel': 'Status',
   'models.filter.disabled': 'Disabled',
   'models.filter.redirected': 'Redirected',
   'models.filter.override': 'Overridden',
@@ -1239,5 +1243,12 @@ window.I18N_LOCALES['en'] = {
   'accounts.filter.missing': 'Account {name} not found',
   'accounts.add.credContent': 'Paste credentials.toml',
   'accounts.add.credContentHint': 'Paste the full credentials.toml content',
-  'accounts.add.verify': 'Verify before adding'
+  'accounts.add.verify': 'Verify before adding',
+
+  // tokens
+  'tokens.createSectionQuota': 'Quota & Limits',
+  'tokens.createSectionModels': 'Models & Activation',
+
+  // logs
+  'logs.debugMergeFailed': 'Merge response failed'
 };

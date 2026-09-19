@@ -22,6 +22,28 @@
   // 已注册的刷新回调
   const refreshCallbacks = [];
 
+  // 语言包按需加载：HTML 不再静态引 locales/*.js，首次需要时注入 script。
+  // 已静态加载过的包（I18N_LOCALES 有键）直接视为就绪，不重复注入。
+  const localePromises = {};
+  let pendingPacks = 0;
+
+  function ensureLocalePack(code) {
+    if (window.I18N_LOCALES[code]) return Promise.resolve();
+    if (!localePromises[code]) {
+      pendingPacks++;
+      localePromises[code] = new Promise((resolve) => {
+        const script = document.createElement('script');
+        script.src = `/web/assets/locales/${code}.js`;
+        const done = () => { pendingPacks--; resolve(); };
+        script.onload = done;
+        // 失败同样放行：t() 回退 zh-CN/key，不能让 ready 悬死
+        script.onerror = done;
+        document.head.appendChild(script);
+      });
+    }
+    return localePromises[code];
+  }
+
   /**
    * 检测浏览器语言
    * @returns {string} 语言代码
@@ -33,7 +55,8 @@
   }
 
   /**
-   * 初始化 i18n
+   * 初始化 i18n：解析当前语言并预载当前包与 zh-CN 兜底包
+   * @returns {Promise} 全部所需语言包就绪后 settle
    */
   function init() {
     const saved = localStorage.getItem('ccload_locale');
@@ -43,6 +66,8 @@
       currentLocale = detectBrowserLocale();
     }
     document.documentElement.lang = currentLocale;
+
+    return Promise.all([...new Set([currentLocale, 'zh-CN'])].map(ensureLocalePack));
   }
 
   /**
@@ -54,7 +79,7 @@
   }
 
   /**
-   * 设置语言
+   * 设置语言（语言包未加载时先加载再应用）
    * @param {string} locale
    */
   function setLocale(locale) {
@@ -62,20 +87,22 @@
       console.warn('[i18n] Unsupported locale:', locale);
       return;
     }
-    currentLocale = locale;
-    localStorage.setItem('ccload_locale', locale);
-    document.documentElement.lang = locale;
+    ensureLocalePack(locale).then(() => {
+      currentLocale = locale;
+      localStorage.setItem('ccload_locale', locale);
+      document.documentElement.lang = locale;
 
-    // 翻译静态页面元素
-    translatePage();
+      // 翻译静态页面元素
+      translatePage();
 
-    // 执行所有已注册的刷新回调
-    refreshCallbacks.forEach(cb => {
-      try { cb(locale); } catch (e) { console.error('[i18n] Refresh callback error:', e); }
+      // 执行所有已注册的刷新回调
+      refreshCallbacks.forEach(cb => {
+        try { cb(locale); } catch (e) { console.error('[i18n] Refresh callback error:', e); }
+      });
+
+      // 触发自定义事件（兼容旧代码）
+      window.dispatchEvent(new CustomEvent('localechange', { detail: { locale } }));
     });
-
-    // 触发自定义事件（兼容旧代码）
-    window.dispatchEvent(new CustomEvent('localechange', { detail: { locale } }));
   }
 
   /**
@@ -160,9 +187,15 @@
   }
 
   /**
-   * 翻译 root 范围内所有带 data-i18n 属性的元素（缺省整文档）
+   * 翻译 root 范围内所有带 data-i18n 属性的元素（缺省整文档）。
+   * 语言包尚在加载时延迟到全部就绪后重放，调用方无需自行等待。
    */
   function translatePage(root = document) {
+    if (pendingPacks > 0) {
+      Promise.all(Object.values(localePromises)).then(() => translatePage(root));
+      return;
+    }
+
     // data-i18n: 替换 textContent
     root.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.getAttribute('data-i18n');
@@ -231,7 +264,7 @@
     const trigger = document.createElement('button');
     trigger.className = 'lang-dropdown-trigger';
     trigger.setAttribute('aria-label', t('common.selectLanguage'));
-    trigger.setAttribute('aria-haspopup', 'true');
+    trigger.setAttribute('aria-haspopup', 'menu');
     trigger.setAttribute('aria-expanded', 'false');
     trigger.innerHTML = `
       <svg class="lang-icon" viewBox="0 0 24 24" fill="currentColor">
@@ -260,6 +293,7 @@
         menu.querySelectorAll('.lang-dropdown-item').forEach(el => el.classList.remove('active'));
         item.classList.add('active');
         closeMenu();
+        trigger.focus();
       });
       menu.appendChild(item);
     });
@@ -267,9 +301,11 @@
     wrapper.appendChild(trigger);
     wrapper.appendChild(menu);
 
-    function toggleMenu() {
-      const isOpen = wrapper.classList.toggle('open');
-      trigger.setAttribute('aria-expanded', isOpen);
+    function openMenu() {
+      wrapper.classList.add('open');
+      trigger.setAttribute('aria-expanded', 'true');
+      const items = menu.querySelectorAll('.lang-dropdown-item');
+      (menu.querySelector('.lang-dropdown-item.active') || items[0])?.focus();
     }
 
     function closeMenu() {
@@ -277,9 +313,48 @@
       trigger.setAttribute('aria-expanded', 'false');
     }
 
+    function toggleMenu() {
+      if (wrapper.classList.contains('open')) {
+        closeMenu();
+      } else {
+        openMenu();
+      }
+    }
+
     trigger.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleMenu();
+    });
+
+    trigger.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' && !wrapper.classList.contains('open')) {
+        e.preventDefault();
+        openMenu();
+      }
+    });
+
+    menu.addEventListener('keydown', (e) => {
+      const items = Array.from(menu.querySelectorAll('.lang-dropdown-item'));
+      const idx = items.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        items[(idx + 1) % items.length].focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        items[(idx - 1 + items.length) % items.length].focus();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        items[0].focus();
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        items[items.length - 1].focus();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMenu();
+        trigger.focus();
+      } else if (e.key === 'Tab') {
+        closeMenu();
+      }
     });
 
     document.addEventListener('click', (e) => {
@@ -297,8 +372,8 @@
     return wrapper;
   }
 
-  // 初始化
-  init();
+  // 初始化并暴露语言包就绪 promise：initPageBootstrap 用它对齐首屏翻译时机
+  const ready = init();
 
   // 导出到全局
   window.i18n = {
@@ -308,7 +383,8 @@
     translatePage,
     getSupportedLocales,
     createLanguageSwitcher,
-    onLocaleChange
+    onLocaleChange,
+    ready
   };
 
   // 简写形式 - 保证 t() 和 i18nText() 永远可用

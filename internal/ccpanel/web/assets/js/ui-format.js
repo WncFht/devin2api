@@ -60,6 +60,15 @@
     return timingTone(seconds, 30, 60);
   }
 
+  // 成功率分档：≥99 healthy，≥95 warning，其余 critical
+  function rateTone(pct) {
+    const value = Number(pct);
+    if (!Number.isFinite(value)) return '';
+    if (value >= 99) return 'healthy';
+    if (value >= 95) return 'warning';
+    return 'critical';
+  }
+
   // tone 名 → 可拼进 class 的片段（' healthy'→' tone-healthy'），空 tone 返回 ''。
   function toneClass(tone) {
     return tone ? ` tone-${tone}` : '';
@@ -92,10 +101,9 @@
    */
 
   function formatCostPair(standard, effective) {
-    const s = Number(standard) || 0;
-    const e = (effective === undefined || effective === null) ? s : (Number(effective) || 0);
-    if (Math.abs(e - s) < 1e-9) return formatCost(s);
-    return formatCost(s) + '/' + formatCost(e);
+    const info = getCostDisplayInfo(standard, effective);
+    if (!info.hasMultiplier) return formatCost(info.standardCost);
+    return formatCost(info.standardCost) + '/' + formatCost(info.effectiveCost);
   }
 
   /**
@@ -230,9 +238,11 @@
   window.buildCostStackHtml = buildCostStackHtml;
   window.getFirstByteTimingTone = getFirstByteTimingTone;
   window.getDurationTimingTone = getDurationTimingTone;
+  window.rateTone = rateTone;
   window.toneClass = toneClass;
   window.formatNumber = formatNumber;
   window.formatRpmValue = formatRpmValue;
   window.escapeHtml = escapeHtml;
+  window.esc = escapeHtml;
 
 })();

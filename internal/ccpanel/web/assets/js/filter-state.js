@@ -22,6 +22,60 @@
     return getQueryKeys(field)[0] || '';
   }
 
+  function getRequestKey(field, value, values) {
+    if (typeof field.requestKey === 'function') {
+      const requestKey = field.requestKey(value, values);
+      if (typeof requestKey === 'string' && requestKey) {
+        return requestKey;
+      }
+    }
+    if (typeof field.requestKey === 'string' && field.requestKey) {
+      return field.requestKey;
+    }
+    return getQueryKeys(field)[0] || '';
+  }
+
+  function appendBaseParams(params, baseParams) {
+    if (!baseParams || typeof baseParams !== 'object') {
+      return;
+    }
+    Object.entries(baseParams).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') {
+        return;
+      }
+      params.set(key, String(value));
+    });
+  }
+
+  // 值 → 后端请求参数（与 buildParams 的 URL 写参同构，键名走 requestKey）
+  function buildRequestParams(values, fields, options = {}) {
+    const params = new URLSearchParams();
+    appendBaseParams(params, options.baseParams);
+
+    (Array.isArray(fields) ? fields : []).forEach((field) => {
+      const value = values ? values[field.key] : undefined;
+      const include = typeof field.includeInRequest === 'function'
+        ? field.includeInRequest(value, values)
+        : value !== undefined && value !== null && value !== '';
+
+      if (!include) {
+        return;
+      }
+
+      const requestKey = getRequestKey(field, value, values);
+      if (!requestKey) {
+        return;
+      }
+
+      const serializedValue = typeof field.serializeForRequest === 'function'
+        ? field.serializeForRequest(value, values)
+        : value;
+      params.set(requestKey, String(serializedValue));
+    });
+
+    return params;
+  }
+
   function load(storageKey, storage = root.localStorage) {
     try {
       const saved = storage.getItem(storageKey);
@@ -154,6 +208,7 @@
     save,
     restore,
     buildParams,
+    buildRequestParams,
     mergeParams,
     buildRestoreSearch,
     buildURL,
@@ -162,6 +217,8 @@
 
   if (typeof window !== 'undefined') {
     window.FilterState = api;
+    // 原 filter-query.js 已并入本文件，保留别名兼容既有调用
+    window.FilterQuery = { buildRequestParams };
   }
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -89,6 +89,11 @@
 	    window.location.replace('/web/index.html');
 	    return;
 	  }
+      // 语言包改为按需加载：就绪后再翻译/渲染，否则首屏会拿 key 当文案
+      if (window.i18n && window.i18n.ready) {
+        await window.i18n.ready;
+      }
+
       if (options.translate !== false && window.i18n && typeof window.i18n.translatePage === 'function') {
         window.i18n.translatePage();
       }
@@ -288,7 +293,7 @@
    */
 
   function initTimeRangeSelector(onRangeChange, scope = document) {
-    const buttons = scope.querySelectorAll('.time-range-btn');
+    const buttons = scope.querySelectorAll('.seg-btn');
     buttons.forEach(btn => {
       const prev = timeRangeClickHandlers.get(btn);
       if (prev) btn.removeEventListener('click', prev);
@@ -330,7 +335,7 @@
             onConfirm: (confirmedRange) => {
               currentValue = 'custom';
               currentCustomRange = confirmedRange;
-              scope.querySelectorAll('.time-range-btn').forEach(b => b.classList.remove('active'));
+              scope.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
               if (button) button.classList.add('active');
               if (button && confirmedRange.label) button.title = confirmedRange.label;
               if (typeof onChange === 'function') onChange('custom', confirmedRange);

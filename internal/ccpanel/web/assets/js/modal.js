@@ -14,7 +14,7 @@
   function focusableItems(el) {
     return Array.from(el.querySelectorAll(
       'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    )).filter((x) => !x.hidden && x.offsetParent !== null);
+    )).filter((x) => !x.hidden && x.getClientRects().length > 0);
   }
 
   function open(target, opts) {

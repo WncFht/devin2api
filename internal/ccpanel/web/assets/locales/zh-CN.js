@@ -118,6 +118,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'index.usage.sendsPerRowHint': '闸门放行数 ÷ 日志行：内层重试探针',
   'index.usage.topKeys': '高频令牌',
   'index.usage.window': '窗口',
+  'index.channelEmpty': '暂无请求',
   'common.selectAll': '全选/取消全选',
   'common.clear': '清空',
 
@@ -282,6 +283,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'stats.containsTextPlaceholder': '包含文本...',
   'stats.detailTitle': '详细统计数据',
   'stats.sortByName': '按模型名称排序',
+  'stats.viewToggle': '视图',
   'stats.viewTable': '表格',
   'stats.viewChart': '图表',
   'stats.avgFirstByte': '首字/耗时(秒)',
@@ -517,6 +519,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.configItem': '配置项',
   'settings.currentValue': '当前值',
   'settings.saveAll': '保存所有更改',
+  'settings.table.title': '面板设置',
   'settings.resetToDefault': '重置为默认值',
   'settings.runtimeMetrics.button': '查看运行状态',
   'settings.runtimeMetrics.title': '进程运行状态',
@@ -837,6 +840,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'models.pageTitle': '模型注册表',
   'models.pageSubtitle': '对外模型名的启用开关与重定向；重定向在别名解析之前生效',
   'models.summary': '共 {total} 个 · 启用 {enabled} · 禁用 {disabled} · 重定向 {redirected}',
+  'models.filter.statusLabel': '状态',
   'models.filter.disabled': '已禁用',
   'models.filter.redirected': '已重定向',
   'models.filter.override': '有覆盖',
@@ -1238,5 +1242,12 @@ window.I18N_LOCALES['zh-CN'] = {
   'accounts.filter.missing': '账号 {name} 不存在',
   'accounts.add.credContent': '粘贴 credentials.toml',
   'accounts.add.credContentHint': '粘贴 credentials.toml 全文',
-  'accounts.add.verify': '先验证再入池'
+  'accounts.add.verify': '先验证再入池',
+
+  // tokens
+  'tokens.createSectionQuota': '配额与限制',
+  'tokens.createSectionModels': '模型与启用',
+
+  // logs
+  'logs.debugMergeFailed': '合并响应失败'
 };

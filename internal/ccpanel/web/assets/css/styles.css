@@ -361,6 +361,52 @@ html[data-resolved-theme="dark"] {
 .tone-bg-none { background-color: var(--color-text-secondary); }
 .tone-bg-primary { background-color: var(--primary-600); }
 
+/* 徽章基座：JS 侧 rateTone 产 tone 名，配色只出口在这里。
+   -50 底/-200 边/-700 字这组语义变量自带暗色翻转，无需 dark 覆写。 */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--neutral-200);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.pill-healthy {
+  background: var(--success-50);
+  border-color: var(--success-200);
+  color: var(--success-700);
+}
+
+.pill-warning {
+  background: var(--warning-50);
+  border-color: var(--warning-200);
+  color: var(--warning-700);
+}
+
+.pill-critical {
+  background: var(--error-50);
+  border-color: var(--error-200);
+  color: var(--error-700);
+}
+
+.pill-none {
+  background: var(--neutral-100);
+  border-color: var(--neutral-200);
+  color: var(--neutral-600);
+}
+
+.pill-primary {
+  background: color-mix(in srgb, var(--primary-500) 14%, transparent);
+  border-color: color-mix(in srgb, var(--primary-500) 30%, transparent);
+  color: var(--primary-600);
+}
+
 /* 自定义 checkbox/radio 样式，修复 Edge 暗色模式下原生控件显示为黑色 */
 
 input[type="checkbox"],
@@ -758,6 +804,10 @@ body {
   min-width: fit-content;
 }
 
+/* 分段控件：.seg/.seg-btn 是语义中立的规范名（状态筛选、视图切换、量纲组都该用它）；
+   .time-range-selector 是时间范围场景的语义容器别名（移动端正横向滚动），按钮统一 .seg-btn。 */
+
+.seg,
 .time-range-selector {
   display: inline-flex;
   gap: 2px;
@@ -765,9 +815,10 @@ body {
   padding: 2px;
   border-radius: var(--radius-md);
   border: 1px solid var(--surface-border);
+  max-width: 100%;
 }
 
-.time-range-btn {
+.seg-btn {
   padding: 7px 14px;
   border-radius: var(--radius-base);
   color: var(--neutral-700);
@@ -788,15 +839,15 @@ body {
   white-space: nowrap;
 }
 
-.time-range-btn:hover {
+.seg-btn:hover {
   color: var(--neutral-900);
   background: var(--surface-hover);
 }
 
-.time-range-btn.active {
+.seg-btn.active {
   background: var(--surface-bg-strong);
   color: var(--primary-600);
-  font-weight: 650;
+  font-weight: 600;
   box-shadow: var(--shadow-lift);
 }
 
@@ -807,14 +858,6 @@ body {
   justify-content: flex-end;
   width: 100%;
   position: relative;
-}
-
-.time-range-selector {
-  max-width: 100%;
-}
-
-.time-range-selector {
-  max-width: 100%;
 }
 
 .filter-custom-range-host {
@@ -866,7 +909,7 @@ body {
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: #9ca3af;
+  color: var(--neutral-400);
   font-family: inherit;
   font-size: var(--text-2xl);
   line-height: 1;
@@ -889,7 +932,7 @@ body {
   margin-bottom: 10px;
   color: var(--neutral-900);
   font-size: var(--text-base);
-  font-weight: 650;
+  font-weight: 600;
   text-align: center;
 }
 
@@ -997,7 +1040,7 @@ body {
   border-radius: var(--radius-sm);
   font-family: inherit;
   font-size: var(--text-13);
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -1198,7 +1241,7 @@ body {
 .time-range-selector::-webkit-scrollbar {
     display: none;
   }
-.time-range-btn {
+.time-range-selector .seg-btn {
     flex: 0 0 auto;
     padding: 6px 12px;
   }
@@ -1296,14 +1339,9 @@ body {
     width: min(720px, calc(100vw - 24px));
     max-width: none;
     max-height: calc(100vh - 24px);
-    padding: 12px;
   }
-.modal-header,
-.form-actions {
+.modal-header {
     flex-wrap: wrap;
-  }
-.form-actions .btn {
-    flex: 1 1 140px;
   }
 .field-grow {
     width: 100%;
@@ -1374,76 +1412,26 @@ body {
   backdrop-filter: blur(10px);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-lg);
-  padding: 16px;
+  padding: 0;
   width: 70%;
   max-width: none;
   max-height: 90vh;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   box-shadow: var(--shadow-xl);
+}
+
+.modal.show .modal-content {
+  animation: slideInUp 0.25s var(--timing-function);
 }
 
 .modal-content--sm {
   max-width: 500px;
 }
 
-/* 探活模态（model-test-modal.js 注入，logs/models 页共用） */
-
-.test-modal-content {
-  max-width: 700px;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
-.test-progress {
-  display: none;
-  text-align: center;
-  padding: var(--space-4);
-  background: var(--neutral-50);
-  border-radius: var(--radius-base);
-  margin: var(--space-4) 0;
-}
-
-.test-progress.show {
-  display: block;
-}
-
-.test-progress p {
-  margin-top: var(--space-2);
-  color: var(--neutral-600);
-}
-
-.test-result {
-  display: none;
-  padding: var(--space-4);
-  border-radius: var(--radius-base);
-  margin: var(--space-4) 0;
-}
-
-.test-result.show {
-  display: block;
-}
-
-.test-result.success {
-  background: var(--success-50);
-  border: 1px solid var(--success-200);
-}
-
-.test-result.error {
-  background: var(--error-50);
-  border: 1px solid var(--error-200);
-}
-
-.test-details {
-  margin-top: var(--space-3);
-  font-size: 0.9em;
-  color: var(--neutral-700);
-}
-
-.test-details h4 {
-  margin: var(--space-3) 0 var(--space-2);
-  font-size: 0.95em;
-  font-weight: 600;
-}
+/* 探活模态（model-test-modal.js 注入，logs/models 页共用）。
+   .test-* 的生效规格在下方「测试模态框样式」节；此处只留 .mtm-*。 */
 
 .mtm-section {
   margin-top: var(--space-3);
@@ -1465,8 +1453,8 @@ body {
   border-radius: var(--radius-xs);
   color: var(--neutral-700);
   white-space: pre-wrap;
-  font-family: monospace;
-  font-size: 0.85em;
+  font-family: var(--font-family-mono);
+  font-size: var(--text-13);
   max-height: 400px;
   overflow-y: auto;
 }
@@ -1479,7 +1467,10 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
+  gap: var(--space-3);
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--surface-border);
+  flex-shrink: 0;
 }
 
 .modal-title {
@@ -1488,11 +1479,20 @@ body {
   color: var(--neutral-800);
 }
 
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--surface-border);
+  flex-shrink: 0;
 }
 
 .close-btn {
@@ -1516,13 +1516,6 @@ body {
   color: var(--neutral-700);
 }
 
-.form-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 24px;
-}
-
 .field-grow {
   flex: 1 1 auto;
   min-width: 0;
@@ -1543,6 +1536,7 @@ body {
   background: var(--surface-bg-strong);
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   padding: var(--space-4);
   margin-bottom: var(--space-2);
   position: relative;
@@ -1591,12 +1585,13 @@ body {
 
 .filter-combobox {
   width: 100%;
-  /* Select-specific background/padding shorthands must not erase the combobox affordance. */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M6 8l4 4 4-4' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
-  background-repeat: no-repeat !important;
-  background-position: right 10px center !important;
-  background-size: 14px 14px !important;
-  padding-inline-end: 32px !important;
+  /* 本规则在 .filter-select 的 background/padding 简写之后出现，同优先级靠
+     顺序即胜，无需 !important；移动端覆写在下方 768px 媒体块里 */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M6 8l4 4 4-4' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px 14px;
+  padding-inline-end: 32px;
 }
 
 .filter-combobox-wrapper {
@@ -1728,9 +1723,9 @@ body {
 
 .filter-label {
   flex-shrink: 0;
-  font-size: var(--text-xs);
-  font-weight: 500;
-  color: var(--neutral-600);
+  font-size: var(--text-13);
+  font-weight: 600;
+  color: var(--neutral-700);
   white-space: nowrap;
   margin-right: 4px;
 }
@@ -1763,6 +1758,7 @@ body {
   border-radius: var(--radius-lg);
   border: 1px solid var(--surface-border);
   background: var(--table-bg);
+  box-shadow: var(--shadow-card);
 }
 
 .modern-table {
@@ -1922,6 +1918,7 @@ body {
 }
 
 /* ===== 渠道管理专用样式 ===== */
+/* 本节只剩 .btn-icon 一组规则；若只有个别页面引用，后续应下沉到对应页级 css */
 
 .btn-icon {
   background: var(--surface-bg);
@@ -1941,6 +1938,8 @@ body {
 }
 
 /* ===== 测试模态框样式 ===== */
+/* .test-* 唯一生效定义（原先模态框组件节的同名第一定义已删，曾被本节覆盖）。
+   这些是探活/chat 模态的专用规格，与 canonical .modal-* 壳并存 */
 
 .test-modal-content {
   max-width: 600px;
@@ -1988,6 +1987,12 @@ body {
   margin-top: 8px;
   font-size: var(--text-xs);
   opacity: 0.8;
+}
+
+.test-details h4 {
+  margin: var(--space-3) 0 var(--space-2);
+  font-size: var(--text-13);
+  font-weight: 600;
 }
 
 .upstream-pre {
@@ -2218,6 +2223,7 @@ html[data-resolved-theme="dark"] .upstream-pre {
 }
 
 /* ===== 日志和统计页面样式 ===== */
+/* 跨页通用件（分页/三态/成本栈/模型标签）留在此；单页专用规则应下沉页级 css */
 
 .status-error {
   color: var(--error-400);
@@ -2252,13 +2258,15 @@ html[data-resolved-theme="dark"] .upstream-pre {
   color: var(--neutral-800);
 }
 
-.empty-state {
+/* 空/错/加载三态统一走 .state-block 家族（--compact 是表内紧凑档）。 */
+
+.state-block {
   text-align: center;
   padding: var(--space-12) var(--space-6);
   color: var(--neutral-600);
 }
 
-.loading-state {
+.state-block--compact {
   text-align: center;
   padding: var(--space-8);
   color: var(--neutral-700);
@@ -2268,22 +2276,35 @@ html[data-resolved-theme="dark"] .upstream-pre {
   margin: 0 auto var(--space-2);
 }
 
-.empty-state-icon--neutral {
+.state-icon--neutral {
   color: var(--neutral-400);
 }
 
-.empty-state-icon--error {
+.state-icon--error {
   color: var(--error-400);
 }
 
-.empty-state-title {
+.state-title {
   font-weight: var(--font-medium);
   margin-bottom: var(--space-1);
   color: var(--neutral-700);
 }
 
-.empty-state-title--error {
+.state-title--error {
   color: var(--error-400);
+}
+
+.state-desc {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--neutral-500);
+}
+
+.state-action {
+  margin-top: var(--space-4);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .cost-stack {
@@ -2310,28 +2331,7 @@ html[data-resolved-theme="dark"] .upstream-pre {
   font-weight: 600;
 }
 
-.success-rate {
-  font-weight: var(--font-medium);
-  color: var(--neutral-800);
-}
-
-.success-rate.high {
-  color: var(--success-400);
-}
-
-.success-rate.low {
-  color: var(--error-400);
-}
-
-.chart-container .empty-state {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
+/* 成功率纯文本场景用 .tone-* + JS rateTone()；徽章场景用 .pill-*。 */
 
 .filter-actions {
   display: flex;
@@ -2359,29 +2359,18 @@ body.web-role-api-token #btn_export_json {
 /* ===== 响应式设计 ===== */
 
 @media (max-width: 768px) {
-.filter-controls {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px 12px;
-    align-items: start;
-  }
-.filter-group {
-    min-width: 0;
-  }
 .pagination-controls {
     flex-direction: column;
     gap: var(--space-2);
   }
 .modal-content {
     width: 100%;
-    padding: var(--space-2);
   }
 }
 
 @media (max-width: 480px) {
 .modal-content {
     width: 90%;
-    padding: var(--space-3);
   }
 }
 
@@ -2442,30 +2431,6 @@ body.web-role-api-token #btn_export_json {
   }
 }
 
-/* ===== 筛选器容器样式 ===== */
-
-/* ===== 动画延迟工具类 ===== */
-
-.animate-slide-up[style*="animation-delay: 0.1s"] {
-  animation-delay: 0.1s;
-}
-
-.animate-slide-up[style*="animation-delay: 0.2s"] {
-  animation-delay: 0.2s;
-}
-
-.animate-slide-up[style*="animation-delay: 0.3s"] {
-  animation-delay: 0.3s;
-}
-
-.animate-slide-up[style*="animation-delay: 0.4s"] {
-  animation-delay: 0.4s;
-}
-
-/* ===== 内联样式常用类 ===== */
-
-/* ===== 背景工具类 ===== */
-
 /* ===== 响应式筛选器修正 ===== */
 
 @media (max-width: 768px) {
@@ -2498,8 +2463,9 @@ body.web-role-api-token #btn_export_json {
     padding: 6px 12px;
   }
 .filter-combobox {
-    background-position: right 8px center !important;
-    padding-inline-end: 26px !important;
+    /* 同媒体块内位于 .filter-input/.filter-select 的 padding 简写之后，顺序即胜 */
+    background-position: right 8px center;
+    padding-inline-end: 26px;
   }
 .filter-dropdown-item {
     font-size: var(--text-13);
@@ -2553,7 +2519,14 @@ body.web-role-api-token #btn_export_json {
 
 .page-subtitle {
   font-size: var(--text-sm);
-  color: var(--neutral-600);
+  color: var(--neutral-700);
+  line-height: 1.6;
+  font-weight: 500;
+}
+
+.page-subtitle b {
+  color: var(--neutral-900);
+  font-weight: 700;
 }
 
 .section-title {
@@ -2807,32 +2780,8 @@ body.web-role-api-token #btn_export_json {
 
 /* migrated from channels.css — culled: only selectors still referenced by panel html/js remain */
 
-.content-area > header .card,
-.filter-bar {
+.content-area > header .card {
   background: var(--surface-bg-strong);
-  border-color: var(--surface-border);
-  box-shadow: var(--shadow-card);
-}
-
-.page-subtitle {
-  color: var(--neutral-700);
-  line-height: 1.6;
-  font-weight: 500;
-}
-
-.page-subtitle b {
-  color: var(--neutral-900);
-  font-weight: 700;
-}
-
-.filter-label {
-  font-size: var(--text-13);
-  font-weight: 600;
-  color: var(--neutral-700);
-}
-
-.table-container {
-  background: var(--table-bg);
   border-color: var(--surface-border);
   box-shadow: var(--shadow-card);
 }

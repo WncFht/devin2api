@@ -1,29 +1,3 @@
-// 保持公共 UI 在独立加载或旧缓存混用时可用；完整实现由 web-auth.js 覆盖。
-
-window.WebAuth = window.WebAuth || {
-
-  ROLE_KEY: 'ccload_web_role',
-
-  clearWebSession(storage) {
-
-    storage.removeItem('ccload_token');
-
-    storage.removeItem('ccload_token_expiry');
-
-    storage.removeItem('ccload_web_role');
-
-  },
-
-  getWebRole() { return 'admin'; },
-
-  isAPITokenRole() { return false; },
-
-  filterNavigation(keys) { return [...keys]; }
-
-};
-
-
-
 // ============================================================
 
 // Token认证工具（统一API调用，替代Cookie Session）
