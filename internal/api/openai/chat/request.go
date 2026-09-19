@@ -195,6 +195,11 @@ func DecodeRequest(data []byte, collectDropped bool) (AdaptedRequest, error) {
 	if err := appendMessages(&context, request.Messages, callIDs, functionIDs); err != nil {
 		return AdaptedRequest{}, err
 	}
+	// messages 非空但解完全落在 system/tool_calls 之外（纯 system 单等）
+	// 时 Messages 为空——空对话打到上游才失败，本地尽早拒绝更可读。
+	if len(context.Messages) == 0 {
+		return AdaptedRequest{}, errors.New("chat request produced no conversation messages")
+	}
 	droppedTools := make(map[string]bool)
 	for _, tool := range request.Tools {
 		if tool.Type != "function" {
