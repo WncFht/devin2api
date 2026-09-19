@@ -243,7 +243,8 @@ func main() {
 	}
 	// 面板与 adapter 共享同一份凭据来源：adapter 的 unauthenticated
 	// 自愈更新 token 后，面板的上游调用自动跟随新值。号池下面板 MVP
-	// 固定绑首号；逐号凭据源另经 SetPoolTokenFuncs 喂给脱敏与配额采样。
+	// 固定绑首号；逐号凭据源走 PoolDeps.Snapshot 的 TokenFuncs 喂给
+	// 脱敏与配额采样。
 	tokenFunc := devinPool.TokenFunc()
 	// 管理器总是创建：enabled 只控制新请求是否写目录，历史查询、
 	// 用量回放、清理与配额采样不随开关停掉，面板也可运行时热切换。
@@ -302,22 +303,15 @@ func main() {
 		os.Exit(1)
 	}
 	ccPanel.SetVersion(resolved)
-	ccPanel.SetGateStats(devinPool.GateStats)
-	ccPanel.SetWarmStats(devinPool.WarmStats)
-	ccPanel.SetDetachedStats(devinPool.DetachedStats)
-	ccPanel.SetAccountGateStats(devinPool.AccountGateStats)
-	ccPanel.SetAccountWarmStats(devinPool.AccountWarmStats)
-	ccPanel.SetAccountLaneStates(devinPool.AccountLaneStates)
-	ccPanel.SetAccountDetachedStats(devinPool.AccountDetachedStats)
-	ccPanel.SetDetachEvictor(devinPool.EvictDetachedByOriginDir)
-	// 排空收尾：面板 BeginDrain 经此把各 lane 闸门窗口行重放缓冲做
-	// 最后一轮同步落库（best-effort，短 ctx 不拖关停）。
-	ccPanel.SetGateFlusher(devinPool.FlushPendingWindows)
-	// 配额探测回灌：面板采样与 test 端点把日/周剩余百分比喂给池侧
-	// 降权簿记（quota_low 阈值判定在 adapter 内）。
-	ccPanel.SetAccountQuotaSignal(devinPool.NoteQuotaSample)
-	ccPanel.SetPoolTokenFuncs(devinPool.TokenFuncs)
-	ccPanel.SetAliasesFunc(devinPool.Aliases)
+	// 号池接口一次接齐：遥测走 Snapshot（每请求一次求值，同一时间
+	// 切面收齐 gate/warm/detached/逐号状态/别名/凭据源），动作口是
+	// 脱钩逐出、排空闸门冲刷与配额探测回灌三个。
+	ccPanel.SetPoolDeps(ccpanel.PoolDeps{
+		Snapshot:      devinPool.Snapshot,
+		EvictDetached: devinPool.EvictDetachedByOriginDir,
+		FlushGates:    devinPool.FlushPendingWindows,
+		NoteQuota:     devinPool.NoteQuotaSample,
+	})
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	// 持久层须在 SetQuotaInterval 前注入：采样协程起跑时快照读它。
 	ccPanel.SetStore(dbStore)

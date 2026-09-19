@@ -44,8 +44,8 @@ func (h *Handler) modelNamesUnion(r *http.Request) map[string][]string {
 	for _, uid := range h.ModelUIDs(r.Context()) {
 		add(uid, "catalog")
 	}
-	if h.aliasesFunc != nil {
-		for name := range h.aliasesFunc() {
+	if ps, ok := h.poolSnapshot(); ok {
+		for name := range ps.Aliases {
 			add(name, "alias")
 		}
 	}
@@ -65,8 +65,8 @@ func (h *Handler) modelNamesUnion(r *http.Request) map[string][]string {
 // 后 adapter 的解析路径一致）。
 func (h *Handler) adminModelRegistry(w http.ResponseWriter, r *http.Request) {
 	aliases := map[string]string{}
-	if h.aliasesFunc != nil {
-		aliases = h.aliasesFunc()
+	if ps, ok := h.poolSnapshot(); ok {
+		aliases = ps.Aliases
 	}
 	overrides := map[string]modelreg.Entry{}
 	if h.models != nil {
@@ -313,8 +313,8 @@ func (h *Handler) resolvedModel(name string) string {
 			target = e.RedirectModel
 		}
 	}
-	if h.aliasesFunc != nil {
-		return devin.ResolveModelAlias(h.aliasesFunc(), target)
+	if ps, ok := h.poolSnapshot(); ok {
+		return devin.ResolveModelAlias(ps.Aliases, target)
 	}
 	return target
 }

@@ -50,11 +50,6 @@ type Handler struct {
 	// 自愈更新 token 后面板跟随新值，不缓存启动时的静态快照。
 	// 号池下它是首号 lane 的凭据源：seat/状态类上游调用 MVP 绑首号。
 	tokenFunc func() string
-	// poolTokenFuncs 返回号池全部 lane 的凭据源（按账号名索引）：
-	// maskToken 的脱敏环与 quota 逐账号采样都靠它收编各号当前
-	// token——漏遮任一号的凭据都是日志泄露。注函数而非快照：
-	// 热更增删 lane 后读侧每次求值拿到当前集合。nil 视为无池。
-	poolTokenFuncs func() map[string]func() string
 	// upstreamPtr 持有当前生效的上游调用束（connect client、裸 transport
 	// 与归一化 baseURL 固化在同一份 base_url/proxy/force_http1 上）：
 	// endpoint 配置热应用时 SetUpstream 整体重建、原子换指针，
@@ -134,17 +129,11 @@ type Handler struct {
 	// history 是进程指标历史环（runtime-metrics/history 端点数据源）：
 	// StartMetricsHistory 起的采样协程单写，admin 读侧短锁拷出。
 	history metricsHistory
-	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
-	gateStats func() devin.GateStats
-	// accountGateStats/accountWarmStats/accountLaneStates 返回逐账号
-	// 闸门/保温/池侧状态快照（按账号名索引）；全为 nil 时
-	// runtime-metrics 不投 accounts 组。
-	accountGateStats  func() map[string]devin.GateStats
-	accountWarmStats  func() map[string]devin.WarmStats
-	accountLaneStates func() map[string]devin.LaneState
-	// accountQuotaSignal 把一次成功的上游配额探测结果回灌给池侧
-	// （quota 降权信号源，参数是日/周剩余百分比）；nil 时只采样不回灌。
-	accountQuotaSignal func(name string, dailyRemainingPct, weeklyRemainingPct float64)
+	// pool 是面板对号池的全部依赖：遥测一次 Snapshot 取齐（读侧每
+	// 请求一次求值，拿到的是同一时间切面而非逐方法拼出的混合切面），
+	// 动作口各自独立可缺席。nil 视为无池：gate/warm/detached/accounts
+	// 组缺席、配额采样退回单号匿名、排空跳过闸门冲刷。
+	pool *PoolDeps
 	// configOps 挂配置自省与热重载端点；nil 时两个端点 404。
 	configOps *ConfigOps
 	// accountOps 挂 /admin/accounts 账号 CRUD 与行操作面；nil 时
@@ -153,8 +142,6 @@ type Handler struct {
 	// maxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值
 	// （配置 reload 后为新值），投影到 runtime-metrics 的 max_concurrency。
 	maxConcurrencyFunc func() int
-	// aliasesFunc 返回模型别名表（注册表落地前的静态种子）。
-	aliasesFunc func() map[string]string
 	// tokens 是下游令牌仓；nil 时 api_token 登录与令牌端点不可用。
 	tokens *authtoken.Store
 	// models 是模型注册表仓；nil 时 /admin/model-registry 返回 503。
@@ -170,20 +157,6 @@ type Handler struct {
 	// 哈希）。令牌被删后下一次探活自动重铸。
 	probeTokenMu sync.Mutex
 	probeToken   string
-	// warmStats 返回前缀保温簿记快照；nil 时 runtime-metrics 不投 warm 组。
-	warmStats func() devin.WarmStats
-	// detachedStats 返回脱钩完成缓存快照（顶层 detached 组，号池下
-	// 为全 lane 聚合）；nil 时 runtime-metrics 不投 detached 组。
-	detachedStats func() devin.DetachedStats
-	// accountDetachedStats 返回逐账号脱钩缓存快照（accounts 组按号
-	// 透出）；nil 时 accounts 内无 detached 键。
-	accountDetachedStats func() map[string]devin.DetachedStats
-	// detachEvictor 按来源调试目录逐出脱钩完成缓存条目：面板 abort 在
-	// Abort 返回 true 后补调，收口 abort-after-detach 残留窗；nil 跳过。
-	detachEvictor func(dir string)
-	// gateFlush 在排空起点冲刷各 lane 闸门窗口行重放缓冲（best-effort
-	// 落库收尾，共享 ctx 预算）；nil 时 BeginDrain 跳过。
-	gateFlush func(ctx context.Context)
 
 	versionMu sync.RWMutex
 	version   string
@@ -260,39 +233,36 @@ func (h *Handler) passwordSnapshot() (string, [32]byte) {
 	return h.password, h.passwordHash
 }
 
-// SetGateStats 注入速率闸门快照源（runtime-metrics 的 gate 组）。
-func (h *Handler) SetGateStats(fn func() devin.GateStats) {
-	h.gateStats = fn
+// PoolDeps 是面板对号池的全部依赖：Snapshot 一次取齐 gate/warm/
+// detached/逐账号状态/别名/逐号凭据源——读侧每请求一次求值，拿到的
+// 是同一时间切面而非旧接口逐方法拼出的混合切面；TokenFuncs 给的是
+// 活句柄，脱敏环与配额采样按需重读。三个动作口独立可缺席（nil 跳过）：
+// EvictDetached 按来源调试目录逐出脱钩完成缓存条目（active-requests
+// abort 在 Abort 返回 true 后补调，收口 abort-after-detach 残留窗），
+// FlushGates 在排空起点以短 ctx 把各 lane 闸门窗口行重放缓冲做最后
+// 一轮同步落库（best-effort），NoteQuota 把一次成功配额探测的日/周
+// 剩余百分比回灌池侧降权簿记。
+type PoolDeps struct {
+	Snapshot      func() devin.PoolSnapshot
+	EvictDetached func(dir string)
+	FlushGates    func(ctx context.Context)
+	NoteQuota     func(name string, dailyRemainingPct, weeklyRemainingPct float64)
 }
 
-// SetAccountGateStats 注入逐账号闸门快照源（runtime-metrics 的
-// accounts 组按号透出；nil 时该组缺席）。
-func (h *Handler) SetAccountGateStats(fn func() map[string]devin.GateStats) {
-	h.accountGateStats = fn
+// SetPoolDeps 注入号池接口（遥测 + 动作口）；空值视为无池——
+// gate/warm/detached/accounts 组缺席、配额采样退回单号匿名、
+// 排空跳过闸门冲刷、脱钩逐出与配额回灌静默跳过。
+func (h *Handler) SetPoolDeps(deps PoolDeps) {
+	h.pool = &deps
 }
 
-// SetAccountWarmStats 注入逐账号保温簿记源（accounts 组按号透出）。
-func (h *Handler) SetAccountWarmStats(fn func() map[string]devin.WarmStats) {
-	h.accountWarmStats = fn
-}
-
-// SetAccountLaneStates 注入逐账号池侧状态源（冷却窗与最近失败归因，
-// accounts 组按号透出）。
-func (h *Handler) SetAccountLaneStates(fn func() map[string]devin.LaneState) {
-	h.accountLaneStates = fn
-}
-
-// SetAccountQuotaSignal 注入配额探测回灌口：每次成功的逐号配额采样
-// 与 test 探测把日/周剩余百分比喂给池侧降权簿记。
-func (h *Handler) SetAccountQuotaSignal(fn func(name string, dailyRemainingPct, weeklyRemainingPct float64)) {
-	h.accountQuotaSignal = fn
-}
-
-// SetPoolTokenFuncs 注入号池凭据源读取函数（按账号名索引的 map）：
-// maskToken 的脱敏环与 quota 逐账号采样共用这份清单。每次求值重取
-// 当前 lane 集合，账号热增删后无需重注册。
-func (h *Handler) SetPoolTokenFuncs(fn func() map[string]func() string) {
-	h.poolTokenFuncs = fn
+// poolSnapshot 取一次号池遥测；无池返回零值与 false——各消费组按
+// 「无池」缺席，与旧逐字段 nil-func 分支同语义。
+func (h *Handler) poolSnapshot() (devin.PoolSnapshot, bool) {
+	if h.pool == nil || h.pool.Snapshot == nil {
+		return devin.PoolSnapshot{}, false
+	}
+	return h.pool.Snapshot(), true
 }
 
 // NoteUpstreamTokens 把一批已知上游凭据字面值登记进常驻脱敏集合
@@ -321,11 +291,6 @@ func (h *Handler) SetConfigOps(ops ConfigOps) {
 // config 声明集与 devinPool 热应用协调，实现由装配层提供）。
 func (h *Handler) SetAccountOps(ops accounts.AccountOps) {
 	h.accountOps = &ops
-}
-
-// SetAliasesFunc 注入别名表读取函数。
-func (h *Handler) SetAliasesFunc(fn func() map[string]string) {
-	h.aliasesFunc = fn
 }
 
 // SetMaxConcurrencyFunc 注入 /v1 并发上限读取函数。
@@ -367,35 +332,6 @@ func (h *Handler) SetSettingsStore(s *PanelSettings) {
 // 请求完全相同的鉴权/准入/重定向/上游路径。
 func (h *Handler) SetProbeHandler(handler http.Handler) {
 	h.probeHandler = handler
-}
-
-// SetWarmStats 注入前缀保温簿记读取函数（/admin/runtime-metrics 的 warm 组）。
-func (h *Handler) SetWarmStats(fn func() devin.WarmStats) {
-	h.warmStats = fn
-}
-
-// SetDetachedStats 注入脱钩完成缓存快照源（/admin/runtime-metrics 的
-// detached 组，首 lane 后兼容形态）。
-func (h *Handler) SetDetachedStats(fn func() devin.DetachedStats) {
-	h.detachedStats = fn
-}
-
-// SetAccountDetachedStats 注入逐账号脱钩缓存快照源（accounts 组按号
-// 透出——缓存 per-lane，跨 lane 重试恒 miss，attach 率须逐号看）。
-func (h *Handler) SetAccountDetachedStats(fn func() map[string]devin.DetachedStats) {
-	h.accountDetachedStats = fn
-}
-
-// SetDetachEvictor 注入脱钩缓存按来源目录逐出器（active-requests abort
-// 用：Abort 返回 true 后清掉残留窗落册的条目，被掐死的生成不留缓存重放）。
-func (h *Handler) SetDetachEvictor(fn func(dir string)) {
-	h.detachEvictor = fn
-}
-
-// SetGateFlusher 注入闸门窗口行冲刷口：BeginDrain 在排空起点以短 ctx
-// 调用，把各 lane 重放缓冲里未落库的窗口行做最后一轮同步落库。
-func (h *Handler) SetGateFlusher(fn func(ctx context.Context)) {
-	h.gateFlush = fn
 }
 
 // panelRoute 是路由表的一行：method+pattern 是 chi 挂载键，handler 是含

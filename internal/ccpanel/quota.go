@@ -123,8 +123,8 @@ func (h *Handler) BeginDrain() {
 	h.quotaMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), drainFlushTimeout)
 	defer cancel()
-	if h.gateFlush != nil {
-		h.gateFlush(ctx)
+	if h.pool != nil && h.pool.FlushGates != nil {
+		h.pool.FlushGates(ctx)
 	}
 	h.FlushPendingQuotaSamples(ctx)
 }
@@ -182,17 +182,18 @@ type quotaAccount struct {
 }
 
 // quotaAccounts 返回本轮要采样的账号清单，按三种状态分别处置：
-//   - poolTokenFuncs 未接线（nil）：回退面板首号凭据源的单号匿名
+//   - 号池未接线（nil）：回退面板首号凭据源的单号匿名
 //     采样，account 字段留空——与历史上无号池时的行格式一致；
-//   - 已接线但空池（返回空 map）：返回空清单整轮跳过——再往下走
+//   - 已接线但空池（快照无 lane）：返回空清单整轮跳过——再往下走
 //     tokenFunc→firstLane 会裸取下标 panic，且每周期写一条
 //     account="" 的上游 401 失败行污染 default 桶；
 //   - 有号：逐号采，按名序输出稳定。
 func (h *Handler) quotaAccounts() []quotaAccount {
-	if h.poolTokenFuncs == nil {
+	ps, ok := h.poolSnapshot()
+	if !ok {
 		return []quotaAccount{{token: h.tokenFunc()}}
 	}
-	funcs := h.poolTokenFuncs()
+	funcs := ps.TokenFuncs
 	if len(funcs) == 0 {
 		// 空池整轮跳过必须留声——静默曾让一次空池故障三天零样本零告警；
 		// 每轮复述即信号本身，刻意不去重。
@@ -564,7 +565,7 @@ func (h *Handler) quotaPersistStats() map[string]any {
 // noteAccountQuotaSignal 把一次成功探测的日/周剩余百分比回灌给池侧
 // 降权簿记；两键俱缺时不喂——weekly 缺报按 0 喂会把 lane 误判进降权档。
 func (h *Handler) noteAccountQuotaSignal(account string, plan map[string]any) {
-	if h.accountQuotaSignal == nil || plan == nil {
+	if h.pool == nil || h.pool.NoteQuota == nil || plan == nil {
 		return
 	}
 	daily := planFloat(plan, "daily_quota_remaining")
@@ -572,7 +573,7 @@ func (h *Handler) noteAccountQuotaSignal(account string, plan map[string]any) {
 	if daily == nil || weekly == nil {
 		return
 	}
-	h.accountQuotaSignal(account, *daily, *weekly)
+	h.pool.NoteQuota(account, *daily, *weekly)
 }
 
 // refreshAccountQuota 即采一次指定账号配额：与定时采样共用

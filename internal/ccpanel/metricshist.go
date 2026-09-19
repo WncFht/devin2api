@@ -117,21 +117,15 @@ func (h *Handler) captureMetricsSample() {
 		s.LogPendingBytes = numI64(stats["pending_bytes"])
 	}
 	// 闩态按 lane 聚合：任一 lane 在闩都计入 latched 数；LatchTotal 是
-	// 全 lane 累计闩次数之和。逐号源未接线时回落首 lane 快照——与
-	// runtime-metrics 顶层 gate 组同源同口径。
-	if h.accountGateStats != nil {
-		for _, g := range h.accountGateStats() {
-			if g.Latched {
+	// 全 lane 累计闩次数之和。与 runtime-metrics 的 accounts 组同源
+	// 同口径（同一次池快照）。
+	if ps, ok := h.poolSnapshot(); ok {
+		for _, ls := range ps.Accounts {
+			if ls.Gate.Latched {
 				s.GateLatchedLanes++
 			}
-			s.GateLatchTotal += g.LatchCount
+			s.GateLatchTotal += ls.Gate.LatchCount
 		}
-	} else if h.gateStats != nil {
-		g := h.gateStats()
-		if g.Latched {
-			s.GateLatchedLanes = 1
-		}
-		s.GateLatchTotal = g.LatchCount
 	}
 	h.history.add(s)
 }

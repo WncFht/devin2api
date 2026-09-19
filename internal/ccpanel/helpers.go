@@ -34,8 +34,8 @@ func (h *Handler) maskToken(data []byte) []byte {
 	}
 	tokens := make([]string, 0, 2)
 	tokens = append(tokens, h.tokenFunc())
-	if h.poolTokenFuncs != nil {
-		for _, fn := range h.poolTokenFuncs() {
+	if ps, ok := h.poolSnapshot(); ok {
+		for _, fn := range ps.TokenFuncs {
 			tokens = append(tokens, fn())
 		}
 	}

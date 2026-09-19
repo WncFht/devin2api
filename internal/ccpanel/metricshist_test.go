@@ -131,13 +131,13 @@ func TestCaptureMetricsSampleSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.SetAccountGateStats(func() map[string]devin.GateStats {
-		return map[string]devin.GateStats{
-			"a": {Latched: true, LatchCount: 2},
-			"b": {Latched: false, LatchCount: 3},
-			"c": {Latched: true, LatchCount: 1},
-		}
-	})
+	h.pool = &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{Accounts: map[string]devin.LaneSnapshot{
+			"a": {Gate: devin.GateStats{Latched: true, LatchCount: 2}},
+			"b": {Gate: devin.GateStats{Latched: false, LatchCount: 3}},
+			"c": {Gate: devin.GateStats{Latched: true, LatchCount: 1}},
+		}}
+	}}
 	h.captureMetricsSample()
 	got := h.history.since(0)
 	if len(got) != 1 {

@@ -102,15 +102,15 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	defer cleanup()
 
 	// yanjian 有活 lane：三件套快照 + 一条在途请求 + 配额样本与身份。
-	h.SetAccountLaneStates(func() map[string]devin.LaneState {
-		return map[string]devin.LaneState{"yanjian": {Healthy: true}}
-	})
-	h.SetAccountGateStats(func() map[string]devin.GateStats {
-		return map[string]devin.GateStats{"yanjian": {WindowQuota: 60, WindowUsed: 3, Sendable: true}}
-	})
-	h.SetAccountWarmStats(func() map[string]devin.WarmStats {
-		return map[string]devin.WarmStats{"yanjian": {Enabled: true, Entries: 12, PingHits: 3, PingMisses: 1, FailoverSuspects: 2}}
-	})
+	h.pool = &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{Accounts: map[string]devin.LaneSnapshot{
+			"yanjian": {
+				State: devin.LaneState{Healthy: true},
+				Gate:  devin.GateStats{WindowQuota: 60, WindowUsed: 3, Sendable: true},
+				Warm:  devin.WarmStats{Enabled: true, Entries: 12, PingHits: 3, PingMisses: 1, FailoverSuspects: 2},
+			},
+		}}
+	}}
 	if rec := h.debug.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat/completions"}); rec != nil {
 		rec.SetUpstreamAccount("yanjian")
 	}

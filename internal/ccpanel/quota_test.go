@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/store"
 )
 
@@ -389,7 +390,9 @@ func TestQuotaAccountsStates(t *testing.T) {
 	var warnBuf bytes.Buffer
 	defaultLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&warnBuf, nil)))
-	h = &Handler{poolTokenFuncs: func() map[string]func() string { return map[string]func() string{} }}
+	h = &Handler{pool: &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{TokenFuncs: map[string]func() string{}}
+	}}}
 	if got := h.quotaAccounts(); len(got) != 0 {
 		t.Fatalf("empty pool = %+v, want empty", got)
 	}
@@ -399,12 +402,12 @@ func TestQuotaAccountsStates(t *testing.T) {
 	}
 
 	// 有号：按名序输出，token 取各 lane 当前凭据。
-	h = &Handler{poolTokenFuncs: func() map[string]func() string {
-		return map[string]func() string{
+	h = &Handler{pool: &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{TokenFuncs: map[string]func() string{
 			"randall": func() string { return "tok-r" },
 			"yanjian": func() string { return "tok-y" },
-		}
-	}}
+		}}
+	}}}
 	got = h.quotaAccounts()
 	if len(got) != 2 ||
 		got[0].name != "randall" || got[0].token != "tok-r" ||
@@ -425,7 +428,7 @@ func TestSetQuotaIntervalAfterDrain(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	// 空池接线：协程起跑即取账号清单，空清单让它空转待机——不触上游、
 	// 不落样本，quotaCancel 是否非 nil 即「协程是否活着」的判定面。
-	h := &Handler{store: st, poolTokenFuncs: func() map[string]func() string { return nil }}
+	h := &Handler{store: st, pool: &PoolDeps{Snapshot: func() devin.PoolSnapshot { return devin.PoolSnapshot{} }}}
 
 	h.SetQuotaInterval(time.Minute)
 	h.quotaMu.Lock()
@@ -643,12 +646,12 @@ func TestQuotaSamplerHeartbeat(t *testing.T) {
 	}))
 	defer srv.Close()
 	h := newQuotaTestHandler(t, srv)
-	h.poolTokenFuncs = func() map[string]func() string {
-		return map[string]func() string{
+	h.pool = &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{TokenFuncs: map[string]func() string{
 			"randall": func() string { return "tok-r" },
 			"yanjian": func() string { return "tok-y" },
-		}
-	}
+		}}
+	}}
 	before := time.Now().Unix()
 	h.sampleQuota(context.Background())
 
@@ -777,12 +780,12 @@ func TestQuotaSamplerRoundAbort(t *testing.T) {
 	}))
 	defer srv.Close()
 	h := newQuotaTestHandler(t, srv)
-	h.poolTokenFuncs = func() map[string]func() string {
-		return map[string]func() string{
+	h.pool = &PoolDeps{Snapshot: func() devin.PoolSnapshot {
+		return devin.PoolSnapshot{TokenFuncs: map[string]func() string{
 			"randall": func() string { return "tok-r" },
 			"yanjian": func() string { return "tok-y" },
-		}
-	}
+		}}
+	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	h.sampleQuota(ctx)

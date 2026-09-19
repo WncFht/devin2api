@@ -45,14 +45,14 @@ func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accoun
 		quota:      map[string]any{},
 		usage:      map[string]map[string]any{},
 	}
-	if h.accountLaneStates != nil {
-		snap.laneStates = h.accountLaneStates()
-	}
-	if h.accountGateStats != nil {
-		snap.gates = h.accountGateStats()
-	}
-	if h.accountWarmStats != nil {
-		snap.warms = h.accountWarmStats()
+	// lane/gate/warm 三表同来自一次池快照：同一切面按名分发，无活
+	// lane 的号（disabled/tombstoned/未接线）自然缺席。
+	if ps, ok := h.poolSnapshot(); ok {
+		for name, ls := range ps.Accounts {
+			snap.laneStates[name] = ls.State
+			snap.gates[name] = ls.Gate
+			snap.warms[name] = ls.Warm
+		}
 	}
 	// inflight 按终局 lane 名分桶：上游请求未发出或 failover 途中的
 	// 请求 Account 为空，不落入任何号；disabled 排空期 lane 快照已撤

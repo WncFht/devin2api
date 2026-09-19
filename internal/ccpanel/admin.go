@@ -119,8 +119,8 @@ func (h *Handler) adminAbortActiveRequest(w http.ResponseWriter, r *http.Request
 				// abort 若落在脱钩登记与请求出 activeDirs 的窗口内，
 				// cancel 对已 WithoutCancel 的后台泵无效——把该目录落册
 				// 的条目清出完成缓存，被掐生成不得留给同键重试重放。
-				if h.detachEvictor != nil {
-					h.detachEvictor(ar.Dir)
+				if h.pool != nil && h.pool.EvictDetached != nil {
+					h.pool.EvictDetached(ar.Dir)
 				}
 				respondOK(w, map[string]any{"aborted": true})
 				return
@@ -366,21 +366,30 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("ccpanel: log latency query failed", "error", err)
 		}
 	}
-	// gate 组是速率闸门快照（闩态/配额/排队 + events 闩迁移事件环）。
-	if h.gateStats != nil {
-		data["gate"] = h.gateStats()
-	}
-	// warm 组投前缀保温簿记；hit_rate 由 hits/(hits+misses) 派生，
-	// cr=0 的 ping 不计入 misses（簿记侧口径），故命中率只反映真实命中。
-	if h.warmStats != nil {
-		data["warm"] = warmStatsView(h.warmStats())
-	}
-	// detached 组投脱钩完成缓存簿记：泵终局（finished_*）、移除原因
-	// 与孤儿浪费（orphans/orphan_completed）在盘上 04 标记行之外
-	// 没有其它观测面；顶层为全 lane 聚合（计数求和、事件环按时刻
-	// 归并，事件带 lane 字段）。
-	if h.detachedStats != nil {
-		data["detached"] = h.detachedStats()
+	// gate/warm/detached/accounts 四组同来自一次池快照——读数属于同
+	// 一时间切面。gate 组是速率闸门快照（闩态/配额/排队 + events 闩
+	// 迁移事件环）；warm 组投前缀保温簿记，hit_rate 由 hits/(hits+
+	// misses) 派生（cr=0 的 ping 不计入 misses，命中率只反映真实
+	// 命中）；detached 组投脱钩完成缓存簿记——泵终局（finished_*）、
+	// 移除原因与孤儿浪费（orphans/orphan_completed）在盘上 04 标记
+	// 行之外没有其它观测面，顶层为全 lane 聚合（计数求和、事件环
+	// 按时刻归并，事件带 lane 字段）；accounts 组是逐号视图——顶层
+	// gate/warm 仍是首 lane 快照（前端后兼容，闩态/分位数不可聚合），
+	// 逐号排障看这里。
+	if ps, ok := h.poolSnapshot(); ok {
+		data["gate"] = ps.Gate
+		data["warm"] = warmStatsView(ps.Warm)
+		data["detached"] = ps.Detached
+		accounts := make(map[string]any, len(ps.Accounts))
+		for name, ls := range ps.Accounts {
+			accounts[name] = map[string]any{
+				"gate":     ls.Gate,
+				"warm":     warmStatsView(ls.Warm),
+				"lane":     ls.State,
+				"detached": ls.Detached,
+			}
+		}
+		data["accounts"] = accounts
 	}
 	// quota 组投配额样本落库健康账（写失败/缓冲丢弃/重放救回与缓冲
 	// 当前深度）与采样轮心跳（协程级 rounds_* 计数/时刻 + 逐 lane
@@ -397,52 +406,6 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 		} else {
 			slog.Warn("ccpanel: store opens query failed", "error", err)
 		}
-	}
-	// accounts 组是号池逐账号视图：每号的闸门/保温/脱钩缓存/池侧
-	// 状态各自透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容，
-	// 闩态/分位数不可聚合），detached 已是全 lane 聚合；逐号排障
-	// 看这里。
-	if h.accountGateStats != nil || h.accountWarmStats != nil || h.accountLaneStates != nil || h.accountDetachedStats != nil {
-		gates := map[string]devin.GateStats{}
-		if h.accountGateStats != nil {
-			gates = h.accountGateStats()
-		}
-		warms := map[string]devin.WarmStats{}
-		if h.accountWarmStats != nil {
-			warms = h.accountWarmStats()
-		}
-		laneStates := map[string]devin.LaneState{}
-		if h.accountLaneStates != nil {
-			laneStates = h.accountLaneStates()
-		}
-		detacheds := map[string]devin.DetachedStats{}
-		if h.accountDetachedStats != nil {
-			detacheds = h.accountDetachedStats()
-		}
-		accounts := make(map[string]any, len(gates)+len(warms)+len(laneStates)+len(detacheds))
-		entry := func(name string) map[string]any {
-			if e, ok := accounts[name].(map[string]any); ok {
-				return e
-			}
-			e := map[string]any{}
-			accounts[name] = e
-			return e
-		}
-		for name, gate := range gates {
-			entry(name)["gate"] = gate
-		}
-		for name, warm := range warms {
-			// warm 只在确有该号簿记时投：两次快照之间 ApplyConfigs
-			// 换过 lane 集合的话，缺席渲染成 enabled:false 会误读。
-			entry(name)["warm"] = warmStatsView(warm)
-		}
-		for name, state := range laneStates {
-			entry(name)["lane"] = state
-		}
-		for name, detached := range detacheds {
-			entry(name)["detached"] = detached
-		}
-		data["accounts"] = accounts
 	}
 	respondOK(w, data)
 }

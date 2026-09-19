@@ -185,7 +185,8 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 	// 按请求打一行，抬到 status 让 agent 程序化可得。
 	go func() {
 		defer wg.Done()
-		if h.aliasesFunc == nil {
+		ps, ok := h.poolSnapshot()
+		if !ok {
 			return
 		}
 		// 与其余五路同序：先拉取与计算、末段一次 resultMu 写结果——
@@ -201,7 +202,7 @@ func (h *Handler) StatusReport(ctx context.Context) map[string]any {
 					uids[uid] = struct{}{}
 				}
 			}
-			for name, target := range h.aliasesFunc() {
+			for name, target := range ps.Aliases {
 				target = strings.TrimSpace(target)
 				if target == "" {
 					continue
