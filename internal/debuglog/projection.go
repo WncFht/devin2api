@@ -159,6 +159,8 @@ func contentProjection(content llm.Content) map[string]any {
 		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "signature": content.Signature, "signature_type": content.SignatureType, "redacted": content.Redacted}
 	case llm.ImageContent:
 		return signProjection(map[string]any{"type": content.ContentType(), "data": content.Data, "mime_type": content.MIMEType}, content.Signature, content.SignatureType)
+	case llm.DocumentContent:
+		return map[string]any{"type": content.ContentType(), "data": content.Data, "mime_type": content.MIMEType, "url": content.URL, "filename": content.Filename}
 	case llm.ToolCall:
 		// Custom 调用的 Arguments 是供应商原文而非 JSON，直接 marshal
 		// RawMessage 会产生坏 JSON——按字符串落盘并标 custom。

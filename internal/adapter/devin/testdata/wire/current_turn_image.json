@@ -48,6 +48,7 @@
   },
   "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
   "prompt": "You are a coding assistant.",
+  "promptCacheKey": "daeb4857eec57e0565561c239d10b5a3",
   "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
   "systemPromptCacheOptions": {
     "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"

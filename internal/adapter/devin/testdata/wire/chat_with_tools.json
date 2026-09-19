@@ -32,6 +32,7 @@
   },
   "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
   "prompt": "You are a coding assistant.\n\n# tools descriptions\n<tool name=\"read_file\">\n1. Read a file from the workspace\n</tool>",
+  "promptCacheKey": "6313e93fc46ff01ba5e894f89c6b8fee",
   "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
   "systemPromptCacheOptions": {
     "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"

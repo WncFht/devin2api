@@ -37,6 +37,7 @@
   "modelAssignmentJwt": "golden-router-jwt",
   "plannerMode": "ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT",
   "prompt": "You are a coding assistant.\n\n# tools descriptions\n<tool name=\"read_file\">\n1. Read a file\n</tool>",
+  "promptCacheKey": "f9fab4ef89865796924924691d6c2600",
   "requestType": "CHAT_MESSAGE_REQUEST_TYPE_CASCADE",
   "systemPromptCacheOptions": {
     "type": "ExaChatPb_CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL"

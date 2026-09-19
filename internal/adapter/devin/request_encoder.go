@@ -107,6 +107,11 @@ func buildRequest(request llm.RequestMessages, config Config, binding callBindin
 		CascadeId:   proto.String(cascadeID),
 		PlannerMode: devinproto.ExaCodeiumCommonPb_ConversationalPlannerMode_ExaCodeiumCommonPb_ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT.Enum(),
 		ExecutionId: proto.String(executionID),
+		// prompt_cache_key 是调用方声明的上游缓存命名空间键（3.10.31
+		// schema 新增 #27）：填会话亲和键——与 trajectory/cascade 同种子
+		// 派生，缓存命名空间与会话轨迹命名空间对齐，且 opaque 不暴露
+		// 客户端原始 SessionKey。
+		PromptCacheKey: proto.String(SessionAffinityKey(request)),
 	}
 	// 上游实测：option_name 合法值为 none/auto/required；Anthropic 的 "any"
 	// 在本层已归一为 required。auto 不发送，与上游缺省行为一致。
@@ -524,7 +529,7 @@ func countMovedPrompts(in, out []*devinproto.ExaChatPb_ChatMessagePrompt) int {
 }
 
 // promptForContent 把 UserMessage/ToolResultMessage 的内容块投影为单条
-// prompt。两类消息的 Validate 已限定 content 只含 text/image，
+// prompt。两类消息的 Validate 已限定 content 只含 text/image/document，
 // thinking/工具调用不会到达这里——助手侧产物走 convertMessage 的
 // AssistantMessage 分支单独组装。
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool, repairs *llm.RequestRepairs) *devinproto.ExaChatPb_ChatMessagePrompt {
@@ -570,6 +575,26 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 				Base64Data: proto.String(data),
 				MimeType:   proto.String(mimeType),
 			})
+		case llm.DocumentContent:
+			// 文档不受「仅当前轮」限制：上游实测历史轮 documents 照常
+			// 被模型读取（与历史图 invalid_argument 不同制）。
+			document := &devinproto.ExaCodeiumCommonPb_DocumentData{
+				Filename: proto.String(block.Filename),
+			}
+			if block.URL != "" {
+				// url 与 mime_type 互斥（上游 "must not set a mime_type"）。
+				document.Url = proto.String(block.URL)
+			} else {
+				data := block.Data
+				if strings.HasPrefix(data, "data:") {
+					if _, encoded, ok := strings.Cut(data, ","); ok {
+						data = encoded
+					}
+				}
+				document.Base64Data = proto.String(data)
+				document.MimeType = proto.String(block.MIMEType)
+			}
+			prompt.Documents = append(prompt.Documents, document)
 		}
 	}
 	prompt.Prompt = proto.String(text.String())

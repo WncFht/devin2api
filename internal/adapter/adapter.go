@@ -27,6 +27,9 @@ type ModelInfo struct {
 	OwnedBy string
 	// SupportsImages 表示该模型是否支持多模态图片输入；目录未知时为 false。
 	SupportsImages bool
+	// SupportsDocuments 表示该模型是否支持文档输入（上游 modelFeatures
+	// 的 supports_documents 能力位，独立于 supports_images）；目录未知时为 false。
+	SupportsDocuments bool
 	// SupportsToolCalls 表示该模型是否支持工具调用；目录未声明时为 false。
 	SupportsToolCalls bool
 	// SupportsParallelToolCalls 表示该模型是否支持同轮并行工具调用；目录未声明时为 false。

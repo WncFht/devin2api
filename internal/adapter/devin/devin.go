@@ -867,6 +867,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
+	if err := adapter.validateDocumentsForModel(request, model); err != nil {
+		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
+		return nil, err
+	}
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
 	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
@@ -1181,6 +1185,33 @@ func (adapter *Adapter) catalogSupportsImages(model string) (supported bool, kno
 	return false, false
 }
 
+// validateDocumentsForModel 在本地尽早拒绝「无文档能力模型 + 文档」组合：
+// 上游对不支持模型的 documents 报 invalid_argument "does not support file
+// inputs"（实测 swe-2-max）。目录未覆盖时放行交给上游裁决——文档能力与
+// 图片不同是例外而非默认，不发明启发式名单。
+func (adapter *Adapter) validateDocumentsForModel(request llm.RequestMessages, model string) error {
+	if !requestHasDocuments(request) {
+		return nil
+	}
+	if supported, known := adapter.catalogSupportsDocuments(model); known && !supported {
+		return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("model %q does not support file inputs (supports_documents=false); use a document-capable model or remove documents", model)}
+	}
+	return nil
+}
+
+// catalogSupportsDocuments 查询模型目录缓存中该 uid 的文档能力。
+// 第二个返回值表示目录是否包含该模型。
+func (adapter *Adapter) catalogSupportsDocuments(model string) (supported bool, known bool) {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	for _, m := range adapter.models {
+		if m.ID == model {
+			return m.SupportsDocuments, true
+		}
+	}
+	return false, false
+}
+
 // warnIfModelAbsentFromCatalog 在目录已加载且目标 uid 缺席时记 Warn。
 // 实测 alias 指向死模型时上游只回模糊的 permission_denied: an internal
 // error occurred——排障只能靠日志里的这条提示定位到 alias 目标。
@@ -1361,6 +1392,27 @@ func requestHasImages(request llm.RequestMessages) bool {
 	return false
 }
 
+// requestHasDocuments 判断请求是否含文档块，口径与 requestHasImages 相同。
+func requestHasDocuments(request llm.RequestMessages) bool {
+	for _, message := range request.Messages {
+		var content []llm.Content
+		switch m := message.(type) {
+		case llm.UserMessage:
+			content = m.Content
+		case llm.ToolResultMessage:
+			content = m.Content
+		default:
+			continue
+		}
+		for _, block := range content {
+			if _, ok := block.(llm.DocumentContent); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // modelLikelySupportsImages 用已知无视觉模型名单；不确定时放行让上游裁决。
 func modelLikelySupportsImages(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -1513,6 +1565,7 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 				info.SupportsToolCalls = features.GetSupportsToolCalls()
 				info.SupportsParallelToolCalls = features.GetSupportsParallelToolCalls()
 				info.SupportsThinking = features.GetSupportsThinking()
+				info.SupportsDocuments = features.GetSupportsDocuments()
 				info.PreserveThinking = features.GetPreserveThinking()
 				if !info.SupportsImages {
 					info.SupportsImages = features.GetSupportsImages()

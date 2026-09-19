@@ -28,3 +28,11 @@ secretGroup = 3
 # 已知历史泄露（不重写历史，口令走轮换）：赦免该 commit 让 gitleaks git
 # 审计归零，新提交里的同类内容不受 commits 豁免影响仍会被拦。
 commits = ['''5e9f3d6602be9b5b7648d36c2e43e34ef9b01aad''']
+
+# wire golden 快照里的 promptCacheKey 是测试 fixture 的确定性 sha256 hex
+# （SessionAffinityKey 对固定 sessionSeed 的输出），非凭据；路径+形状双重
+# 限定放行，其它路径里的 32-hex 仍被 generic-api-key 拦。
+[allowlist]
+regexTarget = "secret"
+paths = ['''internal/adapter/devin/testdata/wire/.*\.json''']
+regexes = ['''^[0-9a-f]{32}$''']

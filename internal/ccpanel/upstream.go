@@ -468,6 +468,8 @@ func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
 				m["supports_thinking"] = features.GetSupportsThinking()
 				m["preserve_thinking"] = features.GetPreserveThinking()
 				m["interleave_thinking"] = features.GetInterleaveThinking()
+				m["supports_documents"] = features.GetSupportsDocuments()
+				m["supports_document_urls"] = features.GetSupportsDocumentUrls()
 			}
 		}
 

@@ -1102,6 +1102,12 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 				h.Write([]byte{3})
 				put(typed.Data)
 				put(typed.MIMEType)
+			case llm.DocumentContent:
+				h.Write([]byte{6})
+				put(typed.Data)
+				put(typed.URL)
+				put(typed.MIMEType)
+				put(typed.Filename)
 			case llm.ToolCall:
 				h.Write([]byte{4})
 				put(typed.ID)

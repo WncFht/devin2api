@@ -418,12 +418,13 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 			}
 			currentUserContent = append(currentUserContent, image)
 		case "document", "file":
-			// 文档块上游没有对应通道，内容必然丢；静默丢弃会让模型在
-			// 缺上下文下回答而无人察觉，落占位文本至少让缺失可见。
-			context.Dropped = append(context.Dropped, "user_block:"+header.Type)
-			currentUserContent = append(currentUserContent, llm.TextContent{
-				Text: "[content omitted: " + header.Type + " block not supported]",
-			})
+			// 上游 documents 通道实测可用（claude-5/gpt-5.6 系 supportsDocuments
+			// 能力位，历史轮回放也接受）；file_id 等无法解析的形态按请求错误拒绝。
+			document, err := common.DecodeDocumentPart(part)
+			if err != nil {
+				return nil, fmt.Errorf("content[%d]: %w", index, err)
+			}
+			currentUserContent = append(currentUserContent, document)
 		case "tool_result":
 			// tool_use_id 缺失或对不上前置调用的结果先按原样进 IR；
 			// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
@@ -659,13 +660,22 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 				content = append(content, llm.TextContent{Text: header.Resource.Text})
 			case header.Resource.Blob != "" && strings.HasPrefix(header.Resource.MIMEType, "image/"):
 				content = append(content, llm.ImageContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType})
+			case header.Resource.Blob != "":
+				// 非图 blob 走文档通道（上游 documents 实测可读），URI 作文件名。
+				content = append(content, llm.DocumentContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType, Filename: header.Resource.URI})
 			default:
 				content = append(content, llm.TextContent{Text: "[resource: " + header.Resource.URI + "]"})
 			}
+		case "document", "file":
+			// tool_result 内容里的文档块与 user 层同通道上行。
+			document, err := common.DecodeDocumentPart(part)
+			if err != nil {
+				return nil, fmt.Errorf("content[%d]: %w", index, err)
+			}
+			content = append(content, document)
 		default:
-			// tool_result 内无法投到 IR 的块（document 等）只记 Dropped、
-			// 不进内容——模型会在不知道有内容被省略的情况下作答；与
-			// user 层 document/file 的占位约定一致，让缺失可见。
+			// tool_result 内无法投到 IR 的块只记 Dropped 加占位文本，
+			// 让缺失对模型可见而不是静默丢上下文。
 			context.Dropped = append(context.Dropped, "content_block:"+header.Type)
 			content = append(content, llm.TextContent{
 				Text: "[content omitted: " + header.Type + " block not supported]",

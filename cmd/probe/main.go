@@ -517,6 +517,11 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	trajectoryID := fs.String("trajectory-id", "", "explicit trajectory_id (share across calls for session continuation)")
 	stepIndex := fs.Int("step-index", -1, "trajectoryReference.step_index (session-monotonic counter, real CLI sends it)")
 	images := fs.Int("images", 0, "")
+	docFile := fs.String("doc-file", "", "attach file as DocumentData on the user message")
+	docMime := fs.String("doc-mime", "", "document mime_type (default: by extension, fallback application/pdf)")
+	docURL := fs.String("doc-url", "", "document url field instead of base64")
+	docHistory := fs.Bool("doc-history", false, "attach the document to a synthetic earlier user turn, not the current one")
+	promptCacheKey := fs.String("prompt-cache-key", "", "request prompt_cache_key field")
 	internalModel := fs.Int("internal-model", 0, "")
 	assignJWT := fs.String("assign-jwt", "", "model_assignment_jwt")
 	resolveModel := fs.Bool("resolve", false, "run AssignModel first, use returned uid+jwt")
@@ -636,6 +641,30 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			Base64Data: proto.String(tinyPNG()),
 			MimeType:   proto.String("image/png"),
 		})
+	}
+	if *docFile != "" {
+		doc, err := probeDocument(*docFile, *docMime, *docURL)
+		if err != nil {
+			return err
+		}
+		if *docHistory {
+			// 历史轮文档：上游对历史图是 invalid_argument，文档是否同制
+			// 需要实测——挂在一个已完结的 user→assistant 轮次上。
+			histUser := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randid.UUID()),
+				Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
+				Prompt:    proto.String("Please read this document."),
+				Documents: []*devinproto.ExaCodeiumCommonPb_DocumentData{doc},
+			}
+			histAssistant := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randid.UUID()),
+				Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				Prompt:    proto.String("I have read the document."),
+			}
+			req.ChatMessagePrompts = append(req.ChatMessagePrompts, histUser, histAssistant)
+		} else {
+			msg.Documents = append(msg.Documents, doc)
+		}
 	}
 	if *sysAsMsg {
 		req.ChatMessagePrompts = append(req.ChatMessagePrompts, &devinproto.ExaChatPb_ChatMessagePrompt{
@@ -775,6 +804,9 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if *assignJWT != "" {
 		req.ModelAssignmentJwt = proto.String(*assignJWT)
 	}
+	if *promptCacheKey != "" {
+		req.PromptCacheKey = proto.String(*promptCacheKey)
+	}
 	return runStream(ctx, client, req, *frames, *dumpDir)
 }
 
@@ -815,6 +847,40 @@ func tinyPNG() string {
 	// 1x1 纯蓝 PNG
 	b, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// probeDocument 从文件构造 DocumentData：mime 显式指定优先，否则按
+// 扩展名猜、兜底 application/pdf；urlFlag 非空时只填 url 不上传字节。
+func probeDocument(path, mime, urlFlag string) (*devinproto.ExaCodeiumCommonPb_DocumentData, error) {
+	doc := &devinproto.ExaCodeiumCommonPb_DocumentData{
+		Filename: proto.String(filepath.Base(path)),
+	}
+	if mime == "" {
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".txt", ".md":
+			mime = "text/plain"
+		case ".json":
+			mime = "application/json"
+		case ".html", ".htm":
+			mime = "text/html"
+		case ".docx":
+			mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		default:
+			mime = "application/pdf"
+		}
+	}
+	if urlFlag != "" {
+		// 上游实测：url 与 mime_type 互斥（"must not set a mime_type"）。
+		doc.Url = proto.String(urlFlag)
+		return doc, nil
+	}
+	doc.MimeType = proto.String(mime)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("doc-file: %w", err)
+	}
+	doc.Base64Data = proto.String(base64.StdEncoding.EncodeToString(raw))
+	return doc, nil
 }
 
 // runStream 发 GetChatMessage 并消费整流：汇总字段出现频次、usage、

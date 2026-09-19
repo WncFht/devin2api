@@ -310,6 +310,7 @@ var modelCreatedFallback = time.Now().Unix()
 func modelCapabilities(m adapter.ModelInfo) map[string]any {
 	return map[string]any{
 		"supports_images":              m.SupportsImages,
+		"supports_documents":           m.SupportsDocuments,
 		"supports_tool_calls":          m.SupportsToolCalls,
 		"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
 		"supports_thinking":            m.SupportsThinking,
