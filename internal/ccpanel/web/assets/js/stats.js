@@ -14,6 +14,7 @@
     let usageData = null;      // /admin/usage 规范化快照；null=未拉到
     let usageDisabled = false; // 快照 disabled 标记（调试日志未启用）
     let statsExactModelValue = '';
+    let statsLoadGeneration = 0; // 加载代际：慢响应撞上新请求时整体丢弃
     let sortState = {
       column: null,
       order: null // null, 'asc', 'desc'
@@ -94,6 +95,7 @@
     }
 
     async function loadStats() {
+      const generation = ++statsLoadGeneration;
       try {
         renderStatsLoading();
 
@@ -101,7 +103,9 @@
         // 用量观测是独立失败域：端点未部署/未启用只影响观测卡，不拖垮统计表
         const usagePromise = loadUsageObserv();
         // 后端返回格式: {"success":true,"data":{"stats":[...],"duration_seconds":...,"rpm_stats":{...},"is_today":...}}
-        statsData = (await fetchDataWithAuth('/dashboard/stats?' + params.toString())) || { stats: [] };
+        const data = (await fetchDataWithAuth('/dashboard/stats?' + params.toString())) || { stats: [] };
+        if (generation !== statsLoadGeneration) return; // 慢响应让位新请求
+        statsData = data;
         durationSeconds = statsData.duration_seconds || 1; // 防止除零
         rpmStats = statsData.rpm_stats || null;
         isToday = statsData.is_today !== false;
@@ -121,6 +125,7 @@
         await usagePromise;
 
       } catch (error) {
+        if (generation !== statsLoadGeneration) return;
         console.error('Failed to load stats:', error);
         if (window.showError) try { window.showError(t('stats.noData')); } catch(_){}
         renderStatsError();
@@ -1466,6 +1471,10 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
     // 渲染所有饼图
     function renderCharts() {
       if (!statsData || !statsData.stats || statsData.stats.length === 0) {
+        // 空结果也要显式清图——否则切到图表视图看到上一次加载的残留饼图
+        renderPieChart('chart-model-calls', {}, '');
+        renderPieChart('chart-model-tokens', {}, '');
+        renderPieChart('chart-model-cost', {}, '');
         return;
       }
 
@@ -1530,7 +1539,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
         })
         .sort((a, b) => b.value - a.value);
 
-      // 如果没有数据，显示空状态
+      // 如果没有数据，清空旧 series 再显示空状态（merge 模式不下发 series 会残留）
       if (data.length === 0) {
         chart.setOption({
           title: {
@@ -1541,7 +1550,8 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
               color: chartTheme.mutedText,
               fontSize: 14
             }
-          }
+          },
+          series: []
         });
         return;
       }
@@ -1557,6 +1567,7 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
       const total = data.reduce((sum, item) => sum + item.value, 0);
 
       const option = {
+        title: { text: '' }, // 清掉空态留下的居中标题（merge 模式）
         tooltip: {
           trigger: 'item',
           backgroundColor: chartTheme.tooltipBg,
