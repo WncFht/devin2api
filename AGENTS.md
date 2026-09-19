@@ -164,6 +164,7 @@
 - **不要手动跑 `./devin-2api` 占端口**：Restart=always 会与手动实例互抢 :3033，交替时全部在途流被掐。
 - 优雅是硬要求：重启只发 SIGTERM（`TimeoutStopSec=660` 覆盖 600s 排空上限，在途流跑完再退），禁用 `kill -9` 抢时间。部署走 `deploy-linux.sh` 的 reuseport 重叠交接才是零停机；直接 `systemctl --user restart` 时排空期新连接是 refused（reuseport 实例 drain 即关 listener）。排空起点对已有连接关 keep-alive（响应带 `Connection: close`），陈旧复用连接最多吃一次 503 即重连到接替者。
 - 冒烟用 `scripts/smoke/smoke.sh`（空闲端口起临时实例，healthz + `/v1/models` 真实上游探针后自动关闭）；不保留常驻侧实例。
+- 本机起调试/测试实例时 `-state-dir` 一律指磁盘路径（如 `~/.cache/devin-2api-test/`），禁止把生产 state 拷进 `/tmp`：archbox 的 `/tmp` 是 16G tmpfs，写满会让整机所有 agent 会话的 shell 包装器写不了临时文件、全部 Bash 瞬间 exit 1/2 零输出（2026-09-19/20 两次齐挂事故）。
 - `devin-2api.new` 构建产物若部署中断残留，直接删除即可。
 - 多个会话可能共用同一工作树：`deploy-linux.sh` 构建的就是工作树现状（tracked 含脏改 + **未跟踪非忽略文件**，即他人未提交 WIP 与本地新脚本原样上生产），脏树部署前先确认树上文件的归属与可编译性。
 - `pkill -f <pattern>` 的模式会匹配发起者自己的 shell 命令行 → 整条 shell 被杀（exit 144，踩过多次）。用自排除正则（`pkill -f 'devin-2api-v[0-9]'`、`pkill -f 'state-dir /tmp/d2api-[0-9]'`——`[0-9]`/`[.]` 字面不匹配模式串自身）或先 `pgrep` 拿 pid 再 `kill -TERM`。
