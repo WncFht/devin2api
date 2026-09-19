@@ -453,7 +453,7 @@ func TestGateWindows(t *testing.T) {
 	if err := s.InsertGateWindow(ctx, &GateWindow{
 		Lane: "default", WindowStart: 1700000000, Quota: 30,
 		UsedFg: 12, UsedBg: 3, UsedBgPing: 2, Drip: 1, RetryAdmits: 2, ReservePeak: 9, WaitersPeak: 4,
-		RejectQuota: 2, RejectHold: 1, RejectBgReserve: 1, RejectLatch: 5, FgRate: 11.4,
+		RejectQuota: 2, RejectBgReserve: 1, RejectLatch: 5, FgRate: 11.4,
 	}); err != nil {
 		t.Fatalf("InsertGateWindow: %v", err)
 	}

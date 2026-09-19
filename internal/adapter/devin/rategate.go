@@ -59,14 +59,13 @@ const (
 )
 
 // 闸门拒绝的 X-Gate-Reason 取值：latch 是冷却闩快败（Retry-After
-// 报闩剩余）；quota 是配额类拒绝（fg 桶满 / bg 预留不足，Retry-After
-// 报下一窗口）；hold 是桶未满但等待将超预算（死区等待是唯一来源）；
-// yield 是让位快败——预计长排队且兄弟 lane 有余量时提前放行给 failover
+// 报闩剩余）；quota 是排队预算类拒绝（桶满/死区睡到下一窗口将超
+// 预算，或 bg 预留/爬坡让路，Retry-After 一律报下一窗口）；yield
+// 是让位快败——预计长排队且兄弟 lane 有余量时提前放行给 failover
 // （Retry-After 按底层阻塞成因同口径报出）。
 const (
 	gateReasonLatch = "latch"
 	gateReasonQuota = "quota"
-	gateReasonHold  = "hold"
 	gateReasonYield = "yield"
 )
 
@@ -133,17 +132,17 @@ type rateGate struct {
 	latchCount      int
 	dripCount       int
 	rejectLatched   int // 闩内被快败的请求数
-	rejectHold      int // 闩外排队预计超 maxHold 被快败的请求数
-	rejectBgReserve int // bg 因预留/爬坡让路被快败的请求数（礼让强度指标；bg 桶满快败归 rejectHold）
+	rejectBudget    int // 闩外排队预算耗尽被快败的请求数（客户端见 quota 词）
+	rejectBgReserve int // bg 因预留/爬坡让路被快败的请求数（礼让强度指标；bg 桶满快败归 rejectBudget）
 	rejectYield     int // 兄弟 lane 有余量时提前快败让给 failover 的请求数（让位强度指标）
 	waitersFg       int // 当前睡到下一窗口的 fg 请求数
 	waitersBg       int // 当前睡着的 bg 请求数（预留阻塞重查也进此列）
 	// win* 是本窗口明细账：rollBucket 翻页时快照成 gate_windows 行后
 	// 清零，把窗口用量/拒绝成因从「事后回推 logs」变成直查。上面的
 	// 累计计数器口径不动（面板兼容），win* 按 client 看到的 reason
-	// 细分——桶满快败归 winRejectQuota 而不是笼统的 rejectHold。
-	winRejectQuota     int // 桶满快败（fg/bg 同列）
-	winRejectHold      int // 死区等待超预算快败
+	// 细分——桶满与死区超预算快败统归 winRejectQuota（客户端同见
+	// quota 词）。
+	winRejectQuota     int // 预算耗尽快败（桶满/死区，fg/bg 同列）
 	winRejectBgReserve int // bg 让路快败（预留/爬坡）
 	winRejectLatch     int // 闩内快败
 	winRejectYield     int // 让位快败（兄弟有余量提前放给 failover）
@@ -357,7 +356,7 @@ type GateStats struct {
 	LatchCount       int        `json:"latch_count"`
 	DripCount        int        `json:"drip_count"`
 	RejectLatched    int        `json:"reject_latched_count"`
-	RejectHold       int        `json:"reject_hold_count"`
+	RejectBudget     int        `json:"reject_budget_count"`
 	WindowQuota      int        `json:"window_quota"`          // 每桶配额（= max_rpm）；0 表示不限速
 	WindowUsed       int        `json:"window_used"`           // 当前桶已放行数（= used_fg + used_bg + 未分类）
 	WindowUsedFg     int        `json:"window_used_fg"`        // 本桶 fg 放行数
@@ -542,7 +541,6 @@ func (gate *rateGate) rollBucket(ws time.Time) {
 	gate.bucketUsedFg = 0
 	gate.bucketUsedBg = 0
 	gate.winRejectQuota = 0
-	gate.winRejectHold = 0
 	gate.winRejectBgReserve = 0
 	gate.winRejectLatch = 0
 	gate.winRejectYield = 0
@@ -599,7 +597,6 @@ func (gate *rateGate) persistWindow(ws time.Time) {
 		ReservePeak:     gate.winReservePeak,
 		WaitersPeak:     gate.winWaitersPeak,
 		RejectQuota:     gate.winRejectQuota,
-		RejectHold:      gate.winRejectHold,
 		RejectBgReserve: gate.winRejectBgReserve,
 		RejectLatch:     gate.winRejectLatch,
 		RejectYield:     gate.winRejectYield,
@@ -788,7 +785,7 @@ func (gate *rateGate) stats() GateStats {
 		LatchCount:       gate.latchCount,
 		DripCount:        gate.dripCount,
 		RejectLatched:    gate.rejectLatched,
-		RejectHold:       gate.rejectHold,
+		RejectBudget:     gate.rejectBudget,
 		RejectBgReserve:  gate.rejectBgReserve,
 		RejectYield:      gate.rejectYield,
 		WindowQuota:      gate.quota,
@@ -1191,28 +1188,15 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 			gate.mu.Unlock()
 			return nil
 		}
-		// 不可放行：按阻塞成因选睡眠时长与快败归因。
-		//   - 桶满：睡到下一窗口；快败按 quota 类（Retry-After 报下窗）。
-		//   - 死区：睡到下一窗口开放；快败按 hold 类。
-		//   - bg 让路阻塞（sendable 且桶未满：预留不足或爬坡额度还没
-		//     释放到它）：只睡 gateBgRecheck——预留随可发区间衰减、
-		//     爬坡随经过时间释放，中段让出的槽即时可吃；快败仍按
-		//     quota 类、Retry-After 报下一窗口（客户端按窗口节奏
-		//     重试，不该按本地重查节奏轮询）。
-		var wait time.Duration
-		reason := gateReasonHold
+		// 不可放行：按阻塞成因选睡眠时长。桶满/死区睡到下一窗口开放；
+		// bg 让路阻塞（sendable 且桶未满：预留不足或爬坡额度还没释放到
+		// 它）只睡 gateBgRecheck——预留随可发区间衰减、爬坡随经过时间
+		// 释放，中段让出的槽即时可吃。快败统一报 quota + Retry-After
+		// 到下一窗口：客户端按窗口节奏重试，不该按本地重查节奏轮询。
 		reserveBlocked := bg && sendable && gate.bucketUsed < gate.quota
-		switch {
-		case gate.bucketUsed >= gate.quota:
-			wait = ws.Add(windowPeriod).Sub(now)
-			reason = gateReasonQuota
-		case !sendable:
-			wait = ws.Add(windowPeriod).Sub(now)
-		case reserveBlocked:
+		wait := ws.Add(windowPeriod).Sub(now)
+		if reserveBlocked {
 			wait = min(gateBgRecheck, ws.Add(gate.usable).Sub(now))
-			reason = gateReasonQuota
-		default:
-			wait = ws.Add(windowPeriod).Sub(now)
 		}
 		// 让位快败：预计排队超 gateEarlyRelease 且号池里有兄弟 lane
 		// 此刻能更快放行时，立即按 yield 快败交给 failover——在注定
@@ -1244,11 +1228,7 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 					gate.rejectYield++
 					gate.winRejectYield++
 					gate.mu.Unlock()
-					retryAfter := wait
-					if reason == gateReasonQuota {
-						retryAfter = ws.Add(windowPeriod).Sub(now)
-					}
-					rej := gateRejection(retryAfter, gateReasonYield)
+					rej := gateRejection(ws.Add(windowPeriod).Sub(now), gateReasonYield)
 					rej.GateProbeMS = probeWait.Milliseconds()
 					rej.GateSiblingEwMS = siblingEW.Milliseconds()
 					return rej
@@ -1260,21 +1240,11 @@ func (gate *rateGate) wait(ctx context.Context) (err error) {
 				gate.rejectBgReserve++
 				gate.winRejectBgReserve++
 			} else {
-				gate.rejectHold++
-				// 窗口账按客户端看到的 reason 细分：桶满快败归
-				// quota，死区等超预算归 hold——与 X-Gate-Reason 同源。
-				if reason == gateReasonQuota {
-					gate.winRejectQuota++
-				} else {
-					gate.winRejectHold++
-				}
-			}
-			retryAfter := wait
-			if reason == gateReasonQuota {
-				retryAfter = ws.Add(windowPeriod).Sub(now)
+				gate.rejectBudget++
+				gate.winRejectQuota++
 			}
 			gate.mu.Unlock()
-			rej := gateRejection(retryAfter, reason)
+			rej := gateRejection(ws.Add(windowPeriod).Sub(now), gateReasonQuota)
 			rej.GateProbeMS = probeWait.Milliseconds()
 			rej.GateSiblingEwMS = siblingEW.Milliseconds()
 			return rej
@@ -1508,7 +1478,7 @@ func (gate *rateGate) noteUpstreamSuccess() {
 // （排障归因 rate_gate），RetryAfterSeconds 直接带精确等待秒数——
 // 不再靠伪造 "reset in N seconds" 文案让下游重解析。Message 保留
 // 同一句式，客户端与日志看到的文案不变。reason 取 gateReason*
-// 词表（latch/quota/hold），经响应头 X-Gate-Reason 透出。
+// 词表（latch/quota/yield），经响应头 X-Gate-Reason 透出。
 func gateRejection(retryAfter time.Duration, reason string) *llm.Failure {
 	seconds := int(math.Ceil(retryAfter.Seconds()))
 	return &llm.Failure{

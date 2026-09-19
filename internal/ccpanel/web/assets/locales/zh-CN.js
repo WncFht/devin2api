@@ -639,7 +639,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'settings.runtimeMetrics.metric.gateLatchCount': '上闩次数',
   'settings.runtimeMetrics.metric.gateDripCount': '滴灌放行',
   'settings.runtimeMetrics.metric.gateRejectLatched': '闩锁快败',
-  'settings.runtimeMetrics.metric.gateRejectHold': '排队超时快败',
+  'settings.runtimeMetrics.metric.gateRejectBudget': '排队超时快败',
   'settings.runtimeMetrics.metric.gateRejectYield': '让位快败',
   'settings.runtimeMetrics.metric.gateWindowNext': '下窗开启',
   'settings.runtimeMetrics.metric.debuglogEnabled': '已启用',

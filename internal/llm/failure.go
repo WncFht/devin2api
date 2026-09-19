@@ -48,9 +48,9 @@ type Failure struct {
 	// RetryAfterMinute 为真表示 hint 以分钟粒度给出：重置时刻须按上游
 	// 分钟桶界向上对齐（floor 取整的剩余时长），不能当精确秒数用。
 	RetryAfterMinute bool
-	// GateReason 是本地闸门拒绝的归因（latch/quota/hold——词表由
-	// rate gate 产出），仅 LocalGate 置位时有值；HTTP 层据此写
-	// X-Gate-Reason 响应头。
+	// GateReason 是本地闸门拒绝的归因（rate gate 词表 latch/quota/
+	// yield，号池另有 bound_yield），仅 LocalGate 置位时有值；
+	// HTTP 层据此写 X-Gate-Reason 响应头。
 	GateReason string
 	// GateProbeMS 是产生本次拒绝的那次闸门评估测得的本侧期望排队
 	// 毫秒数——让位探针的同一量：闩内是闩剩余，排队阻塞是单次睡眠

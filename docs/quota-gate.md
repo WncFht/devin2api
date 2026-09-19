@@ -28,17 +28,17 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 
 每 lane 每个「被观察关闭」的对齐分钟窗口一行——闸门在该窗内被流量/面板/保温触碰过才有关窗行，整窗未触碰的空窗期是缺口而非零行。`(lane, window_start)` 唯一索引；reuseport 交接期新旧两进程并发观察同一窗口时后写者被 `INSERT OR IGNORE` 丢弃。
 
-| 列                                                                    | 含义                                                                                                                               |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `window_start`                                                        | unix 秒，对齐分钟桶界                                                                                                              |
-| `quota`                                                               | 关窗时生效的窗口配额（`<=0` 表示不限速）                                                                                           |
-| `used_fg` / `used_bg`                                                 | 本窗 fg/bg 放行数（bg 含保温 ping 与闩内滴灌探针）                                                                                 |
-| `used_bg_ping`                                                        | 本窗经 `tryAdmit` 的保温 ping 放行数（`used_bg` 的子集——`used_bg - used_bg_ping` 即真实 bg 需求；迁移 0014 起，历史行 0 不可回补） |
-| `drip`                                                                | 闩内滴灌探针放行数（`used_*` 的子集，单列供配额归因）                                                                              |
-| `retry_admits`                                                        | 同 lane 续试重发的放行数（`used_*` 的子集——reopen/续轮/凭据自愈/瞬时重试；不含号池 failover 后新 lane 首发）                       |
-| `reserve_peak` / `waiters_peak`                                       | 本窗 bg 预留量峰值 / 闸内排队数峰值（fg+bg）                                                                                       |
-| `reject_quota` / `reject_hold` / `reject_bg_reserve` / `reject_latch` | 按成因分列的快败数：桶满、排队预算耗尽（死区等待）、bg 让路（预留/爬坡）、闩内快败                                                 |
-| `fg_rate`                                                             | 关窗折叠后的 fg 准入速率 EMA（条/窗），bg 动态预留的输入                                                                           |
+| 列                                                    | 含义                                                                                                                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `window_start`                                        | unix 秒，对齐分钟桶界                                                                                                                                  |
+| `quota`                                               | 关窗时生效的窗口配额（`<=0` 表示不限速）                                                                                                               |
+| `used_fg` / `used_bg`                                 | 本窗 fg/bg 放行数（bg 含保温 ping 与闩内滴灌探针）                                                                                                     |
+| `used_bg_ping`                                        | 本窗经 `tryAdmit` 的保温 ping 放行数（`used_bg` 的子集——`used_bg - used_bg_ping` 即真实 bg 需求；迁移 0014 起，历史行 0 不可回补）                     |
+| `drip`                                                | 闩内滴灌探针放行数（`used_*` 的子集，单列供配额归因）                                                                                                  |
+| `retry_admits`                                        | 同 lane 续试重发的放行数（`used_*` 的子集——reopen/续轮/凭据自愈/瞬时重试；不含号池 failover 后新 lane 首发）                                           |
+| `reserve_peak` / `waiters_peak`                       | 本窗 bg 预留量峰值 / 闸内排队数峰值（fg+bg）                                                                                                           |
+| `reject_quota` / `reject_bg_reserve` / `reject_latch` | 按成因分列的快败数：排队预算耗尽（桶满/死区睡到下一窗口将超预算）、bg 让路（预留/爬坡）、闩内快败；`reject_hold` 列已退役（hold 词并入 quota），恒为 0 |
+| `fg_rate`                                             | 关窗折叠后的 fg 准入速率 EMA（条/窗），bg 动态预留的输入                                                                                               |
 
 两个读法要点：`reject_bg_reserve` 名义是快败，实际形态可以是「骑满排队预算再拒」——bg 被预留/爬坡挡住走 `gateBgRecheck` 短睡重查，直到预计等待超剩余预算才拒，实测被吸收行首 lane 停泊 p50=118.7s（紧贴 `bgMaxHold` 默认 120s），每吸收行平均多付 ~130s 首个上游字节。`waiters_peak=0` 而 transform 段长等，是闸前 stall（AssignModel/目录拉取不过闸）的嗅探信号——gate 账本对它完全不可见。
 
@@ -77,9 +77,9 @@ devin-2api 对「流量、配额、换号、存储」的测量分散在若干持
 ```sql
 -- 最近的闸门拒绝（逐 lane 逐窗，单位=每次 gate.wait 评估）
 SELECT lane, datetime(window_start,'unixepoch','localtime') w,
-       reject_quota, reject_hold, reject_bg_reserve, reject_latch
+       reject_quota, reject_bg_reserve, reject_latch
 FROM gate_windows
-WHERE reject_quota+reject_hold+reject_bg_reserve+reject_latch > 0
+WHERE reject_quota+reject_bg_reserve+reject_latch > 0
 ORDER BY window_start DESC LIMIT 20;
 
 -- 逐日 sends_per_row：分子 gate_windows 放行数（剔保温 ping）

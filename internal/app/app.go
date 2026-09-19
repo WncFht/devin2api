@@ -1213,7 +1213,7 @@ func writeLoggedError(writer http.ResponseWriter, recorder *debuglog.Recorder, p
 	if status == http.StatusTooManyRequests {
 		recorder.SetRateLimited()
 		completion.RateLimited = true
-		// 闸门拒绝的归因（latch/quota/hold）由生产侧结构携带——
+		// 闸门拒绝的归因（latch/quota/yield）由生产侧结构携带——
 		// bg 客户端据此区分「桶满睡到下窗」与「闩内睡到解闩」。
 		if failure.GateReason != "" {
 			writer.Header().Set("X-Gate-Reason", failure.GateReason)

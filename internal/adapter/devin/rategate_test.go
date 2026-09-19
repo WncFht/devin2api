@@ -1013,9 +1013,9 @@ func TestRateGateFgRateEMAFoldsAtRoll(t *testing.T) {
 	}
 }
 
-// bg 快败语义：死区/桶满与 fg 同形按窗口节奏拒绝；预留阻塞单独记
-// rejectBgReserve 不复用 rejectHold，让「礼让强度」与「排队预算
-// 耗尽」可区分。
+// bg 快败语义：死区/桶满与 fg 同形按窗口节奏拒绝（统一报 quota）；
+// 预留阻塞单独记 rejectBgReserve 不复用 rejectBudget，让「礼让强度」
+// 与「排队预算耗尽」可区分。
 func TestRateGateRejectionReasons(t *testing.T) {
 	// 闩内：reason=latch。
 	gate := newRateGate(GateConfig{}, nil, "")
@@ -1025,11 +1025,11 @@ func TestRateGateRejectionReasons(t *testing.T) {
 	if err := gate.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonLatch {
 		t.Fatalf("latched wait error = %v, want *llm.Failure reason=latch", err)
 	}
-	// fg 死区：reason=hold。
+	// fg 死区超预算：reason=quota（死区等待与桶满同归预算类拒绝）。
 	fresh := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
 	pinGateClock(fresh, 58.5)
-	if err := fresh.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonHold {
-		t.Fatalf("dead-zone wait error = %v, want *llm.Failure reason=hold", err)
+	if err := fresh.wait(context.Background()); !errors.As(err, &gateErr) || gateErr.GateReason != gateReasonQuota {
+		t.Fatalf("dead-zone wait error = %v, want *llm.Failure reason=quota", err)
 	}
 	// fg 桶满：reason=quota。
 	full := newRateGate(GateConfig{MaxRPM: 1, MaxHold: time.Second}, nil, "")
@@ -1558,8 +1558,8 @@ func TestRateGateYieldPersistsInWindow(t *testing.T) {
 		t.Fatalf("rows = %d, want 1 closed window", len(rows))
 	}
 	w := rows[0]
-	if w.RejectYield != 1 || w.RejectQuota != 0 || w.RejectHold != 0 {
-		t.Fatalf("row rejects = yield:%d quota:%d hold:%d, want 1/0/0", w.RejectYield, w.RejectQuota, w.RejectHold)
+	if w.RejectYield != 1 || w.RejectQuota != 0 {
+		t.Fatalf("row rejects = yield:%d quota:%d, want 1/0", w.RejectYield, w.RejectQuota)
 	}
 }
 

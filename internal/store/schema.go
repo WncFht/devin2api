@@ -232,6 +232,9 @@ var schemaStatements = []string{
 	// gate_windows：速率闸门按对齐分钟窗口聚合的明细账，每 lane 每个
 	// 被观察关闭的窗口一行（闸门在该窗口内被流量/面板/保温触碰过才有
 	// 行，整窗未触碰的空窗期是缺口而非零行）。列含义见 GateWindow。
+	// reject_hold 是退役列：hold 快败词已并入 quota 不再读写，列位
+	// 保留——REUSEPORT 交接期旧进程仍按旧列表写入，删列会让其 INSERT
+	// 全败。
 	`CREATE TABLE IF NOT EXISTS gate_windows (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		lane TEXT NOT NULL DEFAULT '',
