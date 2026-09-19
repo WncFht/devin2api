@@ -425,12 +425,26 @@ func expandHomeDir(path string) string {
 	return path
 }
 
+// FoldModelKey 归一化模型名比较键：去 '-'/'.'/'_' 并小写。模型名是
+// ASCII 集合，rune 级 Map 足够。这是别名折叠匹配的唯一实现——
+// NormalizeAliases 用它拒绝折叠等价键（同键两目标在运行时是 map
+// 迭代序抽签），adapter/devin.ResolveModelAlias 用同一份做折叠命中。
+func FoldModelKey(s string) string {
+	return strings.ToLower(strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '_', '.':
+			return -1
+		}
+		return r
+	}, s))
+}
+
 // NormalizeAliases 归一化 devin.aliases：键与目标去空白，拒绝空键、
-// 空目标、把 "*" 当目标用（"*" 只作兜底键）、trim 后重复键与仅大小写
-// 不同的键（折叠匹配要求无歧义）；随后把链式映射展开成最终目标并检出
-// 环（a→b、b→c 归一成 a→c、b→c；a→a 按环报错）。展开发生在加载期，
-// 运行时按 精确 → 折叠 → "*" 顺序单跳查找即可。导出供面板设置页
-// （/admin/settings 的 devin_aliases 键）复用同一套校验。
+// 空目标、把 "*" 当目标用（"*" 只作兜底键）、trim 后重复键与折叠等价
+// 键（大小写或标点差异——运行时折叠匹配要求无歧义）；随后把链式映射
+// 展开成最终目标并检出环（a→b、b→c 归一成 a→c、b→c；a→a 按环报错）。
+// 展开发生在加载期，运行时按 精确 → 折叠 → "*" 顺序单跳查找即可。
+// 导出供面板设置页（/admin/settings 的 devin_aliases 键）复用同一套校验。
 func NormalizeAliases(aliases map[string]string) (map[string]string, error) {
 	if len(aliases) == 0 {
 		return aliases, nil
@@ -452,11 +466,11 @@ func NormalizeAliases(aliases map[string]string) (map[string]string, error) {
 		if prev, ok := normalized[key]; ok && prev != target {
 			return nil, fmt.Errorf("devin.aliases: key %q maps to both %q and %q", key, prev, target)
 		}
-		if prev, ok := folded[strings.ToLower(key)]; ok && prev != key {
-			return nil, fmt.Errorf("devin.aliases: keys %q and %q differ only by case", prev, key)
+		if prev, ok := folded[FoldModelKey(key)]; ok && prev != key {
+			return nil, fmt.Errorf("devin.aliases: keys %q and %q collide after case/punctuation folding", prev, key)
 		}
 		normalized[key] = target
-		folded[strings.ToLower(key)] = key
+		folded[FoldModelKey(key)] = key
 	}
 	for key := range normalized {
 		seen := map[string]bool{key: true}

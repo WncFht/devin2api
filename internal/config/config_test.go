@@ -79,7 +79,7 @@ func TestLoadEnablesDebugLoggingExplicitly(t *testing.T) {
 }
 
 // TestNormalizeAliases 钉住别名归一化契约：trim、链式展开、合法 "*" 兜底键；
-// 空键/空目标/"*" 目标/大小写重复/环都在加载期报错而不是运行时静默漂移。
+// 空键/空目标/"*" 目标/大小写或标点折叠重复/环都在加载期报错而不是运行时静默漂移。
 func TestNormalizeAliases(t *testing.T) {
 	valid := map[string]string{
 		" swe-2 ": "swe-2-max",
@@ -109,6 +109,8 @@ func TestNormalizeAliases(t *testing.T) {
 		{"a": "b", "b": "a"},           // 环
 		{"a": "a"},                     // 自环
 		{"a": "b", "b": "c", "c": "b"}, // 中间环
+		{"glm-5.3-flash": "x", "glm_5_3_flash": "y"}, // 仅标点不同的折叠重复
+		{"glm-5.3-flash": "x", "GLM.5.3.FLASH": "z"}, // 大小写+标点混合折叠重复
 	}
 	for i, m := range invalid {
 		if _, err := NormalizeAliases(m); err == nil {
