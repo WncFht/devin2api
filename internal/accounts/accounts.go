@@ -41,6 +41,10 @@ type Runtime struct {
 	pool       *devin.Pool
 	state      atomic.Pointer[configState]
 	lastReload atomic.Pointer[ccpanel.ConfigReloadReport]
+	// degraded 是最近一次 Apply 里 credentials_file 解不出的账号集
+	// （含生效集 DB 行来源，不止 config 声明）：写者持 rt 锁、读者是
+	// View 等无锁读路径，故走 atomic。
+	degraded atomic.Pointer[[]config.DevinAccountConfig]
 }
 
 // configState 是最近一次成功加载的配置快照：配置自省端点拿它回答
@@ -109,6 +113,25 @@ func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, settings *ccpan
 	if err != nil {
 		return nil, nil, err
 	}
+	// credentials_file 解不出的账号：响亮记错并把「什么凭据都没有」的
+	// lane 打进凭据冷却（一条流量不吃；文件回填经 TokenSource/下一次
+	// reload 复活）。仍持有凭据的 lane（保留 token、api_key 铸币）不
+	// 标记——文件缺席不等于 token 死，继续服役。
+	live := rt.pool.TokenFuncs()
+	var degraded []config.DevinAccountConfig
+	for _, account := range synthesized {
+		if account.LoadError == "" {
+			continue
+		}
+		degraded = append(degraded, account)
+		slog.Error("account credentials_file unreadable; lane degraded",
+			"account", account.Name, "error", account.LoadError)
+		if cur, ok := live[account.Name]; ok && cur() != "" {
+			continue
+		}
+		rt.pool.MarkDegraded(account.Name, account.LoadError)
+	}
+	rt.degraded.Store(&degraded)
 	if settings != nil {
 		if err := settings.ApplyAll(); err != nil {
 			slog.Warn("panel settings replay failed", "error", err)
@@ -156,6 +179,15 @@ func (rt *Runtime) View() map[string]any {
 	view["stale"] = fileMtime(rt.configPath).After(cur.fileMtime)
 	if report := rt.lastReload.Load(); report != nil {
 		view["last_reload"] = report
+	}
+	if d := rt.degraded.Load(); d != nil && len(*d) > 0 {
+		list := make([]map[string]any, 0, len(*d))
+		for _, account := range *d {
+			list = append(list, map[string]any{
+				"name": account.Name, "credentials_file": account.CredentialsFile, "error": account.LoadError,
+			})
+		}
+		view["degraded_accounts"] = list
 	}
 	return view
 }
@@ -216,11 +248,21 @@ func credential(acc *store.ResolvedAccount) (string, error) {
 // 字段口径一致。
 func (rt *Runtime) devinConfigs(cfg config.Config, synthesized []config.DevinAccountConfig) []devin.Config {
 	lanes := make([]devin.Config, 0, len(synthesized))
+	live := rt.pool.TokenFuncs()
 	for _, account := range synthesized {
 		lane := BaseConfig(cfg)
 		lane.Identity.Name = account.Name
 		lane.Identity.Token = account.Token
 		lane.Identity.APIKey = account.APIKey
+		if account.Token == "" && account.LoadError != "" {
+			// 凭据文件解不出的既有 lane：保留在册 token 而不是推 ""
+			// ——文件失踪不判 token 死（09-18 删除后原 token 仍服役），
+			// 推空会抹掉一份可能仍有效的凭据并清掉 assignment 缓存。
+			// 新 lane 无在册值，进池即被 Apply 后段标记降级。
+			if cur, ok := live[account.Name]; ok {
+				lane.Identity.Token = cur()
+			}
+		}
 		lane.Priority = account.Priority
 		// 号级 max_rpm 覆盖全局闸门配额；0 继承 devin.max_rpm。
 		if account.MaxRPM > 0 {

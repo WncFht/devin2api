@@ -6,8 +6,6 @@
 package config
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,9 +123,10 @@ func TestLoadAccountsNameValidation(t *testing.T) {
 }
 
 // TestLoadAccountsCredentialSources 验证每个账号至少一种凭据来源：
-// 三者皆缺报错；credentials_file 在加载期就必须解出 windsurf_api_key
-// （文件缺失与文件在但无键是两种报错）；只给文件时 token 由文件播种；
-// 两者都给时 token 保持字面量、文件留作自愈来源；只给 api_key 也可成号。
+// 三者皆缺报错；credentials_file 解不出记 LoadError 降级而非拒载
+// （文件缺失与文件在但无键都落 LoadError，09-18 文件被删事故的
+// 教训）；只给文件时 token 由文件播种；两者都给时 token 保持字面量、
+// 文件留作自愈来源；只给 api_key 也可成号。
 func TestLoadAccountsCredentialSources(t *testing.T) {
 	t.Run("neither token nor file nor api_key", func(t *testing.T) {
 		_, err := loadWithDevin(t, t.TempDir(), "  accounts:\n    - name: alpha\n")
@@ -155,19 +154,72 @@ func TestLoadAccountsCredentialSources(t *testing.T) {
 		}
 	})
 
-	t.Run("missing credentials file", func(t *testing.T) {
-		_, err := loadWithDevin(t, t.TempDir(), "  accounts:\n    - name: alpha\n      credentials_file: 'missing.toml'\n")
-		if err == nil || !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("Load() error = %v, want read failure wrapping fs.ErrNotExist", err)
+	// 文件缺席/无键不再拒载：LoadError 留证据、账号降级，进程继续
+	// 加载——09-18 credentials.toml 被删→1922 次重启循环就是死在这里。
+	t.Run("missing credentials file degrades", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(), "  accounts:\n    - name: alpha\n      credentials_file: 'missing.toml'\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v, want degraded load, not failure", err)
+		}
+		acc := config.Devin.Accounts[0]
+		if acc.LoadError == "" || !strings.Contains(acc.LoadError, "no such file") {
+			t.Fatalf("LoadError = %q, want file-miss evidence", acc.LoadError)
+		}
+		if !acc.Degraded() {
+			t.Fatal("file-only account with unreadable file must be Degraded")
 		}
 	})
 
-	t.Run("credentials file without key", func(t *testing.T) {
+	t.Run("credentials file without key degrades", func(t *testing.T) {
 		dir := t.TempDir()
 		writeTestFile(t, filepath.Join(dir, "creds.toml"), "other_key = \"x\"\n")
-		_, err := loadWithDevin(t, dir, "  accounts:\n    - name: alpha\n      credentials_file: 'creds.toml'\n")
-		if err == nil || !strings.Contains(err.Error(), "no windsurf_api_key") {
-			t.Fatalf("Load() error = %v, want no windsurf_api_key", err)
+		config, err := loadWithDevin(t, dir, "  accounts:\n    - name: alpha\n      credentials_file: 'creds.toml'\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v, want degraded load, not failure", err)
+		}
+		acc := config.Devin.Accounts[0]
+		if !strings.Contains(acc.LoadError, "no windsurf_api_key") || !acc.Degraded() {
+			t.Fatalf("LoadError = %q Degraded = %v", acc.LoadError, acc.Degraded())
+		}
+	})
+
+	// 文件坏但有其它凭据在役：LoadError 证据记下，账号不降级——字面
+	// token/api_key 照常服役，文件留作自愈源等回填。
+	t.Run("missing file with literal token does not degrade", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      token: tok-lit\n      credentials_file: 'missing.toml'\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		acc := config.Devin.Accounts[0]
+		if acc.LoadError == "" || acc.Degraded() || acc.Token != "tok-lit" {
+			t.Fatalf("LoadError = %q Degraded = %v Token = %q", acc.LoadError, acc.Degraded(), acc.Token)
+		}
+	})
+
+	t.Run("missing file with api_key does not degrade", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      api_key: cog_x\n      credentials_file: 'missing.toml'\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if acc := config.Devin.Accounts[0]; acc.LoadError == "" || acc.Degraded() {
+			t.Fatalf("LoadError = %q Degraded = %v", acc.LoadError, acc.Degraded())
+		}
+	})
+
+	// 全号皆降级也是合法加载：进程起来服务管理面，死 lane 标记冷却
+	// 等文件回填——好过 systemd 重启空转。
+	t.Run("all accounts degraded still loads", func(t *testing.T) {
+		config, err := loadWithDevin(t, t.TempDir(),
+			"  accounts:\n    - name: alpha\n      credentials_file: 'a.toml'\n    - name: beta\n      credentials_file: 'b.toml'\n")
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		for _, acc := range config.Devin.Accounts {
+			if !acc.Degraded() {
+				t.Fatalf("account %q not degraded: %+v", acc.Name, acc)
+			}
 		}
 	})
 

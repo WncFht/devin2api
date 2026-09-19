@@ -1714,6 +1714,42 @@ func (pool *Pool) ClearCooldown(name string) bool {
 	return false
 }
 
+// MarkDegraded 把该名 lane 打进凭据冷却并留证据：配置加载期
+// credentials_file 解不出（config.DevinAccountConfig.LoadError）且无
+// 其它凭据可用时调用——无凭据 lane 一条流量都不该吃。簿记与
+// noteFailure 的 unauthenticated 分支同一套字段：badTokenHash 按当前
+// token 记（空 token 即 tokenHash("")），凭据源补进真 token 哈希即变、
+// authCooldown 自动解禁；badUntil 走同一连败退避档，到期探针若恰逢
+// 文件回填就地复活。持久行同步写，重启不复活死 lane。无该名活 lane
+// 返 false。
+func (pool *Pool) MarkDegraded(name, reason string) bool {
+	for _, lane := range pool.snapshot() {
+		if lane.name != name {
+			continue
+		}
+		lane.authMu.Lock()
+		now := time.Now()
+		lane.debtSetAt = now
+		lane.lastFailureAt = now
+		lane.lastFailureCode = "credentials_file_unreadable"
+		lane.lastFailureMessage = reason
+		if len(lane.lastFailureMessage) > 300 {
+			lane.lastFailureMessage = lane.lastFailureMessage[:300]
+		}
+		lane.badTokenHash = tokenHash(lane.adapter.currentToken())
+		if !now.Before(lane.badUntil) {
+			lane.failStreak++
+		}
+		if until := now.Add(backoffDuration(badTokenCooldown, badTokenCooldownMax, lane.failStreak)); until.After(lane.badUntil) {
+			lane.badUntil = until
+		}
+		lane.persistCooldownLocked()
+		lane.authMu.Unlock()
+		return true
+	}
+	return false
+}
+
 // NoteQuotaSample 按配额采样刷新该名 lane 的降权标记：weekly 剩余
 // 百分比低于阈值（QuotaLowThresholdPercent，0→默认 15，负值关闭）
 // 时 quotaLow 置位——排序把 lane 降入「健康但配额低」档，只影响新

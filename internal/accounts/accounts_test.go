@@ -497,3 +497,135 @@ func mustEffective(t *testing.T, ops ccpanel.AccountOps, ctx context.Context) []
 	}
 	return resolved
 }
+
+// TestApplyDegradesMissingCredentialsFile 验证 09-18 事故的降级路径：
+// credentials_file 被外部删掉时整表校验不拒载——有问题的 lane 进池
+// 但被打进凭据冷却（hardDown 一条流量不吃），其余 lane 照常服役；
+// 证据落在 lane 状态（admin 既有透出）与 rt.View 的 degraded_accounts。
+func TestApplyDegradesMissingCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, `server:
+  listen: '127.0.0.1:1'
+devin:
+  base_url: 'https://example.com'
+  model: 'm'
+  accounts:
+    - {name: alpha, token: 'tok-alpha'}
+    - {name: beta, credentials_file: 'gone.toml'}
+`)
+	dbStore := testAccountStore(t, dir)
+	pool := testPool(t)
+	rt := New(configPath, dir, dbStore, pool)
+	rt.CommitConfig(cfg)
+	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("Apply() error = %v, want degraded push, not rejection", err)
+	}
+	states := pool.AccountLaneStates()
+	if got := sortedKeys(states); !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Fatalf("lanes = %v, want [alpha beta]", got)
+	}
+	if states["alpha"].Healthy != true {
+		t.Fatalf("alpha lane must stay healthy: %+v", states["alpha"])
+	}
+	beta := states["beta"]
+	if beta.Healthy || beta.AuthCooldownUntil == nil {
+		t.Fatalf("beta lane must be marked unhealthy with auth cooldown: %+v", beta)
+	}
+	if beta.LastFailureCode != "credentials_file_unreadable" {
+		t.Fatalf("beta.LastFailureCode = %q, want credentials_file_unreadable", beta.LastFailureCode)
+	}
+	view := rt.View()
+	list, ok := view["degraded_accounts"].([]map[string]any)
+	if !ok || len(list) != 1 || list[0]["name"] != "beta" {
+		t.Fatalf("degraded_accounts = %v, want beta entry", view["degraded_accounts"])
+	}
+}
+
+// TestApplyDegradedLaneKeepsLiveToken 验证「文件失踪不判 token 死」：
+// 既有 lane 的文件被删后再 Apply，在册 token 保留、lane 不标冷却——
+// 09-18 里文件被删时在内存的 token 实际仍有效，抹掉只会提前杀 lane。
+// lane 真死在上游时走原 unauthenticated 冷却链；文件回填后下一场
+// Apply 自动解封。
+func TestApplyDegradedLaneKeepsLiveToken(t *testing.T) {
+	dir := t.TempDir()
+	creds := filepath.Join(dir, "creds.toml")
+	if err := os.WriteFile(creds, []byte("windsurf_api_key = \"file-tok-beta\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath, cfg := writeTestConfig(t, dir, `server:
+  listen: '127.0.0.1:1'
+devin:
+  base_url: 'https://example.com'
+  model: 'm'
+  accounts:
+    - {name: alpha, token: 'tok-alpha'}
+    - {name: beta, credentials_file: 'creds.toml'}
+`)
+	dbStore := testAccountStore(t, dir)
+	pool := testPool(t)
+	rt := New(configPath, dir, dbStore, pool)
+	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := pool.TokenFuncs()["beta"](); got != "file-tok-beta" {
+		t.Fatalf("beta token = %q, want file-seeded file-tok-beta", got)
+	}
+	// 外部删掉文件后重推（等价 reload）：证据落 LoadError，但 lane
+	// 保留在册 token 继续服役、不进冷却。
+	if err := os.Remove(creds); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("re-Apply() error = %v", err)
+	}
+	if got := pool.TokenFuncs()["beta"](); got != "file-tok-beta" {
+		t.Fatalf("beta token after file loss = %q, want retained file-tok-beta", got)
+	}
+	if st := pool.AccountLaneStates()["beta"]; !st.Healthy {
+		t.Fatalf("beta lane must keep serving on retained token: %+v", st)
+	}
+}
+
+// TestApplyAllAccountsDegraded 验证全号降级仍合法重推：进程起来服务
+// 管理面，死 lane 全标冷却等文件回填——好过 systemd 重启空转。
+func TestApplyAllAccountsDegraded(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, `server:
+  listen: '127.0.0.1:1'
+devin:
+  base_url: 'https://example.com'
+  model: 'm'
+  accounts:
+    - {name: alpha, credentials_file: 'a.toml'}
+    - {name: beta, credentials_file: 'b.toml'}
+`)
+	dbStore := testAccountStore(t, dir)
+	pool := testPool(t)
+	rt := New(configPath, dir, dbStore, pool)
+	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	for name, st := range pool.AccountLaneStates() {
+		if st.Healthy || st.AuthCooldownUntil == nil {
+			t.Fatalf("lane %q must be marked degraded: %+v", name, st)
+		}
+	}
+}
+
+// TestOpsCredentialOfRejectsMissingFile 钉住写路径契约：verify 探测的
+// 凭据解析对解不出的 credentials_file 返回错误而不是空 token——
+// 拿空串打上游只会换回无关 401，把真正的文件错误淹掉。
+func TestOpsCredentialOfRejectsMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
+	dbStore := testAccountStore(t, dir)
+	pool := testPool(t)
+	rt := New(configPath, dir, dbStore, pool)
+	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	ops := rt.Ops(nil)
+	if _, err := ops.CredentialOf(ccpanel.AccountWrite{Name: "ghost", CredentialsFile: "missing.toml"}); err == nil {
+		t.Fatal("CredentialOf(missing file) must return error, not empty token")
+	}
+}

@@ -55,6 +55,19 @@ type DevinAccountConfig struct {
 	Priority int `yaml:"priority"`
 	// MaxRPM 覆盖该号自己的分钟窗口配额；0 表示继承 devin.max_rpm 全局值。
 	MaxRPM int `yaml:"max_rpm"`
+	// LoadError 是加载期解析 credentials_file 失败的证据（运行时字段，
+	// 非 yaml 键）：文件被外部删除/不可读/无 windsurf_api_key 时由
+	// resolveAccounts 落上，文案与旧的致命错误同形。非空表示该号声明
+	// 的凭据文件当前不可用——账号是否因此降级看 Degraded。
+	LoadError string `yaml:"-"`
+}
+
+// Degraded 报告该账号是否因凭据文件不可用而降级：LoadError 是「文件
+// 读不出」的证据，但只要还有字面 token 或 api_key 在役，lane 照常服役
+// （文件留作自愈源，回填即复活）；三者皆空时文件是唯一凭据来源，账号
+// 降级——进池但拿不到流量，由 Apply 经 pool.MarkDegraded 打凭据冷却。
+func (account DevinAccountConfig) Degraded() bool {
+	return account.LoadError != "" && account.Token == "" && account.APIKey == ""
 }
 
 // devinAccountNamePattern 约束账号名字符集：名字要进闸门状态键
@@ -300,8 +313,10 @@ func (config *Config) Validate(configDir string) error {
 }
 
 // resolveAccounts 校验并落实账号池声明：每个账号必须带合法且唯一的
-// name、至少一种凭据来源；credentials_file 在加载期就必须能解出 key
-// （路径笔误不该静默产出一个死 lane）。同一有效 token 或同一
+// name、至少一种凭据来源或一条 LoadError；credentials_file 读不出记
+// LoadError 而非整体拒载——文件缺席是外部世界的状态不是配置语义错误
+// （09-18 文件被删→进程重启循环事故的教训：lane 级降级，别拉垮进程）。
+// 无凭据又无 LoadError 仍是配置错误。同一有效 token 或同一
 // credentials_file 被两个条目引用等于同一账号进池两次——限流簿记会
 // 各自按满额计数、合并超发，按配置错误拒绝。
 // devin.token 已删除：残留非空值报迁移错误。空 accounts 即空生效集
@@ -348,13 +363,18 @@ func (devin *DevinConfig) resolveAccounts(configDir string) error {
 			seenFiles[account.CredentialsFile] = account.Name
 			resolved, err := readCredentialsFile(account.CredentialsFile)
 			if err != nil {
-				return fmt.Errorf("devin.accounts[%d]: credentials_file %q: %w", index, account.CredentialsFile, err)
-			}
-			if account.Token == "" {
+				// 文件缺席/不可读/无键不再整体拒载：09-18 事故里
+				// credentials.toml 被外部删掉，进程每次重启都在这死掉、
+				// systemd 空转近三小时。记 LoadError 继续——无其它凭据的
+				// 账号降级成死 lane（Degraded），有字面 token/api_key 的
+				// 照常服役（文件只是自愈源）；写路径（ops 干跑）与
+				// Apply 各自消费这条证据。
+				account.LoadError = fmt.Sprintf("devin.accounts[%d]: credentials_file %q: %v", index, account.CredentialsFile, err)
+			} else if account.Token == "" {
 				account.Token = resolved
 			}
 		}
-		if account.Token == "" && account.APIKey == "" {
+		if account.Token == "" && account.APIKey == "" && account.LoadError == "" {
 			return fmt.Errorf("devin.accounts[%d]: one of token/credentials_file/api_key is required", index)
 		}
 		if account.Token != "" {

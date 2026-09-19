@@ -81,6 +81,12 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			if err != nil {
 				return nil, err
 			}
+			// 写路径不享受降级：用户亲手写进一个解不出的 credentials_file
+			// 是输入错误，按旧契约 400 拒掉（别的号文件坏不拦本笔——
+			// 它的 lane 走降级）。LoadError 文案与旧致命错误同形。
+			if sa := synthesizedAccount(synthesized, in.Name); sa.LoadError != "" {
+				return nil, errors.New(sa.LoadError)
+			}
 			// 行存锚定后的绝对路径：merge 不做二次锚定，加载期「相对
 			// 锚 configDir」的规则要在行写入侧复刻。
 			if row.CredentialsFile != "" {
@@ -161,6 +167,9 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row))), configDir)
 			if err != nil {
 				return nil, err
+			}
+			if sa := synthesizedAccount(synthesized, name); sa.LoadError != "" {
+				return nil, errors.New(sa.LoadError)
 			}
 			if row.CredentialsFile != "" {
 				row.CredentialsFile = synthesizedAccount(synthesized, name).CredentialsFile
@@ -301,6 +310,9 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				return nil, err
 			}
 			for i, row := range staged {
+				if sa := synthesizedAccount(synthesized, row.Name); sa.LoadError != "" {
+					return nil, errors.New(sa.LoadError)
+				}
 				if row.CredentialsFile != "" {
 					row.CredentialsFile = synthesizedAccount(synthesized, row.Name).CredentialsFile
 				}
@@ -355,6 +367,11 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 				}}, configDir)
 				if err != nil {
 					return "", err
+				}
+				// 文件解不出时 LoadError 证据原样返回——verify 探测拿空
+				// token 打上游只会换回无关的 401，把文件错误淹掉。
+				if synthesized[0].LoadError != "" {
+					return "", errors.New(synthesized[0].LoadError)
 				}
 				return synthesized[0].Token, nil
 			}
