@@ -353,6 +353,7 @@ window.I18N_LOCALES['zh-CN'] = {
   'trend.title': '请求趋势 - Devin2API',
   'trend.chartTitle': '请求趋势图表',
   'trend.chartType': '图表类型',
+  'trend.metricType': '指标类型',
   'trend.lineChart': '折线图',
   'trend.barChart': '柱状图',
   'trend.allModels': '全部模型',

@@ -31,6 +31,7 @@
     <!-- 主内容区域 -->
     <main class="main-content">
       <div class="content-area">
+        <h1 class="visually-hidden" data-i18n="nav.trend">请求趋势</h1>
         <div data-page-filters="trend"></div>
 
         <!-- 趋势图表 -->
@@ -39,16 +40,22 @@
             <!-- 控件与图例：单行排布，窄屏时趋势类型组内部横滚 -->
             <div class="trend-chart-toolbar mb-6">
                 <!-- 趋势类型切换 -->
-                <div class="toggle-group" id="trend-type-group">
-                  <div class="toggle-btn" data-type="count" data-i18n="trend.typeCount">次数</div>
-                  <div class="toggle-btn" data-type="rpm" data-i18n="trend.typeRpm">RPM</div>
-                  <div class="toggle-btn" data-type="tps" data-i18n="trend.typeTps">TPS</div>
-                  <div class="toggle-btn" data-type="error_rate" data-i18n="trend.typeErrorRate">错误率</div>
-                  <div class="toggle-btn active" data-type="first_byte" data-i18n="trend.typeFirstByte">首字响应</div>
-                  <div class="toggle-btn" data-type="duration" data-i18n="trend.typeDuration">耗时</div>
-                  <div class="toggle-btn" data-type="tokens" data-i18n="trend.typeTokens">Token</div>
-                  <div class="toggle-btn" data-type="cost" data-i18n="trend.typeCost">费用</div>
-                  <div class="toggle-btn" data-type="cache_hit" data-i18n="trend.typeCacheHit">缓存</div>
+                <div
+                  class="toggle-group"
+                  id="trend-type-group"
+                  role="group"
+                  data-i18n-aria-label="trend.metricType"
+                  aria-label="指标类型"
+                >
+                  <button class="toggle-btn" type="button" data-type="count" aria-pressed="false" data-i18n="trend.typeCount">次数</button>
+                  <button class="toggle-btn" type="button" data-type="rpm" aria-pressed="false" data-i18n="trend.typeRpm">RPM</button>
+                  <button class="toggle-btn" type="button" data-type="tps" aria-pressed="false" data-i18n="trend.typeTps">TPS</button>
+                  <button class="toggle-btn" type="button" data-type="error_rate" aria-pressed="false" data-i18n="trend.typeErrorRate">错误率</button>
+                  <button class="toggle-btn active" type="button" data-type="first_byte" aria-pressed="true" data-i18n="trend.typeFirstByte">首字响应</button>
+                  <button class="toggle-btn" type="button" data-type="duration" aria-pressed="false" data-i18n="trend.typeDuration">耗时</button>
+                  <button class="toggle-btn" type="button" data-type="tokens" aria-pressed="false" data-i18n="trend.typeTokens">Token</button>
+                  <button class="toggle-btn" type="button" data-type="cost" aria-pressed="false" data-i18n="trend.typeCost">费用</button>
+                  <button class="toggle-btn" type="button" data-type="cache_hit" aria-pressed="false" data-i18n="trend.typeCacheHit">缓存</button>
                 </div>
                 <!-- 图表样式切换：与趋势类型同一控件语言 -->
                 <div

@@ -183,14 +183,16 @@
       document.querySelectorAll('.sortable').forEach(th => {
         th.classList.remove('sorted');
         th.removeAttribute('data-sort-order');
+        th.removeAttribute('aria-sort');
       });
-      
+
       // 如果有排序状态，设置当前列的样式
       if (sortState.column && sortState.order) {
         const currentHeader = document.querySelector(`[data-column="${sortState.column}"]`);
         if (currentHeader) {
           currentHeader.classList.add('sorted');
           currentHeader.setAttribute('data-sort-order', sortState.order);
+          currentHeader.setAttribute('aria-sort', sortState.order === 'asc' ? 'ascending' : 'descending');
         }
       }
     }
@@ -1030,6 +1032,14 @@ ${t('stats.tooltipCost')}: $${point.cost.toFixed(4)}`;
           const sortable = e.target.closest('.sortable[data-column]');
           if (!sortable) return;
 
+          sortTable(sortable.dataset.column);
+        });
+        thead.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          const sortable = e.target.closest('.sortable[data-column]');
+          if (!sortable) return;
+
+          e.preventDefault();
           sortTable(sortable.dataset.column);
         });
         thead.dataset.bound = '1';

@@ -1336,6 +1336,14 @@
       });
     }
 
+    function updateTrendTypeButtons() {
+      document.querySelectorAll('#trend-type-group .toggle-btn').forEach(button => {
+        const active = (button.getAttribute('data-type') || 'first_byte') === window.currentTrendType;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+
     function attachChartResizeObserver(chartDom) {
       if (!chartDom) return;
       if (window.chartResizeObserver) return;
@@ -1967,10 +1975,8 @@
       trendTypeGroup.addEventListener('click', (e) => {
         const t = e.target.closest('.toggle-btn');
         if (!t) return;
-        trendTypeGroup.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
-        t.classList.add('active');
-        const trendType = t.getAttribute('data-type') || 'first_byte';
-        window.currentTrendType = trendType;
+        window.currentTrendType = t.getAttribute('data-type') || 'first_byte';
+        updateTrendTypeButtons();
         persistState();
         renderChart();
       });
@@ -2107,13 +2113,7 @@
       });
 
       // 应用趋势类型UI
-      const trendTypeGroup = document.getElementById('trend-type-group');
-      if (trendTypeGroup) {
-        trendTypeGroup.querySelectorAll('.toggle-btn').forEach(btn => {
-          const type = btn.getAttribute('data-type') || 'first_byte';
-          btn.classList.toggle('active', type === window.currentTrendType);
-        });
-      }
+      updateTrendTypeButtons();
     }
 
     window.i18n?.onLocaleChange?.(() => {

@@ -77,21 +77,21 @@
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
         <h2 class="modal-title" data-i18n="tokens.createModalTitle">创建API令牌</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-create-modal">&times;</button>
+        <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-create-modal">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label" data-i18n="tokens.descriptionLabel">描述 *</label>
+          <label for="tokenDescription" class="form-label" data-i18n="tokens.descriptionLabel">描述 *</label>
           <input type="text" id="tokenDescription" class="form-input" data-i18n-placeholder="tokens.descriptionPlaceholder" placeholder="请输入令牌用途描述" required>
         </div>
 
         <div class="form-group">
-          <label class="form-label" data-i18n="tokens.expiryLabel">过期时间</label>
+          <label for="tokenExpiry" class="form-label" data-i18n="tokens.expiryLabel">过期时间</label>
           <select id="tokenExpiry" class="form-input" data-expiry-select data-change-action="toggle-custom-expiry"></select>
         </div>
 
         <div id="customExpiryContainer" class="form-group token-custom-expiry">
-          <label class="form-label" data-i18n="tokens.customExpiryLabel">自定义过期时间</label>
+          <label for="customExpiry" class="form-label" data-i18n="tokens.customExpiryLabel">自定义过期时间</label>
           <input type="datetime-local" id="customExpiry" class="form-input">
         </div>
 
@@ -104,7 +104,7 @@
         </div>
 
         <div class="form-group">
-          <label class="form-label" data-i18n="tokens.classLabel">请求类</label>
+          <label for="tokenClass" class="form-label" data-i18n="tokens.classLabel">请求类</label>
           <select id="tokenClass" class="form-input">
             <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
             <option value="bg" data-i18n="tokens.classBgOption">bg（后台批跑）</option>
@@ -113,7 +113,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
+          <label for="token5hCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -124,7 +124,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
+          <label for="tokenDailyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -135,7 +135,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
+          <label for="tokenWeeklyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -146,7 +146,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
+          <label for="tokenMonthlyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -157,7 +157,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
+          <label for="tokenCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -168,7 +168,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
+          <label for="tokenMaxConcurrency" class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <input type="number" id="tokenMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
@@ -178,7 +178,7 @@
         </div>
 
         <div class="form-group form-row-inline">
-          <label class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
+          <label for="tokenMaxRPM" class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
           <div class="form-row-inline__content token-limit-control">
             <div class="token-limit-input-line">
               <input type="number" id="tokenMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
@@ -188,7 +188,7 @@
         </div>
 
         <div class="form-group">
-          <label class="form-label" data-i18n="tokens.allowedModelsLabel">模型限制</label>
+          <label for="tokenAllowedModels" class="form-label" data-i18n="tokens.allowedModelsLabel">模型限制</label>
           <input type="text" id="tokenAllowedModels" class="form-input" data-i18n-placeholder="tokens.allowedModelsPlaceholder" placeholder="逗号分隔，留空表示允许所有模型">
         </div>
 
@@ -211,7 +211,7 @@
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
         <h2 class="modal-title" data-i18n="tokens.resultModalTitle">令牌创建成功</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-token-result-modal">&times;</button>
+        <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-token-result-modal">&times;</button>
       </div>
       <div class="modal-body">
         <div class="token-result-warning">
@@ -222,7 +222,7 @@
         </div>
 
         <div class="form-group">
-          <label class="form-label" data-i18n="tokens.resultTokenLabel">API令牌(请妥善保管)</label>
+          <label for="newTokenValue" class="form-label" data-i18n="tokens.resultTokenLabel">API令牌(请妥善保管)</label>
           <div class="token-result-value-wrap">
             <textarea id="newTokenValue" readonly class="form-input token-result-value"></textarea>
             <button type="button" data-action="copy-token-result" class="btn btn-secondary token-result-copy-btn" data-i18n="common.copy">
@@ -242,7 +242,7 @@
     <div class="modal-content modal-content--wide token-edit-modal">
       <div class="modal-header">
         <h2 class="modal-title" data-i18n="tokens.editModalTitle">编辑令牌</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-edit-modal">&times;</button>
+        <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-edit-modal">&times;</button>
       </div>
       <div class="modal-body token-edit-body token-edit-layout">
         <input type="hidden" id="editTokenId">
@@ -252,29 +252,29 @@
             <h3 class="token-edit-section-title" data-i18n="tokens.editSectionBasic">基础信息</h3>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--token">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.table.token">令牌</label>
+              <label for="editTokenValue" class="form-label form-row-inline__label" data-i18n="tokens.table.token">令牌</label>
               <input type="text" id="editTokenValue" class="form-input field-grow token-edit-token-value" readonly spellcheck="false">
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--description">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.editDescLabel">描述</label>
+              <label for="editTokenDescription" class="form-label form-row-inline__label" data-i18n="tokens.editDescLabel">描述</label>
               <input type="text" id="editTokenDescription" class="form-input field-grow">
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--expiry">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.expiryLabel">过期时间</label>
+              <label for="editTokenExpiry" class="form-label form-row-inline__label" data-i18n="tokens.expiryLabel">过期时间</label>
               <select id="editTokenExpiry" class="form-input field-grow" data-expiry-select data-change-action="toggle-edit-custom-expiry"></select>
             </div>
 
             <div id="editCustomExpiryContainer" class="form-group token-edit-custom-expiry">
               <div class="form-row-inline token-edit-field token-edit-field--custom-expiry">
-                <label class="form-label form-row-inline__label" data-i18n="tokens.customLabel">自定义</label>
+                <label for="editCustomExpiry" class="form-label form-row-inline__label" data-i18n="tokens.customLabel">自定义</label>
                 <input type="datetime-local" id="editCustomExpiry" class="form-input field-grow">
               </div>
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--class">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.classLabel">请求类</label>
+              <label for="editTokenClass" class="form-label form-row-inline__label" data-i18n="tokens.classLabel">请求类</label>
               <div class="form-row-inline__content">
                 <select id="editTokenClass" class="form-input field-grow">
                   <option value="fg" data-i18n="tokens.classFgOption">fg（前台）</option>
@@ -289,7 +289,7 @@
             <h3 class="token-edit-section-title" data-i18n="tokens.editSectionQuota">配额信息</h3>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
+              <label for="edit5hCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.cost5hLimitLabel">5小时限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
                   <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -303,7 +303,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
+              <label for="editDailyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.dailyCostLimitLabel">日限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
                   <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -317,7 +317,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
+              <label for="editWeeklyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.weeklyCostLimitLabel">7天限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
                   <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -331,7 +331,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
+              <label for="editMonthlyCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.monthlyCostLimitLabel">月限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
                   <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -345,7 +345,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--cost">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
+              <label for="editCostLimitUSD" class="form-label form-row-inline__label" data-i18n="tokens.costLimitLabel">总限额</label>
               <div class="form-row-inline__content token-limit-control token-edit-cost-control">
                 <div class="token-limit-input-line token-edit-cost-row">
                   <span class="token-cost-prefix" aria-hidden="true">$</span>
@@ -359,7 +359,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--concurrency">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
+              <label for="editMaxConcurrency" class="form-label form-row-inline__label" data-i18n="tokens.maxConcurrencyLabel">并发上限</label>
               <div class="form-row-inline__content token-limit-control">
                 <div class="token-limit-input-line">
                   <input type="number" id="editMaxConcurrency" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.maxConcurrencyPlaceholder" placeholder="0 表示无限制">
@@ -369,7 +369,7 @@
             </div>
 
             <div class="form-group form-row-inline token-edit-field token-edit-field--rpm">
-              <label class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
+              <label for="editMaxRPM" class="form-label form-row-inline__label" data-i18n="tokens.maxRPMLabel">RPM 上限</label>
               <div class="form-row-inline__content token-limit-control">
                 <div class="token-limit-input-line">
                   <input type="number" id="editMaxRPM" class="form-input field-grow" min="0" step="1" data-i18n-placeholder="tokens.zeroUnlimitedHint" placeholder="0 表示无限制">
@@ -445,7 +445,7 @@
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
         <h2 class="modal-title" data-i18n="tokens.selectModelTitle">选择模型</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-model-select-modal">&times;</button>
+        <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-model-select-modal">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
@@ -477,11 +477,11 @@
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
         <h2 class="modal-title" data-i18n="tokens.importModelTitle">手动输入模型</h2>
-        <button type="button" class="close-btn" aria-label="Close" data-action="close-model-import-modal">&times;</button>
+        <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-model-import-modal">&times;</button>
       </div>
       <div class="modal-body token-model-import-body">
         <div class="form-group model-import-group">
-          <label class="form-label model-import-label"><span data-i18n="tokens.inputModelLabel">输入模型名称</span> <span class="model-import-hint" data-i18n="tokens.inputModelHint">(支持逗号或换行分隔)</span></label>
+          <label for="tokenModelImportTextarea" class="form-label model-import-label"><span data-i18n="tokens.inputModelLabel">输入模型名称</span> <span class="model-import-hint" data-i18n="tokens.inputModelHint">(支持逗号或换行分隔)</span></label>
           <textarea
             id="tokenModelImportTextarea"
             class="form-input model-import-textarea"
