@@ -25,10 +25,14 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
-// requestTypeName 与 responseTypeName 是代理实际调用的上游 RPC 的线网类型。
+// 线网类型：代理上行只有两类 RPC——GetChatMessage（chat）与
+// GetWebSearchResults（服务端托管搜索）。两者共用 03 请求文件名空间
+// （Flow A 搜索占基座名）与 04 帧流，普查按载荷内容判别各归各的描述符。
 const (
-	requestTypeName  = "exa.api_server_pb.GetChatMessageRequest"
-	responseTypeName = "exa.api_server_pb.GetChatMessageResponse"
+	requestTypeName        = "exa.api_server_pb.GetChatMessageRequest"
+	responseTypeName       = "exa.api_server_pb.GetChatMessageResponse"
+	searchRequestTypeName  = "exa.api_server_pb.GetWebSearchResultsRequest"
+	searchResponseTypeName = "exa.api_server_pb.GetWebSearchResultsResponse"
 )
 
 // msgCensus 累计单个消息类型在流量中的出现次数与字段命中数。
@@ -125,7 +129,15 @@ func cmdCensus(args []string) error {
 	if err != nil {
 		return err
 	}
+	searchReqMD, err := messageDesc(searchRequestTypeName)
+	if err != nil {
+		return err
+	}
 	respMD, err := messageDesc(responseTypeName)
+	if err != nil {
+		return err
+	}
+	searchRespMD, err := messageDesc(searchResponseTypeName)
 	if err != nil {
 		return err
 	}
@@ -153,7 +165,7 @@ func cmdCensus(args []string) error {
 				if raw, _, ok, err := st.DebugFile(ctx, dir, stage, 0); err == nil && ok {
 					var obj map[string]any
 					if json.Unmarshal(raw, &obj) == nil {
-						req.walk(reqMD, obj)
+						req.walk(requestDesc(obj, reqMD, searchReqMD), obj)
 					}
 				}
 			}
@@ -163,10 +175,22 @@ func cmdCensus(args []string) error {
 			sc.Buffer(make([]byte, 4<<20), 4<<20)
 			for sc.Scan() {
 				var obj map[string]any
-				if json.Unmarshal(sc.Bytes(), &obj) == nil {
-					frames++
-					resp.walk(respMD, obj)
+				if json.Unmarshal(sc.Bytes(), &obj) != nil {
+					continue
 				}
+				// 04 行是 JSONLRecord 信封：上游帧固定 event="frame"、
+				// protojson 在 data 里；其余 event 名是 adapter 标记行
+				//（account_attempt/retry_attempt/detached 等），载荷非
+				// 上游 wire 格式，不参与普查。
+				if obj["event"] != "frame" {
+					continue
+				}
+				data, ok := obj["data"].(map[string]any)
+				if !ok {
+					continue
+				}
+				frames++
+				resp.walk(responseDesc(data, respMD, searchRespMD), data)
 			}
 			// 单行超过 4MB 缓冲时 Scan 提前终止——不查 Err 会把截断
 			// 当成正常读完，普查少计而不自知。
@@ -189,6 +213,26 @@ func requestDirs(ctx context.Context, st *store.Store, maxDirs int) ([]string, e
 		dirs = dirs[:maxDirs]
 	}
 	return dirs, nil
+}
+
+// requestDesc 按载荷判别 03 请求文件的真实消息类型：query 字段只存在于
+// GetWebSearchResultsRequest，chat 请求无此键。
+func requestDesc(obj map[string]any, chat, search protoreflect.MessageDescriptor) protoreflect.MessageDescriptor {
+	if _, ok := obj["query"]; ok {
+		return search
+	}
+	return chat
+}
+
+// responseDesc 判别 04 帧 data 的消息类型：results/webSearchUrl/summary
+// 三个键只属于 GetWebSearchResultsResponse，chat 响应字段集无交集。
+func responseDesc(data map[string]any, chat, search protoreflect.MessageDescriptor) protoreflect.MessageDescriptor {
+	for _, key := range []string{"results", "webSearchUrl", "summary"} {
+		if _, ok := data[key]; ok {
+			return search
+		}
+	}
+	return chat
 }
 
 // newCensus 建一份空普查累计器（消息表 + unknown 表 + 枚举异常表）。
