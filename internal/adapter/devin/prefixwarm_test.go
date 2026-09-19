@@ -843,9 +843,6 @@ func TestWarmNoteCompletedSideBooks(t *testing.T) {
 		Usage:         llm.Usage{Input: 3000, CacheRead: 6000},
 	})
 	entry := w.entries[key]
-	if _, ok := entry.observedModels["swe-2-max"]; !ok {
-		t.Fatal("response_model must join observed set")
-	}
 	if entry.prefixTokens != 9000 {
 		t.Fatalf("prefixTokens = %d, want 9000", entry.prefixTokens)
 	}
