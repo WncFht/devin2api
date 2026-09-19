@@ -114,7 +114,9 @@ func encodePayload(zw *gzip.Writer, data []byte) (stored []byte, usize int64) {
 
 // EncodePayloadDelta 以 base 为字典把 data 编成 zstd delta 帧（raw
 // content dict，patch-from 语义）：同目录 02/03-devin-request* 相对
-// 01 的差异只剩投影改写的结构部分。档位取 SpeedBetterCompression——
+// 01 的差异只剩投影改写的结构部分——逐文件重复编码持
+// PayloadDeltaEncoder 复用字典表，本函数是单次入口。档位取
+// SpeedBetterCompression——
 // SpeedFastest 的 dict 编码器是 32K 槽单探针快表（enc_fast.go
 // fastEncoderDict，tableBits=15），dict 超 ~300KB 碰撞饱和、残差随
 // 字典尺寸单调劣化（生产实测 0.6%@150K → 41.6%@750K dict）；level 3
@@ -123,23 +125,50 @@ func encodePayload(zw *gzip.Writer, data []byte) (stored []byte, usize int64) {
 // base 为空或残差收益不达阈值时回退 EncodePayload 独立存储——读侧
 // 按魔数自判形态，回退不需要任何标记位。
 func EncodePayloadDelta(data, base []byte) (stored []byte, usize int64) {
-	if len(data) < compressMinBytes || len(base) == 0 {
+	enc := NewPayloadDeltaEncoder(base)
+	if enc == nil {
 		return EncodePayload(data)
+	}
+	defer enc.Close()
+	return enc.Encode(data)
+}
+
+// PayloadDeltaEncoder 是单字典复用的 zstd delta 编码器：字典哈希表
+// 构建是 ~400KB 基座上编码的最贵一步，同目录 02/03* 分片各建一次
+// 编码器等于重复付这笔账。非并发安全：持有者是单编码协程。
+type PayloadDeltaEncoder struct {
+	zw *zstd.Encoder
+}
+
+// NewPayloadDeltaEncoder 以 base 为 raw dict 建复用编码器；base 为空
+// 或建器失败返回 nil——调用方回退 EncodePayload 独立编码。
+func NewPayloadDeltaEncoder(base []byte) *PayloadDeltaEncoder {
+	if len(base) == 0 {
+		return nil
 	}
 	zw, err := zstd.NewWriter(nil,
 		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
 		zstd.WithEncoderConcurrency(1),
-		zstd.WithEncoderDictRaw(deltaDictID, base),
-	)
+		zstd.WithEncoderDictRaw(deltaDictID, base))
 	if err != nil {
+		return nil
+	}
+	return &PayloadDeltaEncoder{zw: zw}
+}
+
+// Encode 与 EncodePayloadDelta 同语义，复用持有者的字典编码器。
+func (e *PayloadDeltaEncoder) Encode(data []byte) (stored []byte, usize int64) {
+	if len(data) < compressMinBytes {
 		return EncodePayload(data)
 	}
-	defer func() { _ = zw.Close() }()
-	if stored = zw.EncodeAll(data, nil); int64(len(stored)) >= int64(len(data))*9/10 {
+	if stored = e.zw.EncodeAll(data, nil); int64(len(stored)) >= int64(len(data))*9/10 {
 		return EncodePayload(data)
 	}
 	return stored, int64(len(data))
 }
+
+// Close 释放编码器占有的内部缓冲；EncodeAll 路径无流式状态可冲刷。
+func (e *PayloadDeltaEncoder) Close() { _ = e.zw.Close() }
 
 // errDeltaNeedsBase 是 delta 帧走到无字典解码口的显式失败：读侧必须
 // 先取同目录基座，静默透传 zstd 帧等于交出乱码。
