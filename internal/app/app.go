@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -304,6 +305,18 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 // （进程启动时刻）：逐请求取 time.Now() 会让同一模型的 created 逐次漂移。
 var modelCreatedFallback = time.Now().Unix()
 
+// modelCapabilities 是 modelEntry 投影的能力位字段：目录投影与别名
+// 合成/影子条目抄同一份清单，新增能力字段只在这里登记。
+func modelCapabilities(m adapter.ModelInfo) map[string]any {
+	return map[string]any{
+		"supports_images":              m.SupportsImages,
+		"supports_tool_calls":          m.SupportsToolCalls,
+		"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
+		"supports_thinking":            m.SupportsThinking,
+		"preserve_thinking":            m.PreserveThinking,
+	}
+}
+
 func modelEntry(m adapter.ModelInfo) map[string]any {
 	created := m.Created
 	if created == 0 {
@@ -315,15 +328,11 @@ func modelEntry(m adapter.ModelInfo) map[string]any {
 	}
 	entry := map[string]any{
 		"id": m.ID, "object": "model", "created": created, "owned_by": ownedBy,
-		"supports_images":              m.SupportsImages,
-		"supports_tool_calls":          m.SupportsToolCalls,
-		"supports_parallel_tool_calls": m.SupportsParallelToolCalls,
-		"supports_thinking":            m.SupportsThinking,
-		"preserve_thinking":            m.PreserveThinking,
-		"is_model_router":              m.IsModelRouter,
-		"context_tokens":               m.ContextTokens,
-		"max_output_tokens":            m.MaxOutputTokens,
+		"is_model_router":   m.IsModelRouter,
+		"context_tokens":    m.ContextTokens,
+		"max_output_tokens": m.MaxOutputTokens,
 	}
+	maps.Copy(entry, modelCapabilities(m))
 	// alias_of 标记该 id 是客户端别名：请求会被改写到目标 uid 运行。
 	if m.AliasOf != "" {
 		entry["alias_of"] = m.AliasOf
@@ -379,6 +388,11 @@ type aliasProvider interface {
 	Aliases() map[string]string
 }
 
+// capabilityKeys 是 modelCapabilities 的键集：能力位清单在 modelCapabilities
+// 单源登记，别名影子/合成条目照抄目标条目的同名字段，新增能力字段无需在
+// 第二处补登。取零值实例只为拿键，值不读。
+var capabilityKeys = slices.Sorted(maps.Keys(modelCapabilities(adapter.ModelInfo{})))
+
 // mergeAliases 把 devin.aliases 并入模型列表投影：别名撞名真实目录条目时
 // 给该条目标注 alias_of（名字仍可达，但请求会被改写为 alias_of 的 uid——
 // 不标注的话目录在说谎）；目录缺席的纯别名补一条合成条目，能力位抄目标
@@ -403,10 +417,6 @@ func (application *App) mergeAliases(data []map[string]any) []map[string]any {
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	capabilityKeys := []string{
-		"supports_images", "supports_tool_calls",
-		"supports_parallel_tool_calls", "supports_thinking", "preserve_thinking",
-	}
 	for _, name := range names {
 		target := strings.TrimSpace(aliases[name])
 		if target == "" {
