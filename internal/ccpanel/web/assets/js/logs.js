@@ -14,11 +14,6 @@ const LOGS_BOOTSTRAP_URL = '/dashboard/logs/bootstrap';
 const LOGS_MODELS_URL = '/dashboard/models';
 const LOGS_EXPORT_URL = '/admin/logs/export';
 const LOGS_STATS_URL = '/dashboard/stats';
-const debugLogUrl = (id) => `/admin/debug-logs/${encodeURIComponent(id)}`;
-const debugLogFileUrl = (id, name) =>
-  `${debugLogUrl(id)}/file/${String(name).split('/').map(encodeURIComponent).join('/')}`;
-const debugLogMergedUrl = (id) => `${debugLogUrl(id)}/merged`;
-const activeDebugLogUrl = (id) => `/admin/active-requests/${encodeURIComponent(id)}/debug-log`;
 const activeAbortUrl = (id) => `/admin/active-requests/${encodeURIComponent(id)}/abort`;
 
 // 失败阶段枚举（internal/debuglog/stages.go ErrStage* 快照）：
@@ -116,7 +111,7 @@ function humanizeLogMessage(raw) {
 // key_hash 是 16 位十六进制（SHA-256 前 8 字节）：列表截前 8 位，全量进 title。
 function buildKeyHashDisplay(hash) {
   const h = String(hash || '');
-  if (!h) return '<span style="color: var(--neutral-500);">-</span>';
+  if (!h) return '<span class="logs-dash">-</span>';
   const short = h.length > 10 ? `${h.slice(0, 8)}…` : h;
   return `<code class="logs-api-key-text logs-mono-text" title="${escapeHtml(h)}">${escapeHtml(short)}</code>`;
 }
@@ -397,7 +392,7 @@ function buildActiveRequestInfoContent(req) {
     return infoHtml;
   }
 
-  return `<span class="debug-log-link has-upstream-detail" data-active-request-id="${activeRequestId}" title="${escapeHtml(t('logs.debugLogTitle'))}">${infoHtml}</span>`;
+  return `<span class="debug-log-link has-upstream-detail" data-action="open-active-debug" data-active-request-id="${activeRequestId}" title="${escapeHtml(t('logs.debugLogTitle'))}">${infoHtml}</span>`;
 }
 
 // IP 地址掩码处理（隐藏最后两段）
@@ -471,7 +466,7 @@ function getStreamFlagHtml(isStreaming) {
 }
 
 function buildTimingSeparatorHtml() {
-  return '<span class="log-timing-separator" style="color: var(--neutral-400);">/</span>';
+  return '<span class="log-timing-separator">/</span>';
 }
 
 function buildFirstByteTimingHtml(seconds, text) {
@@ -529,7 +524,7 @@ function isPrefixOrSuffixVariant(model, actualModel) {
 // （原名仍进 tag 悬浮提示），WS 传输与推理 token 数以角标呈现。
 function buildLogModelDisplay(model, actualModel, reasoningTokens, upstreamWebsocket) {
   if (!model) {
-    return '<span style="color: var(--neutral-500);">-</span>';
+    return '<span class="logs-dash">-</span>';
   }
 
   const redirected = actualModel && actualModel !== model && !isPrefixOrSuffixVariant(model, actualModel);
@@ -564,8 +559,11 @@ function buildLogModelDisplay(model, actualModel, reasoningTokens, upstreamWebso
     </span>`;
 }
 
+let cachedLogMobileLabels = null;
+
 function getLogMobileLabels() {
-  return {
+  if (cachedLogMobileLabels !== null) return cachedLogMobileLabels;
+  cachedLogMobileLabels = {
     time: escapeHtml(t('logs.colTime')),
     ip: escapeHtml(t('logs.colIP')),
     tokenDesc: escapeHtml(t('logs.colTokenDesc')),
@@ -583,6 +581,14 @@ function getLogMobileLabels() {
     cost: escapeHtml(t('logs.colCost')),
     message: escapeHtml(t('logs.colMessage'))
   };
+  return cachedLogMobileLabels;
+}
+
+// 行单元格统一构造：mobile-empty-cell 与 nowrap 都收口到 CSS 类。
+function logRowCell(cls, label, html, opts = {}) {
+  const empty = opts.empty !== undefined ? opts.empty : !html;
+  const classes = cls + (empty ? ' mobile-empty-cell' : '') + (opts.nowrap === false ? '' : ' logs-nowrap');
+  return `<td class="${classes}" data-mobile-label="${label}"${opts.attrs || ''}>${html || ''}</td>`;
 }
 
 function buildActiveRequestTokenDescDisplay(req) {
@@ -606,7 +612,7 @@ function formatLogTokenDescLabel(label) {
 
 function buildLogTokenDescDisplay(label) {
   const text = String(label || '');
-  if (!text) return '<span style="color: var(--neutral-500);">-</span>';
+  if (!text) return '<span class="logs-dash">-</span>';
   return `<span class="logs-token-desc-text" title="${escapeHtml(text)}">${escapeHtml(formatLogTokenDescLabel(text))}</span>`;
 }
 
@@ -650,7 +656,7 @@ function buildLogMessageContent(entry) {
     inner = `<span${titleAttr}>${escapeHtml(msg.text)}</span>`;
   } else {
     const logId = Number(entry?.id);
-    const logIdAttr = Number.isFinite(logId) && logId > 0 ? ` data-log-id="${logId}"` : '';
+    const logIdAttr = Number.isFinite(logId) && logId > 0 ? ` data-action="open-debug-log" data-log-id="${logId}"` : '';
     inner = `<span class="debug-log-link has-upstream-detail"${logIdAttr}${titleAttr}>${escapeHtml(msg.text)}</span>`;
   }
   // error_message 是首个失败点的原始错误文案（仅失败行有值）：行内截
@@ -695,53 +701,6 @@ function buildLogCostTooltip(entry, costInfo) {
 function buildLogCostDisplay(entry, costInfo = getLogCostInfo(entry)) {
   if (!costInfo) return '';
   return `<span class="log-cost"><span class="log-cost-effective">${formatCost(costInfo.standardCost)}</span></span>`;
-}
-
-function formatDebugSettingValue(setting) {
-  if (!setting || setting.value === undefined || setting.value === null || setting.value === '') {
-    return '-';
-  }
-
-  const rawValue = String(setting.value).trim();
-  switch (setting.key) {
-    case 'debug_log_enabled':
-      return (rawValue === 'true' || rawValue === '1')
-        ? t('logs.debugSettingEnabledOn')
-        : t('logs.debugSettingEnabledOff');
-    case 'debug_log_retention_minutes':
-      return t('logs.debugSettingRetentionMinutes', { minutes: rawValue });
-    default:
-      return rawValue;
-  }
-}
-
-function buildDebugLogUnavailableHtml(data) {
-  const enabledSetting = data?.debug_log_enabled || null;
-  const retentionSetting = data?.debug_log_retention_minutes || null;
-  const enabledValue = String(enabledSetting?.value || '').trim().toLowerCase();
-  const isDebugEnabled = enabledValue === 'true' || enabledValue === '1';
-  const hasExplicitEnabledValue = enabledValue !== '';
-  const hintKey = hasExplicitEnabledValue
-    ? (isDebugEnabled ? 'logs.debugUnavailableHintExpired' : 'logs.debugUnavailableHintDisabled')
-    : 'logs.debugUnavailableHintGeneric';
-
-  return `
-    <div class="debug-log-unavailable">
-      <div class="debug-log-unavailable__title">${escapeHtml(t('logs.debugUnavailableTitle'))}</div>
-      <div class="debug-log-unavailable__hint">${escapeHtml(t(hintKey))}</div>
-      <div class="debug-log-unavailable__settings-title">${escapeHtml(t('logs.debugUnavailableSettingsTitle'))}</div>
-      <div class="debug-log-unavailable__settings">
-        <div class="debug-log-unavailable__row">
-          <span class="debug-log-unavailable__label">${escapeHtml(t('settings.desc.debug_log_enabled'))}</span>
-          <span class="debug-log-unavailable__value">${escapeHtml(formatDebugSettingValue(enabledSetting))}</span>
-        </div>
-        <div class="debug-log-unavailable__row">
-          <span class="debug-log-unavailable__label">${escapeHtml(t('settings.desc.debug_log_retention_minutes'))}</span>
-          <span class="debug-log-unavailable__value">${escapeHtml(formatDebugSettingValue(retentionSetting))}</span>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function calculateLogSpeed(entry) {
@@ -1171,7 +1130,7 @@ function buildActiveRequestAbortHtml(req, id, startMs) {
   const label = pending
     ? (typeof t === 'function' ? t('logs.aborting') : '中断中')
     : (typeof t === 'function' ? t('logs.abort') : '中断');
-  return `<button type="button" class="logs-abort-btn" data-abort-request-id="${escapeHtml(id)}"`
+  return `<button type="button" class="logs-abort-btn" data-action="abort-active-request" data-abort-request-id="${escapeHtml(id)}"`
     + ` data-abort-start="${startMs || 0}"${pending ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
 }
 
@@ -1203,11 +1162,8 @@ function renderActiveRequests(activeRequests) {
     const statusDisplay = buildActiveRequestStatusHtml(req);
     const modelDisplay = buildLogModelDisplay(req.model, '', req.reasoning_tokens, req.upstream_websocket);
     const tokenDescDisplay = buildActiveRequestTokenDescDisplay(req);
-    const tokenDescCellClass = `logs-col-token-desc${tokenDescDisplay ? '' : ' mobile-empty-cell'}`;
     const abortDisplay = buildActiveRequestAbortHtml(req, id, startMs);
-    const speedCellClass = `logs-col-speed${abortDisplay ? '' : ' mobile-empty-cell'}`;
     const accountDisplay = buildAccountDisplay(req.account, req.account_switches);
-    const accountCellClass = `logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}`;
 
     // Key显示（key_hash 截断 + title 全量，与完成行同口径）
     const keyDisplay = buildKeyHashDisplay(req.api_key_used);
@@ -1250,36 +1206,35 @@ function renderActiveRequests(activeRequests) {
       row.setAttribute('data-req-id', id);
       if (totalCols < 8) {
         row.innerHTML = `
-            <td colspan="${totalCols}">
+            <td colspan="${totalCols}" class="logs-compact-cell">
               ${statusDisplay}
-              <span style="margin-left: 8px;">${formatTime(req.start_time)}</span>
-              <span class="logs-mono-text" style="margin-left: 8px;" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</span>
-              <span style="margin-left: 8px;">${modelDisplay}</span>
-              <span class="active-account-slot" style="margin-left: 8px;">${accountDisplay}</span>
-              <span style="margin-left: 8px;">${durationDisplay} ${streamFlag}</span>
-              <span style="margin-left: 8px;">${infoContent}</span>
-              <span class="active-abort-slot" style="margin-left: 8px;">${abortDisplay}</span>
+              <span>${formatTime(req.start_time)}</span>
+              <span class="logs-mono-text" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</span>
+              <span>${modelDisplay}</span>
+              <span class="active-account-slot">${accountDisplay}</span>
+              <span>${durationDisplay} ${streamFlag}</span>
+              <span>${infoContent}</span>
+              <span class="active-abort-slot">${abortDisplay}</span>
             </td>
           `;
       } else {
-        row.innerHTML = `
-            <td class="logs-col-time" data-mobile-label="${logMobileLabels.time}" style="white-space: nowrap;">${formatTime(req.start_time)}</td>
-            <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;" title="${escapeHtml(req.client_ip || '')}">${escapeHtml(maskIP(req.client_ip) || '-')}</td>
-            <td class="${tokenDescCellClass}" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
-            <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="white-space: nowrap;">${keyDisplay}</td>
-            <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay}</td>
-            <td class="${accountCellClass}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
-            <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}">${statusDisplay}</td>
-            <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="white-space: nowrap;">${durationDisplay} ${streamFlag}</td>
-            <td class="${speedCellClass}" data-mobile-label="${logMobileLabels.speed}" style="white-space: nowrap;">${abortDisplay}</td>
-            <td class="logs-col-input mobile-empty-cell" data-mobile-label="${logMobileLabels.input}" style="white-space: nowrap;"></td>
-            <td class="logs-col-output mobile-empty-cell" data-mobile-label="${logMobileLabels.output}" style="white-space: nowrap;"></td>
-            <td class="logs-col-cache-read mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheRead}" style="white-space: nowrap;"></td>
-            <td class="logs-col-cache-write mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheWrite}" style="white-space: nowrap;"></td>
-            <td class="logs-col-cache-util mobile-empty-cell" data-mobile-label="${logMobileLabels.cacheUtil}" style="white-space: nowrap;"></td>
-            <td class="logs-col-cost mobile-empty-cell" data-mobile-label="${logMobileLabels.cost}" style="white-space: nowrap;"></td>
-            <td class="logs-col-message" data-mobile-label="${logMobileLabels.message}">${infoContent}</td>
-          `;
+        row.innerHTML =
+          logRowCell('logs-col-time', logMobileLabels.time, formatTime(req.start_time), { empty: false })
+          + logRowCell('logs-col-ip logs-mono-text', logMobileLabels.ip, escapeHtml(maskIP(req.client_ip) || '-'), { empty: false, attrs: ` title="${escapeHtml(req.client_ip || '')}"` })
+          + logRowCell('logs-col-token-desc', logMobileLabels.tokenDesc, tokenDescDisplay)
+          + logRowCell('logs-col-api-key', logMobileLabels.apiKey, keyDisplay, { empty: false })
+          + logRowCell('logs-col-model', logMobileLabels.model, modelDisplay, { empty: false, nowrap: false })
+          + logRowCell('logs-col-account', logMobileLabels.account, accountDisplay)
+          + logRowCell('logs-col-status', logMobileLabels.status, statusDisplay, { empty: false, nowrap: false })
+          + logRowCell('logs-col-timing', logMobileLabels.timing, `${durationDisplay} ${streamFlag}`, { empty: false })
+          + logRowCell('logs-col-speed', logMobileLabels.speed, abortDisplay)
+          + logRowCell('logs-col-input', logMobileLabels.input, '')
+          + logRowCell('logs-col-output', logMobileLabels.output, '')
+          + logRowCell('logs-col-cache-read', logMobileLabels.cacheRead, '')
+          + logRowCell('logs-col-cache-write', logMobileLabels.cacheWrite, '')
+          + logRowCell('logs-col-cache-util', logMobileLabels.cacheUtil, '')
+          + logRowCell('logs-col-cost', logMobileLabels.cost, '')
+          + logRowCell('logs-col-message', logMobileLabels.message, infoContent, { empty: false, nowrap: false });
       }
       tbody.insertBefore(row, firstNonPending);
     }
@@ -1332,7 +1287,7 @@ function formatCacheUtilRate(inputTokens, cacheReadTokens, cacheCreationTokens) 
   const denom = i + r + c;
   if (denom <= 0 || r <= 0) return '';
   const pct = (r / denom) * 100;
-  return `<span class="token-metric-value" style="color: var(--success-600);">${pct.toFixed(1)}%</span>`;
+  return `<span class="token-metric-value token-metric-value--success">${pct.toFixed(1)}%</span>`;
 }
 
 // buildCacheCreationDisplay 渲染缓存建列，5m 分桶角标按实际数据判定，不看
@@ -1343,9 +1298,9 @@ function buildCacheCreationDisplay(entry) {
   if (total <= 0) return '';
 
   const badge = (entry.cache_5m_input_tokens || 0) > 0
-    ? ' <sup style="color: var(--primary-500); font-size: 0.75em; font-weight: 600;">5m</sup>'
+    ? ' <sup class="cache-5m-badge">5m</sup>'
     : '';
-  return `<span class="token-metric-value" style="color: var(--primary-600);">${total.toLocaleString()}${badge}</span>`;
+  return `<span class="token-metric-value token-metric-value--primary">${total.toLocaleString()}${badge}</span>`;
 }
 
 function renderLogsLoading() {
@@ -1391,7 +1346,7 @@ function renderLogs(data) {
     // 0. 客户端IP显示（掩码处理，hover显示完整IP）
     const clientIPDisplay = entry.client_ip ?
       `<span title="${escapeHtml(entry.client_ip)}">${escapeHtml(maskIP(entry.client_ip))}</span>` :
-      '<span style="color: var(--neutral-400);">-</span>';
+      '<span class="logs-dash-faint">-</span>';
 
     // 0.5. API访问令牌描述
     const tokenDescDisplay = buildLogTokenDescDisplay(entry.auth_token_description);
@@ -1409,14 +1364,14 @@ function renderLogs(data) {
     const modelDisplay = buildLogModelDisplay(entry.model, displayedActualModel, entry.reasoning_tokens, entry.upstream_websocket);
     const isTokenSession = typeof window.isAPITokenRole === 'function' && window.isAPITokenRole();
     const probeDisplay = !(statusCode >= 200 && statusCode < 300) && entry.model && !isTokenSession
-      ? `<button type="button" class="test-key-btn" data-probe-model="${escapeHtml(entry.model)}" data-probe-api="${escapeHtml(entry.api || '')}" title="${escapeHtml(t('logs.probeModel'))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
+      ? `<button type="button" class="test-key-btn" data-action="probe-model" data-probe-model="${escapeHtml(entry.model)}" data-probe-api="${escapeHtml(entry.api || '')}" title="${escapeHtml(t('logs.probeModel'))}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path d="M13 2L4 14H11L9 22L20 10H13L13 2Z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
       : '';
 
     // 4. 响应时间显示(流式/非流式)
     const hasDuration = entry.duration !== undefined && entry.duration !== null;
     const durationDisplay = hasDuration ?
       buildDurationTimingHtml(entry.duration, entry.duration.toFixed(2)) :
-      '<span style="color: var(--neutral-500);">-</span>';
+      '<span class="logs-dash">-</span>';
 
     const streamFlag = getStreamFlagHtml(entry.is_streaming);
 
@@ -1425,7 +1380,7 @@ function renderLogs(data) {
       const hasFirstByte = entry.first_byte_time !== undefined && entry.first_byte_time !== null;
       const firstByteDisplay = hasFirstByte ?
         buildFirstByteTimingHtml(entry.first_byte_time, entry.first_byte_time.toFixed(2)) :
-        '<span class="log-timing-first-byte" style="color: var(--neutral-500);">-</span>';
+        '<span class="log-timing-first-byte logs-dash">-</span>';
       responseTimingDisplay = `<span class="log-timing-pair">${firstByteDisplay}${buildTimingSeparatorHtml()}${durationDisplay}</span>${streamFlag}`;
     } else {
       responseTimingDisplay = `<span class="log-timing-pair">${durationDisplay}</span>${streamFlag}`;
@@ -1434,19 +1389,19 @@ function renderLogs(data) {
     const logSpeed = calculateLogSpeed(entry);
     const speedDisplay = logSpeed === null
       ? ''
-      : `<span class="token-metric-value" style="color: var(--neutral-700);">${logSpeed.toFixed(1)}</span>`;
+      : `<span class="token-metric-value token-metric-value--neutral">${logSpeed.toFixed(1)}</span>`;
 
     // 5. Key 哈希显示（本服务 api_key_used 就是 key_hash，截断 + title 全量）
     const apiKeyDisplay = buildKeyHashDisplay(entry.api_key_used);
 
     // 6. Token统计显示(0值为空)
-    const tokenValue = (value, color) => {
+    const tokenValue = (value, modifier) => {
       if (value === undefined || value === null || value === 0) return '';
-      return `<span class="token-metric-value" style="color: ${color};">${value.toLocaleString()}</span>`;
+      return `<span class="token-metric-value token-metric-value--${modifier}">${value.toLocaleString()}</span>`;
     };
-    const inputTokensDisplay = tokenValue(entry.input_tokens, 'var(--neutral-700)');
-    const outputTokensDisplay = tokenValue(entry.output_tokens, 'var(--neutral-700)');
-    const cacheReadDisplay = tokenValue(entry.cache_read_input_tokens, 'var(--success-600)');
+    const inputTokensDisplay = tokenValue(entry.input_tokens, 'neutral');
+    const outputTokensDisplay = tokenValue(entry.output_tokens, 'neutral');
+    const cacheReadDisplay = tokenValue(entry.cache_read_input_tokens, 'success');
 
     // 缓存建列
     const cacheCreationDisplay = buildCacheCreationDisplay(entry);
@@ -1465,24 +1420,24 @@ function renderLogs(data) {
     const accountDisplay = buildAccountDisplay(entry.account, entry.account_switches);
 
     // === 直接拼接行 HTML ===
-    htmlParts[i] = `<tr class="mobile-card-row logs-table-row">
-          <td class="logs-col-time" data-mobile-label="${logMobileLabels.time}" style="white-space: nowrap;">${formatTime(entry.time)}</td>
-          <td class="logs-col-ip logs-mono-text" data-mobile-label="${logMobileLabels.ip}" style="white-space: nowrap;">${clientIPDisplay}</td>
-          <td class="logs-col-token-desc" data-mobile-label="${logMobileLabels.tokenDesc}" style="white-space: nowrap;">${tokenDescDisplay}</td>
-          <td class="logs-col-api-key" data-mobile-label="${logMobileLabels.apiKey}" style="white-space: nowrap;">${apiKeyDisplay}</td>
-          <td class="logs-col-model" data-mobile-label="${logMobileLabels.model}">${modelDisplay} ${probeDisplay}</td>
-          <td class="logs-col-account${accountDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.account}" style="white-space: nowrap;">${accountDisplay}</td>
-          <td class="logs-col-status" data-mobile-label="${logMobileLabels.status}"><span class="${statusClass}"${statusTitleAttr}>${escapeHtml(statusCode)}</span></td>
-          <td class="logs-col-timing" data-mobile-label="${logMobileLabels.timing}" style="white-space: nowrap;">${responseTimingDisplay}</td>
-          <td class="logs-col-speed${speedDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.speed}" style="white-space: nowrap;">${speedDisplay}</td>
-          <td class="logs-col-input${inputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.input}" style="white-space: nowrap;">${inputTokensDisplay}</td>
-          <td class="logs-col-output${outputTokensDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.output}" style="white-space: nowrap;">${outputTokensDisplay}</td>
-          <td class="logs-col-cache-read${cacheReadDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheRead}" style="white-space: nowrap;">${cacheReadDisplay}</td>
-          <td class="logs-col-cache-write${cacheCreationDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheWrite}" style="white-space: nowrap;">${cacheCreationDisplay}</td>
-          <td class="logs-col-cache-util${cacheUtilDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cacheUtil}" style="white-space: nowrap;">${cacheUtilDisplay}</td>
-          <td class="logs-col-cost${costDisplay ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.cost}"${costTitleAttr} style="white-space: nowrap;">${costDisplay}</td>
-          <td class="logs-col-message${messageContent ? '' : ' mobile-empty-cell'}" data-mobile-label="${logMobileLabels.message}" style="max-width: 300px; word-break: break-word;">${messageContent}</td>
-        </tr>`;
+    htmlParts[i] = '<tr class="mobile-card-row logs-table-row">'
+      + logRowCell('logs-col-time', logMobileLabels.time, formatTime(entry.time), { empty: false })
+      + logRowCell('logs-col-ip logs-mono-text', logMobileLabels.ip, clientIPDisplay, { empty: false })
+      + logRowCell('logs-col-token-desc', logMobileLabels.tokenDesc, tokenDescDisplay, { empty: false })
+      + logRowCell('logs-col-api-key', logMobileLabels.apiKey, apiKeyDisplay, { empty: false })
+      + logRowCell('logs-col-model', logMobileLabels.model, `${modelDisplay} ${probeDisplay}`, { empty: false, nowrap: false })
+      + logRowCell('logs-col-account', logMobileLabels.account, accountDisplay)
+      + logRowCell('logs-col-status', logMobileLabels.status, `<span class="${statusClass}"${statusTitleAttr}>${escapeHtml(statusCode)}</span>`, { empty: false, nowrap: false })
+      + logRowCell('logs-col-timing', logMobileLabels.timing, responseTimingDisplay, { empty: false })
+      + logRowCell('logs-col-speed', logMobileLabels.speed, speedDisplay)
+      + logRowCell('logs-col-input', logMobileLabels.input, inputTokensDisplay)
+      + logRowCell('logs-col-output', logMobileLabels.output, outputTokensDisplay)
+      + logRowCell('logs-col-cache-read', logMobileLabels.cacheRead, cacheReadDisplay)
+      + logRowCell('logs-col-cache-write', logMobileLabels.cacheWrite, cacheCreationDisplay)
+      + logRowCell('logs-col-cache-util', logMobileLabels.cacheUtil, cacheUtilDisplay)
+      + logRowCell('logs-col-cost', logMobileLabels.cost, costDisplay, { attrs: costTitleAttr })
+      + logRowCell('logs-col-message', logMobileLabels.message, messageContent, { nowrap: false })
+      + '</tr>';
   }
 
   // 一次性替换 tbody 内容
@@ -1934,7 +1889,28 @@ function initLogsPageActions() {
         'next-logs-page': () => nextLogsPage(),
         'last-logs-page': () => lastLogsPage(),
         'close-debug-log-modal': () => closeDebugLogModal(),
-        'toggle-col-menu': (el) => toggleColMenu(el)
+        'toggle-col-menu': (el) => toggleColMenu(el),
+        'abort-active-request': (el) => abortActiveRequest(el),
+        'open-active-debug': (el) => {
+          const activeRequestId = parseInt(el.dataset.activeRequestId, 10);
+          if (Number.isFinite(activeRequestId) && activeRequestId > 0) {
+            window.showActiveDebugLogModal(activeRequestId);
+          }
+        },
+        'open-debug-log': (el) => {
+          const logId = parseInt(el.dataset.logId, 10);
+          if (Number.isFinite(logId) && logId > 0) {
+            window.showDebugLogModal(logId);
+          }
+        },
+        'probe-model': (el) => {
+          if (typeof window.openModelTestModal === 'function') {
+            window.openModelTestModal({
+              model: el.dataset.probeModel || '',
+              clientProtocol: apiToClientProtocol(el.dataset.probeApi)
+            });
+          }
+        }
       }
     });
   }
@@ -2094,17 +2070,7 @@ window.initPageBootstrap({
   const u = new URLSearchParams(location.search);
   const hasUrlParams = u.toString().length > 0;
   const savedFilters = window.FilterState.load(LOGS_FILTER_KEY);
-  const restoredFilters = window.FilterState.restore({
-    search: location.search,
-    savedFilters,
-    fields: LOGS_FILTER_FIELDS
-  });
-  currentLogsCustomTimeRange = restoredFilters.range === 'custom'
-    ? normalizeLogsCustomTimeRange(restoredFilters)
-    : null;
-  if (restoredFilters.range === 'custom' && !currentLogsCustomTimeRange) {
-    restoredFilters.range = 'today';
-  }
+  const restoredFilters = restoredLogsFilters(location.search, savedFilters);
   rememberExactLogsFilters({
     ...restoredFilters,
     modelExact: !hasUrlParams && savedFilters?.modelExact === true
@@ -2153,52 +2119,20 @@ window.initPageBootstrap({
     window.createAutoRefresh({ load: () => load(true) }).init();
   }
 
-  // 事件委托：处理日志表格中的按钮点击
-  const tbody = document.getElementById('tbody');
-  if (tbody) {
-    tbody.addEventListener('click', (e) => {
-      // 运行中请求手动中断
-      const abortBtn = e.target.closest('.logs-abort-btn[data-abort-request-id]');
-      if (abortBtn) {
-        abortActiveRequest(abortBtn);
-        return;
-      }
-
-      // 运行中请求 Debug log 查看
-      const activeDebugLink = e.target.closest('.debug-log-link[data-active-request-id]');
-      if (activeDebugLink) {
-        const activeRequestId = parseInt(activeDebugLink.dataset.activeRequestId, 10);
-        if (Number.isFinite(activeRequestId) && activeRequestId > 0) {
-          showActiveDebugLogModal(activeRequestId);
-        }
-        return;
-      }
-
-      // Debug log 查看
-      const debugLink = e.target.closest('.debug-log-link[data-log-id]');
-      if (debugLink) {
-        const logId = parseInt(debugLink.dataset.logId, 10);
-        if (Number.isFinite(logId) && logId > 0) {
-          showDebugLogModal(logId);
-        }
-        return;
-      }
-
-      // 非 2xx 行的模型探活入口（按该行实际入口协议预填）
-      const probeBtn = e.target.closest('[data-probe-model]');
-      if (probeBtn) {
-        if (typeof window.openModelTestModal === 'function') {
-          window.openModelTestModal({
-            model: probeBtn.dataset.probeModel || '',
-            clientProtocol: apiToClientProtocol(probeBtn.dataset.probeApi)
-          });
-        }
-        return;
-      }
-    });
-  }
   }
 });
+
+// 筛选恢复在 bootstrap（location.search）与 bfcache 还原（空 search）间共享。
+function restoredLogsFilters(search, savedFilters) {
+  const restored = window.FilterState.restore({ search, savedFilters, fields: LOGS_FILTER_FIELDS });
+  currentLogsCustomTimeRange = restored.range === 'custom'
+    ? normalizeLogsCustomTimeRange(restored)
+    : null;
+  if (restored.range === 'custom' && !currentLogsCustomTimeRange) {
+    restored.range = 'today';
+  }
+  return restored;
+}
 
 // 处理 bfcache（后退/前进缓存）：页面从缓存恢复时重新加载筛选条件
 window.addEventListener('pageshow', async function (event) {
@@ -2206,17 +2140,7 @@ window.addEventListener('pageshow', async function (event) {
     // 页面从 bfcache 恢复，重新同步筛选器状态
     const savedFilters = window.FilterState.load(LOGS_FILTER_KEY);
     if (savedFilters) {
-      const restoredFilters = window.FilterState.restore({
-        search: '',
-        savedFilters,
-        fields: LOGS_FILTER_FIELDS
-      });
-      currentLogsCustomTimeRange = restoredFilters.range === 'custom'
-        ? normalizeLogsCustomTimeRange(restoredFilters)
-        : null;
-      if (restoredFilters.range === 'custom' && !currentLogsCustomTimeRange) {
-        restoredFilters.range = 'today';
-      }
+      const restoredFilters = restoredLogsFilters('', savedFilters);
       rememberExactLogsFilters({
         ...restoredFilters,
         modelExact: savedFilters.modelExact === true
@@ -2241,815 +2165,13 @@ window.addEventListener('pageshow', async function (event) {
 });
 
 
-// ============================================================================
-// Debug Log Modal
-// ============================================================================
-
-function formatJsonSafe(str) {
-  if (!str) return '';
-  try {
-    return JSON.stringify(JSON.parse(str), null, 2);
-  } catch {
-    return str;
-  }
-}
-
-function formatHeaderLines(headers) {
-  if (!headers) return '';
-  if (typeof headers === 'string') {
-    try { headers = JSON.parse(headers); } catch { return headers; }
-  }
-  if (typeof headers !== 'object') return '';
-  headers = window.maskSensitiveHeaders(headers);
-  const lines = [];
-  for (const [key, value] of Object.entries(headers)) {
-    if (Array.isArray(value)) {
-      value.forEach(v => lines.push(`${key}: ${v}`));
-    } else {
-      lines.push(`${key}: ${value}`);
-    }
-  }
-  return lines.join('\n');
-}
-
-function composeDebugRequest(method, url, headerData, bodyData) {
-  const parts = [];
-  parts.push(`${method || 'POST'} ${url || ''}`);
-  const headers = formatHeaderLines(headerData);
-  if (headers) parts.push(headers);
-  const body = formatJsonSafe(bodyData);
-  if (body) {
-    parts.push('');
-    parts.push(body);
-  }
-  return parts.join('\n');
-}
-
-function composeDebugResponse(status, headerData, bodyData, upstreamError) {
-  const parts = [];
-  if (status) parts.push('HTTP ' + status);
-  if (upstreamError) {
-    if (!status) parts.push('UPSTREAM TRANSPORT ERROR (no HTTP response)');
-    parts.push(String(upstreamError));
-  }
-  const headers = formatHeaderLines(headerData);
-  if (headers) parts.push(headers);
-  const body = formatJsonSafe(bodyData);
-  if (body) {
-    parts.push('');
-    parts.push(body);
-  }
-  return parts.join('\n');
-}
-
-function composeDebugRawRequest(data) {
-  if (data?.protocol_transformed) {
-    return composeDebugRequest(data.req_method, data.original_req_url, data.original_req_headers, data.original_req_body);
-  }
-  return composeDebugRequest(data?.req_method, data?.req_url, data?.req_headers, data?.req_body);
-}
-
-function composeDebugRawResponse(data) {
-  return composeDebugResponse(data?.resp_status, data?.resp_headers, data?.resp_body, data?.upstream_error);
-}
-
-function composeDebugTranslatedRequest(data) {
-  return composeDebugRequest(data?.req_method, data?.req_url, data?.req_headers, data?.req_body);
-}
-
-function composeDebugTranslatedResponse(data) {
-  return composeDebugResponse(data?.translated_resp_status, data?.translated_resp_headers, data?.translated_resp_body);
-}
-
-function setDebugTabLabel(buttonId, key, fallback) {
-  const button = document.getElementById(buttonId);
-  if (!button) return;
-  button.dataset.i18n = key;
-  button.textContent = (typeof t === 'function' ? t(key) : '') || fallback;
-}
-
-function activateDebugTab(target) {
-  const modal = document.getElementById('debugLogModal');
-  if (!modal) return;
-  modal.querySelectorAll('.upstream-tab').forEach(tab => {
-    tab.classList.toggle('active', tab.dataset.tab === target);
-  });
-  modal.querySelectorAll('.upstream-tab-panel').forEach(panel => {
-    panel.classList.toggle('active', panel.dataset.tab === target);
-  });
-  updateDebugResponseActionButtons();
-}
-
-function configureDebugProtocolTabs(data) {
-  const transformed = !!data?.protocol_transformed;
-  const translatedRequestTab = document.getElementById('debugTranslatedRequestTabBtn');
-  const translatedResponseTab = document.getElementById('debugTranslatedResponseTabBtn');
-  if (translatedRequestTab) translatedRequestTab.hidden = !transformed;
-  if (translatedResponseTab) translatedResponseTab.hidden = !transformed;
-
-  setDebugTabLabel('debugRequestTabBtn', transformed ? 'logs.debugOriginalRequest' : 'logs.debugRequest', transformed ? '原始请求' : '请求');
-  setDebugTabLabel('debugTranslatedRequestTabBtn', 'logs.debugTranslatedRequest', '转换后请求');
-  setDebugTabLabel('debugResponseTabBtn', transformed ? 'logs.debugOriginalResponse' : 'logs.debugResponse', transformed ? '原始响应' : '响应');
-  setDebugTabLabel('debugTranslatedResponseTabBtn', 'logs.debugTranslatedResponse', '转换后响应');
-
-  const activeTab = document.querySelector('#debugLogModal .upstream-tab.active');
-  if (!activeTab || activeTab.hidden) activateDebugTab('request');
-}
-
-const ACTIVE_DEBUG_LOG_REFRESH_INTERVAL_MS = 1500;
-let activeDebugLogRefreshTimer = null;
-let activeDebugLogRefreshInFlight = false;
-let debugLogWrapEnabled = true;
-let currentDebugLogData = null;
-const debugResponseViews = {
-  response: {
-    rawId: 'debugRespRaw',
-    mergedId: 'debugRespMerged',
-    bodyKey: 'resp_body'
-  },
-  'translated-response': {
-    rawId: 'debugTranslatedRespRaw',
-    mergedId: 'debugTranslatedRespMerged',
-    bodyKey: 'translated_resp_body'
-  }
-};
-const debugMergedStates = {
-  response: { visible: false, sourceBody: null, loading: false },
-  'translated-response': { visible: false, sourceBody: null, loading: false }
-};
-
-// debugFileContext 记录当前模态框对应的可解析目录 id（files/merged 端点
-// 的 {id}：日志行自增 id，或历史链接的 started_at 毫秒戳）与已打开文件
-// 名/大小；活跃请求模态框的 log_id 是 FNV 哈希不能解析目录，fileId 由
-// 活跃列表 start_time 反查。
-let debugFileContext = null;
-
-async function showDebugLogModal(logId) {
-  return showDebugLogModalFromUrl(debugLogUrl(logId), { activeRequestId: 0, fileId: logId });
-}
-
-async function showActiveDebugLogModal(activeRequestId) {
-  return showDebugLogModalFromUrl(activeDebugLogUrl(activeRequestId), { activeRequestId });
-}
-
-async function showDebugLogModalFromUrl(url, opts = {}) {
-  const modal = document.getElementById('debugLogModal');
-  const loading = document.getElementById('debugLogLoading');
-  const error = document.getElementById('debugLogError');
-  const content = document.getElementById('debugLogContent');
-
-  // 若上一次模态框未清理，先停掉旧的轮询
-  stopActiveDebugLogPolling();
-
-  const requestedActiveId = Number(opts.activeRequestId) || 0;
-  debugFileContext = {
-    fileId: opts.fileId ? String(opts.fileId)
-      : (requestedActiveId > 0 ? resolveActiveDebugFileId(requestedActiveId) : ''),
-    activeRequestId: requestedActiveId,
-    openName: null,
-    openSize: null
-  };
-
-  loading.style.display = '';
-  error.style.display = 'none';
-  error.innerHTML = '';
-  error.textContent = '';
-  content.style.display = 'none';
-  setDebugLogStatus(null);
-  currentDebugLogData = null;
-  Modal.open(modal, { onClose: cleanupDebugLogModal });
-
-  // Reset tabs
-  configureDebugProtocolTabs(null);
-  activateDebugTab('request');
-  resetDebugMergedResponses();
-  resetDebugFileView();
-  renderDebugFileList(null);
-  applyDebugLogWrapMode();
-  updateDebugResponseActionButtons();
-
-  try {
-    const { res, payload } = await fetchAPIWithAuthRaw(url);
-    if (!payload.success) {
-      if (res.status === 404) {
-        loading.style.display = 'none';
-        error.innerHTML = buildDebugLogUnavailableHtml(payload.data || null);
-        error.style.display = '';
-        return;
-      }
-      throw new Error(payload.error || i18nText('logs.debugLoadFailed', '加载失败'));
-    }
-
-    const data = payload.data || {};
-    currentDebugLogData = data;
-    loading.style.display = 'none';
-    content.style.display = 'flex';
-
-    configureDebugProtocolTabs(data);
-    window.setHighlightedCodeContent('debugReqRaw', composeDebugRawRequest(data), 'request');
-    window.setHighlightedCodeContent('debugTranslatedReqRaw', composeDebugTranslatedRequest(data), 'request');
-    window.setHighlightedCodeContent('debugRespRaw', composeDebugRawResponse(data), 'response');
-    window.setHighlightedCodeContent('debugTranslatedRespRaw', composeDebugTranslatedResponse(data), 'response');
-    renderDebugFileList(data);
-    resetDebugMergedResponses();
-
-    // 如果是实时活跃请求，启动轮询
-    const activeRequestId = Number(opts.activeRequestId);
-    if (Number.isFinite(activeRequestId) && activeRequestId > 0) {
-      startActiveDebugLogPolling(activeRequestId);
-    }
-  } catch (e) {
-    loading.style.display = 'none';
-    error.textContent = e.message || i18nText('logs.debugLoadFailed', '加载失败');
-    error.style.display = '';
-  }
-}
-
-function setDebugLogStatus(kind) {
-  const el = document.getElementById('debugLogStatus');
-  if (!el) return;
-  el.classList.remove('debug-log-status--refreshing', 'debug-log-status--finished');
-  if (!kind) {
-    el.hidden = true;
-    el.textContent = '';
-    return;
-  }
-  if (kind === 'refreshing') {
-    el.classList.add('debug-log-status--refreshing');
-    el.textContent = (typeof t === 'function' ? t('logs.debugRefreshing') : '正在更新…') || '正在更新…';
-  } else if (kind === 'finished') {
-    el.classList.add('debug-log-status--finished');
-    el.textContent = (typeof t === 'function' ? t('logs.debugRequestFinished') : '请求已结束') || '请求已结束';
-  }
-  el.hidden = false;
-}
-
-function startActiveDebugLogPolling(activeRequestId) {
-  stopActiveDebugLogPolling();
-  setDebugLogStatus('refreshing');
-  activeDebugLogRefreshTimer = setInterval(() => {
-    refreshActiveDebugLogOnce(activeRequestId);
-  }, ACTIVE_DEBUG_LOG_REFRESH_INTERVAL_MS);
-}
-
-function stopActiveDebugLogPolling() {
-  if (activeDebugLogRefreshTimer) {
-    clearInterval(activeDebugLogRefreshTimer);
-    activeDebugLogRefreshTimer = null;
-  }
-  activeDebugLogRefreshInFlight = false;
-}
-
-async function refreshActiveDebugLogOnce(activeRequestId) {
-  if (activeDebugLogRefreshInFlight) return;
-  // 模态框已关闭则停止
-  const modal = document.getElementById('debugLogModal');
-  if (!modal || !modal.classList.contains('show')) {
-    stopActiveDebugLogPolling();
-    return;
-  }
-  activeDebugLogRefreshInFlight = true;
-  try {
-    const { res, payload } = await fetchAPIWithAuthRaw(activeDebugLogUrl(activeRequestId));
-    if (!payload.success) {
-      if (res.status === 404) {
-        // 请求已结束，停止轮询并提示，保留最后一次成功拉到的快照
-        stopActiveDebugLogPolling();
-        setDebugLogStatus('finished');
-        return;
-      }
-      // 其他错误：保持现状，下个 tick 再试
-      return;
-    }
-    const data = payload.data || {};
-    currentDebugLogData = data;
-    updateDebugLogContentPreserveScroll(data);
-  } catch (_) {
-    // 网络抖动：忽略，下个 tick 继续
-  } finally {
-    activeDebugLogRefreshInFlight = false;
-  }
-}
-
-function updateDebugLogContentPreserveScroll(data) {
-  configureDebugProtocolTabs(data);
-  updateDebugPanePreserveScroll('debugReqRaw', composeDebugRawRequest(data), 'request');
-  updateDebugPanePreserveScroll('debugTranslatedReqRaw', composeDebugTranslatedRequest(data), 'request');
-  updateDebugPanePreserveScroll('debugRespRaw', composeDebugRawResponse(data), 'response');
-  updateDebugPanePreserveScroll('debugTranslatedRespRaw', composeDebugTranslatedResponse(data), 'response');
-  // 上游重试会换目录（start_time 变）：轮询时向活跃列表重解析 fileId，
-  // 让 files/merged 始终指向当前目录。
-  if (debugFileContext?.activeRequestId) {
-    const resolved = resolveActiveDebugFileId(debugFileContext.activeRequestId);
-    if (resolved) debugFileContext.fileId = resolved;
-  }
-  renderDebugFileList(data);
-  // 进行中请求仍在写文件：清单里已打开文件的大小变了才重拉内容
-  if (debugFileContext?.openName) {
-    const entry = (Array.isArray(data?.files) ? data.files : [])
-      .find(f => String(f?.name) === debugFileContext.openName);
-    if (!entry) {
-      resetDebugFileView();
-    } else if (Number(entry.size) !== debugFileContext.openSize) {
-      void loadDebugFile(debugFileContext.openName);
-    }
-  }
-  for (const tab of Object.keys(debugResponseViews)) {
-    if (debugMergedStates[tab].visible) {
-      void refreshDebugMergedResponse(data, tab);
-    }
-  }
-}
-
-function updateDebugPanePreserveScroll(targetId, text, mode) {
-  const pre = document.getElementById(targetId);
-  if (!pre) return;
-  // 内容未变化则跳过，避免破坏选区与滚动
-  const prevText = pre._rawText || '';
-  const nextText = mode === 'markdown' ? mergedResponseRawText(text) : (text || '');
-  if (prevText === nextText) return;
-
-  const stickToBottom = isScrolledToBottom(pre);
-  const prevScrollTop = pre.scrollTop;
-
-  if (mode === 'markdown') {
-    window.MarkdownRenderer.renderResponse(targetId, text || { reasoning: '', content: '' });
-  } else {
-    window.setHighlightedCodeContent(targetId, text || '', mode);
-  }
-
-  if (stickToBottom) {
-    pre.scrollTop = pre.scrollHeight;
-  } else {
-    pre.scrollTop = prevScrollTop;
-  }
-}
-
-function mergedResponseRawText(response) {
-  if (response && typeof response === 'object' && !Array.isArray(response)) {
-    return [
-      response.reasoning || response.thinking || '',
-      response.content ?? response.text ?? '',
-      response.tools ?? response.toolCalls ?? response.functionCalls ?? ''
-    ]
-      .map(value => String(value || '').trim())
-      .filter(Boolean)
-      .join('\n\n');
-  }
-  return String(response || '');
-}
-
-function isScrolledToBottom(el) {
-  if (!el) return false;
-  const threshold = 8; // 像素容差
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
-}
-
-function cleanupDebugLogModal() {
-  stopActiveDebugLogPolling();
-  setDebugLogStatus(null);
-  currentDebugLogData = null;
-  resetDebugMergedResponses();
-  resetDebugFileView();
-  debugFileContext = null;
-}
-
-function closeDebugLogModal() {
-  Modal.close(document.getElementById('debugLogModal'));
-}
-
-function updateDebugWrapButton() {
-  const wrapBtn = document.getElementById('debugWrapBtn');
-  if (!wrapBtn) return;
-  wrapBtn.classList.toggle('active', debugLogWrapEnabled);
-  wrapBtn.setAttribute('aria-pressed', debugLogWrapEnabled ? 'true' : 'false');
-  wrapBtn.dataset.i18n = debugLogWrapEnabled ? 'logs.debugWrap' : 'logs.debugNoWrap';
-  wrapBtn.textContent = (typeof t === 'function' ? t(wrapBtn.dataset.i18n) : '') ||
-    (debugLogWrapEnabled ? '换行' : '不换行');
-}
-
-function applyDebugLogWrapMode() {
-  document.querySelectorAll('#debugLogModal .upstream-pre').forEach(pre => {
-    pre.classList.toggle('upstream-pre--nowrap', !debugLogWrapEnabled);
-  });
-  document.querySelectorAll('#debugLogModal .upstream-merged-markdown').forEach(merged => {
-    merged.classList.toggle('upstream-merged-markdown--nowrap', !debugLogWrapEnabled);
-  });
-  updateDebugWrapButton();
-}
-
-function setDebugLogWrapEnabled(enabled) {
-  debugLogWrapEnabled = !!enabled;
-  applyDebugLogWrapMode();
-}
-
-function updateDebugResponseActionButtons() {
-  const activeTab = document.querySelector('#debugLogModal .upstream-tab.active')?.dataset.tab || 'request';
-  const responseView = debugResponseViews[activeTab];
-  const mergedVisible = responseView ? debugMergedStates[activeTab].visible : false;
-  const copyTargets = {
-    request: 'debugReqRaw',
-    'translated-request': 'debugTranslatedReqRaw',
-    response: debugMergedStates.response.visible ? 'debugRespMerged' : 'debugRespRaw',
-    'translated-response': debugMergedStates['translated-response'].visible
-      ? 'debugTranslatedRespMerged'
-      : 'debugTranslatedRespRaw',
-    files: 'debugFileRaw'
-  };
-  const copyBtn = document.querySelector('#debugLogModal .upstream-copy-btn--tabs');
-  if (copyBtn) {
-    copyBtn.dataset.copyTarget = copyTargets[activeTab] || 'debugReqRaw';
-  }
-
-  const mergeBtn = document.getElementById('debugMergeBtn');
-  if (mergeBtn) {
-    mergeBtn.hidden = !responseView;
-    const key = mergedVisible ? 'logs.debugRaw' : 'logs.debugMerge';
-    mergeBtn.classList.toggle('active', mergedVisible);
-    mergeBtn.setAttribute('aria-pressed', mergedVisible ? 'true' : 'false');
-    mergeBtn.dataset.i18n = key;
-    mergeBtn.textContent = (typeof t === 'function' ? t(key) : '') || (mergedVisible ? '原始' : '合并');
-  }
-}
-
-function activeDebugResponseTab() {
-  const tab = document.querySelector('#debugLogModal .upstream-tab.active')?.dataset.tab;
-  return debugResponseViews[tab] ? tab : '';
-}
-
-function setDebugResponseMergedVisible(visible, tab = activeDebugResponseTab()) {
-  const view = debugResponseViews[tab];
-  const state = debugMergedStates[tab];
-  if (!view || !state) return;
-  state.visible = !!visible;
-  const raw = document.getElementById(view.rawId);
-  const merged = document.getElementById(view.mergedId);
-  if (raw) raw.hidden = state.visible;
-  if (merged) merged.hidden = !state.visible;
-  updateDebugResponseActionButtons();
-
-  if (state.visible) {
-    void refreshDebugMergedResponse(currentDebugLogData, tab);
-  }
-}
-
-function resetDebugMergedResponses() {
-  for (const [tab, view] of Object.entries(debugResponseViews)) {
-    const state = debugMergedStates[tab];
-    state.visible = false;
-    state.sourceBody = null;
-    state.loading = false;
-    const raw = document.getElementById(view.rawId);
-    const merged = document.getElementById(view.mergedId);
-    if (raw) raw.hidden = false;
-    if (merged) merged.hidden = true;
-    window.MarkdownRenderer.renderResponse(view.mergedId, { reasoning: '', content: '' });
-  }
-  const note = document.getElementById('debugMergedNote');
-  if (note) {
-    note.hidden = true;
-    note.textContent = '';
-  }
-  updateDebugResponseActionButtons();
-}
-
-function showDebugMergedNote(truncated) {
-  const note = document.getElementById('debugMergedNote');
-  if (!note) return;
-  if (truncated) {
-    note.textContent = i18nText(
-      'logs.mergedTruncated',
-      '响应流超过读取上限，仅合并了前段帧——后半可能缺失'
-    );
-    note.hidden = false;
-  } else {
-    note.hidden = true;
-    note.textContent = '';
-  }
-}
-
-async function refreshDebugMergedResponse(data, tab) {
-  const view = debugResponseViews[tab];
-  const state = debugMergedStates[tab];
-  if (!data || !view || !state || state.loading) return;
-  const sourceBody = String(data[view.bodyKey] || '');
-  if (state.sourceBody === sourceBody) return;
-  state.loading = true;
-  window.MarkdownRenderer.renderResponse(view.mergedId, {
-    reasoning: '',
-    content: (typeof t === 'function' ? t('common.loading') : '加载中...') || '加载中...',
-  });
-  try {
-    // translated-response 的源是 06（客户端线上帧）：目录 id 可解析时走
-    // 服务端合并 GET /admin/debug-logs/{id}/merged——与 POST
-    // merged-response 共用后端 mergeResponseBody，省去把 06 原文上送
-    // 一趟，并能拿到 truncated 标记（>4MB 只合并前段）标注在视图上方。
-    // response 页签（04 上游帧）与活跃请求无目录 id 时仍走 POST 上传。
-    const fileId = tab === 'translated-response' ? (debugFileContext?.fileId || '') : '';
-    let merged;
-    if (fileId) {
-      const resp = await fetchDataWithAuth(debugLogMergedUrl(fileId)) || {};
-      merged = { reasoning: resp.reasoning, content: resp.content, tools: resp.tools };
-      showDebugMergedNote(resp.truncated === true);
-    } else {
-      merged = await window.MergedResponseClient.mergeUpstreamResponse(sourceBody);
-      showDebugMergedNote(false);
-    }
-    state.sourceBody = sourceBody;
-    updateDebugPanePreserveScroll(view.mergedId, merged, 'markdown');
-  } catch (e) {
-    window.MarkdownRenderer.renderResponse(view.mergedId, {
-      reasoning: '',
-      content: e?.message || '合并响应失败',
-    });
-  } finally {
-    state.loading = false;
-  }
-}
-
-// ── Files 页签：调试记录文件清单 ──────────────────────────────────
-// 详情响应的 files[]（{name,size}）列出目录内全部留痕文件（01-06 阶段、
-// error.json、attachments/…）；点击经 /file/{name} 读取——JSON 美化、
-// JSONL 逐行加「#seq +ms event」头注，二进制走 ?raw=1 原始字节预览/打开。
-function resolveActiveDebugFileId(activeRequestId) {
-  const req = latestActiveRequests.find(r => String(r?.id) === String(activeRequestId));
-  const startMs = Number(req?.start_time);
-  return Number.isFinite(startMs) && startMs > 0 ? String(Math.trunc(startMs)) : '';
-}
-
-function resetDebugFileView() {
-  if (debugFileContext) {
-    debugFileContext.openName = null;
-    debugFileContext.openSize = null;
-  }
-  const view = document.getElementById('debugFileView');
-  if (view) view.hidden = true;
-  const pre = document.getElementById('debugFileRaw');
-  if (pre) {
-    pre._rawText = '';
-    pre.innerHTML = '';
-    pre.hidden = false;
-  }
-  const binary = document.getElementById('debugFileBinary');
-  if (binary) {
-    binary.hidden = true;
-    binary.innerHTML = '';
-  }
-}
-
-function renderDebugFileList(data) {
-  const tabBtn = document.getElementById('debugFilesTabBtn');
-  const list = document.getElementById('debugFileList');
-  if (!tabBtn || !list) return;
-  const files = Array.isArray(data?.files) ? data.files : [];
-  tabBtn.hidden = files.length === 0;
-  if (files.length === 0) {
-    list.innerHTML = '';
-    if (debugFileContext?.openName) resetDebugFileView();
-    if (document.querySelector('#debugLogModal .upstream-tab.active')?.dataset.tab === 'files') {
-      activateDebugTab('request');
-    }
-    return;
-  }
-  list.innerHTML = files.map((file) => {
-    const name = String(file?.name || '');
-    const open = debugFileContext && debugFileContext.openName === name;
-    return `<button type="button" class="debug-file-item${open ? ' active' : ''}" data-debug-file="${escapeHtml(name)}">`
-      + `<span class="debug-file-item-name">${escapeHtml(name)}</span>`
-      + `<span class="debug-file-item-size">${escapeHtml(formatBytes(Number(file?.size) || 0))}</span>`
-      + '</button>';
-  }).join('');
-}
-
-// JSONL 逐行加「#seq +elapsed_ms event」头注（沿用旧面板口径）；
-// data 截断 2000 字符避免单行撑爆视图。
-function formatLogsJsonlLines(text) {
-  return String(text || '').split('\n').filter(Boolean).map((line) => {
-    try {
-      const o = JSON.parse(line);
-      const head = (o.seq ? '#' + o.seq + ' ' : '')
-        + (o.elapsed_ms != null ? '+' + o.elapsed_ms + 'ms ' : '')
-        + (o.event || '');
-      return head + '  ' + JSON.stringify(o.data !== undefined ? o.data : o).slice(0, 2000);
-    } catch (e) {
-      return line;
-    }
-  }).join('\n\n');
-}
-
-async function toggleDebugFile(name) {
-  if (!debugFileContext) return;
-  // 再点同一个文件名 = 收起查看区
-  if (debugFileContext.openName === name) {
-    resetDebugFileView();
-    renderDebugFileList(currentDebugLogData);
-    return;
-  }
-  debugFileContext.openName = name;
-  renderDebugFileList(currentDebugLogData);
-  await loadDebugFile(name);
-}
-
-async function loadDebugFile(name) {
-  const view = document.getElementById('debugFileView');
-  const nameEl = document.getElementById('debugFileViewName');
-  const binaryEl = document.getElementById('debugFileBinary');
-  if (!view) return;
-  view.hidden = false;
-  if (binaryEl) {
-    binaryEl.hidden = true;
-    binaryEl.innerHTML = '';
-  }
-  const pre = document.getElementById('debugFileRaw');
-  if (pre) pre.hidden = false;
-  if (nameEl) nameEl.textContent = name;
-  updateDebugFileRawButtons(false);
-  window.setHighlightedCodeContent('debugFileRaw', i18nText('common.loading', '加载中...'), 'text');
-
-  const fileId = debugFileContext?.fileId;
-  if (!fileId) {
-    window.setHighlightedCodeContent(
-      'debugFileRaw',
-      i18nText('logs.debugFileNoDir', '无法定位调试记录（请求可能刚结束或已清理）'),
-      'text'
-    );
-    return;
-  }
-  try {
-    const data = await fetchDataWithAuth(debugLogFileUrl(fileId, name));
-    // 期间用户切换/收起了文件——晚到的内容直接丢弃
-    if (debugFileContext?.openName !== name) return;
-    // 0 字节文件要存 0 而非 null——null 会让轮询判成「大小变了」每拍重拉
-    const openSize = Number(data?.size);
-    debugFileContext.openSize = Number.isFinite(openSize) ? openSize : null;
-    if (data?.binary) {
-      renderDebugFileBinary(name, data);
-      return;
-    }
-    let text = String(data?.text ?? '');
-    let mode = 'text';
-    if (/\.json$/i.test(name)) {
-      text = formatJsonSafe(text);
-      mode = 'json';
-    } else if (/\.jsonl$/i.test(name)) {
-      text = formatLogsJsonlLines(text);
-    }
-    if (data?.truncated) {
-      text += `\n\n${i18nText('logs.fileTruncated', '… 已截断（文件超过读取上限，仅显示前段）')}`;
-    }
-    window.setHighlightedCodeContent('debugFileRaw', text, mode);
-  } catch (e) {
-    if (debugFileContext?.openName !== name) return;
-    window.setHighlightedCodeContent('debugFileRaw', e?.message || i18nText('logs.fileReadFailed', '读取失败'), 'text');
-  }
-}
-
-// 二进制附件（图片等）：JSON 文本视图装不下字节，给「打开原始内容」
-// 入口；图片扩展名额外经 ?raw=1 拉 objectURL 预览。
-function renderDebugFileBinary(name, data) {
-  const binaryEl = document.getElementById('debugFileBinary');
-  const pre = document.getElementById('debugFileRaw');
-  if (!binaryEl) return;
-  if (pre) {
-    pre._rawText = '';
-    pre.innerHTML = '';
-    pre.hidden = true;
-  }
-  updateDebugFileRawButtons(true);
-  binaryEl.innerHTML = `<div class="debug-file-binary-info">${escapeHtml(i18nText(
-    'logs.debugFileBinary',
-    '二进制文件（{size}）——用「打开原始内容」查看',
-    { size: formatBytes(Number(data?.size) || 0) }
-  ))}</div>`;
-  binaryEl.hidden = false;
-  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico)$/i.test(name)) {
-    void previewDebugFileImage(name, binaryEl);
-  }
-}
-
-async function previewDebugFileImage(name, container) {
-  const fileId = debugFileContext?.fileId;
-  if (!fileId) return;
-  try {
-    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
-    if (!res.ok || debugFileContext?.openName !== name) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const img = document.createElement('img');
-    img.className = 'debug-file-preview';
-    img.alt = name;
-    img.src = url;
-    img.onload = () => URL.revokeObjectURL(url);
-    img.onerror = () => URL.revokeObjectURL(url);
-    container.appendChild(img);
-  } catch (_) { /* 预览失败仅保留信息行 */ }
-}
-
-function updateDebugFileRawButtons(isBinary) {
-  // 二进制内容复制成文本是乱码——复制原始按钮只对文本文件有意义
-  const copyBtn = document.getElementById('debugFileRawBtn');
-  if (copyBtn) copyBtn.hidden = !!isBinary;
-}
-
-async function copyDebugFileRaw(btn) {
-  const name = debugFileContext?.openName;
-  const fileId = debugFileContext?.fileId;
-  if (!name || !fileId) return;
-  try {
-    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    await window.copyToClipboard(text);
-    if (btn) {
-      const orig = btn.textContent;
-      btn.textContent = '✓';
-      btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
-    }
-  } catch (e) {
-    if (window.showError) window.showError(e?.message || i18nText('logs.fileReadFailed', '读取失败'));
-  }
-}
-
-async function openDebugFileRaw() {
-  const name = debugFileContext?.openName;
-  const fileId = debugFileContext?.fileId;
-  if (!name || !fileId) return;
-  try {
-    const res = await fetchWithAuth(`${debugLogFileUrl(fileId, name)}?raw=1`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    window.open(url, '_blank', 'noopener');
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch (e) {
-    if (window.showError) window.showError(e?.message || i18nText('logs.fileReadFailed', '读取失败'));
-  }
-}
-
-// Tab switch + copy button delegation for debug log modal.
-// 部分测试桩只提供最小 document API，这里避免在脚本加载阶段就假定完整 DOM 存在。
-if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-  document.addEventListener('click', (e) => {
-    const tab = e.target.closest('#debugLogModal .upstream-tab');
-    if (tab) {
-      activateDebugTab(tab.dataset.tab);
-      return;
-    }
-
-    const mergeBtn = e.target.closest('#debugLogModal [data-action="merge-debug-response"]');
-    if (mergeBtn) {
-      const tab = activeDebugResponseTab();
-      if (tab) setDebugResponseMergedVisible(!debugMergedStates[tab].visible, tab);
-      return;
-    }
-
-    const wrapBtn = e.target.closest('#debugLogModal [data-action="toggle-debug-wrap"]');
-    if (wrapBtn) {
-      setDebugLogWrapEnabled(!debugLogWrapEnabled);
-      return;
-    }
-
-    const fileItem = e.target.closest('#debugLogModal [data-debug-file]');
-    if (fileItem) {
-      void toggleDebugFile(fileItem.dataset.debugFile);
-      return;
-    }
-
-    const fileRawBtn = e.target.closest('#debugLogModal [data-action="copy-debug-file-raw"]');
-    if (fileRawBtn) {
-      void copyDebugFileRaw(fileRawBtn);
-      return;
-    }
-
-    const fileOpenBtn = e.target.closest('#debugLogModal [data-action="open-debug-file-raw"]');
-    if (fileOpenBtn) {
-      void openDebugFileRaw();
-      return;
-    }
-
-    const copyBtn = e.target.closest('#debugLogModal .upstream-copy-btn');
-    if (copyBtn) {
-      const targetId = copyBtn.dataset.copyTarget;
-      const pre = document.getElementById(targetId);
-      if (!pre) return;
-      const text = pre._rawText || pre.textContent || '';
-      window.copyToClipboard(text).then(() => {
-        const orig = copyBtn.textContent;
-        copyBtn.textContent = '\u2713';
-        copyBtn.classList.add('copied');
-        setTimeout(() => { copyBtn.textContent = orig; copyBtn.classList.remove('copied'); }, 1500);
-      }).catch(() => {});
-    }
-  });
-}
-
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { isPrefixOrSuffixVariant, buildLogModelDisplay, buildCacheCreationDisplay };
 }
 
 if (typeof window !== 'undefined') {
   window.i18n?.onLocaleChange?.(() => {
+    cachedLogMobileLabels = null;
     if (displayedLogs !== null) {
       renderLogs(displayedLogs);
       window.i18n.translatePage();

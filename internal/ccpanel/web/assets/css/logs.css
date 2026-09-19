@@ -1102,6 +1102,8 @@ html[data-resolved-theme="dark"] .chat-message {
 
     .logs-table .logs-col-message {
       position: relative;
+      max-width: 300px;
+      word-break: break-word;
     }
 
     .log-source-badge--scheduled {
@@ -1929,4 +1931,44 @@ html[data-resolved-theme="dark"] .chat-message {
       margin-bottom: var(--space-2);
       color: var(--warning-600);
       font-size: var(--text-sm);
+    }
+
+    /* 行内样式收口：nowrap / 占位符 / token 指标色 / 紧凑单元格 */
+
+    .logs-table td.logs-nowrap {
+      white-space: nowrap;
+    }
+
+    .logs-dash {
+      color: var(--neutral-500);
+    }
+
+    .logs-dash-faint {
+      color: var(--neutral-400);
+    }
+
+    .log-timing-separator {
+      color: var(--neutral-400);
+    }
+
+    .token-metric-value--neutral {
+      color: var(--neutral-700);
+    }
+
+    .token-metric-value--success {
+      color: var(--success-600);
+    }
+
+    .token-metric-value--primary {
+      color: var(--primary-600);
+    }
+
+    .cache-5m-badge {
+      color: var(--primary-500);
+      font-size: 0.75em;
+      font-weight: 600;
+    }
+
+    .logs-compact-cell > * + * {
+      margin-left: 8px;
     }
