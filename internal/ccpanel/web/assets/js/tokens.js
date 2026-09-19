@@ -272,25 +272,19 @@
 
       const tbody = document.createElement('tbody');
 
-      // 使用模板引擎渲染行，降级处理
-      if (typeof TemplateEngine !== 'undefined') {
-        allTokens.forEach(token => {
-          const row = createTokenRowWithTemplate(token);
-          if (row) tbody.appendChild(row);
-        });
-      } else {
-        // 降级：模板引擎不可用时使用原有方式
-        console.warn('[Tokens] TemplateEngine not available, using fallback rendering');
-        tbody.innerHTML = allTokens.map(token => createTokenRowFallback(token)).join('');
-      }
+      // 行渲染统一走 tpl-token-row 模板
+      allTokens.forEach(token => {
+        const row = createTokenRowWithTemplate(token);
+        if (row) tbody.appendChild(row);
+      });
 
       table.appendChild(tbody);
       container.innerHTML = '';
       container.appendChild(table);
 
-      // 翻译动态渲染的内容中的 data-i18n 属性
+      // 翻译动态渲染的内容中的 data-i18n 属性（只扫新表，不碰整页）
       if (window.i18n.translatePage) {
-        window.i18n.translatePage();
+        window.i18n.translatePage(table);
       }
     }
 
@@ -573,78 +567,6 @@
       return `<span class="metric-value" style="color: ${colorFn(num)};">${num.toFixed(2)}s</span>`;
     }
 
-    /**
-     * 降级：模板引擎不可用时的渲染方式
-     */
-    function createTokenRowFallback(token) {
-      
-      const locale = window.i18n?.getLocale?.() || 'en';
-      const status = getTokenStatus(token);
-      const createdAt = new Date(token.created_at).toLocaleString(locale);
-      const lastUsed = formatLastUsedHtml(token.last_used_at, locale);
-      const expiresAt = token.expires_at ? new Date(token.expires_at).toLocaleString(locale) : t('tokens.expiryNever');
-
-      // 计算统计信息
-      const successCount = token.success_count || 0;
-      const failureCount = token.failure_count || 0;
-      const totalCount = successCount + failureCount;
-
-      // 预构建HTML片段
-      const callsHtml = buildCallsHtml(successCount, failureCount, totalCount);
-      const successRate = totalCount > 0 ? ((successCount / totalCount) * 100).toFixed(1) : 0;
-      const successRateHtml = buildSuccessRateHtml(successRate, totalCount);
-      const rpmHtml = buildRpmHtml(token);
-      const tokensHtml = buildTokensHtml(token);
-      const costHtml = buildCostHtml(token.total_cost_usd, token.effective_cost_usd);
-      const concurrencyHtml = buildConcurrencyHtml(token.max_concurrency);
-      const streamAvgHtml = buildResponseTimeHtml(token.stream_avg_ttfb, token.stream_count, window.getFirstByteTimingColor);
-      const nonStreamAvgHtml = buildResponseTimeHtml(token.non_stream_avg_rt, token.non_stream_count, window.getDurationTimingColor);
-      const costCellClass = token.total_cost_usd > 0 ? '' : ' mobile-empty-cell';
-      const streamCellClass = token.stream_count ? '' : ' mobile-empty-cell';
-      const nonStreamCellClass = token.non_stream_count ? '' : ' mobile-empty-cell';
-
-      const maskedToken = token.anonymous
-        ? t('tokens.anonymousDisplay')
-        : token.token.length > 8
-          ? token.token.substring(0, 4) + '****' + token.token.slice(-4)
-          : token.token;
-      const rowClass = token.anonymous ? ' token-card-row--anonymous' : '';
-      const displayClass = token.anonymous ? 'anonymous' : status.class;
-      const classBadgeHtml = buildClassBadgeHtml(token.class);
-      // 匿名通道行没有可出示的凭据：复制/试聊按钮整行略去
-      const copyBtnHtml = token.anonymous ? '' :
-        `<button class="btn-copy-token btn btn-secondary token-row-action-btn" data-action="copy-token-hash" data-token="${escapeHtml(token.token)}">${t('common.copy')}</button>`;
-      const playBtnHtml = token.anonymous ? '' :
-        `<button class="btn btn-secondary btn-play token-row-action-btn" data-action="play-token">${t('tokens.action.test')}</button>`;
-
-      return `
-        <tr class="mobile-card-row token-card-row${rowClass}" data-token-id="${token.id}">
-          <td class="tokens-col-token" data-mobile-label="${t('tokens.table.token')}">
-            <div class="token-row-primary"><span class="token-display token-display-${displayClass}">${escapeHtml(maskedToken)}</span></div>
-            <div class="token-row-description">${escapeHtml(token.description)}</div>
-            <div class="token-row-meta">${createdAt}${t('tokens.createdSuffix')} · ${expiresAt}${classBadgeHtml}</div>
-          </td>
-          <td class="tokens-col-calls" data-mobile-label="${t('tokens.table.callCount')}">${callsHtml}</td>
-          <td class="tokens-col-success-rate" data-mobile-label="${t('tokens.table.successRate')}">${successRateHtml}</td>
-          <td class="tokens-col-rpm" data-mobile-label="${t('tokens.table.rpm')}">${rpmHtml}</td>
-          <td class="tokens-col-token-usage" data-mobile-label="${t('tokens.table.tokenUsage')}">${tokensHtml}</td>
-          <td class="tokens-col-cost${costCellClass}" data-mobile-label="${t('tokens.table.totalCost')}">${costHtml}</td>
-          <td class="tokens-col-concurrency" data-mobile-label="${t('tokens.table.concurrency')}">${concurrencyHtml}</td>
-          <td class="tokens-col-stream${streamCellClass}" data-mobile-label="${t('tokens.table.streamAvg')}">${streamAvgHtml}</td>
-          <td class="tokens-col-non-stream${nonStreamCellClass}" data-mobile-label="${t('tokens.table.nonStreamAvg')}">${nonStreamAvgHtml}</td>
-          <td class="tokens-col-last-used" data-mobile-label="${t('tokens.table.lastUsed')}">${lastUsed}</td>
-          <td class="tokens-col-actions" data-mobile-label="${t('tokens.table.actions')}">
-            <div class="token-row-actions">
-              ${copyBtnHtml}
-              ${playBtnHtml}
-              <button class="btn btn-secondary btn-edit token-row-action-btn" data-action="edit-token">${t('common.edit')}</button>
-              <button class="btn btn-danger btn-delete token-row-action-btn" data-action="delete-token">${t('common.delete')}</button>
-            </div>
-          </td>
-        </tr>
-      `;
-    }
-
     function getTokenStatus(token) {
       
       if (token.is_expired) return { class: 'expired', text: t('tokens.status.expired') };
@@ -739,7 +661,7 @@
     }
 
     function editToken(id) {
-      const token = allTokens.find(t => t.id === id);
+      const token = allTokens.find(tok => tok.id === id);
       if (!token) return;
       document.getElementById('editTokenId').value = id;
       // 匿名通道行没有可出示的凭据，令牌位显示占位符而非存储哈希
@@ -1227,6 +1149,12 @@
         .filter(m => m);
     }
 
+    // 去重并排除已在 editAllowedModels 中的模型（大小写不敏感比对、保留原大小写写入）
+    function newImportableModels(models) {
+      const existingModels = new Set(editAllowedModels.map(m => m.toLowerCase()));
+      return [...new Set(models)].filter(m => !existingModels.has(m.toLowerCase()));
+    }
+
     /**
      * 显示模型导入对话框
      */
@@ -1258,9 +1186,7 @@
       }
 
       const models = parseModelInput(input);
-      // 去重并排除已存在的模型
-      const existingModels = new Set(editAllowedModels.map(m => m.toLowerCase()));
-      const newModels = [...new Set(models)].filter(m => !existingModels.has(m.toLowerCase()));
+      const newModels = newImportableModels(models);
 
       if (newModels.length > 0) {
         countSpan.textContent = newModels.length;
@@ -1289,9 +1215,7 @@
         return;
       }
 
-      // 去重并排除已存在的模型
-      const existingModels = new Set(editAllowedModels.map(m => m.toLowerCase()));
-      const newModels = [...new Set(models)].filter(m => !existingModels.has(m.toLowerCase()));
+      const newModels = newImportableModels(models);
 
       if (newModels.length === 0) {
         window.showNotification(t('tokens.msg.allModelsExist'), 'info');
