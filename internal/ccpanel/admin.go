@@ -1,6 +1,7 @@
 package ccpanel
 
 import (
+	"encoding/json"
 	"hash/fnv"
 	"log/slog"
 	"net/http"
@@ -381,6 +382,17 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	// 当前深度）——采样写失败此前只有 stderr WARN，写争用期丢点在
 	// 这里才可见。
 	data["quota"] = h.quotaPersistStats()
+	// store 组投开库台账：opens_recent 里出现第二个 pid/build 即有别处
+	// 进程附着同一状态库（reuseport 交接残留曾静默持锁三天、stderr 零
+	// 留痕——台账正是为此而建）。读失败（老库无此表、表被污染）只省略
+	// 该组，观测面不动端点。
+	if h.store != nil {
+		if opens, err := h.store.StoreOpens(r.Context()); err == nil {
+			data["store"] = storeOpensView(opens)
+		} else {
+			slog.Warn("ccpanel: store opens query failed", "error", err)
+		}
+	}
 	// accounts 组是号池逐账号视图：每号的闸门/保温/脱钩缓存/池侧
 	// 状态各自透出——顶层 gate/warm 仍是首 lane 快照（前端后兼容，
 	// 闩态/分位数不可聚合），detached 已是全 lane 聚合；逐号排障
@@ -470,4 +482,41 @@ func warmStatsView(warm devin.WarmStats) map[string]any {
 		view["events"] = warm.Events
 	}
 	return view
+}
+
+// storeOpensView 把开库台账快照投影成 runtime-metrics 的 store 组：
+// opens_total 总行数、opens_distinct_pids_24h 回看窗内 distinct pid
+// 数（>1 即有别处进程附着）、opens_recent 最近行（新在前）。行字段
+// 取台账列的子集——path 对本面板冗余（handler 只绑一个库），不投。
+func storeOpensView(rep *store.StoreOpensReport) map[string]any {
+	recent := make([]map[string]any, 0, len(rep.Recent))
+	for _, o := range rep.Recent {
+		recent = append(recent, map[string]any{
+			"at":    o.At,
+			"pid":   o.PID,
+			"build": o.Build,
+			"argv":  renderOpenArgv(o.Argv),
+		})
+	}
+	return map[string]any{
+		"opens_total":             rep.Total,
+		"opens_distinct_pids_24h": rep.DistinctPIDs24h,
+		"opens_recent":            recent,
+	}
+}
+
+// renderOpenArgv 把台账 argv 渲染成单行：落库原值是 os.Args 的 JSON
+// 数组文本（写侧 4KB 截断可能切出非法 JSON），解码成功则空格紧凑
+// 相连，否则取原文；统一截到 200 rune——取证字段不背完整命令行。
+func renderOpenArgv(raw string) string {
+	s := raw
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err == nil && len(args) > 0 {
+		s = strings.Join(args, " ")
+	}
+	const max = 200
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
+	}
+	return s
 }
