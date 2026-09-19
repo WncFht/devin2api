@@ -38,6 +38,7 @@
   <script defer src="/web/assets/js/merged-response-client.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/model-test-modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/logs.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/debug-log-modal.js?v=__VERSION__"></script>
 </head>
 <body>
   <div class="app-container">
@@ -189,13 +190,13 @@
       <div id="debugLogError" style="text-align: center; padding: 2rem; color: var(--danger-600); display: none;"></div>
       <div id="debugLogContent" style="display: none; flex: 1; min-height: 0; flex-direction: column;">
         <div class="upstream-detail-tabs">
-          <button type="button" id="debugRequestTabBtn" class="upstream-tab active" data-tab="request" data-i18n="logs.debugRequest">Request</button>
-          <button type="button" id="debugTranslatedRequestTabBtn" class="upstream-tab" data-tab="translated-request" data-i18n="logs.debugTranslatedRequest" hidden>Translated Request</button>
-          <button type="button" id="debugResponseTabBtn" class="upstream-tab" data-tab="response" data-i18n="logs.debugResponse">Response</button>
-          <button type="button" id="debugTranslatedResponseTabBtn" class="upstream-tab" data-tab="translated-response" data-i18n="logs.debugTranslatedResponse" hidden>Translated Response</button>
-          <button type="button" id="debugFilesTabBtn" class="upstream-tab" data-tab="files" data-i18n="logs.debugFiles" hidden>Files</button>
+          <button type="button" id="debugRequestTabBtn" class="upstream-tab active" data-action="switch-debug-tab" data-tab="request" data-i18n="logs.debugRequest">Request</button>
+          <button type="button" id="debugTranslatedRequestTabBtn" class="upstream-tab" data-action="switch-debug-tab" data-tab="translated-request" data-i18n="logs.debugTranslatedRequest" hidden>Translated Request</button>
+          <button type="button" id="debugResponseTabBtn" class="upstream-tab" data-action="switch-debug-tab" data-tab="response" data-i18n="logs.debugResponse">Response</button>
+          <button type="button" id="debugTranslatedResponseTabBtn" class="upstream-tab" data-action="switch-debug-tab" data-tab="translated-response" data-i18n="logs.debugTranslatedResponse" hidden>Translated Response</button>
+          <button type="button" id="debugFilesTabBtn" class="upstream-tab" data-action="switch-debug-tab" data-tab="files" data-i18n="logs.debugFiles" hidden>Files</button>
           <button type="button" id="debugWrapBtn" class="upstream-copy-btn upstream-wrap-btn active" data-action="toggle-debug-wrap" data-i18n="logs.debugWrap" aria-pressed="true">换行</button>
-          <button type="button" class="upstream-copy-btn upstream-copy-btn--tabs" data-copy-target="debugReqRaw" data-i18n="common.copy">复制</button>
+          <button type="button" class="upstream-copy-btn upstream-copy-btn--tabs" data-action="copy-debug-pane" data-copy-target="debugReqRaw" data-i18n="common.copy">复制</button>
           <button type="button" id="debugMergeBtn" class="upstream-copy-btn upstream-merge-btn" data-action="merge-debug-response" data-i18n="logs.debugMerge" aria-pressed="false" hidden>合并</button>
         </div>
         <div class="upstream-tab-panel active" data-tab="request">
