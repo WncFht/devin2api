@@ -91,7 +91,7 @@
       const toggle = e.target.closest('[data-mtm-toggle]');
       if (toggle) {
         const target = document.getElementById(toggle.dataset.mtmToggle);
-        if (target) target.style.display = target.style.display === 'none' ? 'block' : 'none';
+        if (target) target.hidden = !target.hidden;
       }
     });
     // 注入晚于 i18n 首次扫描——data-i18n 属性已就位，再补一次全页翻译
@@ -161,11 +161,11 @@
   }
 
   function toggleBlock(id, labelKey) {
-    return `<button type="button" class="btn btn-secondary btn-sm" data-mtm-toggle="${id}" style="margin-bottom: 8px;">${esc(t(labelKey))}</button>`;
+    return `<button type="button" class="btn btn-secondary btn-sm mb-2" data-mtm-toggle="${id}">${esc(t(labelKey))}</button>`;
   }
 
-  function block(id, text, color) {
-    return `<div id="${id}" style="display: none; padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: ${color}; white-space: pre-wrap; font-family: monospace; font-size: 0.85em; max-height: 400px; overflow-y: auto;">${esc(text)}</div>`;
+  function block(id, text, isError) {
+    return `<div id="${id}" class="mtm-pre${isError ? ' mtm-pre--error' : ''}" hidden>${esc(text)}</div>`;
   }
 
   function renderResult(result) {
@@ -185,13 +185,13 @@
       if (result.request_id) meta.push(`${esc(t('probe.requestId'))}: ${esc(result.request_id)}`);
       let details = `<p>${meta.join(' | ')}</p>`;
       if (result.response_text) {
-        details += `<div style="margin-top: 12px;"><h4 style="margin-bottom: 8px; color: var(--neutral-700);">${esc(t('probe.responseText'))}</h4>` +
-          `<div style="padding: 12px; background: var(--neutral-50); border-radius: 4px; border: 1px solid var(--neutral-200); color: var(--neutral-700); white-space: pre-wrap; font-family: monospace; font-size: 0.9em; max-height: 300px; overflow-y: auto;">${esc(result.response_text)}</div></div>`;
+        details += `<div class="mtm-section"><h4>${esc(t('probe.responseText'))}</h4>` +
+          `<div class="mtm-pre">${esc(result.response_text)}</div></div>`;
       }
       if (result.api_response) {
         const id = 'mtm-resp-' + Date.now();
-        details += `<div style="margin-top: 12px;"><h4 style="margin-bottom: 8px; color: var(--neutral-700);">${esc(t('probe.fullResponse'))}</h4>` +
-          toggleBlock(id, 'probe.toggleJson') + block(id, JSON.stringify(result.api_response, null, 2), 'var(--neutral-700)') + `</div>`;
+        details += `<div class="mtm-section"><h4>${esc(t('probe.fullResponse'))}</h4>` +
+          toggleBlock(id, 'probe.toggleJson') + block(id, JSON.stringify(result.api_response, null, 2)) + `</div>`;
       }
       detailsDiv.innerHTML = details;
       return;
@@ -199,16 +199,16 @@
 
     resultDiv.classList.add('error');
     contentDiv.innerHTML = `<strong>${esc(t('probe.failed'))}</strong>`;
-    let details = `<p style="color: var(--error-600); margin-top: 8px;">${esc(result.error || t('probe.unknownError'))}</p>`;
+    let details = `<p class="mtm-error-text">${esc(result.error || t('probe.unknownError'))}</p>`;
     const meta = [];
     if (result.status_code) meta.push(`${esc(t('probe.statusCode'))}: ${result.status_code}`);
     if (result.duration_ms) meta.push(`${esc(t('probe.duration'))}: ${result.duration_ms}ms`);
     if (result.request_id) meta.push(`${esc(t('probe.requestId'))}: ${esc(result.request_id)}`);
-    if (meta.length) details += `<p style="margin-top: 8px;">${meta.join(' | ')}</p>`;
+    if (meta.length) details += `<p class="mtm-meta">${meta.join(' | ')}</p>`;
     if (result.raw_response) {
       const id = 'mtm-raw-' + Date.now();
-      details += `<div style="margin-top: 12px;"><h4 style="margin-bottom: 8px; color: var(--neutral-700);">${esc(t('probe.rawResponse'))}</h4>` +
-        toggleBlock(id, 'probe.toggle') + block(id, result.raw_response, 'var(--error-700)') + `</div>`;
+      details += `<div class="mtm-section"><h4>${esc(t('probe.rawResponse'))}</h4>` +
+        toggleBlock(id, 'probe.toggle') + block(id, result.raw_response, true) + `</div>`;
     }
     detailsDiv.innerHTML = details;
   }

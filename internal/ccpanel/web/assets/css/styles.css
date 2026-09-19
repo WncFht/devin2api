@@ -1380,6 +1380,36 @@ body {
   font-weight: 600;
 }
 
+.mtm-section {
+  margin-top: var(--space-3);
+}
+
+.mtm-meta {
+  margin-top: var(--space-2);
+}
+
+.mtm-error-text {
+  margin-top: var(--space-2);
+  color: var(--error-600);
+}
+
+.mtm-pre {
+  padding: 12px;
+  background: var(--neutral-50);
+  border: 1px solid var(--neutral-200);
+  border-radius: 4px;
+  color: var(--neutral-700);
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.85em;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.mtm-pre--error {
+  color: var(--error-700);
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -2416,6 +2446,10 @@ body.web-role-api-token #btn_export_json {
 
 .text-lg {
   font-size: var(--text-lg);
+}
+
+.text-muted {
+  color: var(--color-text-secondary);
 }
 
 .w-12 {
