@@ -27,6 +27,11 @@ const (
 	// 失败、下一趟 Get 重试」；取值压过 sqlite busy_timeout（30s），
 	// 正常慢查询仍由 fetch 自己的超时先报。
 	swrRefreshTimeout = 60 * time.Second
+	// fetchFailCooldown 是 fetch 失败后的冷却窗：窗内 Get 有旧快照回
+	// 旧快照、无快照回缓存的错误——上游/库持续故障期，面板轮询的重试
+	// 频率不该等于请求频率。取值对齐最短 TTL（usage 5s）：恢复延迟
+	// 最多一个轮询周期，故障期重试被折到冷却粒度。
+	fetchFailCooldown = 5 * time.Second
 )
 
 // ttlCache 是「TTL 快照 + singleflight」缓存。swr=false 时过期调用方
@@ -42,6 +47,10 @@ type ttlCache[T any] struct {
 	// 快照（swr 的旧值语义也以 at 判定，空结果同样占住 TTL）。
 	snap T
 	at   time.Time
+	// failUntil/failErr 是最近一趟失败 fetch 的冷却窗：窗内 Get 不再
+	// 触发新拉取——有旧快照回旧快照，无快照回缓存的错误。
+	failUntil time.Time
+	failErr   error
 	// inflight 非空表示有 fetch 在途（singleflight 的 done channel），
 	// 关闭即完成信号。
 	inflight chan struct{}
@@ -62,6 +71,17 @@ func (c *ttlCache[T]) Get(ctx context.Context) (T, error) {
 			snap := c.snap
 			c.mu.Unlock()
 			return snap, nil
+		}
+		if time.Now().Before(c.failUntil) {
+			if hasSnap {
+				snap := c.snap
+				c.mu.Unlock()
+				return snap, nil
+			}
+			err := c.failErr
+			c.mu.Unlock()
+			var zero T
+			return zero, err
 		}
 		if c.inflight != nil {
 			done := c.inflight
@@ -100,14 +120,20 @@ func (c *ttlCache[T]) Get(ctx context.Context) (T, error) {
 }
 
 // run 执行一趟 fetch、刷新快照并关闭 done 通知等待方。先写快照再
-// close：被唤醒的等待方回到循环立刻读到新值；失败时保持旧快照，
-// 下一个醒来的等待方顺位成为新的拉取者。
+// close：被唤醒的等待方回到循环立刻读到新值；失败时保持旧快照并
+// 开一扇短冷却窗——窗内醒来的等待方拿旧快照/缓存错误，不再顺位
+// 成为新拉取者，上游故障期的重试被折到冷却粒度而非请求粒度。
 func (c *ttlCache[T]) run(ctx context.Context, done chan struct{}) error {
 	snap, err := c.fetch(ctx)
 	c.mu.Lock()
 	if err == nil {
 		c.snap = snap
 		c.at = time.Now()
+		c.failUntil = time.Time{}
+		c.failErr = nil
+	} else {
+		c.failUntil = time.Now().Add(fetchFailCooldown)
+		c.failErr = err
 	}
 	close(done)
 	c.inflight = nil
