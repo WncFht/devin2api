@@ -1108,25 +1108,41 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	}
 	// 客户端哨兵：streamCtx 从 streamBase 派生不随客户端取消。断连时刻
 	// 的脱钩判定有两个执行者——app 泵退场前的交班 Recv（投递点
-	// ctx.Done 出口先驱动末次 Recv 再退）与本哨兵，同经 mu 串行、
-	// 先到者赢、后到者见 detached 空转。哨兵兜住「泵不再进 Recv」的
+	// ctx.Done 出口先驱动末次 Recv 再退）与本哨兵，经 detached CAS
+	// 定序、先到者赢、后到者见已认领空转。哨兵兜住「泵不再进 Recv」的
 	// 残留形态（如未来不排干 items 就退场的消费方）；泵侧交班才是
 	// 定序保障——泵退出即蕴含判定已定，消费方排干到 close 才放
 	// unwind 进 Complete。
-	go func() {
-		<-ctx.Done()
-		response.mu.Lock()
-		defer response.mu.Unlock()
-		if response.detached {
-			return
-		}
-		if response.detachable() {
-			response.detach(ctx)
-		} else {
-			response.cancel()
-		}
-	}()
+	go response.watchClientCtx(ctx)
 	return response, nil
+}
+
+// watchClientCtx 是客户端哨兵主体：ctx.Done 醒来先走 admitIntent 占位
+// 登记——锁内阻塞段（tryResume/extend/托管搜索的 gate.wait+dial，内层
+// maxConnectAttempts 重试，实测剩余 ~95s）会把持 mu 的判定推迟到段末，
+// 且段末 finished=true 时 detachable() 已假、登记整段丢失。占位路径只用
+// 单调位判定、CAS 认领后条目即刻落册（对同键 lookup、面板 abort 的
+// 清场与 census 立即可见，台账行同步持久化），后台泵不持锁启动、首个
+// Recv 随 mu 释放自然进场。资格不符或占位旁落才回落持 mu 的终局判定
+// （可脱钩则正式脱钩，否则杀泵）。
+func (stream *responseStream) watchClientCtx(ctx context.Context) {
+	<-ctx.Done()
+	if stream.admitIntent() {
+		stream.admitDetached(ctx)
+	}
+	if stream.detached.Load() {
+		return
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.detached.Load() {
+		return
+	}
+	if stream.detachable() {
+		stream.detach(ctx)
+	} else {
+		stream.cancel()
+	}
 }
 
 // maxConnectAttempts 是 GetChatMessage 建立阶段对瞬时传输错误的最大尝试次数。
@@ -1837,14 +1853,18 @@ type responseStream struct {
 	// startReleased 标记 start 已下发给客户端：pre-content 重试重建
 	// 解码器后必须丢弃新 start，否则客户端会收到第二个 message_start。
 	startReleased bool
-	// finished 表示 decoder 已经生成最终事件，不再读取上游。
-	finished bool
+	// finished 表示 decoder 已经生成最终事件，不再读取上游。atomic：
+	// 断连哨兵在锁外做占位登记判定时读它——只 false→true 单向翻转
+	//（swap/tryResume 的 =false 写在已 false 的值上），锁外读不会看
+	// 到反方向的过期值。
+	finished atomic.Bool
 	// queue 保存已经转换、等待调用方读取的中间响应事件。
 	queue []llm.ResponseEvent
 	// producedEvents 表示上游帧已产出过任何事件：一旦为真说明内容已
-	// 开始对外流动，此后失败只能透传，不能整体重发。哨兵经 mu 读它
-	// 判定脱钩资格。
-	producedEvents bool
+	// 开始对外流动，此后失败只能透传，不能整体重发。atomic：哨兵在
+	// 锁外读它判定占位登记资格，单调 false→true 保证读到 true 恒为
+	// 已成立事实。
+	producedEvents atomic.Bool
 	// upstreamConfirmed 标记上游已产出首个非错误帧：限流闩以此为据
 	// 提前解闩（边际态下拒绝是概率执行，成功帧即窗口已过的证据）。
 	upstreamConfirmed bool
@@ -1910,9 +1930,12 @@ type responseStream struct {
 	entry     *detachedEntry
 	// detached 标记本流已与客户端解耦、由后台泵续命：无进度看门狗
 	// 退役（耐心是它的全部意义，running TTL 是存活上界），静默
-	// 看门狗仍在岗——零帧意味着连接真死而非算得慢。写权限在 mu 下，
-	// 哨兵与消费方谁先到谁脱钩，后到者见此标记直接退场。
-	detached bool
+	// 看门狗仍在岗——零帧意味着连接真死而非算得慢。atomic：它同时
+	// 是「生命周期处置权」的唯一认领位——断连哨兵在锁外 CAS 占位
+	// 登记（绕过 mu 内可达分钟级的阻塞段），持 mu 的消费方/哨兵慢路
+	// 经同一 CAS 兑入：赢家或登记进缓存或就地杀泵，后到者见此标记
+	// 直接退场。置位只保证「已有人处置」，不保证「已登记」。
+	detached atomic.Bool
 }
 
 // devinResponseReceiver 描述 responseStream 消费 Devin 服务端流所需的最小能力。
@@ -1951,7 +1974,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	// progressC 为 nil 时 select 的该分支永不触发。
 	var progress *time.Timer
 	var progressC <-chan time.Time
-	if !stream.detached {
+	if !stream.detached.Load() {
 		progress = stream.progress
 		if progress == nil {
 			progress = time.NewTimer(stream.progressDeadline())
@@ -1960,19 +1983,23 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			progress.Reset(stream.progressDeadline())
 		}
 		progressC = progress.C
+	} else if stream.progress != nil {
+		// 占位路径脱钩不持锁、停不了消费方留下的旧表：首个持锁进场的
+		// 脱钩方顺手回收——无进度看门狗对脱钩流已退役。
+		stream.progress.Stop()
+		stream.progress = nil
 	}
-	for len(stream.queue) == 0 && !stream.finished {
+	for len(stream.queue) == 0 && !stream.finished.Load() {
 		if err := ctx.Err(); err != nil {
 			// streamCtx 从 streamBase 派生不随客户端取消：早退路径
 			// 必须显式决定上游泵的去向——已产出内容就脱钩续命进缓存，
-			// 否则杀掉（pre-content 流进缓存没有重放价值）。哨兵抢先
-			// 脱钩时本消费方直接退场，cancel 会误杀归后台的泵。
-			if !stream.detached {
-				if stream.detachable() {
-					stream.detach(ctx)
-				} else {
-					stream.cancel()
-				}
+			// 否则杀掉（pre-content 流进缓存没有重放价值）。detached
+			// CAS 是处置权的唯一仲裁：哨兵占位登记若抢先落子，泵已归
+			// 后台，这里误杀会把刚到手的条目收成截断前缀。
+			if stream.detachable() {
+				stream.detach(ctx)
+			} else if stream.detached.CompareAndSwap(false, true) {
+				stream.cancel()
 			}
 			return llm.ResponseEvent{}, err
 		}
@@ -2048,7 +2075,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				}
 				stream.recordUpstreamFailure(upstreamErr)
 				stream.queue = events
-				stream.finished = true
+				stream.finished.Store(true)
 				continue
 			}
 			if !stream.upstreamConfirmed {
@@ -2058,13 +2085,13 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// 脱钩后盘上不再追写：帧已由 Recv 返回点 tee 进完成缓存供
 			// 重放，此时原 dir 多已 Complete，04 续写只会被 closed 门口
 			// 拒收计进 late_writes/dropped 噪声。
-			if !stream.detached {
+			if !stream.detached.Load() {
 				recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
 			}
 			events := stream.decoder.decode(frame.response)
 			stream.recordSchemaDrift()
 			if len(events) > 0 {
-				stream.producedEvents = true
+				stream.producedEvents.Store(true)
 				if progress != nil {
 					progress.Reset(stream.progressDeadline())
 				}
@@ -2089,7 +2116,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 					continue
 				}
 				stream.queue = events
-				stream.finished = true
+				stream.finished.Store(true)
 				continue
 			}
 			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", stream.stallDeadline())
@@ -2101,7 +2128,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			stream.recordUpstreamFailure(stallErr)
 			stream.queue = stream.release(stream.decoder.finish(stallErr))
-			stream.finished = true
+			stream.finished.Store(true)
 		case <-progressC:
 			// 有帧流动但长期零内容进度（上游 latency 活性帧不算
 			// 进度）：退化形态兜底——pre-content 可整体重发，
@@ -2117,14 +2144,9 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			stream.recordUpstreamFailure(progressErr)
 			stream.queue = stream.release(stream.decoder.finish(progressErr))
-			stream.finished = true
+			stream.finished.Store(true)
 		case <-ctx.Done():
 			stall.Stop()
-			if stream.detached {
-				// 哨兵抢先脱钩：泵已归后台，finish/杀泵都归后台泵的
-				// 退出路径负责，本消费方原样收取消退场。
-				return llm.ResponseEvent{}, context.Cause(ctx)
-			}
 			if stream.detachable() {
 				// 已产出内容的流不随客户端一起死：脱钩进完成缓存由
 				// 后台泵续命，同键重试重放缓冲。取消错误原样返回给
@@ -2132,12 +2154,18 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.detach(ctx)
 				return llm.ResponseEvent{}, context.Cause(ctx)
 			}
+			if !stream.detached.CompareAndSwap(false, true) {
+				// 泵已归后台（哨兵占位登记抢先，或本流早已脱钩）：
+				// finish/杀泵都归后台泵的退出路径负责，本消费方原样
+				// 收取消退场。
+				return llm.ResponseEvent{}, context.Cause(ctx)
+			}
 			stream.cancel()
 			stream.queue = stream.release(stream.decoder.finish(context.Cause(ctx)))
-			stream.finished = true
+			stream.finished.Store(true)
 		}
 	}
-	if stream.finished {
+	if stream.finished.Load() {
 		stream.cancel()
 		// progress/startHold 是跨 Recv 复用的看门狗，不能随 Recv 返回
 		// 停表（语义见 progress 字段注释）；finished 后等待循环不再进入，
@@ -2198,7 +2226,7 @@ func (stream *responseStream) stallDeadline() time.Duration {
 // post-event 与裸流（firstSentAt 零值）不受上限影响。
 func (stream *responseStream) progressDeadline() time.Duration {
 	window := stream.progressWindow()
-	if stream.producedEvents || stream.firstSentAt.IsZero() {
+	if stream.producedEvents.Load() || stream.firstSentAt.IsZero() {
 		return window
 	}
 	if remain := time.Until(stream.firstSentAt.Add(upstreamPreEventSilenceCap)); remain < window {
@@ -2213,10 +2241,10 @@ func (stream *responseStream) progressDeadline() time.Duration {
 // 只发心跳，pre 档必误杀这类合法静默。裸流（对应档 <=0）回落
 // upstreamNoProgressTimeout，保持测试构造的既有语义。
 func (stream *responseStream) progressWindow() time.Duration {
-	if stream.producedEvents && stream.postProgressTimeout > 0 {
+	if stream.producedEvents.Load() && stream.postProgressTimeout > 0 {
 		return stream.postProgressTimeout
 	}
-	if !stream.producedEvents && stream.preProgressTimeout > 0 {
+	if !stream.producedEvents.Load() && stream.preProgressTimeout > 0 {
 		return stream.preProgressTimeout
 	}
 	return upstreamNoProgressTimeout
@@ -2226,7 +2254,7 @@ func (stream *responseStream) progressWindow() time.Duration {
 // progressDeadline 会把已耗尽的累计静默上限残余误报成 ~0——上限已过
 // 时报上限本身，其余回到分档窗口。
 func (stream *responseStream) progressBound() time.Duration {
-	if !stream.producedEvents && !stream.firstSentAt.IsZero() &&
+	if !stream.producedEvents.Load() && !stream.firstSentAt.IsZero() &&
 		!time.Now().Before(stream.firstSentAt.Add(upstreamPreEventSilenceCap)) {
 		return upstreamPreEventSilenceCap
 	}
@@ -2246,35 +2274,43 @@ func (stream *responseStream) progressBound() time.Duration {
 // 失败收尾如 midcontent 式截断，少了这道闸会把死流登记进缓存白占
 // 容量）。已脱钩的流不可再脱钩。
 func (stream *responseStream) detachable() bool {
-	return !stream.detached && !stream.finished &&
+	return !stream.detached.Load() && !stream.finished.Load() &&
 		!stream.recorder.WasAborted() &&
 		stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
 		!stream.entry.isTruncated() &&
-		stream.producedEvents && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
+		stream.producedEvents.Load() && !stream.decoder.hasStopReason && !stream.decoder.stoppedByPattern
 }
 
-// detach 把流从客户端生命周期解耦：条目登记进完成缓存，停掉两个
-// 看门狗计时器（消费方的 defer 只停它捕获的旧表，互不影响），然后
-// 起后台泵续消费直到终态——缓冲经 tee 持续追加，挂接方按序追帧。
-// 调用方须持 stream.mu（消费方 Recv 与哨兵都满足）；由此串行保证
-// 同一时刻只有一个 Recv 在场，后台泵的第一轮 Recv 会等持锁方退场。
-// 泵的存活上界是 running TTL：到期/被容量淘汰掐 drainCtx 退场时
-// 补一条终局错误——截断前缀若误标 completed 会把半成品当完整响应
-// 重放给同键重试。
-func (stream *responseStream) detach(ctx context.Context) {
+// admitIntent 是断连时刻的占位登记资格（admitDetached 锁外快路的准入
+// 判定）：与 detachable() 的分工是「断开瞬间值不值得留」对「持锁终局
+// 该不该留」——判据只收单调位与非可变字段（producedEvents/finished/
+// detached、entry.truncated、recorder.aborted 全单向翻转，registry/key/
+// entry 构造期定型），锁外读到的 true 恒为已成立事实。finished 仍在列：
+// 正常完结的请求 handler 返回即取消 ctx、哨兵必醒，那时 finished 已真，
+// 拒绝占位才不致把每条成功请求都存进缓存；断连落在锁内阻塞段的场景
+// 段未收束 finished 必假，洞例照样占得上位。hasStopReason/
+// stoppedByPattern 不卡：断连落在「语义已收口、只剩尾帧」的窗口时登记
+// 仍兑现前缀价值，泵随后自然定态 completed。
+func (stream *responseStream) admitIntent() bool {
+	return stream.registry != nil && stream.detachKey != "" && stream.entry != nil &&
+		stream.producedEvents.Load() && !stream.finished.Load() &&
+		!stream.entry.isTruncated() && !stream.recorder.WasAborted()
+}
+
+// admitDetached 是登记动作的唯一实现：detached CAS 认领「登记一次」——
+// 占位哨兵（锁外快路）与持 mu 的 detach() 共用，后到者空转。赢家把
+// originDir/drainCancel 落 entry、registry.admit 落册（台账行同步持久化），
+// 写 04 detached 标记与 meta 镜像，再起后台泵。锁序：本方法不持
+// stream.mu 也可运行，内部只依次取 entry.mu→registry.mu→entry.mu，
+// 不破坏 stream.mu > registry.mu > entry.mu 的既有顺序。
+func (stream *responseStream) admitDetached(ctx context.Context) {
+	if !stream.detached.CompareAndSwap(false, true) {
+		return
+	}
 	entry := stream.entry
 	entry.mu.Lock()
 	entry.originDir = stream.recorder.Dir()
 	entry.mu.Unlock()
-	stream.detached = true
-	if stream.stall != nil {
-		stream.stall.Stop()
-		stream.stall = nil
-	}
-	if stream.progress != nil {
-		stream.progress.Stop()
-		stream.progress = nil
-	}
 	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedRunningTTL)
 	entry.mu.Lock()
 	entry.drainCancel = drainCancel
@@ -2286,48 +2322,70 @@ func (stream *responseStream) detach(ctx context.Context) {
 	}
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached", detail)
 	stream.recorder.NoteDetachedEvent("detached", detail)
-	go func() {
-		defer drainCancel()
-		// 退场必收尸：TTL/淘汰走的 ctx.Done 分支不杀泵（detached 态
-		// 直接退场），不补这一刀泵协程会随 streamBase 永久阻塞在
-		// Receive 上。kill 在 mu 下拿当前 cancel，换流后也不会杀错。
-		defer stream.kill()
-		for {
-			_, err := stream.Recv(drainCtx)
-			// 缓冲越预算截断时同步停泵：重放价值归零，继续 drain 是
-			// 纯配额浪费——末帧已是截断错误，finish 收成不可重放的
-			// failed。isTruncated 走 entry.mu，与 append 同一临界区。
-			if err == nil && !entry.isTruncated() {
-				continue
-			}
-			if err != nil && !errors.Is(err, io.EOF) {
-				if entry.append(llm.ResponseEvent{
-					Type: llm.ResponseEventError,
-					Error: &llm.AssistantMessage{
-						ErrorMessage: "detached pump stopped: " + err.Error(),
-						Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
-					},
-				}) {
-					// 终局错误的追加自身越预算：同一冻结点记账口径。
-					stream.registry.noteTruncated(stream.detachKey, entry)
-				}
-			}
-			// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
-			// drainCancel 是 registry 淘汰掐泵，EOF 的 completed/failed
-			// 由 finish 尾帧定态，其余错误归 failed。
-			reason := detachFinishFailed
-			switch state := entry.finish(); {
-			case errors.Is(err, context.DeadlineExceeded):
-				reason = detachFinishExpired
-			case errors.Is(err, context.Canceled):
-				reason = detachFinishKilled
-			case errors.Is(err, io.EOF) && state == detachedCompleted:
-				reason = detachFinishCompleted
-			}
-			stream.registry.noteFinish(stream.detachKey, reason, entry)
-			return
+	go stream.pumpDetached(drainCtx, drainCancel, entry)
+}
+
+// detach 把流从客户端生命周期解耦（持 mu 路径）：停掉两个看门狗计时器
+// 后经 admitDetached 登记——占位哨兵先 CAS 时本调用只剩停表与兑入已
+// 认领的 detached 标记。调用方须持 stream.mu（消费方 Recv 与哨兵慢路
+// 都满足）；由此串行保证同一时刻只有一个 Recv 在场，后台泵的第一轮
+// Recv 会等持锁方退场。
+func (stream *responseStream) detach(ctx context.Context) {
+	if stream.stall != nil {
+		stream.stall.Stop()
+		stream.stall = nil
+	}
+	if stream.progress != nil {
+		stream.progress.Stop()
+		stream.progress = nil
+	}
+	stream.admitDetached(ctx)
+}
+
+// pumpDetached 是脱钩后的后台泵：续消费直到终态——缓冲经 tee 持续追加，
+// 挂接方按序追帧。泵的存活上界是 running TTL：到期/被容量淘汰掐
+// drainCtx 退场时补一条终局错误——截断前缀若误标 completed 会把半成品
+// 当完整响应重放给同键重试。退场必收尸：TTL/淘汰走的 ctx.Done 分支不
+// 杀泵（detached 态直接退场），不补这一刀泵协程会随 streamBase 永久
+// 阻塞在 Receive 上；kill 在 mu 下拿当前 cancel，换流后也不会杀错。
+func (stream *responseStream) pumpDetached(drainCtx context.Context, drainCancel context.CancelFunc, entry *detachedEntry) {
+	defer drainCancel()
+	defer stream.kill()
+	for {
+		_, err := stream.Recv(drainCtx)
+		// 缓冲越预算截断时同步停泵：重放价值归零，继续 drain 是
+		// 纯配额浪费——末帧已是截断错误，finish 收成不可重放的
+		// failed。isTruncated 走 entry.mu，与 append 同一临界区。
+		if err == nil && !entry.isTruncated() {
+			continue
 		}
-	}()
+		if err != nil && !errors.Is(err, io.EOF) {
+			if entry.append(llm.ResponseEvent{
+				Type: llm.ResponseEventError,
+				Error: &llm.AssistantMessage{
+					ErrorMessage: "detached pump stopped: " + err.Error(),
+					Failure:      &llm.Failure{Code: "internal", UpstreamFault: true},
+				},
+			}) {
+				// 终局错误的追加自身越预算：同一冻结点记账口径。
+				stream.registry.noteTruncated(stream.detachKey, entry)
+			}
+		}
+		// 泵终局按原因记四档：drainCtx 超时是 running TTL 到期，
+		// drainCancel 是 registry 淘汰掐泵，EOF 的 completed/failed
+		// 由 finish 尾帧定态，其余错误归 failed。
+		reason := detachFinishFailed
+		switch state := entry.finish(); {
+		case errors.Is(err, context.DeadlineExceeded):
+			reason = detachFinishExpired
+		case errors.Is(err, context.Canceled):
+			reason = detachFinishKilled
+		case errors.Is(err, io.EOF) && state == detachedCompleted:
+			reason = detachFinishCompleted
+		}
+		stream.registry.noteFinish(stream.detachKey, reason, entry)
+		return
+	}
 }
 
 // kill 中止上游泵：持 mu 拿当前 cancel 值再调——swap/tryResume 换流时
@@ -2345,7 +2403,7 @@ func (stream *responseStream) kill() {
 // continueEmpty 为空 end_turn 续传：流正常结束但零内容时重发并
 // 追加 "continue" 用户消息（空轮是上游实测退化形态，CPA#4886 同构）。
 func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
-	if stream.retried || stream.producedEvents || stream.reopen == nil {
+	if stream.retried || stream.producedEvents.Load() || stream.reopen == nil {
 		return false
 	}
 	if cause == nil && !continueEmpty {
@@ -2379,7 +2437,7 @@ func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.C
 	stream.decoder = decoder
 	stream.started = false
 	stream.pendingStart = nil
-	stream.finished = false
+	stream.finished.Store(false)
 	stream.queue = nil
 	// 新流的首个非错误帧重新获得解闩资格——上一流的确认不能
 	// 替代这次重试是否真的打穿了限流。
@@ -2409,7 +2467,7 @@ var maxStreamResumes = 2
 // stopReason 或被本地停止序列截断的流（语义内容已齐，续传会在
 // 停止标记之后再长出一块内容）。
 func (stream *responseStream) tryResume(cause error) bool {
-	if stream.extend == nil || !stream.producedEvents || stream.decoder.hasStopReason ||
+	if stream.extend == nil || !stream.producedEvents.Load() || stream.decoder.hasStopReason ||
 		stream.decoder.stoppedByPattern || stream.resumeAttempts >= maxStreamResumes ||
 		len(stream.decoder.tools) > 0 {
 		return false
@@ -2464,7 +2522,7 @@ func (stream *responseStream) tryResume(cause error) bool {
 	stream.cancel = cancel
 	stream.decoder = decoder
 	stream.started = false
-	stream.finished = false
+	stream.finished.Store(false)
 	stream.upstreamConfirmed = false
 	if stream.progress != nil {
 		stream.progress.Reset(stream.progressDeadline())
@@ -2512,7 +2570,7 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	// 「为什么没续」（典型：在飞工具调用）不必靠反推 retries=0。
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_declined", map[string]any{
 		"retried":            stream.retried,
-		"produced_events":    stream.producedEvents,
+		"produced_events":    stream.producedEvents.Load(),
 		"tools_in_flight":    len(stream.decoder.tools),
 		"has_stop_reason":    stream.decoder.hasStopReason,
 		"stopped_by_pattern": stream.decoder.stoppedByPattern,
@@ -2532,7 +2590,7 @@ func (stream *responseStream) drainFrames() {
 				return
 			}
 			// 与 Recv 主路径同闸：脱钩流的临死帧同样不追写盘上。
-			if !stream.detached {
+			if !stream.detached.Load() {
 				recordProtoJSON(stream.recorder, debuglog.StageDevinResponse, frame.response)
 			}
 			stream.decoder.noteSchemaDrift(frame.response)

@@ -226,16 +226,10 @@ func TestDetachedWatcherPathCoversAbandonedConsumer(t *testing.T) {
 		return e.Type == llm.ResponseEventTextDelta
 	})
 	cancel()
-	// 哨兵判定块与 Adapter.Stream 内同源：持 mu 就地脱钩或杀泵。
-	stream.mu.Lock()
-	if !stream.detached {
-		if stream.detachable() {
-			stream.detach(ctx)
-		} else {
-			stream.cancel()
-		}
-	}
-	stream.mu.Unlock()
+	// 真实哨兵路径：ctx 已取消，watchClientCtx 同步走完全部判定——
+	// 本例由 admitIntent 锁外占位登记（upstream 还在 pause 中，finished
+	// 未置位），不再走持 mu 慢路。
+	stream.watchClientCtx(ctx)
 	entry := registry.lookup("k3")
 	if entry == nil {
 		t.Fatal("sentinel path did not register the detached stream")
@@ -274,19 +268,75 @@ func TestFinishedStreamNotDetachable(t *testing.T) {
 		}
 	}
 	cancel()
-	// 哨兵判定块与 Adapter.Stream 内同源：finished 流不得脱钩。
-	stream.mu.Lock()
-	if !stream.detached {
-		if stream.detachable() {
-			stream.detach(ctx)
-		} else {
-			stream.cancel()
-		}
-	}
-	stream.mu.Unlock()
+	// 真实哨兵路径：finished 置位后 admitIntent 直接拒占位，慢路
+	// detachable() 同拒——不得登记进缓存。
+	stream.watchClientCtx(ctx)
 	if entry := registry.lookup("k5"); entry != nil {
 		t.Fatal("finished stream must not be admitted to the detached cache")
 	}
+}
+
+// TestDetachedAdmitIntentDuringBlockedSegment 钉住断连落在持 mu 阻塞段
+// 内的占位登记：消费方卡在 tryResume→extend 拨号里时哨兵经 admitIntent
+// 锁外判定、admitDetached CAS 认领直接落册——不等段末 mu 释放（生产实测
+// 该段可达 ~95s，段内条目对同键 lookup/淘汰/统计全隐形），且段末
+// finished=true 也照样存活（旧路径此刻 detachable() 已假，登记整段丢失）。
+func TestDetachedAdmitIntentDuringBlockedSegment(t *testing.T) {
+	registry := newDetachedRegistry(nil, "")
+	receiver := &pauseReceiver{pauseAt: 99, release: make(chan struct{}), frames: []*devinproto.GetChatMessageResponse{
+		{DeltaText: proto.String("hi")},
+	}}
+	stream := detachedTestStream(registry, "k9", receiver)
+	// extend 桩把消费方 Recv 钉在持 mu 的续传拨号段里：entered 与 release
+	// 构成段边界，占位登记必须在这个窗口内完成。
+	extendEntered := make(chan struct{})
+	extendRelease := make(chan struct{})
+	stream.extend = func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error) {
+		close(extendEntered)
+		<-extendRelease
+		return nil, nil, nil, errors.New("upstream still blacked out")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	// 先消费出 TextDelta 让 producedEvents 置位，再驱动 Recv：上游 EOF
+	// 无 stopReason → tryResume → 消费方卡进 extend 桩持 mu 不放。
+	drainUntil(t, stream, ctx, func(e llm.ResponseEvent) bool {
+		return e.Type == llm.ResponseEventTextDelta
+	})
+	consumerDone := make(chan struct{})
+	go func() {
+		defer close(consumerDone)
+		for {
+			if _, err := stream.Recv(ctx); err != nil {
+				return
+			}
+		}
+	}()
+	<-extendEntered
+	cancel()
+	go stream.watchClientCtx(ctx)
+	// 段未释放、mu 仍在消费方手里：占位登记若依赖 mu 这里必然超时——
+	// 命中即证明锁外快路把 admit 延迟从段剩余时长压到哨兵调度延迟。
+	var entry *detachedEntry
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry = registry.lookup("k9"); entry != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if entry == nil {
+		t.Fatal("admit-intent must register while the consumer still holds mu in a blocking segment")
+	}
+	select {
+	case <-consumerDone:
+		t.Fatal("consumer exited while extend stub was still blocking")
+	default:
+	}
+	close(extendRelease)
+	<-consumerDone
+	// 段末 finished=true 不再让登记流产：后台泵排空尾帧收成终态——
+	// EOF 无 stopReason 的截断收尾由 finish 产错误尾帧，定态 failed。
+	waitEntryState(t, entry, detachedFailed)
 }
 
 // TestAbortedStreamNotDetachable 钉住主动中断不登记：面板 abort/排空
@@ -315,9 +365,10 @@ func TestAbortedStreamNotDetachable(t *testing.T) {
 	if _, err := stream.Recv(ctx); err == nil {
 		t.Fatal("Recv after abort should return the cancel cause")
 	}
-	if stream.detached {
-		t.Fatal("aborted stream must not detach")
-	}
+	// 真实哨兵路径补验：admitIntent 的 WasAborted 闸与慢路同拒——
+	// detached 位此刻可能已被 ctx 分支的杀泵 CAS 认领（置位只表
+	// 「生命周期已处置」），不登记的判据只能看缓存侧。
+	stream.watchClientCtx(ctx)
 	if got := registry.lookup("k7"); got != nil {
 		t.Fatal("aborted stream must not be admitted to the cache")
 	}
@@ -682,12 +733,13 @@ func TestProgressDeadlineTiers(t *testing.T) {
 	if got := stream.progressDeadline(); got != upstreamNoProgressTimeout {
 		t.Fatalf("pre-content deadline = %v, want %v", got, upstreamNoProgressTimeout)
 	}
-	stream.producedEvents = true
+	stream.producedEvents.Store(true)
 	if got := stream.progressDeadline(); got != 90*time.Millisecond {
 		t.Fatalf("post-content deadline = %v, want 90ms", got)
 	}
 	// 裸流（postProgressTimeout 零值）回落 pre 档——测试构造语义不变。
-	bare := &responseStream{producedEvents: true}
+	bare := &responseStream{}
+	bare.producedEvents.Store(true)
 	if got := bare.progressDeadline(); got != upstreamNoProgressTimeout {
 		t.Fatalf("bare stream deadline = %v, want %v", got, upstreamNoProgressTimeout)
 	}
