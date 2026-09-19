@@ -463,6 +463,32 @@ func TestFlushPendingWindowsWaitsInflight(t *testing.T) {
 	}
 }
 
+// stats 透出重放缓冲当前深度：persist_failures/persist_dropped 是累计账，
+// pending_windows 回答「此刻还欠几行」——缓冲挂账与冲刷清空两侧都要
+// 反映在快照里。
+func TestRateGateStatsPendingWindows(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "gate.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	gate := newRateGate(GateConfig{MaxRPM: 10}, db, store.GateStateKey("default"))
+	base := time.Now().Truncate(time.Minute).Unix()
+	gate.mu.Lock()
+	gate.pendingWindows = []*store.GateWindow{
+		{Lane: "default", WindowStart: base - 120, Quota: 10},
+		{Lane: "default", WindowStart: base - 60, Quota: 10},
+	}
+	gate.mu.Unlock()
+	if got := gate.stats().PendingWindows; got != 2 {
+		t.Fatalf("PendingWindows = %d, want 2", got)
+	}
+	gate.FlushPendingWindows(context.Background())
+	if got := gate.stats().PendingWindows; got != 0 {
+		t.Fatalf("PendingWindows after flush = %d, want 0", got)
+	}
+}
+
 // 续试重发的放行单列进 retry_admits 窗口账：挂 WithGateRetry 的放行
 // 计入 retry_admits，首发不挂不计——两者都照常占 used 配额（used
 // 与 retry_admits 是总数与子集的关系，不是分列口径）。

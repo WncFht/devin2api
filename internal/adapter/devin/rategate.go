@@ -392,6 +392,10 @@ type GateStats struct {
 	// 写争用期丢行完全不可见。
 	PersistFailures int `json:"persist_failures"`
 	PersistDropped  int `json:"persist_dropped"`
+	// PendingWindows 是重放缓冲当前深度——persist_failures/persist_dropped
+	// 是累计账，本字段回答「此刻还有几行欠着没落库」（quota 组的
+	// pending_samples 同口径）。
+	PendingWindows int `json:"pending_windows"`
 	// Wait 是最近 gateWaitCap 次 wait 评估的分类聚合：实测等待分位
 	// 与 est−realized 误差分位是 expectedWait 估计器的校准面；环
 	// 覆盖全结局（含拒绝与取消），补上 transform 段看不见的尾部。
@@ -801,6 +805,7 @@ func (gate *rateGate) stats() GateStats {
 		LastWindow:       gate.lastWindow,
 		PersistFailures:  gate.persistFailures,
 		PersistDropped:   gate.persistDropped,
+		PendingWindows:   len(gate.pendingWindows),
 	}
 	if gate.quota > 0 {
 		open := ws
