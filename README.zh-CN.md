@@ -4,6 +4,10 @@
   <img src="docs/images/logo.png" alt="devin-2api logo" width="128">
 </p>
 
+<p align="center">
+  <a href="https://wncfht.github.io/devin2api/cn/"><img src="https://img.shields.io/badge/%F0%9F%93%96%20%E4%BD%BF%E7%94%A8%E6%96%87%E6%A1%A3-blue" alt="使用文档"></a>
+</p>
+
 > [English](README.md) | **中文**
 
 devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.ai](https://app.devin.ai/)）可用的模型包装在 OpenAI / Anthropic 兼容接口后面——让标准客户端（Codex、Claude Code、任意 SDK）通过熟悉的 API 调用它们。
