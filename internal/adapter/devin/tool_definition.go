@@ -50,10 +50,69 @@ const (
 // 不受 compact 截断影响）。
 type toolSectionEntry struct{ name, description, paramsDigest string }
 
+// toolSectionCache 按工具集内容哈希（hashTools，与 warm 谱系/会话种子
+// 同键）缓存渲染完成的注入段：同一客户端的工具集逐请求原样重发，每
+// 工具一遍 extractParamDigest 的 schema 重解析是纯重复劳动（CC 28 工具
+// ~1ms/req）。name/description/schema 任何漂移都换键，旧条目自然不再
+// 命中；封顶整体清空防无界。
+var toolSectionCache = struct {
+	sync.Mutex
+	items map[string]cachedToolSection
+}{items: make(map[string]cachedToolSection)}
+
+// cachedToolSection 是缓存条目：section 是渲染结果（空串=无注入内容）；
+// oversized 标记 skinny 仍过硬顶的病态输入，oversizedLen 记录当时的
+// 渲染长度供重建错误消息。
+type cachedToolSection struct {
+	section      string
+	oversized    bool
+	oversizedLen int
+}
+
 // withToolDescriptions 把非空工具说明追加到 Devin system prompt，供模型理解
-// 原生工具用途。full 档超软顶先降 compact（prose 逐条截断）、再降 skinny
-// （纯名清单）；skinny 仍过硬顶返回错误。
+// 原生工具用途。注入段只依赖 tools（systemPrompt 是尾部拼接，不参与段内
+// 决策），整条段按工具集内容哈希进 toolSectionCache——无 SessionKey 的
+// 请求在 sessionSeed 里已付过一遍 hashTools，这里复算仍远低于重解析。
+// full 档超软顶先降 compact（prose 逐条截断）、再降 skinny（纯名清单）；
+// skinny 仍过硬顶返回错误。
 func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (string, error) {
+	if len(tools) == 0 {
+		return systemPrompt, nil
+	}
+	key := hashTools(tools)
+	toolSectionCache.Lock()
+	cached, hit := toolSectionCache.items[key]
+	toolSectionCache.Unlock()
+	if !hit {
+		cached = buildToolSection(tools)
+		toolSectionCache.Lock()
+		if len(toolSectionCache.items) >= 64 {
+			clear(toolSectionCache.items)
+		}
+		toolSectionCache.items[key] = cached
+		toolSectionCache.Unlock()
+	}
+	if cached.oversized {
+		// Failure 每次重建不缓存指针：下游会给 event.Error 写本请求的
+		// DebugRef（app/stream.go），共享指针会让调试目录名跨请求串味。
+		return "", &llm.Failure{
+			Code: "invalid_argument",
+			Message: fmt.Sprintf("tool_preamble_too_large: tool list needs %d bytes even as a bare name list (limit %d); reduce the number of tools",
+				cached.oversizedLen, toolPreambleHardBytes),
+		}
+	}
+	if cached.section == "" {
+		return systemPrompt, nil
+	}
+	trimmedPrompt := strings.TrimRight(systemPrompt, "\r\n")
+	if strings.TrimSpace(trimmedPrompt) == "" {
+		return cached.section, nil
+	}
+	return trimmedPrompt + "\n\n" + cached.section, nil
+}
+
+// buildToolSection 渲染注入段并套用预算降级阶梯；返回条目供缓存。
+func buildToolSection(tools []llm.ToolDefinition) cachedToolSection {
 	var entries []toolSectionEntry
 	for _, tool := range tools {
 		description := strings.TrimSpace(tool.Description)
@@ -64,7 +123,7 @@ func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (stri
 		entries = append(entries, toolSectionEntry{tool.Name, formatToolDescription(description), digest})
 	}
 	if len(entries) == 0 {
-		return systemPrompt, nil
+		return cachedToolSection{}
 	}
 	section := renderToolSection(entries, 0)
 	if len(section) > toolPreambleSoftBytes {
@@ -75,17 +134,9 @@ func withToolDescriptions(systemPrompt string, tools []llm.ToolDefinition) (stri
 		}
 	}
 	if len(section) > toolPreambleHardBytes {
-		return "", &llm.Failure{
-			Code: "invalid_argument",
-			Message: fmt.Sprintf("tool_preamble_too_large: tool list needs %d bytes even as a bare name list (limit %d); reduce the number of tools",
-				len(section), toolPreambleHardBytes),
-		}
+		return cachedToolSection{oversized: true, oversizedLen: len(section)}
 	}
-	trimmedPrompt := strings.TrimRight(systemPrompt, "\r\n")
-	if strings.TrimSpace(trimmedPrompt) == "" {
-		return section, nil
-	}
-	return trimmedPrompt + "\n\n" + section, nil
+	return cachedToolSection{section: section}
 }
 
 // renderToolSection 按档渲染注入段：truncate 为 0 是 full（说明全文 +
