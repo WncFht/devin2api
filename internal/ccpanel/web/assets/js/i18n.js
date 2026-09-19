@@ -160,47 +160,47 @@
   }
 
   /**
-   * 翻译页面中所有带 data-i18n 属性的元素
+   * 翻译 root 范围内所有带 data-i18n 属性的元素（缺省整文档）
    */
-  function translatePage() {
+  function translatePage(root = document) {
     // data-i18n: 替换 textContent
-    document.querySelectorAll('[data-i18n]').forEach(el => {
+    root.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.getAttribute('data-i18n');
       if (key) el.textContent = t(key);
     });
 
     // data-i18n-placeholder: 替换 placeholder
-    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    root.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
       const key = el.getAttribute('data-i18n-placeholder');
       if (key) el.placeholder = t(key);
     });
 
     // data-i18n-title: 替换 title
-    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    root.querySelectorAll('[data-i18n-title]').forEach(el => {
       const key = el.getAttribute('data-i18n-title');
       if (key) el.title = t(key);
     });
 
     // data-i18n-value: 替换 value (用于 option 等)
-    document.querySelectorAll('[data-i18n-value]').forEach(el => {
+    root.querySelectorAll('[data-i18n-value]').forEach(el => {
       const key = el.getAttribute('data-i18n-value');
       if (key) el.value = t(key);
     });
 
     // data-i18n-content: 替换 meta content
-    document.querySelectorAll('[data-i18n-content]').forEach(el => {
+    root.querySelectorAll('[data-i18n-content]').forEach(el => {
       const key = el.getAttribute('data-i18n-content');
       if (key) el.setAttribute('content', t(key));
     });
 
     // data-i18n-alt: 替换 image alt
-    document.querySelectorAll('[data-i18n-alt]').forEach(el => {
+    root.querySelectorAll('[data-i18n-alt]').forEach(el => {
       const key = el.getAttribute('data-i18n-alt');
       if (key) el.setAttribute('alt', t(key));
     });
 
     // data-i18n-aria-label: 替换 aria-label
-    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+    root.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
       const key = el.getAttribute('data-i18n-aria-label');
       if (key) el.setAttribute('aria-label', t(key));
     });
