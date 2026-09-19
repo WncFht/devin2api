@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/WncFht/devin2api/internal/adapter/devin"
 	"github.com/WncFht/devin2api/internal/ccpanel"
@@ -485,6 +486,32 @@ func TestAccountOpsCredentialsContent(t *testing.T) {
 	}
 	if _, err := ops.CredentialOf(ccpanel.AccountWrite{}); err == nil {
 		t.Fatal("CredentialOf(empty) should fail")
+	}
+}
+
+// TestCommitCachedConfigView 钉住兜底服役的自省透出：文件缺席时 mtime
+// 比对退化成 stale=false，servedFromCache 标记必须强制 stale 并给
+// served_from/cached_at——「生效配置 ≠ 当前文件」是 stale 的本义。
+func TestCommitCachedConfigView(t *testing.T) {
+	dir := t.TempDir()
+	configPath, cfg := writeTestConfig(t, dir, testAccountsYAML)
+	rt := New(configPath, dir, testAccountStore(t, dir), testPool(t))
+	cachedAt := time.Date(2026, 9, 19, 1, 2, 3, 0, time.UTC)
+	rt.CommitCachedConfig(cfg, cachedAt)
+
+	// 文件随后消失：兜底服役的现实形态。
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	view := rt.View()
+	if stale, _ := view["stale"].(bool); !stale {
+		t.Fatalf("stale = %v, want true under cached serving", view["stale"])
+	}
+	if got := view["served_from"]; got != "last_good_cache" {
+		t.Fatalf("served_from = %v, want last_good_cache", got)
+	}
+	if got := view["cached_at"]; got != cachedAt.Format(time.RFC3339) {
+		t.Fatalf("cached_at = %v, want %v", got, cachedAt.Format(time.RFC3339))
 	}
 }
 

@@ -99,6 +99,10 @@ type App struct {
 	// draining 置位后并发槽获取点转为快速 503：进程即将退出，
 	// 下游网关应立即换路重试，而不是把请求塞进一个要退出的实例。
 	draining atomic.Bool
+	// servingLastGoodConfig 置位表示本次生效配置来自 last-good 缓存
+	// （boot 文件加载失败兜底）：healthz 透出 config_last_good=true，
+	// 外部探活能区分「健康服役」与「带陈化配置兜底服役」。
+	servingLastGoodConfig atomic.Bool
 	// inflight 跟踪占用并发槽的请求与 WS 轮次，供优雅退出等待排空。
 	// 不用 sync.WaitGroup：排空期 listener 保持开启，新请求仍会 Add——
 	// counter 归零与 waiter 唤醒之间存在调度窗口，窗口内 Add(1) 触发
@@ -133,6 +137,12 @@ func normalizeMaxConcurrency(limit int) int {
 // 数以下时新 acquire 全拒直到自然排空——正是目标语义，无存量迁移问题。
 func (application *App) SetMaxConcurrency(limit int) {
 	application.concurrencyLimit.Store(int64(normalizeMaxConcurrency(limit)))
+}
+
+// SetServingLastGoodConfig 标记本次生效配置来自 last-good 缓存（boot
+// 文件加载失败兜底）——healthz 据此透出降级服役信号。
+func (application *App) SetServingLastGoodConfig() {
+	application.servingLastGoodConfig.Store(true)
 }
 
 // MaxConcurrency 返回当前生效的并发上限（归一后的值）。
@@ -238,6 +248,10 @@ func (application *App) health(writer http.ResponseWriter, _ *http.Request) {
 		// 能挑空闲窗口 kickstart，排空期 503 少砸到真实请求。
 		"draining":        application.draining.Load(),
 		"active_requests": application.metrics.Active(),
+		// config_last_good=true 表示生效配置来自兜底缓存而非当前文件：
+		// 服务降级但可用，外部探活应告警而不是摘除——摘除等于把可服役
+		// 实例误判成宕机。
+		"config_last_good": application.servingLastGoodConfig.Load(),
 		// pid 让部署脚本区分「应答的是交接进程还是托管新实例」——
 		// 交接期间 version 两边相同，只有 pid 能确认切换终态。
 		"pid": os.Getpid(),

@@ -53,6 +53,11 @@ type configState struct {
 	cfg       config.Config
 	loadedAt  time.Time
 	fileMtime time.Time
+	// servedFromCache 非零表示本次服役来自 last-good 缓存（boot 文件
+	// 加载失败兜底）：值是缓存写入时刻。文件缺席时 mtime 比对退化成
+	// stale=false，View 须据本字段强制透出——「生效配置 ≠ 当前文件」
+	// 正是 stale 语义的本义。
+	servedFromCache time.Time
 }
 
 // New 组装账号域持有点。db 允许为 nil（纯 config 视图的离线用法），
@@ -70,6 +75,10 @@ func (rt *Runtime) Unlock() { rt.mu.Unlock() }
 // ConfigPath 返回声明集所在文件路径——reload 重读共用。
 func (rt *Runtime) ConfigPath() string { return rt.configPath }
 
+// StateDir 返回运行时状态根目录——last-good 配置缓存与 credentials_content
+// 落盘根共用。
+func (rt *Runtime) StateDir() string { return rt.stateDir }
+
 // Pool 返回 lane 热应用目标（reload 名集比对等只读用法）。
 func (rt *Runtime) Pool() *devin.Pool { return rt.pool }
 
@@ -85,6 +94,12 @@ func (rt *Runtime) Config() config.Config {
 // 共用）：fileMtime 现取，stale 判定据此成立。
 func (rt *Runtime) CommitConfig(cfg config.Config) {
 	rt.state.Store(&configState{cfg: cfg, loadedAt: time.Now(), fileMtime: fileMtime(rt.configPath)})
+}
+
+// CommitCachedConfig 与 CommitConfig 同义，但标记生效配置来自 last-good
+// 缓存而非当前文件——boot 文件加载失败的兜底提交走这里。
+func (rt *Runtime) CommitCachedConfig(cfg config.Config, cachedAt time.Time) {
+	rt.state.Store(&configState{cfg: cfg, loadedAt: time.Now(), fileMtime: fileMtime(rt.configPath), servedFromCache: cachedAt})
 }
 
 // StoreReport 记录最近一次 reload 报告，View 透出。
@@ -176,7 +191,11 @@ func (rt *Runtime) View() map[string]any {
 	view["config"] = fields
 	view["loaded_at"] = cur.loadedAt.Format(time.RFC3339)
 	view["file_mtime"] = cur.fileMtime.Format(time.RFC3339)
-	view["stale"] = fileMtime(rt.configPath).After(cur.fileMtime)
+	view["stale"] = !cur.servedFromCache.IsZero() || fileMtime(rt.configPath).After(cur.fileMtime)
+	if !cur.servedFromCache.IsZero() {
+		view["served_from"] = "last_good_cache"
+		view["cached_at"] = cur.servedFromCache.Format(time.RFC3339)
+	}
 	if report := rt.lastReload.Load(); report != nil {
 		view["last_reload"] = report
 	}

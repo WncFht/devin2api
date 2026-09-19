@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -351,6 +352,142 @@ dashboard:
 					lf.path, report.Applied, report.RequiresRestart)
 			}
 		})
+	}
+}
+
+// TestLoadBootConfigWritesCache 钉住成功加载路径：文件值服役
+// （lastGood 为空）且 last-good 缓存落盘——它是后续崩溃重启的兜底本钱。
+func TestLoadBootConfigWritesCache(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("server:\n  listen: ':3033'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n  accounts:\n    - {name: a, token: 't'}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, lastGood, err := loadBootConfig(configPath, dir, filepath.Join(dir, "logs"))
+	if err != nil {
+		t.Fatalf("loadBootConfig: %v", err)
+	}
+	if lastGood != nil {
+		t.Fatalf("lastGood = %+v, want nil (file config served)", lastGood)
+	}
+	if cfg.Server.Listen != ":3033" {
+		t.Fatalf("Listen = %q", cfg.Server.Listen)
+	}
+	if _, err := config.ReadLastGood(dir); err != nil {
+		t.Fatalf("cache not written: %v", err)
+	}
+}
+
+// TestLoadBootConfigMissingNoCache 钉住兜底缺席语义：文件加载失败且
+// 状态目录无缓存——错误照旧上交，首装机器不会出现「凭空服役」。
+func TestLoadBootConfigMissingNoCache(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := loadBootConfig(filepath.Join(dir, "gone.yaml"), dir, filepath.Join(dir, "logs")); err == nil {
+		t.Fatal("loadBootConfig() error = nil, want load failure")
+	}
+}
+
+// TestLoadBootConfigServesLastGood 复刻 09-18 事故形态并钉住兜底契约：
+// credentials_file 账号的配置成功加载并写缓存 → credentials.toml 与
+// config.yaml 双双消失 → boot 加载失败转服役缓存投影（token 已物化、
+// credentials_file 已摘除，Apply 的重校验不会在同一处再死）→
+// config-fallback.json 标记落盘。
+func TestLoadBootConfigServesLastGood(t *testing.T) {
+	dir := t.TempDir()
+	logRoot := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	credsPath := filepath.Join(dir, "credentials.toml")
+	if err := os.WriteFile(credsPath, []byte("windsurf_api_key = \"tok-file\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath,
+		[]byte("server:\n  listen: ':3033'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n  accounts:\n    - {name: a, credentials_file: 'credentials.toml'}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadBootConfig(configPath, dir, logRoot); err != nil {
+		t.Fatalf("prime loadBootConfig: %v", err)
+	}
+	// 事故：引用凭据文件与配置本体同时消失。
+	for _, p := range []string{credsPath, configPath} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg, lastGood, err := loadBootConfig(configPath, dir, logRoot)
+	if err != nil {
+		t.Fatalf("fallback loadBootConfig: %v", err)
+	}
+	if lastGood == nil {
+		t.Fatal("lastGood = nil, want cached config served")
+	}
+	if cfg.Server.Listen != ":3033" || cfg.Devin.Model != "m" {
+		t.Fatalf("cached cfg = listen %q model %q", cfg.Server.Listen, cfg.Devin.Model)
+	}
+	acc := cfg.Devin.Accounts[0]
+	if acc.Token != "tok-file" || acc.CredentialsFile != "" {
+		t.Fatalf("cached account = {token:%q file:%q}, want {token:tok-file file:\"\"}", acc.Token, acc.CredentialsFile)
+	}
+	// 兜底投影必须过 Apply 的整表重校验——这是事故链上真正的死因。
+	if _, err := config.ResolveAccounts(cfg.Devin.Accounts, dir); err != nil {
+		t.Fatalf("cached accounts fail Apply-time re-validation: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(logRoot, "config-fallback.json"))
+	if err != nil {
+		t.Fatalf("fallback marker missing: %v", err)
+	}
+	var marker configFallbackMarker
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker.Count != 1 || marker.Reason == "" || marker.CachedAt == "" {
+		t.Fatalf("marker = %+v, want count=1 with reason/cached_at", marker)
+	}
+}
+
+// TestLoadBootConfigRecoveredMarksEpisode 钉住恢复告警记账：兜底期后
+// 第一次成功加载要把 marker 的 recovered_at 钉上——事故复盘靠它划界。
+func TestLoadBootConfigRecoveredMarksEpisode(t *testing.T) {
+	dir := t.TempDir()
+	logRoot := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	good := []byte("server:\n  listen: ':3033'\ndevin:\n  base_url: 'https://example.com'\n  model: 'm'\n")
+	if err := os.WriteFile(configPath, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadBootConfig(configPath, dir, logRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("{{{bad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, lastGood, err := loadBootConfig(configPath, dir, logRoot); err != nil || lastGood == nil {
+		t.Fatalf("fallback: cfg err=%v lastGood=%v", err, lastGood)
+	}
+	if err := os.WriteFile(configPath, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, lastGood, err := loadBootConfig(configPath, dir, logRoot); err != nil || lastGood != nil {
+		t.Fatalf("recovered load: err=%v lastGood=%v", err, lastGood)
+	}
+	raw, err := os.ReadFile(filepath.Join(logRoot, "config-fallback.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marker configFallbackMarker
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker.RecoveredAt == "" {
+		t.Fatalf("RecoveredAt empty, marker = %+v", marker)
 	}
 }
 
