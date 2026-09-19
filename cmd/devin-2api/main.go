@@ -296,8 +296,8 @@ func main() {
 	application.SetVersion(resolved)
 	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
-	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
-	// input 价，与 ccpanel cellCost 同口径）。
+	// 请求的 token 用量折成美元供费用限额窗口记账（公式即
+	// ccpanel.TokenCost，与面板聚合同一份实现）。
 	tokenStore, err := authtoken.New(dbStore)
 	if err != nil {
 		slog.Error("load auth tokens failed", "error", err)
@@ -411,11 +411,7 @@ func main() {
 		}
 	}
 	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
-		p, ok := ccPanel.CatalogPrices(context.Background())[model]
-		if !ok {
-			return 0
-		}
-		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
+		return ccpanel.TokenCost(input, output, cacheRead, cacheWrite, ccPanel.CatalogPrices(context.Background())[model])
 	})
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*accounts.ReloadReport, error) {

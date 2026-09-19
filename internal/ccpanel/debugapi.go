@@ -369,7 +369,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		if c, ok := catalog[m.Name]; ok {
 			// cache_write 实测按 input 价计费：配额翻转拟合的隐含单价 ≈ input 价，
 			// 并非 Anthropic 惯例的 1.25×；catalog 无独立 cache_write 价格维。
-			cost := (float64(m.InputTokens+m.CacheWrite)*c.input + float64(m.CacheRead)*c.cached + float64(m.OutputTokens)*c.output) / 1e6
+			cost := TokenCost(m.InputTokens, m.OutputTokens, m.CacheRead, m.CacheWrite, c.CatalogPrice)
 			row["est_cost"] = cost
 			totalCost += cost
 			if c.contextTokens > 0 && m.Requests > 0 {

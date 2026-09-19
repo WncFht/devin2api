@@ -316,22 +316,12 @@ func clampMetricBucket(bucketSec, spanSec int64) int64 {
 // token 覆盖用）；无目录价的模型贡献 0。
 // 与旧面板 usage 页同口径：cache_write 按 input 价计费（目录无独立价格维）。
 func cellCost(key store.LogCellKey, c store.LogCellTotals, prices map[string]CatalogPrice) float64 {
-	return tokenCost(key.Model, c.InTok, c.OutTok, c.CacheRead, c.CacheWrite, prices)
+	return TokenCost(c.InTok, c.OutTok, c.CacheRead, c.CacheWrite, prices[key.Model])
 }
 
 // cellCostNG 与 cellCost 同式，但取非 499 行的 token 口径（metrics/health 用）。
 func cellCostNG(key store.LogCellKey, c store.LogCellTotals, prices map[string]CatalogPrice) float64 {
-	return tokenCost(key.Model, c.InTokNG, c.OutTokNG, c.CacheReadNG, c.CacheWriteNG, prices)
-}
-
-// tokenCost 是目录价折算公式：prompt 侧 input+cache_write 按 input 价、
-// cache_read 按 cached 价、output 按 output 价，目录单位是 USD/百万 token。
-func tokenCost(model string, in, out, cacheRead, cacheWrite int64, prices map[string]CatalogPrice) float64 {
-	p, ok := prices[model]
-	if !ok {
-		return 0
-	}
-	return (float64(in+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(out)*p.Output) / 1e6
+	return TokenCost(c.InTokNG, c.OutTokNG, c.CacheReadNG, c.CacheWriteNG, prices[key.Model])
 }
 
 // dashboardModels 实现 /dashboard/models 与 /admin/models：

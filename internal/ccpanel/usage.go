@@ -8,11 +8,9 @@ import (
 )
 
 // modelCatalogEntry 是模型目录里用量/计价关心的部分：三类 token 单价
-// （$/1M）与上下文窗口上限。
+// （$/1M，内嵌 CatalogPrice）与上下文窗口上限。
 type modelCatalogEntry struct {
-	input         float64
-	cached        float64
-	output        float64
+	CatalogPrice
 	contextTokens int64
 }
 
@@ -23,12 +21,20 @@ type CatalogPrice struct {
 	Output float64
 }
 
+// TokenCost 是目录价折算公式：prompt 侧 input+cache_write 按 input 价、
+// cache_read 按 cached 价、output 按 output 价，目录单位是 USD/百万 token。
+// 无目录价的模型传零值 CatalogPrice 即得 0。面板聚合与 /v1 费用窗口
+// 记账共用同一份公式——口径只在这里定义一次。
+func TokenCost(in, out, cacheRead, cacheWrite int64, p CatalogPrice) float64 {
+	return (float64(in+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(out)*p.Output) / 1e6
+}
+
 // CatalogPrices 返回上游目录价目表（uid→单价）；目录不可用时返回空表。
 func (h *Handler) CatalogPrices(ctx context.Context) map[string]CatalogPrice {
 	catalog := h.modelCatalogMap(ctx)
 	out := make(map[string]CatalogPrice, len(catalog))
 	for uid, c := range catalog {
-		out[uid] = CatalogPrice{Input: c.input, Cached: c.cached, Output: c.output}
+		out[uid] = c.CatalogPrice
 	}
 	return out
 }
@@ -62,9 +68,11 @@ func (h *Handler) modelCatalogMap(ctx context.Context) map[string]modelCatalogEn
 			continue
 		}
 		out[uid] = modelCatalogEntry{
-			input:         floatAny(m["price_input"]),
-			cached:        floatAny(m["price_cached"]),
-			output:        floatAny(m["price_output"]),
+			CatalogPrice: CatalogPrice{
+				Input:  floatAny(m["price_input"]),
+				Cached: floatAny(m["price_cached"]),
+				Output: floatAny(m["price_output"]),
+			},
 			contextTokens: int64(floatAny(m["context_tokens"])),
 		}
 	}
