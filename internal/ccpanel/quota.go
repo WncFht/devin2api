@@ -372,7 +372,7 @@ const quotaPersistRetryCap = 4
 
 // quotaPersistBudget 是落库（含重放积压批）的独立预算，与上游拉取
 // 分账：历史上 fetch 与写共享 120s 单号预算，慢 fetch 把预算耗尽后
-// 写死于 context deadline exceeded（2026-09-19 02:02 randall 丢点
+// 写死于 context deadline exceeded（2026-09-19 02:02 bravo 丢点
 // 事故）。无竞争时单行 INSERT 毫秒级；15s 覆盖 quotaPersistRetryCap+1
 // 行重放批与常规写锁排队仍宽裕，更长也堵不住分钟级争用窗——那部分
 // 归挂账重放管。与 debuglog storeCtx/modelreg storeOpTimeout 同款

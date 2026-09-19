@@ -297,7 +297,7 @@ func (rt *Runtime) devinConfigs(cfg config.Config, synthesized []config.DevinAcc
 		lane.GateStateStore = rt.db
 		if account.CredentialsFile != "" {
 			// credentials_file 型账号：CLI 续期直接改写该文件，重读它
-			// 即跟随续期——fht-mba 的 B 号正是这个形态。
+			// 即跟随续期——旧 Mac 的 B 号正是这个形态。
 			credentialsFile := account.CredentialsFile
 			lane.Identity.TokenSource = func() string {
 				return config.TokenFromCredentialsFile(credentialsFile)

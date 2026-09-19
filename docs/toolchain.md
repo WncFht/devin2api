@@ -27,7 +27,7 @@
 | `python3 scripts/check-yaml-comments.py` | yaml 注释宽度（显示列）                                              | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                                                           |
 | `actionlint`（若装了）                   | workflow 语法                                                        | CI 不跑它，本地自查                                                                                                                                                                |
 
-前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`（git-format-staged 与 yaml 注释检查共用）。Linux 无 brew 时的等价装法（archbox 实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
+前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`（git-format-staged 与 yaml 注释检查共用）。Linux 无 brew 时的等价装法（本机实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
 
 写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（release/perf-snapshot/cacheprobe-verify/deploy-remote 全是这个写法，新脚本照抄）。
 
@@ -109,7 +109,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 | `drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                                                                           |
 | `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                                                                    |
 | `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/`                                                     |
-| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为 fht-mba 生产而写，生产已迁 archbox 本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具                                                              |
+| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为远端 Mac 生产而写，生产已迁本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具                                                                       |
 | `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可带 host 参数走 ssh                                                                                                                                                                   |
 | `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                                                                            |
 
@@ -128,7 +128,7 @@ scripts/release.sh                       # dry-run
 scripts/release.sh --publish             # VERSION 回写→等 CI 绿→打 tag
 bash scripts/release-selftest.sh         # 改 release.sh 后必跑
 
-# 部署与排障（生产 = archbox 本机 :3033）
+# 部署与排障（生产 = 本机 :3033）
 scripts/deploy-linux.sh [--release vX.Y.Z|--check]  # 生产部署唯一路径（零停机交接）
 scripts/deploy.sh [--release vX.Y.Z]     # macOS 本机升级（非生产拓扑）
 # scripts/deploy-remote.sh               # 2026-09-18 退役：运行即 exit 1，仅留档

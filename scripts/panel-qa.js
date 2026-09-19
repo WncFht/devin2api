@@ -25,10 +25,10 @@ function loadPlaywright() {
     process.env.PLAYWRIGHT_PATH,
     'playwright',
     'playwright-core',
-    // panel-verify 套件自带的 playwright（archbox 上 chromium-1243 已装）
+    // panel-verify 套件自带的 playwright
     path.join(__dirname, 'panel-verify', 'node_modules', 'playwright'),
-    // archbox 上 playwright 寄生在 taac2026-cli 的 node_modules 里
-    path.join(home, '.local/lib/node_modules/taac2026-cli/node_modules/playwright'),
+    // 用户级全局安装的 playwright
+    path.join(home, '.local/lib/node_modules', 'playwright'),
   ].filter(Boolean);
   for (const c of cands) {
     try { return require(c); } catch {}

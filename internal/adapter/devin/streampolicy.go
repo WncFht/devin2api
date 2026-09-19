@@ -36,7 +36,7 @@ var upstreamNoProgressTimeout = 10 * time.Minute
 var upstreamPreEventSilenceCap = 180 * time.Second
 
 // defaultPostProgressTimeout 是 post-content 无进度档的默认值：上游在
-// 工具调用参数阶段可静默计算 15-25min 只发心跳帧（实测 archbox 案例
+// 工具调用参数阶段可静默计算 15-25min 只发心跳帧（实测本机案例
 // 17min+ 静默后一次性下 args），pre-content 的 10min 档必误杀。45min
 // 覆盖该形态并留一倍余量；覆盖旋钮是 devin.no_progress_timeout_seconds。
 var defaultPostProgressTimeout = 45 * time.Minute

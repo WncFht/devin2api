@@ -36,7 +36,7 @@ func TestAccountFoldFilter(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()
 	now := time.Now()
-	insertFoldFixture(t, s, now, map[string]int{"": 1, "default": 2, "yanjian": 3})
+	insertFoldFixture(t, s, now, map[string]int{"": 1, "default": 2, "alpha": 3})
 
 	count := func(q LogQuery) int64 {
 		_, total, err := s.SearchLogs(ctx, q)
@@ -48,8 +48,8 @@ func TestAccountFoldFilter(t *testing.T) {
 	if got := count(LogQuery{Account: "default"}); got != 3 {
 		t.Fatalf("LogQuery account=default = %d, want 3 (''+'default')", got)
 	}
-	if got := count(LogQuery{Account: "yanjian"}); got != 3 {
-		t.Fatalf("LogQuery account=yanjian = %d, want 3", got)
+	if got := count(LogQuery{Account: "alpha"}); got != 3 {
+		t.Fatalf("LogQuery account=alpha = %d, want 3", got)
 	}
 	if got := count(LogQuery{}); got != 6 {
 		t.Fatalf("LogQuery 无过滤 = %d, want 6", got)
@@ -65,8 +65,8 @@ func TestAccountFoldFilter(t *testing.T) {
 	if got := recent("default"); got != 3 {
 		t.Fatalf("recent(default) = %d, want 3", got)
 	}
-	if got := recent("yanjian"); got != 3 {
-		t.Fatalf("recent(yanjian) = %d, want 3", got)
+	if got := recent("alpha"); got != 3 {
+		t.Fatalf("recent(alpha) = %d, want 3", got)
 	}
 	if got := recent(""); got != 6 {
 		t.Fatalf("recent(全量) = %d, want 6", got)
@@ -79,10 +79,10 @@ func TestAccountFoldFilter(t *testing.T) {
 
 	// LogCells 逐格回调，scope 过滤后格子计数只含命中群的行。
 	var cellReqs int64
-	err = s.LogCells(ctx, 600, now.Unix()-1, now.Unix()+1, LogScope{Account: "yanjian"},
+	err = s.LogCells(ctx, 600, now.Unix()-1, now.Unix()+1, LogScope{Account: "alpha"},
 		func(_ LogCellKey, c LogCellTotals) { cellReqs += c.Requests })
 	if err != nil || cellReqs != 3 {
-		t.Fatalf("LogCells(yanjian) = %d err=%v, want 3", cellReqs, err)
+		t.Fatalf("LogCells(alpha) = %d err=%v, want 3", cellReqs, err)
 	}
 	cellReqs = 0
 	err = s.LogCells(ctx, 600, now.Unix()-1, now.Unix()+1, LogScope{Account: "default"},

@@ -1541,7 +1541,7 @@ func TestDetachedOrphansCrossLane(t *testing.T) {
 
 // TestMergeDetachedStats 钉住顶层 detached 段的全 lane 聚合口径：计数
 // 与现值逐 lane 求和、事件环按时刻归并（新在前）并回填 lane——号池下
-// 顶层视图不得再丢非首 lane 的脱钩活动（randall 的脱钩曾在首 lane
+// 顶层视图不得再丢非首 lane 的脱钩活动（bravo 的脱钩曾在首 lane
 // 快照里完全不可见）。
 func TestMergeDetachedStats(t *testing.T) {
 	now := time.Now()

@@ -1,7 +1,7 @@
 #!/bin/sh
 # 把 gwcap 回包放行规则钉在 ip filter INPUT 最顶(ts-input 跳板之前)。
 # 背景:出向 :3003 被 inet gwcap REDIRECT 到 :3399 后,代理回包 un-NAT 成
-# src=100.105.212.52、iif=lo——落在 ts-input 的 `saddr 100.64/10 iifname!=tailscale0
+# src=网关 tailscale IP、iif=lo——落在 ts-input 的 `saddr 100.64/10 iifname!=tailscale0
 # drop` 上。本规则必须先于 jump ts-input 执行才有效;而 tailscaled 每次(重)启动
 # 都会把 jump 重插到 INPUT 顶部,把本规则压到后面 -> 回包全灭,连接挂死。
 # 调用方:gw-cap-redirect.service ExecStartPost/ExecStopPost,

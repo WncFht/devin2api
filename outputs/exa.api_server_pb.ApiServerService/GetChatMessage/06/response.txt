@@ -1,7 +1,7 @@
 {
   "latency": 0.57356158,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 94582815,
     "seconds": 1785338585
@@ -17,8 +17,8 @@
 [----------------------next message----------------------]
 {
   "latency": 0.5736724499999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 94693765,
     "seconds": 1785338585
@@ -32,8 +32,8 @@
 {
   "deltaThinking": "用户",
   "latency": 0.5737443000000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 94765545,
     "seconds": 1785338585
@@ -47,8 +47,8 @@
 {
   "deltaThinking": "要在",
   "latency": 0.5737972299999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 94818545,
     "seconds": 1785338585
@@ -62,8 +62,8 @@
 {
   "deltaThinking": "桌面",
   "latency": 0.6122855699999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 133306795,
     "seconds": 1785338585
@@ -77,8 +77,8 @@
 {
   "deltaThinking": "写",
   "latency": 0.61236312,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 133384435,
     "seconds": 1785338585
@@ -92,8 +92,8 @@
 {
   "deltaThinking": "一个",
   "latency": 0.61243196,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 133453275,
     "seconds": 1785338585
@@ -107,8 +107,8 @@
 {
   "deltaThinking": " h",
   "latency": 0.6124612199999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 133482515,
     "seconds": 1785338585
@@ -122,8 +122,8 @@
 {
   "deltaThinking": "elloworld",
   "latency": 0.649248379,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 170269584,
     "seconds": 1785338585
@@ -137,8 +137,8 @@
 {
   "deltaThinking": "。",
   "latency": 0.649370539,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 170391884,
     "seconds": 1785338585
@@ -152,8 +152,8 @@
 {
   "deltaThinking": "我",
   "latency": 0.649504219,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 170525524,
     "seconds": 1785338585
@@ -167,8 +167,8 @@
 {
   "deltaThinking": "需要",
   "latency": 0.694335758,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 215356983,
     "seconds": 1785338585
@@ -182,8 +182,8 @@
 {
   "deltaThinking": "确认",
   "latency": 0.694395408,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 215416753,
     "seconds": 1785338585
@@ -197,8 +197,8 @@
 {
   "deltaThinking": "是",
   "latency": 0.728501938,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 249522853,
     "seconds": 1785338585
@@ -212,8 +212,8 @@
 {
   "deltaThinking": "哪种",
   "latency": 0.7285660279999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 249587333,
     "seconds": 1785338585
@@ -227,8 +227,8 @@
 {
   "deltaThinking": "语言",
   "latency": 0.7712757370000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 292296892,
     "seconds": 1785338585
@@ -242,8 +242,8 @@
 {
   "deltaThinking": "。",
   "latency": 0.771343267,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 292364502,
     "seconds": 1785338585
@@ -257,8 +257,8 @@
 {
   "deltaThinking": "让我",
   "latency": 0.7713800269999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 292401302,
     "seconds": 1785338585
@@ -272,8 +272,8 @@
 {
   "deltaThinking": "先",
   "latency": 1.1223907409999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 643411956,
     "seconds": 1785338585
@@ -287,8 +287,8 @@
 {
   "deltaThinking": "问",
   "latency": 1.122460371,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 643481716,
     "seconds": 1785338585
@@ -302,8 +302,8 @@
 {
   "deltaThinking": "一下",
   "latency": 1.1225279010000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 643549206,
     "seconds": 1785338585
@@ -317,8 +317,8 @@
 {
   "deltaThinking": "，",
   "latency": 1.1225732009999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 643594546,
     "seconds": 1785338585
@@ -332,8 +332,8 @@
 {
   "deltaThinking": "或者",
   "latency": 1.122593661,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 643614976,
     "seconds": 1785338585
@@ -347,8 +347,8 @@
 {
   "deltaThinking": "直接",
   "latency": 1.4577256650000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 978746600,
     "seconds": 1785338585
@@ -362,8 +362,8 @@
 {
   "deltaThinking": "写",
   "latency": 1.457786095,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 978807190,
     "seconds": 1785338585
@@ -377,8 +377,8 @@
 {
   "deltaThinking": "一个",
   "latency": 1.482643874,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 3664979,
     "seconds": 1785338586
@@ -392,8 +392,8 @@
 {
   "deltaThinking": "常见的",
   "latency": 1.482718544,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 3739749,
     "seconds": 1785338586
@@ -407,8 +407,8 @@
 {
   "deltaThinking": "。",
   "latency": 1.524171454,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45192519,
     "seconds": 1785338586
@@ -422,8 +422,8 @@
 {
   "deltaThinking": "考虑到",
   "latency": 1.5242675440000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45288829,
     "seconds": 1785338586
@@ -437,8 +437,8 @@
 {
   "deltaThinking": "用户",
   "latency": 1.524359574,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45380859,
     "seconds": 1785338586
@@ -452,8 +452,8 @@
 {
   "deltaThinking": "说",
   "latency": 1.5244296240000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45450959,
     "seconds": 1785338586
@@ -467,8 +467,8 @@
 {
   "deltaThinking": "\"",
   "latency": 1.5244761640000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45497499,
     "seconds": 1785338586
@@ -482,8 +482,8 @@
 {
   "deltaThinking": "h",
   "latency": 1.5245050240000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 45525809,
     "seconds": 1785338586
@@ -497,8 +497,8 @@
 {
   "deltaThinking": "ellow",
   "latency": 1.8592154380000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 380236353,
     "seconds": 1785338586
@@ -512,8 +512,8 @@
 {
   "deltaThinking": "ord",
   "latency": 1.8592886480000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 380309913,
     "seconds": 1785338586
@@ -527,8 +527,8 @@
 {
   "deltaThinking": "\"",
   "latency": 1.859345088,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 380366373,
     "seconds": 1785338586
@@ -542,8 +542,8 @@
 {
   "deltaThinking": "（",
   "latency": 2.192764372,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 713785237,
     "seconds": 1785338586
@@ -557,8 +557,8 @@
 {
   "deltaThinking": "拼写",
   "latency": 2.1928481619999993,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 713869377,
     "seconds": 1785338586
@@ -572,8 +572,8 @@
 {
   "deltaThinking": "略有",
   "latency": 2.2364260609999995,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 757446816,
     "seconds": 1785338586
@@ -587,8 +587,8 @@
 {
   "deltaThinking": "误",
   "latency": 2.272001611,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 793022816,
     "seconds": 1785338586
@@ -602,8 +602,8 @@
 {
   "deltaThinking": "），",
   "latency": 2.31264633,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 833667405,
     "seconds": 1785338586
@@ -617,8 +617,8 @@
 {
   "deltaThinking": "可能",
   "latency": 2.31271028,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 833731605,
     "seconds": 1785338586
@@ -632,8 +632,8 @@
 {
   "deltaThinking": "就是",
   "latency": 2.352576129,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 873596994,
     "seconds": 1785338586
@@ -647,8 +647,8 @@
 {
   "deltaThinking": "想要",
   "latency": 2.3526675389999996,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 873688674,
     "seconds": 1785338586
@@ -662,8 +662,8 @@
 {
   "deltaThinking": "一个",
   "latency": 2.390725579,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 911746384,
     "seconds": 1785338586
@@ -677,8 +677,8 @@
 {
   "deltaThinking": "简单的",
   "latency": 2.390805459,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 911826784,
     "seconds": 1785338586
@@ -692,8 +692,8 @@
 {
   "deltaThinking": " hello",
   "latency": 2.3909210090000004,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 911941764,
     "seconds": 1785338586
@@ -707,8 +707,8 @@
 {
   "deltaThinking": " world",
   "latency": 2.391023599000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 912044924,
     "seconds": 1785338586
@@ -722,8 +722,8 @@
 {
   "deltaThinking": " 程",
   "latency": 2.430910658,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 951931653,
     "seconds": 1785338586
@@ -737,8 +737,8 @@
 {
   "deltaThinking": "序",
   "latency": 2.431157288,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 952178593,
     "seconds": 1785338586
@@ -752,8 +752,8 @@
 {
   "deltaThinking": "。",
   "latency": 2.431240248,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 952261403,
     "seconds": 1785338586
@@ -767,8 +767,8 @@
 {
   "deltaThinking": "我",
   "latency": 2.4312711179999997,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 952292363,
     "seconds": 1785338586
@@ -782,8 +782,8 @@
 {
   "deltaThinking": "直接",
   "latency": 2.4737908969999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 994811932,
     "seconds": 1785338586
@@ -797,8 +797,8 @@
 {
   "deltaThinking": "写",
   "latency": 2.473873577,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 994894302,
     "seconds": 1785338586
@@ -812,8 +812,8 @@
 {
   "deltaThinking": "一个",
   "latency": 2.4739475969999996,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 994968932,
     "seconds": 1785338586
@@ -827,8 +827,8 @@
 {
   "deltaThinking": " Python",
   "latency": 2.4740375869999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 995057952,
     "seconds": 1785338586
@@ -842,8 +842,8 @@
 {
   "deltaThinking": " 的",
   "latency": 2.474117727,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 995138972,
     "seconds": 1785338586
@@ -857,8 +857,8 @@
 {
   "deltaThinking": "最",
   "latency": 2.5115615669999998,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 32582802,
     "seconds": 1785338587
@@ -872,8 +872,8 @@
 {
   "deltaThinking": "简单",
   "latency": 2.5517866160000002,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 72806371,
     "seconds": 1785338587
@@ -887,8 +887,8 @@
 {
   "deltaThinking": "。",
   "latency": 2.551869186,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 72890281,
     "seconds": 1785338587
@@ -902,8 +902,8 @@
 {
   "deltaThinking": "但",
   "latency": 2.551906066,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 72926901,
     "seconds": 1785338587
@@ -917,8 +917,8 @@
 {
   "deltaThinking": "也许",
   "latency": 2.5916693950000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 112690490,
     "seconds": 1785338587
@@ -932,8 +932,8 @@
 {
   "deltaThinking": "应该",
   "latency": 2.630787645,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 151808660,
     "seconds": 1785338587
@@ -947,8 +947,8 @@
 {
   "deltaThinking": "问",
   "latency": 2.6308551550000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 151876490,
     "seconds": 1785338587
@@ -962,8 +962,8 @@
 {
   "deltaThinking": "一下",
   "latency": 2.6309434549999997,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 151964320,
     "seconds": 1785338587
@@ -977,8 +977,8 @@
 {
   "deltaThinking": "语言",
   "latency": 2.6310097749999994,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 152030980,
     "seconds": 1785338587
@@ -992,8 +992,8 @@
 {
   "deltaThinking": "？",
   "latency": 2.6687532240000005,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 189774179,
     "seconds": 1785338587
@@ -1007,8 +1007,8 @@
 {
   "deltaThinking": "算了",
   "latency": 2.7105140729999997,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 231535248,
     "seconds": 1785338587
@@ -1022,8 +1022,8 @@
 {
   "deltaThinking": "，",
   "latency": 2.7696480919999993,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 290668947,
     "seconds": 1785338587
@@ -1037,8 +1037,8 @@
 {
   "deltaThinking": "简单",
   "latency": 2.7697324020000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 290753727,
     "seconds": 1785338587
@@ -1052,8 +1052,8 @@
 {
   "deltaThinking": "点",
   "latency": 2.769789092,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 290810097,
     "seconds": 1785338587
@@ -1067,8 +1067,8 @@
 {
   "deltaThinking": "，",
   "latency": 2.7698618120000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 290882757,
     "seconds": 1785338587
@@ -1082,8 +1082,8 @@
 {
   "deltaThinking": "写",
   "latency": 2.7699145319999996,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 290935877,
     "seconds": 1785338587
@@ -1097,8 +1097,8 @@
 {
   "deltaThinking": "个",
   "latency": 2.788376052,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 309397157,
     "seconds": 1785338587
@@ -1112,8 +1112,8 @@
 {
   "deltaThinking": " Python",
   "latency": 2.788444592,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 309465917,
     "seconds": 1785338587
@@ -1127,8 +1127,8 @@
 {
   "deltaThinking": " 的",
   "latency": 2.788484952,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 309506267,
     "seconds": 1785338587
@@ -1142,8 +1142,8 @@
 {
   "deltaThinking": " hello",
   "latency": 2.831468211,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 352489416,
     "seconds": 1785338587
@@ -1157,8 +1157,8 @@
 {
   "deltaThinking": " world",
   "latency": 3.3100332530000003,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 831054468,
     "seconds": 1785338587
@@ -1172,8 +1172,8 @@
 {
   "deltaThinking": "。",
   "latency": 3.310110093,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 831131058,
     "seconds": 1785338587
@@ -1192,8 +1192,8 @@
     }
   ],
   "latency": 3.3101983229999994,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 831219588,
     "seconds": 1785338587
@@ -1211,8 +1211,8 @@
     }
   ],
   "latency": 3.8051388040000007,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 326159659,
     "seconds": 1785338588
@@ -1230,8 +1230,8 @@
     }
   ],
   "latency": 3.8052520039999997,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 326273299,
     "seconds": 1785338588
@@ -1249,8 +1249,8 @@
     }
   ],
   "latency": 3.8052966239999995,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 326317969,
     "seconds": 1785338588
@@ -1268,8 +1268,8 @@
     }
   ],
   "latency": 4.2246771370000005,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 745698322,
     "seconds": 1785338588
@@ -1287,8 +1287,8 @@
     }
   ],
   "latency": 4.224736477,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 745757782,
     "seconds": 1785338588
@@ -1306,8 +1306,8 @@
     }
   ],
   "latency": 4.224802507000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 745823222,
     "seconds": 1785338588
@@ -1325,8 +1325,8 @@
     }
   ],
   "latency": 4.2249017570000005,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 745922782,
     "seconds": 1785338588
@@ -1344,8 +1344,8 @@
     }
   ],
   "latency": 4.224957637000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 745978882,
     "seconds": 1785338588
@@ -1363,8 +1363,8 @@
     }
   ],
   "latency": 4.2250040769999995,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 746025322,
     "seconds": 1785338588
@@ -1382,8 +1382,8 @@
     }
   ],
   "latency": 4.59260681,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 113627735,
     "seconds": 1785338589
@@ -1401,8 +1401,8 @@
     }
   ],
   "latency": 4.59267262,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 113693885,
     "seconds": 1785338589
@@ -1420,8 +1420,8 @@
     }
   ],
   "latency": 4.59273016,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 113751495,
     "seconds": 1785338589
@@ -1439,8 +1439,8 @@
     }
   ],
   "latency": 4.6243750200000004,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145396055,
     "seconds": 1785338589
@@ -1458,8 +1458,8 @@
     }
   ],
   "latency": 4.624453689999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145475025,
     "seconds": 1785338589
@@ -1477,8 +1477,8 @@
     }
   ],
   "latency": 4.624481320000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145502655,
     "seconds": 1785338589
@@ -1496,8 +1496,8 @@
     }
   ],
   "latency": 4.6246307799999995,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145651645,
     "seconds": 1785338589
@@ -1515,8 +1515,8 @@
     }
   ],
   "latency": 4.62468478,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145705685,
     "seconds": 1785338589
@@ -1534,8 +1534,8 @@
     }
   ],
   "latency": 4.6247499,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 145771245,
     "seconds": 1785338589
@@ -1553,8 +1553,8 @@
     }
   ],
   "latency": 4.657776198999999,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 178797444,
     "seconds": 1785338589
@@ -1572,8 +1572,8 @@
     }
   ],
   "latency": 4.657848219,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 178869414,
     "seconds": 1785338589
@@ -1586,8 +1586,8 @@
 [----------------------next message----------------------]
 {
   "latency": 4.657945599,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "stopReason": "ExaCodeiumCommonPb_StopReason_STOP_REASON_FUNCTION_CALL",
   "timestamp": {
     "nanos": 178966924,
@@ -1601,8 +1601,8 @@
 [----------------------next message----------------------]
 {
   "latency": 4.660809249000001,
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
-  "requestId": "1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
+  "requestId": "00000000-0000-0000-0000-000000000011",
   "timestamp": {
     "nanos": 181830484,
     "seconds": 1785338589
@@ -1620,7 +1620,7 @@
 }
 [----------------------next message----------------------]
 {
-  "messageId": "bot-1cf7c122-adc0-48ec-a52b-bcab3f206556",
+  "messageId": "bot-00000000-0000-0000-0000-000000000011",
   "responseDimensionGroups": [
     {
       "dimensions": [

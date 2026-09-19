@@ -43,7 +43,7 @@ _LOG_WAIT_S = 0.2
 class CapConfig:
     """运行配置，全部来自 GWCAP_* 环境变量。"""
 
-    upstream_host: str = "100.105.212.52"
+    upstream_host: str = "<old-tailnet-ip>"  # 本机示例默认值，部署以 GWCAP_UPSTREAM 为准
     upstream_port: int = 3003
     listen_port: int = 3399
     limit: int = 4
@@ -53,7 +53,7 @@ class CapConfig:
     def from_env(cls) -> CapConfig:
         """从 GWCAP_* 环境变量构造。"""
         host, _, port = os.environ.get(
-            "GWCAP_UPSTREAM", "100.105.212.52:3003"
+            "GWCAP_UPSTREAM", "<old-tailnet-ip>:3003"
         ).partition(":")
         return cls(
             upstream_host=host or cls.upstream_host,

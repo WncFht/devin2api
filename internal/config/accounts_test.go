@@ -401,16 +401,16 @@ func TestExpandHomeDir(t *testing.T) {
 }
 
 // TestLoadAccountsTrims 验证 name/token 入库前 trim：裁剪发生在校验与
-// 去重之前，"  yanjian  " 落成 "yanjian"，"  tok  " 落成 "tok"。
+// 去重之前，"  alpha  " 落成 "alpha"，"  tok  " 落成 "tok"。
 func TestLoadAccountsTrims(t *testing.T) {
 	config, err := loadWithDevin(t, t.TempDir(),
-		"  accounts:\n    - name: '  yanjian  '\n      token: '  tok  '\n")
+		"  accounts:\n    - name: '  alpha  '\n      token: '  tok  '\n")
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	account := config.Devin.Accounts[0]
-	if account.Name != "yanjian" {
-		t.Fatalf("Name = %q, want trimmed yanjian", account.Name)
+	if account.Name != "alpha" {
+		t.Fatalf("Name = %q, want trimmed alpha", account.Name)
 	}
 	if account.Token != "tok" {
 		t.Fatalf("Token = %q, want trimmed tok", account.Token)

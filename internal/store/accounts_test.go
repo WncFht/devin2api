@@ -21,13 +21,13 @@ func TestAccountsCRUDRoundTrip(t *testing.T) {
 		t.Fatalf("GetAccount missing = (%v,%v,%v), want (nil,false,nil)", row, ok, err)
 	}
 
-	if err := s.UpsertAccount(ctx, &AccountRow{Name: "yanjian", Token: "sess-y", CreatedAt: 1000}); err != nil {
-		t.Fatalf("upsert yanjian: %v", err)
+	if err := s.UpsertAccount(ctx, &AccountRow{Name: "alpha", Token: "sess-y", CreatedAt: 1000}); err != nil {
+		t.Fatalf("upsert alpha: %v", err)
 	}
 	if err := s.UpsertAccount(ctx, &AccountRow{
-		Name: "randall", CredentialsFile: "/p/c.toml", Disabled: true, CreatedAt: 900,
+		Name: "bravo", CredentialsFile: "/p/c.toml", Disabled: true, CreatedAt: 900,
 	}); err != nil {
-		t.Fatalf("upsert randall: %v", err)
+		t.Fatalf("upsert bravo: %v", err)
 	}
 	if err := s.UpsertAccount(ctx, &AccountRow{Name: "old", Deleted: true, CreatedAt: 1100}); err != nil {
 		t.Fatalf("upsert old: %v", err)
@@ -40,26 +40,26 @@ func TestAccountsCRUDRoundTrip(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("rows = %d, want 3", len(rows))
 	}
-	// ORDER BY created_at：randall(900) → yanjian(1000) → old(1100)。
-	if rows[0].Name != "randall" || rows[1].Name != "yanjian" || rows[2].Name != "old" {
+	// ORDER BY created_at：bravo(900) → alpha(1000) → old(1100)。
+	if rows[0].Name != "bravo" || rows[1].Name != "alpha" || rows[2].Name != "old" {
 		t.Fatalf("order = %v,%v,%v", rows[0].Name, rows[1].Name, rows[2].Name)
 	}
 	if rows[0].Token != "" || rows[0].CredentialsFile != "/p/c.toml" || !rows[0].Disabled {
-		t.Fatalf("randall = %+v", rows[0])
+		t.Fatalf("bravo = %+v", rows[0])
 	}
 	if rows[1].Token != "sess-y" || rows[1].CredentialsFile != "" || rows[1].Disabled {
-		t.Fatalf("yanjian = %+v", rows[1])
+		t.Fatalf("alpha = %+v", rows[1])
 	}
 	if !rows[2].Deleted {
 		t.Fatalf("old.Deleted = false, want tombstone")
 	}
 
-	row, ok, err := s.GetAccount(ctx, "randall")
+	row, ok, err := s.GetAccount(ctx, "bravo")
 	if err != nil || !ok {
-		t.Fatalf("GetAccount randall = ok=%v err=%v", ok, err)
+		t.Fatalf("GetAccount bravo = ok=%v err=%v", ok, err)
 	}
 	if row.CreatedAt != 900 || row.UpdatedAt == 0 {
-		t.Fatalf("randall times = %+v", row)
+		t.Fatalf("bravo times = %+v", row)
 	}
 
 	if err := s.DeleteAccount(ctx, "old"); err != nil {
@@ -80,16 +80,16 @@ func TestUpsertAccountConflictSemantics(t *testing.T) {
 	ctx := context.Background()
 
 	if err := s.UpsertAccount(ctx, &AccountRow{
-		Name: "yanjian", Token: "sess-v1", CredentialsFile: "/p/c.toml", CreatedAt: 1000,
+		Name: "alpha", Token: "sess-v1", CredentialsFile: "/p/c.toml", CreatedAt: 1000,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	first, _, _ := s.GetAccount(ctx, "yanjian")
+	first, _, _ := s.GetAccount(ctx, "alpha")
 	time.Sleep(5 * time.Millisecond) // 跨过毫秒边界，updated_at 可见刷新
-	if err := s.UpsertAccount(ctx, &AccountRow{Name: "yanjian", Token: "sess-v2"}); err != nil {
+	if err := s.UpsertAccount(ctx, &AccountRow{Name: "alpha", Token: "sess-v2"}); err != nil {
 		t.Fatal(err)
 	}
-	second, _, _ := s.GetAccount(ctx, "yanjian")
+	second, _, _ := s.GetAccount(ctx, "alpha")
 	if second.Token != "sess-v2" {
 		t.Fatalf("token = %q, want sess-v2", second.Token)
 	}

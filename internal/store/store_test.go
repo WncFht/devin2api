@@ -376,7 +376,7 @@ func TestQuotaSamples(t *testing.T) {
 		t.Fatalf("InsertQuotaSample 2: %v", err)
 	}
 	if err := s.InsertQuotaSample(ctx, &QuotaSample{
-		At: 1700000030, Account: "randall",
+		At: 1700000030, Account: "bravo",
 	}); err != nil {
 		t.Fatalf("InsertQuotaSample 3: %v", err)
 	}
@@ -405,9 +405,9 @@ func TestQuotaSamples(t *testing.T) {
 	if err != nil || len(got) != 1 {
 		t.Fatalf("since filter: %v %v", got, err)
 	}
-	got, err = s.ListQuotaSamples(ctx, "randall", 0, 0)
+	got, err = s.ListQuotaSamples(ctx, "bravo", 0, 0)
 	if err != nil || len(got) != 1 {
-		t.Fatalf("randall filter: %v %v", got, err)
+		t.Fatalf("bravo filter: %v %v", got, err)
 	}
 	// limit 截尾取最新 N 条，返回仍升序。
 	got, err = s.ListQuotaSamples(ctx, "", 0, 2)
@@ -464,7 +464,7 @@ func TestGateWindows(t *testing.T) {
 		t.Fatalf("InsertGateWindow dup: %v", err)
 	}
 	if err := s.InsertGateWindow(ctx, &GateWindow{
-		Lane: "randall", WindowStart: 1700000060, Quota: 30, UsedBg: 7,
+		Lane: "bravo", WindowStart: 1700000060, Quota: 30, UsedBg: 7,
 	}); err != nil {
 		t.Fatalf("InsertGateWindow 2: %v", err)
 	}
@@ -476,14 +476,14 @@ func TestGateWindows(t *testing.T) {
 		t.Fatalf("row = %+v", w)
 	}
 	// since 过滤 + 全 lane 读取。
-	if got, err = s.ListGateWindows(ctx, "", 1700000060, 0); err != nil || len(got) != 1 || got[0].Lane != "randall" {
+	if got, err = s.ListGateWindows(ctx, "", 1700000060, 0); err != nil || len(got) != 1 || got[0].Lane != "bravo" {
 		t.Fatalf("since filter: %v %v", got, err)
 	}
 	// 保留期裁剪：早于 before 的行删除。
 	if n, err := s.PruneGateWindows(ctx, 1700000060); err != nil || n != 1 {
 		t.Fatalf("PruneGateWindows = %d,%v want 1,nil", n, err)
 	}
-	if got, _ := s.ListGateWindows(ctx, "", 0, 0); len(got) != 1 || got[0].Lane != "randall" {
+	if got, _ := s.ListGateWindows(ctx, "", 0, 0); len(got) != 1 || got[0].Lane != "bravo" {
 		t.Fatalf("after prune: %v", got)
 	}
 }

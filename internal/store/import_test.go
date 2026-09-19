@@ -68,7 +68,7 @@ func writeLegacyFixtures(t *testing.T, stateDir, logRoot string) {
 
 	must(os.WriteFile(filepath.Join(logRoot, "gate-state.json"),
 		[]byte(`{"limited_until":"2026-09-17T12:00:00Z"}`), 0o644))
-	must(os.WriteFile(filepath.Join(logRoot, "gate-state-randall.json"),
+	must(os.WriteFile(filepath.Join(logRoot, "gate-state-bravo.json"),
 		[]byte(`{"limited_until":"2026-09-17T13:00:00Z"}`), 0o644))
 }
 
@@ -164,8 +164,8 @@ func TestImportLegacy(t *testing.T) {
 	if err != nil || !ok || gv != `{"limited_until":"2026-09-17T12:00:00Z"}` {
 		t.Fatalf("gate:default = %q,%v,%v", gv, ok, err)
 	}
-	if _, ok, _ := s.GetState(ctx, "gate:randall"); !ok {
-		t.Fatal("gate:randall missing")
+	if _, ok, _ := s.GetState(ctx, "gate:bravo"); !ok {
+		t.Fatal("gate:bravo missing")
 	}
 
 	// 原文件全部改名。
@@ -173,7 +173,7 @@ func TestImportLegacy(t *testing.T) {
 		filepath.Join(logRoot, "index.jsonl"),
 		filepath.Join(logRoot, "quota.jsonl"),
 		filepath.Join(logRoot, "gate-state.json"),
-		filepath.Join(logRoot, "gate-state-randall.json"),
+		filepath.Join(logRoot, "gate-state-bravo.json"),
 		filepath.Join(stateDir, "auth_tokens.json"),
 		filepath.Join(stateDir, "models.json"),
 		filepath.Join(stateDir, "panel-settings.json"),

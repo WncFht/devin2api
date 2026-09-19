@@ -170,6 +170,6 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 
 ## 本机示例：作者的生产拓扑
 
-本节是作者本机部署的具体取值（2026-09-18 起生效），供对照参考，不是部署规范的一部分。
+本节是作者本机部署的拓扑形态（2026-09-18 起生效，地址用占位符），供对照参考，不是部署规范的一部分。
 
-生产实例在 archbox 本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac（fht-mba `:3003`）生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（fht-mba launchd `com.fanghaotian.devin-2api-forwarder` → `100.121.76.120:3033`；archbox systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://100.121.76.120:3033` 访问该实例。
+生产实例在 Linux 生产机本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac 生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（旧 Mac launchd `com.devin2api.forwarder` → `<tailnet-ip>:3033`；生产机 systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://<tailnet-ip>:3033` 访问该实例。

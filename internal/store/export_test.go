@@ -155,8 +155,8 @@ func TestExportLegacyRoundTrip(t *testing.T) {
 
 	// gate-state：两 lane 拆回两份文件，内容逐字节还原。
 	for name, want := range map[string]string{
-		"gate-state.json":         `{"limited_until":"2026-09-17T12:00:00Z"}`,
-		"gate-state-randall.json": `{"limited_until":"2026-09-17T13:00:00Z"}`,
+		"gate-state.json":       `{"limited_until":"2026-09-17T12:00:00Z"}`,
+		"gate-state-bravo.json": `{"limited_until":"2026-09-17T13:00:00Z"}`,
 	} {
 		data, err := os.ReadFile(filepath.Join(outLogRoot, name))
 		if err != nil {
@@ -183,8 +183,8 @@ func TestExportLegacyRoundTrip(t *testing.T) {
 	if n := tableCount(t, dup, "quota_samples"); n != 2 {
 		t.Fatalf("re-imported quota = %d, want 2", n)
 	}
-	if v, ok, _ := dup.GetState(ctx, "gate:randall"); !ok || v == "" {
-		t.Fatal("re-imported gate:randall missing")
+	if v, ok, _ := dup.GetState(ctx, "gate:bravo"); !ok || v == "" {
+		t.Fatal("re-imported gate:bravo missing")
 	}
 }
 
@@ -299,8 +299,8 @@ func TestExportLegacyAccountsYAML(t *testing.T) {
 	defer func() { _ = s.Close() }()
 	ctx := context.Background()
 	for _, r := range []*AccountRow{
-		{Name: "yanjian", Token: "sess-y", CreatedAt: 1},
-		{Name: "randall", CredentialsFile: "/p/c.toml", Disabled: true, CreatedAt: 2},
+		{Name: "alpha", Token: "sess-y", CreatedAt: 1},
+		{Name: "bravo", CredentialsFile: "/p/c.toml", Disabled: true, CreatedAt: 2},
 		{Name: "dead", Token: "x", Deleted: true, CreatedAt: 3},
 	} {
 		if err := s.UpsertAccount(ctx, r); err != nil {
@@ -340,9 +340,9 @@ func TestExportLegacyAccountsYAML(t *testing.T) {
 	if strings.Contains(content, "dead") {
 		t.Fatalf("tombstone leaked into export:\n%s", content)
 	}
-	if !strings.Contains(content, "#   - name: randall") ||
+	if !strings.Contains(content, "#   - name: bravo") ||
 		!strings.Contains(content, "#     credentials_file: /p/c.toml") {
-		t.Fatalf("disabled randall should be a commented entry:\n%s", content)
+		t.Fatalf("disabled bravo should be a commented entry:\n%s", content)
 	}
 	var doc struct {
 		Accounts []legacyAccountEntry `yaml:"accounts"`
@@ -350,9 +350,9 @@ func TestExportLegacyAccountsYAML(t *testing.T) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("export is not valid yaml: %v\n%s", err, content)
 	}
-	if len(doc.Accounts) != 1 || doc.Accounts[0].Name != "yanjian" ||
+	if len(doc.Accounts) != 1 || doc.Accounts[0].Name != "alpha" ||
 		doc.Accounts[0].Token != "sess-y" {
-		t.Fatalf("accounts = %+v, want [yanjian]", doc.Accounts)
+		t.Fatalf("accounts = %+v, want [alpha]", doc.Accounts)
 	}
 
 	// 回灌豁免：ImportLegacy 不认这个文件——导出目录原样再导入，

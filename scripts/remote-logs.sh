@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# remote-logs.sh — 远端实例日志分诊（默认 fht-mba 生产实例）。
+# remote-logs.sh — 远端实例日志分诊（目标主机由 DEVIN2API_HOST 或 --host 指定）。
 #
 # 用法:
 #   remote-logs.sh [--host H] tail [N]       logs 表末 N 行摘要（结果/token/耗时/错误）
@@ -8,16 +8,16 @@
 #   remote-logs.sh [--host H] grep <pat>     logs 表导出行正则过滤
 #   remote-logs.sh [--host H] stderr [N]     stderr.log 末 N 行
 #
-# fht-mba 登录 shell 是 fish：`ssh host 'VAR=x; for ...'` 直发会炸，
+# 远端登录 shell 若是 fish：`ssh host 'VAR=x; for ...'` 直发会炸，
 # 一律走 `ssh host bash -s` 把脚本喂 stdin（本脚本内部就是这么做的）。
 set -u
 
-HOST=fht-mba
+HOST="${DEVIN2API_HOST:?usage: DEVIN2API_HOST=<host> remote-logs.sh [--host H] <cmd>}"
 if [[ "${1:-}" == "--host" ]]; then HOST="$2"; shift 2; fi
 CMD="${1:-tail}"; shift 0
 ARG="${2:-}"
 
-# Mac 生产实例 state dir；--host 换机器时若布局不同用 REMOTE_LOGS / REMOTE_DB 覆盖
+# 默认按 macOS 实例 state dir 布局；--host 换机器时若布局不同用 REMOTE_LOGS / REMOTE_DB 覆盖
 LOGS="${REMOTE_LOGS:-\$HOME/Library/Application Support/devin-2api/logs}"
 DB="${REMOTE_DB:-\$HOME/Library/Application Support/devin-2api/devin-2api.db}"
 

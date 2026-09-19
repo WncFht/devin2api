@@ -57,7 +57,7 @@ $$
 - **归零**：daily 烧穿后 `dailyQuotaRemainingPercent` 直接变 null；付费调用在 connect 阶段收到 400 `failed_precondition: Your daily usage quota has been exhausted`（可引导至 app.devin.ai 购买 on-demand）[^devin-quota]；free 档（swe-2-max）照常服务，归零后 242 个调用全部 completed。weekly 归零同语义：`weeklyQuotaRemainingPercent` 变 null，付费档同样被 `failed_precondition` 拦（文案换成 weekly），free 档继续服务——两额度是并行预算，任一归零都拦付费档。注意 null 的回补滞后于重置：实测 daily null 自 09-13 ~12:25 起持续 ~27h、跨过 09-13 16:00 重置未回补、直到 09-14 16:00 重置才恢复 96——与"每日 16:00 重置即回满"的字面语义不符，疑似与 overage 负债状态联动。
 - **失败计费**：配额拒绝（`failed_precondition`）不产生燃烧已证实（请求没真正执行）；但**已产出 token 的断连/流失败照常计费**——7 例实测，含一例 fable 断连携 `cache_write=89937`（≈$0.9 目录价）在入账中可见。
 - **入账延迟**：~1–3 分钟，且偶发 10 分钟级延迟。
-- `overageBalanceMicros` **不是**静态占位：早期观测（09-13）记为恒 -500354，后续（09-18）yanjian 移至 -1105665（-$1.11）、randall 为 -81233（-$0.08），两号取值各异且随时间移动——疑似随座位状态变化而非代理侧燃烧，机制未确认；现已逐样本落 `quota_samples.overage_balance_micros` 持续观测（未开 auto-reload）。`acuConsumed/acuLimit` 恒 null——Teams 座位的配额不走 ACU 通道。
+- `overageBalanceMicros` **不是**静态占位：早期观测（09-13）记为恒 -500354，后续（09-18）A 号移至 -1105665（-$1.11）、B 号为 -81233（-$0.08），两号取值各异且随时间移动——疑似随座位状态变化而非代理侧燃烧，机制未确认；现已逐样本落 `quota_samples.overage_balance_micros` 持续观测（未开 auto-reload）。`acuConsumed/acuLimit` 恒 null——Teams 座位的配额不走 ACU 通道。
 - `GetQuotaUsageInternal`（能直接返回日/周 usage_micros/limit_micros）需要 admin secret，普通会话 token 拿不到，所以只能反推。
 
 ## 复现

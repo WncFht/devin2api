@@ -45,7 +45,7 @@ Cascade 轨迹流（`StartCascade`/`SendUserCascadeMessage`）另有 `cache_brea
 3. 上游 cache 计量按协议透出：Responses `usage.input_tokens_details.cached_tokens`/`cache_write_tokens`、chat `prompt_tokens_details` 同名字段、Anthropic `cache_read_input_tokens`/`cache_creation_input_tokens`。
 4. sanitize 改写是确定性的（同输入必同输出），不影响缓存键稳定。
 
-## 受控实测的缓存语义（2026-09-15，archbox :3033 暖臂实验）
+## 受控实测的缓存语义（2026-09-15，本机 :3033 暖臂实验）
 
 用受控探针臂（独立 `metadata.user_id` + padded system prompt，绝对偏移时刻表发 seed/ping/probe，`scripts/cache-probe.py` 为该实验骨架的入库形态）测出的机制级结论：
 

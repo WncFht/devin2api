@@ -55,7 +55,7 @@ func TestMigration0007LegacyDB(t *testing.T) {
 	)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`INSERT INTO quota_samples(at, account, daily_remaining) VALUES(1,'yanjian',86)`); err != nil {
+	if _, err := raw.Exec(`INSERT INTO quota_samples(at, account, daily_remaining) VALUES(1,'alpha',86)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
@@ -77,7 +77,7 @@ func TestMigration0007LegacyDB(t *testing.T) {
 	}
 	// 旧行保留，新列可读且为 0。
 	var ov int64
-	if err := s.ro.QueryRow(`SELECT overage_balance_micros FROM quota_samples WHERE account='yanjian'`).Scan(&ov); err != nil {
+	if err := s.ro.QueryRow(`SELECT overage_balance_micros FROM quota_samples WHERE account='alpha'`).Scan(&ov); err != nil {
 		t.Fatalf("read new column: %v", err)
 	}
 	if ov != 0 {
@@ -94,11 +94,11 @@ func TestMigration0007LegacyDB(t *testing.T) {
 	// 新列可写可读。
 	daily := 62.5
 	if err := s.InsertQuotaSample(context.Background(), &QuotaSample{
-		At: 2, Account: "yanjian", DailyRemaining: &daily, OverageBalanceMicros: -1105665,
+		At: 2, Account: "alpha", DailyRemaining: &daily, OverageBalanceMicros: -1105665,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.ListQuotaSamples(context.Background(), "yanjian", 0, 0)
+	rows, err := s.ListQuotaSamples(context.Background(), "alpha", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -82,12 +82,12 @@ func newAccountsHandler(t *testing.T, accs []store.ResolvedAccount) (*Handler, f
 func TestAdminAccountsAggregate(t *testing.T) {
 	accounts := []store.ResolvedAccount{
 		{
-			Name: "yanjian", Source: store.AccountSourceConfig,
+			Name: "alpha", Source: store.AccountSourceConfig,
 			ConfigDeclared: true, HasRow: true,
-			Token: "sess-yanjian", CreatedAt: 1758000000000, UpdatedAt: 1758100000000,
+			Token: "sess-alpha", CreatedAt: 1758000000000, UpdatedAt: 1758100000000,
 		},
 		{
-			Name: "randall", Source: store.AccountSourceTombstoned,
+			Name: "bravo", Source: store.AccountSourceTombstoned,
 			ConfigDeclared: true, HasRow: true,
 			CredentialsFile: "/Users/x/Library/Application Support/windsurf/credentials.toml",
 			CreatedAt:       1758100000000, UpdatedAt: 1758200000000,
@@ -101,10 +101,10 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	h, cleanup := newAccountsHandler(t, accounts)
 	defer cleanup()
 
-	// yanjian 有活 lane：三件套快照 + 一条在途请求 + 配额样本与身份。
+	// alpha 有活 lane：三件套快照 + 一条在途请求 + 配额样本与身份。
 	h.pool = &PoolDeps{Snapshot: func() devin.PoolSnapshot {
 		return devin.PoolSnapshot{Accounts: map[string]devin.LaneSnapshot{
-			"yanjian": {
+			"alpha": {
 				State: devin.LaneState{Healthy: true},
 				Gate:  devin.GateStats{WindowQuota: 60, WindowUsed: 3, Sendable: true},
 				Warm:  devin.WarmStats{Enabled: true, Entries: 12, PingHits: 3, PingMisses: 1, FailoverSuspects: 2},
@@ -112,15 +112,15 @@ func TestAdminAccountsAggregate(t *testing.T) {
 		}}
 	}}
 	if rec := h.debug.Start(debuglog.RequestMeta{Method: "POST", Path: "/v1/chat/completions"}); rec != nil {
-		rec.SetUpstreamAccount("yanjian")
+		rec.SetUpstreamAccount("alpha")
 	}
-	// 一条 yanjian 的完成行喂 usage 投影：200/stream/2s 时长/500ms
+	// 一条 alpha 的完成行喂 usage 投影：200/stream/2s 时长/500ms
 	// 首字 → rpm_now=1、tps=50tok/1.5s、ttfb 单样本 500、
 	// cache_rate=200/(100+200+10)、today 全中。
 	fu := int64(500)
 	if _, err := h.store.InsertLog(context.Background(), &store.LogRow{
 		Dir: "d-yj-1", StartedAt: time.Now(), DurationMS: 2000, FirstUpstreamMS: &fu,
-		StatusCode: 200, Result: "completed", Stream: true, Account: "yanjian",
+		StatusCode: 200, Result: "completed", Stream: true, Account: "alpha",
 		InputTokens: 100, OutputTokens: 50, CacheReadTokens: 200, CacheWriteTokens: 10,
 		TotalTokens: 360,
 	}); err != nil {
@@ -129,22 +129,22 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	now := time.Now().Unix()
 	for i, remaining := range []float64{90, 80, 70} {
 		if err := h.store.InsertQuotaSample(context.Background(), &store.QuotaSample{
-			At: now - int64(1200*(2-i)), Account: "yanjian",
+			At: now - int64(1200*(2-i)), Account: "alpha",
 			DailyRemaining: f64(remaining), DailyResetAt: now + 80000,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// randall 只有一个样本：forecast 落 null，但 accounts 条目存在，
+	// bravo 只有一个样本：forecast 落 null，但 accounts 条目存在，
 	// user 身份键仍能进视图（契约示例形状）。
 	if err := h.store.InsertQuotaSample(context.Background(), &store.QuotaSample{
-		At: now, Account: "randall", DailyRemaining: f64(50),
+		At: now, Account: "bravo", DailyRemaining: f64(50),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	h.quotaSub().users = map[string]map[string]any{
-		"yanjian": {"email": "a@b.c", "plan_name": "pro"},
-		"randall": {"email": "x@y.z"},
+		"alpha": {"email": "a@b.c", "plan_name": "pro"},
+		"bravo": {"email": "x@y.z"},
 	}
 
 	recorder := httptest.NewRecorder()
@@ -156,108 +156,108 @@ func TestAdminAccountsAggregate(t *testing.T) {
 
 	yj, rd, pa := got[0], got[1], got[2]
 	// 排序 = Effective 入序（MergeAccounts 已保证），不重整。
-	if yj["name"] != "yanjian" || rd["name"] != "randall" || pa["name"] != "panel-acc" {
+	if yj["name"] != "alpha" || rd["name"] != "bravo" || pa["name"] != "panel-acc" {
 		t.Fatalf("order = %v,%v,%v", yj["name"], rd["name"], pa["name"])
 	}
 
 	if yj["source"] != "config" || yj["config_declared"] != true || yj["has_override"] != true {
-		t.Fatalf("yanjian identity = %v %v %v", yj["source"], yj["config_declared"], yj["has_override"])
+		t.Fatalf("alpha identity = %v %v %v", yj["source"], yj["config_declared"], yj["has_override"])
 	}
 	if yj["credential"] != "literal" || yj["credentials_file"] != "" || yj["disabled"] != false {
-		t.Fatalf("yanjian credential = %v file=%v disabled=%v", yj["credential"], yj["credentials_file"], yj["disabled"])
+		t.Fatalf("alpha credential = %v file=%v disabled=%v", yj["credential"], yj["credentials_file"], yj["disabled"])
 	}
-	sum := sha256.Sum256([]byte("sess-yanjian"))
+	sum := sha256.Sum256([]byte("sess-alpha"))
 	if yj["token_sha"] != fmt.Sprintf("sha256:%x", sum[:6]) {
 		t.Fatalf("token_sha = %v", yj["token_sha"])
 	}
 	lane, _ := yj["lane"].(map[string]any)
 	if lane["healthy"] != true {
-		t.Fatalf("yanjian lane = %v", yj["lane"])
+		t.Fatalf("alpha lane = %v", yj["lane"])
 	}
 	gate, _ := yj["gate"].(map[string]any)
 	if gate["window_quota"].(float64) != 60 || gate["sendable"] != true {
-		t.Fatalf("yanjian gate = %v", yj["gate"])
+		t.Fatalf("alpha gate = %v", yj["gate"])
 	}
 	warm, _ := yj["warm"].(map[string]any)
 	if warm["entries"].(float64) != 12 || warm["ping_hit_rate"].(float64) != 75 || warm["failover_suspects"].(float64) != 2 {
-		t.Fatalf("yanjian warm = %v", yj["warm"])
+		t.Fatalf("alpha warm = %v", yj["warm"])
 	}
 	if yj["inflight"].(float64) != 1 {
-		t.Fatalf("yanjian inflight = %v", yj["inflight"])
+		t.Fatalf("alpha inflight = %v", yj["inflight"])
 	}
 	quota, _ := yj["quota"].(map[string]any)
 	daily, _ := quota["daily"].(map[string]any)
 	if daily["remaining"].(float64) != 70 || daily["burn_per_hour"].(float64) != 30 {
-		t.Fatalf("yanjian quota.daily = %v", quota["daily"])
+		t.Fatalf("alpha quota.daily = %v", quota["daily"])
 	}
 	if _, ok := quota["points"]; ok {
 		t.Fatal("quota must not carry points")
 	}
 	user, _ := quota["user"].(map[string]any)
 	if user["email"] != "a@b.c" {
-		t.Fatalf("yanjian quota.user = %v", quota["user"])
+		t.Fatalf("alpha quota.user = %v", quota["user"])
 	}
 	// 元数据三键恒出（零值也出键）；usage 是 store 投影——数据行喂出
 	// 真实值，分母为 0 的比率位落 null 而非 0。
 	if yj["priority"].(float64) != 0 || yj["max_rpm"].(float64) != 0 || yj["notes"] != "" {
-		t.Fatalf("yanjian meta = %v %v %v", yj["priority"], yj["max_rpm"], yj["notes"])
+		t.Fatalf("alpha meta = %v %v %v", yj["priority"], yj["max_rpm"], yj["notes"])
 	}
 	usage, _ := yj["usage"].(map[string]any)
 	if usage == nil {
-		t.Fatalf("yanjian usage = %v, want projected object", yj["usage"])
+		t.Fatalf("alpha usage = %v, want projected object", yj["usage"])
 	}
 	if usage["rpm_now"].(float64) != 1 || usage["tps_now"].(float64) != 50.0*1000/1500 ||
 		usage["ttfb_avg"].(float64) != 500 || usage["ttfb_p50"].(float64) != 500 ||
 		usage["ttfb_p90"].(float64) != 500 {
-		t.Fatalf("yanjian usage = %v", usage)
+		t.Fatalf("alpha usage = %v", usage)
 	}
 	if d := usage["cache_rate"].(float64); d != 200.0/310 {
-		t.Fatalf("yanjian cache_rate = %v", usage["cache_rate"])
+		t.Fatalf("alpha cache_rate = %v", usage["cache_rate"])
 	}
 	today, _ := usage["today"].(map[string]any)
 	if today["requests"].(float64) != 1 || today["success_rate"].(float64) != 1 ||
 		today["tokens"].(float64) != 360 {
-		t.Fatalf("yanjian usage.today = %v", today)
+		t.Fatalf("alpha usage.today = %v", today)
 	}
 	if yj["created_at"].(float64) != 1758000000000 || yj["updated_at"].(float64) != 1758100000000 {
-		t.Fatalf("yanjian times = %v %v", yj["created_at"], yj["updated_at"])
+		t.Fatalf("alpha times = %v %v", yj["created_at"], yj["updated_at"])
 	}
 
 	// tombstoned：身份与凭据字段仍按生效值投影，lane/gate/warm 全 null，
 	// quota 单样本 → daily/weekly null 但 user 在。
 	if rd["source"] != "tombstoned" || rd["has_override"] != false {
-		t.Fatalf("randall source = %v has_override=%v", rd["source"], rd["has_override"])
+		t.Fatalf("bravo source = %v has_override=%v", rd["source"], rd["has_override"])
 	}
 	if rd["credential"] != "credentials_file" || rd["credentials_file"] == "" {
-		t.Fatalf("randall credential = %v file=%v", rd["credential"], rd["credentials_file"])
+		t.Fatalf("bravo credential = %v file=%v", rd["credential"], rd["credentials_file"])
 	}
 	if rd["token_sha"] != "" {
-		t.Fatalf("randall token_sha = %v, want empty", rd["token_sha"])
+		t.Fatalf("bravo token_sha = %v, want empty", rd["token_sha"])
 	}
 	for _, key := range []string{"lane", "gate", "warm"} {
 		if v, ok := rd[key]; !ok || v != nil {
-			t.Fatalf("randall %s = %v, want explicit null", key, v)
+			t.Fatalf("bravo %s = %v, want explicit null", key, v)
 		}
 	}
 	if rd["inflight"].(float64) != 0 {
-		t.Fatalf("randall inflight = %v", rd["inflight"])
+		t.Fatalf("bravo inflight = %v", rd["inflight"])
 	}
 	rq, _ := rd["quota"].(map[string]any)
 	if v, ok := rq["daily"]; !ok || v != nil {
-		t.Fatalf("randall daily = %v, want explicit null", v)
+		t.Fatalf("bravo daily = %v, want explicit null", v)
 	}
 	if _, ok := rq["user"]; !ok {
-		t.Fatal("randall quota.user missing")
+		t.Fatal("bravo quota.user missing")
 	}
 	// 无日志行的号 usage 仍是投影对象：计数 0、比率/ttfb 位 null。
 	ru, _ := rd["usage"].(map[string]any)
 	if ru == nil || ru["rpm_now"].(float64) != 0 || ru["tps_now"] != nil ||
 		ru["ttfb_p50"] != nil || ru["cache_rate"] != nil {
-		t.Fatalf("randall usage = %v", rd["usage"])
+		t.Fatalf("bravo usage = %v", rd["usage"])
 	}
 	rt, _ := ru["today"].(map[string]any)
 	if rt["requests"].(float64) != 0 || rt["success_rate"] != nil || rt["tokens"].(float64) != 0 {
-		t.Fatalf("randall usage.today = %v", rt)
+		t.Fatalf("bravo usage.today = %v", rt)
 	}
 
 	// panel：config_declared=false、has_override=false；disabled 号无快照。

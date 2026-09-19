@@ -1106,7 +1106,7 @@ func TestRateGateRejectionReasons(t *testing.T) {
 // 放行回执经 GateContext 回填：class/lane/窗口账/排队耗时随
 // X-Gate-* 头数据源透出；未挂接 ctx 的请求不产生回执。
 func TestRateGateVerdictReceipt(t *testing.T) {
-	gate := newRateGate(GateConfig{MaxRPM: 6, BgReserveMargin: 1}, nil, "gate:yanjian")
+	gate := newRateGate(GateConfig{MaxRPM: 6, BgReserveMargin: 1}, nil, "gate:alpha")
 	pinGateClock(gate, 10)
 	ctx, gc := adapter.WithGateContext(context.Background(), adapter.ClassBG)
 	if err := gate.wait(ctx, attemptEnvFrom(ctx), false); err != nil {
@@ -1116,8 +1116,8 @@ func TestRateGateVerdictReceipt(t *testing.T) {
 	if v == nil {
 		t.Fatal("Verdict = nil, want admission receipt")
 	}
-	if v.Class != adapter.ClassBG || v.Lane != "yanjian" {
-		t.Fatalf("verdict = %+v, want class=bg lane=yanjian", v)
+	if v.Class != adapter.ClassBG || v.Lane != "alpha" {
+		t.Fatalf("verdict = %+v, want class=bg lane=alpha", v)
 	}
 	if v.WindowUsed != 1 || v.WindowQuota != 6 {
 		t.Fatalf("verdict window = %d/%d, want 1/6", v.WindowUsed, v.WindowQuota)

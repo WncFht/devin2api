@@ -24,12 +24,12 @@ func TestLaneAttemptCausesRollup(t *testing.T) {
 
 	for _, r := range []*LogRow{
 		{Dir: "c-1", StartedAt: today, Result: "completed", SwitchCauses: map[SwitchCause]int{
-			{Lane: "yanjian", Cause: "local_gate:latch"}:   1,
-			{Lane: "yanjian", Cause: "resource_exhausted"}: 1,
+			{Lane: "alpha", Cause: "local_gate:latch"}:   1,
+			{Lane: "alpha", Cause: "resource_exhausted"}: 1,
 		}},
 		{Dir: "c-2", StartedAt: today, Result: "completed", SwitchCauses: map[SwitchCause]int{
-			{Lane: "yanjian", Cause: "local_gate:latch"}: 1,
-			{Lane: "randall", Cause: "nocode"}:           1,
+			{Lane: "alpha", Cause: "local_gate:latch"}: 1,
+			{Lane: "bravo", Cause: "nocode"}:           1,
 		}},
 	} {
 		if _, err := s.InsertLog(ctx, r); err != nil {
@@ -38,7 +38,7 @@ func TestLaneAttemptCausesRollup(t *testing.T) {
 	}
 	batch := DebugBatch{LogRows: []*LogRow{
 		{Dir: "c-3", StartedAt: today, Result: "completed", SwitchCauses: map[SwitchCause]int{
-			{Lane: "randall", Cause: "local_gate:quota"}: 2,
+			{Lane: "bravo", Cause: "local_gate:quota"}: 2,
 		}},
 	}}
 	if err := s.WriteDebugBatch(ctx, batch); err != nil {
@@ -46,7 +46,7 @@ func TestLaneAttemptCausesRollup(t *testing.T) {
 	}
 	// 同 dir 重放：logs 行被 OR IGNORE 跳过，归因贡献必须同步跳过。
 	batch.LogRows[0].SwitchCauses = map[SwitchCause]int{
-		{Lane: "randall", Cause: "local_gate:quota"}: 5,
+		{Lane: "bravo", Cause: "local_gate:quota"}: 5,
 	}
 	if err := s.WriteDebugBatch(ctx, batch); err != nil {
 		t.Fatalf("WriteDebugBatch replay: %v", err)
@@ -57,10 +57,10 @@ func TestLaneAttemptCausesRollup(t *testing.T) {
 		t.Fatalf("LaneAttemptCauses: %v", err)
 	}
 	want := []LaneAttemptCause{
-		{Date: day, Lane: "randall", Cause: "local_gate:quota", N: 2},
-		{Date: day, Lane: "randall", Cause: "nocode", N: 1},
-		{Date: day, Lane: "yanjian", Cause: "local_gate:latch", N: 2},
-		{Date: day, Lane: "yanjian", Cause: "resource_exhausted", N: 1},
+		{Date: day, Lane: "alpha", Cause: "local_gate:latch", N: 2},
+		{Date: day, Lane: "alpha", Cause: "resource_exhausted", N: 1},
+		{Date: day, Lane: "bravo", Cause: "local_gate:quota", N: 2},
+		{Date: day, Lane: "bravo", Cause: "nocode", N: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("causes = %+v, want %+v", got, want)
@@ -80,10 +80,10 @@ func TestLaneAttemptCausesPrune(t *testing.T) {
 
 	for _, r := range []*LogRow{
 		{Dir: "p-old", StartedAt: old, Result: "completed", SwitchCauses: map[SwitchCause]int{
-			{Lane: "yanjian", Cause: "local_gate"}: 1,
+			{Lane: "alpha", Cause: "local_gate"}: 1,
 		}},
 		{Dir: "p-new", StartedAt: today, Result: "completed", SwitchCauses: map[SwitchCause]int{
-			{Lane: "yanjian", Cause: "nocode"}: 1,
+			{Lane: "alpha", Cause: "nocode"}: 1,
 		}},
 	} {
 		if _, err := s.InsertLog(ctx, r); err != nil {

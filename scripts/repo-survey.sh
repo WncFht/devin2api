@@ -6,8 +6,8 @@
 #（远端是 fish 也别想直接发命令串）。
 #
 #   repo-survey.sh                本机 ~/src/*
-#   repo-survey.sh fht-mba        fht-mba 上 ~/src/*
-#   repo-survey.sh fht-mba '~/src/*'   自定义 glob
+#   repo-survey.sh <host>         <host> 上 ~/src/*
+#   repo-survey.sh <host> '~/src/*'   自定义 glob
 set -u
 
 HOST="${1:-}"

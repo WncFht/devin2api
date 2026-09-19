@@ -21,7 +21,7 @@ node checks/nav.js                          # 单跑某条（需实例在跑，P
 
 - node >= 20、go、bash、curl。
 - 首次运行自动 `npm install` 与 `npx playwright install firefox`；离线或要控版本时先手动装好。
-- 浏览器默认落 `~/.cache/ms-playwright`；`/tmp` 小或 archbox tmpfs 配额紧时设 `PLAYWRIGHT_BROWSERS_PATH=/somewhere/roomy`（已装好的也要重下到新路径），npm 缓存目录同理可用 `TMPDIR` 换。
+- 浏览器默认落 `~/.cache/ms-playwright`；`/tmp` 小或 tmpfs 配额紧时设 `PLAYWRIGHT_BROWSERS_PATH=/somewhere/roomy`（已装好的也要重下到新路径），npm 缓存目录同理可用 `TMPDIR` 换。
 
 ## 检查清单
 

@@ -69,12 +69,12 @@ func TestCreateAccount(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req := accountRequest(http.MethodPost, "/admin/accounts", "",
-		`{"name":"randall","token":"sess-1","disabled":true}`)
+		`{"name":"bravo","token":"sess-1","disabled":true}`)
 	handler.adminCreateAccount(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	if got.Name != "randall" || got.Token != "sess-1" || !got.Disabled || got.CredentialsFile != "" {
+	if got.Name != "bravo" || got.Token != "sess-1" || !got.Disabled || got.CredentialsFile != "" {
 		t.Fatalf("ops input = %+v", got)
 	}
 	env := decodeEnvelope(t, rec)
@@ -85,7 +85,7 @@ func TestCreateAccount(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data["name"] != "randall" {
+	if data["name"] != "bravo" {
 		t.Fatalf("data.name = %v", data["name"])
 	}
 }
@@ -101,15 +101,15 @@ func TestCreateAccountErrors(t *testing.T) {
 	}{
 		{
 			name:     "duplicate",
-			opsErr:   fmt.Errorf("account %q: %w", "randall", store.ErrAccountExists),
+			opsErr:   fmt.Errorf("account %q: %w", "bravo", store.ErrAccountExists),
 			wantCode: http.StatusConflict,
-			wantErr:  `account "randall" already exists`,
+			wantErr:  `account "bravo" already exists`,
 		},
 		{
 			name:     "validation passthrough",
-			opsErr:   errors.New(`devin.accounts[2]: duplicate token with account "yanjian"`),
+			opsErr:   errors.New(`devin.accounts[2]: duplicate token with account "alpha"`),
 			wantCode: http.StatusBadRequest,
-			wantErr:  `devin.accounts[2]: duplicate token with account "yanjian"`,
+			wantErr:  `devin.accounts[2]: duplicate token with account "alpha"`,
 		},
 	}
 	for _, tc := range cases {
@@ -121,7 +121,7 @@ func TestCreateAccountErrors(t *testing.T) {
 			})
 			rec := httptest.NewRecorder()
 			handler.adminCreateAccount(rec, accountRequest(http.MethodPost, "/admin/accounts", "",
-				`{"name":"randall","token":"sess-1"}`))
+				`{"name":"bravo","token":"sess-1"}`))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 			}
@@ -265,7 +265,7 @@ func TestUpdateAccountPatchSemantics(t *testing.T) {
 		},
 	})
 	rec := httptest.NewRecorder()
-	handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/randall", "randall",
+	handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/bravo", "bravo",
 		`{"token":"","disabled":true}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
@@ -281,7 +281,7 @@ func TestUpdateAccountPatchSemantics(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/randall", "randall", `{}`))
+	handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/bravo", "bravo", `{}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty patch status = %d, want 400", rec.Code)
 	}
@@ -347,8 +347,8 @@ func TestUpdateAccountErrors(t *testing.T) {
 		wantCode int
 		wantErr  string
 	}{
-		{"not found", fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
-		{"tombstoned", fmt.Errorf("account %q: %w", "randall", store.ErrAccountTombstoned), http.StatusConflict, `account "randall" is tombstoned; restore first`},
+		{"not found", fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotFound), http.StatusNotFound, `account "bravo" not found`},
+		{"tombstoned", fmt.Errorf("account %q: %w", "bravo", store.ErrAccountTombstoned), http.StatusConflict, `account "bravo" is tombstoned; restore first`},
 		{"validation", errors.New(`devin.accounts[0]: one of token/credentials_file is required`), http.StatusBadRequest, `devin.accounts[0]: one of token/credentials_file is required`},
 	}
 	for _, tc := range cases {
@@ -359,7 +359,7 @@ func TestUpdateAccountErrors(t *testing.T) {
 				},
 			})
 			rec := httptest.NewRecorder()
-			handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/randall", "randall",
+			handler.adminUpdateAccount(rec, accountRequest(http.MethodPut, "/admin/accounts/bravo", "bravo",
 				`{"disabled":true}`))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
@@ -381,9 +381,9 @@ func TestDeleteAccount(t *testing.T) {
 		wantCode  int
 		wantField string
 	}{
-		{"config tombstoned", &store.ResolvedAccount{Name: "randall", ConfigDeclared: true, Source: store.AccountSourceTombstoned}, nil, http.StatusOK, "tombstoned"},
-		{"panel deleted", &store.ResolvedAccount{Name: "randall", Source: store.AccountSourcePanel}, nil, http.StatusOK, "deleted"},
-		{"not found", nil, fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, ""},
+		{"config tombstoned", &store.ResolvedAccount{Name: "bravo", ConfigDeclared: true, Source: store.AccountSourceTombstoned}, nil, http.StatusOK, "tombstoned"},
+		{"panel deleted", &store.ResolvedAccount{Name: "bravo", Source: store.AccountSourcePanel}, nil, http.StatusOK, "deleted"},
+		{"not found", nil, fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotFound), http.StatusNotFound, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -393,7 +393,7 @@ func TestDeleteAccount(t *testing.T) {
 				},
 			})
 			rec := httptest.NewRecorder()
-			handler.adminDeleteAccount(rec, accountRequest(http.MethodDelete, "/admin/accounts/randall", "randall", ""))
+			handler.adminDeleteAccount(rec, accountRequest(http.MethodDelete, "/admin/accounts/bravo", "bravo", ""))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 			}
@@ -408,8 +408,8 @@ func TestDeleteAccount(t *testing.T) {
 			if err := json.Unmarshal(env.Data, &data); err != nil {
 				t.Fatal(err)
 			}
-			if data["name"] != "randall" || data[tc.wantField] != true {
-				t.Fatalf("data = %v, want {name:randall, %s:true}", data, tc.wantField)
+			if data["name"] != "bravo" || data[tc.wantField] != true {
+				t.Fatalf("data = %v, want {name:bravo, %s:true}", data, tc.wantField)
 			}
 		})
 	}
@@ -424,7 +424,7 @@ func TestRestoreAccount(t *testing.T) {
 		},
 	})
 	rec := httptest.NewRecorder()
-	handler.adminRestoreAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/restore", "randall", ""))
+	handler.adminRestoreAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/restore", "bravo", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -434,8 +434,8 @@ func TestRestoreAccount(t *testing.T) {
 		wantCode int
 		wantErr  string
 	}{
-		{fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotTombstoned), http.StatusConflict, `account "randall" is not tombstoned`},
-		{fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
+		{fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotTombstoned), http.StatusConflict, `account "bravo" is not tombstoned`},
+		{fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotFound), http.StatusNotFound, `account "bravo" not found`},
 	}
 	for _, tc := range cases {
 		handler := newWriteOpsHandler(accounts.AccountOps{
@@ -444,7 +444,7 @@ func TestRestoreAccount(t *testing.T) {
 			},
 		})
 		rec := httptest.NewRecorder()
-		handler.adminRestoreAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/restore", "randall", ""))
+		handler.adminRestoreAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/restore", "bravo", ""))
 		if rec.Code != tc.wantCode {
 			t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 		}
@@ -460,7 +460,7 @@ func TestClearAccountCooldown(t *testing.T) {
 		ClearCooldown: func(string) bool { return true },
 	})
 	rec := httptest.NewRecorder()
-	handler.adminClearAccountCooldown(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/clear-cooldown", "randall", ""))
+	handler.adminClearAccountCooldown(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/clear-cooldown", "bravo", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
@@ -469,7 +469,7 @@ func TestClearAccountCooldown(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data["name"] != "randall" || data["cleared"] != true {
+	if data["name"] != "bravo" || data["cleared"] != true {
 		t.Fatalf("data = %v", data)
 	}
 
@@ -477,11 +477,11 @@ func TestClearAccountCooldown(t *testing.T) {
 		ClearCooldown: func(string) bool { return false },
 	})
 	rec = httptest.NewRecorder()
-	handler.adminClearAccountCooldown(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/clear-cooldown", "randall", ""))
+	handler.adminClearAccountCooldown(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/clear-cooldown", "bravo", ""))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
-	if env := decodeEnvelope(t, rec); env.Error != `account "randall" has no live lane` {
+	if env := decodeEnvelope(t, rec); env.Error != `account "bravo" has no live lane` {
 		t.Fatalf("error = %q", env.Error)
 	}
 }
@@ -495,7 +495,7 @@ func TestRefreshAccountQuotaTokenErrors(t *testing.T) {
 		wantCode int
 		wantErr  string
 	}{
-		{"not found", fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
+		{"not found", fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotFound), http.StatusNotFound, `account "bravo" not found`},
 		{"unresolvable", errors.New("credentials_file unreadable"), http.StatusNotFound, "credentials_file unreadable"},
 	}
 	for _, tc := range cases {
@@ -506,7 +506,7 @@ func TestRefreshAccountQuotaTokenErrors(t *testing.T) {
 				},
 			})
 			rec := httptest.NewRecorder()
-			handler.adminRefreshAccountQuota(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/quota/refresh", "randall", ""))
+			handler.adminRefreshAccountQuota(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/quota/refresh", "bravo", ""))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 			}
@@ -527,7 +527,7 @@ func TestTestAccountTokenErrors(t *testing.T) {
 		wantCode int
 		wantErr  string
 	}{
-		{"not found", fmt.Errorf("account %q: %w", "randall", store.ErrAccountNotFound), http.StatusNotFound, `account "randall" not found`},
+		{"not found", fmt.Errorf("account %q: %w", "bravo", store.ErrAccountNotFound), http.StatusNotFound, `account "bravo" not found`},
 		{"unresolvable", errors.New("credentials_file unreadable"), http.StatusNotFound, "credentials_file unreadable"},
 	}
 	for _, tc := range cases {
@@ -538,7 +538,7 @@ func TestTestAccountTokenErrors(t *testing.T) {
 				},
 			})
 			rec := httptest.NewRecorder()
-			handler.adminTestAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/randall/test", "randall", ""))
+			handler.adminTestAccount(rec, accountRequest(http.MethodPost, "/admin/accounts/bravo/test", "bravo", ""))
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.wantCode)
 			}

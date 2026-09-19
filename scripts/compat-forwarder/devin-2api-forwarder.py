@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""TCP forwarder :3003 -> archbox devin-2api.
+"""TCP forwarder :3003 -> remote devin-2api gateway.
 
 Post-migration compat shim: keeps clients still pointing at the old Mac
-gateway (loopback/tailnet/LAN :3003) working by forwarding to archbox.
+gateway (loopback/tailnet/LAN :3003) working by forwarding to the prod host.
 Binds only when :3003 is free — no SO_REUSEPORT, so it can never co-bind
 with a live devin-2api and split traffic.
 """
@@ -10,10 +10,10 @@ import asyncio
 import socket
 import time
 
-TARGET_HOST = "100.121.76.120"
+TARGET_HOST = "<tailnet-ip>"  # 本机示例：填生产网关的 tailnet 地址
 TARGET_PORT = 3033
 BIND_RETRY_S = 0.3
-DIAL_RETRY_S = 90  # bridge archbox restarts without dropping client conns
+DIAL_RETRY_S = 90  # bridge backend restarts without dropping client conns
 
 
 async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):

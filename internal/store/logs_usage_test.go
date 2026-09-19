@@ -293,7 +293,7 @@ func TestAccountAggsFold(t *testing.T) {
 		{Dir: "ag-e0", StartedAt: now, DurationMS: 100, StatusCode: 200, Result: "completed", Account: "", FirstUpstreamMS: fup(10)},
 		{Dir: "ag-e1", StartedAt: now, DurationMS: 300, StatusCode: 200, Result: "completed", Account: "", FirstUpstreamMS: fup(30)},
 		{Dir: "ag-d0", StartedAt: now, DurationMS: 200, StatusCode: 200, Result: "completed", Account: "default", FirstUpstreamMS: fup(20)},
-		{Dir: "ag-yj", StartedAt: now, DurationMS: 500, StatusCode: 200, Result: "completed", Account: "yanjian", FirstUpstreamMS: fup(50)},
+		{Dir: "ag-yj", StartedAt: now, DurationMS: 500, StatusCode: 200, Result: "completed", Account: "alpha", FirstUpstreamMS: fup(50)},
 	}
 	for _, r := range rows {
 		if _, err := s.InsertLog(ctx, r); err != nil {
@@ -306,7 +306,7 @@ func TestAccountAggsFold(t *testing.T) {
 		t.Fatalf("AccountAggs: %v", err)
 	}
 	if len(aggs) != 2 {
-		t.Fatalf("dims = %+v, want default+yanjian 两桶", aggs)
+		t.Fatalf("dims = %+v, want default+alpha 两桶", aggs)
 	}
 	byName := map[string]DimensionAgg{}
 	for _, d := range aggs {
@@ -316,9 +316,9 @@ func TestAccountAggsFold(t *testing.T) {
 	if def.Requests != 3 || def.AvgDuration != 200 || def.AvgTTFB != 20 {
 		t.Fatalf("default 桶 = %+v, want requests=3 avgDur=200 avgTTFB=20", def)
 	}
-	yj := byName["yanjian"]
+	yj := byName["alpha"]
 	if yj.Requests != 1 || yj.AvgDuration != 500 || yj.AvgTTFB != 50 {
-		t.Fatalf("yanjian 桶 = %+v", yj)
+		t.Fatalf("alpha 桶 = %+v", yj)
 	}
 }
 
@@ -332,19 +332,19 @@ func TestAccountUsage(t *testing.T) {
 	yesterday := now.AddDate(0, 0, -1)
 	fup := func(v int64) *int64 { return &v }
 	rows := []*LogRow{
-		// yanjian：今日 3 行（200/500/499）+ 昨日 1 行（边界守卫）。
+		// alpha：今日 3 行（200/500/499）+ 昨日 1 行（边界守卫）。
 		{Dir: "u-y1", StartedAt: now, DurationMS: 2000, StatusCode: 200, Result: "completed",
-			Account: "yanjian", InputTokens: 30, OutputTokens: 50, CacheReadTokens: 10,
+			Account: "alpha", InputTokens: 30, OutputTokens: 50, CacheReadTokens: 10,
 			TotalTokens: 100, FirstUpstreamMS: fup(100)},
 		{Dir: "u-y2", StartedAt: now, DurationMS: 1000, StatusCode: 500, Result: "failed",
-			Account: "yanjian", OutputTokens: 20, TotalTokens: 60},
+			Account: "alpha", OutputTokens: 20, TotalTokens: 60},
 		{Dir: "u-y3", StartedAt: now, DurationMS: 500, StatusCode: 499, Result: "disconnected",
-			Account: "yanjian"},
+			Account: "alpha"},
 		{Dir: "u-y4", StartedAt: yesterday, DurationMS: 100, StatusCode: 200, Result: "completed",
-			Account: "yanjian", TotalTokens: 5},
-		// 别号行——不得漏进 yanjian 的 usage。
+			Account: "alpha", TotalTokens: 5},
+		// 别号行——不得漏进 alpha 的 usage。
 		{Dir: "u-r1", StartedAt: now, DurationMS: 800, StatusCode: 200, Result: "completed",
-			Account: "randall", TotalTokens: 7, FirstUpstreamMS: fup(50)},
+			Account: "bravo", TotalTokens: 7, FirstUpstreamMS: fup(50)},
 		// '' 与 'default' 两群——折叠后同属 default。
 		{Dir: "u-e1", StartedAt: now, DurationMS: 3000, StatusCode: 200, Result: "completed",
 			Account: "", OutputTokens: 6, TotalTokens: 3, FirstUpstreamMS: fup(10)},
@@ -357,7 +357,7 @@ func TestAccountUsage(t *testing.T) {
 		}
 	}
 
-	row, err := s.AccountUsage(ctx, "yanjian")
+	row, err := s.AccountUsage(ctx, "alpha")
 	if err != nil {
 		t.Fatalf("AccountUsage: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestAccountUsage(t *testing.T) {
 		row.Recent.CrTok != 10 || row.Recent.GenMS != 3400 {
 		t.Fatalf("recent = %+v", row.Recent)
 	}
-	// TTFB 样本：yanjian 只有 y1 的 100ms。
+	// TTFB 样本：alpha 只有 y1 的 100ms。
 	if row.TTFB.Samples != 1 || row.TTFB.P50 != 100 || row.TTFB.P90 != 100 || row.TTFBAvgMS != 100 {
 		t.Fatalf("ttfb = %+v avg=%v", row.TTFB, row.TTFBAvgMS)
 	}
@@ -408,7 +408,7 @@ func TestUsageAttemptCauses(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if _, err := s.InsertLog(ctx, &LogRow{
 			Dir: fmt.Sprintf("sr-%d", i), StartedAt: today, Result: "completed",
-			SwitchCauses: map[SwitchCause]int{{Lane: "yanjian", Cause: "local_gate:latch"}: 1},
+			SwitchCauses: map[SwitchCause]int{{Lane: "alpha", Cause: "local_gate:latch"}: 1},
 		}); err != nil {
 			t.Fatalf("InsertLog: %v", err)
 		}
@@ -418,9 +418,9 @@ func TestUsageAttemptCauses(t *testing.T) {
 		t.Fatalf("UsageStats: %v", err)
 	}
 	if len(snap.AttemptCauses) != 1 || snap.AttemptCauses[0].Date != todayDay ||
-		snap.AttemptCauses[0].Lane != "yanjian" || snap.AttemptCauses[0].Cause != "local_gate:latch" ||
+		snap.AttemptCauses[0].Lane != "alpha" || snap.AttemptCauses[0].Cause != "local_gate:latch" ||
 		snap.AttemptCauses[0].N != 2 {
-		t.Fatalf("attempt_causes = %+v, want 今日 yanjian/local_gate:latch n=2", snap.AttemptCauses)
+		t.Fatalf("attempt_causes = %+v, want 今日 alpha/local_gate:latch n=2", snap.AttemptCauses)
 	}
 }
 
@@ -455,8 +455,8 @@ func TestUsageSendsPerRow(t *testing.T) {
 	// 今日 sends=4（跨 lane 合计：3fg+1bg，其中 retry_admits=1）；昨日
 	// sends=2 但无 logs 行——纯探针日进序列、ratio 缺省。
 	for _, w := range []*GateWindow{
-		{Lane: "yanjian", WindowStart: today.Unix(), UsedFg: 3, UsedBg: 1, RetryAdmits: 1},
-		{Lane: "randall", WindowStart: yesterday.Unix(), UsedFg: 2},
+		{Lane: "alpha", WindowStart: today.Unix(), UsedFg: 3, UsedBg: 1, RetryAdmits: 1},
+		{Lane: "bravo", WindowStart: yesterday.Unix(), UsedFg: 2},
 	} {
 		if err := s.InsertGateWindow(ctx, w); err != nil {
 			t.Fatalf("InsertGateWindow: %v", err)

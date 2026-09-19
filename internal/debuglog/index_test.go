@@ -243,11 +243,11 @@ func TestIndexSwitchCauses(t *testing.T) {
 	defer manager.Close()
 
 	recorder := manager.Start(RequestMeta{Method: "POST", Path: "/v1/messages"})
-	recorder.NoteAccountAttempt("yanjian", &llm.Failure{
+	recorder.NoteAccountAttempt("alpha", &llm.Failure{
 		Code: "resource_exhausted", LocalGate: true, GateReason: "latch"})
-	recorder.NoteAccountAttempt("yanjian", &llm.Failure{
+	recorder.NoteAccountAttempt("alpha", &llm.Failure{
 		Code: "resource_exhausted", Message: "upstream 429"})
-	recorder.NoteAccountAttempt("randall", errors.New("connection reset by peer"))
+	recorder.NoteAccountAttempt("bravo", errors.New("connection reset by peer"))
 	recorder.Complete(Completion{StatusCode: 200, Result: "completed"})
 	waitDrained(recorder)
 
@@ -257,9 +257,9 @@ func TestIndexSwitchCauses(t *testing.T) {
 		t.Fatalf("LaneAttemptCauses: %v", err)
 	}
 	want := []store.LaneAttemptCause{
-		{Date: day, Lane: "randall", Cause: "nocode", N: 1},
-		{Date: day, Lane: "yanjian", Cause: "local_gate:latch", N: 1},
-		{Date: day, Lane: "yanjian", Cause: "resource_exhausted", N: 1},
+		{Date: day, Lane: "alpha", Cause: "local_gate:latch", N: 1},
+		{Date: day, Lane: "alpha", Cause: "resource_exhausted", N: 1},
+		{Date: day, Lane: "bravo", Cause: "nocode", N: 1},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("causes = %+v, want %+v", got, want)

@@ -543,7 +543,7 @@ func TestImportQuotaMixedAccounts(t *testing.T) {
 	writeJSONLines(t, filepath.Join(logRoot, "quota.jsonl"), []string{
 		`{"at":100}`,                     // 单号时代：无 account
 		`{"at":200,"account":"default"}`, //
-		`{"at":300,"account":"randall","daily_remaining":7.5}`,  //
+		`{"at":300,"account":"bravo","daily_remaining":7.5}`,    //
 		`{"at":200,"account":"default","daily_remaining":99.9}`, // 撞 (account,at)，IGNORE
 		`{"at":100,"account":"default"}`,                        // 与首行同 at 但不同 account
 		`{"at":"nope"}`,                                         // 坏行
@@ -576,8 +576,8 @@ func TestImportQuotaMixedAccounts(t *testing.T) {
 		t.Fatalf("(default,200) daily_remaining = %v, want nil (first insert wins)",
 			*qs[1].DailyRemaining)
 	}
-	if qs, err = s.ListQuotaSamples(ctx, "randall", 0, 0); err != nil || len(qs) != 1 {
-		t.Fatalf("randall samples = %v %v", qs, err)
+	if qs, err = s.ListQuotaSamples(ctx, "bravo", 0, 0); err != nil || len(qs) != 1 {
+		t.Fatalf("bravo samples = %v %v", qs, err)
 	}
 	migrated(t, filepath.Join(logRoot, "quota.jsonl"))
 }

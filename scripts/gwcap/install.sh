@@ -1,7 +1,7 @@
 #!/bin/sh
 # gwcap 装机/卸载/状态——本机出向并发闸，当前为留档未部署状态。
 # 用法：sudo sh scripts/gwcap/install.sh [install|uninstall|status]
-# 机制：nftables `inet gwcap` output nat 把到网关 100.105.212.52 / fd7a:115c:a1e0::e501:d434 的 tcp/3003 REDIRECT 到
+# 机制：nftables `inet gwcap` output nat 把到网关 $GWCAP_TARGET_V4 / $GWCAP_TARGET_V6 的 tcp/3003 REDIRECT 到
 # 127.0.0.1+::1 :3399 的 gw-cap-proxy（gwcap 用户自己的上游连接按 skuid 豁免），
 # 代理对 model 命中 swe-2-medium 的请求过全局信号量（代理默认 4，部署单元以
 # Environment=GWCAP_LIMIT=20 覆盖），其余透传。
@@ -17,6 +17,9 @@ HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 case "${1:-install}" in
 install)
+  # 网关 tailnet 地址由部署方注入（本机示例已下线留档，不设默认值）
+  GWCAP_TARGET_V4="${GWCAP_TARGET_V4:?set GWCAP_TARGET_V4 to the gateway tailnet IPv4}"
+  GWCAP_TARGET_V6="${GWCAP_TARGET_V6:?set GWCAP_TARGET_V6 to the gateway tailnet IPv6}"
   if ! id gwcap >/dev/null 2>&1; then
     useradd -r -U -M -s /usr/bin/nologin gwcap
   fi
@@ -28,8 +31,8 @@ install)
     'table inet gwcap {' \
     '  chain output {' \
     '    type nat hook output priority dstnat; policy accept;' \
-    "    ip daddr 100.105.212.52 tcp dport 3003 meta skuid != $uid redirect to :3399" \
-    "    ip6 daddr fd7a:115c:a1e0::e501:d434 tcp dport 3003 meta skuid != $uid redirect to :3399" \
+    "    ip daddr $GWCAP_TARGET_V4 tcp dport 3003 meta skuid != $uid redirect to :3399" \
+    "    ip6 daddr $GWCAP_TARGET_V6 tcp dport 3003 meta skuid != $uid redirect to :3399" \
     '  }' \
     '}' | tee "$LIB/redirect.nft" >/dev/null
   install -D -m 0644 "$HERE/gw-cap-proxy.service" "$UNITS/gw-cap-proxy.service"
