@@ -974,7 +974,7 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 	decoder := newResponseDecoder(model, request.StopSequences, customToolNames(request.Tools), serverTools)
 	// postProgressTimeout 解析 post-content 无进度档（工具调用参数的
 	// 长静默计算）——cfg <=0 回落默认；Stream 构造的流恒有值，测试
-	// 裸流留零走 progressDeadline 的旧值回落。preProgressTimeout 是
+	// 裸流留零走 deadlines.progress 的回落档。preProgressTimeout 是
 	// 它的 pre 对偶档，同法回落 upstreamNoProgressTimeout。
 	postProgressTimeout := cfg.NoProgressTimeout
 	if postProgressTimeout <= 0 {
@@ -985,21 +985,23 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		preProgressTimeout = upstreamNoProgressTimeout
 	}
 	response := &responseStream{
-		frames:              pumpUpstream(streamCtx, stream),
-		cancel:              cancel,
-		decoder:             decoder,
-		recorder:            recorder,
-		gate:                adapter.gate,
-		warm:                adapter.warm,
-		warmKey:             warmKey,
-		postProgressTimeout: postProgressTimeout,
-		preProgressTimeout:  preProgressTimeout,
-		// 累计静默上限的锚点：流刚建立，距首个上游发送只有建流往返，
-		// pre-event 死等预算从这一刻起跨换流累计。
-		firstSentAt: time.Now(),
-		detachKey:   detachKey,
-		registry:    adapter.detached,
-		entry:       &detachedEntry{notify: make(chan struct{})},
+		frames:   pumpUpstream(streamCtx, stream),
+		cancel:   cancel,
+		decoder:  decoder,
+		recorder: recorder,
+		gate:     adapter.gate,
+		warm:     adapter.warm,
+		warmKey:  warmKey,
+		deadlines: streamDeadlines{
+			postProgress: postProgressTimeout,
+			preProgress:  preProgressTimeout,
+			// 累计静默上限的锚点：流刚建立，距首个上游发送只有建流
+			// 往返，pre-event 死等预算从这一刻起跨换流累计。
+			firstSentAt: time.Now(),
+		},
+		detachKey: detachKey,
+		registry:  adapter.detached,
+		entry:     &detachedEntry{notify: make(chan struct{})},
 		// 上游流建立后、产出任何内容前的失败允许整体重发一次：
 		// 传输层断裂与 unauthenticated（凭据自愈）重试能改变结果；
 		// 上游语义拒绝（参数校验/权限/限流）重试只会复现同样失败，直接放行。
@@ -1634,51 +1636,6 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 	return models, nil
 }
 
-// upstreamStallTimeout 是上游首帧确认前允许的最长静默（pre-frame0 档）：
-// 上游收下请求到发出首个确认帧之间没有心跳帧覆盖，排队深度无实测上界，
-// 窗口取保守值；超时即判定传输层已死（半开连接、上游挂死），按传输错误
-// 收尾而不是无限等待。
-// var 而非 const：测试临时缩短它来覆盖超时路径。
-var upstreamStallTimeout = 120 * time.Second
-
-// upstreamConfirmedStallTimeout 是首个上游帧到达后相邻帧之间允许的最长
-// 静默（post-frame0 档）：prod 04 帧时标重建显示上游在 ~60.0s 帧静默
-// 边界发 latency 心跳帧，26536 个健康帧间隔硬顶 60000.84ms——90s 是
-// 心跳周期 + 到达余量，可证零误杀；60s 档与心跳同周期禁用。继续沿用
-// pre-frame0 档只是让 stalled 重试每次多等 ~30s 检测延迟。
-var upstreamConfirmedStallTimeout = 90 * time.Second
-
-// upstreamNoProgressTimeout 是「无内容进度」期限：任意帧（含上游
-// latency 活性帧）喂 stall 看门狗，但只有产出事件的帧喂它。上游实测
-// 合法内容帧间隔上限 ~60s，而退化上游可能周期性发零事件帧无限续命
-// （latency 心跳/元数据帧）——10min 是观察值 10 倍余量的兜底。
-// 它只管产出首个事件之前；产出过之后走 progressDeadline 的 post 档。
-// var 而非 const：测试临时缩短它来覆盖超时路径。覆盖旋钮是
-// devin.pre_event_no_progress_timeout_seconds。
-var upstreamNoProgressTimeout = 10 * time.Minute
-
-// upstreamPreEventSilenceCap 是首个可解码事件产出前允许的累计静默
-// 上限：从首条上游流建立起算、跨 pre-content 重开累计，重开的新流只
-// 继承剩余额度而不是重开一扇窗。prod 实测退化形态是上游收单后只发
-// ack/心跳包络续命、永不产出事件——逐次重开的 10min 档会把死等拖到
-// 远超客户端 ~300s 耐心（~150 例/30h 全部以 client_disconnected 收场
-// 且烧满座位）。180s 给合法慢首字留足余量（实测 pre-event 静默上界远
-// 低于它，60s 心跳帧都到不了两拍），到期按传输错误收尾释放 lane。
-// var 供测试缩短。
-var upstreamPreEventSilenceCap = 180 * time.Second
-
-// defaultPostProgressTimeout 是 post-content 无进度档的默认值：上游在
-// 工具调用参数阶段可静默计算 15-25min 只发心跳帧（实测 archbox 案例
-// 17min+ 静默后一次性下 args），pre-content 的 10min 档必误杀。45min
-// 覆盖该形态并留一倍余量；覆盖旋钮是 devin.no_progress_timeout_seconds。
-var defaultPostProgressTimeout = 45 * time.Minute
-
-// upstreamTailGrace 是消费到 stopReason 之后等待流终止帧的宽限。
-// 实测健康流的尾帧（usage/dim/endstream）在 stopReason 后 <1ms 到达；
-// connect-go 读到 endstream envelope 还会排空 body 等传输 EOF，上游
-// 不关 body 时会卡到看门狗——语义内容已齐时按正常收尾，不再等。
-var upstreamTailGrace = 15 * time.Second
-
 // startHoldTimeout 是 start 事件（message_start/response.created）允许被
 // 扣留的最长时间。扣留的目的是给上游「产出内容前就失败」留一个返回真实
 // HTTP 状态码的窗口——实测这类失败全部在 ~9s 内落定；而下游客户端在
@@ -1773,8 +1730,9 @@ type responseStream struct {
 	// Done 事件触发条目分类与 prefix 尺寸观测（见 release）。
 	warm    *cacheWarmer
 	warmKey warmLineageKey
-	// retried 表示已经做过一次 pre-content 整体重试（上限 1 次）。
-	retried bool
+	// retry 是两类流级重试（pre-content 整体重开 / 截断续传）的预算
+	// 计数与准入判定，纯值类型见 streampolicy.go。
+	retry retryPolicy
 	// reopen 在可重试的 pre-content 失败（传输断裂、凭据自愈后的
 	// unauthenticated、静默看门狗判死）时重发请求并返回新泵；
 	// continueEmpty 表示空 end_turn 续传：追加 "continue" 用户消息。
@@ -1791,8 +1749,6 @@ type responseStream struct {
 	extend func(cause string, extra []llm.Message, seed []llm.Content) (<-chan upstreamFrame, context.CancelFunc, *responseDecoder, error)
 	// hops 是已执行的服务端托管续轮数，封顶见 maxServerSearchHops。
 	hops int
-	// resumeAttempts 是已执行的截断续传次数，封顶见 maxStreamResumes。
-	resumeAttempts int
 	// costsCarry 累计已完成的托管续轮跳的上游 CreditCost：上游按跳
 	// 分别记账，收尾时并入最终 Done 的 Usage（见 applyCostsCarry）。
 	costsCarry int64
@@ -1805,20 +1761,10 @@ type responseStream struct {
 	// 「消费方活跃等待期间零事件」，Stop 会让首个内容事件后的
 	// 零事件帧续命逃过看门狗，流无限挂起。
 	progress *time.Timer
-	// postProgressTimeout 是「产出过内容之后」的无进度档：上游在
-	// 工具调用参数阶段可静默计算 15-25min 只发心跳，pre-content 的
-	// 10min 档必误杀这类合法静默。<=0 时 progressDeadline 回落
-	// upstreamNoProgressTimeout（测试构造的裸流语义不变）。
-	postProgressTimeout time.Duration
-	// preProgressTimeout 是「产出首个事件之前」每段等待的无进度档
-	// （postProgressTimeout 的 pre 对偶）：<=0 同样回落
-	// upstreamNoProgressTimeout。
-	preProgressTimeout time.Duration
-	// firstSentAt 是首条上游流建立的时刻锚点：pre-event 累计静默上限
-	// （upstreamPreEventSilenceCap）从它起算且跨换流累计——tryReopen
-	// 重开的新流只继承剩余额度，逐次重开不再各得一扇 10min 死等窗。
-	// 零值（测试构造的裸流）不启用上限。
-	firstSentAt time.Time
+	// deadlines 收拢两个看门狗的全部期限算术：分档档值（pre/post
+	// 无进度窗）与累计静默上限的锚点（首发起算、跨换流累计）。
+	// 纯值类型零 I/O 零锁，方法与语义见 streampolicy.go。
+	deadlines streamDeadlines
 	// detachKey/registry/entry 是完成缓存挂接面：key 是语义请求
 	// 哈希（detachedRequestKey），entry 自建流起经 Recv 返回点 tee
 	// 累积全部下发事件（重试方需要含前缀的完整序列），registry 持
@@ -1860,10 +1806,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	// 已触发（stall.C 分支）的计时器 Reset 重新武装即可。
 	stall := stream.stall
 	if stall == nil {
-		stall = time.NewTimer(stream.stallDeadline())
+		stall = time.NewTimer(stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 		stream.stall = stall
 	} else {
-		stall.Reset(stream.stallDeadline())
+		stall.Reset(stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 	}
 	defer stall.Stop()
 	// progress 与 stall 同构：计时器跨 Recv 复用，消费方每次进入等待
@@ -1876,10 +1822,10 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 	if !stream.detached.Load() {
 		progress = stream.progress
 		if progress == nil {
-			progress = time.NewTimer(stream.progressDeadline())
+			progress = time.NewTimer(stream.deadlines.progress(stream.producedEvents.Load(), time.Now()))
 			stream.progress = progress
 		} else {
-			progress.Reset(stream.progressDeadline())
+			progress.Reset(stream.deadlines.progress(stream.producedEvents.Load(), time.Now()))
 		}
 		progressC = progress.C
 	} else if stream.progress != nil {
@@ -1922,7 +1868,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		// 收紧；stopReason 之后只剩尾帧（实测 <1ms 到达）再缩到尾部
 		// 宽限——connect-go 排空 body 等传输 EOF 时上游不关连接会把
 		// 正常收尾拖成 stall。
-		stall.Reset(stream.stallDeadline())
+		stall.Reset(stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 		var startHold <-chan time.Time
 		if stream.startHold != nil {
 			startHold = stream.startHold.C
@@ -1992,7 +1938,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			if len(events) > 0 {
 				stream.producedEvents.Store(true)
 				if progress != nil {
-					progress.Reset(stream.progressDeadline())
+					progress.Reset(stream.deadlines.progress(stream.producedEvents.Load(), time.Now()))
 				}
 			}
 			stream.queue = stream.release(events)
@@ -2018,7 +1964,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 				stream.finished.Store(true)
 				continue
 			}
-			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", stream.stallDeadline())
+			stallErr := fmt.Errorf("devin stream stalled: no frames for %s", stream.deadlines.stall(stream.decoder.hasStopReason, stream.upstreamConfirmed))
 			if stream.tryReopen(stallErr, false) {
 				continue
 			}
@@ -2034,7 +1980,7 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			// post-content 按传输错误收尾。
 			stream.cancel()
 			stream.drainFrames()
-			progressErr := fmt.Errorf("devin stream made no progress for %s", stream.progressBound())
+			progressErr := fmt.Errorf("devin stream made no progress for %s", stream.deadlines.progressBound(stream.producedEvents.Load(), time.Now()))
 			if stream.tryReopen(progressErr, false) {
 				continue
 			}
@@ -2101,63 +2047,6 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 		return event, nil
 	}
 	return llm.ResponseEvent{}, io.EOF
-}
-
-// stallDeadline 按流的语义状态给静默看门狗分档：上游首帧确认前没有
-// 心跳帧覆盖（排队深度无界），取 upstreamStallTimeout 保守窗；首个
-// 非错误帧到达后帧间隔被上游 ~60s 心跳硬顶，收紧到
-// upstreamConfirmedStallTimeout；消费到 stopReason 后只剩传输尾帧，
-// 再缩到 upstreamTailGrace。换流（swap/tryResume）复位
-// upstreamConfirmed，新流重新从无覆盖档计起。
-func (stream *responseStream) stallDeadline() time.Duration {
-	if stream.decoder.hasStopReason {
-		return upstreamTailGrace
-	}
-	if stream.upstreamConfirmed {
-		return upstreamConfirmedStallTimeout
-	}
-	return upstreamStallTimeout
-}
-
-// progressDeadline 是无进度看门狗本轮的武装时长：分档窗口（见
-// progressWindow）之外，pre-event 档再被累计静默上限截顶——额度从
-// firstSentAt 起算且跨换流累计，换流后新流只继承剩余额度。
-// post-event 与裸流（firstSentAt 零值）不受上限影响。
-func (stream *responseStream) progressDeadline() time.Duration {
-	window := stream.progressWindow()
-	if stream.producedEvents.Load() || stream.firstSentAt.IsZero() {
-		return window
-	}
-	if remain := time.Until(stream.firstSentAt.Add(upstreamPreEventSilenceCap)); remain < window {
-		return remain
-	}
-	return window
-}
-
-// progressWindow 给无进度看门狗分档：首个事件产出前取
-// preProgressTimeout（还没产出就死等价值不大）；产出过之后取
-// postProgressTimeout——上游在工具调用参数阶段可静默计算 15-25min
-// 只发心跳，pre 档必误杀这类合法静默。裸流（对应档 <=0）回落
-// upstreamNoProgressTimeout，保持测试构造的既有语义。
-func (stream *responseStream) progressWindow() time.Duration {
-	if stream.producedEvents.Load() && stream.postProgressTimeout > 0 {
-		return stream.postProgressTimeout
-	}
-	if !stream.producedEvents.Load() && stream.preProgressTimeout > 0 {
-		return stream.preProgressTimeout
-	}
-	return upstreamNoProgressTimeout
-}
-
-// progressBound 给 progressC 触发的错误归因取生效期限：触发点重算
-// progressDeadline 会把已耗尽的累计静默上限残余误报成 ~0——上限已过
-// 时报上限本身，其余回到分档窗口。
-func (stream *responseStream) progressBound() time.Duration {
-	if !stream.producedEvents.Load() && !stream.firstSentAt.IsZero() &&
-		!time.Now().Before(stream.firstSentAt.Add(upstreamPreEventSilenceCap)) {
-		return upstreamPreEventSilenceCap
-	}
-	return stream.progressWindow()
 }
 
 // detachable 判定这条流客户端断开后是否值得脱钩续命：七个条件缺一
@@ -2306,15 +2195,8 @@ func (stream *responseStream) kill() {
 // continueEmpty 为空 end_turn 续传：流正常结束但零内容时重发并
 // 追加 "continue" 用户消息（空轮是上游实测退化形态，CPA#4886 同构）。
 func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
-	if stream.retried || stream.producedEvents.Load() || stream.reopen == nil {
-		return false
-	}
-	if cause == nil && !continueEmpty {
-		return false
-	}
-	// 累计静默上限已耗尽时重开只剩 ~0s 预算：新流活不过第一次看门狗
-	// 评估，白烧一发上游发送——直接按原失败收尾。
-	if !stream.firstSentAt.IsZero() && !time.Now().Before(stream.firstSentAt.Add(upstreamPreEventSilenceCap)) {
+	if stream.reopen == nil ||
+		!stream.retry.reopenable(stream.producedEvents.Load(), cause, continueEmpty, stream.deadlines.silenceCapExhausted(time.Now())) {
 		return false
 	}
 
@@ -2322,7 +2204,7 @@ func (stream *responseStream) tryReopen(cause error, continueEmpty bool) bool {
 	if err != nil {
 		return false
 	}
-	stream.retried = true
+	stream.retry.reopened = true
 	stream.swap(frames, cancel, stream.newDecoder())
 	return true
 }
@@ -2350,14 +2232,9 @@ func (stream *responseStream) swap(frames <-chan upstreamFrame, cancel context.C
 	// firstSentAt 的累计静默上限截顶——重开只继承剩余额度，不是
 	// 重置预算。脱钩流无 progress 看门狗（nil），跳过武装。
 	if stream.progress != nil {
-		stream.progress.Reset(stream.progressDeadline())
+		stream.progress.Reset(stream.deadlines.progress(stream.producedEvents.Load(), time.Now()))
 	}
 }
-
-// maxStreamResumes 是单条响应允许的截断续传次数：每次续传都把整段
-// 上下文重发再计费一遍，封顶防止对挂死上游反复烧配额。var 供测试
-// 缩短。
-var maxStreamResumes = 2
 
 // tryResume 在「内容已部分下发、上游流被截断」时续传：在飞块物化进
 // partial 后拼成 assistant 回显、追加 "continue" 用户消息整体重发——
@@ -2370,9 +2247,9 @@ var maxStreamResumes = 2
 // stopReason 或被本地停止序列截断的流（语义内容已齐，续传会在
 // 停止标记之后再长出一块内容）。
 func (stream *responseStream) tryResume(cause error) bool {
-	if stream.extend == nil || !stream.producedEvents.Load() || stream.decoder.hasStopReason ||
-		stream.decoder.stoppedByPattern || stream.resumeAttempts >= maxStreamResumes ||
-		len(stream.decoder.tools) > 0 {
+	sealed := stream.decoder.hasStopReason || stream.decoder.stoppedByPattern
+	if stream.extend == nil ||
+		!stream.retry.resumable(stream.producedEvents.Load(), sealed, len(stream.decoder.tools) > 0) {
 		return false
 	}
 	// 物化在飞块并产接缝事件：end 让客户端看到干净块边界，续流
@@ -2417,8 +2294,8 @@ func (stream *responseStream) tryResume(cause error) bool {
 	if costs := partial.Usage.Costs; costs != nil {
 		stream.costsCarry += costs.CreditCost
 	}
-	stream.resumeAttempts++
-	slog.Warn("resuming truncated stream", "attempt", stream.resumeAttempts, "error", cause)
+	stream.retry.resumes++
+	slog.Warn("resuming truncated stream", "attempt", stream.retry.resumes, "error", cause)
 	// 换流同 tryReopen：杀旧泵、重置窗口，新解码器已播种旧内容。
 	stream.cancel()
 	stream.frames = frames
@@ -2428,7 +2305,7 @@ func (stream *responseStream) tryResume(cause error) bool {
 	stream.finished.Store(false)
 	stream.upstreamConfirmed = false
 	if stream.progress != nil {
-		stream.progress.Reset(stream.progressDeadline())
+		stream.progress.Reset(stream.deadlines.progress(stream.producedEvents.Load(), time.Now()))
 	}
 	stream.queue = seam
 	return true
@@ -2472,12 +2349,12 @@ func (stream *responseStream) recordUpstreamFailure(cause error) {
 	// 走到这里说明 reopen/resume 都已拒绝：把两侧门禁快照落成 04 标记行，
 	// 「为什么没续」（典型：在飞工具调用）不必靠反推 retries=0。
 	stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "retry_declined", map[string]any{
-		"retried":            stream.retried,
+		"retried":            stream.retry.reopened,
 		"produced_events":    stream.producedEvents.Load(),
 		"tools_in_flight":    len(stream.decoder.tools),
 		"has_stop_reason":    stream.decoder.hasStopReason,
 		"stopped_by_pattern": stream.decoder.stoppedByPattern,
-		"resume_attempts":    stream.resumeAttempts,
+		"resume_attempts":    stream.retry.resumes,
 	})
 }
 

@@ -1451,11 +1451,11 @@ func TestResponseStreamPreEventSilenceCapCumulatesAcrossReopen(t *testing.T) {
 	defer close(receiver.release)
 	reopened := false
 	stream := &responseStream{
-		frames:      pumpUpstream(context.Background(), receiver),
-		cancel:      func() {},
-		decoder:     newResponseDecoder("model", nil, nil, nil),
-		gate:        newRateGate(GateConfig{}, nil, ""),
-		firstSentAt: time.Now(),
+		frames:    pumpUpstream(context.Background(), receiver),
+		cancel:    func() {},
+		decoder:   newResponseDecoder("model", nil, nil, nil),
+		gate:      newRateGate(GateConfig{}, nil, ""),
+		deadlines: streamDeadlines{firstSentAt: time.Now()},
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			// 新流只发零事件活性帧：stall 看门狗被帧到达喂活，
@@ -1500,11 +1500,11 @@ func TestResponseStreamReopenRefusedAfterSilenceCap(t *testing.T) {
 	}}
 	reopened := false
 	stream := &responseStream{
-		frames:      pumpUpstream(context.Background(), receiver),
-		cancel:      func() {},
-		decoder:     newResponseDecoder("model", nil, nil, nil),
-		gate:        newRateGate(GateConfig{}, nil, ""),
-		firstSentAt: time.Now(),
+		frames:    pumpUpstream(context.Background(), receiver),
+		cancel:    func() {},
+		decoder:   newResponseDecoder("model", nil, nil, nil),
+		gate:      newRateGate(GateConfig{}, nil, ""),
+		deadlines: streamDeadlines{firstSentAt: time.Now()},
 		reopen: func(cause error, _ bool) (<-chan upstreamFrame, context.CancelFunc, error) {
 			reopened = true
 			return nil, nil, cause

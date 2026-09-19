@@ -770,23 +770,21 @@ func TestDetachedEntryFinishClassifies(t *testing.T) {
 }
 
 // TestProgressDeadlineTiers 钉住无进度期限的两档：产出前是 pre 档，
-// 产出过内容后切到 postProgressTimeout（覆盖工具参数静默计算）。
+// 产出过内容后切到 postProgress（覆盖工具参数静默计算）。
 func TestProgressDeadlineTiers(t *testing.T) {
 	defer func(d time.Duration) { upstreamNoProgressTimeout = d }(upstreamNoProgressTimeout)
 	upstreamNoProgressTimeout = 30 * time.Millisecond
-	stream := &responseStream{postProgressTimeout: 90 * time.Millisecond}
-	if got := stream.progressDeadline(); got != upstreamNoProgressTimeout {
+	deadlines := streamDeadlines{postProgress: 90 * time.Millisecond}
+	if got := deadlines.progress(false, time.Now()); got != upstreamNoProgressTimeout {
 		t.Fatalf("pre-content deadline = %v, want %v", got, upstreamNoProgressTimeout)
 	}
-	stream.producedEvents.Store(true)
-	if got := stream.progressDeadline(); got != 90*time.Millisecond {
+	if got := deadlines.progress(true, time.Now()); got != 90*time.Millisecond {
 		t.Fatalf("post-content deadline = %v, want 90ms", got)
 	}
-	// 裸流（postProgressTimeout 零值）回落 pre 档——测试构造语义不变。
-	bare := &responseStream{}
-	bare.producedEvents.Store(true)
-	if got := bare.progressDeadline(); got != upstreamNoProgressTimeout {
-		t.Fatalf("bare stream deadline = %v, want %v", got, upstreamNoProgressTimeout)
+	// 零档值回落 upstreamNoProgressTimeout——测试构造语义不变。
+	bare := streamDeadlines{}
+	if got := bare.progress(true, time.Now()); got != upstreamNoProgressTimeout {
+		t.Fatalf("bare deadlines = %v, want %v", got, upstreamNoProgressTimeout)
 	}
 }
 
