@@ -120,6 +120,9 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		return encoder.toolCallDelta(event)
 	case llm.ResponseEventToolCallEnd:
 		return encoder.endToolCall(event)
+	case llm.ResponseEventServerToolResult:
+		// Chat Completions 没有服务端工具结果的回放概念，与签名帧同档跳过。
+		return nil, nil
 	case llm.ResponseEventDone:
 		return encoder.finish(event), nil
 	case llm.ResponseEventError:
