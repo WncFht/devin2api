@@ -771,11 +771,14 @@ func (p *gateYieldProbe) attach(ctx context.Context) context.Context {
 
 // eval 求兄弟侧期望排队最小值（谓词本体——锁外求值，不得依赖调用方
 // 持锁）；落进让位阈值时把 argmin 兄弟记入 target 作 failover 首选。
+// 只读兄弟闸门的准入裁决：池侧冷却不进让位问题——这是闸门问的「兄
+// 弟闸门能不能更快放行」，落点合不合适由 failover 侧自己的 verdict
+// 再判，探针也不该为读 ew 顺手触发兄弟冷却簿记的惰性清账。
 func (p *gateYieldProbe) eval() (time.Duration, bool) {
 	minEW := time.Duration(math.MaxInt64)
 	var best *poolLane
 	for _, lane := range p.rest {
-		if ew := lane.verdict(p.class).expectedWait; ew < minEW {
+		if ew := lane.adapter.gate.admissionVerdict(p.class).ExpectedWait; ew < minEW {
 			minEW, best = ew, lane
 		}
 	}
@@ -859,10 +862,11 @@ type laneVerdict struct {
 
 // verdict 对 lane 做一次完整健康评估：降级原因按固定序叠加
 // （auth_cooldown → generic_cooldown → gate_latched → gate_window_deadzone
-// → gate_window_full → quota_low），调用方各取所需（排序取 bucket、审计取 reasons、
-// healthy() 取 healthy、权重取 expectedWait）。class 决定闸门期望
-// 排队按哪条准入轨估计；healthy()/state() 等只关心健康面的调用方
-// 传 fg（默认视图——健康判定本身与类无关，expectedWait 才分轨）。
+// → gate_window_full → quota_low——闸门侧三词由 admissionVerdict 整段
+// 带回，池侧只叠自己的冷却与配额低），调用方各取所需（排序取 bucket、
+// 审计取 reasons、healthy() 取 healthy、权重取 expectedWait）。class
+// 决定闸门期望排队按哪条准入轨估计；healthy()/state() 等只关心健康面
+// 的调用方传 fg（默认视图——健康判定本身与类无关，expectedWait 才分轨）。
 // quotaLow 不进 hardDown/病档——它是降权不是故障，配额低 lane 留在
 // 健康档内降一级。
 func (lane *poolLane) verdict(class string) laneVerdict {
@@ -875,24 +879,10 @@ func (lane *poolLane) verdict(class string) laneVerdict {
 		v.hardDown = true
 		v.reasons = append(v.reasons, "generic_cooldown")
 	}
-	snap := lane.adapter.gate.admissionSnapshot(class)
-	v.expectedWait = snap.ExpectedWait
-	if snap.Latched {
-		v.reasons = append(v.reasons, "gate_latched")
-	}
-	// 死区与桶满分记：死区是窗界两侧的停发段（整形——同池 lane 同相
-	// 判病，不含本 lane 容量信号），桶满是本 lane 配额真耗尽。死区内
-	// 桶仍满时两词并存，审计据此区分整形态停发与真实饱和。
-	windowDeadzone := snap.WindowQuota > 0 && !snap.Sendable
-	windowSaturated := snap.WindowQuota > 0 && snap.WindowUsed >= snap.WindowQuota
-	if windowDeadzone {
-		v.reasons = append(v.reasons, "gate_window_deadzone")
-	}
-	if windowSaturated {
-		v.reasons = append(v.reasons, "gate_window_full")
-	}
-	windowBlocked := windowDeadzone || windowSaturated
-	v.healthy = !v.hardDown && !snap.Latched && !windowBlocked
+	adm := lane.adapter.gate.admissionVerdict(class)
+	v.expectedWait = adm.ExpectedWait
+	v.reasons = append(v.reasons, adm.Reasons...)
+	v.healthy = !v.hardDown && adm.Healthy
 	v.bucket = 2
 	if v.healthy {
 		v.bucket = 0

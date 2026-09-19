@@ -930,23 +930,28 @@ func summarizeWaits(samples []gateWaitSample) GateWaitSummary {
 	return out
 }
 
-// gateAdmission 是闸门准入面的窄快照：闩态、可发区间与桶位四元供
-// lane 健康判定用，ExpectedWait 是本类请求此刻进闸的期望排队时长
-// 估计（号池选号的压力权重输入）。
-type gateAdmission struct {
-	Latched      bool
-	Sendable     bool
-	WindowQuota  int
-	WindowUsed   int
+// gateAdmissionVerdict 是闸门对本类请求的准入裁决：窗口模型的解释
+// （闩态、死区、饱和的分词与健康近似）在闸门内完成——消费方读结论，
+// 不再拿裸账重推「死区 vs 饱和」。Reasons 是降级归因词表，固定序
+// gate_latched → gate_window_deadzone → gate_window_full；Healthy 是
+// 闸门侧「立即可发」近似，不含池侧冷却——那是调用方自己叠的层；
+// ExpectedWait 是本类请求此刻进闸的期望排队估计（号池选号的压力
+// 权重输入）。
+type gateAdmissionVerdict struct {
+	Healthy      bool
 	ExpectedWait time.Duration
+	Reasons      []string
 }
 
-// admissionSnapshot 读闸门准入面，读数与 stats 惰性结算后的口径等效但
-// 不产生写：到期未清的陈闩按「now >= limitedUntil」自然读出非闩态，
-// 翻过窗口的旧桶用量不结转——pool.healthy 是每请求热路径，不该为面板
-// 视角付事件环复制与闩时段重放的成本。class 决定 ExpectedWait 按哪条
+// admissionVerdict 读闸门对本类请求的准入裁决，读数与 stats 惰性结算
+// 后的口径等效但不产生写：到期未清的陈闩按「now >= limitedUntil」
+// 自然读出非闩态，翻过窗口的旧桶用量不结转——pool.healthy 是每请求
+// 热路径，不该为面板视角付事件环复制与闩时段重放的成本。死区与桶满
+// 分记：死区是窗界两侧的停发段（整形——同池 lane 同相判病，不含本
+// lane 容量信号），桶满是本 lane 配额真耗尽；死区内桶仍满时两词并存，
+// 审计据此区分整形态停发与真实饱和。class 决定 ExpectedWait 按哪条
 // 准入轨（fg 直放 / bg 预留+爬坡）估计。
-func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
+func (gate *rateGate) admissionVerdict(class string) gateAdmissionVerdict {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 	now := gate.now()
@@ -956,13 +961,22 @@ func (gate *rateGate) admissionSnapshot(class string) gateAdmission {
 		used = 0
 	}
 	sendable := now.Sub(ws) < gate.usable
-	return gateAdmission{
-		Latched:      !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil),
-		Sendable:     sendable,
-		WindowQuota:  gate.quota,
-		WindowUsed:   used,
-		ExpectedWait: gate.expectedWaitLocked(class, now, ws, used, sendable),
+	latched := !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil)
+	deadzone := gate.quota > 0 && !sendable
+	saturated := gate.quota > 0 && used >= gate.quota
+	var v gateAdmissionVerdict
+	if latched {
+		v.Reasons = append(v.Reasons, "gate_latched")
 	}
+	if deadzone {
+		v.Reasons = append(v.Reasons, "gate_window_deadzone")
+	}
+	if saturated {
+		v.Reasons = append(v.Reasons, "gate_window_full")
+	}
+	v.Healthy = !latched && !deadzone && !saturated
+	v.ExpectedWait = gate.expectedWaitLocked(class, now, ws, used, sendable)
+	return v
 }
 
 // expectedWaitLocked 估算本类请求此刻进闸的期望排队时长，是 wait 准入
