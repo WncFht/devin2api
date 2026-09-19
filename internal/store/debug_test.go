@@ -19,7 +19,23 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	waitPayloadSeed(t, s)
 	return s
+}
+
+// waitPayloadSeed 等异步播种协程落地：全新库/计数器行缺席时 Open 只探
+// 不测，真值由后台协程结算落库；持久化行命中的快路径 seedDone 为 nil，
+// 直接返回。
+func waitPayloadSeed(t *testing.T, s *Store) {
+	t.Helper()
+	if s.seedDone == nil {
+		return
+	}
+	select {
+	case <-s.seedDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("payload seed did not finish")
+	}
 }
 
 func TestDebugFileRoundTrip(t *testing.T) {
@@ -533,21 +549,23 @@ func TestDebugPayloadBytesReseed(t *testing.T) {
 	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
 		t.Fatal(err)
 	}
+	waitPayloadSeed(t, s)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// 重启后计数器从权威聚合重新播种，不吃旧内存态。
+	// 重启后计数器从持久化行 O(1) 播种，不吃旧内存态。
 	s, err = Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	waitPayloadSeed(t, s)
 	assertPayloadBytes(t, s)
 }
 
 // TestDebugPayloadBytesSeedFallback 模拟升级后首启：库里有 payload 但
-// runtime_state 没有计数器行，Open 须走权威聚合重建并重新落行；
-// 值损坏时同样重建。重建后再次启动即回 O(1) 读路径。
+// runtime_state 没有计数器行，Open 不阻塞、由异步协程走权威聚合重建
+// 并重新落行；值损坏时同样重建。重建后再次启动即回 O(1) 读路径。
 func TestDebugPayloadBytesSeedFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 	s, err := Open(path)
@@ -561,6 +579,7 @@ func TestDebugPayloadBytesSeedFallback(t *testing.T) {
 	if err := s.AppendDebugChunk(ctx, "d1", "04-devin-response.jsonl", []byte("chunk")); err != nil {
 		t.Fatal(err)
 	}
+	waitPayloadSeed(t, s)
 	want := s.DebugPayloadBytes()
 	// 删掉计数器行——旧二进制写出的库没有它。
 	if _, err := s.db.ExecContext(ctx,
@@ -574,6 +593,7 @@ func TestDebugPayloadBytesSeedFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after key delete: %v", err)
 	}
+	waitPayloadSeed(t, s)
 	if got := s.DebugPayloadBytes(); got != want {
 		t.Fatalf("reseeded counter = %d, want %d", got, want)
 	}
@@ -591,6 +611,7 @@ func TestDebugPayloadBytesSeedFallback(t *testing.T) {
 		t.Fatalf("reopen after corrupt value: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	waitPayloadSeed(t, s)
 	if got := s.DebugPayloadBytes(); got != want {
 		t.Fatalf("counter after corrupt reseed = %d, want %d", got, want)
 	}

@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -850,51 +851,155 @@ func deleteReturningBytes(ctx context.Context, tx *sql.Tx, query string, args ..
 
 // debugPayloadBytesKey 是 runtime_state 里持久化 payload 计数器的键名：
 // 与 debugBytes 内存镜像同源（四表库存字节合计），全部写/删路径在各自
-// 事务内对它做净增量，Open 以它 O(1) 播种；行缺席时 Open 权威聚合重建，
-// cleaner 的周期对账兜底残余漂移。
+// 事务内对它做净增量，Open 以它 O(1) 播种；行缺席时异步协程权威聚合
+// 重建（debugPayloadBytesPendingKey 收编窗内增量），cleaner 的周期对账
+// 兜底残余漂移。
 const debugPayloadBytesKey = "debug_payload_bytes"
 
+// debugPayloadBytesPendingKey 是异步播种期间的增量流水账键：计数器行
+// 缺席的窗口里，写/删路径的净增量改记到它名下（与真实行同一条 UPDATE，
+// 命中哪行记哪行），播种结算时按「现值−快照读数」折算回窗内增量后删除。
+// 它只由播种协程建立与清除——行存在不代表已播种，crash 残留的行对下次
+// 播种无害（两点差值抵消历史结余），周期对账顺带清尸。
+const debugPayloadBytesPendingKey = "debug_payload_bytes_pending"
+
 // addPayloadBytes 在 tx 内把净库存字节增量写进持久化计数器——与 payload
-// 行变更同事务提交，崩溃不留半账。行缺席时为 no-op：下次 Open 的权威
-// 聚合重建会收进期间的全部净量（升级首启窗内的漏计由周期对账兜底）。
+// 行变更同事务提交，崩溃不留半账。两行都缺席时为 no-op：下次权威聚合
+// 重建会收进期间的全部净量（升级首启窗内的漏计由周期对账兜底）。
+// 异步播种窗内（pending 行已建、真实行未落）增量记到 pending——同一条
+// UPDATE 命中哪行记哪行，调用方不需要知道自己处在哪个播种相位。
 func addPayloadBytes(ctx context.Context, tx *sql.Tx, delta int64) error {
 	if delta == 0 {
 		return nil
 	}
 	// TEXT 亲和列把整数结果存成十进制文本，读侧 ParseInt 还原。
 	_, err := tx.ExecContext(ctx,
-		`UPDATE runtime_state SET value = CAST(value AS INTEGER) + ?, updated_at = ? WHERE "key" = ?`,
-		delta, time.Now().UnixMilli(), debugPayloadBytesKey)
+		`UPDATE runtime_state SET value = CAST(value AS INTEGER) + ?, updated_at = ? WHERE "key" IN (?, ?)`,
+		delta, time.Now().UnixMilli(), debugPayloadBytesKey, debugPayloadBytesPendingKey)
 	return err
 }
 
-// seedDebugPayloadBytes 取 payload 计数器的启动值与来源：持久化行存在且
-// 可解析时 O(1) 读回（persisted=true）；行缺席或值损坏时跑四表权威聚合
-// 并以单条 INSERT..SELECT 落库——聚合子查询与写入同一快照，并发提交
-// 不会夹在「算总量」与「登记」之间（交接期双进程同时首启至多各跑一轮）。
+// seedDebugPayloadBytes 探测 payload 计数器的持久化行：存在且可解析时
+// O(1) 读回（persisted=true）；行缺席或值损坏时返回未播种——权威聚合
+// 由 Open 返回后的异步协程完成（seedPayloadBytesAsync），不在启动路径
+// 上付全表扫描（5.6GB 库实测 ~26s，曾挡住就绪）。
 func seedDebugPayloadBytes(db *sql.DB) (total int64, persisted bool, err error) {
 	var raw string
 	err = db.QueryRow(`SELECT value FROM runtime_state WHERE "key"=?`, debugPayloadBytesKey).Scan(&raw)
-	if err != nil && err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
 		return 0, false, fmt.Errorf("read payload bytes counter: %w", err)
 	}
-	if err == nil {
-		if total, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
-			return total, true, nil
-		}
+	if total, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
+		return total, true, nil
 	}
-	if err := db.QueryRow(`INSERT OR REPLACE INTO runtime_state("key", value, updated_at)
-		SELECT ?, CAST(
+	return 0, false, nil
+}
+
+// payloadSeedBudget 给异步播种协程的墙钟上限：聚合是 GB 级库上的一次性
+// 全扫，量级秒到几十秒；超时取消留 pending 行，由下次启动重播或对账收敛。
+const payloadSeedBudget = 10 * time.Minute
+
+// seedPayloadBytesAsync 在计数器行缺席时后台重建它：先立 pending 行收编
+// 窗内增量，再在 ro 读池的单快照里跑四表权威聚合（读快照不占写连接，
+// 聚合时长不阻塞写者），最后在一条写事务里结算落库。结算公式
+// final = 快照真值 + pending现值 − pending快照读数：pending 从建行起
+// 累计全部净增量，两点差值恰是「快照时刻→结算时刻」窗内、快照收不进
+// 的那部分增量——写者无需感知播种相位，增量恒精确入账。real 行落地与
+// pending 删除同事务提交，崩溃只留「无 real」态，半成品不会被当真值读。
+func (s *Store) seedPayloadBytesAsync(ctx context.Context) {
+	defer close(s.seedDone)
+	ctx, cancel := context.WithTimeout(ctx, payloadSeedBudget)
+	defer cancel()
+	start := time.Now()
+	// INSERT OR IGNORE 而非重置：上任崩溃残留的 pending 值不丢，续种
+	// 结算取两点差值时历史结余自动抵消；并发同版本二进程播种同理。
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+		debugPayloadBytesPendingKey, "0", time.Now().UnixMilli()); err != nil {
+		slog.Warn("payload seed: create pending marker failed", "error", err)
+		return
+	}
+	conn, err := s.ro.Conn(ctx)
+	if err != nil {
+		slog.Warn("payload seed: acquire read conn failed", "error", err)
+		return
+	}
+	rtx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		_ = conn.Close()
+		slog.Warn("payload seed: begin snapshot failed", "error", err)
+		return
+	}
+	var snapshot, pendingAtSnap int64
+	err = rtx.QueryRowContext(ctx,
+		`SELECT
 			(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_files) +
 			(SELECT COALESCE(SUM(LENGTH(data)),0) FROM debug_chunks) +
 			(SELECT COALESCE(SUM(LENGTH(content)),0) FROM debug_blobs) +
-			(SELECT COALESCE(SUM(LENGTH(dir)+LENGTH(name)+LENGTH(hash)),0) FROM debug_chunk_refs)
-		AS TEXT), ?
-		RETURNING CAST(value AS INTEGER)`,
-		debugPayloadBytesKey, time.Now().UnixMilli()).Scan(&total); err != nil {
-		return 0, false, fmt.Errorf("aggregate payload bytes: %w", err)
+			(SELECT COALESCE(SUM(LENGTH(dir)+LENGTH(name)+LENGTH(hash)),0) FROM debug_chunk_refs)`).Scan(&snapshot)
+	if err == nil {
+		// pending 行先于快照建立，同事务读回必存在。
+		err = rtx.QueryRowContext(ctx,
+			`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
+			debugPayloadBytesPendingKey).Scan(&pendingAtSnap)
 	}
-	return total, false, nil
+	_ = rtx.Commit()
+	_ = conn.Close()
+	if err != nil {
+		slog.Warn("payload seed: snapshot aggregate failed", "error", err)
+		return
+	}
+	tx, done, err := s.writeTx(ctx, "SeedDebugPayloadBytes")
+	if err != nil {
+		slog.Warn("payload seed: begin finalize failed", "error", err)
+		return
+	}
+	var pendingNow int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
+		debugPayloadBytesPendingKey).Scan(&pendingNow)
+	if err == sql.ErrNoRows {
+		// pending 被对账先行收编（real 行已存在）——采用既有值即可，
+		// 不覆写：对账写的是另一时刻的权威值，语义等价。
+		var existing int64
+		err = tx.QueryRowContext(ctx,
+			`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
+			debugPayloadBytesKey).Scan(&existing)
+		done()
+		if err != nil {
+			slog.Warn("payload seed: read reconciled counter failed", "error", err)
+			return
+		}
+		s.debugBytes.Store(existing)
+		slog.Info("debug payload bytes seed adopted reconciled value", "debug_payload_bytes", existing)
+		return
+	}
+	if err != nil {
+		done()
+		slog.Warn("payload seed: read pending failed", "error", err)
+		return
+	}
+	final := snapshot + pendingNow - pendingAtSnap
+	if _, err = tx.ExecContext(ctx,
+		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+		debugPayloadBytesKey, strconv.FormatInt(final, 10), time.Now().UnixMilli()); err == nil {
+		_, err = tx.ExecContext(ctx,
+			`DELETE FROM runtime_state WHERE "key"=?`, debugPayloadBytesPendingKey)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	done()
+	if err != nil {
+		slog.Warn("payload seed: finalize failed", "error", err)
+		return
+	}
+	s.debugBytes.Store(final)
+	slog.Info("debug payload bytes seeded async",
+		"debug_payload_bytes", final, "duration_ms", time.Since(start).Milliseconds())
 }
 
 // DebugPayloadBytes 返回 debug payload 库存字节合计的内存镜像——与
@@ -906,12 +1011,25 @@ func (s *Store) DebugPayloadBytes() int64 {
 
 // ReconcileDebugPayloadBytes 用权威总量重置计数器（持久化行与内存镜像
 // 一起校正），返回重置前内存读数与权威值之差（正=计数高估，负=低估）——
-// 供 cleaner 对账记录漂移。upsert 顺带补回被手删的计数器行；持久化
-// 失败时内存镜像仍被校正，错误如实返回由调用方告警。
+// 供 cleaner 对账记录漂移。upsert 顺带补回被手删的计数器行，并清掉
+// 异步播种半途残留的 pending 行（crash 僵尸继续吞增量会让内存镜像的
+// 增量被收进死账）；持久化失败时内存镜像仍被校正，错误如实返回由调用方
+// 告警。
 func (s *Store) ReconcileDebugPayloadBytes(ctx context.Context, actual int64) (drift int64, err error) {
-	_, err = s.db.ExecContext(ctx,
+	tx, done, err := s.writeTx(ctx, "ReconcileDebugPayloadBytes")
+	if err != nil {
+		return s.debugBytes.Swap(actual) - actual, err
+	}
+	if _, err = tx.ExecContext(ctx,
 		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
-		debugPayloadBytesKey, strconv.FormatInt(actual, 10), time.Now().UnixMilli())
+		debugPayloadBytesKey, strconv.FormatInt(actual, 10), time.Now().UnixMilli()); err == nil {
+		_, err = tx.ExecContext(ctx,
+			`DELETE FROM runtime_state WHERE "key"=?`, debugPayloadBytesPendingKey)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	done()
 	return s.debugBytes.Swap(actual) - actual, err
 }
 

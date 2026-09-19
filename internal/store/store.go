@@ -33,10 +33,16 @@ type Store struct {
 
 	path string
 	// debugBytes 是 debug payload 四张表库存字节合计的内存镜像
-	// （DebugDirSizes + DebugBlobBytes 总量同口径）：Open 时聚合播种，
-	// 各写/删方法在事务提交后按真实落库字节增减；cleaner 的容量闸读它
-	// 免每轮全表聚合，周期对账兜底漏记账路径。
+	// （DebugDirSizes + DebugBlobBytes 总量同口径）：Open 时从持久化行
+	// 播种（行缺席则 0 起步、异步协程重建后置换），各写/删方法在事务
+	// 提交后按真实落库字节增减；cleaner 的容量闸读它免每轮全表聚合，
+	// 周期对账兜底漏记账路径。
 	debugBytes atomic.Int64
+	// seedDone 在异步播种协程退出时关闭（持久化行命中的快路径下为
+	// nil）；seedCancel 供 Close 中止仍在跑的聚合——sql.DB.Close 会
+	// 等在飞查询结束，不先取消会把关库拖成聚合时长（GB 级库秒级以上）。
+	seedDone   chan struct{}
+	seedCancel context.CancelFunc
 }
 
 // slowWriteWarn 是写连接独占时长的告警线：远低于写调用方的
@@ -179,9 +185,10 @@ func Open(path string) (*Store, error) {
 	// payload 计数器从 runtime_state 持久化行 O(1) 播种：全部写/删
 	// 路径在各自事务内对该行做净增量，四项加数口径与
 	// DebugDirSizes + DebugBlobBytes 的合计逐项对应。行缺席（升级
-	// 首启、全新库、行被手删）才跑四表权威聚合并落库——替代原每次
-	// 启动的全扫（5.6GB 库实测 ~26s，行数计价与体积无关）。
-	debugBytes, seeded, err := seedDebugPayloadBytes(db)
+	// 首启、全新库、行被手删）不在这里跑聚合——四表全扫在 5.6GB 库
+	// 实测 ~26s，会挡住就绪；改由 Open 返回后异步重建（见
+	// seedPayloadBytesAsync），窗内增量经 pending 行收编不丢账。
+	debugBytes, persisted, err := seedDebugPayloadBytes(db)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("seed debug payload bytes: %w", err)
@@ -216,13 +223,22 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("reconcile log cells: %w", err)
 	}
 	reconcileMS := time.Since(stageStart).Milliseconds()
+	if !persisted {
+		// 计数器行缺席：协程在 ro 快照上跑权威聚合，pending 行收编
+		// 窗内增量——Open 就绪不被全扫阻塞，写者经 addPayloadBytes 的
+		// IN 双键 UPDATE 无感切换记账目标。
+		seedCtx, cancel := context.WithCancel(context.Background())
+		st.seedDone = make(chan struct{})
+		st.seedCancel = cancel
+		go st.seedPayloadBytesAsync(seedCtx)
+	}
 	slog.Info("store opened",
 		"path", path,
 		"ping_ms", pingMS,
 		"schema_ms", schemaMS,
 		"migrations_ms", migrationsMS,
 		"seed_ms", seedMS,
-		"seed_persisted", seeded,
+		"seed_persisted", persisted,
 		"readpool_ms", readpoolMS,
 		"reconcile_ms", reconcileMS,
 		"total_ms", time.Since(openStart).Milliseconds(),
@@ -368,8 +384,17 @@ func (s *Store) WALBytes() int64 {
 }
 
 // Close 关闭连接池；WAL checkpoint 由驱动在关闭时收尾。读池退化
-// 复用写池时 ro==db，避免重复 Close。
+// 复用写池时 ro==db，避免重复 Close。异步播种协程先取消再等退出——
+// 它的 ro 快照聚合在 GB 级库上是秒级在飞查询，直接 Close 会被池等待
+// 拖住；取消后经 ctx 中止，等待退出口径把「协程写已关闭池」噪声消掉。
 func (s *Store) Close() error {
+	if s.seedCancel != nil {
+		s.seedCancel()
+		select {
+		case <-s.seedDone:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	if s.ro != s.db.DB {
 		_ = s.ro.Close()
 	}
