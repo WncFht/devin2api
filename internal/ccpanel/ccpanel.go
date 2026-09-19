@@ -96,11 +96,20 @@ type Handler struct {
 	// quotaPersistFailures/Dropped/Replayed 是同锁内的落库健康账，
 	// 投到 runtime-metrics 的 quota 组——样本写失败此前只有 stderr
 	// WARN，写争用期丢点没有这组计数完全不可见。
+	// quotaPersistInFlight/quotaPersistDone 是在途落库调用（采样协程
+	// 与手动刷新共用的 persistQuotaSample 同步路径）的计数与落定
+	// 信号：进入时 +1（>0 时 quotaPersistDone 非 nil），收尾（含
+	// 失败挂回之后）-1，归零 close 并置 nil。FlushPendingQuotaSamples
+	// 凭它在排空时等写落定——失败点挂回缓冲后才能被冲刷看见。不用
+	// sync.WaitGroup：排空窗口内手动刷新仍可能新发落库，Add 撞上
+	// 零计数 Wait 属 misuse。均在 quotaPendingMu 下读写。
 	quotaPendingMu       sync.Mutex
 	pendingQuotaSamples  []*store.QuotaSample
 	quotaPersistFailures int
 	quotaPersistDropped  int
 	quotaPersistReplayed int
+	quotaPersistInFlight int
+	quotaPersistDone     chan struct{}
 	// quotaSamplerMu 管采样轮心跳簿记：quotaRounds*/quotaLastRound*At
 	// 是协程级（每次 sampleQuota 调用记一轮）计数与时刻，quotaLanes
 	// 是逐 lane 的阶段账。全内存、进程生命周期——quota_samples 静默

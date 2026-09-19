@@ -736,3 +736,110 @@ func TestQuotaSamplerRoundAbort(t *testing.T) {
 		t.Fatalf("lanes = %+v, want none — round aborted before first lane", lanes)
 	}
 }
+
+// TestQuotaDrainFlushPending 验证排空冲刷：写失败挂进重放缓冲的点在
+// BeginDrain 时经 FlushPendingQuotaSamples 拿到最后一轮同步落库——
+// 缓冲先靠关库喂出两笔挂账，重开后 BeginDrain 把它们写回，曲线不断档，
+// 救回点数照常计 persist_replayed。
+func TestQuotaDrainFlushPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{store: st}
+	_ = st.Close() // 落库必败，喂两笔挂账
+	for i := 0; i < 2; i++ {
+		h.persistQuotaSample(
+			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(90 - float64(i))})
+	}
+	if stats := h.quotaPersistStats(); stats["pending_samples"] != 2 {
+		t.Fatalf("pending = %+v, want 2 stashed", stats)
+	}
+
+	st2, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st2.Close() }()
+	h.store = st2
+
+	h.BeginDrain()
+	rows, err := st2.ListQuotaSamples(context.Background(), "randall", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].At != 1700000000 || rows[1].At != 1700000000+300 {
+		t.Fatalf("flushed samples = %+v, want 2 rows", rows)
+	}
+	if stats := h.quotaPersistStats(); stats["persist_replayed"] != 2 || stats["pending_samples"] != 0 {
+		t.Fatalf("persist stats after drain flush = %+v", stats)
+	}
+}
+
+// TestQuotaDrainFlushWaitsInflight 验证冲刷的在途落定等待：一笔落库
+// 被外部写锁卡住时 BeginDrain 不得抢先取走空缓冲收工——等锁释放、
+// 在途写落定后冲刷才返回，样本落库不留挂账。
+func TestQuotaDrainFlushWaitsInflight(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	h := &Handler{store: st}
+
+	holder, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(30000)")
+	if err != nil {
+		t.Fatalf("sql.Open holder: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	conn, err := holder.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	committed := make(chan struct{})
+	go func() {
+		defer close(committed)
+		time.Sleep(400 * time.Millisecond)
+		_, _ = conn.ExecContext(context.Background(), "COMMIT")
+	}()
+
+	go h.persistQuotaSample(&store.QuotaSample{At: 1700000000, Account: "randall", DailyRemaining: f64(90)})
+	// 等在途计数起来再排空：否则冲刷读到的 persistDone 还是 nil，
+	// 等待路径根本没被踩到。
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.quotaPendingMu.Lock()
+		n := h.quotaPersistInFlight
+		h.quotaPendingMu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("persist goroutine never went in-flight")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	h.BeginDrain()
+	select {
+	case <-committed:
+	default:
+		t.Fatal("BeginDrain returned before in-flight persist settled")
+	}
+	rows, err := st.ListQuotaSamples(context.Background(), "randall", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].At != 1700000000 {
+		t.Fatalf("samples = %+v, want the in-flight point landed", rows)
+	}
+	if stats := h.quotaPersistStats(); stats["pending_samples"] != 0 || stats["persist_failures"] != 0 {
+		t.Fatalf("persist stats = %+v, want clean settle", stats)
+	}
+}

@@ -92,10 +92,10 @@ func (h *Handler) QuotaInterval() time.Duration {
 	return h.quotaInterval
 }
 
-// gateDrainFlushTimeout 是排空起点闸门窗口行冲刷的总预算：全部 lane
-// 共享——写连接被批量事务占压时超时返回，进程关停不被拖住；预算内
-// 写不完的行与今日一样随退出丢弃。
-const gateDrainFlushTimeout = 5 * time.Second
+// drainFlushTimeout 是排空起点落库冲刷的总预算：闸门窗口行（全部
+// lane 共享）与配额样本重放点共用——写连接被批量事务占压时超时
+// 返回，进程关停不被拖住；预算内写不完的行与今日一样随退出丢弃。
+const drainFlushTimeout = 5 * time.Second
 
 // BeginDrain 实现 app 排空钩子（可选接口，App.BeginDrain 经断言调用）：
 // 停掉配额采样协程——采样每轮对每个 lane 打一次上游并写 quota_samples，
@@ -104,10 +104,13 @@ const gateDrainFlushTimeout = 5 * time.Second
 // 回读仍应反映配置而非「被排空归零」。幂等。quotaDrained 闩置位后
 // 不可逆：排空窗口内的 config reload 与设置写入仍走 SetQuotaInterval，
 // 闩保证它们只记账、不把已收束的上游生产者重新武装。
-// 顺带冲刷闸门窗口行重放缓冲：写失败的挂账行平时等下一窗口翻页重放，
-// 进程退出即丢——排空起点给它们最后一轮同步落库机会（best-effort，
-// gateDrainFlushTimeout 内写不完照样丢）。冲刷放在 quotaMu 外：同步
-// 落库可能吃满整份预算，持锁会堵排空窗口内 SetQuotaInterval 的簿记。
+// 顺带冲刷两类落库重放缓冲：闸门窗口行挂账平时等下一窗口翻页重放，
+// 配额样本挂账等下一轮采样/刷新重放，进程退出即丢——排空起点给它们
+// 最后一轮同步落库机会（best-effort，drainFlushTimeout 内写不完照样
+// 丢）。闸门先行：扇出到各 lane 并行写，健康连接毫秒级收工，把预算
+// 大头留给配额冲刷的在途落定等待；连接真被占压时两轮写都注定超时，
+// 顺序不改变损失。冲刷放在 quotaMu 外：同步落库可能吃满整份预算，
+// 持锁会堵排空窗口内 SetQuotaInterval 的簿记。
 func (h *Handler) BeginDrain() {
 	h.quotaMu.Lock()
 	h.quotaDrained = true
@@ -116,11 +119,12 @@ func (h *Handler) BeginDrain() {
 		h.quotaCancel = nil
 	}
 	h.quotaMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), drainFlushTimeout)
+	defer cancel()
 	if h.gateFlush != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), gateDrainFlushTimeout)
-		defer cancel()
 		h.gateFlush(ctx)
 	}
+	h.FlushPendingQuotaSamples(ctx)
 }
 
 // sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照写入
@@ -286,9 +290,16 @@ const quotaPersistBudget = 15 * time.Second
 // 据它记 failed_persist 与 last_error。
 func (h *Handler) persistQuotaSample(point *store.QuotaSample) error {
 	h.quotaPendingMu.Lock()
+	h.quotaPersistInFlight++
+	if h.quotaPersistDone == nil {
+		h.quotaPersistDone = make(chan struct{})
+	}
 	pending := h.pendingQuotaSamples
 	h.pendingQuotaSamples = nil
 	h.quotaPendingMu.Unlock()
+	// 计数落定放在收尾（含失败挂回）之后：FlushPendingQuotaSamples
+	// 等到落定才取缓冲，挂回的点必须赶在它取走前入帐。
+	defer h.noteQuotaPersistSettled()
 	rows := append(pending, point)
 	ctx, cancel := context.WithTimeout(context.Background(), quotaPersistBudget)
 	defer cancel()
@@ -302,6 +313,53 @@ func (h *Handler) persistQuotaSample(point *store.QuotaSample) error {
 	}
 	h.noteQuotaReplayed(len(pending))
 	return nil
+}
+
+// noteQuotaPersistSettled 落定一次在途落库：计数 -1，归零时 close
+// 落定信号并置 nil 等下一批在途重建。
+func (h *Handler) noteQuotaPersistSettled() {
+	h.quotaPendingMu.Lock()
+	h.quotaPersistInFlight--
+	if h.quotaPersistInFlight == 0 {
+		close(h.quotaPersistDone)
+		h.quotaPersistDone = nil
+	}
+	h.quotaPendingMu.Unlock()
+}
+
+// FlushPendingQuotaSamples 在排空起点对未落库的配额样本点做最后一轮
+// 同步冲刷：先等在途落库调用落定（失败点会挂回 pendingQuotaSamples，
+// 跳过等待直接取缓冲会漏掉它们），再取走缓冲整批写。全程共用调用方
+// 的短 ctx——排空有时限，写连接卡死不能拖住关停；预算内写不完的点
+// 与进程直接退出一样丢弃（best-effort，不是持久化保证），失败点照常
+// 挂回缓冲并计 persistFailures，写成的挂账点计 persistReplayed。
+func (h *Handler) FlushPendingQuotaSamples(ctx context.Context) {
+	if h.store == nil {
+		return
+	}
+	h.quotaPendingMu.Lock()
+	done := h.quotaPersistDone
+	h.quotaPendingMu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		}
+	}
+	h.quotaPendingMu.Lock()
+	rows := h.pendingQuotaSamples
+	h.pendingQuotaSamples = nil
+	h.quotaPendingMu.Unlock()
+	for i, r := range rows {
+		if err := h.store.InsertQuotaSample(ctx, r); err != nil {
+			slog.Warn("quota sample drain flush failed", "account", r.Account, "error", err)
+			h.noteQuotaReplayed(i)
+			h.stashQuotaSamples(rows[i:])
+			return
+		}
+	}
+	h.noteQuotaReplayed(len(rows))
 }
 
 // stashQuotaSamples 把未落库的配额点挂回重放缓冲；超出深度的最老点
