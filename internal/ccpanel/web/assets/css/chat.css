@@ -17,6 +17,11 @@
   min-width: 0;
 }
 
+.chat-controls .chat-grow-full {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
 .chat-controls .chat-grow .form-input {
   width: 100%;
 }

@@ -40,11 +40,11 @@
       </div>
 
       <div class="chat-controls">
-        <div id="${IDS.tokenGroup}" style="display:none; flex:1 1 100%;">
+        <div id="${IDS.tokenGroup}" class="chat-grow-full" hidden>
           <input type="password" id="${IDS.token}" class="form-input" autocomplete="off"
             data-i18n-placeholder="chat.tokenPlaceholder" placeholder="粘贴令牌明文（sk-...）">
         </div>
-        <div id="${IDS.modelGroup}" class="chat-grow" style="display:none;">
+        <div id="${IDS.modelGroup}" class="chat-grow" hidden>
           <input type="text" id="${IDS.model}" class="form-input" list="${IDS.modelList}" spellcheck="false"
             data-i18n-placeholder="chat.modelPlaceholder" placeholder="输入或选择模型名">
           <datalist id="${IDS.modelList}"></datalist>
@@ -55,7 +55,7 @@
           <option value="codex">Codex (/v1/responses)</option>
         </select>
       </div>
-      <p id="${IDS.tokenHint}" class="chat-hint" style="display:none;" data-i18n="chat.tokenHint">明文仅在创建时可见，请重新粘贴</p>
+      <p id="${IDS.tokenHint}" class="chat-hint" hidden data-i18n="chat.tokenHint">明文仅在创建时可见，请重新粘贴</p>
 
       <div id="${IDS.messages}" class="chat-messages"></div>
 
@@ -117,9 +117,9 @@
     el(IDS.title).textContent = tokenMode
       ? t('chat.playgroundTitle')
       : t('chat.title') + ' · ' + state.model;
-    el(IDS.tokenGroup).style.display = tokenMode ? '' : 'none';
-    el(IDS.tokenHint).style.display = tokenMode ? '' : 'none';
-    el(IDS.modelGroup).style.display = tokenMode ? '' : 'none';
+    el(IDS.tokenGroup).hidden = !tokenMode;
+    el(IDS.tokenHint).hidden = !tokenMode;
+    el(IDS.modelGroup).hidden = !tokenMode;
     el(IDS.protocol).value = ['anthropic', 'openai', 'codex'].includes(opts.clientProtocol)
       ? opts.clientProtocol
       : 'anthropic';
