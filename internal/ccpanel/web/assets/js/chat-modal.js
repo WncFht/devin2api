@@ -5,8 +5,8 @@
 // 用用户粘贴的令牌明文，等价于真实客户端调用，用来验证令牌权限与配额。
 // 服务端只存令牌 sha256，明文无法代发，所以 playground 必须放在前端。
 (function () {
-  const t = (key, params) => (typeof window.t === 'function' ? window.t(key, params) : key);
-  const esc = (s) => (typeof window.escapeHtml === 'function' ? window.escapeHtml(String(s ?? '')) : String(s ?? ''));
+  const t = window.t;
+  const esc = window.escapeHtml;
 
   const IDS = {
     modal: 'modelChatModal',
@@ -39,33 +39,35 @@
         <button type="button" class="close-btn" data-cm-action="close" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
       </div>
 
-      <div class="chat-controls">
-        <div id="${IDS.tokenGroup}" class="chat-grow-full" hidden>
-          <input type="password" id="${IDS.token}" class="form-input" autocomplete="off"
-            data-i18n-placeholder="chat.tokenPlaceholder" placeholder="粘贴令牌明文（sk-...）">
+      <div class="modal-body">
+        <div class="chat-controls">
+          <div id="${IDS.tokenGroup}" class="chat-grow-full" hidden>
+            <input type="password" id="${IDS.token}" class="form-input" autocomplete="off"
+              data-i18n-placeholder="chat.tokenPlaceholder" placeholder="粘贴令牌明文（sk-...）">
+          </div>
+          <div id="${IDS.modelGroup}" class="chat-grow" hidden>
+            <input type="text" id="${IDS.model}" class="form-input" list="${IDS.modelList}" spellcheck="false"
+              data-i18n-placeholder="chat.modelPlaceholder" placeholder="输入或选择模型名">
+            <datalist id="${IDS.modelList}"></datalist>
+          </div>
+          <select id="${IDS.protocol}" class="form-input" data-i18n-aria-label="probe.protocol" aria-label="客户端协议">
+            <option value="anthropic">Anthropic (/v1/messages)</option>
+            <option value="openai">OpenAI (/v1/chat/completions)</option>
+            <option value="codex">Codex (/v1/responses)</option>
+          </select>
         </div>
-        <div id="${IDS.modelGroup}" class="chat-grow" hidden>
-          <input type="text" id="${IDS.model}" class="form-input" list="${IDS.modelList}" spellcheck="false"
-            data-i18n-placeholder="chat.modelPlaceholder" placeholder="输入或选择模型名">
-          <datalist id="${IDS.modelList}"></datalist>
+        <p id="${IDS.tokenHint}" class="chat-hint" hidden data-i18n="chat.tokenHint">明文仅在创建时可见，请重新粘贴</p>
+
+        <div id="${IDS.messages}" class="chat-messages"></div>
+
+        <div class="chat-composer">
+          <textarea id="${IDS.input}" class="form-input" rows="2"
+            data-i18n-placeholder="chat.inputPlaceholder" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <button type="button" id="${IDS.sendBtn}" class="btn btn-primary" data-cm-action="send" data-i18n="chat.send">发送</button>
         </div>
-        <select id="${IDS.protocol}" class="form-input" data-i18n-aria-label="probe.protocol" aria-label="客户端协议">
-          <option value="anthropic">Anthropic (/v1/messages)</option>
-          <option value="openai">OpenAI (/v1/chat/completions)</option>
-          <option value="codex">Codex (/v1/responses)</option>
-        </select>
-      </div>
-      <p id="${IDS.tokenHint}" class="chat-hint" hidden data-i18n="chat.tokenHint">明文仅在创建时可见，请重新粘贴</p>
-
-      <div id="${IDS.messages}" class="chat-messages"></div>
-
-      <div class="chat-composer">
-        <textarea id="${IDS.input}" class="form-input" rows="2"
-          data-i18n-placeholder="chat.inputPlaceholder" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
-        <button type="button" id="${IDS.sendBtn}" class="btn btn-primary" data-cm-action="send" data-i18n="chat.send">发送</button>
       </div>
 
-      <div class="chat-footer">
+      <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-cm-action="clear" data-i18n="chat.clear">清空会话</button>
         <button type="button" class="btn btn-secondary" data-cm-action="close" data-i18n="common.close">关闭</button>
       </div>

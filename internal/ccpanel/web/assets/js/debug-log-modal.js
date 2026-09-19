@@ -4,7 +4,7 @@
 (function () {
 
   const t = window.t;
-  const i18nText = window.i18nText || ((key, fallback) => fallback || key);
+  const i18nText = window.i18nText;
 
   const debugLogUrl = (id) => `/admin/debug-logs/${encodeURIComponent(id)}`;
   const debugLogFileUrl = (id, name) =>
@@ -135,11 +135,11 @@
     return composeDebugResponse(data?.translated_resp_status, data?.translated_resp_headers, data?.translated_resp_body);
   }
 
-  function setDebugTabLabel(buttonId, key, fallback) {
+  function setDebugTabLabel(buttonId, key) {
     const button = document.getElementById(buttonId);
     if (!button) return;
     button.dataset.i18n = key;
-    button.textContent = (typeof t === 'function' ? t(key) : '') || fallback;
+    button.textContent = t(key);
   }
 
   function activateDebugTab(target) {
@@ -161,10 +161,10 @@
     if (translatedRequestTab) translatedRequestTab.hidden = !transformed;
     if (translatedResponseTab) translatedResponseTab.hidden = !transformed;
 
-    setDebugTabLabel('debugRequestTabBtn', transformed ? 'logs.debugOriginalRequest' : 'logs.debugRequest', transformed ? '原始请求' : '请求');
-    setDebugTabLabel('debugTranslatedRequestTabBtn', 'logs.debugTranslatedRequest', '转换后请求');
-    setDebugTabLabel('debugResponseTabBtn', transformed ? 'logs.debugOriginalResponse' : 'logs.debugResponse', transformed ? '原始响应' : '响应');
-    setDebugTabLabel('debugTranslatedResponseTabBtn', 'logs.debugTranslatedResponse', '转换后响应');
+    setDebugTabLabel('debugRequestTabBtn', transformed ? 'logs.debugOriginalRequest' : 'logs.debugRequest');
+    setDebugTabLabel('debugTranslatedRequestTabBtn', 'logs.debugTranslatedRequest');
+    setDebugTabLabel('debugResponseTabBtn', transformed ? 'logs.debugOriginalResponse' : 'logs.debugResponse');
+    setDebugTabLabel('debugTranslatedResponseTabBtn', 'logs.debugTranslatedResponse');
 
     const activeTab = document.querySelector('#debugLogModal .upstream-tab.active');
     if (!activeTab || activeTab.hidden) activateDebugTab('request');
@@ -290,10 +290,10 @@
     }
     if (kind === 'refreshing') {
       el.classList.add('debug-log-status--refreshing');
-      el.textContent = (typeof t === 'function' ? t('logs.debugRefreshing') : '正在更新…') || '正在更新…';
+      el.textContent = t('logs.debugRefreshing');
     } else if (kind === 'finished') {
       el.classList.add('debug-log-status--finished');
-      el.textContent = (typeof t === 'function' ? t('logs.debugRequestFinished') : '请求已结束') || '请求已结束';
+      el.textContent = t('logs.debugRequestFinished');
     }
     el.hidden = false;
   }
@@ -438,8 +438,7 @@
     wrapBtn.classList.toggle('active', debugLogWrapEnabled);
     wrapBtn.setAttribute('aria-pressed', debugLogWrapEnabled ? 'true' : 'false');
     wrapBtn.dataset.i18n = debugLogWrapEnabled ? 'logs.debugWrap' : 'logs.debugNoWrap';
-    wrapBtn.textContent = (typeof t === 'function' ? t(wrapBtn.dataset.i18n) : '') ||
-      (debugLogWrapEnabled ? '换行' : '不换行');
+    wrapBtn.textContent = t(wrapBtn.dataset.i18n);
   }
 
   function applyDebugLogWrapMode() {
@@ -482,7 +481,7 @@
       mergeBtn.classList.toggle('active', mergedVisible);
       mergeBtn.setAttribute('aria-pressed', mergedVisible ? 'true' : 'false');
       mergeBtn.dataset.i18n = key;
-      mergeBtn.textContent = (typeof t === 'function' ? t(key) : '') || (mergedVisible ? '原始' : '合并');
+      mergeBtn.textContent = t(key);
     }
   }
 
@@ -551,7 +550,7 @@
     state.loading = true;
     window.MarkdownRenderer.renderResponse(view.mergedId, {
       reasoning: '',
-      content: (typeof t === 'function' ? t('common.loading') : '加载中...') || '加载中...',
+      content: t('common.loading'),
     });
     try {
       // translated-response 的源是 06（客户端线上帧）：目录 id 可解析时走
@@ -574,7 +573,7 @@
     } catch (e) {
       window.MarkdownRenderer.renderResponse(view.mergedId, {
         reasoning: '',
-        content: e?.message || '合并响应失败',
+        content: e?.message || t('logs.debugMergeFailed'),
       });
     } finally {
       state.loading = false;

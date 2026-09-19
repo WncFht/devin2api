@@ -1,5 +1,5 @@
 const t = window.t;
-const i18nText = window.i18nText || ((key, fallback) => fallback || key);
+const i18nText = window.i18nText;
 
 // ── 后端契约（ccpanel 迁移路由）─────────────────────────────────
 // 列表/筛选选项/指标条走 /dashboard/* 镜像——与 /admin 同一批 handler，
@@ -227,18 +227,12 @@ function renderColToggleMenu() {
   if (!list) return;
   list.innerHTML = '';
   for (const col of LOG_COLUMNS) {
-    const visible = isColVisible(col.key);
     const item = document.createElement('label');
     item.className = 'logs-col-toggle-item';
     item.dataset.colKey = col.key;
-    item.dataset.visible = String(visible);
-    item.innerHTML = `<span class="logs-col-toggle-check"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span>${escapeHtml(i18nText(col.i18n, col.i18n))}</span>`;
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const newVisible = !isColVisible(col.key);
-      colVisibility[col.key] = newVisible;
-      item.dataset.visible = String(newVisible);
+    item.innerHTML = `<input type="checkbox"${isColVisible(col.key) ? ' checked' : ''}><span>${escapeHtml(i18nText(col.i18n, col.i18n))}</span>`;
+    item.querySelector('input').addEventListener('change', (e) => {
+      colVisibility[col.key] = e.target.checked;
       saveColVisibility();
       applyColVisibility();
     });
@@ -754,19 +748,8 @@ async function load(skipLoading = false) {
 
     updatePagination();
 
-    // 自动刷新时，保存现有 pending 行以避免闪烁
-    const pendingRows = skipLoading ? Array.from(document.querySelectorAll('tr.pending-row')) : [];
-
+    // pending 行不参与 keyed diff，renderLogs 不再动它们
     renderLogs(data);
-
-    // 立即恢复 pending 行（后续活动请求推送会再更新）
-    if (skipLoading && pendingRows.length > 0) {
-      const tbody = document.getElementById('tbody');
-      const firstRow = tbody.firstChild;
-      const fragment = document.createDocumentFragment();
-      pendingRows.forEach(row => fragment.appendChild(row));
-      tbody.insertBefore(fragment, firstRow);
-    }
 
     // 第一页时用最近一次推送的数据即时刷新进行中请求（轮询由 ui.js 统一驱动）
     if (currentLogsPage === 1) {
@@ -1130,9 +1113,7 @@ const abortingActiveRequests = new Map();
 function buildActiveRequestAbortHtml(req, id, startMs) {
   if (!req.abortable) return '';
   const pending = abortingActiveRequests.has(id);
-  const label = pending
-    ? (typeof t === 'function' ? t('logs.aborting') : '中断中')
-    : (typeof t === 'function' ? t('logs.abort') : '中断');
+  const label = pending ? t('logs.aborting') : t('logs.abort');
   return `<button type="button" class="logs-abort-btn" data-action="abort-active-request" data-abort-request-id="${escapeHtml(id)}"`
     + ` data-abort-start="${startMs || 0}"${pending ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
 }
@@ -1159,6 +1140,11 @@ function renderActiveRequests(activeRequests) {
     const elapsedRaw = startMs ? Math.max(0, (Date.now() - startMs) / 1000) : null;
     const elapsed = elapsedRaw !== null ? elapsedRaw.toFixed(1)  : '—';
     const streamFlag = getStreamFlagHtml(req.is_streaming);
+    // 行级点击开 debug 详情与「信息」列链接同条件（debug_log_available + 有效 id）
+    const activeNumId = Number(req?.id);
+    const debugActiveId = (req?.debug_log_available && Number.isFinite(activeNumId) && activeNumId > 0)
+      ? String(activeNumId)
+      : '';
 
     const durationDisplay = startMs ? buildActiveRequestTimingHtml(req, elapsedRaw, elapsed)  : '—';
 
@@ -1202,11 +1188,14 @@ function renderActiveRequests(activeRequests) {
       }
       const compactAccount = existingRow.querySelector('.active-account-slot');
       if (compactAccount) compactAccount.innerHTML = accountDisplay;
+      if (debugActiveId) existingRow.dataset.debugActiveId = debugActiveId;
+      else delete existingRow.dataset.debugActiveId;
     } else {
       // 创建新行
       const row = document.createElement('tr');
       row.className = 'mobile-card-row pending-row';
       row.setAttribute('data-req-id', id);
+      if (debugActiveId) row.dataset.debugActiveId = debugActiveId;
       if (totalCols < 8) {
         row.innerHTML = `
             <td colspan="${totalCols}" class="logs-compact-cell">
@@ -1260,12 +1249,12 @@ async function abortActiveRequest(button) {
   const id = button.dataset.abortRequestId;
   if (!id || abortingActiveRequests.has(id)) return;
 
-  const confirmMsg = (typeof t === 'function' ? t('logs.abortConfirm') : '') || '确定中断这个进行中的请求吗？将按上游网络故障处理。';
+  const confirmMsg = t('logs.abortConfirm');
   if (!(await Modal.confirm(confirmMsg, { danger: true }))) return;
 
   abortingActiveRequests.set(id, Number(button.dataset.abortStart) || 0);
   button.disabled = true;
-  button.textContent = (typeof t === 'function' ? t('logs.aborting') : '中断中') || '中断中';
+  button.textContent = t('logs.aborting');
 
   try {
     const { payload } = await fetchAPIWithAuthRaw(activeAbortUrl(id), { method: 'POST' });
@@ -1306,12 +1295,71 @@ function buildCacheCreationDisplay(entry) {
   return `<span class="token-metric-value token-metric-value--primary">${total.toLocaleString()}${badge}</span>`;
 }
 
+// ── tbody keyed diff ──────────────────────────────────────────
+// 行 key = logs 行 id（自增主键），缺 id 退 dir 再退行序号；行 DOM 的
+// _sig 存上次写入的单元格 HTML——相同跳过、不同只刷该行内层，序变只做
+// insertBefore 搬位。pending 行（进行中请求）由 renderActiveRequests
+// 管理、恒在列表顶部，不参与对账，也不再被整表重建误伤。
+function logRowKey(entry, index) {
+  return 'r' + (entry?.id ?? entry?.dir ?? index);
+}
+
+function clearLogRows(tbody) {
+  for (const child of Array.from(tbody.children)) {
+    if (!child.matches('tr.pending-row')) child.remove();
+  }
+}
+
+function syncLogRows(tbody, keys, htmlParts, debugIds) {
+  const wanted = new Set(keys);
+  const pool = new Map();
+  for (const child of Array.from(tbody.children)) {
+    if (child.matches('tr.pending-row')) continue;
+    const key = child.dataset ? child.dataset.rowKey : null;
+    if (key && wanted.has(key)) {
+      pool.set(key, child);
+    } else {
+      child.remove();
+    }
+  }
+
+  // 插入基准：首个非 pending 子节点（pending 行恒在其前）
+  let ref = null;
+  for (const child of tbody.children) {
+    if (!child.matches('tr.pending-row')) { ref = child; break; }
+  }
+
+  for (let i = 0; i < keys.length; i++) {
+    let row = pool.get(keys[i]);
+    if (row) {
+      if (row._sig !== htmlParts[i]) {
+        row.innerHTML = htmlParts[i];
+        row._sig = htmlParts[i];
+      }
+      if (debugIds[i]) row.dataset.debugLogId = debugIds[i];
+      else delete row.dataset.debugLogId;
+    } else {
+      row = document.createElement('tr');
+      row.className = 'mobile-card-row logs-table-row';
+      row.dataset.rowKey = keys[i];
+      if (debugIds[i]) row.dataset.debugLogId = debugIds[i];
+      row.innerHTML = htmlParts[i];
+      row._sig = htmlParts[i];
+    }
+    if (row === ref) {
+      ref = ref.nextElementSibling;
+      continue;
+    }
+    tbody.insertBefore(row, ref);
+  }
+}
+
 function renderLogsLoading() {
   displayedLogs = null;
   const tbody = document.getElementById('tbody');
   const colspan = getTableColspan();
   const loadingRow = TemplateEngine.render('tpl-log-loading', { colspan });
-  tbody.innerHTML = '';
+  clearLogRows(tbody);
   if (loadingRow) tbody.appendChild(loadingRow);
 }
 
@@ -1320,7 +1368,7 @@ function renderLogsError() {
   const tbody = document.getElementById('tbody');
   const colspan = getTableColspan();
   const errorRow = TemplateEngine.render('tpl-log-error', { colspan });
-  tbody.innerHTML = '';
+  clearLogRows(tbody);
   if (errorRow) tbody.appendChild(errorRow);
 }
 
@@ -1334,13 +1382,15 @@ function renderLogs(data) {
 
   if (data.length === 0) {
     const emptyRow = TemplateEngine.render('tpl-log-empty', { colspan });
-    tbody.innerHTML = '';
+    clearLogRows(tbody);
     if (emptyRow) tbody.appendChild(emptyRow);
     return;
   }
 
   // 性能优化：直接拼接 HTML 字符串，避免逐行调用 TemplateEngine.render
   const htmlParts = new Array(data.length);
+  const rowKeys = new Array(data.length);
+  const rowDebugIds = new Array(data.length);
 
   for (let i = 0; i < data.length; i++) {
     const entry = data[i];
@@ -1422,9 +1472,11 @@ function renderLogs(data) {
     const messageContent = buildLogMessageContent(entry);
     const accountDisplay = buildAccountDisplay(entry.account, entry.account_switches);
 
-    // === 直接拼接行 HTML ===
-    htmlParts[i] = '<tr class="mobile-card-row logs-table-row">'
-      + logRowCell('logs-col-time', logMobileLabels.time, formatTime(entry.time), { empty: false })
+    // === 拼接行内单元格（tr 壳与 key 由 keyed diff 管理）===
+    rowKeys[i] = logRowKey(entry, i);
+    rowDebugIds[i] = canInspectDebugLog(entry) ? String(Number(entry.id)) : '';
+    htmlParts[i] =
+      logRowCell('logs-col-time', logMobileLabels.time, formatTime(entry.time), { empty: false })
       + logRowCell('logs-col-ip logs-mono-text', logMobileLabels.ip, clientIPDisplay, { empty: false })
       + logRowCell('logs-col-token-desc', logMobileLabels.tokenDesc, tokenDescDisplay, { empty: false })
       + logRowCell('logs-col-api-key', logMobileLabels.apiKey, apiKeyDisplay, { empty: false })
@@ -1439,12 +1491,10 @@ function renderLogs(data) {
       + logRowCell('logs-col-cache-write', logMobileLabels.cacheWrite, cacheCreationDisplay)
       + logRowCell('logs-col-cache-util', logMobileLabels.cacheUtil, cacheUtilDisplay)
       + logRowCell('logs-col-cost', logMobileLabels.cost, costDisplay, { attrs: costTitleAttr })
-      + logRowCell('logs-col-message', logMobileLabels.message, messageContent, { nowrap: false })
-      + '</tr>';
+      + logRowCell('logs-col-message', logMobileLabels.message, messageContent, { nowrap: false });
   }
 
-  // 一次性替换 tbody 内容
-  tbody.innerHTML = htmlParts.join('');
+  syncLogRows(tbody, rowKeys, htmlParts, rowDebugIds);
 }
 
 function updatePagination() {
@@ -1872,6 +1922,29 @@ function initLogsPageActions() {
             });
           }
         }
+      }
+    });
+  }
+
+  // 整行可点开 debug 详情：交互子元素（链接/按钮/输入框/可复制文本）与
+  // 文本选区上的点击不触发——「信息」列链接与探活按钮走 data-action 委托，
+  // 行点击只兜其余区域。
+  const tbody = document.getElementById('tbody');
+  if (tbody && !tbody.dataset.rowClickBound) {
+    tbody.dataset.rowClickBound = '1';
+    tbody.addEventListener('click', (e) => {
+      const row = e.target.closest('tr[data-debug-log-id], tr[data-debug-active-id]');
+      if (!row || !tbody.contains(row)) return;
+      if (e.target.closest('a, button, input, select, textarea, code, [data-action], [data-copy]')) return;
+      if (window.getSelection && String(window.getSelection() || '') !== '') return;
+      const logId = parseInt(row.dataset.debugLogId || '', 10);
+      if (Number.isFinite(logId) && logId > 0) {
+        window.showDebugLogModal(logId);
+        return;
+      }
+      const activeId = parseInt(row.dataset.debugActiveId || '', 10);
+      if (Number.isFinite(activeId) && activeId > 0) {
+        window.showActiveDebugLogModal(activeId);
       }
     });
   }

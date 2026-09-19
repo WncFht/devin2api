@@ -13,13 +13,10 @@
   <link rel="stylesheet" href="/web/assets/css/styles.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/highlight-theme.css?v=__VERSION__">
   <link rel="stylesheet" href="/web/assets/css/logs.css?v=__VERSION__">
-  <script defer src="/web/assets/locales/zh-CN.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/locales/en.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/filter-state.js?v=__VERSION__"></script>
-  <script defer src="/web/assets/js/filter-query.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
@@ -27,6 +24,7 @@
   <script defer src="/web/assets/js/ui-api.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-format.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-filters.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/ui-notify.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-topbar.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-combobox.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui-autorefresh.js?v=__VERSION__"></script>
@@ -76,27 +74,27 @@
               <table class="modern-table logs-table mobile-card-table">
                 <thead>
                   <tr>
-                    <th scope="col" scope="col" class="logs-col-time" data-i18n="logs.colTime">时间</th>
-                    <th scope="col" scope="col" class="logs-col-ip" data-i18n="logs.colIP">IP</th>
-                    <th scope="col" scope="col" class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
-                    <th scope="col" scope="col" class="logs-col-api-key" data-i18n="logs.colApiKey">Key 哈希</th>
-                    <th scope="col" scope="col" class="logs-col-model" data-i18n="common.model">模型</th>
-                    <th scope="col" scope="col" class="logs-col-account" data-i18n="logs.colAccount">账号</th>
-                    <th scope="col" scope="col" class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
-                    <th scope="col" scope="col" class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
-                    <th scope="col" scope="col" class="logs-col-speed" data-i18n="logs.colSpeed">速度(tok/s)</th>
-                    <th scope="col" scope="col" class="logs-col-input" data-i18n="logs.colInput">输入</th>
-                    <th scope="col" scope="col" class="logs-col-output" data-i18n="logs.colOutput">输出</th>
-                    <th scope="col" scope="col" class="logs-col-cache-read" data-i18n="logs.colCacheRead">缓存读</th>
-                    <th scope="col" scope="col" class="logs-col-cache-write" data-i18n="logs.colCacheWrite">缓存建</th>
-                    <th scope="col" scope="col" class="logs-col-cache-util" data-i18n="logs.colCacheUtil">缓存命中%</th>
-                    <th scope="col" scope="col" class="logs-col-cost" data-i18n="logs.colCost" data-i18n-title="logs.costTooltipHeader" title="标准成本：单价（美元/百万 Token）× 数量 = 费用">成本</th>
-                    <th scope="col" scope="col" class="logs-col-message" data-i18n="logs.colMessage">信息</th>
+                    <th scope="col" class="logs-col-time" data-i18n="logs.colTime">时间</th>
+                    <th scope="col" class="logs-col-ip" data-i18n="logs.colIP">IP</th>
+                    <th scope="col" class="logs-col-token-desc" data-i18n="logs.colTokenDesc">令牌</th>
+                    <th scope="col" class="logs-col-api-key" data-i18n="logs.colApiKey">Key 哈希</th>
+                    <th scope="col" class="logs-col-model" data-i18n="common.model">模型</th>
+                    <th scope="col" class="logs-col-account" data-i18n="logs.colAccount">账号</th>
+                    <th scope="col" class="logs-col-status" data-i18n="logs.statusCode">状态码</th>
+                    <th scope="col" class="logs-col-timing" data-i18n="logs.colTiming">首字/耗时(秒)</th>
+                    <th scope="col" class="logs-col-speed" data-i18n="logs.colSpeed">速度(tok/s)</th>
+                    <th scope="col" class="logs-col-input" data-i18n="logs.colInput">输入</th>
+                    <th scope="col" class="logs-col-output" data-i18n="logs.colOutput">输出</th>
+                    <th scope="col" class="logs-col-cache-read" data-i18n="logs.colCacheRead">缓存读</th>
+                    <th scope="col" class="logs-col-cache-write" data-i18n="logs.colCacheWrite">缓存建</th>
+                    <th scope="col" class="logs-col-cache-util" data-i18n="logs.colCacheUtil">缓存命中%</th>
+                    <th scope="col" class="logs-col-cost" data-i18n="logs.colCost" data-i18n-title="logs.costTooltipHeader" title="标准成本：单价（美元/百万 Token）× 数量 = 费用">成本</th>
+                    <th scope="col" class="logs-col-message" data-i18n="logs.colMessage">信息</th>
                   </tr>
                 </thead>
                 <tbody id="tbody">
                   <tr>
-                    <td colspan="16" class="loading-state">
+                    <td colspan="16" class="state-block--compact">
                       <div class="loading-spinner loading-spinner--block"></div>
                       <span data-i18n="logs.loading">正在加载日志...</span>
                     </td>
@@ -164,12 +162,12 @@
   <!-- 空状态模板 -->
   <template id="tpl-log-empty">
     <tr>
-      <td colspan="{{colspan}}" class="empty-state">
-        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--neutral" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <td colspan="{{colspan}}" class="state-block">
+        <svg class="w-12 h-12 mx-auto mb-4 state-icon--neutral" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
         </svg>
-        <div class="empty-state-title" data-i18n="logs.noData">暂无日志数据</div>
-        <div data-i18n="logs.adjustFilter">请调整筛选条件或检查时间范围</div>
+        <div class="state-title" data-i18n="logs.noData">暂无日志数据</div>
+        <div class="state-desc" data-i18n="logs.adjustFilter">请调整筛选条件或检查时间范围</div>
       </td>
     </tr>
   </template>
@@ -184,11 +182,11 @@
         </h2>
         <button type="button" class="close-btn" data-action="close-debug-log-modal" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
       </div>
-      <div id="debugLogLoading" style="text-align: center; padding: 2rem; display: none;">
+      <div id="debugLogLoading" class="state-block--compact" style="display: none;">
         <span data-i18n="logs.loading">加载中...</span>
       </div>
-      <div id="debugLogError" style="text-align: center; padding: 2rem; color: var(--danger-600); display: none;"></div>
-      <div id="debugLogContent" style="display: none; flex: 1; min-height: 0; flex-direction: column;">
+      <div id="debugLogError" class="state-block--compact state-title--error" style="display: none;"></div>
+      <div id="debugLogContent" class="debug-log-content" style="display: none;">
         <div class="upstream-detail-tabs">
           <button type="button" id="debugRequestTabBtn" class="upstream-tab active" data-action="switch-debug-tab" data-tab="request" data-i18n="logs.debugRequest">Request</button>
           <button type="button" id="debugTranslatedRequestTabBtn" class="upstream-tab" data-action="switch-debug-tab" data-tab="translated-request" data-i18n="logs.debugTranslatedRequest" hidden>Translated Request</button>
@@ -233,7 +231,7 @@
   <!-- 加载状态模板 -->
   <template id="tpl-log-loading">
     <tr>
-      <td colspan="{{colspan}}" class="loading-state">
+      <td colspan="{{colspan}}" class="state-block--compact">
         <div class="loading-spinner loading-spinner--block"></div>
         <span data-i18n="logs.loading">正在加载日志...</span>
       </td>
@@ -243,12 +241,12 @@
   <!-- 错误状态模板 -->
   <template id="tpl-log-error">
     <tr>
-      <td colspan="{{colspan}}" class="empty-state">
-        <svg class="w-12 h-12 mx-auto mb-4 empty-state-icon--error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <td colspan="{{colspan}}" class="state-block">
+        <svg class="w-12 h-12 mx-auto mb-4 state-icon--error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.864-.833-2.634 0L4.18 16.5c-.77.833.192 2.5 1.732 2.5z"/>
         </svg>
-        <div class="empty-state-title empty-state-title--error" data-i18n="logs.loadFailed">加载失败</div>
-        <div data-i18n="logs.checkNetwork">请检查网络连接或重试</div>
+        <div class="state-title state-title--error" data-i18n="logs.loadFailed">加载失败</div>
+        <div class="state-desc" data-i18n="logs.checkNetwork">请检查网络连接或重试</div>
       </td>
     </tr>
   </template>

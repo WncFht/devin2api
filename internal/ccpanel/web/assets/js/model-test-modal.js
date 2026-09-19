@@ -4,8 +4,8 @@
 // 模型固定为入口行给定的名字（上游只有一个账号，没有换模型探的意义）；
 // 测试内容默认 ccLoad 的默认探活语，可改。
 (function () {
-  const t = (key, params) => (typeof window.t === 'function' ? window.t(key, params) : key);
-  const esc = (s) => (typeof window.escapeHtml === 'function' ? window.escapeHtml(String(s ?? '')) : String(s ?? ''));
+  const t = window.t;
+  const esc = window.escapeHtml;
 
   // 与 ccLoad DefaultChannelTestContent 同值；后端 model-test 缺省也用它。
   const DEFAULT_CONTENT = 'sonnet 4.0的发布日期是什么';
@@ -37,38 +37,40 @@
         <button type="button" class="close-btn" data-mtm-action="close" data-i18n-aria-label="common.close" aria-label="关闭">&times;</button>
       </div>
 
-      <div class="form-group">
-        <label class="form-label" for="${IDS.protocol}" data-i18n="probe.protocol">客户端协议</label>
-        <select id="${IDS.protocol}" class="form-input">
-          <option value="anthropic">Anthropic (/v1/messages)</option>
-          <option value="openai">OpenAI (/v1/chat/completions)</option>
-          <option value="codex">Codex (/v1/responses)</option>
-        </select>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label" for="${IDS.protocol}" data-i18n="probe.protocol">客户端协议</label>
+          <select id="${IDS.protocol}" class="form-input">
+            <option value="anthropic">Anthropic (/v1/messages)</option>
+            <option value="openai">OpenAI (/v1/chat/completions)</option>
+            <option value="codex">Codex (/v1/responses)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="${IDS.content}" data-i18n="logs.testContent">测试内容</label>
+          <input type="text" id="${IDS.content}" class="form-input" data-i18n-placeholder="logs.testContentPlaceholder" placeholder="输入测试消息内容">
+        </div>
+
+        <div class="form-group">
+          <label class="logs-stream-toggle">
+            <input type="checkbox" id="${IDS.stream}">
+            <span class="form-label" data-i18n="logs.enableStream">启用流式响应</span>
+          </label>
+        </div>
+
+        <div id="${IDS.progress}" class="test-progress">
+          <div class="loading-spinner"></div>
+          <p data-i18n="probe.testing">正在测试...</p>
+        </div>
+
+        <div id="${IDS.result}" class="test-result">
+          <div id="${IDS.resultContent}"></div>
+          <div id="${IDS.resultDetails}" class="test-details"></div>
+        </div>
       </div>
 
-      <div class="form-group">
-        <label class="form-label" for="${IDS.content}" data-i18n="logs.testContent">测试内容</label>
-        <input type="text" id="${IDS.content}" class="form-input" data-i18n-placeholder="logs.testContentPlaceholder" placeholder="输入测试消息内容">
-      </div>
-
-      <div class="form-group">
-        <label class="logs-stream-toggle">
-          <input type="checkbox" id="${IDS.stream}">
-          <span class="form-label" data-i18n="logs.enableStream">启用流式响应</span>
-        </label>
-      </div>
-
-      <div id="${IDS.progress}" class="test-progress">
-        <div class="loading-spinner"></div>
-        <p data-i18n="probe.testing">正在测试...</p>
-      </div>
-
-      <div id="${IDS.result}" class="test-result">
-        <div id="${IDS.resultContent}"></div>
-        <div id="${IDS.resultDetails}" class="test-details"></div>
-      </div>
-
-      <div class="form-actions">
+      <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-mtm-action="close" data-i18n="common.close">关闭</button>
         <button type="button" id="${IDS.runBtn}" class="btn btn-primary" data-mtm-action="run" data-i18n="logs.startTest">开始测试</button>
       </div>
