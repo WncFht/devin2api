@@ -4,20 +4,23 @@
 
 devin-2api 是一个非官方协议适配器，把你 Devin 账号（[app.devin.ai](https://app.devin.ai/)）可用的模型包装在 OpenAI / Anthropic 兼容接口后面——让标准客户端（Codex、Claude Code、任意 SDK）通过熟悉的 API 调用它们。
 
-> **声明**：本项目与 Cognition 无任何关联、未获其背书。它使用你自己的 Devin 会话 token 调用内部 RPC 接口，仅供个人账号自用；请自行遵守 Devin 的服务条款。
+> **声明**：本项目与 Cognition 无任何关联、未获其背书。它使用你自己的 Devin 凭据（会话 token 或 durable 平台 key）调用内部 RPC 接口，仅供个人账号自用；请自行遵守 Devin 的服务条款。
 
 ## 特性
 
 - **一个上游，三个 API 面**——`POST /v1/responses`（OpenAI Responses，含 Codex 式客户端的 WebSocket transport 与多轮会话）、`POST /v1/chat/completions`（OpenAI Chat）、`POST /v1/messages`（Anthropic Messages）
 - **支持流式与一次性响应**（typed SSE / JSON）
 - **思考签名跨轮回放**——按各 provider 原生形态保存并回传：Responses 面落成 `encrypted_content` reasoning item，Anthropic 面落成 `redacted_thinking`，Chat 面落成 `reasoning_content`
-- **工具调用**——custom/freeform 工具调用（如 `apply_patch`）原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对
+- **工具调用**——custom/freeform 工具调用（如 `apply_patch`）原文往返；工具名与 `tool_choice` 本地校验；按上游强制的 call↔result 交错序重新配对。服务端托管的 `web_search` 声明由代理经上游搜索 RPC 代执行，结果按原生 `web_search_call`/`server_tool_use` 项下发——Claude Code 的 WebSearch 专用侧请求整体短路成一次托管搜索
+- **图片、文档、视频输入**——`input_image`、`input_file`/`file`/`document`、`video`/`video_url`/`input_video` part 在三个面统一解码（含 Anthropic `image`/`document`/`video` 块形态）；按模型能力位在上线前本地拦截，不支持的模型快速失败而不是静默丢附件；视频只走抽帧视觉轨，无音轨
 - **上游流恢复**——token 过期自动从凭据来源重读；产出内容前的上游失败（传输断裂、静默卡死、空回复）透明重试；早期失败返回真实 HTTP 错误，而不是已提交 200 后的 SSE error
+- **脱钩完成缓存**——客户端断开不掐上游流：流在服务端续跑进完成缓存，语义等价的重试直接挂回——completed 条目秒回全量、running 条目先重放缓冲前缀再追实时帧；条目跨重启持久化
+- **多账号上游池**——`devin.accounts` 每条 lane 自带凭据、速率闸门与配额追踪；会话亲和键（`X-Claude-Code-Session-Id`、`X-Session-ID`/`X-Session-Affinity`/`X-Conversation-Id`/`X-Thread-Id` 头、`metadata.user_id`、`prompt_cache_key`/`user`）把会话钉到 lane，上游失败向更健康的兄弟 lane failover，周配额过低时对新会话降权。lane 在面板 `/web/accounts.html` 在线管理——空池也是合法起跑状态
 - **限流闸门**——上游 `resource_exhausted` 触发本地冷却闩：排队请求短暂等待后快速失败 `429` + `Retry-After`，不再捶打已被限流的上游；闩内按滴灌节奏放探针探测恢复；闩状态持久化在 `devin-2api.db`，重启后未过期自动恢复。可选 `max_rpm` 令牌桶在触闩前先行整形出站压力
 - **可选前缀保温**——按节拍重放保留谱系的最近请求体给上游 prompt cache 续期，subagent 长等结束后恢复轮次不再吃冷 prefill（`devin.warm_prefix_*`，默认关闭；机制见 `docs/upstream-cache.md`）
 - **归一化错误契约**——上游错误码映射为正确的 HTTP 状态与各协议错误类型；限流归一为 `429` + `Retry-After`；请求日志开启时（`debug.enabled`，随仓库示例配置默认开启）每个请求带 `X-Request-Id`/`debug_ref` 直指其调试记录
-- **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片支持等来自上游模型目录
-- **`/web` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试 payload，以及多数字段可热加载的脱敏配置视图
+- **`/v1/models` 能力位透出**——上下文窗口、工具/thinking/图片/文档/视频支持等来自上游模型目录；`devin.aliases` 条目带 `alias_of` 出现，面板模型注册表可逐个停用或重定向
+- **`/web` 管理面板**——请求浏览、用量/成本聚合、配额追踪、进程指标、按请求调试 payload、下游令牌管理、池 lane 管控、模型注册表、多数字段可热加载的脱敏配置视图，以及托管安装下的一键自更新
 - **单一静态二进制**——[GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api) 公开镜像
 
 ## 快速开始
@@ -51,7 +54,42 @@ cp config.example.yaml config.yaml
 
 ### 3. 启动
 
-预编译二进制（见 [Releases](https://github.com/WncFht/devin2api/releases)，附 `checksums.txt` 可校验）。资产命名 `devin-2api-{darwin,linux}-{amd64,arm64}`；Windows 为同名 `.zip` 包（内含 exe + `config.example.yaml` + LICENSE）：
+五条安装路线，终点都是同一个二进制——区别在于进程归谁托管、升级怎么走。
+
+#### 路线 A：一键脚本（Linux & macOS 推荐）
+
+```bash
+curl -sSL https://raw.githubusercontent.com/WncFht/devin2api/main/scripts/install.sh | bash
+```
+
+一条命令，免 clone 免 root。`install.sh` 按目标版本拉取部署管线后交给平台 deploy 脚本——二进制落在 `~/.local/bin`，配置与状态落在平台目录（布局见路线 B 表格），服务托管在 `systemd --user`（Linux）或 launchd（macOS）下，每次重启走零停机 REUSEPORT 交接。子命令：`install`（缺省；`-v <tag>` 钉版本）、`upgrade`、`rollback <tag>`、`status`、`list-versions`、`uninstall`（移除服务与二进制，保留 config 与日志）。Windows 请走路线 B 的 PowerShell 脚本或路线 C。
+
+首跑时 `config.yaml` 自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/tokens.html` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。
+
+Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
+
+#### 路线 B：clone 后跑部署脚本
+
+与路线 A 相同的托管服务，改从仓库检出驱动——适合想把仓库留在盘上的场景（脚本以仓库为家：同步 `config.yaml` 进平台配置目录、在仓库内维护指向状态目录的 `logs` 符号链接）：
+
+```bash
+git clone https://github.com/WncFht/devin2api && cd devin2api
+bash scripts/deploy/deploy-linux.sh --release latest    # macOS 用 scripts/deploy/deploy.sh
+```
+
+`--release latest` 下载经 sha256 校验的预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。`--check` 对比已安装/运行中/最新版本；`--uninstall` 移除服务与二进制（保留 config 与日志）；`--no-restart` 只换二进制不重启。首跑配置生成行为与路线 A 相同。
+
+| 平台    | 托管方式                                 | 布局                                                                                                      | 脚本                                |
+| ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| macOS   | launchd 代理                             | 二进制 `~/.local/bin` · 配置 + 状态 `~/Library/Application Support/devin-2api`                            | `scripts/deploy/deploy.sh`          |
+| Linux   | `systemd --user`                         | 二进制 `~/.local/bin` · 配置 `~/.config/devin-2api` · 状态 `~/.local/state/devin-2api`                    | `scripts/deploy/deploy-linux.sh`    |
+| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe `%LOCALAPPDATA%\Programs\devin-2api` · 配置 `%APPDATA%\devin-2api` · 状态 `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
+
+Windows 下 `deploy-windows.ps1 -Release latest` 生成的 `config.yaml` 绑回环地址加空闲端口（避开防火墙弹窗与裸暴露），实例在独立控制台窗口起跑——请在本机交互会话里执行，别走 SSH（会话结束 job object 会回收实例）。
+
+#### 路线 C：预编译二进制
+
+[Releases](https://github.com/WncFht/devin2api/releases) 资产命名 `devin-2api-{darwin,linux}-{amd64,arm64}`；Windows 为 `devin-2api-windows-{amd64,arm64}.zip` 包（内含 exe + `config.example.yaml` + LICENSE），附 `checksums.txt` 可校验：
 
 ```bash
 # Linux 示例；macOS 换成 devin-2api-darwin-arm64 或 -darwin-amd64
@@ -62,15 +100,13 @@ chmod +x devin-2api-linux-amd64
 ./devin-2api-linux-amd64 -config config.yaml
 ```
 
-Windows：解压 `devin-2api-windows-amd64.zip`，编辑 `config.yaml`（账号可只给 `credentials_file`——第 1 节让 Windsurf 内嵌的 `devin.exe` 产出凭证文件），在控制台运行 `devin-2api.exe -config config.yaml`。Ctrl+C 触发优雅排空；关窗和 `taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径。
+Windows：解压后编辑 `config.yaml`（账号可只给 `credentials_file`——第 1 节让 Windsurf 内嵌的 `devin.exe` 产出凭证文件），在控制台运行 `devin-2api.exe -config config.yaml`。Ctrl+C 触发优雅排空；关窗和 `taskkill /F` 不走排空——Windows 对控制台进程只有强杀路径。
 
-源码运行（生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需工具链）：
+路径解析：配置走 `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → 路线 B 表中的平台默认；状态目录走 `-state-dir` → `DEVIN2API_STATE_DIR` → 平台默认。
 
-```bash
-go run ./cmd/devin-2api -config config.yaml
-```
+#### 路线 D：Docker
 
-Docker（镜像已发布至 [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)）：
+镜像发布在 [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)：
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -82,24 +118,17 @@ docker run --rm -p 8080:8080 \
 
 状态卷让 `devin-2api.db`（下游令牌仓、请求日志、配额快照）跨容器重启存活——不挂卷则每次运行从空仓起步，即 `/v1` 开放访问。
 
-以服务方式运行（可选）：
+#### 路线 E：源码
 
-| 平台    | 托管方式                                 | 布局                                                                                                      | 安装 / 升级                         |
-| ------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| macOS   | launchd 代理                             | 二进制 `~/.local/bin` · 配置 + 状态 `~/Library/Application Support/devin-2api`                            | `scripts/deploy/deploy.sh`          |
-| Linux   | `systemd --user`                         | 二进制 `~/.local/bin` · 配置 `~/.config/devin-2api` · 状态 `~/.local/state/devin-2api`                    | `scripts/deploy/deploy-linux.sh`    |
-| Windows | 无——控制台运行，或用 NSSM / 任务计划程序 | exe `%LOCALAPPDATA%\Programs\devin-2api` · 配置 `%APPDATA%\devin-2api` · 状态 `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
-
-二进制按平台惯例解析路径：配置走 `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → 上表平台默认；状态目录走 `-state-dir` → `DEVIN2API_STATE_DIR` → 平台默认。两个部署脚本都是「首装与升级同一条命令」：`--release latest` 拉预编译二进制，装完轮询 `/healthz` 确认新版本接管，再打一发 `GET /v1/models` 验证上游鉴权真的通了。脚本以仓库为家——同步 `config.yaml` 进平台配置目录、在仓库内维护指向状态目录的 `logs` 符号链接，所以先 clone 再跑：
+生成的 proto 绑定已提交在 `outputs/devin-proto-go`，clone 后可直接构建，无需额外工具链：
 
 ```bash
-git clone https://github.com/WncFht/devin2api && cd devin2api
-bash scripts/deploy/deploy-linux.sh --release latest    # macOS 用 scripts/deploy/deploy.sh
+go run ./cmd/devin-2api -config config.yaml
 ```
 
-首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/tokens.html` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
+#### 升级
 
-Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
+托管安装（路线 A–B）可以从面板自更新——`/web/settings.html` 的版本更新卡：检查 → 下载 → sha256 校验 → 换二进制 → 跨同一套 REUSEPORT 交接重启，全程零断连，面板轮询进度无缝跨过进程切换。脚本侧等价端点是 `POST /admin/update`（配套 `/admin/update/check`、`/admin/update/status`、`/admin/update/rollback`）；回滚对更新时留下的 `.backup` 旧二进制做对称换回，无需下载。其余形态——手动起的二进制、Windows 控制台、Docker——端点回 `501`：按你的安装路线重跑一遍即可（部署脚本、重新下载、或拉新镜像）。
 
 ### 4. 验证
 
@@ -188,6 +217,8 @@ curl http://localhost:8080/v1/messages \
 | `devin.warm_prefix_*`                            | 前缀保温一族键——按节拍重放保留谱系的最近请求体给上游 prompt cache 续期，压住 subagent 长等后恢复轮次的冷 prefill；键清单见 `config.example.yaml`，机制见 `docs/upstream-cache.md`                                                                          | `warm_prefix_enabled: false`                                                |
 | `devin.session_affinity_ttl_seconds`             | 会话→lane 绑定的滑动 TTL（每次命中续期）；`X-Claude-Code-Session-Id`/`X-Session-ID`/`X-Session-Affinity`/`X-Conversation-Id`/`X-Thread-Id` 头把会话钉到 lane                                                                                               | `3600`                                                                      |
 | `devin.quota_low_threshold_percent`              | 周配额低于该百分比时，新会话选号把该 lane 降到健康 lane 之后（已绑定会话不受影响）                                                                                                                                                                         | `15`                                                                        |
+| `devin.no_progress_timeout_seconds`              | 产出内容后的上游无进度看门狗秒数——上游在工具调用参数阶段可静默计算 15–25 分钟只发心跳帧，此值须明显盖住该区间                                                                                                                                              | `2700`                                                                      |
+| `devin.pre_event_no_progress_timeout_seconds`    | 产出首个可解码事件前每段等待的无进度期限秒数；pre-event 累计静默另有内置 180s 硬顶（首发起算、跨换流累计），配大不突破该上限                                                                                                                               | `600`                                                                       |
 | `debug.enabled`                                  | 按请求记录调试 payload 进 `devin-2api.db`（`debug_files`/`debug_chunks` 表，状态目录）                                                                                                                                                                     | `false`                                                                     |
 | `debug.retention_days`                           | 按请求调试记录保留天数；`<=0` 不按时间清理                                                                                                                                                                                                                 | `14`                                                                        |
 | `debug.max_total_mb`                             | 调试 payload 总量上限（MB），超限从最旧请求组开始删                                                                                                                                                                                                        | `1024`                                                                      |
@@ -239,6 +270,7 @@ dashboard:
 
 ## 文档
 
+- **使用文档（安装、客户端接入、配置、排障）**：[wncfht.github.io/devin2api](https://wncfht.github.io/devin2api/)
 - **架构、API 字段子集、proto 提取等技术细节**：[贡献指南](CONTRIBUTING.md)
 - **上游协议逆向、客户端接入、排障手册、部署与工具链**：[docs/](docs/README.md)
 - **开源协议**：[MIT](LICENSE)

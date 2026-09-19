@@ -4,20 +4,23 @@
 
 devin-2api is an unofficial protocol adapter that exposes the models available to your Devin account ([app.devin.ai](https://app.devin.ai/)) behind OpenAI- and Anthropic-compatible endpoints — so standard clients (Codex, Claude Code, any SDK) can call them through familiar APIs.
 
-> **Disclaimer**: this project is not affiliated with or endorsed by Cognition. It authenticates with your own Devin session token against an internal RPC surface. It is intended for personal use with your own account; you are responsible for complying with Devin's terms of service.
+> **Disclaimer**: this project is not affiliated with or endorsed by Cognition. It authenticates with your own Devin credentials (session token or durable platform key) against an internal RPC surface. It is intended for personal use with your own account; you are responsible for complying with Devin's terms of service.
 
 ## Features
 
 - **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. a WebSocket transport with multi-turn sessions for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
 - **Streaming and non-streaming** responses (typed SSE / JSON)
 - **Reasoning that round-trips** — thinking signatures are preserved and replayed across turns: `encrypted_content` reasoning items on Responses, `redacted_thinking` on Anthropic, `reasoning_content` on Chat
-- **Tool calling** — custom/freeform tool calls (e.g. `apply_patch`) round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces
+- **Tool calling** — custom/freeform tool calls (e.g. `apply_patch`) round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces. Server-managed `web_search` declarations are executed through the upstream search RPC and returned as native `web_search_call`/`server_tool_use` items — a Claude Code WebSearch side request short-circuits into a single managed search
+- **Image, document, and video inputs** — `input_image`, `input_file`/`file`/`document`, and `video`/`video_url`/`input_video` parts decode on all three surfaces (Anthropic `image`/`document`/`video` blocks included). Per-model capability flags gate them locally before the wire, so an incapable model fails fast instead of silently dropping the attachment; video is frames only, no audio track
 - **Upstream stream recovery** — expired tokens are reloaded from the credentials source, pre-content upstream failures (transport breaks, silent stalls, empty replies) are retried transparently, and early failures surface as real HTTP errors instead of SSE errors after a committed `200`
+- **Detached completion cache** — a client disconnect doesn't kill the upstream stream: it keeps running server-side into a completion cache, and a semantically identical retry re-attaches — completed entries replay instantly, running ones replay the buffered prefix then follow live. Entries persist across restarts
+- **Multi-account upstream pool** — `devin.accounts` lanes each carry their own credentials, rate gate, and quota tracking. Session affinity keys (`X-Claude-Code-Session-Id`, `X-Session-ID`/`X-Session-Affinity`/`X-Conversation-Id`/`X-Thread-Id` headers, `metadata.user_id`, `prompt_cache_key`/`user`) pin a conversation to a lane, upstream failures fail over to a healthier sibling, and low weekly quota demotes a lane for new sessions. Lanes are managed live from `/web/accounts.html` — an empty pool is a legal starting state
 - **Rate-limit gate** — upstream `resource_exhausted` trips a local cooldown latch: queued requests wait briefly then fast-fail `429` + `Retry-After` instead of hammering a limited upstream, drip-released probes detect recovery, and latch state persists across restarts (in `devin-2api.db`). An optional `max_rpm` token bucket shapes outbound pressure before the latch ever trips
 - **Optional prefix warming** — replays retained session request bodies on a cadence to renew the upstream prompt cache, so a subagent resuming after a long wait doesn't pay a cold prefill (`devin.warm_prefix_*`, off by default; see `docs/upstream-cache.md`)
 - **Normalized error contract** — upstream error codes map to proper HTTP status and per-protocol error types; rate limits become `429` + `Retry-After`; with request logging on (`debug.enabled`, on in the shipped `config.example.yaml`) every request carries `X-Request-Id`/`debug_ref` identifying its debug record
-- **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from the upstream model catalog
-- **Admin panel at `/web`** — request browser, usage/cost aggregation, quota tracking, process metrics, per-request debug payloads, and a redacted config view with hot reload for most fields
+- **`/v1/models` capability flags** — context window plus tool/thinking/image/document/video support surfaced from the upstream model catalog; `devin.aliases` entries appear with `alias_of`, and the panel model registry can disable or redirect individual names
+- **Admin panel at `/web`** — request browser, usage/cost aggregation, quota tracking, process metrics, per-request debug payloads, downstream token management, pool lane control, model registry, a redacted config view with hot reload for most fields, and one-click self-update on managed installs
 - **Single static binary** — public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 
 ## Quick start
@@ -51,7 +54,42 @@ Edit `config.yaml` and declare your account under `devin.accounts` (starting fro
 
 ### 3. Run
 
-Prebuilt binary (from [Releases](https://github.com/WncFht/devin2api/releases), `checksums.txt` attached for verification). Assets are named `devin-2api-{darwin,linux}-{amd64,arm64}`; Windows ships as same-named `.zip` bundles (exe + `config.example.yaml` + LICENSE):
+Five install routes, all ending at the same binary — they differ in who manages the process and how upgrades work.
+
+#### Option A: install script (recommended on Linux & macOS)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/WncFht/devin2api/main/scripts/install.sh | bash
+```
+
+One command, no clone, no root. `install.sh` fetches the deploy pipeline at the target tag and hands off to the platform deploy script — the binary lands in `~/.local/bin`, config and state in the platform dirs (option B's layout table), and the service runs under `systemd --user` (Linux) or launchd (macOS) with a zero-downtime REUSEPORT handoff on every restart. Subcommands: `install` (default; `-v <tag>` pins a release), `upgrade`, `rollback <tag>`, `status`, `list-versions`, `uninstall` (removes service + binary, keeps config and logs). On Windows use option B's PowerShell script or option C instead.
+
+On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/tokens.html`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand.
+
+On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
+
+#### Option B: deploy scripts from a checkout
+
+The same managed service as option A, driven from a clone — useful when you want the repo on disk, since the scripts treat it as home (sync `config.yaml` into the platform config dir, keep a `logs` symlink in the repo pointing at the state dir):
+
+```bash
+git clone https://github.com/WncFht/devin2api && cd devin2api
+bash scripts/deploy/deploy-linux.sh --release latest    # macOS: scripts/deploy/deploy.sh
+```
+
+`--release latest` fetches a sha256-verified prebuilt binary, then the script polls `/healthz` until the new version answers and probes `GET /v1/models` to confirm upstream auth works. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs; `--no-restart` swaps the binary without restarting. First-run config generation works the same as option A.
+
+| Platform | Supervisor                               | Layout                                                                                                       | Script                              |
+| -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| macOS    | launchd agent                            | bin `~/.local/bin` · config+state `~/Library/Application Support/devin-2api`                                 | `scripts/deploy/deploy.sh`          |
+| Linux    | `systemd --user`                         | bin `~/.local/bin` · config `~/.config/devin-2api` · state `~/.local/state/devin-2api`                       | `scripts/deploy/deploy-linux.sh`    |
+| Windows  | none — console, or NSSM / Task Scheduler | exe `%LOCALAPPDATA%\Programs\devin-2api` · config `%APPDATA%\devin-2api` · state `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
+
+On Windows `deploy-windows.ps1 -Release latest` generates `config.yaml` bound to loopback on a free port (avoids the firewall prompt and a bare exposure) and starts the instance in its own console window — run it from a local interactive session, not over SSH (the job object kills the instance when the session ends).
+
+#### Option C: prebuilt binary
+
+Assets on [Releases](https://github.com/WncFht/devin2api/releases) are named `devin-2api-{darwin,linux}-{amd64,arm64}`; Windows ships `devin-2api-windows-{amd64,arm64}.zip` bundles (exe + `config.example.yaml` + LICENSE). `checksums.txt` is attached for verification:
 
 ```bash
 # Linux shown; on macOS use devin-2api-darwin-arm64 or -darwin-amd64
@@ -62,15 +100,13 @@ chmod +x devin-2api-linux-amd64
 ./devin-2api-linux-amd64 -config config.yaml
 ```
 
-On Windows: unzip `devin-2api-windows-amd64.zip`, edit `config.yaml` (an account may carry only `credentials_file` — step 1 covers the Windsurf-bundled `devin.exe` that produces the credential file), then run `devin-2api.exe -config config.yaml` in a console. Ctrl+C triggers the same graceful drain; closing the window and `taskkill /F` do not — Windows offers no graceful kill for console processes.
+On Windows: unzip, edit `config.yaml` (an account may carry only `credentials_file` — step 1 covers the Windsurf-bundled `devin.exe` that produces the credential file), then run `devin-2api.exe -config config.yaml` in a console. Ctrl+C triggers the same graceful drain; closing the window and `taskkill /F` do not — Windows offers no graceful kill for console processes.
 
-From source (generated proto bindings are committed under `outputs/devin-proto-go`, no toolchain needed):
+Path resolution: config via `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → the platform default in option B's table; state via `-state-dir` → `DEVIN2API_STATE_DIR` → the platform default.
 
-```bash
-go run ./cmd/devin-2api -config config.yaml
-```
+#### Option D: Docker
 
-Docker (image published on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)):
+The image is published on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api):
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -82,32 +118,17 @@ docker run --rm -p 8080:8080 \
 
 The state volume keeps `devin-2api.db` (downstream tokens, request logs, quota samples) across container restarts — without it each run starts with an empty store, meaning open `/v1` access.
 
-Run as a service (optional):
+#### Option E: from source
 
-| Platform | Supervisor                               | Layout                                                                                                       | Install / upgrade                   |
-| -------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
-| macOS    | launchd agent                            | bin `~/.local/bin` · config+state `~/Library/Application Support/devin-2api`                                 | `scripts/deploy/deploy.sh`          |
-| Linux    | `systemd --user`                         | bin `~/.local/bin` · config `~/.config/devin-2api` · state `~/.local/state/devin-2api`                       | `scripts/deploy/deploy-linux.sh`    |
-| Windows  | none — console, or NSSM / Task Scheduler | exe `%LOCALAPPDATA%\Programs\devin-2api` · config `%APPDATA%\devin-2api` · state `%LOCALAPPDATA%\devin-2api` | `scripts/deploy/deploy-windows.ps1` |
-
-The binary resolves its paths per platform convention: config via `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → the platform default above; state via `-state-dir` → `DEVIN2API_STATE_DIR` → platform default. Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works.
-
-On Linux and macOS the shortest path needs no clone and no root — `scripts/install.sh` is a thin bootstrap that fetches the deploy pipeline at the target tag and hands off to it (same zero-downtime handoff; `upgrade`, `rollback <tag>`, `status`, `list-versions`, `uninstall` subcommands):
+Generated proto bindings are committed under `outputs/devin-proto-go`, so a clone builds with no extra toolchain:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/WncFht/devin2api/main/scripts/install.sh | bash
+go run ./cmd/devin-2api -config config.yaml
 ```
 
-The deploy scripts treat the repo as home — syncing `config.yaml` into the platform config dir and keeping a `logs` symlink inside the repo pointing at the state dir — so to drive the pipeline from a checkout instead, clone first:
+#### Upgrading
 
-```bash
-git clone https://github.com/WncFht/devin2api && cd devin2api
-bash scripts/deploy/deploy-linux.sh --release latest    # macOS: scripts/deploy/deploy.sh
-```
-
-On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/tokens.html`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
-
-On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
+Managed installs (options A–B) can update themselves from the panel — `/web/settings.html` carries a version-update card: check → download → sha256 verify → swap → restart across the same REUSEPORT handoff, so nothing drops and the panel polls progress across the process switch. `POST /admin/update` (with `/admin/update/check`, `/admin/update/status`, `/admin/update/rollback`) exposes the same flow to scripts; rollback replays the swap against the `.backup` binary the update left behind — no download. Everywhere else — a manually started binary, a Windows console, Docker — the endpoints answer `501`: re-run your install route instead (deploy script, new download, or a fresh image pull).
 
 ### 4. Verify
 
@@ -196,6 +217,8 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `devin.warm_prefix_*`                            | Prefix-replay warming family — replays retained session prefixes on a cadence to renew the upstream prompt cache across long subagent waits; key list in `config.example.yaml`, mechanism in `docs/upstream-cache.md`                                                                                                                                                                           | `warm_prefix_enabled: false`                                                      |
 | `devin.session_affinity_ttl_seconds`             | Sliding TTL for session→lane bindings (renewed on every hit); headers `X-Claude-Code-Session-Id`/`X-Session-ID`/`X-Session-Affinity`/`X-Conversation-Id`/`X-Thread-Id` pin a session to a lane                                                                                                                                                                                                  | `3600`                                                                            |
 | `devin.quota_low_threshold_percent`              | Weekly-quota percent below which a lane is demoted behind healthy lanes for new sessions (bound sessions unaffected)                                                                                                                                                                                                                                                                            | `15`                                                                              |
+| `devin.no_progress_timeout_seconds`              | No-progress watchdog once content has started flowing — upstream can compute tool-call arguments silently for 15–25 min sending only heartbeats, so this must stay well above that                                                                                                                                                                                                              | `2700`                                                                            |
+| `devin.pre_event_no_progress_timeout_seconds`    | No-progress watchdog before the first decodable event; total pre-event silence is separately hard-capped at 180s (from first send, cumulative across stream reopens) — raising this can't extend that cap                                                                                                                                                                                       | `600`                                                                             |
 | `debug.enabled`                                  | Record per-request debug payload into `devin-2api.db` (`debug_files`/`debug_chunks` tables) in the state dir                                                                                                                                                                                                                                                                                    | `false`                                                                           |
 | `debug.retention_days`                           | Days to keep per-request debug records; `<=0` disables time-based cleanup                                                                                                                                                                                                                                                                                                                       | `14`                                                                              |
 | `debug.max_total_mb`                             | Total debug payload cap (MB); evicts oldest request groups first                                                                                                                                                                                                                                                                                                                                | `1024`                                                                            |
@@ -247,6 +270,7 @@ The full symptom → layer → fix table lives in [`docs/upstream-debug-playbook
 
 ## Documentation
 
+- **User guide (install, clients, configuration, troubleshooting)**: [wncfht.github.io/devin2api](https://wncfht.github.io/devin2api/)
 - **Architecture, supported API fields, proto extraction, and other technical details**: [Contributing guide](CONTRIBUTING.md)
 - **Upstream protocol reverse-engineering notes, client setup, debugging playbook, deployment & toolchain**: [docs/](docs/README.md)（中文）
 - **License**: [MIT](LICENSE)

@@ -28,14 +28,14 @@ devin-2api 把 Anthropic Messages / OpenAI Responses / Chat Completions 请求�
 
 ## 部署与工程
 
-| 文档                    | 用途                                                                                      |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
-| `deployment.md`         | 部署：macOS launchd / Linux systemd --user / Windows 裸进程；目录布局、优雅排空、日志轮转 |
-| `post-deploy-verify.md` | 部署后验证 SOP：healthz 版本确认 + 面板 playwright 套件冒烟                               |
-| `config-reload.md`      | config.yaml 热重载：热/冷键分界、面板覆盖恒赢文件、新热键接入步骤                         |
-| `devin-accounts.md`     | 上游账号池：生效集与面板端点、lane 隔离、亲和绑定、选号与 failover、冷却与观测            |
-| `toolchain.md`          | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本            |
-| `perf.md`               | 性能工作流：pprof/fgprof、loadtest+upstreamstub 压测、延迟分解字段、benchstat 验收、PGO   |
+| 文档                    | 用途                                                                                                              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `deployment.md`         | 部署：macOS launchd / Linux systemd --user / Windows 裸进程；目录布局、优雅排空、零停机交接、面板自更新、日志轮转 |
+| `post-deploy-verify.md` | 部署后验证 SOP：healthz 版本确认 + 面板 playwright 套件冒烟                                                       |
+| `config-reload.md`      | config.yaml 热重载：热/冷键分界、面板覆盖恒赢文件、新热键接入步骤                                                 |
+| `devin-accounts.md`     | 上游账号池：生效集与面板端点、lane 隔离、亲和绑定、选号与 failover、冷却与观测                                    |
+| `toolchain.md`          | 工程设施手册：pre-commit 管道、本地验证命令、版本解析链、CI/CD、发布与部署脚本                                    |
+| `perf.md`               | 性能工作流：pprof/fgprof、loadtest+upstreamstub 压测、延迟分解字段、benchstat 验收、PGO                           |
 
 ## 速查入口
 
