@@ -160,7 +160,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if !slices.Contains(report.Applied, "devin.accounts") {
 		t.Fatalf("devin.accounts missing from applied: %v", report.Applied)
 	}
-	if lanes := devinPool.AccountLaneStates(); len(lanes) != 0 {
+	if lanes := devinPool.Snapshot().Accounts; len(lanes) != 0 {
 		t.Fatalf("pool lanes = %v, want empty", lanes)
 	}
 
@@ -170,7 +170,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 	if _, err := reloadRuntimeConfig(rt, application, panel, manager, settings); err != nil {
 		t.Fatalf("reloadRuntimeConfig() error = %v, want nil", err)
 	}
-	if lanes := devinPool.AccountLaneStates(); len(lanes) != 1 {
+	if lanes := devinPool.Snapshot().Accounts; len(lanes) != 1 {
 		t.Fatalf("pool lanes = %v, want {a}", lanes)
 	}
 

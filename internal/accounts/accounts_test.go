@@ -76,6 +76,15 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
+// laneStates 把 Snapshot 的逐号视图投影回 LaneState 集，供状态断言。
+func laneStates(pool *devin.Pool) map[string]devin.LaneState {
+	states := make(map[string]devin.LaneState)
+	for name, ls := range pool.Snapshot().Accounts {
+		states[name] = ls.State
+	}
+	return states
+}
+
 // TestApplyMergesOverlay 验证重推管线全貌：disabled 行压住 config 号、
 // panel 行加新号、死墓碑被 GC；进池的恰是「非墓碑且未停用」子集，
 // resolved 视图仍含 tombstoned/disabled 条目供面板展示。
@@ -99,7 +108,7 @@ func TestApplyMergesOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sortedKeys(pool.AccountLaneStates()); !slices.Equal(got, []string{"alpha", "gamma"}) {
+	if got := sortedKeys(laneStates(pool)); !slices.Equal(got, []string{"alpha", "gamma"}) {
 		t.Fatalf("lanes = %v, want [alpha gamma]", got)
 	}
 	if findResolved(resolved, "beta") == nil || !findResolved(resolved, "beta").Disabled {
@@ -133,7 +142,7 @@ func TestApplyRejectsInvalidSet(t *testing.T) {
 		!strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("Apply() err = %v, want duplicate-token rejection", err)
 	}
-	if got := sortedKeys(pool.AccountLaneStates()); !slices.Equal(got, []string{"alpha", "beta"}) {
+	if got := sortedKeys(laneStates(pool)); !slices.Equal(got, []string{"alpha", "beta"}) {
 		t.Fatalf("lanes = %v, want unchanged [alpha beta]", got)
 	}
 }
@@ -150,8 +159,8 @@ func TestApplyEmptySet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved) != 0 || len(applied) != 0 || len(pool.AccountLaneStates()) != 0 {
-		t.Fatalf("empty pool expected: resolved=%v applied=%v lanes=%v", resolved, applied, pool.AccountLaneStates())
+	if len(resolved) != 0 || len(applied) != 0 || len(laneStates(pool)) != 0 {
+		t.Fatalf("empty pool expected: resolved=%v applied=%v lanes=%v", resolved, applied, laneStates(pool))
 	}
 }
 
@@ -255,7 +264,7 @@ func TestOpsLifecycle(t *testing.T) {
 	if created.Source != store.AccountSourcePanel || created.Token != "tok-gamma" {
 		t.Fatalf("created = %+v", created)
 	}
-	if _, ok := pool.AccountLaneStates()["gamma"]; !ok {
+	if _, ok := laneStates(pool)["gamma"]; !ok {
 		t.Fatal("gamma lane missing after create")
 	}
 	if _, err := ops.Create(ctx, AccountWrite{Name: "gamma", Token: "y"}); !errors.Is(err, store.ErrAccountExists) {
@@ -287,7 +296,7 @@ func TestOpsLifecycle(t *testing.T) {
 	if !disabled.Disabled || disabled.Source != store.AccountSourceConfig {
 		t.Fatalf("disabled beta = %+v", disabled)
 	}
-	if _, ok := pool.AccountLaneStates()["beta"]; ok {
+	if _, ok := laneStates(pool)["beta"]; ok {
 		t.Fatal("beta lane should be gone while disabled")
 	}
 	if _, err := ops.Update(ctx, "nosuch", AccountPatch{Disabled: &off}); !errors.Is(err, store.ErrAccountNotFound) {
@@ -546,7 +555,7 @@ devin:
 	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("Apply() error = %v, want degraded push, not rejection", err)
 	}
-	states := pool.AccountLaneStates()
+	states := laneStates(pool)
 	if got := sortedKeys(states); !slices.Equal(got, []string{"alpha", "beta"}) {
 		t.Fatalf("lanes = %v, want [alpha beta]", got)
 	}
@@ -607,7 +616,7 @@ devin:
 	if got := pool.TokenFuncs()["beta"](); got != "file-tok-beta" {
 		t.Fatalf("beta token after file loss = %q, want retained file-tok-beta", got)
 	}
-	if st := pool.AccountLaneStates()["beta"]; !st.Healthy {
+	if st := laneStates(pool)["beta"]; !st.Healthy {
 		t.Fatalf("beta lane must keep serving on retained token: %+v", st)
 	}
 }
@@ -631,7 +640,7 @@ devin:
 	if _, _, err := rt.Apply(context.Background(), cfg, nil); err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	for name, st := range pool.AccountLaneStates() {
+	for name, st := range laneStates(pool) {
 		if st.Healthy || st.AuthCooldownUntil == nil {
 			t.Fatalf("lane %q must be marked degraded: %+v", name, st)
 		}

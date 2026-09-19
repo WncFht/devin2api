@@ -232,8 +232,8 @@ func (pool *Pool) snapshot() []*poolLane {
 
 // firstLane 返回配置序首 lane：Endpoint 与 tuning 类全局字段各 lane
 // 一致（devinConfigsFrom 逐 lane 复制同一模板），首 lane 视图只读这组；
-// Identity 类字段各 lane 各异，走 TokenFuncs/AccountLaneStates 等
-// per-lane 接口而不是这里。面板 MVP 也固定绑首号——逐号展示是阶段 2
+// Identity 类字段各 lane 各异，走 Snapshot().Accounts / TokenFuncs
+// 等 per-lane 接口而不是这里。面板 MVP 也固定绑首号——逐号展示是阶段 2
 // 的事。空池返回 nil，调用方给各自视图类型的零值。
 func (pool *Pool) firstLane() *poolLane {
 	if lanes := pool.snapshot(); len(lanes) > 0 {
@@ -1642,75 +1642,13 @@ func (pool *Pool) TokenFuncs() map[string]func() string {
 	return funcs
 }
 
-// GateStats 返回首 lane 闸门快照（顶层 gate 段的后兼容形态）；空池回零值。
-func (pool *Pool) GateStats() GateStats {
-	return pool.Snapshot().Gate
-}
-
-// WarmStats 返回首 lane 保温快照（顶层 warm 段的后兼容形态）；空池回零值。
-func (pool *Pool) WarmStats() WarmStats {
-	return pool.Snapshot().Warm
-}
-
-// AccountGateStats 返回各 lane 的闸门快照（按账号名索引），
-// /admin/runtime-metrics 的 accounts 段透出。
-func (pool *Pool) AccountGateStats() map[string]GateStats {
-	accounts := pool.Snapshot().Accounts
-	stats := make(map[string]GateStats, len(accounts))
-	for name, ls := range accounts {
-		stats[name] = ls.Gate
-	}
-	return stats
-}
-
-// AccountWarmStats 返回各 lane 的保温快照（按账号名索引）。
-func (pool *Pool) AccountWarmStats() map[string]WarmStats {
-	accounts := pool.Snapshot().Accounts
-	stats := make(map[string]WarmStats, len(accounts))
-	for name, ls := range accounts {
-		stats[name] = ls.Warm
-	}
-	return stats
-}
-
-// DetachedStats 返回全 lane 聚合的脱钩完成缓存快照（顶层 detached
-// 段：计数逐 lane 求和、事件环按时刻归并——脱钩簿记全是可加口径，
-// 与 gate/warm 的闩态/分位数不同，没有不可聚合字段）；空池回零值。
-// 逐号视图见 AccountDetachedStats。
-func (pool *Pool) DetachedStats() DetachedStats {
-	return pool.Snapshot().Detached
-}
-
-// AccountDetachedStats 返回各 lane 的脱钩完成缓存快照（按账号名索引），
-// /admin/runtime-metrics 的 accounts.<name>.detached 组透出——缓存
-// per-lane，跨 lane 重试恒 miss，孤儿/attach 率必须逐号看。
-func (pool *Pool) AccountDetachedStats() map[string]DetachedStats {
-	accounts := pool.Snapshot().Accounts
-	stats := make(map[string]DetachedStats, len(accounts))
-	for name, ls := range accounts {
-		stats[name] = ls.Detached
-	}
-	return stats
-}
-
 // EvictDetachedByOriginDir 逐 lane 按来源调试目录清脱钩条目（面板 abort
-// 补刀）：条目归属 lane 由选号决定、abort 侧不可预知，按
-// AccountDetachedStats 同型 fan-out 全池调用，不匹配 lane 上是空操作。
+// 补刀）：条目归属 lane 由选号决定、abort 侧不可预知，全池 fan-out
+// 调用，不匹配 lane 上是空操作。
 func (pool *Pool) EvictDetachedByOriginDir(dir string) {
 	for _, lane := range pool.snapshot() {
 		lane.adapter.EvictDetachedByOriginDir(dir)
 	}
-}
-
-// AccountLaneStates 返回各 lane 的池侧状态快照（按账号名索引），
-// /admin/runtime-metrics 的 accounts.<name>.lane 组透出。
-func (pool *Pool) AccountLaneStates() map[string]LaneState {
-	accounts := pool.Snapshot().Accounts
-	states := make(map[string]LaneState, len(accounts))
-	for name, ls := range accounts {
-		states[name] = ls.State
-	}
-	return states
 }
 
 // Aliases 返回模型别名映射：全局字段各 lane 一致，取首 lane；空池回 nil。

@@ -986,16 +986,11 @@ func TestPoolKeyedViews(t *testing.T) {
 		tokenKeys = append(tokenKeys, name)
 	}
 	check("TokenFuncs", tokenKeys)
-	var gateKeys []string
-	for name := range pool.AccountGateStats() {
-		gateKeys = append(gateKeys, name)
+	var accountKeys []string
+	for name := range pool.Snapshot().Accounts {
+		accountKeys = append(accountKeys, name)
 	}
-	check("AccountGateStats", gateKeys)
-	var warmKeys []string
-	for name := range pool.AccountWarmStats() {
-		warmKeys = append(warmKeys, name)
-	}
-	check("AccountWarmStats", warmKeys)
+	check("Snapshot().Accounts", accountKeys)
 
 	if token := pool.TokenFunc()(); token != "tok-a" {
 		t.Fatalf("TokenFunc() = %q, want first lane token tok-a", token)
@@ -1014,11 +1009,12 @@ func TestPoolEmptyPool(t *testing.T) {
 	if token := pool.TokenFunc()(); token != "" {
 		t.Fatalf("TokenFunc() = %q, want empty on empty pool", token)
 	}
-	if stats := pool.GateStats(); !reflect.DeepEqual(stats, GateStats{}) {
-		t.Fatalf("GateStats = %+v, want zero value", stats)
+	snap := pool.Snapshot()
+	if !reflect.DeepEqual(snap.Gate, GateStats{}) {
+		t.Fatalf("Snapshot().Gate = %+v, want zero value", snap.Gate)
 	}
-	if stats := pool.WarmStats(); !reflect.DeepEqual(stats, WarmStats{}) {
-		t.Fatalf("WarmStats = %+v, want zero value", stats)
+	if !reflect.DeepEqual(snap.Warm, WarmStats{}) {
+		t.Fatalf("Snapshot().Warm = %+v, want zero value", snap.Warm)
 	}
 	if aliases := pool.Aliases(); aliases != nil {
 		t.Fatalf("Aliases = %v, want nil", aliases)
@@ -1026,8 +1022,7 @@ func TestPoolEmptyPool(t *testing.T) {
 	if cfg := pool.CurrentConfig(); !reflect.DeepEqual(cfg, Config{}) {
 		t.Fatalf("CurrentConfig = %+v, want zero value", cfg)
 	}
-	if len(pool.TokenFuncs()) != 0 || len(pool.AccountGateStats()) != 0 ||
-		len(pool.AccountWarmStats()) != 0 || len(pool.AccountLaneStates()) != 0 {
+	if len(pool.TokenFuncs()) != 0 || len(snap.Accounts) != 0 {
 		t.Fatal("keyed views must be empty on empty pool")
 	}
 	if pool.ClearCooldown("a") {

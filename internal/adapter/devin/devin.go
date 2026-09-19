@@ -87,7 +87,7 @@ type Endpoint struct {
 //   - Endpoint 是端点冻结集，换值即重建上游调用束；
 //   - 其余为全局可调项，号池下各 lane 共享同一组值——Pool 的
 //     first-lane 视图（CurrentConfig/Aliases 等）只读这组与 Endpoint，
-//     Identity 类一律走 TokenFuncs/AccountLaneStates 等 per-lane 接口。
+//     Identity 类一律走 Snapshot().Accounts / TokenFuncs 等 per-lane 接口。
 type Config struct {
 	Identity LaneIdentity
 	Endpoint Endpoint

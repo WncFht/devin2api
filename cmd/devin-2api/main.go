@@ -619,9 +619,9 @@ func logCellsAudit(op string, r *store.CellsAuditReport) {
 // 「重推前 lane 名集」取它而不是 config 声明序：overlay 行（面板建
 // 的号、disabled、墓碑）让声明集与 lane 集分叉。
 func poolLaneNames(pool *devin.Pool) []string {
-	states := pool.AccountLaneStates()
-	names := make([]string, 0, len(states))
-	for name := range states {
+	accounts := pool.Snapshot().Accounts
+	names := make([]string, 0, len(accounts))
+	for name := range accounts {
 		names = append(names, name)
 	}
 	slices.Sort(names)
