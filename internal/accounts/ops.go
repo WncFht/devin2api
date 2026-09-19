@@ -76,8 +76,8 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			// 干跑整表校验先于行写入：合成集非法（零凭据/重名/重
 			// token/文件不可解）直接拒绝，库里不留脏行。
-			synthesized, err := config.ResolveAccounts(candidateConfigs(
-				store.MergeAccounts(cfg.Devin.Accounts, append(rows, row))), configDir)
+			synthesized, err := config.ResolveAccounts(accountConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, append(rows, row)), true), configDir)
 			if err != nil {
 				return nil, err
 			}
@@ -163,8 +163,8 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 					row.CredentialsFile = path
 				}
 			}
-			synthesized, err := config.ResolveAccounts(candidateConfigs(
-				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row))), configDir)
+			synthesized, err := config.ResolveAccounts(accountConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, replaceAccountRow(rows, row)), true), configDir)
 			if err != nil {
 				return nil, err
 			}
@@ -304,8 +304,8 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			}
 			// 干跑整表校验先于一切落库：合成集非法（零凭据/重名/重
 			// token/文件不可解）整批拒绝，库里不留半批。
-			synthesized, err := config.ResolveAccounts(candidateConfigs(
-				store.MergeAccounts(cfg.Devin.Accounts, candidate)), configDir)
+			synthesized, err := config.ResolveAccounts(accountConfigs(
+				store.MergeAccounts(cfg.Devin.Accounts, candidate), true), configDir)
 			if err != nil {
 				return nil, err
 			}
@@ -386,23 +386,6 @@ func (rt *Runtime) Ops(settings *ccpanel.PanelSettings) ccpanel.AccountOps {
 			return "", errors.New("one of token/credentials_file/credentials_content/api_key is required")
 		},
 	}
-}
-
-// candidateConfigs 投影写入前干跑校验的账号集：非墓碑条目全部参与
-// （含停用——停用是静止 lane，enable 即转正，凭据合法性必须在写入时
-// 证明，否则坏行能落库、等 enable 才爆）。
-func candidateConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
-	out := make([]config.DevinAccountConfig, 0, len(resolved))
-	for _, acc := range resolved {
-		if acc.Source == store.AccountSourceTombstoned {
-			continue
-		}
-		out = append(out, config.DevinAccountConfig{
-			Name: acc.Name, Token: acc.Token, CredentialsFile: acc.CredentialsFile,
-			APIKey: acc.APIKey, Priority: acc.Priority, MaxRPM: acc.MaxRPM,
-		})
-	}
-	return out
 }
 
 // writeAccountCredentialsFile 把粘贴的 credentials.toml 落进状态目录

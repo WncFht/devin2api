@@ -120,7 +120,7 @@ func (rt *Runtime) Apply(ctx context.Context, cfg config.Config, settings *ccpan
 	if err != nil {
 		return nil, nil, err
 	}
-	synthesized, err := config.ResolveAccounts(laneConfigs(resolved), filepath.Dir(rt.configPath))
+	synthesized, err := config.ResolveAccounts(accountConfigs(resolved, false), filepath.Dir(rt.configPath))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -377,12 +377,14 @@ func BaseConfig(cfg config.Config) devin.Config {
 	}
 }
 
-// laneConfigs 投影该进池的账号（非墓碑且未停用）成声明形状——喂整表
-// 校验与 devinConfigs；校验锚定/补齐后再进 lane 映射。
-func laneConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
+// accountConfigs 投影 resolved 成声明形状（字段映射是校验集与进池集
+// 的唯一来源）。includeDisabled 区分两路：lane 生效集跳过停用，
+// 写入前干跑校验保留停用——停用是静止 lane，enable 即转正，凭据
+// 合法性必须在写入时证明，否则坏行能落库、等 enable 才爆。
+func accountConfigs(resolved []store.ResolvedAccount, includeDisabled bool) []config.DevinAccountConfig {
 	out := make([]config.DevinAccountConfig, 0, len(resolved))
 	for _, acc := range resolved {
-		if acc.Source == store.AccountSourceTombstoned || acc.Disabled {
+		if acc.Source == store.AccountSourceTombstoned || (acc.Disabled && !includeDisabled) {
 			continue
 		}
 		out = append(out, config.DevinAccountConfig{
@@ -394,7 +396,7 @@ func laneConfigs(resolved []store.ResolvedAccount) []config.DevinAccountConfig {
 }
 
 // LaneNames 返回生效集里该进池的名序（非墓碑且未停用，排序后）——
-// 与 laneConfigs 同口径，reload 据此比对出账号集合变化。
+// 与 accountConfigs 的 lane 路同口径，reload 据此比对账号集合变化。
 func LaneNames(resolved []store.ResolvedAccount) []string {
 	names := make([]string, 0, len(resolved))
 	for _, acc := range resolved {
