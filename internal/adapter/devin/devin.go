@@ -346,9 +346,13 @@ func (adapter *Adapter) link() *upstreamLink {
 	return adapter.linkPtr.Load()
 }
 
-// Close 停掉焐池协程并收掉 transport 的 idle 连接池（与 finishConfigApply
-// 退役旧 link 同一卫生动作）；进程退出是最兜底的生命周期。
+// Close 停掉焐池协程、清场脱钩缓存并收掉 transport 的 idle 连接池（与
+// finishConfigApply 退役旧 link 同一卫生动作）；进程退出是最兜底的
+// 生命周期。脱钩清场必须在关 transport 之前——running 泵被 drainCancel
+// 掐死后 Recv 才能干净退场，反序会让泵挂在已关的连接上且台账写入撞
+// 已停状态。
 func (adapter *Adapter) Close() {
+	adapter.detached.close()
 	adapter.warm.Close()
 	link := adapter.link()
 	link.warmer.Close()
@@ -484,12 +488,15 @@ func (adapter *Adapter) finishConfigApply(prev, next Config, newLink *upstreamLi
 		// warmer 停表要等进行中的 warmOnce（最坏 ~15s），异步收不堵 reload。
 		go old.warmer.Close()
 	}
-	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL || prev.Identity.Token != next.Identity.Token {
+	if prev.Endpoint.BaseURL != next.Endpoint.BaseURL || prev.Identity.Token != next.Identity.Token ||
+		prev.Identity.APIKey != next.Identity.APIKey {
 		// assignment jwt 绑 cascade_id 且只认签发它的端点与凭据：换端点
 		// 或换账号后旧缓存若被复用会撞 jwt↔account 校验（permission_denied
 		// 且自愈救不回），清空强制重 assign——清缓存只付一次重解析，
-		// 方向安全。assignmentsFetch 同清：在飞调用的提交以「flight 仍是
-		// 注册项」为前提，清表即让旧端点/旧凭据在飞的解析结果不落缓存。
+		// 方向安全。APIKey 同列：durable key 换值意味着铸币身份换号，
+		// 旧 key 会话签出的 jwt 对新号同样作废。assignmentsFetch 同清：
+		// 在飞调用的提交以「flight 仍是注册项」为前提，清表即让旧
+		// 端点/旧凭据在飞的解析结果不落缓存。
 		adapter.assignmentsMu.Lock()
 		clear(adapter.assignments)
 		clear(adapter.assignmentsFetch)
@@ -1348,18 +1355,22 @@ func (adapter *Adapter) warnIfModelAbsentFromCatalog(model string) {
 // ensureCatalog 尽力保证模型目录已加载：router 判定、图片能力位校验与
 // 缺席告警都以目录为依据，目录从未加载过时这些检查静默失效。
 // TTL 缓存使命中期的调用只是读锁；拉取失败放行，维持「交给上游裁决」的旧行为。
-func (adapter *Adapter) ensureCatalog(ctx context.Context) {
+func (a *Adapter) ensureCatalog(ctx context.Context) {
 	// 调用方 ctx 已死（客户端断连/进程排空）时的失败是噪声不是信号。
-	if _, err := adapter.ListModels(ctx); err != nil && ctx.Err() == nil {
-		// 冷却窗内每个请求都拿到同一 modelsErr：告警按失败场次去重，
-		// 一场冷却只打一条，否则窗内时长等于按请求频率刷屏。
-		adapter.modelsMu.Lock()
-		if adapter.modelsErrWarned {
-			adapter.modelsMu.Unlock()
+	if _, err := a.ListModels(ctx); err != nil && ctx.Err() == nil {
+		if errors.Is(err, adapter.ErrStaleCatalog) {
+			// 陈旧兜底是暖目录：路由检测照常，刷新失败已在 ListModels 落痕。
 			return
 		}
-		adapter.modelsErrWarned = true
-		adapter.modelsMu.Unlock()
+		// 冷却窗内每个请求都拿到同一 modelsErr：告警按失败场次去重，
+		// 一场冷却只打一条，否则窗内时长等于按请求频率刷屏。
+		a.modelsMu.Lock()
+		if a.modelsErrWarned {
+			a.modelsMu.Unlock()
+			return
+		}
+		a.modelsErrWarned = true
+		a.modelsMu.Unlock()
 		slog.Warn("model catalog unavailable; router detection skipped", "error", err)
 	}
 }
@@ -1617,7 +1628,9 @@ func (a *Adapter) ListModels(ctx context.Context) ([]adapter.ModelInfo, error) {
 				if ctx.Err() == nil {
 					slog.Warn("model catalog refresh failed; serving stale cache", "error", err)
 				}
-				return stale, nil
+				// 陈旧兜底带哨兵错误：models 照常可用，号池的 lane
+				// 健康记账仍能拿到「本次刷新失败了」的证据。
+				return stale, fmt.Errorf("%w: %w", adapter.ErrStaleCatalog, err)
 			}
 			return nil, err
 		}
@@ -2330,7 +2343,12 @@ func (stream *responseStream) admitDetached(ctx context.Context) {
 	entry.mu.Lock()
 	entry.drainCancel = drainCancel
 	entry.mu.Unlock()
-	stream.registry.admit(stream.detachKey, entry)
+	if !stream.registry.admit(stream.detachKey, entry) {
+		// 登记表已关停（Adapter.Close 清场）：CAS 已兑掉登记权，泵不能
+		// 起——回收 drain ctx 退场，条目随 GC 蒸发。
+		drainCancel()
+		return
+	}
 	detail := map[string]any{
 		"key":             stream.detachKey,
 		"buffered_events": entry.len(),
@@ -2531,17 +2549,9 @@ func (stream *responseStream) tryResume(cause error) bool {
 	}
 	stream.resumeAttempts++
 	slog.Warn("resuming truncated stream", "attempt", stream.resumeAttempts, "error", cause)
-	// 换流同 tryReopen：杀旧泵、重置窗口，新解码器已播种旧内容。
-	stream.cancel()
-	stream.frames = frames
-	stream.cancel = cancel
-	stream.decoder = decoder
-	stream.started = false
-	stream.finished.Store(false)
-	stream.upstreamConfirmed = false
-	if stream.progress != nil {
-		stream.progress.Reset(stream.progressDeadline())
-	}
+	// 换流走 swap 集中不变量（与 tryReopen 同一交接）：解码器已播种
+	// 旧内容，接缝事件顶替 swap 清空的下发队列。
+	stream.swap(frames, cancel, decoder)
 	stream.queue = seam
 	return true
 }
