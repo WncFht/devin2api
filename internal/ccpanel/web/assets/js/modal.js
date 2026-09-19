@@ -125,7 +125,7 @@
     const yesBtn = el.querySelector('[data-confirm-choice="yes"]');
     yesBtn.textContent = options.okText || t('common.confirm');
     yesBtn.className = options.danger ? 'btn btn-danger' : 'btn btn-primary';
-    el.querySelector('[data-confirm-choice="no"]').textContent = options.cancelText || t('common.cancel');
+    el.querySelector('.modal-footer [data-confirm-choice="no"]').textContent = options.cancelText || t('common.cancel');
     el.querySelector('.close-btn').setAttribute('aria-label', t('common.close'));
     return new Promise((res) => {
       confirmState = { el, resolve: res };
