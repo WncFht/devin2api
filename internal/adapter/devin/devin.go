@@ -871,6 +871,10 @@ func (adapter *Adapter) Stream(ctx context.Context, request llm.RequestMessages)
 		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
 		return nil, err
 	}
+	if err := adapter.validateVideosForModel(request, model); err != nil {
+		recorder.WriteError(debuglog.ErrStageRequestBuild, err)
+		return nil, err
+	}
 	// binding 携带每次调用可变的字段：model 是别名/路由改写后的最终
 	// uid，token 现取（自愈后重试会换），jwt 是本次路由的绑定产物。
 	binding := callBinding{Token: adapter.currentToken(), Model: model, ModelAssignmentJWT: assignmentJWT}
@@ -1212,6 +1216,33 @@ func (adapter *Adapter) catalogSupportsDocuments(model string) (supported bool, 
 	return false, false
 }
 
+// validateVideosForModel 在本地尽早拒绝「无视频能力模型 + 视频」组合：
+// 上游对不支持模型的 videos 报 invalid_argument "does not support video
+// inputs"（实测 swe-2-max）。目录未覆盖时放行交给上游裁决——视频能力是
+// 例外而非默认（仅 kimi-k3/glm-5-3-flash 系），不发明启发式名单。
+func (adapter *Adapter) validateVideosForModel(request llm.RequestMessages, model string) error {
+	if !requestHasVideos(request) {
+		return nil
+	}
+	if supported, known := adapter.catalogSupportsVideo(model); known && !supported {
+		return &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("model %q does not support video inputs (supports_video=false); use a video-capable model or remove videos", model)}
+	}
+	return nil
+}
+
+// catalogSupportsVideo 查询模型目录缓存中该 uid 的视频能力。
+// 第二个返回值表示目录是否包含该模型。
+func (adapter *Adapter) catalogSupportsVideo(model string) (supported bool, known bool) {
+	adapter.modelsMu.RLock()
+	defer adapter.modelsMu.RUnlock()
+	for _, m := range adapter.models {
+		if m.ID == model {
+			return m.SupportsVideo, true
+		}
+	}
+	return false, false
+}
+
 // warnIfModelAbsentFromCatalog 在目录已加载且目标 uid 缺席时记 Warn。
 // 实测 alias 指向死模型时上游只回模糊的 permission_denied: an internal
 // error occurred——排障只能靠日志里的这条提示定位到 alias 目标。
@@ -1413,6 +1444,27 @@ func requestHasDocuments(request llm.RequestMessages) bool {
 	return false
 }
 
+// requestHasVideos 判断请求是否含视频块，口径与 requestHasImages 相同。
+func requestHasVideos(request llm.RequestMessages) bool {
+	for _, message := range request.Messages {
+		var content []llm.Content
+		switch m := message.(type) {
+		case llm.UserMessage:
+			content = m.Content
+		case llm.ToolResultMessage:
+			content = m.Content
+		default:
+			continue
+		}
+		for _, block := range content {
+			if _, ok := block.(llm.VideoContent); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // modelLikelySupportsImages 用已知无视觉模型名单；不确定时放行让上游裁决。
 func modelLikelySupportsImages(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -1566,6 +1618,7 @@ func (a *Adapter) fetchModelCatalog(ctx context.Context) ([]adapter.ModelInfo, e
 				info.SupportsParallelToolCalls = features.GetSupportsParallelToolCalls()
 				info.SupportsThinking = features.GetSupportsThinking()
 				info.SupportsDocuments = features.GetSupportsDocuments()
+				info.SupportsVideo = features.GetSupportsVideo()
 				info.PreserveThinking = features.GetPreserveThinking()
 				if !info.SupportsImages {
 					info.SupportsImages = features.GetSupportsImages()

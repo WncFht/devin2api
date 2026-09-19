@@ -79,6 +79,17 @@ func DecodeContent(raw json.RawMessage, dropped *[]string) ([]llm.Content, error
 				return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("content[%d]: %s", index, err), Cause: err}
 			}
 			content = append(content, document)
+		case "video", "video_url", "input_video":
+			video, err := DecodeVideoPart(part)
+			if err != nil {
+				var failure *llm.Failure
+				if errors.As(err, &failure) {
+					failure.Message = fmt.Sprintf("content[%d]: %s", index, failure.Message)
+					return nil, failure
+				}
+				return nil, &llm.Failure{Code: "invalid_argument", Message: fmt.Sprintf("content[%d]: %s", index, err), Cause: err}
+			}
+			content = append(content, video)
 		case "input_audio":
 			// 音频 part 上游没有对应通道，内容必然丢；
 			// 静默丢弃会让模型在缺上下文下回答而无人察觉，
@@ -277,6 +288,145 @@ func documentContentSourceText(raw json.RawMessage) (string, error) {
 		return "", invalidRequest("document content source carries no text parts")
 	}
 	return text.String(), nil
+}
+
+// DecodeVideoPart 兼容 OpenAI video_url/input_video 与 Anthropic video
+// 视频 part 形态。上游 videos 通道接受 base64_data+mime_type 或 url——
+// 与 documents 同制两者互斥（实测 "video url must not set a mime_type"），
+// file_id 指向供应商侧存储按请求错误拒绝。VideoData wire 无 filename，
+// 携带的 filename 字段直接忽略。
+func DecodeVideoPart(raw json.RawMessage) (llm.VideoContent, error) {
+	var envelope struct {
+		Type   string          `json:"type"`
+		Source json.RawMessage `json:"source"`
+		File   json.RawMessage `json:"file"`
+		// OpenAI video_url：兼容字符串与 {"url":...} 对象两种形态。
+		VideoURL  json.RawMessage `json:"video_url"`
+		FileData  string          `json:"file_data"`
+		FileURL   string          `json:"file_url"`
+		FileID    string          `json:"file_id"`
+		MIMEType  string          `json:"mime_type"`
+		MediaType string          `json:"media_type"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return llm.VideoContent{}, err
+	}
+	if envelope.FileID != "" {
+		return llm.VideoContent{}, invalidRequest("file_id videos are not supported; send base64 file_data or an http(s) video_url")
+	}
+	mimeType := envelope.MIMEType
+	if mimeType == "" {
+		mimeType = envelope.MediaType
+	}
+	// Anthropic source 形态：{"type":"base64|url",...}，与文档同构。
+	if !JSONBlank(envelope.Source) {
+		var source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+			URL       string `json:"url"`
+			FileID    string `json:"file_id"`
+		}
+		if err := json.Unmarshal(envelope.Source, &source); err != nil {
+			return llm.VideoContent{}, invalidRequest("video source: %s", err)
+		}
+		if source.FileID != "" || source.Type == "file" {
+			return llm.VideoContent{}, invalidRequest("file_id videos are not supported; send base64 or url source")
+		}
+		switch source.Type {
+		case "base64":
+			if source.MediaType != "" {
+				mimeType = source.MediaType
+			}
+			return decodeVideoData(source.Data, mimeType)
+		case "url":
+			if source.URL == "" {
+				return llm.VideoContent{}, invalidRequest("video url source is empty")
+			}
+			return llm.VideoContent{URL: source.URL}, nil
+		default:
+			return llm.VideoContent{}, invalidRequest("unsupported video source type %q", source.Type)
+		}
+	}
+	// OpenAI file 嵌套形态 {"type":"video","file":{...}}。
+	if !JSONBlank(envelope.File) {
+		var nested struct {
+			FileData string `json:"file_data"`
+			FileURL  string `json:"file_url"`
+			FileID   string `json:"file_id"`
+		}
+		if err := json.Unmarshal(envelope.File, &nested); err != nil {
+			return llm.VideoContent{}, invalidRequest("video file object: %s", err)
+		}
+		if nested.FileID != "" {
+			return llm.VideoContent{}, invalidRequest("file_id videos are not supported; send base64 file_data or an http(s) video_url")
+		}
+		if nested.FileData != "" {
+			return decodeVideoData(nested.FileData, mimeType)
+		}
+		if nested.FileURL != "" {
+			return llm.VideoContent{URL: nested.FileURL}, nil
+		}
+		return llm.VideoContent{}, invalidRequest("video file object carries no file_data/file_url")
+	}
+	if !JSONBlank(envelope.VideoURL) {
+		// video_url 字符串形态；对象形态取 url 字段。data: URL 的
+		// 字符串上游抓不了，转回 base64 数据。
+		var url string
+		if err := json.Unmarshal(envelope.VideoURL, &url); err == nil {
+			if strings.HasPrefix(url, "data:") {
+				return decodeVideoData(url, mimeType)
+			}
+			return llm.VideoContent{URL: url}, nil
+		}
+		var object struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(envelope.VideoURL, &object); err == nil && object.URL != "" {
+			if strings.HasPrefix(object.URL, "data:") {
+				return decodeVideoData(object.URL, mimeType)
+			}
+			return llm.VideoContent{URL: object.URL}, nil
+		}
+		return llm.VideoContent{}, invalidRequest("video_url must be a string or an object with url")
+	}
+	if envelope.FileData != "" {
+		return decodeVideoData(envelope.FileData, mimeType)
+	}
+	if envelope.FileURL != "" {
+		return llm.VideoContent{URL: envelope.FileURL}, nil
+	}
+	return llm.VideoContent{}, invalidRequest("video part missing video_url/source/file_data/file_url")
+}
+
+// decodeVideoData 解码 base64 视频数据并补 mime：显式 mime 优先，缺省
+// 取 data URL meta，再兜底 video/mp4。
+func decodeVideoData(encoded, mimeType string) (llm.VideoContent, error) {
+	encoded = strings.TrimSpace(encoded)
+	if strings.HasPrefix(encoded, "data:") {
+		meta, rest, ok := strings.Cut(encoded, ",")
+		if !ok {
+			return llm.VideoContent{}, invalidRequest("video must be a base64 data URL")
+		}
+		encoded = rest
+		if mimeType == "" {
+			mimeType = strings.TrimPrefix(strings.TrimSuffix(meta, ";base64"), "data:")
+		}
+	}
+	data, err := base64.StdEncoding.DecodeString(stripBase64Whitespace(encoded))
+	if err != nil {
+		return llm.VideoContent{}, &llm.Failure{Code: "invalid_argument", Message: "decode video data: " + err.Error(), Cause: err}
+	}
+	if len(data) == 0 {
+		return llm.VideoContent{}, invalidRequest("video data is empty")
+	}
+	if mimeType == "" {
+		mimeType = "video/mp4"
+	}
+	return llm.VideoContent{
+		Data:     base64.StdEncoding.EncodeToString(data),
+		MIMEType: mimeType,
+	}, nil
 }
 
 // DecodeImagePart 兼容 OpenAI Responses / Chat Completions / Anthropic 常见图片 part 形态。

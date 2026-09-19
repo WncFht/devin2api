@@ -552,7 +552,7 @@ func countMovedPrompts(in, out []*devinproto.ExaChatPb_ChatMessagePrompt) int {
 }
 
 // promptForContent 把 UserMessage/ToolResultMessage 的内容块投影为单条
-// prompt。两类消息的 Validate 已限定 content 只含 text/image/document，
+// prompt。两类消息的 Validate 已限定 content 只含 text/image/document/video，
 // thinking/工具调用不会到达这里——助手侧产物走 convertMessage 的
 // AssistantMessage 分支单独组装。
 func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, content []llm.Content, attachImages bool, repairs *llm.RequestRepairs) *devinproto.ExaChatPb_ChatMessagePrompt {
@@ -618,6 +618,24 @@ func promptForContent(source devinproto.ExaCodeiumCommonPb_ChatMessageSource, co
 				document.MimeType = proto.String(block.MIMEType)
 			}
 			prompt.Documents = append(prompt.Documents, document)
+		case llm.VideoContent:
+			// 视频与文档同制：历史轮 videos 照常被模型读取（实测 kimi-k3
+			// 抽帧送视觉轨，无音频）。VideoData wire 无 filename。
+			video := &devinproto.ExaCodeiumCommonPb_VideoData{}
+			if block.URL != "" {
+				// url 与 mime_type 互斥（上游 "must not set a mime_type"）。
+				video.Url = proto.String(block.URL)
+			} else {
+				data := block.Data
+				if strings.HasPrefix(data, "data:") {
+					if _, encoded, ok := strings.Cut(data, ","); ok {
+						data = encoded
+					}
+				}
+				video.Base64Data = proto.String(data)
+				video.MimeType = proto.String(block.MIMEType)
+			}
+			prompt.Videos = append(prompt.Videos, video)
 		}
 	}
 	prompt.Prompt = proto.String(text.String())

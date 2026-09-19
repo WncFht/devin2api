@@ -33,6 +33,7 @@ const (
 	ContentTypeThinking ContentType = "thinking"
 	ContentTypeImage    ContentType = "image"
 	ContentTypeDocument ContentType = "document"
+	ContentTypeVideo    ContentType = "video"
 	ContentTypeToolCall ContentType = "toolCall"
 	// ContentTypeServerToolResult 是服务端托管工具的执行结果块（响应方向
 	// 专属）：与对应的 Server ToolCall 一起出现在 AssistantMessage.Content
@@ -293,6 +294,33 @@ func (content DocumentContent) Validate() error {
 	return nil
 }
 
+// VideoContent 表示视频附件，走 Devin 上游的 videos 通道。与文档同制：
+// 历史轮次回放被上游接受（实测 kimi-k3 读帧），无「仅当前轮」限制；
+// 上游抽帧送视觉轨，音频轨不进模型。VideoData wire 无 filename 字段。
+type VideoContent struct {
+	// Data 是不含 data URL 前缀的 base64 视频数据；与 URL 互斥。
+	Data string
+	// MIMEType 是视频媒体类型（video/mp4、video/webm 等）；
+	// URL 形态必须为空——上游对 url+mime_type 组合报 invalid_argument。
+	MIMEType string
+	// URL 是由上游侧抓取的视频地址；与 Data 互斥。
+	URL string
+}
+
+// ContentType 返回视频内容类型。
+func (VideoContent) ContentType() ContentType { return ContentTypeVideo }
+
+// Validate 检查视频内容块。
+func (content VideoContent) Validate() error {
+	if content.Data == "" && content.URL == "" {
+		return errors.New("video data or url is required")
+	}
+	if content.URL != "" && content.MIMEType != "" {
+		return errors.New("video url must not carry a MIME type")
+	}
+	return nil
+}
+
 // ToolCall 表示助手发起的一次工具调用。
 type ToolCall struct {
 	// ID 是供应商分配的调用标识，用于关联后续工具结果。
@@ -340,7 +368,7 @@ func (call ToolCall) Validate() error {
 
 // UserMessage 表示一条用户消息。
 type UserMessage struct {
-	// Content 是用户提交的文字、图片和文档内容块。
+	// Content 是用户提交的文字、图片、文档和视频内容块。
 	Content []Content
 	// TimestampMS 是创建消息时的 Unix 毫秒时间戳。
 	TimestampMS int64
@@ -351,7 +379,7 @@ func (UserMessage) Role() MessageRole { return MessageRoleUser }
 
 // Validate 检查用户消息。
 func (message UserMessage) Validate() error {
-	return validateContent(message.Content, ContentTypeText, ContentTypeImage, ContentTypeDocument)
+	return validateContent(message.Content, ContentTypeText, ContentTypeImage, ContentTypeDocument, ContentTypeVideo)
 }
 
 // ToolResultMessage 表示一次工具调用的执行结果。
@@ -359,7 +387,7 @@ type ToolResultMessage struct {
 	// ToolCallID 是本结果所对应的工具调用标识——wire 上凭它配对，
 	// 工具名不上行（上游 prompt 只带 call id + 正文），故不存。
 	ToolCallID string
-	// Content 是返回给模型的文字、图片和文档内容块。
+	// Content 是返回给模型的文字、图片、文档和视频内容块。
 	Content []Content
 	// IsError 表示工具执行是否失败。
 	IsError bool
@@ -375,7 +403,7 @@ func (message ToolResultMessage) Validate() error {
 	if message.ToolCallID == "" {
 		return errors.New("tool result call ID is required")
 	}
-	if err := validateContent(message.Content, ContentTypeText, ContentTypeImage, ContentTypeDocument); err != nil {
+	if err := validateContent(message.Content, ContentTypeText, ContentTypeImage, ContentTypeDocument, ContentTypeVideo); err != nil {
 		return err
 	}
 	return nil

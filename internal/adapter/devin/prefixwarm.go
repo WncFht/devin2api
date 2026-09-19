@@ -1116,6 +1116,11 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 				put(typed.URL)
 				put(typed.MIMEType)
 				put(typed.Filename)
+			case llm.VideoContent:
+				h.Write([]byte{7})
+				put(typed.Data)
+				put(typed.URL)
+				put(typed.MIMEType)
 			case llm.ToolCall:
 				h.Write([]byte{4})
 				put(typed.ID)

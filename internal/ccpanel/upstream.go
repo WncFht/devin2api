@@ -470,6 +470,8 @@ func (h *Handler) fetchModels(ctx context.Context) ([]map[string]any, error) {
 				m["interleave_thinking"] = features.GetInterleaveThinking()
 				m["supports_documents"] = features.GetSupportsDocuments()
 				m["supports_document_urls"] = features.GetSupportsDocumentUrls()
+				m["supports_video"] = features.GetSupportsVideo()
+				m["supports_video_urls"] = features.GetSupportsVideoUrls()
 			}
 		}
 

@@ -521,6 +521,12 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	docMime := fs.String("doc-mime", "", "document mime_type (default: by extension, fallback application/pdf)")
 	docURL := fs.String("doc-url", "", "document url field instead of base64")
 	docHistory := fs.Bool("doc-history", false, "attach the document to a synthetic earlier user turn, not the current one")
+	vidFile := fs.String("vid-file", "", "attach file as VideoData on the user message")
+	vidMime := fs.String("vid-mime", "", "video mime_type (default: by extension, fallback video/mp4); sent even with -vid-url to probe url+mime exclusivity")
+	vidURL := fs.String("vid-url", "", "video url field instead of base64")
+	vidHistory := fs.Bool("vid-history", false, "attach the video to a synthetic earlier user turn, not the current one")
+	rfType := fs.String("rf-type", "", "configuration.response_format_type (json_object/json_schema/text/...)")
+	rfSchema := fs.String("rf-schema", "", "configuration.response_format_json_schema (schema JSON string)")
 	promptCacheKey := fs.String("prompt-cache-key", "", "request prompt_cache_key field")
 	internalModel := fs.Int("internal-model", 0, "")
 	assignJWT := fs.String("assign-jwt", "", "model_assignment_jwt")
@@ -607,6 +613,12 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 	if *topK >= 0 {
 		req.Configuration.TopK = proto.Uint64(uint64(*topK))
 	}
+	if *rfType != "" {
+		req.Configuration.ResponseFormatType = proto.String(*rfType)
+	}
+	if *rfSchema != "" {
+		req.Configuration.ResponseFormatJsonSchema = proto.String(*rfSchema)
+	}
 	if !*noIDs {
 		if *cascadeID != "" {
 			req.CascadeId = proto.String(*cascadeID)
@@ -664,6 +676,30 @@ func cmdChat(ctx context.Context, client devinprotoconnect.ApiServerServiceClien
 			req.ChatMessagePrompts = append(req.ChatMessagePrompts, histUser, histAssistant)
 		} else {
 			msg.Documents = append(msg.Documents, doc)
+		}
+	}
+	if *vidFile != "" {
+		vid, err := probeVideo(*vidFile, *vidMime, *vidURL)
+		if err != nil {
+			return err
+		}
+		if *vidHistory {
+			// 历史轮视频：与 -doc-history 同构，探上游对历史视频的限制
+			// 是文档制（放行）还是图片制（invalid_argument）。
+			histUser := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randid.UUID()),
+				Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_USER.Enum(),
+				Prompt:    proto.String("Please watch this video."),
+				Videos:    []*devinproto.ExaCodeiumCommonPb_VideoData{vid},
+			}
+			histAssistant := &devinproto.ExaChatPb_ChatMessagePrompt{
+				MessageId: proto.String(randid.UUID()),
+				Source:    devinproto.ExaCodeiumCommonPb_ChatMessageSource_ExaCodeiumCommonPb_ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM.Enum(),
+				Prompt:    proto.String("I have watched the video."),
+			}
+			req.ChatMessagePrompts = append(req.ChatMessagePrompts, histUser, histAssistant)
+		} else {
+			msg.Videos = append(msg.Videos, vid)
 		}
 	}
 	if *sysAsMsg {
@@ -881,6 +917,41 @@ func probeDocument(path, mime, urlFlag string) (*devinproto.ExaCodeiumCommonPb_D
 	}
 	doc.Base64Data = proto.String(base64.StdEncoding.EncodeToString(raw))
 	return doc, nil
+}
+
+// probeVideo 从文件构造 VideoData：mime 显式指定优先，否则按扩展名猜、
+// 兜底 video/mp4；urlFlag 非空时只填 url 不上传字节（url 与 mime_type
+// 是否互斥待实测——-vid-url + -vid-mime 同给时两个字段都发）。
+func probeVideo(path, mime, urlFlag string) (*devinproto.ExaCodeiumCommonPb_VideoData, error) {
+	vid := &devinproto.ExaCodeiumCommonPb_VideoData{}
+	if mime == "" && urlFlag == "" {
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".webm":
+			mime = "video/webm"
+		case ".mov":
+			mime = "video/quicktime"
+		case ".mkv":
+			mime = "video/x-matroska"
+		case ".avi":
+			mime = "video/x-msvideo"
+		default:
+			mime = "video/mp4"
+		}
+	}
+	if urlFlag != "" {
+		vid.Url = proto.String(urlFlag)
+		if mime != "" {
+			vid.MimeType = proto.String(mime)
+		}
+		return vid, nil
+	}
+	vid.MimeType = proto.String(mime)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("vid-file: %w", err)
+	}
+	vid.Base64Data = proto.String(base64.StdEncoding.EncodeToString(raw))
+	return vid, nil
 }
 
 // runStream 发 GetChatMessage 并消费整流：汇总字段出现频次、usage、

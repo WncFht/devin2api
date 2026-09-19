@@ -30,6 +30,10 @@ type ModelInfo struct {
 	// SupportsDocuments 表示该模型是否支持文档输入（上游 modelFeatures
 	// 的 supports_documents 能力位，独立于 supports_images）；目录未知时为 false。
 	SupportsDocuments bool
+	// SupportsVideo 表示该模型是否支持视频输入（上游 modelFeatures 的
+	// supports_video 能力位；supports_video_urls 在本账号目录与其恒共线，
+	// 未单列字段）；目录未知时为 false。
+	SupportsVideo bool
 	// SupportsToolCalls 表示该模型是否支持工具调用；目录未声明时为 false。
 	SupportsToolCalls bool
 	// SupportsParallelToolCalls 表示该模型是否支持同轮并行工具调用；目录未声明时为 false。

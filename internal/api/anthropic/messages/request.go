@@ -425,6 +425,14 @@ func decodeAnthropicUserMessages(context *llm.RequestMessages, raw json.RawMessa
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			currentUserContent = append(currentUserContent, document)
+		case "video", "video_url":
+			// 上游 videos 通道实测可用（kimi-k3/glm-5-3-flash 系 supportsVideo
+			// 能力位，与文档同制历史轮可读、url+mime 互斥）。
+			video, err := common.DecodeVideoPart(part)
+			if err != nil {
+				return nil, fmt.Errorf("content[%d]: %w", index, err)
+			}
+			currentUserContent = append(currentUserContent, video)
 		case "tool_result":
 			// tool_use_id 缺失或对不上前置调用的结果先按原样进 IR；
 			// 解码尾的 DemoteOrphanToolResults 统一降级为 USER 文本。
@@ -660,6 +668,9 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 				content = append(content, llm.TextContent{Text: header.Resource.Text})
 			case header.Resource.Blob != "" && strings.HasPrefix(header.Resource.MIMEType, "image/"):
 				content = append(content, llm.ImageContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType})
+			case header.Resource.Blob != "" && strings.HasPrefix(header.Resource.MIMEType, "video/"):
+				// 视频 blob 走 videos 通道（上游抽帧送视觉轨，实测可读）。
+				content = append(content, llm.VideoContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType})
 			case header.Resource.Blob != "":
 				// 非图 blob 走文档通道（上游 documents 实测可读），URI 作文件名。
 				content = append(content, llm.DocumentContent{Data: header.Resource.Blob, MIMEType: header.Resource.MIMEType, Filename: header.Resource.URI})
@@ -673,6 +684,12 @@ func decodeAnthropicContent(context *llm.RequestMessages, raw json.RawMessage) (
 				return nil, fmt.Errorf("content[%d]: %w", index, err)
 			}
 			content = append(content, document)
+		case "video", "video_url":
+			video, err := common.DecodeVideoPart(part)
+			if err != nil {
+				return nil, fmt.Errorf("content[%d]: %w", index, err)
+			}
+			content = append(content, video)
 		default:
 			// tool_result 内无法投到 IR 的块只记 Dropped 加占位文本，
 			// 让缺失对模型可见而不是静默丢上下文。
