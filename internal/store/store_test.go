@@ -438,6 +438,91 @@ func TestIncrementalVacuumDrainsFreelist(t *testing.T) {
 	}
 }
 
+// walCheckpointTimeout 边界：债折算低于 256MB 一律按下界 2s，
+// 128MB/s 线性放大，超 busy_timeout 后钉死在 30s 上限。
+func TestWalCheckpointTimeoutBounds(t *testing.T) {
+	for _, c := range []struct {
+		debt int64
+		want time.Duration
+	}{
+		{0, walCheckpointBudget},
+		{64 << 20, walCheckpointBudget},
+		{256 << 20, 2 * time.Second},
+		{384 << 20, 3 * time.Second},
+		{10 << 30, walCheckpointBudgetMax},
+	} {
+		if got := walCheckpointTimeout(c.debt); got != c.want {
+			t.Fatalf("walCheckpointTimeout(%d) = %v, want %v", c.debt, got, c.want)
+		}
+	}
+}
+
+// TestMaintainWALBudgetUsesLiveFrames 造化石 WAL（RESTART 复位写指针、
+// 文件不回缩）验证 checkpoint 预算改按实测 live 帧债：400MB 级文件的
+// live 债只有几帧，walLiveBytes 收敛到小值，下轮预算落回 2s 下界——
+// 而按文件体积折算仍在放大档，正是 prod 742MB 化石把每轮预算顶在
+// 5.8s 的事故形态。
+func TestMaintainWALBudgetUsesLiveFrames(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	// 关掉 autocheckpoint 让 WAL 只涨不收，攒出超 RESTART 阈值的文件。
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_autocheckpoint=0`); err != nil {
+		t.Fatalf("disable autocheckpoint: %v", err)
+	}
+	payload := make([]byte, 1<<20)
+	if _, err := rand.Read(payload); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	for i := 0; i < 400; i++ {
+		if err := s.PutDebugFile(ctx, "fossil", fmt.Sprintf("f%03d.bin", i), payload); err != nil {
+			t.Fatalf("PutDebugFile: %v", err)
+		}
+	}
+	wal := s.WALBytes()
+	if wal <= walRestartBytes {
+		t.Fatalf("WAL %d not above restart threshold, test vacuous", wal)
+	}
+	// 复位写指针造化石：live 帧清零，文件体积留在高水位。
+	var busy, nLog, nCkpt int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(RESTART)`).Scan(&busy, &nLog, &nCkpt); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if fossil := s.WALBytes(); fossil <= walRestartBytes {
+		t.Fatalf("RESTART shrank the wal file to %d, no fossil", fossil)
+	}
+	// 一行小写入留下微小 live 债；首轮 Maintain 前 walLiveBytes 未知。
+	if err := s.SetState(ctx, "k", "v"); err != nil {
+		t.Fatalf("SetState: %v", err)
+	}
+	if got := s.walLiveBytes.Load(); got != -1 {
+		t.Fatalf("walLiveBytes before first maintain = %d, want -1", got)
+	}
+	if err := s.Maintain(ctx, 0); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	live := s.walLiveBytes.Load()
+	if live < 0 || live >= 4<<20 {
+		t.Fatalf("walLiveBytes = %d, want small live debt (fossil file %d bytes)", live, wal)
+	}
+	if got := walCheckpointTimeout(live); got != walCheckpointBudget {
+		t.Fatalf("live-frame budget = %v, want floor %v", got, walCheckpointBudget)
+	}
+	if got := walCheckpointTimeout(wal); got <= walCheckpointBudget {
+		t.Fatalf("file-size budget = %v, want above floor (fossil trap needs wal > 256MB)", got)
+	}
+	// 失败路径：被取消的 checkpoint 拿不到结果行，walLiveBytes 标回
+	// 未知，下轮退化文件体积预算——stale 小值不能把新写入风暴锁死在
+	// 低估里。
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Maintain(cancelled, 0); err == nil {
+		t.Fatal("Maintain on cancelled ctx should fail")
+	}
+	if got := s.walLiveBytes.Load(); got != -1 {
+		t.Fatalf("walLiveBytes after failed checkpoint = %d, want -1", got)
+	}
+}
+
 // TestMaintainWALCheckpoint 覆盖 Maintain 的 WAL 纪律：先验证驱动支持
 // wal_checkpoint(RESTART)（静止库上 busy=0、三列形状），再跑一轮
 // Maintain 确认全链路无错——阈值门内的 pragma 与这里同源。

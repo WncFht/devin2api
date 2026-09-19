@@ -34,7 +34,14 @@ type Store struct {
 	db wconn
 	ro *sql.DB
 
-	path string
+	path     string
+	pageSize int64
+	// walLiveBytes 是最近一次 wal_checkpoint 回报的 live 帧债折算
+	// （nLog×pageSize），给下轮 checkpoint 预算做基准；<0 表示未知
+	// （启动首轮、上次尝试被中断拿不到结果行），退化用 WAL 文件体积
+	// 上界。RESTART 只复位写指针不回缩文件——化石 WAL 的磁盘体积会
+	// 永久高估真实回拷量，靠实测 nLog 才能把预算收回诚实量级。
+	walLiveBytes atomic.Int64
 	// debugBytes 是 debug payload 四张表库存字节合计的内存镜像
 	// （DebugDirSizes + DebugBlobBytes 总量同口径）：Open 时从持久化行
 	// 播种（行缺席则 0 起步、异步协程重建后置换），各写/删方法在事务
@@ -272,8 +279,15 @@ func Open(path string) (*Store, error) {
 	}
 	readpoolMS := time.Since(stageStart).Milliseconds()
 	stageStart = time.Now()
-	st := &Store{db: wconn{db}, ro: ro, path: path}
+	// page_size 建库即定不可变，一次读出供 WAL live 帧债折算字节。
+	var pageSize int64
+	if err := db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("query page_size: %w", err)
+	}
+	st := &Store{db: wconn{db}, ro: ro, path: path, pageSize: pageSize}
 	st.debugBytes.Store(debugBytes)
+	st.walLiveBytes.Store(-1)
 	// 水位自愈：任何绕过双写的写入者（无 cells 码的旧二进制、外部
 	// 工具、importIndex）留下的未记账行在每次启动时补记——不做这步，
 	// 缝隙会被后续双写推进的水位碾过，对 UNION 读永久隐形（9-19
@@ -321,17 +335,18 @@ const (
 
 // walRestartBytes 是 Maintain 主动 wal_checkpoint(RESTART) 的触发阈值。
 // 正常流量下 wal_autocheckpoint(500) 把 WAL 压在 ~2MB；autocheckpoint 是
-// PASSIVE 语义，读者持快照就把它饿死，WAL 可积到数百 MB。阈值取 64MB：
-// 单次 RESTART 的回拷量以此封顶，配合 walCheckpointBudget 把写连接占用
-// 钳在 claim 预算（5s）之下。
+// PASSIVE 语义，读者持快照就把它饿死，WAL 可积到数百 MB。阈值按文件体积
+// 取 64MB：RESTART 回拷量只是 live 帧（预算已改按 walLiveBytes 折算），
+// 化石文件上每轮走 RESTART 也是廉价尝试——复位写指针本身不重拷数据，
+// 读者排空等待由 walCheckpointTimeout 封顶。
 const walRestartBytes = 64 << 20
 
 // walCheckpointBudget 给 Maintain 单次 checkpoint 尝试的写连接占用封顶。
 // RESTART 要等全部读者越过 WAL 末尾才复位，等待上限本是 busy_timeout
 // 30s——读者饥饿时每次触发都打出数十秒独占。改用短 ctx 把「等不到」变成
 // 「下轮再来」：sqlite3_interrupt 中止 busy 等待与回拷，已拷页幂等无害，
-// WAL 留原状待下轮收。占用界随 WAL 体积缩放（128MB/s 回拷估计）保证
-// 任意大 WAL 一轮内可收——被中断的 checkpoint 不累计进度，固定 2s 会
+// WAL 留原状待下轮收。占用界随 live 帧债缩放（128MB/s 回拷估计）保证
+// 任意大真实债一轮内可收——被中断的 checkpoint 不累计进度，固定 2s 会
 // 让 GB 级 WAL 永远收不掉；上限对齐 busy_timeout，超出时 RESTART 自己
 // 也等不住。
 const (
@@ -339,10 +354,12 @@ const (
 	walCheckpointBudgetMax = 30 * time.Second
 )
 
-// walCheckpointTimeout 按 WAL 体积给出本轮 checkpoint 的 ctx 预算：
-// 吞吐估计 128MB/s 覆盖回拷 I/O，下界 2s 兜住短读者排空。
-func walCheckpointTimeout(walBytes int64) time.Duration {
-	scaled := time.Duration(walBytes/(128<<20)) * time.Second
+// walCheckpointTimeout 按回拷债估计给出本轮 checkpoint 的 ctx 预算：
+// 吞吐估计 128MB/s 覆盖回拷 I/O，下界 2s 兜住短读者排空。输入是
+// live 帧折算字节（walLiveBytes）或未知时的文件体积上界——化石
+// WAL 文件体积不算债，RESTART 复位过写指针的文件不再回缩。
+func walCheckpointTimeout(debtBytes int64) time.Duration {
+	scaled := time.Duration(debtBytes/(128<<20)) * time.Second
 	return min(max(scaled, walCheckpointBudget), walCheckpointBudgetMax)
 }
 
@@ -405,19 +422,33 @@ func (s *Store) Maintain(ctx context.Context, logRowDays int64) error {
 	// RESTART 强制复位（读者排空等待由 walCheckpointTimeout 封顶，
 	// 超时中断不算没收干净——WAL 仍超阈下一轮重试）；未超阈跑
 	// PASSIVE——不等待读者、能收多少收多少，读间隙顺带复位，兜
-	// autocheckpoint 够不着的空闲尾部与低度饥饿。返回行本就无人
-	// 消费，走 ExecContext 顺带进入慢占用计时。
+	// autocheckpoint 够不着的空闲尾部与低度饥饿。预算基准用实测
+	// live 帧债而非文件体积：化石 WAL 文件不回缩，体积会永久高估
+	// 回拷量把每轮预算顶在放大档；债未知（首轮/上轮被中断）时退化
+	// 文件体积上界——高估方向安全，下一次成功扫描即被实测替换。
 	wal := s.WALBytes()
-	ckptCtx, cancel := context.WithTimeout(ctx, walCheckpointTimeout(wal))
-	var err error
-	if wal > walRestartBytes {
-		_, err = s.db.ExecContext(ckptCtx, `PRAGMA wal_checkpoint(RESTART)`)
-	} else {
-		_, err = s.db.ExecContext(ckptCtx, `PRAGMA wal_checkpoint(PASSIVE)`)
+	debt := wal
+	if live := s.walLiveBytes.Load(); live >= 0 {
+		debt = live
 	}
+	ckptCtx, cancel := context.WithTimeout(ctx, walCheckpointTimeout(debt))
+	query := `PRAGMA wal_checkpoint(PASSIVE)`
+	if wal > walRestartBytes {
+		query = `PRAGMA wal_checkpoint(RESTART)`
+	}
+	var busy, nLog, nCkpt int
+	start := time.Now()
+	err := s.db.QueryRowContext(ckptCtx, query).Scan(&busy, &nLog, &nCkpt)
+	warnSlowWrite(sqlLabel(query), start)
 	cancel()
 	if err != nil {
+		// 被中断的尝试拿不到结果行：标回未知让下轮退化文件体积
+		// 预算。stale 小值遇上新一轮写入风暴会欠预算饿死大债，
+		// 宁可回弹高估一轮也不能把真实债锁死在低估里。
+		s.walLiveBytes.Store(-1)
 		errs = append(errs, err)
+	} else {
+		s.walLiveBytes.Store(int64(nLog) * s.pageSize)
 	}
 	return errors.Join(errs...)
 }
