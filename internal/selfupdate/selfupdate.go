@@ -35,7 +35,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -311,7 +310,7 @@ func (s *Service) claim(ctx context.Context) (*Status, error) {
 	// SIGTERM 回收——它跑的是过期待替换版本，占着 reuseport 组没意义。
 	if st.PID != 0 && st.PID != os.Getpid() && pidAlive(st.PID) && isDevin2API(st.PID) {
 		slog.Info("selfupdate: retiring stale orchestrator", "pid", st.PID)
-		_ = syscall.Kill(st.PID, syscall.SIGTERM)
+		_ = terminateProcess(st.PID)
 	}
 	// 停在 spawning 的陈旧记录另有一种残留：编排进程是不含编排逻辑的
 	// 先行版二进制（更新到 pre-feature release），它以 selfupdate 瞬态
@@ -667,7 +666,7 @@ func (s *Service) spawn(ctx context.Context, exe, to string, rollback bool) erro
 			}
 		}
 		cmd.Env = append(env, envPairs...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.SysProcAttr = detachSysProcAttr()
 		stdout, err := os.OpenFile(filepath.Join(s.stateDir, "logs", "stdout.log"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
@@ -690,13 +689,6 @@ func (s *Service) spawn(ctx context.Context, exe, to string, rollback bool) erro
 		return nil
 	}
 	return ErrUnsupported
-}
-
-// pidAlive 报告 pid 是否对应活进程（EPERM 视为存在——别人的进程
-// 也不该回收，按活着处理最保守）。
-func pidAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // isDevin2API 粗查 pid 是否是本服务进程：回收残留编排进程前的

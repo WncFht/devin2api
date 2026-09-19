@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
-	"syscall"
 	"time"
 )
 
@@ -122,7 +121,7 @@ func (d *DriverDeps) Drive() {
 				switch st.Phase {
 				case phaseDone:
 					slog.Info("selfupdate: managed instance took over", "to", d.To)
-					_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+					_ = terminateProcess(os.Getpid())
 					return
 				case phaseFailed:
 					slog.Error("selfupdate: managed instance reported failure", "error", st.Error)
