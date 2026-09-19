@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -444,6 +445,54 @@ func TestSetQuotaIntervalAfterDrain(t *testing.T) {
 	}
 	if got := h.QuotaInterval(); got != 2*time.Minute {
 		t.Fatalf("QuotaInterval = %v, want 2m (bookkeeping still records)", got)
+	}
+}
+
+// TestQuotaWriterStamp 验证采样武装即刻的写入者身份落 runtime_state：
+// quota_writer 键值是 {pid, boot_at, version, grid_epoch} 的 JSON，
+// 重复武装 upsert 刷新相位锚而不改进程身份。
+func TestQuotaWriterStamp(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	boot := time.Now().Add(-time.Hour).Unix()
+	h := &Handler{store: st, startedAt: time.Unix(boot, 0)}
+	h.SetVersion("v0.0.0-test")
+
+	before := time.Now().Unix()
+	h.stampQuotaWriter()
+	value, ok, err := st.GetState(context.Background(), "quota_writer")
+	if err != nil || !ok {
+		t.Fatalf("GetState ok=%v err=%v", ok, err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(value), &rec); err != nil {
+		t.Fatalf("stamp value not JSON: %v", err)
+	}
+	if rec["pid"] != float64(os.Getpid()) {
+		t.Fatalf("pid = %v, want %d", rec["pid"], os.Getpid())
+	}
+	if rec["boot_at"] != float64(boot) {
+		t.Fatalf("boot_at = %v, want %d", rec["boot_at"], boot)
+	}
+	if rec["version"] != "v0.0.0-test" {
+		t.Fatalf("version = %v", rec["version"])
+	}
+	if ge, ok := rec["grid_epoch"].(float64); !ok || int64(ge) < before || int64(ge) > time.Now().Unix() {
+		t.Fatalf("grid_epoch = %v, want within [%d, now]", rec["grid_epoch"], before)
+	}
+
+	// 重复武装：身份不变，grid_epoch 刷新为新一轮武装时刻。
+	h.stampQuotaWriter()
+	value2, _, _ := st.GetState(context.Background(), "quota_writer")
+	var rec2 map[string]any
+	if err := json.Unmarshal([]byte(value2), &rec2); err != nil {
+		t.Fatal(err)
+	}
+	if rec2["pid"] != rec["pid"] || rec2["boot_at"] != rec["boot_at"] || rec2["version"] != rec["version"] {
+		t.Fatalf("re-arm changed identity: %+v -> %+v", rec, rec2)
 	}
 }
 

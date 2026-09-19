@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"time"
@@ -70,6 +71,7 @@ func (h *Handler) SetQuotaInterval(interval time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.quotaCancel = cancel
 	go func() {
+		h.stampQuotaWriter()
 		h.sampleQuota(ctx)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -125,6 +127,31 @@ func (h *Handler) BeginDrain() {
 		h.gateFlush(ctx)
 	}
 	h.FlushPendingQuotaSamples(ctx)
+}
+
+// stampQuotaWriter 把当前进程的采样写入者身份刻进 runtime_state
+// （key=quota_writer，JSON 值 {pid, boot_at, version, grid_epoch}）。
+// quota_samples 行本身不带写入者——2026-09-15→18 的样本断档归因
+// 只能靠在 at 列上做网格取证反推未受管进程；留下身份后「谁在写、
+// 断档后换成了谁」一次查询即答。采样没有显式相位锚，ticker 各轮
+// at ≈ 武装时刻+n·interval，故 grid_epoch 取本次武装时刻——它即
+// 网格相位。每次武装写一次（SetState upsert）：进程内身份不变，
+// 重复武装仅刷新相位锚；失败仅记日志，不挡采样。
+func (h *Handler) stampQuotaWriter() {
+	raw, err := json.Marshal(map[string]any{
+		"pid":        os.Getpid(),
+		"boot_at":    h.startedAt.Unix(),
+		"version":    h.Version(),
+		"grid_epoch": time.Now().Unix(),
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), quotaPersistBudget)
+	defer cancel()
+	if err := h.store.SetState(ctx, "quota_writer", string(raw)); err != nil {
+		slog.Warn("quota writer stamp failed", "error", err)
+	}
 }
 
 // sampleQuota 对每个账号各拉取一次状态并把 plan_status 快照写入
