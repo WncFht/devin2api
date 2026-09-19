@@ -130,6 +130,9 @@ type Handler struct {
 	store *store.Store
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
+	// history 是进程指标历史环（runtime-metrics/history 端点数据源）：
+	// StartMetricsHistory 起的采样协程单写，admin 读侧短锁拷出。
+	history metricsHistory
 	// gateStats 返回速率闸门快照；nil 时 runtime-metrics 不投 gate 组。
 	gateStats func() devin.GateStats
 	// accountGateStats/accountWarmStats/accountLaneStates 返回逐账号
@@ -435,6 +438,8 @@ func (h *Handler) routes() []panelRoute {
 			"模型目录含能力位与价格"},
 		{http.MethodGet, "/admin/runtime-metrics", A(h.adminRuntimeMetrics), "/admin/runtime-metrics",
 			"进程运行指标（RPM/QPS/goroutine/内存/GC/CPU）+ http.rejects 管线前拒绝（分原因计数+最近事件，不进索引）+ 日志管道自观测 + gate 速率闸门状态 + warm 前缀保温簿记"},
+		{http.MethodGet, "/admin/runtime-metrics/history", A(h.adminRuntimeMetricsHistory), "/admin/runtime-metrics/history?minutes=",
+			"进程指标历史环：30s 一拍的堆/RSS/goroutine/CPU/在途与累计吞吐/日志写积压/闩态（内存 480 点≈4h，重启归零；minutes 缺省 60 上限 240）"},
 		{http.MethodGet, "/admin/accounts", A(h.adminAccounts), "/admin/accounts",
 			"号池账号聚合视图：source(config|panel|tombstoned)+credential+disabled+token_sha+priority/max_rpm/notes+lane/gate/warm 快照+inflight+quota 摘要+usage{rpm_now,tps_now,ttfb_avg,ttfb_p50,ttfb_p90,cache_rate,today{requests,success_rate,tokens}}"},
 		{http.MethodPost, "/admin/accounts", A(h.adminCreateAccount), "/admin/accounts",

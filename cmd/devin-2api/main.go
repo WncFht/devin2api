@@ -321,6 +321,10 @@ func main() {
 	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
 	// 持久层须在 SetQuotaInterval 前注入：采样协程起跑时快照读它。
 	ccPanel.SetStore(dbStore)
+	// 进程指标历史环：30s 一拍采进内存环，/admin/runtime-metrics/history
+	// 的数据源。纯进程内读取——不打上游、不写库，与配额采样不同，
+	// 交接进程同样起跑（重叠窗内它自己的历史也是有效观测）。
+	ccPanel.StartMetricsHistory()
 	// maskToken 常驻脱敏集合播种：config 声明的凭据与 upstream_accounts
 	// 仓的存量行都登记——重启后 recentTokens 环是空的，旧调试目录里的
 	// 凭据字面值照样罩得住。行内 token 含脱敏哈希形态也无妨（明文位
