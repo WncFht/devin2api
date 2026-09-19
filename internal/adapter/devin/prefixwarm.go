@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash"
+	"io"
 	"math/rand"
 	"slices"
 	"strings"
@@ -446,13 +447,15 @@ func (w *cacheWarmer) retain(key warmLineageKey, request llm.RequestMessages, wi
 	if key == (warmLineageKey{}) {
 		return
 	}
+	// 指纹是全量内容 sha256（长历史 MB 级、数 ms）——纯函数无共享态，
+	// 锁外先算好，别让整个 warmer 表为一次哈希停摆。
+	size, digest := fingerprintRequest(request)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.params.Enabled {
 		return
 	}
 	now := w.now()
-	size, digest := fingerprintRequest(request)
 	entry := w.entries[key]
 	if entry == nil {
 		entry = &warmEntry{
@@ -1010,16 +1013,31 @@ func hashTools(tools []llm.ToolDefinition) string {
 		return ""
 	}
 	h := sha256.New()
-	put := func(s string) {
+	put, putBytes := hashFieldWriters(h)
+	for _, tool := range tools {
+		putTool(h, put, putBytes, tool)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hashFieldWriters 产出「长度前缀 + 原样字节」的两路写入闭包：put 走
+// io.WriteString 免 string→[]byte 转换拷贝，putBytes 直接喂切片——
+// schema/arguments 这类 RawMessage 字段按后者写，避开先转 string
+// 再转回 []byte 的双份拷贝。crypto 系 hasher 都实现 io.StringWriter。
+func hashFieldWriters(h hash.Hash) (put func(string), putBytes func([]byte)) {
+	put = func(s string) {
 		var length [8]byte
 		binary.LittleEndian.PutUint64(length[:], uint64(len(s)))
 		h.Write(length[:])
-		h.Write([]byte(s))
+		_, _ = io.WriteString(h, s)
 	}
-	for _, tool := range tools {
-		putTool(h, put, tool)
+	putBytes = func(b []byte) {
+		var length [8]byte
+		binary.LittleEndian.PutUint64(length[:], uint64(len(b)))
+		h.Write(length[:])
+		h.Write(b)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return put, putBytes
 }
 
 // putTool 把一份工具声明的全部身份字段按序写进 h：名/说明/schema/
@@ -1027,10 +1045,10 @@ func hashTools(tools []llm.ToolDefinition) string {
 // wire 字段构成工具身份」的清单只在这里存在一份，ToolDefinition 增
 // 字段只改这里。put 由调用方提供：fingerprintRequest 的版本顺带累加
 // 体量估计。
-func putTool(h hash.Hash, put func(string), tool llm.ToolDefinition) {
+func putTool(h hash.Hash, put func(string), putBytes func([]byte), tool llm.ToolDefinition) {
 	put(tool.Name)
 	put(tool.Description)
-	put(string(tool.InputSchema))
+	putBytes(tool.InputSchema)
 	put(tool.ServerName)
 	var flags byte
 	if tool.Custom {
@@ -1058,16 +1076,18 @@ func putTool(h hash.Hash, put func(string), tool llm.ToolDefinition) {
 // MaxTokens/TimestampMS 这类不进 wire 的字段差不算改写。
 func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byte) {
 	h := sha256.New()
+	rawPut, rawPutBytes := hashFieldWriters(h)
 	put := func(s string) {
-		var length [8]byte
-		binary.LittleEndian.PutUint64(length[:], uint64(len(s)))
-		h.Write(length[:])
-		h.Write([]byte(s))
+		rawPut(s)
 		size += int64(len(s))
+	}
+	putBytes := func(b []byte) {
+		rawPutBytes(b)
+		size += int64(len(b))
 	}
 	put(request.SystemPrompt)
 	for _, tool := range request.Tools {
-		putTool(h, put, tool)
+		putTool(h, put, putBytes, tool)
 	}
 	for _, message := range request.Messages {
 		var content []llm.Content
@@ -1125,7 +1145,7 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 				h.Write([]byte{4})
 				put(typed.ID)
 				put(typed.Name)
-				put(string(typed.Arguments))
+				putBytes(typed.Arguments)
 				var flags byte
 				if typed.Custom {
 					flags |= 1
