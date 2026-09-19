@@ -220,14 +220,6 @@
       .replace(/'/g, '&#39;');
   }
 
-  // 简单显示/隐藏切换（用于日志/测试响应块等）
-
-  function toggleResponse(elementId) {
-    const el = document.getElementById(elementId);
-    if (!el) return;
-    el.style.display = el.style.display === 'none' ? 'block' : 'none';
-  }
-
   // 导出到全局作用域
 
   window.debounce = debounce;
@@ -242,6 +234,5 @@
   window.getRpmColor = getRpmColor;
   window.formatRpmValue = formatRpmValue;
   window.escapeHtml = escapeHtml;
-  window.toggleResponse = toggleResponse;
 
 })();
