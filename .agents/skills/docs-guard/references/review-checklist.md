@@ -1,45 +1,45 @@
-# Docs Guard — Review Checklist
+# Docs Guard——评审清单
 
-Structured walk for review mode. Findings first, file:line evidence always. Priorities: false claims → drift → substance → navigation.
+评审模式的结构化走查。发现先行，file:line 证据永远带。优先级：假断言 → 漂移 → 实质 → 导航。
 
-## Contents
+## 目录
 
-- Pass 1: Claim verification
-- Pass 2: Code samples
-- Pass 3: Drift scan
-- Pass 4: Substance
-- Pass 5: Navigation
-- Reporting
+- 第 1 遍：断言核验
+- 第 2 遍：代码示例
+- 第 3 遍：漂移扫描
+- 第 4 遍：实质
+- 第 5 遍：导航
+- 报告
 
-## Pass 1: Claim verification (must fix)
+## 第 1 遍：断言核验（必须修）
 
-Run the full procedure in [verification.md](verification.md):
+跑 [verification.md](verification.md) 的完整程序：
 
-- Extract every symbol, flag, endpoint, config key, path, version, and behavioral claim.
-- Verify each against its source of truth (definition site, parser, route table, changelog).
-- Every unverified or contradicted claim is a Rule 1/3 finding with the contradicting file:line.
-- Numbers and superlatives without a repo source are Rule 4 findings.
+- 提取每个符号、flag、endpoint、配置项、路径、版本号、行为断言。
+- 逐条对照其事实源（定义处、解析器、路由表、changelog）。
+- 每条未核验或被证伪的断言是规则 1/3 发现，带矛盾处的 file:line。
+- 没有仓库出处的数字和最高级是规则 4 发现。
 
-## Pass 2: Code samples (must fix)
+## 第 2 遍：代码示例（必须修）
 
-For every fenced block, run the [code-samples.md](code-samples.md) checklist: imports, signatures, self-containment, local residue, secrets, shown output. Samples in docstrings count.
+对每个代码块跑 [code-samples.md](code-samples.md) 清单：import、签名、自包含、本地残留、密钥、所示输出。docstring 里的示例也算。
 
-## Pass 3: Drift scan (should fix)
+## 第 3 遍：漂移扫描（应该修）
 
-- Take the public API surface (or the diff, when reviewing a change) and grep the docs for renamed/removed symbols, old defaults, and dead flags.
-- Check the changelog mentions what the docs claim is new, and versions agree (Rule 5).
-- Cross-surface consistency: README vs reference vs docstrings vs config samples — one claim per fact, surfaces agreeing (Rule 6).
+- 拿公开 API 面（评审变更时拿 diff）grep 文档里的改名/删除符号、旧默认值、死 flag。
+- 查文档声称的新东西在 changelog 里有，版本对得上（规则 5）。
+- 跨面一致：README vs 参考文档 vs docstring vs 配置样例——一个事实一处表述，各面不打架（规则 6）。
 
-## Pass 4: Substance (should fix)
+## 第 4 遍：实质（应该修）
 
-- Paraphrase docstrings, heading-restating sections, marketing adjectives, intro padding (Rule 7).
-- Paraphrased upstream documentation that should be a link (Rule 8).
-- Happy-path-only tutorials and API examples (Rule 9).
+- 复述 docstring、复述标题的小节、营销形容词、开场垫话（规则 7）。
+- 该用链接却转述的上游文档（规则 8）。
+- 只有顺利路径的教程和 API 示例（规则 9）。
 
-## Pass 5: Navigation (worth noting)
+## 第 5 遍：导航（值得提）
 
-- TOC vs actual headings; internal links and anchors resolve; no TODO stubs or "coming soon" in published docs (Rule 10).
+- 目录 vs 实际标题；内部链接和锚点能解析；已发布文档里没有 TODO 桩或「即将推出」（规则 10）。
 
-## Reporting
+## 报告
 
-Use the SKILL.md reporting format (Claim / Reality / Fix). Lead with the count: "N claims checked, M false, K unverifiable." End with a verdict — publish / fix first / do not publish — and at most three things the docs do well. A review that verifies 40 claims and finds 2 false is a _good_ result; say so.
+用 SKILL.md 的报告格式（断言 / 实际 / 修法）。开头报数：「核验 N 条断言，M 条为假，K 条不可核验」。结尾给结论——可发布 / 先修 / 不可发布——加至多三条文档做得好的地方。一份核验了 40 条断言、发现 2 条为假的评审是*好*结果；这么说。

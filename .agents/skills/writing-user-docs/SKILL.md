@@ -1,60 +1,60 @@
 ---
 name: writing-user-docs
-description: House style for user-facing documentation — voice, scope, structure, and what to leave out. Use this skill whenever writing, editing, or reviewing anything a user reads to learn how to use a tool — help center articles, getting-started guides, tutorials, feature docs, README usage sections, in-app help, release notes, or FAQ entries. Trigger it even when the request is phrased plainly — "document this feature", "write docs for X", "explain this to users", "write a README for this library", "turn these notes into a guide" — and even when no style guidelines are mentioned. Also use it to review existing docs for tone, bloat, or leaked implementation detail. Do not use it for internal engineering docs, architecture write-ups, RFCs, or code comments.
+description: 面向用户的文档写作规范——语气、范围、结构与取舍。写、改或评审任何「教用户怎么用工具」的内容时使用：帮助中心文章、上手指南、教程、功能文档、README 的用法节、应用内帮助、发布说明、FAQ。即使用户只是随口一说也要触发——「写个文档」「给 X 写说明」「写个 README」「把这些笔记整理成指南」"document this feature" "write docs for X"——没提风格规范也一样。也可用于审查已有文档的语气、冗余与实现细节泄漏。不用于内部工程文档、架构文档、RFC 或代码注释。
 ---
 
-# User-facing documentation
+# 面向用户的文档
 
-Write for the person using the tool, not the person who built it.
+写给用工具的人，不是写给造工具的人。
 
-"User" means whoever uses the thing. For an app, that's an end user. For a library, it's the developer who installs it. Either way they are _not_ implementing it, and the docs should reflect that.
+「用户」指使用这个东西的人。对应用是最终用户，对库是安装它的开发者。他们都不是实现者，文档要体现这一点。
 
-## Voice
+## 语气
 
-Everyday English — the way you'd explain it to a colleague sitting next to you. Formality doesn't add authority, it just adds distance and words.
+日常语言——像跟坐在旁边的同事解释那样写。正式不增加权威，只增加距离和字数。
 
-- **Second person, active, present tense.** "You tap Save," not "the Save button should be tapped" or "the user will then be able to save."
-- **Cut "just," "simply," "easy," "obviously."** They add nothing when things work, and read as mockery when they don't.
-- **No marketing adjectives.** "Powerful," "seamless," "robust," "intuitive" — that's the author admiring the product. The reader is mid-task and doesn't care.
-- **One term per concept, matching the UI exactly.** If the button says _Workspace_, the docs never say "project" or "team space." Varying your vocabulary is good prose and bad documentation — every synonym reads as a new concept.
+- **第二人称、主动、现在时。**「你点保存」，不是「保存按钮应当被点击」或「用户随后将能够保存」。
+- **删掉 just / simply / easy / obviously 和「只是」「很简单」「显然」。**顺利时它们没有信息量，不顺利时读起来像嘲讽。
+- **不要营销形容词。**「强大」「无缝」「健壮」「直观」和 powerful / seamless / robust / intuitive——那是作者在欣赏产品，读者正在做事，不关心。
+- **一个概念只用一个词，且与界面一致。**按钮叫 _Workspace_，文档就永远不说「项目」或「团队空间」。变换词汇是好文风、坏文档——每个同义词都会被读成一个新概念。
 
-## Scope: what goes in
+## 范围：写什么进去
 
-Include only what the reader needs to use the tool. The default is to leave things out.
+只写读者用工具时需要的东西。默认是不写。
 
-**Implementation details stay out.** Not the database, the queue, the framework, the algorithm's name, the internal service, the refactor it took to ship. The test isn't "is this technical?" — it's **"will the reader be surprised, or make a wrong decision, without it?"**
+**实现细节不要进文档。**数据库、队列、框架、算法名字、内部服务、为上线做的重构，都不写。判断标准不是「这算不算技术」，而是**「读者不知道它会惊讶吗、会做错决定吗」**。
 
-Observable behavior passes that test even when it sounds technical, and belongs in the docs: rate limits, offline behavior, what syncs and when, where files are stored, what happens on a conflict, what survives a reinstall. The machinery producing that behavior doesn't.
+可观察行为能过这个测试——就算听起来技术——应该写：限流、离线行为、什么会同步什么时候同步、文件存在哪、冲突时发生什么、重装后什么还在。产生这些行为的内部机制不写。
 
-**Concise means no filler, not short.** Every sentence earns its place. A thorough troubleshooting section is still concise if none of it is padding — and a two-line page is bloated if one line is a welcome message. Cut preambles, restatements of the heading, and "in this article you will learn."
+**concise 是没废话，不是短。**每句话都要挣得自己的位置。详尽的故障排查节仍然是 concise——只要没有水分；两行的页面如果有一行是欢迎语，那就是臃肿。删掉开场白、复述标题的句子、「本文将介绍」。
 
-## Structure
+## 结构
 
-- **Organize by user goal, not by feature or screen.** Headings are things people want to do — "Share a report with someone outside your team" — not nouns like "Sharing module."
-- **Lead with the outcome, then the steps.** People need to know they're on the right page before investing in step 1.
-- **Prerequisites and limits go up front.** Required plan, permission, platform, file size cap. Discovering the blocker at step 6 is the worst possible moment.
-- **One page answers one question, and stands alone.** Most readers arrive from search or a deep link, never from page 1. Assume no one read the previous page; link instead of assuming.
-- **Pick one path.** Where three ways exist, document the recommended one. Alternatives get a short note at the end, or nothing.
+- **按用户目标组织，不按功能或界面。**标题是人们想做的事——「把报告分享给团队外的人」——不是「分享模块」这种名词。
+- **先给结果再给步骤。**读者先确认自己在对的页面，才值得投入第一步。
+- **前置条件和限制写在最前。**需要的套餐、权限、平台、文件大小上限。在第六步才发现被卡住是最糟糕的时刻。
+- **一页只回答一个问题，且能独立成立。**多数读者从搜索或深链进来，不会从第一页读起。假设没人读过上一页；需要时用链接，不要假设。
+- **只给一条路。**有三种做法时，写推荐的那个。替代方案在末尾留一句话，或者不提。
 
-## Cover the unhappy path
+## 覆盖不快乐的路径
 
-This is the most-skipped section and the one people actually search for.
+这是最常被跳过、也是人们真正会搜的部分。
 
-- **Document the failure cases**: what the error says, what causes it, what to do next.
-- **Say what the feature doesn't do** when users predictably assume it does. Cheaper than a support ticket.
-- **Warn before destructive actions, never after.** The warning goes above the step it applies to.
+- **把失败情形写成文档**：报什么错、什么原因、接下来怎么办。
+- **功能不做什么也要说**，当用户会想当然以为它做的时候。这比一张工单便宜。
+- **破坏性操作的警告放在操作前，不是后。**警告写在它适用的步骤上方。
 
-## Keep it from rotting
+## 防腐烂
 
-- **Real examples with real-looking data.** No `foo`, no `test123`, no lorem ipsum. Examples should be copy-pasteable and produce the result shown.
-- **No time-relative language.** "New," "recently," "currently," "coming soon" — all rot silently. So do roadmap promises.
-- **Walk every procedure literally.** If someone following it word-for-word can't finish, the doc is wrong — not the reader.
+- **真实示例配真实感数据。**不要 `foo`、不要 `test123`、不要 lorem ipsum。示例要能直接复制粘贴并得到所示结果。
+- **不要时间相对词。**「新」「最近」「目前」「即将推出」都会悄悄烂掉，路线图承诺也一样。
+- **每条流程都照字面走一遍。**如果有人逐字照做却走不完，错的是文档不是读者。
 
-## Before publishing
+## 发布前
 
-Read the draft once looking only for these:
+通读一遍稿子，只看这几件事：
 
-1. Anything the reader doesn't need to finish the task → cut it.
-2. Anything about how it works internally → cut it, unless behavior depends on it.
-3. Any sentence you wouldn't say out loud → rewrite it.
-4. What happens when this goes wrong → is that answered?
+1. 读者完成任务不需要的东西 → 删。
+2. 讲内部怎么运作的东西 → 删，除非行为依赖它。
+3. 你不会说出口的话 → 重写。
+4. 出错时会发生什么 → 回答了吗？

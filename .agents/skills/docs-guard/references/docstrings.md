@@ -1,26 +1,26 @@
-# Docs Guard — Docstring, PHPDoc, and JSDoc Rules
+# Docs Guard——docstring、PHPDoc 与 JSDoc 规则
 
-In-code documentation has one extra constraint the other surfaces lack: it sits next to the truth. There is no excuse for a docstring that disagrees with the signature three lines below it.
+代码内文档相比其他文档面多一条约束：它就坐在事实旁边。docstring 与下面三行的签名不一致，没有任何借口。
 
-## Contents
+## 目录
 
-- When a docstring is justified
-- The paraphrase test
-- What a good docstring contains
-- Tag accuracy (PHPDoc/JSDoc)
-- Generated-docs hygiene
+- 什么时候该写 docstring
+- 复述测试
+- 好 docstring 含什么
+- 标签准确性（PHPDoc/JSDoc）
+- 生成文档的卫生
 
-## When a docstring is justified
+## 什么时候该写 docstring
 
-- Public API surface: always — it feeds IDEs, generated references, and agents.
-- Internal helpers: only when the contract is not expressible in the signature (units, invariants, side effects, "why"). An internal one-liner with an intention-revealing name usually needs nothing — and clean-code-guard's comment rules apply.
+- 公开 API 面：永远——它喂 IDE、生成的参考文档和 agent。
+- 内部辅助函数：只在契约无法由签名表达时写（单位、不变量、副作用、「为什么」）。名字已经表意的一行内部函数通常什么都不需要——且适用 clean-code-guard 的注释规则。
 
-## The paraphrase test
+## 复述测试
 
-Delete any docstring whose entire information content is recoverable from the signature:
+删掉信息内容可以完整从签名恢复的 docstring：
 
 ```php
-// Fails the test — restates the obvious, documents nothing.
+// 不通过——复述显而易见的事，什么都没文档化。
 /**
  * Gets the user by ID.
  *
@@ -30,31 +30,31 @@ Delete any docstring whose entire information content is recoverable from the si
 function get_user_by_id( $user_id ) { /* … */ }
 ```
 
-AI generators emit these by the thousand; they are comment pollution wearing a suit. Either say something the signature cannot, or say nothing.
+AI 生成器成千地吐这种东西：穿着西装的注释污染。要么说签名说不出的，要么什么都不说。
 
-## What a good docstring contains
+## 好 docstring 含什么
 
-The contract the types cannot express:
+类型表达不了的契约：
 
-- Units and ranges (`$timeout` in seconds? milliseconds? what happens at 0?)
-- Error behavior: which exceptions/returns on failure, and when (verify the raise/return sites)
-- Side effects: writes, cache invalidation, events fired, global state touched
-- Null/empty semantics: what `null` means here, what an empty array does
-- Ordering, idempotency, concurrency guarantees when callers depend on them
-- The "why" for surprising design ("returns 1.0 on API failure so prices never disappear")
+- 单位与取值范围（`$timeout` 是秒还是毫秒？为 0 时怎样？）
+- 错误行为：失败时抛什么/返回什么、何时抛（核验抛出/返回处）
+- 副作用：写入、缓存失效、触发的事件、碰过的全局状态
+- null/空语义：`null` 在这里意味着什么、空数组做什么
+- 顺序、幂等、并发保证——当调用方依赖它们时
+- 令人意外的设计写「为什么」（「API 失败时返回 1.0，价格就永远不会消失」）
 
-## Tag accuracy (PHPDoc/JSDoc)
+## 标签准确性（PHPDoc/JSDoc）
 
-- `@param` names and order match the signature exactly — drift here actively lies to IDEs.
-- `@param` and `@return` types match the real types, including nullability (`int|WP_Error`, `?string`) and generics where the project uses them.
-- `@throws` lists what the body actually throws — verify each raise site; remove what no longer throws.
-- `@since` matches the changelog/tag where the project versions its API.
-- `@deprecated` always names the replacement.
+- `@param` 的名字和顺序与签名完全一致——这里漂移是在对 IDE 撒谎。
+- `@param`、`@return` 类型与真实类型一致，含可空（`int|WP_Error`、`?string`）和项目用到的泛型。
+- `@throws` 列函数体实际抛的——逐个核验抛出处；不再抛的删掉。
+- `@since` 与项目版本化的 changelog/tag 对应。
+- `@deprecated` 必须指明替代。
 
-## Generated-docs hygiene
+## 生成文档的卫生
 
-When docstrings feed a generated reference (phpDocumentor, JSDoc, Sphinx, TypeDoc):
+当 docstring 喂给生成的参考文档（phpDocumentor、JSDoc、Sphinx、TypeDoc）时：
 
-- A wrong docstring becomes a published wrong reference page — Rule 1 severity applies as if it were the README.
-- Check that examples inside docstrings obey [code-samples.md](code-samples.md) — they are the least-reviewed samples in any codebase.
-- Markup must be valid for the generator in use; broken tags silently truncate published pages.
+- 错的 docstring 会变成发布出去的错的参考页——按 README 同级的规则 1 严重度处理。
+- 检查 docstring 里的示例遵守 [code-samples.md](code-samples.md)——它们是任何代码库里最少被 review 的示例。
+- 标记对所用生成器必须合法；坏标签会悄悄截断发布的页面。

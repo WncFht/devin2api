@@ -1,51 +1,51 @@
-# Docs Guard — Verification Procedure
+# Docs Guard——核验程序
 
-The mechanical heart of this skill: turn a document into a list of claims, then check each claim against the source of truth.
+本 skill 的机械核心：把文档变成一张断言清单，然后逐条对照事实源核验。
 
-## Contents
+## 目录
 
-- Step 1: Extract the claims
-- Step 2: Verify each claim type
-- Step 3: Record what you verified
-- When you cannot verify
+- 第 1 步：提取断言
+- 第 2 步：按类型核验
+- 第 3 步：记录核验过程
+- 无法核验时
 
-## Step 1: Extract the claims
+## 第 1 步：提取断言
 
-Scan the doc and list every:
+扫一遍文档，列出每个：
 
-- Function, method, class, constant, hook, event name
-- CLI command, subcommand, flag, default value
-- HTTP endpoint, method, status code, request/response field
-- Config key, env var, file path, directory layout claim
-- Version number, compatibility statement, dependency requirement
-- Behavioral claim ("retries three times", "case-insensitive", "idempotent")
+- 函数、方法、类、常量、hook、事件名
+- CLI 命令、子命令、flag、默认值
+- HTTP endpoint、方法、状态码、请求/响应字段
+- 配置项、环境变量、文件路径、目录结构断言
+- 版本号、兼容性声明、依赖要求
+- 行为断言（「重试三次」「大小写不敏感」「幂等」）
 
-Inline code spans and code blocks are claim-dense; prose hides claims in verbs ("automatically reconnects" is a claim).
+行内代码和代码块是断言密集区；行文里的断言藏在动词里（「自动重连」就是一条断言）。
 
-## Step 2: Verify each claim type
+## 第 2 步：按类型核验
 
-| Claim type           | Source of truth                                                      | How                                                                                              |
-| -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Symbol exists        | The codebase                                                         | Grep definition (`function name`, `class Name`, `def name`, export) — not usages, the definition |
-| Signature            | The definition site                                                  | Read parameters, defaults, return; compare name-by-name with the doc                             |
-| CLI flag             | The argument parser source, or `--help` output if runnable           | Read the parser registration; flags in README but not in the parser are hallucinations           |
-| Endpoint             | Route registration (router file, `register_rest_route`, annotations) | Match path, method, and handler                                                                  |
-| Config key           | The code that reads it (`getenv`, config schema, `get_option`)       | A documented key nothing reads is dead documentation                                             |
-| Default value        | The definition, not the docs of the definition                       | Defaults drift silently; read the current line                                                   |
-| Version claim        | Changelog, git tags, dependency manifests                            | "Since 2.3" must appear in the 2.3 changelog or tag diff                                         |
-| Behavioral claim     | The implementation path                                              | Read the function; trace the claimed behavior (retry loop, case fold, guard clause)              |
-| Internal link/anchor | The target file/heading                                              | Resolve the relative path; slugify the heading and compare                                       |
+| 断言类型      | 事实源                                                 | 怎么核                                                                             |
+| ------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| 符号存在      | 代码库                                                 | grep 定义处（`function name`、`class Name`、`def name`、export）——不是用法，是定义 |
+| 签名          | 定义处                                                 | 读参数、默认值、返回值，与文档逐名对比                                             |
+| CLI flag      | 参数解析器源码，或可运行时的 `--help` 输出             | 读解析器注册处；README 里有而解析器没有的 flag 是幻觉                              |
+| Endpoint      | 路由注册处（router 文件、`register_rest_route`、注解） | 对路径、方法、handler                                                              |
+| 配置项        | 读它的代码（`getenv`、config schema、`get_option`）    | 没有任何代码读的文档化配置项是死文档                                               |
+| 默认值        | 定义本身，不是定义处的文档                             | 默认值会悄悄漂移，读当前那行                                                       |
+| 版本断言      | changelog、git tag、依赖清单                           | 「自 2.3 起」必须出现在 2.3 的 changelog 或 tag diff 里                            |
+| 行为断言      | 实现路径                                               | 读函数，顺藤摸瓜验证声明的行为（重试循环、大小写折叠、guard 分支）                 |
+| 内部链接/锚点 | 目标文件/标题                                          | 解析相对路径；把标题 slug 化后对比                                                 |
 
-## Step 3: Record what you verified
+## 第 3 步：记录核验过程
 
-In write-time mode, keep a short verification trail in your working notes (not in the doc): claim → file:line where confirmed. In review mode, this trail becomes your evidence — every finding cites the definition site that contradicts the doc.
+写作模式下，在工作笔记里留一条简短核验轨迹（不进文档）：断言 → 确认处的 file:line。评审模式下这条轨迹就是证据——每个发现都引用与文档矛盾的定义处。
 
-When the runtime allows execution, prefer executable checks: run `--help`, run the sample, run a link checker. When it does not, source-reading is the standard — never skip to "it looks right."
+运行时允许执行时，优先可执行核验：跑 `--help`、跑示例、跑链接检查。不允许时，读源码是底线——永远不许跳到「看起来对」。
 
-## When you cannot verify
+## 无法核验时
 
-If the source of truth is unavailable (private dependency, external service, missing schema):
+事实源不可得（私有依赖、外部服务、缺 schema）时：
 
-1. Say so explicitly rather than guessing.
-2. Downgrade the claim to what you can verify ("the client calls the `/v2/orders` endpoint" → verified in client code, even if the server is unreachable).
-3. Never decorate an unverified claim with confident language. "Should", "appears to", or a direct question to the user beats a fluent hallucination.
+1. 明说，不要猜。
+2. 把断言降级到能核验的范围（「客户端调用 `/v2/orders` endpoint」——即使服务端不可达，也能在客户端代码里核实）。
+3. 永远不给未核验的断言配自信的措辞。「应该」「看起来是」，或者直接问用户，都比流畅的幻觉强。

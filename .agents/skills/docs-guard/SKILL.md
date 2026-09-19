@@ -1,96 +1,96 @@
 ---
 name: docs-guard
-description: "Review generated or changed documentation before it ships — READMEs, API references, docstrings, PHPDoc/JSDoc, changelogs, tutorials, and doc sites. Best used reactively after an agent writes or edits docs, after code changes documented behavior, or before publishing docs. Use when the user says 'review the docs', 'is this documentation accurate', 'update the docs', 'write a README', 'document this API', 'add a docstring', or 'add a changelog entry'. Core job: verify every referenced function, flag, endpoint, config key, and code sample against the source; catch docs-vs-code drift; strip filler and unverifiable claims. DO NOT USE for production code review (use clean-code-guard), test review (use test-guard), marketing copy or blog posts, prose style editing of non-technical writing, or documentation site theming."
+description: 文档交付前的守卫审查——README、API 参考、docstring、PHPDoc/JSDoc、changelog、教程、文档站。最适合在 agent 写完或改完文档后、代码改动改变了已文档化的行为后、或文档发布前被动使用。当用户说「review 一下文档」「文档准吗」「更新文档」「写个 README」「给这个 API 写文档」「加 docstring」「加 changelog」'review the docs' 'is this documentation accurate' 'write a README' 时使用。核心职责：把文档里引用的每个函数、flag、endpoint、配置项和代码示例对照源码核验；抓文档与代码的漂移；删掉废话和无法证实的断言。不要用于：生产代码评审（用 clean-code-guard）、测试评审（用 test-guard）、营销文案或博客、非技术写作的行文润色、文档站主题美化。
 ---
 
 # Docs Guard
 
-You are reviewing generated or changed documentation before it ships. Apply the rules below as a guard pass after the first documentation pass. The core principle: documentation is a set of claims about a codebase, and every claim is checkable. Your job is to check them.
+你在审查生成或修改过的文档，在它交付之前。在第一遍文档写作之后，把下面的规则作为守卫检查跑一遍。核心原则：**文档是关于代码库的一组断言，每条断言都可检验**。你的工作就是去检验它们。
 
-These rules exist because AI agents document from memory of how APIs _usually_ look, not from the code in front of them. Published research: half of AI answers to programming questions contain incorrect information, and models produce valid invocations for infrequent APIs barely a third of the time — yet the prose sounds authoritative either way. Readers cannot tell verified docs from hallucinated docs. You can, because you have the source.
+这些规则存在的原因：AI agent 是按「API 通常长什么样」的记忆写文档的，不是按眼前的代码。已发表的研究：AI 对编程问题的回答一半含有错误信息，对低频 API 能产出正确调用的只有约三分之一——但行文听起来都一样权威。读者分不出核实过的文档和幻觉文档，你能，因为源码在你手里。
 
-## How to use this skill
+## 使用方式
 
-**Guard-pass mode** (recommended): after documentation or docstrings have been generated or edited, verify every claim against the source and run the self-check before delivery.
+**守卫模式**（推荐）：文档或 docstring 生成、修改完之后，对照源码核验每条断言，交付前跑自查清单。
 
-**Live mode** (explicit): when the user invokes this skill before writing docs, verify before you write — read the actual implementation, then document what it does. Run the self-check before delivery.
+**实时模式**（显式）：用户在写文档前调用本 skill 时，先核验再写——读真实实现，然后文档化它实际做的事。交付前跑自查清单。
 
-**Review mode** (the user asks you to review, audit, or fact-check docs): walk [references/review-checklist.md](references/review-checklist.md) against the target docs and produce a findings report with file:line evidence. Do not rewrite in review mode unless asked.
+**评审模式**（用户让你 review、审计或事实核查文档）：按 [references/review-checklist.md](references/review-checklist.md) 走查目标文档，产出带 file:line 证据的发现报告。评审模式下除非被要求，不要改写文档。
 
-## Adapt to the project first
+## 先适配项目
 
-1. Read the project's agent instructions (CLAUDE.md, AGENTS.md) and any docs style guide. Project conventions win on conflict.
-2. Identify the docs surfaces that must move together: README, reference docs, docstrings, changelog, examples, config samples. A change to one usually owes a change to others (Rule 6).
-3. Note the documented version policy: which versions does the project support, and where are features version-tagged?
+1. 读项目的 agent 指令（CLAUDE.md、AGENTS.md）和任何文档风格规范。冲突时项目约定赢。
+2. 找出必须联动的文档面：README、参考文档、docstring、changelog、示例、配置样例。改一个通常欠另一个（规则 6）。
+3. 记下项目的版本策略：支持哪些版本、特性在哪里标版本。
 
-## The Rules
+## 规则
 
-### Accuracy — must fix
+### 准确性——必须修
 
-1. **Every referenced symbol must exist.** Every function, method, class, hook, CLI command, flag, endpoint, config key, env var, and file path mentioned in the docs gets verified against the actual source, CLI help output, route table, or schema — by reading it, not recalling it. The verification procedure is in [references/verification.md](references/verification.md). An unverifiable reference does not ship.
+1. **每个被引用的符号必须存在。**文档提到的每个函数、方法、类、hook、CLI 命令、flag、endpoint、配置项、环境变量、文件路径，都要对照真实源码、CLI help 输出、路由表或 schema 核验——靠读，不靠回忆。核验程序见 [references/verification.md](references/verification.md)。无法核验的引用不得交付。
 
-2. **Every code sample must work.** Imports resolve, APIs exist with the documented signatures (names, argument order, defaults, return shape), and the sample runs outside the author's machine — no hardcoded local paths, no real credentials, no implicit prior state. Sample rules: [references/code-samples.md](references/code-samples.md).
+2. **每个代码示例必须能跑。**import 能解析，API 以文档所写的签名存在（名字、参数顺序、默认值、返回形状），示例在作者机器之外能跑——没有写死的本地路径、没有真实凭据、没有隐含的前置状态。示例规则：[references/code-samples.md](references/code-samples.md)。
 
-3. **Document the code's actual behavior, not its intended behavior.** Read the implementation before describing it. Where code and comments/specs disagree, the code is the truth — and flag the disagreement to the user instead of silently picking a side.
+3. **写代码的实际行为，不是意图行为。**描述前先读实现。代码与注释/规格不一致时，代码是事实——并且把不一致指给用户，而不是默默选边。
 
-4. **No unverifiable claims.** Performance numbers, compatibility matrices, scale limits, and "production-ready" assertions require a source in the repository (benchmark script, CI matrix, changelog entry) or they come out. "Fast" is marketing; "O(n log n), benchmarked in bench/sort.md" is documentation.
+4. **不要无法证实的断言。**性能数字、兼容性矩阵、规模上限、「生产就绪」断言，都需要仓库里有出处（benchmark 脚本、CI 矩阵、changelog 条目），否则删掉。「fast」是营销；「O(n log n)，见 bench/sort.md」才是文档。
 
-### Versioning and drift
+### 版本与漂移
 
-5. **Versions are explicit.** Features, flags, and behaviors state the version that introduced them when the project tracks versions. Prerequisites are pinned or ranged, never "latest". Deprecated items say so, with the replacement.
+5. **版本要显式。**项目跟踪版本时，特性、flag、行为要写明引入版本。前置依赖固定版本或给范围，不写「latest」。已废弃项要写明，并给出替代。
 
-6. **A code change owes a docs change.** When editing code whose behavior is documented — rename, signature change, new default, removed flag — update every doc surface that mentions it in the same change. Grep the docs for the old symbol before finishing.
+6. **代码变更欠一次文档变更。**改了被文档化的行为——改名、签名变化、新默认值、删 flag——在同一次变更里更新每个提到它的文档面。完工前拿旧符号 grep 一遍文档。
 
-### Substance — should fix
+### 实质——应该修
 
-7. **No filler, no slop.** Delete: docstrings that paraphrase the signature ("Gets the user by ID" above `get_user_by_id`), sections that restate their heading, marketing adjectives in technical prose ("powerful", "seamless", "blazingly fast"), and intro padding ("In this section, we will explore…"). A docstring earns its place by adding contracts the signature cannot express: units, ranges, error conditions, side effects, threading/ordering guarantees.
+7. **不要废话和注水。**删掉：复述签名的 docstring（`get_user_by_id` 上面写「Gets the user by ID」）、复述标题的小节、技术行文里的营销形容词（powerful、seamless、blazingly fast）、开场垫话（「本节我们将探讨……」）。docstring 的价值在于写出签名表达不了的契约：单位、取值范围、错误条件、副作用、线程/顺序保证。
 
-8. **Don't paraphrase upstream docs.** Link to external documentation instead of restating it — paraphrased upstream docs drift the moment upstream changes. Document only your project's relationship to the external thing (which subset you use, what you configure differently).
+8. **不要复述上游文档。**外部文档用链接，不要转述——转述的上游文档在上游变更那一刻就开始漂移。只写你项目与外部事物的关系（用了哪个子集、改了什么配置）。
 
-9. **Examples cover the failure path too.** A tutorial that only shows the happy path documents half the API. Show what the error looks like and what the caller should do — using the error types the code actually raises (verify per Rule 1).
+9. **示例也要覆盖失败路径。**只演示顺利路径的教程只文档化了一半 API。展示错误长什么样、调用方该怎么办——用代码实际抛出的错误类型（按规则 1 核验）。
 
-### Structure — worth noting
+### 结构——值得提
 
-10. **Navigation tells the truth.** Headings describe their sections, the table of contents matches the actual headings, internal links and anchors resolve, and there are no TODO stubs or "coming soon" sections in published docs — unwritten sections are removed, not promised.
+10. **导航要说实话。**标题如实描述小节，目录与实际标题一致，内部链接和锚点能解析，已发布文档里没有 TODO 桩或「即将推出」节——没写的小节删掉，不许承诺。
 
-## Self-check before delivery
+## 交付前自查
 
-1. List every symbol, flag, endpoint, config key, and path your docs mention. Did you verify each one against the source in this session — not from memory?
-2. Would every code sample run on a clean machine? Did you check each import and signature?
-3. Any number, compatibility claim, or superlative without a repo-verifiable source?
-4. If this change touched code: did you grep all docs surfaces for the old names?
-5. Any docstring that just restates the signature? Any section that restates its heading?
-6. Do all internal links and anchors resolve?
+1. 列出文档提到的每个符号、flag、endpoint、配置项、路径。本次会话里每个都对源码核验过吗——不是凭记忆？
+2. 每个代码示例在干净机器上能跑吗？每个 import 和签名都查过吗？
+3. 有没有数字、兼容性断言或最高级形容词没有仓库可考的出处？
+4. 这次改动动了代码：所有文档面拿旧名字 grep 过了吗？
+5. 有没有 docstring 只是复述签名？有没有小节只是复述标题？
+6. 所有内部链接和锚点都能解析吗？
 
-If any answer is wrong, fix it before showing the user.
+任何一问答错了，先修好再给用户看。
 
-## Reporting format (review mode)
+## 报告格式（评审模式）
 
 ```
-**Rule N violation** in `docs/path.md:<line or section>`
-- Claim: <what the docs say>
-- Reality: <what the code/CLI/schema actually has, with file:line>
-- Fix: <one sentence>
+**规则 N 违反**：`docs/path.md:<行或节>`
+- 断言：<文档写的>
+- 实际：<代码/CLI/schema 的真实情况，带 file:line>
+- 修法：<一句话>
 ```
 
-Lead with Rule 1–4 findings (false claims), then drift, then substance. If a doc is clean, say so in one line — accuracy deserves credit.
+先报规则 1–4 的发现（假断言），再报漂移，再报实质。文档干净就用一行说它干净——准确也值得记功。
 
-## Severity guide
+## 严重度
 
-- **Must fix:** Rules 1–4 — false documentation is worse than no documentation; readers act on it
-- **Should fix:** Rules 5–9 — drift debt and noise that buries the signal
-- **Worth noting:** Rule 10 — navigation and polish
+- **必须修：**规则 1–4——假文档比没文档更糟，读者会照着做
+- **应该修：**规则 5–9——漂移债和噪声会埋掉信号
+- **值得提：**规则 10——导航与打磨
 
-## References
+## 参考文件
 
-- [references/verification.md](references/verification.md) — the mechanical procedure: extracting claims, verifying symbols, signatures, CLI flags, endpoints, config keys, links
-- [references/code-samples.md](references/code-samples.md) — what makes a sample shippable: runnability, realistic data, secrets hygiene, error paths
-- [references/docstrings.md](references/docstrings.md) — docstring/PHPDoc/JSDoc-specific rules: when one is justified, what it must contain, paraphrase detection
-- [references/review-checklist.md](references/review-checklist.md) — structured walk-through for review mode
-- [references/sources.md](references/sources.md) — research and style-guide URLs; read only when citing a source
+- [references/verification.md](references/verification.md)——机械核验程序：提取断言、核验符号/签名/CLI flag/endpoint/配置项/链接
+- [references/code-samples.md](references/code-samples.md)——示例可交付的标准：可运行、真实数据、凭据卫生、错误路径
+- [references/docstrings.md](references/docstrings.md)——docstring/PHPDoc/JSDoc 专项规则：何时该写、必须含什么、复述检测
+- [references/review-checklist.md](references/review-checklist.md)——评审模式的结构化走查
+- [references/sources.md](references/sources.md)——研究与风格指南 URL；只在需要引用出处时读
 
-## What this skill does not do
+## 本 skill 不做什么
 
-- Review the code itself — clean-code-guard's jurisdiction. This skill reviews what the docs _claim about_ the code.
-- Generate documentation strategy or information architecture from scratch — it guards accuracy and substance, not scope decisions.
-- Enforce a prose style guide — tone belongs to the project; truth belongs to this skill.
+- 评审代码本身——那是 clean-code-guard 的辖区。本 skill 评审的是文档对代码的*断言*。
+- 从零生成文档策略或信息架构——它守准确性和实质，不管范围决策。
+- 执行行文风格规范——语气归项目管，事实归本 skill 管。

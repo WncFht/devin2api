@@ -1,4 +1,4 @@
 interface:
   display_name: "Docs Guard"
-  short_description: "Documentation accuracy guardrails for AI agents"
-  default_prompt: "Use $docs-guard after documentation is written or changed to review it for drift, hallucinations, and unverifiable claims."
+  short_description: "AI agent 的文档准确性守卫"
+  default_prompt: "在文档写完或改完后调用 $docs-guard，审查漂移、幻觉和无法证实的断言。"

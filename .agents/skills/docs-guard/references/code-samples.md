@@ -1,46 +1,46 @@
-# Docs Guard — Code Sample Rules
+# Docs Guard——代码示例规则
 
-A code sample is the most-trusted part of any documentation: readers paste it. That trust makes a broken sample worse than no sample.
+代码示例是文档里最受信任的部分：读者会粘贴它。这份信任让坏示例比没示例更糟。
 
-## Contents
+## 目录
 
-- Shippable sample checklist
-- Realistic data
-- Secrets and credentials
-- Error-path examples
-- Language and environment tags
-- Sample drift
+- 可交付示例清单
+- 真实感数据
+- 密钥与凭据
+- 错误路径示例
+- 语言与环境标记
+- 示例漂移
 
-## Shippable sample checklist
+## 可交付示例清单
 
-Every sample must pass all of these:
+每个示例必须全部通过：
 
-1. **Imports resolve** — every import/require/use names a real module at the documented version.
-2. **APIs are real** — every call verified per [verification.md](verification.md): name, argument order, defaults, return shape.
-3. **Self-contained or explicit** — runs on a clean machine, or states its prerequisites immediately above the block ("requires the client from the previous step").
-4. **No local residue** — no `/Users/yourname/`, no `C:\Dev\`, no machine-specific ports or hostnames; use placeholder conventions the project already uses.
-5. **Syntactically valid** — parse it mentally line by line; when the runtime allows, actually run or lint it.
-6. **Output shown is output produced** — if the sample shows a result, that result must be what the code yields, not an idealized version.
+1. **import 能解析**——每个 import/require/use 指向文档所写版本里的真实模块。
+2. **API 是真的**——每个调用按 [verification.md](verification.md) 核验：名字、参数顺序、默认值、返回形状。
+3. **自包含或显式声明**——在干净机器上能跑，或在代码块正上方写明前置条件（「需要上一步创建的 client」）。
+4. **无本地残留**——没有 `/Users/yourname/`、没有 `C:\Dev\`、没有机器特定的端口或主机名；用项目已有的占位符约定。
+5. **语法合法**——逐行在脑子里解析；运行时允许就真的跑一遍或 lint 一遍。
+6. **展示的输出是真实产出**——示例给了结果，那结果必须是代码真实产出的，不是理想化版本。
 
-## Realistic data
+## 真实感数据
 
-Use data that exposes the API's shape honestly: realistic field names, plausible values, at least one non-ASCII string where text handling matters. `foo`/`bar` hides bugs that `"Café Münster"` reveals — especially for the i18n-aware audience.
+用能诚实暴露 API 形状的数据：真实的字段名、可信的取值、文本处理要紧时至少一个非 ASCII 字符串。`foo`/`bar` 掩盖了 `"Café Münster"` 会暴露的 bug——对 i18n 敏感的读者尤其如此。
 
-## Secrets and credentials
+## 密钥与凭据
 
-- Placeholders that cannot be mistaken for real values: `YOUR_API_KEY`, `example.com`, RFC 5737 IPs (`192.0.2.x`), `sk_test_…` style markers only when the provider defines them.
-- Never paste real-looking tokens — even invented ones train readers to paste theirs, and secret scanners will flag the repo.
-- Auth setup goes in one place and is linked, not repeated with variations in every sample.
+- 占位符要不可能被当成真值：`YOUR_API_KEY`、`example.com`、RFC 5737 保留 IP（`192.0.2.x`）；`sk_test_…` 式标记只在提供方自己定义时才用。
+- 绝不贴看着像真的 token——哪怕是编的，也会教读者把自己的贴进去，还会触发密钥扫描器。
+- 认证设置写在一处并链接过去，不要在每个示例里变着花样重复。
 
-## Error-path examples
+## 错误路径示例
 
-For any API that can fail in normal operation, show one failure: what the error object/exception/status looks like and the minimal correct response to it — using the error types the code actually raises (verify the raise site). Happy-path-only documentation produces catch-all error swallowing downstream, the exact failure clean-code-guard exists to stop.
+对正常运作中可能失败的 API，演示一种失败：错误对象/异常/状态码长什么样、最小的正确应对是什么——用代码实际抛出的错误类型（核验抛出处）。只写顺利路径的文档会诱导下游写 catch-all 吞错，那正是 clean-code-guard 要消灭的失败模式。
 
-## Language and environment tags
+## 语言与环境标记
 
-- Fenced blocks carry the correct language tag — broken highlighting is a trust signal readers notice.
-- State the environment when it changes behavior: shell prompts (`$` vs `#`), OS-specific paths, version-gated syntax.
+- 代码块带正确的语言标记——高亮坏掉是读者会注意到的信任信号。
+- 环境改变行为时写明环境：shell 提示符（`$` vs `#`）、OS 特定路径、版本门槛语法。
 
-## Sample drift
+## 示例漂移
 
-Samples drift faster than prose because nobody re-runs them. On any code change touching a documented API, grep the docs for the old symbol (SKILL.md Rule 6) — samples are where the stale hits hide. Projects with executable-docs tooling (doctest and kin): prefer it; this skill's manual verification is the floor, not the ceiling.
+示例比行文漂移得更快，因为没人重新跑它们。任何触碰已文档化 API 的代码变更，拿旧符号 grep 一遍文档（SKILL.md 规则 6）——过期的坑都藏在示例里。有 executable-docs 工具链的项目（doctest 之类）：优先用它；本 skill 的手工核验是地板不是天花板。
