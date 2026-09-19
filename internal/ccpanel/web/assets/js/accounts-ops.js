@@ -144,8 +144,9 @@
 
   function confirmDelete(a) {
     const key = a.source === 'panel' ? 'accounts.act.confirmDeletePanel' : 'accounts.act.confirmDelete';
-    if (!window.confirm(t(key, { name: a.name }))) return;
-    runMutation('delete', `${BASE}/${encodeURIComponent(a.name)}`, 'DELETE');
+    window.Modal.confirm(t(key, { name: a.name }), { danger: true }).then((ok) => {
+      if (ok) runMutation('delete', `${BASE}/${encodeURIComponent(a.name)}`, 'DELETE');
+    });
   }
 
   // ---- 改凭据 modal：.modal/.show 惯例，懒建一次挂 body ----
@@ -189,7 +190,7 @@
     document.body.appendChild(el);
     const form = el.querySelector('[data-m="form"]');
     el.addEventListener('click', (e) => {
-      if (e.target === el || e.target.closest('[data-m="close"],[data-m="cancel"]')) closeEditModal();
+      if (e.target.closest('[data-m="close"],[data-m="cancel"]')) closeEditModal();
     });
     form.addEventListener('change', (e) => {
       if (e.target.name === 'acct-edit-kind') syncEditKind();
@@ -252,16 +253,15 @@
     el.querySelector('[data-e="notes"]').value = editCtx.notes;
     setFormErr(el, '');
     syncEditKind();
-    el.classList.add('show');
-    el.setAttribute('aria-hidden', 'false');
-    setTimeout(() => editModal.querySelector(`[data-e="${kind}"]`).focus(), 50);
+    window.Modal.open(el, {
+      focus: `[data-e="${kind}"]`,
+      onClose: () => { editCtx = null; },
+    });
   }
 
   function closeEditModal() {
     if (!editModal) return;
-    editModal.classList.remove('show');
-    editModal.setAttribute('aria-hidden', 'true');
-    editCtx = null;
+    window.Modal.close(editModal);
   }
 
   async function submitEdit() {

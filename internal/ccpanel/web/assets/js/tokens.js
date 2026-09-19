@@ -16,27 +16,6 @@
     let currentAllowedModelFilter = '';
     let initialEditExpiryState = { type: 'never', value: '' };
 
-    // 对话框栈，用于 ESC 键层级关闭
-    const modalStack = [];
-
-    /** 注册全局 ESC 键处理 */
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && modalStack.length > 0) {
-        const topModal = modalStack[modalStack.length - 1];
-        topModal.close();
-      }
-    });
-
-    /** 压入对话框栈 */
-    function pushModal(closeFunc) {
-      modalStack.push({ close: closeFunc });
-    }
-
-    /** 弹出对话框栈 */
-    function popModal() {
-      modalStack.pop();
-    }
-
     function initExpirySelects() {
       const template = document.getElementById('tpl-token-expiry-options');
       if (!template) return;
@@ -650,11 +629,11 @@
       document.getElementById('tokenActive').checked = true;
       document.getElementById('tokenAnonymous').checked = false;
       document.getElementById('customExpiryContainer').style.display = 'none';
-      document.getElementById('createModal').classList.add('show');
+      Modal.open(document.getElementById('createModal'));
     }
 
     function closeCreateModal() {
-      document.getElementById('createModal').classList.remove('show');
+      Modal.close(document.getElementById('createModal'));
     }
 
     async function createToken() {
@@ -728,7 +707,9 @@
         closeCreateModal();
         if (!anonymous && data.token) {
           document.getElementById('newTokenValue').value = data.token;
-          document.getElementById('tokenResultModal').classList.add('show');
+          Modal.open(document.getElementById('tokenResultModal'), {
+            onClose: () => { document.getElementById('newTokenValue').value = ''; },
+          });
         }
         loadTokens();
         window.showNotification(t(anonymous ? 'tokens.msg.anonymousCreateSuccess' : 'tokens.msg.createSuccess'), 'success');
@@ -752,8 +733,7 @@
     }
 
     function closeTokenResultModal() {
-      document.getElementById('tokenResultModal').classList.remove('show');
-      document.getElementById('newTokenValue').value = '';
+      Modal.close(document.getElementById('tokenResultModal'));
     }
 
     function editToken(id) {
@@ -797,12 +777,10 @@
       if (allowedModelFilterInput) allowedModelFilterInput.value = '';
       renderAllowedModelsTable();
 
-      document.getElementById('editModal').classList.add('show');
-      pushModal(closeEditModal);
+      Modal.open(document.getElementById('editModal'), { onClose: resetEditModalState });
     }
 
-    function closeEditModal() {
-      document.getElementById('editModal').classList.remove('show');
+    function resetEditModalState() {
       document.getElementById('editTokenValue').value = '';
       document.getElementById('editCustomExpiry').value = '';
       document.getElementById('editCustomExpiryContainer').style.display = 'none';
@@ -811,7 +789,10 @@
       editAllowedModels = [];
       selectedAllowedModelIndices.clear();
       currentAllowedModelFilter = '';
-      popModal();
+    }
+
+    function closeEditModal() {
+      Modal.close(document.getElementById('editModal'));
     }
 
     async function updateToken() {
@@ -891,8 +872,8 @@
     }
 
     async function deleteToken(id) {
-      
-      if (!confirm(t('tokens.msg.deleteConfirm'))) return;
+
+      if (!(await Modal.confirm(t('tokens.msg.deleteConfirm'), { danger: true }))) return;
       try {
         await fetchDataWithAuth(`${API_BASE}/auth-tokens/${id}`, {
           method: 'DELETE'
@@ -1094,17 +1075,14 @@
       selectedModelsForAdd.clear();
       document.getElementById('modelSearchInput').value = '';
       renderAvailableModels('');
-      document.getElementById('modelSelectModal').classList.add('show');
-      pushModal(closeModelSelectModal);
+      Modal.open(document.getElementById('modelSelectModal'), { onClose: () => selectedModelsForAdd.clear() });
     }
 
     /**
      * 关闭模型选择对话框
      */
     function closeModelSelectModal() {
-      document.getElementById('modelSelectModal').classList.remove('show');
-      selectedModelsForAdd.clear();
-      popModal();
+      Modal.close(document.getElementById('modelSelectModal'));
     }
 
     /**
@@ -1285,17 +1263,14 @@
     function showModelImportModal() {
       document.getElementById('tokenModelImportTextarea').value = '';
       document.getElementById('tokenModelImportPreview').style.display = 'none';
-      document.getElementById('modelImportModal').classList.add('show');
-      setTimeout(() => document.getElementById('tokenModelImportTextarea').focus(), 100);
-      pushModal(closeModelImportModal);
+      Modal.open(document.getElementById('modelImportModal'), { focus: '#tokenModelImportTextarea' });
     }
 
     /**
      * 关闭模型导入对话框
      */
     function closeModelImportModal() {
-      document.getElementById('modelImportModal').classList.remove('show');
-      popModal();
+      Modal.close(document.getElementById('modelImportModal'));
     }
 
     /**

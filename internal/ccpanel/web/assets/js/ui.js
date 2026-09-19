@@ -775,7 +775,7 @@ window.WebAuth = window.WebAuth || {
   }
 
   async function onLogout() {
-    if (!confirm(t('confirm.logout'))) return;
+    if (!(await window.Modal.confirm(t('confirm.logout')))) return;
 
     // 先清理本地Token，避免后续请求触发token检查
     const token = localStorage.getItem('ccload_token');

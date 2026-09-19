@@ -84,7 +84,7 @@
         runTest();
         return;
       }
-      if (action === 'close' || e.target === modal) {
+      if (action === 'close') {
         closeModal();
         return;
       }
@@ -93,9 +93,6 @@
         const target = document.getElementById(toggle.dataset.mtmToggle);
         if (target) target.style.display = target.style.display === 'none' ? 'block' : 'none';
       }
-    });
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && modal.classList.contains('show')) closeModal();
     });
     // 注入晚于 i18n 首次扫描——data-i18n 属性已就位，再补一次全页翻译
     // 让模态立即按当前语言渲染；之后的语言切换由 translatePage 兜底。
@@ -109,9 +106,7 @@
   }
 
   function closeModal() {
-    el(IDS.modal).classList.remove('show');
-    el(IDS.modal).setAttribute('aria-hidden', 'true');
-    state = null;
+    window.Modal.close(el(IDS.modal));
   }
 
   function resetResult() {
@@ -137,8 +132,7 @@
       ? state.clientProtocol
       : 'anthropic';
     resetResult();
-    el(IDS.modal).classList.add('show');
-    el(IDS.modal).setAttribute('aria-hidden', 'false');
+    window.Modal.open(el(IDS.modal), { onClose: () => { state = null; } });
   }
 
   async function runTest() {

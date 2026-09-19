@@ -18,6 +18,7 @@
   <script defer src="/web/assets/js/i18n.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/date-range-selector.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/template-engine.js?v=__VERSION__"></script>
@@ -73,10 +74,10 @@
   </div>
 
   <!-- 创建令牌对话框 -->
-  <div id="createModal" class="modal">
+  <div id="createModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="createModalTitle">
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.createModalTitle">创建API令牌</h2>
+        <h2 class="modal-title" id="createModalTitle" data-i18n="tokens.createModalTitle">创建API令牌</h2>
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-create-modal">&times;</button>
       </div>
       <div class="modal-body">
@@ -207,10 +208,10 @@
   </div>
 
   <!-- 显示新令牌对话框 -->
-  <div id="tokenResultModal" class="modal">
+  <div id="tokenResultModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="tokenResultModalTitle">
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.resultModalTitle">令牌创建成功</h2>
+        <h2 class="modal-title" id="tokenResultModalTitle" data-i18n="tokens.resultModalTitle">令牌创建成功</h2>
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-token-result-modal">&times;</button>
       </div>
       <div class="modal-body">
@@ -238,10 +239,10 @@
   </div>
 
   <!-- 编辑令牌对话框 -->
-  <div id="editModal" class="modal">
+  <div id="editModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="editModalTitle">
     <div class="modal-content modal-content--wide token-edit-modal">
       <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.editModalTitle">编辑令牌</h2>
+        <h2 class="modal-title" id="editModalTitle" data-i18n="tokens.editModalTitle">编辑令牌</h2>
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-edit-modal">&times;</button>
       </div>
       <div class="modal-body token-edit-body token-edit-layout">
@@ -441,10 +442,10 @@
   </div>
 
   <!-- 模型选择对话框 -->
-  <div id="modelSelectModal" class="modal">
+  <div id="modelSelectModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="modelSelectModalTitle">
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.selectModelTitle">选择模型</h2>
+        <h2 class="modal-title" id="modelSelectModalTitle" data-i18n="tokens.selectModelTitle">选择模型</h2>
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-model-select-modal">&times;</button>
       </div>
       <div class="modal-body">
@@ -473,10 +474,10 @@
   </div>
 
   <!-- 批量导入模型对话框 -->
-  <div id="modelImportModal" class="modal token-model-import-modal">
+  <div id="modelImportModal" class="modal token-model-import-modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="modelImportModalTitle">
     <div class="modal-content modal-content--sm">
       <div class="modal-header">
-        <h2 class="modal-title" data-i18n="tokens.importModelTitle">手动输入模型</h2>
+        <h2 class="modal-title" id="modelImportModalTitle" data-i18n="tokens.importModelTitle">手动输入模型</h2>
         <button type="button" class="close-btn" data-i18n-aria-label="common.close" aria-label="关闭" data-action="close-model-import-modal">&times;</button>
       </div>
       <div class="modal-body token-model-import-body">

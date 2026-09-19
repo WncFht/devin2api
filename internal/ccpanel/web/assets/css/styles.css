@@ -2066,6 +2066,13 @@ body {
   color: var(--neutral-800);
 }
 
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .close-btn {
   background: none;
   border: none;
@@ -2139,6 +2146,15 @@ body {
   margin: 0;
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.modal-confirm-message {
+  margin: 0;
+  color: var(--neutral-800);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ===== 筛选器组件 ===== */

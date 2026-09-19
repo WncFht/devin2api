@@ -1303,7 +1303,7 @@ async function abortActiveRequest(button) {
   if (!id || abortingActiveRequests.has(id)) return;
 
   const confirmMsg = (typeof t === 'function' ? t('logs.abortConfirm') : '') || '确定中断这个进行中的请求吗？将按上游网络故障处理。';
-  if (!confirm(confirmMsg)) return;
+  if (!(await Modal.confirm(confirmMsg, { danger: true }))) return;
 
   abortingActiveRequests.set(id, Number(button.dataset.abortStart) || 0);
   button.disabled = true;
@@ -1315,7 +1315,7 @@ async function abortActiveRequest(button) {
   } catch (e) {
     // 中断没打出去就恢复按钮，否则这一行会永远卡在「中断中」
     abortingActiveRequests.delete(id);
-    alert(e.message || i18nText('logs.abortFailed', '中断失败'));
+    if (window.showError) window.showError(e.message || i18nText('logs.abortFailed', '中断失败'));
   }
 }
 
@@ -2075,23 +2075,13 @@ initLogsPageActions();
 applyColVisibility();
 document.addEventListener('click', closeColMenuOnClickOutside);
 
-// ESC键关闭模态框与列显隐菜单——同在 bootstrap 之前绑定，慢会话下也可用
+// ESC键关闭列显隐菜单——同在 bootstrap 之前绑定，慢会话下也可用
+// （.modal 的 ESC/背景关闭由 modal.js 的共享栈统一处理）
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     const colMenu = document.getElementById('colToggleMenu');
     if (colMenu && !colMenu.hidden) {
       colMenu.hidden = true;
-      return;
-    }
-    const debugModal = document.getElementById('debugLogModal');
-    if (debugModal && debugModal.classList.contains('show')) {
-      closeDebugLogModal();
-      return;
-    }
-    // 探活模态 DOM 懒注入：未打开过时不存在，直接调 close 会 null.classList。
-    const modelTestModal = document.getElementById('modelTestModal');
-    if (modelTestModal?.classList.contains('show') && typeof window.closeModelTestModal === 'function') {
-      window.closeModelTestModal();
     }
   }
 });
@@ -2427,7 +2417,7 @@ async function showDebugLogModalFromUrl(url, opts = {}) {
   content.style.display = 'none';
   setDebugLogStatus(null);
   currentDebugLogData = null;
-  modal.classList.add('show');
+  Modal.open(modal, { onClose: cleanupDebugLogModal });
 
   // Reset tabs
   configureDebugProtocolTabs(null);
@@ -2615,14 +2605,17 @@ function isScrolledToBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
 }
 
-function closeDebugLogModal() {
+function cleanupDebugLogModal() {
   stopActiveDebugLogPolling();
   setDebugLogStatus(null);
   currentDebugLogData = null;
   resetDebugMergedResponses();
   resetDebugFileView();
   debugFileContext = null;
-  document.getElementById('debugLogModal').classList.remove('show');
+}
+
+function closeDebugLogModal() {
+  Modal.close(document.getElementById('debugLogModal'));
 }
 
 function updateDebugWrapButton() {

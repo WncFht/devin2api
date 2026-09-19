@@ -5,12 +5,10 @@ const i18nText = window.i18nText || ((key, fallback) => fallback || key);
 let originalSettings = {}; // 保存原始值用于比较
 let settingDefinitions = new Map();
 let runtimeMetricsLoading = false;
-let runtimeMetricsPreviousFocus = null;
 let runtimeMetricsRefreshTimer = null;
 const RUNTIME_METRICS_REFRESH_MS = 3000;
 
 let effectiveConfigData = null;
-let processLogPreviousFocus = null;
 let processLogPollTimer = null;
 let processLogOffset = 0;
 let processLogBuffer = '';
@@ -445,44 +443,21 @@ function bindSettingsPageActions() {
     btn.dataset.bound = '1';
   });
 
-  const modal = document.getElementById('runtimeMetricsModal');
-  if (modal && !modal.dataset.bound) {
-    modal.addEventListener('click', (event) => {
-      if (event.target === modal) closeRuntimeMetricsModal();
-    });
-    modal.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeRuntimeMetricsModal();
-    });
-    modal.dataset.bound = '1';
-  }
-
   bindProcessLogModal();
-}
-
-function trapModalFocus(modal, event) {
-  const focusable = Array.from(modal.querySelectorAll(
-    'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-  )).filter((element) => !element.hidden && element.offsetParent !== null);
-  if (focusable.length === 0) return;
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
 }
 
 function openRuntimeMetricsModal() {
   const modal = document.getElementById('runtimeMetricsModal');
   if (!modal) return;
 
-  runtimeMetricsPreviousFocus = document.activeElement;
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
+  Modal.open(modal, {
+    onClose: () => {
+      if (runtimeMetricsRefreshTimer !== null) {
+        clearInterval(runtimeMetricsRefreshTimer);
+        runtimeMetricsRefreshTimer = null;
+      }
+    },
+  });
   loadRuntimeMetrics();
   if (runtimeMetricsRefreshTimer === null) {
     runtimeMetricsRefreshTimer = setInterval(() => loadRuntimeMetrics({ silent: true }), RUNTIME_METRICS_REFRESH_MS);
@@ -490,17 +465,7 @@ function openRuntimeMetricsModal() {
 }
 
 function closeRuntimeMetricsModal() {
-  const modal = document.getElementById('runtimeMetricsModal');
-  if (!modal) return;
-
-  if (runtimeMetricsRefreshTimer !== null) {
-    clearInterval(runtimeMetricsRefreshTimer);
-    runtimeMetricsRefreshTimer = null;
-  }
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  if (runtimeMetricsPreviousFocus?.isConnected) runtimeMetricsPreviousFocus.focus();
-  runtimeMetricsPreviousFocus = null;
+  Modal.close(document.getElementById('runtimeMetricsModal'));
 }
 
 function normalizeRuntimeMetric(value) {
@@ -1097,32 +1062,20 @@ function openProcessLogModal() {
   const modal = document.getElementById('processLogModal');
   if (!modal) return;
 
-  processLogPreviousFocus = document.activeElement;
   processLogOffset = 0;
   processLogBuffer = '';
   processLogPaused = false;
   updateProcessLogPauseButton();
   const follow = document.getElementById('process-log-follow');
   processLogFollow = follow ? follow.checked : true;
-  document.querySelector('.app-container')?.setAttribute('inert', '');
-  modal.classList.add('show');
-  modal.setAttribute('aria-hidden', 'false');
-  modal.querySelector('.close-btn')?.focus();
+  Modal.open(modal, { onClose: stopProcessLogPolling });
   loadProcessLogDebugState();
   loadProcessLog(0);
   startProcessLogPolling();
 }
 
 function closeProcessLogModal() {
-  const modal = document.getElementById('processLogModal');
-  if (!modal) return;
-
-  stopProcessLogPolling();
-  modal.classList.remove('show');
-  modal.setAttribute('aria-hidden', 'true');
-  document.querySelector('.app-container')?.removeAttribute('inert');
-  if (processLogPreviousFocus?.isConnected) processLogPreviousFocus.focus();
-  processLogPreviousFocus = null;
+  Modal.close(document.getElementById('processLogModal'));
 }
 
 function startProcessLogPolling() {
@@ -1216,20 +1169,8 @@ function bindProcessLogModal() {
   if (!modal || modal.dataset.bound) return;
 
   modal.addEventListener('click', (event) => {
-    if (event.target === modal) {
-      closeProcessLogModal();
-      return;
-    }
     const button = event.target.closest('[data-action]');
     if (button?.dataset.action === 'close-process-log') closeProcessLogModal();
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeProcessLogModal();
-      return;
-    }
-    if (event.key === 'Tab') trapModalFocus(modal, event);
   });
 
   const pauseBtn = document.getElementById('process-log-pause-btn');
@@ -1792,7 +1733,7 @@ async function saveAllSettings() {
     return;
   }
 
-  if (!confirm(t('settings.msg.confirmSave'))) return;
+  if (!(await Modal.confirm(t('settings.msg.confirmSave')))) return;
 
   // 使用批量更新接口（单次请求，事务保护）
   try {

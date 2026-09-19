@@ -23,6 +23,7 @@
   <script defer src="/web/assets/js/page-filters.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/highlight.min.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/web-auth.js?v=__VERSION__"></script>
+  <script defer src="/web/assets/js/modal.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/ui.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/searchable-select.js?v=__VERSION__"></script>
   <script defer src="/web/assets/js/marked.min.js?v=__VERSION__"></script>
@@ -167,10 +168,10 @@
   </template>
 
   <!-- Debug Log 模态框 -->
-  <div id="debugLogModal" class="modal">
+  <div id="debugLogModal" class="modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="debugLogTitle">
     <div class="modal-content upstream-detail-modal-content">
       <div class="modal-header">
-        <h2 class="modal-title">
+        <h2 class="modal-title" id="debugLogTitle">
           <span data-i18n="logs.debugLogTitle">Debug Log</span>
           <span id="debugLogStatus" class="debug-log-status" hidden></span>
         </h2>
