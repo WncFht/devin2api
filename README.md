@@ -92,13 +92,13 @@ Run as a service (optional):
 
 The binary resolves its paths per platform convention: config via `-config` flag → `DEVIN2API_CONFIG` → `./config.yaml` → the platform default above; state via `-state-dir` → `DEVIN2API_STATE_DIR` → platform default. Both deploy scripts install or upgrade in one shot (`--release latest` fetches a prebuilt binary), verify `/healthz` reports the new version, then probe `GET /v1/models` to confirm upstream auth actually works.
 
-On Linux the shortest path needs no clone and no root — `scripts/install.sh` is a thin bootstrap that fetches the deploy pipeline at the target tag and hands off to it (same zero-downtime handoff; `upgrade`, `rollback <tag>`, `status`, `list-versions`, `uninstall` subcommands):
+On Linux and macOS the shortest path needs no clone and no root — `scripts/install.sh` is a thin bootstrap that fetches the deploy pipeline at the target tag and hands off to it (same zero-downtime handoff; `upgrade`, `rollback <tag>`, `status`, `list-versions`, `uninstall` subcommands):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/WncFht/devin2api/main/scripts/install.sh | bash
 ```
 
-The deploy scripts treat the repo as home — syncing `config.yaml` into the platform config dir and keeping a `logs` symlink inside the repo pointing at the state dir — so for macOS, or to drive the pipeline from a checkout, clone first:
+The deploy scripts treat the repo as home — syncing `config.yaml` into the platform config dir and keeping a `logs` symlink inside the repo pointing at the state dir — so to drive the pipeline from a checkout instead, clone first:
 
 ```bash
 git clone https://github.com/WncFht/devin2api && cd devin2api

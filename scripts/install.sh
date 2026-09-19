@@ -4,8 +4,9 @@
 #   curl -sSL https://raw.githubusercontent.com/WncFht/devin2api/main/scripts/install.sh | bash
 #
 # 本体是薄引导层：按目标版本从 GitHub 拉取 scripts/deploy/* 与
-# config.example.yaml 到临时 staging，再交给 deploy-linux.sh 完成
-# 下载校验、unit 生成与 REUSEPORT 零停机交接——部署逻辑不在这里重写。
+# config.example.yaml 到临时 staging，再交给对应平台的 deploy 脚本
+#（Linux→deploy-linux.sh/systemd --user，macOS→deploy.sh/launchd）完成
+# 下载校验、服务定义生成与 REUSEPORT 零停机交接——部署逻辑不在这里重写。
 #
 # 用法:
 #   install.sh [install] [-v <tag>]   安装（缺省命令；无 tag 装最新 release）
@@ -21,7 +22,7 @@
 #   DEVIN2API_REF        拉取部署脚本的 git ref（默认：目标 tag，其次 latest，兜底 main）
 #   DEVIN2API_STAGE_DIR  复用已有 staging 目录（跳过下载，调试用）
 #   DEVIN2API_LABEL / DEVIN2API_BIN_DIR / DEVIN2API_CONFIG_DIR /
-#   DEVIN2API_STATE_DIR / DEVIN2API_PORT ——透传给 deploy-linux.sh
+#   DEVIN2API_STATE_DIR / DEVIN2API_PORT ——透传给 deploy 脚本
 set -euo pipefail
 
 REPO="${DEVIN2API_REPO:-WncFht/devin2api}"
@@ -130,8 +131,13 @@ cmd_list_versions() {
 		die "release 列表获取失败（网络中断或 API 限流）"
 }
 
-[[ "$(uname -s)" == "Linux" ]] || die "install.sh 仅适用 Linux；macOS 见 scripts/deploy/deploy.sh，Windows 直接下 release exe"
-[[ "$(id -u)" != "0" ]] || die "不需要 sudo——服务以 systemd --user 装在当前用户名下，请以普通用户运行"
+OS="$(uname -s)"
+case "${OS}" in
+Linux) DEPLOY_SCRIPT="deploy-linux.sh" ;;
+Darwin) DEPLOY_SCRIPT="deploy.sh" ;;
+*) die "install.sh 仅适用 Linux/macOS；Windows 直接下 release exe 用 deploy-windows.ps1" ;;
+esac
+[[ "$(id -u)" != "0" ]] || die "不需要 sudo——服务以当前用户托管（systemd --user / launchd gui domain），请以普通用户运行"
 command -v curl >/dev/null || die "缺少 curl"
 
 if [[ "${CMD}" == "list-versions" ]]; then
@@ -139,7 +145,11 @@ if [[ "${CMD}" == "list-versions" ]]; then
 	exit 0
 fi
 
-command -v systemctl >/dev/null || die "需要 systemd（找不到 systemctl）"
+if [[ "${OS}" == "Linux" ]]; then
+	command -v systemctl >/dev/null || die "需要 systemd（找不到 systemctl）"
+else
+	command -v launchctl >/dev/null || die "需要 launchd（找不到 launchctl）"
+fi
 
 if [[ "${CMD}" == "rollback" && -z "${TAG}" ]]; then
 	die "rollback 需要 tag（install.sh rollback vX.Y.Z；list-versions 看可选版本）"
@@ -172,7 +182,7 @@ fetch() { # fetch <repo相对路径>：先按 REF 拉，404 兜底 main
 
 if [[ "${CLEAN_STAGE}" == "1" ]]; then
 	echo "==> fetch deploy scripts @ ${REF} (${REPO})"
-	fetch scripts/deploy/deploy-linux.sh
+	fetch "scripts/deploy/${DEPLOY_SCRIPT}"
 	fetch scripts/deploy/lib-deploy.sh
 	fetch scripts/deploy/rotate-logs.sh
 	fetch config.example.yaml
@@ -208,4 +218,4 @@ uninstall)
 esac
 [[ "${NO_RESTART}" == "1" ]] && DEPLOY_ARGS+=(--no-restart)
 
-bash "${STAGE}/scripts/deploy/deploy-linux.sh" "${DEPLOY_ARGS[@]}"
+bash "${STAGE}/scripts/deploy/${DEPLOY_SCRIPT}" "${DEPLOY_ARGS[@]}"
