@@ -538,12 +538,11 @@ func (s *Store) reconcileCells(ctx context.Context, chunk int64) error {
 // reconcileCellsChunk 补记一片：水位之上按 id 序取至多 chunk 行聚合
 // upsert，水位在同一事务推进到该片最大 id——每片原子提交，中途失败
 // 或进程重启后下一轮从已推进的水位续跑。返回 false 表示缝隙尚有余量。
-// 片内先读水位再聚合写入：deferred 下读快照与写锁升级之间被并发写挤入
-// 即 SQLITE_BUSY_SNAPSHOT——本函数在 Open 收尾（交接窗内）与 ImportLegacy
-// 收尾点火，IMMEDIATE 借 busy_timeout 排队等锁（同 applyMigrations）。
+// 片内先读水位再聚合写入——本函数在 Open 收尾（交接窗内）与 ImportLegacy
+// 收尾点火，BEGIN IMMEDIATE 借 busy_timeout 排队等锁（同 applyMigrations）。
 func (s *Store) reconcileCellsChunk(ctx context.Context, bound, chunk int64) (bool, error) {
 	var drained bool
-	err := immediateTx(ctx, s.db.DB, "ReconcileCells", func(ctx context.Context, q dbtx) error {
+	err := writeTx(ctx, s.db.DB, "ReconcileCells", func(ctx context.Context, q dbtx) error {
 		wm, err := cellsWatermark(ctx, q)
 		if err != nil {
 			return err
@@ -673,68 +672,51 @@ func (s *Store) BackfillCells(ctx context.Context, slotLo, slotHi int64, apply b
 	if slotLo < 0 || slotLo > slotHi {
 		return nil, fmt.Errorf("bad slot range %d:%d", slotLo, slotHi)
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = conn.Close() }()
-	// BEGIN IMMEDIATE 先取写锁再跑守卫与重算：deferred 事务在 WAL
-	// 下先读后写时，快照与升级之间若被并发写挤入会吃
-	// SQLITE_BUSY_SNAPSHOT 直接失败；IMMEDIATE 借 busy_timeout 排队
-	// 等待，整段操作是一个原子单元。
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return nil, fmt.Errorf("begin immediate: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			// 不用可能已经取消的 ctx：回滚失败会让带 open tx 的连接
-			// 回池污染后续使用者。
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var rep *CellsBackfillReport
+	err := writeTx(ctx, s.db.DB, "BackfillCells", func(ctx context.Context, q dbtx) error {
+		wm, err := cellsWatermark(ctx, q)
+		if err != nil {
+			return err
 		}
-	}()
-	wm, err := cellsWatermark(ctx, conn)
+		breached, err := cellsBreachedSlots(ctx, q, wm, slotLo, slotHi)
+		if err != nil {
+			return err
+		}
+		if len(breached) > 0 {
+			return fmt.Errorf("slots %v not intact (slot floor below MIN(logs.time)——源行已被部分删除，REPLACE 会把格子写小；先人工核对再决定放行)", breached)
+		}
+		surplus, err := cellsSurplusSlots(ctx, q, wm, slotLo, slotHi)
+		if err != nil {
+			return err
+		}
+		if len(surplus) > 0 {
+			return fmt.Errorf("slots %v have surplus cells (SUM(cell req) > 存活源行——非前缀删除或外部改写痕迹，中止)", surplus)
+		}
+		pre, err := s.cellsAuditTx(ctx, q, wm, slotLo, slotHi)
+		if err != nil {
+			return err
+		}
+		rep = &CellsBackfillReport{Pre: *pre, Post: *pre}
+		if !apply {
+			return nil
+		}
+		if _, err := q.ExecContext(ctx, cellsRebuildSQL, wm, slotLo, slotHi); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, errCellsRebuildSQL, wm, slotLo, slotHi); err != nil {
+			return err
+		}
+		post, err := s.cellsAuditTx(ctx, q, wm, slotLo, slotHi)
+		if err != nil {
+			return err
+		}
+		rep.Post = *post
+		rep.Applied = true
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	breached, err := cellsBreachedSlots(ctx, conn, wm, slotLo, slotHi)
-	if err != nil {
-		return nil, err
-	}
-	if len(breached) > 0 {
-		return nil, fmt.Errorf("slots %v not intact (slot floor below MIN(logs.time)——源行已被部分删除，REPLACE 会把格子写小；先人工核对再决定放行)", breached)
-	}
-	surplus, err := cellsSurplusSlots(ctx, conn, wm, slotLo, slotHi)
-	if err != nil {
-		return nil, err
-	}
-	if len(surplus) > 0 {
-		return nil, fmt.Errorf("slots %v have surplus cells (SUM(cell req) > 存活源行——非前缀删除或外部改写痕迹，中止)", surplus)
-	}
-	pre, err := s.cellsAuditTx(ctx, conn, wm, slotLo, slotHi)
-	if err != nil {
-		return nil, err
-	}
-	rep := &CellsBackfillReport{Pre: *pre, Post: *pre}
-	if !apply {
-		return rep, nil
-	}
-	if _, err := conn.ExecContext(ctx, cellsRebuildSQL, wm, slotLo, slotHi); err != nil {
-		return nil, err
-	}
-	if _, err := conn.ExecContext(ctx, errCellsRebuildSQL, wm, slotLo, slotHi); err != nil {
-		return nil, err
-	}
-	post, err := s.cellsAuditTx(ctx, conn, wm, slotLo, slotHi)
-	if err != nil {
-		return nil, err
-	}
-	rep.Post = *post
-	rep.Applied = true
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return nil, err
-	}
-	committed = true
 	return rep, nil
 }
 

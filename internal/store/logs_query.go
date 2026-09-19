@@ -430,23 +430,18 @@ const deleteLogsBatch = 5000
 func (s *Store) DeleteLogsBefore(ctx context.Context, ms int64) (int64, error) {
 	var total int64
 	for {
-		tx, done, err := s.writeTx(ctx, "DeleteLogsBefore")
-		if err != nil {
-			return total, err
-		}
-		res, err := tx.ExecContext(ctx,
-			`DELETE FROM logs WHERE id IN (
-				SELECT id FROM logs WHERE time < ? AND id <= `+cellsWatermarkSQL+`
-				ORDER BY id LIMIT ?)`, ms, deleteLogsBatch)
-		if err != nil {
-			done()
-			return total, err
-		}
-		n, err := res.RowsAffected()
-		if err == nil {
-			err = tx.Commit()
-		}
-		done()
+		var n int64
+		err := writeTx(ctx, s.db.DB, "DeleteLogsBefore", func(ctx context.Context, q dbtx) error {
+			res, err := q.ExecContext(ctx,
+				`DELETE FROM logs WHERE id IN (
+					SELECT id FROM logs WHERE time < ? AND id <= `+cellsWatermarkSQL+`
+					ORDER BY id LIMIT ?)`, ms, deleteLogsBatch)
+			if err != nil {
+				return err
+			}
+			n, err = res.RowsAffected()
+			return err
+		})
 		if err != nil {
 			return total, err
 		}

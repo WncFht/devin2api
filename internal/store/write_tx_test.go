@@ -135,7 +135,7 @@ func TestPutDebugFileImmediateUnderLock(t *testing.T) {
 }
 
 // TestImportTokensImmediateUnderLock：逐 token 先 SELECT 探行再决定覆盖
-// 或插入（withSourceTxImmediate 的事务体），deferred 下探行快照与写锁
+// 或插入（withSourceTx 的事务体），deferred 下探行快照与写锁
 // 升级之间可吃 BUSY_SNAPSHOT。持锁期间应排队，放锁后数据行与
 // imported:auth_tokens 标记同事务落库。
 func TestImportTokensImmediateUnderLock(t *testing.T) {

@@ -182,7 +182,7 @@ func (s *Store) ImportLegacy(ctx context.Context, stateDir, logRoot string) erro
 // （ImportLegacy 报错 → 文件不改名 → 重启再炸），坏行跳过语义
 // 只在逐行容忍下成立。
 func (s *Store) importIndex(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "index", func(tx *sql.Tx) error {
+	return s.withSourceTx(ctx, "index", func(q dbtx) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return skipMissing(err)
@@ -202,7 +202,7 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 					// ON CONFLICT(dir)：dir 部分唯一索引把「标记丢失后的重跑」
 					// 变成幂等空操作，不会卡死导入；WHERE 子句须与索引的
 					// 部分谓词一致，SQLite 才认这个冲突目标。
-					if _, err := tx.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) WHERE dir != '' DO NOTHING`,
+					if _, err := q.ExecContext(ctx, logsInsertSQL+` ON CONFLICT(dir) WHERE dir != '' DO NOTHING`,
 						e.Dir, ms, ms/60000, started.Format(time.RFC3339Nano), e.DurationMS,
 						e.RequestReadyMS, e.UpstreamSentMS, e.UpstreamOpenMS, e.FirstUpstreamMS, e.FirstClientMS,
 						e.API, e.Method, e.Path, e.StatusCode, e.Result,
@@ -234,7 +234,7 @@ func (s *Store) importIndex(ctx context.Context, path string) error {
 // autoincrement——分阶段落地期间旧仓重建文件的 id 空间与库不一致，
 // 文件 id 只是参考。
 func (s *Store) importTokens(ctx context.Context, path string) error {
-	return s.withSourceTxImmediate(ctx, "auth_tokens", func(q dbtx) error {
+	return s.withSourceTx(ctx, "auth_tokens", func(q dbtx) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return skipMissing(err)
@@ -303,7 +303,7 @@ func (s *Store) importTokens(ctx context.Context, path string) error {
 }
 
 func (s *Store) importModels(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "models", func(tx *sql.Tx) error {
+	return s.withSourceTx(ctx, "models", func(q dbtx) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return skipMissing(err)
@@ -314,7 +314,7 @@ func (s *Store) importModels(ctx context.Context, path string) error {
 		}
 		now := time.Now().UnixMilli()
 		for name, e := range f.Models {
-			if _, err := tx.ExecContext(ctx,
+			if _, err := q.ExecContext(ctx,
 				`INSERT OR REPLACE INTO model_registry(model, redirect_model, disabled, updated_at) VALUES(?,?,?,?)`,
 				name, e.RedirectModel, e.Disabled, now); err != nil {
 				return err
@@ -325,7 +325,7 @@ func (s *Store) importModels(ctx context.Context, path string) error {
 }
 
 func (s *Store) importSettings(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "panel_settings", func(tx *sql.Tx) error {
+	return s.withSourceTx(ctx, "panel_settings", func(q dbtx) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return skipMissing(err)
@@ -335,7 +335,7 @@ func (s *Store) importSettings(ctx context.Context, path string) error {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}
 		for k, v := range f.Values {
-			if _, err := tx.ExecContext(ctx,
+			if _, err := q.ExecContext(ctx,
 				`INSERT OR REPLACE INTO settings("key", value, updated_at) VALUES(?,?,?)`,
 				k, v, f.Updated[k]); err != nil {
 				return err
@@ -346,7 +346,7 @@ func (s *Store) importSettings(ctx context.Context, path string) error {
 }
 
 func (s *Store) importQuota(ctx context.Context, path string) error {
-	return s.withSourceTx(ctx, "quota", func(tx *sql.Tx) error {
+	return s.withSourceTx(ctx, "quota", func(q dbtx) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return skipMissing(err)
@@ -355,20 +355,20 @@ func (s *Store) importQuota(ctx context.Context, path string) error {
 		reader := bufio.NewReaderSize(f, 16*1024)
 		for {
 			line, err := reader.ReadBytes('\n')
-			var q QuotaSample
-			if len(line) > 0 && json.Unmarshal(line, &q) == nil {
-				if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_samples(
+			var qs QuotaSample
+			if len(line) > 0 && json.Unmarshal(line, &qs) == nil {
+				if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO quota_samples(
 					at, account, daily_remaining, weekly_remaining, daily_reset_at, weekly_reset_at,
 					prompt_credits, flow_credits, flex_credits, acu_consumed, acu_limit,
 					used_prompt_credits, used_flow_credits, used_flex_credits,
 					grace_period_status, grace_period_end, was_reduced_by_orphaned_usage,
 					top_up_enabled, top_up_transaction_status, overage_balance_micros
 				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-					q.At, q.Account, q.DailyRemaining, q.WeeklyRemaining, q.DailyResetAt, q.WeeklyResetAt,
-					q.PromptCredits, q.FlowCredits, q.FlexCredits, q.ACUConsumed, q.ACULimit,
-					q.UsedPromptCredits, q.UsedFlowCredits, q.UsedFlexCredits,
-					q.GracePeriodStatus, q.GracePeriodEnd, q.WasReducedByOrphanedUsage,
-					q.TopUpEnabled, q.TopUpTransactionStatus, q.OverageBalanceMicros); err != nil {
+					qs.At, qs.Account, qs.DailyRemaining, qs.WeeklyRemaining, qs.DailyResetAt, qs.WeeklyResetAt,
+					qs.PromptCredits, qs.FlowCredits, qs.FlexCredits, qs.ACUConsumed, qs.ACULimit,
+					qs.UsedPromptCredits, qs.UsedFlowCredits, qs.UsedFlexCredits,
+					qs.GracePeriodStatus, qs.GracePeriodEnd, qs.WasReducedByOrphanedUsage,
+					qs.TopUpEnabled, qs.TopUpTransactionStatus, qs.OverageBalanceMicros); err != nil {
 					return err
 				}
 			}
@@ -417,29 +417,12 @@ func (s *Store) importGateStates(ctx context.Context, logRoot string) error {
 // withSourceTx 在单事务里跑 fn 再写 imported:<name> 标记；fn 返回
 // skipMissing 归一的 nil（源文件缺席）时照样提交标记，语义是
 // 「该源已处理，无需再理」。标记是只写不读的一次性留痕——重跑判定
-// 靠源文件存在性而非标记，崩溃重试由数据行幂等兜底。
-func (s *Store) withSourceTx(ctx context.Context, name string, fn func(tx *sql.Tx) error) error {
-	tx, done, err := s.writeTx(ctx, "import:"+name)
-	if err != nil {
-		return err
-	}
-	defer done()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	if err := markImported(ctx, tx, name); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// withSourceTxImmediate 是 withSourceTx 的 BEGIN IMMEDIATE 变体：源体在
-// 事务内先读库再写时（importTokens 按 token 探行决定覆盖还是插入），
-// deferred 的读快照与写锁升级之间被并发写挤入即 SQLITE_BUSY_SNAPSHOT。
-// 导入跑在 Open 路径（交接窗内，在役实例并发写），IMMEDIATE 借
-// busy_timeout 排队等锁，机制上消掉 SNAPSHOT 类。
-func (s *Store) withSourceTxImmediate(ctx context.Context, name string, fn func(q dbtx) error) error {
-	return immediateTx(ctx, s.db.DB, "import:"+name, func(ctx context.Context, q dbtx) error {
+// 靠源文件存在性而非标记，崩溃重试由数据行幂等兜底。导入跑在 Open
+// 路径（交接窗内，在役实例并发写），源体可在事务内先读库再写
+// （importTokens 按 token 探行决定覆盖还是插入）——BEGIN IMMEDIATE
+// 借 busy_timeout 排队等锁，读序不构成正确性条件。
+func (s *Store) withSourceTx(ctx context.Context, name string, fn func(q dbtx) error) error {
+	return writeTx(ctx, s.db.DB, "import:"+name, func(ctx context.Context, q dbtx) error {
 		if err := fn(q); err != nil {
 			return err
 		}

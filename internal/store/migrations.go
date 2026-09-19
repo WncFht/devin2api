@@ -5,7 +5,7 @@
 // ——apply 与版本登记同提交，不存在 DDL 成功而登记失败的半迁移窗口；
 // 任一迁移失败 Open 即报错退出。
 //
-// 事务一律 BEGIN IMMEDIATE（immediateTx）：deferred 事务先读
+// 事务一律 BEGIN IMMEDIATE（writeTx）：deferred 事务先读
 // （pragma_table_info 探列）后写（ALTER 升级写锁）时，读快照与升级
 // 之间被并发写挤入会吃 SQLITE_BUSY_SNAPSHOT 快败——busy_timeout 救
 // 不了过期快照（9-19 prod 实证：交接进程迁移 6ms 死于此，正值在役
@@ -29,7 +29,7 @@ import (
 )
 
 // migration 是一条版本化演进：version 进 schema_migrations 作幂等键，
-// apply 在同一事务内执行 DDL/回填。dbtx 形参即 immediateTx 的事务
+// apply 在同一事务内执行 DDL/回填。dbtx 形参即 writeTx 的事务
 // 连接（BEGIN IMMEDIATE 已由运行器开好）。
 type migration struct {
 	version string
@@ -333,7 +333,7 @@ func applyMigrations(ctx context.Context, db *sql.DB) error {
 			continue
 		}
 		for {
-			err := immediateTx(ctx, db, "migration "+m.version, func(ctx context.Context, q dbtx) error {
+			err := writeTx(ctx, db, "migration "+m.version, func(ctx context.Context, q dbtx) error {
 				if err := m.apply(ctx, q); err != nil {
 					return fmt.Errorf("apply: %w", err)
 				}

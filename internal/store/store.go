@@ -80,38 +80,23 @@ func (w wconn) ExecContext(ctx context.Context, query string, args ...any) (sql.
 	return res, err
 }
 
-// writeTx 开写事务并返回收尾回调（Rollback+慢占用告警），调用方 defer
-// 它替代裸的 Rollback defer：Begin 成功到 Commit/Rollback 的全程独占
-// 唯一写连接，含语句间的本地工作（payload 编码、目录遍历等）。
-func (s *Store) writeTx(ctx context.Context, op string) (*sql.Tx, func(), error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	start := time.Now()
-	return tx, func() {
-		// 已提交的 Rollback 是免锁 no-op；失败路径的回滚耗时也计入占用窗。
-		_ = tx.Rollback()
-		warnSlowWrite(op, start)
-	}, nil
-}
-
 // dbtx 是事务作用域内语句执行的最小面：*sql.Tx（常规写事务）与
-// *sql.Conn（immediateTx 手工 BEGIN IMMEDIATE 的事务连接）都满足。
+// *sql.Conn（writeTx 手工 BEGIN IMMEDIATE 的事务连接）都满足。
 type dbtx interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// immediateTx 在独占连接上把 f 跑在一个 BEGIN IMMEDIATE 事务里：IMMEDIATE
-// 在 BEGIN 即取写锁、借 busy_timeout 排队等待——deferred 事务（writeTx）
-// 先读后写时，读快照与写锁升级之间被并发写挤入会吃 SQLITE_BUSY_SNAPSHOT
-// 快败（busy_timeout 救不了过期快照；IMMEDIATE 下没有读快照就没有
-// SNAPSHOT 类）。database/sql 的 BeginTx 给不出 IMMEDIATE，只能手工
-// BEGIN，故事务生命周期（committed 标记 + 失败路径 Background 回滚）收在
-// 这里一处；op 口径同 writeTx：连接拿出到事务收尾全程计慢占用。
-func immediateTx(ctx context.Context, db *sql.DB, op string, f func(context.Context, dbtx) error) error {
+// writeTx 在独占连接上把 f 跑在一个 BEGIN IMMEDIATE 事务里——全包写事务
+// 的唯一入口。IMMEDIATE 在 BEGIN 即取写锁、借 busy_timeout 排队等待；
+// 它消灭的是 deferred 事务的 SQLITE_BUSY_SNAPSHOT 类：deferred 先读后写时，
+// 读快照与写锁升级之间被并发写挤入即快败（busy_timeout 救不了过期快照），
+// 而「体内先读还是先写」在调用点不可见——事务体内语句顺序从此不再承载
+// 正确性。database/sql 的 BeginTx 给不出 IMMEDIATE，只能手工 BEGIN，故事务
+// 生命周期（committed 标记 + 失败路径 Background 回滚）收在这里一处；
+// op 口径：连接拿出到事务收尾全程计慢占用。
+func writeTx(ctx context.Context, db *sql.DB, op string, f func(context.Context, dbtx) error) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err

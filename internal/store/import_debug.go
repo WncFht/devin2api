@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -103,55 +102,50 @@ func (s *Store) debugDirExists(ctx context.Context, dir string) (bool, error) {
 // 行进 debug_chunks。用裸 INSERT 而非 REPLACE：dir 已确认不在库，
 // 撞键说明与在线写入同名碰撞，宁可报错重跑也不静默覆盖活数据。
 func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, progress string) error {
-	tx, done, err := s.writeTx(ctx, "importDebugDir:"+dir)
-	if err != nil {
-		return err
-	}
-	defer done()
 	// imported 累计本事务入库的库存字节：裸 INSERT 不压缩，
 	// LENGTH 即写入长度——计数器随提交成功后增量。
 	var imported int64
-	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
+	err := writeTx(ctx, s.db.DB, "importDebugDir:"+dir, func(ctx context.Context, q dbtx) error {
+		err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(dirPath, path)
+			if err != nil {
+				return err
+			}
+			name := filepath.ToSlash(rel)
+			if strings.HasSuffix(name, ".jsonl") {
+				n, err := importDebugJSONL(ctx, q, dir, name, path)
+				imported += n
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if _, err = q.ExecContext(ctx,
+				`INSERT INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
+				dir, name, data, info.ModTime().UnixMilli()); err != nil {
+				return err
+			}
+			imported += int64(len(data))
 			return nil
-		}
-		rel, err := filepath.Rel(dirPath, path)
+		})
 		if err != nil {
 			return err
 		}
-		name := filepath.ToSlash(rel)
-		if strings.HasSuffix(name, ".jsonl") {
-			n, err := importDebugJSONL(ctx, tx, dir, name, path)
-			imported += n
+		if _, err := q.ExecContext(ctx,
+			`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+			progressKey, progress, time.Now().UnixMilli()); err != nil {
 			return err
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if _, err = tx.ExecContext(ctx,
-			`INSERT INTO debug_files(dir, name, content, updated_at) VALUES(?,?,?,?)`,
-			dir, name, data, info.ModTime().UnixMilli()); err != nil {
-			return err
-		}
-		imported += int64(len(data))
-		return nil
+		return addPayloadBytes(ctx, q, imported)
 	})
 	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
-		progressKey, progress, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	if err := addPayloadBytes(ctx, tx, imported); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.debugBytes.Add(imported)
@@ -162,7 +156,7 @@ func (s *Store) importDebugDir(ctx context.Context, dirPath, dir, progressKey, p
 // debug_chunks（seq 从 0 递增）；空文件也写一行空 chunk——「文件
 // 存在但为空」在 UNION 名单语义下只能靠行存在性表达。返回写入的
 // 库存字节合计，供调用方在事务提交后计入 payload 计数器。
-func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) (written int64, err error) {
+func importDebugJSONL(ctx context.Context, q dbtx, dir, name, path string) (written int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
@@ -175,7 +169,7 @@ func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) (
 		if buf.Len() == 0 {
 			return nil
 		}
-		if _, err := tx.ExecContext(ctx,
+		if _, err := q.ExecContext(ctx,
 			`INSERT INTO debug_chunks(dir, name, seq, data) VALUES(?,?,?,?)`,
 			dir, name, seq, buf.Bytes()); err != nil {
 			return err
@@ -207,7 +201,7 @@ func importDebugJSONL(ctx context.Context, tx *sql.Tx, dir, name, path string) (
 		}
 	}
 	if seq == 0 && buf.Len() == 0 {
-		if _, err := tx.ExecContext(ctx,
+		if _, err := q.ExecContext(ctx,
 			`INSERT INTO debug_chunks(dir, name, seq, data) VALUES(?,?,0,?)`,
 			dir, name, []byte{}); err != nil {
 			return written, err

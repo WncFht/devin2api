@@ -186,32 +186,27 @@ func logInsertArgs(e *LogRow) []any {
 // （业务分类归写方 debuglog.logRowFor 与导入器）。行插入与 rollup
 // 记账（log_cells 贡献 + 水位推进）同一事务提交。
 func (s *Store) InsertLog(ctx context.Context, e *LogRow) (int64, error) {
-	tx, done, err := s.writeTx(ctx, "InsertLog")
-	if err != nil {
-		return 0, err
-	}
-	defer done()
-	res, err := tx.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	cells := map[cellDim]*cellVals{}
-	errCells := map[errCellDim]int64{}
-	addCellContrib(cells, errCells, e, id)
-	if err := upsertCells(ctx, tx, cells, errCells); err != nil {
-		return 0, err
-	}
-	causes := map[laneCauseDim]int64{}
-	addCauseContrib(causes, e)
-	if err := upsertCauseCells(ctx, tx, causes); err != nil {
-		return 0, err
-	}
-	if err := setCellsWatermark(ctx, tx, id); err != nil {
-		return 0, err
-	}
-	return id, tx.Commit()
+	var id int64
+	err := writeTx(ctx, s.db.DB, "InsertLog", func(ctx context.Context, q dbtx) error {
+		res, err := q.ExecContext(ctx, logsInsertSQL, logInsertArgs(e)...)
+		if err != nil {
+			return err
+		}
+		if id, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		cells := map[cellDim]*cellVals{}
+		errCells := map[errCellDim]int64{}
+		addCellContrib(cells, errCells, e, id)
+		if err := upsertCells(ctx, q, cells, errCells); err != nil {
+			return err
+		}
+		causes := map[laneCauseDim]int64{}
+		addCauseContrib(causes, e)
+		if err := upsertCauseCells(ctx, q, causes); err != nil {
+			return err
+		}
+		return setCellsWatermark(ctx, q, id)
+	})
+	return id, err
 }

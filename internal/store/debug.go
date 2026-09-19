@@ -33,11 +33,10 @@ type DebugFileInfo struct {
 func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
 	// OR REPLACE 的计数增量 = 新行库存尺寸 − 被顶掉的旧行尺寸；旧行
-	// 尺寸同事务先读，写连接串行化保证读到的是真实前驱。先读后写在
-	// deferred 下有 BUSY_SNAPSHOT 裸露面（升级写锁撞上过期快照），
-	// BEGIN IMMEDIATE 先取写锁再读——与 WriteDebugBatch 同形。
+	// 尺寸同事务先读，写锁自 BEGIN 即持有保证读到的是真实前驱——
+	// 与 WriteDebugBatch 同形。
 	var delta int64
-	err := immediateTx(ctx, s.db.DB, "PutDebugFile", func(ctx context.Context, q dbtx) error {
+	err := writeTx(ctx, s.db.DB, "PutDebugFile", func(ctx context.Context, q dbtx) error {
 		var old int64
 		if err := q.QueryRowContext(ctx,
 			`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
@@ -63,27 +62,22 @@ func (s *Store) PutDebugFile(ctx context.Context, dir, name string, content []by
 // first-write-wins：首个失败点最有诊断价值，覆盖语义由调用方表达。
 func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, content []byte) error {
 	stored, usize := EncodePayload(content)
-	tx, done, err := s.writeTx(ctx, "PutDebugFileIfAbsent")
-	if err != nil {
-		return err
-	}
-	defer done()
-	res, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
-	if err != nil {
-		return err
-	}
 	var delta int64
-	if n, err := res.RowsAffected(); err != nil {
-		return err
-	} else if n > 0 {
-		delta = int64(len(stored))
-	}
-	if err := addPayloadBytes(ctx, tx, delta); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+	err := writeTx(ctx, s.db.DB, "PutDebugFileIfAbsent", func(ctx context.Context, q dbtx) error {
+		res, err := q.ExecContext(ctx,
+			`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+			dir, name, stored, usize, time.Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n > 0 {
+			delta = int64(len(stored))
+		}
+		return addPayloadBytes(ctx, q, delta)
+	})
+	if err != nil {
 		return err
 	}
 	s.debugBytes.Add(delta)
@@ -96,28 +90,23 @@ func (s *Store) PutDebugFileIfAbsent(ctx context.Context, dir, name string, cont
 // 只在是否报告本次真正写入。
 func (s *Store) ClaimDebugFile(ctx context.Context, dir, name string, content []byte) (claimed bool, err error) {
 	stored, usize := EncodePayload(content)
-	tx, done, err := s.writeTx(ctx, "ClaimDebugFile")
-	if err != nil {
-		return false, err
-	}
-	defer done()
-	res, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-		dir, name, stored, usize, time.Now().UnixMilli())
-	if err != nil {
-		return false, err
-	}
 	var delta int64
-	if n, err := res.RowsAffected(); err != nil {
-		return false, err
-	} else if n > 0 {
-		delta = int64(len(stored))
-		claimed = true
-	}
-	if err := addPayloadBytes(ctx, tx, delta); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
+	err = writeTx(ctx, s.db.DB, "ClaimDebugFile", func(ctx context.Context, q dbtx) error {
+		res, err := q.ExecContext(ctx,
+			`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+			dir, name, stored, usize, time.Now().UnixMilli())
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n > 0 {
+			delta = int64(len(stored))
+			claimed = true
+		}
+		return addPayloadBytes(ctx, q, delta)
+	})
+	if err != nil {
 		return false, err
 	}
 	s.debugBytes.Add(delta)
@@ -210,12 +199,10 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 	// 删除路径由 RETURNING 直接汇总被删行——计数器只随提交成功的
 	// 真实变更走，回滚不记账。
 	var delta int64
-	// BEGIN IMMEDIATE 而非 deferred：非 IfAbsent 文件行的 LENGTH 预读
-	// 会让 deferred 事务持 WAL 读快照进写升级，跨进程并发提交（交接期
-	// 在役实例、外部 sqlite3）推进 WAL 末尾即 SQLITE_BUSY_SNAPSHOT
-	// 快败——本批是冲刷 tick 上最频的多语句写事务，正是该物种的头号
-	// 暴露面。IMMEDIATE 在 BEGIN 即取写锁，读之前没有快照可过期。
-	err := immediateTx(ctx, s.db.DB, "WriteDebugBatch", func(ctx context.Context, q dbtx) error {
+	// 非 IfAbsent 文件行的 LENGTH 预读发生在写事务内：BEGIN IMMEDIATE
+	// 自 BEGIN 持写锁，读之前没有快照可过期——本批是冲刷 tick 上最频的
+	// 多语句写事务。
+	err := writeTx(ctx, s.db.DB, "WriteDebugBatch", func(ctx context.Context, q dbtx) error {
 		for _, f := range batch.Files {
 			if f.IfAbsent {
 				res, err := q.ExecContext(ctx,
@@ -837,30 +824,22 @@ func (s *Store) deleteDebugRows(ctx context.Context, op, where string, args ...a
 		for _, dir := range chunk {
 			delArgs = append(delArgs, dir)
 		}
-		tx, done, err := s.writeTx(ctx, op)
-		if err != nil {
-			return err
-		}
 		var freed int64
-		for _, del := range []struct{ table, sizeExpr string }{
-			{"debug_files", "LENGTH(content)"},
-			{"debug_chunks", "LENGTH(data)"},
-			{"debug_chunk_refs", "LENGTH(dir)+LENGTH(name)+LENGTH(hash)"},
-		} {
-			n, err := deleteReturningBytes(ctx, tx,
-				`DELETE FROM `+del.table+` WHERE `+delWhere+` RETURNING `+del.sizeExpr, delArgs...)
-			if err != nil {
-				done()
-				return err
+		err = writeTx(ctx, s.db.DB, op, func(ctx context.Context, q dbtx) error {
+			for _, del := range []struct{ table, sizeExpr string }{
+				{"debug_files", "LENGTH(content)"},
+				{"debug_chunks", "LENGTH(data)"},
+				{"debug_chunk_refs", "LENGTH(dir)+LENGTH(name)+LENGTH(hash)"},
+			} {
+				n, err := deleteReturningBytes(ctx, q,
+					`DELETE FROM `+del.table+` WHERE `+delWhere+` RETURNING `+del.sizeExpr, delArgs...)
+				if err != nil {
+					return err
+				}
+				freed += n
 			}
-			freed += n
-		}
-		if err := addPayloadBytes(ctx, tx, -freed); err != nil {
-			done()
-			return err
-		}
-		err = tx.Commit()
-		done()
+			return addPayloadBytes(ctx, q, -freed)
+		})
 		if err != nil {
 			return err
 		}
@@ -991,54 +970,46 @@ func (s *Store) seedPayloadBytesAsync(ctx context.Context) {
 		slog.Warn("payload seed: snapshot aggregate failed", "error", err)
 		return
 	}
-	tx, done, err := s.writeTx(ctx, "SeedDebugPayloadBytes")
-	if err != nil {
-		slog.Warn("payload seed: begin finalize failed", "error", err)
-		return
-	}
-	var pendingNow int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
-		debugPayloadBytesPendingKey).Scan(&pendingNow)
-	if err == sql.ErrNoRows {
-		// pending 被对账先行收编（real 行已存在）——采用既有值即可，
-		// 不覆写：对账写的是另一时刻的权威值，语义等价。
-		var existing int64
-		err = tx.QueryRowContext(ctx,
+	var seeded, adopted int64
+	isAdopt := false
+	err = writeTx(ctx, s.db.DB, "SeedDebugPayloadBytes", func(ctx context.Context, q dbtx) error {
+		var pendingNow int64
+		err := q.QueryRowContext(ctx,
 			`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
-			debugPayloadBytesKey).Scan(&existing)
-		done()
-		if err != nil {
-			slog.Warn("payload seed: read reconciled counter failed", "error", err)
-			return
+			debugPayloadBytesPendingKey).Scan(&pendingNow)
+		if err == sql.ErrNoRows {
+			// pending 被对账先行收编（real 行已存在）——采用既有值即可，
+			// 不覆写：对账写的是另一时刻的权威值，语义等价。
+			isAdopt = true
+			return q.QueryRowContext(ctx,
+				`SELECT CAST(value AS INTEGER) FROM runtime_state WHERE "key"=?`,
+				debugPayloadBytesKey).Scan(&adopted)
 		}
-		s.debugBytes.Store(existing)
-		slog.Info("debug payload bytes seed adopted reconciled value", "debug_payload_bytes", existing)
-		return
-	}
-	if err != nil {
-		done()
-		slog.Warn("payload seed: read pending failed", "error", err)
-		return
-	}
-	final := snapshot + pendingNow - pendingAtSnap
-	if _, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
-		debugPayloadBytesKey, strconv.FormatInt(final, 10), time.Now().UnixMilli()); err == nil {
-		_, err = tx.ExecContext(ctx,
+		if err != nil {
+			return err
+		}
+		seeded = snapshot + pendingNow - pendingAtSnap
+		if _, err := q.ExecContext(ctx,
+			`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+			debugPayloadBytesKey, strconv.FormatInt(seeded, 10), time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		_, err = q.ExecContext(ctx,
 			`DELETE FROM runtime_state WHERE "key"=?`, debugPayloadBytesPendingKey)
-	}
-	if err == nil {
-		err = tx.Commit()
-	}
-	done()
+		return err
+	})
 	if err != nil {
 		slog.Warn("payload seed: finalize failed", "error", err)
 		return
 	}
-	s.debugBytes.Store(final)
+	if isAdopt {
+		s.debugBytes.Store(adopted)
+		slog.Info("debug payload bytes seed adopted reconciled value", "debug_payload_bytes", adopted)
+		return
+	}
+	s.debugBytes.Store(seeded)
 	slog.Info("debug payload bytes seeded async",
-		"debug_payload_bytes", final, "duration_ms", time.Since(start).Milliseconds())
+		"debug_payload_bytes", seeded, "duration_ms", time.Since(start).Milliseconds())
 }
 
 // DebugPayloadBytes 返回 debug payload 库存字节合计的内存镜像——与
@@ -1055,20 +1026,16 @@ func (s *Store) DebugPayloadBytes() int64 {
 // 增量被收进死账）；持久化失败时内存镜像仍被校正，错误如实返回由调用方
 // 告警。
 func (s *Store) ReconcileDebugPayloadBytes(ctx context.Context, actual int64) (drift int64, err error) {
-	tx, done, err := s.writeTx(ctx, "ReconcileDebugPayloadBytes")
-	if err != nil {
-		return s.debugBytes.Swap(actual) - actual, err
-	}
-	if _, err = tx.ExecContext(ctx,
-		`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
-		debugPayloadBytesKey, strconv.FormatInt(actual, 10), time.Now().UnixMilli()); err == nil {
-		_, err = tx.ExecContext(ctx,
+	err = writeTx(ctx, s.db.DB, "ReconcileDebugPayloadBytes", func(ctx context.Context, q dbtx) error {
+		if _, err := q.ExecContext(ctx,
+			`INSERT OR REPLACE INTO runtime_state("key", value, updated_at) VALUES(?,?,?)`,
+			debugPayloadBytesKey, strconv.FormatInt(actual, 10), time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		_, err = q.ExecContext(ctx,
 			`DELETE FROM runtime_state WHERE "key"=?`, debugPayloadBytesPendingKey)
-	}
-	if err == nil {
-		err = tx.Commit()
-	}
-	done()
+		return err
+	})
 	return s.debugBytes.Swap(actual) - actual, err
 }
 
@@ -1153,23 +1120,17 @@ func (s *Store) reapWhere(ctx context.Context, op, table, pred, sizeExpr string,
 		for _, id := range chunk {
 			delArgs = append(delArgs, id)
 		}
-		tx, done, err := s.writeTx(ctx, op)
-		if err != nil {
-			return err
-		}
-		freed, err := deleteReturningBytes(ctx, tx,
-			`DELETE FROM `+table+` WHERE `+pred+` AND rowid IN (`+placeholders(len(chunk))+`) RETURNING `+sizeExpr,
-			delArgs...)
-		if err != nil {
-			done()
-			return err
-		}
-		if err := addPayloadBytes(ctx, tx, -freed); err != nil {
-			done()
-			return err
-		}
-		err = tx.Commit()
-		done()
+		var freed int64
+		err = writeTx(ctx, s.db.DB, op, func(ctx context.Context, q dbtx) error {
+			var err error
+			freed, err = deleteReturningBytes(ctx, q,
+				`DELETE FROM `+table+` WHERE `+pred+` AND rowid IN (`+placeholders(len(chunk))+`) RETURNING `+sizeExpr,
+				delArgs...)
+			if err != nil {
+				return err
+			}
+			return addPayloadBytes(ctx, q, -freed)
+		})
 		if err != nil {
 			return err
 		}
