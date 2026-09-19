@@ -1979,6 +1979,22 @@ func TestPoolNoteSuccessRequiresPostDebtSend(t *testing.T) {
 	}
 }
 
+// waitPoolcool 轮询 poolcool:<name> 持久行直到内容满足 want：冷却簿记
+// 走 QueueState 异步管道，多笔写按 FIFO 落库——断言末态须等末笔到达。
+func waitPoolcool(t *testing.T, st *store.Store, name string, want func(poolCooldownState) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	var state poolCooldownState
+	for time.Now().Before(deadline) {
+		raw, ok, err := st.GetState(context.Background(), poolCooldownKey(name))
+		if err == nil && ok && json.Unmarshal([]byte(raw), &state) == nil && want(state) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("poolcool:%s row never reached wanted state, last = %+v", name, state)
+}
+
 // 池侧冷却持久化：noteFailure 写 poolcool:<name> 行；lane 重建（模拟
 // 重启）装载恢复未过期冷却与连败；ClearCooldown 删行。
 func TestPoolCooldownPersistence(t *testing.T) {
@@ -1996,6 +2012,7 @@ func TestPoolCooldownPersistence(t *testing.T) {
 	}
 	lane.noteFailure(unauthenticatedErr())
 	lane.adapter.Close()
+	waitStateRow(t, db, "poolcool:x", true)
 
 	// 重建同名 lane：未过期冷却、连败与 lastFailure 证据一并恢复。
 	rebuilt, err := newPoolLane(config)
@@ -2017,6 +2034,7 @@ func TestPoolCooldownPersistence(t *testing.T) {
 	if !pool.ClearCooldown("x") {
 		t.Fatal("ClearCooldown must hit live lane")
 	}
+	waitStateRow(t, db, "poolcool:x", false)
 	reloaded, err := newPoolLane(config)
 	if err != nil {
 		t.Fatalf("newPoolLane reload: %v", err)
@@ -2052,6 +2070,11 @@ func TestPoolCooldownUnbanPersists(t *testing.T) {
 		t.Fatal("rotated token must lift auth cooldown")
 	}
 	lane.adapter.Close()
+	// 落债与解禁重写是两笔异步队列写——presence 不够，须等末笔内容
+	// （badUntil 清零、streak 保留）落库再重建，否则读到中间态。
+	waitPoolcool(t, db, "x", func(st poolCooldownState) bool {
+		return st.BadUntilMS == 0 && st.BadTokenHash == "" && st.FailStreak == 1
+	})
 
 	// 重建读回：badUntil 已清但 failStreak/证据仍在——行被重写而非删除。
 	rebuilt, err := newPoolLane(config)
