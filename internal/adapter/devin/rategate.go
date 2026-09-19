@@ -555,11 +555,14 @@ const gateWindowStoreTimeout = 30 * time.Second
 // persistCooldownLocked/deleteCooldownState 共用本上限。
 const lockedStateStoreTimeout = 5 * time.Second
 
-// gatePersistRetryCap 是窗口行写失败后的重放缓冲深度（每 lane）：
-// 翻页率天然每分钟至多一次，深度 2 让失败行搭上后两次窗口的持久化
-// 协程（~2 分钟覆盖批量日志事务/部署交接的写争用波）；更深的缓冲
-// 重放的是诊断价值已衰减的陈旧行，溢出丢最老行并计 persistDropped。
-const gatePersistRetryCap = 2
+// gatePersistRetryCap 是窗口行写失败后的重放缓冲深度（每 lane）。
+// 翻页率天然每分钟至多一次，深度 N = 失败行最多挂账 N 分钟——60 覆盖
+// 小时级写停摆（prod 实测批量日志事务占死单写连接的争用波间歇绵延
+// 逾一小时、连败峰值 5 行）；60 行 × ~160B 内存可忽略。选挂账缓冲而
+// 非协程内退避重试：重放随下次翻页的单个协程走天然串行，争用期不会
+// 养一批存活数分钟的协程轮流向已占死的写连接试写。缓冲是安全带而非
+// 持久队列，溢出丢最老行并计 persistDropped。
+const gatePersistRetryCap = 60
 
 // persistWindow 把刚关闭窗口的明细账快照成行交给持久层，并把上轮写
 // 失败挂账的行一并重放（取走即清，行集独占移交协程；(lane,
