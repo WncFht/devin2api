@@ -40,6 +40,15 @@ const payloadReconcileInterval = time.Hour
 // 后同向再现，故本常量只作连发成员的入场券，告警裁决见 noteDrift。
 const payloadDriftWarnFloor = 1 << 20
 
+// cleanPassBudget 是单轮 cleanOnce 的墙钟预算。容量淘汰在 payload 恒超
+// max_total_mb 的库上每 tick 必发——分片删除已把单事务钳在秒级，但片
+// 循环自身无界，曾在 context.Background() 上连删 30-120s+/tick 挤死
+// 唯一写连接（2026-09-19 停顿归因）。预算取 60s：健康 pass 实测
+// 45-90s 内完成或已推进大半，病态 pass 在死线收束，cleaner 写连接
+// 占用封顶 ~20% 占空。死线只截断不返工：删除谓词的目录界单调，本轮
+// 已提交片保留、未删尾巴下一轮按原谓词重枚举自然续删。
+const cleanPassBudget = 60 * time.Second
+
 // 负载层的成员判定已下推成 DeleteDebugPayloadsBefore 的名字谓词
 //（devinRequestStageStem+"." 前缀圈出 03 主文件与全部重试/搜索分片、
 // 04/06 精确名、attachments/ 前缀）——剥离名单与该谓词同源维护。
@@ -101,7 +110,11 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 	if manager.store == nil {
 		return 0, 0
 	}
-	ctx := context.Background()
+	// 单轮墙钟预算见 cleanPassBudget：ctx 死线后下一个分片的 writeTx
+	// 立即失败，在途语句跑完本片即收束——语句粒度截断与 cleanerStopped
+	// 同量级，已提交片的 addPayloadBytes 逐片落账不错乱。
+	ctx, cancel := context.WithTimeout(context.Background(), cleanPassBudget)
+	defer cancel()
 	dirs, err := manager.store.DebugDirs(ctx)
 	if err != nil {
 		manager.ioErrors.Add(1)
@@ -138,9 +151,9 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		}
 	}
 
-	// 排空挂起在相位边界生效：StopCleaner 后让已起跑的语句跑完、
-	// 后续相位不再发起，在途 pass 截短到语句粒度。
-	if manager.cleanerStopped() {
+	// 排空挂起与墙钟预算在相位边界生效：StopCleaner 或 ctx 死线后让
+	// 已起跑的语句跑完、后续相位不再发起，在途 pass 截短到语句粒度。
+	if manager.cleanerStopped() || ctx.Err() != nil {
 		return removed, stripped
 	}
 
@@ -183,7 +196,7 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		}
 	}
 
-	if manager.cleanerStopped() {
+	if manager.cleanerStopped() || ctx.Err() != nil {
 		return removed, stripped
 	}
 
@@ -294,7 +307,7 @@ func (manager *Manager) cleanOnce() (removed, stripped int) {
 		return removed, stripped
 	}
 
-	if manager.cleanerStopped() {
+	if manager.cleanerStopped() || ctx.Err() != nil {
 		return removed, stripped
 	}
 
