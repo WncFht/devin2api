@@ -478,7 +478,7 @@ func TestLoadBootConfigServesLastGood(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fallback marker missing: %v", err)
 	}
-	var marker configFallbackMarker
+	var marker forensicMarker
 	if err := json.Unmarshal(raw, &marker); err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func TestLoadBootConfigRecoveredMarksEpisode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var marker configFallbackMarker
+	var marker forensicMarker
 	if err := json.Unmarshal(raw, &marker); err != nil {
 		t.Fatal(err)
 	}

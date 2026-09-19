@@ -891,68 +891,6 @@ func reportListenFailure(listen, logRoot string, err error) {
 	os.Exit(1)
 }
 
-// bindFailureFile 是 EADDRINUSE 退出前落在 logs/ 的冲突标记名。
-const bindFailureFile = "bind-failure.json"
-
-// bindFailureMarker 记录一轮端口冲突的累计形态：count 跨失败累加，
-// holder 取最新一次探活结果，recovered_at 标记「恢复告警已发到哪」。
-type bindFailureMarker struct {
-	FirstAt     string `json:"first_at"`
-	LastAt      string `json:"last_at"`
-	Count       int    `json:"count"`
-	Addr        string `json:"addr"`
-	Holder      string `json:"holder"`
-	RecoveredAt string `json:"recovered_at,omitempty"`
-}
-
-// recordBindFailure 读改写 bind-failure.json：每失败一次 count 加一。
-// 文件只增不删——恢复后的汇报与清理由成功启动侧负责。
-func recordBindFailure(logRoot, listen, holder string) {
-	path := filepath.Join(logRoot, bindFailureFile)
-	var marker bindFailureMarker
-	if raw, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(raw, &marker)
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if marker.Count == 0 {
-		marker.FirstAt = now
-	}
-	marker.LastAt = now
-	marker.Count++
-	marker.Addr = listen
-	marker.Holder = holder
-	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
-	}
-}
-
-// warnIfBindContentionRecovered 在成功绑定后读冲突标记：上一轮
-// EADDRINUSE 循环（KeepAlive 拉起 vs 旧实例排空）若发生过，补一条
-// 恢复告警把「冲突已解除、共失败几次、谁占的坑」并进 stderr.log。
-// recovered_at 记忆已汇报到的 last_at：只在新冲突晚于上次汇报时
-// 再警，避免每次重启都复读旧冲突。
-func warnIfBindContentionRecovered(logRoot string) {
-	path := filepath.Join(logRoot, bindFailureFile)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var marker bindFailureMarker
-	if err := json.Unmarshal(raw, &marker); err != nil || marker.Count == 0 {
-		return
-	}
-	if marker.RecoveredAt != "" && marker.LastAt <= marker.RecoveredAt {
-		return
-	}
-	slog.Warn("port contention recovered",
-		"addr", marker.Addr, "holder", marker.Holder,
-		"count", marker.Count, "first_at", marker.FirstAt, "last_at", marker.LastAt)
-	marker.RecoveredAt = time.Now().UTC().Format(time.RFC3339)
-	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
-	}
-}
-
 // loadBootConfig 加载启动配置：文件加载成功即刷新 last-good 缓存、给上一轮
 // 兜底期补恢复告警；加载失败且状态目录有缓存时兜底服役——配置文件的瞬时
 // 破损（半截写入、引用的 credentials_file 缺失、编辑中态）不该把服务打成
@@ -976,68 +914,6 @@ func loadBootConfig(configPath, stateDir, logRoot string) (config.Config, *confi
 		"error", err, "cached_at", cached.CachedAt.Format(time.RFC3339), "cache_source", cached.SourcePath)
 	recordConfigFallback(logRoot, err, cached)
 	return cached.Config, &cached, nil
-}
-
-// configFallbackFile 是兜底服役事件落在 logs/ 的标记名。
-const configFallbackFile = "config-fallback.json"
-
-// configFallbackMarker 记录兜底服役的累计形态：count 跨兜底 boot 累加，
-// reason 取最新一次加载失败原因，cached_at 是所服缓存的写入时刻，
-// recovered_at 标记「恢复告警已发到哪」。
-type configFallbackMarker struct {
-	FirstAt     string `json:"first_at"`
-	LastAt      string `json:"last_at"`
-	Count       int    `json:"count"`
-	Reason      string `json:"reason"`
-	CachedAt    string `json:"cached_at"`
-	RecoveredAt string `json:"recovered_at,omitempty"`
-}
-
-// recordConfigFallback 读改写 config-fallback.json：每兜底服役一次 count
-// 加一。文件只增不删——恢复后的汇报与清理由成功加载侧负责。
-func recordConfigFallback(logRoot string, loadErr error, cached config.LastGood) {
-	path := filepath.Join(logRoot, configFallbackFile)
-	var marker configFallbackMarker
-	if raw, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(raw, &marker)
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if marker.Count == 0 {
-		marker.FirstAt = now
-	}
-	marker.LastAt = now
-	marker.Count++
-	marker.Reason = loadErr.Error()
-	marker.CachedAt = cached.CachedAt.UTC().Format(time.RFC3339)
-	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
-	}
-}
-
-// warnIfConfigFallbackRecovered 在配置成功加载后读兜底标记：上一轮兜底
-// 服役若发生过，补一条恢复告警把「兜底过几次、最新失败原因、服的缓存
-// 时刻」并进 stderr.log——兜底期的事故复盘需要这条边界。recovered_at
-// 记忆已汇报到的 last_at：只在新兜底晚于上次汇报时再警。
-func warnIfConfigFallbackRecovered(logRoot string) {
-	path := filepath.Join(logRoot, configFallbackFile)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var marker configFallbackMarker
-	if err := json.Unmarshal(raw, &marker); err != nil || marker.Count == 0 {
-		return
-	}
-	if marker.RecoveredAt != "" && marker.LastAt <= marker.RecoveredAt {
-		return
-	}
-	slog.Warn("config fallback recovered",
-		"count", marker.Count, "reason", marker.Reason,
-		"first_at", marker.FirstAt, "last_at", marker.LastAt, "cached_at", marker.CachedAt)
-	marker.RecoveredAt = time.Now().UTC().Format(time.RFC3339)
-	if raw, err := json.Marshal(marker); err == nil {
-		_ = os.WriteFile(path, raw, 0o644)
-	}
 }
 
 // probeExistingInstance 查询占用监听端口的进程是否为本服务实例。
