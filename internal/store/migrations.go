@@ -263,7 +263,7 @@ var schemaMigrations = []migration{
 		//（同 0017_detached_events 先例）。0018_store_opens 由并行分支
 		// feat/store-open-ledger 占用，本迁移取下一空号。
 		version: "0019_detached_blobs",
-		apply: func(_ *sql.Tx) error {
+		apply: func(context.Context, dbtx) error {
 			return nil
 		},
 	},
