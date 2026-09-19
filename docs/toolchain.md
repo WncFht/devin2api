@@ -87,14 +87,14 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 ## 6. 部署脚本族 + 资产断言
 
 - `scripts/deploy.sh`（macOS launchd `com.$USER.devin-2api`，监听端口取 `server.listen`、缺省 :3003）、`scripts/deploy-linux.sh`（systemd `--user`）共享 `scripts/lib-deploy.sh`：release 资产下载 + `checksums.txt` 校验、`wait_healthz_version` 部署后版本轮询、stray 进程检查（`pgrep -x` 精确名匹配——`pgrep -f` 会把命令行里含 devin-2api 的无关进程误报成 stray）。两脚本另把 `scripts/rotate-logs.sh` 装成 `~/.local/bin/devin-2api-logrotate` 并登记每日驱动（launchd StartInterval agent / systemd timer），轮转 stderr/stdout.log。三平台部署细节见 `deployment.md`。
-- ~~`scripts/deploy-remote.sh`~~（2026-09-18 退役留档，运行即 exit 1）曾是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。生产迁 archbox 后部署唯一路径是 `scripts/deploy-linux.sh`。
+- `scripts/deploy-remote.sh` 曾是开发机侧的远程驱动：经免密 SSH 到生产机执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端 staging 构建部署（`config.yaml` 不进 tar）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比生产与验证实例。三种模式部署前都把 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）刷进 staging——live 是权威副本，`deploy.sh` 预检读的也是它。2026-09-18 起退役留档（运行即 exit 1），部署唯一路径是 `scripts/deploy-linux.sh`。
 - `scripts/deploy-assets.test.sh` 是对这些资产的**字符串断言套件**：plist 必须有 KeepAlive/ExitTimeOut/`kickstart -k`、unit 必须有 Restart=always/TimeoutStopSec、进度输出必须 `>&2`（`$()` 捕获会把 stdout 噪音混进变量）、禁 `kill -9`，外加所有 shell 脚本 `bash -n` 与 `fit.py` 的 `compile()` 语法检查。风格：逐条 `check`/`has` 断言、最后统一退出码——新增断言照抄这个模式。
 - Windows 无服务化：裸 exe 前台跑，Ctrl+C 走同一套优雅排空。
 
 ## 7. 其它设施
 
 - **Issue 模板** `.github/ISSUE_TEMPLATE/bug_report.yml`：要 `X-Request-Id`/`debug_ref`（调试身份 dir 名）、`meta.json`/`error.json`、版本、平台——与服务排障工作流（AGENTS.md「服务排障」节）对应。
-- **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有 19 个：`codebase-design`、`code-review`、`diagnosing-bugs`、`docs-guard`、`extract-embedded-protos`、`fix-it-never-work-around-it`、`go-comment-conventions`、`golang-benchmark`、`golang-concurrency`、`golang-performance`、`golang-pro`、`golang-troubleshooting`、`improve-codebase-architecture`、`llm-core-types`、`observability-first-debugging`、`orchestrating-agents`、`protocol-drift`、`release-runbook`、`writing-user-docs`。
+- **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放；现有清单与各 skill 的触发条件见各自 `SKILL.md` 的 frontmatter。
 - **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、`docs/`（活文档目录，索引 `docs/README.md`：上游协议逆向、排障手册、客户端接入、配额计费、部署、本文档）。`notes/` 是本机私有工作区（gitignore），只放 `archive/` 日期快照。
 
 ## 8. 运维与实验脚本（`scripts/`）

@@ -1,8 +1,8 @@
 # 客户端接入指南
 
-> 本文示例基于作者本机部署：`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3033(api_key)→ Devin 上游`。按自己的部署替换地址与凭据；ccload 的 token/渠道 id 是 ccload 侧的配置，不是本仓库的一部分。2026-09-18 起生产实例在 archbox 监听 `:3033`；各机 `:3003` 仍由转发 shim 兜住（见 deployment.md 拓扑注），旧写法照样通。
+每个客户端只需要两个值：devin-2api 的地址（`server.listen`，本文示例用 `http://127.0.0.1:3033`）和一个下游令牌——令牌在面板 `/web/tokens.html` 创建，明文创建时一次性出示，仓内只存哈希。模型名直接填 `swe-2-max`（或你在 `devin.aliases`/模型注册表里配的名字）。
 
-所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3033`、key 换成任一有效下游令牌即可（令牌在面板 /web/tokens.html 创建，明文一次性出示，仓内只存哈希）。
+作者本机另经一层 ccload（`客户端 → ccload http://127.0.0.1:49173 → devin-2api http://127.0.0.1:3033`）做渠道管理与冷却，不是必需——走同款链路时把各节的地址换成 ccload 入口、令牌换成 ccload 侧 token，ccload 侧注意事项见 `upstream-debug-playbook.md`。本机 `:3003` 是兼容转发 shim（拓扑见 `deployment.md` 末节），旧写法照样通。
 
 ## Claude Code
 
@@ -11,8 +11,8 @@
 ```json
 {
     "env": {
-        "ANTHROPIC_BASE_URL": "http://127.0.0.1:49173",
-        "ANTHROPIC_AUTH_TOKEN": "<ccload token>",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:3033",
+        "ANTHROPIC_AUTH_TOKEN": "<下游令牌>",
         "ANTHROPIC_MODEL": "swe-2-max",
         "ANTHROPIC_SMALL_FAST_MODEL": "swe-2-max",
         "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
@@ -23,7 +23,7 @@
 }
 ```
 
-两个窗口 env 是关键：`swe-2-max` 非 `claude-` 前缀，CC 走 unknown-model 默认窗口（远小于实际上游上限 262000），不声明则自动压缩阈值错位——要么压得太早浪费窗口，要么阈值超出真实上限永远撞 prompt-too-long。`AUTO_COMPACT_WINDOW` 留 ~30k 给压缩请求自身的指令与摘要开销。不配窗口声明则用 ccload `channel_models` 的 redirect(发 `claude-sonnet-4-6` → `swe-2-max`) 兜底。
+两个窗口 env 是关键：`swe-2-max` 非 `claude-` 前缀，CC 走 unknown-model 默认窗口（远小于实际上游上限 262000），不声明则自动压缩阈值错位——要么压得太早浪费窗口，要么阈值超出真实上限永远撞 prompt-too-long。`AUTO_COMPACT_WINDOW` 留 ~30k 给压缩请求自身的指令与摘要开销。不配窗口声明也可让 CC 发 `claude-` 前缀名、由 `devin.aliases` 映射回 `swe-2-max`（经 ccload 时等价做法是 `channel_models` 的 redirect）。
 
 可选的容错 env（逆向 CC 二进制得到的行为，视需要添加）：
 
@@ -49,9 +49,9 @@
 {
     "providers": {
         "devin": {
-            "baseUrl": "http://127.0.0.1:49173",
+            "baseUrl": "http://127.0.0.1:3033",
             "api": "anthropic-messages",
-            "apiKey": "<ccload token>",
+            "apiKey": "<下游令牌>",
             "models": [
                 {
                     "id": "swe-2-max",
@@ -79,8 +79,8 @@ default_model = "swe-2-max"
 
 [providers.devin]
 type = "anthropic"
-base_url = "http://127.0.0.1:49173"
-api_key = "<ccload token>"
+base_url = "http://127.0.0.1:3033"
+api_key = "<下游令牌>"
 
 [models."swe-2-max"]
 provider = "devin"
@@ -110,7 +110,7 @@ pattern = "Bash(rm -rf*)"
 
 ## Codex
 
-`~/.codex/config.toml`(本机已配好):
+`~/.codex/config.toml`:
 
 ```toml
 model_provider = "OpenAI"
@@ -119,16 +119,17 @@ model_context_window = 262000
 model_auto_compact_token_limit = 230000
 
 [model_providers.OpenAI]
-base_url = "http://127.0.0.1:49173/v1"
+base_url = "http://127.0.0.1:3033/v1"
+# 下游令牌经 OPENAI_API_KEY 环境变量提供
 ```
 
-Codex 走 OpenAI Responses 面 (`POST /v1/responses`),ccload 原生转发到 devin-2api。`apply_patch` 是 `type:"custom"` 工具调用（0.154.0 起经代理包装过境，实测补丁落盘；更早版本走 `exec_command` shell 兜底），无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
+Codex 走 OpenAI Responses 面 (`POST /v1/responses`),直连与经 ccload 转发均可。`apply_patch` 是 `type:"custom"` 工具调用（0.154.0 起经代理包装过境，实测补丁落盘；更早版本走 `exec_command` shell 兜底），无兼容问题。`model_context_window`/`model_auto_compact_token_limit` 必须按真实窗口 262000 配——默认/错配的更大值会让 auto-compact 阈值落在上限之外，超限请求直接失败而不是先压缩（已实测验证：240k 历史 resume 触发 `context compacted`）。
 
 上游限流（429）对 Codex 只经流内错误事件重试——codex-rs 对 HTTP 429 一律终止（`retry_429` 硬编码 false），代理已把 pre-stream 429 转成 `response.failed` 事件下发，Codex 按事件里的 `try again in Ns` 睡到解闩再续。默认 `stream_max_retries = 5` 大约只覆盖不到一分钟的限流窗口；常见的一分钟桶限流建议在 `[model_providers.OpenAI]` 块内加一行 `stream_max_retries = 100`（上限 100）。
 
 ### Codex WebSocket 链路（可选）
 
-Codex 支持 Responses-over-WS：一条连接上反复 `response.create`/`response.append`，`previous_response_id` + 增量 input。ccload→devin-2api 的 WS 多轮已实现并实测通过（2026-09-12，`responses-ws` 全链路 `completed`）。现行配置：
+Codex 支持 Responses-over-WS：一条连接上反复 `response.create`/`response.append`，`previous_response_id` + 增量 input。ccload→devin-2api 的 WS 多轮已实现并实测通过（2026-09-12，`responses-ws` 全链路 `completed`）。本机链配置（经 ccload 的渠道形态，本机示例）：
 
 - ccload 侧建一条独立的 WS 渠道（本机示例：channel 294 `devin-ws`，独立于 293 `devin` 的 anthropic 渠道）：url `http://127.0.0.1:3003/v1`、protocols `["codex"]`、`websockets=1`，模型 `swe-2-max-ws` → redirect `swe-2-max`。
 - `~/.codex/models.ccload.json` 的 `swe-2-max-ws` 条目带 `prefer_websockets: true`；还原备份在同目录 `models.ccload.json.bak-ws-test`。
@@ -147,6 +148,6 @@ codex exec -m swe-2-max-ws \
 - **system prompt 指纹**:各客户端的身份提示词可能被上游内容策略拦截 (`permission_denied`)。devin-2api 的 `sanitize.go` 已覆盖 Claude Code 指纹;pi / kimi-code 都会伪装 CC 请求头 + 提示词，自动被同一套规则覆盖。
 - **工具调用配对**:上游强制 call→result 紧邻配对，代理已自动重排，客户端无感。
 - **压缩**:四个客户端都自带上下文压缩，代理无需处理——但自动压缩只在客户端声明的窗口 ≤ 上游真实窗口 (262000) 时才可能先于 prompt-too-long 触发；Codex/CC 的窗口声明见上文各节和 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」。
-- **排查**:任何问题先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体),再开 devin-2api debug 看 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
+- **排查**:经 ccload 链时先看 `ccload.db` 的 `debug_logs`(取注入后的真实请求体);再看 devin-2api debug 的 `03-devin-request.json`。详见 `upstream-debug-playbook.md`。
 - **base URL 写 `http://[::1]:<port>` 最稳**：服务绑 `*`（IPv6 双栈 socket）时 `::1` 直连本机；`127.0.0.1` 会被 IDE 的 IPv4 端口转发静默 shadow（VS Code Remote-SSH autoForwardPorts 会把 loopback 绑成隧道，特征是 connect 成功但零字节——curl 000 而非 refused），`localhost` 则依赖 resolver 顺序可能先撞 v4 squatter。诊断与处置见 `upstream-debug-playbook.md` 运维坑节。
-- **跨机访问走 tailscale IP，不走 loopback 转发**：2026-09-18 起生产实例在 archbox，其它机器经 `http://100.121.76.120:3033` 访问（本机示例，按自己的 tailnet 替换）。旧地址 `http://100.105.212.52:3003` 由 fht-mba 上的 forwarder shim 继续转发到 archbox，存量配置不急着改。archbox 出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。
+- **跨机访问走 tailnet IP，不走 loopback 转发**：本机示例如 `http://100.121.76.120:3033`（按自己的 tailnet 替换）；`:3003` 旧地址由转发 shim 继续兜住，存量配置不急着改——完整拓扑见 `deployment.md` 末节。archbox 出向曾挂本地并发闸 gwcap（swe-2-medium 限流），现已下线、仅留档 `scripts/gwcap/`——压测/批跑直接打满上游 `devin.max_rpm` 即可。

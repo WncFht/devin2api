@@ -190,7 +190,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 
 ## 限流与配额
 
-- **两套独立系统**：`CheckUserMessageRateLimit` 恒报 `{messagesRemaining:-1}`（无限，2026-09-15 复测维持），但真实生成路径有限流——~~6 次/分触发 `resource_exhausted: …reset in N seconds|minutes`（seconds 与 minutes 两种粒度都出现过，解析侧均已支持），N 随持续触发递增（实测 2s→36s，分钟级 1~~2min 见 `upstream-rate-limit.md`）。「容量检查说有」≠「生成不报 429」。
+- **两套独立系统**：`CheckUserMessageRateLimit` 恒报 `{messagesRemaining:-1}`（无限，2026-09-15 复测维持），但真实生成路径有限流——触发 `resource_exhausted: …reset in N seconds|minutes`（seconds 与 minutes 两种粒度都出现过，解析侧均已支持）；触发阈值与封禁形态按「分钟桶量化 + 概率执行」模型，详见 `upstream-rate-limit.md`。结论：「容量检查说有」≠「生成不报 429」。
 - 该错误**无 Retry-After 头、无 RetryInfo detail**——唯一机器可用信息是文案里的秒数，已解析透传。
 - Connect 响应 header/trailer 只有标准字段，**trailers 恒空**——上游不在 HTTP 层给配额信号；唯一供应商侧锚点是 `usage.responseHeader.x-request-id`（已进 diagnostics）。
 - **瞬时全断态真实存在**：~3 分钟窗口内所有 RPC（含一元）全部 `unavailable: unexpected EOF` 后自愈；10 连发偶发 0 帧 EOF；流式响应在 envelope 头写到一半时被砍（`invalid_argument: protocol error: incomplete envelope`，实测同波次多条独立连接同步死亡，本机 TUN 代理栈在路径上）——`tryReopen` 对传输断裂的 pre-content 重试覆盖的是正确分类。
@@ -237,7 +237,7 @@ GetChatMessage{chat_model_uid=assignment.model_uid, model_assignment_jwt, cascad
 - 单轮 20 张全接受——CLI 的 `max_trailing_images` 是客户端策略不是 wire 约束。
 - `mime_type=application/pdf` 走 Images 通道 → `invalid_argument`；`ChatMessagePrompt` 无 document 字段——document 块是死路。
 - 退化图片（1×1 PNG）→ `invalid_argument`——上游对图片有最小有效性校验。
-- ~~非视觉模型 + 图 → `invalid_argument`~~：**2026-09-15 复测已推翻**——glm-5-3-low、deepseek-v4-pro-high 带图直接放行应答，`validateImagesForModel` 的上游依据消失，本地闸门成了唯一拦截者。软信号：这些模型对图内容的回答全错——图片是否真实送达模型侧存疑，非视觉模型放图即使不被拒也可能只是静默无效。
+- 非视觉模型 + 图曾被判 `invalid_argument`，**2026-09-15 复测已推翻**——glm-5-3-low、deepseek-v4-pro-high 带图直接放行应答，`validateImagesForModel` 的上游依据消失，本地闸门成了唯一拦截者。软信号：这些模型对图内容的回答全错——图片是否真实送达模型侧存疑，非视觉模型放图即使不被拒也可能只是静默无效。
 
 ## CLI 侧情报（静态）
 

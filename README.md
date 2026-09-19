@@ -11,14 +11,14 @@ devin-2api is an unofficial protocol adapter that exposes the models available t
 - **Three API surfaces on one upstream** — `POST /v1/responses` (OpenAI Responses, incl. a WebSocket transport with multi-turn sessions for Codex-style clients), `POST /v1/chat/completions` (OpenAI Chat), `POST /v1/messages` (Anthropic Messages)
 - **Streaming and non-streaming** responses (typed SSE / JSON)
 - **Reasoning that round-trips** — thinking signatures are preserved and replayed across turns: `encrypted_content` reasoning items on Responses, `redacted_thinking` on Anthropic, `reasoning_content` on Chat
-- **Faithful tool calling** — custom/freeform tool calls (e.g. `apply_patch`) round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces
-- **Resilient upstream streams** — expired tokens are reloaded from the credentials source, pre-content upstream failures (transport breaks, silent stalls, empty replies) are retried transparently, and early failures surface as real HTTP errors instead of SSE errors after a committed `200`
+- **Tool calling** — custom/freeform tool calls (e.g. `apply_patch`) round-trip untouched; tool names and `tool_choice` are validated locally; strict call↔result re-pairing matches what upstream enforces
+- **Upstream stream recovery** — expired tokens are reloaded from the credentials source, pre-content upstream failures (transport breaks, silent stalls, empty replies) are retried transparently, and early failures surface as real HTTP errors instead of SSE errors after a committed `200`
 - **Rate-limit gate** — upstream `resource_exhausted` trips a local cooldown latch: queued requests wait briefly then fast-fail `429` + `Retry-After` instead of hammering a limited upstream, drip-released probes detect recovery, and latch state persists across restarts (in `devin-2api.db`). An optional `max_rpm` token bucket shapes outbound pressure before the latch ever trips
 - **Optional prefix warming** — replays retained session request bodies on a cadence to renew the upstream prompt cache, so a subagent resuming after a long wait doesn't pay a cold prefill (`devin.warm_prefix_*`, off by default; see `docs/upstream-cache.md`)
 - **Normalized error contract** — upstream error codes map to proper HTTP status and per-protocol error types; rate limits become `429` + `Retry-After`; with request logging on (`debug.enabled`, on in the shipped `config.example.yaml`) every request carries `X-Request-Id`/`debug_ref` identifying its debug record
 - **`/v1/models` capability flags** — context window, tool/thinking/image support surfaced from the upstream model catalog
 - **Admin panel at `/web`** — request browser, usage/cost aggregation, quota tracking, process metrics, per-request debug payloads, and a redacted config view with hot reload for most fields
-- **Easy to deploy** — single static binary, public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
+- **Single static binary** — public Docker image on [GHCR](https://github.com/WncFht/devin2api/pkgs/container/devin2api)
 
 ## Quick start
 
@@ -56,6 +56,8 @@ Prebuilt binary (from [Releases](https://github.com/WncFht/devin2api/releases), 
 ```bash
 # Linux shown; on macOS use devin-2api-darwin-arm64 or -darwin-amd64
 curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/devin-2api-linux-amd64
+curl -fLO https://github.com/WncFht/devin2api/releases/latest/download/checksums.txt
+sha256sum -c checksums.txt --ignore-missing   # expect: devin-2api-linux-amd64: OK
 chmod +x devin-2api-linux-amd64
 ./devin-2api-linux-amd64 -config config.yaml
 ```
@@ -73,8 +75,12 @@ Docker (image published on [GHCR](https://github.com/WncFht/devin2api/pkgs/conta
 ```bash
 docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml" \
+  -v devin2api-state:/app/state \
+  -e DEVIN2API_STATE_DIR=/app/state \
   ghcr.io/wncfht/devin2api --config /app/config.yaml
 ```
+
+The state volume keeps `devin-2api.db` (downstream tokens, request logs, quota samples) across container restarts — without it each run starts with an empty store, meaning open `/v1` access.
 
 Run as a service (optional):
 
@@ -179,7 +185,7 @@ Configuration is a YAML file loaded once at startup. Unknown fields are rejected
 | `devin.gate_window_guard_seconds`                | Dead zone on both sides of the estimated bucket boundary — requests inside it sleep until the next window                                                                                                                                                                                                                                                                                       | `2`                                                                               |
 | `devin.gate_bg_max_hold_seconds`                 | Queued-wait budget for `bg`-class tokens inside the gate — unattended batch traffic can afford to wait (fg still uses `gate_max_hold_seconds`); see `docs/gate-classes.md`                                                                                                                                                                                                                      | `120`                                                                             |
 | `devin.gate_bg_reserve_margin`                   | Fixed safety margin (requests) in the bg admission reserve formula — the last `reserve` window slots stay unreachable to bg so fg always has headroom                                                                                                                                                                                                                                           | `4`                                                                               |
-| `devin.warm_prefix_*`                            | Prefix-replay warming family (12 keys: `warm_prefix_enabled`, cadence/jitter, retained-body caps, min prefix tokens, four idle-TTL tiers, two pending-name classifiers) — replays retained session bodies to renew the upstream prompt cache across long subagent waits; full list in `config.example.yaml`, mechanism in `docs/upstream-cache.md`                                              | `warm_prefix_enabled: false`                                                      |
+| `devin.warm_prefix_*`                            | Prefix-replay warming family — replays retained session prefixes on a cadence to renew the upstream prompt cache across long subagent waits; key list in `config.example.yaml`, mechanism in `docs/upstream-cache.md`                                                                                                                                                                           | `warm_prefix_enabled: false`                                                      |
 | `devin.session_affinity_ttl_seconds`             | Sliding TTL for session→lane bindings (renewed on every hit); headers `X-Claude-Code-Session-Id`/`X-Session-ID`/`X-Session-Affinity`/`X-Conversation-Id`/`X-Thread-Id` pin a session to a lane                                                                                                                                                                                                  | `3600`                                                                            |
 | `devin.quota_low_threshold_percent`              | Weekly-quota percent below which a lane is demoted behind healthy lanes for new sessions (bound sessions unaffected)                                                                                                                                                                                                                                                                            | `15`                                                                              |
 | `debug.enabled`                                  | Record per-request debug payload into `devin-2api.db` (`debug_files`/`debug_chunks` tables) in the state dir                                                                                                                                                                                                                                                                                    | `false`                                                                           |
@@ -219,6 +225,17 @@ Notes:
 - tokens are never written to logs (redacted as `<redacted>`);
 - with no accounts configured the pool is empty: `/v1` requests fail fast with `unavailable` — add an account from the panel (`/web/accounts.html`) or `devin.accounts` + reload, no restart needed either way;
 - `config.yaml` is gitignored — keep real tokens out of git anyway; pre-commit runs gitleaks to catch committed secrets.
+
+## Troubleshooting
+
+Every `/v1/*` response carries an `X-Request-Id` header (error bodies also carry `debug_ref`) naming the request's debug record — `GET /admin/debug-logs/{id}/file/error.json` shows the first failure point, and `logs/stderr.log` in the state dir has one summary line per request. Common symptoms:
+
+- **`401`** — no matching token in the store (create one in `/web/tokens.html`), or upstream rejected the account credential; the lane re-resolves it and retries once — check lane status in `/web/accounts.html`
+- **`unavailable`** — the account pool is empty; add an account in `/web/accounts.html`, or via `devin.accounts` + config reload
+- **`429`** — the local rate gate fast-failed (`Retry-After` says when to retry) or upstream is rate-limiting; the `error_stage` column in the `logs` table (`rate_gate` vs `devin_connect`) distinguishes them
+- **SSE stalls near ~300s** — the client's own total timeout, not the proxy's; a disconnected stream keeps running server-side and an identical retry replays it from the completion cache
+
+The full symptom → layer → fix table lives in [`docs/upstream-debug-playbook.md`](docs/upstream-debug-playbook.md)（中文）.
 
 ## Documentation
 

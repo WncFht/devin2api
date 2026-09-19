@@ -84,5 +84,5 @@ ping 语义有三条硬边界。其一，只续命不复活：TTL 死透的谱�
 
 - 免费档命中非保证：偶发 miss 是上游逐出/冷启动，非代理问题。
 - `permission_denied`（含内容策略拦截）在免费档表现非确定性——同一 prompt 可能先封后放（WindsurfAPI 亦记录此现象）。
-- 多 token 轮换会破坏按账号键控的缓存（粘账号才有意义）；当前单 token 无此问题。
+- 缓存按账号键控：同一会话前缀必须落在同一 lane 上才谈得上命中——号池的会话亲和绑定（`devin-accounts.md`「会话钉选与绑定」）就是为此存在；同一会话被换 lane 等于冷启动。
 - 命中率统计口径：`logs` 表聚合时必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败与断开请求的 0-token 行会被误算成 miss；`scripts/index-stream-stats.py` 实现了这套口径（流画像 + gap→hit% 分桶 + miss 归因）。

@@ -4,7 +4,7 @@
 响应的 `applied` 列已生效字段，`requires_restart` 列要重启进程才生效的字段；两者都只报值发生变化的键。
 `GET /admin/config` 返回脱敏后的生效视图，`stale=true` 表示文件在最后一次加载后被改过。
 
-## 当前分界
+## 热/冷分界
 
 热键的共同特征：读侧每次请求取快照（model/aliases/client_*）、有专门的运行时 setter（闸门参数、debug 开关与保留策略、dashboard.password）、或把烤死它的对象整体重建后原子换指针（端点三件套进 adapter 的 upstreamLink 与面板的 panelUpstream，quota ticker 经 SetQuotaInterval 重起，pprof listener 经 applyPprofListen 换绑，max_concurrency 走 CAS 计数器）。
 冷键只剩 server.listen：Serve 无法换绑端口，同一问题的更难版本（换进程）已由 reuseport 交接部署解决，进程内换监听收益小、排空语义一样绕不过。

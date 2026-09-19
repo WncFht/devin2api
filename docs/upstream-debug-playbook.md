@@ -7,11 +7,11 @@
 ```
 client (cc / codex / kimi-cli / ...)
   → ccload :49173            (渠道管理、冷却、格式转换)
-    → devin-2api :3003       (协议转换 + sanitize + wire 构造)
+    → devin-2api :3033       (协议转换 + sanitize + wire 构造)
       → server.codeium.com   (Devin 上游, Connect-RPC)
 ```
 
-> 链路为作者本机示例：ccload 是作者自用的前置网关（非必需——客户端可直连 devin-2api），`:49173`/`:3003` 端口与渠道 id 是本地部署取值，按自己的拓扑替换。ccload 相关小节只在走同款链路时适用。
+> 链路为作者本机示例：ccload 是作者自用的前置网关（非必需——客户端可直连 devin-2api），`:49173`/`:3033` 端口与渠道 id 是本地部署取值，按自己的拓扑替换（本机 `:3003` 是兼容转发 shim，见 deployment.md）。ccload 相关小节只在走同款链路时适用。
 
 任何一环出错都会以「重试/失败」的形式表现在客户端。定位的第一步永远是**确定错误在哪一层产生**。
 
@@ -57,7 +57,7 @@ sqlite3 data/ccload.db \
 ### 2. 绕过 ccload 直连复现
 
 ```bash
-curl -sN http://localhost:3003/v1/responses \
+curl -sN http://localhost:3033/v1/responses \
   -H "Authorization: Bearer <api_key>" -H "Content-Type: application/json" \
   --data-binary @/tmp/req.bin | tail -5
 ```
@@ -83,7 +83,13 @@ curl -sN http://localhost:3003/v1/responses \
 
 看门狗是双层的：`upstreamStallTimeout`（120s，任意帧判活的传输活性探测）+ 无进度期限（只认产出事件帧的内容进度探测，两档：产出前 `devin.pre_event_no_progress_timeout_seconds` 默认 10min，产出过内容后 `devin.no_progress_timeout_seconds` 默认 45min——上游在工具调用参数阶段可静默计算 15-25min 只发心跳，pre 档必误杀）。pre 档之上另有 `upstreamPreEventSilenceCap`=180s 累计静默硬顶：从首条流建立起算、跨 pre-content 重开累计，重开的新流只继承剩余额度——退化上游收单后只发 ack/心跳续命、永不产出事件时（prod 实测 ~150 例/30h，全部以 client_disconnected 收场），死等被兜进客户端 ~300s 耐心之内，到期按传输错误收尾释放 lane。stopReason 消费后等待窗口缩到 `upstreamTailGrace`（15s）——connect-go 读 endstream envelope 时会排空 body 等传输 EOF，上游不关连接就靠这层干净收尾。内容已下发后的截断走续传而非整体重发：在飞块物化进 assistant 回显、追加 "continue" 用户消息重发（`maxStreamResumes`=2），客户端先收块 end 接缝再续新块；在飞工具调用与已收 stopReason/停止序列截断的流不续，按错误透传。
 
-客户端断连不杀「已产出内容」的上游流：流脱钩登记进进程内完成缓存（键是 02 投影剔除逐消息 timestamp_ms 与顶层 dropped_items 后的语义哈希——session_key 保留（同 body 重试恒定，零挂接成本换同租户跨会话隔离），另混 key_hash 隔租户、model 用解析后 uid；容量 8，TTL running 45min / completed 15min / failed 5min，触顶先逐过期、再逐死尸体（截断/不可重放 failed）、再最老 running，无 running 回退最老终态条目），后台泵续消费并缓冲全部事件。同键重试在 `Stream` 入口命中即重放——completed 秒回全量、running 重放前缀后按下标追帧、failed 仅在失败可重放（非上游责任/取消类）时重放终态、否则当未命中走新上游。脱钩写 `detached` 标记行进原 dir 的 04，挂接写 `detached_attach` 进重试 dir 的 04（带 `origin_dir` 回指）。pre-content 断开不脱钩（没有可重放前缀）；脱钩泵关掉无进度看门狗（耐心是它的意义，running TTL 是存活上界）但保留 stall 看门狗（零帧=连接真死）。断开判定有两条腿：消费方 Recv 的 ctx.Done 分支 + `Stream` 起的哨兵协程（app 泵投递点两路就绪随机选，断开后可能不再进 Recv——没哨兵那条路径会漏成「无人杀也无人养」的孤儿泵）；两侧持同一把 stream.mu 就地判定，先到者赢。running 条目被 TTL/容量淘汰掐 drain ctx 退场时补一条终局错误记 failed（截断前缀不误标 completed），正常 EOF 才记 completed。条目缓冲另有 8MiB 字节预算（合法流实测最大 ~400KiB）：越界即截断——缓冲冻结成「前缀 + 截断错误事件」，原 dir 04 记 `detached_truncated` 标记行；截断条目 lookup 一律未命中并就地逐出（同键重试走新上游），在飞挂接方重放到显式错误而非无声 EOF，后台泵下轮自检停泵不再白耗上游配额。注意原 dir 完结后 04/05 不再追写——后台泵后续帧的取证只在条目缓冲里，不在盘上。
+客户端断连不杀「已产出内容」的上游流：流脱钩登记进进程内完成缓存，后台泵续消费并缓冲全部事件。缓存键是 02 投影剔除逐消息 timestamp_ms 与顶层 dropped_items 后的语义哈希——session_key 保留（同 body 重试恒定，零挂接成本换同租户跨会话隔离），另混 key_hash 隔租户、model 用解析后 uid。容量 8 条，TTL 按态分档（running 45min / completed 15min / failed 5min）；触顶先逐过期、再逐死尸体（截断/不可重放 failed）、再最老 running，无 running 回退最老终态条目。
+
+同键重试在 `Stream` 入口命中即重放：completed 秒回全量、running 重放前缀后按下标追帧、failed 仅在失败可重放（非上游责任/取消类）时重放终态、否则当未命中走新上游。脱钩写 `detached` 标记行进原 dir 的 04，挂接写 `detached_attach` 进重试 dir 的 04（带 `origin_dir` 回指）。
+
+生命周期边界：pre-content 断开不脱钩（没有可重放前缀）；脱钩泵关掉无进度看门狗（耐心是它的意义，running TTL 是存活上界）但保留 stall 看门狗（零帧=连接真死）。断开判定有两条腿：消费方 Recv 的 ctx.Done 分支 + `Stream` 起的哨兵协程（app 泵投递点两路就绪随机选，断开后可能不再进 Recv——没哨兵那条路径会漏成「无人杀也无人养」的孤儿泵）；两侧持同一把 stream.mu 就地判定，先到者赢。running 条目被 TTL/容量淘汰掐 drain ctx 退场时补一条终局错误记 failed（截断前缀不误标 completed），正常 EOF 才记 completed。
+
+条目缓冲另有 8MiB 字节预算（合法流实测最大 ~400KiB）：越界即截断——缓冲冻结成「前缀 + 截断错误事件」，原 dir 04 记 `detached_truncated` 标记行；截断条目 lookup 一律未命中并就地逐出（同键重试走新上游），在飞挂接方重放到显式错误而非无声 EOF，后台泵下轮自检停泵不再白耗上游配额。注意原 dir 完结后 04/05 不再追写——后台泵后续帧的取证只在条目缓冲里，不在盘上。
 
 直连同样失败 → 问题在 devin-2api/上游，与 ccload 无关。
 
@@ -138,7 +144,7 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 5. **完全空的 assistant 轮跳过**（实测诱发上游反复返回空回复）。
 6. **工具 schema 剥离**：`Description` 换工具名、剥 annotations（`convertToolDefinition`，防 Cursor 类 MCP-gate 指纹）。被剥掉的信息经 `withToolDescriptions` 搬进 system prompt 尾的 `# tools descriptions` 段：每个工具一条 `<tool name="…">`，内含编号化说明全文 + `Parameters:` 字段摘要（从原始 `input_schema` 的字段级 `description`/`title` 提升——条件必填如 "Required unless `stop` is true" 只活在字段 prose 里，剥离后摘要就是它唯一的幸存通道；行头对 prose 声明必填的字段补标 `required`，超长描述截头时 required 尾句必保留）。注入段按预算分级：96KB 软顶内全文，超出降 compact（说明截 400 runes、摘要完整），再超降 skinny（纯名清单），skinny 过 256KB 硬顶报 `tool_preamble_too_large` 400。实证记录见 `notes/archive/2026-09-17-schedulewakeup-conditional-required.md`。
 7. **特征句指纹库**（`permission_denied`）：对 system prompt / 消息 / 工具描述做等义改写，规则在 `sanitize.go`——对齐 WindsurfAPI 实证规则 + 本项目 bisect 新增的 CC/Codex 指纹（tool-call 冒号句、CC 2.1.x 提示词行、subagent emoji 禁令、Codex 模板三条等，逐条实证记录见 `upstream-policy-fingerprints.md`）。
-8. ~~空 system prompt + 带 tools 会被拒~~：**2026-09-12 实测已不成立**——上游不再因此拒绝，代码也已不再注入兜底 system prompt（仅 `withToolDescriptions` 把工具说明并入 system 字段）。保留此条仅为解释旧记录。
+8. **空 system prompt + 带 tools 曾被拒，2026-09-12 实测已不成立**——上游不再因此拒绝，代码也不再注入兜底 system prompt（仅 `withToolDescriptions` 把工具说明并入 system 字段）。保留此条仅为解释旧记录。
 9. **前缀缓存**：内容前缀即命中，无需会话状态；`trajectory_id`/`cascade_id` 稳定 + EPHEMERAL 断点可提升命中率（详见 `upstream-cache.md`）。
 10. **stepType 恒为 `USER_INPUT`**，末条消息**不要求**是 USER（实测 TOOL 结尾只要配对正确也能过）。
 11. **签名是尾随帧，且按 provider 分体制**：上游在全部正文之后才发 `DeltaSignature`+`DeltaSignatureType`。已观测三种体制：`sealed`（swe-2，`sealed.v1.<b64>`）、`anthropic`（claude-thinking，原生签名 base64）、`openai`（gpt-sol，签名是序列化 reasoning item）。回放时 type 必须与 provider 配对存取——张冠李戴触发流内 `invalid_argument`。解码器把签名合并回上一个 thinking 块（`decodeLateSignature`），编码器延迟 thinking 块的收尾直到签名到达——绝不能落成独立的空 thinking 块（Claude Code 会整条丢弃消息，表现为 result 为空但 HTTP 200）。副作用：当签名帧隔着 text/tool_use 块才到时，下发的 SSE 是「嵌套」块序——thinking 的 `signature_delta`/`content_block_stop` 插在 tool_use 的 delta 中间，同一时刻有两块未收尾，偏离 Anthropic 逐块顺序约定；claude-cli 2.1.269 整日实测容忍，但严格单块假设的解析器可能把迟到的 stop 误当当前块结束，属已知取舍（提前关块会丢签名，危害更大）。
@@ -153,7 +159,7 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 1. 单轮（先确认基本通路 + 身份句是否被封）：
 
     ```bash
-    curl -s http://localhost:3003/v1/messages -H "Authorization: Bearer <api_key>" \
+    curl -s http://localhost:3033/v1/messages -H "Authorization: Bearer <api_key>" \
       -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
       -d '{"model":"swe-2-max","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly: pong"}]}'
     ```
@@ -205,5 +211,5 @@ curl -s -X PUT http://localhost:<port>/admin/settings/debug_log_enabled \
 - **Codex** `~/.codex/config.toml`：`model_context_window = 262000`，`model_auto_compact_token_limit = 230000`。resume 实验确认 240k 历史触发 `context compacted` 后正常续答。
 - **Claude Code** `~/.claude/settings.json` env：`CLAUDE_CODE_MAX_CONTEXT_TOKENS=262000`（非 `claude-` 前缀模型的窗口声明）、`CLAUDE_CODE_AUTO_COMPACT_WINDOW=230000`。实测 ~202k 用量后自动压缩（阈值≈window-28k buffer），压缩后上下文降到 ~17k。
 - CC 另有单条 prompt ≤80% 窗口的客户端保护（~209k tokens），超限直接 "Prompt is too long" 不发请求；`-c -p` resume 时若投影总量超窗也同样拒绝，不会自动压缩——这是边界保护不是 bug。
-- Codex 只在 SSE `response.failed` 事件里按 `error.code=="context_length_exceeded"` 触发错误恢复式压缩；裸 HTTP 413 错误体不会触发（走 generic request error）。因此 devin-2api 对流式请求刻意先补合成 `start` 再发 error 事件（顶层 `status:413` + `code=context_length_exceeded`）。注意路径差异：**直连 :3003 时** Codex 能收到 `response.failed`；**经 ccload 时** `response.created`/`in_progress` 不算语义输出、不会促使 ccload 提交响应，ccload 仍在写出前截住 error 事件并物化成 HTTP 413 给客户端——与裸 413 效果等价（客户端级、零冷却），只是拿不到 SSE 形态。Anthropic 面不同：`message_start` 算语义输出会提交，error 事件随后原文透传。非流式请求统一是干净的 HTTP 413。
+- Codex 只在 SSE `response.failed` 事件里按 `error.code=="context_length_exceeded"` 触发错误恢复式压缩；裸 HTTP 413 错误体不会触发（走 generic request error）。因此 devin-2api 对流式请求刻意先补合成 `start` 再发 error 事件（顶层 `status:413` + `code=context_length_exceeded`）。注意路径差异：**直连 devin-2api 时** Codex 能收到 `response.failed`；**经 ccload 时** `response.created`/`in_progress` 不算语义输出、不会促使 ccload 提交响应，ccload 仍在写出前截住 error 事件并物化成 HTTP 413 给客户端——与裸 413 效果等价（客户端级、零冷却），只是拿不到 SSE 形态。Anthropic 面不同：`message_start` 算语义输出会提交，error 事件随后原文透传。非流式请求统一是干净的 HTTP 413。
 - ccload 的 `/v1/models` 不透传 `context_tokens` 等元数据，客户端无法经 discovery 学到窗口，只能靠上述本地配置。

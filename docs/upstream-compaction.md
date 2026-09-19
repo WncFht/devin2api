@@ -91,7 +91,7 @@ take any actions. Just provide the summary in <summary> tags.
 
 ## 对 devin-2api 的含义
 
-1. **当前链路不需要我们压缩**:在用的四个客户端 (Claude Code、Codex、pi、kimi-code) 都自带压缩器;CC 提示词里 "The system will automatically compress prior messages" 一句已在上游指纹库中，由 `sanitize.go` 改写。
+1. **链路不需要我们压缩**:在用的四个客户端 (Claude Code、Codex、pi、kimi-code) 都自带压缩器;CC 提示词里 "The system will automatically compress prior messages" 一句已在上游指纹库中，由 `sanitize.go` 改写。
 2. **客户端压缩生效有前提**:自动压缩按「客户端声明的窗口」触发——声明值若大于上游真实窗口 (swe-2-max = 262000)，阈值落在上限之外，超限请求直接 `prompt too long` 而不是先压缩。Codex/CC 的正确窗口配置与实测记录见 `upstream-debug-playbook.md` 的「客户端上下文窗口配置」节。
 3. **无压缩客户端**若将来接入 (如裸 API 调用方)，长会话会顶爆窗口。需要时可照本文实现代理侧压缩:token 估算到 spawn 阈值 → 用同模型跑上面的 summarizer 提示词 → 历史替换为 `<summary>` + 逐字保留段 + 尾部 N 条。
 4. **工具调用配对不变**:压缩替换的是消息列表，`request_encoder.go` 的 call→result 配对约束照样适用——保留尾部必须从**完整的 user 轮边界**切开，不能切在 call/result 对中间，否则复现 `invalid_argument`。

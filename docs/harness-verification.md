@@ -1,6 +1,6 @@
 # 各 Harness 验证状态
 
-截至 2026-09-12 的实测记录。链路为作者本机示例：客户端 → ccload:49173 → devin-2api:3003 → Devin `GetChatMessage`(swe-2-max)——端口与渠道是本地部署的取值，按自己的拓扑替换。
+截至 2026-09-12 的实测记录。链路为作者本机示例：客户端 → ccload:49173 → devin-2api:3033 → Devin `GetChatMessage`(swe-2-max)——端口与渠道是本地部署的取值，按自己的拓扑替换。
 
 ## 验证矩阵
 

@@ -1,7 +1,5 @@
 # 部署（launchd / systemd / 裸进程）
 
-当前生产拓扑（2026-09-18 起）：生产实例在 archbox 本机——systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac（fht-mba `:3003`）生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（fht-mba launchd `com.fanghaotian.devin-2api-forwarder` → `100.121.76.120:3033`；archbox systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。
-
 三平台拓扑——各平台按自己的目录规范分家（二进制 / 配置 / 状态日志三类不再同居一个运行目录）：
 
 | 平台    | 托管方式                                   | 二进制                                              | 配置                                                   | 状态/日志                                                                | 部署命令                     |
@@ -14,7 +12,7 @@
 
 三个 deploy 脚本（macOS/Linux 共用 `scripts/lib-deploy.sh`）参数语义一致：`--release <tag|latest>` 装预编译二进制（sha256 校验）、`--no-restart` 只替换不重启、`--check` 对比 已安装/运行中/最新 release 版本、`--uninstall` 停用并移除服务与二进制（保留 config/logs）。服务未安装时首装自动生成服务定义并拉起；`config.yaml` 缺失时从 `config.example.yaml` 生成（随机 `dashboard.password`，tty 下提示粘贴 token；下游 /v1 令牌不入配置，到面板 /web/tokens.html 创建）。开工前的 preflight 拦截 sudo、缺依赖、占位 token、端口冲突、生效 config 里死引用的 `credentials_file`（9-18 断流根因；加载期现已改判该 lane 降级带病服役而非拒载，带病起跑照样拦下）；`/healthz` 版本对上后再打一发 `/v1/models` 验证上游鉴权。最小安装路径：clone 仓库 → `deploy*.sh --release latest`。
 
-~~另有开发机侧的远程驱动 `scripts/deploy-remote.sh`~~（2026-09-18 退役，仅留档）：免密 SSH 到部署目标（`DEVIN2API_HOST`，原示例 `fht-mba`）执行 `deploy.sh`——默认 worktree 模式把 git 视角的本地工作树（含未提交改动）连同 `.git` 推流到远端暂存目录构建部署，`config.yaml` 不进 tar，复制远端在跑实例的 live 配置（`DEVIN2API_CONFIG_LIVE`，默认 `~/Library/Application Support/devin-2api/config.yaml`）；`--ref`/`--release` 部署已推送状态或预编译资产，`--check` 并排对比两端实例版本。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
+开发机侧曾有远程驱动 `scripts/deploy-remote.sh`（SSH 到生产机执行 `deploy.sh`，worktree 推送模式），2026-09-18 随 Mac 生产实例退役、仅留档（运行即 exit 1）；机制细节见 `toolchain.md` §6。部署后的验证步骤（healthz 版本确认 + 面板套件冒烟）见 `post-deploy-verify.md`。
 
 ## 跨平台共同约定
 
@@ -38,7 +36,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 
 请求级 debug 日志的生命周期由 `debug.retention_days` / `debug.max_total_mb` / `debug.payload_hours` / `debug.keep_error_dirs` / `debug.errors_only` 自管；launchd 侧无需额外配置。
 
-### 当前 plist
+### plist 示例
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -72,7 +70,7 @@ launchd (gui/<uid> 用户域, 无需 sudo)
 
 各键的含义与取舍：
 
-| 键                     | 当前值                                         | 说明                                                                                                                                                                       |
+| 键                     | 示例值                                         | 说明                                                                                                                                                                       |
 | ---------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `RunAtLoad`            | true                                           | 登录即启动                                                                                                                                                                 |
 | `KeepAlive`            | true                                           | 任何退出都重拉——含 `bootout` 外的主动 `kill`。若想「干净退出不复活」，改为 `<dict><key>SuccessfulExit</key><false/></dict>`                                                |
@@ -169,3 +167,9 @@ curl -s -H 'Authorization: Bearer <password>' localhost:<port>/admin/debug-logs/
 `password` 为空时面板及 API 开放访问——本机自用可接受，暴露到局域网前务必配置。
 
 面板是移植自 ccLoad（MIT）的唯一管理面。它管理的运行时状态都在 `devin-2api.db` 的三张表：`auth_tokens`（下游多 key：描述/过期/allowed_models/RPM 与 5h/日/周/月费用窗口及并发限额，是 /v1 准入的唯一判定源，只由面板管理、明文一次性出示；仓空（零行）时 /v1 开放准入，匿名通道行（空明文哈希）是无凭据流量的准入载体、至多一行）、`model_registry`（模型注册表：停用 → 404、redirect → 先注册表再 config 别名链）、`settings`（运行设置覆盖：`debug_log_enabled`/`debug_log_errors_only` 与 `log_retention_days`/`log_max_total_mb`/`log_payload_hours`/`log_keep_error_dirs`/`log_row_retention_days` 等日志保留策略，覆盖项在启动与 config reload 后重放、恒赢 config.yaml；`auto_refresh_interval_seconds` 仅前端消费）。
+
+## 本机示例：作者的生产拓扑
+
+本节是作者本机部署的具体取值（2026-09-18 起生效），供对照参考，不是部署规范的一部分。
+
+生产实例在 archbox 本机：systemd `--user` 服务 `devin-2api.service` 监听 `:3033`，由 `scripts/deploy-linux.sh` 维护；原 Mac（fht-mba `:3003`）生产实例已退役，`scripts/deploy-remote.sh` 仅留档。各机 `:3003` 端点由转发 shim 兜住继续可用（fht-mba launchd `com.fanghaotian.devin-2api-forwarder` → `100.121.76.120:3033`；archbox systemd --user `devin-2api-compat-3003.service` → `127.0.0.1:3033`；脚本与 unit 模板见 `scripts/compat-forwarder/`），下游客户端无需改动。其它机器经 tailnet `http://100.121.76.120:3033` 访问该实例。
