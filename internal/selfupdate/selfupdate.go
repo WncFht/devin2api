@@ -113,6 +113,9 @@ type Service struct {
 	checkTag  string
 	checkErr  error
 	checkSeen bool
+	// checkInflight 非空表示有 latestTag 在途：并发 Check（含 force）
+	// 收敛成一趟 GitHub 调用，等待者收 done 后读共享结果。
+	checkInflight chan struct{}
 }
 
 // New 装配托管侧服务。install 是托管二进制路径：普通实例取
@@ -225,7 +228,9 @@ func (s *Service) latestTag(ctx context.Context) (string, error) {
 }
 
 // Check 返回面板「检查更新」视图：当前版本 + 最新 tag + 是否需要更新。
-// 结果按 checkCacheTTL 缓存；force 跳过缓存。
+// 结果按 checkCacheTTL 缓存；force 跳过缓存。并发 Check（含 force）
+// 经 checkInflight 收敛成一趟 latestTag——面板连点/轮询扇出不该各发
+// 一次 GitHub 调用。
 func (s *Service) Check(ctx context.Context, force bool) map[string]any {
 	s.mu.Lock()
 	fresh := s.checkSeen && time.Since(s.checkAt) < checkCacheTTL
@@ -234,12 +239,29 @@ func (s *Service) Check(ctx context.Context, force bool) map[string]any {
 		s.mu.Unlock()
 		return s.checkView(tag, err)
 	}
+	if s.checkInflight != nil {
+		done := s.checkInflight
+		s.mu.Unlock()
+		select {
+		case <-done:
+			s.mu.Lock()
+			tag, err := s.checkTag, s.checkErr
+			s.mu.Unlock()
+			return s.checkView(tag, err)
+		case <-ctx.Done():
+			return s.checkView("", ctx.Err())
+		}
+	}
+	done := make(chan struct{})
+	s.checkInflight = done
 	s.mu.Unlock()
 
 	tag, err := s.latestTag(ctx)
 
 	s.mu.Lock()
 	s.checkSeen, s.checkAt, s.checkTag, s.checkErr = true, time.Now(), tag, err
+	s.checkInflight = nil
+	close(done)
 	s.mu.Unlock()
 	return s.checkView(tag, err)
 }
