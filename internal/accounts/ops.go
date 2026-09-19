@@ -415,7 +415,7 @@ func writeAccountCredentialsFile(stateDir, name, content string) (string, error)
 		return "", err
 	}
 	path := filepath.Join(dir, name+".toml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := config.WriteFileAtomic(path, []byte(content), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

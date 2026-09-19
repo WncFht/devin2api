@@ -36,7 +36,7 @@ func lastGoodPath(stateDir string) string {
 }
 
 // WriteLastGood 把一次成功加载的生效配置原子写进状态目录
-// （CreateTemp 0600 + rename，handoff 与托管实例并发写不互踩——
+// （WriteFileAtomic 0600，handoff 与托管实例并发写不互踩——
 // 缓存内含解出的明文凭据，与 config.yaml 同信任域）。
 //
 // 缓存的是校验后的自包含投影：accounts[].token 已被 resolveAccounts
@@ -59,21 +59,7 @@ func WriteLastGood(stateDir, sourcePath string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(stateDir, ".last-good-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, lastGoodPath(stateDir))
+	return WriteFileAtomic(lastGoodPath(stateDir), raw, 0o600)
 }
 
 // ReadLastGood 读状态目录里的缓存；无缓存、损坏或形态不可服役
