@@ -10,7 +10,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 )
 
 // SwitchCause 是一次被放弃 lane 尝试的归因键：Lane 是被试的 lane，
@@ -45,9 +44,9 @@ func addCauseContrib(causes map[laneCauseDim]int64, e *LogRow) {
 
 // upsertCauseCells 把批内聚合器逐键 upsert 进表（与 logs 行同事务）。
 // 空地图是廉价空转。
-func upsertCauseCells(ctx context.Context, tx *sql.Tx, causes map[laneCauseDim]int64) error {
+func upsertCauseCells(ctx context.Context, q dbtx, causes map[laneCauseDim]int64) error {
 	for dim, n := range causes {
-		if _, err := tx.ExecContext(ctx, laneCauseUpsertSQL, dim.day, dim.lane, dim.cause, n); err != nil {
+		if _, err := q.ExecContext(ctx, laneCauseUpsertSQL, dim.day, dim.lane, dim.cause, n); err != nil {
 			return err
 		}
 	}

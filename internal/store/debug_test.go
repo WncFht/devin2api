@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -795,5 +796,67 @@ func TestDecodePayloadFileMagic(t *testing.T) {
 	}
 	if got, err := DecodePayloadFile(delta, big); err != nil || !bytes.Equal(got, big) {
 		t.Fatalf("delta = %d,%v", len(got), err)
+	}
+}
+
+// TestWriteDebugBatchImmediateUnderLock 验证 WriteDebugBatch 改 BEGIN
+// IMMEDIATE 后的等锁形状：竞争写者持写锁期间批次经 busy_timeout 排队，
+// 而非 deferred 时代「预读快照→写升级」的 SQLITE_BUSY_SNAPSHOT 快败；
+// 持锁者提交后批次照常落库——覆盖含 LENGTH 预读的非 IfAbsent 文件行
+// （prod 517 事故实录的语句形态）与 chunk 追加行。
+func TestWriteDebugBatchImmediateUnderLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contended.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+
+	// 竞争写者持文件写锁（第二连接池，模拟交接期在役实例）。
+	comp, err := sql.Open("sqlite", walDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = comp.Close() }()
+	compConn, err := comp.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = compConn.Close() }()
+	if _, err := compConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, usize := EncodePayload([]byte(`{"m":1}`))
+	batch := DebugBatch{
+		Files:  []DebugFileRow{{Dir: "d1", Name: "meta.json", Stored: stored, Usize: usize}},
+		Chunks: []DebugChunkRow{{Dir: "d1", Name: "04-devin-response.jsonl", Data: []byte("{}\n")}},
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.WriteDebugBatch(ctx, batch) }()
+	select {
+	case err := <-done:
+		t.Fatalf("WriteDebugBatch returned while write lock held: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := compConn.ExecContext(ctx, `COMMIT`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteDebugBatch: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("WriteDebugBatch did not finish after lock release")
+	}
+	data, _, ok, err := s.DebugFile(ctx, "d1", "meta.json", 0)
+	if err != nil || !ok || string(data) != `{"m":1}` {
+		t.Fatalf("meta.json = %q,%v,%v", data, ok, err)
+	}
+	chunk, _, ok, err := s.DebugFile(ctx, "d1", "04-devin-response.jsonl", 0)
+	if err != nil || !ok || string(chunk) != "{}\n" {
+		t.Fatalf("chunk = %q,%v,%v", chunk, ok, err)
 	}
 }

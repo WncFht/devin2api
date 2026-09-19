@@ -472,16 +472,16 @@ func addCellContrib(cells map[cellDim]*cellVals, errs map[errCellDim]int64, e *L
 
 // upsertCells 把批内聚合器逐组 upsert 进 rollup 表（同事务）。调用方
 // 保证地图非 nil；空地图是廉价空转。
-func upsertCells(ctx context.Context, tx *sql.Tx, cells map[cellDim]*cellVals, errs map[errCellDim]int64) error {
+func upsertCells(ctx context.Context, q dbtx, cells map[cellDim]*cellVals, errs map[errCellDim]int64) error {
 	for dim, acc := range cells {
 		args := append([]any{dim.slot, dim.day, dim.api, dim.emodel, dim.keyHash}, acc.args()...)
 		args = append(args, acc.minTime, acc.lastKey)
-		if _, err := tx.ExecContext(ctx, cellsUpsertSQL, args...); err != nil {
+		if _, err := q.ExecContext(ctx, cellsUpsertSQL, args...); err != nil {
 			return err
 		}
 	}
 	for dim, n := range errs {
-		if _, err := tx.ExecContext(ctx, errCellsUpsertSQL, dim.slot, dim.stage, n); err != nil {
+		if _, err := q.ExecContext(ctx, errCellsUpsertSQL, dim.slot, dim.stage, n); err != nil {
 			return err
 		}
 	}

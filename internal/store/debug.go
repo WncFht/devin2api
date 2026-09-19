@@ -207,149 +207,149 @@ func (s *Store) WriteDebugBatch(ctx context.Context, batch DebugBatch) error {
 			storedChunks[i], chunkUsizes[i] = EncodePayload(r.Data)
 		}
 	}
-	tx, done, err := s.writeTx(ctx, "WriteDebugBatch")
-	if err != nil {
-		return err
-	}
-	defer done()
 	// delta 累计本事务对 payload 库存字节的净增量：OR REPLACE 取新旧
 	// 行尺寸差（旧尺寸同事务先读），OR IGNORE 按 RowsAffected 实计，
 	// 删除路径由 RETURNING 直接汇总被删行——计数器只随提交成功的
 	// 真实变更走，回滚不记账。
 	var delta int64
-	for _, f := range batch.Files {
-		if f.IfAbsent {
-			res, err := tx.ExecContext(ctx,
-				`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-				f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli())
+	// BEGIN IMMEDIATE 而非 deferred：非 IfAbsent 文件行的 LENGTH 预读
+	// 会让 deferred 事务持 WAL 读快照进写升级，跨进程并发提交（交接期
+	// 在役实例、外部 sqlite3）推进 WAL 末尾即 SQLITE_BUSY_SNAPSHOT
+	// 快败——本批是冲刷 tick 上最频的多语句写事务，正是该物种的头号
+	// 暴露面。IMMEDIATE 在 BEGIN 即取写锁，读之前没有快照可过期。
+	err := immediateTx(ctx, s.db.DB, "WriteDebugBatch", func(ctx context.Context, q dbtx) error {
+		for _, f := range batch.Files {
+			if f.IfAbsent {
+				res, err := q.ExecContext(ctx,
+					`INSERT OR IGNORE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+					f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli())
+				if err != nil {
+					return err
+				}
+				if n, err := res.RowsAffected(); err != nil {
+					return err
+				} else if n > 0 {
+					delta += int64(len(f.Stored))
+				}
+				continue
+			}
+			var old int64
+			if err := q.QueryRowContext(ctx,
+				`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
+				f.Dir, f.Name).Scan(&old); err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if _, err := q.ExecContext(ctx,
+				`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
+				f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli()); err != nil {
+				return err
+			}
+			delta += int64(len(f.Stored)) - old
+		}
+		for i, r := range batch.Chunks {
+			if _, err := q.ExecContext(ctx, appendChunkSQL, r.Dir, r.Name, storedChunks[i], chunkUsizes[i], r.Dir, r.Name); err != nil {
+				return err
+			}
+			delta += int64(len(storedChunks[i]))
+		}
+		// CAS 共享对象与引用它们的文件行同事务：OR IGNORE 让跨目录/跨批
+		// 重复的块自然去重，记账只随真实插入走——manifest+refs+blob 要么
+		// 整体落库要么整体回滚，结构上无孤儿窗口。
+		for _, b := range batch.Blobs {
+			res, err := q.ExecContext(ctx,
+				`INSERT OR IGNORE INTO debug_blobs(hash, content, usize, created_at) VALUES(?,?,?,?)`,
+				b.Hash, b.Stored, b.Usize, time.Now().UnixMilli())
 			if err != nil {
 				return err
 			}
 			if n, err := res.RowsAffected(); err != nil {
 				return err
 			} else if n > 0 {
-				delta += int64(len(f.Stored))
+				delta += int64(len(b.Stored))
 			}
-			continue
 		}
-		var old int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT LENGTH(content) FROM debug_files WHERE dir=? AND name=?`,
-			f.Dir, f.Name).Scan(&old); err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR REPLACE INTO debug_files(dir, name, content, usize, updated_at) VALUES(?,?,?,?,?)`,
-			f.Dir, f.Name, f.Stored, f.Usize, time.Now().UnixMilli()); err != nil {
-			return err
-		}
-		delta += int64(len(f.Stored)) - old
-	}
-	for i, r := range batch.Chunks {
-		if _, err := tx.ExecContext(ctx, appendChunkSQL, r.Dir, r.Name, storedChunks[i], chunkUsizes[i], r.Dir, r.Name); err != nil {
-			return err
-		}
-		delta += int64(len(storedChunks[i]))
-	}
-	// CAS 共享对象与引用它们的文件行同事务：OR IGNORE 让跨目录/跨批
-	// 重复的块自然去重，记账只随真实插入走——manifest+refs+blob 要么
-	// 整体落库要么整体回滚，结构上无孤儿窗口。
-	for _, b := range batch.Blobs {
-		res, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO debug_blobs(hash, content, usize, created_at) VALUES(?,?,?,?)`,
-			b.Hash, b.Stored, b.Usize, time.Now().UnixMilli())
-		if err != nil {
-			return err
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n > 0 {
-			delta += int64(len(b.Stored))
-		}
-	}
-	for _, r := range batch.Refs {
-		res, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO debug_chunk_refs(dir, name, hash) VALUES(?,?,?)`,
-			r.Dir, r.Name, r.Hash)
-		if err != nil {
-			return err
-		}
-		if n, err := res.RowsAffected(); err != nil {
-			return err
-		} else if n > 0 {
-			delta += refRowBytes(r.Dir, r.Name)
-		}
-	}
-	if len(batch.StripDirs) > 0 {
-		args := make([]any, 0, len(batch.StripDirs))
-		for _, dir := range batch.StripDirs {
-			args = append(args, dir)
-		}
-		where := `dir IN (` + placeholders(len(batch.StripDirs)) + `) AND name NOT IN ('meta.json', 'error.json')`
-		freed, err := deleteReturningBytes(ctx, tx,
-			`DELETE FROM debug_files WHERE `+where+` RETURNING LENGTH(content)`, args...)
-		if err != nil {
-			return err
-		}
-		delta -= freed
-		freed, err = deleteReturningBytes(ctx, tx,
-			`DELETE FROM debug_chunks WHERE `+where+` RETURNING LENGTH(data)`, args...)
-		if err != nil {
-			return err
-		}
-		delta -= freed
-		// 引用随行死：剥离删除文件行的同一 WHERE 原样套到 refs 表
-		// （meta/error 没有 CAS 引用，谓词天然不伤锚点）。
-		freed, err = deleteReturningBytes(ctx, tx,
-			`DELETE FROM debug_chunk_refs WHERE `+where+` RETURNING LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, args...)
-		if err != nil {
-			return err
-		}
-		delta -= freed
-	}
-	if len(batch.LogRows) > 0 {
-		cells := map[cellDim]*cellVals{}
-		errCells := map[errCellDim]int64{}
-		causes := map[laneCauseDim]int64{}
-		var maxID int64
-		for _, row := range batch.LogRows {
-			res, err := tx.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...)
+		for _, r := range batch.Refs {
+			res, err := q.ExecContext(ctx,
+				`INSERT OR IGNORE INTO debug_chunk_refs(dir, name, hash) VALUES(?,?,?)`,
+				r.Dir, r.Name, r.Hash)
 			if err != nil {
 				return err
 			}
-			// OR IGNORE 跳过的重复行（dir 撞部分唯一索引）不记账——
-			// 首个落库者已在它自己的事务里把贡献记进 rollup。
 			if n, err := res.RowsAffected(); err != nil {
 				return err
-			} else if n == 0 {
-				continue
+			} else if n > 0 {
+				delta += refRowBytes(r.Dir, r.Name)
 			}
-			id, err := res.LastInsertId()
+		}
+		if len(batch.StripDirs) > 0 {
+			args := make([]any, 0, len(batch.StripDirs))
+			for _, dir := range batch.StripDirs {
+				args = append(args, dir)
+			}
+			where := `dir IN (` + placeholders(len(batch.StripDirs)) + `) AND name NOT IN ('meta.json', 'error.json')`
+			freed, err := deleteReturningBytes(ctx, q,
+				`DELETE FROM debug_files WHERE `+where+` RETURNING LENGTH(content)`, args...)
 			if err != nil {
 				return err
 			}
-			addCellContrib(cells, errCells, row, id)
-			addCauseContrib(causes, row)
-			if id > maxID {
-				maxID = id
+			delta -= freed
+			freed, err = deleteReturningBytes(ctx, q,
+				`DELETE FROM debug_chunks WHERE `+where+` RETURNING LENGTH(data)`, args...)
+			if err != nil {
+				return err
+			}
+			delta -= freed
+			// 引用随行死：剥离删除文件行的同一 WHERE 原样套到 refs 表
+			// （meta/error 没有 CAS 引用，谓词天然不伤锚点）。
+			freed, err = deleteReturningBytes(ctx, q,
+				`DELETE FROM debug_chunk_refs WHERE `+where+` RETURNING LENGTH(dir)+LENGTH(name)+LENGTH(hash)`, args...)
+			if err != nil {
+				return err
+			}
+			delta -= freed
+		}
+		if len(batch.LogRows) > 0 {
+			cells := map[cellDim]*cellVals{}
+			errCells := map[errCellDim]int64{}
+			causes := map[laneCauseDim]int64{}
+			var maxID int64
+			for _, row := range batch.LogRows {
+				res, err := q.ExecContext(ctx, logsBatchInsertSQL, logInsertArgs(row)...)
+				if err != nil {
+					return err
+				}
+				// OR IGNORE 跳过的重复行（dir 撞部分唯一索引）不记账——
+				// 首个落库者已在它自己的事务里把贡献记进 rollup。
+				if n, err := res.RowsAffected(); err != nil {
+					return err
+				} else if n == 0 {
+					continue
+				}
+				id, err := res.LastInsertId()
+				if err != nil {
+					return err
+				}
+				addCellContrib(cells, errCells, row, id)
+				addCauseContrib(causes, row)
+				if id > maxID {
+					maxID = id
+				}
+			}
+			if maxID > 0 {
+				if err := upsertCells(ctx, q, cells, errCells); err != nil {
+					return err
+				}
+				if err := upsertCauseCells(ctx, q, causes); err != nil {
+					return err
+				}
+				if err := setCellsWatermark(ctx, q, maxID); err != nil {
+					return err
+				}
 			}
 		}
-		if maxID > 0 {
-			if err := upsertCells(ctx, tx, cells, errCells); err != nil {
-				return err
-			}
-			if err := upsertCauseCells(ctx, tx, causes); err != nil {
-				return err
-			}
-			if err := setCellsWatermark(ctx, tx, maxID); err != nil {
-				return err
-			}
-		}
-	}
-	if err := addPayloadBytes(ctx, tx, delta); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
+		return addPayloadBytes(ctx, q, delta)
+	})
+	if err != nil {
 		return err
 	}
 	s.debugBytes.Add(delta)
@@ -873,8 +873,8 @@ func (s *Store) deleteDebugRows(ctx context.Context, op, where string, args ...a
 
 // deleteReturningBytes 执行一条带 RETURNING 长度列的 DELETE 并返回
 // 被删行的库存字节合计。
-func deleteReturningBytes(ctx context.Context, tx *sql.Tx, query string, args ...any) (int64, error) {
-	rows, err := tx.QueryContext(ctx, query, args...)
+func deleteReturningBytes(ctx context.Context, q dbtx, query string, args ...any) (int64, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -909,12 +909,12 @@ const debugPayloadBytesPendingKey = "debug_payload_bytes_pending"
 // 重建会收进期间的全部净量（升级首启窗内的漏计由周期对账兜底）。
 // 异步播种窗内（pending 行已建、真实行未落）增量记到 pending——同一条
 // UPDATE 命中哪行记哪行，调用方不需要知道自己处在哪个播种相位。
-func addPayloadBytes(ctx context.Context, tx *sql.Tx, delta int64) error {
+func addPayloadBytes(ctx context.Context, q dbtx, delta int64) error {
 	if delta == 0 {
 		return nil
 	}
 	// TEXT 亲和列把整数结果存成十进制文本，读侧 ParseInt 还原。
-	_, err := tx.ExecContext(ctx,
+	_, err := q.ExecContext(ctx,
 		`UPDATE runtime_state SET value = CAST(value AS INTEGER) + ?, updated_at = ? WHERE "key" IN (?, ?)`,
 		delta, time.Now().UnixMilli(), debugPayloadBytesKey, debugPayloadBytesPendingKey)
 	return err
