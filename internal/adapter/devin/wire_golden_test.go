@@ -90,7 +90,7 @@ var wireGoldenCases = map[string]struct {
 			Messages: []llm.Message{
 				llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "think about it"}}},
 				llm.AssistantMessage{Content: []llm.Content{
-					llm.ThinkingContent{Thinking: "reasoning here", ThinkingSignature: "sig-payload", SignatureType: "anthropic"},
+					llm.ThinkingContent{Thinking: "reasoning here", Signature: "sig-payload", SignatureType: "anthropic"},
 					llm.TextContent{Text: "the answer"},
 				}},
 				llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "go on"}}},

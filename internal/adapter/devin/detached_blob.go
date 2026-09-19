@@ -34,7 +34,7 @@ import (
 // detachedBlobVersion 是载荷格式版本：解码只认当前版，未来改编码
 //
 //	bump 之，旧行按不可解码跳过（播种降级为未命中，与缓存不存在同语义）。
-const detachedBlobVersion = 1
+const detachedBlobVersion = 2
 
 // detachedBlob 是单条 completed 条目的持久化载荷：blocks 是内容块
 // 去重表（类型标记 JSON），events 里 Partial/Message/Error 的
@@ -47,12 +47,24 @@ type detachedBlob struct {
 
 // blobBlock 是块表条目：Type 是判别标记，五个具体型各占一格。
 type blobBlock struct {
-	Type         llm.ContentType       `json:"t"`
-	Text         *llm.TextContent      `json:"text,omitempty"`
-	Thinking     *llm.ThinkingContent  `json:"think,omitempty"`
-	Image        *llm.ImageContent     `json:"img,omitempty"`
-	ToolCall     *llm.ToolCall         `json:"call,omitempty"`
-	ServerResult *llm.ServerToolResult `json:"sresult,omitempty"`
+	Type         llm.ContentType      `json:"t"`
+	Text         *llm.TextContent     `json:"text,omitempty"`
+	Thinking     *llm.ThinkingContent `json:"think,omitempty"`
+	Image        *llm.ImageContent    `json:"img,omitempty"`
+	ToolCall     *llm.ToolCall        `json:"call,omitempty"`
+	ServerResult *blobServerResult    `json:"sresult,omitempty"`
+}
+
+// blobServerResult 是 ServerToolResult 的线格式：Content 是接口切片，
+// 不能 JSON 往返——嵌套块复用同一套判别标记 inline 携带（结果正文
+// 很小，不进块表去重）。
+type blobServerResult struct {
+	ToolCallID    string                `json:"tcid"`
+	ToolName      string                `json:"tn,omitempty"`
+	Content       []blobBlock           `json:"c,omitempty"`
+	SearchResults []llm.WebSearchResult `json:"sr,omitempty"`
+	IsError       bool                  `json:"e,omitempty"`
+	ErrorCode     string                `json:"ec,omitempty"`
 }
 
 // blobEvent 是 ResponseEvent 的线格式：字段名取短键省体积（blob
@@ -66,7 +78,7 @@ type blobEvent struct {
 	ToolCallID   string                `json:"tid,omitempty"`
 	ToolName     string                `json:"tn,omitempty"`
 	ToolCall     *llm.ToolCall         `json:"tc,omitempty"`
-	ServerResult *llm.ServerToolResult `json:"sr,omitempty"`
+	ServerResult *blobServerResult     `json:"sr,omitempty"`
 	Reason       llm.StopReason        `json:"r,omitempty"`
 	Message      *blobMessage          `json:"m,omitempty"`
 	Error        *blobMessage          `json:"e,omitempty"`
@@ -155,10 +167,12 @@ func (enc *blobEncoder) event(event llm.ResponseEvent) (blobEvent, error) {
 		ToolCallID:   event.ToolCallID,
 		ToolName:     event.ToolName,
 		ToolCall:     event.ToolCall,
-		ServerResult: event.ServerResult,
 		Reason:       event.Reason,
 	}
 	var err error
+	if out.ServerResult, err = encodeBlobServerResult(event.ServerResult); err != nil {
+		return out, err
+	}
 	if event.Partial != nil {
 		if out.Partial, err = enc.partial(event.Partial); err != nil {
 			return out, err
@@ -255,9 +269,9 @@ func (enc *blobEncoder) messageBase(message *llm.AssistantMessage) (*blobMessage
 	return out, nil
 }
 
-// blockIndex 把一个内容块编进块表：值相同（类型标记 JSON 字节相同）
-// 的块去重到同一下标。
-func (enc *blobEncoder) blockIndex(block llm.Content) (int, error) {
+// tagBlock 把内容块装入判别标记外壳：块表去重与 ServerToolResult
+// 正文嵌套块共用同一套装配。
+func tagBlock(block llm.Content) (blobBlock, error) {
 	tagged := blobBlock{Type: block.ContentType()}
 	switch content := block.(type) {
 	case llm.TextContent:
@@ -269,9 +283,62 @@ func (enc *blobEncoder) blockIndex(block llm.Content) (int, error) {
 	case llm.ToolCall:
 		tagged.ToolCall = &content
 	case llm.ServerToolResult:
-		tagged.ServerResult = &content
+		result, err := encodeBlobServerResult(&content)
+		if err != nil {
+			return tagged, err
+		}
+		tagged.ServerResult = result
 	default:
-		return 0, fmt.Errorf("detached blob: unknown content block %T", block)
+		return tagged, fmt.Errorf("detached blob: unknown content block %T", block)
+	}
+	return tagged, nil
+}
+
+// encodeBlobServerResult 把托管工具结果转成线格式影子，正文块逐块
+// 打判别标记。
+func encodeBlobServerResult(result *llm.ServerToolResult) (*blobServerResult, error) {
+	if result == nil {
+		return nil, nil
+	}
+	out := &blobServerResult{
+		ToolCallID: result.ToolCallID, ToolName: result.ToolName,
+		SearchResults: result.SearchResults, IsError: result.IsError, ErrorCode: result.ErrorCode,
+	}
+	for _, block := range result.Content {
+		tagged, err := tagBlock(block)
+		if err != nil {
+			return nil, err
+		}
+		out.Content = append(out.Content, tagged)
+	}
+	return out, nil
+}
+
+// decode 把线格式影子解回 ServerToolResult；嵌套正文块逐块解标记。
+func (result *blobServerResult) decode() (*llm.ServerToolResult, error) {
+	if result == nil {
+		return nil, nil
+	}
+	out := &llm.ServerToolResult{
+		ToolCallID: result.ToolCallID, ToolName: result.ToolName,
+		SearchResults: result.SearchResults, IsError: result.IsError, ErrorCode: result.ErrorCode,
+	}
+	for _, tagged := range result.Content {
+		block, err := tagged.decode()
+		if err != nil {
+			return nil, err
+		}
+		out.Content = append(out.Content, block)
+	}
+	return out, nil
+}
+
+// blockIndex 把一个内容块编进块表：值相同（类型标记 JSON 字节相同）
+// 的块去重到同一下标。
+func (enc *blobEncoder) blockIndex(block llm.Content) (int, error) {
+	tagged, err := tagBlock(block)
+	if err != nil {
+		return 0, err
 	}
 	enc.marshals++
 	data, err := json.Marshal(tagged)
@@ -315,9 +382,12 @@ func decodeDetachedEvents(payload []byte) ([]llm.ResponseEvent, error) {
 		event := llm.ResponseEvent{
 			Type: in.Type, ContentIndex: in.ContentIndex, Delta: in.Delta,
 			Content: in.Content, ToolCallID: in.ToolCallID, ToolName: in.ToolName,
-			ToolCall: in.ToolCall, ServerResult: in.ServerResult, Reason: in.Reason,
+			ToolCall: in.ToolCall, Reason: in.Reason,
 		}
 		var err error
+		if event.ServerResult, err = in.ServerResult.decode(); err != nil {
+			return nil, err
+		}
 		if event.Partial, err = in.Partial.decode(blocks); err != nil {
 			return nil, err
 		}
@@ -387,7 +457,11 @@ func (tagged blobBlock) decode() (llm.Content, error) {
 		}
 	case llm.ContentTypeServerToolResult:
 		if tagged.ServerResult != nil {
-			return *tagged.ServerResult, nil
+			result, err := tagged.ServerResult.decode()
+			if err != nil {
+				return nil, err
+			}
+			return *result, nil
 		}
 	}
 	return nil, fmt.Errorf("detached blob: malformed block type %q", tagged.Type)

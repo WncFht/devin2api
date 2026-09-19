@@ -12,7 +12,7 @@ import (
 // TestStreamEncoderEncodesReasoningAndToolItems 的测试动机是保证思考和工具调用作为独立 output item 完整结束并进入最终 output。
 func TestStreamEncoderEncodesReasoningAndToolItems(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test", nil)
-	thinking := llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "encrypted"}
+	thinking := llm.ThinkingContent{Thinking: "inspect", Signature: "encrypted"}
 	call := llm.ToolCall{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"city":"Shanghai"}`)}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking, call}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{
@@ -125,7 +125,7 @@ func TestStreamEncoderEncodesFinalTextMessage(t *testing.T) {
 }
 
 // TestStreamEncoderHoldsReasoningForLateSignature 的测试动机是上游实测帧序
-// thinking_end → toolcall_* → thinking_signature：reasoning item 必须挂起等待
+// thinking_end → toolcall_* → signature：reasoning item 必须挂起等待
 // 隔块的尾随签名，而不是提前关闭把签名撞成 already-closed 错误。
 // 签名帧到达只累积不关项——收尾三帧推迟到 Done 前的兜底 flush 统一发出，
 // 因此 reasoning 的 output_item.done 落在 tool call 的 done 之后。
@@ -137,7 +137,7 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 		StopReason: llm.StopReasonPending,
 	}
 	final := &llm.AssistantMessage{
-		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}, call},
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", Signature: "sig"}, call},
 		StopReason: llm.StopReasonToolUse,
 	}
 	events := []llm.ResponseEvent{
@@ -150,9 +150,9 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 	}
 	encoded := encodeStreamEvents(t, encoder, events)
 	// 签名帧到达时 Partial 中的思考块已带上签名（与解码器共享指针语义一致）。
-	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}
+	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", Signature: "sig"}
 	late := []llm.ResponseEvent{
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
 		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 1, ToolCall: &call, Partial: partial},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
 	}
@@ -180,7 +180,7 @@ func TestStreamEncoderHoldsReasoningForLateSignature(t *testing.T) {
 }
 
 // TestStreamEncoderAccumulatesSignatureFragments 钉住上游把思考签名拆成
-// 多帧的形态：每个 thinking_signature 事件只累积进 item，收尾三帧推迟到
+// 多帧的形态：每个 signature 事件只累积进 item，收尾三帧推迟到
 // 流终止的 flush——首个分片就关项会让 output_item.done 携带截断签名，
 // 客户端下轮回放被上游 invalid_argument 拒（与 anthropic 侧同策）。
 func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
@@ -190,7 +190,7 @@ func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
 		StopReason: llm.StopReasonPending,
 	}
 	final := &llm.AssistantMessage{
-		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "AAABBB"}},
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", Signature: "AAABBB"}},
 		StopReason: llm.StopReasonStop,
 	}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -198,8 +198,8 @@ func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
 		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
 		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
 		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "AAA", Partial: final},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "BBB", Partial: final},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "AAA", Partial: final},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "BBB", Partial: final},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
 	})
 	assertEventNames(t, encoded, []string{
@@ -222,7 +222,7 @@ func TestStreamEncoderAccumulatesSignatureFragments(t *testing.T) {
 // 必须正常关闭且签名不翻倍。
 func TestStreamEncoderEncodesSignatureOnlyReasoning(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test", nil)
-	thinking := llm.ThinkingContent{ThinkingSignature: "sig"}
+	thinking := llm.ThinkingContent{Signature: "sig"}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonStop}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -360,7 +360,7 @@ func nestedString(t *testing.T, value map[string]any, parent string, field strin
 func TestStreamEncoderOpenAISignatureRestoresItemID(t *testing.T) {
 	encoder := NewStreamEncoder("gpt-test", nil)
 	blob := `[{"id":"rs_real1","type":"reasoning","encrypted_content":"gAAA","summary":[],"content":[],"status":""}]`
-	thinking := llm.ThinkingContent{ThinkingSignature: blob, SignatureType: "openai", Redacted: true}
+	thinking := llm.ThinkingContent{Signature: blob, SignatureType: "openai", Redacted: true}
 	partial := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{thinking}, StopReason: llm.StopReasonStop}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -435,7 +435,7 @@ func TestStreamEncoderWebSearchCallLifecycle(t *testing.T) {
 	call := llm.ToolCall{ID: "call-9", Name: "web_search", Arguments: json.RawMessage(`{"query":"golang"}`), Server: true}
 	result := llm.ServerToolResult{
 		ToolCallID: "call-9", ToolName: "web_search",
-		Text: "go1.27", Results: []llm.WebSearchResult{{Title: "Go", URL: "https://go.dev", Summary: "site"}},
+		Content: []llm.Content{llm.TextContent{Text: "go1.27"}}, SearchResults: []llm.WebSearchResult{{Title: "Go", URL: "https://go.dev", Summary: "site"}},
 	}
 	partial := &llm.AssistantMessage{Content: []llm.Content{call}, StopReason: llm.StopReasonPending}
 	final := &llm.AssistantMessage{Content: []llm.Content{call, result}, StopReason: llm.StopReasonStop}

@@ -93,10 +93,10 @@ func TestDecodeRequestPreservesMidConversationSystem(t *testing.T) {
 	}
 }
 
-// TestDecodeRequestReplaysThinkingSignature 验证 thinking 块正文读自
+// TestDecodeRequestReplaysSignature 验证 thinking 块正文读自
 // thinking 字段（而非 text）、签名保留，redacted_thinking 的 data 透传为
 // 可回放签名。
-func TestDecodeRequestReplaysThinkingSignature(t *testing.T) {
+func TestDecodeRequestReplaysSignature(t *testing.T) {
 	data := []byte(`{
   "model": "claude-test",
   "messages": [
@@ -116,11 +116,11 @@ func TestDecodeRequestReplaysThinkingSignature(t *testing.T) {
 	}
 	assistant := request.Context.Messages[1].(llm.AssistantMessage)
 	first, ok := assistant.Content[0].(llm.ThinkingContent)
-	if !ok || first.Thinking != "先想清楚再答" || first.ThinkingSignature != "sig-1" {
+	if !ok || first.Thinking != "先想清楚再答" || first.Signature != "sig-1" {
 		t.Fatalf("content[0] = %#v, want thinking+signature", assistant.Content[0])
 	}
 	second, ok := assistant.Content[1].(llm.ThinkingContent)
-	if !ok || !second.Redacted || second.ThinkingSignature != "sealed-data-2" {
+	if !ok || !second.Redacted || second.Signature != "sealed-data-2" {
 		t.Fatalf("content[1] = %#v, want redacted thinking with data as signature", assistant.Content[1])
 	}
 }

@@ -102,8 +102,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		return encoder.thinkingDelta(event)
 	case llm.ResponseEventThinkingEnd:
 		return encoder.endThinking(event)
-	case llm.ResponseEventThinkingSignature:
-		return encoder.thinkingSignature(event)
+	case llm.ResponseEventSignature:
+		return encoder.signature(event)
 	case llm.ResponseEventToolCallStart:
 		return encoder.startToolUse(event), nil
 	case llm.ResponseEventToolCallDelta:
@@ -223,7 +223,7 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 		return nil, fmt.Errorf("thinking end at content index %d without thinking_start", event.ContentIndex)
 	}
 	if t, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok {
-		state.signature.WriteString(t.ThinkingSignature)
+		state.signature.WriteString(t.Signature)
 		state.redacted = state.redacted || t.Redacted
 	}
 	// 上游把签名作为正文之后的尾随帧发送（swe-2 实测在所有 text 之后
@@ -256,15 +256,24 @@ func (encoder *StreamEncoder) endThinking(event llm.ResponseEvent) ([]SSEEvent, 
 	}, encoder.stopThinking(state)...), nil
 }
 
-// thinkingSignature 只累积尾随签名增量，不逐帧下发：两个官方 SDK 对
-// signature 是赋值语义（content.signature = delta.signature，非追加），
-// 逐增量发 signature_delta 会让客户端只留最后一片。完整签名统一在
-// flushPendingThinking 里随收尾一次性下发；块已收尾（pendingSig 已清）
+// signature 只累积尾随签名增量到目标块，不逐帧下发：目标不限于
+// thinking——Gemini 体制同样给 text/functionCall part 打签名。Anthropic
+// wire 只有 thinking 块的 signature_delta 通道，其余块的签名留在 IR 内
+// 不下发（协议无对应形态）。两个官方 SDK 对 signature 是赋值语义
+// （content.signature = delta.signature，非追加），逐增量发
+// signature_delta 会让客户端只留最后一片；完整签名统一在
+// flushPendingThinking 里随收尾一次性下发。块已收尾（pendingSig 已清）
 // 的迟到签名帧落进死缓冲自然丢弃——与块不存在（解码器 bug）区分开。
-func (encoder *StreamEncoder) thinkingSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
-	state := encoder.block(event.ContentIndex, "thinking")
+func (encoder *StreamEncoder) signature(event llm.ResponseEvent) ([]SSEEvent, error) {
+	var state *contentBlockState
+	for _, candidate := range encoder.blocks {
+		if candidate.index == event.ContentIndex {
+			state = candidate
+			break
+		}
+	}
 	if state == nil {
-		return nil, fmt.Errorf("thinking signature at content index %d without thinking_start", event.ContentIndex)
+		return nil, fmt.Errorf("signature at content index %d without matching block", event.ContentIndex)
 	}
 	state.signature.WriteString(event.Delta)
 	return nil, nil
@@ -444,14 +453,14 @@ func anthropicServerToolResultBlock(result llm.ServerToolResult) map[string]any 
 		}
 		return block
 	}
-	entries := make([]any, 0, len(result.Results)+1)
-	for _, item := range result.Results {
+	entries := make([]any, 0, len(result.SearchResults)+1)
+	for _, item := range result.SearchResults {
 		entries = append(entries, map[string]any{
 			"type": "web_search_result", "title": item.Title, "url": item.URL, "page_age": nil,
 		})
 	}
-	if len(result.Results) == 0 && result.Text != "" {
-		entries = append(entries, map[string]any{"type": "text", "text": result.Text})
+	if len(result.SearchResults) == 0 && result.TextBody() != "" {
+		entries = append(entries, map[string]any{"type": "text", "text": result.TextBody()})
 	}
 	block["content"] = entries
 	return block
@@ -580,12 +589,12 @@ func messageToAnthropic(message *llm.AssistantMessage) []any {
 			blocks = append(blocks, map[string]any{"type": "text", "text": content.Text})
 		case llm.ThinkingContent:
 			if content.Redacted {
-				blocks = append(blocks, map[string]any{"type": "redacted_thinking", "data": content.ThinkingSignature})
+				blocks = append(blocks, map[string]any{"type": "redacted_thinking", "data": content.Signature})
 				continue
 			}
 			b := map[string]any{"type": "thinking", "thinking": content.Thinking}
-			if content.ThinkingSignature != "" {
-				b["signature"] = content.ThinkingSignature
+			if content.Signature != "" {
+				b["signature"] = content.Signature
 			}
 			blocks = append(blocks, b)
 		case llm.ToolCall:

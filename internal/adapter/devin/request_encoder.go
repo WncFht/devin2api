@@ -350,8 +350,8 @@ func convertMessage(message llm.Message, attachImages bool, repairs *llm.Request
 					thinking.WriteString("\n")
 				}
 				thinking.WriteString(typed.Thinking)
-				if typed.ThinkingSignature != "" {
-					signature = typed.ThinkingSignature
+				if typed.Signature != "" {
+					signature = typed.Signature
 					signatureType = typed.SignatureType
 				}
 				redacted = redacted || typed.Redacted

@@ -21,8 +21,8 @@ func TestRequestMessagesSupportsProviderIndependentHistory(t *testing.T) {
 			AssistantMessage{
 				Content: []Content{
 					ThinkingContent{
-						Thinking:          "需要先读取文件。",
-						ThinkingSignature: "thinking-signature",
+						Thinking:  "需要先读取文件。",
+						Signature: "thinking-signature",
 					},
 					TextContent{
 						Text: "我先读取配置。",

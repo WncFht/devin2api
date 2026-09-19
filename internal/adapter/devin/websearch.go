@@ -241,7 +241,10 @@ func serverSearchEvents(model, query string, outcome webSearchOutcome) []llm.Res
 	call.Arguments = arguments
 	result := llm.ServerToolResult{
 		ToolCallID: call.ID, ToolName: call.Name,
-		Results: outcome.results, Text: outcome.summary,
+		SearchResults: outcome.results,
+	}
+	if outcome.summary != "" {
+		result.Content = []llm.Content{llm.TextContent{Text: outcome.summary}}
 	}
 	text := renderSearchResults(query, outcome)
 	if outcome.url != "" {
@@ -286,7 +289,7 @@ func (stream *responseStream) executeServerCall(ctx context.Context, call llm.To
 	if err := json.Unmarshal(call.Arguments, &arguments); err != nil || arguments.Query == "" {
 		result.IsError = true
 		result.ErrorCode = "invalid_arguments"
-		result.Text = "web search call is missing a valid query argument"
+		result.Content = []llm.Content{llm.TextContent{Text: "web search call is missing a valid query argument"}}
 		return result
 	}
 	var allowed []string
@@ -304,11 +307,11 @@ func (stream *responseStream) executeServerCall(ctx context.Context, call llm.To
 		if failure := llm.Classify(err); failure != nil && failure.Code != "" {
 			result.ErrorCode = failure.Code
 		}
-		result.Text = fmt.Sprintf("web search failed: %s", err)
+		result.Content = []llm.Content{llm.TextContent{Text: fmt.Sprintf("web search failed: %s", err)}}
 		return result
 	}
-	result.Results = outcome.results
-	result.Text = renderSearchResults(arguments.Query, outcome)
+	result.SearchResults = outcome.results
+	result.Content = []llm.Content{llm.TextContent{Text: renderSearchResults(arguments.Query, outcome)}}
 	return result
 }
 
@@ -364,7 +367,7 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 			result = llm.ServerToolResult{
 				ToolCallID: call.ID, ToolName: call.Name, IsError: true,
 				ErrorCode: "max_uses_exceeded",
-				Text:      "web search limit reached for this response",
+				Content:   []llm.Content{llm.TextContent{Text: "web search limit reached for this response"}},
 			}
 		} else {
 			result = stream.executeServerCall(ctx, call)
@@ -382,7 +385,7 @@ func (stream *responseStream) handleServerCalls(ctx context.Context, events *[]l
 		}
 		resultMessages = append(resultMessages, llm.ToolResultMessage{
 			ToolCallID: result.ToolCallID, IsError: result.IsError, TimestampMS: time.Now().UnixMilli(),
-			Content: []llm.Content{llm.TextContent{Text: result.Text}},
+			Content: result.Content,
 		})
 	}
 	// 结果事件插在 Done 之前；续轮路径把 Done 从对外事件里摘除。

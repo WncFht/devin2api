@@ -190,13 +190,13 @@ func detachedEventBytes(event llm.ResponseEvent) int {
 func detachedContentBytes(block llm.Content) int {
 	switch content := block.(type) {
 	case llm.TextContent:
-		return len(content.Text)
+		return len(content.Text) + len(content.Signature)
 	case llm.ThinkingContent:
-		return len(content.Thinking) + len(content.ThinkingSignature)
+		return len(content.Thinking) + len(content.Signature)
 	case llm.ImageContent:
-		return len(content.Data)
+		return len(content.Data) + len(content.Signature)
 	case llm.ToolCall:
-		return len(content.ID) + len(content.Name) + len(content.Arguments)
+		return len(content.ID) + len(content.Name) + len(content.Arguments) + len(content.Signature)
 	case llm.ServerToolResult:
 		return detachedServerResultBytes(&content)
 	}
@@ -205,8 +205,11 @@ func detachedContentBytes(block llm.Content) int {
 
 // detachedServerResultBytes 估计托管工具结果的驻留字节。
 func detachedServerResultBytes(result *llm.ServerToolResult) int {
-	size := len(result.ToolCallID) + len(result.ToolName) + len(result.Text) + len(result.ErrorCode)
-	for _, hit := range result.Results {
+	size := len(result.ToolCallID) + len(result.ToolName) + len(result.ErrorCode)
+	for _, block := range result.Content {
+		size += detachedContentBytes(block)
+	}
+	for _, hit := range result.SearchResults {
 		size += len(hit.Title) + len(hit.URL) + len(hit.Summary)
 	}
 	return size

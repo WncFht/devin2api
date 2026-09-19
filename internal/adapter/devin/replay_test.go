@@ -159,7 +159,7 @@ func TestGoldenFramesThinkingLateSignature(t *testing.T) {
 		llm.ResponseEventThinkingEnd,
 		llm.ResponseEventTextStart,
 		llm.ResponseEventTextDelta,
-		llm.ResponseEventThinkingSignature,
+		llm.ResponseEventSignature,
 		llm.ResponseEventTextEnd,
 		llm.ResponseEventDone,
 	)
@@ -174,8 +174,8 @@ func TestGoldenFramesThinkingLateSignature(t *testing.T) {
 	if thinking.Thinking != "Comparing the two code paths, the merged form wins." {
 		t.Fatalf("thinking = %q", thinking.Thinking)
 	}
-	if thinking.ThinkingSignature != "sealed.v1.goldenfixturesignature" || thinking.SignatureType != "sealed" {
-		t.Fatalf("signature = %q/%s", thinking.ThinkingSignature, thinking.SignatureType)
+	if thinking.Signature != "sealed.v1.goldenfixturesignature" || thinking.SignatureType != "sealed" {
+		t.Fatalf("signature = %q/%s", thinking.Signature, thinking.SignatureType)
 	}
 	if text, ok := message.Content[1].(llm.TextContent); !ok || text.Text != "Verified: the merged history form fixes it." {
 		t.Fatalf("text = %#v", message.Content[1])

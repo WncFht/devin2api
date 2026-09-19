@@ -448,10 +448,10 @@ func consumePendingThinking(pending *pendingReasoning) []llm.Content {
 		return nil
 	}
 	block := llm.ThinkingContent{
-		Thinking:          strings.Join(pending.texts, "\n"),
-		ThinkingSignature: pending.signature,
-		SignatureType:     pending.signatureType,
-		Redacted:          len(pending.texts) == 0,
+		Thinking:      strings.Join(pending.texts, "\n"),
+		Signature:     pending.signature,
+		SignatureType: pending.signatureType,
+		Redacted:      len(pending.texts) == 0,
 	}
 	*pending = pendingReasoning{}
 	return []llm.Content{block}

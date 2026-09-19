@@ -249,8 +249,8 @@ func TestDecodeRequestAttachesReasoningSummary(t *testing.T) {
 	if !ok || thinking.Thinking != "需要调用 read_file" {
 		t.Fatalf("assistant content[2] = %#v, want ThinkingContent", assistant.Content[2])
 	}
-	if thinking.ThinkingSignature != "sealed.v1.xyz" {
-		t.Fatalf("thinking signature = %q, want sealed.v1.xyz replay", thinking.ThinkingSignature)
+	if thinking.Signature != "sealed.v1.xyz" {
+		t.Fatalf("thinking signature = %q, want sealed.v1.xyz replay", thinking.Signature)
 	}
 	if _, ok := assistant.Content[3].(llm.ToolCall); !ok {
 		t.Fatalf("assistant content[3] = %#v, want ToolCall", assistant.Content[3])
@@ -297,7 +297,7 @@ func TestDecodeRequestMergesAssistantTurnItems(t *testing.T) {
 	if text, ok := assistant.Content[1].(llm.TextContent); !ok || text.Text != "我先读 README" {
 		t.Fatalf("content[1] = %#v, want announcement text", assistant.Content[1])
 	}
-	if thinking, ok := assistant.Content[2].(llm.ThinkingContent); !ok || thinking.ThinkingSignature != "sealed.v1.sig" {
+	if thinking, ok := assistant.Content[2].(llm.ThinkingContent); !ok || thinking.Signature != "sealed.v1.sig" {
 		t.Fatalf("content[2] = %#v, want signed reasoning", assistant.Content[2])
 	}
 	call, ok := assistant.Content[3].(llm.ToolCall)
@@ -491,7 +491,7 @@ func TestDecodeRequestReplaysOpenAIReasoningSignature(t *testing.T) {
 		t.Fatalf("message[0] = %T", request.Context.Messages[0])
 	}
 	thinking, ok := assistant.Content[0].(llm.ThinkingContent)
-	if !ok || thinking.SignatureType != "openai" || thinking.ThinkingSignature != blob {
+	if !ok || thinking.SignatureType != "openai" || thinking.Signature != blob {
 		t.Fatalf("thinking block = %#v", assistant.Content[0])
 	}
 	if !thinking.Redacted {
@@ -515,7 +515,7 @@ func TestDecodeRequestDropsForeignReasoningPayload(t *testing.T) {
 	}
 	assistant := request.Context.Messages[0].(llm.AssistantMessage)
 	for _, block := range assistant.Content {
-		if thinking, ok := block.(llm.ThinkingContent); ok && thinking.ThinkingSignature != "" {
+		if thinking, ok := block.(llm.ThinkingContent); ok && thinking.Signature != "" {
 			t.Fatalf("foreign signature must be dropped, got %#v", thinking)
 		}
 	}

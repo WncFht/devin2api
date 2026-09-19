@@ -151,7 +151,7 @@ func TestBuildRequestMapsLoopMessages(t *testing.T) {
 		Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
 			llm.AssistantMessage{Content: []llm.Content{
-				llm.ThinkingContent{Thinking: "think", ThinkingSignature: "sig"},
+				llm.ThinkingContent{Thinking: "think", Signature: "sig"},
 				llm.ToolCall{ID: "call-1", Name: "exec", Arguments: json.RawMessage(`{"command":"ls"}`)},
 			}},
 			llm.ToolResultMessage{ToolCallID: "call-1", IsError: true, Content: []llm.Content{llm.TextContent{Text: "failed"}}},
@@ -339,13 +339,13 @@ func TestBuildRequestAggregatesThinkingBlocks(t *testing.T) {
 		Messages: []llm.Message{
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "hello"}}},
 			llm.AssistantMessage{Content: []llm.Content{
-				llm.ThinkingContent{Thinking: "part-1", ThinkingSignature: "sig-1"},
-				llm.ThinkingContent{Thinking: "part-2", ThinkingSignature: "sig-2"},
+				llm.ThinkingContent{Thinking: "part-1", Signature: "sig-1"},
+				llm.ThinkingContent{Thinking: "part-2", Signature: "sig-2"},
 				llm.TextContent{Text: "answer"},
 			}},
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: "again"}}},
 			llm.AssistantMessage{Content: []llm.Content{
-				llm.ThinkingContent{ThinkingSignature: "sealed-x", Redacted: true},
+				llm.ThinkingContent{Signature: "sealed-x", Redacted: true},
 				llm.ToolCall{ID: "call-1", Name: "exec", Arguments: json.RawMessage(`{}`)},
 			}},
 		},
@@ -563,7 +563,7 @@ func TestResponseDecoderMapsOneFrameToOrderedEvents(t *testing.T) {
 		t.Fatalf("partial = %#v, want three content blocks", partial)
 	}
 	thinking := partial.Content[0].(llm.ThinkingContent)
-	if thinking.Thinking != "think" || thinking.ThinkingSignature != "sig" {
+	if thinking.Thinking != "think" || thinking.Signature != "sig" {
 		t.Fatalf("thinking = %#v", thinking)
 	}
 }
@@ -576,21 +576,21 @@ func TestResponseDecoderMergesLateSignature(t *testing.T) {
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaThinking: proto.String("think")})
 	decoder.decode(&devinproto.GetChatMessageResponse{DeltaText: proto.String("answer")})
 	events := decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("sig")})
-	if len(events) != 1 || events[0].Type != llm.ResponseEventThinkingSignature {
-		t.Fatalf("late signature events = %#v, want single thinking_signature", events)
+	if len(events) != 1 || events[0].Type != llm.ResponseEventSignature {
+		t.Fatalf("late signature events = %#v, want single signature", events)
 	}
 	if events[0].ContentIndex != 0 || events[0].Delta != "sig" {
 		t.Fatalf("signature event = %#v", events[0])
 	}
 	thinking := events[0].Partial.Content[0].(llm.ThinkingContent)
-	if thinking.Thinking != "think" || thinking.ThinkingSignature != "sig" {
+	if thinking.Thinking != "think" || thinking.Signature != "sig" {
 		t.Fatalf("merged thinking = %#v", thinking)
 	}
 }
 
 // TestResponseDecoderSynthesizesThinkingForBareSignature 的测试动机是 openai 体制
 // 上游只有签名没有思考正文：合成块必须走 start/end 完整生命周期，编码器从
-// Partial 边界取签名；发 thinking_signature 会与边界读取叠加翻倍并让 item 悬挂。
+// Partial 边界取签名；发 signature 会与边界读取叠加翻倍并让 item 悬挂。
 func TestResponseDecoderSynthesizesThinkingForBareSignature(t *testing.T) {
 	decoder := newResponseDecoder("model", nil, nil, nil)
 	decoder.start()
@@ -608,16 +608,16 @@ func TestResponseDecoderSynthesizesThinkingForBareSignature(t *testing.T) {
 		}
 	}
 	thinking := events[1].Partial.Content[0].(llm.ThinkingContent)
-	if thinking.ThinkingSignature != "sig" || thinking.SignatureType != "openai" {
+	if thinking.Signature != "sig" || thinking.SignatureType != "openai" {
 		t.Fatalf("synthesized thinking = %#v", thinking)
 	}
 	// 后续裸签名帧按 merge 路径并入同一合成块。
 	events = decoder.decode(&devinproto.GetChatMessageResponse{DeltaSignature: proto.String("2")})
-	if len(events) != 1 || events[0].Type != llm.ResponseEventThinkingSignature || events[0].Delta != "2" {
-		t.Fatalf("second signature events = %#v, want thinking_signature delta", events)
+	if len(events) != 1 || events[0].Type != llm.ResponseEventSignature || events[0].Delta != "2" {
+		t.Fatalf("second signature events = %#v, want signature delta", events)
 	}
 	thinking = events[0].Partial.Content[0].(llm.ThinkingContent)
-	if thinking.ThinkingSignature != "sig2" {
+	if thinking.Signature != "sig2" {
 		t.Fatalf("merged synthesized thinking = %#v", thinking)
 	}
 }
@@ -1759,11 +1759,11 @@ func TestResponseStreamResumesSilentEOF(t *testing.T) {
 	}
 }
 
-// TestResponseStreamResumeStripsPartialThinkingSignature 的测试动机是
+// TestResponseStreamResumeStripsPartialSignature 的测试动机是
 // 钉住在飞 thinking 块的回显形态：截断点的签名是残片，回传可能被
 // 上游验签拒掉——回显剥成无签名 thinking（实测接受），种子内容保留
 // 原样保住客户端已见事件与 partial 的一致性。
-func TestResponseStreamResumeStripsPartialThinkingSignature(t *testing.T) {
+func TestResponseStreamResumeStripsPartialSignature(t *testing.T) {
 	defer func(d time.Duration) { upstreamStallTimeout = d }(upstreamStallTimeout)
 	defer func(d time.Duration) { upstreamConfirmedStallTimeout = d }(upstreamConfirmedStallTimeout)
 	upstreamStallTimeout = 20 * time.Millisecond
@@ -1818,11 +1818,11 @@ func TestResponseStreamResumeStripsPartialThinkingSignature(t *testing.T) {
 	if !ok {
 		t.Fatalf("echoed last block = %#v, want thinking", assistant.Content[len(assistant.Content)-1])
 	}
-	if thinking.ThinkingSignature != "" || thinking.SignatureType != "" {
-		t.Fatalf("echoed thinking signature = %q/%q, want stripped", thinking.ThinkingSignature, thinking.SignatureType)
+	if thinking.Signature != "" || thinking.SignatureType != "" {
+		t.Fatalf("echoed thinking signature = %q/%q, want stripped", thinking.Signature, thinking.SignatureType)
 	}
 	seeded, ok := seed[len(seed)-1].(llm.ThinkingContent)
-	if !ok || seeded.ThinkingSignature != "sigfrag" {
+	if !ok || seeded.Signature != "sigfrag" {
 		t.Fatalf("seeded thinking = %#v, want original signature kept", seed[len(seed)-1])
 	}
 }
@@ -2096,7 +2096,7 @@ func TestResponseDecoderStoresSignatureTypeAndOutputID(t *testing.T) {
 	if !ok {
 		t.Fatalf("content[0] = %T, want ThinkingContent", decoder.partial.Content[0])
 	}
-	if thinking.SignatureType != "anthropic" || thinking.ThinkingSignature != "sig-payload" {
+	if thinking.SignatureType != "anthropic" || thinking.Signature != "sig-payload" {
 		t.Fatalf("thinking = %#v", thinking)
 	}
 	if decoder.partial.OutputID != "msg_123" {
@@ -2128,7 +2128,7 @@ func TestResponseDecoderLateSignatureSynthesizesBlock(t *testing.T) {
 		t.Fatalf("events = %#v, want thinking_start + thinking_end", events)
 	}
 	thinking, ok := decoder.partial.Content[0].(llm.ThinkingContent)
-	if !ok || thinking.SignatureType != "openai" || thinking.ThinkingSignature == "" {
+	if !ok || thinking.SignatureType != "openai" || thinking.Signature == "" {
 		t.Fatalf("content[0] = %#v", decoder.partial.Content[0])
 	}
 }
@@ -2177,7 +2177,7 @@ func TestBuildRequestReplaysSignatureMetadata(t *testing.T) {
 			llm.AssistantMessage{
 				OutputID: "msg_42",
 				Content: []llm.Content{
-					llm.ThinkingContent{Thinking: "t", ThinkingSignature: "sig", SignatureType: "anthropic"},
+					llm.ThinkingContent{Thinking: "t", Signature: "sig", SignatureType: "anthropic"},
 					llm.TextContent{Text: "answer"},
 				},
 			},

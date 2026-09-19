@@ -63,7 +63,7 @@ func responseEventProjection(event llm.ResponseEvent) map[string]any {
 	switch event.Type {
 	case llm.ResponseEventTextStart, llm.ResponseEventTextDelta, llm.ResponseEventTextEnd,
 		llm.ResponseEventThinkingStart, llm.ResponseEventThinkingDelta, llm.ResponseEventThinkingEnd,
-		llm.ResponseEventThinkingSignature,
+		llm.ResponseEventSignature,
 		llm.ResponseEventToolCallStart, llm.ResponseEventToolCallDelta, llm.ResponseEventToolCallEnd:
 		result["content_index"] = event.ContentIndex
 	}
@@ -154,19 +154,36 @@ func contentListProjection(content []llm.Content) []any {
 func contentProjection(content llm.Content) map[string]any {
 	switch content := content.(type) {
 	case llm.TextContent:
-		return map[string]any{"type": content.ContentType(), "text": content.Text}
+		return signProjection(map[string]any{"type": content.ContentType(), "text": content.Text}, content.Signature, content.SignatureType)
 	case llm.ThinkingContent:
-		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "thinking_signature": content.ThinkingSignature, "signature_type": content.SignatureType, "redacted": content.Redacted}
+		return map[string]any{"type": content.ContentType(), "thinking": content.Thinking, "signature": content.Signature, "signature_type": content.SignatureType, "redacted": content.Redacted}
 	case llm.ImageContent:
-		return map[string]any{"type": content.ContentType(), "data": content.Data, "mime_type": content.MIMEType}
+		return signProjection(map[string]any{"type": content.ContentType(), "data": content.Data, "mime_type": content.MIMEType}, content.Signature, content.SignatureType)
 	case llm.ToolCall:
 		// Custom 调用的 Arguments 是供应商原文而非 JSON，直接 marshal
 		// RawMessage 会产生坏 JSON——按字符串落盘并标 custom。
 		if content.Custom {
-			return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": string(content.Arguments), "custom": true}
+			return signProjection(map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": string(content.Arguments), "custom": true}, content.Signature, content.SignatureType)
 		}
-		return map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": content.Arguments}
+		return signProjection(map[string]any{"type": content.ContentType(), "id": content.ID, "name": content.Name, "arguments": content.Arguments}, content.Signature, content.SignatureType)
+	case llm.ServerToolResult:
+		return map[string]any{
+			"type": content.ContentType(), "tool_call_id": content.ToolCallID, "tool_name": content.ToolName,
+			"content": contentListProjection(content.Content), "search_results": content.SearchResults,
+			"is_error": content.IsError, "error_code": content.ErrorCode,
+		}
 	default:
 		return map[string]any{"type": "unknown"}
 	}
+}
+
+// signProjection 给可签名块的投影补上签名键：签名缺席是常态，不空占键位；
+// 出现时（Gemini 对 text/inlineData/functionCall part 的 thought_signature）
+// 正是排障要看的字段。
+func signProjection(projection map[string]any, signature, signatureType string) map[string]any {
+	if signature != "" {
+		projection["signature"] = signature
+		projection["signature_type"] = signatureType
+	}
+	return projection
 }

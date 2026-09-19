@@ -196,6 +196,11 @@ type Content interface {
 type TextContent struct {
 	// Text 是向用户展示或作为上下文重放的文字。
 	Text string
+	// Signature 是供应商挂在本块上的不透明签名载荷（Gemini 会对最终
+	// text part 打 thought_signature），重放时原样回传；空表示未签名。
+	Signature string
+	// SignatureType 是签名载荷的格式标识，语义与 ThinkingContent 同制。
+	SignatureType string
 }
 
 // ContentType 返回文字内容类型。
@@ -208,12 +213,13 @@ func (TextContent) Validate() error { return nil }
 type ThinkingContent struct {
 	// Thinking 是可见的思考内容；加密思考场景下可以为空。
 	Thinking string
-	// ThinkingSignature 是供应商签名或加密后的不透明载荷，重放时应原样保留。
-	ThinkingSignature string
+	// Signature 是供应商签名或加密后的不透明载荷，重放时应原样保留。
+	Signature string
 	// SignatureType 是签名载荷的格式标识（Devin 上游 signature_type：
-	// sealed/anthropic/openai）。签名的解析规则由它决定——openai 型签名
-	// 是序列化的 Responses reasoning item，其余是不透明 blob。重放时必须
-	// 随签名原样回传，实测错配触发上游 invalid_argument。
+	// sealed/anthropic/openai；Gemini 体制是 thought_signature）。签名的
+	// 解析规则由它决定——openai 型签名是序列化的 Responses reasoning
+	// item，其余是不透明 blob。重放时必须随签名原样回传，实测错配触发
+	// 上游 invalid_argument。
 	SignatureType string
 	// Redacted 表示思考正文已被供应商隐藏，签名中可能保存可重放载荷。
 	Redacted bool
@@ -224,7 +230,7 @@ func (ThinkingContent) ContentType() ContentType { return ContentTypeThinking }
 
 // Validate 检查思考内容块。
 func (content ThinkingContent) Validate() error {
-	if content.Redacted && content.ThinkingSignature == "" {
+	if content.Redacted && content.Signature == "" {
 		return errors.New("redacted thinking content requires a signature")
 	}
 	return nil
@@ -236,6 +242,11 @@ type ImageContent struct {
 	Data string
 	// MIMEType 是图片的媒体类型，例如 image/png。
 	MIMEType string
+	// Signature 是供应商挂在本块上的不透明签名载荷（Gemini 会对
+	// inlineData part 打 thought_signature），重放时原样回传。
+	Signature string
+	// SignatureType 是签名载荷的格式标识，语义与 ThinkingContent 同制。
+	SignatureType string
 }
 
 // ContentType 返回图片内容类型。
@@ -270,6 +281,11 @@ type ToolCall struct {
 	// ServerToolResult 块随同一响应下发。编码器据此把调用渲染成各协议的
 	// 托管形态（anthropic server_tool_use / responses web_search_call）。
 	Server bool
+	// Signature 是供应商挂在本块上的不透明签名载荷（Gemini 对 functionCall
+	// part 打 thought_signature 且强制回传，缺省即 400），重放时原样回传。
+	Signature string
+	// SignatureType 是签名载荷的格式标识，语义与 ThinkingContent 同制。
+	SignatureType string
 }
 
 // ContentType 返回工具调用内容类型。
@@ -352,10 +368,12 @@ type ServerToolResult struct {
 	ToolCallID string
 	// ToolName 是托管工具名（如 web_search），供编码器选择结果块形态。
 	ToolName string
-	// Results 是结构化的搜索命中列表；当前仅搜索类托管工具填充。
-	Results []WebSearchResult
-	// Text 是结果的可读正文（上游合成的摘要），回放与兜底渲染共用。
-	Text string
+	// Content 是结果的可读正文块（上游合成的摘要等），回放成
+	// ToolResultMessage 与编码器无结构化条目时的兜底渲染共用。
+	Content []Content
+	// SearchResults 是搜索族托管工具的结构化命中列表；其余工具族
+	// 的结构化明细另设字段承载，不复用本字段。
+	SearchResults []WebSearchResult
 	// IsError 表示托管执行失败（搜索 RPC 失败、参数缺失等）。
 	IsError bool
 	// ErrorCode 是失败时的稳定错误码（供 anthropic
@@ -374,7 +392,19 @@ func (result ServerToolResult) Validate() error {
 	if result.ToolName == "" {
 		return errors.New("server tool result tool name is required")
 	}
-	return nil
+	return validateContent(result.Content, ContentTypeText, ContentTypeImage)
+}
+
+// TextBody 拼接正文里的全部文字块，供编码器在无结构化条目可用时
+// 取可读兜底正文。
+func (result ServerToolResult) TextBody() string {
+	var text strings.Builder
+	for _, block := range result.Content {
+		if typed, ok := block.(TextContent); ok {
+			text.WriteString(typed.Text)
+		}
+	}
+	return text.String()
 }
 
 // ToolDefinition 定义模型可以调用的一个工具。

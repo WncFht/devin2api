@@ -456,7 +456,7 @@ func (decoder *responseDecoder) decodeThinking(events []llm.ResponseEvent, respo
 	}
 	decoder.thinking.Redacted = decoder.thinking.Redacted || response.GetThinkingRedacted()
 	// 思考正文在 endThinking 再 materialize；签名通常较短，每帧同步签名避免 startReasoning 拿不到。
-	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
+	decoder.thinking.Signature = decoder.thinkingSigBuilder.String()
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	if delta := response.GetDeltaThinking(); delta != "" {
 		events = append(events, llm.ResponseEvent{Type: llm.ResponseEventThinkingDelta, ContentIndex: decoder.thinkIdx, Delta: delta, Partial: decoder.snapshot()})
@@ -628,26 +628,26 @@ func (decoder *responseDecoder) decodeLateSignature(events []llm.ResponseEvent, 
 		if !ok {
 			continue
 		}
-		thinking.ThinkingSignature += signature
+		thinking.Signature += signature
 		if sigType := response.GetDeltaSignatureType(); sigType != "" {
 			thinking.SignatureType = sigType
 		}
 		thinking.Redacted = thinking.Redacted || response.GetThinkingRedacted()
 		decoder.partial.Content[index] = thinking
 		return append(events, llm.ResponseEvent{
-			Type: llm.ResponseEventThinkingSignature, ContentIndex: index,
+			Type: llm.ResponseEventSignature, ContentIndex: index,
 			Delta: signature, Partial: decoder.snapshot(),
 		})
 	}
 	thinking := llm.ThinkingContent{
-		ThinkingSignature: signature,
-		SignatureType:     response.GetDeltaSignatureType(),
-		Redacted:          response.GetThinkingRedacted(),
+		Signature:     signature,
+		SignatureType: response.GetDeltaSignatureType(),
+		Redacted:      response.GetThinkingRedacted(),
 	}
 	decoder.partial.Content = append(decoder.partial.Content, thinking)
 	index := len(decoder.partial.Content) - 1
 	// 事件共享同一 Partial 指针，编码器在 start/end 边界就会读到块内签名；
-	// 再发 thinking_signature 会与之叠加翻倍，且合成块永远没有 thinking_end，
+	// 再发 signature 事件会与之叠加翻倍，且合成块永远没有 thinking_end，
 	// 只发签名事件会让编码器侧的 item 悬挂到流终止报错。
 	return append(events,
 		llm.ResponseEvent{Type: llm.ResponseEventThinkingStart, ContentIndex: index, Partial: decoder.snapshot()},
@@ -666,7 +666,7 @@ func (decoder *responseDecoder) endThinking(events []llm.ResponseEvent) []llm.Re
 	decoder.thinkingOpen = false
 	// 只在思考块结束时一次性生成完整思考与签名。
 	decoder.thinking.Thinking = decoder.thinkingBuilder.String()
-	decoder.thinking.ThinkingSignature = decoder.thinkingSigBuilder.String()
+	decoder.thinking.Signature = decoder.thinkingSigBuilder.String()
 	decoder.partial.Content[decoder.thinkIdx] = *decoder.thinking
 	return append(events, llm.ResponseEvent{
 		Type: llm.ResponseEventThinkingEnd, ContentIndex: decoder.thinkIdx,

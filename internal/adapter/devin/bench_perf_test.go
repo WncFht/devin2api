@@ -84,7 +84,7 @@ func BenchmarkBuildRequestLongHistory(b *testing.B) {
 		messages = append(messages,
 			llm.UserMessage{Content: []llm.Content{llm.TextContent{Text: fmt.Sprintf("task %d", i)}}},
 			llm.AssistantMessage{Content: []llm.Content{
-				llm.ThinkingContent{Thinking: strings.Repeat("thinking ", 50), ThinkingSignature: "sealed.v1.x", SignatureType: "sealed"},
+				llm.ThinkingContent{Thinking: strings.Repeat("thinking ", 50), Signature: "sealed.v1.x", SignatureType: "sealed"},
 				llm.ToolCall{ID: fmt.Sprintf("call_%d", i), Name: "exec", Arguments: json.RawMessage(`{"command":"ls"}`)},
 			}},
 			llm.ToolResultMessage{ToolCallID: fmt.Sprintf("call_%d", i), Content: []llm.Content{llm.TextContent{Text: strings.Repeat("output ", 100)}}},

@@ -122,7 +122,7 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 	}
 	// 上游把思考签名作为正文之后的尾随帧发送，可能隔着整个 toolcall
 	// 块才到、还可能拆成多帧（实测 thinking_end → toolcall_* →
-	// thinking_signature）。签名事件只累积不关项——首个分片就收尾会把
+	// signature）。签名事件只累积不关项——首个分片就收尾会把
 	// 截断签名写进 output_item.done；收尾统一由 Done 前的兜底 flush
 	// 发出，防挂起 item 拦下完成。
 	var prefix []SSEEvent
@@ -140,8 +140,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		events, err = encoder.reasoningDelta(event)
 	case llm.ResponseEventThinkingEnd:
 		events, err = encoder.endReasoning(event)
-	case llm.ResponseEventThinkingSignature:
-		events, err = encoder.reasoningSignature(event)
+	case llm.ResponseEventSignature:
+		events, err = encoder.signature(event)
 	case llm.ResponseEventTextStart:
 		events, err = encoder.startText(event)
 	case llm.ResponseEventTextDelta:
@@ -190,7 +190,7 @@ func (encoder *StreamEncoder) startReasoning(event llm.ResponseEvent) ([]SSEEven
 		return nil, err
 	}
 	if thinking, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok {
-		item.encryptedContent = thinking.ThinkingSignature
+		item.encryptedContent = thinking.Signature
 		if thinking.SignatureType == "openai" {
 			// 签名原文 blob 整体进 encrypted_content（回放时按同一形态
 			// 识别），但 item id 用内层真实 rs_*——与上游下发一致。
@@ -236,8 +236,8 @@ func (encoder *StreamEncoder) endReasoning(event llm.ResponseEvent) ([]SSEEvent,
 	if text == "" {
 		text = item.value.String()
 	}
-	if thinking, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.ThinkingSignature != "" {
-		item.encryptedContent = thinking.ThinkingSignature
+	if thinking, ok := common.ContentAt[llm.ThinkingContent](event.Partial, event.ContentIndex); ok && thinking.Signature != "" {
+		item.encryptedContent = thinking.Signature
 	}
 	// 思考文本无论是否推迟收尾都要先落进 pendingText：签名与正文同帧
 	// 到达时不走 pending 分支，若只在该分支赋值，reasoningDone 发出的
@@ -274,18 +274,23 @@ func (encoder *StreamEncoder) reasoningDone(item *streamItem) []SSEEvent {
 	}
 }
 
-// reasoningSignature 把尾随签名并入 reasoning item：Responses 没有增量
-// 签名通道（encrypted_content 只出现在 item 载荷里），签名事件只累积、
-// 保持挂起，由流终止的 flushPendingReasoning 发带全量签名的收尾三帧——
-// 上游可把签名拆成多帧，首个分片就关项会让 output_item.done 携带截断
-// 签名，客户端下轮回放被上游 invalid_argument 拒。
+// signature 把尾随签名并入目标 item：目标不限于 reasoning——Gemini 体制
+// 同样给 text/functionCall part 打签名。Responses 没有增量签名通道
+// （encrypted_content 只出现在 reasoning item 载荷里），reasoning item
+// 的签名事件只累积、保持挂起，由流终止的 flushPendingReasoning 发带全量
+// 签名的收尾三帧——上游可把签名拆成多帧，首个分片就关项会让
+// output_item.done 携带截断签名，客户端下轮回放被上游 invalid_argument 拒。
+// 其余 item 类型的签名在 wire 上无对应形态，留在 IR 内不下发。
 // item 已关闭时（签名随 thinking_end 同帧到齐、或 flush 后仍有迟到帧）
-// 只补写 completed output 的 encrypted_content；下标没有 reasoning item
+// 只补写 completed output 的 encrypted_content；下标没有登记 item
 // 属解码器 bug（start 先于块事件的契约被破坏），显式报错而非静默丢弃。
-func (encoder *StreamEncoder) reasoningSignature(event llm.ResponseEvent) ([]SSEEvent, error) {
+func (encoder *StreamEncoder) signature(event llm.ResponseEvent) ([]SSEEvent, error) {
 	item := encoder.items[event.ContentIndex]
-	if item == nil || item.kind != "reasoning" {
-		return nil, fmt.Errorf("thinking signature at content index %d without thinking_start", event.ContentIndex)
+	if item == nil {
+		return nil, fmt.Errorf("signature at content index %d without matching item", event.ContentIndex)
+	}
+	if item.kind != "reasoning" {
+		return nil, nil
 	}
 	item.encryptedContent += event.Delta
 	if item.closed {
@@ -514,9 +519,9 @@ func (encoder *StreamEncoder) serverToolResult(event llm.ResponseEvent) ([]SSEEv
 		"id": item.id, "type": "web_search_call", "status": status,
 		"action": map[string]any{"type": "search", "query": arguments.Query},
 	}
-	if len(result.Results) > 0 {
-		results := make([]any, 0, len(result.Results))
-		for _, hit := range result.Results {
+	if len(result.SearchResults) > 0 {
+		results := make([]any, 0, len(result.SearchResults))
+		for _, hit := range result.SearchResults {
 			entry := map[string]any{"title": hit.Title, "url": hit.URL}
 			if hit.Summary != "" {
 				entry["summary"] = hit.Summary
@@ -745,7 +750,7 @@ func outputFromMessage(message *llm.AssistantMessage, toolNameMap map[string]str
 		case llm.ThinkingContent:
 			itemID := randid.Prefixed("rs_")
 			if content.SignatureType == "openai" {
-				if items := common.OpenAIReasoningItems(content.ThinkingSignature); items != nil && items[0].ID != "" {
+				if items := common.OpenAIReasoningItems(content.Signature); items != nil && items[0].ID != "" {
 					itemID = items[0].ID
 				}
 			}
@@ -753,8 +758,8 @@ func outputFromMessage(message *llm.AssistantMessage, toolNameMap map[string]str
 				"id": itemID, "type": "reasoning", "status": "completed",
 				"summary": []any{map[string]any{"type": "summary_text", "text": content.Thinking}},
 			}
-			if content.ThinkingSignature != "" {
-				item["encrypted_content"] = content.ThinkingSignature
+			if content.Signature != "" {
+				item["encrypted_content"] = content.Signature
 			}
 			reasonings = append(reasonings, item)
 		case llm.ToolCall:
@@ -805,9 +810,9 @@ func webSearchCallItem(call llm.ToolCall, result llm.ServerToolResult) map[strin
 		"id": "ws_" + call.ID, "type": "web_search_call", "status": status,
 		"action": map[string]any{"type": "search", "query": arguments.Query},
 	}
-	if len(result.Results) > 0 {
-		results := make([]any, 0, len(result.Results))
-		for _, hit := range result.Results {
+	if len(result.SearchResults) > 0 {
+		results := make([]any, 0, len(result.SearchResults))
+		for _, hit := range result.SearchResults {
 			entry := map[string]any{"title": hit.Title, "url": hit.URL}
 			if hit.Summary != "" {
 				entry["summary"] = hit.Summary

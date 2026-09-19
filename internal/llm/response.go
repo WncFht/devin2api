@@ -146,12 +146,15 @@ const (
 	ResponseEventThinkingStart ResponseEventType = "thinking_start"
 	ResponseEventThinkingDelta ResponseEventType = "thinking_delta"
 	ResponseEventThinkingEnd   ResponseEventType = "thinking_end"
-	// ResponseEventThinkingSignature 是思考块结束后才到达的签名增量
-	//（Devin 上游把签名作为尾随帧发送）。ContentIndex 指向已结束块。
-	ResponseEventThinkingSignature ResponseEventType = "thinking_signature"
-	ResponseEventToolCallStart     ResponseEventType = "toolcall_start"
-	ResponseEventToolCallDelta     ResponseEventType = "toolcall_delta"
-	ResponseEventToolCallEnd       ResponseEventType = "toolcall_end"
+	// ResponseEventSignature 是内容块结束后仍可能到达的签名增量
+	//（Devin 上游把思考签名作为尾随帧发送，可隔着后续块迟到、拆
+	// 多帧）。目标块不限于 thinking——Gemini 体制同样给 functionCall/
+	// text part 打签名。ContentIndex 指向目标块，增量载荷走 Delta，
+	// SignatureType 随 Partial 中目标块同步更新，不进事件字段。
+	ResponseEventSignature     ResponseEventType = "signature"
+	ResponseEventToolCallStart ResponseEventType = "toolcall_start"
+	ResponseEventToolCallDelta ResponseEventType = "toolcall_delta"
+	ResponseEventToolCallEnd   ResponseEventType = "toolcall_end"
 	// ResponseEventServerToolResult 是服务端托管工具结果到达事件：
 	// 结果块已按 ContentIndex 追加进 Partial，编码器据此把对应的
 	// 托管调用项（server_tool_use / web_search_call）渲染完结。
@@ -206,7 +209,7 @@ func (event ResponseEvent) Validate() error {
 			return errors.New("tool call start event requires a tool name")
 		}
 		return nil
-	case ResponseEventTextDelta, ResponseEventThinkingDelta, ResponseEventThinkingSignature:
+	case ResponseEventTextDelta, ResponseEventThinkingDelta, ResponseEventSignature:
 		if err := requireIndexedPartial(event); err != nil {
 			return err
 		}

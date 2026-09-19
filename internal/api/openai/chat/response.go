@@ -103,8 +103,8 @@ func (encoder *StreamEncoder) Encode(event llm.ResponseEvent) ([]SSEEvent, error
 		return encoder.thinkingDelta(event)
 	case llm.ResponseEventThinkingEnd:
 		return encoder.endThinking(event)
-	case llm.ResponseEventThinkingSignature:
-		// Chat Completions 没有签名概念，思考签名只影响 Anthropic/Responses 形态。
+	case llm.ResponseEventSignature:
+		// Chat Completions 没有签名概念，块签名只影响 Anthropic/Responses 形态。
 		return nil, nil
 	case llm.ResponseEventToolCallStart:
 		return encoder.startToolCall(event), nil

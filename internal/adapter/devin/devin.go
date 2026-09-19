@@ -2048,7 +2048,7 @@ func (stream *responseStream) tryResume(cause error) bool {
 			// 与 handleServerCalls 续轮的 wire 形态同构。
 			results = append(results, llm.ToolResultMessage{
 				ToolCallID: result.ToolCallID, IsError: result.IsError, TimestampMS: time.Now().UnixMilli(),
-				Content: []llm.Content{llm.TextContent{Text: result.Text}},
+				Content: result.Content,
 			})
 			continue
 		}
@@ -2058,7 +2058,7 @@ func (stream *responseStream) tryResume(cause error) bool {
 		// 在飞 thinking 块的签名是截断残片，回显剥掉——无签名
 		// thinking 上游实测接受；半截签名可能被验签拒掉。
 		if thinking, ok := wireContent[len(wireContent)-1].(llm.ThinkingContent); ok {
-			thinking.ThinkingSignature = ""
+			thinking.Signature = ""
 			thinking.SignatureType = ""
 			wireContent[len(wireContent)-1] = thinking
 		}

@@ -1091,7 +1091,7 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 			case llm.ThinkingContent:
 				h.Write([]byte{2})
 				put(typed.Thinking)
-				put(typed.ThinkingSignature)
+				put(typed.Signature)
 				put(typed.SignatureType)
 				if typed.Redacted {
 					h.Write([]byte{1})
@@ -1119,7 +1119,7 @@ func fingerprintRequest(request llm.RequestMessages) (size int64, digest [32]byt
 				h.Write([]byte{5})
 				put(typed.ToolCallID)
 				put(typed.ToolName)
-				put(typed.Text)
+				put(typed.TextBody())
 			}
 		}
 	}

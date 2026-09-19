@@ -79,10 +79,10 @@ func TestDetachedBlobCodecSynthesized(t *testing.T) {
 	partial := &llm.AssistantMessage{
 		Content: []llm.Content{
 			llm.TextContent{Text: "answer"},
-			llm.ThinkingContent{Thinking: "chain", ThinkingSignature: "sig.v1", SignatureType: "sealed", Redacted: true},
+			llm.ThinkingContent{Thinking: "chain", Signature: "sig.v1", SignatureType: "sealed", Redacted: true},
 			llm.ImageContent{MIMEType: "image/png", Data: "AAAA"},
 			llm.ToolCall{ID: "call_1", Name: "exec", Arguments: json.RawMessage(`{"cmd":"ls"}`), Custom: true},
-			llm.ServerToolResult{ToolCallID: "srv_1", ToolName: "web_search", Text: "hits", Results: []llm.WebSearchResult{{Title: "t", URL: "u", Summary: "s"}}},
+			llm.ServerToolResult{ToolCallID: "srv_1", ToolName: "web_search", Content: []llm.Content{llm.TextContent{Text: "hits"}}, SearchResults: []llm.WebSearchResult{{Title: "t", URL: "u", Summary: "s"}}},
 		},
 		API: "devin", Provider: "anthropic", Model: "m", ResponseModel: "rm",
 		ResponseID: "rid", OutputID: "oid", UpstreamRequestID: "urid",
@@ -129,7 +129,7 @@ func TestDetachedBlobCodecSynthesized(t *testing.T) {
 		t.Fatalf("partial content = %+v", got)
 	}
 	if thinking, ok := got.Content[1].(llm.ThinkingContent); !ok ||
-		thinking.ThinkingSignature != "sig.v1" || thinking.SignatureType != "sealed" || !thinking.Redacted {
+		thinking.Signature != "sig.v1" || thinking.SignatureType != "sealed" || !thinking.Redacted {
 		t.Fatalf("thinking block = %+v", got.Content[1])
 	}
 	if image, ok := got.Content[2].(llm.ImageContent); !ok || image.Data != "AAAA" {
@@ -138,7 +138,7 @@ func TestDetachedBlobCodecSynthesized(t *testing.T) {
 	if call, ok := got.Content[3].(llm.ToolCall); !ok || !call.Custom || string(call.Arguments) != `{"cmd":"ls"}` {
 		t.Fatalf("tool call block = %+v", got.Content[3])
 	}
-	if result, ok := got.Content[4].(llm.ServerToolResult); !ok || len(result.Results) != 1 || result.Results[0].Title != "t" {
+	if result, ok := got.Content[4].(llm.ServerToolResult); !ok || len(result.SearchResults) != 1 || result.SearchResults[0].Title != "t" {
 		t.Fatalf("server result block = %+v", got.Content[4])
 	}
 	if got.Usage.Input != 1 || got.Usage.CacheWrite != 4 || got.StopSequence != "SEQ" || got.TimestampMS != 42 {
@@ -170,7 +170,7 @@ func TestDetachedBlobCodecSynthesized(t *testing.T) {
 // 在产块 100 个真变值，不是事件数×块体的平方开销。
 func TestDetachedBlobCarrySkipsMarshal(t *testing.T) {
 	enc := &blobEncoder{blockIDs: make(map[string]int)}
-	thinking := llm.ThinkingContent{Thinking: "chain", ThinkingSignature: "sig"}
+	thinking := llm.ThinkingContent{Thinking: "chain", Signature: "sig"}
 	var text string
 	for i := 0; i < 100; i++ {
 		text += "x"

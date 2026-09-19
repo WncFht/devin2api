@@ -63,7 +63,7 @@ func TestStreamEncoderEmitsToolUse(t *testing.T) {
 }
 
 // TestStreamEncoderHoldsThinkingForLateSignature 的测试动机是上游实测帧序
-// thinking_end → toolcall_* → thinking_signature：thinking 块必须挂起等待
+// thinking_end → toolcall_* → signature：thinking 块必须挂起等待
 // 隔块的尾随签名，完整签名由流收尾时的 flush 以单条 signature_delta 下发。
 // 后置块的 stop 不得提前落地：规范客户端按关块序聚合 assistant 快照，
 // 最后收尾的若是 thinking 块，Claude Code -p 的 result 会拿到空文本——
@@ -76,7 +76,7 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 		StopReason: llm.StopReasonPending,
 	}
 	final := &llm.AssistantMessage{
-		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}, call},
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", Signature: "sig"}, call},
 		StopReason: llm.StopReasonToolUse,
 	}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -91,9 +91,9 @@ func TestStreamEncoderHoldsThinkingForLateSignature(t *testing.T) {
 	if len(encoded) != 5 {
 		t.Fatalf("events before signature = %d, want 5", len(encoded))
 	}
-	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}
+	partial.Content[0] = llm.ThinkingContent{Thinking: "inspect", Signature: "sig"}
 	encoded = append(encoded, encodeStreamEvents(t, encoder, []llm.ResponseEvent{
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "sig", Partial: partial},
 		{Type: llm.ResponseEventToolCallEnd, ContentIndex: 1, ToolCall: &call, Partial: partial},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonToolUse, Message: final},
 	})...)
@@ -150,7 +150,7 @@ func TestStreamEncoderClosesBlocksInIndexOrder(t *testing.T) {
 	}
 	final := &llm.AssistantMessage{
 		Content: []llm.Content{
-			llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"},
+			llm.ThinkingContent{Thinking: "inspect", Signature: "sig"},
 			llm.TextContent{Text: "4"},
 		},
 		StopReason: llm.StopReasonStop,
@@ -163,7 +163,7 @@ func TestStreamEncoderClosesBlocksInIndexOrder(t *testing.T) {
 		{Type: llm.ResponseEventTextStart, ContentIndex: 1, Partial: partial},
 		{Type: llm.ResponseEventTextDelta, ContentIndex: 1, Delta: "4", Partial: partial},
 		{Type: llm.ResponseEventTextEnd, ContentIndex: 1, Content: "4", Partial: partial},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "sig", Partial: final},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "sig", Partial: final},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: final},
 	})
 	var stops []float64
@@ -189,7 +189,7 @@ func TestStreamEncoderBuffersSignatureFragments(t *testing.T) {
 		StopReason: llm.StopReasonPending,
 	}
 	withSig := &llm.AssistantMessage{
-		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "AAABBB"}},
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", Signature: "AAABBB"}},
 		StopReason: llm.StopReasonStop,
 	}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -197,8 +197,8 @@ func TestStreamEncoderBuffersSignatureFragments(t *testing.T) {
 		{Type: llm.ResponseEventThinkingStart, ContentIndex: 0, Partial: partial},
 		{Type: llm.ResponseEventThinkingDelta, ContentIndex: 0, Delta: "inspect", Partial: partial},
 		{Type: llm.ResponseEventThinkingEnd, ContentIndex: 0, Content: "inspect", Partial: partial},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "AAA", Partial: withSig},
-		{Type: llm.ResponseEventThinkingSignature, ContentIndex: 0, Delta: "BBB", Partial: withSig},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "AAA", Partial: withSig},
+		{Type: llm.ResponseEventSignature, ContentIndex: 0, Delta: "BBB", Partial: withSig},
 		{Type: llm.ResponseEventDone, Reason: llm.StopReasonStop, Message: withSig},
 	})
 	var signatures []string
@@ -302,7 +302,7 @@ func TestStreamEncoderEmitsError(t *testing.T) {
 func TestStreamEncoderSignatureReadyAtThinkingEnd(t *testing.T) {
 	encoder := NewStreamEncoder("claude-test")
 	partial := &llm.AssistantMessage{
-		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", ThinkingSignature: "sig"}},
+		Content:    []llm.Content{llm.ThinkingContent{Thinking: "inspect", Signature: "sig"}},
 		StopReason: llm.StopReasonPending,
 	}
 	encoded := encodeStreamEvents(t, encoder, []llm.ResponseEvent{
@@ -331,7 +331,7 @@ func TestStreamEncoderRedactedThinkingDeferredStart(t *testing.T) {
 	encoder := NewStreamEncoder("claude-test")
 	partial := &llm.AssistantMessage{
 		Content: []llm.Content{llm.ThinkingContent{
-			Thinking: "hidden", ThinkingSignature: "sealed-payload", Redacted: true,
+			Thinking: "hidden", Signature: "sealed-payload", Redacted: true,
 		}},
 		StopReason: llm.StopReasonPending,
 	}

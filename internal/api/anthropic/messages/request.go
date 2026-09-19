@@ -496,16 +496,16 @@ func decodeAssistantContent(context *llm.RequestMessages, raw json.RawMessage) (
 			content = append(content, llm.TextContent{Text: header.Text})
 		case "thinking":
 			content = append(content, llm.ThinkingContent{
-				Thinking:          header.Thinking,
-				ThinkingSignature: header.Signature,
-				SignatureType:     guessSignatureType(header.Signature),
+				Thinking:      header.Thinking,
+				Signature:     header.Signature,
+				SignatureType: guessSignatureType(header.Signature),
 			})
 		case "redacted_thinking":
 			// redacted 块的 data 是密封思考体；在 Devin wire 上对应 signature+redacted 标记。
 			content = append(content, llm.ThinkingContent{
-				ThinkingSignature: header.Data,
-				SignatureType:     guessSignatureType(header.Data),
-				Redacted:          true,
+				Signature:     header.Data,
+				SignatureType: guessSignatureType(header.Data),
+				Redacted:      true,
 			})
 		case "tool_use":
 			args, custom := common.NormalizeToolArguments(header.Input)
