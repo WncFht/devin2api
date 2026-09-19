@@ -1245,3 +1245,72 @@ func TestDetachedMarkerSurvivesComplete(t *testing.T) {
 		t.Fatalf("04 = %q, non-marker row must not survive closed", data)
 	}
 }
+
+// TestDetachedEventRefreshesMetaAfterComplete 钉住 post-Complete 的脱钩
+// 镜像刷新：终态 meta 首次落库后，NoteDetachedEvent 的追加经 closed
+// 豁免闸重序列化 meta 并 OR REPLACE 重写 meta.json 行——脱钩泵余生里
+// 到达的 detached_truncated 等事件不再沉默在内存累积器。断言完结块
+// 字段不回退、finished_at 沿用首值不被刷新稀释、多条事件逐次覆盖。
+// 手工驱动分片/写段复放「事件在收尾提交之后才入队」的后台泵形态。
+func TestDetachedEventRefreshesMetaAfterComplete(t *testing.T) {
+	st := openTestStore(t)
+	manager := newBareManager(st, 4)
+	dir := "20200101-000100"
+	recorder := newBareRecorder(manager, dir)
+	recorder.sequences = map[string]int{}
+	manager.activeDirs[dir] = recorder
+
+	recorder.Complete(Completion{StatusCode: 499, Result: "disconnected"})
+	// 驱动哨兵→收尾入列：insertQ 空时 queueCompletion 内联 flushAll
+	// 提交，终态 meta 首版落库（此刻无 detached_events）。
+	task := <-manager.queues[0]
+	task.run()
+	op := <-manager.insertQ
+	manager.runOp(op)
+	waitDrained(recorder)
+
+	before := readTestFile(t, manager, dir, MetaFile)
+	if strings.Contains(before, "detached_events") {
+		t.Fatalf("meta has detached_events before any event: %s", before)
+	}
+
+	// 首个 post-Complete 事件：豁免闸排入刷新任务——与 04 标记行同路。
+	recorder.NoteDetachedEvent("detached_truncated", map[string]any{"key": "k", "budget_bytes": 8388608})
+	task = <-manager.queues[0]
+	task.run()
+	op = <-manager.insertQ
+	manager.runOp(op)
+	manager.flushAll()
+
+	after := readTestFile(t, manager, dir, MetaFile)
+	for _, want := range []string{`"kind": "detached_truncated"`, `"status_code": 499`, `"result": "disconnected"`, `"budget_bytes": 8388608`} {
+		if !strings.Contains(after, want) {
+			t.Fatalf("refreshed meta missing %s: %s", want, after)
+		}
+	}
+	// finished_at 沿用首值：finished−ended 的收尾排队口径不被刷新稀释。
+	var first, refreshed map[string]any
+	if err := json.Unmarshal([]byte(before), &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(after), &refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if first["finished_at"] != refreshed["finished_at"] {
+		t.Fatalf("finished_at moved across refresh: %v → %v", first["finished_at"], refreshed["finished_at"])
+	}
+
+	// 第二条事件再触发一轮重写：镜像覆盖脱钩全程而非只刷一次——
+	// 终版 meta 同时留住两条事件。
+	recorder.NoteDetachedEvent("detached", map[string]any{"key": "k", "buffered_events": 3})
+	task = <-manager.queues[0]
+	task.run()
+	op = <-manager.insertQ
+	manager.runOp(op)
+	manager.flushAll()
+
+	final := readTestFile(t, manager, dir, MetaFile)
+	if !strings.Contains(final, `"kind": "detached_truncated"`) || !strings.Contains(final, `"kind": "detached"`) {
+		t.Fatalf("final meta lost earlier refresh events: %s", final)
+	}
+}

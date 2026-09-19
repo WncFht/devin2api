@@ -33,7 +33,9 @@ type MetaSummary struct {
 	// detached_attach/detached_truncated/detached_cross_lane_miss 标记行
 	// 与 bulk 帧同走 AppendJSONL 的分片队列，队列满与 Complete 后 closed
 	// 两种情形都会被丢弃——脱钩现场随之整段蒸发。这里经 NoteDetachedEvent
-	// 进 meta 累积器随完结块出账，两种丢法都免疫。条目形状见 DetachedEvent。
+	// 进 meta 累积器随完结块出账，两种丢法都免疫；终态 meta 定稿后到达
+	// 的事件（脱钩泵的 truncated 等）另触发一次 meta 行重写，镜像覆盖
+	// 脱钩全程而非停在完结时刻。条目形状见 DetachedEvent。
 	DetachedEvents []DetachedEvent `json:"detached_events,omitempty"`
 	DroppedEvents  uint64          `json:"dropped_events,omitempty"`
 

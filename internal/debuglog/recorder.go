@@ -344,14 +344,24 @@ type Recorder struct {
 	startedAt time.Time
 	// requestMeta 保存创建时的 HTTP 元信息。
 	requestMeta RequestMeta
-	// mutex 保护 closed、abortCancel、requestedModel、resolvedModel、
-	// keyHash、retries、sequences、upstreamAccount、accountAttempts、
-	// affinityHash、poolCandidates、startedAt 的测试回拨；worker 自身
-	// 状态无锁。
+	// mutex 保护 closed、completion、finishedAt、abortCancel、
+	// requestedModel、resolvedModel、keyHash、retries、sequences、
+	// upstreamAccount、accountAttempts、affinityHash、poolCandidates、
+	// detachedEvents、startedAt 的测试回拨；worker 自身状态无锁。
 	mutex sync.Mutex
 	// closed 表示 Complete 已关闭队列，之后入队请求直接计入丢弃（04
-	// 脱钩类标记行经 enqueueLockedExempt 豁免于本闸，语义见该函数）。
+	// 脱钩类标记行与 meta 刷新任务经 enqueueLockedExempt 豁免于本闸，
+	// 语义见该函数）。
 	closed bool
+	// completion 是 Complete 定稿的完结块，与 closed 同一把锁写入——
+	// closed 可观察处 completion 必可读。post-Complete 的脱钩镜像刷新
+	//（refreshDetachedMeta）以它重跑 metaJSON，重写出的 meta.json
+	// 仍带完整完结块而非退回创建期形状。
+	completion *Completion
+	// finishedAt 是首个终态 meta 的序列化时刻（meta.finished_at 的
+	// 来源）：first-write-wins——post-Complete 刷新重跑 metaJSON 时
+	// 沿用首值，finished_at − ended_at 的收尾排队口径不被刷新稀释。
+	finishedAt time.Time
 	// abortCancel 是请求 ctx 的带因取消函数，Abort 时以调用方给的归因
 	// 取消；nil 表示不可中断。
 	abortCancel context.CancelCauseFunc
@@ -456,6 +466,8 @@ type Recorder struct {
 	// 编码段的队列满（default 分支）与预算 shed 仍会丢弃——这里按
 	// retries 同口径经 NoteDetachedEvent 追加，metaJSON 落
 	// meta.detached_events，与豁免 04 行互为冗余的两个持久见证。
+	// post-Complete 的追加另触发 refreshDetachedMeta 重写终态 meta
+	// 行——脱钩泵余生里到达的事件不再沉默在内存累积器里。
 	detachedEvents []DetachedEvent
 	// devinSends 是 03-devin-request 词干已分配的上游发送序号：计数
 	// 挂在请求目录上跨 lane 共享——号池 failover 后新 lane 的首发续占
@@ -1208,10 +1220,11 @@ func (recorder *Recorder) enqueueLocked(task func()) {
 	recorder.sendTask(task)
 }
 
-// enqueueLockedExempt 是 enqueueLocked 的脱钩标记豁免形态：Complete 的
-// closed 闸对它放行——detached 类标记行是脱钩生命周期记账而非普通帧，
-// 消费方 Recv 内的脱钩登记与写出方 Complete 在 ctx.Done 上竞速（后台泵
-// 的 post-Complete 标记必然输家），被 closed 门口拒收会让脱钩现场整段
+// enqueueLockedExempt 是 enqueueLocked 的 closed 豁免形态：Complete 的
+// closed 闸对它放行——脱钩生命周期记账（04 的 detached 类标记行与
+// NoteDetachedEvent 的 post-Complete meta 刷新任务）不是普通帧，消费方
+// Recv 内的脱钩登记与写出方 Complete 在 ctx.Done 上竞速（后台泵的
+// post-Complete 标记必然输家），被 closed 门口拒收会让脱钩现场整段
 // 蒸发。放行后的任务按序落进分片队列——可在排空哨兵之后，暂存缓冲由
 // 写 worker 的周期 flushAll 照收落库（冲刷不看 closed）。其余拒收面
 // （manager 关停、worker 已退、队列满）照原口径。
@@ -1866,8 +1879,10 @@ func (recorder *Recorder) retryAttempts() []RetryAttempt {
 // elapsed_ms 三戳，与 JSONLRecord 的打戳口径一致）。与标记行不同，
 // 本记录走 meta 累积器随完结块出账：队列满或 Complete 后 closed 把
 // 04 行丢弃时，meta 仍留住脱钩/挂接/截断/跨 lane 未命中的发生事实。
-// Complete 后（后台泵路径）的追加仍会累积但不再出账——终态 meta 已
-// 定稿，post-Complete 的脱钩标记本就无处安放（同 retries 口径）。
+// Complete 后（后台泵路径）的追加除累积外另排一条 meta 刷新任务：
+// detached_truncated 这类事件在终态 meta 定稿后到达，不重写会让
+// 脱钩泵余生的镜像沉默在内存里——closed 与 completion 同锁写入，
+// 此刻重跑 metaJSON 的输入必然齐备。
 func (recorder *Recorder) NoteDetachedEvent(kind string, detail map[string]any) {
 	if recorder == nil {
 		return
@@ -1883,7 +1898,36 @@ func (recorder *Recorder) NoteDetachedEvent(kind string, detail map[string]any) 
 	// startedAt 与 setStartedAt 的测试回拨共用一把锁（同 metaJSON 口径）。
 	event["elapsed_ms"] = at.Sub(recorder.startedAt).Milliseconds()
 	recorder.detachedEvents = append(recorder.detachedEvents, event)
+	if recorder.closed && recorder.completion != nil {
+		completion := recorder.completion
+		recorder.enqueueLockedExempt(func() {
+			recorder.refreshDetachedMeta(completion)
+		})
+	}
 	recorder.mutex.Unlock()
+}
+
+// refreshDetachedMeta 在 Complete 之后重序列化终态 meta 并重新暂存：
+// stagedFiles 的同名 OR REPLACE 语义与周期 flushAll 收库让重写复用
+// 既有落库路径，不引新机制。finished_at 沿用首个终态序列化的定版值
+// （metaJSON 内 first-write-wins），其余完结块字段来自 Complete 存入
+// 的同一份 completion——刷新只让镜像字段（detached_events/late_writes
+// 等）前进，不倒退任何已出账口径。仅经 NoteDetachedEvent 的 closed
+// 分支以豁免闸排进编码队列，在本请求的分片协程上执行。
+func (recorder *Recorder) refreshDetachedMeta(completion *Completion) {
+	data := recorder.metaJSON(completion)
+	if data == nil {
+		return
+	}
+	stored, usize := recorder.encodePayload(data)
+	n := int64(len(stored))
+	if !recorder.manager.chargeStageFile(MetaFile, n) {
+		recorder.noteEncodeDrop(n)
+		return
+	}
+	recorder.pushInsert(n, func() {
+		recorder.stageFile(MetaFile, stagedFile{stored: stored, usize: usize})
+	})
 }
 
 // SetUpstreamAccount 记录最终服务本请求的上游账号（号池 lane 名）。
@@ -2311,12 +2355,19 @@ func (recorder *Recorder) Complete(completion Completion) {
 	// insertQ 与批量事务等待全部排除在 duration_ms 之外——写侧
 	// 积压读数由 meta.finished_at − ended_at 另见。
 	completion.EndedAt = recorder.manager.now()
+	if recorder.aborted.Load() && completion.Result == "disconnected" {
+		completion.Result = "aborted"
+	}
 	recorder.mutex.Lock()
 	if recorder.closed {
 		recorder.mutex.Unlock()
 		return
 	}
 	recorder.closed = true
+	// 完结块与 closed 同锁落位：closed 可观察即 completion 可读——
+	// post-Complete 的脱钩镜像刷新（NoteDetachedEvent 的豁免任务）
+	// 据此重跑 metaJSON 时不必另等写侧补数据。
+	recorder.completion = &completion
 	recorder.abortCancel = nil
 	// 折算必须在锁内完成：dropped 的累加与 closed 置位持同一把锁，
 	// 锁内一次折算保证「置位前队列满丢弃全进 droppedTotal、置位后
@@ -2324,9 +2375,6 @@ func (recorder *Recorder) Complete(completion Completion) {
 	// 打乱。
 	recorder.manager.droppedTotal.Add(recorder.dropped.Load())
 	recorder.mutex.Unlock()
-	if recorder.aborted.Load() && completion.Result == "disconnected" {
-		completion.Result = "aborted"
-	}
 	manager := recorder.manager
 	// worker 已退（关停收尾）时哨兵/op 都可能送不到：兜底在触发方
 	// 直跑同一份收尾。queueCompletion 的 CAS 让并发触发的重复入列
@@ -2443,12 +2491,18 @@ func (recorder *Recorder) metaJSON(completion *Completion) []byte {
 	meta.AffinityHash = recorder.affinityHash
 	meta.PoolCandidates = append([]PoolCandidate(nil), recorder.poolCandidates...)
 	meta.DetachedEvents = append([]DetachedEvent(nil), recorder.detachedEvents...)
+	// finishedAt 按首个终态序列化时刻定版（first-write-wins）：
+	// post-Complete 的镜像刷新会重跑本函数，沿用首值让
+	// finished_at − ended_at 的收尾排队口径不被刷新后移稀释。
+	if completion != nil && recorder.finishedAt.IsZero() {
+		recorder.finishedAt = time.Now()
+	}
+	finishedAt := recorder.finishedAt
 	recorder.mutex.Unlock()
 	if completion != nil {
 		// duration_ms 量「进入→handler 完结」：ended_at 是 Complete
 		// 入口打戳，finished_at 是本收尾 op 的执行时刻——两者之差即
 		// 本目录在编码/写队列与批量事务里的排队耗时。
-		finishedAt := time.Now()
 		durationMS := completion.EndedAt.Sub(startedAt).Milliseconds()
 		meta.DurationMS = &durationMS
 		meta.EndedAt = completion.EndedAt.Format(time.RFC3339Nano)

@@ -2167,8 +2167,8 @@ func (stream *responseStream) Recv(ctx context.Context) (llm.ResponseEvent, erro
 			}
 			stream.recorder.AppendJSONL(debuglog.StageDevinResponse, "detached_truncated", detail)
 			// 后台泵经同一 tee 点触发的截断落在 Complete 之后：04 标记行
-			// 走 closed 豁免照常落库；meta 镜像照记但终态 meta 已定稿不再
-			// 出账——post-Complete 下它只是无害的 slice 追加。
+			// 走 closed 豁免照常落库；meta 镜像追加同时排一条终态 meta
+			// 重写任务，detached_events 覆盖脱钩泵的余生而非停在定稿点。
 			stream.recorder.NoteDetachedEvent("detached_truncated", detail)
 		}
 		return event, nil
