@@ -209,6 +209,7 @@
 .acct-quota-fill {
   height: 100%;
   border-radius: 4px;
+  background: currentColor;
   transition: width 0.4s;
 }
 
@@ -217,6 +218,27 @@
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* 剩余量四档语义色：muted 无数据，>50 success，>20 warning，其余 error */
+.acct-tone--muted {
+  color: var(--color-text-secondary);
+}
+
+.acct-tone--success {
+  color: var(--success-600);
+}
+
+.acct-tone--warning {
+  color: var(--warning-600);
+}
+
+.acct-tone--error {
+  color: var(--error-600);
+}
+
+.acct-rate {
+  font-weight: 600;
 }
 
 .acct-quota-sub {

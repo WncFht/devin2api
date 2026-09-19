@@ -120,8 +120,8 @@
   }
 
   function toneFor(remaining) {
-    if (remaining === null || remaining === undefined) return 'var(--color-text-secondary)';
-    return remaining > 50 ? 'var(--success-600)' : remaining > 20 ? 'var(--warning-600)' : 'var(--error-600)';
+    if (remaining === null || remaining === undefined) return 'muted';
+    return remaining > 50 ? 'success' : remaining > 20 ? 'warning' : 'error';
   }
 
   // ---- pills ----
@@ -234,8 +234,8 @@
     const rate = pingTotal > 0 ? w.ping_hit_rate : null;
     const inner = `<div class="acct-kv-grid">` + [
       kv(t('accounts.f.hitRate'), rate === null
-        ? `<span style="color:var(--color-text-secondary);">—</span>`
-        : `<span style="color:${toneFor(rate)};font-weight:600;">${Number(rate).toFixed(0)}%</span>`),
+        ? `<span class="text-muted">—</span>`
+        : `<span class="acct-rate acct-tone--${toneFor(rate)}">${Number(rate).toFixed(0)}%</span>`),
       kv(t('accounts.f.entries'), esc(num(w.entries || 0))),
       kv(t('accounts.f.promoted'), esc(num(w.promoted || 0))),
       kv(t('accounts.f.pings'), esc(num(w.pings_sent || 0)))
@@ -252,8 +252,8 @@
     ].filter(Boolean).join(' · ');
     return `<div class="acct-quota-row">
       <span class="acct-quota-label">${esc(label)}</span>
-      <div class="acct-quota-track"><div class="acct-quota-fill" style="width:${pct}%;background:${toneFor(pct)};"></div></div>
-      <span class="acct-quota-val" style="color:${toneFor(pct)};">${pct.toFixed(0)}%</span>
+      <div class="acct-quota-track"><div class="acct-quota-fill acct-tone--${toneFor(pct)}" style="width:${pct}%;"></div></div>
+      <span class="acct-quota-val acct-tone--${toneFor(pct)}">${pct.toFixed(0)}%</span>
       ${sub ? `<div class="acct-quota-sub">${esc(sub)}</div>` : ''}
     </div>`;
   }

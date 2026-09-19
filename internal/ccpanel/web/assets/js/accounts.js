@@ -357,17 +357,17 @@
     const healthy = list.filter((a) => primaryTone(a) === 'ok').length;
     const card = (label, value, sub, tone) => `<div class="runtime-metric-card">
       <span class="runtime-metric-label">${esc(label)}</span>
-      <strong class="runtime-metric-value"${tone ? ` style="color:${tone};"` : ''}>${value}</strong>
+      <strong class="runtime-metric-value${tone ? ` acct-tone--${tone}` : ''}">${value}</strong>
       ${sub ? `<span class="runtime-metric-sub">${sub}</span>` : ''}
     </div>`;
     grid.innerHTML = [
       card(t('accounts.kpi.lanes'), list.length, null, null),
       card(t('accounts.kpi.healthy'), healthy, list.length ? t('accounts.kpi.of', { n: list.length }) : null,
-        healthy === list.length ? 'var(--success-600)' : 'var(--warning-600)'),
+        healthy === list.length ? 'success' : 'warning'),
       card(t('accounts.kpi.requests'), num(requests), matrixErr ? esc(t('accounts.partial')) : null, null),
       card(t('accounts.kpi.errors'), num(errors), rateLimited ? t('accounts.kpi.rlSub', { n: rateLimited }) : null,
-        errors ? 'var(--error-600)' : 'var(--success-600)'),
-      card(t('accounts.kpi.switches'), num(switches), null, switches ? 'var(--warning-600)' : null)
+        errors ? 'error' : 'success'),
+      card(t('accounts.kpi.switches'), num(switches), null, switches ? 'warning' : null)
     ].join('');
   }
 
@@ -448,7 +448,7 @@
     const root = el('accounts-list');
     if (!root) return;
     if (!window.acctView || !window.acctOps) {
-      root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock('accounts-view.js / accounts-ops.js not loaded')}</div>`;
+      root.innerHTML = `<div class="card accounts-section-card">${errBlock('accounts-view.js / accounts-ops.js not loaded')}</div>`;
       return;
     }
     const shown = filterName ? list.filter((a) => a.name === filterName) : list;
@@ -460,7 +460,7 @@
         const msg = filterName
           ? t('accounts.filter.missing', { name: filterName })
           : errMsg(runtimeErr || quotaErr || matrixErr);
-        root.innerHTML = `<div class="card" style="padding:var(--space-6);">${errBlock(msg)}</div>`;
+        root.innerHTML = `<div class="card accounts-section-card">${errBlock(msg)}</div>`;
         return;
       }
       root.innerHTML = '';
