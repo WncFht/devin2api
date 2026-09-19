@@ -26,13 +26,13 @@ func (h *Handler) accountOpsUnavailable(w http.ResponseWriter) bool {
 // 按名分发，列表路径不必逐号重查 quota 历史（SQL）与活跃请求集。
 // 无该名条目一律缺席（map 零值），由 view 落成 null。
 // quotaOnly 非空时只读该名的样本序列——单号视图（写端点回包）不必为
-// 一条序列扫全表；空串走全量 QuotaReport（列表路径一次取齐）。
+// 一条序列扫全表；空串走全量 quota report（列表路径一次取齐）。
 type accountSnapshots struct {
 	laneStates map[string]devin.LaneState
 	gates      map[string]devin.GateStats
 	warms      map[string]devin.WarmStats
 	inflight   map[string]int
-	quota      map[string]any            // QuotaReport 的 accounts 子表
+	quota      map[string]any            // quota report 的 accounts 子表
 	usage      map[string]map[string]any // 逐号 usage 投影，由调用方按名填
 }
 
@@ -68,10 +68,10 @@ func (h *Handler) accountSnapshots(ctx context.Context, quotaOnly string) accoun
 			if err != nil {
 				slog.Warn("quota history read failed", "account", quotaOnly, "error", err)
 			} else if len(series) > 0 {
-				snap.quota[quotaOnly] = h.quotaSeriesReport(quotaOnly, series)
+				snap.quota[quotaOnly] = h.quotaSub().seriesReport(quotaOnly, series)
 			}
 		}
-	} else if accounts, ok := h.QuotaReport(ctx)["accounts"].(map[string]any); ok {
+	} else if accounts, ok := h.quotaSub().report(ctx)["accounts"].(map[string]any); ok {
 		snap.quota = accounts
 	}
 	return snap

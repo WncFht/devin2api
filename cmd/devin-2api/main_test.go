@@ -119,7 +119,7 @@ func TestReloadRuntimeConfigRejectsEmptyUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	application := app.New(devinPool, config.ServerConfig{}, manager)
-	panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+	panel, err := ccpanel.New(ccpanel.Deps{Password: "pw", BaseURL: "https://example.com", TokenFunc: func() string { return "t" }, Debug: manager})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ dashboard:
 				t.Fatal(err)
 			}
 			application := app.New(devinPool, config.ServerConfig{}, manager)
-			panel, err := ccpanel.New("pw", "https://example.com", func() string { return "t" }, "", false, nil, manager)
+			panel, err := ccpanel.New(ccpanel.Deps{Password: "pw", BaseURL: "https://example.com", TokenFunc: func() string { return "t" }, Debug: manager})
 			if err != nil {
 				t.Fatal(err)
 			}

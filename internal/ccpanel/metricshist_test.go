@@ -65,7 +65,7 @@ func TestMetricsHistorySince(t *testing.T) {
 // TestAdminRuntimeMetricsHistory 验证端点 ?minutes 过滤与响应形状：
 // 窗口外样本被裁、interval_sec 透出、at 升序、minutes 超上限按 240 截断。
 func TestAdminRuntimeMetricsHistory(t *testing.T) {
-	h, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	h, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestAdminRuntimeMetricsHistory(t *testing.T) {
 // TestCaptureMetricsSampleSources 验证采样从注入源取数：gate 闩态按
 // lane 聚合计数、闩次数求全 lane 和。
 func TestCaptureMetricsSampleSources(t *testing.T) {
-	h, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	h, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}

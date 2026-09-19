@@ -45,11 +45,11 @@ func TestRuntimeMetricsStoreSection(t *testing.T) {
 		t.Fatalf("raw close: %v", err)
 	}
 
-	h, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	h, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h.SetStore(st)
+	h.store = st
 	rec := httptest.NewRecorder()
 	h.adminRuntimeMetrics(rec, httptest.NewRequest("GET", "/admin/runtime-metrics", nil))
 
@@ -114,11 +114,11 @@ func TestRuntimeMetricsStoreSectionMissingTable(t *testing.T) {
 		t.Fatalf("raw close: %v", err)
 	}
 
-	h, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	h, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h.SetStore(st)
+	h.store = st
 	rec := httptest.NewRecorder()
 	h.adminRuntimeMetrics(rec, httptest.NewRequest("GET", "/admin/runtime-metrics", nil))
 	if rec.Code != 200 {

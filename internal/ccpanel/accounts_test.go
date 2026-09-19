@@ -142,7 +142,7 @@ func TestAdminAccountsAggregate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h.quotaUsers = map[string]map[string]any{
+	h.quotaSub().users = map[string]map[string]any{
 		"yanjian": {"email": "a@b.c", "plan_name": "pro"},
 		"randall": {"email": "x@y.z"},
 	}

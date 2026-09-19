@@ -253,7 +253,7 @@ func (h *Handler) adminRefreshAccountQuota(w http.ResponseWriter, r *http.Reques
 	token, err := h.accountOps.TokenOf(r.Context(), name)
 	if err != nil {
 		// 契约只定义 404/502 两档失败：名不在生效集、tombstoned 与
-		// 凭据不可解同归 404；上游拉取失败在 refreshAccountQuota 侧 502。
+		// 凭据不可解同归 404；上游拉取失败在配额刷新侧 502。
 		if errors.Is(err, store.ErrAccountNotFound) {
 			respondError(w, http.StatusNotFound, fmt.Sprintf("account %q not found", name))
 			return
@@ -261,7 +261,7 @@ func (h *Handler) adminRefreshAccountQuota(w http.ResponseWriter, r *http.Reques
 		respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	data, err := h.refreshAccountQuota(r.Context(), name, token)
+	data, err := h.quotaSub().refresh(r.Context(), name, token)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, err.Error())
 		return
@@ -302,7 +302,7 @@ func (h *Handler) adminTestAccount(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.noteAccountQuotaSignal(name, plan)
+	h.quotaSub().noteSignal(name, plan)
 	h.accountOps.ClearCooldown(name)
 	resp := map[string]any{"ok": true, "latency_ms": latency, "user": user}
 	if plan != nil {

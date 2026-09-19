@@ -294,27 +294,56 @@ func main() {
 		}
 	}
 	application.SetVersion(resolved)
+	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
+	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
+	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
+	// input 价，与 ccpanel cellCost 同口径）。
+	tokenStore, err := authtoken.New(dbStore)
+	if err != nil {
+		slog.Error("load auth tokens failed", "error", err)
+		os.Exit(1)
+	}
+	// 先于 dbStore.Close 排空统计写队列（defer 逆序执行，本句晚
+	// 注册先跑）：排空期完成的请求回写经队列落库，不留尾巴。
+	defer tokenStore.Close()
+	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
+	// 移植面板的注册表页共用同一仓。
+	modelStore, err := modelreg.New(dbStore)
+	if err != nil {
+		slog.Error("load model registry failed", "error", err)
+		os.Exit(1)
+	}
 	// 面板与 token 解耦：空 token 时 stats/rejects/日志查询仍是排障入口，
 	// 上游相关调用靠 tokenFunc 现取，凭据补进后自动恢复。
 	// /web、/admin、/dashboard、/public、/login、/logout 挂在根路径。
-	ccPanel, err := ccpanel.New(serviceConfig.Dashboard.Password, serviceConfig.Devin.BaseURL, tokenFunc, serviceConfig.Devin.Proxy, *serviceConfig.Devin.ForceHTTP1, application.Metrics(), debugManager)
+	// 依赖一次接齐：仓类（store/tokens/models）与号池接口都在构造期
+	// 注入——遥测走 Snapshot（每请求一次求值，同一切面收齐
+	// gate/warm/detached/逐号状态/别名/凭据源），动作口是脱钩逐出、
+	// 排空闸门冲刷与配额探测回灌三个。
+	ccPanel, err := ccpanel.New(ccpanel.Deps{
+		Password:           serviceConfig.Dashboard.Password,
+		BaseURL:            serviceConfig.Devin.BaseURL,
+		Proxy:              serviceConfig.Devin.Proxy,
+		ForceHTTP1:         *serviceConfig.Devin.ForceHTTP1,
+		TokenFunc:          tokenFunc,
+		Metrics:            application.Metrics(),
+		Debug:              debugManager,
+		Store:              dbStore,
+		Tokens:             tokenStore,
+		Models:             modelStore,
+		MaxConcurrencyFunc: application.MaxConcurrency,
+		Pool: &ccpanel.PoolDeps{
+			Snapshot:      devinPool.Snapshot,
+			EvictDetached: devinPool.EvictDetachedByOriginDir,
+			FlushGates:    devinPool.FlushPendingWindows,
+			NoteQuota:     devinPool.NoteQuotaSample,
+		},
+	})
 	if err != nil {
 		slog.Error("create panel failed", "error", err)
 		os.Exit(1)
 	}
 	ccPanel.SetVersion(resolved)
-	// 号池接口一次接齐：遥测走 Snapshot（每请求一次求值，同一时间
-	// 切面收齐 gate/warm/detached/逐号状态/别名/凭据源），动作口是
-	// 脱钩逐出、排空闸门冲刷与配额探测回灌三个。
-	ccPanel.SetPoolDeps(ccpanel.PoolDeps{
-		Snapshot:      devinPool.Snapshot,
-		EvictDetached: devinPool.EvictDetachedByOriginDir,
-		FlushGates:    devinPool.FlushPendingWindows,
-		NoteQuota:     devinPool.NoteQuotaSample,
-	})
-	ccPanel.SetMaxConcurrencyFunc(application.MaxConcurrency)
-	// 持久层须在 SetQuotaInterval 前注入：采样协程起跑时快照读它。
-	ccPanel.SetStore(dbStore)
 	// 进程指标历史环：30s 一拍采进内存环，/admin/runtime-metrics/history
 	// 的数据源。纯进程内读取——不打上游、不写库，与配额采样不同，
 	// 交接进程同样起跑（重叠窗内它自己的历史也是有效观测）。
@@ -381,18 +410,6 @@ func main() {
 			slog.Warn("panel settings replay failed", "error", err)
 		}
 	}
-	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
-	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
-	// 请求的 token 用量折成美元供费用限额窗口记账（cache_write 按
-	// input 价，与 ccpanel cellCost 同口径）。
-	tokenStore, err := authtoken.New(dbStore)
-	if err != nil {
-		slog.Error("load auth tokens failed", "error", err)
-		os.Exit(1)
-	}
-	// 先于 dbStore.Close 排空统计写队列（defer 逆序执行，本句晚
-	// 注册先跑）：排空期完成的请求回写经队列落库，不留尾巴。
-	defer tokenStore.Close()
 	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
 		p, ok := ccPanel.CatalogPrices(context.Background())[model]
 		if !ok {
@@ -400,7 +417,6 @@ func main() {
 		}
 		return (float64(input+cacheWrite)*p.Input + float64(cacheRead)*p.Cached + float64(output)*p.Output) / 1e6
 	})
-	ccPanel.SetTokenStore(tokenStore)
 	ccPanel.SetConfigOps(ccpanel.ConfigOps{
 		Reload: func() (*accounts.ReloadReport, error) {
 			return reloadRuntimeConfig(rt, application, ccPanel, debugManager, settingsStore)
@@ -412,15 +428,7 @@ func main() {
 	// /admin/accounts 操作面：行写入+重推+回滚的编排在 ops 闭包内
 	// 完成，面板 handler 只做请求解码与 sentinel→状态码映射。
 	ccPanel.SetAccountOps(rt.Ops(settingsStore.ApplyAll))
-	// 模型注册表：覆盖项落 model_registry 表；/v1 准入（停用/重定向）与
-	// 移植面板的注册表页共用同一仓。
-	modelStore, err := modelreg.New(dbStore)
-	if err != nil {
-		slog.Error("load model registry failed", "error", err)
-		os.Exit(1)
-	}
 	application.SetModelRegistry(modelStore)
-	ccPanel.SetModelRegistry(modelStore)
 	ccPanel.SetSettingsStore(settingsStore)
 	application.SetCCPanel(ccPanel)
 	server := application.HTTPServer()

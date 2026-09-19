@@ -10,7 +10,7 @@ import (
 // token 以转义形态（\"、\\）出现，只遮原始字节会静默漏遮；以 \ 结尾的
 // token 还要求先替换转义形态，否则残留孤立反斜杠破坏 JSON。
 func TestMaskTokenEscapedForms(t *testing.T) {
-	handler, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	handler, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}

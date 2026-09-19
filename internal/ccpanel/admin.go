@@ -395,7 +395,7 @@ func (h *Handler) adminRuntimeMetrics(w http.ResponseWriter, r *http.Request) {
 	// 当前深度）与采样轮心跳（协程级 rounds_* 计数/时刻 + 逐 lane
 	// 阶段账 lanes）——写失败与静默空洞此前只有 stderr WARN 甚至
 	// 毫无痕迹，丢点与调度器死活在这里才可见。
-	data["quota"] = h.quotaPersistStats()
+	data["quota"] = h.quotaSub().persistStats()
 	// store 组投开库台账：opens_recent 里出现第二个 pid/build 即有别处
 	// 进程附着同一状态库（reuseport 交接残留曾静默持锁三天、stderr 零
 	// 留痕——台账正是为此而建）。读失败（老库无此表、表被污染）只省略

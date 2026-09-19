@@ -70,59 +70,17 @@ type Handler struct {
 	// 耗时≈最慢一路 RTT（实测 ~1s）——quota 页每次加载/轮询各付一趟。
 	statusCache ttlCache[map[string]any]
 
-	// quotaMu/quotaCancel 管配额采样协程生命周期：SetQuotaInterval
-	// cancel 旧协程按新间隔重起（配置 reload 热路径）。quotaInterval
-	// 记最近一次请求的周期，供设置页回读；quotaDrained 是 BeginDrain
-	// 置位的排空闩——置位后 SetQuotaInterval 只记账不再重起协程，
-	// 排空窗口内的 reload/设置写入不能把采样重新武装。
-	quotaMu       sync.Mutex
-	quotaCancel   context.CancelFunc
-	quotaInterval time.Duration
-	quotaDrained  bool
-	// quotaUserMu/quotaUsers 是最近一次逐号配额采样顺带取回的账号
-	// 身份快照（按账号名索引）：只活内存、随采样周期刷新，重启后
-	// 首个采样点落盘前缺席——lane 名是主键，身份只是易读别名。
-	quotaUserMu sync.Mutex
-	quotaUsers  map[string]map[string]any
-	// quotaPendingMu/pendingQuotaSamples 是配额快照落库失败的重放
-	// 缓冲：写失败的点挂账回来，下一次落库（定时采样或手动刷新）
-	// 随新点一并重放；容量封顶 quotaPersistRetryCap，溢出丢最老点
-	// 并告警。(account,at) 唯一索引 + INSERT OR IGNORE 使重放幂等——
-	// 缓冲是写争用期的安全带而非持久队列。
-	// quotaPersistFailures/Dropped/Replayed 是同锁内的落库健康账，
-	// 投到 runtime-metrics 的 quota 组——样本写失败此前只有 stderr
-	// WARN，写争用期丢点没有这组计数完全不可见。
-	// quotaPersistInFlight/quotaPersistDone 是在途落库调用（采样协程
-	// 与手动刷新共用的 persistQuotaSample 同步路径）的计数与落定
-	// 信号：进入时 +1（>0 时 quotaPersistDone 非 nil），收尾（含
-	// 失败挂回之后）-1，归零 close 并置 nil。FlushPendingQuotaSamples
-	// 凭它在排空时等写落定——失败点挂回缓冲后才能被冲刷看见。不用
-	// sync.WaitGroup：排空窗口内手动刷新仍可能新发落库，Add 撞上
-	// 零计数 Wait 属 misuse。均在 quotaPendingMu 下读写。
-	quotaPendingMu       sync.Mutex
-	pendingQuotaSamples  []*store.QuotaSample
-	quotaPersistFailures int
-	quotaPersistDropped  int
-	quotaPersistReplayed int
-	quotaPersistInFlight int
-	quotaPersistDone     chan struct{}
-	// quotaSamplerMu 管采样轮心跳簿记：quotaRounds*/quotaLastRound*At
-	// 是协程级（每次 sampleQuota 调用记一轮）计数与时刻，quotaLanes
-	// 是逐 lane 的阶段账。全内存、进程生命周期——quota_samples 静默
-	// 空洞（进程活着、零 WARN、行断档）的归因面：调度器冻结/阶段
-	// 丢失/stderr 丢行三类形态靠这组账互证区分。
-	quotaSamplerMu           sync.Mutex
-	quotaRoundsStarted       int64
-	quotaRoundsAborted       int64
-	quotaLastRoundStartedAt  int64
-	quotaLastRoundFinishedAt int64
-	quotaLanes               map[string]*quotaLaneStats
+	// quota 是配额采样子系统（协程生命周期/身份投影/落库重放/轮次
+	// 心跳，实现见 quota.go）；quotaOnce 兜底字面量构造的 Handler
+	// （测试绕开 New）在首个配额调用点懒挂。
+	quotaOnce sync.Once
+	quota     *quotaSampler
 
 	// debug 是请求目录的读取入口（logs 表行查询走 store）。
 	debug *debuglog.Manager
 	// store 是 SQLite 持久层：日志行查询/聚合与配额样本读写都走它。
-	// 须在 SetQuotaInterval 前注入（采样协程起跑时定生死）；nil 时
-	// 停采、日志与配额端点降级为空——与无 debug manager 的口径一致。
+	// nil 时停采、日志与配额端点降级为空——与无 debug manager 的
+	// 口径一致。
 	store *store.Store
 	// metrics 是进程级运行计数器（runtime-metrics 端点）。
 	metrics *obs.Metrics
@@ -165,27 +123,65 @@ type Handler struct {
 	staticEntries sync.Map
 }
 
-// New 创建面板处理器。password 为空表示开放访问。proxy 为可选代理地址。
-// forceHTTP1 为 true 时强制 HTTP/1.1，与 adapter 保持一致的连接模型。
-// tokenFunc 每次求值返回当前上游凭据（与 adapter 的自愈共用同一来源）；
-// nil 视为恒空凭据。metrics/debug 允许为 nil（对应端点降级为空数据）。
-func New(password, baseURL string, tokenFunc func() string, proxy string, forceHTTP1 bool, metrics *obs.Metrics, debug *debuglog.Manager) (*Handler, error) {
+// Deps 是 New 的装配入口：依赖一次给全，调用方不再背「哪个 Set* 先
+// 调」的顺序知识（旧接口里 store 必须先于 SetQuotaInterval 注入，否则
+// 采样协程按起跑时的 nil 句柄定生死）。各项缺席语义在字段注释标注。
+// 真正迟绑定的操作面保留 setter——settings/probeHandler/configOps/
+// accountOps 的构造依赖面板自身（方法值或根路由），只能后挂。
+type Deps struct {
+	// Password 为空表示开放访问。
+	Password   string
+	BaseURL    string
+	Proxy      string // 可选代理地址
+	ForceHTTP1 bool   // 强制 HTTP/1.1，与 adapter 保持一致的连接模型
+	// TokenFunc 每次求值返回当前上游凭据（与 adapter 的自愈共用同一
+	// 来源）；nil 视为恒空凭据。
+	TokenFunc func() string
+	// Metrics/Debug 允许为 nil（对应端点降级为空数据）。
+	Metrics *obs.Metrics
+	Debug   *debuglog.Manager
+	// Store 是 SQLite 持久层：日志行查询/聚合与配额样本读写都走它；
+	// nil 时停采、日志与配额端点降级为空。
+	Store *store.Store
+	// Tokens 是下游令牌仓；nil 时 api_token 登录与令牌端点不可用。
+	Tokens *authtoken.Store
+	// Models 是模型注册表仓；nil 时 /admin/model-registry 返回 503。
+	Models *modelreg.Store
+	// MaxConcurrencyFunc 返回 /v1 管线的全局并发上限运行时值（配置
+	// reload 后为新值），投影到 runtime-metrics 的 max_concurrency；
+	// nil 按 0（无限制）透出。
+	MaxConcurrencyFunc func() int
+	// Pool 是号池接口（遥测 + 动作口）；nil 视为无池——
+	// gate/warm/detached/accounts 组缺席、配额采样退回单号匿名、
+	// 排空跳过闸门冲刷、脱钩逐出与配额回灌静默跳过。
+	Pool *PoolDeps
+}
+
+// New 按 Deps 创建面板处理器。
+func New(d Deps) (*Handler, error) {
+	tokenFunc := d.TokenFunc
 	if tokenFunc == nil {
 		tokenFunc = func() string { return "" }
 	}
-	up, err := newPanelUpstream(baseURL, proxy, forceHTTP1, tokenFunc)
+	up, err := newPanelUpstream(d.BaseURL, d.Proxy, d.ForceHTTP1, tokenFunc)
 	if err != nil {
 		return nil, err
 	}
 	h := &Handler{
-		password:      password,
-		passwordHash:  sha256.Sum256([]byte(password)),
-		tokenFunc:     tokenFunc,
-		loginFailures: make(map[string]*loginFail),
-		metrics:       metrics,
-		debug:         debug,
-		startedAt:     time.Now(),
+		password:           d.Password,
+		passwordHash:       sha256.Sum256([]byte(d.Password)),
+		tokenFunc:          tokenFunc,
+		loginFailures:      make(map[string]*loginFail),
+		metrics:            d.Metrics,
+		debug:              d.Debug,
+		store:              d.Store,
+		tokens:             d.Tokens,
+		models:             d.Models,
+		maxConcurrencyFunc: d.MaxConcurrencyFunc,
+		pool:               d.Pool,
+		startedAt:          time.Now(),
 	}
+	h.quota = &quotaSampler{h: h}
 	h.modelsCache = newTTLCache(catalogCacheTTL, false, h.fetchModels)
 	h.providersCache = newTTLCache(catalogCacheTTL, false, h.fetchProviders)
 	h.modelStatusesCache = newTTLCache(catalogCacheTTL, false, h.fetchModelStatuses)
@@ -249,13 +245,6 @@ type PoolDeps struct {
 	NoteQuota     func(name string, dailyRemainingPct, weeklyRemainingPct float64)
 }
 
-// SetPoolDeps 注入号池接口（遥测 + 动作口）；空值视为无池——
-// gate/warm/detached/accounts 组缺席、配额采样退回单号匿名、
-// 排空跳过闸门冲刷、脱钩逐出与配额回灌静默跳过。
-func (h *Handler) SetPoolDeps(deps PoolDeps) {
-	h.pool = &deps
-}
-
 // poolSnapshot 取一次号池遥测；无池返回零值与 false——各消费组按
 // 「无池」缺席，与旧逐字段 nil-func 分支同语义。
 func (h *Handler) poolSnapshot() (devin.PoolSnapshot, bool) {
@@ -263,6 +252,17 @@ func (h *Handler) poolSnapshot() (devin.PoolSnapshot, bool) {
 		return devin.PoolSnapshot{}, false
 	}
 	return h.pool.Snapshot(), true
+}
+
+// quotaSub 返回配额采样子系统；字面量构造的 Handler（测试绕开 New）
+// 在首个配额调用点懒挂。
+func (h *Handler) quotaSub() *quotaSampler {
+	h.quotaOnce.Do(func() {
+		if h.quota == nil {
+			h.quota = &quotaSampler{h: h}
+		}
+	})
+	return h.quota
 }
 
 // NoteUpstreamTokens 把一批已知上游凭据字面值登记进常驻脱敏集合
@@ -283,19 +283,17 @@ func (h *Handler) NoteUpstreamTokens(tokens ...string) {
 }
 
 // SetConfigOps 注入配置自省与热重载操作面（/admin/config*）。
+// 迟绑定：Reload 闭包回调面板自身（SetQuotaInterval/SetPassword），
+// 装配层只能先建面板再挂操作面。
 func (h *Handler) SetConfigOps(ops ConfigOps) {
 	h.configOps = &ops
 }
 
 // SetAccountOps 注入 /admin/accounts 账号操作面（读写跨 store 行、
 // config 声明集与 devinPool 热应用协调，实现由装配层提供）。
+// 迟绑定：ops 的构造经 settingsStore，后者依赖面板的配额句柄。
 func (h *Handler) SetAccountOps(ops accounts.AccountOps) {
 	h.accountOps = &ops
-}
-
-// SetMaxConcurrencyFunc 注入 /v1 并发上限读取函数。
-func (h *Handler) SetMaxConcurrencyFunc(fn func() int) {
-	h.maxConcurrencyFunc = fn
 }
 
 // maxConcurrency 返回全局并发上限的运行时值；未注入 getter 时按 0
@@ -307,29 +305,16 @@ func (h *Handler) maxConcurrency() int {
 	return h.maxConcurrencyFunc()
 }
 
-// SetStore 注入 SQLite 持久层（配额采样写入与历史读取的底仓）。
-// 须在 SetQuotaInterval 前调用——采样协程按起跑时的句柄工作。
-func (h *Handler) SetStore(s *store.Store) {
-	h.store = s
-}
-
-// SetTokenStore 注入下游令牌仓（api_token 登录与 /admin/auth-tokens 用）。
-func (h *Handler) SetTokenStore(s *authtoken.Store) {
-	h.tokens = s
-}
-
-// SetModelRegistry 注入模型注册表仓（/admin/model-registry 用）。
-func (h *Handler) SetModelRegistry(s *modelreg.Store) {
-	h.models = s
-}
-
 // SetSettingsStore 注入运行时设置键仓（/admin/settings 用）。
+// 迟绑定：PanelSettings 构造依赖面板的 QuotaInterval/SetQuotaInterval
+// 方法值，只能后挂。
 func (h *Handler) SetSettingsStore(s *PanelSettings) {
 	h.settings = s
 }
 
 // SetProbeHandler 注入应用根路由；模型探活在进程内 ServeHTTP，走与外部
-// 请求完全相同的鉴权/准入/重定向/上游路径。
+// 请求完全相同的鉴权/准入/重定向/上游路径。迟绑定：根路由要等
+// app.HTTPServer() 装配完才存在。
 func (h *Handler) SetProbeHandler(handler http.Handler) {
 	h.probeHandler = handler
 }

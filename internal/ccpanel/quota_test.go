@@ -98,7 +98,7 @@ func TestQuotaReportStaleSeries(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	h := &Handler{store: st}
-	h.quotaInterval = 5 * time.Minute // bound = max(15min, 1h) = 1h
+	h.quotaSub().reqInterval = 5 * time.Minute // bound = max(15min, 1h) = 1h
 	ctx := context.Background()
 	now := time.Now().Unix()
 	// 僵尸桶：尾点停在两天前（无 account 的历史行在报告侧折叠进
@@ -116,7 +116,7 @@ func TestQuotaReportStaleSeries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	report := h.QuotaReport(ctx)
+	report := h.quotaSub().report(ctx)
 	accounts, ok := report["accounts"].(map[string]any)
 	if !ok {
 		t.Fatalf("accounts = %T", report["accounts"])
@@ -161,17 +161,17 @@ func TestQuotaSeriesStaleBound(t *testing.T) {
 			{At: now - ageSeconds},
 		}
 	}
-	if got := h.quotaSeriesReport("x", aged(50*60)); got["stale"] != false {
+	if got := h.quotaSub().seriesReport("x", aged(50*60)); got["stale"] != false {
 		t.Fatalf("50min-old tail stale = %v, want false", got["stale"])
 	}
-	if got := h.quotaSeriesReport("x", aged(70*60)); got["stale"] != true {
+	if got := h.quotaSub().seriesReport("x", aged(70*60)); got["stale"] != true {
 		t.Fatalf("70min-old tail stale = %v, want true", got["stale"])
 	}
-	h.quotaInterval = 2 * time.Hour // bound = max(6h, 1h) = 6h
-	if got := h.quotaSeriesReport("x", aged(5*3600)); got["stale"] != false {
+	h.quotaSub().reqInterval = 2 * time.Hour // bound = max(6h, 1h) = 6h
+	if got := h.quotaSub().seriesReport("x", aged(5*3600)); got["stale"] != false {
 		t.Fatalf("5h-old tail stale = %v, want false (scaled bound)", got["stale"])
 	}
-	if got := h.quotaSeriesReport("x", aged(7*3600)); got["stale"] != true {
+	if got := h.quotaSub().seriesReport("x", aged(7*3600)); got["stale"] != true {
 		t.Fatalf("7h-old tail stale = %v, want true (scaled bound)", got["stale"])
 	}
 }
@@ -192,7 +192,7 @@ func TestQuotaStoreRoundTrip(t *testing.T) {
 	}
 
 	h := &Handler{store: st}
-	points := h.readQuotaHistory(context.Background())
+	points := h.quotaSub().readHistory(context.Background())
 	if len(points) != 3 || floatOr0(points[2].DailyRemaining) != 80 {
 		t.Fatalf("points = %+v", points)
 	}
@@ -267,18 +267,18 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	h := &Handler{store: st}
 	_ = st.Close() // 落库必败
 	for i := 0; i < 6; i++ {
-		_ = h.persistQuotaSample(
+		_ = h.quotaSub().persist(
 			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(float64(90 - i))})
 	}
-	h.quotaPendingMu.Lock()
-	pending := len(h.pendingQuotaSamples)
-	oldest := h.pendingQuotaSamples[0].At
-	h.quotaPendingMu.Unlock()
+	h.quotaSub().pendingMu.Lock()
+	pending := len(h.quotaSub().pending)
+	oldest := h.quotaSub().pending[0].At
+	h.quotaSub().pendingMu.Unlock()
 	if pending != quotaPersistRetryCap || oldest != 1700000000+2*300 {
 		t.Fatalf("pending = %d oldest at = %d, want %d rows from at=%d",
 			pending, oldest, quotaPersistRetryCap, 1700000000+2*300)
 	}
-	if stats := h.quotaPersistStats(); stats["persist_failures"] != 6 ||
+	if stats := h.quotaSub().persistStats(); stats["persist_failures"] != 6 ||
 		stats["persist_dropped"] != 2 || stats["persist_replayed"] != 0 ||
 		stats["pending_samples"] != quotaPersistRetryCap {
 		t.Fatalf("persist stats after failures = %+v", stats)
@@ -290,7 +290,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	}
 	defer func() { _ = st2.Close() }()
 	h.store = st2
-	_ = h.persistQuotaSample(
+	_ = h.quotaSub().persist(
 		&store.QuotaSample{At: 1700000000 + 6*300, Account: "randall", DailyRemaining: f64(84)})
 	rows, err := st2.ListQuotaSamples(context.Background(), "randall", 0, 0)
 	if err != nil {
@@ -299,7 +299,7 @@ func TestQuotaSamplePersistRetry(t *testing.T) {
 	if len(rows) != 5 || rows[0].At != 1700000000+2*300 || rows[4].At != 1700000000+6*300 {
 		t.Fatalf("replayed samples = %+v, want 5 rows from at=%d", rows, 1700000000+2*300)
 	}
-	if stats := h.quotaPersistStats(); stats["persist_replayed"] != 4 || stats["pending_samples"] != 0 {
+	if stats := h.quotaSub().persistStats(); stats["persist_replayed"] != 4 || stats["pending_samples"] != 0 {
 		t.Fatalf("persist stats after replay = %+v", stats)
 	}
 }
@@ -354,8 +354,8 @@ func TestQuotaPersistOwnsBudget(t *testing.T) {
 	// persist 若仍共享调用方预算必死于 deadline。
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
-	if _, _, _, err := h.captureAccountQuota(ctx, "randall", "tok-r"); err != nil {
-		t.Fatalf("captureAccountQuota: %v", err)
+	if _, _, _, err := h.quotaSub().capture(ctx, "randall", "tok-r"); err != nil {
+		t.Fatalf("capture: %v", err)
 	}
 	<-committed
 	rows, err := st.ListQuotaSamples(context.Background(), "randall", 0, 0)
@@ -365,9 +365,9 @@ func TestQuotaPersistOwnsBudget(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("samples = %+v, want the point landed after lock release", rows)
 	}
-	h.quotaPendingMu.Lock()
-	pending := len(h.pendingQuotaSamples)
-	h.quotaPendingMu.Unlock()
+	h.quotaSub().pendingMu.Lock()
+	pending := len(h.quotaSub().pending)
+	h.quotaSub().pendingMu.Unlock()
 	if pending != 0 {
 		t.Fatalf("pending = %d, want 0 — write succeeded on first attempt", pending)
 	}
@@ -380,7 +380,7 @@ func TestQuotaPersistOwnsBudget(t *testing.T) {
 func TestQuotaAccountsStates(t *testing.T) {
 	// 未接线：回退 {token: tokenFunc()} 匿名行。
 	h := &Handler{tokenFunc: func() string { return "tok-single" }}
-	got := h.quotaAccounts()
+	got := h.quotaSub().accounts()
 	if len(got) != 1 || got[0].name != "" || got[0].token != "tok-single" {
 		t.Fatalf("unwired fallback = %+v", got)
 	}
@@ -393,7 +393,7 @@ func TestQuotaAccountsStates(t *testing.T) {
 	h = &Handler{pool: &PoolDeps{Snapshot: func() devin.PoolSnapshot {
 		return devin.PoolSnapshot{TokenFuncs: map[string]func() string{}}
 	}}}
-	if got := h.quotaAccounts(); len(got) != 0 {
+	if got := h.quotaSub().accounts(); len(got) != 0 {
 		t.Fatalf("empty pool = %+v, want empty", got)
 	}
 	slog.SetDefault(defaultLogger)
@@ -408,7 +408,7 @@ func TestQuotaAccountsStates(t *testing.T) {
 			"yanjian": func() string { return "tok-y" },
 		}}
 	}}}
-	got = h.quotaAccounts()
+	got = h.quotaSub().accounts()
 	if len(got) != 2 ||
 		got[0].name != "randall" || got[0].token != "tok-r" ||
 		got[1].name != "yanjian" || got[1].token != "tok-y" {
@@ -417,7 +417,7 @@ func TestQuotaAccountsStates(t *testing.T) {
 }
 
 // TestSetQuotaIntervalAfterDrain 验证排空闩：BeginDrain 置位后
-// SetQuotaInterval 只更新 quotaInterval 簿记、不再重起采样协程——
+// SetQuotaInterval 只更新 reqInterval 簿记、不再重起采样协程——
 // 排空窗口内的 config reload 与设置写入都经 SetQuotaInterval，闩缺席
 // 时它们会把已收束的上游生产者重新武装。
 func TestSetQuotaIntervalAfterDrain(t *testing.T) {
@@ -427,22 +427,23 @@ func TestSetQuotaIntervalAfterDrain(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 	// 空池接线：协程起跑即取账号清单，空清单让它空转待机——不触上游、
-	// 不落样本，quotaCancel 是否非 nil 即「协程是否活着」的判定面。
+	// 不落样本，sampler cancel 是否非 nil 即「协程是否活着」的判定面。
 	h := &Handler{store: st, pool: &PoolDeps{Snapshot: func() devin.PoolSnapshot { return devin.PoolSnapshot{} }}}
 
 	h.SetQuotaInterval(time.Minute)
-	h.quotaMu.Lock()
-	armed := h.quotaCancel != nil
-	h.quotaMu.Unlock()
+	q := h.quotaSub()
+	q.mu.Lock()
+	armed := q.cancel != nil
+	q.mu.Unlock()
 	if !armed {
 		t.Fatal("sampler not armed after SetQuotaInterval")
 	}
 
 	h.BeginDrain()
 	h.SetQuotaInterval(2 * time.Minute)
-	h.quotaMu.Lock()
-	rearmed := h.quotaCancel != nil
-	h.quotaMu.Unlock()
+	q.mu.Lock()
+	rearmed := q.cancel != nil
+	q.mu.Unlock()
 	if rearmed {
 		t.Fatal("sampler re-armed after drain")
 	}
@@ -465,7 +466,7 @@ func TestQuotaWriterStamp(t *testing.T) {
 	h.SetVersion("v0.0.0-test")
 
 	before := time.Now().Unix()
-	h.stampQuotaWriter()
+	h.quotaSub().stampWriter()
 	value, ok, err := st.GetState(context.Background(), "quota_writer")
 	if err != nil || !ok {
 		t.Fatalf("GetState ok=%v err=%v", ok, err)
@@ -488,7 +489,7 @@ func TestQuotaWriterStamp(t *testing.T) {
 	}
 
 	// 重复武装：身份不变，grid_epoch 刷新为新一轮武装时刻。
-	h.stampQuotaWriter()
+	h.quotaSub().stampWriter()
 	value2, _, _ := st.GetState(context.Background(), "quota_writer")
 	var rec2 map[string]any
 	if err := json.Unmarshal([]byte(value2), &rec2); err != nil {
@@ -518,7 +519,7 @@ func newQuotaTestHandler(t *testing.T, srv *httptest.Server) *Handler {
 }
 
 // TestRefreshAccountQuota 验证手动刷新与定时采样共用内核：返回
-// {account,user,plan} 回显，同时更新 quotaUsers 投影并落一行
+// {account,user,plan} 回显，同时更新 users 投影并落一行
 // quota_samples（字段名与采样写库同口径）。
 func TestRefreshAccountQuota(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -544,7 +545,7 @@ func TestRefreshAccountQuota(t *testing.T) {
 	defer srv.Close()
 	h := newQuotaTestHandler(t, srv)
 
-	data, err := h.refreshAccountQuota(context.Background(), "randall", "tok-r")
+	data, err := h.quotaSub().refresh(context.Background(), "randall", "tok-r")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,9 +562,9 @@ func TestRefreshAccountQuota(t *testing.T) {
 	}
 
 	// 身份投影按名更新（与定时采样同一路径）。
-	h.quotaUserMu.Lock()
-	proj := h.quotaUsers["randall"]
-	h.quotaUserMu.Unlock()
+	h.quotaSub().userMu.Lock()
+	proj := h.quotaSub().users["randall"]
+	h.quotaSub().userMu.Unlock()
 	if proj["email"] != "r@x.com" || proj["teams_tier"] != "PRO" || proj["billing_strategy"] != "MONTHLY" {
 		t.Fatalf("quotaUsers[randall] = %+v", proj)
 	}
@@ -588,7 +589,7 @@ func TestRefreshAccountQuotaNoPlan(t *testing.T) {
 	defer srv.Close()
 	h := newQuotaTestHandler(t, srv)
 
-	data, err := h.refreshAccountQuota(context.Background(), "randall", "tok-r")
+	data, err := h.quotaSub().refresh(context.Background(), "randall", "tok-r")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +618,7 @@ func TestRefreshAccountQuotaUpstreamError(t *testing.T) {
 	defer srv.Close()
 	h := newQuotaTestHandler(t, srv)
 
-	if _, err := h.refreshAccountQuota(context.Background(), "randall", "tok-r"); err == nil {
+	if _, err := h.quotaSub().refresh(context.Background(), "randall", "tok-r"); err == nil {
 		t.Fatal("want error for upstream 500")
 	}
 	rows, err := h.store.ListQuotaSamples(context.Background(), "randall", 0, 0)
@@ -653,9 +654,9 @@ func TestQuotaSamplerHeartbeat(t *testing.T) {
 		}}
 	}}
 	before := time.Now().Unix()
-	h.sampleQuota(context.Background())
+	h.quotaSub().sample(context.Background())
 
-	stats := h.quotaPersistStats()
+	stats := h.quotaSub().persistStats()
 	if stats["rounds_started"] != int64(1) || stats["rounds_aborted"] != int64(0) {
 		t.Fatalf("round counters = %+v", stats)
 	}
@@ -694,10 +695,10 @@ func TestQuotaSamplerHeartbeat(t *testing.T) {
 
 	// 手动刷新共用 capture 内核但不记 lane 账——混入会把「调度器死了
 	// 但刷新还在写」误读成采样轮在推进。
-	if _, err := h.refreshAccountQuota(context.Background(), "randall", "tok-r"); err != nil {
+	if _, err := h.quotaSub().refresh(context.Background(), "randall", "tok-r"); err != nil {
 		t.Fatal(err)
 	}
-	r2 := h.quotaPersistStats()["lanes"].(map[string]any)["randall"].(map[string]any)
+	r2 := h.quotaSub().persistStats()["lanes"].(map[string]any)["randall"].(map[string]any)
 	if r2["rounds_started"] != int64(1) || r2["rounds_persist_ok"] != int64(1) {
 		t.Fatalf("manual refresh polluted lane stats: %+v", r2)
 	}
@@ -706,7 +707,7 @@ func TestQuotaSamplerHeartbeat(t *testing.T) {
 // TestQuotaSamplerHeartbeatNoPlan 验证「拉到但缺 planStatus」的分桶：
 // fetch_ok 照涨（拉取确实成功）、failed_no_plan 记无点可写并留
 // last_error——匿名 fallback 单号的 account="" 折叠成 default 桶，
-// 与 QuotaReport 的 ”/default 口径一致。
+// 与 report 的 ”/default 口径一致。
 func TestQuotaSamplerHeartbeatNoPlan(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -716,9 +717,9 @@ func TestQuotaSamplerHeartbeatNoPlan(t *testing.T) {
 	h := newQuotaTestHandler(t, srv)
 	h.tokenFunc = func() string { return "tok-solo" }
 
-	h.sampleQuota(context.Background())
+	h.quotaSub().sample(context.Background())
 
-	lanes := h.quotaPersistStats()["lanes"].(map[string]any)
+	lanes := h.quotaSub().persistStats()["lanes"].(map[string]any)
 	d, ok := lanes["default"].(map[string]any)
 	if !ok {
 		t.Fatalf("default lane = %+v, want '' folded to default", lanes)
@@ -749,9 +750,9 @@ func TestQuotaSamplerHeartbeatPersistFail(t *testing.T) {
 	h := newQuotaTestHandler(t, srv)
 	_ = h.store.Close() // 落库必败
 
-	h.sampleAccountQuota(context.Background(), "randall", "tok-r")
+	h.quotaSub().sampleAccount(context.Background(), "randall", "tok-r")
 
-	stats := h.quotaPersistStats()
+	stats := h.quotaSub().persistStats()
 	if stats["pending_samples"] != 1 {
 		t.Fatalf("pending_samples = %v, want point stashed for replay", stats["pending_samples"])
 	}
@@ -788,9 +789,9 @@ func TestQuotaSamplerRoundAbort(t *testing.T) {
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	h.sampleQuota(ctx)
+	h.quotaSub().sample(ctx)
 
-	stats := h.quotaPersistStats()
+	stats := h.quotaSub().persistStats()
 	if stats["rounds_started"] != int64(1) || stats["rounds_aborted"] != int64(1) {
 		t.Fatalf("round counters = %+v", stats)
 	}
@@ -800,7 +801,7 @@ func TestQuotaSamplerRoundAbort(t *testing.T) {
 }
 
 // TestQuotaDrainFlushPending 验证排空冲刷：写失败挂进重放缓冲的点在
-// BeginDrain 时经 FlushPendingQuotaSamples 拿到最后一轮同步落库——
+// BeginDrain 时经 flush 拿到最后一轮同步落库——
 // 缓冲先靠关库喂出两笔挂账，重开后 BeginDrain 把它们写回，曲线不断档，
 // 救回点数照常计 persist_replayed。
 func TestQuotaDrainFlushPending(t *testing.T) {
@@ -812,10 +813,10 @@ func TestQuotaDrainFlushPending(t *testing.T) {
 	h := &Handler{store: st}
 	_ = st.Close() // 落库必败，喂两笔挂账
 	for i := 0; i < 2; i++ {
-		h.persistQuotaSample(
+		_ = h.quotaSub().persist(
 			&store.QuotaSample{At: 1700000000 + int64(i*300), Account: "randall", DailyRemaining: f64(90 - float64(i))})
 	}
-	if stats := h.quotaPersistStats(); stats["pending_samples"] != 2 {
+	if stats := h.quotaSub().persistStats(); stats["pending_samples"] != 2 {
 		t.Fatalf("pending = %+v, want 2 stashed", stats)
 	}
 
@@ -834,7 +835,7 @@ func TestQuotaDrainFlushPending(t *testing.T) {
 	if len(rows) != 2 || rows[0].At != 1700000000 || rows[1].At != 1700000000+300 {
 		t.Fatalf("flushed samples = %+v, want 2 rows", rows)
 	}
-	if stats := h.quotaPersistStats(); stats["persist_replayed"] != 2 || stats["pending_samples"] != 0 {
+	if stats := h.quotaSub().persistStats(); stats["persist_replayed"] != 2 || stats["pending_samples"] != 0 {
 		t.Fatalf("persist stats after drain flush = %+v", stats)
 	}
 }
@@ -871,14 +872,16 @@ func TestQuotaDrainFlushWaitsInflight(t *testing.T) {
 		_, _ = conn.ExecContext(context.Background(), "COMMIT")
 	}()
 
-	go h.persistQuotaSample(&store.QuotaSample{At: 1700000000, Account: "randall", DailyRemaining: f64(90)})
+	go func() {
+		_ = h.quotaSub().persist(&store.QuotaSample{At: 1700000000, Account: "randall", DailyRemaining: f64(90)})
+	}()
 	// 等在途计数起来再排空：否则冲刷读到的 persistDone 还是 nil，
 	// 等待路径根本没被踩到。
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		h.quotaPendingMu.Lock()
-		n := h.quotaPersistInFlight
-		h.quotaPendingMu.Unlock()
+		h.quotaSub().pendingMu.Lock()
+		n := h.quotaSub().persistInFlight
+		h.quotaSub().pendingMu.Unlock()
 		if n > 0 {
 			break
 		}
@@ -901,7 +904,7 @@ func TestQuotaDrainFlushWaitsInflight(t *testing.T) {
 	if len(rows) != 1 || rows[0].At != 1700000000 {
 		t.Fatalf("samples = %+v, want the in-flight point landed", rows)
 	}
-	if stats := h.quotaPersistStats(); stats["pending_samples"] != 0 || stats["persist_failures"] != 0 {
+	if stats := h.quotaSub().persistStats(); stats["pending_samples"] != 0 || stats["persist_failures"] != 0 {
 		t.Fatalf("persist stats = %+v, want clean settle", stats)
 	}
 }

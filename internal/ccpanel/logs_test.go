@@ -31,11 +31,11 @@ func TestDashboardLogsCountFirstPageOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	h, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.SetStore(st)
+	h.store = st
 	call := func(query string) map[string]any {
 		t.Helper()
 		r := httptest.NewRequest("GET", "/admin/logs?"+query, nil)

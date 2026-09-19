@@ -17,7 +17,7 @@ import (
 // TestLoginFailureSweep 验证失败路径会清扫已失效的爆破条目——纯爆破
 // 流量永远不走成功路径，loginFailures 不能无界增长。
 func TestLoginFailureSweep(t *testing.T) {
-	handler, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	handler, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestLoginFailureSweep(t *testing.T) {
 // TestBearerFailureSharesLoginLedger 验证 Bearer 认证失败与表单登录共用
 // 同一 IP 账本——只守 login 端点等于把全速穷举通道留给 Bearer。
 func TestBearerFailureSharesLoginLedger(t *testing.T) {
-	handler, err := New("pw", "https://example.com", nil, "", false, nil, nil)
+	handler, err := New(Deps{Password: "pw", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	}
 
 	// 开放面板（password==""）：存量播种行命中 Resolve，但仍应 admin。
-	open, err := New("", "https://example.com", nil, "", false, nil, nil)
+	open, err := New(Deps{BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,13 +119,13 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	if _, _, err := store.Ensure("the-api-key", &authtoken.Token{Description: "config: auth.api_key", IsActive: true}); err != nil {
 		t.Fatal(err)
 	}
-	open.SetTokenStore(store)
+	open.tokens = store
 	if code, role := probe(open, "the-api-key"); code != http.StatusOK || role != "admin" {
 		t.Fatalf("open panel + seeded key = (%d, %q), want (200, admin)", code, role)
 	}
 
 	// 密码面板 + Bearer 与密码同值（旧部署里 api_key 常与管理密码同串）→ admin。
-	guarded, err := New("the-api-key", "https://example.com", nil, "", false, nil, nil)
+	guarded, err := New(Deps{Password: "the-api-key", BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestWebAuthPasswordBeatsSeededToken(t *testing.T) {
 	if _, _, err := store2.Ensure("real-token", &authtoken.Token{Description: "t", IsActive: true}); err != nil {
 		t.Fatal(err)
 	}
-	guarded.SetTokenStore(store2)
+	guarded.tokens = store2
 	if code, role := probe(guarded, "the-api-key"); code != http.StatusOK || role != "admin" {
 		t.Fatalf("bearer == panel password = (%d, %q), want (200, admin)", code, role)
 	}
