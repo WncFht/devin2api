@@ -101,12 +101,9 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	// DEVIN2API_HANDOFF 由 deploy 的交接进程携带（scripts/lib-deploy.sh
-	// spawn_handoff）：它是 reuseport 队列里接住端口的短命占位——旧实例
-	// 排空、托管实例拉起之间，新连接真实落在它身上，所以请求服务路径
-	// 照常装配；但后台维护与一次性播种全部归托管实例——两进程并发做
-	// 同一份维护只会重复打上游、重复写库或在 UNIQUE 约束上互相打断。
-	handoff := os.Getenv("DEVIN2API_HANDOFF") != ""
+	// 进程角色（托管实例 vs deploy 交接占位）的语义与判据见 procRole；
+	// 下方凡后台职责一律走 role.duty/role.spawn 登记，不再各点自判。
+	role := roleFromEnv()
 
 	if *exportLegacyDir != "" {
 		if err := runExportLegacy(*exportLegacyDir); err != nil {
@@ -201,13 +198,13 @@ func main() {
 	}
 	defer func() { _ = dbStore.Close() }()
 	// 文件时代状态的一次性导入是迁移维护而非服务依赖（能走 reuseport
-	// 交接的旧实例必然已是 DB 时代、导入早完成），交接进程跳过。
-	if !handoff {
+	// 交接的旧实例必然已是 DB 时代、导入早完成）。
+	role.duty("import legacy state", func() {
 		if err := dbStore.ImportLegacy(context.Background(), absoluteStateDir, logRoot); err != nil {
 			slog.Error("import legacy state failed", "error", err)
 			os.Exit(1)
 		}
-	}
+	})
 
 	// token 允许为空启动：凭据是运行时字段——/admin/config/reload
 	// 热应用与 unauthenticated 自愈链的 TokenSource 重读都能补进。
@@ -257,23 +254,21 @@ func main() {
 	debugManager.SetEnabled(serviceConfig.Debug.Enabled)
 	debugManager.SetErrorsOnly(serviceConfig.Debug.ErrorsOnly)
 	defer debugManager.Close()
-	// 交接进程不跑目录清理：cleanOnce 是共享库上的多语句重事务，
-	// 与托管实例并发清理只会争抢同一写连接互相打断（与下方导入
-	// 跳过同一判据）。
-	if handoff {
+	// 目录清理器随 NewManager 自起跑，交接侧反向关停：cleanOnce 是
+	// 共享库上的多语句重事务，与托管实例并发清理只会争抢同一写连接
+	// 互相打断（与下方导入跳过同一判据）。
+	if role.handoff {
 		debugManager.StopCleaner()
 	}
 	// 遗留磁盘请求目录的后台导入：逐目录事务搬进 debug 两表后删目录，
 	// 断点记在 runtime_state，崩溃重启续传。异步跑——大目录导入不该
 	// 拖住就绪；导入途中同秒新目录的 claim 由 DB 占位与 takenNames 兜底。
-	// 交接进程不跑：它与托管实例并发导入会在同一目录的 UNIQUE 上互相打断。
-	if !handoff {
-		go func() {
-			if err := dbStore.ImportDebugDirs(context.Background(), logRoot, "import_debug_progress"); err != nil {
-				slog.Warn("import legacy debug dirs failed", "error", err)
-			}
-		}()
-	}
+	// 跳过交接侧：与托管实例并发导入会在同一目录的 UNIQUE 上互相打断。
+	role.spawn("import legacy debug dirs", func() {
+		if err := dbStore.ImportDebugDirs(context.Background(), logRoot, "import_debug_progress"); err != nil {
+			slog.Warn("import legacy debug dirs failed", "error", err)
+		}
+	})
 	application := app.New(devinPool, serviceConfig.Server, debugManager)
 	// 兜底服役标记进 healthz：外部探活能区分健康与「带陈化配置服役」。
 	if lastGood != nil {
@@ -283,16 +278,18 @@ func main() {
 	// 开始，RPM 峰值口径同样恢复。完成时刻按 time+duration_ms 归桶，
 	// 与 Finish 实时路径一致；管线前 Reject 不进表，这部分计数不回放。
 	// 50000 是上限；LogTrendSeeds 本身只取最近 60 分钟完成的行。
-	// 交接进程跳过：它的进程内指标随退出丢弃，扫表是白做的启动耗时。
-	if !handoff {
-		if seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000); err == nil {
-			for _, seed := range seeds {
-				application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
-			}
-		} else {
+	// 交接侧跳过的理由不同：它的进程内指标随退出丢弃，扫表是白做的
+	// 启动耗时（不是共享库竞争）。
+	role.duty("seed trend buckets", func() {
+		seeds, err := dbStore.LogTrendSeeds(context.Background(), 50000)
+		if err != nil {
 			slog.Warn("seed trend buckets failed", "error", err)
+			return
 		}
-	}
+		for _, seed := range seeds {
+			application.Metrics().SeedTrend(time.UnixMilli(seed.FinishedMS), seed.IsError)
+		}
+	})
 	application.SetVersion(resolved)
 	// 下游令牌仓：auth_tokens 表在刚打开并导入完的 dbStore 里。
 	// /v1 准入与移植面板的令牌管理共用同一仓；costFn 用目录价把一次
@@ -364,11 +361,11 @@ func main() {
 		}
 		ccPanel.NoteUpstreamTokens(tokenSeeds...)
 	}
-	// 交接进程不起配额采样协程：起跑即对每个账号打一次上游并写
-	// quota_samples，与托管实例的采样重复且互相计数。
-	if !handoff {
+	// 配额采样协程是托管职责：起跑即对每个账号打一次上游并写
+	// quota_samples，交接侧与托管实例的采样会重复且互相计数。
+	role.duty("quota sampler", func() {
 		ccPanel.SetQuotaInterval(time.Duration(*serviceConfig.Debug.QuotaIntervalMinutes) * time.Minute)
-	}
+	})
 	// 运行时设置键仓：覆盖项落 settings 表；覆盖项对被登记键
 	// 恒赢 config.yaml。构造须在 app/panel 装配与 SetQuotaInterval 之后——
 	// 键的 apply/live 依赖这些持有者，boot 采样默认值反映文件生效态；
@@ -403,13 +400,13 @@ func main() {
 		slog.Error("load panel settings failed", "error", err)
 		os.Exit(1)
 	}
-	// 交接进程不重放面板覆盖：窗口内按文件配置服务即可，覆盖重放会
-	// 顺带把配额采样等后台组件也点起来。
-	if !handoff {
+	// 覆盖重放是托管职责：交接窗口内按文件配置服务即可，重放会顺带把
+	// 配额采样等后台组件也点起来。
+	role.duty("replay panel settings", func() {
 		if err := settingsStore.ApplyAll(); err != nil {
 			slog.Warn("panel settings replay failed", "error", err)
 		}
-	}
+	})
 	application.SetAuthTokens(tokenStore, func(model string, input, output, cacheRead, cacheWrite int64) float64 {
 		return ccpanel.TokenCost(input, output, cacheRead, cacheWrite, ccPanel.CatalogPrices(context.Background())[model])
 	})
@@ -444,37 +441,37 @@ func main() {
 	// 回收）：养护对象是库不是调试目录，由这里驱动而非 debuglog
 	// cleaner——后者随 debug.enabled/root 关停，保洁不该跟着停。
 	// 节奏沿用原 cleaner 的 5 分钟；LogRowDays 每拍现读 Policy()，
-	// 面板热改即时生效。交接进程不跑：与托管实例并发做同一份养护
-	// 只会重复写库、在共享库上互相打断。
-	if !handoff {
-		go func() {
-			ticker := time.NewTicker(5 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
+	// 面板热改即时生效。交接侧并发做同一份养护只会重复写库、在共享
+	// 库上互相打断。
+	role.spawn("store maintain", func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// SIGTERM 与 tick 同就绪时 select 随机选——已取消
+				// 就不再发起新一轮（Maintain 是共享库上的多语句
+				// 重活，排空窗内只会白抢写连接）。
+				if ctx.Err() != nil {
 					return
-				case <-ticker.C:
-					// SIGTERM 与 tick 同就绪时 select 随机选——已取消
-					// 就不再发起新一轮（Maintain 是共享库上的多语句
-					// 重活，排空窗内只会白抢写连接）。
-					if ctx.Err() != nil {
-						return
-					}
-					if err := dbStore.Maintain(context.Background(), debugManager.Policy().LogRowDays); err != nil {
-						slog.Warn("store maintain failed", "error", err)
-					}
+				}
+				if err := dbStore.Maintain(context.Background(), debugManager.Policy().LogRowDays); err != nil {
+					slog.Warn("store maintain failed", "error", err)
 				}
 			}
-		}()
-	}
+		}
+	})
 	// 监听归属看门狗：reuseport 并组是静默的（同 euid 即可入组，不撞
 	// EADDRINUSE），野进程进组后唯一的既有信号是人工 ss census——本循环
 	// 把它变成进程内周期核对。只在 reuseport 开启时跑：未开时内核保证
 	// 独占绑定，扫描恒无发现。交接进程不跑：它转瞬即逝，核归属是托管
 	// 实例的职责；交接窗内老/新实例与桥接互见，env 判据互认不误警。
-	if !handoff && reusePortEnabled() {
-		go watchListenOwnership(ctx, listener.Addr().(*net.TCPAddr).Port, application.Metrics())
+	if reusePortEnabled() {
+		role.spawn("watch listen ownership", func() {
+			watchListenOwnership(ctx, listener.Addr().(*net.TCPAddr).Port, application.Metrics())
+		})
 	}
 	// SIGHUP（终端断开）不参与排空语义：前台裸跑时断连不应强杀在途流。
 	signal.Ignore(syscall.SIGHUP)
