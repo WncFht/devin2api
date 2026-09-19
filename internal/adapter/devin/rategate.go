@@ -788,7 +788,6 @@ func (gate *rateGate) clearState() {
 // 时间线才闭环。
 func (gate *rateGate) stats() GateStats {
 	gate.mu.Lock()
-	defer gate.mu.Unlock()
 	now := gate.now()
 	gate.expireIfDue(now)
 	ws := gate.windowStart(now)
@@ -828,46 +827,59 @@ func (gate *rateGate) stats() GateStats {
 			stats.PaceAllowance = gate.bgAllowance(now, ws, stats.Reserve)
 		}
 	}
-	stats.Events = gate.events.recent()
-	if !gate.limitedUntil.IsZero() {
-		until := gate.limitedUntil
+	// 锁内只留结算、O(1) 读数与环内容快照：闩时段重放与等待分位
+	// 排序是 O(n log n) 纯计算，移到锁外做——面板轮询高峰不再挡
+	// wait/admissionVerdict 的锁径。
+	evs := gate.events.ordered()
+	samples := gate.waits.ordered()
+	waitEvals := gate.waitEvals
+	waitTotalFg, waitTotalBg := gate.waitTotalFg, gate.waitTotalBg
+	limitedUntil := gate.limitedUntil
+	gate.mu.Unlock()
+
+	stats.Events = make([]GateEvent, len(evs))
+	for i, ev := range evs {
+		stats.Events[len(evs)-1-i] = ev // 展示序=写入序反转，与 recent() 同
+	}
+	if !limitedUntil.IsZero() {
+		until := limitedUntil
 		stats.LimitedUntil = &until
 	}
-	stats.LatchRanges = gate.latchRanges(now)
-	stats.Wait = gate.waitView()
+	stats.LatchRanges = latchRanges(evs, limitedUntil, now)
+	stats.Wait = waitView(samples, waitEvals, waitTotalFg, waitTotalBg)
 	return stats
 }
 
-// waitView 把样本环聚合成分类摘要：等待分位按墙钟毫秒计，结局计数
-// 同步分出（拒绝再按 reason 细账）。调用方须持 mu。
-func (gate *rateGate) waitView() *GateWait {
-	if gate.waits.size == 0 {
+// waitView 把样本快照聚合成分类摘要：等待分位按墙钟毫秒计，结局计数
+// 同步分出（拒绝再按 reason 细账）。samples 是环的写入序快照（首元素
+// 即最老样本），evals/totalFg/totalBg 是同一锁内取出的计数器副本——
+// 本函数不触闸门状态，可放锁外跑。
+func waitView(samples []gateWaitSample, evals int, totalFg, totalBg GateWaitTotal) *GateWait {
+	if len(samples) == 0 {
 		return nil
 	}
-	view := &GateWait{Samples: gate.waits.size, Evals: gate.waitEvals}
-	all := make([]gateWaitSample, 0, gate.waits.size)
+	view := &GateWait{Samples: len(samples), Evals: evals}
 	var fg, bg []gateWaitSample
-	gate.waits.each(func(s gateWaitSample) {
+	for _, s := range samples {
 		if s.outcome == gateWaitReject {
 			if view.Rejects == nil {
 				view.Rejects = map[string]int{}
 			}
 			view.Rejects[s.reason]++
 		}
-		all = append(all, s)
 		if s.class == adapter.ClassBG {
 			bg = append(bg, s)
 		} else {
 			fg = append(fg, s)
 		}
-	})
-	since := all[0].at // 环按写入序遍历，首元素即最老样本
+	}
+	since := samples[0].at
 	view.Since = &since
-	view.All = summarizeWaits(all)
+	view.All = summarizeWaits(samples)
 	view.Fg = summarizeWaits(fg)
 	view.Bg = summarizeWaits(bg)
-	view.Totals.Fg = gate.waitTotalFg
-	view.Totals.Bg = gate.waitTotalBg
+	view.Totals.Fg = totalFg
+	view.Totals.Bg = totalBg
 	return view
 }
 
@@ -1043,9 +1055,10 @@ func (gate *rateGate) expectedWaitLocked(class string, now, ws time.Time, used i
 // latchRanges 按事件时间序还原闩时段：latched/restored 开窗，released
 // 提前关窗，expired 按截止关窗；延闩（latched 落在开窗内）只推进右端。
 // 仍在闩中的时段收到 now；当前闩的开窗事件滚出环外时给 nil Start。
-// 调用方须持 mu。
-func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
-	if gate.events.size == 0 {
+// evs 是事件环的写入序快照，limitedUntil 是同一锁内取出的闩截止副本
+// ——本函数不触闸门状态，可放锁外跑。
+func latchRanges(evs []GateEvent, limitedUntil, now time.Time) []GateLatchRange {
+	if len(evs) == 0 {
 		return nil
 	}
 	var ranges []GateLatchRange
@@ -1057,8 +1070,7 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 			open = nil
 		}
 	}
-	// 事件环按写入序（旧到新）重放——stats.Events 的新在前序是展示序。
-	gate.events.each(func(ev GateEvent) {
+	for _, ev := range evs {
 		until := ev.At
 		if ev.Until != nil {
 			until = *ev.Until
@@ -1081,14 +1093,14 @@ func (gate *rateGate) latchRanges(now time.Time) []GateLatchRange {
 		case gateEventExpired:
 			closeOpen(until)
 		}
-	})
+	}
 	if open != nil {
 		end := open.End
 		if now.Before(end) {
 			end = now
 		}
 		closeOpen(end)
-	} else if latched := !gate.limitedUntil.IsZero() && now.Before(gate.limitedUntil); latched {
+	} else if latched := !limitedUntil.IsZero() && now.Before(limitedUntil); latched {
 		// 当前闩的开窗事件已滚出环外：左端不可考，给 nil Start。
 		ranges = append(ranges, GateLatchRange{End: now})
 	}

@@ -41,3 +41,11 @@ func (r *eventRing[T]) each(f func(T)) {
 		f(r.events[(r.head-i+len(r.events))%len(r.events)])
 	}
 }
+
+// ordered 按写入序（旧到新）拷贝出全部在场条目：调用方持锁快照后放
+// 到锁外做回放/聚合——与 each 同序，但产物是切片而非逐条回调。
+func (r *eventRing[T]) ordered() []T {
+	out := make([]T, 0, r.size)
+	r.each(func(e T) { out = append(out, e) })
+	return out
+}
