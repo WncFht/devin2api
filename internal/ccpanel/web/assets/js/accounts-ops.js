@@ -1,6 +1,7 @@
 // 账号页操作层（pool 重构）：操作按钮列、改凭据 modal、加号表单、CLI 凭据导入。
-// 经 window.acctOps 供 accounts.js 调用——core 负责点击委托与 loadAll 时调
-// acctOps.detect() 探测后端；reload 由 core 注入（acctOps.reload = loadAll）。
+// 经 window.acctOps 供 accounts.js 调用——core 负责点击委托，loadAll 的
+// fetchAdminAccounts 顺手把 GET 探测结果经 acctOps.reportGetProbe 喂过来；
+// reload 由 core 注入（acctOps.reload = loadAll）。
 // 端点缺席口径（冻结契约）：GET 探测 404/405/501/503/网络错 = 整组缺席 →
 // 全部变更按钮隐藏。变更请求的 404 是域错误（无名/无活 lane/死墓碑），
 // 只弹 error 文案；仅 405/501/503 才按「该动作端点缺席」隐藏对应按钮。
@@ -15,9 +16,8 @@
   const ACT_ABSENT = new Set([405, 501, 503]);        // 变更路径的 404 是域错误，不算缺席
 
   let supported = null; // null=未探测，渲染期乐观显示
-  let detectPromise = null;
   const absentActs = new Set();
-  const formMounts = new Set(); // 挂过的加号表单容器：detect 落定后重评估（core 只在 run() 挂一次）
+  const formMounts = new Set(); // 挂过的加号表单容器：探测落定后重评估（core 只在 run() 挂一次）
   let formSeq = 0;
 
   function reload() {
@@ -40,42 +40,25 @@
     refreshForms();
   }
 
+  // core 的 fetchAdminAccounts 是共享 GET 探测：每轮 loadAll 报一次 status，
+  // null 表示网络错（口径同旧 detect 的 catch 分支），随后随下轮探测自愈。
+  function reportGetProbe(status) {
+    setSupported(status !== null && !PROBE_ABSENT.has(status));
+  }
+
   function absentErr(status) {
     const err = new Error(`HTTP ${status}`);
     err.absent = true;
     return err;
   }
 
+  // 缺席判定必须先于信封解析：405/501/503 的响应体不一定是信封形状。
   async function apiCall(url, options = {}) {
     const res = await fetchWithAuth(url, options);
     if (ACT_ABSENT.has(res.status)) throw absentErr(res.status);
-    const text = await res.text();
-    let payload = null;
-    if (text) {
-      try { payload = JSON.parse(text); } catch (_) { payload = null; }
-    }
-    if (!res.ok || (payload && payload.success === false)) {
-      const msg = payload && typeof payload.error === 'string' && payload.error;
-      throw new Error(msg || `HTTP ${res.status}`);
-    }
-    return payload && 'data' in payload ? payload.data : payload;
-  }
-
-  async function detect() {
-    try {
-      const res = await fetchWithAuth(BASE);
-      setSupported(!PROBE_ABSENT.has(res.status));
-    } catch (_) {
-      setSupported(false);
-    }
-    return supported;
-  }
-
-  function ensureDetected() {
-    if (supported === null && !detectPromise) {
-      detectPromise = detect().finally(() => { detectPromise = null; });
-    }
-    return detectPromise;
+    const payload = await window.parseAPIResponse(res);
+    if (!payload.success) throw new Error(payload.error || `HTTP ${res.status}`);
+    return 'data' in payload ? payload.data : payload;
   }
 
   function cooldownActive(lane) {
@@ -90,7 +73,6 @@
 
   function actionsBlock(a) {
     if (!a || !a.name) return '';
-    ensureDetected();
     const name = a.name;
     const btns = [];
     const link = (act, text) =>
@@ -309,7 +291,6 @@
   function mountForm(el) {
     if (!el) return;
     formMounts.add(el);
-    ensureDetected();
     if (supported === false) {
       el.innerHTML = '';
       return;
@@ -392,7 +373,7 @@
   // ---- CLI 凭据导入与复制预填：共用「找可见加号表单 + 切凭据档」两招 ----
   function visibleAddForm() {
     const forms = Array.from(document.querySelectorAll('form.acct-form[data-add]'));
-    return forms.find((f) => f.offsetParent !== null) || forms[0] || null;
+    return forms.find((f) => f.checkVisibility()) || forms[0] || null;
   }
 
   function setAddKind(form, kind) {
@@ -709,7 +690,7 @@
   window.acctOps = {
     actionsBlock,
     handle,
-    detect,
+    reportGetProbe,
     mountAddForm: mountForm,
     mountEmptyAdd: mountForm,
     maybeCliImport,

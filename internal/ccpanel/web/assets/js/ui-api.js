@@ -254,6 +254,8 @@ window.WebAuth = window.WebAuth || {
 
   window.fetchAPI = fetchAPI;
 
+  window.parseAPIResponse = parseAPIResponse;
+
   window.fetchAPIWithAuth = fetchAPIWithAuth;
 
   window.fetchAPIWithAuthRaw = fetchAPIWithAuthRaw;

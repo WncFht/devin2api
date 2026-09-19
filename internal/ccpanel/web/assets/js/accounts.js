@@ -39,6 +39,13 @@
 
   const el = (id) => document.getElementById(id);
   const errMsg = (e) => (e && (e.message || String(e))) || '';
+  // GET /admin/accounts 是账号操作端点组的共享探测：ops 侧按钮显隐
+  // 靠这份结果（reportGetProbe），不再自己发第二份 GET。
+  const reportProbe = (status) => {
+    if (window.acctOps && typeof window.acctOps.reportGetProbe === 'function') {
+      window.acctOps.reportGetProbe(status);
+    }
+  };
   const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\\]]/g, ''));
 
   window.initPageBootstrap({
@@ -134,8 +141,10 @@
     try {
       res = await window.fetchWithAuth('/admin/accounts');
     } catch (_) {
+      reportProbe(null);
       return null;
     }
+    reportProbe(res.status);
     if (res.status === 404 || res.status === 405) { adminApi = false; return null; }
     if (!res.ok) return null;
     let payload;
