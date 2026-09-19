@@ -91,7 +91,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS 用 scripts/deploy.sh
 ```
 
-首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/auth-tokens` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
+首跑时 `config.yaml` 会自动从 `config.example.yaml` 生成（写入随机 `dashboard.password`，并提示粘贴 Devin token——留空则空池起跑，事后在面板加号；下游 /v1 令牌在面板 `/web/tokens.html` 创建，不入配置）；想提前定制可先 `cp config.example.yaml config.yaml` 手动编辑。`--check` 对比已安装/运行中/最新版本，`--uninstall` 移除服务与二进制（保留 config 与日志）。
 
 Linux 下若需要未登录也常驻，执行 `loginctl enable-linger $USER`。
 
@@ -104,7 +104,7 @@ curl http://localhost:8080/healthz
 
 ## 用法
 
-> **注意**：`/v1/*` 接口由令牌仓（状态目录 `devin-2api.db` 的 `auth_tokens` 表）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据。令牌只在面板（`/web/auth-tokens`）管理——明文创建时一次性出示，仓内只存哈希，配置里不放数据面凭据。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。令牌可带 `class`（`fg` 默认 / `bg` 无人值守批跑），改变速率闸门准入口径——见 `docs/gate-classes.md`。
+> **注意**：`/v1/*` 接口由令牌仓（状态目录 `devin-2api.db` 的 `auth_tokens` 表）统一准入——客户端需通过 `Authorization: Bearer <token>` 或 `X-Api-Key: <token>` 传递命中有效令牌行的凭据。令牌只在面板（`/web/tokens.html`）管理——明文创建时一次性出示，仓内只存哈希，配置里不放数据面凭据。仓为空时接口开放——监听到非 loopback 地址前务必确认仓内有有效令牌，否则等于把你的 Devin 配额开放给整个网络。令牌可带 `class`（`fg` 默认 / `bg` 无人值守批跑），改变速率闸门准入口径——见 `docs/gate-classes.md`。
 
 接口列表：
 
@@ -210,7 +210,7 @@ dashboard:
     password: "" # /web 登录密码；留空免登录
 
 
-# 下游 /v1 令牌只在面板（/web/auth-tokens）管理——配置里不放数据面凭据。
+# 下游 /v1 令牌只在面板（/web/tokens.html）管理——配置里不放数据面凭据。
 # 令牌仓为空即 /v1 开放访问。
 ```
 

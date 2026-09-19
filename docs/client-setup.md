@@ -2,7 +2,7 @@
 
 > 本文示例基于作者本机部署：`客户端 → ccload http://127.0.0.1:49173(token)→ devin-2api http://127.0.0.1:3033(api_key)→ Devin 上游`。按自己的部署替换地址与凭据；ccload 的 token/渠道 id 是 ccload 侧的配置，不是本仓库的一部分。2026-09-18 起生产实例在 archbox 监听 `:3033`；各机 `:3003` 仍由转发 shim 兜住（见 deployment.md 拓扑注），旧写法照样通。
 
-所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3033`、key 换成任一有效下游令牌即可（令牌在面板 /web/auth-tokens 创建，明文一次性出示，仓内只存哈希）。
+所有客户端统一走 ccload 入口，模型名直接填 `swe-2-max`(ccload `channel_models` 已注册)。直连 devin-2api 也可以，把地址换成 `:3033`、key 换成任一有效下游令牌即可（令牌在面板 /web/tokens.html 创建，明文一次性出示，仓内只存哈希）。
 
 ## Claude Code
 

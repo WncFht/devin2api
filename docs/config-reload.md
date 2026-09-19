@@ -18,19 +18,19 @@
 | devin.session_affinity_ttl_seconds / devin.quota_low_threshold_percent / devin.no_progress_timeout_seconds / devin.pre_event_no_progress_timeout_seconds |                            |
 | devin.warm_prefix_* 全部保温参数（总开关热更即时停/启调度循环）                                                                                          |                            |
 | dashboard.password                                                                                                                                       |                            |
-| debug.enabled / debug.retention_*（retention_days、max_total_mb、payload_hours、keep_error_dirs）                                                        |                            |
+| debug.enabled / debug.errors_only / debug.retention（retention_days/max_total_mb/payload_hours/keep_error_dirs 合报单名）                                |                            |
 | debug.quota_interval_minutes / debug.pprof_listen                                                                                                        |                            |
 | server.max_concurrency                                                                                                                                   |                            |
 
 端点三件套的热更语义：ApplyConfig 先用新参数构建整个上游调用束（transport + stream/api client + 焐池 warmer），构建失败（如非法 proxy）整单 422、旧配置继续服役；构建成功才换 config 快照并原子换指针。在途调用持旧 link 跑完，旧 transport 只收 idle 池；换 base_url 还会清空 AssignModel 缓存（jwt 绑 cascade_id，旧端点的解析对新上游无效）。面板经 `SetUpstream` 跟随同一端点，面板的展示地址读 `BaseURL()` 同源透出。
 注意 `devin.client_*` 只影响 chat 路径：面板自身的 seat 类上游调用固定用 windsurf 身份，不随这个键变。
 
-`devin.accounts` 的 reload 语义建立在生效集上：每次重载先把 config 声明与 `upstream_accounts` 行合并（活行覆盖同名声明、墓碑压住声明、disabled 摘出 lane 集），再对生效 lane 集按名做集合 diff——同名 lane 复用旧 adapter 走 ApplyConfig（token 与凭据来源是热换值字段，保温谱系、assignment 与目录缓存、在途流全保住）；新名 lane 先构建再入列；被删/disabled/墓碑 lane 摘出后异步 Close，只停后台协程、在途流持引用跑完（与端点换绑同一生死模型）。lane 名序变化时报 `devin.accounts`，同名 lane 的字段差集仍按各 lane 差集并集进 `applied`（凭据差集以 `devin.accounts.<name>.token` 名义出现）；空生效集合法（空池）。面板的建/改/删/复活/停启用走同一条「合并 → 校验 → ApplyConfigs」路径（行先落库、重推失败回滚行），reload 成功后顺带 GC config 已撤名的死墓碑。任一 lane 构建/应用失败整单 422、已应用 lane 不回滚，与单 lane ApplyConfig 的失败语义一致。号池行为口径见 `devin-accounts.md`。
+`devin.accounts` 的 reload 语义建立在生效集上：每次重载先把 config 声明与 `upstream_accounts` 行合并（活行覆盖同名声明、墓碑压住声明、disabled 摘出 lane 集），再对生效 lane 集按名做集合 diff——同名 lane 复用旧 adapter 走 ApplyConfig（token 与凭据来源是热换值字段，保温谱系、assignment 与目录缓存、在途流全保住）；新名 lane 先构建再入列；被删/disabled/墓碑 lane 摘出后异步 Close，只停后台协程、在途流持引用跑完（与端点换绑同一生死模型）。lane 名序变化时报 `devin.accounts`，同名 lane 的字段差集仍按各 lane 差集并集进 `applied`（凭据差集以 `devin.accounts.<name>.token`/`.api_key` 名义出现）；空生效集合法（空池）。面板的建/改/删/复活/停启用走同一条「合并 → 校验 → ApplyConfigs」路径（行先落库、重推失败回滚行），reload 成功后顺带 GC config 已撤名的死墓碑。任一 lane 构建/应用失败整单 422、已应用 lane 不回滚，与单 lane ApplyConfig 的失败语义一致。号池行为口径见 `devin-accounts.md`。
 
 ## 面板覆盖恒赢文件
 
 `reloadRuntimeConfig` 的顺序是先按文件值 `SetEnabled`/`SetPolicy` 重置，再重放 `settings` 表（`devin-2api.db`）里登记的键（`ApplyAll`）。
-所以凡是面板 settings 页暴露过的键（debug_log_enabled、log_retention_days、log_max_total_mb、log_payload_hours、log_keep_error_dirs、auto_refresh_interval_seconds），面板值永远压过 config.yaml——文件改了同名字段也不会生效，直到面板侧 reset。
+所以凡是面板 settings 页登记过的键（全量注册表在 `internal/ccpanel/settings.go` 的 `buildSettingDefs`：debug_log__、log__ 保留策略、devin._/gate\__/warm_* 各热键、max_concurrency、auto_refresh_interval_seconds 等），面板值永远压过 config.yaml——文件改了同名字段也不会生效，直到面板侧 reset。
 这个「面板赢」的不变量是给未来加键时的硬约束：新热键若同时进面板设置表，reload 路径必须先文件、后重放，顺序不能反。
 
 ## 以后加新热键的步骤

@@ -37,8 +37,9 @@ OpenAI / Anthropic HTTP ──► llm intermediate layer ──► Devin Connect
                  │        ▼                                               │
                  │  llm.ResponseStream (event stream)                     │
                  │        │                                               │
-                 │        ├─ streaming:  writeSSE + <surface>Encoder ──► │
-                 │        └─ non-stream: collectFinalMessage ──► JSON    │
+                 │        ├─ streaming:  AppendSSE / WriteSSEEvent ──►   │
+                 │        └─ non-stream: collectPumpedMessage ──►        │
+                 │                        EncodeFinal ──► JSON           │
                  └────────────────────────────────────────────────────────┘
 ```
 
@@ -135,7 +136,7 @@ The admin panel at `/web` (login: `dashboard.password`) renders these logs as a 
 ## Before submitting
 
 1. **Tests pass**: `go test ./...`
-2. **Linted**: `golangci-lint run` is clean (`.golangci.yml`: default:none + explicit bodyclose/errcheck/govet/revive/staticcheck/unused) — CI runs the same job
+2. **Linted**: `golangci-lint run` is clean (`.golangci.yml`: default:none + explicit bodyclose/errcheck/gosec/govet/revive/staticcheck/unused) — CI runs the same job
 3. **Formatted**: `gofmt -l .` produces no output (or `golangci-lint fmt` for gofmt+goimports)
 4. **Comment conventions**: follow the repo's Go comment conventions (`.agents/skills/go-comment-conventions`) — exported symbols get doc comments, field comments explain "why", not restate the code
 5. **Docs linted**: commits touching `*.md` run the pre-commit pipeline; if a hook rewrites a file, re-stage it and commit again
@@ -242,7 +243,8 @@ cmd/
   upstreamstub/     # tool: local upstream stub replaying transport failure scenarios
   loadtest/         # tool: load generator for the HTTP surfaces
 internal/
-  adapter/          # adapter boundary (interface Adapter, Unavailable placeholder)
+  accounts/         # upstream account pool domain: account CRUD + credential resolution (config ∪ DB overlay)
+  adapter/          # adapter boundary (interface Adapter + request-class plumbing)
     devin/          # Devin Connect adapter: request/response conversion + tool-definition sanitizing
   api/
     anthropic/
@@ -261,6 +263,7 @@ internal/
   modelreg/         # global model registry (model_registry table): disable/redirect overlays before alias resolution
   obs/              # process/HTTP metrics behind /admin/runtime-metrics
   randid/           # random ID generation (X-Request-Id / debug dir names)
+  store/            # SQLite persistence for all runtime state (devin-2api.db tables)
   upstream/         # shared upstream wire helpers (request metadata, auth transport)
 outputs/
   devin-proto/      # raw descriptors extracted from the Devin binary, committed

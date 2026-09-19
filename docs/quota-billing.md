@@ -53,7 +53,7 @@ $$
 
 ## 行为层面的附带发现
 
-- **重置**：`daily_quota_reset_at` 与 `weekly_quota_reset_at` **各自**指向下一次重置——daily 每日 16:00 +08，weekly 每周日 16:00 +08，仅周日重合产生双重置（写作时实测 daily=09-15 16:00 ≠ weekly=09-20 16:00，即"同一时刻"是误读）。"周额度"实为 ~1.8×日额度的并行预算，不是滚动 7 天。注意 weekly 开窗首采可以远低于 100%：09-13 16:00 周窗口开启后 ~3h 首采即 44%（新窗口预先少了 56 点），机制未确认——座位在代理之外被使用、或开窗语义并非回满皆有可能，拟合时不要把「新窗口」当「回满 100%」。
+- **重置**：`dailyQuotaResetAtUnix` 与 `weeklyQuotaResetAtUnix` **各自**指向下一次重置——daily 每日 16:00 +08，weekly 每周日 16:00 +08，仅周日重合产生双重置（写作时实测 daily=09-15 16:00 ≠ weekly=09-20 16:00，即"同一时刻"是误读）。"周额度"实为 ~1.8×日额度的并行预算，不是滚动 7 天。注意 weekly 开窗首采可以远低于 100%：09-13 16:00 周窗口开启后 ~3h 首采即 44%（新窗口预先少了 56 点），机制未确认——座位在代理之外被使用、或开窗语义并非回满皆有可能，拟合时不要把「新窗口」当「回满 100%」。
 - **归零**：daily 烧穿后 `dailyQuotaRemainingPercent` 直接变 null；付费调用在 connect 阶段收到 400 `failed_precondition: Your daily usage quota has been exhausted`（可引导至 app.devin.ai 购买 on-demand）[^devin-quota]；free 档（swe-2-max）照常服务，归零后 242 个调用全部 completed。weekly 归零同语义：`weeklyQuotaRemainingPercent` 变 null，付费档同样被 `failed_precondition` 拦（文案换成 weekly），free 档继续服务——两额度是并行预算，任一归零都拦付费档。注意 null 的回补滞后于重置：实测 daily null 自 09-13 ~12:25 起持续 ~27h、跨过 09-13 16:00 重置未回补、直到 09-14 16:00 重置才恢复 96——与"每日 16:00 重置即回满"的字面语义不符，疑似与 overage 负债状态联动。
 - **失败计费**：配额拒绝（`failed_precondition`）不产生燃烧已证实（请求没真正执行）；但**已产出 token 的断连/流失败照常计费**——7 例实测，含一例 fable 断连携 `cache_write=89937`（≈$0.9 目录价）在入账中可见。
 - **入账延迟**：~1–3 分钟，且偶发 10 分钟级延迟。
@@ -84,7 +84,7 @@ uv run --with numpy --with matplotlib scripts/quota/fit.py \
 
 ## 对 est_cost 的修正
 
-面板侧 est_cost 原本漏算 cache_write（字段采集了但没进公式），已按本结论修复为 `(input + cache_write)·p_in`（commit 78b6ede；现实现见 `internal/ccpanel/logs.go` 的 `logCostBreakdown` 与 `cellCostNG`）。修复后面板 est_cost 与配额实际燃烧同口径。
+面板侧 est_cost 原本漏算 cache_write（字段采集了但没进公式），已按本结论修复为 `(input + cache_write)·p_in`（commit 78b6ede；现实现见 `internal/ccpanel/logs.go` 的 `logCostBreakdown` 与 `internal/ccpanel/dashboard.go` 的 `cellCostNG`）。修复后面板 est_cost 与配额实际燃烧同口径。
 
 ### 参考文献
 

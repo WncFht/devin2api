@@ -1,6 +1,6 @@
 # panel-verify — ccpanel 前端自包含验证套件
 
-一个 `run.sh` 跑完整链路：构建 `./devin-2api`（缺失时）→ 空闲端口起临时实例（临时 config + 独立 state dir）→ `checks/` 下的 playwright 检查 → SIGTERM 收尾。不依赖生产 config.yaml，临时配置用假上游凭据（面板检查不打上游，`devin.base_url`/`model` 仅为启动必填）。
+一个 `run.sh` 跑完整链路：每次现构建到临时目录（embed 资产防陈旧）→ 空闲端口起临时实例（临时 config + 独立 state dir）→ `checks/` 下的 playwright 检查 → SIGTERM 收尾。不依赖生产 config.yaml，临时配置用假上游凭据（面板检查不打上游，`devin.base_url`/`model` 仅为启动必填）。
 
 ```bash
 cd scripts/panel-verify && ./run.sh          # 全量
@@ -25,13 +25,15 @@ node checks/nav.js                          # 单跑某条（需实例在跑，P
 
 ## 检查清单
 
-| 脚本                | 断言                                                                                                                                                                   |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `checks/login.js`   | UI 表单 admin 登录落面板、8 项 nav；api_token 登录按探测到的有效角色断言——密码面板断受限视图（4 项 nav、受限页重定向），开放面板断角色纠成 admin（见 --base 模式）     |
-| `checks/nav.js`     | 9 组「宽度×语言」下 nav 链接无裁切、文档无横向溢出（含 768/767 边界）                                                                                                  |
-| `checks/columns.js` | logs 列显隐：开合、隐藏生效、外部点击关闭、刷新持久化；`/dashboard/session` 拖慢 3s 的死窗内按钮已绑定可点开（`initLogsPageActions` 在模块顶层挂委托，不等 bootstrap） |
-| `checks/mobile.js`  | 375/320 视口 logs 页：无横向溢出、列显隐按钮完整在视口内、可点开                                                                                                       |
-| `checks/console.js` | 8 页零 console error / pageerror / 4xx+ 响应                                                                                                                           |
+| 脚本                    | 断言                                                                                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checks/login.js`       | UI 表单 admin 登录落面板、8 项 nav；api_token 登录按探测到的有效角色断言——密码面板断受限视图（4 项 nav、受限页重定向），开放面板断角色纠成 admin（见 --base 模式）     |
+| `checks/nav.js`         | 9 组「宽度×语言」下 nav 链接无裁切、文档无横向溢出（含 768/767 边界）                                                                                                  |
+| `checks/columns.js`     | logs 列显隐：开合、隐藏生效、外部点击关闭、刷新持久化；`/dashboard/session` 拖慢 3s 的死窗内按钮已绑定可点开（`initLogsPageActions` 在模块顶层挂委托，不等 bootstrap） |
+| `checks/mobile.js`      | 375/320 视口 logs 页：无横向溢出、列显隐按钮完整在视口内、可点开                                                                                                       |
+| `checks/console.js`     | 8 页零 console error / pageerror / 4xx+ 响应                                                                                                                           |
+| `checks/bucket-sec.js`  | `/dashboard/metrics` 秒级桶宽：X-Bucket-Sec 头回传与点数封顶（下限 10、缺省 600、上限 1d）；粒度下拉选 10 秒后请求带 `bucket_sec=10`、间隔片显示秒级                   |
+| `checks/align-shots.js` | 7 页 × 1440/1024 两档视口 + 390 视口 3 页截图落 `shots/align/` 供人工目检，不断言                                                                                      |
 
 约定：每条断言一行 `ok`/`FAIL`，截图只在失败时写 `shots/`（gitignore）；检查脚本进程退出码即结果，run.sh 汇总计数。所有检查经 `PV_BASE`/`PV_ADMIN_PW`/`PV_API_TOKEN`/`PV_SHOTS` 拿环境，由 run.sh 注入。
 

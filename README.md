@@ -91,7 +91,7 @@ git clone https://github.com/WncFht/devin2api && cd devin2api
 bash scripts/deploy-linux.sh --release latest    # macOS: scripts/deploy.sh
 ```
 
-On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/auth-tokens`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
+On first run `config.yaml` is generated from `config.example.yaml` with a random `dashboard.password`, and you're prompted for the Devin token (left empty the pool starts empty — add accounts later from the panel); downstream `/v1` tokens are created in the panel (`/web/tokens.html`), never in config. To preset values, `cp config.example.yaml config.yaml` and edit beforehand. `--check` reports installed/running/latest versions; `--uninstall` removes the service and binary while keeping config and logs.
 
 On Linux, run `loginctl enable-linger $USER` if the service must outlive your login session.
 
@@ -104,7 +104,7 @@ curl http://localhost:8080/healthz
 
 ## Usage
 
-> **Note**: `/v1/*` endpoints are gated by the token store (the `auth_tokens` table in `devin-2api.db`, state dir): clients send `Authorization: Bearer <token>` or `X-Api-Key: <token>` matching an active token row. Tokens are managed only in the panel (`/web/auth-tokens`) — plaintext is shown once at creation and the store keeps hashes; config carries no data-plane credential. An empty store means open access — only bind beyond loopback if the store gates access, or you are handing out your Devin quota to the network. Tokens carry an optional `class` (`fg` default / `bg` for unattended batch traffic) that changes rate-gate admission — see `docs/gate-classes.md`.
+> **Note**: `/v1/*` endpoints are gated by the token store (the `auth_tokens` table in `devin-2api.db`, state dir): clients send `Authorization: Bearer <token>` or `X-Api-Key: <token>` matching an active token row. Tokens are managed only in the panel (`/web/tokens.html`) — plaintext is shown once at creation and the store keeps hashes; config carries no data-plane credential. An empty store means open access — only bind beyond loopback if the store gates access, or you are handing out your Devin quota to the network. Tokens carry an optional `class` (`fg` default / `bg` for unattended batch traffic) that changes rate-gate admission — see `docs/gate-classes.md`.
 
 Endpoints:
 
@@ -210,7 +210,7 @@ dashboard:
     password: "" # /web login; empty = open
 
 
-# Downstream /v1 tokens live only in the panel (/web/auth-tokens) — config
+# Downstream /v1 tokens live only in the panel (/web/tokens.html) — config
 # carries no data-plane credential. An empty token store means open access.
 ```
 

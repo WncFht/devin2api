@@ -73,6 +73,13 @@ devin:
   #     credentials_file: "/home/user/.local/share/devin/credentials.toml"
   # session_affinity_ttl_seconds: 3600  # 会话→lane 绑定的滑动 TTL（命中续期）
   # quota_low_threshold_percent: 15     # weekly 配额低于此百分比时对新会话降权
+  # no_progress_timeout_seconds: 产出过内容后的上游无进度期限秒数，
+  #   须盖住工具参数阶段 15-25min 的静默计算。<=0 默认 2700（45min）。
+  # pre_event_no_progress_timeout_seconds: 产出首个事件前每段等待的
+  #   无进度期限秒数（pre 对偶档）。<=0 默认 600；pre-event 累计静默另
+  #   有内置 180s 硬顶（首发起算、跨重开累计），配大不突破该上限。
+  # no_progress_timeout_seconds: 2700
+  # pre_event_no_progress_timeout_seconds: 600
   # model: "glm-5-2"
   model: "swe-2-max"
   # 代理地址（可选）；支持 http://、https://、socks5://、socks5h://
@@ -84,9 +91,10 @@ devin:
   force_http1: true
   # 客户端模型名 → 上游真实 UID 的别名映射（可选）。
   # 例如客户端发 swe-2 / glm-5.2，上游实际 UID 是 swe-2-max / glm-5-2。
-  # 匹配顺序：精确命中 → 大小写不敏感命中 → "*" 兜底键（任意未命中
-  # 名字都改写到其目标，适合客户端硬编码模型名的场景）。链式映射在
-  # 加载时自动展开到最终目标；空键/空目标/大小写重复键/环会拒绝启动。
+  # 匹配顺序：精确命中 → 折叠命中（剥去 -/_/. 后小写化比较）→ "*"
+  # 兜底键（任意未命中名字都改写到其目标，适合客户端硬编码模型名的
+  # 场景）。链式映射在加载时自动展开到最终目标；空键/空目标/"*"
+  # 作目标/折叠等价重复键/环会拒绝启动。
   # 别名也作用于请求缺省模型时的 devin.model；目标可以是 router uid
   #（会自动走 AssignModel 解析）。别名条目出现在 /v1/models 列表里，
   # 带 alias_of 标记，能力位继承自目标。
@@ -177,7 +185,7 @@ dashboard:
   # 非回环地址（默认 :8080 是全部接口）时建议设置，否则面板对网络开放。
   password: ""
 
-# 下游令牌（/v1 准入凭据）只在面板管理：/web/auth-tokens 创建，明文
+# 下游令牌（/v1 准入凭据）只在面板管理：/web/tokens.html 创建，明文
 # 一次性出示，仓内只存哈希。令牌仓为空 = /v1 开放访问——server.listen
 # 绑到非回环地址（默认 :8080 是全部接口）时务必先建令牌再暴露端口。
 # 客户端经 Authorization: Bearer <token> 或 X-Api-Key 传递。

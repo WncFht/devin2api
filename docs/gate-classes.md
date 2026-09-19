@@ -35,7 +35,7 @@ reserve = fg_rate × 可发区间剩余秒数 + waiters_fg + margin
 
 bg 被预留或爬坡挡住（桶未满、非死区）时不睡到下一窗口，而是按短间隔（4s）睡醒重查——预留随时间衰减、爬坡额度随经过时间释放，中段让出的槽 bg 能及时吃到。bg 因桶满/死区被拒与 fg 同形（睡到下一窗口）；排队预算用 `gate_bg_max_hold_seconds`（默认 120，fg 仍 `gate_max_hold_seconds`，默认 30）——无人值守负载等得起。bg 快败时 `Retry-After` 给到下一窗口开放秒数，闩内被拒照旧给闩剩余。
 
-前缀保温 ping（`tryAdmit`）视同可 dip 入预留的最低优先级流量：准入条件为 `sendable && bucketUsed < quota`，不再要求 `waiters == 0`——bg 常驻排队不该饿死保温（缓存冷的是 fg），ping 占用预留槽的规模被 ping 节拍（默认 180s/谱系）天然限制在 margin 吸收范围内。
+前缀保温 ping（`tryAdmit`）是不排队、不预约的最低优先级流量：准入与 bg 同一上界——可发区间内 `bucketUsed + 1 <= quota − reserve` 且 `bucketUsedBg + 1 <=` 爬坡释放额度（fg 预留槽 ping 不占，同拍到期的多条目也不能齐射穿坡），死区本轮跳过、闩内一律拒（不占滴灌探针槽）；不再要求 `waiters == 0`——bg 常驻排队不该饿死保温（缓存冷的是 fg），被挡住时本轮跳过、下拍再试。
 
 ## 响应头
 

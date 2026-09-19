@@ -4,7 +4,7 @@
 
 ## 组件
 
-- `tcp-forwarder.py`：无依赖 asyncio TCP 转发器，绑定与目标全部由环境变量注入（`BIND_HOST`/`BIND_PORT`/`TARGET_HOST`/`TARGET_PORT`/`BIND_RETRY_S`/`DIAL_RETRY_S`）。两条不变量：**不开 SO_REUSEPORT**——端口被真实例占用时永远绑不上，不会与 devin-2api 共绑分流；**后端拨号重试 `DIAL_RETRY_S` 秒**——目标重启期间已接入的客户端连接不丢，只是数据延后。
+- `tcp-forwarder.py`：无依赖 asyncio TCP 转发器，目标与端口全部由环境变量注入（`BIND_PORT`/`TARGET_HOST`/`TARGET_PORT`/`BIND_RETRY_S`/`DIAL_RETRY_S`），监听地址恒绑通配（`::`/`0.0.0.0`）。两条不变量：**不开 SO_REUSEPORT**——端口被真实例占用时永远绑不上，不会与 devin-2api 共绑分流；**后端拨号重试 `DIAL_RETRY_S` 秒**——目标重启期间已接入的客户端连接不丢，只是数据延后。
 - `devin-2api-compat-3003.service`：archbox 侧 systemd --user unit，跑 `tcp-forwarder.py` 绑 `:3003` → `127.0.0.1:3033`，兜本机陈旧配置。
 - `devin-2api-forwarder.py` + `com.fanghaotian.devin-2api-forwarder.plist`：fht-mba 侧 launchd agent。脚本是同一逻辑的硬编码变体（`TARGET_HOST=100.121.76.120`、绑 `*:3003`），与通用版只差常量取值；plist 绑 loopback/tailnet/LAN 入向全覆盖。
 

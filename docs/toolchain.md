@@ -10,26 +10,26 @@
 - `*.go`：`gofmt` 走同一机制。
 - `*.yaml`/`*.yml`：`scripts/check-yaml-comments.py` 查纯注释行 ≤80 显示列（CJK 按 2 列计，check 类、失败才拦）。约定是「≤80 显示列 + 断点取标点/从句边界」——宽度机检、断点只能人工；没有任何 formatter 会重排注释文字（prettier 保留原文、js-yaml/PyYAML 丢注释，该约定纯手写维护），机械重排用编辑器 reflow（vim `gq` / VS Code Rewrap）。yaml 结构格式（缩进/引号）不进门——仓内 yaml 以 config.example.yaml 的注释面为主，prettier 重排它的收益不够付全仓 churn。
 - 全补丁：gitleaks 密钥扫描（v8.30.1 上游 hook，自定义规则在 `.gitleaks.toml`——GitHub push protection 只认标准 pattern，`devin-session-token$` 这类自有格式靠它拦）。
-- markdownlint / prettier / autocorrect 的版本锁定在 `package.json`（`npm install` + `npm ci` 在 CI 复现），autocorrect 本机经 `brew install autocorrect` 提供。
+- markdownlint / prettier / git-format-staged 的版本锁定在 `package.json`（`npm install` + `npm ci` 在 CI 复现），autocorrect 本机经 `brew install autocorrect` 提供、无版本钉。
 
 ## 2. 本地验证
 
-| 命令                                     | 覆盖                                                         | 说明                                                                                                                                        |
-| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `golangci-lint run`                      | bodyclose / errcheck / govet / revive / staticcheck / unused | `.golangci.yml` 用 `default: none` + 显式点名，升级 golangci 不会被新增默认 linter 偷袭。revive 的 `exported`（导出符号注释）按仓库约定关闭 |
-| `golangci-lint fmt`                      | gofmt + goimports                                            | goimports 的 `local-prefixes` 是 `github.com/WncFht/devin2api`（**必须是 YAML 数组**，标量写法 `run` 能过但 `config verify` 拒收）          |
-| `go vet ./...`                           | 编译期检查                                                   |                                                                                                                                             |
-| `go test -race ./...`                    | 单测 + race                                                  |                                                                                                                                             |
-| `GOOS=windows go build/vet ./...`        | 交叉编译                                                     | 防止引入 unix-only 调用打断其它平台；darwin 同理                                                                                            |
-| `bash scripts/deploy-assets.test.sh`     | 部署资产断言                                                 | 见 §6                                                                                                                                       |
-| `bash scripts/release-selftest.sh`       | release.sh 全流程演练                                        | 见 §5，**改 release.sh 后必跑**                                                                                                             |
-| `npm run format:check` / `lint:md`       | markdown 格式/规则                                           | 与 pre-commit 同套版本                                                                                                                      |
-| `python3 scripts/check-yaml-comments.py` | yaml 注释宽度（显示列）                                      | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                    |
-| `actionlint`（若装了）                   | workflow 语法                                                | CI 不跑它，本地自查                                                                                                                         |
+| 命令                                     | 覆盖                                                                 | 说明                                                                                                                                                                               |
+| ---------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `golangci-lint run`                      | bodyclose / errcheck / gosec / govet / revive / staticcheck / unused | `.golangci.yml` 用 `default: none` + 显式点名，升级 golangci 不会被新增默认 linter 偷袭。revive 的 `exported`（导出符号注释）按仓库约定关闭；gosec 只报高严重度高置信、`cmd/` 豁免 |
+| `golangci-lint fmt`                      | gofmt + goimports                                                    | goimports 的 `local-prefixes` 是 `github.com/WncFht/devin2api`（**必须是 YAML 数组**，标量写法 `run` 能过但 `config verify` 拒收）                                                 |
+| `go vet ./...`                           | 编译期检查                                                           |                                                                                                                                                                                    |
+| `go test -race ./...`                    | 单测 + race                                                          |                                                                                                                                                                                    |
+| `GOOS=windows go build/vet ./...`        | 交叉编译                                                             | 防止引入 unix-only 调用打断其它平台；darwin 同理                                                                                                                                   |
+| `bash scripts/deploy-assets.test.sh`     | 部署资产断言                                                         | 见 §6                                                                                                                                                                              |
+| `bash scripts/release-selftest.sh`       | release.sh 全流程演练                                                | 见 §5，**改 release.sh 后必跑**                                                                                                                                                    |
+| `npm run format:check` / `lint:md`       | markdown 格式/规则                                                   | 与 pre-commit 同套版本                                                                                                                                                             |
+| `python3 scripts/check-yaml-comments.py` | yaml 注释宽度（显示列）                                              | 无参扫 `git ls-files` 全部 yaml；与 pre-commit hook 同款                                                                                                                           |
+| `actionlint`（若装了）                   | workflow 语法                                                        | CI 不跑它，本地自查                                                                                                                                                                |
 
 前置条件：`npm install`、`brew install autocorrect golangci-lint`、`pre-commit install`、系统 `python3`（git-format-staged 与 yaml 注释检查共用）。Linux 无 brew 时的等价装法（archbox 实测）：`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 && ln -sf ~/go/bin/golangci-lint ~/.local/bin/`——版本号与 CI 的 `golangci-lint-action@v9` 固定值对齐。
 
-写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（smoke/release/perf-snapshot/deploy-remote 全是这个写法，新脚本照抄）。
+写 shell 脚本注意 macOS 自带 **bash 3.2**：`mapfile`/`declare -A` 不存在；`set -u` 下展开空数组 `"${arr[@]}"` 报 unbound——仓内脚本统一写 `${arr[@]+"${arr[@]}"}`（release/perf-snapshot/cacheprobe-verify/deploy-remote 全是这个写法，新脚本照抄）。
 
 ## 3. 版本解析链（4 级 fallback）
 
@@ -47,7 +47,7 @@ push 到 main 与 PR 触发。顶层 `permissions: contents: read`；`concurrenc
 - **test**：`go mod tidy -diff`（go.mod 与 import 漂移拦截）→ gofmt 检查 → `go vet` → `go test -race -shuffle=on -covermode=atomic -coverpkg=./...`（覆盖率只观测不设门槛，total 打日志 + profile 存 artifact）→ `go build` → windows/darwin 交叉编译 + vet。
 - **golangci**：`golangci-lint-action@v9` 固定 `v2.13.2`，与本地版对齐。
 - **actionlint**：workflow 文件自身 lint（钉 v1.7.12，shellcheck 查 run: 块内 bash）。
-- **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练。
+- **deploy-assets**：`deploy-assets.test.sh` 断言 + `release-selftest.sh` 演练 + `handoff-triage.test.sh`（lib-deploy 交接链路演练）。
 - **codegen-drift**：钉版 protoc + protoc-gen-go/connect-go 重跑生成 → `scripts/check-codegen.sh` 与提交的 `outputs/devin-proto-go` 逐字节比对，proto 源改了忘重新生成时拦下。
 - **darwin-smoke**（macos-latest）：macOS 平台的真机验证——`go test ./...` + `smoke.sh --no-upstream`（无 token 环境下断言 `/v1/models` 明确 502、SIGTERM 优雅退出），darwin 产物不再只靠交叉编译门禁。
 - **windows-smoke**（windows-latest）：全量测试 + 启动冒烟（healthz + `/v1/models` 空 token 502）；不验 SIGTERM 排空——Windows 优雅退出走 Ctrl+C/os.Interrupt，git-bash kill 是 TerminateProcess，无从断言。
@@ -58,7 +58,7 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 
 `.github/workflows/security.yml` 是独立的 govulncheck job（push/PR/每周一）。**release.sh 的 CI 门禁只认名为 `CI` 的 workflow**——Security 红不挡发版（有意的：漏洞扫描是持续观察项，不是单次发布的质量门）。
 
-`.github/workflows/nightly.yml`（每日 cron + 手动 dispatch）：`upstream-probe` 在 `secrets.DEVIN_E2E_TOKEN` 配置后跑 `smoke.sh` 全真模式（真上游 RPC + SIGTERM 排空；未配置则跳过，fork 不红）；`bench` 跑 `bench.sh` 全基准并把结果存 90 天 artifact 做趋势留痕。`.github/dependabot.yml` 周更 gomod（根 + devinproto 生成模块）、github-actions、npm（根 + panel-verify）。
+`.github/workflows/nightly.yml`（每日 cron + 手动 dispatch）：`upstream-probe` 在 `secrets.DEVIN_E2E_TOKEN` 配置后跑 `smoke.sh` 全真模式（真上游 RPC + SIGTERM 排空；未配置则跳过，fork 不红）；`bench` 跑 `bench.sh` 全基准并把结果存 90 天 artifact 做趋势留痕。`.github/dependabot.yml` 周更 gomod 根、github-actions、npm（根 + panel-verify）；devinproto 生成模块（/outputs/devin-proto-go）登记在周更表内但 `ignore` 全忽略——go.mod 钉死跟随 codegen 工具版本，要升就连钉一起手动升。
 
 ## 5. 发布（`scripts/release.sh` + `release.yml`）
 
@@ -94,24 +94,24 @@ Go 环境统一走复合 action `.github/actions/setup-go`：`actions/setup-go` 
 ## 7. 其它设施
 
 - **Issue 模板** `.github/ISSUE_TEMPLATE/bug_report.yml`：要 `X-Request-Id`/`debug_ref`（调试身份 dir 名）、`meta.json`/`error.json`、版本、平台——与服务排障工作流（AGENTS.md「服务排障」节）对应。
-- **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有 12 个：`codebase-design`、`diagnosing-bugs`、`extract-embedded-protos`、`fix-it-never-work-around-it`、`go-comment-conventions`、`golang-pro`、`improve-codebase-architecture`、`llm-core-types`、`observability-first-debugging`、`orchestrating-agents`、`protocol-drift`、`release-runbook`。
+- **Skills**：`.claude/skills/<name>/` 与 `.agents/skills/<name>/` 是**逐字节相同的镜像**（`SKILL.md` + `agents/openai.yaml`），新增 skill 两边一起放。现有 19 个：`codebase-design`、`code-review`、`diagnosing-bugs`、`docs-guard`、`extract-embedded-protos`、`fix-it-never-work-around-it`、`go-comment-conventions`、`golang-benchmark`、`golang-concurrency`、`golang-performance`、`golang-pro`、`golang-troubleshooting`、`improve-codebase-architecture`、`llm-core-types`、`observability-first-debugging`、`orchestrating-agents`、`protocol-drift`、`release-runbook`、`writing-user-docs`。
 - **文档**：README（EN + zh-CN）、`CONTRIBUTING.md`（架构与贡献）、`AGENTS.md`/`CLAUDE.md`（同一文件，agent 行为规则）、`docs/`（活文档目录，索引 `docs/README.md`：上游协议逆向、排障手册、客户端接入、配额计费、部署、本文档）。`notes/` 是本机私有工作区（gitignore），只放 `archive/` 日期快照。
 
 ## 8. 运维与实验脚本（`scripts/`）
 
 会话排障与上游调研沉淀下来的手工工具，不进 CI：
 
-| 脚本                              | 干什么                                                                                                                                                                                                               |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033，key 自动读 config.yaml），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步                       |
-| `index-stream-stats.py`           | join `logs` 表与 debug_files/debug_chunks payload 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--db` 默认按平台探测 devin-2api.db（只读连接）                          |
-| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                      |
-| `drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                       |
-| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                |
-| `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/` |
-| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为 fht-mba 生产而写，生产已迁 archbox 本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具          |
-| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可 `--host` 走 ssh                                                                                                                 |
-| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                        |
+| 脚本                              | 干什么                                                                                                                                                                                                                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `reqprobe.sh <label> <ep> <body>` | 打一发请求到 `REQPROBE_BASE`（默认 127.0.0.1:3033；自动读 config.yaml 的 dashboard.password，令牌仓闭合时经 /admin/auth-tokens 铸临时令牌、退出即删），打印 X-Request-Id、02 的 Dropped/tool_choice/IR 序列、03 wire 名、SSE/终态 JSON 形态——新客户端/新字段冒烟的第一步 |
+| `index-stream-stats.py`           | join `logs` 表与 debug_files/debug_chunks payload 出流画像：sid/psid 派生、`cc_is_subagent` 标记、gap→hit% 分桶、miss 归因、warm/cold TTFB；`--db` 默认按平台探测 devin-2api.db（只读连接）                                                                              |
+| `cache-probe.py`                  | 缓存受控实验骨架：arm（独立 user_id + padded system）× 绝对偏移时刻表，ThreadPoolExecutor 调度、逐行 JSONL 落盘；`--plan` 或 `--keepalive` 模式                                                                                                                          |
+| `drift-corpus-scan.py`            | 扫 db 里 01 语料统计各协议的漂移形状分布（`--db` 默认按平台探测，`--since/--until YYYYMMDD` 限窗；语料为空 exit 2 防空转误读）                                                                                                                                           |
+| `panel-qa.js`                     | ccpanel 前端走查：`shot`/`overflow`/`sweep` 子命令，playwright 无头截图 + 元素级溢出检测 + i18n 泄漏检查；token 自动读 config.yaml dashboard.password                                                                                                                    |
+| `panel-verify/`                   | ccpanel 断言式验证套件：`./run.sh` 自带临时实例（空闲端口 + 临时 config/state，假上游凭据）跑 playwright 检查——登录角色、断点 nav 裁切、列显隐（含死窗回归）、移动端溢出、零 console 错误；截图只在失败时写 `shots/`                                                     |
+| `remote-logs.sh`                  | 远端实例日志分诊（`tail`/`fails`/`dir`/`grep`/`stderr`），内部 `ssh host bash -s` 绕 fish——原为 fht-mba 生产而写，生产已迁 archbox 本机（直读 `~/.local/state/devin-2api/logs/`），脚本留作远端目标通用工具                                                              |
+| `repo-survey.sh`                  | 一台机器 `~/src/*` 全部 git 仓体检表（branch/dirty/ahead/behind/stash/最后提交），可带 host 参数走 ssh                                                                                                                                                                   |
+| `toolalign/`                      | 客户端工具声明对齐矩阵：`run_matrix.py <cc\|codex>`（逐工具强制调用 + tool_result 回环）、`run_edges.py`（流式/none/image-error/并行配对/namespace 展平边界）                                                                                                            |
 
 脏树时拿干净构建验证的配方：`git worktree add $W/wt HEAD && go build -C $W/wt -o $W/devin-2api ./cmd/devin-2api` 出 HEAD 态二进制 → scratch 目录备一份 `config.yaml`（`listen` 换空闲端口、`debug.enabled: true`）→ `-state-dir .` 让 logs 落本地 → `(nohup … &)` 起 → 测完 `git worktree remove --force` 收尾。多人共用工作树时这是不动主树的验证通道。
 

@@ -33,7 +33,7 @@ deploy_usage() {
 缺失时从 config.example.yaml 生成——写入随机 dashboard.password，终端
 下提示粘贴 Devin session token（写入 devin.accounts 首条），否则留空
 池——面板 /web/accounts.html 再加号。下游 /v1 令牌不入配置：面板
-/web/auth-tokens 创建，明文一次性出示，仓内只存哈希。
+/web/tokens.html 创建，明文一次性出示，仓内只存哈希。
 覆盖项（env）：DEVIN2API_LABEL / DEVIN2API_BIN_DIR / DEVIN2API_CONFIG_DIR /
 DEVIN2API_STATE_DIR / DEVIN2API_PORT（DEVIN2API_RUNTIME 视作 STATE_DIR 的
 兼容别名）。
@@ -398,10 +398,12 @@ preflight_deploy() {
 		echo "==> 凭据来源: ${src}" >&2
 	fi
 
-	# 启动期 config.Load 实读每个 credentials_file——文件被外部摘除会让
-	# 新实例死在加载期（9-18 断流 2h55m 根因）。部署强制冷启动，build
-	# 之前先拦死引用。新实例实际加载的是 ${CONFIG_DIR}/config.yaml
-	# （live 权威副本），live 缺失时才会由仓库副本顶上。
+	# 启动期 config.Load 实读每个 credentials_file——文件被外部摘除曾让
+	# 新实例死在加载期（9-18 断流 2h55m 根因）；现行语义降级为 lane
+	# 带病服役（LoadError），即死引用不再致命但会静默废掉一条 lane。
+	# 部署强制冷启动，build 之前先拦死引用。新实例实际加载的是
+	# ${CONFIG_DIR}/config.yaml（live 权威副本），live 缺失时才会由
+	# 仓库副本顶上。
 	local cfg_file cred
 	cfg_file="config.yaml"
 	[[ -f "${CONFIG_DIR}/config.yaml" ]] && cfg_file="${CONFIG_DIR}/config.yaml"
@@ -410,7 +412,7 @@ preflight_deploy() {
 		cred="${cred/#~\//${HOME}/}"
 		[[ "${cred}" == /* ]] || cred="$(dirname "${cfg_file}")/${cred}"
 		if [[ ! -f "${cred}" ]]; then
-			die "devin.accounts[].credentials_file 不存在: ${cred}（声明于 ${cfg_file}）——新实例加载 config 必失败，中止部署"
+			die "devin.accounts[].credentials_file 不存在: ${cred}（声明于 ${cfg_file}）——死引用会让该 lane 静默带病服役，中止部署"
 		fi
 	done < <(config_credentials_files "${cfg_file}")
 
@@ -426,7 +428,7 @@ preflight_deploy() {
 				"SELECT CASE WHEN COUNT(*)>0 AND SUM(token='${anon_hash}')=0 THEN 1 ELSE 0 END FROM auth_tokens" 2>/dev/null || true)"
 		fi
 		[[ "${closed}" == "1" ]] ||
-			warn "server.listen 非回环且令牌仓未闭合（空仓或存在匿名通道行）——/v1 配额对网络开放，先在面板 /web/auth-tokens 建令牌"
+			warn "server.listen 非回环且令牌仓未闭合（空仓或存在匿名通道行）——/v1 配额对网络开放，先在面板 /web/tokens.html 建令牌"
 	fi
 }
 

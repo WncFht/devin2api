@@ -14,7 +14,7 @@
 # 首装与升级同一条命令：config.yaml 缺失时自动从 config.example.yaml 生成——
 # 写入随机 dashboard.password，listen 绑 127.0.0.1 自选空闲端口（避免
 # Windows 防火墙弹窗与裸暴露），token 提示粘贴或留空走自动发现。
-# 下游 /v1 令牌不入配置：面板 /web/auth-tokens 创建，仓内只存哈希。
+# 下游 /v1 令牌不入配置：面板 /web/tokens.html 创建，仓内只存哈希。
 # 注意：经 SSH 远程执行时，启动的实例会随会话结束被系统回收（job object）
 # ——本脚本面向本机交互会话使用。
 [CmdletBinding()]
@@ -289,7 +289,7 @@ function Assert-Preflight {
 
     $listen = Get-YamlScalar 'listen' $RuntimeConfig
     if ($listen -notmatch '^(127\.|localhost:|\[::1\])') {
-        Warn "server.listen 非回环——/v1 准入全看令牌仓：空仓或存在匿名通道行时配额对网络开放，请确认面板 /web/auth-tokens 已建非匿名令牌"
+        Warn "server.listen 非回环——/v1 准入全看令牌仓：空仓或存在匿名通道行时配额对网络开放，请确认面板 /web/tokens.html 已建非匿名令牌"
     }
 }
 

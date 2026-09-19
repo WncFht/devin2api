@@ -33,20 +33,20 @@
 
 debuglog 给每个请求记录 6 个时间点（相对请求开始的毫秒数，未到达记 `-1`/缺省）：
 
-| meta.json 字段      | 含义                                                                | 埋点位置                         |
-| ------------------- | ------------------------------------------------------------------- | -------------------------------- |
-| `request_ready_ms`  | 请求体解码、消息投影、上游请求构造全部完成，泵协程即将调 `Stream()` | `startStreamPump` 协程入口       |
-| `upstream_sent_ms`  | 首个真实 `GetChatMessage` RPC 发出（重试首试也更新）                | `getChatMessageWithRetry` 调用前 |
-| `upstream_open_ms`  | 上游流建立成功（响应头/首帧通道就绪）                               | `GetChatMessage` 返回后          |
-| `first_upstream_ms` | 第一个真实上游事件到达（本地合成 Start 不计）                       | 泵协程 `Recv` 后                 |
-| `upstream_done_ms`  | 泵协程收完上游事件流（终态 EOF/错误/取消）；`Stream()` 未建成则缺席 | 泵协程退出时（defer）            |
-| `first_client_ms`   | 第一个协议内容字节写给客户端（SSE 保活注释不计）                    | `streamWriter.writeContent`      |
+| meta.json 字段      | 含义                                                                 | 埋点位置                                         |
+| ------------------- | -------------------------------------------------------------------- | ------------------------------------------------ |
+| `request_ready_ms`  | 请求体解码、消息投影、上游请求构造全部完成，泵协程即将调 `Stream()`  | `startStreamPump` 协程入口                       |
+| `upstream_sent_ms`  | 首个真实 `GetChatMessage` RPC 发出（CAS 幂等，重试时 sent 留在首发） | `attemptRunner.send` 循环内 `NoteUpstreamSend()` |
+| `upstream_open_ms`  | 上游流建立成功（响应头/首帧通道就绪）                                | `GetChatMessage` 返回后                          |
+| `first_upstream_ms` | 第一个真实上游事件到达（本地合成 Start 不计）                        | 泵协程 `Recv` 后                                 |
+| `upstream_done_ms`  | 泵协程收完上游事件流（终态 EOF/错误/取消）；`Stream()` 未建成则缺席  | 泵协程退出时（defer）                            |
+| `first_client_ms`   | 第一个协议内容字节写给客户端（SSE 保活注释不计）                     | `streamWriter.writeContent`                      |
 
 这些字段把端到端延迟切成段，段名即两字段之差：`decode`（0→ready）、`transform`（ready→sent，含限流闸门排队）、`connect`（sent→open，上游建连）、`upstream_ttft`（open→首事件，上游首字延迟）、`egress`（编码 + 写客户端）。`egress` 的基线按响应形态分：流式是 `first_client − first_upstream`（首事件→首字节）；非流式攒完整条上游流才一次性写出，`first_client − first_upstream` 量到的是剩余上游时长而非出口延迟，须用 `first_client − upstream_done`（流末→首字节）。
 
 `transform` 段内另有两个相位字段（meta.json 专有，未发生即缺席）：`models_fetch_ms` 是目录确保（`ensureCatalog`→`ListModels`）的墙钟毫秒数——真实拉取与等待他人在飞拉取都计入，缓存命中≈0；`assign_model_ms` 是 `AssignModel` 调用的墙钟毫秒数（含共享 flight 陪等），仅 router uid 请求出现。两者量的都是闸门排队之前的上游解析停滞——闸门指标看不到这段，批量停滞只能靠这里直接读出。
 
-落库位置：`debug_files` 表 `<dir>` 键下的 `meta.json` 行（单请求详情，`/admin/debug-logs/{id}/file/meta.json` 或 `sqlite3` 直查）与 `logs` 表的同名可空列（批量 SQL 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p99。
+落库位置：`debug_files` 表 `<dir>` 键下的 `meta.json` 行（单请求详情，`/admin/debug-logs/{id}/file/meta.json` 或 `sqlite3` 直查）与 `logs` 表的同名可空列（批量 SQL 聚合）。`perf-snapshot.sh` 的收尾步骤自动按段求 avg/p50/p90/p99。
 
 `logs` 表做命中率聚合时的口径陷阱：必须过滤 `result='completed' AND input_tokens+cache_read_tokens>0`——rate_gate 快败、客户端断连等 0-token 行与 failed 高度重合，不过滤会被当 miss 污染比率；上游 `cache_creation` 恒 0，判活只看 `cache_read`。流级画像（静默间隔→命中率、miss 归因）用 `scripts/index-stream-stats.py`（读 `devin-2api.db`）。
 
@@ -79,7 +79,7 @@ scripts/perf-snapshot.sh --out outputs/perf/after
 
 `perf-snapshot.sh` 常用参数：`--concurrency/--requests`（压测强度）、`--deltas/--delta-bytes/--interval/--ttfb`（桩的流形态）、`--profile-seconds`（剖析窗）、`--debug on|off`（debuglog 默认 on——测日志管道自身开销；`--debug off` 剥离该路径）。端口冲突或桩起不来会在前置检查直接报出。
 
-注意两点测量卫生：基准进程的 slog 输出会混进 `go test` stdout 让 benchstat 无法解析，`bench_perf_test.go` 已把日志阈值抬到 Error——新增基准若引入日志路径需同样处理；macOS 自带 bash 3.2 下脚本避免 `mapfile`、变量紧邻中文时用 `${var}` 花括号。
+注意两点测量卫生：基准进程的 slog 输出会混进 `go test` stdout 让 benchstat 无法解析，`internal/app/bench_perf_test.go` 已把日志阈值抬到 Error——新增基准若引入日志路径需同样处理；macOS 自带 bash 3.2 下脚本避免 `mapfile`、变量紧邻中文时用 `${var}` 花括号。
 
 ## PGO
 
